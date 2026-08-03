@@ -1,15 +1,16 @@
 import { cloneScene, defaultScene, type CameraState, type SceneDescription } from "./model";
-import { terrainHeightAt } from "./terrain";
 import type { SceneryGraph, SceneryNode } from "./scenery-graph";
 import {
   bakePondVesselTerrain,
-  pondVesselPlanCurve,
   pondVesselWaterline,
   type PondVesselSpec,
 } from "./voxel-scenery/pond-vessel";
-import { bonsaiNodes, BONSAI_POND_CANOPY } from "./voxel-scenery/bonsai";
-import { sweptCopingNodes, sweptCopingSection, SWEPT_COPING_POND_BULLNOSE } from "./voxel-scenery/swept-coping";
-import { stoneSet } from "./voxel-scenery/stone-set";
+import { BONSAI_POND_CANOPY } from "./voxel-scenery/bonsai";
+import { sweptCopingSection, SWEPT_COPING_POND_BULLNOSE } from "./voxel-scenery/swept-coping";
+import { stoneSetSteppingBodies } from "./voxel-scenery/stone-set";
+import { ROSETTE_AIR_PLANT, ROSETTE_GRASS_TUFT, type RosetteForm } from "./voxel-scenery/rosette";
+import { sweptTubeNodes } from "./voxel-scenery/swept-tube";
+import { tanHalfFovFor35mmFocalLength } from "./webgpu-camera";
 
 /**
  * The hero scene: a porcelain pond with a hose filling it.
@@ -69,15 +70,14 @@ export const HERO_GARDEN_BRICK_CELLS = 8 as const;
  * the node. The ground the water meets is therefore the ground that was
  * generated, with no resampling error between them.
  *
- * The renderer gets nothing from it *yet*. `TerrainGrid` is currently a
- * CPU-and-solver feature: `terrainColumnHeights` bakes it into the octree's
- * height texture, but `cloneTerrain` (`lib/voxel-scene.ts`) drops the grid on
- * the way to the render path, and the dry scene's WGSL evaluates terrain from
- * `terrainMeta` plus eight analytic features in a uniform array with no grid
- * sampler anywhere. A sculpted vessel therefore draws as a flat plane at
- * `baseHeight_m`. The `terrainHeightfield` primitive kind exists in the SVO ABI,
- * with an `externalTerrain` flag and a `terrainReference` word — and no
- * producer. Closing that is the prerequisite for looking at this scene at all.
+ * The renderer sees it too, which it did not always. `TerrainGrid` was once a
+ * CPU-and-solver feature — the dry scene's WGSL evaluated terrain from
+ * `terrainMeta` plus eight analytic features with no grid sampler anywhere, so
+ * a sculpted vessel drew as a flat plane at `baseHeight_m` and this scene could
+ * not be looked at at all. `packSvoDrySceneTerrainHeightfield` is the producer
+ * the `terrainHeightfield` primitive kind was waiting for, and the ray now hits
+ * the surface that was generated here. Sample spacing is therefore a *visual*
+ * decision as well as a solver one.
  */
 export const HERO_GARDEN_TERRAIN_SAMPLE_M = HERO_GARDEN_CELL_M / 4;
 
@@ -186,20 +186,6 @@ export const HERO_GARDEN_WATERLINE_M = pondVesselWaterline(HERO_GARDEN_VESSEL, H
  * was horizon. None of that is in the reference, which is a close
  * three-quarter view with no horizon at all — the pond spans nearly the whole
  * width and the ground behind it is soft and out of focus.
- *
- * The distance is set against the aperture, and the aperture is the awkward
- * part. The dry shader builds its primary rays with a fixed vertical half-tangent
- * of 0.72 — about 72 degrees vertical, and past 100 degrees horizontal at this
- * frame's aspect. That is a much wider lens than the reference, which shows
- * little enough perspective to read as something like a 50 mm. Filling the frame
- * the way the reference does therefore means standing under a metre away, and
- * the near coping grows against the far one as the price. Just under a metre is
- * where the pond commands the frame without the near arc bowing.
- *
- * Getting the rest of the way is a renderer change, not a scene one: the camera
- * has no aperture to author, so `0.72` would have to become one. Worth doing —
- * but it is a shared constant in both the dry shader and the pixel-trace mirror,
- * and it is the sort of change that wants the frame otherwise settled first.
  */
 /**
  * Where the camera stands, and — because the light is derived from it — where
@@ -223,11 +209,50 @@ export const HERO_GARDEN_AZIMUTH_RAD = 5.4;
 /** Screen right in the XZ plane at that azimuth: `(cos az, -sin az)`. */
 const HERO_GARDEN_SCREEN_RIGHT = [Math.cos(HERO_GARDEN_AZIMUTH_RAD), -Math.sin(HERO_GARDEN_AZIMUTH_RAD)] as const;
 
+/**
+ * The lens: a 50 mm, which on the 36 x 24 mm frame is a vertical half-tangent
+ * of 0.24 — 27 degrees vertical and 46 horizontal at the studio's 16:9.
+ *
+ * The renderer's default is 0.72: 71 degrees vertical, 104 horizontal, an
+ * ultra-wide by any reckoning and about a 17 mm. The reference is not that. It
+ * shows a pond a metre across with the far coping only a little smaller than
+ * the near one, which is a normal lens at a couple of metres and nothing else.
+ *
+ * Fifty rather than something longer because the reference does carry visible
+ * perspective — the basin is read as a bowl, not as a disc — and because a
+ * longer lens would put the eye far enough back that the set's own terraces
+ * start occluding the shore.
+ */
+const HERO_GARDEN_TAN_HALF_FOV = tanHalfFovFor35mmFocalLength(50);
+
+/**
+ * Where the camera stands.
+ *
+ * Solved against the set, not against the pond. Three quantities move together
+ * as the distance changes, and only one of them is a free choice:
+ *
+ * - The pond's outer plan is 1.10 x 0.82 m, so at this azimuth its silhouette
+ *   is 0.473 m of half-extent across screen right. At 1.40 m it reaches both
+ *   side crops instead of sitting inside a field of empty plaster.
+ * - The bonsai's crown is the highest thing in the set, and it is deliberately
+ *   cut by the top edge. The reference is a crop, not a catalog
+ *   view; keeping every generated floret inside the picture made the subject
+ *   too small.
+ * - The near-left boulder terrace approaches the left edge while the near
+ *   coping approaches the bottom. Those two near cuts are what make the pond
+ *   read as a place the camera is standing over rather than a miniature placed
+ *   at the centre of a ground plane.
+ *
+ * What the longer lens buys is controlled perspective. Closing from 2.70 m to
+ * 1.40 m spends the safety margin the old framing reserved around the set; the
+ * 50 mm aperture keeps the near coping from acquiring an ultra-wide bow.
+ */
 export const heroGardenCamera: Partial<CameraState> = {
   azimuth_rad: HERO_GARDEN_AZIMUTH_RAD,
   elevation_rad: 0.40,
-  distance_m: 1.05,
-  target_m: { x: 0.02, y: 0.30, z: 0.0 },
+  distance_m: 1.40,
+  tanHalfFov: HERO_GARDEN_TAN_HALF_FOV,
+  target_m: { x: -0.04, y: 0.35, z: 0.0 },
 };
 
 /**
@@ -258,8 +283,19 @@ const HERO_GARDEN_KEY_DIRECTION: readonly [number, number, number] = [
  * obvious way this scene could look wrong, and deriving both from here means it
  * cannot happen by drift.
  */
-export const HERO_GARDEN_HOSE_MOUTH_M = Object.freeze({ x: 0.28, y: 0.44, z: 0.06 });
-const HOSE_AIM = Object.freeze({ x: -0.252, y: -0.966, z: -0.050 });
+export const HERO_GARDEN_HOSE_MOUTH_M = Object.freeze({ x: 0.27, y: 0.40, z: 0.22 });
+/** The visible plunge point, so nozzle placement and jet composition share one authority. */
+export const HERO_GARDEN_HOSE_IMPACT_M = Object.freeze({ x: 0.20, y: HERO_GARDEN_WATERLINE_M, z: 0.07 });
+const HOSE_AIM_LENGTH = Math.hypot(
+  HERO_GARDEN_HOSE_IMPACT_M.x - HERO_GARDEN_HOSE_MOUTH_M.x,
+  HERO_GARDEN_HOSE_IMPACT_M.y - HERO_GARDEN_HOSE_MOUTH_M.y,
+  HERO_GARDEN_HOSE_IMPACT_M.z - HERO_GARDEN_HOSE_MOUTH_M.z,
+);
+const HOSE_AIM = Object.freeze({
+  x: (HERO_GARDEN_HOSE_IMPACT_M.x - HERO_GARDEN_HOSE_MOUTH_M.x) / HOSE_AIM_LENGTH,
+  y: (HERO_GARDEN_HOSE_IMPACT_M.y - HERO_GARDEN_HOSE_MOUTH_M.y) / HOSE_AIM_LENGTH,
+  z: (HERO_GARDEN_HOSE_IMPACT_M.z - HERO_GARDEN_HOSE_MOUTH_M.z) / HOSE_AIM_LENGTH,
+});
 const HOSE_SPEED_M_S = 1.19;
 const HOSE_BORE_M = 0.013;
 
@@ -278,10 +314,10 @@ const HOSE_BORE_M = 0.013;
 const HOSE_PATH_M: readonly (readonly [number, number, number])[] = Object.freeze([
   [HERO_GARDEN_HOSE_MOUTH_M.x, HERO_GARDEN_HOSE_MOUTH_M.y, HERO_GARDEN_HOSE_MOUTH_M.z],
   [HERO_GARDEN_HOSE_MOUTH_M.x + HOSE_AIM.x * -0.09, HERO_GARDEN_HOSE_MOUTH_M.y + HOSE_AIM.y * -0.09, HERO_GARDEN_HOSE_MOUTH_M.z + HOSE_AIM.z * -0.09],
-  [0.40, 0.585, 0.09],
-  [0.55, 0.600, 0.135],
-  [0.72, 0.585, 0.195],
-  [0.95, 0.545, 0.27],
+  [0.44, 0.470, 0.34],
+  [0.60, 0.460, 0.40],
+  [0.80, 0.460, 0.50],
+  [1.02, 0.460, 0.60],
 ]);
 
 /**
@@ -300,21 +336,21 @@ const HOSE_PATH_M: readonly (readonly [number, number, number])[] = Object.freez
  * carrying it on purpose — the same licence the sets already grant a lantern
  * ember, spent on the one object here that is manufactured rather than grown.
  */
-const HOSE_MATERIAL = { colorLinear: [0.045, 0.085, 0.082] as const };
-const FERRULE_MATERIAL = { colorLinear: [0.29, 0.275, 0.235] as const };
+const HOSE_MATERIAL = { colorLinear: [0.045, 0.085, 0.082] as const, surface: "organic" as const };
+const FERRULE_MATERIAL = { colorLinear: [0.29, 0.275, 0.235] as const, surface: "brushed-metal" as const };
 
 function hoseNodes(): SceneryNode[] {
-  const nodes: SceneryNode[] = HOSE_PATH_M.slice(0, -1).map((from, index) => ({
-    kind: "capsule",
-    id: `hose/run-${index}`,
+  // One swept-tube record family over the path as authored, rather than a
+  // capsule per segment: the reference's hose is a continuous curve and a chain
+  // of capsules creases its shading normal at every bend. `sweptTubeNodes`
+  // fits the envelopes, so the only thing decided here is the path and the bore.
+  const nodes: SceneryNode[] = sweptTubeNodes({
+    id: "hose/tube",
     group: "hose-tube",
     tags: ["hose"],
-    place: { units: "metres" },
-    from: { x: from[0], y: from[1], z: from[2] },
-    to: { x: HOSE_PATH_M[index + 1][0], y: HOSE_PATH_M[index + 1][1], z: HOSE_PATH_M[index + 1][2] },
-    radius: HOSE_BORE_M,
+    stations: HOSE_PATH_M.map(([x, y, z]) => ({ at_m: { x, y, z }, radius_m: HOSE_BORE_M })),
     material: HOSE_MATERIAL,
-  }));
+  });
   // The collar, as a short fat capsule rather than a cone, so it is authored by
   // the run it sits on and needs no orientation solved for it.
   nodes.push({
@@ -348,68 +384,141 @@ export const HERO_GARDEN_SET_SEED = 0x5701_e5;
 /**
  * Where the bonsai stands, and which way it leans.
  *
- * On the back-right terrace, and leaning back toward the pond's centre so the
+ * On the far-right bank, and leaning back toward the pond's centre so the
  * crown overhangs the water the way the reference's does. The lean is the
  * negated stand position for exactly that reason — the tree is told to reach
  * for the middle, not given a bearing that has to be kept in agreement with one.
  */
-const BONSAI_AT_M = [0.60, 0.26] as const;
+const BONSAI_AT_M = [0.55, -0.15] as const;
 
 /**
- * The set, grown against the ground it stands on.
+ * This specimen's crown, which is flatter and slightly narrower than the
+ * species'.
  *
- * A function rather than a constant because the species take a ground query, not
- * a heightfield of their own — see `lib/voxel-scenery/README.md`. Passing the
- * baked grid's own sampler is what stops a root or a pebble from being seated
- * against a surface subtly different from the one the renderer draws and the
- * solver collides with.
+ * The reference's canopy is a *cloud layer*: it reads as a broad horizontal
+ * plate hanging over the water, and the single number that decides whether it
+ * does is the crown's width against its own thickness. The species stands at
+ * 5.5:1 and this asks for 5.8:1 on a marginally smaller crown — broad enough to
+ * overhang the basin, thin enough not to read as a dome on a stick.
+ *
+ * It is an override rather than a species edit because the species is also the
+ * catalogue specimen, which is looked at from a wider frame where a plate this
+ * thin reads as a disc. Kept in step with the species by hand: the aspect is the
+ * thing to preserve if either moves, not the absolute numbers.
  */
-function heroGardenScenery(groundHeightAt: (x_m: number, z_m: number) => number): SceneryGraph {
+const HERO_BONSAI_FORM = Object.freeze({
+  ...BONSAI_POND_CANOPY,
+  crownRadius_m: [0.36, 0.31] as const,
+  crownThickness_m: 0.125,
+});
+
+/**
+ * The set, as a description of itself.
+ *
+ * This used to be a *composition step*: a function that took a ground query,
+ * called `sweptCopingNodes`, `stoneSet` and `bonsaiNodes`, and splatted their
+ * output into the node list. What the document then held was 684 baked nodes and
+ * 884 kB of ellipsoid centres — the seeds and the parameters gone, "give me
+ * another garden" a re-run of this factory that discards every edit the user had
+ * made, and every `cloneScene` a copy of the lot. The three nodes below say the
+ * same thing in 1.7 kB and publish the same 2 197 primitives in the same order.
+ * See lib/scenery-generators.ts.
+ *
+ * The vessel is named rather than repeated. All three generators lay their runs
+ * against the same plan curve — that is why moving a control point carries the
+ * rim, the beds and the disc path with it — and a curve that lived on each node
+ * would be three copies with three chances to disagree.
+ *
+ * No ground query is passed. The species still need one and still get one; it
+ * arrives from the expansion context, which is the scene's own baked grid, so a
+ * root or a pebble is still seated against exactly the surface the renderer
+ * draws and the solver collides with.
+ */
+
+/**
+ * Where the plants stand.
+ *
+ * All three sit *off* the coping rather than on it: a rosette's blades are
+ * three millimetres across and the rim is the one surface in this scene the eye
+ * follows as a continuous line, so a tuft on the crest reads as damage to the
+ * casting. `bed_m` is the little of the ground each one has disturbed under
+ * itself, and the near-left plant has more of it because it is bedded into the
+ * boulder group's own gravel.
+ */
+const HERO_PLANT_STANDS: readonly {
+  readonly id: string;
+  readonly form: RosetteForm;
+  readonly at_m: readonly [number, number];
+  readonly bed_m?: number;
+  readonly salt: number;
+}[] = Object.freeze([
+  { id: "plant/terrace-left", form: ROSETTE_AIR_PLANT, at_m: [-0.60, -0.26] as const, bed_m: 0.035, salt: 0x00a1_7e01 },
+  { id: "plant/terrace-back", form: ROSETTE_AIR_PLANT, at_m: [0.44, 0.42] as const, bed_m: 0.028, salt: 0x00a1_7e02 },
+  { id: "plant/rim-right", form: ROSETTE_GRASS_TUFT, at_m: [0.72, -0.32] as const, bed_m: 0.024, salt: 0x00a1_7e03 },
+]);
+
+function heroGardenScenery(): SceneryGraph {
   return {
     palettes: {
       clay: { tint: [1, 0.985, 0.955] },
       stone: { tint: [0.972, 0.984, 1] },
     },
+    vessels: { pond: HERO_GARDEN_VESSEL },
     nodes: [
-      // Porcelain, not lawn. The vessel and the plaster it is set into are one
-      // fired surface in the reference; the garden closure would band them by
-      // height into liner, soil and grass and speckle the lot with daisies.
+      /**
+       * Porcelain, not lawn — and it is the whole set that is porcelain, not
+       * only the ground.
+       *
+       * The immediate reason is the ground: the vessel and the plaster it is set
+       * into are one fired surface in the reference, and the garden closure would
+       * band them by height into liner, soil and grass and speckle the lot with
+       * daisies. But this node is also the scene's only declaration of what it is
+       * *made of*, so `svoMaterialFunctionIdForEnvironmentProxy` reads it for
+       * every prop as well — see `lib/svo-material-abi.ts`. A boulder here is not
+       * granite that happens to be pale; it is the same fired white clay as the
+       * rim it is bedded against, and it would be granite by default only because
+       * its group carries the word "stone". One word decides for the whole set,
+       * which is the only way a monochrome set can be kept monochrome as
+       * generators come and go.
+       */
       { kind: "terrain-shell", id: "shell", materialModel: "porcelain" },
       ...hoseNodes(),
-      // The stones place themselves off the pond's own plan curve rather than off
-      // world coordinates, so moving a control point in the vessel spec carries
-      // the boulders, the beds and the disc path with it. That is the whole reason
-      // the curve is an export.
       // The rim, as a solid swept along the same plan curve the basin was cut
-      // from. Forty-eight samples per lobe rather than the plan's own sixteen,
-      // and that number is load-bearing: a cone chain's *outline* is settled at
-      // sixteen (the chord sags 0.18 mm), but its shading normal steps by the
-      // whole turn angle at every joint, so at sixteen the rim comes back banded
-      // like a caterpillar. Three degrees per joint bands, one degree does not.
-      // The rail's resolution is set by the highlight, not by the silhouette —
-      // which is also the honest argument for a marched swept-arc primitive,
-      // where one record spans an arc and there are no joints to shade across.
-      ...sweptCopingNodes({
-        ...SWEPT_COPING_POND_BULLNOSE,
-        key: "coping",
-        rail: pondVesselPlanCurve(HERO_GARDEN_VESSEL, 48),
-        groundHeightAt,
-        material: { palette: "stone", value: 0.92 },
+      // from.
+      {
+        kind: "generator", id: "coping", generator: "swept-coping", vessel: "pond",
         seed: HERO_GARDEN_SET_SEED ^ 0x00c0_9179,
-      }),
-      ...stoneSet({
-        vessel: HERO_GARDEN_VESSEL,
-        waterline_m: HERO_GARDEN_WATERLINE_M,
+        params: { ...SWEPT_COPING_POND_BULLNOSE, material: { palette: "stone", value: 0.92, surface: "stone" } },
+      },
+      // Boulders, beds and the wading path, all placed in the vessel's own
+      // coordinates — a fraction of a turn round the plan curve and a plan
+      // distance either side of it — rather than in world metres that could
+      // drift from the coping they hug.
+      {
+        kind: "generator", id: "stone", generator: "pond-stone-set", vessel: "pond",
         seed: HERO_GARDEN_SET_SEED,
-      }),
-      ...bonsaiNodes({
-        ...BONSAI_POND_CANOPY,
-        key: "bonsai",
-        at_m: BONSAI_AT_M,
-        groundHeightAt,
-        lean: [-BONSAI_AT_M[0], -BONSAI_AT_M[1]],
+        params: { waterline_m: HERO_GARDEN_WATERLINE_M },
+      },
+      {
+        kind: "generator", id: "bonsai", generator: "bonsai",
         seed: HERO_GARDEN_SET_SEED ^ 0x8017a1,
-      }),
+        params: { ...HERO_BONSAI_FORM, at_m: BONSAI_AT_M, lean: [-BONSAI_AT_M[0], -BONSAI_AT_M[1]] },
+      },
+      // The plants. Built and tested for this scene and then never called by
+      // it, which is the failure mode a generator catalog exists to make
+      // visible: a species with no node in any document is a species nobody can
+      // tell is missing.
+      //
+      // Two air plants where the reference has them — one wedged against the
+      // boulder group on the near-left terrace, one on the back-right plateau
+      // behind the tree's stand — and one grass tuft at the near-right rim,
+      // which is the only place in frame with a run of plaster wide enough to
+      // stand something on without crowding the coping.
+      ...HERO_PLANT_STANDS.map(({ id, form, at_m, bed_m, salt }): SceneryNode => ({
+        kind: "generator", id, generator: "rosette",
+        seed: HERO_GARDEN_SET_SEED ^ salt,
+        params: { ...form, at_m, ...(bed_m === undefined ? {} : { bed_m }) },
+      })),
     ],
   };
 }
@@ -468,7 +577,64 @@ export function createHeroGardenHoseScene(options: HeroGardenHoseOptions = {}): 
   scene.container.fillFraction = HERO_GARDEN_WATERLINE_M / HERO_GARDEN_CONTAINER.height_m;
   scene.fluid.initialCondition = "tank-fill";
   scene.fluid.inflow = heroGardenInflow();
-  scene.rigidBodies = [];
+  /**
+   * The teal, as a property of *this* pond.
+   *
+   * Absorption is a rate per metre, and the frozen clean-water table it
+   * defaults to is calibrated on tanks: at this pond's 115 mm of still depth it
+   * transmits (0.950, 0.990, 0.993), so red is 4.6 % down on green and the
+   * water carries no hue a viewer could name. The reference's pond is
+   * unmistakably teal at the same depth, and no amount of shader tuning can
+   * produce that from a coefficient an order of magnitude too small — Beer's
+   * law is the only thing between the two, and it has one input.
+   *
+   * So these are pond coefficients, not water ones. Red goes up 5.8x, green
+   * 4.7x and blue 10x: the last is what makes it *teal* rather than *blue*,
+   * because dissolved organics and algae absorb in the blue where pure water
+   * barely does, and a pond that attenuates blue least ends up the colour of a
+   * swimming pool. What the numbers buy, in transmission:
+   *
+   *   still depth, 0.115 m   (0.742, 0.953, 0.931)  — red 22 % down on green,
+   *                                                   against 4.6 % before
+   *   eye path,    0.296 m   (0.463, 0.883, 0.832)  — the slant through the
+   *                                                   basin at this camera
+   *   sun path,    0.141 m   (0.693, 0.942, 0.916)  — refracted to 35 degrees
+   *                                                   off vertical
+   *
+   * Round trip, the basin floor keeps 32 % of its red against 83 % of its
+   * green. That is the whole of the pond's colour, and it comes from the medium
+   * rather than from a tint added at the end.
+   *
+   * The in-scatter goes up with it, and by the same factor rather than by an
+   * independently chosen one: `unifiedAbsorbingTransmission` blends toward the
+   * scatter colour as the transmission falls, so a body that now extinguishes
+   * three times as much light needs three times the scatter to stay luminous
+   * instead of going to ink. Three times the default, to within 5 % per channel.
+   */
+  scene.fluid.optics = {
+    absorption_mInv: [2.6, 0.42, 0.62],
+    scatter: [0.038, 0.165, 0.145],
+  };
+  /**
+   * The stepping discs, as solids the water has to part around.
+   *
+   * The path is scenery too — the drawn plate is a tapered footing, a tread and
+   * a crown that softens its edge, and that silhouette is what stops five discs
+   * reading as five drums — but scenery has no solver term, so a disc that is
+   * *only* scenery is a disc the jet pours straight through. These are the same
+   * five stones, solved once by `heroSteppingPath` and published twice: the
+   * generator node draws them, and this collides them. Neither derives the
+   * contour again, which is the only way the two can be guaranteed to agree.
+   *
+   * The collider is a single static cylinder inscribed in the drawn solid — see
+   * `steppingStoneBodies` for why one, and why inscribed rather than at the
+   * tread's own radius.
+   */
+  scene.rigidBodies = stoneSetSteppingBodies({
+    vessel: HERO_GARDEN_VESSEL,
+    waterline_m: HERO_GARDEN_WATERLINE_M,
+    seed: HERO_GARDEN_SET_SEED,
+  });
   /**
    * The light, aimed at the frame rather than at the world.
    *
@@ -489,21 +655,84 @@ export function createHeroGardenHoseScene(options: HeroGardenHoseOptions = {}): 
   scene.lighting = {
     ...scene.lighting,
     directional: {
+      /**
+       * Warm daylight. An eighth of a stop of blue out of the red is what turns
+       * a neutral lamp into a sun, and on a set with no hue of its own it is the
+       * only thing separating the lit side of a stone from its shaded side by
+       * *colour* rather than only by value — the sky fill below is cool, so the
+       * two halves of every boulder land on opposite sides of neutral. That
+       * split is most of what reads as daylight in the reference.
+       */
+      colorLinear: [1, 0.955, 0.875],
+      /**
+       * Three and a bit, and the number is a Lambert denominator rather than an
+       * exposure in disguise.
+       *
+       * A diffuse surface returns `albedo · I · cos / π`, so porcelain at 0.90
+       * albedo facing this sun square-on comes back at `0.275 · I`. Unit
+       * intensity therefore puts a fully lit white surface at 0.28 radiance,
+       * which ACES places on 0.68 display: a mid grey, which is exactly what the
+       * frame looked like. `I = 3.2` is where that same surface returns roughly
+       * unit radiance and lands at 0.95 — near white with the curve's shoulder
+       * still under it, so the coping's crest and its flank are different whites
+       * rather than the same clipped one.
+       *
+       * It is also where the key stops being a rounding error against the fill.
+       * At 1.05 the sun carried under a quarter of a lit surface's radiance and
+       * the set had no light direction at all; here it carries about 40 %, which
+       * is a lit side and a shaded side that differ by roughly two thirds of a
+       * stop — soft, directional, and nowhere near the silhouettes a hard key
+       * would cut into a set of round pale objects.
+       */
+      intensity: 3.2,
       direction: HERO_GARDEN_KEY_DIRECTION,
-      // Warm, and strong enough that the plaster runs close to white without
-      // clipping — the reference is a high-key image, and a mid-grey pond reads
-      // as concrete however correct its geometry is.
-      colorLinear: [1, 0.965, 0.90],
-      intensity: 1.55,
     },
-    // The bounce. White ground under white objects returns a great deal, and
-    // the reference's shadow interiors are barely a stop below its highlights.
-    environment: { diffuseScale: 1.35, specularScale: 1.0 },
+    /**
+     * The sky, which on this set is doing two jobs and therefore needs its own
+     * balance rather than inheriting the environment preset unchanged.
+     *
+     * `diffuseScale` is the fill *and* the bounce: the analytic environment
+     * irradiance is the sky a surface sees, and the derived GI gathers radiance
+     * from surfaces that are themselves lit by it, so raising it raises the
+     * light coming back off the ground as well as the light coming down. That
+     * compounding is the reference's whole shadow character — its shadow
+     * interiors sit a little over half a stop below its highlights because
+     * everything they fall on is white and throws the light straight back up.
+     * At 1.05 the shaded flanks remain open without whitening away the contact
+     * shadows. The key can then carry the highlights and direction instead of
+     * the whole set converging on the same display white.
+     *
+     * The garden palette's sky is cool (0.52, 0.60, 0.72 at the zenith) against
+     * the warm key above it, so scaling it does not merely brighten the shadows,
+     * it keeps them blue.
+     *
+     * `specularScale` is the same sky seen as a mirror, and it is also the
+     * *background*: a primary ray that misses returns the prefiltered
+     * environment at roughness zero. 0.75 keeps the backdrop bright but below
+     * the sunlit porcelain. Surface reflection also passes
+     * through the roughness-aware integrated environment BRDF, so the same
+     * scale produces a broad porcelain sheen without outlining every matte
+     * coping and boulder with the mirror-bright background.
+     */
+    environment: { diffuseScale: 1.05, specularScale: 0.75 },
+    /**
+     * The grade, which is where the high-key look belongs.
+     *
+     * ACES rather than Reinhard because the reference has a shoulder: its
+     * plaster runs to within a few percent of white across a whole coping and
+     * still has form in it, and `x / (x + 1)` cannot do that without the scene
+     * pushing radiance far enough up that the shadows go with it. Exposure
+     * stays at 1 — the set is lit correctly in physical terms, and the curve is
+     * the thing that was wrong.
+     */
+    grade: { toneCurve: "aces", exposure: 1 },
   };
   // The set is seated on the grid that was just baked, not on the generator that
   // produced it: the two agree at every grid node by construction and differ
   // between them by the bilinear fetch, and the ground a root meets should be
-  // the one the ray actually hits.
-  scene.scenery = heroGardenScenery((x_m, z_m) => terrainHeightAt(terrain, x_m, z_m));
+  // the one the ray actually hits. That is now the expander's doing rather than
+  // a closure captured here — it samples `scene.terrain`, which is the grid
+  // assigned above.
+  scene.scenery = heroGardenScenery();
   return scene;
 }

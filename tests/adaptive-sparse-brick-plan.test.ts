@@ -161,3 +161,73 @@ test("adaptive planner validates finite tree bounds and coarsening", () => {
     maximumEnvironmentCoarseningPower: 0,
   }), /\[0, 8\)/);
 });
+
+test("environment leaves refine below the solver level exactly where they are told to", () => {
+  // The direction the planner could not go until `solverLevel` existed. Before
+  // it, environment leaves started at `maximumDepth - coarseningPower` and
+  // descended only where a *solver* brick was in the way, so resolution could
+  // be given up but never spent: the sole knob was the domain's finest cell
+  // size, and it applied everywhere at once.
+  const solverBricks: SparseBrickCoordinate[] = [{ x: 0, y: 0, z: 0 }];
+  // Two proxy regions at the fine lattice, in different coarse bricks. One is
+  // dense enough to want splitting; the other is not.
+  // Fine-lattice coordinates: the tree is one level deeper than the solver, so
+  // these live in [0, 16) while the solver's brick lives in [0, 8).
+  const proxyBricks: SparseBrickCoordinate[] = [];
+  for (let x = 2; x < 4; x += 1) for (let y = 0; y < 2; y += 1) for (let z = 0; z < 2; z += 1) {
+    proxyBricks.push({ x, y, z });
+  }
+  proxyBricks.push({ x: 12, y: 12, z: 12 });
+
+  const dense = { x: 1, y: 0, z: 0 };
+  const plan = planAdaptiveSparseBrickOctree({
+    brickSize: 8,
+    solverBricks,
+    proxyBricks,
+    maximumDepth: 4,
+    solverLevel: 3,
+    maximumEnvironmentCoarseningPower: 0,
+    // Split only the one solver-level brick, so the assertion below is about the
+    // mechanism rather than about a cascade.
+    refineEnvironmentLeaf: (level, coordinate) => level === 3
+      && coordinate.x === dense.x && coordinate.y === dense.y && coordinate.z === dense.z,
+  });
+
+  const levelOf = new Map(plan.leaves.map((leaf) => [leaf.index, plan.nodes[leaf.nodeIndex].level]));
+  // The solver keeps its own lattice. This is the whole point of the split: the
+  // simulation does not move when the renderer resolves geometry more finely.
+  const solverLeaves = plan.leaves.filter((leaf) => plan.nodes[leaf.nodeIndex].level === 3
+    && plan.nodes[leaf.nodeIndex].morton === mortonEncode3D(0, 0, 0));
+  assert.equal(solverLeaves.length, 1, "the solver brick must remain one leaf at its own level");
+
+  const refined = plan.leaves.filter((leaf) => levelOf.get(leaf.index) === 4);
+  assert.ok(refined.length > 0, "the dense region must have descended below the solver level");
+  for (const leaf of refined) {
+    const bounds = adaptiveSparseBrickLeafBounds(plan, leaf.index);
+    assert.equal(bounds.minimum.x >= dense.x * 2 && bounds.maximum.x <= (dense.x + 1) * 2, true,
+      "only the region the predicate named may refine");
+  }
+  // The far single brick is not dense, so it stays whole at the solver level.
+  assert.ok(plan.leaves.some((leaf) => levelOf.get(leaf.index) === 3
+    && adaptiveSparseBrickLeafContains(plan, leaf.index, { x: 12, y: 12, z: 12 })));
+
+  assertCovered(plan, proxyBricks);
+  // The invariant that makes a mixed-depth tree traceable at all: no leaf may
+  // be an ancestor of another, or traversal terminates on the coarse one and
+  // the fine leaf below it is allocated, voxelised, and unreachable.
+  assertNoLeafOverlap(plan);
+});
+
+test("omitting the solver level reproduces the uniform plan exactly", () => {
+  // The invariance that lets this ship dark. Every scene that does not ask for
+  // refinement must get byte-identical topology, because owner indices are the
+  // GPU material table's own addresses and a reordered leaf set moves them all.
+  const solverBricks = [{ x: 1, y: 1, z: 1 }, { x: 2, y: 1, z: 1 }];
+  const proxyBricks = roomShell(8);
+  const shared = { brickSize: 8 as const, solverBricks, proxyBricks, maximumDepth: 3, maximumEnvironmentCoarseningPower: 1 };
+  const before = planAdaptiveSparseBrickOctree(shared);
+  const after = planAdaptiveSparseBrickOctree({ ...shared, solverLevel: 3 });
+  assert.deepEqual(after, before);
+  // And a refinement predicate that never fires changes nothing either.
+  assert.deepEqual(planAdaptiveSparseBrickOctree({ ...shared, refineEnvironmentLeaf: () => false }), before);
+});

@@ -82,6 +82,40 @@ different seed must grow a recognisable sibling, not a different species: if
 re-seeding can produce something degenerate, the form has a parameter that wants
 clamping.
 
+## Reaching a scene document
+
+A species is a function, and a scene document is JSON. The bridge is
+`lib/scenery-generators.ts`: a frozen `SCENERY_GENERATORS` catalog, keyed to the
+`generator` node kind in `lib/scenery-graph.ts`, so a document holds
+`{ generator, seed, params }` and the several hundred primitives it grows never
+appear in it. Before that catalog existed, every caller *baked*: the hero
+garden's three generators were called at build time and their 684 nodes — 884 kB
+of ellipsoid centres — were splatted into the node list, which made re-seeding a
+factory re-run that discarded the user's edits and made a saved scene a copy of
+its output rather than a description of itself.
+
+What that means for writing one:
+
+- **`key` and `seed` come off the node.** The catalog passes the generator node's
+  own id as `key`, so ids stay unique by construction, and the node's `seed` is
+  the only entropy. Neither belongs in `params` — see rule 3.
+- **`groundHeightAt` is supplied at expansion**, from the scene's baked
+  heightfield. That is the whole reason a generator is a node kind rather than a
+  serialized call: a document cannot hold a function.
+- **A run is named, not enumerated.** A generator that follows an outline takes
+  a `PondVesselSpec` from the graph's `vessels` table and derives its own rail.
+  Keep taking a `PlanRail` or a `PlanOutline` in the species — rule 1 — and let
+  the catalog entry do the conversion. A rail in `params` is baked geometry with
+  a different name.
+- **`params` must survive `JSON.stringify`.** No functions, no class instances.
+  A species whose spec needs a callback (`pebbleBedNodes`' band width is
+  `(turn) => number`) cannot have a node kind until that parameter is made
+  declarative; today it is reached through the arrangement that supplies it.
+
+Adding an entry is one line in `SCENERY_GENERATOR_IDS`, one in
+`SceneryGeneratorParamsByKind` and one in `SCENERY_GENERATORS`; anything missing
+is a compile error and there is no `register()`.
+
 ## Oracles
 
 Each generator gets a CPU test pinning, at least: determinism; re-seeded

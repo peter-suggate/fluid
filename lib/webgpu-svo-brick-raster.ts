@@ -1,4 +1,5 @@
 import { SVO_BRICK_OCCUPANCY } from "./svo-brick-occupancy";
+import { cameraApertureShaderLibrary } from "./webgpu-camera";
 
 /**
  * Raster-assisted primary visibility: GPU-driven emission, frustum culling and
@@ -181,7 +182,7 @@ fn svoBrickBoxCorner(vertexIndex:u32)->vec3f{
  * camera uniform, the published topology and the `SvoMapping` prefix of
  * `DryParams`, none of the renderer's fragment-only shading bindings.
  */
-export function createSvoBrickRasterCullWGSL(options: { reversedZNear_m: number; tanHalfFov: number }): string {
+export function createSvoBrickRasterCullWGSL(options: { reversedZNear_m: number }): string {
   const { bindings } = SVO_BRICK_RASTER_CONTRACT;
   return /* wgsl */ `
 struct Uniforms{viewport:vec4f,cameraPosition:vec4f,cameraTarget:vec4f,container:vec4f,options:vec4f,gridInfo:vec4f,debug:vec4f,environment:vec4f,terrainMeta:vec4f,terrainFeatures:array<vec4f,16>}
@@ -208,6 +209,7 @@ struct SvoBrickRasterPublication{
 }
 
 @group(0) @binding(${bindings.uniforms}) var<uniform> uniforms:Uniforms;
+${cameraApertureShaderLibrary()}
 @group(0) @binding(${bindings.mapping}) var<uniform> mapping:SvoMapping;
 @group(0) @binding(${bindings.structure}) var<storage,read> svoBrickStructure:array<u32>;
 @group(0) @binding(${bindings.candidates}) var<storage,read_write> svoBrickCandidates:array<SvoBrickInstance>;
@@ -219,7 +221,6 @@ fn svoBrickNode(index:u32)->SvoNode{let base=128u+index*8u;return SvoNode(svoBri
 fn svoBrickLeaf(index:u32)->SvoLeaf{let base=128u+svoBrickControl(16u)+index*4u;return SvoLeaf(svoBrickStructureWords4(base));}
 
 const SVO_BRICK_NEAR_M:f32=${options.reversedZNear_m};
-const SVO_BRICK_TAN_HALF:f32=${options.tanHalfFov};
 
 fn svoBrickCompactMortonBits(value:vec3u)->vec3u{
   var compact=value&vec3u(0x49249249u);
@@ -259,7 +260,7 @@ fn svoBrickFrustumVisible(camera:SvoBrickCamera,bounds:mat2x3f)->bool{
       select(bounds[0].z,bounds[1].z,(corner&4u)!=0u));
     let relative=point-camera.origin;
     let viewDepth=dot(relative,camera.forward);
-    let lateral=viewDepth*SVO_BRICK_TAN_HALF;
+    let lateral=viewDepth*cameraTanHalfFov();
     let x=dot(relative,camera.right);
     let y=dot(relative,camera.up);
     outsideNear=outsideNear&&(viewDepth<SVO_BRICK_NEAR_M);

@@ -209,7 +209,7 @@ test("cone visibility is generation-checked and fails closed before the explicit
   const coneAoReturn = contactVisibility.indexOf("return vec3f(mix(1.0,raw,dry.tuningRays0.w));");
   assert.ok(coneAoReturn >= 0 && contactVisibility.indexOf("svoTraceVisibility", coneAoReturn) > coneAoReturn,
     "cone AO must return before the separately selected exact AO algorithm");
-  assert.match(svoDrySceneShader, /diffuseVisibility=dryDiffuseMultiBounceVisibility\(gi\.visibility,diffuseColor\)[^;]*;[^]*diffuseEnvironment=[^;]*\*contactVisibility\*diffuseVisibility\*diffuseEnvironmentScale\/UNIFIED_PI[^]*specularEnvironment=dryEnvironment/,
+  assert.match(svoDrySceneShader, /environmentBrdf=unifiedEnvironmentBrdf\([^;]+surface\.roughness,f0\)[^;]*;[^]*diffuseVisibility=dryDiffuseMultiBounceVisibility\(gi\.visibility,diffuseColor\)[^;]*;[^]*diffuseEnvironment=[^;]*\*contactVisibility\*diffuseVisibility\*diffuseEnvironmentScale\/UNIFIED_PI[^]*specularEnvironment=dryEnvironment\(reflected,surface\.roughness\)\*environmentBrdf/,
     "contact and GI visibility must modulate diffuse environment only, leaving emission and specular environment intact");
 });
 

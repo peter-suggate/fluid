@@ -30,12 +30,18 @@ export const GIZMO_HANDLE_SCREEN_FRACTION = 0.11;
  * Arm length that holds a constant on-screen size: the projected size of a world
  * length is proportional to its eye depth, so scaling the length by the depth
  * cancels the perspective divide.
+ *
+ * The aperture is the other half of that cancellation, so it is a parameter and
+ * not the shared constant: on a longer lens the same world length covers more
+ * of the frame, and a gizmo that ignored that would grow as the scene's camera
+ * narrowed until the arms ran off the viewport.
  */
 export function gizmoHandleLength_m(
   depth_m: number,
+  tanHalfFov = CAMERA_TAN_HALF_FOV,
   screenFraction = GIZMO_HANDLE_SCREEN_FRACTION,
 ): number {
-  return Math.max(depth_m, 1e-3) * CAMERA_TAN_HALF_FOV * screenFraction;
+  return Math.max(depth_m, 1e-3) * tanHalfFov * screenFraction;
 }
 
 /**

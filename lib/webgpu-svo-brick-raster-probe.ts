@@ -14,6 +14,7 @@ import {
   decodeSvoPixelTrace,
   type SvoPixelTrace,
 } from "./svo-pixel-trace";
+import { cameraApertureShaderLibrary } from "./webgpu-camera";
 import { SVO_BRICK_RASTER_CONTRACT, svoBrickRasterSharedWGSL } from "./webgpu-svo-brick-raster";
 
 /**
@@ -102,8 +103,6 @@ export interface SvoBrickRasterProbeOptions {
    * experiment makes it an upper bound.
    */
   readonly fragmentDepthWritten: boolean;
-  /** Mirrors the vertical half-extent the dry-scene camera basis uses. */
-  readonly tanHalfFov: number;
   readonly primitiveWordOffset?: number;
   readonly sortStateWordOffset?: number;
   readonly instanceWordOffset?: number;
@@ -125,7 +124,6 @@ fn svoProbeOccupancyDecode(packed:u32)->SvoProbeOccupancy{
 `;
 
 export function createSvoBrickRasterProbeWGSL(options: SvoBrickRasterProbeOptions): string {
-  if (!(options.tanHalfFov > 0)) throw new RangeError("Brick raster probe needs a positive tan(fov/2)");
   const primitiveWordOffset = options.primitiveWordOffset ?? 0;
   const sortStateWordOffset = options.sortStateWordOffset ?? 0;
   const instanceWordOffset = options.instanceWordOffset ?? 0;
@@ -157,6 +155,7 @@ ${occupancyWGSL}
 ${svoPrimitiveWGSL}
 
 @group(0) @binding(${bindings.uniforms}) var<uniform> uniforms:Uniforms;
+${cameraApertureShaderLibrary()}
 @group(0) @binding(${bindings.params}) var<uniform> params:SvoProbeParams;
 // x,y requested pixel; z request token; w non-zero arms the probe.
 @group(0) @binding(${bindings.request}) var<uniform> probeRequest:vec4u;
@@ -180,7 +179,6 @@ const PROBE_RECORD_WORDS:u32=${SVO_PIXEL_TRACE_RECORD_WORDS}u;
 const PROBE_ROW_WORDS:u32=${SVO_PIXEL_TRACE_TEXTURE_ROW_WORDS}u;
 const PROBE_CAPACITY:u32=${recordCapacity}u;
 const PROBE_MISS:f32=1e30;
-const PROBE_TAN_HALF:f32=${options.tanHalfFov};
 
 fn probeWriteWord(wordIndex:u32,value:u32){
   textureStore(probeRecords,vec2u(wordIndex%PROBE_ROW_WORDS,wordIndex/PROBE_ROW_WORDS),vec4u(value,0u,0u,0u));
@@ -270,7 +268,7 @@ fn svoProbeRay()->vec3f{
   let pixel=vec2f(f32(probeRequest.x)+.5,f32(probeRequest.y)+.5);
   let uv=vec2f(pixel.x/viewport.x,1.0-pixel.y/viewport.y);
   let ndc=uv*2.0-1.0;
-  return normalize(forward+right*ndc.x*viewport.x/viewport.y*PROBE_TAN_HALF+up*ndc.y*PROBE_TAN_HALF);
+  return normalize(forward+right*ndc.x*viewport.x/viewport.y*cameraTanHalfFov()+up*ndc.y*cameraTanHalfFov());
 }
 
 fn svoProbeVoxelIndex(voxelOffset:u32,local:vec3u,brickSize:u32)->u32{
@@ -338,8 +336,13 @@ fn svoProbeTraceBrick(ro:vec3f,rd:vec3f,bounds:mat2x3f,voxelOffset:u32,tEnter:f3
         let primitiveIndex=owner-params.metadata.y;
         if(primitiveIndex<params.metadata.x){
           tagged=true;
+          // This probe binds the primitive span alone, not the scene arena, so
+          // it cannot resolve an aggregate's packing. A cluster therefore
+          // reports RAY_INVALID here rather than a plausible hit — the probe is
+          // a diagnostic on the analytic kinds, and a silent miss would be read
+          // as evidence about the traversal it is measuring.
           let exact=svoIntersectPrimitiveExact(svoProbePrimitive(primitiveIndex),ro,rd,
-            max(max(0.0,entry-tolerance),1e-4),cellExit+tolerance);
+            max(max(0.0,entry-tolerance),1e-4),cellExit+tolerance,svoInvalidClusterPacking());
           found=exact.status==SVO_PRIMITIVE_RAY_HIT;
           surface=select(PROBE_MISS,exact.t_m,found);
         }

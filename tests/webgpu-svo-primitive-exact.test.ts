@@ -171,6 +171,54 @@ const cases: OracleCase[] = [
     ray: { origin_m: { x: 0, y: 0, z: 0 }, direction: { x: 0, y: -1, z: 0 } },
   },
   {
+    name: "round cone lateral band",
+    primitive: {
+      kind: "round-cone", primitiveId: 22, materialId: 35, center_m: { x: 0, y: 0, z: 0 },
+      baseRadius_m: 0.8, topRadius_m: 0.5, halfHeight_m: 1, orientation: identity,
+    },
+    ray: { origin_m: { x: -3, y: 0, z: 0 }, direction: { x: 1, y: 0, z: 0 } },
+  },
+  {
+    name: "round cone spherical end",
+    primitive: {
+      kind: "round-cone", primitiveId: 23, materialId: 35, center_m: { x: 0, y: 0, z: 0 },
+      baseRadius_m: 0.8, topRadius_m: 0.5, halfHeight_m: 1, orientation: identity,
+    },
+    ray: { origin_m: { x: 0, y: 3, z: 0 }, direction: { x: 0, y: -1, z: 0 } },
+  },
+  {
+    name: "round cone inside exit",
+    primitive: {
+      kind: "round-cone", primitiveId: 24, materialId: 35, center_m: { x: 0, y: 0, z: 0 },
+      baseRadius_m: 0.8, topRadius_m: 0.5, halfHeight_m: 1, orientation: identity,
+    },
+    ray: { origin_m: { x: 0, y: 0, z: 0 }, direction: { x: 0, y: -1, z: 0 } },
+  },
+  {
+    name: "rounded cylinder top",
+    primitive: {
+      kind: "rounded-cylinder", primitiveId: 25, materialId: 36, center_m: { x: 0, y: 0, z: 0 },
+      radius_m: 1, halfHeight_m: 0.4, edgeRadius_m: 0.1, orientation: identity,
+    },
+    ray: { origin_m: { x: 0, y: 2, z: 0 }, direction: { x: 0, y: -1, z: 0 } },
+  },
+  {
+    name: "rounded cylinder fillet",
+    primitive: {
+      kind: "rounded-cylinder", primitiveId: 26, materialId: 36, center_m: { x: 0, y: 0, z: 0 },
+      radius_m: 1, halfHeight_m: 0.4, edgeRadius_m: 0.1, orientation: identity,
+    },
+    ray: { origin_m: { x: 0.97, y: 2, z: 0 }, direction: { x: 0, y: -1, z: 0 } },
+  },
+  {
+    name: "rounded cylinder inside exit",
+    primitive: {
+      kind: "rounded-cylinder", primitiveId: 27, materialId: 36, center_m: { x: 0, y: 0, z: 0 },
+      radius_m: 1, halfHeight_m: 0.4, edgeRadius_m: 0.1, orientation: identity,
+    },
+    ray: { origin_m: { x: 0, y: 0, z: 0 }, direction: { x: 0, y: -1, z: 0 } },
+  },
+  {
     name: "invalid zero torus major radius",
     primitive: {
       kind: "torus", primitiveId: 21, materialId: 33, center_m: { x: 0, y: 0, z: 0 },
@@ -201,9 +249,13 @@ struct PrimitiveRayInput { originMin: vec4f, directionMax: vec4f }
 fn primitiveOracle(@builtin(global_invocation_id) id: vec3u) {
   if (id.x >= arrayLength(&oracleResults)) { return; }
   let ray = oracleRays[id.x];
+  // No arena is bound here, so every record is offered the "not resolved"
+  // block. Every kind below is analytic or self-contained; an aggregate would
+  // report itself invalid rather than draw its envelope, which is the behaviour
+  // the dry scene relies on and not something to paper over.
   oracleResults[id.x] = svoIntersectPrimitiveExact(
     oraclePrimitives[id.x], ray.originMin.xyz, ray.directionMax.xyz,
-    ray.originMin.w, ray.directionMax.w,
+    ray.originMin.w, ray.directionMax.w, svoInvalidClusterPacking(),
   );
 }`;
 

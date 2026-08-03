@@ -6,6 +6,7 @@ import {
   HERO_GARDEN_CONTAINER,
   HERO_GARDEN_WATER_BELOW_GROUND_M,
   HERO_GARDEN_HOSE_MOUTH_M,
+  HERO_GARDEN_HOSE_IMPACT_M,
   HERO_GARDEN_VESSEL,
   HERO_GARDEN_WATERLINE_M,
   createHeroGardenHoseScene,
@@ -78,23 +79,56 @@ test("the plan curve closes, and the wobble moves it without pinching the rim", 
   assert.ok(Math.max(...radii) - Math.min(...radii) > 0.02, "the seed must actually move the outline");
 });
 
-test("the coping's section varies as it runs, which is what stops it reading as an extrusion", () => {
-  // The first version of this generator held the crest to a constant height and
-  // had a test pinning it there. That is the wrong invariant: the eye reads an
-  // unvarying crest line long before it reads a wandering outline, so a rim with
-  // a constant section looks machined however much the plan wobbles.
+test("with the crest swept as a solid, the plaster runs level to the plan curve and nothing else moved", () => {
+  // This test used to be "the coping's section varies as it runs", measured on
+  // `pondVesselHeightAt`, and it was the right assertion until the crest left
+  // the heightfield. `HERO_GARDEN_VESSEL.crest` is `"flat"` now: the swelling it
+  // measured is a swept solid (`lib/voxel-scenery/swept-coping.ts`), this
+  // function's crest term is identically zero on the hero vessel, and the
+  // section-varies property went with it — it is asserted on the solid's own run
+  // in `tests/swept-coping.test.ts`.
+  //
+  // What is left here is the vessel's half of that contract, which nothing was
+  // asserting: the plaster the solid is set into. Both claims below are the ones
+  // the doc comment on `crest` makes, and they are the reason omitting the crest
+  // is a rendering decision rather than a containment one.
   const curve = pondVesselPlanCurve(HERO_GARDEN_VESSEL);
-  const crests = curve.map(([x, z]) => pondVesselHeightAt(HERO_GARDEN_VESSEL, curve, x, z));
-  const nominal = HERO_GARDEN_VESSEL.groundHeight_m + HERO_GARDEN_VESSEL.rimHeight_m;
-  const swing = Math.max(...crests) - Math.min(...crests);
-  // Enough to see — several millimetres on a 55 mm rim...
-  assert.ok(swing > 0.004, `the crest barely moves: ${(swing * 1e3).toFixed(2)} mm`);
-  // ...and not so much that the rim stops being one continuous form.
-  assert.ok(swing < 0.5 * HERO_GARDEN_VESSEL.rimHeight_m, `the crest swings wildly: ${(swing * 1e3).toFixed(2)} mm`);
-  for (const height of crests) {
-    assert.ok(Math.abs(height - nominal) < 0.4 * HERO_GARDEN_VESSEL.rimHeight_m,
-      `crest height ${height} leaves the authored band around ${nominal}`);
+  const bullnose: PondVesselSpec = { ...HERO_GARDEN_VESSEL, crest: "bullnose" };
+
+  // One: level to the plan curve. The ground on the centreline is
+  // `groundHeight_m` plus the relief and nothing else, which is what gives the
+  // swept rim a flat band to be bedded into rather than a shoulder to perch on.
+  // Measured, the plaster under the rail wanders by -2.24 to +2.03 mm, which is
+  // the 2.5 mm relief and none of it a crest.
+  for (const [x, z] of curve) {
+    const height = pondVesselHeightAt(HERO_GARDEN_VESSEL, curve, x, z);
+    assert.ok(Math.abs(height - HERO_GARDEN_VESSEL.groundHeight_m) <= HERO_GARDEN_VESSEL.relief_m,
+      `the plaster at (${x.toFixed(3)}, ${z.toFixed(3)}) stands ${((height - HERO_GARDEN_VESSEL.groundHeight_m) * 1e3).toFixed(2)} mm off level`);
+    // ...and what left was a crest at its authored height, not a shaving off the
+    // ground. Measured 46.2 to 63.9 mm against the authored 55, which is the
+    // section's own height modulation and nothing else.
+    const crest = pondVesselHeightAt(bullnose, curve, x, z) - height;
+    assert.ok(crest > 0.6 * HERO_GARDEN_VESSEL.rimHeight_m && crest < 1.4 * HERO_GARDEN_VESSEL.rimHeight_m,
+      `the crest that left the heightfield was ${(crest * 1e3).toFixed(2)} mm, not the authored ${HERO_GARDEN_VESSEL.rimHeight_m * 1e3} mm`);
   }
+
+  // Two: it lowered nothing the water can reach. The doc comment claims the
+  // still waterline moves "by less than a nanometre"; measured it moves by
+  // exactly zero, and this is why. `pondVesselCrestProfile` is identically zero
+  // past the coping's foot, and the foot never runs wider than
+  // `rimHalfWidth_m * (1 + 1.6 * sectionWidthVariation)` — 42.9 mm, the widest
+  // a Catmull-Rom through values in [-1, 1] can overshoot to. Outside that the
+  // two vessels are the same float, so the basin floor, the inner face and every
+  // metre of plaster the water rests against are untouched by the decision.
+  const widestBand_m = HERO_GARDEN_VESSEL.rimHalfWidth_m * (1 + 1.6 * HERO_GARDEN_VESSEL.sectionWidthVariation);
+  let compared = 0;
+  for (let x = -0.9; x <= 0.9; x += 0.015) for (let z = -0.6; z <= 0.6; z += 0.015) {
+    if (Math.abs(pondVesselPlanDistance(curve, x, z)) <= widestBand_m) continue;
+    assert.equal(pondVesselHeightAt(HERO_GARDEN_VESSEL, curve, x, z), pondVesselHeightAt(bullnose, curve, x, z),
+      `omitting the crest moved the ground at (${x.toFixed(3)}, ${z.toFixed(3)}), which is outside the widest band the crest can reach`);
+    compared += 1;
+  }
+  assert.ok(compared > 5000, `only ${compared} samples fell outside the band; the sweep must reach the basin and the ground beyond the pond`);
 });
 
 test("a tank fill wets the basin and nothing else", () => {
@@ -227,8 +261,15 @@ test("the hero document is valid, deterministic, and holds its water", () => {
 
   // And the hose is aimed into the water, not at the coping.
   const inflow = scene.fluid.inflow!;
-  const groundUnderJet = terrainHeightAt(scene.terrain, inflow.center_m.x, inflow.center_m.z);
+  const groundUnderJet = terrainHeightAt(scene.terrain, HERO_GARDEN_HOSE_IMPACT_M.x, HERO_GARDEN_HOSE_IMPACT_M.z);
   assert.ok(groundUnderJet < HERO_GARDEN_WATERLINE_M, "the jet must land inside the basin");
+  const impactTime = (HERO_GARDEN_HOSE_IMPACT_M.y - inflow.center_m.y) / inflow.velocity_m_s.y;
+  const landing = {
+    x: inflow.center_m.x + impactTime * inflow.velocity_m_s.x,
+    z: inflow.center_m.z + impactTime * inflow.velocity_m_s.z,
+  };
+  assert.ok(Math.hypot(landing.x - HERO_GARDEN_HOSE_IMPACT_M.x, landing.z - HERO_GARDEN_HOSE_IMPACT_M.z) < 1e-9,
+    "the authored jet direction must reach its visible impact point");
   assert.ok(inflow.center_m.y > HERO_GARDEN_VESSEL.groundHeight_m + HERO_GARDEN_VESSEL.rimHeight_m,
     "the hose mouth must clear the rim it arrives over");
 });
@@ -252,14 +293,46 @@ test("the drawn hose and the injected jet leave from the same place, pointing th
   const cosine = dot / (Math.hypot(axis.x, axis.y, axis.z) * Math.hypot(inflow.velocity_m_s.x, inflow.velocity_m_s.y, inflow.velocity_m_s.z));
   assert.ok(cosine < -0.999, `nozzle and jet disagree on direction, cosine ${cosine}`);
 
-  // The tube is thicker than the bore it carries, and the run is continuous.
-  const runs = scene.scenery!.nodes.filter((node) => node.id.startsWith("hose/run-"));
-  assert.ok(runs.length >= 4, "the hose must actually run somewhere");
-  for (const [index, node] of runs.entries()) {
-    assert.equal(node.kind, "capsule");
-    assert.equal(node.place?.units, "metres", "the hose is authored in metres, not scene fractions");
-    if (index === 0) continue;
-    const previous = runs[index - 1];
-    assert.deepEqual((node as { from: unknown }).from, (previous as { to: unknown }).to, "the hose must not break between segments");
+  // The run is continuous. The hose is a family of tapered-sweep records rather
+  // than a capsule chain — one record carries several bends with a smooth
+  // minimum through them — so continuity is no longer "this capsule's `to` is
+  // the next one's `from`". Each record places its control points in its own
+  // fitted frame, and the property that still has to hold is that consecutive
+  // records *share a station in world space*: the fit is allowed to choose where
+  // to cut the path, but not to leave a gap in it.
+  const runs = scene.scenery!.nodes.filter((node) => node.id.startsWith("hose/tube"));
+  assert.ok(runs.length >= 1, "the hose must actually run somewhere");
+  const worldPoints = runs.map((node) => {
+    assert.equal(node.kind, "cluster");
+    const sweep = node as Extract<typeof node, { kind: "cluster" }>;
+    assert.equal("field" in sweep ? sweep.field : undefined, "tapered-sweep");
+    assert.equal(sweep.place?.units, "metres", "the hose is authored in metres, not scene fractions");
+    const origin = sweep.place!.position!;
+    const q = sweep.place!.orientation!;
+    assert.ok(Math.abs(Math.hypot(q.w, q.x, q.y, q.z) - 1) < 1e-9, "a record's frame must be a rotation");
+    return (sweep as { points: readonly { position: { x: number; y: number; z: number }; radius: number }[] })
+      .points.map(({ position: p, radius }) => {
+        assert.ok(radius > 0, "every station carries a bore");
+        // The standard quaternion sandwich, spelled out: the expander rotates a
+        // cluster's control points by the node's frame and offsets them by its
+        // origin, and this has to agree with it to be checking anything.
+        const t = { x: 2 * (q.y * p.z - q.z * p.y), y: 2 * (q.z * p.x - q.x * p.z), z: 2 * (q.x * p.y - q.y * p.x) };
+        return {
+          x: origin.x + p.x + q.w * t.x + (q.y * t.z - q.z * t.y),
+          y: origin.y + p.y + q.w * t.y + (q.z * t.x - q.x * t.z),
+          z: origin.z + p.z + q.w * t.z + (q.x * t.y - q.y * t.x),
+        };
+      });
+  });
+  for (let index = 1; index < worldPoints.length; index += 1) {
+    const end = worldPoints[index - 1][worldPoints[index - 1].length - 1];
+    const start = worldPoints[index][0];
+    assert.ok(Math.hypot(end.x - start.x, end.y - start.y, end.z - start.z) < 1e-9,
+      `the hose breaks between records ${index - 1} and ${index}`);
   }
+  // And it starts at the mouth the jet leaves from, which is the whole point of
+  // the test above holding for the collar as well.
+  const head = worldPoints[0][0];
+  assert.ok(Math.hypot(head.x - HERO_GARDEN_HOSE_MOUTH_M.x, head.y - HERO_GARDEN_HOSE_MOUTH_M.y,
+    head.z - HERO_GARDEN_HOSE_MOUTH_M.z) < 1e-9, "the tube must start at the nozzle");
 });

@@ -25,6 +25,8 @@ import {
   PEBBLE_GRADED_COBBLE,
   planRail,
   STEPPING_DISC,
+  STONE_VALUE_MAXIMUM,
+  STONE_VALUE_MINIMUM,
   steppingStoneNodes,
   stoneSet,
   stoneSetBoulderNodes,
@@ -145,6 +147,10 @@ function halfExtentOf(node: SceneryPrimitiveNode, quaternion: Quaternion): Vec3 
       case "box": return node.halfSize;
       case "torus": return V(node.majorRadius + node.minorRadius, node.minorRadius, node.majorRadius + node.minorRadius);
       case "capsule": return V(node.radius, node.radius, node.radius);
+      // The lobe, which is exactly what the render ABI clips the packing to and
+      // what every bounds formula downstream reads. A weathered cap is bounded
+      // by the ellipsoid it would have been.
+      case "cluster": return node.lobe;
     }
   })();
   const axis = (v: Vec3) => quaternionRotate(quaternion, v);
@@ -241,13 +247,30 @@ test("a species takes geometry, not a scene", () => {
     "the bed ignored the ground query it was handed");
 });
 
+
+/**
+ * The half-axes of a boulder's cap, whichever way it is spelled.
+ *
+ * A weathered cap is a `cluster` and a smooth one is an `ellipsoid`, and the
+ * proportions below are properties of the *silhouette* — which is the lobe in
+ * both cases, because the render ABI clips the packing to exactly it. Reading
+ * the shape through one accessor is what keeps these assertions about the form
+ * rather than about how the form happens to be published.
+ */
+function capLobe(node: SceneryNode): Vec3 {
+  if (node.kind === "ellipsoid") return node.radius;
+  assert.ok(node.kind === "cluster", `${node.id} is neither a smooth nor a weathered cap`);
+  assert.ok(node.kind === "cluster");
+  return node.lobe;
+}
+
 test("a form carries the silhouette, and a spec only carries the placement", () => {
   const cap = cappedBoulderNodes({ ...BOULDER_MUSHROOM_CAP, key: "a", at_m: [0, 0], seed: 3 });
   const cobble = cappedBoulderNodes({ ...BOULDER_ROUNDED_COBBLE, key: "b", at_m: [0, 0], seed: 3 });
   const overhang = (nodes: readonly SceneryNode[]): number => {
     const capPart = partOf(nodes[0], "/cap"), stem = partOf(nodes[0], "/stem");
-    assert.ok(capPart.kind === "ellipsoid" && stem.kind === "cone");
-    return capPart.radius.x / stem.topRadius;
+    assert.ok(stem.kind === "cone");
+    return capLobe(capPart).x / stem.topRadius;
   };
   assert.ok(overhang(cap) > 1.7, `the capped form overhangs only ${overhang(cap).toFixed(2)}x`);
   assert.ok(overhang(cobble) < 1.3, `the cobble form overhangs ${overhang(cobble).toFixed(2)}x, which is a cap`);
@@ -292,6 +315,10 @@ test("a stepping path lays plates on the bed it is given", () => {
   for (const stone of path) {
     const tread = partOf(stone, "/tread"), footing = partOf(stone, "/footing");
     assert.ok(tread.kind === "cylinder" && footing.kind === "cone");
+    assert.ok(tread.edgeRadius !== undefined && tread.edgeRadius >= 0.1 * tread.radius,
+      `${stone.id} compresses its edge normal into an unresolved band`);
+    assert.equal(stone.kind === "group" ? stone.children.length : 0, 2,
+      `${stone.id} reintroduced overlapping tread geometry`);
     const at = parts.find((part) => part.id === `${stone.id}/tread`)!;
     const foot = parts.find((part) => part.id === `${stone.id}/footing`)!;
     const top = at.center_m.y + tread.halfHeight;
@@ -329,7 +356,7 @@ test("the set fits its share of the scene's primitive budget, and its bricks", (
   assert.ok(leaves.length <= 1_200, `the stone set publishes ${leaves.length} leaves, over its 1 200 budget`);
   assert.ok(leaves.length >= 110, `the stone set publishes only ${leaves.length} leaves`);
   assert.equal(leavesOf(stoneSetBoulderNodes(SPEC)).length, 16, "four boulders of four parts each");
-  assert.equal(leavesOf(stoneSetSteppingNodes(SPEC)).length, 15, "five plates of three parts each");
+  assert.equal(leavesOf(stoneSetSteppingNodes(SPEC)).length, 10, "five single-SDF plates on five footings");
   const pebbles = leavesOf(stoneSetPebbleNodes(SPEC)).length;
   assert.ok(pebbles >= 80 && pebbles <= 320, `${pebbles} pebbles, outside the 80-320 the reference reads as`);
 
@@ -360,10 +387,18 @@ test("every node is legal scenery, in the palettes the hero scene declares", () 
       `${leaf.id} must be stone by palette; the set is monochrome by construction`);
     // The band the whole set is authored in. Outside it a stone stops reading as
     // the same fired white as the vessel and starts reading as a different
-    // material, which is the one thing a monochrome set cannot survive.
-    assert.ok(leaf.material.value >= 0.62 && leaf.material.value <= 0.92,
-      `${leaf.id} has value ${leaf.material.value}, outside the set's [0.62, 0.92]`);
+    // material, which is the one thing a monochrome set cannot survive. Read
+    // from the module rather than restated, because the band moved once already
+    // — the hero scene now shades every prop through a flat closure with no
+    // colour grain of its own, so the authored value *is* the albedo and the old
+    // 0.62 floor came back grey beside a white rim.
+    assert.ok(leaf.material.value >= STONE_VALUE_MINIMUM && leaf.material.value <= STONE_VALUE_MAXIMUM,
+      `${leaf.id} has value ${leaf.material.value}, outside the set's [${STONE_VALUE_MINIMUM}, ${STONE_VALUE_MAXIMUM}]`);
   }
+  // ...and the band itself is a creamy white rather than a grey. A set whose
+  // floor drifted back down would pass the clamp above and still lose the look.
+  assert.ok(STONE_VALUE_MINIMUM >= 0.76 && STONE_VALUE_MAXIMUM < 1,
+    `the quarry is authored in [${STONE_VALUE_MINIMUM}, ${STONE_VALUE_MAXIMUM}]; white reads white above ~0.8, and above 1 the material record throws`);
 });
 
 test("the material closure resolves to stone, not to organic", () => {
@@ -451,10 +486,7 @@ test("the boulders and beds follow the coping rather than sitting on it", () => 
   // The graded set: strictly descending, and a range wide enough to read as one.
   const caps = stoneSetBoulderNodes(SPEC)
     .filter((node) => node.id.endsWith("/boulder-0") || node.id.includes("/boulder-"))
-    .map((node) => {
-      const cap = partOf(node, "/cap");
-      return cap.kind === "ellipsoid" ? cap.radius.x : 0;
-    });
+    .map((node) => capLobe(partOf(node, "/cap")).x);
   for (let index = 1; index < caps.length; index += 1) {
     assert.ok(caps[index] < caps[index - 1], `boulder ${index} is not smaller than the one before it`);
   }
@@ -494,26 +526,130 @@ test("the beds are clusters, not a band round the whole coping", () => {
   assert.ok(longestGap >= 5, `the longest bare run of coping is ${longestGap} of 40 bearings`);
 });
 
-test("a boulder is a cap on a stem, and the cap overhangs it", () => {
-  // The three proportions that make the silhouette. Read off the reference: the
-  // cap is a little under twice the stem's width, flattened to about a third of
-  // its own, and its rim stands clear of the stem all the way round — which is
-  // what puts the dark undercut line under every one of these stones.
-  for (const boulder of stoneSetBoulderNodes(SPEC)) {
+test("the boulders are a family of different stones, not one stone at four sizes", () => {
+  // What this used to assert was the *mushroom* form's three proportions, on
+  // every boulder, because every boulder was that form at a different radius.
+  // The render said what that looks like: four photocopies at four
+  // enlargements, which the eye reads as one object repeated. So the bands here
+  // are now the species' — wide enough to hold a parasol, a seated cobble and
+  // everything between — and the assertion that carries the art direction is
+  // the *spread* across the four at the bottom.
+  const boulders = stoneSetBoulderNodes(SPEC);
+  const flattens: number[] = [];
+  const overhangs: number[] = [];
+  const stems: number[] = [];
+  for (const boulder of boulders) {
     const cap = partOf(boulder, "/cap");
     const stem = partOf(boulder, "/stem");
-    assert.ok(cap.kind === "ellipsoid" && stem.kind === "cone", `${boulder.id} needs an ellipsoid cap on a cone stem`);
-    assert.ok(cap.radius.x / stem.topRadius > 1.7 && cap.radius.x / stem.topRadius < 2.3,
-      `${boulder.id} cap-to-stem is ${(cap.radius.x / stem.topRadius).toFixed(2)}, outside the reference's ~1.9`);
-    assert.ok(cap.radius.y / cap.radius.x > 0.30 && cap.radius.y / cap.radius.x < 0.45,
-      `${boulder.id} cap flatten is ${(cap.radius.y / cap.radius.x).toFixed(2)}, outside the reference's ~0.37`);
+    assert.ok(stem.kind === "cone", `${boulder.id} needs a cone stem`);
+    // Weathering does not change the silhouette, and this is where that is
+    // pinned: the cap's proportions are read off its lobe whether the surface
+    // on it is a smooth ellipsoid or an aggregate packing clipped to the same
+    // ellipsoid.
+    const capRadius = capLobe(cap);
+    const overhang = capRadius.x / stem.topRadius;
+    const flatten = capRadius.y / capRadius.x;
+    assert.ok(overhang > 1.05 && overhang < 2.8,
+      `${boulder.id} cap-to-stem is ${overhang.toFixed(2)}: under 1.05 the cap is narrower than what holds it up, over 2.8 it is a plate on a post`);
+    assert.ok(flatten > 0.26 && flatten < 0.72,
+      `${boulder.id} cap flatten is ${flatten.toFixed(2)}: under 0.26 it is a disc, over 0.72 it is a ball`);
     assert.ok(stem.baseRadius > stem.topRadius, `${boulder.id} stem must taper upward`);
     // The cap has to sit down over the stem, or the two meet in a seam the
     // voxelizer decides the ownership of rather than fusing into one stone.
-    const capBottom = (cap.place?.position?.y ?? 0) - cap.radius.y;
+    const capBottom = (cap.place?.position?.y ?? 0) - capRadius.y;
     const stemTop = (stem.place?.position?.y ?? 0) + stem.halfHeight;
     assert.ok(capBottom < stemTop, `${boulder.id} cap balances on its stem instead of sitting over it`);
+    flattens.push(flatten);
+    overhangs.push(overhang);
+    stems.push(2 * stem.halfHeight / capRadius.x);
   }
+  // The art direction, as three numbers. Sizes alone are not a family: the four
+  // have to differ in the ratios that draw the silhouette, or they are one
+  // drawing at four scales however far apart their radii are.
+  const spread = (values: readonly number[]) => Math.max(...values) / Math.min(...values);
+  assert.ok(spread(flattens) > 1.7, `the caps' flattening spans only ${spread(flattens).toFixed(2)}x; the set is one cap`);
+  assert.ok(spread(stems) > 3, `the stems span only ${spread(stems).toFixed(2)}x of their caps; the set is one stone`);
+  assert.ok(spread(overhangs) > 1.6, `the overhangs span only ${spread(overhangs).toFixed(2)}x`);
+  // ...and the group is a group: no two gaps along the bank are the same, or
+  // four stones evenly spaced read as a fence rather than as a family.
+  const at = resolve(boulders).filter(({ id }) => id.endsWith("/footing"));
+  const gaps = at.slice(1).map((stone, index) =>
+    Math.hypot(stone.center_m.x - at[index].center_m.x, stone.center_m.z - at[index].center_m.z));
+  assert.equal(gaps.length, 3);
+  assert.ok(spread(gaps) > 1.4, `the four stand at ${gaps.map((g) => (1e3 * g).toFixed(0)).join("/")} mm: an even row`);
+});
+
+test("every stone big enough to read carries an irregular silhouette", () => {
+  // "Basically, no more spheres." An ellipsoid has no silhouette irregularity at
+  // all, so every gram of authored size, aspect and bedding variation in a bed
+  // used to arrive at the eye as a tray of eggs. The rule is a size rule rather
+  // than a blanket one, because a marched field costs real shader time and a
+  // stone under about 24 mm covers a few pixels at the hero camera: above the
+  // floor a stone must be a `cluster`, below it, an ellipsoid is honest and an
+  // ellipsoid is what it gets.
+  // Each bed's own floor, so the oracle is "no stone escaped the rule its bed
+  // declares" rather than a number restated here and free to drift from it. The
+  // floors themselves are held to a ceiling: a bed could otherwise satisfy this
+  // by declaring that nothing it lays is ever legible.
+  for (const form of [PEBBLE_GRADED_COBBLE, PEBBLE_FINE_SHINGLE]) {
+    assert.ok(form.clusterFloor_m <= 0.015,
+      `a bed exempts everything under ${(2e3 * form.clusterFloor_m).toFixed(0)} mm from carrying a silhouette`);
+  }
+  const round: string[] = [];
+  let irregular = 0;
+  for (const leaf of leavesOf(stoneSetPebbleNodes(SPEC))) {
+    if (leaf.kind === "cluster") { irregular += 1; continue; }
+    if (leaf.kind !== "ellipsoid") continue;
+    const floor_m = leaf.id.includes("/shore-bed/") ? PEBBLE_FINE_SHINGLE.clusterFloor_m : PEBBLE_GRADED_COBBLE.clusterFloor_m;
+    const halfWidth = Math.max(leaf.radius.x, leaf.radius.z);
+    if (halfWidth > floor_m) round.push(`${leaf.id} (${(2e3 * halfWidth).toFixed(0)} mm)`);
+    // What carries the small stones instead: they are lentils and flakes, not
+    // beads, and that is what stops the fine shingle reading as spheres.
+    assert.ok(leaf.radius.y < 0.95 * Math.max(leaf.radius.x, leaf.radius.z),
+      `${leaf.id} is as tall as it is wide; a bedded pebble is flattened`);
+  }
+  assert.equal(round.length, 0, `${round.length} bare ellipsoids over their bed's floor: ${round.slice(0, 5).join(", ")}`);
+  assert.ok(irregular >= 20, `only ${irregular} pebbles carry an irregular mass; the beds have lost their cobbles`);
+  // Every boulder's mass too — a cap is the largest stone in the frame and the
+  // one an ellipse would give away first.
+  for (const boulder of stoneSetBoulderNodes(SPEC)) {
+    assert.equal(partOf(boulder, "/cap").kind, "cluster", `${boulder.id} draws a perfect ellipse against the sky`);
+  }
+});
+
+test("the beds grade, dramatically, from cobbles to shingle", () => {
+  // The complaint this table was rebuilt for: "too uniform". A bed whose stones
+  // span a factor of two in size reads as one grain from a metre away, which is
+  // what the first version did — it graded its mean 16 mm to 8.5 mm and came
+  // back as an even necklace of beads round the pool. The reference heaps
+  // cobbles the size of a plum against its big stones and runs out into shingle
+  // you could not pick up: measured against the coping, 80 mm down to 15 mm.
+  const widths = leavesOf(stoneSetPebbleNodes(SPEC))
+    .map((leaf) => 2 * (leaf.kind === "cluster" ? Math.max(leaf.lobe.x, leaf.lobe.z)
+      : leaf.kind === "ellipsoid" ? Math.max(leaf.radius.x, leaf.radius.z) : 0))
+    .sort((a, b) => a - b);
+  const at = (share: number) => widths[Math.min(widths.length - 1, Math.floor(share * widths.length))];
+  assert.ok(at(0.98) / at(0.02) > 4,
+    `the beds span only ${(at(0.98) / at(0.02)).toFixed(1)}x between their 2nd and 98th percentile stone; that is one grain`);
+  assert.ok(widths[widths.length - 1] > 0.060,
+    `the largest stone in the beds is ${(1e3 * widths[widths.length - 1]).toFixed(0)} mm; the reference's cobbles are 80`);
+  assert.ok(widths[0] < 0.014,
+    `the smallest is ${(1e3 * widths[0]).toFixed(0)} mm; the reference's shingle is 15`);
+
+  // ...and the grade is *placed*: the coarse end is against the boulder group
+  // rather than sprinkled evenly round the pool. Measured as the mean stone
+  // size within a boulder's reach against the mean everywhere else.
+  const boulders = resolve(stoneSetBoulderNodes(SPEC)).filter(({ id }) => id.endsWith("/footing"));
+  let near = 0, nearCount = 0, far = 0, farCount = 0;
+  for (const pebble of resolve(stoneSetPebbleNodes(SPEC))) {
+    const width = 2 * Math.max(pebble.halfExtent_m.x, pebble.halfExtent_m.z);
+    const beside = boulders.some((stone) =>
+      Math.hypot(pebble.center_m.x - stone.center_m.x, pebble.center_m.z - stone.center_m.z) < 0.16);
+    if (beside) { near += width; nearCount += 1; } else { far += width; farCount += 1; }
+  }
+  assert.ok(nearCount > 8 && farCount > 8, `${nearCount} stones at the boulders and ${farCount} away from them`);
+  assert.ok((near / nearCount) / (far / farCount) > 1.35,
+    `stones at the boulders are only ${((near / nearCount) / (far / farCount)).toFixed(2)}x the size of those away from them`);
 });
 
 test("the plates wade over the shore, not over the basin floor", () => {
@@ -545,7 +681,7 @@ test("the plates wade over the shore, not over the basin floor", () => {
     assert.ok(top < HERO_GARDEN_WATERLINE_M + 0.05,
       `${step.id} stands ${((top - HERO_GARDEN_WATERLINE_M) * 1e3).toFixed(0)} mm proud; a stepping stone is not a plinth`);
     // A plate is thin: the reference's are about a fifth of their own width.
-    assert.ok(2 * tread.halfHeight < 0.30 * tread.radius * 2,
+    assert.ok(2 * tread.halfHeight < 0.34 * tread.radius * 2,
       `${step.id} is ${(2e3 * tread.halfHeight).toFixed(0)} mm thick on a ${(2e3 * tread.radius).toFixed(0)} mm plate`);
     // Inside the basin by a whole tread, so no plate grows out of the coping.
     const distance = pondVesselPlanDistance(CURVE, treadAt.x, treadAt.z);

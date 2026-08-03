@@ -32,7 +32,7 @@ import type { RigidBodyDescription } from "@/lib/model";
 import { resourceInteractionGates } from "@/lib/resource-readiness";
 import { simulation } from "@/lib/simulation/controller";
 import { simulationRecording } from "@/lib/simulation/recording";
-import { projectToViewport, viewportRayForPointer } from "@/lib/webgpu-camera";
+import { cameraTanHalfFov, projectToViewport, viewportRayForPointer } from "@/lib/webgpu-camera";
 import {
   closestPointOnAxis,
   GIZMO_AXIS_DIRECTIONS,
@@ -628,7 +628,7 @@ export function WebGPUViewport() {
       // A segment or an arm is drawn as the line it is, not as a square at one
       // end: that is what makes the handle look like the thing it moves, and it
       // is far easier to hit.
-      const world = handleWorldEnds(entity, handle, projection.depth_m);
+      const world = handleWorldEnds(entity, handle, projection.depth_m, cameraTanHalfFov(camera));
       return {
         handle,
         projection,

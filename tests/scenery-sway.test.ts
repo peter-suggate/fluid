@@ -95,9 +95,9 @@ test("excursion is charged to the lever for travel and to anisotropy for roll", 
   assert.ok(Math.abs(pad - .05 * (.3 - .12)) < 1e-12);
 });
 
-test("the specimen-tree sway target stays subcell so live maintenance remains local", () => {
-  // This is a performance target only. The generalized updater still repairs
-  // payloads and grows topology when motion crosses this locality radius.
+test("the specimen-tree sway stays inside its render-only sparse ownership margin", () => {
+  // This is the correctness bound for keeping authored sway out of sparse
+  // maintenance. General scene motion outside it uses the keyed updater.
   const scene = getScenePreset("garden-svo-lighting").create();
   const catalog = buildEnvironmentProxyCatalog(scene, "garden");
   const build = buildSvoScenePrimitives(scene);
@@ -199,11 +199,11 @@ test("a grown tree is deterministic and hangs its whole crown off one root", () 
   assert.throws(() => treeSwayFor(first, first.parts[0], { excursion_m: 0 }), /positive/);
 });
 
-test("the renderer publishes scene motion through the exact live primitive arena", () => {
+test("the renderer keeps bounded sway out of sparse scene maintenance", () => {
   const renderer = readFileSync(new URL("../lib/webgpu-renderer.ts", import.meta.url), "utf8");
   const pipeline = readFileSync(new URL("../lib/webgpu-svo-dry-scene.ts", import.meta.url), "utf8");
 
-  assert.match(renderer, /this\.publishRenderScene\(scene, readyGPUFluid \?\? this\.gpuFluid\)/,
+  assert.match(renderer, /this\.publishRenderScene\(scene, sparseSceneProducer\)/,
     "ordinary presentation must publish the authoritative scene independently of solver identity");
   assert.match(pipeline, /publishPrimitiveArena\([^]*?packSvoPrimitiveCandidateArena\(records, candidates\)/,
     "motion must publish exact geometry and its BVH as one generation");
@@ -211,6 +211,12 @@ test("the renderer publishes scene motion through the exact live primitive arena
     "the fixed live scene arena must update without allocation or binding churn");
   assert.match(pipeline, /publishPrimitiveArena[^]*?this\.clearReusableFrame\(\);\s*this\.clearPrimaryVisibilityCache\(\);/,
     "frame and primary-visibility reuse must not survive geometry that moved");
-  assert.doesNotMatch(pipeline, /bounded motion so a re-posed surface cannot leave the cell/,
-    "the live renderer must not encode cell-local motion assumptions");
+  const animation = renderer.slice(
+    renderer.indexOf("private advanceLiveSceneAnimation"),
+    renderer.indexOf("private sparseSceneProducer"),
+  );
+  assert.doesNotMatch(animation, /stageLivePrimitiveUpdates|encodeSceneMaintenance/,
+    "sub-cell sway must not restart voxel and derived-lighting maintenance every frame");
+  assert.match(animation, /derivedLighting: "unchanged"/,
+    "the reference-pose sparse lighting generation remains reusable during bounded sway");
 });

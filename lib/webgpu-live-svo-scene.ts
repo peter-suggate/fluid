@@ -27,6 +27,11 @@ export interface LiveSvoSceneOptions {
   renderBrickSize?: 4 | 8;
   /** Additional subdivision of authored-environment bricks. */
   environmentBrickRefinementLevels?: number;
+  /**
+   * Extra octree levels for dense environment regions on a scene the solver
+   * does not own. See `OctreeSparseBrickWorld`'s option of the same name.
+   */
+  environmentRefinementDepth?: number;
   /** Experimental in-place diffuse feedback; disabled in production. */
   radianceFeedback?: boolean;
 }
@@ -104,6 +109,7 @@ export class WebGPULiveSvoScene implements GPUSolverInstance {
     this.world = new OctreeSparseBrickWorld(device, scene, dimensions, {
       brickSize: liveSvoRenderBrickSize(scene, options),
       environmentBrickRefinementLevels: options.environmentBrickRefinementLevels,
+      environmentRefinementDepth: options.environmentRefinementDepth,
       radianceFeedback: options.radianceFeedback,
       haloCells: 0,
       brickPreActivation: false,

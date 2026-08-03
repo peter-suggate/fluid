@@ -86,8 +86,12 @@ test("the direct renderer exposes a source-aware replacement texture contract", 
   const primitiveHitStart = drySceneSource.indexOf("fn primitiveHit(");
   const primitiveHitEnd = drySceneSource.indexOf("fn traceLeafPayload(", primitiveHitStart);
   const primitiveHit = drySceneSource.slice(primitiveHitStart, primitiveHitEnd);
-  assert.match(primitiveHit, /svoIntersectPrimitiveExact\(record,ro,rd,max\(tMin,1e-4\),tMax\)/,
-    "occupied SVO payload cells must use the shared five-kind analytic ray contract");
+  // The shared contract, packing included. An aggregate's parameters do not fit
+  // in its 64-byte record, so the arena block travels alongside it — and a hit
+  // that resolved the block anywhere but here would be a second definition of
+  // the surface the renderer draws.
+  assert.match(primitiveHit, /svoIntersectPrimitiveExact\(record,ro,rd,max\(tMin,1e-4\),tMax,dryClusterPacking\(record\)\)/,
+    "occupied SVO payload cells must use the shared analytic ray contract");
   assert.doesNotMatch(primitiveHit, /svoEvaluatePrimitive|svoPrimitiveDistance_m|svoEllipsoidClosestPoint_m/,
     "ray hits must not run the bounded ellipsoid closest-point distance solve to recover a normal");
   assert.match(drySceneSource, /fn nearestBodyMaskIgnoring\([^]*bodyBoundingSphereVisible\(ro,rd,body,0\.0,best\.t\)/,

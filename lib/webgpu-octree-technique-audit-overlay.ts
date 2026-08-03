@@ -9,7 +9,7 @@
 
 import { OCTREE_GENERATED_POWER_CATALOG_MANIFEST } from "./generated/octree-power-catalog";
 import type { OctreeTechniqueDebugSource } from "./octree-technique-debug";
-import { CAMERA_TAN_HALF_FOV } from "./webgpu-camera";
+import { cameraApertureShaderLibrary } from "./webgpu-camera";
 
 const auditSharedWGSL = /* wgsl */ `
 struct Uniforms {
@@ -47,7 +47,7 @@ fn cameraRay(uv:vec2f)->CameraRay {
   if(length(right)<1e-5){right=vec3f(1.0,0.0,0.0);}
   right=normalize(right);
   let up=normalize(cross(right,forward));
-  let direction=normalize(forward+right*ndc.x*u.viewport.x/max(u.viewport.y,1.0)*${CAMERA_TAN_HALF_FOV}+up*ndc.y*${CAMERA_TAN_HALF_FOV});
+  let direction=normalize(forward+right*ndc.x*u.viewport.x/max(u.viewport.y,1.0)*cameraTanHalfFov()+up*ndc.y*cameraTanHalfFov());
   return CameraRay(origin,direction);
 }
 fn boxInterval(ray:CameraRay,minimum:vec3f,maximum:vec3f)->vec2f {
@@ -114,6 +114,7 @@ struct Metric { topologyCode:u32, transformAndFlags:u32, volume:f32, reserved:u3
 struct TetraHeader { first:u32, count:u32, flags:u32 }
 struct TetraVertex { value:vec4f }
 @group(0) @binding(0) var<uniform> u:Uniforms;
+${cameraApertureShaderLibrary("u")}
 @group(0) @binding(1) var ownerRows:texture_3d<u32>;
 @group(0) @binding(2) var<storage,read> headers:array<LeafHeader>;
 @group(0) @binding(3) var<storage,read> metrics:array<Metric>;

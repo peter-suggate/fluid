@@ -1,9 +1,12 @@
 import { add, scale as scaleVec } from "./math";
-import type { Quaternion, SceneDescription, Vec3 } from "./model";
+import type { Quaternion, Vec3 } from "./model";
 import { quaternionMultiply } from "./rigid-body";
+import { growSceneryGenerator, type SceneryGeneratorRequest } from "./scenery-generators";
 import { sceneryMaximumSwayExcursion_m } from "./scenery-sway";
 import {
   isSceneryShellNode,
+  type SceneryClusterNode,
+  type SceneryGeneratorNode,
   type SceneryGraph,
   type SceneryMaterial,
   type SceneryNode,
@@ -13,6 +16,7 @@ import {
   type SceneryShellNode,
   type SceneryUnits,
 } from "./scenery-graph";
+import { validateSvoClusterPacking, type SvoSmoothUnionClusterPacking } from "./svo-primitive-abi";
 import {
   aabb,
   V,
@@ -36,7 +40,10 @@ import { terrainHeightAt } from "./terrain";
  *
  * Expansion order is document order, depth-first. That is load-bearing: owner
  * indices are the GPU material table's own addresses, so two builds of the same
- * graph must publish the same primitives in the same sequence.
+ * graph must publish the same primitives in the same sequence. A `generator`
+ * node is grown in place and its nodes visited where it stands, so the sequence
+ * is the same one a hand-spliced set produced — which is what let six baked
+ * generators become node kinds without a single owner index moving.
  */
 
 /** A node's resolved place in the world, and the units its children speak in. */
@@ -174,7 +181,83 @@ function point(frame: SceneryFrame, local: Vec3): Vec3 {
   return add(frame.origin_m, rotate(frame.orientation, scaleVec(local, frame.unit_m * frame.scale)));
 }
 
+/**
+ * Publish one node, inside its authored surface scope when it named one.
+ *
+ * The scope wraps rather than being passed because the builder's own emitters
+ * take colour and emission and not a material — see `ProxyBuilder.surface`.
+ * A node with no `surface` emits exactly as it did before this field existed,
+ * so every set that has not been migrated keeps the name-regex inference.
+ */
 function emitPrimitive(
+  builder: ProxyBuilder,
+  node: SceneryPrimitiveNode,
+  frame: SceneryFrame,
+  graph: SceneryGraph,
+): void {
+  const surface = node.material.surface;
+  if (surface) {
+    builder.surface(surface, () => emitPrimitiveGeometry(builder, node, frame, graph));
+    return;
+  }
+  emitPrimitiveGeometry(builder, node, frame, graph);
+}
+
+/**
+ * The render ABI's packing for one aggregate node, in metres.
+ *
+ * Every length scales with the object and every proportion is left alone: an
+ * aggregate at half its size wants lattice lobes half as large on a period half
+ * as fine, and the same count and arrangement of them. Control points are
+ * scaled but *not* placed — they are offsets inside the record's own frame,
+ * which the builder centres at `frame.origin_m` and rotates by
+ * `frame.orientation`, so running them through `point` would place them twice.
+ *
+ * The one validator lives in the render ABI, because every bound it enforces is
+ * a property of the march rather than of scenery. It is called here anyway, and
+ * its message re-thrown with the node's id, so an author sees which node in a
+ * four-thousand-primitive graph is the one that will not publish.
+ */
+function clusterPacking(node: SceneryClusterNode, frame: SceneryFrame, envelope_m: Vec3): SvoSmoothUnionClusterPacking {
+  const shared = { smoothRadius_m: metres(frame, node.smoothRadius), seed: node.seed };
+  const packing: SvoSmoothUnionClusterPacking = node.field === "seeded-lobes"
+    ? {
+      ...shared,
+      field: "seeded-lobes",
+      lobeCount: node.lobeCount,
+      anisotropy: node.anisotropy,
+      // Spread rather than defaulted here: an omitted placement parameter has
+      // exactly one default and it lives in the render ABI beside the field
+      // that reads it.
+      ...(node.lobeSpan === undefined ? {} : { lobeSpan: node.lobeSpan }),
+      ...(node.lobeSpanSpread === undefined ? {} : { lobeSpanSpread: node.lobeSpanSpread }),
+      ...(node.displacement === undefined ? {} : { displacement: node.displacement }),
+    }
+    : node.field === "tapered-sweep"
+      ? {
+        ...shared,
+        field: "tapered-sweep",
+        points: node.points.map((control) => ({
+          position_m: scaleVec(control.position, frame.unit_m * frame.scale),
+          radius_m: metres(frame, control.radius),
+        })),
+      }
+      : {
+        ...shared,
+        latticeLobeRadius_m: metres(frame, node.floretRadius),
+        latticePeriod_m: metres(frame, node.latticePeriod),
+        jitter: node.jitter,
+        ...(node.octaves === undefined ? {} : { octaves: node.octaves }),
+      };
+  try {
+    validateSvoClusterPacking(packing, envelope_m);
+  } catch (error) {
+    throw new RangeError(`Scenery cluster node "${node.id}": ${(error as Error).message}`);
+  }
+  return packing;
+}
+
+function emitPrimitiveGeometry(
   builder: ProxyBuilder,
   node: SceneryPrimitiveNode,
   frame: SceneryFrame,
@@ -191,7 +274,8 @@ function emitPrimitive(
       return;
     case "cylinder":
       builder.cylinder(node.id, group, centre,
-        metres(frame, node.radius), metres(frame, node.halfHeight), color, emission, tags, frame.orientation);
+        metres(frame, node.radius), metres(frame, node.halfHeight), color, emission, tags, frame.orientation,
+        node.edgeRadius === undefined ? 0 : metres(frame, node.edgeRadius));
       return;
     case "ellipsoid":
       builder.ellipsoid(node.id, group, centre,
@@ -211,8 +295,14 @@ function emitPrimitive(
     case "cone":
       builder.cone(node.id, group, centre,
         metres(frame, node.baseRadius), metres(frame, node.topRadius), metres(frame, node.halfHeight),
-        color, emission, tags, frame.orientation);
+        color, emission, tags, frame.orientation, node.roundedEnds);
       return;
+    case "cluster": {
+      const envelope_m = scaleVec(node.lobe, frame.unit_m * frame.scale);
+      builder.cluster(node.id, group, centre, envelope_m,
+        clusterPacking(node, frame, envelope_m), color, emission, tags, frame.orientation);
+      return;
+    }
     default:
       node satisfies never;
   }
@@ -347,6 +437,51 @@ function emitTree(
 }
 
 /**
+ * Grow the nodes a generator node stands for, in publication order.
+ *
+ * The two things a document cannot hold are supplied here and nowhere else.
+ *
+ * The **ground query** is the whole reason a generator is a node kind rather
+ * than a serialized function: a bonsai seats its root fingers on the heightfield
+ * and a coping is set into it, and neither can carry `(x, z) => number` in a
+ * JSON document. It resolves exactly as `childFrame`'s `anchor: "terrain"` does
+ * — the scene's own baked grid, falling back to the environment's floor datum
+ * when there is no terrain — so a generated set and an anchored node can never
+ * disagree about where the ground is.
+ *
+ * The **vessel** is resolved from the graph's own table, so a run is named
+ * rather than enumerated. `validateSceneryGraph` refuses a node naming one the
+ * graph does not declare; the throw below is for a generator that needs a vessel
+ * and was given none, which no valid document reaches.
+ *
+ * The generated nodes are visited in the generator node's own frame, so a
+ * generator with no `place` publishes exactly what the same nodes would have
+ * published spliced into the document by hand — which is what makes converting
+ * a baked set to a generator node a no-op for owner indices.
+ */
+function growGenerator(
+  node: SceneryGeneratorNode,
+  context: EnvironmentSceneryContext,
+  graph: SceneryGraph,
+): SceneryNode[] {
+  const request: SceneryGeneratorRequest = {
+    key: node.id,
+    seed: node.seed,
+    groundHeightAt: (x_m, z_m) => context.scene.terrain
+      ? terrainHeightAt(context.scene.terrain, x_m, z_m)
+      : context.floorY_m,
+    vessel: () => {
+      const spec = node.vessel === undefined ? undefined : graph.vessels?.[node.vessel];
+      if (!spec) {
+        throw new Error(`Scenery generator ${node.id} (${node.generator}) needs a vessel the graph declares`);
+      }
+      return spec;
+    },
+  };
+  return growSceneryGenerator(node.generator, node.params, request);
+}
+
+/**
  * Expand a scene's scenery graph onto the builder.
  *
  * Shell faces publish before props, exactly as the imperative modules did, so
@@ -369,6 +504,7 @@ export function expandSceneryGraph(
       if (isSceneryShellNode(node)) continue;
       const frame = childFrame(parent, node, context);
       if (node.kind === "group") { visit(node.children, frame); continue; }
+      if (node.kind === "generator") { visit(growGenerator(node, context, graph), frame); continue; }
       if (node.kind === "tree") { emitTree(builder, node, frame, context, graph); continue; }
       if (node.kind === "glazing") {
         panes.push({

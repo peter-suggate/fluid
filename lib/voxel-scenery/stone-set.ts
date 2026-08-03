@@ -1,6 +1,6 @@
-import type { Quaternion, Vec3 } from "../model";
+import type { Quaternion, RigidBodyDescription, Vec3 } from "../model";
 import { quaternionMultiply } from "../rigid-body";
-import type { SceneryMaterial, SceneryNode } from "../scenery-graph";
+import type { SceneryMaterial, SceneryNode, SceneryPlacement } from "../scenery-graph";
 import { alongAxis, V } from "./builder";
 import {
   pondVesselHeightAt,
@@ -14,11 +14,23 @@ import {
  *
  * Reference: `output/imagegen/garden-pond-hose-fill-simplified.png`. Three
  * families that look nothing alike in the frame and are one vocabulary
- * underneath — a graded ellipsoid bedded onto whatever ground it is given, with
- * the boulder adding a stem under its cap and the stepping stone trading its
- * dome for a flat tread. That is deliberate: the reference's stones read as one
- * quarry, and the cheapest way to guarantee that is for them to come out of one
- * generator. They share a file for the same reason they share a look.
+ * underneath — an irregular graded mass bedded onto whatever ground it is
+ * given, with the boulder adding a stem under its cap and the stepping stone
+ * trading its dome for a flat tread. That is deliberate: the reference's stones
+ * read as one quarry, and the cheapest way to guarantee that is for them to
+ * come out of one generator. They share a file for the same reason they share a
+ * look.
+ *
+ * **Nothing that is meant to read as rock is a bare ellipsoid.** That was the
+ * one thing this file got wrong for longest and the hardest to see from inside
+ * it: every number below spends itself on variety — size, aspect, bedding
+ * normal, grade — and all of it arrived at the eye as a tray of eggs, because
+ * an ellipsoid has no silhouette irregularity at all and no amount of authored
+ * spread can give it one. Every mass is now built by {@link stoneMass}, which is
+ * also the single seam where a better field gets swapped in. The exception is
+ * deliberate and measured: below the size at which a lumpy outline can be
+ * resolved, a marched field is cost with nothing on the other end of it, so the
+ * fine shingle stays an ellipsoid and earns its variety from aspect instead.
  *
  * **These are species, not props.** Each takes a *form* — shape only, no
  * position, no seed, no id — and a *spec* that adds where this one goes, which
@@ -106,7 +118,131 @@ function ramp(value: number): number {
 const quaternionAboutY = (angle_rad: number): Quaternion =>
   ({ w: Math.cos(0.5 * angle_rad), x: 0, y: Math.sin(0.5 * angle_rad), z: 0 });
 
-const stone = (value: number): SceneryMaterial => ({ palette: "stone", value });
+/**
+ * Every stone in the set, declared as stone.
+ *
+ * `surface` is what un-loads the naming rule this file used to carry. Before
+ * it, the closure was picked by matching a regular expression against the
+ * object's group and tags, so a boulder had to avoid a vocabulary it had no
+ * other reason to care about — the comment on `CappedBoulderForm` below is the
+ * scar. Saying `stone` here says it once, for the whole quarry.
+ */
+
+/**
+ * **The seam.** Every solid mass in this quarry — a cap, a shoulder, a cobble —
+ * is built here and nowhere else, so the whole set changes shape together.
+ *
+ * *What it is today.* A jittered sphere lattice clipped to the ellipsoid it
+ * would otherwise have been. The parameter that matters is `lobesAcross`: how
+ * many spheres of the lattice span the stone. Around seven, which is what the
+ * caps used to be authored at, the packing granulates a surface and leaves the
+ * ellipse underneath intact — and an ellipse against the sky is the one
+ * silhouette a weathered stone never has. Around three or four, each sphere is
+ * a third of the stone, the union bulges past the envelope in some directions
+ * and falls short of it in others, and what is left is lumpy rather than
+ * merely textured. That is the whole reason this file no longer publishes a
+ * bare ellipsoid for anything that is meant to read as rock.
+ *
+ * *What it will be.* An explicit set of oriented anisotropic lobes placed from
+ * the seed — `field: "seeded-lobes"` on `SceneryClusterNode` — which is a
+ * strictly better fit for a stone than a lattice, because a lattice is
+ * isotropic and periodic and a stone is neither. That field is not wired
+ * through to the shader yet. When it is, this function is the only edit: every
+ * caller hands it an envelope, a coarseness and a seed, which is exactly the
+ * vocabulary the seeded field takes.
+ *
+ * The three ratios below are the field's safety contract, discharged once here
+ * rather than trusted per call site — see {@link SVO_SMOOTH_UNION_CLUSTER_NEIGHBOURHOOD}
+ * in `lib/svo-primitive-abi.ts`, which throws on a violation.
+ */
+interface StoneMassSpec {
+  readonly id: string;
+  readonly group: string;
+  readonly tags: readonly string[];
+  /** The whole placement, so a bedded stone keeps its terrain anchor and its lie. */
+  readonly place: SceneryPlacement;
+  /** Half-axes of the envelope. The drawn solid is inside it by construction. */
+  readonly radius: Vec3;
+  /**
+   * Lattice spheres spanning the stone's mean horizontal reach.
+   *
+   * Non-positive publishes the bare ellipsoid instead, which is what the fine
+   * shingle takes: below a couple of millimetres on screen a marched field buys
+   * a silhouette nobody can resolve.
+   */
+  readonly lobesAcross: number;
+  readonly seed: number;
+  readonly material: SceneryMaterial;
+}
+
+/**
+ * Sphere radius as a fraction of the lattice period.
+ *
+ * Above `sqrt(3)/2 = 0.866` every cell corner is inside a sphere, so the mass
+ * is closed rather than a bag of separate beads. Just under one keeps the
+ * overlap small enough that the union still shows where its spheres are.
+ */
+const STONE_MASS_FLORET_SHARE = 0.98;
+/**
+ * Sphere displacement from its own cell centre, as a fraction of the period.
+ *
+ * This is the amplitude of the irregularity: a sphere wandering by `j·p` moves
+ * the surface it owns by up to `j·p·sqrt(3)`, which at the coarse periods below
+ * is a sixth of the stone. Well under the ABI's 0.3 ceiling, and under the
+ * value at which a sphere wanders far enough to open a hole in its own row.
+ */
+const STONE_MASS_JITTER = 0.16;
+/** Smooth-minimum radius, as a fraction of the sphere. Fuses the lattice without filling it. */
+const STONE_MASS_SMOOTH_SHARE = 0.30;
+
+/**
+ * The ABI's condition, evaluated at the ratios above so a violation is a
+ * compile-time-visible number rather than a runtime throw:
+ *
+ *   (2 - jitter)·period >= floretRadius + smoothRadius
+ *   (2 - 0.16)·p        >= (0.98 + 0.30·0.98)·p
+ *   1.84·p              >= 1.274·p                     ✓ 44 % margin
+ *
+ * It holds for every period because both sides are proportional to it, which is
+ * why the caller may choose `lobesAcross` freely.
+ */
+const STONE_MASS_NEIGHBOURHOOD_MARGIN =
+  (2 - STONE_MASS_JITTER) / (STONE_MASS_FLORET_SHARE * (1 + STONE_MASS_SMOOTH_SHARE));
+if (!(STONE_MASS_NEIGHBOURHOOD_MARGIN >= 1)) {
+  throw new RangeError(
+    `Stone mass ratios violate the cluster neighbourhood condition by ${(1 / STONE_MASS_NEIGHBOURHOOD_MARGIN).toFixed(3)}x`,
+  );
+}
+
+/** A cluster's seed is a u32, and a caller's may be anything an integer hash produced. */
+const seed32 = (seed: number): number => (seed >>> 0) || 1;
+
+function stoneMass(spec: StoneMassSpec): SceneryNode {
+  const { id, group, tags, place, radius, material } = spec;
+  if (!(spec.lobesAcross > 0)) {
+    return { kind: "ellipsoid", id, group, tags, place, radius, material };
+  }
+  // The mean *horizontal* reach, not the largest semi-axis. A bedded stone is
+  // flattened, and a period taken off its height would put thirty spheres
+  // across its plan; one taken off its length would put a third of a sphere
+  // through its thickness and clip the lot back to the bare ellipsoid.
+  const reach = radius.x + radius.z;
+  const latticePeriod = reach / spec.lobesAcross;
+  const floretRadius = STONE_MASS_FLORET_SHARE * latticePeriod;
+  return {
+    kind: "cluster", id, group, tags,
+    place,
+    lobe: radius,
+    floretRadius,
+    latticePeriod,
+    jitter: STONE_MASS_JITTER,
+    smoothRadius: STONE_MASS_SMOOTH_SHARE * floretRadius,
+    seed: seed32(spec.seed),
+    material,
+  };
+}
+
+const stone = (value: number): SceneryMaterial => ({ palette: "stone", value, surface: "stone" });
 
 /**
  * The palette band the whole quarry is authored in.
@@ -115,9 +251,21 @@ const stone = (value: number): SceneryMaterial => ({ palette: "stone", value });
  * it and starts reading as a different material, which is the one thing a
  * monochrome set cannot survive. Every form's values are clamped into it rather
  * than trusted, because a form is data a caller can write.
+ *
+ * The band moved up once and it is worth recording why, because the numbers
+ * below were not wrong when they were written. The hero scene used to shade
+ * every prop through a closure with its own colour grain, so an authored 0.70
+ * arrived at the eye with the grain's own highlights on top of it. It now
+ * renders every surface through a flat `plaster` closure with no grain at all
+ * and a key light raised so that white reads as white — which means the
+ * authored value *is* the albedo, and the set's old floor of 0.62 came back as
+ * a grey pebble beside a white rim. Everything here is now authored for a
+ * creamy white: the darkest thing in the quarry is a boulder's footing in its
+ * own shadow, and even that is 0.78. The ceiling stays under 1 because
+ * `canonicalSvoMaterialRecord` rejects a channel above it.
  */
-export const STONE_VALUE_MINIMUM = 0.62;
-export const STONE_VALUE_MAXIMUM = 0.92;
+export const STONE_VALUE_MINIMUM = 0.78;
+export const STONE_VALUE_MAXIMUM = 0.94;
 const value = (v: number): SceneryMaterial => stone(Math.min(STONE_VALUE_MAXIMUM, Math.max(STONE_VALUE_MINIMUM, v)));
 
 // ---------------------------------------------------------------------------
@@ -279,9 +427,11 @@ function beddedOrientation(normal: Vec3, follow: number, yaw_rad: number): Quate
  * all the way round. Get any one of those wrong and the silhouette becomes a
  * mound — which is exactly what `BOULDER_ROUNDED_COBBLE` below is.
  *
- * Nothing here may be named "mushroom": `svoMaterialFunctionIdForEnvironmentProxy`
- * tests that word on the same line as `hose` and `cloth`, so a boulder described
- * as a mushroom is shaded as an organic one.
+ * This used to carry a naming prohibition — nothing here could be called a
+ * "mushroom", because `svoMaterialFunctionIdForEnvironmentProxy` tested that
+ * word on the same line as `hose` and `cloth` and would have shaded a boulder
+ * as an organic one. The forms now declare `surface: "stone"` outright, so the
+ * word is free again and the shape can be described by what it looks like.
  */
 export interface CappedBoulderForm {
   /** Cap semi-axis on its long horizontal direction: the boulder's own scale. */
@@ -311,6 +461,23 @@ export interface CappedBoulderForm {
   /** How far the shoulder sits off the cap's axis, as a fraction of the cap radius. */
   readonly shoulderOffsetShare: number;
   /**
+   * How many lobes of the mass span the cap. See {@link StoneMassSpec}.
+   *
+   * This replaced a `capRumple` depth, and the change is not a rename. A rumple
+   * depth of a quarter of the cap put seven spheres across it, which granulated
+   * the *surface* and left the ellipse under it exactly where it was — so the
+   * stone still drew a perfect ellipse against the sky, which is precisely what
+   * the parameter was added to stop. Three or four says the same thing in the
+   * units that decide it: each lobe is a third of the stone, so the silhouette
+   * itself goes lumpy.
+   *
+   * A count rather than a length because it is a *proportion* of the stone.
+   * Weathering that stayed a fixed size would make a small cobble look like a
+   * scale model of a large one. Zero leaves the cap the smooth ellipsoid it
+   * once was, and nothing in this file asks for that any more.
+   */
+  readonly capLobesAcross: number;
+  /**
    * How far off plumb the stone is set, in radians, before the seed's own
    * scatter. Slight is the point: the reference's stones lean just enough that
    * no two verticals in a group are parallel, and a stone leaning further than
@@ -320,6 +487,40 @@ export interface CappedBoulderForm {
   /** Palette value at the cap. The stem and footing ramp down off it. */
   readonly value: number;
 }
+
+/**
+ * Four forms, because a family is proportions and not sizes.
+ *
+ * The set used to be one form at four `capRadius_m`, and the render said what
+ * that is: four photocopies at four enlargements, which the eye reads as one
+ * object repeated rather than as a group of stones. The reference's group is
+ * nothing like it — it holds a tall stone on a slim stem under a wide flat cap,
+ * a squat broad one whose cap is nearly as thick as it is wide, and a low
+ * seated cobble with barely a stem at all, and *those* differences are what
+ * make it read as a quarry. So the four below differ in every ratio that draws
+ * a silhouette: cap flattening runs 0.30 to 0.62, stem height 0.18 to 1.75 cap
+ * radii, and the overhang from a full brim to none.
+ *
+ * `capRadius_m` on a form is only its natural size; the hero set overrides it
+ * per stone. What a caller is choosing here is the *shape*.
+ */
+
+/** Tall: a slim stem under a wide flat cap, with the deepest undercut in the set. */
+export const BOULDER_TALL_PARASOL: CappedBoulderForm = Object.freeze({
+  capRadius_m: 0.085,
+  capFlatten: 0.30,
+  capDepthShare: 0.90,
+  stemTopShare: 0.40,
+  stemBaseShare: 0.54,
+  stemHeightShare: 1.75,
+  footingShare: 0.72,
+  footingHeightShare: 0.18,
+  shoulderShare: 0.58,
+  shoulderOffsetShare: 0.40,
+  capLobesAcross: 4.2,
+  lean_rad: 0.09,
+  value: 0.90,
+});
 
 /** The reference's near-left group: a flat wide cap on a short tapered stem. */
 export const BOULDER_MUSHROOM_CAP: CappedBoulderForm = Object.freeze({
@@ -333,8 +534,35 @@ export const BOULDER_MUSHROOM_CAP: CappedBoulderForm = Object.freeze({
   footingHeightShare: 0.20,
   shoulderShare: 0.72,
   shoulderOffsetShare: 0.34,
+  capLobesAcross: 3.6,
   lean_rad: 0.07,
-  value: 0.86,
+  value: 0.89,
+});
+
+/**
+ * Squat and broad: the mass in the reference's group that reads as *heavy*.
+ *
+ * Its cap is half as thick as it is wide and sits on a stem two thirds the
+ * cap's own width, so there is a lip rather than a brim and the whole stone is
+ * one boulder rather than a plate on a post. The oval plan is doing work here —
+ * a squat stone drawn on a circle is a drum — and the shoulder is the largest
+ * in the set, because at three lobes across the mass this is the individual
+ * whose silhouette is most obviously a stone.
+ */
+export const BOULDER_SQUAT_ANVIL: CappedBoulderForm = Object.freeze({
+  capRadius_m: 0.080,
+  capFlatten: 0.50,
+  capDepthShare: 0.76,
+  stemTopShare: 0.68,
+  stemBaseShare: 0.82,
+  stemHeightShare: 0.42,
+  footingShare: 0.96,
+  footingHeightShare: 0.26,
+  shoulderShare: 0.84,
+  shoulderOffsetShare: 0.46,
+  capLobesAcross: 3.0,
+  lean_rad: 0.05,
+  value: 0.88,
 });
 
 /**
@@ -347,16 +575,22 @@ export const BOULDER_MUSHROOM_CAP: CappedBoulderForm = Object.freeze({
 export const BOULDER_ROUNDED_COBBLE: CappedBoulderForm = Object.freeze({
   capRadius_m: 0.070,
   capFlatten: 0.62,
-  capDepthShare: 0.86,
+  capDepthShare: 0.82,
+  // A lip rather than a brim, and the stem still has to taper: a cobble sits on
+  // a foot wider than the waist under its own crown, like every other stone in
+  // the quarry, or the two solids meet in a re-entrant corner.
   stemTopShare: 0.86,
-  stemBaseShare: 0.78,
-  stemHeightShare: 0.22,
-  footingShare: 0.80,
+  stemBaseShare: 0.92,
+  stemHeightShare: 0.18,
+  footingShare: 0.98,
   footingHeightShare: 0.24,
-  shoulderShare: 0.74,
-  shoulderOffsetShare: 0.30,
+  shoulderShare: 0.78,
+  shoulderOffsetShare: 0.34,
+  // A cobble is a river stone, and a river stone is worn rounder than a
+  // weathered cap: fewer, larger lobes rather than none.
+  capLobesAcross: 2.8,
   lean_rad: 0.10,
-  value: 0.84,
+  value: 0.89,
 });
 
 export interface CappedBoulderSpec extends CappedBoulderForm {
@@ -412,7 +646,12 @@ export function cappedBoulderNodes(spec: CappedBoulderSpec): SceneryNode[] {
       tags: [...BOULDER_TAGS, "footing"],
       place: { position: V(0, -0.42 * footingSemiHeight, 0) },
       radius: V(footingRadius, footingSemiHeight, footingRadius * (0.86 + 0.10 * hash01(seed + 8))),
-      material: value(spec.value - 0.14 + 0.05 * hash01(seed + 9)),
+      // The ramps off the cap's value are a *shading* device — a stone is darker
+      // where it turns away from the sky — and they are a third of what they
+      // were, because the closure under them no longer adds any grain of its
+      // own. A 0.14 step used to read as one stone in two lights; on flat
+      // plaster it reads as two stones.
+      material: value(spec.value - 0.06 + 0.04 * hash01(seed + 9)),
     },
     {
       kind: "cone",
@@ -423,42 +662,46 @@ export function cappedBoulderNodes(spec: CappedBoulderSpec): SceneryNode[] {
       baseRadius: stemBase,
       topRadius: stemTop,
       halfHeight: 0.5 * stemHeight,
-      material: value(spec.value - 0.12 + 0.05 * hash01(seed + 10)),
+      material: value(spec.value - 0.045 + 0.03 * hash01(seed + 10)),
     },
-    {
-      kind: "ellipsoid",
-      id: `${key}/cap`,
-      group,
-      tags: [...BOULDER_TAGS, "cap"],
+    stoneMass({
+      id: `${key}/cap`, group, tags: [...BOULDER_TAGS, "cap"],
       place: { position: V(0, capCenterY, 0) },
       radius: V(capRadius_m, capSemiHeight, capRadius_m * spec.capDepthShare * (0.96 + 0.10 * hash01(seed + 11))),
-      material: value(spec.value - 0.02 + 0.06 * hash01(seed + 12)),
-    },
+      lobesAcross: spec.capLobesAcross,
+      seed: seed + 12,
+      material: value(spec.value - 0.01 + 0.04 * hash01(seed + 12)),
+    }),
   ];
 
   if (spec.shoulderShare > 0) {
-    children.push({
-      // Fused rather than placed — it sits well inside the cap's own surface and
-      // only shows where it pushes past it, so what the eye reads is one stone
-      // with a shoulder rather than two stones touching.
-      kind: "ellipsoid",
-      id: `${key}/cap-lobe`,
-      group,
-      tags: [...BOULDER_TAGS, "cap"],
-      place: {
-        position: V(
-          capRadius_m * spec.shoulderOffsetShare * Math.cos(shoulderAzimuth),
-          capCenterY + capSemiHeight * (0.10 * hashSigned(seed + 14)),
-          capRadius_m * spec.shoulderOffsetShare * Math.sin(shoulderAzimuth),
+    // Fused rather than placed — it sits well inside the cap's own surface and
+    // only shows where it pushes past it, so what the eye reads is one stone
+    // with a shoulder rather than two stones touching.
+    children.push(
+      stoneMass({
+        id: `${key}/cap-lobe`, group, tags: [...BOULDER_TAGS, "cap"],
+        place: {
+          position: V(
+            capRadius_m * spec.shoulderOffsetShare * Math.cos(shoulderAzimuth),
+            capCenterY + capSemiHeight * (0.10 * hashSigned(seed + 14)),
+            capRadius_m * spec.shoulderOffsetShare * Math.sin(shoulderAzimuth),
+          ),
+        },
+        radius: V(
+          capRadius_m * spec.shoulderShare * (0.94 + 0.16 * hash01(seed + 15)),
+          capSemiHeight * (0.86 + 0.14 * hash01(seed + 16)),
+          capRadius_m * spec.shoulderShare * (0.86 + 0.20 * hash01(seed + 17)),
         ),
-      },
-      radius: V(
-        capRadius_m * spec.shoulderShare * (0.94 + 0.16 * hash01(seed + 15)),
-        capSemiHeight * (0.86 + 0.14 * hash01(seed + 16)),
-        capRadius_m * spec.shoulderShare * (0.86 + 0.20 * hash01(seed + 17)),
-      ),
-      material: value(spec.value - 0.02 + 0.06 * hash01(seed + 18)),
-    });
+        // A shoulder is a smaller mass than the cap it grows out of, so the
+        // same lobe *count* would make it finer-grained than its own stone and
+        // give the join away. Scaled by the two envelopes instead, the two
+        // halves of one boulder are packed at one period.
+        lobesAcross: spec.capLobesAcross * spec.shoulderShare,
+        seed: seed + 18,
+        material: value(spec.value - 0.01 + 0.04 * hash01(seed + 18)),
+      }),
+    );
   }
 
   return [{
@@ -557,6 +800,40 @@ export interface PebbleBedForm {
   /** How far a stone leans onto the ground's own normal, and the per-stone jitter on it. */
   readonly bedTiltFollow: number;
   readonly bedNormalJitter: number;
+  /**
+   * Drawn *half-width* at or above which a stone is published as an irregular
+   * mass rather than as an ellipsoid, and how many lobes span one when it is.
+   *
+   * The half-width the stone actually ends up with — `max(semi.x, semi.z)` —
+   * and not the lane radius it was drawn from. Those differ by the aspect band,
+   * which reaches 1.58, so a floor applied to the lane radius let a dozen
+   * stones out at 30 mm wide with a bare elliptical outline while the ones
+   * beside them at 25 mm got a silhouette. The rule is about what is on screen,
+   * so it is measured on what is on screen.
+   *
+   * The line this file was told to draw, and it is a *cost* line rather than a
+   * taste one. Every stone in the reference is an irregular ovoid and none of
+   * them is a sphere, so on looks alone every stone here would be a
+   * {@link stoneMass}. But a cluster is a marched field — up to
+   * `SVO_PRIMITIVE_MARCH_ITERATIONS` field evaluations against an ellipsoid's
+   * one closed-form root — and a bed is the densest population in the scene.
+   *
+   * So the split is by *legibility*. At the hero camera the pond spans about
+   * 1.15 m across the frame, so a stone 24 mm across covers on the order of ten
+   * pixels: enough that a lumpy outline is a lumpy outline, and enough that a
+   * round one reads as a bead. Below that the silhouette is a smudge whatever
+   * shape it is, and what still reads is the stone's *aspect* — which the
+   * spreads above deliver for free. The floor therefore buys the irregularity
+   * exactly where it can be seen and pays nothing for it where it cannot.
+   *
+   * `clusterLobesAcross` is a band, not a number, because the lattice is
+   * anchored on the node's own origin: two stones at one lobe count and one
+   * envelope would carry the same arrangement of lumps, modulated only by the
+   * per-cell jitter. Drawing the count per stone re-phases the lattice against
+   * the envelope and is the cheapest decorrelation available.
+   */
+  readonly clusterFloor_m: number;
+  readonly clusterLobesAcross: readonly [number, number];
   /** Palette value band the bed's stones are drawn from. */
   readonly value: readonly [number, number];
 }
@@ -565,42 +842,70 @@ export interface PebbleBedForm {
  * The bank bed: cobbles heaped where a bed is rich, thinning to shingle where it
  * is lean. This is the form the reference's upper-left bank is made of.
  *
- * The grain is measured off the reference against the pond itself: its coping
- * spans 1.15 m across 1 630 pixels, and the cobbles beside its largest boulder
- * come out 27-44 mm across. The packing is deliberately loose for that grain, and
- * that half is not aesthetic. The lighting hierarchy binds
- * `OCTREE_LIVE_SCENE_CANDIDATES_PER_BRICK = 64` primitives per 200 mm brick and
- * silently drops the surplus, so the densest stones in a bed are the ones that
- * stop being lit — and the first version of this bed, a continuous double band at
- * a tighter packing, put more than 64 into three bricks. Stone count in a bed
- * goes as the inverse square of the spacing, so a tenth more of it is a fifth
- * fewer stones per brick at no visible cost. `tests/stone-set.test.ts` measures
- * the worst brick rather than trusting this note. See
- * `docs/SVO_FINE_VOXEL_CAPACITY.md`.
+ * **The grade is the subject.** The first version of this bed graded its mean
+ * radius 16 mm to 8.5 mm — a factor of 1.9 — and the render said what a factor
+ * of 1.9 looks like from a metre away, which is nothing: an even necklace of
+ * identical beads round the pool. The reference is not remotely that. It heaps
+ * cobbles the size of a plum against the foot of its big stones and runs out
+ * into shingle you could not pick up individually, and measured against the
+ * coping — 1.15 m across 1 630 pixels — that is 80 mm down to about 15 mm.
+ *
+ * So the mean now grades 42 mm to 14 mm across, a factor of 2.9, and the size
+ * spread inside it widens to 0.46-1.55 of that mean. Compounded with
+ * `crossGrade` running the same way outward, the *population* runs from a 6 mm
+ * flake to an 86 mm cobble: a factor of fourteen, against the four the bed used
+ * to hold. That is the whole difference between "graded" as a word in a comment
+ * and graded as something the frame shows.
+ *
+ * The packing stays deliberately loose, and that half is not aesthetic. The
+ * lighting hierarchy binds `OCTREE_LIVE_SCENE_CANDIDATES_PER_BRICK = 64`
+ * primitives per 200 mm brick and silently drops the surplus, so the densest
+ * stones in a bed are the ones that stop being lit. Coarsening the grain is the
+ * cheapest possible relief for that: stone count goes as the inverse square of
+ * the spacing, so heaping *larger* cobbles against the boulders costs fewer
+ * records than the fine ones it replaces. `tests/stone-set.test.ts` measures the
+ * worst brick rather than trusting this note. See `docs/SVO_FINE_VOXEL_CAPACITY.md`.
  */
 export const PEBBLE_GRADED_COBBLE: PebbleBedForm = Object.freeze({
-  radiusRich_m: 0.0160,
-  radiusLean_m: 0.0085,
-  sizeSpread: [0.60, 1.55] as const,
+  radiusRich_m: 0.0210,
+  radiusLean_m: 0.0072,
+  sizeSpread: [0.46, 1.55] as const,
   alongPacking: 0.80,
   acrossPacking: 0.88,
-  lengthShare: [0.94, 1.22] as const,
-  heightShare: [0.66, 1.02] as const,
-  widthShare: [0.82, 1.08] as const,
-  widthWander: 0.30,
+  // A wide *aspect* band, not just a wide size band, and much wider than it was.
+  // The reference's beds hold flat slabs lying on their side beside near-round
+  // cobbles: the length runs to half again the width and the height falls to a
+  // third of it, so a stone drawn at the ends of these bands is a flake rather
+  // than an egg. This is also what carries the fine shingle, which is below the
+  // size at which a marched silhouette is worth paying for — an ellipsoid at
+  // 0.34 height share does not read as a sphere.
+  lengthShare: [0.88, 1.58] as const,
+  heightShare: [0.34, 0.88] as const,
+  widthShare: [0.60, 1.16] as const,
+  widthWander: 0.34,
   // Coarsening *outward*, because the bank band grows away from the water: the
   // reference heaps its biggest cobbles up against the boulders and fines to
   // shingle at the shoreline, and a bed of one grain reads as gravel however
   // wide the size spread inside it is.
-  crossGrade: 1.35,
+  crossGrade: 1.34,
   sinkShare: 0.34,
   moundShare: 0.55,
   moundWidthFloor_m: 0.09,
-  edgeThinning: 0.52,
-  edgeThinningPower: 2.2,
+  // Deeper than it was but held to the last quarter of the band, and the power
+  // is the load-bearing half of that pair. The bed coarsens outward, so a
+  // thinning that bit at half width would be deleting precisely the largest
+  // cobbles it had just graded up — the first pass at these numbers did exactly
+  // that and capped the bed at 58 mm when it was authored to reach 86.
+  edgeThinning: 0.74,
+  edgeThinningPower: 2.6,
   bedTiltFollow: 0.72,
   bedNormalJitter: 0.42,
-  value: [0.70, 0.90] as const,
+  // 24 mm across is about ten pixels at the hero camera: the size at which a
+  // round outline starts reading as a bead. Three to four and a half lobes puts
+  // one lump per third of the stone.
+  clusterFloor_m: 0.012,
+  clusterLobesAcross: [3.0, 4.5] as const,
+  value: [0.82, 0.93] as const,
 });
 
 /**
@@ -608,26 +913,34 @@ export const PEBBLE_GRADED_COBBLE: PebbleBedForm = Object.freeze({
  * fining as it runs down. This is what the reference shows all the way round its
  * right and back, where the bed is one course of small stones on the rim's inner
  * slope, and what its left shore fines *to* as the shelf runs into the water.
+ *
+ * Its cluster floor is deliberately *higher* than the bank bed's, not lower.
+ * This band exists to fine out into the water, so most of it is below the size
+ * at which a marched outline earns its cost; only the few cobbles at its rich
+ * end are worth one, and they are the ones sitting where the bank bed's drift
+ * runs down to meet it.
  */
 export const PEBBLE_FINE_SHINGLE: PebbleBedForm = Object.freeze({
-  radiusRich_m: 0.0135,
-  radiusLean_m: 0.0075,
-  sizeSpread: [0.74, 1.36] as const,
+  radiusRich_m: 0.0125,
+  radiusLean_m: 0.0058,
+  sizeSpread: [0.58, 1.48] as const,
   alongPacking: 0.82,
   acrossPacking: 0.90,
-  lengthShare: [0.96, 1.26] as const,
-  heightShare: [0.62, 0.98] as const,
-  widthShare: [0.84, 1.10] as const,
-  widthWander: 0.16,
+  lengthShare: [0.92, 1.52] as const,
+  heightShare: [0.32, 0.82] as const,
+  widthShare: [0.62, 1.14] as const,
+  widthWander: 0.22,
   crossGrade: 0.62,
   sinkShare: 0.36,
   moundShare: 0.40,
   moundWidthFloor_m: 0.07,
-  edgeThinning: 0.52,
-  edgeThinningPower: 1.9,
+  edgeThinning: 0.72,
+  edgeThinningPower: 1.4,
   bedTiltFollow: 0.78,
   bedNormalJitter: 0.46,
-  value: [0.72, 0.91] as const,
+  clusterFloor_m: 0.014,
+  clusterLobesAcross: [2.8, 4.0] as const,
+  value: [0.83, 0.94] as const,
 });
 
 export interface PebbleBedSpec extends PebbleBedForm {
@@ -647,6 +960,19 @@ export interface PebbleBedSpec extends PebbleBedForm {
   readonly widthAt: (turn: number) => number;
   /** Where on the grade this part of the run sits, in [0, 1]. 1 is `radiusRich_m`. */
   readonly gradeAt?: (turn: number) => number;
+  /**
+   * Share of the candidate stones kept at a fraction of a turn, in [0, 1].
+   * Omitted keeps them all.
+   *
+   * The *other* half of "a drift", and the half a band width alone cannot say.
+   * Narrowing the band toward a drift's tail thins the bed by making it
+   * narrower, which from a raised camera reads as a bed that has been trimmed
+   * with a straightedge. A drift does not narrow, it *disperses*: the same
+   * spread of ground goes from stones resting on stones, to stones with plaster
+   * between them, to three stones and then none. This is the knob for that, and
+   * it is on the spec rather than the form because it is a property of the run.
+   */
+  readonly densityAt?: (turn: number) => number;
   /**
    * A level no stone may sit under, if this bed meets water.
    *
@@ -682,6 +1008,7 @@ export function pebbleBedNodes(spec: PebbleBedSpec): SceneryNode[] {
   const { key, rail, groundHeightAt, direction, start_m } = spec;
   if (direction !== 1 && direction !== -1) throw new RangeError("A pebble band grows outward or inward, nothing else");
   const gradeAt = spec.gradeAt ?? (() => 1);
+  const densityAt = spec.densityAt ?? (() => 1);
   const children: SceneryNode[] = [];
   const group = `${key}-stone`;
   let published = 0;
@@ -691,6 +1018,7 @@ export function pebbleBedNodes(spec: PebbleBedSpec): SceneryNode[] {
   while (arc < rail.length_m) {
     const turn = railAt(rail, arc, 0).turn;
     const grade = Math.min(1, Math.max(0, gradeAt(turn)));
+    const density = Math.min(1, Math.max(0, densityAt(turn)));
     // A little of the bed's wandering is its own rather than its run's: two slow
     // octaves keyed on the course so the width breathes along the bank.
     const noise = 0.5 + 0.5 * Math.sin(2 * Math.PI * (3.3 * turn + hash01(spec.seed)))
@@ -724,6 +1052,10 @@ export function pebbleBedNodes(spec: PebbleBedSpec): SceneryNode[] {
       );
       const sink = spec.sinkShare * semi.y;
       const edge = Math.abs(centre - start_m) / Math.max(1e-6, width);
+      // Dispersal along the run, then thinning across the band. Two independent
+      // hashes, because a stone dropped by both is a stone dropped once and the
+      // two effects have to compose rather than mask one another.
+      if (hash01(seed + 11) >= density) continue;
       if (hash01(seed + 7) < spec.edgeThinning * edge ** spec.edgeThinningPower) continue;
       if (spec.within && !spec.within(at.x, at.z)) continue;
       if (spec.avoid?.some(({ at_m, radius_m }) => Math.hypot(at.x - at_m[0], at.z - at_m[1]) < radius_m + 0.55 * radius)) continue;
@@ -736,8 +1068,7 @@ export function pebbleBedNodes(spec: PebbleBedSpec): SceneryNode[] {
       const mound = spec.moundShare * radius * Math.sin(Math.PI * Math.min(1, edge))
         * Math.min(1, Math.max(0, (width - 2.2 * meanRadius) / spec.moundWidthFloor_m));
 
-      children.push({
-        kind: "ellipsoid",
+      children.push(stoneMass({
         id: `${key}/pebble-${published}`,
         group,
         tags: PEBBLE_TAGS,
@@ -763,8 +1094,15 @@ export function pebbleBedNodes(spec: PebbleBedSpec): SceneryNode[] {
           ),
         },
         radius: semi,
+        // Tested on the stone's own drawn half-width rather than on the lane's
+        // mean, so a large stone in a fine part of the bed still gets a
+        // silhouette and a small one in a coarse part does not pay for one it
+        // cannot show.
+        lobesAcross: Math.max(semi.x, semi.z) >= spec.clusterFloor_m
+          ? band(spec.clusterLobesAcross, hash01(seed + 10)) : 0,
+        seed: seed + 12,
         material: value(band(spec.value, hash01(seed + 6))),
-      });
+      }));
       published += 1;
     }
     arc += 2 * spec.alongPacking * meanRadius;
@@ -863,7 +1201,7 @@ export const STEPPING_DISC: SteppingStoneForm = Object.freeze({
   freeboard_m: 0.011,
   emergenceShare: 0.85,
   radiusJitter: 0.03,
-  value: 0.84,
+  value: 0.89,
 });
 
 export interface SteppingStonePathSpec extends SteppingStoneForm {
@@ -911,23 +1249,39 @@ function pathPoint(points: PlanOutline, s: number): readonly [number, number] {
 }
 
 /**
- * A path of stepping stones, each set against the bed under it.
+ * One stone's solved place on the path, before anything is drawn or collided.
  *
- * This is the one species whose height is authored against the *water* rather
- * than against the ground. A stepping stone's whole subject is the constant
- * finger's breadth of freeboard it holds as the pond deepens under it — a chain
- * that instead held a constant height above the bed would climb out of the water
- * at the shore and drown at the far end, which is the opposite of the reference.
- * So the tread's top is placed on the level and the footing under it is as long
- * as the local depth demands.
- *
- * Where the bed is *above* the level the rule inverts and the stone sits on the
- * ground with its whole thickness showing, which is what the shore end of a path
- * wading in over a shelf actually looks like — and, on a scene that opens dry,
- * what most of the path looks like.
+ * Extracted so that the scenery and the solver's collider cannot disagree. A
+ * stepping stone is the one family in this file that has to exist twice —
+ * scenery is invisible to the solver, so a disc that is only scenery is a disc
+ * water flows through, which on a wading path is the one thing it must not do —
+ * and the way two representations of the same object stay in agreement is that
+ * there is only ever one solve.
  */
-export function steppingStoneNodes(spec: SteppingStonePathSpec): SceneryNode[] {
-  const { key, seed, count, groundHeightAt } = spec;
+export interface SteppingStonePlacement {
+  readonly index: number;
+  /** Plan position in world metres. */
+  readonly at_m: readonly [number, number];
+  /** Tread radius, after the per-stone jitter. */
+  readonly radius_m: number;
+  readonly yaw_rad: number;
+  readonly treadTop_m: number;
+  readonly treadBottom_m: number;
+  readonly footingBottom_m: number;
+  readonly footingTop_m: number;
+  /** Seed the drawn stone's per-part variation is taken from. */
+  readonly seed: number;
+}
+
+/**
+ * Walk the path and solve every stone against the bed and the level.
+ *
+ * The whole of the arithmetic that used to live inside the node emitter. See
+ * `steppingStoneNodes` for why the tread's *top* is what is placed and the
+ * footing under it is whatever the local depth demands.
+ */
+export function steppingStonePlacements(spec: SteppingStonePathSpec): SteppingStonePlacement[] {
+  const { seed, count, groundHeightAt } = spec;
   if (!Number.isInteger(count) || count < 1) throw new RangeError("A stepping path needs at least one stone");
   if (spec.path.length < 2) throw new RangeError("A stepping path needs at least two control points");
 
@@ -960,15 +1314,13 @@ export function steppingStoneNodes(spec: SteppingStonePathSpec): SceneryNode[] {
       * (1 - 0.5 * spec.radiusJitter + spec.radiusJitter * hash01(seed + 613 * index));
   };
 
-  const nodes: SceneryNode[] = [];
+  const placements: SteppingStonePlacement[] = [];
   let arc = 0;
   for (let index = 0; index < count; index += 1) {
     const stoneSeed = seed + 0x77_00 + 613 * index;
     const radius = radiusOf(index);
     if (index > 0) arc += radiusOf(index - 1) + radius + spec.stride_m;
     const [x, z] = pointAtArc(arc);
-    const group = `${key}-stone`;
-
     const ground = groundHeightAt(x, z);
     const level = spec.level_m ?? -Infinity;
     const treadTop = Math.max(
@@ -976,8 +1328,101 @@ export function steppingStoneNodes(spec: SteppingStonePathSpec): SceneryNode[] {
       ground + spec.emergenceShare * spec.tread_m,
     );
     const treadBottom = treadTop - spec.tread_m;
-    const footingBottom = ground - spec.bed_m;
-    const footingTop = treadBottom + 0.004;
+    placements.push({
+      index,
+      at_m: [x, z],
+      radius_m: radius,
+      yaw_rad: 2 * Math.PI * hash01(stoneSeed + 2),
+      treadTop_m: treadTop,
+      treadBottom_m: treadBottom,
+      footingBottom_m: ground - spec.bed_m,
+      footingTop_m: treadBottom + 0.004,
+      seed: stoneSeed,
+    });
+  }
+  return placements;
+}
+
+/**
+ * How far inside the drawn footing's narrowest radius the collider sits.
+ *
+ * Three per cent, which on the largest plate is 1.2 mm. Exact tangency would
+ * leave the two surfaces coincident along a whole circle, and which one a ray
+ * resolves there is a coin toss taken per pixel.
+ */
+const STEPPING_COLLIDER_INSET = 0.97;
+
+/**
+ * The collider under a stepping stone: one static cylinder, inscribed.
+ *
+ * **Why one cylinder.** The drawn stone is three primitives — a tapered footing,
+ * the tread, and a crown that softens its edge — and a rigid body is one shape.
+ * At the lattice this scene ships on, 25 mm, a 32-42 mm plate is 2.6 to 3.4
+ * cells across and the footing's taper is entirely sub-cell: the solver cannot
+ * represent the difference between the plate and its foot, so paying two of the
+ * twelve available body slots per stone to state it would buy nothing.
+ *
+ * **Why inscribed rather than circumscribed.** The scene opens dry, so the whole
+ * footing is on show, and the rigid renderer colours bodies from a hard-coded
+ * shape palette in `lib/webgpu-rigid-body.ts` — a cylinder comes out purple.
+ * A collider at the tread's own radius would therefore stand a purple collar
+ * proud of the footing on every dry frame. Taken at the narrowest the drawn
+ * solid ever gets over the height it spans — the footing's top radius, less a
+ * little — the collider is strictly inside the stone at every height, so it can
+ * never be the nearest surface and there is nothing to z-fight with. The water
+ * reaches about three millimetres nearer the disc's foot than the stone does,
+ * which is a fifth of a cell.
+ */
+export function steppingStoneBodies(spec: SteppingStonePathSpec, keyPrefix = spec.key): RigidBodyDescription[] {
+  // A stone's own material, so a body that is ever asked what it weighs answers
+  // in granite rather than in water.
+  const density_kg_m3 = 2650;
+  return steppingStonePlacements(spec).map((placement) => {
+    const radius = placement.radius_m * spec.footingTopShare * STEPPING_COLLIDER_INSET;
+    const height = Math.max(1e-4, placement.treadTop_m - placement.footingBottom_m);
+    return {
+      id: `${keyPrefix}/step-${placement.index}`,
+      name: `Stepping stone ${placement.index + 1}`,
+      shape: "cylinder" as const,
+      dimensions_m: { x: radius, y: height, z: radius },
+      density_kg_m3,
+      position_m: { x: placement.at_m[0], y: 0.5 * (placement.footingBottom_m + placement.treadTop_m), z: placement.at_m[1] },
+      orientation: quaternionAboutY(placement.yaw_rad),
+      linearVelocity_m_s: V(0, 0, 0),
+      angularVelocity_rad_s: V(0, 0, 0),
+      restitution: 0.05,
+      friction: 0.85,
+      motion: "static" as const,
+    };
+  });
+}
+
+
+
+/**
+ * A path of stepping stones, each set against the bed under it.
+ *
+ * This is the one species whose height is authored against the *water* rather
+ * than against the ground. A stepping stone's whole subject is the constant
+ * finger's breadth of freeboard it holds as the pond deepens under it — a chain
+ * that instead held a constant height above the bed would climb out of the water
+ * at the shore and drown at the far end, which is the opposite of the reference.
+ * So the tread's top is placed on the level and the footing under it is as long
+ * as the local depth demands.
+ *
+ * Where the bed is *above* the level the rule inverts and the stone sits on the
+ * ground with its whole thickness showing, which is what the shore end of a path
+ * wading in over a shelf actually looks like — and, on a scene that opens dry,
+ * what most of the path looks like.
+ */
+export function steppingStoneNodes(spec: SteppingStonePathSpec): SceneryNode[] {
+  const { key } = spec;
+  const nodes: SceneryNode[] = [];
+  for (const placement of steppingStonePlacements(spec)) {
+    const { index, radius_m: radius, seed: stoneSeed } = placement;
+    const [x, z] = placement.at_m;
+    const { treadTop_m: treadTop, treadBottom_m: treadBottom, footingBottom_m: footingBottom, footingTop_m: footingTop } = placement;
+    const group = `${key}-stone`;
 
     nodes.push({
       kind: "group",
@@ -995,7 +1440,7 @@ export function steppingStoneNodes(spec: SteppingStonePathSpec): SceneryNode[] {
       place: {
         units: "metres",
         position: V(x, 0, z),
-        orientation: quaternionAboutY(2 * Math.PI * hash01(stoneSeed + 2)),
+        orientation: quaternionAboutY(placement.yaw_rad),
       },
       children: [
         {
@@ -1010,27 +1455,34 @@ export function steppingStoneNodes(spec: SteppingStonePathSpec): SceneryNode[] {
           baseRadius: radius * spec.footingBaseShare,
           topRadius: radius * spec.footingTopShare,
           halfHeight: 0.5 * (footingTop - footingBottom),
-          material: value(spec.value - 0.16 + 0.04 * hash01(stoneSeed + 3)),
+          material: value(spec.value - 0.07 + 0.03 * hash01(stoneSeed + 3)),
         },
-        {
-          kind: "cylinder",
-          id: `${key}/step-${index}/tread`,
-          group,
-          tags: [...STEPPING_TAGS, "tread"],
-          place: { position: V(0, 0.5 * (treadBottom + treadTop), 0) },
-          radius,
-          halfHeight: 0.5 * spec.tread_m,
-          material: value(spec.value - 0.04 + 0.06 * hash01(stoneSeed + 4)),
-        },
-        {
-          kind: "ellipsoid",
-          id: `${key}/step-${index}/crown`,
-          group,
-          tags: [...STEPPING_TAGS, "crown"],
-          place: { position: V(0, treadTop, 0) },
-          radius: V(radius, radius * spec.dome, radius * (0.97 + 0.05 * hash01(stoneSeed + 5))),
-          material: value(spec.value - 0.02 + 0.06 * hash01(stoneSeed + 6)),
-        },
+        (() => {
+          // This used to be a cylinder with a paper-thin ellipsoid intersecting
+          // its top plane. At the hero camera the crown's entire upward-to-side
+          // normal transition occupied about one pixel, so sampling turned its
+          // dark grazing band into a broken ring of dots. One rounded-cylinder
+          // SDF has a single zero set and a fillet large enough to resolve; its
+          // bottom and crown apex remain exactly where the old pair put them.
+          const crownRise = radius * spec.dome;
+          const top = treadTop + crownRise;
+          const halfHeight = 0.5 * (top - treadBottom);
+          const edgeRadius = Math.min(
+            0.48 * halfHeight,
+            Math.max(crownRise, radius * 0.12),
+          );
+          return {
+            kind: "cylinder" as const,
+            id: `${key}/step-${index}/tread`,
+            group,
+            tags: [...STEPPING_TAGS, "tread", "crown"],
+            place: { position: V(0, 0.5 * (treadBottom + top), 0) },
+            radius,
+            halfHeight,
+            edgeRadius,
+            material: value(spec.value - 0.015 + 0.04 * hash01(stoneSeed + 4)),
+          };
+        })(),
       ],
     });
   }
@@ -1103,8 +1555,17 @@ function vesselGround(spec: StoneSetSpec): GroundHeightAt {
  * width and it sits **behind the near coping**, up and to the left, with all four
  * reading as one small family rather than as foreground objects. So the group
  * lives on the far half of the left bank, where the camera is a metre away
- * instead of half of one, and the caps grade 2.4 : 1 across it — the receding
+ * instead of half of one, and the caps grade 2.7 : 1 across it — the receding
  * line the reference draws, rather than a row.
+ *
+ * The third mistake is the one this table now carries the fix for, and it is not
+ * about *where*. All four used to be `BOULDER_MUSHROOM_CAP` at four radii and
+ * four even steps of the rail, and both halves of that were wrong. Four
+ * enlargements of one drawing read as one object repeated, whatever their sizes;
+ * and four even steps read as a fence, because a group of stones the eye
+ * accepts as *placed* has no interval in it that repeats. So each row now names
+ * its own form, and the turns are 0.030, 0.038 and 0.062 apart — a close pair,
+ * a third leaning in, and the small one set out on its own.
  */
 interface BoulderPlacement {
   /** Fraction of a turn round the rail. */
@@ -1113,13 +1574,23 @@ interface BoulderPlacement {
   readonly offset_m: number;
   /** Cap semi-axis on its long horizontal direction: the boulder's scale. */
   readonly capRadius_m: number;
+  /** Which stone this is. The whole point of the family: they are not one shape. */
+  readonly form: CappedBoulderForm;
 }
 
 const HERO_BOULDERS: readonly BoulderPlacement[] = Object.freeze([
-  { turn: 0.702, offset_m: 0.142, capRadius_m: 0.080 },
-  { turn: 0.656, offset_m: 0.146, capRadius_m: 0.060 },
-  { turn: 0.612, offset_m: 0.150, capRadius_m: 0.044 },
-  { turn: 0.570, offset_m: 0.150, capRadius_m: 0.033 },
+  // The anchor: broad, heavy, seated, and the nearest of the four to the rim so
+  // it reads in front of the rest.
+  { turn: 0.688, offset_m: 0.126, capRadius_m: 0.082, form: BOULDER_SQUAT_ANVIL },
+  // Its partner, half a cap away and standing more than twice as tall on a stem
+  // two fifths the width of what it carries. This is the reference's parasol,
+  // and the pair is what makes the group a group.
+  { turn: 0.658, offset_m: 0.168, capRadius_m: 0.068, form: BOULDER_TALL_PARASOL },
+  // The third leans back into the pair rather than continuing the line.
+  { turn: 0.620, offset_m: 0.132, capRadius_m: 0.047, form: BOULDER_MUSHROOM_CAP },
+  // Small and low, set out along the bank on its own: the thing that stops the
+  // group reading as a wall.
+  { turn: 0.558, offset_m: 0.152, capRadius_m: 0.030, form: BOULDER_ROUNDED_COBBLE },
 ]);
 
 /**
@@ -1154,37 +1625,59 @@ const onPlaster = (x: number, z: number): boolean =>
  * hierarchy binds 64 primitives per 200 mm brick and drops the rest silently, and
  * a continuous double band put more than that into three bricks. Clusters plus
  * the coarser grain halve the set.
+ *
+ * **A drift, not a band with a taper.** The first version of this table gave
+ * each place one `grade`, so the grain inside a drift was *constant* — the
+ * weighted average of a single contributing entry is that entry, whatever
+ * weight it has — and only the band's width faded. What the render showed was
+ * exactly what that describes: a necklace of identically sized stones round a
+ * pool, narrowing at the ends. The reference's drifts do the opposite of that.
+ * They heap their largest cobbles hard against the foot of the big stones and
+ * then run *out*, coarse to fine and dense to sparse over the same stretch of
+ * ground, with the band still a hand's breadth wide where the last three stones
+ * are. So a place now carries both ends of both ramps, and the drift's own
+ * weight interpolates them.
  */
-interface PebbleCluster {
-  /** Middle of the cluster, as a rail turn. */
+interface PebbleDrift {
+  /** Middle of the drift, as a rail turn. */
   readonly turn: number;
   /** Half its run in turns. The bed fades to nothing over the outer part of it. */
   readonly halfLength: number;
   /** Widest the bank band gets here, in plan metres. Zero leaves the outside bare. */
   readonly bankWidth_m: number;
-  /** Where on the grade this cluster sits, in [0, 1]. 1 is the coarsest cobble. */
+  /** Grade at the drift's heart and where it fades out, in [0, 1]. 1 is the coarsest cobble. */
   readonly grade: number;
+  readonly gradeTail: number;
+  /** Share of the candidate stones kept, at the heart and at the tail. */
+  readonly density: number;
+  readonly densityTail: number;
   /** Whether the water's-edge course runs here too. */
   readonly shore: boolean;
 }
 
-const HERO_PEBBLE_CLUSTERS: readonly PebbleCluster[] = Object.freeze([
-  // The dense bed under the boulders, running down over the beach into the
-  // water. The reference's one large bed, and the only place both bands meet.
-  { turn: 0.560, halfLength: 0.150, bankWidth_m: 0.120, grade: 1.00, shore: true },
+const HERO_PEBBLE_DRIFTS: readonly PebbleDrift[] = Object.freeze([
+  // The heap at the boulders' feet. Its heart is at the middle of the family
+  // rather than beside it — the whole subject of the reference's main bed is
+  // that the biggest cobbles are the ones wedged against the biggest stones —
+  // and it runs out both ways to a quarter of the grain and a third of the
+  // stones. It is the widest band in the set and the only one that reaches the
+  // full 42 mm mean.
+  { turn: 0.640, halfLength: 0.108, bankWidth_m: 0.150, grade: 1.00, gradeTail: 0.30, density: 1.00, densityTail: 0.30, shore: false },
+  // The beach: where the shelf runs down into the water, and the only place
+  // both bands meet. Fine from the start and finer as it goes, because this is
+  // the end of the drift above rather than a bed of its own.
+  { turn: 0.494, halfLength: 0.098, bankWidth_m: 0.072, grade: 0.50, gradeTail: 0.10, density: 0.92, densityTail: 0.26, shore: true },
   // The course along the right-hand rim, where the tree's terrace comes down to
-  // the coping. Narrow, and the one the reference runs *inside* the rim.
-  { turn: 0.080, halfLength: 0.095, bankWidth_m: 0.062, grade: 0.45, shore: true },
+  // the coping. Narrow, fine, and the one the reference runs *inside* the rim.
+  { turn: 0.080, halfLength: 0.086, bankWidth_m: 0.050, grade: 0.24, gradeTail: 0.05, density: 0.84, densityTail: 0.20, shore: true },
   // The loose scatter outside the coping at the near right: a dozen stones, no
-  // bed under them, which is what a bank width of one cobble produces.
-  { turn: 0.230, halfLength: 0.062, bankWidth_m: 0.038, grade: 0.30, shore: false },
-  // Two or three singles at the near left, and nothing else on that whole run.
-  { turn: 0.395, halfLength: 0.038, bankWidth_m: 0.028, grade: 0.25, shore: false },
+  // bed under them, which is what a narrow band at half density produces.
+  { turn: 0.230, halfLength: 0.056, bankWidth_m: 0.034, grade: 0.15, gradeTail: 0.02, density: 0.52, densityTail: 0.14, shore: false },
 ]);
 
-/** How much of a cluster's run is full width before it fades out. */
-function clusterWeight(cluster: PebbleCluster, turn: number): number {
-  return ramp(1 - turnDelta(turn, cluster.turn) / cluster.halfLength);
+/** How much of a drift's run is full width before it fades out. */
+function driftWeight(drift: PebbleDrift, turn: number): number {
+  return ramp(1 - turnDelta(turn, drift.turn) / drift.halfLength);
 }
 
 /**
@@ -1307,7 +1800,7 @@ export function stoneSetBoulderNodes(spec: StoneSetSpec): SceneryNode[] {
     const at = railTurnAt(rail, placement.turn, placement.offset_m);
     if (groundHeightAt(at.x, at.z) <= spec.waterline_m) continue;
     nodes.push(...cappedBoulderNodes({
-      ...BOULDER_MUSHROOM_CAP,
+      ...placement.form,
       capRadius_m: placement.capRadius_m,
       key: `${key}/boulder-${index}`,
       at_m: [at.x, at.z],
@@ -1334,22 +1827,33 @@ export function stoneSetPebbleNodes(spec: StoneSetSpec): SceneryNode[] {
   const avoid = boulderFootprints(spec, rail);
 
   const bankWidthAt = (turn: number): number =>
-    HERO_PEBBLE_CLUSTERS.reduce((widest, cluster) =>
-      Math.max(widest, cluster.bankWidth_m * clusterWeight(cluster, turn)), 0);
+    HERO_PEBBLE_DRIFTS.reduce((widest, drift) =>
+      Math.max(widest, drift.bankWidth_m * driftWeight(drift, turn)), 0);
   const shoreWeightAt = (turn: number): number =>
-    HERO_PEBBLE_CLUSTERS.reduce((most, cluster) =>
-      Math.max(most, cluster.shore ? clusterWeight(cluster, turn) : 0), 0);
-  // The grade is the clusters' own, weighted by how much of each is here, so a
+    HERO_PEBBLE_DRIFTS.reduce((most, drift) =>
+      Math.max(most, drift.shore ? driftWeight(drift, turn) : 0), 0);
+  // The grade a drift is at *here*, ramped between its heart and its tail by its
+  // own weight, and then averaged over the drifts that reach this turn so a
   // stone in the overlap between two of them is graded between the two rather
-  // than jumping at the join.
+  // than jumping at the join. The inner ramp is the whole fix: without it the
+  // average of one contributing drift is that drift's own number, so every bed
+  // came out at one grain.
   const gradeAt = (turn: number): number => {
     let weight = 0, graded = 0;
-    for (const cluster of HERO_PEBBLE_CLUSTERS) {
-      const w = clusterWeight(cluster, turn);
-      weight += w; graded += w * cluster.grade;
+    for (const drift of HERO_PEBBLE_DRIFTS) {
+      const w = driftWeight(drift, turn);
+      weight += w; graded += w * (drift.gradeTail + (drift.grade - drift.gradeTail) * w);
     }
     return weight > 0 ? graded / weight : 0;
   };
+  // Density takes the *densest* drift rather than the average, to match the way
+  // the band width is resolved: where two drifts overlap the bed is the union of
+  // them, so it cannot be sparser than either.
+  const densityAt = (turn: number): number =>
+    HERO_PEBBLE_DRIFTS.reduce((most, drift) => {
+      const w = driftWeight(drift, turn);
+      return Math.max(most, drift.densityTail + (drift.density - drift.densityTail) * w);
+    }, 0);
 
   return [
     ...pebbleBedNodes({
@@ -1362,6 +1866,7 @@ export function stoneSetPebbleNodes(spec: StoneSetSpec): SceneryNode[] {
       direction: 1,
       widthAt: bankWidthAt,
       gradeAt,
+      densityAt,
       level_m: spec.waterline_m,
       avoid,
       within: onPlaster,
@@ -1380,6 +1885,7 @@ export function stoneSetPebbleNodes(spec: StoneSetSpec): SceneryNode[] {
       widthAt: (turn) => shoreWeightAt(turn)
         * (HERO_SHORE_WIDTH_FLOOR_M + HERO_SHORE_RUN_SHARE * beachRunAt(spec, rail, turn)),
       gradeAt,
+      densityAt,
       level_m: spec.waterline_m,
       avoid,
       within: onPlaster,
@@ -1387,8 +1893,15 @@ export function stoneSetPebbleNodes(spec: StoneSetSpec): SceneryNode[] {
   ];
 }
 
-/** The five plates, wading in along a contour of the shore. */
-export function stoneSetSteppingNodes(spec: StoneSetSpec): SceneryNode[] {
+/**
+ * The wading path's spec, solved against the shore once.
+ *
+ * Both the drawn plates and the colliders under them come from here, so a
+ * control point moving in the vessel moves the stone and the volume of water it
+ * displaces together. Two independent solves of the same contour is exactly the
+ * drift the whole file is arranged to prevent.
+ */
+function heroSteppingPath(spec: StoneSetSpec): SteppingStonePathSpec {
   const key = spec.key ?? "stone";
   const rail = planRail(pondVesselPlanCurve(spec.vessel));
   const groundHeightAt = vesselGround(spec);
@@ -1400,7 +1913,7 @@ export function stoneSetSteppingNodes(spec: StoneSetSpec): SceneryNode[] {
   // the clamp has to hold for the interpolated positions too, not just for the
   // ones solved here.
   const minimumRun = 1.30 * spec.vessel.rimHalfWidth_m + HERO_STEP_RADIUS_SHORE_M + 0.012;
-  return steppingStoneNodes({
+  return {
     ...STEPPING_DISC,
     key: `${key}/path`,
     seed: spec.seed,
@@ -1415,7 +1928,23 @@ export function stoneSetSteppingNodes(spec: StoneSetSpec): SceneryNode[] {
     stride_m: HERO_STEP_STRIDE_M,
     groundHeightAt,
     level_m: spec.waterline_m,
-  });
+  };
+}
+
+/** The five plates, wading in along a contour of the shore. */
+export function stoneSetSteppingNodes(spec: StoneSetSpec): SceneryNode[] {
+  return steppingStoneNodes(heroSteppingPath(spec));
+}
+
+/**
+ * The same five plates as solid bodies the water has to part around.
+ *
+ * Scenery has no solver term, so without these the disc path is a picture the
+ * jet pours straight through — which on the one family whose whole subject is
+ * standing in water is the difference between a pond and a photograph of one.
+ */
+export function stoneSetSteppingBodies(spec: StoneSetSpec): RigidBodyDescription[] {
+  return steppingStoneBodies(heroSteppingPath(spec));
 }
 
 /**
@@ -1427,4 +1956,85 @@ export function stoneSetSteppingNodes(spec: StoneSetSpec): SceneryNode[] {
  */
 export function stoneSet(spec: StoneSetSpec): SceneryNode[] {
   return [...stoneSetBoulderNodes(spec), ...stoneSetPebbleNodes(spec), ...stoneSetSteppingNodes(spec)];
+}
+
+// ---------------------------------------------------------------------------
+// What the set looks like from outside it
+// ---------------------------------------------------------------------------
+
+/**
+ * Where one point-placed stone actually stands, for anything that has to lay
+ * out *around* the set rather than inside it.
+ *
+ * Measured off the nodes the generator emits rather than re-derived beside
+ * them, because a second derivation is a second answer. `hero-layout.ts` kept
+ * one of those: four boulder rows and five disc rows in authored world metres,
+ * written against an older pond and then left behind by it — by the time this
+ * was added the boulder rows were on the wrong side of the water and a disc row
+ * failed its own clearance assertion while the stone it claimed to describe was
+ * comfortably clear. A composition that cannot see the set cannot lay anything
+ * out around it, and a composition that sees a stale copy is worse than one
+ * that sees nothing.
+ */
+export interface StoneStation {
+  /** The node id this describes. */
+  readonly key: string;
+  /** Plan position in world metres: the stone's own anchor. */
+  readonly at_m: readonly [number, number];
+  /** Widest full plan extent, and full vertical extent. */
+  readonly width_m: number;
+  readonly height_m: number;
+  /** Lowest point, in the frame the stone's own group is placed in. */
+  readonly base_m: number;
+}
+
+/** Half-extents of one primitive in its own local frame. A cluster is its envelope. */
+function primitiveHalfExtent(node: SceneryNode): Vec3 | undefined {
+  switch (node.kind) {
+    case "ellipsoid": return node.radius;
+    case "cluster": return node.lobe;
+    case "cylinder": return V(node.radius, node.halfHeight, node.radius);
+    case "cone": return V(Math.max(node.baseRadius, node.topRadius), node.halfHeight, Math.max(node.baseRadius, node.topRadius));
+    default: return undefined;
+  }
+}
+
+/**
+ * One published stone, reduced to the box a layout needs.
+ *
+ * The group's own orientation is deliberately *not* applied. A boulder's tilt is
+ * a few degrees and rotating each part's box by it would inflate the envelope by
+ * more than the lean actually moves anything, which for a composition — whose
+ * whole use of this is "what else fits beside it" — is the wrong error to make.
+ */
+function stationOf(node: SceneryNode): StoneStation {
+  if (node.kind !== "group") throw new TypeError(`${node.id} is not a placed stone`);
+  const at = node.place?.position ?? V(0, 0, 0);
+  let width = 0, low = Infinity, high = -Infinity;
+  for (const child of node.children) {
+    const half = primitiveHalfExtent(child);
+    if (!half) continue;
+    const centre = child.place?.position ?? V(0, 0, 0);
+    width = Math.max(width, 2 * (Math.abs(centre.x) + half.x), 2 * (Math.abs(centre.z) + half.z));
+    low = Math.min(low, centre.y - half.y);
+    high = Math.max(high, centre.y + half.y);
+  }
+  return { key: node.id, at_m: [at.x, at.z], width_m: width, height_m: high - low, base_m: low };
+}
+
+/** The boulder family, as the boxes a composition has to keep clear of. */
+export function stoneSetBoulderStations(spec: StoneSetSpec): StoneStation[] {
+  return stoneSetBoulderNodes(spec).map(stationOf);
+}
+
+/**
+ * The wading path, as the boxes a composition has to keep clear of.
+ *
+ * `base_m` is a *world* height here and a seat-relative one for a boulder, and
+ * that asymmetry is the species' rather than an oversight: a stepping stone is
+ * the one family authored against the water instead of against the ground, so
+ * its parts carry absolute heights and its group carries none.
+ */
+export function stoneSetSteppingStations(spec: StoneSetSpec): StoneStation[] {
+  return stoneSetSteppingNodes(spec).map(stationOf);
 }

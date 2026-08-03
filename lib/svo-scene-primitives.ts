@@ -5,6 +5,7 @@ import {
   packSvoPrimitiveRecords,
   type SvoFinitePrimitiveDescriptor,
   type SvoPrimitiveDescriptor,
+  type SvoSmoothUnionClusterPacking,
 } from "./svo-primitive-abi";
 import {
   buildSvoPrimitiveCandidates,
@@ -25,6 +26,11 @@ import {
 } from "./voxel-environments";
 import { VOXEL_MATERIAL_IDS } from "./voxel-scene";
 import { ENVIRONMENT_VOXEL_MATERIAL_BASE } from "./webgpu-octree-sparse-bricks";
+// The arena layout an aggregate's word-13 reference points into. Imported
+// rather than restated because a reference that does not name the region the
+// renderer uploads resolves to nothing, and a cluster that resolves to nothing
+// draws nothing — with no error anywhere.
+import { packSvoDrySceneClusters, svoDrySceneClusterReference } from "./webgpu-svo-dry-scene";
 
 /** Defensive ceiling: current authored catalogs contain fewer than 64 entries. */
 export const SVO_SCENE_DEFAULT_MAXIMUM_PRIMITIVES = 4_096;
@@ -88,6 +94,10 @@ export interface SvoScenePrimitiveBuild {
   environmentId: EnvironmentId;
   descriptors: readonly SvoPrimitiveDescriptor[];
   packedRecords: Uint32Array<ArrayBuffer>;
+  /** Aggregate packings in publication order; index `i` is reference `i`. */
+  clusterPackings: readonly SvoSmoothUnionClusterPacking[];
+  /** The same, packed for the scene arena's cluster region. Absent means no aggregates. */
+  clusterBlocks?: Uint32Array<ArrayBuffer>;
   /** @deprecated Offline audit index; the renderer always uses SVO payload traversal. */
   primitiveCandidates?: SvoPrimitiveCandidatePublication;
   metadata: readonly SvoEnvironmentPrimitiveMetadata[];
@@ -155,6 +165,7 @@ export function svoDescriptorForEnvironmentProxy(
 function descriptorForProxy(
   scene: Pick<SceneDescription, "rigidBodies">,
   primitive: EnvironmentProxyPrimitive,
+  clusterIndex = 0,
 ): SvoPrimitiveDescriptor {
   const identity = environmentIdentity(scene, primitive);
   // Primitive ID follows the scene-global owner ID. It is stable for the same
@@ -172,7 +183,9 @@ function descriptorForProxy(
     return { ...base, kind: "box", halfExtents_m: { ...primitive.halfSize_m } };
   }
   if (primitive.kind === "cylinder") {
-    return { ...base, kind: "cylinder", radius_m: primitive.radius_m, halfHeight_m: primitive.halfHeight_m };
+    return primitive.edgeRadius_m && primitive.edgeRadius_m > 0
+      ? { ...base, kind: "rounded-cylinder", radius_m: primitive.radius_m, halfHeight_m: primitive.halfHeight_m, edgeRadius_m: primitive.edgeRadius_m }
+      : { ...base, kind: "cylinder", radius_m: primitive.radius_m, halfHeight_m: primitive.halfHeight_m };
   }
   if (primitive.kind === "capsule") {
     return { ...base, kind: "capsule", radius_m: primitive.radius_m, segmentHalfLength_m: primitive.halfLength_m };
@@ -182,8 +195,20 @@ function descriptorForProxy(
   }
   if (primitive.kind === "cone") {
     return {
-      ...base, kind: "cone",
+      ...base, kind: primitive.roundedEnds ? "round-cone" : "cone",
       baseRadius_m: primitive.baseRadius_m, topRadius_m: primitive.topRadius_m, halfHeight_m: primitive.halfHeight_m,
+    };
+  }
+  if (primitive.kind === "cluster") {
+    // Both halves: the packing travels on the descriptor so a caller holding
+    // only this — the editor's picker does — can evaluate the exact surface the
+    // renderer draws, and the reference names where the same numbers live in
+    // the scene arena for the shader that has no descriptor at all.
+    return {
+      ...base, kind: "smooth-union-cluster",
+      lobeRadii_m: { ...primitive.radius_m },
+      clusterReference: svoDrySceneClusterReference(clusterIndex),
+      packing: primitive.packing,
     };
   }
   return { ...base, kind: "ellipsoid", radii_m: { ...primitive.radius_m } };
@@ -262,6 +287,10 @@ export function svoScenePrimitivesFromEnvironmentCatalog(
   const metadata: SvoEnvironmentPrimitiveMetadata[] = [];
   const primitiveIndexByOwnerId = new Map<number, number>();
   const primitiveIndexByMaterialId = new Map<number, number>();
+  // Publication order, which is what makes block `i` the one reference `i`
+  // names. Expansion is depth-first in document order, so two builds of the
+  // same graph assign the same references.
+  const clusterPackings: SvoSmoothUnionClusterPacking[] = [];
   let openShellOwnerId: number | undefined;
 
   for (const primitive of primitives) {
@@ -273,7 +302,9 @@ export function svoScenePrimitivesFromEnvironmentCatalog(
     if (openShell && openShellOwnerId !== undefined) throw new Error("Environment catalog contains multiple front/open shell owners");
     if (openShell) openShellOwnerId = ownerId;
 
-    descriptors.push(descriptorForProxy(scene, primitive));
+    const descriptor = descriptorForProxy(scene, primitive, clusterPackings.length);
+    if (descriptor.kind === "smooth-union-cluster" && descriptor.packing) clusterPackings.push(descriptor.packing);
+    descriptors.push(descriptor);
     metadata.push({
       primitiveIndex,
       environmentOwnerIndex: primitive.ownerIndex,
@@ -308,6 +339,8 @@ export function svoScenePrimitivesFromEnvironmentCatalog(
     environmentId: catalog.environmentId,
     descriptors,
     packedRecords,
+    clusterPackings,
+    clusterBlocks: clusterPackings.length > 0 ? packSvoDrySceneClusters(clusterPackings) : undefined,
     primitiveCandidates,
     metadata,
     primitiveIndexByOwnerId,

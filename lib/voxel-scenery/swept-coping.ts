@@ -1,3 +1,4 @@
+import type { Vec3 } from "../model";
 import type { SceneryMaterial, SceneryNode } from "../scenery-graph";
 import { alongAxis, V } from "./builder";
 
@@ -63,17 +64,14 @@ import { alongAxis, V } from "./builder";
  *
  * ## Records
  *
- * A truncated cone per rail segment, plus a sphere at every rail node. The cone
- * chain is what carries a section that swells and narrows along the run — a
- * capsule chain cannot, because a capsule has one radius, and neighbouring
- * capsules of different radii leave a step at every joint. The sphere is the
- * bonsai's trick and it is needed for the same reason: two cones meeting at an
- * angle leave a wedge open on the outside of the bend, `radius * tan(bend / 2)`
- * deep, and a sphere of the node's own radius closes it exactly.
- *
- * So two records per rail segment — and **the rail's resolution is set by the
- * shading, not by the outline**, which is the one thing about this construction
- * that is not obvious and cost three renders to establish.
+ * The rail is emitted as a chain of round-cone SDFs: the exact convex hull of
+ * the endpoint spheres. Unlike a capsule, each segment preserves both authored
+ * radii; unlike a truncated cone, its ends are spherical parts of the same SDF
+ * rather than planar caps that separate geometry is expected to hide. That is
+ * load-bearing in an SVO. A voxel stores one primitive owner, so the old
+ * endpoint sphere could not reliably hide an overlapping cone cap; whichever
+ * owner won the cell was the only primitive the ray tested. Buried cap normals
+ * consequently leaked through as dark one-pixel dots along the coping.
  *
  * The outline is settled long before the highlight is. A chord's departure from
  * the plan is `c^2 / 8R`, which on this pond is 0.18 mm at the plan curve's own
@@ -84,32 +82,24 @@ import { alongAxis, V } from "./builder";
  * modulation: turning every modulation off leaves an identically banded uniform
  * tube. Measured, on the hero rim at 0.15 m:
  *
- *   112 segments   3.2 deg/joint    224 records   banded, obviously
- *   336 segments   1.1 deg/joint    672 records   clean
- *   448 segments   0.8 deg/joint    896 records   clean
+ *   112 segments   3.2 deg/joint    112 records   banded, obviously
+ *   336 segments   1.1 deg/joint    336 records   clean
+ *   448 segments   0.8 deg/joint    448 records   clean
  *
- * So a convincing rim on this pond is about 672 records, against
- * `SVO_PRIMITIVE_CANDIDATE_MAXIMUM_LEAVES = 4096` shared by the whole frame, of
- * which the hero set already spends about 1500. That is affordable exactly once.
- * A second rim, or a stream bank, or a set of path edgings, is not — and the
- * reason is structural rather than budgetary: the catalog has no smooth union,
- * so C1 has to be bought with resolution. A marched swept-arc SDF would buy it
- * with one record per arc instead. See the recommendation this module was
- * written to support.
- *
- * The other cost of the joints is a firefly. Isolated bright pixels, presumably
- * rays resolving on a tangency circle, run at 0.03 % of the frame on the swept
- * rim against 0.002 % on the heightfield one, and the count scales with the
- * joint count. At 900 x 520 that is about 160 pixels.
+ * So a convincing rim on this pond is about 336 records. The round-cone halves
+ * the old cone-plus-sphere record cost, but C1 round-a-curve still has to be
+ * bought with rail resolution because the ABI has no multi-segment swept-arc
+ * field. A future marched sweep SDF can replace this emitter without changing
+ * `sweptCopingStations`, which is why the form and record layers are separate.
  *
  * The remaining constraint is density, not total.
  * `OCTREE_LIVE_SCENE_CANDIDATES_PER_BRICK` is 64 primitives per brick and the
  * rest of a crowded brick is dropped from the voxelized occupancy — not from
  * primary visibility, which is a BVH over the records — so an overflowing brick
- * loses shadowing and ambient occlusion rather than silhouette. Measured, the
- * 224-record rim adds fourteen occupied bricks to the hero scene and moves its
- * busiest brick not at all: that brick is a pebble bed at 218, and the scene
- * overflows in five bricks with or without a coping.
+ * loses shadowing and ambient occlusion rather than silhouette. The coping is
+ * therefore kept as one record per rail segment; reintroducing endpoint helper
+ * primitives would spend this local density budget as well as reviving the
+ * single-owner overlap ambiguity fixed here.
  */
 
 /** Shape only: the species, with no rail, no ground and no seed. */
@@ -211,9 +201,12 @@ export interface SweptCopingSpec extends SweptCopingForm {
    */
   readonly groundHeightAt: (x_m: number, z_m: number) => number;
   /**
-   * The selectable object, and — because the regex is load-bearing — the surface
-   * closure. `svoMaterialFunctionIdForEnvironmentProxy` matches `coping` onto
-   * the `stone` procedural material, so renaming this restyles the rim.
+   * The selectable object.
+   *
+   * It used to pick the surface closure as well: the name was matched against
+   * a regular expression, `coping` landed on the `stone` procedural material,
+   * and renaming the group restyled the rim. `material.surface` says it
+   * directly now, so this is a name again.
    */
   readonly group?: string;
   readonly material: SceneryMaterial;
@@ -273,16 +266,45 @@ export function sweptCopingSection(form: Pick<SweptCopingForm, "crestHeight_m" |
 }
 
 /**
- * Grow one coping along a rail.
+ * One station on the rail: where the section's centre sits and how wide it is.
  *
- * The rail is resampled by `segmentStride`, the section is evaluated at each
- * surviving node, and the run is emitted as a cone chain with a sphere at every
- * node. Every node's ground is queried where that node is, so a rim over
- * lumpy plaster follows the lumps rather than floating over them — which is
- * also why the crest is authored *above the ground* and not as a world height.
+ * The whole of a coping's *shape* is this list. Everything below it is a choice
+ * about which records express that shape, and the two are deliberately not the
+ * same decision — the emitter has already been a truncated-cone chain, a
+ * tapered-sweep cluster and a capsule chain while the centreline underneath
+ * stayed the same numbers.
  */
-export function sweptCopingNodes(spec: SweptCopingSpec): SceneryNode[] {
-  const { rail, key, seed, relief_m } = spec;
+export interface SweptCopingStation {
+  /** Centre of the circular section, in world metres. */
+  readonly at: Vec3;
+  /** Section radius there. */
+  readonly radius: number;
+  /** Fraction of a turn round the rail, so a caller can stay in step with the run. */
+  readonly turn: number;
+}
+
+/**
+ * The centreline and radius profile: a coping's shape, before anything decides
+ * how to draw it.
+ *
+ * ### The seam
+ *
+ * This is the half of the generator that is geometry. `sweptCopingNodes` is the
+ * half that is records, and it may be replaced wholesale — by a tapered sweep
+ * along a control polyline as a single SDF record, which is what this run wants
+ * and what would retire the chain — without a line of this function moving.
+ * Anything that needs a coping's *form* rather than its primitives (a pebble
+ * course banking against its foot, a test asserting the crest clears the water)
+ * should ask here rather than reading records back.
+ *
+ * The rail is resampled by `segmentStride` and the section evaluated at each
+ * surviving point. Every station's ground is queried where that station is, so a
+ * rim over lumpy plaster follows the lumps rather than floating over them —
+ * which is also why the crest is authored *above the ground* and not as a world
+ * height.
+ */
+export function sweptCopingStations(spec: SweptCopingSpec): readonly SweptCopingStation[] {
+  const { rail, seed, relief_m } = spec;
   if (rail.length < 3) throw new RangeError("Swept coping needs a rail of at least three points");
   for (const [count, label] of [[spec.variationLobes, "variation"], [spec.reliefLobes, "relief"]] as const) {
     if (!Number.isInteger(count) || count < 3) throw new RangeError(`Swept coping needs at least three ${label} lobes`);
@@ -290,30 +312,48 @@ export function sweptCopingNodes(spec: SweptCopingSpec): SceneryNode[] {
   const stride = spec.segmentStride ?? 1;
   if (!Number.isInteger(stride) || stride < 1) throw new RangeError("Swept coping segment stride must be a positive integer");
   const base = sweptCopingSection(spec);
-  const group = spec.group ?? "stone-coping";
 
   const radiusModulation = modulation(spec.variationLobes, seed);
   const crestModulation = modulation(spec.variationLobes, seed ^ 0x3d1f_0977);
   const radiusRelief = modulation(spec.reliefLobes, seed ^ 0x51ed_2701);
   const crestRelief = modulation(spec.reliefLobes, seed ^ 0x6a09_e667);
 
-  // Nodes first, then runs between them: the section at a joint has to be the
-  // same number for the cone arriving and the cone leaving, or the chain steps.
+  // Stations first, runs between them second: the section at a joint has to be
+  // the same number for the segment arriving and the segment leaving, or the
+  // chain steps whatever primitive it is spelled with.
   const count = Math.floor(rail.length / stride);
   if (count < 3) throw new RangeError("Swept coping segment stride leaves fewer than three nodes");
-  const nodes = Array.from({ length: count }, (_unused, index) => {
+  return Array.from({ length: count }, (_unused, index) => {
     const [x, z] = rail[index * stride];
-    const turn = index / count;
+    // The rail's own fraction of a turn, not the station index's. They agree
+    // when the stride is one, and when it is not, this is the one that keeps the
+    // modulation a function of *where round the pond* a station is rather than
+    // of how coarsely the rail was walked.
+    const turn = (index * stride) / rail.length;
     const radius = base.radius_m * (1 + spec.sectionVariation * periodicSpline(radiusModulation, turn))
       + relief_m * periodicSpline(radiusRelief, turn);
     const crest = spec.crestHeight_m * (1 + spec.crestVariation * periodicSpline(crestModulation, turn))
       + relief_m * periodicSpline(crestRelief, turn);
     // The lift stays proportional to the *authored* radius rather than to this
-    // node's, so a swell widens the rim without also lifting it out of the
+    // station's, so a swell widens the rim without also lifting it out of the
     // ground and undoing its own undercut.
     const ground = spec.groundHeightAt(x, z);
-    return { at: V(x, ground + crest - base.radius_m, z), radius: Math.max(1e-4, radius) };
+    return { at: V(x, ground + crest - base.radius_m, z), radius: Math.max(1e-4, radius), turn };
   });
+}
+
+/**
+ * Grow one coping along a rail.
+ *
+ * Shape from `sweptCopingStations`, records from here. Consecutive round-cone
+ * SDFs share the exact endpoint sphere, so either owner gives the same surface
+ * at a joint and there is no planar cap for a voxel owner to leak.
+ */
+export function sweptCopingNodes(spec: SweptCopingSpec): SceneryNode[] {
+  const { key } = spec;
+  const group = spec.group ?? "stone-coping";
+  const nodes = sweptCopingStations(spec);
+  const count = nodes.length;
 
   const emitted: SceneryNode[] = [];
   for (let index = 0; index < count; index += 1) {
@@ -334,15 +374,7 @@ export function sweptCopingNodes(spec: SweptCopingSpec): SceneryNode[] {
       baseRadius: from.radius,
       topRadius: to.radius,
       halfHeight,
-      material: spec.material,
-    });
-    emitted.push({
-      kind: "ellipsoid",
-      id: `${key}/node-${index}`,
-      group,
-      tags: ["coping", "stone"],
-      place: { units: "metres", position: from.at },
-      radius: V(from.radius, from.radius, from.radius),
+      roundedEnds: true,
       material: spec.material,
     });
   }

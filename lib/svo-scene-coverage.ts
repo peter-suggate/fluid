@@ -4,6 +4,7 @@ import { cameraForPreset, scenePresets } from "./scenes";
 import { buildSvoSceneGlass, type SvoSceneGlassUnsupportedEntry } from "./svo-scene-glass";
 import { buildSvoSceneThickGlass, type SvoSceneThickGlassMetadata } from "./svo-scene-thick-glass";
 import { buildSvoSceneLights } from "./svo-light-abi";
+import { svoClusterFeatureRadius_m } from "./svo-primitive-abi";
 import { buildSvoScenePrimitives } from "./svo-scene-primitives";
 import {
   cachedSvoPublication,
@@ -111,6 +112,15 @@ function dimensions(proxy: EnvironmentProxyPrimitive): readonly [number, number,
   if (proxy.kind === "cone") {
     const widest = 2 * Math.max(proxy.baseRadius_m, proxy.topRadius_m);
     return [widest, 2 * proxy.halfHeight_m, widest];
+  }
+  // An aggregate's *envelope* is large and its smallest solid width is one
+  // feature of its field — a floret, a lobe, a tube section — which is the
+  // number this test wants: a cluster of two-centimetre spheres in a half-metre
+  // canopy is thin-featured however big the canopy is, and reading the envelope
+  // here would let cell-centre voxelization drop it.
+  if (proxy.kind === "cluster") {
+    const feature = 2 * svoClusterFeatureRadius_m(proxy.radius_m, proxy.packing);
+    return [feature, feature, feature];
   }
   return [2 * proxy.radius_m.x, 2 * proxy.radius_m.y, 2 * proxy.radius_m.z];
 }

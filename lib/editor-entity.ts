@@ -5,7 +5,7 @@ import { add, scale, sub } from "./math";
 import { quaternionInverseRotate, quaternionRotate } from "./rigid-body";
 import type { CameraState, Quaternion, SceneDescription, Vec3 } from "./model";
 import type { SceneDraftSubject } from "./stores/scene-draft-store";
-import { projectToViewport } from "./webgpu-camera";
+import { CAMERA_TAN_HALF_FOV, cameraTanHalfFov, projectToViewport } from "./webgpu-camera";
 
 /**
  * What it means to be an editable thing.
@@ -625,13 +625,14 @@ export function handleWorldEnds(
   entity: EditorEntity,
   handle: EditorHandle,
   depth_m: number,
+  tanHalfFov = CAMERA_TAN_HALF_FOV,
 ): { from: Vec3; to: Vec3 } | undefined {
   const local = (point: Vec3) => handle.space === "entity" ? frameToWorld(entity.frame, point) : point;
   if (handle.segment) return { from: local(handle.segment.from), to: local(handle.segment.to) };
   if (!handle.arm) return undefined;
   const from = handleWorldPosition(entity, handle);
   const direction = handle.space === "entity" ? quaternionRotate(entity.frame.orientation, handle.arm) : handle.arm;
-  return { from, to: add(from, scale(direction, gizmoHandleLength_m(depth_m))) };
+  return { from, to: add(from, scale(direction, gizmoHandleLength_m(depth_m, tanHalfFov))) };
 }
 
 /**
@@ -665,7 +666,7 @@ export function entityHandleAtPointer(
       // A segment or an arm is drawn along its whole length, so it must be
       // grabbable along its whole length: measuring to one end would leave most
       // of what the user can see un-clickable.
-      const world_ends = handleWorldEnds(entity, handle, projection.depth_m);
+      const world_ends = handleWorldEnds(entity, handle, projection.depth_m, cameraTanHalfFov(camera));
       const ends = world_ends && [world_ends.from, world_ends.to]
         .map((point) => projectToViewport(point, camera, width, height));
       const distance_px = ends && ends.every((end) => end.depth_m > 1e-6)

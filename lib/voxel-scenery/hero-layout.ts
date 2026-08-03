@@ -1,10 +1,21 @@
-import { HERO_GARDEN_CONTAINER, HERO_GARDEN_VESSEL, HERO_GARDEN_WATERLINE_M } from "../hero-garden-scene";
+import {
+  HERO_GARDEN_CONTAINER,
+  HERO_GARDEN_SET_SEED,
+  HERO_GARDEN_VESSEL,
+  HERO_GARDEN_WATERLINE_M,
+} from "../hero-garden-scene";
 import type { Quaternion, SceneDescription, Vec3 } from "../model";
 import { quaternionMultiply } from "../rigid-body";
 import type { SceneryGraph, SceneryMaterial, SceneryNode, SceneryPlacement } from "../scenery-graph";
 import { SVO_PRIMITIVE_CANDIDATE_MAXIMUM_LEAVES } from "../svo-primitive-candidates";
 import { terrainHeightAt } from "../terrain";
 import { pondVesselPlanCurve, pondVesselPlanDistance } from "./pond-vessel";
+import {
+  stoneSetBoulderStations,
+  stoneSetSteppingStations,
+  type StoneSetSpec,
+  type StoneStation,
+} from "./stone-set";
 
 /**
  * Where the objects in a set stand, how big they are, and which way they face.
@@ -187,6 +198,17 @@ const hashSigned = (n: number): number => 2 * hash01(n) - 1;
 
 const V3 = (x: number, y: number, z: number): Vec3 => ({ x, y, z });
 
+/**
+ * The stand-ins' albedo, in the band `lib/voxel-scenery/stone-set.ts` authors
+ * the finished quarry in.
+ *
+ * The values here used to run 0.68-0.88, which was right while the hero scene
+ * shaded props through a closure with its own colour grain. It now renders every
+ * surface through a flat `plaster` closure with none, and a raised key so that
+ * white reads as white — so the authored value *is* the albedo, and a 0.68
+ * scaffold comes back a grey lump beside a white rim. Everything below is a
+ * creamy white for the same reason its detailed counterpart is.
+ */
 const STONE = (value: number): SceneryMaterial => ({ palette: "stone", value });
 const CLAY = (value: number): SceneryMaterial => ({ palette: "clay", value });
 
@@ -339,7 +361,7 @@ function mushroomBoulderStandIn(placement: LayoutPlacement): SceneryNode[] {
       baseRadius: .83 * capRadius,
       topRadius: .74 * capRadius,
       halfHeight: .5 * stemHeight,
-      material: STONE(.80),
+      material: STONE(.88),
     },
     {
       kind: "ellipsoid",
@@ -347,7 +369,7 @@ function mushroomBoulderStandIn(placement: LayoutPlacement): SceneryNode[] {
       tags: ["layout", "placeholder", placement.species],
       place: { units: "metres", position: V3(0, stemHeight + capHalfHeight, 0) },
       radius: V3(capRadius, capHalfHeight, capRadius),
-      material: STONE(.88),
+      material: STONE(.92),
     },
   ];
 }
@@ -375,7 +397,7 @@ function steppingDiscStandIn(placement: LayoutPlacement, seat: Vec3, world: Layo
     place: { units: "metres", position: V3(0, .5 * thickness, 0) },
     radius,
     halfHeight: .5 * thickness,
-    material: STONE(.86),
+    material: STONE(.91),
   }];
   if (supportHeight > 0) {
     nodes.push({
@@ -385,7 +407,7 @@ function steppingDiscStandIn(placement: LayoutPlacement, seat: Vec3, world: Layo
       place: { units: "metres", position: V3(0, -.5 * supportHeight, 0) },
       radius: .30 * radius,
       halfHeight: .5 * supportHeight,
-      material: STONE(.68),
+      material: STONE(.82),
     });
   }
   return nodes;
@@ -590,7 +612,7 @@ function runStandIn(placement: LayoutPlacement, world: LayoutWorld, count: numbe
         orientation: { w: Math.cos(spin), x: 0, y: Math.sin(spin), z: 0 },
       },
       radius: V3(radius, flatten * radius, radius * (.78 + .3 * hash01(placement.seed + 7 * index + 17))),
-      material: STONE(.72 + .16 * hash01(placement.seed + 7 * index + 19)),
+      material: STONE(.83 + .11 * hash01(placement.seed + 7 * index + 19)),
     });
   }
   return nodes;
@@ -631,7 +653,7 @@ function budgetFillStandIn(placement: LayoutPlacement, seat: Vec3, count: number
         ),
       },
       radius: V3(radius, radius, radius),
-      material: STONE(.70 + .2 * hash01(placement.seed + 31 * index + 4)),
+      material: STONE(.82 + .12 * hash01(placement.seed + 31 * index + 4)),
     });
   }
   return nodes;
@@ -811,50 +833,75 @@ export interface HeroGardenLayoutInput {
 /** The id every row of the hero table is prefixed with, and the handle for replacing them. */
 export const HERO_LAYOUT_NODE_PREFIX = "layout/";
 
-function boulderRow(
-  key: string,
-  at_m: readonly [number, number],
-  capRadius_m: number,
-  height_m: number,
-  yaw_rad: number,
-  tilt_rad: number,
-  seed: number,
-): LayoutPlacement {
+/**
+ * The spec the stone generator is actually built with, so this table can ask it
+ * where it put things instead of keeping a second opinion.
+ *
+ * Same three numbers `heroGardenScenery` hands its `pond-stone-set` node. If it
+ * were ever to disagree, the rows below would describe a set nobody publishes —
+ * which is the exact failure they were rewritten to end.
+ */
+const HERO_STONE_SET: StoneSetSpec = Object.freeze({
+  vessel: HERO_GARDEN_VESSEL,
+  waterline_m: HERO_GARDEN_WATERLINE_M,
+  seed: HERO_GARDEN_SET_SEED,
+});
+
+/**
+ * A boulder row, taken from where the generator actually stood the stone.
+ *
+ * These used to be four authored world positions and four cap radii, and by the
+ * time anyone looked they were on the *far side of the pond* from the stones
+ * they claimed to be — the group had been moved round the rail twice while the
+ * table stayed put. Nothing caught it, because an `authored` row publishes
+ * nothing and therefore cannot look wrong; it can only quietly mislead whatever
+ * is placed against it, which is what put an air plant inside a pebble.
+ *
+ * `yaw_rad` and `tilt_rad` stay zero. A capped boulder is very nearly a solid of
+ * revolution and its lean is a few degrees the generator draws from its own
+ * seed, so a facing here would be a number with nothing on the other end of it.
+ */
+function boulderRow(station: StoneStation, seed: number): LayoutPlacement {
   return {
-    key: `${HERO_LAYOUT_NODE_PREFIX}${key}`,
+    key: `${HERO_LAYOUT_NODE_PREFIX}${station.key.replace(/^stone\//, "stone/cap-")}`,
     species: "mushroom-boulder",
-    at_m,
+    at_m: station.at_m,
     datum: "ground",
     // Bedded, not balanced: a cap stone set on ground sinks a little into it, and
     // a stand-in resting exactly on the heightfield reads as dropped.
     lift_m: -0.012,
-    size_m: [2 * capRadius_m, height_m, 2 * capRadius_m],
-    yaw_rad, tilt_rad, seed,
+    size_m: [station.width_m, station.height_m + station.base_m + 0.012, station.width_m],
+    yaw_rad: 0, tilt_rad: 0, seed,
     // Four worn stones as smooth-union clusters, at the plan's own estimate.
     detailBudget: 50,
     authority: "authored",
   };
 }
 
-function discRow(
-  key: string,
-  at_m: readonly [number, number],
-  radius_m: number,
-  yaw_rad: number,
-  seed: number,
-): LayoutPlacement {
+/**
+ * A disc row, taken from where the generator's own shoreline solve put the plate.
+ *
+ * The path is laid on a *contour* of the pond's shelf rather than at authored
+ * coordinates, so it is the one family in the set whose positions genuinely
+ * cannot be written down here: change the vessel and the contour moves. The row
+ * keeps its own vertical semantics — a plate is placed against the water, and
+ * `lift_m` is what puts the waterline across its side rather than under it —
+ * and takes only the plan position and the size from the solve.
+ */
+function discRow(station: StoneStation, seed: number): LayoutPlacement {
+  const radius_m = 0.5 * station.width_m;
   const thickness_m = 0.17 * 2 * radius_m;
   return {
-    key: `${HERO_LAYOUT_NODE_PREFIX}${key}`,
+    key: `${HERO_LAYOUT_NODE_PREFIX}${station.key.replace(/^stone\/path\/step-/, "stone/disc-")}`,
     species: "stepping-disc",
-    at_m,
+    at_m: station.at_m,
     datum: "level",
     // The reference's discs break the surface by a fraction of their own
     // thickness — enough that the waterline cuts visibly across the side, not so
     // much that they read as beached.
     lift_m: -0.4 * thickness_m,
     size_m: [2 * radius_m, thickness_m, 2 * radius_m],
-    yaw_rad, tilt_rad: 0, seed,
+    yaw_rad: 0, tilt_rad: 0, seed,
     detailBudget: 20,
     authority: "authored",
   };
@@ -970,16 +1017,17 @@ export function heroGardenLayoutPlacements(input: HeroGardenLayoutInput): readon
     // stone set's share of the primitive ceiling.
     //
     // The graded set is on the left bank and recedes. The grade is the
-    // composition: the reference reads as a family precisely because the four are
-    // one shape at four sizes, and the largest is a fifth of the pond's width —
-    // big enough to be the frame's second subject after the water. They recede
-    // rather than spreading across the frame because the bank they stand on is a
-    // 0.2 m strip between the coping and the container wall, and a line of stones
-    // laid across the view would have to stand in the pond to do it.
-    boulderRow("stone/cap-a", [-0.280, 0.500], 0.043, 0.076, 0.62, 0.055, 0x51_0a01),
-    boulderRow("stone/cap-b", [-0.470, 0.420], 0.063, 0.118, -0.28, 0.048, 0x51_0b02),
-    boulderRow("stone/cap-c", [-0.630, 0.300], 0.092, 0.174, 0.41, -0.038, 0x51_0c03),
-    boulderRow("stone/cap-d", [-0.750, 0.180], 0.118, 0.224, -0.15, 0.030, 0x51_0d04),
+    // composition — the reference reads as a family precisely because it is one
+    // quarry at four sizes *and four proportions*, and its largest is a fifth of
+    // the pond's width, big enough to be the frame's second subject after the
+    // water. They recede rather than spreading across the frame because the bank
+    // they stand on is a 0.2 m strip between the coping and the container wall,
+    // and a line of stones laid across the view would have to stand in the pond
+    // to do it.
+    //
+    // Read from the generator rather than restated. See `boulderRow`.
+    ...stoneSetBoulderStations(HERO_STONE_SET)
+      .map((station, index) => boulderRow(station, 0x51_0a01 + 0x0101 * index)),
 
     // The pebble beds, as three offsets of the vessel's own outline, and all three
     // *outside* the coping.
@@ -991,29 +1039,36 @@ export function heroGardenLayoutPlacements(input: HeroGardenLayoutInput): readon
     // inside anyway would put them either on the bullnose's flank, perched, or
     // 110 mm under water. Outside is where this vessel has a foot to bank
     // against, and it is also what the reference's near-right corner shows.
+    //
+    // The grades below are the *published* ones, and they moved a long way. The
+    // beds used to grade 7 mm to 21 mm of radius — a factor of three across the
+    // whole set — and from a metre away that reads as one grain: an even
+    // necklace of beads round the pool. They now run from a 4 mm flake to a
+    // 45 mm cobble, heaped coarse against the boulder group and running out to
+    // sparse shingle away from it. A row that kept the old numbers would
+    // under-reserve the envelope every bed is laid inside of by half.
     bedRow("stone/bed-shore", input, {
       fromTurn: 0.30, toTurn: 0.78, offsetInHalfWidths: 1.55,
-      halfWidth_m: 0.048, grade_m: [0.007, 0.021],
+      halfWidth_m: 0.078, grade_m: [0.004, 0.045],
     }, 480, 0x51_be01),
     bedRow("stone/bed-near", input, {
       fromTurn: 0.85, toTurn: 1.12, offsetInHalfWidths: 1.45,
-      halfWidth_m: 0.042, grade_m: [0.007, 0.019],
+      halfWidth_m: 0.042, grade_m: [0.004, 0.016],
     }, 300, 0x51_be02),
     bedRow("stone/bed-scatter", input, {
       fromTurn: 0.33, toTurn: 0.47, offsetInHalfWidths: 3.09,
-      halfWidth_m: 0.055, grade_m: [0.006, 0.016],
+      halfWidth_m: 0.055, grade_m: [0.004, 0.014],
     }, 120, 0x51_be03),
 
-    // Five discs wading out from the screen-left bank toward the near side, which
-    // under this camera is the +x run the reference's diagonal maps onto. Graded
-    // the reference's way round: smallest and furthest first. Each is far enough
-    // inside the outline that its whole rim clears the coping's inner foot — a
-    // disc overlapping the wall would read as set into it.
-    discRow("stone/disc-1", [-0.300, 0.140], 0.052, 0.35, 0x51_d101),
-    discRow("stone/disc-2", [-0.160, 0.210], 0.056, -0.22, 0x51_d202),
-    discRow("stone/disc-3", [0.020, 0.220], 0.060, 0.48, 0x51_d303),
-    discRow("stone/disc-4", [0.200, 0.160], 0.065, -0.36, 0x51_d404),
-    discRow("stone/disc-5", [0.360, 0.020], 0.070, 0.19, 0x51_d505),
+    // Five discs wading out from the bank along a contour of the pond's own
+    // shelf, shrinking as they go — the reference's diagonal, graded its way
+    // round. Each is far enough inside the outline that its whole rim clears the
+    // coping's inner foot; a disc overlapping the wall would read as set into
+    // it, and the assertion that pins it is `tests/hero-layout.test.ts`.
+    //
+    // Read from the generator rather than restated. See `discRow`.
+    ...stoneSetSteppingStations(HERO_STONE_SET)
+      .map((station, index) => discRow(station, 0x51_d101 + 0x0101 * index)),
 
     // The bonsai, on the far right and answering the stone set across the water.
     // Its canopy is a parasol, not a ball: the reference's is roughly two and a
@@ -1142,7 +1197,11 @@ export function withHeroLayout(scene: SceneDescription, options: LayoutOptions =
   if (!base) throw new Error("The hero layout extends a scenery graph the scene must already carry");
   const kept = base.nodes.filter((node) => !node.id.startsWith(HERO_LAYOUT_NODE_PREFIX));
   const nodes = layoutPlaceholderNodes(heroGardenLayout(), heroGardenLayoutWorld(scene), options);
-  return { palettes: base.palettes, nodes: [...kept, ...nodes] };
+  // Spread rather than name the fields: everything on the graph except the node
+  // list belongs to the base and has to survive. Naming them cost the vessels
+  // table the day generators started resolving their runs through it, and the
+  // failure was a hero document whose coping no longer knew which pond it rings.
+  return { ...base, nodes: [...kept, ...nodes] };
 }
 
 /** The container the hero layout must stay inside, as the AABB the scene document implies. */

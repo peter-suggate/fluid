@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { cloneScene, defaultScene } from "../lib/model";
+import { getScenePreset } from "../lib/scenes";
 import { unpackSvoPrimitiveRecords } from "../lib/svo-primitive-abi";
 import {
   SVO_SCENE_DEFAULT_MAXIMUM_PRIMITIVES,
@@ -68,6 +69,23 @@ test("bridge converts each proxy shape into the aligned implicit ABI", () => {
   const ellipsoid = byKey.get(ellipsoidProxy.key);
   assert.ok(ellipsoid?.kind === "ellipsoid");
   assert.deepEqual(ellipsoid.radii_m, ellipsoidProxy.radius_m);
+});
+
+test("stepping-stone fillets reach the renderer as one rounded SDF per plate", () => {
+  const scene = getScenePreset("hero-garden-hose").create();
+  const catalog = buildEnvironmentProxyCatalog(scene, "garden");
+  const source = svoScenePrimitivesFromEnvironmentCatalog(scene, catalog);
+  const proxies = environmentProxyPrimitives(catalog);
+  const treads = proxies.filter(({ key }) => /stone\/path\/step-\d+\/tread$/.test(key));
+  assert.equal(treads.length, 5);
+  assert.ok(treads.every((proxy) => proxy.kind === "cylinder" && (proxy.edgeRadius_m ?? 0) > 0));
+  for (const tread of treads) {
+    const metadata = source.metadata.find(({ key }) => key === tread.key)!;
+    const descriptor = source.descriptors[metadata.primitiveIndex];
+    assert.equal(descriptor.kind, "rounded-cylinder", `${tread.key} lost its fillet at the render bridge`);
+  }
+  assert.ok(!proxies.some(({ key }) => /stone\/path\/step-\d+\/crown$/.test(key)),
+    "a second crown owner would restore the sub-pixel overlap ring");
 });
 
 test("front room shell remains modelled but is identified as the interior-view skip owner", () => {

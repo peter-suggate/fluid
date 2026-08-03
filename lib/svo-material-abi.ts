@@ -1,5 +1,10 @@
-import { SVO_PORCELAIN_TERRAIN_BASE_COLOR_LINEAR, SVO_PORCELAIN_TERRAIN_ROUGHNESS } from "./svo-terrain-material";
+import {
+  SVO_PORCELAIN_TERRAIN_BASE_COLOR_LINEAR,
+  SVO_PORCELAIN_TERRAIN_ROUGHNESS,
+  type SvoTerrainSurfaceModel,
+} from "./svo-terrain-material";
 import { GLASS_OPTICS, WATER_OPTICS, type LinearRgb } from "./webgpu-lighting";
+import type { SceneryySurface } from "./scenery-graph";
 import type { EnvironmentProxyMaterial, EnvironmentProxyPrimitive } from "./voxel-environments";
 import { VOXEL_MATERIAL_IDS, VOXEL_MATERIALS, type VoxelMaterial } from "./voxel-scene";
 
@@ -13,6 +18,18 @@ export const SVO_MATERIAL_FLAGS = Object.freeze({
   thinWall: 1 << 2,
 } as const);
 
+/**
+ * Stable ABI values; append only, because a published material record carries
+ * the integer and a cached publication outlives this file.
+ *
+ * `gardenTerrain` is the odd one here: it is the lawn closure, chosen by
+ * `svoMaterialFromVoxelMaterial` from the scene's terrain shell, and no
+ * environment proxy can ever select it — a tide line belongs to ground, not to
+ * a bench. `plaster` is chosen from the same shell and *also* by every proxy in
+ * a porcelain scene, which is the point of that model: one fired surface, so one
+ * closure. Everything else is picked semantically by
+ * `svoMaterialFunctionIdForEnvironmentProxy` below.
+ */
 export const SVO_MATERIAL_FUNCTION_IDS = Object.freeze({
   none: 0,
   gardenTerrain: 1,
@@ -23,12 +40,70 @@ export const SVO_MATERIAL_FUNCTION_IDS = Object.freeze({
   ceramic: 6,
   brushedMetal: 7,
   organic: 8,
+  plaster: 9,
 } as const);
 
-/** Stable semantic selection; it depends only on authored group/tags, never publication order. */
+/**
+ * What each authored surface name resolves to.
+ *
+ * A total `Record`, so a name added to `SCENERY_SURFACE_IDS` does not compile
+ * until it has a closure here. That is the whole reason the two lists are
+ * allowed to live in different files: the scene schema cannot import the
+ * material ABI without a cycle, and this table is what stops them drifting.
+ *
+ * `architectural` is spelled without its `-surface` suffix on the authoring
+ * side because a scene author names a *kind of surface*, not a function.
+ */
+export const SVO_MATERIAL_FUNCTION_ID_BY_SURFACE: Readonly<Record<SceneryySurface, number>> = Object.freeze({
+  none: SVO_MATERIAL_FUNCTION_IDS.none,
+  architectural: SVO_MATERIAL_FUNCTION_IDS.architecturalSurface,
+  wood: SVO_MATERIAL_FUNCTION_IDS.wood,
+  stone: SVO_MATERIAL_FUNCTION_IDS.stone,
+  foliage: SVO_MATERIAL_FUNCTION_IDS.foliage,
+  ceramic: SVO_MATERIAL_FUNCTION_IDS.ceramic,
+  "brushed-metal": SVO_MATERIAL_FUNCTION_IDS.brushedMetal,
+  organic: SVO_MATERIAL_FUNCTION_IDS.organic,
+  plaster: SVO_MATERIAL_FUNCTION_IDS.plaster,
+});
+
+/**
+ * Stable semantic selection; it depends only on authored material, group and
+ * tags, never on publication order.
+ *
+ * An authored `material.surface` wins outright. Everything below it is the
+ * legacy inference — a regular expression over the object's own name — kept
+ * for the sets that have not declared one. It is worth being explicit about
+ * why that is a fallback and not the design: under it, a generator could not
+ * rename its own parts without restyling them, which is why
+ * `lib/voxel-scenery/stone-set.ts` still carries the comment "Nothing here may
+ * be named 'mushroom'". A node that says what it is made of has no such
+ * coupling, and the `shell` tag stays authoritative either way because a wall
+ * is architectural by virtue of being a wall.
+ *
+ * `surfaceModel` sits above all of that, and it is the scene's word rather than
+ * the object's. A porcelain scene is one in which every surface is the *same*
+ * fired white material — the ground, the rim it is set into, the boulders bedded
+ * on it, the tree standing in it — so the granite speckle a boulder would
+ * otherwise inherit from its own name is not a refinement of that set, it is a
+ * contradiction of it. Rather than teach every generator to author
+ * `surface: "plaster"` (and to keep authoring it), the scene says once what it
+ * is made of, in the same place it already says what its ground is made of:
+ * `{ kind: "terrain-shell", materialModel: "porcelain" }`. The default is the
+ * garden model, so a scene that says nothing resolves exactly as before.
+ *
+ * Note that this selects a *closure*, never a colour. A porcelain scene's one
+ * chromatic object — the hero garden's slate-teal hose — keeps its authored
+ * albedo and merely stops being grained, which is the whole of what was wanted.
+ */
 export function svoMaterialFunctionIdForEnvironmentProxy(
-  primitive: Pick<EnvironmentProxyPrimitive, "group" | "tags">,
+  primitive: Pick<EnvironmentProxyPrimitive, "group" | "tags"> & {
+    readonly material?: Pick<EnvironmentProxyMaterial, "surface">;
+  },
+  surfaceModel: SvoTerrainSurfaceModel = "garden-terrain",
 ): number {
+  if (surfaceModel === "porcelain") return SVO_MATERIAL_FUNCTION_IDS.plaster;
+  const surface = primitive.material?.surface;
+  if (surface !== undefined) return SVO_MATERIAL_FUNCTION_ID_BY_SURFACE[surface];
   const semantic = `${primitive.group} ${primitive.tags.join(" ")}`;
   if (primitive.tags.includes("shell")) return SVO_MATERIAL_FUNCTION_IDS.architecturalSurface;
   if (/leaf|foliage|hedge|flower|fruit|canopy|lilypad|reed/.test(semantic)) return SVO_MATERIAL_FUNCTION_IDS.foliage;
@@ -125,10 +200,14 @@ export function canonicalSvoMaterialRecord(input: SvoMaterialRecord): SvoMateria
 /**
  * Which closure the terrain material record selects.
  *
- * The default is the garden lawn. `porcelain` swaps it for the flat function ID
- * and an unmodulated albedo — the same override the sculpted-vessel scenes want,
+ * The default is the garden lawn. `porcelain` swaps it for the fired-plaster
+ * grain and a white albedo — the same override the sculpted-vessel scenes want,
  * expressed once here rather than at each of the two sites that assemble a
  * material table.
+ *
+ * It used to swap the lawn for the *flat* function, which is why the hero pond
+ * shipped with no surface at all: the vessel is most of that frame, and one
+ * albedo across it reads as untextured geometry rather than as fired clay.
  */
 export interface SvoVoxelMaterialOptions {
   readonly terrainSurface?: "garden-terrain" | "porcelain";
@@ -141,13 +220,22 @@ export function svoMaterialFromVoxelMaterial(
 ): SvoMaterialRecord {
   const isWater = material.id === VOXEL_MATERIAL_IDS.fluid;
   const isThinGlass = material.closure === "thin-dielectric";
-  const isPorcelainTerrain = material.id === VOXEL_MATERIAL_IDS.terrain && options.terrainSurface === "porcelain";
+  const isTerrain = material.id === VOXEL_MATERIAL_IDS.terrain;
+  const isPorcelainTerrain = isTerrain && options.terrainSurface === "porcelain";
   return canonicalSvoMaterialRecord({
     materialId: material.id,
     revision,
-    materialFunctionId: material.id === VOXEL_MATERIAL_IDS.terrain && !isPorcelainTerrain
-      ? SVO_MATERIAL_FUNCTION_IDS.gardenTerrain
-      : SVO_MATERIAL_FUNCTION_IDS.none,
+    // Three arms, not two, because terrain is the only built-in material with a
+    // choice of closure and porcelain is a different closure rather than the
+    // lack of one. The lawn's height-banded liner/soil/grass classifier would be
+    // a lie on a fired vessel — but so was the flat function this used to fall
+    // through to, which is why a scene whose whole subject is a white basin came
+    // out with an unmodulated basin.
+    materialFunctionId: !isTerrain
+      ? SVO_MATERIAL_FUNCTION_IDS.none
+      : isPorcelainTerrain
+        ? SVO_MATERIAL_FUNCTION_IDS.plaster
+        : SVO_MATERIAL_FUNCTION_IDS.gardenTerrain,
     flags: material.closure === "opaque"
       ? SVO_MATERIAL_FLAGS.opaque
       : SVO_MATERIAL_FLAGS.dielectric | (isThinGlass ? SVO_MATERIAL_FLAGS.thinWall : 0),
@@ -246,6 +334,19 @@ export function unpackSvoMaterialRecord(table: Uint32Array, materialId: number):
   });
 }
 
+/**
+ * The shader's copy of the function IDs, generated rather than transcribed.
+ *
+ * Hand-written, it was a second table that had to be remembered: the porcelain
+ * ground shipped for a release with no grain at all partly because adding an ID
+ * meant editing two lists and a policy row, and it is exactly the sort of edit
+ * that gets two of three. `camelCase` maps to `SCREAMING_SNAKE` verbatim, so
+ * the emitted text is byte-identical to the block this replaced.
+ */
+const wgslMaterialFunctionConstants = Object.entries(SVO_MATERIAL_FUNCTION_IDS)
+  .map(([key, id]) => `const SVO_MATERIAL_FUNCTION_${key.replace(/[A-Z]/g, (letter) => `_${letter}`).toUpperCase()}:u32=${id}u;`)
+  .join("\n");
+
 export const svoMaterialWGSL = /* wgsl */ `
 struct SvoMaterialRecord {
   baseColorOpacity:vec4f,
@@ -258,15 +359,7 @@ struct SvoMaterialRecord {
 const SVO_MATERIAL_FLAG_OPAQUE:u32=1u;
 const SVO_MATERIAL_FLAG_DIELECTRIC:u32=2u;
 const SVO_MATERIAL_FLAG_THIN_WALL:u32=4u;
-const SVO_MATERIAL_FUNCTION_NONE:u32=0u;
-const SVO_MATERIAL_FUNCTION_GARDEN_TERRAIN:u32=1u;
-const SVO_MATERIAL_FUNCTION_ARCHITECTURAL_SURFACE:u32=2u;
-const SVO_MATERIAL_FUNCTION_WOOD:u32=3u;
-const SVO_MATERIAL_FUNCTION_STONE:u32=4u;
-const SVO_MATERIAL_FUNCTION_FOLIAGE:u32=5u;
-const SVO_MATERIAL_FUNCTION_CERAMIC:u32=6u;
-const SVO_MATERIAL_FUNCTION_BRUSHED_METAL:u32=7u;
-const SVO_MATERIAL_FUNCTION_ORGANIC:u32=8u;
+${wgslMaterialFunctionConstants}
 fn svoMaterialValid(material:SvoMaterialRecord,index:u32)->bool{
   return material.identity.x==index&&index!=0u&&material.identity.w!=0u;
 }

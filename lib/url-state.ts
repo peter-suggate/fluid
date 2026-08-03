@@ -301,6 +301,10 @@ export function parseQueryState(search: string): QueryState {
         azimuth_rad: numberParam(query, "camera.azimuth", presetCamera.azimuth_rad),
         elevation_rad: numberParam(query, "camera.elevation", presetCamera.elevation_rad, -1.45, 1.45),
         distance_m: numberParam(query, "camera.distance", presetCamera.distance_m, 0.65, 12),
+        // Carried from the preset rather than the query: the aperture is the
+        // scene's lens, not a view the user orbited to, so it has no URL key to
+        // restore from and must not be dropped while rebuilding the rest.
+        tanHalfFov: presetCamera.tanHalfFov,
         target_m: {
           x: numberParam(query, "camera.targetX", presetCamera.target_m.x),
           y: numberParam(query, "camera.targetY", presetCamera.target_m.y),
@@ -404,20 +408,35 @@ export function replaceQueryStateUrl(preparedSceneEntries?: readonly SceneQueryE
   if (next !== current) window.history.replaceState(window.history.state, "", next);
 }
 
+/** The canonical location for the document currently held by the stores. */
+export function currentScenePageUrl(): string {
+  const search = serializeQueryState(window.location.search, useSceneStore.getState(), useMethodStore.getState(), useUIStore.getState(), { view: "studio" });
+  return `/scene${search ? `?${search}` : ""}`;
+}
+
+export interface QueryStateSyncOptions {
+  /** False when a client navigation or Fast Refresh already retained the document stores. */
+  readonly hydrateFromUrl?: boolean;
+}
+
 /**
  * Hydrate all source-of-truth stores once, then mirror their snapshots to
  * history.replaceState. Popstate follows the same path, so back/forward,
  * reloads and development module replacement rebuild the application from one
  * coherent store snapshot.
  */
-export function startQueryStateSync(onHydrated: (presetId: string) => void) {
+export function startQueryStateSync(onHydrated: (presetId: string) => void, options: QueryStateSyncOptions = {}) {
   let active = true;
   let queued = false;
   let applyingUrl = false;
   const cachedSceneLayer = createSceneQueryLayerCache();
+  const scenePageActive = () => window.location.pathname === "/scene" || window.location.pathname.startsWith("/scene/");
 
   const writeUrl = () => {
-    if (!active || applyingUrl) return;
+    // AppShell retains this component while the library route is visible. Its
+    // URL belongs to the library and must neither mirror nor hydrate the hidden
+    // studio until navigation returns to /scene.
+    if (!active || applyingUrl || !scenePageActive()) return;
     replaceQueryStateUrl(cachedSceneLayer(useSceneStore.getState()));
   };
 
@@ -448,7 +467,8 @@ export function startQueryStateSync(onHydrated: (presetId: string) => void) {
     writeUrl();
   };
 
-  hydrate();
+  if (options.hydrateFromUrl === false) writeUrl();
+  else hydrate();
   const stopMethod = useMethodStore.subscribe(scheduleWrite);
   const stopScene = useSceneStore.subscribe(scheduleWrite);
   const stopUI = useUIStore.subscribe(scheduleWrite);
@@ -457,7 +477,8 @@ export function startQueryStateSync(onHydrated: (presetId: string) => void) {
   const stopShell = useShellStore.subscribe((shell, previous) => {
     if (shell.view !== previous.view) scheduleWrite();
   });
-  window.addEventListener("popstate", hydrate);
+  const hydrateScenePage = () => { if (scenePageActive()) hydrate(); };
+  window.addEventListener("popstate", hydrateScenePage);
 
   return () => {
     active = false;
@@ -465,6 +486,6 @@ export function startQueryStateSync(onHydrated: (presetId: string) => void) {
     stopScene();
     stopUI();
     stopShell();
-    window.removeEventListener("popstate", hydrate);
+    window.removeEventListener("popstate", hydrateScenePage);
   };
 }

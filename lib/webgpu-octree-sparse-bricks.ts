@@ -22,6 +22,7 @@ import {
   svoMaterialFunctionIdForEnvironmentProxy,
   svoMaterialFromEnvironmentProxyMaterial,
 } from "./svo-material-abi";
+import { sceneTerrainSurfaceModel, type SvoTerrainSurfaceModel } from "./svo-terrain-material";
 import {
   SparseBrickOctreeGPU,
   SPARSE_BRICK_GPU_LAYOUT,
@@ -90,6 +91,17 @@ export interface OctreeSparseBrickWorldOptions {
   brickSize?: SparseBrickSize;
   /** Additional authored-environment subdivision beyond the legacy 2x brick ceiling. */
   environmentBrickRefinementLevels?: number;
+  /**
+   * Extra octree levels the environment may descend into where a leaf holds
+   * more primitives than the hierarchy binds. Zero is the historical plan.
+   *
+   * Honoured only when `systems.fluid` is false, because a solver brick pins
+   * its node at the solver's own level and the domain planner claims the whole
+   * container as solver bricks. Two levels take the hero garden's busiest brick
+   * from 122 candidates to 64 for 8 % more leaves; the uniform alternative —
+   * halving `finestCellSize_m` twice — costs nine times as many.
+   */
+  environmentRefinementDepth?: number;
   /** Air-side support retained for pressure-topology rebuilds. */
   haloCells?: number;
   /** Keep the independent deep-liquid topology worklist. */
@@ -346,23 +358,31 @@ export interface OctreeSvoPbrMaterialPublicationData {
 
 const octreeSvoPbrMaterialCache = new Map<string, OctreeSvoPbrMaterialPublicationData>();
 
-/** Dense default table used by the producer and CPU ABI/lifecycle tests. */
+/**
+ * Dense default table used by the producer and CPU ABI/lifecycle tests.
+ *
+ * `surfaceModel` is the scene's own declaration, not a per-primitive one, and it
+ * is part of the content revision because two scenes with identical proxies and
+ * different ground models publish different closures.
+ */
 export function buildOctreeSvoPbrMaterialPublication(
   revision = OCTREE_SVO_PBR_MATERIAL_REVISION,
   environmentPrimitives: readonly EnvironmentProxyPrimitive[] = [],
+  surfaceModel: SvoTerrainSurfaceModel = "garden-terrain",
 ): OctreeSvoPbrMaterialPublicationData {
   if (!Number.isSafeInteger(revision) || revision < 1 || revision > 0xffff_ffff) {
     throw new RangeError("SVO PBR material publication revision must be a positive uint32");
   }
   const contentRevision = hashSvoPublication(new Uint32Array(), JSON.stringify({
     revision,
+    surfaceModel,
     environmentPrimitives: environmentPrimitives.map(({ key, ownerIndex, group, tags, material }) => ({ key, ownerIndex, group, tags, material })),
   }));
   const cacheKey = `octree-svo-pbr-material-v1:${contentRevision}`;
   const cached = cachedSvoPublication(octreeSvoPbrMaterialCache, cacheKey);
   if (cached) return cached;
   const records = [
-    ...buildDefaultSvoMaterialRecords(revision),
+    ...buildDefaultSvoMaterialRecords(revision, { terrainSurface: surfaceModel }),
     ...environmentPrimitives.map((primitive) => {
       if (!Number.isSafeInteger(primitive.ownerIndex) || primitive.ownerIndex < 0) {
         throw new RangeError(`Environment material owner index for ${primitive.key} must be a non-negative safe integer`);
@@ -373,7 +393,7 @@ export function buildOctreeSvoPbrMaterialPublication(
         materialId,
         primitive.material,
         revision,
-        svoMaterialFunctionIdForEnvironmentProxy(primitive),
+        svoMaterialFunctionIdForEnvironmentProxy(primitive, surfaceModel),
       );
     }),
   ];
@@ -692,6 +712,8 @@ export class OctreeSparseBrickWorld {
   private liveDerivedFeedbackPhase = 0;
   private liveDerivedFeedbackFramesRemaining = 0;
   private liveDerivedInitial = true;
+  /** The scene's one word about what its surfaces are made of; see the ABI. */
+  private readonly surfaceModel: SvoTerrainSurfaceModel;
   private liveScenePrimitiveStates = new Map<string, LiveScenePrimitiveState>();
   private liveScenePrimitives = new Map<string, LiveScenePrimitiveEntry>();
   private readonly coveredSceneBrickCoordinates = new Set<string>();
@@ -709,6 +731,7 @@ export class OctreeSparseBrickWorld {
     this.dimensions = dimensions;
     const brickSize = options.brickSize ?? 8;
     this.brickSize = brickSize;
+    this.surfaceModel = sceneTerrainSurfaceModel(scene);
     const environmentCatalog = buildEnvironmentProxyCatalog(scene, scene.environment ?? "default");
     const environmentPrimitives = environmentProxyPrimitives(environmentCatalog, true);
     const sceneDomain = planSparseSceneDomain(
@@ -717,20 +740,72 @@ export class OctreeSparseBrickWorld {
       { conservativePaddingCells: 1, worldBounds_m: scene.voxelDomain.bounds_m }
     );
     this.solverGridOriginCells = sceneDomain.solverGridOriginCells;
-    this.sceneBrickDimensions = sceneDomain.brickDimensions;
+    this.sceneBrickDimensions = sceneDomain.brickDimensions;  // replaced below once the refinement depth is known
     this.sceneWorldOrigin = [sceneDomain.worldOrigin_m.x, sceneDomain.worldOrigin_m.y, sceneDomain.worldOrigin_m.z];
-    const maximumDepth = sparseSceneOctreeMaximumDepth(sceneDomain.brickDimensions, sceneDomain.coordinates);
+    const solverLevel = sparseSceneOctreeMaximumDepth(sceneDomain.brickDimensions, sceneDomain.coordinates);
+    /**
+     * Extra octree levels the *environment* may use, below the solver's own.
+     *
+     * Only on a scene the solver does not own. `planSparseSceneDomain` claims
+     * every brick of the container as a solver brick unconditionally, and a
+     * solver brick pins its node at `solverLevel` — so while the simulation is
+     * present there is nowhere for environment geometry to descend into, and
+     * the only resolution knob is `finestCellSize_m` applied to the whole
+     * domain. On a dry scene that claim is vacuous, and the render tree is free
+     * to spend depth where the geometry actually is.
+     */
+    const refinementDepth = scene.systems?.fluid === false
+      ? Math.max(0, Math.trunc(options.environmentRefinementDepth ?? 0))
+      : 0;
+    const refineScale = 2 ** refinementDepth;
+    const maximumDepth = solverLevel + refinementDepth;
+    const refinedBrickDimensions = sceneDomain.brickDimensions.map((value) => value * refineScale) as [number, number, number];
+    const renderCellSize = sceneDomain.cellSize_m.map((value) => value / refineScale) as [number, number, number];
+    const refinedBrickEdge = renderCellSize.map((value) => value * brickSize) as [number, number, number];
+    const worldOrigin = [sceneDomain.worldOrigin_m.x, sceneDomain.worldOrigin_m.y, sceneDomain.worldOrigin_m.z] as const;
+    /** Primitives whose bounds touch a brick — what the voxeliser bins per leaf. */
+    const candidatesInBrick = (level: number, coordinate: SparseBrickCoordinate): number => {
+      const edge = refinedBrickEdge.map((value) => value * 2 ** (maximumDepth - level));
+      const lo = [coordinate.x, coordinate.y, coordinate.z].map((value, axis) => worldOrigin[axis] + value * edge[axis]);
+      const hi = lo.map((value, axis) => value + edge[axis]);
+      let count = 0;
+      for (const primitive of environmentPrimitives) {
+        const { min, max } = primitive.aabb_m;
+        if (max.x < lo[0] || min.x > hi[0] || max.y < lo[1] || min.y > hi[1] || max.z < lo[2] || min.z > hi[2]) continue;
+        count += 1;
+      }
+      return count;
+    };
     const plan = planAdaptiveSparseBrickOctree({
       brickSize,
-      solverBricks: sceneDomain.solverBrickCoordinates,
-      proxyBricks: sceneDomain.proxyBrickCoordinates.flat(),
+      // A dry scene has no simulation to pin bricks for. Handing the planner the
+      // container anyway is what made the tree uniform-depth in practice.
+      solverBricks: refinementDepth > 0 ? [] : sceneDomain.solverBrickCoordinates,
+      proxyBricks: refinementDepth > 0
+        ? liveSceneBrickCoordinatesForRegions(
+          environmentPrimitives.map((primitive) => ({
+            minimum: [primitive.aabb_m.min.x, primitive.aabb_m.min.y, primitive.aabb_m.min.z] as const,
+            maximum: [primitive.aabb_m.max.x, primitive.aabb_m.max.y, primitive.aabb_m.max.z] as const,
+          })),
+          worldOrigin, renderCellSize, brickSize, refinedBrickDimensions)
+        : sceneDomain.proxyBrickCoordinates.flat(),
       maximumDepth,
+      solverLevel,
       maximumEnvironmentCoarseningPower: Math.min(
         environmentMaximumCoarseningPower(options.environmentBrickRefinementLevels),
-        maximumDepth,
-      )
+        solverLevel,
+      ),
+      // Split a leaf that holds more primitives than the hierarchy binds. Above
+      // that budget the surplus is dropped *silently* — absent from the opacity
+      // pyramid and the radiance atlas while still drawing in primary
+      // visibility — so the geometry keeps its silhouette and stops casting a
+      // shadow. Splitting is the direct fix and it is local.
+      refineEnvironmentLeaf: refinementDepth > 0
+        ? (level, coordinate) => candidatesInBrick(level, coordinate) > OCTREE_LIVE_SCENE_CANDIDATES_PER_BRICK
+        : undefined,
     });
     this.finestLevel = plan.maximumDepth;
+    this.sceneBrickDimensions = refinedBrickDimensions;
     for (const leaf of plan.leaves) {
       const node = plan.nodes[leaf.nodeIndex];
       const scale = 2 ** (plan.maximumDepth - node.level);
@@ -791,7 +866,7 @@ export class OctreeSparseBrickWorld {
     const leafByCoordinate = new Map<string, number>();
     for (const leaf of plan.leaves) {
       const node = plan.nodes[leaf.nodeIndex];
-      if (node.level === plan.maximumDepth) leafByCoordinate.set(`${leaf.coordinate.x},${leaf.coordinate.y},${leaf.coordinate.z}`, leaf.index);
+      if (node.level === solverLevel) leafByCoordinate.set(`${leaf.coordinate.x},${leaf.coordinate.y},${leaf.coordinate.z}`, leaf.index);
     }
     const localBrickDimensions = dimensions.map((value) => Math.ceil(value / brickSize)) as [number, number, number];
     const leafIndices = new Uint32Array(localBrickDimensions[0] * localBrickDimensions[1] * localBrickDimensions[2]);
@@ -799,8 +874,13 @@ export class OctreeSparseBrickWorld {
     for (let z = 0; z < localBrickDimensions[2]; z += 1) for (let y = 0; y < localBrickDimensions[1]; y += 1) for (let x = 0; x < localBrickDimensions[0]; x += 1) {
       const key = `${solverOriginBricks[0] + x},${solverOriginBricks[1] + y},${solverOriginBricks[2] + z}`;
       const leafIndex = leafByCoordinate.get(key);
-      if (leafIndex === undefined) throw new Error(`Fluid brick ${key} has no finest scene leaf`);
-      leafIndices[mappedBrick++] = leafIndex;
+      // A refined dry scene publishes no solver bricks at all, so there is no
+      // leaf to name and nothing that will ever read this table: the fluid frame
+      // path is not reached when `systems.fluid` is false. Anywhere the solver
+      // *is* present, a missing leaf is still a hard error — that is the
+      // statement that solver bricks are never coarsened.
+      if (leafIndex === undefined && refinementDepth === 0) throw new Error(`Fluid brick ${key} has no finest scene leaf`);
+      leafIndices[mappedBrick++] = leafIndex ?? 0;
     }
     this.residency = new GPUFluidBrickResidency(device, dimensions, sceneDomain.cellSize_m, {
       brickSize, haloCells: options.haloCells ?? 2, retireAfterFrames: 3, leafIndices, leafCapacity: this.tree.leafCapacity,
@@ -860,6 +940,7 @@ export class OctreeSparseBrickWorld {
     const pbrMaterials = buildOctreeSvoPbrMaterialPublication(
       OCTREE_SVO_PBR_MATERIAL_REVISION,
       environmentPrimitives,
+      this.surfaceModel,
     );
     this.pbrMaterialBuffer = storageBuffer(
       device,
@@ -892,7 +973,12 @@ export class OctreeSparseBrickWorld {
     this.inspectionBodyMaterials = bodyMaterials;
     const c = scene.container;
     this.containerClosedTop = c.top === "closed";
-    this.cellSize = sceneDomain.cellSize_m;
+    // The render lattice, which is the solver's divided by the refinement. Every
+    // world bound downstream is `coordinate * 2^(maximumDepth - level) * brickSize
+    // * cellSize`, so a deeper tree over the same world needs a proportionally
+    // finer cell here — a solver leaf at `solverLevel` then measures exactly what
+    // it always did. The residency above deliberately keeps the solver's own.
+    this.cellSize = renderCellSize;
     const parameterData = new ArrayBuffer(64), uints = new Uint32Array(parameterData), floats = new Float32Array(parameterData);
     uints.set([sceneDomain.sceneDimensionsCells[0], sceneDomain.sceneDimensionsCells[1], sceneDomain.sceneDimensionsCells[2], 0], 0);
     floats.set([sceneDomain.worldOrigin_m.x, sceneDomain.worldOrigin_m.y, sceneDomain.worldOrigin_m.z, 0], 4);
@@ -1415,6 +1501,7 @@ export class OctreeSparseBrickWorld {
     const pbrMaterials = buildOctreeSvoPbrMaterialPublication(
       OCTREE_SVO_PBR_MATERIAL_REVISION + revision,
       authored,
+      this.surfaceModel,
     );
     if (pbrMaterials.count > OCTREE_LIVE_SCENE_MATERIAL_CAPACITY) {
       throw new RangeError(`Live scene needs ${pbrMaterials.count} materials but the fixed arena holds ${OCTREE_LIVE_SCENE_MATERIAL_CAPACITY}`);

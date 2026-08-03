@@ -119,6 +119,11 @@ function proxyEmitterRadius(proxy: EnvironmentProxyPrimitive, policy: "bounding"
     const widest = Math.max(proxy.baseRadius_m, proxy.topRadius_m);
     return policy === "bounding" ? Math.max(widest, proxy.halfHeight_m) : Math.cbrt(widest * widest * proxy.halfHeight_m);
   }
+  // An aggregate emits as its lobe, for the same reason it voxelizes as one.
+  if (proxy.kind === "cluster") {
+    const { x, y, z } = proxy.radius_m;
+    return policy === "bounding" ? Math.max(x, y, z) : Math.cbrt(x * y * z);
+  }
   return Math.max(proxy.halfSize_m.x, proxy.halfSize_m.y, proxy.halfSize_m.z);
 }
 

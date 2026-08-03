@@ -6,7 +6,7 @@
  * A fixed ring keeps the presentation path allocation- and readback-free.
  */
 
-import { CAMERA_TAN_HALF_FOV } from "./webgpu-camera";
+import { cameraApertureShaderLibrary } from "./webgpu-camera";
 import type { GPUInitializationTask } from "./gpu-initialization";
 
 const secondaryParticlePipelineCache = new WeakMap<GPUDevice, Map<string, GPUComputePipeline[]>>();
@@ -387,6 +387,7 @@ struct Particle {
 }
 
 @group(0) @binding(0) var<uniform> view: ViewUniforms;
+${cameraApertureShaderLibrary("view")}
 @group(0) @binding(1) var<storage, read> particles: array<Particle>;
 
 struct EllipsoidVertex {
@@ -424,7 +425,7 @@ fn project(world: vec3f) -> vec4f {
   let relative = world - view.cameraPosition.xyz;
   let eyeDepth = dot(relative, forward);
   let aspect = view.viewport.x / max(view.viewport.y, 1.0);
-  let ndc = vec2f(dot(relative, cameraRight()) / (max(eyeDepth, 0.001) * aspect * ${CAMERA_TAN_HALF_FOV}), dot(relative, cameraUp()) / (max(eyeDepth, 0.001) * ${CAMERA_TAN_HALF_FOV}));
+  let ndc = vec2f(dot(relative, cameraRight()) / (max(eyeDepth, 0.001) * aspect * cameraTanHalfFov()), dot(relative, cameraUp()) / (max(eyeDepth, 0.001) * cameraTanHalfFov()));
   return vec4f(ndc * eyeDepth, clamp(eyeDepth / 50.0, 0.0, 1.0) * eyeDepth, eyeDepth);
 }
 
@@ -523,6 +524,52 @@ fn ellipsoidInterface(input: EllipsoidVertex, back: bool) -> InterfaceFragment {
 @fragment fn ellipsoidBack(input: EllipsoidVertex) -> InterfaceFragment { return ellipsoidInterface(input, true); }
 `;
 
+/**
+ * Escaped spray, and why nothing constructs this.
+ *
+ * The render half of this file is complete and live: `SecondaryParticleRenderPipeline`
+ * is built by the renderer, the water pipeline draws it into both optical
+ * interfaces, and a droplet would take the resolved water's refraction and
+ * absorption without the compositor being able to tell it apart. The simulation
+ * half — this class — is never instantiated by anything, and the shipped
+ * solver's `secondaryParticles` accessor returns `undefined`
+ * (`lib/webgpu-uniform-eulerian.ts`). Giving it an owner is not a wiring job,
+ * and the reason is worth writing down rather than rediscovering.
+ *
+ * **The blocker is the sampling contract, not the ownership.**
+ * `SecondaryParticleSamplingSource` asks for three *dense* lattice textures:
+ * phi, MAC velocity, and column bases. The only interactive GPU method is
+ * `octree` (`lib/methods/index.ts`), it always passes an `octree` option, and
+ * `WebGPUUniformEulerianSolver`'s constructor reads
+ *
+ *     this.hostAllocation = options.octree ? undefined : planUniformHostAllocation(...)
+ *
+ * so on every shipped scene the dense velocity textures, the dense volume
+ * textures and the column-base textures are *never allocated*. `velocityTexture`
+ * and `columnBaseTexture` correspondingly return `undefined`. The one dense
+ * field that survives is `levelSetTexture`, which the octree itself documents as
+ * "presentation-only ... the sparse octree solver never samples it" and which
+ * `releaseDenseBootstrapPhi` frees outright once the compact path is
+ * authoritative. There is no stale-data compromise available here: two of the
+ * three inputs do not exist, and the third is a bootstrap mirror.
+ *
+ * **What giving it an owner actually costs.** The spawn kernel has to be
+ * re-authored against the compact ABI — phi from the global-fine brick pages
+ * (`globalFineLevelSetSource`) and velocity from the structured row authority
+ * (`structuredRowVelocities`) — which is a new consumer of two ABIs, with the
+ * page-address and A/B-generation handling every other consumer of them carries.
+ * That is comparable in size to the rest of Phase 4 put together, so it is
+ * deliberately not started rather than half-started.
+ *
+ * **And the spawn source would change anyway.** The kernel below sweeps the
+ * whole lattice and promotes near-surface trial particles by
+ * Chentanez-Mueller 3.9.3, which is a *breakup* criterion. The hero pond wants
+ * plunge and impact — the jet entering the water and water striking a solid —
+ * and the structured solver already computes what identifies both: the inflow
+ * boundary knows where the jet enters, and the rigid coupling knows which faces
+ * carry a solid. A compact spawn pass keyed on those two would be a smaller
+ * kernel than this one, not a port of it.
+ */
 export class WebGPUSecondaryParticleSystem {
   readonly renderSource: GPUSecondaryParticleSource;
   readonly allocatedBytes: number;

@@ -61,7 +61,7 @@ test("choosing a scene does not silently kill every keyboard shortcut", () => {
   // this, which is a stronger guarantee than remembering to blur.
   const overlay = readFileSync(new URL("../components/SceneOverlay.tsx", import.meta.url), "utf8");
   assert.doesNotMatch(overlay, /<select/, "the scene chip must not reintroduce a focusable form control");
-  assert.match(overlay, /openLibrary/, "the chip's job is to open the library");
+  assert.match(overlay, /router\.push\("\/"\)/, "the chip's job is to navigate to the library page");
 
   // The library's search box is a text field and is therefore inside the guard
   // above by construction; its own Escape handling must not fight it.

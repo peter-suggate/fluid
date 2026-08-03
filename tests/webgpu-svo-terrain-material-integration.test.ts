@@ -16,6 +16,7 @@ import type { SparseVoxelRenderSource } from "../lib/webgpu-voxel-debug";
 import { svoDrySceneFixture } from "./svo-dry-scene-test-fixture";
 
 const rendererSource = readFileSync(new URL("../lib/webgpu-renderer.ts", import.meta.url), "utf8");
+const dryFrameHarnessSource = readFileSync(new URL("../tools/svo-dry-frame-harness.ts", import.meta.url), "utf8");
 
 function structuralSource(): SparseVoxelRenderSource {
   const resource = { buffer: {} as GPUBuffer };
@@ -64,6 +65,9 @@ test("production garden metadata is packed into the existing dry uniform without
   assert.match(rendererSource,
     /const terrainMaterial = scenePrimitives\.analyticTerrain && terrainSurface === "garden-terrain"\s*\n?\s*\? buildSvoTerrainMaterial\(scene\)\s*\n?\s*: undefined/);
   assert.match(rendererSource, /terrainMaterialMetadata: terrainMaterial\?\.packedMetadata/);
+  assert.match(dryFrameHarnessSource,
+    /svoMaterialFunctionIdForEnvironmentProxy\(primitive, terrainSurface\)/,
+    "headless evidence must use the same scene-wide porcelain closure as production");
   assert.equal(SVO_TERRAIN_MATERIAL_METADATA_STRIDE_BYTES, 16);
   assert.deepEqual(SVO_DRY_SCENE_PARAMS_LAYOUT, {
     sizeBytes: 576, terrainWordOffset: 24, terrainMaterialWordOffset: 28, materialPublicationWordOffset: 32,

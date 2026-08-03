@@ -1024,6 +1024,16 @@ export async function smokeRenderHybridPresentation(
     if (verifyGlobalFineAuthorityTransition && !globalFineLevelSet) {
       throw new Error("Global-fine authority transition requested without a published source");
     }
+    // The same statement of the document the renderer makes every frame, so the
+    // Dawn lane exercises the scene's own optics, key and caustic receiver
+    // rather than the pipeline's clean-water constructor defaults.
+    pipeline.setSceneOptics({
+      optics: scene.fluid.optics,
+      directional: scene.lighting?.directional,
+      grade: scene.lighting?.grade,
+      terrain: scene.terrain,
+      container: { width_m: scene.container.width_m, depth_m: scene.container.depth_m },
+    });
     pipeline.setVolume(solver.surfaceFieldTexture ?? solver.volumeTexture,
       solver.columnBaseTexture ?? columnFallback);
     pipeline.setGlobalFineLevelSet(globalFineLevelSet);

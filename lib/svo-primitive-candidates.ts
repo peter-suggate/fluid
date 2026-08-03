@@ -4,6 +4,7 @@ import {
   SVO_PRIMITIVE_RECORD_WORDS,
   canonicalSvoPrimitive,
   intersectSvoPrimitive,
+  svoPrimitiveLocalExtent_m,
   type SvoFinitePrimitiveDescriptor,
   type SvoPrimitiveRay,
   type SvoPrimitiveRayHit,
@@ -74,18 +75,10 @@ function worldExtents(local: Vec3, orientation: Quaternion): Vec3 {
 
 export function svoPrimitiveCandidateBounds(descriptorInput: SvoFinitePrimitiveDescriptor): SvoPrimitiveCandidateBounds {
   const descriptor = canonicalSvoPrimitive(descriptorInput) as SvoFinitePrimitiveDescriptor;
-  let local: Vec3;
-  if (descriptor.kind === "sphere") local = { x: descriptor.radius_m, y: descriptor.radius_m, z: descriptor.radius_m };
-  else if (descriptor.kind === "box") local = descriptor.halfExtents_m;
-  else if (descriptor.kind === "capsule") local = { x: descriptor.radius_m, y: descriptor.segmentHalfLength_m + descriptor.radius_m, z: descriptor.radius_m };
-  else if (descriptor.kind === "cylinder") local = { x: descriptor.radius_m, y: descriptor.halfHeight_m, z: descriptor.radius_m };
-  else if (descriptor.kind === "torus") {
-    const outer = descriptor.majorRadius_m + descriptor.minorRadius_m;
-    local = { x: outer, y: descriptor.minorRadius_m, z: outer };
-  } else if (descriptor.kind === "cone") {
-    const widest = Math.max(descriptor.baseRadius_m, descriptor.topRadius_m);
-    local = { x: widest, y: descriptor.halfHeight_m, z: widest };
-  } else local = descriptor.radii_m;
+  // One formula, in the kind table, rather than the sixth copy of it. A leaf
+  // bound that is too small does not fail loudly: the BVH simply stops offering
+  // the primitive to rays that do hit it, and the shape loses an edge.
+  const local = svoPrimitiveLocalExtent_m(descriptor);
   const orientation = descriptor.kind === "sphere" ? { w: 1, x: 0, y: 0, z: 0 } : descriptor.orientation!;
   const extent = worldExtents(local, orientation);
   // Float32 upload plus a small absolute pad keeps tangencies and subcell props

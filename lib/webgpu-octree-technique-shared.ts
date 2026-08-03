@@ -6,9 +6,10 @@
  * module back, which would close an import cycle.
  */
 import { OCTREE_GENERATED_POWER_CATALOG_MANIFEST } from "./generated/octree-power-catalog";
-import { CAMERA_TAN_HALF_FOV } from "./webgpu-camera";
+import { cameraApertureShaderLibrary } from "./webgpu-camera";
 
 export const octreeTechniqueSharedWGSL = /* wgsl */ `
+${cameraApertureShaderLibrary("u")}
 struct Uniforms {
   viewport:vec4f, cameraPosition:vec4f, cameraTarget:vec4f, container:vec4f,
   options:vec4f, gridInfo:vec4f, debug:vec4f, environment:vec4f,
@@ -30,7 +31,7 @@ fn inversePowerTransform(value:vec3f,code:u32)->vec3f {
 fn cameraRay(uv:vec2f)->CameraRay {
   let ndc=uv*2.0-1.0;let origin=u.cameraPosition.xyz;let forward=normalize(u.cameraTarget.xyz-origin);
   var right=cross(forward,vec3f(0.0,1.0,0.0));if(length(right)<1e-5){right=vec3f(1.0,0.0,0.0);}right=normalize(right);let up=normalize(cross(right,forward));
-  let direction=normalize(forward+right*ndc.x*u.viewport.x/max(u.viewport.y,1.0)*${CAMERA_TAN_HALF_FOV}+up*ndc.y*${CAMERA_TAN_HALF_FOV});return CameraRay(origin,direction);
+  let direction=normalize(forward+right*ndc.x*u.viewport.x/max(u.viewport.y,1.0)*cameraTanHalfFov()+up*ndc.y*cameraTanHalfFov());return CameraRay(origin,direction);
 }
 fn boxInterval(ray:CameraRay,minimum:vec3f,maximum:vec3f)->vec2f {
   let inverse=1.0/select(vec3f(1e-20),ray.direction,abs(ray.direction)>vec3f(1e-20));let a=(minimum-ray.origin)*inverse;let b=(maximum-ray.origin)*inverse;

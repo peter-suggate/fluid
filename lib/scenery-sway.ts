@@ -1,28 +1,23 @@
 import type { Quaternion, Vec3 } from "./model";
-import type { SvoPrimitiveDescriptor } from "./svo-primitive-abi";
+import { svoPrimitiveLocalExtent_m, type SvoPrimitiveDescriptor } from "./svo-primitive-abi";
 
 /**
  * Authored scenery motion — the gust that moves a tree, not a rigid body.
  *
- * The exact analytic primitive is re-posed every presented frame and the same
- * keyed update is sent to sparse-scene maintenance. Old/new bounds localize
- * voxel payload and derived-page repair; motion that reaches uncovered space
- * explicitly schedules topology growth. The amplitude below is therefore a
- * performance-locality target, not a correctness boundary or a special case
- * for one authored environment.
- *
- * Geometry, cone lighting, exact visibility, normals, and distance-dependent
- * light terms all consume live generations. Page-local validity allows the
- * rest of the scene to remain warm while the affected region is rebuilt.
+ * The exact analytic primitive is re-posed every presented frame without
+ * re-voxelizing the sparse scene. That is sound because authored sway is held
+ * inside the finest-cell ownership margin: the analytic surface, normals and
+ * exact visibility move, while the sparse owner and baked cone-lighting
+ * reference pose remain valid. Scene edits and motion without this bound use
+ * the general keyed sparse-update path instead.
  */
 
 /** Peak surface excursion targets this fraction of one finest-cell locality radius. */
 export const SCENERY_SWAY_MARGIN_FRACTION = 0.8;
 
 /**
- * Half a finest-cell diagonal is a useful locality scale for authored motion.
- * It controls expected dirty-page cost only; sparse maintenance remains the
- * correctness mechanism when a primitive moves farther or changes shape.
+ * Half a finest-cell diagonal is the conservative ownership scale for authored
+ * render-only motion. Motion outside this bound must use sparse maintenance.
  */
 export function scenerySvoLocalityRadius_m(finestCellSize_m: number): number {
   if (!(finestCellSize_m > 0) || !Number.isFinite(finestCellSize_m)) {
@@ -120,22 +115,18 @@ function rotateVector(rotation: Quaternion, value: Vec3): Vec3 {
   };
 }
 
-/** Half-extents of the descriptor along its own local axes, ignoring rotation. */
+/**
+ * Half-extents of the descriptor along its own local axes, ignoring rotation.
+ *
+ * The kind table's, not a copy of it. This used to be the sixth transcription
+ * of the same formula and it ended in `[0, 0, 0]` — so a kind it had never
+ * heard of got a zero excursion budget and swayed straight out of the cell
+ * ownership the voxelizer wrote for it, silently. A kind with no finite local
+ * box reports a negative extent, which the caller below refuses outright.
+ */
 function descriptorExtents(descriptor: SvoPrimitiveDescriptor): readonly number[] {
-  if (descriptor.kind === "sphere") return [descriptor.radius_m, descriptor.radius_m, descriptor.radius_m];
-  if (descriptor.kind === "box") return [descriptor.halfExtents_m.x, descriptor.halfExtents_m.y, descriptor.halfExtents_m.z];
-  if (descriptor.kind === "ellipsoid") return [descriptor.radii_m.x, descriptor.radii_m.y, descriptor.radii_m.z];
-  if (descriptor.kind === "capsule") return [descriptor.radius_m, descriptor.segmentHalfLength_m + descriptor.radius_m, descriptor.radius_m];
-  if (descriptor.kind === "cylinder") return [descriptor.radius_m, descriptor.halfHeight_m, descriptor.radius_m];
-  if (descriptor.kind === "torus") {
-    const outer = descriptor.majorRadius_m + descriptor.minorRadius_m;
-    return [outer, descriptor.minorRadius_m, outer];
-  }
-  if (descriptor.kind === "cone") {
-    const widest = Math.max(descriptor.baseRadius_m, descriptor.topRadius_m);
-    return [widest, descriptor.halfHeight_m, widest];
-  }
-  return [0, 0, 0];
+  const extent = svoPrimitiveLocalExtent_m(descriptor);
+  return extent.x < 0 ? [0, 0, 0] : [extent.x, extent.y, extent.z];
 }
 
 /**

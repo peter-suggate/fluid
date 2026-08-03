@@ -1,6 +1,18 @@
 import {
+  svoClusterFieldByCode,
+  svoClusterFieldName,
   svoPrimitiveWGSL,
+  SVO_CLUSTER_FIELD_TABLE,
+  SVO_CLUSTER_LOBE_DEFAULT_DISPLACEMENT,
+  SVO_CLUSTER_LOBE_DEFAULT_SPAN,
+  SVO_CLUSTER_LOBE_DEFAULT_SPAN_SPREAD,
+  SVO_CLUSTER_SWEEP_MAXIMUM_POINTS,
+  SVO_PRIMITIVE_KINDS,
   SVO_PRIMITIVE_RECORD_STRIDE_BYTES,
+  SVO_PRIMITIVE_RECORD_WORDS,
+  SVO_SMOOTH_UNION_CLUSTER_ARENA_WORDS,
+  type SvoClusterResolver,
+  type SvoSmoothUnionClusterPacking,
   type SvoTerrainHeightfieldPrimitive,
   type SvoTerrainResolver,
 } from "./svo-primitive-abi";
@@ -101,6 +113,7 @@ import {
   type TerrainDescription,
   type TerrainGrid,
 } from "./terrain";
+import { cameraApertureShaderLibrary } from "./webgpu-camera";
 import { unifiedLightingShaderLibrary, WATER_OPTICS } from "./webgpu-lighting";
 import { liveSvoDerivedPageValidityWGSL } from "./webgpu-svo-live-derived-cache";
 import { createWebgpuSvoTraversalWGSL } from "./webgpu-svo-traversal";
@@ -201,6 +214,12 @@ export interface SparseVoxelDrySceneData {
    * shader evaluates in closed form from the uniform mirror as it always has.
    */
   terrainHeightfield?: Uint32Array<ArrayBuffer>;
+  /**
+   * Packed aggregate parameter blocks, in publication order, as
+   * `packSvoDrySceneClusters` produces them. Absent means this scene publishes
+   * no aggregates, and the region is uploaded as zeroes rather than left alone.
+   */
+  clusterBlocks?: Uint32Array<ArrayBuffer>;
   /** Packed 80-byte finite-pane records. Empty means this scene has no glass. */
   glassRecords?: Uint32Array<ArrayBuffer>;
   /** Versioned live content key used to avoid redundant pane uploads. */
@@ -259,18 +278,53 @@ export const svoDrySceneTerrainRegionBytes = (sampleCount: number): number =>
   SVO_DRY_SCENE_TERRAIN_HEADER_BYTES + sampleCount * Float32Array.BYTES_PER_ELEMENT;
 export const SVO_DRY_SCENE_TERRAIN_ARENA_MAXIMUM_BYTES =
   svoDrySceneTerrainRegionBytes(MAX_TERRAIN_GRID_SAMPLES);
-/** One stable renderer-owned storage allocation for every authored scene record. */
+/**
+ * How many aggregate clusters one scene may publish.
+ *
+ * A cluster costs one of the 4 096 primitive records, so this ceiling is well
+ * above anything the record budget can reach. A block is now a 192-byte slot
+ * rather than the 32 bytes it was when the kind held one field — the tapered sweep
+ * carries an eight-point polyline — so the region is 192 KB reserved once,
+ * against an arena that already carries three quarters of a megabyte of
+ * material and candidate space. It is written once per publication, not per
+ * frame.
+ */
+export const SVO_DRY_SCENE_CLUSTER_CAPACITY = 1_024;
+export const SVO_DRY_SCENE_CLUSTER_BLOCK_BYTES =
+  SVO_SMOOTH_UNION_CLUSTER_ARENA_WORDS * Uint32Array.BYTES_PER_ELEMENT;
+export const SVO_DRY_SCENE_CLUSTER_ARENA_SIZE_BYTES =
+  SVO_DRY_SCENE_CLUSTER_CAPACITY * SVO_DRY_SCENE_CLUSTER_BLOCK_BYTES;
+
+/**
+ * One stable renderer-owned storage allocation for every authored scene record.
+ *
+ * Written as a running offset rather than as nested alignment calls: the terrain
+ * region's offset used to be four `alignDrySceneArenaBytes` calls deep and the
+ * total five, which meant inserting a region between two of them was an edit to
+ * every line below it.
+ */
+const drySceneArenaRegions = (() => {
+  let offsetBytes = 0;
+  const region = (sizeBytes: number): number => {
+    const start = offsetBytes;
+    offsetBytes = alignDrySceneArenaBytes(start + sizeBytes);
+    return start;
+  };
+  const materialOffsetBytes = region(SVO_DRY_SCENE_MATERIAL_ARENA_SIZE_BYTES);
+  const primitiveOffsetBytes = region(SVO_PRIMITIVE_CANDIDATE_ARENA_SIZE_BYTES);
+  const glassOffsetBytes = region(SVO_DRY_SCENE_GLASS_ARENA_SIZE_BYTES);
+  const clusterOffsetBytes = region(SVO_DRY_SCENE_CLUSTER_ARENA_SIZE_BYTES);
+  const terrainOffsetBytes = region(SVO_DRY_SCENE_TERRAIN_HEADER_BYTES);
+  return { materialOffsetBytes, primitiveOffsetBytes, glassOffsetBytes, clusterOffsetBytes, terrainOffsetBytes, sizeBytes: offsetBytes };
+})();
+
 export const SVO_DRY_SCENE_ARENA_LAYOUT = Object.freeze({
-  materialOffsetBytes: 0,
-  primitiveOffsetBytes: alignDrySceneArenaBytes(SVO_DRY_SCENE_MATERIAL_ARENA_SIZE_BYTES),
-  glassOffsetBytes: alignDrySceneArenaBytes(
-    alignDrySceneArenaBytes(SVO_DRY_SCENE_MATERIAL_ARENA_SIZE_BYTES) + SVO_PRIMITIVE_CANDIDATE_ARENA_SIZE_BYTES,
-  ),
-  terrainOffsetBytes: alignDrySceneArenaBytes(
-    alignDrySceneArenaBytes(
-      alignDrySceneArenaBytes(SVO_DRY_SCENE_MATERIAL_ARENA_SIZE_BYTES) + SVO_PRIMITIVE_CANDIDATE_ARENA_SIZE_BYTES,
-    ) + SVO_DRY_SCENE_GLASS_ARENA_SIZE_BYTES,
-  ),
+  materialOffsetBytes: drySceneArenaRegions.materialOffsetBytes,
+  primitiveOffsetBytes: drySceneArenaRegions.primitiveOffsetBytes,
+  glassOffsetBytes: drySceneArenaRegions.glassOffsetBytes,
+  /** Fixed-capacity aggregate parameter blocks, addressed by a record's word-13 reference. */
+  clusterOffsetBytes: drySceneArenaRegions.clusterOffsetBytes,
+  terrainOffsetBytes: drySceneArenaRegions.terrainOffsetBytes,
   /**
    * The allocation a scene with no sculpted terrain needs. Every fixed-capacity
    * region plus a zeroed heightfield header; the samples themselves are sized
@@ -278,13 +332,7 @@ export const SVO_DRY_SCENE_ARENA_LAYOUT = Object.freeze({
    * ceiling would cost a megabyte that no authored scene has ever wanted and
    * would be uploaded as zeroes on every publication that has no grid at all.
    */
-  sizeBytes: alignDrySceneArenaBytes(
-    alignDrySceneArenaBytes(
-      alignDrySceneArenaBytes(
-        alignDrySceneArenaBytes(SVO_DRY_SCENE_MATERIAL_ARENA_SIZE_BYTES) + SVO_PRIMITIVE_CANDIDATE_ARENA_SIZE_BYTES,
-      ) + SVO_DRY_SCENE_GLASS_ARENA_SIZE_BYTES,
-    ) + SVO_DRY_SCENE_TERRAIN_HEADER_BYTES,
-  ),
+  sizeBytes: drySceneArenaRegions.sizeBytes,
 } as const);
 /** Total arena bytes that hold a terrain region of `terrainBytes`, header included. */
 export const svoDrySceneArenaSizeBytes = (terrainBytes: number): number => alignDrySceneArenaBytes(
@@ -492,6 +540,209 @@ export const SVO_DRY_SCENE_TERRAIN_REFERENCE = SVO_DRY_SCENE_ARENA_LAYOUT.terrai
  * unpacked and evaluated through the same record every other primitive uses,
  * against the same arena region the renderer already uploads.
  */
+/**
+ * Word offset of aggregate cluster block `index` in the scene arena.
+ *
+ * Same convention as the terrain reference and for the same reason: a shader
+ * handed this number reads the block with no further indirection, so the
+ * reference is the offset rather than an index into a table that would have to
+ * exist first.
+ */
+/**
+ * Word offsets inside a cluster's arena block.
+ *
+ * Declared once and read by the packer, the CPU resolver and the shader's own
+ * decode below, because those are three transcriptions of the same layout and
+ * the failure mode when one of them drifts is a field that renders as a
+ * different field with no error anywhere. The order matches
+ * `struct SvoClusterPacking` in the shared ABI so the decode is a straight run
+ * down the block.
+ */
+const CLUSTER_BLOCK_FIELD_WORD = 0;
+const CLUSTER_BLOCK_SEED_WORD = 1;
+const CLUSTER_BLOCK_COUNT_WORD = 2;
+const CLUSTER_BLOCK_SMOOTH_RADIUS_WORD = 3;
+const CLUSTER_BLOCK_LATTICE_LOBE_RADIUS_WORD = 4;
+const CLUSTER_BLOCK_LATTICE_PERIOD_WORD = 5;
+const CLUSTER_BLOCK_JITTER_WORD = 6;
+const CLUSTER_BLOCK_ANISOTROPY_WORD = 7;
+const CLUSTER_BLOCK_LOBE_SPAN_WORD = 8;
+const CLUSTER_BLOCK_LOBE_SPAN_SPREAD_WORD = 9;
+const CLUSTER_BLOCK_DISPLACEMENT_WORD = 10;
+/**
+ * Eight `vec4f`, so the shader reads the polyline as vectors rather than
+ * scalars. Sixteen-word aligned, which is why the three words above it stop at
+ * eleven and the block leaves four unused.
+ */
+const CLUSTER_BLOCK_POINTS_WORD = 16;
+
+export function svoDrySceneClusterReference(index: number): number {
+  if (!Number.isInteger(index) || index < 0 || index >= SVO_DRY_SCENE_CLUSTER_CAPACITY) {
+    throw new RangeError(`Cluster index ${index} is outside the arena's ${SVO_DRY_SCENE_CLUSTER_CAPACITY}-block capacity`);
+  }
+  return SVO_DRY_SCENE_ARENA_LAYOUT.clusterOffsetBytes / Uint32Array.BYTES_PER_ELEMENT
+    + index * SVO_SMOOTH_UNION_CLUSTER_ARENA_WORDS;
+}
+
+/**
+ * Pack every cluster's packing into the arena's cluster region, in publication
+ * order, so block `i` is what `svoDrySceneClusterReference(i)` names.
+ *
+ * An unfilled block stays zeroed, and a zeroed block reads as a lattice with a
+ * zero lobe radius — the "not resolved" encoding both the CPU resolver and the
+ * shader reject. A cluster record that names one therefore renders as nothing
+ * and reports itself invalid, rather than as the smooth ellipsoid a plausible
+ * default would produce.
+ */
+export function packSvoDrySceneClusters(
+  packings: readonly SvoSmoothUnionClusterPacking[],
+): Uint32Array<ArrayBuffer> {
+  if (packings.length > SVO_DRY_SCENE_CLUSTER_CAPACITY) {
+    throw new RangeError(`Scene publishes ${packings.length} clusters, above the arena's ${SVO_DRY_SCENE_CLUSTER_CAPACITY}`);
+  }
+  const buffer = new ArrayBuffer(SVO_DRY_SCENE_CLUSTER_ARENA_SIZE_BYTES);
+  const words = new Uint32Array(buffer);
+  const floats = new Float32Array(buffer);
+  packings.forEach((packing, index) => {
+    const base = index * SVO_SMOOTH_UNION_CLUSTER_ARENA_WORDS;
+    const field = svoClusterFieldName(packing);
+    // The header every field shares, and the one word that says which field
+    // the rest of the block is. `count` is deliberately one slot for three
+    // meanings: it is the only per-field cardinal, and giving each its own
+    // word would leave two of them zero in every block ever published.
+    words[base + CLUSTER_BLOCK_FIELD_WORD] = SVO_CLUSTER_FIELD_TABLE[field].code;
+    words[base + CLUSTER_BLOCK_SEED_WORD] = packing.seed >>> 0;
+    floats[base + CLUSTER_BLOCK_SMOOTH_RADIUS_WORD] = packing.smoothRadius_m;
+    if (packing.field === "seeded-lobes") {
+      words[base + CLUSTER_BLOCK_COUNT_WORD] = packing.lobeCount >>> 0;
+      floats[base + CLUSTER_BLOCK_ANISOTROPY_WORD] = packing.anisotropy;
+      // Defaulted here rather than in the shader. The block is the ABI, and a
+      // shader that substituted its own default for an absent parameter would
+      // be a second place the default lives — which is the arrangement this
+      // whole file exists to avoid.
+      floats[base + CLUSTER_BLOCK_LOBE_SPAN_WORD] = packing.lobeSpan ?? SVO_CLUSTER_LOBE_DEFAULT_SPAN;
+      floats[base + CLUSTER_BLOCK_LOBE_SPAN_SPREAD_WORD] = packing.lobeSpanSpread ?? SVO_CLUSTER_LOBE_DEFAULT_SPAN_SPREAD;
+      floats[base + CLUSTER_BLOCK_DISPLACEMENT_WORD] = packing.displacement ?? SVO_CLUSTER_LOBE_DEFAULT_DISPLACEMENT;
+      return;
+    }
+    if (packing.field === "tapered-sweep") {
+      words[base + CLUSTER_BLOCK_COUNT_WORD] = packing.points.length >>> 0;
+      packing.points.forEach((point, pointIndex) => {
+        const pointBase = base + CLUSTER_BLOCK_POINTS_WORD + pointIndex * 4;
+        floats.set([point.position_m.x, point.position_m.y, point.position_m.z, point.radius_m], pointBase);
+      });
+      return;
+    }
+    words[base + CLUSTER_BLOCK_COUNT_WORD] = (packing.octaves ?? 1) >>> 0;
+    floats[base + CLUSTER_BLOCK_LATTICE_LOBE_RADIUS_WORD] = packing.latticeLobeRadius_m;
+    floats[base + CLUSTER_BLOCK_LATTICE_PERIOD_WORD] = packing.latticePeriod_m;
+    floats[base + CLUSTER_BLOCK_JITTER_WORD] = packing.jitter;
+  });
+  return words;
+}
+
+/**
+ * Say so, loudly, when a scene publishes an aggregate whose block never arrived.
+ *
+ * An aggregate that cannot resolve its packing draws *nothing* — the shader
+ * rejects it as invalid rather than falling back to its lobe, which is the
+ * right call because a smooth ellipsoid is a shape the scene never asked for.
+ * The failure is therefore silent by construction, and it is one assembly site
+ * away at all times: `SparseVoxelDrySceneData` is built by hand in the renderer
+ * and again in the headless harness, and the first headless frame after this
+ * kind landed drew every aggregate in the scene as nothing at all because
+ * one of them had not been taught the field.
+ *
+ * A console warning is the right shape for it because the GPU smoke lane
+ * already fails on any `[svo]` warning, so a forgotten upload fails CI rather
+ * than being noticed by eye in a frame nobody happened to look at.
+ */
+function warnOnUnresolvedClusters(scene: SparseVoxelDrySceneData): void {
+  const records = scene.primitiveRecords;
+  if (!records?.length) return;
+  const resolve = svoDrySceneClusterResolver(scene.clusterBlocks);
+  let unresolved = 0;
+  let clusters = 0;
+  for (let base = 0; base + SVO_PRIMITIVE_RECORD_WORDS <= records.length; base += SVO_PRIMITIVE_RECORD_WORDS) {
+    if (records[base + 3] !== SVO_PRIMITIVE_KINDS.smoothUnionCluster) continue;
+    clusters += 1;
+    if (!resolve(records[base + 13])) unresolved += 1;
+  }
+  if (unresolved === 0) return;
+  // The two causes read very differently at the call site and the fix is not
+  // the same: an assembly site that never carried `clusterBlocks` at all is a
+  // forgotten field on a hand-built `SparseVoxelDrySceneData`, while a block
+  // that arrived and was rejected is a field the packer and the resolver
+  // disagree about — a layout drift rather than a plumbing one.
+  const cause = scene.clusterBlocks
+    ? "their blocks arrived and were rejected: check the field code and the per-field validity rule"
+    : "this scene published no cluster blocks at all: check that the assembly site carries `clusterBlocks`";
+  console.warn(`[svo] ${unresolved} of ${clusters} aggregate records name an unresolved cluster block; ${cause}. They will draw as nothing`);
+}
+
+/**
+ * CPU mirror of the shader's block decode, for the analytic oracles and captures.
+ *
+ * Every rejection here has a shader counterpart in `svoClusterPackingValid`,
+ * and both must reject the same blocks: an oracle that resolves a packing the
+ * GPU treats as invalid reports a surface the frame does not contain, which is
+ * the one failure a parity test cannot tell apart from a shading bug.
+ */
+export function svoDrySceneClusterResolver(packed: Uint32Array | undefined): SvoClusterResolver {
+  const clusterBase = SVO_DRY_SCENE_ARENA_LAYOUT.clusterOffsetBytes / Uint32Array.BYTES_PER_ELEMENT;
+  return (clusterReference: number) => {
+    if (!packed) return undefined;
+    const offset = clusterReference - clusterBase;
+    // The slot stride is what makes this check possible at all: an offset that
+    // is not a block start is a stale or corrupt reference, not a packing read
+    // from the middle of its neighbour.
+    if (offset < 0 || offset % SVO_SMOOTH_UNION_CLUSTER_ARENA_WORDS !== 0) return undefined;
+    if (offset + SVO_SMOOTH_UNION_CLUSTER_ARENA_WORDS > packed.length) return undefined;
+    const floats = new Float32Array(packed.buffer, packed.byteOffset, packed.length);
+    const entry = svoClusterFieldByCode(packed[offset + CLUSTER_BLOCK_FIELD_WORD]);
+    if (!entry) return undefined;
+    const seed = packed[offset + CLUSTER_BLOCK_SEED_WORD] >>> 0;
+    const count = packed[offset + CLUSTER_BLOCK_COUNT_WORD];
+    const smoothRadius_m = floats[offset + CLUSTER_BLOCK_SMOOTH_RADIUS_WORD];
+    if (entry.name === "seeded-lobes") {
+      const anisotropy = floats[offset + CLUSTER_BLOCK_ANISOTROPY_WORD];
+      const lobeSpan = floats[offset + CLUSTER_BLOCK_LOBE_SPAN_WORD];
+      if (!(count >= 1) || !(anisotropy >= 1) || !(lobeSpan > 0)) return undefined;
+      return {
+        field: "seeded-lobes", seed, smoothRadius_m, lobeCount: count, anisotropy, lobeSpan,
+        lobeSpanSpread: floats[offset + CLUSTER_BLOCK_LOBE_SPAN_SPREAD_WORD],
+        displacement: floats[offset + CLUSTER_BLOCK_DISPLACEMENT_WORD],
+      };
+    }
+    if (entry.name === "tapered-sweep") {
+      if (count < 2 || count > SVO_CLUSTER_SWEEP_MAXIMUM_POINTS) return undefined;
+      const points = Array.from({ length: count }, (_unused, index) => {
+        const base = offset + CLUSTER_BLOCK_POINTS_WORD + index * 4;
+        return {
+          position_m: { x: floats[base], y: floats[base + 1], z: floats[base + 2] },
+          radius_m: floats[base + 3],
+        };
+      });
+      if (!points.every((point) => point.radius_m > 0)) return undefined;
+      return { field: "tapered-sweep", seed, smoothRadius_m, points };
+    }
+    // The zeroed block lands here — field code 0 is the lattice — and is
+    // rejected by its own radii, which is what the "never filled" case has
+    // always relied on.
+    const latticeLobeRadius_m = floats[offset + CLUSTER_BLOCK_LATTICE_LOBE_RADIUS_WORD];
+    const latticePeriod_m = floats[offset + CLUSTER_BLOCK_LATTICE_PERIOD_WORD];
+    if (!(latticeLobeRadius_m > 0) || !(latticePeriod_m > 0) || !(count >= 1)) return undefined;
+    return {
+      latticeLobeRadius_m,
+      latticePeriod_m,
+      jitter: floats[offset + CLUSTER_BLOCK_JITTER_WORD],
+      smoothRadius_m,
+      seed,
+      octaves: count,
+    };
+  };
+}
+
 export function svoDrySceneTerrainPrimitive(identity: {
   primitiveId: number;
   materialId: number;
@@ -1246,7 +1497,7 @@ fn dryConeZeroRegionAt(position_m:vec3f,level:u32,pageCache:ptr<function,DryNode
   // its directory/page-cache work on most steps (full-range blending doubled
   // per-step fetches everywhere and cost +35% frame time).
   //
-  // surfaceNormal (zero to disable, as AO and the standalone benchmark do)
+  // surfaceNormal (zero only for free-space/standalone benchmark cones)
   // marks the receiver's tangent plane at the march origin: coverage whose
   // trilinear support still straddles that plane is the receiver's own
   // voxelized surface, and accumulating it self-shadows in bands that track
@@ -1255,7 +1506,8 @@ fn dryConeZeroRegionAt(position_m:vec3f,level:u32,pageCache:ptr<function,DryNode
   // sample's coverage is therefore scaled by its plane clearance over the
   // sample's own support width, ramping back to full occlusion by 24 fine
   // voxels of marched distance so genuine distant blockers keep their shadows.
-  // Shadow cones (surfaceNormal set) refine their step width geometrically as
+  // Receiver cones (surfaceNormal set) suppress their own coverage. Shadow
+  // cones additionally refine their step width geometrically as
   // the march approaches its endpoint and fade the trailing 1.5 diameters:
   // every cone toward a light converges on the same emitter neighbourhood, so
   // with diameter-sized steps the number of samples landing inside geometry
@@ -1459,6 +1711,25 @@ export interface SvoDryOptimizationExperiments {
    * so this is a timing probe only, never a rendering mode.
    */
   readonly rasterPrimaryHsrProbe?: boolean;
+  /**
+   * The same upper-bound probe, for the *scene primitive* raster rather than
+   * the brick raster.
+   *
+   * {@link rasterPrimaryHsrProbe} bounds hidden-surface removal on proxies that
+   * are subsets of disjoint SVO leaf cells, where overlap along a ray is rare.
+   * Authored primitive proxies are not disjoint and overlap heavily — on the
+   * hero pond a pixel is covered by roughly two dozen of them, and 84 % of the
+   * scene's kinds resolve their hit by a 48-iteration sphere trace rather than
+   * a closed-form root. Writing frag_depth and calling discard both leave a
+   * fragment's depth and coverage unknown until it has been shaded, so this
+   * pass currently marches every covering proxy instead of keeping the winner.
+   *
+   * The arm drops both. The image is wrong here — occluded primitives still
+   * shade and the stored depth is the proxy's rather than the surface's — so
+   * this is a timing probe only, never a rendering mode. Its delta bounds what
+   * a sound front-to-back resolve can recover.
+   */
+  readonly scenePrimitiveHsrProbe?: boolean;
 }
 
 /** Pure policy seam used by the renderer and by fail-closed contract tests. */
@@ -1726,6 +1997,10 @@ export function createSvoDrySceneFragmentWGSL(
   // compositions silently fell through to the wide-fanout cursor.
   const secondaryTraversalMode = traversalMode === "raster-primary" ? "canonical-parametric" : traversalMode;
   const hsrProbe = experiments.rasterPrimaryHsrProbe === true;
+  const scenePrimitiveHsrProbe = experiments.scenePrimitiveHsrProbe === true;
+  if (scenePrimitiveHsrProbe && traversalMode !== "raster-primary") {
+    throw new RangeError("The scene primitive raster depth experiment only applies to raster-primary traversal");
+  }
   const noFragmentDepth = hsrProbe || experiments.rasterPrimaryNoFragmentDepth === true;
   const directRasterPrimary = experiments.rasterPrimaryDirect === true || noFragmentDepth;
   if (directRasterPrimary && traversalMode !== "raster-primary") {
@@ -1763,7 +2038,7 @@ fn dryLeafCurrent(hit:SvoTraversalHit)->bool{return svoBrickLifecycleCurrent(svo
 `;
   const primaryTraversalCursorWGSL = screenSpaceTerminationPixels > 0 ? /* wgsl */ `
 fn drySvoShouldTerminateNodeScreenSpace(bounds:mat2x3f,level:u32)->bool{
-  return svoShouldTerminateNodeScreenSpace(bounds,uniforms.cameraPosition.xyz,uniforms.viewport.y,.72,${screenSpaceTerminationPixels},level,0u);
+  return svoShouldTerminateNodeScreenSpace(bounds,uniforms.cameraPosition.xyz,uniforms.viewport.y,cameraTanHalfFov(),${screenSpaceTerminationPixels},level,0u);
 }
 fn dryTraversalCursorNextPrimary(ray:SvoRay,mapping:SvoMapping,cursor:ptr<function,DryTraversalCursor>)->SvoTraversalHit{
   return svoTraversalContinuationNextScreenSpace(ray,mapping,dryDiagnosticMaximumDepth(),&(*cursor).canonical);
@@ -2098,7 +2373,7 @@ fn dryVoxelLightVisibility(position:vec3f,normal:vec3f)->vec2f{
   if(motionKind!=DRY_GBUFFER_MOTION_STATIC){atomicAdd(&dryVoxelLightQueue.rejected,1u);return;}
   let uv=vec2f((f32(id.x)+.5)/f32(dimensions.x),1.0-(f32(id.y)+.5)/f32(dimensions.y));let ndc=uv*2.0-1.0;
   let ro=uniforms.cameraPosition.xyz;let forward=normalize(uniforms.cameraTarget.xyz-ro);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));
-  let rd=normalize(forward+right*ndc.x*uniforms.viewport.x/max(uniforms.viewport.y,1.0)*.72+up*ndc.y*.72);let position=ro+rd*geometry.w;
+  let rd=normalize(forward+right*ndc.x*uniforms.viewport.x/max(uniforms.viewport.y,1.0)*cameraTanHalfFov()+up*ndc.y*cameraTanHalfFov());let position=ro+rd*geometry.w;
   let address=dryVoxelLightAddress(position);if(address.valid==0u){atomicAdd(&dryVoxelLightQueue.rejected,1u);return;}
   let word=address.voxelIndex>>5u;let bit=1u<<(address.voxelIndex&31u);let previous=atomicOr(&dryVoxelLightRequests[word],bit);if((previous&bit)!=0u){return;}
   atomicAdd(&dryVoxelLightQueue.distinct,1u);let packedNormal=dryVoxelLightPackNormal(geometry.xyz);
@@ -2208,7 +2483,7 @@ fn dryRasterPrimaryCamera()->mat4x3f{
 }
 fn dryRasterPrimaryRay(pixel:vec2f,camera:mat4x3f)->vec3f{
   let uv=vec2f(pixel.x/max(uniforms.viewport.x,1.0),1.0-pixel.y/max(uniforms.viewport.y,1.0));let ndc=uv*2.0-1.0;
-  return normalize(camera[1]+camera[2]*ndc.x*uniforms.viewport.x/max(uniforms.viewport.y,1.0)*.72+camera[3]*ndc.y*.72);
+  return normalize(camera[1]+camera[2]*ndc.x*uniforms.viewport.x/max(uniforms.viewport.y,1.0)*cameraTanHalfFov()+camera[3]*ndc.y*cameraTanHalfFov());
 }
 fn dryRasterPrimarySurface(opaque:DryHit,ro:vec3f,rd:vec3f,forward:vec3f,producer:u32)->DryRasterPrimaryOut{
   let generation=dryPublicationGeneration();
@@ -2237,28 +2512,29 @@ struct DryScenePrimitiveVertexOut{
   @builtin(position) position:vec4f,
   @location(0) @interpolate(flat) primitiveIndex:u32,
 }
-fn dryScenePrimitiveLocalExtent(kind:u32,dimensions:vec3f)->vec3f{
-  if(kind==SVO_KIND_SPHERE){return vec3f(dimensions.x);}
-  if(kind==SVO_KIND_BOX||kind==SVO_KIND_ELLIPSOID){return dimensions;}
-  if(kind==SVO_KIND_CAPSULE){return vec3f(dimensions.x,dimensions.y+dimensions.x,dimensions.x);}
-  if(kind==SVO_KIND_CYLINDER){return vec3f(dimensions.x,dimensions.y,dimensions.x);}
-  if(kind==SVO_KIND_TORUS){return vec3f(dimensions.x+dimensions.y,dimensions.y,dimensions.x+dimensions.y);}
-  if(kind==SVO_KIND_CONE){let radius=max(dimensions.x,dimensions.z);return vec3f(radius,dimensions.y,radius);}
-  return vec3f(-1.0);
-}
 fn dryScenePrimitiveWorldExtent(localExtent:vec3f,orientation:vec4f)->vec3f{
   let q=orientation/length(orientation);
   return abs(svoQuaternionRotate(q,vec3f(localExtent.x,0.0,0.0)))
     +abs(svoQuaternionRotate(q,vec3f(0.0,localExtent.y,0.0)))
     +abs(svoQuaternionRotate(q,vec3f(0.0,0.0,localExtent.z)))+vec3f(1e-5);
 }
+// Tightening this proxy to the primitive's own oriented box was measured and
+// does not pay, which is worth stating because the coverage argument for it is
+// correct and still tempting: a hose spelled as 336 diagonal round cones has an
+// axis-aligned box several times the shape, and the oriented box halves mean
+// covering proxies per pixel over the hero framing (16.1 to 7.7, median 15 to
+// 3). Interleaved and paired at 1600x1240 that bought -5.2, +3.7 and -24.1 ms
+// against a control arm whose own spread was 356.7 to 385.8 — no effect, and
+// the sign is not even stable. Fragment *count* is not what this pass is bound
+// by; per-fragment march cost is, and the proxies the oriented box shrinks are
+// the cheap round cones rather than the tapered-sweep clusters beside them.
 @vertex fn ${SVO_SCENE_PRIMITIVE_RASTER_CONTRACT.entryPoints.vertex}(
   @builtin(vertex_index) vertexIndex:u32,
   @builtin(instance_index) primitiveIndex:u32,
 )->DryScenePrimitiveVertexOut{
   var position=vec4f(2.0,2.0,0.0,1.0);
   if(primitiveIndex>=dry.metadata.x){return DryScenePrimitiveVertexOut(position,primitiveIndex);}
-  let record=dryPrimitive(primitiveIndex);let localExtent=dryScenePrimitiveLocalExtent(svoPrimitiveKind(record),svoPrimitiveDimensions_m(record));
+  let record=dryPrimitive(primitiveIndex);let localExtent=svoPrimitiveLocalExtent_m(svoPrimitiveKind(record),svoPrimitiveDimensions_m(record));
   let orientationLength=length(record.orientation);
   if(any(localExtent<vec3f(0.0))||!(orientationLength>1e-8)){return DryScenePrimitiveVertexOut(position,primitiveIndex);}
   let extent=dryScenePrimitiveWorldExtent(localExtent,record.orientation);let centre=svoPrimitiveCenter_m(record);let minimum=centre-extent;let maximum=centre+extent;
@@ -2269,19 +2545,43 @@ fn dryScenePrimitiveWorldExtent(localExtent:vec3f,orientation:vec4f)->vec3f{
     if(vertexIndex<3u){position=vec4f(screen[vertexIndex],1.0,1.0);}
   }else{
     let world=mix(minimum,maximum,svoBrickBoxCorner(vertexIndex));let relative=world-ro;let viewDepth=dot(relative,forward);
-    position=vec4f(dot(relative,right)/(aspect*.72),dot(relative,up)/.72,DRY_REVERSED_Z_NEAR_M,viewDepth);
+    position=vec4f(dot(relative,right)/(aspect*cameraTanHalfFov()),dot(relative,up)/cameraTanHalfFov(),DRY_REVERSED_Z_NEAR_M,viewDepth);
   }
   return DryScenePrimitiveVertexOut(position,primitiveIndex);
 }
-@fragment fn ${SVO_SCENE_PRIMITIVE_RASTER_CONTRACT.entryPoints.fragment}(input:DryScenePrimitiveVertexOut)->DryRasterPrimaryOut{
+// Scene-primitive fragments carry their own output struct for the same reason
+// the brick ones do: the hidden-surface-removal probe drops frag_depth here
+// without disturbing any other pass sharing DryRasterPrimaryOut.
+struct DrySceneRasterOut{
+  @location(0) packedSurface:vec4u,
+  @location(1) identityMedia:vec4u,
+  @location(2) geometry:vec4f,
+  @location(3) opaqueIdentity:vec2u,${scenePrimitiveHsrProbe ? "" : `
+  @builtin(frag_depth) hardwareDepth:f32,`}
+}
+fn drySceneRasterOut(surface:DryRasterPrimaryOut)->DrySceneRasterOut{
+  return DrySceneRasterOut(surface.packedSurface,surface.identityMedia,surface.geometry,surface.opaqueIdentity${scenePrimitiveHsrProbe ? "" : ",surface.hardwareDepth"});
+}
+@fragment fn ${SVO_SCENE_PRIMITIVE_RASTER_CONTRACT.entryPoints.fragment}(input:DryScenePrimitiveVertexOut)->DrySceneRasterOut{
   dryRasterPrimaryReset();
-  if(input.primitiveIndex>=dry.metadata.x){discard;}
+${scenePrimitiveHsrProbe
+    ? `  var probe=dryRasterPrimaryMiss();
+  if(input.primitiveIndex<dry.metadata.x){
+    let record=dryPrimitive(input.primitiveIndex);
+    if(!dryOpaqueOwnerSuppressed(svoPrimitiveOwnerId(record))){
+      let camera=dryRasterPrimaryCamera();let ro=camera[0];let rd=dryRasterPrimaryRay(input.position.xy,camera);
+      let exact=primitiveHit(record,ro,rd,0.0,DRY_MISS);
+      if(exact.t<DRY_MISS){probe=dryRasterPrimarySurface(exact,ro,rd,camera[1],SVO_GBUFFER_PRODUCER_SCENE_PRIMITIVE);}
+    }
+  }
+  return drySceneRasterOut(probe);`
+    : `  if(input.primitiveIndex>=dry.metadata.x){discard;}
   let record=dryPrimitive(input.primitiveIndex);
   if(dryOpaqueOwnerSuppressed(svoPrimitiveOwnerId(record))){discard;}
   let camera=dryRasterPrimaryCamera();let ro=camera[0];let rd=dryRasterPrimaryRay(input.position.xy,camera);
   let exact=primitiveHit(record,ro,rd,0.0,DRY_MISS);
   if(!(exact.t<DRY_MISS)){discard;}
-  return dryRasterPrimarySurface(exact,ro,rd,camera[1],SVO_GBUFFER_PRODUCER_SCENE_PRIMITIVE);
+  return drySceneRasterOut(dryRasterPrimarySurface(exact,ro,rd,camera[1],SVO_GBUFFER_PRODUCER_SCENE_PRIMITIVE));`}
 }
 // Background and terrain. The megakernel's octree stack, rigid loop and pane
 // loop are all absent here, which is the register budget this mode buys back.
@@ -2311,7 +2611,7 @@ fn dryScenePrimitiveWorldExtent(localExtent:vec3f,orientation:vec4f)->vec3f{
     let relative=world-ro;let viewDepth=dot(relative,forward);
     // Constant clip-space z with w = view depth is exactly the reversed-Z
     // infinite-far projection: the interpolated depth is near/viewDepth.
-    position=vec4f(dot(relative,right)/(aspect*.72),dot(relative,up)/.72,DRY_REVERSED_Z_NEAR_M,viewDepth);
+    position=vec4f(dot(relative,right)/(aspect*cameraTanHalfFov()),dot(relative,up)/cameraTanHalfFov(),DRY_REVERSED_Z_NEAR_M,viewDepth);
   }
   return SvoBrickRasterVertexOut(position,record.proxyMinimum,record.proxyMaximum,record.nodeIndexKey&SVO_BRICK_NODE_INDEX_MASK,record.voxelOffset,instanceIndex);
 }
@@ -2431,7 +2731,7 @@ fn dryBrickRasterOut(surface:DryRasterPrimaryOut)->DryBrickRasterOut{
     : "";
   const prepassEntryWGSL = reduced ? /* wgsl */ `struct DryPrepassGeometryOut{@location(0) geometry:vec4f,@location(1) identity:u32}
 @fragment fn dryPrepassGeometryMain(input:VertexOut)->DryPrepassGeometryOut{
-  let ndc=input.uv*2.0-1.0;let ro=uniforms.cameraPosition.xyz;let forward=normalize(uniforms.cameraTarget.xyz-ro);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));let rd=normalize(forward+right*ndc.x*uniforms.viewport.x/max(uniforms.viewport.y,1.0)*.72+up*ndc.y*.72);
+  let ndc=input.uv*2.0-1.0;let ro=uniforms.cameraPosition.xyz;let forward=normalize(uniforms.cameraTarget.xyz-ro);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));let rd=normalize(forward+right*ndc.x*uniforms.viewport.x/max(uniforms.viewport.y,1.0)*cameraTanHalfFov()+up*ndc.y*cameraTanHalfFov());
   dryVisibilityIgnoredOwner=DRY_OWNER_NONE;dryThickGlassEnabled=0u;
   var output=DryPrepassGeometryOut(vec4f(0.0),0xffffffffu);
   if((dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.coneLightingRequested}u)==0u||!dryNodeMipReady()){return output;}
@@ -2542,7 +2842,7 @@ fn drySilhouetteTraceVisibilityExact(opaque:DryHit,ro:vec3f,rd:vec3f)->DrySilhou
   if(geometry.x<=0.0){return vec2u(0xffffffffu);}
   let identity=textureLoad(dryPrepassIdentityTexture,coordinate,0).x;let metadata=u32(round(geometry.w));
   let opaque=DryHit(geometry.x,dryPrepassDecodeNormal(geometry.yz),identity&0xffffu,identity>>16u,metadata&15u,(metadata>>4u)&15u,(metadata>>8u)&3u,(metadata>>10u)&1u,0.0,vec3u(0u));
-  let ndc=input.uv*2.0-1.0;let ro=uniforms.cameraPosition.xyz;let forward=normalize(uniforms.cameraTarget.xyz-ro);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));let rd=normalize(forward+right*ndc.x*uniforms.viewport.x/max(uniforms.viewport.y,1.0)*.72+up*ndc.y*.72);
+  let ndc=input.uv*2.0-1.0;let ro=uniforms.cameraPosition.xyz;let forward=normalize(uniforms.cameraTarget.xyz-ro);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));let rd=normalize(forward+right*ndc.x*uniforms.viewport.x/max(uniforms.viewport.y,1.0)*cameraTanHalfFov()+up*ndc.y*cameraTanHalfFov());
   return dryPrepassTraceVisibility(opaque,ro,rd);
 }
 @fragment fn dryPrepassShadeMain(input:VertexOut)->@location(0) vec4f{
@@ -2550,7 +2850,7 @@ fn drySilhouetteTraceVisibilityExact(opaque:DryHit,ro:vec3f,rd:vec3f)->DrySilhou
   if(geometry.x<=0.0){return vec4f(0.0);}
   let identity=textureLoad(dryPrepassIdentityTexture,coordinate,0).x;let metadata=u32(round(geometry.w));
   let opaque=DryHit(geometry.x,dryPrepassDecodeNormal(geometry.yz),identity&0xffffu,identity>>16u,metadata&15u,(metadata>>4u)&15u,(metadata>>8u)&3u,(metadata>>10u)&1u,0.0,vec3u(0u));
-  let ndc=input.uv*2.0-1.0;let ro=uniforms.cameraPosition.xyz;let forward=normalize(uniforms.cameraTarget.xyz-ro);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));let rd=normalize(forward+right*ndc.x*uniforms.viewport.x/max(uniforms.viewport.y,1.0)*.72+up*ndc.y*.72);
+  let ndc=input.uv*2.0-1.0;let ro=uniforms.cameraPosition.xyz;let forward=normalize(uniforms.cameraTarget.xyz-ro);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));let rd=normalize(forward+right*ndc.x*uniforms.viewport.x/max(uniforms.viewport.y,1.0)*cameraTanHalfFov()+up*ndc.y*cameraTanHalfFov());
   // GLOBAL stores a current-frame, world-space surface GI result. The full-rate
   // consumer reconstructs it only across matching identity/depth/normal and
   // publishes an explicit invalid marker when the requested derived page is
@@ -2604,26 +2904,26 @@ fn dryPrimarySeamHit(sample:DryPrimarySeamSample)->DryHit{
 }
 @fragment fn dryPrimarySeamMain(input:VertexOut)->DryVisibilityOut{
   let coordinate=vec2i(input.position.xy);let seam=dryPrimarySeamSample(coordinate);if(seam.valid==0u){discard;}
-  let ndc=input.uv*2.0-1.0;let ro=uniforms.cameraPosition.xyz;let forward=normalize(uniforms.cameraTarget.xyz-ro);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));let rd=normalize(forward+right*ndc.x*uniforms.viewport.x/max(uniforms.viewport.y,1.0)*.72+up*ndc.y*.72);
+  let ndc=input.uv*2.0-1.0;let ro=uniforms.cameraPosition.xyz;let forward=normalize(uniforms.cameraTarget.xyz-ro);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));let rd=normalize(forward+right*ndc.x*uniforms.viewport.x/max(uniforms.viewport.y,1.0)*cameraTanHalfFov()+up*ndc.y*cameraTanHalfFov());
   let opaque=dryPrimarySeamHit(seam);let generation=dryPublicationGeneration();let media=dryMediumPair(rd,opaque.normal,DRY_MEDIUM_OPAQUE);let rigidSurface=dryRigidMotionSurface(opaque,ro+rd*opaque.t);let motionVelocity=select(vec3f(0.0),rigidSurface.velocity_m_s,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);let motionGeneration=select(generation,rigidSurface.generation,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);let motionValid=select(opaque.motionValid,rigidSurface.valid,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);var flags=select(0u,SVO_GBUFFER_MOTION_VALID,motionValid!=0u)|svoGBufferProducerFlags(SVO_GBUFFER_PRODUCER_TRACED);if(opaque.featureId!=SVO_FEATURE_SMOOTH){flags|=DRY_GBUFFER_HARD_FEATURE;}let targets=svoGBufferSurface(vec3f(0.0),opaque.t,opaque.normal,opaque.normal,vec4u(dryResolvedMaterialId(opaque),opaque.ownerId,media.x,media.y),motionVelocity,opaque.motionKind,opaque.fieldSource,motionGeneration,flags,opaque.featureId);
   return drySplitVisibilityOut(targets,dryHardwareDepth(opaque.t,rd,forward));
 }
 @fragment fn dryVisibilityMain(input:VertexOut)->DryVisibilityOut{
-  let ndc=input.uv*2.0-1.0;let ro=uniforms.cameraPosition.xyz;let forward=normalize(uniforms.cameraTarget.xyz-ro);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));let rd=normalize(forward+right*ndc.x*uniforms.viewport.x/max(uniforms.viewport.y,1.0)*.72+up*ndc.y*.72);dryVisibilityIgnoredOwner=DRY_OWNER_NONE;dryThickGlassFailure=0u;dryThickGlassEnabled=0u;
+  let ndc=input.uv*2.0-1.0;let ro=uniforms.cameraPosition.xyz;let forward=normalize(uniforms.cameraTarget.xyz-ro);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));let rd=normalize(forward+right*ndc.x*uniforms.viewport.x/max(uniforms.viewport.y,1.0)*cameraTanHalfFov()+up*ndc.y*cameraTanHalfFov());dryVisibilityIgnoredOwner=DRY_OWNER_NONE;dryThickGlassFailure=0u;dryThickGlassEnabled=0u;
   let opaque=${splitPrimaryTraceWGSL};${splitVisibilityGlassDiscoveryWGSL}
   ${splitVisibilityGlassReturnWGSL}
   if(opaque.t<DRY_MISS){let media=dryMediumPair(rd,opaque.normal,DRY_MEDIUM_OPAQUE);let rigidSurface=dryRigidMotionSurface(opaque,ro+rd*opaque.t);let motionVelocity=select(vec3f(0.0),rigidSurface.velocity_m_s,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);let motionGeneration=select(generation,rigidSurface.generation,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);let motionValid=select(opaque.motionValid,rigidSurface.valid,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);var flags=select(0u,SVO_GBUFFER_MOTION_VALID,motionValid!=0u)|svoGBufferProducerFlags(SVO_GBUFFER_PRODUCER_TRACED);if(opaque.featureId!=SVO_FEATURE_SMOOTH){flags|=DRY_GBUFFER_HARD_FEATURE;}let targets=svoGBufferSurface(vec3f(0.0),opaque.t,opaque.normal,opaque.normal,vec4u(dryResolvedMaterialId(opaque),opaque.ownerId,media.x,media.y),motionVelocity,opaque.motionKind,opaque.fieldSource,motionGeneration,flags,opaque.featureId);return drySplitVisibilityOut(targets,dryHardwareDepth(opaque.t,rd,forward));}
   return drySplitVisibilityOut(svoGBufferMiss(vec3f(0.0),0u,generation,DRY_GBUFFER_NO_INTERSECTION,svoGBufferProducerFlags(SVO_GBUFFER_PRODUCER_TRACED)),0.0);
 }
 @fragment fn dryLightingMain(input:VertexOut)->@location(0) vec4f{
-  let ndc=input.uv*2.0-1.0;let ro=uniforms.cameraPosition.xyz;let forward=normalize(uniforms.cameraTarget.xyz-ro);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));let rd=normalize(forward+right*ndc.x*uniforms.viewport.x/max(uniforms.viewport.y,1.0)*.72+up*ndc.y*.72);dryVisibilityIgnoredOwner=DRY_OWNER_NONE;dryThickGlassFailure=0u;dryThickGlassEnabled=0u;
+  let ndc=input.uv*2.0-1.0;let ro=uniforms.cameraPosition.xyz;let forward=normalize(uniforms.cameraTarget.xyz-ro);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));let rd=normalize(forward+right*ndc.x*uniforms.viewport.x/max(uniforms.viewport.y,1.0)*cameraTanHalfFov()+up*ndc.y*cameraTanHalfFov());dryVisibilityIgnoredOwner=DRY_OWNER_NONE;dryThickGlassFailure=0u;dryThickGlassEnabled=0u;
   let coordinate=vec2i(input.position.xy);var geometry=drySplitGeometryAt(coordinate);var opaqueIdentity=drySplitIdentityAt(coordinate);if((dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.silhouetteRefinement}u)!=0u){let seam=dryPrimarySeamSample(coordinate);if(seam.valid!=0u){geometry=seam.geometry;opaqueIdentity=vec4u(seam.identity,0u,0u);}}var opaque=missHit();
   let packedOpaqueMaterial=opaqueIdentity.x;${splitOpaqueMaterialDecodeWGSL}if(geometry.w<DRY_MISS){let metadata=opaqueIdentity.y;opaque=DryHit(geometry.w,geometry.xyz,opaqueMaterial,metadata&0xffffu,(metadata>>16u)&15u,(metadata>>20u)&15u,(metadata>>24u)&3u,(metadata>>26u)&1u,0.0,vec3u(0u));}
   ${prepassResolveCallWGSL}var glass=dryGlassMiss();${splitGlassKeyLoadWGSL}if(glassKey>0u){let recordIndex=glassKey-1u;if(recordIndex<dry.terrain.y){let record=dryGlassPane(recordIndex);let candidate=svoThinGlassIntersect(record,ro,rd,0.0,opaque.t,1e-6,record.extentIorEpsilon.w);if(candidate.valid!=0u){glass=DryGlassHit(candidate,recordIndex);}}}var color=shadeDryOpaque(opaque,ro,rd);var depth=opaque.t;let glassVisible=glass.hit.valid!=0u&&glass.hit.t_m<opaque.t;if(glassVisible){let glassSurface=shadeThinGlass(glass,opaque,ro,rd);color=glassSurface.color;depth=glassSurface.depth;}
   let vignette=1.0-.14*dot(ndc*.58,ndc*.58);return vec4f(max(color*vignette,vec3f(0.0)),select(0.0,depth,depth<DRY_MISS));
 }
 @fragment fn drySkyLightingMain(input:VertexOut)->@location(0) vec4f{
-  let ndc=input.uv*2.0-1.0;let ro=uniforms.cameraPosition.xyz;let forward=normalize(uniforms.cameraTarget.xyz-ro);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));let rd=normalize(forward+right*ndc.x*uniforms.viewport.x/max(uniforms.viewport.y,1.0)*.72+up*ndc.y*.72);dryVisibilityIgnoredOwner=DRY_OWNER_NONE;dryThickGlassFailure=0u;dryThickGlassEnabled=0u;
+  let ndc=input.uv*2.0-1.0;let ro=uniforms.cameraPosition.xyz;let forward=normalize(uniforms.cameraTarget.xyz-ro);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));let rd=normalize(forward+right*ndc.x*uniforms.viewport.x/max(uniforms.viewport.y,1.0)*cameraTanHalfFov()+up*ndc.y*cameraTanHalfFov());dryVisibilityIgnoredOwner=DRY_OWNER_NONE;dryThickGlassFailure=0u;dryThickGlassEnabled=0u;
   let coordinate=vec2i(input.position.xy);var opaque=missHit();
   // Skipping the G-buffer identity load is most of what makes this entry cheap,
   // but without raster glass discovery the glass key is packed into that very
@@ -2661,7 +2961,7 @@ ${prepassFanoutDeclarationWGSL}
 @compute @workgroup_size(1) fn dryPrepassResetMain(){
   atomicStore(&dryPrepassBoundaryQueue.count,0u);atomicStore(&dryPrepassBoundaryQueue.invalidAoPages,0u);atomicStore(&dryPrepassBoundaryQueue.invalidDirectPages,0u);atomicStore(&dryPrepassBoundaryQueue.failedRefinements,0u);
 }
-fn dryPrepassRay(coordinate:vec2u,dimensions:vec2u)->mat2x3f{let uv=vec2f((f32(coordinate.x)+.5)/f32(dimensions.x),1.0-(f32(coordinate.y)+.5)/f32(dimensions.y));let ndc=uv*2.0-1.0;let ro=uniforms.cameraPosition.xyz;let forward=normalize(uniforms.cameraTarget.xyz-ro);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));let rd=normalize(forward+right*ndc.x*uniforms.viewport.x/max(uniforms.viewport.y,1.0)*.72+up*ndc.y*.72);return mat2x3f(ro,rd);}
+fn dryPrepassRay(coordinate:vec2u,dimensions:vec2u)->mat2x3f{let uv=vec2f((f32(coordinate.x)+.5)/f32(dimensions.x),1.0-(f32(coordinate.y)+.5)/f32(dimensions.y));let ndc=uv*2.0-1.0;let ro=uniforms.cameraPosition.xyz;let forward=normalize(uniforms.cameraTarget.xyz-ro);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));let rd=normalize(forward+right*ndc.x*uniforms.viewport.x/max(uniforms.viewport.y,1.0)*cameraTanHalfFov()+up*ndc.y*cameraTanHalfFov());return mat2x3f(ro,rd);}
 fn dryPrepassStore(coordinate:vec2i,opaque:DryHit,ro:vec3f,rd:vec3f){if(!(opaque.t<DRY_MISS)){textureStore(dryPrepassVisibilityWrite,coordinate,vec4u(0xffffffffu));textureStore(dryPrepassGeometryWrite,coordinate,vec4f(0.0));textureStore(dryPrepassIdentityWrite,coordinate,vec4u(0xffffffffu));${prepassFanoutMissStoreWGSL}return;}textureStore(dryPrepassGeometryWrite,coordinate,vec4f(opaque.t,dryPrepassEncodeNormal(opaque.normal),f32(dryPrepassHitMetadata(opaque))));textureStore(dryPrepassIdentityWrite,coordinate,vec4u(dryPrepassPackIdentity(opaque),0u,0u,0u));${prepassFanoutHitStoreWGSL}${prepassVisibilityStoreWGSL}}
 @compute @workgroup_size(8,8) fn dryPrepassCoherentMain(@builtin(global_invocation_id) globalId:vec3u){
   let dimensions=textureDimensions(dryPrepassGeometryWrite);if(any(globalId.xy>=dimensions)){return;}let coordinate=vec2i(globalId.xy);let ray=dryPrepassRay(globalId.xy,dimensions);
@@ -2824,14 +3124,14 @@ fn dryWorldGiBodyInfluence(position:vec3f,ignoredBodyOwner:u32)->DryWorldGiBodyI
   let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));
   dryWorldGiFrame.bodySignature=signature;dryWorldGiFrame.movingBodyCount=movingBodyCount;dryWorldGiFrame.bodyCount=bodyCount;atomicStore(&dryWorldGiFrame.invalidGiPages,0u);
   dryWorldGiFrame.cameraPosition=vec4f(origin,0.0);
-  dryWorldGiFrame.cameraForwardAspect=vec4f(forward,uniforms.viewport.x/max(uniforms.viewport.y,1.0)*.72);
+  dryWorldGiFrame.cameraForwardAspect=vec4f(forward,uniforms.viewport.x/max(uniforms.viewport.y,1.0)*cameraTanHalfFov());
   dryWorldGiFrame.cameraRight=vec4f(right,0.0);dryWorldGiFrame.cameraUp=vec4f(up,0.0);
 }
 fn dryWorldGiFrameRay(coordinate:vec2u,dimensions:vec2u)->mat2x3f{
   let uv=vec2f((f32(coordinate.x)+.5)/f32(dimensions.x),1.0-(f32(coordinate.y)+.5)/f32(dimensions.y));
   let ndc=uv*2.0-1.0;let rd=normalize(dryWorldGiFrame.cameraForwardAspect.xyz
     +dryWorldGiFrame.cameraRight.xyz*ndc.x*dryWorldGiFrame.cameraForwardAspect.w
-    +dryWorldGiFrame.cameraUp.xyz*ndc.y*.72);
+    +dryWorldGiFrame.cameraUp.xyz*ndc.y*cameraTanHalfFov());
   return mat2x3f(dryWorldGiFrame.cameraPosition.xyz,rd);
 }
 @compute @workgroup_size(8,8) fn dryWorldGiCacheMain(@builtin(global_invocation_id) globalId:vec3u){
@@ -2957,6 +3257,7 @@ struct DryHit {
 }
 
 @group(0) @binding(0) var<uniform> uniforms:Uniforms;
+${cameraApertureShaderLibrary()}
 @group(0) @binding(1) var<uniform> bodies:array<BodyGPU,12>;
 @group(0) @binding(3) var<storage,read> materialOwners:array<u32>;
 @group(0) @binding(4) var<storage,read> drySceneArena:array<u32>;
@@ -2980,6 +3281,8 @@ struct DryHit {
 const DRY_SCENE_MATERIAL_WORD_OFFSET:u32=${SVO_DRY_SCENE_ARENA_LAYOUT.materialOffsetBytes / 4}u;
 const DRY_SCENE_PRIMITIVE_WORD_OFFSET:u32=${SVO_DRY_SCENE_ARENA_LAYOUT.primitiveOffsetBytes / 4}u;
 const DRY_SCENE_GLASS_WORD_OFFSET:u32=${SVO_DRY_SCENE_ARENA_LAYOUT.glassOffsetBytes / 4}u;
+const DRY_SCENE_CLUSTER_WORD_OFFSET:u32=${SVO_DRY_SCENE_ARENA_LAYOUT.clusterOffsetBytes / 4}u;
+const DRY_SCENE_CLUSTER_WORD_LIMIT:u32=DRY_SCENE_CLUSTER_WORD_OFFSET+${SVO_DRY_SCENE_CLUSTER_ARENA_SIZE_BYTES / 4}u;
 const DRY_SCENE_TERRAIN_WORD_OFFSET:u32=${SVO_DRY_SCENE_ARENA_LAYOUT.terrainOffsetBytes / 4}u;
 const DRY_SCENE_TERRAIN_SAMPLE_WORD_OFFSET:u32=DRY_SCENE_TERRAIN_WORD_OFFSET+${SVO_DRY_SCENE_TERRAIN_HEADER_WORDS}u;
 fn drySceneWords4(offset:u32)->vec4u{return vec4u(drySceneArena[offset],drySceneArena[offset+1u],drySceneArena[offset+2u],drySceneArena[offset+3u]);}
@@ -2992,6 +3295,27 @@ fn dryMaterial(index:u32)->SvoMaterialRecord{
 fn dryPrimitive(index:u32)->SvoPrimitiveRecord{
   let base=DRY_SCENE_PRIMITIVE_WORD_OFFSET+index*${SVO_PRIMITIVE_RECORD_STRIDE_BYTES / 4}u;
   return SvoPrimitiveRecord(drySceneWords4(base),drySceneWords4(base+4u),bitcast<vec4f>(drySceneWords4(base+8u)),drySceneWords4(base+12u));
+}
+// An aggregate's packing, resolved from the word-13 reference exactly as a
+// heightfield's samples are. A record of any other kind carries the invalid
+// sentinel there, so it reads the "not resolved" block and the ABI ignores it.
+fn dryClusterPacking(record:SvoPrimitiveRecord)->SvoClusterPacking{
+  if(svoPrimitiveKind(record)!=SVO_KIND_SMOOTH_UNION_CLUSTER){return svoInvalidClusterPacking();}
+  let base=svoPrimitiveClusterReference(record);
+  if(base<DRY_SCENE_CLUSTER_WORD_OFFSET||base+${SVO_SMOOTH_UNION_CLUSTER_ARENA_WORDS}u>DRY_SCENE_CLUSTER_WORD_LIMIT){return svoInvalidClusterPacking();}
+  let head=drySceneWords4(base);
+  let shape=bitcast<vec4f>(drySceneWords4(base+${CLUSTER_BLOCK_LATTICE_LOBE_RADIUS_WORD}u));
+  let placement=bitcast<vec4f>(drySceneWords4(base+${CLUSTER_BLOCK_LOBE_SPAN_WORD}u));
+  // The polyline is copied whatever the field is: a uniform read costs the same
+  // for every cluster and branching on the field here would diverge the wave
+  // for the one arm that needs it. Fields that do not use it never look.
+  var points=array<vec4f,${SVO_CLUSTER_SWEEP_MAXIMUM_POINTS}>();
+  for(var index=0u;index<${SVO_CLUSTER_SWEEP_MAXIMUM_POINTS}u;index+=1u){
+    points[index]=bitcast<vec4f>(drySceneWords4(base+${CLUSTER_BLOCK_POINTS_WORD}u+index*4u));
+  }
+  return SvoClusterPacking(head[${CLUSTER_BLOCK_FIELD_WORD}],head[${CLUSTER_BLOCK_SEED_WORD}],head[${CLUSTER_BLOCK_COUNT_WORD}],
+    bitcast<f32>(head[${CLUSTER_BLOCK_SMOOTH_RADIUS_WORD}]),shape.x,shape.y,shape.z,shape.w,
+    placement.x,placement.y,placement.z,points);
 }
 fn dryGlassPane(index:u32)->SvoThinGlassRecord{
   let base=DRY_SCENE_GLASS_WORD_OFFSET+index*${SVO_THIN_GLASS_RECORD_WORDS}u;
@@ -3399,7 +3723,7 @@ fn primitiveHit(record:SvoPrimitiveRecord,ro:vec3f,rd:vec3f,tMin:f32,tMax:f32)->
   // Use the shared analytic ray contract directly. In particular, do not call
   // the bounded closest-point distance evaluator merely to recover an
   // ellipsoid normal after the ray quadratic has already found the surface.
-  let exact=svoIntersectPrimitiveExact(record,ro,rd,max(tMin,1e-4),tMax);
+  let exact=svoIntersectPrimitiveExact(record,ro,rd,max(tMin,1e-4),tMax,dryClusterPacking(record));
   if(exact.status!=SVO_PRIMITIVE_RAY_HIT){return missHit();}
   return DryHit(exact.t_m,exact.normal.xyz,svoPrimitiveMaterialId(record),svoPrimitiveOwnerId(record),exact.featureId,DRY_GBUFFER_FIELD_ANALYTIC,DRY_GBUFFER_MOTION_STATIC,1u,0.0,vec3u(0u));
 }
@@ -3771,7 +4095,7 @@ fn shadeDryOpaque(hit:DryHit,ro:vec3f,rd:vec3f)->vec3f {
     if(lightIndex>=lightCount||sampleBudget>=dry.tuningCounts0.z){break;}${prepassLightSlotWGSL}let light=dryLighting.lights[lightIndex];if(light.identity.w!=dryLighting.metadata.y){continue;}let area=light.identity.x==SVO_LIGHT_SPHERE_AREA||light.identity.x==SVO_LIGHT_RECTANGLE_AREA;let sampleCount=select(select(1u,select(dry.tuningCounts1.x,dry.tuningCounts0.w,${SVO_DRY_SCENE_CAMERA_SETTLED_WGSL}),area),1u,globalIllumination);
     for(var sampleIndex=0u;sampleIndex<${SVO_DRY_SCENE_AREA_LIGHT_SAMPLES}u;sampleIndex+=1u){if(sampleIndex>=sampleCount||sampleBudget>=dry.tuningCounts0.z){break;}sampleBudget+=1u;let sample=dryLightSample(light,sampleIndex,position);if(sample.valid==0u||dot(hit.normal,sample.towardLight)<=0.0){continue;}let visibility=dryLightVisibility(position,hit.normal,hit.ownerId,sample.towardLight,sample.finiteDistance_m);let lighting=unifiedLightingInputWithGeometry(hit.normal,hit.normal,-rd,sample.towardLight,sample.radiance*visibility/f32(sampleCount));direct+=shadeUnifiedSurface(directClosure,lighting);}
   }
-  let viewDirection=normalize(-rd);let reflected=reflect(rd,hit.normal);let diffuseColor=surface.baseColor*(1.0-surface.metallic);let f0=mix(surface.specularF0*surface.specularWeight,surface.baseColor,surface.metallic);let fresnel=unifiedSchlick(max(dot(hit.normal,viewDirection),0.0),f0);let contactVisibility=dryContactVisibility(position,hit.normal,hit.featureId,hit.ownerId);let ignoredBodyOwner=select(DRY_OWNER_NONE,hit.ownerId,hit.motionKind==DRY_GBUFFER_MOTION_RIGID);let gi=dryGlobalIllumination(position,hit.normal,ignoredBodyOwner);let diffuseVisibility=dryDiffuseMultiBounceVisibility(gi.visibility,diffuseColor);let diffuseEnvironmentScale=select(1.0,dry.giLighting.z,globalIllumination);let directScale=dry.giLighting.w;let diffuseEnvironment=diffuseColor*svoEnvironmentDiffuseIrradiance(dryLighting.environment,hit.normal)*contactVisibility*diffuseVisibility*diffuseEnvironmentScale/UNIFIED_PI;let specularEnvironment=dryEnvironment(reflected,surface.roughness)*fresnel;let indirectDiffuse=diffuseColor*gi.radiance;
+  let viewDirection=normalize(-rd);let reflected=reflect(rd,hit.normal);let diffuseColor=surface.baseColor*(1.0-surface.metallic);let f0=mix(surface.specularF0*surface.specularWeight,surface.baseColor,surface.metallic);let environmentBrdf=unifiedEnvironmentBrdf(max(dot(hit.normal,viewDirection),0.0),surface.roughness,f0);let diffuseEnergy=max(vec3f(0.0),vec3f(1.0)-environmentBrdf);let contactVisibility=dryContactVisibility(position,hit.normal,hit.featureId,hit.ownerId);let ignoredBodyOwner=select(DRY_OWNER_NONE,hit.ownerId,hit.motionKind==DRY_GBUFFER_MOTION_RIGID);let gi=dryGlobalIllumination(position,hit.normal,ignoredBodyOwner);let diffuseVisibility=dryDiffuseMultiBounceVisibility(gi.visibility,diffuseColor);let diffuseEnvironmentScale=select(1.0,dry.giLighting.z,globalIllumination);let directScale=dry.giLighting.w;let diffuseEnvironment=diffuseColor*diffuseEnergy*svoEnvironmentDiffuseIrradiance(dryLighting.environment,hit.normal)*contactVisibility*diffuseVisibility*diffuseEnvironmentScale/UNIFIED_PI;let specularEnvironment=dryEnvironment(reflected,surface.roughness)*environmentBrdf;let indirectDiffuse=diffuseColor*gi.radiance;
   var shaded=max(surface.emissive+diffuseEnvironment+specularEnvironment+direct*directScale+indirectDiffuse,vec3f(0.0));
   return dryHoverRim(shaded,hit,viewDirection);
 }
@@ -3836,7 +4160,7 @@ fn dryFragmentOut(targets:SvoGBufferTargets,hardwareDepth:f32)->DryFragmentOut{
 }
 
 @fragment fn fragmentMain(input:VertexOut)->DryFragmentOut {
-  let ndc=input.uv*2.0-1.0;let ro=uniforms.cameraPosition.xyz;let forward=normalize(uniforms.cameraTarget.xyz-ro);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));let rd=normalize(forward+right*ndc.x*uniforms.viewport.x/max(uniforms.viewport.y,1.0)*.72+up*ndc.y*.72);dryVisibilityIgnoredOwner=DRY_OWNER_NONE;dryThickGlassFailure=0u;
+  let ndc=input.uv*2.0-1.0;let ro=uniforms.cameraPosition.xyz;let forward=normalize(uniforms.cameraTarget.xyz-ro);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));let rd=normalize(forward+right*ndc.x*uniforms.viewport.x/max(uniforms.viewport.y,1.0)*cameraTanHalfFov()+up*ndc.y*cameraTanHalfFov());dryVisibilityIgnoredOwner=DRY_OWNER_NONE;dryThickGlassFailure=0u;
   // Curved thick glass is compiled separately from this Metal-sensitive pass.
   // Its authored pane therefore remains visible through the exact thin fallback.
   dryThickGlassEnabled=0u;
@@ -3951,6 +4275,7 @@ struct GlassRasterFragmentOut {
   @builtin(frag_depth) hardwareDepth:f32,
 }
 @group(0) @binding(0) var<uniform> uniforms:Uniforms;
+${cameraApertureShaderLibrary()}
 @group(0) @binding(4) var<storage,read> dryRasterSceneArena:array<u32>;
 @group(1) @binding(0) var dryRasterOpaqueGeometry:texture_2d<f32>;
 @group(1) @binding(1) var<uniform> glassRaster:GlassRasterParams;
@@ -3967,12 +4292,12 @@ fn dryRasterGlassCorner(index:u32)->vec2f{
 fn dryRasterGlassRay(pixel:vec2f)->mat2x3f{
   let uv=vec2f(pixel.x/max(uniforms.viewport.x,1.0),1.0-pixel.y/max(uniforms.viewport.y,1.0));let ndc=uv*2.0-1.0;
   let ro=uniforms.cameraPosition.xyz;let forward=normalize(uniforms.cameraTarget.xyz-ro);let right=normalize(cross(forward,vec3f(0.0,1.0,0.0)));let up=normalize(cross(right,forward));
-  let rd=normalize(forward+right*ndc.x*uniforms.viewport.x/max(uniforms.viewport.y,1.0)*.72+up*ndc.y*.72);return mat2x3f(ro,rd);
+  let rd=normalize(forward+right*ndc.x*uniforms.viewport.x/max(uniforms.viewport.y,1.0)*cameraTanHalfFov()+up*ndc.y*cameraTanHalfFov());return mat2x3f(ro,rd);
 }
 @vertex fn glassRasterVertex(@builtin(vertex_index) vertexIndex:u32,@builtin(instance_index) recordIndex:u32)->GlassRasterVertexOut{
   let record=dryRasterGlassPane(recordIndex);let corner=dryRasterGlassCorner(vertexIndex);let padding=max(2.0*record.extentIorEpsilon.w,1e-5);let local=vec3f(corner*(record.extentIorEpsilon.xy+vec2f(padding)),0.0);let world=record.centerThickness.xyz+svoThinGlassRotate(record.orientation,local);
   let ro=uniforms.cameraPosition.xyz;let forward=normalize(uniforms.cameraTarget.xyz-ro);let right=normalize(cross(forward,vec3f(0.0,1.0,0.0)));let up=normalize(cross(right,forward));let relative=world-ro;let viewDepth=dot(relative,forward);let aspect=uniforms.viewport.x/max(uniforms.viewport.y,1.0);
-  return GlassRasterVertexOut(vec4f(dot(relative,right)/(aspect*.72),dot(relative,up)/.72,.5*viewDepth,viewDepth),recordIndex);
+  return GlassRasterVertexOut(vec4f(dot(relative,right)/(aspect*cameraTanHalfFov()),dot(relative,up)/cameraTanHalfFov(),.5*viewDepth,viewDepth),recordIndex);
 }
 @fragment fn glassRasterFragment(input:GlassRasterVertexOut)->GlassRasterFragmentOut{
   if(input.recordIndex>=glassRaster.paneCount){discard;}
@@ -4038,6 +4363,22 @@ const rasterPrimaryTargets: GPUColorTargetState[] = [
 
 export const SVO_SCENE_PRIMITIVE_RASTER_CONTRACT = Object.freeze({
   verticesPerProxy: 36,
+  /**
+   * One face of the proxy box, not both.
+   *
+   * The fragment repeats the shared exact intersection, so the two faces of a
+   * box produce the same hit and the second one is pure duplicated work — and
+   * this is the pass every marched primitive lands in, where that work is a
+   * sphere trace rather than a quadratic. Drawing the far side (and not the
+   * near) is what keeps a camera *inside* a primitive's proxy shading it, which
+   * is the same reason the brick raster culls this way: the corner table winds
+   * outward-CCW in world space and projection flips the near-facing triangles
+   * to clockwise, which WebGPU's default `ccw` front face calls back faces.
+   *
+   * The near-plane case is unaffected: a proxy that contains the eye emits a
+   * full-screen triangle instead, and that one is wound front-facing.
+   */
+  cullMode: SVO_BRICK_RASTER_CONTRACT.cullMode,
   entryPoints: Object.freeze({
     vertex: "dryScenePrimitiveRasterVertex",
     fragment: "dryScenePrimitiveRasterFragment",
@@ -4693,7 +5034,7 @@ export class SparseVoxelDrySceneRenderer {
           entries: sparseVoxelDrySceneBindGroupLayoutEntries(this.traversalMode).filter((entry) => resolveBindings.has(entry.binding)),
       });
       const module = await checkedModule(this.device, "Sparse voxel brick instance emission",
-        createSvoBrickRasterCullWGSL({ reversedZNear_m: SVO_DRY_SCENE_REVERSED_Z_NEAR_M, tanHalfFov: 0.72 }));
+        createSvoBrickRasterCullWGSL({ reversedZNear_m: SVO_DRY_SCENE_REVERSED_Z_NEAR_M }));
       const layout = this.device.createPipelineLayout({ bindGroupLayouts: [this.brickCullLayout] });
       const [emit, scan, scatter] = await Promise.all(
         ([SVO_BRICK_RASTER_CONTRACT.entryPoints.emit, SVO_BRICK_RASTER_CONTRACT.entryPoints.scan,
@@ -4785,7 +5126,6 @@ export class SparseVoxelDrySceneRenderer {
             // the covering-proxy count is exact or an upper bound.
             fragmentDepthWritten: !this.experiments.rasterPrimaryHsrProbe
               && !this.experiments.rasterPrimaryNoFragmentDepth,
-            tanHalfFov: 0.72,
             primitiveWordOffset: SVO_DRY_SCENE_ARENA_LAYOUT.primitiveOffsetBytes / 4,
             sortStateWordOffset: this.brickSortStateOffsetBytes / 4,
             instanceWordOffset: this.brickInstanceOffsetBytes / 4,
@@ -5311,7 +5651,7 @@ export class SparseVoxelDrySceneRenderer {
             layout: this.device.createPipelineLayout({ bindGroupLayouts: [layout] }),
             vertex: { module, entryPoint: SVO_SCENE_PRIMITIVE_RASTER_CONTRACT.entryPoints.vertex },
             fragment: { module, entryPoint: SVO_SCENE_PRIMITIVE_RASTER_CONTRACT.entryPoints.fragment, targets: rasterPrimaryTargets },
-            primitive: { topology: "triangle-list", cullMode: "none" },
+            primitive: { topology: "triangle-list", cullMode: SVO_SCENE_PRIMITIVE_RASTER_CONTRACT.cullMode },
             depthStencil: {
               format: SVO_GBUFFER_RENDER_TARGET_CONTRACT.hardwareDepthFormat,
               depthWriteEnabled: true,
@@ -6022,6 +6362,16 @@ export class SparseVoxelDrySceneRenderer {
     this.device.queue.writeBuffer(this.sceneArenaBuffer, SVO_DRY_SCENE_ARENA_LAYOUT.primitiveOffsetBytes, primitiveArena.packedRecords);
     this.device.queue.writeBuffer(this.sceneArenaBuffer, SVO_DRY_SCENE_ARENA_LAYOUT.materialOffsetBytes, scene.materialRecords);
     if (records?.byteLength) this.device.queue.writeBuffer(this.sceneArenaBuffer, SVO_DRY_SCENE_ARENA_LAYOUT.glassOffsetBytes, records);
+    // Written on every publication for the same reason the terrain header is:
+    // a stale block left behind by the previous scene would be resolved by a
+    // new scene's cluster record and grow the wrong packing inside its lobe.
+    // Zeroes are the "not resolved" encoding, which draws nothing.
+    this.device.queue.writeBuffer(
+      this.sceneArenaBuffer,
+      SVO_DRY_SCENE_ARENA_LAYOUT.clusterOffsetBytes,
+      scene.clusterBlocks ?? new Uint32Array(SVO_DRY_SCENE_CLUSTER_ARENA_SIZE_BYTES / Uint32Array.BYTES_PER_ELEMENT),
+    );
+    warnOnUnresolvedClusters(scene);
     // The header is written on every publication, never conditionally: a zeroed
     // header is what tells the shader this scene is analytic, and skipping it
     // would leave the previous scene's vessel standing under the new ground.

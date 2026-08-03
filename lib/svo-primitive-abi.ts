@@ -1,5 +1,11 @@
 import type { Quaternion, RigidBodyDescription, Vec3 } from "./model";
 import { packMaterialOwner, SPARSE_BRICK_NO_OWNER, unpackMaterialOwner } from "./sparse-brick-octree";
+import {
+  SVO_PRIMITIVE_KIND_FLAGS,
+  SVO_PRIMITIVE_KIND_TABLE,
+  svoPrimitiveKindConstantsWGSL,
+  type SvoPrimitiveKindName,
+} from "./svo-primitive-kinds";
 import { terrainHeightAt, terrainNormalAt, type TerrainDescription } from "./terrain";
 import { materialIdForRigidShape } from "./voxel-scene";
 
@@ -17,30 +23,222 @@ export const SVO_ELLIPSOID_CLOSEST_POINT_ITERATIONS = 64;
  */
 export const SVO_PRIMITIVE_MARCH_ITERATIONS = 48;
 
-/** Stable on-GPU primitive tags. Zero remains reserved for an invalid/empty record. */
+/**
+ * Stable on-GPU primitive tags. Zero remains reserved for an invalid/empty
+ * record.
+ *
+ * Read from the kind table rather than restated, so the numbers a record is
+ * packed with and the numbers the shader compares against cannot drift. The key
+ * names are the historical camelCase ones because they are already spelled out
+ * across the tests and diagnostics that read this object.
+ */
 export const SVO_PRIMITIVE_KINDS = Object.freeze({
-  sphere: 1,
-  box: 2,
-  capsule: 3,
-  cylinder: 4,
-  ellipsoid: 5,
-  terrainHeightfield: 6,
-  torus: 7,
-  cone: 8,
+  sphere: SVO_PRIMITIVE_KIND_TABLE.sphere.code,
+  box: SVO_PRIMITIVE_KIND_TABLE.box.code,
+  capsule: SVO_PRIMITIVE_KIND_TABLE.capsule.code,
+  cylinder: SVO_PRIMITIVE_KIND_TABLE.cylinder.code,
+  ellipsoid: SVO_PRIMITIVE_KIND_TABLE.ellipsoid.code,
+  terrainHeightfield: SVO_PRIMITIVE_KIND_TABLE["terrain-heightfield"].code,
+  torus: SVO_PRIMITIVE_KIND_TABLE.torus.code,
+  cone: SVO_PRIMITIVE_KIND_TABLE.cone.code,
+  smoothUnionCluster: SVO_PRIMITIVE_KIND_TABLE["smooth-union-cluster"].code,
+  roundCone: SVO_PRIMITIVE_KIND_TABLE["round-cone"].code,
+  roundedCylinder: SVO_PRIMITIVE_KIND_TABLE["rounded-cylinder"].code,
 } as const);
 
-export const SVO_PRIMITIVE_FLAGS = Object.freeze({
-  exactDistance: 1,
-  hardFeatures: 2,
-  externalTerrain: 4,
+export const SVO_PRIMITIVE_FLAGS = SVO_PRIMITIVE_KIND_FLAGS;
+
+/**
+ * The procedural signed-distance fields kind 9 selects among.
+ *
+ * One primitive kind, several fields, because what varies between them is the
+ * *construction* and not anything a record holds: each is a smooth minimum of
+ * analytic lobes over a procedurally generated domain, hard-`max`ed against the
+ * record's ellipsoid envelope. A second kind code would duplicate the envelope
+ * contract, the march plumbing, the arena reference and the normal policy in
+ * order to vary one function.
+ *
+ * They are geometric constructions and nothing more. What a given parameter
+ * regime happens to look like is not decided here and is not describable here:
+ * the same three fields have to serve a set that has not been authored yet, so
+ * anything that would be true only of one set belongs in the generator that
+ * composes them.
+ *
+ * Every field in this family owes the same two guarantees, and neither is a
+ * quality knob:
+ *
+ * 1. **It stays inside the envelope.** The record's three dimension floats are
+ *    an ellipsoid, the field is intersected with it by a hard `max`, and the
+ *    solid is therefore provably contained. That is what lets every bounds
+ *    formula, the voxelizer and the node-mip oracle keep treating this kind as
+ *    an ordinary ellipsoid without knowing any field exists.
+ * 2. **It is a Lipschitz-1 lower bound.** The march steps by `|d|`, so a field
+ *    that ever oversteps walks through its own surface. Each field is built as
+ *    a smooth minimum of analytic lobes whose individual distances are already
+ *    unit-Lipschitz lower bounds; a polynomial smooth minimum of such bounds is
+ *    one too — its gradient is the convex combination `h·∇a + (1-h)·∇b`. The
+ *    construction this family deliberately does *not* use is noise displacement
+ *    of an envelope, measured at L = 60 and 58.9 % of rays tunnelling in
+ *    `docs/HERO_GARDEN_AGGREGATE_SDF_ASSESSMENT.md` §3.
+ *
+ * Codes are stable: they are packed into the arena blocks of published scenes.
+ * `lattice` is zero so that a scene authored before this family existed — and a
+ * block that was never filled — reads as the field it always was.
+ */
+export const SVO_CLUSTER_FIELD_NAMES = Object.freeze(["lattice", "seeded-lobes", "tapered-sweep"] as const);
+
+export type SvoClusterFieldName = typeof SVO_CLUSTER_FIELD_NAMES[number];
+
+export interface SvoClusterFieldEntry {
+  readonly name: SvoClusterFieldName;
+  /** Stable on-GPU field tag, packed into word 0 of the arena block. */
+  readonly code: number;
+  /** Name of the matching WGSL constant, generated into the shared shader library. */
+  readonly wgslConstant: string;
   /**
-   * The kind's ray hit is a bounded sphere trace of its own exact distance
-   * instead of a closed-form root. This is what makes a new shape cheap: it
-   * costs one signed-distance function on each of the CPU and the GPU, not a
-   * bespoke quartic and its degenerate cases.
+   * Words this field's block actually occupies, header included.
+   *
+   * Per field rather than one global, because a swept tube's polyline is an
+   * order of magnitude larger than a lattice's five numbers and sizing every
+   * block for the largest would be honest only by accident. See
+   * {@link SVO_SMOOTH_UNION_CLUSTER_ARENA_WORDS} for why the arena still steps
+   * by a uniform slot.
    */
-  marchedIntersection: 8,
-} as const);
+  readonly arenaWords: number;
+}
+
+export const SVO_CLUSTER_FIELD_TABLE = Object.freeze({
+  lattice: { name: "lattice", code: 0, wgslConstant: "SVO_CLUSTER_FIELD_LATTICE", arenaWords: 16 },
+  "seeded-lobes": { name: "seeded-lobes", code: 1, wgslConstant: "SVO_CLUSTER_FIELD_SEEDED_LOBES", arenaWords: 16 },
+  "tapered-sweep": { name: "tapered-sweep", code: 2, wgslConstant: "SVO_CLUSTER_FIELD_TAPERED_SWEEP", arenaWords: 48 },
+} as const satisfies Record<SvoClusterFieldName, SvoClusterFieldEntry>);
+
+const clusterFieldByCode = new Map<number, SvoClusterFieldEntry>(
+  Object.values(SVO_CLUSTER_FIELD_TABLE).map((entry) => [entry.code, entry]),
+);
+
+/** The field a packed block's word 0 names, or undefined for a code no field owns. */
+export function svoClusterFieldByCode(code: number): SvoClusterFieldEntry | undefined {
+  return clusterFieldByCode.get(code);
+}
+
+/**
+ * The WGSL field constants, generated rather than transcribed — the same
+ * arrangement, and for the same reason, as the kind constants next door.
+ */
+const svoClusterFieldConstantsWGSL: string = Object.values(SVO_CLUSTER_FIELD_TABLE)
+  .map((entry) => `const ${entry.wgslConstant}: u32 = ${entry.code}u;`)
+  .join("\n");
+
+/**
+ * Slot stride of a cluster's parameter block in the shared scene arena.
+ *
+ * The largest field's block, so every slot is the same size. That costs a
+ * lattice thirty-two unused words and buys two things a variable stride would
+ * lose. A reference stays *checkable*: the resolver rejects an offset that is
+ * not a multiple of the stride, which is what turns a stale or corrupted
+ * word-13 into a reported failure instead of a plausible packing read from the
+ * middle of its neighbour. And a reference stays a function of the cluster's
+ * index alone, so the publisher does not have to carry a prefix sum of every
+ * preceding field's size through a build that assigns references while it is
+ * still discovering which fields the scene uses.
+ */
+export const SVO_SMOOTH_UNION_CLUSTER_ARENA_WORDS = Math.max(
+  ...Object.values(SVO_CLUSTER_FIELD_TABLE).map((entry) => entry.arenaWords),
+);
+
+/** Control points a tapered sweep may carry. Fixed: the block is a fixed-size slot. */
+export const SVO_CLUSTER_SWEEP_MAXIMUM_POINTS = 8;
+
+/**
+ * Octaves the lattice field may stack.
+ *
+ * Three, and the ceiling is a cost bound rather than a soundness one — each
+ * octave is an independent ~63-lobe evaluation, so a fourth would put a covering
+ * fragment past 250 distance evaluations for detail an eighth of the first
+ * octave's, which is below a pixel at any scale this renderer draws.
+ */
+export const SVO_CLUSTER_LATTICE_MAXIMUM_OCTAVES = 3;
+
+/**
+ * Lobes the seeded-lobes field may fuse.
+ *
+ * The floor is where the construction degenerates rather than a matter of
+ * taste: with fewer than four, the smooth union is dominated by the centred
+ * lobe and the result is an ellipsoid — the shape the field exists to be an
+ * alternative to. The ceiling is a cost bound, twelve rotations and twelve
+ * scaled lengths per distance evaluation and four of those per normal.
+ */
+export const SVO_CLUSTER_LOBE_MINIMUM_COUNT = 4;
+export const SVO_CLUSTER_LOBE_MAXIMUM_COUNT = 12;
+
+/**
+ * Largest ratio between a lobe's longest and shortest half-axis.
+ *
+ * A soundness ceiling wearing a cost hat. The lobe's distance is scaled by a
+ * lower bound on its smallest singular value, so a lobe of ratio `a` understeps
+ * by up to `a` near its long axis — and with
+ * {@link SVO_PRIMITIVE_MARCH_ITERATIONS} fixed at 48, a grazing ray on a flat
+ * enough lobe runs out of iterations before it arrives and reports a miss.
+ */
+export const SVO_CLUSTER_LOBE_MAXIMUM_ANISOTROPY = 4;
+
+/**
+ * Defaults for the seeded-lobes placement parameters.
+ *
+ * A *representative* regime and not a definition. The placement rule itself is
+ * three numbers — span, spread and displacement — and they exist as parameters
+ * rather than as constants because the range they cover is the difference
+ * between a compact solid with a slightly irregular skin and a loose cluster of
+ * distinct lumps, and this file has no way to know which of those a caller
+ * wants. See {@link SvoClusterSeededLobesField} for what each one does and for
+ * the containment argument they are constrained by.
+ */
+export const SVO_CLUSTER_LOBE_DEFAULT_SPAN = 0.48;
+export const SVO_CLUSTER_LOBE_DEFAULT_SPAN_SPREAD = 0.24;
+export const SVO_CLUSTER_LOBE_DEFAULT_DISPLACEMENT = 0.8;
+
+/**
+ * Cells per axis in the neighbourhood a cluster's distance is minimised over.
+ *
+ * Four, and this number is the whole safety argument for the kind — it is not a
+ * quality knob.
+ *
+ * The obvious choice is two: `floor(p/period - 1/2)` names the eight cell
+ * centres that surround the point, so the *nearest* sphere is almost always one
+ * of them. That is not enough, and the reason is subtle. The block's membership
+ * changes as the point crosses a cell boundary, and at the instant a cell
+ * leaves, its sphere is only `(1 - jitter)·period - radius` from the point —
+ * 1.2 mm on a 16 mm period. A lobe that close is still inside the smooth
+ * minimum's blend, so the field *jumps* when it leaves. A sphere trace stepping
+ * by `|d|` relies on the field being Lipschitz-1; measured over 200 000 sample
+ * pairs, the eight-cell field's constant is **60**, and 5 of 2 000 rays step
+ * clean through the surface as a result. Enlarging to a 27-cell block does not
+ * help: it is centred on the point's own cell rather than on the point, so its
+ * membership changes at the same boundaries.
+ *
+ * A four-cell block is the smallest one centred on the point that *contains*
+ * the eight surrounding cells with a ring to spare. A leaving sphere is then at
+ * least `(2 - jitter)·period - radius` away — 17.2 mm at the same scale, well
+ * outside the blend — so the field is continuous. Measured constant: 1.000.
+ *
+ * Sixty-four cells is not sixty-four sphere evaluations: the fifty-six outer
+ * cells are rejected by a distance to their *unjittered* centre, which needs no
+ * hash, and only those that can reach the running minimum are evaluated.
+ */
+export const SVO_SMOOTH_UNION_CLUSTER_NEIGHBOURHOOD = 4;
+
+/**
+ * The largest jitter a domain-repeated lattice may carry, as a fraction of its
+ * own period.
+ *
+ * With the neighbourhood above, three tenths is a *look* bound rather than a
+ * safety one — it is where the packing stops reading as a lattice, and past it
+ * a sphere wanders far enough to leave a visible hole in its own row. The
+ * safety bound is the period condition enforced beside it, which this value
+ * also enters.
+ */
+export const SVO_SMOOTH_UNION_CLUSTER_MAXIMUM_JITTER = 0.3;
 
 /** Stable feature IDs returned beside shading normals. */
 export const SVO_PRIMITIVE_FEATURES = Object.freeze({
@@ -93,6 +291,16 @@ export interface SvoCylinderPrimitive extends SvoOrientedPrimitive {
   halfHeight_m: number;
 }
 
+/** Flat-capped cylinder whose cap/side join is a circular fillet. */
+export interface SvoRoundedCylinderPrimitive extends SvoOrientedPrimitive {
+  kind: "rounded-cylinder";
+  /** Outer radial extent, including the fillet. */
+  radius_m: number;
+  /** Outer vertical half extent, including the fillet. */
+  halfHeight_m: number;
+  edgeRadius_m: number;
+}
+
 export interface SvoEllipsoidPrimitive extends SvoOrientedPrimitive {
   kind: "ellipsoid";
   radii_m: Vec3;
@@ -102,7 +310,7 @@ export interface SvoEllipsoidPrimitive extends SvoOrientedPrimitive {
  * A ring swept about the local +Y axis, so its tube lies in the local XZ plane.
  * One record replaces the bead chains scenery used to approximate a coil, and
  * because it is a single owner the surface no longer steps at voxel boundaries
- * where two beads used to meet.
+ * where two of them used to meet.
  */
 export interface SvoTorusPrimitive extends SvoOrientedPrimitive {
   kind: "torus";
@@ -124,6 +332,14 @@ export interface SvoConePrimitive extends SvoOrientedPrimitive {
   halfHeight_m: number;
 }
 
+/** Convex hull of spheres at local -Y/+Y: a tapered segment with round ends. */
+export interface SvoRoundConePrimitive extends SvoOrientedPrimitive {
+  kind: "round-cone";
+  baseRadius_m: number;
+  topRadius_m: number;
+  halfHeight_m: number;
+}
+
 /**
  * A terrain record references the shared scene heightfield table. Variable-size
  * terrain features deliberately do not live in every primitive record.
@@ -134,14 +350,232 @@ export interface SvoTerrainHeightfieldPrimitive extends SvoPrimitiveIdentity {
   normalEpsilon_m?: number;
 }
 
+/**
+ * What every field of the family carries, whatever it is made of.
+ *
+ * Not in the record, because it does not fit: sixty-four bytes leave three
+ * floats of per-kind space and the envelope's half-axes have already spent them.
+ */
+interface SvoClusterFieldBase {
+  /**
+   * Radius of the polynomial smooth minimum that fuses this field's lobes.
+   *
+   * This is what removes the seams a chain of explicit primitives leaves at
+   * every junction, and it is also why the trace is safe: a smooth minimum is a
+   * strict *lower* bound on the union distance, so the march understeps.
+   */
+  readonly smoothRadius_m: number;
+  /** Stable u32 that decorrelates one cluster's procedural arrangement from its neighbours'. */
+  readonly seed: number;
+}
+
+/**
+ * Field 0: a domain-repeated jittered lobe lattice, `n` octaves deep.
+ *
+ * One sphere per cell of an infinite cubic lattice, displaced from its cell
+ * centre by a hash of the cell index, smooth-unioned over the point's own
+ * neighbourhood — then that whole construction repeated at successive halvings
+ * and fused onto itself.
+ *
+ * `field` is optional here and required on every other member, and that is
+ * deliberate rather than lax. A packing authored before this family existed is
+ * a lattice, and leaving the discriminant off means the call sites that already
+ * author one stay untouched and keep publishing exactly the surface they did.
+ */
+export interface SvoClusterLatticeField extends SvoClusterFieldBase {
+  readonly field?: "lattice";
+  /** Radius of one lobe of the coarsest octave's lattice. */
+  readonly latticeLobeRadius_m: number;
+  /** Domain-repetition period of the coarsest octave, the same on all three axes. */
+  readonly latticePeriod_m: number;
+  /**
+   * How far a lobe is displaced from its own cell centre, as a fraction of the
+   * period, in [0, {@link SVO_SMOOTH_UNION_CLUSTER_MAXIMUM_JITTER}].
+   *
+   * Zero is a perfect crystal and looks like one. The cap is where the
+   * four-cell neighbourhood stops being a lower bound; see the constant.
+   *
+   * The lobe radius against the period is the other half of what the packing
+   * looks like: below half the period the lattice separates into distinct
+   * beads, and above `period·√3/2` every cell corner is covered and the result
+   * is a solid with a rumpled skin.
+   */
+  readonly jitter: number;
+  /**
+   * How many halvings of the lattice are fused onto it, in
+   * `1..{@link SVO_CLUSTER_LATTICE_MAXIMUM_OCTAVES}`. Absent is one.
+   *
+   * Octave `k` repeats on `period·2^-k` with lobes of `radius·2^-k`, and is
+   * smooth-unioned onto the running result with `smoothRadius·2^-k` — every
+   * length scaled together, so an octave is the same lattice seen closer and
+   * inherits the same neighbourhood bound that makes the first one sound. Each
+   * octave costs one whole lattice evaluation.
+   */
+  readonly octaves?: number;
+}
+
+/**
+ * Field 1: a set of oriented anisotropic lobes, placed from a seed and fused.
+ *
+ * A general irregular solid: `lobeCount` ellipsoids at hashed orientations and
+ * axis ratios, positioned inside the envelope by a rule that guarantees the
+ * hard `max` never reaches any of them, smooth-unioned in index order. The
+ * silhouette it produces has as many distinct curvatures as it has lobes, which
+ * is the property that distinguishes it from the ellipsoid it is contained in.
+ *
+ * The lobes are not stored. They are derived from `seed` and from the record's
+ * envelope by a fixed hash, which is what keeps the block sixteen words and
+ * what lets the shader recompute the same arrangement on every march step. It
+ * is also loop-invariant over a march, so a compiler that hoists it pays for
+ * the placement once per covering fragment rather than once per step.
+ *
+ * All three placement parameters are fractions of the envelope in its own
+ * normalised space — the space in which the envelope is the unit ball — so the
+ * arrangement is invariant to how eccentric the envelope is and a caller sets
+ * proportions rather than lengths.
+ */
+export interface SvoClusterSeededLobesField extends SvoClusterFieldBase {
+  readonly field: "seeded-lobes";
+  /** Lobes fused, in `{@link SVO_CLUSTER_LOBE_MINIMUM_COUNT}..{@link SVO_CLUSTER_LOBE_MAXIMUM_COUNT}`. */
+  readonly lobeCount: number;
+  /**
+   * Largest ratio between a lobe's longest and shortest half-axis, in
+   * `1..{@link SVO_CLUSTER_LOBE_MAXIMUM_ANISOTROPY}`.
+   *
+   * One makes every lobe a sphere. Raising it both varies the silhouette and
+   * shrinks the solid, because a lobe's *longest* half-axis is what `lobeSpan`
+   * fixes and the other two shorten away from it.
+   */
+  readonly anisotropy: number;
+  /**
+   * A lobe's longest half-axis, as a fraction of the envelope, in `(0, 1)`.
+   * Defaults to {@link SVO_CLUSTER_LOBE_DEFAULT_SPAN}.
+   *
+   * The primary size knob, and it trades solidity against irregularity: what a
+   * lobe spans it cannot also travel, because the two are constrained to sum to
+   * at most one. Near 1 the field is a single centred ellipsoid; small values
+   * give distinct lumps a long way apart, which the blend may or may not close.
+   */
+  readonly lobeSpan?: number;
+  /**
+   * How much `lobeSpan` varies across the lobes, in `[0, 1 - lobeSpan)`.
+   * Defaults to {@link SVO_CLUSTER_LOBE_DEFAULT_SPAN_SPREAD}.
+   *
+   * Zero makes every lobe the same size, which reads as regular however the
+   * orientations scatter.
+   */
+  readonly lobeSpanSpread?: number;
+  /**
+   * The share of its available travel a lobe actually spends, in `[0, 1]`.
+   * Defaults to {@link SVO_CLUSTER_LOBE_DEFAULT_DISPLACEMENT}.
+   *
+   * Zero puts every lobe concentric and the field becomes the union of nested
+   * ellipsoids. One pushes each lobe until its bounding ball is tangent to the
+   * envelope's clearance shell, which is the only way the authored envelope is
+   * also the drawn silhouette — but because travel and span are constrained to
+   * sum to a constant, at exactly one every lobe reaches the *same* shell and
+   * the outline regularises again. Just under one is where both hold.
+   */
+  readonly displacement?: number;
+}
+
+/** One control point of a tapered sweep, in the record's own local frame. */
+export interface SvoClusterSweepPoint {
+  /** Offset from the record's centre, before its orientation is applied. */
+  readonly position_m: Vec3;
+  /** Sweep radius at this point. The sweep tapers linearly between neighbours. */
+  readonly radius_m: number;
+}
+
+/**
+ * Field 2: a tapered sweep along a control polyline.
+ *
+ * Consecutive control points define round cones — the convex hull of the two
+ * spheres at their ends — smooth-unioned in authored order. One record for a
+ * run that would otherwise be a chain of capsules: a record each, a stepped
+ * shading normal at every junction, and a seam wherever two of them met across
+ * a voxel boundary. The segment distance is exact, so the field is Lipschitz-1
+ * rather than merely bounded by one.
+ */
+export interface SvoClusterTaperedSweepField extends SvoClusterFieldBase {
+  readonly field: "tapered-sweep";
+  /** Two to {@link SVO_CLUSTER_SWEEP_MAXIMUM_POINTS} points, in sweep order. */
+  readonly points: readonly SvoClusterSweepPoint[];
+}
+
+/**
+ * The packing a cluster's arena block holds: one of the family's fields.
+ *
+ * Discriminated on `field`, whose absence is the lattice — see
+ * {@link SvoClusterLatticeField}.
+ */
+export type SvoSmoothUnionClusterPacking =
+  | SvoClusterLatticeField
+  | SvoClusterSeededLobesField
+  | SvoClusterTaperedSweepField;
+
+/** The field a packing names, with the lattice standing in for an absent discriminant. */
+export function svoClusterFieldName(packing: SvoSmoothUnionClusterPacking): SvoClusterFieldName {
+  return packing.field ?? "lattice";
+}
+
+/**
+ * An aggregate: one record standing for a procedural field clipped to an
+ * ellipsoidal envelope.
+ *
+ * It exists because the explicit alternative does not fit. An aggregate spelled
+ * as fifteen hundred records spends more than a third of the scene's 4 096-record
+ * budget, and — worse, because it is silent — averages some eighty of them in
+ * each brick against a 64-candidate-per-brick ceiling whose overflow is a
+ * *dropped* primitive: absent from the opacity pyramid and the radiance atlas
+ * while still drawing in primary visibility. One record owning a coarse region
+ * outright is how that budget and that density are both returned.
+ *
+ * `lobeRadii_m` is the record's three dimension floats, so every bounds formula
+ * in the tree — the raster proxy, the voxelizer's world AABB, the candidate BVH
+ * leaf, the coverage footprint, the sway budget — reads an ordinary ellipsoid
+ * without knowing this kind exists. That is sound rather than convenient: the
+ * envelope is applied as a hard `max` against its own distance, so the solid is
+ * contained in the ellipsoid by construction, and a voxelizer that treats the
+ * whole envelope as solid over-occludes a fissured interior. Over-occluding is
+ * the safe direction for shadows and ambient occlusion; under-occluding is
+ * indistinguishable from empty space to every consumer of the pyramid.
+ */
+export interface SvoSmoothUnionClusterPrimitive extends SvoOrientedPrimitive {
+  kind: "smooth-union-cluster";
+  /**
+   * Half-axes of the envelope every field of the family is clipped to.
+   *
+   * Named for the lattice's lobe because that is what it was when the kind held
+   * one field. It is the envelope for all of them, and the containment argument
+   * above is what every other consumer of this record is relying on.
+   */
+  lobeRadii_m: Vec3;
+  /** u32 word offset of this cluster's parameter block in the shared scene arena. */
+  clusterReference: number;
+  /**
+   * The block's contents.
+   *
+   * Present on an authored descriptor and absent on one recovered from a packed
+   * record, exactly as a terrain record recovers a reference and not a
+   * heightfield. Evaluating a cluster without either is an error rather than a
+   * plausible-looking default: a silently degenerate packing renders as a
+   * smooth ellipsoid, which is a shape the scene never asked for.
+   */
+  packing?: SvoSmoothUnionClusterPacking;
+}
+
 export type SvoPrimitiveDescriptor =
   | SvoSpherePrimitive
   | SvoBoxPrimitive
   | SvoCapsulePrimitive
   | SvoCylinderPrimitive
+  | SvoRoundedCylinderPrimitive
   | SvoEllipsoidPrimitive
   | SvoTorusPrimitive
   | SvoConePrimitive
+  | SvoRoundConePrimitive
+  | SvoSmoothUnionClusterPrimitive
   | SvoTerrainHeightfieldPrimitive;
 
 export interface SvoPrimitiveSample {
@@ -175,6 +609,28 @@ export interface SvoPrimitiveRayHit {
 }
 
 export type SvoTerrainResolver = (terrainReference: number) => TerrainDescription | undefined;
+
+/**
+ * Reads a cluster's packing back out of the scene arena.
+ *
+ * The mirror of {@link SvoTerrainResolver}, and for the same reason: a record
+ * recovered from packed bytes names an arena block it cannot itself contain, so
+ * whoever holds the arena supplies the contents. A descriptor that still has
+ * its authored `packing` needs no resolver.
+ */
+export type SvoClusterResolver = (clusterReference: number) => SvoSmoothUnionClusterPacking | undefined;
+
+function resolveCluster(
+  descriptor: SvoSmoothUnionClusterPrimitive,
+  clusterResolver?: SvoClusterResolver,
+): ResolvedCluster {
+  const packing = descriptor.packing ?? clusterResolver?.(descriptor.clusterReference);
+  if (!packing) {
+    throw new Error("Smooth-union cluster evaluation requires its authored packing or an arena resolver");
+  }
+  validateSvoClusterPacking(packing, descriptor.lobeRadii_m);
+  return { ...descriptor, packing };
+}
 
 const NORMAL_EPSILON = 1e-12;
 
@@ -234,6 +690,15 @@ function dimensions(descriptor: SvoPrimitiveDescriptor): Vec3 {
     positive(descriptor.halfHeight_m, "Cylinder half height");
     return { x: descriptor.radius_m, y: descriptor.halfHeight_m, z: 0 };
   }
+  if (descriptor.kind === "rounded-cylinder") {
+    positive(descriptor.radius_m, "Rounded-cylinder radius");
+    positive(descriptor.halfHeight_m, "Rounded-cylinder half height");
+    positive(descriptor.edgeRadius_m, "Rounded-cylinder edge radius");
+    if (descriptor.edgeRadius_m > Math.min(descriptor.radius_m, descriptor.halfHeight_m)) {
+      throw new RangeError("Rounded-cylinder edge radius must fit inside its outer radius and half height");
+    }
+    return { x: descriptor.radius_m, y: descriptor.halfHeight_m, z: descriptor.edgeRadius_m };
+  }
   if (descriptor.kind === "ellipsoid") {
     finiteVec3(descriptor.radii_m, "Ellipsoid radii");
     positive(descriptor.radii_m.x, "Ellipsoid X radius");
@@ -251,7 +716,7 @@ function dimensions(descriptor: SvoPrimitiveDescriptor): Vec3 {
     }
     return { x: descriptor.majorRadius_m, y: descriptor.minorRadius_m, z: 0 };
   }
-  if (descriptor.kind === "cone") {
+  if (descriptor.kind === "cone" || descriptor.kind === "round-cone") {
     positive(descriptor.halfHeight_m, "Cone half height");
     nonNegative(descriptor.baseRadius_m, "Cone base radius");
     nonNegative(descriptor.topRadius_m, "Cone top radius");
@@ -259,7 +724,23 @@ function dimensions(descriptor: SvoPrimitiveDescriptor): Vec3 {
     if (!(Math.max(descriptor.baseRadius_m, descriptor.topRadius_m) > 0)) {
       throw new RangeError("Cone must have a positive radius at one end");
     }
+    if (descriptor.kind === "round-cone"
+      && !(2 * descriptor.halfHeight_m > Math.abs(descriptor.topRadius_m - descriptor.baseRadius_m) * SINGLE_PRECISION_SLACK)) {
+      throw new RangeError("Round-cone taper must not outrun its segment length");
+    }
     return { x: descriptor.baseRadius_m, y: descriptor.halfHeight_m, z: descriptor.topRadius_m };
+  }
+  if (descriptor.kind === "smooth-union-cluster") {
+    finiteVec3(descriptor.lobeRadii_m, "Cluster lobe radii");
+    positive(descriptor.lobeRadii_m.x, "Cluster lobe X radius");
+    positive(descriptor.lobeRadii_m.y, "Cluster lobe Y radius");
+    positive(descriptor.lobeRadii_m.z, "Cluster lobe Z radius");
+    uint32(descriptor.clusterReference, "Cluster reference");
+    if (descriptor.clusterReference === SVO_PRIMITIVE_INVALID_REFERENCE) {
+      throw new RangeError("Cluster reference may not use the invalid sentinel");
+    }
+    if (descriptor.packing) validateSvoClusterPacking(descriptor.packing, descriptor.lobeRadii_m);
+    return { ...descriptor.lobeRadii_m };
   }
   uint32(descriptor.terrainReference, "Terrain reference");
   if (descriptor.terrainReference === SVO_PRIMITIVE_INVALID_REFERENCE) throw new RangeError("Terrain reference may not use the invalid sentinel");
@@ -268,31 +749,160 @@ function dimensions(descriptor: SvoPrimitiveDescriptor): Vec3 {
   return { x: epsilon, y: 0, z: 0 };
 }
 
-function kindCode(kind: SvoPrimitiveDescriptor["kind"]): number {
-  if (kind === "sphere") return SVO_PRIMITIVE_KINDS.sphere;
-  if (kind === "box") return SVO_PRIMITIVE_KINDS.box;
-  if (kind === "capsule") return SVO_PRIMITIVE_KINDS.capsule;
-  if (kind === "cylinder") return SVO_PRIMITIVE_KINDS.cylinder;
-  if (kind === "ellipsoid") return SVO_PRIMITIVE_KINDS.ellipsoid;
-  if (kind === "torus") return SVO_PRIMITIVE_KINDS.torus;
-  if (kind === "cone") return SVO_PRIMITIVE_KINDS.cone;
-  return SVO_PRIMITIVE_KINDS.terrainHeightfield;
+/**
+ * Both bounds below are checked with a single-precision slack, and that is not
+ * cosmetic: a packing lives in the scene arena as f32s, so a value authored *at*
+ * a limit comes back from the round trip a few ulps above it — `fround(0.3)` is
+ * 0.30000001 — and a scene that packed successfully would then fail to unpack.
+ * The slack is far below anything that could make an argument here untrue.
+ */
+const SINGLE_PRECISION_SLACK = 1 + 1e-6;
+
+/**
+ * The envelope's own Lipschitz-1 lower bound, read from the inside.
+ *
+ * How far a point is from the envelope surface, *underestimated*. Used to place
+ * and to check every field's lobes, and it is exactly the function the hard
+ * `max` clips with — so a lobe that clears this margin is one the `max` provably
+ * never touches, and the silhouette it draws is its own rather than an ellipsoid
+ * cap. Any other containment test would be either unsound or gratuitously
+ * conservative: the ellipsoid with each half-axis reduced by `r` does *not*
+ * contain every ball of radius `r` that fits, which is easy to get wrong on an
+ * eccentric envelope.
+ */
+function clusterEnvelopeClearance_m(point: Vec3, lobeRadii_m: Vec3): number {
+  return -clusterLobeDistance(point, lobeRadii_m);
 }
 
-/** Kinds whose ray hit is marched rather than solved in closed form. */
-function marchedKind(kind: SvoPrimitiveDescriptor["kind"]): boolean {
-  return kind === "torus" || kind === "cone";
-}
-
-function primitiveFlags(kind: SvoPrimitiveDescriptor["kind"]): number {
-  if (kind === "box" || kind === "cylinder") return SVO_PRIMITIVE_FLAGS.exactDistance | SVO_PRIMITIVE_FLAGS.hardFeatures;
-  if (kind === "sphere" || kind === "capsule" || kind === "ellipsoid") return SVO_PRIMITIVE_FLAGS.exactDistance;
-  if (kind === "torus") return SVO_PRIMITIVE_FLAGS.exactDistance | SVO_PRIMITIVE_FLAGS.marchedIntersection;
-  if (kind === "cone") {
-    return SVO_PRIMITIVE_FLAGS.exactDistance | SVO_PRIMITIVE_FLAGS.hardFeatures | SVO_PRIMITIVE_FLAGS.marchedIntersection;
+/**
+ * Reject a packing whose field would stop being a Lipschitz-1 lower bound, or
+ * would be clipped by the envelope it is meant to fill.
+ *
+ * Every check here is load-bearing rather than tidy. A field that oversteps
+ * makes the march walk through its own surface, and the symptom downstream is a
+ * hole rather than an exception; a lobe that pushes past the envelope is sliced
+ * flat by the `max`, and the symptom is an ellipsoid cap on a shape that spent
+ * every other number avoiding one. Neither is visible from anywhere but here.
+ */
+export function validateSvoClusterPacking(packing: SvoSmoothUnionClusterPacking, lobeRadii_m: Vec3): void {
+  nonNegative(packing.smoothRadius_m, "Cluster smooth-minimum radius");
+  uint32(packing.seed, "Cluster seed");
+  const shortestEnvelope_m = Math.min(lobeRadii_m.x, lobeRadii_m.y, lobeRadii_m.z);
+  if (packing.field === "seeded-lobes") {
+    if (!Number.isInteger(packing.lobeCount)
+      || packing.lobeCount < SVO_CLUSTER_LOBE_MINIMUM_COUNT || packing.lobeCount > SVO_CLUSTER_LOBE_MAXIMUM_COUNT) {
+      throw new RangeError(
+        `Seeded-lobe count must be an integer in ${SVO_CLUSTER_LOBE_MINIMUM_COUNT}..${SVO_CLUSTER_LOBE_MAXIMUM_COUNT}`,
+      );
+    }
+    if (!Number.isFinite(packing.anisotropy)
+      || packing.anisotropy < 1 || packing.anisotropy > SVO_CLUSTER_LOBE_MAXIMUM_ANISOTROPY) {
+      throw new RangeError(`Seeded-lobe anisotropy must be in 1..${SVO_CLUSTER_LOBE_MAXIMUM_ANISOTROPY}`);
+    }
+    const { span, spanSpread, displacement } = seededLobePlacement(packing);
+    positive(span, "Seeded-lobe span");
+    nonNegative(spanSpread, "Seeded-lobe span spread");
+    if (!Number.isFinite(displacement) || displacement < 0 || displacement > 1) {
+      throw new RangeError("Seeded-lobe displacement must be in 0..1");
+    }
+    // Span, its spread and the blend all come out of the same unit budget: the
+    // widest lobe reaches `span + spanSpread` and the blend inflates the union
+    // by up to its own radius on top, so exceeding one leaves the hard `max`
+    // slicing the lobes it was supposed to contain without touching.
+    const widest = span + spanSpread + packing.smoothRadius_m / shortestEnvelope_m;
+    if (widest * SINGLE_PRECISION_SLACK >= 1) {
+      throw new RangeError(
+        `Seeded lobes overrun their envelope: span ${span} plus spread ${spanSpread} plus a blend of `
+        + `${(packing.smoothRadius_m / shortestEnvelope_m).toFixed(3)} of the shortest half-axis must stay under 1`,
+      );
+    }
+    return;
   }
-  if (kind === "terrain-heightfield") return SVO_PRIMITIVE_FLAGS.externalTerrain;
-  return 0;
+  if (packing.field === "tapered-sweep") {
+    if (packing.points.length < 2 || packing.points.length > SVO_CLUSTER_SWEEP_MAXIMUM_POINTS) {
+      throw new RangeError(`Tapered-sweep control polyline must have 2..${SVO_CLUSTER_SWEEP_MAXIMUM_POINTS} points`);
+    }
+    packing.points.forEach((point, index) => {
+      finiteVec3(point.position_m, `Tapered-sweep point ${index} position`);
+      positive(point.radius_m, `Tapered-sweep point ${index} radius`);
+      // The margin the hard `max` needs: the convex hull of two contained balls
+      // is contained, so checking the balls checks every segment — and adding
+      // the blend covers the smooth minimum, which *inflates* the union by up
+      // to a quarter of its own radius.
+      const clearance_m = clusterEnvelopeClearance_m(point.position_m, lobeRadii_m);
+      if (clearance_m * SINGLE_PRECISION_SLACK < point.radius_m + packing.smoothRadius_m) {
+        throw new RangeError(
+          `Tapered-sweep point ${index} reaches past its envelope: the point is ${clearance_m.toFixed(4)} m inside it `
+          + `and needs ${(point.radius_m + packing.smoothRadius_m).toFixed(4)} m for its radius plus the blend`,
+        );
+      }
+    });
+    for (let index = 0; index + 1 < packing.points.length; index += 1) {
+      const from = packing.points[index];
+      const to = packing.points[index + 1];
+      const span_m = Math.hypot(
+        to.position_m.x - from.position_m.x,
+        to.position_m.y - from.position_m.y,
+        to.position_m.z - from.position_m.z,
+      );
+      // A round cone whose taper outruns its own length is one ball inside the
+      // other, and the closed-form distance below degenerates on it.
+      if (!(span_m > Math.abs(to.radius_m - from.radius_m) * SINGLE_PRECISION_SLACK)) {
+        throw new RangeError(
+          `Tapered-sweep segment ${index} tapers faster than it runs: `
+          + `${span_m.toFixed(4)} m between points against a ${Math.abs(to.radius_m - from.radius_m).toFixed(4)} m radius change`,
+        );
+      }
+    }
+    return;
+  }
+  positive(packing.latticeLobeRadius_m, "Cluster lattice lobe radius");
+  positive(packing.latticePeriod_m, "Cluster lattice period");
+  nonNegative(packing.jitter, "Cluster jitter");
+  const octaves = packing.octaves ?? 1;
+  if (!Number.isInteger(octaves) || octaves < 1 || octaves > SVO_CLUSTER_LATTICE_MAXIMUM_OCTAVES) {
+    throw new RangeError(`Cluster lattice octaves must be an integer in 1..${SVO_CLUSTER_LATTICE_MAXIMUM_OCTAVES}`);
+  }
+  if (packing.jitter > SVO_SMOOTH_UNION_CLUSTER_MAXIMUM_JITTER * SINGLE_PRECISION_SLACK) {
+    throw new RangeError(`Cluster jitter must not exceed ${SVO_SMOOTH_UNION_CLUSTER_MAXIMUM_JITTER} of the lattice period`);
+  }
+  // The condition that keeps the field continuous, and therefore the trace
+  // sound. A lobe leaving the neighbourhood is at least this far away; if the
+  // smooth minimum can still feel it there, the field steps and rays tunnel.
+  // One check covers every octave: period, lobe radius and blend are all
+  // scaled by the same `2^-k`, so the inequality is scale-invariant.
+  const departingDistance_m = (SVO_SMOOTH_UNION_CLUSTER_NEIGHBOURHOOD / 2 - packing.jitter) * packing.latticePeriod_m;
+  if (departingDistance_m * SINGLE_PRECISION_SLACK < packing.latticeLobeRadius_m + packing.smoothRadius_m) {
+    throw new RangeError(
+      "Cluster lattice lobes reach past their own neighbourhood: "
+      + `(${SVO_SMOOTH_UNION_CLUSTER_NEIGHBOURHOOD / 2} - jitter) * period must be at least the lattice lobe plus smooth-minimum radius`,
+    );
+  }
+}
+
+function kindCode(kind: SvoPrimitiveKindName): number {
+  return SVO_PRIMITIVE_KIND_TABLE[kind].code;
+}
+
+function primitiveFlags(kind: SvoPrimitiveKindName): number {
+  return SVO_PRIMITIVE_KIND_TABLE[kind].flags;
+}
+
+/**
+ * Conservative local half-extent of a primitive about its own centre.
+ *
+ * The one formula behind every bound in the tree. It used to be five, in five
+ * files, in five slightly different forms — and a bound that is too small does
+ * not fail loudly, it removes geometry from a raster proxy or a dirty region
+ * and leaves a clipped silhouette to be noticed by eye.
+ */
+export function svoPrimitiveLocalExtent_m(descriptor: SvoPrimitiveDescriptor): Vec3 {
+  return SVO_PRIMITIVE_KIND_TABLE[descriptor.kind].localExtent_m(dimensions(descriptor));
+}
+
+/** Radius of a sphere about the centre containing the primitive at any orientation. */
+export function svoPrimitiveBoundingRadius_m(descriptor: SvoPrimitiveDescriptor): number {
+  return SVO_PRIMITIVE_KIND_TABLE[descriptor.kind].boundingRadius_m(dimensions(descriptor));
 }
 
 function descriptorCenter(descriptor: SvoPrimitiveDescriptor): Vec3 {
@@ -315,10 +925,21 @@ export function canonicalSvoPrimitive(descriptor: SvoPrimitiveDescriptor): SvoPr
   if (descriptor.kind === "box") return { ...descriptor, center_m: { ...descriptorCenter(descriptor) }, ownerId, orientation: descriptorOrientation(descriptor), halfExtents_m: d };
   if (descriptor.kind === "capsule") return { ...descriptor, center_m: { ...descriptorCenter(descriptor) }, ownerId, orientation: descriptorOrientation(descriptor), radius_m: d.x, segmentHalfLength_m: d.y };
   if (descriptor.kind === "cylinder") return { ...descriptor, center_m: { ...descriptorCenter(descriptor) }, ownerId, orientation: descriptorOrientation(descriptor), radius_m: d.x, halfHeight_m: d.y };
+  if (descriptor.kind === "rounded-cylinder") return { ...descriptor, center_m: { ...descriptorCenter(descriptor) }, ownerId, orientation: descriptorOrientation(descriptor), radius_m: d.x, halfHeight_m: d.y, edgeRadius_m: d.z };
   if (descriptor.kind === "ellipsoid") return { ...descriptor, center_m: { ...descriptorCenter(descriptor) }, ownerId, orientation: descriptorOrientation(descriptor), radii_m: d };
   if (descriptor.kind === "torus") return { ...descriptor, center_m: { ...descriptorCenter(descriptor) }, ownerId, orientation: descriptorOrientation(descriptor), majorRadius_m: d.x, minorRadius_m: d.y };
-  if (descriptor.kind === "cone") return { ...descriptor, center_m: { ...descriptorCenter(descriptor) }, ownerId, orientation: descriptorOrientation(descriptor), baseRadius_m: d.x, halfHeight_m: d.y, topRadius_m: d.z };
+  if (descriptor.kind === "cone" || descriptor.kind === "round-cone") return { ...descriptor, center_m: { ...descriptorCenter(descriptor) }, ownerId, orientation: descriptorOrientation(descriptor), baseRadius_m: d.x, halfHeight_m: d.y, topRadius_m: d.z };
+  if (descriptor.kind === "smooth-union-cluster") {
+    return { ...descriptor, center_m: { ...descriptorCenter(descriptor) }, ownerId, orientation: descriptorOrientation(descriptor), lobeRadii_m: d };
+  }
   return { ...descriptor, ownerId, normalEpsilon_m: d.x };
+}
+
+/** The word-13 arena reference a kind carries, or the invalid sentinel. */
+function arenaReference(descriptor: SvoPrimitiveDescriptor): number {
+  if (descriptor.kind === "terrain-heightfield") return descriptor.terrainReference >>> 0;
+  if (descriptor.kind === "smooth-union-cluster") return descriptor.clusterReference >>> 0;
+  return SVO_PRIMITIVE_INVALID_REFERENCE;
 }
 
 /**
@@ -342,7 +963,7 @@ export function packSvoPrimitiveRecords(descriptors: readonly SvoPrimitiveDescri
     floats.set([orientation.x, orientation.y, orientation.z, orientation.w], base + 8);
     words.set([
       descriptor.primitiveId >>> 0,
-      descriptor.kind === "terrain-heightfield" ? descriptor.terrainReference >>> 0 : SVO_PRIMITIVE_INVALID_REFERENCE,
+      arenaReference(descriptor),
       primitiveFlags(descriptor.kind),
       0,
     ], base + 12);
@@ -361,9 +982,17 @@ function descriptorFromRecord(words: Uint32Array, floats: Float32Array, base: nu
   if (kind === SVO_PRIMITIVE_KINDS.box) return { ...identity, kind: "box", center_m, orientation, halfExtents_m: d };
   if (kind === SVO_PRIMITIVE_KINDS.capsule) return { ...identity, kind: "capsule", center_m, orientation, radius_m: d.x, segmentHalfLength_m: d.y };
   if (kind === SVO_PRIMITIVE_KINDS.cylinder) return { ...identity, kind: "cylinder", center_m, orientation, radius_m: d.x, halfHeight_m: d.y };
+  if (kind === SVO_PRIMITIVE_KINDS.roundedCylinder) return { ...identity, kind: "rounded-cylinder", center_m, orientation, radius_m: d.x, halfHeight_m: d.y, edgeRadius_m: d.z };
   if (kind === SVO_PRIMITIVE_KINDS.ellipsoid) return { ...identity, kind: "ellipsoid", center_m, orientation, radii_m: d };
   if (kind === SVO_PRIMITIVE_KINDS.torus) return { ...identity, kind: "torus", center_m, orientation, majorRadius_m: d.x, minorRadius_m: d.y };
   if (kind === SVO_PRIMITIVE_KINDS.cone) return { ...identity, kind: "cone", center_m, orientation, baseRadius_m: d.x, halfHeight_m: d.y, topRadius_m: d.z };
+  if (kind === SVO_PRIMITIVE_KINDS.roundCone) return { ...identity, kind: "round-cone", center_m, orientation, baseRadius_m: d.x, halfHeight_m: d.y, topRadius_m: d.z };
+  if (kind === SVO_PRIMITIVE_KINDS.smoothUnionCluster) {
+    // No `packing`: the record carries only the reference, and inventing a
+    // default here would produce a smooth ellipsoid that renders plausibly and
+    // is not the authored shape. A caller that needs the packing resolves it.
+    return { ...identity, kind: "smooth-union-cluster", center_m, orientation, lobeRadii_m: d, clusterReference: words[base + 13] };
+  }
   if (kind === SVO_PRIMITIVE_KINDS.terrainHeightfield) {
     return { ...identity, kind: "terrain-heightfield", terrainReference: words[base + 13], normalEpsilon_m: d.x };
   }
@@ -679,12 +1308,520 @@ function intersectEllipsoidLocal(
   return nearestLocalHit(candidates, ray);
 }
 
+/** Exact `uint32` mirror of `svoClusterHash`; one avalanche per lattice cell. */
+function clusterCellHash(cellX: number, cellY: number, cellZ: number, seed: number): number {
+  let hash = seed >>> 0;
+  hash = (hash ^ Math.imul(cellX | 0, 0x9e37_79b1)) >>> 0;
+  hash = (hash ^ Math.imul(cellY | 0, 0x85eb_ca77)) >>> 0;
+  hash = (hash ^ Math.imul(cellZ | 0, 0xc2b2_ae3d)) >>> 0;
+  hash = (hash ^ (hash >>> 16)) >>> 0;
+  hash = Math.imul(hash, 0x7feb_352d) >>> 0;
+  hash = (hash ^ (hash >>> 15)) >>> 0;
+  hash = Math.imul(hash, 0x846c_a68b) >>> 0;
+  return (hash ^ (hash >>> 16)) >>> 0;
+}
+
 /**
- * Local signed distance, shading normal and feature of the marched kinds. Both
- * distances are exact, which is what lets one sphere trace stand in for a
- * bespoke root solve per shape.
+ * Three decorrelated offsets in [-1, 1] from one avalanche.
+ *
+ * Ten bits an axis rather than three separate hashes: the jitter this scales is
+ * at most three tenths of a lattice period — millimetres at the scales this
+ * renderer draws — so a thousand levels resolves it to microns, and it runs
+ * this eight times per evaluation and roughly sixty times per covering ray.
  */
-function marchedLocalSample(descriptor: SvoTorusPrimitive | SvoConePrimitive, point: Vec3): SvoPrimitiveSample {
+function clusterCellJitter(cellX: number, cellY: number, cellZ: number, seed: number): Vec3 {
+  const hash = clusterCellHash(cellX, cellY, cellZ, seed);
+  return {
+    x: ((hash & 0x3ff) / 1023) * 2 - 1,
+    y: (((hash >>> 10) & 0x3ff) / 1023) * 2 - 1,
+    z: (((hash >>> 20) & 0x3ff) / 1023) * 2 - 1,
+  };
+}
+
+/**
+ * The polynomial smooth minimum, and the reason the aggregate is traceable at
+ * all: it is a strict lower bound on `min(a, b)`, so a sphere trace stepping by
+ * it understeps and can never cross the surface it is looking for.
+ */
+function smoothMinimum(a: number, b: number, k: number): number {
+  if (!(k > 0)) return Math.min(a, b);
+  const h = Math.min(1, Math.max(0, 0.5 + (0.5 * (b - a)) / k));
+  return b + (a - b) * h - k * h * (1 - h);
+}
+
+/**
+ * One octave of the lattice field: every length the neighbourhood argument
+ * involves, at one scale, plus the seed that decorrelates it from the others.
+ */
+interface ClusterLatticeOctave {
+  readonly latticeLobeRadius_m: number;
+  readonly latticePeriod_m: number;
+  readonly jitter: number;
+  readonly smoothRadius_m: number;
+  readonly seed: number;
+}
+
+/** Surface distance to the jittered sphere of one lattice cell. */
+function clusterSphereDistance(
+  point: Vec3,
+  cellX: number,
+  cellY: number,
+  cellZ: number,
+  octave: ClusterLatticeOctave,
+): number {
+  const period = octave.latticePeriod_m;
+  const jitter = clusterCellJitter(cellX, cellY, cellZ, octave.seed);
+  return Math.hypot(
+    point.x - (cellX + 0.5 + octave.jitter * jitter.x) * period,
+    point.y - (cellY + 0.5 + octave.jitter * jitter.y) * period,
+    point.z - (cellZ + 0.5 + octave.jitter * jitter.z) * period,
+  ) - octave.latticeLobeRadius_m;
+}
+
+/**
+ * The fused packing of one octave, minimised over the point's own neighbourhood.
+ *
+ * Two passes, and the split is what makes sixty-four cells affordable. The
+ * inner eight — the cell centres immediately surrounding the point — always
+ * matter and are evaluated outright; they also establish a tight running
+ * minimum. The outer fifty-six are then rejected by the distance to their
+ * *unjittered* centre, which costs a subtract and a dot product and no hash at
+ * all, and only the handful that could still reach the running minimum are
+ * evaluated. On a representative packing that is roughly fifteen of the fifty-six.
+ *
+ * The fold order is fixed and shared with the WGSL because a polynomial smooth
+ * minimum is not associative: folding the same spheres in a different sequence
+ * gives a different answer, by up to a quarter of the smoothing radius.
+ */
+function clusterLatticeOctaveDistance(point: Vec3, octave: ClusterLatticeOctave): number {
+  const period = octave.latticePeriod_m;
+  const span = SVO_SMOOTH_UNION_CLUSTER_NEIGHBOURHOOD;
+  const ring = span / 2 - 1;
+  const baseX = Math.floor(point.x / period - 0.5) - ring;
+  const baseY = Math.floor(point.y / period - 0.5) - ring;
+  const baseZ = Math.floor(point.z / period - 0.5) - ring;
+  let distance = 0;
+  for (let corner = 0; corner < 8; corner += 1) {
+    const sphere = clusterSphereDistance(
+      point, baseX + ring + (corner & 1), baseY + ring + ((corner >> 1) & 1), baseZ + ring + ((corner >> 2) & 1), octave,
+    );
+    distance = corner === 0 ? sphere : smoothMinimum(distance, sphere, octave.smoothRadius_m);
+  }
+  // The furthest a sphere can sit from its own unjittered centre, plus the
+  // reach of the lobe and of the blend. A cell whose nominal centre is
+  // further than this beyond the running minimum cannot change it.
+  const reach = octave.jitter * period * Math.sqrt(3) + octave.latticeLobeRadius_m + octave.smoothRadius_m;
+  for (let index = 0; index < span * span * span; index += 1) {
+    const stepX = index % span;
+    const stepY = Math.floor(index / span) % span;
+    const stepZ = Math.floor(index / (span * span)) % span;
+    if (stepX >= ring && stepX <= ring + 1 && stepY >= ring && stepY <= ring + 1 && stepZ >= ring && stepZ <= ring + 1) continue;
+    const cellX = baseX + stepX, cellY = baseY + stepY, cellZ = baseZ + stepZ;
+    const nominal = Math.hypot(
+      point.x - (cellX + 0.5) * period,
+      point.y - (cellY + 0.5) * period,
+      point.z - (cellZ + 0.5) * period,
+    );
+    if (nominal - reach > distance) continue;
+    distance = smoothMinimum(distance, clusterSphereDistance(point, cellX, cellY, cellZ, octave), octave.smoothRadius_m);
+  }
+  return distance;
+}
+
+/**
+ * The seed octave `k` hashes its cells with.
+ *
+ * Zero for octave zero, exactly — `imul(0, ...)` is zero and `seed ^ 0` is
+ * `seed` — which is what makes a one-octave field bit-for-bit the field this
+ * kind published before octaves existed. Without that the octave parameter
+ * would silently re-pack every set already authored against it.
+ */
+function clusterOctaveSeed(seed: number, octave: number): number {
+  return (seed ^ Math.imul(octave, 0x9e37_79b1)) >>> 0;
+}
+
+/**
+ * The lattice field: octaves of the same packing, each a halving of the last,
+ * smooth-unioned onto the running result.
+ *
+ * Both the scale and the blend halve together. That is what carries the
+ * neighbourhood argument up the stack unchanged: octave `k` is the octave-zero
+ * packing viewed at `2^k`, so if the first satisfies the period condition every
+ * one after it does, and each is separately a Lipschitz-1 lower bound. The
+ * smooth minimum that fuses them is a convex combination of their gradients, so
+ * the stack is one as well.
+ */
+function clusterLatticeDistance(point: Vec3, packing: SvoClusterLatticeField): number {
+  const octaves = packing.octaves ?? 1;
+  let distance = 0;
+  for (let octave = 0; octave < octaves; octave += 1) {
+    // A negative power of two, so octave zero scales every length by an exact
+    // 1 and the single-octave result is unchanged to the last bit.
+    const scale = 2 ** -octave;
+    const smoothRadius_m = packing.smoothRadius_m * scale;
+    const sample = clusterLatticeOctaveDistance(point, {
+      latticeLobeRadius_m: packing.latticeLobeRadius_m * scale,
+      latticePeriod_m: packing.latticePeriod_m * scale,
+      jitter: packing.jitter,
+      smoothRadius_m,
+      seed: clusterOctaveSeed(packing.seed, octave),
+    });
+    distance = octave === 0 ? sample : smoothMinimum(distance, sample, smoothRadius_m);
+  }
+  return distance;
+}
+
+/**
+ * One anisotropic lobe, in the envelope's normalised space — the space in which
+ * the envelope is the unit ball. Both the centre and the half-axes are
+ * fractions of the envelope, not metres.
+ */
+interface ClusterSeededLobe {
+  readonly center: Vec3;
+  readonly halfAxes: Vec3;
+  readonly orientation: Quaternion;
+}
+
+/** The three placement parameters, with the defaults an absent one takes. */
+function seededLobePlacement(packing: SvoClusterSeededLobesField): {
+  span: number; spanSpread: number; displacement: number;
+} {
+  return {
+    span: packing.lobeSpan ?? SVO_CLUSTER_LOBE_DEFAULT_SPAN,
+    spanSpread: packing.lobeSpanSpread ?? SVO_CLUSTER_LOBE_DEFAULT_SPAN_SPREAD,
+    displacement: packing.displacement ?? SVO_CLUSTER_LOBE_DEFAULT_DISPLACEMENT,
+  };
+}
+
+/**
+ * Where lobe `index` sits, how big it is and which way it faces.
+ *
+ * Four hashes of the same avalanche the lattice uses, so the arrangement is
+ * reproducible from `seed` alone and nothing about it is stored.
+ *
+ * Everything is in the envelope's *normalised* space, and that is what makes
+ * the solid scale with what it was authored against. Sizing a lobe against the
+ * envelope's shortest half-axis instead — the obvious reading of "inside it" —
+ * caps every lobe of a 3:2 envelope at its narrow dimension and leaves the
+ * result occupying a fraction of the volume the voxelizer and the opacity
+ * pyramid have already called solid.
+ *
+ * The containment argument is then one line. A lobe's surface reaches
+ * `|v| + span` from the origin in normalised space, the envelope's own
+ * Lipschitz-1 lower bound at radius `u` is `(1 - u)·Rmin`, and `v` is placed
+ * within `1 - span - smooth/Rmin` — so the clearance at the lobe's surface is
+ * at least the blend and the hard `max` never bites.
+ *
+ * Lobe zero is centred, which is the cheapest guarantee that every other lobe
+ * has something to fuse to. It is not a proof of connectedness: a low count, a
+ * high anisotropy and a high displacement can still leave a lobe standing off
+ * on its own, and the blend is the knob that closes it.
+ */
+function clusterSeededLobe(index: number, lobeRadii_m: Vec3, packing: SvoClusterSeededLobesField): ClusterSeededLobe {
+  const shortest_m = Math.min(lobeRadii_m.x, lobeRadii_m.y, lobeRadii_m.z);
+  const placement = seededLobePlacement(packing);
+  const offsetHash = clusterCellJitter(index, 0, 0, packing.seed);
+  const shapeHash = clusterCellJitter(index, 1, 0, packing.seed);
+  const axisHash = clusterCellJitter(index, 2, 0, packing.seed);
+  const spreadHash = clusterCellJitter(index, 3, 0, packing.seed);
+
+  // Axis ratios spanning at most `anisotropy` end to end, then rescaled so the
+  // longest is one — which is what lets `span` alone stand for the lobe's reach
+  // in the containment argument, whatever the anisotropy did to the other two.
+  const raw = {
+    x: Math.pow(packing.anisotropy, 0.5 * shapeHash.x),
+    y: Math.pow(packing.anisotropy, 0.5 * shapeHash.y),
+    z: Math.pow(packing.anisotropy, 0.5 * shapeHash.z),
+  };
+  const longest = Math.max(raw.x, raw.y, raw.z);
+  const span = placement.span + placement.spanSpread * 0.5 * (spreadHash.x + 1);
+  const halfAxes = { x: span * raw.x / longest, y: span * raw.y / longest, z: span * raw.z / longest };
+
+  // The normalised radius the centre may travel over, and the share of it this
+  // lobe spends. Zero for lobe zero, the shared core. The hash gives the
+  // direction only and the radius is the budget share, so a lobe is placed *at*
+  // a chosen distance rather than wherever a cube-uniform hash happened to fall
+  // — which averaged well under half the budget and left the solid clear of its
+  // own envelope on every side.
+  const budget = index === 0
+    ? 0
+    : Math.max(0, 1 - span - packing.smoothRadius_m / shortest_m) * placement.displacement;
+  const offsetLength = Math.hypot(offsetHash.x, offsetHash.y, offsetHash.z);
+  const offsetScale = offsetLength > NORMAL_EPSILON ? budget / offsetLength : 0;
+  const center = {
+    x: offsetHash.x * offsetScale,
+    y: offsetHash.y * offsetScale,
+    z: offsetHash.z * offsetScale,
+  };
+
+  // Axis-angle rather than four hashed components normalised: a quaternion
+  // built this way is a rotation for any hash at all, including the degenerate
+  // one, which the shader has no way to reject.
+  const axisLength = Math.hypot(axisHash.x, axisHash.y, axisHash.z);
+  const axis = axisLength > NORMAL_EPSILON
+    ? { x: axisHash.x / axisLength, y: axisHash.y / axisLength, z: axisHash.z / axisLength }
+    : { x: 0, y: 1, z: 0 };
+  const half = 0.5 * Math.PI * spreadHash.y;
+  const sine = Math.sin(half);
+  return {
+    center,
+    halfAxes,
+    orientation: { w: Math.cos(half), x: axis.x * sine, y: axis.y * sine, z: axis.z * sine },
+  };
+}
+
+/**
+ * The seeded-lobes field: oriented anisotropic lobes fused into one solid.
+ *
+ * A lobe is the affine image `M = diag(R)·Q·diag(k)` of the unit ball, and its
+ * distance is the same trick the envelope uses one level up: `(|M⁻¹w| - 1)`
+ * shares the lobe's exact zero set, and multiplying by a lower bound on `M`'s
+ * smallest singular value makes it Lipschitz-1 — `|∇f| ≤ σ / σmin(M) ≤ 1`.
+ * `min(R)·min(k)` is that lower bound, because `σmin(AB) ≥ σmin(A)·σmin(B)` and
+ * a rotation has none. It is not tight, and being loose here costs march steps
+ * rather than correctness: the field understeps, which is the safe direction.
+ *
+ * The smooth minimum over the lobes is a convex combination of their gradients,
+ * so the fused field is unit-Lipschitz as well.
+ */
+function clusterSeededLobesDistance(
+  point: Vec3,
+  lobeRadii_m: Vec3,
+  packing: SvoClusterSeededLobesField,
+): number {
+  const shortest_m = Math.min(lobeRadii_m.x, lobeRadii_m.y, lobeRadii_m.z);
+  const normalized = { x: point.x / lobeRadii_m.x, y: point.y / lobeRadii_m.y, z: point.z / lobeRadii_m.z };
+  let distance = 0;
+  for (let index = 0; index < packing.lobeCount; index += 1) {
+    const lobe = clusterSeededLobe(index, lobeRadii_m, packing);
+    const local = inverseRotate(lobe.orientation, {
+      x: normalized.x - lobe.center.x,
+      y: normalized.y - lobe.center.y,
+      z: normalized.z - lobe.center.z,
+    });
+    const scaled = Math.hypot(local.x / lobe.halfAxes.x, local.y / lobe.halfAxes.y, local.z / lobe.halfAxes.z);
+    const sample = (scaled - 1) * shortest_m * Math.min(lobe.halfAxes.x, lobe.halfAxes.y, lobe.halfAxes.z);
+    distance = index === 0 ? sample : smoothMinimum(distance, sample, packing.smoothRadius_m);
+  }
+  return distance;
+}
+
+/**
+ * Exact distance to a round cone: the convex hull of two spheres.
+ *
+ * Exact, and therefore Lipschitz-1 by definition rather than by argument, which
+ * is the whole reason a tube is built out of these rather than out of a capsule
+ * whose radius is lerped along it — that construction is not a distance at all
+ * wherever the taper is steep. `span > |Δradius|` is the condition that keeps
+ * one sphere from swallowing the other; the packing validator rejects anything
+ * else, so `a2` here is positive.
+ */
+function clusterRoundConeDistance(
+  point: Vec3,
+  from: Vec3,
+  to: Vec3,
+  fromRadius_m: number,
+  toRadius_m: number,
+): number {
+  const axis = { x: to.x - from.x, y: to.y - from.y, z: to.z - from.z };
+  const axisSquared = axis.x ** 2 + axis.y ** 2 + axis.z ** 2;
+  const taper = fromRadius_m - toRadius_m;
+  const lateralSquared = axisSquared - taper * taper;
+  const inverseAxisSquared = 1 / axisSquared;
+  const offset = { x: point.x - from.x, y: point.y - from.y, z: point.z - from.z };
+  const along = offset.x * axis.x + offset.y * axis.y + offset.z * axis.z;
+  const beyond = along - axisSquared;
+  const perpendicular = {
+    x: offset.x * axisSquared - axis.x * along,
+    y: offset.y * axisSquared - axis.y * along,
+    z: offset.z * axisSquared - axis.z * along,
+  };
+  const perpendicularSquared = perpendicular.x ** 2 + perpendicular.y ** 2 + perpendicular.z ** 2;
+  const alongSquared = along * along * axisSquared;
+  const beyondSquared = beyond * beyond * axisSquared;
+  // The two cap regions and the lateral band, separated by the tangent plane
+  // the taper defines rather than by a clamp along the axis.
+  const split = Math.sign(taper) * taper * taper * perpendicularSquared;
+  if (Math.sign(beyond) * lateralSquared * beyondSquared > split) {
+    return Math.sqrt(perpendicularSquared + beyondSquared) * inverseAxisSquared - toRadius_m;
+  }
+  if (Math.sign(along) * lateralSquared * alongSquared < split) {
+    return Math.sqrt(perpendicularSquared + alongSquared) * inverseAxisSquared - fromRadius_m;
+  }
+  return (Math.sqrt(perpendicularSquared * lateralSquared * inverseAxisSquared) + along * taper) * inverseAxisSquared
+    - fromRadius_m;
+}
+
+/**
+ * The tapered-sweep field: round-cone segments fused in authored order.
+ *
+ * Fold order is fixed and mirrored in WGSL for the same reason the lattice's is
+ * — a polynomial smooth minimum is not associative — and it is why the polyline
+ * is stored in sweep order rather than sorted by anything.
+ */
+function clusterTaperedSweepDistance(point: Vec3, packing: SvoClusterTaperedSweepField): number {
+  let distance = 0;
+  for (let index = 0; index + 1 < packing.points.length; index += 1) {
+    const from = packing.points[index];
+    const to = packing.points[index + 1];
+    const sample = clusterRoundConeDistance(point, from.position_m, to.position_m, from.radius_m, to.radius_m);
+    distance = index === 0 ? sample : smoothMinimum(distance, sample, packing.smoothRadius_m);
+  }
+  return distance;
+}
+
+/** The field a packing names, before the envelope clip. */
+function clusterFieldDistance(point: Vec3, lobeRadii_m: Vec3, packing: SvoSmoothUnionClusterPacking): number {
+  if (packing.field === "seeded-lobes") return clusterSeededLobesDistance(point, lobeRadii_m, packing);
+  if (packing.field === "tapered-sweep") return clusterTaperedSweepDistance(point, packing);
+  return clusterLatticeDistance(point, packing);
+}
+
+/**
+ * The smallest solid feature a field draws.
+ *
+ * The gradient step is a quarter of it. Per field because the number that sets
+ * it is different in each: a lattice's finest lobe, a lobe set's blend, a
+ * sweep's thinnest section. Reading a fixed fraction of the envelope instead
+ * would step across several features at once and hand back the envelope's own
+ * normal.
+ */
+export function svoClusterFeatureRadius_m(lobeRadii_m: Vec3, packing: SvoSmoothUnionClusterPacking): number {
+  if (packing.field === "seeded-lobes") {
+    const shortest_m = Math.min(lobeRadii_m.x, lobeRadii_m.y, lobeRadii_m.z);
+    // A lobe set with no blend still has a smallest feature: the thinnest a
+    // lobe can be. `lobeSpan` fixes its longest half-axis and the anisotropy
+    // shortens the others away from it by at most that ratio, so this is a
+    // lower bound on every lobe's smallest half-axis whatever the seed did.
+    return Math.max(packing.smoothRadius_m, seededLobePlacement(packing).span * shortest_m / Math.max(packing.anisotropy, 1));
+  }
+  if (packing.field === "tapered-sweep") {
+    let thinnest_m = packing.points[0].radius_m;
+    for (const point of packing.points) thinnest_m = Math.min(thinnest_m, point.radius_m);
+    return thinnest_m;
+  }
+  // The finest octave's lobe. An exact power of two, so a one-octave field
+  // keeps the step it has always used.
+  return packing.latticeLobeRadius_m * 2 ** -((packing.octaves ?? 1) - 1);
+}
+
+/**
+ * A Lipschitz-1 lower bound on the distance to an ellipsoid.
+ *
+ * Not the exact closest-point distance, which costs a 64-iteration bisection
+ * and is evaluated here on every march step of every covering fragment. The
+ * scaled-radius form `(|p/r| - 1) * min(r)` has gradient magnitude at most one
+ * by construction and shares the exact ellipsoid's zero set, which is all the
+ * clip needs: the surface is in the right place, and the trace understeps
+ * toward it.
+ *
+ * Used twice over: once as the envelope every field is clipped to, and once as
+ * the distance to an individual anisotropic lobe of the seeded-lobes field.
+ */
+function clusterLobeDistance(point: Vec3, lobeRadii_m: Vec3): number {
+  const scaled = Math.hypot(point.x / lobeRadii_m.x, point.y / lobeRadii_m.y, point.z / lobeRadii_m.z);
+  return (scaled - 1) * Math.min(lobeRadii_m.x, lobeRadii_m.y, lobeRadii_m.z);
+}
+
+/** The field, clipped to the envelope. A hard intersection, so the solid is inside the ellipsoid. */
+function clusterDistance(point: Vec3, lobeRadii_m: Vec3, packing: SvoSmoothUnionClusterPacking): number {
+  return Math.max(clusterFieldDistance(point, lobeRadii_m, packing), clusterLobeDistance(point, lobeRadii_m));
+}
+
+/**
+ * Gradient by the four-tap tetrahedron rather than six-tap central differences.
+ *
+ * A cluster evaluation is roughly sixty sphere distances, and the normal is
+ * wanted once per hit against a march that converges in about eight steps — so
+ * the difference between four taps and six is a fifth of the whole trace.
+ */
+function clusterLocalNormal(point: Vec3, lobeRadii_m: Vec3, packing: SvoSmoothUnionClusterPacking): Vec3 | null {
+  const step = 0.25 * svoClusterFeatureRadius_m(lobeRadii_m, packing);
+  const corners = [[1, -1, -1], [-1, -1, 1], [-1, 1, -1], [1, 1, 1]] as const;
+  let gradient = { x: 0, y: 0, z: 0 };
+  for (const [sx, sy, sz] of corners) {
+    const sample = clusterDistance(
+      { x: point.x + sx * step, y: point.y + sy * step, z: point.z + sz * step },
+      lobeRadii_m,
+      packing,
+    );
+    gradient = { x: gradient.x + sx * sample, y: gradient.y + sy * sample, z: gradient.z + sz * sample };
+  }
+  return normalize(gradient);
+}
+
+/** A cluster whose arena block has been resolved, which is the only form that can be evaluated. */
+type ResolvedCluster = SvoSmoothUnionClusterPrimitive & { packing: SvoSmoothUnionClusterPacking };
+
+type MarchedPrimitive = SvoTorusPrimitive | SvoConePrimitive | SvoRoundConePrimitive | SvoRoundedCylinderPrimitive | ResolvedCluster;
+
+function roundedCylinderLocalSample(descriptor: SvoRoundedCylinderPrimitive, point: Vec3): SvoPrimitiveSample {
+  const radial = Math.hypot(point.x, point.z);
+  const radialCore = descriptor.radius_m - descriptor.edgeRadius_m;
+  const verticalCore = descriptor.halfHeight_m - descriptor.edgeRadius_m;
+  const q = { x: radial - radialCore, y: Math.abs(point.y) - verticalCore };
+  const outside = { x: Math.max(q.x, 0), y: Math.max(q.y, 0) };
+  const signedDistance_m = Math.hypot(outside.x, outside.y) + Math.min(Math.max(q.x, q.y), 0) - descriptor.edgeRadius_m;
+  const direction = radial > NORMAL_EPSILON ? { x: point.x / radial, z: point.z / radial } : { x: 1, z: 0 };
+  let normal: Vec3;
+  if (q.x > 0 && q.y > 0) {
+    const magnitude = Math.hypot(q.x, q.y);
+    normal = { x: direction.x * q.x / magnitude, y: Math.sign(point.y || 1) * q.y / magnitude, z: direction.z * q.x / magnitude };
+  } else if (q.x > q.y) {
+    normal = { x: direction.x, y: 0, z: direction.z };
+  } else {
+    normal = { x: 0, y: Math.sign(point.y || 1), z: 0 };
+  }
+  return { signedDistance_m, normal, featureId: SVO_PRIMITIVE_FEATURES.smooth };
+}
+
+function roundConeLocalSample(descriptor: SvoRoundConePrimitive, point: Vec3): SvoPrimitiveSample {
+  // This is the local-Y specialization of `clusterRoundConeDistance`. Besides
+  // being cheaper during a march, its region test also gives the exact normal:
+  // endpoint-sphere radial in either cap region, constant cone gradient in the
+  // tangent band. A finite-difference normal made every coping hit pay four
+  // more SDF evaluations and introduced avoidable sub-pixel normal jitter.
+  const { baseRadius_m: base, topRadius_m: top, halfHeight_m: half } = descriptor;
+  const span = 2 * half;
+  const taper = (base - top) / span;
+  const lateral = Math.sqrt(Math.max(0, 1 - taper * taper));
+  const radial = Math.hypot(point.x, point.z);
+  const along = point.y + half;
+  const region = -taper * radial + lateral * along;
+  let signedDistance_m: number;
+  let normal: Vec3 | null;
+  if (region < 0) {
+    const offset = { x: point.x, y: along, z: point.z };
+    signedDistance_m = Math.hypot(offset.x, offset.y, offset.z) - base;
+    normal = normalize(offset);
+  } else if (region > lateral * span) {
+    const offset = { x: point.x, y: along - span, z: point.z };
+    signedDistance_m = Math.hypot(offset.x, offset.y, offset.z) - top;
+    normal = normalize(offset);
+  } else {
+    signedDistance_m = lateral * radial + taper * along - base;
+    const direction = radial > NORMAL_EPSILON ? { x: point.x / radial, z: point.z / radial } : { x: 1, z: 0 };
+    normal = { x: lateral * direction.x, y: taper, z: lateral * direction.z };
+  }
+  return { signedDistance_m, normal, featureId: SVO_PRIMITIVE_FEATURES.smooth };
+}
+
+/**
+ * Local signed distance, shading normal and feature of the marched kinds.
+ *
+ * The torus and cone distances are exact, which is what lets one sphere trace
+ * stand in for a bespoke root solve per shape. The cluster's is a strict lower
+ * bound, which serves the same trace for the same reason — the march only needs
+ * a guarantee that it never steps past a surface.
+ */
+function marchedLocalSample(descriptor: MarchedPrimitive, point: Vec3): SvoPrimitiveSample {
+  if (descriptor.kind === "smooth-union-cluster") {
+    return {
+      signedDistance_m: clusterDistance(point, descriptor.lobeRadii_m, descriptor.packing),
+      normal: clusterLocalNormal(point, descriptor.lobeRadii_m, descriptor.packing),
+      featureId: SVO_PRIMITIVE_FEATURES.smooth,
+    };
+  }
   if (descriptor.kind === "torus") {
     const radial = Math.hypot(point.x, point.z);
     const ring = radial - descriptor.majorRadius_m;
@@ -696,6 +1833,8 @@ function marchedLocalSample(descriptor: SvoTorusPrimitive | SvoConePrimitive, po
       : null;
     return { signedDistance_m, normal, featureId: SVO_PRIMITIVE_FEATURES.smooth };
   }
+  if (descriptor.kind === "rounded-cylinder") return roundedCylinderLocalSample(descriptor, point);
+  if (descriptor.kind === "round-cone") return roundConeLocalSample(descriptor, point);
   const { baseRadius_m: base, topRadius_m: top, halfHeight_m: half } = descriptor;
   const radial = Math.hypot(point.x, point.z);
   // Exact frustum distance: nearest of the end disc (`cap`) and the lateral
@@ -728,10 +1867,8 @@ function marchedLocalSample(descriptor: SvoTorusPrimitive | SvoConePrimitive, po
 }
 
 /** Rotation-invariant radius that bounds a marched kind about its own centre. */
-function marchedBoundingRadius(descriptor: SvoTorusPrimitive | SvoConePrimitive): number {
-  return descriptor.kind === "torus"
-    ? descriptor.majorRadius_m + descriptor.minorRadius_m
-    : Math.hypot(Math.max(descriptor.baseRadius_m, descriptor.topRadius_m), descriptor.halfHeight_m);
+function marchedBoundingRadius(descriptor: MarchedPrimitive): number {
+  return svoPrimitiveBoundingRadius_m(descriptor);
 }
 
 /** Surface acceptance band, shared with WGSL so both solves stop in the same place. */
@@ -745,7 +1882,7 @@ function marchSurfaceEpsilon(t_m: number): number {
  * far surface a closed-form solve would.
  */
 function intersectMarchedLocal(
-  descriptor: SvoTorusPrimitive | SvoConePrimitive,
+  descriptor: MarchedPrimitive,
   origin: Vec3,
   direction: Vec3,
   ray: CanonicalPrimitiveRay,
@@ -782,14 +1919,18 @@ function intersectMarchedLocal(
 function intersectCanonicalSvoPrimitive(
   descriptor: SvoFinitePrimitiveDescriptor,
   ray: CanonicalPrimitiveRay,
+  clusterResolver?: SvoClusterResolver,
 ): SvoPrimitiveRayHit | null {
   const { origin, direction, orientation } = localPrimitiveRay(descriptor, ray);
   const localHit = descriptor.kind === "sphere" ? intersectSphereLocal(descriptor, origin, direction, ray)
     : descriptor.kind === "box" ? intersectBoxLocal(descriptor, origin, direction, ray)
       : descriptor.kind === "capsule" ? intersectCapsuleLocal(descriptor, origin, direction, ray)
         : descriptor.kind === "cylinder" ? intersectCylinderLocal(descriptor, origin, direction, ray)
-          : descriptor.kind === "torus" || descriptor.kind === "cone" ? intersectMarchedLocal(descriptor, origin, direction, ray)
-            : intersectEllipsoidLocal(descriptor, origin, direction, ray);
+          : descriptor.kind === "smooth-union-cluster"
+            ? intersectMarchedLocal(resolveCluster(descriptor, clusterResolver), origin, direction, ray)
+            : descriptor.kind === "torus" || descriptor.kind === "cone" || descriptor.kind === "round-cone" || descriptor.kind === "rounded-cylinder"
+              ? intersectMarchedLocal(descriptor, origin, direction, ray)
+              : intersectEllipsoidLocal(descriptor, origin, direction, ray);
   if (!localHit) return null;
   const normal = worldNormal(orientation, localHit.normal);
   if (!normal) return null;
@@ -801,7 +1942,7 @@ function intersectCanonicalSvoPrimitive(
       z: ray.origin_m.z + ray.direction.z * localHit.t_m,
     },
     normal,
-    normalPolicy: descriptor.kind === "box" || descriptor.kind === "cylinder" || descriptor.kind === "cone" ? "hard-feature" : "smooth",
+    normalPolicy: SVO_PRIMITIVE_KIND_TABLE[descriptor.kind].normalPolicy,
     featureId: localHit.featureId,
     primitiveKind: descriptor.kind,
     primitiveId: descriptor.primitiveId,
@@ -811,28 +1952,40 @@ function intersectCanonicalSvoPrimitive(
 }
 
 /** Exact analytic finite-primitive hit oracle. Terrain is intentionally handled by its separate heightfield tracer. */
-export function intersectSvoPrimitive(input: SvoFinitePrimitiveDescriptor, rayInput: SvoPrimitiveRay): SvoPrimitiveRayHit | null {
+export function intersectSvoPrimitive(
+  input: SvoFinitePrimitiveDescriptor,
+  rayInput: SvoPrimitiveRay,
+  clusterResolver?: SvoClusterResolver,
+): SvoPrimitiveRayHit | null {
   const descriptor = canonicalSvoPrimitive(input);
   if (descriptor.kind === "terrain-heightfield") throw new TypeError("Terrain heightfield intersection uses the separate terrain tracer");
-  return intersectCanonicalSvoPrimitive(descriptor, canonicalPrimitiveRay(rayInput));
+  return intersectCanonicalSvoPrimitive(descriptor, canonicalPrimitiveRay(rayInput), clusterResolver);
 }
 
 /** Nearest exact finite-primitive hit. Input order is the deterministic tie-breaker. */
-export function intersectSvoPrimitives(inputs: readonly SvoPrimitiveDescriptor[], rayInput: SvoPrimitiveRay): SvoPrimitiveRayHit | null {
+export function intersectSvoPrimitives(
+  inputs: readonly SvoPrimitiveDescriptor[],
+  rayInput: SvoPrimitiveRay,
+  clusterResolver?: SvoClusterResolver,
+): SvoPrimitiveRayHit | null {
   const ray = canonicalPrimitiveRay(rayInput);
   let nearest: SvoPrimitiveRayHit | null = null;
   for (const input of inputs) {
     const descriptor = canonicalSvoPrimitive(input);
     if (descriptor.kind === "terrain-heightfield") continue;
-    const hit = intersectCanonicalSvoPrimitive(descriptor, ray);
+    const hit = intersectCanonicalSvoPrimitive(descriptor, ray, clusterResolver);
     if (hit && (!nearest || hit.t_m < nearest.t_m)) nearest = hit;
   }
   return nearest;
 }
 
 /** Unpack the stable 64-byte ABI and select its nearest finite analytic hit. */
-export function intersectPackedSvoPrimitiveRecords(packed: Uint32Array, ray: SvoPrimitiveRay): SvoPrimitiveRayHit | null {
-  return intersectSvoPrimitives(unpackSvoPrimitiveRecords(packed), ray);
+export function intersectPackedSvoPrimitiveRecords(
+  packed: Uint32Array,
+  ray: SvoPrimitiveRay,
+  clusterResolver?: SvoClusterResolver,
+): SvoPrimitiveRayHit | null {
+  return intersectSvoPrimitives(unpackSvoPrimitiveRecords(packed), ray, clusterResolver);
 }
 
 interface SvoEllipsoidClosestPoint {
@@ -917,6 +2070,7 @@ export function sampleSvoPrimitive(
   input: SvoPrimitiveDescriptor,
   worldPoint_m: Vec3,
   terrainResolver?: SvoTerrainResolver,
+  clusterResolver?: SvoClusterResolver,
 ): SvoPrimitiveSample {
   const descriptor = canonicalSvoPrimitive(input);
   if (descriptor.kind === "terrain-heightfield") {
@@ -959,8 +2113,12 @@ export function sampleSvoPrimitive(
       normal: worldNormal(orientation, normalize(offset)), featureId: SVO_PRIMITIVE_FEATURES.smooth,
     };
   }
-  if (descriptor.kind === "torus" || descriptor.kind === "cone") {
+  if (descriptor.kind === "torus" || descriptor.kind === "cone" || descriptor.kind === "round-cone" || descriptor.kind === "rounded-cylinder") {
     const local = marchedLocalSample(descriptor, point);
+    return { ...local, normal: worldNormal(orientation, local.normal) };
+  }
+  if (descriptor.kind === "smooth-union-cluster") {
+    const local = marchedLocalSample(resolveCluster(descriptor, clusterResolver), point);
     return { ...local, normal: worldNormal(orientation, local.normal) };
   }
   if (descriptor.kind === "cylinder") {
@@ -1010,14 +2168,7 @@ export function sampleSvoPrimitive(
  * average across hard boundaries.
  */
 export const svoPrimitiveWGSL = /* wgsl */ `
-const SVO_KIND_SPHERE: u32 = 1u;
-const SVO_KIND_BOX: u32 = 2u;
-const SVO_KIND_CAPSULE: u32 = 3u;
-const SVO_KIND_CYLINDER: u32 = 4u;
-const SVO_KIND_ELLIPSOID: u32 = 5u;
-const SVO_KIND_TERRAIN: u32 = 6u;
-const SVO_KIND_TORUS: u32 = 7u;
-const SVO_KIND_CONE: u32 = 8u;
+${svoPrimitiveKindConstantsWGSL}
 const SVO_FEATURE_SMOOTH: u32 = 0u;
 const SVO_FEATURE_BOX_X: u32 = 1u;
 const SVO_FEATURE_BOX_Y: u32 = 2u;
@@ -1066,11 +2217,382 @@ fn svoPrimitiveDimensions_m(record: SvoPrimitiveRecord) -> vec3f { return bitcas
 fn svoPrimitiveMaterialId(record: SvoPrimitiveRecord) -> u32 { return record.dimensionsIdentity.w & 0xffffu; }
 fn svoPrimitiveOwnerId(record: SvoPrimitiveRecord) -> u32 { return record.dimensionsIdentity.w >> 16u; }
 fn svoPrimitiveId(record: SvoPrimitiveRecord) -> u32 { return record.metadata.x; }
+// One word, two arena-backed kinds. A heightfield names its samples and a
+// cluster names its packing; both are the u32 word offset of a block in the
+// shared scene arena, and neither fits in the record's three dimension floats.
+fn svoPrimitiveArenaReference(record: SvoPrimitiveRecord) -> u32 { return record.metadata.y; }
 fn svoPrimitiveTerrainReference(record: SvoPrimitiveRecord) -> u32 { return record.metadata.y; }
+fn svoPrimitiveClusterReference(record: SvoPrimitiveRecord) -> u32 { return record.metadata.y; }
+
+/**
+ * The conservative local half-extent of every kind, generated from the same
+ * table the CPU reads. A negative component means the kind has no finite local
+ * box, which a caller must treat as a refusal rather than clamp to zero.
+ */
+fn svoPrimitiveLocalExtent_m(kind: u32, dimensions_m: vec3f) -> vec3f {
+  if (kind == SVO_KIND_SPHERE) { return vec3f(dimensions_m.x); }
+  if (kind == SVO_KIND_BOX || kind == SVO_KIND_ELLIPSOID || kind == SVO_KIND_SMOOTH_UNION_CLUSTER) { return dimensions_m; }
+  if (kind == SVO_KIND_CAPSULE) { return vec3f(dimensions_m.x, dimensions_m.y + dimensions_m.x, dimensions_m.x); }
+  if (kind == SVO_KIND_CYLINDER) { return vec3f(dimensions_m.x, dimensions_m.y, dimensions_m.x); }
+  if (kind == SVO_KIND_ROUNDED_CYLINDER) { return vec3f(dimensions_m.x, dimensions_m.y, dimensions_m.x); }
+  if (kind == SVO_KIND_TORUS) { return vec3f(dimensions_m.x + dimensions_m.y, dimensions_m.y, dimensions_m.x + dimensions_m.y); }
+  if (kind == SVO_KIND_CONE) { let radius = max(dimensions_m.x, dimensions_m.z); return vec3f(radius, dimensions_m.y, radius); }
+  if (kind == SVO_KIND_ROUND_CONE) { let radius = max(dimensions_m.x, dimensions_m.z); return vec3f(radius, dimensions_m.y + radius, radius); }
+  return vec3f(-1.0);
+}
 
 fn svoQuaternionRotate(q: vec4f, point: vec3f) -> vec3f {
   let twiceCross = 2.0 * cross(q.xyz, point);
   return point + q.w * twiceCross + cross(q.xyz, twiceCross);
+}
+
+${svoClusterFieldConstantsWGSL}
+/** No field owns this code, so a block carrying it evaluates as a miss. */
+const SVO_CLUSTER_FIELD_INVALID: u32 = 0xffffffffu;
+const SVO_CLUSTER_SWEEP_MAXIMUM_POINTS: u32 = ${SVO_CLUSTER_SWEEP_MAXIMUM_POINTS}u;
+
+/**
+ * A cluster's arena block, as the shader sees it.
+ *
+ * The envelope's half-axes are absent because the record already carries them
+ * as its dimensions — which is also why every bounds formula in the tree sees a
+ * plain ellipsoid and needs to know nothing about this kind.
+ *
+ * One struct for the whole field family rather than one per field, because
+ * there are no unions in WGSL and the alternative is a distinct packing
+ * parameter threaded through \`svoIntersectPrimitiveExact\` for each. The
+ * polyline dominates it: eight \`vec4f\` against a dozen scalars for everything
+ * else. That is the cost of keeping the shared library ignorant of where the
+ * arena is bound — a field that read its own control points out of storage
+ * would tie this file to one shader's binding layout, and there are three
+ * shaders using it. The array is dynamically indexed, so a driver stages it in
+ * scratch rather than in registers and the cost lands on the fields that use it.
+ */
+struct SvoClusterPacking {
+  field: u32,
+  seed: u32,
+  /** Octaves, lobes or control points, depending on the field. */
+  count: u32,
+  smoothRadius_m: f32,
+  latticeLobeRadius_m: f32,
+  latticePeriod_m: f32,
+  jitter: f32,
+  anisotropy: f32,
+  /** Seeded-lobe placement, already defaulted by the packer. Fractions of the envelope. */
+  lobeSpan: f32,
+  lobeSpanSpread: f32,
+  displacement: f32,
+  /** xyz is a control-point offset from the record's centre, w its sweep radius. */
+  points: array<vec4f, ${SVO_CLUSTER_SWEEP_MAXIMUM_POINTS}>,
+}
+
+/** The encoding of "this record's block was not resolved". Evaluates as a miss. */
+fn svoInvalidClusterPacking() -> SvoClusterPacking {
+  return SvoClusterPacking(SVO_CLUSTER_FIELD_INVALID, 0u, 0u, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+    array<vec4f, ${SVO_CLUSTER_SWEEP_MAXIMUM_POINTS}>());
+}
+
+// A block that was never filled is all zeroes, which reads as the lattice with
+// no lobe radius and no period — rejected here. That is deliberate: the "not
+// resolved" case has to fail the same test a corrupt one does, because a
+// cluster that fell back to its envelope would draw a smooth ellipsoid nobody
+// authored and raise nothing anywhere.
+fn svoClusterPackingValid(packing: SvoClusterPacking) -> bool {
+  if (packing.field == SVO_CLUSTER_FIELD_LATTICE) {
+    return packing.latticeLobeRadius_m > 0.0 && packing.latticePeriod_m > 0.0 && packing.count >= 1u;
+  }
+  if (packing.field == SVO_CLUSTER_FIELD_SEEDED_LOBES) {
+    return packing.count >= 1u && packing.anisotropy >= 1.0 && packing.lobeSpan > 0.0;
+  }
+  if (packing.field == SVO_CLUSTER_FIELD_TAPERED_SWEEP) {
+    return packing.count >= 2u && packing.count <= SVO_CLUSTER_SWEEP_MAXIMUM_POINTS && packing.points[0].w > 0.0;
+  }
+  return false;
+}
+
+/** Three decorrelated offsets in [-1,1] from one avalanche; the CPU mirrors it bit for bit. */
+fn svoClusterCellJitter(cell: vec3i, seed: u32) -> vec3f {
+  var hash = seed;
+  hash = hash ^ (bitcast<u32>(cell.x) * 0x9e3779b1u);
+  hash = hash ^ (bitcast<u32>(cell.y) * 0x85ebca77u);
+  hash = hash ^ (bitcast<u32>(cell.z) * 0xc2b2ae3du);
+  hash = hash ^ (hash >> 16u); hash = hash * 0x7feb352du; hash = hash ^ (hash >> 15u);
+  hash = hash * 0x846ca68bu; hash = hash ^ (hash >> 16u);
+  let quantized = vec3u(hash & 1023u, (hash >> 10u) & 1023u, (hash >> 20u) & 1023u);
+  return vec3f(quantized) / 1023.0 * 2.0 - vec3f(1.0);
+}
+
+/** Polynomial smooth minimum: a strict lower bound on min(a,b), so the trace understeps. */
+fn svoSmoothMinimum(a: f32, b: f32, k: f32) -> f32 {
+  if (!(k > 0.0)) { return min(a, b); }
+  let h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0);
+  return mix(b, a, h) - k * h * (1.0 - h);
+}
+
+// Lipschitz-1 lower bound on the ellipsoid distance, sharing its exact zero
+// set. The closest-point solve is a 64-iteration bisection and this runs on
+// every march step of every covering fragment. Used both as the envelope every
+// field is clipped to and as one anisotropic lobe of a seeded set.
+fn svoClusterLobeDistance_m(point: vec3f, lobeRadii_m: vec3f) -> f32 {
+  return (length(point / lobeRadii_m) - 1.0) * min(lobeRadii_m.x, min(lobeRadii_m.y, lobeRadii_m.z));
+}
+
+/** One octave's lengths, at one scale, plus the seed that decorrelates it. */
+struct SvoClusterLatticeOctave {
+  latticeLobeRadius_m: f32,
+  latticePeriod_m: f32,
+  jitter: f32,
+  smoothRadius_m: f32,
+  seed: u32,
+}
+
+fn svoClusterSphereDistance_m(point: vec3f, cell: vec3i, octave: SvoClusterLatticeOctave) -> f32 {
+  let centre = (vec3f(cell) + vec3f(0.5) + octave.jitter * svoClusterCellJitter(cell, octave.seed)) * octave.latticePeriod_m;
+  return length(point - centre) - octave.latticeLobeRadius_m;
+}
+
+// Two passes over a neighbourhood centred on the point. The inner eight cells
+// always matter and set a tight running minimum; the outer shell is rejected by
+// the distance to its unjittered centre, which needs no hash. The fold order is
+// fixed and mirrored on the CPU because a polynomial smooth minimum is not
+// associative. See SVO_SMOOTH_UNION_CLUSTER_NEIGHBOURHOOD for why the block is
+// this size rather than the obvious eight.
+fn svoClusterLatticeOctaveDistance_m(point: vec3f, octave: SvoClusterLatticeOctave) -> f32 {
+  const SPAN: i32 = ${SVO_SMOOTH_UNION_CLUSTER_NEIGHBOURHOOD};
+  const RING: i32 = SPAN / 2 - 1;
+  let base = vec3i(floor(point / octave.latticePeriod_m - vec3f(0.5))) - vec3i(RING);
+  var distance_m = 0.0;
+  for (var corner = 0u; corner < 8u; corner += 1u) {
+    let cell = base + vec3i(RING) + vec3i(i32(corner & 1u), i32((corner >> 1u) & 1u), i32((corner >> 2u) & 1u));
+    let sphere = svoClusterSphereDistance_m(point, cell, octave);
+    distance_m = select(svoSmoothMinimum(distance_m, sphere, octave.smoothRadius_m), sphere, corner == 0u);
+  }
+  let reach = octave.jitter * octave.latticePeriod_m * 1.7320508 + octave.latticeLobeRadius_m + octave.smoothRadius_m;
+  for (var index = 0; index < SPAN * SPAN * SPAN; index += 1) {
+    let step = vec3i(index % SPAN, (index / SPAN) % SPAN, (index / (SPAN * SPAN)) % SPAN);
+    if (all(step >= vec3i(RING)) && all(step <= vec3i(RING + 1))) { continue; }
+    let cell = base + step;
+    let nominal = length(point - (vec3f(cell) + vec3f(0.5)) * octave.latticePeriod_m);
+    if (nominal - reach > distance_m) { continue; }
+    distance_m = svoSmoothMinimum(distance_m, svoClusterSphereDistance_m(point, cell, octave), octave.smoothRadius_m);
+  }
+  return distance_m;
+}
+
+// Octave k is the octave-zero packing at 2^-k, so the period condition that
+// makes the first one a lower bound carries to every one after it unchanged.
+// exp2(0) is exactly 1 and the seed mix is exactly the seed at k = 0, which is
+// what keeps a one-octave field bit-identical to the field this kind published
+// before octaves existed.
+fn svoClusterLatticeDistance_m(point: vec3f, packing: SvoClusterPacking) -> f32 {
+  var distance_m = 0.0;
+  for (var octave = 0u; octave < packing.count; octave += 1u) {
+    let scale = exp2(-f32(octave));
+    let smoothRadius_m = packing.smoothRadius_m * scale;
+    let sample = svoClusterLatticeOctaveDistance_m(point, SvoClusterLatticeOctave(
+      packing.latticeLobeRadius_m * scale, packing.latticePeriod_m * scale, packing.jitter,
+      smoothRadius_m, packing.seed ^ (octave * 0x9e3779b1u),
+    ));
+    distance_m = select(svoSmoothMinimum(distance_m, sample, smoothRadius_m), sample, octave == 0u);
+  }
+  return distance_m;
+}
+
+// Centre and half-axes in the envelope's normalised space, where the envelope
+// is the unit ball. Fractions of the envelope, not metres.
+struct SvoClusterSeededLobe {
+  center: vec3f,
+  halfAxes: vec3f,
+  orientation: vec4f,
+}
+
+// Lobe placement, derived from the seed and the envelope and stored nowhere.
+// A lobe's longest half-axis is exactly its span and its centre stays inside
+// 1 - span - smooth/Rmin of the origin, so the envelope's own Lipschitz-1 lower
+// bound at the lobe's surface already covers the blend and the hard max never
+// touches it. Normalised space is what makes the solid scale with the envelope
+// it was authored against rather than with a ball of its shortest half-axis.
+// Lobe zero is centred, the cheapest guarantee that the others have something
+// to fuse to. Everything here depends only on the packing and the envelope, so
+// it is loop-invariant over a march and a driver may hoist it out.
+fn svoClusterSeededLobe(index: u32, lobeRadii_m: vec3f, packing: SvoClusterPacking) -> SvoClusterSeededLobe {
+  let shortest_m = min(lobeRadii_m.x, min(lobeRadii_m.y, lobeRadii_m.z));
+  let offsetHash = svoClusterCellJitter(vec3i(i32(index), 0, 0), packing.seed);
+  let shapeHash = svoClusterCellJitter(vec3i(i32(index), 1, 0), packing.seed);
+  let axisHash = svoClusterCellJitter(vec3i(i32(index), 2, 0), packing.seed);
+  let spreadHash = svoClusterCellJitter(vec3i(i32(index), 3, 0), packing.seed);
+
+  let raw = vec3f(pow(packing.anisotropy, 0.5 * shapeHash.x), pow(packing.anisotropy, 0.5 * shapeHash.y),
+    pow(packing.anisotropy, 0.5 * shapeHash.z));
+  let longest = max(raw.x, max(raw.y, raw.z));
+  let span = packing.lobeSpan + packing.lobeSpanSpread * 0.5 * (spreadHash.x + 1.0);
+  let halfAxes = span * raw / longest;
+
+  let budget = select(
+    max(0.0, 1.0 - span - packing.smoothRadius_m / shortest_m) * packing.displacement, 0.0, index == 0u);
+  // The hash supplies the direction only; the radius is the budget share, so a
+  // lobe is placed at a chosen distance rather than wherever a cube-uniform
+  // hash fell — which left the solid clear of its own envelope on every side.
+  let offsetLength = length(offsetHash);
+  let offsetScale = select(0.0, budget / max(offsetLength, 1e-12), offsetLength > 1e-12);
+
+  // Axis-angle, not four hashed components normalised: this is a rotation for
+  // every hash including the degenerate one, which the shader cannot reject.
+  let axisLength = length(axisHash);
+  let axis = select(vec3f(0.0, 1.0, 0.0), axisHash / max(axisLength, 1e-12), axisLength > 1e-12);
+  let half = 0.5 * 3.1415927 * spreadHash.y;
+  return SvoClusterSeededLobe(offsetHash * offsetScale, halfAxes, vec4f(axis * sin(half), cos(half)));
+}
+
+// A lobe is the affine image diag(R)*Q*diag(k) of the unit ball. (|M^-1 w| - 1)
+// shares its exact zero set, and min(R)*min(k) is a lower bound on M's smallest
+// singular value — sigma_min(AB) >= sigma_min(A) sigma_min(B), and a rotation
+// has none — so the product is Lipschitz-1. Loose rather than tight, which
+// costs march steps and never correctness.
+fn svoClusterSeededLobesDistance_m(point: vec3f, lobeRadii_m: vec3f, packing: SvoClusterPacking) -> f32 {
+  let shortest_m = min(lobeRadii_m.x, min(lobeRadii_m.y, lobeRadii_m.z));
+  let normalized = point / lobeRadii_m;
+  var distance_m = 0.0;
+  for (var index = 0u; index < packing.count; index += 1u) {
+    let lobe = svoClusterSeededLobe(index, lobeRadii_m, packing);
+    let local = svoQuaternionRotate(vec4f(-lobe.orientation.xyz, lobe.orientation.w), normalized - lobe.center);
+    let scaled = length(local / lobe.halfAxes);
+    let sample = (scaled - 1.0) * shortest_m * min(lobe.halfAxes.x, min(lobe.halfAxes.y, lobe.halfAxes.z));
+    distance_m = select(svoSmoothMinimum(distance_m, sample, packing.smoothRadius_m), sample, index == 0u);
+  }
+  return distance_m;
+}
+
+// Exact distance to the convex hull of two spheres, so Lipschitz-1 by
+// definition rather than by argument. The validator rejects a segment whose
+// taper outruns its own length, which is what keeps lateralSquared positive.
+fn svoClusterRoundConeDistance_m(point: vec3f, start: vec4f, finish: vec4f) -> f32 {
+  let axis = finish.xyz - start.xyz;
+  let axisSquared = dot(axis, axis);
+  let taper = start.w - finish.w;
+  let lateralSquared = axisSquared - taper * taper;
+  let inverseAxisSquared = 1.0 / axisSquared;
+  let offset = point - start.xyz;
+  let along = dot(offset, axis);
+  let beyond = along - axisSquared;
+  let perpendicular = offset * axisSquared - axis * along;
+  let perpendicularSquared = dot(perpendicular, perpendicular);
+  let alongSquared = along * along * axisSquared;
+  let beyondSquared = beyond * beyond * axisSquared;
+  let split = sign(taper) * taper * taper * perpendicularSquared;
+  if (sign(beyond) * lateralSquared * beyondSquared > split) {
+    return sqrt(perpendicularSquared + beyondSquared) * inverseAxisSquared - finish.w;
+  }
+  if (sign(along) * lateralSquared * alongSquared < split) {
+    return sqrt(perpendicularSquared + alongSquared) * inverseAxisSquared - start.w;
+  }
+  return (sqrt(perpendicularSquared * lateralSquared * inverseAxisSquared) + along * taper) * inverseAxisSquared - start.w;
+}
+
+fn svoRoundConeDistance_m(point:vec3f,dimensions_m:vec3f)->f32{
+  let span=2.0*dimensions_m.y;
+  let taper=(dimensions_m.x-dimensions_m.z)/span;
+  let lateral=sqrt(max(0.0,1.0-taper*taper));
+  let radial=length(point.xz);
+  let along=point.y+dimensions_m.y;
+  let region=-taper*radial+lateral*along;
+  if(region<0.0){return length(vec3f(point.x,along,point.z))-dimensions_m.x;}
+  if(region>lateral*span){return length(vec3f(point.x,along-span,point.z))-dimensions_m.z;}
+  return lateral*radial+taper*along-dimensions_m.x;
+}
+
+fn svoRoundConeNormal(point:vec3f,dimensions_m:vec3f)->vec3f{
+  let span=2.0*dimensions_m.y;
+  let taper=(dimensions_m.x-dimensions_m.z)/span;
+  let lateral=sqrt(max(0.0,1.0-taper*taper));
+  let radial=length(point.xz);
+  let along=point.y+dimensions_m.y;
+  let region=-taper*radial+lateral*along;
+  if(region<0.0){let offset=vec3f(point.x,along,point.z);let magnitude=length(offset);return select(vec3f(0.0),offset/magnitude,magnitude>1e-12);}
+  if(region>lateral*span){let offset=vec3f(point.x,along-span,point.z);let magnitude=length(offset);return select(vec3f(0.0),offset/magnitude,magnitude>1e-12);}
+  let direction=point.xz/max(radial,1e-8);
+  return vec3f(lateral*direction.x,taper,lateral*direction.y);
+}
+
+fn svoRoundedCylinderDistance_m(point:vec3f,dimensions_m:vec3f)->f32{
+  let radial=length(point.xz);
+  let core=dimensions_m.xy-vec2f(dimensions_m.z);
+  let q=vec2f(radial-core.x,abs(point.y)-core.y);
+  return length(max(q,vec2f(0.0)))+min(max(q.x,q.y),0.0)-dimensions_m.z;
+}
+
+fn svoRoundedCylinderNormal(point:vec3f,dimensions_m:vec3f)->vec3f{
+  let radial=length(point.xz);
+  let direction=point.xz/max(radial,1e-8);
+  let core=dimensions_m.xy-vec2f(dimensions_m.z);
+  let q=vec2f(radial-core.x,abs(point.y)-core.y);
+  if(q.x>0.0&&q.y>0.0){let gradient=normalize(q);return vec3f(direction.x*gradient.x,select(-gradient.y,gradient.y,point.y>=0.0),direction.y*gradient.x);}
+  if(q.x>q.y){return vec3f(direction.x,0.0,direction.y);}
+  return vec3f(0.0,select(-1.0,1.0,point.y>=0.0),0.0);
+}
+
+// The polyline is copied into a function-scope var so the loop may index it
+// dynamically; the fold order is the authored one, mirrored on the CPU because
+// a polynomial smooth minimum is not associative.
+fn svoClusterTaperedSweepDistance_m(point: vec3f, packing: SvoClusterPacking) -> f32 {
+  var points = packing.points;
+  let count = min(packing.count, SVO_CLUSTER_SWEEP_MAXIMUM_POINTS);
+  var distance_m = 0.0;
+  for (var index = 0u; index + 1u < count; index += 1u) {
+    let sample = svoClusterRoundConeDistance_m(point, points[index], points[index + 1u]);
+    distance_m = select(svoSmoothMinimum(distance_m, sample, packing.smoothRadius_m), sample, index == 0u);
+  }
+  return distance_m;
+}
+
+fn svoClusterFieldDistance_m(point: vec3f, lobeRadii_m: vec3f, packing: SvoClusterPacking) -> f32 {
+  if (packing.field == SVO_CLUSTER_FIELD_SEEDED_LOBES) {
+    return svoClusterSeededLobesDistance_m(point, lobeRadii_m, packing);
+  }
+  if (packing.field == SVO_CLUSTER_FIELD_TAPERED_SWEEP) { return svoClusterTaperedSweepDistance_m(point, packing); }
+  return svoClusterLatticeDistance_m(point, packing);
+}
+
+// The smallest solid feature a field draws, and a quarter of it is the gradient
+// step. Per field because the number that sets it differs in each; a fixed
+// fraction of the envelope would step across several features at once and hand
+// back the envelope's own.
+fn svoClusterFeatureRadius_m(lobeRadii_m: vec3f, packing: SvoClusterPacking) -> f32 {
+  if (packing.field == SVO_CLUSTER_FIELD_SEEDED_LOBES) {
+    let shortest_m = min(lobeRadii_m.x, min(lobeRadii_m.y, lobeRadii_m.z));
+    return max(packing.smoothRadius_m, packing.lobeSpan * shortest_m / max(packing.anisotropy, 1.0));
+  }
+  if (packing.field == SVO_CLUSTER_FIELD_TAPERED_SWEEP) {
+    var points = packing.points;
+    let count = min(packing.count, SVO_CLUSTER_SWEEP_MAXIMUM_POINTS);
+    var thinnest_m = points[0].w;
+    for (var index = 1u; index < count; index += 1u) { thinnest_m = min(thinnest_m, points[index].w); }
+    return thinnest_m;
+  }
+  // max(count, 1) rather than count: this is reachable through
+  // svoEvaluatePrimitive without the validity gate the march applies, and a
+  // zero count would wrap the u32 subtraction into a meaningless step.
+  return packing.latticeLobeRadius_m * exp2(-f32(max(packing.count, 1u) - 1u));
+}
+
+fn svoClusterDistance_m(point: vec3f, lobeRadii_m: vec3f, packing: SvoClusterPacking) -> f32 {
+  if (!svoClusterPackingValid(packing)) { return SVO_PRIMITIVE_RAY_INFINITY; }
+  return max(svoClusterFieldDistance_m(point, lobeRadii_m, packing), svoClusterLobeDistance_m(point, lobeRadii_m));
+}
+
+// Four taps, not six: an evaluation is roughly sixty sphere distances and the
+// march converges in about eight steps, so the two extra taps would be a fifth
+// of the whole trace.
+fn svoClusterLocalNormal(point: vec3f, lobeRadii_m: vec3f, packing: SvoClusterPacking) -> vec3f {
+  let step = 0.25 * svoClusterFeatureRadius_m(lobeRadii_m, packing);
+  let a = vec3f(1.0, -1.0, -1.0); let b = vec3f(-1.0, -1.0, 1.0);
+  let c = vec3f(-1.0, 1.0, -1.0); let d = vec3f(1.0, 1.0, 1.0);
+  let gradient = a * svoClusterDistance_m(point + a * step, lobeRadii_m, packing)
+    + b * svoClusterDistance_m(point + b * step, lobeRadii_m, packing)
+    + c * svoClusterDistance_m(point + c * step, lobeRadii_m, packing)
+    + d * svoClusterDistance_m(point + d * step, lobeRadii_m, packing);
+  let magnitude = length(gradient);
+  return select(vec3f(0.0), gradient / magnitude, magnitude > 1e-12);
 }
 
 fn svoPrimitiveLocalPoint(record: SvoPrimitiveRecord, worldPoint_m: vec3f) -> vec3f {
@@ -1147,15 +2669,25 @@ fn svoConeSample(point: vec3f, dimensions_m: vec3f) -> SvoConeSample {
   return SvoConeSample(distance_m, SVO_FEATURE_CYLINDER_SIDE, vec3f(direction.x * lateral.x, lateral.y, direction.y * lateral.x));
 }
 
-fn svoMarchedKind(kind: u32) -> bool { return kind == SVO_KIND_TORUS || kind == SVO_KIND_CONE; }
+fn svoMarchedKind(kind: u32) -> bool {
+  return kind == SVO_KIND_TORUS || kind == SVO_KIND_CONE || kind == SVO_KIND_ROUND_CONE || kind == SVO_KIND_ROUNDED_CYLINDER || kind == SVO_KIND_SMOOTH_UNION_CLUSTER;
+}
 
-fn svoMarchedDistance_m(kind: u32, point: vec3f, dimensions_m: vec3f) -> f32 {
+fn svoMarchedDistance_m(kind: u32, point: vec3f, dimensions_m: vec3f, packing: SvoClusterPacking) -> f32 {
   if (kind == SVO_KIND_TORUS) { return svoTorusDistance_m(point, dimensions_m); }
+  if (kind == SVO_KIND_SMOOTH_UNION_CLUSTER) { return svoClusterDistance_m(point, dimensions_m, packing); }
+  if (kind == SVO_KIND_ROUND_CONE) { return svoRoundConeDistance_m(point,dimensions_m); }
+  if (kind == SVO_KIND_ROUNDED_CYLINDER) { return svoRoundedCylinderDistance_m(point,dimensions_m); }
   return svoConeSample(point, dimensions_m).distance_m;
 }
 
-fn svoMarchedLocalNormal(kind: u32, point: vec3f, dimensions_m: vec3f) -> vec4f {
+fn svoMarchedLocalNormal(kind: u32, point: vec3f, dimensions_m: vec3f, packing: SvoClusterPacking) -> vec4f {
   if (kind == SVO_KIND_TORUS) { return vec4f(svoTorusNormal(point, dimensions_m), f32(SVO_FEATURE_SMOOTH)); }
+  if (kind == SVO_KIND_SMOOTH_UNION_CLUSTER) {
+    return vec4f(svoClusterLocalNormal(point, dimensions_m, packing), f32(SVO_FEATURE_SMOOTH));
+  }
+  if (kind == SVO_KIND_ROUND_CONE) { return vec4f(svoRoundConeNormal(point,dimensions_m),f32(SVO_FEATURE_SMOOTH)); }
+  if (kind == SVO_KIND_ROUNDED_CYLINDER) { return vec4f(svoRoundedCylinderNormal(point,dimensions_m),f32(SVO_FEATURE_SMOOTH)); }
   let cone = svoConeSample(point, dimensions_m);
   return vec4f(cone.normal, f32(cone.featureId));
 }
@@ -1163,6 +2695,12 @@ fn svoMarchedLocalNormal(kind: u32, point: vec3f, dimensions_m: vec3f) -> vec4f 
 /** Rotation-invariant radius that bounds a marched kind about its own centre. */
 fn svoMarchedBoundingRadius_m(kind: u32, dimensions_m: vec3f) -> f32 {
   if (kind == SVO_KIND_TORUS) { return dimensions_m.x + dimensions_m.y; }
+  // An ellipsoidal lobe is contained in a sphere of its longest half-axis, not
+  // of its corner: the corner belongs to the box around it, and using it here
+  // would start every march that much earlier for nothing.
+  if (kind == SVO_KIND_SMOOTH_UNION_CLUSTER) { return max(dimensions_m.x, max(dimensions_m.y, dimensions_m.z)); }
+  if (kind == SVO_KIND_ROUND_CONE) { return dimensions_m.y + max(dimensions_m.x,dimensions_m.z); }
+  if (kind == SVO_KIND_ROUNDED_CYLINDER) { return length(dimensions_m.xy); }
   return length(vec2f(max(dimensions_m.x, dimensions_m.z), dimensions_m.y));
 }
 
@@ -1181,6 +2719,7 @@ fn svoIntersectPrimitiveExact(
   worldDirectionIn: vec3f,
   tMin_m: f32,
   tMax_m: f32,
+  packing: SvoClusterPacking,
 ) -> SvoPrimitiveRayResult {
   let directionLength = length(worldDirectionIn);
   let orientationLength = length(record.orientation);
@@ -1202,9 +2741,18 @@ fn svoIntersectPrimitiveExact(
   else if (kind == SVO_KIND_CAPSULE) { dimensionsValid = dimensions_m.x > 0.0 && dimensions_m.y >= 0.0; }
   else if (kind == SVO_KIND_CYLINDER) { dimensionsValid = dimensions_m.x > 0.0 && dimensions_m.y > 0.0; }
   else if (kind == SVO_KIND_TORUS) { dimensionsValid = dimensions_m.y > 0.0 && dimensions_m.y < dimensions_m.x; }
-  else if (kind == SVO_KIND_CONE) {
+  else if (kind == SVO_KIND_CONE || kind == SVO_KIND_ROUND_CONE) {
     dimensionsValid = dimensions_m.y > 0.0 && dimensions_m.x >= 0.0 && dimensions_m.z >= 0.0
       && max(dimensions_m.x, dimensions_m.z) > 0.0;
+    if(kind==SVO_KIND_ROUND_CONE){dimensionsValid=dimensionsValid&&2.0*dimensions_m.y>abs(dimensions_m.z-dimensions_m.x)*1.000001;}
+  }
+  else if (kind == SVO_KIND_ROUNDED_CYLINDER) {
+    dimensionsValid=dimensions_m.x>0.0&&dimensions_m.y>0.0&&dimensions_m.z>0.0&&dimensions_m.z<=min(dimensions_m.x,dimensions_m.y);
+  }
+  // A cluster whose arena block did not resolve is invalid, not empty: falling
+  // through to a miss would draw a hole where the aggregate is and say nothing.
+  else if (kind == SVO_KIND_SMOOTH_UNION_CLUSTER) {
+    dimensionsValid = all(dimensions_m > vec3f(0.0)) && svoClusterPackingValid(packing);
   }
   if (!finiteKind || !dimensionsValid) { return svoPrimitiveNoRayHit(SVO_PRIMITIVE_RAY_INVALID); }
 
@@ -1289,9 +2837,9 @@ fn svoIntersectPrimitiveExact(
         var marchT_m = start;
         for (var iteration = 0u; iteration <= ${SVO_PRIMITIVE_MARCH_ITERATIONS}u; iteration += 1u) {
           let point_m = localOrigin + localDirection * marchT_m;
-          let distance_m = abs(svoMarchedDistance_m(kind, point_m, dimensions_m));
+          let distance_m = abs(svoMarchedDistance_m(kind, point_m, dimensions_m, packing));
           if (distance_m <= svoMarchSurfaceEpsilon_m(marchT_m)) {
-            let local = svoMarchedLocalNormal(kind, point_m, dimensions_m);
+            let local = svoMarchedLocalNormal(kind, point_m, dimensions_m, packing);
             if (length(local.xyz) > 1e-8) {
               bestT_m = marchT_m;
               bestNormal = local.xyz;
@@ -1496,7 +3044,7 @@ fn svoEllipsoidDistance_m(point: vec3f, radii_m: vec3f) -> f32 {
   return select(distance_m, -distance_m, dot(point / radii_m, point / radii_m) < 1.0);
 }
 
-fn svoPrimitiveDistance_m(record: SvoPrimitiveRecord, worldPoint_m: vec3f, terrainHeight_m: f32) -> f32 {
+fn svoPrimitiveDistance_m(record: SvoPrimitiveRecord, worldPoint_m: vec3f, terrainHeight_m: f32, packing: SvoClusterPacking) -> f32 {
   let kind = svoPrimitiveKind(record);
   let dimensions_m = svoPrimitiveDimensions_m(record);
   if (kind == SVO_KIND_TERRAIN) { return worldPoint_m.y - terrainHeight_m; }
@@ -1506,7 +3054,7 @@ fn svoPrimitiveDistance_m(record: SvoPrimitiveRecord, worldPoint_m: vec3f, terra
   if (kind == SVO_KIND_CAPSULE) { return svoCapsuleDistance_m(point, dimensions_m); }
   if (kind == SVO_KIND_CYLINDER) { return svoCylinderDistance_m(point, dimensions_m); }
   if (kind == SVO_KIND_ELLIPSOID) { return svoEllipsoidDistance_m(point, dimensions_m); }
-  if (svoMarchedKind(kind)) { return svoMarchedDistance_m(kind, point, dimensions_m); }
+  if (svoMarchedKind(kind)) { return svoMarchedDistance_m(kind, point, dimensions_m, packing); }
   return 3.402823e38;
 }
 
@@ -1530,7 +3078,7 @@ fn svoCylinderFeatureNormal(point: vec3f, dimensions_m: vec3f) -> vec4f {
   return vec4f(radial.x, 0.0, radial.y, f32(SVO_FEATURE_CYLINDER_SIDE));
 }
 
-fn svoPrimitiveLocalNormal(record: SvoPrimitiveRecord, point: vec3f) -> vec4f {
+fn svoPrimitiveLocalNormal(record: SvoPrimitiveRecord, point: vec3f, packing: SvoClusterPacking) -> vec4f {
   let kind = svoPrimitiveKind(record);
   let dimensions_m = svoPrimitiveDimensions_m(record);
   if (kind == SVO_KIND_SPHERE) { return vec4f(normalize(point), f32(SVO_FEATURE_SMOOTH)); }
@@ -1540,7 +3088,7 @@ fn svoPrimitiveLocalNormal(record: SvoPrimitiveRecord, point: vec3f) -> vec4f {
     return vec4f(normalize(vec3f(point.x, point.y - closestY, point.z)), f32(SVO_FEATURE_SMOOTH));
   }
   if (kind == SVO_KIND_CYLINDER) { return svoCylinderFeatureNormal(point, dimensions_m); }
-  if (svoMarchedKind(kind)) { return svoMarchedLocalNormal(kind, point, dimensions_m); }
+  if (svoMarchedKind(kind)) { return svoMarchedLocalNormal(kind, point, dimensions_m, packing); }
   if (kind == SVO_KIND_ELLIPSOID) {
     if (any(dimensions_m <= vec3f(0.0))) { return vec4f(0.0); }
     let closest = svoEllipsoidClosestPoint_m(dimensions_m, point);
@@ -1557,14 +3105,14 @@ fn svoPrimitiveLocalNormal(record: SvoPrimitiveRecord, point: vec3f) -> vec4f {
   return vec4f(0.0);
 }
 
-fn svoEvaluatePrimitive(record: SvoPrimitiveRecord, worldPoint_m: vec3f, terrainHeight_m: f32, terrainNormal: vec3f) -> SvoPrimitiveSample {
-  let distance_m = svoPrimitiveDistance_m(record, worldPoint_m, terrainHeight_m);
+fn svoEvaluatePrimitive(record: SvoPrimitiveRecord, worldPoint_m: vec3f, terrainHeight_m: f32, terrainNormal: vec3f, packing: SvoClusterPacking) -> SvoPrimitiveSample {
+  let distance_m = svoPrimitiveDistance_m(record, worldPoint_m, terrainHeight_m, packing);
   if (svoPrimitiveKind(record) == SVO_KIND_TERRAIN) {
     let normalLength = length(terrainNormal);
     return SvoPrimitiveSample(distance_m, SVO_FEATURE_TERRAIN, select(0u, SVO_SAMPLE_NORMAL_VALID, normalLength > 1e-8), 0u, vec4f(terrainNormal / max(normalLength, 1e-8), 0.0));
   }
   let localPoint = svoPrimitiveLocalPoint(record, worldPoint_m);
-  let local = svoPrimitiveLocalNormal(record, localPoint);
+  let local = svoPrimitiveLocalNormal(record, localPoint, packing);
   let localLength = length(local.xyz);
   let worldNormal = svoQuaternionRotate(record.orientation, local.xyz / max(localLength, 1e-8));
   return SvoPrimitiveSample(distance_m, u32(local.w), select(0u, SVO_SAMPLE_NORMAL_VALID, localLength > 1e-8), 0u, vec4f(worldNormal, 0.0));

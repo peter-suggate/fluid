@@ -163,7 +163,11 @@ function proxySurface(proxy: EnvironmentProxyPrimitive, world: Triple): SurfaceS
       const axis = q.indexOf(Math.max(...q));
       normal = [0, 0, 0]; normal[axis] = Math.sign(p[axis] || 1);
     }
-  } else if (proxy.kind === "ellipsoid") {
+  } else if (proxy.kind === "ellipsoid" || proxy.kind === "cluster") {
+    // An aggregate contributes as its lobe. Its packing is a render-only
+    // refinement inside exactly this ellipsoid, and a fissured emitter would
+    // give a radiance estimate that depended on which floret a sample landed
+    // between rather than on how much of the mass is glowing.
     const r = [proxy.radius_m.x, proxy.radius_m.y, proxy.radius_m.z] as Triple;
     const scaled = p.map((value, axis) => value / Math.max(r[axis], 1e-12)) as Triple;
     const k0 = length(scaled);

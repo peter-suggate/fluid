@@ -6,24 +6,44 @@ import type { SvoVec3 } from "./webgpu-svo-traversal";
 /**
  * Which closure the ground wears.
  *
- * `garden-terrain` is everything below in this file. `porcelain` is its
- * absence: the terrain material record carries the flat function ID and one
- * albedo, no metadata is published, and the shader's terrain-policy branch is
- * therefore never taken. Selecting it is a scene decision, made once by the
- * terrain shell node, so the ground the water rests in and the ground the
- * camera sees cannot disagree about which one it is.
+ * `garden-terrain` is everything below in this file. `porcelain` is not its
+ * absence but its alternative: the terrain material record carries the
+ * `plaster` procedural function instead, no metadata is published, and the
+ * shader's terrain-policy branch is therefore never taken — that branch tests
+ * for the garden function specifically, so the two closures cannot both run and
+ * the ground can never be double-varied.
+ *
+ * It *was* an absence, and the flat function ID it selected is why the hero
+ * pond rendered with no surface: a vessel filling most of the frame at one
+ * unmodulated albedo. Not publishing metadata is the part worth keeping; not
+ * publishing a material was the mistake.
+ *
+ * Selecting it is a scene decision, made once by the terrain shell node, so the
+ * ground the water rests in and the ground the camera sees cannot disagree
+ * about which one it is.
  */
 export type SvoTerrainSurfaceModel = "garden-terrain" | "porcelain";
 
 /**
  * Unglazed white porcelain, in scene-linear.
  *
- * Below the paper white the rest of the sets are lit against, because a ground
- * plane fills most of the frame and an albedo that high turns every bounce into
- * a second light source. Faintly warm, which is what separates fired clay from
- * a render's default grey.
+ * It was 0.80, held below paper white on the argument that a ground plane fills
+ * most of the frame and an albedo that high turns every bounce into a second
+ * light source. That argument is correct and it is describing the *reference*:
+ * a high-key porcelain garden is exactly a set in which the floor is a second
+ * light source, and holding the largest surface an eighth of a stop under the
+ * props standing on it is what made the frame read as concrete rather than as
+ * fired clay. The props are authored between 0.62 and 0.92 on their palettes, so
+ * 0.90 puts the ground at the top of the set's own band instead of below it.
+ *
+ * Still faintly warm — the 0.015 spread between the channels is what separates
+ * fired clay from a render's default grey, and it survives at any level.
+ *
+ * Both are the *base* the `plaster` procedural policy modulates, not the final
+ * surface. Since that policy carries no colour amplitude, the albedo here is the
+ * albedo shaded: the only thing the closure perturbs is the sheen.
  */
-export const SVO_PORCELAIN_TERRAIN_BASE_COLOR_LINEAR: LinearRgb = [0.80, 0.792, 0.775];
+export const SVO_PORCELAIN_TERRAIN_BASE_COLOR_LINEAR: LinearRgb = [0.90, 0.891, 0.874];
 export const SVO_PORCELAIN_TERRAIN_ROUGHNESS = 0.62;
 
 /** The ground's closure, as declared by the scene's terrain shell. */

@@ -37,6 +37,7 @@ import {
   sparseSceneOctreeMaximumDepth,
 } from "../lib/webgpu-octree-sparse-bricks";
 import { liveSvoPlanBasePages } from "../lib/webgpu-svo-live-derived-builder";
+import { svoScenePrimitiveBrickDensity } from "./svo-dry-frame-harness";
 
 /** This machine's Dawn/Metal adapter, as reported by `adapter.limits`. */
 const M1_MAX_LIMITS = {
@@ -124,44 +125,31 @@ function surfaceBricks(scene: SceneDescription, cells: readonly [number, number,
 }
 
 /**
- * How crowded the busiest brick gets.
+ * How crowded the busiest brick gets, at a lattice this sweep is only
+ * contemplating rather than one the GPU has published.
  *
- * The live voxelizer keeps `OCTREE_LIVE_SCENE_CANDIDATES_PER_BRICK` primitives
- * per dirty brick and raises `CANDIDATE_OVERFLOW` for the rest, which are then
- * simply not written into that brick's voxels
- * (`lib/webgpu-sparse-scene-proxies.ts`). That makes the ceiling on *generated
- * objects* a density rather than a total: 64 primitives per (brickSize x cell)
- * cube of world, which shrinks by 8x every time the lattice halves. A scene
- * library of parameterised species instantiated freely runs into this long
- * before it runs into the 4 096 record arenas.
+ * The binning itself is `svoScenePrimitiveBrickDensity` in
+ * `./svo-dry-frame-harness`, shared with the render smoke lane so the sweep and
+ * the gate cannot disagree about what "busiest brick" means. What stays here is
+ * this tool's *hypothetical* lattice: cell size derived from the container and
+ * the swept cell count, with the container's own corner as the origin. The
+ * smoke lane instead reads the real published `structural.domain`, which is the
+ * right frame once a world exists and the wrong one for a sweep over sizes no
+ * world has been built at.
  */
 function primitivesPerBrick(scene: SceneDescription, cells: readonly [number, number, number], brickSize: number) {
   const container = scene.container;
-  const cellSize = [container.width_m / cells[0], container.height_m / cells[1], container.depth_m / cells[2]] as const;
-  const bricks = cells.map((value) => Math.ceil(value / brickSize)) as [number, number, number];
-  const origin = [-container.width_m / 2, 0, -container.depth_m / 2];
-  const counts = new Map<number, number>();
-  let primitives = 0;
-  for (const descriptor of buildSvoScenePrimitives(scene).descriptors) {
-    if (descriptor.kind === "terrain-heightfield") continue;
-    primitives += 1;
-    const bounds = svoPrimitiveCandidateBounds(descriptor as never);
-    const minimum = [bounds.minimum_m.x, bounds.minimum_m.y, bounds.minimum_m.z];
-    const maximum = [bounds.maximum_m.x, bounds.maximum_m.y, bounds.maximum_m.z];
-    const first = minimum.map((value, axis) => Math.max(0, Math.floor((value - origin[axis]) / (cellSize[axis] * brickSize))));
-    const last = maximum.map((value, axis) => Math.min(bricks[axis] - 1, Math.floor((value - origin[axis]) / (cellSize[axis] * brickSize))));
-    for (let bz = first[2]; bz <= last[2]; bz += 1) for (let by = first[1]; by <= last[1]; by += 1) for (let bx = first[0]; bx <= last[0]; bx += 1) {
-      const key = (bz * bricks[1] + by) * bricks[0] + bx;
-      counts.set(key, (counts.get(key) ?? 0) + 1);
-    }
-  }
-  let maximum = 0;
-  let overflowed = 0;
-  for (const count of counts.values()) {
-    maximum = Math.max(maximum, count);
-    if (count > OCTREE_LIVE_SCENE_CANDIDATES_PER_BRICK) overflowed += 1;
-  }
-  return { primitives, maximumPerBrick: maximum, overflowedBricks: overflowed, brickEdge_m: cellSize[0] * brickSize };
+  const { primitives, maximumPerBrick, overflowedBricks, brickEdge_m } = svoScenePrimitiveBrickDensity(
+    buildSvoScenePrimitives(scene).descriptors,
+    {
+      worldOrigin_m: [-container.width_m / 2, 0, -container.depth_m / 2],
+      cellSize_m: [container.width_m / cells[0], container.height_m / cells[1], container.depth_m / cells[2]],
+      dimensionsCells: cells as readonly [number, number, number],
+      brickSize,
+    },
+    OCTREE_LIVE_SCENE_CANDIDATES_PER_BRICK,
+  );
+  return { primitives, maximumPerBrick, overflowedBricks, brickEdge_m };
 }
 
 function sweep(cellSize_m: number) {

@@ -107,8 +107,29 @@ export function sparseScenePrimitiveForSvoDescriptor(descriptor: SvoPrimitiveDes
   if (descriptor.kind === "box") return { ...base, kind: "box", halfExtents: [descriptor.halfExtents_m.x, descriptor.halfExtents_m.y, descriptor.halfExtents_m.z] };
   if (descriptor.kind === "capsule") return { ...base, kind: "capsule", radius: descriptor.radius_m, halfLength: descriptor.segmentHalfLength_m };
   if (descriptor.kind === "cylinder") return { ...base, kind: "cylinder", radius: descriptor.radius_m, halfHeight: descriptor.halfHeight_m };
+  // The ordinary outer cylinder contains its filleted SDF and is therefore a
+  // conservative live-occupancy proxy for shadows and indirect light.
+  if (descriptor.kind === "rounded-cylinder") return { ...base, kind: "cylinder", radius: descriptor.radius_m, halfHeight: descriptor.halfHeight_m };
   if (descriptor.kind === "torus") return { ...base, kind: "torus", majorRadius: descriptor.majorRadius_m, minorRadius: descriptor.minorRadius_m };
   if (descriptor.kind === "cone") return { ...base, kind: "cone", baseRadius: descriptor.baseRadius_m, topRadius: descriptor.topRadius_m, halfHeight: descriptor.halfHeight_m };
+  // Live occupancy is conservative for the render-only round-cone SDF: the
+  // widest endpoint radius as a capsule contains the tapered convex hull.
+  if (descriptor.kind === "round-cone") return {
+    ...base, kind: "capsule", radius: Math.max(descriptor.baseRadius_m, descriptor.topRadius_m),
+    halfLength: descriptor.halfHeight_m,
+  };
+  // An aggregate voxelizes as its envelope, deliberately. This pass derives
+  // coverage from a single distance sample at each voxel centre through a planar
+  // law, which assumes a locally planar surface with a unit gradient — a
+  // fissured packing has neither, and it *under*-reports. An under-populated
+  // page is indistinguishable from empty space to every consumer downstream:
+  // the geometry silently stops casting shadows and stops occluding indirect
+  // light. Reporting the solid lobe over-occludes instead, which is the safe
+  // direction and is sound rather than merely cautious, because the render SDF
+  // clips the packing to exactly this ellipsoid.
+  if (descriptor.kind === "smooth-union-cluster") {
+    return { ...base, kind: "ellipsoid", radii: [descriptor.lobeRadii_m.x, descriptor.lobeRadii_m.y, descriptor.lobeRadii_m.z] };
+  }
   return { ...base, kind: "ellipsoid", radii: [descriptor.radii_m.x, descriptor.radii_m.y, descriptor.radii_m.z] };
 }
 
@@ -133,6 +154,13 @@ export function sparseScenePrimitiveForProxy(
   if (proxy.kind === "torus") return { ...base, kind: "torus", majorRadius: proxy.majorRadius_m, minorRadius: proxy.minorRadius_m };
   if (proxy.kind === "cone") {
     return { ...base, kind: "cone", baseRadius: proxy.baseRadius_m, topRadius: proxy.topRadius_m, halfHeight: proxy.halfHeight_m };
+  }
+  // A cluster voxelizes as its lobe. It shares `radius_m` with an ellipsoid, so
+  // this would have arrived at the right answer by falling through — which is
+  // exactly the kind of accident that stops being right the first time either
+  // shape changes. See the same choice in `sparseScenePrimitiveForSvoDescriptor`.
+  if (proxy.kind === "cluster") {
+    return { ...base, kind: "ellipsoid", radii: [proxy.radius_m.x, proxy.radius_m.y, proxy.radius_m.z] };
   }
   return { ...base, kind: "ellipsoid", radii: [proxy.radius_m.x, proxy.radius_m.y, proxy.radius_m.z] };
 }

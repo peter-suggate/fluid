@@ -23,7 +23,7 @@ import { createSvoDrySceneFragmentWGSL, sparseVoxelDrySceneBindGroupLayoutEntrie
   SVO_DRY_TRAVERSAL_MODES, SVO_SCENE_PRIMITIVE_RASTER_CONTRACT,
   type SvoDryOptimizationExperiments } from "../lib/webgpu-svo-dry-scene";
 
-const cullShader = createSvoBrickRasterCullWGSL({ reversedZNear_m: 0.01, tanHalfFov: 0.72 });
+const cullShader = createSvoBrickRasterCullWGSL({ reversedZNear_m: 0.01 });
 // Layout builders read the WebGPU stage flags, which only exist once a device
 // module has installed its globals.
 if (typeof globalThis.GPUShaderStage === "undefined") {
@@ -131,7 +131,7 @@ test("the raster-primary fragment reuses the production leaf tracer and writes d
   assert.doesNotMatch(fragment, /traceStatic|nearestBody|traceGlass/,
     "the brick fragment carries no octree stack, rigid loop or pane loop");
   // Constant clip-space z with w = view depth is the reversed-Z infinite-far projection.
-  assert.match(shader, /position=vec4f\(dot\(relative,right\)\/\(aspect\*\.72\),dot\(relative,up\)\/\.72,DRY_REVERSED_Z_NEAR_M,viewDepth\);/);
+  assert.match(shader, /position=vec4f\(dot\(relative,right\)\/\(aspect\*cameraTanHalfFov\(\)\),dot\(relative,up\)\/cameraTanHalfFov\(\),DRY_REVERSED_Z_NEAR_M,viewDepth\);/);
   assert.match(shader, /struct DryRasterPrimaryOut\{[^}]*@location\(2\) geometry:vec4f,[^}]*@location\(3\) opaqueIdentity:vec2u,/);
   // Background and terrain only; the primary trace never runs full-screen here.
   assert.match(shader, /let terrain=traceTerrain\(camera\[0\],rd\);/);
@@ -187,16 +187,30 @@ test("raster-primary resolves live scene primitive overlap with exact per-primit
   assert.ok(vertexStart > 0 && fragmentStart > vertexStart);
   assert.match(shader.slice(vertexStart, fragmentStart), /dryPrimitive\(primitiveIndex\)/,
     "each instance derives conservative coverage from its own analytic record");
-  assert.match(shader, /kind==SVO_KIND_SPHERE/);
-  assert.match(shader, /kind==SVO_KIND_BOX\|\|kind==SVO_KIND_ELLIPSOID/);
-  assert.match(shader, /kind==SVO_KIND_CAPSULE/);
-  assert.match(shader, /kind==SVO_KIND_CYLINDER/);
-  assert.match(shader, /kind==SVO_KIND_TORUS/);
-  assert.match(shader, /kind==SVO_KIND_CONE/);
+  // The conservative local extent is the kind table's now, not a copy of it in
+  // this shader: it was one of six transcriptions of the same formula, and a
+  // bound that is too small here silently clips a silhouette rather than
+  // failing. Every kind still has to appear in the dispatch, which is what
+  // these assert — against the shared helper's own spelling.
+  assert.match(shader.slice(vertexStart, fragmentStart), /svoPrimitiveLocalExtent_m\(svoPrimitiveKind\(record\)/,
+    "the vertex stage reads the shared per-kind extent rather than its own");
+  for (const kind of [
+    "SVO_KIND_SPHERE", "SVO_KIND_BOX", "SVO_KIND_ELLIPSOID", "SVO_KIND_CAPSULE",
+    "SVO_KIND_CYLINDER", "SVO_KIND_TORUS", "SVO_KIND_CONE", "SVO_KIND_SMOOTH_UNION_CLUSTER",
+  ]) {
+    assert.match(shader, new RegExp(`kind == ${kind}`), `${kind} has no arm in the shared local-extent dispatch`);
+  }
   assert.match(fragment, /let exact=primitiveHit\(record,ro,rd,0\.0,DRY_MISS\);/,
     "the voxel owner is not authoritative at a projected primitive boundary");
-  assert.match(fragment, /return dryRasterPrimarySurface\(exact,ro,rd,camera\[1\],SVO_GBUFFER_PRODUCER_SCENE_PRIMITIVE\);/,
+  assert.match(fragment, /return drySceneRasterOut\(dryRasterPrimarySurface\(exact,ro,rd,camera\[1\],SVO_GBUFFER_PRODUCER_SCENE_PRIMITIVE\)\);/,
     "the exact hit publishes all four primary planes, its producing-pass tag and analytic frag_depth together");
+  // The indirection above exists so `scenePrimitiveHsrProbe` can drop the depth
+  // write. Production must still carry it: without an analytic frag_depth the
+  // stored depth is the proxy's rather than the surface's, and every later
+  // primary producer tests against the wrong occluder.
+  const sceneRasterOut = shader.slice(shader.indexOf("struct DrySceneRasterOut"));
+  assert.match(sceneRasterOut.slice(0, sceneRasterOut.indexOf("}")), /@builtin\(frag_depth\) hardwareDepth:f32/,
+    "the shipped scene-primitive fragment publishes analytic depth");
   assert.doesNotMatch(fragment, /materialOwners|traceLeafPayload/);
 
   const primitiveBinding = sparseVoxelDrySceneBindGroupLayoutEntries().find((entry) => entry.binding === 4);

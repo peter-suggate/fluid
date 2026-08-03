@@ -118,3 +118,56 @@ Independent of 1–3.
 
 Phase 0 in any order. Phase 1's primitive table before Phase 2. Phase 3 after
 Phase 2. Phases 4 and 5 are independent of everything else and of each other.
+
+---
+
+## Corrections found while building it
+
+**Decision 1's "ship 8 neighbours" is unsound, and the measurement that
+recommended it was reading the wrong failure.** The eight cells surrounding the
+query point are the right *set*, but the set changes as the point crosses a cell
+boundary, and at the instant a cell leaves, its sphere is only
+`(1 − jitter)·period − radius` away — 1.2 mm at hero canopy scale, well inside
+the smooth minimum's blend. The field therefore *jumps*. Measured over 200 000
+sample pairs at the recommended configuration, its Lipschitz constant is **60**,
+and 5 of 2 000 rays step clean through the surface. Twenty-seven cells do not fix
+it (that block is centred on the point's own cell, so its membership changes at
+the same boundaries), and neither does an order-independent fold.
+
+A **four-cell block centred on the point** is the smallest that contains the
+eight with a ring to spare; a leaving sphere is then `(2 − jitter)·period −
+radius` away — 17.2 mm — and the measured constant is **1.000**, with zero
+tunnelled rays. Sixty-four cells is not sixty-four sphere evaluations: the outer
+fifty-six are rejected by the distance to their *unjittered* centre, which needs
+no hash. The authoring contract is now `(2 − jitter)·period ≥ floret + smooth`,
+enforced where a scene can reach it.
+
+The residual is not tunnelling: about one ray in six hundred, all at grazing
+incidence, reports a hit past the dense oracle's crossing because the field dips
+to zero between two march samples without entering the 37 µm acceptance band.
+That is the band buying the step count, and it is a silhouette pixel rather than
+a hole.
+
+**Phase 3's gate is not met at the authored lattice, and the aggregate is not
+what stands between us and it.** The canopy move took the set from 2 227 records
+to 1 209 and the bonsai from 1 339 to 191, so the 4 096 ceiling is comfortable.
+The per-brick ceiling is not: at 25 mm cells (200 mm bricks) twelve bricks hold
+more than the 64 candidates the hierarchy binds, worst 128. Attributed, the
+overfull bricks are **the swept coping rail** (83 cones in one brick) and **the
+bonsai's fork** (103) — the two things still spelled as chains of explicit
+primitives, and the two an *ellipsoidal-lobe* aggregate cannot express. Sweeping
+the lattice: 12.5 mm leaves six bricks over at worst 72; **7.5 mm clears it
+entirely**, worst 51.
+
+So the remedy the plan already names — halve the render lattice — works, but the
+lattice is currently one number shared with the solver, where 7.5 mm overruns the
+65 536-vs-65 535 one-axis dispatch. The scene opens dry, so the shipped default
+would be fine and `water: true` would not. Separating the render lattice from the
+solver's, or a **swept-arc aggregate** for the rail and the trunk, are the two
+real routes. Neither was taken here.
+
+**Phase 3's "trunk and root flare onto the cluster" is only half reachable.** A
+cluster's envelope is an ellipsoid, so it serves the canopy lobes, the boulder
+caps and any squat mass; it cannot express a tapered swept trunk, and chaining
+clusters along one would reintroduce the seams at every hard lobe clip. The
+capsule seams at limb junctions want the swept-arc kind, not this one.

@@ -107,6 +107,11 @@ function pointInsideProxy(proxy: EnvironmentProxyPrimitive, point: readonly [num
     const radius_m = proxy.baseRadius_m + (proxy.topRadius_m - proxy.baseRadius_m) * height;
     return dx * dx + dz * dz <= radius_m * radius_m;
   }
+  // A cluster and an ellipsoid share their `radius_m`, and that is deliberate:
+  // this oracle mirrors what the voxelizer writes, and the voxelizer sees an
+  // aggregate as its solid lobe. Over-occluding a fissured interior is the safe
+  // direction — an under-populated page is indistinguishable from empty space
+  // to every consumer of the pyramid.
   return (dx / proxy.radius_m.x) ** 2 + (dy / proxy.radius_m.y) ** 2 + (dz / proxy.radius_m.z) ** 2 <= 1;
 }
 

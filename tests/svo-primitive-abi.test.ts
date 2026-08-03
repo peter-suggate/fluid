@@ -69,6 +69,7 @@ test("primitive ABI uses four aligned lanes and stable kind values", () => {
   // captured by an older build still decode to the shape they were written as.
   assert.deepEqual(SVO_PRIMITIVE_KINDS, {
     sphere: 1, box: 2, capsule: 3, cylinder: 4, ellipsoid: 5, terrainHeightfield: 6, torus: 7, cone: 8,
+    smoothUnionCluster: 9, roundCone: 10, roundedCylinder: 11,
   });
 
   const packed = packSvoPrimitiveRecords(descriptors);
@@ -90,7 +91,12 @@ test("primitive ABI uses four aligned lanes and stable kind values", () => {
   const terrain = 5 * SVO_PRIMITIVE_RECORD_WORDS;
   assert.equal(packed[terrain + 3], SVO_PRIMITIVE_KINDS.terrainHeightfield);
   assert.equal(packed[terrain + 13], 7);
-  assert.equal(packed[terrain + 14], SVO_PRIMITIVE_FLAGS.externalTerrain);
+  // Terrain is also arena-backed, and says so. The flag word is write-only —
+  // nothing branches on it, the real dispatch is on the kind tag — so this is a
+  // description of the record rather than a switch, and the bit was added when
+  // the aggregate kind gave that property a second holder.
+  assert.equal(packed[terrain + 14],
+    SVO_PRIMITIVE_FLAGS.externalTerrain | SVO_PRIMITIVE_FLAGS.arenaBacked);
 });
 
 test("packing is deterministic and unpacking preserves normalized metre records", () => {
@@ -164,6 +170,10 @@ test("primitive validation rejects lossy identity, invalid geometry, and degener
     kind: "cone", primitiveId: 1, materialId: 34, center_m: { x: 0, y: 0, z: 0 },
     baseRadius_m: 1, topRadius_m: 0, halfHeight_m: 1,
   }));
+  assert.throws(() => canonicalSvoPrimitive({
+    kind: "round-cone", primitiveId: 1, materialId: 34, center_m: { x: 0, y: 0, z: 0 },
+    baseRadius_m: 2, topRadius_m: 0, halfHeight_m: 1,
+  }), /taper must not outrun/);
 });
 
 test("swept ring and tapered cone evaluations keep their zero sets, features, and flags", () => {
@@ -204,6 +214,69 @@ test("swept ring and tapered cone evaluations keep their zero sets, features, an
     y: (cone.baseRadius_m - cone.topRadius_m) / slope,
     z: 0,
   });
+});
+
+test("round-cone SDF keeps tapered spherical ends smooth and cap-free", () => {
+  const roundCone: SvoPrimitiveDescriptor = {
+    kind: "round-cone", primitiveId: 109, materialId: 35,
+    center_m: { x: 0, y: 0, z: 0 }, baseRadius_m: 0.8, topRadius_m: 0.5, halfHeight_m: 1,
+  };
+  const packed = packSvoPrimitiveRecords([roundCone]);
+  assert.equal(packed[3], SVO_PRIMITIVE_KINDS.roundCone);
+  assert.equal(packed[14], SVO_PRIMITIVE_FLAGS.exactDistance | SVO_PRIMITIVE_FLAGS.marchedIntersection);
+  assert.equal(unpackSvoPrimitiveRecords(packed)[0].kind, "round-cone");
+
+  const base = sampleSvoPrimitive(roundCone, { x: 0.8, y: -1, z: 0 });
+  close(base.signedDistance_m, 0);
+  closeVector(base.normal, { x: 1, y: 0, z: 0 });
+  assert.equal(base.featureId, SVO_PRIMITIVE_FEATURES.smooth);
+
+  const taper = (roundCone.baseRadius_m - roundCone.topRadius_m) / (2 * roundCone.halfHeight_m);
+  const lateral = Math.sqrt(1 - taper * taper);
+  const radial = (roundCone.baseRadius_m - taper * roundCone.halfHeight_m) / lateral;
+  const flank = sampleSvoPrimitive(roundCone, { x: radial, y: 0, z: 0 });
+  close(flank.signedDistance_m, 0);
+  closeVector(flank.normal, { x: lateral, y: taper, z: 0 });
+  assert.equal(flank.featureId, SVO_PRIMITIVE_FEATURES.smooth);
+
+  const top = sampleSvoPrimitive(roundCone, { x: 0, y: 1.5, z: 0 });
+  close(top.signedDistance_m, 0);
+  closeVector(top.normal, { x: 0, y: 1, z: 0 });
+  assert.equal(top.featureId, SVO_PRIMITIVE_FEATURES.smooth);
+});
+
+test("rounded-cylinder SDF gives a plate one continuous, resolvable edge", () => {
+  const plate: SvoPrimitiveDescriptor = {
+    kind: "rounded-cylinder", primitiveId: 110, materialId: 36,
+    center_m: { x: 0, y: 0, z: 0 }, radius_m: 1, halfHeight_m: 0.4, edgeRadius_m: 0.1,
+  };
+  const packed = packSvoPrimitiveRecords([plate]);
+  assert.equal(packed[3], SVO_PRIMITIVE_KINDS.roundedCylinder);
+  assert.equal(packed[14], SVO_PRIMITIVE_FLAGS.exactDistance | SVO_PRIMITIVE_FLAGS.marchedIntersection);
+  assert.equal(unpackSvoPrimitiveRecords(packed)[0].kind, "rounded-cylinder");
+
+  const top = sampleSvoPrimitive(plate, { x: 0, y: 0.4, z: 0 });
+  close(top.signedDistance_m, 0);
+  closeVector(top.normal, { x: 0, y: 1, z: 0 });
+
+  const side = sampleSvoPrimitive(plate, { x: 1, y: 0, z: 0 });
+  close(side.signedDistance_m, 0);
+  closeVector(side.normal, { x: 1, y: 0, z: 0 });
+
+  const diagonal = Math.SQRT1_2 * plate.edgeRadius_m;
+  const fillet = sampleSvoPrimitive(plate, {
+    x: plate.radius_m - plate.edgeRadius_m + diagonal,
+    y: plate.halfHeight_m - plate.edgeRadius_m + diagonal,
+    z: 0,
+  });
+  close(fillet.signedDistance_m, 0);
+  closeVector(fillet.normal, { x: Math.SQRT1_2, y: Math.SQRT1_2, z: 0 });
+  assert.equal(fillet.featureId, SVO_PRIMITIVE_FEATURES.smooth);
+
+  assert.throws(() => canonicalSvoPrimitive({
+    ...plate,
+    edgeRadius_m: plate.halfHeight_m + 0.01,
+  }), /must fit inside/);
 });
 
 test("rigid-body adapter preserves the repository's dimension semantics", () => {

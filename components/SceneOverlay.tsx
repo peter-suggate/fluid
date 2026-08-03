@@ -1,8 +1,8 @@
 "use client";
 
+import { useRouter } from "next/navigation";
 import { findSceneDefinition } from "@/lib/scenes";
 import { useSceneStore } from "@/lib/stores/scene-store";
-import { useShellStore } from "@/lib/stores/shell-store";
 import { useUIStore } from "@/lib/stores/ui-store";
 import { planSceneRuntime } from "@/lib/scene-runtime";
 
@@ -20,11 +20,11 @@ import { planSceneRuntime } from "@/lib/scene-runtime";
  * hold that state at all.
  */
 export function SceneOverlay() {
+  const router = useRouter();
   const presetId = useSceneStore((state) => state.presetId);
   const scene = useSceneStore((state) => state.scene);
   const sceneModalOpen = useUIStore((state) => state.sceneModalOpen);
   const setSceneModalOpen = useUIStore((state) => state.setSceneModalOpen);
-  const openLibrary = useShellStore((state) => state.openLibrary);
   const definition = findSceneDefinition(presetId);
   const runtime = planSceneRuntime(scene).fluidSolver ? `seed ${scene.randomSeed}` : "live SVO · no fluid";
   return (
@@ -33,7 +33,7 @@ export function SceneOverlay() {
       <button
         type="button"
         className="scene-overlay-chip"
-        onClick={openLibrary}
+        onClick={() => router.push("/")}
         data-testid="open-scene-library"
         title={definition ? `${definition.blurb}\n\nBrowse all scenes` : "Browse all scenes"}
       >

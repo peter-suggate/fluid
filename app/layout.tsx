@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { headers } from "next/headers";
+import { AppShell } from "@/components/AppShell";
 import "./globals.css";
 
 export async function generateMetadata(): Promise<Metadata> {
@@ -33,6 +34,6 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
   // has to be told this one is deliberate. React leaves it alone either way.
   return <html lang="en" suppressHydrationWarning>
     <head><script dangerouslySetInnerHTML={{ __html: THEME_BOOT }} /></head>
-    <body>{children}</body>
+    <body><AppShell>{children}</AppShell></body>
   </html>;
 }

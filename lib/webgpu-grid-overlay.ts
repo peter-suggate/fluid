@@ -7,7 +7,7 @@
  * only owns the grid-specific sampling and alpha blend.
  */
 
-import { CAMERA_TAN_HALF_FOV } from "./webgpu-camera";
+import { cameraApertureShaderLibrary } from "./webgpu-camera";
 
 export const gridOverlayShader = /* wgsl */ `
 struct Uniforms {
@@ -32,6 +32,7 @@ struct BodyGPU {
   colorSelected: vec4f,
 }
 @group(0) @binding(0) var<uniform> u: Uniforms;
+${cameraApertureShaderLibrary("u")}
 @group(0) @binding(1) var<storage, read> bodies: array<BodyGPU, 12>;
 @group(0) @binding(2) var fluidField: texture_3d<f32>;
 @group(0) @binding(3) var tallCellBases: texture_2d<f32>;
@@ -513,7 +514,7 @@ fn volumeField(uv:vec2f)->vec4f {
   if(length(right)<1e-5){right=vec3f(1.0,0.0,0.0);}
   right=normalize(right);
   let up=normalize(cross(right,forward));
-  let direction=normalize(forward+right*ndc.x*u.viewport.x/max(u.viewport.y,1.0)*${CAMERA_TAN_HALF_FOV}+up*ndc.y*${CAMERA_TAN_HALF_FOV});
+  let direction=normalize(forward+right*ndc.x*u.viewport.x/max(u.viewport.y,1.0)*cameraTanHalfFov()+up*ndc.y*cameraTanHalfFov());
   let size=u.container.xyz;
   let boundsMin=vec3f(-0.5*size.x,0.0,-0.5*size.z);
   let interval=boxIntersection(origin,direction,boundsMin,boundsMin+size);
@@ -555,7 +556,7 @@ fn volumeField(uv:vec2f)->vec4f {
   let forward = normalize(u.cameraTarget.xyz - origin);
   let right = normalize(cross(forward, vec3f(0.0, 1.0, 0.0)));
   let up = normalize(cross(right, forward));
-  let direction = normalize(forward + right * ndc.x * u.viewport.x / max(u.viewport.y, 1.0) * ${CAMERA_TAN_HALF_FOV} + up * ndc.y * ${CAMERA_TAN_HALF_FOV});
+  let direction = normalize(forward + right * ndc.x * u.viewport.x / max(u.viewport.y, 1.0) * cameraTanHalfFov() + up * ndc.y * cameraTanHalfFov());
   let size = u.container.xyz;
   let boundsMin = vec3f(-0.5 * size.x, 0.0, -0.5 * size.z);
   let boundsMax = boundsMin + size;

@@ -87,8 +87,8 @@ test("the probe declares one binding per resource it reads", () => {
 });
 
 test("the covering-proxy count is exact only while the fragment writes its own depth", () => {
-  const withDepth = createSvoBrickRasterProbeWGSL({ fragmentDepthWritten: true, tanHalfFov: 0.72 });
-  const withoutDepth = createSvoBrickRasterProbeWGSL({ fragmentDepthWritten: false, tanHalfFov: 0.72 });
+  const withDepth = createSvoBrickRasterProbeWGSL({ fragmentDepthWritten: true });
+  const withoutDepth = createSvoBrickRasterProbeWGSL({ fragmentDepthWritten: false });
   // A fragment that writes frag_depth cannot be rejected before it runs, so no
   // proxy is ever flagged as merely possibly-shaded. Match the guard itself
   // rather than the bare flag value, which also spells the sort-bucket count.
@@ -100,7 +100,7 @@ test("the covering-proxy count is exact only while the fragment writes its own d
 });
 
 test("a dropped record never inflates the count of bricks drawn at this pixel", () => {
-  const code = createSvoBrickRasterProbeWGSL({ fragmentDepthWritten: true, tanHalfFov: 0.72 });
+  const code = createSvoBrickRasterProbeWGSL({ fragmentDepthWritten: true });
   // Overflowing the record buffer (a long DDA) and overflowing the proxy array
   // are different failures. Only the latter makes the covering count a floor;
   // adding record drops into it would report bricks the frame never drew.
@@ -116,14 +116,21 @@ test("a dropped record never inflates the count of bricks drawn at this pixel", 
   assert.match(code, /let recordDrops=atomicLoad\(&probeOverflow\)\+atomicLoad\(&probeRecordDrops\);/);
 });
 
-test("the probe rejects a camera basis it cannot form a ray from", () => {
-  assert.throws(() => createSvoBrickRasterProbeWGSL({ fragmentDepthWritten: true, tanHalfFov: 0 }), RangeError);
+// The probe used to take the aperture as a build-time option and reject a
+// non-positive one. It now reads the scene's lens out of the shared view
+// uniform block, which is the only way its ray can stay the production ray
+// once the aperture became something a document authors.
+test("the probe takes its aperture from the camera uniform", () => {
+  const code = createSvoBrickRasterProbeWGSL({ fragmentDepthWritten: true });
+  assert.match(code, /fn cameraTanHalfFov\(\)->f32\{let authored=uniforms\.cameraPosition\.w;/);
+  assert.match(code, /forward\+right\*ndc\.x\*viewport\.x\/viewport\.y\*cameraTanHalfFov\(\)\+up\*ndc\.y\*cameraTanHalfFov\(\)/);
+  assert.doesNotMatch(code, /PROBE_TAN_HALF/);
 });
 
 test("the raster probe compiles and builds its compute pipeline", { skip }, async () => {
   const gpuDevice = await device();
   for (const fragmentDepthWritten of [true, false]) {
-    const code = createSvoBrickRasterProbeWGSL({ fragmentDepthWritten, tanHalfFov: 0.72 });
+    const code = createSvoBrickRasterProbeWGSL({ fragmentDepthWritten });
     const module = gpuDevice.createShaderModule({ label: `raster probe (depth=${fragmentDepthWritten})`, code });
     const info = await module.getCompilationInfo();
     assert.deepEqual(
@@ -163,7 +170,7 @@ test("the probe's workgroup array fits the guaranteed minimum storage size", { s
   const gpuDevice = await device();
   const module = gpuDevice.createShaderModule({
     label: "raster probe (default limits)",
-    code: createSvoBrickRasterProbeWGSL({ fragmentDepthWritten: true, tanHalfFov: 0.72 }),
+    code: createSvoBrickRasterProbeWGSL({ fragmentDepthWritten: true }),
   });
   const layout = gpuDevice.createBindGroupLayout({ entries: svoBrickRasterProbeBindGroupLayoutEntries() });
   // 16384 is the WebGPU-guaranteed minimum; Dawn reports the overrun against

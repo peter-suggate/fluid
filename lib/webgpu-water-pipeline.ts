@@ -3,11 +3,22 @@ import { advancePresentationClock, frameInterval_ms } from "./frame-pacing";
 import type { SecondaryParticleRenderPipeline } from "./webgpu-secondary-particles";
 import {
   GLASS_OPTICS,
+  packWaterSceneOptics,
+  resolveDisplayGrade,
+  resolveWaterKeyLight,
+  resolveWaterOptics,
   unifiedDisplayTransferShaderLibrary,
   unifiedLightingShaderLibrary,
   WATER_OPTICS,
+  WATER_SCENE_OPTICS_BYTES,
+  WATER_SCENE_OPTICS_FLOATS,
+  WATER_SCENE_OPTICS_RECEIVER_FLOAT_OFFSET,
+  waterSceneOpticsShaderLibrary,
+  type WaterOpticsAuthoring,
+  type DisplayGradeAuthoring,
 } from "./webgpu-lighting";
-import { CAMERA_TAN_HALF_FOV } from "./webgpu-camera";
+import { terrainHeightAt, type TerrainDescription } from "./terrain";
+import { cameraApertureShaderLibrary } from "./webgpu-camera";
 import {
   OCTREE_POWER_COARSE_LEVELSET_SAMPLE_ENTRY_BYTES,
   OCTREE_POWER_COARSE_LEVELSET_SAMPLE_HEADER_BYTES,
@@ -798,13 +809,15 @@ override peelBehindFirstExit:f32=0.0;
 @group(0) @binding(0) var<uniform> u: Uniforms;
 @group(0) @binding(1) var<storage,read> vertices: array<SurfaceVertex>;
 @group(1) @binding(0) var firstBackPosition:texture_2d<f32>;
+${cameraApertureShaderLibrary("u")}
 struct Out { @builtin(position) clip:vec4f, @location(0) world:vec3f, @location(1) normal:vec3f }
 fn project(world:vec3f)->vec4f {
   let forward=normalize(u.cameraTarget.xyz-u.cameraPosition.xyz);
   let right=normalize(cross(forward,vec3f(0.0,1.0,0.0))); let up=normalize(cross(right,forward));
   let relative=world-u.cameraPosition.xyz; let depth=max(dot(relative,forward),0.001);
   let aspect=u.viewport.x/max(u.viewport.y,1.0);
-  let ndc=vec2f(dot(relative,right)/(depth*aspect*${CAMERA_TAN_HALF_FOV}),dot(relative,up)/(depth*${CAMERA_TAN_HALF_FOV}));
+  let aperture=cameraTanHalfFov();
+  let ndc=vec2f(dot(relative,right)/(depth*aspect*aperture),dot(relative,up)/(depth*aperture));
   return vec4f(ndc*depth,clamp(depth/50.0,0.0,1.0)*depth,depth);
 }
 @vertex fn surfaceVertex(@builtin(vertex_index) index:u32)->Out {
@@ -839,24 +852,170 @@ struct SurfaceOut { @location(0) position:vec4f, @location(1) normal:vec4f }
 }
 `;
 
+/**
+ * Edge of the square caustic map, which is also the receiver lattice's.
+ *
+ * The map is an orthographic plan projection of the whole container, so one
+ * texel is `container.x / 384` by `container.z / 384` — 4.7 by 3.1 mm on the
+ * hero garden, against a global-fine surface sampled at 6.25 mm. Sampling the
+ * receiver at exactly the map's own resolution is the only choice that needs no
+ * argument: a coarser receiver would move a caustic further than the map can
+ * represent, and a finer one would resolve relief the splat cannot land on.
+ */
+export const CAUSTIC_MAP_RESOLUTION = 384;
+
+/**
+ * Refracted caustics, as the ray bundle each surface triangle carries.
+ *
+ * Four things were wrong with the projection this replaces, and they compound:
+ * the light direction was the literal `[-0.45, 0.86, 0.28]` default rather than
+ * the scene's; the receiver was a plane at `y = 0.006` regardless of what the
+ * ground under the water actually was; the deposited energy was
+ * `.012 + .045 * n.y^2`, which is a function of *tilt alone* and therefore
+ * cannot form a filament however the surface curves; and — decisively — nothing
+ * ever sampled the result, so none of it was visible either way.
+ *
+ * **The energy term.** A caustic is a Jacobian: the brightness at a receiver
+ * point is the ratio between the cross-section a refracted bundle presents to
+ * the light and the footprint it lands on. Where the surface is convex the
+ * bundle spreads and the ratio falls below one; where it is concave the bundle
+ * converges and the ratio runs away, which is the filament. The standard cheap
+ * form differences the refracted landing map across neighbouring surface
+ * samples; this shader uses the mesh's own triangle as that stencil, so the
+ * differencing vectors are the triangle's two edges `(v1 - v0, v2 - v0)` and
+ * the ratio comes out *exactly* rather than to first order:
+ *
+ *   numerator   = |dot(0.5 * cross(e1, e2), L)|   — the bundle's cross-section
+ *                                                   perpendicular to the light
+ *   denominator = 0.5 * |f1.x * f2.z - f1.z * f2.x| — the plan area its three
+ *                                                   landing points enclose
+ *
+ * where `f_i` are the landing-point edges. No normals are consulted for the
+ * energy at all: the per-vertex shading normals only steer each corner's
+ * refraction, and the geometric normal that carries the flux is the cross
+ * product. That is what makes this term survive a mesh whose vertex normals are
+ * noisy, which a marching-tetrahedra surface's always are.
+ *
+ * **What is stored.** Not radiance — the *ratio to the illumination the dry
+ * pass already assumed*. The SVO lights the pond floor with the unrefracted key,
+ * so the correction the composite must apply is exactly
+ * `refracted / flat-surface`, which is 1 on still water. Dividing by the flat
+ * reference here rather than in the consumer also makes the additive blend mean
+ * the right thing: two bundles landing on one texel sum to a ratio above one,
+ * which is a caustic, and an uncovered texel keeps alpha at zero and is left
+ * alone rather than going black.
+ *
+ * The light's own passage through the water *is* included, because nothing else
+ * accounts for it: the dry pass lights the basin floor as if the pond were not
+ * there. So a still hero pond deposits `exp(-absorption * pathLength)` rather
+ * than 1, which is the second half of what makes it read teal.
+ */
 export const causticShader = /* wgsl */ `
 struct Uniforms { viewport:vec4f, cameraPosition:vec4f, cameraTarget:vec4f, container:vec4f, options:vec4f, gridInfo:vec4f, debug:vec4f }
 struct SurfaceVertex { position:vec4f, normal:vec4f }
 @group(0) @binding(0) var<uniform> u:Uniforms;
 @group(0) @binding(1) var<storage,read> vertices:array<SurfaceVertex>;
-struct Out { @builtin(position) clip:vec4f, @location(0) energy:f32 }
-@vertex fn causticVertex(@builtin(vertex_index) index:u32)->Out {
-  let v=vertices[index];let n=normalize(v.normal.xyz);let towardLight=normalize(vec3f(-0.45,0.86,0.28));
-  let transmitted=refract(-towardLight,n,0.75019);
-  let downward=transmitted.y<-.02;
-  let distance=select(0.0,clamp((.006-v.position.y)/min(transmitted.y,-.02),0.0,u.container.y*2.0),downward);
-  var floorPoint=v.position.xyz+transmitted*distance;
-  floorPoint.x=clamp(floorPoint.x,-u.container.x*.499,u.container.x*.499);
-  floorPoint.z=clamp(floorPoint.z,-u.container.z*.499,u.container.z*.499);
-  var o:Out;o.clip=vec4f(2.0*floorPoint.x/u.container.x,2.0*floorPoint.z/u.container.z,0.0,1.0);
-  let topFacing=smoothstep(.18,.62,n.y);o.energy=select(0.0,(.012+.045*n.y*n.y)*topFacing,downward);return o;
+${waterSceneOpticsShaderLibrary(0, 2, 3)}
+${unifiedLightingShaderLibrary}
+struct Out { @builtin(position) clip:vec4f, @location(0) @interpolate(flat) energy:vec3f, @location(1) @interpolate(flat) covered:f32 }
+
+// Where a refracted ray meets the receiver, as (distance, converged).
+//
+// A fixed-point iteration on t = (origin.y - h(origin + d t)) / -d.y rather
+// than a march, because a march that resolved a texel would need ~50
+// heightfield fetches and this runs once per vertex per triangle -- three
+// times over, since a vertex shader cannot hoist per-triangle work. Five
+// evaluations is what the same accuracy costs here.
+//
+// The iteration contracts exactly when |grad h| * |d.xz| < |d.y|: the receiver
+// is flatter under this ray than the ray is steep. That is not a limitation to
+// apologise for, it is the condition under which a single landing point exists
+// at all. The pond's inner face falls 155 mm in 35 mm of run -- a slope of 4.4
+// -- so rays aimed at the wall correctly fail to converge and their bundles are
+// dropped, instead of being deposited at whichever point the iteration happened
+// to stop on. The test is the last step's horizontal movement against one map
+// texel.
+fn causticShadingNormal(stored:vec3f,geometric:vec3f)->vec3f{
+  let n=normalize(stored);
+  return select(-n,n,dot(n,geometric)>=0.0);
 }
-@fragment fn causticFragment(input:Out)->@location(0) vec4f{if(input.energy<.0005){discard;}return vec4f(input.energy*vec3f(0.63,0.96,0.86),input.energy);}
+
+fn causticLanding(origin:vec3f,direction:vec3f)->vec2f{
+  let descent=max(-direction.y,1e-3);
+  let ceiling=4.0*u.container.y;
+  var t=clamp((origin.y-waterReceiverHeight(origin.x,origin.z))/descent,0.0,ceiling);
+  var previous=t;
+  for(var iteration=0;iteration<4;iteration+=1){
+    previous=t;
+    let p=origin+direction*t;
+    t=clamp((origin.y-waterReceiverHeight(p.x,p.z))/descent,0.0,ceiling);
+  }
+  let texel=max(u.container.x,u.container.z)/${CAUSTIC_MAP_RESOLUTION}.0;
+  return vec2f(t,select(0.0,1.0,abs(t-previous)*length(direction.xz)<=texel));
+}
+
+@vertex fn causticVertex(@builtin(vertex_index) index:u32)->Out {
+  let first=index-index%3u;
+  let p0=vertices[first].position.xyz;
+  let p1=vertices[first+1u].position.xyz;
+  let p2=vertices[first+2u].position.xyz;
+  // The scene's key, unconditionally — not the environment preset's. The map is
+  // a *correction* to what the dry pass already put on the floor, and the dry
+  // pass lights from buildSvoSceneLights, whose un-authored default is the
+  // same [-0.45, 0.86, 0.28] this resolves to. Falling back to the environment's
+  // sun here would divide by a reference the receiver was never lit with.
+  let towardLight=waterAuthoredKeyDirection();
+  // Twice the triangle's area normal. Its sign is the mesh's winding, which the
+  // extraction orients outward, so a downward-facing face has a negative dot
+  // with an upward light and is rejected below rather than mirrored.
+  let areaNormal=.5*cross(p1-p0,p2-p0);
+  let crossSection=dot(areaNormal,towardLight);
+  var o:Out;
+  o.clip=vec4f(2.0,2.0,0.0,1.0);o.energy=vec3f(0.0);o.covered=0.0;
+  // A face the light does not see refracts nothing, and a face whose own area
+  // has collapsed carries no bundle to divide by.
+  if(crossSection<=1e-9){return o;}
+  let geometric=normalize(areaNormal);
+  let eta=1.0/waterIndexOfRefraction();
+  // Each corner refracts through its own shading normal so the landing triangle
+  // follows the surface's curvature rather than the tessellation's facets, which
+  // is the whole source of the Jacobian's variation. The stored normals are the
+  // level set's gradient and are not orientation-guaranteed — the composite
+  // flips them against the view ray for the same reason — so each is put on the
+  // winding's side before it is refracted through.
+  let d0=refract(-towardLight,causticShadingNormal(vertices[first].normal.xyz,geometric),eta);
+  let d1=refract(-towardLight,causticShadingNormal(vertices[first+1u].normal.xyz,geometric),eta);
+  let d2=refract(-towardLight,causticShadingNormal(vertices[first+2u].normal.xyz,geometric),eta);
+  if(max(max(d0.y,d1.y),d2.y)>-.02){return o;}
+  let l0=causticLanding(p0,d0);
+  let l1=causticLanding(p1,d1);
+  let l2=causticLanding(p2,d2);
+  if(l0.y+l1.y+l2.y<2.5){return o;}
+  let q0=p0+d0*l0.x;let q1=p1+d1*l1.x;let q2=p2+d2*l2.x;
+  let f1=q1-q0;let f2=q2-q0;
+  let footprint=.5*abs(f1.x*f2.z-f1.z*f2.x);
+  // The flat-water reference the dry pass already applied to this floor: an
+  // unrefracted key arriving on level ground at the same Fresnel geometry.
+  let flatTransmission=1.0-unifiedDielectricFresnel(max(towardLight.y,1e-3),waterFresnelF0());
+  let reference=max(towardLight.y,1e-3)*flatTransmission;
+  let transmission=1.0-unifiedDielectricFresnel(clamp(dot(geometric,towardLight),0.0,1.0),waterFresnelF0());
+  let travel=(l0.x+l1.x+l2.x)/3.0;
+  let concentration=crossSection*transmission/(max(footprint,1e-9)*reference);
+  // A bundle converging onto a point is a singularity in the continuum and a
+  // firefly on a 384-texel map. Eight times the still-water level is about as
+  // bright as a real caustic filament gets before the receiver's own resolution
+  // is what is being measured.
+  o.energy=min(vec3f(8.0),vec3f(concentration))*unifiedBeerLambert(waterAbsorption(),travel);
+  o.covered=1.0;
+  var landing=q0;
+  if(index==first+1u){landing=q1;}else if(index==first+2u){landing=q2;}
+  o.clip=vec4f(2.0*landing.x/u.container.x,2.0*landing.z/u.container.z,0.0,1.0);
+  return o;
+}
+@fragment fn causticFragment(input:Out)->@location(0) vec4f{
+  if(input.covered<.5){discard;}
+  return vec4f(input.energy,1.0);
+}
 `;
 
 export const compositeShader = /* wgsl */ `
@@ -876,15 +1035,31 @@ struct BodyGPU { positionRadius:vec4f, halfSizeShape:vec4f, orientation:vec4f, c
 @group(0) @binding(11) var rearFrontNormal:texture_2d<f32>;
 @group(0) @binding(12) var rearBackPosition:texture_2d<f32>;
 @group(0) @binding(13) var rearBackNormal:texture_2d<f32>;
+@group(0) @binding(14) var causticMap:texture_2d<f32>;
+${waterSceneOpticsShaderLibrary(0, 15, 16)}
+${cameraApertureShaderLibrary("u")}
 struct VOut{@builtin(position) position:vec4f,@location(0) uv:vec2f}
 @vertex fn vertexMain(@builtin(vertex_index)i:u32)->VOut{var p=array<vec2f,3>(vec2f(-1,-1),vec2f(3,-1),vec2f(-1,3));var o:VOut;o.position=vec4f(p[i],0,1);o.uv=p[i]*.5+.5;return o;}
-fn project(world:vec3f)->vec2f{let f=normalize(u.cameraTarget.xyz-u.cameraPosition.xyz);let r=normalize(cross(f,vec3f(0,1,0)));let up=normalize(cross(r,f));let q=world-u.cameraPosition.xyz;let d=max(dot(q,f),1e-4);let ndc=vec2f(dot(q,r)/(d*u.viewport.x/max(u.viewport.y,1.0)*.72),dot(q,up)/(d*.72));return vec2f(ndc.x*.5+.5,.5-ndc.y*.5);}
+fn project(world:vec3f)->vec2f{let f=normalize(u.cameraTarget.xyz-u.cameraPosition.xyz);let r=normalize(cross(f,vec3f(0,1,0)));let up=normalize(cross(r,f));let q=world-u.cameraPosition.xyz;let d=max(dot(q,f),1e-4);let aperture=cameraTanHalfFov();let ndc=vec2f(dot(q,r)/(d*u.viewport.x/max(u.viewport.y,1.0)*aperture),dot(q,up)/(d*aperture));return vec2f(ndc.x*.5+.5,.5-ndc.y*.5);}
 fn safeSample(texture:texture_2d<f32>,uv:vec2f)->vec4f{return textureSampleLevel(texture,linearSampler,clamp(uv,vec2f(.001),vec2f(.999)),0);}
-fn cameraRay(textureUV:vec2f)->vec3f{let ndc=vec2f(textureUV.x*2.0-1.0,1.0-textureUV.y*2.0);let forward=normalize(u.cameraTarget.xyz-u.cameraPosition.xyz);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));return normalize(forward+right*ndc.x*u.viewport.x/max(u.viewport.y,1.0)*.72+up*ndc.y*.72);}
+fn cameraRay(textureUV:vec2f)->vec3f{let ndc=vec2f(textureUV.x*2.0-1.0,1.0-textureUV.y*2.0);let forward=normalize(u.cameraTarget.xyz-u.cameraPosition.xyz);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));let aperture=cameraTanHalfFov();return normalize(forward+right*ndc.x*u.viewport.x/max(u.viewport.y,1.0)*aperture+up*ndc.y*aperture);}
 fn boxHit(ro:vec3f,rd:vec3f,mn:vec3f,mx:vec3f)->vec2f{let inv=1.0/rd;let a=(mn-ro)*inv;let b=(mx-ro)*inv;let near3=min(a,b);let far3=max(a,b);return vec2f(max(max(near3.x,near3.y),near3.z),min(min(far3.x,far3.y),far3.z));}
 ${environmentShaderLibrary}
 ${unifiedLightingShaderLibrary}
 ${unifiedDisplayTransferShaderLibrary}
+// The water's key light. A document that authors one wins — that is the only
+// way the highlight on the water can agree with the set the SVO lit from the
+// same record — and one that does not keeps the environment preset's sun, which
+// is byte-identical to the authored default. See resolveWaterKeyLight.
+fn waterKeyDirection()->vec3f{return select(environmentLightDirection(),waterAuthoredKeyDirection(),waterKeyAuthored());}
+fn waterKeyColor()->vec3f{return select(environmentLightColor(),waterKeyRadiance(),waterKeyAuthored());}
+// The two silhouette tints in the water shading below predate authorable optics:
+// they are the same in-scattering seen at a grazing angle, tuned by eye against
+// the clean-water table. Scaling them by the scene's departure from that table
+// leaves every un-authoring scene byte-identical and lets an authored pond
+// carry its own hue all the way out to the rim instead of ending in a fixed
+// pale turquoise that contradicts its body.
+fn waterTintScale()->vec3f{return waterScatter()/vec3f(${WATER_OPTICS.scatter.join(",")});}
 fn qrot(q:vec4f,v:vec3f)->vec3f{let a=cross(q.yzw,v);return v+2.0*(q.x*a+cross(q.yzw,a));}
 fn qinv(q:vec4f,v:vec3f)->vec3f{return qrot(vec4f(q.x,-q.yzw),v);}
 struct RigidHit { t:f32, n:vec3f }
@@ -950,6 +1125,28 @@ fn boxNormal(point:vec3f,center:vec3f,halfSize:vec3f)->vec3f{
 // The compact SVO G-buffer uses zero linear depth on a miss, while the raster
 // compatibility pass retains its historical half-float maximum sentinel.
 fn resolvedDrySceneDepth(encodedDepth:f32)->f32{return select(65504.0,encodedDepth,encodedDepth>0.0);}
+// The caustic consumer. The map holds the ratio between the illumination the
+// refracting surface actually delivers to a receiver point and the flat-water
+// illumination the dry pass already applied there, so this is a modulation of
+// the transmitted radiance rather than an addition to it: an uncovered texel
+// (alpha zero) leaves the dry pass's own answer alone, which is what a
+// screen-space additive overlay could never do.
+//
+// The receiver point is reconstructed from the dry scene's own linear depth
+// rather than assumed, so the caustic lands on the sculpted basin the renderer
+// actually drew. resolvedDrySceneDepth turns a miss into the far sentinel.
+fn causticModulation(textureUV:vec2f)->vec3f{
+  let strength=waterCausticStrength();
+  if(strength<=0.0){return vec3f(1.0);}
+  let depth=resolvedDrySceneDepth(safeSample(sceneTexture,textureUV).a);
+  if(!(depth>0.0)||depth>60000.0){return vec3f(1.0);}
+  let world=u.cameraPosition.xyz+cameraRay(textureUV)*depth;
+  let mapUV=vec2f(.5+world.x/max(u.container.x,1e-4),.5-world.z/max(u.container.z,1e-4));
+  if(any(mapUV<vec2f(0.0))||any(mapUV>vec2f(1.0))){return vec3f(1.0);}
+  let sampled=textureSampleLevel(causticMap,linearSampler,mapUV,0.0);
+  if(sampled.a<=1e-4){return vec3f(1.0);}
+  return mix(vec3f(1.0),max(sampled.rgb,vec3f(0.0)),strength);
+}
 fn compositeFrontGlass(color:vec3f,ro:vec3f,rd:vec3f,sceneDepth:f32)->vec3f{
   // The garden pond has no vessel: nothing to composite in front of the water.
   if(environmentIndex()==7){return color;}
@@ -980,37 +1177,37 @@ fn compositeRearWater(textureUV:vec2f,dryColor:vec3f)->vec3f{
   let cellSize=min(min(u.container.x/max(u.gridInfo.x,1.0),u.container.y/max(u.gridInfo.y,1.0)),u.container.z/max(u.gridInfo.z,1.0));
   if(resolvedDrySceneDepth(scene.a)+max(.0015,.18*cellSize)<frontDepth){return dryColor;}
   var n=normalize(safeSample(rearFrontNormal,textureUV).xyz);if(dot(n,rd)>0.0){n=-n;}
-  var inside=refract(rd,n,1.0/${WATER_OPTICS.indexOfRefraction.toFixed(3)});if(length(inside)<1e-5){inside=reflect(rd,n);}
+  var inside=refract(rd,n,1.0/waterIndexOfRefraction());if(length(inside)<1e-5){inside=reflect(rd,n);}
   var exitUV=textureUV;var back=vec4f(0);var exitN=vec3f(0,-1,0);
   for(var iteration=0;iteration<3;iteration+=1){back=safeSample(rearBackPosition,exitUV);if(back.a<.5){break;}let backDepth=dot(back.xyz-ro,forward);let frontPlane=dot(front.xyz-ro,forward);let travel=max(0.0,(backDepth-frontPlane)/max(dot(inside,forward),.001));exitUV=project(front.xyz+inside*travel);exitN=normalize(safeSample(rearBackNormal,exitUV).xyz);}
   let refinedBack=safeSample(rearBackPosition,exitUV);if(refinedBack.a<.5){return dryColor;}back=refinedBack;exitN=normalize(safeSample(rearBackNormal,exitUV).xyz);
   let thickness=length(back.xyz-front.xyz);if(thickness<1e-4){return dryColor;}
-  if(dot(exitN,inside)<0.0){exitN=-exitN;}var outgoing=refract(inside,-exitN,${WATER_OPTICS.indexOfRefraction.toFixed(3)});let tir=length(outgoing)<1e-5;if(tir){outgoing=reflect(inside,-exitN);}
-  let backgroundUV=project(back.xyz+outgoing*(.55+.45*thickness));let transmitted=safeSample(sceneTexture,backgroundUV).rgb;
-  let refracted=unifiedAbsorbingTransmission(transmitted,vec3f(${WATER_OPTICS.absorption.join(",")}),vec3f(${WATER_OPTICS.scatter.join(",")}),thickness);
+  if(dot(exitN,inside)<0.0){exitN=-exitN;}var outgoing=refract(inside,-exitN,waterIndexOfRefraction());let tir=length(outgoing)<1e-5;if(tir){outgoing=reflect(inside,-exitN);}
+  let backgroundUV=project(back.xyz+outgoing*(.55+.45*thickness));let transmitted=safeSample(sceneTexture,backgroundUV).rgb*causticModulation(backgroundUV);
+  let refracted=unifiedAbsorbingTransmission(transmitted,waterAbsorption(),waterScatter(),thickness);
   let reflectedDir=reflect(rd,n);var reflected=environmentLight(reflectedDir);let ssr=safeSample(sceneTexture,project(front.xyz+reflectedDir*.8));reflected=mix(reflected,ssr.rgb,select(0.0,.32,ssr.a>0.0&&ssr.a<60000.0));
-  let cosine=clamp(dot(-rd,n),0.0,1.0);let fresnel=unifiedDielectricFresnel(cosine,${WATER_OPTICS.fresnelF0});var water=mix(refracted,reflected,fresnel);if(tir){water=mix(water,environmentLight(outgoing),.88);}
-  water+=environmentLightColor()*unifiedSpecularLobe(n,-rd,environmentLightDirection(),180.0)*1.4;
-  water+=vec3f(.018,.10,.085)*(1.0-exp(-thickness*2.4));water+=vec3f(.08,.18,.15)*pow(1.0-cosine,3.0)*.15;
+  let cosine=clamp(dot(-rd,n),0.0,1.0);let fresnel=unifiedDielectricFresnel(cosine,waterFresnelF0());var water=mix(refracted,reflected,fresnel);if(tir){water=mix(water,environmentLight(outgoing),.88);}
+  water+=waterKeyColor()*unifiedSpecularLobe(n,-rd,waterKeyDirection(),180.0)*1.4;
+  water+=vec3f(.018,.10,.085)*waterTintScale()*(1.0-exp(-thickness*2.4));water+=vec3f(.08,.18,.15)*waterTintScale()*pow(1.0-cosine,3.0)*.15;
   return water;
 }
 // Scenery is geometry, not a screen-space overlay: every frond, batten and
 // blade that used to be painted here in NDC is now an analytic primitive in
 // the scene's own scenery graph, so it parallaxes, occludes and takes light like the rest
 // of the world. Only the lens falloff remains, which belongs to the camera.
-fn finish(color:vec3f,ndc:vec2f)->vec4f{let c=color*(1.0-.08*dot(ndc*.55,ndc*.55));return vec4f(unifiedDisplayTransfer(c),1);}
+fn finish(color:vec3f,ndc:vec2f)->vec4f{let c=color*(1.0-.08*dot(ndc*.55,ndc*.55));return vec4f(unifiedDisplayGrade(c,waterDisplayExposure(),waterDisplayToneCurve()),1);}
 @fragment fn fragmentMain(input:VOut)->@location(0) vec4f{
   // Full-screen interpolated UV has Y=1 at the top of the render target,
   // while sampled WebGPU textures have Y=0 there. The shared legacy upscaler
   // performs the same conversion for the final target; all raster-path
   // intermediate reads and world projections must do it here as well.
-  let ndc=input.uv*2.0-1.0;let textureUV=vec2f(input.uv.x,1.0-input.uv.y);let ro=u.cameraPosition.xyz;let forward=normalize(u.cameraTarget.xyz-ro);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));let rd=normalize(forward+right*ndc.x*u.viewport.x/max(u.viewport.y,1.0)*.72+up*ndc.y*.72);
+  let ndc=input.uv*2.0-1.0;let textureUV=vec2f(input.uv.x,1.0-input.uv.y);let ro=u.cameraPosition.xyz;let forward=normalize(u.cameraTarget.xyz-ro);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));let aperture=cameraTanHalfFov();let rd=normalize(forward+right*ndc.x*u.viewport.x/max(u.viewport.y,1.0)*aperture+up*ndc.y*aperture);
   let scene=safeSample(sceneTexture,textureUV);var front=safeSample(frontPosition,textureUV);if(front.a<.5){return finish(compositeFrontGlass(scene.rgb,ro,rd,scene.a),ndc);}var frontDepth=dot(front.xyz-ro,rd);
   let cellSize=min(min(u.container.x/max(u.gridInfo.x,1.0),u.container.y/max(u.gridInfo.y,1.0)),u.container.z/max(u.gridInfo.z,1.0));let depthEpsilon=max(.0015,.18*cellSize);
   var n=normalize(safeSample(frontNormal,textureUV).xyz);let rigidFront=nearestRigid(ro,rd);let contactBand=${CONTACT_RESOLVE_BAND_CELLS.toFixed(1)}*cellSize;
   if(u.gridInfo.w>.5&&rigidFront.t<1e19&&abs(rigidFront.t-frontDepth)<=contactBand){let contact=refineContactSurface(ro,rd,frontDepth,cellSize);if(contact.valid){front=vec4f(contact.point,1);frontDepth=dot(contact.point-ro,rd);n=contact.normal;}if(rigidFront.t<=frontDepth+max(3e-4,.03*cellSize)){return finish(compositeFrontGlass(scene.rgb,ro,rd,scene.a),ndc);}}
   if(resolvedDrySceneDepth(scene.a)+depthEpsilon<frontDepth){return finish(compositeFrontGlass(scene.rgb,ro,rd,scene.a),ndc);}
-  if(dot(n,rd)>0.0){n=-n;}let etaIn=1.0/${WATER_OPTICS.indexOfRefraction.toFixed(3)};var inside=refract(rd,n,etaIn);if(length(inside)<1e-5){inside=reflect(rd,n);}
+  if(dot(n,rd)>0.0){n=-n;}let etaIn=1.0/waterIndexOfRefraction();var inside=refract(rd,n,etaIn);if(length(inside)<1e-5){inside=reflect(rd,n);}
   var exitUV=textureUV;var back=vec4f(0);var exitN=vec3f(0,-1,0);
   for(var iteration=0;iteration<3;iteration+=1){back=safeSample(backPosition,exitUV);if(back.a<.5){break;}let backDepth=dot(back.xyz-ro,forward);let frontPlane=dot(front.xyz-ro,forward);let travel=max(0.0,(backDepth-frontPlane)/max(dot(inside,forward),.001));exitUV=project(front.xyz+inside*travel);exitN=normalize(safeSample(backNormal,exitUV).xyz);}
   let refinedBack=safeSample(backPosition,exitUV);if(refinedBack.a>.5){back=refinedBack;exitN=normalize(safeSample(backNormal,exitUV).xyz);}
@@ -1024,18 +1221,24 @@ fn finish(color:vec3f,ndc:vec2f)->vec4f{let c=color*(1.0-.08*dot(ndc*.55,ndc*.55
     thickness=length(innerOrigin-front.xyz)+travel;exitPoint=innerOrigin+inside*travel;exitN=boxNormal(exitPoint,(boundsMin+boundsMax)*.5,u.container.xyz*.5);
   }
   var outgoing=inside;var tir=false;var backgroundUV=project(exitPoint);
-  if(!opaqueSolidExit){if(dot(exitN,inside)<0.0){exitN=-exitN;}outgoing=refract(inside,-exitN,${WATER_OPTICS.indexOfRefraction.toFixed(3)});tir=length(outgoing)<1e-5;if(tir){outgoing=reflect(inside,-exitN);}backgroundUV=project(exitPoint+outgoing*(.55+.45*thickness));}
-  let transmittedScene=compositeRearWater(backgroundUV,safeSample(sceneTexture,backgroundUV).rgb);
-  // Clean water: red is attenuated first.  A small in-scattering term keeps
-  // thick regions luminous instead of turning into opaque ink.
-  let refracted=unifiedAbsorbingTransmission(transmittedScene,vec3f(${WATER_OPTICS.absorption.join(",")}),vec3f(${WATER_OPTICS.scatter.join(",")}),thickness);let reflectedDir=reflect(rd,n);var reflected=environmentLight(reflectedDir);
+  if(!opaqueSolidExit){if(dot(exitN,inside)<0.0){exitN=-exitN;}outgoing=refract(inside,-exitN,waterIndexOfRefraction());tir=length(outgoing)<1e-5;if(tir){outgoing=reflect(inside,-exitN);}backgroundUV=project(exitPoint+outgoing*(.55+.45*thickness));}
+  // The modulation goes on the *dry* term rather than on what comes back:
+  // where a rear water interval exists it shades its own receiver and applies
+  // its own caustic, and multiplying that result again would count the floor's
+  // concentration twice through two layers of water.
+  let transmittedScene=compositeRearWater(backgroundUV,safeSample(sceneTexture,backgroundUV).rgb*causticModulation(backgroundUV));
+  // Absorption is the scene's, not the renderer's: the same clean-water rate
+  // that turns a metre of tank blue leaves a hand's breadth of pond colourless.
+  // A small in-scattering term keeps thick regions luminous instead of turning
+  // into opaque ink, and has to grow with the absorption it accompanies.
+  let refracted=unifiedAbsorbingTransmission(transmittedScene,waterAbsorption(),waterScatter(),thickness);let reflectedDir=reflect(rd,n);var reflected=environmentLight(reflectedDir);
   let ssrUV=project(front.xyz+reflectedDir*.8);let ssr=safeSample(sceneTexture,ssrUV);reflected=mix(reflected,ssr.rgb,select(0.0,.32,ssr.a>0.0&&ssr.a<60000.0));
-  let cosine=clamp(dot(-rd,n),0.0,1.0);let fresnel=unifiedDielectricFresnel(cosine,${WATER_OPTICS.fresnelF0});var water=mix(refracted,reflected,fresnel);
+  let cosine=clamp(dot(-rd,n),0.0,1.0);let fresnel=unifiedDielectricFresnel(cosine,waterFresnelF0());var water=mix(refracted,reflected,fresnel);
   if(tir){water=mix(water,environmentLight(outgoing),.88);}
-  let light=environmentLightDirection();water+=environmentLightColor()*unifiedSpecularLobe(n,-rd,light,180.0)*1.4;
+  water+=waterKeyColor()*unifiedSpecularLobe(n,-rd,waterKeyDirection(),180.0)*1.4;
   // Thin forward-scattering highlight at silhouettes, plus a restrained
   // turquoise body tint that grows only with actual optical thickness.
-  water+=vec3f(.018,.10,.085)*(1.0-exp(-thickness*2.4));water+=vec3f(.08,.18,.15)*pow(1.0-cosine,3.0)*.15;
+  water+=vec3f(.018,.10,.085)*waterTintScale()*(1.0-exp(-thickness*2.4));water+=vec3f(.08,.18,.15)*waterTintScale()*pow(1.0-cosine,3.0)*.15;
   return finish(compositeFrontGlass(water,ro,rd,scene.a),ndc);
 }
 `;
@@ -1048,9 +1251,29 @@ async function checkedModule(device: GPUDevice, label: string, code: string) {
   return shaderModule;
 }
 
+/**
+ * What the water pipeline needs from the document.
+ *
+ * One call rather than three setters, because the three facts are consumed by
+ * one uniform and a scene change moves all of them together. `terrain` is the
+ * caustic receiver: the water pipeline resamples it onto its own lattice rather
+ * than taking a texture, so the CPU mirror stays `terrainHeightAt` and a grid
+ * and an analytic heightfield reach the shader through the same path.
+ */
+export interface WaterSceneOpticsInput {
+  readonly optics?: WaterOpticsAuthoring;
+  readonly grade?: DisplayGradeAuthoring;
+  readonly directional?: {
+    readonly direction?: readonly [number, number, number];
+    readonly colorLinear?: readonly [number, number, number];
+    readonly intensity?: number;
+  };
+  readonly terrain?: TerrainDescription;
+  /** The plan the caustic map projects onto, in metres. */
+  readonly container?: { readonly width_m: number; readonly depth_m: number };
+}
+
 export class RasterWaterPipeline {
-  /** Temporarily disabled while the projected map is being retuned. */
-  private readonly causticsEnabled = false;
   private extractPipeline?: GPUComputePipeline;
   private extractBandPipeline?: GPUComputePipeline;
   private extractTallSidesPipeline?: GPUComputePipeline;
@@ -1072,6 +1295,7 @@ export class RasterWaterPipeline {
   private globalExtractLayout?: GPUBindGroupLayout;
   private globalPolygoniseLayout?: GPUBindGroupLayout;
   private prepareLayout?: GPUBindGroupLayout;
+  private causticLayout?: GPUBindGroupLayout;
   private surfaceLayout?: GPUBindGroupLayout;
   private surfacePeelLayout?: GPUBindGroupLayout;
   private compositeLayout?: GPUBindGroupLayout;
@@ -1086,6 +1310,7 @@ export class RasterWaterPipeline {
   private globalExtractBindGroup?: GPUBindGroup;
   private globalPolygoniseBindGroup?: GPUBindGroup;
   private prepareBindGroup?: GPUBindGroup;
+  private causticBindGroup?: GPUBindGroup;
   private surfaceBindGroup?: GPUBindGroup;
   private surfaceUnpeeledBindGroup?: GPUBindGroup;
   private surfacePeelBindGroup?: GPUBindGroup;
@@ -1106,6 +1331,13 @@ export class RasterWaterPipeline {
   private rearBackNormal?: GPUTexture;
   private rearBackDepth?: GPUTexture;
   private causticTexture?: GPUTexture;
+  private causticReceiver?: GPUTexture;
+  private waterSceneOpticsBuffer?: GPUBuffer;
+  private readonly waterSceneOptics = new Float32Array(WATER_SCENE_OPTICS_FLOATS);
+  private waterSceneOpticsDirty = true;
+  private causticStrength = 0;
+  private receiverKey = "";
+  private receiverSource?: TerrainDescription;
   private geometryKey = "";
   private targetKey = "";
   private volume?: GPUTexture;
@@ -1138,7 +1370,99 @@ export class RasterWaterPipeline {
     private readonly targetFormat: GPUTextureFormat,
     private readonly uniformBuffer: GPUBuffer,
     private readonly bodyBuffer: GPUBuffer
-  ) {}
+  ) {
+    // Clean water and the default key until a document says otherwise, so a
+    // caller that never sets scene optics gets the frozen table verbatim.
+    this.setSceneOptics({});
+  }
+
+  /**
+   * Adopt the document's medium, key light and caustic receiver.
+   *
+   * Idempotent and cheap: the uniform is only written when a lane actually
+   * changes, and the receiver is only resampled when the heightfield identity
+   * or the container does. Both are per-scene facts arriving on a per-frame
+   * call.
+   */
+  setSceneOptics(input: WaterSceneOpticsInput) {
+    const packed = packWaterSceneOptics(
+      resolveWaterOptics(input.optics),
+      resolveWaterKeyLight(input.directional),
+      resolveDisplayGrade(input.grade),
+    );
+    this.causticStrength = packed[15];
+    for (let index = 0; index < packed.length; index += 1) {
+      // Receiver lanes are pipeline-owned and may already contain the sampled
+      // heightfield. The document packet carries placeholders there only to
+      // preserve the WGSL layout; a per-frame scene adoption must not erase
+      // them before updateCausticReceiver's identity fast path returns.
+      if (index >= WATER_SCENE_OPTICS_RECEIVER_FLOAT_OFFSET
+          && index < WATER_SCENE_OPTICS_RECEIVER_FLOAT_OFFSET + 8) continue;
+      if (this.waterSceneOptics[index] === packed[index]) continue;
+      this.waterSceneOptics[index] = packed[index];
+      this.waterSceneOpticsDirty = true;
+    }
+    this.updateCausticReceiver(input.terrain, input.container?.width_m ?? 0, input.container?.depth_m ?? 0);
+    this.flushSceneOptics();
+  }
+
+  private flushSceneOptics() {
+    if (!this.waterSceneOpticsBuffer || !this.waterSceneOpticsDirty) return;
+    this.device.queue.writeBuffer(this.waterSceneOpticsBuffer, 0, this.waterSceneOptics);
+    this.waterSceneOpticsDirty = false;
+  }
+
+  /**
+   * Resample the scene's ground onto the caustic map's own lattice.
+   *
+   * `terrainHeightAt` rather than the grid's samples, because an analytic
+   * terrain and a sculpted grid must reach the same shader through the same
+   * path, and because the CPU function is the one the stones, the solver and
+   * the renderer all already agree on. The lattice is container-aligned and
+   * square in *samples*, not in metres: it matches the map it feeds, so one map
+   * texel gets one receiver sample.
+   */
+  private updateCausticReceiver(terrain: TerrainDescription | undefined, width: number, depth: number) {
+    // Keyed on identity plus shape rather than on contents: a heightfield is
+    // immutable once baked (a brush stroke returns a new grid) and resampling
+    // 147k points per frame to prove that would cost more than the bake did.
+    const key = terrain && width > 0 && depth > 0
+      ? `${width}x${depth}:${terrain.baseHeight_m}:${terrain.features.length}:${terrain.grid
+        ? `${terrain.grid.size.nx}x${terrain.grid.size.nz}@${terrain.grid.spacing_m}@${terrain.grid.origin_m.x},${terrain.grid.origin_m.z}`
+        : "analytic"}`
+      : "";
+    if (key === this.receiverKey && terrain === this.receiverSource) return;
+    this.receiverKey = key;
+    this.receiverSource = terrain;
+    if (!this.causticReceiver) return;
+    const size = CAUSTIC_MAP_RESOLUTION;
+    const spacing = Math.max(Math.max(width, depth) / (size - 1), 1e-6);
+    const originX = -0.5 * width, originZ = -0.5 * depth;
+    const heights = new Float32Array(size * size);
+    if (terrain && width > 0 && depth > 0) {
+      for (let row = 0; row < size; row += 1) {
+        const z = originZ + row * spacing;
+        for (let column = 0; column < size; column += 1) {
+          heights[row * size + column] = terrainHeightAt(terrain, originX + column * spacing, z);
+        }
+      }
+    }
+    this.device.queue.writeTexture({ texture: this.causticReceiver }, heights, { bytesPerRow: size * 4, rowsPerImage: size }, { width: size, height: size });
+    // A single spacing on both axes, so the shader's mirror of
+    // `sampleTerrainGrid` needs no per-axis case. The lattice therefore covers
+    // at least the container and overhangs the shorter axis, which costs
+    // nothing: the overhang samples ground the map can never address.
+    const lanes = terrain && width > 0 && depth > 0
+      ? [originX, originZ, spacing, 0, size, size, 0, 0]
+      : [0, 0, 1, 0, 0, 0, 0, 0];
+    for (let index = 0; index < lanes.length; index += 1) {
+      const slot = WATER_SCENE_OPTICS_RECEIVER_FLOAT_OFFSET + index;
+      if (this.waterSceneOptics[slot] === lanes[index]) continue;
+      this.waterSceneOptics[slot] = lanes[index];
+      this.waterSceneOpticsDirty = true;
+    }
+    this.rebuildBindGroups();
+  }
 
   async initialize(onProgress:(label:string,completed:number,total:number)=>void=()=>{}) {
     const [extract, globalClassify, globalScan, globalEmitAll, prepare, surface, caustic, composite] = await Promise.all([
@@ -1204,13 +1528,24 @@ export class RasterWaterPipeline {
     this.surfacePeelLayout = this.device.createBindGroupLayout({ label: "Water rear-interface peel binding", entries: [
       { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "unfilterable-float" } }
     ] });
+    // Binding 14 is the caustic map the projection pass writes and this pass
+    // finally reads — the consumer whose absence made the whole caustic path a
+    // no-op. 15 and 16 are the scene's own optics and caustic receiver.
     this.compositeLayout = this.device.createBindGroupLayout({ label: "Water composite bindings", entries: [
       { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } },
-      ...[1,2,3,4,5,10,11,12,13].map((binding) => ({ binding, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "float" as const } })),
+      ...[1,2,3,4,5,10,11,12,13,14].map((binding) => ({ binding, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "float" as const } })),
       { binding: 6, visibility: GPUShaderStage.FRAGMENT, sampler: { type: "filtering" } },
       { binding: 7, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "read-only-storage" } },
       { binding: 8, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
-      { binding: 9, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "unfilterable-float" } }
+      { binding: 9, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "unfilterable-float" } },
+      { binding: 15, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } },
+      { binding: 16, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "unfilterable-float" } }
+    ] });
+    this.causticLayout = this.device.createBindGroupLayout({ label: "Water caustic projection bindings", entries: [
+      { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: "uniform" } },
+      { binding: 1, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" } },
+      { binding: 2, visibility: GPUShaderStage.VERTEX, buffer: { type: "uniform" } },
+      { binding: 3, visibility: GPUShaderStage.VERTEX, texture: { sampleType: "unfilterable-float" } }
     ] });
     const extractionPipelineLayout = this.device.createPipelineLayout({ bindGroupLayouts: [this.extractLayout] });
     const globalExtractionPipelineLayout = this.device.createPipelineLayout({ bindGroupLayouts: [this.globalExtractLayout] });
@@ -1230,7 +1565,7 @@ export class RasterWaterPipeline {
     this.preparePipeline = await compute("Preparing surface dispatch",{ label: "Prepare polygonise dispatch", layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.prepareLayout] }), compute: { module: prepare, entryPoint: "prepareMain" } });
     this.polygoniseDispatchBuffer = this.device.createBuffer({ label: "Water polygonise dispatch arguments", size: 12, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT });
     const surfacePipelineLayout = this.device.createPipelineLayout({ bindGroupLayouts: [this.surfaceLayout, this.surfacePeelLayout] });
-    const causticPipelineLayout = this.device.createPipelineLayout({ bindGroupLayouts: [this.surfaceLayout] });
+    const causticPipelineLayout = this.device.createPipelineLayout({ bindGroupLayouts: [this.causticLayout] });
     const surfaceDescriptor = (label: string, cullMode: GPUCullMode, coverageExpansionPixels = 0, peel = false): GPURenderPipelineDescriptor => ({
       label, layout: surfacePipelineLayout, vertex: { module: surface, entryPoint: "surfaceVertex", constants: { interfaceCoverageExpansionPixels: coverageExpansionPixels } },
       fragment: { module: surface, entryPoint: "surfaceFragment", constants: { peelBehindFirstExit: peel ? 1 : 0 }, targets: [{ format: "rgba16float" }, { format: "rgba16float" }] },
@@ -1256,6 +1591,18 @@ export class RasterWaterPipeline {
     this.fallbackSparseParams = this.device.createBuffer({ label: "Water sparse-params fallback", size: 128, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.globalFineRenderParams = this.device.createBuffer({ label: "Water global fine parameters", size: 112, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.fallbackSparseControl = this.device.createBuffer({ label: "Water disabled storage binding", size: WATER_DISABLED_STORAGE_BYTES, usage: GPUBufferUsage.STORAGE });
+    this.waterSceneOpticsBuffer = this.device.createBuffer({ label: "Water scene optics and caustic receiver", size: WATER_SCENE_OPTICS_BYTES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    // Allocated unconditionally: the composite declares the receiver whether or
+    // not the scene has ground, and a bind group with a missing entry is not a
+    // bind group. A container-less scene leaves it zeroed and the uniform's
+    // receiver size at zero, which is what `waterReceiverPresent` reads.
+    this.causticReceiver = this.device.createTexture({
+      label: "Caustic receiver heights", size: [CAUSTIC_MAP_RESOLUTION, CAUSTIC_MAP_RESOLUTION], format: "r32float",
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+    });
+    this.waterSceneOpticsDirty = true;
+    this.receiverKey = "";
+    this.flushSceneOptics();
     this.rebuildBindGroups();
   }
 
@@ -1510,6 +1857,10 @@ export class RasterWaterPipeline {
       { binding: 0, resource: { buffer: this.indirectBuffer } }, { binding: 1, resource: { buffer: this.activeCubeBuffer } }, { binding: 2, resource: { buffer: this.polygoniseDispatchBuffer } }
     ] });
     if (this.surfaceLayout && this.vertexBuffer) this.surfaceBindGroup = this.device.createBindGroup({ layout: this.surfaceLayout, entries: [{ binding: 0, resource: { buffer: this.uniformBuffer } }, { binding: 1, resource: { buffer: this.vertexBuffer } }] });
+    if (this.causticLayout && this.vertexBuffer && this.waterSceneOpticsBuffer && this.causticReceiver) this.causticBindGroup = this.device.createBindGroup({ label: "Water caustic projection inputs", layout: this.causticLayout, entries: [
+      { binding: 0, resource: { buffer: this.uniformBuffer } }, { binding: 1, resource: { buffer: this.vertexBuffer } },
+      { binding: 2, resource: { buffer: this.waterSceneOpticsBuffer } }, { binding: 3, resource: this.causticReceiver.createView() }
+    ] });
     if (this.surfacePeelLayout && this.sceneTextureView) this.surfaceUnpeeledBindGroup = this.device.createBindGroup({ label: "Water unpeeled placeholder binding", layout: this.surfacePeelLayout, entries: [{ binding: 0, resource: this.sceneTextureView }] });
     if (this.surfacePeelLayout && this.backPosition) this.surfacePeelBindGroup = this.device.createBindGroup({ layout: this.surfacePeelLayout, entries: [{ binding: 0, resource: this.backPosition.createView() }] });
     this.compositeBindGroup = this.sceneTextureView ? this.compositeBindGroupFor(this.sceneTextureView) : undefined;
@@ -1518,9 +1869,9 @@ export class RasterWaterPipeline {
   private compositeBindGroupFor(sceneView: GPUTextureView): GPUBindGroup | undefined {
     const cached = this.compositeBindGroups.get(sceneView);
     if (cached) return cached;
-    if (!this.compositeLayout || !this.frontPosition || !this.frontNormal || !this.backPosition || !this.backNormal || !this.rearFrontPosition || !this.rearFrontNormal || !this.rearBackPosition || !this.rearBackNormal || !this.sampler || !this.volume || !this.columnBases) return undefined;
+    if (!this.compositeLayout || !this.frontPosition || !this.frontNormal || !this.backPosition || !this.backNormal || !this.rearFrontPosition || !this.rearFrontNormal || !this.rearBackPosition || !this.rearBackNormal || !this.sampler || !this.volume || !this.columnBases || !this.causticTexture || !this.waterSceneOpticsBuffer || !this.causticReceiver) return undefined;
     const bindGroup = this.device.createBindGroup({ layout: this.compositeLayout, entries: [
-      { binding: 0, resource: { buffer: this.uniformBuffer } }, { binding: 1, resource: sceneView }, { binding: 2, resource: this.frontPosition.createView() }, { binding: 3, resource: this.frontNormal.createView() }, { binding: 4, resource: this.backPosition.createView() }, { binding: 5, resource: this.backNormal.createView() }, { binding: 6, resource: this.sampler }, { binding: 7, resource: { buffer: this.bodyBuffer } }, { binding: 8, resource: this.volume.createView({ dimension: "3d" }) }, { binding: 9, resource: this.columnBases.createView() }, { binding: 10, resource: this.rearFrontPosition.createView() }, { binding: 11, resource: this.rearFrontNormal.createView() }, { binding: 12, resource: this.rearBackPosition.createView() }, { binding: 13, resource: this.rearBackNormal.createView() }
+      { binding: 0, resource: { buffer: this.uniformBuffer } }, { binding: 1, resource: sceneView }, { binding: 2, resource: this.frontPosition.createView() }, { binding: 3, resource: this.frontNormal.createView() }, { binding: 4, resource: this.backPosition.createView() }, { binding: 5, resource: this.backNormal.createView() }, { binding: 6, resource: this.sampler }, { binding: 7, resource: { buffer: this.bodyBuffer } }, { binding: 8, resource: this.volume.createView({ dimension: "3d" }) }, { binding: 9, resource: this.columnBases.createView() }, { binding: 10, resource: this.rearFrontPosition.createView() }, { binding: 11, resource: this.rearFrontNormal.createView() }, { binding: 12, resource: this.rearBackPosition.createView() }, { binding: 13, resource: this.rearBackNormal.createView() }, { binding: 14, resource: this.causticTexture.createView() }, { binding: 15, resource: { buffer: this.waterSceneOpticsBuffer } }, { binding: 16, resource: this.causticReceiver.createView() }
     ] });
     this.compositeBindGroups.set(sceneView, bindGroup);
     return bindGroup;
@@ -1530,13 +1881,16 @@ export class RasterWaterPipeline {
     const compactSurface = this.globalFineLevelSet ?? this.coarseLevelSet;
     const geometryDimensions = compactSurface?.sampleDimensions ?? [nx, ny, nz] as const;
     this.ensureGeometry(geometryDimensions[0],geometryDimensions[1],geometryDimensions[2]);
-    if (!this.extractPipeline||!this.extractBandPipeline||!this.extractTallSidesPipeline||!this.extractWallPipeline||!this.extractGlobalFinePipeline||!this.extractGlobalCoarsePipeline||!this.preparePipeline||!this.polygonisePipeline||!this.polygoniseGlobalFineScanPipeline||!this.polygoniseGlobalFineEmitPipeline||!this.surfaceFrontPipeline||!this.surfaceBackPipeline||!this.surfaceRearFrontPipeline||!this.surfaceRearBackPipeline||!this.causticPipeline||!this.compositePipeline||!this.extractBindGroup||!this.globalExtractBindGroup||!this.globalPolygoniseBindGroup||!this.prepareBindGroup||!this.surfaceBindGroup||!this.surfaceUnpeeledBindGroup||!this.surfacePeelBindGroup||!this.compositeBindGroup||!this.indirectBuffer||!this.polygoniseDispatchBuffer||!this.volume||!this.sceneTexture||!this.frontPosition||!this.frontNormal||!this.frontDepth||!this.backPosition||!this.backNormal||!this.backDepth||!this.rearFrontPosition||!this.rearFrontNormal||!this.rearFrontDepth||!this.rearBackPosition||!this.rearBackNormal||!this.rearBackDepth||!this.causticTexture) return false;
+    if (!this.extractPipeline||!this.extractBandPipeline||!this.extractTallSidesPipeline||!this.extractWallPipeline||!this.extractGlobalFinePipeline||!this.extractGlobalCoarsePipeline||!this.preparePipeline||!this.polygonisePipeline||!this.polygoniseGlobalFineScanPipeline||!this.polygoniseGlobalFineEmitPipeline||!this.surfaceFrontPipeline||!this.surfaceBackPipeline||!this.surfaceRearFrontPipeline||!this.surfaceRearBackPipeline||!this.causticPipeline||!this.compositePipeline||!this.extractBindGroup||!this.globalExtractBindGroup||!this.globalPolygoniseBindGroup||!this.prepareBindGroup||!this.surfaceBindGroup||!this.causticBindGroup||!this.surfaceUnpeeledBindGroup||!this.surfacePeelBindGroup||!this.compositeBindGroup||!this.indirectBuffer||!this.polygoniseDispatchBuffer||!this.volume||!this.sceneTexture||!this.frontPosition||!this.frontNormal||!this.frontDepth||!this.backPosition||!this.backNormal||!this.backDepth||!this.rearFrontPosition||!this.rearFrontNormal||!this.rearFrontDepth||!this.rearBackPosition||!this.rearBackNormal||!this.rearBackDepth||!this.causticTexture||!this.causticReceiver) return false;
     const now_ms = performance.now();
     // Rendering follows the newest available solver revision, but extraction
     // follows the fixed presentation cadence. Unchanged solver revisions
     // retain the existing mesh, so pausing does not create redundant work.
     const updateSurface = shouldUpdateWaterSurface(this.extractedRevision, revision, this.lastExtractionAt_ms, now_ms);
-    const updateCaustics = this.causticsEnabled && (updateSurface || !this.causticsValid);
+    // The map follows the mesh: a retained surface deposits the same bundles,
+    // so re-projecting it would spend a full pass to write the same texels. A
+    // scene that authors zero caustic strength never encodes the pass at all.
+    const updateCaustics = this.causticStrength > 0 && (updateSurface || !this.causticsValid);
     if (updateSurface) {
       if (compactSurface) {
         // Preserve the last published draw count while the GPU validates the
@@ -1592,7 +1946,7 @@ export class RasterWaterPipeline {
       tracePhase?.({ id: "surface-extraction", label: "Water surface extraction" });
     }
     if (updateCaustics) {
-      const caustic=encoder.beginRenderPass({label:"Water caustics",colorAttachments:[{view:this.causticTexture.createView(),clearValue:{r:0,g:0,b:0,a:0},loadOp:"clear",storeOp:"store"}]});caustic.setPipeline(this.causticPipeline);caustic.setBindGroup(0,this.surfaceBindGroup);caustic.drawIndirect(this.indirectBuffer,0);caustic.end();
+      const caustic=encoder.beginRenderPass({label:"Water caustics",colorAttachments:[{view:this.causticTexture.createView(),clearValue:{r:0,g:0,b:0,a:0},loadOp:"clear",storeOp:"store"}]});caustic.setPipeline(this.causticPipeline);caustic.setBindGroup(0,this.causticBindGroup);caustic.drawIndirect(this.indirectBuffer,0);caustic.end();
       this.causticsValid = true;
       tracePhase?.({ id: "water-caustics", label: "Water caustic map" });
     }
@@ -1639,6 +1993,6 @@ export class RasterWaterPipeline {
   }
 
   destroy() {
-    for (const resource of [this.vertexBuffer,this.indirectBuffer,this.activeCubeBuffer,this.globalCubeValues,this.globalCubeOffsets,this.polygoniseDispatchBuffer,this.sceneTexture,this.frontPosition,this.frontNormal,this.frontDepth,this.backPosition,this.backNormal,this.backDepth,this.rearFrontPosition,this.rearFrontNormal,this.rearFrontDepth,this.rearBackPosition,this.rearBackNormal,this.rearBackDepth,this.causticTexture,this.fallbackSparsePageTable,this.fallbackSparseActivePages,this.fallbackSparsePhi,this.fallbackSparseParams,this.globalFineRenderParams,this.fallbackSparseControl,this.surfaceDiagnosticReadback]) { try { resource?.destroy(); } catch { /* device loss */ } }
+    for (const resource of [this.vertexBuffer,this.indirectBuffer,this.activeCubeBuffer,this.globalCubeValues,this.globalCubeOffsets,this.polygoniseDispatchBuffer,this.sceneTexture,this.frontPosition,this.frontNormal,this.frontDepth,this.backPosition,this.backNormal,this.backDepth,this.rearFrontPosition,this.rearFrontNormal,this.rearFrontDepth,this.rearBackPosition,this.rearBackNormal,this.rearBackDepth,this.causticTexture,this.causticReceiver,this.waterSceneOpticsBuffer,this.fallbackSparsePageTable,this.fallbackSparseActivePages,this.fallbackSparsePhi,this.fallbackSparseParams,this.globalFineRenderParams,this.fallbackSparseControl,this.surfaceDiagnosticReadback]) { try { resource?.destroy(); } catch { /* device loss */ } }
   }
 }

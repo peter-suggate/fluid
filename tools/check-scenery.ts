@@ -1,33 +1,64 @@
 /**
- * Per-environment scenery check, so one scene can be art-directed without
- * running (or waiting on) the whole suite.
+ * Per-scene scenery check, so one set can be art-directed without running (or
+ * waiting on) the whole suite.
  *
  *   node --import tsx tools/check-scenery.ts garden
- *   node --import tsx tools/check-scenery.ts            # every environment
+ *   node --import tsx tools/check-scenery.ts hero-garden
+ *   node --import tsx tools/check-scenery.ts            # every subject
  *
  * Verifies the invariants a scenery module can plausibly break: determinism,
  * unique keys, dense owner order, finite bounds, light-record budget, and that
  * nothing has been parked inside the container where the water lives.
  */
 import { environmentIds, type EnvironmentId } from "../lib/environments";
-import { cloneScene, defaultScene } from "../lib/model";
+import { createHeroGardenHoseScene } from "../lib/hero-garden-scene";
+import { cloneScene, defaultScene, type SceneDescription } from "../lib/model";
 import { buildSvoEnvironmentCoverage } from "../lib/svo-scene-coverage";
 import { SVO_LIGHT_MAXIMUM_RECORDS } from "../lib/svo-light-abi";
 import { buildEnvironmentProxyCatalog, environmentProxyPrimitives } from "../lib/voxel-environments";
 
-const requested = process.argv.slice(2).filter((value) => !value.startsWith("-"));
-const targets = (requested.length ? requested : [...environmentIds]) as EnvironmentId[];
-for (const id of targets) {
-  if (!environmentIds.includes(id)) throw new Error(`Unknown environment ${id}; expected one of ${environmentIds.join(", ")}`);
+/**
+ * What gets walked, and why it is not simply `environmentIds`.
+ *
+ * `buildEnvironmentProxyCatalog` reads `scene.scenery ?? sceneryGraphForEnvironment(...)`,
+ * and a default scene carries no graph of its own — so walking the eight
+ * environments walks eight *presets* and no authored document. The hero garden
+ * is the one scene in the app that authors its own graph, and it is by some
+ * distance the largest: about 2 200 props from four generator nodes, against a
+ * couple of hundred in the richest preset. It was invisible to this check.
+ *
+ * The environment still has to be named for a document that carries a graph,
+ * because the shell, the floor datum and the material closures come from the
+ * preset either way; the hero pond is a garden.
+ */
+interface ScenerySubject {
+  readonly id: string;
+  readonly environment: EnvironmentId;
+  /** Built twice per run, so the determinism check compares two real builds. */
+  readonly build: () => SceneDescription;
 }
+
+const SUBJECTS: readonly ScenerySubject[] = [
+  ...environmentIds.map((environment) => ({ id: environment, environment, build: () => cloneScene(defaultScene) })),
+  { id: "hero-garden", environment: "garden" as EnvironmentId, build: () => createHeroGardenHoseScene() },
+];
+
+const requested = process.argv.slice(2).filter((value) => !value.startsWith("-"));
+const targets = requested.length
+  ? requested.map((name) => {
+    const subject = SUBJECTS.find(({ id }) => id === name);
+    if (!subject) throw new Error(`Unknown scenery subject ${name}; expected one of ${SUBJECTS.map(({ id }) => id).join(", ")}`);
+    return subject;
+  })
+  : SUBJECTS;
 
 let failures = 0;
 const fail = (id: string, message: string) => { failures++; console.error(`  ✗ ${id}: ${message}`); };
 
-for (const id of targets) {
-  const scene = cloneScene(defaultScene);
-  const first = buildEnvironmentProxyCatalog(scene, id);
-  const second = buildEnvironmentProxyCatalog(cloneScene(defaultScene), id);
+for (const { id, environment, build } of targets) {
+  const scene = build();
+  const first = buildEnvironmentProxyCatalog(scene, environment);
+  const second = buildEnvironmentProxyCatalog(build(), environment);
   if (JSON.stringify(first) !== JSON.stringify(second)) fail(id, "catalog is not deterministic across rebuilds");
 
   const all = environmentProxyPrimitives(first);
@@ -58,15 +89,15 @@ for (const id of targets) {
     if (intruding.length) fail(id, `${intruding.length} prop(s) inside the container volume: ${intruding.slice(0, 5).map(({ key }) => key).join(", ")}`);
   }
 
-  const coverage = buildSvoEnvironmentCoverage(scene, id);
+  const coverage = buildSvoEnvironmentCoverage(scene, environment);
   const unsupported = coverage.entries.filter(({ status }) => status === "unsupported");
   if (unsupported.length) fail(id, `${unsupported.length} entry(ies) the tracer does not own: ${unsupported.map(({ key }) => key).join(", ")}`);
   const omitted = coverage.entries.filter(({ reason }) => reason === "light-record-capacity");
   if (omitted.length) fail(id, `${omitted.length} light(s) dropped past the ${SVO_LIGHT_MAXIMUM_RECORDS}-record cap: ${omitted.map(({ key }) => key).join(", ")}`);
 
   const lit = first.primitives.filter(({ tags }) => tags.includes("light")).length;
-  console.log(`${failures ? " " : "✓"} ${id.padEnd(17)} props ${String(first.primitives.length).padStart(3)}  shell ${String(first.shell.primitives.length).padStart(2)}  lights ${String(lit).padStart(2)}  coverage ${coverage.summary.complete}✓ ${coverage.summary.degraded}~ ${coverage.summary.unsupported}✗`);
+  console.log(`${failures ? " " : "✓"} ${id.padEnd(17)} props ${String(first.primitives.length).padStart(4)}  shell ${String(first.shell.primitives.length).padStart(2)}  lights ${String(lit).padStart(2)}  coverage ${coverage.summary.complete}✓ ${coverage.summary.degraded}~ ${coverage.summary.unsupported}✗`);
 }
 
 if (failures) { console.error(`\n${failures} scenery check failure(s)`); process.exit(1); }
-console.log(`\nAll ${targets.length} environment(s) pass.`);
+console.log(`\nAll ${targets.length} subject(s) pass.`);

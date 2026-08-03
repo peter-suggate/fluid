@@ -6,8 +6,82 @@ import type { CameraState, Vec3 } from "./model";
  *
  * This is tan(verticalFieldOfView / 2), not an angle in radians. Keeping the
  * semantic in the name prevents raster and analytic-ray cameras diverging.
+ *
+ * It is also the aperture a camera gets when the document does not author one,
+ * which is why it stays 0.72 rather than moving to something photographic: this
+ * number reproduces every frame ever fingerprinted against this renderer. A
+ * scene that wants a longer lens says so in `CameraState.tanHalfFov`.
  */
 export const CAMERA_TAN_HALF_FOV = 0.72;
+
+/**
+ * Bounds on an authored aperture.
+ *
+ * The floor is not a taste judgement — below it the primary rays degenerate
+ * towards parallel and the reversed-Z near plane stops separating anything —
+ * and the ceiling is where the corner ray passes 89 degrees off axis and the
+ * frame inverts. Out-of-range values clamp rather than throw: this resolves on
+ * the render path for a document a user may be dragging a slider in.
+ */
+export const CAMERA_TAN_HALF_FOV_RANGE = Object.freeze({ minimum: 0.02, maximum: 8 });
+
+/**
+ * The aperture this camera actually renders at.
+ *
+ * Absent means {@link CAMERA_TAN_HALF_FOV}. That fallback is the whole reason
+ * the field is optional: every existing scene document, editor fixture and
+ * golden fingerprint predates the field, and all of them must keep producing
+ * the frame they produced before.
+ */
+export function cameraTanHalfFov(camera: Pick<CameraState, "tanHalfFov">): number {
+  const authored = camera.tanHalfFov;
+  if (authored === undefined || !Number.isFinite(authored)) return CAMERA_TAN_HALF_FOV;
+  return Math.min(CAMERA_TAN_HALF_FOV_RANGE.maximum, Math.max(CAMERA_TAN_HALF_FOV_RANGE.minimum, authored));
+}
+
+/**
+ * The aperture a 35 mm-format focal length would give.
+ *
+ * Photographic focal lengths are the only vocabulary anyone has for "how wide
+ * is this lens", and they are quoted against the 36 x 24 mm frame, so the
+ * vertical half-angle is `atan(12 / f)`. A 50 mm therefore lands on 0.24 and
+ * the renderer's historical 0.72 is a 16.7 mm — an ultra-wide, which is exactly
+ * what the hero garden's near coping was bowing against.
+ */
+export function tanHalfFovFor35mmFocalLength(focalLength_mm: number): number {
+  return 12 / Math.max(1, focalLength_mm);
+}
+
+/**
+ * Lane of the shared view uniform block that carries the aperture.
+ *
+ * `cameraPosition` has always been a `vec4f` whose `w` was written as zero
+ * padding, and every shader that binds this block reads only `.xyz`, so the
+ * lane was free. Threading the aperture there instead of growing the block
+ * means no bind-group layout, no struct declaration and no host packing offset
+ * moves — the block is declared verbatim in a dozen shader modules and one
+ * added field would have to be edited into all of them in lockstep.
+ *
+ * The same lane already carries the same quantity in the decoration overlay's
+ * private block, so the convention is not new here.
+ */
+export const CAMERA_APERTURE_UNIFORM_LANE = 7;
+
+/**
+ * WGSL accessor for the aperture lane, to be pasted into any module that binds
+ * the shared view uniform block.
+ *
+ * Zero falls back to {@link CAMERA_TAN_HALF_FOV} rather than clamping to the
+ * range floor. That matters: benchmark harnesses and smoke executors write this
+ * block themselves and none of them know about the lane, so a fallback to the
+ * historical lens keeps them rendering what they rendered, where a clamp to
+ * 0.02 would collapse every one of their frames to a pinhole.
+ */
+export function cameraApertureShaderLibrary(uniformName = "uniforms"): string {
+  return /* wgsl */ `
+fn cameraTanHalfFov()->f32{let authored=${uniformName}.cameraPosition.w;return select(${CAMERA_TAN_HALF_FOV},authored,authored>0.0);}
+`;
+}
 
 export interface ViewportRay {
   readonly origin: Vec3;
@@ -35,12 +109,12 @@ export function viewportAspect(width: number, height: number): number {
  * Normalized device coordinates run -1..1 with +x right and +y up.
  */
 export function viewportRay(camera: CameraState, ndcX: number, ndcY: number, aspect: number): ViewportRay {
-  const basis = cameraBasis(camera);
+  const basis = cameraBasis(camera), tanHalfFov = cameraTanHalfFov(camera);
   return {
     origin: basis.position,
     direction: normalize(add(basis.forward, add(
-      scale(basis.right, ndcX * aspect * CAMERA_TAN_HALF_FOV),
-      scale(basis.up, ndcY * CAMERA_TAN_HALF_FOV),
+      scale(basis.right, ndcX * aspect * tanHalfFov),
+      scale(basis.up, ndcY * tanHalfFov),
     ))),
   };
 }
@@ -89,9 +163,9 @@ export function projectToViewport(
   const relative = sub(position_m, basis.position);
   const depth_m = dot(relative, basis.forward);
   const aspect = viewportAspect(width, height);
-  const inFront = depth_m > 1e-6;
-  const ndcX = inFront ? dot(relative, basis.right) / (depth_m * aspect * CAMERA_TAN_HALF_FOV) : Number.POSITIVE_INFINITY;
-  const ndcY = inFront ? dot(relative, basis.up) / (depth_m * CAMERA_TAN_HALF_FOV) : Number.POSITIVE_INFINITY;
+  const inFront = depth_m > 1e-6, tanHalfFov = cameraTanHalfFov(camera);
+  const ndcX = inFront ? dot(relative, basis.right) / (depth_m * aspect * tanHalfFov) : Number.POSITIVE_INFINITY;
+  const ndcY = inFront ? dot(relative, basis.up) / (depth_m * tanHalfFov) : Number.POSITIVE_INFINITY;
   return {
     leftFraction: 0.5 * (ndcX + 1),
     topFraction: 0.5 * (1 - ndcY),

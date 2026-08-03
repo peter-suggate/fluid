@@ -1,4 +1,5 @@
 import { SVO_GBUFFER_FIELD_SOURCES, SVO_GBUFFER_MOTION_KINDS, svoGBufferWGSL } from "./svo-gbuffer";
+import { cameraApertureShaderLibrary } from "./webgpu-camera";
 import { svoPrimitiveMotionWGSL } from "./svo-primitive-motion";
 import { VOXEL_MATERIAL_IDS } from "./voxel-scene";
 
@@ -211,6 +212,7 @@ struct BodyGPU{
   colorSelected:vec4f,
 }
 @group(0) @binding(0) var<uniform> rigidUniforms:RigidRasterUniforms;
+${cameraApertureShaderLibrary("rigidUniforms")}
 @group(0) @binding(1) var<storage,read> rigidBodies:array<BodyGPU>;
 @group(0) @binding(14) var<uniform> rigidMotion:array<SvoPrimitiveMotionRecord,12>;
 @group(1) @binding(0) var rigidPackedSurfaceRead:texture_2d<u32>;
@@ -274,14 +276,14 @@ struct RigidRasterVertexOut{
   let aspect=rigidUniforms.viewport.x/max(rigidUniforms.viewport.y,1.0);
   // This is the exact inverse of the production ray construction. Proxy depth
   // only participates in clipping; the fragment writes the analytic depth.
-  output.position=vec4f(dot(relative,right)/(aspect*.72),dot(relative,up)/.72,0.0,viewDepth);
+  output.position=vec4f(dot(relative,right)/(aspect*cameraTanHalfFov()),dot(relative,up)/cameraTanHalfFov(),0.0,viewDepth);
   return output;
 }
 
 fn rigidRasterRay(pixelCoordinate:vec2f)->mat2x3f{
   let pixelUv=vec2f(pixelCoordinate.x/max(rigidUniforms.viewport.x,1.0),1.0-pixelCoordinate.y/max(rigidUniforms.viewport.y,1.0));let ndc=pixelUv*2.0-1.0;
   let origin=rigidUniforms.cameraPosition.xyz;let forward=normalize(rigidUniforms.cameraTarget.xyz-origin);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));
-  let direction=normalize(forward+right*ndc.x*rigidUniforms.viewport.x/max(rigidUniforms.viewport.y,1.0)*.72+up*ndc.y*.72);return mat2x3f(origin,direction);
+  let direction=normalize(forward+right*ndc.x*rigidUniforms.viewport.x/max(rigidUniforms.viewport.y,1.0)*cameraTanHalfFov()+up*ndc.y*cameraTanHalfFov());return mat2x3f(origin,direction);
 }
 
 struct RigidRasterHit{t:f32,normal:vec3f,featureId:u32,valid:u32}

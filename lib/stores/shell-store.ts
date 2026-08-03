@@ -2,17 +2,13 @@ import { create } from "zustand";
 import type { SceneSectionId } from "../scene-cards";
 
 /**
- * Which half of the product is in front.
+ * Session metadata shared by the library page and the scene page.
  *
- * Deliberately a view flag rather than a route. The WebGPU device, the compiled
- * pipelines and the retained draw loop survive Fast Refresh on purpose (see the
- * controller singleton); unmounting the viewport to show a menu would make
- * choosing a scene the most expensive navigation in the product, and would throw
- * away the one property this design is built on — that the library is what you
- * read while the platform lane is still starting.
- *
- * So the library is a layer over a live viewport, and entering the studio is a
- * state change with no teardown.
+ * The route now decides which page is visible. `view` remains the serializable
+ * compatibility value for existing URLs, while `studioEntered` says whether
+ * there is a real working document worth autosaving or retaining during Fast
+ * Refresh. The persistent app shell, rather than this flag, keeps the mounted
+ * WebGPU canvas alive between those routes.
  */
 
 export type ShellView = "library" | "studio";
@@ -36,8 +32,7 @@ interface ShellStore {
 }
 
 export const useShellStore = create<ShellStore>((set) => ({
-  // The front door. A cold load spends its first second or two in the platform
-  // lane regardless; spending it on something worth reading is free.
+  // The front door. The studio itself is lazy-mounted by AppShell.
   view: "library",
   studioEntered: false,
   librarySearch: "",

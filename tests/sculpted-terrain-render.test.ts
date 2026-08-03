@@ -60,6 +60,44 @@ const analyticRise = (features: typeof terrain.features) =>
 const terrainSourceOf = (description = scene): VoxelTerrainSource =>
   planVoxelScene(description).sceneSources.find((source) => source.kind === "terrain-heightfield") as VoxelTerrainSource;
 
+/**
+ * The vessel's tallest heightfield feature, and the fixture three assertions
+ * below stand on.
+ *
+ * They used to stand on the coping, which rose 55 mm above the base ground and
+ * was the one thing in this scene a bracket tuned for gentle analytic mounds
+ * could step over. `HERO_GARDEN_VESSEL.crest` is `"flat"` now — the rim is a
+ * swept solid the terrain knows nothing about — so the plan curve is plaster and
+ * the tallest ground the heightfield reaches is the back-right terrace, at 75 mm.
+ * Taller than the rim ever was, which is what makes it the honest replacement
+ * rather than a weaker stand-in.
+ *
+ * Chosen by height rather than by index so that re-ordering the authored
+ * terraces cannot quietly point these tests at the shorter one.
+ */
+const TALLEST_TERRACE = [...HERO_GARDEN_VESSEL.terraces!].sort((a, b) => b.height_m - a.height_m)[0];
+
+/**
+ * A ring of world points inside a terrace's plateau.
+ *
+ * `flat` is the fraction of the footprint that is level — 0.30 on this terrace —
+ * so a quarter of the radius is well inside it and every sample stands at the
+ * terrace's full authored height rather than somewhere on its fade.
+ */
+const terraceCrown = (terrace: typeof TALLEST_TERRACE, samples = 16): readonly (readonly [number, number])[] => {
+  const rotation = terrace.rotation_rad ?? 0;
+  const cos = Math.cos(rotation), sin = Math.sin(rotation);
+  return Array.from({ length: samples }, (_unused, index) => {
+    const angle = 2 * Math.PI * index / samples;
+    const localX = 0.25 * terrace.radius_m[0] * Math.cos(angle);
+    const localZ = 0.25 * terrace.radius_m[1] * Math.sin(angle);
+    return [
+      terrace.center_m[0] + cos * localX - sin * localZ,
+      terrace.center_m[1] + sin * localX + cos * localZ,
+    ] as const;
+  });
+};
+
 test("a sculpted grid survives into the voxel source instead of being dropped on the way", () => {
   const source = terrainSourceOf();
   assert.ok(source.terrain.grid, "the published terrain must carry the sculpted heights the solver reads");
@@ -90,10 +128,22 @@ test("the ceiling is the tallest ground the terrain can reach, sculpted or analy
   assert.equal(terrainCeiling(terrain), extent.maximum_m + TERRAIN_CEILING_MARGIN_M);
   // Against the generator rather than against the bake, so this pins the
   // ceiling to the vessel that was authored and not merely to its own samples.
+  //
+  // Swept over the whole footprint rather than along the plan curve, which is
+  // where this used to look. With the coping swept as a solid the plan curve is
+  // level plaster, so a curve-only sweep now bounds the *base ground* and would
+  // pass against a ceiling 75 mm too low. A 15 mm step over a 6.25 mm lattice
+  // coincides with a node only every fifth sample on each axis — one in
+  // twenty-five — so this is still the generator's claim rather than a
+  // restatement of the bake's own extrema.
   let tallest = 0;
-  for (const [x, z] of curve) tallest = Math.max(tallest, pondVesselHeightAt(HERO_GARDEN_VESSEL, curve, x, z));
+  for (let x = -0.9; x <= 0.9; x += 0.015) for (let z = -0.6; z <= 0.6; z += 0.015) {
+    tallest = Math.max(tallest, pondVesselHeightAt(HERO_GARDEN_VESSEL, curve, x, z));
+  }
+  assert.ok(tallest > terrain.baseHeight_m + 0.9 * TALLEST_TERRACE.height_m,
+    `the sweep must find the terrace it is bounding; it topped out at ${tallest}`);
   assert.ok(terrainCeiling(terrain) > tallest,
-    `the ceiling ${terrainCeiling(terrain)} must clear the crest ${tallest}`);
+    `the ceiling ${terrainCeiling(terrain)} must clear the vessel's high ground ${tallest}`);
   // ...and the margin is a margin, not a hiding place for a wrong bound.
   assert.ok(terrainCeiling(terrain) - tallest < 2 * TERRAIN_CEILING_MARGIN_M);
 
@@ -120,21 +170,46 @@ test("the grid extent bounds its own slope, which is what the march marches on",
     `the surface reaches slope ${steepest}, above the published bound ${extent.slopeBound}`);
 });
 
-test("a ray cast down at the coping hits the coping", () => {
+test("a ray cast down at the vessel's high ground hits it, not the bracket it started in", () => {
   // This is the assertion the bug failed. The old bracket started at
-  // `baseHeight_m + 0.05` and the crest stands 5.5 cm above the base ground, so
-  // the ray entered *inside* the rim, never changed sign, and reported nothing
-  // at all — a hole exactly where the vessel is.
+  // `baseHeight_m + 0.05` and it was aimed at the coping, which stood 5.5 cm
+  // above the base ground: the ray entered *inside* the rim, never changed sign,
+  // and reported nothing at all — a hole exactly where the vessel is.
+  //
+  // The coping is a swept solid now, so a ray down the plan curve lands on
+  // plaster and clears a 5 cm bracket by construction — it can no longer catch
+  // that bug, and it cannot catch a path that falls back to the analytic form
+  // either, because analytic ground here *is* `baseHeight_m` and the plaster is
+  // within 2.5 mm of it. The vessel's tallest heightfield feature is the terrace,
+  // 75 mm proud, so that is what the bracket has to clear and what a fallback
+  // would visibly miss.
+  for (const [x, z] of terraceCrown(TALLEST_TERRACE)) {
+    const hit = intersectSvoTerrainHeightfield(terrain, { x, y: 0.58, z }, { x: 0, y: -1, z: 0 }, sceneScale);
+    assert.ok(hit, `no hit on the terrace at (${x.toFixed(3)}, ${z.toFixed(3)})`);
+    assert.equal(hit.solver, "sculpted");
+    assert.ok(hit.position_m.y > terrain.baseHeight_m + 0.7 * TALLEST_TERRACE.height_m,
+      `the terrace resolved at ${hit.position_m.y}, near the base ground ${terrain.baseHeight_m}`);
+    assert.ok(Math.abs(hit.position_m.y - terrainHeightAt(terrain, x, z)) < 1e-4,
+      `the terrace resolved at ${hit.position_m.y} rather than ${terrainHeightAt(terrain, x, z)}`);
+    assert.ok(Math.abs(hit.position_m.y - pondVesselHeightAt(HERO_GARDEN_VESSEL, curve, x, z)) < 1e-3);
+  }
+
+  // The plan curve keeps its pass, for the property it still has. It is the
+  // densest sampling of the vessel and every point of it sits on the lip, a
+  // couple of millimetres from a 155 mm drop, which is the hardest place in the
+  // scene for a bracket to resolve *and* the band the swept rim is bedded into.
+  // So: a hit at every sample, on the sculpted solver, agreeing with the surface
+  // under it — and level, because the crest is not in this heightfield.
   for (const [x, z] of curve) {
     const hit = intersectSvoTerrainHeightfield(terrain, { x, y: 0.58, z }, { x: 0, y: -1, z: 0 }, sceneScale);
-    assert.ok(hit, `no hit on the crest at (${x.toFixed(3)}, ${z.toFixed(3)})`);
+    assert.ok(hit, `no hit on the coping's band at (${x.toFixed(3)}, ${z.toFixed(3)})`);
     assert.equal(hit.solver, "sculpted");
-    assert.ok(hit.position_m.y > terrain.baseHeight_m + 0.7 * HERO_GARDEN_VESSEL.rimHeight_m,
-      `the crest resolved at ${hit.position_m.y}, near the base ground ${terrain.baseHeight_m}`);
+    assert.ok(Math.abs(hit.position_m.y - terrain.baseHeight_m) <= HERO_GARDEN_VESSEL.relief_m,
+      `the band resolved at ${hit.position_m.y}, off the level plaster at ${terrain.baseHeight_m}`);
     assert.ok(Math.abs(hit.position_m.y - terrainHeightAt(terrain, x, z)) < 1e-4,
-      `the crest resolved at ${hit.position_m.y} rather than ${terrainHeightAt(terrain, x, z)}`);
+      `the band resolved at ${hit.position_m.y} rather than ${terrainHeightAt(terrain, x, z)}`);
     // And the ground the ray reports is the ground the generator drew, to
-    // within what a 6.25 mm bake of a hand-formed rim can hold.
+    // within what a 6.25 mm bake of a hand-formed vessel can hold.
     assert.ok(Math.abs(hit.position_m.y - pondVesselHeightAt(HERO_GARDEN_VESSEL, curve, x, z)) < 1e-3);
   }
 });
@@ -150,23 +225,54 @@ test("a ray into the basin resolves the basin floor, not the ground it is cut in
   }
 });
 
-test("the march crosses the coping without stepping over it", () => {
-  // A profile across the rim, at the resolution the rim is expressed at. A
-  // bracket tuned for smooth analytic mounds samples three points across the
-  // whole interval and reports the ground beyond; every sample here has to be
-  // the surface directly under it.
-  const z = 0;
-  let crest = 0;
-  for (let x = 0.40; x <= 0.72; x += grid.spacing_m) {
-    const hit = intersectSvoTerrainHeightfield(terrain, { x, y: 0.58, z }, { x: 0, y: -1, z: 0 }, sceneScale);
-    assert.ok(hit, `no hit crossing the coping at x=${x.toFixed(4)}`);
-    const expected = terrainHeightAt(terrain, x, z);
-    assert.ok(Math.abs(hit.position_m.y - expected) < 1e-4,
-      `x=${x.toFixed(4)} resolved ${hit.position_m.y} instead of ${expected}`);
-    crest = Math.max(crest, hit.position_m.y);
-  }
-  assert.ok(crest > terrain.baseHeight_m + 0.9 * HERO_GARDEN_VESSEL.rimHeight_m,
-    `the sweep never found the rim; it topped out at ${crest}`);
+test("the march crosses the vessel's steepest and tallest ground without stepping over either", () => {
+  // A profile at the resolution the vessel is expressed at. A bracket tuned for
+  // smooth analytic mounds samples three points across the whole interval and
+  // reports the ground beyond; every sample here has to be the surface directly
+  // under it, which is what the per-sample assertion inside `profile` is.
+  const profile = (z: number, from_m: number, to_m: number) => {
+    let lowest = Infinity, highest = -Infinity;
+    for (let x = from_m; x <= to_m; x += grid.spacing_m) {
+      const hit = intersectSvoTerrainHeightfield(terrain, { x, y: 0.58, z }, { x: 0, y: -1, z: 0 }, sceneScale);
+      assert.ok(hit, `no hit crossing z=${z} at x=${x.toFixed(4)}`);
+      const expected = terrainHeightAt(terrain, x, z);
+      assert.ok(Math.abs(hit.position_m.y - expected) < 1e-4,
+        `x=${x.toFixed(4)} resolved ${hit.position_m.y} instead of ${expected}`);
+      lowest = Math.min(lowest, hit.position_m.y);
+      highest = Math.max(highest, hit.position_m.y);
+    }
+    return { lowest, highest, span: highest - lowest };
+  };
+
+  // The steepest. This crossing used to be the coping's bullnose and topped out
+  // 55 mm above the base ground; with the crest swept as a solid what remains at
+  // z = 0 is the wall behind it, and it is still the feature that sets
+  // `slopeBound` for the whole grid and the one a fixed-step march is most
+  // likely to skate over. It is no longer the whole drop: `floorDish` moves 45 %
+  // of the 155 mm onto the floor, so the face falls about 85 mm over its 35 mm
+  // of run and the dish takes the rest across the next 300 mm.
+  //
+  // Which is why the sweep starts at the middle of the pond rather than at
+  // 0.40 m. The old window ended 130 mm inside the plan curve, which was the
+  // floor when the floor was flat and is now still 55 mm up the dish: it
+  // reported a 114.8 mm span and read as a march that had skated the wall.
+  // The property is unchanged — the sweep must traverse the whole interior
+  // rather than running along the plaster above it — and it is the per-sample
+  // assertion inside `profile` that carries it. Measured 166.5 mm of span
+  // against the authored 155 mm basin, the extra being the terrace fade out
+  // beyond the rim.
+  const face = profile(0, 0.00, 0.72);
+  assert.ok(face.span > 0.9 * HERO_GARDEN_VESSEL.basinDepth_m,
+    `the sweep never crossed the inner face; it spanned only ${(face.span * 1e3).toFixed(1)} mm`);
+  assert.ok(face.lowest < terrain.baseHeight_m - 0.9 * HERO_GARDEN_VESSEL.basinDepth_m,
+    `the sweep never reached the basin floor; its lowest was ${face.lowest}`);
+
+  // The tallest, which is where "stepped over" shows as a reported height below
+  // the thing that is actually there. The back-right terrace rises 75 mm, against
+  // the 55 mm rim this assertion used to cross.
+  const terrace = profile(0.30, 0.40, 0.90);
+  assert.ok(terrace.highest > terrain.baseHeight_m + 0.9 * TALLEST_TERRACE.height_m,
+    `the sweep never found the terrace; it topped out at ${terrace.highest}`);
 });
 
 test("an angled ray reports the first crossing rather than a later one", () => {

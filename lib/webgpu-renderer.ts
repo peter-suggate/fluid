@@ -13,7 +13,7 @@ import { environmentIndex, type EnvironmentId, defaultEnvironmentId } from "./en
 import { MAX_TERRAIN_FEATURES, TERRAIN_DEFAULT_FLAT, TERRAIN_UNION_EXPONENT, sceneHasTerrain } from "./terrain";
 import { SecondaryParticleRenderPipeline } from "./webgpu-secondary-particles";
 import { SparseVoxelDebugRenderer, type SparseVoxelRenderSource, type SparseVoxelSceneRenderSource, type VoxelRenderMode } from "./webgpu-voxel-debug";
-import { CAMERA_TAN_HALF_FOV, viewportAspect, viewportRayForPixel } from "./webgpu-camera";
+import { cameraTanHalfFov, viewportAspect, viewportRayForPixel } from "./webgpu-camera";
 import {
   type SvoPixelTrace,
   type SvoPixelTraceLayer,
@@ -32,7 +32,6 @@ import {
 import { buildSvoPrimitiveCandidates, refitSvoPrimitiveCandidates, svoPrimitiveCandidateBounds, type SvoPrimitiveCandidatePublication } from "./svo-primitive-candidates";
 import { packSvoPrimitiveRecords, type SvoPrimitiveDescriptor } from "./svo-primitive-abi";
 import { swayedPrimitiveDescriptor, type EnvironmentProxySway } from "./scenery-sway";
-import { sparseScenePrimitiveForSvoDescriptor } from "./webgpu-sparse-scene-proxies";
 import {
   buildDefaultSvoMaterialRecords,
   packSvoMaterialTable,
@@ -101,10 +100,10 @@ export const SVO_CAMERA_CHANGING_FRAME = -2;
 /**
  * Exact old/new coverage for each procedurally moving analytic primitive.
  *
- * The list stays per primitive rather than becoming one scene-sized union, so
- * the unified sparse publisher can map a small branch motion to only its local
- * pages. Intermediate poses are not render generations; old and new bounds are
- * the complete dependency set for this atomic presentation update.
+ * The list stays per primitive rather than becoming one scene-sized union.
+ * Bounded sway retains the sparse reference pose, but the render arena still
+ * records the exact old/new dependency bounds for diagnostics and any future
+ * localized render cache that consumes them.
  */
 export function svoSwayDirtyBounds(
   previous: readonly SvoPrimitiveDescriptor[],
@@ -160,7 +159,7 @@ export function voxelViewProjectionMatrix(camera: CameraState, aspect: number, n
     -dot(basis.right, position), -dot(basis.up, position), dot(basis.forward, position), 1
   ]);
   const safeNear = Math.max(1e-4, near), safeFar = Math.max(safeNear + 1, far);
-  const focal = 1 / CAMERA_TAN_HALF_FOV;
+  const focal = 1 / cameraTanHalfFov(camera);
   const projection = new Float32Array([
     focal / Math.max(1e-4, aspect), 0, 0, 0,
     0, focal, 0, 0,
@@ -759,7 +758,6 @@ export class FluidLabRenderer {
   private liveSceneAnimation?: {
     readonly rest: readonly SvoPrimitiveDescriptor[];
     readonly sway: readonly (EnvironmentProxySway | undefined)[];
-    readonly keys: readonly string[];
     current: readonly SvoPrimitiveDescriptor[];
     candidates: SvoPrimitiveCandidatePublication;
     origin_ms?: number;
@@ -1337,6 +1335,7 @@ export class FluidLabRenderer {
   private encodeDecorationOverlay(
     encoder: GPUCommandEncoder,
     basis: ReturnType<typeof cameraBasis>,
+    tanHalfFov: number,
     scene: SceneDescription,
     pixelTrace: PixelTraceConfig | undefined,
     fluidCellTrace: FluidCellTraceConfig | undefined,
@@ -1388,7 +1387,7 @@ export class FluidLabRenderer {
         forward: [basis.forward.x, basis.forward.y, basis.forward.z],
         right: [basis.right.x, basis.right.y, basis.right.z],
         up: [basis.up.x, basis.up.y, basis.up.z],
-        tanHalfFov: CAMERA_TAN_HALF_FOV,
+        tanHalfFov,
         aspect: viewportAspect(width, height),
       },
       viewportWidth: width,
@@ -1820,8 +1819,10 @@ export class FluidLabRenderer {
       let solver:GPUSolverInstance;
       if (!planSceneRuntime(scene).fluidSolver) {
         const refinement = config.values.svoEnvironmentBrickRefinementLevels;
+        const depth = config.values.svoEnvironmentRefinementDepth;
         solver=await WebGPULiveSvoScene.create(device, scene, config.quality, report, abort.signal, {
           environmentBrickRefinementLevels: typeof refinement === "number" ? refinement : undefined,
+          environmentRefinementDepth: typeof depth === "number" ? depth : undefined,
         });
       } else {
         solver=await (method.createSolverAsync
@@ -1831,8 +1832,10 @@ export class FluidLabRenderer {
       if (solver.sparseVoxelSceneSource) return {solver};
       try {
         const refinement=config.values.svoEnvironmentBrickRefinementLevels;
+        const depth=config.values.svoEnvironmentRefinementDepth;
         const sidecar=await WebGPULiveSvoScene.create(device,scene,config.quality,report,abort.signal,{
           environmentBrickRefinementLevels:typeof refinement==="number"?refinement:undefined,
+          environmentRefinementDepth:typeof depth==="number"?depth:undefined,
         });
         return {solver,sidecar};
       } catch(error) {
@@ -1915,7 +1918,10 @@ export class FluidLabRenderer {
         primitive.materialId,
         primitive.material,
         revision,
-        svoMaterialFunctionIdForEnvironmentProxy(primitive),
+        // The same word that chose the ground's closure chooses every prop's:
+        // a porcelain scene is one fired material throughout, not a porcelain
+        // floor with granite on it.
+        svoMaterialFunctionIdForEnvironmentProxy(primitive, terrainSurface),
       )),
     ]);
     const sceneGlass = buildSvoSceneGlass(scene, { cellSize_m: source.structural?.domain.cellSize_m });
@@ -1954,6 +1960,12 @@ export class FluidLabRenderer {
       // scene arena as well. Analytic scenes pass undefined and keep the
       // closed-form evaluator they have always used.
       terrainHeightfield: packSvoDrySceneTerrainHeightfield(scene.terrain?.grid),
+      // The same door as the heightfield above, for the same reason: an
+      // aggregate's packing does not fit in a 64-byte record, so the record
+      // carries a reference and the numbers live in the arena. Publication
+      // order assigns the references, so these arrive already in agreement
+      // with the records beside them.
+      clusterBlocks: scenePrimitives.clusterBlocks,
       glassRecords: sceneGlass.packedRecords,
       glassCacheKey: sceneGlass.cacheKey,
       thickGlassRecords: sceneThickGlass.packedRecords,
@@ -2000,7 +2012,6 @@ export class FluidLabRenderer {
     this.liveSceneAnimation = sway.some(Boolean) ? {
       rest: scenePrimitives.descriptors,
       sway,
-      keys: scenePrimitives.metadata.map(({ key }) => key),
       current: scenePrimitives.descriptors,
       candidates: primitiveCandidates,
     } : undefined;
@@ -2022,8 +2033,8 @@ export class FluidLabRenderer {
     }
   }
 
-  /** Refit continuously-authored motion through the same exact live arena. */
-  private advanceLiveSceneAnimation(solver: GPUSolverInstance | undefined): void {
+  /** Refit bounded authored motion through the exact render arena only. */
+  private advanceLiveSceneAnimation(): void {
     const animation = this.liveSceneAnimation;
     const pipeline = this.svoDryScenePipeline;
     if (!animation || !pipeline || !this.svoDrySceneData) return;
@@ -2040,42 +2051,22 @@ export class FluidLabRenderer {
     );
     const records = packSvoPrimitiveRecords(descriptors);
     const dirtyBounds = svoSwayDirtyBounds(animation.current, descriptors, animation.sway);
-    const sparseUpdates = descriptors.flatMap((descriptor, index) => animation.sway[index] ? [{
-      key: animation.keys[index], primitive: sparseScenePrimitiveForSvoDescriptor(descriptor),
-    }] : []);
-    try {
-      if (sparseUpdates.length > 0 && !solver?.stageLivePrimitiveUpdates) {
-        throw new Error("the active scene producer has no keyed live-update seam");
-      }
-      solver?.stageLivePrimitiveUpdates?.(sparseUpdates);
-    } catch (error) {
-      // Sparse and analytic publications remain atomic: retain the previous
-      // pose and expose the failed-closed state instead of silently degrading.
-      const reason = error instanceof Error ? error.message : "unknown sparse maintenance failure";
-      if (reason !== this.liveSceneAnimationFailure) {
-        this.liveSceneAnimationFailure = reason;
-        this.onStatus({
-          state: "blocked",
-          label: `Live scene update failed closed: ${reason}`,
-          resource: svoPresentationResourcePlugin,
-        });
-      }
-      return;
-    }
-    this.liveSceneAnimationFailure = undefined;
     const revision = this.renderSceneRevision >= 0xffff_fffe ? 1 : this.renderSceneRevision + 1;
     if (!pipeline.publishPrimitiveArena(records, candidates, revision, {
       dirtyBounds,
-      // Sparse node-mip/radiance payloads change in the dirty pages too. Their
-      // stable atlas slots and page-local validity keep unrelated cache entries
-      // warm without pretending the derived payload itself stayed unchanged.
+      // Authored sway is constrained to the finest-cell ownership margin. The
+      // exact analytic surface moves, while its sparse owner and baked lighting
+      // remain valid at the reference pose. Restaging the sparse world here
+      // needlessly re-voxelized the tree and rebuilt derived lighting every
+      // frame, producing the garden's repeating FPS drain-and-recovery cycle.
       derivedLighting: "unchanged",
     })) {
-      const reason = "the analytic primitive arena is not ready for the staged sparse generation";
+      const reason = "the analytic primitive arena is not ready for the live render generation";
       this.liveSceneAnimationFailure = reason;
       this.onStatus({ state: "blocked", label: `Live scene update failed closed: ${reason}`, resource: svoPresentationResourcePlugin });
       return;
     }
+    this.liveSceneAnimationFailure = undefined;
     animation.current = descriptors;
     animation.candidates = candidates;
     this.renderSceneRevision = revision;
@@ -2303,6 +2294,7 @@ export class FluidLabRenderer {
       values: {
         ...config.values,
         svoEnvironmentBrickRefinementLevels: activeSvoTuning.environmentBrickRefinementLevels,
+        svoEnvironmentRefinementDepth: activeSvoTuning.environmentRefinementDepth,
       },
     };
     const readyGPUFluid = backend === "webgpu" || !sceneRuntime.fluidSolver
@@ -2461,7 +2453,10 @@ export class FluidLabRenderer {
     }
     const uniform = new Float32Array([
       this.presentationTexture.width, this.presentationTexture.height, time_s, cameraChanging ? SVO_CAMERA_CHANGING_FRAME : -1,
-      position.x, position.y, position.z, 0,
+      // cameraPosition.w is the aperture, tan(fov/2). It was padding until the
+      // lens became a scene property; see CAMERA_APERTURE_UNIFORM_LANE for why
+      // it rides here rather than in a field of its own.
+      position.x, position.y, position.z, cameraTanHalfFov(camera),
       camera.target_m.x, camera.target_m.y, camera.target_m.z, 0,
       scene.container.width_m, scene.container.height_m, scene.container.depth_m, scene.container.height_m * scene.container.fillFraction,
       // options.w carries the largest represented adaptive pressure-cell
@@ -2513,7 +2508,7 @@ export class FluidLabRenderer {
       });
       this.device.queue.writeBuffer(this.bodyBuffer, 0, bodyData);
     }
-    this.advanceLiveSceneAnimation(sparseSceneProducer);
+    this.advanceLiveSceneAnimation();
     this.svoDryScenePipeline?.setRigidBodyCount(bodies.length, svoDryRigidBounds(bodies));
     // Reduced-rate cone lighting is the production default: quarter-axis-rate
     // prepass + full-resolution relight, with 0.5 retained by the quality tier.
@@ -2597,6 +2592,17 @@ export class FluidLabRenderer {
       return replacementResult;
     };
     this.waterPipeline.setSceneHasFluid(Boolean(sceneRuntime.fluidSolver));
+    // The medium, the key and the caustic receiver are all document facts the
+    // composite used to have inlined into its WGSL at build time. The pipeline
+    // ignores a call that changes nothing, so this stays a per-frame statement
+    // of what the scene is rather than a per-frame upload.
+    this.waterPipeline.setSceneOptics({
+      optics: scene.fluid.optics,
+      directional: scene.lighting?.directional,
+      grade: scene.lighting?.grade,
+      terrain: scene.terrain,
+      container: { width_m: scene.container.width_m, depth_m: scene.container.depth_m },
+    });
     // Before the dry pass samples it, and outside the water pipeline's own
     // passes so the volume is complete for the whole frame.
     this.svoFluidCoverage?.encode(encoder);
@@ -2745,7 +2751,7 @@ export class FluidLabRenderer {
     }
     // One assembled draw for every decoration any pass contributed this frame.
     this.encodeDecorationOverlay(
-      encoder, basis, scene, pixelTraceRequested ? pixelTrace : undefined, fluidCellTrace);
+      encoder, basis, cameraTanHalfFov(camera), scene, pixelTraceRequested ? pixelTrace : undefined, fluidCellTrace);
     closeFixedPresentationPhase();
     const upscalePass=encoder.beginRenderPass({colorAttachments:[{view:this.context.getCurrentTexture().createView(),clearValue:{r:0.01,g:0.025,b:0.024,a:1},loadOp:"clear",storeOp:"store"}]});
     upscalePass.setPipeline(this.upscalePipeline);upscalePass.setBindGroup(0,this.upscaleBindGroup);upscalePass.draw(3);upscalePass.end();

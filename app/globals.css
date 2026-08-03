@@ -1183,10 +1183,9 @@ button.card[data-active] { border-color: var(--accent); }
 /* ---------------------------------------------------------------------------
    The front door.
 
-   A layer over a live viewport, never a route — the device and its pipelines
-   keep running behind it (lib/stores/shell-store.ts). Opaque rather than a
-   scrim, because this is the product's own surface and not a dialog over the
-   studio's: the wash is what a cold load reads while the platform lane starts.
+   The root route. Opaque because this is the product's own surface rather than
+   a dialog over the studio. After a scene has been visited, AppShell retains
+   that studio as a hidden sibling so returning here does not release WebGPU.
    --------------------------------------------------------------------------- */
 .scene-library-layer { position: fixed; inset: 0; z-index: 40; display: grid; grid-template-rows: 70px minmax(0, 1fr); color: var(--ink); font-family: var(--sans); background: radial-gradient(1100px 620px at 86% -12%, var(--accent-wash), transparent 62%), radial-gradient(900px 520px at -6% 108%, var(--wash-warm), transparent 58%), var(--bg); }
 .scene-library-layer .panel-scroll { scrollbar-color: var(--line-strong) transparent; }

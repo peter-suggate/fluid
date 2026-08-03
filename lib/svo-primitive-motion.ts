@@ -1,6 +1,7 @@
 import type { Quaternion } from "./model";
 import {
   intersectSvoPrimitive,
+  svoPrimitiveBoundingRadius_m,
   type SvoFinitePrimitiveDescriptor,
   type SvoPrimitiveRay,
   type SvoPrimitiveRayHit,
@@ -131,15 +132,16 @@ function descriptorIdentity(primitive: SvoFinitePrimitiveDescriptor) {
   return { primitiveId, materialId: primitive.materialId, ownerId };
 }
 
-/** Rotation-independent radius used for conservative swept residency bounds. */
+/**
+ * Rotation-independent radius used for conservative swept residency bounds.
+ *
+ * Kept as a name of its own because that is what a sidecar reads, but the
+ * formula is the kind table's: a swept bound derived from a second copy of it
+ * would go stale the first time a kind was added, and its failure mode is a
+ * primitive that leaves the residency it was given mid-move.
+ */
 export function svoPrimitiveBoundingRadius(primitive: SvoFinitePrimitiveDescriptor): number {
-  if (primitive.kind === "sphere") return primitive.radius_m;
-  if (primitive.kind === "box") return Math.hypot(primitive.halfExtents_m.x, primitive.halfExtents_m.y, primitive.halfExtents_m.z);
-  if (primitive.kind === "capsule") return primitive.segmentHalfLength_m + primitive.radius_m;
-  if (primitive.kind === "cylinder") return Math.hypot(primitive.radius_m, primitive.halfHeight_m);
-  if (primitive.kind === "torus") return primitive.majorRadius_m + primitive.minorRadius_m;
-  if (primitive.kind === "cone") return Math.hypot(Math.max(primitive.baseRadius_m, primitive.topRadius_m), primitive.halfHeight_m);
-  return Math.max(primitive.radii_m.x, primitive.radii_m.y, primitive.radii_m.z);
+  return svoPrimitiveBoundingRadius_m(primitive);
 }
 
 export function svoPrimitiveTemporalMotionLimit(cellSize_m: number): number {

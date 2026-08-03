@@ -1,4 +1,6 @@
 import type { Quaternion, Vec3 } from "./model";
+import type { SceneryGeneratorParamsByKind } from "./scenery-generators";
+import type { PondVesselSpec } from "./voxel-scenery/pond-vessel";
 
 /**
  * The declarative description of everything visible in a scene that is not
@@ -30,9 +32,15 @@ import type { Quaternion, Vec3 } from "./model";
  * out to iterate an authored table — a flagstone coordinate list, a hose
  * polyline, a pot tuple — so they flatten to sibling nodes with their
  * arithmetic folded. That costs nothing (the tables were the data all along)
- * and buys the ability to select one flagstone. The single exception is the
- * procedural tree, whose seed genuinely generates its geometry; it stays a
- * parameterized node so re-seeding re-grows the tree.
+ * and buys the ability to select one flagstone.
+ *
+ * The exceptions are the *generators*, whose seed genuinely produces their
+ * geometry rather than naming it. `tree` was the first and for a long while the
+ * only one; `generator` is the general form, keyed to `SCENERY_GENERATORS`. A
+ * generated set stays a parameterized node so that re-seeding is an edit to one
+ * number instead of a factory re-run that discards everything the user changed,
+ * and so that a saved scene holds its own description rather than the several
+ * hundred ellipsoids that description happens to expand to.
  */
 
 /** Whether a node's lengths are fractions of the environment scale, or metres. */
@@ -70,16 +78,63 @@ export interface SceneryPlacement {
 }
 
 /**
+ * The named surface closures a scenery node may ask for.
+ *
+ * Declared here rather than derived from `SVO_MATERIAL_FUNCTION_IDS`, for the
+ * same reason `SCENERY_GENERATOR_IDS` is: `lib/model.ts` runtime-imports
+ * `validateSceneryGraph`, so a scene *schema* that reached into the material
+ * ABI would drag the lighting and voxel-material modules into every bundle
+ * that parses a document. The mapping from these names to function IDs is a
+ * total `Record` on the other side, so the two halves cannot drift.
+ *
+ * `garden-terrain` is deliberately absent. It is a height-banded ground
+ * closure — pool liner below, soil collar, then mown grass — and asking a
+ * bench or a pebble for it would paint a tide line across an object that has
+ * no relationship to the waterline. Ground surfaces are chosen by the terrain
+ * shell, not by a prop.
+ */
+export const SCENERY_SURFACE_IDS = Object.freeze([
+  "none",
+  "architectural",
+  "wood",
+  "stone",
+  "foliage",
+  "ceramic",
+  "brushed-metal",
+  "organic",
+  "plaster",
+] as const);
+
+export type SceneryySurface = typeof SCENERY_SURFACE_IDS[number];
+
+const scenerySurfaces = new Set<string>(SCENERY_SURFACE_IDS);
+
+/**
  * A surface, either as a palette reference or as a literal.
  *
  * The reference form is the one the sets are authored in: a named ramp and a
  * value on it. Literals exist for the handful of surfaces that are genuinely
  * chromatic — a lantern ember, a warm lamp — which are the only saturated
  * colour in any of these environments and are meant to stay that way.
+ *
+ * `surface` says what the thing is *made of*, which is a separate question
+ * from what value it sits at, and until it existed the answer was inferred by
+ * running a regular expression over the object's name. That inference is why
+ * `lib/voxel-scenery/stone-set.ts` carries the comment "Nothing here may be
+ * named 'mushroom'" and why the README warns that the regex is load-bearing: a
+ * generator could not rename its own parts without silently restyling them.
+ * Omitting `surface` keeps the legacy inference, so nothing authored before
+ * this field existed changes.
  */
+interface SceneryMaterialBase {
+  readonly emission?: number;
+  /** Which procedural closure shades this. Omitted falls back to the name regex. */
+  readonly surface?: SceneryySurface;
+}
+
 export type SceneryMaterial =
-  | { readonly palette: string; readonly value: number; readonly emission?: number }
-  | { readonly colorLinear: readonly [number, number, number]; readonly emission?: number };
+  | (SceneryMaterialBase & { readonly palette: string; readonly value: number })
+  | (SceneryMaterialBase & { readonly colorLinear: readonly [number, number, number] });
 
 /**
  * A named value ramp. `tint` multiplies the value per channel, which is exactly
@@ -113,6 +168,8 @@ export interface SceneryCylinderNode extends SceneryNodeBase {
   readonly kind: "cylinder";
   readonly radius: number;
   readonly halfHeight: number;
+  /** Optional circular cap-to-side fillet; emits a rounded-cylinder SDF. */
+  readonly edgeRadius?: number;
   readonly material: SceneryMaterial;
 }
 
@@ -147,8 +204,142 @@ export interface SceneryConeNode extends SceneryNodeBase {
   readonly baseRadius: number;
   readonly topRadius: number;
   readonly halfHeight: number;
+  /** Convex-hull SDF with spherical ends instead of planar caps. */
+  readonly roundedEnds?: boolean;
   readonly material: SceneryMaterial;
 }
+
+/**
+ * What every aggregate carries, whatever procedural field fills it.
+ *
+ * One node, one record, one owner — standing for detail that a set of explicit
+ * primitives cannot afford to spell. The same shape authored as fifteen hundred
+ * ellipsoids costs more than a third of the scene's whole 4 096-record budget,
+ * and averages some eighty of them in each brick against a per-brick candidate
+ * ceiling of sixty-four whose overflow is a *silent drop*: the surplus never
+ * reaches the opacity pyramid or the radiance atlas, so it stops casting shadows
+ * and stops occluding indirect light while still drawing in primary visibility.
+ *
+ * It is also what removes the seams. A run spelled as a chain of capsules steps
+ * its shading normal at every joint; the smooth minimum here is continuous
+ * through the junction, so a branch meeting its parent has no line across it.
+ *
+ * `lobe` is the envelope, and it is what every bounds formula, the voxelizer
+ * and the node-mip oracle read — the field is clipped to exactly it by a hard
+ * maximum, so the drawn solid is inside it by construction. It is therefore the
+ * *silhouette* an author is setting, not a hint: a field authored to reach past
+ * it is sliced flat rather than expanded, and the render ABI rejects that at
+ * publication rather than drawing it.
+ *
+ * Every length is in the node's own units, exactly like its siblings. What a
+ * given parameter regime looks like is the composing generator's business; see
+ * `SVO_CLUSTER_FIELD_TABLE` in lib/svo-primitive-abi.ts for what each field is.
+ */
+interface SceneryClusterNodeBase extends SceneryNodeBase {
+  readonly kind: "cluster";
+  /** Half-axes of the envelope the field is clipped to. */
+  readonly lobe: Vec3;
+  /** Radius of the smooth minimum that fuses the field's lobes. */
+  readonly smoothRadius: number;
+  /** Stable integer. Re-seeding rearranges the field and moves nothing else. */
+  readonly seed: number;
+  readonly material: SceneryMaterial;
+}
+
+/**
+ * The default field: a domain-repeated jittered lobe lattice, `n` octaves deep.
+ *
+ * The period is what the lattice repeats on and the lobe is one sphere of it; a
+ * lobe smaller than half the period leaves the lattice as separate beads, and
+ * one above `period·√3/2` covers every cell corner and gives a solid with a
+ * rumpled skin.
+ *
+ * `field` is optional here and required on every other member so that the sets
+ * authored before the family existed stay untouched and keep publishing exactly
+ * the surface they always did. `floretRadius` is the historical name for the
+ * lattice lobe radius and is kept for the same reason.
+ */
+export interface SceneryLatticeClusterNode extends SceneryClusterNodeBase {
+  readonly field?: "lattice";
+  /** Radius of one lobe of the coarsest octave's lattice. */
+  readonly floretRadius: number;
+  /** Repetition period of the coarsest octave, the same on all three axes. */
+  readonly latticePeriod: number;
+  /**
+   * Lobe displacement from its own cell centre, as a fraction of the period.
+   *
+   * Bounded by the render ABI, which enforces the bound that keeps its trace
+   * sound rather than trusting an author. Zero is a perfect crystal and looks
+   * like one.
+   */
+  readonly jitter: number;
+  /**
+   * Halvings of the lattice fused onto it, 1..3. Absent is one.
+   *
+   * Each octave repeats twice as finely with lobes and a blend half the size,
+   * adding a scale of detail an octave below the last. It costs one whole
+   * lattice evaluation per octave.
+   */
+  readonly octaves?: number;
+}
+
+/**
+ * A set of oriented anisotropic lobes, placed from the seed and fused.
+ *
+ * A general irregular solid whose silhouette has as many distinct curvatures as
+ * it has lobes. The lobes are derived, not authored: the whole arrangement is
+ * `seed` against the envelope and the parameters below, so re-seeding gives a
+ * different arrangement of the same size and character.
+ *
+ * The three optional parameters are fractions of the envelope and cover the
+ * range from a compact solid with a slightly irregular skin to a loose set of
+ * distinct lumps. Omitting them takes the render ABI's documented defaults.
+ */
+export interface ScenerySeededLobesClusterNode extends SceneryClusterNodeBase {
+  readonly field: "seeded-lobes";
+  /** Lobes fused, 4..12. Below four the centred lobe dominates and the result is its envelope. */
+  readonly lobeCount: number;
+  /** Largest ratio between a lobe's longest and shortest half-axis, 1..4. One is a sphere. */
+  readonly anisotropy: number;
+  /** A lobe's longest half-axis as a fraction of the envelope, in (0, 1). */
+  readonly lobeSpan?: number;
+  /** How much `lobeSpan` varies across the lobes, in [0, 1 - lobeSpan). */
+  readonly lobeSpanSpread?: number;
+  /** Share of its available travel a lobe spends, in [0, 1]. Zero is concentric. */
+  readonly displacement?: number;
+}
+
+/** One control point of a tapered sweep, in the node's own local frame and units. */
+export interface ScenerySweepPoint {
+  /** Offset from the node's own origin, before its placement rotation. */
+  readonly position: Vec3;
+  /** Sweep radius here. The sweep tapers linearly to the next point. */
+  readonly radius: number;
+}
+
+/**
+ * A tapered sweep along a control polyline.
+ *
+ * One record where scenery would otherwise spell a chain of capsules or a row
+ * of beads — a record each, a stepped shading normal at every junction, and a
+ * seam wherever two of them met across a voxel boundary.
+ *
+ * The polyline is authored in the node's own frame and the `lobe` around it is
+ * not derived, because an ellipsoid that merely contained the run would be a
+ * very poor envelope for a long thin one and would over-occlude a large volume
+ * in the opacity pyramid. An author sets both and the render ABI checks that
+ * every control sphere clears the envelope, naming the point that does not.
+ */
+export interface SceneryTaperedSweepClusterNode extends SceneryClusterNodeBase {
+  readonly field: "tapered-sweep";
+  /** Two to eight points, in sweep order. */
+  readonly points: readonly ScenerySweepPoint[];
+}
+
+export type SceneryClusterNode =
+  | SceneryLatticeClusterNode
+  | ScenerySeededLobesClusterNode
+  | SceneryTaperedSweepClusterNode;
 
 /**
  * One object assembled from parts. The group's placement is the object's, so
@@ -162,9 +353,14 @@ export interface SceneryGroupNode extends SceneryNodeBase {
 }
 
 /**
- * The one true generator. A seed grows the whole specimen, so the node stays
- * parameterized rather than baked: re-seeding re-grows the tree, and the ~30
- * primitives it expands to never appear in the document.
+ * The first generator, and still its own node kind.
+ *
+ * A seed grows the whole specimen, so the node stays parameterized rather than
+ * baked: re-seeding re-grows the tree, and the ~30 primitives it expands to
+ * never appear in the document. `generator` below is the same idea made general;
+ * `tree` keeps a kind of its own because every environment preset in
+ * `lib/scenery-presets.ts` is authored against it, and rewriting seven sets to
+ * gain nothing but uniformity is not a migration, it is churn.
  *
  * `sway` opts the tree into the per-frame gust. The excursion budget is set by
  * the sparse lattice, not by this node — a swaying prop is re-posed every frame
@@ -183,6 +379,64 @@ export interface SceneryTreeNode extends SceneryNodeBase {
   readonly leaf: string;
   readonly sway?: boolean;
 }
+
+/**
+ * The generators a document may name.
+ *
+ * Declared here rather than derived from `SCENERY_GENERATORS` for one reason:
+ * `lib/model.ts` validates every parsed scene against this module, and the
+ * schema should not have to load six geometry modules — a bonsai's canopy
+ * planner among them — in order to decide whether a name is legal. The catalog
+ * is annotated total over this list, so an id with no entry and an entry with
+ * no id are both compile errors, and the split cannot drift. It is the same
+ * arrangement `EnvironmentId` and `SCENERY_GRAPHS` already have.
+ */
+export const SCENERY_GENERATOR_IDS = Object.freeze([
+  "swept-coping",
+  "pond-stone-set",
+  "bonsai",
+  "rosette",
+  "capped-boulder",
+  "stepping-path",
+] as const);
+
+export type SceneryGeneratorId = typeof SCENERY_GENERATOR_IDS[number];
+
+/**
+ * A species named rather than baked: `{ generator, seed, params }`, and the
+ * several hundred primitives it grows stay out of the document.
+ *
+ * This is the general form of `tree`, and the whole of what a scene needs to
+ * say in order to hold a bonsai, a pond's stone set or a swept rim as a
+ * *description*. What it deliberately cannot carry is anything a generator
+ * produced: a rail is 672 numbers derived from about thirty, and persisting it
+ * would be persisting baked geometry under a different name — one that would
+ * then drift from the pond the moment a control point moved. So a run is named
+ * (`vessel`) rather than enumerated, and the ground query, which is a function
+ * and therefore not expressible in a document at all, arrives from the
+ * expansion context. See lib/scenery-generators.ts.
+ *
+ * Distributed over the ids so `generator` discriminates `params`: a node naming
+ * `"bonsai"` beside a coping's parameters is a compile error, and so is a node
+ * naming a generator the catalog does not hold.
+ *
+ * `place` composes on top of whatever the generator emitted, exactly as it does
+ * for any other node, so a generated set can be moved as one object. The ground
+ * query is *not* re-aimed by that offset — a set dragged off its bank keeps the
+ * bank it was planned against — which is the one thing about this kind that a
+ * gizmo can express and the document cannot yet describe.
+ */
+export type SceneryGeneratorNode = {
+  readonly [Id in SceneryGeneratorId]: SceneryNodeBase & {
+    readonly kind: "generator";
+    readonly generator: Id;
+    /** The only entropy. Changing it re-grows the set and nothing else. */
+    readonly seed: number;
+    /** Which of the graph's `vessels` this one lays its runs against. */
+    readonly vessel?: string;
+    readonly params: SceneryGeneratorParamsByKind[Id];
+  };
+}[SceneryGeneratorId];
 
 /**
  * A rectangular hole in a wall, in scene-scale fractions.
@@ -264,7 +518,8 @@ export type SceneryPrimitiveNode =
   | SceneryEllipsoidNode
   | SceneryCapsuleNode
   | SceneryTorusNode
-  | SceneryConeNode;
+  | SceneryConeNode
+  | SceneryClusterNode;
 
 export type SceneryShellNode =
   | SceneryRoomShellNode
@@ -275,15 +530,26 @@ export type SceneryNode =
   | SceneryGlazingNode
   | SceneryGroupNode
   | SceneryTreeNode
+  | SceneryGeneratorNode
   | SceneryShellNode;
 
 /**
- * A scene's complete scenery description: the palettes its materials name, and
- * the nodes themselves. Exactly one shell node is expected, and it may sit
- * anywhere in the list.
+ * A scene's complete scenery description: the palettes its materials name, the
+ * vessels its generators run against, and the nodes themselves. Exactly one
+ * shell node is expected, and it may sit anywhere in the list.
  */
 export interface SceneryGraph {
   readonly palettes: Readonly<Record<string, SceneryPalette>>;
+  /**
+   * Named plan vessels, referenced the way a material references a palette.
+   *
+   * One authority per pond, and that is the point of holding them here rather
+   * than on each node. A coping sweeps the plan curve, the stone set beds
+   * against the same curve and the terrain is baked from it; three copies of
+   * thirty numbers is three chances for a rim to end up ringing a pond that has
+   * moved out from under it.
+   */
+  readonly vessels?: Readonly<Record<string, PondVesselSpec>>;
   readonly nodes: readonly SceneryNode[];
 }
 
@@ -293,7 +559,8 @@ export function isSceneryShellNode(node: SceneryNode): node is SceneryShellNode 
 
 export function isSceneryPrimitiveNode(node: SceneryNode): node is SceneryPrimitiveNode {
   return node.kind === "box" || node.kind === "cylinder" || node.kind === "ellipsoid"
-    || node.kind === "capsule" || node.kind === "torus" || node.kind === "cone";
+    || node.kind === "capsule" || node.kind === "torus" || node.kind === "cone"
+    || node.kind === "cluster";
 }
 
 /** Depth-first walk in expansion order, so callers see nodes as they publish. */
@@ -339,6 +606,26 @@ export function validateSceneryGraph(graph: SceneryGraph): string[] {
     if (isSceneryPrimitiveNode(node) && "palette" in node.material
       && graph.palettes[node.material.palette] === undefined) {
       errors.push(`Scenery node ${node.id} names unknown palette ${node.material.palette}`);
+    }
+    // Same reason the generator id is checked below: a parsed document is
+    // `JSON.parse` output cast to the schema, so a misspelled surface got past
+    // the compiler by never meeting it. Left unchecked it would fall back to
+    // the name regex and restyle the object without saying anything.
+    if (isSceneryPrimitiveNode(node) && node.material.surface !== undefined
+      && !scenerySurfaces.has(node.material.surface)) {
+      errors.push(`Scenery node ${node.id} names unknown surface ${node.material.surface}`);
+    }
+    if (node.kind === "generator") {
+      // A parsed document is `JSON.parse` output cast to the schema, so the id
+      // and the vessel name are both strings that got past the compiler by not
+      // being compiled. They are checked exactly as an unknown palette is.
+      if (!(SCENERY_GENERATOR_IDS as readonly string[]).includes(node.generator)) {
+        errors.push(`Scenery node ${node.id} names unknown generator ${node.generator}`);
+      }
+      if (!Number.isFinite(node.seed)) errors.push(`Scenery node ${node.id} needs a finite generator seed`);
+      if (node.vessel !== undefined && graph.vessels?.[node.vessel] === undefined) {
+        errors.push(`Scenery node ${node.id} names unknown vessel ${node.vessel}`);
+      }
     }
   }
   if (shells !== 1) errors.push(`A scenery graph needs exactly one shell node, found ${shells}`);

@@ -18,11 +18,25 @@ export const SVO_PRIMARY_LEAF_VISIT_HARD_LIMIT = 256;
 /** Additional authored-environment subdivision beyond the legacy SVO brick plan. */
 export const SVO_ENVIRONMENT_BRICK_REFINEMENT_MAXIMUM = 1;
 
+/**
+ * Extra octree levels dense environment regions may descend into.
+ *
+ * Distinct from `environmentBrickRefinementLevels`, which *coarsens* toward the
+ * solver's lattice. This spends depth below it, and only on a scene the solver
+ * does not own — the domain planner claims every brick of a simulated
+ * container, and a solver brick pins its node. Two is the measured point where
+ * the hero garden's busiest brick reaches the 64 candidates the hierarchy binds;
+ * beyond that nothing more splits.
+ */
+export const SVO_ENVIRONMENT_REFINEMENT_DEPTH_MAXIMUM = 3;
+
 /** Runtime-adjustable sparse-presentation controls. Shader loops retain hard caps;
  * these values only lower work or adjust quality inside those audited bounds. */
 export interface SvoRenderTuning {
   readonly resolutionScale: number;
   readonly environmentBrickRefinementLevels: number;
+  /** Extra octree levels for dense environment regions on an unsimulated scene. */
+  readonly environmentRefinementDepth: number;
   readonly coneLightingScale: SvoConeLightingScale;
   readonly coneRadianceReconstruction: SvoConeRadianceReconstruction;
   /** Reuse an exact primary G-buffer while an eligible camera and scene remain unchanged. */
@@ -61,6 +75,9 @@ export interface SvoRenderTuning {
 export const DEFAULT_SVO_RENDER_TUNING: SvoRenderTuning = Object.freeze({
   resolutionScale: 0.72,
   environmentBrickRefinementLevels: 1,
+  // Off by default: it changes leaf sizes, and the excursion budget a swaying
+  // prop is held to is still derived from one scene-wide cell size.
+  environmentRefinementDepth: 0,
   // The balanced tier keeps the accepted 2x2 visibility error bar. The 4x4
   // rate remains available in the performance preset, while full-resolution
   // relighting preserves material and edge detail at either reduced rate.
@@ -155,6 +172,11 @@ export function normalizeSvoRenderTuning(value: SvoRenderTuning): SvoRenderTunin
       value.environmentBrickRefinementLevels,
       0,
       SVO_ENVIRONMENT_BRICK_REFINEMENT_MAXIMUM,
+    ),
+    environmentRefinementDepth: integer(
+      value.environmentRefinementDepth,
+      0,
+      SVO_ENVIRONMENT_REFINEMENT_DEPTH_MAXIMUM,
     ),
     coneLightingScale,
     coneRadianceReconstruction,

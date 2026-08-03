@@ -10,7 +10,6 @@ import { useRuntimeStore } from "@/lib/stores/runtime-store";
 import { useUIStore } from "@/lib/stores/ui-store";
 import { useShellStore } from "@/lib/stores/shell-store";
 import { WebGPUViewport } from "./WebGPUViewport";
-import { SceneLibrary } from "./SceneLibrary";
 import { EditorToolbar } from "./EditorToolbar";
 import { SceneOverlay } from "./SceneOverlay";
 import { SceneScaleOverlay } from "./SceneScaleOverlay";
@@ -135,7 +134,20 @@ export function FluidLab() {
   const trayCards = resourceActivitiesFor(resourceReadiness, "card");
   const trayPills = resourceActivitiesFor(resourceReadiness, "pill");
 
-  useLayoutEffect(() => startQueryStateSync(() => simulation.reset()), []);
+  useLayoutEffect(() => {
+    // A scene has its own route. During client navigation (and Fast Refresh)
+    // the opened document is already in the stores, so keep it rather than
+    // rebuilding an incomplete URL projection over it. A direct page load has
+    // fresh stores and hydrates from the address as before.
+    const hydrateFromUrl = !useShellStore.getState().studioEntered;
+    useShellStore.getState().enterStudio();
+    return startQueryStateSync(() => {
+      // /scene is authoritative even for an old link carrying view=library.
+      // Enter before the canonical URL write so that legacy flag is removed.
+      useShellStore.getState().enterStudio();
+      simulation.reset();
+    }, { hydrateFromUrl });
+  }, []);
   // After the URL has hydrated the document, so the first autosave records the
   // scene the reader actually arrived on rather than the default preset.
   useEffect(() => startSceneAutosave({ storage: browserSceneLibraryStorage() }), []);
@@ -150,7 +162,6 @@ export function FluidLab() {
 
 
   return (
-  <>
     <main className="lab-shell" style={{ "--right-panel-width": `${rightPanelWidth}px` } as CSSProperties} data-run-state={runState} data-solver-mode="eulerian" data-simulation-time={simulationTime.toFixed(6)} data-body-count={bodies.length} data-right-panel-open={Boolean(rightPanel)} data-right-panel={rightPanel ?? "closed"} data-shell-view={shellView}>
       <section className="viewport-shell" data-resource-active={activities.length > 0} data-gpu-transition={activities.at(-1)?.lane ?? resourceReadiness.platform.state}>
         <WebGPUViewport />
@@ -207,12 +218,5 @@ export function FluidLab() {
       <RecordingPlaybackModal />
       <SceneConfigPopover />
     </main>
-
-    {/* A layer rather than a route, and a peer of the studio rather than a
-        child of it: the viewport keeps its device, its pipelines and its draw
-        loop while this is in front, and the front door follows the reader's
-        theme instead of the studio's pinned instrument palette. */}
-    <SceneLibrary />
-  </>
   );
 }

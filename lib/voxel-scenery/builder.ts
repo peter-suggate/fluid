@@ -1,6 +1,11 @@
 import type { EnvironmentId } from "../environments";
 import type { Quaternion, SceneDescription, Vec3 } from "../model";
+import type { SceneryySurface } from "../scenery-graph";
 import type { EnvironmentProxySway } from "../scenery-sway";
+// Type-only: the aggregate proxy carries the render ABI's own discriminated
+// packing rather than a flattened copy of it, and a value import here would put
+// the primitive ABI in every module that draws a box.
+import type { SvoSmoothUnionClusterPacking } from "../svo-primitive-abi";
 
 export type { EnvironmentProxySway } from "../scenery-sway";
 
@@ -12,6 +17,14 @@ export interface EnvironmentProxyMaterial {
   readonly emission: number;
   /** Surface parameter for the shared raster/voxel lighting model. */
   readonly roughness: number;
+  /**
+   * The authored procedural closure, when the node named one.
+   *
+   * Absent means "infer it", which is what every surface in the tree did until
+   * this field existed: a regular expression over the object's group and tags.
+   * See `SCENERY_SURFACE_IDS` in lib/scenery-graph.ts.
+   */
+  readonly surface?: SceneryySurface;
 }
 
 export interface EnvironmentProxyAabb {
@@ -56,6 +69,7 @@ export interface EnvironmentCylinderProxy extends EnvironmentProxyBase {
   readonly radius_m: number;
   readonly halfHeight_m: number;
   readonly axis: "y";
+  readonly edgeRadius_m?: number;
 }
 
 export interface EnvironmentEllipsoidProxy extends EnvironmentProxyBase {
@@ -83,6 +97,32 @@ export interface EnvironmentConeProxy extends EnvironmentProxyBase {
   readonly baseRadius_m: number;
   readonly topRadius_m: number;
   readonly halfHeight_m: number;
+  readonly roundedEnds?: boolean;
+}
+
+/**
+ * A procedural field clipped to an ellipsoidal envelope: a jittered lobe
+ * lattice, a seeded set of oriented anisotropic lobes, or a tapered sweep.
+ *
+ * The one proxy kind whose *rendered* shape and whose *voxelized* shape are
+ * deliberately different. `radius_m` is the envelope, and it is what every
+ * bounds formula, the voxelizer and the node-mip oracle see — an ordinary
+ * ellipsoid. The field is applied only by the render ABI, which clips it to
+ * that same envelope with a hard maximum, so the drawn solid is inside the
+ * reported bound by construction. Over-occluding a fissured interior is the
+ * safe direction: an under-populated opacity page is indistinguishable from
+ * empty space to everything that reads it.
+ *
+ * The packing travels whole rather than flattened into this interface, because
+ * the three fields share almost none of their parameters and a union of every
+ * field's numbers here would be a second, drifting copy of the render ABI's own
+ * discriminated one.
+ */
+export interface EnvironmentClusterProxy extends EnvironmentProxyBase {
+  readonly kind: "cluster";
+  /** Half-axes of the envelope. Also what every non-render consumer sees. */
+  readonly radius_m: Vec3;
+  readonly packing: SvoSmoothUnionClusterPacking;
 }
 
 export type EnvironmentProxyPrimitive =
@@ -91,7 +131,8 @@ export type EnvironmentProxyPrimitive =
   | EnvironmentEllipsoidProxy
   | EnvironmentCapsuleProxy
   | EnvironmentTorusProxy
-  | EnvironmentConeProxy;
+  | EnvironmentConeProxy
+  | EnvironmentClusterProxy;
 
 export interface EnvironmentProxyShell {
   readonly kind: "room" | "terrain-heightfield";
@@ -156,6 +197,7 @@ export class ProxyBuilder {
   readonly shell: EnvironmentBoxProxy[] = [];
   private nextOwner = 0;
   private swayResolver?: (proxy: EnvironmentProxyPrimitive) => EnvironmentProxySway | undefined;
+  private surfaceScope?: SceneryySurface;
 
   constructor(private readonly environmentId: EnvironmentId) {}
 
@@ -176,9 +218,31 @@ export class ProxyBuilder {
     try { emit(); } finally { this.swayResolver = undefined; }
   }
 
+  /**
+   * Emit the primitives built inside `emit` as one authored surface.
+   *
+   * Scoped for the same reason `sway` is, and it is the same shape: what a
+   * thing is made of belongs to the object, not to each of the hundred cones a
+   * coping is spelled with. Threading it as a tenth positional argument
+   * through seven emitters would have put it at every call site and at none of
+   * the ones that matter.
+   *
+   * Nesting throws rather than resolving to an inner or an outer winner: a set
+   * that asked for stone inside wood has a bug in it, and silently choosing one
+   * is how the name regex behaved.
+   */
+  surface(id: SceneryySurface, emit: () => void): void {
+    if (this.surfaceScope) throw new Error("Scenery surface scopes do not nest");
+    this.surfaceScope = id;
+    try { emit(); } finally { this.surfaceScope = undefined; }
+  }
+
   private emit<T extends EnvironmentProxyPrimitive>(proxy: T, shell = false): T {
-    const sway = this.swayResolver?.(proxy);
-    const result = sway ? { ...proxy, sway } : proxy;
+    const surfaced = this.surfaceScope
+      ? { ...proxy, material: { ...proxy.material, surface: this.surfaceScope } }
+      : proxy;
+    const sway = this.swayResolver?.(surfaced);
+    const result = sway ? { ...surfaced, sway } : surfaced;
     (shell ? this.shell : this.props).push(result as EnvironmentProxyPrimitive as never);
     return result;
   }
@@ -191,11 +255,11 @@ export class ProxyBuilder {
     }, shell);
   }
 
-  cylinder(key: string, group: string, center_m: Vec3, radius_m: number, halfHeight_m: number, colorLinear: EnvironmentLinearColor, emission = 0, tags: readonly string[] = [], orientation?: Quaternion): EnvironmentCylinderProxy {
+  cylinder(key: string, group: string, center_m: Vec3, radius_m: number, halfHeight_m: number, colorLinear: EnvironmentLinearColor, emission = 0, tags: readonly string[] = [], orientation?: Quaternion, edgeRadius_m = 0): EnvironmentCylinderProxy {
     const radius = V(radius_m, halfHeight_m, radius_m);
     return this.emit<EnvironmentCylinderProxy>({
       kind: "cylinder", key: `${this.environmentId}/${key}`, ownerIndex: this.nextOwner++, group, tags,
-      center_m, orientation, radius_m, halfHeight_m, axis: "y",
+      center_m, orientation, radius_m, halfHeight_m, axis: "y", edgeRadius_m,
       material: { colorLinear, emission, roughness: roughnessFor(group, emission) },
       aabb_m: aabb(center_m, rotatedExtent(radius, orientation))
     });
@@ -239,13 +303,29 @@ export class ProxyBuilder {
     });
   }
 
-  cone(key: string, group: string, center_m: Vec3, baseRadius_m: number, topRadius_m: number, halfHeight_m: number, colorLinear: EnvironmentLinearColor, emission = 0, tags: readonly string[] = [], orientation?: Quaternion): EnvironmentConeProxy {
+  /**
+   * An aggregate mass. Its bounds are the envelope's, not the field's, because
+   * the render ABI clips the field to exactly that envelope — see
+   * `EnvironmentClusterProxy`.
+   */
+  cluster(key: string, group: string, center_m: Vec3, radius_m: Vec3, packing: SvoSmoothUnionClusterPacking,
+    colorLinear: EnvironmentLinearColor, emission = 0, tags: readonly string[] = [], orientation?: Quaternion): EnvironmentClusterProxy {
+    return this.emit<EnvironmentClusterProxy>({
+      kind: "cluster", key: `${this.environmentId}/${key}`, ownerIndex: this.nextOwner++, group, tags,
+      center_m, orientation, radius_m, packing,
+      material: { colorLinear, emission, roughness: roughnessFor(group, emission) },
+      aabb_m: aabb(center_m, rotatedExtent(radius_m, orientation)),
+    });
+  }
+
+  cone(key: string, group: string, center_m: Vec3, baseRadius_m: number, topRadius_m: number, halfHeight_m: number, colorLinear: EnvironmentLinearColor, emission = 0, tags: readonly string[] = [], orientation?: Quaternion, roundedEnds = false): EnvironmentConeProxy {
     const widest = Math.max(baseRadius_m, topRadius_m);
+    const localHalfHeight = halfHeight_m + (roundedEnds ? widest : 0);
     return this.emit<EnvironmentConeProxy>({
       kind: "cone", key: `${this.environmentId}/${key}`, ownerIndex: this.nextOwner++, group, tags,
-      center_m, orientation, baseRadius_m, topRadius_m, halfHeight_m,
+      center_m, orientation, baseRadius_m, topRadius_m, halfHeight_m, roundedEnds,
       material: { colorLinear, emission, roughness: roughnessFor(group, emission) },
-      aabb_m: aabb(center_m, rotatedExtent(V(widest, halfHeight_m, widest), orientation))
+      aabb_m: aabb(center_m, rotatedExtent(V(widest, localHalfHeight, widest), orientation))
     });
   }
 }

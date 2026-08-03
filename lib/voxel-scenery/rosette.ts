@@ -394,7 +394,7 @@ export function rosetteSceneryNodes(plan: RosettePlan): SceneryNode[] {
   const { spec, root_m } = plan;
   const group = `${spec.key}-leaf`;
   const local = (p: Vec3): Vec3 => V(p.x - root_m.x, p.y - root_m.y, p.z - root_m.z);
-  const clay = (value: number): SceneryMaterial => ({ palette: "clay", value });
+  const clay = (value: number): SceneryMaterial => ({ palette: "clay", value, surface: "ceramic" });
 
   const children: SceneryNode[] = [{
     kind: "ellipsoid",

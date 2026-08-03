@@ -35,6 +35,7 @@ test("material-function IDs and seeds are stable, unique ABI values", () => {
     ceramic: 6,
     brushedMetal: 7,
     organic: 8,
+    plaster: 9,
   });
   assert.equal(new Set(SVO_PROCEDURAL_MATERIAL_POLICIES.map(({ functionId }) => functionId)).size,
     SVO_PROCEDURAL_MATERIAL_POLICIES.length);
@@ -67,6 +68,19 @@ test("authored semantic groups select deterministic functions without changing i
     svoMaterialFunctionIdForEnvironmentProxy(primitive) === SVO_MATERIAL_FUNCTION_IDS.foliage));
   assert.ok(garden.filter(({ group }) => group === "stone-pebble").every((primitive) =>
     svoMaterialFunctionIdForEnvironmentProxy(primitive) === SVO_MATERIAL_FUNCTION_IDS.stone));
+
+  // A porcelain scene is one fired material throughout, and it says so once —
+  // on its terrain shell. Every proxy takes the plaster closure regardless of
+  // what its own name or its authored `surface` would otherwise select, which
+  // is the whole of what stops a set called "stone" being granite. The pebbles
+  // above are the exact case: same primitives, different scene, other closure.
+  assert.ok(garden.every((primitive) =>
+    svoMaterialFunctionIdForEnvironmentProxy(primitive, "porcelain") === SVO_MATERIAL_FUNCTION_IDS.plaster),
+    "a porcelain scene shades every prop with the one white closure");
+  // And that closure moves no albedo at all — the grain is gone, not merely
+  // quiet. Anything above zero here is visible mottling on a white set.
+  assert.equal(SVO_PROCEDURAL_MATERIAL_POLICIES
+    .find(({ functionId }) => functionId === SVO_MATERIAL_FUNCTION_IDS.plaster)?.colorAmplitude, 0);
 });
 
 test("CPU seeded noise is repeatable, bounded, and continuous across world-space seams", () => {

@@ -73,11 +73,10 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 import zlib from "node:zlib";
 
-import { environmentIndex, type EnvironmentId } from "../lib/environments";
-import { cameraPosition } from "../lib/math";
+import type { EnvironmentId } from "../lib/environments";
 import { defaultCamera, type CameraState, type SceneDescription } from "../lib/model";
 import {
   DynamicGPUPerformanceTraceRecorder,
@@ -85,29 +84,25 @@ import {
   type GPUTimestampPhase,
   type PerformanceTrace,
 } from "../lib/performance-trace";
-import { boundingRadius, initializeRigidBodies } from "../lib/rigid-body";
 import { getScenePreset } from "../lib/scenes";
-import { buildSvoSceneGlass } from "../lib/svo-scene-glass";
-import { buildSvoScenePrimitives } from "../lib/svo-scene-primitives";
-import { buildDefaultSvoMaterialRecords, packSvoMaterialTable, svoMaterialFromEnvironmentProxyMaterial, svoMaterialFunctionIdForEnvironmentProxy } from "../lib/svo-material-abi";
-import { buildSvoSceneThickGlass } from "../lib/svo-scene-thick-glass";
-import { buildSvoTerrainMaterial, sceneTerrainSurfaceModel } from "../lib/svo-terrain-material";
-import { MAX_TERRAIN_FEATURES, sceneHasTerrain, TERRAIN_DEFAULT_FLAT, TERRAIN_UNION_EXPONENT } from "../lib/terrain";
-import { requiredFluidDeviceLimits } from "../lib/webgpu-device-limits";
 import type { SvoConeTracingMode } from "../lib/svo-render-options";
 import { DEFAULT_SVO_RENDER_TUNING, type SvoConeRadianceReconstruction } from "../lib/svo-render-tuning";
-import { SVO_CAMERA_CHANGING_FRAME } from "../lib/webgpu-renderer";
 import { WebGPULiveSvoScene } from "../lib/webgpu-live-svo-scene";
 import { LIVE_SVO_RADIANCE_FEEDBACK } from "../lib/webgpu-svo-live-derived-builder";
+import {
+  buildSvoDrySceneAssembly,
+  createDawnRenderDevice,
+  packSvoDryRigidBodies,
+  packSvoDryViewUniforms,
+  SVO_VIEW_UNIFORM_FLOATS as HARNESS_SVO_VIEW_UNIFORM_FLOATS,
+} from "./svo-dry-frame-harness";
 import {
   createPassEncoderIsolationScratch,
   isolateComputePassEncoders,
 } from "./webgpu-pass-encoder-isolation";
 import {
-  buildSparseVoxelDrySceneLightingMirrors,
   canConsumeSparseVoxelPbrMaterials,
   canEncodeSparseVoxelDryScene,
-  packSvoDrySceneTerrainHeightfield,
   resolveSparseVoxelThickGlassBinderStatus,
   SVO_DRY_SPLIT_EXTRA_BYTES_PER_PIXEL,
   SVO_DRY_TRAVERSAL_MODES,
@@ -115,7 +110,6 @@ import {
   SparseVoxelDrySceneRenderer,
   svoConePrepassSize,
   svoDryRigidPrimaryStrategy,
-  type SparseVoxelDrySceneData,
   type SvoBrickOccupancyMode,
   type SvoConeLightingScale,
   type SvoDryTraversalMode,
@@ -138,7 +132,10 @@ const sourceProvenance = () => {
   const trackedDiff = git("diff", "--no-ext-diff", "--binary", "HEAD");
   const renderPaths = git("ls-files", "-co", "--exclude-standard")
     .split("\n")
-    .filter((file) => /^(?:lib\/(?:webgpu-svo|webgpu-static-svo|svo-|scenes\.ts|paper-scenarios\.ts|environments\.ts|voxel-scenery\/)|tools\/benchmark-svo-dry-frame-gpu\.ts)/.test(file))
+    // svo-dry-frame-harness.ts is in here because it now owns the scene, uniform
+    // and dry-scene-data assembly this benchmark measures; a baseline whose
+    // renderFingerprint ignored it would compare two different scenes.
+    .filter((file) => /^(?:lib\/(?:webgpu-svo|webgpu-static-svo|svo-|scenes\.ts|paper-scenarios\.ts|environments\.ts|voxel-scenery\/)|tools\/benchmark-svo-dry-frame-gpu\.ts|tools\/svo-dry-frame-harness\.ts)/.test(file))
     .filter((file) => existsSync(path.resolve(repoRoot, file)))
     .sort();
   const renderHash = createHash("sha256");
@@ -210,6 +207,7 @@ const optimizationExperiments: SvoDryOptimizationExperiments = {
   rasterPrimaryDirect: process.env.FLUID_SVO_DRY_FRAME_DIRECT_BRICK === "1",
   rasterPrimaryNoFragmentDepth: process.env.FLUID_SVO_DRY_FRAME_NO_FRAG_DEPTH === "1",
   rasterPrimaryHsrProbe: process.env.FLUID_SVO_DRY_FRAME_HSR_PROBE === "1",
+  scenePrimitiveHsrProbe: process.env.FLUID_SVO_DRY_FRAME_SCENE_HSR_PROBE === "1",
 };
 const voxelLightCacheEnabled = optimizationExperiments.voxelLightCache !== false;
 const rayCoherenceModeRaw = process.env.FLUID_SVO_DRY_FRAME_COHERENCE ?? "off";
@@ -372,6 +370,11 @@ function toneByte(linear: number): number {
 }
 
 const SVO_VIEW_UNIFORM_FLOATS = 104;
+// The packing itself lives in ./svo-dry-frame-harness so the smoke lane and this
+// benchmark cannot mirror FluidLabRenderer differently. The literal stays named
+// here because it is this file's buffer-size contract; a divergence is loud.
+assert.equal(SVO_VIEW_UNIFORM_FLOATS, HARNESS_SVO_VIEW_UNIFORM_FLOATS,
+  "view-uniform float count drifted from the shared dry-frame harness");
 
 /** Mirror of the FluidLabRenderer 416-byte view-uniform packing (webgpu-renderer.ts). */
 function packViewUniforms(
@@ -383,90 +386,24 @@ function packViewUniforms(
   overlay?: { mode: number; opacity: number },
   cameraMovingOverride?: boolean,
 ): Float32Array<ArrayBuffer> {
-  const position = cameraPosition(camera);
-  // options.x: DEFAULT_SVO_RENDER_DIAGNOSTICS maximumTraversalDepth(21)*512 + maximumNodeVisits(256).
-  const diagnosticControl = 21 * 512 + 256;
-  // viewport.w carries only the camera-quality tier: the changing sentinel or
-  // the stable sentinel. Temporal accumulation and checkerboard phase no longer
-  // share this lane.
-  const cameraState = (cameraMovingOverride ?? cameraMoving) ? SVO_CAMERA_CHANGING_FRAME : -1;
-  const uniform = new Float32Array([
-    width, height, 0, cameraState,
-    position.x, position.y, position.z, overlay?.mode ?? 0,
-    camera.target_m.x, camera.target_m.y, camera.target_m.z, overlay ? overlay.opacity : 0.82,
-    scene.container.width_m, scene.container.height_m, scene.container.depth_m, scene.container.height_m * scene.container.fillFraction,
-    diagnosticControl, scene.voxelDomain.finestCellSize_m, Math.min(bodyCount, 12), 1,
-    info.nx, info.ny, info.nz, 3,
-    0, 0.5, 1, 0,
-    environmentIndex(environmentId), 0, 0, 0,
-  ]);
-  const packed = new Float32Array(SVO_VIEW_UNIFORM_FLOATS);
-  packed.set(uniform, 0);
-  if (sceneHasTerrain(scene) && scene.terrain) {
-    const terrain = scene.terrain;
-    const features = terrain.features.slice(0, MAX_TERRAIN_FEATURES);
-    packed.set([1, terrain.baseHeight_m, features.length, TERRAIN_UNION_EXPONENT], 32);
-    features.forEach((feature, index) => {
-      packed.set([feature.center_m.x, feature.center_m.z, feature.radius_m.x, feature.radius_m.z], 36 + index * 8);
-      packed.set([(feature.kind === "mound" ? 1 : -1) * feature.amount_m, feature.rotation_rad ?? 0, feature.flat ?? TERRAIN_DEFAULT_FLAT, 0], 40 + index * 8);
-    });
-  }
-  return packed;
-}
-
-/** Mirror of the FluidLabRenderer CPU rigid-body packing (webgpu-renderer.ts). */
-function packBodies(scene: SceneDescription): { data: Float32Array<ArrayBuffer>; count: number } {
-  const bodies = initializeRigidBodies(scene.rigidBodies);
-  const bodyData = new Float32Array(12 * 16);
-  const shapeIndex = { sphere: 0, box: 1, capsule: 2, cylinder: 3 } as const;
-  const palette = [[0.95, 0.63, 0.29], [0.48, 0.66, 0.96], [0.84, 0.42, 0.48], [0.66, 0.52, 0.92]];
-  bodies.slice(0, 12).forEach((body, index) => {
-    const offset = index * 16;
-    const d = body.description.dimensions_m;
-    const half = body.description.shape === "box" ? [d.x / 2, d.y / 2, d.z / 2] : body.description.shape === "sphere" ? [d.x, d.x, d.x] : [d.x, d.y / 2, d.x];
-    const color = palette[shapeIndex[body.description.shape]];
-    bodyData.set([body.position_m.x, body.position_m.y, body.position_m.z, boundingRadius(body)], offset);
-    bodyData.set([half[0], half[1], half[2], shapeIndex[body.description.shape]], offset + 4);
-    bodyData.set([body.orientation.w, body.orientation.x, body.orientation.y, body.orientation.z], offset + 8);
-    bodyData.set([color[0], color[1], color[2], 0], offset + 12);
+  return packSvoDryViewUniforms({
+    scene, camera, environmentId, info, bodyCount, width, height, overlay,
+    cameraMoving: cameraMovingOverride ?? cameraMoving,
   });
-  return { data: bodyData, count: bodies.length };
 }
 
 // ---------------------------------------------------------------------------
 // GPU bring-up on Dawn/Metal.
 // ---------------------------------------------------------------------------
-const { create, globals } = await import(pathToFileURL(modulePath).href) as { create(options: string[]): GPU; globals: Record<string, unknown> };
-Object.assign(globalThis, globals);
-const dawnFeatures = (process.env.FLUID_WEBGPU_DAWN_FEATURES ?? "")
-  .split(",").map((feature) => feature.trim()).filter(Boolean);
-const gpu = create(["backend=metal",
-  ...(dawnFeatures.length > 0 ? [`enable-dawn-features=${dawnFeatures.join(",")}`] : [])]);
-const adapter = await gpu.requestAdapter({ powerPreference: "high-performance" });
-assert.ok(adapter, "no Metal adapter — benchmark did not execute on the GPU");
-const adapterInfo = {
-  vendor: adapter.info?.vendor ?? "",
-  architecture: adapter.info?.architecture ?? "",
-  device: adapter.info?.device ?? "",
-  description: adapter.info?.description ?? "",
-};
-assert.ok(adapterInfo.vendor || adapterInfo.architecture || adapterInfo.description,
-  "adapter info is empty — refusing to report a benchmark that may not have run on real hardware");
-const timestampsSupported = adapter.features.has("timestamp-query");
-assert.ok(timingMode !== "gpu" || timestampsSupported,
-  "FLUID_SVO_DRY_FRAME_TIMING=gpu requires timestamp-query support; no wall-time fallback was selected");
 const f16Requested = optimizationExperiments.halfPrecisionLighting === true;
-assert.ok(!f16Requested || adapter.features.has("shader-f16"),
-  "FLUID_SVO_DRY_FRAME_F16=1 requires Dawn shader-f16 support");
-const device = await adapter.requestDevice({
-  requiredFeatures: [
-    ...(timestampsSupported ? ["timestamp-query" as GPUFeatureName] : []),
-    ...(f16Requested ? ["shader-f16" as GPUFeatureName] : []),
-  ],
-  requiredLimits: requiredFluidDeviceLimits(adapter.limits),
+const { adapterInfo, device, timestampsSupported, validationErrors } = await createDawnRenderDevice({
+  modulePath,
+  dawnFeatures: (process.env.FLUID_WEBGPU_DAWN_FEATURES ?? "").split(","),
+  // FLUID_SVO_DRY_FRAME_TIMING=gpu asked for hardware timestamps, so a wall-time
+  // fallback would silently report a different measurement than the one requested.
+  requireTimestampQuery: timingMode === "gpu",
+  requireShaderF16: f16Requested,
 });
-const validationErrors: string[] = [];
-device.addEventListener("uncapturederror", (event) => validationErrors.push((event as GPUUncapturedErrorEvent).error.message));
 log(`Adapter: ${JSON.stringify(adapterInfo)} timestamps=${timestampsSupported}`);
 
 // ---------------------------------------------------------------------------
@@ -504,6 +441,9 @@ const solver = await WebGPULiveSvoScene.create(
   undefined,
   {
     ...(renderBrickSize === undefined ? {} : { renderBrickSize }),
+    // FLUID_SVO_DRY_FRAME_ENVIRONMENT_REFINEMENT: extra octree levels for dense
+    // environment regions on a dry scene. Zero is the historical plan.
+    environmentRefinementDepth: Number(process.env.FLUID_SVO_DRY_FRAME_ENVIRONMENT_REFINEMENT ?? 0),
     radianceFeedback: radianceFeedbackEnabled,
   },
 );
@@ -543,48 +483,9 @@ const source = globalIlluminationEnabled || !publishedSource
   : { ...publishedSource, tetrahedralRadiance: undefined };
 assert.ok(source?.structural, "live SVO scene did not publish a structural scene source");
 
-// Exact mirror of FluidLabRenderer solver-attachment dry-scene data assembly.
-const scenePrimitives = buildSvoScenePrimitives(scene);
-const sceneGlass = buildSvoSceneGlass(scene, { cellSize_m: source.structural!.domain.cellSize_m });
-const sceneThickGlass = buildSvoSceneThickGlass(scene);
-const thickReplacedPaneKey = sceneThickGlass.metadata.find(({ replacesThinPaneKey }) => Boolean(replacesThinPaneKey))?.replacesThinPaneKey;
-const thickReplacedPaneId = sceneGlass.metadata.find(({ key }) => key === thickReplacedPaneKey)?.paneId;
-const terrainSurface = sceneTerrainSurfaceModel(scene);
-const terrainMaterial = scenePrimitives.analyticTerrain && terrainSurface === "garden-terrain"
-  ? buildSvoTerrainMaterial(scene)
-  : undefined;
-const compositorOwnedGlass = sceneGlass.metadata.filter(({ role }) => role === "container-pane" || role === "container-top");
-const lightingMirrors = buildSparseVoxelDrySceneLightingMirrors(scene, 1);
-const drySceneData: SparseVoxelDrySceneData = {
-  renderRevision: 1,
-  primitiveRecords: scenePrimitives.packedRecords,
-  primitiveCandidates: scenePrimitives.primitiveCandidates!,
-  materialRecords: packSvoMaterialTable([
-    ...buildDefaultSvoMaterialRecords(1, { terrainSurface }),
-    ...scenePrimitives.metadata.map((primitive) => svoMaterialFromEnvironmentProxyMaterial(
-      primitive.materialId, primitive.material, 1, svoMaterialFunctionIdForEnvironmentProxy(primitive),
-    )),
-  ]),
-  materialRevision: 1,
-  ownerBase: scene.rigidBodies.length,
-  skippedOwnerId: scenePrimitives.openShellOwnerId,
-  terrainMaterialId: scenePrimitives.analyticTerrain?.materialId,
-  terrainMaterialMetadata: terrainMaterial?.packedMetadata,
-  terrainMaterialCacheKey: terrainMaterial?.cacheKey,
-  // A sculpted vessel is terrain the eight-feature uniform mirror cannot
-  // express. Production publishes the grid into the scene arena; without this
-  // the bench renders a flat plane at `baseHeight_m` and calls it the scene.
-  terrainHeightfield: packSvoDrySceneTerrainHeightfield(scene.terrain?.grid),
-  glassRecords: sceneGlass.packedRecords,
-  glassCacheKey: sceneGlass.cacheKey,
-  thickGlassRecords: sceneThickGlass.packedRecords,
-  thickGlassRevision: sceneThickGlass.revision,
-  thickGlassCacheKey: sceneThickGlass.cacheKey,
-  thickGlassReplacedThinPaneId: thickReplacedPaneId,
-  primaryCompositeOwnedGlassPaneIdBase: compositorOwnedGlass[0]?.paneId,
-  primaryCompositeOwnedGlassPaneCount: compositorOwnedGlass.length,
-  ...lightingMirrors,
-};
+// Exact mirror of FluidLabRenderer solver-attachment dry-scene data assembly,
+// shared with tools/run-svo-dry-render-smoke.ts through the harness.
+const { drySceneData, scenePrimitives, sceneGlass } = buildSvoDrySceneAssembly(scene, source);
 assert.equal(scenePrimitives.requiresRasterTerrainFallback, false, "garden terrain must render analytically");
 assert.ok(canConsumeSparseVoxelPbrMaterials(source), "PBR material publication unavailable");
 assert.ok(canEncodeSparseVoxelDryScene(source, drySceneData), "production dry-scene contract rejected the garden source");
@@ -601,7 +502,7 @@ const uniformBuffer = device.createBuffer({
   usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
 });
 const bodyBuffer = device.createBuffer({ label: "Bench rigid bodies", size: 12 * 64, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-const bodies = packBodies(scene);
+const bodies = packSvoDryRigidBodies(scene);
 device.queue.writeBuffer(uniformBuffer, 0, packViewUniforms(scene, activeCamera, environmentId, solver.info, bodies.count));
 device.queue.writeBuffer(bodyBuffer, 0, bodies.data);
 

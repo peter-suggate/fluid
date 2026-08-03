@@ -86,7 +86,9 @@ test("contact visibility attenuates indirect diffuse only and adds no storage bi
   assert.match(shade, /let contactVisibility=dryContactVisibility\(position,hit\.normal,hit\.featureId,hit\.ownerId\)/);
   assert.match(shade, /let ignoredBodyOwner=select\(DRY_OWNER_NONE,hit\.ownerId,hit\.motionKind==DRY_GBUFFER_MOTION_RIGID\);let gi=dryGlobalIllumination\(position,hit\.normal,ignoredBodyOwner\)/);
   assert.match(shade, /let diffuseVisibility=dryDiffuseMultiBounceVisibility\(gi\.visibility,diffuseColor\)[^;]*;[^]*let diffuseEnvironment=[^;]*\*contactVisibility\*diffuseVisibility\*diffuseEnvironmentScale\/UNIFIED_PI/);
-  assert.match(shade, /let specularEnvironment=dryEnvironment\(reflected,surface\.roughness\)\*fresnel/);
+  assert.match(shade, /let environmentBrdf=unifiedEnvironmentBrdf\([^;]+surface\.roughness,f0\)/);
+  assert.match(shade, /let diffuseEnergy=max\(vec3f\(0\.0\),vec3f\(1\.0\)-environmentBrdf\)/);
+  assert.match(shade, /let specularEnvironment=dryEnvironment\(reflected,surface\.roughness\)\*environmentBrdf/);
   assert.match(shade, /let indirectDiffuse=diffuseColor\*gi\.radiance/);
   // The hover rim is added after this sum and by nothing that feeds it, which
   // is the claim that matters here: an editor cursor must not change how the

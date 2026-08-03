@@ -22,6 +22,24 @@ import { MAX_TERRAIN_GRID_SAMPLES, MIN_TERRAIN_GRID_SIZE, type TerrainGrid } fro
  * moved. `pondVesselPlanCurve` hands out the polyline this bake used, so those
  * generators offset a curve instead of guessing one.
  *
+ * ## The interior is one curve, not a wall and a floor
+ *
+ * A vessel whose face drops its whole depth over a short run and then stops is a
+ * cylinder with a lid on it, and it renders as one: a hard ring of banding where
+ * the face meets a floor that is dead flat for the next third of a metre. What
+ * the reference shows is a shallow, wide basin — a soft continuous fall from the
+ * kerb into a gently dished floor, deepest in the middle and a finger deep at
+ * the sides.
+ *
+ * So the drop is shared. `innerFace_m` carries most of it over its own run and
+ * `floorDish` spreads the rest across the whole floor, as two smoothsteps summed
+ * rather than sequenced, and the sum is tangent where it leaves the plaster and
+ * tangent again where it arrives at the deepest point. That is a shape decision
+ * and also the cheapest performance decision available here: the grid carries
+ * one Lipschitz slope bound for the *whole scene* and the dry render's march
+ * steps by it everywhere, so a face that is 45 % less steep is paid back on the
+ * flat plaster metres away. Measured on the hero pond, 9.41 to 5.32.
+ *
  * Determinism is the same contract the procedural tree keeps: the seed is the
  * only entropy, it enters through an integer avalanche hash, and the same spec
  * bakes the same grid on every rebuild — the sparse publication cache is keyed
@@ -68,11 +86,18 @@ export interface PondVesselBeach {
 export interface PondVesselSpec {
   /** Centre of the pond's plan, in world metres. */
   readonly center_m: readonly [number, number];
-  /** Semi-axes of the crest centreline before the wobble is applied. */
+  /**
+   * Semi-axes of the crest centreline before the wander is applied.
+   *
+   * Three things move the curve off this ellipse and they are deliberately
+   * different in kind: the seeded grain and the long sway, both funded out of
+   * `wobble`, and a beach's inward sweep, which is funded out of the beach.
+   * See `pondVesselPlanCurve`.
+   */
   readonly radius_m: readonly [number, number];
   /** Ground level around the pond, in metres above the container floor. */
   readonly groundHeight_m: number;
-  /** Basin floor below `groundHeight_m`. */
+  /** The basin's *deepest* point below `groundHeight_m`, reached out in the dish. */
   readonly basinDepth_m: number;
   /** Coping crest above `groundHeight_m`. */
   readonly rimHeight_m: number;
@@ -101,8 +126,23 @@ export interface PondVesselSpec {
    * lowers nothing the water can reach.
    */
   readonly crest?: "bullnose" | "flat";
-  /** Run from the coping's inner foot down to the basin floor. */
+  /**
+   * Run from the coping's inner foot down to the *edge* of the floor's dish.
+   *
+   * Not down to the deepest point: `floorDish` takes a share of the depth off
+   * this face and spreads it across the floor, so the face carries
+   * `(1 - floorDish) * basinDepth_m` over this run and the rest arrives as a
+   * bowl. The two together are one continuous fall from the plaster to the
+   * middle of the pond.
+   */
   readonly innerFace_m: number;
+  /**
+   * Share of `basinDepth_m` the floor's dish carries rather than the inner face.
+   *
+   * Defaults to `POND_VESSEL_FLOOR_DISH`. Zero is the old vessel: the whole drop
+   * on the face and a dead flat floor under it.
+   */
+  readonly floorDish?: number;
   /** A shallow sector of that face, if this pond has a shore. */
   readonly beach?: PondVesselBeach;
   /** Control points around the plan. More lobes, more places for it to wander. */
@@ -148,6 +188,104 @@ export interface PondVesselSpec {
  */
 export const PLAN_SAMPLES_PER_LOBE = 16;
 
+/**
+ * How much of the authored wander the long sway carries, against the per-lobe
+ * grain.
+ *
+ * The two are the same amplitude and read completely differently, which is the
+ * only reason this constant exists. Wander spent entirely on the grain is white
+ * noise at the control rate: seven independent scales round the ring is a wiggle
+ * with a wavelength of about two lobes, and at the hero's 8 % it comes back as a
+ * *slightly noisy circle* — the outline never commits to being anywhere. The
+ * reference commits: it bulges over half a side and narrows over the next, which
+ * is energy at two or three cycles per turn and almost none above it.
+ *
+ * So most of the wander is moved down there and the grain is what is left. Not
+ * all of it: a plan built only from two sinusoids is a rounded triangle or a
+ * peanut, and reads as a *shape* rather than as something dug. The grain is what
+ * stops the sway being recognisable as one.
+ */
+const PLAN_SWAY_SHARE = 0.62;
+
+/**
+ * The sway itself: two cycles and three, weighted, with a seeded phase each.
+ *
+ * Two is the lowest useful term — one cycle of radial modulation is, to first
+ * order, the same ellipse with its centre moved, so it buys a translation rather
+ * than a shape. Three is the highest that survives being read at the hero's
+ * seven lobes without turning back into grain. The weights sum to one so the
+ * sway's amplitude is exactly the share of `wobble` it was given.
+ *
+ * Evaluated continuously rather than at the control points, and that is
+ * load-bearing: three cycles sampled at seven lobes is 2.33 samples a cycle,
+ * under the two the Catmull-Rom would need, so a sway laid into the control
+ * values would alias into something the seed did not ask for.
+ */
+const PLAN_SWAY_CYCLES = Object.freeze([
+  Object.freeze({ cycles: 2, weight: 0.58 }),
+  Object.freeze({ cycles: 3, weight: 0.42 }),
+]);
+
+/**
+ * How far a beach draws the plan in, as a fraction of the local radius.
+ *
+ * A shore is not only a shallower inner face. The reference's pond is a vessel
+ * on three sides and on the fourth the kerb *sweeps inward* and leaves a bank
+ * with stones on it — the outline is narrower exactly where the ground is wider.
+ * Deriving that from `beach` rather than authoring it separately is the same
+ * argument `PondVesselBeach` already makes: the graded face, the pinch and the
+ * bank are three consequences of one decision about where the near shore is.
+ *
+ * Six per cent draws the hero pond's shore in by 30 mm, which is half the
+ * coping's own width, and it is chosen against the set rather than by eye. The
+ * near stepping stone is the binding constraint: `stone/disc-1` is authored 300
+ * mm out on a bearing 8 degrees off the beach's centre, and at zero pinch its
+ * rim already clears the coping's inner foot by only 31 mm. The sweep eats that
+ * clearance almost millimetre for millimetre — 6.2 mm left at six per cent, 1.9
+ * at seven, negative at eight. The reference's sweep is nearer twelve per cent
+ * and this pond could carry it the day that stone moves 25 mm inward; until
+ * then a rim that grew through a stepping stone would be the outline and the
+ * composition disagreeing, which is exactly what one shared plan curve exists
+ * to prevent.
+ *
+ * Gentle either way: over the hero beach's 61-degree sector the rail's tangent
+ * never turns more than about five degrees off the ellipse's, so the sweep is
+ * something the eye follows rather than a dent it catches on.
+ */
+const PLAN_BEACH_PINCH = 0.06;
+
+/**
+ * Share of the basin's own half-width the floor's dish spends reaching its
+ * deepest.
+ *
+ * Short of the whole of it on purpose. The dish is defined on the distance in
+ * from the plan curve, so it would otherwise reach its minimum only on the
+ * plan's medial axis — a ridge, not a point — and every sample would land on the
+ * approach to it. Stopping at nine tenths leaves a small true floor in the
+ * middle at exactly `basinDepth_m`, which is what makes that number mean
+ * something a test can assert.
+ */
+const POND_VESSEL_FLOOR_DISH_REACH = 0.9;
+
+/**
+ * The share of the depth a dished floor carries, when the spec does not say.
+ *
+ * The reference is a *shallow, wide basin*: the water is a hand deep in the
+ * middle and a finger deep at the sides, and the surface under it is one
+ * continuous curve from the kerb's inner foot to the centre. The vessel this
+ * replaces put the whole 155 mm on 35 mm of face and left a dead flat floor,
+ * which renders as a cylinder with a lid — and paid for the steepness twice,
+ * because the grid carries one Lipschitz slope bound for the whole scene and the
+ * dry march steps by it everywhere (`lib/voxel-scenery/swept-coping.ts`).
+ *
+ * Moving 45 % of the drop onto the floor buys both at once. Measured on the hero
+ * pond: the bound falls from 9.41 to 5.32 and the face still drops 85 mm over
+ * its 35 mm of run, so the water still meets a wall — 42.5 mm of it, at about 68
+ * degrees, which is all of the face that is ever above the waterline. What
+ * changed is the 112 mm that is under it.
+ */
+export const POND_VESSEL_FLOOR_DISH = 0.45;
+
 /** Integer avalanche hash in [0, 1). The same pond on every rebuild. */
 function hash01(n: number): number {
   let h = Math.imul(n ^ 0x9e3779b9, 0x85ebca6b) >>> 0;
@@ -179,6 +317,32 @@ export function pondVesselCrestProfile(u: number): number {
 }
 
 /**
+ * Weight of a beach's sector at a turn about the plan's centre, in [0, 1].
+ *
+ * One definition, because two quantities are now functions of the same sector —
+ * how far the inner face runs there, and how far the plan is drawn in — and a
+ * second copy of the wrap-around arithmetic would be a shore whose slope and
+ * whose outline part company the day one of them is edited.
+ *
+ * The separation is the shortest signed one on the circle, so a sector that
+ * straddles the atan2 branch cut behaves like any other.
+ */
+function beachWeight(beach: PondVesselBeach | undefined, turn: number): number {
+  if (!beach || !(beach.width > 0)) return 0;
+  const separation = Math.abs((((turn - beach.turn + 0.5) % 1) + 1) % 1 - 0.5);
+  return ramp(1 - separation / beach.width);
+}
+
+/** The sway, in [-1, 1]: the long bulges, at a phase the seed chooses. */
+function planSway(turn: number, seed: number): number {
+  let total = 0;
+  for (const [index, term] of PLAN_SWAY_CYCLES.entries()) {
+    total += term.weight * Math.sin(2 * Math.PI * (term.cycles * turn + hash01(seed + 0x5147_0000 + index)));
+  }
+  return total;
+}
+
+/**
  * The plan, as a closed polyline.
  *
  * Built in *polar* form: a periodic spline interpolates the seeded radial scale
@@ -194,6 +358,34 @@ export function pondVesselCrestProfile(u: number): number {
  * The wobble moves the *curve* rather than the distance field, so the coping
  * keeps its section all the way round a wandering outline. Displacing the field
  * would thin the rim on every turn.
+ *
+ * ## Three wanders, and why they are not one
+ *
+ * The scale is a sum of three terms with different wavelengths, because an
+ * outline that reads as *dug* has structure at every scale and one term can only
+ * have it at one:
+ *
+ *  - the **grain**, a Catmull-Rom through `lobes` seeded values, which is where
+ *    the wander used to live in its entirety;
+ *  - the **sway**, two and three cycles a turn at a seeded phase, which is the
+ *    bulging and narrowing the reference reads as, and which the grain cannot
+ *    produce because white noise at seven control points has almost no energy
+ *    that low (`PLAN_SWAY_SHARE`);
+ *  - a **beach's pinch**, which is not wander at all — it is the outline
+ *    agreeing with the shore that `PondVesselBeach` already declares.
+ *
+ * The first two share `wobble` between them, so the authored amplitude still
+ * bounds the whole wander and a zero wobble is still exactly the ellipse. The
+ * pinch is funded by the beach and is absent from a pond without one.
+ *
+ * The pinch is placed by the point's own **bearing** rather than by the curve
+ * parameter, and the difference is not small: on a 0.52 x 0.38 ellipse the two
+ * part company by up to 8.8 degrees, a quarter of the hero beach's half-width.
+ * `beach.turn` is a bearing — it is compared against `pondVesselTurnAt` when the
+ * inner face is graded — so the pinch has to be one too, or the outline would
+ * sweep in beside the shore instead of along it. The bearing is available before
+ * the scale is: scaling is radial in the ellipse's own frame, so every scale
+ * puts the point on the same ray out of the centre.
  */
 export function pondVesselPlanCurve(
   spec: PondVesselSpec,
@@ -205,21 +397,27 @@ export function pondVesselPlanCurve(
   if (!(rx > 0) || !(rz > 0)) throw new RangeError("Pond vessel radii must be positive");
   if (!(wobble >= 0 && wobble < 1)) throw new RangeError("Pond vessel wobble must be in [0, 1)");
 
-  const scales: number[] = [];
-  for (let index = 0; index < lobes; index += 1) scales.push(1 + wobble * hashSigned(seed + 31 * index));
-  const scaleAt = (index: number) => scales[((index % lobes) + lobes) % lobes];
+  const grain: number[] = [];
+  for (let index = 0; index < lobes; index += 1) grain.push(hashSigned(seed + 31 * index));
+  const grainAt = (index: number) => grain[((index % lobes) + lobes) % lobes];
 
   const points: (readonly [number, number])[] = [];
   for (let index = 0; index < lobes; index += 1) {
-    const a = scaleAt(index - 1), b = scaleAt(index), c = scaleAt(index + 1), d = scaleAt(index + 2);
+    const a = grainAt(index - 1), b = grainAt(index), c = grainAt(index + 1), d = grainAt(index + 2);
     for (let step = 0; step < samplesPerLobe; step += 1) {
       const t = step / samplesPerLobe, t2 = t * t, t3 = t2 * t;
       // Uniform Catmull-Rom on the scalar. Control samples are exactly evenly
       // spaced in angle, so this is the natural parameterization rather than an
       // approximation of one, and a constant sequence interpolates to a constant.
-      const scale = .5 * (2 * b + (c - a) * t + (2 * a - 5 * b + 4 * c - d) * t2 + (3 * b - 3 * c + d - a) * t3);
-      const angle = 2 * Math.PI * (index + t) / lobes;
-      points.push([cx + rx * scale * Math.cos(angle), cz + rz * scale * Math.sin(angle)]);
+      const grained = .5 * (2 * b + (c - a) * t + (2 * a - 5 * b + 4 * c - d) * t2 + (3 * b - 3 * c + d - a) * t3);
+      const turn = (index + t) / lobes;
+      const angle = 2 * Math.PI * turn;
+      const cos = Math.cos(angle), sin = Math.sin(angle);
+      const bearing = Math.atan2(rz * sin, rx * cos) / (2 * Math.PI);
+      const scale = 1
+        + wobble * ((1 - PLAN_SWAY_SHARE) * grained + PLAN_SWAY_SHARE * planSway(turn, seed))
+        - PLAN_BEACH_PINCH * beachWeight(spec.beach, bearing);
+      points.push([cx + rx * scale * cos, cz + rz * scale * sin]);
     }
   }
   return points;
@@ -311,10 +509,20 @@ function terraceWeight(terrace: PondVesselTerrace, x: number, z: number): number
  * The profile is a function of the signed plan distance alone, which is what
  * keeps the coping a constant section all the way round a wandering outline:
  *
- *   base   the ground outside, falling to the basin floor over `innerFace_m`
- *          once past the coping's inner foot
+ *   base   the ground outside, falling into the basin once past the coping's
+ *          inner foot — the face over `innerFace_m`, then the dish across the
+ *          rest of the floor
  *   crest  the bullnose, centred on the plan curve and symmetric across it
  *   lift   terraces, masked out of the pond so a plateau can never swallow the rim
+ *
+ * The fall is *two* smoothsteps summed rather than one followed by a flat floor,
+ * and that is the difference between a cylinder and a basin. Both are tangent at
+ * their own start, so the whole surface leaves the plaster band with a horizontal
+ * normal, turns down through the face, and flattens again into the middle of the
+ * pond with no join anywhere: one continuous curve from the kerb's inner foot to
+ * the floor. Sharing the drop between them is also the only lever on the scene's
+ * Lipschitz bound that does not cost a millimetre of the rim — see
+ * `POND_VESSEL_FLOOR_DISH`.
  */
 export function pondVesselHeightAt(
   spec: PondVesselSpec,
@@ -328,17 +536,17 @@ export function pondVesselHeightAt(
   // function of its own run. Taken about the plan's centre rather than along the
   // curve's arc length: the two differ by the wobble, which is small, and an arc
   // length would have to be integrated per sample for no visible gain.
-  const turn = Math.atan2(z - spec.center_m[1], x - spec.center_m[0]) / (2 * Math.PI);
-  const section = (variation: number, salt: number) => 1 + variation * periodicSpline(
-    sectionModulation(spec, salt), turn,
-  );
-  const rimHeight = spec.rimHeight_m * section(spec.sectionHeightVariation, 0);
-  const rimHalfWidth = spec.rimHalfWidth_m * section(spec.sectionWidthVariation, 977);
+  const turn = pondVesselTurnAt(spec, x, z);
+  const rimHeight = spec.rimHeight_m * (1 + spec.sectionHeightVariation * periodicSpline(sectionModulation(spec, 0), turn));
+  const rimHalfWidth = pondVesselRimHalfWidthAt(spec, turn);
 
   const inward = -distance - rimHalfWidth;
-  const base = distance >= 0
-    ? spec.groundHeight_m
-    : spec.groundHeight_m - spec.basinDepth_m * ramp(inward / pondVesselInnerFaceRun(spec, turn));
+  const dish = spec.floorDish ?? POND_VESSEL_FLOOR_DISH;
+  const fall = distance >= 0 ? 0 : spec.basinDepth_m * (
+    (1 - dish) * ramp(inward / pondVesselInnerFaceRun(spec, turn))
+    + dish * ramp(inward / pondVesselFloorDishReach(spec, curve))
+  );
+  const base = spec.groundHeight_m - fall;
   const crest = spec.crest === "flat" ? 0 : rimHeight * pondVesselCrestProfile(Math.abs(distance) / rimHalfWidth);
   let lift = 0;
   if (spec.terraces?.length) {
@@ -351,6 +559,38 @@ export function pondVesselHeightAt(
 }
 
 /**
+ * Where round the plan a world point lies, as a fraction of a turn about the
+ * plan's centre. The parameter every per-turn quantity here is a function of.
+ */
+export function pondVesselTurnAt(spec: PondVesselSpec, x: number, z: number): number {
+  return Math.atan2(z - spec.center_m[1], x - spec.center_m[0]) / (2 * Math.PI);
+}
+
+/**
+ * Half-width of the coping's band at a given turn, in metres.
+ *
+ * Exported for the same reason `pondVesselInnerFaceRun` is: it is a number two
+ * authorities have to agree on, and a caller that re-derived it would be a
+ * second copy of this modulation that drifts the moment a seed moves.
+ *
+ * With `crest: "flat"` it is no longer a *crest* width. It is the half-width of
+ * the level plaster band the vessel leaves either side of the plan curve —
+ * where the ground stops being flat and the inner face starts falling — and the
+ * swept solid set into that band has a ground footprint of its own
+ * (`sweptCopingSection(...).groundHalfWidth_m`) that has to land on it. The hero
+ * vessel derives `rimHalfWidth_m` from exactly that footprint so the two agree
+ * on the mean; asking whether they agree at a *particular* turn is what this is
+ * for, and `tests/swept-coping.test.ts` is where it is asked.
+ *
+ * The salt is 977 rather than 0 because the height modulation already uses 0 —
+ * a shared salt would make the band widen exactly where the crest rises, which
+ * is one motif repeating rather than two accidents of the same hand.
+ */
+export function pondVesselRimHalfWidthAt(spec: PondVesselSpec, turn: number): number {
+  return spec.rimHalfWidth_m * (1 + spec.sectionWidthVariation * periodicSpline(sectionModulation(spec, 977), turn));
+}
+
+/**
  * The inner face's run at a given turn about the plan's centre.
  *
  * Exported because the stones need it: whether a stepping disc wades or stands
@@ -360,11 +600,44 @@ export function pondVesselHeightAt(
  */
 export function pondVesselInnerFaceRun(spec: PondVesselSpec, turn: number): number {
   const beach = spec.beach;
-  if (!beach || !(beach.width > 0)) return spec.innerFace_m;
-  // Shortest signed separation on the circle, in turns, so a sector that
-  // straddles the atan2 branch cut behaves like any other.
-  const separation = Math.abs((((turn - beach.turn + 0.5) % 1) + 1) % 1 - 0.5);
-  return spec.innerFace_m + (beach.innerFace_m - spec.innerFace_m) * ramp(1 - separation / beach.width);
+  if (!beach) return spec.innerFace_m;
+  return spec.innerFace_m + (beach.innerFace_m - spec.innerFace_m) * beachWeight(beach, turn);
+}
+
+/** The plan's inradius, cached per curve so the bake is not quadratic. */
+const planInradiusCache = new WeakMap<object, number>();
+
+/**
+ * How far in from the coping's inner foot the floor's dish takes to reach its
+ * deepest, in metres.
+ *
+ * Derived from the curve rather than from `radius_m`, and the reason is that
+ * three separate things move the outline inward — the grain, the sway and a
+ * beach's pinch — so a reach taken off the authored semi-axes would be a
+ * different number from the one the pond actually has. What is wanted is the
+ * plan's *inradius about its own centre*: the smallest distance from the centre
+ * to the outline, which is a lower bound on how far in any point can be and is
+ * exact on a circle. `POND_VESSEL_FLOOR_DISH_REACH` then stops the dish a little
+ * short of it, so the middle of the pond is a floor at `basinDepth_m` rather
+ * than a ridge approaching it.
+ *
+ * Exported for the same reason `pondVesselInnerFaceRun` is: how deep the water
+ * is at a bed is a question about this number, and a stone generator that
+ * re-derived it would bed against a floor the vessel does not have.
+ */
+export function pondVesselFloorDishReach(
+  spec: PondVesselSpec,
+  curve: readonly (readonly [number, number])[],
+): number {
+  // Cached on the curve, not on the spec: it is a property of the polyline, and
+  // `bakePondVesselTerrain` asks for it once per sample over ~56k of them.
+  let inradius = planInradiusCache.get(curve);
+  if (inradius === undefined) {
+    inradius = Infinity;
+    for (const [x, z] of curve) inradius = Math.min(inradius, Math.hypot(x - spec.center_m[0], z - spec.center_m[1]));
+    planInradiusCache.set(curve, inradius);
+  }
+  return Math.max(1e-4, POND_VESSEL_FLOOR_DISH_REACH * (inradius - spec.rimHalfWidth_m));
 }
 
 /** Per-lobe section multipliers in [-1, 1], cached per spec so the bake is not quadratic. */
@@ -419,6 +692,8 @@ export function bakePondVesselTerrain(
   if (!(spec.rimHalfWidth_m > 0) || !(spec.innerFace_m > 0)) throw new RangeError("Pond vessel rim width and inner face must be positive");
   if (!(spec.basinDepth_m > 0) || !(spec.rimHeight_m >= 0)) throw new RangeError("Pond vessel basin depth must be positive and rim height non-negative");
   if (spec.basinDepth_m > spec.groundHeight_m) throw new RangeError("Pond vessel basin cannot be cut below the container floor");
+  const dish = spec.floorDish ?? POND_VESSEL_FLOOR_DISH;
+  if (!(dish >= 0 && dish < 1)) throw new RangeError("Pond vessel floor dish must be in [0, 1)");
 
   const nx = Math.max(MIN_TERRAIN_GRID_SIZE, Math.ceil(container.width_m / spacing_m) + 1);
   const nz = Math.max(MIN_TERRAIN_GRID_SIZE, Math.ceil(container.depth_m / spacing_m) + 1);

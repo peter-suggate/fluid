@@ -97,6 +97,42 @@ export const SVO_PROCEDURAL_MATERIAL_POLICIES = Object.freeze([
   { functionId: SVO_MATERIAL_FUNCTION_IDS.ceramic, key: "ceramic", seed: 0xa409_3822, frequency_mInv: [3.5, 3.5, 3.5], colorAmplitude: 0.045, roughnessAmplitude: 0.035, ...SINGLE_SCALE },
   { functionId: SVO_MATERIAL_FUNCTION_IDS.brushedMetal, key: "brushed-metal", seed: 0x299f_31d0, frequency_mInv: [12.0, 2.0, 12.0], colorAmplitude: 0.035, roughnessAmplitude: 0.055, ...SINGLE_SCALE },
   { functionId: SVO_MATERIAL_FUNCTION_IDS.organic, key: "organic", seed: 0x082e_fa98, frequency_mInv: [6.0, 4.0, 6.0], colorAmplitude: 0.07, roughnessAmplitude: 0.06, ...SINGLE_SCALE },
+  /**
+   * Fired plaster, and the only policy in this table that touches no albedo at
+   * all. It is the closure a *porcelain* scene wears — the ground, the coping,
+   * the boulders, the pebbles, the tree, all of it — and the whole of its job is
+   * to keep white surfaces white while still giving them a sheen that travels.
+   *
+   * `colorAmplitude` is zero on purpose, and it is the point of the row rather
+   * than an omission. It was 0.07 with a 6.2 mm speckle riding on it, argued for
+   * as "a cloud you can see and not one you can name" — and on a set that is
+   * white *everywhere*, a cloud you can see is the thing that reads as dirt. The
+   * failure mode on white was never flatness; it is grubbiness, and every gram
+   * of albedo modulation on fired porcelain spends itself on that. So the albedo
+   * is exactly the authored value at every point on every surface, which is what
+   * "white everywhere" has to mean if it means anything: two adjacent stones
+   * differ because they were authored at different values, never because a noise
+   * field passed between them. Zero is also *cheap* — `evaluateSvoProceduralMaterial`
+   * and its WGSL mirror both skip the colour field's noise evaluation outright
+   * when the amplitude is zero, so the closure that now shades an entire scene
+   * costs one value-noise fetch per hit rather than two.
+   *
+   * Roughness is where the form goes, and it is all that is left here. 0.12 on
+   * the porcelain's 0.62 wanders the sheen through roughly 0.58 to 0.66 in
+   * normal use and 0.50 to 0.74 at the extremes — never near enough to a mirror
+   * or to chalk to change what the surface is, but enough that a curved white
+   * wall has a highlight that moves across it instead of one flat tone. A single
+   * scale at 4.5 /m is a 222 mm drift: about the width of the near coping, so it
+   * crosses a form rather than tiling it. The 162.5 /m speckle this row used to
+   * carry is gone with the colour it was there to support — at the hero framing
+   * a pixel is roughly 2.9 mm on the near coping, so a 6.2 mm cell was two
+   * pixels of shimmer, which is grain by any name and grain is what was asked to
+   * leave.
+   *
+   * No flecks, for the same reason as before: a crystal in white plaster does
+   * not read as a crystal, it reads as a speck of dirt.
+   */
+  { functionId: SVO_MATERIAL_FUNCTION_IDS.plaster, key: "plaster", seed: 0xec4e_6c89, frequency_mInv: [4.5, 4.5, 4.5], colorAmplitude: 0, roughnessAmplitude: 0.12, ...SINGLE_SCALE },
 ] as const satisfies readonly SvoProceduralMaterialPolicy[]);
 
 /** Salts for the second and third fields. Distinct, and stable ABI values. */
@@ -173,14 +209,20 @@ export function evaluateSvoProceduralMaterial(
     roughness: Math.min(1, Math.max(0.04, roughness)),
     variationFlags: 0,
   };
-  let tone = sampleSvoProceduralNoise(position_m, policy.frequency_mInv, policy.seed);
+  // Guarded rather than weighted by zero, in both directions: this is up to two
+  // noise evaluations per shaded hit on a path already measured as
+  // primary-visibility bound. Most policies do not want the fine scales, and
+  // `plaster` — the closure a whole porcelain scene wears — does not want the
+  // colour field at all. A half is the field's own mean, so the guarded arm is
+  // exactly what the unguarded one computes when the amplitude is zero.
+  const colorVaries = policy.colorAmplitude > 0;
+  let tone = colorVaries ? sampleSvoProceduralNoise(position_m, policy.frequency_mInv, policy.seed) : 0.5;
   let roughnessNoise = sampleSvoProceduralNoise(position_m, policy.frequency_mInv, policy.seed ^ ROUGHNESS_SALT);
-  // Guarded rather than weighted by zero: this is two noise evaluations per
-  // shaded hit on a path already measured as primary-visibility bound, and six
-  // of the seven policies do not want them.
   if (policy.detailWeight > 0) {
     const fine = policy.frequency_mInv.map((value) => f32(value * policy.detailOctave)) as [number, number, number];
-    tone = interpolate(tone, sampleSvoProceduralNoise(position_m, fine, policy.seed ^ DETAIL_SALT), policy.detailWeight);
+    if (colorVaries) {
+      tone = interpolate(tone, sampleSvoProceduralNoise(position_m, fine, policy.seed ^ DETAIL_SALT), policy.detailWeight);
+    }
     roughnessNoise = interpolate(
       roughnessNoise,
       sampleSvoProceduralNoise(position_m, fine, policy.seed ^ ROUGHNESS_SALT ^ DETAIL_SALT),
@@ -230,10 +272,12 @@ fn svoProceduralMaterial(functionId:u32,baseColorLinear:vec3f,roughness:f32,posi
   var detailOctave=1.0;var detailWeight=0.0;var fleckThreshold=0.75;var fleckAmplitude=0.0;
   ${wgslPolicies}
   else{return SvoProceduralMaterialSample(baseColorLinear,clamp(roughness,0.04,1.0),0u);}
-  var tone=svoProceduralNoise(position_m,frequency,seed);var roughnessNoise=svoProceduralNoise(position_m,frequency,seed^${ROUGHNESS_SALT}u);
+  let colorVaries=colorAmplitude>0.0;
+  var tone=0.5;if(colorVaries){tone=svoProceduralNoise(position_m,frequency,seed);}
+  var roughnessNoise=svoProceduralNoise(position_m,frequency,seed^${ROUGHNESS_SALT}u);
   if(detailWeight>0.0){
     let fine=frequency*detailOctave;
-    tone=mix(tone,svoProceduralNoise(position_m,fine,seed^${DETAIL_SALT}u),detailWeight);
+    if(colorVaries){tone=mix(tone,svoProceduralNoise(position_m,fine,seed^${DETAIL_SALT}u),detailWeight);}
     roughnessNoise=mix(roughnessNoise,svoProceduralNoise(position_m,fine,seed^${ROUGHNESS_SALT}u^${DETAIL_SALT}u),detailWeight);
   }
   var fleck=0.0;

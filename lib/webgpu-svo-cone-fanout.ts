@@ -1,4 +1,5 @@
 import { SVO_LIGHT_MAXIMUM_RECORDS, svoLightWGSL } from "./svo-light-abi";
+import { cameraApertureShaderLibrary } from "./webgpu-camera";
 import { SVO_CONTACT_VISIBILITY_CONTRACT } from "./svo-contact-visibility";
 import { svoFluidCoverageWGSL } from "./svo-fluid-coverage";
 import { svoNodeMipSamplingWGSL } from "./svo-node-mip-sampling";
@@ -202,6 +203,7 @@ struct FanoutFrame {
   activity:vec2u,
 }
 @group(0) @binding(0) var<uniform> uniforms:Uniforms;
+${cameraApertureShaderLibrary()}
 @group(0) @binding(1) var<uniform> dry:DryParams;
 @group(0) @binding(2) var<uniform> dryLighting:DryLightingArena;
 @group(0) @binding(3) var<storage,read> publicationState:array<u32>;
@@ -231,7 +233,7 @@ fn fanoutRay(coordinate:vec2u)->mat2x3f{
   let uv=vec2f((f32(coordinate.x)+.5)/f32(fanout.dimensions.x),1.0-(f32(coordinate.y)+.5)/f32(fanout.dimensions.y));
   let ndc=uv*2.0-1.0;let ro=uniforms.cameraPosition.xyz;let forward=normalize(uniforms.cameraTarget.xyz-ro);
   let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));
-  let rd=normalize(forward+right*ndc.x*uniforms.viewport.x/max(uniforms.viewport.y,1.0)*.72+up*ndc.y*.72);
+  let rd=normalize(forward+right*ndc.x*uniforms.viewport.x/max(uniforms.viewport.y,1.0)*cameraTanHalfFov()+up*ndc.y*cameraTanHalfFov());
   return mat2x3f(ro,rd);
 }
 fn fanoutContactRadius()->f32{

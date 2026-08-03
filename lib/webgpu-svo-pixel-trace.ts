@@ -615,7 +615,7 @@ fn probeRecordRigidProxies(ro:vec3f,rd:vec3f,rigid:DryHit){
   let forward=normalize(uniforms.cameraTarget.xyz-ro);
   let right=normalize(cross(forward,vec3f(0,1,0)));
   let up=normalize(cross(right,forward));
-  let rd=normalize(forward+right*ndc.x*viewport.x/viewport.y*.72+up*ndc.y*.72);
+  let rd=normalize(forward+right*ndc.x*viewport.x/viewport.y*cameraTanHalfFov()+up*ndc.y*cameraTanHalfFov());
 
   ${raster
     ? `// Raster primary: the octree was not walked for this pixel, so nothing here

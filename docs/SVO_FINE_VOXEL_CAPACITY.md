@@ -151,7 +151,18 @@ lib/webgpu-octree-sparse-bricks.ts:972
 reached because `webGpuSvoNodeMipMaximumPages` returned `maxTextureDimension2D`
 — 16 384 — against a plan needing 23 545 pages. The sampled directory was a
 two-texel-wide `rgba32uint` texture with one *row* per page, so the 2D height
-limit was the entire page ceiling. This is not a graceful degradation: a page
+limit was the entire page ceiling.
+
+> **This paragraph is history, not the current ceiling.** `webGpuSvoNodeMipMaximumPages`
+> is now `limit * floor(limit / directoryTexelsPerPage)`
+> (`lib/webgpu-svo-node-mip-pyramid.ts:71-75`), so the directory packs many pages
+> per row and the smallest acceptable device offers on the order of 10^8 pages
+> rather than 16 384. Read as current, the sentence above sends you looking for a
+> texture-dimension wall that is no longer there — and `requiredLimits` cannot
+> put it back, because dawn-node ignores a request for *less* than the adapter
+> advertises. Whatever is limiting a pyramid today, it is not this.
+
+This is not a graceful degradation: a page
 the plan cannot address is a page the marcher samples as empty air, so
 `OctreeSparseBrickWorld` refuses the whole pyramid rather than draw holes, and
 cone lighting falls back to exact traversal for the frame.

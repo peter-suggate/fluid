@@ -2,6 +2,7 @@ import sharedDefaultScene from "./default-scene.json";
 import { validateTerrain, type TerrainDescription } from "./terrain";
 import type { EnvironmentId } from "./environments";
 import { validateSceneryGraph, type SceneryGraph } from "./scenery-graph";
+import type { DisplayGradeAuthoring, WaterOpticsAuthoring } from "./webgpu-lighting";
 
 export type RunState = "paused" | "running";
 
@@ -58,6 +59,18 @@ export interface SceneDescription {
       diffuseScale?: number;
       specularScale?: number;
     };
+    /**
+     * How the finished radiance becomes pixels: an exposure and a named tone
+     * curve.
+     *
+     * Separate from `directional` on purpose. Everything above this line is a
+     * fact about the set — where the sun is, how bright it is — and everything
+     * in here is a fact about the camera that photographs it. Conflating them
+     * is what makes a scene raise its key light to fight a transfer function,
+     * which changes the shadows as a side effect of wanting a brighter wall.
+     * Omitted is `DISPLAY_GRADE_NEUTRAL`; see `lib/webgpu-lighting.ts`.
+     */
+    grade?: DisplayGradeAuthoring;
   };
   randomSeed: number;
   duration_s: number;
@@ -130,6 +143,17 @@ export interface SceneDescription {
      */
     initialBrickSeedsAdditive?: boolean;
     inflow?: FluidInflow;
+    /**
+     * What the liquid looks like, as opposed to how it moves.
+     *
+     * Absorption and scatter are rates per metre, so the same coefficients
+     * describe entirely different-looking water at tank depth and at pond
+     * depth. Omitted, the renderer uses the frozen clean-water table in
+     * `lib/webgpu-lighting.ts` and nothing about an existing document changes;
+     * present, it is threaded to the composite as a uniform rather than
+     * inlined into WGSL, which is what makes it authorable at all.
+     */
+    optics?: WaterOpticsAuthoring;
   };
   nominalResolution: {
     length_m: number;
@@ -158,6 +182,21 @@ export interface CameraState {
   elevation_rad: number;
   distance_m: number;
   target_m: Vec3;
+  /**
+   * The lens, as `tan(verticalFieldOfView / 2)` rather than an angle.
+   *
+   * A tangent and not an angle because that is the form every consumer needs:
+   * the shaders multiply it by an NDC coordinate, the host inverses divide by
+   * it, and a stored radian would be converted at each of ~20 sites with a
+   * chance of one of them drifting. `lib/webgpu-camera.ts` holds the same
+   * reasoning for the shared constant.
+   *
+   * Omitted means `CAMERA_TAN_HALF_FOV` (0.72, a 16.7 mm equivalent), which is
+   * what this renderer has always drawn and what every golden frame in the repo
+   * was captured at. Resolve it with `cameraTanHalfFov` rather than reading the
+   * field, so an out-of-range value clamps instead of taking the frame down.
+   */
+  tanHalfFov?: number;
 }
 
 export interface MetricSample {
@@ -225,6 +264,8 @@ export function validateScene(scene: SceneDescription): string[] {
     if (color.length !== 3 || !color.every((value) => Number.isFinite(value) && value >= 0)) errors.push("Scene directional-light color must contain three non-negative finite channels");
   }
   if (lighting?.directional?.intensity !== undefined && (!Number.isFinite(lighting.directional.intensity) || lighting.directional.intensity < 0)) errors.push("Scene directional-light intensity must be non-negative and finite");
+  if (lighting?.grade?.exposure !== undefined && (!Number.isFinite(lighting.grade.exposure) || lighting.grade.exposure <= 0)) errors.push("Scene grade exposure must be positive and finite");
+  if (lighting?.grade?.toneCurve !== undefined && lighting.grade.toneCurve !== "reinhard" && lighting.grade.toneCurve !== "aces") errors.push("Scene grade tone curve must be reinhard or aces");
   for (const [value, label] of [[lighting?.environment?.diffuseScale, "diffuse"], [lighting?.environment?.specularScale, "specular"]] as const) {
     if (value !== undefined && (!Number.isFinite(value) || value < 0)) errors.push(`Scene environment ${label} scale must be non-negative and finite`);
   }
@@ -251,6 +292,22 @@ export function validateScene(scene: SceneDescription): string[] {
   if (!scene.fluid || scene.fluid.dynamicViscosity_Pa_s < 0) errors.push("Dynamic viscosity cannot be negative");
   if (!scene.fluid || scene.fluid.surfaceTension_N_m < 0) errors.push("Surface tension cannot be negative");
   if (!scene.fluid || !["dam-break", "tank-fill"].includes(scene.fluid.initialCondition)) errors.push("Unsupported fluid initial condition");
+  const optics = scene.fluid?.optics;
+  if (optics) {
+    for (const [value, label] of [[optics.absorption_mInv, "absorption"], [optics.scatter, "scatter"]] as const) {
+      if (value !== undefined && (value.length !== 3 || !value.every((channel) => Number.isFinite(channel) && channel >= 0))) {
+        errors.push(`Water ${label} must contain three non-negative finite channels`);
+      }
+    }
+    // A refractive index under one inverts the interface and there is nothing
+    // to refract at exactly one; the composite would then shade air as water.
+    if (optics.indexOfRefraction !== undefined && !(optics.indexOfRefraction > 1 && optics.indexOfRefraction <= 2)) {
+      errors.push("Water index of refraction must lie in (1, 2]");
+    }
+    for (const [value, label] of [[optics.fresnelF0, "Fresnel F0"], [optics.causticStrength, "caustic strength"]] as const) {
+      if (value !== undefined && (!Number.isFinite(value) || value < 0 || value > 1)) errors.push(`Water ${label} must lie in [0, 1]`);
+    }
+  }
   const damDimensions = scene.fluid?.initialDamBreakDimensions_m;
   const damOrigin = scene.fluid?.initialDamBreakOrigin_m;
   if (damOrigin && !damDimensions) errors.push("Initial dam-break origin requires authored dam-break dimensions");

@@ -31,12 +31,221 @@ export interface UnifiedLightingSample {
   lightColorLinear: LinearRgb;
 }
 
+/**
+ * Clean water, as the default every scene starts from.
+ *
+ * These are the pure-water coefficients: red is absorbed an order of magnitude
+ * harder than green and blue, which is why a swimming pool is blue and a glass
+ * of water is not. They are the right numbers for a tank a metre across and the
+ * wrong ones for a pond: at the hero garden's 0.115 m of still depth
+ * Beer-Lambert leaves transmission (0.950, 0.990, 0.993), so red is 4.6 % down
+ * on green and the water carries essentially no hue. See `WaterOpticsAuthoring`
+ * for why that is a scene decision rather than a bug in this table.
+ */
 export const WATER_OPTICS = Object.freeze({
   indexOfRefraction: 1.333,
   fresnelF0: 0.02037,
   absorption: [0.45, 0.09, 0.06] as LinearRgb,
   scatter: [0.012, 0.055, 0.049] as LinearRgb
 });
+
+/**
+ * What a scene may say about the water it is filled with.
+ *
+ * Every field is optional and falls back to `WATER_OPTICS`, so a document that
+ * says nothing is byte-identical to the frozen table and no existing scene
+ * moves. The reason this exists at all is depth: absorption is a *rate*, and a
+ * rate that reads as clean water over a metre reads as nothing at all over a
+ * hand's breadth. A vessel whose water is meant to carry colour at pond depth
+ * needs coefficients close to an order of magnitude larger — and which pond it
+ * is deciding that is precisely why the table cannot be the only authority.
+ *
+ * Units are per metre, scene-linear RGB, matching `unifiedBeerLambert`.
+ */
+export interface WaterOpticsAuthoring {
+  /** Beer-Lambert extinction per metre, per channel. */
+  readonly absorption_mInv?: LinearRgb;
+  /** Radiance the medium adds back as the beam is extinguished. */
+  readonly scatter?: LinearRgb;
+  readonly indexOfRefraction?: number;
+  readonly fresnelF0?: number;
+  /**
+   * How much of the refracted caustic modulation reaches the receiver, in
+   * [0, 1]. Zero skips the caustic pass entirely for this scene.
+   */
+  readonly causticStrength?: number;
+}
+
+export interface ResolvedWaterOptics {
+  readonly absorption_mInv: [number, number, number];
+  readonly scatter: [number, number, number];
+  readonly indexOfRefraction: number;
+  readonly fresnelF0: number;
+  readonly causticStrength: number;
+}
+
+/** Default caustic strength: the map is consumed at full modulation. */
+export const WATER_CAUSTIC_DEFAULT_STRENGTH = 1;
+
+function opticalChannels(value: LinearRgb | undefined, fallback: LinearRgb): [number, number, number] {
+  if (!value || value.length !== 3) return [...fallback] as [number, number, number];
+  return value.map((channel, index) =>
+    Number.isFinite(channel) && channel >= 0 ? channel : fallback[index]) as [number, number, number];
+}
+
+function opticalScalar(value: number | undefined, fallback: number, minimum: number, maximum: number): number {
+  if (value === undefined || !Number.isFinite(value)) return fallback;
+  return Math.min(maximum, Math.max(minimum, value));
+}
+
+/**
+ * Fold an authored block onto the frozen defaults.
+ *
+ * Out-of-range values fall back per field rather than throwing: this runs on
+ * the render path for a document a user may be editing live, and a negative
+ * absorption typed into an inspector should leave the water looking like water
+ * rather than take the frame down.
+ */
+export function resolveWaterOptics(authored?: WaterOpticsAuthoring): ResolvedWaterOptics {
+  return {
+    absorption_mInv: opticalChannels(authored?.absorption_mInv, WATER_OPTICS.absorption),
+    scatter: opticalChannels(authored?.scatter, WATER_OPTICS.scatter),
+    // Below one there is no interface to refract at, and above two the
+    // composite's exit refraction total-internal-reflects on nearly every ray.
+    indexOfRefraction: opticalScalar(authored?.indexOfRefraction, WATER_OPTICS.indexOfRefraction, 1, 2),
+    fresnelF0: opticalScalar(authored?.fresnelF0, WATER_OPTICS.fresnelF0, 0, 1),
+    causticStrength: opticalScalar(authored?.causticStrength, WATER_CAUSTIC_DEFAULT_STRENGTH, 0, 1),
+  };
+}
+
+/**
+ * The directional key as the water sees it.
+ *
+ * The dry scene resolves its key from `scene.lighting.directional` (see
+ * `buildSvoSceneLights`), while the water composite has always taken its
+ * highlight direction from `environmentLightDirection()` — the environment
+ * preset's own sun. On a scene that authors neither, the two agree by
+ * construction: both fall back to `[-0.45, 0.86, 0.28]`. On a scene that
+ * authors a key they disagree, and the hero garden is exactly such a scene: its
+ * sun is derived from the camera azimuth and sits over the camera's right
+ * shoulder, while the garden environment's is over its left. `authored` is what
+ * lets the water follow the document where there is one and leave every
+ * un-authored scene's highlight where it was.
+ */
+export interface ResolvedWaterKeyLight {
+  readonly direction: [number, number, number];
+  /** Colour times intensity: the radiance the caustic pass and highlight use. */
+  readonly radianceLinear: [number, number, number];
+  readonly authored: boolean;
+}
+
+/** Mirrors `buildSvoSceneLights`' directional defaults exactly. */
+const WATER_KEY_DEFAULT_DIRECTION: LinearRgb = [-0.45, 0.86, 0.28];
+const WATER_KEY_DEFAULT_COLOR: LinearRgb = [1.04, 1, 0.91];
+
+export function resolveWaterKeyLight(directional?: {
+  readonly direction?: LinearRgb;
+  readonly colorLinear?: LinearRgb;
+  readonly intensity?: number;
+}): ResolvedWaterKeyLight {
+  const authored = Boolean(directional?.direction
+    && directional.direction.length === 3
+    && directional.direction.every(Number.isFinite)
+    && Math.hypot(...directional.direction) > 1e-12);
+  const direction = normalize3(
+    authored ? directional!.direction! : WATER_KEY_DEFAULT_DIRECTION, WATER_KEY_DEFAULT_DIRECTION,
+  );
+  const intensity = opticalScalar(directional?.intensity, 1, 0, 64);
+  const color = opticalChannels(directional?.colorLinear, WATER_KEY_DEFAULT_COLOR);
+  return { direction, radianceLinear: color.map((channel) => channel * intensity) as [number, number, number], authored };
+}
+
+/**
+ * Seven vec4 lanes shared by the water composite and the caustic projection.
+ *
+ * Lanes 0-3 are the scene's medium and key; lanes 4-5 describe the caustic
+ * receiver, which the renderer resamples from `scene.terrain`; lane 6 is the
+ * final display grade. They live in one buffer because all are per-scene facts
+ * consumed by the same compositor, and a second uniform binding buys nothing.
+ */
+export const WATER_SCENE_OPTICS_LANES = 7;
+export const WATER_SCENE_OPTICS_FLOATS = 4 * WATER_SCENE_OPTICS_LANES;
+export const WATER_SCENE_OPTICS_BYTES = 4 * WATER_SCENE_OPTICS_FLOATS;
+/** Where the pipeline's own receiver description starts, in floats. */
+export const WATER_SCENE_OPTICS_RECEIVER_FLOAT_OFFSET = 16;
+
+/** Complete document packet. The pipeline preserves and overwrites receiver lanes 4-5. */
+export function packWaterSceneOptics(
+  optics: ResolvedWaterOptics,
+  key: ResolvedWaterKeyLight,
+  grade: ResolvedDisplayGrade = DISPLAY_GRADE_NEUTRAL,
+): Float32Array {
+  return new Float32Array([
+    ...optics.absorption_mInv, optics.indexOfRefraction,
+    ...optics.scatter, optics.fresnelF0,
+    ...key.direction, key.authored ? 1 : 0,
+    ...key.radianceLinear, optics.causticStrength,
+    // Two receiver lanes are filled by RasterWaterPipeline after it resamples
+    // the scene terrain. Keeping their slots in this complete document packet
+    // lets setSceneOptics update every other lane without stale values.
+    0, 0, 0, 0,
+    0, 0, 0, 0,
+    grade.exposure, SCENE_TONE_CURVE_CODES[grade.toneCurve], 0, 0,
+  ]);
+}
+
+/**
+ * WGSL mirror of the lanes above, plus the receiver's bilinear fetch.
+ *
+ * The bindings are emitted by the library rather than by its callers, so the
+ * two shaders that consume this uniform cannot bind it to different slots or
+ * declare two divergent copies of the struct. `waterReceiver` holds receiver
+ * heights in metres on a container-aligned lattice, and `waterReceiverHeight`
+ * is the exact WGSL mirror of `sampleTerrainGrid` in lib/terrain.ts — clamped
+ * bilinear on that lattice — so a caustic lands on the surface the renderer
+ * actually draws rather than on a plane chosen to make the maths easy.
+ */
+export function waterSceneOpticsShaderLibrary(group: number, opticsBinding: number, receiverBinding: number): string {
+  return /* wgsl */ `
+struct WaterSceneOptics {
+  absorptionIor: vec4f,
+  scatterFresnel: vec4f,
+  keyDirectionAuthored: vec4f,
+  keyRadianceCaustic: vec4f,
+  receiverOriginSpacing: vec4f,
+  receiverSize: vec4f,
+  displayGrade: vec4f,
+}
+@group(${group}) @binding(${opticsBinding}) var<uniform> waterScene: WaterSceneOptics;
+@group(${group}) @binding(${receiverBinding}) var waterReceiver: texture_2d<f32>;
+fn waterAbsorption() -> vec3f { return max(waterScene.absorptionIor.xyz, vec3f(0.0)); }
+fn waterIndexOfRefraction() -> f32 { return max(waterScene.absorptionIor.w, 1.0); }
+fn waterScatter() -> vec3f { return max(waterScene.scatterFresnel.xyz, vec3f(0.0)); }
+fn waterFresnelF0() -> f32 { return clamp(waterScene.scatterFresnel.w, 0.0, 1.0); }
+fn waterKeyAuthored() -> bool { return waterScene.keyDirectionAuthored.w > 0.5; }
+fn waterAuthoredKeyDirection() -> vec3f { return normalize(waterScene.keyDirectionAuthored.xyz); }
+fn waterKeyRadiance() -> vec3f { return max(waterScene.keyRadianceCaustic.xyz, vec3f(0.0)); }
+fn waterCausticStrength() -> f32 { return clamp(waterScene.keyRadianceCaustic.w, 0.0, 1.0); }
+fn waterDisplayExposure() -> f32 { return max(waterScene.displayGrade.x, 0.0); }
+fn waterDisplayToneCurve() -> u32 { return u32(round(max(waterScene.displayGrade.y, 0.0))); }
+fn waterReceiverPresent() -> bool { return waterScene.receiverSize.x >= 2.0 && waterScene.receiverSize.y >= 2.0; }
+fn waterReceiverHeight(x: f32, z: f32) -> f32 {
+  if (!waterReceiverPresent()) { return 0.0; }
+  let size = waterScene.receiverSize.xy;
+  let spacing = max(waterScene.receiverOriginSpacing.z, 1e-6);
+  let fx = clamp((x - waterScene.receiverOriginSpacing.x) / spacing, 0.0, size.x - 1.0);
+  let fz = clamp((z - waterScene.receiverOriginSpacing.y) / spacing, 0.0, size.y - 1.0);
+  let i0 = vec2i(i32(floor(fx)), i32(floor(fz)));
+  let i1 = min(i0 + vec2i(1), vec2i(i32(size.x) - 1, i32(size.y) - 1));
+  let t = vec2f(fx - f32(i0.x), fz - f32(i0.y));
+  let h00 = textureLoad(waterReceiver, vec2i(i0.x, i0.y), 0).x;
+  let h10 = textureLoad(waterReceiver, vec2i(i1.x, i0.y), 0).x;
+  let h01 = textureLoad(waterReceiver, vec2i(i0.x, i1.y), 0).x;
+  let h11 = textureLoad(waterReceiver, vec2i(i1.x, i1.y), 0).x;
+  return mix(mix(h00, h10, t.x), mix(h01, h11, t.x), t.y);
+}
+`;
+}
 
 export const GLASS_OPTICS = Object.freeze({
   indexOfRefraction: 1.5,
@@ -58,19 +267,124 @@ export function beerLambert(absorption: LinearRgb, distance: number): [number, n
 }
 
 /**
+ * The tone curves a document may ask for by name.
+ *
+ * `reinhard` is `x / (x + 1)`, what this renderer has always applied. It has no
+ * shoulder in the photographic sense: it approaches white asymptotically and
+ * spends most of its range compressing, so a surface at unit radiance lands at
+ * 0.5 linear — 0.73 after gamma — and reads as a light grey. The only way to
+ * get a white out of it is to over-light, which is what a scene that wants
+ * near-white plaster has had to do.
+ *
+ * `aces` is the Narkowicz 2015 fit of the ACES RRT+ODT, the standard cheap
+ * filmic curve. It is chosen over Hable's because it is one rational with no
+ * free parameters to mis-tune, and over Khronos PBR Neutral because the
+ * saturation-preserving behaviour PBR Neutral exists for is the opposite of
+ * what is wanted here: the reference is a photograph, and its highlights do
+ * desaturate. It puts unit radiance at 0.80 linear (0.91 after gamma) with a
+ * real roll-off above it, so plaster can run near-white on a key of 1.0.
+ *
+ * The trade is contrast, not brightness: ACES also pulls the toe down, so the
+ * shadowed underside of a rock goes darker than Reinhard left it. That is the
+ * point — the flatness of the current frame is the curve's, and no amount of
+ * relighting fixes a transfer function.
+ */
+export type SceneToneCurve = "reinhard" | "aces";
+
+/** WGSL selector values. Ordered so zero is the historical behaviour. */
+export const SCENE_TONE_CURVE_CODES = Object.freeze({ reinhard: 0, aces: 1 } as const);
+
+/**
+ * What a scene may say about how its radiance becomes pixels.
+ *
+ * Exposure is a plain linear scale applied before the curve, in stops-free
+ * units: 2 is one stop up. It exists so a scene can be graded without touching
+ * its lights, which are physical facts about the set and should not be doing
+ * two jobs.
+ */
+export interface DisplayGradeAuthoring {
+  readonly exposure?: number;
+  readonly toneCurve?: SceneToneCurve;
+}
+
+export interface ResolvedDisplayGrade {
+  readonly exposure: number;
+  readonly toneCurve: SceneToneCurve;
+}
+
+/**
+ * The grade a document gets when it authors nothing.
+ *
+ * Unit exposure and Reinhard, which together are the identity against every
+ * frame this renderer has produced. Every default in this block exists to make
+ * "scene says nothing" and "scene did not have the field" the same frame.
+ */
+export const DISPLAY_GRADE_NEUTRAL: ResolvedDisplayGrade = Object.freeze({ exposure: 1, toneCurve: "reinhard" });
+
+/** Exposure below this is a black frame and above it a white one; both clamp. */
+export const DISPLAY_EXPOSURE_RANGE = Object.freeze({ minimum: 0.05, maximum: 20 });
+
+export function resolveDisplayGrade(authored?: DisplayGradeAuthoring): ResolvedDisplayGrade {
+  return {
+    exposure: opticalScalar(authored?.exposure, DISPLAY_GRADE_NEUTRAL.exposure,
+      DISPLAY_EXPOSURE_RANGE.minimum, DISPLAY_EXPOSURE_RANGE.maximum),
+    toneCurve: authored?.toneCurve === "aces" ? "aces" : DISPLAY_GRADE_NEUTRAL.toneCurve,
+  };
+}
+
+function toneCurve(value: number, curve: SceneToneCurve): number {
+  if (curve !== "aces") return value / (value + 1);
+  return Math.min(1, Math.max(0,
+    (value * (2.51 * value + 0.03)) / (value * (2.43 * value + 0.59) + 0.14)));
+}
+
+/**
  * The single final-output transform shared by raster and sparse-voxel frames.
  * Lighting and media code must keep values scene-linear and call this only
  * when writing the presentation target.
+ *
+ * The grade defaults to {@link DISPLAY_GRADE_NEUTRAL}, so the one-argument call
+ * every existing caller makes is byte-identical to what it was.
  */
-export function sceneLinearToDisplay(sceneLinear: LinearRgb): [number, number, number] {
+export function sceneLinearToDisplay(
+  sceneLinear: LinearRgb,
+  grade: ResolvedDisplayGrade = DISPLAY_GRADE_NEUTRAL,
+): [number, number, number] {
   return sceneLinear.map((channel) => {
-    const nonNegative = Math.max(0, Number.isFinite(channel) ? channel : 0);
-    return (nonNegative / (nonNegative + 1)) ** (1 / 2.2);
+    const nonNegative = Math.max(0, Number.isFinite(channel) ? channel : 0) * grade.exposure;
+    return toneCurve(nonNegative, grade.toneCurve) ** (1 / 2.2);
   }) as [number, number, number];
 }
 
-/** Binding-free WGSL mirror of `sceneLinearToDisplay`. */
+/**
+ * Binding-free WGSL mirror of `sceneLinearToDisplay`.
+ *
+ * Two entry points rather than one parameterised entry point: `unifiedDisplayTransfer`
+ * is called by presentation shaders that have no uniform to read a grade from
+ * and must not grow a binding to acquire one, and it stays the exact expression
+ * it has always been so a diff of the composite's output is a diff of the
+ * scene. `unifiedDisplayGrade` is what a shader calls once it can supply the
+ * scene's exposure and curve code.
+ *
+ * The frame that reaches the canvas is finished in exactly one place — the
+ * `finish` helper of `compositeShader` in `lib/webgpu-water-pipeline.ts` — so
+ * that is the single call site an authored grade has to travel through, and
+ * until it does, `SceneDescription["lighting"].grade` is resolved and validated
+ * but not yet applied.
+ */
 export const unifiedDisplayTransferShaderLibrary = /* wgsl */ `
+fn unifiedToneCurve(exposed: vec3f, toneCurve: u32) -> vec3f {
+  if (toneCurve == ${SCENE_TONE_CURVE_CODES.aces}u) {
+    // Narkowicz 2015 ACES fit. One rational per channel, so it costs the same
+    // as the Reinhard it replaces and has no transcendental to schedule.
+    return clamp((exposed * (2.51 * exposed + vec3f(0.03)))
+      / (exposed * (2.43 * exposed + vec3f(0.59)) + vec3f(0.14)), vec3f(0.0), vec3f(1.0));
+  }
+  return exposed / (exposed + vec3f(1.0));
+}
+fn unifiedDisplayGrade(sceneLinear: vec3f, exposure: f32, toneCurve: u32) -> vec3f {
+  return pow(unifiedToneCurve(max(sceneLinear, vec3f(0.0)) * max(exposure, 0.0), toneCurve), vec3f(1.0 / 2.2));
+}
 fn unifiedDisplayTransfer(sceneLinear: vec3f) -> vec3f {
   let nonNegative = max(sceneLinear, vec3f(0.0));
   let toneMapped = nonNegative / (nonNegative + vec3f(1.0));
@@ -106,6 +420,35 @@ export function schlickFresnel(cosine: number, f0: LinearRgb): [number, number, 
   const grazing = (1 - saturate(cosine)) ** 5;
   const base = canonicalColor(f0, 1);
   return base.map((channel) => channel + (1 - channel) * grazing) as [number, number, number];
+}
+
+/**
+ * Integrated GGX environment response without a sampled BRDF lookup table.
+ *
+ * A prefiltered environment already integrates the light lobe, but it still
+ * needs the view/roughness half of the split-sum approximation. Multiplying it
+ * by raw Schlick Fresnel is only correct for an ideal mirror: at a silhouette
+ * Schlick reaches one regardless of roughness, turning a bright sky into a
+ * one-pixel white contour around matte objects. This fit includes GGX masking
+ * and shadowing, so rough surfaces retain a broad sheen without acquiring a
+ * mirror-bright grazing rim.
+ */
+export function integratedEnvironmentBrdf(
+  nDotV: number,
+  roughness: number,
+  f0: LinearRgb,
+): [number, number, number] {
+  const view = saturate(nDotV);
+  const perceptualRoughness = saturate(roughness);
+  const rX = 1 - perceptualRoughness;
+  const rY = 0.0425 - 0.0275 * perceptualRoughness;
+  const rZ = 1.04 - 0.572 * perceptualRoughness;
+  const rW = -0.04 + 0.022 * perceptualRoughness;
+  const a004 = Math.min(rX * rX, 2 ** (-9.28 * view)) * rX + rY;
+  const scale = -1.04 * a004 + rZ;
+  const bias = 1.04 * a004 + rW;
+  return canonicalColor(f0, 1).map((channel) =>
+    Math.min(1, Math.max(0, channel * scale + bias))) as [number, number, number];
 }
 
 /** Trowbridge-Reitz/GGX normal-distribution function. */
@@ -287,6 +630,15 @@ fn unifiedLightingInputWithGeometry(shadingNormal: vec3f, geometricNormal: vec3f
 fn unifiedSchlick(cosine: f32, f0: vec3f) -> vec3f {
   let grazing = pow(1.0 - clamp(cosine, 0.0, 1.0), 5.0);
   return f0 + (vec3f(1.0) - f0) * grazing;
+}
+
+// Analytic split-sum DFG fit for prefiltered environment lighting. Raw Schlick
+// alone reaches unit reflectance at every silhouette, even for rough stone.
+fn unifiedEnvironmentBrdf(nDotVIn:f32,roughnessIn:f32,f0In:vec3f)->vec3f {
+  let nDotV=clamp(nDotVIn,0.0,1.0);let roughness=clamp(roughnessIn,0.0,1.0);let f0=clamp(f0In,vec3f(0.0),vec3f(1.0));
+  let c0=vec4f(-1.0,-.0275,-.572,.022);let c1=vec4f(1.0,.0425,1.04,-.04);let r=roughness*c0+c1;
+  let a004=min(r.x*r.x,exp2(-9.28*nDotV))*r.x+r.y;let response=f0*(-1.04*a004+r.z)+(1.04*a004+r.w);
+  return clamp(response,vec3f(0.0),vec3f(1.0));
 }
 
 fn unifiedDielectricFresnel(cosine: f32, f0: f32) -> f32 {

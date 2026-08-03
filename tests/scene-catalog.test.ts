@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { cameraPosition, pan } from "../lib/math";
-import { canonicalScene, validateScene } from "../lib/model";
+import { canonicalScene, parseScene, serializeScene, validateScene } from "../lib/model";
+import { SCENERY_GENERATORS } from "../lib/scenery-generators";
+import { SVO_PRIMITIVE_CANDIDATE_MAXIMUM_LEAVES } from "../lib/svo-primitive-candidates";
+import { SCENERY_GENERATOR_IDS, validateSceneryGraph, type SceneryGraph } from "../lib/scenery-graph";
 import {
   SCENE_AUDIENCES,
   defineScene,
@@ -20,7 +23,7 @@ import {
   sceneCatalogCards,
   scenePresets,
 } from "../lib/scenes";
-import { buildEnvironmentProxyCatalog } from "../lib/voxel-environments";
+import { buildEnvironmentProxyCatalog, environmentProxyPrimitives } from "../lib/voxel-environments";
 
 const AUDIENCE_IDS = new Set<SceneAudience>(SCENE_AUDIENCES.map(({ id }) => id));
 
@@ -227,4 +230,79 @@ test("a variant is a delta over its own scene, and an unknown one is refused", (
 test("definitions are frozen, so nothing can rewrite the catalog at runtime", () => {
   assert.ok(Object.isFrozen(SCENE_CATALOG));
   for (const entry of SCENE_CATALOG) assert.ok(Object.isFrozen(entry), `${entry.id} must be frozen`);
+});
+
+test("the scenery generator catalog is frozen and total over the ids a document may name", () => {
+  assert.ok(Object.isFrozen(SCENERY_GENERATORS));
+  assert.ok(Object.isFrozen(SCENERY_GENERATOR_IDS));
+  assert.deepEqual(Object.keys(SCENERY_GENERATORS).sort(), [...SCENERY_GENERATOR_IDS].sort(),
+    "the schema's id list and the catalog are one vocabulary, not two");
+  for (const id of SCENERY_GENERATOR_IDS) {
+    const generator = SCENERY_GENERATORS[id];
+    assert.equal(generator.id, id, "an entry must answer to the key it is filed under");
+    assert.equal(typeof generator.grow, "function");
+    assert.equal(typeof generator.needsVessel, "boolean");
+  }
+  // No mutable `register()`, stated as the property rather than as the absence
+  // of a function: import order and hot reload cannot change what a document is
+  // allowed to say.
+  assert.throws(() => {
+    (SCENERY_GENERATORS as Record<string, unknown>)["floret-canopy"] = SCENERY_GENERATORS.bonsai;
+  }, TypeError);
+  const graph: SceneryGraph = {
+    palettes: {},
+    nodes: [
+      { kind: "terrain-shell", id: "shell", materialModel: "porcelain" },
+      // Cast because the whole point is a document that got past the compiler by
+      // not being compiled: a parsed scene is `JSON.parse` output.
+      { kind: "generator", id: "ghost", generator: "floret-canopy", seed: 1, params: {} } as never,
+    ],
+  };
+  assert.deepEqual(validateSceneryGraph(graph), ["Scenery node ghost names unknown generator floret-canopy"]);
+});
+
+test("the hero set is a description of itself, and survives a save unchanged", () => {
+  const entry = getSceneDefinition("hero-garden-hose");
+  const scene = sceneDocument(entry);
+  const scenery = scene.scenery;
+  assert.ok(scenery);
+  assert.deepEqual(
+    scenery.nodes.filter((node) => node.kind === "generator").map((node) => node.generator),
+    ["swept-coping", "pond-stone-set", "bonsai", "rosette", "rosette", "rosette"],
+    "the rim, the stones, the tree and the plants are named rather than baked");
+
+  // The property this phase exists for. Baked, the same set is 684 nodes and
+  // 884 kB of ellipsoid centres — every one of which `cloneScene` copies on
+  // every edit and `localStorage` would have to hold — and re-seeding it is a
+  // factory re-run that discards whatever the user changed. Described, it is
+  // three nodes and a vessel. The ceiling is deliberately loose: it catches a
+  // regression to baking, not an extra prop.
+  assert.ok(JSON.stringify(scenery).length < 20_000,
+    `the hero scenery graph must stay a description, not a bake (${JSON.stringify(scenery).length} bytes)`);
+
+  const before = environmentProxyPrimitives(buildEnvironmentProxyCatalog(scene, entry.environment));
+  // A real set, and one that fits. It used to publish 2 227 of the 4 096
+  // records the scene-wide candidate index holds — 90 % of it in the bonsai and
+  // the coping — which is not a slope but a cliff: past the ceiling the BVH is
+  // never built and the whole set stops drawing. With the crown and the boulder
+  // caps moved onto aggregates it is comfortably under, and the two bounds here
+  // are what keep it that way in both directions: below, a generator that
+  // quietly stopped growing; above, a re-tune that spent the headroom back.
+  //
+  // The floor came down from 900 when the bonsai's trunk stopped being a chain
+  // of cones and became a dozen swept records, and its crown four aggregates
+  // instead of thirty-six: that specimen alone went from 219 records to 62 and
+  // it is the *same object*, drawn better. A floor is a guard against a
+  // generator that stopped growing, so it has to move when a generator starts
+  // spelling the same shape in fewer records.
+  assert.ok(before.length > 600, `the generators publish a stub: ${before.length} primitives`);
+  assert.ok(before.length < 0.6 * SVO_PRIMITIVE_CANDIDATE_MAXIMUM_LEAVES,
+    `the hero set publishes ${before.length} of ${SVO_PRIMITIVE_CANDIDATE_MAXIMUM_LEAVES} records`);
+  // Through the real save path, because that is what a generator node has to
+  // survive: a document is stored as raw JSON and read back with `parseScene`.
+  const reloaded = parseScene(serializeScene(scene));
+  const after = environmentProxyPrimitives(buildEnvironmentProxyCatalog(reloaded, entry.environment));
+  assert.deepEqual(after.map(({ key }) => key), before.map(({ key }) => key),
+    "owner order is the GPU material table's own addressing; it cannot move across a save");
+  assert.deepEqual(after.map(({ center_m }) => center_m), before.map(({ center_m }) => center_m));
 });

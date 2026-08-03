@@ -12,13 +12,37 @@ import {
 
 export interface AdaptiveSparseBrickPlanOptions {
   brickSize: SparseBrickSize;
-  /** Coordinates of simulation bricks. These always remain at maximumDepth. */
+  /** Coordinates of simulation bricks, expressed at {@link solverLevel}. */
   solverBricks: readonly SparseBrickCoordinate[];
-  /** Finest-level bricks touched by raster/analytic scene proxy geometry. */
+  /** Bricks touched by raster/analytic scene proxy geometry, expressed at maximumDepth. */
   proxyBricks: readonly SparseBrickCoordinate[];
+  /** Depth of the tree. Environment leaves may reach it; solver leaves do not. */
   maximumDepth: number;
   /** A power of two: 0 disables environment coarsening, 3 permits 8x coarser bricks. */
   maximumEnvironmentCoarseningPower: number;
+  /**
+   * The level the solver's own bricks occupy. Defaults to `maximumDepth`.
+   *
+   * Separating the two is what lets environment geometry be resolved *finer*
+   * than the simulation without moving the simulation's lattice. Until this
+   * existed the tree could only coarsen: environment leaves started at
+   * `maximumDepth - coarseningPower` and descended solely where a solver brick
+   * was in the way, so there was no way to spend resolution on detail — the
+   * only knob was `finestCellSize_m`, and it applied to the whole domain.
+   */
+  solverLevel?: number;
+  /**
+   * Whether an environment leaf at this level should be split further.
+   *
+   * Consulted only below {@link solverLevel}, and only where no solver brick
+   * already provides coverage. The intended criterion is candidate density: the
+   * voxeliser bins primitives per *leaf* against a fixed budget and drops the
+   * surplus silently, so a leaf holding more than the budget is one that stops
+   * casting shadows and stops occluding indirect light without saying so.
+   * Splitting it is the direct fix, and it is local — the leaves around it keep
+   * their size.
+   */
+  refineEnvironmentLeaf?: (level: number, coordinate: SparseBrickCoordinate) => boolean;
 }
 
 export interface AdaptiveSparseBrickReductionReport {
@@ -48,11 +72,36 @@ function assertDepth(value: number): number {
   return value;
 }
 
-function assertCoarseningPower(value: number, maximumDepth: number): number {
-  if (!Number.isInteger(value) || value < 0 || value > maximumDepth) {
-    throw new RangeError("Maximum environment coarsening power must be an integer from 0 to maximumDepth");
+function assertCoarseningPower(value: number, solverLevel: number): number {
+  if (!Number.isInteger(value) || value < 0 || value > solverLevel) {
+    throw new RangeError("Maximum environment coarsening power must be an integer from 0 to the solver level");
   }
   return value;
+}
+
+function assertSolverLevel(value: number, maximumDepth: number): number {
+  if (!Number.isInteger(value) || value < 0 || value > maximumDepth) {
+    throw new RangeError("Solver level must be an integer from 0 to maximumDepth");
+  }
+  return value;
+}
+
+/**
+ * The local coordinate a Morton key denotes at a level.
+ *
+ * At a fixed level the prefix *is* the Morton encoding of the coordinate, so
+ * this is a de-interleave rather than a lookup.
+ */
+function coordinateForKey(key: bigint, level: number): SparseBrickCoordinate {
+  let x = 0;
+  let y = 0;
+  let z = 0;
+  for (let bit = 0; bit < level; bit += 1) {
+    x += Number((key >> BigInt(3 * bit)) & 1n) * 2 ** bit;
+    y += Number((key >> BigInt(3 * bit + 1)) & 1n) * 2 ** bit;
+    z += Number((key >> BigInt(3 * bit + 2)) & 1n) * 2 ** bit;
+  }
+  return { x, y, z };
 }
 
 function canonicalCoordinate(
@@ -69,11 +118,13 @@ function canonicalCoordinate(
   return { x: coordinate.x, y: coordinate.y, z: coordinate.z };
 }
 
-function canonicalize(options: AdaptiveSparseBrickPlanOptions): CanonicalInputs {
+function canonicalize(options: AdaptiveSparseBrickPlanOptions, solverLevel: number): CanonicalInputs {
   const solver = new Map<bigint, SparseBrickCoordinate>();
   const proxy = new Map<bigint, SparseBrickCoordinate>();
   for (const input of options.solverBricks) {
-    const coordinate = canonicalCoordinate(input, options.maximumDepth, "Solver brick");
+    // Solver bricks are addressed in their own level's domain, which is coarser
+    // than the tree's whenever the environment is being resolved more finely.
+    const coordinate = canonicalCoordinate(input, solverLevel, "Solver brick");
     solver.set(mortonEncode3D(coordinate.x, coordinate.y, coordinate.z), coordinate);
   }
   for (const input of options.proxyBricks) {
@@ -113,26 +164,48 @@ function popcount8(value: number): number {
 export function planAdaptiveSparseBrickOctree(options: AdaptiveSparseBrickPlanOptions): SparseBrickPlan {
   if (options.brickSize !== 4 && options.brickSize !== 8) throw new RangeError("Sparse brick size must be 4 or 8");
   const maximumDepth = assertDepth(options.maximumDepth);
-  const coarseningPower = assertCoarseningPower(options.maximumEnvironmentCoarseningPower, maximumDepth);
-  const inputs = canonicalize(options);
-  const solverPrefixes = prefixSets(inputs.solver.keys(), maximumDepth);
+  const solverLevel = assertSolverLevel(options.solverLevel ?? maximumDepth, maximumDepth);
+  const coarseningPower = assertCoarseningPower(options.maximumEnvironmentCoarseningPower, solverLevel);
+  const inputs = canonicalize(options, solverLevel);
+  const solverPrefixes = prefixSets(inputs.solver.keys(), solverLevel);
   const proxyPrefixes = prefixSets(inputs.proxy.keys(), maximumDepth);
-  const minimumEnvironmentLevel = maximumDepth - coarseningPower;
+  const minimumEnvironmentLevel = solverLevel - coarseningPower;
+  const refine = options.refineEnvironmentLeaf;
+
+  /**
+   * Whether a solver brick already owns this node — as an ancestor of one above
+   * `solverLevel`, or as the brick containing it below.
+   *
+   * Below the solver level there are no solver *nodes*, so containment is the
+   * only question that makes sense: the solver's leaf is the ancestor, and it
+   * provides the coverage its whole subtree would have.
+   */
+  const solverCovers = (level: number, key: bigint): boolean => (level <= solverLevel
+    ? solverPrefixes[level].has(key)
+    : solverPrefixes[solverLevel].has(key >> BigInt(3 * (level - solverLevel))));
 
   // `${level}:${morton}` is unambiguous because each level has its own Morton domain.
   const leafKeys = new Set<string>();
-  for (const key of inputs.solver.keys()) leafKeys.add(`${maximumDepth}:${key}`);
+  for (const key of inputs.solver.keys()) leafKeys.add(`${solverLevel}:${key}`);
 
   const addProxyLeaves = (level: number, key: bigint): void => {
-    if (!solverPrefixes[level].has(key)) {
-      leafKeys.add(`${level}:${key}`);
+    const descend = (): void => {
+      for (let octant = 0; octant < 8; octant += 1) {
+        const child = mortonChild(key, octant);
+        if (proxyPrefixes[level + 1].has(child)) addProxyLeaves(level + 1, child);
+      }
+    };
+    if (solverCovers(level, key)) {
+      // The coincident solver leaf provides coverage; nothing below it is ours.
+      if (level >= solverLevel) return;
+      descend();
       return;
     }
-    if (level === maximumDepth) return; // The coincident solver leaf provides coverage.
-    for (let octant = 0; octant < 8; octant += 1) {
-      const child = mortonChild(key, octant);
-      if (proxyPrefixes[level + 1].has(child)) addProxyLeaves(level + 1, child);
+    if (level < maximumDepth && refine?.(level, coordinateForKey(key, level))) {
+      descend();
+      return;
     }
+    leafKeys.add(`${level}:${key}`);
   };
   for (const key of [...proxyPrefixes[minimumEnvironmentLevel]].sort(compareMorton)) {
     addProxyLeaves(minimumEnvironmentLevel, key);
@@ -144,18 +217,7 @@ export function planAdaptiveSparseBrickOctree(options: AdaptiveSparseBrickPlanOp
     const leafLevel = Number(leafKey.slice(0, separator));
     let key = BigInt(leafKey.slice(separator + 1));
     for (let level = leafLevel; level >= 0; level -= 1) {
-      if (!nodesByLevel[level].has(key)) {
-        // At a fixed level the prefix is also the Morton encoding of the local coordinate.
-        let x = 0;
-        let y = 0;
-        let z = 0;
-        for (let bit = 0; bit < level; bit += 1) {
-          x += Number((key >> BigInt(3 * bit)) & 1n) * 2 ** bit;
-          y += Number((key >> BigInt(3 * bit + 1)) & 1n) * 2 ** bit;
-          z += Number((key >> BigInt(3 * bit + 2)) & 1n) * 2 ** bit;
-        }
-        nodesByLevel[level].set(key, { x, y, z });
-      }
+      if (!nodesByLevel[level].has(key)) nodesByLevel[level].set(key, coordinateForKey(key, level));
       key >>= 3n;
     }
   }

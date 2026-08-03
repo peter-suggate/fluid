@@ -1,7 +1,9 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import { simulation } from "@/lib/simulation/controller";
+import { currentScenePageUrl } from "@/lib/url-state";
 import {
   allSceneCards,
   matchSceneCards,
@@ -24,12 +26,9 @@ import { ThemeSwitch } from "./ThemeSwitch";
 /**
  * The front door.
  *
- * A layer over a live viewport rather than a route, so the WebGPU device and
- * every compiled pipeline survive being here — see `lib/stores/shell-store.ts`.
- * The consequence worth naming: a cold load spends its first second or two in
- * the platform lane whatever we show, so showing this instead of a progress bar
- * on an empty canvas turns the wait into browsing, and by the time a scene is
- * chosen the device is usually already up.
+ * The scene library owns the front page. A viewed scene is mounted on /scene,
+ * giving the WebGPU viewport a route lifecycle independent of browsing and of
+ * Fast Refreshes that only touch this page.
  */
 
 function savedLabel(savedAt_ms: number): string {
@@ -68,7 +67,7 @@ function SceneCardChips({ card }: { card: SceneCard }) {
   </>;
 }
 
-function SceneCardButton({ card, active }: { card: SceneCard; active: boolean }) {
+function SceneCardButton({ card, active, open }: { card: SceneCard; active: boolean; open: (card: SceneCard) => void }) {
   return (
     <button
       type="button"
@@ -77,7 +76,7 @@ function SceneCardButton({ card, active }: { card: SceneCard; active: boolean })
       data-active={active || undefined}
       data-testid={`scene-card-${card.id}`}
       aria-current={active || undefined}
-      onClick={() => simulation.openSceneCard(card)}
+      onClick={() => open(card)}
     >
       <span className="card-art"><SceneCardArt card={card} /></span>
       <span className="card-body">
@@ -102,7 +101,7 @@ function SceneCardButton({ card, active }: { card: SceneCard; active: boolean })
  * the root keeps the ordering and the proportions exact — a cube stays a cube —
  * while leaving the smallest one legible. Its metres are on the card's title.
  */
-function StarterRow() {
+function StarterRow({ open }: { open: (card: SceneCard) => void }) {
   const starters = useMemo(() => starterSceneCards().flatMap((card) => {
     const glyph = sceneCardGlyph(card), scene = sceneCardPreview(card);
     return glyph && scene ? [{ card, glyph, scene }] : [];
@@ -117,7 +116,7 @@ function StarterRow() {
           key={card.id}
           title={card.blurb}
           data-testid={`starter-${card.id}`}
-          onClick={() => simulation.openSceneCard(card)}
+          onClick={() => open(card)}
         >
           <span className="starter-art">
             <SceneIsoGlyph scene={scene} glyph={glyph} scale={Math.sqrt(glyph.size_m / largest_m)} />
@@ -129,7 +128,7 @@ function StarterRow() {
   );
 }
 
-function SceneSectionBlock({ section, activeId }: { section: SceneSection; activeId: string }) {
+function SceneSectionBlock({ section, activeId, open }: { section: SceneSection; activeId: string; open: (card: SceneCard) => void }) {
   const expandedSections = useShellStore((state) => state.expandedSections);
   const toggleSection = useShellStore((state) => state.toggleSection);
   const expanded = section.disclosed ? expandedSections.includes(section.id) : true;
@@ -160,7 +159,7 @@ function SceneSectionBlock({ section, activeId }: { section: SceneSection; activ
               drawn when the section actually divides into several. */}
           {section.shelves.length > 1 && <h3>{shelf.shelf}</h3>}
           <div className="scene-grid">
-            {shelf.cards.map((card) => <SceneCardButton key={card.id} card={card} active={card.id === activeId} />)}
+            {shelf.cards.map((card) => <SceneCardButton key={card.id} card={card} active={card.id === activeId} open={open} />)}
           </div>
         </div>
       ))}
@@ -169,20 +168,27 @@ function SceneSectionBlock({ section, activeId }: { section: SceneSection; activ
 }
 
 export function SceneLibrary() {
-  const view = useShellStore((state) => state.view);
-  const studioEntered = useShellStore((state) => state.studioEntered);
+  const router = useRouter();
   const search = useShellStore((state) => state.librarySearch);
   const setSearch = useShellStore((state) => state.setLibrarySearch);
-  const enterStudio = useShellStore((state) => state.enterStudio);
   const presetId = useSceneStore((state) => state.presetId);
   const [entries, setEntries] = useState<SceneLibraryEntry[]>([]);
   const searchRef = useRef<HTMLInputElement | null>(null);
 
-  // Storage is only readable in the browser, and a scene saved in the studio
-  // must appear on the way back, so the list is re-read each time this opens.
+  // Storage is only readable in the browser. Mounting this page again after a
+  // studio visit naturally re-reads anything saved there.
   useEffect(() => {
-    if (view === "library") setEntries(readSceneLibrary(browserSceneLibraryStorage()));
-  }, [view]);
+    let active = true;
+    queueMicrotask(() => {
+      if (active) setEntries(readSceneLibrary(browserSceneLibraryStorage()));
+    });
+    return () => { active = false; };
+  }, []);
+
+  const open = (card: SceneCard) => {
+    if (!simulation.openSceneCard(card)) return;
+    router.push(currentScenePageUrl());
+  };
 
   const sections = useMemo(() => sceneSections(entries), [entries]);
   const results = useMemo(
@@ -192,29 +198,23 @@ export function SceneLibrary() {
   const resume = useMemo(() => sceneResume(entries), [entries]);
 
   useEffect(() => {
-    if (view !== "library") return;
     const onKeyDown = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
       const editing = target !== null && ["INPUT", "TEXTAREA", "SELECT"].includes(target.tagName);
       if (event.key === "Escape") {
-        // Nothing to go back to on a cold load: a viewport showing a scene
-        // nobody chose is not a place to be returned to.
         if (editing && search) { setSearch(""); return; }
-        if (studioEntered) { event.preventDefault(); enterStudio(); }
         return;
       }
       if (event.key === "/" && !editing) { event.preventDefault(); searchRef.current?.focus(); }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [view, studioEntered, enterStudio, search, setSearch]);
-
-  if (view !== "library") return null;
+  }, [search, setSearch]);
 
   const resumeScene = resume ? sceneCardPreview(resume.card) : undefined;
 
   return (
-    <div className="scene-library-layer" role="dialog" aria-label="Scene library" data-testid="scene-library-layer">
+    <main className="scene-library-layer" aria-label="Scene library" data-testid="scene-library-layer">
       <header className="library-bar">
         <span className="library-brand">
           <span className="brand-mark" aria-hidden="true">FL</span>
@@ -234,11 +234,6 @@ export function SceneLibrary() {
           <kbd aria-hidden="true">/</kbd>
         </label>
         <ThemeSwitch />
-        {studioEntered && (
-          <button type="button" className="pill" onClick={enterStudio} data-testid="close-scene-library">
-            Back to scene
-          </button>
-        )}
       </header>
 
       <div className="library-body panel-scroll">
@@ -256,7 +251,7 @@ export function SceneLibrary() {
               </header>
               <div className="scene-shelf">
                 <div className="scene-grid">
-                  {results.map((card) => <SceneCardButton key={card.id} card={card} active={card.id === presetId} />)}
+                  {results.map((card) => <SceneCardButton key={card.id} card={card} active={card.id === presetId} open={open} />)}
                 </div>
               </div>
               {results.length === 0 && <p className="library-empty">Nothing here matches “{search}”.</p>}
@@ -267,7 +262,7 @@ export function SceneLibrary() {
                 <button
                   type="button"
                   className="card hero-continue"
-                  onClick={() => simulation.openSceneCard(resume.card)}
+                  onClick={() => open(resume.card)}
                   data-testid="resume-scene"
                   data-autosaved={resume.autosaved || undefined}
                 >
@@ -291,15 +286,15 @@ export function SceneLibrary() {
                   <h2 id="hero-new-heading">New scene</h2>
                   <small>An empty, lit room. Drop in bodies and props straight away; add water when you want it.</small>
                 </div>
-                <StarterRow />
+                <StarterRow open={open} />
               </section>
             </div>
             {sections.map((section) => (
-              <SceneSectionBlock key={section.id} section={section} activeId={presetId} />
+              <SceneSectionBlock key={section.id} section={section} activeId={presetId} open={open} />
             ))}
           </>}
         </div>
       </div>
-    </div>
+    </main>
   );
 }

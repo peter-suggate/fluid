@@ -46,6 +46,14 @@ test("outward water triangles preserve camera-entry interfaces after framebuffer
   assert.deepEqual(WATER_INTERFACE_CULL_MODES, { front: "back", back: "front" });
 });
 
+test("every water projection consumes the authored camera aperture", () => {
+  assert.match(surfaceRasterShader, /let aperture=cameraTanHalfFov\(\)/);
+  assert.match(compositeShader, /fn project\([^}]+let aperture=cameraTanHalfFov\(\)/);
+  assert.match(compositeShader, /fn cameraRay\([^}]+let aperture=cameraTanHalfFov\(\)/);
+  assert.doesNotMatch(surfaceRasterShader, /depth\*aspect\*0?\.72|depth\*0?\.72/);
+  assert.doesNotMatch(compositeShader, /ndc\.[xy][^;]*\*0?\.72|depth[^;]*\*0?\.72/);
+});
+
 test("front interface rasterization conservatively covers shared liquid-wall silhouettes", () => {
   assert.match(surfaceRasterShader, /override interfaceCoverageExpansionPixels:f32=0\.0/);
   assert.match(surfaceRasterShader, /first=index-index%3u/,

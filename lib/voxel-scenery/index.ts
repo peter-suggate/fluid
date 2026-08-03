@@ -11,6 +11,9 @@ export * from "./builder";
  * lib/scenery-expand.ts for the expansion that replaced the modules.
  *
  * What stayed behind is what a description cannot be: the builder that assigns
- * owner indices and derives bounds, and the procedural tree, whose seed
- * genuinely generates its ~30 primitives rather than naming them.
+ * owner indices and derives bounds, and the generators, whose seed genuinely
+ * produces their geometry rather than naming it. Those are reached from a
+ * document through the `generator` node kind and the frozen catalog in
+ * lib/scenery-generators.ts, so a described set is `{ generator, seed, params }`
+ * and not the several hundred primitives it grows.
  */
