@@ -11,6 +11,7 @@ import {
   decodeOctreePersistentMGPCGBandCensus,
   octreePersistentMGPCGRegularBandRowsMode,
   octreePersistentMGPCGStagedSmootherEnabled,
+  octreePersistentMGPCGStencilColumnsEnabled,
 } from "../lib/webgpu-octree-persistent-mgpcg";
 import {
   OCTREE_PERSISTENT_MGPCG_BAND_CENSUS_MARKER,
@@ -19,6 +20,7 @@ import {
   OCTREE_PERSISTENT_MGPCG_PARTIAL_WORDS,
   OCTREE_PERSISTENT_MGPCG_REDUCTION_LANES,
   OCTREE_PERSISTENT_MGPCG_STAGED_SMOOTHER_WORKGROUP_BYTES,
+  OCTREE_PERSISTENT_MGPCG_STENCIL_COLUMNS,
   OCTREE_PERSISTENT_MGPCG_WORKGROUP_BYTES,
   octreePersistentMGPCGArenaWords,
   octreePersistentMGPCGWGSL,
@@ -437,6 +439,63 @@ test("the band census decodes only words this dispatch authored", () => {
   "an empty band reports no share rather than a NaN");
 });
 
+test("the stencil column cache is on by default and rolls back on exactly zero", () => {
+  assert.equal(octreePersistentMGPCGStencilColumnsEnabled({}), true);
+  assert.equal(octreePersistentMGPCGStencilColumnsEnabled(
+    { FLUID_OCTREE_MGPCG_STENCIL_COLUMNS: undefined }), true);
+  assert.equal(octreePersistentMGPCGStencilColumnsEnabled(
+    { FLUID_OCTREE_MGPCG_STENCIL_COLUMNS: "1" }), true);
+  assert.equal(octreePersistentMGPCGStencilColumnsEnabled(
+    { FLUID_OCTREE_MGPCG_STENCIL_COLUMNS: "0" }), false,
+  "exactly \"0\" is the documented rollback to the per-sweep page chase");
+  assert.equal(octreePersistentMGPCGStencilColumnsEnabled(
+    { FLUID_OCTREE_MGPCG_STENCIL_COLUMNS: "" }), true);
+});
+
+test("persistent MGPCG publishes solve-invariant stencil columns above the staged inputs", () => {
+  const capacity = 148_480;
+  const partials = Math.ceil(capacity / OCTREE_PERSISTENT_MGPCG_REDUCTION_LANES);
+  const baseline = OCTREE_PERSISTENT_MGPCG_HEADER.totalWords
+    + OCTREE_PERSISTENT_MGPCG_CHANNEL_COUNT * capacity
+    + OCTREE_PERSISTENT_MGPCG_PARTIAL_WORDS * partials
+    + 2 * capacity;
+  assert.equal(octreePersistentMGPCGArenaWords(capacity, false), baseline,
+    "the declined cache must not move a single arena word");
+  assert.equal(octreePersistentMGPCGArenaWords(capacity, true),
+    baseline + OCTREE_PERSISTENT_MGPCG_STENCIL_COLUMNS * capacity);
+
+  const cached = octreePersistentMGPCGWGSL({
+    maximumIterations: 10, compactLiveRows: true, stencilColumnCache: true,
+  });
+  // The region starts exactly where the two capacity-strided staged input
+  // channels end, so `channelByteOffset` and the external staging ABI are
+  // unmoved and the arena still ends on the last column.
+  assert.match(cached, /fn stencilBase\(\)->u32\{return p\.sizes\.w\+2u\*capacity\(\);\}/);
+  assert.match(cached,
+    /fn stencilColumnAt\(row:u32,k:u32\)->u32\{return stencilBase\(\)\+k\*capacity\(\)\+row;\}/);
+  assert.equal(cached.includes(`const STENCIL_COLUMNS=${OCTREE_PERSISTENT_MGPCG_STENCIL_COLUMNS}u;`), true);
+  // Addressing only: the apply keeps its eighteen terms and its fold, and
+  // loses only the per-sweep page/brick/rank chase.
+  assert.match(cached,
+    /let owner=stencilColumn\(row,channel\);if\(owner==0u\)\{continue;\}\s*directTerms\[channel\]=c\*\(x-vload\(inCh,owner-1u\)\);/);
+  assert.equal(cached.includes("let slot=opPageSlot(l,page,q,vec3u(targetQ),row);\n  if(slot==INVALID){reportAt(ERR_ROW,28u,row);continue;}\n  let flags=state[at(S_FLAGS,l,slot)];\n  if((flags&MG_ONLY)!=0u){continue;}\n  let encoded=state[at(S_OWNER,l,slot)];\n  if(encoded==0u||encoded>capacity()){reportAt(ERR_ROW,29u,row);continue;}\n  directTerms[channel]"), false,
+    "the chased arm must not survive inside the cached apply");
+  // The zero sweep covers every live row; only classes 0..3 resolve, so a
+  // class-4 identity row reads an all-zero cache exactly as HEAD reads
+  // eighteen zero coefficients.
+  assert.match(cached,
+    /for\(var k=0u;k<STENCIL_COLUMNS;k\+=1u\)\{arena\[stencilColumnAt\(row,k\)\]=0u;\}/);
+  assert.match(cached, /for\(var cls=0u;cls<4u;cls\+=1u\)\{let n=worksetCount\(cls\);/);
+
+  const declined = octreePersistentMGPCGWGSL({
+    maximumIterations: 10, compactLiveRows: true, stencilColumnCache: false,
+  });
+  assert.equal(declined,
+    octreePersistentMGPCGWGSL({ maximumIterations: 10, compactLiveRows: true }),
+    "declining the cache must emit a byte-identical module, comments included");
+  assert.equal(declined.includes("stencilColumn"), false);
+});
+
 test("every band-row and staged-smoother combination is accepted by naga", () => {
   const probe = spawnSync(process.env.NAGA ?? "naga", ["--version"], { encoding: "utf8" });
   if (probe.error) {
@@ -449,15 +508,19 @@ test("every band-row and staged-smoother combination is accepted by naga", () =>
   const directory = mkdtempSync(join(tmpdir(), "fluid-persistent-mgpcg-wgsl-"));
   try {
     for (const stagedSmoother of [false, true]) {
-      for (const regularBandRows of [undefined, "census", "route"] as const) {
-        const name = `mgpcg-${regularBandRows ?? "off"}-${stagedSmoother ? "staged" : "direct"}`;
-        const path = join(directory, `${name}.wgsl`);
-        writeFileSync(path, octreePersistentMGPCGWGSL({
-          maximumIterations: 10, stagedSmoother,
-          ...(regularBandRows === undefined ? {} : { regularBandRows }),
-        }));
-        const result = spawnSync(process.env.NAGA ?? "naga", [path], { encoding: "utf8" });
-        assert.equal(result.status, 0, `${name}:\n${result.stderr || result.stdout}`);
+      for (const stencilColumnCache of [false, true]) {
+        for (const regularBandRows of [undefined, "census", "route"] as const) {
+          const name = `mgpcg-${regularBandRows ?? "off"}-${
+            stagedSmoother ? "staged" : "direct"}-${
+            stencilColumnCache ? "columns" : "chased"}`;
+          const path = join(directory, `${name}.wgsl`);
+          writeFileSync(path, octreePersistentMGPCGWGSL({
+            maximumIterations: 10, stagedSmoother, stencilColumnCache,
+            ...(regularBandRows === undefined ? {} : { regularBandRows }),
+          }));
+          const result = spawnSync(process.env.NAGA ?? "naga", [path], { encoding: "utf8" });
+          assert.equal(result.status, 0, `${name}:\n${result.stderr || result.stdout}`);
+        }
       }
     }
   } finally {

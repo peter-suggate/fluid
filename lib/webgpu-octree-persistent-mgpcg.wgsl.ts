@@ -106,6 +106,12 @@ export interface OctreePersistentMGPCGShaderOptions {
    */
   readonly stagedSmoother?: boolean;
   /**
+   * Publish the Section 6.3 apply's solve-invariant stencil columns once per
+   * dispatch instead of re-chasing pages, bricks and ranks on every sweep.
+   * Addressing only; see the equality argument above `stencilColumnHelpers`.
+   */
+  readonly stencilColumnCache?: boolean;
+  /**
    * Route class-0 rows of the Section 4.3 band sweep through the same cheap
    * regular apply `applyAllRows` already uses for them.
    *
@@ -139,13 +145,25 @@ export interface OctreePersistentMGPCGShaderOptions {
  * compact hot channels makes them immutable while the live-row stride is
  * repacked in place.
  */
-export function octreePersistentMGPCGArenaWords(rowCapacity: number): number {
+export function octreePersistentMGPCGArenaWords(
+  rowCapacity: number,
+  stencilColumnCache = false,
+): number {
   const partials = Math.ceil(rowCapacity / OCTREE_PERSISTENT_MGPCG_REDUCTION_LANES);
   return OCTREE_PERSISTENT_MGPCG_HEADER.totalWords
     + OCTREE_PERSISTENT_MGPCG_CHANNEL_COUNT * rowCapacity
     + partials * OCTREE_PERSISTENT_MGPCG_PARTIAL_WORDS
-    + 2 * rowCapacity;
+    + 2 * rowCapacity
+    + (stencilColumnCache ? OCTREE_PERSISTENT_MGPCG_STENCIL_COLUMNS * rowCapacity : 0);
 }
+
+/**
+ * Channel-major stencil columns per row when the cache is selected: eighteen
+ * resolved owner rows for the full Section 6.3 apply and eighteen for the
+ * reduced class-0 apply. Appended ABOVE the two capacity-strided staged input
+ * channels, so `channelByteOffset` and the external staging ABI are unmoved.
+ */
+export const OCTREE_PERSISTENT_MGPCG_STENCIL_COLUMNS = 36;
 
 /**
  * Workgroup-storage footprint the kernel declares. Checked against
@@ -258,6 +276,155 @@ export function octreePersistentMGPCGWGSL(
   const regularAdjoint = options.regularAdjointOracle
     ? " + finerAdjoint(row,q,l,x,inCh)" : "";
   const regularChannelCount = options.regularAllChannelsOracle ? 18 : 6;
+
+  // --- solve-invariant stencil column cache (E2, addressing only) ----------
+  //
+  // Every input to the A2 apply's ADDRESS resolution is immutable for the whole
+  // dispatch: `topology`, `coefficients`, `geometry` and `metrics` are `read`
+  // bindings, and the only `state` channels this kernel ever writes are S_RHS,
+  // S_A and S_B (the single writer is `storef`). S_KEY, S_FLAGS and S_OWNER --
+  // the three the page/brick/rank chase reads -- are never written. So
+  // `applyRow`'s eighteen `opPageSlot` chains resolve to the same eighteen
+  // owner rows on every one of the 2*sweeps-1 band sweeps per Section 4.3
+  // correction plus every `applyAllRows`, and the kernel re-chases them well
+  // over a hundred times per solve.
+  //
+  // This publishes them once, in P1b, as a channel-major table of resolved
+  // owner rows. It is the same memoization the SPGrid V-cycle smoother already
+  // enjoys -- `applied()` reads a precomputed `topology[columnBase+k*span]`
+  // neighbour column rather than chasing pages -- brought to the Section 6.3
+  // apply, which had none.
+  //
+  // ADDRESSING ONLY. The iteration, the eighteen terms, their order and
+  // `canonical18Sum`'s fold are untouched; a cached entry is the identical
+  // `state[at(S_OWNER,l,slot)]` word the chase produced.
+  //
+  // Per channel this replaces ten loads on a five-deep dependent chain
+  // (coefficient, page neighbour, page record, three brick words, ranked slot,
+  // flags, owner, value) with three on a two-deep one (coefficient, column,
+  // value), and the column read is channel-major so a wavefront of adjacent
+  // band items reads adjacent words instead of eighteen scattered chases.
+  //
+  // THE ONE DEVIATION, stated precisely. The reports the resolution can raise
+  // (stages 21/22/23 inside `opPageSlot`, 27/28/29/31 around it) now fire once
+  // at build time instead of once per apply. The SET of raised (flag, stage)
+  // pairs is unchanged -- P1b resolves exactly the rows P2 would, from the same
+  // worksets -- and every one of them latches `control[0]`, so the solve fails
+  // closed at P1b instead of P2. Which claimant wins `control[6]` can differ,
+  // but that word is already decided by a 256-lane `atomicCompareExchangeWeak`
+  // race at HEAD and is not a deterministic output.
+  const stencilColumns = options.stencilColumnCache === true;
+  const stencilColumnHelpers = stencilColumns ? `
+// Thirty-six channel-major columns per row: eighteen resolved owner rows for
+// the full Section 6.3 apply, then eighteen for the reduced class-0 apply.
+// A zero entry means the channel contributes no direct term -- zero
+// coefficient, out-of-domain target, unresolvable column, MG_ONLY neighbour or
+// an unowned slot -- which is exactly HEAD's zero-initialized directTerms[k].
+const STENCIL_COLUMNS=36u;
+fn stencilBase()->u32{return p.sizes.w+2u*capacity();}
+fn stencilColumnAt(row:u32,k:u32)->u32{return stencilBase()+k*capacity()+row;}
+fn stencilColumn(row:u32,k:u32)->u32{return arena[stencilColumnAt(row,k)];}
+` : "";
+  const applyRowLocals = " let x=vload(inCh,row);var coefficientTerms:array<f32,18>;var directTerms:array<f32,18>;\n";
+  const applyRowColumns = stencilColumns
+    ? `\n${applyRowLocals} for(var channel=0u;channel<18u;channel+=1u){
+  let c=coefficients[base+1u+channel];if(c==0.0){continue;}
+  coefficientTerms[channel]=c;
+  let owner=stencilColumn(row,channel);if(owner==0u){continue;}
+  directTerms[channel]=c*(x-vload(inCh,owner-1u));}`
+    : `let page=pageFor(l,q);
+ if(page==INVALID||page>=levelCapacity(l)){reportAt(ERR_ROW,31u,row);return;}
+${applyRowLocals} for(var channel=0u;channel<18u;channel+=1u){let c=coefficients[base+1u+channel];if(c==0.0){continue;}
+  coefficientTerms[channel]=c;
+  let targetQ=vec3i(q)+worldDirection(canonicalDirection(channel),m.transformAndFlags&63u);
+  if(any(targetQ<vec3i(0))||any(targetQ>=vec3i(dims(l)))){reportAt(ERR_ROW,27u,row);continue;}
+  let slot=opPageSlot(l,page,q,vec3u(targetQ),row);
+  if(slot==INVALID){reportAt(ERR_ROW,28u,row);continue;}
+  let flags=state[at(S_FLAGS,l,slot)];
+  if((flags&MG_ONLY)!=0u){continue;}
+  let encoded=state[at(S_OWNER,l,slot)];
+  if(encoded==0u||encoded>capacity()){reportAt(ERR_ROW,29u,row);continue;}
+  directTerms[channel]=c*(x-vload(inCh,encoded-1u));}`;
+  const applyRegularRowColumns = stencilColumns
+    ? `\n${applyRowLocals} for(var channel=0u;channel<${regularChannelCount}u;channel+=1u){
+  let c=coefficients[base+1u+channel];if(c==0.0){continue;}coefficientTerms[channel]=c;
+  let owner=stencilColumn(row,18u+channel);if(owner==0u){continue;}
+  directTerms[channel]=c*(x-vload(inCh,owner-1u));}`
+    : `let page=pageFor(l,q);
+ if(page==INVALID||page>=levelCapacity(l)){reportAt(ERR_ROW,31u,row);return;}
+${applyRowLocals} for(var channel=0u;channel<${regularChannelCount}u;channel+=1u){
+  let c=coefficients[base+1u+channel];if(c==0.0){continue;}coefficientTerms[channel]=c;
+  let targetQ=vec3i(q)+worldDirection(canonicalDirection(channel),m.transformAndFlags&63u);
+  if(any(targetQ<vec3i(0))||any(targetQ>=vec3i(dims(l)))){reportAt(ERR_ROW,27u,row);continue;}
+  let slot=${regularSlotLookup};
+  if(slot==INVALID){reportAt(ERR_ROW,28u,row);continue;}
+  let flags=state[at(S_FLAGS,l,slot)];if((flags&MG_ONLY)!=0u){continue;}
+  let encoded=state[at(S_OWNER,l,slot)];if(encoded==0u||encoded>capacity()){
+   reportAt(ERR_ROW,29u,row);continue;}
+  directTerms[channel]=c*(x-vload(inCh,encoded-1u));}`;
+  // The two builders are the deleted resolution arms, verbatim, with the term
+  // arithmetic removed and the resolved owner stored. Guard order, guard
+  // predicates, stage ordinals and the `continue`/`return` structure are the
+  // ones they replace, so a malformed authority still lands on the same code.
+  const stencilColumnBuilders = stencilColumns ? `// --- P1b builders --------
+fn buildStencilColumns(row:u32){
+ if(row>=capacity()||row>=arrayLength(&geometry)||row>=arrayLength(&metrics)){
+  reportAt(ERR_ROW,25u,row);return;}
+ let h=geometry[row];let m=metrics[row];let base=coefficientBase(row);
+ if(m.error!=0u||(m.transformAndFlags&0x80000000u)==0u
+  ||base+19u>arrayLength(&coefficients)){reportAt(ERR_AUTHORITY,26u,row);return;}
+ let l=firstTrailingBit(h.y);let q=originOf(h)/(1u<<l);let page=pageFor(l,q);
+ if(page==INVALID||page>=levelCapacity(l)){reportAt(ERR_ROW,31u,row);return;}
+ for(var channel=0u;channel<18u;channel+=1u){
+  let c=coefficients[base+1u+channel];if(c==0.0){continue;}
+  let targetQ=vec3i(q)+worldDirection(canonicalDirection(channel),m.transformAndFlags&63u);
+  if(any(targetQ<vec3i(0))||any(targetQ>=vec3i(dims(l)))){reportAt(ERR_ROW,27u,row);continue;}
+  let slot=opPageSlot(l,page,q,vec3u(targetQ),row);
+  if(slot==INVALID){reportAt(ERR_ROW,28u,row);continue;}
+  let flags=state[at(S_FLAGS,l,slot)];
+  if((flags&MG_ONLY)!=0u){continue;}
+  let encoded=state[at(S_OWNER,l,slot)];
+  if(encoded==0u||encoded>capacity()){reportAt(ERR_ROW,29u,row);continue;}
+  arena[stencilColumnAt(row,channel)]=encoded;}}
+fn buildRegularStencilColumns(row:u32){
+ if(row>=capacity()||row>=arrayLength(&geometry)||row>=arrayLength(&metrics)){
+  reportAt(ERR_ROW,25u,row);return;}
+ let h=geometry[row];let m=metrics[row];let base=coefficientBase(row);
+ if(m.error!=0u||(m.transformAndFlags&0x80000000u)==0u||m.caseId!=0u
+  ||(m.transformAndFlags&0x3f00u)!=0u||base+19u>arrayLength(&coefficients)){
+  reportAt(ERR_AUTHORITY,26u,row);return;}
+ let l=firstTrailingBit(h.y);let q=originOf(h)/(1u<<l);let page=pageFor(l,q);
+ if(page==INVALID||page>=levelCapacity(l)){reportAt(ERR_ROW,31u,row);return;}
+ for(var channel=0u;channel<${regularChannelCount}u;channel+=1u){
+  let c=coefficients[base+1u+channel];if(c==0.0){continue;}
+  let targetQ=vec3i(q)+worldDirection(canonicalDirection(channel),m.transformAndFlags&63u);
+  if(any(targetQ<vec3i(0))||any(targetQ>=vec3i(dims(l)))){reportAt(ERR_ROW,27u,row);continue;}
+  let slot=${regularSlotLookup};
+  if(slot==INVALID){reportAt(ERR_ROW,28u,row);continue;}
+  let flags=state[at(S_FLAGS,l,slot)];if((flags&MG_ONLY)!=0u){continue;}
+  let encoded=state[at(S_OWNER,l,slot)];if(encoded==0u||encoded>capacity()){
+   reportAt(ERR_ROW,29u,row);continue;}
+  arena[stencilColumnAt(row,18u+channel)]=encoded;}}
+` : "";
+  // Zeroing sweeps EVERY live row, then only classes 0..3 resolve. A class-4
+  // identity row therefore reads an all-zero cache if a dilation ever pulls it
+  // into the band -- identical to HEAD, whose eighteen zero off-diagonals make
+  // every channel `continue` before it resolves anything.
+  const stencilColumnPhase = stencilColumns ? `
+  // --- P1b: solve-invariant stencil columns --------------------------------
+  for(var row=lane;row<liveRows;row+=LANES){
+   if(failed()){continue;}
+   for(var k=0u;k<STENCIL_COLUMNS;k+=1u){arena[stencilColumnAt(row,k)]=0u;}}
+  storageBarrier();workgroupBarrier();
+  for(var cls=0u;cls<4u;cls+=1u){let n=worksetCount(cls);
+   for(var item=lane;item<n;item+=LANES){let row=worksetRow(cls,item);
+    if(!failed()&&row<liveRows){buildStencilColumns(row);}}}
+  let regularColumnRows=worksetCount(0u);
+  for(var item=lane;item<regularColumnRows;item+=LANES){
+   let row=worksetRow(0u,item);
+   if(!failed()&&row<liveRows){buildRegularStencilColumns(row);}}
+  storageBarrier();workgroupBarrier();
+` : "";
   const bandInitialization = options.section63BandOracle
     ? `for(var row=lane;row<liveRows;row+=LANES){if(!stopped()){
        ustore(CH_BANDA,row,select(0u,1u,section63Class(row)>=2u));}}`
@@ -574,7 +741,7 @@ fn vstore(c:u32,r:u32,v:f32){arena[ch(c,r)]=bitcast<u32>(v);}
 fn uload(c:u32,r:u32)->u32{return arena[ch(c,r)];}
 fn ustore(c:u32,r:u32,v:u32){arena[ch(c,r)]=v;}
 fn partialBase()->u32{return ARENA_HEADER+CHANNELS*rowStride();}
-
+${stencilColumnHelpers}
 // ---------------------------------------------------------------------------
 // Address helpers. These are the SPGrid V-cycle's memoized-table forms; the
 // accurate operator and the Section 4.3 shell recompute the identical values
@@ -772,20 +939,7 @@ fn applyRow(row:u32,inCh:u32,outCh:u32){
  let h=geometry[row];let m=metrics[row];let base=coefficientBase(row);
  if(m.error!=0u||(m.transformAndFlags&0x80000000u)==0u
   ||base+19u>arrayLength(&coefficients)){reportAt(ERR_AUTHORITY,26u,row);return;}
- let l=firstTrailingBit(h.y);let q=originOf(h)/(1u<<l);let page=pageFor(l,q);
- if(page==INVALID||page>=levelCapacity(l)){reportAt(ERR_ROW,31u,row);return;}
- let x=vload(inCh,row);var coefficientTerms:array<f32,18>;var directTerms:array<f32,18>;
- for(var channel=0u;channel<18u;channel+=1u){let c=coefficients[base+1u+channel];if(c==0.0){continue;}
-  coefficientTerms[channel]=c;
-  let targetQ=vec3i(q)+worldDirection(canonicalDirection(channel),m.transformAndFlags&63u);
-  if(any(targetQ<vec3i(0))||any(targetQ>=vec3i(dims(l)))){reportAt(ERR_ROW,27u,row);continue;}
-  let slot=opPageSlot(l,page,q,vec3u(targetQ),row);
-  if(slot==INVALID){reportAt(ERR_ROW,28u,row);continue;}
-  let flags=state[at(S_FLAGS,l,slot)];
-  if((flags&MG_ONLY)!=0u){continue;}
-  let encoded=state[at(S_OWNER,l,slot)];
-  if(encoded==0u||encoded>capacity()){reportAt(ERR_ROW,29u,row);continue;}
-  directTerms[channel]=c*(x-vload(inCh,encoded-1u));}
+ let l=firstTrailingBit(h.y);let q=originOf(h)/(1u<<l);${applyRowColumns}
  var value=max(0.0,coefficients[base]-canonical18Sum(coefficientTerms))*x+canonical18Sum(directTerms);
  value+=finerAdjoint(row,q,l,x,inCh);
  if(!finite(value)){reportAt(ERR_NONFINITE,30u,row);}else{vstore(outCh,row,value);}}
@@ -804,19 +958,7 @@ fn applyRegularRow(row:u32,inCh:u32,outCh:u32){
  if(m.error!=0u||(m.transformAndFlags&0x80000000u)==0u||m.caseId!=0u
   ||(m.transformAndFlags&0x3f00u)!=0u||base+19u>arrayLength(&coefficients)){
   reportAt(ERR_AUTHORITY,26u,row);return;}
- let l=firstTrailingBit(h.y);let q=originOf(h)/(1u<<l);let page=pageFor(l,q);
- if(page==INVALID||page>=levelCapacity(l)){reportAt(ERR_ROW,31u,row);return;}
- let x=vload(inCh,row);var coefficientTerms:array<f32,18>;var directTerms:array<f32,18>;
- for(var channel=0u;channel<${regularChannelCount}u;channel+=1u){
-  let c=coefficients[base+1u+channel];if(c==0.0){continue;}coefficientTerms[channel]=c;
-  let targetQ=vec3i(q)+worldDirection(canonicalDirection(channel),m.transformAndFlags&63u);
-  if(any(targetQ<vec3i(0))||any(targetQ>=vec3i(dims(l)))){reportAt(ERR_ROW,27u,row);continue;}
-  let slot=${regularSlotLookup};
-  if(slot==INVALID){reportAt(ERR_ROW,28u,row);continue;}
-  let flags=state[at(S_FLAGS,l,slot)];if((flags&MG_ONLY)!=0u){continue;}
-  let encoded=state[at(S_OWNER,l,slot)];if(encoded==0u||encoded>capacity()){
-   reportAt(ERR_ROW,29u,row);continue;}
-  directTerms[channel]=c*(x-vload(inCh,encoded-1u));}
+ let l=firstTrailingBit(h.y);let q=originOf(h)/(1u<<l);${applyRegularRowColumns}
  let value=max(0.0,coefficients[base]-canonical18Sum(coefficientTerms))*x
   +canonical18Sum(directTerms)${regularAdjoint};
  if(!finite(value)){reportAt(ERR_NONFINITE,30u,row);}else{vstore(outCh,row,value);}}
@@ -862,7 +1004,7 @@ fn applyIdentityRow(row:u32,inCh:u32,outCh:u32){
  let value=vload(inCh,row);if(!finite(value)){reportAt(ERR_NONFINITE,32u,row);}
  else{vstore(outCh,row,value);}}
 
-// TRANSCRIPTION NOTE: the hierarchical exact apply dispatches the five
+${stencilColumnBuilders}// TRANSCRIPTION NOTE: the hierarchical exact apply dispatches the five
 // disjoint accepted row classes, whose lists partition [0, rows()) exactly
 // (finalizeStructuredPublication scatters every row into exactly one class).
 // applyRow is a pure gather into its own output slot, so iterating the rows
@@ -1372,7 +1514,7 @@ fn persistentMGPCG(@builtin(local_invocation_index) lane:u32${activityParameters
    vstore(CH_PRESSURE,row,seed);
    vstore(CH_RESIDUAL,row,0.0);}
   storageBarrier();workgroupBarrier();
-
+${stencilColumnPhase}
   // --- P2: A2(pressure) -> directionImage ---------------------------------
   applyAllRows(lane,liveRows,CH_PRESSURE,CH_DIRIMG);
   storageBarrier();workgroupBarrier();

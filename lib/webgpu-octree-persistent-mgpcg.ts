@@ -43,6 +43,7 @@ import {
   OCTREE_PERSISTENT_MGPCG_PARTIAL_WORDS,
   OCTREE_PERSISTENT_MGPCG_REDUCTION_LANES,
   OCTREE_PERSISTENT_MGPCG_STAGED_SMOOTHER_WORKGROUP_BYTES,
+  OCTREE_PERSISTENT_MGPCG_STENCIL_COLUMNS,
   OCTREE_PERSISTENT_MGPCG_WORKGROUP_BYTES,
   octreePersistentMGPCGArenaWords,
   octreePersistentMGPCGWGSL,
@@ -55,6 +56,7 @@ export {
   OCTREE_PERSISTENT_MGPCG_CHANNEL_COUNT,
   OCTREE_PERSISTENT_MGPCG_HEADER,
   OCTREE_PERSISTENT_MGPCG_STAGED_SMOOTHER_WORKGROUP_BYTES,
+  OCTREE_PERSISTENT_MGPCG_STENCIL_COLUMNS,
   OCTREE_PERSISTENT_MGPCG_WORKGROUP_BYTES,
   octreePersistentMGPCGArenaWords,
   octreePersistentMGPCGWGSL,
@@ -211,6 +213,72 @@ export function octreePersistentMGPCGStagedSmootherEnabled(
   const resolved = environment
     ?? (typeof process !== "undefined" ? process.env : undefined);
   return resolved?.FLUID_OCTREE_MGPCG_STAGED_SMOOTHER !== "0";
+}
+
+/**
+ * Publish the Section 6.3 A2 apply's stencil columns once per dispatch.
+ *
+ * Default ON since 2026-08-03. `benchmark-power-dam-ab.ts --lane=droplet-256
+ * --steps=60 --repeats=3`, interleaved, A/A sampled every round:
+ *
+ * | arm | ms/advance | Δ | spread |
+ * |---|---:|---:|---:|
+ * | control (6 runs) | 82.16 | — | 0.25 |
+ * | `FLUID_OCTREE_MGPCG_STENCIL_COLUMNS=1` | **80.98** | **−1.17 (−1.4%)** | 0.20 |
+ *
+ * A/A noise floor 0.30 ms, so the delta is 3.9x the floor: FASTER, conclusive.
+ * The D4 window is unmoved with it on — volume/velocity/pressure/rhs first
+ * diverge at step 68, diagonal/topology at 69, all four walls at 68 with spread
+ * 0, 250 checkpoints, zero validation errors.
+ *
+ * READ IT AS A BOUND, NOT ONLY AS A WIN. −1.17 ms is ~9% of the persistent
+ * solve, against a model that predicted ~4 ms. The main-loop page/brick/rank
+ * chase is therefore NOT the dominant term inside this kernel; whatever is,
+ * it is `finerAdjoint`'s 8x18 uncached resolutions, the V-cycle, or the
+ * barrier-serialized reductions. Set the variable to `0` to restore the chase.
+ *
+ * WHAT IT CHANGES. Addressing, and nothing else. `applyRow` resolves eighteen
+ * stencil spokes per row through `opPageSlot` — a page-neighbour probe, a page
+ * record decode, three brick-directory words and a ranked-slot indirection,
+ * then the neighbour's flags and owner — and it does that on every one of the
+ * `2 * boundarySmoothingIterations - 1` Section 4.3 band sweeps per correction
+ * plus every `applyAllRows`, which on this lane is well over a hundred repeats
+ * of the same resolution. Every input to it is immutable for the whole
+ * dispatch: `topology`, `coefficients`, `geometry` and `metrics` are `read`
+ * bindings, and the only `state` channels the kernel writes are S_RHS, S_A and
+ * S_B — S_KEY, S_FLAGS and S_OWNER, the three the chase reads, are never
+ * written. So the resolution is a pure function of the dispatch's inputs and
+ * is hoisted to a new phase P1b.
+ *
+ * This is the memoization the SPGrid V-cycle smoother already has and the
+ * Section 6.3 apply never did: `applied()` reads a precomputed neighbour column
+ * out of `topology`, while `applyRow` re-derives the same thing from scratch.
+ *
+ * Per stencil channel it replaces ten loads on a five-deep dependent chain with
+ * three on a two-deep one, and the surviving column read is channel-major, so a
+ * wavefront of adjacent band items reads adjacent words rather than eighteen
+ * uncorrelated chases.
+ *
+ * COST. `OCTREE_PERSISTENT_MGPCG_STENCIL_COLUMNS * rowCapacity` extra arena
+ * words — 576 KiB at the droplet lanes' authored 4,096 rows, 9 MiB at the
+ * 65,536-row ceiling — against the 177 MiB the SPGrid arena already holds on
+ * the same lane. The build itself is one resolution pass against the hundred-
+ * plus it removes.
+ *
+ * THE ONE DEVIATION, stated so it is never rediscovered as a bug. A resolution
+ * report now fires once at build time rather than once per apply. The SET of
+ * raised (flag, stage) pairs is unchanged — P1b resolves exactly the rows P2
+ * would, off the same accepted worksets — and every one of them latches
+ * `control[0]`, so the solve fails closed at P1b instead of P2. Which claimant
+ * wins `control[6]` can differ, but that word is already decided by a 256-lane
+ * `atomicCompareExchangeWeak` race and is not a deterministic output.
+ */
+export function octreePersistentMGPCGStencilColumnsEnabled(
+  environment?: Readonly<Record<string, string | undefined>>,
+): boolean {
+  const resolved = environment
+    ?? (typeof process !== "undefined" ? process.env : undefined);
+  return resolved?.FLUID_OCTREE_MGPCG_STENCIL_COLUMNS !== "0";
 }
 
 /** Selected mode for {@link octreePersistentMGPCGRegularBandRowsMode}. */
@@ -458,6 +526,7 @@ export class WebGPUOctreePersistentMGPCG implements OctreePersistentMGPCGExecuto
   private readonly dispatchMetaBytes: number;
   private readonly compactLiveRows: boolean;
   private readonly stagedSmoother: boolean;
+  private readonly stencilColumns: boolean;
   private readonly regularBandRows: OctreePersistentMGPCGRegularBandRowsMode;
   private destroyed = false;
 
@@ -550,6 +619,7 @@ export class WebGPUOctreePersistentMGPCG implements OctreePersistentMGPCGExecuto
     // Resolved before the capability gate below, which asserts the declared
     // workgroup footprint against the device limit.
     this.stagedSmoother = octreePersistentMGPCGStagedSmootherEnabled();
+    this.stencilColumns = octreePersistentMGPCGStencilColumnsEnabled();
     this.regularBandRows = octreePersistentMGPCGRegularBandRowsMode();
     this.workgroupStorageBytes = octreePersistentMGPCGWorkgroupBytes(this.stagedSmoother);
     const rowCapacity = positiveInteger(source.rowCapacity, "Persistent MGPCG row capacity");
@@ -641,7 +711,7 @@ export class WebGPUOctreePersistentMGPCG implements OctreePersistentMGPCGExecuto
     const stagedInputBaseWords = OCTREE_PERSISTENT_MGPCG_HEADER.totalWords
       + OCTREE_PERSISTENT_MGPCG_CHANNEL_COUNT * rowCapacity
       + partialCapacity * OCTREE_PERSISTENT_MGPCG_PARTIAL_WORDS;
-    this.arenaWords = octreePersistentMGPCGArenaWords(rowCapacity);
+    this.arenaWords = octreePersistentMGPCGArenaWords(rowCapacity, this.stencilColumns);
     this.arena = device.createBuffer({
       label: "Persistent MGPCG consolidated row arena",
       size: this.arenaWords * 4,
@@ -746,6 +816,7 @@ export class WebGPUOctreePersistentMGPCG implements OctreePersistentMGPCGExecuto
       fullApplyOracle,
       linearApplyOracle,
       stagedSmoother: this.stagedSmoother,
+      stencilColumnCache: this.stencilColumns,
       ...(this.regularBandRows === "off" ? {} : { regularBandRows: this.regularBandRows }),
       diagnosticStageCapture,
       ...(diagnosticOutputChannel === undefined ? {} : { diagnosticOutputChannel }),
@@ -774,6 +845,7 @@ export class WebGPUOctreePersistentMGPCG implements OctreePersistentMGPCGExecuto
         + `/${fullApplyOracle ? "full-apply" : "hybrid-apply"}`
         + `/${linearApplyOracle ? "linear-apply" : "class-apply"}`
         + `/${this.stagedSmoother ? "staged-smoother" : "direct-smoother"}`
+        + `/${this.stencilColumns ? "stencil-columns" : "chased-columns"}`
         + `/band-rows-${this.regularBandRows}`
         + `/diagnostic-output-${diagnosticOutputChannel ?? "pressure"}`,
     );
@@ -781,6 +853,7 @@ export class WebGPUOctreePersistentMGPCG implements OctreePersistentMGPCGExecuto
     this.shaderLabel = `Octree persistent MGPCG · single-dispatch 256-lane solve · ${
       compactLiveRows ? "compact live rows" : "capacity-strided oracle"}${
       this.stagedSmoother ? " · staged smoother" : ""}${
+      this.stencilColumns ? " · published stencil columns" : ""}${
       this.regularBandRows === "off" ? "" : ` · ${this.regularBandRows} band rows`}`;
     this.allocatedBytes = this.arena.size + this.params.size;
   }

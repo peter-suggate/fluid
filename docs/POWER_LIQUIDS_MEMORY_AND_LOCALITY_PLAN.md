@@ -351,7 +351,109 @@ Predicted: 18.9 → ~1–3 ms, i.e. ~16 ms off an 87 ms frame. Gate as always on
 `symmetric-expansion` D4 window, which this cannot move — the write set is
 unchanged and its order is unobservable.
 
+### E2a — publish the A2 apply's stencil columns — **LANDED, 2026-08-03: −1.4%**
+
+**The mechanism, first.** The SPGrid V-cycle smoother has a memoized neighbour
+table: `applied()` reads `topology[columnBase + k*span]`, eighteen precomputed
+columns per slot. **The Section 6.3 A2 apply has none.** `applyRow` re-derives
+each of its eighteen spokes from scratch through `opPageSlot` — a page-neighbour
+probe, a page-record decode, three brick-directory words, a ranked-slot
+indirection, then the neighbour's flags and owner. Ten loads on a five-deep
+dependent chain, per spoke, per call.
+
+And it is called *constantly*. `applyBandRows` runs `2*sweeps - 1 = 15` times per
+Section 4.3 correction, and there is one correction per CG iteration plus one for
+the initial preconditioner — well over a hundred repeats of the identical
+resolution per solve.
+
+**It is identical every time, and that is provable from the bindings.**
+`topology`, `coefficients`, `geometry` and `metrics` are all `read` bindings.
+The only `state` channels this kernel ever writes are `S_RHS`, `S_A` and `S_B` —
+the single writer is `storef`, and grepping its call sites gives exactly those
+three. `S_KEY`, `S_FLAGS` and `S_OWNER`, the three the chase reads, are never
+written by any phase. So the resolution is a pure function of the dispatch's
+immutable inputs and hoists to a new phase P1b.
+
+`FLUID_OCTREE_MGPCG_STENCIL_COLUMNS` (default **ON**) publishes 36 channel-major
+columns per row — eighteen resolved owner rows for the full apply, eighteen for
+the reduced class-0 apply — into an arena region appended above the two staged
+input channels, so `channelByteOffset` and the external staging ABI do not move.
+Per spoke the apply then does three loads on a two-deep chain instead of ten on
+a five-deep one, and the surviving column read is **channel-major**, so a
+wavefront of adjacent band items reads adjacent words instead of eighteen
+uncorrelated chases. **Addressing only** — same eighteen terms, same order, same
+`canonical18Sum` fold, same `reportAt` stage ordinals.
+
+| arm | ms/advance | Δ vs control | own spread | verdict |
+|---|---:|---:|---:|---|
+| control (6 runs) | 82.16 | — | 0.25 | — |
+| `FLUID_OCTREE_MGPCG_STENCIL_COLUMNS=1` | **80.98** | **−1.17 (−1.4%)** | 0.20 | **FASTER** |
+
+`--lane=droplet-256 --steps=60 --repeats=3`, interleaved, A/A every round.
+**A/A noise floor 0.30 ms**, so the delta is 3.9× the floor — and unlike E5's
+run, this floor is clean (control 82.13 vs control-aa 82.18 in the same round).
+
+**D4 gate green**, exactly the standing contract:
+
+| hook | first divergence | contract |
+|---|---:|---:|
+| `volume`, `velocity`, `pressure`, `rhs` | **68** | 68 |
+| `diagonal`, `topology` | **69** | 69 |
+| `wall-contact` | all four walls at 68, spread **0** | PASS |
+| `checkpoint-count` | 250 | PASS |
+| `validation-clean` | 0 errors | PASS |
+
+The one documented deviation: a resolution report now fires once at build time
+rather than once per apply. The *set* of raised (flag, stage) pairs is unchanged
+— P1b resolves exactly the rows P2 would, off the same accepted worksets — and
+every one latches `control[0]`, so the solve fails closed at P1b instead of P2.
+Which claimant wins `control[6]` can differ, but that word is already decided by
+a 256-lane `atomicCompareExchangeWeak` race and is not a deterministic output.
+The declined variant emits a **byte-identical** module (asserted in
+`tests/webgpu-octree-persistent-mgpcg.test.ts` across seven option
+combinations), and all twelve option combinations are naga-validated offline.
+
+#### The more useful half of this result: −1.17 ms is a *bound*
+
+The pre-registered prediction was ~4 ms, from a model that put the Section 4.3
+band sweep at ~60–70% of the 14.88 ms slice and the eighteen-spoke chase at ~70%
+of `applyRow`. The measurement says **the main-loop chase is ~9% of the
+persistent solve**, so at least one of those two factors is badly wrong.
+
+Recorded by mechanism, because it re-ranks everything below:
+
+- **The main-loop page/brick/rank chase is not the wall.** Removing six of ten
+  loads per spoke, across every call site, on the phase the code comments name
+  as the hot one, moves 1.4% of the frame. Any further work that targets *that*
+  chase — E2's row-major operator blocks, for instance — is now bounded above by
+  roughly what it just bought.
+- **What is left, ranked by remaining surface.** (a) `finerAdjoint`: eight
+  children by eighteen directions, each with its own `opPageSlot`, two state
+  loads, a `coefficientForDirection` pair and an arena gather — **~1,650 loads
+  for a ghost-owning row against the 54 the cached main loop now costs**, and
+  entirely uncached. (b) The V-cycle: `restrictLevel` runs a full 64-element
+  bitonic sort (21 stages × 64 compare-exchanges on a dynamically indexed
+  `array<f32,64>`, which Metal backs with thread-local scratch) to sort at most
+  a handful of real terms. (c) The reductions: `reduceMerged` walks one 128-row
+  virtual group at a time with a seven-level tree and ~10 barriers per group,
+  ~2,300 barriers per solve.
+- **The falsifier that fired.** The plan's own §2.2 attributes the slice to
+  `sparseSmoothPhase`. That attribution now has to compete with a measurement:
+  the A2 apply's addressing, which §2.2 does not mention at all, is worth 1.4%
+  on its own, and the smoother's `applied()` was *already* memoized. The
+  remaining candidates are not the ones §2.2 names.
+
 ### E0 — sort the worklist (cheap, and most of the prize)
+
+**Re-scoped by E2a.** The 41-of-59 coalescing claim below is **overstated at the
+measured occupancies**. Sorting the worklist makes slot addresses *monotonic*,
+not *contiguous*: at level-0 occupancy of 0.49–1.5%, consecutive occupied slots
+are 70–200 words apart, so 32 sorted lanes still touch 32 distinct cache lines.
+What sorting buys is a compact *span* (a few KB per wavefront instead of a
+1 MB level), i.e. DRAM-page and L2 locality, not coalescing. Contiguity needs
+E1's dense index space. Keep the ordering — slot sort before Morton — but do not
+expect E0 to deliver 69% of the traffic.
+
 
 The worklist is filled in **insertion order**: `claimCount` increments as keys
 are claimed (`spgrid-vcycle.ts:4038`), so `workSlot(l,i)` walks avalanche-hashed
