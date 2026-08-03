@@ -813,9 +813,11 @@ interface FineLevelSetTopologyPipelineBundle {
   readonly expandSparseDesiredPipelines: readonly GPUComputePipeline[];
   readonly compactSparseDesiredPipeline: GPUComputePipeline;
   readonly publishDesiredBricksPipeline: GPUComputePipeline;
+  readonly clearRecurringIdentityMaskPipeline: GPUComputePipeline;
   readonly publishRecurringSparseBandPipeline: GPUComputePipeline;
   readonly scatterRecurringSeedHaloPipeline: GPUComputePipeline;
   readonly scanRecurringDesiredPipeline: GPUComputePipeline;
+  readonly offsetRecurringSparseRecordsPipeline: GPUComputePipeline;
   readonly finalizeRecurringSparseBandPipeline: GPUComputePipeline;
   readonly scatterRecurringSparseBandPipeline: GPUComputePipeline;
   readonly snapshotPipeline: GPUComputePipeline;
@@ -900,11 +902,17 @@ export class WebGPUFineLevelSetTopology {
   private expandSparseDesiredPipelines!: readonly GPUComputePipeline[];
   private compactSparseDesiredPipeline!: GPUComputePipeline;
   private publishDesiredBricksPipeline!: GPUComputePipeline;
+  private clearRecurringIdentityMaskPipeline!: GPUComputePipeline;
   private publishRecurringSparseBandPipeline!: GPUComputePipeline;
   private scatterRecurringSeedHaloPipeline!: GPUComputePipeline;
   private scanRecurringDesiredPipeline!: GPUComputePipeline;
+  private offsetRecurringSparseRecordsPipeline!: GPUComputePipeline;
   private finalizeRecurringSparseBandPipeline!: GPUComputePipeline;
   private scatterRecurringSparseBandPipeline!: GPUComputePipeline;
+  /** Words in the identity-mask buffer, including the trailing block marks. */
+  private readonly identityMaskWords: number;
+  /** One occupancy mark per 256-key recurring scan block. */
+  private readonly recurringBandBlockWords: number;
   private snapshotPipeline!: GPUComputePipeline;
   private classifyIdentityPipeline!: GPUComputePipeline;
   private scanIdentityRecordsPipeline!: GPUComputePipeline;
@@ -1017,6 +1025,15 @@ export class WebGPUFineLevelSetTopology {
       current.plan.maximumResidentBricks,
       current.plan.logicalBrickCount,
     );
+    // The logical fine-brick lattice is a uniform occupancy grid: 16.7M keys at
+    // a 256-cubed container against ~565 live bricks (0.003%). One trailing word
+    // per 256-key scan block records whether the live halo scatter touched that
+    // block at all, so the three lattice-shaped recurring passes can skip the
+    // blocks that hold nothing instead of streaming the whole 67 MB mask. The
+    // marks sit past every key the mask itself addresses, so the WGSL base is
+    // exactly `max(pageCapacity, logicalBrickCount)` with no new parameter.
+    this.recurringBandBlockWords = Math.ceil(current.plan.logicalBrickCount / 256);
+    const topologyErrorWords = topologyScratchWords + this.recurringBandBlockWords;
     const desiredScanWords = Math.max(
       scanRecordCapacity + desiredScanBlocks + desiredScanSuperBlocks,
       2 * (topologyErrorBlocks + topologyErrorSuperBlocks),
@@ -1030,14 +1047,15 @@ export class WebGPUFineLevelSetTopology {
       size: desiredScanWords * 4, usage: GPUBufferUsage.STORAGE });
     this.topologyErrors = device.createBuffer({
       label: "fine-levelset direct identity mask and fixed topology error records",
-      size: topologyScratchWords * 4, usage: GPUBufferUsage.STORAGE,
+      size: topologyErrorWords * 4, usage: GPUBufferUsage.STORAGE,
     });
+    this.identityMaskWords = topologyErrorWords;
     this.transportedPhiSnapshot = device.createBuffer({ label: "fine-levelset transported phi transaction",
       size: sampleBytes, usage: GPUBufferUsage.STORAGE });
     this.allocatedBytes = FINE_LEVELSET_TOPOLOGY_ALLOCATED_BYTES
       + this.pageDeltaLayout.totalBytes + FINE_LEVELSET_TOPOLOGY_DIRECT_DISPATCH_BYTES + sampleBytes
       + (desiredCandidateWords + desiredScanWords + this.sparseCandidateCapacity
-        + current.plan.maximumResidentBricks + topologyScratchWords) * 4;
+        + current.plan.maximumResidentBricks + topologyErrorWords) * 4;
     this.params = device.createBuffer({ label: "fine-levelset topology params",
       size: FINE_LEVELSET_TOPOLOGY_PARAMETER_BYTES,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
@@ -1094,12 +1112,16 @@ export class WebGPUFineLevelSetTopology {
       ],
       compactSparseDesiredPipeline: await pipeline("Compact sparse fine topology candidates", "compactSparseDesiredBricks"),
       publishDesiredBricksPipeline: await pipeline("Publish sorted sparse fine topology", "publishDesiredBricks"),
+      clearRecurringIdentityMaskPipeline: await pipeline(
+        "Clear recurring fine topology identity mask", "clearRecurringIdentityMask"),
       publishRecurringSparseBandPipeline: await pipeline(
         "Mark compact recurring fine topology band", "publishRecurringSparseBand"),
       scatterRecurringSeedHaloPipeline: await pipeline(
         "Scatter recurring fine topology seed halos", "scatterRecurringSeedHalo"),
       scanRecurringDesiredPipeline: await pipeline(
         "Rank recurring fine topology identity marks", "scanRecurringDesiredRecords"),
+      offsetRecurringSparseRecordsPipeline: await pipeline(
+        "Offset recurring fine topology identity ranks", "offsetRecurringSparseRecords"),
       finalizeRecurringSparseBandPipeline: await pipeline(
         "Finalize recurring fine topology rank", "finalizeRecurringSparseBand"),
       scatterRecurringSparseBandPipeline: await pipeline(
@@ -1444,6 +1466,12 @@ export class WebGPUFineLevelSetTopology {
       // affects mark radius only; cold sorting is absent from recurring work.
       const algorithmDiagnostics = octreeAlgorithmDiagnosticsEnabled();
       if (algorithmDiagnostics) broker.fence("algorithm diagnostic before recurring fine-band scatter");
+      // The mask reset used to be a 256-lane loop inside the publication below,
+      // which made the one lattice-sized job in this stage run at 1/32 of the
+      // machine. It is a plain parallel clear; give it the whole machine.
+      runIdentityLinear(this.clearRecurringIdentityMaskPipeline, discoverEntries,
+        Math.ceil(this.identityMaskWords / 256), [0, 21],
+        "Clear recurring fine-band identity mask");
       runIdentity(this.publishRecurringSparseBandPipeline, discoverEntries,
         1, 1, [0, 6, 7, 14, 15, 16, 19, 21, 22, 23, 33],
         "Publish recurring sparse fine band (compact seed classification and rank)");
@@ -1468,8 +1496,8 @@ export class WebGPUFineLevelSetTopology {
       if (recurringBlocks > 1) {
         runIdentityLinear(this.offsetSparseGroupsPipeline, discoverEntries,
           recurringSuperBlocks, [0, 7, 20]);
-        runIdentityLinear(this.offsetSparseRecordsPipeline, discoverEntries,
-          recurringBlocks, [0, 7, 20]);
+        runIdentityLinear(this.offsetRecurringSparseRecordsPipeline, discoverEntries,
+          recurringBlocks, [0, 7, 20, 21]);
       }
       runIdentity(this.finalizeRecurringSparseBandPipeline, discoverEntries,
         1, 1, [0, 7, 20, 21]);
@@ -1873,6 +1901,22 @@ fn seedRecordPresent(item:u32)->bool{
  return currentLookup(key)==INVALID;
 }
 fn sparseScanScratch(index:u32)->u32{return params.scanRecordCapacity+index;}
+// The logical fine-brick lattice IS a uniform occupancy grid, and recurring
+// publication reads it at 0.003% occupancy: 565 live bricks in 16,777,216 keys
+// at a 256-cubed container. One trailing word per 256-key scan block records
+// whether the live halo scatter touched that block at all. Every nonzero mask
+// entry is written by that scatter and by nothing else, so "block unmarked"
+// implies "all 256 keys are zero" — which lets the rank, offset and scatter
+// passes retire a block after a single load instead of streaming 67 MB apiece.
+// The marks live past every key the mask addresses; the base is therefore the
+// host's own scratch-word count with no extra parameter.
+fn recurringBandBlockBase()->u32{return max(params.pageCapacity,desiredLogicalCount());}
+fn recurringBandBlockCount()->u32{return (desiredLogicalCount()+255u)/256u;}
+fn markRecurringBandBlock(key:u32){
+ atomicOr(&topologyErrors[recurringBandBlockBase()+key/256u],1u);}
+fn recurringBandBlockOccupied(block:u32)->bool{
+ return block<recurringBandBlockCount()
+  &&atomicLoad(&topologyErrors[recurringBandBlockBase()+block])!=0u;}
 fn sparseScanBlockCount()->u32{return (control[9]+255u)/256u;}
 fn sparseScanSuperBlockCount()->u32{return (sparseScanBlockCount()+255u)/256u;}
 // The sparse-scan family is dispatched over a two-dimensional grid: at
@@ -2002,6 +2046,7 @@ fn recurringScatterMembership(key:u32,offset:u32){
  let distance=u32(max(abs(delta.x),max(abs(delta.y),abs(delta.z))));let exact=distance==0u;
  let bits=select(0u,2u,distance<=control[6])|select(0u,1u,exact);
  atomicOr(&topologyErrors[output],bits);
+ markRecurringBandBlock(output);
 }
 fn recurringScatterDeltaRadii(key:u32,offset:u32){
  if(key>=desiredLogicalCount()||offset>=deltaRadiusVolume()){return;}
@@ -2012,13 +2057,34 @@ fn recurringScatterDeltaRadii(key:u32,offset:u32){
  if(any(point<vec3i(0))||any(point>=vec3i(params.brickDimensions))){return;}
  let distance=u32(max(abs(delta.x),max(abs(delta.y),abs(delta.z))));
  let bits=select(0u,DELTA_DIRTY,distance<=params.dirtyHaloRings)|DELTA_SUPPORT;
- atomicOr(&topologyErrors[packBrick(vec3u(point))],bits);
+ let output=packBrick(vec3u(point));
+ atomicOr(&topologyErrors[output],bits);
+ markRecurringBandBlock(output);
 }
 // The bootstrap expansion arena is never live during recurring publication.
 // Its record region stages one classification per compact producer; its sorted
 // region holds the ranked seed list the halo pair grid indexes, exactly as the
 // cold path publishes its compacted result from the same region.
 fn recurringSeedSlot(seed:u32)->u32{return params.sparseCandidateCapacity+seed;}
+// Resetting the identity mask is the one genuinely lattice-sized job in this
+// publication, and it used to run inside publishRecurringSparseBand's single
+// workgroup: 16,777,216 atomic stores by 256 lanes, 5.5 ms/advance at 256-cubed
+// against 0.09 ms at 64-cubed — a pure 1/32-of-the-machine bandwidth term. It
+// is embarrassingly parallel, so it belongs in its own launch. The block marks
+// in the tail are cleared by the same sweep, which is what lets the passes
+// below trust an unmarked block. Ordering is by dispatch boundary: this runs
+// immediately before the publication that seeds the band, exactly where the
+// in-workgroup loop sat.
+@compute @workgroup_size(256) fn clearRecurringIdentityMask(
+ @builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)nwg:vec3u,
+ @builtin(local_invocation_index)local:u32){
+ let item=fineLinearWorkgroup(wid,nwg)*256u+local;
+ // Derive the bound from params rather than arrayLength so the host's launch
+ // count and the shader's extent are the same expression; a mismatch would
+ // leave live marks behind, which is the one failure this sweep must not have.
+ let count=recurringBandBlockBase()+recurringBandBlockCount();
+ if(item<count&&item<arrayLength(&topologyErrors)){atomicStore(&topologyErrors[item],0u);}
+}
 @compute @workgroup_size(256) fn publishRecurringSparseBand(
  @builtin(local_invocation_index)local:u32){
  if(local==0u){
@@ -2058,11 +2124,10 @@ fn recurringSeedSlot(seed:u32)->u32{return params.sparseCandidateCapacity+seed;}
  var localError=0u;
  // Fixed lifecycle error records occupy the physical-page prefix. Desired
  // membership from the previous publication exists only at its compact live
- // keys, so both sets are reset without a logical-domain capacity sweep.
- let resetCount=select(params.pageCapacity,arrayLength(&topologyErrors),DELTA_RADIUS_MASK);
- for(var item=local;item<resetCount;item+=256u){
-  atomicStore(&topologyErrors[item],0u);
- }
+ // keys, so both sets are reset without a logical-domain capacity sweep here:
+ // clearRecurringIdentityMask has already zeroed the whole mask in parallel in
+ // the preceding dispatch. This live-key store stays as the fail-closed
+ // belt-and-braces reset it always was.
  let livePages=min(currentWorklist[1],params.pageCapacity);
  for(var work=local;work<livePages;work+=256u){
   let id=currentWorklist[7u+work];
@@ -2158,16 +2223,49 @@ fn recurringSeedSlot(seed:u32)->u32{return params.sparseCandidateCapacity+seed;}
 fn recurringDesiredPresent(item:u32)->bool{
  return control[0]==0u&&item<desiredLogicalCount()&&(atomicLoad(&topologyErrors[item])&2u)!=0u;
 }
+// The rank is still authored across the whole lattice, but an unmarked block
+// contributes a zero block total and nothing else. Only that one word has to be
+// written: desiredScan[item] inside an unmarked block is read by nobody —
+// offsetRecurringSparseRecords skips the same blocks, scatterRecurringSparseBand
+// indexes it only at present keys, and the grand total now comes from the last
+// block's published offset plus a direct recount of its own 256 keys.
+//
+// The gate must be workgroup-uniform because scanIdentityBlock carries barriers:
+// lane 0 stages the storage read and workgroupUniformLoad republishes it. A bare
+// storage-derived early return here is a Tint uniformity error, not a fast path.
+var<workgroup> recurringBandGate:u32;
 @compute @workgroup_size(256) fn scanRecurringDesiredRecords(
  @builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)nwg:vec3u,@builtin(local_invocation_index)local:u32){
  let block=fineLinearWorkgroup(wid,nwg);let count=desiredLogicalCount();
+ if(block==0u&&local==0u){control[9]=count;}
+ if(local==0u){recurringBandGate=select(0u,1u,recurringBandBlockOccupied(block));}
+ let occupied=workgroupUniformLoad(&recurringBandGate);
+ if(occupied==0u){
+  if(local==255u&&block*256u<count){desiredScan[sparseScanScratch(block)]=0u;}
+  return;
+ }
  let item=block*256u+local;let present=recurringDesiredPresent(item);
  let prefix=scanIdentityBlock(local,select(0u,1u,present));if(item<count){desiredScan[item]=prefix;}
  if(local==255u&&block*256u<count){desiredScan[sparseScanScratch(block)]=identityScanTotal;}
- if(item==0u){control[9]=count;}
 }
-fn recurringDesiredTotal()->u32{let count=desiredLogicalCount();if(count==0u){return 0u;}let last=count-1u;
- return desiredScan[last]+select(0u,1u,recurringDesiredPresent(last));
+// Same block gate. This kernel has no barriers, so the storage-derived return
+// needs no staging.
+@compute @workgroup_size(256) fn offsetRecurringSparseRecords(
+ @builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)nwg:vec3u,@builtin(local_invocation_index)local:u32){
+ let block=fineLinearWorkgroup(wid,nwg);
+ if(!recurringBandBlockOccupied(block)){return;}
+ let item=block*256u+local;if(item<control[9]){desiredScan[item]+=desiredScan[sparseScanScratch(block)];}
+}
+// After the group scan and offset, desiredScan[sparseScanScratch(b)] is block b's
+// *global* exclusive rank offset, so the total is the last block's offset plus
+// the number of present keys that block holds. Recounting 256 keys in one lane
+// is cheap and, unlike reading desiredScan[count-1], stays correct when the
+// final block was skipped as unmarked.
+fn recurringDesiredTotal()->u32{let count=desiredLogicalCount();if(count==0u){return 0u;}
+ let block=(count-1u)/256u;var total=desiredScan[sparseScanScratch(block)];
+ for(var item=block*256u;item<count;item+=1u){
+  total+=select(0u,1u,recurringDesiredPresent(item));}
+ return total;
 }
 @compute @workgroup_size(1) fn finalizeRecurringSparseBand(){
  if(control[0]!=0u){control[2]=0u;return;}let count=recurringDesiredTotal();control[2]=count;
@@ -2175,7 +2273,12 @@ fn recurringDesiredTotal()->u32{let count=desiredLogicalCount();if(count==0u){re
 }
 @compute @workgroup_size(256) fn scatterRecurringSparseBand(
  @builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)nwg:vec3u,@builtin(local_invocation_index)local:u32){
- let key=fineLinearWorkgroup(wid,nwg)*256u+local;if(key>=desiredLogicalCount()){return;}
+ let block=fineLinearWorkgroup(wid,nwg);
+ // Every nonzero mask entry was written by the halo scatter, which marks the
+ // block it wrote. An unmarked block therefore has nothing to retain and nothing
+ // to emit, and its reset is already satisfied.
+ if(!recurringBandBlockOccupied(block)){return;}
+ let key=block*256u+local;if(key>=desiredLogicalCount()){return;}
  let membership=atomicLoad(&topologyErrors[key]);
  atomicStore(&topologyErrors[key],select(0u,membership&(DELTA_DIRTY|DELTA_SUPPORT),
   DELTA_RADIUS_MASK&&(!REASON_CONES||pageDelta[10]==2u)));
