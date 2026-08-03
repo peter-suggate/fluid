@@ -28,7 +28,10 @@ export async function generateMetadata(): Promise<Metadata> {
 const THEME_BOOT = `try{var t=localStorage.getItem("fluid-lab-theme");if(t==="light"||t==="dark")document.documentElement.dataset.theme=t}catch(e){}`;
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
-  return <html lang="en">
+  // The boot script writes `data-theme` before React hydrates, which is the
+  // point of it — and is an attribute the server did not render, so the check
+  // has to be told this one is deliberate. React leaves it alone either way.
+  return <html lang="en" suppressHydrationWarning>
     <head><script dangerouslySetInnerHTML={{ __html: THEME_BOOT }} /></head>
     <body>{children}</body>
   </html>;
