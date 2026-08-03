@@ -5,9 +5,11 @@ import {
   HERO_GARDEN_CONTAINER,
   HERO_GARDEN_VESSEL,
   HERO_GARDEN_WATERLINE_M,
+  heroGardenCamera,
 } from "../lib/hero-garden-scene";
-import type { Quaternion, Vec3 } from "../lib/model";
+import type { CameraState, Quaternion, Vec3 } from "../lib/model";
 import { quaternionRotate } from "../lib/rigid-body";
+import { projectToViewport } from "../lib/webgpu-camera";
 import {
   isSceneryPrimitiveNode,
   validateSceneryGraph,
@@ -272,7 +274,10 @@ test("a form carries the silhouette, and a spec only carries the placement", () 
     assert.ok(stem.kind === "cone");
     return capLobe(capPart).x / stem.topRadius;
   };
-  assert.ok(overhang(cap) > 1.7, `the capped form overhangs only ${overhang(cap).toFixed(2)}x`);
+  // A lip, not a brim. The bound came down from 1.7 when the forms were squatted:
+  // an overhang past about 1.8 needs a stem under 0.55 of the cap, and a stem
+  // that thin under a cap this thick is a mushroom lamp rather than a stone.
+  assert.ok(overhang(cap) > 1.4, `the capped form overhangs only ${overhang(cap).toFixed(2)}x`);
   assert.ok(overhang(cobble) < 1.3, `the cobble form overhangs ${overhang(cobble).toFixed(2)}x, which is a cap`);
   // Two specimens of one form differ only by the seed and where they stand.
   const here = cappedBoulderNodes({ ...BOULDER_MUSHROOM_CAP, key: "a", at_m: [0.4, -0.2], seed: 3 });
@@ -317,8 +322,22 @@ test("a stepping path lays plates on the bed it is given", () => {
     assert.ok(tread.kind === "cylinder" && footing.kind === "cone");
     assert.ok(tread.edgeRadius !== undefined && tread.edgeRadius >= 0.1 * tread.radius,
       `${stone.id} compresses its edge normal into an unresolved band`);
-    assert.equal(stone.kind === "group" ? stone.children.length : 0, 2,
-      `${stone.id} reintroduced overlapping tread geometry`);
+    // The tread is one rounded-cylinder SDF so that its crown has a single zero
+    // set and a fillet wide enough to resolve; a second solid *skinning* it would
+    // put back the broken ring of grazing dots that cost the plates their edge.
+    // What the plate is allowed is a lobe that breaks its outline — set off the
+    // axis, thick, and standing past the rim — because such a solid's normals
+    // nowhere agree with the crown's. Pinned as that property rather than as a
+    // child count, so the guard survives the shape gaining a feature.
+    for (const child of stone.kind === "group" ? stone.children : []) {
+      if (child.id.endsWith("/tread") || child.id.endsWith("/footing")) continue;
+      assert.ok(child.kind === "cluster", `${child.id} rides the tread as a surface of revolution`);
+      const offset = Math.hypot(child.place?.position?.x ?? 0, child.place?.position?.z ?? 0);
+      assert.ok(child.lobe.y >= 0.3 * tread.halfHeight,
+        `${child.id} is a shell over the crown, not a mass beside it`);
+      assert.ok(offset + Math.max(child.lobe.x, child.lobe.z) > 1.02 * tread.radius,
+        `${child.id} sits entirely inside the tread and cannot break its outline`);
+    }
     const at = parts.find((part) => part.id === `${stone.id}/tread`)!;
     const foot = parts.find((part) => part.id === `${stone.id}/footing`)!;
     const top = at.center_m.y + tread.halfHeight;
@@ -356,7 +375,8 @@ test("the set fits its share of the scene's primitive budget, and its bricks", (
   assert.ok(leaves.length <= 1_200, `the stone set publishes ${leaves.length} leaves, over its 1 200 budget`);
   assert.ok(leaves.length >= 110, `the stone set publishes only ${leaves.length} leaves`);
   assert.equal(leavesOf(stoneSetBoulderNodes(SPEC)).length, 16, "four boulders of four parts each");
-  assert.equal(leavesOf(stoneSetSteppingNodes(SPEC)).length, 10, "five single-SDF plates on five footings");
+  assert.equal(leavesOf(stoneSetSteppingNodes(SPEC)).length, 15,
+    "five single-SDF plates on five footings, each with the lobe that breaks its outline");
   const pebbles = leavesOf(stoneSetPebbleNodes(SPEC)).length;
   assert.ok(pebbles >= 80 && pebbles <= 320, `${pebbles} pebbles, outside the 80-320 the reference reads as`);
 
@@ -549,10 +569,16 @@ test("the boulders are a family of different stones, not one stone at four sizes
     const capRadius = capLobe(cap);
     const overhang = capRadius.x / stem.topRadius;
     const flatten = capRadius.y / capRadius.x;
-    assert.ok(overhang > 1.05 && overhang < 2.8,
-      `${boulder.id} cap-to-stem is ${overhang.toFixed(2)}: under 1.05 the cap is narrower than what holds it up, over 2.8 it is a plate on a post`);
-    assert.ok(flatten > 0.26 && flatten < 0.72,
-      `${boulder.id} cap flatten is ${flatten.toFixed(2)}: under 0.26 it is a disc, over 0.72 it is a ball`);
+    assert.ok(overhang > 1.05 && overhang < 1.9,
+      `${boulder.id} cap-to-stem is ${overhang.toFixed(2)}: under 1.05 the cap is narrower than what holds it up, over 1.9 it is a plate on a post`);
+    assert.ok(flatten > 0.42 && flatten < 0.80,
+      `${boulder.id} cap flatten is ${flatten.toFixed(2)}: under 0.42 it is a plate, over 0.80 it is a ball`);
+    // The rule that keeps a stone a stone. A wide flat cap on a thin vertical
+    // stalk is a mushroom lamp, and at hero scale that is exactly what it read
+    // as: a small side table standing beside a pond. Rock that stands proud of a
+    // bank on a narrow waist is rock somebody carved.
+    assert.ok(2 * stem.halfHeight < 0.6 * capRadius.x,
+      `${boulder.id} stands on a stem ${(2 * stem.halfHeight / capRadius.x).toFixed(2)} cap radii tall; over 0.6 it stops reading as stone`);
     assert.ok(stem.baseRadius > stem.topRadius, `${boulder.id} stem must taper upward`);
     // The cap has to sit down over the stem, or the two meet in a seam the
     // voxelizer decides the ownership of rather than fusing into one stone.
@@ -566,10 +592,18 @@ test("the boulders are a family of different stones, not one stone at four sizes
   // The art direction, as three numbers. Sizes alone are not a family: the four
   // have to differ in the ratios that draw the silhouette, or they are one
   // drawing at four scales however far apart their radii are.
+  //
+  // The bands came down when the forms were squatted, and deliberately. A set
+  // free to run from a plate on a stalk to a ball on nothing spans a great deal
+  // and half of what it spans is not stone; the range that *is* stone is narrow,
+  // so what a family can differ by inside it is narrow too. A third again in cap
+  // thickness and six times in stem height is plenty at a sixth of a pond's
+  // width — the mistake this replaced was reading a wide spread as the goal
+  // rather than as a symptom.
   const spread = (values: readonly number[]) => Math.max(...values) / Math.min(...values);
-  assert.ok(spread(flattens) > 1.7, `the caps' flattening spans only ${spread(flattens).toFixed(2)}x; the set is one cap`);
+  assert.ok(spread(flattens) > 1.35, `the caps' flattening spans only ${spread(flattens).toFixed(2)}x; the set is one cap`);
   assert.ok(spread(stems) > 3, `the stems span only ${spread(stems).toFixed(2)}x of their caps; the set is one stone`);
-  assert.ok(spread(overhangs) > 1.6, `the overhangs span only ${spread(overhangs).toFixed(2)}x`);
+  assert.ok(spread(overhangs) > 1.25, `the overhangs span only ${spread(overhangs).toFixed(2)}x`);
   // ...and the group is a group: no two gaps along the bank are the same, or
   // four stones evenly spaced read as a fence rather than as a family.
   const at = resolve(boulders).filter(({ id }) => id.endsWith("/footing"));
@@ -587,28 +621,34 @@ test("every stone big enough to read carries an irregular silhouette", () => {
   // stone under about 24 mm covers a few pixels at the hero camera: above the
   // floor a stone must be a `cluster`, below it, an ellipsoid is honest and an
   // ellipsoid is what it gets.
-  // Each bed's own floor, so the oracle is "no stone escaped the rule its bed
-  // declares" rather than a number restated here and free to drift from it. The
-  // floors themselves are held to a ceiling: a bed could otherwise satisfy this
-  // by declaring that nothing it lays is ever legible.
-  for (const form of [PEBBLE_GRADED_COBBLE, PEBBLE_FINE_SHINGLE]) {
-    assert.ok(form.clusterFloor_m <= 0.015,
-      `a bed exempts everything under ${(2e3 * form.clusterFloor_m).toFixed(0)} mm from carrying a silhouette`);
-  }
+  // Measured in **pixels at the hero camera**, not in millimetres, because that
+  // is the mistake this test was written around and then made anyway. The first
+  // floor was reasoned from a nominal "a 24 mm stone is about ten pixels", which
+  // was four times too coarse: the frame is 1 600 px wide, not 800, and the
+  // shore bed lies nearer the eye than the pond's own middle. The ten largest
+  // bare ellipsoids in the render were 37 to 44 px across, at the front of the
+  // picture, reading as smooth white beans. A floor in metres cannot catch that
+  // — only the projection can.
+  const width = 1600, height = 920, tanHalfFov = 0.24;
+  const legible_px = 16;
+  const camera = { ...heroGardenCamera } as CameraState;
   const round: string[] = [];
   let irregular = 0;
-  for (const leaf of leavesOf(stoneSetPebbleNodes(SPEC))) {
-    if (leaf.kind === "cluster") { irregular += 1; continue; }
-    if (leaf.kind !== "ellipsoid") continue;
-    const floor_m = leaf.id.includes("/shore-bed/") ? PEBBLE_FINE_SHINGLE.clusterFloor_m : PEBBLE_GRADED_COBBLE.clusterFloor_m;
-    const halfWidth = Math.max(leaf.radius.x, leaf.radius.z);
-    if (halfWidth > floor_m) round.push(`${leaf.id} (${(2e3 * halfWidth).toFixed(0)} mm)`);
-    // What carries the small stones instead: they are lentils and flakes, not
-    // beads, and that is what stops the fine shingle reading as spheres.
-    assert.ok(leaf.radius.y < 0.95 * Math.max(leaf.radius.x, leaf.radius.z),
-      `${leaf.id} is as tall as it is wide; a bedded pebble is flattened`);
+  for (const stone of resolve(stoneSetPebbleNodes(SPEC))) {
+    if (stone.node.kind === "cluster") { irregular += 1; continue; }
+    if (stone.node.kind !== "ellipsoid") continue;
+    const { depth_m } = projectToViewport(stone.center_m, camera, width, height);
+    const halfWidth = Math.max(stone.node.radius.x, stone.node.radius.z);
+    const px = 2 * halfWidth * width / (2 * depth_m * (width / height) * tanHalfFov);
+    if (px > legible_px) round.push(`${stone.id} (${px.toFixed(0)} px)`);
+    // What carries the stones below the floor instead: they are lentils and
+    // flakes, not beads, and that is what stops the fine shingle reading as
+    // spheres at the size where a marched outline would be a smudge anyway.
+    assert.ok(stone.node.radius.y < 0.95 * halfWidth,
+      `${stone.id} is as tall as it is wide; a bedded pebble is flattened`);
   }
-  assert.equal(round.length, 0, `${round.length} bare ellipsoids over their bed's floor: ${round.slice(0, 5).join(", ")}`);
+  assert.equal(round.length, 0,
+    `${round.length} bare ellipsoids over ${legible_px} px at the hero camera: ${round.slice(0, 5).join(", ")}`);
   assert.ok(irregular >= 20, `only ${irregular} pebbles carry an irregular mass; the beds have lost their cobbles`);
   // Every boulder's mass too — a cap is the largest stone in the frame and the
   // one an ellipse would give away first.
@@ -680,8 +720,12 @@ test("the plates wade over the shore, not over the basin floor", () => {
       `${step.id} tread is drowned: ${((top - HERO_GARDEN_WATERLINE_M) * 1e3).toFixed(1)} mm of freeboard`);
     assert.ok(top < HERO_GARDEN_WATERLINE_M + 0.05,
       `${step.id} stands ${((top - HERO_GARDEN_WATERLINE_M) * 1e3).toFixed(0)} mm proud; a stepping stone is not a plinth`);
-    // A plate is thin: the reference's are about a fifth of their own width.
-    assert.ok(2 * tread.halfHeight < 0.34 * tread.radius * 2,
+    // A plate is low, and "low" is about a quarter of its own width rather than
+    // the fifth this used to say. At a fifth the five of them rendered as
+    // tablets lying on the water; the reference's stones show a real side. The
+    // bound is on the whole solid — the rounded cylinder carries its own crown —
+    // so it has to be looser than the tread thickness alone would need.
+    assert.ok(2 * tread.halfHeight < 0.42 * tread.radius * 2,
       `${step.id} is ${(2e3 * tread.halfHeight).toFixed(0)} mm thick on a ${(2e3 * tread.radius).toFixed(0)} mm plate`);
     // Inside the basin by a whole tread, so no plate grows out of the coping.
     const distance = pondVesselPlanDistance(CURVE, treadAt.x, treadAt.z);
@@ -698,15 +742,29 @@ test("the plates wade over the shore, not over the basin floor", () => {
   assert.ok(exposed_m < 0.5 * footing_m,
     `${(1e2 * exposed_m / footing_m).toFixed(0)}% of the path's footing stands out of the bed`);
 
-  // A path, not a heap: consecutive plates clear one another, and they shrink as
-  // they wade in.
+  // A path, not a heap: consecutive plates clear one another, and the chain
+  // shrinks as it wades in.
+  const gaps: number[] = [];
   for (let index = 1; index < treads.length; index += 1) {
     const a = treads[index - 1], b = treads[index];
-    assert.ok(b.radius < a.radius, `plate ${index} is not smaller than the one before it`);
     const gap = Math.hypot(a.x - b.x, a.z - b.z) - a.radius - b.radius;
     assert.ok(gap > 0.012, `plates ${index - 1} and ${index} are ${(gap * 1e3).toFixed(0)} mm apart`);
     assert.ok(gap < 0.14, `plates ${index - 1} and ${index} are ${(gap * 1e3).toFixed(0)} mm apart, not a stride`);
+    gaps.push(gap);
   }
+  // The grade is over the *chain*, not step by step, and that is the correction
+  // rather than a weakening. A monotonic radius plus a fixed stride is a
+  // *pattern*, and the eye reads a pattern as manufacture: five identical white
+  // ovals at five identical spacings rendered as a row of pills. Real stepping
+  // stones are whatever the mason had, set where the wading was good. So what is
+  // pinned now is that the far end is clearly smaller than the near end and that
+  // no two gaps in the chain are alike.
+  assert.ok(treads[treads.length - 1].radius < 0.85 * treads[0].radius,
+    `the chain grades only ${(treads[treads.length - 1].radius / treads[0].radius).toFixed(2)}x from shore to deep`);
+  const gapSpread = Math.max(...gaps) / Math.min(...gaps);
+  assert.ok(gapSpread > 1.35, `the plates are laid at ${gaps.map((g) => (1e3 * g).toFixed(0)).join("/")} mm: an even row`);
+  const radiusSpread = Math.max(...treads.map((t) => t.radius)) / Math.min(...treads.map((t) => t.radius));
+  assert.ok(radiusSpread > 1.3, `the plates span only ${radiusSpread.toFixed(2)}x in size`);
 });
 
 test("the beds are packed, not scattered", () => {

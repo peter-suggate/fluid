@@ -251,6 +251,63 @@ test("every swept run publishes a packing the render ABI will accept", () => {
   }
 });
 
+test("the buttresses are separate blades on the bank, not a collar of lumps over the water", () => {
+  // Three properties, and the object failed all three in one round: a fin as
+  // thick as it is tall reads as a bread roll, fins that touch all the way round
+  // read as one lumpy collar, and a fin over the coping is a root growing out of
+  // open water.
+  for (const seed of [0x8017a1, 1, 7, 0x51ed, 0x7fff_ffff]) {
+    const plan = planBonsai(specFor(BONSAI_POND_CANOPY, { seed }));
+    const fins = leaves(plan.nodes).filter((node) => node.kind === "cluster" && node.field === "seeded-lobes");
+    assert.ok(fins.length >= 12, `seed ${seed}: ${fins.length} fin envelopes; the chain has collapsed back to one per root`);
+
+    // A blade. The thin axis against the tall one, which is the section a
+    // buttress is read by — a quarter is the thick end of what still reads as a
+    // plate, and it is what the march's own eccentricity cap allows.
+    for (const fin of fins) {
+      if (fin.kind !== "cluster") continue;
+      const section = Math.min(fin.lobe.x, fin.lobe.y, fin.lobe.z) / fin.lobe.y;
+      assert.ok(section <= 0.26, `seed ${seed}: ${fin.id} is ${section.toFixed(2)} as thick as it is tall; that is a lump`);
+    }
+
+    // Air between them, at mid-run, where a real buttress system has its deep V
+    // valleys. The merge is meant to happen only inside the base.
+    const mids = fins.filter((node) => node.id.endsWith("-2")).map((node) => {
+      const at = node.place?.position;
+      assert.ok(at, "every fin is placed");
+      return {
+        angle: Math.atan2(at.z, at.x),
+        radius: Math.hypot(at.x, at.z),
+        half: node.kind === "cluster" ? Math.min(node.lobe.x, node.lobe.y, node.lobe.z) : 0,
+      };
+    }).sort((a, b) => a.angle - b.angle);
+    let narrowest = Infinity;
+    for (let i = 0; i < mids.length; i += 1) {
+      const here = mids[i], next = mids[(i + 1) % mids.length];
+      const between = ((next.angle - here.angle) + 2 * Math.PI) % (2 * Math.PI);
+      const subtended = Math.asin(Math.min(1, here.half / here.radius)) + Math.asin(Math.min(1, next.half / next.radius));
+      narrowest = Math.min(narrowest, (between - subtended) * 180 / Math.PI);
+    }
+    assert.ok(narrowest > 12, `seed ${seed}: only ${narrowest.toFixed(0)} degrees of air between adjacent fins; they will fuse into a collar`);
+
+    // And on the bank. The whole envelope, sampled round its own bounding
+    // circle, against the coping's outer foot — a fin may reach the foot and no
+    // further, whatever the authored `rootReach` asked for.
+    for (const fin of fins) {
+      const at = fin.place?.position;
+      assert.ok(at, "every fin is placed");
+      const reach = fin.kind === "cluster" ? Math.max(fin.lobe.x, fin.lobe.y, fin.lobe.z) : 0;
+      for (let i = 0; i < 48; i += 1) {
+        const angle = 2 * Math.PI * i / 48;
+        const x = STAND_M[0] + at.x + reach * Math.cos(angle);
+        const z = STAND_M[1] + at.z + reach * Math.sin(angle);
+        assert.ok(pondVesselPlanDistance(CURVE, x, z) > VESSEL.rimHalfWidth_m,
+          `seed ${seed}: ${fin.id} reaches over the coping`);
+      }
+    }
+  }
+});
+
 test("a buttress fin is eccentric enough to be a plate and not so eccentric the march misses it", () => {
   // The trade this field is here for. A buttress root is a fin — long, tall,
   // thin — which a swept tube cannot be at all, because a sweep is circular in
@@ -291,7 +348,7 @@ test("a buttress fin is eccentric enough to be a plate and not so eccentric the 
   assert.equal(missed, 0, `${missed} of ${shot} rays march through a fin without finding it`);
   // And the other side of the trade: a fin that has regularised back toward a
   // tube is the defect this replaced.
-  assert.ok(worst > 2, `the fins are only ${worst.toFixed(1)} times longer than thick; they will read as tubes again`);
+  assert.ok(worst > 3.5, `the fins are only ${worst.toFixed(1)} times longer than thick; they will read as tubes again`);
 });
 
 test("the budget is enforced rather than merely documented", () => {
@@ -458,7 +515,11 @@ test("the crown clears the coping it overhangs", () => {
 
 test("the buttress roots meet the bank they run out over, and grip it", () => {
   const plan = planBonsai(specFor(BONSAI_POND_CANOPY));
-  assert.equal(plan.rootFeet_m.length, BONSAI_POND_CANOPY.roots);
+  // At most one per authored bearing, and a bearing whose bank runs out is left
+  // bare rather than given a buttress hanging over the water — so this is a
+  // range, not an equality.
+  assert.ok(plan.rootFeet_m.length <= BONSAI_POND_CANOPY.roots);
+  assert.ok(plan.rootFeet_m.length >= 3, `only ${plan.rootFeet_m.length} bearings kept a buttress`);
   let fall = 0;
   for (const foot of plan.rootFeet_m) {
     const under = ground(foot.x, foot.z);
@@ -474,7 +535,15 @@ test("the buttress roots meet the bank they run out over, and grip it", () => {
   // The terrace falls away toward the coping inside the buttresses' own reach,
   // so a generator that had assumed a plane would have left toes hanging in air
   // by this much. Guards the height query against being quietly dropped.
-  assert.ok(fall > 0.02, `the bank only falls ${(1000 * fall).toFixed(0)} mm under the root spread; the oracle has stopped testing anything`);
+  // Bounded on both sides now, and the pair is the whole story. Below: the
+  // terrace really does fall away inside the buttresses' own reach, so a
+  // generator that had assumed a plane would leave toes hanging in air by this
+  // much — the guard against the height query being quietly dropped. Above: no
+  // toe is allowed to follow the bank further down than the run may descend
+  // before it has left it, which is what stops a root growing over the pond.
+  assert.ok(fall > 0.015, `the bank only falls ${(1000 * fall).toFixed(0)} mm under the root spread; the oracle has stopped testing anything`);
+  assert.ok(fall < 0.9 * BONSAI_POND_CANOPY.boleRadius_m,
+    `a toe follows the bank ${(1000 * fall).toFixed(0)} mm down; the reach clamp has stopped biting`);
 
   // The grip. A buttress is not a finger: the plate it makes has to be wider
   // than the stump it leaves, or the base reads as a post with tabs beside it —

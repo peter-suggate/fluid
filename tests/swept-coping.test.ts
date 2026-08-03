@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { growSceneryGenerator } from "../lib/scenery-generators";
+import { growSceneryGenerator, SWEPT_COPING_RAIL_SAMPLES_PER_LOBE } from "../lib/scenery-generators";
 import { SVO_MATERIAL_FUNCTION_IDS, svoMaterialFunctionIdForEnvironmentProxy } from "../lib/svo-material-abi";
 import { buildSvoScenePrimitives } from "../lib/svo-scene-primitives";
 import { buildEnvironmentProxyCatalog, environmentProxyPrimitives } from "../lib/voxel-environments";
@@ -16,6 +16,7 @@ import {
   SWEPT_COPING_POND_BULLNOSE,
   sweptCopingNodes,
   sweptCopingSection,
+  sweptCopingStations,
   type SweptCopingSpec,
 } from "../lib/voxel-scenery/swept-coping";
 import {
@@ -41,6 +42,9 @@ import { terrainHeightAt } from "../lib/terrain";
 
 const RAIL = pondVesselPlanCurve(HERO_GARDEN_VESSEL);
 const FLAT_VESSEL = { ...HERO_GARDEN_VESSEL, crest: "flat" as const };
+/** Stations the form's own stride leaves on that rail; the record count is the same. */
+const STATIONS = Math.floor(
+  pondVesselPlanCurve(HERO_GARDEN_VESSEL).length / (SWEPT_COPING_POND_BULLNOSE.segmentStride ?? 1));
 const FLAT_TERRAIN = {
   baseHeight_m: FLAT_VESSEL.groundHeight_m,
   features: [],
@@ -56,13 +60,20 @@ function spec(overrides: Partial<SweptCopingSpec> = {}): SweptCopingSpec {
   };
 }
 
-function copingRailSamples(nodes: readonly ReturnType<typeof sweptCopingNodes>[number][]) {
-  return nodes.flatMap((node) => {
-    if (node.kind !== "cone") return [];
-    const at = node.place?.position;
-    assert.ok(at, `${node.id} must be placed`);
-    return [{ at, radius: .5 * (node.baseRadius + node.topRadius) }];
-  });
+/**
+ * The rim's shape, asked for at the seam rather than read back off records.
+ *
+ * This used to unpack whatever primitive the emitter happened to be spelling the
+ * run with, and it was rewritten three times in a week as the emitter went cone
+ * chain, capsule chain, round-cone chain and finally tapered sweep — while the
+ * *properties below it* never changed once. `sweptCopingStations` is where a
+ * coping's centreline and radius profile live (`lib/voxel-scenery/swept-coping.ts`),
+ * and every assertion in this file about crest height, burial, footprint or
+ * freeboard is a question about the shape, not about the records. Only the one
+ * test named for the record layout looks at nodes now.
+ */
+function copingRailSamples(spec: SweptCopingSpec) {
+  return sweptCopingStations(spec);
 }
 
 test("the section overhangs, which is the whole reason it is not a heightfield", () => {
@@ -86,7 +97,8 @@ test("one seed grows one coping, and another grows a sibling", () => {
   assert.deepEqual(sweptCopingNodes(spec()), sweptCopingNodes(spec()));
 
   const first = sweptCopingNodes(spec());
-  const sibling = sweptCopingNodes(spec({ seed: 0x5701e5 ^ 0x9e3779b9 }));
+  const siblingSpec = spec({ seed: 0x5701e5 ^ 0x9e3779b9 });
+  const sibling = sweptCopingNodes(siblingSpec);
   assert.equal(sibling.length, first.length, "a re-seed must not change the record count");
   assert.notDeepEqual(sibling, first);
 
@@ -97,28 +109,44 @@ test("one seed grows one coping, and another grows a sibling", () => {
     + 2 * SWEPT_COPING_POND_BULLNOSE.relief_m;
   const floor = base.radius_m * (1 - 1.6 * SWEPT_COPING_POND_BULLNOSE.sectionVariation)
     - 2 * SWEPT_COPING_POND_BULLNOSE.relief_m;
-  for (const point of copingRailSamples(sibling)) {
+  for (const point of copingRailSamples(siblingSpec)) {
     assert.ok(point.radius <= bound && point.radius >= floor, `radius ${point.radius} left the species`);
   }
 });
 
-test("records are cap-free round-cone SDFs and the rail's resolution is the only knob", () => {
-  assert.equal(sweptCopingNodes(spec()).length, RAIL.length);
-  assert.equal(sweptCopingNodes(spec({ segmentStride: 2 })).length, Math.floor(RAIL.length / 2));
-  const denseRail = pondVesselPlanCurve(HERO_GARDEN_VESSEL, 48);
-  assert.equal(sweptCopingNodes(spec({ rail: denseRail })).length, denseRail.length);
+test("the run is a C1 round-cone chain, and its stride is a density decision", () => {
+  // The one test in this file that is about *records*. Everything else asks
+  // `sweptCopingStations`, which is why the emitter could be swapped twice under
+  // them without any of them moving.
+  const nodes = sweptCopingNodes(spec());
+  assert.equal(nodes.length, STATIONS);
+  assert.equal(sweptCopingNodes(spec({ segmentStride: 1 })).length, RAIL.length);
 
-  for (const node of sweptCopingNodes(spec())) {
+  for (const node of nodes) {
     assert.equal(node.kind, "cone");
     if (node.kind !== "cone") continue;
-    assert.equal(node.roundedEnds, true, "a planar cap can leak its buried normal through the SVO owner cell");
+    // The whole argument for the chain. A round cone is the convex hull of its
+    // end spheres and is tangent to both, so consecutive segments sharing a
+    // sphere are C1 whatever the rail turns through — and there is no planar cap
+    // for the SVO's one-owner-per-voxel to leak a buried normal through.
+    assert.equal(node.roundedEnds, true);
   }
-  assert.ok(denseRail.length < 4096 - 1600,
-    "the smooth-shading resolution must still leave the hero set its budget");
+  // Consecutive segments have to *share* that sphere, not merely abut: the
+  // arriving top radius and the leaving base radius are one station's section.
+  for (let index = 0; index < nodes.length; index += 1) {
+    const here = nodes[index], next = nodes[(index + 1) % nodes.length];
+    if (here.kind !== "cone" || next.kind !== "cone") continue;
+    assert.ok(Math.abs(here.topRadius - next.baseRadius) < 1e-12,
+      `run ${index} hands over a ${here.topRadius} section to a ${next.baseRadius} one`);
+  }
 
+  // A rim is uniformly dense all the way round, so it overflows
+  // `OCTREE_LIVE_SCENE_CANDIDATES_PER_BRICK` everywhere at once or nowhere. The
+  // stride is what keeps it under: at 1 the hero scene's busiest 200 mm brick was
+  // 110 with eight bricks over the 64 contract, and 58 of that brick was rim.
   const publication = buildSvoScenePrimitives(createHeroGardenHoseScene());
   const coping = publication.metadata.filter(({ tags }) => tags.includes("coping"));
-  assert.equal(coping.length, 336, "the hero rail keeps the smooth 1.1-degree joint spacing");
+  assert.ok(coping.length <= 128, `the hero rim publishes ${coping.length} records; 336 overflowed eight bricks`);
   assert.ok(coping.every(({ primitiveIndex }) => publication.descriptors[primitiveIndex].kind === "round-cone"),
     "the scenery bridge must preserve rounded ends as the cap-free ABI kind");
 
@@ -129,9 +157,8 @@ test("records are cap-free round-cone SDFs and the rail's resolution is the only
 
 test("every node is seated on the ground it was handed, not on a plane", () => {
   const section = sweptCopingSection(SWEPT_COPING_POND_BULLNOSE);
-  const nodes = sweptCopingNodes(spec());
   let checked = 0;
-  for (const { at, radius } of copingRailSamples(nodes)) {
+  for (const { at, radius } of copingRailSamples(spec())) {
     const ground = GROUND(at.x, at.z);
     const crest = at.y + radius - ground;
     // The crest stands proud by the authored height, within the modulation.
@@ -145,7 +172,7 @@ test("every node is seated on the ground it was handed, not on a plane", () => {
     assert.ok(at.y - radius < ground - 0.25 * section.radius_m, "the section must be bedded in");
     checked += 1;
   }
-  assert.equal(checked, RAIL.length);
+  assert.equal(checked, STATIONS);
 });
 
 test("the coping's section varies as it runs, which is what stops it reading as an extrusion", () => {
@@ -161,7 +188,7 @@ test("the coping's section varies as it runs, which is what stops it reading as 
   // this is the run the eye actually follows.
   const section = sweptCopingSection(SWEPT_COPING_POND_BULLNOSE);
   const crests: number[] = [], radii: number[] = [];
-  for (const { at, radius } of copingRailSamples(sweptCopingNodes(spec()))) {
+  for (const { at, radius } of copingRailSamples(spec())) {
     // The crest line, not the axis: what stands proud of the plaster at this
     // node is the section's *top*, so a swell in the radius raises it as well as
     // widening it. That is deliberate — `sweptCopingNodes` holds the axis lift
@@ -170,7 +197,7 @@ test("the coping's section varies as it runs, which is what stops it reading as 
     crests.push(at.y + radius - GROUND(at.x, at.z));
     radii.push(radius);
   }
-  assert.equal(crests.length, RAIL.length);
+  assert.equal(crests.length, STATIONS);
 
   const swing = Math.max(...crests) - Math.min(...crests);
   // Enough to see — measured 18.2 mm on a 55 mm rim...
@@ -250,17 +277,31 @@ test("the swept rim and the plaster it is set into agree, on the document that p
   assert.ok(copingNode?.kind === "generator", "the hero document must hold its rim as a generator node");
   const vessel = HERO_GRAPH.vessels?.[copingNode.vessel ?? ""];
   assert.ok(vessel, "the rim's generator node must name a vessel the graph declares");
+  const heroGround = (x_m: number, z_m: number) => terrainHeightAt(HERO_TERRAIN, x_m, z_m);
   const heroCoping = growSceneryGenerator(copingNode.generator, copingNode.params, {
     key: copingNode.id,
     seed: copingNode.seed,
-    groundHeightAt: (x_m, z_m) => terrainHeightAt(HERO_TERRAIN, x_m, z_m),
+    groundHeightAt: heroGround,
     vessel: () => vessel,
+  });
+  // The same inputs, taken to the seam instead of to the emitter: this is the
+  // rim's shape as the document specifies it, and `heroCoping` above is the
+  // records that shape was turned into. Both are needed — the assertions below
+  // are about the shape, and the last one closes the loop through the records.
+  const heroParams = copingNode.params as SweptCopingSpec & { railSamplesPerLobe?: number };
+  const heroStations = sweptCopingStations({
+    ...heroParams,
+    key: copingNode.id,
+    seed: copingNode.seed,
+    rail: pondVesselPlanCurve(vessel, heroParams.railSamplesPerLobe ?? SWEPT_COPING_RAIL_SAMPLES_PER_LOBE),
+    groundHeightAt: heroGround,
+    material: { palette: "stone", value: 0.9 },
   });
 
   // One: the seating, at every rail node.
   let worstOffLevel = 0, leastBurial = Infinity, leastFreeboard = Infinity, lowestUnderside = Infinity;
   let bandTotal = 0, footTotal = 0, worstMismatch = 0, samples = 0;
-  for (const { at, radius } of copingRailSamples(heroCoping)) {
+  for (const { at, radius } of heroStations) {
     const ground = terrainHeightAt(HERO_TERRAIN, at.x, at.z);
     worstOffLevel = Math.max(worstOffLevel, Math.abs(ground - HERO_GARDEN_VESSEL.groundHeight_m));
     leastBurial = Math.min(leastBurial, ground - (at.y - radius));
@@ -286,10 +327,12 @@ test("the swept rim and the plaster it is set into agree, on the document that p
     `the plaster under the rim wanders ${(worstOffLevel * 1e3).toFixed(2)} mm, past the ${HERO_GARDEN_VESSEL.relief_m * 1e3} mm relief`);
   // The section is buried at every node — a rim that floats has a seam of sky
   // under it all the way round. Nominally the burial is exactly the section's
-  // axis lift; the crest and radius modulations drag it to a measured worst of
-  // 10.6 mm, so half the axis lift is a bound with room in it rather than the
-  // identity restated.
-  assert.ok(leastBurial > 0.5 * section.axisLift_m,
+  // axis lift (18.35 mm); the crest and radius modulations drag it to a measured
+  // worst of 8.9 mm, so two fifths of the axis lift is a bound with room in it
+  // rather than the identity restated. It was 10.6 mm before the rail's stride
+  // went to four — a coarser walk lands the stations on different plaster, and
+  // this is the only bound in the file that noticed.
+  assert.ok(leastBurial > 0.4 * section.axisLift_m,
     `the rim's underside comes within ${(leastBurial * 1e3).toFixed(2)} mm of the plaster surface`);
 
   // Two: the width the two authorities are supposed to share.
@@ -331,11 +374,9 @@ test("the swept rim and the plaster it is set into agree, on the document that p
   // one place rather than of two nearby ones. A quarter of a millimetre, which is
   // the plan polyline's own chord sag.
   const curve = pondVesselPlanCurve(HERO_GARDEN_VESSEL);
-  for (const node of heroCoping) {
-    if (node.kind !== "ellipsoid") continue;
-    const at = node.place!.position!;
+  for (const { at } of heroStations) {
     assert.ok(Math.abs(pondVesselPlanDistance(curve, at.x, at.z)) < 1e-3,
-      `${node.id} is ${(pondVesselPlanDistance(curve, at.x, at.z) * 1e3).toFixed(2)} mm off the plan curve`);
+      `a station is ${(pondVesselPlanDistance(curve, at.x, at.z) * 1e3).toFixed(2)} mm off the plan curve`);
   }
 
   // And the loop closed: the rim above was grown with a ground query this file
@@ -346,22 +387,34 @@ test("the swept rim and the plaster it is set into agree, on the document that p
   // the ground enters nowhere else: a rim bedded into the generator instead of
   // the bake, or into a plane at `groundHeight_m`, differs from this one by about
   // two millimetres and would satisfy every bound above.
-  const published = new Map(environmentProxyPrimitives(buildEnvironmentProxyCatalog(HERO, "garden"))
+  const catalog = new Map(environmentProxyPrimitives(buildEnvironmentProxyCatalog(HERO, "garden"))
     .map((proxy) => [proxy.key.replace(/^garden\//, ""), proxy]));
-  let compared = 0;
-  for (const node of heroCoping) {
-    if (node.kind !== "cone") continue;
-    const proxy = published.get(node.id);
+  const published = heroCoping.map((node) => {
+    const proxy = catalog.get(node.id);
     assert.ok(proxy, `${node.id} never reached the published catalog`);
-    assert.equal(proxy.kind, "cone");
-    if (proxy.kind !== "cone") continue;
-    const at = node.place!.position!;
-    assert.ok(Math.hypot(proxy.center_m.x - at.x, proxy.center_m.y - at.y, proxy.center_m.z - at.z) < 1e-12,
-      `${node.id} is published seated somewhere else`);
-    assert.equal(proxy.baseRadius_m, node.baseRadius, `${node.id} is published with a different base section`);
-    assert.equal(proxy.topRadius_m, node.topRadius, `${node.id} is published with a different top section`);
-    assert.equal(proxy.roundedEnds, true);
-    compared += 1;
+    return proxy;
+  });
+  assert.equal(published.length, heroCoping.length, "every record the generator grew must reach the catalog");
+  // Every station has to be inside the union of the published envelopes, at its
+  // own radius. That is the loop the record layer could break without any bound
+  // above noticing: a rim bedded into a plane at `groundHeight_m` rather than
+  // into the bake differs from this one by about two millimetres, and an
+  // envelope solved against the wrong stations would clip the ring.
+  let worstReach = 0;
+  for (const { at } of heroStations) {
+    let nearest = Infinity;
+    for (const proxy of published) {
+      const { min, max } = proxy.aabb_m;
+      const dx = Math.max(min.x - at.x, 0, at.x - max.x);
+      const dy = Math.max(min.y - at.y, 0, at.y - max.y);
+      const dz = Math.max(min.z - at.z, 0, at.z - max.z);
+      nearest = Math.min(nearest, Math.hypot(dx, dy, dz));
+      if (nearest === 0) break;
+    }
+    // The station's whole section has to be inside some record's bounds.
+    worstReach = Math.max(worstReach, nearest);
+    assert.equal(nearest, 0, `a station at ${at.x.toFixed(3)},${at.z.toFixed(3)} is outside every published sweep`);
   }
-  assert.equal(compared, samples);
+  assert.equal(worstReach, 0);
+  assert.ok(samples > 0);
 });

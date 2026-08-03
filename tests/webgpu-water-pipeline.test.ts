@@ -11,6 +11,7 @@ import {
   CONTACT_RESOLVE_BAND_CELLS,
   EXTRACTION_POLYGONISE_WORKGROUP,
   extractionPrepareShader,
+  resolvePremultipliedCausticSample,
   shouldResolveRigidContact,
   shouldUpdateWaterSurface,
   surfaceExtractionDispatchPlan,
@@ -21,6 +22,19 @@ import {
   WATER_INTERFACE_CULL_MODES
 } from "../lib/webgpu-water-pipeline";
 
+test("filtered caustic coverage blends back to the neutral floor without erasing overlaps", () => {
+  assert.deepEqual(resolvePremultipliedCausticSample([0, 0, 0, 0]), [1, 1, 1]);
+  assert.deepEqual(resolvePremultipliedCausticSample([0.1, 0.08, 0.06, 0.1]), [1, 0.98, 0.96],
+    "ten-percent filtered coverage must retain the ninety-percent unchanged floor share");
+  assert.deepEqual(resolvePremultipliedCausticSample([0.6, 0.8, 1.2, 1]), [0.6, 0.8, 1.2],
+    "complete coverage keeps the deposited modulation verbatim");
+  assert.deepEqual(resolvePremultipliedCausticSample([1.8, 2.2, 2.6, 2]), [1.8, 2.2, 2.6],
+    "alpha above one is a real overlapping bundle and must not be normalized away");
+  assert.deepEqual(resolvePremultipliedCausticSample([0.6, 0.8, 1.2, 1], 0.5), [0.8, 0.9, 1.1]);
+  assert.match(compositeShader, /let coverage=clamp\(sampled\.a,0\.0,1\.0\)/);
+  assert.match(compositeShader, /let modulation=mix\(vec3f\(1\.0\),deposited,coverage\)/);
+});
+
 test("rigid contact resolution is confined to a narrow body/surface band", () => {
   assert.equal(CONTACT_RESOLVE_BAND_CELLS, 1.5);
   assert.equal(shouldResolveRigidContact(4, 4.149, 0.1, 1), true);
@@ -30,6 +44,11 @@ test("rigid contact resolution is confined to a narrow body/surface band", () =>
 });
 
 test("the optical composite locally refines rigid contacts and terminates water at opaque bodies", () => {
+  assert.match(compositeShader, /fn safeInterfaceSample/);
+  assert.match(compositeShader, /sampled\.rgb\/sampled\.a/,
+    "filtered interface positions and normals must be resolved out of their fractional validity coverage");
+  assert.doesNotMatch(compositeShader, /front=safeSample\((?:rearFrontPosition|frontPosition)/);
+  assert.doesNotMatch(compositeShader, /normalize\(safeSample\((?:rearFrontNormal|frontNormal|rearBackNormal|backNormal)/);
   assert.match(compositeShader, /fn refineContactSurface/);
   assert.match(compositeShader, /abs\(rigidFront\.t-frontDepth\)<=contactBand/, "implicit sampling stays behind the analytic contact gate");
   assert.match(compositeShader, /rigidFront\.t<=frontDepth/, "exact rigid depth owns pixels in front of the refined liquid surface");

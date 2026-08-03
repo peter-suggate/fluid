@@ -339,10 +339,11 @@ export interface BonsaiForm {
    */
   readonly rootWidth: number;
   /**
-   * How much a buttress narrows along its run. Under one: it is the whole flare,
-   * a buttress that keeps its shoulder radius all the way out is a slab. A
-   * buttress that narrows to a point is a spike and a ring of spikes is a
-   * starfish, so the toe is fatter than the taper alone would leave it.
+   * How much a buttress narrows along its run — which under an anisotropic fin
+   * is spelled as how far back toward the trunk its mass sits, because an
+   * ellipsoid falls to nothing at both ends and a fin centred on its own run
+   * would be fattest in the middle, the one place a root never is. Zero is that
+   * leaf shape; near one the fin leaves thick and thins the whole way out.
    */
   readonly rootTaper: number;
   /** Palette naming the trunk, root and limb ramp. */
@@ -481,7 +482,7 @@ export const BONSAI_POND_CANOPY: BonsaiForm = Object.freeze({
   limbWidth: 0.72,
   limbsPerTrunk: 2,
   limbBow: 0.30,
-  roots: 7,
+  roots: 5,
   rootReach: 2.9,
   rootWidth: 0.92,
   rootTaper: 0.62,
@@ -699,16 +700,26 @@ const LIMB_FORK_SHARE = 0.80;
  */
 const GROUND_ENVELOPE_WASTE_BUDGET = 6;
 
+/** How tall a fin stands where it leaves the trunk, as a fraction of its shoulder width. */
+const BUTTRESS_HEIGHT_SHARE = 1.45;
+
 /**
- * A buttress fin's section: how thick it is across its run, and how tall it
- * stands, both as fractions of its own shoulder width.
+ * Envelopes chained along one fin, and how far each overlaps its neighbour.
  *
- * A plate, which is what a buttress root is and what a round sweep can never be.
- * Thin enough to read as a fin from the side and tall enough to read as one from
- * the front; the ratio between them is what separates a buttress from a rib.
+ * The count is what buys the blade. A single envelope over the whole run makes
+ * the *length* the longest half-axis, and the eccentricity cap below then sets
+ * the thin axis off that length rather than off the height — which is how one
+ * envelope per root came out with a section near enough square. Four short ones
+ * put the length under the height for most of the run, so the cap binds on the
+ * height instead and the section falls to one in four.
+ *
+ * The overlap is not optional: two records meet in a hard union, and a chain
+ * that merely abutted would show a gap at every junction. A third of a segment
+ * either way puts each junction well inside its neighbour, where the two blades
+ * already agree on their section and the union is invisible.
  */
-const BUTTRESS_THICKNESS_SHARE = 0.42;
-const BUTTRESS_HEIGHT_SHARE = 1.35;
+const BUTTRESS_SEGMENTS = 4;
+const BUTTRESS_SEGMENT_OVERLAP = 0.34;
 
 /**
  * The largest ratio between a fin envelope's longest and shortest half-axis.
@@ -716,12 +727,59 @@ const BUTTRESS_HEIGHT_SHARE = 1.35;
  * A soundness bound wearing a proportion's hat, and it is the *envelope's*
  * rather than the lobes'. A cluster is clipped by `(|p/R| - 1)·min R`, a
  * Lipschitz-1 lower bound whose slack goes as the envelope's own eccentricity,
- * so a fin `n` times longer than it is thin understeps by up to `n` near its
- * long axis. With {@link SVO_PRIMITIVE_MARCH_ITERATIONS} fixed at 48, a grazing
- * ray on a thin enough fin runs out before it arrives and reports a miss — a
- * hole, not an error. Three is what `tests/bonsai.test.ts` measures clean.
+ * so a fin `n` times thinner than it is long understeps by up to `n` and, with
+ * {@link SVO_PRIMITIVE_MARCH_ITERATIONS} fixed at 48, a ray runs out before it
+ * arrives. That failure is a *hole*, reported nowhere.
+ *
+ * Measured with the ABI's own tracer on a blade envelope, rays cast at it from
+ * 676 directions through its centre — where the field provably is, so a miss can
+ * only be the march giving up:
+ *
+ *   eccentricity    3      4      5      6      8     10
+ *   rays that hit  100%   100%  99.7%  97.5%  92.5%  82.3%
+ *
+ * Four is the last one clean, and it is also enough: it puts the fin's thickness
+ * at a quarter of its height, which is the thick end of what reads as a blade.
+ * Anything thinner has to come from a cap this measurement does not support.
  */
-const BUTTRESS_MAXIMUM_ECCENTRICITY = 3;
+const BUTTRESS_MAXIMUM_ECCENTRICITY = 4;
+
+/**
+ * The fin's blend, as a fraction of its *shortest* half-axis.
+ *
+ * Which is the axis the ABI measures it against: a seeded-lobes packing must
+ * keep `span + spread + blend/shortest` under one, or the hard `max` slices the
+ * lobes it was there to contain. The defaults spend 0.72 of that budget, so this
+ * has 0.28 to work in and takes half of it — enough to round the lumps into one
+ * blade, not enough to swell it back toward its envelope.
+ */
+const BUTTRESS_BLEND_SHARE = 0.15;
+
+/**
+ * How far the ground may fall under a buttress before it has left the bank, as
+ * a fraction of the stump radius.
+ *
+ * The generator is handed a height query and nothing else, on purpose — a
+ * specimen has no business knowing whether it is standing beside a pond, a wall
+ * or a step. What it *can* see is that the ground under a bearing has dropped
+ * away, and that is what the edge of a bank is. On the hero stand the terrace
+ * falls 70 mm within 80 mm toward the water while the coping's outer foot is at
+ * 100 mm, so a fin that stops at a bole radius of fall stops on soil with room
+ * to spare; the bearings that run inland fall 50 mm in 240 mm and never reach
+ * the limit, so they are not shortened at all.
+ */
+const ROOT_MAXIMUM_FALL_SHARE = 0.85;
+
+/**
+ * The shortest run worth publishing a buttress along, in stump radii.
+ *
+ * Below it the four chained envelopes are shorter than they are tall and the
+ * chain stops being a blade, so the bearing is left bare. It is a floor rather
+ * than a target: on the hero stand the pond-side bearings clamp to about two
+ * thirds of a bole and still publish, which is the stub a bank that narrow
+ * actually has room for.
+ */
+const BUTTRESS_MINIMUM_REACH_SHARE = 0.6;
 
 /**
  * Anisotropy of the fin's own lobes, against the ABI's ceiling of four.
@@ -1195,105 +1253,135 @@ export function planBonsai(spec: BonsaiSpec): BonsaiPlan {
     { at_m: V(0, stumpTopY, 0), radius_m: BASE_TOP_SHARE * boleRadius },
   ], bark(spec.barkValue + .01), "stem", GROUND_ENVELOPE_WASTE_BUDGET);
 
-  // The buttresses, and the field they are made of is the whole point.
+  // The buttresses. A **fin**, and every decision here is about making a blade
+  // rather than a lump.
   //
-  // A swept tube is *circular in section*. Built that way these came out as a
-  // bundle of smooth round pipes splaying from a central mass — an octopus, not
-  // a root plate — and no taper fixes it, because the section is round at every
-  // station by construction. A buttress root is a **fin**: long along its run,
-  // tall against the trunk, thin across. That is three different half-axes, so
-  // it is a `seeded-lobes` cluster in an oriented triaxial envelope.
+  // Round sweeps made them tentacles: a sweep is circular in section at every
+  // station by construction, so a bundle of them reads as pipes. One `seeded-lobes`
+  // envelope apiece made them boulders, and the reason is the eccentricity cap:
+  // a cluster's clip is `(|p/R| - 1)·min R`, whose slack goes as the envelope's
+  // own longest-over-shortest, so a single envelope spanning the whole run
+  // forced the thin axis up to a quarter of that *length* — 0.61 of the fin's
+  // height, which is a section near enough square, which is a bread roll.
+  //
+  // The way past it is the one the crown's rim needed: composition. A fin is
+  // several short envelopes chained along its run, each well inside the cap, and
+  // their union is longer and thinner than any of them could be alone. With the
+  // long axis no longer the largest, the thin axis is set by the *height*
+  // instead, and the section comes out one to four — a blade standing on edge.
   //
   // The field is what makes it a root rather than a wedge. Its lobes are placed
   // from the seed inside the envelope by a rule that guarantees the clipping
   // `max` never reaches them, so the silhouette it draws is the lobes' own and
-  // *not* the ellipsoid — which is exactly the property the crown's lattice does
-  // not have, and the reason the same trick cannot be used up there. All three
-  // placement parameters are fractions of the envelope in its own normalised
-  // space, so an envelope this eccentric produces lobes of the same proportions:
-  // a fin's lumps are fin-shaped without being told to be.
-  //
-  // The run itself is unchanged — out on `t^0.62`, down on `(1-t)^2`, every
-  // station on the ground under it, which is the whole reason this generator is
-  // handed a height query rather than a plane. What the run now defines is the
-  // envelope's frame rather than a chain of stations.
+  // *not* the ellipsoid — the property the crown's lattice does not have, and
+  // the reason the same trick cannot be used up there. All three placement
+  // parameters are fractions of the envelope in its own normalised space, so an
+  // envelope this eccentric produces lobes of the same proportions: a fin's
+  // lumps are fin-shaped without being told to be.
   const rootFeet_m: Vec3[] = [];
-  const rootPoints: Vec3[][] = [];
-  const ROOT_STEPS = 5;
+  const ROOT_STEPS = 12;
   for (let index = 0; index < rootCount; index += 1) {
     const angle = 2 * Math.PI * (index + .30 * hashSigned(seed + 17 * index)) / rootCount;
-    const reach = boleRadius * spec.rootReach * (.85 + .30 * hash01(seed + 17 * index + 1));
     const outward = bearing(angle);
     const width = spec.rootWidth * (.90 + .20 * hash01(seed + 17 * index + 2));
-    const points: Vec3[] = [];
-    for (let step = 0; step <= ROOT_STEPS; step += 1) {
-      const t = step / ROOT_STEPS;
+    // How far this bearing may run before it has left the bank.
+    //
+    // Terrain, not geometry, and deliberately so: the generator is handed a
+    // height query and nothing else, because a specimen has no business knowing
+    // what it is standing beside. What it *can* see is that the ground under a
+    // bearing has dropped away, which is what the edge of a bank is. On the hero
+    // stand the terrace falls 70 mm within 80 mm toward the water and the
+    // coping's outer foot is at 100 mm, so a fin that stops where the bank has
+    // fallen a bole radius stops on soil; the bearings that run inland never
+    // reach the limit at all and are unaffected.
+    const wanted = boleRadius * spec.rootReach * (.85 + .30 * hash01(seed + 17 * index + 1));
+    const shoulderTall_m = boleRadius * width * BUTTRESS_HEIGHT_SHARE;
+    const reach = (() => {
+      const fall = ROOT_MAXIMUM_FALL_SHARE * boleRadius;
+      for (let step = 1; step <= ROOT_STEPS; step += 1) {
+        const radial = wanted * step / ROOT_STEPS;
+        if (!(-groundLocal(outward.x * radial, outward.z * radial) > fall)) continue;
+        // Back off by the fin's own height at the *toe*, not by a step of the
+        // walk. What has to stay on the bank is the envelope, and the last one
+        // reaches past its toe by its own longest half-axis — which for a blade
+        // is how tall it is there, not how far it runs. Backing off a step left
+        // three millimetres of one hanging over the coping; backing off the
+        // shoulder's height instead deleted the pond-side roots outright.
+        return Math.max(0, wanted * (step - 1) / ROOT_STEPS
+          - shoulderTall_m * (1 - spec.rootTaper));
+      }
+      return wanted;
+    })();
+    // A bearing with no bank left still gets a buttress, just a short one: the
+    // pond side of this specimen genuinely has less ground, and a stub that
+    // flares out of the base and stops reads as that. What it must not do is go
+    // to zero, which leaves the camera-facing quarter of the base with no root
+    // on it at all.
+    if (!(reach > BUTTRESS_MINIMUM_REACH_SHARE * boleRadius)) continue;
+
+    // The run: out on `t^0.62`, down on `(1-t)^2`, every station placed on the
+    // ground under it, so a buttress follows the bank down as it goes. That last
+    // part is the whole reason this generator is handed a height query.
+    const at = (t: number): Vec3 => {
       const radial = reach * t ** .62;
       const x = outward.x * radial, z = outward.z * radial;
-      points.push(V(x, groundLocal(x, z) + stumpTopY * (1 - t) ** 2 - .30 * boleRadius * t, z));
-    }
-    rootPoints.push(points);
+      return V(x, groundLocal(x, z) + stumpTopY * (1 - t) ** 2 - .30 * boleRadius * t, z);
+    };
+    // Height along the run, from the shoulder to a knife edge. This is the flare:
+    // the fin is at its tallest where it leaves the trunk and thins the whole way
+    // out, rather than being fattest in the middle like a leaf.
+    const tallAt = (t: number): number => shoulderTall_m * (1 - spec.rootTaper * t ** .7);
 
-    // The frame: long axis down the chord from the shoulder to the toe, which
-    // already points outward *and* down, so the fin follows the bank without
-    // being told about it. Lateral is horizontal and across that run; the third
-    // axis closes the basis and is what the fin stands up on.
-    const shoulder = points[0];
-    const toe = points[ROOT_STEPS];
-    const along = normalize(sub(toe, shoulder));
-    const lateral = normalize(cross(V(0, 1, 0), along));
-    const upright = cross(along, lateral);
-    // Half-axes, and the eccentricity is capped rather than authored freely: the
-    // envelope's containment bound is scaled by its *smallest* half-axis, so a
-    // fin much thinner than it is long makes the march understep by that ratio
-    // and a grazing ray runs out of its forty-eight iterations before it
-    // arrives. Three is measured to be safe here; see `tests/bonsai.test.ts`.
-    const long_m = .58 * length(sub(toe, shoulder));
-    const thin_m = boleRadius * width * BUTTRESS_THICKNESS_SHARE;
-    const tall_m = Math.min(BUTTRESS_MAXIMUM_ECCENTRICITY * thin_m, boleRadius * width * BUTTRESS_HEIGHT_SHARE);
-    nodes.push({
-      kind: "cluster", field: "seeded-lobes", id: `${key}/root-${index}`,
-      group: key, tags: partTags("root"),
-      place: { position: scale(add(shoulder, toe), .5), orientation: basisOrientation(along, upright, lateral) },
-      lobe: V(long_m, tall_m, Math.max(thin_m, long_m / BUTTRESS_MAXIMUM_ECCENTRICITY)),
-      lobeCount: 6 + (index % 3),
-      anisotropy: BUTTRESS_LOBE_ANISOTROPY,
-      smoothRadius: .35 * thin_m,
-      seed: (seed ^ (0x85eb_ca6b * (index + 1))) >>> 0,
-      material: bark(spec.barkValue - .03 + .04 * hash01(seed + 23 * index)),
-    });
-    // The envelope bounds the field by construction, so its own box is the bound.
-    cover(scale(add(shoulder, toe), .5), V(long_m, tall_m, long_m));
-    // A toe, rounder than the fin that reaches it: a buttress that narrows to a
-    // point is a spike and a ring of spikes is a starfish.
-    sphere(`root-${index}-toe`, toe, 1.05 * tall_m,
-      bark(spec.barkValue - .02 + .03 * hash01(seed + 29 * index)), "root");
+    for (let segment = 0; segment < BUTTRESS_SEGMENTS; segment += 1) {
+      // Overlapped, because two records meet in a hard union and a gap between
+      // them is a hole. A third of a segment either way puts each junction well
+      // inside its neighbour, where both blades already agree on their section.
+      const t0 = Math.max(0, (segment - BUTTRESS_SEGMENT_OVERLAP) / BUTTRESS_SEGMENTS);
+      const t1 = Math.min(1, (segment + 1 + BUTTRESS_SEGMENT_OVERLAP) / BUTTRESS_SEGMENTS);
+      const from = at(t0), to = at(t1);
+      const span_m = length(sub(to, from));
+      if (!(span_m > 1e-4)) continue;
+      const along = normalize(sub(to, from));
+      const lateral = normalize(cross(V(0, 1, 0), along));
+      const upright = cross(along, lateral);
+      const centre = scale(add(from, to), .5);
+      const long_m = .56 * span_m;
+      const tall_m = tallAt(.5 * (t0 + t1));
+      // The section. The thin axis is a quarter of whichever of the other two is
+      // larger, which is the eccentricity cap holding — and because the chaining
+      // keeps `long_m` under `tall_m` for most of the run, what sets it is the
+      // height, so the fin is a blade rather than a log.
+      const thin_m = Math.max(tall_m, long_m) / BUTTRESS_MAXIMUM_ECCENTRICITY;
+      nodes.push({
+        kind: "cluster", field: "seeded-lobes", id: `${key}/root-${index}-${segment}`,
+        group: key, tags: partTags("root"),
+        place: { position: centre, orientation: basisOrientation(along, upright, lateral) },
+        lobe: V(long_m, tall_m, thin_m),
+        lobeCount: 5 + ((index + segment) % 4),
+        anisotropy: BUTTRESS_LOBE_ANISOTROPY,
+        // Against the *shortest* half-axis, which is what the ABI measures a
+        // blend by: span plus spread plus this must stay under one or the hard
+        // `max` slices the lobes it was meant to contain.
+        smoothRadius: BUTTRESS_BLEND_SHARE * thin_m,
+        seed: (seed ^ (0x85eb_ca6b * (index + 1)) ^ (0x9e37_79b1 * (segment + 1))) >>> 0,
+        material: bark(spec.barkValue - .03 + .04 * hash01(seed + 23 * index + segment)),
+      });
+      // The envelope contains the field by construction, so its own box bounds it.
+      cover(centre, V(Math.max(long_m, tall_m), Math.max(long_m, tall_m), Math.max(long_m, tall_m)));
+    }
+    const toe = at(1);
     rootFeet_m.push(V(standX + toe.x, groundY + toe.y, standZ + toe.z));
   }
+  if (rootFeet_m.length < 3) throw new RangeError("Bonsai has no bank to put its buttresses on");
 
-  // The fillet in each notch between neighbouring buttresses — a sphere, and it
-  // took two wrong shapes to get there. A flattened spheroid across the pair is
-  // what a smooth union would leave, but the roll of `alongAxis` is unspecified
-  // so it has to be a disc, and a disc wide enough to bridge two of them reaches
-  // as far above and below: a ring of those made the base wear a skirt of
-  // petals. A sphere in the notch has no plane to stick out of, and a smoothing
-  // radius is a rolling ball anyway — this is the ball. Its radius is clamped
-  // against the ground under it so a fillet cannot be buried in the bank.
-  //
-  // One ring rather than two. The buttresses are thick enough now that they
-  // already overlap for the first third of their run; the notch that still needs
-  // filling is the one just outside the base's own flare.
-  const FILLET_STEP = 2;
-  for (let index = 0; index < rootCount; index += 1) {
-    const here = rootPoints[index][FILLET_STEP];
-    const next = rootPoints[(index + 1) % rootCount][FILLET_STEP];
-    const center = scale(add(here, next), .5);
-    const clearance = center.y - groundLocal(center.x, center.z);
-    const radius = Math.min(.52 * length(sub(next, here)), Math.max(.20 * boleRadius, .9 * clearance));
-    if (!(radius > 0)) continue;
-    sphere(`fillet-${index}`, center, radius,
-      bark(spec.barkValue - .03 + .04 * hash01(seed + 37 * index)), "root");
-  }
+  // No fillet ring. It used to bridge the notches between neighbouring roots,
+  // and with fins that is precisely the wrong thing to do: what has to read is
+  // the deep V between one blade and the next, running from high on the trunk
+  // down to the soil and opening outward. Seven roots with their notches filled
+  // came out as a single lumpy collar. Five with air between them read as roots,
+  // and the merge that is wanted happens on its own — every fin leaves the axis
+  // inside the base's own flare, so they fuse for the first fifth of their run
+  // and are separate objects for the rest.
 
   // The trunks. Radial offset goes as t^1.8 so each leaves the base nearly
   // upright and is splayed by the time it forks: that curve is what makes the

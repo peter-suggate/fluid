@@ -7,7 +7,7 @@ import {
 } from "./voxel-scenery/pond-vessel";
 import { BONSAI_POND_CANOPY } from "./voxel-scenery/bonsai";
 import { sweptCopingSection, SWEPT_COPING_POND_BULLNOSE } from "./voxel-scenery/swept-coping";
-import { stoneSetSteppingBodies } from "./voxel-scenery/stone-set";
+import { stoneSetBoulderStations, stoneSetSteppingBodies } from "./voxel-scenery/stone-set";
 import { ROSETTE_AIR_PLANT, ROSETTE_GRASS_TUFT, type RosetteForm } from "./voxel-scenery/rosette";
 import { sweptTubeNodes } from "./voxel-scenery/swept-tube";
 import { tanHalfFovFor35mmFocalLength } from "./webgpu-camera";
@@ -436,14 +436,50 @@ const HERO_BONSAI_FORM = Object.freeze({
  */
 
 /**
+ * Where the boulder-family plant stands: derived, not authored.
+ *
+ * The near plant belongs *to the boulder group* — it is the tuft that has taken
+ * hold in the gravel heaped at their feet, and that reading is the whole reason
+ * it carries a wider `bed_m` than the other two. So it is solved from the
+ * family's own stations rather than given a world coordinate beside them.
+ *
+ * That is not tidiness. This constant used to hold `[-0.60, -0.26]`, and when
+ * the stone set re-solved the family's position against the camera the plant
+ * stayed behind and stood alone on an empty bank — a coordinate restating
+ * another module's answer is a copy that drifts the first time the original
+ * moves. `stoneSetSteppingStations` is read the same way by the layout for the
+ * same reason.
+ *
+ * It stands off the outboard end of the family rather than among it, clear by
+ * half the outermost stone's own width, so a three-millimetre rosette is never
+ * inside a boulder it cannot be seen against.
+ */
+const HERO_BOULDER_PLANT_CLEARANCE = 0.5;
+function heroBoulderPlantStand(): readonly [number, number] {
+  const family = stoneSetBoulderStations({
+    vessel: HERO_GARDEN_VESSEL,
+    waterline_m: HERO_GARDEN_WATERLINE_M,
+    seed: HERO_GARDEN_SET_SEED,
+  });
+  // The outboard end is the station furthest from the pond's centre in x, which
+  // is the direction the family runs; standing beyond it keeps the plant on the
+  // open bank instead of between two stones.
+  const outboard = family.reduce((a, b) => (a.at_m[0] <= b.at_m[0] ? a : b));
+  return [
+    outboard.at_m[0] - HERO_BOULDER_PLANT_CLEARANCE * outboard.width_m,
+    outboard.at_m[1] + HERO_BOULDER_PLANT_CLEARANCE * outboard.width_m,
+  ];
+}
+
+/**
  * Where the plants stand.
  *
  * All three sit *off* the coping rather than on it: a rosette's blades are
  * three millimetres across and the rim is the one surface in this scene the eye
  * follows as a continuous line, so a tuft on the crest reads as damage to the
  * casting. `bed_m` is the little of the ground each one has disturbed under
- * itself, and the near-left plant has more of it because it is bedded into the
- * boulder group's own gravel.
+ * itself, and the boulder-group plant has more of it because it is bedded into
+ * that group's own gravel.
  */
 const HERO_PLANT_STANDS: readonly {
   readonly id: string;
@@ -452,7 +488,7 @@ const HERO_PLANT_STANDS: readonly {
   readonly bed_m?: number;
   readonly salt: number;
 }[] = Object.freeze([
-  { id: "plant/terrace-left", form: ROSETTE_AIR_PLANT, at_m: [-0.60, -0.26] as const, bed_m: 0.035, salt: 0x00a1_7e01 },
+  { id: "plant/boulder-group", form: ROSETTE_AIR_PLANT, at_m: heroBoulderPlantStand(), bed_m: 0.035, salt: 0x00a1_7e01 },
   { id: "plant/terrace-back", form: ROSETTE_AIR_PLANT, at_m: [0.44, 0.42] as const, bed_m: 0.028, salt: 0x00a1_7e02 },
   { id: "plant/rim-right", form: ROSETTE_GRASS_TUFT, at_m: [0.72, -0.32] as const, bed_m: 0.024, salt: 0x00a1_7e03 },
 ]);

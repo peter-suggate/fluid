@@ -38,7 +38,8 @@ import { MAX_TERRAIN_GRID_SAMPLES, MIN_TERRAIN_GRID_SIZE, type TerrainGrid } fro
  * and also the cheapest performance decision available here: the grid carries
  * one Lipschitz slope bound for the *whole scene* and the dry render's march
  * steps by it everywhere, so a face that is 45 % less steep is paid back on the
- * flat plaster metres away. Measured on the hero pond, 9.41 to 5.32.
+ * flat plaster metres away. Measured on the hero pond, 9.41 to 5.32, and to 4.40
+ * once the face was allowed a crease at the top (`pondVesselInnerFaceProfile`).
  *
  * Determinism is the same contract the procedural tree keeps: the seed is the
  * only entropy, it enters through an integer avalanche hash, and the same spec
@@ -236,23 +237,27 @@ const PLAN_SWAY_CYCLES = Object.freeze([
  * argument `PondVesselBeach` already makes: the graded face, the pinch and the
  * bank are three consequences of one decision about where the near shore is.
  *
- * Six per cent draws the hero pond's shore in by 30 mm, which is half the
- * coping's own width, and it is chosen against the set rather than by eye. The
- * near stepping stone is the binding constraint: `stone/disc-1` is authored 300
- * mm out on a bearing 8 degrees off the beach's centre, and at zero pinch its
- * rim already clears the coping's inner foot by only 31 mm. The sweep eats that
- * clearance almost millimetre for millimetre — 6.2 mm left at six per cent, 1.9
- * at seven, negative at eight. The reference's sweep is nearer twelve per cent
- * and this pond could carry it the day that stone moves 25 mm inward; until
- * then a rim that grew through a stepping stone would be the outline and the
- * composition disagreeing, which is exactly what one shared plan curve exists
- * to prevent.
+ * Twelve per cent is the reference's own sweep, and it draws the hero pond's
+ * shore in by 60 mm — a coping's full width. It was six for one round, held
+ * there by a stepping stone: the near plate was authored at a fixed position
+ * 300 mm out and cleared the coping's inner foot by only 31 mm before any pinch
+ * at all, so the sweep ate that clearance almost millimetre for millimetre and
+ * ran out at eight per cent.
  *
- * Gentle either way: over the hero beach's 61-degree sector the rail's tangent
- * never turns more than about five degrees off the ellipse's, so the sweep is
- * something the eye follows rather than a dent it catches on.
+ * What released it is that the wading chain stopped being authored and started
+ * being *solved against this curve*: `stone-set.ts` now clamps every plate to a
+ * minimum run off the rail, so the shore sweeping inward pushes the plates out
+ * into the water with it instead of being overtaken. Measured across the pinch,
+ * the whole chain's tightest plate moves from 46.5 mm of clearance at six per
+ * cent to 39.4 at twelve — 7 mm spent for 30 mm of sweep, where before it was
+ * millimetre for millimetre. It is still the binding constraint and it is no
+ * longer a tight one.
+ *
+ * Gentle at this depth too: over the hero beach's 61-degree sector the rail's
+ * tangent never turns more than about ten degrees off the ellipse's, so the
+ * sweep is something the eye follows rather than a dent it catches on.
  */
-const PLAN_BEACH_PINCH = 0.06;
+const PLAN_BEACH_PINCH = 0.12;
 
 /**
  * Share of the basin's own half-width the floor's dish spends reaching its
@@ -314,6 +319,60 @@ function ramp(value: number): number {
 export function pondVesselCrestProfile(u: number): number {
   const t = Math.min(1, Math.max(0, u));
   return (1 - t * t) ** 1.5;
+}
+
+/**
+ * How much of the inner face's fillet is spent easing into the floor, as a
+ * fraction of its run.
+ *
+ * The face is otherwise straight, and both ends of that choice are deliberate.
+ * See `pondVesselInnerFaceProfile`.
+ */
+const POND_VESSEL_INNER_FACE_FILLET = 0.35;
+
+/** Straight run and fillet share the fall, so the straight part is this much steeper than the mean. */
+const POND_VESSEL_INNER_FACE_SLOPE = 1 / (1 - POND_VESSEL_INNER_FACE_FILLET / 2);
+
+/**
+ * The inner face's fall, as a fraction of its share of the depth at a fraction
+ * `u` of the way down its run.
+ *
+ * A straight face with a fillet at the bottom and **nothing at the top**, which
+ * is the one thing here that is a break rather than a blend, and it buys two
+ * unrelated things at once.
+ *
+ * The first is the line. Every other join in this vessel is tangent on purpose,
+ * and for the coping's outer flank that is wrong — which is why the coping left
+ * the heightfield (`lib/voxel-scenery/swept-coping.ts`). The *inner* foot had
+ * the same problem and no such escape: a smoothstep leaves the plaster band with
+ * a horizontal normal, so the flat band did not end anywhere, it just gradually
+ * stopped being flat, and the whole interior rendered as one unbroken white
+ * sheet. The reference has a hard shadow line where the kerb's inner foot meets
+ * the floor. Starting the face at its full slope puts the normal 71 degrees over
+ * in a single cell, and that line appears for free.
+ *
+ * The second is the slope, and it is the opposite of what you would guess.
+ * Introducing a crease makes the face *shallower*, not steeper: a profile that
+ * has to start and finish flat must overshoot the mean in the middle, and
+ * smoothstep's peak is 1.5x it. A face that is allowed to begin at full slope
+ * only has to ease at one end, and the peak falls to `1 / (1 - fillet / 2)` —
+ * 1.21x at the 35 % fillet here. Since the terrain grid carries one Lipschitz
+ * bound for the whole scene, that is a fifth off the marching cost of every
+ * ray in the frame, paid for by a feature the reference wanted anyway.
+ *
+ * The fillet is at the bottom rather than the top because that is the end that
+ * has to meet something: the floor's dish arrives tangent, and a face landing on
+ * it at full slope would put a second crease where the reference has none.
+ */
+export function pondVesselInnerFaceProfile(u: number): number {
+  const t = Math.min(1, Math.max(0, u));
+  const fillet = POND_VESSEL_INNER_FACE_FILLET;
+  const straight = 1 - fillet;
+  if (t <= straight) return POND_VESSEL_INNER_FACE_SLOPE * t;
+  // A quadratic ease over the fillet: value and slope match the straight run at
+  // its start, and the slope reaches zero exactly at the foot.
+  const v = (t - straight) / fillet;
+  return POND_VESSEL_INNER_FACE_SLOPE * (straight + fillet * (v - .5 * v * v));
 }
 
 /**
@@ -543,7 +602,7 @@ export function pondVesselHeightAt(
   const inward = -distance - rimHalfWidth;
   const dish = spec.floorDish ?? POND_VESSEL_FLOOR_DISH;
   const fall = distance >= 0 ? 0 : spec.basinDepth_m * (
-    (1 - dish) * ramp(inward / pondVesselInnerFaceRun(spec, turn))
+    (1 - dish) * pondVesselInnerFaceProfile(inward / pondVesselInnerFaceRun(spec, turn))
     + dish * ramp(inward / pondVesselFloorDishReach(spec, curve))
   );
   const base = spec.groundHeight_m - fall;

@@ -1047,17 +1047,21 @@ export function heroGardenLayoutPlacements(input: HeroGardenLayoutInput): readon
     // 45 mm cobble, heaped coarse against the boulder group and running out to
     // sparse shingle away from it. A row that kept the old numbers would
     // under-reserve the envelope every bed is laid inside of by half.
+    // The heap at the boulders' feet, the beach where the shelf runs into the
+    // water, and the fine course along the right-hand rim. Each is one of
+    // `HERO_PEBBLE_DRIFTS` read back as an arc: middle turn plus and minus its
+    // half length, centred at the middle of its own band.
     bedRow("stone/bed-shore", input, {
-      fromTurn: 0.30, toTurn: 0.78, offsetInHalfWidths: 1.55,
-      halfWidth_m: 0.078, grade_m: [0.004, 0.045],
+      fromTurn: 0.642, toTurn: 0.838, offsetInHalfWidths: 3.00,
+      halfWidth_m: 0.059, grade_m: [0.004, 0.045],
     }, 480, 0x51_be01),
     bedRow("stone/bed-near", input, {
-      fromTurn: 0.85, toTurn: 1.12, offsetInHalfWidths: 1.45,
-      halfWidth_m: 0.042, grade_m: [0.004, 0.016],
+      fromTurn: 0.396, toTurn: 0.592, offsetInHalfWidths: 2.27,
+      halfWidth_m: 0.036, grade_m: [0.004, 0.020],
     }, 300, 0x51_be02),
     bedRow("stone/bed-scatter", input, {
-      fromTurn: 0.33, toTurn: 0.47, offsetInHalfWidths: 3.09,
-      halfWidth_m: 0.055, grade_m: [0.004, 0.014],
+      fromTurn: 0.994, toTurn: 1.286, offsetInHalfWidths: 1.80,
+      halfWidth_m: 0.025, grade_m: [0.004, 0.012],
     }, 120, 0x51_be03),
 
     // Five discs wading out from the bank along a contour of the pond's own

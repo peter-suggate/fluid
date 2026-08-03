@@ -208,6 +208,7 @@ const optimizationExperiments: SvoDryOptimizationExperiments = {
   rasterPrimaryNoFragmentDepth: process.env.FLUID_SVO_DRY_FRAME_NO_FRAG_DEPTH === "1",
   rasterPrimaryHsrProbe: process.env.FLUID_SVO_DRY_FRAME_HSR_PROBE === "1",
   scenePrimitiveHsrProbe: process.env.FLUID_SVO_DRY_FRAME_SCENE_HSR_PROBE === "1",
+  scenePrimitiveUnboundedMarch: process.env.FLUID_SVO_DRY_FRAME_UNBOUNDED_MARCH === "1",
 };
 const voxelLightCacheEnabled = optimizationExperiments.voxelLightCache !== false;
 const rayCoherenceModeRaw = process.env.FLUID_SVO_DRY_FRAME_COHERENCE ?? "off";

@@ -64,42 +64,77 @@ import { alongAxis, V } from "./builder";
  *
  * ## Records
  *
- * The rail is emitted as a chain of round-cone SDFs: the exact convex hull of
- * the endpoint spheres. Unlike a capsule, each segment preserves both authored
- * radii; unlike a truncated cone, its ends are spherical parts of the same SDF
- * rather than planar caps that separate geometry is expected to hide. That is
- * load-bearing in an SVO. A voxel stores one primitive owner, so the old
- * endpoint sphere could not reliably hide an overlapping cone cap; whichever
- * owner won the cell was the only primitive the ray tested. Buried cap normals
- * consequently leaked through as dark one-pixel dots along the coping.
+ * One round-cone SDF per station pair — the convex hull of the two end spheres —
+ * with consecutive segments sharing their endpoint sphere. Two properties follow
+ * from that and both are load-bearing.
  *
- * The outline is settled long before the highlight is. A chord's departure from
- * the plan is `c^2 / 8R`, which on this pond is 0.18 mm at the plan curve's own
- * 112 points — invisible at any zoom. But the chain's *shading normal* steps by
- * the whole turn angle at every joint, because a cone is straight and the rim is
- * not, and 112 joints round a closed run is 3.2 degrees apiece. Rendered on a
- * near-white surface that is unmistakable banding, and it is *not* the section
- * modulation: turning every modulation off leaves an identically banded uniform
- * tube. Measured, on the hero rim at 0.15 m:
+ * **It is C1 through every joint.** A round cone's lateral surface is tangent to
+ * both of its end spheres, so where two of them meet on a shared sphere the
+ * surface has one normal however far the rail turns. That is *not* true of the
+ * constructions this replaced, and the difference invalidated the rule this
+ * module was built on: a truncated cone is straight and its cap is planar, so a
+ * cone chain's shading normal stepped by the whole turn angle at every joint and
+ * a convincing rim cost 336 segments at 1.1 degrees apiece. With round cones the
+ * joint angle costs nothing, and the only thing rail resolution still buys is
+ * chord sag — `c^2 / 8R`, which is 0.57 mm at the 84 stations used here.
  *
- *   112 segments   3.2 deg/joint    112 records   banded, obviously
- *   336 segments   1.1 deg/joint    336 records   clean
- *   448 segments   0.8 deg/joint    448 records   clean
- *
- * So a convincing rim on this pond is about 336 records. The round-cone halves
- * the old cone-plus-sphere record cost, but C1 round-a-curve still has to be
- * bought with rail resolution because the ABI has no multi-segment swept-arc
- * field. A future marched sweep SDF can replace this emitter without changing
- * `sweptCopingStations`, which is why the form and record layers are separate.
- *
- * The remaining constraint is density, not total.
- * `OCTREE_LIVE_SCENE_CANDIDATES_PER_BRICK` is 64 primitives per brick and the
- * rest of a crowded brick is dropped from the voxelized occupancy — not from
+ * **Its density is the ceiling, not its total.**
+ * `OCTREE_LIVE_SCENE_CANDIDATES_PER_BRICK` is 64 primitives per 200 mm brick and
+ * the rest of a crowded brick is dropped from the voxelized occupancy — not from
  * primary visibility, which is a BVH over the records — so an overflowing brick
- * loses shadowing and ambient occlusion rather than silhouette. The coping is
- * therefore kept as one record per rail segment; reintroducing endpoint helper
- * primitives would spend this local density budget as well as reviving the
- * single-owner overlap ambiguity fixed here.
+ * keeps its silhouette and silently stops casting shadows and stops occluding
+ * indirect light. A rim is the worst possible shape for that ceiling: a long thin
+ * run at a fixed segment rate is *uniformly* dense all the way round, so it
+ * overflows everywhere at once or nowhere.
+ *
+ * Both together are why `segmentStride` is 4. Measured on the hero garden, with
+ * the rest of the scene held fixed — the normal step is between adjacent
+ * stride-1 stations on the crest, through the published records:
+ *
+ *   stride  recs  scene  busiest  over-64   normal p90   max    over 5 deg
+ *      1     336    729     103       8       4.04     8.72      20 / 336
+ *      2     168    561      74       4       3.16     6.51      13 / 336
+ *      3     112    505      67       2       2.75     7.59       4 / 336
+ *      4      84    477      67       1       2.42     7.77       4 / 336
+ *
+ * Coarsening the rail makes the rim *smoother*, which is the opposite of what
+ * the old cone-chain rule predicted and is the clearest evidence that the rule
+ * died with the cap: what the extra stations were carrying was not curvature, it
+ * was `relief_m` sampled faster than the eye wants it. `reliefLobes` came down
+ * with the stride to keep four stations per lobe, which is the band limit its
+ * own doc comment asks for.
+ *
+ * ## The marched sweep was tried here, and does not fit
+ *
+ * `field: "tapered-sweep"` (`lib/voxel-scenery/swept-tube.ts`) is the multi-
+ * segment sweep SDF this record layer was factored apart to wait for, and it
+ * carries the *identical solid*: a sweep segment is the same round cone, so the
+ * surface does not move by a nanometre. It collapses the ring to 64 records and
+ * takes the scene's busiest brick to 67 with one brick over. It was still
+ * rejected, and the reason is worth keeping so nobody re-tries it blind.
+ *
+ * A cluster is clipped to a fitted ellipsoid by a hard `max`, and the fitter
+ * minimises envelope volume subject to every *station* clearing a Lipschitz-1
+ * lower bound on the ellipsoid distance. On a hose that is fine. On a coping the
+ * run is short and fat — 37 mm of section over 60 mm of rail — so the envelope
+ * hugs the solid, and measured, the rim's own surface comes within 0.81 mm of
+ * its clipping envelope on 21 of 64 records, always at a record's ends. Nothing
+ * is actually cut. What breaks is the *normal*: the shading gradient is a
+ * tetrahedron tap at a quarter of the field's feature radius, which here is
+ * about 7.5 mm, so at a record end the taps reach outside the envelope and come
+ * back with the ellipsoid's normal instead of the rim's. Measured on the
+ * published records, the normal step across a record boundary averages 8.57
+ * degrees against 1.63 inside one, peaking at 18.2 — and at 1600x920 that is
+ * unmistakable transverse banding on the near rim.
+ *
+ * It is not tunable from here. The blend radius is the only lever this side of
+ * the seam that widens the envelope, and raising it makes both problems worse:
+ * it beads the section at every station, and measured, 4 mm of blend takes the
+ * boundary step from 18.2 to 25.2 degrees while growing the crest by up to 2 mm.
+ * The fix belongs in the fitter — an envelope margin scaled to the field's own
+ * feature radius rather than to the station radius alone — and until it exists
+ * the chain is strictly better here: it reaches the same busiest brick at
+ * stride 4 with a fifth of the shading defects.
  */
 
 /** Shape only: the species, with no rail, no ground and no seed. */
@@ -176,7 +211,15 @@ export const SWEPT_COPING_POND_BULLNOSE: SweptCopingForm = Object.freeze({
   crestVariation: 0.11,
   variationLobes: 11,
   relief_m: 0.0015,
-  reliefLobes: 44,
+  // Four stations a lobe at the stride below, which is what the relief's own
+  // doc comment asks for and what stops it reading as a caterpillar. It was 44
+  // against 336 stations; the stride change would have left it at 1.9.
+  reliefLobes: 21,
+  // The rail is walked one point in four. See the module header: with round-cone
+  // segments the joint angle is free, so this is bounded by chord sag (0.57 mm)
+  // and by the relief's band limit, not by the shading — and it is what takes
+  // the hero scene's busiest brick from 103 to 67.
+  segmentStride: 4,
 });
 
 export interface SweptCopingSpec extends SweptCopingForm {
@@ -345,19 +388,23 @@ export function sweptCopingStations(spec: SweptCopingSpec): readonly SweptCoping
 /**
  * Grow one coping along a rail.
  *
- * Shape from `sweptCopingStations`, records from here. Consecutive round-cone
- * SDFs share the exact endpoint sphere, so either owner gives the same surface
- * at a joint and there is no planar cap for a voxel owner to leak.
+ * Shape from `sweptCopingStations`, records from here: one round-cone SDF per
+ * station pair, consecutive ones sharing their endpoint sphere. A round cone is
+ * the convex hull of its two end spheres and its lateral surface is tangent to
+ * both, so a chain of them is C1 through every joint whatever angle the rail
+ * turns through — there is no crease to hide and no planar cap for a voxel owner
+ * to leak. That property is the reason the rail can be walked as coarsely as it
+ * is; see the module header.
  */
 export function sweptCopingNodes(spec: SweptCopingSpec): SceneryNode[] {
   const { key } = spec;
   const group = spec.group ?? "stone-coping";
-  const nodes = sweptCopingStations(spec);
-  const count = nodes.length;
+  const stations = sweptCopingStations(spec);
+  const count = stations.length;
 
   const emitted: SceneryNode[] = [];
   for (let index = 0; index < count; index += 1) {
-    const from = nodes[index], to = nodes[(index + 1) % count];
+    const from = stations[index], to = stations[(index + 1) % count];
     const axis = V(to.at.x - from.at.x, to.at.y - from.at.y, to.at.z - from.at.z);
     const halfHeight = .5 * Math.hypot(axis.x, axis.y, axis.z);
     if (!(halfHeight > 0)) throw new Error(`Swept coping run ${index} has zero length`);

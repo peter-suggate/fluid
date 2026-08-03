@@ -51,6 +51,31 @@ export function shouldUpdateWaterSurface(extractedRevision: number, latestRevisi
 /** Raster/body depth separation that activates the local implicit resolver. */
 export const CONTACT_RESOLVE_BAND_CELLS = 1.5;
 
+/**
+ * Resolve one filtered sample from the additive caustic target.
+ *
+ * RGB is deposited energy and alpha is deposited coverage, so filtering across
+ * a covered/uncovered edge produces premultiplied RGB.  Restore the uncovered
+ * share to the neutral modulation (one) without normalizing genuine overlaps:
+ * alpha above one means multiple bundles really did land on the same texel.
+ * This CPU mirror keeps that distinction explicit for regression tests.
+ */
+export function resolvePremultipliedCausticSample(
+  sampled: readonly [number, number, number, number],
+  strength = 1,
+): readonly [number, number, number] {
+  const alpha = Math.max(0, sampled[3]);
+  if (alpha <= 1e-4) return [1, 1, 1];
+  const coverage = Math.min(alpha, 1);
+  const resolvedStrength = Math.min(1, Math.max(0, strength));
+  const resolveChannel = (channel: number) => {
+    const deposited = Math.max(channel, 0) / Math.max(coverage, 1e-4);
+    const modulation = 1 + (deposited - 1) * coverage;
+    return 1 + (modulation - 1) * resolvedStrength;
+  };
+  return [resolveChannel(sampled[0]), resolveChannel(sampled[1]), resolveChannel(sampled[2])];
+}
+
 /** Shared disabled storage must satisfy the compact coarse-directory ABI. */
 export const WATER_DISABLED_STORAGE_BYTES = Math.max(
   64,
@@ -1042,6 +1067,16 @@ struct VOut{@builtin(position) position:vec4f,@location(0) uv:vec2f}
 @vertex fn vertexMain(@builtin(vertex_index)i:u32)->VOut{var p=array<vec2f,3>(vec2f(-1,-1),vec2f(3,-1),vec2f(-1,3));var o:VOut;o.position=vec4f(p[i],0,1);o.uv=p[i]*.5+.5;return o;}
 fn project(world:vec3f)->vec2f{let f=normalize(u.cameraTarget.xyz-u.cameraPosition.xyz);let r=normalize(cross(f,vec3f(0,1,0)));let up=normalize(cross(r,f));let q=world-u.cameraPosition.xyz;let d=max(dot(q,f),1e-4);let aperture=cameraTanHalfFov();let ndc=vec2f(dot(q,r)/(d*u.viewport.x/max(u.viewport.y,1.0)*aperture),dot(q,up)/(d*aperture));return vec2f(ndc.x*.5+.5,.5-ndc.y*.5);}
 fn safeSample(texture:texture_2d<f32>,uv:vec2f)->vec4f{return textureSampleLevel(texture,linearSampler,clamp(uv,vec2f(.001),vec2f(.999)),0);}
+// Interface targets carry a binary validity mask in alpha. Their RGB is not
+// useful outside that mask, so bilinear filtering makes a boundary sample
+// premultiplied by its fractional coverage. Divide that coverage back out;
+// this preserves smooth interpolation among valid surface samples without
+// pulling world positions toward zero or normals toward the clear value.
+fn safeInterfaceSample(texture:texture_2d<f32>,uv:vec2f)->vec4f{
+  let sampled=safeSample(texture,uv);
+  if(sampled.a<=1e-4){return vec4f(0.0);}
+  return vec4f(sampled.rgb/sampled.a,sampled.a);
+}
 fn cameraRay(textureUV:vec2f)->vec3f{let ndc=vec2f(textureUV.x*2.0-1.0,1.0-textureUV.y*2.0);let forward=normalize(u.cameraTarget.xyz-u.cameraPosition.xyz);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));let aperture=cameraTanHalfFov();return normalize(forward+right*ndc.x*u.viewport.x/max(u.viewport.y,1.0)*aperture+up*ndc.y*aperture);}
 fn boxHit(ro:vec3f,rd:vec3f,mn:vec3f,mx:vec3f)->vec2f{let inv=1.0/rd;let a=(mn-ro)*inv;let b=(mx-ro)*inv;let near3=min(a,b);let far3=max(a,b);return vec2f(max(max(near3.x,near3.y),near3.z),min(min(far3.x,far3.y),far3.z));}
 ${environmentShaderLibrary}
@@ -1145,7 +1180,15 @@ fn causticModulation(textureUV:vec2f)->vec3f{
   if(any(mapUV<vec2f(0.0))||any(mapUV>vec2f(1.0))){return vec3f(1.0);}
   let sampled=textureSampleLevel(causticMap,linearSampler,mapUV,0.0);
   if(sampled.a<=1e-4){return vec3f(1.0);}
-  return mix(vec3f(1.0),max(sampled.rgb,vec3f(0.0)),strength);
+  // The additive caustic target is premultiplied at filtered coverage edges:
+  // RGB and alpha both approach zero between tiny landing triangles. Restore
+  // the uncovered share to neutral illumination instead of mistaking that
+  // fractional RGB for a fully covered, nearly black caustic. Alpha above one
+  // remains unnormalized because it represents real overlapping ray bundles.
+  let coverage=clamp(sampled.a,0.0,1.0);
+  let deposited=max(sampled.rgb,vec3f(0.0))/max(coverage,1e-4);
+  let modulation=mix(vec3f(1.0),deposited,coverage);
+  return mix(vec3f(1.0),modulation,strength);
 }
 fn compositeFrontGlass(color:vec3f,ro:vec3f,rd:vec3f,sceneDepth:f32)->vec3f{
   // The garden pond has no vessel: nothing to composite in front of the water.
@@ -1172,15 +1215,15 @@ fn compositeFrontGlass(color:vec3f,ro:vec3f,rd:vec3f,sceneDepth:f32)->vec3f{
 // that pair before the foreground interval consumes the transmitted radiance.
 fn compositeRearWater(textureUV:vec2f,dryColor:vec3f)->vec3f{
   let ro=u.cameraPosition.xyz;let forward=normalize(u.cameraTarget.xyz-ro);let rd=cameraRay(textureUV);
-  let front=safeSample(rearFrontPosition,textureUV);if(front.a<.5){return dryColor;}
+  let front=safeInterfaceSample(rearFrontPosition,textureUV);if(front.a<.5){return dryColor;}
   let scene=safeSample(sceneTexture,textureUV);let frontDepth=dot(front.xyz-ro,rd);
   let cellSize=min(min(u.container.x/max(u.gridInfo.x,1.0),u.container.y/max(u.gridInfo.y,1.0)),u.container.z/max(u.gridInfo.z,1.0));
   if(resolvedDrySceneDepth(scene.a)+max(.0015,.18*cellSize)<frontDepth){return dryColor;}
-  var n=normalize(safeSample(rearFrontNormal,textureUV).xyz);if(dot(n,rd)>0.0){n=-n;}
+  var n=normalize(safeInterfaceSample(rearFrontNormal,textureUV).xyz);if(dot(n,rd)>0.0){n=-n;}
   var inside=refract(rd,n,1.0/waterIndexOfRefraction());if(length(inside)<1e-5){inside=reflect(rd,n);}
   var exitUV=textureUV;var back=vec4f(0);var exitN=vec3f(0,-1,0);
-  for(var iteration=0;iteration<3;iteration+=1){back=safeSample(rearBackPosition,exitUV);if(back.a<.5){break;}let backDepth=dot(back.xyz-ro,forward);let frontPlane=dot(front.xyz-ro,forward);let travel=max(0.0,(backDepth-frontPlane)/max(dot(inside,forward),.001));exitUV=project(front.xyz+inside*travel);exitN=normalize(safeSample(rearBackNormal,exitUV).xyz);}
-  let refinedBack=safeSample(rearBackPosition,exitUV);if(refinedBack.a<.5){return dryColor;}back=refinedBack;exitN=normalize(safeSample(rearBackNormal,exitUV).xyz);
+  for(var iteration=0;iteration<3;iteration+=1){back=safeInterfaceSample(rearBackPosition,exitUV);if(back.a<.5){break;}let backDepth=dot(back.xyz-ro,forward);let frontPlane=dot(front.xyz-ro,forward);let travel=max(0.0,(backDepth-frontPlane)/max(dot(inside,forward),.001));exitUV=project(front.xyz+inside*travel);exitN=normalize(safeInterfaceSample(rearBackNormal,exitUV).xyz);}
+  let refinedBack=safeInterfaceSample(rearBackPosition,exitUV);if(refinedBack.a<.5){return dryColor;}back=refinedBack;exitN=normalize(safeInterfaceSample(rearBackNormal,exitUV).xyz);
   let thickness=length(back.xyz-front.xyz);if(thickness<1e-4){return dryColor;}
   if(dot(exitN,inside)<0.0){exitN=-exitN;}var outgoing=refract(inside,-exitN,waterIndexOfRefraction());let tir=length(outgoing)<1e-5;if(tir){outgoing=reflect(inside,-exitN);}
   let backgroundUV=project(back.xyz+outgoing*(.55+.45*thickness));let transmitted=safeSample(sceneTexture,backgroundUV).rgb*causticModulation(backgroundUV);
@@ -1202,15 +1245,15 @@ fn finish(color:vec3f,ndc:vec2f)->vec4f{let c=color*(1.0-.08*dot(ndc*.55,ndc*.55
   // performs the same conversion for the final target; all raster-path
   // intermediate reads and world projections must do it here as well.
   let ndc=input.uv*2.0-1.0;let textureUV=vec2f(input.uv.x,1.0-input.uv.y);let ro=u.cameraPosition.xyz;let forward=normalize(u.cameraTarget.xyz-ro);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));let aperture=cameraTanHalfFov();let rd=normalize(forward+right*ndc.x*u.viewport.x/max(u.viewport.y,1.0)*aperture+up*ndc.y*aperture);
-  let scene=safeSample(sceneTexture,textureUV);var front=safeSample(frontPosition,textureUV);if(front.a<.5){return finish(compositeFrontGlass(scene.rgb,ro,rd,scene.a),ndc);}var frontDepth=dot(front.xyz-ro,rd);
+  let scene=safeSample(sceneTexture,textureUV);var front=safeInterfaceSample(frontPosition,textureUV);if(front.a<.5){return finish(compositeFrontGlass(scene.rgb,ro,rd,scene.a),ndc);}var frontDepth=dot(front.xyz-ro,rd);
   let cellSize=min(min(u.container.x/max(u.gridInfo.x,1.0),u.container.y/max(u.gridInfo.y,1.0)),u.container.z/max(u.gridInfo.z,1.0));let depthEpsilon=max(.0015,.18*cellSize);
-  var n=normalize(safeSample(frontNormal,textureUV).xyz);let rigidFront=nearestRigid(ro,rd);let contactBand=${CONTACT_RESOLVE_BAND_CELLS.toFixed(1)}*cellSize;
+  var n=normalize(safeInterfaceSample(frontNormal,textureUV).xyz);let rigidFront=nearestRigid(ro,rd);let contactBand=${CONTACT_RESOLVE_BAND_CELLS.toFixed(1)}*cellSize;
   if(u.gridInfo.w>.5&&rigidFront.t<1e19&&abs(rigidFront.t-frontDepth)<=contactBand){let contact=refineContactSurface(ro,rd,frontDepth,cellSize);if(contact.valid){front=vec4f(contact.point,1);frontDepth=dot(contact.point-ro,rd);n=contact.normal;}if(rigidFront.t<=frontDepth+max(3e-4,.03*cellSize)){return finish(compositeFrontGlass(scene.rgb,ro,rd,scene.a),ndc);}}
   if(resolvedDrySceneDepth(scene.a)+depthEpsilon<frontDepth){return finish(compositeFrontGlass(scene.rgb,ro,rd,scene.a),ndc);}
   if(dot(n,rd)>0.0){n=-n;}let etaIn=1.0/waterIndexOfRefraction();var inside=refract(rd,n,etaIn);if(length(inside)<1e-5){inside=reflect(rd,n);}
   var exitUV=textureUV;var back=vec4f(0);var exitN=vec3f(0,-1,0);
-  for(var iteration=0;iteration<3;iteration+=1){back=safeSample(backPosition,exitUV);if(back.a<.5){break;}let backDepth=dot(back.xyz-ro,forward);let frontPlane=dot(front.xyz-ro,forward);let travel=max(0.0,(backDepth-frontPlane)/max(dot(inside,forward),.001));exitUV=project(front.xyz+inside*travel);exitN=normalize(safeSample(backNormal,exitUV).xyz);}
-  let refinedBack=safeSample(backPosition,exitUV);if(refinedBack.a>.5){back=refinedBack;exitN=normalize(safeSample(backNormal,exitUV).xyz);}
+  for(var iteration=0;iteration<3;iteration+=1){back=safeInterfaceSample(backPosition,exitUV);if(back.a<.5){break;}let backDepth=dot(back.xyz-ro,forward);let frontPlane=dot(front.xyz-ro,forward);let travel=max(0.0,(backDepth-frontPlane)/max(dot(inside,forward),.001));exitUV=project(front.xyz+inside*travel);exitN=normalize(safeInterfaceSample(backNormal,exitUV).xyz);}
+  let refinedBack=safeInterfaceSample(backPosition,exitUV);if(refinedBack.a>.5){back=refinedBack;exitN=normalize(safeInterfaceSample(backNormal,exitUV).xyz);}
   var exitPoint=back.xyz;var thickness=length(exitPoint-front.xyz);let meshExitValid=back.a>=.5&&thickness>=1e-4;let innerStep=max(.0005,cellSize*.08);let innerOrigin=front.xyz+inside*innerStep;let rigidExit=nearestRigid(innerOrigin,inside);var opaqueSolidExit=false;
   if(rigidExit.t<1e19&&(!meshExitValid||rigidExit.t+innerStep<thickness)){opaqueSolidExit=true;exitPoint=innerOrigin+inside*rigidExit.t;thickness=length(exitPoint-front.xyz);}
   else if(!meshExitValid){
@@ -1966,7 +2009,7 @@ export class RasterWaterPipeline {
     // Water and spray target the same interface attachments and depth state.
     // Encode both draws in one pass per side so spray does not force two extra
     // full-resolution attachment load/store cycles.
-    const interfacePass=(label:string,pipeline:GPURenderPipeline,position:GPUTexture,normal:GPUTexture,depth:GPUTexture,side:"front"|"back",particles=true,peel=false)=>{const pass=encoder.beginRenderPass({label,colorAttachments:[{view:position.createView(),clearValue:{r:0,g:0,b:0,a:0},loadOp:"clear",storeOp:"store"},{view:normal.createView(),clearValue:{r:0,g:1,b:0,a:0},loadOp:"clear",storeOp:"store"}],depthStencilAttachment:{view:depth.createView(),depthClearValue:1,depthLoadOp:"clear",depthStoreOp:"store"}});pass.setPipeline(pipeline);pass.setBindGroup(0,this.surfaceBindGroup!);pass.setBindGroup(1,peel?this.surfacePeelBindGroup!:this.surfaceUnpeeledBindGroup!);pass.drawIndirect(this.indirectBuffer!,0);if(particles){this.secondaryParticles?.encodeOpticalInterface(pass,side);}pass.end();};
+    const interfacePass=(label:string,pipeline:GPURenderPipeline,position:GPUTexture,normal:GPUTexture,depth:GPUTexture,side:"front"|"back",particles=true,peel=false)=>{const pass=encoder.beginRenderPass({label,colorAttachments:[{view:position.createView(),clearValue:{r:0,g:0,b:0,a:0},loadOp:"clear",storeOp:"store"},{view:normal.createView(),clearValue:{r:0,g:0,b:0,a:0},loadOp:"clear",storeOp:"store"}],depthStencilAttachment:{view:depth.createView(),depthClearValue:1,depthLoadOp:"clear",depthStoreOp:"store"}});pass.setPipeline(pipeline);pass.setBindGroup(0,this.surfaceBindGroup!);pass.setBindGroup(1,peel?this.surfacePeelBindGroup!:this.surfaceUnpeeledBindGroup!);pass.drawIndirect(this.indirectBuffer!,0);if(particles){this.secondaryParticles?.encodeOpticalInterface(pass,side);}pass.end();};
     if (this.sceneHasFluid) {
       interfacePass("Water + spray front interfaces",this.surfaceFrontPipeline,this.frontPosition,this.frontNormal,this.frontDepth,"front");
       tracePhase?.({ id: "water-front-interface", label: "Water + spray front interface" });
@@ -1977,7 +2020,7 @@ export class RasterWaterPipeline {
     } else if (!this.dryInterfaceClearsEncoded) {
       // A fluid-less scene draws no interface geometry. Clear once so the
       // compositor's no-interface input cannot retain a preceding fluid scene.
-      const clearPass=(label:string,position:GPUTexture,normal:GPUTexture,depth:GPUTexture)=>{encoder.beginRenderPass({label,colorAttachments:[{view:position.createView(),clearValue:{r:0,g:0,b:0,a:0},loadOp:"clear",storeOp:"store"},{view:normal.createView(),clearValue:{r:0,g:1,b:0,a:0},loadOp:"clear",storeOp:"store"}],depthStencilAttachment:{view:depth.createView(),depthClearValue:1,depthLoadOp:"clear",depthStoreOp:"store"}}).end();};
+      const clearPass=(label:string,position:GPUTexture,normal:GPUTexture,depth:GPUTexture)=>{encoder.beginRenderPass({label,colorAttachments:[{view:position.createView(),clearValue:{r:0,g:0,b:0,a:0},loadOp:"clear",storeOp:"store"},{view:normal.createView(),clearValue:{r:0,g:0,b:0,a:0},loadOp:"clear",storeOp:"store"}],depthStencilAttachment:{view:depth.createView(),depthClearValue:1,depthLoadOp:"clear",depthStoreOp:"store"}}).end();};
       clearPass("Fluid-less scene front interface clear",this.frontPosition,this.frontNormal,this.frontDepth);
       tracePhase?.({ id: "water-front-interface", label: "Fluid-less scene front interface clear" });
       clearPass("Fluid-less scene back interface clear",this.backPosition,this.backNormal,this.backDepth);

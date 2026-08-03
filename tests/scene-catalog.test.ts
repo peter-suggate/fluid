@@ -295,7 +295,15 @@ test("the hero set is a description of itself, and survives a save unchanged", (
   // it is the *same object*, drawn better. A floor is a guard against a
   // generator that stopped growing, so it has to move when a generator starts
   // spelling the same shape in fewer records.
-  assert.ok(before.length > 600, `the generators publish a stub: ${before.length} primitives`);
+  //
+  // It came down again, from 600, for the same reason and on the same kind of
+  // change: the coping's chain of 336 round cones became 64 marched sweeps
+  // carrying the identical solid — measured, the surface does not move — which
+  // took the set from 735 records to 487 and the scene's busiest 200 mm brick
+  // from 110 to 67 against the 64-primitive contract. Two of these in a month is
+  // the shape of the phase rather than a coincidence, and the floor is worth
+  // keeping only as long as it is understood to track the *emitters*.
+  assert.ok(before.length > 400, `the generators publish a stub: ${before.length} primitives`);
   assert.ok(before.length < 0.6 * SVO_PRIMITIVE_CANDIDATE_MAXIMUM_LEAVES,
     `the hero set publishes ${before.length} of ${SVO_PRIMITIVE_CANDIDATE_MAXIMUM_LEAVES} records`);
   // Through the real save path, because that is what a generator node has to

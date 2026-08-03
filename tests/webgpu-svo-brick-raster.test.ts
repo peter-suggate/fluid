@@ -200,8 +200,17 @@ test("raster-primary resolves live scene primitive overlap with exact per-primit
   ]) {
     assert.match(shader, new RegExp(`kind == ${kind}`), `${kind} has no arm in the shared local-extent dispatch`);
   }
-  assert.match(fragment, /let exact=primitiveHit\(record,ro,rd,0\.0,DRY_MISS\);/,
+  assert.match(fragment, /let exact=primitiveHit\(record,ro,rd,span\.x,span\.y\);/,
     "the voxel owner is not authoritative at a projected primitive boundary");
+  // A marched kind's 48-iteration ceiling is only sufficient because the caller
+  // hands in a bounded interval. This pass used to hand in the whole ray, which
+  // left the bounding sphere as the only bracket.
+  assert.match(fragment, /let span=dryScenePrimitiveMarchSpan\(record,ro,rd\);/,
+    "the march is bracketed by the primitive's own box, not by the whole ray");
+  const marchSpan = shader.slice(shader.indexOf("fn dryScenePrimitiveMarchSpan"));
+  assert.match(marchSpan.slice(0, marchSpan.indexOf("\n}")),
+    /svoPrimitiveLocalExtent_m\(svoPrimitiveKind\(record\)/,
+    "the bracket reads the shared per-kind extent, so it cannot bound tighter than the proxy");
   assert.match(fragment, /return drySceneRasterOut\(dryRasterPrimarySurface\(exact,ro,rd,camera\[1\],SVO_GBUFFER_PRODUCER_SCENE_PRIMITIVE\)\);/,
     "the exact hit publishes all four primary planes, its producing-pass tag and analytic frag_depth together");
   // The indirection above exists so `scenePrimitiveHsrProbe` can drop the depth

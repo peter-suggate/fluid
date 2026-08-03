@@ -1730,6 +1730,13 @@ export interface SvoDryOptimizationExperiments {
    * a sound front-to-back resolve can recover.
    */
   readonly scenePrimitiveHsrProbe?: boolean;
+  /**
+   * Retain the unbounded `0 .. DRY_MISS` march interval in the scene-primitive
+   * raster as the exact control for the box-bounded one. See
+   * `dryScenePrimitiveMarchSpan` for why the bounded interval is the contract
+   * the marched kinds were written against.
+   */
+  readonly scenePrimitiveUnboundedMarch?: boolean;
 }
 
 /** Pure policy seam used by the renderer and by fail-closed contract tests. */
@@ -1998,6 +2005,11 @@ export function createSvoDrySceneFragmentWGSL(
   const secondaryTraversalMode = traversalMode === "raster-primary" ? "canonical-parametric" : traversalMode;
   const hsrProbe = experiments.rasterPrimaryHsrProbe === true;
   const scenePrimitiveHsrProbe = experiments.scenePrimitiveHsrProbe === true;
+  // The exact hit is unchanged either way — this only decides how much empty
+  // interval the sphere trace is asked to walk before it reaches the solid.
+  const scenePrimitiveMarchSpanWGSL = experiments.scenePrimitiveUnboundedMarch === true
+    ? "let exact=primitiveHit(record,ro,rd,0.0,DRY_MISS);"
+    : "let span=dryScenePrimitiveMarchSpan(record,ro,rd);let exact=primitiveHit(record,ro,rd,span.x,span.y);";
   if (scenePrimitiveHsrProbe && traversalMode !== "raster-primary") {
     throw new RangeError("The scene primitive raster depth experiment only applies to raster-primary traversal");
   }
@@ -2512,6 +2524,42 @@ struct DryScenePrimitiveVertexOut{
   @builtin(position) position:vec4f,
   @location(0) @interpolate(flat) primitiveIndex:u32,
 }
+// The ray's span through the primitive's own oriented box, as the march bracket.
+//
+// primitiveHit brackets a marched kind by its *bounding sphere*, and the ABI
+// states the assumption that makes 48 iterations sufficient: "callers hand in a
+// bounded interval - one traversed voxel in the renderer - so the march starts
+// within a cell of the surface". This pass was handing in 0 .. DRY_MISS, so
+// that assumption did not hold on the path carrying 78% of the frame. For a
+// round cone the bounding sphere is halfLength + radius, many times the
+// thickness the ray actually crosses, and every step of that excess is a full
+// SDF evaluation.
+//
+// The local box is the same containment the raster proxy already relies on, so
+// a hit outside this span does not exist. Returns x > y when the ray misses the
+// box, which is a hit the exact test cannot produce either.
+//
+// The span is padded because containment is exact in real arithmetic and not in
+// floating point: the exact solve puts a grazing cone hit up to 1.3e-5 *before*
+// its own box entry (tests/svo-scene-primitive-march-span.test.ts finds it on
+// the authored hero set), and an unpadded bracket would drop that sliver of
+// silhouette on the one path carrying most of the frame. A grazing ray converts
+// a tiny spatial error into a much larger one in t, so the pad is relative to
+// the span rather than absolute. Widening the bracket cannot introduce a hit —
+// the exact test still decides — it only declines to save a step or two.
+fn dryScenePrimitiveMarchSpan(record:SvoPrimitiveRecord,ro:vec3f,rd:vec3f)->vec2f{
+  let localExtent=svoPrimitiveLocalExtent_m(svoPrimitiveKind(record),svoPrimitiveDimensions_m(record));
+  let orientationLength=length(record.orientation);
+  if(any(localExtent<vec3f(0.0))||!(orientationLength>1e-8)){return vec2f(0.0,DRY_MISS);}
+  let inverse=vec4f(-record.orientation.xyz,record.orientation.w)/orientationLength;
+  let localOrigin=svoQuaternionRotate(inverse,ro-svoPrimitiveCenter_m(record));
+  let localDirection=svoQuaternionRotate(inverse,rd);
+  let span=svoRayAabbWithInverse(SvoRay(localOrigin,0.0,localDirection,DRY_MISS),
+    1.0/localDirection,mat2x3f(-localExtent,localExtent));
+  if(span.x==0.0){return vec2f(DRY_MISS,0.0);}
+  let pad=max(${SVO_SCENE_PRIMITIVE_MARCH_SPAN_PAD_M},${SVO_SCENE_PRIMITIVE_MARCH_SPAN_PAD_RELATIVE}*span.z);
+  return vec2f(max(0.0,span.y-pad),span.z+pad);
+}
 fn dryScenePrimitiveWorldExtent(localExtent:vec3f,orientation:vec4f)->vec3f{
   let q=orientation/length(orientation);
   return abs(svoQuaternionRotate(q,vec3f(localExtent.x,0.0,0.0)))
@@ -2570,7 +2618,7 @@ ${scenePrimitiveHsrProbe
     let record=dryPrimitive(input.primitiveIndex);
     if(!dryOpaqueOwnerSuppressed(svoPrimitiveOwnerId(record))){
       let camera=dryRasterPrimaryCamera();let ro=camera[0];let rd=dryRasterPrimaryRay(input.position.xy,camera);
-      let exact=primitiveHit(record,ro,rd,0.0,DRY_MISS);
+      ${scenePrimitiveMarchSpanWGSL}
       if(exact.t<DRY_MISS){probe=dryRasterPrimarySurface(exact,ro,rd,camera[1],SVO_GBUFFER_PRODUCER_SCENE_PRIMITIVE);}
     }
   }
@@ -2579,7 +2627,7 @@ ${scenePrimitiveHsrProbe
   let record=dryPrimitive(input.primitiveIndex);
   if(dryOpaqueOwnerSuppressed(svoPrimitiveOwnerId(record))){discard;}
   let camera=dryRasterPrimaryCamera();let ro=camera[0];let rd=dryRasterPrimaryRay(input.position.xy,camera);
-  let exact=primitiveHit(record,ro,rd,0.0,DRY_MISS);
+  ${scenePrimitiveMarchSpanWGSL}
   if(!(exact.t<DRY_MISS)){discard;}
   return drySceneRasterOut(dryRasterPrimarySurface(exact,ro,rd,camera[1],SVO_GBUFFER_PRODUCER_SCENE_PRIMITIVE));`}
 }
@@ -4360,6 +4408,16 @@ const rasterPrimaryTargets: GPUColorTargetState[] = [
   { format: SVO_DRY_SPLIT_GEOMETRY_FORMAT },
   { format: SVO_DRY_SPLIT_IDENTITY_FORMAT },
 ];
+
+/**
+ * Slack on the scene-primitive march bracket, absolute and relative to the span.
+ *
+ * Exported so the CPU containment test brackets with exactly the shipped
+ * numbers rather than a tolerance of its own, which is the only way that test
+ * can fail for a real reason.
+ */
+export const SVO_SCENE_PRIMITIVE_MARCH_SPAN_PAD_M = 1e-4;
+export const SVO_SCENE_PRIMITIVE_MARCH_SPAN_PAD_RELATIVE = 1e-3;
 
 export const SVO_SCENE_PRIMITIVE_RASTER_CONTRACT = Object.freeze({
   verticesPerProxy: 36,
