@@ -586,10 +586,11 @@ per-element defect in the march scales with seeds, so per-element removals come
 first and band reduction stays second. Anyone re-running band reduction expecting
 a win should read this paragraph first.
 
-#### The march's launch gate is NOT an E6-style always-zero load
+#### The march's launch gate LOOKS like E6's always-zero load and is the opposite: 113 setters
 
-Recorded because it looks exactly like the defect that paid −7.55 ms, and is
-not. Sites such as
+**If you are reading this because a per-lane `atomicLoad` in a hot gate looks
+like the E6 defect that paid −7.55 ms: check the setter count first. This one has
+113 of them and the load is load-bearing.** Sites such as
 
     if(item>=s(72u)||s(0u)!=0u||s(47u)!=0u){return;}
 
@@ -602,6 +603,13 @@ this generation failed, and the gate is what stops every downstream pass from
 running on that corrupt state. Deleting the load would make a failed generation
 continue **silently** — the opposite of failing loudly.
 
+The general rule this earns: **an "always zero" claim is only as good as an
+exhaustive count of who can write the word.** E6's membership bit had exactly one
+setter (`markAcceptedOwner`) running in a later pass, and a clearing pass
+immediately before, so the claim was provable. Any future finding of this shape
+must state the setter count in the same breath as the E6 analogy, or it is not a
+finding.
+
 The narrow true statement: 22 of the dispatch-argument writers already publish
 `select(vec3u(0u,1u,1u), …, s(0u)==0u)`, so a failed generation ALREADY
 dispatches zero workgroups. For those kernels only, the in-kernel latch test is
@@ -609,6 +617,27 @@ a second line of defence behind a zero-sized dispatch. That is provable per site
 but it removes one workgroup-invariant load per lane from an address every lane
 shares — an L1 hit — so its ceiling is far below this lane's 3.65 ms A/A floor.
 Not worth the fail-closed risk.
+
+#### Landed: one canonical seed offset per operand in the march tie-break (`427a586`)
+
+`betterFace` named `canonicalSeedOffset` four times for two distinct values;
+each call re-does an integer divide, two `faceCenterQuarter` resolutions and a
+`faceCell` load. Ties are the common case — two neighbours relaying the same seed
+are equidistant and equal in magnitude.
+
+| | ms/advance |
+|---|---:|
+| March Section 5, both dispatches, before | 43.56 |
+| after | **39.68** |
+| delta | **−3.88** |
+
+**Status: pass-level confirmed, frame-level unresolved.** The −3.88 is measured
+against per-pass GPU timestamps, not against the 3.65 ms frame-level A/A floor,
+and no interleaved A/B was run because the change is unconditional with no flag
+to arm. The mechanism is not in doubt — it is a hoist of loop-invariant loads,
+tie-break order untouched, D4 green at 68/69, and the neighbouring passes did not
+move (MGPCG 61.33 → 60.36, Advect 40.34 → 40.66). Do not spend a run firming up
+the frame-level figure.
 
 #### The 12 ungated frontier waves are NOT the march's cost — refuted, do not chase
 
