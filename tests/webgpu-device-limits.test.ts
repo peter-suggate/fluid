@@ -25,6 +25,8 @@ test("node-mip page ceiling requests the adapter value, not the WebGPU default",
     maxTextureDimension3D: 1,
     maxSampledTexturesPerShaderStage: 16,
     maxColorAttachmentBytesPerSample: 128,
+    maxComputeInvocationsPerWorkgroup: 1024,
+    maxComputeWorkgroupSizeX: 1024,
   };
   assert.equal(
     requiredFluidDeviceLimits({ ...base, maxTextureDimension2D: 16384 }).maxTextureDimension2D,
@@ -51,6 +53,8 @@ test("colour-attachment request never exceeds the adapter and never drops below 
     maxTextureDimension2D: 8192,
     maxTextureDimension3D: 1,
     maxSampledTexturesPerShaderStage: 16,
+    maxComputeInvocationsPerWorkgroup: 1024,
+    maxComputeWorkgroupSizeX: 1024,
   };
   assert.equal(requiredFluidDeviceLimits({ ...base, maxColorAttachmentBytesPerSample: 32 })
     .maxColorAttachmentBytesPerSample, 32);
@@ -74,4 +78,35 @@ test("sole 128-lane target reduction is fail-closed on device limits", () => {
     maxComputeInvocationsPerWorkgroup: 1024,
     maxComputeWorkgroupStorageSize: 3 * 1024,
   }), false);
+});
+
+/**
+ * The persistent MGPCG solve is one dispatch of one workgroup, so the width of
+ * that workgroup is the only occupancy lever WGSL can express without a
+ * cross-workgroup barrier — and it was pinned at WebGPU's 256 default while the
+ * M1 Max hosts 1024 threads per threadgroup, because this request never named
+ * the limit. A ceiling nobody asked to raise is not a hardware ceiling.
+ */
+test("compute workgroup width requests the adapter value, not the WebGPU default", () => {
+  const base = {
+    maxStorageBuffersPerShaderStage: 10,
+    maxStorageBufferBindingSize: 1,
+    maxBufferSize: 1,
+    maxTextureDimension2D: 16384,
+    maxTextureDimension3D: 1,
+    maxSampledTexturesPerShaderStage: 16,
+    maxColorAttachmentBytesPerSample: 128,
+  };
+  const granted = requiredFluidDeviceLimits({
+    ...base, maxComputeInvocationsPerWorkgroup: 1024, maxComputeWorkgroupSizeX: 1024,
+  });
+  assert.equal(granted.maxComputeInvocationsPerWorkgroup, 1024);
+  assert.equal(granted.maxComputeWorkgroupSizeX, 1024);
+  // An adapter that really does cap at the default is served its own value,
+  // and the persistent executor fails closed against the granted number.
+  const modest = requiredFluidDeviceLimits({
+    ...base, maxComputeInvocationsPerWorkgroup: 256, maxComputeWorkgroupSizeX: 256,
+  });
+  assert.equal(modest.maxComputeInvocationsPerWorkgroup, 256);
+  assert.equal(modest.maxComputeWorkgroupSizeX, 256);
 });

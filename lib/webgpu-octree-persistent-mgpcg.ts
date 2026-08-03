@@ -89,8 +89,43 @@ function persistentMGPCGDiagnosticOutputChannel(): number | undefined {
   return channel;
 }
 
-/** One 256-lane workgroup, one dispatch. */
+/** One workgroup, one dispatch. Authored width; see {@link octreePersistentMGPCGLanes}. */
 export const OCTREE_PERSISTENT_MGPCG_LANES = 256;
+
+/**
+ * Lanes in the single persistent workgroup. Default 256, the authored shape.
+ *
+ * The whole solve is one dispatch of one workgroup, i.e. one of the M1 Max's
+ * 32 cores. WGSL cannot express a cross-workgroup barrier, so until the solve
+ * is restructured the ONLY occupancy lever is the width of that workgroup:
+ * more lanes means more simdgroups resident on the core, and more memory-level
+ * parallelism behind a kernel whose cost is dependent-gather latency.
+ *
+ * Value-neutral by construction. `LANES` is a work-distribution stride and
+ * nothing else: every `for(var i=lane;i<n;i+=LANES)` loop writes only its own
+ * row or slot, so the covered set is `[0,n)` and the writes stay disjoint
+ * however the lanes are dealt. The compensated reductions index by
+ * `REDUCTION_LANES` (128) under a `lane<REDUCTION_LANES` guard, so their
+ * association order does not depend on this at all, and `compactBand` is a
+ * chunk-partitioned stable compaction whose output is the globally ascending
+ * band list at any power-of-two width.
+ *
+ * Restricted to powers of two because `compactBand`'s Hillis-Steele scan steps
+ * `width` from 1 while `width < LANES`. A width the device cannot host is a
+ * pipeline-creation failure, not a silent fallback.
+ */
+export function octreePersistentMGPCGLanes(
+  environment?: Readonly<Record<string, string | undefined>>,
+): 256 | 512 | 1024 {
+  const resolved = environment
+    ?? (typeof process !== "undefined" ? process.env : undefined);
+  const value = resolved?.FLUID_OCTREE_MGPCG_LANES;
+  if (value === undefined || value === "") return OCTREE_PERSISTENT_MGPCG_LANES;
+  if (value === "256") return 256;
+  if (value === "512") return 512;
+  if (value === "1024") return 1024;
+  throw new RangeError(`Persistent MGPCG lane count must be 256, 512 or 1024; received ${value}`);
+}
 
 /** Marker written to solve-control word 21 so a readback can identify the executor. */
 export const OCTREE_PERSISTENT_MGPCG_CONTROL_MARKER = 0x5045_5253;
@@ -618,6 +653,7 @@ export class WebGPUOctreePersistentMGPCG implements OctreePersistentMGPCGExecuto
   private readonly stagedSmoother: boolean;
   private readonly stencilColumns: boolean;
   private readonly restrictedPrefixNetwork: boolean;
+  private readonly lanes: 256 | 512 | 1024;
   private readonly phaseRepeatProbe: ReturnType<typeof octreePersistentMGPCGPhaseRepeatProbe>;
   private readonly regularBandRows: OctreePersistentMGPCGRegularBandRowsMode;
   private destroyed = false;
@@ -643,7 +679,7 @@ export class WebGPUOctreePersistentMGPCG implements OctreePersistentMGPCGExecuto
   }> {
     return Object.freeze({
       encodedDispatchCount: 1 as const,
-      lanes: OCTREE_PERSISTENT_MGPCG_LANES,
+      lanes: this.lanes,
       rowThreshold: this.maximumRowCapacity,
       storageBindings: this.storageBindingCount,
       workgroupStorageBytes: this.workgroupStorageBytes,
@@ -713,9 +749,11 @@ export class WebGPUOctreePersistentMGPCG implements OctreePersistentMGPCGExecuto
     this.stagedSmoother = octreePersistentMGPCGStagedSmootherEnabled();
     this.stencilColumns = octreePersistentMGPCGStencilColumnsEnabled();
     this.restrictedPrefixNetwork = octreePersistentMGPCGRestrictedPrefixNetworkEnabled();
+    this.lanes = octreePersistentMGPCGLanes();
     this.phaseRepeatProbe = octreePersistentMGPCGPhaseRepeatProbe();
     this.regularBandRows = octreePersistentMGPCGRegularBandRowsMode();
-    this.workgroupStorageBytes = octreePersistentMGPCGWorkgroupBytes(this.stagedSmoother);
+    this.workgroupStorageBytes =
+      octreePersistentMGPCGWorkgroupBytes(this.stagedSmoother, this.lanes);
     const rowCapacity = positiveInteger(source.rowCapacity, "Persistent MGPCG row capacity");
     // This is provisioned arena capacity, not adaptive work. The exact live
     // row count is GPU-published only after topology construction, so the
@@ -757,8 +795,9 @@ export class WebGPUOctreePersistentMGPCG implements OctreePersistentMGPCGExecuto
     // that `skip_validation` turns into a SIGSEGV rather than a message.
     const limits = device.limits;
     if (limits) {
-      if (OCTREE_PERSISTENT_MGPCG_LANES > limits.maxComputeInvocationsPerWorkgroup) {
-        throw new RangeError("Persistent MGPCG 256-lane workgroup exceeds device limits");
+      if (this.lanes > limits.maxComputeInvocationsPerWorkgroup) {
+        throw new RangeError(`Persistent MGPCG ${this.lanes}-lane workgroup exceeds device limits`
+          + ` (${limits.maxComputeInvocationsPerWorkgroup})`);
       }
       if (this.workgroupStorageBytes > limits.maxComputeWorkgroupStorageSize) {
         throw new RangeError(`Persistent MGPCG requires ${this.workgroupStorageBytes} bytes of `
@@ -913,6 +952,7 @@ export class WebGPUOctreePersistentMGPCG implements OctreePersistentMGPCGExecuto
       stagedSmoother: this.stagedSmoother,
       stencilColumnCache: this.stencilColumns,
       restrictedPrefixNetwork: this.restrictedPrefixNetwork,
+      lanes: this.lanes,
       ...(this.phaseRepeatProbe === undefined
         ? {} : { phaseRepeatProbe: this.phaseRepeatProbe.phase }),
       ...(this.regularBandRows === "off" ? {} : { regularBandRows: this.regularBandRows }),
@@ -928,7 +968,7 @@ export class WebGPUOctreePersistentMGPCG implements OctreePersistentMGPCGExecuto
           workgroupId: "activityWorkgroupId",
           numWorkgroups: "activityNumWorkgroups",
           localInvocationIndex: "lane",
-          workgroupLaneCount: OCTREE_PERSISTENT_MGPCG_LANES,
+          workgroupLaneCount: this.lanes,
         }),
       } } : {}),
     });
@@ -945,12 +985,13 @@ export class WebGPUOctreePersistentMGPCG implements OctreePersistentMGPCGExecuto
         + `/${this.stagedSmoother ? "staged-smoother" : "direct-smoother"}`
         + `/${this.stencilColumns ? "stencil-columns" : "chased-columns"}`
         + `/${this.restrictedPrefixNetwork ? "restricted-prefix" : "full-prefix"}`
+        + `/lanes-${this.lanes}`
         + `/phase-repeat-${this.phaseRepeatProbe?.phase ?? "none"}`
         + `/band-rows-${this.regularBandRows}`
         + `/diagnostic-output-${diagnosticOutputChannel ?? "pressure"}`,
     );
     this.shaderCode = shaderVariant.code;
-    this.shaderLabel = `Octree persistent MGPCG · single-dispatch 256-lane solve · ${
+    this.shaderLabel = `Octree persistent MGPCG · single-dispatch ${this.lanes}-lane solve · ${
       compactLiveRows ? "compact live rows" : "capacity-strided oracle"}${
       this.stagedSmoother ? " · staged smoother" : ""}${
       this.stencilColumns ? " · published stencil columns" : ""}${

@@ -6,6 +6,8 @@ type FluidAdapterLimits = Pick<GPUSupportedLimits,
   | "maxTextureDimension3D"
   | "maxSampledTexturesPerShaderStage"
   | "maxColorAttachmentBytesPerSample"
+  | "maxComputeInvocationsPerWorkgroup"
+  | "maxComputeWorkgroupSizeX"
 >;
 
 /**
@@ -50,6 +52,21 @@ export function requiredFluidDeviceLimits(limits: FluidAdapterLimits): Record<st
         FLUID_RASTER_PRIMARY_COLOR_BYTES_PER_SAMPLE,
       ),
     ),
+    // The persistent MGPCG solve is ONE dispatch of ONE workgroup, so the width
+    // of that workgroup is the only occupancy lever WGSL can express without a
+    // cross-workgroup barrier. It was capped at 256 lanes -- not by the M1 Max,
+    // which hosts 1024 threads per threadgroup, but because this function never
+    // asked for the adapter's value and WebGPU's default is 256. A 256-lane
+    // ceiling on a latency-bound kernel was therefore a limit nobody raised.
+    // Requesting the advertised value is the same portable move the six limits
+    // above make; every consumer still fails closed against the GRANTED limit,
+    // and `WebGPUOctreePersistentMGPCG` does exactly that before any pipeline
+    // exists.
+    maxComputeInvocationsPerWorkgroup: limits.maxComputeInvocationsPerWorkgroup,
+    // A wider workgroup also needs the X extent raised; its default is 256 too,
+    // and a @workgroup_size the device cannot host is a pipeline-creation
+    // failure rather than a silent clamp.
+    maxComputeWorkgroupSizeX: limits.maxComputeWorkgroupSizeX,
   };
 }
 

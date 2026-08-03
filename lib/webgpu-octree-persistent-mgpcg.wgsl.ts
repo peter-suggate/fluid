@@ -118,6 +118,27 @@ export interface OctreePersistentMGPCGShaderOptions {
    */
   readonly restrictedPrefixNetwork?: boolean;
   /**
+   * Lanes in the single persistent workgroup. 256 is the authored shape.
+   *
+   * The whole solve runs in ONE workgroup, i.e. on ONE of the M1 Max's 32
+   * cores, so within-core occupancy is the only lever that does not require a
+   * cross-workgroup barrier WGSL cannot express. Widening the workgroup puts
+   * more simdgroups on that core and therefore more memory-level parallelism
+   * behind a kernel whose cost is dependent-gather latency.
+   *
+   * VALUE-NEUTRAL BY CONSTRUCTION. `LANES` appears only as a work-distribution
+   * stride: every `for(var i=lane;i<n;i+=LANES)` loop writes only its own row
+   * or slot, so the covered set is `[0,n)` and the writes are disjoint however
+   * the lanes are dealt. The compensated reductions are indexed by
+   * `REDUCTION_LANES` (128) and guarded by `lane<REDUCTION_LANES`, so their
+   * association order does not depend on `LANES` at all; `compactBand` is a
+   * chunk-partitioned stable compaction whose output is the globally ascending
+   * band list for any power-of-two width. Must stay a power of two: the
+   * Hillis-Steele scan in `compactBand` steps `width` from 1 while
+   * `width < LANES`.
+   */
+  readonly lanes?: 256 | 512 | 1024;
+  /**
    * Timing instrument, not a solver option. Re-runs one phase an extra
    * `p.worksets.z` times per call.
    *
@@ -200,10 +221,13 @@ export const OCTREE_PERSISTENT_MGPCG_STENCIL_COLUMNS = 36;
 export const OCTREE_PERSISTENT_MGPCG_WORKGROUP_BYTES =
   // merged: array<MergedScalars, 128>, eight f32 each
   128 * 8 * 4
-  // scan: array<u32, 256> for the deterministic band compaction
+  // scan: array<u32, LANES> for the deterministic band compaction
   + 256 * 4
   // uniform-load scalars (rows, levels, partials, counts, halt flags)
   + 64;
+
+/** Authored lane count of the single persistent workgroup. */
+export const OCTREE_PERSISTENT_MGPCG_DEFAULT_LANES = 256;
 
 /**
  * Extra workgroup storage the staged smoother declares.
@@ -233,8 +257,12 @@ export const OCTREE_PERSISTENT_MGPCG_STAGED_SMOOTHER_WORKGROUP_BYTES =
   + 8 * 4;
 
 /** Declared workgroup footprint for a given staged-smoother selection. */
-export function octreePersistentMGPCGWorkgroupBytes(stagedSmoother = false): number {
+export function octreePersistentMGPCGWorkgroupBytes(
+  stagedSmoother = false,
+  lanes: number = OCTREE_PERSISTENT_MGPCG_DEFAULT_LANES,
+): number {
   return OCTREE_PERSISTENT_MGPCG_WORKGROUP_BYTES
+    + (lanes - OCTREE_PERSISTENT_MGPCG_DEFAULT_LANES) * 4
     + (stagedSmoother ? OCTREE_PERSISTENT_MGPCG_STAGED_SMOOTHER_WORKGROUP_BYTES : 0);
 }
 
@@ -295,6 +323,10 @@ export function octreePersistentMGPCGWGSL(
   options: OctreePersistentMGPCGShaderOptions,
 ): string {
   const iterations = options.maximumIterations;
+  const lanes = options.lanes ?? OCTREE_PERSISTENT_MGPCG_DEFAULT_LANES;
+  if (lanes !== 256 && lanes !== 512 && lanes !== 1024) {
+    throw new RangeError("Persistent MGPCG lane count must be 256, 512 or 1024");
+  }
   const rowStride = options.compactLiveRows === false ? "capacity()" : "wRows";
   const regularSlotLookup = options.regularAddressOracle
     ? "opPageSlot(l,page,q,vec3u(targetQ),row)"
@@ -724,7 +756,7 @@ const S_YZMM=20u;const S_RHS=21u;const S_A=22u;const S_B=23u;
 const S_OWNER=24u;const S_SPECTRAL=25u;const STATE_CHANNELS=26u;
 const PAGE_RECORD_WORDS=28u;
 const DISPATCH_WORDS=12u;
-const LANES=256u;
+const LANES=${lanes}u;
 const REDUCTION_LANES=${OCTREE_PERSISTENT_MGPCG_REDUCTION_LANES}u;
 const MAX_LIVE_ROWS=${OCTREE_PERSISTENT_MGPCG_MAXIMUM_ROW_CAPACITY}u;
 
@@ -762,7 +794,7 @@ const CH_RHS=${OCTREE_PERSISTENT_MGPCG_CHANNEL.rhs}u;
 const CH_SEED=${OCTREE_PERSISTENT_MGPCG_CHANNEL.pressureSeed}u;
 ${bandCensusDeclarations}
 ${stagedSmootherDeclarations}var<workgroup> merged:array<MergedScalars,${OCTREE_PERSISTENT_MGPCG_REDUCTION_LANES}>;
-var<workgroup> scan:array<u32,256>;
+var<workgroup> scan:array<u32,${lanes}>;
 var<workgroup> wRows:u32;
 var<workgroup> wLevels:u32;
 var<workgroup> wPartials:u32;
@@ -1561,7 +1593,7 @@ fn compactBand(lane:u32,liveRows:u32){
 // ---------------------------------------------------------------------------
 // The single persistent entry point.
 // ---------------------------------------------------------------------------
-@compute @workgroup_size(256)
+@compute @workgroup_size(${lanes})
 fn persistentMGPCG(@builtin(local_invocation_index) lane:u32${activityParameters}){${stagedSmootherPrologue}${activityEnter}
  // --- P0: authority validation, uniform bootstrap -------------------------
  if(lane==0u){

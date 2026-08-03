@@ -11,6 +11,7 @@ import {
   decodeOctreePersistentMGPCGBandCensus,
   octreePersistentMGPCGRegularBandRowsMode,
   octreePersistentMGPCGStagedSmootherEnabled,
+  octreePersistentMGPCGLanes,
   octreePersistentMGPCGPhaseRepeatProbe,
   octreePersistentMGPCGRestrictedPrefixNetworkEnabled,
   octreePersistentMGPCGStencilColumnsEnabled,
@@ -573,6 +574,42 @@ test("the phase repeat probe is idempotent, opaque to the compiler, and absent b
     /sparseSmoothPhase\(l,S_A,S_B,phase,degree,lane\);.*\s*.*sparseSmoothPhase\(l,S_B,S_A,phase,degree,lane\);/);
   assert.notEqual(smooth, band);
   assert.notEqual(smooth, allRows);
+});
+
+test("the persistent workgroup width is a work-distribution stride only", () => {
+  assert.equal(octreePersistentMGPCGLanes({}), 256);
+  assert.equal(octreePersistentMGPCGLanes({ FLUID_OCTREE_MGPCG_LANES: "512" }), 512);
+  assert.equal(octreePersistentMGPCGLanes({ FLUID_OCTREE_MGPCG_LANES: "1024" }), 1024);
+  assert.throws(() => octreePersistentMGPCGLanes({ FLUID_OCTREE_MGPCG_LANES: "384" }),
+    /must be 256, 512 or 1024/, "non-power-of-two widths break compactBand's scan");
+
+  const authored = octreePersistentMGPCGWGSL({ maximumIterations: 10, compactLiveRows: true });
+  assert.equal(octreePersistentMGPCGWGSL({
+    maximumIterations: 10, compactLiveRows: true, lanes: 256,
+  }), authored, "the authored width must emit a byte-identical module");
+
+  const wide = octreePersistentMGPCGWGSL({
+    maximumIterations: 10, compactLiveRows: true, lanes: 1024,
+  });
+  assert.match(wide, /const LANES=1024u;/);
+  assert.match(wide, /@compute @workgroup_size\(1024\)/);
+  // The scan array must track the width or compactBand reads out of bounds.
+  assert.match(wide, /var<workgroup> scan:array<u32,1024>;/);
+  // The reductions must NOT track it: their association order is what the
+  // compensated sum depends on, and it is indexed by REDUCTION_LANES alone.
+  assert.match(wide, /let row=vg\*REDUCTION_LANES\+lane;/);
+  assert.match(wide, /if\(lane<REDUCTION_LANES&&row<liveRows&&!stopped\(\)\)/);
+  assert.match(wide, /for\(var width=REDUCTION_LANES\/2u;width>0u;width>>=1u\)/);
+
+  // Workgroup storage has to grow with the scan array and stay inside the
+  // 16 KiB floor Dawn exposes on Metal; an overflow here is a validation error
+  // the skip_validation harness turns into a SIGSEGV rather than a message.
+  for (const lanes of [256, 512, 1024] as const) {
+    const bytes = octreePersistentMGPCGWorkgroupBytes(true, lanes);
+    assert.equal(bytes, OCTREE_PERSISTENT_MGPCG_WORKGROUP_BYTES + (lanes - 256) * 4
+      + OCTREE_PERSISTENT_MGPCG_STAGED_SMOOTHER_WORKGROUP_BYTES);
+    assert.ok(bytes < 16384, `workgroup storage at ${lanes} lanes must fit the floor`);
+  }
 });
 
 test("every band-row and staged-smoother combination is accepted by naga", () => {
