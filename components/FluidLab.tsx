@@ -3,10 +3,15 @@
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent } from "react";
 import { simulation } from "@/lib/simulation/controller";
 import { startQueryStateSync } from "@/lib/url-state";
+import { startSceneAutosave } from "@/lib/scene-autosave";
+import { browserSceneLibraryStorage } from "@/lib/scene-library";
 import { useDiagnosticsStore } from "@/lib/stores/diagnostics-store";
 import { useRuntimeStore } from "@/lib/stores/runtime-store";
 import { useUIStore } from "@/lib/stores/ui-store";
+import { useShellStore } from "@/lib/stores/shell-store";
 import { WebGPUViewport } from "./WebGPUViewport";
+import { SceneLibrary } from "./SceneLibrary";
+import { UrlStateSync } from "./UrlStateSync";
 import { EditorToolbar } from "./EditorToolbar";
 import { SceneOverlay } from "./SceneOverlay";
 import { SceneScaleOverlay } from "./SceneScaleOverlay";
@@ -18,7 +23,7 @@ import { PerformancePanel } from "./PerformancePanel";
 import { TransportBar } from "./TransportBar";
 import { RecordingPlaybackModal } from "./RecordingPlaybackModal";
 import type { ResourceActivity, ResourcePluginDefinition } from "@/lib/resource-readiness";
-import { resourceActivities } from "@/lib/resource-readiness";
+import { resourceActivities, resourceActivitiesFor } from "@/lib/resource-readiness";
 import { requestManualGPUStart } from "@/lib/gpu-startup";
 import { useSafeBrowserGPUBringup } from "@/lib/use-safe-browser-gpu-bringup";
 import { useEditorShortcuts } from "@/lib/use-editor-shortcuts";
@@ -103,6 +108,15 @@ function GPUInitializationPanel({ activity, plugin }: {
   </div>;
 }
 
+/** Work that blocks nothing is reported, but it never takes the tray's width. */
+function ResourceActivityPill({ activity }: { activity: ResourceActivity }) {
+  return <span className="resource-activity-pill" role="status" aria-live="polite">
+    <i aria-hidden="true" />
+    <strong>{activity.label}</strong>
+    {activity.total > 0 && <small>{Math.min(activity.completed, activity.total)}/{activity.total}</small>}
+  </span>;
+}
+
 export function FluidLab() {
   const safeBringup = useSafeBrowserGPUBringup() === true;
   const runState = useRuntimeStore((state) => state.runState);
@@ -115,9 +129,17 @@ export function FluidLab() {
   const rightPanel = useUIStore((state) => state.rightPanel);
   const rightPanelWidth = useUIStore((state) => state.rightPanelWidth);
   const setRightPanel = useUIStore((state) => state.setRightPanel);
+  const shellView = useShellStore((state) => state.view);
   const activities = resourceActivities(resourceReadiness);
+  // Transport-blocking work is deliberately absent here: TransportBar states it
+  // inline, beside the controls it suspends.
+  const trayCards = resourceActivitiesFor(resourceReadiness, "card");
+  const trayPills = resourceActivitiesFor(resourceReadiness, "pill");
 
   useLayoutEffect(() => startQueryStateSync(() => simulation.reset()), []);
+  // After the URL has hydrated the document, so the first autosave records the
+  // scene the reader actually arrived on rather than the default preset.
+  useEffect(() => startSceneAutosave({ storage: browserSceneLibraryStorage() }), []);
   useEditorShortcuts();
 
   useEffect(() => {
@@ -129,7 +151,8 @@ export function FluidLab() {
 
 
   return (
-    <main className="lab-shell" style={{ "--right-panel-width": `${rightPanelWidth}px` } as CSSProperties} data-run-state={runState} data-solver-mode="eulerian" data-simulation-time={simulationTime.toFixed(6)} data-body-count={bodies.length} data-right-panel-open={Boolean(rightPanel)} data-right-panel={rightPanel ?? "closed"}>
+  <>
+    <main className="lab-shell" style={{ "--right-panel-width": `${rightPanelWidth}px` } as CSSProperties} data-run-state={runState} data-solver-mode="eulerian" data-simulation-time={simulationTime.toFixed(6)} data-body-count={bodies.length} data-right-panel-open={Boolean(rightPanel)} data-right-panel={rightPanel ?? "closed"} data-shell-view={shellView}>
       <section className="viewport-shell" data-resource-active={activities.length > 0} data-gpu-transition={activities.at(-1)?.lane ?? resourceReadiness.platform.state}>
         <WebGPUViewport />
         <EditorToolbar />
@@ -146,12 +169,15 @@ export function FluidLab() {
           <button className={diagnosticsOpen ? "active" : ""} onClick={() => setDiagnosticsOpen(!diagnosticsOpen)} aria-expanded={diagnosticsOpen} title="Live diagnostics">DIAGNOSTICS</button>
           <button className={rightPanel === "performance" ? "active" : ""} onClick={() => setRightPanel(rightPanel === "performance" ? null : "performance")} aria-expanded={rightPanel === "performance"} aria-controls="performance-panel" title="Measured work and paper fields">PERFORMANCE</button>
         </nav>
-        {activities.length > 0 && <div className="resource-activity-tray" aria-label="Resource tasks">
-          {activities.map((activity) => <GPUInitializationPanel
+        {(trayCards.length > 0 || trayPills.length > 0) && <div className="resource-activity-tray" aria-label="Resource tasks">
+          {trayCards.map((activity) => <GPUInitializationPanel
             key={activity.id}
             activity={activity}
             plugin={resourceReadiness.plugins[activity.pluginId].plugin}
           />)}
+          {trayPills.length > 0 && <div className="resource-activity-pills">
+            {trayPills.map((activity) => <ResourceActivityPill key={activity.id} activity={activity} />)}
+          </div>}
         </div>}
         {gpuStatus.state === "manual" && <div className="gpu-fallback gpu-manual-start" role="status">
           <strong>WebGPU startup paused for safety</strong>
@@ -181,6 +207,14 @@ export function FluidLab() {
 
       <RecordingPlaybackModal />
       <SceneConfigPopover />
+      <UrlStateSync />
     </main>
+
+    {/* A layer rather than a route, and a peer of the studio rather than a
+        child of it: the viewport keeps its device, its pipelines and its draw
+        loop while this is in front, and the front door follows the reader's
+        theme instead of the studio's pinned instrument palette. */}
+    <SceneLibrary />
+  </>
   );
 }

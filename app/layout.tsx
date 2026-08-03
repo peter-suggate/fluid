@@ -17,6 +17,19 @@ export async function generateMetadata(): Promise<Metadata> {
   };
 }
 
+/**
+ * The stored theme, applied before the first paint.
+ *
+ * `system` is the default and is the absence of the attribute, so this only has
+ * anything to do when the reader has chosen otherwise — which is exactly the
+ * case that would otherwise flash the wrong palette. Kept deliberately tiny and
+ * in sync with `lib/stores/theme-store.ts`.
+ */
+const THEME_BOOT = `try{var t=localStorage.getItem("fluid-lab-theme");if(t==="light"||t==="dark")document.documentElement.dataset.theme=t}catch(e){}`;
+
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
-  return <html lang="en"><body>{children}</body></html>;
+  return <html lang="en">
+    <head><script dangerouslySetInnerHTML={{ __html: THEME_BOOT }} /></head>
+    <body>{children}</body>
+  </html>;
 }

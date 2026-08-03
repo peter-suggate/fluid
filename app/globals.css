@@ -1,24 +1,88 @@
-:root {
-  color-scheme: dark;
-  --bg: #06100f;
-  --panel: rgba(8, 22, 21, 0.94);
-  --panel-soft: rgba(12, 31, 29, 0.78);
-  --ink: #ecf8f5;
-  --muted: #829d98;
-  --dim: #4f6965;
-  --line: rgba(168, 226, 215, 0.13);
-  --line-strong: rgba(168, 226, 215, 0.23);
-  --accent: #83f1d1;
-  --accent-strong: #b4ffe8;
-  --amber: #f7c66d;
-  --red: #ff877c;
-  --mono: "SFMono-Regular", "Roboto Mono", Consolas, monospace;
-  --sans: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+/* Outfit, self-hosted: a wide geometric grotesque with almost no stroke
+   contrast, which is what lets a heading be large and bold without being loud.
+   Vendored rather than fetched so the product's voice has no third party in it
+   and no network on the critical path. */
+@font-face {
+  font-family: "Outfit";
+  font-style: normal;
+  font-weight: 300 800;
+  font-display: swap;
+  src: url("/fonts/outfit-latin.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
 }
+@font-face {
+  font-family: "Outfit";
+  font-style: normal;
+  font-weight: 300 800;
+  font-display: swap;
+  src: url("/fonts/outfit-latin-ext.woff2") format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+
+/**
+ * One vocabulary, two palettes.
+ *
+ * Every surface in the product names the same dozen tokens — `--ink`, `--line`,
+ * `--accent` and the rest — and the *theme* decides what they mean. Light is the
+ * product's own voice: warm, low-contrast, generous. Dark is the one the studio
+ * has always worn, because a viewport is a light source and every panel around
+ * it is a readout over a live image.
+ *
+ * Both live in one declaration. `light-dark()` resolves against the element's
+ * used `color-scheme`, so the switcher is three one-line rules and no palette is
+ * ever written twice — and a component states a colour once, or not at all.
+ * The dark values below are exactly the ones the studio has always had.
+ */
+:root {
+  /* Both, and the system decides — until the reader says otherwise. */
+  color-scheme: light dark;
+
+  --bg: light-dark(#f5f2eb, #06100f);
+  --panel: light-dark(#fffdf8, rgba(8, 22, 21, .94));
+  --panel-soft: light-dark(#f0ebe1, rgba(12, 31, 29, .78));
+  --ink: light-dark(#26302d, #ecf8f5);
+  --muted: light-dark(#616e6a, #829d98);
+  --dim: light-dark(#98a29d, #4f6965);
+  --line: light-dark(#e7e0d2, rgba(168, 226, 215, .13));
+  --line-strong: light-dark(#d4cab7, rgba(168, 226, 215, .23));
+  --accent: light-dark(#2f8f7f, #83f1d1);
+  --accent-strong: light-dark(#1f6d61, #b4ffe8);
+  --accent-wash: light-dark(rgba(47, 143, 127, .075), rgba(131, 241, 209, .085));
+  --accent-line: light-dark(rgba(47, 143, 127, .3), rgba(131, 241, 209, .34));
+  --amber: light-dark(#b0743a, #f7c66d);
+  --red: light-dark(#bd584c, #ff877c);
+  /* The warm half of the page: a second, quieter wash so a surface reads as
+     paper rather than as white. */
+  --wash-warm: light-dark(rgba(178, 156, 110, .1), rgba(168, 226, 215, .05));
+  --shadow-soft: light-dark(rgba(66, 56, 38, .045), rgba(0, 0, 0, .3));
+  --shadow-tint: light-dark(rgba(66, 56, 38, .5), rgba(0, 0, 0, .7));
+  /* Thumbnail ink and thumbnail ground; every mark shades these with opacity. */
+  --iso-ink: light-dark(#26302d, #d8ece7);
+  --iso-ground: light-dark(#7c6c4e, #9db5a8);
+
+  /* Soft rather than square: the whole product is one radius family. */
+  --radius-s: 9px;
+  --radius-m: 15px;
+  --radius-l: 24px;
+  --shadow-card: 0 1px 2px var(--shadow-soft), 0 12px 28px -20px var(--shadow-tint);
+  --shadow-lift: 0 2px 5px var(--shadow-soft), 0 26px 52px -28px var(--shadow-tint);
+
+  --mono: "SFMono-Regular", "Roboto Mono", Consolas, monospace;
+  --sans: Outfit, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --display: var(--sans);
+}
+
+/* The switcher, in full. */
+:root[data-theme="light"] { color-scheme: light; }
+:root[data-theme="dark"] { color-scheme: dark; }
+/* The studio is an instrument surface and stays one under either theme: its
+   panels are readouts over a live image, and the image is the light in the
+   room. `color` is restated so it re-resolves against this scheme. */
+.lab-shell { color-scheme: dark; color: var(--ink); }
 
 * { box-sizing: border-box; }
 html, body { margin: 0; min-height: 100%; overflow: hidden; }
-body { background: var(--bg); color: var(--ink); font-family: var(--sans); font-size: 13px; }
+body { background: var(--bg); color: var(--ink); font-family: var(--sans); font-size: 13px; -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; }
 button, input { font: inherit; }
 button { color: inherit; }
 button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
@@ -34,7 +98,7 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); ou
 }
 .lab-shell[data-right-panel-open="true"] { grid-template-columns: minmax(360px, 1fr) var(--right-panel-width, 620px); }
 
-.brand-mark { width: 31px; height: 31px; flex: none; display: grid; place-items: center; border: 1px solid rgba(131, 241, 209, .45); color: var(--accent); font: 700 11px/1 var(--mono); letter-spacing: -.08em; box-shadow: inset 0 0 18px rgba(131,241,209,.08), 0 0 24px rgba(131,241,209,.05); }
+.brand-mark { width: 32px; height: 32px; flex: none; display: grid; place-items: center; border: 1.5px solid var(--accent-line); border-radius: var(--radius-s, 0); color: var(--accent); font: 800 12px/1 var(--display, var(--sans)); letter-spacing: -.04em; }
 .segmented button { border: 0; background: transparent; color: var(--muted); cursor: pointer; transition: .18s ease; }
 .segmented button:hover { color: var(--ink); }
 .segmented button.active { background: rgba(131, 241, 209, .12); color: var(--accent-strong); box-shadow: inset 0 0 0 1px rgba(131,241,209,.16); }
@@ -1018,3 +1082,169 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 .pixel-trace-disclosure:hover { border-color: rgba(194,166,255,.5); }
 .pixel-trace-disclosure em { margin-left: auto; padding: 2px 5px; border: 1px solid rgba(98,205,176,.3); background: rgba(98,205,176,.07); color: #82d5c1; font: 700 7px/1 var(--mono); font-style: normal; letter-spacing: .06em; }
 .pixel-trace-disclosure em[data-failed="true"] { border-color: rgba(226,104,132,.42); background: rgba(226,104,132,.09); color: #ee8aa2; }
+
+/* Scene chip: names where you are and opens the library. It replaced a preset
+   <select>, so it keeps that pill's footprint and gains its own affordance. */
+.scene-overlay-chip { min-width: 0; flex: 1; display: grid; justify-items: start; gap: 1px; padding: 3px 9px; border: 0; background: transparent; text-align: left; cursor: pointer; }
+.scene-overlay-chip strong { max-width: 100%; overflow: hidden; color: var(--ink); font-size: 12px; font-weight: 550; letter-spacing: -.015em; text-overflow: ellipsis; white-space: nowrap; }
+.scene-overlay-chip small { max-width: 100%; overflow: hidden; color: var(--dim); font: 7px/1 var(--mono); text-overflow: ellipsis; white-space: nowrap; }
+.scene-overlay-chip:hover strong { color: var(--accent-strong); }
+.scene-overlay-chip:hover small { color: var(--muted); }
+
+/* ---------------------------------------------------------------------------
+   Paper — the product's own surface, and the primitives every page on it is
+   built from.
+
+   `.card`, `.chip`, `.pill` and `.section-head` are deliberately un-namespaced.
+   They are the style guide, not the scene library's private stylesheet: a panel
+   that moves onto paper adopts them without one new rule, and a change to the
+   card shape is one line rather than four. Everything they read is a token
+   declared once, in `:root, .surface-paper`.
+   --------------------------------------------------------------------------- */
+.card { display: grid; align-content: start; overflow: hidden; border: 1px solid var(--line); border-radius: var(--radius-l); background: var(--panel); box-shadow: var(--shadow-card); text-align: left; }
+button.card { padding: 0; cursor: pointer; transition: transform .22s cubic-bezier(.2,.7,.3,1), box-shadow .22s ease, border-color .22s ease; }
+button.card:hover { transform: translateY(-3px); border-color: var(--accent-line); box-shadow: var(--shadow-lift); }
+button.card[data-active] { border-color: var(--accent); }
+/* The thumbnail's well: a wash rather than a frame, so a hairline drawing sits
+   on the card instead of in a box on it. */
+.card-art { display: block; min-height: 0; padding: 16px 18px 2px; background: linear-gradient(168deg, var(--accent-wash), var(--wash-warm) 68%, transparent); }
+.card-body { display: grid; align-content: start; gap: 8px; padding: 18px 20px 20px; }
+.card-body strong { font: 650 16px/1.25 var(--display); letter-spacing: -.018em; }
+.card-body small { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 2; color: var(--muted); font-size: 12.5px; line-height: 1.5; }
+
+.chip { padding: 3px 9px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); font: 600 10.5px/1.4 var(--display); letter-spacing: .09em; text-transform: uppercase; white-space: nowrap; }
+.chip[data-tone="accent"] { border-color: var(--accent-line); background: var(--accent-wash); color: var(--accent-strong); }
+.chip[data-tone="warn"] { border-color: var(--red); color: var(--red); }
+.chip-row { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 2px; }
+
+.pill { display: flex; align-items: center; gap: 9px; height: 40px; padding: 0 18px; border: 1px solid var(--line-strong); border-radius: 999px; background: transparent; color: var(--muted); font: 600 13px/1 var(--display); cursor: pointer; transition: color .18s ease, border-color .18s ease, background .18s ease, box-shadow .18s ease; }
+.pill:hover { border-color: var(--accent-line); background: var(--accent-wash); color: var(--accent-strong); }
+.pill:focus-within { border-color: var(--accent-line); box-shadow: 0 0 0 4px var(--accent-wash); }
+
+/* Wide, bold and low contrast: a heading carries its rank on its shape rather
+   than on a rule, a colour or a label above it. */
+.section-head { display: grid; gap: 6px; }
+.section-head h1 { margin: 0; font: 700 clamp(46px, 6.2vw, 76px)/.94 var(--display); letter-spacing: -.038em; }
+.section-head h2 { margin: 0; font: 700 28px/1.1 var(--display); letter-spacing: -.028em; }
+.section-head p, .section-head small { margin: 0; max-width: 58ch; color: var(--muted); font-size: 14px; line-height: 1.5; }
+.section-head h1 ~ p { font-size: 16px; }
+
+/* ---------------------------------------------------------------------------
+   The front door.
+
+   A layer over a live viewport, never a route — the device and its pipelines
+   keep running behind it (lib/stores/shell-store.ts). Opaque rather than a
+   scrim, because this is the product's own surface and not a dialog over the
+   studio's: the wash is what a cold load reads while the platform lane starts.
+   --------------------------------------------------------------------------- */
+.scene-library-layer { position: fixed; inset: 0; z-index: 40; display: grid; grid-template-rows: 70px minmax(0, 1fr); color: var(--ink); font-family: var(--sans); background: radial-gradient(1100px 620px at 86% -12%, var(--accent-wash), transparent 62%), radial-gradient(900px 520px at -6% 108%, var(--wash-warm), transparent 58%), var(--bg); }
+.scene-library-layer .panel-scroll { scrollbar-color: var(--line-strong) transparent; }
+.scene-library-layer .eyebrow { margin: 0; color: var(--accent); font: 700 10px/1.2 var(--display); letter-spacing: .17em; text-transform: uppercase; }
+
+.library-bar { display: flex; align-items: center; gap: 16px; padding: 0 clamp(20px, 4vw, 46px); border-bottom: 1px solid var(--line); }
+.library-brand { display: flex; align-items: center; }
+.library-wordmark { position: relative; margin-left: 17px; padding-left: 17px; font: 700 13px/1 var(--display); letter-spacing: .19em; text-transform: uppercase; white-space: nowrap; }
+.library-wordmark::before { content: ""; position: absolute; left: 0; top: 50%; width: 1px; height: 22px; transform: translateY(-50%); background: var(--line-strong); }
+.library-search { width: min(360px, 34vw); margin-left: auto; padding-right: 8px; background: var(--panel); border-color: var(--line); cursor: text; }
+.library-search:hover { background: var(--panel); }
+.library-search svg { width: 15px; height: 15px; flex: none; fill: none; stroke: var(--dim); stroke-width: 1.5; stroke-linecap: round; }
+.library-search input { min-width: 0; flex: 1; height: 100%; border: 0; outline: 0; appearance: none; background: transparent; color: var(--ink); font-size: 14px; }
+.library-search input::placeholder { color: var(--dim); }
+.library-search input::-webkit-search-cancel-button { appearance: none; }
+.library-search kbd { flex: none; min-width: 22px; height: 22px; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 7px; color: var(--dim); font: 600 11px/1 var(--display); }
+.library-search:focus-within kbd { opacity: 0; }
+.theme-switch { display: flex; gap: 2px; padding: 3px; border: 1px solid var(--line); border-radius: 999px; }
+.theme-switch button { width: 30px; height: 30px; display: grid; place-items: center; border: 0; border-radius: 999px; background: transparent; color: var(--dim); cursor: pointer; transition: color .18s ease, background .18s ease; }
+.theme-switch button:hover { color: var(--ink); }
+.theme-switch button[aria-pressed="true"] { background: var(--accent-wash); color: var(--accent-strong); }
+.theme-switch svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+
+.library-page { width: 100%; max-width: 1240px; margin: 0 auto; padding: clamp(36px, 5vw, 64px) clamp(20px, 4vw, 46px) 120px; display: grid; gap: clamp(38px, 4.4vw, 58px); align-content: start; }
+.library-empty { margin: 0; color: var(--muted); font-size: 14px; }
+
+/* Continuing and creating are the two reasons someone who has been here before
+   is here again, so they share the top of the page and nothing else does. */
+.library-hero { display: grid; grid-template-columns: minmax(0, 1fr); gap: 20px; }
+.library-hero[data-resume] { grid-template-columns: minmax(0, 1.32fr) minmax(340px, .92fr); }
+@media (max-width: 940px) { .library-hero[data-resume] { grid-template-columns: minmax(0, 1fr); } }
+.hero-continue { grid-template-rows: minmax(0, 1fr) auto; min-height: 320px; }
+.hero-continue .card-art { padding: 26px 30px 6px; }
+.hero-continue .card-body { gap: 7px; padding: 20px 30px 28px; }
+.hero-continue .card-body strong, .hero-new h2 { font: 700 26px/1.1 var(--display); letter-spacing: -.028em; }
+.hero-continue .card-body small { -webkit-line-clamp: 3; font-size: 13.5px; }
+/* New scene is a peer of choosing one, so it is a surface of its own rather
+   than a card in the grid — and the three rooms below it are the whole offer. */
+.hero-new { gap: 16px; padding: 30px 30px 22px; border-color: var(--accent-line); background: linear-gradient(170deg, var(--accent-wash), transparent 70%), var(--panel); }
+.hero-new-copy { display: grid; gap: 9px; }
+.hero-new h2 { margin: 0; }
+.hero-new > small { max-width: 40ch; color: var(--muted); font-size: 13.5px; line-height: 1.5; }
+.hero-new-plus { width: 46px; height: 46px; margin-bottom: 4px; fill: none; stroke: var(--accent); stroke-width: 1.4; stroke-linecap: round; opacity: .85; }
+.starter-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; margin-top: 14px; padding-top: 16px; border-top: 1px solid var(--line); }
+.starter { display: grid; gap: 6px; padding: 8px 6px 12px; border: 1px solid transparent; border-radius: var(--radius-m); background: transparent; cursor: pointer; transition: background .18s ease, border-color .18s ease; }
+.starter-art { display: block; height: 84px; }
+/* With nothing to continue, the panel takes the page rather than leaving half
+   of it blank: the copy on one side, the three rooms on the other. */
+.library-hero:not([data-resume]) .hero-new { grid-template-columns: minmax(240px, .8fr) minmax(0, 1fr); align-items: center; column-gap: 48px; padding: 34px; }
+.library-hero:not([data-resume]) .starter-row { margin: 0; padding: 0 0 0 48px; border-top: 0; border-left: 1px solid var(--line); }
+.starter-name { color: var(--muted); font: 600 10.5px/1 var(--display); letter-spacing: .13em; text-transform: uppercase; text-align: center; transition: color .18s ease; }
+.starter:hover { border-color: var(--accent-line); background: var(--panel); }
+.starter:hover .starter-name { color: var(--accent-strong); }
+
+.scene-section { display: grid; gap: 20px; }
+/* The oracles are how the physics is trusted, so they are disclosed rather than
+   removed — present, findable, and not the first impression. */
+.scene-section-disclosure { display: flex; align-items: center; gap: 12px; width: 100%; padding: 16px 4px; border: 0; border-top: 1px solid var(--line); background: transparent; text-align: left; cursor: pointer; }
+.scene-section-disclosure i { width: 24px; height: 24px; flex: none; display: grid; place-items: center; border: 1px solid var(--line-strong); border-radius: 50%; color: var(--muted); font-style: normal; font-size: 13px; transition: border-color .18s ease, color .18s ease; }
+.scene-section-disclosure strong { font: 700 19px/1.2 var(--display); letter-spacing: -.02em; }
+.scene-section-disclosure small { color: var(--muted); font-size: 13px; }
+.scene-section-disclosure:hover i { border-color: var(--accent-line); color: var(--accent); }
+.scene-section-disclosure:hover strong { color: var(--accent-strong); }
+.scene-shelf { display: grid; gap: 12px; }
+.scene-shelf h3 { margin: 0; color: var(--dim); font: 700 10.5px/1 var(--display); letter-spacing: .17em; text-transform: uppercase; }
+.scene-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(256px, 1fr)); gap: 18px; }
+.scene-card { grid-template-rows: auto 1fr; border-radius: var(--radius-m); }
+.scene-card .card-art { height: 148px; border-bottom: 1px solid var(--line); }
+.card-art-missing { display: block; height: 100%; border: 1px dashed var(--line-strong); border-radius: var(--radius-s); opacity: .55; }
+
+/* ---------------------------------------------------------------------------
+   The thumbnail: `sceneIsoGlyph` as a small room (components/SceneIsoGlyph.tsx).
+   Hairlines and washes only — the mark has to be identified by its shape at
+   90 px, and a second hue would only compete with the card's own state. Every
+   colour here is a token, so one rule restyles every thumbnail in the product.
+   --------------------------------------------------------------------------- */
+.scene-iso { display: block; width: 100%; height: 100%; }
+.scene-iso * { vector-effect: non-scaling-stroke; }
+.iso-room-floor, .iso-room-wall, .iso-room-lid, .iso-body-top, .iso-body-side, .iso-body-round { fill: var(--iso-ink); }
+.iso-room-floor { fill-opacity: .05; }
+.iso-room-wall { fill-opacity: .028; }
+.iso-room-lid { fill-opacity: .022; }
+.iso-room-edge { fill: none; stroke: var(--iso-ink); stroke-opacity: .3; stroke-width: .9; stroke-linejoin: round; stroke-linecap: round; }
+.iso-room-edge-near { stroke-opacity: .55; stroke-width: 1.2; }
+.iso-water-top, .iso-water-side { fill: var(--accent); transition: fill-opacity .22s ease; }
+.iso-water-top { fill-opacity: .3; }
+.iso-water-side { fill-opacity: .17; }
+.iso-terrain-row { fill: var(--iso-ground); fill-opacity: .11; stroke: var(--iso-ground); stroke-opacity: .26; stroke-width: .7; stroke-linejoin: round; }
+.iso-body-top, .iso-body-round { fill-opacity: .2; }
+.iso-body-side { fill-opacity: .12; }
+.iso-inflow line { stroke: var(--accent); stroke-width: 1.6; stroke-linecap: round; }
+.iso-inflow circle { fill: var(--accent); }
+/* A card lifts its whole mark rather than any one part, so the drawing keeps
+   its internal contrast in every state. */
+button:hover .iso-water-top { fill-opacity: .44; }
+button:hover .iso-water-side { fill-opacity: .26; }
+
+/* Resource activity presentation (lib/resource-readiness.ts). A card is the
+   loudest mark the shell can put over a live viewport, so only work that took
+   scene interaction keeps one; work that blocks nothing gets a pill, and
+   transport-blocking work states itself in the transport bar instead. Both new
+   marks inherit the tray's pointer transparency — nothing here may take input. */
+.resource-activity-pills { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 5px; }
+.resource-activity-pill { display: flex; align-items: center; gap: 6px; max-width: 100%; padding: 3px 8px; border: 1px solid var(--line); background: rgba(7,20,18,.9); backdrop-filter: blur(10px); }
+.resource-activity-pill i { flex: none; width: 5px; height: 5px; border-radius: 50%; background: var(--accent); animation: status-pulse 1.6s ease-in-out infinite; }
+.resource-activity-pill strong { overflow: hidden; color: var(--muted); font: 650 8px/1.4 var(--mono); text-overflow: ellipsis; white-space: nowrap; }
+.resource-activity-pill small { flex: none; color: var(--dim); font: 8px/1.4 var(--mono); font-variant-numeric: tabular-nums; }
+
+.transport-resource-state { display: flex; align-items: center; gap: 6px; max-width: 232px; height: 29px; margin-left: 7px; padding: 0 9px; border: 1px solid rgba(131,241,209,.24); background: rgba(131,241,209,.05); }
+.transport-resource-state i { flex: none; width: 7px; height: 7px; border: 1px solid rgba(131,241,209,.35); border-top-color: var(--accent); border-radius: 50%; animation: gpu-build-spin .8s linear infinite; }
+.transport-resource-state strong { overflow: hidden; color: var(--accent); font: 650 8px/1 var(--mono); letter-spacing: .04em; text-overflow: ellipsis; white-space: nowrap; }
+.transport-resource-state small { flex: none; color: var(--muted); font: 8px/1 var(--mono); font-variant-numeric: tabular-nums; }
