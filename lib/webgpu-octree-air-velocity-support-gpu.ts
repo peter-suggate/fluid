@@ -2760,11 +2760,34 @@ fn betterFace(item:u32,candidate:vec4u,best:vec4u)->bool{let candidateDistanceSq
   // Normal-velocity magnitude is invariant under every axis reflection and
   // permutation, so use it before the canonical spatial fallback.
   let candidateMagnitude=abs(bitcast<f32>(candidate.x));let bestMagnitude=abs(bitcast<f32>(best.x));
-  return candidate.w!=0u&&finiteValue(candidateDistanceSquared)&&(best.w==0u||candidateDistanceSquared<bestDistanceSquared
-    ||(candidateDistanceSquared==bestDistanceSquared
-      &&(candidateMagnitude<bestMagnitude||(candidateMagnitude==bestMagnitude
-        &&(canonicalOffsetLess(canonicalSeedOffset(item,candidate.z),canonicalSeedOffset(item,best.z))
-          ||(all(canonicalSeedOffset(item,candidate.z)==canonicalSeedOffset(item,best.z))&&candidate.z<best.z))))));}
+  // Same predicate, same tie-break ORDER, evaluated with each canonical offset
+  // resolved once instead of twice.
+  //
+  // The single expression this replaces named canonicalSeedOffset FOUR times
+  // for two distinct values, and every call re-does an integer divide by the
+  // owned-face slot count, two faceCenterQuarter resolutions and a faceCell
+  // load. The comment on faceDistanceSquaredFrom directly below records this
+  // exact fix being applied to the distance path -- "resolve it once per
+  // invocation instead of once per candidate" -- and the tie path was missed.
+  // Ties are the common case here: two neighbours relaying the same seed are
+  // equidistant and equal in magnitude, so this chain is where the marching
+  // scan actually spends its candidates.
+  //
+  // The early returns reproduce the original short-circuit exactly, including
+  // its NaN behaviour: a non-finite distance or magnitude fails every < and ==,
+  // so both forms fall through to false. The offsets are still only touched
+  // after distance AND magnitude have tied, so the non-tie path does not pay
+  // for them.
+  if(candidate.w==0u||!finiteValue(candidateDistanceSquared)){return false;}
+  if(best.w==0u){return true;}
+  if(candidateDistanceSquared<bestDistanceSquared){return true;}
+  if(candidateDistanceSquared!=bestDistanceSquared){return false;}
+  if(candidateMagnitude<bestMagnitude){return true;}
+  if(candidateMagnitude!=bestMagnitude){return false;}
+  let candidateOffset=canonicalSeedOffset(item,candidate.z);
+  let bestOffset=canonicalSeedOffset(item,best.z);
+  if(canonicalOffsetLess(candidateOffset,bestOffset)){return true;}
+  return all(candidateOffset==bestOffset)&&candidate.z<best.z;}
 // An air leaf may be demanded even when the octree has no allocated leaf on
 // its negative side. Positive-only patch ownership then has no stored record
 // for one of the ordinary faces incident to this dual-mesh node. Recover that
