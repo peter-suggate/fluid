@@ -402,6 +402,18 @@ export interface OctreeSPGridVCyclePlan {
   readonly stencilNeighbourBytes: number;
   /** Dense logical-page directory plus immutable key+27-neighbour records. */
   readonly pageDirectoryBytes: number;
+  /**
+   * Where that directory starts in the topology arena.
+   *
+   * Published because the directory is the one region whose *unwritten* value
+   * has to be a specific word rather than zero: a logical page that has never
+   * held a cell must read INVALID, and zero is the perfectly legal index of
+   * physical page 0. Nothing in the commit path ever writes an empty page's
+   * slot — it copies only the slots belonging to retiring and arriving pages —
+   * so the resting value has to be authored at allocation, and that needs this
+   * offset outside the shader.
+   */
+  readonly pageDirectoryOffsetBytes: number;
   readonly pageRecordWords: 28;
   /** Exact 64-row L1 page transaction: twelve publication words followed by
    * four exclusive words per page (generation/change/validation/copy). */
@@ -899,8 +911,11 @@ export function planOctreeSPGridVCycle(options: Pick<OctreeSPGridVCycleOptions, 
   // one of them to accumulate the coefficient; publishing the slot it resolved
   // is what stops the recurring correction from re-deriving it per spoke.
   const stencilNeighbourWords = 18 * totalLevelSlots;
-  const topologyBytes = (TOPOLOGY_HEADER_WORDS + rowMapWords + worklistWords
-    + pageWorklistWords + pageDirectoryWords
+  // The one term the shader spells as `pageDirectoryBase()`; kept here as the
+  // same sum so the allocation-time authoring below cannot drift from it.
+  const pageDirectoryOffsetWords = TOPOLOGY_HEADER_WORDS + rowMapWords + worklistWords
+    + pageWorklistWords;
+  const topologyBytes = (pageDirectoryOffsetWords + pageDirectoryWords
     + transferWords + directoryWords + stencilNeighbourWords) * 4;
   const stateBytes = STATE_CHANNELS * totalLevelSlots * 4;
   const dispatchBytes = levelCount * DISPATCH_RECORD_BYTES_PER_LEVEL + DISPATCH_LIFECYCLE_BYTES;
@@ -920,7 +935,9 @@ export function planOctreeSPGridVCycle(options: Pick<OctreeSPGridVCycleOptions, 
       + capturePageStateBytes + levelDeltaBytes + levelCount * PARAMS_BYTES,
     levelDeltaBytes, brickCount, directoryBytes,
     stencilNeighbourBytes: stencilNeighbourWords * 4,
-    pageDirectoryBytes: pageDirectoryWords * 4, pageRecordWords: PAGE_RECORD_WORDS,
+    pageDirectoryBytes: pageDirectoryWords * 4,
+    pageDirectoryOffsetBytes: pageDirectoryOffsetWords * 4,
+    pageRecordWords: PAGE_RECORD_WORDS,
     capturePageStateBytes, capturePageCount,
     rowDispatch: dispatchFor(rowCapacity), slotDispatch: dispatchFor(levelStride), transferDispatch: dispatchFor(transferStride),
     brickDispatch: dispatchFor(brickCount) };
@@ -1559,6 +1576,24 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
       size: 16, usage: touchedHeaderUsage });
     this.touchedDirectoryDummy = device.createBuffer({ label: "SPGrid disabled touched-directory binding",
       size: 32, usage: storage });
+    // A logical page that has never held a cell must answer "no page", and the
+    // buffer's zero-fill answers "physical page 0" — a legal index whose record
+    // decodes to a completely different corner of the domain. The commit path
+    // writes a directory slot only when a page arrives or retires, so an
+    // always-empty slot keeps whatever it was allocated with; nothing else ever
+    // authors it. Fail closed at allocation instead.
+    //
+    // The reads this protects are the ones that legitimately probe an empty
+    // region: `finerAdjoint` asks every above-finest row whether its eight
+    // children exist, and `linkCandidatePageNeighbours` asks each page for the
+    // twenty-six around it. Both guard on INVALID and neither can distinguish
+    // page 0 from absence. Under zero-fill the coarse row instead resolved a
+    // stranger's page and the operator rejected the whole publication with
+    // ERR_ROW stage 22 — see tests/octree-spgrid-page-directory.test.ts.
+    const emptyPageDirectory = new Uint32Array(this.plan.pageDirectoryBytes / 4).fill(0xffff_ffff);
+    for (const buffer of [this.topology, this.candidateTopology]) {
+      device.queue.writeBuffer(buffer, this.plan.pageDirectoryOffsetBytes, emptyPageDirectory);
+    }
     if (this.touchedDirectoryEnabled) {
       this.touchedBrickSort = new WebGPURadixSortU32(device, 7 * this.plan.totalLevelSlots,
         this.touchedBrickHeader);
