@@ -610,6 +610,50 @@ but it removes one workgroup-invariant load per lane from an address every lane
 shares — an L1 hit — so its ceiling is far below this lane's 3.65 ms A/A floor.
 Not worth the fail-closed risk.
 
+#### The 12 ungated frontier waves are NOT the march's cost — refuted, do not chase
+
+The `fineFactor === 1` convergence gate really is inert on every factor-4 lane
+(`webgpu-octree-air-velocity-support-gpu.ts:1170-1173`, mirrored at `:3008`), and
+`symmetric-expansion` runs factor 4, so all 12 waves are encoded after the fixed
+point is reached. That looked like it could be worth more than every per-element
+fix combined. It is worth nothing, and the sweep was already on disk
+(`SYMMETRIC_EXPANSION_FRAME_PROFILE.md:206-217`, same lane, 62 advances):
+
+| `FLUID_OCTREE_AIR_SUPPORT_FRONTIER_WAVES` | 0 | **12 (authored)** | 24 | 48 |
+|---|---:|---:|---:|---:|
+| ms/advance | 233.90 | **227.27** | 227.47 | 227.05 |
+
+**36 additional, provably post-fixed-point waves cost −0.22 ms.** The same table
+bounds the fixed point at `W <= 12`: 0 -> 12 saved 6.63 ms by moving propagation
+out of the 3-workgroup tail into wide waves, and if convergence needed more than
+12 waves then 12 -> 24 would have saved on the same slope. It saved zero.
+
+The reason is that the gate the kernels actually obey is not the `fineFactor`
+one. It is `atomicLoad(&faceFrontier[10u]) != 0u` (`:2973`, `:2990`, `:2997`),
+raised by `:3007` as soon as a wave changes nothing. After convergence every lane
+returns after two atomic loads. The `fineFactor` gate would only replace ~135
+workgroups of immediately-returning lanes with zero workgroups — a launch-shape
+win on a pass that is not launch-bound.
+
+**Where the march's time actually is:** the closest-face gather in `extendFace`,
+up to `adjacencyIncidentCount(row) <= 30` incident rows x 4 quadrants = **120
+candidates per relaxed destination**, at 15.5% occupancy and 34.4% ALU. That is
+ALU-bound per element, which is the axis that has paid every time on this
+program. Wave 0 is strictly the largest by construction — its frontier is every
+one of the 13,184 seeds, 38% of the 34,416 owned patches — and later waves shrink
+monotonically.
+
+**One stale claim corrected.** That profile doc records the two encodes as
+30.2 ms (topology-commit) against 0.06 ms (settled-fine). Current measurement has
+them at **19.88 and 19.80 ms** — essentially equal. Both twins now cost the same,
+so any fix must target the kernel, not one call site.
+
+**An exact wave count is one flag away** if it is ever wanted:
+`FLUID_OCTREE_AIR_SUPPORT_FRONTIER_WAVES=0` with `FLUID_GPU_PASS_TIMESTAMPS=1`
+makes `summary.terminalCounters.airSupportMarchDepth` read exactly `W`, because
+the persistent tail is then the sole authority. Recorded rather than run: the
+sweep above already prices the answer at zero.
+
 ### E2a — publish the A2 apply's stencil columns — **LANDED, 2026-08-03: −1.4%**
 
 **The mechanism, first.** The SPGrid V-cycle smoother has a memoized neighbour
