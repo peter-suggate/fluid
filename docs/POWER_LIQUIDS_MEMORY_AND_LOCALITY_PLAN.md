@@ -920,6 +920,57 @@ fails to compile. The control run of the gate, with no experimental flag set,
 fails identically — which is how you tell an upstream break from your own. E2c's
 D4 gate is owed on this.
 
+## 5b. OWED: the fluid-heavy re-measurement, and why it could not run
+
+**The most important number this session produced is `liveRows = 100`, and it
+undercuts the session's own headline.** The droplet family pins the fluid at
+~100 cells and sweeps the container — that is its design, and it makes
+`droplet-256` an instrument for *container overhead*. A 100-unknown pressure
+system on a 256-lane workgroup is not evidence about how any of these wins
+behave when there is actually water in the scene. Until the same wins are
+scored on a fluid-heavy lane, **none of them may be quoted as a general
+speedup**; each is, so far, a measured win on an overhead-dominated lane.
+
+That applies to all three of the session's landed perf commits:
+`aa78e90` (grading page fill), `9675040` (stencil columns) and `833d8b0` (E2c).
+
+**Ready to run, one command, the moment the tree is green:**
+
+```
+node --import tsx tools/benchmark-power-dam-ab.ts --lane=fill-800 --steps=60 --repeats=3 \
+  --arm=chased:FLUID_OCTREE_MGPCG_STENCIL_COLUMNS=0 \
+  --arm=narrow:FLUID_OCTREE_MGPCG_RESTRICTED_PREFIX_SORT=1 \
+  --arm=gradefill0:FLUID_OCTREE_GRADING_PAGE_FILL=0 \
+  --arm=smoothx3:FLUID_PERSISTENT_MGPCG_PHASE_REPEAT=smooth:3
+```
+
+`fill-800` fixes the 256-cubed container and sweeps the fluid, so it is the
+droplet family's exact dual. Two arms are *negative* (they disable a landed
+default), so a win that transfers reads as SLOWER there; `smoothx3` returns the
+V-cycle smoother's share by the same idempotence the band probe used. Pair it
+with `FLUID_POWER_HYBRID_CENSUS=1 FLUID_OCTREE_MGPCG_REGULAR_BAND_ROWS=census`
+on a short run first to get that lane's `liveRows` — the single number that says
+whether the lane is throughput-shaped at all.
+
+**Why it did not run: every GPU lane is down, and it is not this work.** At
+19:40 `fill-800` failed at t=0 with "Initial sparse authority cold-topology
+published no liquid-row frontier". Two controls attribute it:
+
+| control | flags | result |
+|---|---|---|
+| `droplet-256` — the lane that produced this session's A/Bs green at 19:20 | **none** | t=0 cold-topology failure |
+| `fill-800` | `FLUID_OCTREE_MGPCG_STENCIL_COLUMNS=0` | identical failure |
+
+With that variable at `0` the persistent kernel emits a module byte-identical to
+pre-session HEAD and the arena reverts to its original size, so the persistent
+solve is excluded by construction. `lib/webgpu-octree.ts` — the grading agent's
+file — carries ~135 uncommitted lines and was last written two minutes before
+these runs; earlier the same tree failed with `[Invalid ShaderModule
+"GPU-resident octree projection"]`. **Do not attempt to fix or work around it.**
+
+This also blocks E2c's D4 gate. Both are one command each once that agent
+commits a green tree.
+
 ## 6. Traps this axis has now paid for twice
 
 - **`node --import tsx -e "import('./tools/webgpu-smoke-executor.ts')"` RUNS A
