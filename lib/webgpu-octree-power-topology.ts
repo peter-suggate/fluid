@@ -15,6 +15,14 @@ import {
   OCTREE_POWER_TRANSFER_RELATION,
   unpackOctreePowerRowTemplateSlot,
 } from "./octree-power-catalog";
+import {
+  OCTREE_POWER_COMPILED_SAMPLER_FIXED_AXES,
+  OCTREE_POWER_COMPILED_SAMPLER_HEADER_WORDS,
+  OCTREE_POWER_COMPILED_SAMPLER_OCTANTS,
+  OCTREE_POWER_COMPILED_SAMPLER_SYMMETRY_MASKS,
+  OCTREE_POWER_COMPILED_SAMPLER_TRANSFORMS,
+  compileOctreePowerSampler,
+} from "./octree-power-compiled-sampler";
 import { OCTREE_POWER_ROW_METRIC_BYTES } from "./octree-power-operator";
 import {
   OCTREE_POWER_ROW_DELTA_VALID,
@@ -73,6 +81,8 @@ export interface OctreePowerTopologySource {
   readonly catalogTetrahedra?: GPUBuffer;
   readonly catalogTetrahedronVertices?: GPUBuffer;
   readonly catalogTetrahedronVertexCount?: number;
+  /** Immutable selector-transform and tetrahedron-walk point-location tables. */
+  readonly catalogCompiledSampler?: GPUBuffer;
   readonly catalogLookup: GPUBuffer;
   readonly sameOrFinerDirect: GPUBuffer;
   readonly sameOrCoarserDirect: GPUBuffer;
@@ -205,6 +215,14 @@ export function planOctreePowerTopology(rowCapacityValue: number, catalog: Gener
   const catalogBytes = catalog.entryHeaders.byteLength + catalog.entryVolumes.byteLength + catalog.faceData.byteLength
     + catalog.lookup.byteLength + catalog.sameOrFinerDirect.byteLength + catalog.sameOrCoarserDirect.byteLength
     + catalog.tetrahedronHeaders.byteLength + catalog.tetrahedronData.byteLength + catalog.tetrahedronVertexData.byteLength
+    + (OCTREE_POWER_COMPILED_SAMPLER_HEADER_WORDS
+      + OCTREE_POWER_COMPILED_SAMPLER_TRANSFORMS * (catalog.tetrahedronVertexData.length / 4)
+      + catalog.tetrahedronData.length + OCTREE_POWER_COMPILED_SAMPLER_OCTANTS * entryCount
+      + 9 * catalog.tetrahedronData.length
+      + OCTREE_POWER_COMPILED_SAMPLER_FIXED_AXES * OCTREE_POWER_COMPILED_SAMPLER_SYMMETRY_MASKS
+        * OCTREE_POWER_COMPILED_SAMPLER_TRANSFORMS
+      + OCTREE_POWER_COMPILED_SAMPLER_TRANSFORMS * OCTREE_POWER_COMPILED_SAMPLER_TRANSFORMS
+      + OCTREE_POWER_COMPILED_SAMPLER_TRANSFORMS) * 4
     + catalog.coefficientData.byteLength + rowTemplateBytes;
   return { rowCapacity, entryCount, lookupCount, metricBytes, catalogBytes, rowTemplateBytes,
     allocatedBytes: 2 * metricBytes + OCTREE_POWER_TOPOLOGY_CONTROL_ARENA_BYTES + 80 + 12 + catalogBytes
@@ -252,6 +270,7 @@ export class WebGPUOctreePowerTopology {
   readonly catalogTetrahedra: GPUBuffer;
   readonly catalogTetrahedronVertices: GPUBuffer;
   readonly catalogTetrahedronVertexCount: number;
+  readonly catalogCompiledSampler: GPUBuffer;
   readonly catalogLookup: GPUBuffer;
   readonly sameOrFinerDirect: GPUBuffer;
   readonly sameOrCoarserDirect: GPUBuffer;
@@ -336,6 +355,8 @@ export class WebGPUOctreePowerTopology {
     this.catalogTetrahedronHeaders = upload("Octree power catalog tetrahedron headers", catalog.tetrahedronHeaders);
     this.catalogTetrahedra = upload("Octree power catalog tetrahedra", catalog.tetrahedronData);
     this.catalogTetrahedronVertices = upload("Octree power catalog tetrahedron vertices", catalog.tetrahedronVertexData);
+    const compiledSampler = compileOctreePowerSampler(catalog);
+    this.catalogCompiledSampler = upload("Octree power compiled interpolation sampler", compiledSampler.words);
     this.catalogLookup = device.createBuffer({
       label: "Octree power catalog lookup and exact publication arena",
       size: catalog.lookup.byteLength + topologyPublicationArenaBytes(rowCapacity),
@@ -488,6 +509,7 @@ export class WebGPUOctreePowerTopology {
       catalogTetrahedronHeaders: this.catalogTetrahedronHeaders, catalogTetrahedra: this.catalogTetrahedra,
       catalogTetrahedronVertices: this.catalogTetrahedronVertices,
       catalogTetrahedronVertexCount: this.catalogTetrahedronVertexCount,
+      catalogCompiledSampler: this.catalogCompiledSampler,
       sameOrFinerDirect: this.sameOrFinerDirect, sameOrCoarserDirect: this.sameOrCoarserDirect };
   }
 
@@ -500,6 +522,7 @@ export class WebGPUOctreePowerTopology {
     this.catalogCoefficients.destroy(); this.catalogLookup.destroy();
     this.catalogTetrahedronHeaders.destroy(); this.catalogTetrahedra.destroy();
     this.catalogTetrahedronVertices.destroy();
+    this.catalogCompiledSampler.destroy();
     this.sameOrFinerDirect.destroy(); this.sameOrCoarserDirect.destroy();
   }
 

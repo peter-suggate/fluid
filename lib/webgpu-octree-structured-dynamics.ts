@@ -21,7 +21,7 @@ import type { SurfaceInflowState } from "./webgpu-quadtree-builder";
 
 const STRUCTURED_ROW_UNION_DISPATCH_OFFSET_BYTES = 9 * 12;
 const STRUCTURED_FAMILY_UNION_DISPATCH_OFFSET_BYTES = 10 * 12;
-// Record 4 is repurposed for the flattened class-7/8 face grid, so the
+// Record 4 is repurposed for the face-wide carry/trace classifier grid, so the
 // dry-identity RHS zero dispatches from this dedicated tail record.
 const STRUCTURED_IDENTITY_RHS_DISPATCH_OFFSET_BYTES = 11 * 12;
 type StructuredDynamicsPipelineBundle = Readonly<Record<string, GPUComputePipeline>>;
@@ -36,7 +36,7 @@ const structuredDynamicsPipelineCache = new WeakMap<GPUDevice,
 const structuredDynamicsPipelineCompilations = new WeakMap<GPUDevice,
   Map<string, StructuredDynamicsPipelineCompilation>>();
 /** Class four is unused by recurring dynamics, so prepare reuses its indirect
- * record for one workgroup per class-7/8 boundary face. */
+ * record for one workgroup per family face. */
 export const STRUCTURED_BOUNDARY_DRY_PROBE_DISPATCH_OFFSET_BYTES = 4 * 12;
 
 /**
@@ -330,7 +330,7 @@ export class WebGPUStructuredVelocityDynamics {
   readonly projectionEnergyStats: GPUBuffer;
   /** Immutable packed volume/slot/tetra catalog shared by direct consumers. */
   readonly catalog: GPUBuffer;
-  readonly catalogOffsetsWords: readonly [number, number, number, number, number];
+  readonly catalogOffsetsWords: readonly [number, number, number, number, number, number];
   /** Nine accepted class dispatch records followed by row/family union records. */
   readonly dispatch: GPUBuffer;
   /** Diagnostic-only A/B face values captured immediately after candidate
@@ -402,7 +402,7 @@ export class WebGPUStructuredVelocityDynamics {
       || resources.airSupportLayout.selectorStride !== resources.selectorStride
       || resources.selectorRows.size < resources.airSupportLayout.totalBytes
       || !topology.catalogTetrahedronHeaders || !topology.catalogTetrahedra
-      || !topology.catalogTetrahedronVertices) {
+      || !topology.catalogTetrahedronVertices || !topology.catalogCompiledSampler) {
       throw new RangeError("Structured dynamics resources are invalid or undersized");
     }
     this.selectorStride = resources.selectorStride;
@@ -410,11 +410,11 @@ export class WebGPUStructuredVelocityDynamics {
     this.dimensions = resources.dimensions;
     const pieces = [topology.catalogVolumes, topology.catalogFaces,
       topology.catalogTetrahedronHeaders, topology.catalogTetrahedronVertices,
-      topology.catalogTetrahedra] as const;
+      topology.catalogCompiledSampler, topology.catalogTetrahedra] as const;
     const offsets: number[] = []; let catalogBytes = 0;
     for (const piece of pieces) { offsets.push(catalogBytes); catalogBytes += piece.size; }
     this.catalogOffsetsWords = offsets.map((offset) => offset / 4) as unknown as
-      readonly [number, number, number, number, number];
+      readonly [number, number, number, number, number, number];
     const maximumBinding = Math.min(device.limits.maxStorageBufferBindingSize, device.limits.maxBufferSize);
     if (catalogBytes > maximumBinding) throw new RangeError("Structured dynamics catalog exceeds binding limits");
     const storage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST;
@@ -457,7 +457,7 @@ export class WebGPUStructuredVelocityDynamics {
       structured.plan.worksetStrideWords, structured.worksetBankStrideWords,
       ...resources.dimensions, resources.closedBoundaryMask >>> 0,
       offsets[0]! / 4, offsets[1]! / 4, offsets[2]! / 4, offsets[3]! / 4,
-      offsets[4]! / 4, topology.catalogTetrahedronVertexCount ?? 0,
+      offsets[5]! / 4, topology.catalogTetrahedronVertexCount ?? 0,
       topology.rowTemplateHeaderOffsetBytes / 4,
       topology.reconstructionDataOffsetBytes / 4,
     ], 0);
@@ -776,12 +776,15 @@ export class WebGPUStructuredVelocityDynamics {
       const pass = broker.compute({ label: "Flatten structured boundary carry probes" });
       pass.setPipeline(this.boundaryDryProbe);
       pass.setBindGroup(0, this.group(this.boundaryDryProbe,
-        [0, 1, 2, 3, 11, 16, 17], params));
+        [0, 1, 2, 3, 11, 16, 17, 18], params));
       pass.dispatchWorkgroupsIndirect(this.dispatch,
         STRUCTURED_BOUNDARY_DRY_PROBE_DISPATCH_OFFSET_BYTES);
     }
     this.encodeUnion(broker, this.advection, "families",
-      [0, 1, 2, 3, 4, 5, 6, 11, 16, 17, 18], params, "Advect structured families");
+      this.flattenedBoundaryAdvection
+        ? [0, 1, 2, 3, 4, 5, 6, 16, 17, 18]
+        : [0, 1, 2, 3, 4, 5, 6, 11, 16, 17, 18],
+      params, "Advect structured families");
     // The sampler writes only the inactive bank; commit runs as a later
     // dispatch and reads that bank as ordinary storage. In-pass dispatch
     // ordering closes the race without a pass boundary.
@@ -1126,6 +1129,10 @@ fn prepareStructuredDynamics(){
   if(p.physical.w<.5&&arrayLength(&accepted)>=13u){
     atomicStore(&accepted[11],0u);atomicStore(&accepted[12],INVALID);
   }
+  // Word 14 is dynamics-owned scratch. The classifier below atomically
+  // compacts only faces that genuinely need a characteristic into an
+  // inactive-authority channel; every later publication rewrites that bank.
+  if(arrayLength(&accepted)>14u){atomicStore(&accepted[14],0u);}
   for(var cls=0u;cls<9u;cls+=1u){
     let base=wbase(cls);
     let valid=acc(0u)==0u&&acc(3u)!=0u&&boundaryValid()&&worksets[base]==acc(3u);
@@ -1138,12 +1145,13 @@ fn prepareStructuredDynamics(){
     indirect[out+2u]=select(1u,worksets[base+6u],valid);
   }
   // Dynamics has no class-4 recurring kernel. Reuse that otherwise-dead
-  // record for one workgroup per class-7/8 face, concatenating the two
-  // accepted worklists without materializing another list.
-  let base7=wbase(7u);let base8=wbase(8u);
-  let flatValid=acc(0u)==0u&&acc(3u)!=0u&&boundaryValid()
-    &&worksets[base7]==acc(3u)&&worksets[base8]==acc(3u);
-  let flatCount=select(0u,worksets[base7+1u]+worksets[base8+1u],flatValid);
+  // record for one workgroup per family face. This wide first pass proves the
+  // carry predicate and compacts all remaining trace work, so the expensive
+  // sampler never shares a SIMD group with identity carries.
+  var flatValid=acc(0u)==0u&&acc(3u)!=0u&&boundaryValid();var flatCount=0u;
+  for(var family=5u;family<9u;family+=1u){let base=wbase(family);
+    flatValid=flatValid&&worksets[base]==acc(3u);flatCount+=worksets[base+1u];}
+  flatCount=select(0u,flatCount,flatValid);
   let flatX=min(65535u,flatCount);
   var flatY=1u;if(flatX!=0u){flatY=(flatCount+flatX-1u)/flatX;}
   indirect[12u]=flatX;
@@ -1661,31 +1669,144 @@ fn tetraWeights(point:vec3f,x:vec3f,y:vec3f,z:vec3f)->vec4f{
 }
 fn tetraSelectorGeometry(selector:u32)->vec4f{let at=p.tetraVertexOffset+4u*selector;
   return vec4f(bitsf(at),bitsf(at+1u),bitsf(at+2u),bitsf(at+3u));}
-fn transformedD4Selector(selector:u32,transform:u32)->u32{if(selector>=p.tetraVertexCount){return INVALID;}
-  let source=tetraSelectorGeometry(selector);let wanted=powerTransform(source.xyz,transform);
-  for(var candidate=0u;candidate<p.tetraVertexCount;candidate+=1u){let value=tetraSelectorGeometry(candidate);
-    if(all(value.xyz==wanted)&&value.w==source.w){return candidate;}}
-  return INVALID;}
-fn transitionFanSample(row:u32,localPoint:vec3f,first:u32,count:u32,transform:u32)->vec4f{
-  for(var ti=0u;ti<count;ti+=1u){let packed=catalog[p.tetraOffset+first+ti];
-    var selectors=vec3u(packed&255u,(packed>>8u)&255u,(packed>>16u)&255u);
-    if(transform!=0u){selectors=vec3u(transformedD4Selector(selectors.x,transform),
-      transformedD4Selector(selectors.y,transform),transformedD4Selector(selectors.z,transform));}
-    if(any(selectors>=vec3u(p.tetraVertexCount))){return vec4f(f32(ti),22.,f32(p.tetraVertexCount),-1.);}
-    let sa=tetraSelectorGeometry(selectors.x);let sb=tetraSelectorGeometry(selectors.y);let sc=tetraSelectorGeometry(selectors.z);
-    let weights=tetraWeights(localPoint,sa.xyz,sb.xyz,sc.xyz);
-    if(all(weights>=vec4f(-2e-6))&&all(weights<=vec4f(1.000002))){var positive=max(weights,vec4f(0.));
-      let positiveSum=canonicalInterpolation4(array<f32,4>(positive.x,positive.y,positive.z,positive.w));
-      if(!finite(positiveSum)||positiveSum<=0.){return vec4f(f32(ti),25.,positiveSum,-1.);}positive/=positiveSum;
-      var termsX=array<f32,4>(0.,0.,0.,0.);var termsY=array<f32,4>(0.,0.,0.,0.);
-      var termsZ=array<f32,4>(0.,0.,0.,0.);
-      if(positive.x>0.){let v0=velocitySample(row);if(!vectorValid(v0)){return vec4f(f32(ti),23.,f32(row),-1.);}let term=positive.x*v0.xyz;termsX[0]=term.x;termsY[0]=term.y;termsZ[0]=term.z;}
-      if(positive.y>0.){let v1=selectorVelocity(row,selectors.x,sa);if(!vectorValid(v1)){return v1;}let term=positive.y*v1.xyz;termsX[1]=term.x;termsY[1]=term.y;termsZ[1]=term.z;}
-      if(positive.z>0.){let v2=selectorVelocity(row,selectors.y,sb);if(!vectorValid(v2)){return v2;}let term=positive.z*v2.xyz;termsX[2]=term.x;termsY[2]=term.y;termsZ[2]=term.z;}
-      if(positive.w>0.){let v3=selectorVelocity(row,selectors.z,sc);if(!vectorValid(v3)){return v3;}let term=positive.w*v3.xyz;termsX[3]=term.x;termsY[3]=term.y;termsZ[3]=term.z;}
-      let result=vec3f(canonicalInterpolation4(termsX),canonicalInterpolation4(termsY),canonicalInterpolation4(termsZ));
-      if(!finite3(result)){return invalidVector();}return vec4f(result,1.);}}
-  return vec4f(255.,24.,f32(count),-1.);}
+fn compiledSamplerBase()->u32{return p.tetraVertexOffset+4u*p.tetraVertexCount;}
+// The host constructs the versioned compiled buffer and packs
+// it immediately after the selector geometry. Revalidating the same magic,
+// version, lengths and offsets inside every selector/adjacency lookup made the
+// supposedly O(1) cutover reload its header dozens of times per sample.
+fn compiledTransformedSelector(selector:u32,transform:u32)->u32{
+  let base=compiledSamplerBase();if(selector>=p.tetraVertexCount||transform>=48u){return INVALID;}
+  let at=base+catalog[base+4u]+transform*p.tetraVertexCount+selector;
+  let mapped=catalog[at];
+  return select(mapped,INVALID,mapped>=p.tetraVertexCount);
+}
+fn compiledTetraNeighbor(globalTetra:u32,face:u32)->u32{
+  let base=compiledSamplerBase();if(face>=3u||globalTetra>=catalog[base+7u]){return INVALID;}
+  let at=base+catalog[base+5u]+globalTetra;
+  let neighbor=(catalog[at]>>(8u*face))&255u;return select(neighbor,INVALID,neighbor==255u);
+}
+fn compiledTetraSeed(caseId:u32,point:vec3f)->u32{
+  let base=compiledSamplerBase();if(caseId>=catalog[base+3u]){return INVALID;}
+  let octant=select(0u,1u,point.x>=0.)|select(0u,2u,point.y>=0.)|select(0u,4u,point.z>=0.);
+  let at=base+catalog[base+6u]+8u*caseId+octant;
+  let seed=catalog[at];return select(seed,INVALID,seed==255u);
+}
+fn compiledTetraSelectors(first:u32,ti:u32,transform:u32)->vec3u{
+  let packed=catalog[p.tetraOffset+first+ti];
+  var selectors=vec3u(packed&255u,(packed>>8u)&255u,(packed>>16u)&255u);
+  if(transform!=0u){selectors=vec3u(compiledTransformedSelector(selectors.x,transform),
+    compiledTransformedSelector(selectors.y,transform),compiledTransformedSelector(selectors.z,transform));}
+  return selectors;
+}
+fn compiledTetraWeights(first:u32,ti:u32,point:vec3f)->vec4f{
+  let base=compiledSamplerBase();let at=base+catalog[base+8u]+9u*(first+ti);
+  let a0=canonicalInterpolation3(array<f32,3>(point.x*bitsf(at),
+    point.y*bitsf(at+1u),point.z*bitsf(at+2u)));
+  let a1=canonicalInterpolation3(array<f32,3>(point.x*bitsf(at+3u),
+    point.y*bitsf(at+4u),point.z*bitsf(at+5u)));
+  let a2=canonicalInterpolation3(array<f32,3>(point.x*bitsf(at+6u),
+    point.y*bitsf(at+7u),point.z*bitsf(at+8u)));
+  var complementTerms=array<f32,4>(1.,-a0,-a1,-a2);
+  return vec4f(canonicalInterpolation4(complementTerms),a0,a1,a2);
+}
+fn compiledCanonicalFanTransform(fixedAxis:u32,symmetryMask:u32,rowTransform:u32)->u32{
+  let base=compiledSamplerBase();
+  let at=base+catalog[base+9u]+48u*(symmetryMask+256u*fixedAxis)+rowTransform;
+  return catalog[at];
+}
+fn compiledTransformCompose(first:u32,second:u32)->u32{
+  let base=compiledSamplerBase();return catalog[base+catalog[base+10u]+48u*first+second];
+}
+fn compiledInverseTransform(transform:u32)->u32{
+  let base=compiledSamplerBase();return catalog[base+catalog[base+11u]+transform];
+}
+fn canonicalWorldPointTransform(point:vec3f)->u32{
+  let centered=centeredGridPoint(point);
+  // The horizontal D4 orbit can be canonicalized without testing eight
+  // matrices: put the larger absolute horizontal coordinate on x, then make
+  // both horizontal components non-positive. Equal magnitudes deliberately
+  // retain identity axis order, the lowest packed transform code.
+  let swap=abs(centered.z)>abs(centered.x);
+  if(swap){return 40u|select(0u,1u,centered.z>0.)|select(0u,4u,centered.x>0.);}
+  return select(0u,1u,centered.x>0.)|select(0u,4u,centered.z>0.);
+}
+fn tetraWeightsValid(weights:vec4f)->bool{
+  return all(weights>=vec4f(-2e-6))&&all(weights<=vec4f(1.000002));
+}
+fn transitionFanSample(row:u32,caseId:u32,localPoint:vec3f,first:u32,count:u32,transform:u32)->vec4f{
+  // Barycentric coordinates are equivariant under the cube transform. Walk
+  // the immutable source fan with one inverse-transformed point, then map only
+  // the three selectors of the accepted tetrahedron for velocity lookup. The
+  // former shape mapped three selectors on every rejected/overlap candidate.
+  let fanPoint=inverseTransform(localPoint,transform);
+  var ti=compiledTetraSeed(caseId,fanPoint);
+  var previous=INVALID;
+  var found=INVALID;
+  var foundWeights=vec4f(-2.);
+  for(var step=0u;step<count;step+=1u){if(ti>=count){break;}
+    let weights=compiledTetraWeights(first,ti,fanPoint);
+    if(tetraWeightsValid(weights)){found=ti;foundWeights=weights;break;}
+    // The anchor is the implicit fourth vertex. A negative selector weight
+    // crosses one of the three origin-incident faces; the compiled graph names
+    // that adjacent tetrahedron directly. A negative anchor weight leaves this
+    // local star through its outer hull and is handled by the caller's exact
+    // adjacent-element/extended-field fallback.
+    var face=INVALID;var worst=-2e-6;
+    if(weights.y<worst){face=0u;worst=weights.y;}
+    if(weights.z<worst){face=1u;worst=weights.z;}
+    if(weights.w<worst){face=2u;worst=weights.w;}
+    if(face==INVALID||weights.x<worst){break;}
+    let next=compiledTetraNeighbor(first+ti,face);
+    if(next==INVALID||next==previous){break;}previous=ti;ti=next;
+  }
+  if(found==INVALID){return vec4f(255.,24.,f32(count),-1.);}
+
+  // The scalar implementation selected the first source-ordered tetrahedron.
+  // The tolerance intentionally makes both sides of a shared face valid, so a
+  // walk must canonicalize that overlap rather than returning whichever side
+  // its octant seed reached. Traverse only the boundary-connected valid
+  // component and retain its minimum local index; interior samples visit one.
+  var chosen=found;
+  if(any(foundWeights.yzw<=vec3f(2e-6))){
+    var visited=vec3u(0u);var frontier=vec3u(0u);
+    let foundWord=found>>5u;let foundMask=1u<<(found&31u);
+    visited[foundWord]|=foundMask;frontier[foundWord]|=foundMask;
+    for(var visit=0u;visit<count;visit+=1u){
+      if(all(frontier==vec3u(0u))){break;}
+      var word=select(select(2u,1u,frontier.y!=0u),0u,frontier.x!=0u);
+      let bit=countTrailingZeros(frontier[word]);frontier[word]&=~(1u<<bit);
+      let candidate=32u*word+bit;if(candidate>=count){continue;}
+      var weights=foundWeights;
+      if(candidate!=found){weights=compiledTetraWeights(first,candidate,fanPoint);}
+      if(!tetraWeightsValid(weights)){continue;}chosen=min(chosen,candidate);
+      for(var face=0u;face<3u;face+=1u){
+        if(weights[face+1u]>2e-6){continue;}
+        let neighbor=compiledTetraNeighbor(first+candidate,face);
+        if(neighbor==INVALID||neighbor>=count){continue;}
+        let neighborWord=neighbor>>5u;let neighborMask=1u<<(neighbor&31u);
+        if((visited[neighborWord]&neighborMask)==0u){
+          visited[neighborWord]|=neighborMask;frontier[neighborWord]|=neighborMask;
+        }
+      }
+    }
+  }
+
+  ti=chosen;let selectors=compiledTetraSelectors(first,ti,transform);
+  if(any(selectors>=vec3u(p.tetraVertexCount))){return vec4f(f32(ti),22.,f32(p.tetraVertexCount),-1.);}
+  let sa=tetraSelectorGeometry(selectors.x);let sb=tetraSelectorGeometry(selectors.y);let sc=tetraSelectorGeometry(selectors.z);
+  var weights=foundWeights;
+  if(ti!=found){weights=compiledTetraWeights(first,ti,fanPoint);}
+  var positive=max(weights,vec4f(0.));
+  let positiveSum=canonicalInterpolation4(array<f32,4>(positive.x,positive.y,positive.z,positive.w));
+  if(!finite(positiveSum)||positiveSum<=0.){return vec4f(f32(ti),25.,positiveSum,-1.);}positive/=positiveSum;
+  var termsX=array<f32,4>(0.,0.,0.,0.);var termsY=array<f32,4>(0.,0.,0.,0.);
+  var termsZ=array<f32,4>(0.,0.,0.,0.);
+  if(positive.x>0.){let v0=velocitySample(row);if(!vectorValid(v0)){return vec4f(f32(ti),23.,f32(row),-1.);}let term=positive.x*v0.xyz;termsX[0]=term.x;termsY[0]=term.y;termsZ[0]=term.z;}
+  if(positive.y>0.){let v1=selectorVelocity(row,selectors.x,sa);if(!vectorValid(v1)){return v1;}let term=positive.y*v1.xyz;termsX[1]=term.x;termsY[1]=term.y;termsZ[1]=term.z;}
+  if(positive.z>0.){let v2=selectorVelocity(row,selectors.y,sb);if(!vectorValid(v2)){return v2;}let term=positive.z*v2.xyz;termsX[2]=term.x;termsY[2]=term.y;termsZ[2]=term.z;}
+  if(positive.w>0.){let v3=selectorVelocity(row,selectors.z,sc);if(!vectorValid(v3)){return v3;}let term=positive.w*v3.xyz;termsX[3]=term.x;termsY[3]=term.y;termsZ[3]=term.z;}
+  let result=vec3f(canonicalInterpolation4(termsX),canonicalInterpolation4(termsY),canonicalInterpolation4(termsZ));
+  if(!finite3(result)){return invalidVector();}return vec4f(result,1.);}
 fn transitionSample(row:u32,x:vec3f)->vec4f{
   if(row>=acc(2u)||!finite3(x)){return vec4f(255.,20.,f32(row),-1.);}let rg=rowGeometry[rbase()+row];
   let extent=f32(rg.y)*p.physical.x;
@@ -1694,29 +1815,19 @@ fn transitionSample(row:u32,x:vec3f)->vec4f{
     (centeredGridPoint(x)-rowCenteredGridOffset(rg))/f32(rg.y),
     metrics[row].transformAndFlags&63u));
   let thAt=p.tetraHeaderOffset+3u*metrics[row].caseId;let first=catalog[thAt];let count=catalog[thAt+1u];
-  // Fan closure depends only on immutable catalog topology. The generator
-  // publishes its exact D4 mask in the header; reproving it here nested a
-  // selector-catalog search inside every characteristic sample.
-  // The row transform can permute world vertical onto any canonical axis.
-  // Conjugating horizontal D4 by that transform therefore selects the full
-  // stabilizer of canonical x, y, or z. The catalog packs the exact fan
-  // closure mask for all three groups; selecting the conjugate group is what
-  // makes a physical reflection independent of case canonicalization.
+  // A generated case may admit several equivalent row transforms. The old
+  // scalar sampler evaluated every automorphism in that stabilizer and
+  // averaged the results. The compiled table instead chooses the minimum
+  // effective source orientation in the stabilizer coset, so reflected rows
+  // select the same fan without repeating point location and interpolation.
   let rowTransform=metrics[row].transformAndFlags&63u;
   let canonicalVertical=abs(powerTransform(vec3f(0.,1.,0.),rowTransform));
   let fixedAxis=select(select(2u,1u,canonicalVertical.y>.5),0u,canonicalVertical.x>.5);
   let symmetryMask=(catalog[thAt+2u]>>(8u+8u*fixedAxis))&255u;
-  let d4=array<u32,24>(0u,2u,4u,6u,8u,10u,12u,14u,
-    0u,1u,4u,5u,40u,41u,44u,45u,
-    0u,1u,2u,3u,16u,17u,18u,19u);var xTerms:array<f32,8>;
-  var yTerms:array<f32,8>;var zTerms:array<f32,8>;var sampleCount=0u;
-  for(var symmetry=0u;symmetry<8u;symmetry+=1u){let transform=d4[8u*fixedAxis+symmetry];
-    if((symmetryMask&(1u<<symmetry))==0u){continue;}
-    let sample=transitionFanSample(row,local,first,count,transform);if(!vectorValid(sample)){return sample;}
-    xTerms[sampleCount]=sample.x;yTerms[sampleCount]=sample.y;zTerms[sampleCount]=sample.z;sampleCount+=1u;}
-  if(sampleCount==0u){return vec4f(255.,27.,f32(count),-1.);}let inverseCount=1./f32(sampleCount);
-  return vec4f(inverseCount*vec3f(canonicalInterpolation8(xTerms,sampleCount),
-    canonicalInterpolation8(yTerms,sampleCount),canonicalInterpolation8(zTerms,sampleCount)),1.);
+  let worldTransform=canonicalWorldPointTransform(x);
+  let effectiveTransform=compiledTransformCompose(compiledInverseTransform(worldTransform),rowTransform);
+  let fanTransform=compiledCanonicalFanTransform(fixedAxis,symmetryMask,effectiveTransform);
+  return transitionFanSample(row,metrics[row].caseId,local,first,count,fanTransform);
 }
 
 // Aanjaneya et al. 2017 Section 5
@@ -1810,6 +1921,17 @@ fn acceptedRowContaining(point:vec3f)->u32{
   for(var level=0u;level<31u;level+=1u){if(size>maximum){break;}let origin=vec3u(floor(grid/f32(size)))*size;let cell=origin.x+d.x*(origin.y+d.y*origin.z);let row=acceptedDirectoryFind(cell,size);if(row!=INVALID){containedResolved=true;containedOrigin=origin;containedSize=size;containedRow=row;return row;}size<<=1u;}
   containedResolved=true;containedOrigin=finest;containedSize=1u;containedRow=INVALID;
   return INVALID;
+}
+// Advection consumes the already-published transport owner directory rather
+// than re-running a level-by-level binary search over accepted rows for every
+// characteristic sample. Liquid cells are tagged with their direct row;
+// extrapolated air cells carry SUPPORT_TAG and deliberately remain non-rows.
+fn compiledAcceptedRowContaining(point:vec3f)->u32{
+  if(!finite3(point)||!supportPublicationValid()){return INVALID;}
+  let d=dimensions();let upper=max(vec3f(d)-vec3f(1e-4),vec3f(0.));
+  let grid=clamp(point/p.physical.x,vec3f(0.),upper);
+  let tag=extendedOwnerTag(vec3u(floor(grid)));
+  return select(tag,INVALID,tag==INVALID||(tag&SUPPORT_TAG)!=0u||tag>=acc(2u));
 }
 fn candidateRowCenter(candidateBank:u32,row:u32)->vec3f{
   if(row>=p.rowCapacity){return vec3f(3.402823e38);}
@@ -1990,7 +2112,7 @@ fn seamInterpolationSample(point:vec3f)->vec4f{
     if((corner&(~seamMask))!=0u){continue;}var probe=point;
     for(var axis=0u;axis<3u;axis+=1u){if((seamMask&(1u<<axis))!=0u){
       probe[axis]+=select(-1e-4,1e-4,(corner&(1u<<axis))!=0u)*p.physical.x;}}
-    let candidate=acceptedRowContaining(probe);if(candidate==INVALID||candidate>=acc(2u)){continue;}
+    let candidate=compiledAcceptedRowContaining(probe);if(candidate==INVALID||candidate>=acc(2u)){continue;}
     var duplicate=false;for(var prior=0u;prior<rowCount;prior+=1u){duplicate=duplicate||rows[prior]==candidate;}
     if(duplicate){continue;}rows[rowCount]=candidate;rowCount+=1u;
     let sample=incidentInterpolationElementSample(candidate,point);if(!vectorValid(sample)){continue;}
@@ -2012,7 +2134,7 @@ fn seamInterpolationSample(point:vec3f)->vec4f{
 // owner-local closure could serve.
 fn characteristicSample(row:u32,point:vec3f)->vec4f{
   let seam=seamInterpolationSample(point);if(vectorValid(seam)){return seam;}
-  var anchor=acceptedRowContaining(point);
+  var anchor=compiledAcceptedRowContaining(point);
   if(anchor!=INVALID&&anchor<acc(2u)){
     var sample=interpolationElementSample(anchor,point);
     if(vectorValid(sample)){return sample;}
@@ -2110,6 +2232,7 @@ fn rowTouchesDryCached(handle:u32,neighborSide:bool)->bool{
 
 var<workgroup> dryProbePartial:array<u32,64>;
 var<workgroup> dryProbeHandle:u32;
+var<workgroup> dryProbeClass:u32;
 var<workgroup> dryProbeOwner:u32;
 var<workgroup> dryProbeNeighbor:u32;
 var<workgroup> dryProbeEligible:u32;
@@ -2120,24 +2243,34 @@ var<workgroup> dryProbeEligible:u32;
 // without reintroducing any row, slot, or compiled-image work.
 fn faceIdentityCarried(handle:u32)->bool{return acc(13u)!=0u
   ||bitcast<f32>(a[abase()+p.centroidOffset+4u*handle+3u])>.5;}
-// One workgroup owns one class-7/8 face. Lanes 0..5 perform the owner's six
+fn compactTraceAt(index:u32)->u32{
+  return (1u-bank())*p.authorityWords+p.pressureScaleOffset+index;
+}
+// One workgroup owns one family face. Lanes 0..5 perform the owner's six
 // independent neighbour probes; lanes 8..13 do the neighbour row. Two
-// eight-lane OR trees reproduce rowTouchesDry without changing the
-// directory search, liquid test, physical-wall rule, or carry predicate.
+// eight-lane OR trees reproduce rowTouchesDry without changing the directory
+// search, liquid test, physical-wall rule, or carry predicate. Lane zero then
+// completes an exact carry immediately or appends the face to a dense trace
+// list in inactive authority scratch. The subsequent sampler sees traced
+// faces only; carried and traced costs can no longer diverge inside a SIMD
+// group.
 @compute @workgroup_size(64)fn classifyStructuredBoundaryDryProbes(
   @builtin(workgroup_id)g:vec3u,@builtin(local_invocation_index)lid:u32
 ){
   if(lid==0u){
     let flatIndex=g.x+g.y*65535u;
-    let count7=worksets[wbase(7u)+1u];
-    var cls=7u;var index=flatIndex;
-    if(flatIndex>=count7){cls=8u;index=flatIndex-count7;}
-    let handle=workItem(cls,index);
+    let item=unionClassItem(5u,flatIndex);let cls=item.x;var handle=INVALID;
+    if(cls!=INVALID){handle=workItem(cls,item.y);}
+    dryProbeClass=cls;
     dryProbeHandle=handle;dryProbeOwner=INVALID;dryProbeNeighbor=INVALID;dryProbeEligible=0u;
     if(handle!=INVALID&&handle<acc(5u)){
       let lo=owner(handle);let hi=neighbor(handle);
       dryProbeOwner=lo;dryProbeNeighbor=hi;
-      dryProbeEligible=select(0u,1u,faceIdentityCarried(handle)&&hi!=INVALID);
+      let aperture=bitcast<f32>(a[abase()+p.fractionOffset+handle]);
+      let prescribed=inflowNormalVelocity(handle);
+      dryProbeEligible=select(0u,1u,deepIdentityCarryEnabled&&supportPublicationValid()
+        &&faceIdentityCarried(handle)&&hi!=INVALID&&finite(aperture)&&aperture>0.
+        &&aperture<=1.&&prescribed.y<=0.);
     }
   }
   workgroupBarrier();
@@ -2156,14 +2289,34 @@ fn faceIdentityCarried(handle:u32)->bool{return acc(13u)!=0u
     if(lid<16u&&(lid&7u)<width){dryProbePartial[lid]|=dryProbePartial[lid+width];}
     workgroupBarrier();
   }
-  if(handle!=INVALID&&handle<acc(5u)){
-    if(lid==0u){a[dryOwnerCacheAt(handle)]=select(1u,dryProbePartial[0],eligible);}
-    if(lid==8u){a[dryNeighborCacheAt(handle)]=select(1u,dryProbePartial[8],eligible);}
+  if(lid==0u&&handle!=INVALID&&handle<acc(5u)){
+    a[dryOwnerCacheAt(handle)]=select(1u,dryProbePartial[0],eligible);
+    a[dryNeighborCacheAt(handle)]=select(1u,dryProbePartial[8],eligible);
+    let deep=eligible&&dryProbePartial[0]==0u&&dryProbePartial[8]==0u;
+    if(deep){
+      let prior=value(handle);setNextValue(handle,prior);
+      debugAdvectionWord(p.ownerOffset,handle,3.402823e38);
+      debugAdvectionWord(p.neighborOffset,handle,3.402823e38);
+      debugAdvectionWord(p.metadataOffset,handle,3.402823e38);
+      debugAdvectionWord(p.areaOffset,handle,3.402823e38);
+      debugAdvectionWord(p.inverseOffset,handle,3.402823e38);
+      debugAdvectionWord(p.fractionOffset,handle,3.402823e38);
+      debugAdvection3(p.normalOffset,handle,vec3f(3.402823e38));
+      debugAdvection3(p.centroidOffset,handle,vec3f(3.402823e38));
+      let n=normal(handle);let area=bitcast<f32>(a[abase()+p.areaOffset+handle]);
+      if(!finite3(n)||!finite(area)||area<=0.||!finite(prior)){
+        transportMetrics[handle]=invalidVector();rejectSample(3u,handle);
+      }else{transportMetrics[handle]=vec4f(prior*n*area,0.);}
+    }else{
+      let compact=atomicAdd(&accepted[14],1u);
+      if(compact<p.slotCapacity){
+        a[compactTraceAt(compact)]=handle|((dryProbeClass-5u)<<30u);
+      }else{rejectSample(3u,handle);}
+    }
   }
 }
 
-fn advect(cls:u32,index:u32,flattenedDryRows:bool){
-  let handle=workItem(cls,index);
+fn advectHandle(cls:u32,handle:u32,allowCarry:bool,flattenedDryRows:bool){
   if(handle==INVALID||handle>=acc(5u)){return;}
   if(!supportPublicationValid()){
     transportMetrics[handle]=invalidVector();
@@ -2230,7 +2383,7 @@ fn advect(cls:u32,index:u32,flattenedDryRows:bool){
   // free-surface (or wall) face: never carried. Closed-wall faces already
   // returned through the aperture==0 branch above.
   let hiRow=neighbor(handle);
-  if(deepIdentityCarryEnabled&&faceIdentityCarried(handle)&&hiRow!=INVALID){
+  if(allowCarry&&deepIdentityCarryEnabled&&faceIdentityCarried(handle)&&hiRow!=INVALID){
     var deepInterior=false;
     if(flattenedDryRows){
       deepInterior=!rowTouchesDryCached(handle,false)&&!rowTouchesDryCached(handle,true);
@@ -2275,8 +2428,12 @@ fn advect(cls:u32,index:u32,flattenedDryRows:bool){
   setNextValue(handle,projected);
   transportMetrics[handle]=vec4f(projected*n*area,.5*area*max(0.,prior*prior-projected*projected));
 }
-@compute @workgroup_size(64)fn advectStructuredFamilies(@builtin(global_invocation_id)g:vec3u){let item=unionClassItem(5u,classItem(g));if(item.x!=INVALID){advect(item.x,item.y,false);}}
-@compute @workgroup_size(64)fn advectStructuredFamiliesFlattenedBoundary(@builtin(global_invocation_id)g:vec3u){let item=unionClassItem(5u,classItem(g));if(item.x!=INVALID){advect(item.x,item.y,item.x>=7u);}}
+@compute @workgroup_size(64)fn advectStructuredFamilies(@builtin(global_invocation_id)g:vec3u){let item=unionClassItem(5u,classItem(g));if(item.x!=INVALID){advectHandle(item.x,workItem(item.x,item.y),true,false);}}
+@compute @workgroup_size(64)fn advectStructuredFamiliesFlattenedBoundary(@builtin(global_invocation_id)g:vec3u){
+  let index=classItem(g);let count=atomicLoad(&accepted[14]);if(index>=count){return;}
+  let packed=a[compactTraceAt(index)];let cls=5u+(packed>>30u);let handle=packed&0x3fffffffu;
+  advectHandle(cls,handle,false,true);
+}
 
 fn commitAdvected(cls:u32,index:u32){
   let handle=workItem(cls,index);
@@ -2690,6 +2847,20 @@ fn canonicalInterpolation4(values:array<f32,4>)->f32{
   var widened:array<f32,8>;
   for(var i=0u;i<4u;i+=1u){widened[i]=values[i];}
   return canonicalInterpolation8(widened,4u);
+}
+fn canonicalInterpolation3(values:array<f32,3>)->f32{
+  var sorted=values;
+  for(var i=1u;i<3u;i+=1u){let value=sorted[i];var j=i;
+    loop{if(j==0u||abs(sorted[j-1u])<=abs(value)){break;}sorted[j]=sorted[j-1u];j-=1u;}
+    sorted[j]=value;
+  }
+  var sum=0.;var i=0u;
+  loop{if(i>=3u){break;}let magnitude=abs(sorted[i]);var balance=0;var j=i;
+    loop{if(j>=3u||abs(sorted[j])!=magnitude){break;}
+      if(sorted[j]>0.){balance+=1;}else if(sorted[j]<0.){balance-=1;}j+=1u;}
+    sum+=f32(balance)*magnitude;i=j;
+  }
+  return sum;
 }
 fn canonicalReconstructionSum(values:array<f32,31>,count:u32)->f32{
   var sorted=values;

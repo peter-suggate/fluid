@@ -3,7 +3,17 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
 import { unpackOctreePowerRowTemplateSlot } from "../lib/octree-power-catalog";
+import {
+  OCTREE_POWER_COMPILED_SAMPLER_HEADER_WORDS,
+  OCTREE_POWER_COMPILED_SAMPLER_INVALID,
+  OCTREE_POWER_COMPILED_SAMPLER_MAGIC,
+  OCTREE_POWER_COMPILED_SAMPLER_OCTANTS,
+  OCTREE_POWER_COMPILED_SAMPLER_TRANSFORMS,
+  OCTREE_POWER_COMPILED_SAMPLER_VERSION,
+  compileOctreePowerSampler,
+} from "../lib/octree-power-compiled-sampler";
 import { decodeGeneratedOctreePowerCatalog } from "../lib/generated/octree-power-catalog";
+import { OCTREE_CUBE_TRANSFORMS, transformPowerVector } from "../lib/octree-power-topology";
 import { structuredBoundaryCoefficientWGSL } from "../lib/webgpu-octree-structured-boundary";
 import {
   decodeStructuredProjectionEnergy,
@@ -145,9 +155,11 @@ test("advection interpolation folds reflected corners canonically", () => {
   assert.match(structuredVelocityDynamicsWGSL,
     /positiveSum=canonicalInterpolation4\(array<f32,4>\(positive\.x,positive\.y,positive\.z,positive\.w\)\)/,
     "barycentric normalization must not depend on transformed selector order");
-  assert.match(structuredVelocityDynamicsWGSL,
-    /canonicalVertical=abs\(powerTransform\(vec3f\(0\.,1\.,0\.\),rowTransform\)\)[\s\S]*symmetryMask=\(catalog\[thAt\+2u\]>>\(8u\+8u\*fixedAxis\)\)&255u[\s\S]*array<u32,24>[\s\S]*d4\[8u\*fixedAxis\+symmetry\][\s\S]*canonicalInterpolation8\(xTerms,sampleCount\)/,
-    "a symmetric co-spherical link must average the D4 fan conjugated through the row transform");
+  assert.match(transition,
+    /worldTransform=canonicalWorldPointTransform\(x\)[\s\S]*effectiveTransform=compiledTransformCompose\(compiledInverseTransform\(worldTransform\),rowTransform\)[\s\S]*fanTransform=compiledCanonicalFanTransform\(fixedAxis,symmetryMask,effectiveTransform\)[\s\S]*return transitionFanSample\(row,metrics\[row\]\.caseId,local,first,count,fanTransform\);/,
+    "the compiled equivariant fan must choose one canonical stabilizer-coset orientation");
+  assert.doesNotMatch(transition, /array<u32,24>|sampleCount/,
+    "the shipping sampler must not repeat an identical point-location walk for every D4 automorphism");
   assert.doesNotMatch(structuredVelocityDynamicsWGSL, /tetraFanClosedUnderD4Transform|tetraFanUsesSelector/,
     "immutable fan closure must be generated once, never reproved inside every sample");
 });
@@ -207,6 +219,133 @@ test("transition barycentric sampling requires non-face selector adjacency", () 
   assert.deepEqual(tetrahedra[8], [15, 67, 74]);
   assert.deepEqual(tetrahedra[8]!.filter((selector) => !faceSelectors.includes(selector)), [15, 74],
     "the accepted transition sample cannot be reconstructed from power-face row slots alone");
+});
+
+test("compiled transition sampler covers every selector transform and tetrahedron adjacency", () => {
+  const bytes = readFileSync(new URL("../lib/generated/octree-power-catalog.bin", import.meta.url));
+  const catalog = decodeGeneratedOctreePowerCatalog(
+    bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
+  const compiled = compileOctreePowerSampler(catalog);
+  const { words } = compiled;
+  const compiledFloats = new Float32Array(words.buffer, words.byteOffset, words.length);
+  const selectorCount = catalog.tetrahedronVertexData.length / 4;
+  const entryCount = catalog.tetrahedronHeaders.length / 3;
+
+  assert.deepEqual(Array.from(words.slice(0, OCTREE_POWER_COMPILED_SAMPLER_HEADER_WORDS)), [
+    OCTREE_POWER_COMPILED_SAMPLER_MAGIC,
+    OCTREE_POWER_COMPILED_SAMPLER_VERSION,
+    selectorCount,
+    entryCount,
+    compiled.transformedSelectorOffsetWords,
+    compiled.adjacencyOffsetWords,
+    compiled.octantSeedOffsetWords,
+    catalog.tetrahedronData.length,
+    compiled.barycentricOffsetWords,
+    compiled.canonicalFanTransformOffsetWords,
+    compiled.transformCompositionOffsetWords,
+    compiled.inverseTransformOffsetWords,
+  ]);
+  assert.equal(words.length, compiled.inverseTransformOffsetWords
+    + OCTREE_POWER_COMPILED_SAMPLER_TRANSFORMS);
+
+  const selectorGeometry = (selector: number): readonly number[] =>
+    Array.from(catalog.tetrahedronVertexData.slice(4 * selector, 4 * selector + 4));
+  let mappedSelectorCount = 0;
+  for (let code = 0; code < OCTREE_POWER_COMPILED_SAMPLER_TRANSFORMS; code += 1) {
+    const transform = OCTREE_CUBE_TRANSFORMS[code]!;
+    for (let selector = 0; selector < selectorCount; selector += 1) {
+      const mapped = words[compiled.transformedSelectorOffsetWords + code * selectorCount + selector]!;
+      if (mapped === OCTREE_POWER_COMPILED_SAMPLER_INVALID) continue;
+      mappedSelectorCount += 1;
+      const source = selectorGeometry(selector);
+      const transformed = transformPowerVector([source[0]!, source[1]!, source[2]!], transform);
+      assert.deepEqual(selectorGeometry(mapped), [...transformed, source[3]].map((value) => value === 0 ? 0 : value),
+        `transform ${code} selector ${selector} must preserve its power geometry`);
+    }
+  }
+  assert.equal(mappedSelectorCount, words.slice(compiled.transformedSelectorOffsetWords,
+    compiled.adjacencyOffsetWords).filter((mapped) => mapped !== OCTREE_POWER_COMPILED_SAMPLER_INVALID).length);
+  for (let selector = 0; selector < selectorCount; selector += 1) {
+    assert.equal(words[compiled.transformedSelectorOffsetWords + selector], selector,
+      "the identity transform must map the complete selector domain");
+  }
+
+  const tetraSelectors = (global: number): readonly number[] => {
+    const packed = catalog.tetrahedronData[global]!;
+    return [packed & 0xff, (packed >>> 8) & 0xff, (packed >>> 16) & 0xff];
+  };
+  const d4 = [0, 2, 4, 6, 8, 10, 12, 14,
+    0, 1, 4, 5, 40, 41, 44, 45,
+    0, 1, 2, 3, 16, 17, 18, 19] as const;
+  for (let entry = 0; entry < entryCount; entry += 1) {
+    const first = catalog.tetrahedronHeaders[3 * entry]!;
+    const count = catalog.tetrahedronHeaders[3 * entry + 1]!;
+    const packedSymmetryMasks = catalog.tetrahedronHeaders[3 * entry + 2]!;
+    for (let fixedAxis = 0; fixedAxis < 3; fixedAxis += 1) {
+      const mask = (packedSymmetryMasks >>> (8 + 8 * fixedAxis)) & 0xff;
+      for (let symmetry = 0; symmetry < 8; symmetry += 1) {
+        if ((mask & (1 << symmetry)) === 0) continue;
+        const code = d4[8 * fixedAxis + symmetry]!;
+        for (let local = 0; local < count; local += 1) {
+          for (const selector of tetraSelectors(first + local)) {
+            assert.notEqual(words[compiled.transformedSelectorOffsetWords
+              + code * selectorCount + selector], OCTREE_POWER_COMPILED_SAMPLER_INVALID,
+            `case ${entry} D4 transform ${code} must map tetra selector ${selector}`);
+          }
+        }
+      }
+    }
+    for (let octant = 0; octant < OCTREE_POWER_COMPILED_SAMPLER_OCTANTS; octant += 1) {
+      assert.ok(words[compiled.octantSeedOffsetWords
+        + OCTREE_POWER_COMPILED_SAMPLER_OCTANTS * entry + octant]! < count,
+      `case ${entry} octant ${octant} must have a local seed`);
+    }
+    for (let local = 0; local < count; local += 1) {
+      const selectors = tetraSelectors(first + local);
+      const vertices = selectors.map(selectorGeometry);
+      const centroid = [0, 1, 2].map((axis) => vertices.reduce((sum, value) =>
+        sum + value[axis]!, 0) / 4);
+      const inverseAt = compiled.barycentricOffsetWords + 9 * (first + local);
+      for (let row = 0; row < 3; row += 1) {
+        const weight = centroid.reduce((sum, coordinate, axis) => sum
+          + coordinate * compiledFloats[inverseAt + 3 * row + axis]!, 0);
+        assert.ok(Math.abs(weight - 0.25) < 2e-6,
+          `case ${entry} tetra ${local} inverse row ${row} must reproduce its centroid`);
+      }
+      const adjacency = words[compiled.adjacencyOffsetWords + first + local]!;
+      for (let face = 0; face < 3; face += 1) {
+        const neighbor = (adjacency >>> (8 * face)) & 0xff;
+        if (neighbor === OCTREE_POWER_COMPILED_SAMPLER_INVALID) continue;
+        assert.ok(neighbor < count, `case ${entry} tetra ${local} has a local neighbour`);
+        const neighborSelectors = tetraSelectors(first + neighbor);
+        const shared = selectors.filter((selector) => neighborSelectors.includes(selector));
+        assert.equal(shared.length, 2,
+          `case ${entry} tetra ${local} and ${neighbor} share one origin-incident face`);
+        const reverse = words[compiled.adjacencyOffsetWords + first + neighbor]!;
+        assert.ok([0, 8, 16].some((shift) => ((reverse >>> shift) & 0xff) === local),
+          `case ${entry} adjacency ${local} -> ${neighbor} must be reciprocal`);
+      }
+    }
+  }
+});
+
+test("advection consumes the compiled owner and tetrahedron point-location paths", () => {
+  const fan = structuredVelocityDynamicsWGSL.slice(
+    structuredVelocityDynamicsWGSL.indexOf("fn transitionFanSample("),
+    structuredVelocityDynamicsWGSL.indexOf("fn transitionSample("));
+  assert.match(fan, /compiledTetraSeed/);
+  assert.match(fan, /compiledTetraNeighbor/);
+  assert.doesNotMatch(fan, /for\(var ti=0u;ti<count/,
+    "the shipping sampler must not linearly scan every tetrahedron");
+  assert.doesNotMatch(structuredVelocityDynamicsWGSL, /fn transformedD4Selector/,
+    "selector transforms must be direct compiled lookups");
+  const characteristic = structuredVelocityDynamicsWGSL.slice(
+    structuredVelocityDynamicsWGSL.indexOf("fn characteristicSample("),
+    structuredVelocityDynamicsWGSL.indexOf("fn traceFace("));
+  assert.match(characteristic, /compiledAcceptedRowContaining/,
+    "characteristic samples must consume the published owner hash");
+  assert.doesNotMatch(characteristic, /acceptedDirectoryFind/,
+    "characteristic samples must not repeat the accepted-row binary search");
 });
 
 test("projection energy uses one coherent face-weighted pair around projection", () => {
@@ -389,7 +528,7 @@ test("momentum advection consumes the projected extended field on air rows", () 
     /fn velocitySample\([\s\S]*sample=rowVelocity\[rbase\(\)\+row\]/,
     "momentum characteristics consume the canonical projected-and-extended row field");
   const advection = structuredVelocityDynamicsWGSL.slice(
-    structuredVelocityDynamicsWGSL.indexOf("fn advect("),
+    structuredVelocityDynamicsWGSL.indexOf("fn advectHandle("),
     structuredVelocityDynamicsWGSL.indexOf("fn forceFamily("));
   assert.doesNotMatch(advection, /rowCpt/,
     "the hot advection call graph must not add a separate CPT storage binding");
@@ -400,8 +539,8 @@ test("momentum advection consumes the projected extended field on air rows", () 
   // longer reads the prescribed solid-normal field (aperture-0 faces keep
   // their staged prior; forceFamily re-imposes the solid value first).
   assert.match(dynamicsHost,
-    /this\.advection, "families",\s*\[0, 1, 2, 3, 4, 5, 6, 11, 16, 17, 18\]/,
-    "advection binds exactly ten storage buffers including the liquid mask");
+    /this\.flattenedBoundaryAdvection[\s\S]*\? \[0, 1, 2, 3, 4, 5, 6, 16, 17, 18\][\s\S]*: \[0, 1, 2, 3, 4, 5, 6, 11, 16, 17, 18\]/,
+    "compacted advection must drop the stale source-workset binding while the serial oracle retains it");
 });
 
 test("characteristics resolve the paper's dual element rather than equating it with an octree leaf", () => {
@@ -553,7 +692,7 @@ test("staggered weights reproduce a face's own value exactly at its centre", () 
   }
 });
 
-test("class-7/8 carry probes flatten the exact order-free Boolean reduction", () => {
+test("family carry probes compact traces after an exact order-free Boolean reduction", () => {
   assert.equal(structuredBoundaryAdvectionFlatteningEnabled({}), true,
     "the measured boundary optimization is production-default");
   assert.equal(structuredBoundaryAdvectionFlatteningEnabled({
@@ -590,12 +729,12 @@ test("class-7/8 carry probes flatten the exact order-free Boolean reduction", ()
     structuredVelocityDynamicsWGSL.indexOf("fn prepareStructuredDynamics("),
     structuredVelocityDynamicsWGSL.indexOf("fn value("));
   assert.match(prepare,
-    /base7=wbase\(7u\);let base8=wbase\(8u\)[\s\S]*flatCount=select\(0u,worksets\[base7\+1u\]\+worksets\[base8\+1u\],[\s\S]*indirect\[12u\]=flatX/,
-    "class 4 must concatenate the accepted class-7/8 counts into one face-wide dispatch");
+    /for\(var family=5u;family<9u;family\+=1u\)[\s\S]*flatCount\+=worksets\[base\+1u\][\s\S]*indirect\[12u\]=flatX/,
+    "class 4 must concatenate every accepted family into one face-wide classifier dispatch");
 
   const flattened = structuredVelocityDynamicsWGSL.slice(
     structuredVelocityDynamicsWGSL.indexOf("fn rowTouchesDryDirection("),
-    structuredVelocityDynamicsWGSL.indexOf("fn advect("));
+    structuredVelocityDynamicsWGSL.indexOf("fn advectHandle("));
   assert.match(flattened,
     /let dimension=direction\/2u;let positive=\(direction&1u\)!=0u;var probe=q;[\s\S]*acceptedRowContainingFinestCell\(probe\)/,
     "dry-neighbour classification must use exact integer topology identity, not reflected world floats");
@@ -612,21 +751,27 @@ test("class-7/8 carry probes flatten the exact order-free Boolean reduction", ()
     /fn faceIdentityCarried\(handle:u32\)->bool\{return acc\(13u\)!=0u[\s\S]*centroidOffset\+4u\*handle\+3u/,
     "an exact-topology receipt must provide the per-face carry proof skipped with scatter");
   assert.match(flattened,
-    /dryProbeEligible=select\(0u,1u,faceIdentityCarried\(handle\)&&hi!=INVALID\)/,
+    /dryProbeEligible=select\(0u,1u,deepIdentityCarryEnabled&&supportPublicationValid\(\)[\s\S]*faceIdentityCarried\(handle\)&&hi!=INVALID/,
     "the flattened carry probe must consume the unified identity proof");
+  assert.match(flattened,
+    /deep=eligible&&dryProbePartial\[0\]==0u&&dryProbePartial\[8\]==0u[\s\S]*atomicAdd\(&accepted\[14\],1u\)[\s\S]*compactTraceAt\(compact\)/,
+    "deep carries must finish in the classifier and only trace-required faces enter dense scratch");
   const advection = structuredVelocityDynamicsWGSL.slice(
-    structuredVelocityDynamicsWGSL.indexOf("fn advect("),
+    structuredVelocityDynamicsWGSL.indexOf("fn advectHandle("),
     structuredVelocityDynamicsWGSL.indexOf("fn commitAdvected("));
   assert.match(advection,
-    /if\(deepIdentityCarryEnabled&&faceIdentityCarried\(handle\)&&hiRow!=INVALID\)/,
-    "the scalar carry path must consume the same unified identity proof");
+    /if\(allowCarry&&deepIdentityCarryEnabled&&faceIdentityCarried\(handle\)&&hiRow!=INVALID\)/,
+    "the serial diagnostic oracle must retain the same unified identity proof");
+  assert.match(advection,
+    /advectStructuredFamiliesFlattenedBoundary[\s\S]*atomicLoad\(&accepted\[14\]\)[\s\S]*packed=a\[compactTraceAt\(index\)\][\s\S]*advectHandle\(cls,handle,false,true\)/,
+    "the production sampler must consume only the compacted trace list");
 
   const host = dynamicsHost.slice(dynamicsHost.indexOf("encodeAdvection("),
     dynamicsHost.indexOf("encodeForcesAndDivergence("));
   const flatAt = host.indexOf("Flatten structured boundary carry probes");
   const advectAt = host.indexOf("Advect structured families");
   assert.ok(flatAt >= 0 && advectAt > flatAt,
-    "the cache dispatch must precede its class-7/8 consumers");
+    "the carry/trace classifier must precede the compact trace consumer");
   assert.doesNotMatch(host.slice(flatAt, advectAt), /broker\.fence/,
     "the extra dispatch remains in the existing advection pass");
   assert.match(dynamicsHost,
@@ -639,7 +784,7 @@ test("advection destinations stage into the inactive bank and commit in dispatch
   // lane writing its destination into the accepted bank mid-dispatch would
   // race the reads and advect some faces through a partially updated field.
   const advection = structuredVelocityDynamicsWGSL.slice(
-    structuredVelocityDynamicsWGSL.indexOf("fn advect("),
+    structuredVelocityDynamicsWGSL.indexOf("fn classifyStructuredBoundaryDryProbes("),
     structuredVelocityDynamicsWGSL.indexOf("fn commitAdvected("));
   assert.doesNotMatch(advection, /setValue\(/,
     "advect must never write the accepted value bank it samples from");
