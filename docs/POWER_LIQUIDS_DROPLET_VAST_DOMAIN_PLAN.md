@@ -583,6 +583,48 @@ passes moving by the same ~2%, i.e. run-to-run offset). It is retained only
 because it is what makes the per-page hoist expressible. **No saving is claimed
 for it**; do not credit it later.
 
+### The seventh lane, and why a timeout there is not a regression
+
+`deep-power-hydrostatic` timed out on the first gate run (`exceeded 240000 ms;
+sending SIGTERM`, exit 124) instead of producing its usual red. That is a
+*different failure mode* from the recorded one, so it was chased rather than
+filed as expected.
+
+Two facts make the raise-the-timeout reflex a dead end, and both are worth
+knowing before anyone tries it again:
+
+- `parseWebGPUSmokeTimeout` hard-caps `FLUID_WEBGPU_SMOKE_TIMEOUT_MS` at
+  **240000**. A larger value aborts the run before Dawn starts.
+- The benchmark overlay sets `FLUID_WEBGPU_SMOKE_TIMEOUT_MS: "240000"` *after*
+  spreading `process.env`, so a shell value cannot reach it regardless.
+
+The lane's own config comment already says it: 240 steps at ~1 s/advance against
+a 240 s ceiling is zero margin by construction. Under any wall-clock pressure —
+this run had already lost a lock race to a concurrent agent — it times out.
+
+Resolved by shortening the lane instead, which fits under the cap and yields a
+comparable verdict. At `--steps=120` both sides complete and fail identically:
+
+| | HEAD `0a839bf` | BASELINE `65b2427` |
+|---|---|---|
+| restriction-unaccepted | 120 | 120 |
+| fine-band-sentinel | 60 | 60 |
+| air-support-failure | 120 | 120 |
+| topology-rollback | 60 | 60 |
+| first trips (steps) | 1 / 1 / 1 / 2 | 1 / 1 / 1 / 2 |
+
+Bit-for-bit identical, so the lane is unchanged by the grading fix. Note the
+comparison is on **trip counts and first-trip steps, not walls**: a tripwire
+failure throws before the `ms/advance` line is printed, so a red lane never
+reports a wall. The counts are the stronger equivalence claim anyway.
+
+The failure itself is upstream of anything grading touches — it trips at step 1
+with root `structured dynamics rejected at stage 1 (advect: advecting velocity
+sample invalid at the face centroid)`, and `topology-rollback` reports
+`published: false` with `downstreamFinalizeReason: 13`. (That is the reason-13
+signature recorded elsewhere as `latchedFinalizeReason`; same value and same
+not-published state, surfaced through a different field.)
+
 ### Next
 
 `Octree resident grading closure` is now ~21.9 ms, still the largest intercept
