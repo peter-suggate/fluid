@@ -187,3 +187,58 @@ test("octree initialization has no hand-maintained pipeline totals and fences wa
     "ordinary warm replacement must retain and retire the previous solver transactionally");
   assert.match(transaction, /method\.createSolverAsync\([^\n]+abort\.signal\)/);
 });
+
+// Construction is paid once per benchmark arm and every arm is a fresh
+// process, so shader compilation lands inside the A/B loop's wall clock in
+// full. Batching independent compile tasks is worth ~65% of that phase -- but
+// only if the batch cannot change what the serial runner produced.
+test("independent pipeline compile tasks run concurrently", async () => {
+  const signal = new AbortController().signal;
+  const runner = new GPUInitializationTaskRunner(() => {}, signal);
+  let live = 0, peak = 0;
+  const compile = (id: string) => ({
+    id, phase: "solver-pipelines" as const, label: id, dependencies: ["allocate"],
+    run: async () => {
+      live += 1; peak = Math.max(peak, live);
+      await new Promise((resolve) => setTimeout(resolve, 15));
+      live -= 1;
+    },
+  });
+  await runner.run([
+    { id: "allocate", phase: "allocation", label: "Allocate", run: () => {} },
+    compile("a"), compile("b"), compile("c"),
+  ]);
+  assert.equal(peak, 3, "the three independent compile tasks must overlap");
+  assert.equal(runner.completedCount, 4);
+});
+
+test("a compile batch stops at a dependency on a task inside it", async () => {
+  const signal = new AbortController().signal;
+  const runner = new GPUInitializationTaskRunner(() => {}, signal);
+  const order: string[] = [];
+  let firstFinished = false;
+  await runner.run([
+    { id: "allocate", phase: "allocation", label: "Allocate", run: () => {} },
+    { id: "first", phase: "solver-pipelines", label: "first", dependencies: ["allocate"],
+      run: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 15));
+        firstFinished = true; order.push("first");
+      } },
+    // Depends on a task that has NOT completed when the batch would form, so it
+    // must not be batched with it.
+    { id: "second", phase: "solver-pipelines", label: "second", dependencies: ["first"],
+      run: () => {
+        assert.ok(firstFinished, "a dependent compile task ran before its dependency");
+        order.push("second");
+      } },
+  ]);
+  assert.deepEqual(order, ["first", "second"]);
+});
+
+test("parallel pipeline compilation is disabled by FLUID_GPU_PARALLEL_PIPELINE_COMPILE=0", () => {
+  const source = readFileSync(new URL("../lib/gpu-initialization.ts", import.meta.url), "utf8");
+  // Exactly "0" disables, so an unset or empty variable keeps the batch. The
+  // serial runner stays reachable because it is the definition of the result.
+  assert.match(source, /FLUID_GPU_PARALLEL_PIPELINE_COMPILE\s*!==\s*"0"/);
+  assert.match(source, /phase !== "solver-pipelines"|candidate\.phase !== "solver-pipelines"/);
+});

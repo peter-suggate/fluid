@@ -53,6 +53,10 @@ import {
   type GPUPassTimestampReport,
 } from "./webgpu-smoke-gpu-audits";
 import {
+  formatInitializationCensus,
+  readInitializationCensus,
+} from "../lib/gpu-initialization";
+import {
   gravitationalPotentialEnergyProxy,
   initialSeedBrickBounds,
   inspectColumnBases,
@@ -993,6 +997,29 @@ async function runGPU(
   // measured window, but a wall being compared should carry no unasked-for work.
   const residentMemoryCensus = (process.env.FLUID_GPU_MEMORY_CENSUS ?? "") !== ""
     ? new GPUResidentMemoryCensus() : undefined;
+  const initCensusEnabled = process.env.FLUID_GPU_INIT_CENSUS === "1";
+  let createBufferElapsedMs = 0, createBufferCalls = 0, createBufferBytes = 0;
+  // Construction is paid once per benchmark arm and every arm is a fresh
+  // process, so it lands inside the A/B loop's wall clock in full. Report it on
+  // process exit rather than after construction: the runs worth profiling for
+  // startup cost include the ones that never reach a measured window, and a
+  // census that only prints on the happy path cannot diagnose a red lane.
+  if (initCensusEnabled) {
+    process.on("exit", () => {
+      const entries = readInitializationCensus();
+      if (entries.length === 0) return;
+      console.log(JSON.stringify({ scenario: scenarioId, method: method.id,
+        phase: "gpu-init", entries,
+        createBuffer: { calls: createBufferCalls, bytes: createBufferBytes,
+          elapsed_ms: createBufferElapsedMs } }));
+      console.log("--- GPU initialization census ---");
+      console.log(formatInitializationCensus(entries));
+      console.log(`  createBuffer: ${createBufferCalls} calls,`
+        + ` ${(createBufferBytes / (1024 * 1024)).toFixed(1)} MiB,`
+        + ` ${createBufferElapsedMs.toFixed(1)} ms`
+        + ` (${(createBufferBytes / (1024 * 1024) / (createBufferElapsedMs / 1000)).toFixed(0)} MiB/s)`);
+    });
+  }
   const requestedPassTimestampQueryCapacity = Number(
     process.env.FLUID_GPU_PASS_TIMESTAMP_QUERY_CAPACITY ?? 2048);
   const passTimestampQueryCapacity = Number.isFinite(requestedPassTimestampQueryCapacity)
@@ -1045,7 +1072,13 @@ async function runGPU(
       if (property === "queue") return instrumentedQueue;
       if (property === "createBuffer") return (descriptor: GPUBufferDescriptor) => {
         commandAudit?.recordBufferAllocation(descriptor);
+        const createStarted = initCensusEnabled ? performance.now() : 0;
         const buffer = target.createBuffer(descriptor);
+        if (initCensusEnabled) {
+          createBufferElapsedMs += performance.now() - createStarted;
+          createBufferCalls += 1;
+          createBufferBytes += Number(descriptor.size);
+        }
         dataFlowAudit?.registry.recordBuffer(buffer, descriptor);
         residentMemoryCensus?.recordBuffer(descriptor, buffer);
         return buffer;
