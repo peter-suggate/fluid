@@ -2,6 +2,7 @@ import type { SceneDescription } from "./model";
 import { WebGPUOctreeFineSeedAdapter } from "./webgpu-octree-fine-seed-adapter";
 import {
   lookupOctreeOwnerPage,
+  OCTREE_OWNER_ARENA_PROJECTION_WORDS,
   OCTREE_OWNER_PAGE_LOOKUP_STATUS,
   WebGPUOctreeSimulationOwnerPages,
   type OctreeOwnerLeafSize,
@@ -132,6 +133,7 @@ export const OCTREE_PROJECTION_BASE_ENTRY_POINTS = [
   "prefixAffectedRowDeltaBlocks", "compactRowDelta", "publishRowDelta", "publishReusedRowDelta",
   "planLeaves", "scanLeafBlocks", "emitLeaves",
   "classifyTopologyTileSignature", "buildDirtyTileDelta", "buildDirtyFrontierDelta",
+  "advanceGradingRound",
 ] as const;
 
 export const OCTREE_PROJECTION_VARIANT_ENTRY_POINTS = [
@@ -141,7 +143,12 @@ export const OCTREE_PROJECTION_VARIANT_ENTRY_POINTS = [
 ] as const;
 
 export const OCTREE_PROJECTION_ACTIVITY_ENTRY_POINTS = Object.freeze([
-  ...OCTREE_PROJECTION_BASE_ENTRY_POINTS,
+  // The instrumentation transform requires every listed entry point to exist in
+  // the module, which is the exhaustiveness guard. A source-gated experiment is
+  // absent from the unflagged shader by construction, so it joins the list only
+  // when its own variable puts it in the shader.
+  ...OCTREE_PROJECTION_BASE_ENTRY_POINTS.filter((entryPoint) =>
+    entryPoint !== "advanceGradingRound" || octreeGradingFixpointEnabled()),
   ...OCTREE_PROJECTION_VARIANT_ENTRY_POINTS,
 ]);
 
@@ -409,6 +416,26 @@ export function octreeGradingMembershipLoadEnabled(
   return resolved?.FLUID_OCTREE_GRADING_MEMBERSHIP_LOAD === "1";
 }
 
+/**
+ * Retire grading rounds once the balance closure has converged.
+ *
+ * A balance round writes owner state ONLY through a split, so a round that
+ * claims none leaves the next round's input bit-identical and the next round
+ * provably claims none either. Skipping is therefore exact, not conservative.
+ *
+ * Default OFF and gated at the SOURCE, not by an override: with the variable
+ * unset `octreeProjectionShader` is byte-identical to the unflagged tree, the
+ * `advanceGradingRound` pipeline is not reachable, and the owner arena keeps
+ * its 16-word control block. Nothing about the unflagged path can move.
+ */
+export function octreeGradingFixpointEnabled(
+  environment?: Readonly<Record<string, string | undefined>>,
+): boolean {
+  const resolved = environment
+    ?? (typeof process !== "undefined" ? process.env : undefined);
+  return resolved?.FLUID_OCTREE_GRADING_FIXPOINT === "1";
+}
+
 export function octreeSparseWorldRequired(
   hasTerrain: boolean,
   rigidBodyCount: number,
@@ -513,6 +540,9 @@ export function octreeProjectionPipelineRequired(
   // fine refinement selects a target-size pipeline from `refineLevelPipelines`.
   if (entryPoint === "refineTopology" || entryPoint === "refineTopologyDelta") {
     return false;
+  }
+  if (entryPoint === "advanceGradingRound") {
+    return octreeGradingFixpointEnabled();
   }
   if (entryPoint === "rasterizeSolids" || entryPoint === "rasterizeSolidsDelta") {
     return config.solidRasterization;
@@ -1574,6 +1604,7 @@ export class WebGPUOctreeProjection {
   private classifyTopologyTileSignaturePipeline!: GPUComputePipeline;
   private buildDirtyTileDeltaPipeline!: GPUComputePipeline;
   private buildDirtyFrontierDeltaPipeline!: GPUComputePipeline;
+  private advanceGradingRoundPipeline!: GPUComputePipeline;
   private materializePipeline?: GPUComputePipeline;
   private readonly maxLeafSize: 2 | 4 | 8 | 16 | 32;
   private readonly fluidGatedBoundaryRefinement: boolean;
@@ -2379,7 +2410,7 @@ export class WebGPUOctreeProjection {
     };
   }
   private topologyCandidateEntryPoint(entryPoint: string): boolean {
-    return /^(?:rasterizeSolids|resetTopology|refineTopology|balanceTopology|stampFrontier|beginFrontier|classifyFrontier|scanFrontier|prefixFrontier|emitFrontier|prepareFrontier|sortFrontier|mergeFrontier|finalizeFrontier|planLeaves|emitLeaves|markRowDeltaRing)/.test(entryPoint);
+    return /^(?:rasterizeSolids|resetTopology|refineTopology|balanceTopology|advanceGradingRound|stampFrontier|beginFrontier|classifyFrontier|scanFrontier|prefixFrontier|emitFrontier|prepareFrontier|sortFrontier|mergeFrontier|finalizeFrontier|planLeaves|emitLeaves|markRowDeltaRing)/.test(entryPoint);
   }
   private pipelineConstants(candidateTopology = false): Record<string, number> {
     return {
@@ -2451,7 +2482,7 @@ export class WebGPUOctreeProjection {
       this.compactRowDeltaPipeline, this.publishRowDeltaPipeline, this.publishReusedRowDeltaPipeline,
       this.planPipeline, this.scanPipeline, this.emitPipeline,
       this.classifyTopologyTileSignaturePipeline, this.buildDirtyTileDeltaPipeline,
-      this.buildDirtyFrontierDeltaPipeline
+      this.buildDirtyFrontierDeltaPipeline, this.advanceGradingRoundPipeline
     ] = compiled;
   }
 
@@ -2516,7 +2547,7 @@ export class WebGPUOctreeProjection {
         this.compactRowDeltaPipeline, this.publishRowDeltaPipeline, this.publishReusedRowDeltaPipeline,
         this.planPipeline, this.scanPipeline, this.emitPipeline,
         this.classifyTopologyTileSignaturePipeline, this.buildDirtyTileDeltaPipeline,
-        this.buildDirtyFrontierDeltaPipeline,
+        this.buildDirtyFrontierDeltaPipeline, this.advanceGradingRoundPipeline,
       ][index]),
       frontierSort: [...this.frontierCandidateSortPipelines],
       refine: new Map(this.refineLevelPipelines), refineCoarse: new Map(this.refineCoarsePipelines), balanceCoarse: new Map(this.balanceCoarsePipelines),
@@ -3648,6 +3679,7 @@ export class WebGPUOctreeProjection {
     }
     const gradingRoundProbe = typeof process !== "undefined"
       && process.env?.FLUID_GRADING_ROUND_PROBE === "1";
+    const gradingFixpoint = octreeGradingFixpointEnabled();
     for (let round = 0; round < this.balanceRounds; round += 1) {
       const tag = String(round).padStart(2, "0");
       for (const size of this.coarseRefinementSizes) {
@@ -3660,6 +3692,16 @@ export class WebGPUOctreeProjection {
         pass = broker.compute({ label: `Octree grading r${tag} candidates` });
       }
       dispatchCandidates(this.balancePipeline, this.balanceDeltaPipeline);
+      // Carry this round's verdict to the next. Dispatches inside one compute
+      // pass are ordered, so the balance kernels read what this writes with no
+      // copy, no pass boundary and no indirect republication -- a producer and
+      // a consumer in separate dispatches, never a barrier. The last round has
+      // no successor to inform.
+      if (gradingFixpoint && round + 1 < this.balanceRounds) {
+        pass.setPipeline(this.advanceGradingRoundPipeline);
+        pass.setBindGroup(0, this.groups.ab);
+        pass.dispatchWorkgroups(1);
+      }
     }
     if (active && !analyticColdBootstrap) {
       const decisionGroup = this.topologyDecisionGroup;
@@ -6259,7 +6301,7 @@ export function initialOctreeLevelSet(
   return signedDistanceFromVolume(alpha, nx, ny, nz, cell);
 }
 
-export const octreeProjectionShader = /* wgsl */ `
+const octreeProjectionShaderBase = /* wgsl */ `
 override targetRefinementSize: u32 = 0u;
 override rowIndexedPressure: bool = true;
 override sparseTopologyTileStates: u32 = 0u;
@@ -9250,6 +9292,126 @@ fn emitLeaves(@builtin(global_invocation_id) gid: vec3u, @builtin(local_invocati
 }
 
 `;
+
+/**
+ * Splice the grading-fixpoint experiment into the projection shader.
+ *
+ * Applied only when `FLUID_OCTREE_GRADING_FIXPOINT=1`. Every edit is an exact
+ * string replacement asserted to match once, so the transform either produces
+ * the whole experiment or throws at module evaluation -- it can never emit a
+ * half-patched shader. With the flag unset this is not called at all and the
+ * module is byte-identical to the unflagged tree.
+ */
+function octreeGradingFixpointShader(source: string): string {
+  const splice = (from: string, to: string): void => {
+    const occurrences = source.split(from).length - 1;
+    if (occurrences !== 1) {
+      throw new Error(
+        `Grading-fixpoint shader splice matched ${occurrences} times, expected 1`);
+    }
+    source = source.replace(from, to);
+  };
+  splice(
+    "const OWNER_WORD_TOPOLOGY: u32 = 0x00200000u;",
+    `const OWNER_WORD_TOPOLOGY: u32 = 0x00200000u;
+// Projection-owned scratch inside the owner arena's reserved block. The page
+// authority owns words 0-15 and never touches these.
+const GRADING_SPLIT_FLAG: u32 = ${OCTREE_OWNER_ARENA_PROJECTION_WORDS.gradingSplitFlag}u;
+const GRADING_CONVERGED: u32 = ${OCTREE_OWNER_ARENA_PROJECTION_WORDS.gradingConverged}u;
+
+// The grading closure is a fixpoint, and it reaches it long before it stops.
+//
+// A balance round writes owner state ONLY through a split, so a round that
+// claims none leaves the state every later round would read bit-identical, and
+// every later round is therefore guaranteed to claim none either. The rounds
+// are consecutive dispatches in one compute pass, where WebGPU orders each
+// dispatch's writes before the next dispatch's reads, so round r's verdict is
+// readable at the top of round r+1 with no barrier and no readback.
+//
+// ZERO means keep grading. That polarity is load-bearing: a freshly created,
+// zero-filled arena must run the full unconditional closure, because a flag
+// that had to be seeded before it was safe disables grading on any path that
+// reaches the rounds first -- and a tree that is never 2:1 balanced publishes
+// no liquid-row frontier at all.
+fn markGradingSplit() { atomicStore(&owners[GRADING_SPLIT_FLAG], 1u); }
+fn gradingRoundActive() -> bool {
+  return atomicLoad(&owners[GRADING_CONVERGED]) == 0u;
+}`);
+  splice(
+    `  let word = encodePagedOwner(origin, origin, size / 2u) | membership;
+  return atomicMin(&owners[at], word) > word;`,
+    `  let word = encodePagedOwner(origin, origin, size / 2u) | membership;
+  let claimed = atomicMin(&owners[at], word) > word;
+  if (claimed) { markGradingSplit(); }
+  return claimed;`);
+  splice(
+    `fn balanceTopology(@builtin(global_invocation_id) gid: vec3u) {
+  let base = gid * 2u;`,
+    `fn balanceTopology(@builtin(global_invocation_id) gid: vec3u) {
+  if (!gradingRoundActive()) { return; }
+  let base = gid * 2u;`);
+  splice(
+    `fn balanceTopologyDelta(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_id) lid: vec3u) {
+  let base = deltaTopologyCandidate(wid, lid);`,
+    `fn balanceTopologyDelta(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_id) lid: vec3u) {
+  if (!gradingRoundActive()) { return; }
+  let base = deltaTopologyCandidate(wid, lid);`);
+  // The cooperative block ends in a barrier. WGSL uniformity analysis rejects a
+  // barrier reachable only under a storage-derived condition, and under
+  // skip_validation that surfaces as a Dawn abort inside entry-point lookup
+  // rather than as a shader error -- so this gate rides the lane-zero
+  // eligibility store that already exists for exactly this reason.
+  splice(
+    `    let inBounds = all(origin < dims());
+    let owner = ownerAt(vec3i(min(origin, dims() - vec3u(1u))));
+    atomicStore(&balanceEligible, select(0u, 1u, inBounds && ownerValid(owner)`,
+    `    let inBounds = all(origin < dims()) && gradingRoundActive();
+    let owner = ownerAt(vec3i(min(origin, dims() - vec3u(1u))));
+    atomicStore(&balanceEligible, select(0u, 1u, inBounds && ownerValid(owner)`);
+  splice(
+    `  if (workgroupUniformLoad(&balanceFlags[0]) == 0u) { return; }
+  let cells = size * size * size;`,
+    `  if (workgroupUniformLoad(&balanceFlags[0]) == 0u) { return; }
+  // This path splits without going through claimLeafSplit, so it raises the
+  // flag itself; one lane is enough and the store is idempotent.
+  if (lid == 0u) { markGradingSplit(); }
+  let cells = size * size * size;`);
+  splice(
+    `@compute @workgroup_size(1)
+fn beginFrontier() {`,
+    `// Carry one round's verdict into the next: one lane, between rounds, inside
+// the open pass.
+@compute @workgroup_size(1)
+fn advanceGradingRound() {
+  let raised = atomicLoad(&owners[GRADING_SPLIT_FLAG]);
+  atomicStore(&owners[GRADING_CONVERGED], select(1u, 0u, raised != 0u));
+  atomicStore(&owners[GRADING_SPLIT_FLAG], 0u);
+}
+
+@compute @workgroup_size(1)
+fn beginFrontier() {`);
+  splice(
+    `  var next = frontier[8] + 1u;
+  if (next == 0u) { next = 1u; }
+  frontier[8] = next;`,
+    `  var next = frontier[8] + 1u;
+  if (next == 0u) { next = 1u; }
+  frontier[8] = next;
+  // Re-arm per advance. Not load-bearing -- zero already means keep grading --
+  // but it stops a converged verdict from leaking across generations.
+  atomicStore(&owners[GRADING_CONVERGED], 0u);
+  atomicStore(&owners[GRADING_SPLIT_FLAG], 0u);`);
+  return source;
+}
+
+/**
+ * The projection module. Byte-identical to the unflagged tree unless
+ * `FLUID_OCTREE_GRADING_FIXPOINT=1`, which is asserted by
+ * `tests/octree-balance-elision.test.ts`.
+ */
+export const octreeProjectionShader = octreeGradingFixpointEnabled()
+  ? octreeGradingFixpointShader(octreeProjectionShaderBase)
+  : octreeProjectionShaderBase;
 
 function projectionWGSLClosingDelimiter(
   source: string,

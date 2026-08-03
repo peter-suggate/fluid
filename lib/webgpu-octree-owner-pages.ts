@@ -10,9 +10,57 @@
 import { PassBroker } from "./webgpu-pass-broker";
 import type { GPUInitializationTask } from "./gpu-initialization";
 
+/**
+ * Read here rather than imported, because `webgpu-octree.ts` imports this
+ * module and a cycle would leave the constant undefined at evaluation time.
+ * Same variable, same default-off meaning as `octreeGradingFixpointEnabled`.
+ */
+function octreeGradingFixpointReservation(): boolean {
+  const environment = typeof process !== "undefined" ? process.env : undefined;
+  return environment?.FLUID_OCTREE_GRADING_FIXPOINT === "1";
+}
+
 export const OCTREE_OWNER_BRICK_SIZE = 8 as const;
 export const OCTREE_OWNER_PAGE_VOXELS = OCTREE_OWNER_BRICK_SIZE ** 3;
-export const OCTREE_OWNER_ARENA_CONTROL_WORDS = 16;
+/**
+ * Words reserved ahead of the owner record tables.
+ *
+ * Sixteen are this authority's own control block
+ * (`OCTREE_OWNER_PAGE_CONTROL_WORDS`, indices 0-15) and it owns every one.
+ * `FLUID_OCTREE_GRADING_FIXPOINT=1` reserves eight more for the octree
+ * projection, which needs a little read-modify-write-safe scratch and has no
+ * other such binding available: the budget is closed
+ * (`tests/webgpu-octree-projection-binding-budget.test.ts`) and `compaction`,
+ * `frontier` and the sort scratch are plain `array<u32>`, where the
+ * many-lanes-write-one-value flag that experiment needs would be a data race.
+ *
+ * The reservation is behind the flag because growing it shifts every table in
+ * the arena. With the flag unset this is 16 and the layout is bit-identical to
+ * the unflagged tree, which is the property
+ * `tests/webgpu-octree-owner-pages.test.ts` pins.
+ */
+export const OCTREE_OWNER_ARENA_CONTROL_WORDS =
+  octreeGradingFixpointReservation() ? 24 : 16;
+
+/** Words 0-15, decoded by `octreeOwnerPageControlFromWords`. */
+export const OCTREE_OWNER_PAGE_CONTROL_WORD_COUNT = 16;
+
+/**
+ * Projection-owned scratch inside the reserved block, valid only when the
+ * grading-fixpoint reservation is active.
+ *
+ * `gradingSplitFlag` is raised by any invocation that claims a split during one
+ * grading round. `gradingConverged` carries that verdict into the next round,
+ * and its polarity is deliberate: ZERO means "keep grading", so a freshly
+ * created, zero-filled arena runs the full unconditional closure. A flag that
+ * had to be seeded before it was safe would silently disable grading on any
+ * path that reached the rounds first -- which publishes no liquid-row frontier
+ * at all.
+ */
+export const OCTREE_OWNER_ARENA_PROJECTION_WORDS = Object.freeze({
+  gradingSplitFlag: 16,
+  gradingConverged: 17,
+} as const);
 export const OCTREE_OWNER_ARENA_MAGIC = 0x4f57_4e52;
 export const OCTREE_OWNER_PAGE_WORD_VALID = 0x8000_0000;
 /** Resident page belongs to the moving accepted-topology worklist, rather
@@ -73,8 +121,8 @@ export interface OctreeOwnerPageControl {
 
 /** Decode the complete owner-arena control packet without legacy field aliases. */
 export function unpackOctreeOwnerPageControl(words: ArrayLike<number>): OctreeOwnerPageControl {
-  if (words.length < OCTREE_OWNER_ARENA_CONTROL_WORDS) {
-    throw new RangeError(`Octree owner control needs ${OCTREE_OWNER_ARENA_CONTROL_WORDS} words`);
+  if (words.length < OCTREE_OWNER_PAGE_CONTROL_WORD_COUNT) {
+    throw new RangeError(`Octree owner control needs ${OCTREE_OWNER_PAGE_CONTROL_WORD_COUNT} words`);
   }
   const word = (name: keyof typeof OCTREE_OWNER_PAGE_CONTROL_WORDS) =>
     Number(words[OCTREE_OWNER_PAGE_CONTROL_WORDS[name]]) >>> 0;

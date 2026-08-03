@@ -4,10 +4,14 @@ import test from "node:test";
 import {
   octreeBalancePredicatesWouldSplit,
   octreeBalanceRounds,
+  octreeGradingFixpointEnabled,
   octreeGradingMembershipLoadEnabled,
   octreeGradingPageFillEnabled,
   octreeGradingSplitHelpersEnabled,
+  octreeProjectionPipelineRequired,
+  octreeProjectionShader,
 } from "../lib/webgpu-octree";
+import { OCTREE_OWNER_ARENA_CONTROL_WORDS } from "../lib/webgpu-octree-owner-pages";
 
 const octreeSource = readFileSync(
   new URL("../lib/webgpu-octree.ts", import.meta.url),
@@ -112,4 +116,36 @@ test("grading materializer arms are environment-selected with the fast form on b
     "the redundant per-cell membership load is off by default");
   assert.equal(octreeGradingMembershipLoadEnabled(
     { FLUID_OCTREE_GRADING_MEMBERSHIP_LOAD: "1" }), true);
+});
+
+test("the grading fixpoint is off by default and leaves the shader byte-identical", () => {
+  // A broken default in a shared worktree costs far more than an unfinished
+  // experiment, so this one is spliced at the source rather than selected by a
+  // pipeline override: with the variable unset there is no extra entry point to
+  // compile, no extra arena word to shift the owner tables, and not one byte of
+  // difference in the module.
+  assert.equal(octreeGradingFixpointEnabled({}), false);
+  assert.equal(octreeGradingFixpointEnabled({ FLUID_OCTREE_GRADING_FIXPOINT: "0" }), false);
+  assert.equal(octreeGradingFixpointEnabled({ FLUID_OCTREE_GRADING_FIXPOINT: "1" }), true);
+  assert.equal(process.env.FLUID_OCTREE_GRADING_FIXPOINT, undefined,
+    "this test asserts the unflagged shape, so the variable must not be set for it");
+  assert.doesNotMatch(octreeProjectionShader,
+    /advanceGradingRound|gradingRoundActive|markGradingSplit|GRADING_SPLIT_FLAG/,
+    "the unflagged module must carry no part of the experiment");
+  assert.equal(OCTREE_OWNER_ARENA_CONTROL_WORDS, 16,
+    "the unflagged owner arena must keep its sixteen-word control block");
+  assert.equal(octreeProjectionPipelineRequired("advanceGradingRound", {
+    solidRasterization: true,
+    localFrontierCandidateSort: true,
+    cooperativeRowDeltaRing: true,
+  }), false, "the unflagged tree must not compile the carry pipeline");
+  // The splices are exact single-match replacements that throw at module
+  // evaluation, so a shader that half-applies cannot exist.
+  assert.match(octreeSource,
+    /Grading-fixpoint shader splice matched \$\{occurrences\} times, expected 1/);
+  // Zero must mean "keep grading", so a freshly created arena runs the full
+  // closure. The inverse polarity silently disables grading wherever the rounds
+  // are reached before the flag is seeded, which publishes no liquid rows.
+  assert.match(octreeSource,
+    /fn gradingRoundActive\(\) -> bool \{\s*return atomicLoad\(&owners\[GRADING_CONVERGED\]\) == 0u;/);
 });
