@@ -1496,10 +1496,19 @@ export class WebGPUOctreeSimulationOwnerPages {
       throw new Error("Recurring owner pages require exact topology-tile residency");
     }
     try {
-      const pass = broker.compute({ label: "Prepare inactive owner-page generation" });
-      pass.setBindGroup(0, this.topologyGroup);
-      pass.setPipeline(this.buildCandidate); pass.dispatchWorkgroups(1);
-      pass.setPipeline(this.commitCandidate); pass.dispatchWorkgroups(1);
+      // Two labels, not one. Both dispatches are single-workgroup and were
+      // indistinguishable under one bucket, which hid which of them carried the
+      // domain tax: the builder sorts and materializes a candidate bank sized by
+      // the live source slots, while the commit sweeps the whole physical page
+      // capacity. Splitting is free in production — PassBroker reuses the open
+      // pass and records the absorbed label — and exact under
+      // FLUID_GPU_ISOLATE_PASS_LABELS.
+      const build = broker.compute({ label: "Prepare inactive owner-page generation" });
+      build.setBindGroup(0, this.topologyGroup);
+      build.setPipeline(this.buildCandidate); build.dispatchWorkgroups(1);
+      const commit = broker.compute({ label: "Commit inactive owner-page candidate bank" });
+      commit.setBindGroup(0, this.topologyGroup);
+      commit.setPipeline(this.commitCandidate); commit.dispatchWorkgroups(1);
       broker.fence("inactive owner-page generation prepared");
     } catch (error) {
       broker.fence("owner-page lifecycle encoding failure");

@@ -1737,6 +1737,11 @@ export class WebGPUOctreeProjection {
       includePressureBoundarySupport: true,
       pressureBoundaryTopClosed: scene.container.top === "closed",
       includeWholeDomainPressureSupport: scene.fluid.inflow !== undefined,
+      // Tied to the refinement policy, never authored separately: the
+      // scheduler must retain a dry wall tile exactly when `refineLeaf` would
+      // split one. When these two disagreed, the scheduler won and published
+      // topology for leaves that never existed.
+      fluidGatedBoundarySupport: this.fluidGatedBoundaryRefinement,
     });
     reportAllocation(2);
     const analyticBootstrapPlan = analyticSparseBootstrap ? planOctreeAnalyticBootstrapBounds({
@@ -1779,6 +1784,7 @@ export class WebGPUOctreeProjection {
         includePressureBoundarySupport: true,
         pressureBoundaryTopClosed: scene.container.top === "closed",
         includeWholeDomainPressureSupport: scene.fluid.inflow !== undefined,
+        fluidGatedBoundarySupport: this.fluidGatedBoundaryRefinement,
         // Direct page candidates consume no sparse-world leaf publication.
         // Keep only format-valid sentinel words for those bindings.
         fineSeedCandidatesOnly: true,

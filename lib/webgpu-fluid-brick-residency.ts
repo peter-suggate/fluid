@@ -69,6 +69,28 @@ export interface FluidBrickResidencyOptions {
   includePressureBoundarySupport?: boolean;
   pressureBoundaryTopClosed?: boolean;
   /**
+   * Require liquid within reach before a dry pressure-wall tile is retained.
+   *
+   * The sentence above — "the power topology refines those strips
+   * independently of liquid phi" — stopped being true when
+   * `fluidGatedBoundaryRefinement` became the default: `refineLeaf` gates a
+   * closed-wall crossing on `minimumPhi <= band`, so a dry wall tile far from
+   * any liquid never splits. Retaining it anyway published topology for leaves
+   * that do not exist, and the cost is not the tile — it is the 64 owner pages
+   * per tile that the single-workgroup candidate builder then sorts, dedups and
+   * copies every advance.
+   *
+   * That is the whole domain tax on a droplet in a vast container. The tile
+   * lattice is a uniform occupancy grid; this flag is what stops the container
+   * walls from marking all of it occupied. Measured on `power-droplet-256`
+   * (100 liquid cells in a 256-cubed box): 448 of 512 tiles retained, 28,672 of
+   * 30,400 candidate pages, and 52.9 ms of a 71 ms domain step.
+   *
+   * Wall tiles still search one tile further than liquid tiles, preserving the
+   * 2:1 grading margin the unconditional retention was standing in for.
+   */
+  fluidGatedBoundarySupport?: boolean;
+  /**
    * Retain the whole pressure-owner tile lattice for authored inflows. Inflow
    * protection refines dry cells around the nozzle before transported phi
    * arrives, so phi-derived residency alone cannot bound that support.
@@ -396,6 +418,7 @@ fn includeLiquidInterior() -> bool { return (schedulerFlags() & 1u) != 0u; }
 fn includePressureBoundarySupport() -> bool { return (schedulerFlags() & 2u) != 0u; }
 fn pressureBoundaryTopClosed() -> bool { return (schedulerFlags() & 4u) != 0u; }
 fn includeWholeDomainPressureSupport() -> bool { return (schedulerFlags() & 8u) != 0u; }
+fn fluidGatedBoundarySupport() -> bool { return (schedulerFlags() & 16u) != 0u; }
 
 fn brickCoordinate(index: u32) -> vec3u {
   let bx = params.brickDimsCapacity.x;
@@ -641,10 +664,17 @@ fn emitTopologyTiles(@builtin(global_invocation_id) gid: vec3u) {
     (tileIndex / params.tiling.y) % params.tiling.z,
     tileIndex / (params.tiling.y * params.tiling.z)
   );
-  var anyResident = tileHasPressureBoundarySupport(tile);
-  for (var dz = -1; dz <= 1 && !anyResident; dz += 1) {
-    for (var dy = -1; dy <= 1 && !anyResident; dy += 1) {
-      for (var dx = -1; dx <= 1 && !anyResident; dx += 1) {
+  let boundary = tileHasPressureBoundarySupport(tile);
+  // A dry wall tile is retained only when liquid is within reach. See the
+  // fluidGatedBoundarySupport option for why unconditional retention was
+  // over-conservative once boundary refinement itself became fluid-gated, and
+  // for what it cost. Wall tiles search one tile wider than liquid tiles, which
+  // is the 2:1 grading margin the unconditional form was standing in for.
+  var anyResident = boundary && !fluidGatedBoundarySupport();
+  let reach = select(1, 2, boundary);
+  for (var dz = -reach; dz <= reach && !anyResident; dz += 1) {
+    for (var dy = -reach; dy <= reach && !anyResident; dy += 1) {
+      for (var dx = -reach; dx <= reach && !anyResident; dx += 1) {
         anyResident = tileHasResident(vec3i(tile) + vec3i(dx, dy, dz));
       }
     }
@@ -733,8 +763,13 @@ fn persistentLiquid()->bool{return (schedulerFlags()&1u)!=0u;}
 fn pressureBoundarySupport()->bool{return (schedulerFlags()&2u)!=0u;}
 fn pressureBoundaryTopClosed()->bool{return (schedulerFlags()&4u)!=0u;}
 fn wholeDomainPressureSupport()->bool{return (schedulerFlags()&8u)!=0u;}
+fn gatedBoundarySupport()->bool{return (schedulerFlags()&16u)!=0u;}
 fn pressureBoundaryTile(key:u32)->bool{
   if(wholeDomainPressureSupport()){return true;}
+  // Gated: a dry wall tile is not claimed for its own sake. The live-leaf ring
+  // marking below reaches every wall tile liquid can actually touch, and
+  // boundary refinement is itself fluid-gated. See fluidGatedBoundarySupport.
+  if(gatedBoundarySupport()){return false;}
   if(!pressureBoundarySupport()){return false;}
   let d=params.tiling.yzw;
   let q=vec3u(key%d.x,(key/d.x)%d.y,key/(d.x*d.y));
@@ -1229,7 +1264,8 @@ export class GPUFluidBrickResidency {
     const schedulerFlags = (options.includeLiquidInterior ? 1 : 0)
       | (options.includePressureBoundarySupport ? 2 : 0)
       | (options.pressureBoundaryTopClosed ? 4 : 0)
-      | (options.includeWholeDomainPressureSupport ? 8 : 0);
+      | (options.includeWholeDomainPressureSupport ? 8 : 0)
+      | (options.fluidGatedBoundarySupport ? 16 : 0);
     floats.set([haloCells * Math.max(...cellSize), retireAfterFrames, 0, schedulerFlags], 8);
     device.queue.writeBuffer(this.params, 0, parameterData);
     this.layout = device.createBindGroupLayout({ label: "Fluid brick residency layout", entries: [

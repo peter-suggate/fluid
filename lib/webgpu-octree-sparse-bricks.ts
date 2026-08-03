@@ -105,6 +105,8 @@ export interface OctreeSparseBrickWorldOptions {
   includePressureBoundarySupport?: boolean;
   pressureBoundaryTopClosed?: boolean;
   includeWholeDomainPressureSupport?: boolean;
+  /** Retain a dry wall tile only when liquid is within reach; see the residency option. */
+  fluidGatedBoundarySupport?: boolean;
   /** Lifetime budget of previously absent scene bricks that may be activated in-place. */
   sceneMutationBrickCapacity?: number;
 }
@@ -805,6 +807,7 @@ export class OctreeSparseBrickWorld {
         includePressureBoundarySupport: options.includePressureBoundarySupport,
         pressureBoundaryTopClosed: options.pressureBoundaryTopClosed,
         includeWholeDomainPressureSupport: options.includeWholeDomainPressureSupport,
+        fluidGatedBoundarySupport: options.fluidGatedBoundarySupport,
         leafIndices,
         leafCapacity: this.tree.leafCapacity,
         topologyTileBricks: options.topologyTileBricks ?? 1,

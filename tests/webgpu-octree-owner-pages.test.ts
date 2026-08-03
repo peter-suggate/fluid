@@ -34,8 +34,16 @@ const ownerPageSource = readFileSync(new URL("../lib/webgpu-octree-owner-pages.t
 test("recurring owner lifecycle separates inactive preparation from next-boundary commit", () => {
   const prepare = WebGPUOctreeSimulationOwnerPages.prototype.encodeInactiveCandidate.toString();
   const commit = WebGPUOctreeSimulationOwnerPages.prototype.encodeReadyCommit.toString();
-  assert.equal((prepare.match(/broker\.compute/g) ?? []).length, 1);
+  // Two labelled compute() requests, still one production pass: PassBroker
+  // reuses the open pass across a label change and records the absorbed label,
+  // so this costs nothing outside FLUID_GPU_ISOLATE_PASS_LABELS. It buys
+  // separate attribution for the builder and the bank commit, which under one
+  // label were indistinguishable — and the builder turned out to carry the
+  // whole domain tax while the commit carried 0.1 ms of it.
+  assert.equal((prepare.match(/broker\.compute/g) ?? []).length, 2);
   assert.equal((prepare.match(/dispatchWorkgroups\(1\)/g) ?? []).length, 2);
+  assert.match(prepare, /label:\s*"Prepare inactive owner-page generation"/);
+  assert.match(prepare, /label:\s*"Commit inactive owner-page candidate bank"/);
   assert.equal((commit.match(/dispatchWorkgroups\(1\)/g) ?? []).length, 1);
   assert.match(prepare, /broker\.fence\("inactive owner-page generation prepared"\)/);
   assert.doesNotMatch(commit, /broker\.fence/,

@@ -408,3 +408,97 @@ a clean HEAD clone.
 3. Interface band: the profile inherits band 1 (large-hydro). The tiny-still
    band-1-vs-3 A/B showed no difference at 16³ (WORK_AND_DATA §1); re-check
    once at 240³ before trusting that at scale.
+
+## 6c. The domain tax, found and removed (2026-08-03)
+
+Per-label GPU attribution (`--pass-timestamps --isolate-pass-labels`, matched
+10-capture windows, both ends at 565 resident fine bricks) resolved the step to
+a single pass:
+
+| GPU pass | 64³ | 256³ | Δ |
+|---|---|---|---|
+| **Prepare inactive owner-page generation** | 1.02 | **52.91** | **+51.9** |
+| Octree persistent MGPCG | 16.70 | 23.50 | +6.8 |
+| Scan and compact recurring fine-band identity | 0.15 | 4.49 | +4.3 |
+| Publish recurring sparse fine band | 0.09 | 4.30 | +4.2 |
+| Octree resident grading closure | 55.59 | 57.49 | +1.9 |
+| Advect structured families | 21.86 | 21.83 | −0.0 |
+| **total attributed** | **117.6** | **188.7** | **+71.1** |
+
+73% of the tax in one single-workgroup pass. Splitting its two dispatches into
+two labels (free in production — `PassBroker` reuses the open pass) charged
+60.4 ms to `buildOwnerPageCandidate` and 0.5 ms to the bank commit.
+
+### Root cause: the occupancy grid was marked fully occupied
+
+The topology tile lattice *is* a uniform occupancy grid — 8³ tiles of 32 cells
+at 256³. `tileHasPressureBoundarySupport` marked the container's entire wall
+shell, two tiles thick, unconditionally resident: **448 of 512 tiles**, each
+carrying 64 owner pages, for 100 cells of water in one corner. The candidate
+builder then sorted, deduped and re-materialized ~30,400 pages every advance in
+*one workgroup* — ~124 MB of payload copy at 1/32 of the machine.
+
+That retention was standing in for a refinement policy that no longer exists.
+`refineLeaf` gates a closed-wall crossing on `minimumPhi <= band`
+(`fluidGatedBoundaryRefinement`, default true since it landed), so a dry wall
+tile far from liquid never splits. The scheduler was publishing topology for
+leaves that do not exist, and the two policies had no shared source of truth.
+
+**Fix**: `fluidGatedBoundarySupport` (residency scheduler flag bit 16), wired
+from `this.fluidGatedBoundaryRefinement` at both construction sites so the two
+can never disagree again. A dry wall tile is retained only when liquid is within
+reach; wall tiles search one tile wider than liquid tiles, which is the 2:1
+grading margin the unconditional form was standing in for. Both publishers are
+covered — the dense `emitTopologyTiles` ring and the sparse publisher's
+single-lane `pressureBoundaryTile` claim scan.
+
+### Measured
+
+Measurement-clean, M1 Max, 20 advances:
+
+| N | before | after | Δ |
+|---|---|---|---|
+| 64³ | 160.0 | **118.50** | −26% |
+| 128³ | 163.5 | **125.05** | −24% |
+| 240³ | 231.0 | **147.85** | −36% |
+| 256³ | 224.3 | **154.15** | −31% |
+
+Domain tax (256³ − 64³) cut from +64.3 ms to +35.7 ms. The
+`Prepare inactive owner-page generation` pass went 52.9 → 9.2 ms.
+
+**It is also a correctness fix.** `power-droplet-256` at 80 steps tripped
+`mgpcg-nonconvergence` 51 times from step 30 on the baseline; after the change,
+0 trips over 80 steps. The 20-step lane never reached it, which is why the first
+sweep looked green. Controlled: identical clean configuration, baseline clone at
+`c1880f0`.
+
+### Regression status
+
+- `symmetric-expansion`: first D4 loss at **step 68** (volume/velocity/pressure/
+  rhs), 69 (diagonal/topology) — bit-identical to the documented window.
+- `minimal-power-dam-break` 500 advances, `large-power-dam-break` 500,
+  `large-power-hydrostatic` 240: **0 tripwires** on all three.
+  Wall: 245.6→246.8, 283.7→287.9, **156.0→146.3**. Neutral to better; the
+  +1.5% on the large dam is a dense-fluid scene where the gate can only add the
+  wider ring search, and is within this lane's run-to-run spread.
+- `deep-power-hydrostatic` fails identically before and after (same
+  `latchedFinalizeReason: 13`, `topologyPublished: 0`, same row count) — a
+  pre-existing red lane, not a regression.
+- Octree/residency CPU tests: 17 failures before, the same 17 after, by name.
+
+### What the sort experiment was actually measuring
+
+`FLUID_OWNER_PAGE_LIVE_SORT_SPAN` stays default OFF, and the earlier null result
+is now explained rather than merely repeated: `sourceSlots` was (448+27)·64 =
+30,400, so `pow2(sourceSlots)` only shrank the network 65,536→32,768 — one stage
+group, and the measured saving was 7% (52.9→49.2). The flag was never wrong; the
+live count simply was not live. With the occupancy fix the candidate stream is
+small enough that the flag has nothing left to save.
+
+### Next
+
+The remaining 256³ frame is ~154 ms, of which only ~18 ms still scales with the
+domain (owner-page prepare 9.1, the two recurring fine-band scans 8.9). The rest
+is intercept: `Octree resident grading closure` ~55 ms and
+`Advect structured families` ~22 ms, both flat from 64³ to 256³. That is now the
+bigger number and a different problem — attack the intercept next, not the slope.
