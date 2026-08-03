@@ -2877,6 +2877,24 @@ fn extendFace(item:u32,readA:bool)->bool{let current=faceBank(item,readA);
   let faceCount=s(29u);${octreeAirSupportMarchFastPath
     ? "let itemCenter=faceCenterQuarter(item);" : ""}
   let incidence=adjacencyIncidentCount(faceRow);if(incidence>${OCTREE_GENERATED_POWER_CATALOG_MANIFEST.maximumFaceIncidence}u){fail(item,ERROR_CAPACITY);return false;}
+  // MEASURED: this 30x4 candidate scan is only ~10% of this pass.
+  //
+  // Up to adjacencyIncidentCount(row) <= 30 incident rows x 4 quadrants = 120
+  // candidates per relaxed destination, at 15.5% occupancy and 34.4% ALU, looked
+  // like the march's cost. It is not. Running the whole scan TWICE -- which is
+  // result-preserving, because the selection is a deterministic minimum over the
+  // same inputs, and which tripped zero tripwires -- moved the pass from 39.68 to
+  // 43.52 ms/advance on symmetric-expansion. One complete scan therefore costs
+  // ~3.84 ms of 39.68, against a 3.65 ms A/A floor on that lane. Deleting the
+  // loop ENTIRELY would barely clear the floor, so no partial optimization of it
+  // (quadrant hoisting, early rejection, analytic quadrant selection) can pay.
+  // The other ~36 ms is the frontier machinery around it, not the gather.
+  //
+  // Do not price this loop with an ablation that skips candidates: collapsing it
+  // to one candidate made the pass 2x SLOWER (82.59 ms) and moved a neighbouring
+  // pass by +8.6 ms, because picking a non-closest face changes the marched
+  // field so the frontier stops converging. An ablation that perturbs a
+  // fixed-point iteration measures its own divergence, not the loop.
   for(var localFace=0u;localFace<incidence;localFace+=1u){let otherRow=adjacencyIncident(faceRow,localFace);
     if(otherRow==INVALID){continue;}let sourceBase=otherRow*${STRUCTURED_AIR_SUPPORT_OWNED_FACE_SLOTS}u+4u*axis;
     for(var quadrant=0u;quadrant<4u;quadrant+=1u){let source=sourceBase+quadrant;
