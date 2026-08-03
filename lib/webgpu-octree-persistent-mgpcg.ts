@@ -192,12 +192,25 @@ export function octreePersistentMGPCGCompactLiveRowsEnabled(
  * baseline footprint is: an overflow here is a validation error the
  * `skip_validation` harness turns into a SIGSEGV rather than a message.
  */
+/**
+ * Default ON since 2026-08-03.
+ *
+ * Scored by the *paired* arms, which is the only honest reading: against
+ * control it measures -2.57 ms (-1.7%) and reads inconclusive, because the
+ * serial level commit dominated the frame. Against the parallel-commit arm in
+ * the same rounds -- spreads 0.18 and 0.60 ms -- it is **-3.27 ms, -3.7%** on
+ * droplet-256, reproducing the -3.6% measured on mini.
+ *
+ * Bit-identity is argued term-by-term above and witnessed on device: the
+ * `symmetric-expansion` D4 window is unmoved at 68/69 with this on.
+ * Set the variable to `0` to restore the unstaged smoother.
+ */
 export function octreePersistentMGPCGStagedSmootherEnabled(
   environment?: Readonly<Record<string, string | undefined>>,
 ): boolean {
   const resolved = environment
     ?? (typeof process !== "undefined" ? process.env : undefined);
-  return resolved?.FLUID_OCTREE_MGPCG_STAGED_SMOOTHER === "1";
+  return resolved?.FLUID_OCTREE_MGPCG_STAGED_SMOOTHER !== "0";
 }
 
 /** Selected mode for {@link octreePersistentMGPCGRegularBandRowsMode}. */

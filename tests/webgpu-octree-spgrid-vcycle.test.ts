@@ -459,12 +459,16 @@ test("the parallel level commit restores lane parallelism inside the same live-c
   assert.doesNotMatch(WebGPUOctreeSPGridVCycle.prototype.encodeReadySetupCommit.toString(),
     /dispatchFor/, "the commit may never regress to a capacity-shaped dispatchFor");
 
-  // Default OFF, opt in with exactly "1".
-  assert.equal(spgridParallelLevelCommitEnabled({}), false);
-  assert.equal(spgridParallelLevelCommitEnabled({ FLUID_SPGRID_PARALLEL_LEVEL_COMMIT: "" }), false);
-  assert.equal(spgridParallelLevelCommitEnabled({ FLUID_SPGRID_PARALLEL_LEVEL_COMMIT: "0" }), false);
-  assert.equal(spgridParallelLevelCommitEnabled({ FLUID_SPGRID_PARALLEL_LEVEL_COMMIT: "true" }), false);
+  // Default ON since the droplet-256 A/B landed (-40.9%, D4 window unmoved);
+  // "0" is the rollback, matching the `!== "0"` convention the air-support
+  // flags already use. An unset variable must reach the parallel commit.
+  assert.equal(spgridParallelLevelCommitEnabled({}), true);
+  assert.equal(spgridParallelLevelCommitEnabled(
+    { FLUID_SPGRID_PARALLEL_LEVEL_COMMIT: undefined }), true);
   assert.equal(spgridParallelLevelCommitEnabled({ FLUID_SPGRID_PARALLEL_LEVEL_COMMIT: "1" }), true);
+  assert.equal(spgridParallelLevelCommitEnabled({ FLUID_SPGRID_PARALLEL_LEVEL_COMMIT: "0" }), false,
+    "exactly \"0\" is the documented rollback and must be the only way to get the serial commit");
+  assert.equal(spgridParallelLevelCommitEnabled({ FLUID_SPGRID_PARALLEL_LEVEL_COMMIT: "" }), true);
   assert.deepEqual(OCTREE_SPGRID_VCYCLE_BINDINGS.commitCandidateLevelsParallel,
     OCTREE_SPGRID_VCYCLE_BINDINGS.commitCandidateLevels,
     "the parallel arm reaches exactly the arenas the serial arm reaches");

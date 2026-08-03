@@ -1067,14 +1067,30 @@ const OCTREE_SPGRID_HIERARCHICAL_ONLY_PIPELINES = new Set<OctreeSPGridVCyclePipe
  * nothing to reassociate and only the lane that issues a store changes. The
  * A/B is therefore a wall-clock comparison, not a physics gate.
  *
- * Default OFF until that A/B lands.
+ * Default ON since 2026-08-03; the A/B landed.
+ *
+ * `benchmark-power-dam-ab.ts --lane=droplet-256 --steps=60 --repeats=3`,
+ * interleaved with an A/A pair per round: control median 151.63 ms/advance,
+ * this flag alone **89.55 (-62.08, -40.9%)**, with both this and the staged
+ * smoother **86.28 (-65.34, -43.1%)**. Each arm's own 3-round spread is under
+ * 1.2 ms. The pass it targets, `SPGrid V-cycle - publish validated exact level
+ * deltas`, falls from ~96 to 2.47 ms/advance under label isolation.
+ *
+ * -40.9% here against -16.1% previously measured on mini is the predicted
+ * direction: `commitCandidateLevels` was `@workgroup_size(1)`, so the bigger
+ * the lane the more of the frame it serialized.
+ *
+ * `symmetric-expansion` with both flags on holds the exact contract window --
+ * volume/velocity/pressure/rhs first diverge at step 68, diagonal/topology at
+ * 69, wall-contact spread 0 across all four walls, 250 checkpoints, zero
+ * validation errors. Set the variable to `0` to restore the serial commit.
  */
 export function spgridParallelLevelCommitEnabled(
   environment?: Readonly<Record<string, string | undefined>>,
 ): boolean {
   const resolved = environment
     ?? (typeof process !== "undefined" ? process.env : undefined);
-  return resolved?.FLUID_SPGRID_PARALLEL_LEVEL_COMMIT === "1";
+  return resolved?.FLUID_SPGRID_PARALLEL_LEVEL_COMMIT !== "0";
 }
 
 /** Pipeline reachability mirror used by construction and non-GPU tests. */

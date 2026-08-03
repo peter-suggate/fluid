@@ -168,17 +168,19 @@ const stagedShader = () => octreePersistentMGPCGWGSL({
 const appliedBodyOf = (shader: string) =>
   shader.slice(shader.indexOf("fn applied("), shader.indexOf("fn chebyshevWeight("));
 
-test("the staged smoother is off unless its flag is exactly 1", () => {
-  assert.equal(octreePersistentMGPCGStagedSmootherEnabled({}), false);
+test("the staged smoother is on unless its flag is exactly 0", () => {
+  // Default ON since its bitwise gate was witnessed on device: the
+  // `symmetric-expansion` D4 window is unmoved at 68/69 with it enabled.
+  assert.equal(octreePersistentMGPCGStagedSmootherEnabled({}), true);
   assert.equal(octreePersistentMGPCGStagedSmootherEnabled(
-    { FLUID_OCTREE_MGPCG_STAGED_SMOOTHER: undefined }), false);
-  assert.equal(octreePersistentMGPCGStagedSmootherEnabled(
-    { FLUID_OCTREE_MGPCG_STAGED_SMOOTHER: "0" }), false);
-  assert.equal(octreePersistentMGPCGStagedSmootherEnabled(
-    { FLUID_OCTREE_MGPCG_STAGED_SMOOTHER: "true" }), false,
-  "an opt-in awaiting its bitwise symmetry gate must not accept a loose truthy");
+    { FLUID_OCTREE_MGPCG_STAGED_SMOOTHER: undefined }), true);
   assert.equal(octreePersistentMGPCGStagedSmootherEnabled(
     { FLUID_OCTREE_MGPCG_STAGED_SMOOTHER: "1" }), true);
+  assert.equal(octreePersistentMGPCGStagedSmootherEnabled(
+    { FLUID_OCTREE_MGPCG_STAGED_SMOOTHER: "0" }), false,
+  "exactly \"0\" is the documented rollback to the unstaged smoother");
+  assert.equal(octreePersistentMGPCGStagedSmootherEnabled(
+    { FLUID_OCTREE_MGPCG_STAGED_SMOOTHER: "" }), true);
 });
 
 test("the default persistent kernel is unchanged by the staged-smoother option", () => {
