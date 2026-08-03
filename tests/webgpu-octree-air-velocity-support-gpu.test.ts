@@ -12,11 +12,16 @@ import {
   factorOneAirSupportFrontierIndirectRecords,
   encodeOctreeAirSupportReconstructionHandoff,
   octreeAirSupportChangedFrontierEnabled,
+  octreeAirSupportDirectIndirectArgsEnabled,
   octreeAirSupportIndirectFrontierGateEnabled,
   octreeAirSupportReconstructionCompactPassEnabled,
   octreeAirSupportTopologyReuseEnabled,
+  OCTREE_AIR_SUPPORT_DIRECT_INDIRECT_ARGS_ENVIRONMENT,
   OCTREE_AIR_SUPPORT_GPU_CANDIDATE_WORDS,
   OCTREE_AIR_SUPPORT_GPU_CANDIDATE_STRIDE,
+  OCTREE_AIR_SUPPORT_GPU_DISPATCH_BINDING,
+  OCTREE_AIR_SUPPORT_GPU_DISPATCH_PHASES,
+  OCTREE_AIR_SUPPORT_GPU_DISPATCH_PHASE_NAMES,
   OCTREE_AIR_SUPPORT_GPU_ENTRY_BINDINGS,
   OCTREE_AIR_SUPPORT_GPU_ERROR,
   OCTREE_AIR_SUPPORT_GPU_FACE_ADJACENCY_STRIDE,
@@ -248,7 +253,7 @@ test("WGSL performs deterministic mark, parallel scan, scatter, and tag resoluti
     "fine-only identities must be stably ordered independently of hash claim order");
   assert.doesNotMatch(shader, /directoryWinnerOffset|directoryFlagOffset|waitHashKey/);
   assert.match(shader,
-    /writeDispatch\(66u,select\(vec3u\(0u,1u,1u\),dispatchFor\(s\(72u\),256u\),clean&&!reuseTopology\)\)/,
+    /writeDispatch\(66u,8u,select\(vec3u\(0u,1u,1u\),dispatchFor\(s\(72u\),256u\),clean&&!reuseTopology\)\)/,
     "a cold owner hash must publish zero clear work and recurring clears must use its prior live list");
   assert.match(shader, /if\(!reuseTopology\)\{sw\(72u,s\(71u\)\);sw\(71u,0u\);\}/,
     "topology reuse must retain the owner hash's touched-slot ledger for the next fresh clear");
@@ -310,18 +315,20 @@ test("the second same-epoch Section 5 publication reuses immutable topology and 
   assert.match(begin,
     /boundaryIdentity=.*boundaryEpochOffset\+3u.*boundaryEpoch.*!=0u.*identityReady=receiptReady&&accepted\.identity!=0u&&boundaryIdentity/s,
     "cross-epoch reuse must require exact structured and boundary-liquid identities");
-  for (const record of [13, 16, 43, 66]) {
+  for (const [word, record] of [[13, 1], [16, 2], [43, 5], [66, 8]] as const) {
     assert.match(begin, new RegExp(
-      `writeDispatch\\(${record}u,select\\(vec3u\\(0u,1u,1u\\),dispatchFor\\([^;]+\\),clean&&!reuseTopology\\)\\)`),
+      `writeDispatch\\(${word}u,${record}u,select\\(vec3u\\(0u,1u,1u\\),dispatchFor\\([^;]+\\),clean&&!reuseTopology\\)\\)`),
     `immutable air graph record ${record} must publish zero work under exact identity reuse`);
   }
   assert.match(begin,
-    /writeDispatch\(19u,select\(vec3u\(0u,1u,1u\),dispatchFor\(initializeItems,256u\),clean\)\)/,
+    /writeDispatch\(19u,3u,select\(vec3u\(0u,1u,1u\),dispatchFor\(initializeItems,256u\),clean\)\)/,
     "reuse must rehydrate exactly the retained row/support footprint after clearing its live hash slots");
   const prefix = shader.slice(shader.indexOf("fnprefixAirSupportBlocks"),
     shader.indexOf("fnscatterAirSupportRecords"));
   assert.match(prefix, /if\(lane==255u&&!reuse\).*writeDispatch\(43u.*writeDispatch\(66u/s,
     "the prefix must not revive topology or owner-hash work after identity reuse zeroed it");
+  assert.match(prefix, /if\(lane==255u&&reuse\)\{republishDispatch\(43u,5u\);republishDispatch\(66u,8u\);\}/,
+    "a reuse dispatch must still mirror the zero-work records the staged copy carried");
   assert.match(begin,
     /letretainedGraph=existingReady&&\(p\.capturePreceding&16u\)!=0u&&atomicLoad\(&faceFrontier\[11u\]\)==RETAINED_GRAPH_VALID&&precedingSeeds<=3u\*p\.candidateCapacity&&precedingSeeds<=p\.faceCapacity/s,
     "retained values require the same settled receipt because live seed magnitude participates in winner ordering");
@@ -556,7 +563,7 @@ test("transition and regular demand slots are fixed and physical exterior stays 
   // out-of-domain cube tag INVALID.
   assert.match(shader, /if\(!inDomain\)\{atomicStore\(&supportArena\[tag\],INVALID\);\}else\{/);
   assert.match(shader, /any\(origin<vec3i\(0\)\).*atomicStore\(&supportArena\[tag\],INVALID\)/);
-  assert.match(shader, /writeDispatch\(16u,select\(vec3u\(0u,1u,1u\),dispatchFor\(rows,1u\),clean&&!reuseTopology\)\)/,
+  assert.match(shader, /writeDispatch\(16u,2u,select\(vec3u\(0u,1u,1u\),dispatchFor\(rows,1u\),clean&&!reuseTopology\)\)/,
     "the indirect schedule must dispatch one 2-D-safe workgroup per row");
   assert.doesNotMatch(shader, /regularNeighborhoodExact/,
     "candidate lanes must not each repeat the complete 27-owner proof");
@@ -661,7 +668,7 @@ test("Section 5 chain is power-face seeded, persistently marched, and reconstruc
     /fnrefreshRetainedAirSupportFaceValues.*letseedItem=carrier\.z.*letseed=faceB\[seedItem\].*carrier\.x!=seed\.x.*faceA\[item\]=carrier/s,
     "retained closest-source identities and distances must update only from their exact winning seed value");
   assert.match(shader,
-    /fnfinalizeRetainedAirSupportMarchSchedule.*s\(25u\)!=s\(49u\).*atomicStore\(&faceFrontier\[10u\],1u\).*writeDispatch\(32u,select\(vec3u\(0u,1u,1u\),dispatchFor\(s\(29u\),256u\),clean&&!retained\)\)/s,
+    /fnfinalizeRetainedAirSupportMarchSchedule.*s\(25u\)!=s\(49u\).*atomicStore\(&faceFrontier\[10u\],1u\).*writeDispatch\(32u,4u,select\(vec3u\(0u,1u,1u\),dispatchFor\(s\(29u\),256u\),clean&&!retained\)\)/s,
     "equal seed membership must admit a zero second-publication march schedule and mismatches must fail closed");
   assert.match(shader,
     /fnpackedFrontierLane\(packed:u32\)->vec2u\{returnvec2u\(packed%3u,packed\/3u\)/,
@@ -746,42 +753,51 @@ test("no liquid film fallback seeds a carrier-free face", () => {
 
 test("host uses only GPU-published live schedules for fine demand and changed frontiers", () => {
   const encode = compact(WebGPUOctreeAirVelocitySupportProducer.prototype.encode.toString());
-  assert.match(encode, /dispatchWorkgroups\(1\).*updateIndirectBuffer/);
-  assert.equal((encode.match(/updateIndirectBuffer/g) ?? []).length, 13,
+  assert.match(encode, /dispatchWorkgroups\(1\).*publish\(/);
+  // Ten `publish` sites plus the three-copy identity block: the same thirteen
+  // schedule publications the staged encoder always had. `publish` is the one
+  // funnel, so a fourteenth cannot reach the command stream unaudited.
+  assert.equal((encode.match(/publish\(/g) ?? []).length, 10,
     "identity, radix, sparse-cell, face, retained-march, and factor-1 convergence schedules must remain GPU authored");
+  assert.equal((encode.match(/updateIndirectBuffer/g) ?? []).length, 4,
+    "staging survives only inside `publish` and the one non-contiguous identity block");
   for (const [name, offset] of [["clearAirSupportDirectory", 0], ["clearAirSupportTags", 12],
     ["emitAirSupportCandidates", 24], ["markAndScanAirSupportCandidates", 36]] as const) {
     assert.match(encode, new RegExp(`run\\("${name}",${offset}\\)`));
   }
-  assert.match(encode, /updateIndirectBuffer\(this\.scratch,32\*4,this\.indirect,4\*12,2\*12\)/);
-  assert.match(encode, /dispatchWorkgroupsIndirect\(this\.indirect,48\)/);
+  assert.match(encode, /publish\(32,\[4,5\],"face",/);
+  assert.match(encode, /broker\.updateIndirectBuffer\(this\.scratch,source\*4,this\.indirect,records\[0\]\*12,records\.length\*12\)/,
+    "the staged arm must still copy exactly the record family it publishes");
+  assert.match(encode, /dispatchWorkgroupsIndirect\(indirectFor\(48\),48\)/);
   assert.match(encode,
-    /prepareFineBandAirSupportDemand.*updateIndirectBuffer[\s\S]*markFineBandAirSupportDemand.*dispatchWorkgroupsIndirect\(this\.indirect,48\)/s,
+    /prepareFineBandAirSupportDemand[\s\S]*owners\[4\]=this\.dispatchArenas\.fineDemand[\s\S]*markFineBandAirSupportDemand.*dispatchWorkgroupsIndirect\(indirectFor\(48\),48\)/s,
     "fine demand must launch one workgroup per live page from a GPU-authored schedule");
-  assert.match(encode, /markFineBandAirSupportDemand.*dispatchWorkgroupsIndirect\(this\.indirect,48\)/s,
+  assert.match(encode, /markFineBandAirSupportDemand.*dispatchWorkgroupsIndirect\(indirectFor\(48\),48\)/s,
     "fine demand must have no provisioned-capacity launch branch");
   assert.doesNotMatch(encode, /maximumResidentBricks|domainVolume\/OCTREE_AIR_SUPPORT_GPU_WORKGROUP_SIZE|dilateFineBandAirSupportDemand/,
     "production air support must not encode capacity/domain-shaped fine work");
-  assert.match(encode, /dispatchWorkgroupsIndirect\(this\.indirect,60\)/);
+  assert.match(encode, /dispatchWorkgroupsIndirect\(indirectFor\(60\),60\)/);
   assert.match(encode,
-    /updateIndirectBuffer\(this\.scratch,43\*4,this\.indirect,60,12\)[\s\S]*resolveAirSupportTopology.*dispatchWorkgroupsIndirect\(this\.indirect,60\)/s,
+    /publish\(43,\[5\],"support",[^)]*\);[\s\S]*resolveAirSupportTopology.*dispatchWorkgroupsIndirect\(indirectFor\(60\),60\)/s,
     "support topology work must use the exact GPU-authored support-row count, not capacity");
   assert.match(encode, /run\("finalizeAirSupportMetadata"\)[\s\S]*commitAirSupportDirectRows[\s\S]*run\("commitAirSupportPublication"\)/);
   assert.doesNotMatch(encode, /dispatchWorkgroups\(this\.plan\.faceCapacity/);
   assert.match(encode, /clearBuffer\(this\.scratch,32\*4,6\*4\)/,
-    "copied indirect words must be recycled once as six storage-visible wave flags");
+    "published indirect words must be recycled once as six storage-visible wave flags");
   assert.match(encode, /validateAirSupportFrontierReciprocity.*compactAirSupportSeedFrontier.*refreshRetainedAirSupportFaceValues.*finalizeRetainedAirSupportMarchSchedule.*broker\.fence\("Section5ordinary-faceseedspublished"\)/s);
-  assert.match(encode, /broker\.fence\("Section5ordinary-faceseedspublished"\).*updateIndirectBuffer\(this\.scratch,32\*4,this\.indirect,48,12\).*clearBuffer\(this\.scratch,32\*4,6\*4\)/s,
-    "the GPU reuse decision must replace the march schedule only across an indirect-copy visibility boundary");
+  assert.match(encode, /broker\.fence\("Section5ordinary-faceseedspublished"\).*publish\(32,\[4\],"march","",false\).*clearBuffer\(this\.scratch,32\*4,6\*4\)/s,
+    "the GPU reuse decision must replace the march schedule only across the seed-publication boundary it already rides");
   assert.match(encode,
     /indirectFrontierGate=changedFrontier&&octreeAirSupportIndirectFrontierGateEnabled\(\)&&fineSlot!==.*this\.inputs\.fineSources\[fineSlot\]\.plan\.fineFactor===1/,
     "only factor 1 may replace the factor-4/8 march graph with convergence-gated records");
   assert.match(encode,
-    /if\(indirectFrontierGate\)\{broker\.updateIndirectBuffer\(this\.scratch,10\*4,this\.indirect,0,3\*12\)/,
+    /if\(indirectFrontierGate\)publish\(10,\[0,1,2\],"march","",false\)/,
     "the initial factor-1 records need a storage-to-indirect visibility boundary");
   assert.match(encode,
-    /advanceAirSupportChangedFrontier.*dispatchWorkgroupsIndirect\(this\.indirect,12\).*updateIndirectBuffer\(this\.scratch,10\*4,this\.indirect,0,3\*12\).*marchAirSupportFacesChangedFrontier.*dispatchWorkgroupsIndirect\(this\.indirect,24\)/s,
+    /advanceAirSupportChangedFrontier.*dispatchWorkgroupsIndirect\(indirectFor\(12\),12\).*publish\(10,\[0,1,2\],alternate\?"frontierB":"frontierA",[^)]*\).*marchAirSupportFacesChangedFrontier.*dispatchWorkgroupsIndirect\(indirectFor\(24\),24\)/s,
     "each proven singleton must gate all later wave phases, singletons, and the residual tail");
+  assert.match(encode, /constalternate=directArgs&&\(wave&1\)===1/,
+    "a wave must publish into the arena it is not itself dispatching from");
   assert.match(encode,
     /marchAirSupportFacesChangedFrontier.*dispatchWorkgroups\(3\).*encodeOctreeAirSupportReconstructionHandoff\(broker\)/s);
   assert.match(encode, /changedFrontier=octreeAirSupportChangedFrontierEnabled\(\)/,
@@ -855,7 +871,8 @@ test("producer exposes canonical banked row vectors and avoids double-counting a
   assert.match(source, /canonicalRowVelocities:this\.inputs\.structured\.rowVelocities/);
   const implementation = compact(readFileSync(
     new URL("../lib/webgpu-octree-air-velocity-support-gpu.ts", import.meta.url), "utf8"));
-  assert.match(implementation, /this\.allocatedBytes=this\.plan\.allocatedBytes\+256-\(inputs\.sharedArena\?this\.plan\.support\.totalBytes:0\)/);
+  assert.match(implementation,
+    /this\.allocatedBytes=this\.plan\.allocatedBytes\+256\+OCTREE_AIR_SUPPORT_GPU_DISPATCH_PHASE_NAMES\.length\*this\.plan\.indirectBytes-\(inputs\.sharedArena\?this\.plan\.support\.totalBytes:0\)/);
   assert.match(implementation,
     /this\.params=Object\.freeze\(\[0,1\]\.map.*constparameterSlot=this\.parameterSlot;this\.parameterSlot=parameterSlot===0\?1:0.*queue\.writeBuffer\(params,0,this\.parameterData/s,
     "two support transactions encoded into one command buffer must retain invocation-stable uniforms");
@@ -929,4 +946,204 @@ test("Dawn compiles every Section 5 producer entry point at the M1 storage-buffe
 test("GPU plan rejects malformed capacities and domain dimensions", () => {
   assert.throws(() => planOctreeAirVelocitySupportGPU(0, 30, [16, 16, 16]), /positive/);
   assert.throws(() => planOctreeAirVelocitySupportGPU(1, 30, [16, 0, 16]), /positive/);
+});
+
+// ---------------------------------------------------------------------------
+// Direct STORAGE|INDIRECT dispatch arenas
+// ---------------------------------------------------------------------------
+
+test("direct indirect-args authorship defaults off and is a pure host-encoding decision", () => {
+  assert.equal(OCTREE_AIR_SUPPORT_DIRECT_INDIRECT_ARGS_ENVIRONMENT,
+    "FLUID_OCTREE_AIR_SUPPORT_DIRECT_INDIRECT_ARGS");
+  assert.equal(octreeAirSupportDirectIndirectArgsEnabled({}), false);
+  assert.equal(octreeAirSupportDirectIndirectArgsEnabled({
+    FLUID_OCTREE_AIR_SUPPORT_DIRECT_INDIRECT_ARGS: "0",
+  }), false);
+  assert.equal(octreeAirSupportDirectIndirectArgsEnabled({
+    FLUID_OCTREE_AIR_SUPPORT_DIRECT_INDIRECT_ARGS: "1",
+  }), true);
+  const implementation = compact(readFileSync(
+    new URL("../lib/webgpu-octree-air-velocity-support-gpu.ts", import.meta.url), "utf8"));
+  // Construction, layout and the shader must be identical in both arms, exactly
+  // as `changedFrontier` is: only which buffer a dispatch reads may change.
+  assert.match(implementation, /constdirectArgs=octreeAirSupportDirectIndirectArgsEnabled\(\);/,
+    "the arm must be sampled once per encode, not read inside the WGSL or the constructor");
+  const constructor = implementation.slice(
+    implementation.indexOf("constructor(privatereadonlydevice"),
+    implementation.indexOf("privatepipelineEntryPoints()"));
+  assert.doesNotMatch(constructor, /octreeAirSupportDirectIndirectArgsEnabled/,
+    "arenas must be allocated unconditionally so an A/B cannot move allocation");
+  assert.doesNotMatch(compact(octreeAirVelocitySupportPublicationWGSL),
+    /DIRECT_INDIRECT_ARGS|directArgs/,
+    "the shader must publish both destinations unconditionally");
+});
+
+test("dispatch arenas carry STORAGE and INDIRECT, and the staged buffer stays INDIRECT-only", () => {
+  const implementation = compact(readFileSync(
+    new URL("../lib/webgpu-octree-air-velocity-support-gpu.ts", import.meta.url), "utf8"));
+  // The whole point: a buffer with INDIRECT but not STORAGE cannot be written
+  // by a compute shader, so its args have to be staged through a copy, and
+  // every such copy is a forced compute-pass boundary.
+  assert.match(implementation,
+    /label:"Structuredair-supportindirectschedules",size:this\.plan\.indirectBytes,usage:GPUBufferUsage\.COPY_DST\|GPUBufferUsage\.INDIRECT/,
+    "the staged arena must remain exactly as it was so the default arm is unchanged");
+  assert.match(implementation,
+    /usage:GPUBufferUsage\.STORAGE\|GPUBufferUsage\.INDIRECT\|GPUBufferUsage\.COPY_SRC,/,
+    "every direct arena must be writable by its producing kernel and readable as INDIRECT");
+  assert.match(implementation,
+    /size:this\.plan\.indirectBytes,\s*usage:GPUBufferUsage\.STORAGE/,
+    "an arena must keep the canonical nine-record layout so record offsets never move");
+});
+
+test("every schedule producer owns exactly one arena and no pass writes one it dispatches from", () => {
+  const shader = compact(octreeAirVelocitySupportPublicationWGSL);
+  // The set that calls writeDispatch, the set that declares binding 31, and the
+  // phase table's key set are one set. Anything else is either an unpublished
+  // schedule or a bind group the device would reject.
+  const declares = Object.entries(OCTREE_AIR_SUPPORT_GPU_ENTRY_BINDINGS)
+    .filter(([, bindings]) => (bindings as readonly number[])
+      .includes(OCTREE_AIR_SUPPORT_GPU_DISPATCH_BINDING))
+    .map(([entry]) => entry).sort();
+  const authors = Object.keys(OCTREE_AIR_SUPPORT_GPU_ENTRY_BINDINGS).filter((entry) => {
+    const body = shader.slice(shader.indexOf(`fn${entry}(`));
+    return /^[\s\S]*?writeDispatch\(/.test(body.slice(0, body.indexOf("@compute") + 1 || undefined));
+  }).sort();
+  assert.deepEqual(Object.keys(OCTREE_AIR_SUPPORT_GPU_DISPATCH_PHASES).sort(), declares);
+  assert.deepEqual(declares, authors,
+    "binding 31 must be declared by exactly the entry points that publish a schedule");
+  for (const entry of declares) {
+    const audit = auditWGSLComputeBindingReachability(octreeAirVelocitySupportPublicationWGSL, entry);
+    assert.ok(audit.bindings.some(({ binding }) =>
+      binding === OCTREE_AIR_SUPPORT_GPU_DISPATCH_BINDING),
+    `${entry} must reach the published dispatch arena`);
+  }
+  // Injective: two producers sharing an arena could collide across the pass
+  // boundary that separates them, and a producer sharing an arena with a
+  // consumer in its own pass is the STORAGE/INDIRECT conflict this splits.
+  const phases = Object.values(OCTREE_AIR_SUPPORT_GPU_DISPATCH_PHASES);
+  assert.equal(new Set(phases).size, phases.length,
+    "each producing kernel must own its own arena");
+  assert.deepEqual([...OCTREE_AIR_SUPPORT_GPU_DISPATCH_PHASE_NAMES].sort(),
+    [...new Set([...phases, "frontierB"])].sort(),
+    "the allocated arena set must be the phase set plus the frontier ping-pong partner");
+  // One operand, two destinations, nothing recomputed: the direct record is the
+  // same bits the copy would have moved.
+  assert.match(shader,
+    /fnwriteDispatch\(at:u32,record:u32,value:vec3u\)\{sw\(at,value\.x\);sw\(at\+1u,value\.y\);sw\(at\+2u,value\.z\);letbase=3u\*record;publishedDispatch\[base\]=value\.x;publishedDispatch\[base\+1u\]=value\.y;publishedDispatch\[base\+2u\]=value\.z;\}/,
+    "the scratch words and the arena record must be written from one operand");
+  // Two writers, both funnelled. A third -- or a conditional write inside one
+  // of these producers with no republication arm -- is how an arena record goes
+  // stale where the staged copy carried a retained value: the copy moved the
+  // scratch word whether or not that dispatch had rewritten it.
+  assert.equal((shader.match(/publishedDispatch\[/g) ?? []).length, 6,
+    "publishedDispatch must be written only by writeDispatch and republishDispatch");
+  assert.match(shader,
+    /fnrepublishDispatch\(at:u32,record:u32\)\{letbase=3u\*record;publishedDispatch\[base\]=s\(at\);publishedDispatch\[base\+1u\]=s\(at\+1u\);publishedDispatch\[base\+2u\]=s\(at\+2u\);\}/,
+    "a republication must read exactly the scratch record the staged copy read");
+});
+
+/**
+ * Encode both arms against a recording command encoder.
+ *
+ * The producer's own resources are irrelevant here -- only which buffer each
+ * indirect dispatch reads and which commands sit between the passes -- so the
+ * instance is stubbed down to the fields `encode` actually touches. The broker
+ * is the real one, so the boundary census is the production census.
+ */
+function encodeAirSupportArm(directArgs: boolean) {
+  const previous = process.env[OCTREE_AIR_SUPPORT_DIRECT_INDIRECT_ARGS_ENVIRONMENT];
+  process.env[OCTREE_AIR_SUPPORT_DIRECT_INDIRECT_ARGS_ENVIRONMENT] = directArgs ? "1" : "0";
+  try {
+    const named = (name: string) => ({ label: name } as unknown as GPUBuffer);
+    const indirect = named("staged");
+    const arenas = Object.fromEntries(OCTREE_AIR_SUPPORT_GPU_DISPATCH_PHASE_NAMES
+      .map((phase) => [phase, named(phase)]));
+    const indirectReads: string[] = [];
+    const copies: string[] = [];
+    const pass = {
+      setPipeline() {}, setBindGroup() {}, dispatchWorkgroups() {},
+      dispatchWorkgroupsIndirect(buffer: GPUBuffer, offset: number) {
+        indirectReads.push(`${(buffer as unknown as { label: string }).label}@${offset}`);
+      },
+      end() {},
+    };
+    const encoder = {
+      beginComputePass: () => pass,
+      copyBufferToBuffer(_s: GPUBuffer, _so: number, destination: GPUBuffer,
+        offset: number, size: number) {
+        copies.push(`${(destination as unknown as { label: string }).label}@${offset}+${size}`);
+      },
+      clearBuffer() {},
+      finish: () => ({}),
+    } as unknown as GPUCommandEncoder;
+    const broker = new PassBroker(encoder, { isolateLabels: false });
+    const proxy = new Proxy({}, { get: (_t, key) => key }) as Record<string, never>;
+    const producer = Object.assign(
+      Object.create(WebGPUOctreeAirVelocitySupportProducer.prototype), {
+        device: { queue: { writeBuffer() {} } },
+        destroyed: false, pipelinesInitialized: true, publicationCount: 0, parameterSlot: 0,
+        inputs: { fineSources: [{ plan: { fineFactor: 1 } }, { plan: { fineFactor: 1 } }] },
+        params: [{}, {}], groups: [proxy, proxy], pipelines: proxy,
+        fineDemandGroups: [[{}, {}], [{}, {}]], fineDemandScheduleGroups: [[{}, {}], [{}, {}]],
+        frontierAlternateGroups: [{}, {}],
+        scratch: named("scratch"), indirect, dispatchArenas: arenas,
+        parameterData: () => new ArrayBuffer(256),
+      }) as WebGPUOctreeAirVelocitySupportProducer;
+    producer.encode(broker, 1, 0);
+    broker.finish();
+    const bucket = (reason: string) => broker.boundaryAudit.get(reason);
+    return {
+      indirectReads, copies,
+      passes: broker.computePassCount,
+      staged: bucket("stage indirect args")?.passClosures ?? 0,
+      stagedCopies: bucket("stage indirect args")?.copyCommands ?? 0,
+      stagedBytes: bucket("stage indirect args")?.commandBytes ?? 0,
+      closures: [...broker.boundaryAudit.values()]
+        .reduce((total, entry) => total + entry.passClosures, 0),
+    };
+  } finally {
+    if (previous === undefined) delete process.env[OCTREE_AIR_SUPPORT_DIRECT_INDIRECT_ARGS_ENVIRONMENT];
+    else process.env[OCTREE_AIR_SUPPORT_DIRECT_INDIRECT_ARGS_ENVIRONMENT] = previous;
+  }
+}
+
+test("direct arenas delete every staging copy and change no pass boundary", () => {
+  const staged = encodeAirSupportArm(false);
+  const direct = encodeAirSupportArm(true);
+  // What the conversion buys: the copies.
+  assert.ok(staged.stagedCopies > 0);
+  assert.equal(direct.stagedCopies, 0, "no schedule may still travel by copy");
+  assert.equal(direct.copies.length, 0, "the direct arm must encode no buffer copy at all");
+  assert.equal(direct.staged, 0);
+  // What it does NOT buy, and the reason it is worth saying out loud: every one
+  // of those copies sat exactly where a producing kernel hands a schedule to a
+  // consumer that dispatches from it. That hand-off needs the boundary whether
+  // the args travel by copy or are authored in place, so the closure count is
+  // identical and only the reason labels move.
+  assert.equal(direct.closures, staged.closures,
+    "converting authorship must not silently add or remove a barrier");
+  assert.equal(direct.passes, staged.passes);
+  // Every record is read from the arena its producer authored it into, at the
+  // canonical offset the staged arm copied it to.
+  assert.deepEqual([...new Set(staged.indirectReads.map((read) => read.split("@")[0]))], ["staged"]);
+  const byOffset = new Map<string, Set<string>>();
+  for (const read of direct.indirectReads) {
+    const [arena, offset] = read.split("@") as [string, string];
+    byOffset.set(offset, (byOffset.get(offset) ?? new Set()).add(arena));
+  }
+  assert.deepEqual(Object.fromEntries([...byOffset]
+    .sort((left, right) => Number(left[0]) - Number(right[0]))
+    .map(([offset, arenas]) => [offset, [...arenas]])), {
+    0: ["identity", "march", "frontierA", "frontierB"],
+    12: ["identity", "march", "frontierA", "frontierB"],
+    24: ["identity", "frontierB"],
+    36: ["identity", "candidates"],
+    48: ["fineDemand", "face", "march"],
+    60: ["support", "face"],
+    72: ["fineClosure", "radix"],
+    84: ["fineEmission"],
+    96: ["identity", "support"],
+  });
+  assert.ok(!direct.indirectReads.includes("staged@0"),
+    "no dispatch may fall back to the staged arena");
 });

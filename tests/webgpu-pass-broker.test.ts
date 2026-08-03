@@ -6,8 +6,11 @@ import {
   PassBroker,
   formatPassBrokerBoundaryAudit,
   formatPassBrokerLabelAudit,
+  passBrokerBoundaryAuditSnapshot,
+  passBrokerBoundaryAuditTotals,
   passBrokerLabelIsolationPrefixes,
   passBrokerLabelIsolationRequested,
+  resetPassBrokerBoundaryAuditTotals,
   xctraceSafeComputeLabel,
 } from "../lib/webgpu-pass-broker";
 
@@ -247,6 +250,91 @@ test("boundary audit distinguishes idempotent requests from serial-spine closure
   assert.deepEqual(broker.boundaryAudit.get("publication"), {
     requests: 3, passClosures: 1, copyCommands: 0, clearCommands: 0, commandBytes: 0,
   });
+});
+
+/**
+ * A broker owns one command encoder and is dropped at `finish()`. Roughly
+ * thirty call sites construct one per encoder, so `boundaryAudit` on any single
+ * instance describes a fragment of a frame and is garbage before a report
+ * exists. The process-wide census is what a benchmark can actually read.
+ */
+test("boundary causes aggregate across every broker instance in the process", () => {
+  resetPassBrokerBoundaryAuditTotals();
+  const events: string[] = [];
+  const buffer = { size: 64 } as GPUBuffer;
+  for (let encoder = 0; encoder < 3; encoder += 1) {
+    const broker = new PassBroker(fakeEncoder(events), { isolateLabels: false });
+    broker.compute({ label: "stage" });
+    broker.updateIndirectBuffer(buffer, 0, buffer, 0, 12);
+    broker.compute({ label: "next stage" });
+    broker.fence("publication visibility");
+    // Idempotent: nothing is open, so this is a caller that could be batched
+    // away for free rather than a pass that has to be merged.
+    broker.fence("publication visibility");
+    broker.finish();
+    assert.equal(broker.boundaryAudit.get("publication visibility")?.passClosures, 1,
+      "a per-encoder audit must keep describing only its own encoder");
+  }
+  const totals = passBrokerBoundaryAuditTotals();
+  assert.deepEqual(totals.get("stage indirect args"), {
+    requests: 3, passClosures: 3, copyCommands: 3, clearCommands: 0, commandBytes: 36,
+  });
+  assert.deepEqual(totals.get("publication visibility"), {
+    requests: 6, passClosures: 3, copyCommands: 0, clearCommands: 0, commandBytes: 0,
+  });
+
+  const snapshot = passBrokerBoundaryAuditSnapshot();
+  assert.equal(snapshot.brokers, 3);
+  assert.equal(snapshot.passClosures, 6);
+  assert.equal(snapshot.requests, 12);
+  assert.equal(snapshot.copyCommands, 3);
+  assert.equal(snapshot.commandBytes, 36);
+  assert.equal(snapshot.labelIsolated, false);
+  assert.ok(snapshot.resets >= 1, "an unreset census still carries construction");
+  assert.deepEqual(Object.keys(snapshot.byReason), [
+    "stage indirect args", "publication visibility", "finish command encoder",
+  ], "the snapshot is ranked exactly as the formatter prints");
+
+  // A snapshot is a copy: encoding that continues afterwards must not mutate a
+  // report a harness is already holding.
+  const held = totals.get("publication visibility");
+  const later = new PassBroker(fakeEncoder(events), { isolateLabels: false });
+  later.compute();
+  later.fence("publication visibility");
+  assert.equal(held?.passClosures, 3);
+  assert.equal(snapshot.byReason["publication visibility"]?.passClosures, 3);
+  assert.equal(passBrokerBoundaryAuditTotals().get("publication visibility")?.passClosures, 4);
+});
+
+test("the process census records label isolation and the merges already happening", () => {
+  resetPassBrokerBoundaryAuditTotals();
+  assert.equal(passBrokerBoundaryAuditTotals().size, 0, "a reset starts a new window");
+  const events: string[] = [];
+  // Production grouping: the second label is dropped into the first label's
+  // encoder, which is a merge that has already happened.
+  const shared = new PassBroker(fakeEncoder(events), { isolateLabels: false });
+  shared.compute({ label: "owner" });
+  shared.compute({ label: "swallowed" });
+  shared.finish();
+  assert.equal(passBrokerBoundaryAuditSnapshot().absorbedLabelPairs, 1);
+  assert.equal(passBrokerBoundaryAuditSnapshot().compositeEncoderLabels, 1);
+  assert.equal(passBrokerBoundaryAuditSnapshot().labelIsolated, false);
+
+  // With isolation on the broker manufactures a boundary per label change. A
+  // table that did not say so would report a diagnostic stream as production.
+  const isolated = new PassBroker(fakeEncoder(events), {
+    isolateLabels: true, isolateLabelPrefixes: ["SPGrid V-cycle ·"],
+  });
+  isolated.compute({ label: "SPGrid V-cycle · smooth" });
+  isolated.compute({ label: "SPGrid V-cycle · restrict" });
+  isolated.finish();
+  const snapshot = passBrokerBoundaryAuditSnapshot();
+  assert.equal(snapshot.labelIsolated, true);
+  assert.equal(snapshot.labelIsolatedBrokers, 1);
+  assert.equal(snapshot.brokers, 2);
+  assert.deepEqual(snapshot.labelIsolationPrefixes, ["SPGrid V-cycle -"]);
+  assert.equal(snapshot.byReason["pass label isolation"]?.passClosures, 1);
+  resetPassBrokerBoundaryAuditTotals();
 });
 
 test("raw command encoder access is an explicit pass boundary", () => {

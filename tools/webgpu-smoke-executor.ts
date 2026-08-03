@@ -24,6 +24,11 @@ import { octreePowerHybridWorkVerdict }
 import { readFineLevelSetWorksetHeader } from "../lib/octree-fine-levelset-bricks";
 import { decodeStructuredProjectionEnergy }
   from "../lib/webgpu-octree-structured-dynamics";
+import {
+  passBrokerBoundaryAuditSnapshot,
+  resetPassBrokerBoundaryAuditTotals,
+  type PassBrokerBoundaryAuditSnapshot,
+} from "../lib/webgpu-pass-broker";
 import { requiredFluidDeviceLimits } from "../lib/webgpu-device-limits";
 import { fluidExecutionDeviceFeatures } from "../lib/gpu-startup";
 import {
@@ -612,6 +617,10 @@ interface GPUSmokeResult {
   structuredRejectReports: number;
   firstStructuredRejectStep?: number;
   gpuCommandAudit?: GPUCommandAuditReport;
+  /** Which pass-boundary CAUSES produced the frame's compute passes, summed
+   * over every `PassBroker` this process constructed after warmup. Unlike the
+   * command audit this needs no device proxying, so it is always present. */
+  gpuPassBoundaryAudit?: PassBrokerBoundaryAuditSnapshot;
   gpuFineTimestamps?: GPUFineTimestampReport;
   gpuPassTimestamps?: GPUPassTimestampReport;
   finalPerformanceAuthority?: Readonly<Record<string, unknown>>;
@@ -785,6 +794,7 @@ function reportResult(scenario: SmokeScenario, result: GPUSmokeResult) {
     structuredRejectIndex: info.structuredRejectIndex,
     structuredRejectSummary: info.structuredRejectSummary,
     gpuCommandAudit: result.gpuCommandAudit,
+    gpuPassBoundaryAudit: result.gpuPassBoundaryAudit,
     gpuFineTimestamps: result.gpuFineTimestamps,
     gpuPassTimestamps: result.gpuPassTimestamps,
     algorithmDiagnostics: result.algorithmDiagnostics,
@@ -1324,6 +1334,12 @@ async function runGPU(
   // below measures only recurring advance work and explicitly requested
   // profiler/readback activity after the initialized solver is warm.
   commandAudit?.reset();
+  // Same window, same reason: the pass-boundary census is process-wide and
+  // cumulative from module load, so without this the per-advance numbers carry
+  // construction plus the cold bootstrap encoders
+  // (encodeColdTopologySignatureBaseline, encodeAnalyticBootstrap). Reset is
+  // unconditional because the census costs nothing to keep.
+  resetPassBrokerBoundaryAuditTotals();
   if (dataFlowSkipAdvances === 0) dataFlowAudit?.start();
   passTimestampAudit?.start();
   const runStarted = performance.now();
@@ -3444,6 +3460,7 @@ async function runGPU(
     rejectedAdvanceAttempts, maximumConsecutiveRejectedAdvances,
     structuredRejectReports, firstStructuredRejectStep,
     gpuCommandAudit: commandAudit?.snapshot(),
+    gpuPassBoundaryAudit: passBrokerBoundaryAuditSnapshot(),
     gpuFineTimestamps,
     gpuPassTimestamps,
     finalPerformanceAuthority,

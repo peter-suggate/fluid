@@ -1,6 +1,7 @@
 import { cloneScene, defaultCamera, defaultScene, DEFAULT_GPU_CPU_TIMESTEP_RATIO, type CameraState, type SceneDescription } from "./model";
 import { createPaperScenario } from "./paper-scenarios";
 import { applyGardenPool, GARDEN_DAM_BRICK_SEED_M, GARDEN_WATERLINE_M, gardenPoolTerrain } from "./garden-scene";
+import { createHeroGardenHoseScene, heroGardenCamera } from "./hero-garden-scene";
 import { terrainHeightAt } from "./terrain";
 import type { EnvironmentId } from "./environments";
 import type { MethodProfile } from "./methods";
@@ -883,6 +884,28 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
         "A 5 ms outer step: the wave-profile lane observes six seconds, and the "
         + "browser's 8 ms cap would let the 4.2 m/s front cross more than a cell a step.",
         (scene) => pinStep(scene, 0.005)),
+    },
+  }),
+  defineScene({
+    id: "hero-garden-hose",
+    name: "Porcelain pond · hose filling",
+    blurb: "A raised porcelain pond on a 7.5 mm lattice, with a hose plunging in. The coping, the basin and the ground are one generated heightfield, so the water meets the rim exactly where the rim is.",
+    audience: "explore",
+    shelf: "Garden",
+    environment: "garden",
+    build: createHeroGardenHoseScene,
+    camera: heroGardenCamera,
+    variants: {
+      "gpu-smoke": smokeVariant(
+        "Does the generated vessel hold still water? The hose is shut off and the capillary "
+        + "force removed, so a residual speed is the basin's own — a step the bake left in the "
+        + "inner face, or a rim the fill overtopped — and nothing else in the scene could be "
+        + "causing it. The 1/120 s step is the one the other terrain-pool lanes rest at.",
+        (scene) => {
+          delete scene.fluid.inflow;
+          scene.fluid.surfaceTension_N_m = 0;
+          pinStep(scene, 1 / 120);
+        }),
     },
   }),
   defineScene({

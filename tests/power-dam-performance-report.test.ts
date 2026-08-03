@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { PerformanceTrace } from "../lib/performance-trace";
 import {
+  buildPowerDamPassBoundaryProfile,
   powerDamComputePassStage,
   powerDamPerformanceFailures,
   powerDamResultFromLine,
@@ -87,6 +88,92 @@ test("fine GPU pass timestamps normalize by sampled advances, not the full smoke
   });
   assert.equal(summary.fineTimestamps?.summedPassPerAdvance_ms, 12);
   assert.equal(summary.fineTimestamps?.byLabel["Fine topology"]?.totalPerAdvance_ms, 12);
+});
+
+/**
+ * The pass budget is a BOUNDARY budget: a compute pass exists because something
+ * fenced. `computePassesPerAdvance` counts the passes; this ranks the causes,
+ * which is what a merge has to be aimed at.
+ */
+test("pass boundary causes rank by measured closures and separate batchable requests", () => {
+  const summary = summarizePowerDamPerformance({
+    scenario: "minimal-power-dam-break", method: "octree", phase: "result",
+    steps: 4, simulationWall_ms: 240,
+    gpuPassBoundaryAudit: {
+      schemaVersion: 1,
+      brokers: 8, labelIsolatedBrokers: 0, labelIsolated: false, resets: 1,
+      requests: 480, passClosures: 320, copyCommands: 80, clearCommands: 40,
+      commandBytes: 4_000_000, absorbedLabelPairs: 12, compositeEncoderLabels: 3,
+      byReason: {
+        "stage indirect args": { requests: 160, passClosures: 160, copyCommands: 80,
+          clearCommands: 0, commandBytes: 2_000_000 },
+        "clear buffer": { requests: 40, passClosures: 40, copyCommands: 0,
+          clearCommands: 40, commandBytes: 2_000_000 },
+        "publication visibility": { requests: 240, passClosures: 80, copyCommands: 0,
+          clearCommands: 0, commandBytes: 0 },
+        "finish command encoder": { requests: 40, passClosures: 40, copyCommands: 0,
+          clearCommands: 0, commandBytes: 0 },
+      },
+    },
+  });
+  const boundaries = summary.passBoundaries;
+  assert.equal(boundaries?.exact, true);
+  assert.equal(boundaries?.warmupExcluded, true);
+  assert.equal(boundaries?.labelIsolated, false);
+  assert.equal(boundaries?.passClosuresPerAdvance, 80);
+  assert.equal(boundaries?.requestsPerAdvance, 120);
+  // The actionable number: 40 fence calls per advance found no open pass, so
+  // they are already batched behind an earlier boundary and cost no launch.
+  assert.equal(boundaries?.idempotentRequestsPerAdvance, 40);
+  assert.equal(boundaries?.brokersPerAdvance, 2);
+  assert.equal(boundaries?.bytesPerAdvance, 1_000_000);
+  assert.equal(boundaries?.absorbedLabelPairs, 12);
+  assert.deepEqual(Object.keys(boundaries?.byReason ?? {}), [
+    "stage indirect args", "publication visibility", "clear buffer", "finish command encoder",
+  ], "causes rank by real closures, then command traffic, then bytes, then name");
+  assert.deepEqual(boundaries?.byReason["publication visibility"], {
+    requests: 240, passClosures: 80, copyCommands: 0, clearCommands: 0, commandBytes: 0,
+    idempotentRequests: 160, passClosuresPerAdvance: 20, requestsPerAdvance: 60,
+    idempotentRequestsPerAdvance: 40, bytesPerAdvance: 0, shareOfClosures: 0.25,
+  });
+  assert.deepEqual(boundaries?.warnings, []);
+});
+
+test("a label-isolated or unreset boundary census cannot report itself as exact", () => {
+  const profile = buildPowerDamPassBoundaryProfile({
+    schemaVersion: 1,
+    brokers: 2, labelIsolatedBrokers: 2, labelIsolated: true,
+    labelIsolationPrefixes: ["SPGrid V-cycle -"],
+    // Never reset, so construction and the cold bootstrap encoders are still in
+    // here and every per-advance number below is inflated by one-time setup.
+    resets: 0,
+    requests: 24, passClosures: 20, copyCommands: 0, clearCommands: 0, commandBytes: 0,
+    absorbedLabelPairs: 0, compositeEncoderLabels: 0,
+    byReason: {
+      // The synthetic bucket label isolation manufactures. Reporting a table
+      // that contains it without saying so would present a diagnostic command
+      // stream as the production one.
+      "pass label isolation": { requests: 16, passClosures: 16, copyCommands: 0,
+        clearCommands: 0, commandBytes: 0 },
+      "publication visibility": { requests: 8, passClosures: 4, copyCommands: 0,
+        clearCommands: 0, commandBytes: 0 },
+    },
+  }, 2);
+  assert.equal(profile?.exact, false);
+  assert.equal(profile?.labelIsolated, true);
+  assert.equal(profile?.labelIsolatedBrokers, 2);
+  assert.deepEqual(profile?.labelIsolationPrefixes, ["SPGrid V-cycle -"]);
+  assert.equal(profile?.warmupExcluded, false);
+  assert.equal(profile?.byReason["pass label isolation"]?.passClosuresPerAdvance, 8);
+  assert.ok(profile?.warnings.some((warning) =>
+    /FLUID_GPU_ISOLATE_PASS_LABELS/.test(warning)), profile?.warnings.join("\n"));
+  assert.ok(profile?.warnings.some((warning) =>
+    /cold bootstrap/.test(warning)), profile?.warnings.join("\n"));
+  assert.equal(buildPowerDamPassBoundaryProfile({
+    schemaVersion: 1, brokers: 0, labelIsolatedBrokers: 0, labelIsolated: false, resets: 1,
+    requests: 0, passClosures: 0, copyCommands: 0, clearCommands: 0, commandBytes: 0,
+    absorbedLabelPairs: 0, compositeEncoderLabels: 0, byReason: {},
+  }, 2), undefined, "an empty census is absent, not a table of zeroes");
 });
 
 test("pressure kernel timestamps roll up into optimization regions", () => {
@@ -191,6 +278,20 @@ test("quiescent paired-prefix window subtracts cumulative work and retains termi
         "Octree MGPCG solve": { calls: 200_000, bytes: 0 },
       },
     },
+    gpuPassBoundaryAudit: {
+      schemaVersion: 1 as const,
+      brokers: 1_000, labelIsolatedBrokers: 0, labelIsolated: false, resets: 1,
+      requests: 37_500, passClosures: 25_000, copyCommands: 5_000, clearCommands: 2_500,
+      commandBytes: 500_000_000, absorbedLabelPairs: 12, compositeEncoderLabels: 3,
+      byReason: {
+        "stage indirect args": { requests: 5_000, passClosures: 5_000, copyCommands: 5_000,
+          clearCommands: 0, commandBytes: 250_000_000 },
+        "publication visibility": { requests: 30_000, passClosures: 17_500, copyCommands: 0,
+          clearCommands: 0, commandBytes: 0 },
+        "clear buffer": { requests: 2_500, passClosures: 2_500, copyCommands: 0,
+          clearCommands: 2_500, commandBytes: 250_000_000 },
+      },
+    },
   };
   const complete = {
     ...prefix,
@@ -228,6 +329,20 @@ test("quiescent paired-prefix window subtracts cumulative work and retains termi
         "Octree MGPCG solve": { calls: 221_600, bytes: 0 },
       },
     },
+    gpuPassBoundaryAudit: {
+      schemaVersion: 1 as const,
+      brokers: 1_120, labelIsolatedBrokers: 0, labelIsolated: false, resets: 1,
+      requests: 44_700, passClosures: 29_800, copyCommands: 6_200, clearCommands: 3_100,
+      commandBytes: 560_000_000, absorbedLabelPairs: 12, compositeEncoderLabels: 3,
+      byReason: {
+        "stage indirect args": { requests: 6_200, passClosures: 6_200, copyCommands: 6_200,
+          clearCommands: 0, commandBytes: 280_000_000 },
+        "publication visibility": { requests: 35_400, passClosures: 20_500, copyCommands: 0,
+          clearCommands: 0, commandBytes: 0 },
+        "clear buffer": { requests: 3_100, passClosures: 3_100, copyCommands: 0,
+          clearCommands: 3_100, commandBytes: 280_000_000 },
+      },
+    },
   };
   const result = powerDamResultWindow(prefix, complete);
   const summary = summarizePowerDamPerformance(result);
@@ -255,6 +370,18 @@ test("quiescent paired-prefix window subtracts cumulative work and retains termi
     pressureIterationsScheduled: 20,
     pressureIterationsHardLimit: 20,
   });
+  // `powerDamResultWindow` rebuilds the record from an explicit field list, so
+  // an unlisted field is silently dropped on the whole quiescent lane.
+  assert.equal(result.gpuPassBoundaryAudit?.passClosures, 4_800);
+  assert.equal(summary.passBoundaries?.passClosuresPerAdvance, 80);
+  assert.equal(summary.passBoundaries?.requestsPerAdvance, 120);
+  assert.equal(summary.passBoundaries?.idempotentRequestsPerAdvance, 40);
+  assert.equal(summary.passBoundaries?.brokersPerAdvance, 2);
+  assert.deepEqual(Object.keys(summary.passBoundaries?.byReason ?? {}), [
+    "publication visibility", "stage indirect args", "clear buffer",
+  ], "the differenced suffix is re-ranked, not left in the cumulative order");
+  assert.equal(summary.passBoundaries?.byReason["stage indirect args"]?.bytesPerAdvance,
+    500_000);
   assert.equal(result.gpuFineTimestamps, undefined,
     "cumulative timestamp distributions cannot be differenced exactly");
   assert.deepEqual(result.compactMechanicalEnergyCheckpoints?.map(({ time_s }) => time_s), [2.04],

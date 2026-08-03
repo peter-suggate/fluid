@@ -346,6 +346,82 @@ export function octreeAirSupportIndirectFrontierGateEnabled(
   return resolved?.FLUID_OCTREE_AIR_SUPPORT_INDIRECT_FRONTIER_GATE !== "0";
 }
 
+/**
+ * Author every dispatch record directly into a `STORAGE | INDIRECT` per-phase
+ * arena instead of staging it through `PassBroker.updateIndirectBuffer`.
+ *
+ * A buffer that carries INDIRECT but not STORAGE cannot be written by a
+ * compute shader, so this producer authors each `[x,y,1]` triple into the
+ * `scratch` control block and then copies it into `this.indirect`. Every one of
+ * those copies is a `broker.fence()` -- `copyBufferToBuffer` cannot be recorded
+ * inside a compute pass -- which is why the encoder carries thirteen staging
+ * sites and the boundary census attributes ~14 closures per advance to
+ * `stage indirect args` here alone.
+ *
+ * With the bit set, `writeDispatch` publishes the SAME triple into the arena
+ * owned by the producing kernel, and the consumer dispatches from that arena at
+ * the SAME canonical record offset. The arguments are bit-identical by
+ * construction: one `writeDispatch` call writes both the scratch words (which
+ * several later stages recycle as counters and flags, so they must keep their
+ * values) and the arena, from one `vec3u` operand. Nothing recomputes anything.
+ *
+ * Per-PHASE arenas, not one arena, because a compute pass may not both write a
+ * buffer as storage and dispatch indirectly from it. Splitting by producing
+ * kernel makes every pass write exactly one arena and read only others, so the
+ * conversion needs no boundary the staged path did not already have (see
+ * `lib/webgpu-octree-fine-levelset-topology.ts:860`, the same decomposition).
+ *
+ * Default OFF: this has never run on a GPU. Note what it does and does not buy.
+ * It deletes 22 copies per advance from the command stream. It deletes ZERO
+ * pass closures, because every staging copy in this encoder sits exactly where
+ * a producing kernel hands a schedule to a consumer that dispatches from it,
+ * and that hand-off needs the boundary whether the args travel by copy or are
+ * written in place. This producer is a genuinely serial eight-stage pipeline
+ * (identity -> fine closure -> fine emission -> radix -> candidates -> support
+ * -> faces -> march), and eight boundaries is its floor under the storage-to-
+ * indirect rule. Only lifting that rule -- dispatching indirectly, inside one
+ * pass, from a buffer an earlier dispatch in that same pass wrote -- can lower
+ * it, and that is a separate, unproven bet.
+ */
+export const OCTREE_AIR_SUPPORT_DIRECT_INDIRECT_ARGS_ENVIRONMENT =
+  "FLUID_OCTREE_AIR_SUPPORT_DIRECT_INDIRECT_ARGS";
+export function octreeAirSupportDirectIndirectArgsEnabled(
+  environment?: Readonly<Record<string, string | undefined>>,
+): boolean {
+  const resolved = environment
+    ?? (typeof process !== "undefined" ? process.env : undefined);
+  return resolved?.[OCTREE_AIR_SUPPORT_DIRECT_INDIRECT_ARGS_ENVIRONMENT] === "1";
+}
+
+/**
+ * Which per-phase arena each schedule-producing entry point authors into.
+ *
+ * The key set is exactly the set of entry points that call `writeDispatch`, and
+ * therefore exactly the set that declares binding 31. `frontierB` has no
+ * producer of its own: `advanceAirSupportChangedFrontier` alternates between
+ * `frontierA` and `frontierB` across waves, because a wave reads the schedule
+ * the preceding wave's advance published while publishing the next one.
+ */
+export const OCTREE_AIR_SUPPORT_GPU_DISPATCH_PHASES = Object.freeze({
+  beginAirSupportPublication: "identity",
+  prepareFineBandAirSupportDemand: "fineDemand",
+  prepareFineBandAirSupportClosureSchedule: "fineClosure",
+  prepareFineBandAirSupportEmissionSchedule: "fineEmission",
+  prepareCompactAuthorityRadixSchedule: "radix",
+  prefixCompactFineCandidateBlocks: "candidates",
+  prefixAirSupportBlocks: "support",
+  prepareAirSupportFaces: "face",
+  finalizeRetainedAirSupportMarchSchedule: "march",
+  advanceAirSupportChangedFrontier: "frontierA",
+} as const);
+export type OctreeAirSupportDispatchPhase =
+  (typeof OCTREE_AIR_SUPPORT_GPU_DISPATCH_PHASES)[
+    keyof typeof OCTREE_AIR_SUPPORT_GPU_DISPATCH_PHASES] | "frontierB";
+export const OCTREE_AIR_SUPPORT_GPU_DISPATCH_PHASE_NAMES: readonly OctreeAirSupportDispatchPhase[] =
+  Object.freeze([...new Set(Object.values(OCTREE_AIR_SUPPORT_GPU_DISPATCH_PHASES)), "frontierB"]);
+/** The storage binding every schedule producer writes its arena through. */
+export const OCTREE_AIR_SUPPORT_GPU_DISPATCH_BINDING = 31;
+
 /** The march and reconstruction exchange only face/storage payloads while
  * reading the same immutable indirect record. Zero restores the old split. */
 export function octreeAirSupportReconstructionCompactPassEnabled(
@@ -370,24 +446,24 @@ export function encodeOctreeAirSupportReconstructionHandoff(
 /** Exact per-entry bind reachability. Binding zero/eleven are uniforms; all
  * other entries are storage resources and no pipeline reaches more than ten. */
 export const OCTREE_AIR_SUPPORT_GPU_ENTRY_BINDINGS = Object.freeze({
-  beginAirSupportPublication: Object.freeze([0,1,3,7,8,9,10,29]),
+  beginAirSupportPublication: Object.freeze([0,1,3,7,8,9,10,29,31]),
   clearAirSupportDirectory: Object.freeze([0,7]),
   clearAdaptiveAirSupportOwnerDirectory: Object.freeze([0,7,9]),
   clearAirSupportCandidates: Object.freeze([0,2,7,8]),
   clearAirSupportTags: Object.freeze([0,7,9]),
   emitAirSupportCandidates: Object.freeze([0,2,3,4,5,6,7,9,11,18]),
   markAndScanAirSupportCandidates: Object.freeze([0,7]),
-  prefixAirSupportBlocks: Object.freeze([0,7]),
+  prefixAirSupportBlocks: Object.freeze([0,7,31]),
   scatterAirSupportRecords: Object.freeze([0,7,8]),
   resolveAirSupportTags: Object.freeze([0,7,8,9]),
   resolveAirSupportTopology: Object.freeze([0,3,7,8,11,12,13,14]),
-  prepareFineBandAirSupportDemand: Object.freeze([0,7,26]),
-  prepareFineBandAirSupportClosureSchedule: Object.freeze([7]),
-  prepareFineBandAirSupportEmissionSchedule: Object.freeze([7]),
+  prepareFineBandAirSupportDemand: Object.freeze([0,7,26,31]),
+  prepareFineBandAirSupportClosureSchedule: Object.freeze([7,31]),
+  prepareFineBandAirSupportEmissionSchedule: Object.freeze([7,31]),
   markFineBandAirSupportDemand: Object.freeze([0,7,25,26,27,28]),
   closeFineBandAirSupportInterpolationDemand: Object.freeze([0,2,3,4,5,6,7,11,12,13,14]),
   emitFineBandAirSupportCandidates: Object.freeze([0,2,3,7,11]),
-  prepareCompactAuthorityRadixSchedule: Object.freeze([7]),
+  prepareCompactAuthorityRadixSchedule: Object.freeze([7,31]),
   countCompactAuthorityRadix0: Object.freeze([0,7]),
   countCompactAuthorityRadix1: Object.freeze([0,7]),
   countCompactAuthorityRadix2: Object.freeze([0,7]),
@@ -398,21 +474,21 @@ export const OCTREE_AIR_SUPPORT_GPU_ENTRY_BINDINGS = Object.freeze({
   scatterCompactAuthorityRadix2: Object.freeze([0,7]),
   scatterCompactAuthorityRadix3: Object.freeze([0,7]),
   markCompactFineCandidates: Object.freeze([0,7]),
-  prefixCompactFineCandidateBlocks: Object.freeze([0,7]),
+  prefixCompactFineCandidateBlocks: Object.freeze([0,7,31]),
   scatterCompactFineCandidates: Object.freeze([0,7]),
   publishAirSupportOwnerDirectory: Object.freeze([0,2,7,8,9]),
-  prepareAirSupportFaces: Object.freeze([0,7,29]),
+  prepareAirSupportFaces: Object.freeze([0,7,29,31]),
   resolveAirSupportFaceAdjacency: Object.freeze([0,2,3,7,8,11,15,16,23]),
   validateAirSupportFrontierReciprocity: Object.freeze([0,7,23]),
   seedAirSupportFaces: Object.freeze([0,2,7,8,15,16,18,19,21,23]),
   seedRetainedAirSupportFaces: Object.freeze([0,2,7,8,15,16,18,20,21,23]),
   compactAirSupportSeedFrontier: Object.freeze([0,7,19,29]),
   refreshRetainedAirSupportFaceValues: Object.freeze([7,19,20]),
-  finalizeRetainedAirSupportMarchSchedule: Object.freeze([0,7,29]),
+  finalizeRetainedAirSupportMarchSchedule: Object.freeze([0,7,29,31]),
   expandAirSupportChangedFrontier: Object.freeze([0,7,19,23,29]),
   relaxAirSupportChangedFrontier: Object.freeze([0,2,7,8,19,20,23,29]),
   commitAirSupportChangedFrontier: Object.freeze([0,7,19,20,29]),
-  advanceAirSupportChangedFrontier: Object.freeze([0,7,29]),
+  advanceAirSupportChangedFrontier: Object.freeze([0,7,29,31]),
   marchAirSupportFacesChangedFrontier: Object.freeze([0,2,7,8,19,20,23,29]),
   extendAirSupportFacesAtoB: Object.freeze([0,2,7,8,19,20,23]),
   extendAirSupportFacesBtoA: Object.freeze([0,2,7,8,19,20,23]),
@@ -749,6 +825,15 @@ export class WebGPUOctreeAirVelocitySupportProducer {
    * `OctreeAirVelocitySupportGPUPlan.faceArenaBytes`. */
   readonly faceAdjacency: GPUBuffer;
   readonly faceFrontier: GPUBuffer;
+  /**
+   * One `STORAGE | INDIRECT | COPY_SRC` arena per schedule-producing kernel,
+   * each laid out exactly like `indirect` so a record keeps its canonical
+   * offset (0/12/.../96) whichever arena currently owns it. Allocated and
+   * written unconditionally: the A/B toggle must not change construction,
+   * resource layout, or the shader, only which buffer a dispatch reads.
+   * COPY_SRC so a diagnostic readback never forces the args back off STORAGE.
+   */
+  readonly dispatchArenas: Readonly<Record<OctreeAirSupportDispatchPhase, GPUBuffer>>;
   readonly allocatedBytes: number;
   private readonly params: readonly [GPUBuffer, GPUBuffer];
   private readonly ownerParams: GPUBuffer;
@@ -761,6 +846,9 @@ export class WebGPUOctreeAirVelocitySupportProducer {
     readonly [GPUBindGroup, GPUBindGroup]];
   private fineDemandScheduleGroups?: readonly [readonly [GPUBindGroup, GPUBindGroup],
     readonly [GPUBindGroup, GPUBindGroup]];
+  /** `advanceAirSupportChangedFrontier` bound to `frontierB` instead of
+   * `frontierA`, one per parameter slot. Odd waves publish through it. */
+  private frontierAlternateGroups?: readonly [GPUBindGroup, GPUBindGroup];
   private readonly ownsArena: boolean;
   private pipelinesInitialized = false;
   private pipelineInitialization?: Promise<void>;
@@ -834,6 +922,12 @@ export class WebGPUOctreeAirVelocitySupportProducer {
       size: this.plan.faceFrontierBytes, usage: storage });
     this.indirect = device.createBuffer({ label: "Structured air-support indirect schedules",
       size: this.plan.indirectBytes, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.INDIRECT });
+    this.dispatchArenas = Object.freeze(Object.fromEntries(
+      OCTREE_AIR_SUPPORT_GPU_DISPATCH_PHASE_NAMES.map((phase) => [phase, device.createBuffer({
+        label: `Structured air-support direct ${phase} dispatch schedules`,
+        size: this.plan.indirectBytes,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_SRC,
+      })]))) as Readonly<Record<OctreeAirSupportDispatchPhase, GPUBuffer>>;
     this.params = Object.freeze([0, 1].map((slot) => device.createBuffer({
       label: `Structured air-support publication parameters ${slot}`, size: 256,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
@@ -849,6 +943,7 @@ export class WebGPUOctreeAirVelocitySupportProducer {
     ]));
     this.pipelineCacheKey = this.pipelineEntryPoints().join("\0");
     this.allocatedBytes = this.plan.allocatedBytes + 256
+      + OCTREE_AIR_SUPPORT_GPU_DISPATCH_PHASE_NAMES.length * this.plan.indirectBytes
       - (inputs.sharedArena ? this.plan.support.totalBytes : 0);
   }
 
@@ -880,12 +975,22 @@ export class WebGPUOctreeAirVelocitySupportProducer {
         [26, this.inputs.fineSources[0].worklist], [27, this.inputs.fineSources[0].flags],
         [28, this.inputs.fineSources[0].phi]] as const : []),
     ]);
+    // Binding 31 is resolved from the producing entry point, never from the
+    // shared `buffers` table: it is the one binding whose buffer differs per
+    // pipeline, which is exactly what keeps a pass from writing an arena it
+    // also dispatches from.
+    const dispatchArena = (entry: string): GPUBuffer => this.dispatchArenas[
+      OCTREE_AIR_SUPPORT_GPU_DISPATCH_PHASES[
+        entry as keyof typeof OCTREE_AIR_SUPPORT_GPU_DISPATCH_PHASES]];
     const resource = (params: GPUBuffer, entry: OctreeAirSupportGPUEntryPoint,
       binding: number): GPUBufferBinding => {
       if (binding === 0) return { buffer: params };
       if (entry === "reconstructAirSupportVectors" && binding === 24) {
         return { buffer: this.arena, offset: this.plan.support.supportVectorOffsetBytes,
           size: this.plan.support.supportVectorBytes };
+      }
+      if (binding === OCTREE_AIR_SUPPORT_GPU_DISPATCH_BINDING) {
+        return { buffer: dispatchArena(entry) };
       }
       return { buffer: buffers.get(binding)! };
     };
@@ -915,6 +1020,7 @@ export class WebGPUOctreeAirVelocitySupportProducer {
           binding, resource: { buffer: binding === 0 ? params
           : binding === 25 ? fine.metadata
           : binding === 26 ? fine.worklist : binding === 27 ? fine.flags : binding === 28 ? fine.phi
+          : binding === OCTREE_AIR_SUPPORT_GPU_DISPATCH_BINDING ? dispatchArena(entry)
             : buffers.get(binding)! } })),
       });
       fineDemandGroups = Object.freeze(this.params.map((params) => Object.freeze(
@@ -924,12 +1030,26 @@ export class WebGPUOctreeAirVelocitySupportProducer {
         this.inputs.fineSources!.map((fine) => makeFineGroup("prepareFineBandAirSupportDemand", params, fine))))) as unknown as
           NonNullable<typeof this.fineDemandScheduleGroups>;
     }
+    // A frontier wave dispatches from the record its predecessor's advance
+    // published while publishing the next one, so the advance singleton needs
+    // two arenas to alternate between; one would be written and read as
+    // INDIRECT inside a single wave's pass.
+    const frontierAlternateGroups = Object.freeze(this.params.map((params) =>
+      this.device.createBindGroup({
+        layout: pipelines.advanceAirSupportChangedFrontier!.getBindGroupLayout(0),
+        entries: OCTREE_AIR_SUPPORT_GPU_ENTRY_BINDINGS.advanceAirSupportChangedFrontier
+          .map((binding) => ({ binding,
+            resource: binding === OCTREE_AIR_SUPPORT_GPU_DISPATCH_BINDING
+              ? { buffer: this.dispatchArenas.frontierB }
+              : resource(params, "advanceAirSupportChangedFrontier", binding) })),
+      }))) as unknown as readonly [GPUBindGroup, GPUBindGroup];
     // Publish the pipeline-dependent state only after every pipeline and bind
     // group has been created, so encode can never observe a partial set.
     this.pipelines = Object.freeze(pipelines);
     this.groups = groups;
     this.fineDemandGroups = fineDemandGroups;
     this.fineDemandScheduleGroups = fineDemandScheduleGroups;
+    this.frontierAlternateGroups = frontierAlternateGroups;
     this.pipelinesInitialized = true;
   }
 
@@ -1057,6 +1177,36 @@ export class WebGPUOctreeAirVelocitySupportProducer {
       this.parameterData(expectedEpoch, fineSlot, gravityDt ?? [0, 0, 0], changedFrontier,
         compactFineCells, indirectFrontierGate));
     this.publicationCount += 1;
+    const directArgs = octreeAirSupportDirectIndirectArgsEnabled();
+    // Which buffer currently holds each canonical dispatch record. Staged
+    // authorship keeps one INDIRECT-only arena and copies into it; direct
+    // authorship spreads the identical records across per-phase STORAGE arenas,
+    // and a record changes owner at exactly the point a staging copy used to
+    // overwrite it. Offsets are unchanged either way.
+    const owners: GPUBuffer[] = new Array<GPUBuffer>(
+      OCTREE_AIR_SUPPORT_GPU_INDIRECT_RECORDS).fill(this.indirect);
+    const indirectFor = (offset: number) => owners[offset / 12]!;
+    /**
+     * Publish one producing kernel's schedule family.
+     *
+     * `records` are the canonical record indices the kernel just authored, and
+     * `source` the scratch word its first record starts at. Both arms emit the
+     * same single pass boundary: the staged arm because `copyBufferToBuffer`
+     * cannot be recorded inside a compute pass, the direct arm because a
+     * storage write must leave the pass before a dispatch reads it as INDIRECT.
+     * Only the copies disappear. `records` must be contiguous in both the
+     * scratch block and the arena, which every family here is.
+     */
+    const publish = (source: number, records: readonly number[],
+      phase: OctreeAirSupportDispatchPhase, reason: string, fenced = true) => {
+      if (directArgs) {
+        if (fenced) broker.fence(reason);
+        for (const record of records) owners[record] = this.dispatchArenas[phase];
+        return;
+      }
+      broker.updateIndirectBuffer(this.scratch, source * 4, this.indirect,
+        records[0]! * 12, records.length * 12);
+    };
     const siteLabel = (label: string) => `${label} · ${site}`;
     let pass = broker.compute({ label: siteLabel("Initialize structured air-support publication") });
     pass.setPipeline(this.pipelines.beginAirSupportPublication!);
@@ -1070,17 +1220,26 @@ export class WebGPUOctreeAirVelocitySupportProducer {
       pass.setBindGroup(0, this.fineDemandScheduleGroups[parameterSlot][fineSlot]);
       pass.dispatchWorkgroups(1);
     }
-    // Storage-authored schedules are copied into an INDIRECT-only buffer. The
-    // second copy below is the only other required pass boundary.
-    broker.updateIndirectBuffer(this.scratch, 10 * 4, this.indirect, 0,
-      (fineSlot === undefined ? 4 : 5) * 12);
-    broker.updateIndirectBuffer(this.scratch, 43 * 4, this.indirect, 60, 12);
-    broker.updateIndirectBuffer(this.scratch, 66 * 4, this.indirect, 96, 12);
+    // The initialization singleton owns records 0-3, 5 and 8; the fine-demand
+    // singleton owns record 4. Both ran in the pass this boundary closes, so
+    // one boundary publishes the whole identity family however it travels --
+    // three staged copies (only the first of which closes a pass, the other two
+    // being idempotent) become one fence and four arena hand-overs.
+    if (directArgs) {
+      broker.fence("air-support identity schedules published");
+      for (const record of [0, 1, 2, 3, 5, 8]) owners[record] = this.dispatchArenas.identity;
+      if (fineSlot !== undefined) owners[4] = this.dispatchArenas.fineDemand;
+    } else {
+      broker.updateIndirectBuffer(this.scratch, 10 * 4, this.indirect, 0,
+        (fineSlot === undefined ? 4 : 5) * 12);
+      broker.updateIndirectBuffer(this.scratch, 43 * 4, this.indirect, 60, 12);
+      broker.updateIndirectBuffer(this.scratch, 66 * 4, this.indirect, 96, 12);
+    }
     pass = broker.compute({ label: siteLabel("Publish structured air-support identities") });
     const run = (name: keyof typeof this.pipelines, indirectOffset?: number) => {
       pass.setPipeline(this.pipelines[name]!); pass.setBindGroup(0, groups[name]!);
       if (indirectOffset === undefined) pass.dispatchWorkgroups(1);
-      else pass.dispatchWorkgroupsIndirect(this.indirect, indirectOffset);
+      else pass.dispatchWorkgroupsIndirect(indirectFor(indirectOffset), indirectOffset);
     };
     run("clearAirSupportDirectory", 0);
     run("clearAdaptiveAirSupportOwnerDirectory", 96);
@@ -1090,29 +1249,29 @@ export class WebGPUOctreeAirVelocitySupportProducer {
     if (fineSlot !== undefined && this.fineDemandGroups) {
       pass.setPipeline(this.pipelines.markFineBandAirSupportDemand!);
       pass.setBindGroup(0, this.fineDemandGroups[parameterSlot][fineSlot]);
-      pass.dispatchWorkgroupsIndirect(this.indirect, 48);
+      pass.dispatchWorkgroupsIndirect(indirectFor(48), 48);
       if (compactFineCells) {
         pass.setPipeline(this.pipelines.prepareFineBandAirSupportClosureSchedule!);
         pass.setBindGroup(0, groups.prepareFineBandAirSupportClosureSchedule!);
         pass.dispatchWorkgroups(1);
-        broker.updateIndirectBuffer(this.scratch, 60 * 4, this.indirect, 72, 12);
+        publish(60, [6], "fineClosure", "air-support fine closure schedule published");
         pass = broker.compute({ label: siteLabel("Close sparse fine air-support demand") });
         pass.setPipeline(this.pipelines.closeFineBandAirSupportInterpolationDemand!);
         pass.setBindGroup(0, groups.closeFineBandAirSupportInterpolationDemand!);
-        pass.dispatchWorkgroupsIndirect(this.indirect, 72);
+        pass.dispatchWorkgroupsIndirect(indirectFor(72), 72);
         pass.setPipeline(this.pipelines.prepareFineBandAirSupportEmissionSchedule!);
         pass.setBindGroup(0, groups.prepareFineBandAirSupportEmissionSchedule!);
         pass.dispatchWorkgroups(1);
-        broker.updateIndirectBuffer(this.scratch, 63 * 4, this.indirect, 84, 12);
+        publish(63, [7], "fineEmission", "air-support fine emission schedule published");
         pass = broker.compute({ label: siteLabel("Emit sparse fine air-support demand") });
         pass.setPipeline(this.pipelines.emitFineBandAirSupportCandidates!);
         pass.setBindGroup(0, groups.emitFineBandAirSupportCandidates!);
-        pass.dispatchWorkgroupsIndirect(this.indirect, 84);
+        pass.dispatchWorkgroupsIndirect(indirectFor(84), 84);
       }
     }
     if (fineSlot !== undefined) {
       run("prepareCompactAuthorityRadixSchedule");
-      broker.updateIndirectBuffer(this.scratch, 60 * 4, this.indirect, 72, 12);
+      publish(60, [6], "radix", "air-support compact radix schedule published");
       pass = broker.compute({ label: siteLabel("Canonicalize footprint air-support identities") });
       const radixCounts = ["countCompactAuthorityRadix0", "countCompactAuthorityRadix1",
         "countCompactAuthorityRadix2", "countCompactAuthorityRadix3"] as const;
@@ -1128,16 +1287,18 @@ export class WebGPUOctreeAirVelocitySupportProducer {
       run("scatterCompactFineCandidates", 72);
       // Fine compaction replaces the initialization schedule with the exact
       // authored-row + canonical-fine candidate extent.
-      broker.updateIndirectBuffer(this.scratch, 19 * 4, this.indirect, 36, 12);
+      publish(19, [3], "candidates", "air-support canonical candidate schedule published");
       pass = broker.compute({ label: siteLabel("Publish canonical air-support candidates") });
     }
     run("markAndScanAirSupportCandidates", 36);
     run("prefixAirSupportBlocks");
     // The prefix owns the exact fresh support count. Move its two live-count
     // schedules into INDIRECT only after publication; neither topology nor
-    // owner hashing may launch over a provisioned capacity.
-    broker.updateIndirectBuffer(this.scratch, 43 * 4, this.indirect, 60, 12);
-    broker.updateIndirectBuffer(this.scratch, 66 * 4, this.indirect, 96, 12);
+    // owner hashing may launch over a provisioned capacity. Records 5 and 8 are
+    // not adjacent, so the staged arm needs two copies where the arena needs
+    // one boundary and two hand-overs.
+    publish(43, [5], "support", "air-support live support schedules published");
+    publish(66, [8], "support", "", false);
     pass = broker.compute({ label: siteLabel("Resolve and hash live adaptive air owners") });
     run("scatterAirSupportRecords", 36);
     // Topology resolution is exact support-row work. The GPU reuse decision
@@ -1145,34 +1306,38 @@ export class WebGPUOctreeAirVelocitySupportProducer {
     // schedules; the later face-schedule copy safely overwrites it.
     pass.setPipeline(this.pipelines.resolveAirSupportTopology!);
     pass.setBindGroup(0, groups.resolveAirSupportTopology!);
-    pass.dispatchWorkgroupsIndirect(this.indirect, 60);
+    pass.dispatchWorkgroupsIndirect(indirectFor(60), 60);
     run("resolveAirSupportTags", 24);
     pass.setPipeline(this.pipelines.publishAirSupportOwnerDirectory!);
     pass.setBindGroup(0, groups.publishAirSupportOwnerDirectory!);
-    pass.dispatchWorkgroupsIndirect(this.indirect, 96);
+    pass.dispatchWorkgroupsIndirect(indirectFor(96), 96);
     run("prepareAirSupportFaces");
-    broker.updateIndirectBuffer(this.scratch, 32 * 4, this.indirect, 4 * 12, 2 * 12);
+    // Records 4 and 5 change owner here: the face family replaces the fine
+    // worklist and the live support count for every consumer below.
+    publish(32, [4, 5], "face", "air-support ordinary face schedules published");
     // These indirect-publication words have completed their schedule lifetime.
-    // Reuse them for terminal march depth and convergence state.
+    // Reuse them for terminal march depth and convergence state. The clear is
+    // scratch bookkeeping in both arms, and is idempotent as a fence because
+    // the publication above has already closed the pass.
     broker.clearBuffer(this.scratch, 32 * 4, 6 * 4);
     pass = broker.compute({ label: siteLabel("Extrapolate structured ordinary faces and reconstruct support vectors") });
     pass.setPipeline(this.pipelines.resolveAirSupportFaceAdjacency!);
     pass.setBindGroup(0, groups.resolveAirSupportFaceAdjacency!);
-    pass.dispatchWorkgroupsIndirect(this.indirect, 60);
+    pass.dispatchWorkgroupsIndirect(indirectFor(60), 60);
     if (changedFrontier) {
       pass.setPipeline(this.pipelines.validateAirSupportFrontierReciprocity!);
       pass.setBindGroup(0, groups.validateAirSupportFrontierReciprocity!);
-      pass.dispatchWorkgroupsIndirect(this.indirect, 60);
+      pass.dispatchWorkgroupsIndirect(indirectFor(60), 60);
     }
     pass.setPipeline(this.pipelines.seedAirSupportFaces!); pass.setBindGroup(0, groups.seedAirSupportFaces!);
-    pass.dispatchWorkgroupsIndirect(this.indirect, 48);
+    pass.dispatchWorkgroupsIndirect(indirectFor(48), 48);
     if (changedFrontier) {
       pass.setPipeline(this.pipelines.seedRetainedAirSupportFaces!);
       pass.setBindGroup(0, groups.seedRetainedAirSupportFaces!);
-      pass.dispatchWorkgroupsIndirect(this.indirect, 48);
+      pass.dispatchWorkgroupsIndirect(indirectFor(48), 48);
       pass.setPipeline(this.pipelines.compactAirSupportSeedFrontier!);
       pass.setBindGroup(0, groups.compactAirSupportSeedFrontier!);
-      pass.dispatchWorkgroupsIndirect(this.indirect, 48);
+      pass.dispatchWorkgroupsIndirect(indirectFor(48), 48);
       // On an admitted same-topology publication, the winning seed identity
       // and squared distance of every settled face are immutable. Refresh the
       // seed values and update each retained carrier directly; no graph wave
@@ -1180,7 +1345,7 @@ export class WebGPUOctreeAirVelocitySupportProducer {
       // and author the ordinary sparse march schedule below.
       pass.setPipeline(this.pipelines.refreshRetainedAirSupportFaceValues!);
       pass.setBindGroup(0, groups.refreshRetainedAirSupportFaceValues!);
-      pass.dispatchWorkgroupsIndirect(this.indirect, 60);
+      pass.dispatchWorkgroupsIndirect(indirectFor(60), 60);
       pass.setPipeline(this.pipelines.finalizeRetainedAirSupportMarchSchedule!);
       pass.setBindGroup(0, groups.finalizeRetainedAirSupportMarchSchedule!);
       pass.dispatchWorkgroups(1);
@@ -1189,18 +1354,18 @@ export class WebGPUOctreeAirVelocitySupportProducer {
         const name = (wave & 1) === 0 ? "extendAirSupportFacesAtoB" : "extendAirSupportFacesBtoA";
         pass.setPipeline(this.pipelines[name]!);
         pass.setBindGroup(0, groups[name]!);
-        pass.dispatchWorkgroupsIndirect(this.indirect, 48);
+        pass.dispatchWorkgroupsIndirect(indirectFor(48), 48);
       }
     }
     broker.fence("Section 5 ordinary-face seeds published");
     if (changedFrontier) {
       // The retained refresh publishes a zero schedule; a fresh publication
-      // republishes the original face schedule. The INDIRECT copy is the
-      // required visibility boundary between that GPU decision and the march.
-      broker.updateIndirectBuffer(this.scratch, 32 * 4, this.indirect, 48, 12);
-      if (indirectFrontierGate) {
-        broker.updateIndirectBuffer(this.scratch, 10 * 4, this.indirect, 0, 3 * 12);
-      }
+      // republishes the original face schedule. That GPU decision needs a
+      // visibility boundary before the march reads it, and the explicit fence
+      // above already is one -- these publications ride it in both arms, which
+      // is why the staged copies here were already idempotent.
+      publish(32, [4], "march", "", false);
+      if (indirectFrontierGate) publish(10, [0, 1, 2], "march", "", false);
       broker.clearBuffer(this.scratch, 32 * 4, 6 * 4);
     }
     pass = broker.compute({ label: siteLabel(changedFrontier
@@ -1226,23 +1391,32 @@ export class WebGPUOctreeAirVelocitySupportProducer {
       // exact unbounded authority.
       const frontierWaves = octreeAirSupportParallelFrontierWaves();
       for (let wave = 0; wave < frontierWaves; wave += 1) {
+        const waveOffset = indirectFrontierGate ? 0 : 48;
         pass.setPipeline(this.pipelines.expandAirSupportChangedFrontier!);
         pass.setBindGroup(0, groups.expandAirSupportChangedFrontier!);
-        pass.dispatchWorkgroupsIndirect(this.indirect, indirectFrontierGate ? 0 : 48);
+        pass.dispatchWorkgroupsIndirect(indirectFor(waveOffset), waveOffset);
         pass.setPipeline(this.pipelines.relaxAirSupportChangedFrontier!);
         pass.setBindGroup(0, groups.relaxAirSupportChangedFrontier!);
-        pass.dispatchWorkgroupsIndirect(this.indirect, indirectFrontierGate ? 0 : 48);
+        pass.dispatchWorkgroupsIndirect(indirectFor(waveOffset), waveOffset);
         pass.setPipeline(this.pipelines.commitAirSupportChangedFrontier!);
         pass.setBindGroup(0, groups.commitAirSupportChangedFrontier!);
-        pass.dispatchWorkgroupsIndirect(this.indirect, indirectFrontierGate ? 0 : 48);
+        pass.dispatchWorkgroupsIndirect(indirectFor(waveOffset), waveOffset);
         pass.setPipeline(this.pipelines.advanceAirSupportChangedFrontier!);
-        pass.setBindGroup(0, groups.advanceAirSupportChangedFrontier!);
+        // A wave publishes into the arena the NEXT wave dispatches from, never
+        // the one it is reading, so the singleton alternates between two
+        // frontier arenas. Nothing alternates on the staged path, where the
+        // schedules travel by copy.
+        const alternate = directArgs && (wave & 1) === 1;
+        pass.setBindGroup(0, alternate
+          ? this.frontierAlternateGroups![parameterSlot]
+          : groups.advanceAirSupportChangedFrontier!);
         if (indirectFrontierGate) {
-          pass.dispatchWorkgroupsIndirect(this.indirect, 12);
+          pass.dispatchWorkgroupsIndirect(indirectFor(12), 12);
           // The singleton's storage-authored schedules need a usage-scope
-          // boundary before becoming INDIRECT. This copy is deliberately host
-          // encoded; it replaces an unsafe cross-workgroup completion latch.
-          broker.updateIndirectBuffer(this.scratch, 10 * 4, this.indirect, 0, 3 * 12);
+          // boundary before becoming INDIRECT. It is deliberately host encoded;
+          // it replaces an unsafe cross-workgroup completion latch.
+          publish(10, [0, 1, 2], alternate ? "frontierB" : "frontierA",
+            "air-support frontier wave schedules published");
           pass = broker.compute({ label: siteLabel(
             "March Section 5 sparse changed frontier to a fixed point") });
         } else {
@@ -1251,7 +1425,7 @@ export class WebGPUOctreeAirVelocitySupportProducer {
       }
       pass.setPipeline(this.pipelines.marchAirSupportFacesChangedFrontier!);
       pass.setBindGroup(0, groups.marchAirSupportFacesChangedFrontier!);
-      if (indirectFrontierGate) pass.dispatchWorkgroupsIndirect(this.indirect, 24);
+      if (indirectFrontierGate) pass.dispatchWorkgroupsIndirect(indirectFor(24), 24);
       else pass.dispatchWorkgroups(3);
     } else {
       for (let wave = 0; wave < OCTREE_AIR_SUPPORT_GPU_WIDE_MARCH_WAVES; wave += 1) {
@@ -1264,7 +1438,7 @@ export class WebGPUOctreeAirVelocitySupportProducer {
           ? "extendAirSupportFacesAtoB" : "extendAirSupportFacesBtoA";
         pass.setPipeline(this.pipelines[name]!);
         pass.setBindGroup(0, groups[name]!);
-        pass.dispatchWorkgroupsIndirect(this.indirect, 48);
+        pass.dispatchWorkgroupsIndirect(indirectFor(48), 48);
       }
       pass.setPipeline(this.pipelines.advanceAirSupportMarchWave!);
       pass.setBindGroup(0, groups.advanceAirSupportMarchWave!);
@@ -1275,16 +1449,16 @@ export class WebGPUOctreeAirVelocitySupportProducer {
     }
     pass.setPipeline(this.pipelines.completeAirSupportIncidentFaces!);
     pass.setBindGroup(0, groups.completeAirSupportIncidentFaces!);
-    pass.dispatchWorkgroupsIndirect(this.indirect, 48);
+    pass.dispatchWorkgroupsIndirect(indirectFor(48), 48);
     encodeOctreeAirSupportReconstructionHandoff(broker);
     pass = broker.compute({ label: siteLabel("Reconstruct Section 5 air-support vectors") });
     pass.setPipeline(this.pipelines.reconstructAirSupportVectors!);
     pass.setBindGroup(0, groups.reconstructAirSupportVectors!);
-    pass.dispatchWorkgroupsIndirect(this.indirect, 60);
+    pass.dispatchWorkgroupsIndirect(indirectFor(60), 60);
     run("finalizeAirSupportMetadata");
     pass.setPipeline(this.pipelines.commitAirSupportDirectRows!);
     pass.setBindGroup(0, groups.commitAirSupportDirectRows!);
-    pass.dispatchWorkgroupsIndirect(this.indirect, 60);
+    pass.dispatchWorkgroupsIndirect(indirectFor(60), 60);
     run("commitAirSupportPublication");
   }
 
@@ -1304,7 +1478,8 @@ export class WebGPUOctreeAirVelocitySupportProducer {
     this.destroyed = true;
     if (this.ownsArena) this.arena.destroy();
     for (const buffer of [this.recordArena, this.scratch, this.faceA, this.faceB, this.incidentFaces, this.faceAdjacency, this.faceFrontier,
-      this.indirect, this.ownerParams, ...this.params]) buffer.destroy();
+      this.indirect, this.ownerParams, ...this.params,
+      ...Object.values(this.dispatchArenas)]) buffer.destroy();
   }
 }
 
@@ -1378,6 +1553,12 @@ struct CatalogSlotGeometry {neighborOffsetSize:vec4f,areaCentroid:vec4f,normalIn
 // face-capacity queue banks, then one generation mark per face slot.
 @group(0)@binding(29)var<storage,read_write>faceFrontier:array<atomic<u32>>;
 @group(0)@binding(30)var<storage,read_write>incidentFaces:array<vec4u>;
+// The per-phase direct dispatch arena of whichever schedule producer is
+// running. Every entry point that calls writeDispatch reaches it, and the host
+// binds each of them a DIFFERENT buffer, so no compute pass ever writes the
+// arena it also dispatches from. Nine canonical [x,y,z] records at a 12-byte
+// stride, identical in layout to the staged indirect buffer.
+@group(0)@binding(${OCTREE_AIR_SUPPORT_GPU_DISPATCH_BINDING})var<storage,read_write>publishedDispatch:array<u32>;
 ${octreeOwnerPageLookupWgsl}
 const INVALID:u32=${OCTREE_AIR_SUPPORT_INVALID}u;
 const SUPPORT_TAG:u32=${OCTREE_AIR_SUPPORT_TAG}u;
@@ -1416,7 +1597,21 @@ fn linearItem(wid:vec3u,lane:u32,workgroups:vec3u,size:u32)->u32{
 }
 fn dispatchFor(count:u32,size:u32)->vec3u{let groups=(count+size-1u)/size;let x=min(groups,65535u);
   return vec3u(x,select(1u,(groups+x-1u)/x,x>0u),1u);}
-fn writeDispatch(at:u32,value:vec3u){sw(at,value.x);sw(at+1u,value.y);sw(at+2u,value.z);}
+// One operand, two destinations. \`at\` is the scratch control word the record
+// has always been authored into -- several later stages recycle those words as
+// counters and flags, so they keep their values whichever arm the host encodes
+// -- and \`record\` is the canonical indirect record index the same triple is
+// published into. Nothing is recomputed between them, so a direct dispatch is
+// bit-identical to the copy it replaces.
+fn writeDispatch(at:u32,record:u32,value:vec3u){sw(at,value.x);sw(at+1u,value.y);sw(at+2u,value.z);
+  let base=3u*record;publishedDispatch[base]=value.x;publishedDispatch[base+1u]=value.y;
+  publishedDispatch[base+2u]=value.z;}
+// Mirror a record this dispatch did NOT recompute from the scratch words that
+// still hold it. writeDispatch and this are the only two writers of
+// publishedDispatch, and both take their bits from the same scratch record the
+// staged copy would have moved.
+fn republishDispatch(at:u32,record:u32){let base=3u*record;publishedDispatch[base]=s(at);
+  publishedDispatch[base+1u]=s(at+1u);publishedDispatch[base+2u]=s(at+2u);}
 fn coord(cell:u32)->vec3u{return vec3u(cell%p.dimensions.x,
   (cell/p.dimensions.x)%p.dimensions.y,cell/(p.dimensions.x*p.dimensions.y));}
 fn cellOf(q:vec3u)->u32{return q.x+p.dimensions.x*(q.y+p.dimensions.y*q.z);}
@@ -1592,9 +1787,9 @@ fn demand(row:u32,cell:i32,size:u32,flags:u32,tagWord:u32,item:u32){
   // continue on one coherent (temporarily reused) power topology.
   if(atomicLoad(&accepted.flags)!=0u&&existingReady){
     sw(0u,ERROR_SOURCE|ERROR_GENERATION);sw(1u,0u);sw(31u,2u);
-    writeDispatch(10u,vec3u(0u,1u,1u));writeDispatch(13u,vec3u(0u,1u,1u));
-    writeDispatch(16u,vec3u(0u,1u,1u));writeDispatch(19u,vec3u(0u,1u,1u));
-    writeDispatch(43u,vec3u(0u,1u,1u));writeDispatch(66u,vec3u(0u,1u,1u));return;
+    writeDispatch(10u,0u,vec3u(0u,1u,1u));writeDispatch(13u,1u,vec3u(0u,1u,1u));
+    writeDispatch(16u,2u,vec3u(0u,1u,1u));writeDispatch(19u,3u,vec3u(0u,1u,1u));
+    writeDispatch(43u,5u,vec3u(0u,1u,1u));writeDispatch(66u,8u,vec3u(0u,1u,1u));return;
   }
   sw(0u,0u);sw(1u,INVALID);sw(31u,0u);let rows=min(accepted.rowCount,p.rowCapacity);sw(2u,rows);sw(3u,accepted.epoch);
   sw(4u,accepted.bank);var boundary=0u;if(p.boundaryEpochOffset<arrayLength(&boundaryEpoch)){boundary=boundaryEpoch[p.boundaryEpochOffset];}sw(5u,boundary);
@@ -1651,22 +1846,22 @@ fn demand(row:u32,cell:i32,size:u32,flags:u32,tagWord:u32,item:u32){
   atomicStore(&supportArena[p.airControlOffset],ERROR_SOURCE);atomicStore(&supportArena[p.airControlOffset+1u],0u);
   atomicStore(&supportArena[p.airControlOffset+13u],0u);
   let clean=s(0u)==0u;
-  writeDispatch(10u,select(vec3u(0u,1u,1u),dispatchFor(s(70u),256u),clean));
-  writeDispatch(13u,select(vec3u(0u,1u,1u),dispatchFor(rows*(${OCTREE_AIR_SUPPORT_SELECTOR_STRIDE}u+${OCTREE_AIR_SUPPORT_REGULAR_STENCIL_SIZE}u),256u),clean&&!reuseTopology));
+  writeDispatch(10u,0u,select(vec3u(0u,1u,1u),dispatchFor(s(70u),256u),clean));
+  writeDispatch(13u,1u,select(vec3u(0u,1u,1u),dispatchFor(rows*(${OCTREE_AIR_SUPPORT_SELECTOR_STRIDE}u+${OCTREE_AIR_SUPPORT_REGULAR_STENCIL_SIZE}u),256u),clean&&!reuseTopology));
   // One workgroup owns one structured row. Its lanes cooperatively prove the
   // 27-site cube closure once before emitting either cube or tetra candidates.
-  writeDispatch(16u,select(vec3u(0u,1u,1u),dispatchFor(rows,1u),clean&&!reuseTopology));
+  writeDispatch(16u,2u,select(vec3u(0u,1u,1u),dispatchFor(rows,1u),clean&&!reuseTopology));
   let initializeItems=select(rows*p.candidateStride,rows+precedingSupportRows,reuseTopology);
-  writeDispatch(19u,select(vec3u(0u,1u,1u),dispatchFor(initializeItems,256u),clean));
+  writeDispatch(19u,3u,select(vec3u(0u,1u,1u),dispatchFor(initializeItems,256u),clean));
   // Prefix publication replaces these provisional schedules with exact live
   // counts before either consumer launches. Fresh topology no longer walks
   // provisioned support capacity.
   let topologyWork=select(p.supportCapacity,s(8u),reuseTopology);
-  writeDispatch(43u,select(vec3u(0u,1u,1u),dispatchFor(topologyWork,256u),clean&&!reuseTopology));
+  writeDispatch(43u,5u,select(vec3u(0u,1u,1u),dispatchFor(topologyWork,256u),clean&&!reuseTopology));
   // The adaptive owner hash is immutable under admitted same-topology reuse.
   // A cold zero owner list launches no clear; fresh recurring publication
   // clears only the exact slots published by the preceding owner transaction.
-  writeDispatch(66u,select(vec3u(0u,1u,1u),dispatchFor(s(72u),256u),clean&&!reuseTopology));
+  writeDispatch(66u,8u,select(vec3u(0u,1u,1u),dispatchFor(s(72u),256u),clean&&!reuseTopology));
 }
 
 fn ownerHashCapacity()->u32{
@@ -1728,14 +1923,14 @@ fn fineLocal(local:u32)->vec3u{let z=local/(p.fineR*p.fineR);let rem=local-z*p.f
     &&fineWorklist[0]==p.expectedFineGeneration&&fineWorklist[2]==p.finePageCapacity
     &&(fineWorklist[3]&3u)==3u&&fineWorklist[5]==1u&&fineWorklist[6]==1u
     &&fineWorklist[1]<=p.finePageCapacity;
-  if(!valid){fail(0u,ERROR_SOURCE|ERROR_GENERATION);writeDispatch(22u,vec3u(0u,1u,1u));return;}
-  writeDispatch(22u,select(vec3u(0u,1u,1u),dispatchFor(fineWorklist[1],1u),s(0u)==0u));
+  if(!valid){fail(0u,ERROR_SOURCE|ERROR_GENERATION);writeDispatch(22u,4u,vec3u(0u,1u,1u));return;}
+  writeDispatch(22u,4u,select(vec3u(0u,1u,1u),dispatchFor(fineWorklist[1],1u),s(0u)==0u));
 }
 @compute @workgroup_size(1)fn prepareFineBandAirSupportClosureSchedule(){
-  let clean=s(0u)==0u;writeDispatch(60u,select(vec3u(0u,1u,1u),dispatchFor(s(69u),256u),clean));
+  let clean=s(0u)==0u;writeDispatch(60u,6u,select(vec3u(0u,1u,1u),dispatchFor(s(69u),256u),clean));
 }
 @compute @workgroup_size(1)fn prepareFineBandAirSupportEmissionSchedule(){
-  let clean=s(0u)==0u;writeDispatch(63u,select(vec3u(0u,1u,1u),dispatchFor(s(69u),256u),clean));
+  let clean=s(0u)==0u;writeDispatch(63u,7u,select(vec3u(0u,1u,1u),dispatchFor(s(69u),256u),clean));
 }
 fn markFineBandDemandNeighborhood(base:vec3u){
   let radius=(p.maxDisplacementFineCells+p.fineFactor-1u)/p.fineFactor;
@@ -2042,7 +2237,7 @@ fn scatterCompactRadix(lane:u32,block:u32,shift:u32,sourceRadix:bool){let item=b
   let output=s(radixHistogramOffset()+block*256u+digit)+localRank;if(output>=live){fail(item,ERROR_CAPACITY);return;}
   if(sourceRadix){sw(p.touchedSlotOffset+output,slot);}else{sw(radixScratchOffset()+output,slot);}}
 @compute @workgroup_size(1)fn prepareCompactAuthorityRadixSchedule(){let clean=s(0u)==0u;
-  writeDispatch(60u,select(vec3u(0u,1u,1u),dispatchFor(s(69u),256u),clean));}
+  writeDispatch(60u,6u,select(vec3u(0u,1u,1u),dispatchFor(s(69u),256u),clean));}
 @compute @workgroup_size(256)fn countCompactAuthorityRadix0(@builtin(local_invocation_index)lane:u32,@builtin(workgroup_id)wid:vec3u){countCompactRadix(lane,wid.x,0u,false);}
 @compute @workgroup_size(256)fn countCompactAuthorityRadix1(@builtin(local_invocation_index)lane:u32,@builtin(workgroup_id)wid:vec3u){countCompactRadix(lane,wid.x,8u,true);}
 @compute @workgroup_size(256)fn countCompactAuthorityRadix2(@builtin(local_invocation_index)lane:u32,@builtin(workgroup_id)wid:vec3u){countCompactRadix(lane,wid.x,16u,false);}
@@ -2076,7 +2271,7 @@ var<workgroup> compactBlockScan:array<u32,256>;
   var cursor=select(0u,compactBlockScan[lane-1u],lane>0u);for(var block=first;block<last;block+=1u){sw(p.blockOffsetOffset+block,cursor);cursor+=s(p.blockCountOffset+block);}
   if(lane==255u){let fine=compactBlockScan[255u];sw(30u,fine);if(fine>p.supportCapacity){fail(fine,ERROR_CAPACITY);}
     let candidates=candidateBoundFor(s(2u));sw(6u,candidates);sw(7u,(candidates+255u)/256u);
-    writeDispatch(19u,select(vec3u(0u,1u,1u),dispatchFor(candidates,256u),s(0u)==0u&&s(47u)==0u));}}
+    writeDispatch(19u,3u,select(vec3u(0u,1u,1u),dispatchFor(candidates,256u),s(0u)==0u&&s(47u)==0u));}}
 @compute @workgroup_size(256)fn scatterCompactFineCandidates(@builtin(local_invocation_index)lane:u32,@builtin(workgroup_id)wid:vec3u){
   let block=wid.x;let item=block*256u+lane;if(item>=s(69u)||s(0u)!=0u){return;}let localRank=s(radixScratchOffset()+item);
   if(localRank==INVALID){return;}let slot=s(p.touchedSlotOffset+item);if(!compactFineEligible(slot)){fail(item,ERROR_TOPOLOGY);return;}
@@ -2098,9 +2293,16 @@ var<workgroup> blockScan:array<u32,256>;
   let first=min(blocks,lane*chunk);let last=min(blocks,first+chunk);var total=0u;for(var block=first;block<last;block+=1u){total+=s(p.blockCountOffset+block);}blockScan[lane]=total;workgroupBarrier();
   for(var offset=1u;offset<256u;offset<<=1u){var add=0u;if(lane>=offset){add=blockScan[lane-offset];}workgroupBarrier();blockScan[lane]+=add;workgroupBarrier();}
   var cursor=select(0u,blockScan[lane-1u],lane>0u);for(var block=first;block<last;block+=1u){sw(p.blockOffsetOffset+block,cursor);cursor+=s(p.blockCountOffset+block);}
+  // A reuse dispatch does not recompute records 5 and 8 -- the initialization
+  // singleton already published their zero-work forms into the scratch words.
+  // The staged path copied those words regardless of who last wrote them, so
+  // the arena has to carry them too: an arena that only ever saw RECOMPUTED
+  // records would hand a consumer the preceding advance's live count where the
+  // copy handed it zero. Republishing reads exactly the words that copy read.
+  if(lane==255u&&reuse){republishDispatch(43u,5u);republishDispatch(66u,8u);}
   if(lane==255u&&!reuse){let count=blockScan[255u];sw(8u,count);if(count>p.supportCapacity){fail(count,ERROR_CAPACITY);}
-    let clean=s(0u)==0u;writeDispatch(43u,select(vec3u(0u,1u,1u),dispatchFor(count,256u),clean));
-    writeDispatch(66u,select(vec3u(0u,1u,1u),dispatchFor(s(2u)+count,256u),clean));}}
+    let clean=s(0u)==0u;writeDispatch(43u,5u,select(vec3u(0u,1u,1u),dispatchFor(count,256u),clean));
+    writeDispatch(66u,8u,select(vec3u(0u,1u,1u),dispatchFor(s(2u)+count,256u),clean));}}
 
 @compute @workgroup_size(256)fn scatterAirSupportRecords(@builtin(local_invocation_index)lane:u32,
   @builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)groups:vec3u){let block=wid.x+wid.y*groups.x;let item=block*256u+lane;
@@ -2303,8 +2505,8 @@ fn catalogNeighbor(cell:vec4u,global:u32)->vec2u{if(global>=arrayLength(&catalog
   if(faceRows>p.faceCellCapacity||count>p.faceCapacity){fail(faceRows,ERROR_CAPACITY);clean=false;}sw(29u,select(0u,count,clean));sw(25u,0u);sw(28u,0u);sw(30u,0u);sw(32u,0u);sw(37u,0u);
   sw(43u,0u);sw(44u,0u);sw(45u,0u);sw(46u,0u);
   for(var word=0u;word<16u;word+=1u){atomicStore(&faceFrontier[word],0u);}
-  writeDispatch(32u,select(vec3u(0u,1u,1u),dispatchFor(count,256u),clean));
-  writeDispatch(35u,select(vec3u(0u,1u,1u),dispatchFor(faceRows,256u),clean));}
+  writeDispatch(32u,4u,select(vec3u(0u,1u,1u),dispatchFor(count,256u),clean));
+  writeDispatch(35u,5u,select(vec3u(0u,1u,1u),dispatchFor(faceRows,256u),clean));}
 
 fn adjacencyBase(faceRow:u32)->u32{return faceRow*p.faceAdjacencyStride;}
 fn adjacencyIncidentCount(faceRow:u32)->u32{return faceAdjacency[adjacencyBase(faceRow)];}
@@ -2505,12 +2707,12 @@ fn airSupportSeedCarrier(item:u32)->vec4u{let faceRow=item/${STRUCTURED_AIR_SUPP
 @compute @workgroup_size(1)fn finalizeRetainedAirSupportMarchSchedule(){let retained=s(50u)!=0u;
   var clean=s(0u)==0u;if(retained&&s(25u)!=s(49u)){failTopology(10u,s(25u));clean=false;}
   if(retained){atomicStore(&faceFrontier[10u],1u);}
-  writeDispatch(32u,select(vec3u(0u,1u,1u),dispatchFor(s(29u),256u),clean&&!retained));
+  writeDispatch(32u,4u,select(vec3u(0u,1u,1u),dispatchFor(s(29u),256u),clean&&!retained));
   if(p.fineFactor==1u&&(p.capturePreceding&8u)!=0u){
     let waveActive=clean&&!retained;
-    writeDispatch(10u,select(vec3u(0u,1u,1u),dispatchFor(s(29u),256u),waveActive));
-    writeDispatch(13u,select(vec3u(0u,1u,1u),vec3u(1u),waveActive));
-    writeDispatch(16u,select(vec3u(0u,1u,1u),vec3u(3u,1u,1u),waveActive));}
+    writeDispatch(10u,0u,select(vec3u(0u,1u,1u),dispatchFor(s(29u),256u),waveActive));
+    writeDispatch(13u,1u,select(vec3u(0u,1u,1u),vec3u(1u),waveActive));
+    writeDispatch(16u,2u,select(vec3u(0u,1u,1u),vec3u(3u,1u,1u),waveActive));}
   atomicStore(&faceFrontier[11u],select(0u,RETAINED_GRAPH_VALID,clean));}
 // The carrier stores squared Euclidean distance. sqrt is strictly monotone on
 // non-negative finite values, so it cannot change the closest-seed ordering;
@@ -2781,9 +2983,9 @@ fn packedFrontierLane(packed:u32)->vec2u{return vec2u(packed%3u,packed/3u);}
     atomicStore(&faceFrontier[axis],count);atomicStore(&faceFrontier[3u+axis],0u);atomicStore(&faceFrontier[6u+axis],0u);}
   atomicAdd(&faceFrontier[9u],1u);if(changed==0u){atomicStore(&faceFrontier[10u],1u);}
   if(p.fineFactor==1u&&(p.capturePreceding&8u)!=0u){let waveActive=s(0u)==0u&&changed!=0u;
-    writeDispatch(10u,select(vec3u(0u,1u,1u),dispatchFor(12u*(s(2u)+s(8u)),256u),waveActive));
-    writeDispatch(13u,select(vec3u(0u,1u,1u),vec3u(1u),waveActive));
-    writeDispatch(16u,select(vec3u(0u,1u,1u),vec3u(3u,1u,1u),waveActive));}}
+    writeDispatch(10u,0u,select(vec3u(0u,1u,1u),dispatchFor(12u*(s(2u)+s(8u)),256u),waveActive));
+    writeDispatch(13u,1u,select(vec3u(0u,1u,1u),vec3u(1u),waveActive));
+    writeDispatch(16u,2u,select(vec3u(0u,1u,1u),vec3u(3u,1u,1u),waveActive));}}
 @compute @workgroup_size(256)fn marchAirSupportFacesChangedFrontier(@builtin(local_invocation_index)lane:u32,
   @builtin(workgroup_id)wid:vec3u){let axis=wid.x;
   if(lane==0u){frontierFaceRows=s(2u)+s(8u);frontierCurrentCount=atomicLoad(&faceFrontier[axis]);

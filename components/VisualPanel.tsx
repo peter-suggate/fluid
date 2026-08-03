@@ -115,6 +115,9 @@ export function VisualPanel() {
       : silhouetteRefinementEnabled ? "enabled" as const : "disabled" as const,
     detail: effectiveRendererStatus.detail,
   };
+  const lightingVisibilityStatus = effectiveRendererStatus.lightingVisibility ?? {
+    state: svoConeTracingMode,
+  };
   const updateTuning = <K extends keyof SvoRenderTuning>(key: K, value: SvoRenderTuning[K]) =>
     setTuning((current) => ({ ...current, [key]: value }));
   const modified = <K extends keyof SvoRenderTuning>(key: K) => tuning[key] !== SVO_RENDER_TUNING_PRESETS.balanced[key];
@@ -146,7 +149,8 @@ export function VisualPanel() {
       <div className="render-status-line">
         <span className={effectiveRendererStatus.state === "active" ? "online" : ""} />
         <strong data-testid="effective-renderer-status">{effectiveRendererStatus.state === "active"
-          ? "SVO GI ACTIVE"
+          ? lightingVisibilityStatus.state === "cones" ? "SVO GI ACTIVE"
+            : lightingVisibilityStatus.state === "exact" ? "SVO EXACT ACTIVE" : "SVO DIRECT ACTIVE"
           : effectiveRendererStatus.state === "not-required" ? "SVO NOT REQUIRED"
           : effectiveRendererStatus.state === "pending" ? "SVO PENDING" : "SVO FAILED CLOSED"}</strong>
         <code>{Math.round(tuning.resolutionScale * 100)}% · cone {svoConeTracingMode !== "cones" ? svoConeTracingMode : tuning.coneLightingScale === 1 ? "full" : `${1 / tuning.coneLightingScale}×${1 / tuning.coneLightingScale}`}</code>
@@ -182,6 +186,12 @@ export function VisualPanel() {
           className={silhouetteRefinementStatus.state === "failed" ? "render-inline-warning" : "render-inline-status"}>
           Primary seam closure: {silhouetteRefinementStatus.state.toUpperCase()}
           {silhouetteRefinementStatus.detail ? ` · ${silhouetteRefinementStatus.detail}` : ""}
+        </p>
+        <p data-testid="lighting-visibility-status" aria-live="polite"
+          className={lightingVisibilityStatus.fallback ? "render-inline-warning" : "render-inline-status"}>
+          Lighting visibility: {lightingVisibilityStatus.state.toUpperCase()}
+          {lightingVisibilityStatus.fallback ? " FALLBACK" : ""}
+          {lightingVisibilityStatus.detail ? ` · ${lightingVisibilityStatus.detail}` : ""}
         </p>
         <div className="svo-control-grid">
           <RangeControl label="Render resolution" unit="%" value={tuning.resolutionScale * 100} min={35} max={100} step={1} displayDigits={0}

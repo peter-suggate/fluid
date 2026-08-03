@@ -19,6 +19,18 @@ const NON_RECURRING_SOURCE_BASENAMES = new Set([
   "webgpu-octree-work-accounting.ts",
 ]);
 
+/** Recurring simulation modules whose names do not carry an octree prefix, so
+ * the prefix filter above silently skipped them. Both are encoded every
+ * advance from `webgpu-octree.ts` — brick residency publishes the topology the
+ * octree consumes, and the sparse mutation module rewrites it — which makes
+ * them exactly the kind of module Bet 1 is about. Membership here is an
+ * inclusion list only because the naming convention is not uniform; anything
+ * that acquires an octree prefix enters the gate automatically. */
+const ADDITIONAL_RECURRING_SOURCE_BASENAMES = new Set([
+  "webgpu-fluid-brick-residency.ts",
+  "webgpu-sparse-brick-topology-mutation.ts",
+]);
+
 export interface OctreeProductionRepositoryAudit {
   readonly scannedSources: readonly string[];
   readonly violations: readonly OctreeSourceViolation[];
@@ -105,7 +117,8 @@ export function discoverOctreeProductionSources(repositoryRoot: string): readonl
     if (extension !== ".ts" && extension !== ".wgsl") return false;
     return name === "webgpu-octree.ts"
       || name.startsWith("webgpu-octree-")
-      || name.startsWith("octree-");
+      || name.startsWith("octree-")
+      || ADDITIONAL_RECURRING_SOURCE_BASENAMES.has(name);
   });
 }
 

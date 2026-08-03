@@ -121,22 +121,30 @@ and `classifyPageDelta` when `FLUID_FINE_TOPOLOGY_INDIRECT_ASSIGN=1`;
 already carries the compact seed count that `scatterRecurringSparseBand` wants.
 
 **V2 — SPGrid dense brick/page directory sweep (A(C)/A(D)).**
-`prepareCandidateSchedules` (`lib/webgpu-octree-spgrid-vcycle.ts:3877`) publishes
+*(Line numbers re-verified 2026-08-03; this file moves daily.)*
+`prepareCandidateSchedules` (`lib/webgpu-octree-spgrid-vcycle.ts:3843`) publishes
 the whole candidate chain's indirect records — genuinely live for every phase
 except:
 
 ```
-lib/webgpu-octree-spgrid-vcycle.ts:3912
+lib/webgpu-octree-spgrid-vcycle.ts:3878
  if(topologyLevelItems!=0u){brickItems=p.totals.y;logicalPageItems=p.totals.z;
   physicalPageItems=p.totals.z;}
 ```
 
-`p.totals.y` is `totalBrickCount` (`:3563`), `p.totals.z` the page-directory
-cardinality. Four dispatches consume those records on any dirty epoch:
-`markCandidateBrickOccupancy` (`:2005`), `scatterCandidateRankedSlots` (`:2009`),
-`markCandidatePageOccupancy` (`:2011`), `linkCandidatePageNeighbours` (`:2015`).
-The in-file comment at `:3909` already admits it. Clean epochs publish zero, so
-this is *change-gated but not size-gated*.
+`p.totals.y` is `totalBrickCount` (`:3529`), `p.totals.z` the page-directory
+cardinality; the host writes both from the CPU plan (`:1598-1599`,
+`[totalLevelSlots, plan.brickCount, plan.pageDirectoryBytes/4, 0]`) and
+`plan.brickCount` is a pure O(domain) sum over levels (`:887-891`). Four
+dispatches consume those records on any dirty epoch:
+`markCandidateBrickOccupancy` (`:1971`), `scatterCandidateRankedSlots` (`:1975`),
+`markCandidatePageOccupancy` (`:1977`), `linkCandidatePageNeighbours` (`:1981`).
+The in-file comment at `:3875-3877` already admits it. Clean epochs publish
+zero, so this is *change-gated but not size-gated*.
+
+**This is the shape the source gate could not see until 2026-08-03** — see
+§"the in-tree capacity-dispatch lint" below, blindness 3. It is now rule
+`capacity-indirect-args`, and V2 is three of its four repository hits.
 
 **V3 — brick-residency fine-seed candidate scan.**
 `GPUFluidBrickResidency.encodeFineSeedCandidates`,
@@ -200,24 +208,72 @@ dispatch per pyramid level, and `maximumLevel = levelOffsets.length - 1` is
   `WebGPUStructuredBoundaryCoefficients.encode` / `encodeAcceptedCandidate`
   (`lib/webgpu-octree-structured-boundary.ts:408`/`:420`) are unreachable, so the
   "Prepare structured boundary accepted recurring transaction" label never runs.
-- **The in-tree capacity-dispatch lint is green and blind.**
-  `npm run audit:octree-production-source` reports *27 violations in 59 sources,
-  none of them `capacity-dispatch`* — while V1 above is 20 capacity/domain-shaped
-  dispatches per substep. Two independent holes in
-  `lib/webgpu-octree-work-accounting.ts`:
-  1. `CAPACITY_AUTHORITY` (`:1045`) is
-     `…|maximumResidentBricks|logical(?:Cell|Brick|Page|Domain)|dims\.n[xyz])\b`.
-     The trailing `\b` after the alternation means `logicalBrickCount`,
-     `totalBrickCount`, `brickCount` and `pageDirectoryWords` **do not match**
-     (verified: only `plan.maximumResidentBricks` of that list tests true).
-  2. `capacityDispatchViolations` (`:1055`) only inspects the literal argument
-     text of `dispatchWorkgroups(` and follows `const/let/var` aliases *in the
-     same file*. Capacity passed as an argument into a helper —
-     `runIdentity(pipeline, entries, Math.ceil(plan.maximumResidentBricks / 64), …)`
-     with the helper body `pass.dispatchWorkgroups(x, y)` — is invisible.
+- **The in-tree capacity-dispatch lint has been green and blind three times.**
+  When this section was written, `npm run audit:octree-production-source`
+  reported *27 violations in 59 sources, none of them `capacity-dispatch`* —
+  while V1 above is 20 capacity/domain-shaped dispatches per substep. **A green
+  result from this gate has now twice been quoted as evidence while wrong**, so
+  the record of what it could not see is kept here, and every hole is pinned by
+  a regression in `tests/webgpu-octree-work-accounting.test.ts`.
 
-  Both are one-line fixes and should land before any Bet-1 work, or the gate will
-  keep certifying violations as clean.
+  1. **Capacity vocabulary by enumeration** (`CAPACITY_AUTHORITY`). The original
+     trailing `\b` after the alternation meant `logicalBrickCount`,
+     `totalBrickCount`, `brickCount` and `pageDirectoryWords` did not match, and
+     a hard-coded five-name capacity list exempted every capacity introduced
+     after it was written. **Closed** by matching shape (`\w*[Cc]apacity`,
+     `logical(?:Cell|Brick|Page|Domain)\w*`, `total\w*Count`, `domainVolume`).
+     The lowercase spelling was a third round of the same bug: `this.capacity`
+     was exempt while `this.rowCapacity` was not, which hid four of the six
+     capacity-shaped launches in `webgpu-fluid-brick-residency.ts`.
+  2. **Detection stopping at the literal `dispatchWorkgroups(` call.** Capacity
+     passed as an argument into a local helper —
+     `runIdentity(pipeline, entries, Math.ceil(plan.maximumResidentBricks / 64), …)`
+     with the helper body `pass.dispatchWorkgroups(x, y)` — was invisible.
+     **Closed** by `dispatchingHelpers`, which discovers any local function whose
+     body dispatches and then audits its argument lists too.
+  3. **The `dispatchWorkgroupsIndirect` exemption** (2026-08-03). The gate
+     deliberately skipped indirect launches because "an indirect launch is
+     shaped by whatever the GPU published into the args buffer, which is the
+     compliant form". That is only true if the *publisher* used a live count.
+     `prepareCandidateSchedules` (`lib/webgpu-octree-spgrid-vcycle.ts:3843`)
+     authors the indirect args **from capacities, on the GPU**: `:3878-3879`
+     sets `brickItems = p.totals.y` and `logicalPageItems = physicalPageItems =
+     p.totals.z`, where the host writes `p.totals = [totalLevelSlots,
+     plan.brickCount, plan.pageDirectoryBytes/4, …]` (`:1598-1599`) and
+     `plan.brickCount` is a pure O(domain) sum over levels (`:887-891`). Four
+     recurring launches consume those records — `markCandidateBrickOccupancy`
+     and `scatterCandidateRankedSlots` off `CANDIDATE_SCHEDULE.bricks`,
+     `markCandidatePageOccupancy` off `.logicalPages`,
+     `linkCandidatePageNeighbours` off `.physicalPages` (`:1971-1982`;
+     `rankCandidateBricks` and `compactCandidatePages` run off
+     `.topologyLevels`, which is level-count shaped, not capacity shaped). That
+     is a capacity-shaped launch wearing an indirect costume, and the gate
+     reported it clean. **Closed** by `capacityIndirectArgumentViolations`
+     (rule `capacity-indirect-args`).
+
+  **What the gate still cannot see.** Read a green result with these in mind:
+
+  - **Host-written indirect args.** The new rule is shader-side. A host
+    `queue.writeBuffer` / `copyBufferToBuffer` of a capacity into an INDIRECT
+    buffer is not detected.
+  - **Mixed-path counts.** When one name is assigned a GPU-published count on
+    one path and a capacity on another, the published assignment wins and the
+    site is not reported. Flagging it would flag every `min(capacity, live)`
+    clamp in the tree; the trade is recorded in the rule's own doc comment.
+  - **Capacity laundered through a function return.** A helper `fn` that
+    *returns* a capacity is treated as capacity-derived only when its name
+    matches the capacity vocabulary (`levelCapacity`) — an accessor named, say,
+    `fn brickExtent()` would pass.
+  - **Work per invocation.** The gate audits launch *shape*, never the work a
+    launched invocation does. A 1-workgroup launch that walks the whole domain
+    is a `capacity-scan` finding at best and often nothing at all.
+  - **Scope.** The scan is `lib/**` filtered to the octree prefixes plus an
+    explicit inclusion list (`webgpu-fluid-brick-residency.ts`,
+    `webgpu-sparse-brick-topology-mutation.ts`). A new recurring module without
+    an octree prefix is outside the gate until someone adds it.
+  - **`resetSummary` and friends.** A dispatch the author *deliberately* left
+    capacity-shaped is reported identically to an accidental one. The gate
+    ranks nothing; it only enumerates.
 
 ## 2. Per-lane accounting: where 470 vs 442 comes from
 

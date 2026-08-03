@@ -996,7 +996,8 @@ export interface OctreeSourceViolation {
     | "deleted-production-module"
     | "general-timestep-authority"
     | "capacity-scan"
-    | "nested-capacity-scan";
+    | "nested-capacity-scan"
+    | "capacity-indirect-args";
   readonly excerpt: string;
 }
 
@@ -1047,8 +1048,8 @@ const SHADER_SOURCE_CHECKS: readonly SourceCheck[] = Object.freeze([
  * little fluid exists -- the violation Bet 1 ("existence is free") exists to
  * prevent. Capacities may size *buffers*; they may never size *launches*.
  *
- * Two spelling holes made this gate report clean while the violations it names
- * were present, so both are now closed by shape rather than by enumeration:
+ * Three spelling holes made this gate report clean while the violations it
+ * names were present, so all three are now closed by shape, not by enumeration:
  *
  *  - `\w*Capacity` replaces a hard-coded five-name list. Every capacity
  *    introduced after that list was written was exempt by default --
@@ -1058,11 +1059,15 @@ const SHADER_SOURCE_CHECKS: readonly SourceCheck[] = Object.freeze([
  *  - `logical(?:Cell|Brick|Page|Domain)\w*` replaces a trailing `\b`, which
  *    matched the bare `logicalBrick` but not `logicalBrickCount` -- and
  *    `logicalBrickCount` is the spelling the code actually uses.
+ *  - `[Cc]apacity` replaces `Capacity`. A field spelled `this.capacity` (rather
+ *    than `this.rowCapacity`) was exempt: four of the six capacity-shaped
+ *    launches in `webgpu-fluid-brick-residency.ts` are `dispatchWorkgroups(
+ *    bricks)` where `bricks = Math.ceil(this.capacity / 64)`.
  *
  * `domainVolume` was absent entirely, so the `ceil(domainVolume/256)` family
  * that Bet 1 names as its headline violation could never have been flagged. */
 const CAPACITY_AUTHORITY =
-  /\b(?:\w*Capacity|maximumResidentBricks|logical(?:Cell|Brick|Page|Domain)\w*|total\w*Count|brickCount|pageDirectoryWords|domainVolume|levelStride|dims\.n[xyz])\b/;
+  /\b(?:\w*[Cc]apacity|maximumResidentBricks|logical(?:Cell|Brick|Page|Domain)\w*|total\w*Count|brickCount|pageDirectoryWords|domainVolume|levelStride|dims\.n[xyz])\b/;
 
 function escapedIdentifier(value: string): string {
   return value.replace(/[\^$.*+?()[\]{}|\\]/g, "\\$&");
@@ -1131,10 +1136,16 @@ function capacityDispatchViolations(sourceName: string, source: string): OctreeS
       ).test(expression));
 
   const violations: OctreeSourceViolation[] = [];
-  // `dispatchWorkgroupsIndirect` is deliberately not matched: an indirect launch
-  // is shaped by whatever the GPU published into the args buffer, which is the
-  // compliant form. Only the direct call and the local helpers that wrap it
-  // carry a host-authored workgroup count.
+  // `dispatchWorkgroupsIndirect` is deliberately not matched *here*: an indirect
+  // launch is shaped by whatever was published into the args buffer, and only
+  // the direct call and the local helpers that wrap it carry a host-authored
+  // workgroup count on the host side.
+  //
+  // That exemption was itself a hole, and it is now closed on the shader side by
+  // `capacityIndirectArgumentViolations`: a GPU kernel may perfectly well write
+  // a capacity into an indirect-args buffer, and then the indirect launch is a
+  // capacity-shaped launch wearing an indirect costume. See that function for
+  // the evidence that made this the gate's third measured blindness.
   const helpers = dispatchingHelpers(source);
   const call = new RegExp(
     "\\b(?:dispatchWorkgroups|dispatchFor|workgroupPerItemDispatch"
@@ -1263,6 +1274,275 @@ function capacityScanViolations(sourceName: string, source: string): OctreeSourc
   return violations;
 }
 
+/** Storage arrays whose words a host later binds as `INDIRECT` dispatch
+ * arguments. Recognized by name shape rather than by an enumerated list,
+ * because an enumerated list is exactly what let the two earlier holes in this
+ * file stay open: `candidateDispatch`, `dispatchArgs`, `indirectDispatch`,
+ * `publishedDispatch`, `classDispatch`, `rowDispatch`, `commitRowsDispatch`,
+ * and the bare `dispatch` / `indirect` spellings all match. */
+const INDIRECT_ARGS_TARGET_NAME = /dispatch|indirect|schedule|args/i;
+
+/** A literal argument can never carry a capacity. */
+const SHADER_LITERAL_ARGUMENT = /^\s*(?:[0-9]+(?:\.[0-9]*)?[uifh]?|true|false)\s*$/;
+
+/** Reads that can only produce a value the GPU itself published this step. */
+const GPU_PUBLISHED_INTRINSIC =
+  /\b(?:atomic(?:Load|Add|Sub|Max|Min|And|Or|Xor|Exchange|CompareExchangeWeak)|workgroupUniformLoad|arrayLength)\s*\(/;
+
+interface ShaderFunction {
+  readonly name: string;
+  readonly parameters: readonly string[];
+  readonly bodyStart: number;
+  readonly bodyEnd: number;
+  readonly body: string;
+}
+
+function shaderFunctions(code: string): readonly ShaderFunction[] {
+  const functions: ShaderFunction[] = [];
+  const header = /\bfn\s+([A-Za-z_][\w]*)\s*\(/g;
+  for (let match = header.exec(code); match; match = header.exec(code)) {
+    const open = code.indexOf("{", match.index);
+    if (open < 0) continue;
+    const close = matchingBrace(code, open);
+    const signature = balancedArguments(code, header.lastIndex).text;
+    functions.push({
+      name: match[1]!,
+      parameters: splitArguments(signature)
+        .map((parameter) => /^\s*(?:@\w+(?:\([^)]*\))?\s*)*([A-Za-z_]\w*)\s*:/.exec(parameter)?.[1])
+        .filter((parameter): parameter is string => parameter !== undefined),
+      bodyStart: open, bodyEnd: close, body: code.slice(open, close),
+    });
+  }
+  return functions;
+}
+
+/** WGSL `select(falseValue, trueValue, predicate)`: the third operand decides
+ * *whether* the count applies, never *what* it is. A live predicate around a
+ * capacity is still a capacity-shaped launch on the step it fires, so the
+ * predicate is removed before the value is judged. */
+function withoutSelectPredicates(expression: string): string {
+  let text = expression;
+  for (let guard = 0; guard < 8; guard += 1) {
+    const call = /\bselect\s*\(/g;
+    const match = call.exec(text);
+    if (!match) break;
+    const { text: inner, end } = balancedArguments(text, call.lastIndex);
+    const parts = splitArguments(inner);
+    if (parts.length !== 3) break;
+    const replaced = `(${parts[0]!},${parts[1]!})`;
+    const next = text.slice(0, match.index) + replaced + text.slice(end);
+    if (next === text) break;
+    text = next;
+  }
+  return text;
+}
+
+function declaredNames(code: string, expression: RegExp): Set<string> {
+  const names = new Set<string>();
+  expression.lastIndex = 0;
+  for (let match = expression.exec(code); match; match = expression.exec(code)) {
+    names.add(match[1]!);
+  }
+  return names;
+}
+
+function containsIdentifier(expression: string, name: string): boolean {
+  return new RegExp(
+    "(?:^|[^A-Za-z0-9_])" + escapedIdentifier(name) + "(?:$|[^A-Za-z0-9_])",
+  ).test(expression);
+}
+
+/** Splits a balanced argument list on its top-level commas. */
+function splitArguments(text: string): string[] {
+  const parts: string[] = [];
+  let depth = 0, start = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index];
+    if (character === "(" || character === "[" || character === "{") depth += 1;
+    else if (character === ")" || character === "]" || character === "}") depth -= 1;
+    else if (character === "," && depth === 0) {
+      parts.push(text.slice(start, index)); start = index + 1;
+    }
+  }
+  if (text.slice(start).trim().length > 0 || parts.length > 0) parts.push(text.slice(start));
+  return parts;
+}
+
+/**
+ * The gate's third measured blindness, and the reason this rule exists.
+ *
+ * `capacityDispatchViolations` exempts `dispatchWorkgroupsIndirect` because "an
+ * indirect launch is shaped by whatever the GPU published into the args buffer,
+ * which is the compliant form". That reasoning silently assumes the *publisher*
+ * used a live count. It need not: `prepareCandidateSchedules` in
+ * `webgpu-octree-spgrid-vcycle.ts` writes `brickItems = p.totals.y` (the host's
+ * `plan.brickCount`, a pure O(domain) sum over levels) and `logicalPageItems =
+ * physicalPageItems = p.totals.z` (`plan.pageDirectoryBytes / 4`) into the
+ * candidate schedule, and four recurring launches consume those records. The
+ * gate reported that clean.
+ *
+ * Two authorities make a published item count host-authored:
+ *
+ *  - the same `CAPACITY_AUTHORITY` vocabulary the direct rule uses, and
+ *  - **any read of a uniform block**. A uniform is written by the host, and the
+ *    host may not read back a live count (`hostSchedulingUsesReadback: false`),
+ *    so a uniform-derived item count is an allocation-time constant by
+ *    construction. This is what catches `p.totals.y`, which no capacity
+ *    vocabulary contained — and enumerating it would have re-created the hole.
+ *
+ * Three things suppress a report, because each one means the count is not
+ * host-authored at this site:
+ *
+ *  - a **storage read or atomic load** anywhere in the value: that is a count
+ *    the GPU published this step, which is the compliant form. `min(published,
+ *    capacity)` is bounded by the published count and stays clean.
+ *  - a **function parameter**: a publisher helper such as
+ *    `writeCandidateSchedule(record, items, lanes)` clamps whatever it is
+ *    handed, so the judgement belongs at its call site, which the transitive
+ *    publisher closure reaches.
+ *  - a **literal**, an index, or a workgroup-size divisor: none is an item
+ *    count.
+ *
+ * Known limit, deliberately taken: when one name is assigned a live count on
+ * one path and a capacity on another, the live assignment wins and the site is
+ * not reported. Reporting it would flag every `min(capacity, live)` clamp in
+ * the tree. Record the limit rather than closing it by exemption list.
+ */
+function capacityIndirectArgumentViolations(
+  sourceName: string, source: string,
+): OctreeSourceViolation[] {
+  const code = shaderCodeOnly(source);
+  const storages = declaredNames(code, /\bvar\s*<\s*storage[^>]*>\s*([A-Za-z_]\w*)\s*:/g);
+  const targets = new Set([...storages].filter((name) => INDIRECT_ARGS_TARGET_NAME.test(name)));
+  if (targets.size === 0) return [];
+  const uniforms = declaredNames(code, /\bvar\s*<\s*uniform\s*>\s*([A-Za-z_]\w*)\s*:/g);
+  const functions = shaderFunctions(code);
+
+  const targetNames = [...targets].map(escapedIdentifier).join("|");
+  const writeExpression = new RegExp(
+    "\\b(?:" + targetNames + ")\\s*\\[([^\\]]*)\\]\\s*=(?!=)\\s*([^;\\n]+)", "g");
+  const atomicWriteExpression = new RegExp(
+    "\\batomicStore\\s*\\(\\s*&\\s*(?:" + targetNames + ")\\s*\\[", "g");
+
+  // A publisher writes indirect words itself, or hands its arguments to one
+  // that does. The transitive closure is what makes `writeCandidateSchedule`'s
+  // caller — where the capacity actually enters — the reported site.
+  const publishers = new Set<string>();
+  for (const shaderFunction of functions) {
+    writeExpression.lastIndex = 0;
+    atomicWriteExpression.lastIndex = 0;
+    if (writeExpression.test(shaderFunction.body)
+      || atomicWriteExpression.test(shaderFunction.body)) publishers.add(shaderFunction.name);
+  }
+  for (let changed = true; changed;) {
+    changed = false;
+    for (const shaderFunction of functions) {
+      if (publishers.has(shaderFunction.name)) continue;
+      for (const publisher of publishers) {
+        if (new RegExp("\\b" + escapedIdentifier(publisher) + "\\s*\\(").test(shaderFunction.body)) {
+          publishers.add(shaderFunction.name); changed = true; break;
+        }
+      }
+    }
+  }
+
+  // A function is a live source when it reads storage it does not merely
+  // publish into. Stripping its own assignment targets first keeps a publisher
+  // helper (which only *writes* the indirect array) from claiming to produce a
+  // GPU-published count and silencing all of its call sites.
+  const liveFunctions = new Set<string>();
+  const readsStorage = (body: string): boolean => {
+    const reads = body.replace(
+      new RegExp("\\b(?:" + [...storages].map(escapedIdentifier).join("|")
+        + ")\\s*\\[[^\\]]*\\]\\s*=(?!=)", "g"), " ");
+    return GPU_PUBLISHED_INTRINSIC.test(reads)
+      || [...storages].some((name) => containsIdentifier(reads, name));
+  };
+  for (const shaderFunction of functions) {
+    if (readsStorage(shaderFunction.body)) liveFunctions.add(shaderFunction.name);
+  }
+  for (let changed = true; changed;) {
+    changed = false;
+    for (const shaderFunction of functions) {
+      if (liveFunctions.has(shaderFunction.name)) continue;
+      for (const live of liveFunctions) {
+        if (new RegExp("\\b" + escapedIdentifier(live) + "\\s*\\(").test(shaderFunction.body)) {
+          liveFunctions.add(shaderFunction.name); changed = true; break;
+        }
+      }
+    }
+  }
+
+  const violations: OctreeSourceViolation[] = [];
+  const report = (offset: number, excerpt: string): void => {
+    violations.push({
+      source: sourceName,
+      line: sourceLine(source, offset),
+      rule: "capacity-indirect-args",
+      excerpt: excerpt.slice(0, 140).replace(/\s+/g, " ").trim(),
+    });
+  };
+
+  for (const shaderFunction of functions) {
+    const body = shaderFunction.body;
+    // Declarations and plain re-assignments both carry a capacity forward, and
+    // the SPGrid publisher uses the second form: `var brickItems = 0u;` then
+    // `brickItems = p.totals.y;` inside the dirty-epoch branch.
+    const aliases = new Set<string>();
+    const published = new Set<string>(shaderFunction.parameters);
+    const assignments = [...body.matchAll(
+      /(?:\b(?:let|var)\s+)?\b([A-Za-z_]\w*)\s*(?::\s*[A-Za-z_][\w<>,\s]*?)?=(?!=)\s*([^;\n]+)/g)]
+      .map((match) => [match[1]!, withoutSelectPredicates(match[2]!)] as const);
+    const gpuPublished = (expression: string): boolean =>
+      GPU_PUBLISHED_INTRINSIC.test(expression)
+      || [...storages].some((name) => containsIdentifier(expression, name))
+      || [...liveFunctions].some((name) => new RegExp(
+        "\\b" + escapedIdentifier(name) + "\\s*\\(").test(expression))
+      || [...published].some((name) => containsIdentifier(expression, name));
+    const capacityDerived = (expression: string): boolean =>
+      CAPACITY_AUTHORITY.test(expression)
+      || [...uniforms].some((name) => new RegExp(
+        "(?:^|[^A-Za-z0-9_])" + escapedIdentifier(name) + "\\s*\\.").test(expression))
+      || [...aliases].some((alias) => containsIdentifier(expression, alias));
+    const hostAuthored = (raw: string): boolean => {
+      const expression = withoutSelectPredicates(raw);
+      return capacityDerived(expression) && !gpuPublished(expression);
+    };
+    for (let changed = true; changed;) {
+      changed = false;
+      for (const [target, expression] of assignments) {
+        if (targets.has(target)) continue;
+        if (!published.has(target) && gpuPublished(expression)) {
+          published.add(target); aliases.delete(target); changed = true; continue;
+        }
+        if (!aliases.has(target) && !published.has(target) && capacityDerived(expression)) {
+          aliases.add(target); changed = true;
+        }
+      }
+    }
+
+    writeExpression.lastIndex = 0;
+    for (let match = writeExpression.exec(body); match; match = writeExpression.exec(body)) {
+      if (hostAuthored(match[2]!)) report(shaderFunction.bodyStart + match.index, match[0]);
+    }
+    for (const publisher of publishers) {
+      const call = new RegExp("\\b" + escapedIdentifier(publisher) + "\\s*\\(", "g");
+      for (let match = call.exec(body); match; match = call.exec(body)) {
+        const { text, end } = balancedArguments(body, match.index + match[0].length);
+        call.lastIndex = end;
+        for (const argument of splitArguments(text)) {
+          if (SHADER_LITERAL_ARGUMENT.test(argument)) continue;
+          if (!hostAuthored(argument)) continue;
+          report(shaderFunction.bodyStart + match.index,
+            `${publisher}(${text}) publishes host-authored ${argument.trim()}`);
+          break;
+        }
+      }
+    }
+  }
+  return violations;
+}
+
 const RETIRED_SHADER_IDENTIFIER =
   /\b[A-Za-z_][A-Za-z0-9_]*\b/g;
 
@@ -1343,6 +1623,7 @@ export function auditOctreeProductionSource(
   }
   if (role === "shader") {
     violations.push(...capacityScanViolations(sourceName, source));
+    violations.push(...capacityIndirectArgumentViolations(sourceName, source));
     const code = shaderCodeOnly(source);
     RETIRED_SHADER_IDENTIFIER.lastIndex = 0;
     for (let match = RETIRED_SHADER_IDENTIFIER.exec(code); match;

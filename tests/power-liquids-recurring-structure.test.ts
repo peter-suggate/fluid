@@ -186,7 +186,14 @@ test("recurring Power Liquids entry graphs contain only reviewed transaction ato
         // into a fixed seven-bucket control, chosen around the 1e-2 theta
         // floor. It accumulates a diagnostic count, never a face coefficient,
         // and takes no ordering on the publication.
-        ? ["acceptStructuredBoundary", "boundaryLiquidIdentityEligible", "classifyStructuredLiquidRows", "commitStructuredBoundarySlots", "fail",
+        // `boundaryExactRowCarryEligible` and `boundaryRowCarryActive` are the
+        // exact zero-dispatch row carry's two readers of `control.pad` and
+        // `acceptedBoundary.pad`. Both are pure loads of a publication receipt:
+        // they take no ordering, accumulate nothing, and neither can be
+        // expressed non-atomically because `pad` is declared `atomic<u32>` for
+        // the dirty channel every other stage ors into.
+        ? ["acceptStructuredBoundary", "boundaryExactRowCarryEligible", "boundaryLiquidIdentityEligible",
+          "boundaryRowCarryActive", "classifyStructuredLiquidRows", "commitStructuredBoundarySlots", "fail",
           "prepareStructuredBoundaryAccepted", "prepareStructuredBoundaryCandidate", "publishStructuredBoundarySetup",
           "rebuildStructuredBoundaryRows", "recordTheta", "resolveStructuredBoundarySlots",
           "resolveStructuredSolidSlots", "worksetPublicationEnabled"]

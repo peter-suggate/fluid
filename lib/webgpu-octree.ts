@@ -5646,6 +5646,14 @@ export class WebGPUOctreeProjection {
   readPowerHybridCensus() {
     return this.persistentMGPCG?.readHybridCensus() ?? Promise.resolve(null);
   }
+  /**
+   * Post-submit class-0 census of the Section 4.3 band shell. `null` unless
+   * `FLUID_OCTREE_MGPCG_REGULAR_BAND_ROWS` selected a mode — it is the only
+   * emission that authors those words, so it cannot report a stale arena.
+   */
+  readPersistentBandCensus() {
+    return this.persistentMGPCG?.readBandCensus() ?? Promise.resolve(null);
+  }
   /** Diagnostic-only proof that the five dynamic hybrid classes themselves
    * respect the scene's D4 row orbits. This never feeds simulation control. */
   async readPowerHybridClassSymmetry() {

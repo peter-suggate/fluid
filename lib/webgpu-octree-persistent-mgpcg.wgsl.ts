@@ -54,8 +54,21 @@ export const OCTREE_PERSISTENT_MGPCG_HEADER = Object.freeze({
   /** Eight `(epoch, count)` pairs: `(bank * 4 + rowClass)`. */
   worksetHeaders: 272,
   worksetHeaderWords: 16,
+  /**
+   * `[marker, bandRows, regularBandRows, coarseRegularBandRows]`, authored once
+   * per solve by the class-0 band census and never read by the kernel. It sits
+   * above every host-staged region (`encodeSolve` copies the dispatch header
+   * into `[16, 272)` and nothing else below `totalWords`), so it is the only
+   * kernel arena write below `ARENA_HEADER`. Emitted only when
+   * `FLUID_OCTREE_MGPCG_REGULAR_BAND_ROWS` selects a mode.
+   */
+  bandCensus: 288,
+  bandCensusWords: 4,
   totalWords: 1024,
 } as const);
+
+/** Sentinel proving `bandCensus` was authored by this dispatch, not left over. */
+export const OCTREE_PERSISTENT_MGPCG_BAND_CENSUS_MARKER = 0x4241_4e44;
 
 /** 128-lane virtual reduction groups, matching the hierarchical partial shape. */
 export const OCTREE_PERSISTENT_MGPCG_REDUCTION_LANES = 128;
@@ -85,6 +98,24 @@ export interface OctreePersistentMGPCGShaderOptions {
   readonly fullApplyOracle?: boolean;
   /** Diagnostic A/B: restore the original linear full-row apply traversal. */
   readonly linearApplyOracle?: boolean;
+  /**
+   * Memory-only smoother staging: hoist the two solve-invariant header regions
+   * into workgroup storage and issue `applied`'s eighteen spokes as independent
+   * load waves instead of one dependent chain. Value-neutral by construction;
+   * see `stagedSmootherApplied` below for the term-by-term equality argument.
+   */
+  readonly stagedSmoother?: boolean;
+  /**
+   * Route class-0 rows of the Section 4.3 band sweep through the same cheap
+   * regular apply `applyAllRows` already uses for them.
+   *
+   * `"census"` publishes the class-0 row map and the band census but leaves
+   * every band row on `applyRow`, so the hit rate and the map's own cost can be
+   * measured before the routing is trusted. `"route"` additionally takes the
+   * regular path. See `octreePersistentMGPCGRegularBandRowsMode` for the
+   * numerical-equivalence argument and why this defaults off.
+   */
+  readonly regularBandRows?: "census" | "route";
   /** Diagnostic-only: publish one internal channel through pressureOut after
    * the solve so the Dawn symmetry oracle can localize a broken sub-map. */
   readonly diagnosticOutputChannel?: number;
@@ -130,6 +161,92 @@ export const OCTREE_PERSISTENT_MGPCG_WORKGROUP_BYTES =
   // uniform-load scalars (rows, levels, partials, counts, halt flags)
   + 64;
 
+/**
+ * Extra workgroup storage the staged smoother declares.
+ *
+ * Both regions are immutable for the whole dispatch, so one copy replaces every
+ * subsequent storage re-read:
+ *  - `wDispatch`: the 256-word dispatch header `arena[16..272)`, authored by
+ *    the host `copyBufferToBuffer` before the dispatch and never written by the
+ *    kernel (every kernel arena write is at `ARENA_HEADER` or above, at
+ *    `partialBase()`, or at `stagedCh()`), re-read today by `count()`,
+ *    `pageCount()` and `transferCount()` — the last two from inside
+ *    `regularPageSlot`, i.e. twice per stencil channel per band row per sweep.
+ *  - `wAccepted`: the eight-word accepted-authority prefix of a `read` binding,
+ *    re-read today by `acceptedBank()` and therefore by `coefficientBase()` —
+ *    once per `diagonalAt`, and 144 times per `applyRow` whose `finerAdjoint`
+ *    runs (eight children by eighteen `coefficientForDirection` probes).
+ *
+ * 1,056 bytes on top of the 5,184-byte baseline, well inside the 16 KiB
+ * `maxComputeWorkgroupStorageSize` floor Dawn exposes on Metal. The deleted
+ * page-blocked halo needed 9,600 bytes on its own and is not restored here;
+ * see `stagedSmootherApplied`.
+ */
+export const OCTREE_PERSISTENT_MGPCG_STAGED_SMOOTHER_WORKGROUP_BYTES =
+  // wDispatch: array<u32, 256>
+  OCTREE_PERSISTENT_MGPCG_HEADER.dispatchWords * 4
+  // wAccepted: array<u32, 8>
+  + 8 * 4;
+
+/** Declared workgroup footprint for a given staged-smoother selection. */
+export function octreePersistentMGPCGWorkgroupBytes(stagedSmoother = false): number {
+  return OCTREE_PERSISTENT_MGPCG_WORKGROUP_BYTES
+    + (stagedSmoother ? OCTREE_PERSISTENT_MGPCG_STAGED_SMOOTHER_WORKGROUP_BYTES : 0);
+}
+
+/**
+ * The staged `applied()` body: the same eighteen terms, in the same order, fed
+ * to the same `canonical18Sum`, with only the load schedule changed.
+ *
+ * HEAD fuses one dependent chain per spoke — coefficient load, compare,
+ * neighbour-column load, bounds compare, scattered value load — and repeats it
+ * eighteen times. Inside a single-workgroup kernel there is no other resident
+ * work to hide any of those round trips, so the eighteen spokes serialize into
+ * roughly thirty-six memory latencies per cell per sweep. Every spoke is
+ * independent of every other, so the identical values can be fetched as three
+ * waves of eighteen independent loads.
+ *
+ * BIT-IDENTITY, term by term (`t{k}` here versus `terms[k]` at HEAD):
+ *  - `c{k}` is the identical `loadf(S_XP+k,l,slot)`; `k` is a literal here and
+ *    a fully-unrollable loop counter at HEAD, so the address is the same word.
+ *  - `n{k}` is the identical `topology[columnBase+k*span]`, now issued for
+ *    every `k` rather than only for nonzero coefficients. The stencil neighbour
+ *    table is exactly `18 * totalLevelSlots` words (see `stencilNeighbourWords`
+ *    in the SPGrid plan) and `columnBase + 17*span` is its last column, so the
+ *    unconditional loads are in bounds and their results are discarded.
+ *  - `g{k}` is HEAD's acceptance predicate verbatim: nonzero coefficient AND a
+ *    resolvable in-capacity column.
+ *  - the report loop fires `reportAt(OVERFLOW,75u,slot)` for exactly the same
+ *    `k`, in ascending `k`, exactly as HEAD's `continue` arm does.
+ *  - `x{k}` reads slot zero when `g{k}` is false. That address is
+ *    `at(source,l,0u)`, always in bounds, and the value is discarded by the
+ *    following `select`, so no term changes and no report is added or lost.
+ *  - `t{k}` is `c{k}*x{k}` when accepted and the default `0.0` otherwise —
+ *    HEAD's zero-initialized `terms[k]` for both the `c==0` and the
+ *    invalid-column arms.
+ *  - the eighteen scalars enter `canonical18Sum` in ascending `k`, so the
+ *    axis/diagonal pairing and the `sorted3Sum`/`sorted6Sum` association order
+ *    are untouched. This is what keeps the exact-D4 window where it is.
+ *
+ * Replacing `var terms:array<f32,18>` with eighteen named scalars is the second
+ * half of the change and is free: HEAD indexes that array with a loop counter,
+ * which Metal backs with thread-local scratch whenever it declines to unroll,
+ * and the only consumer takes it by value at constant indices.
+ */
+function stagedSmootherApplied(): string {
+  const spokes = Array.from({ length: 18 }, (_, k) => k);
+  const wave = (build: (k: number) => string) => spokes.map(build).join("");
+  return ` let cap=levelCapacity(l);
+ ${wave((k) => `let c${k}=loadf(S_XP+${k}u,l,slot);`)}
+ ${wave((k) => `let n${k}=topology[columnBase+${k}u*span];`)}
+ ${wave((k) => `let g${k}=c${k}!=0.0&&n${k}!=INVALID&&n${k}<cap;`)}
+ ${wave((k) => `if(c${k}!=0.0&&!g${k}){reportAt(OVERFLOW,75u,slot);}`)}
+ ${wave((k) => `let x${k}=loadf(source,l,select(0u,n${k},g${k}));`)}
+ ${wave((k) => `let t${k}=select(0.0,c${k}*x${k},g${k});`)}
+ return loadf(S_DIAG,l,slot)*loadf(source,l,slot)-canonical18Sum(array<f32,18>(${
+    spokes.map((k) => `t${k}`).join(",")}));`;
+}
+
 export function octreePersistentMGPCGWGSL(
   options: OctreePersistentMGPCGShaderOptions,
 ): string {
@@ -158,6 +275,63 @@ export function octreePersistentMGPCGWGSL(
     : `for(var cls=0u;cls<5u;cls+=1u){let n=worksetCount(cls);
      for(var item=lane;item<n;item+=LANES){let row=worksetRow(cls,item);
       if(!stopped()&&row<liveRows){if(cls==0u){${classZeroApply};}else if(cls==4u){applyIdentityRow(row,inCh,outCh);}else{applyRow(row,inCh,outCh);}}}}`;
+  // The band list carries row indices only; unlike `applyAllRows` it has no
+  // class in hand, because the class lives in the five accepted worksets and
+  // nowhere else. P4b republishes the class-0 membership as a per-row map in
+  // CH_BANDA — dead from the last dilation to the end of the dispatch — and the
+  // sweep takes the SAME `classZeroApply` string `applyAllRows` takes, so the
+  // full-apply oracle continues to disable both routings together.
+  const regularBandRows = options.regularBandRows;
+  if (regularBandRows !== undefined
+    && regularBandRows !== "census" && regularBandRows !== "route") {
+    throw new RangeError("Persistent MGPCG regular band-row mode is invalid");
+  }
+  const bandRowApply = regularBandRows === "route"
+    ? `if(uload(CH_BANDA,row)!=0u){${classZeroApply};}else{applyRow(row,inCh,outCh);}`
+    : "applyRow(row,inCh,outCh);";
+  // Gated so the declined option leaves the emitted kernel byte-identical,
+  // comments included: a shader module is hashed and cached by its source.
+  const bandRowsNote = regularBandRows === undefined ? "" : `// The band shell is
+// the one sweep that runs 2 * boundarySweeps - 1 times per Section 4.3
+// correction, and at HEAD every one of its rows takes the full eighteen-channel
+// power apply, including the rows the accepted publication already proved
+// regular. CH_BANDA carries that proof forward as a per-row map (P4b).
+`;
+  const bandCensusDeclarations = regularBandRows === undefined ? ""
+    : `const H_BAND_CENSUS=${OCTREE_PERSISTENT_MGPCG_HEADER.bandCensus}u;\n`
+      + `const BAND_CENSUS_MARKER=${
+        OCTREE_PERSISTENT_MGPCG_BAND_CENSUS_MARKER >>> 0}u;\n`;
+  // Ordering: after the third dilation's barrier (nothing reads CH_BANDA again)
+  // and before `compactBand`, so the map is visible to every later band sweep.
+  // The membership is exactly `applyAllRows`' `cls==0u` arm — P0 already proved
+  // the five lists partition `[0, rows())` exactly, so the bounds test below is
+  // belt-and-braces, and P4's `regularCoefficientTailValid` has already failed
+  // the solve closed for any class-0 row whose edge coefficients are nonzero.
+  const bandRowClassMap = regularBandRows === undefined ? "" : `
+  // --- P4b: class-0 row map for the Section 4.3 band sweep -----------------
+  for(var row=lane;row<liveRows;row+=LANES){if(!stopped()){ustore(CH_BANDA,row,0u);}}
+  storageBarrier();workgroupBarrier();
+  let regularRowCount=worksetCount(0u);
+  for(var item=lane;item<regularRowCount;item+=LANES){
+   let row=worksetRow(0u,item);
+   if(!stopped()&&row<liveRows){ustore(CH_BANDA,row,1u);}}
+  storageBarrier();workgroupBarrier();`;
+  // One serial lane-zero pass over a list bounded by the live row count, once
+  // per solve. It reads only what the sweep reads and writes only the four
+  // host-visible census words, so it cannot perturb any solve value.
+  const bandRowCensus = regularBandRows === undefined ? "" : `
+  if(lane==0u){
+   var censusRegular=0u;var censusCoarse=0u;let censusBand=wBand;
+   for(var item=0u;item<censusBand;item+=1u){
+    let row=uload(CH_BANDLIST,item);
+    if(row==INVALID||row>=liveRows||uload(CH_BANDA,row)==0u){continue;}
+    censusRegular+=1u;
+    if(row<arrayLength(&geometry)&&firstTrailingBit(geometry[row].y)!=0u){
+     censusCoarse+=1u;}}
+   arena[H_BAND_CENSUS]=BAND_CENSUS_MARKER;
+   arena[H_BAND_CENSUS+1u]=censusBand;
+   arena[H_BAND_CENSUS+2u]=censusRegular;
+   arena[H_BAND_CENSUS+3u]=censusCoarse;}`;
   const diagnosticOutputChannel = options.diagnosticOutputChannel
     ?? OCTREE_PERSISTENT_MGPCG_CHANNEL.pressure;
   const captureInitialResidual = options.diagnosticStageCapture
@@ -206,6 +380,33 @@ export function octreePersistentMGPCGWGSL(
     || diagnosticOutputChannel >= OCTREE_PERSISTENT_MGPCG_CHANNEL_COUNT) {
     throw new RangeError("Persistent MGPCG diagnostic output channel is invalid");
   }
+  const stagedSmoother = options.stagedSmoother === true;
+  const stagedSmootherDeclarations = stagedSmoother
+    ? `var<workgroup> wDispatch:array<u32,${OCTREE_PERSISTENT_MGPCG_HEADER.dispatchWords}>;\n`
+      + "var<workgroup> wAccepted:array<u32,8>;\n"
+    : "";
+  const acceptedRead = stagedSmoother ? "wAccepted[word]" : "acceptedBoundary[word]";
+  const dispatchRead = stagedSmoother ? "wDispatch[word]" : "arena[H_DISPATCH+word]";
+  const appliedBody = stagedSmoother ? stagedSmootherApplied()
+    : ` var terms:array<f32,18>;
+ for(var k=0u;k<18u;k+=1u){let c=loadf(S_XP+k,l,slot);if(c==0.0){continue;}
+  let other=topology[columnBase+k*span];
+  if(other==INVALID||other>=levelCapacity(l)){reportAt(OVERFLOW,75u,slot);continue;}
+  terms[k]=c*loadf(source,l,other);}
+ return loadf(S_DIAG,l,slot)*loadf(source,l,slot)-canonical18Sum(terms);`;
+  // Emitted ahead of BOTH P0 and the profiler's enter checkpoint. P0's
+  // lane-zero block snapshots the accepted authority through `acc()`, and the
+  // enter hook's sampled-lane predicate is `lane < rows() && !failed()`, which
+  // is another `acc()` — either one running before the copy would read
+  // uninitialized workgroup storage. An out-of-range staging read takes the
+  // identical WGSL bounds clamp the direct `acc()`/`dispatchWord()` read took,
+  // so a malformed authority binding still lands on the same validation code.
+  const stagedSmootherPrologue = stagedSmoother ? `
+ // --- P-1: solve-invariant header staging --------------------------------
+ for(var w=lane;w<${OCTREE_PERSISTENT_MGPCG_HEADER.dispatchWords}u;w+=LANES){
+  wDispatch[w]=arena[H_DISPATCH+w];}
+ if(lane<8u){wAccepted[lane]=acceptedBoundary[lane];}
+ storageBarrier();workgroupBarrier();` : "";
   const activityParameters = options.activity?.parameters
     ? `,\n ${options.activity.parameters}` : "";
   const activityEnter = options.activity?.enter ? `\n ${options.activity.enter}` : "";
@@ -284,8 +485,8 @@ const CH_BANDB=${OCTREE_PERSISTENT_MGPCG_CHANNEL.bandB}u;
 const CH_BANDLIST=${OCTREE_PERSISTENT_MGPCG_CHANNEL.bandList}u;
 const CH_RHS=${OCTREE_PERSISTENT_MGPCG_CHANNEL.rhs}u;
 const CH_SEED=${OCTREE_PERSISTENT_MGPCG_CHANNEL.pressureSeed}u;
-
-var<workgroup> merged:array<MergedScalars,${OCTREE_PERSISTENT_MGPCG_REDUCTION_LANES}>;
+${bandCensusDeclarations}
+${stagedSmootherDeclarations}var<workgroup> merged:array<MergedScalars,${OCTREE_PERSISTENT_MGPCG_REDUCTION_LANES}>;
 var<workgroup> scan:array<u32,256>;
 var<workgroup> wRows:u32;
 var<workgroup> wLevels:u32;
@@ -317,7 +518,7 @@ fn storePair(word:u32,value:CompensatedF32){
 // This removes nine staging copies and, more importantly, keeps the class
 // membership and coefficient bank under one live epoch selection.
 // ---------------------------------------------------------------------------
-fn acc(word:u32)->u32{return acceptedBoundary[word];}
+fn acc(word:u32)->u32{return ${acceptedRead};}
 fn capacity()->u32{return p.dims.w;}
 fn rows()->u32{return min(acc(2u),capacity());}
 fn acceptedEpoch()->u32{return acc(4u);}
@@ -353,7 +554,7 @@ fn validateAcceptedRowPartition()->u32{
   if(best!=expected||owner==INVALID){return 0x201u;}cursor[owner]+=1u;}
  for(var cls=0u;cls<5u;cls+=1u){if(cursor[cls]!=counts[cls]){return 0x202u+cls;}}
  return 0u;}
-fn dispatchWord(word:u32)->u32{return arena[H_DISPATCH+word];}
+fn dispatchWord(word:u32)->u32{return ${dispatchRead};}
 fn count(l:u32)->u32{return dispatchWord(l*DISPATCH_WORDS);}
 fn transferCount(l:u32)->u32{return dispatchWord(l*DISPATCH_WORDS+1u);}
 fn pageCount(l:u32)->u32{return dispatchWord(l*DISPATCH_WORDS+8u);}
@@ -670,10 +871,10 @@ fn applyIdentityRow(row:u32,inCh:u32,outCh:u32){
 fn applyAllRows(lane:u32,liveRows:u32,inCh:u32,outCh:u32){
  ${allRowsApply}}
 
-fn applyBandRows(lane:u32,bandCount:u32,inCh:u32,outCh:u32){
+${bandRowsNote}fn applyBandRows(lane:u32,bandCount:u32,inCh:u32,outCh:u32){
  for(var item=lane;item<bandCount;item+=LANES){
   let row=uload(CH_BANDLIST,item);
-  if(!stopped()&&row!=INVALID&&row<rows()){applyRow(row,inCh,outCh);}}}
+  if(!stopped()&&row!=INVALID&&row<rows()){${bandRowApply}}}}
 
 // ---------------------------------------------------------------------------
 // Section 4.3 boundary-band classification (encodeSetup's six stages)
@@ -746,12 +947,7 @@ fn smoothZeroValue(row:u32,rhsCh:u32)->f32{
 fn smoothable(l:u32,s:u32)->bool{return(state[at(S_FLAGS,l,s)]&GHOST)==0u;}
 fn applied(l:u32,slot:u32,source:u32)->f32{
  let base=levelBase(l);let span=totalLevelSlots();let columnBase=neighbourBase()+base+slot;
- var terms:array<f32,18>;
- for(var k=0u;k<18u;k+=1u){let c=loadf(S_XP+k,l,slot);if(c==0.0){continue;}
-  let other=topology[columnBase+k*span];
-  if(other==INVALID||other>=levelCapacity(l)){reportAt(OVERFLOW,75u,slot);continue;}
-  terms[k]=c*loadf(source,l,other);}
- return loadf(S_DIAG,l,slot)*loadf(source,l,slot)-canonical18Sum(terms);}
+${appliedBody}}
 fn chebyshevWeight(l:u32,phase:u32,degree:u32)->f32{
  let upper=loadf(S_SPECTRAL,l,0u);let lower=upper/30.0;
  if(!(lower>0.0)||!(upper>lower)||!finite(upper)){reportAt(NONPOSITIVE,76u,l);return 0.0;}
@@ -1120,7 +1316,7 @@ fn compactBand(lane:u32,liveRows:u32){
 // The single persistent entry point.
 // ---------------------------------------------------------------------------
 @compute @workgroup_size(256)
-fn persistentMGPCG(@builtin(local_invocation_index) lane:u32${activityParameters}){${activityEnter}
+fn persistentMGPCG(@builtin(local_invocation_index) lane:u32${activityParameters}){${stagedSmootherPrologue}${activityEnter}
  // --- P0: authority validation, uniform bootstrap -------------------------
  if(lane==0u){
  atomicStore(&control[7],INVALID);
@@ -1199,8 +1395,8 @@ fn persistentMGPCG(@builtin(local_invocation_index) lane:u32${activityParameters
   storageBarrier();workgroupBarrier();
   for(var row=lane;row<liveRows;row+=LANES){
    if(!stopped()){ustore(CH_BANDB,row,dilatedBand(row,false));}}
-  storageBarrier();workgroupBarrier();
-  compactBand(lane,liveRows);}
+  storageBarrier();workgroupBarrier();${bandRowClassMap}
+  compactBand(lane,liveRows);${bandRowCensus}}
  let bandCount=workgroupUniformLoad(&wBand);
 
  if(lane==0u){wHalt=select(0u,1u,failed());}

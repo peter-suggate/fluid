@@ -1002,6 +1002,7 @@ export type OctreeSPGridVCyclePipelineName = "beginL1CapturePlan"
   | "linkCompactCandidatePageNeighbours"
   | "buildCandidateStencils" | "publishCandidateSpectralBounds"
   | "validateCandidateHierarchy" | "commitCandidateLevels"
+  | "commitCandidateLevelsParallel"
   | "commitCandidateTouchedBricks"
   | "finalizeLifecycle" | "prepareCorrectionDispatches" | "clearCorrection"
   | "zeroVectors" | "seedRhs" | "seedRhsAndClearCorrection"
@@ -1020,6 +1021,44 @@ const OCTREE_SPGRID_HIERARCHICAL_ONLY_PIPELINES = new Set<OctreeSPGridVCyclePipe
   "restrictAndGhostAccumulate", "coarseVcycleTail", "exactBottom",
   "prolongAndGhostPropagate", "publish",
 ]);
+
+/**
+ * Select the lane-parallel hierarchy commit.
+ *
+ * `commitCandidateLevels` publishes the entire accepted hierarchy -- the brick
+ * directory, every retired and every claimed slot's 19 stencil + 18 neighbour
+ * + 26 state channels, the row map, the logical/physical page records and
+ * directory, and the transfer chains -- and since `a56ddd0` it does all of it
+ * on ONE THREAD PER LEVEL. That is three to five lanes carrying on the order
+ * of 1e5-1e6 dependent global load/store pairs, and it measured 37.10 ms of a
+ * 224.37 ms mini advance at f4d11e7: 16% of the frame, the #2 pass, and by
+ * itself half of the entire 69.6 ms advance of 2026-07-29.
+ *
+ * `commitCandidateLevelsParallel` fixes the collapsed *work* without giving
+ * back the launch shape `a56ddd0` correctly fixed. `CANDIDATE_SCHEDULE.commit`
+ * is authored by `writeCandidateSchedule(7u, commitItems, 1u)`, so its record
+ * is already `commitItems` WORKGROUPS -- `runCandidateIndirect` feeds it
+ * straight to `dispatchWorkgroupsIndirect` -- and raising the entry point from
+ * `@workgroup_size(1)` to `@workgroup_size(64)` therefore changes not one byte
+ * of the launch: still indirect, still live-count shaped, still zero capacity
+ * anywhere near a dispatch argument. Bet 1 is untouched; only the sixty-four
+ * lanes inside each level's workgroup are new.
+ *
+ * The kernel is bit-identical by construction: the commit is a pure copy of
+ * candidate words into accepted words plus a fixed set of per-level header
+ * words, with no float arithmetic, no accumulator and no atomic, so there is
+ * nothing to reassociate and only the lane that issues a store changes. The
+ * A/B is therefore a wall-clock comparison, not a physics gate.
+ *
+ * Default OFF until that A/B lands.
+ */
+export function spgridParallelLevelCommitEnabled(
+  environment?: Readonly<Record<string, string | undefined>>,
+): boolean {
+  const resolved = environment
+    ?? (typeof process !== "undefined" ? process.env : undefined);
+  return resolved?.FLUID_SPGRID_PARALLEL_LEVEL_COMMIT === "1";
+}
 
 /** Pipeline reachability mirror used by construction and non-GPU tests. */
 export function octreeSPGridPipelineNamesForExecutor(
@@ -1071,6 +1110,9 @@ export const OCTREE_SPGRID_VCYCLE_BINDINGS: Readonly<Record<OctreeSPGridVCyclePi
   validateCandidateHierarchy: [0, 6, 13, 14, 17],
   commitCandidateTouchedBricks: [0, 4, 13, 14, 15, 27, 28],
   commitCandidateLevels: [0, 3, 4, 5, 6, 13, 14, 15, 16, 17],
+  // Identical arena set: the parallel commit differs only in which lane issues
+  // each store, so it reaches exactly the same ten buffers.
+  commitCandidateLevelsParallel: [0, 3, 4, 5, 6, 13, 14, 15, 16, 17],
   finalizeLifecycle: [0, 3, 6, 7, 13],
   prepareCorrectionDispatches: [0, 3, 6, 7, 19],
   clearCorrection: [0, 3, 7, 9],
@@ -1170,6 +1212,9 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
   /** Exact fingerprint of the inputs the last committed hierarchy consumed. */
   private readonly committedInputs: GPUBuffer;
   private readonly touchedDirectoryEnabled = spgridTouchedRadixSortEnabled();
+  /** See `spgridParallelLevelCommitEnabled`. Selects the entry point only; the
+   * indirect record, its offset and its live-count shape are identical. */
+  private readonly parallelLevelCommit = spgridParallelLevelCommitEnabled();
   private readonly touchedDirectoryTripwire = this.touchedDirectoryEnabled
     && typeof process !== "undefined"
     && process.env?.FLUID_SPGRID_TOUCHED_RADIX_TRIPWIRE === "1";
@@ -2019,8 +2064,11 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     this.run(pass, "finalizeL1CapturePublication", 0, input, [1, 1, 1]);
     if (this.touchedDirectoryEnabled) this.run(pass, "commitCandidateTouchedBricks", 0, input,
       [1, 1, 1]);
-    this.runCandidateIndirect(pass, "commitCandidateLevels", 0, input,
-      CANDIDATE_SCHEDULE.commit);
+    // Same record, same offset, same workgroup count. Only the lane count
+    // inside each level's workgroup differs between the two entry points.
+    this.runCandidateIndirect(pass,
+      this.parallelLevelCommit ? "commitCandidateLevelsParallel" : "commitCandidateLevels",
+      0, input, CANDIDATE_SCHEDULE.commit);
     this.run(pass, "finalizeLifecycle", 0, input, [1, 1, 1]);
     // Fingerprint the exact inputs this hierarchy consumed, and only after the
     // lifecycle gate accepted it. A rejected epoch leaves the previous
@@ -4723,6 +4771,139 @@ fn commitCandidateLevelAt(l:u32){
 }
 @compute @workgroup_size(1) fn commitCandidateLevels(@builtin(global_invocation_id) g:vec3u){
  let l=g.x;if(l<levels()){commitCandidateLevelAt(l);}
+}
+// One WORKGROUP per level instead of one THREAD per level. Selected by
+// FLUID_SPGRID_PARALLEL_LEVEL_COMMIT=1; see spgridParallelLevelCommitEnabled.
+//
+// LAUNCH. Unchanged. writeCandidateSchedule(7u,commitItems,1u) publishes
+// blocks=commitItems into CANDIDATE_SCHEDULE.commit and runCandidateIndirect
+// hands that record to dispatchWorkgroupsIndirect, which reads WORKGROUP
+// counts. commitCandidateLevels above therefore already launches commitItems
+// workgroups of one lane; this entry point launches the same commitItems
+// workgroups with sixty-four. No capacity reaches a dispatch argument in
+// either arm, so Bet 1 holds exactly as it does today.
+//
+// BIT IDENTITY. Every store below writes the same word with the same value as
+// the serial form; only the issuing lane changes. The commit performs no
+// floating-point arithmetic, holds no accumulator and touches no atomic -- it
+// copies candidateTopology/candidateState/candidateDispatch words into
+// topology/state/dispatchMeta and stamps a fixed set of per-level header words
+// -- so there is no sum to reassociate and no order-dependent value. The three
+// places where the serial form got an ordering for free are restored with
+// storage barriers, every word indexed by LEVEL rather than by item is written
+// by lane 0 alone, and the one break becomes an equivalent bound plus one
+// report. captureReport is a non-atomic OR of a single constant flag
+// (OVERFLOW) and no lane in this dispatch re-reads capturePages.error, so
+// concurrent reporters all store the identical value.
+const COMMIT_LANES:u32=64u;
+fn commitCandidateLevelLanes(l:u32,lane:u32){
+ // Launder every gate through uniformWord. workgroup_id is uniform, but
+ // topologyDirty/stencilDirty/captureFailed/levelDelta are read_write storage
+ // loads, which WGSL's uniformity analysis treats as non-uniform: a barrier
+ // predicated on one of them does not compile, and the early return has to be
+ // uniform too or a lane would exit while its siblings still wait on a
+ // barrier. Bit 0 topology, bit 1 stencil, bit 2 transfer; a zero word is
+ // exactly the serial form's two early returns, because a raw transferChanged
+ // with a clean topology implies l+1<levels().
+ let topologyChanged=topologyDirty(l);
+ let transferChanged=topologyChanged||(l+1u<levels()&&topologyDirty(l+1u));
+ var gate=0u;
+ if(topologyChanged){gate|=1u;}
+ if(stencilDirty(l)){gate|=2u;}
+ if(transferChanged&&l+1u<levels()){gate|=4u;}
+ if(captureFailed()||levelDelta[deltaAt(l,4u)]!=0u){gate=0u;}
+ let live=uniformWord(lane,gate);
+ if(live==0u){return;}
+ let topo=(live&1u)!=0u;let stencil=(live&2u)!=0u;let transfer=(live&4u)!=0u;
+ let oldSlots=count(l);let newSlots=selectedCount(l);
+ // Phase 1. The dense brick directory and the retired accepted identities.
+ // Independent: brick records are four disjoint words at an index pure in
+ // brick, and commitCandidateSlot writes only slot-indexed channel words.
+ // The retired loop READS topology[workBase()+levelBase(l)+i], which phase 2
+ // overwrites, so the two cannot share a phase.
+ if(topo){
+  if(!touchedDirectory()){for(var brick=lane;brick<brickCount(l);brick+=COMMIT_LANES){
+    let record=directoryBase()+16u+(brickLevelOffset(l)+brick)*4u;
+   for(var word=0u;word<4u;word+=1u){topology[record+word]=candidateTopology[record+word];}}}
+  for(var i=lane;i<oldSlots;i+=COMMIT_LANES){let slot=workSlot(l,i);commitCandidateSlot(l,slot,true,true);}
+ }
+ storageBarrier();workgroupBarrier();
+ // Phase 2. The claimed identities, the row map, and the retired page
+ // directory. Three disjoint arenas (work/ranked, row map, page directory),
+ // each written at an index pure in the loop variable. pageKey reads
+ // topology[pageRecord(l,i)], which phase 3 overwrites, so those two cannot
+ // share a phase either.
+ if(topo){
+  for(var i=lane;i<newSlots;i+=COMMIT_LANES){let slot=cWorkSlot(l,i);commitCandidateSlot(l,slot,true,true);
+   topology[workBase()+levelBase(l)+i]=slot;
+   topology[rankedSlotsBase()+levelBase(l)+i]=candidateTopology[rankedSlotsBase()+levelBase(l)+i];}
+  for(var r=lane;r<max(rows(),previousRows());r+=COMMIT_LANES){topology[rowMapBase()+l*p.capacity.x+r]=candidateTopology[rowMapBase()+l*p.capacity.x+r];}
+  let oldPages=pageCount(l);for(var i=lane;i<oldPages;i+=COMMIT_LANES){let key=pageKey(l,i);if(key==0u){captureReport(OVERFLOW);continue;}
+   let q=decode(key,l)/vec3u(8u,8u,4u);let d=logicalPageDims(l);
+   if(any(q>=d)){captureReport(OVERFLOW);}else{let at=pageDirectoryBase()+pageLevelOffset(l)+q.x+d.x*(q.y+d.y*q.z);
+    topology[at]=candidateTopology[at];}}
+ }
+ storageBarrier();workgroupBarrier();
+ // Phase 3. The claimed page records (28 disjoint words per i) plus the
+ // stencil-only path, which runs only on a clean topology and therefore never
+ // coexists with phases 1-2.
+ if(topo){
+  let newPages=candidateDispatch[l*DISPATCH_WORDS+8u];for(var i=lane;i<newPages;i+=COMMIT_LANES){let page=pageRecord(l,i);
+   for(var word=0u;word<28u;word+=1u){topology[page+word]=candidateTopology[page+word];}
+   let q=decode(candidateTopology[page],l)/vec3u(8u,8u,4u);let d=logicalPageDims(l);
+   if(any(q>=d)){captureReport(OVERFLOW);}else{let at=pageDirectoryBase()+pageLevelOffset(l)+q.x+d.x*(q.y+d.y*q.z);
+    topology[at]=candidateTopology[at];}}
+ }
+ if(stencil&&!topo){for(var i=lane;i<newSlots;i+=COMMIT_LANES){commitCandidateSlot(l,selectedWorkSlot(l,i),false,true);}}
+ storageBarrier();workgroupBarrier();
+ // Phase 4. The transfer chains, in the level's own parent/fine arena. The
+ // first loop's workSlot(l,i) must observe phase 2's republished work list:
+ // the serial form read it after that same overwrite, and reproducing the
+ // published bytes means reproducing that read.
+ if(transfer){
+  for(var i=lane;i<count(l);i+=COMMIT_LANES){let fine=workSlot(l,i);topology[fineHeadBase(l)+fine]=candidateTopology[fineHeadBase(l)+fine];
+   topology[fineCountBase(l)+fine]=candidateTopology[fineCountBase(l)+fine];}
+  for(var i=lane;i<selectedCount(l);i+=COMMIT_LANES){let fine=selectedWorkSlot(l,i);topology[fineHeadBase(l)+fine]=candidateTopology[fineHeadBase(l)+fine];
+   topology[fineCountBase(l)+fine]=candidateTopology[fineCountBase(l)+fine];}
+  for(var i=lane;i<count(l+1u);i+=COMMIT_LANES){let coarse=workSlot(l+1u,i);topology[parentHeadBase(l)+coarse]=candidateTopology[parentHeadBase(l)+coarse];
+   topology[parentTailBase(l)+coarse]=candidateTopology[parentTailBase(l)+coarse];}
+  for(var i=lane;i<selectedCount(l+1u);i+=COMMIT_LANES){let coarse=selectedWorkSlot(l+1u,i);topology[parentHeadBase(l)+coarse]=candidateTopology[parentHeadBase(l)+coarse];
+   topology[parentTailBase(l)+coarse]=candidateTopology[parentTailBase(l)+coarse];}
+  // The serial break becomes a bound plus one report: that loop wrote
+  // records [0,min(records,transferCapacity)) and OR'd OVERFLOW exactly when
+  // the record count exceeded the capacity.
+  let records=max(transferCount(l),candidateDispatch[l*DISPATCH_WORDS+1u]);
+  let bound=min(records,transferCapacity(l));
+  if(records>transferCapacity(l)&&lane==0u){captureReport(OVERFLOW);}
+  for(var i=lane;i<bound;i+=COMMIT_LANES){for(var w=0u;w<4u;w+=1u){topology[transferWord(l,i,w)]=candidateTopology[transferWord(l,i,w)];}}
+ }
+ storageBarrier();workgroupBarrier();
+ // The tail is every word indexed by LEVEL rather than by item: the level's
+ // spectral bound (slot 0, which the phase 1/2 slot loops may also have
+ // written and which the serial form overwrote afterwards), the directory
+ // generation stamp, the delta stamp and the twelve per-level dispatch words.
+ // Sixty-four lanes storing the same word is what lane 0 is for -- and it also
+ // keeps the read-after-write at let pages=dispatchMeta[...+8u] inside one
+ // lane, exactly as the serial form had it.
+ if(lane!=0u){return;}
+ if(stencil){state[at(SPECTRAL,l,0u)]=levelDelta[deltaAt(l,7u)];}
+ if(topo){dispatchMeta[l*DISPATCH_WORDS]=candidateDispatch[l*DISPATCH_WORDS];
+  dispatchMeta[l*DISPATCH_WORDS+8u]=candidateDispatch[l*DISPATCH_WORDS+8u];
+  topology[directoryBase()+2u+l]=candidateTopology[directoryBase()+2u+l];
+  levelDelta[deltaAt(l,5u)]=captureGeneration();}
+ if(transfer){dispatchMeta[l*DISPATCH_WORDS+1u]=candidateDispatch[l*DISPATCH_WORDS+1u];}
+ let blocks=(selectedCount(l)+63u)/64u;dispatchMeta[l*DISPATCH_WORDS+2u]=min(65535u,blocks);
+ dispatchMeta[l*DISPATCH_WORDS+3u]=select(1u,(blocks+65534u)/65535u,blocks>0u);dispatchMeta[l*DISPATCH_WORDS+4u]=1u;
+ var parentSlots=0u;if(l+1u<levels()){parentSlots=selectedCount(l+1u);}
+ dispatchMeta[l*DISPATCH_WORDS+5u]=min(65535u,parentSlots);
+ dispatchMeta[l*DISPATCH_WORDS+6u]=select(1u,(parentSlots+65534u)/65535u,parentSlots>0u);
+ dispatchMeta[l*DISPATCH_WORDS+7u]=1u;
+ let pages=dispatchMeta[l*DISPATCH_WORDS+8u];dispatchMeta[l*DISPATCH_WORDS+9u]=pages;
+ dispatchMeta[l*DISPATCH_WORDS+10u]=1u;dispatchMeta[l*DISPATCH_WORDS+11u]=1u;
+}
+@compute @workgroup_size(64) fn commitCandidateLevelsParallel(@builtin(workgroup_id) wg:vec3u,
+ @builtin(local_invocation_index) lane:u32){
+ let l=wg.x;if(l<levels()){commitCandidateLevelLanes(l,lane);}
 }
 @compute @workgroup_size(1) fn finalizeLifecycle(){let base=lifecycleBase();if(atomicLoad(&control[0])==0u&&!captureFailed()){
  dispatchMeta[base]=1u;dispatchMeta[base+1u]=rows();return;}

@@ -37,6 +37,7 @@
  *      FLUID_SVO_DRY_FRAME_CONE_FANOUT (1 enables deterministic one-cone-per-lane fan-out),
  *      FLUID_SVO_DRY_FRAME_STRIP_DIAGNOSTICS / _INLINE_CONE_BOUNDARIES /
  *      _CLEAR_CONE_QUEUE_BLIT / _F16 / _DROP_GI_PAGE_CACHE
+ *      / _EDGE_RECEIVER_RECOVERY (0 disables the bounded exact-identity edge tier)
  *      / _SHORT_STACK
  *      / _TINY_STACK
  *      (1 enables the named Dawn experiment),
@@ -189,6 +190,7 @@ const maximumShadedLights = Number(process.env.FLUID_SVO_DRY_FRAME_MAX_LIGHTS ??
 const readVoxelLightCounters = process.env.FLUID_SVO_DRY_FRAME_VOXEL_LIGHT_COUNTERS === "1";
 const optimizationExperiments: SvoDryOptimizationExperiments = {
   voxelLightCache: process.env.FLUID_SVO_DRY_FRAME_VOXEL_LIGHT_CACHE !== "0",
+  edgeReceiverRecovery: process.env.FLUID_SVO_DRY_FRAME_EDGE_RECEIVER_RECOVERY !== "0",
   inlineConeBoundaries: process.env.FLUID_SVO_DRY_FRAME_INLINE_CONE_BOUNDARIES === "1",
   clearConeQueueWithBlit: process.env.FLUID_SVO_DRY_FRAME_CLEAR_CONE_QUEUE_BLIT === "1",
   halfPrecisionLighting: process.env.FLUID_SVO_DRY_FRAME_F16 === "1",
@@ -1173,6 +1175,20 @@ if (rawOutPath) {
 }
 const configuredRows = coneScale === 1 ? referenceRows : reducedRows;
 assert.ok(configuredRows, "configured-scale frame was not captured");
+const configuredPixels = decodePixels(configuredRows);
+const failureTintPixels = { globalIllumination: 0, directVisibility: 0, ambientOcclusion: 0, reconstruction: 0 };
+for (let pixel = 0; pixel < width * height; pixel += 1) {
+  const r = toneByte(configuredPixels[pixel * 4]);
+  const g = toneByte(configuredPixels[pixel * 4 + 1]);
+  const b = toneByte(configuredPixels[pixel * 4 + 2]);
+  // Production mixes typed failure primaries at 82%; these conservative
+  // thresholds deliberately count only conspicuous diagnostic pixels rather
+  // than similarly hued authored materials.
+  if (r > 160 && b > 120 && g < 70) failureTintPixels.globalIllumination += 1;
+  else if (r > 160 && g < 100 && b < 60) failureTintPixels.directVisibility += 1;
+  else if (r < 80 && g > 120 && b > 150) failureTintPixels.ambientOcclusion += 1;
+  else if (r > 160 && g > 150 && b < 80) failureTintPixels.reconstruction += 1;
+}
 if (configuredRawOutPath) {
   mkdirSync(path.dirname(configuredRawOutPath), { recursive: true });
   writeFileSync(configuredRawOutPath,
@@ -1522,6 +1538,7 @@ const result = {
     warmVisibilityProbe: warmConeVisibilityProbe,
     lightAttribution_ms,
     errorStats,
+    failureTintPixels,
     fallback,
     images,
   },

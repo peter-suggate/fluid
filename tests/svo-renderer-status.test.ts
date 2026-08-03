@@ -68,6 +68,18 @@ test("silhouette refinement lifecycle is preserved verbatim in renderer diagnost
   });
 });
 
+test("effective renderer status exposes an exact lighting fallback without failing SVO", () => {
+  const lightingVisibility = {
+    state: "exact" as const,
+    fallback: true,
+    detail: "Derived hierarchy exceeds this device's page capacity",
+  };
+  assert.deepEqual(resolveEffectiveRendererStatus({ ...ready, lightingVisibility }), {
+    state: "active",
+    lightingVisibility,
+  });
+});
+
 test("effective renderer status distinguishes pending and failed-closed SVO states", () => {
   assert.deepEqual(resolveEffectiveRendererStatus({ ...ready, sourceAvailable: false, svoEncoded: false }), {
     state: "pending", failureReason: "missing-source",
@@ -130,6 +142,7 @@ test("renderer publishes effective status through the viewport diagnostics bridg
     "the fixed renderer arenas receive the new exact scene publication without a source rebuild");
   assert.match(viewport, /effectiveRendererStatus\) => useDiagnosticsStore\.getState\(\)\.set\(\{ effectiveRendererStatus \}\)/);
   assert.match(panel, /data-testid="effective-renderer-status"/);
+  assert.match(panel, /data-testid="lighting-visibility-status"/);
   assert.match(panel, /effectiveRendererStatus\.detail/);
   for (const reason of ["missing-source", "unsupported-terrain", "unsupported-glass-cutout", "missing-pbr-materials", "missing-lighting-publications", "pipeline-compile-failure", "frame-rejected"]) assert.ok(panel.includes(`"${reason}"`));
   assert.doesNotMatch(panel, /RASTER FALLBACK|SVO fallback/);

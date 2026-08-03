@@ -36,23 +36,29 @@ import {
   type OctreeSPGridVCyclePlan,
 } from "./webgpu-octree-spgrid-vcycle";
 import {
+  OCTREE_PERSISTENT_MGPCG_BAND_CENSUS_MARKER,
   OCTREE_PERSISTENT_MGPCG_CHANNEL,
   OCTREE_PERSISTENT_MGPCG_CHANNEL_COUNT,
   OCTREE_PERSISTENT_MGPCG_HEADER,
   OCTREE_PERSISTENT_MGPCG_PARTIAL_WORDS,
   OCTREE_PERSISTENT_MGPCG_REDUCTION_LANES,
+  OCTREE_PERSISTENT_MGPCG_STAGED_SMOOTHER_WORKGROUP_BYTES,
   OCTREE_PERSISTENT_MGPCG_WORKGROUP_BYTES,
   octreePersistentMGPCGArenaWords,
   octreePersistentMGPCGWGSL,
+  octreePersistentMGPCGWorkgroupBytes,
 } from "./webgpu-octree-persistent-mgpcg.wgsl";
 
 export {
+  OCTREE_PERSISTENT_MGPCG_BAND_CENSUS_MARKER,
   OCTREE_PERSISTENT_MGPCG_CHANNEL,
   OCTREE_PERSISTENT_MGPCG_CHANNEL_COUNT,
   OCTREE_PERSISTENT_MGPCG_HEADER,
+  OCTREE_PERSISTENT_MGPCG_STAGED_SMOOTHER_WORKGROUP_BYTES,
   OCTREE_PERSISTENT_MGPCG_WORKGROUP_BYTES,
   octreePersistentMGPCGArenaWords,
   octreePersistentMGPCGWGSL,
+  octreePersistentMGPCGWorkgroupBytes,
 };
 
 /**
@@ -155,6 +161,133 @@ export function octreePersistentMGPCGCompactLiveRowsEnabled(
   const resolved = environment
     ?? (typeof process !== "undefined" ? process.env : undefined);
   return resolved?.FLUID_OCTREE_PERSISTENT_MGPCG_COMPACT_ROWS !== "0";
+}
+
+/**
+ * Memory-only staging for the single-workgroup smoother. Default OFF.
+ *
+ * WHAT IT CHANGES. Nothing arithmetic. It (a) copies the two solve-invariant
+ * header regions — the immutable dispatch header `arena[16..272)` and the
+ * eight-word accepted-authority prefix of a `read` binding — into workgroup
+ * storage once at kernel entry, so `count()`/`pageCount()`/`transferCount()`
+ * and `acceptedBank()` stop re-reading storage on every call; and (b) issues
+ * `applied()`'s eighteen stencil spokes as three waves of independent loads
+ * held in eighteen named scalars, instead of one dependent load chain feeding a
+ * dynamically indexed `array<f32,18>`. Same eighteen terms, same order, same
+ * `canonical18Sum`, same `reportAt` sites — see the equality argument on
+ * `stagedSmootherApplied` in the WGSL module.
+ *
+ * WHY IT DEFAULTS OFF. The tree's correctness contract for this kernel is
+ * bitwise, not approximate: `test:webgpu:symmetric-expansion` pins the factor-1
+ * lane D4-symmetric through step 67 and first divergent at step 68. The
+ * equality argument above is a proof about the emitted WGSL, not about what
+ * Tint and the Metal backend do with a shader whose register pressure and
+ * unrolling shape both change. Until that oracle has been re-run against the
+ * variant on real hardware, the claim is unwitnessed, and a silent one-ulp move
+ * in the smoother would be indistinguishable from a topology regression in
+ * every downstream lane. The A/B and the symmetry gate flip this, not review.
+ *
+ * The 1,056 extra bytes of workgroup storage are asserted against
+ * `maxComputeWorkgroupStorageSize` before any pipeline exists, exactly as the
+ * baseline footprint is: an overflow here is a validation error the
+ * `skip_validation` harness turns into a SIGSEGV rather than a message.
+ */
+export function octreePersistentMGPCGStagedSmootherEnabled(
+  environment?: Readonly<Record<string, string | undefined>>,
+): boolean {
+  const resolved = environment
+    ?? (typeof process !== "undefined" ? process.env : undefined);
+  return resolved?.FLUID_OCTREE_MGPCG_STAGED_SMOOTHER === "1";
+}
+
+/** Selected mode for {@link octreePersistentMGPCGRegularBandRowsMode}. */
+export type OctreePersistentMGPCGRegularBandRowsMode = "off" | "census" | "route";
+
+/**
+ * Class-0 routing for the Section 4.3 band sweep. Default OFF.
+ *
+ * WHAT IT CHANGES. `applyAllRows` already reads the accepted five-class
+ * worksets and sends `cls == 0` rows to `applyRegularRow` — six channels,
+ * `regularPageSlot`, no `finerAdjoint`. `applyBandRows` cannot, because a row's
+ * class exists *only* as membership in one of those five lists and the band
+ * list carries bare row indices. This publishes that membership once, in P4b,
+ * as a per-row map in CH_BANDA (dead from the third dilation to the end of the
+ * dispatch), and then the band sweep takes the same `applyRegularRow` for the
+ * same rows. That sweep runs `2 * boundarySweeps - 1` times per Section 4.3
+ * correction and is where the kernel's time is.
+ *
+ * `"census"` publishes the map and the four census words but leaves every band
+ * row on `applyRow`. It exists so the class-0 hit rate on band rows, the coarse
+ * share of those rows, and the map's own cost are all measurable *before* the
+ * arithmetic moves. `"1"` selects the routing and keeps the census.
+ *
+ * WHAT IT IS NOT. It is NOT bit-identical, and this is Gate B, not Gate A:
+ *
+ *  - `applyRow` adds `finerAdjoint(...)`, which for a class-0 row returns
+ *    `+0.0` (level 0 returns the literal; above it, a class-0 row owns no fine
+ *    ghosts because `rowTransition` keeps every level-transition row out of
+ *    class 0, so all eight `canonical18Sum` children fold to `+0.0`). Dropping
+ *    a `+ (+0.0)` is value-preserving except that it can no longer turn a
+ *    `-0.0` row image into `+0.0`. Numerical equivalence up to signed zero is
+ *    the strongest claim available, and the argument about which rows own
+ *    ghosts is a property of the publisher, not a local invariant.
+ *  - `applyRegularRow` adds two authority checks (`caseId == 0`, no physical
+ *    boundary bits) that `applyRow` does not make. Both are false by the
+ *    definition of class 0, and — decisively — P2's `applyAllRows` already ran
+ *    `applyRegularRow` over every class-0 row before any band exists, and every
+ *    report either path can raise for a given row is a function of topology and
+ *    row geometry only. So the routing adds no reachable report that the solve
+ *    has not already made.
+ *  - Its address resolver is `regularPageSlot`, not `opPageSlot`. That is not
+ *    obviously fewer loads (it trades `decode`'s dependent page-origin probe
+ *    for a dependent `S_KEY` probe and two dispatch-header reads); its
+ *    measured value here is the twelve skipped edge channels and the removed
+ *    `finerAdjoint`, so a lane whose rows are all at level 0 should expect much
+ *    less than one whose band is coarse.
+ *
+ * WHY IT DEFAULTS OFF. The tree's contract for this kernel is bitwise: the
+ * factor-1 `symmetric-expansion` lane is D4-symmetric through step 67 and first
+ * diverges at 68. A signed-zero flip is invisible to that oracle's enforced
+ * fields — every one of them gates on `maximumAbsoluteError`, and
+ * `Math.abs(+0 - -0)` is `0`; only `topology`, an integer field, gates on
+ * `Object.is` — but "invisible to the oracle" is an argument, and the argument
+ * has not been witnessed on hardware. The A/B plus the symmetry gate flip this,
+ * not review.
+ */
+export function octreePersistentMGPCGRegularBandRowsMode(
+  environment?: Readonly<Record<string, string | undefined>>,
+): OctreePersistentMGPCGRegularBandRowsMode {
+  const resolved = environment
+    ?? (typeof process !== "undefined" ? process.env : undefined);
+  const value = resolved?.FLUID_OCTREE_MGPCG_REGULAR_BAND_ROWS;
+  if (value === "1") return "route";
+  if (value === "census") return "census";
+  return "off";
+}
+
+/** The four `bandCensus` words, decoded only when this dispatch authored them. */
+export interface OctreePersistentMGPCGBandCensus {
+  readonly bandRows: number;
+  readonly regularBandRows: number;
+  /** Regular band rows whose native level is above zero — the only ones whose
+   * `finerAdjoint` probe does more than return a literal. */
+  readonly coarseRegularBandRows: number;
+  /** `regularBandRows / bandRows`; the multiplier on any per-row saving. */
+  readonly regularShare: number;
+}
+
+export function decodeOctreePersistentMGPCGBandCensus(
+  words: Uint32Array,
+): OctreePersistentMGPCGBandCensus | null {
+  if (words.length < OCTREE_PERSISTENT_MGPCG_HEADER.bandCensusWords) return null;
+  if (words[0] !== OCTREE_PERSISTENT_MGPCG_BAND_CENSUS_MARKER) return null;
+  const bandRows = words[1]!, regularBandRows = words[2]!;
+  const coarseRegularBandRows = words[3]!;
+  if (regularBandRows > bandRows || coarseRegularBandRows > regularBandRows) return null;
+  return Object.freeze({
+    bandRows, regularBandRows, coarseRegularBandRows,
+    regularShare: bandRows === 0 ? 0 : regularBandRows / bandRows,
+  });
 }
 
 export const OCTREE_PERSISTENT_MGPCG_ACTIVITY_MODULE_ID = "octree/persistent-mgpcg";
@@ -300,7 +433,7 @@ export class WebGPUOctreePersistentMGPCG implements OctreePersistentMGPCGExecuto
   readonly allocatedBytes: number;
   readonly arenaWords: number;
   readonly storageBindingCount = OCTREE_PERSISTENT_MGPCG_STORAGE_BINDING_COUNT;
-  readonly workgroupStorageBytes = OCTREE_PERSISTENT_MGPCG_WORKGROUP_BYTES;
+  readonly workgroupStorageBytes: number;
 
   private readonly params: GPUBuffer;
   private readonly arena: GPUBuffer;
@@ -311,6 +444,8 @@ export class WebGPUOctreePersistentMGPCG implements OctreePersistentMGPCGExecuto
   private readonly groups: Array<{ pressureOut: GPUBuffer; group: GPUBindGroup }> = [];
   private readonly dispatchMetaBytes: number;
   private readonly compactLiveRows: boolean;
+  private readonly stagedSmoother: boolean;
+  private readonly regularBandRows: OctreePersistentMGPCGRegularBandRowsMode;
   private destroyed = false;
 
   /** GPU-authored records suitable for the existing diagnostics readback. */
@@ -364,11 +499,46 @@ export class WebGPUOctreePersistentMGPCG implements OctreePersistentMGPCGExecuto
     }
   }
 
+  /**
+   * Post-submit class-0 band census. Observational, and `null` unless
+   * `FLUID_OCTREE_MGPCG_REGULAR_BAND_ROWS` selected a mode for this executor —
+   * the census words are only authored by that emission, so a stale arena
+   * cannot be mistaken for a measurement.
+   */
+  async readBandCensus(): Promise<OctreePersistentMGPCGBandCensus | null> {
+    this.assertLive();
+    if (this.regularBandRows === "off") return null;
+    const bytes = OCTREE_PERSISTENT_MGPCG_HEADER.bandCensusWords * 4;
+    const readback = this.device.createBuffer({
+      label: "Persistent MGPCG band census readback",
+      size: bytes,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+    const encoder = this.device.createCommandEncoder({ label: "Read persistent band census" });
+    encoder.copyBufferToBuffer(this.arena,
+      OCTREE_PERSISTENT_MGPCG_HEADER.bandCensus * 4, readback, 0, bytes);
+    this.device.queue.submit([encoder.finish()]);
+    try {
+      await readback.mapAsync(GPUMapMode.READ);
+      return decodeOctreePersistentMGPCGBandCensus(
+        Uint32Array.from(new Uint32Array(readback.getMappedRange())),
+      );
+    } finally {
+      if (readback.mapState === "mapped") readback.unmap();
+      readback.destroy();
+    }
+  }
+
   constructor(
     private readonly device: GPUDevice,
     private readonly source: OctreePersistentMGPCGSource,
     private readonly options: OctreePersistentMGPCGOptions,
   ) {
+    // Resolved before the capability gate below, which asserts the declared
+    // workgroup footprint against the device limit.
+    this.stagedSmoother = octreePersistentMGPCGStagedSmootherEnabled();
+    this.regularBandRows = octreePersistentMGPCGRegularBandRowsMode();
+    this.workgroupStorageBytes = octreePersistentMGPCGWorkgroupBytes(this.stagedSmoother);
     const rowCapacity = positiveInteger(source.rowCapacity, "Persistent MGPCG row capacity");
     // This is provisioned arena capacity, not adaptive work. The exact live
     // row count is GPU-published only after topology construction, so the
@@ -562,6 +732,8 @@ export class WebGPUOctreePersistentMGPCG implements OctreePersistentMGPCGExecuto
       section63BandOracle,
       fullApplyOracle,
       linearApplyOracle,
+      stagedSmoother: this.stagedSmoother,
+      ...(this.regularBandRows === "off" ? {} : { regularBandRows: this.regularBandRows }),
       diagnosticStageCapture,
       ...(diagnosticOutputChannel === undefined ? {} : { diagnosticOutputChannel }),
       ...(this.activity.enabled ? { activity: {
@@ -588,11 +760,15 @@ export class WebGPUOctreePersistentMGPCG implements OctreePersistentMGPCGExecuto
         + `/${section63BandOracle ? "section63-band" : "dynamic-band"}`
         + `/${fullApplyOracle ? "full-apply" : "hybrid-apply"}`
         + `/${linearApplyOracle ? "linear-apply" : "class-apply"}`
+        + `/${this.stagedSmoother ? "staged-smoother" : "direct-smoother"}`
+        + `/band-rows-${this.regularBandRows}`
         + `/diagnostic-output-${diagnosticOutputChannel ?? "pressure"}`,
     );
     this.shaderCode = shaderVariant.code;
     this.shaderLabel = `Octree persistent MGPCG · single-dispatch 256-lane solve · ${
-      compactLiveRows ? "compact live rows" : "capacity-strided oracle"}`;
+      compactLiveRows ? "compact live rows" : "capacity-strided oracle"}${
+      this.stagedSmoother ? " · staged smoother" : ""}${
+      this.regularBandRows === "off" ? "" : ` · ${this.regularBandRows} band rows`}`;
     this.allocatedBytes = this.arena.size + this.params.size;
   }
 

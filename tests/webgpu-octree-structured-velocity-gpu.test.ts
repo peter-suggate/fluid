@@ -15,6 +15,7 @@ import {
   directStructuredVelocityPublicationWGSL,
   planStructuredVelocityGPU,
   structuredImageIdentityCarryEnabled,
+  structuredReconstructionIdentityGateEnabled,
   structuredVelocityRowCapacityForBindingLimit,
 } from "../lib/webgpu-octree-structured-velocity-gpu";
 
@@ -261,8 +262,13 @@ test("exact zero-affected row delta carries structured topology without rebuildi
   assert.match(directStructuredVelocityPublicationWGSL,
     /fn acceptStructuredPublication.*acceptedControl\[13\],control\.reserved\[0\]/s,
     "identity carry must publish its all-face carry proof for recurring dynamics");
+  // Record 27 moved from publishBlockDispatch to publishExactRowDispatch so the
+  // reconstruction gate can express a true (0,1,1); publishBlockDispatch floors
+  // X at one and would still launch a workgroup. With the gate off the argument
+  // is the same (rows+63)/64 block count and publishExactRowDispatch forwards it
+  // to publishBlockDispatch unchanged, so the disabled arm is byte-identical.
   assert.match(directStructuredVelocityPublicationWGSL,
-    /publishBlockDispatch\(27u,\(rows\+63u\)\/64u\);if\(identity\)\{publishExactRowDispatch\(0u,0u\);publishExactRowDispatch\(3u,0u\);if\(p\.imageIdentityCarryEnabled!=0u\)\{publishExactRowDispatch\(21u,0u\);publishExactRowDispatch\(24u,0u\);\}\}else\{publishBlockDispatch\(0u,\(rows\+63u\)\/64u\);publishBlockDispatch\(3u,\(rows\*p\.maxSlots\+63u\)\/64u\);\}/,
+    /publishExactRowDispatch\(27u,select\(\(rows\+63u\)\/64u,0u,identity&&p\.reconstructionIdentityGateEnabled!=0u\)\);if\(identity\)\{publishExactRowDispatch\(0u,0u\);publishExactRowDispatch\(3u,0u\);if\(p\.imageIdentityCarryEnabled!=0u\)\{publishExactRowDispatch\(21u,0u\);publishExactRowDispatch\(24u,0u\);\}\}else\{publishBlockDispatch\(0u,\(rows\+63u\)\/64u\);publishBlockDispatch\(3u,\(rows\*p\.maxSlots\+63u\)\/64u\);\}/,
     "exact identity must zero both topology records while incomplete identity restores both launches");
   const reconstruction = prototype.encodeCandidateReconstruction.toString();
   assert.match(reconstruction,
@@ -278,6 +284,44 @@ test("exact zero-affected row delta carries structured topology without rebuildi
   assert.match(directStructuredVelocityPublicationWGSL,
     /fn finalizeStructuredPublication.*let identity=control\.reserved\[0\]!=0u;let rows=select\([^;]+,0u,identity\);let slots=select\([^;]+,0u,identity\)[\s\S]*workgroupBarrier\(\)[\s\S]*if\(lane==0u\)\{let epoch=candidateEpoch\(\);if\(identity\)/,
     "identity finalization must branch only after the workgroup-wide reduction barriers");
+});
+
+test("the carried velocity reconstruction can publish zero launches for provably zero writes", () => {
+  assert.equal(structuredReconstructionIdentityGateEnabled({}), false,
+    "the reconstruction gate must default off so Gate A/B owns the flip");
+  assert.equal(structuredReconstructionIdentityGateEnabled({
+    FLUID_STRUCTURED_RECONSTRUCTION_IDENTITY_GATE: "1",
+  }), true);
+  assert.equal(structuredReconstructionIdentityGateEnabled({
+    FLUID_STRUCTURED_RECONSTRUCTION_IDENTITY_GATE: "0",
+  }), false);
+  // The bit-identity argument is static, not a receipt: the kernel already
+  // returns on `control.reserved[0]!=0u`, which is set by the same `identity`
+  // predicate that selects this gate. Every invocation record 27 launches on a
+  // carried step therefore returns before its first store, so the launch is
+  // pure overhead and removing it changes no byte of rowVelocities/rowGeometry.
+  assert.match(directStructuredVelocityPublicationWGSL,
+    /fn reconstructStructuredCellVelocity\(@builtin\(global_invocation_id\)g:vec3u\)\{let row=g\.x;if\(control\.reserved\[0\]!=0u\|\|/,
+    "the identity early-out is what makes the zeroed launch bit-identical");
+  assert.match(directStructuredVelocityPublicationWGSL,
+    /control\.reserved\[0\]=select\(0u,1u,identity\);publishExactRowDispatch\(27u,select\(\(rows\+63u\)\/64u,0u,identity&&p\.reconstructionIdentityGateEnabled!=0u\)\)/,
+    "the same identity predicate must drive both the early-out flag and the record");
+  // publishExactRowDispatch forwards a non-zero count straight to
+  // publishBlockDispatch, so the disabled arm is byte-identical to the record
+  // this call site published before the gate existed.
+  assert.match(directStructuredVelocityPublicationWGSL,
+    /fn publishExactRowDispatch\(at:u32,rows:u32\)\{if\(rows==0u\)\{publicationDispatch\[at\]=0u;\s*publicationDispatch\[at\+1u\]=1u;publicationDispatch\[at\+2u\]=1u;return;\}publishBlockDispatch\(at,rows\);\}/);
+  assert.match(directStructuredVelocityPublicationWGSL,
+    /reconstructionIdentityGateEnabled:u32,/,
+    "the gate must be a uniform arm so both A/B arms compile the identical module");
+  const host = readFileSync(new URL("../lib/webgpu-octree-structured-velocity-gpu.ts", import.meta.url), "utf8");
+  assert.match(host, /words\[44\] = structuredReconstructionIdentityGateEnabled\(\) \? 1 : 0;/);
+  // Record 27 is consumed twice per substep: once at the tail of
+  // encodeCandidatePasses and once directly from the octree's inactive coupled
+  // candidate, so both launches disappear together.
+  const octree = readFileSync(new URL("../lib/webgpu-octree.ts", import.meta.url), "utf8");
+  assert.equal([...octree.matchAll(/encodeCandidateReconstruction\(/g)].length, 1,
+    "the second per-substep reconstruction launch must stay a single, findable call site");
 });
 
 test("exact identity publishes zero compiled SPGrid address-image work", () => {

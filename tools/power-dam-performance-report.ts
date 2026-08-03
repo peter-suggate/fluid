@@ -10,6 +10,11 @@ import {
   buildPowerDamPressureKernelProfile,
   type PowerDamPressureKernelProfile,
 } from "./power-dam-pressure-kernel-profile";
+import {
+  rankPassBrokerBoundaryAudit,
+  type PassBrokerBoundaryAuditBucket,
+  type PassBrokerBoundaryAuditSnapshot,
+} from "../lib/webgpu-pass-broker";
 
 export interface PowerDamCommandBucket {
   readonly calls: number;
@@ -66,6 +71,56 @@ export interface PowerDamPassTimestampReport {
   readonly byLabel: Readonly<Record<string, PowerDamFineTimestampBucket>>;
 }
 
+export interface PowerDamPassBoundaryBucket extends PassBrokerBoundaryAuditBucket {
+  /** `requests - passClosures`: fences that found no open pass. These callers
+   * are already batched behind an earlier boundary; deleting them is free but
+   * saves nothing. The actionable pass count is `passClosures`. */
+  readonly idempotentRequests: number;
+  readonly passClosuresPerAdvance: number;
+  readonly requestsPerAdvance: number;
+  readonly idempotentRequestsPerAdvance: number;
+  readonly bytesPerAdvance: number;
+  /** This cause's share of all real pass closures. */
+  readonly shareOfClosures: number;
+}
+
+/**
+ * Which CAUSES produced the frame's compute-pass boundaries, ranked by measured
+ * closures. The program's pass budget is a boundary problem: a compute pass
+ * exists because something fenced, so merging passes means deleting or batching
+ * the causes at the top of this table.
+ */
+export interface PowerDamPassBoundaryProfile {
+  readonly schemaVersion: 1;
+  /** True when nothing known distorts the census: warmup was excluded and no
+   * broker was injecting synthetic label-isolation boundaries. */
+  readonly exact: boolean;
+  readonly measuredAdvances: number;
+  /** Command encoders (one broker each) recorded over those advances. */
+  readonly brokers: number;
+  readonly brokersPerAdvance: number;
+  /** `FLUID_GPU_ISOLATE_PASS_LABELS`. With it on the broker injects a
+   * `"pass label isolation"` fence per label change, which creates a large
+   * synthetic bucket and shifts every requests/passClosures ratio. */
+  readonly labelIsolated: boolean;
+  readonly labelIsolatedBrokers: number;
+  readonly labelIsolationPrefixes?: readonly string[];
+  /** True when the census was reset after construction and cold bootstrap. */
+  readonly warmupExcluded: boolean;
+  readonly passClosuresPerAdvance: number;
+  readonly requestsPerAdvance: number;
+  readonly idempotentRequestsPerAdvance: number;
+  readonly copyCommandsPerAdvance: number;
+  readonly clearCommandsPerAdvance: number;
+  readonly bytesPerAdvance: number;
+  /** Distinct (encoder label, dropped label) pairs: stages ALREADY sharing a
+   * pass with another stage, i.e. merges that have already happened. */
+  readonly absorbedLabelPairs: number;
+  readonly compositeEncoderLabels: number;
+  readonly byReason: Readonly<Record<string, PowerDamPassBoundaryBucket>>;
+  readonly warnings: readonly string[];
+}
+
 export interface PowerDamResultRecord {
   readonly scenario: string;
   readonly method: string;
@@ -97,6 +152,8 @@ export interface PowerDamResultRecord {
   }[];
   readonly validationErrors?: readonly string[];
   readonly gpuCommandAudit?: PowerDamCommandAudit;
+  /** Process-wide `PassBroker` boundary census over the measured advances. */
+  readonly gpuPassBoundaryAudit?: PassBrokerBoundaryAuditSnapshot;
   readonly gpuFineTimestamps?: PowerDamFineTimestampReport;
   readonly gpuPassTimestamps?: PowerDamPassTimestampReport;
   readonly algorithmDiagnostics?: Readonly<Record<string, unknown>>;
@@ -193,6 +250,10 @@ export interface PowerDamPerformanceSummary {
   /** Targeted, label-isolated pressure solve attribution derived from the raw
    * pass timestamps. Present only when pressure labels were captured. */
   readonly pressureKernelProfile?: PowerDamPressureKernelProfile;
+  /** Measured ranking of the causes that END compute passes. This is the
+   * instrument for the pass-merge surgery: `computePassesPerAdvance` says how
+   * many passes there are, this says WHY each one ended. */
+  readonly passBoundaries?: PowerDamPassBoundaryProfile;
   readonly algorithmDiagnostics?: Readonly<Record<string, unknown>>;
   /** Machine-readable lineage captured from actual pipeline/bind-group/dispatch
    * state during the same advances as fine GPU timestamps. */
@@ -306,6 +367,125 @@ function subtractCommandAudit(
 }
 
 /**
+ * Difference a process-wide boundary census across the paired-prefix window.
+ *
+ * Every counter here is cumulative from the same post-warmup reset in both
+ * runs, so the suffix is an exact subtraction. The isolation and reset flags
+ * describe the encoding configuration, which is identical in both runs, so they
+ * are carried from the complete run rather than differenced.
+ */
+function subtractPassBoundaryAudit(
+  later: PassBrokerBoundaryAuditSnapshot | undefined,
+  earlier: PassBrokerBoundaryAuditSnapshot | undefined,
+): PassBrokerBoundaryAuditSnapshot | undefined {
+  if (!later && !earlier) return undefined;
+  if (!later || !earlier) {
+    throw new Error("Power dam window cannot subtract pass boundary audit: availability differs");
+  }
+  const byReason: Record<string, PassBrokerBoundaryAuditBucket> = {};
+  for (const reason of new Set([...Object.keys(later.byReason), ...Object.keys(earlier.byReason)])) {
+    const end = later.byReason[reason] ?? EMPTY_BOUNDARY_BUCKET;
+    const start = earlier.byReason[reason] ?? EMPTY_BOUNDARY_BUCKET;
+    const bucket: PassBrokerBoundaryAuditBucket = {
+      requests: subtractCounter(end.requests, start.requests, `boundary ${reason} requests`)!,
+      passClosures: subtractCounter(end.passClosures, start.passClosures,
+        `boundary ${reason} passClosures`)!,
+      copyCommands: subtractCounter(end.copyCommands, start.copyCommands,
+        `boundary ${reason} copyCommands`)!,
+      clearCommands: subtractCounter(end.clearCommands, start.clearCommands,
+        `boundary ${reason} clearCommands`)!,
+      commandBytes: subtractCounter(end.commandBytes, start.commandBytes,
+        `boundary ${reason} commandBytes`)!,
+    };
+    if (bucket.requests !== 0 || bucket.commandBytes !== 0) byReason[reason] = bucket;
+  }
+  return {
+    schemaVersion: 1,
+    brokers: subtractCounter(later.brokers, earlier.brokers, "boundary brokers")!,
+    labelIsolatedBrokers: subtractCounter(later.labelIsolatedBrokers,
+      earlier.labelIsolatedBrokers, "boundary labelIsolatedBrokers")!,
+    labelIsolated: later.labelIsolated,
+    ...(later.labelIsolationPrefixes
+      ? { labelIsolationPrefixes: later.labelIsolationPrefixes } : {}),
+    resets: later.resets,
+    requests: subtractCounter(later.requests, earlier.requests, "boundary requests")!,
+    passClosures: subtractCounter(later.passClosures, earlier.passClosures,
+      "boundary passClosures")!,
+    copyCommands: subtractCounter(later.copyCommands, earlier.copyCommands,
+      "boundary copyCommands")!,
+    clearCommands: subtractCounter(later.clearCommands, earlier.clearCommands,
+      "boundary clearCommands")!,
+    commandBytes: subtractCounter(later.commandBytes, earlier.commandBytes,
+      "boundary commandBytes")!,
+    // Deduplicated identity sets, not sums: a pair observed in the prefix is
+    // observed again in the suffix, so differencing them would report zero.
+    absorbedLabelPairs: later.absorbedLabelPairs,
+    compositeEncoderLabels: later.compositeEncoderLabels,
+    byReason: Object.fromEntries(rankPassBrokerBoundaryAudit(new Map(Object.entries(byReason)))),
+  };
+}
+
+const EMPTY_BOUNDARY_BUCKET: PassBrokerBoundaryAuditBucket = {
+  requests: 0, passClosures: 0, copyCommands: 0, clearCommands: 0, commandBytes: 0,
+};
+
+/**
+ * Rank the causes of the frame's compute-pass boundaries, normalized per
+ * advance. `formatPassBrokerBoundaryAudit` in `lib/webgpu-pass-broker.ts`
+ * prints the same ranking for a human; this is the machine-readable form.
+ */
+export function buildPowerDamPassBoundaryProfile(
+  audit: PassBrokerBoundaryAuditSnapshot,
+  steps: number,
+): PowerDamPassBoundaryProfile | undefined {
+  if (!Number.isInteger(steps) || steps < 1) return undefined;
+  if (Object.keys(audit.byReason).length === 0) return undefined;
+  const ranked = rankPassBrokerBoundaryAudit(new Map(Object.entries(audit.byReason)));
+  const warmupExcluded = audit.resets > 0;
+  const warnings: string[] = [];
+  if (audit.labelIsolated) {
+    warnings.push(`FLUID_GPU_ISOLATE_PASS_LABELS was on for ${audit.labelIsolatedBrokers}`
+      + ` of ${audit.brokers} command encoders: the broker injected a synthetic`
+      + " \"pass label isolation\" boundary at every label change, so this table describes a"
+      + " diagnostic command stream and its requests/passClosures ratios are not production's.");
+  }
+  if (!warmupExcluded) {
+    warnings.push("The boundary census was never reset, so it still includes construction and"
+      + " cold bootstrap encoding; every per-advance number below is inflated by one-time setup.");
+  }
+  return {
+    schemaVersion: 1,
+    exact: warmupExcluded && !audit.labelIsolated,
+    measuredAdvances: steps,
+    brokers: audit.brokers,
+    brokersPerAdvance: perAdvance(audit.brokers, steps),
+    labelIsolated: audit.labelIsolated,
+    labelIsolatedBrokers: audit.labelIsolatedBrokers,
+    ...(audit.labelIsolationPrefixes
+      ? { labelIsolationPrefixes: audit.labelIsolationPrefixes } : {}),
+    warmupExcluded,
+    passClosuresPerAdvance: perAdvance(audit.passClosures, steps),
+    requestsPerAdvance: perAdvance(audit.requests, steps),
+    idempotentRequestsPerAdvance: perAdvance(audit.requests - audit.passClosures, steps),
+    copyCommandsPerAdvance: perAdvance(audit.copyCommands, steps),
+    clearCommandsPerAdvance: perAdvance(audit.clearCommands, steps),
+    bytesPerAdvance: perAdvance(audit.commandBytes, steps),
+    absorbedLabelPairs: audit.absorbedLabelPairs,
+    compositeEncoderLabels: audit.compositeEncoderLabels,
+    byReason: Object.fromEntries(ranked.map(([reason, bucket]) => [reason, {
+      ...bucket,
+      idempotentRequests: bucket.requests - bucket.passClosures,
+      passClosuresPerAdvance: perAdvance(bucket.passClosures, steps),
+      requestsPerAdvance: perAdvance(bucket.requests, steps),
+      idempotentRequestsPerAdvance: perAdvance(bucket.requests - bucket.passClosures, steps),
+      bytesPerAdvance: perAdvance(bucket.commandBytes, steps),
+      shareOfClosures: audit.passClosures > 0 ? bucket.passClosures / audit.passClosures : 0,
+    }])),
+    warnings,
+  };
+}
+
+/**
  * Isolate a trailing benchmark window when the smoke runner only exposes
  * cumulative counters. Both records start from the same deterministic scene;
  * subtracting the settle-prefix run from the longer run excludes warmup work.
@@ -343,6 +523,10 @@ export function powerDamResultWindow(
     gpuCommandAudit: subtractCommandAudit(
       complete.gpuCommandAudit,
       settlePrefix.gpuCommandAudit,
+    ),
+    gpuPassBoundaryAudit: subtractPassBoundaryAudit(
+      complete.gpuPassBoundaryAudit,
+      settlePrefix.gpuPassBoundaryAudit,
     ),
     // A generic trace is one terminal sampled advance, so the complete run's
     // trace belongs to the suffix even though it is not a window average.
@@ -545,6 +729,9 @@ export function summarizePowerDamPerformance(result: PowerDamResultRecord): Powe
   const pressureKernelProfile = result.gpuPassTimestamps
     ? buildPowerDamPressureKernelProfile(result.gpuPassTimestamps)
     : undefined;
+  const passBoundaries = result.gpuPassBoundaryAudit
+    ? buildPowerDamPassBoundaryProfile(result.gpuPassBoundaryAudit, result.steps)
+    : undefined;
   return {
     scenario: result.scenario,
     method: result.method,
@@ -631,6 +818,7 @@ export function summarizePowerDamPerformance(result: PowerDamResultRecord): Powe
       passTimestamps: result.gpuPassTimestamps,
       ...(pressureKernelProfile ? { pressureKernelProfile } : {}),
     } : {}),
+    ...(passBoundaries ? { passBoundaries } : {}),
     ...(result.algorithmDiagnostics ? { algorithmDiagnostics: result.algorithmDiagnostics } : {}),
     ...(result.gpuDataFlowManifest ? { dataFlow: result.gpuDataFlowManifest } : {}),
     ...(trace ? { physicsTrace: {

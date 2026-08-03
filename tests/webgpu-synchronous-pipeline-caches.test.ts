@@ -129,7 +129,9 @@ test("remaining synchronous WebGPU families reuse per-device immutable pipelines
     };
     const boundaryResources = {
       structured,
-      coarse: { directory: buffer(64), rowCapacity: 1 },
+      // `delta` is the coarse publisher's exact value/phase receipt, bound so
+      // the boundary's exact row carry has a phi-side signal to gate on.
+      coarse: { directory: buffer(64), rowCapacity: 1, delta: buffer(64) },
       separationMask: buffer(4), rigidBodies: buffer(12 * 8 * 16), bodyCount: 0,
       dimensions: [1, 1, 1] as const, physicalCellSize: 1, closedBoundaryMask: 0,
     };

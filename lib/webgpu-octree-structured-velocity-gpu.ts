@@ -126,6 +126,33 @@ export function structuredPublicationRepeatCount(
 /** Exact topology identity can retain the compiled SPGrid address image only
  * when the apply reads the same physical image bank. The diagnostic two-bank
  * remap arm changes banks with the accepted epoch and therefore rebuilds. */
+/**
+ * Zero dispatch record 27 on an exactly carried step. Default OFF: a Gate A/B
+ * arm, not a shipped default.
+ *
+ * BIT IDENTITY, statically provable rather than argued from a receipt:
+ * `reconstructStructuredCellVelocity` already begins
+ * `if(control.reserved[0]!=0u||...){return;}`, and `control.reserved[0]` is set
+ * by the same `identity` predicate that selects this gate. Every invocation the
+ * record currently launches on a carried step therefore returns before its
+ * first store, so the kernel's entire observable output on that step is empty
+ * with or without the launch. Zeroing the record removes ceil(rows/64)
+ * workgroups of pure launch overhead and changes no byte of `rowVelocities` or
+ * `rowGeometry`. The gate is still a flag because it also removes the
+ * dispatch's implicit memory barrier from the submission, which only a real
+ * frame can price.
+ *
+ * The record is consumed twice per substep -- once at the tail of
+ * `encodeCandidatePasses` and once directly from `encodeInactiveCoupledPowerCandidate`
+ * -- so both launches disappear together.
+ */
+export function structuredReconstructionIdentityGateEnabled(
+  environment: Readonly<Record<string, string | undefined>> | undefined
+    = typeof process !== "undefined" ? process.env : undefined,
+): boolean {
+  return environment?.FLUID_STRUCTURED_RECONSTRUCTION_IDENTITY_GATE === "1";
+}
+
 export function structuredImageIdentityCarryEnabled(
   environment: Readonly<Record<string, string | undefined>> | undefined
     = typeof process !== "undefined" ? process.env : undefined,
@@ -410,6 +437,7 @@ export class WebGPUDirectStructuredVelocityAuthority {
     words[42] = typeof process === "undefined"
       || process.env.FLUID_STRUCTURED_IDENTITY_CARRY !== "0" ? 1 : 0;
     words[43] = structuredImageIdentityCarryEnabled() ? 1 : 0;
+    words[44] = structuredReconstructionIdentityGateEnabled() ? 1 : 0;
     return bytes;
   }
 
@@ -566,7 +594,13 @@ export class WebGPUDirectStructuredVelocityAuthority {
   /** Rebuild the inactive row-vector field after a candidate-only face-value
    * transfer. Calling this twice is intentional: the first publication makes
    * candidate geometry available, while the second observes transferred
-   * values before the coupled epoch can be accepted. */
+   * values before the coupled epoch can be accepted.
+   *
+   * On an exactly carried step both launches produce nothing: the kernel
+   * returns on `control.reserved[0]!=0u` before its first store.
+   * `FLUID_STRUCTURED_RECONSTRUCTION_IDENTITY_GATE=1` therefore zeroes record 27
+   * under identity and removes 2 x ceil(rows/64) workgroups per substep of pure
+   * launch overhead. See `structuredReconstructionIdentityGateEnabled`. */
   encodeCandidateReconstruction(broker: PassBroker,
     topologyMetrics: GPUBuffer = this.inputs.topology.metrics,
     leafHeaders: GPUBuffer = this.inputs.leafHeaders): void {
@@ -701,6 +735,7 @@ struct Params {
   rowFamilyHandleOffset:u32,rowFamilySlotOffset:u32,
   deltaControlOffset:u32,newToOldOffset:u32,oldToNewOffset:u32,affectedRowsOffset:u32,
   cellSize:f32,injectedFailure:u32,identityCarryEnabled:u32,imageIdentityCarryEnabled:u32,
+  reconstructionIdentityGateEnabled:u32,
 }
 struct LeafHeader {cell:u32,entryStart:u32,entryCount:u32,size:u32,diagonal:f32,rhs:f32,flags:u32,reserved:u32,gradient:vec4f}
 struct Metric {caseId:u32,transformAndFlags:u32,volume:f32,error:u32}
@@ -777,7 +812,7 @@ fn exactIdentityCarry(rows:u32,hasAccepted:bool)->bool{
     &&sourceRowDelta[base+15u]==1u&&atomicLoad(&acceptedControl[2])==rows
     &&atomicLoad(&acceptedControl[5])<=p.slotCapacity;
 }
-@compute @workgroup_size(1)fn beginStructuredPublication(){let rows=min(sourceRowDelta[p.deltaControlOffset],p.rowCapacity);let hasAccepted=arrayLength(&acceptedControl)>=6u&&atomicLoad(&acceptedControl[0])==0u&&atomicLoad(&acceptedControl[3])!=0u;let identity=exactIdentityCarry(rows,hasAccepted)&&p.injectedFailure==0u&&p.identityCarryEnabled!=0u;atomicStore(&control.flags,p.injectedFailure);atomicStore(&control.firstError,select(INVALID,0u,p.injectedFailure!=0u));control.rowCount=rows;control.slotCount=select(0u,atomicLoad(&acceptedControl[5]),identity);control.epoch=0u;control.activeBank=select(select(0u,1u-(atomicLoad(&acceptedControl[4])&1u),hasAccepted),atomicLoad(&acceptedControl[4])&1u,identity);control.projected=select(0u,1u,hasAccepted);atomicStore(&control.entryCount,0u);for(var family=0u;family<7u;family+=1u){control.familyOffsets[family]=0u;}for(var word=0u;word<17u;word+=1u){control.reserved[word]=0u;}control.reserved[0]=select(0u,1u,identity);publishBlockDispatch(27u,(rows+63u)/64u);if(identity){publishExactRowDispatch(0u,0u);publishExactRowDispatch(3u,0u);if(p.imageIdentityCarryEnabled!=0u){publishExactRowDispatch(21u,0u);publishExactRowDispatch(24u,0u);}}else{publishBlockDispatch(0u,(rows+63u)/64u);publishBlockDispatch(3u,(rows*p.maxSlots+63u)/64u);}}
+@compute @workgroup_size(1)fn beginStructuredPublication(){let rows=min(sourceRowDelta[p.deltaControlOffset],p.rowCapacity);let hasAccepted=arrayLength(&acceptedControl)>=6u&&atomicLoad(&acceptedControl[0])==0u&&atomicLoad(&acceptedControl[3])!=0u;let identity=exactIdentityCarry(rows,hasAccepted)&&p.injectedFailure==0u&&p.identityCarryEnabled!=0u;atomicStore(&control.flags,p.injectedFailure);atomicStore(&control.firstError,select(INVALID,0u,p.injectedFailure!=0u));control.rowCount=rows;control.slotCount=select(0u,atomicLoad(&acceptedControl[5]),identity);control.epoch=0u;control.activeBank=select(select(0u,1u-(atomicLoad(&acceptedControl[4])&1u),hasAccepted),atomicLoad(&acceptedControl[4])&1u,identity);control.projected=select(0u,1u,hasAccepted);atomicStore(&control.entryCount,0u);for(var family=0u;family<7u;family+=1u){control.familyOffsets[family]=0u;}for(var word=0u;word<17u;word+=1u){control.reserved[word]=0u;}control.reserved[0]=select(0u,1u,identity);publishExactRowDispatch(27u,select((rows+63u)/64u,0u,identity&&p.reconstructionIdentityGateEnabled!=0u));if(identity){publishExactRowDispatch(0u,0u);publishExactRowDispatch(3u,0u);if(p.imageIdentityCarryEnabled!=0u){publishExactRowDispatch(21u,0u);publishExactRowDispatch(24u,0u);}}else{publishBlockDispatch(0u,(rows+63u)/64u);publishBlockDispatch(3u,(rows*p.maxSlots+63u)/64u);}}
 
 // One invocation per (row, catalog slot). The row-level guards are re-evaluated
 // per slot rather than hoisted: \`fail\` is an atomicOr plus an atomicMin on the

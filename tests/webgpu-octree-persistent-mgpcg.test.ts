@@ -1,19 +1,28 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import { planOctreePressureCapacity } from "../lib/webgpu-octree";
 import {
   OCTREE_PERSISTENT_MGPCG_ROW_THRESHOLD,
   WebGPUOctreePersistentMGPCG,
+  decodeOctreePersistentMGPCGBandCensus,
+  octreePersistentMGPCGRegularBandRowsMode,
+  octreePersistentMGPCGStagedSmootherEnabled,
 } from "../lib/webgpu-octree-persistent-mgpcg";
 import {
+  OCTREE_PERSISTENT_MGPCG_BAND_CENSUS_MARKER,
   OCTREE_PERSISTENT_MGPCG_CHANNEL_COUNT,
   OCTREE_PERSISTENT_MGPCG_HEADER,
   OCTREE_PERSISTENT_MGPCG_PARTIAL_WORDS,
   OCTREE_PERSISTENT_MGPCG_REDUCTION_LANES,
+  OCTREE_PERSISTENT_MGPCG_STAGED_SMOOTHER_WORKGROUP_BYTES,
   OCTREE_PERSISTENT_MGPCG_WORKGROUP_BYTES,
   octreePersistentMGPCGArenaWords,
   octreePersistentMGPCGWGSL,
+  octreePersistentMGPCGWorkgroupBytes,
 } from "../lib/webgpu-octree-persistent-mgpcg.wgsl";
 
 test("persistent MGPCG packs hot channels by live rows after stable input staging", () => {
@@ -146,4 +155,310 @@ test("large provisioned pressure headroom does not reject adaptive construction"
   assert.doesNotMatch(projectionSource,
     /acceptsLiveRows\(this\.pressureCapacity\.rowCapacity\)/,
     "provisioned capacity exists before the GPU publishes adaptive rows");
+});
+
+// ---------------------------------------------------------------------------
+// FLUID_OCTREE_MGPCG_STAGED_SMOOTHER — memory-only smoother staging
+// ---------------------------------------------------------------------------
+
+const SPOKES = Array.from({ length: 18 }, (_, k) => k);
+const stagedShader = () => octreePersistentMGPCGWGSL({
+  maximumIterations: 10, stagedSmoother: true,
+});
+const appliedBodyOf = (shader: string) =>
+  shader.slice(shader.indexOf("fn applied("), shader.indexOf("fn chebyshevWeight("));
+
+test("the staged smoother is off unless its flag is exactly 1", () => {
+  assert.equal(octreePersistentMGPCGStagedSmootherEnabled({}), false);
+  assert.equal(octreePersistentMGPCGStagedSmootherEnabled(
+    { FLUID_OCTREE_MGPCG_STAGED_SMOOTHER: undefined }), false);
+  assert.equal(octreePersistentMGPCGStagedSmootherEnabled(
+    { FLUID_OCTREE_MGPCG_STAGED_SMOOTHER: "0" }), false);
+  assert.equal(octreePersistentMGPCGStagedSmootherEnabled(
+    { FLUID_OCTREE_MGPCG_STAGED_SMOOTHER: "true" }), false,
+  "an opt-in awaiting its bitwise symmetry gate must not accept a loose truthy");
+  assert.equal(octreePersistentMGPCGStagedSmootherEnabled(
+    { FLUID_OCTREE_MGPCG_STAGED_SMOOTHER: "1" }), true);
+});
+
+test("the default persistent kernel is unchanged by the staged-smoother option", () => {
+  const authored = octreePersistentMGPCGWGSL({ maximumIterations: 10 });
+  assert.equal(octreePersistentMGPCGWGSL({ maximumIterations: 10, stagedSmoother: false }),
+    authored, "declining the option must emit the identical shader text");
+  assert.doesNotMatch(authored, /wDispatch|wAccepted/,
+    "the default kernel declares no staged workgroup regions");
+  assert.match(authored, /fn acc\(word:u32\)->u32\{return acceptedBoundary\[word\];\}/);
+  assert.match(authored, /fn dispatchWord\(word:u32\)->u32\{return arena\[H_DISPATCH\+word\];\}/);
+  assert.match(appliedBodyOf(authored), /var terms:array<f32,18>;/);
+});
+
+test("staged smoother stages only regions no phase of the solve writes", () => {
+  const shader = stagedShader();
+  assert.match(shader, /var<workgroup> wDispatch:array<u32,256>;/);
+  assert.match(shader, /var<workgroup> wAccepted:array<u32,8>;/);
+  assert.equal(OCTREE_PERSISTENT_MGPCG_HEADER.dispatchWords, 256,
+    "the staged dispatch window must cover the whole authored header");
+  // One reader each, and it is the staging copy: every later `count()`,
+  // `pageCount()`, `transferCount()` and `acceptedBank()` now hits workgroup
+  // storage, so the copy is the kernel's only view of either region.
+  assert.equal(shader.match(/arena\[H_DISPATCH/g)?.length, 1);
+  assert.equal(shader.match(/acceptedBoundary\[/g)?.length, 1);
+  assert.match(shader, /fn acc\(word:u32\)->u32\{return wAccepted\[word\];\}/);
+  assert.match(shader, /fn dispatchWord\(word:u32\)->u32\{return wDispatch\[word\];\}/);
+  // The copy must precede P0, which snapshots the accepted authority itself.
+  const prologue = shader.indexOf("P-1: solve-invariant header staging");
+  assert.ok(prologue > 0 && prologue < shader.indexOf("P0: authority validation"),
+    "staging must be visible before the lane-zero authority snapshot reads it");
+  assert.match(shader,
+    /P-1: solve-invariant header staging[^]*wDispatch\[w\]=arena\[H_DISPATCH\+w\];\}\s*if\(lane<8u\)\{wAccepted\[lane\]=acceptedBoundary\[lane\];\}\s*storageBarrier\(\);workgroupBarrier\(\);/,
+    "both copies must complete behind one barrier before any consumer runs");
+});
+
+test("staged smoother workgroup budget stays inside the guaranteed device floor", () => {
+  assert.equal(OCTREE_PERSISTENT_MGPCG_STAGED_SMOOTHER_WORKGROUP_BYTES, 256 * 4 + 8 * 4);
+  assert.equal(octreePersistentMGPCGWorkgroupBytes(), OCTREE_PERSISTENT_MGPCG_WORKGROUP_BYTES);
+  assert.equal(octreePersistentMGPCGWorkgroupBytes(false), 5_184);
+  assert.equal(octreePersistentMGPCGWorkgroupBytes(true), 6_240);
+  // WebGPU guarantees 16,384 bytes of maxComputeWorkgroupStorageSize. The
+  // deleted 10x10x6 page halo alone was 4 * 600 * 4 = 9,600 bytes; the staged
+  // smoother deliberately buys locality that fits with 10 KiB to spare.
+  assert.ok(octreePersistentMGPCGWorkgroupBytes(true) <= 16_384);
+});
+
+test("staged applied keeps the eighteen canonical terms in their authored order", () => {
+  const applied = appliedBodyOf(stagedShader());
+  assert.doesNotMatch(applied, /var terms:array<f32,18>|terms\[k\]/,
+    "a dynamically indexed local array is what Metal backs with scratch");
+  assert.doesNotMatch(applied, /for\(var k=/,
+    "the eighteen spokes must not re-enter a dependent loop");
+  assert.doesNotMatch(applied, /directoryLookup|pageFor|brickRecord/,
+    "a restriction spoke must not rediscover sparse topology");
+  for (const k of SPOKES) {
+    assert.ok(applied.includes(`let c${k}=loadf(S_XP+${k}u,l,slot);`),
+      `spoke ${k} must read the same coefficient channel HEAD reads`);
+    assert.ok(applied.includes(`let n${k}=topology[columnBase+${k}u*span];`),
+      `spoke ${k} must read the same prepublished neighbour column`);
+    assert.ok(applied.includes(`let g${k}=c${k}!=0.0&&n${k}!=INVALID&&n${k}<cap;`),
+      `spoke ${k} must keep HEAD's nonzero-coefficient and in-capacity guard`);
+    assert.ok(applied.includes(`if(c${k}!=0.0&&!g${k}){reportAt(OVERFLOW,75u,slot);}`),
+      `spoke ${k} must report the identical unresolvable column`);
+    assert.ok(applied.includes(`let x${k}=loadf(source,l,select(0u,n${k},g${k}));`),
+      `spoke ${k} must fetch the value from an unconditionally in-bounds slot`);
+    assert.ok(applied.includes(`let t${k}=select(0.0,c${k}*x${k},g${k});`),
+      `spoke ${k} must fall back to HEAD's zero-initialized term`);
+  }
+  // The whole bitwise contract of this change: the same eighteen terms reach
+  // the same summation tree in ascending channel order, so the axis/diagonal
+  // pairing in canonical18Sum — and the exact-D4 window it buys — cannot move.
+  assert.ok(applied.includes(
+    `-canonical18Sum(array<f32,18>(${SPOKES.map((k) => `t${k}`).join(",")}));`),
+  "terms must enter canonical18Sum in ascending channel order");
+  assert.match(applied,
+    /return loadf\(S_DIAG,l,slot\)\*loadf\(source,l,slot\)-canonical18Sum\(/,
+    "the diagonal term and its subtraction are untouched");
+  // Ascending emission order also pins the report sequence a single lane makes.
+  const reportOrder = [...applied.matchAll(/if\(c(\d+)!=0\.0&&!g\d+\)\{reportAt/g)]
+    .map((match) => Number(match[1]));
+  assert.deepEqual(reportOrder, SPOKES);
+});
+
+test("staged smoother changes no other arithmetic in the kernel", () => {
+  const authored = octreePersistentMGPCGWGSL({ maximumIterations: 10 });
+  const staged = stagedShader();
+  const withoutApplied = (shader: string) =>
+    shader.replace(appliedBodyOf(shader), "")
+      .replace(/var<workgroup> wDispatch:array<u32,256>;\nvar<workgroup> wAccepted:array<u32,8>;\n/, "")
+      .replace(/\n *\/\/ --- P-1[^]*?storageBarrier\(\);workgroupBarrier\(\);/, "")
+      .replace(/return wAccepted\[word\];/, "return acceptedBoundary[word];")
+      .replace(/return wDispatch\[word\];/, "return arena[H_DISPATCH+word];");
+  assert.equal(withoutApplied(staged), withoutApplied(authored),
+    "the staged variant may differ only in applied() and the header staging");
+});
+
+// ---------------------------------------------------------------------------
+// FLUID_OCTREE_MGPCG_REGULAR_BAND_ROWS — class-0 routing for the band sweep
+// ---------------------------------------------------------------------------
+
+const bandShader = (
+  regularBandRows: "census" | "route",
+  stagedSmoother = false,
+) => octreePersistentMGPCGWGSL({ maximumIterations: 10, regularBandRows, stagedSmoother });
+
+const bandRowsBodyOf = (shader: string) =>
+  shader.slice(shader.indexOf("fn applyBandRows("),
+    shader.indexOf("// Section 4.3 boundary-band classification"));
+
+/** Strip exactly the three regions this option is allowed to add. */
+const withoutBandRows = (shader: string) => shader
+  .replace(/const H_BAND_CENSUS=\d+u;\nconst BAND_CENSUS_MARKER=\d+u;\n/, "")
+  .replace(/\/\/ The band shell is\n[^]*?\(P4b\)\.\n(?=fn applyBandRows\()/, "")
+  .replace(
+    "if(uload(CH_BANDA,row)!=0u){applyRegularRow(row,inCh,outCh);}else{applyRow(row,inCh,outCh);}",
+    "applyRow(row,inCh,outCh);")
+  .replace(/\n *\/\/ --- P4b[^]*?storageBarrier\(\);workgroupBarrier\(\);(?=\n *compactBand)/, "")
+  .replace(/\n *if\(lane==0u\)\{\n *var censusRegular[^]*?arena\[H_BAND_CENSUS\+3u\]=censusCoarse;\}/, "");
+
+test("the regular band-row option is off unless its flag names a mode", () => {
+  assert.equal(octreePersistentMGPCGRegularBandRowsMode({}), "off");
+  assert.equal(octreePersistentMGPCGRegularBandRowsMode(
+    { FLUID_OCTREE_MGPCG_REGULAR_BAND_ROWS: undefined }), "off");
+  assert.equal(octreePersistentMGPCGRegularBandRowsMode(
+    { FLUID_OCTREE_MGPCG_REGULAR_BAND_ROWS: "0" }), "off");
+  assert.equal(octreePersistentMGPCGRegularBandRowsMode(
+    { FLUID_OCTREE_MGPCG_REGULAR_BAND_ROWS: "true" }), "off",
+  "a Gate-B opt-in must not accept a loose truthy");
+  assert.equal(octreePersistentMGPCGRegularBandRowsMode(
+    { FLUID_OCTREE_MGPCG_REGULAR_BAND_ROWS: "CENSUS" }), "off");
+  assert.equal(octreePersistentMGPCGRegularBandRowsMode(
+    { FLUID_OCTREE_MGPCG_REGULAR_BAND_ROWS: "census" }), "census");
+  assert.equal(octreePersistentMGPCGRegularBandRowsMode(
+    { FLUID_OCTREE_MGPCG_REGULAR_BAND_ROWS: "1" }), "route");
+});
+
+test("the default persistent kernel is unchanged by the regular band-row option", () => {
+  const authored = octreePersistentMGPCGWGSL({ maximumIterations: 10 });
+  assert.equal(
+    octreePersistentMGPCGWGSL({ maximumIterations: 10, regularBandRows: undefined }),
+    authored, "declining the option must emit the identical shader text");
+  assert.doesNotMatch(authored, /H_BAND_CENSUS|BAND_CENSUS_MARKER|--- P4b|CH_BANDA,row,0u/,
+    "the default kernel declares no census words and publishes no class map");
+  assert.match(bandRowsBodyOf(authored),
+    /if\(!stopped\(\)&&row!=INVALID&&row<rows\(\)\)\{applyRow\(row,inCh,outCh\);\}/,
+    "HEAD routes every band row through the full eighteen-channel apply");
+  assert.throws(() => octreePersistentMGPCGWGSL({
+    maximumIterations: 10,
+    regularBandRows: "regular" as unknown as "route",
+  }), /regular band-row mode is invalid/);
+});
+
+test("census mode publishes the class map and the census without moving arithmetic", () => {
+  const census = bandShader("census");
+  assert.match(bandRowsBodyOf(census),
+    /if\(!stopped\(\)&&row!=INVALID&&row<rows\(\)\)\{applyRow\(row,inCh,outCh\);\}/,
+    "the measurement arm must leave every band row on the authored apply");
+  assert.match(census, /--- P4b: class-0 row map for the Section 4\.3 band sweep/);
+  assert.match(census, /arena\[H_BAND_CENSUS\]=BAND_CENSUS_MARKER;/);
+  assert.equal(withoutBandRows(census), octreePersistentMGPCGWGSL({ maximumIterations: 10 }),
+    "census mode may differ only in the declarations, the map and the census");
+});
+
+test("route mode sends class-0 band rows down the same path applyAllRows uses", () => {
+  const routed = bandShader("route");
+  assert.match(bandRowsBodyOf(routed),
+    /if\(uload\(CH_BANDA,row\)!=0u\)\{applyRegularRow\(row,inCh,outCh\);\}else\{applyRow\(row,inCh,outCh\);\}/,
+    "class-0 band rows take applyRegularRow, everything else keeps applyRow");
+  assert.match(routed,
+    /if\(!stopped\(\)&&row<liveRows\)\{if\(cls==0u\)\{applyRegularRow\(row,inCh,outCh\);\}/,
+    "applyAllRows keeps its own class-0 routing unchanged");
+  assert.equal(withoutBandRows(routed), octreePersistentMGPCGWGSL({ maximumIterations: 10 }),
+    "route mode may differ only in the declarations, the map, the census and the sweep");
+  // Class 4 is deliberately NOT rerouted: applyBandRows never called
+  // applyIdentityRow, and admitting it here would be a separate change.
+  assert.doesNotMatch(bandRowsBodyOf(routed), /applyIdentityRow/);
+});
+
+test("the class-0 map is published where CH_BANDA is provably dead", () => {
+  const routed = bandShader("route");
+  const lastDilation = routed.lastIndexOf("ustore(CH_BANDB,row,dilatedBand(row,false));");
+  const map = routed.indexOf("--- P4b: class-0 row map");
+  const compaction = routed.indexOf("compactBand(lane,liveRows);");
+  assert.ok(lastDilation > 0 && lastDilation < map && map < compaction,
+    "the map must land after the third dilation and before the band compaction");
+  // Only `dilatedBand(row,false)` reads CH_BANDA (through `bandAt`), and the
+  // ping-pong ends before the map, so nothing observes the repurposed channel.
+  assert.equal(routed.slice(map).match(/dilatedBand\(|bandAt\(/g), null,
+    "no band dilation may read CH_BANDA after the map overwrites it");
+  assert.match(routed, /fn bandAt\(row:u32,useB:bool\)->u32\{return select\(uload\(CH_BANDA,row\),uload\(CH_BANDB,row\),useB\);\}/);
+  assert.match(routed, /if\(uload\(CH_BANDB,row\)==0u\)\{return current;\}/,
+    "the smoother's own band gate reads CH_BANDB, which the map never touches");
+  // The map is exactly applyAllRows' cls==0 membership, not a re-derivation.
+  assert.match(routed,
+    /let regularRowCount=worksetCount\(0u\);\s*for\(var item=lane;item<regularRowCount;item\+=LANES\)\{\s*let row=worksetRow\(0u,item\);/);
+});
+
+test("the full-apply oracle disables the band routing with applyAllRows", () => {
+  const oracle = octreePersistentMGPCGWGSL({
+    maximumIterations: 10, regularBandRows: "route", fullApplyOracle: true,
+  });
+  assert.match(bandRowsBodyOf(oracle),
+    /if\(uload\(CH_BANDA,row\)!=0u\)\{applyRow\(row,inCh,outCh\);\}else\{applyRow\(row,inCh,outCh\);\}/,
+    "both arms must be the full apply so the oracle still isolates one variable");
+  assert.doesNotMatch(oracle, /applyRegularRow\(row,inCh,outCh\)/);
+});
+
+test("band-row routing composes with the staged smoother in all four combinations", () => {
+  const off = (staged: boolean) =>
+    octreePersistentMGPCGWGSL({ maximumIterations: 10, stagedSmoother: staged });
+  for (const staged of [false, true]) {
+    for (const mode of ["census", "route"] as const) {
+      assert.equal(withoutBandRows(bandShader(mode, staged)), off(staged),
+        `${mode} + ${staged ? "staged" : "direct"} smoother must be separable`);
+    }
+  }
+  // The staged smoother stages arena words [16, 272); the census words live at
+  // 288, so neither option can read or write the other's region.
+  assert.equal(OCTREE_PERSISTENT_MGPCG_HEADER.bandCensus, 288);
+  assert.equal(OCTREE_PERSISTENT_MGPCG_HEADER.bandCensusWords, 4);
+  assert.ok(OCTREE_PERSISTENT_MGPCG_HEADER.bandCensus
+    >= OCTREE_PERSISTENT_MGPCG_HEADER.dispatch + OCTREE_PERSISTENT_MGPCG_HEADER.dispatchWords);
+  assert.ok(OCTREE_PERSISTENT_MGPCG_HEADER.bandCensus
+    >= OCTREE_PERSISTENT_MGPCG_HEADER.worksetHeaders
+      + OCTREE_PERSISTENT_MGPCG_HEADER.worksetHeaderWords);
+  assert.ok(OCTREE_PERSISTENT_MGPCG_HEADER.bandCensus
+    + OCTREE_PERSISTENT_MGPCG_HEADER.bandCensusWords
+    <= OCTREE_PERSISTENT_MGPCG_HEADER.totalWords);
+  const staged = bandShader("route", true);
+  assert.equal(staged.match(/arena\[H_DISPATCH/g)?.length, 1,
+    "the staged dispatch copy stays the kernel's only view of that header");
+  assert.equal(staged.match(/acceptedBoundary\[/g)?.length, 1);
+});
+
+test("the band census decodes only words this dispatch authored", () => {
+  assert.equal(OCTREE_PERSISTENT_MGPCG_BAND_CENSUS_MARKER, 0x4241_4e44);
+  assert.equal(decodeOctreePersistentMGPCGBandCensus(Uint32Array.from([0, 1, 1, 0])), null,
+    "an unwritten arena must never read back as a measurement");
+  assert.equal(decodeOctreePersistentMGPCGBandCensus(
+    Uint32Array.from([OCTREE_PERSISTENT_MGPCG_BAND_CENSUS_MARKER, 4])), null,
+  "a short readback is not a census");
+  assert.equal(decodeOctreePersistentMGPCGBandCensus(
+    Uint32Array.from([OCTREE_PERSISTENT_MGPCG_BAND_CENSUS_MARKER, 10, 11, 0])), null,
+  "more regular band rows than band rows is impossible");
+  assert.equal(decodeOctreePersistentMGPCGBandCensus(
+    Uint32Array.from([OCTREE_PERSISTENT_MGPCG_BAND_CENSUS_MARKER, 10, 4, 5])), null,
+  "more coarse regular rows than regular rows is impossible");
+  assert.deepEqual(decodeOctreePersistentMGPCGBandCensus(
+    Uint32Array.from([OCTREE_PERSISTENT_MGPCG_BAND_CENSUS_MARKER, 1_000, 250, 40])), {
+    bandRows: 1_000, regularBandRows: 250, coarseRegularBandRows: 40, regularShare: 0.25,
+  });
+  assert.equal(decodeOctreePersistentMGPCGBandCensus(
+    Uint32Array.from([OCTREE_PERSISTENT_MGPCG_BAND_CENSUS_MARKER, 0, 0, 0]))?.regularShare, 0,
+  "an empty band reports no share rather than a NaN");
+});
+
+test("every band-row and staged-smoother combination is accepted by naga", () => {
+  const probe = spawnSync(process.env.NAGA ?? "naga", ["--version"], { encoding: "utf8" });
+  if (probe.error) {
+    // `npm run test:water-shaders` is the tree's naga gate and does not yet
+    // carry this kernel at all; this keeps the combinations covered wherever
+    // naga exists without making the CPU suite depend on it.
+    console.log("skipped: naga is not on PATH");
+    return;
+  }
+  const directory = mkdtempSync(join(tmpdir(), "fluid-persistent-mgpcg-wgsl-"));
+  try {
+    for (const stagedSmoother of [false, true]) {
+      for (const regularBandRows of [undefined, "census", "route"] as const) {
+        const name = `mgpcg-${regularBandRows ?? "off"}-${stagedSmoother ? "staged" : "direct"}`;
+        const path = join(directory, `${name}.wgsl`);
+        writeFileSync(path, octreePersistentMGPCGWGSL({
+          maximumIterations: 10, stagedSmoother,
+          ...(regularBandRows === undefined ? {} : { regularBandRows }),
+        }));
+        const result = spawnSync(process.env.NAGA ?? "naga", [path], { encoding: "utf8" });
+        assert.equal(result.status, 0, `${name}:\n${result.stderr || result.stdout}`);
+      }
+    }
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });

@@ -310,6 +310,18 @@ export interface SparseVoxelSceneRenderSource {
   nodeMipPyramid?: import("./webgpu-svo-node-mip-pyramid").WebGpuSvoNodeMipVisibleGeneration;
   /** Optional directional exitant-radiance generation sharing the opacity page plan and slots. */
   tetrahedralRadiance?: import("./webgpu-svo-tetrahedral-radiance").WebGpuSvoTetrahedralRadianceVisibleGeneration;
+  /**
+   * Capability of the derived opacity/radiance hierarchy. This is independent
+   * of authored light-table support: consumers can visibly select exact SVO
+   * visibility when cone data cannot be represented without dropping pages.
+   */
+  derivedLighting?: Readonly<{
+    state: "ready" | "unavailable";
+    reason?: "capacity" | "address-plan-invalidated" | "unsupported-level-count" | "initialization-failed";
+    detail?: string;
+    requiredPages: number;
+    capacity: number;
+  }>;
   /** Renderer-derived allocation telemetry; absent capabilities report zero bytes. */
   derivedRenderAllocationBytes?: Readonly<{
     wideFanout: number;

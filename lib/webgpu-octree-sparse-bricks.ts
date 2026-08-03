@@ -46,6 +46,7 @@ import { WebGpuLiveSvoTetrahedralRadiance } from "./webgpu-svo-tetrahedral-radia
 import {
   WebGpuLiveSvoDerivedBuilder,
   WebGpuLiveSvoDerivedWorklistPlanner,
+  liveSvoPlanBasePages,
 } from "./webgpu-svo-live-derived-builder";
 import { WebGpuSvoBrickOccupancyBuilder } from "./webgpu-svo-brick-occupancy";
 import {
@@ -673,6 +674,8 @@ export class OctreeSparseBrickWorld {
   private readonly tetrahedralRadiance?: WebGpuLiveSvoTetrahedralRadiance;
   private readonly liveDerivedPlanner?: WebGpuLiveSvoDerivedWorklistPlanner;
   private readonly liveDerivedBuilder?: WebGpuLiveSvoDerivedBuilder;
+  private readonly liveDerivedPlannedBasePageKeys = new Set<string>();
+  private liveDerivedAddressPlanValid = true;
   private liveDerivedInitial = true;
   private liveScenePrimitiveStates = new Map<string, LiveScenePrimitiveState>();
   private liveScenePrimitives = new Map<string, LiveScenePrimitiveEntry>();
@@ -935,15 +938,31 @@ export class OctreeSparseBrickWorld {
     let liveDerivedBuilder: WebGpuLiveSvoDerivedBuilder | undefined;
     const liveDerivedBasePageDimensions = liveSvoBasePageDimensions(this.sceneBrickDimensions, brickSize);
     const liveDerivedLevelCount = sparseSceneOctreeMaximumDepth(liveDerivedBasePageDimensions, []) + 1;
+    const maximumDerivedPages = webGpuSvoNodeMipMaximumPages(device);
+    let derivedLighting: NonNullable<SparseVoxelSceneRenderSource["derivedLighting"]> = {
+      state: "unavailable",
+      reason: "unsupported-level-count",
+      detail: `Live SVO derived lighting needs ${liveDerivedLevelCount} mip levels; the runtime supports at most 12`,
+      requiredPages: 0,
+      capacity: maximumDerivedPages,
+    };
     if (liveDerivedLevelCount <= 12) {
       try {
-        const maximumPages = webGpuSvoNodeMipMaximumPages(device);
+        const occupiedPages = liveSvoPlanBasePages(plan);
+        occupiedPages.forEach((page) => this.liveDerivedPlannedBasePageKeys.add(page.join(",")));
         const mipPlan = planSvoNodeMipPyramid({
           generation: 1,
-          occupiedPages: liveSvoDenseFinestPages(liveDerivedBasePageDimensions),
+          occupiedPages,
           levelCount: liveDerivedLevelCount,
-          capacity: maximumPages,
+          capacity: maximumDerivedPages,
         });
+        derivedLighting = {
+          state: "unavailable",
+          reason: "capacity",
+          detail: `Live SVO derived lighting needs ${mipPlan.requestedPageCount} sparse pages; this device can address ${maximumDerivedPages}`,
+          requiredPages: mipPlan.requestedPageCount,
+          capacity: maximumDerivedPages,
+        };
         const direct = createWebGpuSvoNodeMipDirectPageTable(mipPlan, device.limits.maxTextureDimension3D);
         const atlasFits = mipPlan.atlas.texels.every((value) => value <= device.limits.maxTextureDimension3D);
         if (!mipPlan.complete || !direct.ready || !atlasFits || mipPlan.pages.length === 0) {
@@ -998,9 +1017,10 @@ export class OctreeSparseBrickWorld {
           generationSource: liveDerivedGenerationSource,
           levelCount: liveDerivedLevelCount,
           finestLevel: plan.maximumDepth,
-          // No dirty page may be omitted: zero validity is fail-closed cache
-          // authority, so this fixed budget covers the entire address plan.
-          pageCapacityPerLevel: mipPlan.pages.length,
+          // Every sparse address is retained, but a level can only emit its
+          // own resident pages. Avoid sizing all worklists like the hierarchy.
+          pageCapacityPerLevel: Math.max(...Array.from({ length: liveDerivedLevelCount }, (_, level) =>
+            mipPlan.pages.filter((page) => page.key.level === level).length)),
           label: "Unified live SVO derived-page planner",
         });
         liveDerivedBuilder = new WebGpuLiveSvoDerivedBuilder(device, {
@@ -1016,6 +1036,11 @@ export class OctreeSparseBrickWorld {
         });
         nodeMipPyramid.acceptGpuUpdate(mipPlan.generation);
         tetrahedralRadiance.acceptGpuUpdate(mipPlan.generation);
+        derivedLighting = {
+          state: "ready",
+          requiredPages: mipPlan.requestedPageCount,
+          capacity: maximumDerivedPages,
+        };
       } catch (error) {
         liveDerivedBuilder?.destroy();
         liveDerivedPlanner?.destroy();
@@ -1025,9 +1050,17 @@ export class OctreeSparseBrickWorld {
         tetrahedralRadiance = undefined;
         liveDerivedPlanner = undefined;
         liveDerivedBuilder = undefined;
-        console.warn("[svo] live derived lighting unavailable; cone lighting remains fail-closed", error);
+        if (derivedLighting.requiredPages <= derivedLighting.capacity) {
+          derivedLighting = {
+            ...derivedLighting,
+            reason: "initialization-failed",
+            detail: error instanceof Error ? error.message : String(error),
+          };
+        }
+        console.warn("[svo] live derived lighting unavailable; exact visibility will be used", error);
       }
     }
+    this.liveDerivedAddressPlanValid = derivedLighting.state === "ready";
     this.nodeMipPyramid = nodeMipPyramid;
     this.tetrahedralRadiance = tetrahedralRadiance;
     this.liveDerivedPlanner = liveDerivedPlanner;
@@ -1159,6 +1192,7 @@ export class OctreeSparseBrickWorld {
         worldExtent_m: sceneDomain.sceneDimensionsCells.map((cells, axis) => cells * sceneDomain.cellSize_m[axis]) as [number, number, number],
       },
       tetrahedralRadiance: this.tetrahedralRadiance?.visibleGeneration(),
+      derivedLighting,
       derivedRenderAllocationBytes: {
         wideFanout: this.wideFanout?.allocatedBytes ?? 0,
         compactHierarchy: this.compactHierarchy?.allocatedBytes ?? 0,
@@ -1427,7 +1461,25 @@ export class OctreeSparseBrickWorld {
       for (const coordinate of liveSceneMissingBrickCoordinates(
         newBounds, this.sceneWorldOrigin, this.cellSize, this.brickSize,
         this.sceneBrickDimensions, this.coveredSceneBrickCoordinates,
-      )) this.pendingTopologyCoordinates.set(brickCoordinateKey(coordinate), coordinate);
+      )) {
+        this.pendingTopologyCoordinates.set(brickCoordinateKey(coordinate), coordinate);
+        const pageKey = [coordinate.x, coordinate.y, coordinate.z]
+          .map((value) => Math.floor(value * this.brickSize / SVO_NODE_MIP_LAYOUT.interiorSize))
+          .join(",");
+        if (this.liveDerivedAddressPlanValid && !this.liveDerivedPlannedBasePageKeys.has(pageKey)) {
+          this.liveDerivedAddressPlanValid = false;
+          const current = this.sceneSource.derivedLighting;
+          this.sceneSource.derivedLighting = {
+            state: "unavailable",
+            reason: "address-plan-invalidated",
+            detail: `Scene edit activated derived page ${pageKey} outside the fixed sparse address plan; exact visibility is active`,
+            requiredPages: current?.requiredPages ?? this.liveDerivedPlannedBasePageKeys.size,
+            capacity: current?.capacity ?? webGpuSvoNodeMipMaximumPages(this.device),
+          };
+          this.sceneSource.nodeMipPyramid = undefined;
+          this.sceneSource.tetrahedralRadiance = undefined;
+        }
+      }
     }
     if (this.pendingTopologyCoordinates.size === 0) {
       this.device.queue.writeBuffer(this.topologyMutationWorklist, 0, new Uint32Array(8));
@@ -1496,7 +1548,7 @@ export class OctreeSparseBrickWorld {
   }
 
   private encodeLiveDerivedMaintenance(encoder: GPUCommandEncoder): void {
-    if (!this.liveDerivedPlanner || !this.liveDerivedBuilder) return;
+    if (!this.liveDerivedAddressPlanValid || !this.liveDerivedPlanner || !this.liveDerivedBuilder) return;
     const initializeEmpty = this.liveDerivedInitial;
     if (initializeEmpty) this.liveDerivedPlanner.encodeInitial(encoder);
     else this.liveDerivedPlanner.encode(encoder);

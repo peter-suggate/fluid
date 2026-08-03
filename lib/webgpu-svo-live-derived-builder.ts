@@ -1,4 +1,9 @@
-import { SPARSE_BRICK_GPU_LAYOUT, type SparseBrickOctreeGPU, type SparseBrickSize } from "./sparse-brick-octree";
+import {
+  SPARSE_BRICK_GPU_LAYOUT,
+  type SparseBrickOctreeGPU,
+  type SparseBrickPlan,
+  type SparseBrickSize,
+} from "./sparse-brick-octree";
 import { SVO_BRICK_LIFECYCLE } from "./svo-brick-occupancy";
 import { SVO_NODE_MIP_LAYOUT } from "./svo-node-mip-pyramid";
 import type { WebGpuLiveSvoNodeMipGpuTarget } from "./webgpu-svo-node-mip-pyramid";
@@ -100,6 +105,26 @@ export function liveSvoLeafBasePages(options: {
     pages.push([x, y, z]);
   }
   return pages;
+}
+
+/**
+ * Finest virtual pages touched by the canonical sparse topology. Coarse leaves
+ * expand to every page in their extent, while empty space with no leaf never
+ * consumes a physical opacity/radiance slot.
+ */
+export function liveSvoPlanBasePages(plan: SparseBrickPlan): readonly (readonly [number, number, number])[] {
+  const unique = new Map<string, readonly [number, number, number]>();
+  for (const leaf of plan.leaves) {
+    const node = plan.nodes[leaf.nodeIndex];
+    if (!node) throw new RangeError(`Live derived leaf ${leaf.index} references a missing node`);
+    for (const page of liveSvoLeafBasePages({
+      coordinate: [node.coordinate.x, node.coordinate.y, node.coordinate.z],
+      leafLevel: node.level,
+      finestLevel: plan.maximumDepth,
+      brickSize: plan.brickSize,
+    })) unique.set(page.join(","), page);
+  }
+  return [...unique.values()];
 }
 
 export const liveSvoDerivedWorklistWGSL = /* wgsl */ `

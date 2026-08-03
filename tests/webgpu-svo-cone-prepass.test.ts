@@ -9,7 +9,6 @@ import {
   createSvoDrySceneFragmentWGSL,
   SparseVoxelDrySceneRenderer,
   SVO_DRY_CONE_PREPASS_CONTRACT,
-  SVO_DRY_DERIVED_FAILURE,
   SVO_DRY_SILHOUETTE_REFINEMENT_CONTRACT,
   SVO_DRY_VOXEL_LIGHT_CACHE_CONTRACT,
   svoConePrepassSize,
@@ -58,7 +57,7 @@ test("scale 1 preserves the production shader byte-for-byte (fingerprint contrac
     "the reduced-only blocker specialization must not perturb the scale-1 shader");
 });
 
-test("reduced scales fail closed explicitly and never escape into exact cone fallbacks", () => {
+test("reduced scales use declared receiver and full-rate edge tiers without hiding page failures", () => {
   for (const scale of [0.5, 0.25, 0.125] as const) {
     const reduced = createSvoDrySceneFragmentWGSL(scale);
     assert.match(reduced, /@group\(1\) @binding\(0\) var dryPrepassVisibilityKeyTexture:texture_2d<u32>/);
@@ -75,8 +74,8 @@ test("reduced scales fail closed explicitly and never escape into exact cone fal
       "opaque shading must have a separate reduced-rate entry point so it cannot inflate cone-pass register pressure");
     assert.ok(reduced.includes(createSvoDryConeMarcherWGSL({ branchlessMorton: true, rangedDirectorySearch: true, fluidCoverage: true, directPageTable: true })),
       "the reduced variant must embed the identical optimized marcher block");
-    assert.match(reduced, new RegExp(`if\\(weightSum<0\\.05\\)\\{dryDerivedPageFailure\\|=${SVO_DRY_DERIVED_FAILURE.reducedReconstruction}u;return;\\}`),
-      "insufficient guided support must publish a visible reconstruction failure");
+    assert.match(reduced, /if\(weightSum<0\.05\)\{[^]*dryPrepassRecoverExactReceiver[^]*dryPrepassExactEdgeState=1u;return;/,
+      "sub-prepass-pixel surfaces must enter the declared live full-rate edge tier");
     assert.match(reduced, /let cone=dryConeVisibility\(origin,rotated[^]*if\(cone\.valid==0u\)\{return DRY_PREPASS_INVALID_PACKED;\}[^]*visibility\+=cone\.transmittance/,
       "a dirty AO page must invalidate the reduced texel instead of fabricating visibility");
     assert.match(reduced, /let cone=dryConeVisibility\(ray\.origin_m\+geometricNormal\*coneEscape_m[^]*if\(cone\.valid==0u\)\{return DRY_PREPASS_INVALID_PACKED;\}[^]*visibility\+=mix/,
@@ -104,11 +103,15 @@ test("reduced scales fail closed explicitly and never escape into exact cone fal
       "rigid AO blocker sampling stays inline at full resolution on the upsampled AO path");
     assert.match(reduced, /fn anyBodyBlockerIgnoring\([^]*if\(bodyHit\(ro,rd,body\)\.t<tMax\)\{return true;\}/,
       "blocker-only paths must early out without carrying the full nearest-hit payload");
-    assert.match(reduced, /let identityMatches=dryPrepassIdentityMatches\(textureLoad\(dryPrepassIdentityTexture,texel,0\)\.x,u32\(round\(geometry\.w\)\),hit\)/,
-      "radiance reconstruction must reject exact material, owner, feature, field, or motion identity mismatches");
-    assert.match(reduced, /accumulated2\+=dryPrepassUnpack2\(packed\)\*weight;[^]*if\(identityMatches\)/,
-      "depth/normal-guided visibility may cross identity boundaries without authorizing radiance reuse");
-    assert.match(reduced, /if\(bilinear>1e-6&&!identityMatches\)\{linearSafe=0u;\}[^]*if\(bilinear>1e-6&&\(depthWeight<0\.25\|\|normalWeight<0\.25\)\)\{linearSafe=0u;\}/,
+    assert.match(reduced, /fn dryPrepassReceiverCompatible[^]*materialMatches[^]*metadata==dryPrepassHitMetadata\(hit\)[^]*hit\.motionKind==DRY_GBUFFER_MOTION_STATIC\|\|ownerMatches/,
+      "static seams may share fully classified receivers while moving surfaces retain exact ownership");
+    assert.match(reduced, /let identityMatches=dryPrepassReceiverCompatible\(textureLoad\(dryPrepassIdentityTexture,texel,0\)\.x,u32\(round\(geometry\.w\)\),hit\)/,
+      "radiance reconstruction must apply the declared receiver compatibility contract");
+    assert.match(reduced, /if\(!identityMatches\)\{if\(bilinear>1e-6\)\{linearSafe=0u;\}continue;\}[^]*accumulated2\+=dryPrepassUnpack2\(packed\)\*weight/,
+      "visibility and radiance reconstruction must share one compatible receiver at discontinuities");
+    assert.match(reduced, /if\(all\(packed\.xy==DRY_PREPASS_INVALID_PACKED\)\)\{linearSafe=0u;continue;\}/,
+      "an invalid neighbouring receiver must be excluded instead of poisoning unrelated full-rate pixels");
+    assert.match(reduced, /if\(!identityMatches\)\{if\(bilinear>1e-6\)\{linearSafe=0u;\}continue;\}[^]*if\(bilinear>1e-6&&\(depthWeight<0\.25\|\|normalWeight<0\.25\)\)\{linearSafe=0u;\}/,
       "hardware filtering must be disabled before it can cross an identity, depth, or normal edge");
     assert.match(reduced, /textureSampleLevel\(dryPrepassRadianceTexture,nodeMipSampler,pixel\/max\(uniforms\.viewport\.xy,vec2f\(1\.0\)\),0\.0\)/,
       "the gated-linear mode must use the resident linear sampler without another pass");
@@ -157,6 +160,20 @@ test("reduced scales fail closed explicitly and never escape into exact cone fal
   const deferredLighting = rendererSource.indexOf('label: "Sparse voxel deferred dry lighting"', persistentGi);
   assert.ok(compactVisibility >= 0 && persistentGi > compactVisibility && deferredLighting > persistentGi,
     "split GLOBAL must evaluate environmental GI after current-frame compact visibility and before deferred lighting");
+});
+
+test("edge reconstruction is bounded, motion-safe, and promotes only unresolved pixels", () => {
+  const shader = createSvoDrySceneFragmentWGSL(0.5, "canonical-parametric", "off", "split");
+  assert.match(shader, /for\(var j=0u;j<2u;j\+=1u\)\{for\(var i=0u;i<2u;i\+=1u\)/,
+    "the common shipping path must remain bounded to its ordinary four receiver candidates");
+  assert.match(shader, /if\(!identityMatches\)[^]*continue;[^]*if\(all\(packed\.xy==DRY_PREPASS_INVALID_PACKED\)\)[^]*continue;/,
+    "other identities and invalid pages must be rejected before they enter the reconstruction");
+  assert.match(shader, /for\(var radius=1;radius<=2;radius\+=1\)[^]*dryPrepassUseExactReceiver/,
+    "the exceptional receiver search must have a hard two-texel radius");
+  assert.match(shader, /dryPrepassRecoverExactReceiver\(coordinate,dims,depth,normal,hit\)[^]*dryPrepassExactEdgeState=1u;return;/,
+    "only pixels with no lawful receiver may enter full-rate live cone evaluation");
+  assert.match(shader, /if\(cone\.valid==0u\)\{dryDerivedPageFailure\|=2u;return vec3f\(0\.0\);\}/,
+    "an unavailable page in the edge tier must remain explicitly fail-visible");
 });
 
 test("primary seam closure brackets background with opposing foreground surfaces", () => {

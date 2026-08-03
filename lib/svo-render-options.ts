@@ -30,6 +30,14 @@ export type SvoSilhouetteRefinementStatus = Readonly<{
   detail?: string;
 }>;
 
+/** Effective lighting-visibility path, including a visible exact fallback. */
+export type SvoLightingVisibilityStatus = Readonly<{
+  state: "cones" | "exact" | "off";
+  /** True only when cones were requested but their complete hierarchy is unavailable. */
+  fallback?: boolean;
+  detail?: string;
+}>;
+
 export type SvoLightingOptions = Readonly<{
   shadowsEnabled: boolean;
   ambientOcclusionEnabled: boolean;

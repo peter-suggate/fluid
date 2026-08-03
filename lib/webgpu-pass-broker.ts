@@ -64,6 +64,137 @@ export interface PassBrokerBoundaryAuditBucket {
   readonly commandBytes: number;
 }
 
+type MutableBoundaryBucket = {
+  requests: number; passClosures: number; copyCommands: number;
+  clearCommands: number; commandBytes: number;
+};
+
+const emptyBoundaryBucket = (): MutableBoundaryBucket =>
+  ({ requests: 0, passClosures: 0, copyCommands: 0, clearCommands: 0, commandBytes: 0 });
+
+/**
+ * Process-wide boundary census, merged by EVERY broker.
+ *
+ * A broker owns exactly one command encoder, and roughly thirty call sites
+ * construct one per encoder and drop it at `finish()`. A per-instance
+ * `boundaryAudit` is therefore unreadable by any harness: by the time a report
+ * exists, every broker that produced the frame's boundaries is garbage. These
+ * module-level totals are merged inside the single boundary funnel, so they
+ * cover present and future call sites without any of them being touched.
+ *
+ * Bounded by the distinct fence-reason vocabulary (tens of entries), not by
+ * encoders or frames, and written only where a pass boundary already happens.
+ */
+const processBoundaries = new Map<string, MutableBoundaryBucket>();
+/** Process-wide equivalent of `PassBroker.labelAttributionAudit`: which stage
+ * labels are ALREADY sharing a pass with another stage, which is the set of
+ * merges the frame has already made. Deduplicated, so it is bounded by the
+ * source's distinct label vocabulary rather than by frames or encoders. */
+const processAbsorbed = new Map<string, Set<string>>();
+let processBrokers = 0;
+let processLabelIsolatedBrokers = 0;
+const processLabelIsolationPrefixes = new Set<string>();
+let processBoundaryResets = 0;
+
+/** Serializable form of the process-wide census, for NDJSON result records. */
+export interface PassBrokerBoundaryAuditSnapshot {
+  readonly schemaVersion: 1;
+  /** Brokers constructed since the last reset; one per command encoder. */
+  readonly brokers: number;
+  /** Of those, how many were sampling `FLUID_GPU_ISOLATE_PASS_LABELS`. */
+  readonly labelIsolatedBrokers: number;
+  /**
+   * True when ANY contributing broker injected a synthetic
+   * `"pass label isolation"` fence per label change. Such a run is a
+   * diagnostic command stream: the boundary table carries a large fake bucket
+   * and every requests/passClosures ratio is shifted. Recorded from the
+   * brokers themselves rather than re-read from the environment, so a snapshot
+   * cannot disagree with the stream it describes.
+   */
+  readonly labelIsolated: boolean;
+  /** Union of the isolation prefixes those brokers scoped themselves to. */
+  readonly labelIsolationPrefixes?: readonly string[];
+  /**
+   * How many times the totals were reset in this process. Zero means the
+   * census still includes construction and cold bootstrap encoding
+   * (`encodeColdTopologySignatureBaseline`, `encodeAnalyticBootstrap`), which
+   * inflates any per-advance normalization of it.
+   */
+  readonly resets: number;
+  readonly requests: number;
+  readonly passClosures: number;
+  readonly copyCommands: number;
+  readonly clearCommands: number;
+  readonly commandBytes: number;
+  /** Distinct (encoder label, dropped label) pairs: passes already merged. */
+  readonly absorbedLabelPairs: number;
+  /** Encoder labels which name a composite bucket rather than one stage. */
+  readonly compositeEncoderLabels: number;
+  /** Ranked by real closures, then command traffic, then bytes, then name. */
+  readonly byReason: Readonly<Record<string, PassBrokerBoundaryAuditBucket>>;
+}
+
+/** The one ranking rule: real closures first, then command traffic. Exported so
+ * a report orders its JSON exactly as `formatPassBrokerBoundaryAudit` prints. */
+export function rankPassBrokerBoundaryAudit<Bucket extends PassBrokerBoundaryAuditBucket>(
+  audit: ReadonlyMap<string, Bucket>,
+): [string, Bucket][] {
+  return [...audit.entries()].sort((left, right) =>
+    right[1].passClosures - left[1].passClosures
+    || (right[1].copyCommands + right[1].clearCommands)
+      - (left[1].copyCommands + left[1].clearCommands)
+    || right[1].commandBytes - left[1].commandBytes
+    || left[0].localeCompare(right[0]));
+}
+
+/** Every boundary every broker in this process has requested since the last
+ * reset. Copied on read so a held snapshot cannot drift as encoding continues. */
+export function passBrokerBoundaryAuditTotals(): ReadonlyMap<string, PassBrokerBoundaryAuditBucket> {
+  return new Map([...processBoundaries].map(([reason, bucket]) => [reason, { ...bucket }]));
+}
+
+/** The same census as a plain, ranked, JSON-serializable record. */
+export function passBrokerBoundaryAuditSnapshot(): PassBrokerBoundaryAuditSnapshot {
+  const ranked = rankPassBrokerBoundaryAudit(processBoundaries);
+  const totals = emptyBoundaryBucket();
+  for (const [, bucket] of ranked) {
+    totals.requests += bucket.requests;
+    totals.passClosures += bucket.passClosures;
+    totals.copyCommands += bucket.copyCommands;
+    totals.clearCommands += bucket.clearCommands;
+    totals.commandBytes += bucket.commandBytes;
+  }
+  let absorbedLabelPairs = 0;
+  for (const swallowed of processAbsorbed.values()) absorbedLabelPairs += swallowed.size;
+  return {
+    schemaVersion: 1,
+    brokers: processBrokers,
+    labelIsolatedBrokers: processLabelIsolatedBrokers,
+    labelIsolated: processLabelIsolatedBrokers > 0,
+    ...(processLabelIsolationPrefixes.size > 0
+      ? { labelIsolationPrefixes: [...processLabelIsolationPrefixes].sort() } : {}),
+    resets: processBoundaryResets,
+    ...totals,
+    absorbedLabelPairs,
+    compositeEncoderLabels: processAbsorbed.size,
+    byReason: Object.fromEntries(ranked.map(([reason, bucket]) => [reason, { ...bucket }])),
+  };
+}
+
+/**
+ * Start a new measurement window. A harness calls this once the solver is warm,
+ * exactly where it resets its command audit, so construction and cold bootstrap
+ * encoding do not inflate a per-advance number.
+ */
+export function resetPassBrokerBoundaryAuditTotals(): void {
+  processBoundaries.clear();
+  processAbsorbed.clear();
+  processBrokers = 0;
+  processLabelIsolatedBrokers = 0;
+  processLabelIsolationPrefixes.clear();
+  processBoundaryResets += 1;
+}
+
 /**
  * Lazily owns the compute pass for one GPU command encoder.
  *
@@ -94,10 +225,7 @@ export class PassBroker {
   /** Structural census of every requested pass boundary. This deliberately
    * records idempotent requests as well as real closures: the former identify
    * callers which can be batched, while the latter are the serial spine. */
-  private readonly boundaries = new Map<string, {
-    requests: number; passClosures: number; copyCommands: number;
-    clearCommands: number; commandBytes: number;
-  }>();
+  private readonly boundaries = new Map<string, MutableBoundaryBucket>();
   /** Sampled per broker so a test can drive it; production reads the env once
    * per command encoder, which is not on any hot path. */
   private readonly isolateLabels: boolean;
@@ -110,6 +238,13 @@ export class PassBroker {
     this.isolateLabels = options?.isolateLabels ?? passBrokerLabelIsolationRequested();
     this.isolateLabelPrefixes = (options?.isolateLabelPrefixes
       ?? passBrokerLabelIsolationPrefixes()).map(xctraceSafeComputeLabel);
+    // Census the isolation state here rather than re-reading the environment at
+    // report time: a report must describe the stream that was actually encoded.
+    processBrokers += 1;
+    if (this.isolateLabels) {
+      processLabelIsolatedBrokers += 1;
+      for (const prefix of this.isolateLabelPrefixes) processLabelIsolationPrefixes.add(prefix);
+    }
   }
 
   /** Return the open compute pass, creating it only when necessary. */
@@ -141,9 +276,12 @@ export class PassBroker {
     // Record the loss rather than let it be inferred from a timing report.
     if (nextLabel !== this.openComputePassLabel) {
       const owner = this.openComputePassLabel ?? UNLABELLED_PASS;
-      const swallowed = this.absorbed.get(owner) ?? new Set<string>();
-      swallowed.add(nextLabel ?? UNLABELLED_PASS);
-      this.absorbed.set(owner, swallowed);
+      const dropped = nextLabel ?? UNLABELLED_PASS;
+      for (const map of [this.absorbed, processAbsorbed]) {
+        const swallowed = map.get(owner) ?? new Set<string>();
+        swallowed.add(dropped);
+        map.set(owner, swallowed);
+      }
     }
     return this.openComputePass;
   }
@@ -151,11 +289,11 @@ export class PassBroker {
   /** End the current pass. `reason` documents semantic boundaries at callers. */
   fence(reason?: string): void {
     const name = reason ?? "explicit fence";
-    const bucket = this.boundaryBucket(name);
-    bucket.requests += 1;
+    const buckets = this.boundaryBuckets(name);
+    for (const bucket of buckets) bucket.requests += 1;
     const pass = this.openComputePass;
     if (!pass) return;
-    bucket.passClosures += 1;
+    for (const bucket of buckets) bucket.passClosures += 1;
     this.openComputePass = undefined;
     this.openComputePassLabel = undefined;
     this.latestFence = reason;
@@ -164,10 +302,12 @@ export class PassBroker {
 
   clearBuffer(buffer: GPUBuffer, offset?: GPUSize64, size?: GPUSize64): void {
     this.fence("clear buffer");
-    const bucket = this.boundaryBucket("clear buffer");
-    bucket.clearCommands += 1;
-    if (typeof size === "number") bucket.commandBytes += size;
-    else if (typeof buffer.size === "number") bucket.commandBytes += buffer.size - Number(offset ?? 0);
+    const bytes = typeof size === "number" ? size
+      : typeof buffer.size === "number" ? buffer.size - Number(offset ?? 0) : 0;
+    for (const bucket of this.boundaryBuckets("clear buffer")) {
+      bucket.clearCommands += 1;
+      bucket.commandBytes += bytes;
+    }
     this.encoder.clearBuffer(buffer, offset, size);
   }
 
@@ -179,9 +319,10 @@ export class PassBroker {
     size: GPUSize64,
   ): void {
     this.fence("copy buffer");
-    const bucket = this.boundaryBucket("copy buffer");
-    bucket.copyCommands += 1;
-    if (typeof size === "number") bucket.commandBytes += size;
+    for (const bucket of this.boundaryBuckets("copy buffer")) {
+      bucket.copyCommands += 1;
+      if (typeof size === "number") bucket.commandBytes += size;
+    }
     this.encoder.copyBufferToBuffer(source, sourceOffset, destination, destinationOffset, size);
   }
 
@@ -196,19 +337,30 @@ export class PassBroker {
     // Keep indirect publication distinct in the audit. It is the dominant
     // recurring copy family and therefore the first Bet-3 staging target.
     this.fence("stage indirect args");
-    const bucket = this.boundaryBucket("stage indirect args");
-    bucket.copyCommands += 1;
-    if (typeof size === "number") bucket.commandBytes += size;
+    for (const bucket of this.boundaryBuckets("stage indirect args")) {
+      bucket.copyCommands += 1;
+      if (typeof size === "number") bucket.commandBytes += size;
+    }
     this.encoder.copyBufferToBuffer(source, sourceOffset, destination, destinationOffset, size);
   }
 
-  private boundaryBucket(reason: string) {
+  /**
+   * THE boundary funnel. Every write to either census goes through here, so a
+   * new boundary kind cannot reach the command stream without being counted,
+   * and this broker's own audit can never disagree with the process totals.
+   */
+  private boundaryBuckets(reason: string): readonly MutableBoundaryBucket[] {
     let bucket = this.boundaries.get(reason);
     if (!bucket) {
-      bucket = { requests: 0, passClosures: 0, copyCommands: 0, clearCommands: 0, commandBytes: 0 };
+      bucket = emptyBoundaryBucket();
       this.boundaries.set(reason, bucket);
     }
-    return bucket;
+    let total = processBoundaries.get(reason);
+    if (!total) {
+      total = emptyBoundaryBucket();
+      processBoundaries.set(reason, total);
+    }
+    return [bucket, total];
   }
 
   /** Escape to commands not represented here only after closing compute. */
@@ -292,12 +444,7 @@ export function formatPassBrokerBoundaryAudit(
   audit: ReadonlyMap<string, PassBrokerBoundaryAuditBucket>,
   limit = 12,
 ): readonly string[] {
-  const ranked = [...audit.entries()].sort((left, right) =>
-    right[1].passClosures - left[1].passClosures
-    || (right[1].copyCommands + right[1].clearCommands)
-      - (left[1].copyCommands + left[1].clearCommands)
-    || right[1].commandBytes - left[1].commandBytes
-    || left[0].localeCompare(right[0]));
+  const ranked = rankPassBrokerBoundaryAudit(audit);
   if (ranked.length === 0) return [];
   const lines = [`${ranked.reduce((sum, [, bucket]) => sum + bucket.passClosures, 0)} compute-pass boundaries by cause:`];
   for (const [reason, bucket] of ranked.slice(0, limit)) {

@@ -38,26 +38,75 @@ pressure-boundary treatment stays correct, and which gate proves it.
 
 The `166 passes / 1,513 dispatches / hierarchical MGPCG` numbers in older docs
 are obsolete on this branch. Measured on this branch
-(`artifacts/scene-size-overhead/`):
+(`artifacts/scene-size-overhead/`, `artifacts/measurement-floor/`):
 
-| lane | passes/adv | dispatches/adv | indirect | MGPCG dispatches |
-|---|---:|---:|---:|---:|
-| mini (persistent) | 80 | 442 | 252 (57%) | **1** |
-| large 20× (persistent) | 80 | 470 | 281 (60%) | **1** |
-| large (old hierarchical, for contrast) | 170 | 2,144 | 1,852 | 1,675 |
+| lane | captured | leaf | passes/adv | dispatches/adv | indirect | "MGPCG disp" | solve iters | ms/adv |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| mini (persistent) | 07-29 | **2** | 80 | 442 | 252 (57%) | 1 | — | **69.6** |
+| mini (persistent) | 08-03 | **32** | 80 | 503 | 328 | 26 | 4 | **245.3** |
+| mini (persistent) | 08-03 | **2** | 79 | 469 | 294 | 26 | 6 | **211.1** |
+| tiny-hydro | 08-03 | 32 | 80 | 499 | 328 | 26 | 4 | **361.6** |
+| tiny-hydro, band 1 | 08-03 | 32 | 80 | 499 | 328 | 26 | 4 | 360.6 |
+| large-hydro | 08-03 | 32 | 80 | 501 | 328 | 26 | 1 | **143.6** |
+| large 20× churn | 08-03 | 32 | 81 | 515 | 328 | 26 | 2 | **306.9** |
+| large 20× (persistent) | 07-30 | 32 | 80 | 470 | 281 (60%) | 1 | — | 122.7 |
+| large (old hierarchical, for contrast) | — | — | 170 | 2,144 | 1,852 | 1,675 | — | — |
 
-The pressure *solve* is now one dispatch (`webgpu-octree-persistent-mgpcg.ts`
-`encodeSolve`); it is no longer the launch problem. What remains, with measured
-evidence:
+Note what the structure columns do *not* explain: passes/advance is 80 and
+dispatches/advance is ~500 on **every** current lane, from 16³ still water to
+the 20× dam, while the wall moves 143.6 → 361.6. Launch structure is flat across
+the matrix; the wall is not. See §2's filled matrix for what does track it.
+
+**Read that table with two corrections in hand.**
+
+- **The leaf column is not decoration.** Commit `065219a` (2026-08-01,
+  "fix(octree): restore factor-one scene parity") moved the mini lane's
+  `FLUID_MAXIMUM_LEAF_SIZE` from 2 to 32 and the large lane's from 16 to 32.
+  Every pre-`065219a` artifact therefore describes a **different
+  discretization** from every post-`065219a` one, and they have been compared as
+  if they did not. Measured this session on the same 240-step mini lane at HEAD:
+  245.3 ms/adv at leaf 32 vs 211.1 ms/adv at leaf 2
+  (`artifacts/measurement-floor/mini-240-clean-a.json`, `…/mini-240-leaf2.json`).
+  So the leaf change accounts for ~14% of the gap to the 07-29 leaf-2 capture's
+  69.6 ms/adv — and a **real ~3× regression remains, unexplained**. See §5.
+- **"MGPCG dispatches" is a label-attribution metric, not a solve dispatch
+  count.** `POWER_DAM_MGPCG_SOLVE_STAGE`
+  (`tools/power-dam-performance-report.ts:476-482`) resolves a compute pass to
+  its owning stage and folds `SPGrid V-cycle`, `Section 4.3 preconditioner`,
+  `SPGrid accurate A2` and `SPGrid Section 6.3 apply` into the solve, then sums
+  the dispatches in every such pass. The 07-29 capture recorded 1 because **no
+  pass in it carried an `SPGrid V-cycle` label at all**; the current captures
+  carry two (`… · capture plan L1 delta`, `… · candidate commit changed L1`), so
+  the candidate rebuild's ~25 dispatches are now counted as the solve.
+
+The pressure *solve* itself is still literally **one dispatch**:
+`WebGPUOctreePersistentMGPCG.encodedDispatchCount = 1`
+(`lib/webgpu-octree-persistent-mgpcg.ts:292-293`), and every fresh artifact
+records `computePassesByLabel["Octree persistent MGPCG - whole solve in one
+workgroup"] = 1`. It is not the launch problem. *(Recommended, not done here —
+that file is owned elsewhere: rename or split `mgpcgDispatchesPerAdvance` so it
+stops reading as the solve. It is currently "dispatches inside solve-owned
+passes", and the SPGrid candidate rebuild dominates it.)*
+
+What remains, with measured evidence:
 
 1. **Scene-shaped maintenance.** The SPGrid candidate rebuild is ~21
    capacity-shaped dispatches per advance (`webgpu-octree-spgrid-vcycle.ts`
    `encodeSetupCandidate`), sized from `rowCapacity` / `brickCount` /
-   `pageDirectoryWords` — all O(domain-edge²) allocation-time constants, zero
-   indirect. Air support dispatches four kernels at `ceil(domainVolume/256)`
-   (`webgpu-octree-air-velocity-support-gpu.ts`, `plan.domainVolume`), at **two
-   encode sites per advance**. Fine topology identity scans run over
-   `logicalBrickCount` (whole-domain fine bricks) and `maximumResidentBricks`.
+   `pageDirectoryWords` — all O(domain-edge²) allocation-time constants. They
+   now run *through* the GPU-authored `CANDIDATE_SCHEDULE`, which does not make
+   them live-shaped: `prepareCandidateSchedules` writes those same capacities
+   into the indirect args on the GPU (`:3878-3879`, `brickItems = p.totals.y`
+   = `plan.brickCount`), so four of them are capacity-shaped launches wearing an
+   indirect costume. The four `ceil(domainVolume/256)` air-support dispatches
+   are **gone** (test-locked); `domainVolume` survives in that module only in
+   capacity planning and WGSL bounds checks. There are now **four**
+   `airVelocitySupport.encode` call sites (`lib/webgpu-octree.ts:3774`, `:4004`,
+   `:4342`, `:4380`), of which two run per steady-state advance — the artifacts
+   show every Section 5 label twice, suffixed `- topology-commit` and
+   `- settled-fine`. Fine topology identity scans run over
+   **`maximumResidentBricks`**, not `logicalBrickCount`
+   (`…fine-levelset-topology.ts:1464-1517`, `Math.ceil(plan.maximumResidentBricks / 64)`).
 2. **Change-independent maintenance.** Topology candidate + descriptor + power
    topology + boundary + SPGrid setup + air support + full transport + full JFA
    redistance run **every step**, while X-1 measured 197 of the first 200
@@ -99,8 +148,11 @@ Factor cost as `wall = f(scene size, fluid size, change rate)`. The lanes:
 
 Phase 0 fills the matrix:
 
-> **Status 2026-08-02:** P0.1 (`hydrostatic-tiny` lane) and P0.2
-> (`large-power-hydrostatic`) exist in `tools/power-dam-lane-environment.ts`.
+> **Status 2026-08-02:** P0.1 (`hydrostatic-tiny` lane) and P0.2 exist in
+> `tools/power-dam-lane-environment.ts`. P0.2's **lane key is
+> `--lane=large-hydrostatic`**; `large-power-hydrostatic` is the *scene* id and
+> `--lane=large-power-hydrostatic` throws. npm script:
+> `benchmark:power-dam-large-hydrostatic`.
 > P0.4 is half-captured: mini + tiny-hydro fresh baselines live in
 > `artifacts/scene-size-overhead/fresh-20260802-*`; the two large cells are
 > blocked on red lanes — the large-dam class-4 stage-34 trip from step 249 and
@@ -131,10 +183,14 @@ Phase 0 fills the matrix:
 - **P0.4 — fresh baselines + censuses on all four cells.** Clean walls via
   `benchmark-power-dam.ts` (A/A pairs, interleaved, per the measurement
   protocol in `POWER_LIQUIDS_ULTIMATE_M1MAX.md`), plus one run each with
-  `FLUID_OCTREE_ROW_DELTA_CENSUS=1` and `FLUID_WORKSET_CENSUS=1`, plus one
-  xctrace stage capture each (`profile:mini-dam-xctrace` / `--lane=large`).
-  Record: ms/advance, dispatches (direct vs indirect), passes, per-family
-  attributed ms, zero-affected-generation fraction, arena bytes.
+  `FLUID_WORKSET_CENSUS=1`, plus one xctrace stage capture each
+  (`profile:mini-dam-xctrace` / `--lane=large`). Record: ms/advance, dispatches
+  (direct vs indirect), passes, per-family attributed ms,
+  zero-affected-generation fraction, arena bytes. **`FLUID_OCTREE_ROW_DELTA_CENSUS`
+  does not exist** — it was removed in `9de199a` and survives only in docs;
+  setting it yields a silently census-free artifact. Every artifact now carries
+  a resolved-`environment` record (schemaVersion 2) — check `clean` and
+  `comparisonKey` before comparing two runs at all.
 - **P0.5 — refresh `SYMMETRIC_EXPANSION_ORACLE.md`** divergence table (63→68,
   spread 0) so nobody gates against stale numbers.
 
@@ -142,20 +198,101 @@ Phase 0 fills the matrix:
 scene-size tax = wall(large-hydro) − wall(tiny-hydro); change tax =
 wall(large-dam) − wall(large-hydro); existence floor = wall(tiny-hydro).
 
+### The matrix, filled in for the first time (2026-08-03, HEAD `f4d11e7`)
+
+All four cells captured this session on Apple M1 Max / Dawn Metal, artifacts in
+`artifacts/measurement-floor/`, each carrying the resolved-`environment` record.
+ms/advance:
+
+| | small (16³) | large (64×20×64) |
+|---|---:|---:|
+| **still** | **361.6** (`hydrostatic-tiny`, 240 steps) | **143.6** (`large-hydrostatic`, 240 steps) |
+| **churn** | **245.3** (`mini`, 240 steps) | **306.9** (`large`, 200 steps) |
+
+> The mini cell is 240 steps, not the lane's default 500, so it is directly
+> comparable to the July `baseline-mini.json` capture; the 500-step default lane
+> reads ~241 ms.
+
+**The headline: the wall is anti-correlated with scene size.** Ranked —
+tiny-still 361.6 > large-churn 306.9 > small-churn 245.3 > large-still 143.6.
+**The tiny still scene is the slowest cell in the matrix**, on a domain 20×
+smaller than the fastest. The plan above is written on the assumption that large
+costs more than small. On this tree it does not, and the three decision numbers
+come out with signs nobody planned for: the "scene-size tax"
+(143.6 − 361.6) is **−218 ms**.
+
+**The confounder, and how far it is ruled out.** The authored matrix confounds
+size with interface band: the small lanes run `FLUID_OCTREE_INTERFACE_BAND: 3`
+and the large lanes `1` (`tools/power-dam-lane-environment.ts`). So "small vs
+large" has always also meant "band 3 vs band 1". Re-running `hydrostatic-tiny`
+at band 1 gives **360.60 ms vs 361.63 ms**
+(`hydrostatic-tiny-240-band1.json` vs `hydrostatic-tiny-240.json`, both
+`clean: true`) — no difference. Band reach is not what makes the tiny still lane
+expensive. **That single measurement is the only thing currently separating the
+two axes**; the lane table still confounds them, and any other size-vs-band
+question needs its own paired run.
+
+**What does predict the wall: the persistent solve's executed iteration count.**
+From `terminalCounters.pressureIterationsExecuted` in the same artifacts:
+
+| lane | executed iterations | ms/adv |
+|---|---:|---:|
+| tiny-hydro | 4 | 361.6 |
+| mini-dam | 4 | 245.3 |
+| large-dam | 2 | 306.9 |
+| large-hydro | 1 | 143.6 |
+
+Combined with the per-pass profile — `Octree persistent MGPCG - whole solve in
+one workgroup` measured at **84.9 ms/advance, 38% of the mini frame** — the
+honest reading is that **the wall is set by a serialized single-workgroup
+pressure solve and tracks its iteration count, not the domain**. All four lanes
+encode 10 outer iterations and hard-limit at 16; none is iteration-starved.
+
+So **Bet 1's identity is not currently the binding constraint. The "small
+constant" is.** `wall ≈ O(interface changed) + O(live rows) + small constant`
+can be perfectly satisfied and still leave a 361 ms still-water advance, because
+one dispatch that runs the whole solve inside one workgroup is the constant.
+Bet 3.2 (persistent kernels) built that constant; making it *parallel again for
+large row counts* is now a first-order item, not a Bet-3 refinement.
+
+Two caveats that must travel with these numbers:
+
+- **The large-churn cell is not measurement-clean.** `large-200.json` reports
+  `clean: false` with `FLUID_PRESSURE_ROW_CAPACITY` as its one contaminant — it
+  had to be set by hand to make the lane run at all (see §5). A pressure-row
+  capacity plausibly affects the wall, so 306.9 ms is provisional until the lane
+  table is fixed and it is re-captured clean.
+- **Iteration count is a correlate, not a law.** The mini leaf-2 run executed
+  **6** iterations at **211.1 ms** while the leaf-32 run executed **4** at
+  **245.3 ms** — more iterations, lower wall. Whatever sets the per-iteration
+  cost (row count, occupancy, the serialized workgroup) matters at least as much
+  as the count.
+
 ### Targets (accept/reject thresholds for the program, measured clean)
 
-| lane | today (approx) | target | stretch |
+| lane | today (measured, 08-03, leaf 32) | target | stretch |
 |---|---:|---:|---:|
-| tiny hydrostatic, settled steps | ≈ mini wall (~38–44) | **≤ 4 ms** | ≤ 1.5 ms |
-| large hydrostatic, settled steps | unmeasured | **≤ 1.5× tiny-hydro** | ≈ tiny-hydro |
-| large 20× dam churn | ~38–47 | **≤ 1.5× mini churn** | ≤ 1.25× |
-| mini dam churn | ~38–44 | **≤ 15 ms** | single digit |
+| tiny hydrostatic, settled steps | **361.6** | **≤ 4 ms** | ≤ 1.5 ms |
+| large hydrostatic, settled steps | **143.6** | **≤ 1.5× tiny-hydro** — *already met, in the wrong direction* | ≈ tiny-hydro |
+| large 20× dam churn | **306.9** (200 steps, `clean: false`) | **≤ 1.5× mini churn** | ≤ 1.25× |
+| mini dam churn | **245.3** (240 steps; ~241 at the 500-step default) | **≤ 15 ms** | single digit |
 | ocean-seiche | 2-step only | 500-step lane exists and completes | ≤ 250 ms/adv |
 
+The old "~38–44 ms" column matched no artifact in the tree and is deleted. Every
+number above is from `artifacts/measurement-floor/` with a resolved
+`environment` record; check `clean` and `comparisonKey` before comparing any
+two. **These are not a settled floor**, for two independent reasons: the mini
+lane's ~3× gap to the 07-29 capture is unexplained (§5), and the
+"large ≤ 1.5× tiny" target is being met only because tiny is 2.5× *slower* than
+large — see the filled matrix above. A target that passes for the wrong reason
+is not a passing target; re-derive these thresholds once the solve constant is
+understood.
+
 Rationale: X-9 proves the fine lane can run at 0.43 ms; the persistent solve is
-1 dispatch converging in 3–5 iterations; what stands between ~40 ms and single
-digits is maintenance that ignores change and dispatch shapes that ignore
-fluid. Memory: O(fluid + interface) arenas, not O(domain) — required for ocean
+1 dispatch converging in 3–5 iterations; what stands between the measured wall
+and single digits is maintenance that ignores change and dispatch shapes that
+ignore fluid — plus, on the current mini number, whatever the unexplained ~3×
+turns out to be. Memory: O(fluid + interface) arenas, not O(domain) — required for ocean
 (current air-support allocator is ~42 KB/pressure-row and domain-volume
 dispatch-shaped; it blocks >115³ today).
 
@@ -176,24 +313,38 @@ The rule: every recurring dispatch must be shaped by a **GPU-published live
 count** (compacted worklist + indirect args), or be a `(1,1,1)` control
 singleton. Allocation-time capacities may size *buffers*, never *launches*.
 
-> **Status 2026-08-02:** items 1–3 below mostly landed in `a0a2247` and read
-> stale as written. The candidate chain runs off the GPU-authored
-> `CANDIDATE_SCHEDULE`/`runCandidateIndirect` indirect schedule; the four
-> `domainVolume` air-support dispatches are gone (test-locked); the indirect
-> frontier gate is default-on; the proven-reach corridor exists with the
-> out-of-corridor census/reject split (the "~94k faces" figure is retracted by
-> the in-tree censuses). The honest residue, all shaped by one missing
-> primitive (a multi-workgroup **stable LSD radix sort** over touched u32
-> identities — `sortSparseCandidates` is a single-workgroup bitonic, not it):
-> (a) the SPGrid dense brick/page **directory sweep** (4 kernels over
-> `totalBrickCount`/page words per dirty epoch; CPU oracle
-> `octree-spgrid-touched-directory.ts` is written, test-only), (b) the
-> fine-topology `maximumResidentBricks`/`logicalBrickCount` recurring scans,
-> (c) the 12 `domainVolume` dispatches in `webgpu-octree-coarse-summary.ts`
-> (coarse-only lane), (d) grow-on-reject capacity reallocation (item 4's
-> remainder — note the large-dam capacity override in `lib/scenes.ts` is the
-> *authored budget* precedent, not a wart to retire: the floor-spanning
-> collapse needs more bricks than any initial-footprint estimate).
+> **Status 2026-08-03:** items 1–3 below mostly landed in `a56ddd0`
+> ("perf(power-liquids): revive the coarse-only tracker and land Bet 1/4
+> scaffolding" — the older `a0a2247` hash was rebased away; anchor on the
+> message) and read stale as written. The candidate chain runs off the
+> GPU-authored `CANDIDATE_SCHEDULE`/`runCandidateIndirect` indirect schedule;
+> the four `domainVolume` air-support dispatches are gone (test-locked); the
+> indirect frontier gate is default-on; the proven-reach corridor exists with
+> the out-of-corridor census/reject split (the "~94k faces" figure is retracted
+> by the in-tree censuses). The honest residue:
+> (a) the SPGrid dense brick/page **directory sweep** — its replacement
+> primitive is **not missing**: `lib/webgpu-radix-sort-u32.ts` is a genuinely
+> multi-workgroup stable LSD radix sort, Dawn-validated against the CPU oracle
+> `octree-spgrid-touched-directory.ts` by `tests/webgpu-radix-sort-u32.test.ts`,
+> landed and wired behind `FLUID_SPGRID_TOUCHED_RADIX_SORT=1`, awaiting its
+> Gate-B A/B. (`sortSparseCandidates` *is* a single-workgroup bitonic; that half
+> of the old claim was right.) Meanwhile the default arm's schedule is authored
+> from capacity **on the GPU** — `prepareCandidateSchedules` writes
+> `plan.brickCount` and `pageDirectoryWords` into the indirect args
+> (`…spgrid-vcycle.ts:3878-3879`), which is why an indirect launch here is not
+> yet a live launch. (b) the fine-topology **`maximumResidentBricks`** recurring
+> scans — `logicalBrickCount` does not shape them. (c) the 12 `domainVolume`
+> dispatches in `webgpu-octree-coarse-summary.ts` are **unreachable on every
+> matrix lane**: the module is constructed only inside
+> `if (this.coarseOnlySurfaceTracking)` (`lib/webgpu-octree.ts:2819`,
+> construction `:2825`), `coarseOnlySurfaceTracking = globalFineLevelSetFactor
+> === 1` (`:1638`), every other touch is optional-chained, and the factor
+> defaults to 4 (`lib/methods/octree.ts:7`, `:108`; `webgpu-octree.ts:2155`).
+> Move it to the coarse-only/Bet 4.3 track. (d) grow-on-reject capacity
+> reallocation (item 4's remainder — note the large-dam capacity override in
+> `lib/scenes.ts` is the *authored budget* precedent, not a wart to retire: the
+> floor-spanning collapse needs more bricks than any initial-footprint
+> estimate).
 
 1. **Indirect-ify the SPGrid candidate chain.** `encodeSetupCandidate`'s ~21
    phases move from `dispatchFor(rowCapacity/levelStride/brickCount/pageWords)`
@@ -203,17 +354,27 @@ singleton. Allocation-time capacities may size *buffers*, never *launches*.
    audit exists: grep every `dispatchFor(` and `workgroupPerItemDispatch(` in
    `spgrid-vcycle.ts` and classify each against a live count that already
    exists in the delta/compaction control words.
-2. **Kill the four `ceil(domainVolume/256)` air-support dispatches** and the
-   `maximumResidentBricks`-shaped demand marks. The compact-demand indirect
-   mechanism already exists (`FLUID_OCTREE_AIR_SUPPORT_COMPACT_FINE_DEMAND`,
-   default on) — finish the family: demand mark, clears, directory stages all
-   driven from the compacted demand list. Promote
-   `FLUID_OCTREE_AIR_SUPPORT_INDIRECT_FRONTIER_GATE` (GPU-published wave gate,
-   currently default-off) after an A/B, so quiet steps zero the 12 frontier
-   waves on-GPU.
+2. **DONE — do not re-run.** The four `ceil(domainVolume/256)` air-support
+   dispatches are gone and test-locked. The compact-demand indirect mechanism is
+   **unconditional**: `FLUID_OCTREE_AIR_SUPPORT_COMPACT_FINE_DEMAND` was dead
+   and is now deleted (ledger §2.1) — `encode` gates the fine-demand schedule on
+   `fineSlot` alone, and setting that env var does nothing because nothing reads
+   it. `FLUID_OCTREE_AIR_SUPPORT_INDIRECT_FRONTIER_GATE` is **default ON**
+   (`…air-velocity-support-gpu.ts:346`, `!== "0"`, test-locked at
+   `tests/webgpu-octree-air-velocity-support-gpu.test.ts:67-75`); the A/B this
+   item asks for has already been taken. What is left of item 2 is the
+   `maximumResidentBricks`-shaped demand marks, and corridor engagement at
+   factor 4 (item 3).
 3. **Air-support corridor (the structural one).** Topology reuse landed, but
-   support membership is still ≈ the whole air partition (~94k face patches
-   marched on mini; scales with domain, catastrophic at 20×/ocean). Replace
+   support membership is still ≈ the whole air partition — **not** the retracted
+   "~94k face patches": the in-tree census is
+   `terminalCounters.airSupportFaceItems = 31,584` on mini
+   (`artifacts/scene-size-overhead/fresh-20260802-mini-a.json`). The stronger
+   argument is in the same artifact set: the *still* scene marches **more** faces
+   than the churn scene (43,776 vs 31,584, seed faces 30,528 vs 17,564, on the
+   same 16³ domain — `fresh-20260802-hydrostatic-tiny-a.json`). Air support
+   scales with the air partition, not with change, exactly as this bet predicts;
+   it scales with domain, catastrophic at 20×/ocean. Replace
    "all air near liquid" with a **proven-reach corridor**: the union of (a)
    faces within the advection backtrace reach of any wet/interface cell
    (transport bound + interpolation stencil — the same radii the fine-band
@@ -410,6 +571,57 @@ mini but scales with domain is a regression under this plan.
 
 ## 5. Traps carried forward (measured; do not relearn)
 
+- **The discretization moved under the artifacts.** `FLUID_MAXIMUM_LEAF_SIZE`
+  changed on 2026-08-01 in `065219a`: mini 2→32, large 16→32, hydrostatic
+  16→32. Pre- and post-`065219a` artifacts are different simulations and were
+  compared as if they were not. Measured at HEAD on the same 240-step mini lane:
+  **245.3 ms/adv at leaf 32, 211.1 ms/adv at leaf 2**, against **69.6 ms/adv**
+  for the 2026-07-29 leaf-2 capture. Leaf size explains ~14%; a **real ~3×
+  regression is still unexplained and is the open item** — treat every
+  cross-date comparison in the older docs as void until it is closed.
+  Recurrence prevention now in tree: benchmark artifacts carry a resolved
+  `environment` record (`tools/power-dam-run-environment.ts`; diagnostic
+  artifact at schemaVersion 2, plus the octree regression artifact) naming every
+  `FLUID_*`/`WEBGPU_*` variable the run received, which were inherited from the
+  shell rather than authored, a `contaminants` list of wall-affecting knobs off
+  their measurement-clean value, a `clean` boolean, and a `comparisonKey` digest
+  over the scene+solver configuration. `tools/benchmark-power-dam.ts` takes
+  `--leaf-size=` so the leaf is an explicit A/B axis. **Compare only equal
+  `comparisonKey`s.**
+- **The `large` benchmark lane is red for a lane-table reason, not a physics
+  one.** `tools/benchmark-power-dam.ts --lane=large` dies at t=0 with *"Initial
+  sparse authority cold-topology published no liquid-row frontier"*, while the
+  smoke lane on the **same scene** (`npm run
+  test:webgpu:large-power-dam-runtime`, `runtime-150`) is green for 150 steps.
+  The difference is capacity, not the solver: the smoke catalog applies
+  `largePowerDamOverrides` (`lib/scene-webgpu-smoke-catalog.ts:349-355`) with
+  `pressureRowCapacity: 8_192` and `globalFineLevelSetMaximumBricks:
+  LARGE_POWER_DAM_FINE_BRICK_CAPACITY` (32,768); the benchmark lane table
+  (`tools/power-dam-lane-environment.ts`, `large:`) sets **neither**. Passing
+  `FLUID_PRESSURE_ROW_CAPACITY=8192` by hand
+  (`tools/webgpu-smoke-executor.ts:454-458`) makes it run green to 200 steps —
+  which is how the large-churn cell above was captured, and why that cell is
+  `clean: false`. **`globalFineLevelSetMaximumBricks` has no env override at
+  all**: `lib/methods/octree.ts:58-62` reads it only from authored method
+  values, so the benchmark lane cannot express its own scene's authored capacity
+  even in principle. Fix: add `FLUID_PRESSURE_ROW_CAPACITY: "8192"` to the
+  `large` lane, and decide separately whether the brick capacity gets an env
+  override or the lane table gets a method-override channel. **Do not read a
+  cold-topology publication failure on this lane as a solver red.**
+- **A green `audit:octree-production-source` is not evidence of a live-shaped
+  frame.** The gate has been green-and-blind three times (capacity vocabulary by
+  enumeration; detection stopping at the literal `dispatchWorkgroups(` call; and
+  the `dispatchWorkgroupsIndirect` exemption, which missed a GPU kernel writing
+  `plan.brickCount` straight into the indirect args). All three are closed and
+  pinned by regressions, but `docs/BET1_DISPATCH_SHAPE_AUDIT.md` §"What the gate
+  still cannot see" lists what remains invisible — read it before quoting a
+  clean run.
+- **`environment.clean: false` is not always contamination.** An *unset*
+  variable whose measurement-clean value is `"0"` is currently listed as a
+  contaminant with `resolved: null` — `mini-240-clean-a.json` reports six of
+  those and is otherwise a clean run. Read the `contaminants` entries, not just
+  the boolean; a `resolved: null` entry means "not proven clean", a non-null one
+  means "actually set to something else".
 - **A/A before A/B; no second WebGPU client on the GPU** — contamination
   silently changes physics (`POWER_LIQUIDS_ULTIMATE_M1MAX.md`).
 - **Dispatch-count deletion alone does not move the wall** (B4-experiment:

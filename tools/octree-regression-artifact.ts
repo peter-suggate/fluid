@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { extname, relative, resolve } from "node:path";
 import { performanceTraceIsExact, type PaperPhaseId } from "../lib/performance-trace";
+import type { PowerDamRunEnvironment } from "./power-dam-run-environment";
 import {
   OCTREE_WORK_STAGES,
   type OctreeWorkSnapshot,
@@ -56,6 +57,13 @@ export interface OctreeRegressionArtifact {
     readonly complete: boolean;
   };
   readonly revisions: OctreeRegressionRevision;
+  /**
+   * The environment this capture actually ran in. Optional only so artifacts
+   * written before ledger C7 still parse; every new capture carries one, and a
+   * comparison against an artifact without it is a comparison against an
+   * unknown.
+   */
+  readonly environment?: PowerDamRunEnvironment;
   readonly metrics: {
     readonly wallTime_ms: number;
     readonly stageTime_ms: Readonly<Partial<Record<PaperPhaseId, number>>> | null;
@@ -315,6 +323,7 @@ export function buildOctreeRegressionArtifact(input: {
   readonly adapter?: string;
   readonly capturedAt?: string;
   readonly revisions?: OctreeRegressionRevision;
+  readonly environment?: PowerDamRunEnvironment;
 }): OctreeRegressionArtifact {
   const contract = OCTREE_REGRESSION_CONTRACTS[input.lane];
   const result = input.result;
@@ -373,6 +382,7 @@ export function buildOctreeRegressionArtifact(input: {
       complete,
     }),
     revisions: input.revisions ?? octreeRegressionRevision(input.repositoryRoot),
+    ...(input.environment ? { environment: input.environment } : {}),
     metrics: Object.freeze({
       wallTime_ms: result.simulationWall_ms,
       stageTime_ms: stages,

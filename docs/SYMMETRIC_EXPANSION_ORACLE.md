@@ -80,15 +80,26 @@ Four construction defects were responsible:
 
 ## Current first dynamic divergences
 
-On the Dawn Metal path used during implementation (as of `perf/structured-cutover`
-2026-08-02, after the air-support Section-5 retirement in `f853dd2`):
+Re-run on the Dawn Metal path at `perf/structured-cutover` **2026-08-03**
+(HEAD `f4d11e7`); the 2026-08-02 row after the air-support Section-5 retirement
+in `f853dd2` is kept beneath it, since the only change is one step of headroom
+on the topology/diagonal families.
 
-| Lane | First volume | First velocity | First pressure | First topology | Wall-contact steps (-x, +x, -z, +z) |
-| --- | --- | --- | --- | --- | --- |
-| factor 1 | step 68, `0.272 s` | step 68 | step 68 | bitwise D4 through step 67 | `68, 68, 68, 68` — spread **0** |
-| factor 4 | step 1 | step 1 | step 1 | exact through step 1 | not evaluated in the one-step lane |
+| Lane | First volume | First velocity | First pressure | First rhs | First topology / diagonal | Wall-contact steps (-x, +x, -z, +z) |
+| --- | --- | --- | --- | --- | --- | --- |
+| factor 1 (08-03) | step 68, `0.272 s` | step 68 | step 68 | step 68 | bitwise D4 through step **68** (first loss step 69) | `68, 68, 68, 68` — spread **0** |
+| factor 1 (08-02) | step 68 | step 68 | step 68 | — | bitwise D4 through step 67 | `68, 68, 68, 68` — spread **0** |
+| factor 4 | step 1 | step 1 | step 1 | step 1 | exact through step 1 | not evaluated in the one-step lane |
 
-The factor-1 lane is now bitwise D4-symmetric all the way to simultaneous wall
+> **The 250-step run exits non-zero, and that is the expected outcome.** The gate
+> is the divergence *step*, not a passing process. `npm run
+> test:webgpu:symmetric-expansion` deliberately runs past the window so the
+> oracle can report where D4 is first lost; a non-zero exit with
+> `first volume/velocity/pressure/rhs = 68` and `topology/diagonal = 69` is a
+> **green** result. Read the reported steps, not the exit code. (This is not
+> obvious from the script and has cost at least one GPU session.)
+
+The factor-1 lane is bitwise D4-symmetric all the way to simultaneous wall
 contact; the first loss at step 68 is the wall interaction itself, not a
 directional bias in the interior operators. Per-family numbers and the
 measurement lanes live in `SYMMETRIC_EXPANSION_FRAME_PROFILE.md`. The historical

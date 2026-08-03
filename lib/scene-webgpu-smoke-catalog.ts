@@ -30,6 +30,7 @@ export const sceneWebGPUSmokeIds = [
   "hose-tank",
   "sphere-jet",
   "deep-water",
+  "hero-garden-hose",
   "garden-pond",
   "garden-hose",
   "garden-dam-break",
@@ -712,6 +713,14 @@ const suiteList = [
   }),
   suite("deep-water", "Extreme vertical aspect ratio", { definitionId: "deep-water-ab", variantId: "gpu-smoke" }, {
     default: lane({ target_s: 0.1, oracleSteps: 1, diagnostics: [equilibriumDiagnostic] }),
+  }),
+  // The hero scene's vessel, asked the only question phase 1 has: does a
+  // generated basin hold still water. The 7.5 mm lattice makes this the finest
+  // terrain pool in the catalog, so it is also where a bake that left a step in
+  // the inner face would show up first.
+  suite("hero-garden-hose", "Hydrostatic rest in a generated porcelain pond", { definitionId: "hero-garden-hose", variantId: "gpu-smoke" }, {
+    default: lane({ target_s: 0.1, oracleSteps: 2, cpuOracle: false, methods: methods(["octree"]),
+      diagnostics: [equilibriumDiagnostic], timeout_ms: 240_000 }),
   }),
   suite("garden-pond", "Hydrostatic rest in an organic terrain pool", { definitionId: "garden-pond", variantId: "gpu-smoke" }, {
     default: lane({ target_s: 0.1, oracleSteps: 2, diagnostics: [equilibriumDiagnostic] }),

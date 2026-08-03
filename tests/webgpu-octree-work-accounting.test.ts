@@ -546,6 +546,111 @@ test("capacity dispatch guard follows capacity into local dispatching helpers", 
   "a capacity on a continuation line must still be seen");
 });
 
+/**
+ * The gate's third measured blindness. The first two were the capacity
+ * vocabulary (enumerated, so every new capacity was exempt) and detection
+ * stopping at the literal `dispatchWorkgroups(` call (so every local `run(...)`
+ * helper was exempt). This one is the `dispatchWorkgroupsIndirect` exemption:
+ * an indirect launch is only compliant if the *publisher* used a live count,
+ * and `prepareCandidateSchedules` publishes `p.totals.y` (the host's
+ * `plan.brickCount`) into the candidate schedule that four recurring launches
+ * consume. A green audit from this gate has twice been quoted as evidence while
+ * wrong, so each hole gets a pinned regression with its negative cases.
+ */
+test("indirect-args guard flags a capacity published into an indirect record", () => {
+  const source = [
+    "@group(0) @binding(0) var<uniform> p: Params;",
+    "@group(0) @binding(1) var<storage,read_write> candidateDispatch: array<u32>;",
+    "@group(0) @binding(2) var<storage,read> acceptedRows: array<u32>;",
+    "fn rows() -> u32 { return acceptedRows[2]; }",
+    "fn writeSchedule(record: u32, items: u32, lanes: u32) {",
+    "  let blocks = (items + lanes - 1u) / lanes;",
+    "  candidateDispatch[record * 3u] = min(65535u, blocks);",
+    "}",
+    "@compute @workgroup_size(1) fn prepareSchedules() {",
+    "  var brickItems = 0u;",
+    "  brickItems = p.totals.y;",
+    "  writeSchedule(4u, brickItems, 64u);",
+    "  writeSchedule(5u, rows(), 64u);",
+    "}",
+  ].join("\n");
+  assert.deepEqual(
+    auditOctreeProductionSource("schedule.wgsl", source, "shader")
+      .filter(({ rule }) => rule === "capacity-indirect-args")
+      .map(({ line }) => line),
+    [12],
+    "the uniform-derived record is flagged at its call site; the live-count one is not",
+  );
+});
+
+test("indirect-args guard reads through the select predicate, not around it", () => {
+  const source = [
+    "@group(0) @binding(0) var<uniform> p: P;",
+    "@group(0) @binding(1) var<storage,read_write> dispatchArgs: array<u32>;",
+    "@group(0) @binding(2) var<storage,read_write> state: array<atomic<u32>>;",
+    "fn airPublished() -> bool { return atomicLoad(&state[0]) != 0u; }",
+    "fn publishRecord(slot: u32, groups: u32) {",
+    "  let width = min(groups, p.maxWorkgroups);",
+    "  dispatchArgs[3u * slot] = width;",
+    "}",
+    "@compute @workgroup_size(1) fn prepare() {",
+    "  publishRecord(0u, select(0u, (p.domainVolume + 255u) / 256u, airPublished()));",
+    "  publishRecord(1u, (min(atomicLoad(&state[1]), p.entryCapacity) + 255u) / 256u);",
+    "}",
+  ].join("\n");
+  assert.deepEqual(
+    auditOctreeProductionSource("summary.wgsl", source, "shader")
+      .filter(({ rule }) => rule === "capacity-indirect-args")
+      .map(({ line }) => line),
+    [10],
+    "a live predicate around a capacity is still a capacity on the step it fires;"
+      + " a capacity that only clamps a published count is not",
+  );
+});
+
+test("indirect-args guard leaves compliant publishers and non-args buffers alone", () => {
+  // Negative case 1: every record derives from a GPU-published count.
+  const live = [
+    "@group(0) @binding(0) var<uniform> p: P;",
+    "@group(0) @binding(1) var<storage,read_write> publishedDispatch: array<u32>;",
+    "@group(0) @binding(2) var<storage,read> control: array<u32>;",
+    "@compute @workgroup_size(1) fn publish() {",
+    "  publishedDispatch[0] = (control[3] + 63u) / 64u;",
+    "  publishedDispatch[1] = 1u;",
+    "}",
+  ].join("\n");
+  assert.deepEqual(auditOctreeProductionSource("live.wgsl", live, "shader")
+    .filter(({ rule }) => rule === "capacity-indirect-args"), []);
+
+  // Negative case 2: the same capacity written into a buffer that is not
+  // indirect arguments. Capacities may size buffers; they may not size
+  // launches, and this rule must not blur that line.
+  const sizing = [
+    "@group(0) @binding(0) var<uniform> p: P;",
+    "@group(0) @binding(1) var<storage,read_write> arenaHeader: array<u32>;",
+    "@compute @workgroup_size(1) fn publish() { arenaHeader[0] = p.rowCapacity; }",
+  ].join("\n");
+  assert.deepEqual(auditOctreeProductionSource("sizing.wgsl", sizing, "shader")
+    .filter(({ rule }) => rule === "capacity-indirect-args"), []);
+
+  // Negative case 3: host sources are unchanged -- this is a shader-side rule.
+  assert.deepEqual(auditOctreeProductionSource("host.ts",
+    "pass.dispatchWorkgroupsIndirect(args, 0);", "host"), []);
+});
+
+test("capacity vocabulary spells the bare lowercase field too", () => {
+  // `this.capacity` was exempt while `this.rowCapacity` was not, which hid four
+  // of the six capacity-shaped launches in webgpu-fluid-brick-residency.ts.
+  const violations = auditOctreeProductionSource("residency.ts", [
+    "const bricks = Math.ceil(this.capacity / 64);",
+    "classify.dispatchWorkgroups(bricks);",
+    "commit.dispatchWorkgroups(Math.ceil(liveTiles / 64));",
+  ].join("\n"), "host");
+  assert.deepEqual(violations.map(({ line, rule }) => ({ line, rule })), [
+    { line: 2, rule: "capacity-dispatch" },
+  ]);
+});
+
 test("shader deletion gate rejects retired identifiers and general timestep authorities", () => {
   const source = [
     "// fallbackLegacyCompatibility is commentary, not executable WGSL",
@@ -625,6 +730,15 @@ test("repository audit includes the real production source tree by default", () 
     "the primary orchestration owner and every embedded shader must be audited");
   assert.ok(sources.some((source) => source.endsWith("/lib/webgpu-octree-structured-dynamics.ts")));
   assert.ok(!sources.some((source) => source.endsWith("/lib/webgpu-octree-voxel-inspection.ts")));
+  // Recurring simulation modules whose names carry no octree prefix. The
+  // prefix filter skipped both while they encoded every advance.
+  for (const recurring of [
+    "/lib/webgpu-fluid-brick-residency.ts",
+    "/lib/webgpu-sparse-brick-topology-mutation.ts",
+  ]) {
+    assert.ok(sources.some((source) => source.endsWith(recurring)),
+      `${recurring} is encoded every advance and must be inside the gate`);
+  }
   const audit = auditOctreeProductionRepository(root);
   assert.equal(audit.scannedSources.length, sources.length);
   assert.ok(audit.violations.every((violation) => sources.some((source) =>

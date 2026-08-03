@@ -49,12 +49,83 @@ export function octreePowerHybridDryIdentityEnabled(
   return resolved?.FLUID_POWER_HYBRID_DRY_IDENTITY !== "0";
 }
 
+/**
+ * Publish zero row and slot dispatches when the whole boundary map provably
+ * reproduces the accepted publication bit for bit. Default OFF: this is a Gate
+ * A/B arm, not a shipped default.
+ *
+ * The flag is carried in the uniform (`p.carry.x`), never in the WGSL text, so
+ * both arms compile the identical shader with the identical auto bind-group
+ * layouts. An A/B therefore differs by one uniform word and nothing else.
+ *
+ * WHAT THE GATE PROVES (see `boundaryExactRowCarryEligible`): the boundary
+ * writes only `a.fractions`, `a.pressureScales`, `solidVelocity`, `liquid`, the
+ * 19-channel `rows` coefficients and the nine worksets, all at
+ * `control.bank`. The carry retains last epoch's bytes at that same bank, so it
+ * is exact exactly when every input to those writes is bitwise unchanged:
+ *   - row/slot geometry, handles, areas, inverse distances, normals, centroids:
+ *     covered by the structured publication's own exact row-delta identity
+ *     carry (`accepted[15]`, i.e. candidate `control.reserved[0]`). That bit is
+ *     set only when `beginStructuredPublication` zeroed dispatch records 0 and
+ *     3, which is also what guarantees the scatter did NOT reset
+ *     fractions/pressureScales to 1.0 underneath the retained values;
+ *   - the coarse level set: covered by the coarse publisher's own exact
+ *     value/phase delta (`count == 0`), which compares phi, minimumPhi and
+ *     maximumPhi as raw bit patterns and reports every insertion and
+ *     retirement;
+ *   - the fine level set: NOT covered by any receipt, so a live fine band
+ *     (`fp.width > 0`) disables the carry outright;
+ *   - rigid bodies: no receipt, so a non-zero body count disables the carry;
+ *   - the separation mask: `separationFresh` ages a mark against
+ *     `control.epoch`, so an unchanged mask still flips an aperture as the
+ *     epoch advances. `resolveStructuredBoundarySlots` therefore folds "a
+ *     closed world face carried a live mark" into the dirty channel, which
+ *     keeps the carry off for as long as any mark exists.
+ *
+ * TRANSITIVITY, and the one conjunct that lacks it. The coarse delta and the
+ * row-delta identity each compare step N against step N-1, so a chain of them
+ * proves step N against the last full recompute; the liquid mask is a pure
+ * function of those two and inherits the chain. The separation mask does not:
+ * a carried step never runs the resolve, so it never observes the mask, and an
+ * unbroken chain would stop watching it entirely. Mode 1 therefore refuses to
+ * carry twice in a row, which caps mark staleness at exactly one step. Mode 2
+ * chains and exists to measure what that alternation costs.
+ *
+ * RESIDUALS, stated so the A/B knows what it is pricing:
+ *   1. The coarse delta's phase comparison covers only PHI_INTERFACE and
+ *      PHI_CORRECTED. A PHI_VALID/PHI_FINITE flip with bitwise identical phi
+ *      would not be reported. Widening that comparison belongs to the coarse
+ *      publisher.
+ *   2. Even in mode 1 the separation conjunct is retrospective by one step: it
+ *      cannot see the first mark of a run, created by the projection after the
+ *      publication whose receipt we are reading. Closing that needs a
+ *      mark counter published by `markSeparationRow`.
+ *
+ * `FLUID_STRUCTURED_BOUNDARY_EXACT_ROW_CARRY`: unset/"0" off, "1" alternating,
+ * "2" chained.
+ */
+export function structuredBoundaryExactRowCarryMode(
+  environment?: Readonly<Record<string, string | undefined>>,
+): 0 | 1 | 2 {
+  const resolved = environment
+    ?? (typeof process !== "undefined" ? process.env : undefined);
+  const raw = resolved?.FLUID_STRUCTURED_BOUNDARY_EXACT_ROW_CARRY;
+  return raw === "1" ? 1 : raw === "2" ? 2 : 0;
+}
+
+export function structuredBoundaryExactRowCarryEnabled(
+  environment?: Readonly<Record<string, string | undefined>>,
+): boolean {
+  return structuredBoundaryExactRowCarryMode(environment) !== 0;
+}
+
 export interface StructuredBoundaryResources {
   readonly structured: DirectStructuredVelocitySource;
   /** Identity-keyed coarse phi from the accepted pre-adaptation topology.
    * Candidate rows may be inserted or reordered, so row-indexed values are
    * not a valid source for the inactive structured generation. */
-  readonly coarse: Pick<OctreePowerCoarseLevelSetSampleSource, "directory" | "rowCapacity">;
+  readonly coarse: Pick<OctreePowerCoarseLevelSetSampleSource,
+    "directory" | "rowCapacity" | "delta">;
   readonly solid?: OctreeSolidVertexSdfSource;
   /** Per-cell unilateral-contact face bits published by the previous
    * projection's separation stage; fresh marks open closed world faces. */
@@ -134,6 +205,8 @@ export class WebGPUStructuredBoundaryCoefficients {
       || resources.dimensions.some((value) => !Number.isSafeInteger(value) || value < 1)
       || resources.coarse.rowCapacity !== structured.plan.rowCapacity
       || resources.coarse.directory.size < 32 + structured.plan.rowCapacity * 32
+      // The exact-carry gate reads only the delta's 16-word publication header.
+      || resources.coarse.delta.size < 64
       || !Number.isSafeInteger(resources.bodyCount) || resources.bodyCount < 0 || resources.bodyCount > 12
       || resources.separationMask.size < resources.dimensions[0]! * resources.dimensions[1]! * resources.dimensions[2]! * 4
       || resources.rigidBodies.size < 12 * 8 * 16
@@ -175,7 +248,10 @@ export class WebGPUStructuredBoundaryCoefficients {
     this.worksetBlocks = device.createBuffer({ label: "Structured boundary workset block prefixes",
       size: 9 * Math.ceil(Math.max(structured.plan.rowCapacity, structured.plan.slotCapacity) / 64) * 4,
       usage: storage });
-    this.params = device.createBuffer({ label: "Structured boundary parameters", size: 144,
+    // Nine vec4 of published geometry plus the tenth `carry` vec4, which holds
+    // only Gate A/B arm selectors. Keeping the arm in the uniform rather than in
+    // the WGSL text is what makes both arms compile byte-identical modules.
+    this.params = device.createBuffer({ label: "Structured boundary parameters", size: 160,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.inertFineParams = device.createBuffer({
       // FineP is 72 bytes of fields rounded to its 16-byte uniform alignment.
@@ -190,7 +266,7 @@ export class WebGPUStructuredBoundaryCoefficients {
       this.inertSolidStorage = device.createBuffer({ label: "Inert structured solid SDF binding", size: 80,
         usage: storage });
     }
-    const words = new Uint32Array(36), floats = new Float32Array(words.buffer);
+    const words = new Uint32Array(40), floats = new Float32Array(words.buffer);
     words.set([structured.plan.rowCapacity, structured.plan.slotCapacity,
       structured.plan.maximumCaseSlots, structured.plan.authorityWords,
       19, structured.section63.coefficientBankStrideWords,
@@ -210,6 +286,7 @@ export class WebGPUStructuredBoundaryCoefficients {
     floats.set([dam?.x ?? 0, dam?.y ?? 0, dam?.z ?? 0,
       resources.analyticBootstrap?.initialCondition === "tank-fill" ? 1
         : resources.analyticBootstrap?.initialCondition === "dam-break" ? 2 : 0], 32);
+    words[36] = structuredBoundaryExactRowCarryMode();
     device.queue.writeBuffer(this.params, 0, words.buffer);
     this.allocatedBytes = this.liquidMask.size + this.solidNormalVelocities.size
       + this.candidateMask.size + this.candidates.size + this.candidateSolidNormalVelocities.size
@@ -289,7 +366,11 @@ export class WebGPUStructuredBoundaryCoefficients {
       21: this.candidateSolidNormalVelocities, 22: this.control,
       23: section63.topologyMetrics, 24: section63.catalogFaces,
       25: this.resources.separationMask,
-      27: this.worksetClasses, 28: this.worksetBlocks };
+      27: this.worksetClasses, 28: this.worksetBlocks,
+      // Exact-carry receipt only. Reachable from the candidate prepare and from
+      // nowhere else, which keeps every kernel already at Metal's ten-storage
+      // ceiling exactly where it was.
+      29: this.resources.coarse.delta };
     // Binding 26 is the only texture in this layout; every other entry is a
     // buffer from the map above.
     // `coarseValue` references the texture unconditionally, so the auto layout
@@ -304,7 +385,12 @@ export class WebGPUStructuredBoundaryCoefficients {
     });
     const prepare = authority === "candidate-ready" ? this.prepareCandidate : this.prepareAccepted;
     const groups = Object.freeze([
-      group(prepare, authority === "candidate-ready" ? [0, 1, 16, 17, 22] : [0, 1, 16, 17]),
+      // The candidate prepare owns the whole exact-carry gate, so it is the one
+      // kernel that reads the coarse directory header (4), the fine-parameter
+      // sentinel (5) and the coarse value/phase delta (29). Six storage
+      // bindings on a workgroup_size(1) kernel; the recurring accepted prepare
+      // has no carry arm and keeps its original four.
+      group(prepare, authority === "candidate-ready" ? [0, 1, 4, 5, 16, 17, 22, 29] : [0, 1, 16, 17]),
       group(this.classify, [0, 3, 4, 5, 6, 7, 8, 9, 12, 16, 26]),
       group(this.resolve, [0, 2, 3, 4, 5, 6, 7, 8, 9, 11, 16, 25, 26]),
       group(this.resolveSolid, [0, 2, 3, 10, 11, 16, 19, 21]),
@@ -312,7 +398,10 @@ export class WebGPUStructuredBoundaryCoefficients {
       group(this.rebuild, [0, 1, 2, 12, 13, 14, 16, 22, 24, 27]),
       group(this.countRowClasses, [0, 3, 13, 14, 16, 27, 28]),
       group(this.countFamilyClasses, [0, 2, 3, 13, 14, 16, 27, 28]),
-      group(this.scanWorksetBlocks, [0, 16, 18, 28]),
+      // Binding 22 is the carry arm's revalidation source: the retained workset
+      // headers must still be stamped with the ACCEPTED epoch before this scan
+      // re-stamps them with the candidate one.
+      group(this.scanWorksetBlocks, [0, 16, 18, 22, 28]),
       group(this.scatterRowWorksets, [0, 16, 18, 27, 28]),
       group(this.scatterFamilyWorksets, [0, 16, 18, 27, 28]),
     ]);
@@ -439,7 +528,9 @@ export class WebGPUStructuredBoundaryCoefficients {
 }
 
 export const structuredBoundaryCoefficientWGSL = /* wgsl */ `
-struct P{counts:vec4u,resolved:vec4u,dimensions:vec4u,physical:vec4f,offset0:vec4u,offset1:vec4u,offset2:vec4u,pad:vec4u,damDimensions:vec4f}
+// \`carry\` is the tenth vec4 and holds Gate A/B arm selectors only:
+// x = FLUID_STRUCTURED_BOUNDARY_EXACT_ROW_CARRY, yzw reserved.
+struct P{counts:vec4u,resolved:vec4u,dimensions:vec4u,physical:vec4f,offset0:vec4u,offset1:vec4u,offset2:vec4u,pad:vec4u,damDimensions:vec4f,carry:vec4u}
 struct FineP{brickDimensions:vec3u,brickResolution:u32,sampleDimensions:vec3u,samplesPerBrick:u32,origin:vec3f,width:f32,worklistCapacity:u32,worklistHeaderWords:u32,pageCapacity:u32,generation:u32,activeCount:u32,invalid:u32,fineFactor:u32,timestep:f32}
 // The 64-byte publication has always carried eight words past the pad. They now
 // hold a ghost-fluid theta histogram, which is the only production evidence of
@@ -466,11 +557,27 @@ fn foldedBlock(wg:vec3u)->u32{return wg.x+wg.y*65535u;}
 // the row capacity), and a per-class table of per-block prefix bases.
 @group(0)@binding(27)var<storage,read_write>worksetClasses:array<u32>;
 @group(0)@binding(28)var<storage,read_write>worksetBlocks:array<u32>;
+// The coarse publisher's exact value/phase delta. Header words: count,
+// generation, flags, valid. \`count == 0\` under a valid publication is a
+// bitwise proof that every live coarse sample -- phi, minimumPhi, maximumPhi
+// and its interface/corrected phase -- is unchanged, with no row inserted and
+// none retired. Read only by the exact-carry gate.
+@group(0)@binding(29)var<storage,read>coarsePhiDelta:array<u32>;
 // Host-rasterized t=0 level set, authoritative only while pad.z==3. Analytic
 // and post-bootstrap lanes bind a placeholder here and never sample it.
 @group(0)@binding(26)var bootstrapLevelSetIn:texture_3d<f32>;
 ${makeOctreePowerCoarseLevelSetSampleWGSL(4)}
 const INVALID:u32=0xffffffffu;const SOLID_VALID:u32=0x80000000u;fn finite(v:f32)->bool{return v==v&&abs(v)<=3.402823e38;}fn fail(i:u32,f:u32){atomicOr(&control.flags,f);atomicMin(&control.firstError,i);}
+// \`control.pad\` is a bit set, not a boolean. Bit 0 is the historical dirty
+// channel every stage ors into; bit 1 records that THIS publication retained
+// the accepted rows verbatim, which is how the workset scan distinguishes
+// "nothing changed" from "nothing ran".
+// The published receipt reuses the same two bit positions: bit 0 becomes "the
+// liquid mask was proved identical and no live separation mark was observed",
+// bit 1 stays "that publication was itself a carry".
+const BOUNDARY_DIRTY:u32=1u;const BOUNDARY_CARRIED:u32=2u;const BOUNDARY_RECEIPT_IDENTITY:u32=1u;
+const COARSE_PHI_VALID:u32=0x80000000u;const COARSE_PHI_DENSE:u32=0x40000000u;
+const ERROR_CARRY:u32=256u;
 fn abase()->u32{return control.bank*p.counts.w;}fn rbase()->u32{return control.bank*p.counts.x;}fn section63Base()->u32{return control.bank*p.resolved.y;}
 fn rowCenter(row:u32)->vec3f{let g=geometry[rbase()+row];let q=vec3u(g.x%p.dimensions.x,(g.x/p.dimensions.x)%p.dimensions.y,g.x/(p.dimensions.x*p.dimensions.y));return(vec3f(q)+.5*f32(g.y))*p.physical.x;}
 fn finePage(key:u32)->u32{if(fp.worklistHeaderWords!=7u||arrayLength(&fineWork)<7u||fineWork[0]!=fp.generation||fineWork[2]!=fp.pageCapacity||(fineWork[3]&3u)!=3u){return INVALID;}let base=7u+fp.worklistCapacity;if(base+key>=arrayLength(&fineWork)){return INVALID;}let id=fineWork[base+key];let m=id*10u;return select(INVALID,id,id<fp.pageCapacity&&m+2u<arrayLength(&fineMeta)&&fineMeta[m]==id&&fineMeta[m+1u]==key&&fineMeta[m+2u]==fp.generation);}
@@ -529,15 +636,73 @@ fn recordTheta(scale:f32){
  else if(theta<=5e-1){bucket=5u;}
  else if(theta<0.999){bucket=6u;}
  atomicAdd(&control.theta[bucket],1u);}
-fn boundaryLiquidIdentityEligible()->bool{return atomicLoad(&control.pad)==0u
+// \`accepted[15]\` is the structured publication control's \`reserved[0]\`, the
+// bit \`beginStructuredPublication\` sets when the GPU row delta proved an exact
+// topology identity. It is the same bit that zeroed dispatch records 0 and 3,
+// so it certifies both that the row/slot geometry is bitwise unchanged AND that
+// the family scatter did not reset fractions/pressureScales underneath the
+// coefficients this boundary published last epoch.
+fn boundaryLiquidIdentityEligible()->bool{return (atomicLoad(&control.pad)&BOUNDARY_DIRTY)==0u
   &&arrayLength(&accepted)>15u&&accepted[15u]!=0u
   &&atomicLoad(&acceptedBoundary.flags)==0u&&acceptedBoundary.rows==control.rows
   &&acceptedBoundary.slots==control.slots&&acceptedBoundary.epoch!=0u
   &&acceptedBoundary.published==acceptedBoundary.epoch&&acceptedBoundary.bank==control.bank;}
-@compute @workgroup_size(1)fn prepareStructuredBoundaryCandidate(){if(arrayLength(&accepted)<6u){publishStructuredBoundarySetup(0u,0u,0u,0u,false);return;}let rowCount=accepted[2];let slotCount=accepted[3];let generation=accepted[4];let bank=accepted[5];let valid=accepted[0]==${OCTREE_STRUCTURED_GPU_VALID}u&&rowCount<=p.counts.x&&slotCount<=p.counts.y&&generation!=0u&&bank<=1u;publishStructuredBoundarySetup(rowCount,slotCount,generation,bank,valid);atomicStore(&control.pad,select(1u,0u,valid&&boundaryLiquidIdentityEligible()));}
-@compute @workgroup_size(1)fn prepareStructuredBoundaryAccepted(){if(arrayLength(&accepted)<6u){publishStructuredBoundarySetup(0u,0u,0u,0u,false);return;}let rowCount=accepted[2];let generation=accepted[3];let bank=accepted[4];let slotCount=accepted[5];let valid=accepted[0]==0u&&rowCount<=p.counts.x&&slotCount<=p.counts.y&&generation!=0u&&bank<=1u;publishStructuredBoundarySetup(rowCount,slotCount,generation,bank,valid);atomicStore(&control.pad,1u);}
+// A genuine (0,1,1). publishStructuredBoundarySetup floors the slot record's X
+// at one, so pushing a zero count through its arithmetic still launches a
+// workgroup; this is the boundary's analogue of publishExactRowDispatch.
+fn publishExactBoundaryDispatch(at:u32,blocks:u32){if(blocks==0u){dispatch[at]=0u;dispatch[at+1u]=1u;dispatch[at+2u]=1u;return;}let x=max(1u,min(65535u,blocks));dispatch[at]=x;dispatch[at+1u]=(blocks+x-1u)/x;dispatch[at+2u]=1u;}
+// The phi side of the gate. Everything this checks is a precondition
+// \`coarseValue\` would itself have re-established before sampling, plus the
+// coarse publisher's exact delta: zero changed records under a valid
+// publication is a bitwise proof that every live sample is unchanged. The dense
+// complement (generation bit 30) is excluded because the delta walks only the
+// compact directory rows and says nothing about the dense tail.
+fn boundaryCoarsePhiIdentity()->bool{
+ if(powerCoarseSamples.state!=COARSE_PHI_VALID
+  ||(powerCoarseSamples.generation&COARSE_PHI_DENSE)!=0u
+  ||(powerCoarseSamples.generation&0x3fffffffu)!=(control.epoch&0x3fffffffu)
+  ||any(powerCoarseSamples.dimensions!=p.dimensions.xyz)
+  ||abs(powerCoarseSamples.physicalCellSize-p.physical.x)>1e-5*max(powerCoarseSamples.physicalCellSize,p.physical.x)){return false;}
+ return arrayLength(&coarsePhiDelta)>=4u&&coarsePhiDelta[3]==COARSE_PHI_VALID
+  &&coarsePhiDelta[2]==0u&&coarsePhiDelta[0]==0u
+  &&(coarsePhiDelta[1]&0x3fffffffu)==(control.epoch&0x3fffffffu);}
+// Forward exactness gate. \`eligible\` already carries the retrospective half --
+// a complete accepted publication at the same rows/slots/bank over carried
+// topology. This adds the forward conjuncts the receipt cannot supply:
+//   receipt bit 0         the last full recompute reproduced the accepted
+//                         liquid mask AND observed no live separation mark, so
+//                         the retained coefficients are a fixed point of the
+//                         boundary map under the accepted inputs;
+//   receipt bit 1         mode 1 refuses to carry a publication that was itself
+//                         a carry. Every other conjunct is transitive across a
+//                         chain; the separation mask is not, because a carried
+//                         step never runs the resolve that observes it.
+//                         Alternating caps that staleness at one step.
+//   coarse phi identity   the level set this map reads is bitwise unchanged;
+//   fp.width / bodyCount  the two inputs with no receipt at all are absent.
+// p.pad.z!=0 means an authored or imported bootstrap still owns phi, which is a
+// one-shot authority the carry must not extend.
+fn boundaryExactRowCarryEligible(eligible:bool)->bool{
+ if(p.carry.x==0u||!eligible){return false;}
+ let receipt=atomicLoad(&acceptedBoundary.pad);
+ if((receipt&BOUNDARY_RECEIPT_IDENTITY)==0u){return false;}
+ if(p.carry.x==1u&&(receipt&BOUNDARY_CARRIED)!=0u){return false;}
+ if(p.pad.z!=0u||fp.width>0.||p.dimensions.w!=0u){return false;}
+ return boundaryCoarsePhiIdentity();}
+@compute @workgroup_size(1)fn prepareStructuredBoundaryCandidate(){if(arrayLength(&accepted)<6u){publishStructuredBoundarySetup(0u,0u,0u,0u,false);return;}let rowCount=accepted[2];let slotCount=accepted[3];let generation=accepted[4];let bank=accepted[5];let valid=accepted[0]==${OCTREE_STRUCTURED_GPU_VALID}u&&rowCount<=p.counts.x&&slotCount<=p.counts.y&&generation!=0u&&bank<=1u;publishStructuredBoundarySetup(rowCount,slotCount,generation,bank,valid);let eligible=valid&&boundaryLiquidIdentityEligible();let carry=boundaryExactRowCarryEligible(eligible);atomicStore(&control.pad,select(select(BOUNDARY_DIRTY,0u,eligible),BOUNDARY_CARRIED,carry));
+ // Zero both live records. That removes nine of the eleven encoded dispatches:
+ // classify/resolve/resolveSolid/commit/rebuild and the two count and two
+ // scatter publications all read one of these two. Only the direct prepare and
+ // the direct block scan survive, and the scan takes its own carry arm below.
+ // \`rebuild\` normally advances \`published\`, so the carry has to advance it here
+ // or worksetPublicationEnabled and acceptStructuredBoundary both fail closed
+ // and the boundary never publishes at all. The theta histogram is a pure
+ // diagnostic that no kernel reads back; carry it forward so a carried step
+ // reports the surface stiffness it actually still has rather than zeros.
+ if(carry){publishExactBoundaryDispatch(0u,0u);publishExactBoundaryDispatch(3u,0u);control.published=control.epoch;for(var b=0u;b<8u;b+=1u){atomicStore(&control.theta[b],atomicLoad(&acceptedBoundary.theta[b]));}}}
+@compute @workgroup_size(1)fn prepareStructuredBoundaryAccepted(){if(arrayLength(&accepted)<6u){publishStructuredBoundarySetup(0u,0u,0u,0u,false);return;}let rowCount=accepted[2];let generation=accepted[3];let bank=accepted[4];let slotCount=accepted[5];let valid=accepted[0]==0u&&rowCount<=p.counts.x&&slotCount<=p.counts.y&&generation!=0u&&bank<=1u;publishStructuredBoundarySetup(rowCount,slotCount,generation,bank,valid);atomicStore(&control.pad,BOUNDARY_DIRTY);}
 fn solidAt(row:u32,x:vec3f)->f32{if(p.resolved.w==0u||solid.header[5]!=SOLID_VALID||row>=solid.header[2]){return 1e20;}let rg=geometry[rbase()+row];let q=vec3u(rg.x%p.dimensions.x,(rg.x/p.dimensions.x)%p.dimensions.y,rg.x/(p.dimensions.x*p.dimensions.y));let t=clamp((x/p.physical.x-vec3f(q))/f32(rg.y),vec3f(0),vec3f(1));var v=0.;for(var corner=0u;corner<8u;corner+=1u){let w=select(1.-t.x,t.x,(corner&1u)!=0u)*select(1.-t.y,t.y,(corner&2u)!=0u)*select(1.-t.z,t.z,(corner&4u)!=0u);v+=w*bitcast<f32>(solid.values[row*8u+corner]);}return v;}
-@compute @workgroup_size(64)fn classifyStructuredLiquidRows(@builtin(global_invocation_id)g:vec3u){let row=g.x;if(row>=control.rows){return;}let point=rowCenter(row);let coarseSample=coarseValue(point);let sample=fineSample(point,coarseSample.x);if(coarseSample.y==0.&&sample.y==0.){candidateLiquid[row]=0u;atomicOr(&control.pad,1u);fail(row,2u);return;}candidateLiquid[row]=select(0u,1u,sample.x<0.);}
+@compute @workgroup_size(64)fn classifyStructuredLiquidRows(@builtin(global_invocation_id)g:vec3u){let row=g.x;if(row>=control.rows){return;}let point=rowCenter(row);let coarseSample=coarseValue(point);let sample=fineSample(point,coarseSample.x);if(coarseSample.y==0.&&sample.y==0.){candidateLiquid[row]=0u;atomicOr(&control.pad,BOUNDARY_DIRTY);fail(row,2u);return;}candidateLiquid[row]=select(0u,1u,sample.x<0.);}
 fn handleOwner(h:u32)->u32{return a[abase()+p.offset0.x+h];}fn handleNeighbor(h:u32)->u32{return a[abase()+p.offset0.y+h];}fn handleNormal(h:u32)->vec3f{let at=abase()+p.offset1.z+4u*h;return vec3f(bitcast<f32>(a[at]),bitcast<f32>(a[at+1u]),bitcast<f32>(a[at+2u]));}fn handleCenter(h:u32)->vec3f{let at=abase()+p.offset1.w+4u*h;return vec3f(bitcast<f32>(a[at]),bitcast<f32>(a[at+1u]),bitcast<f32>(a[at+2u]));}fn sbase()->u32{return control.bank*p.counts.y;}fn lbase()->u32{return control.bank*p.counts.x;}fn liquidAt(row:u32)->u32{return liquid[lbase()+row];}
 // Lattice-origin face centroids to the centred world frame authored rigid
 // poses live in. handleCenter shares the structured centroids region,
@@ -564,6 +729,19 @@ fn separationFresh(row:u32,faceBit:u32)->bool{
   let epoch=(control.epoch&0x3fffffffu)&0x3ffffffu;
   let age=(epoch-marked)&0x3ffffffu;
   return age<=2u;
+}
+// The mark WITHOUT the age test. separationFresh ages a mark against
+// control.epoch, so a bitwise unchanged mask still flips an aperture from open
+// to prescribed-solid as the epoch advances. A carry that skipped the resolve
+// would keep the stale open face, so any live mark anywhere must veto the next
+// step's carry. This is the only exactness conjunct the gate cannot evaluate
+// itself: the mask is dimension-sized and the prepare kernel is one lane.
+fn separationMarked(row:u32,faceBit:u32)->bool{
+  let at=rbase()+row;
+  if(at>=arrayLength(&geometry)){return false;}
+  let cell=geometry[at].x;
+  if(cell>=arrayLength(&separationMask)){return false;}
+  return (separationMask[cell]&faceBit)!=0u;
 }
 @compute @workgroup_size(64)fn resolveStructuredBoundarySlots(@builtin(global_invocation_id)g:vec3u){let h=foldedItem(g);if(h>=control.slots||atomicLoad(&control.flags)!=0u){return;}let lo=handleOwner(h);let hi=handleNeighbor(h);if(lo>=control.rows){fail(h,4u);return;}let loPoint=rowCenter(lo);let world=worldBoundaryBit(h)!=0u;var hiPoint=handleCenter(h);if(hi!=INVALID){hiPoint=rowCenter(hi);}else if(!world){let inv=bitcast<f32>(a[abase()+p.offset0.w+h]);hiPoint=loPoint+handleNormal(h)/max(inv,1e-20);}let clo=coarseValue(loPoint);let chi=coarseValue(hiPoint);let plo=fineSample(loPoint,clo.x);let phi=fineSample(hiPoint,chi.x);if((clo.y==0.&&plo.y==0.)||(!world&&chi.y==0.&&phi.y==0.)){fail(h,8u|128u);return;}var scale=1.;
 // Ghost-fluid crossing handling covers every orientation the moving front
@@ -597,6 +775,10 @@ if(boundaryBit!=0u&&(p.resolved.z&boundaryBit)!=0u){
   // Closed world face. A face carrying a fresh separation mark for exactly
   // this face bit opens for this epoch; every other closed face stays a
   // prescribed solid.
+  // Observing a mark of any age publishes the dirty bit, which withdraws the
+  // NEXT step's exact row carry. Behind p.carry.x so the disabled arm executes
+  // neither the load nor the atomic and stays byte-identical.
+  if(p.carry.x!=0u&&separationMarked(lo,boundaryBit)){atomicOr(&control.pad,BOUNDARY_DIRTY);}
   aperture=select(0.,1.,separationFresh(lo,boundaryBit));
 }
 recordTheta(scale);candidates[h]=vec2f(aperture,scale);}
@@ -605,7 +787,7 @@ recordTheta(scale);candidates[h]=vec2f(aperture,scale);}
 fn canonicalDirection(channel:u32)->vec3i{let d=array<vec3i,18>(vec3i(1,0,0),vec3i(-1,0,0),vec3i(0,1,0),vec3i(0,-1,0),vec3i(0,0,1),vec3i(0,0,-1),vec3i(1,1,0),vec3i(1,-1,0),vec3i(-1,1,0),vec3i(-1,-1,0),vec3i(1,0,1),vec3i(1,0,-1),vec3i(-1,0,1),vec3i(-1,0,-1),vec3i(0,1,1),vec3i(0,1,-1),vec3i(0,-1,1),vec3i(0,-1,-1));return d[channel];}
 fn channelForCatalogSlot(global:u32)->u32{if(global>=arrayLength(&catalogSlots)){return INVALID;}let slot=catalogSlots[global];let direction=vec3i(round(slot.areaCentroid.yzw+.5*slot.normalInverseDistance.xyz));for(var channel=0u;channel<18u;channel+=1u){if(all(direction==canonicalDirection(channel))){return channel+1u;}}return INVALID;}
 const HYBRID_POWER_BAND:u32=0x80000000u;
-@compute @workgroup_size(64)fn rebuildStructuredBoundaryRows(@builtin(global_invocation_id)g:vec3u){let row=g.x;if(row>=control.rows||atomicLoad(&control.flags)!=0u){return;}let value=candidateLiquid[row];if(!boundaryLiquidIdentityEligible()||value!=liquid[acceptedBoundary.bank*p.counts.x+row]){atomicOr(&control.pad,1u);}liquid[lbase()+row]=value;let base=section63Base()+row*19u;if(base+19u>arrayLength(&rows)){fail(row,64u);return;}for(var channel=0u;channel<19u;channel+=1u){rows[base+channel]=0u;}var powerBand=candidateLiquid[row]==0u;var diagonalTerms:array<f32,31>;for(var local=0u;local<31u;local+=1u){diagonalTerms[local]=0.;}for(var local=0u;local<p.counts.z;local+=1u){let at=row*p.counts.z+local;let h=a[abase()+p.offset2.y+at];if(h==INVALID||h>=control.slots){continue;}let lo=handleOwner(h);let hi=handleNeighbor(h);let other=select(lo,hi,lo==row);let aperture=bitcast<f32>(a[abase()+p.offset1.x+h]);let scale=bitcast<f32>(a[abase()+p.offset1.y+h]);powerBand=powerBand||hi==INVALID||aperture!=1.||scale!=1.||(other<control.rows&&candidateLiquid[other]!=candidateLiquid[row]);let coefficient=bitcast<f32>(a[abase()+p.offset0.z+h])*bitcast<f32>(a[abase()+p.offset0.w+h])*aperture*scale;if(candidateLiquid[row]==0u||coefficient<=0.){continue;}diagonalTerms[local]=coefficient;let global=a[abase()+p.offset2.w+at];let channel=channelForCatalogSlot(global);if(channel==INVALID){fail(row,64u);continue;}if(other!=INVALID&&other<control.rows&&other!=row&&candidateLiquid[other]!=0u){rows[base+channel]=bitcast<u32>(bitcast<f32>(rows[base+channel])+coefficient);}}for(var i=1u;i<31u;i+=1u){let value=diagonalTerms[i];var j=i;loop{if(j==0u||diagonalTerms[j-1u]<=value){break;}diagonalTerms[j]=diagonalTerms[j-1u];j-=1u;}diagonalTerms[j]=value;}var sum=0.;for(var i=0u;i<31u;i+=1u){sum+=diagonalTerms[i];}let d=select(1.,sum,candidateLiquid[row]!=0u);rows[base]=bitcast<u32>(d);worksetClasses[row]=select(0u,HYBRID_POWER_BAND,powerBand);if(row+1u==control.rows){control.published=control.epoch;}}
+@compute @workgroup_size(64)fn rebuildStructuredBoundaryRows(@builtin(global_invocation_id)g:vec3u){let row=g.x;if(row>=control.rows||atomicLoad(&control.flags)!=0u){return;}let value=candidateLiquid[row];if(!boundaryLiquidIdentityEligible()||value!=liquid[acceptedBoundary.bank*p.counts.x+row]){atomicOr(&control.pad,BOUNDARY_DIRTY);}liquid[lbase()+row]=value;let base=section63Base()+row*19u;if(base+19u>arrayLength(&rows)){fail(row,64u);return;}for(var channel=0u;channel<19u;channel+=1u){rows[base+channel]=0u;}var powerBand=candidateLiquid[row]==0u;var diagonalTerms:array<f32,31>;for(var local=0u;local<31u;local+=1u){diagonalTerms[local]=0.;}for(var local=0u;local<p.counts.z;local+=1u){let at=row*p.counts.z+local;let h=a[abase()+p.offset2.y+at];if(h==INVALID||h>=control.slots){continue;}let lo=handleOwner(h);let hi=handleNeighbor(h);let other=select(lo,hi,lo==row);let aperture=bitcast<f32>(a[abase()+p.offset1.x+h]);let scale=bitcast<f32>(a[abase()+p.offset1.y+h]);powerBand=powerBand||hi==INVALID||aperture!=1.||scale!=1.||(other<control.rows&&candidateLiquid[other]!=candidateLiquid[row]);let coefficient=bitcast<f32>(a[abase()+p.offset0.z+h])*bitcast<f32>(a[abase()+p.offset0.w+h])*aperture*scale;if(candidateLiquid[row]==0u||coefficient<=0.){continue;}diagonalTerms[local]=coefficient;let global=a[abase()+p.offset2.w+at];let channel=channelForCatalogSlot(global);if(channel==INVALID){fail(row,64u);continue;}if(other!=INVALID&&other<control.rows&&other!=row&&candidateLiquid[other]!=0u){rows[base+channel]=bitcast<u32>(bitcast<f32>(rows[base+channel])+coefficient);}}for(var i=1u;i<31u;i+=1u){let value=diagonalTerms[i];var j=i;loop{if(j==0u||diagonalTerms[j-1u]<=value){break;}diagonalTerms[j]=diagonalTerms[j-1u];j-=1u;}diagonalTerms[j]=value;}var sum=0.;for(var i=0u;i<31u;i+=1u){sum+=diagonalTerms[i];}let d=select(1.,sum,candidateLiquid[row]!=0u);rows[base]=bitcast<u32>(d);worksetClasses[row]=select(0u,HYBRID_POWER_BAND,powerBand);if(row+1u==control.rows){control.published=control.epoch;}}
 fn rowTransition(row:u32)->bool{let at=rbase()+row;return row<control.rows&&at<arrayLength(&geometry)&&geometry[at].z!=0u;}
 // Class 4 is a separate dry-identity proof, not regular liquid interior. A
 // failed proof falls through to the pre-authored power-band bit, so corrupt or
@@ -646,6 +828,7 @@ const WORKSET_SKIP:u32=0xffffffffu;
     var<workgroup> worksetLiveRowBlocks:u32;
     var<workgroup> worksetLiveSlotBlocks:u32;
 fn worksetPublicationEnabled()->bool{return atomicLoad(&control.flags)==0u&&control.rows>0u&&control.published==control.epoch;}
+fn boundaryRowCarryActive()->bool{return (atomicLoad(&control.pad)&BOUNDARY_CARRIED)!=0u;}
 fn worksetBlockStride()->u32{return (max(p.counts.x,p.counts.y)+63u)/64u;}
 fn worksetSlotClassBase()->u32{return p.counts.x;}
 fn worksetBlockTotal(cls:u32)->u32{var n=0u;for(var j=0u;j<64u;j+=1u){if(worksetBlockClass[j]==cls){n+=1u;}}return n;}
@@ -671,8 +854,41 @@ fn worksetBlockOffset(lane:u32)->u32{let cls=worksetBlockClass[lane];var n=0u;fo
  if(lane>=5u&&lane<9u){worksetBlocks[lane*worksetBlockStride()+foldedBlock(wg)]=worksetBlockTotal(lane);}
 }
     @compute @workgroup_size(256)fn scanStructuredWorksetBlocks(@builtin(local_invocation_index)lane:u32){
-     if(lane==0u){worksetGate=select(0u,1u,worksetPublicationEnabled());worksetLiveRowBlocks=(control.rows+63u)/64u;worksetLiveSlotBlocks=(control.slots+63u)/64u;}
-     if(workgroupUniformLoad(&worksetGate)==0u){return;}
+     if(lane==0u){worksetGate=select(0u,select(1u,2u,boundaryRowCarryActive()),worksetPublicationEnabled());worksetLiveRowBlocks=(control.rows+63u)/64u;worksetLiveSlotBlocks=(control.slots+63u)/64u;}
+     let worksetMode=workgroupUniformLoad(&worksetGate);
+     if(worksetMode==0u){return;}
+ // Exact row carry. This kernel is the one direct dispatch in the publication,
+ // so it still launches when the two count records are zero -- and it rewrites
+ // worksetBlocks IN PLACE from counts to exclusive prefixes. Re-running it over
+ // a table that already holds prefixes would prefix them a second time. Instead
+ // re-stamp the nine retained workset headers with the candidate epoch and
+ // revalidate every field the persistent solver's validateAcceptedRowPartition
+ // reads: the accepted epoch stamp, n <= capacity, the 3-bit shape word, the
+ // exact (n+63)/64 dispatch triple in words 4..6, the list bound, and
+ // total(classes 0..4) == rows. Nothing is stamped until all nine validate, so
+ // a rejected carry leaves the accepted publication byte for byte where it was
+ // and acceptStructuredBoundary declines to republish. Uniform control flow:
+ // the whole workgroup returns here together, before any barrier below.
+     if(worksetMode==2u){
+      if(lane==0u){
+       let acceptedEpoch=acceptedBoundary.epoch;
+       var valid=control.epoch!=0u&&acceptedEpoch!=0u;var rowTotal=0u;
+       for(var cls=0u;cls<9u;cls+=1u){
+        let base=worksetBase(cls);
+        if(base+7u>arrayLength(&dynamicWorksets)){valid=false;continue;}
+        let n=dynamicWorksets[base+1u];let blocks=(n+63u)/64u;let dx=max(1u,min(65535u,blocks));
+        valid=valid&&dynamicWorksets[base]==acceptedEpoch&&n<=dynamicWorksets[base+2u]
+         &&(dynamicWorksets[base+3u]&3u)==3u&&dynamicWorksets[base+4u]==dx
+         &&dynamicWorksets[base+5u]==(blocks+dx-1u)/dx&&dynamicWorksets[base+6u]==1u
+         &&base+7u+n<=arrayLength(&dynamicWorksets);
+        if(cls<5u){rowTotal+=n;}
+       }
+       valid=valid&&rowTotal==control.rows;
+       if(valid){for(var cls=0u;cls<9u;cls+=1u){dynamicWorksets[worksetBase(cls)]=control.epoch;}}
+       else{fail(0u,ERROR_CARRY);}
+      }
+      return;
+     }
  // Every barrier below is reached under bounds derived from the uniform p, so
  // the loop trip counts are uniform even though the live-element predicate is
      // not; out-of-range blocks contribute a zero and never gate a barrier.
@@ -723,5 +939,5 @@ fn worksetBlockOffset(lane:u32)->u32{let cls=worksetBlockClass[lane];var n=0u;fo
  if(cls>=9u){return;}
  dynamicWorksets[worksetBase(cls)+7u+worksetBlocks[cls*worksetBlockStride()+foldedBlock(wg)]+worksetBlockOffset(lane)]=h;
 }
-@compute @workgroup_size(1)fn acceptStructuredBoundary(){if(atomicLoad(&control.flags)!=0u||control.epoch==0u||control.published!=control.epoch){return;}let liquidIdentity=select(0u,1u,atomicLoad(&control.pad)==0u);atomicStore(&acceptedBoundary.flags,0u);atomicStore(&acceptedBoundary.firstError,INVALID);acceptedBoundary.rows=control.rows;acceptedBoundary.slots=control.slots;acceptedBoundary.epoch=control.epoch;acceptedBoundary.bank=control.bank;acceptedBoundary.published=control.published;atomicStore(&acceptedBoundary.pad,liquidIdentity);for(var b=0u;b<8u;b+=1u){atomicStore(&acceptedBoundary.theta[b],atomicLoad(&control.theta[b]));}}
+@compute @workgroup_size(1)fn acceptStructuredBoundary(){if(atomicLoad(&control.flags)!=0u||control.epoch==0u||control.published!=control.epoch){return;}let pad=atomicLoad(&control.pad);let liquidIdentity=select(0u,BOUNDARY_RECEIPT_IDENTITY,(pad&BOUNDARY_DIRTY)==0u)|(pad&BOUNDARY_CARRIED);atomicStore(&acceptedBoundary.flags,0u);atomicStore(&acceptedBoundary.firstError,INVALID);acceptedBoundary.rows=control.rows;acceptedBoundary.slots=control.slots;acceptedBoundary.epoch=control.epoch;acceptedBoundary.bank=control.bank;acceptedBoundary.published=control.published;atomicStore(&acceptedBoundary.pad,liquidIdentity);for(var b=0u;b<8u;b+=1u){atomicStore(&acceptedBoundary.theta[b],atomicLoad(&control.theta[b]));}}
 `;

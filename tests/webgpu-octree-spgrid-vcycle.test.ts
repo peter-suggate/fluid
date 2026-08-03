@@ -19,6 +19,7 @@ import {
   octreeSPGridPipelineNamesForExecutor,
   octreeSPGridVCycleShader,
   planOctreeSPGridVCycle,
+  spgridParallelLevelCommitEnabled,
   spgridRowCapacityForBindingLimit,
   lookupSPGridBrickRank,
   prolongSPGrid,
@@ -436,9 +437,121 @@ test("compact SPGrid addressing and commit dispatch cover every variable arena",
   assert.match(WebGPUOctreeSPGridVCycle.prototype.constructor.toString(),
     /SPGrid level tables disagree with the allocated plan/,
     "the memoized level tables must fail closed against the exact allocation plan");
+  // Both commit arms consume the same GPU-authored envelope at the same
+  // offset; the flag selects the entry point and nothing else.
   assert.match(WebGPUOctreeSPGridVCycle.prototype.encodeReadySetupCommit.toString(),
-    /runCandidateIndirect\(pass,"commitCandidateLevels",0,input,CANDIDATE_SCHEDULE\.commit\)/,
+    /runCandidateIndirect\(pass,this\.parallelLevelCommit\?"commitCandidateLevelsParallel":"commitCandidateLevels",0,input,CANDIDATE_SCHEDULE\.commit\)/,
     "ready publication must consume the GPU-authored validated commit envelope");
+});
+
+test("the parallel level commit restores lane parallelism inside the same live-count launch", () => {
+  // a56ddd0 was right to make this launch indirect and live-count shaped and
+  // wrong to collapse the WORK onto one thread per level: the whole hierarchy
+  // publication ran on three to five lanes and measured 37.10 ms of a 224.37 ms
+  // mini advance at f4d11e7. The synthesis keeps the launch and gets the lanes
+  // back, so the first thing to pin is that the launch did not move.
+  assert.match(octreeSPGridVCycleShader,
+    /writeCandidateSchedule\(7u,select\(commitItems,0u,failed\),1u\);/,
+    "the commit record must stay one WORKGROUP per live level, never a capacity");
+  assert.match(octreeSPGridVCycleShader,
+    /fn writeCandidateSchedule\(record:u32,items:u32,lanes:u32\)\{\n let blocks=\(items\+lanes-1u\)\/lanes;/,
+    "the schedule publishes workgroup counts, so the entry point's lane count is free");
+  assert.doesNotMatch(WebGPUOctreeSPGridVCycle.prototype.encodeReadySetupCommit.toString(),
+    /dispatchFor/, "the commit may never regress to a capacity-shaped dispatchFor");
+
+  // Default OFF, opt in with exactly "1".
+  assert.equal(spgridParallelLevelCommitEnabled({}), false);
+  assert.equal(spgridParallelLevelCommitEnabled({ FLUID_SPGRID_PARALLEL_LEVEL_COMMIT: "" }), false);
+  assert.equal(spgridParallelLevelCommitEnabled({ FLUID_SPGRID_PARALLEL_LEVEL_COMMIT: "0" }), false);
+  assert.equal(spgridParallelLevelCommitEnabled({ FLUID_SPGRID_PARALLEL_LEVEL_COMMIT: "true" }), false);
+  assert.equal(spgridParallelLevelCommitEnabled({ FLUID_SPGRID_PARALLEL_LEVEL_COMMIT: "1" }), true);
+  assert.deepEqual(OCTREE_SPGRID_VCYCLE_BINDINGS.commitCandidateLevelsParallel,
+    OCTREE_SPGRID_VCYCLE_BINDINGS.commitCandidateLevels,
+    "the parallel arm reaches exactly the arenas the serial arm reaches");
+
+  // The control arm stays byte-for-byte, and the new arm is one workgroup per
+  // level with sixty-four lanes in it.
+  const code = codeOnlyWGSL(octreeSPGridVCycleShader);
+  assert.match(code,
+    /@compute @workgroup_size\(1\) fn commitCandidateLevels\(@builtin\(global_invocation_id\) g:vec3u\)\{\n let l=g\.x;if\(l<levels\(\)\)\{commitCandidateLevelAt\(l\);\}/);
+  assert.match(code, /const COMMIT_LANES:u32=64u;/);
+  assert.match(code,
+    /@compute @workgroup_size\(64\) fn commitCandidateLevelsParallel\(@builtin\(workgroup_id\) wg:vec3u,\n @builtin\(local_invocation_index\) lane:u32\)\{\n let l=wg\.x;if\(l<levels\(\)\)\{commitCandidateLevelLanes\(l,lane\);\}/,
+    "the level must come from the workgroup id so the record stays a workgroup count");
+
+  const parallel = code.slice(code.indexOf("fn commitCandidateLevelLanes("),
+    code.indexOf("@compute @workgroup_size(64) fn commitCandidateLevelsParallel"));
+  const serial = code.slice(code.indexOf("fn commitCandidateLevelAt("),
+    code.indexOf("@compute @workgroup_size(1) fn commitCandidateLevels("));
+
+  // Every per-item loop strides the sixty-four lanes. The only loops that may
+  // still start at zero are the fixed-width word copies inside one record.
+  assert.equal((parallel.match(/for\(var \w+=lane;/g) ?? []).length, 12,
+    "every per-item loop must be lane strided");
+  for (const loop of parallel.match(/for\(var \w+=0u;[^;]+;/g) ?? []) {
+    assert.match(loop, /<(?:4u|28u);/,
+      `${loop} is a per-item loop that was left on one lane`);
+  }
+  assert.equal((parallel.match(/\+=COMMIT_LANES\)/g) ?? []).length, 12);
+
+  // Barriers. WGSL requires every lane of the workgroup to reach a barrier, and
+  // every gate here (topologyDirty, stencilDirty, captureFailed, levelDelta) is
+  // a read_write storage load the uniformity analysis cannot prove uniform, so
+  // the gate is laundered through uniformWord and every barrier sits at the
+  // function's top level -- never inside a branch, never after a bare return.
+  assert.match(parallel, /let live=uniformWord\(lane,gate\);\n if\(live==0u\)\{return;\}/,
+    "the early return must be uniform or a lane exits while its siblings wait");
+  const depths: number[] = [];
+  let depth = 0;
+  for (let index = 0; index < parallel.length; index += 1) {
+    if (parallel.startsWith("storageBarrier()", index)
+      || parallel.startsWith("workgroupBarrier()", index)) depths.push(depth);
+    if (parallel[index] === "{") depth += 1;
+    else if (parallel[index] === "}") depth -= 1;
+  }
+  assert.equal(depths.length, 8, "four phase boundaries, each a storage plus workgroup barrier");
+  assert.deepEqual([...new Set(depths)], [1], "no barrier may sit inside a divergent branch");
+  // The three orderings the serial form got for free, in order: the retired
+  // work list is read before phase 2 republishes it, the retired page keys are
+  // read before phase 3 overwrites the page records, and every item store
+  // retires before the per-level tail.
+  assert.match(parallel, new RegExp([
+    "let slot=workSlot\\(l,i\\);commitCandidateSlot", "[^]*",
+    "storageBarrier\\(\\);workgroupBarrier\\(\\);", "[^]*",
+    "topology\\[workBase\\(\\)\\+levelBase\\(l\\)\\+i\\]=slot;", "[^]*",
+    "let key=pageKey\\(l,i\\);", "[^]*",
+    "storageBarrier\\(\\);workgroupBarrier\\(\\);", "[^]*",
+    "let page=pageRecord\\(l,i\\);", "[^]*",
+    "storageBarrier\\(\\);workgroupBarrier\\(\\);", "[^]*",
+    "if\\(lane!=0u\\)\\{return;\\}",
+  ].join("")));
+
+  // Words indexed by LEVEL, not by item, belong to lane 0 alone: sixty-four
+  // lanes storing a per-level header is the one hazard a lane-strided rewrite
+  // introduces.
+  const tail = parallel.indexOf("if(lane!=0u){return;}");
+  assert.ok(tail > 0);
+  for (const word of ["state[at(SPECTRAL,l,0u)]=", "dispatchMeta[l*DISPATCH_WORDS]=",
+    "topology[directoryBase()+2u+l]=", "levelDelta[deltaAt(l,5u)]=",
+    "dispatchMeta[l*DISPATCH_WORDS+1u]=", "dispatchMeta[l*DISPATCH_WORDS+9u]="]) {
+    assert.ok(parallel.indexOf(word) > tail, `${word} is per level and must be lane 0 only`);
+    assert.equal(parallel.indexOf(word), parallel.lastIndexOf(word), `${word} must be written once`);
+  }
+
+  // Bit identity. The commit is a pure word copy with no float arithmetic, no
+  // accumulator and no atomic, so nothing can reassociate; what has to hold is
+  // that the two arms store the same words with the same values. Compare the
+  // store statements themselves -- the loop variables are unchanged, so the
+  // two multisets must be identical.
+  const stores = (body: string) => [...new Set(
+    body.match(/(?:topology|state|dispatchMeta|levelDelta)\[[^=;]*\]=[^;]*;/g) ?? [])].sort();
+  assert.deepEqual(stores(parallel), stores(serial),
+    "the parallel arm must publish exactly the words the serial arm publishes");
+  assert.ok(stores(serial).length >= 20);
+  assert.doesNotMatch(parallel, /(?:topology|state|dispatchMeta|levelDelta)\[[^=;]*\]\s*[+\-*/|&^]=/,
+    "no published word may be accumulated into: the commit must stay a pure copy");
+  assert.doesNotMatch(parallel, /atomic|bitcast<f32>|f32\(/,
+    "nothing here may reassociate a float, so the parallel arm is bit identical");
 });
 
 test("4^3 brick masks rank every occupied bit exactly and reject malformed publication", () => {
@@ -1479,7 +1592,11 @@ test("Dawn accepts the native sparse V-cycle shader", {
     "markCandidateBrickOccupancy", "rankCandidateBricks",
     "scatterCandidateRankedSlots", "markCandidatePageOccupancy", "compactCandidatePages",
     "linkCandidatePageNeighbours", "buildCandidateStencils", "publishCandidateSpectralBounds",
-    "validateCandidateHierarchy", "commitCandidateLevels",
+    // Tint, not naga, is the authority on WGSL's uniformity analysis: the
+    // parallel commit carries four barriers behind gates that are read_write
+    // storage loads, so it has to be compiled here even while the flag that
+    // encodes it is off.
+    "validateCandidateHierarchy", "commitCandidateLevels", "commitCandidateLevelsParallel",
     "finalizeLifecycle", "prepareCorrectionDispatches", "clearCorrection", "zeroVectors", "seedRhs",
     "seedRhsAndClearCorrection",
     "restrictAndGhostAccumulate", "coarseVcycleTail", "exactBottom",

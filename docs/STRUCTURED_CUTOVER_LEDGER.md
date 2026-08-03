@@ -366,11 +366,45 @@ The prize it quantifies on the coarse-only mini lane: the profiled advance
 executed 6 of 10 encoded outer iterations (the 500-advance control, 4), so
 **4 dead applies ≈ 388 zero-workgroup dispatches ≈ 31% of lane launches**.
 
-The missing half is the plumbing, not the policy: `lib/physics-step-program.ts`
-declares the P0.5 launch-shape carve-out in its driver contract (`:127`) and
-still has `predicates: Object.freeze([])` (`:137`), and nothing captures an
-`OctreeFactorOneSolveTailObservation` from the end-of-step snapshot. Keep the
-selector and its tests as the written spec for that work.
+**That prize is dead on this branch (2026-08-03).** It is hierarchical-MGPCG
+accounting, and the hierarchical executor is gone:
+`compileHierarchicalExecutor: false` is hard-coded on the only production
+`WebGPUOctreeSPGridVCycle` construction (`lib/webgpu-octree.ts:2790`) and
+test-locked (`tests/gpu-initialization.test.ts:153`). The persistent kernel runs
+the entire outer loop **inside one workgroup**, with
+`storageBarrier()`/`workgroupBarrier()` where the dispatch boundaries used to be
+(`…persistent-mgpcg.wgsl.ts:1236`), and it already breaks out on convergence
+(`:1257`, `:1274`). The `accountZeroAll`/`accountZeroRemaining` counters at
+`:1004-1011` say it in their own comment — *"The persistent path has no indirect
+outer records to zero; these keep the GPU-authored `zeroedDispatches` accounting
+word identical to the hierarchical run so a lockstep A/B compares the full
+control record."* They **simulate** the old zeroed-dispatch count. There are no
+dispatches there to remove.
+
+Consequently a lowered `encodedOuterIterations` removes no dispatch and shortens
+no converged solve. On the persistent path it moves exactly one thing:
+`p.shape.x`, the non-convergence trip at `:1066-1068` — i.e. it *tightens a
+fail-closed threshold*. It cannot even do that per step: the loop trip count is
+a WGSL literal baked at shader build (`octreePersistentMGPCGWGSL`'s
+`maximumIterations`, `…persistent-mgpcg.wgsl.ts:136`) and the params buffer is
+written once, in the constructor (`…persistent-mgpcg.ts:495`), from
+`this.solveTailPolicy.encodedOuterIterations` fixed at `webgpu-octree.ts:1607`.
+
+**Verdict: still KEEP the selector as written spec, but it is not a launch win
+and must not be queued as one.** Two blockers precede any revival:
+
+1. `selectOctreeFactorOneEncodedSolveTail` returns `not-factor-one` unless
+   `globalFineLevelSetFactor === 1` — every shipping mini/dam lane runs factor 4.
+2. It returns `non-adjacent-history` unless `observation.step + 1 === nextStep`,
+   but the browser polls `readStats` on a **250 ms cadence**
+   (`lib/webgpu-renderer.ts:2042`), so a step-adjacent observation never
+   arrives and the selector would refuse on every call.
+
+The plumbing gap is still real: `lib/physics-step-program.ts` declares the P0.5
+launch-shape carve-out in its driver contract (`:127`) and still has
+`predicates: Object.freeze([])` (`:137`), and nothing captures an
+`OctreeFactorOneSolveTailObservation`. That work only becomes worth doing if the
+hierarchical executor returns or the coarse-only factor-1 track ships.
 
 ### Summary of §2
 
@@ -409,12 +443,31 @@ npm scripts at `package.json:78-81`. `tools/benchmark-power-dam.ts:88-89` sets
 `WEBGPU_NODE_MODULE` and the Metal backend itself, so the direct `node` form
 below is self-contained.
 
-**The two large cells are red past their trip points** (plan §2 status block:
-large-dam class-4 stage-34 from ~step 249; large-hydrostatic restriction
-bootstrap loop from step 3). Use `--steps=200` on `--lane=large` to stay inside
-the clean window, and expect `--lane=large-hydrostatic` to be unusable until
-that bootstrap loop is fixed. **Do not treat a red large lane as a null A/B
-result.**
+**Both large cells now capture (2026-08-03), with one caveat each.**
+`--lane=large-hydrostatic` runs 240 steps clean (143.6 ms/adv,
+`artifacts/measurement-floor/large-hydrostatic-240.json`, `clean: true`) — the
+old restriction bootstrap loop is gone. `--lane=large` **dies at t=0** with
+*"Initial sparse authority cold-topology published no liquid-row frontier"*, and
+that is a **lane-table bug, not a physics red**: the smoke catalog applies
+`largePowerDamOverrides` (`lib/scene-webgpu-smoke-catalog.ts:349-355`,
+`pressureRowCapacity: 8_192` and `globalFineLevelSetMaximumBricks: 32_768`) and
+the benchmark lane table sets neither. Work around it with
+
+```sh
+FLUID_PRESSURE_ROW_CAPACITY=8192 node --import tsx tools/benchmark-power-dam.ts \
+  --lane=large --steps=200 --artifact=…
+```
+
+which runs green through 200 steps (0 validation errors) — but the artifact then
+reports `clean: false` with `FLUID_PRESSURE_ROW_CAPACITY` as its contaminant, so
+it is not a baseline. **`globalFineLevelSetMaximumBricks` has no env override at
+all** (`lib/methods/octree.ts:58-62` reads it from authored method values only),
+so the lane cannot express its scene's authored brick capacity even in
+principle. The real fix is in `tools/power-dam-lane-environment.ts`. Past step
+200 the lane still enters the alternating empty-band/rejected-rebuild regime
+around step 413; that is a separate, genuine physics question (air-support
+seeding of the settled thin film). **Do not treat a red large lane as a null A/B
+result — and name which of the three configurations you ran.**
 
 ### The protocol (plan §5 + `POWER_LIQUIDS_ULTIMATE_M1MAX.md:191-198`)
 
@@ -442,6 +495,44 @@ Discard rounds where either arm exceeds 1.3× its own minimum. Never compare
 across sessions. Never run a second WebGPU client concurrently — per plan §5 it
 silently changes physics.
 
+#### The environment record (new 2026-08-03 — read this before comparing anything)
+
+C7 below was caused by two artifacts that described **different simulations**
+and said nothing about it. Both benchmark artifacts now carry a resolved
+`environment` record, produced by `tools/power-dam-run-environment.ts` and
+attached to the diagnostic artifact (now `schemaVersion: 2`) and to the octree
+regression artifact. Fields, and how to use them:
+
+| field | use |
+|---|---|
+| `resolved` | every `FLUID_*`/`WEBGPU_*` variable the run actually received. This is the run's identity; the lane name is not. |
+| `inherited` | which of those came from the **shell** rather than from the lane definition. A non-empty `inherited` means someone's exported variable is in your measurement. |
+| `overridden` | lane values the command line replaced. |
+| `contaminants` | wall-affecting knobs sitting off their measurement-clean value, each with `{name, resolved, clean}`. A tripwire or audit flag here can cost ~27% on its own. |
+| `clean` | `true` only when `contaminants` is empty. **A `clean: false` arm is not a baseline.** |
+| `comparisonKey` | digest over the scene + solver configuration. **Two artifacts with different `comparisonKey`s are not comparable, full stop** — that is exactly the leaf-2-vs-leaf-32 trap, and the key changes when the leaf changes. |
+
+Worked example already in the tree:
+`artifacts/measurement-floor/mini-240-clean-a.json` (leaf 32,
+`comparisonKey 752e800d…`, `clean: false`) versus
+`artifacts/measurement-floor/mini-240-leaf2.json` (leaf 2,
+`comparisonKey 1d87d090…`, `clean: true`). Different keys — so the 245.3 vs
+211.1 ms/adv difference is a **deliberate A/B on the leaf axis**, not an A/A,
+and the `clean: false` arm's contaminant list must be read before either number
+is quoted.
+
+**Leaf size is now an explicit axis**, not an accident:
+
+```sh
+node --import tsx tools/benchmark-power-dam.ts --lane=mini --leaf-size=32 \
+  --artifact=artifacts/cutover/mini-leaf32.json
+node --import tsx tools/benchmark-power-dam.ts --lane=mini --leaf-size=2 \
+  --artifact=artifacts/cutover/mini-leaf2.json
+```
+
+`--leaf-size=` takes a power of two and throws otherwise. Hold it fixed for any
+A/B that is not about discretization, and vary only it when it is.
+
 **Gate commands.**
 
 - *Gate A (bit-exact)* — run both arms and diff the readback streams:
@@ -457,6 +548,36 @@ silently changes physics.
   **Do not use the symmetry audit as the control for
   `FLUID_STRUCTURED_BOUNDARY_ADVECT_FLAT`** — see §4.
 
+### Results so far (2026-08-03)
+
+Interleaved on the `mini` lane, 120 steps, 3 rounds, paired median of per-round
+deltas. **A/A noise floor 5.54 ms**; control median **251.4 ms/advance**. A
+result inside the noise floor is inconclusive, not null.
+
+| arm | Δ ms/adv | verdict |
+|---|---:|---|
+| `FLUID_OCTREE_SECTION43_SHELL_DEPTH=4` | **−25.26 (−10.0%)** | **CONCLUSIVE FASTER** |
+| `FLUID_SPGRID_TOUCHED_RADIX_SORT=1` (Q2) | +2.72 | **INCONCLUSIVE** — inside the noise floor |
+
+Two things follow.
+
+**Q2 is not "the biggest structural prize" on mini.** It removes the dense
+directory sweep and does not move the wall — which is §5's own trap #2
+(*"dispatch-count deletion alone does not move the wall"*) confirmed with
+numbers on the exact item the queue ranked first for structural value. **Re-rank
+it below Q1 and Q3.** Caveat before retiring it: mini's `plan.brickCount` is
+small, so the dense sweep it deletes is cheap there; the large lane has 20× the
+bricks and may behave differently. Re-run on `--lane=large` before concluding.
+
+**`FLUID_OCTREE_SECTION43_SHELL_DEPTH` is a physics/iteration knob, not a
+cutover** (§1 bucket 2 says so), and it is the largest measured win in the set.
+That is consistent with the plan §2 matrix finding that the wall tracks the
+persistent solve: the §4.3 shell trip count is solve work, and shortening it
+shortens the frame. It changes the preconditioner, so it needs the Gate-B
+battery and a convergence check across all four lanes before it can be an
+authored default — a 10% wall win bought by slower convergence on a harder lane
+is not a win. Queue it as its own item, not as a flag flip.
+
 ### The queue
 
 **Q1 — `FLUID_FINE_TOPOLOGY_INDIRECT_ASSIGN=1`** · `…fine-levelset-topology.ts:1689` · **Gate A** · lanes: `large`, then `hydrostatic-tiny`
@@ -469,21 +590,48 @@ provable bit-identical: `assignDesiredPageIdentities` (`:2326-2337`) and
 `finalizeDesiredPageIdentityAssignment` (`:2338-2350`) write disjoint word sets,
 and the kernel early-returns on `work >= desiredCount`, so the narrower launch
 writes exactly the same words. This is precisely Bet 1 residue (b) — the
-`maximumResidentBricks` recurring scans — and the large lane is where capacity
-(81,920 logical fine bricks) dwarfs the live count (8,126 active,
-`artifacts/scene-size-overhead/recheck-persistent-1.json`), a **10× launch
-reduction on one dispatch**. Cost: ~20 GPU-minutes for A/A + 4 rounds on two
+`maximumResidentBricks` recurring scans.
+
+**Corrected 2026-08-03: the win is ~2.3–4×, not 10×.** The dispatch is shaped by
+`plan.maximumResidentBricks` (`Math.ceil(plan.maximumResidentBricks / 64)`,
+`…fine-levelset-topology.ts:1476-1477`), and that capacity has since halved on
+the large lane. At `recheck-persistent-1.json` (07-30) the lane's
+`terminalCounters` recorded `fineBrickCapacity 81,920` against
+`desiredFineBricks 8,126` → 1,280 vs 127 workgroups, so "10×" was right *then*.
+The lane now carries an **authored** budget:
+`LARGE_POWER_DAM_FINE_BRICK_CAPACITY = 32_768` (`lib/scenes.ts:73`, applied at
+`:86` and `lib/scene-webgpu-smoke-catalog.ts:351`, consumed as
+`options.globalFineLevelSetMaximumBricks` at `lib/webgpu-octree.ts:2199`) → 512
+workgroups, against 227 for the 14,474 desired fine pages recorded in
+`artifacts/scene-size-overhead/large-current/traced.log`
+(`finePlan.maximumResidentBricks = 32768`, `logicalBrickCount = 81920`,
+`candidate-build.activePages = 14474`). So ~2.3× at that lane state and ~4× at
+the sparser one. Note the mechanism is the **authored scene budget**, not a
+capacity planner change — the fine-band default still comes from
+`planFluidFootprintFineNarrowBandBrickCapacity` (`webgpu-octree.ts:881-907`),
+and `lib/webgpu-octree-owner-pages.ts` plans *owner* pages, a different arena.
+The item stays queued: a 2.3× narrowing of a recurring capacity-shaped launch is
+still the cheapest Bet-1 proof in the set, but do not budget against 10×.
+
+Cost: ~20 GPU-minutes for A/A + 4 rounds on two
 lanes. Risk: it adds one `broker.fence()`; that is a pass boundary, not a
 storage round-trip, so Gate A should hold — but if the diff is non-zero, fall
 back to Gate B rather than assuming contamination.
 
-**Q2 — `FLUID_SPGRID_TOUCHED_RADIX_SORT=1`** · `lib/webgpu-radix-sort-u32.ts:23` · **Gate B** · lanes: all four, `large` first
+**Q2 — `FLUID_SPGRID_TOUCHED_RADIX_SORT=1`** · `lib/webgpu-radix-sort-u32.ts:23` · **Gate B** · lanes: `large` only now
 
-The biggest structural prize and the highest variance. It removes six
-dense-directory-capacity dispatches (`markCandidateBrickOccupancy`,
+> **Measured 2026-08-03 on mini: +2.72 ms, inconclusive (noise floor 5.54 ms).**
+> Re-ranked below Q1 and Q3. The text below is why it *looked* like the biggest
+> prize; the only remaining reason to spend GPU minutes on it is that mini's
+> `plan.brickCount` is small and the large lane has 20× the bricks.
+
+The former "biggest structural prize", and the highest variance. It removes six
+dense-directory dispatches (`markCandidateBrickOccupancy`,
 `rankCandidateBricks`, `scatterCandidateRankedSlots`,
 `markCandidatePageOccupancy`, `compactCandidatePages`,
-`linkCandidatePageNeighbours`) and replaces them with live-run-shaped compact
+`linkCandidatePageNeighbours`) — of which **four** are actually capacity-shaped
+(the other two run off `CANDIDATE_SCHEDULE.topologyLevels`, which is level-count
+shaped; see §6) — and replaces them with live-run-shaped compact
 equivalents driven by two 18-dispatch radix sorts. The author's own accounting
 at `…spgrid-vcycle.ts:1824-1827` gives **net +30 setup dispatches** — and plan
 §5's own trap says dispatch-count deletion does not move the wall, so judge this
@@ -516,18 +664,41 @@ regex. Fix those two assertions first or the unit gate is already red.
 
 **Q4 — `FLUID_COARSE_SUMMARY_INDIRECT_DISPATCH=1`** · `…coarse-summary.ts:45` · **Gate B** · lane: coarse-only tracker only
 
-Lower EV than the plan implies. It publishes three indirect records and re-routes
-16 of 20 dispatches. But the "12 `domainVolume` dispatches" the plan names are
-record 0, and in production `ownerDirectoryCellCapacity` **is** `domainVolume`
-(`lib/webgpu-octree.ts:2834`), so the published record equals
-`ceil(domainVolume/256)` and saves nothing on those twelve whenever air support
-is published. The real saving is (a) all twelve zeroed when air support is
-*unpublished* (`:643`, `select(0u, …, airPublished())`), and (b) 4 dispatches on
-records 1/2 going from `rowCapacity`/`entryCapacity` to live counts. Also
-`resetSummary` (`:253`) is deliberately left capacity-shaped — the flag does not
-make the encode fully live-shaped. Adds a storage→indirect round-trip ⇒ Gate B.
-~15 GPU-minutes, and only worth it if the coarse-only lane is on the critical
-path.
+Lower EV than the plan implies, and **unreachable on every matrix lane**, so it
+should not be run at all until the coarse-only track is live.
+
+*Unreachability, confirmed:* `WebGPUOctreeCoarseSummary` is constructed at
+exactly one place, `lib/webgpu-octree.ts:2825`, inside
+`if (this.coarseOnlySurfaceTracking) {` (`:2819`), and
+`this.coarseOnlySurfaceTracking = options.globalFineLevelSetFactor === 1`
+(`:1638`). All eleven other `coarseOnlySummary` references are optional-chained
+(`:2680`, `:2854`, `:4190`, `:4373`, `:4385`, `:4510`, `:6082`), so on a factor
+4/8 lane the object simply does not exist. The factor default is `"4"`
+(`lib/methods/octree.ts:7`, `:108`) and the construction path reads
+`options.globalFineLevelSetFactor ?? 4` (`webgpu-octree.ts:2155`).
+
+*Corrected size of the prize.* The flag re-routes **16 of the module's 17
+capacity-shaped dispatches** — every `dispatch(entry, groups, record)` call with
+a record (`…coarse-summary.ts:249-274`); only `resetSummary` (`:248`, no record)
+is deliberately left capacity-shaped, so the encode does not become fully
+live-shaped either way. Of the 16, **twelve are record 0**, and in production
+`ownerDirectoryCellCapacity` **is** the domain's finest-cell count
+(`lib/webgpu-octree-air-velocity-support.ts:184`, passed at
+`lib/webgpu-octree.ts:2817`), so the published record equals
+`ceil(domainVolume/256)` and **saves nothing on those twelve whenever air
+support is published**. The real saving is (a) all twelve zeroed when air
+support is *unpublished* (`:638`, `select(0u, …, airPublished())`), and (b) the
+**4** dispatches on records 1/2 (`ensureSummaryPages`, `ensureSummaryRanks`,
+`correctCoarseDirectory`, `finalizeSummaryEntries`) going from
+`rowCapacity`/`entryCapacity` to live counts. Adds a storage→indirect round-trip
+⇒ Gate B. ~15 GPU-minutes, and only worth it if the coarse-only lane is on the
+critical path.
+
+Note that the `select(0u, …, airPublished())` record 0 is now a
+`capacity-indirect-args` violation in its own right
+(`…coarse-summary.ts:638`): a live predicate wrapped around
+`(p.domainVolume + 255u) / 256u` is still a domain-shaped launch on the step it
+fires. See §6.
 
 **Q5 — `FLUID_FINE_DELTA_RADIUS_MASK=0` (an *ablation*, not a cutover)** · **Gate B** · lane: `large`
 
@@ -605,8 +776,13 @@ Stale, and **contradicted by the plan's own §3 status block** ("the four
 current file `domainVolume` appears only in capacity planning (`:629-635`,
 `:149-155`) and WGSL bounds checks (`:1493`, `:1518`, `:1545`, `:1743`, `:2247`)
 — there is no host `dispatchWorkgroups(ceil(domainVolume/256))`. Also: there are
-**three** air-support encode call sites, not two (`lib/webgpu-octree.ts:3792`,
-`:4021`, `:4397` — line numbers as of the session snapshot).
+**four** air-support encode call sites, not two and not three —
+`lib/webgpu-octree.ts:3774`, `:4004`, `:4342`, `:4380` (re-checked 2026-08-03;
+this file moves, anchor on `this.airVelocitySupport.encode(`). Two of them run
+per steady-state advance, which the artifacts show directly: every Section 5
+pass label now appears twice, suffixed `- topology-commit` and `- settled-fine`
+(diff `baseline-mini.json` against `measurement-floor/mini-240-clean-a.json`).
+That doubling is most of the +61 dispatches/advance between those two captures.
 
 **C6 — §3 Bet 1, item 3: "support membership is still ≈ the whole air partition
 (~94k face patches marched on mini…)" (lines 219-220).**
@@ -638,19 +814,59 @@ captured `2026-07-29T23:56Z`. The interleaved fresh capture of `2026-08-02` that
 
 Two consequences:
 - §1's "The pressure *solve* is now one dispatch (`encodeSolve`); it is no
-  longer the launch problem" holds for the 07-30 large capture and **not** for
-  the 08-02 mini/tiny captures, which record 26 MGPCG dispatches per advance.
+  longer the launch problem" is **TRUE everywhere, and this ledger was wrong to
+  doubt it** — see the resolution below.
 - §2's "today (approx)" column — mini churn "~38–44", tiny hydrostatic
   "≈ mini wall (~38–44)", large 20× dam "~38–47" — matches **no artifact in the
   tree**. The fresh A/A pairs are tight (241.26 vs 240.03, i.e. 0.5%; 352.14 vs
   352.08, i.e. 0.02%) and interleaved by capture time (10:00, 10:02, 10:05,
   10:07), so they are clean-protocol runs, not noise.
 
-  I cannot tell from the artifacts whether the fresh runs carried diagnostics
-  (no environment is recorded in the JSON) or whether the branch regressed. **It
-  must be resolved before any of these numbers gates anything**, because a
-  target of "≤ 15 ms" against a "today" of 40 vs 240 is a completely different
-  program. Recommend: record the resolved environment in the artifact schema.
+#### C7 resolution status, 2026-08-03 — **PARTIAL. Do not close this item.**
+
+**(a) The 1 → 26 "MGPCG dispatches" step is a label-attribution artifact.
+RESOLVED.** `mgpcgDispatchesPerAdvance` is computed by `mgpcgSolveDispatches`
+over `audit.dispatchesByPassLabel`, keyed on the *owning stage* a pass label
+resolves to, and `POWER_DAM_MGPCG_SOLVE_STAGE`
+(`tools/power-dam-performance-report.ts:476-482`) deliberately folds
+`SPGrid V-cycle`, `Section 4.3 preconditioner`, `SPGrid accurate A2` and
+`SPGrid Section 6.3 apply` into the solve. The persistent solve is one dispatch:
+`WebGPUOctreePersistentMGPCG.encodedDispatchCount = 1`
+(`lib/webgpu-octree-persistent-mgpcg.ts:292-293`), and **every** capture in the
+table above — including `baseline-mini.json` — records
+`computePassesByLabel["Octree persistent MGPCG - whole solve in one workgroup"]
+= 1`. The step came from pass *labels*, not from work: `baseline-mini.json`
+carries **no** `SPGrid V-cycle` label at all, while the current captures carry
+two (`… · capture plan L1 delta`, `… · candidate commit changed L1`), and with
+`FLUID_GPU_ISOLATE_PASS_LABELS` off the ~24 candidate-rebuild dispatches of
+`encodeCaptureDelta` + `encodeSetupCandidate` all land inside those two passes.
+So 26 ≈ 1 solve + 25 SPGrid candidate rebuild.
+*Recommended (not done — that file is owned elsewhere): split the metric, e.g.
+`pressureStageDispatchesPerAdvance` alongside a
+`persistentSolveDispatchesPerAdvance`, so it stops reading as the solve.*
+
+**(b) The missing environment. RESOLVED.** See the environment-record section in
+§3 — `tools/power-dam-run-environment.ts`, `environment` on both artifacts,
+`contaminants`/`clean`/`comparisonKey`, and `--leaf-size=`.
+
+**(c) The wall. OPEN, and larger than it looked.** The comparison was invalid in
+a way nobody had recorded: commit `065219a` (2026-08-01, "fix(octree): restore
+factor-one scene parity") changed `FLUID_MAXIMUM_LEAF_SIZE` in
+`tools/power-dam-lane-environment.ts` from **2 → 32** on mini and **16 → 32** on
+large (also 16→32 hydrostatic, 2→32 on two more lanes). Every pre-`065219a`
+artifact is a different discretization from every post-`065219a` one. Measured
+this session on the same 240-step mini lane at HEAD:
+
+| capture | leaf | ms/adv | passes | disp/adv |
+|---|---:|---:|---:|---:|
+| `artifacts/measurement-floor/mini-240-clean-a.json` | 32 | **245.3** | 80.00 | 503.0 |
+| `artifacts/measurement-floor/mini-240-leaf2.json` | 2 | **211.1** | 79.00 | 469.0 |
+| `artifacts/scene-size-overhead/baseline-mini.json` (07-29) | 2 | **69.6** | 80.03 | 442.1 |
+
+The leaf change accounts for ~14% (245.3 → 211.1). **211.1 vs 69.6 at the same
+leaf size is a real ~3× regression, still unexplained**, and nothing else in the
+tree is watching it. It is the single most valuable thing on this list. Bisect
+it with `--leaf-size=2` held fixed and `comparisonKey` checked on both arms.
 
 **C8 — §2, P0.2 status: "P0.2 (`large-power-hydrostatic`) exist in
 `tools/power-dam-lane-environment.ts`" (lines 102-104).** True but the key is
@@ -752,24 +968,27 @@ that "either/or" in favour of **wire it** — it is 5×-plan §1.3(a), worth ~31
 coarse-only lane launches. See §2.7.)
 
 **Fix the measurement floor before the queue.** The single most valuable thing
-on this list is not a cutover: it is resolving C7. The plan's §2 "today" column,
-the §1 dispatch table, and the fresh baselines disagree by up to 6×, and one of
-them says the persistent solve is 1 dispatch while another says 26. Every accept/
-reject threshold in the program is denominated in those numbers. Two clean
-interleaved A/A runs on `--lane=mini` and `--lane=hydrostatic-tiny` with the
-resolved environment recorded in the artifact would cost ~25 GPU-minutes and
-would either restore confidence in the whole §2 target table or reveal a 3.5×
-regression that nothing else in the tree is watching. **Do that first.**
+on this list is still not a cutover: it is finishing C7. Two of its three parts
+are now closed — the "26 vs 1 MGPCG dispatches" contradiction was a pass-label
+attribution artifact (the solve is 1 dispatch in every capture), and artifacts
+now carry a resolved environment with `clean`/`comparisonKey`. The third part
+got **worse** on inspection: the leaf-size change in `065219a` invalidated every
+cross-date comparison, and correcting for it leaves a **real ~3× mini
+regression** (211.1 ms/adv at leaf 2 today vs 69.6 on 07-29 at the same leaf)
+that nothing in the tree is watching. Every accept/reject threshold in the
+program is denominated in those numbers. **Bisect that first**, with
+`--leaf-size=2` pinned and `comparisonKey` checked on both arms.
 
 **Then run Q1.** `FLUID_FINE_TOPOLOGY_INDIRECT_ASSIGN` is the only queued item
 that is both statically provable and directly on the Bet 1 critical path
-(capacity-shaped launch → live-count launch, 10× narrower on the large lane).
-It is a Gate-A change with a written-down proof and no test. If it lands clean,
-it also validates the pattern for the rest of the `maximumResidentBricks`
-residue. Q2 (`FLUID_SPGRID_TOUCHED_RADIX_SORT`) is the larger prize but needs
-the tripwire correctness pass first and a Gate-B battery after; do not start it
-until C3 is corrected in the plan, or the next reader will re-derive a primitive
-that already exists and is already GPU-tested.
+(capacity-shaped launch → live-count launch, **~2.3–4×** narrower on the large
+lane — the 10× figure is corrected in Q1 above). It is a Gate-A change with a
+written-down proof and no test. If it lands clean, it also validates the pattern
+for the rest of the `maximumResidentBricks` residue. Q2
+(`FLUID_SPGRID_TOUCHED_RADIX_SORT`) is the larger prize but needs the tripwire
+correctness pass first and a Gate-B battery after; C3 is now corrected in the
+plan, so the next reader will not re-derive a primitive that already exists and
+is already GPU-tested.
 
 **Finally, note what the whole table says about confidence.** Not one of the 39
 non-instrument toggles has its non-default arm executed by a GPU test. Every
@@ -778,3 +997,69 @@ on a CPU predicate assertion and a regex. That is fine for an A/B lever — you
 find out when you run it — but it means **no escape hatch in this repo should be
 trusted as a rollback path without first running it.** If a landing goes wrong
 at 2 a.m., `FLUID_X=0` is a hypothesis, not a fix.
+
+---
+
+## 6. The Bet-1 source gate, 2026-08-03
+
+`npm run audit:octree-production-source` now scans **61** sources and reports
+**119** violations (previously 108 in 59). The delta is entirely new *visibility*
+— no dispatch changed.
+
+| change | effect |
+|---|---|
+| Scope widened past the octree-prefix filter | `lib/webgpu-fluid-brick-residency.ts`: **6** `capacity-dispatch`. `lib/webgpu-sparse-brick-topology-mutation.ts`: **clean**. |
+| New rule `capacity-indirect-args` | **4** hits, all real (below). |
+| Capacity vocabulary `\w*Capacity` → `\w*[Cc]apacity` | +5, of which 4 are brick-residency launches spelled `this.capacity`. |
+
+**Brick residency, the newly-scoped module.** All six are genuine and all recur:
+four `dispatchWorkgroups(bricks)` at `:1403-1407` where
+`bricks = Math.ceil(this.capacity / 64)` (`:1401`); one
+`emitTopologyTiles` at `ceil(this.tileCapacity / 64)` (`:1412`); and one
+`commitFineSeedCandidates` at
+`ceil(max(worklistByteLength, tileWorklistByteLength, stateBytes, tileStateBytes) / 4 / 64)`
+(`:1477`) — a launch shaped by the **byte size of its own arenas**, which is
+O(capacity) in the most literal form the rule can express. None of them had ever
+been inside the gate.
+
+**The third blindness.** The gate exempted `dispatchWorkgroupsIndirect` on the
+reasoning that "an indirect launch is shaped by whatever the GPU published into
+the args buffer, which is the compliant form". That is only true if the
+*publisher* used a live count.
+
+- `webgpu-octree-spgrid-vcycle.ts:3884-3886` — `prepareCandidateSchedules`
+  (`:3843`) sets `brickItems = p.totals.y`, `logicalPageItems =
+  physicalPageItems = p.totals.z` (`:3878-3879`) and publishes them as candidate
+  schedule records 4/5/6. The host writes `p.totals = [totalLevelSlots,
+  plan.brickCount, plan.pageDirectoryBytes/4, …]` (`:1598-1599`), and
+  `plan.brickCount` is a pure O(domain) sum over levels (`:887-891`). **Four**
+  recurring launches consume those records: `markCandidateBrickOccupancy` and
+  `scatterCandidateRankedSlots` off `.bricks`, `markCandidatePageOccupancy` off
+  `.logicalPages`, `linkCandidatePageNeighbours` off `.physicalPages`
+  (`:1971-1982`). The other two of the six the Q2 entry names —
+  `rankCandidateBricks`, `compactCandidatePages` — run off `.topologyLevels`,
+  which is level-count shaped and therefore fine.
+- `webgpu-octree-coarse-summary.ts:638` — record 0's
+  `select(0u, (p.domainVolume + 255u) / 256u, airPublished())`. Factor-1-only, so
+  it does not fire on a matrix lane, but it is the same shape.
+
+The rule (`capacityIndirectArgumentViolations` in
+`lib/webgpu-octree-work-accounting.ts`) treats a published item count as
+host-authored when it derives from the capacity vocabulary **or from any uniform
+block** — a uniform is host-written and the host may not read back a live count
+(`hostSchedulingUsesReadback: false`), so a uniform-derived count is an
+allocation-time constant by construction. That is what catches `p.totals.y`,
+which no capacity vocabulary contained. It suppresses on a storage/atomic read
+(GPU-published), on a function parameter (judged at the call site), and on
+literals; it reads *through* `select`'s predicate, because a live predicate
+around a capacity is still a capacity on the step it fires. Pinned by four
+regressions with negative cases in
+`tests/webgpu-octree-work-accounting.test.ts`.
+
+**This is the gate's third blindness, and a green result from it has twice been
+quoted as evidence while wrong.** `docs/BET1_DISPATCH_SHAPE_AUDIT.md` now
+carries a "what the gate still cannot see" list — host-written indirect args,
+mixed live/capacity assignment paths, capacity laundered through an
+unrecognised accessor name, per-invocation work, out-of-scope modules, and
+deliberate exemptions like `resetSummary` that are reported identically to
+accidents. Read it before quoting a clean run.

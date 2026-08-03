@@ -22,6 +22,8 @@ import {
   type PowerDamRuntimeLane as RuntimeLane,
 } from "./power-dam-lane-environment";
 import { POWER_DAM_PRESSURE_KERNEL_LABEL_PREFIXES } from "./power-dam-pressure-kernel-profile";
+import { formatPassBrokerBoundaryAudit } from "../lib/webgpu-pass-broker";
+import { powerDamRunEnvironment } from "./power-dam-run-environment";
 
 const args = new Set(process.argv.slice(2));
 const requestedLane = process.argv.find((argument) => argument.startsWith("--lane="))
@@ -83,8 +85,14 @@ const runner = fileURLToPath(new URL("./run-webgpu-smoke-isolated.ts", import.me
 
 const laneEnvironment = POWER_DAM_LANE_ENVIRONMENT;
 
-const benchmarkEnvironment = (overrides: Record<string, string> = {}): NodeJS.ProcessEnv => ({
-    ...process.env,
+/**
+ * Everything this harness and the lane table assert on top of the caller's
+ * shell. Kept separate from the merge below so the artifact can name which
+ * variables the run *inherited* rather than chose — the C7 ambiguity in
+ * `docs/STRUCTURED_CUTOVER_LEDGER.md` was unresolvable precisely because a
+ * merged environment cannot distinguish the two.
+ */
+const benchmarkEnvironmentOverlay = (overrides: Record<string, string> = {}): Record<string, string> => ({
     WEBGPU_NODE_MODULE: `${root}/node_modules/webgpu/index.js`,
     FLUID_WEBGPU_BACKEND: "metal",
     FLUID_WEBGPU_ADAPTER: "Apple M1 Max",
@@ -158,10 +166,20 @@ const benchmarkEnvironment = (overrides: Record<string, string> = {}): NodeJS.Pr
       FLUID_TRIPWIRE_ALLOW_SUMMARY: "1", FLUID_QUALITY_INVALID_PROBE: "1" } : {}),
 });
 
+const benchmarkEnvironment = (overrides: Record<string, string> = {}): NodeJS.ProcessEnv => ({
+  ...process.env, ...benchmarkEnvironmentOverlay(overrides),
+});
+
+/** The overlay of the last run started, for the artifact's environment record. */
+let lastAuthoredOverlay: Record<string, string> = benchmarkEnvironmentOverlay();
+let lastResolvedEnvironment: NodeJS.ProcessEnv = benchmarkEnvironment();
+
 const runBenchmark = async (overrides: Record<string, string> = {}): Promise<PowerDamResultRecord> => {
+  lastAuthoredOverlay = benchmarkEnvironmentOverlay(overrides);
+  lastResolvedEnvironment = { ...process.env, ...lastAuthoredOverlay };
   const child = spawn(process.execPath, ["--import", "tsx", runner], {
     cwd: root,
-    env: benchmarkEnvironment(overrides),
+    env: lastResolvedEnvironment,
     stdio: ["ignore", "pipe", "inherit"],
   });
   let result: PowerDamResultRecord | undefined;
@@ -226,6 +244,8 @@ const bandLevelOverride = process.argv.find((argument) => argument.startsWith("-
   ?.slice("--band-level=".length);
 const fineFactorOverride = process.argv.find((argument) => argument.startsWith("--fine-factor="))
   ?.slice("--fine-factor=".length);
+const leafSizeOverride = process.argv.find((argument) => argument.startsWith("--leaf-size="))
+  ?.slice("--leaf-size=".length);
 if (stepsOverride !== undefined && dtOverride !== undefined) {
   throw new Error("--steps and --dt are mutually exclusive; --dt derives steps at fixed simulated time");
 }
@@ -259,6 +279,19 @@ if (fineFactorOverride !== undefined) {
   // This changes the discretization and therefore always requires Gate B.
   bandEnvironmentOverride.FLUID_OCTREE_GLOBAL_FINE_FACTOR = String(fineFactor);
 }
+if (leafSizeOverride !== undefined) {
+  const leafSize = Number(leafSizeOverride);
+  if (!Number.isInteger(leafSize) || leafSize < 1 || (leafSize & (leafSize - 1)) !== 0) {
+    throw new Error(`--leaf-size must be a positive power of two; received ${leafSizeOverride}`);
+  }
+  // The lane table pins `FLUID_MAXIMUM_LEAF_SIZE`, so a shell export cannot
+  // reach it and an `--arm=` cannot either. This override exists because the
+  // lane's own leaf size has already changed under the program once
+  // (`065219a`, mini 2 -&gt; 32) and the artifacts on either side were compared as
+  // if they described the same lane. Changing it changes the discretization:
+  // Gate B, and never a number to quote next to a default-lane capture.
+  bandEnvironmentOverride.FLUID_MAXIMUM_LEAF_SIZE = String(leafSize);
+}
 
 const movingResult = await runBenchmark({ ...laneOverride, ...bandEnvironmentOverride });
 let artifactResult: OctreeRegressionResultRecord = movingResult;
@@ -289,13 +322,24 @@ if (quiescent) {
   }
   summary = quiescentSummary;
 }
+// Resolved once, from the last run's overlay, and written into every artifact
+// this invocation produces. Ledger C7: an artifact without its environment
+// cannot be compared to anything, including its own re-run.
+const runEnvironment = powerDamRunEnvironment({
+  lane: requestedLane,
+  argv: process.argv.slice(2),
+  resolved: lastResolvedEnvironment as Record<string, string | undefined>,
+  authored: lastAuthoredOverlay,
+  repositoryRoot: root,
+});
 if (diagnosticArtifactPath) {
   const absoluteDiagnosticPath = resolve(root, diagnosticArtifactPath);
   mkdirSync(dirname(absoluteDiagnosticPath), { recursive: true });
   writeFileSync(absoluteDiagnosticPath, `${JSON.stringify({
-    schemaVersion: 1,
+    schemaVersion: 2,
     lane: requestedLane,
     capturedAt: new Date().toISOString(),
+    environment: runEnvironment,
     summary,
   }, null, 2)}\n`);
   if (!jsonOnly) console.log(`diagnostic artifact: ${absoluteDiagnosticPath}`);
@@ -306,6 +350,7 @@ if (artifactPath) {
     result: artifactResult,
     repositoryRoot: root,
     adapter: process.env.FLUID_WEBGPU_ADAPTER ?? "Apple M1 Max",
+    environment: runEnvironment,
   });
   const absoluteArtifactPath = resolve(root, artifactPath);
   mkdirSync(dirname(absoluteArtifactPath), { recursive: true });
@@ -415,8 +460,9 @@ const failures = [...powerDamPerformanceFailures(summary, {
 if (jsonOnly) {
   for (const failure of failures) console.error(`performance gate: ${failure}`);
   const output = quiescent
-    ? { lane: "quiescent", moving: summarizePowerDamPerformance(movingResult), quiescent: summary }
-    : summary;
+    ? { lane: "quiescent", environment: runEnvironment,
+      moving: summarizePowerDamPerformance(movingResult), quiescent: summary }
+    : { ...summary, environment: runEnvironment };
   console.log(JSON.stringify(qualityInvalidProbe
     ? { ...output, qualityInvalidProbe: true, probeFailures: failures }
     : output));
@@ -424,6 +470,17 @@ if (jsonOnly) {
   const authority = quiescent ? "quiescent paired-prefix window"
     : traceProfile ? "generic trace sample" : "throughput authority";
   console.log(`${summary.scenario}: ${summary.advanceWall_ms.toFixed(2)} ms/advance (${summary.steps} advances, ${authority})`);
+  // Printed next to the number it qualifies, not buried in the artifact. A
+  // contaminated wall compared against a clean one is ledger C7 happening again.
+  console.log(`environment: ${runEnvironment.clean ? "measurement-clean" : "CONTAMINATED"}`
+    + ` · comparison key ${runEnvironment.comparisonKey}`
+    + ` · ${runEnvironment.git.head?.slice(0, 7) ?? "no-git"}${runEnvironment.git.dirty ? "-dirty" : ""}`
+    + ` · ${runEnvironment.adapter}`);
+  for (const entry of runEnvironment.contaminants) {
+    console.log(`environment contaminant: ${entry.name}=${entry.resolved ?? "(unset)"}`
+      + ` (measurement-clean: ${entry.clean.length === 0 ? "unclassified shell variable"
+        : entry.clean.map((value) => value ?? "(unset)").join(" | ")})`);
+  }
   if (summary.measurementWindow) {
     console.log(`measurement window: settled through step ${summary.measurementWindow.startStep}; cumulative counters differenced over steps ${summary.measurementWindow.startStep + 1}–${summary.measurementWindow.endStep}`);
   }
@@ -495,6 +552,37 @@ if (jsonOnly) {
       console.log(`pressure region: ${region}: ${bucket.totalPerAdvance_ms.toFixed(3)} ms/advance · ${(100 * bucket.shareOfPressure).toFixed(1)}% · ${bucket.samples} samples`);
     }
     for (const warning of profile.warnings) console.log(`pressure profile note: ${warning}`);
+  }
+  if (summary.passBoundaries) {
+    const boundaries = summary.passBoundaries;
+    // The pass budget is a boundary problem: a compute pass exists because
+    // something fenced. `computePassesPerAdvance` above says how many passes
+    // there are; this says WHY each one ended, so a merge can be aimed.
+    console.log(`pass boundaries/advance: ${boundaries.passClosuresPerAdvance.toFixed(1)} closures`
+      + ` from ${boundaries.requestsPerAdvance.toFixed(1)} fence requests`
+      + ` (${boundaries.idempotentRequestsPerAdvance.toFixed(1)} idempotent — already batched)`
+      + ` · ${boundaries.copyCommandsPerAdvance.toFixed(1)} copies`
+      + ` · ${boundaries.clearCommandsPerAdvance.toFixed(1)} clears`
+      + ` · ${(boundaries.bytesPerAdvance / 1e6).toFixed(2)} MB`
+      + ` · ${boundaries.brokersPerAdvance.toFixed(1)} command encoders`);
+    // Both honesty flags print next to the table, never only in the artifact: a
+    // label-isolated stream carries a synthetic boundary per label change, and a
+    // census that still holds construction inflates every number above.
+    // The ranked table below is RAW totals over the measured window; only the
+    // line above is per advance. Say so, next to both.
+    console.log(`pass boundary census: ${boundaries.exact ? "exact" : "QUALIFIED"}`
+      + ` · totals below cover ${boundaries.measuredAdvances} measured advances`
+      + ` · warmup ${boundaries.warmupExcluded ? "excluded" : "INCLUDED"}`
+      + ` · FLUID_GPU_ISOLATE_PASS_LABELS ${boundaries.labelIsolated
+        ? `ON for ${boundaries.labelIsolatedBrokers}/${boundaries.brokers} encoders`
+        : "off"}`
+      + ` · ${boundaries.absorbedLabelPairs} stage labels already share a pass with another`
+      + ` stage across ${boundaries.compositeEncoderLabels} composite encoders`);
+    for (const line of formatPassBrokerBoundaryAudit(
+      new Map(Object.entries(boundaries.byReason)), 20)) {
+      console.log(`pass boundary: ${line}`);
+    }
+    for (const warning of boundaries.warnings) console.log(`pass boundary note: ${warning}`);
   }
   if (summary.dataFlow) {
     const dispatches = summary.dataFlow.passes.reduce((sum, pass) => sum + pass.dispatches, 0);

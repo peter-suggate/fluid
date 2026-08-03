@@ -26,13 +26,19 @@ const worldSource = readFileSync(new URL("../lib/webgpu-octree-sparse-bricks.ts"
 const sourceAbi = readFileSync(new URL("../lib/webgpu-voxel-debug.ts", import.meta.url), "utf8");
 
 test("live derived page validity uses sampled uint bindings with zero fallbacks", () => {
+  assert.doesNotMatch(drySource, /dryDerivedFailureColor|mix\(shaded,dryDerivedFailure/,
+    "typed page failures must not be painted into production scene colour");
   assert.match(drySource, /nodeMipPageValidityFallback = device\.createTexture\([^]*size: \[1, 1\][^]*format: "r32uint"/);
   assert.match(drySource, /tetrahedralRadiancePageValidityFallback = device\.createTexture\([^]*size: \[1, 1\][^]*format: "r32uint"/);
   assert.match(drySource, /binding: 26, resource: nodeMipPageValidity \?\? this\.nodeMipPageValidityFallbackView/);
   assert.match(drySource, /binding: 27, resource: tetrahedralRadiancePageValidity \?\? this\.tetrahedralRadiancePageValidityFallbackView/);
   const reduced = createSvoDrySceneFragmentWGSL(0.5, "canonical-parametric", "off", "split", 0, false, false, false, true);
-  assert.match(reduced, new RegExp(`all\\(packed\\.xy==DRY_PREPASS_INVALID_PACKED\\)\\)\\{dryDerivedPageFailure\\|=${SVO_DRY_DERIVED_FAILURE.reducedReconstruction}u;return;\\}`),
-    "fan-out invalidity must become an explicit reconstruction failure");
+  assert.match(reduced, /if\(all\(packed\.xy==DRY_PREPASS_INVALID_PACKED\)\)\{linearSafe=0u;continue;\}/,
+    "one invalid fan-out receiver must be isolated from unrelated identities");
+  assert.match(reduced, /if\(weightSum<0\.05\)\{[^]*dryPrepassRecoverExactReceiver[^]*dryPrepassExactEdgeState=1u;return;/,
+    "fan-out invalidity must enter only the declared live edge tier when no compatible receiver exists");
+  assert.match(reduced, new RegExp(`if\\(cone\\.valid==0u\\)\\{dryDerivedPageFailure\\|=${SVO_DRY_DERIVED_FAILURE.directVisibilityPage}u;return vec3f\\(0\\.0\\);\\}`),
+    "the edge tier must retain typed failure publication for genuinely unavailable live pages");
 });
 
 function source(): SparseVoxelRenderSource {
@@ -68,7 +74,7 @@ test("GLOBAL lighting and its visibility effects write independent flags", () =>
     globalIllumination: 16, globalIlluminationOcclusion: 32, globalIlluminationRequested: 64,
     silhouetteRefinement: 128,
   });
-  assert.match(drySource, /const requestedDerivedSourceUnavailable = coneTracingEnabled && !giReady/);
+  assert.match(drySource, /const coneTracingEnabled = coneTracingMode === "cones" && this\.derivedLightingReady\(\)/);
   assert.doesNotMatch(drySource, /lightingMode|setLightingMode/);
   const previousBufferUsage = globalThis.GPUBufferUsage, previousTextureUsage = globalThis.GPUTextureUsage;
   Object.assign(globalThis, {
@@ -95,16 +101,21 @@ test("GLOBAL lighting and its visibility effects write independent flags", () =>
     const flagWord = (write: { words: Uint32Array }) => write.words[SVO_DRY_SCENE_PARAMS_LAYOUT.materialPublicationWordOffset + 3];
     assert.equal(flagWord(params().at(-1)!) & SVO_DRY_VISIBILITY_FLAGS.exactShadow, SVO_DRY_VISIBILITY_FLAGS.exactShadow);
     assert.equal(flagWord(params().at(-1)!) & SVO_DRY_VISIBILITY_FLAGS.ambientOcclusion, SVO_DRY_VISIBILITY_FLAGS.ambientOcclusion);
-    assert.equal(flagWord(params().at(-1)!) & SVO_DRY_VISIBILITY_FLAGS.coneLightingRequested, SVO_DRY_VISIBILITY_FLAGS.coneLightingRequested);
+    assert.equal(flagWord(params().at(-1)!) & SVO_DRY_VISIBILITY_FLAGS.coneLightingRequested, 0,
+      "an unavailable cone hierarchy selects exact visibility instead of poisoning the frame");
+    assert.deepEqual(renderer.lightingVisibilityStatus, {
+      state: "exact", fallback: true,
+      detail: "Complete cone-lighting hierarchy is unavailable; exact SVO shadows and AO are active",
+    });
     renderer.setLightingOptions({ shadowsEnabled: false, ambientOcclusionEnabled: true });
     assert.equal(flagWord(params().at(-1)!) & SVO_DRY_VISIBILITY_FLAGS.exactShadow, 0);
-    assert.equal(flagWord(params().at(-1)!) & SVO_DRY_VISIBILITY_FLAGS.coneLightingRequested, SVO_DRY_VISIBILITY_FLAGS.coneLightingRequested);
+    assert.equal(flagWord(params().at(-1)!) & SVO_DRY_VISIBILITY_FLAGS.coneLightingRequested, 0);
     renderer.setLightingOptions({ shadowsEnabled: false, ambientOcclusionEnabled: false });
     assert.equal(flagWord(params().at(-1)!) & (SVO_DRY_VISIBILITY_FLAGS.exactContact | SVO_DRY_VISIBILITY_FLAGS.exactShadow | SVO_DRY_VISIBILITY_FLAGS.coneLightingRequested | SVO_DRY_VISIBILITY_FLAGS.ambientOcclusion), 0);
     renderer.setLightingOptions({ shadowsEnabled: true, ambientOcclusionEnabled: true });
     const requestedWithoutDerivedFlags = flagWord(params().at(-1)!);
-    assert.equal(requestedWithoutDerivedFlags & SVO_DRY_VISIBILITY_FLAGS.globalIlluminationRequested,
-      SVO_DRY_VISIBILITY_FLAGS.globalIlluminationRequested, "the probe can diagnose a requested GI atlas that is unavailable");
+    assert.equal(requestedWithoutDerivedFlags & SVO_DRY_VISIBILITY_FLAGS.globalIlluminationRequested, 0,
+      "the effective exact path must not ask shader stages to sample an unavailable GI atlas");
     assert.equal(requestedWithoutDerivedFlags & SVO_DRY_VISIBILITY_FLAGS.globalIllumination, 0);
     const giSource = source() as unknown as SparseVoxelRenderSource & Record<string, unknown>;
     const plan = { generation: 1, complete: true, pages: [{ key: { generation: 1, level: 0, coordinate: [0, 0, 0] }, slot: 0 }], atlas: { texels: [10, 10, 10] } };
@@ -119,6 +130,7 @@ test("GLOBAL lighting and its visibility effects write independent flags", () =>
     assert.equal(giFlags & SVO_DRY_VISIBILITY_FLAGS.globalIlluminationRequested,
       SVO_DRY_VISIBILITY_FLAGS.globalIlluminationRequested);
     assert.equal(giFlags & SVO_DRY_VISIBILITY_FLAGS.coneLightingRequested, SVO_DRY_VISIBILITY_FLAGS.coneLightingRequested);
+    assert.deepEqual(renderer.lightingVisibilityStatus, { state: "cones" });
     assert.equal(giFlags & SVO_DRY_VISIBILITY_FLAGS.globalIlluminationOcclusion,
       SVO_DRY_VISIBILITY_FLAGS.globalIlluminationOcclusion, "AO enables broad GI-cone visibility");
     assert.equal(giFlags & (SVO_DRY_VISIBILITY_FLAGS.exactContact | SVO_DRY_VISIBILITY_FLAGS.ambientOcclusion), 0,
