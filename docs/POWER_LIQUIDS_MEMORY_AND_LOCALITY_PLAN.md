@@ -906,7 +906,63 @@ it. Do that before designing anything: this axis has now produced two models
 that were wrong by 3.4× and by an order of magnitude, and one probe that settled
 each question in a single run.
 
-#### E2b/E2d — the cancelled successors, kept for the record
+### CORRECTION, measured on `symmetric-expansion`: E2b and E2d were cancelled on the wrong lane
+
+Both cancellations below were made on `droplet-256`, which pins the fluid at
+~100 cells and sweeps the container. On the guide lane (`liveRows = 2,070`,
+band 2,070, class-0 850 = 41.1%, coarse class-0 **0**) the phase-repeat probe
+reads completely differently. Rounds 1 and 3; round 2 is discarded, every probe
+arm ran 2-3x its other rounds there while control held at 259.90.
+
+| phase | delta for 3 extra passes | implied total | share of the 61.33 ms slice |
+|---|---:|---:|---:|
+| `applyBandRows` | +96.0 ms | **32.0 ms/advance** | **~52%** |
+| `applyAllRows` | +10.2 ms | 3.4 ms/advance | ~5.5% |
+| `sparseSmoothPhase` | +9.6 ms | 3.2 ms/advance | ~5.2% |
+
+**E2b is RESURRECTED and is the top target.** The band apply was 0.57 ms on
+droplet and is 32.0 ms here -- 56x, and half the persistent solve. `applyRow`,
+and `finerAdjoint` inside it, is where the kernel's time actually is. The
+droplet reading that cancelled it was an artefact of 100 unknowns on 256 lanes.
+
+**E2d is NOT settled either way.** Its premise geometry is confirmed --
+`wPartials = ceil(2070/128) = 17`, against droplet's 1 -- but none of the three
+probes measure `reduceMerged`; they measure the two applies and the smoother.
+Its cost remains unmeasured. What the smoother probe *does* refute is §2.2's
+attribution: `sparseSmoothPhase` is 3.2 ms, not the wall.
+
+The probe is value-neutral on device, not just on paper: with
+`FLUID_PERSISTENT_MGPCG_PHASE_REPEAT=smooth:3` the D4 window is unmoved at
+68/69, wall spread 0, 250 checkpoints, zero validation errors.
+
+### E4, informed: the solve is barrier-bound, not lane-starved
+
+`FLUID_OCTREE_MGPCG_LANES`, interleaved on `symmetric-expansion`, **A/A floor
+5.45 ms**:
+
+| width | ms/advance | delta vs 256 | verdict |
+|---|---:|---:|---|
+| 256 (control, 6 runs) | 260.02 | -- | -- |
+| 512 | 256.56 | -3.46 (-1.3%) | INCONCLUSIVE, inside the floor |
+| 1024 | 267.63 | **+7.60 (+2.9%)** | **SLOWER** |
+
+**Non-monotone.** Doubling to 512 buys nothing measurable; doubling again costs
+11 ms against 512. So the persistent solve is not starved of lanes -- it is
+bound by barrier rendezvous and dependency chains, and widening the workgroup
+makes every one of its ~1,000+ `workgroupBarrier()` calls synchronize more
+lanes while cutting simdgroups resident per core (9,312 B of workgroup storage
+at 1024).
+
+**The design consequence for E4 is direct: do not spread this barrier structure
+wider.** A multi-workgroup solve that preserved the rendezvous count would
+inherit a cost this curve has already measured as negative. The levers the data
+supports are cutting per-row dependent work in `applyRow` (E2b, 52% of the
+slice) and cutting rendezvous count -- not adding lanes.
+
+`FLUID_OCTREE_MGPCG_LANES` stays at its authored 256, where the module is
+byte-identical; no default is flipped at a width D4 has not seen.
+
+#### E2b/E2d — the original cancellations, superseded by the correction above
 
 Ranked by remaining surface, each with its equality argument done, so the next
 session can implement rather than re-derive. All three are inside the persistent
