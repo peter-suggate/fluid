@@ -497,6 +497,84 @@ grading pass**. Two follow-ups, in cost order:
   payload. That is the E3b-class structural change for this arena and it would
   also take a size-32 split from 32,768 writes to 64.
 
+#### Two owner-side leads, parked but not lost
+
+Both found while ranking `symmetric-expansion`; neither is being chased yet.
+
+- **The owner-page directory is a full permutation on every lane**, so its load
+  is pure indirection. `planOctreeOwnerPages` clamps `capacity <=
+  logicalBrickCount` and every lane hits equality — symmetric-expansion 32/32,
+  mini 8/8, droplet-256 32,768/32,768, ocean 4,800/4,800 (verified on CPU). Every
+  `ownerAt()` therefore spends a **second dependent device load** indexing a
+  fully populated table. Assigning pages as the IDENTITY when
+  `capacity == logicalBrickCount` lets `ownerPageEncoded` compute the page
+  instead of loading it, halving the dependent-load count shader-wide, and the
+  directory would still be *written* with identity values so every existing
+  reader — the CPU lookup, the read-only WGSL ABI, the diagnostics — is
+  unaffected. Open question before it can land: `requireOwnerPageEncoded` has a
+  missing-page rejection path, so full residency has to be established rather
+  than assumed.
+- **`refineCoarseBlock` and `balanceCoarseBlock` run their size-cubed predicates
+  on lane 0 alone**, between barriers, with 127 (or 255) lanes idle — the same
+  sync smell as the serial split materializer that E6 already cashed for
+  −12.58 ms. It is a likely follow-up to the per-page uniform-owner summary,
+  which touches the same two functions.
+
+### E7 — the symmetric-expansion frame, measured — **the grading axis is spent on this lane**
+
+`symmetric-expansion` is the lane that matters, and profiling it inverts the
+whole ranking this document was built on. Baseline, interleaved A/B, 3 rounds:
+**268.59 ms/advance**, A/A noise floor **3.65 ms**.
+
+Label-isolated pass profile (274.03 ms frame; ranking honest, absolute ~2% high):
+
+| pass | ms/advance | share |
+|---|---:|---:|
+| Octree persistent MGPCG — whole solve in one workgroup | **61.33** | 22% |
+| Advect structured families | **40.34** | 15% |
+| March Section 5 sparse changed frontier (x2) | **43.56** | 16% |
+| Advect fine phi rare + common | **29.01** | 11% |
+| Transfer accepted velocity to changed topology faces | 11.80 | 4% |
+| Scatter recurring fine-band seed halos | 5.13 | 2% |
+| **Octree resident grading closure (r00)** | **0.437** | **0.2%** |
+
+The top six are **70% of the frame**. No other grading round reaches the
+reporting threshold at all.
+
+**Grading is 0.437 ms here against 27.53 ms on droplet-256** — 0.2% of the frame
+instead of 32%. The reason is in this repo's own commit `db4f487`: droplet-256
+holds ~100 live pressure rows by construction, while symmetric-expansion holds
+**2,124**. droplet-256 is a container sweep with almost no fluid; the
+fluid-heavy lane spends its time per ROW, not on topology. E6's −12.58 ms was
+real and remains banked, but **the grading axis cannot move this lane**, and
+neither can its two named successors:
+
+- the **fixpoint short-circuit** (E6 follow-up) targets rounds r03-r09;
+- the **per-page uniform-owner summary** targets split materialization writes.
+
+Both are inside a pass worth 0.437 ms. Ranked by ceiling, they are worth less
+than the A/A noise floor of 3.65 ms on this lane.
+
+#### The fixpoint short-circuit does not boot, and is not worth repairing here
+
+Measured as instructed. `FLUID_OCTREE_GRADING_FIXPOINT=1` failed in **all three
+rounds**, verdict **NO DATA**, every round exiting on
+
+    Initial sparse authority cold-topology published no liquid-row frontier
+
+So the polarity inversion recorded in `2d501ea` (zero means keep grading, so a
+zero-filled arena runs the full closure) was **necessary but not sufficient** —
+something else in the flag, most likely the 16-to-24-word owner arena control
+block that the flag also enables, breaks the analytic cold bootstrap. It stays
+default-off and unrepaired: the ceiling above says repairing it buys at most a
+fraction of the 0.437 ms it gates.
+
+**The lesson for this document.** Every ranking in sections 1-3 was taken on
+droplet-256, whose fluid is pinned at ~100 cells. Those numbers rank the
+*container*, not the *solver*. Re-derive any target on a fluid-heavy lane before
+spending on it. The four terms that dominate droplet-256's footprint are
+0.26 MiB each here; the pass that dominates droplet-256's frame is 0.2% here.
+
 ### E2a — publish the A2 apply's stencil columns — **LANDED, 2026-08-03: −1.4%**
 
 **The mechanism, first.** The SPGrid V-cycle smoother has a memoized neighbour
