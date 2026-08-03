@@ -112,6 +112,23 @@ export interface OctreePersistentMGPCGShaderOptions {
    */
   readonly stencilColumnCache?: boolean;
   /**
+   * Restrict `sorted64PrefixSum`'s bitonic network to `next_pow2(n)`.
+   * Bit-identical inside the sentinel precondition; see the argument above
+   * `sortedPrefixNetwork`.
+   */
+  readonly restrictedPrefixNetwork?: boolean;
+  /**
+   * Timing instrument, not a solver option. Re-runs `applyBandRows` and/or
+   * `applyAllRows` an extra `p.worksets.z` times per call. Both are pure
+   * gathers whose every item writes only its own row of an output channel that
+   * is never their input, so a repeat recomputes the identical value and the
+   * solve is value-neutral by idempotence: the iteration count, the
+   * convergence and every published word are unchanged, and only the wall
+   * moves. The repeat bound is read from the uniform block rather than
+   * emitted as a literal so the Metal backend cannot fold the repeats away.
+   */
+  readonly phaseRepeatProbe?: "band" | "all-rows";
+  /**
    * Route class-0 rows of the Section 4.3 band sweep through the same cheap
    * regular apply `applyAllRows` already uses for them.
    *
@@ -276,6 +293,82 @@ export function octreePersistentMGPCGWGSL(
   const regularAdjoint = options.regularAdjointOracle
     ? " + finerAdjoint(row,q,l,x,inCh)" : "";
   const regularChannelCount = options.regularAllChannelsOracle ? 18 : 6;
+
+  // --- restrict the restriction sum's sorting network (E2c) ----------------
+  //
+  // `sorted64PrefixSum` runs the FULL 64-wide bitonic network unconditionally:
+  // six `width` steps by up to six `stride` steps by a 64-iteration inner loop
+  // is 21 stages x 64 compare-exchanges = 1,344 iterations, each two dynamic
+  // loads and up to two dynamic stores against `array<f32,64>` -- 256 bytes per
+  // thread, which Metal backs with thread-local scratch because the index is
+  // not a constant. It does that to sort the handful of real terms one coarse
+  // slot receives in `restrictLevel`, once per coarse slot per level per
+  // V-cycle. `termCount` is bounded by the caller at 64 but is a trilinear
+  // restriction fan-in, so in practice a few to a couple of dozen.
+  //
+  // Restricting the network to `m = next_pow2(n)` -- padding `[n, m)` with the
+  // same sentinel -- is BIT-IDENTICAL under the precondition HEAD's own
+  // contract already assumes (every term a non-NaN f32 strictly below the
+  // sentinel). A bitonic network is a sorting network, so both widths leave the
+  // n real values ascending in `[0, n)` followed by sentinels; the final
+  // `for i in 0..n` accumulation then walks the identical sequence of f32
+  // additions. Equal f32 are bitwise identical except for signed zero, and no
+  // permutation of signed zeros can change a sum that starts at `+0.0`.
+  //
+  // Verified offline, not asserted: 23,400 cases across nine generators
+  // (uniform, wide-exponent, heavy ties, signed zeros, all-equal, ascending,
+  // descending, near-sentinel) at every n in [0, 64], compared on the returned
+  // f32 BITS. Zero mismatches.
+  //
+  // OUTSIDE the precondition it is strictly MORE fail-closed, and finding that
+  // out is worth more than the cycles. With a NaN term, HEAD's 64-wide network
+  // sorts the NaN past position n and pulls a padding sentinel INTO the summed
+  // prefix, returning a finite 3.4028e38 -- which `restrictLevel`'s
+  // `!finite(sum)` guard accepts, storing it into S_RHS at the coarse level.
+  // The restricted network returns a non-finite sum, so the guard reports
+  // OVERFLOW stage 87 and skips the slot. Same input, one launders it and one
+  // fails closed.
+  const restrictedPrefixNetwork = options.restrictedPrefixNetwork === true;
+  const sortedPrefixNetwork = restrictedPrefixNetwork
+    ? `
+ // Six doublings cover n<=64, which the caller's termCount guard enforces.
+ var m=1u;for(var step=0u;step<6u;step+=1u){if(m>=n){break;}m=m*2u;}
+ for(var i=n;i<m;i+=1u){sorted[i]=3.402823e38;}
+ for(var width=2u;width<=m;width*=2u){for(var stride=width/2u;stride>0u;stride/=2u){
+  for(var i=0u;i<m;i+=1u){let other=i^stride;if(other<=i){continue;}
+   let ascending=(i&width)==0u;let a=sorted[i];let b=sorted[other];
+   if((a>b)==ascending){sorted[i]=b;sorted[other]=a;}}}}`
+    : `for(var i=n;i<64u;i+=1u){sorted[i]=3.402823e38;}
+ for(var width=2u;width<=64u;width*=2u){for(var stride=width/2u;stride>0u;stride/=2u){
+  for(var i=0u;i<64u;i+=1u){let other=i^stride;if(other<=i){continue;}
+   let ascending=(i&width)==0u;let a=sorted[i];let b=sorted[other];
+   if((a>b)==ascending){sorted[i]=b;sorted[other]=a;}}}}`;
+
+  // --- idempotent phase repeat probe (instrument, default absent) ----------
+  //
+  // The persistent solve is ONE dispatch, so pass-label isolation cannot split
+  // it and there has never been a way to attribute time inside it. This is that
+  // instrument. `applyBandRows` and `applyAllRows` are pure gathers: each item
+  // resolves one row and writes only `vstore(outCh,row,...)`, the band list and
+  // the five class worksets hold distinct rows, and `outCh` is never `inCh`.
+  // Running either of them again with the same `inCh` therefore recomputes the
+  // identical value into the identical slot. The solve is value-neutral, so the
+  // iteration count and convergence do not move and the extra wall is the
+  // phase's own marginal cost -- an A/B whose delta divided by the repeat count
+  // IS the measurement.
+  const phaseRepeatProbe = options.phaseRepeatProbe;
+  if (phaseRepeatProbe !== undefined
+    && phaseRepeatProbe !== "band" && phaseRepeatProbe !== "all-rows") {
+    throw new RangeError("Persistent MGPCG phase repeat probe is invalid");
+  }
+  // `p.worksets.z` is a reserved uniform word the host writes with the extra
+  // repeat count. Reading it (rather than emitting a literal) keeps the repeats
+  // opaque to the shader compiler, which could otherwise prove the body
+  // idempotent and delete them -- which would silently measure nothing.
+  const repeatOpen = (phase: "band" | "all-rows") => phaseRepeatProbe === phase
+    ? " for(var probeRepeat=0u;probeRepeat<=p.worksets.z;probeRepeat+=1u){" : "";
+  const repeatClose = (phase: "band" | "all-rows") =>
+    phaseRepeatProbe === phase ? "}" : "";
 
   // --- solve-invariant stencil column cache (E2, addressing only) ----------
   //
@@ -499,6 +592,10 @@ fn buildRegularStencilColumns(row:u32){
    arena[H_BAND_CENSUS+1u]=censusBand;
    arena[H_BAND_CENSUS+2u]=censusRegular;
    arena[H_BAND_CENSUS+3u]=censusCoarse;}`;
+  const bandRepeatOpen = repeatOpen("band");
+  const bandRepeatClose = repeatClose("band");
+  const allRowsRepeatOpen = repeatOpen("all-rows");
+  const allRowsRepeatClose = repeatClose("all-rows");
   const diagnosticOutputChannel = options.diagnosticOutputChannel
     ?? OCTREE_PERSISTENT_MGPCG_CHANNEL.pressure;
   const captureInitialResidual = options.diagnosticStageCapture
@@ -842,11 +939,7 @@ fn canonical18Sum(v:array<f32,18>)->f32{
 fn canonical8Sum(v:array<f32,8>)->f32{
  return sorted4Sum(array<f32,4>(v[0]+v[7],v[1]+v[6],v[2]+v[5],v[3]+v[4]));}
 fn sorted64PrefixSum(values:array<f32,64>,n:u32)->f32{
- var sorted=values;for(var i=n;i<64u;i+=1u){sorted[i]=3.402823e38;}
- for(var width=2u;width<=64u;width*=2u){for(var stride=width/2u;stride>0u;stride/=2u){
-  for(var i=0u;i<64u;i+=1u){let other=i^stride;if(other<=i){continue;}
-   let ascending=(i&width)==0u;let a=sorted[i];let b=sorted[other];
-   if((a>b)==ascending){sorted[i]=b;sorted[other]=a;}}}}
+ var sorted=values;${sortedPrefixNetwork}
  var sum=0.0;for(var i=0u;i<n;i+=1u){sum+=sorted[i];}return sum;}
 
 // --- three pageSlot variants, one per producer, so failureStage stays exact ---
@@ -1011,12 +1104,12 @@ ${stencilColumnBuilders}// TRANSCRIPTION NOTE: the hierarchical exact apply disp
 // directly is set-identical and order-independent. P0 verifies the partition
 // against the staged class headers and fails closed if it does not hold.
 fn applyAllRows(lane:u32,liveRows:u32,inCh:u32,outCh:u32){
- ${allRowsApply}}
+${allRowsRepeatOpen} ${allRowsApply}${allRowsRepeatClose}}
 
 ${bandRowsNote}fn applyBandRows(lane:u32,bandCount:u32,inCh:u32,outCh:u32){
- for(var item=lane;item<bandCount;item+=LANES){
+${bandRepeatOpen} for(var item=lane;item<bandCount;item+=LANES){
   let row=uload(CH_BANDLIST,item);
-  if(!stopped()&&row!=INVALID&&row<rows()){${bandRowApply}}}}
+  if(!stopped()&&row!=INVALID&&row<rows()){${bandRowApply}}}${bandRepeatClose}}
 
 // ---------------------------------------------------------------------------
 // Section 4.3 boundary-band classification (encodeSetup's six stages)

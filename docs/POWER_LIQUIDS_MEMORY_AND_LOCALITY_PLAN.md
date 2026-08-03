@@ -597,7 +597,130 @@ Recorded by mechanism, because it re-ranks everything below:
   on its own, and the smoother's `applied()` was *already* memoized. The
   remaining candidates are not the ones §2.2 names.
 
-#### E2b/E2c/E2d — the three successors, specified
+### E2c — the restriction sum's sorting network — **−3.8%, gate owed**
+
+**The purest unoptimized-shader-code hit in the tree.** `sorted64PrefixSum` runs
+the FULL 64-wide bitonic network unconditionally — 21 stages × 64
+compare-exchanges = **1,344 iterations**, each two dynamic loads and up to two
+dynamic stores against an `array<f32,64>` that Metal backs with thread-local
+scratch because the index is not a constant — to sort the handful of terms one
+coarse slot actually receives in `restrictLevel`. Restricting it to
+`m = next_pow2(n)` is **28× less work at n ≤ 8**.
+
+| arm | ms/advance | Δ vs control | own spread | verdict |
+|---|---:|---:|---:|---|
+| control (6 runs) | 72.97 | — | 0.13 | — |
+| `FLUID_OCTREE_MGPCG_RESTRICTED_PREFIX_SORT=1` | **70.17** | **−2.80 (−3.8%)** | 0.13 | **FASTER** |
+
+`--lane=droplet-256 --steps=60 --repeats=3`, interleaved. **A/A floor 0.15 ms**
+(control 72.95 vs control-aa 72.97) — the delta is **18.7× the floor**, the
+cleanest margin this axis has produced. Twice the stencil-column win, from a
+loop bound.
+
+*The control moved 82.16 → 72.97 between the two experiments because the grading
+agent landed `aa78e90` in the interim. Both A/Bs are interleaved within a single
+source state, so both deltas stand; only the absolute baselines differ.*
+
+**Bit-identity, proven offline rather than argued.** A differential harness
+transcribed both WGSL bodies and compared the returned f32 **bits** over 23,400
+cases: nine generators (uniform, wide-exponent, heavy ties, signed zeros,
+all-equal, ascending, descending, near-sentinel) at every n in [0, 64]. **Zero
+mismatches.** The argument the harness confirms: a bitonic network is a sorting
+network, so both widths leave the n real values ascending in `[0, n)`; equal f32
+differ in bits only as signed zero, and no permutation of signed zeros can
+change a sum that starts at `+0.0`.
+
+**And it removes a latent HEAD bug.** Outside the precondition — a NaN term —
+HEAD's 64-wide network sorts the NaN past position n and pulls a padding
+sentinel INTO the summed prefix, returning a **finite** `3.4028e38` that
+`restrictLevel`'s `!finite(sum)` guard **accepts** and stores into S_RHS at the
+coarse level. The restricted network returns non-finite, so the guard reports
+OVERFLOW stage 87 and skips the slot. Same input; one launders it, one fails
+closed. Found by the harness, not by reading.
+
+**Status: default OFF, D4 gate owed.** The tree's protocol is that the A/B and
+the symmetry gate flip a default, not review. The A/B is done and conclusive;
+the gate could not be run because `lib/webgpu-octree.ts` is mid-edit in another
+agent's worktree and its "GPU-resident octree projection" shader module does not
+currently compile — the control run of `symmetric-expansion`, **without this
+flag**, fails identically. This is the §5 failure mode again, in a different
+file. Flipping the default is one line once the lane is runnable.
+
+### The measurement that re-ranks everything: 100 unknowns
+
+Two instruments landed with E2c, and between them they void most of §2 and §3.
+
+**The band census, finally readable.** `readPersistentBandCensus()` had **no
+caller anywhere** in `lib/` or `tools/`, so `FLUID_OCTREE_MGPCG_REGULAR_BAND_ROWS=census`
+published four GPU words that nothing read — the same trap as the harness
+swallowing child stdout, sprung and unnoticed. Wired through the smoke executor
+(loudly: it throws if the mode was requested and no census came back) and
+forwarded by `benchmark-power-dam.ts`. `power-hybrid-census` was silently
+discarded by the same reader and is now forwarded too.
+
+On `droplet-256`:
+
+| | |
+|---|---:|
+| `liveRows` | **100** |
+| `bandRows` | **100** — the band is every row |
+| class-0 band rows | 18 (18.0%) |
+| class-0 band rows at level > 0 | **0** |
+| regular / power / identity rows | 18 / 82 / 0 |
+
+**The whole pressure system is 100 unknowns.** `LANES` is 256. So every
+row-strided loop — `for(var r=lane;r<liveRows;r+=LANES)` — runs **exactly one
+iteration on 100 of 256 lanes**, and 156 lanes idle in every phase. The
+persistent solve is not throughput-bound in any phase; it is a critical path.
+
+**The idempotent phase-repeat probe.** The solve is one dispatch, so pass-label
+isolation cannot split it and every ranking of its internals has been a model.
+`FLUID_PERSISTENT_MGPCG_PHASE_REPEAT=band:3` re-runs a phase N extra times;
+`applyBandRows` and `applyAllRows` are pure gathers whose items write only their
+own row of an output channel that is never their input, so a repeat recomputes
+the identical value — **value-neutral by idempotence**, iteration count and
+convergence unmoved, only the wall changes. The bound is read from a uniform
+word, never emitted as a literal, so the Metal backend cannot fold the repeats
+away and silently measure nothing.
+
+| probe | Δ for 3 extra passes | implied total cost |
+|---|---:|---:|
+| `applyBandRows` | +1.70 ms | **0.57 ms/advance** |
+| `applyAllRows` | +0.70 ms | **0.23 ms/advance** |
+
+**The entire Section 6.3 A2 apply surface costs 0.80 ms/advance** — about 6% of
+the persistent solve. Consequences, all of them negative results by measurement:
+
+- **E2b (`finerAdjoint` caching) is CANCELLED.** Its whole home is 0.80 ms, so
+  the maximum available win is under 0.8 ms — for 4.7 MB and real complexity.
+  The `coarseRegularBandRows = 0` reading kills it independently: every class-0
+  band row is at level 0, where `finerAdjoint` returns `0.0` with zero loads.
+- **E2d (dual-group reductions) is CANCELLED.** With 100 rows,
+  `wPartials = ceil(100/128) = 1`. `reduceMerged` folds **one** virtual group,
+  not the ~11 the specification assumed, so the barrier count is ~210 and not
+  ~2,300 and folding two groups at once saves nothing.
+- **`FLUID_OCTREE_MGPCG_REGULAR_BAND_ROWS=route` is not worth gating.** It can
+  reach 18% of 100 band rows, none of them coarse — exactly the "a lane whose
+  rows are all at level 0 should expect much less" caveat its own author wrote.
+- **E2a's mechanism was right and its share estimate was wrong.** Before E2a the
+  apply surface was ~2.0 ms; it is now 0.80. That is the 10-loads-to-3
+  prediction landing almost exactly — on a phase that was never 60% of the
+  slice.
+
+**Where the remaining ~11 ms is: the V-cycle.** By elimination, and confirmed
+constructively — E2c took 2.80 ms out of `restrictLevel` alone. `smoothLevel`,
+`restrictLevel` and `prolongLevel` are the only large phases left unmeasured.
+
+**The probe extends to them, and that is the next move.** `sparseSmoothPhase`
+reads `source` and writes `destination` with `smoothLevel` alternating
+`S_A→S_B`, `S_B→S_A` — the same read/write disjointness that makes the band
+probe value-neutral, so a repeated phase recomputes the identical values. One
+more probe arm buys the V-cycle's internal split before anyone writes code for
+it. Do that before designing anything: this axis has now produced two models
+that were wrong by 3.4× and by an order of magnitude, and one probe that settled
+each question in a single run.
+
+#### E2b/E2d — the cancelled successors, kept for the record
 
 Ranked by remaining surface, each with its equality argument done, so the next
 session can implement rather than re-derive. All three are inside the persistent
@@ -621,25 +744,7 @@ indirected: one `adjointIndex[row]` word plus a dense payload per ghost-owning
 row, with a capacity guard that falls back to the chase (never fails the solve)
 on overflow. Build it in the same P1b pass.
 
-**E2c — stop running a 64-element bitonic sort to sort a handful of terms.**
-`sorted64PrefixSum` (`webgpu-octree-persistent-mgpcg.wgsl.ts`) runs the full
-network unconditionally: `width` over 6 values, `stride` over up to 6, and an
-inner `i < 64` — **21 stages × 64 compare-exchanges = 1,344 iterations**, each
-two dynamic loads and up to two dynamic stores against `array<f32,64>`, which
-Metal backs with thread-local scratch because the index is not a constant. It is
-called once per coarse slot per `restrictLevel` per level per V-cycle, and
-`termCount` is typically 8–27.
-
-*Bit-identical, and here is why.* Padding is `3.402823e38`, and HEAD already
-relies on every real term being below it (a term above it would put padding
-inside `sorted[0..n)` and corrupt the sum at HEAD too). Under that standing
-assumption, restricting the network to `m = next_pow2(n)` elements — padding
-positions `n..m` with the same sentinel — leaves `sorted[0..n)` holding the same
-n real values in the same ascending order, and the final `for i in 0..n` sum
-walks the identical sequence of f32 additions. For `n <= 8` that is 6 stages ×
-8 = 48 iterations against 1,344: **28× less**. The loop bound becomes
-lane-dependent, so a SIMD group pays its maximum `m`; there are no barriers
-inside, so divergence is the only cost.
+**E2c — landed and measured above; this specification is superseded.**
 
 **E2d — the reductions run 128 lanes wide and barrier per 128 rows.**
 `reduceMerged`/`reduceCurvature` walk **one** 128-row virtual group at a time;

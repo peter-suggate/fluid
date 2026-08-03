@@ -3382,6 +3382,10 @@ async function runGPU(
         fullPageSlotChains: number; hybridPageSlotChains: number;
         epoch: number; machineryReduction: number;
       } | null>;
+      readPersistentBandCensus(): Promise<{
+        bandRows: number; regularBandRows: number;
+        coarseRegularBandRows: number; regularShare: number;
+      } | null>;
       readPowerHybridClassSymmetry(): Promise<Record<string, unknown> | undefined>;
       readCoarseSurfaceTrackerReceipt(): Promise<Record<string, unknown> | undefined>;
     };
@@ -3421,6 +3425,27 @@ async function runGPU(
     || process.env.FLUID_POWER_HYBRID_MIN_REDUCTION !== undefined
     ? await diagnosticProjection.octreeProjection?.readPowerHybridCensus()
     : undefined;
+  // Asking for the band census and getting silence is the same trap the
+  // touched-directory tripwire above exists to kill, and it had already sprung:
+  // `readPersistentBandCensus` had no caller anywhere in `lib/` or `tools/`, so
+  // `FLUID_OCTREE_MGPCG_REGULAR_BAND_ROWS=census` published four GPU words that
+  // nothing ever read. A mode whose whole purpose is to be measured before the
+  // arithmetic moves must emit or fail.
+  const persistentBandCensusRequested =
+    process.env.FLUID_OCTREE_MGPCG_REGULAR_BAND_ROWS !== undefined
+    && process.env.FLUID_OCTREE_MGPCG_REGULAR_BAND_ROWS !== "0";
+  const persistentBandCensus = persistentBandCensusRequested
+    ? await diagnosticProjection.octreeProjection?.readPersistentBandCensus()
+    : undefined;
+  if (persistentBandCensusRequested) {
+    if (!persistentBandCensus) {
+      throw new Error("FLUID_OCTREE_MGPCG_REGULAR_BAND_ROWS selected a mode but no band census"
+        + " was published: no octree projection, no persistent executor, or the solve failed"
+        + " before P4b. The class-0 band share was NOT measured; do not read this run as evidence.");
+    }
+    console.log(JSON.stringify({ scenario: scenarioId, method: resultMethod,
+      phase: "persistent-band-census", metrics: persistentBandCensus }));
+  }
   const powerHybridClassSymmetry = process.env.FLUID_SYMMETRY_STAGE_AUDIT === "1"
     ? await diagnosticProjection.octreeProjection?.readPowerHybridClassSymmetry()
     : undefined;

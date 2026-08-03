@@ -11,6 +11,8 @@ import {
   decodeOctreePersistentMGPCGBandCensus,
   octreePersistentMGPCGRegularBandRowsMode,
   octreePersistentMGPCGStagedSmootherEnabled,
+  octreePersistentMGPCGPhaseRepeatProbe,
+  octreePersistentMGPCGRestrictedPrefixNetworkEnabled,
   octreePersistentMGPCGStencilColumnsEnabled,
 } from "../lib/webgpu-octree-persistent-mgpcg";
 import {
@@ -496,6 +498,64 @@ test("persistent MGPCG publishes solve-invariant stencil columns above the stage
   assert.equal(declined.includes("stencilColumn"), false);
 });
 
+test("the restriction sum's sorting network narrows to next_pow2 without moving a term", () => {
+  assert.equal(octreePersistentMGPCGRestrictedPrefixNetworkEnabled({}), false);
+  assert.equal(octreePersistentMGPCGRestrictedPrefixNetworkEnabled(
+    { FLUID_OCTREE_MGPCG_RESTRICTED_PREFIX_SORT: "1" }), true);
+
+  const restricted = octreePersistentMGPCGWGSL({
+    maximumIterations: 10, compactLiveRows: true, restrictedPrefixNetwork: true,
+  });
+  // Six doublings cover the caller's own termCount ceiling of 64.
+  assert.match(restricted,
+    /var m=1u;for\(var step=0u;step<6u;step\+=1u\)\{if\(m>=n\)\{break;\}m=m\*2u;\}/);
+  assert.match(restricted, /for\(var i=n;i<m;i\+=1u\)\{sorted\[i\]=3\.402823e38;\}/);
+  assert.match(restricted, /for\(var width=2u;width<=m;width\*=2u\)/);
+  assert.equal(restricted.includes("for(var width=2u;width<=64u;width*=2u)"), false,
+    "the full-width network must not survive alongside the restricted one");
+  // The compare-exchange rule and the accumulation are untouched: this is a
+  // loop bound, not a different sum.
+  assert.match(restricted,
+    /let ascending=\(i&width\)==0u;let a=sorted\[i\];let b=sorted\[other\];/);
+  assert.match(restricted, /var sum=0\.0;for\(var i=0u;i<n;i\+=1u\)\{sum\+=sorted\[i\];\}return sum;/);
+
+  const full = octreePersistentMGPCGWGSL({ maximumIterations: 10, compactLiveRows: true });
+  assert.equal(octreePersistentMGPCGWGSL({
+    maximumIterations: 10, compactLiveRows: true, restrictedPrefixNetwork: false,
+  }), full, "declining the option must emit a byte-identical module");
+  assert.match(full, /for\(var width=2u;width<=64u;width\*=2u\)/);
+});
+
+test("the phase repeat probe is idempotent, opaque to the compiler, and absent by default", () => {
+  assert.equal(octreePersistentMGPCGPhaseRepeatProbe({}), undefined);
+  assert.deepEqual(octreePersistentMGPCGPhaseRepeatProbe(
+    { FLUID_PERSISTENT_MGPCG_PHASE_REPEAT: "band:4" }), { phase: "band", repeats: 4 });
+  assert.deepEqual(octreePersistentMGPCGPhaseRepeatProbe(
+    { FLUID_PERSISTENT_MGPCG_PHASE_REPEAT: "all-rows" }), { phase: "all-rows", repeats: 1 });
+  assert.throws(() => octreePersistentMGPCGPhaseRepeatProbe(
+    { FLUID_PERSISTENT_MGPCG_PHASE_REPEAT: "vcycle:2" }), /Unknown persistent MGPCG phase repeat/);
+  assert.throws(() => octreePersistentMGPCGPhaseRepeatProbe(
+    { FLUID_PERSISTENT_MGPCG_PHASE_REPEAT: "band:0" }), /integer in \[1,64\]/);
+
+  const band = octreePersistentMGPCGWGSL({
+    maximumIterations: 10, compactLiveRows: true, phaseRepeatProbe: "band",
+  });
+  // The bound is a uniform read, never a literal: a folded repeat would measure
+  // nothing while looking like a null result.
+  assert.match(band,
+    /for\(var probeRepeat=0u;probeRepeat<=p\.worksets\.z;probeRepeat\+=1u\)/);
+  assert.equal(band.includes("probeRepeat<=1u"), false);
+
+  const authored = octreePersistentMGPCGWGSL({ maximumIterations: 10, compactLiveRows: true });
+  assert.equal(authored.includes("probeRepeat"), false,
+    "the absent probe must leave the production kernel free of it");
+  const allRows = octreePersistentMGPCGWGSL({
+    maximumIterations: 10, compactLiveRows: true, phaseRepeatProbe: "all-rows",
+  });
+  assert.equal(allRows.includes("probeRepeat"), true);
+  assert.notEqual(allRows, band, "the two probes select different phases");
+});
+
 test("every band-row and staged-smoother combination is accepted by naga", () => {
   const probe = spawnSync(process.env.NAGA ?? "naga", ["--version"], { encoding: "utf8" });
   if (probe.error) {
@@ -509,17 +569,23 @@ test("every band-row and staged-smoother combination is accepted by naga", () =>
   try {
     for (const stagedSmoother of [false, true]) {
       for (const stencilColumnCache of [false, true]) {
+        for (const restrictedPrefixNetwork of [false, true]) {
+        for (const phaseRepeatProbe of [undefined, "band", "all-rows"] as const) {
         for (const regularBandRows of [undefined, "census", "route"] as const) {
           const name = `mgpcg-${regularBandRows ?? "off"}-${
             stagedSmoother ? "staged" : "direct"}-${
-            stencilColumnCache ? "columns" : "chased"}`;
+            stencilColumnCache ? "columns" : "chased"}-${
+            restrictedPrefixNetwork ? "narrow" : "wide"}-${phaseRepeatProbe ?? "noprobe"}`;
           const path = join(directory, `${name}.wgsl`);
           writeFileSync(path, octreePersistentMGPCGWGSL({
-            maximumIterations: 10, stagedSmoother, stencilColumnCache,
+            maximumIterations: 10, stagedSmoother, stencilColumnCache, restrictedPrefixNetwork,
+            ...(phaseRepeatProbe === undefined ? {} : { phaseRepeatProbe }),
             ...(regularBandRows === undefined ? {} : { regularBandRows }),
           }));
           const result = spawnSync(process.env.NAGA ?? "naga", [path], { encoding: "utf8" });
           assert.equal(result.status, 0, `${name}:\n${result.stderr || result.stdout}`);
+        }
+        }
         }
       }
     }

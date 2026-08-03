@@ -281,6 +281,82 @@ export function octreePersistentMGPCGStencilColumnsEnabled(
   return resolved?.FLUID_OCTREE_MGPCG_STENCIL_COLUMNS !== "0";
 }
 
+/**
+ * Restrict `sorted64PrefixSum`'s bitonic network to `next_pow2(n)`.
+ * Default OFF until the interleaved A/B and the D4 window have witnessed it.
+ *
+ * WHAT IT CHANGES. Work, and nothing else. `restrictLevel` sums a coarse slot's
+ * restriction terms through a sorting network that always runs at full 64-lane
+ * width: 21 stages x 64 compare-exchanges = 1,344 iterations against an
+ * `array<f32,64>` whose dynamic index forces Metal to back it with thread-local
+ * scratch, to sort the handful of terms a trilinear restriction fan-in actually
+ * produces. Restricting the network to `next_pow2(n)` is 28x less work at
+ * n <= 8 and 2.8x at n <= 32.
+ *
+ * BIT-IDENTICAL inside the precondition HEAD's own contract already assumes --
+ * every term a non-NaN f32 strictly below the `3.402823e38` padding sentinel.
+ * A bitonic network is a sorting network, so both widths leave the n real
+ * values ascending in `[0, n)` and the accumulation walks the identical
+ * sequence of f32 additions; equal f32 differ in bits only as signed zero, and
+ * no permutation of signed zeros can change a sum that starts at `+0.0`.
+ * Verified offline over 23,400 cases across nine generators (uniform,
+ * wide-exponent, heavy ties, signed zeros, all-equal, ascending, descending,
+ * near-sentinel) at every n in [0, 64], compared on the returned f32 BITS:
+ * zero mismatches.
+ *
+ * OUTSIDE the precondition it is strictly more fail-closed, and that is a
+ * latent HEAD bug worth naming. Given a NaN term, HEAD's 64-wide network sorts
+ * the NaN past position n and pulls a padding sentinel INTO the summed prefix,
+ * returning a finite `3.4028e38` that `restrictLevel`'s `!finite(sum)` guard
+ * ACCEPTS and stores into S_RHS at the coarse level. The restricted network
+ * returns a non-finite sum, so the guard reports OVERFLOW stage 87 and skips
+ * the slot. Same input; one launders it, one fails closed.
+ */
+export function octreePersistentMGPCGRestrictedPrefixNetworkEnabled(
+  environment?: Readonly<Record<string, string | undefined>>,
+): boolean {
+  const resolved = environment
+    ?? (typeof process !== "undefined" ? process.env : undefined);
+  return resolved?.FLUID_OCTREE_MGPCG_RESTRICTED_PREFIX_SORT === "1";
+}
+
+/** Phase selected by {@link octreePersistentMGPCGPhaseRepeatProbe}. */
+export type OctreePersistentMGPCGPhaseRepeatProbe = "band" | "all-rows";
+
+/**
+ * Timing instrument for the one-dispatch solve. Absent by default.
+ *
+ * The persistent kernel is a single dispatch, so `FLUID_GPU_ISOLATE_PASS_LABELS`
+ * cannot split it and there has never been a way to attribute time to a phase
+ * INSIDE it. Every ranking of this kernel's internals has therefore been a
+ * model, and the stencil-column result showed a model can be 3.4x out.
+ *
+ * `FLUID_PERSISTENT_MGPCG_PHASE_REPEAT=band:4` re-runs `applyBandRows` four
+ * extra times per call. Both probeable phases are pure gathers whose every item
+ * writes only its own row of an output channel that is never its input, and
+ * whose worklists hold distinct rows, so a repeat recomputes the identical
+ * value into the identical slot. The solve is value-neutral by idempotence:
+ * iteration count, convergence and every published word are unchanged, and the
+ * A/B delta divided by the repeat count is that phase's marginal cost.
+ */
+export function octreePersistentMGPCGPhaseRepeatProbe(
+  environment?: Readonly<Record<string, string | undefined>>,
+): Readonly<{ phase: OctreePersistentMGPCGPhaseRepeatProbe; repeats: number }> | undefined {
+  const resolved = environment
+    ?? (typeof process !== "undefined" ? process.env : undefined);
+  const value = resolved?.FLUID_PERSISTENT_MGPCG_PHASE_REPEAT;
+  if (!value) return undefined;
+  const [phase, count] = value.split(":");
+  if (phase !== "band" && phase !== "all-rows") {
+    throw new RangeError(`Unknown persistent MGPCG phase repeat probe ${value}`);
+  }
+  const repeats = count === undefined ? 1 : Number(count);
+  if (!Number.isSafeInteger(repeats) || repeats < 1 || repeats > 64) {
+    throw new RangeError("Persistent MGPCG phase repeat count must be an integer in [1,64]");
+  }
+  return Object.freeze({ phase, repeats });
+}
+
 /** Selected mode for {@link octreePersistentMGPCGRegularBandRowsMode}. */
 export type OctreePersistentMGPCGRegularBandRowsMode = "off" | "census" | "route";
 
@@ -527,6 +603,8 @@ export class WebGPUOctreePersistentMGPCG implements OctreePersistentMGPCGExecuto
   private readonly compactLiveRows: boolean;
   private readonly stagedSmoother: boolean;
   private readonly stencilColumns: boolean;
+  private readonly restrictedPrefixNetwork: boolean;
+  private readonly phaseRepeatProbe: ReturnType<typeof octreePersistentMGPCGPhaseRepeatProbe>;
   private readonly regularBandRows: OctreePersistentMGPCGRegularBandRowsMode;
   private destroyed = false;
 
@@ -620,6 +698,8 @@ export class WebGPUOctreePersistentMGPCG implements OctreePersistentMGPCGExecuto
     // workgroup footprint against the device limit.
     this.stagedSmoother = octreePersistentMGPCGStagedSmootherEnabled();
     this.stencilColumns = octreePersistentMGPCGStencilColumnsEnabled();
+    this.restrictedPrefixNetwork = octreePersistentMGPCGRestrictedPrefixNetworkEnabled();
+    this.phaseRepeatProbe = octreePersistentMGPCGPhaseRepeatProbe();
     this.regularBandRows = octreePersistentMGPCGRegularBandRowsMode();
     this.workgroupStorageBytes = octreePersistentMGPCGWorkgroupBytes(this.stagedSmoother);
     const rowCapacity = positiveInteger(source.rowCapacity, "Persistent MGPCG row capacity");
@@ -734,7 +814,8 @@ export class WebGPUOctreePersistentMGPCG implements OctreePersistentMGPCGExecuto
       this.plan.transferStride, this.plan.brickCount, this.plan.pageDirectoryBytes / 4,
       stagedInputBaseWords,
       0, 0, 0, 0,
-      source.worksetStrideWords, source.worksetBankStrideWords, 0, 0,
+      source.worksetStrideWords, source.worksetBankStrideWords,
+      this.phaseRepeatProbe?.repeats ?? 0, 0,
     ]);
     floats[16] = options.relativeTolerance;
     floats[17] = absoluteTolerance;
@@ -817,6 +898,9 @@ export class WebGPUOctreePersistentMGPCG implements OctreePersistentMGPCGExecuto
       linearApplyOracle,
       stagedSmoother: this.stagedSmoother,
       stencilColumnCache: this.stencilColumns,
+      restrictedPrefixNetwork: this.restrictedPrefixNetwork,
+      ...(this.phaseRepeatProbe === undefined
+        ? {} : { phaseRepeatProbe: this.phaseRepeatProbe.phase }),
       ...(this.regularBandRows === "off" ? {} : { regularBandRows: this.regularBandRows }),
       diagnosticStageCapture,
       ...(diagnosticOutputChannel === undefined ? {} : { diagnosticOutputChannel }),
@@ -846,6 +930,8 @@ export class WebGPUOctreePersistentMGPCG implements OctreePersistentMGPCGExecuto
         + `/${linearApplyOracle ? "linear-apply" : "class-apply"}`
         + `/${this.stagedSmoother ? "staged-smoother" : "direct-smoother"}`
         + `/${this.stencilColumns ? "stencil-columns" : "chased-columns"}`
+        + `/${this.restrictedPrefixNetwork ? "restricted-prefix" : "full-prefix"}`
+        + `/phase-repeat-${this.phaseRepeatProbe?.phase ?? "none"}`
         + `/band-rows-${this.regularBandRows}`
         + `/diagnostic-output-${diagnosticOutputChannel ?? "pressure"}`,
     );
@@ -854,6 +940,9 @@ export class WebGPUOctreePersistentMGPCG implements OctreePersistentMGPCGExecuto
       compactLiveRows ? "compact live rows" : "capacity-strided oracle"}${
       this.stagedSmoother ? " · staged smoother" : ""}${
       this.stencilColumns ? " · published stencil columns" : ""}${
+      this.restrictedPrefixNetwork ? " · restricted prefix network" : ""}${
+      this.phaseRepeatProbe === undefined
+        ? "" : ` · ${this.phaseRepeatProbe.phase} repeat probe`}${
       this.regularBandRows === "off" ? "" : ` · ${this.regularBandRows} band rows`}`;
     this.allocatedBytes = this.arena.size + this.params.size;
   }

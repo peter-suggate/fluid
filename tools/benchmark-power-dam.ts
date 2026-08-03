@@ -198,6 +198,11 @@ const runBenchmark = async (overrides: Record<string, string> = {}): Promise<Pow
    * inside a pipe is not evidence. */
   const CORRECTNESS_PHASES = new Set([
     "spgrid-touched-directory-tripwire", "tripwires",
+    // Both censuses only exist when their own environment variable asked for
+    // them, and both were unreadable from this harness until they were listed
+    // here: the child prints them and this reader discarded them. Same trap the
+    // memory census hit, same fix.
+    "power-hybrid-census",
   ]);
   const lines = createInterface({ input: child.stdout! });
   lines.on("line", (line) => {
@@ -206,6 +211,10 @@ const runBenchmark = async (overrides: Record<string, string> = {}): Promise<Pow
       const record = JSON.parse(line) as {
         record?: string; phase?: string; when?: string;
         residentMemory?: GPUResidentMemoryReport;
+        metrics?: {
+          bandRows: number; regularBandRows: number;
+          coarseRegularBandRows: number; regularShare: number;
+        };
       };
       if (record.phase !== undefined && CORRECTNESS_PHASES.has(record.phase)) {
         console.log(line);
@@ -219,6 +228,19 @@ const runBenchmark = async (overrides: Record<string, string> = {}): Promise<Pow
         console.log(line);
         console.log(`--- GPU resident memory (${record.when}) ---`);
         console.log(formatResidentMemoryReport(record.residentMemory));
+        return;
+      }
+      // Same doctrine as the memory census: the band census only exists when
+      // `FLUID_OCTREE_MGPCG_REGULAR_BAND_ROWS` explicitly asked for it, and a
+      // census that only exists inside a pipe is not evidence. It is the
+      // cheapest discriminator available for the persistent MGPCG slice, so it
+      // is forwarded unconditionally with the share the child cannot compute.
+      if (record.phase === "persistent-band-census" && record.metrics) {
+        console.log(line);
+        const census = record.metrics;
+        console.log(`--- Section 4.3 band census --- rows ${census.bandRows}`
+          + `, class-0 ${census.regularBandRows} (${(census.regularShare * 100).toFixed(1)}%)`
+          + `, of which coarse ${census.coarseRegularBandRows}`);
         return;
       }
       if (forwardNDJSON
