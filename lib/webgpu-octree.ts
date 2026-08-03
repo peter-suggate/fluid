@@ -1312,6 +1312,32 @@ export function octreeBalancePredicatesWouldSplit(
   return ratioViolation || mixedPaperRing || faceNeighborTooFine;
 }
 
+/**
+ * The largest leaf the domain can actually hold.
+ *
+ * A leaf is dyadic and size-aligned, so `origin + size <= dims` must hold on
+ * every axis; `resetTopologyAt` enforces exactly that by halving until it does.
+ * A domain whose shortest axis is 16 therefore contains no size-32 leaf ANYWHERE
+ * and can never grow one, because refinement only ever makes leaves finer.
+ *
+ * The authored maximum still sizes the plans, the tile lattice and the shader
+ * params; this only bounds the refinement and grading LADDER, whose every rung
+ * above this size is a dispatch that provably matches no leaf. On the
+ * symmetric-expansion lane (32 x 16 x 32, authored leaf 32) that is one coarse
+ * refinement dispatch plus one coarse balance dispatch in every one of the
+ * balance rounds, and two whole rounds of the fixed-point budget -- fixed costs
+ * that do not shrink with the domain and are invisible on a cubic lane.
+ */
+export function octreeEffectiveLeafSize(
+  maximumLeafSize: 2 | 4 | 8 | 16 | 32,
+  dims: { nx: number; ny: number; nz: number },
+): 2 | 4 | 8 | 16 | 32 {
+  const shortest = Math.min(dims.nx, dims.ny, dims.nz);
+  let size: number = maximumLeafSize;
+  while (size > 2 && size > shortest) size >>= 1;
+  return size as 2 | 4 | 8 | 16 | 32;
+}
+
 export function octreeBalanceRounds(maximumLeafSize: 2 | 4 | 8 | 16 | 32): number {
   if (maximumLeafSize <= 2) return 0;
   // Ordinary 2:1 balance needs at most one propagation per tree level. The
@@ -1639,6 +1665,7 @@ export class WebGPUOctreeProjection {
   /** Immutable cold-bootstrap and optional diagnostic dispatch records. */
   private readonly coldDispatch: GPUBuffer;
   private readonly coldDispatchOffsetBySize = new Map<number, number>();
+  private readonly effectiveLeafSize: 2 | 4 | 8 | 16 | 32;
   private readonly refinementSizes: readonly number[];
   private readonly coarseRefinementSizes: readonly number[];
   private readonly balanceRounds: number;
@@ -1694,15 +1721,18 @@ export class WebGPUOctreeProjection {
       closedTop: scene.container.top === "closed",
       requestedRelativeTolerance: scene.numerics.pressureRelativeTolerance,
     });
+    this.effectiveLeafSize = octreeEffectiveLeafSize(this.maxLeafSize, dims);
     this.refinementSizes = Object.freeze((() => {
       const sizes: number[] = [];
-      for (let size = this.maxLeafSize; size >= 2; size >>= 1) sizes.push(size);
+      for (let size = this.effectiveLeafSize; size >= 2; size >>= 1) sizes.push(size);
       return sizes;
     })());
     this.coarseRefinementSizes = Object.freeze(
       this.refinementSizes.filter((size) => size >= 16),
     );
-    this.balanceRounds = octreeBalanceRounds(this.maxLeafSize);
+    // One propagation per tree LEVEL, and the tree has no level above the
+    // largest leaf the domain can hold.
+    this.balanceRounds = octreeBalanceRounds(this.effectiveLeafSize);
     this.adaptivity = Math.max(0, Math.min(1, options.adaptivity ?? 1));
     this.interfaceRefinementBandCells = Math.max(0, Math.min(32, Math.round(options.interfaceRefinementBandCells ?? 4)));
     this.surfaceRefinementGradingLayers = Math.max(1, Math.min(4,
@@ -2508,6 +2538,7 @@ export class WebGPUOctreeProjection {
       reachability: stableEntries(reachability),
       shaderCapabilities: this.shaderCapabilities().cacheKey,
       maximumLeafSize: this.maxLeafSize,
+      effectiveLeafSize: this.effectiveLeafSize,
       requiredEntryPoints: WebGPUOctreeProjection.pipelineEntryPoints
         .filter((entryPoint) => octreeProjectionPipelineRequired(entryPoint, reachability)),
       ...(this.projectionActivityShaderKey
@@ -2687,7 +2718,7 @@ export class WebGPUOctreeProjection {
         },
       }));
     }
-    for (let size = this.maxLeafSize; size >= 16; size >>= 1) {
+    for (let size = this.effectiveLeafSize; size >= 16; size >>= 1) {
       for (const operation of ["refine", "balance"] as const) {
         if ((operation === "refine" ? cached?.refineCoarse : cached?.balanceCoarse)?.has(size)) continue;
         const pipelines: Partial<OctreePipelineVariants> = {};

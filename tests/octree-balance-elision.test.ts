@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   octreeBalancePredicatesWouldSplit,
   octreeBalanceRounds,
+  octreeEffectiveLeafSize,
   octreeGradingFixpointEnabled,
   octreeGradingMembershipLoadEnabled,
   octreeGradingPageFillEnabled,
@@ -54,8 +55,8 @@ test("balance-round planning elides only the maximum-leaf-size-two domain", () =
 test("host scheduling guards recurring setup and cold/recurring grading dispatches", () => {
   assert.match(
     octreeSource,
-    /this\.balanceRounds = octreeBalanceRounds\(this\.maxLeafSize\);/,
-    "the immutable maximum leaf size must determine the common cold/recurring round count",
+    /this\.balanceRounds = octreeBalanceRounds\(this\.effectiveLeafSize\);/,
+    "the largest leaf the domain can hold must determine the common cold/recurring round count",
   );
   assert.match(
     octreeSource,
@@ -148,4 +149,45 @@ test("the grading fixpoint is off by default and leaves the shader byte-identica
   // are reached before the flag is seeded, which publishes no liquid rows.
   assert.match(octreeSource,
     /fn gradingRoundActive\(\) -> bool \{\s*return atomicLoad\(&owners\[GRADING_CONVERGED\]\) == 0u;/);
+});
+
+test("the refinement ladder stops at the largest leaf the domain can hold", () => {
+  // A leaf is dyadic and size-aligned, so origin + size <= dims must hold on
+  // every axis. A domain whose shortest axis is 16 contains no size-32 leaf and
+  // can never grow one, because refinement only makes leaves finer. Every rung
+  // above that size is a dispatch that provably matches nothing.
+  assert.equal(octreeEffectiveLeafSize(32, { nx: 32, ny: 16, nz: 32 }), 16,
+    "symmetric-expansion is 16 cells tall, so its ladder tops out at 16");
+  assert.equal(octreeEffectiveLeafSize(32, { nx: 16, ny: 16, nz: 16 }), 16);
+  assert.equal(octreeEffectiveLeafSize(32, { nx: 24, ny: 24, nz: 24 }), 16,
+    "a non-power-of-two extent still cannot hold a leaf larger than itself");
+  assert.equal(octreeEffectiveLeafSize(8, { nx: 256, ny: 256, nz: 256 }), 8,
+    "the authored maximum is still an upper bound");
+  assert.equal(octreeEffectiveLeafSize(32, { nx: 2, ny: 2, nz: 2 }), 2,
+    "the ladder never drops below the smallest leaf");
+  // Regression safety: every lane whose shortest axis already admits the
+  // authored leaf is bit-identical, which is why this cannot move the measured
+  // droplet-256 or ocean results.
+  for (const dims of [{ nx: 256, ny: 256, nz: 256 }, { nx: 320, ny: 96, nz: 80 },
+    { nx: 64, ny: 64, nz: 64 }]) {
+    assert.equal(octreeEffectiveLeafSize(32, dims), 32);
+    assert.equal(octreeBalanceRounds(octreeEffectiveLeafSize(32, dims)),
+      octreeBalanceRounds(32));
+  }
+  assert.equal(octreeBalanceRounds(octreeEffectiveLeafSize(32, { nx: 32, ny: 16, nz: 32 })), 8,
+    "two of the ten fixed-point rounds budget for a tree level that cannot exist");
+  // The ladder, the coarse ladder, the grading round budget and the coarse
+  // pipeline set must all derive from the same effective size, or a dispatched
+  // size would have no compiled pipeline.
+  assert.match(octreeSource,
+    /this\.effectiveLeafSize = octreeEffectiveLeafSize\(this\.maxLeafSize, dims\);/);
+  assert.match(octreeSource,
+    /for \(let size = this\.effectiveLeafSize; size >= 2; size >>= 1\) sizes\.push\(size\);/);
+  assert.match(octreeSource,
+    /this\.balanceRounds = octreeBalanceRounds\(this\.effectiveLeafSize\);/);
+  assert.match(octreeSource,
+    /for \(let size = this\.effectiveLeafSize; size >= 16; size >>= 1\) \{/,
+    "the coarse pipeline set must cover exactly the dispatched coarse sizes");
+  assert.match(octreeSource, /effectiveLeafSize: this\.effectiveLeafSize,/,
+    "the pipeline cache key must distinguish two domains that share an authored leaf");
 });
