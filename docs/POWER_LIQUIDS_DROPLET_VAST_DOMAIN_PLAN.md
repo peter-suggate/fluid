@@ -502,3 +502,91 @@ domain (owner-page prepare 9.1, the two recurring fine-band scans 8.9). The rest
 is intercept: `Octree resident grading closure` ~55 ms and
 `Advect structured families` ~22 ms, both flat from 64³ to 256³. That is now the
 bigger number and a different problem — attack the intercept next, not the slope.
+
+## 6d. The intercept, first cut: grading stopped re-materializing splits (2026-08-03)
+
+Commit `0a839bf`. The `Octree resident grading closure` pass was the largest
+single item in the frame and, unusually, **flat**: 55.6 ms at 64³ and 57.5 ms at
+256³, ~47% of a 118.5 ms frame for 565 resident bricks. Flat means it is not
+bounded by the domain, so the occupancy fix of §6c could not touch it.
+
+### Attribution
+
+Splitting the closure into one label per balance round (free in production —
+PassBroker reuses the open pass — and exact under
+`FLUID_GPU_ISOLATE_PASS_LABELS`) localized it immediately. At 64³ the ten rounds
+cost **26.4, 13.2, 4.5, 1.8, then ~0.9 ms each**. A flat total that is
+front-loaded like that is not a fixed per-round cost; it is split
+materialization, concentrated where the topology is still moving.
+
+### Root cause
+
+Grading is a neighbour repair. Every leaf on the ring around a coarse neighbour
+independently requests the **same** neighbour split, and `splitLeaf` then wrote
+that neighbour's entire `size³` owner partition **serially in one lane, once per
+asker**. The writes are idempotent `atomicMin`, so the duplicates never changed
+published topology — they only multiplied a 32³ materialization by the ring
+population and piled every copy onto the same words.
+
+### Fix
+
+1. `claimLeafSplit` claims each split on its own origin cell — the first cell
+   `splitLeaf` would write anyway — so exactly one asker materializes the cube.
+   The claim word is bit-identical to what the old first loop iteration wrote,
+   so the winner performs every write the losers would have.
+2. Materialize one owner page at a time, so the page directory is consulted once
+   per page instead of once per cell.
+
+A missing owner page is answered by materializing, not claiming: that path
+latches the rejection flag inside `storeOwnerRequired`, and the loop must keep
+visiting the pages that do exist.
+
+### Measured
+
+Paired, interleaved base/head, measurement-clean, 20 advances, M1 Max:
+
+| lane | baseline | head | Δ |
+|---|---|---|---|
+| droplet-64 | 111.30 | **93.95** | −15.6% |
+| droplet-256 | 140.50 | **121.90** | −13.2% |
+
+Grading candidates, normalized against the untouched `Advect structured
+families` pass in the same run: **51.69 → 21.87 ms (−58%)**.
+
+### Gates
+
+All measurement-clean. `power-droplet-256` at **80** advances: 0 tripwires with
+an empty allow-list and `mode: end-of-run` — this is the lane that caught the
+previous change diverging from step 30, so it is the result that matters.
+`symmetric-expansion`: 68/68/68/68/69/69, the baseline window unchanged, and the
+topology hook in particular still holds exact D4 symmetry through step 68 —
+relevant because the dedup changes *which* invocation materializes a split.
+`mini` 500, `large` 500, `large-hydrostatic` 240, `power-droplet-64` 80: 0
+tripwires each. Walls 242.06 / 282.51 / 141.42 against the §6c references of
+246.8 / 287.9 / 146.3. CPU tests: 13 failures by name at both `65b2427` and
+`0a839bf` on the narrow glob; the wide glob adds the four un-prefixed
+`tests/octree-*.test.ts` reds for the familiar 17.
+
+**Note on `test:webgpu:symmetric-expansion`: it always exits rc=1.** Six
+`hook.fluid-symmetry.octree.*` findings fail by construction. The criterion is
+the step those hooks reach, never the exit code, and never a grep for check
+names — `quadtreeMaximumNeighborRatio` and `powerDiagramAuthoritative` appear in
+the same findings array as *passes*, and counting them as failures manufactures
+a phantom 2:1-balance regression.
+
+### Refuted, and kept anyway
+
+Caching the owner-page arena header per invocation — it was re-read through five
+device atomics on the same five words per owner lookup — measured **null**
+(94.67 → 97.15 ms summed pass occupancy, with the unrelated `Advect` and `MGPCG`
+passes moving by the same ~2%, i.e. run-to-run offset). It is retained only
+because it is what makes the per-page hoist expressible. **No saving is claimed
+for it**; do not credit it later.
+
+### Next
+
+`Octree resident grading closure` is now ~21.9 ms, still the largest intercept
+item, and the serial single-lane materialization of one 32³ cube remains — the
+ring duplication was the multiplier, not the base cost. Spreading the cube
+across the workgroup's 256 lanes is the untried follow-up. `Advect structured
+families` (~22 ms, flat from 64³ to 256³) is still unattacked.
