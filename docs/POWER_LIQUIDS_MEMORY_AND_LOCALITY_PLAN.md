@@ -268,7 +268,7 @@ magnitude outside within-round noise, but they are single samples.
 Work: run the 3-round interleaved median, then flip the defaults. No new code.
 This is the largest measured, implemented, unbanked win in the tree.
 
-### E6 — the grading closure: one lane, 32,768 serial atomics — **IN PROGRESS**
+### E6 — the grading closure: one lane, 32,768 serial atomics — **CLOSED, −14.7%**
 
 **This displaces E0 as the top target.** After E5 the frame reorganized
 completely and the old ranking is void. Re-profiled at HEAD, droplet-256, 80
@@ -350,6 +350,135 @@ verified:
 Predicted: 18.9 → ~1–3 ms, i.e. ~16 ms off an 87 ms frame. Gate as always on the
 `symmetric-expansion` D4 window, which this cannot move — the write set is
 unchanged and its order is unobservable.
+
+### E6 closure — **LANDED, 2026-08-03: −12.58 ms, −14.7%** (`aa78e90`)
+
+**v2 was not needed and its premise was wrong.** The 18.9 ms was never a lane
+count. Two defects inside the inner body carried all of it, and both are
+removals rather than additions — no worklist, no indirect dispatch, no extra
+binding, no extra pass.
+
+| arm (droplet-256, `benchmark-power-dam-ab.ts --steps=60 --repeats=3`, interleaved) | ms/advance | vs landed | own spread |
+|---|---:|---:|---:|
+| **landed** (all three below) | **73.08** | — | 0.20 |
+| `control-aa` | 73.05 | +0.00 | 0.18 |
+| `FLUID_OCTREE_GRADING_PAGE_FILL=0` — the original per-cell walk | 85.67 | **+12.58 (+17.2%)** | 0.25 |
+| `FLUID_OCTREE_GRADING_MEMBERSHIP_LOAD=1` | 80.98 | +7.90 | 1.03 |
+| `FLUID_OCTREE_GRADING_SPLIT_HELPERS=0` | 73.43 | +0.35 | 0.08 |
+
+**A/A noise floor 0.27 ms.** The headline delta is 47× it and the sign is
+identical in all three rounds (85.78/85.67/85.53 against 73.17/73.12/72.97).
+
+Per-round attribution, `FLUID_GRADING_ROUND_PROBE=1` with label isolation:
+
+| round | before | after |
+|---|---:|---:|
+| r00 | 10.20 | **2.31** |
+| r01 | 8.69 | **2.10** |
+| r02 | 1.53 | 0.95 |
+| r03–r09 | ~0.81 each | ~0.77 each (untouched) |
+
+**Split materialization: 18.9 ms → ~3.0 ms.** The pass is now ~10.8 ms, of
+which **7.7 ms is the ten-round probe floor** — a different defect, see below.
+
+#### 1. The owner word is page-invariant and was recomputed 512 times (−4.69 ms)
+
+A child of size ≥ 8 is 8-aligned and so is the owner page, so a page lies wholly
+inside **one** child; and `encodePagedOwner` keys the origin delta off the
+*cell's brick origin*, which is page-invariant too. **Every one of a page's 512
+cells therefore receives the identical 32-bit word.** The inner body rebuilt it
+per cell through three runtime integer divisions by `child` plus a
+`firstTrailingBit`. `splitPageAt` resolves it once per page; the fill collapses
+to a contiguous 512-word loop with no address arithmetic at all.
+
+This is the same ALU sensitivity the recorded +6.05 ms negative result measured
+from the other direction — that experiment *added* three div/mods per cell and
+paid 6 ms; this one *removes* about six and gains 4.7. The loop was never
+bandwidth-bound; it was arithmetic issued on a dependent chain.
+
+#### 2. The per-cell membership load can never observe a set bit (−7.55 ms)
+
+`storeOwnerRequired` preserves `OWNER_WORD_TOPOLOGY` by loading the current word
+and OR-ing the bit into the `atomicMin` candidate. That load is a **second
+device round trip on a dependent chain** — half the traffic of the entire
+materialization — and inside the topology candidate view it is provably a load
+of zero:
+
+- membership is a *leaf* property, published only by `markAcceptedOwner` during
+  frontier emission, which runs **after** grading in the same encode;
+- `commitOwnerPageCandidate` rewrites the whole inactive payload bank with
+  `word &= ~OWNER_WORD_TOPOLOGY` (its own comment: *"Membership is a leaf
+  property, not a resident-page property"*) in
+  `Prepare inactive owner-page generation`, the pass **immediately before** the
+  topology dispatches;
+- every page reachable through the candidate directory is in that candidate key
+  set by construction, so there is no page the split can address whose bit
+  survives.
+
+`splitOwnerWord` therefore returns the word unchanged when
+`topologyCandidateView == 1u`, and keeps the loading form verbatim everywhere
+else. The cross-module premise is asserted by a test rather than left in a
+comment (`tests/octree-balance-elision.test.ts`), because if the candidate
+clear were ever removed the materializer would silently *coarsen* marked leaf
+origins: `OWNER_WORD_TOPOLOGY` sits at bit 21, **above** the exponent at bits
+18–20, so a set bit inverts the finer-wins order of the `atomicMin`.
+
+#### 3. Fan-out is real but no longer where the time is (−0.35 ms)
+
+`materializeSplitPages` lets a losing asker take one page of the split it asked
+for, claimed by `atomicMin` on the page's first cell — the write the fill would
+perform anyway, so a helper that loses retires having spent exactly the three
+device ops it already spent. No barrier, no shared memory, no queue: this is the
+property the workgroup-local queue could not have. **Measured −0.9 ms while the
+membership load was still present, and −0.35 ms after it went.** Kept, at 1.3×
+the A/A floor and the same sign in all three rounds, but it is a rounding error
+next to the two removals. **Depth was not the constraint; per-iteration cost
+was.**
+
+#### Negative results worth recording
+
+1. **"Gather over allocated owner pages" is domain-shaped, not live-shaped, and
+   would have violated Bet 1.** The plan's own framing assumed the page
+   directory is sparse. It is not: the owner map is a **total partition of the
+   domain** — every cell must return an owner from `ownerAt` — so
+   `planOctreeOwnerPages` sizes `capacity == logicalBrickCount` and essentially
+   all 32,768 pages at 256³ are resident. One workgroup per allocated page is
+   16.7M cells per sweep, ten sweeps per advance. The sparsity that makes the
+   *iteration* live-shaped elsewhere does not exist in this structure.
+2. **Inverting the paper repairs into a self-check on the coarse leaf is more
+   expensive than the scatter it replaces.** `repairPaperRatioNeighbors`
+   inverts exactly — "L splits iff it has an 18-neighbour smaller than
+   size(L)/2" is literally `ownerAtIsTooFine`, which `balanceCoarseBlock`
+   already evaluates over 6 faces with 256 cooperating lanes. But
+   `repairPaperMixedNeighbors` is a **2-hop** predicate (L splits iff some
+   adjacent anchor has both a finer and a coarser neighbour), and evaluating it
+   from L means walking L's 6·32² = 6,144 boundary cells × 18 owner lookups ≈
+   110k dependent gathers — three times the 32,768 writes it would replace.
+3. **The ablation route to sizing this is closed.** Filling one cell per page
+   instead of 512 does produce a timing lower bound, but the resulting topology
+   trips `air-support-failure`, which `--quality-invalid-probe` does not allow,
+   so the run never reaches its report. Attribution has to come from correct
+   arms, which is what the three overrides above are for.
+
+#### What is left in this pass: the probe floor, 7.7 ms
+
+r03–r09 cost ~0.77 ms each and did not move, because they raise no splits at
+all — they are pure probing. Ten rounds × 0.77 ms is now **the majority of the
+grading pass**. Two follow-ups, in cost order:
+
+- **Short-circuit the fixpoint.** A device-side "splits raised since the last
+  round" counter (a reserved `owners` header word incremented by
+  `claimLeafSplit`) plus a per-round indirect argument publish would collapse
+  rounds 3–9 to zero workgroups once the closure has converged. Predicted −5 ms;
+  needs one extra tiny dispatch and one `copyBufferToBuffer` per round, and the
+  early-out must be conservative or it moves the topology.
+- **Memoize the owner-page directory lookup.** Every `ownerAt` is two dependent
+  device loads (directory then payload), and `neighborTooFine` issues 6·size² of
+  them along faces that overwhelmingly share one page. The directory is
+  read-only in this shader — nothing outside `commitOwnerPageCandidate` writes
+  it — so a one-entry `var<private>` memo of `logical → encoded` is sound and
+  would collapse most of the first load. This helps every owner reader in the
+  frame, not only grading.
 
 ### E2a — publish the A2 apply's stencil columns — **LANDED, 2026-08-03: −1.4%**
 
