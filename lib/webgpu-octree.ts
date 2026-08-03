@@ -6434,6 +6434,16 @@ fn ownerPageMap() -> OwnerPageMap {
   }
   return ownerPageMapCache;
 }
+// Memoizing this lookup does NOT pay; see E6's recorded negative result.
+//
+// The directory IS dispatch-invariant -- ownerPageMap caches the arena header
+// on exactly that reasoning, and every atomic store in this module targets the
+// rejection latch at owners[2] or a payload word -- and lookups do arrive in
+// page-local bursts, so a single-entry var<private> memo is both sound and
+// hits about seven times in eight. It measured -0.41 ms in favour of NOT
+// memoizing, with the grading probe floor consistently ~5% worse. The load it
+// removes was already the hottest line in the arena, while the two extra
+// thread-local registers and the compare are paid on every lookup.
 fn ownerPageEncoded(logical: u32) -> u32 {
   let map = ownerPageMap();
   if (map.consistent == 0u || logical >= map.logicalCount) { return 0u; }

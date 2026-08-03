@@ -459,6 +459,23 @@ was.**
    trips `air-support-failure`, which `--quality-invalid-probe` does not allow,
    so the run never reaches its report. Attribution has to come from correct
    arms, which is what the three overrides above are for.
+4. **Memoizing the owner-page directory lookup does not pay** — implemented,
+   measured, reverted (`nomemo` −0.41 ms, −0.6%, INCONCLUSIVE against a 1.23 ms
+   A/A floor, but faster in *all three* rounds — 72.98/72.97/73.00 against
+   73.27/74.28/73.50 — and the grading probe floor was consistently ~5% worse,
+   0.808–0.839 against 0.766–0.784 ms/round). The premise was sound in both
+   halves: the directory really is dispatch-invariant (`ownerPageMap` already
+   caches the arena header on that reasoning, and every atomic store in the
+   module targets the rejection latch or a payload word), and lookups really do
+   arrive in page-local bursts (one balance invocation walks eight parities of a
+   2³ box, always one page; `neighborTooFine` sweeps a face y-fastest and
+   changes page once in eight). **The error was treating that load as a
+   dependent DRAM round trip.** The directory entry is re-read by every lane of
+   every workgroup, so it is the hottest line in the arena and was already a
+   cache hit; the memo removes a hit and pays two extra thread-local registers
+   plus a compare on *every* lookup. The dependent-load argument that carries
+   §2.2 does not transfer to a line that is already resident. The comment is
+   left on `ownerPageEncoded` so the next reader does not re-derive it.
 
 #### What is left in this pass: the probe floor, 7.7 ms
 
@@ -472,13 +489,13 @@ grading pass**. Two follow-ups, in cost order:
   rounds 3–9 to zero workgroups once the closure has converged. Predicted −5 ms;
   needs one extra tiny dispatch and one `copyBufferToBuffer` per round, and the
   early-out must be conservative or it moves the topology.
-- **Memoize the owner-page directory lookup.** Every `ownerAt` is two dependent
-  device loads (directory then payload), and `neighborTooFine` issues 6·size² of
-  them along faces that overwhelmingly share one page. The directory is
-  read-only in this shader — nothing outside `commitOwnerPageCandidate` writes
-  it — so a one-entry `var<private>` memo of `logical → encoded` is sound and
-  would collapse most of the first load. This helps every owner reader in the
-  frame, not only grading.
+- ~~Memoize the owner-page directory lookup.~~ **Tried and reverted; see
+  negative result 4.** What remains of that idea is the *second* load: the
+  payload word, which is genuinely scattered. Collapsing it needs the owner map
+  to stop being 512× redundant — a page inside a leaf of size ≥ 8 stores one
+  word 512 times — i.e. a per-page uniform-owner summary consulted before the
+  payload. That is the E3b-class structural change for this arena and it would
+  also take a size-32 split from 32,768 writes to 64.
 
 ### E2a — publish the A2 apply's stencil columns — **LANDED, 2026-08-03: −1.4%**
 
