@@ -575,6 +575,41 @@ droplet-256, whose fluid is pinned at ~100 cells. Those numbers rank the
 spending on it. The four terms that dominate droplet-256's footprint are
 0.26 MiB each here; the pass that dominates droplet-256's frame is 0.2% here.
 
+#### The band-1 null on the Section 5 march is explained — do not re-run it
+
+Reducing the march's corridor width measured a null (360.60 vs 361.63 ms on
+`hydrostatic-tiny`) and the reason is now known: **wave-zero cost is driven by
+the SEED count, not the corridor width.** The march starts from **13,184 seeds**
+sitting on the **1,152 liquid rows**; narrowing the band shrinks the corridor
+those seeds march through, not the population that starts marching. Every
+per-element defect in the march scales with seeds, so per-element removals come
+first and band reduction stays second. Anyone re-running band reduction expecting
+a win should read this paragraph first.
+
+#### The march's launch gate is NOT an E6-style always-zero load
+
+Recorded because it looks exactly like the defect that paid −7.55 ms, and is
+not. Sites such as
+
+    if(item>=s(72u)||s(0u)!=0u||s(47u)!=0u){return;}
+
+read `scratch[0]` through `s(0u)` on every lane, and the E6 precedent is a
+per-cell `atomicLoad` of a bit that was provably clear. Here the word is a live
+**fail-closed error latch**: `fail()` and `failTopology()` raise it with
+`atomicOr(&scratch[0], flag)` from **113 call sites** across this file. A
+surviving nonzero is not a stale bit, it is the signal that some earlier pass in
+this generation failed, and the gate is what stops every downstream pass from
+running on that corrupt state. Deleting the load would make a failed generation
+continue **silently** — the opposite of failing loudly.
+
+The narrow true statement: 22 of the dispatch-argument writers already publish
+`select(vec3u(0u,1u,1u), …, s(0u)==0u)`, so a failed generation ALREADY
+dispatches zero workgroups. For those kernels only, the in-kernel latch test is
+a second line of defence behind a zero-sized dispatch. That is provable per site,
+but it removes one workgroup-invariant load per lane from an address every lane
+shares — an L1 hit — so its ceiling is far below this lane's 3.65 ms A/A floor.
+Not worth the fail-closed risk.
+
 ### E2a — publish the A2 apply's stencil columns — **LANDED, 2026-08-03: −1.4%**
 
 **The mechanism, first.** The SPGrid V-cycle smoother has a memoized neighbour
