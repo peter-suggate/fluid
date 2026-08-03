@@ -39,7 +39,8 @@ test("symmetric expansion is the minimum dyadic four-brick horizontal oracle", (
   const preset = getScenePreset("symmetric-expansion");
   assert.equal(preset.create().sceneId, scene.sceneId);
   assert.equal(preset.methodProfile?.methodId, "octree");
-  assert.equal(preset.methodProfile?.overrides.globalFineLevelSetFactor, "1");
+  assert.equal(preset.methodProfile?.overrides.globalFineLevelSetFactor, "4");
+  assert.equal(preset.methodProfile?.overrides.interfaceRefinementBandCells, 4);
 });
 
 test("symmetric expansion Dawn lane samples every accepted step and gates every state field", () => {
@@ -47,7 +48,8 @@ test("symmetric expansion Dawn lane samples every accepted step and gates every 
   assert.equal(lane.stop.exactSteps, 250);
   assert.equal(lane.stop.maxDt_s, 0.004);
   assert.equal(lane.collect.checkpointEvery_s, 0.004);
-  assert.equal(lane.methods[0]?.overrides.globalFineLevelSetFactor, "1");
+  assert.equal(lane.methods[0]?.overrides.globalFineLevelSetFactor, "4");
+  assert.equal(lane.methods[0]?.overrides.interfaceRefinementBandCells, 4);
   const collector = lane.collect.evidenceCollectors.find(({ id }) => id === "fluid-symmetry");
   assert.ok(collector);
   assert.deepEqual(collector.requires, ["compact velocity", "compact pressure"]);
@@ -72,7 +74,7 @@ test("symmetric expansion Dawn lane samples every accepted step and gates every 
   assert.equal(fine.collect.globalFineGeneration, true);
   const raster = getSceneWebGPUSmokeLane("symmetric-expansion", "raster-construction");
   assert.equal(raster.stop.exactSteps, 1);
-  assert.equal(raster.methods[0]?.overrides.globalFineLevelSetFactor, "1");
+  assert.equal(raster.methods[0]?.overrides.globalFineLevelSetFactor, "4");
   assert.equal(raster.collect.raster, "initial-final");
   assert.equal(raster.collect.globalFineGeneration, true);
   assert.equal(raster.diagnostics.some(({ id }) => id === "exhaustive-power-generation"), false,
@@ -81,7 +83,7 @@ test("symmetric expansion Dawn lane samples every accepted step and gates every 
     "the raster regression must isolate construction from the known post-step field asymmetry");
   const oneStep = getSceneWebGPUSmokeLane("symmetric-expansion", "one-step");
   assert.equal(oneStep.stop.exactSteps, 1);
-  assert.equal(oneStep.methods[0]?.overrides.globalFineLevelSetFactor, "1");
+  assert.equal(oneStep.methods[0]?.overrides.globalFineLevelSetFactor, "4");
   assert.deepEqual(oneStep.hooks[0]?.parameters, {
     maximumVolumeAbsoluteError: 0,
     maximumVelocityAbsoluteError_m_s: 0,
@@ -124,21 +126,24 @@ test("symmetric expansion has an isolated Dawn reproduction command", () => {
   assert.match(command, /FLUID_EXPECT_GRID=32,16,32/);
   assert.match(command, /FLUID_CHECKPOINT_EVERY_S=0\.004/);
   assert.match(command, /FLUID_EXPECT_EXACT_STEPS=250/);
-  assert.match(command, /FLUID_OCTREE_GLOBAL_FINE_FACTOR=1/);
+  assert.match(command, /FLUID_OCTREE_INTERFACE_BAND=4/);
+  assert.match(command, /FLUID_OCTREE_GLOBAL_FINE_FACTOR=4/);
+  assert.match(command, /FLUID_GLOBAL_FINE_GENERATION_TRANSITION=1/);
   assert.match(command, /run-webgpu-smoke-isolated\.ts$/);
 
   const fineCommand = packageJson.scripts["test:webgpu:symmetric-expansion:fine"];
   assert.ok(fineCommand);
   assert.match(fineCommand, /FLUID_LANE=fine-factor-4/);
   assert.match(fineCommand, /FLUID_OCTREE_GLOBAL_FINE_FACTOR=4/);
+  assert.match(fineCommand, /FLUID_OCTREE_INTERFACE_BAND=4/);
   assert.match(fineCommand, /FLUID_RASTER_CHECKPOINTS=1/);
   assert.match(fineCommand, /FLUID_RASTER_MESH_SYMMETRY=1/);
   assert.match(fineCommand, /FLUID_GLOBAL_FINE_GENERATION_TRANSITION=1/);
   const rasterCommand = packageJson.scripts["test:webgpu:symmetric-expansion:raster"];
   assert.match(rasterCommand, /FLUID_LANE=raster-construction/);
   assert.match(rasterCommand, /FLUID_RASTER_MESH_SYMMETRY=1/);
-  assert.match(rasterCommand, /FLUID_OCTREE_GLOBAL_FINE_FACTOR=1/);
-  assert.doesNotMatch(rasterCommand, /FLUID_GLOBAL_FINE_GENERATION_TRANSITION=1/);
+  assert.match(rasterCommand, /FLUID_OCTREE_GLOBAL_FINE_FACTOR=4/);
+  assert.match(rasterCommand, /FLUID_GLOBAL_FINE_GENERATION_TRANSITION=1/);
   const oneStepCommand = packageJson.scripts["test:webgpu:symmetric-expansion:one-step"];
   assert.match(oneStepCommand, /FLUID_LANE=one-step/);
   assert.match(oneStepCommand, /FLUID_SYMMETRY_STAGE_AUDIT=1/);

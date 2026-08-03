@@ -51,6 +51,19 @@ export const POWER_VALIDATION_METHOD_PROFILE: MethodProfile = Object.freeze({
   }),
 });
 
+/** Canonical paper configuration for the horizontal D4 oracle. Performance,
+ * Dawn regression, and the interactive preset must all exercise the same
+ * factor-4 fine surface and level-4 coupled reach. */
+export const SYMMETRIC_EXPANSION_METHOD_PROFILE: MethodProfile = Object.freeze({
+  methodId: "octree",
+  quality: "balanced",
+  overrides: Object.freeze({
+    maximumLeafSize: "32",
+    interfaceRefinementBandCells: 4,
+    globalFineLevelSetFactor: "4",
+  }),
+});
+
 /**
  * Shared coarse-only dam experiment. The surface field and pressure octree use
  * the same lattice; size-16 leaves preserve a materially coarse far field while
@@ -1559,11 +1572,11 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
   defineScene({
     id: "symmetric-expansion",
     name: "Octree · symmetric expansion",
-    blurb: "One exact central 2×1×2-brick water body collapses across the minimum dyadic 32×16×32 tank. Its factor-1 Section 5 surface authority avoids the sparse JFA approximation, while Dawn checks D4 symmetry of volume, velocity, pressure, topology, and four-wall contact after every step.",
+    blurb: "One exact central 2×1×2-brick water body collapses across the minimum dyadic 32×16×32 tank using the paper-default factor-4 fine band and level-4 coupled reach. Dawn checks D4 symmetry of volume, velocity, pressure, topology, and four-wall contact after every step.",
     audience: "validation",
     shelf: "Symmetry",
     environment: "default",
-    methodProfile: COARSE_ONLY_POWER_DAM_METHOD_PROFILE,
+    methodProfile: SYMMETRIC_EXPANSION_METHOD_PROFILE,
     build: createSymmetricExpansionScene,
     camera: { distance_m: 2.5, target_m: { x: 0, y: 0.25, z: 0 } },
   }),

@@ -14,6 +14,7 @@ import {
   POWER_FILL_FINE_BRICK_CAPACITY,
   POWER_FILL_LIQUID_CELLS,
   POWER_FILL_PRESSURE_ROW_CAPACITY,
+  SYMMETRIC_EXPANSION_METHOD_PROFILE,
   findSceneDefinition,
   powerFillReservoirCells,
 } from "./scenes";
@@ -357,6 +358,7 @@ const octreePowerOverrides = {
   interfaceRefinementBandCells: 3,
   globalFineLevelSetFactor: "4",
 } as const;
+const symmetricExpansionOverrides = SYMMETRIC_EXPANSION_METHOD_PROFILE.overrides;
 const largePowerDamOverrides = {
   ...octreePowerOverrides,
   maximumLeafSize: "32",
@@ -855,7 +857,7 @@ const suiteList = [
   suite("symmetric-expansion", "Central 2x1x2-brick liquid body with horizontal D4 symmetry",
     { definitionId: "symmetric-expansion" }, {
       default: lane({ target_s: 1, exactSteps: 250, maxDt_s: 0.004, oracleSteps: 250, cpuOracle: false,
-        methods: methods(["octree"], { octree: COARSE_ONLY_POWER_DAM_METHOD_PROFILE.overrides }), timeout_ms: 240_000,
+        methods: methods(["octree"], { octree: symmetricExpansionOverrides }), timeout_ms: 240_000,
         collect: {
           fieldStats: "checkpoints", checkpointEvery_s: 0.004, spatialField: true,
           structuredValidation: true, raster: "initial-final", globalFineGeneration: true,
@@ -887,13 +889,13 @@ const suiteList = [
       }),
       "raster-construction": lane({ id: "raster-construction", target_s: 0.004, exactSteps: 1,
         maxDt_s: 0.004, oracleSteps: 1, cpuOracle: false,
-        methods: methods(["octree"], { octree: COARSE_ONLY_POWER_DAM_METHOD_PROFILE.overrides }), timeout_ms: 240_000,
+        methods: methods(["octree"], { octree: symmetricExpansionOverrides }), timeout_ms: 240_000,
         collect: { fieldStats: "final", raster: "initial-final", globalFineGeneration: true },
         diagnostics: [],
       }),
       "one-step": lane({ id: "one-step", target_s: 0.004, exactSteps: 1,
         maxDt_s: 0.004, oracleSteps: 1, cpuOracle: false,
-        methods: methods(["octree"], { octree: COARSE_ONLY_POWER_DAM_METHOD_PROFILE.overrides }),
+        methods: methods(["octree"], { octree: symmetricExpansionOverrides }),
         timeout_ms: 240_000,
         collect: {
           fieldStats: "checkpoints", checkpointEvery_s: 0.004, spatialField: true,
@@ -925,7 +927,7 @@ const suiteList = [
       }),
       "two-step": lane({ id: "two-step", target_s: 0.008, exactSteps: 2,
         maxDt_s: 0.004, oracleSteps: 2, cpuOracle: false,
-        methods: methods(["octree"], { octree: COARSE_ONLY_POWER_DAM_METHOD_PROFILE.overrides }),
+        methods: methods(["octree"], { octree: symmetricExpansionOverrides }),
         timeout_ms: 240_000,
         collect: {
           fieldStats: "checkpoints", checkpointEvery_s: 0.004, spatialField: true,
@@ -957,7 +959,7 @@ const suiteList = [
       }),
       "three-step": lane({ id: "three-step", target_s: 0.012, exactSteps: 3,
         maxDt_s: 0.004, oracleSteps: 3, cpuOracle: false,
-        methods: methods(["octree"], { octree: COARSE_ONLY_POWER_DAM_METHOD_PROFILE.overrides }),
+        methods: methods(["octree"], { octree: symmetricExpansionOverrides }),
         timeout_ms: 240_000,
         collect: {
           fieldStats: "checkpoints", checkpointEvery_s: 0.004, spatialField: true,
@@ -989,7 +991,7 @@ const suiteList = [
       }),
       "fine-factor-4": lane({ id: "fine-factor-4", target_s: 0.004, exactSteps: 1,
         maxDt_s: 0.004, oracleSteps: 1, cpuOracle: false,
-        methods: methods(["octree"], { octree: octreePowerOverrides }), timeout_ms: 240_000,
+        methods: methods(["octree"], { octree: symmetricExpansionOverrides }), timeout_ms: 240_000,
         collect: {
           fieldStats: "checkpoints", checkpointEvery_s: 0.004, spatialField: true,
           structuredValidation: true, raster: "initial-final", globalFineGeneration: true,
@@ -1027,7 +1029,7 @@ const suiteList = [
        */
       performance: lane({ id: "performance", target_s: 0.248, exactSteps: 62,
         maxDt_s: 0.004, oracleSteps: 62, cpuOracle: false,
-        methods: methods(["octree"], { octree: octreePowerOverrides }),
+        methods: methods(["octree"], { octree: symmetricExpansionOverrides }),
         collect: { fieldStats: "none", performanceProfile: true, gpuCommandAudit: true },
         diagnostics: [{ id: "performance" }], timeout_ms: 240_000 }),
     }),
