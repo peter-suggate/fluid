@@ -23,6 +23,10 @@ import {
 } from "./power-dam-lane-environment";
 import { POWER_DAM_PRESSURE_KERNEL_LABEL_PREFIXES } from "./power-dam-pressure-kernel-profile";
 import { formatPassBrokerBoundaryAudit } from "../lib/webgpu-pass-broker";
+import {
+  formatResidentMemoryReport,
+  type GPUResidentMemoryReport,
+} from "./webgpu-smoke-gpu-audits";
 import { powerDamRunEnvironment } from "./power-dam-run-environment";
 
 const args = new Set(process.argv.slice(2));
@@ -199,9 +203,22 @@ const runBenchmark = async (overrides: Record<string, string> = {}): Promise<Pow
   lines.on("line", (line) => {
     result = powerDamResultFromLine(line) ?? result;
     try {
-      const record = JSON.parse(line) as { record?: string; phase?: string };
+      const record = JSON.parse(line) as {
+        record?: string; phase?: string; when?: string;
+        residentMemory?: GPUResidentMemoryReport;
+      };
       if (record.phase !== undefined && CORRECTNESS_PHASES.has(record.phase)) {
         console.log(line);
+        return;
+      }
+      // Unconditional for the same reason as a correctness verdict: the census
+      // only runs when `FLUID_GPU_MEMORY_CENSUS` explicitly asked for it, and a
+      // census you requested and cannot see is the failure this reader's own
+      // comment describes. Forwarded with the summary the child cannot print.
+      if (record.phase === "gpu-memory" && record.residentMemory) {
+        console.log(line);
+        console.log(`--- GPU resident memory (${record.when}) ---`);
+        console.log(formatResidentMemoryReport(record.residentMemory));
         return;
       }
       if (forwardNDJSON

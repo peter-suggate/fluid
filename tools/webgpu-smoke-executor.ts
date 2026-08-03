@@ -43,7 +43,9 @@ import {
 import {
   GPUCommandAudit,
   GPUPassTimestampAudit,
+  GPUResidentMemoryCensus,
   auditCommandEncoder,
+  formatResidentMemoryReport,
   writtenByteLength,
   type GPUCommandAuditReport,
   type GPUFineTimestampBucket,
@@ -985,6 +987,12 @@ async function runGPU(
   device.addEventListener("uncapturederror", (event) => validationErrors.push(event.error.message));
   const commandAudit = gpuCommandAuditRequested ? new GPUCommandAudit() : undefined;
   const dataFlowAudit = gpuDataFlowManifestRequested ? new GPUDataFlowAudit() : undefined;
+  // Resident footprint, not per-advance allocation. Off by default because it
+  // captures a stack per `createBuffer` to attribute the bytes to a module; the
+  // cost is bounded by construction-time allocation and is invisible in the
+  // measured window, but a wall being compared should carry no unasked-for work.
+  const residentMemoryCensus = (process.env.FLUID_GPU_MEMORY_CENSUS ?? "") !== ""
+    ? new GPUResidentMemoryCensus() : undefined;
   const requestedPassTimestampQueryCapacity = Number(
     process.env.FLUID_GPU_PASS_TIMESTAMP_QUERY_CAPACITY ?? 2048);
   const passTimestampQueryCapacity = Number.isFinite(requestedPassTimestampQueryCapacity)
@@ -1039,6 +1047,7 @@ async function runGPU(
         commandAudit?.recordBufferAllocation(descriptor);
         const buffer = target.createBuffer(descriptor);
         dataFlowAudit?.registry.recordBuffer(buffer, descriptor);
+        residentMemoryCensus?.recordBuffer(descriptor, buffer);
         return buffer;
       };
       if (property === "createShaderModule") return (descriptor: GPUShaderModuleDescriptor) => {
@@ -1334,6 +1343,15 @@ async function runGPU(
   // below measures only recurring advance work and explicitly requested
   // profiler/readback activity after the initialized solver is warm.
   commandAudit?.reset();
+  // The same boundary is exactly where the resident footprint is worth reading:
+  // the solver is constructed and t=0 is published, so what it holds now is what
+  // it holds for the run. Emitted before the reset discards the only record of it.
+  if (residentMemoryCensus) {
+    const residentMemory = residentMemoryCensus.snapshot();
+    console.log(JSON.stringify({ scenario: scenarioId, method: resultMethod,
+      phase: "gpu-memory", when: "after-construction", residentMemory }));
+    console.log(formatResidentMemoryReport(residentMemory));
+  }
   // Same window, same reason: the pass-boundary census is process-wide and
   // cumulative from module load, so without this the per-advance numbers carry
   // construction plus the cold bootstrap encoders
@@ -3450,6 +3468,15 @@ async function runGPU(
     spgridHierarchy,
     powerHybridCensus,
   } : undefined;
+  // A second read at the end of the run. A difference against the
+  // after-construction record is a solver that grows its arenas while stepping,
+  // which is the one memory behaviour a construction-time snapshot cannot see.
+  if (residentMemoryCensus) {
+    const residentMemory = residentMemoryCensus.snapshot();
+    console.log(JSON.stringify({ scenario: scenarioId, method: resultMethod,
+      phase: "gpu-memory", when: "after-run", residentMemory }));
+    console.log(formatResidentMemoryReport(residentMemory));
+  }
   const result: GPUSmokeResult = {
     method: resultMethod, info, grid: [info.nx, info.ny, info.nz], matchedField: matched.field,
     matchedSummary: matched.summary, compactFieldEvidence: matched.compactFieldEvidence,
