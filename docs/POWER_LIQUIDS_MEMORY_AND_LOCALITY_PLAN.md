@@ -268,6 +268,89 @@ magnitude outside within-round noise, but they are single samples.
 Work: run the 3-round interleaved median, then flip the defaults. No new code.
 This is the largest measured, implemented, unbanked win in the tree.
 
+### E6 — the grading closure: one lane, 32,768 serial atomics — **IN PROGRESS**
+
+**This displaces E0 as the top target.** After E5 the frame reorganized
+completely and the old ranking is void. Re-profiled at HEAD, droplet-256, 80
+advances, label isolation (ranking honest, absolute ~19% high):
+
+| pass | ms/advance |
+|---|---:|
+| **Octree resident grading closure** | **27.53** |
+| Octree persistent MGPCG (whole solve, one workgroup) | 14.88 |
+| Advect fine phi rare | 3.72 |
+| March Section 5 sparse changed frontier (×2) | 7.09 |
+| `SPGrid V-cycle - publish validated exact level deltas` | 2.47 *(was ~96)* |
+
+`FLUID_GRADING_ROUND_PROBE=1` splits grading by round: **r00 10.20, r01 8.69**,
+r02 1.53, r03–r09 ~0.81 each. So 18.9 ms is real split work and ~5.7 ms is a
+per-round floor.
+
+**The mechanism, and the in-tree A/B that proves it.** `splitLeaf` materializes
+a leaf's whole size³ owner partition — for size 32 (the authored leaf size on
+these lanes) that is 64 pages × 512 cells = **32,768 dependent atomic
+read-modify-writes in a single lane**, while the other 63 lanes of its
+`@workgroup_size(4,4,4)` workgroup idle. `balanceTopologyAt` can raise up to 37
+such splits per lane per parity, over 8 parities.
+
+The tree already contains the other strategy: `balanceCoarseBlock` fans the same
+size³ partition across its 256 lanes. **The profiler A/Bs them on the same lane
+and the same work: the cooperative coarse dispatch costs 0.148 ms/advance
+against 18.9 ms for the serial candidate rounds.**
+
+Fanning out is observationally free — `claimLeafSplit` already elects exactly one
+materializer per split, and the write is `atomicMin` of a value depending only
+on (origin, size, cell), so it is commutative and idempotent and no lane can
+observe another's order.
+
+**Landed so far:** `materializeSplitStrided(origin, size, lane, lanes)`, the
+shared primitive. It divides over **pages**, keeping the per-page nested triple
+loop byte-for-byte serial. `splitLeaf` calls it with `lanes = 1` and measures
+87.18 vs 86.97 ms/advance — cost-neutral, as required.
+
+**Two measured negative results, recorded because they shaped the design:**
+
+1. **A workgroup-local split queue drained behind a barrier does not work.**
+   v1 had each lane claim into `var<workgroup>` storage, then the workgroup
+   drain it cooperatively. droplet-64 passed; **droplet-256 produced zero
+   advances in 600 s** where it otherwise runs 60 advances in ~90 s. The cause is
+   structural, not a bug to chase: on queue overflow a lane runs the full
+   32,768-cell serial walk *while 63 siblings block at `workgroupBarrier()`*,
+   and the barrier also couples every lane to the slowest one — whereas the
+   serial code lets lanes retire independently. A workgroup-local queue cannot
+   bound a producer that raises up to 37 splits per lane per parity.
+2. **Flattening the inner triple loop to stride cells costs +6.05 ms.** The same
+   refactor with `flat % span.x` indexing measured **93.02 vs 86.97** at
+   `lanes = 1`. Three integer div/mods on each of 32,768 cells is a real cost;
+   this loop is ALU-sensitive as well as latency-sensitive. Stride pages, never
+   cells.
+
+**Next: v2 — claim into a device worklist, materialize by indirect dispatch.**
+One workgroup per claimed split, `@workgroup_size(256)`, i.e. exactly the
+`balanceCoarseBlock` shape, with the producer and consumer in *separate*
+dispatches so nothing blocks on a barrier. Three constraints shape it, all
+verified:
+
+- **No new storage binding is available.** `OCTREE_PROJECTION_CORE_BUFFER_LAYOUT`
+  carries 9 storage bindings and `tests/webgpu-octree-projection-binding-budget.test.ts`
+  asserts `storageCount + 1 <= 10`, reserving one slot for activity
+  instrumentation. The worklist must live in an existing arena — `compaction`
+  has a planned base-offset map (`planOctreeCompactionAllocation`) and is the
+  natural host.
+- **`compaction` is `array<u32>`, not atomic**, so a lock-free append counter
+  cannot live there. `owners` is `array<atomic<u32>>` with a 16-word header;
+  the counter can live in a reserved header word while the payload lives in
+  `compaction`.
+- **`compaction` has no `INDIRECT` usage**, so the published dispatch args need
+  one `copyBufferToBuffer` into an existing indirect buffer per round — the
+  pattern already used at `webgpu-octree.ts:3534-3536`. Ten rounds means ten
+  extra copies and pass closures; §4.3 of `WORK_AND_DATA` says that is not the
+  wall, but it must be measured rather than assumed.
+
+Predicted: 18.9 → ~1–3 ms, i.e. ~16 ms off an 87 ms frame. Gate as always on the
+`symmetric-expansion` D4 window, which this cannot move — the write set is
+unchanged and its order is unobservable.
+
 ### E0 — sort the worklist (cheap, and most of the prize)
 
 The worklist is filled in **insertion order**: `claimCount` increments as keys

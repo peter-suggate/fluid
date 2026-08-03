@@ -7595,16 +7595,38 @@ fn claimLeafSplit(origin: vec3u, size: u32) -> bool {
 // dependent device loads on the serial chain of a size-32 split. The
 // rejection latch and the absent-page skip keep the exact behaviour of
 // storeOwnerRequired, which likewise only tests for a zero page index.
-fn splitLeaf(origin: vec3u, size: u32) {
+// Materialize a claimed split across lanes cooperating invocations.
+//
+// lanes == 1 reproduces the original serial walk exactly, term for term and
+// page for page; it stays the definition of the result. Wider lane counts
+// divide the SAME write set, and dividing it is observationally free: the write
+// is atomicMin against a value that depends only on (origin, size, cell), so
+// it is commutative and idempotent and no lane can see another's order. The
+// claim is deliberately NOT here -- claimLeafSplit elects one materializer per
+// split before this is ever reached, so a fanned-out call cannot duplicate work
+// that the serial one deduplicated.
+//
+// The division is over PAGES, and the per-page body is byte-for-byte the serial
+// one. That matters more than it looks: an earlier revision flattened the inner
+// triple loop so it could stride cells as well as pages, which put three
+// integer div/mods on every one of a size-32 split's 32,768 cells. At lanes == 1
+// that alone measured +6.05 ms/advance on droplet-256 (86.97 -> 93.02) -- a
+// direct measurement of how ALU-sensitive this loop is. Striding pages needs no
+// arithmetic the serial walk did not already do.
+//
+// A size-32 leaf is 4x4x4 = 64 pages and puts exactly one lane on each; size 16
+// is 8 pages over 8 lanes. Smaller leaves are one page and stay serial, which is
+// the right trade -- they are at most 512 cells against the size-32 case's
+// 32,768, and those big coarse-neighbour splits are what the profile is made of.
+fn materializeSplitStrided(origin: vec3u, size: u32, lane: u32, lanes: u32) {
   let child = size / 2u;
-  if (!claimLeafSplit(origin, size)) { return; }
   let payloadBase = ownerPageMap().payloadBase;
   let brickDims = (dims() + vec3u(7u)) / 8u;
   let first = origin / 8u;
   let last = (origin + vec3u(size - 1u)) / 8u;
   let shape = last - first + vec3u(1u);
   let pages = shape.x * shape.y * shape.z;
-  for (var page = 0u; page < pages; page += 1u) {
+  for (var page = lane; page < pages; page += lanes) {
     let brick = first + vec3u(page % shape.x, (page / shape.x) % shape.y,
       page / (shape.x * shape.y));
     let logical = brick.x + brick.y * brickDims.x + brick.z * brickDims.x * brickDims.y;
@@ -7627,6 +7649,11 @@ fn splitLeaf(origin: vec3u, size: u32) {
       }
     }
   }
+}
+
+fn splitLeaf(origin: vec3u, size: u32) {
+  if (!claimLeafSplit(origin, size)) { return; }
+  materializeSplitStrided(origin, size, 0u, 1u);
 }
 
 fn refineTopologyAt(gid: vec3u) {
