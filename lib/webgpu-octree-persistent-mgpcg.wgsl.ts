@@ -118,16 +118,25 @@ export interface OctreePersistentMGPCGShaderOptions {
    */
   readonly restrictedPrefixNetwork?: boolean;
   /**
-   * Timing instrument, not a solver option. Re-runs `applyBandRows` and/or
-   * `applyAllRows` an extra `p.worksets.z` times per call. Both are pure
-   * gathers whose every item writes only its own row of an output channel that
-   * is never their input, so a repeat recomputes the identical value and the
-   * solve is value-neutral by idempotence: the iteration count, the
-   * convergence and every published word are unchanged, and only the wall
-   * moves. The repeat bound is read from the uniform block rather than
-   * emitted as a literal so the Metal backend cannot fold the repeats away.
+   * Timing instrument, not a solver option. Re-runs one phase an extra
+   * `p.worksets.z` times per call.
+   *
+   * All three probeable phases are value-neutral by the same read/write
+   * disjointness:
+   *  - `applyBandRows` / `applyAllRows` are pure gathers whose every item
+   *    writes only its own row of an output channel that is never their input.
+   *  - `sparseSmoothPhase` reads `source` and writes `destination`, and
+   *    `smoothLevel` alternates `S_A->S_B`, `S_B->S_A`, so the two are always
+   *    distinct; `S_FLAGS`, `S_DIAG` and `S_RHS` are read and never written,
+   *    and each worklist slot is touched by exactly one lane.
+   *
+   * So a repeat recomputes the identical value into the identical slot: the
+   * iteration count, the convergence and every published word are unchanged,
+   * and only the wall moves. The repeat bound is read from the uniform block
+   * rather than emitted as a literal so the Metal backend cannot fold the
+   * repeats away and leave a null result that looks like a measurement.
    */
-  readonly phaseRepeatProbe?: "band" | "all-rows";
+  readonly phaseRepeatProbe?: "band" | "all-rows" | "smooth";
   /**
    * Route class-0 rows of the Section 4.3 band sweep through the same cheap
    * regular apply `applyAllRows` already uses for them.
@@ -357,17 +366,17 @@ export function octreePersistentMGPCGWGSL(
   // phase's own marginal cost -- an A/B whose delta divided by the repeat count
   // IS the measurement.
   const phaseRepeatProbe = options.phaseRepeatProbe;
-  if (phaseRepeatProbe !== undefined
-    && phaseRepeatProbe !== "band" && phaseRepeatProbe !== "all-rows") {
+  if (phaseRepeatProbe !== undefined && phaseRepeatProbe !== "band"
+    && phaseRepeatProbe !== "all-rows" && phaseRepeatProbe !== "smooth") {
     throw new RangeError("Persistent MGPCG phase repeat probe is invalid");
   }
   // `p.worksets.z` is a reserved uniform word the host writes with the extra
   // repeat count. Reading it (rather than emitting a literal) keeps the repeats
   // opaque to the shader compiler, which could otherwise prove the body
   // idempotent and delete them -- which would silently measure nothing.
-  const repeatOpen = (phase: "band" | "all-rows") => phaseRepeatProbe === phase
+  const repeatOpen = (phase: "band" | "all-rows" | "smooth") => phaseRepeatProbe === phase
     ? " for(var probeRepeat=0u;probeRepeat<=p.worksets.z;probeRepeat+=1u){" : "";
-  const repeatClose = (phase: "band" | "all-rows") =>
+  const repeatClose = (phase: "band" | "all-rows" | "smooth") =>
     phaseRepeatProbe === phase ? "}" : "";
 
   // --- solve-invariant stencil column cache (E2, addressing only) ----------
@@ -596,6 +605,8 @@ fn buildRegularStencilColumns(row:u32){
   const bandRepeatClose = repeatClose("band");
   const allRowsRepeatOpen = repeatOpen("all-rows");
   const allRowsRepeatClose = repeatClose("all-rows");
+  const smoothRepeatOpen = repeatOpen("smooth");
+  const smoothRepeatClose = repeatClose("smooth");
   const diagnosticOutputChannel = options.diagnosticOutputChannel
     ?? OCTREE_PERSISTENT_MGPCG_CHANNEL.pressure;
   const captureInitialResidual = options.diagnosticStageCapture
@@ -1190,11 +1201,11 @@ fn chebyshevWeight(l:u32,phase:u32,degree:u32)->f32{
  return 1.0/(centre-radius*cos(3.141592653589793*(2.0*f32(phase)+1.0)/(2.0*f32(degree))));}
 fn sparseSmoothPhase(l:u32,source:u32,destination:u32,phase:u32,degree:u32,lane:u32){
  let weight=chebyshevWeight(l,phase,degree);let n=count(l);
- for(var i=lane;i<n;i+=LANES){let slot=workSlot(l,i);let value=loadf(source,l,slot);
+${smoothRepeatOpen} for(var i=lane;i<n;i+=LANES){let slot=workSlot(l,i);let value=loadf(source,l,slot);
   if(!smoothable(l,slot)){storef(destination,l,slot,value);continue;}
   let d=loadf(S_DIAG,l,slot);if(!(d>0.0)){reportAt(NONPOSITIVE,79u,slot);continue;}
   let next=value+weight*(loadf(S_RHS,l,slot)-applied(l,slot,source))/d;
-  if(!finite(next)){reportAt(NONFINITE,80u,slot);}else{storef(destination,l,slot,next);}}}
+  if(!finite(next)){reportAt(NONFINITE,80u,slot);}else{storef(destination,l,slot,next);}}${smoothRepeatClose}}
 fn smoothLevel(l:u32,reverse:bool,lane:u32){
  let degree=p.shape.y;
  for(var step=0u;step<degree;step+=1u){let phase=select(step,degree-1u-step,reverse);

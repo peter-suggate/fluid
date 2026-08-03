@@ -321,7 +321,7 @@ export function octreePersistentMGPCGRestrictedPrefixNetworkEnabled(
 }
 
 /** Phase selected by {@link octreePersistentMGPCGPhaseRepeatProbe}. */
-export type OctreePersistentMGPCGPhaseRepeatProbe = "band" | "all-rows";
+export type OctreePersistentMGPCGPhaseRepeatProbe = "band" | "all-rows" | "smooth";
 
 /**
  * Timing instrument for the one-dispatch solve. Absent by default.
@@ -347,7 +347,7 @@ export function octreePersistentMGPCGPhaseRepeatProbe(
   const value = resolved?.FLUID_PERSISTENT_MGPCG_PHASE_REPEAT;
   if (!value) return undefined;
   const [phase, count] = value.split(":");
-  if (phase !== "band" && phase !== "all-rows") {
+  if (phase !== "band" && phase !== "all-rows" && phase !== "smooth") {
     throw new RangeError(`Unknown persistent MGPCG phase repeat probe ${value}`);
   }
   const repeats = count === undefined ? 1 : Number(count);

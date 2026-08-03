@@ -532,8 +532,10 @@ test("the phase repeat probe is idempotent, opaque to the compiler, and absent b
     { FLUID_PERSISTENT_MGPCG_PHASE_REPEAT: "band:4" }), { phase: "band", repeats: 4 });
   assert.deepEqual(octreePersistentMGPCGPhaseRepeatProbe(
     { FLUID_PERSISTENT_MGPCG_PHASE_REPEAT: "all-rows" }), { phase: "all-rows", repeats: 1 });
+  assert.deepEqual(octreePersistentMGPCGPhaseRepeatProbe(
+    { FLUID_PERSISTENT_MGPCG_PHASE_REPEAT: "smooth:6" }), { phase: "smooth", repeats: 6 });
   assert.throws(() => octreePersistentMGPCGPhaseRepeatProbe(
-    { FLUID_PERSISTENT_MGPCG_PHASE_REPEAT: "vcycle:2" }), /Unknown persistent MGPCG phase repeat/);
+    { FLUID_PERSISTENT_MGPCG_PHASE_REPEAT: "restrict:2" }), /Unknown persistent MGPCG phase repeat/);
   assert.throws(() => octreePersistentMGPCGPhaseRepeatProbe(
     { FLUID_PERSISTENT_MGPCG_PHASE_REPEAT: "band:0" }), /integer in \[1,64\]/);
 
@@ -554,6 +556,20 @@ test("the phase repeat probe is idempotent, opaque to the compiler, and absent b
   });
   assert.equal(allRows.includes("probeRepeat"), true);
   assert.notEqual(allRows, band, "the two probes select different phases");
+
+  // The smoother's value-neutrality rests on source != destination, which
+  // `smoothLevel` guarantees by alternating S_A->S_B and S_B->S_A. Pin that
+  // alternation here: if it ever became an in-place sweep the probe would
+  // silently stop being idempotent.
+  const smooth = octreePersistentMGPCGWGSL({
+    maximumIterations: 10, compactLiveRows: true, phaseRepeatProbe: "smooth",
+  });
+  assert.match(smooth,
+    /for\(var probeRepeat=0u;probeRepeat<=p\.worksets\.z;probeRepeat\+=1u\)\{ for\(var i=lane;i<n;i\+=LANES\)/);
+  assert.match(smooth,
+    /sparseSmoothPhase\(l,S_A,S_B,phase,degree,lane\);.*\s*.*sparseSmoothPhase\(l,S_B,S_A,phase,degree,lane\);/);
+  assert.notEqual(smooth, band);
+  assert.notEqual(smooth, allRows);
 });
 
 test("every band-row and staged-smoother combination is accepted by naga", () => {
@@ -570,7 +586,7 @@ test("every band-row and staged-smoother combination is accepted by naga", () =>
     for (const stagedSmoother of [false, true]) {
       for (const stencilColumnCache of [false, true]) {
         for (const restrictedPrefixNetwork of [false, true]) {
-        for (const phaseRepeatProbe of [undefined, "band", "all-rows"] as const) {
+        for (const phaseRepeatProbe of [undefined, "band", "all-rows", "smooth"] as const) {
         for (const regularBandRows of [undefined, "census", "route"] as const) {
           const name = `mgpcg-${regularBandRows ?? "off"}-${
             stagedSmoother ? "staged" : "direct"}-${

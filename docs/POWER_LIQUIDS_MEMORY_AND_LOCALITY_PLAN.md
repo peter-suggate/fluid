@@ -912,3 +912,30 @@ transform does, which is why `node --import tsx -e "import('./lib/…')"` belong
 in the loop before any measured run — `WORK_AND_DATA` §6 learning 6, hit again.
 
 The two memory censuses in §1 completed before that edit and are valid.
+
+**2026-08-03, the same class again, different file.** `symmetric-expansion`
+cannot run: `lib/webgpu-octree.ts` is dirty with ~120 uncommitted lines in
+another agent's worktree and its "GPU-resident octree projection" shader module
+fails to compile. The control run of the gate, with no experimental flag set,
+fails identically — which is how you tell an upstream break from your own. E2c's
+D4 gate is owed on this.
+
+## 6. Traps this axis has now paid for twice
+
+- **`node --import tsx -e "import('./tools/webgpu-smoke-executor.ts')"` RUNS A
+  SMOKE.** That module self-executes on import: it constructs a device, takes
+  the exclusive GPU lock and starts advancing a scene. Type-checking it that way
+  costs ~90 s of somebody else's GPU time and leaves a lock behind. Use
+  `npx tsc --noEmit`, or import a `lib/` module, never that one.
+- **A census with no consumer is not a measurement.** `readPersistentBandCensus`
+  had no caller in `lib/` or `tools/` at all, and `power-hybrid-census` was
+  printed by the child and discarded by `benchmark-power-dam.ts`. Both are wired
+  now, both loudly. Before trusting any `FLUID_*_CENSUS`-style knob, grep for a
+  consumer.
+- **A model of this kernel is worth one run of a probe.** Two models in this
+  section were wrong by 3.4x and by an order of magnitude. The idempotent
+  phase-repeat probe settled each question in a single interleaved A/B.
+- **Lane choice is a claim about what you measured.** The droplet family pins
+  the fluid and sweeps the container, so a droplet win can be pure container
+  overhead. Any win quoted as a general speedup needs a fluid-heavy lane
+  (`fill-800`, `large`) beside it.
