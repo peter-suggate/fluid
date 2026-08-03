@@ -179,6 +179,27 @@ function leafSize(value: number): OctreeOwnerLeafSize {
   return value as OctreeOwnerLeafSize;
 }
 
+/**
+ * Gate for shaping the owner-page candidate sort by its live key count.
+ *
+ * Default OFF, so the shipping encode is byte-for-byte what it was and the
+ * droplet sweep's published baseline stays the baseline. The ON arm is the
+ * measured fix for the only term that moved that sweep: a 100-cell droplet in
+ * a 240-cubed container sorted 32,768 keys through 120 barrier stages in one
+ * workgroup because the network was sized by the dense topology tile lattice
+ * rather than by the few hundred keys actually present. Gate it on the D4
+ * symmetric-expansion oracle before flipping the default — the candidate order
+ * feeds stable-ID carry, so a wrong network is a correctness bug, not a slow
+ * one.
+ */
+export function ownerPageLiveSortSpanEnabled(
+  environment?: Readonly<Record<string, string | undefined>>,
+): boolean {
+  const resolved = environment
+    ?? (typeof process !== "undefined" ? process.env : undefined);
+  return resolved?.FLUID_OWNER_PAGE_LIVE_SORT_SPAN === "1";
+}
+
 export function planOctreeOwnerPages(
   dimensions: OctreeOwnerCoordinate,
   options: OctreeOwnerPagePlanOptions = {},
@@ -828,6 +849,9 @@ const META_ADDED: u32 = 29u;
 const META_RETIRED: u32 = 30u;
 const META_FREE_HEAD: u32 = 31u;
 override SORT_CAPACITY: u32 = 1u;
+/** 1 shapes the candidate bitonic network by the live key count instead of the
+ * capacity-derived arena bound. See buildOwnerPageCandidate. */
+override LIVE_SORT_SPAN: u32 = 0u;
 
 fn sortABase() -> u32 { return 32u; }
 fn candidateKeyBase() -> u32 { return sortABase() + SORT_CAPACITY; }
@@ -954,14 +978,34 @@ fn buildOwnerPageCandidate(@builtin(local_invocation_index) lid:u32) {
   let generation=workgroupUniformLoad(&transactionState[1]);
   let oldCount=workgroupUniformLoad(&transactionState[2]);
   let sourceSlots=workgroupUniformLoad(&transactionState[3]);
+  // SORT_CAPACITY is the *arena* bound — the worst-case union of the dense
+  // topology tile lattice and the analytic support floor, so it grows with the
+  // container and not with the fluid. Sorting it whole meant a 100-cell droplet
+  // in a 240-cubed box ran a 32,768-key bitonic network (120 device-scope
+  // barrier stages, ~15,360 compare-exchanges per lane) inside a single
+  // workgroup, against a few hundred live keys: domain-sized work wearing a
+  // compliant (1,1,1) launch, which is why the launch-shape audit scored this
+  // file clean while it dominated the wall at 240/256 cubed.
+  //
+  // The live span is the smallest power of two covering sourceSlots, which
+  // the transaction has already published and which is workgroup-uniform.
+  // Sorting [0, sortSpan) is equivalent: every real key is below INVALID_KEY,
+  // so the padding it replaces sorted to the tail regardless, and nothing
+  // downstream reads past sourceSlots. Only the network size changes.
+  var sortSpan=SORT_CAPACITY;
+  if(LIVE_SORT_SPAN!=0u){
+    var span=1u;
+    if(sourceSlots>1u){span=1u<<(32u-countLeadingZeros(sourceSlots-1u));}
+    sortSpan=min(span,SORT_CAPACITY);
+  }
   if(enabled!=0u){
-    for(var slot=lid;slot<SORT_CAPACITY;slot+=256u){
+    for(var slot=lid;slot<sortSpan;slot+=256u){
       scratch[sortABase()+slot]=select(INVALID_KEY,candidatePageKey(slot),slot<sourceSlots);
     }
     storageBarrier();workgroupBarrier();
-    for(var width=2u;width<=SORT_CAPACITY;width<<=1u){
+    for(var width=2u;width<=sortSpan;width<<=1u){
       for(var stride=width>>1u;stride>0u;stride>>=1u){
-        for(var index=lid;index<SORT_CAPACITY;index+=256u){
+        for(var index=lid;index<sortSpan;index+=256u){
           let partner=index^stride;
           if(partner>index){
             let left=sortedKey(index);let right=sortedKey(partner);
@@ -1430,7 +1474,10 @@ export class WebGPUOctreeSimulationOwnerPages {
       { id: "octree.owner-pages.pipeline.build", phase: "adaptive-topology",
         label: "Compile owner-page candidate builder", dependencies: ["octree.owner-pages.shader"],
         run: async () => { this.buildCandidate = await this.device.createComputePipelineAsync(
-          this.pipelineDescriptor("buildOwnerPageCandidate", { SORT_CAPACITY: this.sortCapacity })); } },
+          this.pipelineDescriptor("buildOwnerPageCandidate", {
+            SORT_CAPACITY: this.sortCapacity,
+            LIVE_SORT_SPAN: ownerPageLiveSortSpanEnabled() ? 1 : 0,
+          })); } },
       { id: "octree.owner-pages.pipeline.commit-candidate", phase: "adaptive-topology",
         label: "Compile owner-page candidate commit", dependencies: ["octree.owner-pages.shader"],
         run: async () => { this.commitCandidate = await this.device.createComputePipelineAsync(

@@ -1351,6 +1351,28 @@ export class WebGPUFineLevelSetTopology {
       pass.setPipeline(pipeline); pass.setBindGroup(0, this.cachedBindGroup(pipeline, entries, used));
       pass.dispatchWorkgroups(x, y);
     };
+    // The sparse-scan family's launches are the only ones here shaped by the
+    // *logical* brick lattice rather than by a capacity, and at fine factor 4
+    // that lattice is one brick per finest cell. `ceil(nx*ny*nz / 256)` reaches
+    // 65,536 at a 256-cubed container against a `maxComputeWorkgroupsPerDimension`
+    // floor of 65,535 — which is not in `requiredFluidDeviceLimits` — so a bare
+    // `dispatchWorkgroups(blocks, 1)` made every domain at or above 16,776,960
+    // cells a Dawn validation error on every recurring step, with no guard
+    // anywhere in the tree. Tiling the same one-dimensional workload over x/y
+    // is the mechanical half of the fix and changes nothing below the limit:
+    // `planFineLevelSetDispatch2D` returns y = 1 there, and the kernels
+    // recover `wid.x` exactly. Shaping these five by live counts instead of the
+    // dense lattice is the separate, larger half.
+    const runIdentityLinear = (pipeline: GPUComputePipeline, entries: GPUBindGroupEntry[],
+      blocks: number, used: readonly number[], label?: string) => {
+      const dispatch = planFineLevelSetDispatch2D(
+        blocks, this.device.limits.maxComputeWorkgroupsPerDimension,
+      );
+      if (dispatch.workgroups === 0) return;
+      const pass = broker.compute(label ? { label } : undefined);
+      pass.setPipeline(pipeline); pass.setBindGroup(0, this.cachedBindGroup(pipeline, entries, used));
+      pass.dispatchWorkgroups(dispatch.x, dispatch.y, dispatch.z);
+    };
     const clearItems = Math.max(7 + plan.maximumResidentBricks, 8);
     run(this.clearPageDeltaPipeline, deltaEntries, "Clear exact global fine page delta",
       Math.ceil(Math.max(24, 3 * FINE_LEVELSET_TOPOLOGY_INDIRECT_RECORDS) / 64), [0, 15, 22]);
@@ -1375,11 +1397,11 @@ export class WebGPUFineLevelSetTopology {
         "Validate deterministic cold global fine seeds", 1, [7, 20]);
       const seedBlocks = Math.ceil((2 * plan.maximumResidentBricks) / 256);
       const seedSuperBlocks = Math.ceil(seedBlocks / 256);
-      runIdentity(this.scanSparseSeedRecordsPipeline, discoverEntries, seedBlocks, 1, [0, 7, 14, 16, 18, 20]);
-      runIdentity(this.scanSparseGroupsPipeline, discoverEntries, seedSuperBlocks, 1, [0, 7, 20]);
+      runIdentityLinear(this.scanSparseSeedRecordsPipeline, discoverEntries, seedBlocks, [0, 7, 14, 16, 18, 20]);
+      runIdentityLinear(this.scanSparseGroupsPipeline, discoverEntries, seedSuperBlocks, [0, 7, 20]);
       runIdentity(this.scanSparseSuperGroupsPipeline, discoverEntries, 1, 1, [0, 7, 20]);
-      runIdentity(this.offsetSparseGroupsPipeline, discoverEntries, seedSuperBlocks, 1, [0, 7, 20]);
-      runIdentity(this.offsetSparseRecordsPipeline, discoverEntries, seedBlocks, 1, [0, 7, 20]);
+      runIdentityLinear(this.offsetSparseGroupsPipeline, discoverEntries, seedSuperBlocks, [0, 7, 20]);
+      runIdentityLinear(this.offsetSparseRecordsPipeline, discoverEntries, seedBlocks, [0, 7, 20]);
       run(this.finalizeDesiredSeedCountPipeline, discoverEntries, "Finalize deterministic cold fine seed count",
         1, [0, 7, 14, 16, 18, 20]);
       run(this.clearSparseCandidatesPipeline, discoverEntries, "Clear cold fine seed expansion",
@@ -1390,15 +1412,15 @@ export class WebGPUFineLevelSetTopology {
       const desiredSuperBlocks = Math.ceil(desiredBlocks / 256);
       const compactSortedExpansion = (label: string) => {
         runIdentity(this.sortSparseCandidatesPipeline, discoverEntries, 1, 1, [0, 19]);
-        runIdentity(this.scanSparseCandidateRecordsPipeline, discoverEntries,
-          desiredBlocks, 1, [0, 7, 19, 20]);
-        runIdentity(this.scanSparseGroupsPipeline, discoverEntries,
-          desiredSuperBlocks, 1, [0, 7, 20]);
+        runIdentityLinear(this.scanSparseCandidateRecordsPipeline, discoverEntries,
+          desiredBlocks, [0, 7, 19, 20]);
+        runIdentityLinear(this.scanSparseGroupsPipeline, discoverEntries,
+          desiredSuperBlocks, [0, 7, 20]);
         runIdentity(this.scanSparseSuperGroupsPipeline, discoverEntries, 1, 1, [0, 7, 20]);
-        runIdentity(this.offsetSparseGroupsPipeline, discoverEntries,
-          desiredSuperBlocks, 1, [0, 7, 20]);
-        runIdentity(this.offsetSparseRecordsPipeline, discoverEntries,
-          desiredBlocks, 1, [0, 7, 20]);
+        runIdentityLinear(this.offsetSparseGroupsPipeline, discoverEntries,
+          desiredSuperBlocks, [0, 7, 20]);
+        runIdentityLinear(this.offsetSparseRecordsPipeline, discoverEntries,
+          desiredBlocks, [0, 7, 20]);
         run(this.compactSparseDesiredPipeline, discoverEntries, label,
           Math.ceil(this.sparseCandidateCapacity / 64), [0, 7, 19, 20]);
       };
@@ -1436,23 +1458,23 @@ export class WebGPUFineLevelSetTopology {
       if (algorithmDiagnostics) broker.fence("algorithm diagnostic after recurring fine-band scatter");
       const recurringBlocks = Math.ceil(plan.logicalBrickCount / 256);
       const recurringSuperBlocks = Math.ceil(recurringBlocks / 256);
-      runIdentity(this.scanRecurringDesiredPipeline, discoverEntries,
-        recurringBlocks, 1, [0, 7, 20, 21],
+      runIdentityLinear(this.scanRecurringDesiredPipeline, discoverEntries,
+        recurringBlocks, [0, 7, 20, 21],
         "Scan and compact recurring fine-band logical identity");
-      runIdentity(this.scanSparseGroupsPipeline, discoverEntries,
-        recurringSuperBlocks, 1, [0, 7, 20]);
+      runIdentityLinear(this.scanSparseGroupsPipeline, discoverEntries,
+        recurringSuperBlocks, [0, 7, 20]);
       runIdentity(this.scanSparseSuperGroupsPipeline, discoverEntries,
         1, 1, [0, 7, 20]);
       if (recurringBlocks > 1) {
-        runIdentity(this.offsetSparseGroupsPipeline, discoverEntries,
-          recurringSuperBlocks, 1, [0, 7, 20]);
-        runIdentity(this.offsetSparseRecordsPipeline, discoverEntries,
-          recurringBlocks, 1, [0, 7, 20]);
+        runIdentityLinear(this.offsetSparseGroupsPipeline, discoverEntries,
+          recurringSuperBlocks, [0, 7, 20]);
+        runIdentityLinear(this.offsetSparseRecordsPipeline, discoverEntries,
+          recurringBlocks, [0, 7, 20]);
       }
       runIdentity(this.finalizeRecurringSparseBandPipeline, discoverEntries,
         1, 1, [0, 7, 20, 21]);
-      runIdentity(this.scatterRecurringSparseBandPipeline, discoverEntries,
-        recurringBlocks, 1, [0, 6, 7, 15, 20, 21]);
+      runIdentityLinear(this.scatterRecurringSparseBandPipeline, discoverEntries,
+        recurringBlocks, [0, 6, 7, 15, 20, 21]);
       if (algorithmDiagnostics) broker.fence("algorithm diagnostic after recurring fine-band scan");
     }
     if (publication.kind === "bootstrap") {
@@ -1853,31 +1875,49 @@ fn seedRecordPresent(item:u32)->bool{
 fn sparseScanScratch(index:u32)->u32{return params.scanRecordCapacity+index;}
 fn sparseScanBlockCount()->u32{return (control[9]+255u)/256u;}
 fn sparseScanSuperBlockCount()->u32{return (sparseScanBlockCount()+255u)/256u;}
-@compute @workgroup_size(256) fn scanSparseSeedRecords(@builtin(workgroup_id)wid:vec3u,@builtin(local_invocation_index)local:u32){
- let item=wid.x*256u+local;let count=2u*params.pageCapacity;let present=item<count&&seedRecordPresent(item);
+// The sparse-scan family is dispatched over a two-dimensional grid: at
+// global fine factor 4 the logical brick lattice is one brick per finest
+// cell, so a 256-cubed container needs 65,536 scan blocks against a
+// maxComputeWorkgroupsPerDimension floor of 65,535, and a bare 1-D launch is
+// a validation error rather than a slow path. Every one of these kernels
+// therefore recovers its block ordinal with fineLinearWorkgroup, which is
+// exactly wid.x whenever the y extent is 1 — i.e. bit-identical on every
+// domain that fit before. The tail blocks a rectangular grid adds beyond the
+// real block count still run — their block ordinal is only ever used to *write*
+// under an existing bound, so nothing outside the authored scan region is
+// touched, and the scan's workgroup barriers stay in unconditional control
+// flow. Returning early instead would be an unstructured barrier: the block
+// counts are derived from control[9], which Tint treats as non-uniform.
+@compute @workgroup_size(256) fn scanSparseSeedRecords(@builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)nwg:vec3u,@builtin(local_invocation_index)local:u32){
+ let block=fineLinearWorkgroup(wid,nwg);let count=2u*params.pageCapacity;
+ let item=block*256u+local;let present=item<count&&seedRecordPresent(item);
  let prefix=scanIdentityBlock(local,select(0u,1u,present));if(item<count){desiredScan[item]=prefix;}
- if(local==255u){desiredScan[sparseScanScratch(wid.x)]=identityScanTotal;}
+ if(local==255u&&block*256u<count){desiredScan[sparseScanScratch(block)]=identityScanTotal;}
  if(item==0u){control[9]=count;}}
-@compute @workgroup_size(256) fn scanSparseCandidateRecords(@builtin(workgroup_id)wid:vec3u,@builtin(local_invocation_index)local:u32){
- let item=wid.x*256u+local;let count=params.sparseCandidateCapacity;
+@compute @workgroup_size(256) fn scanSparseCandidateRecords(@builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)nwg:vec3u,@builtin(local_invocation_index)local:u32){
+ let block=fineLinearWorkgroup(wid,nwg);let count=params.sparseCandidateCapacity;
+ let item=block*256u+local;
  let present=item<count&&sparseCandidateRunStart(item);
  let prefix=scanIdentityBlock(local,select(0u,1u,present));if(item<count){desiredScan[item]=prefix;}
- if(local==255u){desiredScan[sparseScanScratch(wid.x)]=identityScanTotal;}
+ if(local==255u&&block*256u<count){desiredScan[sparseScanScratch(block)]=identityScanTotal;}
  if(item==0u){control[9]=count;}}
-@compute @workgroup_size(256) fn scanSparseGroups(@builtin(workgroup_id)wid:vec3u,@builtin(local_invocation_index)local:u32){
- let item=wid.x*256u+local;let blocks=sparseScanBlockCount();var value=0u;
+@compute @workgroup_size(256) fn scanSparseGroups(@builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)nwg:vec3u,@builtin(local_invocation_index)local:u32){
+ let block=fineLinearWorkgroup(wid,nwg);let blocks=sparseScanBlockCount();
+ let item=block*256u+local;var value=0u;
  if(item<blocks){value=desiredScan[sparseScanScratch(item)];}
  let prefix=scanIdentityBlock(local,value);if(item<blocks){desiredScan[sparseScanScratch(item)]=prefix;}
- if(local==255u){desiredScan[sparseScanScratch(blocks+wid.x)]=identityScanTotal;}}
+ if(local==255u&&block*256u<blocks){desiredScan[sparseScanScratch(blocks+block)]=identityScanTotal;}}
 @compute @workgroup_size(256) fn scanSparseSuperGroups(@builtin(local_invocation_index)local:u32){
  let blocks=sparseScanBlockCount();let count=sparseScanSuperBlockCount();var value=0u;
  if(local<count){value=desiredScan[sparseScanScratch(blocks+local)];}
  let prefix=scanIdentityBlock(local,value);if(local<count){desiredScan[sparseScanScratch(blocks+local)]=prefix;}}
-@compute @workgroup_size(256) fn offsetSparseGroups(@builtin(workgroup_id)wid:vec3u,@builtin(local_invocation_index)local:u32){
- let item=wid.x*256u+local;let blocks=sparseScanBlockCount();
- if(item<blocks){desiredScan[sparseScanScratch(item)]+=desiredScan[sparseScanScratch(blocks+wid.x)];}}
-@compute @workgroup_size(256) fn offsetSparseRecords(@builtin(workgroup_id)wid:vec3u,@builtin(local_invocation_index)local:u32){
- let item=wid.x*256u+local;if(item<control[9]){desiredScan[item]+=desiredScan[sparseScanScratch(wid.x)];}}
+@compute @workgroup_size(256) fn offsetSparseGroups(@builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)nwg:vec3u,@builtin(local_invocation_index)local:u32){
+ let block=fineLinearWorkgroup(wid,nwg);let blocks=sparseScanBlockCount();
+ let item=block*256u+local;
+ if(item<blocks){desiredScan[sparseScanScratch(item)]+=desiredScan[sparseScanScratch(blocks+block)];}}
+@compute @workgroup_size(256) fn offsetSparseRecords(@builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)nwg:vec3u,@builtin(local_invocation_index)local:u32){
+ let block=fineLinearWorkgroup(wid,nwg);
+ let item=block*256u+local;if(item<control[9]){desiredScan[item]+=desiredScan[sparseScanScratch(block)];}}
 fn sparseSeedTotal()->u32{let count=2u*params.pageCapacity;if(count==0u){return 0u;}let last=count-1u;
  return desiredScan[last]+select(0u,1u,seedRecordPresent(last));}
 fn sparseCandidateTotal()->u32{
@@ -2119,10 +2159,11 @@ fn recurringDesiredPresent(item:u32)->bool{
  return control[0]==0u&&item<desiredLogicalCount()&&(atomicLoad(&topologyErrors[item])&2u)!=0u;
 }
 @compute @workgroup_size(256) fn scanRecurringDesiredRecords(
- @builtin(workgroup_id)wid:vec3u,@builtin(local_invocation_index)local:u32){
- let item=wid.x*256u+local;let count=desiredLogicalCount();let present=recurringDesiredPresent(item);
+ @builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)nwg:vec3u,@builtin(local_invocation_index)local:u32){
+ let block=fineLinearWorkgroup(wid,nwg);let count=desiredLogicalCount();
+ let item=block*256u+local;let present=recurringDesiredPresent(item);
  let prefix=scanIdentityBlock(local,select(0u,1u,present));if(item<count){desiredScan[item]=prefix;}
- if(local==255u){desiredScan[sparseScanScratch(wid.x)]=identityScanTotal;}
+ if(local==255u&&block*256u<count){desiredScan[sparseScanScratch(block)]=identityScanTotal;}
  if(item==0u){control[9]=count;}
 }
 fn recurringDesiredTotal()->u32{let count=desiredLogicalCount();if(count==0u){return 0u;}let last=count-1u;
@@ -2133,8 +2174,8 @@ fn recurringDesiredTotal()->u32{let count=desiredLogicalCount();if(count==0u){re
  if(count>params.pageCapacity){control[0]|=CAPACITY;control[6]=count;}
 }
 @compute @workgroup_size(256) fn scatterRecurringSparseBand(
- @builtin(workgroup_id)wid:vec3u,@builtin(local_invocation_index)local:u32){
- let key=wid.x*256u+local;if(key>=desiredLogicalCount()){return;}
+ @builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)nwg:vec3u,@builtin(local_invocation_index)local:u32){
+ let key=fineLinearWorkgroup(wid,nwg)*256u+local;if(key>=desiredLogicalCount()){return;}
  let membership=atomicLoad(&topologyErrors[key]);
  atomicStore(&topologyErrors[key],select(0u,membership&(DELTA_DIRTY|DELTA_SUPPORT),
   DELTA_RADIUS_MASK&&(!REASON_CONES||pageDelta[10]==2u)));

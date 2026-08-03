@@ -57,7 +57,15 @@ test("recurring GPU owner publication keeps stable physical IDs and is atomic-fr
   const shader = octreeDeterministicOwnerPageLifecycleShader;
   assert.match(shader, /fn buildOwnerPageCandidate/);
   assert.match(shader,
-    /for\(var width=2u;width<=SORT_CAPACITY;width<<=1u\)[\s\S]*let partner=index\^stride/);
+    /for\(var width=2u;width<=sortSpan;width<<=1u\)[\s\S]*let partner=index\^stride/);
+  // The network is bounded by a span, not by the arena constant, so a small
+  // fluid in a large container can sort its few hundred live keys instead of
+  // the capacity-derived worst case. With LIVE_SORT_SPAN off the span *is*
+  // SORT_CAPACITY, so the shipping encode is unchanged; with it on the span is
+  // the smallest power of two covering the transaction's published live count,
+  // which is workgroup-uniform and therefore legal around the sort's barriers.
+  assert.match(shader, /var sortSpan=SORT_CAPACITY;[\s\S]{0,240}?sortSpan=min\(span,SORT_CAPACITY\)/);
+  assert.match(shader, /span=1u<<\(32u-countLeadingZeros\(sourceSlots-1u\)\)/);
   assert.match(shader, /let key=sortedKey\(row\);let old=lowerBoundOld\(key,oldCount\)/);
   assert.match(shader, /let carried=old<oldCount&&arena\[recordKeyBase\(activeTable\(\)\)\+old\]==key/);
   assert.match(shader, /if\(carried\)\{oldPage=arena\[recordPageBase\(activeTable\(\)\)\+old\];\}/);

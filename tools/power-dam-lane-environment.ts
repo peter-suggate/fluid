@@ -8,7 +8,55 @@
  * number the benchmark gates on.
  */
 
-export type PowerDamRuntimeLane = "mini" | "large" | "hydrostatic-tiny" | "large-hydrostatic" | "deep-hydrostatic" | "hydrostatic" | "ui" | "moving-interface" | "ocean" | "ceiling-drop" | "symmetric-expansion";
+export type PowerDamRuntimeLane = "mini" | "large" | "hydrostatic-tiny" | "large-hydrostatic" | "deep-hydrostatic" | "hydrostatic" | "ui" | "moving-interface" | "ocean" | "ceiling-drop" | "symmetric-expansion" | "droplet-64" | "droplet-128" | "droplet-240" | "droplet-256";
+
+/**
+ * The droplet sweep, as lane records.
+ *
+ * Four lanes that differ in exactly two fields — the scene id and the expected
+ * grid. Everything else is written identically on purpose: same 0.05 m
+ * lattice, same leaf 32 / band 1 / fine factor 4, same 0.004 s step, same
+ * 100-cell corner reservoir, same authored row reserve. A wall difference
+ * between two of these lanes therefore has one possible cause, which is the
+ * entire point of the instrument.
+ *
+ * `FLUID_PRESSURE_ROW_CAPACITY` is restated here because the benchmark path
+ * resolves method values from the environment and never reads the scene's
+ * authored profile ([[capacity-is-not-inert]]); the planner's own default for
+ * a 100-cell footprint is 256 rows, which dies at the t=0 cold-topology gate.
+ * The fine-brick reserve has no environment path at all, so a benchmark run
+ * carries the footprint-shaped default of 1,073 resident bricks instead of the
+ * authored 4,096. That is a *reduction* in reserve, not an increase, and it
+ * does not change any launch shape — the recurring ladder is sized by the
+ * logical lattice, not by residency — so the benchmark and smoke paths still
+ * measure the same scene. Closing the hole properly needs an override in
+ * `lib/methods/octree.ts` plus `tools/webgpu-smoke-executor.ts`.
+ *
+ * Step counts start at 20. The full 240-step lane is affordable only after the
+ * slope falls; 240 cubed also pays two O(domain) CPU loops before the first
+ * advance (the footprint budget triple loop and the tall-cell column walk),
+ * which is seconds of cold start that no GPU change removes.
+ */
+const dropletLane = (edgeCells: number, steps = 20): Record<string, string> => ({
+  FLUID_SCENE: `power-droplet-${edgeCells}`,
+  FLUID_TARGET_S: String(steps * 0.004),
+  FLUID_MAX_DT: "0.004",
+  FLUID_ORACLE_STEPS: String(steps),
+  FLUID_EXPECT_EXACT_STEPS: String(steps),
+  FLUID_EXPECT_GRID: `${edgeCells},${edgeCells},${edgeCells}`,
+  FLUID_MAXIMUM_LEAF_SIZE: "32",
+  FLUID_OCTREE_INTERFACE_BAND: "1",
+  FLUID_OCTREE_GLOBAL_FINE_FACTOR: "4",
+  FLUID_PRESSURE_ROW_CAPACITY: "4096",
+  ...(edgeCells >= 256
+    // At 256 cubed the fine level-set's two dense logical directories are
+    // ~134 MB each, over Dawn's 128 MiB default storage-binding limit. The
+    // ocean lane raises the same knob for the same reason. Removing the
+    // allocation, rather than the limit, is the memory milestone of the
+    // program; until then a lane that cannot bind cannot report anything.
+    ? { FLUID_WEBGPU_MAX_STORAGE_BINDING_BYTES: "2147483648" }
+    : {}),
+});
 
 export const POWER_DAM_LANE_ENVIRONMENT: Record<PowerDamRuntimeLane, Record<string, string>> = {
   mini: {
@@ -145,6 +193,10 @@ export const POWER_DAM_LANE_ENVIRONMENT: Record<PowerDamRuntimeLane, Record<stri
     FLUID_EXPECT_GRID: "32,16,32", FLUID_MAXIMUM_LEAF_SIZE: "32",
     FLUID_OCTREE_INTERFACE_BAND: "3", FLUID_OCTREE_GLOBAL_FINE_FACTOR: "4",
   },
+  "droplet-64": dropletLane(64),
+  "droplet-128": dropletLane(128),
+  "droplet-240": dropletLane(240),
+  "droplet-256": dropletLane(256),
   "ceiling-drop": {
     FLUID_SCENE: "ceiling-slab-drop", FLUID_TARGET_S: "0.024",
     FLUID_LANE: "performance",

@@ -502,8 +502,18 @@ test("fine topology isolates cold closure and publishes recurring sparse deltas"
     /fnrecurringScatterMembership[\s\S]*atomicOr\(&topologyErrors\[output\],bits\)[\s\S]*fnscanRecurringDesiredRecords[\s\S]*scanIdentityBlock[\s\S]*desiredScan\[item\]=prefix[\s\S]*fnscatterRecurringSparseBand[\s\S]*output=desiredScan\[key\][\s\S]*targetB\[7u\+output\]=key/,
     "compact seeds scatter bounded halos, rank in parallel, and publish canonical keys exactly once");
   assert.match(wgsl,
-    /fnscanRecurringDesiredRecords[\s\S]*wid\.x\*256u\+local[\s\S]*fnfinalizeRecurringSparseBand[\s\S]*recurringDesiredTotal\(\)[\s\S]*fnscatterRecurringSparseBand/,
+    /fnscanRecurringDesiredRecords[\s\S]*fineLinearWorkgroup\(wid,nwg\)[\s\S]*block\*256u\+local[\s\S]*fnfinalizeRecurringSparseBand[\s\S]*recurringDesiredTotal\(\)[\s\S]*fnscatterRecurringSparseBand/,
     "all logical-domain sizes use the same hierarchical mark/rank/scatter publication");
+  // "All logical-domain sizes" now literally includes the ones a 1-D launch
+  // could not express. At fine factor 4 the logical lattice is one brick per
+  // finest cell, so `ceil(nx*ny*nz/256)` passes 65,535 at a 256-cubed
+  // container; every block ordinal in the recurring ladder is recovered from a
+  // 2-D grid so the same kernel covers both sides of that limit.
+  for (const entry of ["scanRecurringDesiredRecords", "scatterRecurringSparseBand",
+    "scanSparseGroups", "offsetSparseGroups", "offsetSparseRecords"]) {
+    assert.match(wgsl, new RegExp(`fn${entry}\\([\\s\\S]{0,400}?fineLinearWorkgroup\\(wid,nwg\\)`),
+      `${entry} must tile its launch over x/y rather than assume the domain fits one dimension`);
+  }
   assert.doesNotMatch(wgsl, /fnrecurringSort|fnrecurringCompact|fnrecurringExpandedAxisKey/,
     "recurring topology must not retain a capacity-wide ordering branch");
   assert.match(wgsl,

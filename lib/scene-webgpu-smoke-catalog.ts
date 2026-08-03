@@ -7,6 +7,9 @@ import {
   DEEP_POWER_HYDROSTATIC_PRESSURE_ROW_CAPACITY,
   LARGE_POWER_DAM_FINE_BRICK_CAPACITY,
   LARGE_POWER_HYDROSTATIC_PRESSURE_ROW_CAPACITY,
+  POWER_DROPLET_EDGE_CELLS,
+  POWER_DROPLET_FINE_BRICK_CAPACITY,
+  POWER_DROPLET_PRESSURE_ROW_CAPACITY,
   findSceneDefinition,
 } from "./scenes";
 import {
@@ -45,6 +48,10 @@ export const sceneWebGPUSmokeIds = [
   "large-power-dam-break",
   "large-power-hydrostatic",
   "deep-power-hydrostatic",
+  "power-droplet-64",
+  "power-droplet-128",
+  "power-droplet-240",
+  "power-droplet-256",
   "ceiling-slab-drop",
   "corner-brick-drop",
   "midair-brick-drop",
@@ -363,6 +370,21 @@ const deepPowerHydrostaticOverrides = {
   ...largePowerHydrostaticOverrides,
   pressureRowCapacity: DEEP_POWER_HYDROSTATIC_PRESSURE_ROW_CAPACITY,
   globalFineLevelSetMaximumBricks: DEEP_POWER_HYDROSTATIC_FINE_BRICK_CAPACITY,
+} as const;
+/**
+ * The droplet family's reserves, shared by every N in the sweep.
+ *
+ * These are the same two constants for a 64-cubed container and a 256-cubed
+ * one, on purpose: if a lane had to grow a capacity to run a larger empty box,
+ * the sweep would be measuring the capacity and not the domain. The
+ * `globalFineLevelSetMaximumBricks` half cannot be expressed any other way —
+ * it has no environment override — so this object is the only place a droplet
+ * benchmark and a droplet smoke run agree on the scene.
+ */
+const powerDropletOverrides = {
+  ...largePowerHydrostaticOverrides,
+  pressureRowCapacity: POWER_DROPLET_PRESSURE_ROW_CAPACITY,
+  globalFineLevelSetMaximumBricks: POWER_DROPLET_FINE_BRICK_CAPACITY,
 } as const;
 
 const powerDiagnostics: readonly SceneWebGPUDiagnosticPack[] = [
@@ -1116,6 +1138,84 @@ const suiteList = [
           { id: "deep-hydrostatic-row-arena-fits", metric: "methods.octree.info.pressureCapacityOverflow",
             operator: "equal", expected: false }] }),
     }),
+  // The droplet-in-a-vast-domain sweep. One hundred liquid cells at every N, so
+  // the pinned t=0 counters below are the family's invariant rather than
+  // per-scene baselines: every number here is the *same* number at 64 cubed and
+  // at 256 cubed, and a lane that needs a larger one is publishing
+  // domain-shaped work — the exact defect the sweep hunts. Measured at 64
+  // cubed: 100 air-support rows, 624 resident fine bricks (117 of them
+  // interface), against a 262,144-brick logical lattice that is 16.8M at 256
+  // cubed. The pins sit at 1,024 and 2,048 — an order of magnitude above the
+  // fluid and four below anything domain-proportional, so they discriminate
+  // exactly the thing worth discriminating and leave room for the slump
+  // transient.
+  ...POWER_DROPLET_EDGE_CELLS.map((edgeCells) => {
+    const grid = [edgeCells, edgeCells, edgeCells];
+    const pinned: readonly SceneWebGPUAcceptanceRule[] = [
+      { id: "expected-grid", metric: "methods.octree.grid", operator: "equal", expected: grid },
+      { id: "power-droplet-pinned-air-support-rows",
+        metric: "methods.octree.info.structuredAirSupportRows",
+        operator: "at-most", expected: 1_024 },
+      { id: "power-droplet-pinned-fine-residency",
+        metric: "methods.octree.info.globalFineActiveBricks",
+        operator: "at-most", expected: 2_048 },
+      // `pressureRequiredRows` is the solve's overflow lower bound and reads 0
+      // whenever the arena holds, so it gates the failure mode rather than the
+      // count. Both halves are kept: one says the reserve was not exceeded,
+      // the other that no domain-shaped row demand was even attempted.
+      { id: "power-droplet-pinned-rows", metric: "methods.octree.info.pressureRequiredRows",
+        operator: "at-most", expected: 1_024 },
+      { id: "power-droplet-row-arena-fits", metric: "methods.octree.info.pressureCapacityOverflow",
+        operator: "equal", expected: false },
+    ];
+    // A gate that is itself O(domain) cannot gate a program about O(domain)
+    // work, and two collectors here are exactly that. The spatial field and
+    // its field-stats loop walk every cell (13.8M at 240 cubed against the
+    // 196k this family was modelled on), and the global-fine sample census
+    // behind `global-fine-publication` walks the *fine* lattice, which at
+    // factor 4 is `(N*4)^3` — 16.7M samples at 64 cubed but 885M at 240. The
+    // 240-cubed gate blew the 240 s isolated-runner ceiling on collection
+    // alone while its twenty measured advances take 4.6 s.
+    //
+    // So above 2M cells the lane collects only what it gates on. What the
+    // large members therefore do NOT check, stated rather than quietly
+    // dropped: represented field statistics and the fine-publication sample
+    // census. What they still check is every pinned counter below, structured
+    // authority, the per-step generation audit and volume drift — and the
+    // small members run the full collection on the identical solver
+    // configuration, which is what makes the omission affordable.
+    const denseCollection = edgeCells ** 3 <= 2_097_152;
+    return suite(`power-droplet-${edgeCells}`,
+      `One hundred liquid cells in a ${edgeCells}-cubed container: the domain-tax instrument`,
+      { definitionId: `power-droplet-${edgeCells}` }, {
+        default: lane({ target_s: 0.004, exactSteps: 1, maxDt_s: 0.004, oracleSteps: 1, cpuOracle: false,
+          methods: methods(["octree"], { octree: powerDropletOverrides }), timeout_ms: 240_000,
+          collect: { fieldStats: denseCollection ? "final" : "none", spatialField: denseCollection,
+            stabilityEnvelope: true, structuredValidation: true,
+            globalFineGeneration: denseCollection, powerGenerationAudit: { everySteps: 1, log: false } },
+          diagnostics: denseCollection ? [powerDiagnostics[0], powerDiagnostics[2]] : [powerDiagnostics[0]],
+          acceptance: [...powerAcceptance, ...pinned] }),
+        // The measurement lane. Cold start pays two unavoidable O(domain) CPU
+        // loops before the first advance — the footprint budget's triple loop
+        // and the tall-cell column walk — which are seconds at 240 cubed, so
+        // the 240 s isolated-runner ceiling is a real constraint here and not a
+        // formality. Sample `--lane=droplet-<N> --steps=20` on the benchmark
+        // first; the smoke lane is affordable only once the slope has fallen
+        // far enough for 240 advances to fit.
+        "runtime-240": lane({ id: "runtime-240", target_s: 0.96, exactSteps: 240,
+          maxDt_s: 0.004, oracleSteps: 240, cpuOracle: false,
+          methods: methods(["octree"], { octree: powerDropletOverrides }), timeout_ms: 240_000,
+          collect: { fieldStats: denseCollection ? "checkpoints" : "none", checkpointEvery_s: 0.12,
+            spatialField: denseCollection,
+            stabilityEnvelope: true, structuredValidation: true, globalFineGeneration: denseCollection,
+            powerGenerationAudit: { everySteps: 1, log: false } },
+          diagnostics: denseCollection ? exhaustivePowerDiagnostics(1e-4)
+            : exhaustivePowerDiagnostics(1e-4).filter((pack) => pack.id !== "global-fine-publication"),
+          acceptance: [...powerAcceptance, ...pinned,
+            { id: "power-droplet-volume-drift", metric: "methods.octree.stabilityEnvelope.maximumExactVolumeDrift",
+              operator: "at-most", expected: 1e-4 }] }),
+      });
+  }),
   ...(["ceiling-slab-drop", "corner-brick-drop", "midair-brick-drop", "midair-corner-drop"] as const).map((id) => suite(id,
     id === "ceiling-slab-drop" ? "Seeded brick flush under the lid free-fall oracle"
       : id === "corner-brick-drop" ? "Seeded brick in a lid/corner seam free-fall oracle"

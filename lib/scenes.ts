@@ -161,6 +161,112 @@ export const DEEP_POWER_HYDROSTATIC_METHOD_PROFILE: MethodProfile = Object.freez
   }),
 });
 
+// ---- the droplet-in-a-vast-domain family ------------------------------------
+//
+// `wall(scene) ~= intercept(fluid footprint, solver constants) + slope * domain`.
+// Every other authored lane moves both terms at once, so neither can be read.
+// This family pins the fluid term to ~zero — one hundred liquid cells, always
+// the same hundred — and sweeps only the container. The measured ms/advance vs
+// nx*ny*nz curve therefore *is* the domain tax: its slope is what the program
+// attacks, and its intercept belongs to the solve-constant work that the
+// persistent-MGPCG program already owns. See
+// `docs/POWER_LIQUIDS_DROPLET_VAST_DOMAIN_PLAN.md`.
+
+/** Finest cell shared with the whole hydrostatic/dam family, so a wall measured
+ * here is comparable to theirs: only the lattice *extent* differs. */
+export const POWER_DROPLET_CELL_SIZE_M = 0.05;
+
+/**
+ * The reservoir, and the reason it is a corner reservoir.
+ *
+ * 0.25 x 0.2 x 0.25 m is 5 x 4 x 5 = 100 finest cells at 0.05 m, and it is
+ * authored with **no** `initialDamBreakOrigin_m`. That is not a stylistic
+ * choice: `analyticSparseBootstrap` (`lib/webgpu-octree.ts`) requires no brick
+ * seeds, no bodies, no terrain and a reservoir anchored at the container
+ * corner. Any offset origin, or an equivalent `initialBrickSeeds_m` droplet,
+ * flips the whole bootstrap dense — `Float32Array(nx*ny*nz)`, a full-domain
+ * signed-distance transform, a 67-134 MB phi texture and a persistent
+ * `cellCount * 4 B` surface-state allocation — which is precisely the
+ * domain-shaped cost this family exists to measure, moved into the setup where
+ * it cannot be separated. A free-floating droplet is a later, deliberate
+ * variant with those costs budgeted; it is not the v1 scene.
+ */
+export const POWER_DROPLET_RESERVOIR_M = Object.freeze({ x: 0.25, y: 0.2, z: 0.25 });
+
+/** 5 x 4 x 5 cells of the authored reservoir. The invariant of the family. */
+export const POWER_DROPLET_LIQUID_CELLS = 100;
+
+/** Container edges of the swept family, in finest cells.
+ *
+ * 64 is the control (3.2 m — the large-dam footprint, so its intercept is
+ * directly comparable to that lane's). 240 is the vast end at 12 m: 13,824,000
+ * cells, whose recurring fine-band ladder issues 54,000 workgroups and clears
+ * the 65,535 device dispatch limit. 256 is 16,777,216 cells = 65,536
+ * workgroups, one over that limit, and did not run at all until the recurring
+ * ladder was routed through `planFineLevelSetDispatch2D`; it is kept in the
+ * family as the regression test for the scene that could not exist. */
+export const POWER_DROPLET_EDGE_CELLS = Object.freeze([64, 128, 240, 256] as const);
+export type PowerDropletEdgeCells = typeof POWER_DROPLET_EDGE_CELLS[number];
+
+/**
+ * Row reserve for every droplet lane — deliberately independent of N.
+ *
+ * The planner's footprint-shaped default collapses to 256 rows at 100 liquid
+ * cells (`planOctreePressureCapacity`: `maximumLiquidCells * 2`, 256-aligned).
+ * That is too tight the moment the three-cell closed-wall strip and 2:1
+ * balance publish around a reservoir sitting in the container corner, and an
+ * under-authored value does not merely reserve less — it dies at the
+ * `cold-topology` / `pressureCapacityOverflow` gates, the way
+ * `large-power-dam-break` dies at its planner default.
+ *
+ * The derivation, in rows:
+ *
+ *   liquid rows        5 * 4 * 5 unit owners                     =   100
+ *   wall strip         the reservoir touches three closed walls;
+ *                      the 3-cell strip around a 5x4x5 corner
+ *                      block is bounded by 11 * 10 * 11 - 100    = 1,110
+ *   surface band       band 1 plus the Section 5 transport reach
+ *                      of 4 cells, i.e. a further four layers
+ *                      outward: 19 * 18 * 19 - 11 * 10 * 11      = 5,288 cells,
+ *                      of which only wet leaves publish rows
+ *   2:1 balance        dry, coarsening outward: no rows
+ *
+ * Every term is a *local* shell around a fixed 100-cell body, so none of them
+ * moves with N — which is the whole point of the instrument. 4,096 covers the
+ * liquid plus wall terms with the surface band entirely dry, with 3.7x
+ * headroom, and the t=0 `pressureRequiredRows` readback verifies it. The GPU
+ * overflow receipt still rejects any generation that exceeds the reserve.
+ */
+export const POWER_DROPLET_PRESSURE_ROW_CAPACITY = 4_096;
+
+/**
+ * Fine narrow-band brick reserve, likewise independent of N.
+ *
+ * At `globalFineLevelSetFactor: "4"` and a 4-cubed brick resolution the fine
+ * lattice has exactly one brick per finest cell, so the *logical* lattice is
+ * nx*ny*nz — 13.8M bricks at 240 — while the resident set is the band around
+ * 100 cells. The footprint-shaped default asks for ~1,073 resident bricks for
+ * this reservoir; 4,096 authors 3.8x of that for the slump transient and is
+ * still four orders of magnitude below the logical lattice. There is no
+ * environment path for this knob (`lib/methods/octree.ts` reads it only from
+ * authored method values), so a lane that wants it must carry it in the smoke
+ * catalog overrides.
+ */
+export const POWER_DROPLET_FINE_BRICK_CAPACITY = 4_096;
+
+/** Every discretization knob of the 20x still lane — leaf 32, interface band 1,
+ * fine factor 4 — so the droplet sweep's intercept is comparable to the
+ * hydrostatic family's wall. Only the two footprint reserves are re-authored,
+ * and both are constants of the family rather than functions of N. */
+export const POWER_DROPLET_METHOD_PROFILE: MethodProfile = Object.freeze({
+  ...LARGE_POWER_HYDROSTATIC_METHOD_PROFILE,
+  overrides: Object.freeze({
+    ...LARGE_POWER_HYDROSTATIC_METHOD_PROFILE.overrides,
+    pressureRowCapacity: POWER_DROPLET_PRESSURE_ROW_CAPACITY,
+    globalFineLevelSetMaximumBricks: POWER_DROPLET_FINE_BRICK_CAPACITY,
+  }),
+});
+
 /** The Bet-4 work verdict is about avoided machinery, not surface accuracy: a
  * factor-1 surface keeps the frame's cost in the pressure path the census
  * measures, and band 1 keeps the refined shell off the deep interior. */
@@ -461,6 +567,60 @@ export function createDeepPowerHydrostaticScene(): SceneDescription {
   // point is that no liquid cell is near a lateral free surface.
   scene.fluid.initialCondition = "tank-fill";
   delete scene.fluid.initialDamBreakDimensions_m;
+  return scene;
+}
+
+/**
+ * One hundred cells of water in a container of `edgeCells` cubed.
+ *
+ * The whole family is one factory because the only authored difference between
+ * its members is the container edge — if the reservoir, lattice, lid, wall
+ * mode, surface tension or timestep could drift between two entries, the
+ * measured slope would be a scene difference rather than a domain tax.
+ *
+ * Extents are `edgeCells * 0.05 m` computed from the authored integer lattice,
+ * not decimal literals: the power catalog requires isotropic finest cells to
+ * within 1e-5 (`lib/webgpu-octree.ts`), and a cube built by multiplying one
+ * spacing by one integer is isotropic by construction. `fillFraction` is
+ * likewise computed from the reservoir rather than written down, because
+ * `validateScene` requires it to equal the authored dam-break volume fraction
+ * to within 1e-9 and that fraction changes with every N (3.81e-4 at 64 down to
+ * 5.96e-6 at 256).
+ *
+ * The physics is deliberately boring. A corner puddle five cells wide slumps
+ * for a few steps, wets the floor and two walls, and settles; there is no
+ * front to track, no splash, and no interface worth refining. That is the
+ * instrument: whatever the wall does across the sweep is not the fluid.
+ */
+export function createPowerDropletScene(edgeCells: PowerDropletEdgeCells): SceneDescription {
+  const scene = cloneScene(defaultScene);
+  scene.sceneId = `power-droplet-${edgeCells}`;
+  scene.duration_s = 1;
+  scene.rigidBodies = [];
+  const extent_m = edgeCells * POWER_DROPLET_CELL_SIZE_M;
+  const reservoir = POWER_DROPLET_RESERVOIR_M;
+  scene.container = {
+    ...scene.container,
+    width_m: extent_m,
+    height_m: extent_m,
+    depth_m: extent_m,
+    // The same expression `validateScene` re-derives, so the equality it
+    // checks is exact rather than merely close.
+    fillFraction: (reservoir.x * reservoir.y * reservoir.z) / (extent_m * extent_m * extent_m),
+    top: "closed",
+    fluidWallMode: "free-slip",
+  };
+  scene.voxelDomain = { finestCellSize_m: POWER_DROPLET_CELL_SIZE_M, brickSize_cells: 8 };
+  scene.fluid.initialCondition = "dam-break";
+  scene.fluid.initialDamBreakDimensions_m = { ...reservoir };
+  // The four deletions that keep `analyticSparseBootstrap` true. See
+  // `POWER_DROPLET_RESERVOIR_M` for what each one would otherwise cost.
+  delete scene.fluid.initialDamBreakOrigin_m;
+  delete scene.fluid.initialBrickSeeds_m;
+  delete scene.fluid.initialBrickSeedsAdditive;
+  delete scene.fluid.inflow;
+  scene.fluid.surfaceTension_N_m = 0;
+  scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 0.004;
   return scene;
 }
 
@@ -1103,6 +1263,23 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     build: createDeepPowerHydrostaticScene,
     camera: { distance_m: 7.4, target_m: { x: 0, y: 1, z: 0 } },
   }),
+  ...POWER_DROPLET_EDGE_CELLS.map((edgeCells) => defineScene({
+    id: `power-droplet-${edgeCells}`,
+    name: `Octree · droplet in a ${edgeCells}³ domain`,
+    blurb: `One hundred cells of water — a 5×4×5 corner puddle — in a ${edgeCells}³ container (${(edgeCells * POWER_DROPLET_CELL_SIZE_M).toFixed(1)} m on a side). The fluid is identical across the family, so the only thing that changes between these scenes is how much empty space the solver is asked to carry. Wall against domain volume across the sweep is the domain tax, measured directly.`,
+    audience: "validation",
+    // Its own shelf rather than the hydrostatic one: these four are a single
+    // instrument read across its members, not four scenes anyone would open
+    // for their own sake. The shelf is the unit of meaning here.
+    shelf: "Domain-tax sweep",
+    environment: "default",
+    methodProfile: POWER_DROPLET_METHOD_PROFILE,
+    build: () => createPowerDropletScene(edgeCells),
+    camera: {
+      distance_m: edgeCells * POWER_DROPLET_CELL_SIZE_M * 1.6,
+      target_m: { x: 0, y: edgeCells * POWER_DROPLET_CELL_SIZE_M * 0.1, z: 0 },
+    },
+  })),
   defineScene({
     id: "power-hybrid-deep-ocean",
     name: "Octree · hybrid deep ocean",
