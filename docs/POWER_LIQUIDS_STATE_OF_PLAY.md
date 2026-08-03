@@ -32,11 +32,24 @@ Four ceilings priced on `symmetric-expansion` so far:
 
 **Four independent targets, every one at or under the noise floor.** That is not
 four unlucky guesses; it is the signature of cost spread thinly across many
-sites. The guide lane's 270 ms is broad per-row work, not a few defects.
+sites.
 
-Which means the remaining wins are **structural** — fewer rows, less work per
-row, better occupancy, a different solve shape — and surgical per-item removal,
-the technique that produced every win so far, is now near exhausted here.
+**AMENDED, same day — the diffuseness is real but it is LOCAL.** All four of
+those ceilings sit in the march / advect / grading side of the frame. The
+persistent MGPCG slice had never been probed, and when it was, it turned out to
+hold the most concentrated target on the lane: **`applyBandRows` is 32.0
+ms/advance — 52% of the 61.33 ms slice and ~12% of the whole frame.**
+
+So the correct statement is narrower than "the guide lane is diffuse":
+
+- **march, advect, grading: diffuse.** Surgical per-item removal is exhausted
+  there. Four ceilings, four nulls.
+- **persistent MGPCG: concentrated.** One pass owns half of it.
+
+The general lesson survives and is worth more than the specific one: **an
+unprobed slice is not a cheap slice.** Four nulls in a row made "the whole lane
+is diffuse" feel earned, and it was an extrapolation from three of the six
+passes. Probe before you generalise.
 
 ## What worked
 
@@ -101,7 +114,7 @@ Where the guide frame actually is (~270 ms):
 
 | pass | ms | share | status |
 |---|---:|---:|---|
-| persistent MGPCG (ONE workgroup) | 61.33 | 22% | **open** |
+| persistent MGPCG (ONE workgroup) | 61.33 | 22% | **`applyBandRows` owns 32.0 of it** |
 | March Section 5 changed frontier x2 | 39.68 | 15% | -3.88 landed; scan+waves excluded |
 | Advect structured families | 40.28 | 15% | **open — largest uncontended pass** |
 | Advect fine phi rare + common | 29.01 | 11% | untouched |
@@ -113,15 +126,19 @@ essentially untouched.** That is the plot.
 
 ## Promising leads
 
-**1. The MGPCG one-workgroup ceiling is partly self-imposed.**
-`maxComputeInvocationsPerWorkgroup` sat at the conservative WebGPU default of
-256 because `requiredFluidDeviceLimits` never requested it — in a function whose
-own comment says devices expose conservative defaults unless asked. The M1 Max
-hosts 1024. Lane width is now selectable and 256 emits a byte-identical module.
-*Owed: the 512/1024 A/B.* Temper it — this moves ~3% of the machine to ~12% at
-best, still on one core cluster, and wider barriers may cost more than they buy.
-A non-monotone curve is the useful outcome: it would prove the solve is
-barrier-bound, which is what a multi-workgroup design hinges on.
+**1. `applyBandRows` — 32.0 ms/advance, 52% of the persistent solve, ~12% of the
+frame.** The single largest concentrated target on the guide lane. Priced by
+phase-repeat: 3 extra passes cost +96.0 ms against a 5.45 ms floor. This is
+E2b, which was **cancelled in error** on droplet-256 where the same apply
+measured 0.57 ms at `liveRows = 100` — a **56x** miss. The guide lane runs
+`liveRows = 2,070`. `applyRow`, and `finerAdjoint` inside it, is where the time
+is. Nothing else on this list is close.
+
+*Companion numbers from the same probe:* `applyAllRows` 3.4 ms (~5.5%),
+`sparseSmoothPhase` 3.2 ms (~5.2%) — which **refutes the long-standing §2.2
+attribution** that the smoother was the wall. E2d's premise geometry is
+confirmed (`wPartials = 17` against droplet's 1) but its cost is still
+unmeasured: none of the three probes touch `reduceMerged`.
 
 **2. The march's unattributed ~36 ms.** The pass is 39.68 ms, and its two most
 plausible targets are now both excluded — the ungated waves (-0.22 ms) and the
@@ -139,10 +156,24 @@ arena is **97.8% empty**; and owner pages are a full permutation on every lane,
 so every `ownerAt()` pays a second dependent load. Footprint is charged three
 times over: memory, cache locality, and construction wall-clock per arm.
 
-**4. Two cancellations are unproven, not dead.** E2b and E2d were both cancelled
-on droplet geometry, where `wPartials = 1`. It is 6 on `fill-800` and **17** on
-the guide lane — the premise doesn't hold off droplet. One phase-repeat run
-settles both.
+**4. Widening the persistent workgroup is measured and dead — but it settles
+E4's design.** `maxComputeInvocationsPerWorkgroup` really was left at WebGPU's
+conservative 256 while the M1 Max hosts 1024, and `requiredFluidDeviceLimits`
+never asked for it. The A/B, interleaved, A/A floor 5.45 ms:
+
+| lanes | ms/advance | delta |
+|---|---:|---:|
+| 256 (control, 6 runs) | 260.02 | — |
+| 512 | 256.56 | -3.46, inside the floor |
+| **1024** | 267.63 | **+7.60 — SLOWER**, 1.4x the floor |
+
+Non-monotone, which is the informative outcome. **The persistent solve is not
+lane-starved; it is barrier- and dependency-bound** — widening makes every one
+of its ~1,000+ `workgroupBarrier()` rendezvous wider while cutting simdgroups
+resident per core. **E4 consequence, direct: do not spread this barrier
+structure across more workgroups.** Any multi-workgroup solve that preserves the
+rendezvous count inherits a cost this curve has already measured as negative.
+`FLUID_OCTREE_MGPCG_LANES` stays at 256, where the module is byte-identical.
 
 ## Flag defaults — audited 2026-08-03
 
