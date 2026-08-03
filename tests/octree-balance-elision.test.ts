@@ -4,6 +4,9 @@ import test from "node:test";
 import {
   octreeBalancePredicatesWouldSplit,
   octreeBalanceRounds,
+  octreeGradingMembershipLoadEnabled,
+  octreeGradingPageFillEnabled,
+  octreeGradingSplitHelpersEnabled,
 } from "../lib/webgpu-octree";
 
 const octreeSource = readFileSync(
@@ -60,4 +63,53 @@ test("host scheduling guards recurring setup and cold/recurring grading dispatch
     /for \(let round = 0; round < this\.balanceRounds; round \+= 1\) \{[\s\S]*dispatchCandidates\(this\.balancePipeline, this\.balanceDeltaPipeline\);/,
     "the zero round count must suppress both cold full-domain and recurring delta balance dispatches",
   );
+});
+
+test("the split materializer resolves one owner word per page, not per cell", () => {
+  const materializer = octreeSource.slice(
+    octreeSource.indexOf("fn splitPageAt"),
+    octreeSource.indexOf("fn splitLeafSeeded"),
+  );
+  assert.match(materializer,
+    /fn splitPageAt[\s\S]*return SplitPage\([\s\S]*encodePagedOwner\(brickOrigin, childOrigin, child\)\)/,
+    "a page inside one child has a single owner word; resolving it per cell is the defect");
+  assert.doesNotMatch(materializer,
+    /\/ vec3u\(child\)|firstTrailingBit/,
+    "the per-cell floor-to-child division must not reappear inside the page fill");
+  assert.match(materializer,
+    /fn fillSplitPage[\s\S]*for \(var slot = 1u; slot < 512u; slot \+= 1u\) \{\s*let at = plan\.base \+ slot;\s*atomicMin\(&owners\[at\], splitOwnerWord\(at, plan\.word\)\);/,
+    "the fill must be one contiguous atomic per cell over the whole page");
+  assert.match(materializer,
+    /fn splitOwnerWord[\s\S]*if \(topologyCandidateView == 1u && !gradingMembershipLoad\) \{ return word; \}/,
+    "the membership load must be elided only inside the topology candidate view");
+});
+
+test("the elided membership load rests on the candidate bank clearing that bit", () => {
+  // splitOwnerWord drops the per-cell OWNER_WORD_TOPOLOGY load because the
+  // candidate payload bank is rewritten with the bit clear in the pass
+  // immediately before every topology dispatch. If that clear ever goes away
+  // the materializer silently coarsens marked leaf origins, so the premise is
+  // asserted across the module boundary rather than left in a comment.
+  const ownerPages = readFileSync(
+    new URL("../lib/webgpu-octree-owner-pages.ts", import.meta.url),
+    "utf8",
+  );
+  assert.match(ownerPages, /word&=~OWNER_WORD_TOPOLOGY;/,
+    "commitOwnerPageCandidate must keep clearing membership on the inactive payload bank");
+  assert.match(octreeSource,
+    /markAcceptedOwner\(unpackOrigin\(acceptedOwner\.packedOrigin\)\)/,
+    "membership must remain published only by frontier emission, which follows grading");
+});
+
+test("grading materializer arms are environment-selected with the fast form on by default", () => {
+  assert.equal(octreeGradingPageFillEnabled({}), true);
+  assert.equal(octreeGradingPageFillEnabled({ FLUID_OCTREE_GRADING_PAGE_FILL: "0" }), false,
+    "the serial per-cell walk stays reachable as the A/B control");
+  assert.equal(octreeGradingSplitHelpersEnabled({}), true);
+  assert.equal(octreeGradingSplitHelpersEnabled(
+    { FLUID_OCTREE_GRADING_SPLIT_HELPERS: "0" }), false);
+  assert.equal(octreeGradingMembershipLoadEnabled({}), false,
+    "the redundant per-cell membership load is off by default");
+  assert.equal(octreeGradingMembershipLoadEnabled(
+    { FLUID_OCTREE_GRADING_MEMBERSHIP_LOAD: "1" }), true);
 });

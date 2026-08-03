@@ -360,6 +360,55 @@ export function octreeFineEngineSplitsEnabled(
   return resolved?.FLUID_ENGINE_SPLIT !== "collapsed";
 }
 
+/**
+ * Whole-page owner fills inside the split materializer.
+ *
+ * Selects the page-claimed form of splitLeaf over the per-cell walk. Both write
+ * the same cells the same words through the same idempotent atomicMin; the page
+ * form only stops the inner loop from recomputing a page-invariant constant 512
+ * times through three runtime integer divisions. Off restores the original walk
+ * verbatim, including its per-cell membership load, so an interleaved A/B can
+ * score them from one shader module in separate processes.
+ */
+export function octreeGradingPageFillEnabled(
+  environment?: Readonly<Record<string, string | undefined>>,
+): boolean {
+  const resolved = environment
+    ?? (typeof process !== "undefined" ? process.env : undefined);
+  return resolved?.FLUID_OCTREE_GRADING_PAGE_FILL !== "0";
+}
+
+/**
+ * Losing askers take one page of the split they asked for.
+ *
+ * Requires the page-claimed materializer above; with the page fill off this has
+ * nothing to divide. The write set is unchanged either way -- the same cells
+ * receive the same words through the same idempotent atomicMin -- so this only
+ * chooses how many lanes carry it.
+ */
+export function octreeGradingSplitHelpersEnabled(
+  environment?: Readonly<Record<string, string | undefined>>,
+): boolean {
+  const resolved = environment
+    ?? (typeof process !== "undefined" ? process.env : undefined);
+  return resolved?.FLUID_OCTREE_GRADING_SPLIT_HELPERS !== "0";
+}
+
+/**
+ * Restore the per-cell membership load inside the split materializer.
+ *
+ * Off by default because the bit it preserves is provably clear on every cell
+ * the topology candidate view can address; see splitOwnerWord. Kept as an arm
+ * so the interleaved A/B can price the load rather than assert it.
+ */
+export function octreeGradingMembershipLoadEnabled(
+  environment?: Readonly<Record<string, string | undefined>>,
+): boolean {
+  const resolved = environment
+    ?? (typeof process !== "undefined" ? process.env : undefined);
+  return resolved?.FLUID_OCTREE_GRADING_MEMBERSHIP_LOAD === "1";
+}
+
 export function octreeSparseWorldRequired(
   hasTerrain: boolean,
   rigidBodyCount: number,
@@ -2341,6 +2390,9 @@ export class WebGPUOctreeProjection {
       topologyCandidateView: candidateTopology ? 1 : 0,
       fineSummaryFactor: this.coarseOnlySurfaceTracking
         ? 1 : this.globalFineLevelSet?.plan.fineFactor ?? 4,
+      gradingPageFill: octreeGradingPageFillEnabled() ? 1 : 0,
+      gradingSplitHelpers: octreeGradingSplitHelpersEnabled() ? 1 : 0,
+      gradingMembershipLoad: octreeGradingMembershipLoadEnabled() ? 1 : 0,
     };
   }
   private diagnosticDescriptor(): GPUComputePipelineDescriptor {
@@ -6215,6 +6267,9 @@ override denseSolidField: bool = true;
 override fluidGatedBoundaryRefinement: bool = true;
 override topologyCandidateView: u32 = 0u;
 override fineSummaryFactor: u32 = 4u;
+override gradingPageFill: bool = false;
+override gradingSplitHelpers: bool = false;
+override gradingMembershipLoad: bool = false;
 struct Owner { packedOrigin: u32, size: u32 }
 struct Params { dimsMax: vec4u, cellRelax: vec4f, control: vec4u, solve: vec4f, container: vec4f, inflowPositionRadius: vec4f, inflowDirectionLength: vec4f, physical: vec4f, pressureCapacity: vec4u, hydrostatic: vec4f }
 struct LeafHeader { cell: u32, entryStart: u32, entryCount: u32, size: u32, diagonal: f32, rhs: f32, pad0: u32, pad1: u32, gradient: vec4f }
@@ -7651,10 +7706,134 @@ fn materializeSplitStrided(origin: vec3u, size: u32, lane: u32, lanes: u32) {
   }
 }
 
-fn splitLeaf(origin: vec3u, size: u32) {
-  if (!claimLeafSplit(origin, size)) { return; }
+// --- Page-claimed split materialization ------------------------------------
+//
+// One page of a split: where its 512 owner words live, and the single word
+// every one of them receives.
+struct SplitPage { base: u32, word: u32 }
+
+// Resolve one page of the split rooted at (origin, size).
+//
+// Defined for size >= 16, where the child is 8 or larger. The leaf is
+// size-aligned and the page is 8-aligned, so the page lies wholly inside ONE
+// child and its 512 cells share a SINGLE owner word: encodePagedOwner keys the
+// origin delta off the CELL's brick origin, which is page-invariant too. The
+// per-cell loop this replaces recomputed that constant 512 times through three
+// runtime integer divisions by child plus a firstTrailingBit -- the exact class
+// of arithmetic an earlier revision measured at +6.05 ms/advance for three
+// div/mods on this very loop.
+//
+// base == 0 is the absent-page sentinel: the payload can never start at word
+// zero because the arena header and the page directory precede it.
+fn splitPageAt(origin: vec3u, size: u32, page: u32) -> SplitPage {
+  let child = size / 2u;
+  let span = size / 8u;
+  let first = origin / 8u;
+  let brick = first + vec3u(page % span, (page / span) % span, page / (span * span));
+  let brickDims = (dims() + vec3u(7u)) / 8u;
+  let logical = brick.x + brick.y * brickDims.x + brick.z * brickDims.x * brickDims.y;
+  let encoded = requireOwnerPageEncoded(logical);
+  if (encoded == 0u) { return SplitPage(0u, 0u); }
+  let brickOrigin = brick * vec3u(8u);
+  let childOrigin = origin + ((brickOrigin - origin) & vec3u(~(child - 1u)));
+  return SplitPage(ownerPageMap().payloadBase + (encoded - 1u) * 512u,
+    encodePagedOwner(brickOrigin, childOrigin, child));
+}
+
+// Membership is not readable state here, so the fill does not read it.
+//
+// storeOwnerRequired preserves OWNER_WORD_TOPOLOGY by loading the current word
+// and OR-ing the bit back into the atomicMin candidate. That load is the second
+// device round trip on a dependent chain -- half of the traffic of a size-cubed
+// materialization -- and inside the topology candidate view it can never
+// observe a set bit. Membership is a leaf property published by
+// markAcceptedOwner during frontier emission, and commitOwnerPageCandidate
+// rewrites the whole inactive payload bank with word &= ~OWNER_WORD_TOPOLOGY
+// (webgpu-octree-owner-pages.ts, "Membership is a leaf property, not a
+// resident-page property") in the pass immediately before the topology
+// dispatches. Every page reachable through the candidate directory is in that
+// candidate key set by construction, so the bit is clear on every cell this
+// path can address, and OR-ing zero is a no-op.
+//
+// The guard is the override, not a comment: outside the candidate view the
+// loading form is kept verbatim.
+fn splitOwnerWord(at: u32, word: u32) -> u32 {
+  if (topologyCandidateView == 1u && !gradingMembershipLoad) { return word; }
+  return word | (atomicLoad(&owners[at]) & OWNER_WORD_TOPOLOGY);
+}
+
+// Claim a page the same way the split itself is claimed: write the first cell
+// the fill would write anyway and report whether this invocation lowered it.
+// A loser retires having spent exactly the three device ops it already spent,
+// and it knows the page has a materializer.
+fn claimSplitPage(plan: SplitPage) -> bool {
+  let word = splitOwnerWord(plan.base, plan.word);
+  return atomicMin(&owners[plan.base], word) > word;
+}
+
+// The remaining 511 cells, contiguous and in the same x-fastest order the
+// triple loop used. Slot zero belongs to the claim.
+fn fillSplitPage(plan: SplitPage) {
+  for (var slot = 1u; slot < 512u; slot += 1u) {
+    let at = plan.base + slot;
+    atomicMin(&owners[at], splitOwnerWord(at, plan.word));
+  }
+}
+
+// The elected materializer sweeps every page, so coverage never depends on how
+// many helpers showed up. Pages a helper already claimed cost three device ops
+// to skip.
+fn materializeSplitPages(origin: vec3u, size: u32) {
+  let span = size / 8u;
+  let pages = span * span * span;
+  for (var page = 0u; page < pages; page += 1u) {
+    let plan = splitPageAt(origin, size, page);
+    if (plan.base == 0u) { continue; }
+    // Page zero's first cell IS the leaf origin and its word is byte-identical
+    // to the leaf claim's, so re-claiming it would always lose and would strand
+    // the 511 cells behind it.
+    if (page == 0u || claimSplitPage(plan)) { fillSplitPage(plan); }
+  }
+}
+
+// Give a losing asker exactly one page.
+//
+// Grading is a neighbour repair: every leaf on the ring around a coarse
+// neighbour asks for the SAME neighbour split. Deduplicating on the origin cell
+// made the cost proportional to splits rather than askers, but it also left ONE
+// lane walking the whole size-cubed partition -- 32,768 dependent atomics for a
+// size-32 leaf -- while every other asker retired after three device ops and 63
+// of its own workgroup siblings idled.
+//
+// The partition divides over pages and the write is an idempotent atomicMin of
+// a value depending only on (origin, size, cell), so any lane may perform any
+// page and no lane can observe another's order. Each loser therefore takes one
+// page, chosen by hashing its own anchor so that askers spread over the pages
+// instead of colliding on the first one. Nothing is shared, nothing blocks, and
+// the loser's cost is unchanged unless it actually wins work -- which is the
+// property a workgroup-local queue drained behind a barrier could not have.
+fn helpSplitPage(origin: vec3u, size: u32, seed: u32) {
+  let span = size / 8u;
+  let pages = span * span * span;
+  var mixed = seed * 0x9e3779b1u;
+  mixed = mixed ^ (mixed >> 16u);
+  let plan = splitPageAt(origin, size, mixed & (pages - 1u));
+  if (plan.base == 0u) { return; }
+  if (claimSplitPage(plan)) { fillSplitPage(plan); }
+}
+
+fn splitLeafSeeded(origin: vec3u, size: u32, seed: u32) {
+  let claimed = claimLeafSplit(origin, size);
+  if (gradingPageFill && size >= 16u) {
+    if (claimed) { materializeSplitPages(origin, size); }
+    else if (gradingSplitHelpers) { helpSplitPage(origin, size, seed); }
+    return;
+  }
+  if (!claimed) { return; }
   materializeSplitStrided(origin, size, 0u, 1u);
 }
+
+fn splitLeaf(origin: vec3u, size: u32) { splitLeafSeeded(origin, size, 0u); }
 
 fn refineTopologyAt(gid: vec3u) {
   if (any(gid >= dims())) { return; }
@@ -7833,7 +8012,7 @@ fn repairPaperMixedNeighbors(origin: vec3u, size: u32) {
   // oracle: split every coarse face/edge neighbor of the mixed anchor once.
   for (var bit = 0u; bit < 18u; bit += 1u) {
     let probe = paperProbe(origin, size, PAPER_DIRECTIONS[bit]); if (!valid(probe)) { continue; }
-    let neighbor = ownerAt(probe); if (ownerValid(neighbor) && neighbor.size > size) { splitLeaf(unpackOrigin(neighbor.packedOrigin), neighbor.size); }
+    let neighbor = ownerAt(probe); if (ownerValid(neighbor) && neighbor.size > size) { splitLeafSeeded(unpackOrigin(neighbor.packedOrigin), neighbor.size, packOrigin(origin) + bit); }
   }
 }
 
@@ -7842,7 +8021,7 @@ fn repairPaperRatioNeighbors(origin: vec3u, size: u32) {
     let probe = paperProbe(origin, size, PAPER_DIRECTIONS[bit]); if (!valid(probe)) { continue; }
     let neighbor = ownerAt(probe);
     if (ownerValid(neighbor) && neighbor.size > 2u * size) {
-      splitLeaf(unpackOrigin(neighbor.packedOrigin), neighbor.size);
+      splitLeafSeeded(unpackOrigin(neighbor.packedOrigin), neighbor.size, packOrigin(origin) + bit);
     }
   }
 }
