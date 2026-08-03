@@ -182,22 +182,27 @@ function leafSize(value: number): OctreeOwnerLeafSize {
 /**
  * Gate for shaping the owner-page candidate sort by its live key count.
  *
- * Default OFF, so the shipping encode is byte-for-byte what it was and the
- * droplet sweep's published baseline stays the baseline. The ON arm is the
- * measured fix for the only term that moved that sweep: a 100-cell droplet in
- * a 240-cubed container sorted 32,768 keys through 120 barrier stages in one
- * workgroup because the network was sized by the dense topology tile lattice
- * rather than by the few hundred keys actually present. Gate it on the D4
- * symmetric-expansion oracle before flipping the default — the candidate order
- * feeds stable-ID carry, so a wrong network is a correctness bug, not a slow
- * one.
+ * Default ON. `SORT_CAPACITY` is an arena bound that grows with the container,
+ * so a 100-cell droplet in a 256-cubed box sorted 32,768 keys through 120
+ * device-scope barrier stages in one workgroup against a couple of thousand
+ * live keys. The live span is the smallest power of two covering the published
+ * `sourceSlots`, which is the definition of the same set — padding sorts to the
+ * tail either way and nothing downstream reads past `sourceSlots`.
+ *
+ * The first evaluation of this flag was a null result because it was measured
+ * while the container's wall shell still marked 448 of 512 topology tiles
+ * resident: `sourceSlots` was 30,400, so the live span only shrank the network
+ * 65,536 -> 32,768, one stage group. With the occupancy fix in `65b2427` the
+ * candidate stream really is live, and the same flag is worth 8.86 -> 3.22
+ * ms/advance on `power-droplet-256` per-label attribution. Set
+ * `FLUID_OWNER_PAGE_LIVE_SORT_SPAN=0` to restore the capacity-shaped network.
  */
 export function ownerPageLiveSortSpanEnabled(
   environment?: Readonly<Record<string, string | undefined>>,
 ): boolean {
   const resolved = environment
     ?? (typeof process !== "undefined" ? process.env : undefined);
-  return resolved?.FLUID_OWNER_PAGE_LIVE_SORT_SPAN === "1";
+  return resolved?.FLUID_OWNER_PAGE_LIVE_SORT_SPAN !== "0";
 }
 
 export function planOctreeOwnerPages(
