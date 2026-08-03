@@ -156,8 +156,12 @@ export class GPUInitializationTaskRunner {
       // dependency contract the serial path enforces is unchanged; the tasks in
       // a batch simply cannot depend on each other.
       if (parallelPipelineCompilationEnabled && task.phase === "solver-pipelines") {
+        // Bounded by the same budget that governs serial painting, so a long
+        // compile phase still reports progress at the cadence the UI contract
+        // requires. A batch is one paint; letting it grow without limit would
+        // turn twenty tiny pipeline tasks into a single silent stall.
         const batch: GPUInitializationTask[] = [];
-        while (index + batch.length < tasks.length) {
+        while (index + batch.length < tasks.length && batch.length < TASKS_PER_PAINT) {
           const candidate = tasks[index + batch.length]!;
           if (candidate.phase !== "solver-pipelines" || candidate.paintBeforeRun) break;
           if ((candidate.dependencies ?? []).some((id) => !this.completed.has(id))) break;
