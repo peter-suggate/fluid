@@ -137,8 +137,21 @@ function pane(
   };
 }
 
+/**
+ * Whether this document's container is a visible vessel.
+ *
+ * The garden has always been the open case: its water sits in the ground, and a
+ * pane hanging in the air around it would read as a bug. `container.vessel`
+ * generalises that from an environment the renderer happens to know the name of
+ * to a property of the scene, which is what lets a fresh room start without a
+ * tank in it and gain one when its author asks for one.
+ */
+function containerIsGlass(scene: SceneDescription, environmentId: EnvironmentId): boolean {
+  return scene.container.vessel !== "none" && environmentId !== "garden";
+}
+
 function containerPanes(scene: SceneDescription, environmentId: EnvironmentId, thickness_m: number): AuthoredSceneGlassPane[] {
-  if (environmentId === "garden") return [];
+  if (!containerIsGlass(scene, environmentId)) return [];
   const halfWidth = 0.5 * scene.container.width_m;
   const halfDepth = 0.5 * scene.container.depth_m;
   const halfHeight = 0.5 * scene.container.height_m;
@@ -253,7 +266,7 @@ export function svoSceneGlassFromEnvironmentCatalog(
     packedRecords,
     metadata,
     unsupportedEntries,
-    containerPolicy: catalog.environmentId === "garden" ? "absent-open-environment" : "thin-glass-vessel",
+    containerPolicy: containerIsGlass(scene, catalog.environmentId) ? "thin-glass-vessel" : "absent-open-environment",
     containerPaneIndices,
     containerTopPaneIndex: metadata.find(({ role }) => role === "container-top")?.recordIndex,
     environmentPaneIndices,

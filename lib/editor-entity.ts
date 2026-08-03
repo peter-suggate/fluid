@@ -283,11 +283,14 @@ export interface EditorEntityContext {
   readonly scene: SceneDescription;
   readonly bodies: readonly EditorBodyPose[];
   /**
-   * True only when the complete scene generation is the image being presented.
+   * True only when the complete scene generation is the image being presented,
+   * which is the one thing a *click on the scene* depends on: it resolves
+   * against what the GPU published. Handles are document geometry and are not
+   * gated by it — see `entityAtRay` in the catalog.
    * An absent value keeps pure entity/unit-test contexts independent from GPU
    * lifecycle state; the viewport always supplies it explicitly.
    */
-  readonly scenePresentationAvailable?: boolean;
+  readonly pickingAvailable?: boolean;
 }
 
 /** The runtime pose an entity definition needs, without importing the solver. */

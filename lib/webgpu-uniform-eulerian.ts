@@ -1552,13 +1552,25 @@ fn recordPhysicsPhaseBoundary(
   get secondaryParticles() { return undefined; }
   applyRuntimeValues(_values: Record<string, string | number | boolean>) {}
   /**
-   * Adopt scene scalars that no lattice, arena, or seed depends on. This
-   * solver reads them from `this.scene` when it writes per-step params, so the
-   * swap alone is enough; the octree projection keeps its own params buffer
-   * and is refreshed explicitly.
+   * Adopt scene inputs that no lattice, arena, or seed depends on. This solver
+   * reads most of them from `this.scene` when it writes per-step params, so the
+   * swap alone is enough; the octree projection keeps its own params buffer and
+   * is refreshed explicitly.
+   *
+   * The inflow boundary is the exception and has to be rederived. Where the
+   * nozzle is and which way it points are a uniform-tier input — that is what
+   * makes aiming the hose a params write rather than a restart — but the outlet
+   * centre and aperture scale the step params carry are *derived* from them
+   * here, on the host, and derived once. Swapping the scene without redoing
+   * that derivation would move the arrow the user is dragging and leave the
+   * water coming out of where it used to be.
    */
   applySceneUniforms(scene: SceneDescription) {
     this.scene = scene;
+    const { nx, ny, nz } = this.info;
+    this.inflowBoundary = scene.fluid.inflow
+      ? createInflowGridBoundary(scene.fluid.inflow, scene.container, [nx, ny, nz])
+      : undefined;
     this.octreeProjection?.applySceneUniforms(scene);
   }
 

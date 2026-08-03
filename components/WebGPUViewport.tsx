@@ -29,6 +29,7 @@ import { canonicalScene, type CameraState } from "@/lib/model";
 import { add, cameraBasis, dot, length, orbit, pan, scale, sub, zoom } from "@/lib/math";
 import { boundingRadius, createBodyDescription, type RigidBodyState } from "@/lib/rigid-body";
 import type { RigidBodyDescription } from "@/lib/model";
+import { resourceInteractionGates } from "@/lib/resource-readiness";
 import { simulation } from "@/lib/simulation/controller";
 import { simulationRecording } from "@/lib/simulation/recording";
 import { projectToViewport, viewportRayForPointer } from "@/lib/webgpu-camera";
@@ -41,15 +42,9 @@ import { hoverSceneAt, restOnHover, type EditorHover } from "@/lib/editor-hover"
 import { sceneryHighlightRange } from "@/lib/editor-scenery";
 import { createInflowAt, INFLOW_SELECTION_ID } from "@/lib/editor-inflow";
 import {
-  editorFluidLattice,
-  eraseFluidBrick,
   fillFractionForHeight,
   fillLevelHandlePosition,
-  fluidBrickCenter,
-  fluidBrickIndexAt,
-  fluidBrickKey,
-  fluidPaintPatch,
-  paintFluidBrick,
+  fluidBrushSample,
 } from "@/lib/editor-fluid";
 import {
   axisConstraintLabel,
@@ -174,9 +169,13 @@ export function WebGPUViewport() {
   const sceneDraft = useSceneDraftStore((state) => state.draft);
   const gpuInfo = useDiagnosticsStore((state) => state.gpuInfo);
   const waterSurfacePresentation = useDiagnosticsStore((state) => state.waterSurfacePresentation);
-  const scenePresentationAvailable = useDiagnosticsStore(
-    (state) => state.effectiveRendererStatus.state === "active"
-      || state.effectiveRendererStatus.state === "not-required");
+  // Two gates, not one. A rebuild replaces the image, so it may only take away
+  // the things that read that image: a ray into the scene, the hover chip, a
+  // drop onto a surface. The camera is ours and keeps moving, and so does every
+  // gizmo, because those are drawn from the document — see
+  // `resourceInteractionGates` and EDITOR_ENTITY_ARCHITECTURE.md.
+  const resourceReadiness = useDiagnosticsStore((state) => state.resourceReadiness);
+  const { cameraInteractive, pickingInteractive } = resourceInteractionGates(resourceReadiness, false);
   const [viewportSize, setViewportSize] = useState({ width: 1, height: 1 });
   const svoStageView = useUIStore((state) => state.svoStageView);
   const svoStageLightSlot = useUIStore((state) => state.svoStageLightSlot);
@@ -604,7 +603,9 @@ export function WebGPUViewport() {
     | { id: number; action: "slice"; axis: "x" | "y" | "z"; grabY: number; startClientY: number; startSlice: number }
     | null
   >(null);
-  const fluidToolArmed = scenePresentationAvailable
+  // A brush stroke lands on the surface the ray meets, so the brush is only
+  // armed once there is a published surface for it to land on.
+  const fluidToolArmed = pickingInteractive
     && (activeTool === "fluid-paint" || activeTool === "fluid-erase");
 
   // The selection's handles.
@@ -615,7 +616,7 @@ export function WebGPUViewport() {
   // scene write invalidates the solver's seed key — writing per pointer-move
   // asked the renderer to re-seed dozens of times a second, which is exactly the
   // hitch that made the gesture unusable. Preview here, simulate on release.
-  const entityContext: EditorEntityContext = { scene, scenePresentationAvailable, bodies: bodies.map((body) => ({
+  const entityContext: EditorEntityContext = { scene, pickingAvailable: pickingInteractive, bodies: bodies.map((body) => ({
     id: body.description.id, position_m: body.position_m, orientation: body.orientation })) };
   const entities = surfacedEntities(entityContext, activeTool, selection);
   const heldEntity = entities[0];
@@ -653,11 +654,14 @@ export function WebGPUViewport() {
   // between a constraint and a gesture that looks broken.
   const heldHandle = handleDrag && heldEntity?.handles.find((handle) => handle.id === handleDrag.handleId);
   const heldAxes = heldHandle && constrainedAxes(heldHandle.axes, axisConstraint);
-  const fillHandle = scenePresentationAvailable && fluidToolArmed && scene.fluid.initialCondition === "tank-fill"
+  // The fill handle belongs to the brush, which `fluidToolArmed` already gates.
+  const fillHandle = fluidToolArmed && scene.fluid.initialCondition === "tank-fill"
     ? projectToViewport(fillLevelHandlePosition(scene), camera, viewportSize.width, viewportSize.height)
     : undefined;
-  const selectedTerrainFeature = scenePresentationAvailable
-    && selection?.kind === "terrain-feature" && activeTool === "select"
+  // Terrain handles are the selection's gizmo, drawn from `scene.terrain`, so
+  // like every other handle they outlive the generation that was on screen when
+  // the feature was picked.
+  const selectedTerrainFeature = selection?.kind === "terrain-feature" && activeTool === "select"
     ? terrainFeatureIndex(selection.id, scene.terrain)
     : undefined;
   const terrainHandles = selectedTerrainFeature !== undefined && scene.terrain
@@ -1260,27 +1264,28 @@ export function WebGPUViewport() {
 
   /**
    * Paint or erase the brick under the pointer. Returns the brick key so a
-   * drag only touches the document when it crosses into a new brick.
+   * drag only revises the proposal when it crosses into a new brick.
+   *
+   * The stroke accumulates in the draft, against the scene as the pointer
+   * currently proposes it, so each brick unions with the ones already painted
+   * rather than with the committed document. Writing per brick instead meant a
+   * twenty-brick stroke changed `gpuSceneSeedKey` twenty times — twenty
+   * attempted re-seeds, serialised behind `reseedInFlight` — and then reset the
+   * clock on release. This is the same commit-on-release contract every other
+   * gesture in the editor already keeps.
    */
   const paintFluidAt = (ray: { origin: Vec3; direction: Vec3 }, erase: boolean, lastBrickKey?: string) => {
-    const sceneStore = useSceneStore.getState();
-    const scene = sceneStore.scene;
-    const hit = hoverSceneAt(scene, useDiagnosticsStore.getState().bodies, ray);
+    const proposed = displaySceneSnapshot();
+    const hit = hoverSceneAt(proposed, useDiagnosticsStore.getState().bodies, ray);
     // Paint onto whatever surface is under the cursor; with nothing there,
     // fall back to the fill-level plane so open air is still paintable.
     const point = hit?.position_m
-      ?? planeHit(ray.origin, ray.direction, { x: 0, y: fillLevelHandlePosition(scene).y, z: 0 }, { x: 0, y: 1, z: 0 });
-    const lattice = editorFluidLattice(scene);
-    const index = fluidBrickIndexAt(lattice, point);
-    if (!index) return lastBrickKey;
-    const key = fluidBrickKey(index);
-    if (key === lastBrickKey) return key;
-    // A surface hit sits on the boundary of the brick behind it; nudging into
-    // the brick centre keeps a stroke on the surface from seeding solids.
-    const target = erase ? point : fluidBrickCenter(lattice, index);
-    const result = erase ? eraseFluidBrick(scene, target) : paintFluidBrick(scene, target);
-    if (result) sceneStore.patchScene({ fluid: fluidPaintPatch(scene, result) });
-    return key;
+      ?? planeHit(ray.origin, ray.direction, { x: 0, y: fillLevelHandlePosition(proposed).y, z: 0 }, { x: 0, y: 1, z: 0 });
+    const sample = fluidBrushSample(useSceneStore.getState().scene, proposed, point, erase);
+    if (!sample) return lastBrickKey;
+    if (sample.brickKey === lastBrickKey) return sample.brickKey;
+    if (sample.patch) useSceneDraftStore.getState().updateDraft(sample.patch);
+    return sample.brickKey;
   };
 
   /** Drop the armed placement shape onto whatever the cursor is over. */
@@ -1315,24 +1320,34 @@ export function WebGPUViewport() {
     publishHoverHighlight(null);
     if (event.button === 0 && !event.shiftKey) {
       const ray = pointerRay(event);
+      // Handles first, and never GPU-gated: they are the selection's own
+      // document geometry, so a gesture already under way — or one started
+      // mid-rebuild — keeps working while the renderer replaces the image.
       if (beginEntityHandleDrag(event)) return;
       if (beginTerrainHandleDrag(event)) return;
-      if (useUIStore.getState().activeTool === "inflow") { placeInflowAt(ray); return; }
-      // Armed tools claim the click before the slice/pick/orbit fallback so a
-      // placement never orbits the camera instead.
-      if (useUIStore.getState().activeTool === "body-place") { placeBodyAt(ray); return; }
-      if (useUIStore.getState().activeTool === "prop-place") {
-        const target = hoverSceneAt(useSceneStore.getState().scene, useDiagnosticsStore.getState().bodies, ray);
-        if (target) simulation.addScenery(useUIStore.getState().propShape, target.position_m, target.normal);
-        return;
-      }
-      if (beginFillLevelDrag(event)) return;
-      const paintTool = useUIStore.getState().activeTool;
-      if (paintTool === "fluid-paint" || paintTool === "fluid-erase") {
-        const erase = paintTool === "fluid-erase";
-        simulation.beginEdit(erase ? "Erased water" : "Painted water");
-        pointerRef.current = { id: event.pointerId, action: "fluid-paint", erase, lastBrickKey: paintFluidAt(ray, erase) };
-        return;
+      // Everything below drops something onto, or reads something out of, the
+      // surface the ray meets, and only a complete published generation has
+      // one. With no generation attached each of these falls through to the
+      // orbit/pan fallback at the end rather than acting on a scene the user
+      // cannot see.
+      if (pickingInteractive) {
+        if (useUIStore.getState().activeTool === "inflow") { placeInflowAt(ray); return; }
+        // Armed tools claim the click before the slice/pick/orbit fallback so a
+        // placement never orbits the camera instead.
+        if (useUIStore.getState().activeTool === "body-place") { placeBodyAt(ray); return; }
+        if (useUIStore.getState().activeTool === "prop-place") {
+          const target = hoverSceneAt(useSceneStore.getState().scene, useDiagnosticsStore.getState().bodies, ray);
+          if (target) simulation.addScenery(useUIStore.getState().propShape, target.position_m, target.normal);
+          return;
+        }
+        if (beginFillLevelDrag(event)) return;
+        const paintTool = useUIStore.getState().activeTool;
+        if (paintTool === "fluid-paint" || paintTool === "fluid-erase") {
+          const erase = paintTool === "fluid-erase";
+          simulation.beginDraft("fluid-body", erase ? "Erased water" : "Painted water");
+          pointerRef.current = { id: event.pointerId, action: "fluid-paint", erase, lastBrickKey: paintFluidAt(ray, erase) };
+          return;
+        }
       }
       // What a click on the scene itself would select. Resolved now, acted on at
       // the release: the press has to stay available as an orbit, and only the
@@ -1340,7 +1355,7 @@ export function WebGPUViewport() {
       // background click has always followed, with something to select rather
       // than nothing.
       let selectOnClick: EditorSelection | undefined;
-      if (useUIStore.getState().activeTool === "select") {
+      if (pickingInteractive && useUIStore.getState().activeTool === "select") {
         const context = editorEntityContext();
         const surface = hoverSceneAt(context.scene, useDiagnosticsStore.getState().bodies, ray);
         // Clicking the ground selects the terrain feature under the cursor, so
@@ -1362,7 +1377,8 @@ export function WebGPUViewport() {
       }
       const grab = sliceGrabHit(ray.origin, ray.direction);
       if (grab) { pointerRef.current = { id: event.pointerId, action: "slice", ...grab, startClientY: event.clientY, startSlice: useUIStore.getState().gridOverlaySlice }; return; }
-      if (simulation.backend === "webgpu" && rendererRef.current) {
+      // The GPU pick reads the published frame, so it answers to the same gate.
+      if (pickingInteractive && simulation.backend === "webgpu" && rendererRef.current) {
         const pointerId=event.pointerId,timeStamp=event.timeStamp,x=event.clientX,y=event.clientY;
         pointerRef.current={id:pointerId,x,y,downX:x,downY:y,action:"pick"};
         const rect=event.currentTarget.getBoundingClientRect();
@@ -1387,8 +1403,10 @@ export function WebGPUViewport() {
         pointerRef.current={...active,action:"orbit",selectOnClick};
         return;
       }
+      // The analytic body pick is the non-WebGPU fallback for the block above
+      // and answers to the same gate: an unpresented body must not be grabbable.
       let nearest: { body: RigidBodyState; t: number } | undefined;
-      for (const body of useDiagnosticsStore.getState().bodies) {
+      for (const body of pickingInteractive ? useDiagnosticsStore.getState().bodies : []) {
         const oc = sub(ray.origin, body.position_m), radius = boundingRadius(body), b = dot(oc, ray.direction), c = dot(oc, oc) - radius * radius, discriminant = b * b - c;
         if (discriminant < 0) continue; const t = -b - Math.sqrt(discriminant);
         if (t > 0 && (!nearest || t < nearest.t)) nearest = { body, t };
@@ -1436,12 +1454,16 @@ export function WebGPUViewport() {
         return;
       }
       setHandleHover(null);
-      // Analytic hover: no GPU readback, so it is safe at pointer-move rate.
+      // Analytic hover: no GPU readback, so it is safe at pointer-move rate. It
+      // still names the thing under the cursor *in the presented image*, so it
+      // waits for a generation to be presented — unlike the handle hover above,
+      // which reads the document and stays live through a rebuild.
+      if (!pickingInteractive) { setHover(null); publishHoverHighlight(null); return; }
       // Scenery is asked for only under the select tool — see EditorHoverOptions.
       const ray = pointerRay(event);
       const hovered = hoverSceneAt(
         useSceneStore.getState().scene, useDiagnosticsStore.getState().bodies, ray,
-        { scenery: scenePresentationAvailable && ui.activeTool === "select" }) ?? null;
+        { scenery: ui.activeTool === "select" }) ?? null;
       setHover(hovered);
       publishHoverHighlight(hovered);
       return;
@@ -1568,10 +1590,9 @@ export function WebGPUViewport() {
       simulation.commitDraft();
       return;
     }
-    // Painting writes brick seeds as the stroke crosses each brick, so its
-    // document write is already once-per-brick rather than once-per-move.
     if (active.action === "fluid-paint") {
-      simulation.commitEdit(undefined, { reseed: true });
+      if (cancelled) { simulation.cancelDraft(); return; }
+      simulation.commitDraft();
       return;
     }
     // Nothing claimed the press, so a click that never became a drag is the user
@@ -1585,6 +1606,11 @@ export function WebGPUViewport() {
   };
 
   return <>
+    {/* `data-scene-presentation` and `aria-disabled` keep reporting PICKING
+        availability — what a click on the scene can reach — because that is the
+        question a11y and the e2e lanes were always asking. The pointer handlers
+        below are attached regardless: a canvas nobody can orbit is a far worse
+        answer than one whose clicks cannot select anything yet. */}
     <canvas
       ref={canvasRef}
       className="gpu-canvas"
@@ -1592,29 +1618,30 @@ export function WebGPUViewport() {
       data-testid="gpu-viewport"
       data-camera-azimuth={camera.azimuth_rad.toFixed(6)}
       data-camera-elevation={camera.elevation_rad.toFixed(6)}
-      data-scene-presentation={scenePresentationAvailable ? "active" : "unavailable"}
-      aria-disabled={!scenePresentationAvailable}
+      data-scene-presentation={pickingInteractive ? "active" : "unavailable"}
+      aria-disabled={!pickingInteractive}
       data-pixel-trace={pixelTraceEnabled && activeTool === "select" && !pixelTracePinned ? "live" : undefined}
       data-shape-grab={handleHover ? "true" : undefined}
-      onPointerDown={scenePresentationAvailable ? pointerDown : undefined}
-      onPointerMove={scenePresentationAvailable ? pointerMove : undefined}
-      onPointerUp={scenePresentationAvailable ? pointerUp : undefined}
-      onPointerCancel={scenePresentationAvailable ? pointerUp : undefined}
+      onPointerDown={pointerDown}
+      onPointerMove={pointerMove}
+      onPointerUp={pointerUp}
+      onPointerCancel={pointerUp}
       onPointerLeave={() => { setHover(null); publishHoverHighlight(null); setHandleHover(null); }}
-      onWheel={scenePresentationAvailable ? (event) => { event.preventDefault(); setCamera((current) => zoom(current, event.deltaY)); } : undefined}
+      onWheel={cameraInteractive ? (event) => { event.preventDefault(); setCamera((current) => zoom(current, event.deltaY)); } : undefined}
       onContextMenu={(event) => event.preventDefault()}
     />
     {/* Pick mode, beside the frame rate rather than four scrolls into a
         collapsed panel section. It is a mode and not an action — it changes
         what a click on the scene means — so it reads as a pressed state with
         the gesture spelled out, and it names the pinned case separately because
-        that is the state a reader can get stuck in without noticing. */}
+        that is the state a reader can get stuck in without noticing. It is a
+        GPU readback against the presented frame, so it waits for picking. */}
     <button
       type="button"
       className="scene-pick-toggle"
       data-testid="cell-pick-toggle"
       aria-pressed={fluidCellTraceEnabled}
-      disabled={!scenePresentationAvailable}
+      disabled={!pickingInteractive}
       data-pinned={fluidCellTracePinned ? "true" : "false"}
       onClick={() => setFluidCellTraceEnabled(!fluidCellTraceEnabled)}
       title={fluidCellTraceEnabled

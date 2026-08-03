@@ -1,50 +1,45 @@
 "use client";
 
-import { scenePresets } from "@/lib/scenes";
-import { simulation } from "@/lib/simulation/controller";
+import { findSceneDefinition } from "@/lib/scenes";
 import { useSceneStore } from "@/lib/stores/scene-store";
+import { useShellStore } from "@/lib/stores/shell-store";
 import { useUIStore } from "@/lib/stores/ui-store";
 import { planSceneRuntime } from "@/lib/scene-runtime";
 
-const groups = [...new Set(scenePresets.map((preset) => preset.group))];
-
 /**
- * The only always-visible scene affordances: which preset is loaded, and the
- * way into its configuration. Everything else authored per-scene lives in the
- * configuration panel, so this rides over the viewport instead of costing a
- * sidebar column.
+ * The only always-visible scene affordances: which scene is loaded, the way back
+ * to the library, and the way into this scene's configuration.
+ *
+ * This was a dropdown over every preset — twenty-five options, of which
+ * thirteen were analytic oracles, in a 214 px pill. Choosing what to explore is
+ * not a form control, so it moved to the library and this became a chip that
+ * names where you are and opens it. That also retires a real hazard: a focused
+ * dropdown reads as text editing to the shortcut chassis, so choosing a scene
+ * used to silently disable every single-key shortcut until something else took
+ * focus, and the fix was a `blur()` someone had to remember. A button cannot
+ * hold that state at all.
  */
 export function SceneOverlay() {
   const presetId = useSceneStore((state) => state.presetId);
   const scene = useSceneStore((state) => state.scene);
   const sceneModalOpen = useUIStore((state) => state.sceneModalOpen);
   const setSceneModalOpen = useUIStore((state) => state.setSceneModalOpen);
-  const active = scenePresets.find((preset) => preset.id === presetId);
+  const openLibrary = useShellStore((state) => state.openLibrary);
+  const definition = findSceneDefinition(presetId);
   const runtime = planSceneRuntime(scene).fluidSolver ? `seed ${scene.randomSeed}` : "live SVO · no fluid";
   return (
     <div className="scene-overlay" data-testid="scene-panel">
       <span className="brand-mark" title="Fluid Lab · WebGPU CFD workbench">FL</span>
-      <label className="scene-overlay-preset" title={active?.description}>
-        <span className="visually-hidden">Scene preset</span>
-        {/* Release focus once the choice is made. A focused <select> counts as
-            text editing to the shortcut chassis, so leaving it focused silently
-            kills every single-key shortcut — you pick a scene, press a tool
-            key, and nothing happens for no visible reason. */}
-        <select
-          aria-label="Scene preset"
-          value={presetId}
-          onChange={(event) => { simulation.loadPreset(event.target.value); event.target.blur(); }}
-        >
-          {groups.map((group) => (
-            <optgroup key={group} label={group}>
-              {scenePresets.filter((preset) => preset.group === group).map((preset) => (
-                <option key={preset.id} value={preset.id}>{preset.name}</option>
-              ))}
-            </optgroup>
-          ))}
-        </select>
+      <button
+        type="button"
+        className="scene-overlay-chip"
+        onClick={openLibrary}
+        data-testid="open-scene-library"
+        title={definition ? `${definition.blurb}\n\nBrowse all scenes` : "Browse all scenes"}
+      >
+        <strong>{definition?.name ?? scene.sceneId}</strong>
         <small>{scene.sceneId} · {runtime}</small>
-      </label>
+      </button>
       <button
         className={`scene-overlay-configure${sceneModalOpen ? " active" : ""}`}
         onClick={() => setSceneModalOpen(!sceneModalOpen)}

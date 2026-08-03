@@ -3,6 +3,7 @@ import test from "node:test";
 import { readFileSync } from "node:fs";
 import { cloneScene, defaultScene, type SceneDescription } from "../lib/model";
 import { getMethod, resolveMethodValues } from "../lib/methods";
+import { getScenePreset } from "../lib/scenes";
 import {
   gpuSceneSeedKey,
   gpuSceneSolverKey,
@@ -63,7 +64,9 @@ test("each authoring input reaches exactly the tiers that must answer it", () =>
     { label: "wall mode", tiers: ["structural"], mutate: (scene) => { scene.container.fluidWallMode = scene.container.fluidWallMode === "no-slip" ? "free-slip" : "no-slip"; } },
     { label: "voxel domain", tiers: ["structural"], mutate: (scene) => { scene.voxelDomain.finestCellSize_m *= 0.5; } },
     { label: "fill fraction", tiers: ["seed"], mutate: (scene) => { scene.container.fillFraction = 0.5 * (scene.container.fillFraction + 1); } },
-    { label: "rigid bodies", tiers: ["seed"], mutate: (scene) => { scene.rigidBodies = []; } },
+    // Emptying the roster crosses the one boundary that is genuinely
+    // allocation-shaped — solids present or absent — and so moves both tiers.
+    { label: "rigid bodies", tiers: ["seed", "uniform"], mutate: (scene) => { scene.rigidBodies = []; } },
     { label: "initial condition", tiers: ["seed"], mutate: (scene) => { scene.fluid.initialCondition = scene.fluid.initialCondition === "dam-break" ? "tank-fill" : "dam-break"; } },
     { label: "dam origin", tiers: ["seed"], mutate: (scene) => { scene.fluid.initialDamBreakOrigin_m = { x: 0.1, y: 0, z: 0 }; } },
     { label: "brick seeds", tiers: ["seed"], mutate: (scene) => { scene.fluid.initialBrickSeeds_m = [{ x: 0, y: 0.1, z: 0 }]; } },
@@ -90,6 +93,96 @@ test("each authoring input reaches exactly the tiers that must answer it", () =>
     const rebuilds = gpuSceneSolverKey(next, config) !== gpuSceneSolverKey(cloneScene(defaultScene), config);
     assert.equal(rebuilds, !(tiers.length === 1 && tiers[0] === "uniform"), `${label} must ${tiers[0] === "uniform" ? "not " : ""}rebuild`);
   }
+});
+
+test("aiming the hose is a params write; resizing it is a re-seed", () => {
+  // The nozzle used to be one JSON blob in the seed tier, so nudging the arrow
+  // restarted the simulation. What an allocation is actually sized from is the
+  // volume the hose will deliver — `fluidFootprint` integrates radius, speed
+  // and the timing window — and never where it points.
+  const base = getScenePreset("hose-tank").create();
+  const inflow = base.fluid.inflow;
+  assert.ok(inflow, "this fixture must actually carry a nozzle");
+  const withInflow = (patch: Partial<NonNullable<SceneDescription["fluid"]["inflow"]>>) =>
+    ({ ...base, fluid: { ...base.fluid, inflow: { ...inflow, ...patch } } });
+
+  const speed = Math.hypot(inflow.velocity_m_s.x, inflow.velocity_m_s.y, inflow.velocity_m_s.z);
+  const aimedAt = (x: number, y: number, z: number) => {
+    const norm = speed / Math.hypot(x, y, z);
+    return { velocity_m_s: { x: x * norm, y: y * norm, z: z * norm } };
+  };
+  const hot: ReadonlyArray<{ label: string; scene: SceneDescription }> = [
+    { label: "moved", scene: withInflow({ center_m: { ...inflow.center_m, x: inflow.center_m.x + 0.05 } }) },
+    { label: "re-aimed", scene: withInflow(aimedAt(0, -1, 0.4)) },
+    { label: "lengthened", scene: withInflow({ length_m: inflow.length_m * 1.5 }) },
+  ];
+  for (const { label, scene } of hot) {
+    assert.equal(gpuSceneSeedKey(scene), gpuSceneSeedKey(base), `a ${label} hose must not re-seed`);
+    assert.notEqual(gpuSceneUniformKey(scene), gpuSceneUniformKey(base), `a ${label} hose must reach the solver`);
+    assert.equal(gpuSceneSolverKey(scene, config), gpuSceneSolverKey(base, config),
+      `a ${label} hose must not rebuild`);
+  }
+
+  const budgeted: ReadonlyArray<{ label: string; scene: SceneDescription }> = [
+    { label: "widened", scene: withInflow({ radius_m: inflow.radius_m * 1.5 }) },
+    { label: "sped up", scene: withInflow({ velocity_m_s: { x: 0, y: -2 * speed, z: 0 } }) },
+    { label: "re-timed", scene: withInflow({ end_s: inflow.end_s + 1 }) },
+    { label: "removed", scene: { ...base, fluid: { ...base.fluid, inflow: undefined } } },
+  ];
+  for (const { label, scene } of budgeted) {
+    assert.notEqual(gpuSceneSeedKey(scene), gpuSceneSeedKey(base),
+      `a ${label} hose changes the volume the arena is budgeted for`);
+  }
+
+  // Turning the hose at constant speed delivers the same water, so it must not
+  // move the budget even though the velocity vector changed.
+  const turned = withInflow(aimedAt(1, 0, 0));
+  assert.equal(gpuSceneSeedKey(turned), gpuSceneSeedKey(base));
+});
+
+test("editing a body that already exists is a buffer write", () => {
+  // Every step writes the whole roster through `syncBodies` and re-encodes the
+  // solid vertex SDF from that buffer, so what a body *is* was never what an
+  // allocation was shaped by — only how many there are, whether any move, and
+  // the owner numbering the render source derives from the count.
+  const base = getScenePreset("dam-break-boxes").create();
+  assert.ok(base.rigidBodies.length > 0, "this fixture must already carry solids");
+  const replacingFirst = (patch: Partial<(typeof base.rigidBodies)[number]>) =>
+    ({ ...base, rigidBodies: [{ ...base.rigidBodies[0], ...patch }, ...base.rigidBodies.slice(1)] });
+
+  const hot: ReadonlyArray<{ label: string; scene: SceneDescription }> = [
+    { label: "repositioned", scene: replacingFirst({ position_m: { x: 0.2, y: 0.3, z: 0 } }) },
+    { label: "reshaped", scene: replacingFirst({ dimensions_m: { x: 0.2, y: 0.2, z: 0.2 } }) },
+    { label: "re-materialed", scene: replacingFirst({ friction: 0.1, restitution: 0.9 }) },
+    { label: "made denser", scene: replacingFirst({ density_kg_m3: 2000 }) },
+  ];
+  for (const { label, scene } of hot) {
+    assert.equal(gpuSceneSeedKey(scene), gpuSceneSeedKey(base), `a ${label} body must not re-seed`);
+    assert.notEqual(gpuSceneUniformKey(scene), gpuSceneUniformKey(base), "it must still reach the solver");
+    assert.equal(gpuSceneSolverKey(scene, config), gpuSceneSolverKey(base, config));
+  }
+
+  // The three facts that are not about a body but about the roster, asserted as
+  // such rather than left implicit.
+  const added = { ...base, rigidBodies: [...base.rigidBodies, { ...base.rigidBodies[0], id: "dropped-in" }] };
+  assert.notEqual(gpuSceneSeedKey(added), gpuSceneSeedKey(base),
+    "the count numbers every environment proxy after the bodies, so adding one renumbers the render source");
+  assert.notEqual(gpuSceneSeedKey({ ...base, rigidBodies: [] }), gpuSceneSeedKey(base),
+    "removing the last body releases the dense solid field");
+  const pinned = { ...base, rigidBodies: base.rigidBodies.map((body) => ({ ...body, motion: "static" as const })) };
+  assert.notEqual(gpuSceneSeedKey(pinned), gpuSceneSeedKey(base),
+    "pinning every body drops the moving-immersed-boundary iteration");
+});
+
+test("a solver that adopts a moved nozzle rederives the boundary it derived from it", () => {
+  // The step params carry an outlet centre and an aperture scale that are
+  // computed on the host from the nozzle's placement. Swapping the scene alone
+  // would move the arrow the user is dragging and leave the water coming out of
+  // where it used to be — which reads as the aim being ignored, not as a stale
+  // derivation.
+  const solver = readFileSync(new URL("../lib/webgpu-uniform-eulerian.ts", import.meta.url), "utf8");
+  const adopt = solver.slice(solver.indexOf("applySceneUniforms(scene: SceneDescription)"));
+  assert.match(adopt.slice(0, 600), /this\.inflowBoundary = scene\.fluid\.inflow/);
 });
 
 test("a world scale is answered by a re-seed, never a rebuild", () => {

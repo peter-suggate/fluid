@@ -1,0 +1,196 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { canonicalScene, validateScene } from "../lib/model";
+import {
+  SCENE_AUDIENCES,
+  defineScene,
+  duplicateSceneDefinitionIds,
+  sceneDefinitionCamera,
+  sceneDocument,
+  sceneShelves,
+  type SceneAudience,
+  type SceneDefinition,
+} from "../lib/scene-definition";
+import {
+  SCENE_CATALOG,
+  defaultScenePresetId,
+  getSceneDefinition,
+  getScenePreset,
+  sceneCatalogCards,
+  scenePresets,
+} from "../lib/scenes";
+
+const AUDIENCE_IDS = new Set<SceneAudience>(SCENE_AUDIENCES.map(({ id }) => id));
+
+/** A minimal well-formed definition, so a rejection test isolates one field. */
+function definition(patch: Partial<SceneDefinition> = {}): SceneDefinition {
+  return defineScene({
+    id: "probe",
+    name: "Probe",
+    blurb: "A scene that exists only to exercise the guard.",
+    audience: "explore",
+    shelf: "Tanks",
+    environment: "default",
+    build: () => getScenePreset("water-box-dam-break").create(),
+    ...patch,
+  });
+}
+
+test("every scene has one identity", () => {
+  assert.deepEqual(duplicateSceneDefinitionIds(SCENE_CATALOG), []);
+  assert.equal(new Set(SCENE_CATALOG.map(({ name }) => name)).size, SCENE_CATALOG.length,
+    "two scenes with the same name are indistinguishable on a card");
+});
+
+test("every catalog entry builds a document the schema accepts", () => {
+  for (const entry of SCENE_CATALOG) {
+    assert.deepEqual(validateScene(sceneDocument(entry)), [], `${entry.id} must build a valid document`);
+  }
+});
+
+test("every catalog document owns its scenery rather than naming a background", () => {
+  // The whole reason the smoke catalog's local factories diverged: assigning
+  // `environment` names a background without copying the graph it implies.
+  for (const entry of SCENE_CATALOG) {
+    const scene = sceneDocument(entry);
+    assert.equal(scene.environment, entry.environment, `${entry.id} must carry its environment id`);
+    assert.ok(scene.scenery, `${entry.id} must carry the scenery graph its environment seeds`);
+  }
+});
+
+test("building a scene twice yields the same document", () => {
+  for (const entry of SCENE_CATALOG) {
+    assert.equal(canonicalScene(sceneDocument(entry)), canonicalScene(sceneDocument(entry)),
+      `${entry.id} must not depend on call order or ambient state`);
+  }
+});
+
+test("every scene declares a known audience, and the oracles stay in validation", () => {
+  for (const entry of SCENE_CATALOG) {
+    assert.ok(AUDIENCE_IDS.has(entry.audience), `${entry.id} declares an unknown audience`);
+    assert.ok(entry.shelf.trim().length > 0, `${entry.id} needs a shelf`);
+    // A guard rather than taste: an analytic oracle that lands on the Explore
+    // shelf is thirteen ceiling-drop tests back in the product's front door.
+    if (entry.name.startsWith("Octree · ")) {
+      assert.equal(entry.audience, "validation", `${entry.id} is an oracle and belongs behind the disclosure`);
+    }
+  }
+  assert.ok(SCENE_CATALOG.some((entry) => entry.audience === "explore"));
+  assert.ok(SCENE_CATALOG.some((entry) => entry.audience === "study"));
+  assert.ok(SCENE_CATALOG.some((entry) => entry.audience === "validation"));
+  assert.equal(SCENE_AUDIENCES.find(({ id }) => id === "validation")?.disclosed, true,
+    "validation scenes are disclosed, never removed");
+});
+
+test("a numerical scene carries the solver profile it requires", () => {
+  // Loading a saved scene used to drop this, so a validation document could run
+  // under whatever method happened to be selected.
+  for (const entry of SCENE_CATALOG) {
+    if (entry.audience !== "validation") continue;
+    if (!entry.name.startsWith("Octree · ")) continue;
+    assert.ok(entry.methodProfile, `${entry.id} is a power-diagram oracle and must pin its profile`);
+    assert.equal(entry.methodProfile?.methodId, "octree");
+  }
+});
+
+test("the preset projection agrees with the catalog", () => {
+  assert.equal(scenePresets.length, SCENE_CATALOG.length);
+  for (const [index, entry] of SCENE_CATALOG.entries()) {
+    const preset = scenePresets[index];
+    assert.equal(preset.id, entry.id, "preset order is catalog order");
+    assert.equal(preset.group, entry.shelf);
+    assert.equal(preset.description, entry.blurb);
+    assert.equal(preset.background, entry.environment);
+    assert.deepEqual(preset.methodProfile, entry.methodProfile);
+    assert.equal(canonicalScene(preset.create()), canonicalScene(sceneDocument(entry)),
+      `${entry.id} must be one document however it is reached`);
+  }
+});
+
+test("the cold-load scene is pinned", () => {
+  // `lib/gpu-startup.ts` names this id when it decides whether bring-up needs an
+  // explicit start, so renaming or reordering it is a runtime behaviour change.
+  assert.equal(defaultScenePresetId, "water-box-dam-break");
+  assert.equal(SCENE_CATALOG[0].id, defaultScenePresetId);
+});
+
+test("an unknown id falls back rather than throwing", () => {
+  assert.equal(getSceneDefinition("no-such-scene").id, SCENE_CATALOG[0].id);
+  assert.equal(getScenePreset("no-such-scene").id, scenePresets[0].id);
+});
+
+test("a card opens the same document, camera and profile as its definition", () => {
+  assert.equal(sceneCatalogCards.length, SCENE_CATALOG.length);
+  for (const [index, card] of sceneCatalogCards.entries()) {
+    const entry = SCENE_CATALOG[index];
+    const opening = card.open();
+    assert.equal(card.id, entry.id);
+    assert.equal(card.source, "catalog");
+    assert.equal(opening.presetId, entry.id);
+    assert.equal(canonicalScene(opening.scene), canonicalScene(sceneDocument(entry)));
+    // Loading a preset applied these and loading a saved scene did not; one card
+    // cannot afford two behaviours. The camera arrives resolved, so a scene that
+    // declares none still restores the default view rather than inheriting the
+    // framing of whatever was open before.
+    assert.deepEqual(opening.camera, sceneDefinitionCamera(entry));
+    assert.deepEqual(opening.methodProfile, entry.methodProfile);
+  }
+});
+
+test("shelves group in catalog order, within one audience", () => {
+  const shelves = sceneShelves(sceneCatalogCards.filter(({ audience }) => audience === "explore"));
+  assert.ok(shelves.length > 1, "Explore is more than one shelf");
+  assert.equal(new Set(shelves.map(({ shelf }) => shelf)).size, shelves.length, "a shelf appears once");
+  for (const { shelf, cards } of shelves) {
+    assert.ok(cards.length > 0);
+    for (const card of cards) {
+      assert.equal(card.audience, "explore");
+      assert.equal(card.shelf, shelf);
+    }
+  }
+  assert.equal(
+    shelves.flatMap(({ cards }) => cards.map(({ id }) => id)).join(),
+    sceneCatalogCards.filter(({ audience }) => audience === "explore").map(({ id }) => id).join(),
+    "grouping must not reorder the catalog",
+  );
+});
+
+test("a malformed definition fails at definition time, not on a blank card", () => {
+  assert.throws(() => definition({ id: " " }), /non-empty id/);
+  assert.throws(() => definition({ name: "" }), /needs a name/);
+  assert.throws(() => definition({ blurb: "  " }), /needs a blurb/);
+  assert.throws(() => definition({ shelf: "" }), /needs a shelf/);
+  assert.throws(
+    () => definition({ environment: "atlantis" as SceneDefinition["environment"] }),
+    /unknown environment/,
+  );
+  assert.throws(() => definition({
+    variants: { smoke: { id: "gpu-smoke", description: "mismatched", apply: (scene) => scene } },
+  }), /differs from variant id/);
+  assert.throws(() => definition({
+    variants: { smoke: { id: "smoke", description: "", apply: (scene) => scene } },
+  }), /needs a description/);
+});
+
+test("a variant is a delta over its own scene, and an unknown one is refused", () => {
+  const entry = definition({
+    variants: {
+      still: {
+        id: "still",
+        description: "Zeroed surface tension, as the GPU lanes run it.",
+        apply: (scene) => ({ ...scene, fluid: { ...scene.fluid, surfaceTension_N_m: 0 } }),
+      },
+    },
+  });
+  assert.equal(sceneDocument(entry, "still").fluid.surfaceTension_N_m, 0);
+  // Everything else is the base document, including the scenery the definition
+  // attaches after the delta runs.
+  assert.ok(sceneDocument(entry, "still").scenery);
+  assert.equal(sceneDocument(entry, "still").environment, "default");
+  assert.throws(() => sceneDocument(entry, "no-such-variant"), /has no variant/);
+});
+
+test("definitions are frozen, so nothing can rewrite the catalog at runtime", () => {
+  assert.ok(Object.isFrozen(SCENE_CATALOG));
+  for (const entry of SCENE_CATALOG) assert.ok(Object.isFrozen(entry), `${entry.id} must be frozen`);
+});

@@ -11,7 +11,7 @@ import { useMethodStore } from "@/lib/stores/method-store";
 import { requestManualGPUStop } from "@/lib/gpu-startup";
 import { useSafeBrowserGPUBringup } from "@/lib/use-safe-browser-gpu-bringup";
 import { planSceneRuntime } from "@/lib/scene-runtime";
-import { resourceInteractionGates } from "@/lib/resource-readiness";
+import { resourceActivitiesFor, resourceInteractionGates } from "@/lib/resource-readiness";
 
 
 export function TransportBar() {
@@ -39,8 +39,9 @@ export function TransportBar() {
   const [safeStepRequested, setSafeStepRequested] = useState(false);
   const webgpu = simulation.backend === "webgpu";
   const lagged = webgpu && gpuLag !== undefined && gpuLag > 2 * maxDt;
-  const applyingGPUSettings = resourceReadiness.fluid.state === "preparing"
-    && Boolean(resourceReadiness.fluid.activity?.operation);
+  // A resource that declares `blocks: "transport"` says so here rather than in
+  // the activity tray: the suspended control and its reason stay together.
+  const transportResourceWork = resourceActivitiesFor(resourceReadiness, "transport-inline")[0];
   const interaction = resourceInteractionGates(resourceReadiness, !rendererOnlyScene);
   const initialSceneReady = methodId !== "octree" || (gpuInfo?.initialSparseAuthorityReady === true
     && gpuInfo?.initialRasterSurfaceReady === true);
@@ -76,6 +77,11 @@ export function TransportBar() {
           data-testid="record-simulation"
         >{recordingStatus === "recording" ? "■ STOP" : recordingStatus === "processing" ? "WAIT" : "● REC"}</button>
         {safeBringup && <button type="button" className="stop-gpu-button" onClick={requestManualGPUStop}>STOP GPU</button>}
+        {transportResourceWork && <span className="transport-resource-state" role="status" aria-live="polite" title={transportResourceWork.label}>
+          <i aria-hidden="true" />
+          <strong>{transportResourceWork.operation ?? transportResourceWork.label}</strong>
+          {transportResourceWork.total > 0 && <small>{Math.min(transportResourceWork.completed, transportResourceWork.total)}/{transportResourceWork.total}</small>}
+        </span>}
       </div>
       <div className="time-readout">
         <span>t</span><strong>{simulationTime.toFixed(4)}</strong><small>s</small>
@@ -89,7 +95,7 @@ export function TransportBar() {
           : <span className="continuous-run" title={`CPU reference simulation · present every browser animation frame · fixed step ${(fixedDt * 1000).toFixed(2)} ms`}>CPU REFERENCE · PRESENT ASAP</span>}
       </div>
       <div className="file-actions">
-        <span className={`notice${noticeTone === "warn" ? " warn" : ""}`}>{applyingGPUSettings ? `GPU SETTINGS · ${resourceReadiness.fluid.activity?.operation ?? resourceReadiness.fluid.label}` : notice}</span>
+        <span className={`notice${noticeTone === "warn" ? " warn" : ""}`}>{notice}</span>
         {recording && recordingStatus !== "recording" && <button onClick={() => simulationRecording.open()}>Playback</button>}
         <button disabled={browserSafetyLocked} onClick={() => { if (!simulation.loadLocalScene()) fileRef.current?.click(); }}>Load</button>
         <button disabled={browserSafetyLocked} onClick={() => fileRef.current?.click()}>Import</button>

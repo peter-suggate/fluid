@@ -54,9 +54,18 @@ test("choosing a scene does not silently kill every keyboard shortcut", () => {
   // camera framing, undo, and delete — with nothing on screen to explain why.
   const shortcuts = readFileSync(new URL("../lib/use-editor-shortcuts.ts", import.meta.url), "utf8");
   assert.match(shortcuts, /\["INPUT", "TEXTAREA", "SELECT"\]\.includes\(target\.tagName\)/,
-    "this is the guard the blur below exists to get out from under");
+    "this is the guard the overlay below has to stay out from under");
 
+  // The dropdown is gone: scenes are chosen in the library, and the overlay is
+  // a button that opens it. A button cannot hold the focus state that caused
+  // this, which is a stronger guarantee than remembering to blur.
   const overlay = readFileSync(new URL("../components/SceneOverlay.tsx", import.meta.url), "utf8");
-  assert.match(overlay, /simulation\.loadPreset\(event\.target\.value\); event\.target\.blur\(\);/,
-    "the preset select must hand focus back once the choice is made");
+  assert.doesNotMatch(overlay, /<select/, "the scene chip must not reintroduce a focusable form control");
+  assert.match(overlay, /openLibrary/, "the chip's job is to open the library");
+
+  // The library's search box is a text field and is therefore inside the guard
+  // above by construction; its own Escape handling must not fight it.
+  const library = readFileSync(new URL("../components/SceneLibrary.tsx", import.meta.url), "utf8");
+  assert.match(library, /\["INPUT", "TEXTAREA", "SELECT"\]\.includes\(target\.tagName\)/,
+    "the library reuses the same editing test rather than inventing a second one");
 });

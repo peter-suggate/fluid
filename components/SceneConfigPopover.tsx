@@ -120,6 +120,10 @@ export function SceneConfigPopover() {
                 <Segmented ariaLabel="Container top" value={scene.container.top} options={[{ value: "open", label: "Open top" }, { value: "closed", label: "Closed" }]} onChange={(value) => patchContainer({ top: value })} />
                 <Segmented ariaLabel="Fluid wall condition" value={scene.container.fluidWallMode} options={[{ value: "no-slip", label: "No slip" }, { value: "free-slip", label: "Free slip" }]} onChange={(value) => patchContainer({ fluidWallMode: value })} />
               </div>
+              {/* Whether the domain is *drawn* as a tank, which is separate from
+                  the boundary it always is. A fresh scene starts as a room, so
+                  this is how its author asks for the vessel. */}
+              <Segmented ariaLabel="Container vessel" value={scene.container.vessel ?? "glass"} options={[{ value: "glass", label: "Glass tank" }, { value: "none", label: "No tank" }]} onChange={(value) => patchContainer({ vessel: value })} />
             </section>
             <section data-testid="voxel-domain-controls">
               <h3>Unified voxel domain</h3>

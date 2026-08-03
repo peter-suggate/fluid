@@ -1,12 +1,17 @@
 import { BUILD_ID, canonicalScene, cloneScene, parseScene, type SceneDescription } from "../model";
 import { EulerianFluidSolver } from "../eulerian-solver";
-import { advanceRigidBodies, boundingRadius, cloneRigidBodies, createBodyDescription, initializeRigidBodies, initializeRigidBody, rigidDiagnostics, type RigidBodyState, type RigidStepDiagnostics } from "../rigid-body";
+import { adoptRigidBodyRoster, advanceRigidBodies, boundingRadius, cloneRigidBodies, createBodyDescription, initializeRigidBodies, initializeRigidBody, rigidDiagnostics, type RigidBodyState, type RigidStepDiagnostics } from "../rigid-body";
 import type { RigidBodyDescription } from "../model";
 import { applyFluidReactions, computeFluidLoads, type CouplingDiagnostics } from "../fluid-rigid-coupling";
 import type { RigidShape } from "../model";
+import { sceneEditRequiresReset } from "../webgpu-renderer";
 import type { RendererFrameMetrics, SimulationBackend } from "../webgpu-renderer";
 import { getMethod } from "../methods";
-import { cameraForPreset, getScenePreset } from "../scenes";
+import { getSceneDefinition } from "../scenes";
+import { sceneCardForDefinition, type SceneCard } from "../scene-definition";
+import { savedSceneCard } from "../scene-cards";
+import { SCENE_STARTERS } from "../empty-scene";
+import { useShellStore } from "../stores/shell-store";
 import { useSceneStore } from "../stores/scene-store";
 import { useEditorHistoryStore, type EditorHistorySnapshot } from "../stores/history-store";
 import { useMethodStore, resolvedMethodValues } from "../stores/method-store";
@@ -460,18 +465,66 @@ class SimulationController {
       : `${scene.fluid.inflow ? "Inflow scene" : scene.fluid.initialCondition === "dam-break" ? "Dam-break" : "Tank fill"} reset at t = 0`);
   }
 
-  loadPreset(presetId: string) {
-    const preset = getScenePreset(presetId);
-    this.recordHistory(`load ${preset.name}`);
-    if (preset.methodProfile) useMethodStore.getState().applyProfile(preset.methodProfile);
-    const scene = preset.create();
-    this.reset(scene, preset.id);
-    useUIStore.getState().setCamera(cameraForPreset(preset));
-    const runtimePlan = planSceneRuntime(scene);
+  /**
+   * Open a library card: the one path a scene reaches the product by.
+   *
+   * Authored presets, saved documents and empty starters used to load through
+   * three different functions with three different behaviours — only the preset
+   * path applied a camera or a solver profile, and nothing at all could create
+   * an empty scene. A library that shows all three in one grid cannot afford
+   * that, so the differences live in the card and this stays one function.
+   *
+   * A card's `open` may throw: a stored document is validated on load, not on
+   * save, so an entry written by an older schema surfaces here as a notice
+   * rather than as a corrupted live scene.
+   */
+  openSceneCard(card: SceneCard): boolean {
+    let opening;
+    try {
+      opening = card.open();
+    } catch (error) {
+      useRuntimeStore.getState().setNotice(
+        error instanceof Error ? error.message : `${card.name} failed validation`, "warn");
+      return false;
+    }
+    this.recordHistory(`open ${card.name}`);
+    if (opening.methodProfile) useMethodStore.getState().applyProfile(opening.methodProfile);
+    this.reset(opening.scene, opening.presetId);
+    // Absent only for a saved document whose origin scene this build no longer
+    // has; there the camera the reader already had is the better answer.
+    if (opening.camera) useUIStore.getState().setCamera(opening.camera);
+    const runtimePlan = planSceneRuntime(opening.scene);
     useRuntimeStore.getState().setNotice(!runtimePlan.fluidSolver
-      ? `${preset.name} loaded · fluid solver disabled`
-      : `${preset.name} loaded · dt ${scene.numerics.fixedDt_s.toFixed(4)} s`);
+      ? `${card.name} opened · no fluid solver, so nothing waits on one`
+      : `${card.name} opened · dt ${opening.scene.numerics.fixedDt_s.toFixed(4)} s`);
     useRuntimeStore.getState().setRunState(runtimePlan.fluidSolver ? "running" : "paused");
+    useShellStore.getState().enterStudio();
+    return true;
+  }
+
+  loadPreset(presetId: string) {
+    this.openSceneCard(sceneCardForDefinition(getSceneDefinition(presetId)));
+  }
+
+  /**
+   * Create a fresh document and enter the studio.
+   *
+   * The scene is fluid-free, which is the whole point: `planSceneRuntime` sees
+   * `systems.fluid === false`, the renderer attaches the live sparse scene
+   * instead of a solver, and there is no t=0 fence, no fluid pipeline family and
+   * no transport gate between the click and the first frame. Water is added
+   * later, deliberately, and that is the one expensive transition in the flow.
+   */
+  newScene(starterId?: string): boolean {
+    const starter = SCENE_STARTERS.find((candidate) => candidate.id === starterId) ?? SCENE_STARTERS[0];
+    return this.openSceneCard({
+      id: `starter:${starter.id}`,
+      source: "starter",
+      name: starter.name,
+      blurb: starter.blurb,
+      shelf: "Start from empty",
+      open: () => ({ scene: starter.create(), presetId: `starter:${starter.id}` }),
+    });
   }
 
   setQuality(quality: Parameters<ReturnType<typeof useMethodStore.getState>["setQuality"]>[0]) {
@@ -559,12 +612,16 @@ class SimulationController {
   /**
    * Close the gesture; a patch that changed nothing records no undo entry.
    *
-   * `reseed` re-seeds the solver from the edited document. Scene fields that
-   * are absent from `gpuSceneSolverKey` — terrain most importantly — reach the
-   * solver no other way, and an edit that the renderer shows but the physics
-   * ignores is the worst possible outcome for a WYSIWYG editor. Today that is
-   * an epoch bump and a full rebuild; Phase 1 replaces this one call with a
-   * warm re-seed and the cost goes away without the call sites changing.
+   * `reseed` asks for the solver to be started again from the edited document.
+   * Scene fields the solver cannot adopt live reach it no other way, and an edit
+   * that the renderer shows but the physics ignores is the worst possible
+   * outcome for a WYSIWYG editor.
+   *
+   * It is a request, not an instruction: `sceneEditRequiresReset` decides. An
+   * edit confined to the uniform tier — aiming the hose, changing density — is
+   * adopted by the running solver through `applySceneUniforms`, so resetting for
+   * it would throw away the simulation the user is editing in order to apply a
+   * buffer write. Call sites keep asking; only the ones that need it now pay.
    */
   commitEdit(patch?: Partial<SceneDescription>, options: { reseed?: boolean } = {}) {
     const pending = this.pendingEdit;
@@ -572,18 +629,33 @@ class SimulationController {
     const sceneStore = useSceneStore.getState();
     if (patch) sceneStore.patchScene(patch);
     if (!pending) return false;
-    const changed = canonicalScene(useSceneStore.getState().scene) !== canonicalScene(pending.snapshot.scene);
+    const committed = useSceneStore.getState().scene;
+    const changed = canonicalScene(committed) !== canonicalScene(pending.snapshot.scene);
     if (!changed) return false;
     useEditorHistoryStore.getState().record(pending.snapshot);
-    if (options.reseed) {
+    if (options.reseed && sceneEditRequiresReset(pending.snapshot.scene, committed)) {
       // reset() re-selects the first body; an editor gesture must keep the
       // thing the user is still holding selected.
       const selection = useUIStore.getState().selection;
       this.reset();
       useUIStore.getState().select(selection);
-    }
+    } else this.adoptRigidBodies(committed);
     useRuntimeStore.getState().setNotice(pending.label);
     return true;
+  }
+
+  /**
+   * Reconcile the running roster with an edit that did not take a reset.
+   *
+   * `reset` is the only other place `this.bodies` is built, so without this a
+   * body added while the clock runs would be in the document, on screen, and
+   * absent from `advanceTo` — the solver would never hear about it.
+   */
+  private adoptRigidBodies(scene: SceneDescription) {
+    const before = this.bodies;
+    this.bodies = adoptRigidBodyRoster(before, scene.rigidBodies);
+    if (before.length === this.bodies.length && before.every((body, index) => body === this.bodies[index])) return;
+    this.publishBodies(rigidDiagnostics(this.bodies, scene.fluid.gravity_m_s2));
   }
 
   /** Abandon a gesture without recording it; runtime preview state is kept. */
@@ -1011,18 +1083,15 @@ class SimulationController {
     return entries;
   }
 
-  /** Load a library entry as a scene edit, so it is undoable like any other. */
+  /**
+   * Load a library entry as a scene edit, so it is undoable like any other.
+   *
+   * Routed through the same card as the library grid, which is how a saved
+   * validation scene regained the solver profile it was authored under — this
+   * path used to drop it and run whatever method happened to be selected.
+   */
   loadNamedScene(entry: SceneLibraryEntry): boolean {
-    try {
-      const scene = loadSceneFromLibrary(entry);
-      this.recordHistory(`load ${entry.name}`);
-      this.reset(scene, entry.presetId);
-      useRuntimeStore.getState().setNotice(`Loaded “${entry.name}”`);
-      return true;
-    } catch (error) {
-      useRuntimeStore.getState().setNotice(error instanceof Error ? error.message : "Stored scene failed validation", "warn");
-      return false;
-    }
+    return this.openSceneCard(savedSceneCard(entry));
   }
 
   loadLocalScene(): boolean {

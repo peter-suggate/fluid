@@ -229,8 +229,9 @@ export interface SceneryGlazingNode extends SceneryNodeBase {
 /** The finite six-face room every interior set is staged in. */
 export interface SceneryRoomShellNode extends SceneryNodeBase {
   readonly kind: "room-shell";
+  /** `room` is the unstaged case: a plain enclosure with no set dressed in it. */
   readonly materialModel: "conservatory" | "courtyard" | "night-lab"
-    | "gallery" | "bathhouse" | "station";
+    | "gallery" | "bathhouse" | "station" | "room";
   readonly floor: SceneryMaterial;
   readonly wall: SceneryMaterial;
   readonly ceiling: SceneryMaterial;

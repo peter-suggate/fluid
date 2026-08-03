@@ -16,6 +16,16 @@ export const SCENE_LIBRARY_STORAGE_KEY = "fluid-lab.scene-library.v1";
 export const SCENE_LIBRARY_LIMIT = 64;
 export const SCENE_NAME_MAXIMUM_LENGTH = 80;
 
+/**
+ * The working document's reserved identity — see `lib/scene-autosave.ts`.
+ *
+ * It is stored here because it is the same artifact as a saved scene, but it is
+ * not one the reader saved: the name match below skips it, so saving explicitly
+ * under whatever name the autosave happens to carry writes the reader's own
+ * entry instead of adopting this one.
+ */
+export const SCENE_AUTOSAVE_ENTRY_ID = "autosave";
+
 export interface SceneLibraryEntry {
   readonly id: string;
   readonly name: string;
@@ -58,6 +68,15 @@ function isEntry(value: unknown): value is SceneLibraryEntry {
   return typeof entry.id === "string" && typeof entry.name === "string"
     && typeof entry.savedAt_ms === "number" && Number.isFinite(entry.savedAt_ms)
     && typeof entry.presetId === "string" && typeof entry.scene === "string";
+}
+
+export function isSceneAutosaveEntry(entry: SceneLibraryEntry): boolean {
+  return entry.id === SCENE_AUTOSAVE_ENTRY_ID;
+}
+
+/** The entries a reader chose to keep; the autosave is not one of them. */
+export function savedSceneEntries(entries: readonly SceneLibraryEntry[]): SceneLibraryEntry[] {
+  return entries.filter((entry) => !isSceneAutosaveEntry(entry));
 }
 
 /** Malformed storage is treated as empty rather than throwing into the UI. */
@@ -105,7 +124,7 @@ export function saveSceneToLibrary(
   const normalized = normalizeSceneName(name);
   const existing = readSceneLibrary(storage);
   const replaced = options.replaceId
-    ?? existing.find((entry) => entry.name.toLowerCase() === normalized.toLowerCase())?.id;
+    ?? savedSceneEntries(existing).find((entry) => entry.name.toLowerCase() === normalized.toLowerCase())?.id;
   const entry: SceneLibraryEntry = {
     id: replaced ?? sceneEntryId(normalized, options.savedAt_ms),
     name: normalized,

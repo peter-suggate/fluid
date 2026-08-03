@@ -286,6 +286,35 @@ export function resourceActivities(snapshot: ResourceReadinessSnapshot): readonl
     .sort((left, right) => left.startedAt_ms - right.startedAt_ms);
 }
 
+/**
+ * How much screen in-flight work may claim, decided by what it takes away.
+ *
+ * A card is the loudest thing the shell can put over a live viewport, so only
+ * work that has actually taken scene interaction earns one. Work that suspends
+ * transport states itself beside the controls it suspends, and work that blocks
+ * nothing gets a pill. An unrecognised declaration takes the pill: over-claiming
+ * would cover a viewport the user can still use.
+ */
+export type ResourceActivityPresentation = "card" | "transport-inline" | "pill";
+
+export function resourceActivityPresentation(
+  plugin?: Pick<ResourcePluginDefinition, "blocks">,
+): ResourceActivityPresentation {
+  switch (plugin?.blocks) {
+    case "viewport": return "card";
+    case "transport": return "transport-inline";
+    default: return "pill";
+  }
+}
+
+export function resourceActivitiesFor(
+  snapshot: ResourceReadinessSnapshot,
+  presentation: ResourceActivityPresentation,
+): readonly ResourceActivity[] {
+  return resourceActivities(snapshot).filter((activity) =>
+    resourceActivityPresentation(snapshot.plugins[activity.pluginId]?.plugin) === presentation);
+}
+
 export function resourceCapabilityUsable(
   snapshot: ResourceReadinessSnapshot,
   capability: RuntimeResourceCapability,
@@ -304,16 +333,28 @@ export function resourceCapabilityUsable(
   return snapshot[lane].usable;
 }
 
+/**
+ * What the user may do now, by capability rather than by whether work is running.
+ *
+ * These are four answers and not one because they stop being true at different
+ * moments. A single "the viewport is interactive" bit meant an ordinary SVO
+ * recompile — which only replaces the image — took the camera and every editor
+ * gizmo with it. Looking at a scene from another angle needs a device to draw
+ * with; resolving a ray against the scene needs a complete published generation
+ * for the ray to hit. Only the second waits for a rebuild.
+ */
 export function resourceInteractionGates(snapshot: ResourceReadinessSnapshot, fluidRequired: boolean) {
   const rendererUsable = resourceCapabilityUsable(snapshot, "renderer");
   const scenePresentationUsable = resourceCapabilityUsable(snapshot, "sparse-voxel-presentation");
   const fluidUsable = resourceCapabilityUsable(snapshot, "fluid-authority")
     && resourceCapabilityUsable(snapshot, "water-presentation");
   return {
-    /** React editing, camera controls, panels, import/export: never GPU-gated. */
+    /** React editing, panels, import/export: never GPU-gated. */
     shellInteractive: true,
-    /** A scene is interactive only when one complete GLOBAL SVO generation owns it. */
-    viewportInteractive: rendererUsable && scenePresentationUsable,
+    /** Orbit, pan, zoom and framing move our own camera; they need only a device. */
+    cameraInteractive: rendererUsable,
+    /** A ray may only resolve against geometry a complete GLOBAL SVO generation published. */
+    pickingInteractive: rendererUsable && scenePresentationUsable,
     /** Advancing an invisible/partial scene would break simulation/presentation lockstep. */
     transportInteractive: rendererUsable && scenePresentationUsable && (!fluidRequired || fluidUsable),
   };

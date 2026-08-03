@@ -78,12 +78,22 @@ test("a selection resolves whether or not the tool surfaces it", () => {
   assert.equal(findEntity(context(scene), { kind: "tank", id: "not-the-tank" }), undefined);
 });
 
-test("an unavailable scene presentation exposes no entities", () => {
+test("a rebuild takes the click into the scene, and nothing else", () => {
+  // Handles are document geometry: the entity is still in the scene, the editor
+  // still knows where it is, and a drag still writes the document — so losing
+  // the presented frame must not make the selection vanish with it. Only a
+  // click *on the scene* waits, because that resolves against what was
+  // published, and answering it from the CPU would select what nobody can see.
   const scene = preset("water-box-dam-break");
-  const unavailable = { ...context(scene), scenePresentationAvailable: false };
-  assert.deepEqual(surfacedEntities(unavailable, "select", WATER), []);
-  assert.equal(findEntity(unavailable, WATER), undefined);
-  assert.equal(entityAtRay(unavailable, {
+  const rebuilding = { ...context(scene), pickingAvailable: false };
+
+  const handles = surfacedEntities(rebuilding, "select", WATER);
+  assert.equal(handles.length, 1, "the selection keeps its handles through a rebuild");
+  assert.ok(handles[0]!.handles.length > 0);
+  assert.equal(findEntity(rebuilding, WATER)?.label, "WATER");
+  assert.equal(findEntity(rebuilding, TANK)?.label, "TANK");
+
+  assert.equal(entityAtRay(rebuilding, {
     origin: { x: 0, y: 0.4, z: -1 }, direction: { x: 0, y: 0, z: 1 },
   }), undefined, "CPU picking must not reveal objects absent from the presented frame");
 });

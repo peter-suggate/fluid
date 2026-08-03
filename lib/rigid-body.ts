@@ -174,6 +174,64 @@ export function initializeRigidBodies(descriptions: RigidBodyDescription[]): Rig
   return descriptions.map(initializeRigidBody);
 }
 
+/**
+ * A body's description by value, in a fixed field order.
+ *
+ * Documents are replaced rather than mutated, so a body nobody touched still
+ * arrives as a fresh object on every edit. Comparing by reference would
+ * re-derive every body's mass properties each time and discard the contact and
+ * force state each one is carrying.
+ *
+ * The orientation is normalized first because `initializeRigidBody` normalizes
+ * the description it retains: an authored quaternion and the one a live body is
+ * holding describe the same rotation while differing in the last bit, and
+ * without this every body would read as edited on every commit.
+ */
+function describedBody(description: RigidBodyDescription): string {
+  return JSON.stringify([
+    description.shape, description.dimensions_m, description.density_kg_m3,
+    description.position_m, quaternionNormalize(description.orientation),
+    description.linearVelocity_m_s, description.angularVelocity_rad_s,
+    description.restitution, description.friction, description.motion,
+  ]);
+}
+
+/**
+ * Take an edited roster onto a running simulation.
+ *
+ * A body that is still in the document keeps the state it has reached, which is
+ * the whole point: dropping a second sphere must not teleport the first one
+ * back to where it was authored two seconds ago. A body that is new starts from
+ * its description, and one that is gone goes.
+ *
+ * When a description itself changed, the mass properties are re-derived from it
+ * while the run's pose and velocity are carried across — so a resized crate
+ * stays where it fell instead of snapping back to where it was dropped. The
+ * document's authored pose is restored onto the result afterwards because that
+ * is what the GPU rigid system signs a body with; only the simulated state
+ * above came from the run.
+ */
+export function adoptRigidBodyRoster(
+  live: readonly RigidBodyState[],
+  descriptions: readonly RigidBodyDescription[],
+): RigidBodyState[] {
+  const byId = new Map(live.map((body) => [body.description.id, body]));
+  return descriptions.map((description) => {
+    const previous = byId.get(description.id);
+    if (!previous) return initializeRigidBody(description);
+    if (describedBody(previous.description) === describedBody(description)) return previous;
+    const adopted = initializeRigidBody({
+      ...description,
+      position_m: previous.position_m,
+      orientation: previous.orientation,
+      linearVelocity_m_s: previous.linearVelocity_m_s,
+      angularVelocity_rad_s: previous.angularVelocity_rad_s,
+    });
+    adopted.description = JSON.parse(JSON.stringify(description)) as RigidBodyDescription;
+    return adopted;
+  });
+}
+
 export function cloneRigidBodies(bodies: RigidBodyState[]): RigidBodyState[] {
   return bodies.map((body) => ({
     ...body,

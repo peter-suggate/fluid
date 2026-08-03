@@ -7,6 +7,7 @@ import {
   deleteSceneFromLibrary,
   readSceneLibrary,
   renameSceneInLibrary,
+  savedSceneEntries,
   type SceneLibraryEntry,
 } from "@/lib/scene-library";
 import { useSceneStore } from "@/lib/stores/scene-store";
@@ -29,6 +30,10 @@ export function SceneLibraryPanel() {
   // Storage is only readable in the browser, so the first list arrives after mount.
   useEffect(() => setEntries(readSceneLibrary(browserSceneLibraryStorage())), []);
 
+  // The autosaved working document shares this storage but is not a scene the
+  // reader saved; it is offered as Continue in the library, not renamed here.
+  const saved = savedSceneEntries(entries);
+
   const save = () => {
     setEntries(simulation.saveNamedScene(name || sceneId));
     setName("");
@@ -36,7 +41,7 @@ export function SceneLibraryPanel() {
 
   return (
     <section className="scene-library" data-testid="scene-library">
-      <div className="popover-section-heading"><h3>My scenes</h3><span>{entries.length} SAVED</span></div>
+      <div className="popover-section-heading"><h3>My scenes</h3><span>{saved.length} SAVED</span></div>
       <div className="scene-library-save">
         <input
           value={name}
@@ -49,7 +54,7 @@ export function SceneLibraryPanel() {
         <button type="button" onClick={save}>SAVE</button>
       </div>
       <div className="scene-library-list">
-        {entries.map((entry) => (
+        {saved.map((entry) => (
           <div key={entry.id} className="scene-library-entry">
             {renaming === entry.id ? (
               <input
@@ -68,7 +73,7 @@ export function SceneLibraryPanel() {
             <button type="button" className="quiet-button" aria-label={`Delete ${entry.name}`} onClick={() => setEntries(deleteSceneFromLibrary(browserSceneLibraryStorage(), entry.id))}>×</button>
           </div>
         ))}
-        {entries.length === 0 && <p className="panel-note">Authored scenes you save appear here. They persist in this browser and export as the same JSON as the file download.</p>}
+        {saved.length === 0 && <p className="panel-note">Authored scenes you save appear here. They persist in this browser and export as the same JSON as the file download.</p>}
       </div>
     </section>
   );

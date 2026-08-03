@@ -2,18 +2,23 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { parseScene, serializeScene, validateScene } from "../lib/model";
-import { getScenePreset, scenePresets } from "../lib/scenes";
+import { getSceneDefinition, getScenePreset, scenePresets } from "../lib/scenes";
 import { planSceneRuntime } from "../lib/scene-runtime";
 import { planSparseSceneDomain } from "../lib/sparse-scene-domain";
+import { planAdaptiveSparseBrickOctree } from "../lib/adaptive-sparse-brick-plan";
 import { buildSvoSceneLights } from "../lib/svo-light-abi";
 import { planSvoNodeMipPyramid } from "../lib/svo-node-mip-pyramid";
 import { createTallCellLayout } from "../lib/tall-cell-grid";
 import { buildEnvironmentProxyCatalog, environmentProxyPrimitives } from "../lib/voxel-environments";
 import {
   buildOctreeSvoEnvironmentLightingPublication,
+  environmentMaximumCoarseningPower,
+  liveSvoBasePageDimensions,
   liveSceneBrickCoordinatesForRegions,
   liveSvoDenseFinestPages,
+  sparseSceneOctreeMaximumDepth,
 } from "../lib/webgpu-octree-sparse-bricks";
+import { liveSvoPlanBasePages } from "../lib/webgpu-svo-live-derived-builder";
 import { liveSvoRenderBrickSize } from "../lib/webgpu-live-svo-scene";
 import { canInitializeGPUSceneSource, gpuSceneSolverKey, type SimulationRunConfig } from "../lib/webgpu-renderer";
 
@@ -21,7 +26,9 @@ test("garden SVO lighting preset is a valid fluid-free fluid-free scene", () => 
   const preset = getScenePreset("garden-svo-lighting");
   const scene = preset.create();
 
-  assert.equal(preset.group, "Garden");
+  // A study, not an oracle and not a scene to explore — it exists to validate
+  // mip-cone lighting. The shelf is a display label; the audience is the claim.
+  assert.equal(getSceneDefinition("garden-svo-lighting").audience, "study");
   assert.equal(scene.sceneId, "garden-svo-lighting-study");
   assert.equal(scene.systems?.fluid, false);
   const runtimePlan = planSceneRuntime(scene);
@@ -146,6 +153,35 @@ test("garden dense live-derived plan certifies every level and keeps edits local
     assert.ok(plannedKeys.has(`${level}:${coordinate.join(",")}`),
       "each dirty old/new page has an address-resident ancestor for incremental rebuild");
   }
+});
+
+test("hose live-derived hierarchy follows sparse leaves and fits the M1 page ceiling", () => {
+  const scene = getScenePreset("hose-tank").create();
+  const fine = createTallCellLayout(scene, "balanced");
+  const dimensions = [fine.nx, fine.fineNy, fine.nz] as const;
+  const proxies = environmentProxyPrimitives(buildEnvironmentProxyCatalog(scene, scene.environment ?? "default"), true);
+  const domain = planSparseSceneDomain(
+    scene, dimensions, scene.voxelDomain.brickSize_cells,
+    proxies.map(({ aabb_m }) => ({ min: aabb_m.min, max: aabb_m.max })),
+    { conservativePaddingCells: 1, worldBounds_m: scene.voxelDomain.bounds_m },
+  );
+  const maximumDepth = sparseSceneOctreeMaximumDepth(domain.brickDimensions, domain.coordinates);
+  const topology = planAdaptiveSparseBrickOctree({
+    brickSize: scene.voxelDomain.brickSize_cells,
+    solverBricks: domain.solverBrickCoordinates,
+    proxyBricks: domain.proxyBrickCoordinates.flat(),
+    maximumDepth,
+    maximumEnvironmentCoarseningPower: Math.min(environmentMaximumCoarseningPower(), maximumDepth),
+  });
+  const baseDimensions = liveSvoBasePageDimensions(domain.brickDimensions, topology.brickSize);
+  const levelCount = sparseSceneOctreeMaximumDepth(baseDimensions, []) + 1;
+  const sparse = planSvoNodeMipPyramid({ generation: 1, occupiedPages: liveSvoPlanBasePages(topology), levelCount });
+  const dense = planSvoNodeMipPyramid({ generation: 1, occupiedPages: liveSvoDenseFinestPages(baseDimensions), levelCount });
+
+  assert.equal(sparse.pages.length, 14_303);
+  assert.ok(sparse.pages.length <= 16_384, "the complete sparse hierarchy fits the M1 sampled-directory height");
+  assert.ok(dense.pages.length > 16_384, "allocating the empty bounding box would incorrectly disable cones");
+  assert.equal(sparse.complete, true);
 });
 
 test("live SVO render brick overrides do not mutate a fluid scene's solver contract", () => {

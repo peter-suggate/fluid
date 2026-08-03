@@ -68,6 +68,16 @@ export interface SceneDescription {
     fillFraction: number;
     top: "open" | "closed";
     fluidWallMode: "free-slip" | "no-slip";
+    /**
+     * Whether the domain is drawn as a glass vessel standing in the set.
+     *
+     * The container is two things at once: the solver's boundary, and — in
+     * every environment except the garden — a tank you can see. A fresh scene
+     * wants the first without the second, so that starting a scene hands over a
+     * room rather than an aquarium nobody asked for; the tank is then something
+     * to add. Absent means `glass`, so no authored document changes meaning.
+     */
+    vessel?: "glass" | "none";
   };
   /** Authoritative uniform lattice shared by scene geometry, SVO rendering, and fluid when enabled. */
   voxelDomain: {
@@ -222,6 +232,10 @@ export function validateScene(scene: SceneDescription): string[] {
   if (!(scene.duration_s > 0)) errors.push("Duration must be positive");
   const c = scene.container;
   if (!c || !(c.width_m > 0) || !(c.height_m > 0) || !(c.depth_m > 0)) errors.push("Container dimensions must be positive");
+  // Validated rather than defaulted: a default would write the field into every
+  // document that round-trips through `parseScene`, and the whole point of the
+  // optional form is that an authored scene is unchanged by its existence.
+  if (c?.vessel !== undefined && c.vessel !== "glass" && c.vessel !== "none") errors.push("Container vessel must be 'glass' or 'none'");
   if (!c || c.fillFraction < 0 || c.fillFraction > 1) errors.push("Fill fraction must be in [0, 1]");
   if (!c || !["free-slip", "no-slip"].includes(c.fluidWallMode)) errors.push("Unsupported fluid wall mode");
   const voxelDomain = scene.voxelDomain;

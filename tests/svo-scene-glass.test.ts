@@ -40,6 +40,38 @@ test("closed container top is a stable sixth pane and garden remains vessel-free
   assert.equal(garden.containerTopPaneIndex, undefined);
 });
 
+test("a container declared vessel-free publishes no panes in any environment", () => {
+  // The garden used to be the only open case, reached by the builder knowing
+  // one environment id. A fresh scene needs the same outcome in a room, so the
+  // decision moved into the document — and must hold everywhere, including the
+  // closed-top case that would otherwise contribute a sixth pane.
+  for (const environmentId of environmentIds) {
+    const scene = cloneScene(defaultScene);
+    scene.container.top = "closed";
+    scene.container.vessel = "none";
+    const glass = buildSvoSceneGlass(scene, { environmentId });
+    assert.equal(glass.containerPaneIndices.length, 0, `${environmentId} must publish no vessel`);
+    assert.equal(glass.containerTopPaneIndex, undefined);
+    assert.equal(glass.containerPolicy, "absent-open-environment");
+    // Only the container goes: a conservatory keeps its mullions.
+    const glazed = buildSvoSceneGlass(cloneScene(defaultScene), { environmentId });
+    assert.equal(glass.environmentPaneIndices.length, glazed.environmentPaneIndices.length,
+      `${environmentId} authored glazing is not the vessel and must survive`);
+  }
+});
+
+test("an absent vessel field still means glass, so no authored scene changes", () => {
+  const scene = cloneScene(defaultScene);
+  assert.equal(scene.container.vessel, undefined);
+  const implied = buildSvoSceneGlass(scene, { environmentId: "default" });
+  const explicit = buildSvoSceneGlass(
+    { ...scene, container: { ...scene.container, vessel: "glass" } },
+    { environmentId: "default" },
+  );
+  assert.equal(implied.containerPaneIndices.length, explicit.containerPaneIndices.length);
+  assert.equal(implied.containerPolicy, explicit.containerPolicy);
+});
+
 test("container glass preserves the existing stable material/no-owner identity", () => {
   const scene = cloneScene(defaultScene);
   const glass = buildSvoSceneGlass(scene, { environmentId: "default" });

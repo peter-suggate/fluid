@@ -45,6 +45,7 @@ import { buildSvoTerrainMaterial } from "./svo-terrain-material";
 import {
   DEFAULT_SVO_LIGHTING_OPTIONS,
   type SvoLightingOptions,
+  type SvoLightingVisibilityStatus,
   type SvoPrimaryTraversalMode,
   type SvoSilhouetteRefinementStatus,
 } from "./svo-render-options";
@@ -363,7 +364,15 @@ export function canInitializeGPUSceneSource(scene: SceneDescription, methodId: s
  * warm-reset path replaces the seed tier's response, and the uniform tier's
  * response, without moving these boundaries again.
  */
-export function gpuSceneStructuralKey(scene: SceneDescription, config: SimulationRunConfig): string {
+/**
+ * The document's own half of the structural tier: what the lattice is, and the
+ * wall conditions compiled into the pipelines that walk it.
+ *
+ * Split out from `gpuSceneStructuralKey` because two documents can be compared
+ * without a run config — which is what an editor commit needs in order to ask
+ * "does this edit require a reset?" before it takes one.
+ */
+export function sceneStructuralKey(scene: SceneDescription): string {
   // The lattice is keyed in cells, not in metres. Scaling the world multiplies
   // the container extents and the finest cell size by the same factor, so the
   // cell counts, every arena sized from them, and every compiled pipeline are
@@ -377,7 +386,11 @@ export function gpuSceneStructuralKey(scene: SceneDescription, config: Simulatio
       .map((value) => Math.round(value / cellSize_m)).join(",")
     : "none";
   const lattice = `${sceneLatticeDimensions(scene).join("x")}:${scene.voxelDomain.brickSize_cells}:${boundsCells}`;
-  return `fluid-${planSceneRuntime(scene).fluidSolver}:${config.methodId}:${config.quality}:${JSON.stringify(structuralMethodValues(config))}:${lattice}:${scene.container.top}:${scene.container.fluidWallMode}`;
+  return `fluid-${planSceneRuntime(scene).fluidSolver}:${lattice}:${scene.container.top}:${scene.container.fluidWallMode}`;
+}
+
+export function gpuSceneStructuralKey(scene: SceneDescription, config: SimulationRunConfig): string {
+  return `${config.methodId}:${config.quality}:${JSON.stringify(structuralMethodValues(config))}:${sceneStructuralKey(scene)}`;
 }
 
 /**
@@ -399,12 +412,104 @@ export function gpuSceneStructuralKey(scene: SceneDescription, config: Simulatio
  */
 export function gpuSceneSeedKey(scene: SceneDescription): string {
   const c = scene.container;
-  return `${c.width_m}:${c.height_m}:${c.depth_m}:${c.fillFraction}:${JSON.stringify(scene.rigidBodies)}:${scene.fluid.initialCondition}:${JSON.stringify(scene.fluid.initialDamBreakDimensions_m ?? null)}:${JSON.stringify(scene.fluid.initialDamBreakOrigin_m ?? null)}:${JSON.stringify(scene.fluid.initialBrickSeeds_m ?? null)}:${scene.fluid.initialBrickSeedsAdditive ?? false}:${JSON.stringify(scene.terrain ?? null)}:${JSON.stringify(scene.fluid.inflow ?? null)}`;
+  return `${c.width_m}:${c.height_m}:${c.depth_m}:${c.fillFraction}:${rigidBodyAllocationKey(scene.rigidBodies)}:${scene.fluid.initialCondition}:${JSON.stringify(scene.fluid.initialDamBreakDimensions_m ?? null)}:${JSON.stringify(scene.fluid.initialDamBreakOrigin_m ?? null)}:${JSON.stringify(scene.fluid.initialBrickSeeds_m ?? null)}:${scene.fluid.initialBrickSeedsAdditive ?? false}:${JSON.stringify(scene.terrain ?? null)}:${inflowBudgetKey(scene.fluid.inflow)}`;
 }
 
-/** Pure scalars; no lattice or seed depends on them. */
+/**
+ * The rigid-body facts an allocation, a compiled policy, or the owner numbering
+ * is shaped by.
+ *
+ * *Which* bodies, where they are, and what shape they take are absent on
+ * purpose: every step already writes the whole roster into the rigid state
+ * buffer through `syncBodies`, and the solid vertex SDF is re-encoded from that
+ * buffer, so moving, reshaping or re-materialing a body is adopted live. That
+ * is what keeps `rigidBodyRosterKey` in the uniform tier.
+ *
+ * What remains is three facts, and the third is the interesting one:
+ *
+ *  - Are there any solids? `octreeSparseWorldRequired`,
+ *    `planOctreeSolidCellAllocation` and `planOctreeSurfaceStateAllocation`
+ *    each allocate a dense solid field for the whole lattice or skip it.
+ *  - Does any of them move? `planOctreeSolveTail` scores one extra iteration
+ *    for a moving immersed boundary, regardless of how many there are.
+ *  - **How many are there?** Not an allocation — a numbering.
+ *    `svo-scene-primitives`, `svo-scene-thick-glass`, the sparse brick world
+ *    and the dry-scene publication all number environment proxies as
+ *    `rigidBodies.length + ownerIndex`, so the roster length is part of the
+ *    render source's ABI. Adding a body renumbers every scenery object, which
+ *    is why the count is here and why adding one still costs a re-seed.
+ *
+ * That third one is a decoupling worth doing and is not done: pinning the
+ * environment base at the fixed rigid capacity (`GPU_RIGID_BODY_CAPACITY`, 12)
+ * would take the count out of this key entirely, at the cost of resizing every
+ * per-owner arena from `bodies.length + proxies` to `12 + proxies`. Until then,
+ * "drop a body into running water" is warm only for a body that already exists.
+ */
+function rigidBodyAllocationKey(bodies: SceneDescription["rigidBodies"]): string {
+  return `${bodies.length}:${bodies.some((body) => body.motion !== "static")}`;
+}
+
+/** The roster itself, which a live solver re-uploads rather than rebuilds for. */
+function rigidBodyRosterKey(bodies: SceneDescription["rigidBodies"]): string {
+  return JSON.stringify(bodies);
+}
+
+/**
+ * The inflow inputs an allocation is sized from.
+ *
+ * `fluidFootprint` budgets the fine narrow band from the volume the nozzle will
+ * deliver over the whole run — `integratedInflowVolume`, which is the radius,
+ * the speed and the timing window — and `includeWholeDomainPressureSupport`
+ * reads presence alone. Nothing here is *where* the nozzle is or *which way* it
+ * points, because neither changes what has to be allocated. Those live in the
+ * uniform tier, where `writeParams` already packs them, which is what makes
+ * dragging the hose a buffer write instead of a restart.
+ *
+ * Speed rather than the velocity vector, deliberately: the integrated volume is
+ * flow rate times time, and flow rate is area times speed. Turning the hose
+ * without slowing it delivers the same water into the same budget.
+ */
+function inflowBudgetKey(inflow: SceneDescription["fluid"]["inflow"]): string {
+  if (!inflow) return "none";
+  const v = inflow.velocity_m_s;
+  return `${inflow.radius_m}:${Math.hypot(v.x, v.y, v.z)}:${inflow.start_s}:${inflow.end_s}:${inflow.ramp_s}`;
+}
+
+/**
+ * Whether landing this edit costs the simulation its timeline.
+ *
+ * An editor commit used to reset unconditionally, so every gesture — including
+ * ones the live solver adopts through a single buffer write — zeroed the clock,
+ * cleared the diagnostics store and paused transport. That is the difference
+ * between an editor with a simulation in it and a simulation you can edit.
+ *
+ * The rule is the tier boundary and nothing else: a structural or seed-tier
+ * difference has to be answered by a rebuild or a re-seed, both of which start
+ * again from t=0. Everything left over is a uniform-tier difference, which
+ * `applySceneUniforms` adopts on the running solver. Both keys are compared,
+ * not just the seed one, because a lattice change is the case where continuing
+ * would be worst: the solver would keep running at the old shape.
+ */
+export function sceneEditRequiresReset(before: SceneDescription, after: SceneDescription): boolean {
+  return sceneStructuralKey(before) !== sceneStructuralKey(after)
+    || gpuSceneSeedKey(before) !== gpuSceneSeedKey(after);
+}
+
+/** Where the nozzle is, which way it points, and how far it reaches. */
+function inflowAimKey(inflow: SceneDescription["fluid"]["inflow"]): string {
+  if (!inflow) return "none";
+  const { center_m: c, velocity_m_s: v } = inflow;
+  const speed = Math.hypot(v.x, v.y, v.z) || 1;
+  return `${c.x},${c.y},${c.z}:${v.x / speed},${v.y / speed},${v.z / speed}:${inflow.length_m}`;
+}
+
+/**
+ * Inputs a live solver adopts through `applySceneUniforms` — the scalars no
+ * lattice or seed depends on, plus the nozzle's placement and aim, which reach
+ * the GPU as params rather than as geometry.
+ */
 export function gpuSceneUniformKey(scene: SceneDescription): string {
-  return `${scene.fluid.density_kg_m3}:${scene.fluid.dynamicViscosity_Pa_s}:${scene.fluid.surfaceTension_N_m}:${scene.fluid.gravity_m_s2.y}`;
+  return `${scene.fluid.density_kg_m3}:${scene.fluid.dynamicViscosity_Pa_s}:${scene.fluid.surfaceTension_N_m}:${scene.fluid.gravity_m_s2.y}:${inflowAimKey(scene.fluid.inflow)}:${rigidBodyRosterKey(scene.rigidBodies)}`;
 }
 
 /**
@@ -460,6 +565,8 @@ export interface EffectiveRendererStatus {
   detail?: string;
   /** The requested refinement lifecycle is independent and never a fallback selector. */
   silhouetteRefinement?: SvoSilhouetteRefinementStatus;
+  /** Requested versus effective shadows/AO/GI path. */
+  lightingVisibility?: SvoLightingVisibilityStatus;
 }
 
 export interface EffectiveRendererConditions {
@@ -480,6 +587,7 @@ export interface EffectiveRendererConditions {
   svoEncoded: boolean;
   contractFailure?: string;
   silhouetteRefinement?: SvoSilhouetteRefinementStatus;
+  lightingVisibility?: SvoLightingVisibilityStatus;
 }
 
 /** Resolve one frame's production renderer without changing simulation state. */
@@ -518,9 +626,10 @@ export function svoDryRigidBounds(bodies: readonly RigidBodyState[]): SvoDryRigi
 export function resolveEffectiveRendererStatus(
   conditions: EffectiveRendererConditions,
 ): EffectiveRendererStatus {
-  const status = (renderer: Omit<EffectiveRendererStatus, "silhouetteRefinement">): EffectiveRendererStatus => ({
+  const status = (renderer: Omit<EffectiveRendererStatus, "silhouetteRefinement" | "lightingVisibility">): EffectiveRendererStatus => ({
     ...renderer,
     ...(conditions.silhouetteRefinement ? { silhouetteRefinement: conditions.silhouetteRefinement } : {}),
+    ...(conditions.lightingVisibility ? { lightingVisibility: conditions.lightingVisibility } : {}),
   });
   if (conditions.required === false) return status({ state: "not-required" });
   // An absent pipeline means two very different things. Startup and a primary
@@ -811,7 +920,10 @@ export class FluidLabRenderer {
     if (previous?.state === status.state && previous.failureReason === status.failureReason
       && previous.detail === status.detail
       && previous.silhouetteRefinement?.state === status.silhouetteRefinement?.state
-      && previous.silhouetteRefinement?.detail === status.silhouetteRefinement?.detail) return;
+      && previous.silhouetteRefinement?.detail === status.silhouetteRefinement?.detail
+      && previous.lightingVisibility?.state === status.lightingVisibility?.state
+      && previous.lightingVisibility?.fallback === status.lightingVisibility?.fallback
+      && previous.lightingVisibility?.detail === status.lightingVisibility?.detail) return;
     this.lastEffectiveRendererStatus = status;
     this.effectiveRendererStatusCallback?.(status);
   }
@@ -2484,6 +2596,7 @@ export class FluidLabRenderer {
     this.svoPickingAvailable = svoEncoded;
     this.lastSvoPickingBodies = this.svoPickingAvailable ? bodies.slice(0, 12) : [];
     const silhouetteRefinementStatus = this.svoDryScenePipeline?.silhouetteRefinementStatus;
+    const lightingVisibilityStatus = this.svoDryScenePipeline?.lightingVisibilityStatus;
     this.publishEffectiveRendererStatus(resolveEffectiveRendererStatus({
       required: sparsePresentationRequired,
       pipelineAvailable: this.svoPipelineAvailable,
@@ -2504,6 +2617,7 @@ export class FluidLabRenderer {
       svoEncoded,
       contractFailure: this.svoPublicationFailure,
       silhouetteRefinement: silhouetteRefinementStatus,
+      lightingVisibility: lightingVisibilityStatus,
     }));
     let inspectionOverlayEncoded = false;
     // Render stage views replace the composited image with a decode of a plane

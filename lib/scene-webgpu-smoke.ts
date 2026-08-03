@@ -145,9 +145,23 @@ export interface SceneWebGPUSmokeLane {
   readonly timeout_ms?: number;
 }
 
+/**
+ * Which authored scene a suite runs, as identity rather than as a closure.
+ *
+ * A suite used to carry a factory, and eleven of them rebuilt a catalog scene
+ * by hand under the catalog's own name. Naming the definition instead means the
+ * document can only come from `sceneDocument`, and a lane that genuinely needs a
+ * different one has to say so as a named variant of the scene it differs from.
+ */
+export interface SceneWebGPUSmokeScene {
+  readonly definitionId: string;
+  readonly variantId?: string;
+}
+
 export interface SceneWebGPUSmokeSuite<Id extends string = string> {
   readonly sceneId: Id;
   readonly description: string;
+  readonly scene: SceneWebGPUSmokeScene;
   readonly createScene: () => SceneDescription;
   readonly defaultLane: string;
   readonly lanes: Readonly<Record<string, SceneWebGPUSmokeLane>>;
@@ -166,6 +180,7 @@ function deepFreeze<T>(value: T): T {
 export function defineSceneWebGPUSmokeSuite<const Id extends string>(
   suite: SceneWebGPUSmokeSuite<Id>,
 ): SceneWebGPUSmokeSuite<Id> {
+  if (!suite.scene.definitionId.trim()) throw new Error(`${suite.sceneId} must name the catalog scene it runs`);
   if (!(suite.defaultLane in suite.lanes)) {
     throw new Error(`${suite.sceneId} default WebGPU smoke lane ${suite.defaultLane} does not exist`);
   }

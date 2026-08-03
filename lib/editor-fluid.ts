@@ -126,6 +126,74 @@ export function fluidPaintPatch(scene: SceneDescription, result: FluidPaintResul
   return { ...rest, initialBrickSeeds_m: result.seeds, initialBrickSeedsAdditive: true };
 }
 
+/**
+ * The bounds `validateScene` holds initial brick seeds to.
+ *
+ * `editorFluidLattice` rounds its brick count up, so the last brick on an axis
+ * whose cell count is not a multiple of eight has its centre outside the tank —
+ * a 24 x 18 x 16 cell tank has three brick rows in y and only two and a quarter
+ * fit. Painting there used to author a seed the schema rejects, which surfaced
+ * as a document that would not save rather than as a brush that would not
+ * paint.
+ */
+function seedInsideSolverBounds(scene: SceneDescription, point: Vec3): boolean {
+  const c = scene.container;
+  return point.x >= -c.width_m / 2 && point.x < c.width_m / 2
+    && point.y >= 0 && point.y < c.height_m
+    && point.z >= -c.depth_m / 2 && point.z < c.depth_m / 2;
+}
+
+export interface FluidBrushSample {
+  /** The brick this sample landed in, so a drag only revises on a crossing. */
+  readonly brickKey: string;
+  /** Absent when the sample changed nothing — a repeat, or an erase over dry brick. */
+  readonly patch?: Partial<SceneDescription>;
+}
+
+/**
+ * One sample of a brush stroke, as a patch over the committed document.
+ *
+ * Two scenes, because a stroke is a proposal being built up: `proposed` is what
+ * the pointer has painted so far and is what each new brick unions with, while
+ * `committed` is what the patch will land on. Folding them into one would make
+ * a stroke either forget its own earlier bricks or reopen the flip below on
+ * every sample.
+ *
+ * The patch is whole rather than incremental because `updateDraft` replaces the
+ * draft's patch outright: a sample that emitted only the fields it changed
+ * would silently retract the ones it did not.
+ */
+export function fluidBrushSample(
+  committed: SceneDescription,
+  proposed: SceneDescription,
+  point: Vec3,
+  erase: boolean,
+): FluidBrushSample | undefined {
+  const lattice = editorFluidLattice(proposed);
+  const index = fluidBrickIndexAt(lattice, point);
+  if (!index) return undefined;
+  // A surface hit sits on the boundary of the brick behind it; nudging into the
+  // brick centre keeps a stroke on the surface from seeding solids.
+  const target = erase ? point : fluidBrickCenter(lattice, index);
+  const brickKey = fluidBrickKey(index);
+  if (!erase && !seedInsideSolverBounds(proposed, target)) return { brickKey };
+  const result = erase ? eraseFluidBrick(proposed, target) : paintFluidBrick(proposed, target);
+  if (!result) return { brickKey };
+  return {
+    brickKey,
+    patch: {
+      fluid: fluidPaintPatch(proposed, result),
+      // The first brick of water in a scene built without a solver is the one
+      // expensive transition in this editor, and it is meant to be exactly
+      // this: user-initiated, named, and once per scene. Erasing never flips it
+      // back — a scene that has had water is a fluid scene with none in it.
+      ...(committed.systems?.fluid === false && !result.empty
+        ? { systems: { ...committed.systems, fluid: true } }
+        : {}),
+    },
+  };
+}
+
 /** World height of the tank-fill surface for the current fill fraction. */
 export function fillLevelHeight_m(scene: SceneDescription): number {
   return Math.max(0, Math.min(1, scene.container.fillFraction)) * scene.container.height_m;

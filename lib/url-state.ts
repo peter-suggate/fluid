@@ -4,6 +4,7 @@ import { isOctreeTechniqueOverlayMode } from "./octree-technique-debug";
 import { cameraForPreset, defaultScenePresetId, getScenePreset, scenePresets } from "./scenes";
 import { useMethodStore } from "./stores/method-store";
 import { useSceneStore } from "./stores/scene-store";
+import { useShellStore, type ShellView } from "./stores/shell-store";
 import { DEFAULT_RIGHT_PANEL_WIDTH, MAX_RIGHT_PANEL_WIDTH, MIN_RIGHT_PANEL_WIDTH, useUIStore, type RightPanel } from "./stores/ui-store";
 import { DEFAULT_SVO_LIGHTING_OPTIONS, type SvoConeTracingMode, type SvoPrimaryTraversalMode } from "./svo-render-options";
 import type { GPUQuality } from "./tall-cell-grid";
@@ -54,6 +55,7 @@ type QueryState = {
   overrides: Record<string, MethodParamValues>;
   presetId: string;
   scene: SceneDescription;
+  view?: ShellView;
   ui: UIQueryState;
 };
 
@@ -76,7 +78,19 @@ type UIQueryState = {
 
 type SerializableMethodState = Pick<QueryState, "methodId" | "quality" | "overrides">;
 type SerializableSceneState = Pick<QueryState, "presetId" | "scene">;
+type SerializableShellState = Pick<QueryState, "view">;
 type SerializableUIState = UIQueryState;
+
+/**
+ * Which shell layer a link opens.
+ *
+ * Only the library is spelled out. The studio is what a URL that names a scene
+ * already means, and `view` carried a retired presentation mode in older links,
+ * so anything unrecognised resolves to the studio rather than being preserved.
+ */
+export function shellViewFromQuery(search: string): ShellView {
+  return new URLSearchParams(search).get("view") === "library" ? "library" : "studio";
+}
 
 function exactMethod(id: string | null) {
   return simulationMethods.find((method) => method.id === id);
@@ -199,6 +213,7 @@ export function parseQueryState(search: string): QueryState {
     overrides,
     presetId: preset.id,
     scene: validateScene(scene).length === 0 ? scene : baseScene,
+    view: shellViewFromQuery(search),
     ui: {
       camera: {
         azimuth_rad: numberParam(query, "camera.azimuth", presetCamera.azimuth_rad),
@@ -240,7 +255,8 @@ export function serializeQueryState(
   search: string,
   sceneState: SerializableSceneState,
   methodState: SerializableMethodState,
-  uiState: SerializableUIState = useUIStore.getInitialState()
+  uiState: SerializableUIState = useUIStore.getInitialState(),
+  shellState: SerializableShellState = { view: "studio" }
 ): string {
   const query = new URLSearchParams(search);
   for (const key of [...query.keys()]) if (isManagedKey(key)) query.delete(key);
@@ -248,6 +264,9 @@ export function serializeQueryState(
   query.set("method", methodState.methodId);
   query.set("scene", sceneState.presetId);
   query.set("quality", methodState.quality);
+  // The studio is the absence of the layer, not a second value: a link to a
+  // scene should not also have to say that it is not the shelf it came from.
+  if (shellState.view === "library") query.set("view", "library");
   if (uiState.svoShadowsEnabled !== DEFAULT_SVO_LIGHTING_OPTIONS.shadowsEnabled) query.set("svoShadows", uiState.svoShadowsEnabled ? "1" : "0");
   if (uiState.svoAmbientOcclusionEnabled !== DEFAULT_SVO_LIGHTING_OPTIONS.ambientOcclusionEnabled) query.set("svoAO", uiState.svoAmbientOcclusionEnabled ? "1" : "0");
   if (uiState.silhouetteRefinementEnabled !== DEFAULT_SVO_LIGHTING_OPTIONS.silhouetteRefinementEnabled) {
@@ -293,6 +312,22 @@ export function serializeQueryState(
 }
 
 /**
+ * Mirror every store into the address bar in place.
+ *
+ * The one writer, so that a subscriber outside this module — the shell view is
+ * the first — canonicalises the whole query rather than editing one key of it
+ * behind the others' backs. Replace and never push: the URL describes what is
+ * on screen, and a back button that stepped through every panel toggle and
+ * library visit would never reach the page the reader actually arrived from.
+ */
+export function replaceQueryStateUrl() {
+  const search = serializeQueryState(window.location.search, useSceneStore.getState(), useMethodStore.getState(), useUIStore.getState(), useShellStore.getState());
+  const next = `${window.location.pathname}${search ? `?${search}` : ""}${window.location.hash}`;
+  const current = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+  if (next !== current) window.history.replaceState(window.history.state, "", next);
+}
+
+/**
  * Hydrate both source-of-truth stores once, then mirror their snapshots to
  * history.replaceState. Popstate follows the same path, so back/forward and
  * reloads rebuild the simulation from one coherent store snapshot.
@@ -304,10 +339,7 @@ export function startQueryStateSync(onHydrated: (presetId: string) => void) {
 
   const writeUrl = () => {
     if (!active || applyingUrl) return;
-    const search = serializeQueryState(window.location.search, useSceneStore.getState(), useMethodStore.getState(), useUIStore.getState());
-    const next = `${window.location.pathname}${search ? `?${search}` : ""}${window.location.hash}`;
-    const current = `${window.location.pathname}${window.location.search}${window.location.hash}`;
-    if (next !== current) window.history.replaceState(window.history.state, "", next);
+    replaceQueryStateUrl();
   };
 
   const scheduleWrite = () => {

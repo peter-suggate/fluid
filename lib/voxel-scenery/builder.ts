@@ -99,7 +99,7 @@ export interface EnvironmentProxyShell {
   readonly bounds_m: EnvironmentProxyAabb;
   /** Shell faces suitable for voxel/debug publication. Garden terrain has none: its real heightfield remains authoritative. */
   readonly primitives: readonly EnvironmentBoxProxy[];
-  readonly materialModel: "conservatory" | "courtyard" | "night-lab" | "gallery" | "bathhouse" | "station" | "default-floor" | "garden-terrain";
+  readonly materialModel: "conservatory" | "courtyard" | "night-lab" | "gallery" | "bathhouse" | "station" | "room" | "default-floor" | "garden-terrain";
 }
 
 export const V = (x: number, y: number, z: number): Vec3 => ({ x, y, z });

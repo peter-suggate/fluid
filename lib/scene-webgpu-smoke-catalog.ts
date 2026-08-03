@@ -1,16 +1,13 @@
-import { applyGardenPool, GARDEN_DAM_BRICK_SEED_M } from "./garden-scene";
-import { cloneScene, defaultScene, type SceneDescription } from "./model";
 import type { MethodParamValues } from "./methods";
-import { createPaperScenario } from "./paper-scenarios";
+import { sceneDocument, type SceneDefinition } from "./scene-definition";
 import {
   CEILING_DROP_METHOD_PROFILE,
   COARSE_ONLY_POWER_DAM_METHOD_PROFILE,
+  DEEP_POWER_HYDROSTATIC_FINE_BRICK_CAPACITY,
+  DEEP_POWER_HYDROSTATIC_PRESSURE_ROW_CAPACITY,
   LARGE_POWER_DAM_FINE_BRICK_CAPACITY,
   LARGE_POWER_HYDROSTATIC_PRESSURE_ROW_CAPACITY,
-  createBrickQuadDamBreakScene,
-  createOceanSeicheScene,
-  createTwinDamCollisionScene,
-  getScenePreset,
+  findSceneDefinition,
 } from "./scenes";
 import {
   defineSceneWebGPUSmokeSuite,
@@ -20,6 +17,7 @@ import {
   type SceneWebGPUDiagnosticPack,
   type SceneWebGPUSmokeLane,
   type SceneWebGPUSmokeMethod,
+  type SceneWebGPUSmokeScene,
   type SceneWebGPUSmokeSuite,
   type WebGPUSmokeMethodId,
 } from "./scene-webgpu-smoke";
@@ -45,6 +43,7 @@ export const sceneWebGPUSmokeIds = [
   "minimal-power-dam-break-64",
   "large-power-dam-break",
   "large-power-hydrostatic",
+  "deep-power-hydrostatic",
   "ceiling-slab-drop",
   "corner-brick-drop",
   "midair-brick-drop",
@@ -356,6 +355,14 @@ const largePowerHydrostaticOverrides = {
   interfaceRefinementBandCells: 1,
   pressureRowCapacity: LARGE_POWER_HYDROSTATIC_PRESSURE_ROW_CAPACITY,
 } as const;
+/** The deep still lane differs from the 20x still lane only in its two
+ * footprint-derived reserves; every discretization knob is shared, so a wall
+ * or row count measured here is comparable to the shallow lane's. */
+const deepPowerHydrostaticOverrides = {
+  ...largePowerHydrostaticOverrides,
+  pressureRowCapacity: DEEP_POWER_HYDROSTATIC_PRESSURE_ROW_CAPACITY,
+  globalFineLevelSetMaximumBricks: DEEP_POWER_HYDROSTATIC_FINE_BRICK_CAPACITY,
+} as const;
 
 const powerDiagnostics: readonly SceneWebGPUDiagnosticPack[] = [
   { id: "structured-power", methods: ["octree"], parameters: {
@@ -398,111 +405,35 @@ const powerAcceptance: readonly SceneWebGPUAcceptanceRule[] = [
   { id: "power-velocities-finite", metric: "methods.octree.stabilityEnvelope.nonFiniteVelocityCount", operator: "equal", expected: 0 },
 ];
 
-function paperScene(id: "hose-tank" | "dam-break-boxes" | "sphere-jet"): SceneDescription {
-  const scene = createPaperScenario(id);
-  scene.environment = id === "hose-tank" ? "conservatory" : id === "dam-break-boxes" ? "concrete-gallery" : "night-lab";
-  return scene;
-}
-
-function gardenSmokeScene(id: "garden-pond" | "garden-dam-break"): SceneDescription {
-  const scene = applyGardenPool(cloneScene(defaultScene), id === "garden-dam-break" ? { fillFraction: 0.16 } : {});
-  scene.environment = "garden";
-  scene.sceneId = `smoke-${id}`;
-  scene.rigidBodies = [];
-  scene.fluid.surfaceTension_N_m = 0;
-  delete scene.fluid.inflow;
-  scene.fluid.initialCondition = id === "garden-pond" ? "tank-fill" : "dam-break";
-  if (id === "garden-dam-break") scene.fluid.initialBrickSeeds_m = [{ ...GARDEN_DAM_BRICK_SEED_M }];
-  scene.numerics.fixedDt_s = scene.numerics.maxDt_s = id === "garden-pond" ? 1 / 120 : 0.004;
-  return scene;
-}
-
-function settledTankScene(): SceneDescription {
-  const scene = cloneScene(defaultScene);
-  scene.environment = "default";
-  scene.rigidBodies = [];
-  scene.fluid.surfaceTension_N_m = 0;
-  delete scene.fluid.inflow;
-  scene.sceneId = "smoke-settled-tank";
-  scene.fluid.initialCondition = "tank-fill";
-  scene.container.fillFraction = 0.7;
-  scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 1 / 120;
-  return scene;
-}
-
-function deepWaterScene(): SceneDescription {
-  const scene = cloneScene(defaultScene);
-  scene.environment = "research-station";
-  scene.rigidBodies = [];
-  scene.fluid.surfaceTension_N_m = 0;
-  delete scene.fluid.inflow;
-  scene.sceneId = "smoke-deep-water";
-  scene.container.height_m = 20;
-  scene.container.fillFraction = 0.8;
-  scene.fluid.initialCondition = "tank-fill";
-  scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 1 / 30;
-  return scene;
-}
-
-function brickQuadScene(): SceneDescription {
-  const scene = createBrickQuadDamBreakScene();
-  scene.environment = "default";
-  scene.sceneId = "smoke-brick-quad-dam-break";
-  scene.fluid.surfaceTension_N_m = 0;
-  scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 0.004;
-  return scene;
-}
-
-function twinDamScene(): SceneDescription {
-  const scene = createTwinDamCollisionScene();
-  scene.environment = "default";
-  scene.sceneId = "smoke-twin-dam-collision";
-  scene.fluid.surfaceTension_N_m = 0;
-  scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 0.004;
-  return scene;
-}
-
-function oceanScene(): SceneDescription {
-  const scene = createOceanSeicheScene();
-  scene.environment = "default";
-  scene.sceneId = "smoke-ocean-seiche";
-  scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 0.005;
-  return scene;
+function definition(id: string): SceneDefinition {
+  const found = findSceneDefinition(id);
+  if (!found) throw new Error(`The WebGPU smoke catalog names an unknown scene ${id}`);
+  return found;
 }
 
 /**
- * Bet-4 work-verdict scene: a genuinely volumetric pool, but bounded enough to
- * run as a one-step shipping-path gate.  The topology-aligned 64x64x48 lattice
- * has 56 wet layers, so
- * the regular deep interior dominates the free-surface and tank-wall bands.
- * It deliberately has no wave seed: D4 correctness remains the separate
- * symmetric-expansion gate, while this scene measures only avoided machinery.
+ * A suite names the authored scene it runs; it never builds one.
+ *
+ * Eleven local factories used to rebuild a catalog scene here, under the
+ * catalog's own name, from `defaultScene` — which meant assigning `environment`
+ * as a bare string, so a lane ran a document with no scenery graph at all and
+ * `hose-tank` on the GPU lane was not the `hose-tank` in the product. A lane
+ * that genuinely needs a different document names a variant of the scene it
+ * differs from, and the difference lives beside that scene.
  */
-function powerHybridDeepOceanScene(): SceneDescription {
-  const scene = cloneScene(defaultScene);
-  scene.sceneId = "smoke-power-hybrid-deep-ocean";
-  scene.environment = "default";
-  scene.rigidBodies = [];
-  scene.container = { ...scene.container, width_m: 3.2, height_m: 3.2, depth_m: 2.4,
-    fillFraction: 0.875, top: "closed", fluidWallMode: "no-slip" };
-  scene.voxelDomain = { finestCellSize_m: 0.05, brickSize_cells: 8 };
-  scene.fluid.initialCondition = "tank-fill";
-  scene.fluid.surfaceTension_N_m = 0;
-  delete scene.fluid.initialBrickSeeds_m;
-  delete scene.fluid.initialBrickSeedsAdditive;
-  delete scene.fluid.inflow;
-  scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 0.004;
-  return scene;
-}
-
 function suite<const Id extends SceneWebGPUSmokeId>(
   sceneId: Id,
   description: string,
-  createScene: () => SceneDescription,
+  scene: SceneWebGPUSmokeScene,
   lanes: Record<string, SceneWebGPUSmokeLane>,
   defaultLane = "default",
 ): SceneWebGPUSmokeSuite<Id> {
-  return defineSceneWebGPUSmokeSuite({ sceneId, description, createScene, defaultLane, lanes });
+  const resolved = definition(scene.definitionId);
+  return defineSceneWebGPUSmokeSuite({
+    sceneId, description, scene,
+    createScene: () => sceneDocument(resolved, scene.variantId),
+    defaultLane, lanes,
+  });
 }
 
 const inflowDiagnostics: readonly SceneWebGPUDiagnosticPack[] = [{ id: "inflow-activity", parameters: {
@@ -709,8 +640,12 @@ const minimalDamRasterParameters = {
     { maximum: 0 }],
 } as const;
 
+/** Read back from the document rather than restated here: the box-stack lane
+ * wants eight of the figure's own steps, whatever the paper scenario authors. */
+const paperFigureStep_s = sceneDocument(definition("dam-break-boxes")).numerics.maxDt_s;
+
 const suiteList = [
-  suite("dam-break-ui", "Exact browser water-box dam-break preset", () => getScenePreset("water-box-dam-break").create(), {
+  suite("dam-break-ui", "Exact browser water-box dam-break preset", { definitionId: "water-box-dam-break" }, {
     default: lane({ target_s: 0.2, oracleSteps: 2,
       collect: { fieldStats: "final", evidenceCollectors: [{ id: "collocated-velocity", phase: "terminal",
         requires: ["collocated velocity"], provides: ["collocated velocity", "volume field", "compact velocity"] }] },
@@ -739,22 +674,22 @@ const suiteList = [
       methods: methods(["octree"]), collect: { fieldStats: "none", performanceProfile: true, gpuCommandAudit: true }, diagnostics: [{ id: "performance" }], timeout_ms: 240_000 }),
   }),
 
-  suite("settled-tank", "Hydrostatic preservation in a closed level pool", settledTankScene, {
+  suite("settled-tank", "Hydrostatic preservation in a closed level pool", { definitionId: "water-box-tank-fill", variantId: "gpu-smoke" }, {
     default: lane({ target_s: 0.1, oracleSteps: 2, diagnostics: [equilibriumDiagnostic] }),
     acceptance: lane({ id: "acceptance", target_s: 0.0667, oracleSteps: 2, cpuOracle: false,
       methods: methods(["octree"]), collect: { stabilityEnvelope: true, fieldStats: "final", powerGenerationAudit: { everySteps: 1, log: false }, boundaryThetaHistogram: true },
       diagnostics: [equilibriumDiagnostic, powerDiagnostics[0]], timeout_ms: 240_000 }),
   }),
-  suite("settled-tank-ui", "Exact browser settled-tank preset with rigid bodies", () => getScenePreset("water-box-tank-fill").create(), {
+  suite("settled-tank-ui", "Exact browser settled-tank preset with rigid bodies", { definitionId: "water-box-tank-fill" }, {
     default: lane({ target_s: 0.2, oracleSteps: 2, diagnostics: [equilibriumDiagnostic] }),
     acceptance: lane({ id: "acceptance", target_s: 0.0667, oracleSteps: 2, cpuOracle: false, methods: methods(["octree"]),
       collect: { stabilityEnvelope: true, fieldStats: "final", powerGenerationAudit: { everySteps: 1, log: false } }, diagnostics: [equilibriumDiagnostic], timeout_ms: 240_000 }),
   }),
-  suite("dam-break-boxes", "Three-dimensional dam break with immersed boxes", () => paperScene("dam-break-boxes"), {
-    default: lane({ target_s: Math.max(createPaperScenario("dam-break-boxes").numerics.maxDt_s * 8, 0.05), oracleSteps: 2,
+  suite("dam-break-boxes", "Three-dimensional dam break with immersed boxes", { definitionId: "dam-break-boxes" }, {
+    default: lane({ target_s: Math.max(paperFigureStep_s * 8, 0.05), oracleSteps: 2,
       diagnostics: [tallCellRestrictedDiagnostic] }),
   }),
-  suite("hose-tank", "Fixed cylindrical inflow into a shallow receiving pool", () => paperScene("hose-tank"), {
+  suite("hose-tank", "Fixed cylindrical inflow into a shallow receiving pool", { definitionId: "hose-tank" }, {
     default: lane({ target_s: 0.5, oracleSteps: 2, maximumRepresentedVolumeDrift: false,
       diagnostics: inflowDiagnostics, acceptance: inflowAcceptance }),
     drift: lane({ id: "drift", target_s: 0.4611111111111111, exactSteps: 166, maxDt_s: 0.002777777777777778, oracleSteps: 166, cpuOracle: false,
@@ -771,22 +706,22 @@ const suiteList = [
         maximumBallisticCenterlineRelativeError: 1.1,
       } }], timeout_ms: 240_000 }),
   }),
-  suite("sphere-jet", "Directed inlet jet past a fixed immersed sphere", () => paperScene("sphere-jet"), {
+  suite("sphere-jet", "Directed inlet jet past a fixed immersed sphere", { definitionId: "sphere-jet" }, {
     default: lane({ target_s: 0.5, oracleSteps: 2, maximumRepresentedVolumeDrift: false,
       diagnostics: inflowDiagnostics, acceptance: inflowAcceptance }),
   }),
-  suite("deep-water", "Extreme vertical aspect ratio", deepWaterScene, {
+  suite("deep-water", "Extreme vertical aspect ratio", { definitionId: "deep-water-ab", variantId: "gpu-smoke" }, {
     default: lane({ target_s: 0.1, oracleSteps: 1, diagnostics: [equilibriumDiagnostic] }),
   }),
-  suite("garden-pond", "Hydrostatic rest in an organic terrain pool", () => gardenSmokeScene("garden-pond"), {
+  suite("garden-pond", "Hydrostatic rest in an organic terrain pool", { definitionId: "garden-pond", variantId: "gpu-smoke" }, {
     default: lane({ target_s: 0.1, oracleSteps: 2, diagnostics: [equilibriumDiagnostic] }),
   }),
-  suite("garden-hose", "Authored terrain pond with continuous hose inflow", () => getScenePreset("garden-hose").create(), {
+  suite("garden-hose", "Authored terrain pond with continuous hose inflow", { definitionId: "garden-hose" }, {
     default: lane({ target_s: 0.5, oracleSteps: 2, cpuOracle: false, methods: methods(["octree"]),
       maximumRepresentedVolumeDrift: false, collect: { fieldStats: "final" },
       diagnostics: inflowDiagnostics, acceptance: inflowAcceptance, timeout_ms: 240_000 }),
   }),
-  suite("garden-dam-break", "Single fluid brick released down terrain into the pond", () => gardenSmokeScene("garden-dam-break"), {
+  suite("garden-dam-break", "Single fluid brick released down terrain into the pond", { definitionId: "garden-dam-break", variantId: "gpu-smoke" }, {
     default: lane({ target_s: 0.2, oracleSteps: 2 }),
     migration: lane({ id: "migration", target_s: 1, oracleSteps: 2, cpuOracle: false, methods: methods(["octree"]),
       collect: { fieldStats: "none", sparsePublication: true },
@@ -795,7 +730,7 @@ const suiteList = [
           sourceFluidVoxelsAtEnd: 0, sourceCoreResidencyAtEnd: false,
           requireResidentCountBelowCapacity: true } }] }),
   }),
-  suite("brick-quad-dam-break", "Four-brick tank whose release crosses every brick boundary", brickQuadScene, {
+  suite("brick-quad-dam-break", "Four-brick tank whose release crosses every brick boundary", { definitionId: "brick-quad-dam-break", variantId: "gpu-smoke" }, {
     default: lane({ target_s: 1.5, oracleSteps: 2, cpuOracle: false,
       collect: { fieldStats: "checkpoints", checkpointEvery_s: 0.25, spatialField: true, sparsePublication: true },
       hooks: [{ id: "brick-quad-coverage", requires: ["checkpoint fields", "initial fluid brick stats", "final sparse publication"],
@@ -803,10 +738,10 @@ const suiteList = [
           minimumInitialResidentBricks: 1, minimumFinalResidentBricks: 2, minimumFinalCoreBricks: 2,
           liquidThreshold: 0.5, requireResidentCountBelowCapacity: true } }] }),
   }),
-  suite("twin-dam-collision", "Opposed seeded reservoirs collapsing into an oblique collision", twinDamScene, {
+  suite("twin-dam-collision", "Opposed seeded reservoirs collapsing into an oblique collision", { definitionId: "twin-dam-collision", variantId: "gpu-smoke" }, {
     default: lane({ target_s: 1, oracleSteps: 2, cpuOracle: false, collect: { stabilityEnvelope: true, fieldStats: "checkpoints", checkpointEvery_s: 0.1 } }),
   }),
-  suite("hydrostatic-power-two-level", "16-cubed settled leaf-32 power grid", () => getScenePreset("hydrostatic-power-two-level").create(), {
+  suite("hydrostatic-power-two-level", "16-cubed settled leaf-32 power grid", { definitionId: "hydrostatic-power-two-level" }, {
     default: lane({ target_s: 0.2, exactSteps: 50, maxDt_s: 0.004, oracleSteps: 50, cpuOracle: false,
       methods: methods(["octree"], { octree: octreePowerOverrides }),
       collect: { fieldStats: "checkpoints", checkpointEvery_s: 0.2, spatialField: true, stabilityEnvelope: true, structuredValidation: true,
@@ -815,7 +750,7 @@ const suiteList = [
         { id: "expected-grid", metric: "methods.octree.grid", operator: "equal", expected: [16, 16, 16] },
         { id: "hydrostatic-power-volume-drift", metric: "methods.octree.stabilityEnvelope.maximumExactVolumeDrift", operator: "at-most", expected: 1e-4 }] }),
   }),
-  suite("hydrostatic-power-large-offset", "32x24x16 cell-cut leaf-32 power grid", () => getScenePreset("hydrostatic-power-large-offset").create(), {
+  suite("hydrostatic-power-large-offset", "32x24x16 cell-cut leaf-32 power grid", { definitionId: "hydrostatic-power-large-offset" }, {
     default: lane({ target_s: 0.004, exactSteps: 1, maxDt_s: 0.004, oracleSteps: 1, cpuOracle: false,
       methods: methods(["octree"], { octree: { ...octreePowerOverrides, interfaceRefinementBandCells: 4 } }),
       collect: { fieldStats: "checkpoints", checkpointEvery_s: 0.004, spatialField: true, stabilityEnvelope: true, structuredValidation: true,
@@ -826,7 +761,7 @@ const suiteList = [
       hooks: [{ id: "water-raster-integrity", methods: ["octree"], requires: ["global fine generation", "front/back raster"],
         parameters: standardWaterRasterParameters }] }),
   }),
-  suite("minimal-power-dam-break", "Minimal dynamic leaf-32 analytic dam", () => getScenePreset("minimal-power-dam-break").create(), {
+  suite("minimal-power-dam-break", "Minimal dynamic leaf-32 analytic dam", { definitionId: "minimal-power-dam-break" }, {
     default: lane({ target_s: 2, exactSteps: 500, maxDt_s: 0.004, oracleSteps: 500, cpuOracle: false,
       methods: methods(["octree"], { octree: octreePowerOverrides }), timeout_ms: 240_000,
       collect: { fieldStats: "checkpoints", checkpointEvery_s: 0.1, energyEverySteps: 50, spatialField: true, stabilityEnvelope: true, structuredValidation: true,
@@ -873,7 +808,7 @@ const suiteList = [
       collect: { fieldStats: "final", globalFineGeneration: true, powerGenerationAudit: { everySteps: 1, log: false } }, diagnostics: powerDiagnostics, timeout_ms: 240_000 }),
   }),
   suite("symmetric-expansion", "Central 2x1x2-brick liquid body with horizontal D4 symmetry",
-    () => getScenePreset("symmetric-expansion").create(), {
+    { definitionId: "symmetric-expansion" }, {
       default: lane({ target_s: 1, exactSteps: 250, maxDt_s: 0.004, oracleSteps: 250, cpuOracle: false,
         methods: methods(["octree"], { octree: COARSE_ONLY_POWER_DAM_METHOD_PROFILE.overrides }), timeout_ms: 240_000,
         collect: {
@@ -1052,7 +987,7 @@ const suiteList = [
         diagnostics: [{ id: "performance" }], timeout_ms: 240_000 }),
     }),
   suite("minimal-power-dam-break-32", "32-cubed coarse-only analytic mini dam",
-    () => getScenePreset("minimal-power-dam-break-32").create(), {
+    { definitionId: "minimal-power-dam-break-32" }, {
       default: lane({ target_s: 0.004, exactSteps: 1, maxDt_s: 0.004, oracleSteps: 1, cpuOracle: false,
         methods: methods(["octree"], { octree: COARSE_ONLY_POWER_DAM_METHOD_PROFILE.overrides }),
         timeout_ms: 240_000,
@@ -1091,7 +1026,7 @@ const suiteList = [
             operator: "equal", expected: false }] }),
     }),
   suite("minimal-power-dam-break-64", "64-cubed coarse-only analytic mini dam",
-    () => getScenePreset("minimal-power-dam-break-64").create(), {
+    { definitionId: "minimal-power-dam-break-64" }, {
       default: lane({ target_s: 0.004, exactSteps: 1, maxDt_s: 0.004, oracleSteps: 1, cpuOracle: false,
         methods: methods(["octree"], { octree: COARSE_ONLY_POWER_DAM_METHOD_PROFILE.overrides }),
         timeout_ms: 240_000,
@@ -1102,7 +1037,7 @@ const suiteList = [
           { id: "expected-grid", metric: "methods.octree.grid", operator: "equal", expected: [64, 64, 64] }] }),
     }),
   suite("large-power-dam-break", "20x-volume authored dam cold-start and one-step regression",
-    () => getScenePreset("large-power-dam-break").create(), {
+    { definitionId: "large-power-dam-break" }, {
       default: lane({ target_s: 0.004, exactSteps: 1, maxDt_s: 0.004, oracleSteps: 1, cpuOracle: false,
         methods: methods(["octree"], { octree: largePowerDamOverrides }), timeout_ms: 240_000,
         collect: { fieldStats: "final", spatialField: true, stabilityEnvelope: true, structuredValidation: true,
@@ -1122,7 +1057,7 @@ const suiteList = [
           { id: "large-power-volume-drift", metric: "methods.octree.stabilityEnvelope.maximumExactVolumeDrift", operator: "at-most", expected: 0.01 }] }),
     }),
   suite("large-power-hydrostatic", "20x-volume scene with a quarter-volume 1,024-cell sparse pool",
-    () => getScenePreset("large-power-hydrostatic").create(), {
+    { definitionId: "large-power-hydrostatic" }, {
       default: lane({ target_s: 0.96, exactSteps: 240, maxDt_s: 0.004, oracleSteps: 240,
         cpuOracle: false, methods: methods(["octree"], { octree: largePowerHydrostaticOverrides }),
         timeout_ms: 240_000,
@@ -1134,12 +1069,50 @@ const suiteList = [
           { id: "expected-grid", metric: "methods.octree.grid", operator: "equal", expected: [64, 20, 64] },
           { id: "large-hydrostatic-volume-drift", metric: "methods.octree.stabilityEnvelope.maximumExactVolumeDrift", operator: "at-most", expected: 1e-4 }] }),
     }),
+  // The Bet-4.2 lane. `deep-hydrostatic-interior-coarsening` is the whole
+  // reason this scene exists: 163,840 liquid cells that publish at most 61,440
+  // rows is 0.375 rows/cell, against `large-power-hydrostatic`'s 1.004. If the
+  // interior does not coarsen this rule fails by name instead of the run
+  // silently overflowing a 65,536-row arena, and the shallow lane cannot state
+  // the claim at all because every one of its cells is interface.
+  suite("deep-power-hydrostatic", "Deep 20x still tank: the interior-coarsening measurement lane",
+    { definitionId: "deep-power-hydrostatic" }, {
+      default: lane({ target_s: 0.004, exactSteps: 1, maxDt_s: 0.004, oracleSteps: 1, cpuOracle: false,
+        methods: methods(["octree"], { octree: deepPowerHydrostaticOverrides }), timeout_ms: 240_000,
+        collect: { fieldStats: "final", spatialField: true, stabilityEnvelope: true, structuredValidation: true,
+          globalFineGeneration: true, powerGenerationAudit: { everySteps: 1, log: false } },
+        diagnostics: [powerDiagnostics[0], powerDiagnostics[2]],
+        acceptance: [...powerAcceptance,
+          { id: "expected-grid", metric: "methods.octree.grid", operator: "equal", expected: [64, 48, 64] },
+          { id: "deep-hydrostatic-interior-coarsening", metric: "methods.octree.info.pressureRequiredRows",
+            operator: "at-most", expected: 61_440 },
+          { id: "deep-hydrostatic-row-arena-fits", metric: "methods.octree.info.pressureCapacityOverflow",
+            operator: "equal", expected: false }] }),
+      "runtime-240": lane({ id: "runtime-240", target_s: 0.96, exactSteps: 240,
+        maxDt_s: 0.004, oracleSteps: 240, cpuOracle: false,
+        // `MAXIMUM_WEBGPU_SMOKE_TIMEOUT_MS` is the ceiling the isolated runner
+        // enforces, so 240 deep steps must fit 240 s of wall clock: about
+        // 1 s/advance. Shorten a first capture with `--steps=N` on the
+        // benchmark lane rather than raising a safety envelope.
+        methods: methods(["octree"], { octree: deepPowerHydrostaticOverrides }), timeout_ms: 240_000,
+        collect: { fieldStats: "checkpoints", checkpointEvery_s: 0.12, spatialField: true,
+          stabilityEnvelope: true, structuredValidation: true, globalFineGeneration: true,
+          powerGenerationAudit: { everySteps: 1, log: false } },
+        diagnostics: exhaustivePowerDiagnostics(1e-4),
+        acceptance: [...powerAcceptance,
+          { id: "expected-grid", metric: "methods.octree.grid", operator: "equal", expected: [64, 48, 64] },
+          { id: "deep-hydrostatic-volume-drift", metric: "methods.octree.stabilityEnvelope.maximumExactVolumeDrift", operator: "at-most", expected: 1e-4 },
+          { id: "deep-hydrostatic-interior-coarsening", metric: "methods.octree.info.pressureRequiredRows",
+            operator: "at-most", expected: 61_440 },
+          { id: "deep-hydrostatic-row-arena-fits", metric: "methods.octree.info.pressureCapacityOverflow",
+            operator: "equal", expected: false }] }),
+    }),
   ...(["ceiling-slab-drop", "corner-brick-drop", "midair-brick-drop", "midair-corner-drop"] as const).map((id) => suite(id,
     id === "ceiling-slab-drop" ? "Seeded brick flush under the lid free-fall oracle"
       : id === "corner-brick-drop" ? "Seeded brick in a lid/corner seam free-fall oracle"
         : id === "midair-brick-drop" ? "Seeded brick touching no boundary: the zero-contact free-fall control"
           : "Seeded brick on two vertical walls clear of the lid: seam adhesion without ceiling contact",
-    () => getScenePreset(id).create(), {
+    { definitionId: id }, {
       default: lane({ target_s: 0.5, oracleSteps: 2, cpuOracle: false,
         methods: methods(["octree"], { octree: id === "ceiling-slab-drop"
           ? CEILING_DROP_METHOD_PROFILE.overrides : octreePowerOverrides }),
@@ -1183,7 +1156,7 @@ const suiteList = [
           diagnostics: [powerDiagnostics[2]], timeout_ms: 240_000 }),
       } : {}),
     })),
-  suite("power-hybrid-deep-ocean", "Deep-interior Bet-4 shipping work gate", powerHybridDeepOceanScene, {
+  suite("power-hybrid-deep-ocean", "Deep-interior Bet-4 shipping work gate", { definitionId: "power-hybrid-deep-ocean" }, {
     default: lane({ target_s: 0.004, exactSteps: 1, maxDt_s: 0.004, oracleSteps: 1, cpuOracle: false,
       methods: methods(["octree"], { octree: {
         maximumLeafSize: "32", interfaceRefinementBandCells: 1, globalFineLevelSetFactor: "1",
@@ -1191,7 +1164,7 @@ const suiteList = [
       collect: { fieldStats: "none" },
       timeout_ms: 240_000 }),
   }),
-  suite("ocean-seiche", "Long gravity wave crossing a wide deep tank", oceanScene, {
+  suite("ocean-seiche", "Long gravity wave crossing a wide deep tank", { definitionId: "ocean-seiche", variantId: "gpu-smoke" }, {
     default: lane({ target_s: 6, oracleSteps: 1, cpuOracle: false,
       methods: methods(["octree"], { octree: { maximumLeafSize: "32" } }),
       collect: { fieldStats: "checkpoints", checkpointEvery_s: 0.5, spatialField: true, stabilityEnvelope: true },

@@ -46,7 +46,48 @@ test("independent resource lanes do not overwrite one another", () => {
   assert.equal(resourceCapabilityUsable(readiness, "sparse-voxel-presentation"), false);
   assert.deepEqual(resourceInteractionGates(readiness, true), {
     shellInteractive: true,
-    viewportInteractive: false,
+    // The device is up, so the user may still look at the scene from anywhere;
+    // only the ray has to wait for something published to hit.
+    cameraInteractive: true,
+    pickingInteractive: false,
+    transportInteractive: false,
+  });
+});
+
+test("a presentation rebuild costs picking and nothing else", () => {
+  let readiness = reduceGPUResourceStatus(initialResourceReadiness(), {
+    state: "ready", label: "WebGPU renderer ready", adapter: "test",
+  });
+  readiness = reduceGPUResourceStatus(readiness, {
+    state: "ready", label: "Live SVO renderer ready", adapter: "test",
+    resource: svoPresentationResourcePlugin,
+  });
+  assert.equal(resourceInteractionGates(readiness, false).pickingInteractive, true);
+
+  // An ordinary pipeline recompile: the image is being replaced, the device is not.
+  readiness = reduceGPUResourceEvidence(readiness, undefined, {
+    state: "pending", failureReason: "pipeline-compiling",
+  });
+  assert.deepEqual(resourceInteractionGates(readiness, false), {
+    shellInteractive: true,
+    cameraInteractive: true,
+    pickingInteractive: false,
+    transportInteractive: false,
+  });
+});
+
+test("without a device nothing but the shell is interactive", () => {
+  // Sparse presentation is satisfied outright and the platform lane is still
+  // preparing: there is no image to orbit around, so the camera waits too.
+  const readiness = reduceGPUResourceEvidence(initialResourceReadiness(), undefined, {
+    state: "not-required",
+  });
+  assert.equal(resourceCapabilityUsable(readiness, "sparse-voxel-presentation"), true);
+  assert.equal(resourceCapabilityUsable(readiness, "renderer"), false);
+  assert.deepEqual(resourceInteractionGates(readiness, false), {
+    shellInteractive: true,
+    cameraInteractive: false,
+    pickingInteractive: false,
     transportInteractive: false,
   });
 });
@@ -126,7 +167,7 @@ test("a rejected frame revokes the previously usable scene generation", () => {
     state: "ready", label: "Live SVO renderer ready", adapter: "test",
     resource: svoPresentationResourcePlugin,
   });
-  assert.equal(resourceInteractionGates(readiness, false).viewportInteractive, true);
+  assert.equal(resourceInteractionGates(readiness, false).pickingInteractive, true);
 
   readiness = reduceGPUResourceEvidence(readiness, undefined, {
     state: "pending", failureReason: "missing-source",
@@ -134,7 +175,8 @@ test("a rejected frame revokes the previously usable scene generation", () => {
   assert.equal(resourceCapabilityUsable(readiness, "sparse-voxel-presentation"), false);
   assert.deepEqual(resourceInteractionGates(readiness, false), {
     shellInteractive: true,
-    viewportInteractive: false,
+    cameraInteractive: true,
+    pickingInteractive: false,
     transportInteractive: false,
   });
 });
@@ -173,7 +215,12 @@ test("the UI presents concurrent plugin work without treating all progress as a 
   const transport = readFileSync(new URL("../components/TransportBar.tsx", import.meta.url), "utf8");
   assert.match(fluidLab, /resourceActivities\(resourceReadiness\)/);
   assert.match(fluidLab, /resource-activity-tray/);
-  assert.match(fluidLab, /activities\.map/);
+  // The tray shows what each plugin declares it blocks; transport-blocking work
+  // is stated by the control it suspends, so it is absent from the tray.
+  assert.match(fluidLab, /resourceActivitiesFor\(resourceReadiness, "card"\)/);
+  assert.match(fluidLab, /resourceActivitiesFor\(resourceReadiness, "pill"\)/);
+  assert.doesNotMatch(fluidLab, /resourceActivitiesFor\(resourceReadiness, "transport-inline"\)/);
+  assert.match(transport, /resourceActivitiesFor\(resourceReadiness, "transport-inline"\)/);
   assert.match(fluidLab, /aria-label="Resource tasks"/);
   assert.doesNotMatch(fluidLab, /viewportBlocked|blockingActivity|backgroundActivities/);
   assert.doesNotMatch(fluidLab, /<section className="viewport-shell" aria-busy=/);
@@ -185,6 +232,25 @@ test("the UI presents concurrent plugin work without treating all progress as a 
   assert.match(viewport, /phase: "planning", completed: 0, total: 0/,
     "the solver handoff must not reuse the renderer's completed task count");
   assert.match(transport, /resourceInteractionGates\(resourceReadiness, !rendererOnlyScene\)/);
+});
+
+test("a rebuild cannot detach the viewport's own input", () => {
+  const viewport = readFileSync(new URL("../components/WebGPUViewport.tsx", import.meta.url), "utf8");
+  const catalog = readFileSync(new URL("../lib/editor-entity-catalog.ts", import.meta.url), "utf8");
+  for (const handler of ["onPointerDown={pointerDown}", "onPointerMove={pointerMove}",
+    "onPointerUp={pointerUp}", "onPointerCancel={pointerUp}"]) {
+    assert.ok(viewport.includes(handler),
+      `${handler} must be attached unconditionally: a compiling pipeline is not a reason to stop reading the pointer`);
+  }
+  assert.match(viewport, /onWheel=\{cameraInteractive \?/,
+    "zoom answers to the device, not to whether a generation is published");
+  assert.doesNotMatch(viewport, /scenePresentationAvailable/,
+    "the over-broad gate is gone; camera and picking are separate questions");
+  // Handles are document geometry, so only the click into the scene is gated.
+  assert.match(catalog, /export function entityAtRay\([\s\S]{0,200}?context\.pickingAvailable === false/);
+  assert.doesNotMatch(
+    catalog.slice(catalog.indexOf("export function surfacedEntities"), catalog.indexOf("export function entityAtRay")),
+    /pickingAvailable/);
 });
 
 test("WebGPU resource work is worker-owned and frame traffic is bounded", () => {

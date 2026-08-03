@@ -4,6 +4,7 @@ import { sceneryEntity } from "./editor-scenery";
 import { rigidBodyEntity } from "./editor-rigid-body";
 import { tankEntity } from "./editor-tank";
 import type { EditorSelection, EditorTool } from "./editor-tools";
+import { resourceInteractionGates } from "./resource-readiness";
 import { useDiagnosticsStore } from "./stores/diagnostics-store";
 import { displaySceneSnapshot } from "./stores/scene-draft-store";
 import type {
@@ -28,6 +29,16 @@ import type {
  * the body actually visible there. Clicks on the scene itself are ordered by
  * distance instead — see `entityAtRay` — because there the geometry already
  * says which is in front.
+ *
+ * Only one of the three entry points below is GPU-gated, and the split is the
+ * point: handles are **document** geometry, drawn from `context.scene`, so a
+ * selection keeps its gizmos through any rebuild — the entity is still there,
+ * the editor still knows where it is, and a drag still writes the document.
+ * A click on the *scene* is the exception, because it resolves against the
+ * image the renderer published: with no complete generation attached there is
+ * nothing behind the pixel to name, and answering from the CPU alone would
+ * select objects the user cannot see. Gating all three, as this file once did,
+ * made an ordinary pipeline recompile look like the editor had lost the scene.
  */
 export const EDITOR_ENTITIES: readonly EditorEntityDefinition[] = Object.freeze([
   rigidBodyEntity,
@@ -47,9 +58,10 @@ export const EDITOR_ENTITIES: readonly EditorEntityDefinition[] = Object.freeze(
 export function editorEntityContext(): EditorEntityContext {
   return {
     scene: displaySceneSnapshot(),
-    scenePresentationAvailable:
-      useDiagnosticsStore.getState().effectiveRendererStatus.state === "active"
-      || useDiagnosticsStore.getState().effectiveRendererStatus.state === "not-required",
+    // One definition of "a ray can hit something", shared with the viewport:
+    // the capability gate, not a second reading of the renderer's status enum.
+    pickingAvailable: resourceInteractionGates(
+      useDiagnosticsStore.getState().resourceReadiness, false).pickingInteractive,
     bodies: useDiagnosticsStore.getState().bodies.map((body) => ({
       id: body.description.id,
       position_m: body.position_m,
@@ -64,13 +76,15 @@ export function editorEntityContext(): EditorEntityContext {
  * Handles belong to the selection and to nothing else. An editor that showed
  * them for everything at once would be a scene covered in squares, and every
  * click meant for an object would land on some other object's corner instead.
+ *
+ * Not GPU-gated: these are drawn from the display scene, so they survive a
+ * rebuild along with the selection that owns them.
  */
 export function surfacedEntities(
   context: EditorEntityContext,
   tool: EditorTool,
   selection: EditorSelection | undefined,
 ): EditorEntity[] {
-  if (context.scenePresentationAvailable === false) return [];
   const entity = findEntity(context, selection);
   if (!entity) return [];
   const definition = EDITOR_ENTITIES.find((candidate) => candidate.kind === selection?.kind);
@@ -84,12 +98,16 @@ export function surfacedEntities(
  * behind the water, which is behind the props, which are behind whatever the
  * user just dropped, and the ray sorts them without anything having to declare
  * a priority.
+ *
+ * The one gated entry point: with no complete generation published there is no
+ * image the click can mean anything against, and a CPU answer would select
+ * objects that are not on screen.
  */
 export function entityAtRay(
   context: EditorEntityContext,
   ray: EditorRay,
 ): EntityRayHit | undefined {
-  if (context.scenePresentationAvailable === false) return undefined;
+  if (context.pickingAvailable === false) return undefined;
   let nearest: EntityRayHit | undefined;
   for (const definition of EDITOR_ENTITIES) {
     const hit = definition.pick?.(context, ray);
@@ -104,12 +122,14 @@ export function entityAtRay(
  * Separate from `surfacedEntities` because a selection outlives the tool that
  * made it: the flyout and the keyboard both have to resolve one after the mode
  * that drew its handles has been left.
+ *
+ * Not GPU-gated either: a selection names something in the document, and it
+ * outlives a presentation generation the same way it outlives a tool.
  */
 export function findEntity(
   context: EditorEntityContext,
   selection: EditorSelection | undefined,
 ): EditorEntity | undefined {
-  if (context.scenePresentationAvailable === false) return undefined;
   if (!selection) return undefined;
   return EDITOR_ENTITIES
     .find((definition) => definition.kind === selection.kind)

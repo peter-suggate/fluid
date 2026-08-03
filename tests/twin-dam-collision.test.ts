@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createTwinDamCollisionScene, getScenePreset } from "../lib/scenes";
+import { createTwinDamCollisionScene, getSceneDefinition, getScenePreset } from "../lib/scenes";
 import { initialFluidBrickContainsCell } from "../lib/initial-fluid";
 import { createTallCellLayout, tallCellSettings, type GPUQuality } from "../lib/tall-cell-grid";
 import { createSmokeScenario, isSmokeScenarioId } from "../tools/webgpu-smoke-scenarios";
@@ -115,7 +115,9 @@ test("the seeded reservoirs replace the analytic dam rather than adding to it", 
 test("the twin-dam scene is registered in the UI presets and the smoke harness", () => {
   const preset = getScenePreset("twin-dam-collision");
   assert.equal(preset.id, "twin-dam-collision", "the preset must exist rather than fall back to the default scene");
-  assert.equal(preset.group, "Interactive");
+  // What matters is that it is offered rather than disclosed: this is a scene to
+  // watch, not an oracle. Its shelf is a display label and may be re-cut.
+  assert.equal(getSceneDefinition("twin-dam-collision").audience, "explore");
   assert.ok(isSmokeScenarioId("twin-dam-collision"));
   const scenario = createSmokeScenario("twin-dam-collision");
   assert.deepEqual(validateScene(scenario.scene), []);

@@ -7,11 +7,29 @@ import type { MethodProfile } from "./methods";
 import { sceneDamBreakFractions } from "./initial-fluid";
 import { sceneWithEnvironment } from "./scenery-presets";
 import { withSceneryNodes } from "./scenery-edit";
+import {
+  defineScene,
+  sceneCardForDefinition,
+  sceneDocument,
+  type SceneCard,
+  type SceneDefinition,
+  type SceneVariant,
+} from "./scene-definition";
 
+/**
+ * The preset view of a catalog entry.
+ *
+ * Retained as a projection of `SceneDefinition` rather than a second source of
+ * truth: forty-eight modules import `scenePresets`/`getScenePreset`, and a
+ * scene's identity now lives in one place regardless of which shape a caller
+ * happens to want. `group` is the definition's shelf and is therefore a plain
+ * string — it used to be a closed union of four labels written for us, which is
+ * exactly the thing the audience model replaces.
+ */
 export interface ScenePreset {
   id: string;
   name: string;
-  group: "Interactive" | "Garden" | "Paper figures" | "Comparisons";
+  group: string;
   description: string;
   create(): SceneDescription;
   camera?: Partial<CameraState>;
@@ -83,6 +101,75 @@ export const LARGE_POWER_HYDROSTATIC_METHOD_PROFILE: MethodProfile = Object.free
     maximumLeafSize: "32",
     interfaceRefinementBandCells: 1,
     pressureRowCapacity: LARGE_POWER_HYDROSTATIC_PRESSURE_ROW_CAPACITY,
+  }),
+});
+
+/**
+ * Row reserve for the deep still-water lane (`deep-power-hydrostatic`).
+ *
+ * A CPU model of the shipped refinement rule — unit owners inside the three-
+ * cell closed-wall strips (`OCTREE_POWER_BOUNDARY_STRIP_MIN_CELLS`) and across
+ * the free surface, `interfaceRefinementBandCells + surfaceRefinementGrading-
+ * Layers * (size - 2)` of outward distance protection, then 2:1 balance —
+ * publishes 57,776 rows on this 64x48x64 tank: 50,944 unit, 6,048 size-2, 752
+ * size-4 and 32 size-8 leaves. That is 0.353 rows per liquid cell, against
+ * `large-power-hydrostatic`'s 1.004. The same model reproduces the ocean
+ * lane's measured 363,336-row frontier bank to within 5%, and it deliberately
+ * over-refines (it ignores that a leaf outside the published fine narrow band
+ * has no summary to refine against at all), so 57,776 is an upper bound.
+ *
+ * `planOctreePressureCapacity`'s own scene-shaped request here is 59,392
+ * (15,360 surface + 43,764 closed-wall strip + 48 coarse rows, 256-aligned) —
+ * only 2.8% above that bound, which is not enough for a settling transient.
+ * 65,536 is the smallest 256-aligned power of two clearing both by >= 1.10x.
+ * It is not an air-support allowance: above `domain / 5` rows
+ * `octreeAirSupportFootprintCapacity` returns the dense domain-sized support
+ * reserve (196,608) at any capacity in this range, which already covers the
+ * 64 x 4 x 64 = 16,384-cell air reach above the free surface. The GPU overflow
+ * receipt still rejects any generation that exceeds the reserve.
+ */
+export const DEEP_POWER_HYDROSTATIC_PRESSURE_ROW_CAPACITY = 65_536;
+
+/**
+ * Physical single-interface fine-band reserve for the same lane.
+ *
+ * The deep tank's fluid footprint *is* the tank, so the footprint-shaped
+ * default (`planFluidFootprintFineNarrowBandBrickCapacity`, which reserves all
+ * three exposed faces of the authored liquid box) asks for 152,064 of the
+ * 196,608 logical fine bricks — 77% of a dense lattice, for a scene whose
+ * interface is one horizontal plane. The physical bound is that plane:
+ * 64 x 64 = 4,096 fine bricks of interface area times the eleven-layer
+ * capacity band that `planFineLevelSetCapacityDilationBrickRings(4, 1, 4)`
+ * (five rings) implies is 45,056 resident bricks, and the planner's own 1.5x
+ * deformation safety rounds that to 67,584 — exactly
+ * `planGlobalFineNarrowBandBrickCapacity([64, 48, 64], 5).maximumResidentBricks`,
+ * which the scene test pins. Authoring it removes 2.25x of reserve rather than
+ * adding any.
+ */
+export const DEEP_POWER_HYDROSTATIC_FINE_BRICK_CAPACITY = 67_584;
+
+/** The deep still-water lane keeps every solver knob of the 20x still lane —
+ * maximum leaf 32, interface band 1, global fine factor 4 — so a measurement
+ * against `large-power-hydrostatic` differs only in scene geometry. */
+export const DEEP_POWER_HYDROSTATIC_METHOD_PROFILE: MethodProfile = Object.freeze({
+  ...LARGE_POWER_HYDROSTATIC_METHOD_PROFILE,
+  overrides: Object.freeze({
+    ...LARGE_POWER_HYDROSTATIC_METHOD_PROFILE.overrides,
+    pressureRowCapacity: DEEP_POWER_HYDROSTATIC_PRESSURE_ROW_CAPACITY,
+    globalFineLevelSetMaximumBricks: DEEP_POWER_HYDROSTATIC_FINE_BRICK_CAPACITY,
+  }),
+});
+
+/** The Bet-4 work verdict is about avoided machinery, not surface accuracy: a
+ * factor-1 surface keeps the frame's cost in the pressure path the census
+ * measures, and band 1 keeps the refined shell off the deep interior. */
+export const POWER_HYBRID_DEEP_OCEAN_METHOD_PROFILE: MethodProfile = Object.freeze({
+  methodId: "octree",
+  quality: "balanced",
+  overrides: Object.freeze({
+    maximumLeafSize: "32",
+    interfaceRefinementBandCells: 1,
+    globalFineLevelSetFactor: "1",
   }),
 });
 
@@ -317,6 +404,86 @@ export function createLargePowerHydrostaticScene(): SceneDescription {
   delete scene.fluid.initialBrickSeeds_m;
   delete scene.fluid.initialBrickSeedsAdditive;
   delete scene.fluid.inflow;
+  return scene;
+}
+
+/**
+ * The 20x still-water tank made deep: the only lane that can express Bet 4.2.
+ *
+ * `large-power-hydrostatic` is one finest cell deep, so every one of its liquid
+ * cells touches the floor *and* the free surface. It publishes 1.004 rows per
+ * liquid cell and zero `regularInterior` rows, which makes the paper's Section
+ * 8 interior-coarsening cost model unmeasurable on it — a hybrid discretization
+ * that skips the power machinery on regular interior rows has nothing to skip.
+ * This scene changes exactly two authored numbers: tank height 1.0 -> 2.4 m and
+ * fill 1/80 -> 5/6. Footprint (3.2 x 3.2 m), lattice (0.05 m finest cell, 8-cell
+ * bricks), closed lid, free-slip walls, zero surface tension and the 0.004 s
+ * step are the 20x family's, unchanged, so the two lanes differ only in depth.
+ *
+ * Geometry, in finest cells. The domain is 64 x 48 x 64 = 196,608 and 5/6 of 48
+ * puts the flat free surface exactly on the y = 40 cell boundary, so the liquid
+ * is 64 x 40 x 64 = 163,840 cells (2.0 m of water). Classify those against the
+ * two reaches the solver actually uses:
+ *
+ *   - closed-wall shell: `OCTREE_POWER_BOUNDARY_STRIP_MIN_CELLS` = 3 cells
+ *     inside each of the four vertical walls and the floor are split to unit
+ *     owners (the lid strip is dry).
+ *   - free-surface band: the Section 5 transport band is
+ *     `max(2, band) * fineFactor` = 8 fine cells = 2 coarse cells, plus one
+ *     extension layer and one interpolation halo — the same reach = 4 the
+ *     large-hydro air-support budget is derived from.
+ *
+ *   interior     = (64 - 2*3) * (40 - 3 - 4) * (64 - 2*3)
+ *                = 58 * 33 * 58            = 111,012 cells = 67.8%
+ *   surface band = 64 * 4 * 64             =  16,384 cells = 10.0%
+ *   wall-only    = 163,840 - 111,012 - 16,384 = 36,444 cells = 22.2%
+ *
+ * Two thirds is the target, and 40 cells is close to the shallowest depth that
+ * reaches it: the shell is 6 cells wide horizontally and 7 cells tall, so the
+ * interior fraction is (1 - 6/64)^2 * (1 - 7/H) and drops below 2/3 for any
+ * H < 38. There is no cheap deep scene — that is the finding, not a shortcut
+ * being missed. Below the shell the octree coarsens: the CPU leaf model behind
+ * `DEEP_POWER_HYDROSTATIC_PRESSURE_ROW_CAPACITY` puts 112,896 of the 163,840
+ * liquid cells (69%) inside 6,832 coarse leaves, i.e. under 0.36 rows per cell.
+ */
+export function createDeepPowerHydrostaticScene(): SceneDescription {
+  const scene = createLargePowerHydrostaticScene();
+  scene.sceneId = "deep-power-hydrostatic";
+  scene.container = {
+    ...scene.container,
+    height_m: 2.4,
+    // 5/6 of 48 cells is exactly 40; the nearest cell centres are 0.5 cells
+    // clear on both sides, so the wet layer count cannot round either way.
+    fillFraction: 5 / 6,
+  };
+  // A full-footprint tank fill, not the 20x lane's corner reservoir: the whole
+  // point is that no liquid cell is near a lateral free surface.
+  scene.fluid.initialCondition = "tank-fill";
+  delete scene.fluid.initialDamBreakDimensions_m;
+  return scene;
+}
+
+/**
+ * Bet-4 work-verdict scene: a genuinely volumetric pool, but bounded enough to
+ * run as a one-step shipping-path gate. The topology-aligned 64x64x48 lattice
+ * has 56 wet layers, so the regular deep interior dominates the free-surface
+ * and tank-wall bands. It deliberately has no wave seed: D4 correctness remains
+ * the separate symmetric-expansion gate, while this scene measures only avoided
+ * machinery.
+ */
+export function createPowerHybridDeepOceanScene(): SceneDescription {
+  const scene = cloneScene(defaultScene);
+  scene.sceneId = "power-hybrid-deep-ocean";
+  scene.rigidBodies = [];
+  scene.container = { ...scene.container, width_m: 3.2, height_m: 3.2, depth_m: 2.4,
+    fillFraction: 0.875, top: "closed", fluidWallMode: "no-slip" };
+  scene.voxelDomain = { finestCellSize_m: 0.05, brickSize_cells: 8 };
+  scene.fluid.initialCondition = "tank-fill";
+  scene.fluid.surfaceTension_N_m = 0;
+  delete scene.fluid.initialBrickSeeds_m;
+  delete scene.fluid.initialBrickSeedsAdditive;
+  delete scene.fluid.inflow;
+  scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 0.004;
   return scene;
 }
 
@@ -608,259 +775,216 @@ export function createGardenSvoLightingScene(): SceneDescription {
   }]);
 }
 
-const authoredScenePresets: ReadonlyArray<ScenePreset> = [
-  {
+/**
+ * The delta a WebGPU smoke lane runs the scene with, declared beside the scene
+ * it is a delta *of*.
+ *
+ * Every one of these existed already, as a forked factory in the smoke catalog
+ * that rebuilt the scene from `defaultScene` under the catalog's own name — and
+ * so shipped with no scenery, and drifted apart from the scene it claimed to
+ * be. Written here the difference is the only thing stated, a test can pin it
+ * field by field, and the environment still arrives from the definition.
+ *
+ * `build` hands out a fresh document, so an `apply` mutates it the way every
+ * factory above does.
+ */
+function smokeVariant(description: string, apply: (scene: SceneDescription) => void): SceneVariant {
+  return { id: "gpu-smoke", description, apply: (scene) => { apply(scene); return scene; } };
+}
+
+/** Pin the outer step: a lane's `exactSteps`/`simulatedTime_s` contract is only
+ * exact when the document cannot take a larger step than its fixed one. */
+function pinStep(scene: SceneDescription, dt_s: number): void {
+  scene.numerics.fixedDt_s = scene.numerics.maxDt_s = dt_s;
+}
+
+/**
+ * The scene catalog.
+ *
+ * One list, one identity per scene, one accessor (`sceneDocument`). Order is
+ * the order the library offers them within a shelf, and the first entry is what
+ * a cold load opens on.
+ *
+ * `audience` is the load-bearing new field. "Comparisons" used to hold thirteen
+ * analytic oracles beside the three paper figures, and a `<select>` showed them
+ * all to whoever arrived — a third of the product's first impression was
+ * ceiling-drop adhesion tests. They are how the physics is trusted and they
+ * stay; they are disclosed rather than offered.
+ */
+export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
+  defineScene({
     id: "water-box-dam-break",
     name: "Water box · dam break",
-    group: "Interactive",
-    description: "A collapsing water column. Drag bodies in from the viewport tray.",
-    background: "default",
-    create: () => {
+    blurb: "A collapsing water column. Drop bodies in and watch them take the wave.",
+    audience: "explore",
+    shelf: "Tanks",
+    environment: "default",
+    build: () => {
       const scene = cloneScene(defaultScene);
       scene.rigidBodies = [];
       return scene;
-    }
-  },
-  {
+    },
+  }),
+  defineScene({
     id: "water-box-tank-fill",
     name: "Water box · settled tank",
-    group: "Interactive",
-    description: "The same container starting from a settled fill; drop bodies into calm water.",
-    background: "bathhouse",
-    create: () => {
+    blurb: "The same container starting from a settled fill; drop bodies into calm water.",
+    audience: "explore",
+    shelf: "Tanks",
+    environment: "bathhouse",
+    build: () => {
       const scene = cloneScene(defaultScene);
       scene.sceneId = "interactive-water-box-settled";
       scene.fluid.initialCondition = "tank-fill";
       return scene;
-    }
-  },
-  {
+    },
+    variants: {
+      "gpu-smoke": smokeVariant(
+        "Hydrostatic equilibrium alone: no bodies to stir it, no capillary force, "
+        + "a 70% fill deep enough to hold a still interior, and a pinned 1/120 s step.",
+        (scene) => {
+          scene.rigidBodies = [];
+          scene.container.fillFraction = 0.7;
+          scene.fluid.surfaceTension_N_m = 0;
+          pinStep(scene, 1 / 120);
+        }),
+    },
+  }),
+  defineScene({
     id: "twin-dam-collision",
     name: "Twin dams · corner collision",
-    group: "Interactive",
-    description: "A wide tank with a reservoir on each diagonally opposite floor corner. Both release at once, run 1.2 m down the long axis, and meet mid-tank at an angle.",
-    background: "default",
-    create: createTwinDamCollisionScene,
-    camera: { azimuth_rad: 0.5, elevation_rad: 0.32, distance_m: 4.1, target_m: { x: 0, y: 0.2, z: 0 } }
-  },
-  {
+    blurb: "A wide tank with a reservoir on each diagonally opposite floor corner. Both release at once, run 1.2 m down the long axis, and meet mid-tank at an angle.",
+    audience: "explore",
+    shelf: "Tanks",
+    environment: "default",
+    build: createTwinDamCollisionScene,
+    camera: { azimuth_rad: 0.5, elevation_rad: 0.32, distance_m: 4.1, target_m: { x: 0, y: 0.2, z: 0 } },
+    variants: {
+      "gpu-smoke": smokeVariant(
+        "The collision measured without capillary force, at the 4 ms step the oblique "
+        + "front needs to stay inside the lane's component-CFL bound.",
+        (scene) => {
+          scene.fluid.surfaceTension_N_m = 0;
+          pinStep(scene, 0.004);
+        }),
+    },
+  }),
+  defineScene({
+    id: "ocean-seiche",
+    name: "Ocean · rolling wave",
+    blurb: "A broad 8 m tank of deep calm water; a raised slab along one wall releases a long wave that ripples across and reflects. With the octree method, set Maximum leaf to 32³ to watch the deep interior coarsen into 16³/32³ pressure cells.",
+    audience: "explore",
+    shelf: "Open water",
+    environment: "research-station",
+    build: createOceanSeicheScene,
+    camera: { azimuth_rad: 0.35, elevation_rad: 0.32, distance_m: 9.0, target_m: { x: 0, y: 1.1, z: 0 } },
+    variants: {
+      "gpu-smoke": smokeVariant(
+        "A 5 ms outer step: the wave-profile lane observes six seconds, and the "
+        + "browser's 8 ms cap would let the 4.2 m/s front cross more than a cell a step.",
+        (scene) => pinStep(scene, 0.005)),
+    },
+  }),
+  defineScene({
     id: "garden-pond",
     name: "Garden pond · still water",
-    group: "Garden",
-    description: "A white-clay pond settled to its waterline, ringed by cloud trees and oversized mushrooms. A cork ball bobs over the deep end; stepping stones cross the beach shelf.",
-    create: createGardenPondScene,
+    blurb: "A white-clay pond settled to its waterline, ringed by cloud trees and oversized mushrooms. A cork ball bobs over the deep end; stepping stones cross the beach shelf.",
+    audience: "explore",
+    shelf: "Garden",
+    environment: "garden",
+    build: createGardenPondScene,
     camera: gardenCamera,
-    background: "garden"
-  },
-  {
-    id: "garden-svo-lighting",
-    name: "Garden · SVO lighting study",
-    group: "Garden",
-    description: "A fluid-free dusk garden lit by a warm lamppost for validating SVO mip-cone lighting, soft shadows, and ambient occlusion without initializing simulation authority.",
-    create: createGardenSvoLightingScene,
-    camera: gardenCamera,
-    background: "garden"
-  },
-  {
+    variants: {
+      "gpu-smoke": smokeVariant(
+        "Rest on terrain with nothing floating in it: the cork ball and stepping stones "
+        + "are removed so a residual speed is the pond's, not a body's, with no capillary "
+        + "force and a pinned 1/120 s step.",
+        (scene) => {
+          scene.rigidBodies = [];
+          scene.fluid.surfaceTension_N_m = 0;
+          pinStep(scene, 1 / 120);
+        }),
+    },
+  }),
+  defineScene({
     id: "garden-dam-break",
     name: "Garden pond · dam break",
-    group: "Garden",
-    description: "One resident fluid brick releases on the upper lawn, vacates its source region, and activates neighbouring bricks as it washes into the pond.",
-    create: () => {
+    blurb: "One resident fluid brick releases on the upper lawn, vacates its source region, and activates neighbouring bricks as it washes into the pond.",
+    audience: "explore",
+    shelf: "Garden",
+    environment: "garden",
+    build: () => {
       const scene = applyGardenPool(createPaperScenario("dam-break-boxes"), { fillFraction: 0.16 });
       scene.sceneId = "garden-pond-dam-break";
       scene.fluid.initialBrickSeeds_m = [{ ...GARDEN_DAM_BRICK_SEED_M }];
       return scene;
     },
     camera: gardenCamera,
-    background: "garden"
-  },
-  {
+    variants: {
+      "gpu-smoke": smokeVariant(
+        "The brick-migration lane attributes residency to the water alone, so the paper "
+        + "box stack this scene inherits is removed; no-slip banks and a 4 ms step keep "
+        + "the released body's arrival where the hook's core-brick counts were measured.",
+        (scene) => {
+          scene.rigidBodies = [];
+          scene.container.fluidWallMode = "no-slip";
+          pinStep(scene, 0.004);
+        }),
+    },
+  }),
+  defineScene({
     id: "garden-hose",
     name: "Garden pond · hose fill",
-    group: "Garden",
-    description: "The pond starts as a puddle in the deep end and a hose arcs water in until the banks fill to the waterline.",
-    create: () => {
+    blurb: "The pond starts as a puddle in the deep end and a hose arcs water in until the banks fill to the waterline.",
+    audience: "explore",
+    shelf: "Garden",
+    environment: "garden",
+    build: () => {
       const scene = applyGardenPool(createPaperScenario("hose-tank"), { fillFraction: 0.08 });
       scene.sceneId = "garden-pond-hose-fill";
       if (scene.fluid.inflow) scene.fluid.inflow.end_s = 30;
       return scene;
     },
     camera: gardenCamera,
-    background: "garden"
-  },
-  {
+  }),
+  defineScene({
     id: "hose-tank",
     name: "Hose-filled tank",
-    group: "Paper figures",
-    description: "Figure 3 · a continuous jet fills a shallow tank.",
-    background: "conservatory",
-    create: () => createPaperScenario("hose-tank"),
-    camera: paperCamera
-  },
-  {
+    blurb: "Figure 3 · a continuous jet fills a shallow tank.",
+    audience: "study",
+    shelf: "Paper figures",
+    environment: "conservatory",
+    build: () => createPaperScenario("hose-tank"),
+    camera: paperCamera,
+  }),
+  defineScene({
     id: "dam-break-boxes",
     name: "Dam break + box stack",
-    group: "Paper figures",
-    description: "Figure 4 · a dam break strikes a stack of rigid boxes.",
-    background: "concrete-gallery",
-    create: () => createPaperScenario("dam-break-boxes"),
-    camera: paperCamera
-  },
-  {
+    blurb: "Figure 4 · a dam break strikes a stack of rigid boxes.",
+    audience: "study",
+    shelf: "Paper figures",
+    environment: "concrete-gallery",
+    build: () => createPaperScenario("dam-break-boxes"),
+    camera: paperCamera,
+  }),
+  defineScene({
     id: "sphere-jet",
     name: "Jet past sphere",
-    group: "Paper figures",
-    description: "Figure 6 · an inlet jet flows past a static sphere.",
-    background: "night-lab",
-    create: () => createPaperScenario("sphere-jet"),
-    camera: paperCamera
-  },
-  {
-    id: "brick-quad-dam-break",
-    name: "Brick quad · dam break",
-    group: "Comparisons",
-    description: "A 2x2 four-brick tank: one brick quadrant of water releases and crosses every brick boundary, exercising cross-brick transport, residency activation, and seam quality.",
-    background: "default",
-    create: createBrickQuadDamBreakScene,
-    camera: { distance_m: 1.9, target_m: { x: 0, y: 0.2, z: 0 } }
-  },
-  {
-    id: "hydrostatic-power-two-level",
-    name: "Octree · tiny hydrostatic",
-    group: "Comparisons",
-    description: "A 16³ settled tank for the first power-diagram oracle. Maximum leaf 32³ matches every other authored scene while interface band 3 keeps the surface support explicit.",
-    background: "default",
-    methodProfile: POWER_VALIDATION_METHOD_PROFILE,
-    create: createTinyHydrostaticScene,
-    camera: { distance_m: 1.85, target_m: { x: 0, y: 0.35, z: 0 } }
-  },
-  {
-    id: "hydrostatic-power-large-offset",
-    name: "Octree · larger hydrostatic",
-    group: "Comparisons",
-    description: "A 32x24x16 settled tank with a cell-cut free surface. Maximum leaf 32³ matches every other authored scene while exercising a larger adaptive pressure layout than the tiny oracle.",
-    background: "default",
-    methodProfile: LARGE_HYDROSTATIC_POWER_METHOD_PROFILE,
-    create: createLargeHydrostaticScene,
-    camera: { distance_m: 2.75, target_m: { x: 0, y: 0.5, z: 0 } }
-  },
-  {
-    id: "minimal-power-dam-break",
-    name: "Octree · minimal dam break",
-    group: "Comparisons",
-    description: "The analytic 12.5%-volume dam initializer collapses inside a 16³ tank, providing the smallest dynamic authoritative power-projection scene.",
-    background: "default",
-    methodProfile: POWER_VALIDATION_METHOD_PROFILE,
-    create: createMinimalPowerDamBreakScene,
-    camera: { distance_m: 1.9, target_m: { x: 0, y: 0.3, z: 0 } }
-  },
-  {
-    id: "symmetric-expansion",
-    name: "Octree · symmetric expansion",
-    group: "Comparisons",
-    description: "One exact central 2×1×2-brick water body collapses across the minimum dyadic 32×16×32 tank. Its factor-1 Section 5 surface authority avoids the sparse JFA approximation, while Dawn checks D4 symmetry of volume, velocity, pressure, topology, and four-wall contact after every step.",
-    background: "default",
-    methodProfile: COARSE_ONLY_POWER_DAM_METHOD_PROFILE,
-    create: createSymmetricExpansionScene,
-    camera: { distance_m: 2.5, target_m: { x: 0, y: 0.25, z: 0 } }
-  },
-  {
-    id: "minimal-power-dam-break-32",
-    name: "Octree · minimal dam break 32³",
-    group: "Comparisons",
-    description: "The same 0.8 m analytic mini dam at 0.025 m resolution. Surface tracking stays coarse-only (1×), while size-16 pressure leaves and three grading layers reveal progressive octree refinement around the interface.",
-    background: "default",
-    methodProfile: COARSE_ONLY_POWER_DAM_METHOD_PROFILE,
-    create: createMinimalPowerDamBreak32Scene,
-    camera: { distance_m: 1.9, target_m: { x: 0, y: 0.3, z: 0 } }
-  },
-  {
-    id: "minimal-power-dam-break-64",
-    name: "Octree · minimal dam break 64³",
-    group: "Comparisons",
-    description: "The same 0.8 m analytic mini dam at 0.0125 m resolution. Surface tracking stays coarse-only (1×), while size-16 pressure leaves and three grading layers reveal progressive octree refinement around the interface.",
-    background: "default",
-    methodProfile: COARSE_ONLY_POWER_DAM_METHOD_PROFILE,
-    create: createMinimalPowerDamBreak64Scene,
-    camera: { distance_m: 1.9, target_m: { x: 0, y: 0.3, z: 0 } }
-  },
-  {
-    id: "large-power-dam-break",
-    name: "Octree · 20× dam break",
-    group: "Comparisons",
-    description: "The mini dam break's exact water block in a tank with 20× the volume: 4× longer, 4× wider, and 25% taller, using maximum leaf 32³ and a band-1 interface.",
-    background: "default",
-    methodProfile: LARGE_POWER_DAM_METHOD_PROFILE,
-    create: createLargePowerDamBreakScene,
-    camera: { distance_m: 6.4, target_m: { x: 0, y: 0.45, z: 0 } }
-  },
-  {
-    id: "large-power-hydrostatic",
-    name: "Octree · 20× hydrostatic",
-    group: "Comparisons",
-    description: "The 20× dam tank with a representable one-cell-deep 32×32 sparse pool (1,024 finest-cell volumes), completing the large-scene/minimal-liquid benchmark cell.",
-    background: "default",
-    methodProfile: LARGE_POWER_HYDROSTATIC_METHOD_PROFILE,
-    create: createLargePowerHydrostaticScene,
-    camera: { distance_m: 6.4, target_m: { x: 0, y: 0.2, z: 0 } }
-  },
-  {
-    id: "ceiling-slab-drop",
-    name: "Octree · ceiling drop oracle",
-    group: "Comparisons",
-    description: "One 8³ fluid brick seeded flush under the closed lid, touching nothing else. The exact answer is free fall (y = y₀ − gt²/2, impact ≈0.29 s); any hesitation is wall adhesion.",
-    background: "default",
-    methodProfile: CEILING_DROP_METHOD_PROFILE,
-    create: createCeilingSlabDropScene,
-    camera: { distance_m: 2.4, target_m: { x: 0, y: 0.4, z: 0 } }
-  },
-  {
-    id: "corner-brick-drop",
-    name: "Octree · corner drop oracle",
-    group: "Comparisons",
-    description: "One 8³ fluid brick seeded into a top corner: lid, two walls, and their vertical edge seam. Frictionless walls exert only normal force, so the exact answer is still free fall.",
-    background: "default",
-    methodProfile: POWER_VALIDATION_METHOD_PROFILE,
-    create: createCornerBrickDropScene,
-    camera: { distance_m: 2.4, target_m: { x: 0, y: 0.4, z: 0 } }
-  },
-  {
-    id: "midair-brick-drop",
-    name: "Octree · mid-air drop control",
-    group: "Comparisons",
-    description: "The same 8³ brick hanging in open space, touching no boundary at all. The zero-contact control: whatever it deviates from free fall is the scheme's own transient, not adhesion.",
-    background: "default",
-    methodProfile: POWER_VALIDATION_METHOD_PROFILE,
-    create: createMidairBrickDropScene,
-    camera: { distance_m: 3, target_m: { x: 0, y: 0.6, z: 0 } }
-  },
-  {
-    id: "midair-corner-drop",
-    name: "Octree · mid-air corner oracle",
-    group: "Comparisons",
-    description: "The same 8³ brick against two vertical walls and their seam, but clear of the lid. Gravity is tangential to both walls, so free-slip walls cannot slow it: this isolates seam adhesion from ceiling adhesion.",
-    background: "default",
-    methodProfile: POWER_VALIDATION_METHOD_PROFILE,
-    create: createMidairCornerDropScene,
-    camera: { distance_m: 3, target_m: { x: 0, y: 0.6, z: 0 } }
-  },
-  {
-    id: "ocean-seiche",
-    name: "Ocean · rolling wave",
-    group: "Comparisons",
-    description: "A broad 8 m tank of deep calm water; a raised slab along one wall releases a long wave that ripples across and reflects. With the octree method, set Maximum leaf to 32³ to watch the deep interior coarsen into 16³/32³ pressure cells.",
-    background: "research-station",
-    create: createOceanSeicheScene,
-    camera: { azimuth_rad: 0.35, elevation_rad: 0.32, distance_m: 9.0, target_m: { x: 0, y: 1.1, z: 0 } }
-  },
-  {
+    blurb: "Figure 6 · an inlet jet flows past a static sphere.",
+    audience: "study",
+    shelf: "Paper figures",
+    environment: "night-lab",
+    build: () => createPaperScenario("sphere-jet"),
+    camera: paperCamera,
+  }),
+  defineScene({
     id: "deep-water-ab",
     name: "Deep-water A/B",
-    group: "Comparisons",
-    description: "20 m tank at 80% fill, 1/30 s paper step, σ = 0 · isolates the grid method.",
-    background: "research-station",
-    create: () => {
+    blurb: "20 m tank at 80% fill, 1/30 s paper step, σ = 0 · isolates the grid method.",
+    audience: "study",
+    shelf: "Method comparisons",
+    environment: "research-station",
+    build: () => {
       const scene = cloneScene(defaultScene);
       scene.sceneId = "deep-water-grid-comparison";
       scene.container.height_m = 20;
@@ -874,26 +998,237 @@ const authoredScenePresets: ReadonlyArray<ScenePreset> = [
       scene.numerics.maxDt_s = scene.numerics.fixedDt_s * DEFAULT_GPU_CPU_TIMESTEP_RATIO;
       scene.rigidBodies = [];
       return scene;
-    }
-  }
-];
+    },
+    variants: {
+      "gpu-smoke": smokeVariant(
+        "The equilibrium lane runs one paper step per outer step: the browser's 4x GPU "
+        + "cap would let a 20 m column settle four times as far between observations.",
+        (scene) => pinStep(scene, scene.numerics.fixedDt_s)),
+    },
+  }),
+  defineScene({
+    id: "garden-svo-lighting",
+    name: "Garden · SVO lighting study",
+    blurb: "A fluid-free dusk garden lit by a warm lamppost for validating SVO mip-cone lighting, soft shadows, and ambient occlusion without initializing simulation authority.",
+    audience: "study",
+    shelf: "Rendering",
+    environment: "garden",
+    build: createGardenSvoLightingScene,
+    camera: gardenCamera,
+  }),
+  defineScene({
+    id: "brick-quad-dam-break",
+    name: "Brick quad · dam break",
+    blurb: "A 2x2 four-brick tank: one brick quadrant of water releases and crosses every brick boundary, exercising cross-brick transport, residency activation, and seam quality.",
+    audience: "validation",
+    shelf: "Brick residency",
+    environment: "default",
+    build: createBrickQuadDamBreakScene,
+    camera: { distance_m: 1.9, target_m: { x: 0, y: 0.2, z: 0 } },
+    variants: {
+      "gpu-smoke": smokeVariant(
+        "Seam quality is the measurement, so capillary force is removed and the outer "
+        + "step is pinned to 4 ms: a doubled cap moves the front across a brick boundary "
+        + "in fewer steps than the coverage checkpoints resolve.",
+        (scene) => {
+          scene.fluid.surfaceTension_N_m = 0;
+          pinStep(scene, 0.004);
+        }),
+    },
+  }),
+  defineScene({
+    id: "hydrostatic-power-two-level",
+    name: "Octree · tiny hydrostatic",
+    blurb: "A 16³ settled tank for the first power-diagram oracle. Maximum leaf 32³ matches every other authored scene while interface band 3 keeps the surface support explicit.",
+    audience: "validation",
+    shelf: "Hydrostatic oracles",
+    environment: "default",
+    methodProfile: POWER_VALIDATION_METHOD_PROFILE,
+    build: createTinyHydrostaticScene,
+    camera: { distance_m: 1.85, target_m: { x: 0, y: 0.35, z: 0 } },
+  }),
+  defineScene({
+    id: "hydrostatic-power-large-offset",
+    name: "Octree · larger hydrostatic",
+    blurb: "A 32x24x16 settled tank with a cell-cut free surface. Maximum leaf 32³ matches every other authored scene while exercising a larger adaptive pressure layout than the tiny oracle.",
+    audience: "validation",
+    shelf: "Hydrostatic oracles",
+    environment: "default",
+    methodProfile: LARGE_HYDROSTATIC_POWER_METHOD_PROFILE,
+    build: createLargeHydrostaticScene,
+    camera: { distance_m: 2.75, target_m: { x: 0, y: 0.5, z: 0 } },
+  }),
+  defineScene({
+    id: "large-power-hydrostatic",
+    name: "Octree · 20× hydrostatic",
+    blurb: "The 20× dam tank with a representable one-cell-deep 32×32 sparse pool (1,024 finest-cell volumes), completing the large-scene/minimal-liquid benchmark cell.",
+    audience: "validation",
+    shelf: "Hydrostatic oracles",
+    environment: "default",
+    methodProfile: LARGE_POWER_HYDROSTATIC_METHOD_PROFILE,
+    build: createLargePowerHydrostaticScene,
+    camera: { distance_m: 6.4, target_m: { x: 0, y: 0.2, z: 0 } },
+  }),
+  defineScene({
+    id: "deep-power-hydrostatic",
+    name: "Octree · deep hydrostatic",
+    blurb: "The 20× still tank filled 2 m deep (64×48×64, 163,840 liquid cells). 67.8% of its liquid is interior — away from every wall strip and the surface band — so it is the only authored lane on which interior coarsening, and the Section 8 hybrid cost model, can be measured at all.",
+    audience: "validation",
+    shelf: "Hydrostatic oracles",
+    environment: "default",
+    methodProfile: DEEP_POWER_HYDROSTATIC_METHOD_PROFILE,
+    build: createDeepPowerHydrostaticScene,
+    camera: { distance_m: 7.4, target_m: { x: 0, y: 1, z: 0 } },
+  }),
+  defineScene({
+    id: "power-hybrid-deep-ocean",
+    name: "Octree · hybrid deep ocean",
+    blurb: "A 64×64×48 pool filled to 56 wet layers, with no wave seed at all. The regular deep interior dominates the free-surface and wall bands, which is what makes one step of it a verdict on the machinery a hybrid discretization avoids rather than on surface accuracy.",
+    audience: "validation",
+    shelf: "Hydrostatic oracles",
+    environment: "default",
+    methodProfile: POWER_HYBRID_DEEP_OCEAN_METHOD_PROFILE,
+    build: createPowerHybridDeepOceanScene,
+    camera: { distance_m: 7.4, target_m: { x: 0, y: 1.4, z: 0 } },
+  }),
+  defineScene({
+    id: "minimal-power-dam-break",
+    name: "Octree · minimal dam break",
+    blurb: "The analytic 12.5%-volume dam initializer collapses inside a 16³ tank, providing the smallest dynamic authoritative power-projection scene.",
+    audience: "validation",
+    shelf: "Dam-break ladder",
+    environment: "default",
+    methodProfile: POWER_VALIDATION_METHOD_PROFILE,
+    build: createMinimalPowerDamBreakScene,
+    camera: { distance_m: 1.9, target_m: { x: 0, y: 0.3, z: 0 } },
+  }),
+  defineScene({
+    id: "minimal-power-dam-break-32",
+    name: "Octree · minimal dam break 32³",
+    blurb: "The same 0.8 m analytic mini dam at 0.025 m resolution. Surface tracking stays coarse-only (1×), while size-16 pressure leaves and three grading layers reveal progressive octree refinement around the interface.",
+    audience: "validation",
+    shelf: "Dam-break ladder",
+    environment: "default",
+    methodProfile: COARSE_ONLY_POWER_DAM_METHOD_PROFILE,
+    build: createMinimalPowerDamBreak32Scene,
+    camera: { distance_m: 1.9, target_m: { x: 0, y: 0.3, z: 0 } },
+  }),
+  defineScene({
+    id: "minimal-power-dam-break-64",
+    name: "Octree · minimal dam break 64³",
+    blurb: "The same 0.8 m analytic mini dam at 0.0125 m resolution. Surface tracking stays coarse-only (1×), while size-16 pressure leaves and three grading layers reveal progressive octree refinement around the interface.",
+    audience: "validation",
+    shelf: "Dam-break ladder",
+    environment: "default",
+    methodProfile: COARSE_ONLY_POWER_DAM_METHOD_PROFILE,
+    build: createMinimalPowerDamBreak64Scene,
+    camera: { distance_m: 1.9, target_m: { x: 0, y: 0.3, z: 0 } },
+  }),
+  defineScene({
+    id: "large-power-dam-break",
+    name: "Octree · 20× dam break",
+    blurb: "The mini dam break's exact water block in a tank with 20× the volume: 4× longer, 4× wider, and 25% taller, using maximum leaf 32³ and a band-1 interface.",
+    audience: "validation",
+    shelf: "Dam-break ladder",
+    environment: "default",
+    methodProfile: LARGE_POWER_DAM_METHOD_PROFILE,
+    build: createLargePowerDamBreakScene,
+    camera: { distance_m: 6.4, target_m: { x: 0, y: 0.45, z: 0 } },
+  }),
+  defineScene({
+    id: "symmetric-expansion",
+    name: "Octree · symmetric expansion",
+    blurb: "One exact central 2×1×2-brick water body collapses across the minimum dyadic 32×16×32 tank. Its factor-1 Section 5 surface authority avoids the sparse JFA approximation, while Dawn checks D4 symmetry of volume, velocity, pressure, topology, and four-wall contact after every step.",
+    audience: "validation",
+    shelf: "Symmetry",
+    environment: "default",
+    methodProfile: COARSE_ONLY_POWER_DAM_METHOD_PROFILE,
+    build: createSymmetricExpansionScene,
+    camera: { distance_m: 2.5, target_m: { x: 0, y: 0.25, z: 0 } },
+  }),
+  defineScene({
+    id: "ceiling-slab-drop",
+    name: "Octree · ceiling drop oracle",
+    blurb: "One 8³ fluid brick seeded flush under the closed lid, touching nothing else. The exact answer is free fall (y = y₀ − gt²/2, impact ≈0.29 s); any hesitation is wall adhesion.",
+    audience: "validation",
+    shelf: "Free-fall contact",
+    environment: "default",
+    methodProfile: CEILING_DROP_METHOD_PROFILE,
+    build: createCeilingSlabDropScene,
+    camera: { distance_m: 2.4, target_m: { x: 0, y: 0.4, z: 0 } },
+  }),
+  defineScene({
+    id: "corner-brick-drop",
+    name: "Octree · corner drop oracle",
+    blurb: "One 8³ fluid brick seeded into a top corner: lid, two walls, and their vertical edge seam. Frictionless walls exert only normal force, so the exact answer is still free fall.",
+    audience: "validation",
+    shelf: "Free-fall contact",
+    environment: "default",
+    methodProfile: POWER_VALIDATION_METHOD_PROFILE,
+    build: createCornerBrickDropScene,
+    camera: { distance_m: 2.4, target_m: { x: 0, y: 0.4, z: 0 } },
+  }),
+  defineScene({
+    id: "midair-brick-drop",
+    name: "Octree · mid-air drop control",
+    blurb: "The same 8³ brick hanging in open space, touching no boundary at all. The zero-contact control: whatever it deviates from free fall is the scheme's own transient, not adhesion.",
+    audience: "validation",
+    shelf: "Free-fall contact",
+    environment: "default",
+    methodProfile: POWER_VALIDATION_METHOD_PROFILE,
+    build: createMidairBrickDropScene,
+    camera: { distance_m: 3, target_m: { x: 0, y: 0.6, z: 0 } },
+  }),
+  defineScene({
+    id: "midair-corner-drop",
+    name: "Octree · mid-air corner oracle",
+    blurb: "The same 8³ brick against two vertical walls and their seam, but clear of the lid. Gravity is tangential to both walls, so free-slip walls cannot slow it: this isolates seam adhesion from ceiling adhesion.",
+    audience: "validation",
+    shelf: "Free-fall contact",
+    environment: "default",
+    methodProfile: POWER_VALIDATION_METHOD_PROFILE,
+    build: createMidairCornerDropScene,
+    camera: { distance_m: 3, target_m: { x: 0, y: 0.6, z: 0 } },
+  }),
+]);
+
+export function getSceneDefinition(id: string): SceneDefinition {
+  return findSceneDefinition(id) ?? SCENE_CATALOG[0];
+}
 
 /**
- * Attach the art-directed environment to the scene consumed by GPU solvers.
+ * Exact lookup, with no fallback.
  *
- * The environment's scenery is copied into the document here and is never
- * consulted again: from this point the scene owns what it looks like, and
- * editing scenery is an ordinary edit to `scene.scenery`.
+ * A saved scene records the preset it came from, and that id may name a scene
+ * this build no longer has. Falling back would silently frame it with another
+ * scene's camera and pin another scene's solver profile, so callers that are
+ * asking "was this authored here?" need to be able to hear no.
  */
-export const scenePresets: ReadonlyArray<ScenePreset> = authoredScenePresets.map((preset) => ({
-  ...preset,
-  create: () => {
-    const scene = preset.create();
-    // A preset that already staged its own scenery keeps it. Re-seeding here
-    // would throw away exactly the edits that make a study scene a study.
-    return scene.scenery ? { ...scene, environment: preset.background }
-      : sceneWithEnvironment(scene, preset.background);
-  },
+export function findSceneDefinition(id: string): SceneDefinition | undefined {
+  return SCENE_CATALOG.find((definition) => definition.id === id);
+}
+
+/** Library cards for the authored catalog, in catalog order. */
+export const sceneCatalogCards: readonly SceneCard[] =
+  Object.freeze(SCENE_CATALOG.map(sceneCardForDefinition));
+
+/**
+ * The preset projection.
+ *
+ * `create` is `sceneDocument`, so a preset, a library card, a saved scene and a
+ * GPU smoke lane all obtain the identical document — which was not previously
+ * true: the smoke catalog's local factories assigned `environment` without
+ * copying its scenery, so ten shared ids named two different scenes.
+ */
+export const scenePresets: ReadonlyArray<ScenePreset> = SCENE_CATALOG.map((definition) => ({
+  id: definition.id,
+  name: definition.name,
+  group: definition.shelf,
+  description: definition.blurb,
+  background: definition.environment,
+  camera: definition.camera,
+  methodProfile: definition.methodProfile,
+  create: () => sceneDocument(definition),
 }));
 
 export const defaultScenePresetId = scenePresets[0].id;
