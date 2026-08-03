@@ -436,6 +436,20 @@ export function octreeGradingFixpointEnabled(
   return resolved?.FLUID_OCTREE_GRADING_FIXPOINT === "1";
 }
 
+/**
+ * Size the topology delta tile by the largest leaf the domain can hold.
+ *
+ * Default OFF: it currently leaves symmetric-expansion inert. See the comment
+ * at the assignment for what has already been ruled out.
+ */
+export function octreeTopologyTileClampEnabled(
+  environment?: Readonly<Record<string, string | undefined>>,
+): boolean {
+  const resolved = environment
+    ?? (typeof process !== "undefined" ? process.env : undefined);
+  return resolved?.FLUID_OCTREE_TOPOLOGY_TILE_CLAMP === "1";
+}
+
 export function octreeSparseWorldRequired(
   hasTerrain: boolean,
   rigidBodyCount: number,
@@ -1832,7 +1846,25 @@ export class WebGPUOctreeProjection {
     // publication is encoded before the first advance, so the first dynamic
     // surface pass is sparse as well.
     const topologyHaloCells = this.interfaceRefinementBandCells;
-    this.topologyTileSize = Math.max(8, this.maxLeafSize);
+    // The delta partition can fail to partition, and shrinking it is not yet a
+    // safe fix. Tiles are the granularity of every exact structural delta in the
+    // topology path, and sizing them by the AUTHORED leaf gives a 32 x 16 x 32
+    // domain a lattice of ONE tile -- any change anywhere marks the whole domain
+    // dirty, so the incremental path is a full rebuild that also pays the
+    // delta's classification and compaction. droplet-256 gets 8 x 8 x 8 = 512
+    // tiles from the same authored leaf, which is why the design looks sound
+    // there and this is invisible at that scale.
+    //
+    // Sizing by the largest leaf the domain can hold gives that lane 4 tiles,
+    // and it is DEFAULT OFF because it measured inert: the D4 oracle reported
+    // contactSteps {} -- no wall reached in 250 steps -- with every symmetry
+    // hook at maximumObserved 0 because nothing moves, and validation still
+    // clean. Two mechanisms are already ruled out without a GPU: the analytic
+    // bootstrap bounds are healthy at tile 16 (4 active tiles, not 0) and
+    // planOctreeCompactionAllocation is sane. The flag exists so the remaining
+    // localization costs one run rather than a red tree.
+    this.topologyTileSize = Math.max(8, octreeTopologyTileClampEnabled()
+      ? this.effectiveLeafSize : this.maxLeafSize);
     const allocateSparseWorld = octreeSparseWorldRequired(sceneHasTerrain(scene), scene.rigidBodies.length);
     const sparseWorldBrickSize = scene.voxelDomain.brickSize_cells;
     if (allocateSparseWorld) this.sparseBrickWorld = new OctreeSparseBrickWorld(device, scene, [dims.nx, dims.ny, dims.nz], {

@@ -191,3 +191,33 @@ test("the refinement ladder stops at the largest leaf the domain can hold", () =
   assert.match(octreeSource, /effectiveLeafSize: this\.effectiveLeafSize,/,
     "the pipeline cache key must distinguish two domains that share an authored leaf");
 });
+
+test("a shallow domain gets a single-tile topology delta, and shrinking the tile is not the fix", () => {
+  // Tiles are the granularity of every exact structural delta in the topology
+  // path: the signature comparison, the dirty-tile delta, the tile worklist and
+  // every per-tile indirect dispatch. Sized by the authored leaf, a 32x16x32
+  // domain gets ONE tile -- so any change anywhere marks the whole domain dirty
+  // and the incremental path is a full rebuild that also pays the delta's
+  // classification and compaction. droplet-256 gets 512 tiles, which is why the
+  // design looks sound there and this is invisible at that scale.
+  const lattice = (dims: { nx: number; ny: number; nz: number }, tile: number) => {
+    const bricks = [dims.nx, dims.ny, dims.nz].map((value) => Math.ceil(value / 8));
+    const tileBricks = tile / 8;
+    return bricks.reduce((total, value) => total * Math.ceil(value / tileBricks), 1);
+  };
+  const symmetric = { nx: 32, ny: 16, nz: 32 };
+  assert.equal(lattice(symmetric, 32), 1,
+    "the authored leaf collapses symmetric-expansion to a partition of one");
+  assert.equal(lattice({ nx: 256, ny: 256, nz: 256 }, 32), 512,
+    "the same authored leaf gives droplet-256 a real partition");
+  // MEASURED NEGATIVE RESULT, recorded so it is not retried: sizing the tile by
+  // the effective leaf instead (4 tiles here) leaves the scene INERT. The D4
+  // oracle reported contactSteps {} -- the liquid reaches no wall in 250 steps
+  // -- with every symmetry hook at maximumObserved 0 because nothing moves, and
+  // validation still clean. The tile size is not a free granularity knob: it
+  // also sets topologyTileBricks and candidateBlocksPerTile, so it is coupled to
+  // fine-brick residency and to the halo, and the partition-of-one has to be
+  // fixed from the residency side rather than by shrinking the tile.
+  assert.match(octreeSource, /this\.topologyTileSize = Math\.max\(8, this\.maxLeafSize\);/,
+    "the authored leaf still sizes the tile; see the negative result above");
+});
