@@ -3594,9 +3594,18 @@ export class WebGPUOctreeProjection {
       );
       pass = broker.compute({ label: "Octree resident grading closure" });
     }
+    const gradingRoundProbe = typeof process !== "undefined"
+      && process.env?.FLUID_GRADING_ROUND_PROBE === "1";
     for (let round = 0; round < this.balanceRounds; round += 1) {
+      const tag = String(round).padStart(2, "0");
       for (const size of this.coarseRefinementSizes) {
+        if (gradingRoundProbe) {
+          pass = broker.compute({ label: `Octree grading r${tag} coarse ${size}` });
+        }
         dispatchCoarse(size, this.balanceCoarsePipelines.get(size)!);
+      }
+      if (gradingRoundProbe) {
+        pass = broker.compute({ label: `Octree grading r${tag} candidates` });
       }
       dispatchCandidates(this.balancePipeline, this.balanceDeltaPipeline);
     }
@@ -6331,22 +6340,50 @@ fn decodePagedOwner(word: u32, cell: vec3u) -> Owner {
       || any(origin + vec3u(size) > dims())) { return rejectOwnerAuthority(); }
   return Owner(packOrigin(origin), size);
 }
-fn ownerPageEncoded(logical: u32) -> u32 {
-  let pageIndexOffset = atomicLoad(&owners[5]);
-  let capacity = atomicLoad(&owners[3]);
-  let logicalCount = atomicLoad(&owners[4]);
-  let activeTable = atomicLoad(&owners[10]) >> 31u;
-  let table = activeTable ^ min(topologyCandidateView, 1u);
-  let directoryOffset = pageIndexOffset + 3u * capacity + table * logicalCount;
-  let payloadOffset = atomicLoad(&owners[6]);
-  if (pageIndexOffset != 16u + capacity || logical >= logicalCount
-      || payloadOffset != pageIndexOffset + 3u * capacity + 2u * logicalCount) { return 0u; }
-  return atomicLoad(&owners[directoryOffset + logical]);
+// The owner-page arena layout -- capacity, logical count, directory offset,
+// payload offset and the active table bit -- is published by the page
+// authority before any topology dispatch and is never written by this shader.
+// It is therefore dispatch-invariant, yet every owner read and every owner
+// store re-derived it through five device atomics on the SAME five words, plus
+// three more inside ownerPayloadBase. Those addresses cannot live in L1, so a
+// single owner lookup cost nine round trips to a handful of contended lines
+// and splitLeaf paid them once per cell of the leaf it materializes.
+//
+// Resolve it once per invocation instead. The header is read with the same
+// atomic loads the first time it is needed, so a caller that runs before the
+// authority publishes still observes exactly what it observed before.
+struct OwnerPageMap {
+  directoryOffset: u32,
+  payloadBase: u32,
+  capacity: u32,
+  logicalCount: u32,
+  consistent: u32,
 }
-fn ownerPayloadBase() -> u32 {
-  let capacity=atomicLoad(&owners[3]);
-  let table=(atomicLoad(&owners[10])>>31u)^min(topologyCandidateView,1u);
-  return atomicLoad(&owners[6])+table*capacity*512u;
+var<private> ownerPageMapCache: OwnerPageMap;
+var<private> ownerPageMapResolved: bool = false;
+fn ownerPageMap() -> OwnerPageMap {
+  if (!ownerPageMapResolved) {
+    let pageIndexOffset = atomicLoad(&owners[5]);
+    let capacity = atomicLoad(&owners[3]);
+    let logicalCount = atomicLoad(&owners[4]);
+    let activeTable = atomicLoad(&owners[10]) >> 31u;
+    let table = activeTable ^ min(topologyCandidateView, 1u);
+    let payloadOffset = atomicLoad(&owners[6]);
+    let consistent = pageIndexOffset == 16u + capacity
+      && payloadOffset == pageIndexOffset + 3u * capacity + 2u * logicalCount;
+    ownerPageMapCache = OwnerPageMap(
+      pageIndexOffset + 3u * capacity + table * logicalCount,
+      payloadOffset + table * capacity * 512u,
+      capacity, logicalCount, select(0u, 1u, consistent));
+    ownerPageMapResolved = true;
+  }
+  return ownerPageMapCache;
+}
+fn ownerPageEncoded(logical: u32) -> u32 {
+  let map = ownerPageMap();
+  if (map.consistent == 0u || logical >= map.logicalCount) { return 0u; }
+  let directoryOffset = map.directoryOffset;
+  return atomicLoad(&owners[directoryOffset + logical]);
 }
 fn requireOwnerPageEncoded(logical: u32) -> u32 {
   let encoded = ownerPageEncoded(logical);
@@ -6358,10 +6395,10 @@ fn ownerPageWord(cell: vec3u) -> u32 {
   let brick = cell / 8u;
   let logical = brick.x + brick.y * brickDims.x + brick.z * brickDims.x * brickDims.y;
   let encoded = ownerPageEncoded(logical);
-  let capacity = atomicLoad(&owners[3]);
-  if (encoded == 0u || encoded == 0xffffffffu || encoded > capacity) { return 0xffffffffu; }
+  let map = ownerPageMap();
+  if (encoded == 0u || encoded == 0xffffffffu || encoded > map.capacity) { return 0xffffffffu; }
   let local = cell % vec3u(8u);
-  return atomicLoad(&owners[ownerPayloadBase() + (encoded - 1u) * 512u + local.x + local.y * 8u + local.z * 64u]);
+  return atomicLoad(&owners[map.payloadBase + (encoded - 1u) * 512u + local.x + local.y * 8u + local.z * 64u]);
 }
 fn ownerAt(p: vec3i) -> Owner {
   if (!valid(p)) { return rejectOwnerAuthority(); }
@@ -6374,10 +6411,10 @@ fn ownerAtIndex(cell: u32) -> Owner { return ownerAt(vec3i(cellCoord(cell))); }
 fn storeOwner(cell: vec3u, origin: vec3u, size: u32) {
   let brickDims = (dims() + vec3u(7u)) / 8u; let brick = cell / 8u;
   let logical = brick.x + brick.y * brickDims.x + brick.z * brickDims.x * brickDims.y;
-  let encoded = ownerPageEncoded(logical); let capacity = atomicLoad(&owners[3]);
-  if (encoded == 0u || encoded == 0xffffffffu || encoded > capacity) { return; }
+  let encoded = ownerPageEncoded(logical); let map = ownerPageMap();
+  if (encoded == 0u || encoded == 0xffffffffu || encoded > map.capacity) { return; }
   let local = cell % vec3u(8u);
-  let at=ownerPayloadBase()+(encoded-1u)*512u+local.x+local.y*8u+local.z*64u;
+  let at=map.payloadBase+(encoded-1u)*512u+local.x+local.y*8u+local.z*64u;
   let membership=atomicLoad(&owners[at])&OWNER_WORD_TOPOLOGY;
   atomicStore(&owners[at], encodePagedOwner(cell, origin, size) | membership);
 }
@@ -6392,16 +6429,16 @@ fn storeOwnerRequired(cell: vec3u, origin: vec3u, size: u32) {
   // valid finer dyadic encoding is numerically smaller than every overlapping
   // coarser encoding. Atomic min therefore makes that race deterministic and
   // leaves one non-overlapping owner partition instead of a torn parent.
-  let at=ownerPayloadBase()+(encoded-1u)*512u+local.x+local.y*8u+local.z*64u;
+  let at=ownerPageMap().payloadBase+(encoded-1u)*512u+local.x+local.y*8u+local.z*64u;
   let membership=atomicLoad(&owners[at])&OWNER_WORD_TOPOLOGY;
   atomicMin(&owners[at], encodePagedOwner(cell, origin, size) | membership);
 }
 fn markAcceptedOwner(origin:vec3u){
   let brickDims=(dims()+vec3u(7u))/8u;let brick=origin/8u;
   let logical=brick.x+brick.y*brickDims.x+brick.z*brickDims.x*brickDims.y;
-  let encoded=ownerPageEncoded(logical);let capacity=atomicLoad(&owners[3]);
-  if(encoded==0u||encoded==0xffffffffu||encoded>capacity){return;}
-  let local=origin%vec3u(8u);let at=ownerPayloadBase()+(encoded-1u)*512u
+  let encoded=ownerPageEncoded(logical);let map=ownerPageMap();
+  if(encoded==0u||encoded==0xffffffffu||encoded>map.capacity){return;}
+  let local=origin%vec3u(8u);let at=map.payloadBase+(encoded-1u)*512u
     +local.x+local.y*8u+local.z*64u;
   atomicOr(&owners[at],OWNER_WORD_TOPOLOGY);
 }
@@ -7519,12 +7556,77 @@ fn leafNeedsRefinement(origin: vec3u, size: u32) -> bool {
   return false;
 }
 
+// Claim the split of a leaf by publishing its own origin cell, which is the
+// first cell splitLeaf would write anyway, and report whether this invocation
+// was the one that lowered it.
+//
+// Grading is a neighbour repair: every leaf on the ring around a coarse
+// neighbour asks for the SAME neighbour split, and each asker then writes the
+// identical size-cubed owner partition serially in one lane. The writes are
+// idempotent atomicMin, so the duplicates never change the published topology
+// -- they only multiply a 32-cubed materialization by the ring population and
+// pile every copy onto the same words. Deduplicating on the origin cell keeps
+// the published state identical (the winner performs every write the losers
+// would have) while making the cost proportional to splits rather than to
+// askers.
+//
+// A missing owner page is answered by materializing, not claiming: that path
+// already latches the rejection flag inside storeOwnerRequired, and the loop
+// must keep visiting the pages that do exist exactly as before.
+fn claimLeafSplit(origin: vec3u, size: u32) -> bool {
+  let brickDims = (dims() + vec3u(7u)) / 8u; let brick = origin / 8u;
+  let logical = brick.x + brick.y * brickDims.x + brick.z * brickDims.x * brickDims.y;
+  let encoded = requireOwnerPageEncoded(logical); if (encoded == 0u) { return true; }
+  let local = origin % vec3u(8u);
+  let at = ownerPageMap().payloadBase + (encoded - 1u) * 512u
+    + local.x + local.y * 8u + local.z * 64u;
+  let membership = atomicLoad(&owners[at]) & OWNER_WORD_TOPOLOGY;
+  let word = encodePagedOwner(origin, origin, size / 2u) | membership;
+  return atomicMin(&owners[at], word) > word;
+}
+
+// Materialize a split, one owner page at a time.
+//
+// This is the same write set storeOwnerRequired produced cell by cell, in the
+// same page-local order, with the page lookup lifted out of the inner loop.
+// A leaf is dyadic and its origin is size-aligned, so it either covers whole
+// 8-cubed pages or lies inside one -- either way the directory only has to be
+// consulted once per page instead of once per cell, which is 512 fewer
+// dependent device loads on the serial chain of a size-32 split. The
+// rejection latch and the absent-page skip keep the exact behaviour of
+// storeOwnerRequired, which likewise only tests for a zero page index.
 fn splitLeaf(origin: vec3u, size: u32) {
   let child = size / 2u;
-  for (var z = 0u; z < size; z += 1u) { for (var y = 0u; y < size; y += 1u) { for (var x = 0u; x < size; x += 1u) {
-    let local = vec3u(x,y,z); let childOrigin = origin + (local / vec3u(child)) * vec3u(child);
-    storeOwnerRequired(origin + local, childOrigin, child);
-  } } }
+  if (!claimLeafSplit(origin, size)) { return; }
+  let payloadBase = ownerPageMap().payloadBase;
+  let brickDims = (dims() + vec3u(7u)) / 8u;
+  let first = origin / 8u;
+  let last = (origin + vec3u(size - 1u)) / 8u;
+  let shape = last - first + vec3u(1u);
+  let pages = shape.x * shape.y * shape.z;
+  for (var page = 0u; page < pages; page += 1u) {
+    let brick = first + vec3u(page % shape.x, (page / shape.x) % shape.y,
+      page / (shape.x * shape.y));
+    let logical = brick.x + brick.y * brickDims.x + brick.z * brickDims.x * brickDims.y;
+    let encoded = requireOwnerPageEncoded(logical);
+    if (encoded == 0u) { continue; }
+    let base = payloadBase + (encoded - 1u) * 512u;
+    let brickOrigin = brick * vec3u(8u);
+    let lo = max(brickOrigin, origin) - brickOrigin;
+    let hi = min(brickOrigin + vec3u(8u), origin + vec3u(size)) - brickOrigin;
+    for (var lz = lo.z; lz < hi.z; lz += 1u) {
+      for (var ly = lo.y; ly < hi.y; ly += 1u) {
+        for (var lx = lo.x; lx < hi.x; lx += 1u) {
+          let local = vec3u(lx, ly, lz);
+          let cell = brickOrigin + local;
+          let childOrigin = origin + ((cell - origin) / vec3u(child)) * vec3u(child);
+          let at = base + local.x + local.y * 8u + local.z * 64u;
+          let membership = atomicLoad(&owners[at]) & OWNER_WORD_TOPOLOGY;
+          atomicMin(&owners[at], encodePagedOwner(cell, childOrigin, child) | membership);
+        }
+      }
+    }
+  }
 }
 
 fn refineTopologyAt(gid: vec3u) {
