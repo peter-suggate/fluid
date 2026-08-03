@@ -283,7 +283,21 @@ export function octreePersistentMGPCGStencilColumnsEnabled(
 
 /**
  * Restrict `sorted64PrefixSum`'s bitonic network to `next_pow2(n)`.
- * Default OFF until the interleaved A/B and the D4 window have witnessed it.
+ *
+ * Default ON since 2026-08-03. `benchmark-power-dam-ab.ts --lane=droplet-256
+ * --steps=60 --repeats=3`, interleaved, A/A sampled every round:
+ *
+ * | arm | ms/advance | delta | spread |
+ * |---|---:|---:|---:|
+ * | control (6 runs) | 72.97 | -- | 0.13 |
+ * | restricted | **70.17** | **-2.80 (-3.8%)** | 0.13 |
+ *
+ * A/A floor 0.15 ms, so the delta is 18.7x the floor -- the cleanest margin on
+ * this axis. The D4 window is unmoved with it on: volume/velocity/pressure/rhs
+ * first diverge at step 68, diagonal/topology at 69, all four walls at 68 with
+ * spread 0, 250 checkpoints, zero validation errors.
+ *
+ * Set the variable to `0` to restore the full 64-wide network.
  *
  * WHAT IT CHANGES. Work, and nothing else. `restrictLevel` sums a coarse slot's
  * restriction terms through a sorting network that always runs at full 64-lane
@@ -317,7 +331,7 @@ export function octreePersistentMGPCGRestrictedPrefixNetworkEnabled(
 ): boolean {
   const resolved = environment
     ?? (typeof process !== "undefined" ? process.env : undefined);
-  return resolved?.FLUID_OCTREE_MGPCG_RESTRICTED_PREFIX_SORT === "1";
+  return resolved?.FLUID_OCTREE_MGPCG_RESTRICTED_PREFIX_SORT !== "0";
 }
 
 /** Phase selected by {@link octreePersistentMGPCGPhaseRepeatProbe}. */

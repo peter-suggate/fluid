@@ -499,9 +499,12 @@ test("persistent MGPCG publishes solve-invariant stencil columns above the stage
 });
 
 test("the restriction sum's sorting network narrows to next_pow2 without moving a term", () => {
-  assert.equal(octreePersistentMGPCGRestrictedPrefixNetworkEnabled({}), false);
+  assert.equal(octreePersistentMGPCGRestrictedPrefixNetworkEnabled({}), true);
   assert.equal(octreePersistentMGPCGRestrictedPrefixNetworkEnabled(
     { FLUID_OCTREE_MGPCG_RESTRICTED_PREFIX_SORT: "1" }), true);
+  assert.equal(octreePersistentMGPCGRestrictedPrefixNetworkEnabled(
+    { FLUID_OCTREE_MGPCG_RESTRICTED_PREFIX_SORT: "0" }), false,
+  "exactly \"0\" is the documented rollback to the full 64-wide network");
 
   const restricted = octreePersistentMGPCGWGSL({
     maximumIterations: 10, compactLiveRows: true, restrictedPrefixNetwork: true,
