@@ -233,7 +233,12 @@ function emitRoomShell(
   graph: SceneryGraph,
   panes: SceneryPane[],
 ): EnvironmentProxyShell {
-  const { roomHalf_m: roomHalf, floorY_m: floorY, shellThickness_m: thickness } = context;
+  const { floorY_m: floorY, shellThickness_m: thickness, scene, s } = context;
+  const roomHalf = node.halfSize ? V(
+    Math.max(node.halfSize.x * s, scene.container.width_m * .5 + thickness),
+    Math.max(node.halfSize.y * s, scene.container.height_m * .5 + thickness),
+    Math.max(node.halfSize.z * s, scene.container.depth_m * .5 + thickness),
+  ) : context.roomHalf_m;
   const centre = V(0, floorY + roomHalf.y, 0);
   const t = thickness * .5;
   const face = (
@@ -251,7 +256,6 @@ function emitRoomShell(
     // box would conceal the authored thin-glass pane behind it and force the
     // whole set off the analytic path.
     const opening = node.backWall;
-    const { s } = context;
     const openingHalfWidth = Math.min(opening.halfWidth * s, roomHalf.x - thickness);
     const openingHalfHeight = Math.min(opening.halfHeight * s, roomHalf.y - thickness);
     const openingCentreY = floorY + opening.centerY * s;
@@ -306,20 +310,6 @@ function emitShell(
   panes: SceneryPane[],
 ): EnvironmentProxyShell {
   if (node.kind === "room-shell") return emitRoomShell(builder, node, context, graph, panes);
-  if (node.kind === "floor-shell") {
-    const { roomHalf_m: roomHalf, floorY_m: floorY, shellThickness_m: thickness, s } = context;
-    const t = thickness * .5;
-    const minimum = (node.minimumHalf ?? 0) * s;
-    const half = V(Math.max(roomHalf.x, minimum), t, Math.max(roomHalf.z, minimum));
-    const { color, emission } = resolveMaterial(node.floor, graph);
-    builder.box("shell/floor", "shell-floor", V(0, floorY - t, 0), half, color, emission,
-      ["shell", "floor"], true);
-    return {
-      kind: "floor", floorY_m: floorY,
-      bounds_m: aabb(V(0, floorY, 0), V(half.x, 0, half.z)),
-      primitives: builder.shell, materialModel: node.materialModel,
-    };
-  }
   // The garden's heightfield is the authority — the same surface the solver
   // collides against — so this shell publishes no boxes of its own.
   const { roomHalf_m: roomHalf, floorY_m: floorY, scene } = context;

@@ -25,7 +25,7 @@ import { containerDecorationSpace } from "./visualization-decorations";
 import { WebGPUFluidCellTrace } from "./webgpu-fluid-cell-trace";
 import type { FluidCellTrace } from "./fluid-cell-trace";
 import type { FineBandCellContext } from "./fine-band-cell-model";
-import { buildSparseVoxelDrySceneLightingMirrors, canConsumeSparseVoxelLighting, resolveSparseVoxelThickGlassBinderStatus, sparseVoxelDrySceneContractFailure, SparseVoxelDrySceneRenderer, SVO_DRY_SCENE_REVERSED_Z_NEAR_M, SVO_PRESENTATION_STARTUP_STAGES, svoPresentationResourcePlugin, type SparseVoxelDrySceneData, type SvoDryRigidBounds, type SvoDrySceneDirtyBounds } from "./webgpu-svo-dry-scene";
+import { buildSparseVoxelDrySceneLightingMirrors, canConsumeSparseVoxelLighting, packSvoDrySceneTerrainHeightfield, resolveSparseVoxelThickGlassBinderStatus, sparseVoxelDrySceneContractFailure, SparseVoxelDrySceneRenderer, SVO_DRY_SCENE_REVERSED_Z_NEAR_M, SVO_PRESENTATION_STARTUP_STAGES, svoPresentationResourcePlugin, type SparseVoxelDrySceneData, type SvoDryRigidBounds, type SvoDrySceneDirtyBounds } from "./webgpu-svo-dry-scene";
 import {
   buildSvoScenePrimitives,
 } from "./svo-scene-primitives";
@@ -41,7 +41,7 @@ import {
 } from "./svo-material-abi";
 import { buildSvoSceneGlass } from "./svo-scene-glass";
 import { buildSvoSceneThickGlass } from "./svo-scene-thick-glass";
-import { buildSvoTerrainMaterial } from "./svo-terrain-material";
+import { buildSvoTerrainMaterial, sceneTerrainSurfaceModel } from "./svo-terrain-material";
 import {
   DEFAULT_SVO_LIGHTING_OPTIONS,
   type SvoLightingOptions,
@@ -820,6 +820,8 @@ export class FluidLabRenderer {
   private fluidTextureKey = "";
   private fluidRevision = -1;
   private gpuFluid?: GPUSolverInstance;
+  /** Renderer-owned sparse source for fluid methods that do not publish one. */
+  private svoSceneSidecar?: WebGPULiveSvoScene;
   private readonly retiredGPUFluids = new Set<GPUSolverInstance>();
   private gpuFluidKey = "";
   private gpuFluidPendingKey = "";
@@ -1022,8 +1024,8 @@ export class FluidLabRenderer {
     solver: GPUSolverInstance,
     requestGeneration: number,
     startedAt_ms: number,
+    source = solver.sparseVoxelSceneSource,
   ): void {
-    const source = solver.sparseVoxelSceneSource;
     this.svoDrySceneSource = source;
     this.svoDrySceneData = undefined;
     this.renderSceneKey = "";
@@ -1471,7 +1473,9 @@ export class FluidLabRenderer {
       invalidateGPUCompilationManager(device, info.message || info.reason);
       this.deviceLost = true;
       const fluid = this.gpuFluid;
+      const sidecar = this.svoSceneSidecar;
       this.gpuFluid = undefined;
+      this.svoSceneSidecar = undefined;
       this.pendingInitialRasterPresentation = undefined;
       this.pendingLiveSvoPresentation = undefined;
       this.gpuFluidKey = "";
@@ -1487,6 +1491,7 @@ export class FluidLabRenderer {
       // group mixing them with the replacement device fails validation.
       this.gpuFluidRequestGeneration += 1;
       try { fluid?.destroy(); } catch { /* Resources may already be invalid after device loss. */ }
+      try { sidecar?.destroy(); } catch { /* Resources may already be invalid after device loss. */ }
       // Breadcrumbs for hang diagnosis: the last known solver state narrows a
       // watchdog reset down to a stage without needing a reproduction.
       if (fluid) console.error("GPU device lost mid-simulation", { reason: info.reason, message: info.message, submittedTime_s: fluid.info.submittedTime_s, completedTime_s: fluid.info.completedTime_s, pendingBatches: this.gpuPendingBatches, encodedSteps: fluid.info.encodedSteps, physicsTrace: fluid.info.physicsTrace });
@@ -1559,7 +1564,7 @@ export class FluidLabRenderer {
     this.device = undefined; this.context = undefined;
     this.upscalePipeline = undefined; this.upscaleSampler = undefined; this.upscaleBindGroup = undefined;
     this.waterPipeline = undefined; this.gridOverlayPipeline = undefined; this.techniqueOverlayPipeline = undefined; this.techniqueAuditOverlayPipeline = undefined; this.voxelDebugPipeline = undefined; this.svoDryScenePipeline = undefined; this.secondaryParticlePipeline = undefined; this.svoStageOverlay = undefined;
-    this.optionalPipelineTasks.clear(); this.failedOptionalPipelines.clear(); this.optionalPipelineFailures.clear(); this.svoDrySceneSource = undefined; this.svoDrySceneData = undefined; this.liveSceneAnimation = undefined; this.liveSceneAnimationFailure = undefined; this.renderSceneKey = ""; this.svoPipelineProgress = undefined; this.svoPipelineStartedAt_ms = undefined; this.pendingLiveSvoPresentation = undefined;
+    this.optionalPipelineTasks.clear(); this.failedOptionalPipelines.clear(); this.optionalPipelineFailures.clear(); this.svoDrySceneSource = undefined; this.svoSceneSidecar = undefined; this.svoDrySceneData = undefined; this.liveSceneAnimation = undefined; this.liveSceneAnimationFailure = undefined; this.renderSceneKey = ""; this.svoPipelineProgress = undefined; this.svoPipelineStartedAt_ms = undefined; this.pendingLiveSvoPresentation = undefined;
     this.svoPipelineAvailable = false; this.svoSourceAvailable = false; this.svoPublicationFailure = undefined; this.svoTerrainSupported = true; this.svoGlassSupported = true; this.svoMaterialsSupported = true; this.svoLightingSupported = true;
     this.uniformBuffer = undefined; this.bodyBuffer = undefined;
     this.presentationTexture = undefined; this.voxelDebugDepth = undefined; this.presentationTextureKey = "";
@@ -1775,6 +1780,7 @@ export class FluidLabRenderer {
     const abort=new AbortController();this.gpuFluidInitializationAbort=abort;
     const device=this.device,generation=++this.gpuFluidRequestGeneration,startedAt_ms=performance.now();
     const previous=this.gpuFluid;
+    const previousSidecar=this.svoSceneSidecar;
     const drainPreviousForReset=this.timelineResetPending&&Boolean(previous);
     this.timelineResetPending=false;
     this.pendingLiveSvoPresentation=undefined;
@@ -1784,6 +1790,7 @@ export class FluidLabRenderer {
     let reportedCompleted=0,reportedTotal=1;
     const report=(progress:{phase:string;taskId?:string;label:string;completed:number;total:number})=>{if(this.disposed||this.deviceLost||generation!==this.gpuFluidRequestGeneration)return;reportedCompleted=progress.completed;reportedTotal=progress.total;this.onStatus({state:"initializing",...progress,startedAt_ms,kind:previous?"rebuild":"startup",retainingPrevious:Boolean(previous),resource:initializationResource});};
     let previousDestroyedForReset=false;
+    let previousSidecarDestroyedForReset=false;
     const prepare=async()=>{
       if(!drainPreviousForReset||!previous)return;
       report({phase:"drain",taskId:"solver.drain",label:"Drain previous GPU work",completed:0,total:1});
@@ -1801,40 +1808,55 @@ export class FluidLabRenderer {
         this.svoDrySceneSource=undefined;this.svoDrySceneData=undefined;this.liveSceneAnimation=undefined;this.liveSceneAnimationFailure=undefined;this.renderSceneKey="";this.svoDryScenePipeline?.setSource(undefined);
         previous.destroy();previousDestroyedForReset=true;
       }
+      if(this.svoSceneSidecar===previousSidecar&&previousSidecar){
+        this.svoSceneSidecar=undefined;
+        previousSidecar.destroy();previousSidecarDestroyedForReset=true;
+      }
       this.resetGPUQueueTracking();
       report({phase:"drain",taskId:"solver.drain",label:"Previous GPU work drained",completed:1,total:1});
     };
-    // Annotated because the two branches return different solver classes: without
-    // it the inferred TResult1 pins to WebGPULiveSvoScene and rejects the
-    // GPUSolverInstance branch.
-    const create:Promise<GPUSolverInstance>=prepare().then(async ():Promise<GPUSolverInstance>=>{
+    const create:Promise<{solver:GPUSolverInstance;sidecar?:WebGPULiveSvoScene}>=prepare().then(async ()=>{
       if(abort.signal.aborted||this.disposed||this.deviceLost||generation!==this.gpuFluidRequestGeneration)throw new DOMException("GPU initialization superseded","AbortError");
+      let solver:GPUSolverInstance;
       if (!planSceneRuntime(scene).fluidSolver) {
         const refinement = config.values.svoEnvironmentBrickRefinementLevels;
-        return WebGPULiveSvoScene.create(device, scene, config.quality, report, abort.signal, {
+        solver=await WebGPULiveSvoScene.create(device, scene, config.quality, report, abort.signal, {
           environmentBrickRefinementLevels: typeof refinement === "number" ? refinement : undefined,
         });
+      } else {
+        solver=await (method.createSolverAsync
+          ? method.createSolverAsync(device,scene,config.quality,config.values,this.gpuRigidLoadCallback,report,abort.signal)
+          : new Promise<GPUSolverInstance>((resolve,reject)=>setTimeout(()=>{try{resolve(method.createSolver!(device,scene,config.quality,config.values,this.gpuRigidLoadCallback));}catch(error){reject(error);}},0)));
       }
-      return method.createSolverAsync
-        ? method.createSolverAsync(device,scene,config.quality,config.values,this.gpuRigidLoadCallback,report,abort.signal)
-        : new Promise<GPUSolverInstance>((resolve,reject)=>setTimeout(()=>{try{resolve(method.createSolver!(device,scene,config.quality,config.values,this.gpuRigidLoadCallback));}catch(error){reject(error);}},0));
+      if (solver.sparseVoxelSceneSource) return {solver};
+      try {
+        const refinement=config.values.svoEnvironmentBrickRefinementLevels;
+        const sidecar=await WebGPULiveSvoScene.create(device,scene,config.quality,report,abort.signal,{
+          environmentBrickRefinementLevels:typeof refinement==="number"?refinement:undefined,
+        });
+        return {solver,sidecar};
+      } catch(error) {
+        solver.destroy();
+        throw error;
+      }
     });
-    this.gpuFluidPending=create.then((solver)=>{
-      if(this.disposed||this.deviceLost||generation!==this.gpuFluidRequestGeneration){solver.destroy();return;}
-      if(config.methodId==="octree"&&solver.initialSparseAuthorityReady!==true){solver.destroy();throw new Error("Octree solver returned before fenced sparse t=0 authority");}
+    this.gpuFluidPending=create.then(({solver,sidecar})=>{
+      if(this.disposed||this.deviceLost||generation!==this.gpuFluidRequestGeneration){solver.destroy();sidecar?.destroy();return;}
+      if(config.methodId==="octree"&&solver.initialSparseAuthorityReady!==true){solver.destroy();sidecar?.destroy();throw new Error("Octree solver returned before fenced sparse t=0 authority");}
       report({phase:"attach",taskId:"solver.attach",label:"Attach warmed solver",completed:reportedCompleted,total:reportedTotal+1});
       solver.applyRuntimeValues?.(config.values);
-      this.gpuFluid=solver;this.gpuFluidKey=key;this.attachedStructuralKey=gpuSceneStructuralKey(scene,config);this.gpuFluidPendingKey="";this.resetGPUQueueTracking();this.gpuFluidGeneration+=1;this.lastGPUInfoPollAt_ms=-Infinity;this.globalFineWaterAttached=false;
+      this.gpuFluid=solver;this.svoSceneSidecar=sidecar;this.gpuFluidKey=key;this.attachedStructuralKey=gpuSceneStructuralKey(scene,config);this.gpuFluidPendingKey="";this.resetGPUQueueTracking();this.gpuFluidGeneration+=1;this.lastGPUInfoPollAt_ms=-Infinity;this.globalFineWaterAttached=false;
       const fencedInitialRaster=requiresFencedInitialRasterPresentation(config.methodId);
       if(rendererOnlyScene){solver.info.initialRasterSurfaceReady=true;solver.info.initialRasterSurfaceState="gpu-authoritative";solver.info.initialRasterSurfaceDiagnostic="Live scene source ready; fluid authority intentionally absent";this.pendingInitialRasterPresentation=undefined;}
       else if(fencedInitialRaster){solver.info.initialRasterSurfaceReady=false;solver.info.initialRasterSurfaceState="pending";solver.info.initialRasterSurfaceDiagnostic="Waiting for the first fenced t=0 raster publication";this.pendingInitialRasterPresentation={solver,solverGeneration:this.gpuFluidGeneration,requestGeneration:generation,submitted:false,resource:method.resource};}
       else{solver.info.initialRasterSurfaceReady=true;solver.info.initialRasterSurfaceState="gpu-authoritative";solver.info.initialRasterSurfaceDiagnostic="Direct solver field attached; sparse raster fence not required";this.pendingInitialRasterPresentation=undefined;}
       this.updateRenderSources(solver.surfaceFieldTexture??solver.volumeTexture,solver.columnBaseTexture,solver.gridCellTexture??this.gridCellTexture,solver.velocityTexture??this.velocityFallbackTexture,solver.gridPressureSamplesTexture??this.pressureSamplesFallbackTexture,solver.gridDivergenceTexture??this.scalarFallbackTexture,solver.gridPressureTexture??this.scalarFallbackTexture);this.secondaryParticlePipeline?.setSource(solver.secondaryParticles);this.voxelInspectionSource?.inspectionPublication?.setEnabled(false);this.voxelInspectionSource=undefined;this.voxelDebugPipeline?.setSource(undefined);this.voxelDebugSourceGeneration=-1;
-      this.attachSparsePresentationSource(solver,generation,startedAt_ms);
+      this.attachSparsePresentationSource(solver,generation,startedAt_ms,sidecar?.sparseVoxelSceneSource??solver.sparseVoxelSceneSource);
       if(rendererOnlyScene)
         this.onStatus({state:"ready",label:"Live sparse scene source ready",adapter:this.adapterName,resource:liveSvoSceneResourcePlugin});
       this.pausedPresentationRevision+=1;
       if(previous&&previous!==solver&&!previousDestroyedForReset)this.retireGPUFluid(previous);
+      if(previousSidecar&&previousSidecar!==sidecar&&!previousSidecarDestroyedForReset)this.retireGPUFluid(previousSidecar);
       this.gpuInfoCallback?.(solver.info);
       if(!rendererOnlyScene&&fencedInitialRaster)this.onStatus({state:"initializing",label:"Warmed solver attached; publishing fenced t=0 raster surface",phase:"presentation",completed:reportedCompleted,total:reportedTotal+1,startedAt_ms,kind:previous?"rebuild":"startup",retainingPrevious:false,resource:method.resource});
       else if(!rendererOnlyScene)this.onStatus({state:"ready",label:"WebGPU direct-field solver ready",adapter:this.adapterName,resource:method.resource});
@@ -1886,8 +1908,9 @@ export class FluidLabRenderer {
       ?? buildSvoPrimitiveCandidates(scenePrimitives.descriptors as Parameters<typeof buildSvoPrimitiveCandidates>[0], {
         skippedOwnerId: scenePrimitives.openShellOwnerId,
       });
+    const terrainSurface = sceneTerrainSurfaceModel(scene);
     const materialRecords = packSvoMaterialTable([
-      ...buildDefaultSvoMaterialRecords(revision),
+      ...buildDefaultSvoMaterialRecords(revision, { terrainSurface }),
       ...scenePrimitives.metadata.map((primitive) => svoMaterialFromEnvironmentProxyMaterial(
         primitive.materialId,
         primitive.material,
@@ -1899,7 +1922,13 @@ export class FluidLabRenderer {
     const sceneThickGlass = buildSvoSceneThickGlass(scene, { revision });
     const thickReplacedPaneKey = sceneThickGlass.metadata.find(({ replacesThinPaneKey }) => Boolean(replacesThinPaneKey))?.replacesThinPaneKey;
     const thickReplacedPaneId = sceneGlass.metadata.find(({ key }) => key === thickReplacedPaneKey)?.paneId;
-    const terrainMaterial = scenePrimitives.analyticTerrain ? buildSvoTerrainMaterial(scene) : undefined;
+    // A porcelain ground publishes no terrain metadata at all: the metadata is
+    // what configures the lawn closure, and an unread region is a region that
+    // can go stale. Absent, the shader's policy word stays zero and its terrain
+    // branch is unreachable by construction rather than by agreement.
+    const terrainMaterial = scenePrimitives.analyticTerrain && terrainSurface === "garden-terrain"
+      ? buildSvoTerrainMaterial(scene)
+      : undefined;
     const compositorOwnedGlass = sceneGlass.metadata.filter(({ role }) => role === "container-pane" || role === "container-top");
     const lightingMirrors = buildSparseVoxelDrySceneLightingMirrors(scene, revision);
     if (!lightingMirrors) {
@@ -1920,6 +1949,11 @@ export class FluidLabRenderer {
       terrainMaterialId: scenePrimitives.analyticTerrain?.materialId,
       terrainMaterialMetadata: terrainMaterial?.packedMetadata,
       terrainMaterialCacheKey: terrainMaterial?.cacheKey,
+      // A sculpted vessel is terrain the eight-feature uniform mirror cannot
+      // express, so the grid the solver already consumes is published into the
+      // scene arena as well. Analytic scenes pass undefined and keep the
+      // closed-form evaluator they have always used.
+      terrainHeightfield: packSvoDrySceneTerrainHeightfield(scene.terrain?.grid),
       glassRecords: sceneGlass.packedRecords,
       glassCacheKey: sceneGlass.cacheKey,
       thickGlassRecords: sceneThickGlass.packedRecords,
@@ -2046,6 +2080,11 @@ export class FluidLabRenderer {
     animation.candidates = candidates;
     this.renderSceneRevision = revision;
     this.svoDrySceneData = { ...this.svoDrySceneData, renderRevision: revision, primitiveRecords: records, primitiveCandidates: candidates };
+  }
+
+  /** The solver's sparse world when it has one, otherwise the renderer sidecar. */
+  private sparseSceneProducer(fluid: GPUSolverInstance | undefined): GPUSolverInstance | undefined {
+    return fluid?.sparseVoxelSceneSource ? fluid : this.svoSceneSidecar;
   }
 
   private currentGPUFluid(scene: SceneDescription, config: SimulationRunConfig) {
@@ -2269,9 +2308,13 @@ export class FluidLabRenderer {
     const readyGPUFluid = backend === "webgpu" || !sceneRuntime.fluidSolver
       ? this.currentGPUFluid(this.simulationScene ?? scene, svoSceneConfig)
       : undefined;
-    const sparsePresentationRequired = !sceneRuntime.fluidSolver
-      || Boolean((readyGPUFluid ?? this.gpuFluid)?.sparseVoxelSceneSource);
-    this.publishRenderScene(scene, readyGPUFluid ?? this.gpuFluid);
+    const fluidSource = readyGPUFluid ?? this.gpuFluid;
+    const sparseSceneProducer = this.sparseSceneProducer(fluidSource);
+    // Every authored scene has a room or terrain shell. Fluid methods without
+    // their own sparse hierarchy receive a renderer-owned source sidecar, so a
+    // missing method capability can never turn the dry scene into magenta.
+    const sparsePresentationRequired = true;
+    this.publishRenderScene(scene, sparseSceneProducer);
     const pixelTraceRequested = Boolean(pixelTrace) && voxelRenderMode === "smooth";
     // Ahead of the sweep, so a toggled traversal retires the old pipeline and is
     // rebuilt in the same frame rather than one frame later.
@@ -2336,12 +2379,12 @@ export class FluidLabRenderer {
     // smooth presentation avoids a second capacity-sized GPU instance arena
     // (about 295 MB for the widened ocean) while SVO continues to consume the
     // structural source directly.
-    const requestedVoxelDebugGeneration = voxelRenderMode !== "smooth" && this.gpuFluid
+    const requestedVoxelDebugGeneration = voxelRenderMode !== "smooth" && sparseSceneProducer
       ? this.gpuFluidGeneration
       : -1;
     if (requestedVoxelDebugGeneration !== this.voxelDebugSourceGeneration) {
       this.voxelInspectionSource?.inspectionPublication?.setEnabled(false);
-      this.voxelInspectionSource = requestedVoxelDebugGeneration >= 0 ? this.gpuFluid?.sparseVoxelRenderSource : undefined;
+      this.voxelInspectionSource = requestedVoxelDebugGeneration >= 0 ? sparseSceneProducer?.sparseVoxelRenderSource : undefined;
       this.voxelInspectionSource?.inspectionPublication?.setEnabled(true);
       this.voxelDebugPipeline?.setSource(this.voxelInspectionSource);
       this.voxelDebugSourceGeneration = requestedVoxelDebugGeneration;
@@ -2470,7 +2513,7 @@ export class FluidLabRenderer {
       });
       this.device.queue.writeBuffer(this.bodyBuffer, 0, bodyData);
     }
-    this.advanceLiveSceneAnimation(readyGPUFluid ?? this.gpuFluid);
+    this.advanceLiveSceneAnimation(sparseSceneProducer);
     this.svoDryScenePipeline?.setRigidBodyCount(bodies.length, svoDryRigidBounds(bodies));
     // Reduced-rate cone lighting is the production default: quarter-axis-rate
     // prepass + full-resolution relight, with 0.5 retained by the quality tier.
@@ -2508,7 +2551,8 @@ export class FluidLabRenderer {
     const rawEncoder = this.device.createCommandEncoder({ label: "Fluid Lab frame" });
     const encoder = presentationTrace?.instrument(rawEncoder) ?? rawEncoder;
     presentationTrace?.begin();
-    (readyGPUFluid ?? this.gpuFluid)?.encodeSceneMaintenance?.(encoder);
+    fluidSource?.encodeSceneMaintenance?.(encoder);
+    if (sparseSceneProducer !== fluidSource) sparseSceneProducer?.encodeSceneMaintenance?.(encoder);
     const detailedPresentationTrace = traceDetailedSvoRenderPath ? presentationTrace : undefined;
     // The SVO cone path names its own stages; every other path walks the fixed
     // presentation partition in encode order.
@@ -2784,7 +2828,9 @@ export class FluidLabRenderer {
     if (this.disposed) return;
     this.disposed = true;
     const fluid = this.gpuFluid;
+    const sidecar = this.svoSceneSidecar;
     this.gpuFluid = undefined;
+    this.svoSceneSidecar = undefined;
     this.pendingInitialRasterPresentation = undefined;
     this.pendingLiveSvoPresentation = undefined;
     this.svoPickingAvailable = false;
@@ -2796,6 +2842,7 @@ export class FluidLabRenderer {
     this.resetGPUQueueTracking();
     this.gpuFluidGeneration += 1;
     try { fluid?.destroy(); } catch { /* Device loss can invalidate solver resources first. */ }
+    try { sidecar?.destroy(); } catch { /* Device loss can invalidate sparse scene resources first. */ }
     for (const retired of this.retiredGPUFluids) { try { retired.destroy(); } catch { /* Best-effort cleanup after device loss. */ } }
     this.retiredGPUFluids.clear();
     try { this.waterPipeline?.destroy(); } catch { /* Best-effort cleanup after device loss. */ }

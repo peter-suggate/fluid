@@ -226,7 +226,7 @@ export interface SceneryGlazingNode extends SceneryNodeBase {
   readonly half: readonly [number, number];
 }
 
-/** The finite six-face room every interior set is staged in. */
+/** The finite six-face room every non-terrain set is staged in. */
 export interface SceneryRoomShellNode extends SceneryNodeBase {
   readonly kind: "room-shell";
   /** `room` is the unstaged case: a plain enclosure with no set dressed in it. */
@@ -235,6 +235,8 @@ export interface SceneryRoomShellNode extends SceneryNodeBase {
   readonly floor: SceneryMaterial;
   readonly wall: SceneryMaterial;
   readonly ceiling: SceneryMaterial;
+  /** Optional half extents in scene-scale fractions. Omission uses the set-wide room frame. */
+  readonly halfSize?: Vec3;
   /** An opening in the back wall, which is then built as the boxes around it. */
   readonly backWall?: SceneryWallOpening;
 }
@@ -242,25 +244,18 @@ export interface SceneryRoomShellNode extends SceneryNodeBase {
 /**
  * The garden's ground. Its heightfield is the authority — the same surface the
  * solver collides against — so unlike a room this shell publishes no boxes.
+ *
+ * `garden-terrain` is the lawn: a height-banded closure that paints a dark
+ * pebbled pool liner, a soil collar and mown grass with clover and daisies over
+ * whatever the heightfield happens to be. `porcelain` is the same ground with no
+ * closure at all — one unmodulated white albedo from the basin floor to the
+ * horizon — which is what a formed vessel needs: on a moulded rim every one of
+ * the lawn's variations reads as dirt on the casting rather than as ground
+ * cover, and the height bands cut a tide line across a surface that has none.
  */
 export interface SceneryTerrainShellNode extends SceneryNodeBase {
   readonly kind: "terrain-shell";
-  readonly materialModel: "garden-terrain";
-}
-
-/**
- * An open plate rather than an enclosing room: the calibration studio, where the
- * background is a cyclorama standing on the floor and there are no walls behind
- * it to see. `minimumHalf` widens the plate past the room the container would
- * imply, so a sweep authored beyond it still stands on floor rather than over
- * an edge.
- */
-export interface SceneryFloorShellNode extends SceneryNodeBase {
-  readonly kind: "floor-shell";
-  readonly materialModel: "default-floor";
-  readonly floor: SceneryMaterial;
-  /** Half extent floor, in scene-scale fractions. */
-  readonly minimumHalf?: number;
+  readonly materialModel: "garden-terrain" | "porcelain";
 }
 
 export type SceneryPrimitiveNode =
@@ -273,8 +268,7 @@ export type SceneryPrimitiveNode =
 
 export type SceneryShellNode =
   | SceneryRoomShellNode
-  | SceneryTerrainShellNode
-  | SceneryFloorShellNode;
+  | SceneryTerrainShellNode;
 
 export type SceneryNode =
   | SceneryPrimitiveNode
@@ -294,8 +288,7 @@ export interface SceneryGraph {
 }
 
 export function isSceneryShellNode(node: SceneryNode): node is SceneryShellNode {
-  return node.kind === "room-shell" || node.kind === "terrain-shell"
-    || node.kind === "floor-shell";
+  return node.kind === "room-shell" || node.kind === "terrain-shell";
 }
 
 export function isSceneryPrimitiveNode(node: SceneryNode): node is SceneryPrimitiveNode {
@@ -333,6 +326,10 @@ export function validateSceneryGraph(graph: SceneryGraph): string[] {
     else if (ids.has(node.id)) errors.push(`Duplicate scenery node id ${node.id}`);
     ids.add(node.id);
     if (isSceneryShellNode(node)) shells += 1;
+    if (node.kind === "room-shell" && node.halfSize
+      && ![node.halfSize.x, node.halfSize.y, node.halfSize.z].every((value) => Number.isFinite(value) && value > 0)) {
+      errors.push(`Scenery room shell ${node.id} half size must be positive and finite`);
+    }
     const scale = node.place?.scale;
     if (scale !== undefined && !(scale > 0)) errors.push(`Scenery node ${node.id} scale must be positive`);
     const position = node.place?.position;

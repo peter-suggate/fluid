@@ -16,6 +16,7 @@ import {
   liveSvoDerivedCopyWGSL,
   liveSvoDerivedEmptyInitializationWGSL,
   liveSvoLeafBasePages,
+  liveSvoRadianceFeedbackWGSL,
   liveSvoDerivedWorklistWGSL,
 } from "../lib/webgpu-svo-live-derived-builder";
 
@@ -45,14 +46,17 @@ class BufferMock {
 function fixture() {
   const textures: TextureMock[] = [], buffers: BufferMock[] = [], bindGroups: GPUBindGroupDescriptor[] = [], writes: unknown[][] = [];
   const pipelines: GPUComputePipelineDescriptor[] = [];
+  const createPipeline = (descriptor: GPUComputePipelineDescriptor) => {
+    pipelines.push(descriptor); return { getBindGroupLayout: () => ({ entry: descriptor.compute.entryPoint }) };
+  };
   const device = {
     queue: { writeBuffer: (...args: unknown[]) => writes.push(args) },
     createTexture: (descriptor: GPUTextureDescriptor) => { const value = new TextureMock(descriptor); textures.push(value); return value; },
     createBuffer: (descriptor: GPUBufferDescriptor) => { const value = new BufferMock(descriptor); buffers.push(value); return value; },
     createShaderModule: () => ({}),
-    createComputePipeline: (descriptor: GPUComputePipelineDescriptor) => {
-      pipelines.push(descriptor); return { getBindGroupLayout: () => ({ entry: descriptor.compute.entryPoint }) };
-    },
+    createSampler: () => ({}),
+    createComputePipeline: createPipeline,
+    createComputePipelineAsync: async (descriptor: GPUComputePipelineDescriptor) => createPipeline(descriptor),
     createBindGroup: (descriptor: GPUBindGroupDescriptor) => { bindGroups.push(descriptor); return descriptor; },
   } as unknown as GPUDevice;
   const targetTexture = () => new TextureMock({ size: [40, 10, 10], dimension: "3d", format: "rgba8unorm", usage: 0 }) as unknown as GPUTexture;
@@ -82,7 +86,8 @@ test("GPU builder ABI is bounded, level-ordered, and contains no CPU/readback co
   assert.match(liveSvoDerivedBuildWGSL, /textureStore\(opacityScratch/);
   assert.match(liveSvoDerivedBuildWGSL, /worklist\[2\]==0u/);
   assert.match(liveSvoDerivedBuildWGSL, /childRadiance/);
-  assert.match(liveSvoDerivedBuildWGSL, /let solid=1\.-\(1\.-dynamicSolid\)\*\(1\.-sceneSolid\)/);
+  assert.match(liveSvoDerivedBuildWGSL, /dynamicIdentity&0xffffu\)==1u[^]*sceneIdentity&0xffffu\)==1u[^]*let solid=1\.-\(1\.-dynamicSolid\)\*\(1\.-sceneSolid\)/,
+    "container glass must remain out of the cone-opacity hierarchy so the tank casts no projected cutout");
   assert.match(liveSvoDerivedBuildWGSL, /params\.laneOffsets\.z\+voxel\*4u/);
   assert.match(liveSvoDerivedBuildWGSL, /referencedChildrenReady/);
   assert.match(liveSvoDerivedBuildWGSL, /textureLoad\(opacityValidity[^]*==0u/);
@@ -99,7 +104,7 @@ test("GPU builder ABI is bounded, level-ordered, and contains no CPU/readback co
   assert.doesNotMatch(liveSvoDerivedBuildWGSL + liveSvoDerivedCopyWGSL, /mapAsync|getMappedRange|array<ScenePrimitive>|for\(var primitive/);
 });
 
-test("GPU planner unions multiple dirty streams, deduplicates by shared generation, and can initialize from all live leaves", () => {
+test("GPU planner unions multiple dirty streams, deduplicates by shared generation, and can initialize from all live leaves", async () => {
   assert.match(liveSvoDerivedWorklistWGSL, /atomicExchange\(&claims\[slot\],generation\)/);
   assert.match(liveSvoDerivedWorklistWGSL, /let allLive=params\.limits\.w!=0u/);
   assert.match(liveSvoDerivedWorklistWGSL, /generationState\[params\.source\.y\]/);
@@ -116,6 +121,7 @@ test("GPU planner unions multiple dirty streams, deduplicates by shared generati
       generationSource: { buffer: generation as unknown as GPUBuffer, offsetBytes: 8 },
       levelCount: 2, finestLevel: 4, pageCapacityPerLevel: 2,
     });
+    await planner.initializePipelines();
     assert.equal(planner.worklists.length, 2);
     assert.deepEqual(planner.worklists.map(({ indirectOffsetBytes }) => indirectOffsetBytes), [16, 272]);
     const clears: Array<[number | undefined, number | undefined]> = [], dispatches: number[] = [];
@@ -129,7 +135,9 @@ test("GPU planner unions multiple dirty streams, deduplicates by shared generati
     assert.deepEqual(dispatches, [2, 1, 2], "two bounded dirty sources are populated before one two-level finalize");
     dispatches.length = 0; planner.encodeInitial(encoder);
     assert.deepEqual(dispatches, [1, 2, 1, 2], "initial publication adds the fixed-capacity live-leaf source to the same union");
-    assert.deepEqual(clears.slice(0, 2), [[0, 32], [256, 32]]);
+    dispatches.length = 0; planner.encodeRadianceFeedback(encoder, 2, 4);
+    assert.deepEqual(dispatches, [1, 2], "feedback compacts one partitioned all-leaf source then finalizes both levels");
+    assert.deepEqual(clears.slice(1, 3), [[0, 32], [256, 32]], "slot claims clear before the two worklist headers");
     assert.deepEqual([mock.buffers.length, mock.bindGroups.length], allocations, "planner encoding allocates no resources");
     planner.destroy();
   } finally { restore(); }
@@ -167,7 +175,7 @@ test("4- and 8-cell leaves map generically into fixed 8-cell pages and arbitrary
   assert.match(liveSvoDerivedBuildWGSL, /fn leafLocal\(globalCell:vec3u,leaf:u32\)/);
 });
 
-test("GPU builder preallocates scratch resources and encodes invalidate then finest-to-coarsest indirect work", () => {
+test("GPU builder preallocates scratch resources and encodes invalidate then finest-to-coarsest indirect work", async () => {
   const restore = installGpuConstants();
   try {
     const mock = fixture();
@@ -177,6 +185,7 @@ test("GPU builder preallocates scratch resources and encodes invalidate then fin
       generationSource: { buffer: mock.treeBuffer, offsetBytes: 8 }, plannedPageCount: 4,
       finestLevel: 4,
     });
+    await builder.initializePipelines();
     assert.deepEqual(mock.textures.map((texture) => texture.descriptor.format), ["rgba8unorm", "rgba16float"]);
     assert.deepEqual(builder.scratchAtlasPages, [2, 1, 1], "scratch follows the largest dirty-level budget, not target atlas capacity");
     assert.deepEqual(mock.textures.map((texture) => texture.descriptor.size), [[20, 10, 10], [20, 10, 40]]);
@@ -206,6 +215,34 @@ test("GPU builder preallocates scratch resources and encodes invalidate then fin
     assert.equal(labels[1], "Invalidate live SVO derived pages",
       "occupied pages overwrite certified-empty pages through ordinary fail-closed rebuild ordering");
     builder.destroy(); assert.ok(mock.textures.every((texture) => texture.destroyed)); assert.ok(mock.buffers.every((buffer) => buffer.destroyed));
+  } finally { restore(); }
+});
+
+test("GPU builder encodes opt-in temporal radiance feedback without touching opacity", async () => {
+  const restore = installGpuConstants();
+  try {
+    const mock = fixture();
+    const builder = new WebGpuLiveSvoDerivedBuilder(mock.device, {
+      tree: mock.tree, nodeMips: mock.nodeMips, radiance: mock.radiance,
+      materialEmission: mock.treeBuffer, materialPbr: mock.treeBuffer, environmentLighting: mock.treeBuffer,
+      lights: mock.treeBuffer, lightCount: 1,
+      radianceFeedback: true,
+      worklists: mock.worklists, generationSource: { buffer: mock.treeBuffer, offsetBytes: 8 },
+      plannedPageCount: 4, finestLevel: 4,
+    });
+    await builder.initializePipelines();
+    assert.equal(builder.radianceFeedbackEnabled, true);
+    assert.equal(mock.buffers.length, 3, "feedback adds only its fixed parameter buffer");
+    const labels: string[] = [], indirect: number[] = [];
+    const encoder = { beginComputePass: (descriptor: GPUComputePassDescriptor) => {
+      labels.push(descriptor.label ?? ""); return { setPipeline: () => undefined, setBindGroup: () => undefined,
+        dispatchWorkgroupsIndirect: (_buffer: unknown, offset: number) => indirect.push(offset), end: () => undefined };
+    } } as unknown as GPUCommandEncoder;
+    builder.encodeRadianceFeedback(encoder);
+    assert.equal(labels.filter((label) => label === "Feed back live SVO diffuse radiance").length, 2);
+    assert.equal(labels.some((label) => label.includes("opacity")), false);
+    assert.equal(indirect.length, 10, "each level runs one feedback build and four lobe publications");
+    builder.destroy();
   } finally { restore(); }
 });
 
@@ -240,7 +277,7 @@ test("GPU valid-empty initialization certifies every planned garden page", {
     const shaderModule = device.createShaderModule({ code: liveSvoDerivedEmptyInitializationWGSL });
     const info = await shaderModule.getCompilationInfo();
     assert.deepEqual(info.messages.filter(({ type }) => type === "error"), []);
-    for (const code of [liveSvoDerivedWorklistWGSL, liveSvoDerivedBuildWGSL, liveSvoDerivedCopyWGSL]) {
+    for (const code of [liveSvoDerivedWorklistWGSL, liveSvoDerivedBuildWGSL, liveSvoDerivedCopyWGSL, liveSvoRadianceFeedbackWGSL]) {
       const validationModule = device.createShaderModule({ code });
       const validationInfo = await validationModule.getCompilationInfo();
       assert.deepEqual(validationInfo.messages.filter(({ type }) => type === "error"), []);
@@ -326,6 +363,9 @@ test("GPU initial live-derived publication covers a compact non-power-of-two hie
   const generationState = gpuBuffer(16, GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST, new Uint32Array([generation]));
   const dirty = gpuBuffer(16, GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST, new Uint32Array(4));
   const emission = gpuBuffer(16, GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST, new Uint32Array(4));
+  const pbr = gpuBuffer(96, GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST, new Uint32Array(24));
+  const environment = gpuBuffer(96, GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST, new Uint32Array(24));
+  const feedbackLights = gpuBuffer(112, GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST, new Uint32Array(28));
   const directTable = device.createTexture({ size: direct.dimensions, dimension: "3d", format: "r32uint",
     usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
   device.queue.writeTexture({ texture: directTable }, direct.words,
@@ -360,8 +400,10 @@ test("GPU initial live-derived publication covers a compact non-power-of-two hie
   });
   const builder = new WebGpuLiveSvoDerivedBuilder(device, {
     tree, nodeMips: nodeTarget, radiance: radianceTarget, materialEmission: emission,
+    materialPbr: pbr, environmentLighting: environment, lights: feedbackLights, lightCount: 0,
     worklists: planner.worklists, generationSource, plannedPageCount: plan.pages.length, finestLevel,
   });
+  await Promise.all([planner.initializePipelines(), builder.initializePipelines()]);
   const expectedLevels = gpuBuffer(plan.pages.length * 4, GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     new Uint32Array(plan.pages.map(({ key }) => key.level)));
   const ownershipResults = gpuBuffer(16, GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
@@ -393,6 +435,7 @@ test("GPU initial live-derived publication covers a compact non-power-of-two hie
       pass.dispatchWorkgroups(Math.ceil(plan.pages.length / 64)); pass.end();
     });
     builder.encode(encoder, true);
+    planner.encodeRadianceFeedback(encoder, 0, 4); builder.encodeRadianceFeedback(encoder);
     validity.forEach((texture, index) => encoder.copyTextureToBuffer({ texture }, { buffer: readbacks[index], bytesPerRow }, [plan.pages.length, 1]));
     encoder.copyBufferToBuffer(ownershipResults, 0, ownershipReadback, 0, 16);
     device.queue.submit([encoder.finish()]);
@@ -408,7 +451,7 @@ test("GPU initial live-derived publication covers a compact non-power-of-two hie
   } finally {
     builder.destroy(); planner.destroy(); readbacks.forEach((buffer) => buffer.destroy()); ownershipReadback.destroy(); validity.forEach((texture) => texture.destroy());
     radianceTextures.forEach((texture) => texture.destroy()); opacity.destroy(); directTable.destroy();
-    [control, topology, payload, generationState, dirty, emission, expectedLevels, ownershipResults].forEach((buffer) => buffer.destroy()); device.destroy();
+    [control, topology, payload, generationState, dirty, emission, pbr, environment, feedbackLights, expectedLevels, ownershipResults].forEach((buffer) => buffer.destroy()); device.destroy();
   }
 });
 

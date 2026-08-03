@@ -90,7 +90,7 @@ test("global illumination exposes image-shaping controls with cinematic balanced
     direct: DEFAULT_SVO_RENDER_TUNING.giDirectStrength,
     aperture: DEFAULT_SVO_RENDER_TUNING.giConeAperture,
     cones: DEFAULT_SVO_RENDER_TUNING.giConeCount,
-  }, { bounce: 1.5, occlusion: 0.82, environment: 0.65, direct: 1, aperture: 1.05, cones: 4 });
+  }, { bounce: 1.8, occlusion: 0.65, environment: 0.85, direct: 1, aperture: 1.05, cones: 4 });
   const normalized = normalizeSvoRenderTuning({
     ...DEFAULT_SVO_RENDER_TUNING,
     giBounceStrength: 99, giOcclusionStrength: -1, giEnvironmentStrength: 99,
@@ -113,8 +113,8 @@ test("global illumination exposes image-shaping controls with cinematic balanced
   for (const label of ["GI bounce", "GI occlusion", "Diffuse environment", "Direct key", "GI cones", "GI cone aperture"]) {
     assert.ok(panel.includes(`label="${label}"`), `${label} is live-tunable`);
   }
-  assert.match(svoDrySceneShader, /indirect\+=select\(vec3f\(0\.0\),result\.radiance,finiteRadiance\)\*weight;[^]*let visibleThroughStatic=select\(1\.0,result\.transmittance,finiteVisibility\);[^]*visibility\+=select\(visibleThroughStatic,0\.0,rigidBlocked\)\*weight/,
-    "one fail-soft GI gather must supply both bounced light and broad occlusion");
+  assert.match(svoDrySceneShader, /if\(!finiteRadiance\|\|!finiteVisibility\)\{[^]*return DryGlobalIllumination\(vec3f\(0\.0\),1\.0,0u\);\}[^]*indirect\+=result\.radiance\*weight;[^]*let visibleThroughStatic=result\.transmittance;[^]*visibility\+=select\(visibleThroughStatic,0\.0,rigidBlocked\)\*weight/,
+    "one validated GI gather must supply both bounced light and broad occlusion");
   assert.match(svoDrySceneShader, /direct\*directScale\+indirectDiffuse/);
   assert.match(svoDrySceneShader, /let directScale=dry\.giLighting\.w/,
     "live analytic direct lighting must not change when derived GI pages become ready");

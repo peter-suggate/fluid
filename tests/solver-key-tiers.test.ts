@@ -206,7 +206,12 @@ test("render-only authoring never reaches the solver identity", () => {
     scene.scenery = {
       palettes: {},
       nodes: [
-        { kind: "floor-shell", id: "shell", materialModel: "default-floor", floor: { colorLinear: [.6, .6, .6] } },
+        {
+          kind: "room-shell", id: "shell", materialModel: "room",
+          floor: { colorLinear: [.6, .6, .6] },
+          wall: { colorLinear: [.55, .55, .55] },
+          ceiling: { colorLinear: [.65, .65, .65] },
+        },
         {
           kind: "box", id: "box-1", place: { units: "metres", position: { x: 0, y: 0.1, z: 0 } },
           halfSize: { x: 0.05, y: 0.05, z: 0.05 }, material: { colorLinear: [0.4, 0.4, 0.4] },

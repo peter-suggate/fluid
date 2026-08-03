@@ -133,6 +133,84 @@ export function terrainIsSculpted(terrain: TerrainDescription | undefined): terr
 }
 
 /**
+ * Clearance every ray marcher leaves above the tallest ground sample before it
+ * starts looking for the surface. Small enough that the bracket is not mostly
+ * empty sky, large enough that a ray entering exactly at the crest still starts
+ * outside the solid.
+ */
+export const TERRAIN_CEILING_MARGIN_M = 0.05;
+
+export interface TerrainGridExtent {
+  /** Lowest and highest sample, and therefore of the bilinear surface itself. */
+  minimum_m: number;
+  maximum_m: number;
+  /**
+   * Lipschitz bound on |grad h|, in metres of rise per metre of run.
+   *
+   * Bilinear interpolation is a convex combination along each axis, so the
+   * surface's slope inside a cell never exceeds the largest slope along that
+   * cell's edges, and the largest edge slope in the whole grid therefore bounds
+   * the whole surface. That is what makes a ray march over sculpted ground
+   * *provably* unable to step over a feature: the field y - h(p(t)) changes by
+   * at most |rd.y| + slopeBound * |rd.xz| per metre of ray, so a step of
+   * |field| divided by that quantity cannot cross a root.
+   */
+  slopeBound: number;
+}
+
+/**
+ * One pass over a sculpted grid, cached on the grid object.
+ *
+ * `bakePondVesselTerrain` produces ~56k samples for the hero pond and the
+ * ceiling is wanted per frame by the renderer and per publication by the voxel
+ * planner, so this is memoized the same way `sectionModulation` memoizes the
+ * pond's per-lobe modulation: keyed on identity in a `WeakMap`, because the
+ * grid is immutable once baked and a brush stroke returns a new one.
+ */
+const gridExtentCache = new WeakMap<TerrainGrid, TerrainGridExtent>();
+export function terrainGridExtent(grid: TerrainGrid): TerrainGridExtent {
+  const cached = gridExtentCache.get(grid);
+  if (cached) return cached;
+  const { nx, nz } = grid.size;
+  let minimum_m = Infinity, maximum_m = -Infinity, largestRise = 0;
+  for (let j = 0; j < nz; j += 1) for (let i = 0; i < nx; i += 1) {
+    const height = grid.heights_m[i + nx * j] ?? 0;
+    if (height < minimum_m) minimum_m = height;
+    if (height > maximum_m) maximum_m = height;
+    if (i + 1 < nx) largestRise = Math.max(largestRise, Math.abs((grid.heights_m[i + 1 + nx * j] ?? 0) - height));
+    if (j + 1 < nz) largestRise = Math.max(largestRise, Math.abs((grid.heights_m[i + nx * (j + 1)] ?? 0) - height));
+  }
+  // Both axes can be that steep at once, so the gradient magnitude bound is the
+  // diagonal of the per-axis bound rather than the bound itself.
+  const extent: TerrainGridExtent = {
+    minimum_m: Number.isFinite(minimum_m) ? minimum_m : 0,
+    maximum_m: Number.isFinite(maximum_m) ? maximum_m : 0,
+    slopeBound: Math.SQRT2 * largestRise / grid.spacing_m,
+  };
+  gridExtentCache.set(grid, extent);
+  return extent;
+}
+
+/**
+ * Upper bound on the ground, plus the bracket margin. The one definition every
+ * consumer uses, which is the whole point of it existing.
+ *
+ * Both ray-marching mirrors used to compute this as `baseHeight_m` plus the sum
+ * of the analytic mound amounts. For a sculpted terrain that sum is zero — the
+ * analytic fields are only provenance once a grid is present — so the bracket
+ * began 5 cm above the *base* ground and clipped away every sculpted feature
+ * taller than that. The hero pond's coping is 5.5 cm, so the bug removed
+ * precisely the thing the vessel exists to draw. The voxelization candidate
+ * bounds had the same hole and stopped a brick short of the crest.
+ */
+export function terrainCeiling(terrain: TerrainDescription | undefined): number {
+  if (!terrain) return TERRAIN_CEILING_MARGIN_M;
+  if (terrain.grid) return terrainGridExtent(terrain.grid).maximum_m + TERRAIN_CEILING_MARGIN_M;
+  const mounds = terrain.features.reduce((sum, feature) => sum + (feature.kind === "mound" ? feature.amount_m : 0), 0);
+  return terrain.baseHeight_m + mounds + TERRAIN_CEILING_MARGIN_M;
+}
+
+/**
  * Bake per-column ground heights (metres) at cell centres of an nx-by-nz
  * lattice spanning the container footprint. Row-major, index x + nx * z —
  * the layout every solver's column texture uses.

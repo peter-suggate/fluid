@@ -145,7 +145,7 @@ test("GLOBAL lighting and its visibility effects write independent flags", () =>
       "GLOBAL must not reconstruct an unwritten reduced-radiance plane as black");
     const giParams = new Float32Array(params().at(-1)!.words.buffer);
     assert.deepEqual([...giParams.slice(SVO_DRY_SCENE_PARAMS_LAYOUT.giLightingWordOffset,
-      SVO_DRY_SCENE_PARAMS_LAYOUT.giLightingWordOffset + 4)], [1.5, 0.8199999928474426, 0.6499999761581421, 1]);
+      SVO_DRY_SCENE_PARAMS_LAYOUT.giLightingWordOffset + 4)], [1.7999999523162842, 0.6499999761581421, 0.8500000238418579, 1]);
     assert.deepEqual([...giParams.slice(SVO_DRY_SCENE_PARAMS_LAYOUT.giConesWordOffset,
       SVO_DRY_SCENE_PARAMS_LAYOUT.giConesWordOffset + 2)], [1.0499999523162842, 4]);
     renderer.setLightingOptions({ shadowsEnabled: true, ambientOcclusionEnabled: false });

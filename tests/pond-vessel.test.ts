@@ -4,15 +4,14 @@ import test from "node:test";
 import {
   HERO_GARDEN_CELL_M,
   HERO_GARDEN_CONTAINER,
-  HERO_GARDEN_FREEBOARD_M,
+  HERO_GARDEN_WATER_BELOW_GROUND_M,
   HERO_GARDEN_HOSE_MOUTH_M,
   HERO_GARDEN_VESSEL,
   HERO_GARDEN_WATERLINE_M,
   createHeroGardenHoseScene,
 } from "../lib/hero-garden-scene";
 import { validateScene } from "../lib/model";
-import { sceneDocument } from "../lib/scene-definition";
-import { getSceneDefinition } from "../lib/scenes";
+import { planSceneRuntime } from "../lib/scene-runtime";
 import { sampleTerrainGrid, terrainHeightAt, validateTerrain } from "../lib/terrain";
 import {
   bakePondVesselTerrain,
@@ -34,6 +33,9 @@ const PLAIN: PondVesselSpec = {
   innerFace_m: 0.15,
   lobes: 8,
   wobble: 0,
+  sectionHeightVariation: 0,
+  sectionWidthVariation: 0,
+  relief_m: 0,
   seed: 1,
 };
 
@@ -74,15 +76,45 @@ test("the plan curve closes, and the wobble moves it without pinching the rim", 
   const wobbled = pondVesselPlanCurve({ ...PLAIN, wobble: 0.12, seed: 7 });
   const radii = wobbled.map(([x, z]) => Math.hypot(x, z));
   assert.ok(Math.max(...radii) - Math.min(...radii) > 0.02, "the seed must actually move the outline");
-  // The wobble is applied to the curve, not to the field, so the coping keeps
-  // its section all the way round. Sampling the crest height along the curve is
-  // the direct test of that: a field-space wobble would thin the rim on turns.
-  const crest = HERO_GARDEN_VESSEL.groundHeight_m + HERO_GARDEN_VESSEL.rimHeight_m;
-  const heroCurve = pondVesselPlanCurve(HERO_GARDEN_VESSEL);
-  for (const [x, z] of heroCurve) {
-    const height = pondVesselHeightAt(HERO_GARDEN_VESSEL, heroCurve, x, z);
-    assert.ok(Math.abs(height - crest) < 1e-3, `crest height ${height} drifts from ${crest} at (${x}, ${z})`);
+});
+
+test("the coping's section varies as it runs, which is what stops it reading as an extrusion", () => {
+  // The first version of this generator held the crest to a constant height and
+  // had a test pinning it there. That is the wrong invariant: the eye reads an
+  // unvarying crest line long before it reads a wandering outline, so a rim with
+  // a constant section looks machined however much the plan wobbles.
+  const curve = pondVesselPlanCurve(HERO_GARDEN_VESSEL);
+  const crests = curve.map(([x, z]) => pondVesselHeightAt(HERO_GARDEN_VESSEL, curve, x, z));
+  const nominal = HERO_GARDEN_VESSEL.groundHeight_m + HERO_GARDEN_VESSEL.rimHeight_m;
+  const swing = Math.max(...crests) - Math.min(...crests);
+  // Enough to see — several millimetres on a 55 mm rim...
+  assert.ok(swing > 0.004, `the crest barely moves: ${(swing * 1e3).toFixed(2)} mm`);
+  // ...and not so much that the rim stops being one continuous form.
+  assert.ok(swing < 0.5 * HERO_GARDEN_VESSEL.rimHeight_m, `the crest swings wildly: ${(swing * 1e3).toFixed(2)} mm`);
+  for (const height of crests) {
+    assert.ok(Math.abs(height - nominal) < 0.4 * HERO_GARDEN_VESSEL.rimHeight_m,
+      `crest height ${height} leaves the authored band around ${nominal}`);
   }
+});
+
+test("a tank fill wets the basin and nothing else", () => {
+  // The property the scene failed to load without. `tank-fill` wets every column
+  // the waterline clears, so ground outside the coping that sits below it floods
+  // the whole container with a film two cells deep — a degenerate topology the
+  // sparse authority rejects outright, and not what the reference shows either.
+  const scene = createHeroGardenHoseScene();
+  const curve = pondVesselPlanCurve(HERO_GARDEN_VESSEL);
+  const clearance_m: number[] = [];
+  for (let x = -0.9; x <= 0.9; x += 0.01) for (let z = -0.6; z <= 0.6; z += 0.01) {
+    // Outside the coping's outer foot, with a cell of margin.
+    if (pondVesselPlanDistance(curve, x, z) < 1.5 * HERO_GARDEN_VESSEL.rimHalfWidth_m) continue;
+    clearance_m.push(terrainHeightAt(scene.terrain, x, z) - HERO_GARDEN_WATERLINE_M);
+  }
+  assert.ok(clearance_m.length > 1000, "the sweep must actually reach the ground outside the pond");
+  const worst = Math.min(...clearance_m);
+  assert.ok(worst > 0, `ground outside the pond dips ${(worst * 1e3).toFixed(1)} mm under the waterline`);
+  // And by more than a cell, so the fill cannot wet it through rounding.
+  assert.ok(worst > HERO_GARDEN_CELL_M, `only ${(worst * 1e3).toFixed(1)} mm of clearance, under one cell`);
 });
 
 test("the plan distance is signed, and zero on the curve", () => {
@@ -118,7 +150,7 @@ test("the rim is closed above the waterline all the way round", () => {
   const curve = pondVesselPlanCurve(HERO_GARDEN_VESSEL);
   for (const [x, z] of curve) {
     const height = pondVesselHeightAt(HERO_GARDEN_VESSEL, curve, x, z);
-    assert.ok(height >= HERO_GARDEN_WATERLINE_M + HERO_GARDEN_FREEBOARD_M - 1e-6,
+    assert.ok(height >= HERO_GARDEN_WATERLINE_M + HERO_GARDEN_WATER_BELOW_GROUND_M - 1e-6,
       `rim at (${x}, ${z}) stands only ${(height - HERO_GARDEN_WATERLINE_M).toFixed(4)} m above the waterline`);
   }
 });
@@ -152,10 +184,33 @@ test("the bake reproduces the generator on the lattice the solver reads", () => 
   assert.ok(worst < 2e-3, `bake departs from the generator by ${(worst * 1e3).toFixed(2)} mm`);
 });
 
+test("water is one flag, and turning it on changes nothing else", () => {
+  const dry = createHeroGardenHoseScene();
+  const wet = createHeroGardenHoseScene({ water: true });
+  assert.deepEqual(validateScene(dry), []);
+  assert.deepEqual(validateScene(wet), []);
+
+  // The point of the switch. If the two documents could differ anywhere else,
+  // the dry scene would be a second scene wearing the first one's name, and
+  // feedback given on it would be feedback on something that is not the hero.
+  assert.equal(planSceneRuntime(dry).fluidSolver, false, "the scene opens without a solver");
+  assert.equal(planSceneRuntime(wet).fluidSolver, true);
+  assert.deepEqual(
+    { ...dry, systems: undefined },
+    { ...wet, systems: undefined },
+    "dry and wet must be the same document apart from systems.fluid",
+  );
+  assert.deepEqual(dry.systems, { ...wet.systems, fluid: false });
+
+  // Including the water itself: the fill and the jet are authored in both, so
+  // turning it on fills the pond that was designed rather than an empty tank.
+  assert.ok(dry.container.fillFraction > 0 && dry.fluid.inflow, "the dry document still describes its water");
+});
+
 test("the hero document is valid, deterministic, and holds its water", () => {
-  const scene = createHeroGardenHoseScene();
+  const scene = createHeroGardenHoseScene({ water: true });
   assert.deepEqual(validateScene(scene), []);
-  assert.equal(JSON.stringify(scene), JSON.stringify(createHeroGardenHoseScene()), "the bake must be deterministic");
+  assert.equal(JSON.stringify(scene), JSON.stringify(createHeroGardenHoseScene({ water: true })), "the bake must be deterministic");
 
   // Every container dimension is a whole number of bricks, so the sparse domain
   // has no partial brick at a wall.
@@ -207,17 +262,4 @@ test("the drawn hose and the injected jet leave from the same place, pointing th
     const previous = runs[index - 1];
     assert.deepEqual((node as { from: unknown }).from, (previous as { to: unknown }).to, "the hose must not break between segments");
   }
-});
-
-test("the settling lane runs the hero vessel, not a second scene", () => {
-  const definition = getSceneDefinition("hero-garden-hose");
-  const hero = sceneDocument(definition);
-  const still = sceneDocument(definition, "gpu-smoke");
-  assert.equal(still.fluid.inflow, undefined, "the hose must be shut off");
-  // The vessel itself has to be untouched, or the lane proves a basin the
-  // product never opens. `terrain` carries the whole bake, so comparing it is
-  // comparing every one of the generated heights.
-  assert.deepEqual(still.terrain, hero.terrain);
-  assert.equal(still.container.fillFraction, hero.container.fillFraction);
-  assert.deepEqual(still.scenery, hero.scenery);
 });

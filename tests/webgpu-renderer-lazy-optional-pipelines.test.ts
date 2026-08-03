@@ -23,14 +23,16 @@ test("applicable GLOBAL startup requests the sparse renderer", () => {
   ]) assert.doesNotMatch(initializeSource, new RegExp(optionalConstructor), `${optionalConstructor} must be deferred`);
 });
 
-test("source-free water presentation cannot create an SVO startup activity", () => {
+test("every water presentation requests its authored SVO shell", () => {
   assert.deepEqual(optionalRendererPipelineRequests(
-    undefined, "smooth", false, false, false, false, false, false,
-  ), []);
-  assert.match(rendererSource, /const sparsePresentationRequired = !sceneRuntime\.fluidSolver[\s\S]*sparseVoxelSceneSource/,
-    "applicability must be derived from the scene authority before optional compilation is requested");
+    undefined, "smooth", false, false,
+  ), ["svo-dry-scene"]);
+  assert.match(rendererSource, /const sparsePresentationRequired = true/,
+    "the dry scene is required even when the fluid method has no sparse hierarchy");
+  assert.match(rendererSource, /solver\.sparseVoxelSceneSource[\s\S]*WebGPULiveSvoScene\.create[\s\S]*return \{solver,sidecar\}/,
+    "a renderer-owned source must fill the method capability gap");
   assert.match(rendererSource, /if \(sparsePresentationRequired\) requested\.push\("svo-dry-scene"\)/,
-    "an inapplicable sparse presentation must have no task to become stranded");
+    "the authored shell must start the sparse presentation task");
 });
 
 test("each optional pipeline has an explicit first-use condition", () => {

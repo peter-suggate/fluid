@@ -59,9 +59,15 @@ test("the room is an enclosure and a light, and nothing else", () => {
   const [shell, light] = nodes;
   assert.equal(shell.kind === "room-shell" && shell.materialModel, "room",
     "an unstaged room must not borrow a staged set's material model");
+  if (shell.kind === "room-shell") {
+    assert.deepEqual([shell.floor, shell.wall, shell.ceiling], [
+      { palette: "white", value: .9 },
+      { colorLinear: [1, 1, 1] },
+      { palette: "white", value: .9 },
+    ]);
+  }
   assert.ok(light.tags?.includes("light"), "an unlit room is a black frame");
-  assert.equal(nodes.some((node) => node.id.startsWith("cyc/") || node.id.startsWith("calibration/")), false,
-    "the calibration studio's cyclorama and step wedge belong to scenes that read numbers off water");
+  assert.equal(nodes.length, 2, "the plain room must not acquire set dressing");
 });
 
 test("a fresh scene has no tank in it", () => {

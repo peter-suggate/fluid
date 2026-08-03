@@ -418,19 +418,36 @@ const globalFinePublication = defineDiagnosticPackImplementation({
   }),
 });
 
-function raster(diagnostics: UnknownRecord, which: "initial" | "final"): UnknownRecord | undefined {
+/**
+ * The `which` raster together with the global-fine generation it was actually
+ * captured against. Checkpoint-authored lanes deliberately avoid redundant
+ * t=0/final raster captures, so their first and last checkpoint are the
+ * corresponding closure evidence. `scene-water-raster-integrity-diagnostic`
+ * already reads them that way; without the same fallback here every metric in
+ * this pack resolves to `undefined` on those lanes and reports as a physics
+ * failure.
+ *
+ * The pair has to travel together. A checkpoint raster carries the generation
+ * that was valid at *its* checkpoint, so grading it against the lane's t=0
+ * publication compares two different moments and can only match by accident —
+ * on `minimal-power-dam-break` the first checkpoint is generation 27 and the
+ * initial publication is 2, and `initial-authority` failed on that alone.
+ */
+function rasterEvidence(diagnostics: UnknownRecord, which: "initial" | "final"): {
+  readonly raster: UnknownRecord | undefined;
+  readonly generation: UnknownRecord | undefined;
+} {
   const explicit = recordPath(diagnostics, "raster", which)
     ?? recordPath(diagnostics, `${which}GlobalFineRaster`);
-  if (explicit !== undefined) return explicit;
-  // Checkpoint-authored lanes deliberately avoid redundant t=0/final raster
-  // captures, so their first and last checkpoint are the corresponding closure
-  // evidence. `scene-water-raster-integrity-diagnostic` already reads them that
-  // way; without the same fallback here every metric in this pack resolves to
-  // `undefined` on those lanes and reports as a physics failure.
+  if (explicit !== undefined) return { raster: explicit, generation: generation(diagnostics, which) };
   const checkpoints = (arrayPath(diagnostics, "raster", "checkpoints")
     ?? arrayPath(diagnostics, "globalFineGenerationCheckpoints") ?? [])
     .map(recordValue).filter((value) => value !== undefined);
-  return recordPath(which === "initial" ? checkpoints[0] : checkpoints.at(-1), "raster");
+  const checkpoint = which === "initial" ? checkpoints[0] : checkpoints.at(-1);
+  return {
+    raster: recordPath(checkpoint, "raster"),
+    generation: recordPath(checkpoint, "globalFineGeneration") ?? generation(diagnostics, which),
+  };
 }
 
 const authoritativeWaterRaster = defineDiagnosticPackImplementation({
@@ -439,7 +456,7 @@ const authoritativeWaterRaster = defineDiagnosticPackImplementation({
   evaluate: (context) => selected(context).flatMap(([method, diagnostics]) => {
     const findings: RuntimeDiagnosticFinding[] = [];
     for (const which of ["initial", "final"] as const) {
-      const value = raster(diagnostics, which), published = generation(diagnostics, which);
+      const { raster: value, generation: published } = rasterEvidence(diagnostics, which);
       const reverse = recordPath(value, "reverseView");
       const minimumFront = parameterNumber(context, "minimumFrontInterfacePixels", 1);
       const minimumBack = parameterNumber(context, "minimumBackInterfacePixels", 1);

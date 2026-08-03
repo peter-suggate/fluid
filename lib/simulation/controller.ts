@@ -527,6 +527,37 @@ class SimulationController {
     });
   }
 
+  /**
+   * Hand the document to the fluid solver, or take it back.
+   *
+   * The one control that moves a scene across `planSceneRuntime`'s fluid gate,
+   * and so between two different things being attached to the device: a solver,
+   * or the live sparse scene. It is a document edit rather than a runtime knob —
+   * `systems.fluid` is in the renderer's own solver key — so it goes on the undo
+   * stack and through `reset`, exactly as opening a scene card does.
+   *
+   * Turning water *off* is how a scene whose solver will not come up is still
+   * worth opening: the set renders, and nothing waits on a fluid authority. The
+   * fill, the initial condition and the jet are left untouched in both
+   * directions, so turning it back on restores the pond that was authored rather
+   * than an empty tank.
+   */
+  setFluidSystem(enabled: boolean) {
+    const scene = useSceneStore.getState().scene;
+    if ((scene.systems?.fluid !== false) === enabled) return;
+    const label = enabled ? "Enable water" : "Disable water";
+    this.announceGPURebuild(label);
+    this.recordHistory(label.toLowerCase());
+    const next = cloneScene(scene);
+    next.systems = { ...next.systems, fluid: enabled };
+    this.reset(next);
+    const runtime = useRuntimeStore.getState();
+    runtime.setRunState("paused");
+    runtime.setNotice(enabled
+      ? "Water enabled · solver rebuilding, paused at t = 0"
+      : "Water off · live SVO scene, so nothing waits on a solver");
+  }
+
   setQuality(quality: Parameters<ReturnType<typeof useMethodStore.getState>["setQuality"]>[0]) {
     this.announceGPURebuild(`Apply ${quality} quality`);
     useMethodStore.getState().setQuality(quality);

@@ -104,3 +104,33 @@ test("fixed radiance atlas exposes storage targets without CPU content uploads",
     owner.destroy(); assert.ok(mock.buffers.every((buffer) => buffer.destroyed)); assert.ok(mock.textures.every((texture) => texture.destroyed));
   } finally { restore(); }
 });
+
+test("a page-validity capacity past the 2D width limit wraps onto rows", () => {
+  const restore = installGpuConstants();
+  try {
+    const mock = mockDevice();
+    // Four texels per row, so ten pages need three. On real hardware the same
+    // arithmetic runs at 16 384, where the hero pond's 5 mm lattice asks for
+    // 23 545 slots and Dawn used to refuse the texture outright.
+    Object.assign(mock.device, { limits: { maxTextureDimension2D: 4 } });
+    const state = new WebGpuLiveSvoDerivedPageState(mock.device, 10, "wrapped");
+    assert.deepEqual(mock.textures[0].descriptor.size, [4, 3]);
+    // A run of slots is not a run of texels once the layout wraps, so the upload
+    // is by whole rows; slot 9 lives on row 2 and only that row is written.
+    state.begin({ generation: 1, dirtySlots: [9] });
+    const [destination, data, layout, size] = mock.textureWrites[0] as [
+      GPUTexelCopyTextureInfo, Uint32Array, GPUTexelCopyBufferLayout, GPUExtent3D,
+    ];
+    assert.deepEqual(destination.origin, [0, 2]);
+    assert.deepEqual(size, [4, 1]);
+    assert.equal(layout.bytesPerRow, 16);
+    assert.equal(data.length, 4, "the padded tail of the last row is uploaded as the zero generation");
+    assert.equal(state.availability(9), "unavailable");
+    assert.equal(state.availability(10), "unavailable", "padding slots are outside the declared capacity");
+    state.markComplete(9);
+    assert.equal(state.publish().published, true);
+    assert.equal(state.availability(9), "current");
+    assert.throws(() => state.begin({ generation: 2, dirtySlots: [10] }), /exceeds fixed capacity/);
+    state.destroy();
+  } finally { restore(); }
+});

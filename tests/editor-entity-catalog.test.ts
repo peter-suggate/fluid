@@ -113,10 +113,10 @@ test("a click resolves to whatever is nearest, so the tank is what is left", () 
   assert.equal(corner?.selection.kind, "tank", "the floor is the tank, and it is behind everything");
 
   // Through the reservoir itself, the water is in front and wins. Started
-  // inside the studio rather than five metres outside it: the cyclorama stands
-  // between, and it is scenery a click can now reach.
+  // inside the studio rather than five metres outside it so the room shell does
+  // not become the nearer hit.
   const water = entityAtRay(context(scene), {
-    origin: { x: 0.9 * box.min.x, y: 0.1 * box.max.y, z: box.min.z - 0.5 },
+    origin: { x: 0.5 * box.min.x, y: 0.1 * box.max.y, z: box.min.z - 0.5 },
     direction: { x: 0, y: 0, z: 1 },
   });
   assert.equal(water?.selection.kind, "fluid-body");

@@ -38,7 +38,11 @@ function mockDevice() {
     queue: {
       writeBuffer: (...args: unknown[]) => bufferWrites.push(args),
       writeTexture: (destination: GPUTexelCopyTextureInfo, data: GPUAllowSharedBufferSource, layout: GPUTexelCopyBufferLayout, size: GPUExtent3D) => {
-        textureWrites.push({ destination, data: new Uint8Array(data as ArrayBuffer), layout, size });
+        // Copy the bytes, not the elements: a Uint32Array source through
+        // `new Uint8Array(view)` would truncate every word to its low byte and
+        // silently make a word-layout assertion untestable.
+        const view = data as ArrayBufferView;
+        textureWrites.push({ destination, data: new Uint8Array(view.buffer.slice(view.byteOffset, view.byteOffset + view.byteLength)), layout, size });
       },
     },
     createSampler: () => sampler,
@@ -104,6 +108,50 @@ test("WebGPU owner publishes an empty complete generation without zero-sized res
   assert.deepEqual(mock.textures[2].descriptor.size, [1, 1, 1]);
   assert.equal(mock.buffers[0].descriptor.size, 32);
   owner.destroy();
+});
+
+test("a directory past the 2D height limit wraps into columns without repacking", () => {
+  Object.assign(globalThis, { GPUTextureUsage: { TEXTURE_BINDING: 4, COPY_DST: 2 }, GPUBufferUsage: { STORAGE: 128, COPY_DST: 8 } });
+  const mock = mockDevice();
+  // A device that can only address four rows, so six pages must wrap. On real
+  // hardware the same arithmetic runs at 16 384 rows, where the hero pond's
+  // 5 mm lattice asks for 23 545 pages and used to be refused outright.
+  Object.assign(mock.device, { limits: { maxTextureDimension2D: 4 } });
+  const owner = new WebGpuSvoNodeMipPyramid(mock.device);
+  const plan = planSvoNodeMipPyramid({ generation: 1, occupiedPages: [[0, 0, 0], [1, 0, 0], [0, 1, 0], [1, 1, 0]], levelCount: 2 });
+  assert.equal(plan.pages.length, 5);
+  owner.beginGeneration(plan);
+  assert.deepEqual(mock.textures[1].descriptor.size, [4, 3], "two page columns of three rows");
+  const directory = mock.textureWrites[0];
+  assert.deepEqual(directory.size, [4, 3]);
+  assert.equal(directory.layout.bytesPerRow, 2 * SVO_NODE_MIP_LAYOUT.directoryBytesPerPage);
+  assert.equal(directory.layout.rowsPerImage, 3);
+  // Slot order along the row is what lets the storage buffer and the texture
+  // share one array, and it is what keeps the directory sorted by (level,
+  // morton) in page-index order for the marcher's binary search.
+  const words = new Uint32Array(directory.data.buffer, directory.data.byteOffset, directory.data.byteLength / 4);
+  for (const page of plan.pages) {
+    const base = page.slot * WEBGPU_SVO_NODE_MIP_LAYOUT.directoryWordsPerPage;
+    assert.equal(words[base], plan.generation, `page ${page.slot} must sit at linear slot order regardless of the wrap`);
+    assert.equal(words[base + 1], page.key.level);
+    assert.equal(words[base + 7], page.slot);
+  }
+  assert.equal(words.length, 2 * 3 * WEBGPU_SVO_NODE_MIP_LAYOUT.directoryWordsPerPage,
+    "the unused tail of the last row is zero, which reads back as generation 0 and therefore as a miss");
+  owner.destroy();
+});
+
+test("the direct page table survives a page count that overflows an argument list", () => {
+  // A 3 mm hero lattice plans 108 421 pages. Spreading that many into
+  // `Math.max` throws RangeError: Maximum call stack size exceeded, which the
+  // world catches and reports as "derived lighting unavailable" — a CPU limit
+  // wearing a device limit's clothes.
+  const occupiedPages = Array.from({ length: 200_000 }, (_, index) => [index, 0, 0] as const);
+  const plan = planSvoNodeMipPyramid({ generation: 1, occupiedPages, levelCount: 1 });
+  assert.equal(plan.pages.length, 200_000);
+  const table = createWebGpuSvoNodeMipDirectPageTable(plan, 262_144);
+  assert.equal(table.ready, true);
+  assert.deepEqual(table.dimensions, [200_000, 1, 1]);
 });
 
 const modulePath = process.env.WEBGPU_NODE_MODULE;

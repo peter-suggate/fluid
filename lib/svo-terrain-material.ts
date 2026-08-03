@@ -1,6 +1,40 @@
 import type { SceneDescription } from "./model";
+import { walkSceneryNodes } from "./scenery-graph";
 import { VOXEL_MATERIAL_IDS, type LinearRgb } from "./voxel-scene";
 import type { SvoVec3 } from "./webgpu-svo-traversal";
+
+/**
+ * Which closure the ground wears.
+ *
+ * `garden-terrain` is everything below in this file. `porcelain` is its
+ * absence: the terrain material record carries the flat function ID and one
+ * albedo, no metadata is published, and the shader's terrain-policy branch is
+ * therefore never taken. Selecting it is a scene decision, made once by the
+ * terrain shell node, so the ground the water rests in and the ground the
+ * camera sees cannot disagree about which one it is.
+ */
+export type SvoTerrainSurfaceModel = "garden-terrain" | "porcelain";
+
+/**
+ * Unglazed white porcelain, in scene-linear.
+ *
+ * Below the paper white the rest of the sets are lit against, because a ground
+ * plane fills most of the frame and an albedo that high turns every bounce into
+ * a second light source. Faintly warm, which is what separates fired clay from
+ * a render's default grey.
+ */
+export const SVO_PORCELAIN_TERRAIN_BASE_COLOR_LINEAR: LinearRgb = [0.80, 0.792, 0.775];
+export const SVO_PORCELAIN_TERRAIN_ROUGHNESS = 0.62;
+
+/** The ground's closure, as declared by the scene's terrain shell. */
+export function sceneTerrainSurfaceModel(
+  scene: Pick<SceneDescription, "scenery">,
+): SvoTerrainSurfaceModel {
+  for (const { node } of walkSceneryNodes(scene.scenery?.nodes ?? [])) {
+    if (node.kind === "terrain-shell") return node.materialModel === "porcelain" ? "porcelain" : "garden-terrain";
+  }
+  return "garden-terrain";
+}
 
 /** Version of the binding-free garden terrain material contract. */
 export const SVO_TERRAIN_MATERIAL_VERSION = 1;

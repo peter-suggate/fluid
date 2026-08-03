@@ -176,7 +176,7 @@ export const defaultScene: SceneDescription = sharedDefaultScene as SceneDescrip
 export const defaultCamera: CameraState = {
   azimuth_rad: 0.72,
   elevation_rad: 0.42,
-  distance_m: 2.65,
+  distance_m: 1.9,
   target_m: { x: 0, y: 0.38, z: 0 }
 };
 

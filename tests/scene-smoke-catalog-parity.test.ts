@@ -26,26 +26,6 @@ const VARIANT_DELTAS: Readonly<Record<string, Readonly<Record<string, unknown>>>
   "deep-water-ab/gpu-smoke": {
     "numerics.maxDt_s": 1 / 30,
   },
-  // Removing an object removes every leaf under it, which is why shutting the
-  // hose off is eleven entries rather than one. Spelled out rather than
-  // special-cased: the whole point of this table is that a lane cannot change
-  // anything it has not written down.
-  "hero-garden-hose/gpu-smoke": {
-    "fluid.inflow.center_m.x": undefined,
-    "fluid.inflow.center_m.y": undefined,
-    "fluid.inflow.center_m.z": undefined,
-    "fluid.inflow.radius_m": undefined,
-    "fluid.inflow.length_m": undefined,
-    "fluid.inflow.velocity_m_s.x": undefined,
-    "fluid.inflow.velocity_m_s.y": undefined,
-    "fluid.inflow.velocity_m_s.z": undefined,
-    "fluid.inflow.start_s": undefined,
-    "fluid.inflow.end_s": undefined,
-    "fluid.inflow.ramp_s": undefined,
-    "fluid.surfaceTension_N_m": 0,
-    "numerics.fixedDt_s": 1 / 120,
-    "numerics.maxDt_s": 1 / 120,
-  },
   "garden-pond/gpu-smoke": {
     "fluid.surfaceTension_N_m": 0,
     "numerics.fixedDt_s": 1 / 120,

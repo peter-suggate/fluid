@@ -44,6 +44,7 @@ import {
 } from "./webgpu-svo-node-mip-pyramid";
 import { WebGpuLiveSvoTetrahedralRadiance } from "./webgpu-svo-tetrahedral-radiance";
 import {
+  LIVE_SVO_RADIANCE_FEEDBACK,
   WebGpuLiveSvoDerivedBuilder,
   WebGpuLiveSvoDerivedWorklistPlanner,
   liveSvoPlanBasePages,
@@ -59,6 +60,7 @@ import { VOXEL_MATERIAL_IDS, materialIdForRigidShape, packVoxelDebugMaterialTabl
 import { buildEnvironmentProxyCatalog, environmentProxyPrimitives, type EnvironmentProxyPrimitive } from "./voxel-environments";
 import {
   SparseSceneProxyVoxelizer,
+  SPARSE_SCENE_MAINTENANCE_INCOMPLETE_OVERFLOW,
   SPARSE_SCENE_MAINTENANCE_STATE_WORDS,
   sparseScenePrimitiveBounds,
   sparseScenePrimitiveForProxy,
@@ -92,6 +94,8 @@ export interface OctreeSparseBrickWorldOptions {
   haloCells?: number;
   /** Keep the independent deep-liquid topology worklist. */
   bulkResidency?: boolean;
+  /** Temporally amortized diffuse-radiance feedback; on by default. */
+  radianceFeedback?: boolean;
   /** Velocity-swept residency support plus downstream neighbor activation. */
   brickPreActivation?: boolean;
   /**
@@ -601,7 +605,14 @@ fn finalizeScene() {
   let requested = sceneMaintenance[maintenanceOffset + ${SPARSE_SCENE_MAINTENANCE_STATE_WORDS.requestedRevision}u];
   let completed = sceneMaintenance[maintenanceOffset + ${SPARSE_SCENE_MAINTENANCE_STATE_WORDS.completedRevision}u];
   let overflow = sceneMaintenance[maintenanceOffset + ${SPARSE_SCENE_MAINTENANCE_STATE_WORDS.overflowFlags}u];
-  if (requested == 0u || completed != requested || overflow != 0u || topologyMutation[3] != 0u) { return; }
+  // Only the overflows that left a brick holding the previous revision withhold
+  // the generation. A per-brick candidate overflow is a detail budget: the brick
+  // was rebuilt, just from fewer primitives than overlapped it, and refusing the
+  // whole publication for it takes every derived-lighting page down with it.
+  // See SPARSE_SCENE_MAINTENANCE_INCOMPLETE_OVERFLOW.
+  if (requested == 0u || completed != requested
+    || (overflow & ${SPARSE_SCENE_MAINTENANCE_INCOMPLETE_OVERFLOW}u) != 0u
+    || topologyMutation[3] != 0u) { return; }
   if (topologyMutation[0] != 0u) { state[${SPARSE_VOXEL_PUBLICATION_STATE.topologyRevision}] += 1u; }
   state[${SPARSE_VOXEL_PUBLICATION_STATE.sceneGeometryRevision}] += 1u;
   // Scene publication adds its independently-owned lane; it must never clear
@@ -678,6 +689,8 @@ export class OctreeSparseBrickWorld {
   private readonly liveDerivedBuilder?: WebGpuLiveSvoDerivedBuilder;
   private readonly liveDerivedPlannedBasePageKeys = new Set<string>();
   private liveDerivedAddressPlanValid = true;
+  private liveDerivedFeedbackPhase = 0;
+  private liveDerivedFeedbackFramesRemaining = 0;
   private liveDerivedInitial = true;
   private liveScenePrimitiveStates = new Map<string, LiveScenePrimitiveState>();
   private liveScenePrimitives = new Map<string, LiveScenePrimitiveEntry>();
@@ -864,7 +877,7 @@ export class OctreeSparseBrickWorld {
     this.lightBuffer = storageBuffer(
       device,
       "Sparse voxel authored light table",
-      lights.packedRecords.byteLength,
+      Math.max(SVO_LIGHT_RECORD_STRIDE_BYTES, lights.packedRecords.byteLength),
       lights.packedRecords,
     );
     const environmentLighting = buildOctreeSvoEnvironmentLightingPublication(scene);
@@ -1031,10 +1044,17 @@ export class OctreeSparseBrickWorld {
           nodeMips: nodeTarget,
           radiance: radianceTarget,
           materialEmission: this.materialEmissionBuffer,
+          materialPbr: this.pbrMaterialBuffer,
+          environmentLighting: this.environmentLightingBuffer,
+          lights: this.lightBuffer,
+          lightCount: lights.count,
           worklists: liveDerivedPlanner.worklists,
           generationSource: liveDerivedGenerationSource,
           plannedPageCount: mipPlan.pages.length,
           finestLevel: plan.maximumDepth,
+          worldOrigin_m: this.sceneWorldOrigin,
+          cellSize_m: this.cellSize,
+          radianceFeedback: options.radianceFeedback ?? LIVE_SVO_RADIANCE_FEEDBACK.enabledByDefault,
           label: "Unified live SVO derived-page builder",
         });
         nodeMipPyramid.acceptGpuUpdate(mipPlan.generation);
@@ -1539,7 +1559,12 @@ export class OctreeSparseBrickWorld {
       this.pendingScenePublication = undefined;
     }
     encoded = this.proxyVoxelizer.encodeMaintenance(encoder) || encoded;
-    if (!encoded) return false;
+    // Diffuse feedback continues for a bounded convergence window after the
+    // last source revision. A static room normally reaches this branch after
+    // its first publication; stopping immediately freezes phase 0 and exposes
+    // its quarter-leaf pattern, while running forever makes a complex hero
+    // scene visibly breathe and spends GPU time after convergence.
+    if (!encoded) return !deferDerived && this.encodeLiveRadianceFeedback(encoder);
     const broker = new PassBroker(encoder);
     const finalizer = broker.compute({ label: "Finalize live sparse voxel scene publication" });
     finalizer.setPipeline(this.structuralScenePipeline);
@@ -1556,6 +1581,9 @@ export class OctreeSparseBrickWorld {
     if (initializeEmpty) this.liveDerivedPlanner.encodeInitial(encoder);
     else this.liveDerivedPlanner.encode(encoder);
     this.liveDerivedBuilder.encode(encoder, initializeEmpty);
+    this.liveDerivedFeedbackFramesRemaining = this.liveDerivedBuilder.radianceFeedbackEnabled
+      ? LIVE_SVO_RADIANCE_FEEDBACK.settleFrameCount : 0;
+    this.encodeLiveRadianceFeedback(encoder);
     this.liveDerivedInitial = false;
     const nodeMip = this.nodeMipPyramid?.visibleGeneration();
     const radiance = this.tetrahedralRadiance?.visibleGeneration();
@@ -1565,6 +1593,22 @@ export class OctreeSparseBrickWorld {
       worldExtent_m: this.sceneBrickDimensions.map((bricks, axis) => bricks * this.brickSize * this.cellSize[axis]) as [number, number, number],
     };
     this.sceneSource.tetrahedralRadiance = radiance;
+  }
+
+  private encodeLiveRadianceFeedback(encoder: GPUCommandEncoder): boolean {
+    if (this.liveDerivedFeedbackFramesRemaining <= 0 || !this.liveDerivedAddressPlanValid
+      || !this.liveDerivedPlanner || !this.liveDerivedBuilder?.radianceFeedbackEnabled) {
+      return false;
+    }
+    this.liveDerivedPlanner.encodeRadianceFeedback(
+      encoder,
+      this.liveDerivedFeedbackPhase,
+      LIVE_SVO_RADIANCE_FEEDBACK.phaseCount,
+    );
+    this.liveDerivedBuilder.encodeRadianceFeedback(encoder);
+    this.liveDerivedFeedbackPhase = (this.liveDerivedFeedbackPhase + 1) % LIVE_SVO_RADIANCE_FEEDBACK.phaseCount;
+    this.liveDerivedFeedbackFramesRemaining -= 1;
+    return true;
   }
 
   encode(encoder: GPUCommandEncoder, fields: OctreeSparseBrickDenseFields, dt_s = 0): void {

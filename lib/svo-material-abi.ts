@@ -1,3 +1,4 @@
+import { SVO_PORCELAIN_TERRAIN_BASE_COLOR_LINEAR, SVO_PORCELAIN_TERRAIN_ROUGHNESS } from "./svo-terrain-material";
 import { GLASS_OPTICS, WATER_OPTICS, type LinearRgb } from "./webgpu-lighting";
 import type { EnvironmentProxyMaterial, EnvironmentProxyPrimitive } from "./voxel-environments";
 import { VOXEL_MATERIAL_IDS, VOXEL_MATERIALS, type VoxelMaterial } from "./voxel-scene";
@@ -40,8 +41,8 @@ export function svoMaterialFunctionIdForEnvironmentProxy(
   // laminated, so they take the same fine architectural grain as a wall rather
   // than a material grain of their own.
   if (/counter|board|panel|target/.test(semantic)) return SVO_MATERIAL_FUNCTION_IDS.architecturalSurface;
-  // Everything still here is deliberately flat: cycloramas and calibration
-  // wedges (whose whole job is unmodulated albedo), softboxes, glass, and the
+  // Everything still here is deliberately flat: calibration wedges (whose
+  // whole job is unmodulated albedo), softboxes, glass, and the
   // void behind a porthole. Procedural grain on any of those would be a lie.
   return SVO_MATERIAL_FUNCTION_IDS.none;
 }
@@ -121,22 +122,39 @@ export function canonicalSvoMaterialRecord(input: SvoMaterialRecord): SvoMateria
   });
 }
 
-export function svoMaterialFromVoxelMaterial(material: VoxelMaterial, revision = 1): SvoMaterialRecord {
+/**
+ * Which closure the terrain material record selects.
+ *
+ * The default is the garden lawn. `porcelain` swaps it for the flat function ID
+ * and an unmodulated albedo — the same override the sculpted-vessel scenes want,
+ * expressed once here rather than at each of the two sites that assemble a
+ * material table.
+ */
+export interface SvoVoxelMaterialOptions {
+  readonly terrainSurface?: "garden-terrain" | "porcelain";
+}
+
+export function svoMaterialFromVoxelMaterial(
+  material: VoxelMaterial,
+  revision = 1,
+  options: SvoVoxelMaterialOptions = {},
+): SvoMaterialRecord {
   const isWater = material.id === VOXEL_MATERIAL_IDS.fluid;
   const isThinGlass = material.closure === "thin-dielectric";
+  const isPorcelainTerrain = material.id === VOXEL_MATERIAL_IDS.terrain && options.terrainSurface === "porcelain";
   return canonicalSvoMaterialRecord({
     materialId: material.id,
     revision,
-    materialFunctionId: material.id === VOXEL_MATERIAL_IDS.terrain
+    materialFunctionId: material.id === VOXEL_MATERIAL_IDS.terrain && !isPorcelainTerrain
       ? SVO_MATERIAL_FUNCTION_IDS.gardenTerrain
       : SVO_MATERIAL_FUNCTION_IDS.none,
     flags: material.closure === "opaque"
       ? SVO_MATERIAL_FLAGS.opaque
       : SVO_MATERIAL_FLAGS.dielectric | (isThinGlass ? SVO_MATERIAL_FLAGS.thinWall : 0),
-    baseColorLinear: material.baseColorLinear,
+    baseColorLinear: isPorcelainTerrain ? SVO_PORCELAIN_TERRAIN_BASE_COLOR_LINEAR : material.baseColorLinear,
     opacity: isThinGlass ? 0.24 : 1,
     emissiveLinear: material.emissiveLinear,
-    roughness: material.roughness,
+    roughness: isPorcelainTerrain ? SVO_PORCELAIN_TERRAIN_ROUGHNESS : material.roughness,
     metallic: material.metallic,
     specularWeight: 1,
     indexOfRefraction: material.ior,
@@ -180,8 +198,11 @@ export function svoMaterialFromEnvironmentProxyMaterial(
   });
 }
 
-export function buildDefaultSvoMaterialRecords(revision = 1): readonly SvoMaterialRecord[] {
-  return VOXEL_MATERIALS.map((material) => svoMaterialFromVoxelMaterial(material, revision));
+export function buildDefaultSvoMaterialRecords(
+  revision = 1,
+  options: SvoVoxelMaterialOptions = {},
+): readonly SvoMaterialRecord[] {
+  return VOXEL_MATERIALS.map((material) => svoMaterialFromVoxelMaterial(material, revision, options));
 }
 
 /** Dense direct-index table. Slot zero is empty and unassigned slots are inert. */

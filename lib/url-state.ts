@@ -1,7 +1,7 @@
 import { defaultMethodId, interactiveMethodId, simulationMethods, type MethodParamValue, type MethodParamValues } from "./methods";
 import { cloneScene, validateScene, type CameraState, type SceneDescription } from "./model";
 import { isOctreeTechniqueOverlayMode } from "./octree-technique-debug";
-import { cameraForPreset, defaultScenePresetId, getScenePreset, scenePresets } from "./scenes";
+import { cameraForPreset, defaultScenePresetId, getScenePreset, scenePresets, type ScenePreset } from "./scenes";
 import { useMethodStore } from "./stores/method-store";
 import { useSceneStore } from "./stores/scene-store";
 import { useShellStore, type ShellView } from "./stores/shell-store";
@@ -81,6 +81,11 @@ type SerializableSceneState = Pick<QueryState, "presetId" | "scene">;
 type SerializableShellState = Pick<QueryState, "view">;
 type SerializableUIState = UIQueryState;
 
+export interface ShellSessionState {
+  readonly view: ShellView;
+  readonly studioEntered: boolean;
+}
+
 /**
  * Which shell layer a link opens.
  *
@@ -90,6 +95,29 @@ type SerializableUIState = UIQueryState;
  */
 export function shellViewFromQuery(search: string): ShellView {
   return new URLSearchParams(search).get("view") === "library" ? "library" : "studio";
+}
+
+/**
+ * Restore the shell around a URL-hydrated scene.
+ *
+ * A completely bare first visit is still the library front door. Once a URL
+ * names a scene, however, it is a real studio location: a page reload, React
+ * Fast Refresh, or an RSC program reload must not put the library layer back in
+ * front of it. An explicitly requested library remains the front door; within
+ * the current session its Back to scene affordance keeps the existing studio.
+ */
+export function shellSessionFromQuery(
+  search: string,
+  current: ShellSessionState,
+): ShellSessionState {
+  const query = new URLSearchParams(search);
+  const requestedView = shellViewFromQuery(search);
+  if (requestedView === "library") {
+    return { view: "library", studioEntered: current.studioEntered };
+  }
+  return current.studioEntered || query.has("scene")
+    ? { view: "studio", studioEntered: true }
+    : current;
 }
 
 function exactMethod(id: string | null) {
@@ -122,8 +150,62 @@ function setAtPath(value: object, path: string, next: unknown) {
   else current[leaf] = next;
 }
 
-function sameValue(left: unknown, right: unknown) {
-  return JSON.stringify(left) === JSON.stringify(right);
+type SceneQueryEntry = readonly [key: string, value: string];
+
+/**
+ * The preset side of a scene diff is immutable and deterministic. Keep its
+ * serialized path values instead of rebuilding an authored preset every time
+ * the address bar changes. This matters for generated scenes: constructing the
+ * hero pond bakes a 289 x 193 heightfield before a single value can be compared.
+ */
+const sceneQueryBaselineCache = new WeakMap<ScenePreset, readonly (string | undefined)[]>();
+
+function sceneQueryBaseline(presetId: string): readonly (string | undefined)[] {
+  const preset = getScenePreset(presetId);
+  const cached = sceneQueryBaselineCache.get(preset);
+  if (cached) return cached;
+  const baseScene = preset.create();
+  const serialized = sceneQueryPaths.map((path) => JSON.stringify(getAtPath(baseScene, path)));
+  sceneQueryBaselineCache.set(preset, serialized);
+  return serialized;
+}
+
+function sceneQueryEntries(sceneState: SerializableSceneState): readonly SceneQueryEntry[] {
+  const baseline = sceneQueryBaseline(sceneState.presetId);
+  const entries: SceneQueryEntry[] = [];
+  sceneQueryPaths.forEach((path, index) => {
+    const current = getAtPath(sceneState.scene, path);
+    const serialized = JSON.stringify(current);
+    if (serialized === baseline[index]) return;
+    // A sculpted grid is a scene-library document, not a URL value. The hero
+    // pond carries 55,777 samples: serializing one edited height produces a
+    // roughly 1.2 MB location that works until reload, when the server rejects
+    // the request headers with HTTP 431. Analytic terrain remains small and
+    // shareable, and deleting a preset's terrain remains the compact ~delete
+    // marker; only a value that actually carries a grid stays out of the URL.
+    if (path === "terrain" && current && typeof current === "object" && "grid" in current) return;
+    entries.push([`scene.${path}`, current === undefined ? deletedValue : serialized!]);
+  });
+  return entries;
+}
+
+/**
+ * Camera motion changes only UI state. Reuse the already-derived scene layer
+ * until the immutable scene document (or its preset baseline) changes, so a
+ * pointer-rate camera update never scans or serializes a sculpted terrain.
+ */
+export function createSceneQueryLayerCache() {
+  let cached: {
+    readonly presetId: string;
+    readonly scene: SceneDescription;
+    readonly entries: readonly SceneQueryEntry[];
+  } | undefined;
+  return (sceneState: SerializableSceneState): readonly SceneQueryEntry[] => {
+    if (cached?.presetId === sceneState.presetId && cached.scene === sceneState.scene) return cached.entries;
+    const entries = sceneQueryEntries(sceneState);
+    cached = { ...sceneState, entries };
+    return entries;
+  };
 }
 
 function parseMethodValue(methodId: string, key: string, raw: string): MethodParamValue | undefined {
@@ -256,7 +338,8 @@ export function serializeQueryState(
   sceneState: SerializableSceneState,
   methodState: SerializableMethodState,
   uiState: SerializableUIState = useUIStore.getInitialState(),
-  shellState: SerializableShellState = { view: "studio" }
+  shellState: SerializableShellState = { view: "studio" },
+  preparedSceneEntries?: readonly SceneQueryEntry[],
 ): string {
   const query = new URLSearchParams(search);
   for (const key of [...query.keys()]) if (isManagedKey(key)) query.delete(key);
@@ -293,13 +376,7 @@ export function serializeQueryState(
   ];
   for (const [key, value, base] of cameraValues) if (value !== base) query.set(key, String(value));
 
-  const baseScene = getScenePreset(sceneState.presetId).create();
-  for (const path of sceneQueryPaths) {
-    const base = getAtPath(baseScene, path);
-    const current = getAtPath(sceneState.scene, path);
-    if (sameValue(base, current)) continue;
-    query.set(`scene.${path}`, current === undefined ? deletedValue : JSON.stringify(current));
-  }
+  for (const [key, value] of preparedSceneEntries ?? sceneQueryEntries(sceneState)) query.set(key, value);
 
   for (const method of simulationMethods) {
     const values = methodState.overrides[method.id] ?? {};
@@ -320,26 +397,28 @@ export function serializeQueryState(
  * on screen, and a back button that stepped through every panel toggle and
  * library visit would never reach the page the reader actually arrived from.
  */
-export function replaceQueryStateUrl() {
-  const search = serializeQueryState(window.location.search, useSceneStore.getState(), useMethodStore.getState(), useUIStore.getState(), useShellStore.getState());
+export function replaceQueryStateUrl(preparedSceneEntries?: readonly SceneQueryEntry[]) {
+  const search = serializeQueryState(window.location.search, useSceneStore.getState(), useMethodStore.getState(), useUIStore.getState(), useShellStore.getState(), preparedSceneEntries);
   const next = `${window.location.pathname}${search ? `?${search}` : ""}${window.location.hash}`;
   const current = `${window.location.pathname}${window.location.search}${window.location.hash}`;
   if (next !== current) window.history.replaceState(window.history.state, "", next);
 }
 
 /**
- * Hydrate both source-of-truth stores once, then mirror their snapshots to
- * history.replaceState. Popstate follows the same path, so back/forward and
- * reloads rebuild the simulation from one coherent store snapshot.
+ * Hydrate all source-of-truth stores once, then mirror their snapshots to
+ * history.replaceState. Popstate follows the same path, so back/forward,
+ * reloads and development module replacement rebuild the application from one
+ * coherent store snapshot.
  */
 export function startQueryStateSync(onHydrated: (presetId: string) => void) {
   let active = true;
   let queued = false;
   let applyingUrl = false;
+  const cachedSceneLayer = createSceneQueryLayerCache();
 
   const writeUrl = () => {
     if (!active || applyingUrl) return;
-    replaceQueryStateUrl();
+    replaceQueryStateUrl(cachedSceneLayer(useSceneStore.getState()));
   };
 
   const scheduleWrite = () => {
@@ -350,7 +429,15 @@ export function startQueryStateSync(onHydrated: (presetId: string) => void) {
 
   const hydrate = () => {
     applyingUrl = true;
-    const state = parseQueryState(window.location.search);
+    const search = window.location.search;
+    const state = parseQueryState(search);
+    const shellState = useShellStore.getState();
+    const restoredShell = shellSessionFromQuery(search, shellState);
+    useShellStore.setState({
+      view: restoredShell.view,
+      studioEntered: restoredShell.studioEntered,
+      ...(restoredShell.view === "studio" ? { librarySearch: "" } : {}),
+    });
     // Offline comparison methods remain parseable and serializable, while the
     // interactive application admits only the choices exposed by its picker.
     useMethodStore.setState({ methodId: interactiveMethodId(state.methodId), quality: state.quality, overrides: state.overrides });
@@ -365,6 +452,11 @@ export function startQueryStateSync(onHydrated: (presetId: string) => void) {
   const stopMethod = useMethodStore.subscribe(scheduleWrite);
   const stopScene = useSceneStore.subscribe(scheduleWrite);
   const stopUI = useUIStore.subscribe(scheduleWrite);
+  // Search text and section disclosure are intentionally session-only; only
+  // the layer in front belongs in the address bar.
+  const stopShell = useShellStore.subscribe((shell, previous) => {
+    if (shell.view !== previous.view) scheduleWrite();
+  });
   window.addEventListener("popstate", hydrate);
 
   return () => {
@@ -372,6 +464,7 @@ export function startQueryStateSync(onHydrated: (presetId: string) => void) {
     stopMethod();
     stopScene();
     stopUI();
+    stopShell();
     window.removeEventListener("popstate", hydrate);
   };
 }

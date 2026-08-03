@@ -121,7 +121,10 @@ test("renderer lazily attaches inspection before solver submission and services 
   assert.ok(encoderCreation > solverSubmit && pausedPublication > encoderCreation, "render encode services a pending paused repaint");
   const solverAttachment = source.slice(source.indexOf("this.gpuFluidPending=create.then"), modeControl);
   assert.doesNotMatch(solverAttachment, /solver\.sparseVoxelRenderSource/, "smooth solver attachment must not activate expanded records");
-  assert.match(solverAttachment, /const sparseSceneSource=solver\.sparseVoxelSceneSource/);
+  assert.match(solverAttachment, /sidecar\?\.sparseVoxelSceneSource\?\?solver\.sparseVoxelSceneSource/,
+    "smooth attachment must use the solver hierarchy or its renderer-owned sidecar");
+  assert.match(source, /requestedVoxelDebugGeneration >= 0 \? sparseSceneProducer\?\.sparseVoxelRenderSource/,
+    "inspection must follow the same solver-or-sidecar sparse authority");
 });
 
 test("octree keeps the structural scene source eager and inspection records lazy", () => {

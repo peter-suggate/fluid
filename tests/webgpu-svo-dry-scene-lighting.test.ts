@@ -48,6 +48,30 @@ test("directional visibility clips to the finite authored scene exit", () => {
   assert.equal(directionalLightSceneExitDistance({ x: 0, y: 1, z: 0 }, { x: 0, y: 0, z: 0 }, bounds), 0);
 });
 
+test("a shadow ray that never crosses the domain is unoccluded, not shadowed", () => {
+  // The zero above is the whole of the case: a receiver outside the container
+  // whose ray to the light never re-enters it. The octree holds nothing out
+  // there, so nothing can occlude — and reading that zero as full shadow is
+  // what switched the sun off for every square metre of ground beyond the
+  // container footprint, leaving a lit rectangle in a dark field that read as a
+  // floating slab rather than as a lighting bug.
+  assert.match(svoDrySceneShader,
+    /fn dryDirectionalRayLeavesDomain\(maximumDistance:f32\)->bool\{return !\(maximumDistance>0\.0\);\}/);
+  assert.match(svoDrySceneShader,
+    /if\(dryDirectionalRayLeavesDomain\(maximumDistance\)\)\{return vec3f\(1\.0\);\}/,
+    "the shaded direct term must treat an empty domain interval as full visibility");
+  assert.doesNotMatch(svoDrySceneShader, /if\(maximumDistance<=0\.0\)\{return vec3f\(0\.0\);\}/,
+    "no direct-visibility path may still read an empty domain interval as full shadow");
+  // The reduced-rate prepass and the exact silhouette band are composed into
+  // their own shader modules, so they are checked against the source rather
+  // than the shaded module — but they must agree with it, or the two tiers
+  // disagree about the same pixel across the seam between them.
+  assert.equal(drySceneSource.match(/dryDirectionalRayLeavesDomain\(maximumDistance\)\)\{visibility\+=1\.0;continue;\}/g)?.length, 2,
+    "both prepass visibility accumulators must add full visibility for an empty interval");
+  assert.doesNotMatch(drySceneSource, /directionalLightSceneExitDistance\(position,sample\.towardLight\),sample\.finiteDistance_m,sample\.finiteDistance_m>0\.0\);\s*\n?\s*if\(maximumDistance<=0\.0\)\{continue;\}/,
+    "no visibility accumulator may still drop a light whose ray simply never enters the domain");
+});
+
 test("dry-scene direct PBR is geometry-normal aware and hard visibility modulates only direct light", () => {
   assert.match(svoDrySceneShader, /unifiedPbrMaterial\(surface\.baseColor,surface\.metallic,surface\.roughness,vec3f\(0\.0\),0\.0/);
   assert.match(svoDrySceneShader, /unifiedLightingInputWithGeometry\(hit\.normal,hit\.normal,-rd,sample\.towardLight,sample\.radiance\*visibility\/f32\(sampleCount\)\)/);
@@ -154,8 +178,8 @@ test("bounded hard-shadow visibility covers opaque sources and transmissive pane
     "all catalogs must use SVO payload shadow traversal");
   assert.match(adapter, /traceTerrain\(ray\.origin_m,ray\.direction\)/,
     "analytic terrain must cast hard shadows");
-  assert.match(adapter, /traceGlass\(ray\.origin_m,ray\.direction,tMin_m,bestT,false\)/,
-    "finite panes must attenuate rather than become opaque shadow blockers");
+  assert.match(adapter, /traceGlass\(ray\.origin_m,ray\.direction,tMin_m,bestT,true\)/,
+    "visibility must skip compositor-owned vessel panes while retaining authored scene glazing");
   assert.match(svoDrySceneShader, /fn dryGlassBoundingSphereVisible\([^]*record\.extentIorEpsilon\.xy[^]*record\.centerThickness\.w[^]*radius\*radius/,
     "pane tracing must conservatively reject distant finite sheets in world space before local transforms");
   assert.match(svoDrySceneShader, /compositeOwned\|\|thickReplaced\|\|!dryGlassBoundingSphereVisible\(record,ro,rd,tMin_m,bestT\)[^]*continue[^]*svoThinGlassIntersect/,
@@ -185,7 +209,7 @@ test("cone visibility is generation-checked and fails closed before the explicit
   const coneAoReturn = contactVisibility.indexOf("return vec3f(mix(1.0,raw,dry.tuningRays0.w));");
   assert.ok(coneAoReturn >= 0 && contactVisibility.indexOf("svoTraceVisibility", coneAoReturn) > coneAoReturn,
     "cone AO must return before the separately selected exact AO algorithm");
-  assert.match(svoDrySceneShader, /diffuseEnvironment=[^;]*\*contactVisibility\*gi\.visibility\*diffuseEnvironmentScale\/UNIFIED_PI[^]*specularEnvironment=dryEnvironment/,
+  assert.match(svoDrySceneShader, /diffuseVisibility=dryDiffuseMultiBounceVisibility\(gi\.visibility,diffuseColor\)[^;]*;[^]*diffuseEnvironment=[^;]*\*contactVisibility\*diffuseVisibility\*diffuseEnvironmentScale\/UNIFIED_PI[^]*specularEnvironment=dryEnvironment/,
     "contact and GI visibility must modulate diffuse environment only, leaving emission and specular environment intact");
 });
 

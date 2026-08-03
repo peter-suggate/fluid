@@ -8,7 +8,7 @@
  * number the benchmark gates on.
  */
 
-export type PowerDamRuntimeLane = "mini" | "large" | "hydrostatic-tiny" | "large-hydrostatic" | "deep-hydrostatic" | "hydrostatic" | "ui" | "moving-interface" | "ocean" | "ceiling-drop" | "symmetric-expansion" | "droplet-64" | "droplet-128" | "droplet-240" | "droplet-256";
+export type PowerDamRuntimeLane = "mini" | "large" | "hydrostatic-tiny" | "large-hydrostatic" | "deep-hydrostatic" | "hydrostatic" | "ui" | "moving-interface" | "ocean" | "ceiling-drop" | "symmetric-expansion" | "droplet-64" | "droplet-128" | "droplet-240" | "droplet-256" | "fill-100" | "fill-800" | "fill-6400";
 
 /**
  * The droplet sweep, as lane records.
@@ -56,6 +56,49 @@ const dropletLane = (edgeCells: number, steps = 20): Record<string, string> => (
     // program; until then a lane that cannot bind cannot report anything.
     ? { FLUID_WEBGPU_MAX_STORAGE_BINDING_BYTES: "2147483648" }
     : {}),
+});
+
+/**
+ * The live-occupancy sweep, as lane records: the droplet sweep's dual.
+ *
+ * Three lanes that differ in exactly ONE field — the scene id. Same 256-cubed
+ * grid, same 0.05 m lattice, same leaf 32 / band 1 / fine factor 4, same
+ * 0.004 s step, same authored row reserve, same storage-binding raise. The only
+ * thing that moves between them is how much live water the scene contains, so a
+ * per-label GPU cost read across the three is a direct measurement of how each
+ * pass scales in live occupancy and in nothing else.
+ *
+ * `FLUID_PRESSURE_ROW_CAPACITY` is restated here for the same reason the
+ * droplet lanes restate theirs: the harness's environment override is applied
+ * AFTER the authored profile (`tools/webgpu-smoke-executor.ts`), so a lane that
+ * omits it inherits whatever the authored lane says and cannot be A/B'd from
+ * the command line. Stating it makes the capacity an explicit property of the
+ * lane rather than an inherited one, which is what the capacity control needs.
+ *
+ * Steps start at 80, not the droplet family's 20: droplet-family divergence
+ * lives past step 30, and the default per-label capture window (skip 40,
+ * capture 25) needs at least 65 advances to be the window it claims to be.
+ * Compare only runs at the same step count and the same capture window.
+ */
+const fillLane = (liquidCells: number, steps = 80): Record<string, string> => ({
+  FLUID_SCENE: `power-fill-256-${liquidCells}`,
+  FLUID_TARGET_S: String(steps * 0.004),
+  FLUID_MAX_DT: "0.004",
+  FLUID_ORACLE_STEPS: String(steps),
+  FLUID_EXPECT_EXACT_STEPS: String(steps),
+  FLUID_EXPECT_GRID: "256,256,256",
+  FLUID_MAXIMUM_LEAF_SIZE: "32",
+  FLUID_OCTREE_INTERFACE_BAND: "1",
+  FLUID_OCTREE_GLOBAL_FINE_FACTOR: "4",
+  // The family's shared reserve, sized for the 6,400-cell member and carried
+  // unchanged by the 100-cell one. A capacity that moved with the member would
+  // make a capacity-shaped pass read as live-shaped, which is the one error
+  // this instrument cannot afford.
+  FLUID_PRESSURE_ROW_CAPACITY: "65536",
+  // At 256 cubed the fine level-set's two dense logical directories are ~134 MB
+  // each, over Dawn's 128 MiB default storage-binding limit. Same knob, same
+  // reason, as `droplet-256` and the ocean lane.
+  FLUID_WEBGPU_MAX_STORAGE_BINDING_BYTES: "2147483648",
 });
 
 export const POWER_DAM_LANE_ENVIRONMENT: Record<PowerDamRuntimeLane, Record<string, string>> = {
@@ -197,6 +240,9 @@ export const POWER_DAM_LANE_ENVIRONMENT: Record<PowerDamRuntimeLane, Record<stri
   "droplet-128": dropletLane(128),
   "droplet-240": dropletLane(240),
   "droplet-256": dropletLane(256),
+  "fill-100": fillLane(100),
+  "fill-800": fillLane(800),
+  "fill-6400": fillLane(6400),
   "ceiling-drop": {
     FLUID_SCENE: "ceiling-slab-drop", FLUID_TARGET_S: "0.024",
     FLUID_LANE: "performance",

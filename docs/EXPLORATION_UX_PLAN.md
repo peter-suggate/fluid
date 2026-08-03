@@ -220,11 +220,9 @@ A starter strip offers documents, not code paths. It offers *sizes* — *Room*,
 key and therefore the one decision a starter can honestly make on someone's
 behalf; everything else is placed afterwards and costs nothing to change.
 
-**The room is a room.** Two nodes: a `room-shell` and a softbox. Every other set
-in the app is *staged* — the calibration studio has a cyclorama, a datum grid
-and a step wedge — because each was composed around a scene that already
-existed. A new scene has no subject yet, so anything in the room is scenery its
-author has to identify and delete before their own work reads.
+**The room is a room.** Two nodes: a uniformly white `room-shell` and one
+overhead softbox. There is no grid, value wedge, ground light, prop, or other set
+dressing for the author to identify and delete before their own work reads.
 
 For the same reason a fresh document sets `container.vessel: "none"`. The
 container is two things at once: the solver's boundary, and — in every

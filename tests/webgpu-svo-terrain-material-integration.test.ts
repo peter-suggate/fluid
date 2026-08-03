@@ -53,7 +53,16 @@ function gardenMaterial() {
 }
 
 test("production garden metadata is packed into the existing dry uniform without a new binding", () => {
-  assert.match(rendererSource, /const terrainMaterial = scenePrimitives\.analyticTerrain \? buildSvoTerrainMaterial\(scene\) : undefined/);
+  // The lawn is one of two ground closures now, and only the lawn is configured
+  // by this metadata: a porcelain ground publishes none, so that the shader's
+  // policy word stays zero and its terrain branch is unreachable rather than
+  // merely unvisited. Both halves of that condition are pinned here, because
+  // publishing the metadata for a scene that does not read it is exactly how a
+  // region goes stale without anything noticing.
+  assert.match(rendererSource,
+    /const terrainSurface = sceneTerrainSurfaceModel\(scene\)/);
+  assert.match(rendererSource,
+    /const terrainMaterial = scenePrimitives\.analyticTerrain && terrainSurface === "garden-terrain"\s*\n?\s*\? buildSvoTerrainMaterial\(scene\)\s*\n?\s*: undefined/);
   assert.match(rendererSource, /terrainMaterialMetadata: terrainMaterial\?\.packedMetadata/);
   assert.equal(SVO_TERRAIN_MATERIAL_METADATA_STRIDE_BYTES, 16);
   assert.deepEqual(SVO_DRY_SCENE_PARAMS_LAYOUT, {

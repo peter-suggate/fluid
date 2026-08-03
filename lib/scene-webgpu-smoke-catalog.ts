@@ -10,7 +10,12 @@ import {
   POWER_DROPLET_EDGE_CELLS,
   POWER_DROPLET_FINE_BRICK_CAPACITY,
   POWER_DROPLET_PRESSURE_ROW_CAPACITY,
+  POWER_FILL_EDGE_CELLS,
+  POWER_FILL_FINE_BRICK_CAPACITY,
+  POWER_FILL_LIQUID_CELLS,
+  POWER_FILL_PRESSURE_ROW_CAPACITY,
   findSceneDefinition,
+  powerFillReservoirCells,
 } from "./scenes";
 import {
   defineSceneWebGPUSmokeSuite,
@@ -33,7 +38,6 @@ export const sceneWebGPUSmokeIds = [
   "hose-tank",
   "sphere-jet",
   "deep-water",
-  "hero-garden-hose",
   "garden-pond",
   "garden-hose",
   "garden-dam-break",
@@ -52,6 +56,9 @@ export const sceneWebGPUSmokeIds = [
   "power-droplet-128",
   "power-droplet-240",
   "power-droplet-256",
+  "power-fill-256-100",
+  "power-fill-256-800",
+  "power-fill-256-6400",
   "ceiling-slab-drop",
   "corner-brick-drop",
   "midair-brick-drop",
@@ -385,6 +392,21 @@ const powerDropletOverrides = {
   ...largePowerHydrostaticOverrides,
   pressureRowCapacity: POWER_DROPLET_PRESSURE_ROW_CAPACITY,
   globalFineLevelSetMaximumBricks: POWER_DROPLET_FINE_BRICK_CAPACITY,
+} as const;
+/**
+ * The fill family's reserves, shared by every member of the sweep.
+ *
+ * Same two knobs as `powerDropletOverrides` and the same reason for existing —
+ * a capacity that moved with the member would make a capacity-shaped pass read
+ * as live-shaped — except that here the *live* term is what varies, so the
+ * constancy is doing strictly more work. Both values are 16x the droplet
+ * family's, which is what turns `power-fill-256-100` against
+ * `power-droplet-256` into a clean capacity A/B at identical live occupancy.
+ */
+const powerFillOverrides = {
+  ...largePowerHydrostaticOverrides,
+  pressureRowCapacity: POWER_FILL_PRESSURE_ROW_CAPACITY,
+  globalFineLevelSetMaximumBricks: POWER_FILL_FINE_BRICK_CAPACITY,
 } as const;
 
 const powerDiagnostics: readonly SceneWebGPUDiagnosticPack[] = [
@@ -735,14 +757,6 @@ const suiteList = [
   }),
   suite("deep-water", "Extreme vertical aspect ratio", { definitionId: "deep-water-ab", variantId: "gpu-smoke" }, {
     default: lane({ target_s: 0.1, oracleSteps: 1, diagnostics: [equilibriumDiagnostic] }),
-  }),
-  // The hero scene's vessel, asked the only question phase 1 has: does a
-  // generated basin hold still water. The 7.5 mm lattice makes this the finest
-  // terrain pool in the catalog, so it is also where a bake that left a step in
-  // the inner face would show up first.
-  suite("hero-garden-hose", "Hydrostatic rest in a generated porcelain pond", { definitionId: "hero-garden-hose", variantId: "gpu-smoke" }, {
-    default: lane({ target_s: 0.1, oracleSteps: 2, cpuOracle: false, methods: methods(["octree"]),
-      diagnostics: [equilibriumDiagnostic], timeout_ms: 240_000 }),
   }),
   suite("garden-pond", "Hydrostatic rest in an organic terrain pool", { definitionId: "garden-pond", variantId: "gpu-smoke" }, {
     default: lane({ target_s: 0.1, oracleSteps: 2, diagnostics: [equilibriumDiagnostic] }),
@@ -1213,6 +1227,82 @@ const suiteList = [
             : exhaustivePowerDiagnostics(1e-4).filter((pack) => pack.id !== "global-fine-publication"),
           acceptance: [...powerAcceptance, ...pinned,
             { id: "power-droplet-volume-drift", metric: "methods.octree.stabilityEnvelope.maximumExactVolumeDrift",
+              operator: "at-most", expected: 1e-4 }] }),
+      });
+  }),
+  // The live-occupancy sweep: the droplet family's dual. Container fixed at 256
+  // cubed, reservoir swept 100 -> 800 -> 6,400 cells in exact 8x steps at a
+  // shared capacity.
+  //
+  // The pinned rules below are deliberately NOT the droplet family's shape. The
+  // droplet pins are family-invariants — the same number at every N, because
+  // the fluid is the same fluid — and pinning a live counter there is exactly
+  // how that sweep detects domain-shaped work. Here the live counters are the
+  // independent variable, so pinning them flat would gate away the signal. What
+  // is pinned instead is the container (which must not move) and the two
+  // overflow modes, because a fine band that overflows degrades its resident
+  // count to the 0xFFFFFFFF sentinel and leaves the pressure solve executing
+  // zero iterations while the run still reports PASS — a silently no-op solver
+  // would read as a beautifully flat pass.
+  //
+  // The counters that discriminate the members — `globalFineActiveBricks`,
+  // `structuredAirSupportRows`, `pressureRequiredRows` — are collected and
+  // reported rather than pinned, because a floor invented before the first
+  // capture is a number from intent rather than from a log. Pinning them is the
+  // follow-up once the sweep has run.
+  ...POWER_FILL_LIQUID_CELLS.map((liquidCells) => {
+    const grid = [POWER_FILL_EDGE_CELLS, POWER_FILL_EDGE_CELLS, POWER_FILL_EDGE_CELLS];
+    const cells = powerFillReservoirCells(liquidCells);
+    const pinned: readonly SceneWebGPUAcceptanceRule[] = [
+      { id: "expected-grid", metric: "methods.octree.grid", operator: "equal", expected: grid },
+      { id: "power-fill-row-arena-fits", metric: "methods.octree.info.pressureCapacityOverflow",
+        operator: "equal", expected: false },
+      // Reads 0 whenever the arena holds, so it gates the overflow lower bound
+      // rather than the count; the reserve itself is the ceiling.
+      { id: "power-fill-rows-within-reserve", metric: "methods.octree.info.pressureRequiredRows",
+        operator: "at-most", expected: POWER_FILL_PRESSURE_ROW_CAPACITY },
+      { id: "power-fill-fine-residency-within-reserve",
+        metric: "methods.octree.info.globalFineActiveBricks",
+        operator: "at-most", expected: POWER_FILL_FINE_BRICK_CAPACITY },
+    ];
+    // Always false: the container is 256 cubed for every member, which is 16.8M
+    // cells against the 2M ceiling the droplet family established for dense
+    // collection. The spatial-field walk and the fine-publication census are
+    // both O(domain) and blew the 240 s isolated-runner ceiling at 240 cubed on
+    // collection alone. So these lanes collect only what they gate on: no
+    // represented field statistics and no fine-publication sample census, but
+    // every pinned counter, structured authority, the generation audit and
+    // volume drift. The droplet family runs the full collection on the
+    // identical solver configuration at 64 and 128 cubed, which is what makes
+    // the omission affordable here.
+    return suite(`power-fill-${POWER_FILL_EDGE_CELLS}-${liquidCells}`,
+      `${liquidCells} liquid cells (${cells.x}x${cells.y}x${cells.z}) in a fixed ${POWER_FILL_EDGE_CELLS}-cubed container: the live-occupancy instrument`,
+      { definitionId: `power-fill-${POWER_FILL_EDGE_CELLS}-${liquidCells}` }, {
+        default: lane({ target_s: 0.004, exactSteps: 1, maxDt_s: 0.004, oracleSteps: 1, cpuOracle: false,
+          methods: methods(["octree"], { octree: powerFillOverrides }), timeout_ms: 240_000,
+          collect: { fieldStats: "none", spatialField: false,
+            stabilityEnvelope: true, structuredValidation: true,
+            globalFineGeneration: false, powerGenerationAudit: { everySteps: 1, log: false } },
+          diagnostics: [powerDiagnostics[0]],
+          acceptance: [...powerAcceptance, ...pinned] }),
+        // The measurement lane. Droplet-family divergence lives past step 30, so
+        // a correctness read on this discretization wants 80 advances rather
+        // than 20; 240 is the same window the droplet lanes gate on and is what
+        // makes a fill capture comparable to a droplet one. Cold start pays two
+        // O(domain) CPU loops before the first advance at 256 cubed — the
+        // footprint budget's triple loop and the tall-cell column walk — so the
+        // 240 s isolated-runner ceiling is a real constraint, not a formality.
+        // Sample `--lane=fill-<cells> --steps=80` on the benchmark first.
+        "runtime-240": lane({ id: "runtime-240", target_s: 0.96, exactSteps: 240,
+          maxDt_s: 0.004, oracleSteps: 240, cpuOracle: false,
+          methods: methods(["octree"], { octree: powerFillOverrides }), timeout_ms: 240_000,
+          collect: { fieldStats: "none", checkpointEvery_s: 0.12, spatialField: false,
+            stabilityEnvelope: true, structuredValidation: true, globalFineGeneration: false,
+            powerGenerationAudit: { everySteps: 1, log: false } },
+          diagnostics: exhaustivePowerDiagnostics(1e-4)
+            .filter((pack) => pack.id !== "global-fine-publication"),
+          acceptance: [...powerAcceptance, ...pinned,
+            { id: "power-fill-volume-drift", metric: "methods.octree.stabilityEnvelope.maximumExactVolumeDrift",
               operator: "at-most", expected: 1e-4 }] }),
       });
   }),

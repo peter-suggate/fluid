@@ -24,6 +24,31 @@ export const SVO_CONTACT_VISIBILITY_CONTRACT = Object.freeze({
   maximumSceneRadiusFraction: 0.06,
 } as const);
 
+/**
+ * Cheap albedo-aware approximation of diffuse interreflection lost by a
+ * single visibility/cone pass. This is the fitted GTAO multi-bounce curve:
+ * black materials retain the original visibility while bright materials
+ * recover progressively more energy from higher-order diffuse bounces.
+ */
+export function svoDiffuseMultiBounceVisibility(
+  visibilityIn: number,
+  albedoIn: SvoVec3,
+): SvoVec3 {
+  if (!Number.isFinite(visibilityIn) || albedoIn.some((channel) => !Number.isFinite(channel))) {
+    throw new RangeError("Diffuse multi-bounce inputs must be finite");
+  }
+  const visibility = Math.max(0, Math.min(1, visibilityIn));
+  const compensate = (channel: number) => {
+    const albedo = Math.max(0, Math.min(1, channel));
+    const a = 2.0404 * albedo - 0.3324;
+    const b = -4.7951 * albedo + 0.6417;
+    const c = 2.7552 * albedo + 0.6903;
+    const compensated = ((visibility * a + b) * visibility + c) * visibility;
+    return Math.max(visibility, Math.min(1, compensated));
+  };
+  return [compensate(albedoIn[0]), compensate(albedoIn[1]), compensate(albedoIn[2])];
+}
+
 export interface SvoContactVisibilityInput {
   surfacePosition_m: SvoVec3;
   geometricNormal: SvoVec3;

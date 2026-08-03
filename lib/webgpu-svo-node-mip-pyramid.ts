@@ -29,19 +29,49 @@ export const WEBGPU_SVO_NODE_MIP_LAYOUT = Object.freeze({
 } as const);
 
 /**
+ * How the sampled directory's pages are laid out in a 2D texture.
+ *
+ * The directory used to be two texels wide with one *row* per page, which made
+ * the 2D height limit the entire page ceiling — 16 384 on an M1 Max, which the
+ * hero pond reaches at a 5 mm lattice and every dense domain reaches eventually.
+ * Wrapping pages across columns instead costs one integer divide in the lookup
+ * and squares the ceiling. Pages stay in slot order along the row and then wrap,
+ * so the CPU-side buffer needs no repacking and the directory remains sorted by
+ * (level, morton) in page-index order, which is what the marcher's binary search
+ * over a level's run depends on.
+ *
+ * One column reproduces the old layout byte for byte, so every scene below the
+ * wrap threshold is unchanged.
+ */
+export function webGpuSvoNodeMipDirectoryShape(
+  pages: number,
+  maximumDimension: number,
+): { columns: number; rows: number; texels: readonly [number, number] } {
+  if (!Number.isSafeInteger(pages) || pages < 0) throw new RangeError("SVO node-mip directory page count must be a non-negative safe integer");
+  const width = Math.max(1, Math.floor(maximumDimension / WEBGPU_SVO_NODE_MIP_LAYOUT.directoryTexelsPerPage));
+  const height = Math.max(1, maximumDimension);
+  const columns = Math.min(width, Math.max(1, Math.ceil(Math.max(1, pages) / height)));
+  const rows = Math.max(1, Math.ceil(Math.max(1, pages) / columns));
+  if (rows > height) throw new RangeError(`SVO node-mip directory needs ${rows} rows, exceeding the ${height} texture limit`);
+  return { columns, rows, texels: [columns * WEBGPU_SVO_NODE_MIP_LAYOUT.directoryTexelsPerPage, rows] };
+}
+
+/**
  * Largest page count this device can address.
  *
- * The sampled directory is a two-texel-wide texture with one *row* per page, so
- * the binding constraint is the 2D height limit and nothing else. Capping below
- * it does not save memory — an atlas is only allocated for the pages that are
- * actually resident — it just silently discards scene geometry, which the
- * marcher then reads as empty air because a non-resident page samples as zero.
+ * The binding constraint is the sampled directory's area under the layout above.
+ * Capping below it does not save memory — an atlas is only allocated for the
+ * pages that are actually resident — it just silently discards scene geometry,
+ * which the marcher then reads as empty air because a non-resident page samples
+ * as zero. The atlas volume and the direct page table are checked separately by
+ * the caller; this number is only about addressability.
  *
  * The floor keeps a device that reports no limits usable rather than empty.
  */
 export function webGpuSvoNodeMipMaximumPages(device: Pick<GPUDevice, "limits">): number {
-  const limit = Number(device.limits?.maxTextureDimension2D);
-  return Number.isSafeInteger(limit) && limit >= 2_048 ? limit : 2_048;
+  const raw = Number(device.limits?.maxTextureDimension2D);
+  const limit = Number.isSafeInteger(raw) && raw >= 2_048 ? raw : 2_048;
+  return limit * Math.floor(limit / WEBGPU_SVO_NODE_MIP_LAYOUT.directoryTexelsPerPage);
 }
 
 export const WEBGPU_SVO_NODE_MIP_DIRECTORY_ABI = Object.freeze({
@@ -90,6 +120,8 @@ export interface WebGpuSvoNodeMipVisibleGeneration {
 }
 
 interface OwnedGeneration extends WebGpuSvoNodeMipVisibleGeneration {
+  /** Column/row wrap of the sampled directory; the shader rederives it from the width. */
+  directoryShape: { columns: number; rows: number; texels: readonly [number, number] };
   directPageTableWords: Uint32Array<ArrayBuffer>;
   uploadedSlots: Set<number>;
   directoryComplete: boolean;
@@ -116,7 +148,10 @@ export function createWebGpuSvoNodeMipDirectPageTable(
 ): WebGpuSvoNodeMipDirectPageTable {
   const levelZOffsets = new Uint32Array(WEBGPU_SVO_NODE_MIP_LAYOUT.directPageTableMaximumLevels);
   if (plan.pages.length === 0) return { dimensions: [1, 1, 1], levelZOffsets, words: new Uint32Array(1), ready: false };
-  const levelCount = Math.max(...plan.pages.map((page) => page.key.level + 1));
+  // Folded rather than spread: `Math.max(...pages)` is an argument list, and a
+  // domain fine enough to need six figures of pages overflows the call stack
+  // before it ever reaches a device limit.
+  const levelCount = plan.pages.reduce((maximum, page) => Math.max(maximum, page.key.level + 1), 1);
   if (levelCount > WEBGPU_SVO_NODE_MIP_LAYOUT.directPageTableMaximumLevels) {
     return { dimensions: [1, 1, 1], levelZOffsets, words: new Uint32Array(1), ready: false };
   }
@@ -167,9 +202,10 @@ function createGeneration(device: GPUDevice, plan: SvoNodeMipPyramidPlan, sample
     size: Math.max(SVO_NODE_MIP_LAYOUT.directoryBytesPerPage, plan.pages.length * SVO_NODE_MIP_LAYOUT.directoryBytesPerPage),
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
   });
+  const directoryShape = webGpuSvoNodeMipDirectoryShape(plan.pages.length, device.limits?.maxTextureDimension2D ?? 2_048);
   const directoryTexture = device.createTexture({
     label: `SVO node mip sampled directory generation ${plan.generation}`,
-    size: [WEBGPU_SVO_NODE_MIP_LAYOUT.directoryTexelsPerPage, Math.max(1, plan.pages.length)],
+    size: [...directoryShape.texels],
     format: WEBGPU_SVO_NODE_MIP_LAYOUT.directoryTextureFormat,
     usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
   });
@@ -190,6 +226,7 @@ function createGeneration(device: GPUDevice, plan: SvoNodeMipPyramidPlan, sample
     directory,
     directoryTexture,
     directoryView: directoryTexture.createView(),
+    directoryShape,
     directPageTableTexture,
     directPageTableView: directPageTableTexture.createView({ dimension: "3d" }),
     directPageTableDimensions: directPageTable.dimensions,
@@ -234,14 +271,18 @@ export class WebGpuSvoNodeMipPyramid {
     this.assertAlive();
     if (this.candidate) this.destroyGeneration(this.candidate);
     this.candidate = createGeneration(this.device, plan, this.sampler);
-    const words = new Uint32Array(Math.max(1, plan.pages.length) * WEBGPU_SVO_NODE_MIP_LAYOUT.directoryWordsPerPage);
+    const { columns, rows, texels } = this.candidate.directoryShape;
+    // Slot order along the row, so the same linear buffer serves the storage
+    // directory and the wrapped texture; the tail of the last row stays zero,
+    // which reads back as generation 0 and therefore as a miss.
+    const words = new Uint32Array(columns * rows * WEBGPU_SVO_NODE_MIP_LAYOUT.directoryWordsPerPage);
     for (const page of plan.pages) words.set(packDirectoryEntry(page), page.slot * WEBGPU_SVO_NODE_MIP_LAYOUT.directoryWordsPerPage);
     if (plan.pages.length) this.device.queue.writeBuffer(this.candidate.directory, 0, words, 0, plan.pages.length * WEBGPU_SVO_NODE_MIP_LAYOUT.directoryWordsPerPage);
     if (plan.pages.length) this.device.queue.writeTexture(
       { texture: this.candidate.directoryTexture },
       words,
-      { bytesPerRow: SVO_NODE_MIP_LAYOUT.directoryBytesPerPage, rowsPerImage: plan.pages.length },
-      [WEBGPU_SVO_NODE_MIP_LAYOUT.directoryTexelsPerPage, plan.pages.length],
+      { bytesPerRow: columns * SVO_NODE_MIP_LAYOUT.directoryBytesPerPage, rowsPerImage: rows },
+      [...texels],
     );
     if (this.candidate.directPageTableReady) {
       this.device.queue.writeTexture(
@@ -395,6 +436,7 @@ export class WebGpuLiveSvoNodeMipPyramid {
   private readonly directory: GPUBuffer;
   private readonly directoryTexture: GPUTexture;
   private readonly directoryView: GPUTextureView;
+  private readonly directoryShape: { columns: number; rows: number; texels: readonly [number, number] };
   private readonly directPageTableTexture: GPUTexture;
   private readonly directPageTableView: GPUTextureView;
   private readonly directPageTableDimensions: readonly [number, number, number];
@@ -424,8 +466,9 @@ export class WebGpuLiveSvoNodeMipPyramid {
       addressModeW: "clamp-to-edge", ...WEBGPU_SVO_NODE_MIP_LAYOUT.sampler });
     this.directory = device.createBuffer({ label: `${label} directory`, size: pageCapacity * SVO_NODE_MIP_LAYOUT.directoryBytesPerPage,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+    this.directoryShape = webGpuSvoNodeMipDirectoryShape(pageCapacity, device.limits?.maxTextureDimension2D ?? 2_048);
     this.directoryTexture = device.createTexture({ label: `${label} sampled directory`,
-      size: [WEBGPU_SVO_NODE_MIP_LAYOUT.directoryTexelsPerPage, pageCapacity], format: WEBGPU_SVO_NODE_MIP_LAYOUT.directoryTextureFormat,
+      size: [...this.directoryShape.texels], format: WEBGPU_SVO_NODE_MIP_LAYOUT.directoryTextureFormat,
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
     this.directoryView = this.directoryTexture.createView();
     this.directPageTableDimensions = direct;
@@ -435,22 +478,23 @@ export class WebGpuLiveSvoNodeMipPyramid {
     this.directPageTableView = this.directPageTableTexture.createView({ dimension: "3d" });
     this.pageState = new WebGpuLiveSvoDerivedPageState(device, pageCapacity, label);
     this.allocatedBytes = atlasTexels[0] * atlasTexels[1] * atlasTexels[2] * SVO_NODE_MIP_LAYOUT.bytesPerTexel
-      + pageCapacity * SVO_NODE_MIP_LAYOUT.directoryBytesPerPage * 2
+      + pageCapacity * SVO_NODE_MIP_LAYOUT.directoryBytesPerPage
+      + this.directoryShape.columns * this.directoryShape.rows * SVO_NODE_MIP_LAYOUT.directoryBytesPerPage
       + direct[0] * direct[1] * direct[2] * 4 + this.pageState.allocatedBytes;
   }
 
   private uploadPlanLayout(plan: SvoNodeMipPyramidPlan): void {
     const layoutKey = plan.pages.map((page) => `${page.key.level}:${page.key.coordinate.join(",")}:${page.slot}:${page.atlasTexelOrigin.join(",")}`).join(";");
     if (layoutKey === this.directoryLayoutKey) return;
-    const directoryWords = new Uint32Array(this.options.pageCapacity * WEBGPU_SVO_NODE_MIP_LAYOUT.directoryWordsPerPage);
+    const directoryWords = new Uint32Array(this.directoryShape.columns * this.directoryShape.rows * WEBGPU_SVO_NODE_MIP_LAYOUT.directoryWordsPerPage);
     // Directory generation is intentionally stable. Page-local validity is the
     // live generation authority, so transform/material edits never rewrite the
     // complete directory or direct table.
     for (const page of plan.pages) directoryWords.set(packDirectoryEntry({ ...page, key: { ...page.key, generation: 1 } }), page.slot * WEBGPU_SVO_NODE_MIP_LAYOUT.directoryWordsPerPage);
-    this.device.queue.writeBuffer(this.directory, 0, directoryWords);
+    this.device.queue.writeBuffer(this.directory, 0, directoryWords, 0, this.options.pageCapacity * WEBGPU_SVO_NODE_MIP_LAYOUT.directoryWordsPerPage);
     this.device.queue.writeTexture({ texture: this.directoryTexture }, directoryWords,
-      { bytesPerRow: SVO_NODE_MIP_LAYOUT.directoryBytesPerPage, rowsPerImage: this.options.pageCapacity },
-      [WEBGPU_SVO_NODE_MIP_LAYOUT.directoryTexelsPerPage, this.options.pageCapacity]);
+      { bytesPerRow: this.directoryShape.columns * SVO_NODE_MIP_LAYOUT.directoryBytesPerPage, rowsPerImage: this.directoryShape.rows },
+      [...this.directoryShape.texels]);
     const direct = createWebGpuSvoNodeMipDirectPageTable(plan, Math.max(...this.directPageTableDimensions));
     this.directPageTableLevelZOffsets.fill(0);
     this.directPageTableLevelZOffsets.set(direct.levelZOffsets);

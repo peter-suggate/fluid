@@ -29,10 +29,10 @@ export interface EnvironmentPreset {
 export const environmentPresets: ReadonlyArray<EnvironmentPreset> = [
   {
     id: "default",
-    name: "Calibration studio",
-    shortName: "Studio",
-    description: "A white cyclorama and an inlaid metre grid. Deliberately empty, so nothing competes with the numbers you are reading off the water.",
-    swatch: ["#4a4d4f", "#b7b9b8", "#f2f1ee"]
+    name: "White room",
+    shortName: "White room",
+    description: "A plain white enclosure with one overhead light and no set dressing.",
+    swatch: ["#d9d9d9", "#eeeeee", "#ffffff"]
   },
   {
     id: "conservatory",

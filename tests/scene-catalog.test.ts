@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { cameraPosition, pan } from "../lib/math";
 import { canonicalScene, validateScene } from "../lib/model";
 import {
   SCENE_AUDIENCES,
@@ -19,6 +20,7 @@ import {
   sceneCatalogCards,
   scenePresets,
 } from "../lib/scenes";
+import { buildEnvironmentProxyCatalog } from "../lib/voxel-environments";
 
 const AUDIENCE_IDS = new Set<SceneAudience>(SCENE_AUDIENCES.map(({ id }) => id));
 
@@ -55,6 +57,38 @@ test("every catalog document owns its scenery rather than naming a background", 
     const scene = sceneDocument(entry);
     assert.equal(scene.environment, entry.environment, `${entry.id} must carry its environment id`);
     assert.ok(scene.scenery, `${entry.id} must carry the scenery graph its environment seeds`);
+  }
+});
+
+test("every water scene has an enclosing SVO shell unless terrain is its enclosure", () => {
+  for (const entry of SCENE_CATALOG) {
+    const scene = sceneDocument(entry);
+    if (scene.systems?.fluid === false) continue;
+    const shell = scene.scenery?.nodes.find((node) =>
+      node.kind === "room-shell" || node.kind === "terrain-shell");
+    if (scene.terrain) {
+      assert.equal(shell?.kind, "terrain-shell", `${entry.id} must publish its authored terrain as the SVO shell`);
+    } else {
+      assert.equal(shell?.kind, "room-shell", `${entry.id} must place water in a bounded SVO room`);
+    }
+  }
+});
+
+test("the default water-box cameras start inside the white room with panning headroom", () => {
+  for (const id of ["water-box-dam-break", "twin-dam-collision"]) {
+    const entry = getSceneDefinition(id);
+    const scene = sceneDocument(entry);
+    const shell = buildEnvironmentProxyCatalog(scene, entry.environment).shell;
+    assert.equal(shell.kind, "room");
+    if (shell.kind !== "room") continue;
+    const camera = sceneDefinitionCamera(entry);
+    for (const candidate of [camera, pan(camera, 100, 0), pan(camera, -100, 0), pan(camera, 0, 100), pan(camera, 0, -100)]) {
+      const position = cameraPosition(candidate);
+      for (const axis of ["x", "y", "z"] as const) {
+        assert.ok(position[axis] > shell.bounds_m.min[axis] && position[axis] < shell.bounds_m.max[axis],
+          `${id} camera must remain inside the room after a modest ${axis}-axis pan`);
+      }
+    }
   }
 });
 

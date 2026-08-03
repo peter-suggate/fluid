@@ -23,28 +23,22 @@ const DEFAULT_EXTENTS_M = Object.freeze({ x: 1.6, y: 1.2, z: 1.6 });
 /**
  * The room a new scene starts in: floor, walls, ceiling, and one softbox.
  *
- * Every other set in the app is *staged* — the studio has a cyclorama, a datum
- * grid and a step wedge, the conservatory has a pot bench — because each was
- * composed around a scene that already existed. A new scene has no subject yet,
- * so anything in the room would be scenery the author has to identify and
- * delete before their own work reads. What is left is the enclosure and the
- * light that makes it visible.
+ * A new scene has no subject yet, so anything beyond the enclosure and its
+ * light would be scenery the author has to identify and delete before their own
+ * work reads.
  *
  * Shared by every empty document, exactly as `studioSceneryGraph` is shared by
  * every scene that seeds from the studio: a document owns its graph, and an
  * edit replaces nodes rather than mutating them.
  */
 export const minimalRoomSceneryGraph: SceneryGraph = {
-  palettes: { neutral: { tint: [1, 1.005, 1.01] }, daylight: { tint: [.96, .97, .98] } },
+  palettes: { white: { tint: [1, 1, 1] }, daylight: { tint: [1, 1, 1] } },
   nodes: [
     {
       kind: "room-shell", id: "shell", materialModel: "room",
-      // A value ramp up from floor to ceiling, so the enclosure reads as a room
-      // under one overhead source without any prop casting a shadow to explain
-      // it. The band is narrow on purpose: this is a backdrop for water.
-      floor: { palette: "neutral", value: .58 },
-      wall: { palette: "neutral", value: .72 },
-      ceiling: { palette: "neutral", value: .84 },
+      floor: { palette: "white", value: .9 },
+      wall: { colorLinear: [1, 1, 1] },
+      ceiling: { palette: "white", value: .9 },
     },
     {
       kind: "box", id: "light/softbox", group: "softbox", tags: ["softbox", "light", "emits-negative-y"],

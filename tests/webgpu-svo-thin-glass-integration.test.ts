@@ -105,11 +105,11 @@ test("glass uses one fixed live arena and survives source replacement", () => {
     };
     renderer.setSource(structuralSource());
     renderer.publishScene(scene);
-    const firstGlass = created.find(({ label }) => label === "Live authored scene arena (materials, primitives/BVH, thin glass)");
+    const firstGlass = created.find(({ label }) => label === "Live authored scene arena (materials, primitives/BVH, thin glass, terrain)");
     assert.ok(firstGlass);
     renderer.setSource(structuralSource());
     renderer.publishScene(scene);
-    assert.equal(created.filter(({ label }) => label === "Live authored scene arena (materials, primitives/BVH, thin glass)").length, 1,
+    assert.equal(created.filter(({ label }) => label === "Live authored scene arena (materials, primitives/BVH, thin glass, terrain)").length, 1,
       "scene updates must retain the fixed-capacity glass arena");
     assert.equal(firstGlass.destroyed, false);
     renderer.setSource(undefined);
@@ -143,8 +143,9 @@ test("primary pane optics are exact, two-sided, identity preserving, and one-que
     "a pane is never substituted as opaque or recursively shaded");
 });
 
-test("pane shadows use nearest-event bounded transmission rather than opaque substitution", () => {
-  assert.match(svoDrySceneShader, /traceGlass\(ray\.origin_m,ray\.direction,tMin_m,bestT,false\)/);
+test("authored pane shadows use bounded transmission while compositor-owned tank panes are skipped", () => {
+  assert.match(svoDrySceneShader, /traceGlass\(ray\.origin_m,ray\.direction,tMin_m,bestT,true\)/,
+    "exact visibility must skip the vessel panes already owned by the water compositor");
   assert.match(svoDrySceneShader, /dryVisibilityTransmissionStep\([^]*glassTransmission/);
   assert.match(svoDrySceneShader, /SvoVisibilityBudget\(dry\.tuningCounts1\.w,dry\.tuningCounts2\.x,dry\.tuningCounts2\.y,dry\.tuningCounts2\.z\),true/,
     "pane transmission must share the published bounded visibility tuning");

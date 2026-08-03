@@ -2,6 +2,7 @@ import { cloneScene, defaultCamera, defaultScene, DEFAULT_GPU_CPU_TIMESTEP_RATIO
 import { createPaperScenario } from "./paper-scenarios";
 import { applyGardenPool, GARDEN_DAM_BRICK_SEED_M, GARDEN_WATERLINE_M, gardenPoolTerrain } from "./garden-scene";
 import { createHeroGardenHoseScene, heroGardenCamera } from "./hero-garden-scene";
+import { withHeroLayout } from "./voxel-scenery/hero-layout";
 import { terrainHeightAt } from "./terrain";
 import type { EnvironmentId } from "./environments";
 import type { MethodProfile } from "./methods";
@@ -266,6 +267,199 @@ export const POWER_DROPLET_METHOD_PROFILE: MethodProfile = Object.freeze({
     globalFineLevelSetMaximumBricks: POWER_DROPLET_FINE_BRICK_CAPACITY,
   }),
 });
+
+// ---- the live-occupancy fill family: the droplet sweep's dual ---------------
+//
+// The droplet family pins the fluid and sweeps the container, so it measures
+// `slope * domain`. It has run out of resolving power on the other term:
+// *every* pass driven by live work is flat across that sweep by construction,
+// so "flat in N" cannot tell correctly live-shaped work apart from
+// capacity-shaped work or from fixed overhead. At 256 cubed the two largest
+// GPU labels — resident grading closure and structured advection — are both
+// flat, and one of them (advection, `publishUnionDispatch` in
+// `lib/webgpu-octree-structured-dynamics.ts`) is provably live-count-driven.
+// Flatness in N is therefore not evidence of anything.
+//
+// This family is the dual instrument. The container is FIXED at 256 cubed and
+// only the reservoir moves, so a per-pass cost read across its members answers
+// the question the droplet sweep cannot:
+//
+//   flat in live occupancy        -> fixed overhead; deletable, and the only
+//                                    place a 5x frame win can come from
+//   linear in live occupancy      -> honest work; attack per-item cost
+//   superlinear in live occupancy -> algorithmic defect
+//
+// Read together the two families span the plane: droplet holds fluid and moves
+// domain, fill holds domain and moves fluid.
+
+/** Container edge for every member of the fill family, in finest cells.
+ *
+ * Fixed on purpose, and fixed at the *largest* droplet member so the two
+ * instruments share a container: `power-fill-256-100` and `power-droplet-256`
+ * are the same 256-cubed box holding the same hundred cells, differing only in
+ * their authored reserves. That coincidence is the capacity control — see
+ * `POWER_FILL_PRESSURE_ROW_CAPACITY`. */
+export const POWER_FILL_EDGE_CELLS = 256;
+
+/**
+ * The three reservoirs, in finest cells, and why they are these three.
+ *
+ * Each is the previous one doubled on every axis: 5x4x5 -> 10x8x10 -> 20x16x20,
+ * so liquid occupancy is exactly 100 -> 800 -> 6,400 and each step is exactly
+ * 8x. A geometric sweep with a constant ratio is what makes the classification
+ * mechanical rather than a judgement call — over one step, a flat pass reads
+ * 1x, a linear pass reads 8x, and an area-shaped pass reads 4x — and holding
+ * the 5:4:5 aspect ratio constant keeps the surface/volume law fixed too, so a
+ * pass that tracks free-surface area rather than volume is still readable
+ * (4x per step) instead of being confounded by a reshaped box.
+ *
+ * 6,400 rather than a round 8,000 for the top member: 20x20x20 would be 8,000
+ * cells but a 1.25x-taller box, which breaks both the exact 8x volume ratio and
+ * the fixed aspect ratio and buys nothing. The ratio is the instrument.
+ *
+ * The first member is the droplet family's own 5x4x5 reservoir, reproduced
+ * exactly rather than approximated, so the fill sweep's low end is literally
+ * the droplet sweep's high end.
+ */
+export const POWER_FILL_RESERVOIR_CELLS = Object.freeze([
+  Object.freeze({ x: 5, y: 4, z: 5 }),
+  Object.freeze({ x: 10, y: 8, z: 10 }),
+  Object.freeze({ x: 20, y: 16, z: 20 }),
+] as const);
+
+/** Liquid cells per member: the family's independent variable, and the axis
+ * every per-pass cost in the sweep is regressed against. */
+export const POWER_FILL_LIQUID_CELLS = Object.freeze([100, 800, 6_400] as const);
+export type PowerFillLiquidCells = typeof POWER_FILL_LIQUID_CELLS[number];
+
+/**
+ * Row reserve for every fill lane — deliberately independent of the reservoir.
+ *
+ * A capacity that grew with the member would be a hidden confound: a pass that
+ * is capacity-shaped would then read as live-shaped and the instrument would
+ * report the opposite of the truth. So one value covers all three, authored for
+ * the 6,400-cell member and carried unchanged by the 100-cell one.
+ *
+ * The derivation, in rows, for the largest member (the same shape as
+ * `POWER_DROPLET_PRESSURE_ROW_CAPACITY`, evaluated on a 20x16x20 corner block):
+ *
+ *   liquid rows        20 * 16 * 20 unit owners                  =  6,400
+ *   wall strip         three closed walls; the 3-cell strip
+ *                      around the block is 26 * 22 * 26 - 6,400  =  8,472
+ *   surface band       band 1 plus the Section 5 transport reach,
+ *                      dry at t=0 and wetting as the block slumps
+ *   2:1 balance        dry, coarsening outward: no rows
+ *
+ * 14,872 liquid-plus-wall rows against `planOctreePressureCapacity`'s own
+ * footprint-shaped ask of 12,800. 65,536 is 4.4x the derivation and 5.1x the
+ * planner, matching the droplet family's 3.4x headroom over its own
+ * liquid-plus-wall term with extra room for a reservoir eight times deeper that
+ * genuinely spreads. It is also a magnitude the codebase already runs:
+ * `deep-power-hydrostatic` authors exactly 65,536 rows.
+ *
+ * Raising a reserve is not inert here ([[capacity-is-not-inert]]) — a lane has
+ * failed at t=0 under a LARGER row capacity — which is precisely why this
+ * number is also an experiment. `power-fill-256-100` is the same hundred cells
+ * in the same 256-cubed container as `power-droplet-256`, differing ONLY in
+ * carrying 65,536/65,536 where that lane carries 4,096/4,096. Diffing the two
+ * per-label captures is a direct measurement of capacity-shaped GPU cost at
+ * identical live occupancy, with no attribution guesswork at all.
+ */
+export const POWER_FILL_PRESSURE_ROW_CAPACITY = 65_536;
+
+/**
+ * Fine narrow-band brick reserve, likewise constant across the family.
+ *
+ * `planFluidFootprintFineNarrowBandBrickCapacity` asks 1,073 / 4,290 / 17,160
+ * bricks for the three reservoirs. 65,536 is 3.8x the largest ask — the same
+ * ratio the droplet family authors over its own (4,096 against 1,073) — and is
+ * still 256x below the 16,777,216-brick logical lattice a 256-cubed container
+ * carries at fine factor 4. Constant across members for the same reason as the
+ * row reserve, and 16x the droplet family's value so the capacity control above
+ * moves both reserves by the same factor.
+ *
+ * There is no environment path for this knob (`lib/methods/octree.ts` reads it
+ * only from authored method values), so it must be carried by the authored
+ * profile and by the smoke-catalog overrides; the benchmark reaches it through
+ * the latter.
+ */
+export const POWER_FILL_FINE_BRICK_CAPACITY = 65_536;
+
+/** Every discretization knob of the droplet family — leaf 32, interface band 1,
+ * fine factor 4, 0.05 m cells, 0.004 s steps — so a per-label capture on a fill
+ * lane is directly comparable to a droplet one. Only the two reserves differ,
+ * and both are constants of the family rather than functions of the member. */
+export const POWER_FILL_METHOD_PROFILE: MethodProfile = Object.freeze({
+  ...LARGE_POWER_HYDROSTATIC_METHOD_PROFILE,
+  overrides: Object.freeze({
+    ...LARGE_POWER_HYDROSTATIC_METHOD_PROFILE.overrides,
+    pressureRowCapacity: POWER_FILL_PRESSURE_ROW_CAPACITY,
+    globalFineLevelSetMaximumBricks: POWER_FILL_FINE_BRICK_CAPACITY,
+  }),
+});
+
+/** The reservoir a member is built from, in finest cells. Keyed by the liquid
+ * count because that count is the family's independent variable and the thing
+ * its scene ids are named for. */
+export function powerFillReservoirCells(liquidCells: PowerFillLiquidCells) {
+  const index = POWER_FILL_LIQUID_CELLS.indexOf(liquidCells);
+  const reservoir = POWER_FILL_RESERVOIR_CELLS[index];
+  if (!reservoir) throw new RangeError(`No authored fill reservoir for ${liquidCells} liquid cells`);
+  return reservoir;
+}
+
+/**
+ * `liquidCells` cells of water in a fixed 256-cubed container.
+ *
+ * One factory for the same reason the droplet family has one: the only authored
+ * difference between members must be the reservoir, or the measured slope is a
+ * scene difference rather than a live-occupancy law.
+ *
+ * The corner dam-break with **no** `initialDamBreakOrigin_m` is mandatory and
+ * not stylistic. `analyticSparseBootstrap` (`lib/webgpu-octree.ts`) requires no
+ * brick seeds, no bodies, no terrain and a reservoir anchored at the container
+ * corner; any offset origin flips the bootstrap dense — `Float32Array(nx*ny*nz)`
+ * over 16.7M cells, a full-domain signed-distance transform and a ~134 MB phi
+ * texture — which at 256 cubed would swamp the very measurement this family
+ * exists to take. See `POWER_DROPLET_RESERVOIR_M` for the same argument at the
+ * other end of the plane.
+ */
+export function createPowerFillScene(liquidCells: PowerFillLiquidCells): SceneDescription {
+  const scene = cloneScene(defaultScene);
+  scene.sceneId = `power-fill-${POWER_FILL_EDGE_CELLS}-${liquidCells}`;
+  scene.duration_s = 1;
+  scene.rigidBodies = [];
+  const extent_m = POWER_FILL_EDGE_CELLS * POWER_DROPLET_CELL_SIZE_M;
+  const cells = powerFillReservoirCells(liquidCells);
+  // Built from the authored integer lattice times one spacing, never decimal
+  // literals: the power catalog requires isotropic finest cells to 1e-5.
+  const reservoir = {
+    x: cells.x * POWER_DROPLET_CELL_SIZE_M,
+    y: cells.y * POWER_DROPLET_CELL_SIZE_M,
+    z: cells.z * POWER_DROPLET_CELL_SIZE_M,
+  };
+  scene.container = {
+    ...scene.container,
+    width_m: extent_m,
+    height_m: extent_m,
+    depth_m: extent_m,
+    // The expression `validateScene` re-derives, so its 1e-9 equality is exact.
+    fillFraction: (reservoir.x * reservoir.y * reservoir.z) / (extent_m * extent_m * extent_m),
+    top: "closed",
+    fluidWallMode: "free-slip",
+  };
+  scene.voxelDomain = { finestCellSize_m: POWER_DROPLET_CELL_SIZE_M, brickSize_cells: 8 };
+  scene.fluid.initialCondition = "dam-break";
+  scene.fluid.initialDamBreakDimensions_m = reservoir;
+  // The four deletions that keep `analyticSparseBootstrap` true.
+  delete scene.fluid.initialDamBreakOrigin_m;
+  delete scene.fluid.initialBrickSeeds_m;
+  delete scene.fluid.initialBrickSeedsAdditive;
+  delete scene.fluid.inflow;
+  scene.fluid.surfaceTension_N_m = 0;
+  scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 0.004;
+  return scene;
+}
 
 /** The Bet-4 work verdict is about avoided machinery, not surface accuracy: a
  * factor-1 surface keeps the frame's cost in the pressure path the census
@@ -1019,7 +1213,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     shelf: "Tanks",
     environment: "default",
     build: createTwinDamCollisionScene,
-    camera: { azimuth_rad: 0.5, elevation_rad: 0.32, distance_m: 4.1, target_m: { x: 0, y: 0.2, z: 0 } },
+    camera: { azimuth_rad: 0.5, elevation_rad: 0.32, distance_m: 3.2, target_m: { x: 0, y: 0.2, z: 0 } },
     variants: {
       "gpu-smoke": smokeVariant(
         "The collision measured without capillary force, at the 4 ms step the oblique "
@@ -1049,24 +1243,31 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
   defineScene({
     id: "hero-garden-hose",
     name: "Porcelain pond · hose filling",
-    blurb: "A raised porcelain pond on a 7.5 mm lattice, with a hose plunging in. The coping, the basin and the ground are one generated heightfield, so the water meets the rim exactly where the rim is.",
+    blurb: "A raised porcelain pond with a hose over it. The coping, the basin and the ground are one generated heightfield, so the water meets the rim exactly where the rim is. Opens dry — turn Water on under Scene configuration · Fluid to fill it.",
     audience: "explore",
     shelf: "Garden",
     environment: "garden",
-    build: createHeroGardenHoseScene,
-    camera: heroGardenCamera,
-    variants: {
-      "gpu-smoke": smokeVariant(
-        "Does the generated vessel hold still water? The hose is shut off and the capillary "
-        + "force removed, so a residual speed is the basin's own — a step the bake left in the "
-        + "inner face, or a rim the fill overtopped — and nothing else in the scene could be "
-        + "causing it. The 1/120 s step is the one the other terrain-pool lanes rest at.",
-        (scene) => {
-          delete scene.fluid.inflow;
-          scene.fluid.surfaceTension_N_m = 0;
-          pinStep(scene, 1 / 120);
-        }),
+    // Dry by default. The set is what is ready to be looked at; the water is
+    // still in bring-up, and a scene that opens is worth more than a scene that
+    // opens correctly. `systems.fluid` is the switch, and nothing else differs.
+    //
+    // The set is composed here rather than inside `createHeroGardenHoseScene`
+    // because the layout depends on the vessel — it seats every prop through
+    // `pondVesselHeightAt` and runs its pebble beds along `pondVesselPlanCurve`
+    // — and a scene module that imported it back would close a cycle that dies
+    // in the temporal dead zone. Vessel, then set, then catalog is the one
+    // ordering with no arrow pointing backwards. Appending rather than mutating
+    // matters too: `scene.scenery` is a module-level constant shared by every
+    // document the factory produces.
+    build: () => {
+      const scene = createHeroGardenHoseScene();
+      return scene.scenery ? { ...scene, scenery: withHeroLayout(scene) } : scene;
     },
+    camera: heroGardenCamera,
+    // No GPU lane yet, and so deliberately no variant: an authored variant that
+    // no lane claims is a fork by another name. The settling lane returns with
+    // the inner-face fix that phase 1 is currently blocked on — see
+    // docs/HERO_GARDEN_HOSE_SCENE_PLAN.md.
   }),
   defineScene({
     id: "garden-pond",
@@ -1280,6 +1481,26 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
       target_m: { x: 0, y: edgeCells * POWER_DROPLET_CELL_SIZE_M * 0.1, z: 0 },
     },
   })),
+  ...POWER_FILL_LIQUID_CELLS.map((liquidCells) => {
+    const cells = powerFillReservoirCells(liquidCells);
+    return defineScene({
+      id: `power-fill-${POWER_FILL_EDGE_CELLS}-${liquidCells}`,
+      name: `Octree · ${liquidCells.toLocaleString("en-US")}-cell fill of a ${POWER_FILL_EDGE_CELLS}³ domain`,
+      blurb: `${liquidCells.toLocaleString("en-US")} cells of water — a ${cells.x}×${cells.y}×${cells.z} corner reservoir — in a fixed ${POWER_FILL_EDGE_CELLS}³ container (${(POWER_FILL_EDGE_CELLS * POWER_DROPLET_CELL_SIZE_M).toFixed(1)} m on a side) at a capacity shared with every member. The container, the lattice and both reserves are identical across the family, so the only thing that changes is how much live water there is. A GPU pass measured across the sweep is flat (fixed overhead), linear (honest work) or superlinear (a defect), and nothing else.`,
+      audience: "validation",
+      // Its own shelf, beside the domain-tax sweep: these three are one
+      // instrument read across its members, and the pair of shelves is the
+      // pair of axes.
+      shelf: "Live-occupancy sweep",
+      environment: "default",
+      methodProfile: POWER_FILL_METHOD_PROFILE,
+      build: () => createPowerFillScene(liquidCells),
+      camera: {
+        distance_m: POWER_FILL_EDGE_CELLS * POWER_DROPLET_CELL_SIZE_M * 1.6,
+        target_m: { x: 0, y: POWER_FILL_EDGE_CELLS * POWER_DROPLET_CELL_SIZE_M * 0.1, z: 0 },
+      },
+    });
+  }),
   defineScene({
     id: "power-hybrid-deep-ocean",
     name: "Octree · hybrid deep ocean",

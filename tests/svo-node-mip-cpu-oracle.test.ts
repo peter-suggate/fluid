@@ -3,7 +3,7 @@ import test from "node:test";
 import type { SceneDescription } from "../lib/model";
 import type { SparseSceneDomainPlan } from "../lib/sparse-scene-domain";
 import { SVO_NODE_MIP_CPU_ORACLE_DEFAULT_CAPACITY, buildSvoNodeMipCpuOraclePublication } from "../lib/svo-node-mip-cpu-oracle";
-import { webGpuSvoNodeMipMaximumPages } from "../lib/webgpu-svo-node-mip-pyramid";
+import { webGpuSvoNodeMipDirectoryShape, webGpuSvoNodeMipMaximumPages } from "../lib/webgpu-svo-node-mip-pyramid";
 import type { EnvironmentProxyPrimitive } from "../lib/voxel-environments";
 
 function scene(terrain = false): SceneDescription {
@@ -125,13 +125,28 @@ test("default capacity fits the guaranteed WebGPU sampled-directory height", () 
   assert.equal(SVO_NODE_MIP_CPU_ORACLE_DEFAULT_CAPACITY, 8_192);
 });
 
-test("production capacity follows the device directory height rather than a fixed floor", () => {
-  // One directory row per page, so the 2D height limit is the only ceiling.
-  // Apple reports 16384; the former hard-coded 8192 discarded roughly a sixth
-  // of hose-tank's scene geometry, and a dropped page samples as empty air.
-  assert.equal(webGpuSvoNodeMipMaximumPages({ limits: { maxTextureDimension2D: 16_384 } } as GPUDevice), 16_384);
-  assert.equal(webGpuSvoNodeMipMaximumPages({ limits: { maxTextureDimension2D: 8_192 } } as GPUDevice), 8_192);
+test("production capacity is the directory's area, not one page per row", () => {
+  // The directory used to be two texels wide with one row per page, which made
+  // the 2D height limit the whole ceiling: 16 384 pages on an M1 Max, which the
+  // hero pond reaches at a 5 mm lattice and refuses to open at. Wrapping pages
+  // across columns squares it. A dropped page is not a degradation — it samples
+  // as empty air — so this number has to be the real addressable count.
+  assert.equal(webGpuSvoNodeMipMaximumPages({ limits: { maxTextureDimension2D: 16_384 } } as GPUDevice), 16_384 * 8_192);
+  assert.equal(webGpuSvoNodeMipMaximumPages({ limits: { maxTextureDimension2D: 8_192 } } as GPUDevice), 8_192 * 4_096);
   // A device that reports nothing usable stays usable, not empty.
-  assert.equal(webGpuSvoNodeMipMaximumPages({ limits: undefined } as unknown as GPUDevice), 2_048);
-  assert.equal(webGpuSvoNodeMipMaximumPages({ limits: { maxTextureDimension2D: 512 } } as GPUDevice), 2_048);
+  assert.equal(webGpuSvoNodeMipMaximumPages({ limits: undefined } as unknown as GPUDevice), 2_048 * 1_024);
+  assert.equal(webGpuSvoNodeMipMaximumPages({ limits: { maxTextureDimension2D: 512 } } as GPUDevice), 2_048 * 1_024);
+});
+
+test("the sampled directory keeps one column until the height limit forces a wrap", () => {
+  // One column is byte-for-byte the layout every shipped scene already uploads,
+  // and it is what the shader's `columns == 1` path reduces to, so nothing below
+  // the wrap threshold can change behaviour.
+  assert.deepEqual(webGpuSvoNodeMipDirectoryShape(1, 16_384), { columns: 1, rows: 1, texels: [2, 1] });
+  assert.deepEqual(webGpuSvoNodeMipDirectoryShape(16_384, 16_384), { columns: 1, rows: 16_384, texels: [2, 16_384] });
+  // The hero pond at 5 mm: 23 545 pages, one page past the old ceiling.
+  assert.deepEqual(webGpuSvoNodeMipDirectoryShape(23_545, 16_384), { columns: 2, rows: 11_773, texels: [4, 11_773] });
+  const wide = webGpuSvoNodeMipDirectoryShape(16_384 * 8_192, 16_384);
+  assert.deepEqual(wide, { columns: 8_192, rows: 16_384, texels: [16_384, 16_384] });
+  assert.throws(() => webGpuSvoNodeMipDirectoryShape(16_384 * 8_192 + 1, 16_384), /exceeding the 16384 texture limit/);
 });

@@ -84,18 +84,32 @@ test("CPU seeded noise is repeatable, bounded, and continuous across world-space
     assert.ok(first.baseColorLinear.every((channel) => Number.isFinite(channel) && channel >= 0 && channel <= 1));
     assert.ok(first.roughness >= 0.04 && first.roughness <= 1);
 
+    // Continuity is Lipschitz, not smallness. A policy with a millimetre grain
+    // moves measurably over a tenth of a millimetre, so a fixed probe and a
+    // fixed tolerance only ever held for the coarse policies: the probe is
+    // therefore a fixed fraction of the *finest* period a policy uses, and the
+    // tolerance is that policy's own slope bound over it. Smoothstep-interpolated
+    // value noise moves at most 1.5 per cell, and the fleck term multiplies its
+    // field's slope by 1 / (1 - threshold). A seam would be an O(amplitude)
+    // jump, which stays orders of magnitude above this for every policy.
+    const finest = policy.frequency_mInv[0] * (policy.detailWeight > 0 ? policy.detailOctave : 1);
+    const offset = 5e-4 / finest;
+    const slope = (amplitude: number) => 1.5 * finest
+      * (2 * amplitude + policy.fleckAmplitude / (1 - policy.fleckThreshold));
     const cellBoundary = 1 / policy.frequency_mInv[0];
     const left = evaluateSvoProceduralMaterial(policy.functionId, [0.5, 0.4, 0.3], 0.6, {
-      x: cellBoundary - 1e-4, y: 0.23, z: -0.17,
+      x: cellBoundary - offset, y: 0.23, z: -0.17,
     });
     const right = evaluateSvoProceduralMaterial(policy.functionId, [0.5, 0.4, 0.3], 0.6, {
-      x: cellBoundary + 1e-4, y: 0.23, z: -0.17,
+      x: cellBoundary + offset, y: 0.23, z: -0.17,
     });
     for (let channel = 0; channel < 3; channel += 1) {
-      assert.ok(Math.abs(left.baseColorLinear[channel] - right.baseColorLinear[channel]) < 1e-5,
+      assert.ok(Math.abs(left.baseColorLinear[channel] - right.baseColorLinear[channel])
+        < 1e-5 + 2 * offset * slope(policy.colorAmplitude),
         `${policy.key} color must remain continuous at the shared cell/primitive seam`);
     }
-    assert.ok(Math.abs(left.roughness - right.roughness) < 1e-5,
+    assert.ok(Math.abs(left.roughness - right.roughness)
+      < 1e-5 + 2 * offset * slope(policy.roughnessAmplitude),
       `${policy.key} roughness must remain continuous at the shared cell/primitive seam`);
   }
 

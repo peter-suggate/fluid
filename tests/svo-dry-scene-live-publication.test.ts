@@ -26,6 +26,11 @@ import {
   octreeSparseBrickStructuralFinalizeShader,
 } from "../lib/webgpu-octree-sparse-bricks";
 import {
+  SPARSE_SCENE_MAINTENANCE_INCOMPLETE_OVERFLOW,
+  SPARSE_SCENE_MAINTENANCE_OVERFLOW,
+  sparseSceneRevisionIncomplete,
+} from "../lib/webgpu-sparse-scene-proxies";
+import {
   buildSparseVoxelDrySceneLightingMirrors,
   canEncodeSparseVoxelDryScene,
   SVO_DRY_SCENE_REQUIRED_VALID_FIELDS,
@@ -77,7 +82,14 @@ test("the live finalizer is overflow-gated and closes with the completion fence"
     octreeSparseBrickStructuralFinalizeShader.indexOf("fn finalizeScene()"),
   );
   assert.ok(liveEntry, "the finalizer must expose a live-scene entry point");
-  assert.match(liveEntry, /completed != requested \|\| overflow != 0u \|\| topologyMutation\[3\] != 0u/);
+  // Gated on the overflows that mean a brick still holds the previous revision,
+  // not on the flag word. A per-brick candidate overflow rebuilt that brick with
+  // fewer primitives than overlapped it; withholding the generation for it took
+  // every derived-lighting page down and rendered the whole octree domain as
+  // full shadow. See SPARSE_SCENE_MAINTENANCE_INCOMPLETE_OVERFLOW.
+  assert.match(liveEntry, new RegExp(
+    `completed != requested\\s*\\|\\| \\(overflow & ${SPARSE_SCENE_MAINTENANCE_INCOMPLETE_OVERFLOW}u\\) != 0u\\s*\\|\\| topologyMutation\\[3\\] != 0u`));
+  assert.equal(sparseSceneRevisionIncomplete(SPARSE_SCENE_MAINTENANCE_OVERFLOW.candidates), false);
   assert.match(liveEntry, /state\[1\] \|= SCENE_VALID_FIELDS;/);
   assert.match(liveEntry, /state\[2\] \+= 1u;/);
   assert.match(liveEntry, /state\[3\] \+= 1u;/);

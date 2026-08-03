@@ -86,9 +86,12 @@ export const DEFAULT_SVO_RENDER_TUNING: SvoRenderTuning = Object.freeze({
   shadowConeAperture: 0.065,
   // GI is deliberately image-forward by default: the exact key light remains
   // crisp, while bounce and broad cone visibility visibly shape the scene.
-  giBounceStrength: 1.5,
-  giOcclusionStrength: 0.82,
-  giEnvironmentStrength: 0.65,
+  giBounceStrength: 1.8,
+  // Multi-bounce compensation already restores much of the energy hidden by
+  // broad cone occlusion. Retaining the old .82 contrast double-darkened room
+  // corners and amplified 8-bit opacity contours into visible bands.
+  giOcclusionStrength: 0.65,
+  giEnvironmentStrength: 0.85,
   // Direct light is evaluated from the current scene-light arena every frame.
   // Derived radiance contains emitted energy, not a baked replacement for the
   // authored lights, so enabling GI must not silently remove ten percent of it.
@@ -108,7 +111,7 @@ export const SVO_RENDER_TUNING_PRESETS = Object.freeze({
     coneStepBudget: 20,
     giConeCount: 3,
     giBounceStrength: 1.35,
-    giOcclusionStrength: 0.72,
+    giOcclusionStrength: 0.6,
     maximumShadedLights: 3,
     stableAreaLightSamples: 1,
     stableAoSamples: 2,

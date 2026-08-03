@@ -27,6 +27,8 @@ export interface LiveSvoSceneOptions {
   renderBrickSize?: 4 | 8;
   /** Additional subdivision of authored-environment bricks. */
   environmentBrickRefinementLevels?: number;
+  /** Experimental in-place diffuse feedback; disabled in production. */
+  radianceFeedback?: boolean;
 }
 
 export function liveSvoRenderBrickSize(
@@ -102,6 +104,7 @@ export class WebGPULiveSvoScene implements GPUSolverInstance {
     this.world = new OctreeSparseBrickWorld(device, scene, dimensions, {
       brickSize: liveSvoRenderBrickSize(scene, options),
       environmentBrickRefinementLevels: options.environmentBrickRefinementLevels,
+      radianceFeedback: options.radianceFeedback,
       haloCells: 0,
       brickPreActivation: false,
     });
@@ -174,7 +177,7 @@ export class WebGPULiveSvoScene implements GPUSolverInstance {
   stageLivePrimitiveUpdates(updates: readonly SparseScenePrimitiveUpdate[]): boolean {
     return this.world.stageLivePrimitiveUpdates(updates);
   }
-  encodeSceneMaintenance(encoder: GPUCommandEncoder): void { this.world.encodeSceneMaintenance(encoder); }
+  encodeSceneMaintenance(encoder: GPUCommandEncoder): boolean { return this.world.encodeSceneMaintenance(encoder); }
 
   advanceTo(): boolean { return false; }
   readStats(): Promise<GPUEulerianInfo> { return Promise.resolve({ ...this.info }); }

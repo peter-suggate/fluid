@@ -45,6 +45,10 @@
  *      static-primary requires split and reuses exact primary visibility),
  *      FLUID_SVO_DRY_FRAME_SCREEN_SPACE_PIXELS (0 disables; diagnostic canonical primary-ray proxy),
  *      FLUID_SVO_DRY_FRAME_SCENE (default garden-svo-lighting),
+ *      FLUID_SVO_DRY_FRAME_RADIANCE_FEEDBACK (1 opts into the experimental
+ *      in-place feedback path; production default is off),
+ *      FLUID_SVO_DRY_FRAME_FEEDBACK_FRAMES (default 96; total live-radiance
+ *      feedback publications, including initial scene publication),
  *      FLUID_SVO_DRY_FRAME_OUT, FLUID_SVO_DRY_FRAME_RAW_OUT (optional packed
  *      scale-1 rgba16float fingerprint frame),
  *      FLUID_SVO_DRY_FRAME_CONFIGURED_RAW_OUT (optional packed rgba16float at
@@ -87,13 +91,14 @@ import { buildSvoSceneGlass } from "../lib/svo-scene-glass";
 import { buildSvoScenePrimitives } from "../lib/svo-scene-primitives";
 import { buildDefaultSvoMaterialRecords, packSvoMaterialTable, svoMaterialFromEnvironmentProxyMaterial, svoMaterialFunctionIdForEnvironmentProxy } from "../lib/svo-material-abi";
 import { buildSvoSceneThickGlass } from "../lib/svo-scene-thick-glass";
-import { buildSvoTerrainMaterial } from "../lib/svo-terrain-material";
+import { buildSvoTerrainMaterial, sceneTerrainSurfaceModel } from "../lib/svo-terrain-material";
 import { MAX_TERRAIN_FEATURES, sceneHasTerrain, TERRAIN_DEFAULT_FLAT, TERRAIN_UNION_EXPONENT } from "../lib/terrain";
 import { requiredFluidDeviceLimits } from "../lib/webgpu-device-limits";
 import type { SvoConeTracingMode } from "../lib/svo-render-options";
 import { DEFAULT_SVO_RENDER_TUNING, type SvoConeRadianceReconstruction } from "../lib/svo-render-tuning";
 import { SVO_CAMERA_CHANGING_FRAME } from "../lib/webgpu-renderer";
 import { WebGPULiveSvoScene } from "../lib/webgpu-live-svo-scene";
+import { LIVE_SVO_RADIANCE_FEEDBACK } from "../lib/webgpu-svo-live-derived-builder";
 import {
   createPassEncoderIsolationScratch,
   isolateComputePassEncoders,
@@ -102,6 +107,7 @@ import {
   buildSparseVoxelDrySceneLightingMirrors,
   canConsumeSparseVoxelPbrMaterials,
   canEncodeSparseVoxelDryScene,
+  packSvoDrySceneTerrainHeightfield,
   resolveSparseVoxelThickGlassBinderStatus,
   SVO_DRY_SPLIT_EXTRA_BYTES_PER_PIXEL,
   SVO_DRY_TRAVERSAL_MODES,
@@ -164,10 +170,14 @@ const radianceReconstructionRaw = process.env.FLUID_SVO_DRY_FRAME_RADIANCE_RECON
 const shadowsEnabled = process.env.FLUID_SVO_DRY_FRAME_SHADOWS !== "0";
 const ambientOcclusionEnabled = process.env.FLUID_SVO_DRY_FRAME_AO !== "0";
 const globalIlluminationEnabled = process.env.FLUID_SVO_DRY_FRAME_GI !== "0";
+const radianceFeedbackEnabled = process.env.FLUID_SVO_DRY_FRAME_RADIANCE_FEEDBACK === "1";
 const silhouetteRefinementRaw = process.env.FLUID_SVO_DRY_FRAME_PRIMARY_SEAM_CLOSURE ?? "0";
 const silhouetteRefinementEnabled = silhouetteRefinementRaw === "1";
 const coneTracingModeRaw = process.env.FLUID_SVO_DRY_FRAME_CONE_TRACING ?? "cones";
 const scenePresetId = process.env.FLUID_SVO_DRY_FRAME_SCENE ?? "garden-svo-lighting";
+const radianceFeedbackFrames = radianceFeedbackEnabled
+  ? Number(process.env.FLUID_SVO_DRY_FRAME_FEEDBACK_FRAMES ?? LIVE_SVO_RADIANCE_FEEDBACK.settleFrameCount)
+  : 1;
 const profileSeconds = Number(process.env.FLUID_SVO_DRY_FRAME_PROFILE_SECONDS ?? 0);
 const profileBatch = Number(process.env.FLUID_SVO_DRY_FRAME_PROFILE_BATCH ?? 1);
 const isolateProfilePassEncoders = process.env.FLUID_SVO_DRY_FRAME_ISOLATE_PASS_ENCODERS === "1";
@@ -237,6 +247,8 @@ const modulePath = process.env.WEBGPU_NODE_MODULE
 assert.ok(Number.isSafeInteger(width) && width > 0 && Number.isSafeInteger(height) && height > 0);
 assert.ok(Number.isSafeInteger(warmups) && warmups >= 0 && Number.isSafeInteger(cycles) && cycles > 0);
 assert.ok(Number.isSafeInteger(encodesPerSample) && encodesPerSample > 0);
+assert.ok(Number.isSafeInteger(radianceFeedbackFrames) && radianceFeedbackFrames >= 1,
+  "FLUID_SVO_DRY_FRAME_FEEDBACK_FRAMES must be a positive integer");
 assert.ok(Number.isSafeInteger(maximumShadedLights) && maximumShadedLights >= 1
   && maximumShadedLights <= DEFAULT_SVO_RENDER_TUNING.maximumShadedLights,
 "FLUID_SVO_DRY_FRAME_MAX_LIGHTS must be between 1 and the production maximum");
@@ -461,9 +473,26 @@ log(`Adapter: ${JSON.stringify(adapterInfo)} timestamps=${timestampsSupported}`)
 // Build the shipped garden lighting-study world (sparse bricks + node-mip
 // pyramid + wide fanout) and the exact production dry-scene data.
 // ---------------------------------------------------------------------------
+/**
+ * A scene from a module rather than from the catalog.
+ *
+ * Set `FLUID_SVO_DRY_FRAME_SCENE_MODULE` to a file exporting `createScene()`
+ * and optionally `camera`. This is how a generator under development gets a
+ * frame without first being registered: a half-built boulder set has no
+ * business in the scene library, and adding it there temporarily means every
+ * such experiment collides with every other one in the same file.
+ */
+const sceneModulePath = process.env.FLUID_SVO_DRY_FRAME_SCENE_MODULE;
+const sceneModule: { createScene?: () => SceneDescription; camera?: Partial<CameraState> } | undefined = sceneModulePath
+  ? await import(path.resolve(sceneModulePath))
+  : undefined;
+if (sceneModule && typeof sceneModule.createScene !== "function") {
+  throw new Error(`${sceneModulePath} must export createScene(): SceneDescription`);
+}
 const preset = getScenePreset(scenePresetId);
-const scene = preset.create();
-const camera: CameraState = { ...defaultCamera, ...preset.camera, target_m: { ...(preset.camera?.target_m ?? defaultCamera.target_m) } };
+const scene = sceneModule?.createScene ? sceneModule.createScene() : preset.create();
+const presetCamera = sceneModule ? sceneModule.camera : preset.camera;
+const camera: CameraState = { ...defaultCamera, ...presetCamera, target_m: { ...(presetCamera?.target_m ?? defaultCamera.target_m) } };
 let activeCamera: CameraState = camera;
 const environmentId: EnvironmentId = (scene.environment ?? "default") as EnvironmentId;
 
@@ -473,7 +502,10 @@ const solver = await WebGPULiveSvoScene.create(
   "balanced",
   ({ label, completed, total }) => log(`  [world] ${label} (${completed}/${total})`),
   undefined,
-  renderBrickSize === undefined ? {} : { renderBrickSize },
+  {
+    ...(renderBrickSize === undefined ? {} : { renderBrickSize }),
+    radianceFeedback: radianceFeedbackEnabled,
+  },
 );
 // Production encodes staged live-scene maintenance before any presentation
 // consumer in the frame. The benchmark must publish that initial generation
@@ -483,6 +515,28 @@ solver.encodeSceneMaintenance(initialScenePublication);
 device.queue.submit([initialScenePublication.finish()]);
 await device.queue.onSubmittedWorkDone();
 assert.deepEqual(validationErrors, [], "GPU validation errors during initial live scene publication");
+// The browser calls scene maintenance on every presentation frame, including
+// while physics is paused. Reproduce that contract before capturing a static
+// Dawn frame: one initial publication alone updates only feedback phase 0 and
+// bakes its quarter-leaf pattern into the apparent room lighting.
+if (radianceFeedbackEnabled) {
+  for (let frame = 1; frame < radianceFeedbackFrames; frame += 1) {
+    const feedbackEncoder = device.createCommandEncoder({ label: `Bench live-radiance feedback ${frame}` });
+    solver.encodeSceneMaintenance(feedbackEncoder);
+    device.queue.submit([feedbackEncoder.finish()]);
+  }
+}
+await device.queue.onSubmittedWorkDone();
+assert.deepEqual(validationErrors, [], "GPU validation errors while settling live-radiance feedback");
+let staticFeedbackIdle: boolean | undefined;
+if (radianceFeedbackEnabled && radianceFeedbackFrames >= LIVE_SVO_RADIANCE_FEEDBACK.settleFrameCount) {
+  const idleEncoder = device.createCommandEncoder({ label: "Bench post-convergence static maintenance probe" });
+  staticFeedbackIdle = !solver.encodeSceneMaintenance(idleEncoder);
+  device.queue.submit([idleEncoder.finish()]);
+  await device.queue.onSubmittedWorkDone();
+  assert.equal(staticFeedbackIdle, true,
+    "a static live scene must stop encoding feedback after its convergence window");
+}
 const publishedSource = solver.sparseVoxelSceneSource;
 const source = globalIlluminationEnabled || !publishedSource
   ? publishedSource
@@ -495,7 +549,10 @@ const sceneGlass = buildSvoSceneGlass(scene, { cellSize_m: source.structural!.do
 const sceneThickGlass = buildSvoSceneThickGlass(scene);
 const thickReplacedPaneKey = sceneThickGlass.metadata.find(({ replacesThinPaneKey }) => Boolean(replacesThinPaneKey))?.replacesThinPaneKey;
 const thickReplacedPaneId = sceneGlass.metadata.find(({ key }) => key === thickReplacedPaneKey)?.paneId;
-const terrainMaterial = scenePrimitives.analyticTerrain ? buildSvoTerrainMaterial(scene) : undefined;
+const terrainSurface = sceneTerrainSurfaceModel(scene);
+const terrainMaterial = scenePrimitives.analyticTerrain && terrainSurface === "garden-terrain"
+  ? buildSvoTerrainMaterial(scene)
+  : undefined;
 const compositorOwnedGlass = sceneGlass.metadata.filter(({ role }) => role === "container-pane" || role === "container-top");
 const lightingMirrors = buildSparseVoxelDrySceneLightingMirrors(scene, 1);
 const drySceneData: SparseVoxelDrySceneData = {
@@ -503,7 +560,7 @@ const drySceneData: SparseVoxelDrySceneData = {
   primitiveRecords: scenePrimitives.packedRecords,
   primitiveCandidates: scenePrimitives.primitiveCandidates!,
   materialRecords: packSvoMaterialTable([
-    ...buildDefaultSvoMaterialRecords(1),
+    ...buildDefaultSvoMaterialRecords(1, { terrainSurface }),
     ...scenePrimitives.metadata.map((primitive) => svoMaterialFromEnvironmentProxyMaterial(
       primitive.materialId, primitive.material, 1, svoMaterialFunctionIdForEnvironmentProxy(primitive),
     )),
@@ -514,6 +571,10 @@ const drySceneData: SparseVoxelDrySceneData = {
   terrainMaterialId: scenePrimitives.analyticTerrain?.materialId,
   terrainMaterialMetadata: terrainMaterial?.packedMetadata,
   terrainMaterialCacheKey: terrainMaterial?.cacheKey,
+  // A sculpted vessel is terrain the eight-feature uniform mirror cannot
+  // express. Production publishes the grid into the scene arena; without this
+  // the bench renders a flat plane at `baseHeight_m` and calls it the scene.
+  terrainHeightfield: packSvoDrySceneTerrainHeightfield(scene.terrain?.grid),
   glassRecords: sceneGlass.packedRecords,
   glassCacheKey: sceneGlass.cacheKey,
   thickGlassRecords: sceneThickGlass.packedRecords,
@@ -1558,6 +1619,9 @@ const result = {
     shadowsEnabled,
     ambientOcclusionEnabled,
     globalIlluminationEnabled,
+    radianceFeedbackEnabled,
+    radianceFeedbackFrames,
+    staticFeedbackIdle,
     maximumShadedLights,
     coneLightingScale: coneScale,
     coneFanout,

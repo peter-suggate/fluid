@@ -18,7 +18,7 @@ test("every authored environment gets a stable full-scene proxy catalog", () => 
   // geometry is the graph it seeds in lib/scenery-presets.ts.
   const authoredPropCounts = new Map([
     ["conservatory", 89], ["courtyard", 29], ["night-lab", 105], ["concrete-gallery", 16],
-    ["bathhouse", 23], ["research-station", 39], ["default", 17], ["garden", 122]
+    ["bathhouse", 23], ["research-station", 39], ["default", 1], ["garden", 122]
   ]);
   for (const id of environmentIds) {
     const first = buildEnvironmentProxyCatalog(scene, id);

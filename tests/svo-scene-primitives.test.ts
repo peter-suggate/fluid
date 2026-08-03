@@ -104,14 +104,15 @@ test("night-lab back wall is four stable analytic boxes around the thin-glass op
   assert.ok(backWall.every(({ sourceKind, tags }) => sourceKind === "box" && tags.includes("window-cutout")));
 });
 
-test("floor-only and garden catalogs report presentation support explicitly", () => {
+test("studio-room and garden catalogs report presentation support explicitly", () => {
   const scene = cloneScene(defaultScene);
-  const floor = buildSvoScenePrimitives(scene, { environmentId: "default" });
-  assert.equal(floor.descriptors.length, 18, "the cyclorama, datum grid and softbox join the floor plate");
-  assert.equal(floor.metadata[0].shell, true);
-  assert.equal(floor.openShellOwnerId, undefined);
-  assert.equal(floor.requiresRasterTerrainFallback, false);
-  assert.deepEqual(floor.unsupportedSources, []);
+  const studio = buildSvoScenePrimitives(scene, { environmentId: "default" });
+  assert.equal(studio.descriptors.length, 7, "the six-face white room has only its overhead light");
+  assert.equal(studio.metadata.filter(({ shell }) => shell).length, 6);
+  assert.deepEqual(studio.metadata.filter(({ shell }) => !shell).map(({ key }) => key), ["default/light/softbox"]);
+  assert.ok(studio.metadata.find(({ ownerId }) => ownerId === studio.openShellOwnerId)?.key.endsWith("/shell/wall-front"));
+  assert.equal(studio.requiresRasterTerrainFallback, false);
+  assert.deepEqual(studio.unsupportedSources, []);
 
   scene.terrain = { baseHeight_m: 0.2, features: [] };
   const garden = buildSvoScenePrimitives(scene, { environmentId: "garden" });

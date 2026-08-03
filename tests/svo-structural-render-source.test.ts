@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { SPARSE_BRICK_GPU_LAYOUT } from "../lib/sparse-brick-octree";
 import { octreeSparseBrickStructuralFinalizeShader } from "../lib/webgpu-octree-sparse-bricks";
+import { SPARSE_SCENE_MAINTENANCE_INCOMPLETE_OVERFLOW } from "../lib/webgpu-sparse-scene-proxies";
 import {
   SPARSE_VOXEL_PUBLICATION_STATE,
   SPARSE_VOXEL_VALID_FIELDS,
@@ -71,7 +72,11 @@ test("completion generation advances only after a completed live-scene maintenan
   const shader = octreeSparseBrickStructuralFinalizeShader;
   const sceneFinalize = shader.slice(shader.indexOf("fn finalizeScene()"));
   assert.match(shader, /@compute @workgroup_size\(1\)\s*fn finalizeScene/);
-  assert.match(sceneFinalize, /requested == 0u \|\| completed != requested \|\| overflow != 0u/);
+  // "Completed" means every dirty brick now holds this revision. It does not
+  // mean every brick got every primitive that overlapped it: a per-brick
+  // candidate overflow is a detail budget and must not withhold the generation.
+  assert.match(sceneFinalize, new RegExp(
+    `requested == 0u \\|\\| completed != requested\\s*\\|\\| \\(overflow & ${SPARSE_SCENE_MAINTENANCE_INCOMPLETE_OVERFLOW}u\\) != 0u`));
   assert.match(sceneFinalize, new RegExp(`state\\[${SPARSE_VOXEL_PUBLICATION_STATE.topologyRevision}\\] \\+= 1u;`));
   assert.match(sceneFinalize, new RegExp(`state\\[${SPARSE_VOXEL_PUBLICATION_STATE.sceneGeometryRevision}\\] \\+= 1u;`));
   assert.doesNotMatch(sceneFinalize, new RegExp(`state\\[${SPARSE_VOXEL_PUBLICATION_STATE.dynamicSolidRevision}\\]\\s*(?:\\+)?=`));

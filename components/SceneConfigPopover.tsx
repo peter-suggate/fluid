@@ -136,6 +136,17 @@ export function SceneConfigPopover() {
           </>}
           {section === "fluid" && <>
             <section>
+              <h3>Water</h3>
+              {/* The gate `planSceneRuntime` reads. Off attaches the live sparse
+                  scene instead of a solver, so a set can be looked at while its
+                  water is still in bring-up — and everything below stays
+                  authored, describing the pond that returns when it is on. */}
+              <Segmented ariaLabel="Fluid system" value={fluidEnabled ? "on" : "off"} options={[{ value: "off", label: "Off" }, { value: "on", label: "On" }]} onChange={(value) => simulation.setFluidSystem(value === "on")} />
+              <small className="control-hint">{fluidEnabled
+                ? "The fluid solver owns this scene. Turning water off renders the set alone, with no solver to bring up and no transport."
+                : "Renderer only: the set draws from the live sparse scene and nothing waits on a fluid authority. The settings below are still authored, and take effect when water is turned back on."}</small>
+            </section>
+            <section>
               <h3>Fluid</h3>
               <Segmented ariaLabel="Fluid initial condition" value={scene.fluid.initialCondition} options={[{ value: "dam-break", label: "Dam break" }, { value: "tank-fill", label: "Tank fill" }]} onChange={(value) => patchFluid({ initialCondition: value })} />
               <RangeControl label="Density" unit="kg/m³" value={scene.fluid.density_kg_m3} min={700} max={1300} step={0.1} onChange={(value) => patchFluid({ density_kg_m3: value })} displayDigits={1} />

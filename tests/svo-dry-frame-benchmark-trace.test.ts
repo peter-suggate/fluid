@@ -45,6 +45,16 @@ test("SVO dry-frame benchmark measures only the production GLOBAL path", () => {
   assert.match(source, /renderer\.setLightingOptions/);
   assert.match(source, /solver\.encodeSceneMaintenance\(initialScenePublication\)/,
     "the benchmark must publish the staged live scene before timing render consumers");
+  assert.match(source, /FLUID_SVO_DRY_FRAME_RADIANCE_FEEDBACK/);
+  assert.match(source, /const radianceFeedbackEnabled = process\.env\.FLUID_SVO_DRY_FRAME_RADIANCE_FEEDBACK === "1"/);
+  assert.match(source, /FLUID_SVO_DRY_FRAME_FEEDBACK_FRAMES/);
+  assert.match(source, /for \(let frame = 1; frame < radianceFeedbackFrames; frame \+= 1\)[^]*solver\.encodeSceneMaintenance\(feedbackEncoder\)/,
+    "the Dawn image must settle the same continuous radiance feedback that browser presentation frames encode");
+  assert.match(source, /scene: \{[^]*radianceFeedbackFrames,/,
+    "the capture must report its exact feedback-settlement depth");
+  assert.match(source, /staticFeedbackIdle = !solver\.encodeSceneMaintenance\(idleEncoder\)/);
+  assert.match(source, /assert\.equal\(staticFeedbackIdle, true,[^]*static live scene must stop encoding feedback/,
+    "the Dawn smoke must reject a renderer that keeps processing a converged static scene");
 });
 
 test("SVO dry-frame benchmark isolates primary-seam-closure cost and quality", () => {

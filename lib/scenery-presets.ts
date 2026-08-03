@@ -151,7 +151,7 @@ const CONSERVATORY_NODES: readonly SceneryNode[] = [
   {
     kind: "room-shell", id: "shell", materialModel: "conservatory",
     floor: { colorLinear: [.40, .395, .385] },
-    wall: { palette: "chalk", value: 1 },
+    wall: { colorLinear: [1, 1, 1] },
     ceiling: { colorLinear: [.78, .785, .79] },
   },
   // The glass itself: six panes in the mullioned bay, declared beside the frame
@@ -278,7 +278,7 @@ const NIGHT_LAB_NODES: readonly SceneryNode[] = [
   {
     kind: "room-shell", id: "shell", materialModel: "night-lab",
     floor: { colorLinear: [.172, .178, .186] },
-    wall: { colorLinear: [.395, .400, .410] },
+    wall: { colorLinear: [1, 1, 1] },
     ceiling: { colorLinear: [.455, .458, .462] },
     backWall: { halfWidth: 1.62, halfHeight: .55, centerY: 1.60, glazing: "window/city-glazing" },
   },
@@ -443,7 +443,7 @@ function courtyardNodes(): readonly SceneryNode[] {
     {
       kind: "room-shell", id: "shell", materialModel: "courtyard",
       floor: { palette: "stone", value: .58 },
-      wall: { palette: "stucco", value: .86 },
+      wall: { colorLinear: [1, 1, 1] },
       ceiling: { palette: "stucco", value: .95 },
     },
     // Noon: one hard source high and slightly behind the colonnade, so the
@@ -490,7 +490,7 @@ function galleryNodes(): readonly SceneryNode[] {
     {
       kind: "room-shell", id: "shell", materialModel: "gallery",
       floor: { palette: "concrete", value: .40 },
-      wall: { palette: "concrete", value: .58 },
+      wall: { colorLinear: [1, 1, 1] },
       ceiling: { palette: "concrete", value: .50 },
     },
     ...[.42, .78, 1.14, 1.5, 1.86, 2.22].map((y, index) => board(index + 1, y)),
@@ -550,7 +550,7 @@ function bathhouseNodes(): readonly SceneryNode[] {
     {
       kind: "room-shell", id: "shell", materialModel: "bathhouse",
       floor: { palette: "cedar", value: .50 },
-      wall: { palette: "plaster", value: .80 },
+      wall: { colorLinear: [1, 1, 1] },
       ceiling: { palette: "cedar", value: .60 },
     },
     ...[-1.68, -1.26, -.84, -.42, 0, .42, .84, 1.26, 1.68].map((x, index) => batten(index + 1, x)),
@@ -613,7 +613,7 @@ function stationNodes(): readonly SceneryNode[] {
     {
       kind: "room-shell", id: "shell", materialModel: "station",
       floor: { palette: "hull", value: .48 },
-      wall: { palette: "hull", value: .78 },
+      wall: { colorLinear: [1, 1, 1] },
       ceiling: { palette: "hull", value: .70 },
       // The observation port: a hole in the hull, the glass in it, and the lit
       // sea outside. One declaration, so the frame cannot drift off the pane.
@@ -653,50 +653,25 @@ export const stationSceneryGraph: SceneryGraph = {
   nodes: stationNodes(),
 };
 
-/**
- * Calibration studio: the set every numeric preset reads its numbers against.
- *
- * Deliberately almost empty. An infinity curve sweeps up behind the tank so the
- * background has no horizon to mistake for a fill line, a datum grid is inlaid
- * in the plate at a 0.7 s pitch, a step wedge calibrates value, and one overhead
- * softbox does the lighting. Everything is pushed past |x| or |z| = 0.68 s, so
- * the container volume and the space above it stay empty for the water.
- */
+/** A plain white room and the single overhead source that lights it. */
 function studioNodes(): readonly SceneryNode[] {
-  const datum = (axis: "x" | "z", index: number, offset: number): SceneryNode => ({
-    kind: "box", id: `grid/datum-${axis}-${index}`, group: "grid-datum", tags: ["grid", "datum"],
-    place: { position: axis === "x" ? { x: 0, y: 0, z: offset } : { x: offset, y: 0, z: 0 }, anchor: "floor" },
-    halfSize: axis === "x" ? { x: 2.5, y: .008, z: .02 } : { x: .02, y: .008, z: 2.5 },
-    material: { palette: "neutral", value: .44 },
-  });
-  const step = (index: number, value: number): SceneryNode => ({
-    kind: "box", id: `calibration/step-${index + 1}`, group: "calibration-step", tags: ["calibration"],
-    place: { position: { x: -1.45 + .2 * index, y: .05, z: -.85 }, anchor: "floor" },
-    halfSize: { x: .075, y: .05, z: .075 }, material: { palette: "neutral", value },
-  });
   return [
-    // Not a room: there are no walls behind a cyclorama to see. The plate is
-    // widened past the container's own room so the sweep always stands on floor.
-    { kind: "floor-shell", id: "shell", materialModel: "default-floor", minimumHalf: 2.7, floor: { palette: "neutral", value: .62 } },
-    // The infinity curve: two panels, their coves, and a filleted corner, so the
-    // background behind the tank has no horizon line and no visible join.
-    { kind: "box", id: "cyc/back-panel", group: "cyclorama", tags: ["cyclorama"], place: { position: { x: 0, y: 1.2, z: -1.6 }, anchor: "floor" }, halfSize: { x: 2.5, y: 1.2, z: .05 }, material: { palette: "neutral", value: .80 } },
-    { kind: "ellipsoid", id: "cyc/back-cove", group: "cyclorama", tags: ["cyclorama", "cove"], place: { position: { x: 0, y: 0, z: -1.55 }, anchor: "floor" }, radius: { x: 2.5, y: .42, z: .42 }, material: { palette: "neutral", value: .80 } },
-    { kind: "box", id: "cyc/left-panel", group: "cyclorama", tags: ["cyclorama"], place: { position: { x: -1.6, y: 1.2, z: 0 }, anchor: "floor" }, halfSize: { x: .05, y: 1.2, z: 2.5 }, material: { palette: "neutral", value: .80 } },
-    { kind: "ellipsoid", id: "cyc/left-cove", group: "cyclorama", tags: ["cyclorama", "cove"], place: { position: { x: -1.55, y: 0, z: 0 }, anchor: "floor" }, radius: { x: .42, y: .42, z: 2.5 }, material: { palette: "neutral", value: .80 } },
-    { kind: "cylinder", id: "cyc/corner-fillet", group: "cyclorama", tags: ["cyclorama", "cove"], place: { position: { x: -1.25, y: 1.2, z: -1.25 }, anchor: "floor" }, radius: .3, halfHeight: 1.2, material: { palette: "neutral", value: .80 } },
-    // The -1.4 s pair is omitted on purpose: the cove swallows it.
-    ...[-.7, .7, 1.4].flatMap((offset, index) => [datum("x", index + 1, offset), datum("z", index + 1, offset)]),
-    ...[.05, .22, .52, .90].map((value, index) => step(index, value)),
+    // The front face remains in the SVO model but the interior renderer omits
+    // it, so the camera can look into the enclosure when a water scene is
+    // framed tightly.
+    {
+      kind: "room-shell", id: "shell", materialModel: "room",
+      halfSize: { x: 1.45, y: 1, z: 1.45 },
+      floor: { palette: "white", value: .9 },
+      wall: { colorLinear: [1, 1, 1] },
+      ceiling: { palette: "white", value: .9 },
+    },
     { kind: "box", id: "light/softbox", group: "softbox", tags: ["softbox", "light", "emits-negative-y"], place: { position: { x: 0, y: 1.72, z: -.15 }, anchor: "floor" }, halfSize: { x: .72, y: .03, z: .55 }, material: { palette: "daylight", value: 1, emission: 1 } },
-    // A dim groundrow lifts the cove toe, which is what makes the curve read as
-    // infinite rather than as a wall meeting a floor.
-    { kind: "box", id: "light/groundrow", group: "groundrow", tags: ["groundrow", "light", "emits-positive-y"], place: { position: { x: 0, y: .025, z: -1.06 }, anchor: "floor" }, halfSize: { x: 1.9, y: .02, z: .05 }, material: { palette: "daylight", value: .99, emission: .34 } },
   ];
 }
 
 export const studioSceneryGraph: SceneryGraph = {
-  palettes: { neutral: { tint: [1, 1.005, 1.01] }, daylight: { tint: [.96, .97, .98] } },
+  palettes: { white: { tint: [1, 1, 1] }, daylight: { tint: [1, 1, 1] } },
   nodes: studioNodes(),
 };
 

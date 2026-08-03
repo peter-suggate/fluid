@@ -26,11 +26,11 @@ test("octree smooth presentation keeps analytic solids and glass", () => {
 });
 
 test("raw voxel and brick-grid inspection overlay the GLOBAL GPU sparse source", () => {
-  assert.match(rendererSource, /voxelRenderMode !== "smooth" && this\.gpuFluid/);
-  assert.match(rendererSource, /this\.voxelInspectionSource = requestedVoxelDebugGeneration >= 0 \? this\.gpuFluid\?\.sparseVoxelRenderSource : undefined/,
+  assert.match(rendererSource, /voxelRenderMode !== "smooth" && sparseSceneProducer/);
+  assert.match(rendererSource, /this\.voxelInspectionSource = requestedVoxelDebugGeneration >= 0 \? sparseSceneProducer\?\.sparseVoxelRenderSource : undefined/,
     "capacity-sized debug instance buffers attach only while inspection is visible");
-  assert.match(rendererSource, /const sparseSceneSource=solver\.sparseVoxelSceneSource/,
-    "smooth production SVO consumes the structural source without activating inspection records");
+  assert.match(rendererSource, /sidecar\?\.sparseVoxelSceneSource\?\?solver\.sparseVoxelSceneSource/,
+    "smooth production SVO consumes the solver hierarchy or its renderer-owned sidecar without activating inspection records");
   assert.match(rendererSource, /if \(voxelRenderMode !== "smooth" && this\.voxelDebugDepth\)/);
   assert.match(rendererSource, /mode: voxelRenderMode/);
   assert.match(rendererSource, /Structural views diagnose the same GLOBAL frame[^]*colorLoadOp: "load"/);

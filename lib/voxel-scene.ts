@@ -1,5 +1,5 @@
 import { canonicalScene, type Quaternion, type RigidBodyDescription, type RigidShape, type SceneDescription, type Vec3 } from "./model";
-import { TERRAIN_DEFAULT_FLAT, TERRAIN_UNION_EXPONENT, type TerrainDescription } from "./terrain";
+import { TERRAIN_DEFAULT_FLAT, TERRAIN_UNION_EXPONENT, terrainCeiling, type TerrainDescription } from "./terrain";
 
 /** Deterministic CPU planning schema consumed by the future GPU brick builder. */
 export const VOXEL_SCENE_PLAN_VERSION = "1.0.0" as const;
@@ -281,6 +281,28 @@ function numericRevision(hash: string): number {
   return Number.parseInt(hash.slice(-8), 16) >>> 0;
 }
 
+/**
+ * Content digest of a sculpted grid's samples, so `hashValue` never sees them.
+ *
+ * `hashValue` serializes to JSON and then folds one BigInt multiply per *byte*,
+ * which is fine for the handful of numbers every other source carries and is
+ * seconds of wall clock for the hero pond's 56k heights — roughly a megabyte of
+ * text. Two independent 32-bit FNV-1a walks over the f32 bit patterns give the
+ * same 64 bits of identity for one machine-word multiply per sample, and the
+ * grid still participates in `revisionHash` exactly as it must: a brush stroke
+ * returns a new array, so a re-sculpted vessel is a new revision.
+ */
+function terrainGridDigest(grid: NonNullable<TerrainDescription["grid"]>): string {
+  const samples = Float32Array.from(grid.heights_m);
+  const words = new Uint32Array(samples.buffer);
+  let low = 0x811c_9dc5, high = 0x9e37_79b9;
+  for (const word of words) {
+    low = Math.imul(low ^ word, 0x0100_0193) >>> 0;
+    high = Math.imul(high ^ (word >>> 16 | word << 16), 0x85eb_ca6b) >>> 0;
+  }
+  return (high.toString(16).padStart(8, "0")) + (low.toString(16).padStart(8, "0"));
+}
+
 function cloneVec3(value: Vec3): Vec3 {
   return { x: value.x, y: value.y, z: value.z };
 }
@@ -452,6 +474,16 @@ function boundarySources(scene: SceneDescription, layout: SparseBrickLayoutPlan)
   });
 }
 
+/**
+ * The clone exists so a published source can never alias document state, which
+ * is why the sculpted grid is copied sample by sample rather than shared.
+ *
+ * Dropping `grid` here was the whole of why a sculpted vessel rendered as a
+ * flat plane at `baseHeight_m`: the solver reads `scene.terrain` directly
+ * through `terrainColumnHeights`, but everything downstream of a
+ * `VoxelSceneSource` — the voxelization bounds, the SVO publication and the dry
+ * scene's heightfield — sees only what this function hands on.
+ */
 function cloneTerrain(terrain: TerrainDescription): TerrainDescription {
   return {
     baseHeight_m: terrain.baseHeight_m,
@@ -459,14 +491,22 @@ function cloneTerrain(terrain: TerrainDescription): TerrainDescription {
       ...feature,
       center_m: { ...feature.center_m },
       radius_m: { ...feature.radius_m }
-    }))
+    })),
+    ...(terrain.grid ? {
+      grid: {
+        ...terrain.grid,
+        origin_m: { ...terrain.grid.origin_m },
+        size: { ...terrain.grid.size },
+        heights_m: terrain.grid.heights_m.slice()
+      }
+    } : {})
   };
 }
 
 function terrainSource(scene: SceneDescription, layout: SparseBrickLayoutPlan): VoxelTerrainSource | undefined {
   if (!scene.terrain) return undefined;
   const terrain = cloneTerrain(scene.terrain);
-  const maximumHeight = Math.min(scene.container.height_m, terrain.baseHeight_m + terrain.features.reduce((sum, feature) => sum + (feature.kind === "mound" ? feature.amount_m : 0), 0));
+  const maximumHeight = Math.min(scene.container.height_m, terrainCeiling(terrain));
   const exact: VoxelAabb = {
     min: { x: -scene.container.width_m / 2, y: 0, z: -scene.container.depth_m / 2 },
     max: { x: scene.container.width_m / 2, y: maximumHeight, z: scene.container.depth_m / 2 }
@@ -481,7 +521,13 @@ function terrainSource(scene: SceneDescription, layout: SparseBrickLayoutPlan): 
     evaluator: { unionExponent: TERRAIN_UNION_EXPONENT, defaultFlat: TERRAIN_DEFAULT_FLAT, clampMinimum_m: 0 as const },
     candidate: candidateBounds(exact, layout.worldOrigin_m, layout.voxelSize_m, layout.brickSize_m, layout.conservativePadding_m)
   };
-  return { ...source, revisionHash: hashValue(source) };
+  const grid = terrain.grid;
+  if (!grid) return { ...source, revisionHash: hashValue(source) };
+  const { heights_m, ...shape } = grid;
+  return {
+    ...source,
+    revisionHash: hashValue({ ...source, terrain: { ...terrain, grid: { ...shape, heightsDigest: terrainGridDigest(grid) } } })
+  };
 }
 
 function unionBounds(bounds: VoxelAabb[]): VoxelAabb {

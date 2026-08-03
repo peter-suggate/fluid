@@ -11,7 +11,6 @@ import { useUIStore } from "@/lib/stores/ui-store";
 import { useShellStore } from "@/lib/stores/shell-store";
 import { WebGPUViewport } from "./WebGPUViewport";
 import { SceneLibrary } from "./SceneLibrary";
-import { UrlStateSync } from "./UrlStateSync";
 import { EditorToolbar } from "./EditorToolbar";
 import { SceneOverlay } from "./SceneOverlay";
 import { SceneScaleOverlay } from "./SceneScaleOverlay";
@@ -207,7 +206,6 @@ export function FluidLab() {
 
       <RecordingPlaybackModal />
       <SceneConfigPopover />
-      <UrlStateSync />
     </main>
 
     {/* A layer rather than a route, and a peer of the studio rather than a

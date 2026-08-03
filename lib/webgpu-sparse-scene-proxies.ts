@@ -192,6 +192,38 @@ export const SPARSE_SCENE_MAINTENANCE_OVERFLOW = Object.freeze({
   topology: 4,
 } as const);
 
+/**
+ * The overflow flags that mean the revision did not happen, as opposed to the
+ * one that means it happened with less detail than was asked for.
+ *
+ * `dirtyBricks` truncated the brick list and `topology` skipped a relocating
+ * brick, so in both cases some brick still holds the previous revision's voxels
+ * and no consumer may be told the new one is current. `candidates` is not like
+ * that: `rebuildDirtyBrickPayload` writes every voxel of an over-subscribed
+ * brick from the first `candidatesPerBrick()` primitives, so the brick *is* the
+ * new revision, minus whichever primitives lost the race.
+ *
+ * Reading all three the same way is what made a density budget into an outage.
+ * Three bricks of the hero garden's pebble bands hold more than 64 primitives
+ * at its 25 mm lattice (docs/SVO_FINE_VOXEL_CAPACITY.md §4), so every hero frame
+ * raised `candidates`, `completedRevision` was never stored, `finalizeScene`
+ * never advanced the live generation, and the one-shot pass that certifies the
+ * node-mip pages as empty read that zero and certified nothing. Cone visibility
+ * then failed closed over exactly the octree domain and the garden rendered
+ * with a hard-edged black slab across the container footprint.
+ */
+export const SPARSE_SCENE_MAINTENANCE_INCOMPLETE_OVERFLOW =
+  SPARSE_SCENE_MAINTENANCE_OVERFLOW.dirtyBricks | SPARSE_SCENE_MAINTENANCE_OVERFLOW.topology;
+
+/**
+ * CPU mirror of the completion gate the two finalize shaders apply. It exists so
+ * the rule has one statement rather than a repeated bit test, and so a test can
+ * assert the rule rather than the WGSL text that spells it.
+ */
+export function sparseSceneRevisionIncomplete(overflowFlags: number): boolean {
+  return (overflowFlags & SPARSE_SCENE_MAINTENANCE_INCOMPLETE_OVERFLOW) !== 0;
+}
+
 function finiteVector(values: readonly number[], name: string): void {
   if (values.some((value) => !Number.isFinite(value))) throw new RangeError(`${name} must contain finite values`);
 }
@@ -472,6 +504,7 @@ const OCCUPANCY_READY:u32=${SVO_BRICK_OCCUPANCY.readyBit}u;
 const OCCUPANCY_OCCUPIED:u32=${SVO_BRICK_OCCUPANCY.occupiedBit}u;
 const DIRTY_BRICK_OVERFLOW:u32=${SPARSE_SCENE_MAINTENANCE_OVERFLOW.dirtyBricks}u;
 const CANDIDATE_OVERFLOW:u32=${SPARSE_SCENE_MAINTENANCE_OVERFLOW.candidates}u;
+const INCOMPLETE_OVERFLOW:u32=${SPARSE_SCENE_MAINTENANCE_INCOMPLETE_OVERFLOW}u;
 const TOPOLOGY_INCOMPLETE:u32=${SPARSE_SCENE_MAINTENANCE_OVERFLOW.topology}u;
 const NO_MATERIAL_OWNER:u32=0xffff0000u;
 
@@ -632,7 +665,10 @@ fn prepareMaintenanceDispatch(){
   let brickSize=controlLoad(11u);
   writeDispatch(stateOffset()+${SPARSE_SCENE_MAINTENANCE_STATE_WORDS.rebuildDispatch}u,dirtyCount*brickSize*brickSize*brickSize,256u);
   writeDispatch(stateOffset()+${SPARSE_SCENE_MAINTENANCE_STATE_WORDS.finalizeDispatch}u,dirtyCount,64u);
-  if(dirtyCount==0u&&atomicLoad(&maintenance[stateOffset()+1u])==0u){
+  // Only invalidation has run at this point, so the mask can only be carrying
+  // DIRTY_BRICK_OVERFLOW here; it is spelled the same way as the two later
+  // stores so the completion rule has exactly one form in this shader.
+  if(dirtyCount==0u&&(atomicLoad(&maintenance[stateOffset()+1u])&INCOMPLETE_OVERFLOW)==0u){
     atomicStore(&maintenance[stateOffset()+3u],sceneRevision());
   }
 }
@@ -709,7 +745,7 @@ fn rebuildDirtyBrickPayload(@builtin(global_invocation_id) gid:vec3u,@builtin(nu
 fn finalizeDirtyBricks(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) groups:vec3u){
   let dirtyIndex=linearIndex64(gid,groups);
   let dirtyCount=min(atomicLoad(&maintenance[stateOffset()]),dirtyBrickCapacity());
-  if(dirtyIndex==0u&&dirtyCount==0u&&atomicLoad(&maintenance[stateOffset()+1u])==0u){
+  if(dirtyIndex==0u&&dirtyCount==0u&&(atomicLoad(&maintenance[stateOffset()+1u])&INCOMPLETE_OVERFLOW)==0u){
     atomicStore(&maintenance[stateOffset()+3u],sceneRevision());
   }
   if(dirtyIndex>=dirtyCount){return;}
@@ -717,7 +753,6 @@ fn finalizeDirtyBricks(@builtin(global_invocation_id) gid:vec3u,@builtin(num_wor
   let leafIndex=atomicLoad(&maintenance[record]);
   let leafBase=controlLoad(16u)+leafIndex*4u;
   let nodeIndex=topologyLoad(leafBase);
-  if(atomicLoad(&maintenance[record+2u])!=0u){return;}
   let lifecycle=topologyLoad(nodeIndex*8u+7u);
   if((lifecycle&BRICK_RELOCATING)!=0u){
     atomicOr(&maintenance[stateOffset()+1u],TOPOLOGY_INCOMPLETE);
@@ -749,8 +784,13 @@ fn finalizeDirtyBricks(@builtin(global_invocation_id) gid:vec3u,@builtin(num_wor
   }
   // Occupancy and payload become current together. ACTIVE is retained while
   // DIRTY/QUEUED are cleared only after the complete rebuild.
+  //
+  // An over-subscribed brick is summarized here like any other. Its voxels were
+  // rebuilt from the first candidatesPerBrick() primitives, so the occupancy
+  // word describes what the brick now holds; withholding it left the payload
+  // current and the summary stale, which is a worse state than either.
   topologyStore(nodeIndex*8u+7u,packed|(lifecycle&BRICK_ACTIVE));
-  if(dirtyIndex==0u&&atomicLoad(&maintenance[stateOffset()+1u])==0u){
+  if(dirtyIndex==0u&&(atomicLoad(&maintenance[stateOffset()+1u])&INCOMPLETE_OVERFLOW)==0u){
     atomicStore(&maintenance[stateOffset()+3u],sceneRevision());
   }
 }

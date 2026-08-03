@@ -11,6 +11,7 @@ import {
   octreeGradingSplitHelpersEnabled,
   octreeProjectionPipelineRequired,
   octreeProjectionShader,
+  octreeTopologyTileClampEnabled,
 } from "../lib/webgpu-octree";
 import { OCTREE_OWNER_ARENA_CONTROL_WORDS } from "../lib/webgpu-octree-owner-pages";
 
@@ -218,6 +219,10 @@ test("a shallow domain gets a single-tile topology delta, and shrinking the tile
   // also sets topologyTileBricks and candidateBlocksPerTile, so it is coupled to
   // fine-brick residency and to the halo, and the partition-of-one has to be
   // fixed from the residency side rather than by shrinking the tile.
-  assert.match(octreeSource, /this\.topologyTileSize = Math\.max\(8, this\.maxLeafSize\);/,
-    "the authored leaf still sizes the tile; see the negative result above");
+  assert.equal(octreeTopologyTileClampEnabled({}), false,
+    "the clamp measured inert, so the authored leaf must still size the tile by default");
+  assert.equal(octreeTopologyTileClampEnabled({ FLUID_OCTREE_TOPOLOGY_TILE_CLAMP: "1" }), true);
+  assert.match(octreeSource,
+    /this\.topologyTileSize = Math\.max\(8, octreeTopologyTileClampEnabled\(\)\s*\?\s*this\.effectiveLeafSize : this\.maxLeafSize\);/,
+    "the clamp must remain selectable so localization costs one run, not a rediscovery");
 });

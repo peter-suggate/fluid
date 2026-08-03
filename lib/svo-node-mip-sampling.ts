@@ -84,8 +84,16 @@ const SVO_NODE_MIP_PHYSICAL_SIZE:u32=${SVO_NODE_MIP_LAYOUT.physicalSize}u;
 const SVO_NODE_MIP_APRON:u32=${SVO_NODE_MIP_LAYOUT.apron}u;
 struct SvoNodeMipSample{solidMean:f32,solidMaximum:f32,fluidMean:f32,fluidMaximum:f32}
 struct SvoNodeMipDirectoryEntry{generation:u32,level:u32,mortonLow:u32,mortonHigh:u32,pageOrigin:vec3u,slot:u32}
+// A page is two rgba32uint texels — key, then location — and pages run along the
+// row before wrapping, so a directory wider than one pair holds \`columns\` of
+// them per row. At one column this is (0,pageIndex) and (1,pageIndex) exactly,
+// which is what every scene below the wrap threshold still executes. The width
+// carries the column count, so nothing has to be passed in and the texture and
+// the shader cannot disagree about the layout.
 fn svoNodeMipDirectoryEntry(directory:texture_2d<u32>,pageIndex:u32)->SvoNodeMipDirectoryEntry{
-  let key=textureLoad(directory,vec2u(0u,pageIndex),0);let location=textureLoad(directory,vec2u(1u,pageIndex),0);
+  let columns=max(1u,textureDimensions(directory).x>>1u);
+  let texel=vec2u((pageIndex%columns)<<1u,pageIndex/columns);
+  let key=textureLoad(directory,texel,0);let location=textureLoad(directory,texel+vec2u(1u,0u),0);
   return SvoNodeMipDirectoryEntry(key.x,key.y,key.z,key.w,location.xyz,location.w);
 }
 fn svoNodeMipAtlasUv(pageOrigin:vec3u,interiorTexel:vec3f,atlasDimensions:vec3u)->vec3f{

@@ -260,6 +260,120 @@ camera moving.
 
 ---
 
+## 6b. What phase 0/1 actually measured (2026-08-03)
+
+Built: `lib/voxel-scenery/pond-vessel.ts` (generator), `lib/hero-garden-scene.ts`
+(scene), `tests/pond-vessel.test.ts` (11 oracles, green). Registered as
+`hero-garden-hose` on the Garden shelf. It loads and simulates at 25 mm.
+
+**Four things the plan got wrong, found by building it.**
+
+1. **The vessel was an extrusion.** The first generator held the coping to a
+   constant section and had a test *pinning the crest to a constant height*. That
+   is the wrong invariant: the eye reads an unvarying crest line long before it
+   reads a wandering outline, so the rim looked machined however much the plan
+   wobbled. The section now swells and narrows along its run — at a different
+   lobe count from the plan, so the two read as two accidents of one hand rather
+   than one repeating motif — over 2.5 mm of two-octave relief. §4 said "organic
+   by variation" and then varied only the outline; varying the *section* is what
+   the word was supposed to mean.
+
+2. **Nothing was planned for surface grain.** The plaster speckle on every white
+   surface is a large part of why the reference reads as hand-made, and it is
+   sub-millimetre — a material, not geometry, at any lattice we will ever run.
+   `lib/svo-procedural-material.ts` already carries `stone`/`ceramic`/`organic`
+   noise policies over colour and roughness; the terrain material needs wiring to
+   them. Cheap, and the highest return per line in the whole plan.
+
+3. **The tree is not made of cones.** §5 phase 2 said to re-tune the existing
+   procedural tree. But the reference's trunk is a *fused buttressed root mass* —
+   smooth-min-unioned tubes, the melted-wax look — and its canopy is ~10⁴
+   florets. Those are the same operation. One marched **smooth-union displaced
+   cluster** primitive serves the trunk, the canopy, the worn boulders and
+   possibly the pebble beds, which is a far stronger case for the one hard engine
+   change than "florets" was on its own. It should be the plan's backbone, not a
+   phase-4 stretch.
+
+4. **Pebbles were undercounted and mis-modelled.** ~600–900, not ~400 — still
+   inside the 4 096 budget, so they stay individual ellipsoids — but they are
+   *contact-packed* in graded bands, not Poisson-scattered. `scatter-band` needs
+   to be a packing.
+
+**Three solver walls, in the order they were hit.**
+
+| Wall | Evidence | Status |
+|---|---|---|
+| Waterline above the outer ground floods the domain | `tank-fill` wets every column the level clears; the outer plaster sat below it, so a 2-cell film covered the whole 1.8 × 1.2 m floor and the sparse authority published no liquid-row frontier at all | **Fixed.** The waterline is now measured *down* from the outer ground, in cells, and a test sweeps the ground outside the coping for clearance |
+| 7.5 mm overruns a device limit | "Seed global fine bricks from every interface leaf" dispatches one workgroup per interface leaf on one axis: 65 536 against WebGPU's 65 535 | **Open, engine-shaped.** Needs a 2-D dispatch. No art direction moves it |
+| 25 mm, 15 mm and 12.5 mm refuse the t=0 pressure gate | Identical failure across row counts, so not scale. Reproduced with an analytic basin in place of the generated grid, so **not** the sculpted-heightfield path — the coping-as-terrain bet is cleared | **Fixed, in the engine.** See §6c. The inner face was not implicated; all three lattices publish t=0 |
+
+At 25 mm the scene initialises, solves and simulates; it fails only the
+equilibrium *quality* gate — 5 disconnected components, 27 % volume drift — which
+is the same shallow-wedge story seen from the other end, plus a coping only two
+cells wide. No GPU lane is registered for it yet, and therefore no variant: an
+authored variant no lane claims is a fork by another name.
+
+**The scene opens dry, and the water is opted into.** `systems.fluid` already
+existed as the gate `planSceneRuntime` reads — it is how a new document reaches
+its first frame without a solver — so the hero scene sets it false by default and
+`createHeroGardenHoseScene({ water: true })` turns it on. The two documents are
+identical apart from that one leaf, which is asserted: the fill, the initial
+condition and the jet are authored either way, so the switch fills the pond that
+was designed rather than an empty tank, and a dry scene cannot quietly become a
+second scene wearing the first one's name. The switch is also on the Fluid tab of
+scene configuration, for any scene, since "render the set without bringing up a
+solver" is not a hero-specific need.
+
+The vessel is now baked at a quarter of the fluid cell (6.25 mm). The coping is a
+`terrainHeightfield` primitive — the ray marches the grid rather than voxelised
+cells — so the sample spacing, not the lattice, is what limits its rendered form;
+at the solver's 25 mm the rim was two samples wide and there was nothing to
+judge. A quarter cell also puts every solver column centre exactly on a grid
+node, so the finer bake costs the water nothing.
+
+**The next move is the inner face**, not the lattice: steepening it toward the
+reference's near-vertical profile is the one change that plausibly addresses the
+component count and the drift together, and it is a change toward the source
+image rather than away from it. (It was also nominated for the t=0 gate. It was
+not that — see §6c.)
+
+## 6c. The t=0 gate was the page directory, not the vessel (2026-08-03)
+
+The pressure solve refused this scene at t=0 on every lattice tried, and the
+browser's own words named the row: `mgpcg[0]=2` is `ERR_ROW`, `mgpcg[6]=22` the
+failing stage, `mgpcg[7]` the row. Reproduced in Dawn against the authored scene
+through `WebGPUUniformEulerianSolver.createAsync`, byte-for-byte identical to
+the browser, then re-walked on the CPU from a dump of the SPGrid topology
+buffer.
+
+Stage 22 is `opPageSlot` rejecting a page whose record decodes somewhere other
+than the cell that was asked for, and the caller was not the row's own stencil —
+it was `finerAdjoint`, which asks every row above the finest level whether its
+eight children exist one level down. That question is answered by the dense
+logical-page directory, guarded by `pageFor(...) != INVALID`.
+
+**The directory could not answer it.** Its resting value was the buffer's
+zero-fill, and zero is the perfectly legal index of physical page 0. The commit
+path writes a directory slot only for a page that is *arriving* or *retiring*,
+so a logical page that has never held a cell is never written at all: it
+answered "page 0" to every query. Row 519 sat at level 1 over page (4, 1, 5),
+which holds no finest cells; the directory handed back page 0, whose origin is
+(24, 8, 12); the operator compared the two and rejected the publication.
+
+Why this scene and not the tanks: a wide shallow basin in a large open container
+has coarse rows standing over regions with no finest-level cells at all. The
+mini dam has no empty logical page in its 16³ domain and so never asks. The
+defect was present in every scene — `minimal-power-dam-break` carries four stale
+slots at level 0 — and only this one queried them.
+
+Fixed by authoring the page directory as INVALID at allocation, in both topology
+banks (`lib/webgpu-octree-spgrid-vcycle.ts`), pinned by
+`tests/octree-spgrid-page-directory.test.ts`. 25 mm, 15 mm and 12.5 mm all
+publish t=0 after it; `minimal-power-dam-break` is bit-identical.
+
+7.5 mm still fails, but earlier and differently — cold topology publishes no
+liquid-row frontier — which is its own wall and not this one.
+
 ## 7. What I would do first
 
 Phase 0 and Phase 1, in that order, and then stop and look at a render before

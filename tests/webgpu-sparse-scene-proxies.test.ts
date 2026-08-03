@@ -3,9 +3,11 @@ import test from "node:test";
 import { pathToFileURL } from "node:url";
 import { packMaterialOwner, unpackMaterialOwner } from "../lib/sparse-brick-octree";
 import {
+  SPARSE_SCENE_MAINTENANCE_OVERFLOW,
   SPARSE_SCENE_PRIMITIVE_STRIDE_BYTES,
   SPARSE_SCENE_PRIMITIVE_TYPES,
   SparseSceneProxyVoxelizer,
+  sparseSceneRevisionIncomplete,
   packSparseScenePrimitives,
   sampleSparseScenePrimitiveCell,
   sparseScenePrimitiveBounds,
@@ -133,6 +135,30 @@ test("GPU maintenance invalidates before rebuild, bins brick candidates, clears 
   assert.equal((sparseSceneProxyVoxelizationShader.match(/var<storage,/g) ?? []).length, 4,
     "proxy voxelization respects the four-storage-buffer design ceiling");
   assert.doesNotMatch(sparseSceneProxyVoxelizationShader, /texture_|mapAsync|getMappedRange/);
+});
+
+test("a per-brick candidate overflow degrades that brick's detail and does not withhold the revision", () => {
+  const { dirtyBricks, candidates, topology } = SPARSE_SCENE_MAINTENANCE_OVERFLOW;
+  // A truncated dirty list and a skipped relocating brick both leave some brick
+  // holding the previous revision's voxels, so neither may publish. An
+  // over-subscribed brick was rebuilt from the first candidatesPerBrick()
+  // primitives, so it is the new revision with less detail in it.
+  assert.equal(sparseSceneRevisionIncomplete(dirtyBricks), true);
+  assert.equal(sparseSceneRevisionIncomplete(topology), true);
+  assert.equal(sparseSceneRevisionIncomplete(candidates), false);
+  assert.equal(sparseSceneRevisionIncomplete(candidates | topology), true);
+  assert.equal(sparseSceneRevisionIncomplete(0), false);
+
+  // Every store of completedRevision consults the mask rather than the raw flag
+  // word, and an over-subscribed brick still reaches its occupancy summary --
+  // the early-out that used to skip it left the payload current and the summary
+  // stale, and its record flag is now read only where the candidates are.
+  const stores = sparseSceneProxyVoxelizationShader.match(/atomicStore\(&maintenance\[stateOffset\(\)\+3u\],sceneRevision\(\)\)/g);
+  assert.equal(stores?.length, 3);
+  assert.equal((sparseSceneProxyVoxelizationShader
+    .match(/atomicLoad\(&maintenance\[stateOffset\(\)\+1u\]\)&INCOMPLETE_OVERFLOW\)==0u/g) ?? []).length, 3);
+  assert.doesNotMatch(sparseSceneProxyVoxelizationShader, /atomicLoad\(&maintenance\[stateOffset\(\)\+1u\]\)==0u/);
+  assert.doesNotMatch(sparseSceneProxyVoxelizationShader, /if\(atomicLoad\(&maintenance\[record\+2u\]\)!=0u\)\{return;\}/);
 });
 
 test("live GPU resources are fixed-capacity, hot-written, and encode invalidate-to-finalize ordering", () => {

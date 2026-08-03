@@ -1,9 +1,48 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { getMethod, resolveMethodValues } from "../lib/methods";
+import { cloneScene } from "../lib/model";
 import { getScenePreset } from "../lib/scenes";
 import { useUIStore } from "../lib/stores/ui-store";
-import { parseQueryState, serializeQueryState } from "../lib/url-state";
+import { createSceneQueryLayerCache, parseQueryState, serializeQueryState } from "../lib/url-state";
+
+test("camera URL writes reuse the scene-derived query layer until the document changes", () => {
+  const scene = getScenePreset("hero-garden-hose").create();
+  const layerFor = createSceneQueryLayerCache();
+  const initial = layerFor({ presetId: "hero-garden-hose", scene });
+
+  assert.equal(layerFor({ presetId: "hero-garden-hose", scene }), initial,
+    "an unchanged scene identity must not rebake or reserialize its terrain for a UI-only write");
+
+  const edited = cloneScene(scene);
+  edited.container.width_m += 0.1;
+  const revised = layerFor({ presetId: "hero-garden-hose", scene: edited });
+  assert.notEqual(revised, initial);
+  assert.deepEqual(revised.find(([key]) => key === "scene.container.width_m"),
+    ["scene.container.width_m", JSON.stringify(edited.container.width_m)]);
+});
+
+test("an edited sculpted terrain stays out of the URL while analytic terrain remains shareable", () => {
+  const sculpted = cloneScene(getScenePreset("hero-garden-hose").create());
+  sculpted.terrain!.grid!.heights_m[0] += 0.001;
+  const method = { methodId: "octree" as const, quality: "balanced" as const, overrides: {} };
+  const sculptedQuery = serializeQueryState("", {
+    presetId: "hero-garden-hose",
+    scene: sculpted,
+  }, method);
+  assert.equal(new URLSearchParams(sculptedQuery).has("scene.terrain"), false);
+  assert.ok(sculptedQuery.length < 2_000,
+    `a sculpted scene location must remain reloadable, not grow to ${sculptedQuery.length} characters`);
+
+  const analytic = cloneScene(getScenePreset("garden-svo-lighting").create());
+  analytic.terrain!.baseHeight_m += 0.01;
+  const analyticQuery = serializeQueryState("", {
+    presetId: "garden-svo-lighting",
+    scene: analytic,
+  }, method);
+  assert.ok(new URLSearchParams(analyticQuery).has("scene.terrain"),
+    "small analytic terrain edits should still survive a shared-link round trip");
+});
 
 test("query state accepts the finest surface voxel inspection mode", () => {
   const parsed = parseQueryState("?voxels=surface-voxels");

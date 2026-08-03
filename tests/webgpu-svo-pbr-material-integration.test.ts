@@ -120,7 +120,7 @@ test("renderer binds its live material arena, never producer or inspection buffe
     internals.pipeline = {} as GPURenderPipeline;
     renderer.setSource(source);
     renderer.publishScene(scene);
-    assert.equal(((entries.find(({ binding }) => binding === 4)?.resource as GPUBufferBinding).buffer as unknown as { label?: string }).label, "Live authored scene arena (materials, primitives/BVH, thin glass)");
+    assert.equal(((entries.find(({ binding }) => binding === 4)?.resource as GPUBufferBinding).buffer as unknown as { label?: string }).label, "Live authored scene arena (materials, primitives/BVH, thin glass, terrain)");
     assert.notEqual((entries.find(({ binding }) => binding === 4)?.resource as GPUBufferBinding).buffer, pbrBuffer);
     assert.notEqual((entries.find(({ binding }) => binding === 4)?.resource as GPUBufferBinding).buffer, legacyBuffer);
     renderer.destroy();

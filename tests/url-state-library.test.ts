@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { getScenePreset } from "../lib/scenes";
-import { parseQueryState, serializeQueryState, shellViewFromQuery } from "../lib/url-state";
+import { parseQueryState, serializeQueryState, shellSessionFromQuery, shellViewFromQuery } from "../lib/url-state";
 
 function roundTrip(search: string) {
   const parsed = parseQueryState(search);
@@ -38,6 +38,46 @@ test("the studio round-trips without growing a redundant key", () => {
 test("an absent view is the studio", () => {
   assert.equal(parseQueryState("").view, "studio");
   assert.equal(shellViewFromQuery(""), "studio");
+});
+
+test("a named scene restores the studio after a page or module reload", () => {
+  assert.deepEqual(shellSessionFromQuery("?scene=garden-pond", {
+    view: "library",
+    studioEntered: false,
+  }), {
+    view: "studio",
+    studioEntered: true,
+  });
+});
+
+test("a bare first visit remains the library front door", () => {
+  assert.deepEqual(shellSessionFromQuery("", {
+    view: "library",
+    studioEntered: false,
+  }), {
+    view: "library",
+    studioEntered: false,
+  });
+});
+
+test("an explicitly opened library retains the current session's scene", () => {
+  assert.deepEqual(shellSessionFromQuery("?scene=garden-pond&view=library", {
+    view: "library",
+    studioEntered: true,
+  }), {
+    view: "library",
+    studioEntered: true,
+  });
+});
+
+test("a canonicalized fresh library URL does not invent an entered studio", () => {
+  assert.deepEqual(shellSessionFromQuery("?scene=garden-pond&view=library", {
+    view: "library",
+    studioEntered: false,
+  }), {
+    view: "library",
+    studioEntered: false,
+  });
 });
 
 test("an unreadable view resolves to the studio rather than throwing", () => {

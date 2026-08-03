@@ -94,12 +94,12 @@ export type EnvironmentProxyPrimitive =
   | EnvironmentConeProxy;
 
 export interface EnvironmentProxyShell {
-  readonly kind: "room" | "floor" | "terrain-heightfield";
+  readonly kind: "room" | "terrain-heightfield";
   readonly floorY_m: number;
   readonly bounds_m: EnvironmentProxyAabb;
   /** Shell faces suitable for voxel/debug publication. Garden terrain has none: its real heightfield remains authoritative. */
   readonly primitives: readonly EnvironmentBoxProxy[];
-  readonly materialModel: "conservatory" | "courtyard" | "night-lab" | "gallery" | "bathhouse" | "station" | "room" | "default-floor" | "garden-terrain";
+  readonly materialModel: "conservatory" | "courtyard" | "night-lab" | "gallery" | "bathhouse" | "station" | "room" | "garden-terrain" | "porcelain";
 }
 
 export const V = (x: number, y: number, z: number): Vec3 => ({ x, y, z });
@@ -264,4 +264,3 @@ export interface EnvironmentSceneryContext {
   /** Physical thickness of finite room shell faces. */
   readonly shellThickness_m: number;
 }
-

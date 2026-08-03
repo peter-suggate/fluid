@@ -258,7 +258,7 @@ export function addSceneryNode(scene: SceneDescription, node: SceneryNode): Scen
 function selectableNodes(scene: SceneDescription): readonly SceneryNode[] {
   return sceneSceneryGraph(scene).nodes.filter((node) =>
     node.kind !== "room-shell" && node.kind !== "terrain-shell"
-    && node.kind !== "floor-shell" && node.kind !== "glazing");
+    && node.kind !== "glazing");
 }
 
 /**
