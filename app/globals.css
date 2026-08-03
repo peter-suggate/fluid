@@ -43,8 +43,8 @@
   --ink: light-dark(#26302d, #ecf8f5);
   --muted: light-dark(#616e6a, #829d98);
   --dim: light-dark(#98a29d, #4f6965);
-  --line: light-dark(#e7e0d2, rgba(168, 226, 215, .13));
-  --line-strong: light-dark(#d4cab7, rgba(168, 226, 215, .23));
+  --line: light-dark(#e2dacb, rgba(168, 226, 215, .13));
+  --line-strong: light-dark(#cabfa8, rgba(168, 226, 215, .23));
   --accent: light-dark(#2f8f7f, #83f1d1);
   --accent-strong: light-dark(#1f6d61, #b4ffe8);
   --accent-wash: light-dark(rgba(47, 143, 127, .075), rgba(131, 241, 209, .085));
@@ -59,6 +59,26 @@
   /* Thumbnail ink and thumbnail ground; every mark shades these with opacity. */
   --iso-ink: light-dark(#26302d, #d8ece7);
   --iso-ground: light-dark(#7c6c4e, #9db5a8);
+
+  /* Instrument tokens: the studio's recessed fields, hover washes, the panes
+     it floats over a live image, and the alarm palette. Same vocabulary, so a
+     panel is one set of rules under either theme. */
+  --well: light-dark(rgba(38, 48, 45, .04), rgba(0, 0, 0, .14));
+  --hover: light-dark(rgba(38, 48, 45, .05), rgba(255, 255, 255, .035));
+  --overlay: light-dark(rgba(255, 253, 248, .9), rgba(5, 18, 16, .84));
+  --scrim: light-dark(rgba(66, 56, 38, .36), rgba(1, 8, 7, .76));
+  --on-accent: light-dark(#fffdf8, #06201a);
+  --amber-line: light-dark(rgba(176, 116, 58, .4), rgba(247, 198, 109, .4));
+  --amber-wash: light-dark(rgba(176, 116, 58, .08), rgba(247, 198, 109, .09));
+  --red-line: light-dark(rgba(189, 88, 76, .4), rgba(255, 135, 124, .42));
+  --red-wash: light-dark(rgba(189, 88, 76, .07), rgba(255, 135, 124, .1));
+  --alert: light-dark(#c62a3f, #ff1738);
+  --alert-ink: light-dark(#a8384a, #ff6278);
+  --alert-line: light-dark(rgba(198, 42, 63, .45), rgba(255, 23, 56, .6));
+  --alert-wash: light-dark(rgba(198, 42, 63, .06), rgba(255, 23, 56, .09));
+  --violet: light-dark(#6b4bd6, #c2a6ff);
+  --violet-line: light-dark(rgba(107, 75, 214, .35), rgba(194, 166, 255, .42));
+  --violet-wash: light-dark(rgba(107, 75, 214, .06), rgba(194, 166, 255, .08));
 
   /* Soft rather than square: the whole product is one radius family. */
   --radius-s: 9px;
@@ -75,10 +95,9 @@
 /* The switcher, in full. */
 :root[data-theme="light"] { color-scheme: light; }
 :root[data-theme="dark"] { color-scheme: dark; }
-/* The studio is an instrument surface and stays one under either theme: its
-   panels are readouts over a live image, and the image is the light in the
-   room. `color` is restated so it re-resolves against this scheme. */
-.lab-shell { color-scheme: dark; color: var(--ink); }
+/* The studio reads the same tokens as the front door, so it follows the theme
+   too. `color` is restated because the inherited value was already resolved. */
+.lab-shell { color: var(--ink); }
 
 * { box-sizing: border-box; }
 html, body { margin: 0; min-height: 100%; overflow: hidden; }
@@ -189,7 +208,7 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 .gpu-badge { min-width: 230px; height: 31px; padding: 0 10px; display: flex; align-items: center; gap: 8px; border: 1px solid var(--line); background: var(--overlay); backdrop-filter: blur(14px); }
 .gpu-badge strong { color: var(--accent); font: 700 8px/1 var(--mono); letter-spacing: .1em; }
 .gpu-badge > span:last-child { max-width: 175px; overflow: hidden; color: var(--muted); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
-.status-dot { display: inline-block; width: 6px; height: 6px; margin-right: 7px; border-radius: 50%; background: var(--dim); box-shadow: 0 0 0 3px rgba(109,139,133,.08); }
+.status-dot { display: inline-block; width: 6px; height: 6px; margin-right: 7px; border-radius: 50%; background: var(--dim); box-shadow: 0 0 0 3px var(--hover); }
 .status-dot.online { background: var(--accent); box-shadow: 0 0 9px var(--accent-line); }
 .status-dot.warning { background: var(--amber); box-shadow: 0 0 9px var(--amber-line); }
 .status-dot.idle { background: var(--muted); }
@@ -345,13 +364,13 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 .notice.warn { color: var(--amber); }
 .sim-rate { color: var(--dim); font: 8px/1 var(--mono); }
 .lag-chip { padding: 3px 6px; border: 1px solid var(--amber-line); color: var(--amber); font: 700 8px/1 var(--mono); white-space: nowrap; }
-.transport-controls .record-button { color: #d88d86; }
+.transport-controls .record-button { color: var(--red); }
 .transport-controls .record-button.active { border-color: var(--red-line); background: var(--red-wash); color: var(--red); }
 .recording-chip { display: flex; align-items: center; gap: 5px; color: var(--red) !important; white-space: nowrap; }
 .recording-chip i { width: 6px; height: 6px; border-radius: 50%; background: var(--red); box-shadow: 0 0 9px var(--red-line); animation: status-pulse 1.2s ease-in-out infinite; }
 
 /* ---- simulation-time video playback ---- */
-.recording-modal-backdrop { position: fixed; z-index: 90; inset: 0; display: grid; place-items: center; padding: 28px; background: rgba(1,8,7,.76); backdrop-filter: blur(12px); }
+.recording-modal-backdrop { position: fixed; z-index: 90; inset: 0; display: grid; place-items: center; padding: 28px; background: var(--scrim); backdrop-filter: blur(12px); }
 .recording-modal { width: min(980px, 94vw); max-height: 92vh; overflow: auto; border: 1px solid var(--line-strong); background: var(--overlay); box-shadow: 0 32px 120px rgba(0,0,0,.68); }
 .recording-modal > header { min-height: 70px; padding: 14px 17px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid var(--line); }
 .recording-modal > header .eyebrow { margin-bottom: 5px; }
@@ -472,8 +491,8 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 .render-segment-row button:hover:not(:disabled), .render-segment-row button.active, .render-discrete-control button:hover, .render-discrete-control button.active { border-color: var(--accent-line); background: var(--accent-wash); color: var(--accent); }
 .render-segment-row button:disabled { opacity: .3; cursor: not-allowed; }
 .render-toggle-row { display: flex; flex-wrap: wrap; gap: 4px; margin: 6px 0; }
-.render-toggle { min-height: 25px; padding: 0 8px 0 5px; display: flex; align-items: center; gap: 6px; border: 1px solid var(--line); background: var(--render-control-bg); color: #82948f; font: 700 6px/1 var(--mono); cursor: pointer; }
-.render-toggle i { position: relative; width: 19px; height: 10px; border: 1px solid var(--dim); border-radius: 7px; background: var(--dim); }
+.render-toggle { min-height: 25px; padding: 0 8px 0 5px; display: flex; align-items: center; gap: 6px; border: 1px solid var(--line); background: var(--render-control-bg); color: var(--dim); font: 700 6px/1 var(--mono); cursor: pointer; }
+.render-toggle i { position: relative; width: 19px; height: 10px; border: 1px solid var(--line-strong); border-radius: 7px; background: var(--well); }
 .render-toggle i::after { content: ""; position: absolute; top: 2px; left: 2px; width: 4px; height: 4px; border-radius: 50%; background: var(--dim); transition: transform .13s ease, background .13s ease; }
 .render-toggle[aria-checked="true"] { border-color: var(--accent-line); color: var(--accent); }
 .render-toggle[aria-checked="true"] i { border-color: var(--accent-line); background: var(--accent-wash); }
@@ -483,7 +502,7 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 .svo-control-grid .range-control, .render-discrete-control { min-width: 0; min-height: 54px; margin: 0; padding: 7px 8px; border: 1px solid var(--line); background: var(--render-control-bg); }
 .svo-control-grid .reconstruction-control { grid-column: 1 / -1; }
 .svo-control-grid .control-heading { margin-bottom: 8px; gap: 5px; }
-.svo-control-grid .control-heading > span { min-width: 0; overflow: hidden; color: #91a49f; font: 8px/1.15 var(--mono); text-overflow: ellipsis; white-space: nowrap; }
+.svo-control-grid .control-heading > span { min-width: 0; overflow: hidden; color: var(--muted); font: 8px/1.15 var(--mono); text-overflow: ellipsis; white-space: nowrap; }
 .svo-control-grid .control-heading output { flex: 0 0 auto; font-size: 8px; }
 .svo-control-grid input[type="range"] { height: 1px; }
 .svo-control-grid input[type="range"]::-webkit-slider-thumb { width: 8px; height: 8px; }
@@ -559,7 +578,7 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 .pixel-trace-hud { position: absolute; z-index: 8; right: 16px; bottom: 70px; width: min(352px, calc(100% - 32px)); max-height: min(560px, calc(100% - 110px)); overflow: auto; display: grid; gap: 9px; padding: 11px 12px 10px; border: 1px solid var(--violet-line); background: var(--overlay); box-shadow: 0 16px 44px rgba(0,0,0,.42); backdrop-filter: blur(12px); }
 .pixel-trace-hud[data-pinned="true"] { border-color: var(--amber-line); }
 .pixel-trace-hud > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; padding-bottom: 8px; border-bottom: 1px solid var(--line); }
-.pixel-trace-hud > header small { display: block; margin-bottom: 4px; color: #c2a6ff; font: 700 7px/1 var(--mono); letter-spacing: .13em; text-transform: uppercase; }
+.pixel-trace-hud > header small { display: block; margin-bottom: 4px; color: var(--violet); font: 700 7px/1 var(--mono); letter-spacing: .13em; text-transform: uppercase; }
 .pixel-trace-hud[data-pinned="true"] > header small { color: var(--amber); }
 .pixel-trace-hud > header h3 { margin: 0; color: var(--ink); font: 600 12px/1.2 var(--mono); letter-spacing: -.01em; }
 .pixel-trace-actions { display: flex; flex: none; gap: 4px; }
@@ -1092,6 +1111,38 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 .scene-overlay-chip:hover small { color: var(--muted); }
 
 /* ---------------------------------------------------------------------------
+   The studio, in the same shapes.
+
+   Two rules rather than thirty edits: every pane that floats over a live image
+   takes one soft edge and one lift, and every control takes the product's
+   radius family. A hairline tuned to read on a dark viewport disappears on a
+   bright one, which is what the shadow is for.
+   --------------------------------------------------------------------------- */
+.gpu-badge, .health-chip, .fps-meter, .camera-toolbar, .scene-overlay, .scene-pick-toggle,
+.utility-panel-tabs button, .editor-tool-strip button, .editor-history button,
+.editor-tool-options button, .resource-activity-pill, .scene-scale-overlay,
+.entity-hover-chip, .shape-readout, .shape-axis-lock, .editor-fill-handle,
+.gpu-build-card, .svo-cost-legend, .pixel-trace-hud, .gpu-fallback, .scene-popover,
+.recording-modal, .viewport-failure-alert { border-color: var(--line-strong); box-shadow: var(--shadow-card); }
+
+.lab-shell button, .lab-shell input, .lab-shell select, .lab-shell .metric-card,
+.lab-shell .estimate-grid > div, .lab-shell .force-grid > div, .lab-shell .segmented,
+.lab-shell .paper-view-grid button, .lab-shell .svo-control-grid .range-control,
+.lab-shell .render-discrete-control, .lab-shell .measurement-mode, .lab-shell .transport-timing label,
+.gpu-badge, .health-chip, .fps-meter, .camera-toolbar, .scene-overlay, .scene-pick-toggle,
+.resource-activity-pill, .scene-scale-overlay, .entity-hover-chip, .shape-readout,
+.shape-axis-lock, .editor-fill-handle, .lag-chip, .transport-resource-state { border-radius: var(--radius-s); }
+.gpu-build-card, .svo-cost-legend, .pixel-trace-hud, .gpu-fallback, .scene-popover,
+.recording-modal, .viewport-failure-alert { border-radius: var(--radius-m); }
+/* The two strips are docked to an edge, so they round away from it. */
+.utility-panel-tabs button { border-radius: var(--radius-s) 0 0 var(--radius-s); }
+/* Cards inside a panel are raised off it, which a wash alone cannot say on a
+   pale surface. */
+.paper-view-grid button, .paper-view-inspector, .paper-spatial-row { background: var(--panel); }
+.editor-tool-strip button { border-radius: 0 var(--radius-s) var(--radius-s) 0; }
+.lab-shell input[type="range"]::-webkit-slider-thumb { border-radius: 50%; }
+
+/* ---------------------------------------------------------------------------
    Paper — the product's own surface, and the primitives every page on it is
    built from.
 
@@ -1167,14 +1218,17 @@ button.card[data-active] { border-color: var(--accent); }
 .library-hero { display: grid; grid-template-columns: minmax(0, 1fr); gap: 20px; }
 .library-hero[data-resume] { grid-template-columns: minmax(0, 1.32fr) minmax(340px, .92fr); }
 @media (max-width: 940px) { .library-hero[data-resume] { grid-template-columns: minmax(0, 1fr); } }
-.hero-continue { grid-template-rows: minmax(0, 1fr) auto; min-height: 320px; }
+/* The mark has an intrinsic aspect, so an unbounded row would let it set the
+   card's height — and the whole hero's with it. */
+.hero-continue { grid-template-rows: minmax(0, 1fr) auto; }
+.hero-continue .card-art { height: clamp(190px, 19vw, 256px); }
 .hero-continue .card-art { padding: 26px 30px 6px; }
 .hero-continue .card-body { gap: 7px; padding: 20px 30px 28px; }
 .hero-continue .card-body strong, .hero-new h2 { font: 700 26px/1.1 var(--display); letter-spacing: -.028em; }
 .hero-continue .card-body small { -webkit-line-clamp: 3; font-size: 13.5px; }
 /* New scene is a peer of choosing one, so it is a surface of its own rather
    than a card in the grid — and the three rooms below it are the whole offer. */
-.hero-new { gap: 16px; padding: 30px 30px 22px; border-color: var(--accent-line); background: linear-gradient(170deg, var(--accent-wash), transparent 70%), var(--panel); }
+.hero-new { gap: 16px; align-content: center; padding: 30px 30px 22px; border-color: var(--accent-line); background: linear-gradient(170deg, var(--accent-wash), transparent 70%), var(--panel); }
 .hero-new-copy { display: grid; gap: 9px; }
 .hero-new h2 { margin: 0; }
 .hero-new > small { max-width: 40ch; color: var(--muted); font-size: 13.5px; line-height: 1.5; }
