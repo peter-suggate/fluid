@@ -109,7 +109,8 @@ export class WebGPUOctreeLosassoAuthority implements WebGPUOctreeLosassoCandidat
         rowFaces: make("row-face CSR incidence", incidences * 4),
         faces: make("unique axis faces", faces * OCTREE_LOSASSO_FACE_BYTES),
         rowDispatch: make("GPU-authored row dispatch", 12, indirect),
-        faceDispatch: make("GPU-authored face dispatch", 12, indirect),
+        // The second indirect record carries the epoch-local directory grid.
+        faceDispatch: make("GPU-authored face and directory dispatch", 24, indirect),
         rightHandSide: make("integrated pressure RHS", rows * 4),
         faceMetrics: make("axis-face extension metrics", faces * 16),
         faceAdjacencyOffsets: make("axis-face adjacency offsets", (faces + 1) * 4),

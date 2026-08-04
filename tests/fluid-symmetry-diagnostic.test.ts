@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { measureFluidSymmetry } from "../lib/fluid-symmetry-diagnostic";
+import {
+  measureFluidSymmetry,
+  measureHorizontalFrontCircularity,
+} from "../lib/fluid-symmetry-diagnostic";
 
 function symmetricState() {
   const grid = [6, 3, 6] as const;
@@ -50,4 +53,19 @@ test("D4 diagnostic fails closed on incomplete adaptive fields", () => {
   const state = symmetricState();
   state.pressure[5] = Number.NaN;
   assert.ok(measureFluidSymmetry(state).pressure.nonFiniteCount > 0);
+});
+
+test("radial diagnostic distinguishes circular and axis-leading D4 fronts", () => {
+  const grid = [32, 1, 32] as const;
+  const circle = new Float32Array(32 * 32), axisBiased = new Float32Array(32 * 32);
+  const centre = 15.5;
+  for (let z = 0; z < 32; z += 1) for (let x = 0; x < 32; x += 1) {
+    const dx = x - centre, dz = z - centre;
+    circle[x + 32 * z] = Math.hypot(dx, dz) <= 10 ? 1 : 0;
+    axisBiased[x + 32 * z] = Math.abs(dx) + 1.5 * Math.abs(dz) <= 12 ? 1 : 0;
+  }
+  const round = measureHorizontalFrontCircularity(circle, grid);
+  const biased = measureHorizontalFrontCircularity(axisBiased, grid);
+  assert.ok(Math.abs(round.axisLead_cells) < 0.2, JSON.stringify(round));
+  assert.ok(biased.axisLead_cells > 2, JSON.stringify(biased));
 });

@@ -46,37 +46,52 @@ fn ready()->bool{
  return generation!=0u&&ownerCandidate[28u]==0x80000000u&&ownerCandidate[23u]==0u
    &&frontier[6u]==1u&&frontier[8u]==generation&&frontier[9u]==0u
    &&count<=p.rows&&candidateControl[0u]==generation&&candidateControl[1u]==count
-   &&candidateControl[2u]<=p.faces&&candidateControl[3u]==1u&&candidateControl[4u]==0u;
+   &&candidateControl[2u]<=p.faces&&candidateControl[3u]==1u&&candidateControl[4u]==0u
+   &&candidateControl[6u]>=2u*candidateControl[2u]&&candidateControl[6u]<=p.directory
+   &&(candidateControl[6u]&(candidateControl[6u]-1u))==0u;
 }
-@compute @workgroup_size(64)fn commitLosassoAuthorityRows(@builtin(global_invocation_id)g:vec3u){
- if(!ready()){return;}let row=g.x;let count=candidateControl[1u];
+fn reused()->bool{return candidateControl[5u]==1u&&acceptedControl[0u]!=0u
+ &&acceptedControl[1u]==candidateControl[1u]&&acceptedControl[2u]==candidateControl[2u]
+ &&acceptedControl[3u]==1u&&acceptedControl[4u]==0u;}
+fn linearInvocation(g:vec3u,n:vec3u)->u32{return g.x+g.y*n.x*64u;}
+@compute @workgroup_size(64)fn commitLosassoAuthorityRows(@builtin(global_invocation_id)g:vec3u,
+ @builtin(num_workgroups)n:vec3u){
+ if(!ready()||reused()){return;}let row=linearInvocation(g,n);let count=candidateControl[1u];
  if(row<=count){acceptedOffsets[row]=candidateOffsets[row];}
  if(row<count){acceptedRhs[row]=candidateRhs[row];acceptedDiagonal[row]=candidateDiagonal[row];}
 }
-@compute @workgroup_size(64)fn commitLosassoAuthorityIncidences(@builtin(global_invocation_id)g:vec3u){
- if(!ready()){return;}let cursor=g.x;let count=candidateOffsets[candidateControl[1u]];
+@compute @workgroup_size(64)fn commitLosassoAuthorityIncidences(@builtin(global_invocation_id)g:vec3u,
+ @builtin(num_workgroups)n:vec3u){
+ if(!ready()||reused()){return;}let cursor=linearInvocation(g,n);let count=candidateOffsets[candidateControl[1u]];
  if(cursor<count&&cursor<p.incidences){acceptedIncidences[cursor]=candidateIncidences[cursor];}
 }
-@compute @workgroup_size(64)fn commitLosassoAuthorityFaces(@builtin(global_invocation_id)g:vec3u){
- if(!ready()){return;}let face=g.x;let count=candidateControl[2u];if(face>=count||face>=p.faces){return;}
+@compute @workgroup_size(64)fn commitLosassoAuthorityFaces(@builtin(global_invocation_id)g:vec3u,
+ @builtin(num_workgroups)n:vec3u){
+ if(!ready()||reused()){return;}let face=linearInvocation(g,n);let count=candidateControl[2u];if(face>=count||face>=p.faces){return;}
  let base=FACE_WORDS*face;for(var word=0u;word<FACE_WORDS;word+=1u){acceptedFaces[base+word]=candidateFaces[base+word];}
  acceptedGeometry[face]=candidateGeometry[face];
 }
-@compute @workgroup_size(64)fn commitLosassoAuthorityFaceAux(@builtin(global_invocation_id)g:vec3u){
- if(!ready()){return;}let cursor=g.x;let count=candidateControl[2u];
+@compute @workgroup_size(64)fn commitLosassoAuthorityFaceAux(@builtin(global_invocation_id)g:vec3u,
+ @builtin(num_workgroups)n:vec3u){
+ if(!ready()||reused()){return;}let cursor=linearInvocation(g,n);let count=candidateControl[2u];
  if(cursor<count&&cursor<p.faces){acceptedMetrics[cursor]=candidateMetrics[cursor];}
  if(cursor<=count&&cursor<=p.faces){acceptedAdjacencyOffsets[cursor]=candidateAdjacencyOffsets[cursor];}
  if(cursor<p.adjacencies){acceptedAdjacency[cursor]=candidateAdjacency[cursor];}
 }
-@compute @workgroup_size(64)fn commitLosassoAuthorityVelocity(@builtin(global_invocation_id)g:vec3u){
- if(!ready()){return;}let face=g.x;if(face<candidateControl[2u]&&face<p.faces){acceptedExtended[face]=candidateExtended[face];}
+@compute @workgroup_size(64)fn commitLosassoAuthorityVelocity(@builtin(global_invocation_id)g:vec3u,
+ @builtin(num_workgroups)n:vec3u){
+ if(!ready()||reused()){return;}let face=linearInvocation(g,n);if(face<candidateControl[2u]&&face<p.faces){acceptedExtended[face]=candidateExtended[face];}
 }
-@compute @workgroup_size(64)fn commitLosassoAuthorityDirectory(@builtin(global_invocation_id)g:vec3u){
- if(!ready()){return;}let slot=g.x;if(slot<p.directory){acceptedDirectory[slot]=candidateDirectory[slot];}
+@compute @workgroup_size(64)fn commitLosassoAuthorityDirectory(@builtin(global_invocation_id)g:vec3u,
+ @builtin(num_workgroups)n:vec3u){
+ if(!ready()||reused()){return;}let slot=linearInvocation(g,n);if(slot<candidateControl[6u]){acceptedDirectory[slot]=candidateDirectory[slot];}
 }
 @compute @workgroup_size(1)fn finishLosassoAuthorityCommit(){
  if(!ready()){return;}
- for(var word=0u;word<3u;word+=1u){acceptedRowDispatch[word]=candidateRowDispatch[word];acceptedFaceDispatch[word]=candidateFaceDispatch[word];}
+ if(reused()){acceptedSolver[4u]=candidateControl[0u];acceptedSolver[6u]=candidateControl[0u];
+  acceptedControl[0u]=candidateControl[0u];acceptedControl[5u]=1u;return;}
+ for(var word=0u;word<3u;word+=1u){acceptedRowDispatch[word]=candidateRowDispatch[word];}
+ for(var word=0u;word<6u;word+=1u){acceptedFaceDispatch[word]=candidateFaceDispatch[word];}
  for(var word=0u;word<7u;word+=1u){acceptedSolver[word]=candidateSolver[word];}
  // Publish the accepted epoch last. Every consumer gates its arrays through this control.
  for(var word=0u;word<8u;word+=1u){acceptedControl[word]=candidateControl[word];}

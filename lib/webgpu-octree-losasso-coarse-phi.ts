@@ -62,7 +62,7 @@ export function planOctreeLosassoCoarsePhi(
     + OCTREE_LOSASSO_COARSE_PHI_DIRECTORY_WORDS * directoryCapacity) * 4;
   return Object.freeze({ rowCapacity, faceCapacity, directoryCapacity, arenaBytes,
     encodedDispatchCount: 6 as const,
-    allocatedBytes: 96 + 2 * arenaBytes + 16 * rowCapacity
+    allocatedBytes: 136 + 2 * arenaBytes + 16 * rowCapacity
       + OCTREE_LOSASSO_GHOST_DISTANCE_WORDS * 4 * faceCapacity
       + 32 + rowCapacity * 32 + 64 + rowCapacity * 4 + (16 + 8 * rowCapacity) * 4 });
 }
@@ -98,15 +98,22 @@ export class WebGPUOctreeLosassoCoarsePhiExchange {
   readonly source: WebGPUOctreeLosassoCoarsePhiSource;
   private readonly arenas: readonly [GPUBuffer, GPUBuffer];
   private readonly params: GPUBuffer;
-  private pipelines?: Readonly<Record<"prepare" | "warm" | "restrict" | "finalize" | "volume" | "ghost", GPUComputePipeline>>;
+  private readonly readyDispatch: GPUBuffer;
+  private readonly bindGroupCache = new Map<GPUComputePipeline,
+    { buffers: readonly GPUBuffer[]; group: GPUBindGroup }[]>();
+  private pipelines?: Readonly<Record<"prepare" | "prepareRefresh" | "warm" | "restrict"
+    | "refresh" | "finalize" | "volume" | "volumeRefresh" | "ghost" | "publish",
+    GPUComputePipeline>>;
   private destroyed = false;
 
   constructor(private readonly device: GPUDevice,
     rowCapacity: number, faceCapacity: number) {
     this.plan = planOctreeLosassoCoarsePhi(rowCapacity, faceCapacity);
     const storage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST;
-    this.params = device.createBuffer({ label: "Losasso coarse-phi exchange constants", size: 96,
+    this.params = device.createBuffer({ label: "Losasso coarse-phi exchange constants", size: 112,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.readyDispatch = device.createBuffer({ label: "Losasso coarse-phi ready reuse dispatch", size: 24,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_SRC });
     this.arenas = [0, 1].map((slot) => device.createBuffer({
       label: `Losasso compact coarse-phi directory generation ${slot}`, size: this.plan.arenaBytes, usage: storage,
     })) as unknown as readonly [GPUBuffer, GPUBuffer];
@@ -144,26 +151,88 @@ export class WebGPUOctreeLosassoCoarsePhiExchange {
     // Dawn's Metal compiler serializes this module internally; compiling its
     // four auto-layout entry points concurrently can race the native frontend.
     const prepare = await make("prepareLosassoCoarsePhi");
+    const prepareRefresh = await make("prepareLosassoCoarsePhiRefresh");
     const warm = await this.device.createComputePipelineAsync({ label: "warmLosassoCoarsePhi", layout: "auto",
       compute: { module: warmModule, entryPoint: "warmLosassoCoarsePhi" } });
     const restrict = await make("restrictLosassoCoarsePhi");
+    const refresh = await make("refreshLosassoCoarsePhi");
     const finalize = await make("finalizeLosassoCoarsePhi");
     const ghost = await make("publishLosassoGhostDistances");
+    const publish = await make("publishLosassoCoarsePhiArena");
     const volume = await this.device.createComputePipelineAsync({ label: "publishLosassoVolumeBridge", layout: "auto",
       compute: { module: volumeModule, entryPoint: "publishLosassoVolumeBridge" } });
-    this.pipelines = Object.freeze({ prepare, warm, restrict, finalize, volume, ghost });
+    const volumeRefresh = await this.device.createComputePipelineAsync({ label: "refreshLosassoVolumeBridge", layout: "auto",
+      compute: { module: volumeModule, entryPoint: "refreshLosassoVolumeBridge" } });
+    this.pipelines = Object.freeze({ prepare, prepareRefresh, warm, restrict, refresh,
+      finalize, volume, volumeRefresh, ghost, publish });
   }
 
   encode(broker: PassBroker, fine: WebGPUFineLevelSetBrickSource,
     input: WebGPUOctreeLosassoCoarsePhiInput): WebGPUOctreeLosassoCoarsePhiSource {
     this.assertLive(); if (!this.pipelines) throw new Error("Losasso coarse-phi pipelines are not initialized");
+    this.updateParams(fine, input, 0);
+    // `source.arena` is part of several long-lived projection/topology bind
+    // groups. Keep that buffer identity stable for the lifetime of the
+    // exchange. Build the next generation in the private staging arena while
+    // the published arena remains available to the warm remap and full-row
+    // summary delta, then order its in-pass compute publication after every
+    // reader of the old generation has finished.
+    const previousArena = this.source.arena;
+    const nextArena = this.arenas[1];
+    const buffers = new Map<number, GPUBuffer>([
+      [0, this.params], [1, fine.metadata], [2, fine.worklist], [3, fine.samples],
+      [4, input.leafHeaders], [5, input.coarseControl], [6, input.faces],
+      [7, input.faceGeometry], [8, nextArena], [9, this.source.rowPhi],
+      [10, this.source.ghostDistances],
+      [11, this.source.volumeDirectory], [12, this.source.volumePublication],
+      [13, this.source.physicalVolumes], [14, previousArena], [15, this.source.summaryDelta],
+      [16, this.readyDispatch],
+    ]);
+    const run = this.runner(broker, buffers);
+    run("prepare", [0, 4, 5, 6, 8, 14, 16], 1);
+    run("warm", [0, 4, 5, 9, 14], [this.readyDispatch, 0]);
+    run("restrict", [0, 1, 2, 3, 4, 5, 8, 9, 14], Math.ceil(this.plan.rowCapacity / 64));
+    run("finalize", [0, 5, 8, 14], 1);
+    run("volume", [0, 5, 8, 11, 12, 13, 14, 15], Math.ceil(2 * this.plan.rowCapacity / 64));
+    run("ghost", [0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 14], Math.ceil(this.plan.faceCapacity / 64));
+    run("publish", [0, 5, 8, 14], [this.readyDispatch, 12]);
+    return this.source;
+  }
+
+  /** Refresh phi-dependent fields against an unchanged accepted row/face epoch.
+   * The retained directory and row identities are validated on the GPU; a
+   * mismatch fails the refreshed publication closed instead of rebuilding it. */
+  encodeFieldRefresh(broker: PassBroker, fine: WebGPUFineLevelSetBrickSource,
+    input: WebGPUOctreeLosassoCoarsePhiInput): WebGPUOctreeLosassoCoarsePhiSource {
+    this.assertLive(); if (!this.pipelines) throw new Error("Losasso coarse-phi pipelines are not initialized");
+    this.updateParams(fine, input, 1);
+    const arena = this.source.arena;
+    const buffers = new Map<number, GPUBuffer>([
+      [0, this.params], [1, fine.metadata], [2, fine.worklist], [3, fine.samples],
+      [4, input.leafHeaders], [5, input.coarseControl], [6, input.faces],
+      [7, input.faceGeometry], [8, arena], [9, this.source.rowPhi],
+      [10, this.source.ghostDistances], [11, this.source.volumeDirectory],
+      [12, this.source.volumePublication], [13, this.source.physicalVolumes],
+      [14, this.arenas[1]], [15, this.source.summaryDelta],
+    ]);
+    const run = this.runner(broker, buffers);
+    run("prepareRefresh", [0, 4, 5, 6, 8], 1);
+    run("refresh", [0, 1, 2, 3, 4, 5, 8, 9, 14], Math.ceil(this.plan.rowCapacity / 64));
+    run("finalize", [0, 5, 8, 14], 1);
+    run("volumeRefresh", [0, 8, 11, 12, 13, 15], Math.ceil(this.plan.rowCapacity / 64));
+    run("ghost", [0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 14], Math.ceil(this.plan.faceCapacity / 64));
+    return this.source;
+  }
+
+  private updateParams(fine: WebGPUFineLevelSetBrickSource,
+    input: WebGPUOctreeLosassoCoarsePhiInput, scheduleMode: 0 | 1): void {
     if (input.dimensions.some((value) => !Number.isSafeInteger(value) || value < 1)
       || !Number.isSafeInteger(input.maximumLeafSize) || input.maximumLeafSize < 1
       || (input.maximumLeafSize & (input.maximumLeafSize - 1)) !== 0
       || !Number.isFinite(input.cellSize) || input.cellSize <= 0) {
       throw new RangeError("Losasso coarse-phi geometry is invalid");
     }
-    const bytes = new ArrayBuffer(96), words = new Uint32Array(bytes), floats = new Float32Array(bytes);
+    const bytes = new ArrayBuffer(112), words = new Uint32Array(bytes), floats = new Float32Array(bytes);
     words.set(fine.plan.brickDimensions, 0); words[3] = fine.plan.brickResolution;
     words.set(fine.plan.sampleDimensions, 4); words[7] = fine.plan.samplesPerBrick;
     floats.set(fine.plan.domainOrigin, 8); floats[11] = fine.plan.fineCellWidth;
@@ -172,33 +241,28 @@ export class WebGPUOctreeLosassoCoarsePhiExchange {
     words.set(input.dimensions, 16); words[19] = input.maximumLeafSize;
     floats[20] = input.cellSize; words[21] = this.plan.directoryCapacity;
     words[22] = this.plan.rowCapacity; words[23] = this.plan.faceCapacity;
+    words[24] = scheduleMode; words[25] = Math.ceil(this.plan.rowCapacity / 64);
+    words[26] = Math.ceil(this.plan.arenaBytes / 4 / 64);
     this.device.queue.writeBuffer(this.params, 0, bytes);
-    const previousArena = this.source.arena;
-    const nextArena = previousArena === this.arenas[0] ? this.arenas[1] : this.arenas[0];
-    (this.source as { arena: GPUBuffer }).arena = nextArena;
-    const buffers = new Map<number, GPUBuffer>([
-      [0, this.params], [1, fine.metadata], [2, fine.worklist], [3, fine.samples],
-      [4, input.leafHeaders], [5, input.coarseControl], [6, input.faces],
-      [7, input.faceGeometry], [8, nextArena], [9, this.source.rowPhi],
-      [10, this.source.ghostDistances],
-      [11, this.source.volumeDirectory], [12, this.source.volumePublication],
-      [13, this.source.physicalVolumes], [14, previousArena], [15, this.source.summaryDelta],
-    ]);
-    const run = (name: "prepare" | "warm" | "restrict" | "finalize" | "volume" | "ghost",
-      bindings: readonly number[], groups: number) => {
+  }
+
+  private runner(broker: PassBroker, buffers: ReadonlyMap<number, GPUBuffer>) {
+    return (name: keyof NonNullable<typeof this.pipelines>,
+      bindings: readonly number[], groups: number | readonly [GPUBuffer, number]) => {
       const pipeline = this.pipelines![name]; const pass = broker.compute({ label: `Losasso coarse phi - ${name}` });
-      pass.setPipeline(pipeline); pass.setBindGroup(0, this.device.createBindGroup({
-        layout: pipeline.getBindGroupLayout(0), entries: bindings.map((binding) =>
-          ({ binding, resource: { buffer: buffers.get(binding)! } })),
-      })); pass.dispatchWorkgroups(groups);
+      const bound = bindings.map((binding) => buffers.get(binding)!);
+      const variants = this.bindGroupCache.get(pipeline) ?? [];
+      const cached = variants.find((variant) => variant.buffers.length === bound.length
+        && variant.buffers.every((buffer, index) => buffer === bound[index]));
+      const group = cached?.group ?? this.device.createBindGroup({
+        layout: pipeline.getBindGroupLayout(0), entries: bindings.map((binding, index) =>
+          ({ binding, resource: { buffer: bound[index]! } })),
+      });
+      if (!cached) { variants.push({ buffers: bound, group }); this.bindGroupCache.set(pipeline, variants); }
+      pass.setPipeline(pipeline); pass.setBindGroup(0, group);
+      if (typeof groups === "number") pass.dispatchWorkgroups(groups);
+      else pass.dispatchWorkgroupsIndirect(groups[0], groups[1]);
     };
-    run("prepare", [0, 4, 5, 6, 8], 1);
-    run("warm", [0, 4, 5, 9, 14], Math.ceil(this.plan.rowCapacity / 64));
-    run("restrict", [0, 1, 2, 3, 4, 5, 8, 9], Math.ceil(this.plan.rowCapacity / 64));
-    run("finalize", [8], 1);
-    run("volume", [0, 8, 11, 12, 13, 14, 15], Math.ceil(2 * this.plan.rowCapacity / 64));
-    run("ghost", [0, 1, 2, 3, 4, 5, 6, 7, 8, 10], Math.ceil(this.plan.faceCapacity / 64));
-    return this.source;
   }
 
   fineTopologyEntry(binding = 9): GPUBindGroupEntry {
@@ -219,9 +283,10 @@ export class WebGPUOctreeLosassoCoarsePhiExchange {
     return Object.freeze({ values: this.source.rowPhi, control: this.source.volumePublication });
   }
   destroy(): void { if (this.destroyed) return; this.destroyed = true;
-    this.params.destroy(); for (const arena of this.arenas) arena.destroy(); this.source.rowPhi.destroy(); this.source.ghostDistances.destroy();
+    this.params.destroy(); this.readyDispatch.destroy(); for (const arena of this.arenas) arena.destroy(); this.source.rowPhi.destroy(); this.source.ghostDistances.destroy();
     this.source.volumeDirectory.destroy(); this.source.volumePublication.destroy(); this.source.physicalVolumes.destroy();
     this.source.summaryDelta.destroy();
+    this.bindGroupCache.clear();
     this.pipelines = undefined; }
   private assertLive(): void { if (this.destroyed) throw new Error("Losasso coarse-phi exchange is destroyed"); }
 }

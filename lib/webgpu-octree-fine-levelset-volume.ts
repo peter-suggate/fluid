@@ -11,6 +11,8 @@ import { fineLevelSetPackedSampleWGSL } from "./fine-levelset-packed-sample";
 export const FINE_LEVELSET_VOLUME_CONTROL_BYTES = 64;
 export const FINE_LEVELSET_VOLUME_VALID = 0x8000_0000;
 const FINE_LEVELSET_VOLUME_INDIRECT_BYTES = 16;
+const FINE_LEVELSET_VOLUME_CORRECTION_INDIRECT_BYTES = 36;
+const FINE_LEVELSET_VOLUME_RESIDUAL_INDIRECT_BYTES = 24;
 export const FLUID_FINE_VOLUME_CADENCE_ENV = "FLUID_FINE_VOLUME_CADENCE";
 const volumeCadenceTicks = new WeakMap<GPUBuffer, number>();
 
@@ -102,7 +104,9 @@ export function planFineLevelSetGPUVolume(coarseRowCapacity: number, fineSampleC
   const reductionScratchBytes = Math.max(coarsePartialBytes, finePartialBytes);
   return { coarseRowCapacity, fineSampleCapacity, coarsePartialCount, finePartialCount,
     coarsePartialBytes, finePartialBytes, reductionScratchBytes,
-    allocatedBytes: 64 + 16 + reductionScratchBytes + FINE_LEVELSET_VOLUME_INDIRECT_BYTES + 12
+    allocatedBytes: 64 + 16 + reductionScratchBytes + FINE_LEVELSET_VOLUME_INDIRECT_BYTES
+      + FINE_LEVELSET_VOLUME_CORRECTION_INDIRECT_BYTES
+      + FINE_LEVELSET_VOLUME_RESIDUAL_INDIRECT_BYTES + 12
       + (ownsControl ? FINE_LEVELSET_VOLUME_CONTROL_BYTES : 0) };
 }
 
@@ -122,6 +126,8 @@ export class WebGPUFineLevelSetVolumeCorrection {
   private readonly referenceDeltaParams: GPUBuffer;
   private readonly reductionScratch: GPUBuffer;
   private readonly fineDispatch: GPUBuffer;
+  private readonly correctionDispatch: GPUBuffer;
+  private readonly residualDispatch: GPUBuffer;
   private readonly coarseDispatch: GPUBuffer;
   private resetPipeline!: GPUComputePipeline;
   private addReferencePipeline!: GPUComputePipeline;
@@ -165,6 +171,16 @@ export class WebGPUFineLevelSetVolumeCorrection {
     this.fineDispatch = device.createBuffer({ label: "global fine total-volume active-sample dispatch",
       size: FINE_LEVELSET_VOLUME_INDIRECT_BYTES,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT });
+    this.correctionDispatch = device.createBuffer({
+      label: "global fine total-volume bounded correction dispatch",
+      size: FINE_LEVELSET_VOLUME_CORRECTION_INDIRECT_BYTES,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT,
+    });
+    this.residualDispatch = device.createBuffer({
+      label: "global fine total-volume residual correction dispatch",
+      size: FINE_LEVELSET_VOLUME_RESIDUAL_INDIRECT_BYTES,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT,
+    });
     this.coarseDispatch = device.createBuffer({ label: "global fine total-volume exact coarse-row dispatch",
       size: 12, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT });
     const bytes = new ArrayBuffer(64), u = new Uint32Array(bytes), f = new Float32Array(bytes);
@@ -216,12 +232,14 @@ export class WebGPUFineLevelSetVolumeCorrection {
     cache(this.finePartialPipeline, [[0, this.source.params], [1, this.source.metadata],
       [2, this.source.worklist], [3, this.source.samples], [6, this.coarseParams],
       [11, this.coarse.sampleDirectory], [12, this.reductionScratch], [13, this.coarse.publicationControl]]);
-    cache(this.fineFinalizePipeline, [[0, this.source.params], [5, this.control],
-      [6, this.coarseParams], [12, this.reductionScratch]]);
+    cache(this.fineFinalizePipeline, [[0, this.source.params], [2, this.source.worklist],
+      [5, this.control], [6, this.coarseParams], [12, this.reductionScratch],
+      [17, this.residualDispatch], [18, this.correctionDispatch]]);
     cache(this.applyPipeline, [[0, this.source.params], [1, this.source.metadata],
       [2, this.source.worklist], [3, this.source.samples], [5, this.control]]);
-    cache(this.correctedFinalizePipeline, [[0, this.source.params], [5, this.control],
-      [6, this.coarseParams], [12, this.reductionScratch]]);
+    cache(this.correctedFinalizePipeline, [[0, this.source.params], [2, this.source.worklist],
+      [5, this.control], [6, this.coarseParams], [12, this.reductionScratch],
+      [17, this.residualDispatch]]);
     cache(this.measuredFinalizePipeline, [[0, this.source.params], [5, this.control],
       [6, this.coarseParams], [12, this.reductionScratch]]);
   }
@@ -362,45 +380,53 @@ export class WebGPUFineLevelSetVolumeCorrection {
       [11, this.coarse.sampleDirectory],
       [12, this.reductionScratch], [13, this.coarse.publicationControl]],
     "Reduce resident fine overlap partials");
-    run(this.fineFinalizePipeline, [[0, this.source.params], [5, this.control],
-      [6, this.coarseParams], [12, this.reductionScratch]], 1, "Finalize global fine volume");
+    run(this.fineFinalizePipeline, [[0, this.source.params], [2, this.source.worklist],
+      [5, this.control], [6, this.coarseParams], [12, this.reductionScratch],
+      [17, this.residualDispatch], [18, this.correctionDispatch]], 1,
+    "Finalize global fine volume");
     if (!applyCorrection) {
       broker.fence("global fine volume measurement complete");
       return;
     }
-    runFine(this.applyPipeline, [[0, this.source.params], [1, this.source.metadata], [2, this.source.worklist],
-      [3, this.source.samples], [5, this.control]],
-    "Apply bounded global fine normal correction");
-    // The correction pass mutates the published field. Re-reduce that field
-    // before publication so currentVolume describes the same phi consumed by
-    // restriction, rendering, and the next transport step.
-    runFine(this.finePartialPipeline, [[0, this.source.params], [1, this.source.metadata],
-      [2, this.source.worklist], [3, this.source.samples], [6, this.coarseParams],
-      [11, this.coarse.sampleDirectory], [12, this.reductionScratch],
-      [13, this.coarse.publicationControl]],
-    "Re-reduce corrected global fine volume");
-    run(this.correctedFinalizePipeline, [[0, this.source.params], [5, this.control],
-      [6, this.coarseParams], [12, this.reductionScratch]], 1,
-    "Finalize first corrected global fine volume");
-    // A topology/redistance update can require slightly more than the
-    // half-fine-cell bound. Apply one residual bounded shift, matching the
-    // convergence behavior used by the standalone conservation oracle.
-    runFine(this.applyPipeline, [[0, this.source.params], [1, this.source.metadata], [2, this.source.worklist],
-      [3, this.source.samples], [5, this.control]],
-    "Apply residual bounded global fine normal correction");
-    runFine(this.finePartialPipeline, [[0, this.source.params], [1, this.source.metadata],
-      [2, this.source.worklist], [3, this.source.samples], [6, this.coarseParams],
-      [11, this.coarse.sampleDirectory], [12, this.reductionScratch],
-      [13, this.coarse.publicationControl]],
-    "Measure twice-corrected global fine volume");
-    run(this.measuredFinalizePipeline, [[0, this.source.params], [5, this.control],
-      [6, this.coarseParams], [12, this.reductionScratch]], 1,
-    "Finalize measured global fine volume");
+    // An unsaturated offset lies wholly inside the local linear occupancy
+    // model used to derive it. Apply that shift once and publish its target
+    // analytically; only a half-cell-saturated shift pays another owner lookup
+    // to measure the nonlinear/clamped remainder.
+    broker.fence("global fine bounded correction dispatch published");
+    {
+      const pass = broker.compute({ label: "Apply bounded global fine normal correction" });
+      pass.setPipeline(this.applyPipeline); pass.setBindGroup(0, this.groups.get(this.applyPipeline)!);
+      pass.dispatchWorkgroupsIndirect(this.correctionDispatch, 0);
+      pass.setPipeline(this.finePartialPipeline);
+      pass.setBindGroup(0, this.groups.get(this.finePartialPipeline)!);
+      pass.dispatchWorkgroupsIndirect(this.correctionDispatch, 12);
+      pass.setPipeline(this.correctedFinalizePipeline);
+      pass.setBindGroup(0, this.groups.get(this.correctedFinalizePipeline)!);
+      pass.dispatchWorkgroupsIndirect(this.correctionDispatch, 24);
+    }
+    // A topology/redistance update can require more than one half-cell shift.
+    // The corrected finalizer publishes zero indirect work unless its residual
+    // remains saturated at that bound, so the common converged case retires a
+    // complete fine-band owner lookup without a CPU decision.
+    broker.fence("global fine residual correction dispatch published");
+    {
+      const pass = broker.compute({ label: "Apply residual bounded global fine normal correction" });
+      pass.setPipeline(this.applyPipeline); pass.setBindGroup(0, this.groups.get(this.applyPipeline)!);
+      pass.dispatchWorkgroupsIndirect(this.residualDispatch, 0);
+      pass.setPipeline(this.finePartialPipeline);
+      pass.setBindGroup(0, this.groups.get(this.finePartialPipeline)!);
+      pass.dispatchWorkgroupsIndirect(this.residualDispatch, 0);
+      pass.setPipeline(this.measuredFinalizePipeline);
+      pass.setBindGroup(0, this.groups.get(this.measuredFinalizePipeline)!);
+      pass.dispatchWorkgroupsIndirect(this.residualDispatch, 12);
+    }
     broker.fence("global fine volume correction complete");
   }
 
   destroy(): void { if (this.destroyed) return; this.destroyed = true;
-    this.coarseParams.destroy(); this.referenceDeltaParams.destroy(); this.reductionScratch.destroy(); this.fineDispatch.destroy(); this.coarseDispatch.destroy();
+    this.coarseParams.destroy(); this.referenceDeltaParams.destroy(); this.reductionScratch.destroy();
+    this.fineDispatch.destroy(); this.correctionDispatch.destroy(); this.residualDispatch.destroy();
+    this.coarseDispatch.destroy();
     if (this.ownsControl) this.control.destroy(); }
 }
 
@@ -421,6 +447,8 @@ ${fineLevelSetPackedSampleWGSL("samples", true)}
 @group(0)@binding(13)var<storage,read>coarsePublication:array<u32>;
 @group(0)@binding(14)var<storage,read_write>fineDispatch:array<u32>;
 @group(0)@binding(15)var<storage,read_write>coarseDispatch:array<u32>;
+@group(0)@binding(17)var<storage,read_write>residualDispatch:array<u32>;
+@group(0)@binding(18)var<storage,read_write>correctionDispatch:array<u32>;
 var<workgroup> sum0:array<f32,256>;var<workgroup> sum1:array<f32,256>;var<workgroup> sum2:array<f32,256>;
 var<workgroup> words0:array<u32,256>;var<workgroup> words1:array<u32,256>;var<workgroup> words2:array<u32,256>;var<workgroup> words3:array<u32,256>;var<workgroup> words4:array<u32,256>;
 struct CoarseVolumeReduction{volume:f32,rows:u32,errors:u32}
@@ -456,10 +484,10 @@ fn reduceCoarsePartialHierarchy(lid:u32)->CoarseVolumeReduction{let range=balanc
  sum0[l.x]=fineVolume;sum1[l.x]=replaced;sum2[l.x]=area;words0[l.x]=samples;words1[l.x]=errors;words2[l.x]=expectedAir;words3[l.x]=lookupFailure;words4[l.x]=staleOwner;workgroupBarrier();for(var stride=32u;stride>0u;stride/=2u){if(l.x<stride){sum0[l.x]+=sum0[l.x+stride];sum1[l.x]+=sum1[l.x+stride];sum2[l.x]+=sum2[l.x+stride];words0[l.x]+=words0[l.x+stride];words1[l.x]|=words1[l.x+stride];words2[l.x]+=words2[l.x+stride];words3[l.x]+=words3[l.x+stride];words4[l.x]+=words4[l.x+stride];}workgroupBarrier();}
  if(l.x==0u){let base=groupFlat*8u;partials[base]=bitcast<u32>(sum0[0]);partials[base+1u]=bitcast<u32>(sum1[0]);partials[base+2u]=bitcast<u32>(sum2[0]);partials[base+3u]=words0[0];partials[base+4u]=words1[0];partials[base+5u]=words2[0];partials[base+6u]=words3[0];partials[base+7u]=words4[0];}}
 fn reduceFinePartialHierarchy(lid:u32)->FineVolumeReduction{let range=balancedReductionRange(c.p1,lid);var fineVolume=0.;var replacedVolume=0.;var interfaceArea=0.;var samples=0u;var errors=0u;var expectedAir=0u;var lookupFailures=0u;var staleOwners=0u;for(var group=range.x;group<range.y;group+=1u){let base=group*8u;fineVolume+=bitcast<f32>(partials[base]);replacedVolume+=bitcast<f32>(partials[base+1u]);interfaceArea+=bitcast<f32>(partials[base+2u]);samples+=partials[base+3u];errors|=partials[base+4u];expectedAir+=partials[base+5u];lookupFailures+=partials[base+6u];staleOwners+=partials[base+7u];}sum0[lid]=fineVolume;sum1[lid]=replacedVolume;sum2[lid]=interfaceArea;words0[lid]=samples;words1[lid]=errors;words2[lid]=expectedAir;words3[lid]=lookupFailures;words4[lid]=staleOwners;workgroupBarrier();for(var stride=128u;stride>0u;stride/=2u){if(lid<stride){sum0[lid]+=sum0[lid+stride];sum1[lid]+=sum1[lid+stride];sum2[lid]+=sum2[lid+stride];words0[lid]+=words0[lid+stride];words1[lid]|=words1[lid+stride];words2[lid]+=words2[lid+stride];words3[lid]+=words3[lid+stride];words4[lid]+=words4[lid+stride];}workgroupBarrier();}return FineVolumeReduction(sum0[0],sum1[0],sum2[0],words0[0],words1[0],words2[0],words3[0],words4[0]);}
-@compute @workgroup_size(256)fn finalizeFineVolume(@builtin(local_invocation_index)lid:u32){let result=reduceFinePartialHierarchy(lid);if(lid!=0u){return;}control.fineVolume=result.fineVolume;control.replacedCoarseVolume=result.replacedVolume;control.interfaceArea=result.interfaceArea;control.samples=result.samples;control.flags|=result.errors;control.expectedAir=result.expectedAir;control.lookupFailures=result.lookupFailures;control.staleOwners=result.staleOwners;control.currentVolume=control.coarseVolume+result.fineVolume-result.replacedVolume;control.generation=p.generation;if(!finite(control.coarseVolume)||!finite(result.fineVolume)||!finite(result.replacedVolume)||!finite(control.currentVolume)||!finite(result.interfaceArea)){control.flags|=ERROR_FINE;}if(result.samples>0u&&(result.fineVolume<=0.0||result.interfaceArea<=0.0||control.currentVolume<=0.0)){control.flags|=ERROR_FINE;}if(control.initialized==0u&&control.flags==0u&&control.coarseRows>0u){control.referenceVolume=control.currentVolume;control.initialized=1u;}if(control.initialized!=0u&&control.flags==0u&&result.interfaceArea>0.){control.correction=clamp((control.currentVolume-control.referenceVolume)/result.interfaceArea,-.5*p.fineCellWidth,.5*p.fineCellWidth);}if(control.initialized!=0u&&control.flags==0u){control.flags=PUBLISHED;}}
+@compute @workgroup_size(256)fn finalizeFineVolume(@builtin(local_invocation_index)lid:u32){let result=reduceFinePartialHierarchy(lid);if(lid!=0u){return;}control.fineVolume=result.fineVolume;control.replacedCoarseVolume=result.replacedVolume;control.interfaceArea=result.interfaceArea;control.samples=result.samples;control.flags|=result.errors;control.expectedAir=result.expectedAir;control.lookupFailures=result.lookupFailures;control.staleOwners=result.staleOwners;control.currentVolume=control.coarseVolume+result.fineVolume-result.replacedVolume;control.generation=p.generation;if(!finite(control.coarseVolume)||!finite(result.fineVolume)||!finite(result.replacedVolume)||!finite(control.currentVolume)||!finite(result.interfaceArea)){control.flags|=ERROR_FINE;}if(result.samples>0u&&(result.fineVolume<=0.0||result.interfaceArea<=0.0||control.currentVolume<=0.0)){control.flags|=ERROR_FINE;}if(control.initialized==0u&&control.flags==0u&&control.coarseRows>0u){control.referenceVolume=control.currentVolume;control.initialized=1u;}if(control.initialized!=0u&&control.flags==0u&&result.interfaceArea>0.){control.correction=clamp((control.currentVolume-control.referenceVolume)/result.interfaceArea,-.5*p.fineCellWidth,.5*p.fineCellWidth);}if(control.initialized!=0u&&control.flags==0u){control.flags=PUBLISHED;}let published=control.flags==PUBLISHED;let saturated=published&&abs(control.correction)>=.5*p.fineCellWidth;let apply=published&&control.correction!=0.;let sampleCount=min(worklist[1],p.pageCapacity)*p.samplesPerBrick;let groups=(sampleCount+63u)/64u;let applyX=select(0u,min(groups,c.p2),apply);correctionDispatch[0]=applyX;correctionDispatch[1]=select(1u,(groups+applyX-1u)/applyX,applyX>0u);correctionDispatch[2]=1u;let measureX=select(0u,min(groups,c.p2),saturated);correctionDispatch[3]=measureX;correctionDispatch[4]=select(1u,(groups+measureX-1u)/measureX,measureX>0u);correctionDispatch[5]=1u;correctionDispatch[6]=select(0u,1u,saturated);correctionDispatch[7]=1u;correctionDispatch[8]=1u;residualDispatch[0]=0u;residualDispatch[1]=1u;residualDispatch[2]=1u;residualDispatch[3]=0u;residualDispatch[4]=1u;residualDispatch[5]=1u;if(published&&!saturated){control.currentVolume=control.referenceVolume;control.corrected=1u;}}
 @compute @workgroup_size(64)fn applyFineVolumeCorrection(@builtin(workgroup_id)w:vec3u,@builtin(local_invocation_index)lid:u32,@builtin(num_workgroups)n:vec3u){if(control.flags!=PUBLISHED){return;}let flat=fineLinearWorkgroup(w,n)*64u+lid;if(flat==0u){control.corrected=1u;}let a=activeSample(flat);if(a.x==INVALID){return;}let index=a.x*p.samplesPerBrick+a.y;if((finePackedFlags(index)&VALID)==0u){return;}fineWritePackedPhi(index,finePackedPhi(index)+control.correction);}
 fn finalizeCorrectedMeasurement(updateCorrection:bool,lid:u32){let result=reduceFinePartialHierarchy(lid);if(lid!=0u||control.flags!=PUBLISHED){return;}control.fineVolume=result.fineVolume;control.replacedCoarseVolume=result.replacedVolume;control.interfaceArea=result.interfaceArea;control.samples=result.samples;control.expectedAir=result.expectedAir;control.lookupFailures=result.lookupFailures;control.staleOwners=result.staleOwners;control.currentVolume=control.coarseVolume+result.fineVolume-result.replacedVolume;control.generation=p.generation;if(result.errors!=0u||result.lookupFailures!=0u||result.staleOwners!=0u||!finite(result.fineVolume)||!finite(result.replacedVolume)||!finite(result.interfaceArea)||!finite(control.currentVolume)||control.currentVolume<=0.0){control.flags=result.errors|ERROR_FINE;}else{if(updateCorrection&&result.interfaceArea>0.){control.correction=clamp((control.currentVolume-control.referenceVolume)/result.interfaceArea,-.5*p.fineCellWidth,.5*p.fineCellWidth);}control.flags=PUBLISHED;control.corrected=1u;}}
-@compute @workgroup_size(256)fn finalizeCorrectedFineVolume(@builtin(local_invocation_index)lid:u32){finalizeCorrectedMeasurement(true,lid);}
+@compute @workgroup_size(256)fn finalizeCorrectedFineVolume(@builtin(local_invocation_index)lid:u32){finalizeCorrectedMeasurement(true,lid);if(lid==0u){let saturated=control.flags==PUBLISHED&&abs(control.correction)>=.5*p.fineCellWidth;let samples=min(worklist[1],p.pageCapacity)*p.samplesPerBrick;let groups=(samples+63u)/64u;let x=select(0u,min(groups,c.p2),saturated);residualDispatch[0]=x;residualDispatch[1]=select(1u,(groups+x-1u)/x,x>0u);residualDispatch[2]=1u;residualDispatch[3]=select(0u,1u,saturated);residualDispatch[4]=1u;residualDispatch[5]=1u;}}
 @compute @workgroup_size(256)fn finalizeMeasuredFineVolume(@builtin(local_invocation_index)lid:u32){finalizeCorrectedMeasurement(false,lid);}
 `;
 

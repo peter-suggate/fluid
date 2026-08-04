@@ -75,7 +75,10 @@ test("fine volume classifies compact-air overlap only through the authoritative 
     "the conservative controller must use the same compact-field Heaviside width as the published-field QA");
   assert.match(shader,
     /@compute@workgroup_size\(256\)fnfinalizeMeasuredFineVolume\(@builtin\(local_invocation_index\)lid:u32\)\{finalizeCorrectedMeasurement\(false,lid\);\}/,
-    "publication telemetry must be remeasured after both bounded correction passes");
+    "saturated correction telemetry retains the measured fallback");
+  assert.match(shader,
+    /letsaturated=published&&abs\(control\.correction\)>=\.5\*p\.fineCellWidth[\s\S]*correctionDispatch\[3\]=measureX[\s\S]*if\(published&&!saturated\)\{control\.currentVolume=control\.referenceVolume;control\.corrected=1u;\}/,
+    "an unsaturated linear correction must retire both full-band remeasurement rounds on the GPU");
   assert.match(shader,
     /fnbalancedReductionRange\(count:u32,lid:u32\)->vec2u\{letwidth=count\/256u;letremainder=count%256u;letbegin=lid\*width\+min\(lid,remainder\)/,
     "final reductions must partition the partial arena into deterministic contiguous lane ranges");
@@ -87,6 +90,12 @@ test("fine volume classifies compact-air overlap only through the authoritative 
   }).encodePasses.toString().replace(/\s+/g, "");
   assert.match(encodePasses, /dispatchWorkgroupsIndirect\(this\.fineDispatch,0\)/,
     "fine reductions and correction sweeps must consume GPU-authored active dispatch arguments");
+  assert.match(encodePasses,
+    /dispatchWorkgroupsIndirect\(this\.correctionDispatch,0\)[\s\S]*dispatchWorkgroupsIndirect\(this\.correctionDispatch,12\)[\s\S]*dispatchWorkgroupsIndirect\(this\.correctionDispatch,24\)/,
+    "the initial correction and its measured fallback must be independently GPU-retirable");
+  assert.match(encodePasses,
+    /dispatchWorkgroupsIndirect\(this\.residualDispatch,0\)[\s\S]*dispatchWorkgroupsIndirect\(this\.residualDispatch,12\)/,
+    "only a still-saturated first correction may execute the residual round");
   assert.match(encodePasses, /dispatchWorkgroupsIndirect\(this\.coarseDispatch,0\)/,
     "coarse reduction must consume the exact accepted compact-row dispatch rather than its capacity bound");
   assert.match(shader,

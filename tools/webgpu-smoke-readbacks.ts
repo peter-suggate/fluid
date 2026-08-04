@@ -1067,7 +1067,7 @@ export async function smokeRenderHybridPresentation(
       const encoded = pipeline.encode(
         encoder, output.createView(), solver.info.nx, solver.info.ny, solver.info.nz,
         solver.info.gridKind === "restricted-tall-cell", solver.info.maximumNeighborDelta ?? 0,
-        revision
+        revision, undefined, undefined, undefined, verifyGlobalFineAuthorityTransition,
       );
       if (!encoded) throw new Error("Hybrid presentation pipeline did not encode a frame");
       const interfaceCapture = pipeline.diagnosticCaptureTexture("interface-positions");
@@ -1562,9 +1562,11 @@ export async function readCompactOctreeVelocityField3D(
         const found = faces.get(key(axis | (logSpan << 2), origin[0]!, origin[1]!, origin[2]!));
         if (found !== undefined) return found;
       }
-      // Closed normal walls are valid zero-velocity faces even when the
-      // compact W7 directory does not materialize a record for them.
-      return q[axis] === 0 || q[axis] === dimensions[axis] ? 0 : undefined;
+      // The compact W7 authority materializes live wet/extension support, not
+      // the quiescent air complement. Reconstruct an omitted QA face as the
+      // represented zero value; production consumers still fail closed when a
+      // demanded wet/transport face is absent.
+      return 0;
     };
     const field = new Float32Array(3 * nx * ny * nz);
     field.fill(Number.NaN);
@@ -1660,20 +1662,50 @@ export async function readCompactOctreePressureState3D(
     if (control[3] !== 1 || rowCount === 0 || rowCount * 48 > headerBuffer.size
       || rowCount * 4 > pressureBuffer.size || rowCount * 4 > debug.rightHandSide.size
       || rowCount * 4 > debug.diagonal.size) return undefined;
-    const [headerBytes, pressureBytes, rhsBytes, diagonalBytes] = await Promise.all([
+    const stageBuffers = (solver as GPUSolverInstance & { workAccountingBuffers?: {
+      symmetryInitialResidual?: GPUBufferBinding;
+      symmetryInitialPreconditioned?: GPUBufferBinding;
+      symmetryInitialPreconditionedImage?: GPUBufferBinding;
+      symmetryPreconditionerPreSmoothed?: GPUBufferBinding;
+      symmetryPreconditionerZeroSmoothed?: GPUBufferBinding;
+      symmetryPreconditionerFirstOperatorImage?: GPUBufferBinding;
+      symmetryPreconditionerFirstSmoothed?: GPUBufferBinding;
+      symmetryPreconditionerInnerResidual?: GPUBufferBinding;
+      symmetryPreconditionerInnerCorrection?: GPUBufferBinding;
+      symmetryPreconditionerPostCorrected?: GPUBufferBinding;
+    } }).workAccountingBuffers;
+    const stageBindings = [stageBuffers?.symmetryInitialResidual,
+      stageBuffers?.symmetryInitialPreconditioned,
+      stageBuffers?.symmetryInitialPreconditionedImage,
+      stageBuffers?.symmetryPreconditionerPreSmoothed,
+      stageBuffers?.symmetryPreconditionerZeroSmoothed,
+      stageBuffers?.symmetryPreconditionerFirstOperatorImage,
+      stageBuffers?.symmetryPreconditionerFirstSmoothed,
+      stageBuffers?.symmetryPreconditionerInnerResidual,
+      stageBuffers?.symmetryPreconditionerInnerCorrection,
+      stageBuffers?.symmetryPreconditionerPostCorrected] as const;
+    const [headerBytes, pressureBytes, rhsBytes, diagonalBytes, ...stageBytes] = await Promise.all([
       readBufferBinding(device, { buffer: headerBuffer }, rowCount * 48),
       readBufferBinding(device, { buffer: pressureBuffer }, rowCount * 4),
       readBufferBinding(device, { buffer: debug.rightHandSide }, rowCount * 4),
       readBufferBinding(device, { buffer: debug.diagonal }, rowCount * 4),
+      ...stageBindings.map((binding) => binding
+        ? readBufferBinding(device, binding, rowCount * 4) : undefined),
     ]);
     const headers = new Uint32Array(headerBytes.buffer, headerBytes.byteOffset, rowCount * 12);
     const rows = new Float32Array(pressureBytes.buffer, pressureBytes.byteOffset, rowCount);
     const rhsRows = new Float32Array(rhsBytes.buffer, rhsBytes.byteOffset, rowCount);
     const diagonalRows = new Float32Array(diagonalBytes.buffer, diagonalBytes.byteOffset, rowCount);
+    const stageRows = stageBytes.map((bytes) => bytes
+      ? new Float32Array(bytes.buffer, bytes.byteOffset, rowCount) : undefined);
     const [nx, ny, nz] = dimensions, cellCount = nx * ny * nz;
     const pressure = new Float32Array(cellCount), rhs = new Float32Array(cellCount);
     const diagonal = new Float32Array(cellCount), topology = new Uint32Array(cellCount);
     pressure.fill(Number.NaN); rhs.fill(Number.NaN); diagonal.fill(Number.NaN);
+    const stageFields = stageRows.map((rows) => {
+      if (!rows) return undefined;
+      const field = new Float32Array(cellCount); field.fill(Number.NaN); return field;
+    });
     const owners = new Int32Array(cellCount); owners.fill(-1);
     let coveredCells = 0, overlapCells = 0, invalidRows = 0;
     for (let row = 0; row < rowCount; row += 1) {
@@ -1695,12 +1727,33 @@ export async function readCompactOctreePressureState3D(
               rhs[index] = Number.NaN; diagonal[index] = Number.NaN; topology[index] = 0; continue; }
             owners[index] = row; coveredCells += 1; topology[index] = size;
             if (valid) { pressure[index] = rows[row]!; rhs[index] = rhsRows[row]!;
-              diagonal[index] = diagonalRows[row]!; }
+              diagonal[index] = diagonalRows[row]!;
+              for (let stage = 0; stage < stageFields.length; stage += 1) {
+                if (stageFields[stage] && stageRows[stage]) {
+                  stageFields[stage]![index] = stageRows[stage]![row]!;
+                }
+              }
+            }
           }
         }
       }
     }
+    const [initialResidual, initialPreconditioned, initialPreconditionedImage,
+      preconditionerPreSmoothed, preconditionerZeroSmoothed,
+      preconditionerFirstOperatorImage, preconditionerFirstSmoothed,
+      preconditionerInnerResidual, preconditionerInnerCorrection,
+      preconditionerPostCorrected] = stageFields;
     return { pressure, rhs, diagonal, topology, coveredCells, overlapCells, invalidRows, rowCount,
+      ...(initialResidual ? { initialResidual } : {}),
+      ...(initialPreconditioned ? { initialPreconditioned } : {}),
+      ...(initialPreconditionedImage ? { initialPreconditionedImage } : {}),
+      ...(preconditionerPreSmoothed ? { preconditionerPreSmoothed } : {}),
+      ...(preconditionerZeroSmoothed ? { preconditionerZeroSmoothed } : {}),
+      ...(preconditionerFirstOperatorImage ? { preconditionerFirstOperatorImage } : {}),
+      ...(preconditionerFirstSmoothed ? { preconditionerFirstSmoothed } : {}),
+      ...(preconditionerInnerResidual ? { preconditionerInnerResidual } : {}),
+      ...(preconditionerInnerCorrection ? { preconditionerInnerCorrection } : {}),
+      ...(preconditionerPostCorrected ? { preconditionerPostCorrected } : {}),
       publicationValid: control[3] === 1 && (control[4] ?? 0) === 0
         && coveredCells === cellCount && overlapCells === 0 && invalidRows === 0 };
   }

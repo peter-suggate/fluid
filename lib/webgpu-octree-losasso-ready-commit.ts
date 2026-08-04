@@ -33,11 +33,15 @@ struct P{capacity:u32,pad:vec3u}
   &&frontier[6u]==1u&&frontier[8u]==generation&&frontier[9u]==0u
   &&count<=p.capacity&&authority[0]==generation&&authority[1]==count
   &&authority[3]==1u&&authority[4]==0u;
- dispatch[0]=select(0u,(count+63u)/64u,valid);dispatch[1]=1u;dispatch[2]=1u;
+ let reuse=valid&&authority[5u]==1u;
+ let groups=(count+63u)/64u;let width=min(groups,65535u);let safeWidth=max(1u,width);
+ dispatch[0]=select(0u,width,valid&&!reuse);
+ dispatch[1]=select(1u,(groups+safeWidth-1u)/safeWidth,valid&&!reuse);dispatch[2]=1u;
  if(!valid){authority[3]=0u;authority[4]|=4u;}
 }
-@compute @workgroup_size(64)fn commitLosassoReadyRows(@builtin(global_invocation_id)g:vec3u){
- let row=g.x;if(authority[3]!=1u||row>=authority[1]||row>=p.capacity){return;}
+@compute @workgroup_size(64)fn commitLosassoReadyRows(@builtin(global_invocation_id)g:vec3u,
+ @builtin(num_workgroups)n:vec3u){
+ let row=g.x+g.y*n.x*64u;if(authority[3]!=1u||row>=authority[1]||row>=p.capacity){return;}
  let wordBase=12u*row;for(var word=0u;word<12u;word+=1u){acceptedHeaders[wordBase+word]=candidateHeaders[wordBase+word];}
  let pressure=candidatePressure[row];pressureA[row]=pressure;pressureB[row]=pressure;
  if(row==0u){acceptedRows[0]=authority[1];}

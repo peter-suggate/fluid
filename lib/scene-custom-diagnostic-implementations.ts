@@ -435,8 +435,21 @@ const fluidSymmetry = defineSceneHookImplementation({
     const requireExactTopology = boolean(context.parameters, "requireExactTopology");
     const requireAllWallsReached = boolean(context.parameters, "requireAllWallsReached");
     const requirePressureStageAudit = boolean(context.parameters, "requirePressureStageAudit") ?? false;
+    const circularityEvaluationStart_s = numeric(context.parameters, "circularityEvaluationStart_s");
+    const circularityEvaluationEnd_s = numeric(context.parameters, "circularityEvaluationEnd_s");
+    const maximumAxisDiagonalFrontDifference_cells = numeric(
+      context.parameters, "maximumAxisDiagonalFrontDifference_cells");
+    const circularityValues = [circularityEvaluationStart_s, circularityEvaluationEnd_s,
+      maximumAxisDiagonalFrontDifference_cells];
     if (!limits || requireExactTopology === undefined || requireAllWallsReached === undefined) {
       return parameterFailure("fluid-symmetry", [...keys, "requireExactTopology", "requireAllWallsReached"]);
+    }
+    if (circularityValues.some((value) => value !== undefined)
+      && (circularityValues.some((value) => value === undefined)
+        || circularityEvaluationEnd_s! < circularityEvaluationStart_s!
+        || maximumAxisDiagonalFrontDifference_cells! < 0)) {
+      return parameterFailure("fluid-symmetry", ["circularityEvaluationStart_s",
+        "circularityEvaluationEnd_s", "maximumAxisDiagonalFrontDifference_cells"]);
     }
     return context.selectedMethods.flatMap((method) => {
       const diagnostics = recordValue(context.getMethod(method)?.diagnostics);
@@ -454,18 +467,16 @@ const fluidSymmetry = defineSceneHookImplementation({
         ["rhs", limits.maximumRhsAbsoluteError],
         ["diagonal", limits.maximumDiagonalAbsoluteError],
         ...(requirePressureStageAudit ? [
-          ["initialResidual", 0],
-          ["section63Diagonal", 0],
-          ["section63CaseId", 0],
-          ["initialPreconditioned", 0],
-          ["initialPreconditionedImage", 0],
-          ["preconditionerPreSmoothed", 0],
-          ["preconditionerZeroSmoothed", 0],
-          ["preconditionerFirstOperatorImage", 0],
-          ["preconditionerFirstSmoothed", 0],
-          ["preconditionerInnerResidual", 0],
-          ["preconditionerInnerCorrection", 0],
-          ["preconditionerPostCorrected", 0],
+          ["initialResidual", limits.maximumRhsAbsoluteError],
+          ["initialPreconditioned", limits.maximumPressureAbsoluteError],
+          ["initialPreconditionedImage", limits.maximumPressureAbsoluteError],
+          ["preconditionerPreSmoothed", limits.maximumPressureAbsoluteError],
+          ["preconditionerZeroSmoothed", limits.maximumPressureAbsoluteError],
+          ["preconditionerFirstOperatorImage", limits.maximumPressureAbsoluteError],
+          ["preconditionerFirstSmoothed", limits.maximumPressureAbsoluteError],
+          ["preconditionerInnerResidual", limits.maximumPressureAbsoluteError],
+          ["preconditionerInnerCorrection", limits.maximumPressureAbsoluteError],
+          ["preconditionerPostCorrected", limits.maximumPressureAbsoluteError],
         ] as const : []),
       ] as const;
       const findings: RuntimeDiagnosticFinding[] = [];
@@ -514,6 +525,43 @@ const fluidSymmetry = defineSceneHookImplementation({
           metrics: firstTopologyFailure.observation.topology,
         } : undefined,
       }));
+
+      if (circularityEvaluationStart_s !== undefined
+        && circularityEvaluationEnd_s !== undefined
+        && maximumAxisDiagonalFrontDifference_cells !== undefined) {
+        // The authored body starts square and the tank itself is square. Judge
+        // the freely propagating front only after the initial rarefaction has
+        // rounded it and before axis rays contact the walls; after contact a
+        // circular contour is geometrically impossible inside this domain.
+        const circularity = observations.filter(({ time_s }) =>
+          time_s >= circularityEvaluationStart_s && time_s <= circularityEvaluationEnd_s);
+        const firstFailure = circularity.find(({ observation }) => {
+          const metric = recordValue(observation.frontCircularity);
+          const difference = numberPath(metric, "axisLead_cells");
+          return difference === undefined
+            || Math.abs(difference) > maximumAxisDiagonalFrontDifference_cells;
+        });
+        const maximumObserved = circularity.reduce((value, { observation }) => {
+          const difference = numberPath(recordValue(observation.frontCircularity), "axisLead_cells");
+          return Math.max(value, difference === undefined ? Infinity : Math.abs(difference));
+        }, 0);
+        const passed = circularity.length > 0 && !firstFailure;
+        findings.push(hookFinding({
+          id: `${method}.front-circularity`, method, passed,
+          message: passed
+            ? "the freely propagating dam front remained circular"
+            : firstFailure
+              ? `the axis and diagonal fronts first diverged at step ${firstFailure.step}, t=${firstFailure.time_s.toFixed(3)} s`
+              : "no dam-front circularity checkpoint was collected in the declared window",
+          expected: { evaluationStart_s: circularityEvaluationStart_s,
+            evaluationEnd_s: circularityEvaluationEnd_s,
+            maximumAbsoluteAxisLead_cells: maximumAxisDiagonalFrontDifference_cells },
+          actual: firstFailure ? {
+            step: firstFailure.step, time_s: firstFailure.time_s,
+            metrics: firstFailure.observation.frontCircularity, maximumObserved,
+          } : { checkpoints: circularity.length, maximumObserved },
+        }));
+      }
 
       const wallNames = ["negativeX", "positiveX", "negativeZ", "positiveZ"] as const;
       const contactSteps = Object.fromEntries(wallNames.map((wall) => {

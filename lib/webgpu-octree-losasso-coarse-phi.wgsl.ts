@@ -9,7 +9,8 @@ const INTERFACE:u32=4u;const FINE_RESTRICTED:u32=8u;const MAGIC:u32=${OCTREE_LOS
 const FACE_SEPARATED:u32=0x20000000u;const FACE_CLOSED_BOUNDARY:u32=0x40000000u;const FACE_ROW_ON_POSITIVE_SIDE:u32=0x80000000u;
 struct Params{brickDimensions:vec3u,brickResolution:u32,sampleDimensions:vec3u,samplesPerBrick:u32,
  domainOrigin:vec3f,fineCellWidth:f32,pageCapacity:u32,generation:u32,worklistCapacity:u32,worklistHeaderWords:u32,
- dimensions:vec3u,maximumLeafSize:u32,cellSize:f32,directoryCapacity:u32,rowCapacity:u32,faceCapacity:u32}
+ dimensions:vec3u,maximumLeafSize:u32,cellSize:f32,directoryCapacity:u32,rowCapacity:u32,faceCapacity:u32,
+ schedule:vec4u}
 struct LeafHeader{cell:u32,entryStart:u32,entryCount:u32,size:u32,diagonal:f32,rhs:f32,pad0:u32,pad1:u32,gradient:vec4f}
 struct Face{negativeRow:u32,positiveRow:u32,axis:u32,reserved:u32,area:f32,inverseDistance:f32,openFraction:f32,normalVelocity:f32}
 @group(0)@binding(0)var<uniform>p:Params;
@@ -23,6 +24,8 @@ struct Face{negativeRow:u32,positiveRow:u32,axis:u32,reserved:u32,area:f32,inver
 @group(0)@binding(8)var<storage,read_write>arena:array<atomic<u32>>;
 @group(0)@binding(9)var<storage,read_write>rowPhi:array<vec4u>;
 @group(0)@binding(10)var<storage,read_write>ghosts:array<vec4u>;
+@group(0)@binding(14)var<storage,read_write>publishedArena:array<atomic<u32>>;
+@group(0)@binding(16)var<storage,read_write>readyDispatch:array<u32>;
 fn finite(v:f32)->bool{return v==v&&abs(v)<3.402823e38;}
 ${fineLevelSetPackedSampleWGSL("samples")}
 ${makeFineLevelSetSortedWorklistLookupWGSL("p", "metadata", "worklist", "losassoCoarseFineBrick")}
@@ -63,9 +66,30 @@ fn finePhi(positionCells:vec3f)->FinePhi{let grid=positionCells*(p.cellSize/p.fi
 fn directoryHash(cell:u32,size:u32)->u32{return ((cell*0x9e3779b1u)^size)*0x85ebca6bu;}
 fn entryBase(row:u32)->u32{return atomicLoad(&arena[9])+8u*row;}
 fn directoryBase(slot:u32)->u32{return atomicLoad(&arena[10])+4u*slot;}
+fn exactTopologyReuse()->bool{return p.schedule.x==0u&&arrayLength(&coarseControl)>5u&&coarseControl[5]==1u;}
+fn targetLoad(index:u32,usePublished:bool)->u32{
+ if(usePublished){return atomicLoad(&publishedArena[index]);}return atomicLoad(&arena[index]);}
+fn targetStore(index:u32,value:u32,usePublished:bool){
+ if(usePublished){atomicStore(&publishedArena[index],value);}else{atomicStore(&arena[index],value);}}
+fn targetOr(index:u32,value:u32,usePublished:bool){
+ if(usePublished){atomicOr(&publishedArena[index],value);}else{atomicOr(&arena[index],value);}}
 
 @compute @workgroup_size(256)
 fn prepareLosassoCoarsePhi(@builtin(local_invocation_index)lane:u32){
+ let reuse=exactTopologyReuse();
+ if(lane==0u){readyDispatch[0]=select(p.schedule.y,0u,reuse);readyDispatch[1]=1u;readyDispatch[2]=1u;
+  readyDispatch[3]=select(p.schedule.z,0u,reuse);readyDispatch[4]=1u;readyDispatch[5]=1u;}
+ if(reuse){if(lane==0u){let valid=atomicLoad(&publishedArena[0])==MAGIC
+   &&atomicLoad(&publishedArena[2])==rows()&&atomicLoad(&publishedArena[3])==faceCount()
+   &&atomicLoad(&publishedArena[4])==p.maximumLeafSize
+   &&atomicLoad(&publishedArena[5])==p.dimensions.x&&atomicLoad(&publishedArena[6])==p.dimensions.y
+   &&atomicLoad(&publishedArena[7])==p.dimensions.z
+   &&atomicLoad(&publishedArena[8])==bitcast<u32>(p.cellSize)
+   &&atomicLoad(&publishedArena[11])==p.directoryCapacity;
+   atomicStore(&publishedArena[0],0u);atomicStore(&publishedArena[1],coarseControl[0]);
+   atomicStore(&publishedArena[13],select(16u,0u,valid));
+   atomicStore(&publishedArena[12],p.generation);atomicStore(&publishedArena[14],p.generation);}
+  return;}
  if(lane<20u){atomicStore(&arena[lane],0u);}workgroupBarrier();
  if(lane==0u){atomicStore(&arena[1],coarseControl[0]);atomicStore(&arena[2],rows());atomicStore(&arena[3],faceCount());
   atomicStore(&arena[4],p.maximumLeafSize);atomicStore(&arena[5],p.dimensions.x);atomicStore(&arena[6],p.dimensions.y);
@@ -79,12 +103,25 @@ fn prepareLosassoCoarsePhi(@builtin(local_invocation_index)lane:u32){
   for(var word=0u;word<4u;word+=1u){atomicStore(&arena[base+4u*slot+word],0u);}}
 }
 
-@compute @workgroup_size(64)
-fn restrictLosassoCoarsePhi(@builtin(global_invocation_id)invocation:vec3u){let row=invocation.x;if(row>=rows()){return;}
+@compute @workgroup_size(1)
+fn prepareLosassoCoarsePhiRefresh(){let valid=atomicLoad(&arena[0])==MAGIC
+ &&atomicLoad(&arena[1])==coarseControl[0]&&atomicLoad(&arena[2])==rows()
+ &&atomicLoad(&arena[3])==faceCount()&&atomicLoad(&arena[4])==p.maximumLeafSize
+ &&atomicLoad(&arena[5])==p.dimensions.x&&atomicLoad(&arena[6])==p.dimensions.y
+ &&atomicLoad(&arena[7])==p.dimensions.z&&atomicLoad(&arena[8])==bitcast<u32>(p.cellSize)
+ &&atomicLoad(&arena[11])==p.directoryCapacity;
+ atomicStore(&arena[0],0u);atomicStore(&arena[13],select(16u,0u,valid));
+ atomicStore(&arena[12],p.generation);atomicStore(&arena[14],p.generation);}
+
+fn restrictLosassoCoarsePhiRow(row:u32,rebuildDirectory:bool,usePublished:bool){if(row>=rows()){return;}
  let header=headers[row];let origin=originOf(header);let centre=vec3f(origin)+vec3f(.5*f32(header.size));
  let centreFine=finePhi(centre);let seed=rowPhi[row];var centrePhi=bitcast<f32>(seed.x);
  var minimum=bitcast<f32>(seed.y);var maximum=bitcast<f32>(seed.z);var flags=VALID|FINITE;
- if(header.size==0u||header.size>p.maximumLeafSize){rowPhi[row]=vec4u(0u);atomicOr(&arena[13],2u);return;}
+ if(header.size==0u||header.size>p.maximumLeafSize){rowPhi[row]=vec4u(0u);targetOr(13u,2u,usePublished);return;}
+ let entry=20u+8u*row;
+ if(!rebuildDirectory&&(targetLoad(entry,usePublished)!=header.cell+1u
+   ||targetLoad(entry+1u,usePublished)!=header.size
+   ||targetLoad(entry+6u,usePublished)!=row)){rowPhi[row]=vec4u(0u);targetOr(13u,16u,usePublished);return;}
  if(centreFine.valid!=0u){centrePhi=centreFine.value;minimum=centrePhi;maximum=centrePhi;var complete=1u;
   for(var corner=0u;corner<8u;corner+=1u){let offset=vec3u(corner&1u,(corner>>1u)&1u,(corner>>2u)&1u);
    let point=vec3f(origin+offset*header.size);let sample=finePhi(point);
@@ -92,30 +129,44 @@ fn restrictLosassoCoarsePhi(@builtin(global_invocation_id)invocation:vec3u){let 
   if(complete!=0u){flags|=FINE_RESTRICTED;}else{let extent=.5*f32(header.size)*p.cellSize;minimum=centrePhi-extent;maximum=centrePhi+extent;}
  }
  if(minimum<=0.&&maximum>=0.){flags|=INTERFACE;}rowPhi[row]=vec4u(bitcast<u32>(centrePhi),bitcast<u32>(minimum),bitcast<u32>(maximum),flags);
- let entry=20u+8u*row;atomicStore(&arena[entry],header.cell+1u);atomicStore(&arena[entry+1u],header.size);
- atomicStore(&arena[entry+2u],bitcast<u32>(centrePhi));atomicStore(&arena[entry+3u],bitcast<u32>(minimum));
- atomicStore(&arena[entry+4u],bitcast<u32>(maximum));atomicStore(&arena[entry+5u],flags);
- atomicStore(&arena[entry+6u],row);atomicStore(&arena[entry+7u],bitcast<u32>(f32(header.size*header.size*header.size)*p.cellSize*p.cellSize*p.cellSize));
- let hash=directoryHash(header.cell,header.size);let mask=p.directoryCapacity-1u;var installed=false;
+ targetStore(entry,header.cell+1u,usePublished);targetStore(entry+1u,header.size,usePublished);
+ targetStore(entry+2u,bitcast<u32>(centrePhi),usePublished);targetStore(entry+3u,bitcast<u32>(minimum),usePublished);
+ targetStore(entry+4u,bitcast<u32>(maximum),usePublished);targetStore(entry+5u,flags,usePublished);
+ targetStore(entry+6u,row,usePublished);targetStore(entry+7u,bitcast<u32>(f32(header.size*header.size*header.size)*p.cellSize*p.cellSize*p.cellSize),usePublished);
+ if(!rebuildDirectory){return;}let hash=directoryHash(header.cell,header.size);let mask=p.directoryCapacity-1u;var installed=false;
  for(var probe=0u;probe<32u;probe+=1u){let slot=(hash+probe)&mask;let at=20u+8u*p.rowCapacity+4u*slot;
   var claimed=atomicCompareExchangeWeak(&arena[at],0u,header.cell+1u);
   loop{if(claimed.exchanged||claimed.old_value!=0u){break;}claimed=atomicCompareExchangeWeak(&arena[at],0u,header.cell+1u);}
   if(claimed.exchanged){atomicStore(&arena[at+1u],header.size);
    atomicStore(&arena[at+2u],row+1u);atomicStore(&arena[at+3u],hash);installed=true;break;}}
- if(!installed){atomicOr(&arena[13],4u);}}
+ if(!installed){targetOr(13u,4u,usePublished);}}
+
+@compute @workgroup_size(64)
+fn restrictLosassoCoarsePhi(@builtin(global_invocation_id)invocation:vec3u){
+ let reuse=exactTopologyReuse();restrictLosassoCoarsePhiRow(invocation.x,!reuse,reuse);}
+
+@compute @workgroup_size(64)
+fn refreshLosassoCoarsePhi(@builtin(global_invocation_id)invocation:vec3u){
+ restrictLosassoCoarsePhiRow(invocation.x,false,false);}
 
 @compute @workgroup_size(1)
-fn finalizeLosassoCoarsePhi(){if(atomicLoad(&arena[13])==0u){atomicStore(&arena[0],MAGIC);}}
+fn finalizeLosassoCoarsePhi(){let reuse=exactTopologyReuse();if(targetLoad(13u,reuse)==0u){targetStore(0u,MAGIC,reuse);}}
+
+@compute @workgroup_size(64)
+fn publishLosassoCoarsePhiArena(@builtin(global_invocation_id)invocation:vec3u){let word=invocation.x;
+ if(exactTopologyReuse()){return;}
+ if(word<min(arrayLength(&arena),arrayLength(&publishedArena))){atomicStore(&publishedArena[word],atomicLoad(&arena[word]));}}
 
 @compute @workgroup_size(64)
 fn publishLosassoGhostDistances(@builtin(global_invocation_id)invocation:vec3u){let faceId=invocation.x;if(faceId>=faceCount()){return;}
+ let reuse=exactTopologyReuse();
  var face=faces[faceId];var flags=0u;var distance=0.;var theta=1.;var airPhi=0.;
- if(atomicLoad(&arena[0])!=MAGIC){ghosts[faceId]=vec4u(0u,bitcast<u32>(1.),0u,8u);return;}
+ if(targetLoad(0u,reuse)!=MAGIC){ghosts[faceId]=vec4u(0u,bitcast<u32>(1.),0u,8u);return;}
  if(face.positiveRow==INVALID){let geometry=faceGeometry[faceId];let axis=geometry.x&3u;let span=1u<<(geometry.x>>2u);
   let origin=geometry.yzw;let boundary=origin[axis]==0u||origin[axis]==p.dimensions[axis];
-  if(boundary&&(face.reserved&FACE_CLOSED_BOUNDARY)!=0u&&face.negativeRow<atomicLoad(&arena[2])){
-   let entry=atomicLoad(&arena[9])+8u*face.negativeRow;let liquid=bitcast<f32>(atomicLoad(&arena[entry+2u]));
-   let rowSize=atomicLoad(&arena[entry+1u]);let rowFlags=atomicLoad(&arena[entry+5u]);
+  if(boundary&&(face.reserved&FACE_CLOSED_BOUNDARY)!=0u&&face.negativeRow<targetLoad(2u,reuse)){
+   let entry=targetLoad(9u,reuse)+8u*face.negativeRow;let liquid=bitcast<f32>(targetLoad(entry+2u,reuse));
+   let rowSize=targetLoad(entry+1u,reuse);let rowFlags=targetLoad(entry+5u,reuse);
    let towardAir=select(1.,-1.,(face.reserved&FACE_ROW_ON_POSITIVE_SIDE)!=0u);var centroid=vec3f(origin);
    for(var tangent=0u;tangent<3u;tangent+=1u){if(tangent!=axis){centroid[tangent]+=.5*f32(span);}}
    // Fine samples are cell centred. Probe the outermost interior centre; a
@@ -141,8 +192,8 @@ fn publishLosassoGhostDistances(@builtin(global_invocation_id)invocation:vec3u){
    let rowSize=select(1u,headers[face.negativeRow].size,face.negativeRow<rows());
    distance=max(.5*p.fineCellWidth,.5*f32(rowSize)*p.cellSize);face.inverseDistance=1./distance;
    face.openFraction=1.;faces[faceId]=face;flags=1u;
-  }else if(face.negativeRow<atomicLoad(&arena[2])){let entry=atomicLoad(&arena[9])+8u*face.negativeRow;
-   let liquid=bitcast<f32>(atomicLoad(&arena[entry+2u]));let rowSize=atomicLoad(&arena[entry+1u]);let rowFlags=atomicLoad(&arena[entry+5u]);
+  }else if(face.negativeRow<targetLoad(2u,reuse)){let entry=targetLoad(9u,reuse)+8u*face.negativeRow;
+   let liquid=bitcast<f32>(targetLoad(entry+2u,reuse));let rowSize=targetLoad(entry+1u,reuse);let rowFlags=targetLoad(entry+5u,reuse);
    let sign=select(1.,-1.,(face.reserved&0x80000000u)!=0u);var centroid=vec3f(origin);
    for(var tangent=0u;tangent<3u;tangent+=1u){if(tangent!=axis){centroid[tangent]+=.5*f32(span);}}
    // A missing pressure neighbor is staged at the same size as this row, so
@@ -161,7 +212,8 @@ export const octreeLosassoWarmPhiWGSL = /* wgsl */ `
 const MAGIC:u32=${OCTREE_LOSASSO_COARSE_PHI_MAGIC}u;const VALID:u32=1u;const FINITE:u32=2u;
 struct Params{brickDimensions:vec3u,brickResolution:u32,sampleDimensions:vec3u,samplesPerBrick:u32,
  domainOrigin:vec3f,fineCellWidth:f32,pageCapacity:u32,generation:u32,worklistCapacity:u32,worklistHeaderWords:u32,
- dimensions:vec3u,maximumLeafSize:u32,cellSize:f32,directoryCapacity:u32,rowCapacity:u32,faceCapacity:u32}
+ dimensions:vec3u,maximumLeafSize:u32,cellSize:f32,directoryCapacity:u32,rowCapacity:u32,faceCapacity:u32,
+ schedule:vec4u}
 struct LeafHeader{cell:u32,entryStart:u32,entryCount:u32,size:u32,diagonal:f32,rhs:f32,pad0:u32,pad1:u32,gradient:vec4f}
 @group(0)@binding(0)var<uniform>p:Params;@group(0)@binding(4)var<storage,read>headers:array<LeafHeader>;
 @group(0)@binding(5)var<storage,read>coarseControl:array<u32>;@group(0)@binding(9)var<storage,read_write>rowPhi:array<vec4u>;
@@ -169,6 +221,7 @@ struct LeafHeader{cell:u32,entryStart:u32,entryCount:u32,size:u32,diagonal:f32,r
 fn finite(v:f32)->bool{return v==v&&abs(v)<3.402823e38;}
 fn hash(cell:u32,size:u32)->u32{return ((cell*0x9e3779b1u)^size)*0x85ebca6bu;}
 @compute @workgroup_size(64)fn warmLosassoCoarsePhi(@builtin(global_invocation_id)invocation:vec3u){let row=invocation.x;
+ if(arrayLength(&coarseControl)>5u&&coarseControl[5]==1u){return;}
  let count=min(min(coarseControl[1],p.rowCapacity),arrayLength(&headers));if(row>=count){return;}let header=headers[row];
  var value=-.5*f32(header.size)*p.cellSize;var minimum=-f32(header.size)*p.cellSize;var maximum=-1e-4*p.cellSize;
  if(arrayLength(&previousArena)>=20u&&previousArena[0]==MAGIC&&previousArena[4]==p.maximumLeafSize
@@ -185,8 +238,10 @@ export const octreeLosassoVolumeBridgeWGSL = /* wgsl */ `
 const MAGIC:u32=${OCTREE_LOSASSO_COARSE_PHI_MAGIC}u;
 struct Params{brickDimensions:vec3u,brickResolution:u32,sampleDimensions:vec3u,samplesPerBrick:u32,
  domainOrigin:vec3f,fineCellWidth:f32,pageCapacity:u32,generation:u32,worklistCapacity:u32,worklistHeaderWords:u32,
- dimensions:vec3u,maximumLeafSize:u32,cellSize:f32,directoryCapacity:u32,rowCapacity:u32,faceCapacity:u32}
+ dimensions:vec3u,maximumLeafSize:u32,cellSize:f32,directoryCapacity:u32,rowCapacity:u32,faceCapacity:u32,
+ schedule:vec4u}
 @group(0)@binding(0)var<uniform>p:Params;@group(0)@binding(8)var<storage,read>arena:array<u32>;
+@group(0)@binding(5)var<storage,read>coarseControl:array<u32>;
 @group(0)@binding(11)var<storage,read_write>volumeDirectory:array<u32>;
 @group(0)@binding(12)var<storage,read_write>volumePublication:array<u32>;
 @group(0)@binding(13)var<storage,read_write>physicalVolumes:array<f32>;
@@ -194,6 +249,22 @@ struct Params{brickDimensions:vec3u,brickResolution:u32,sampleDimensions:vec3u,s
 @group(0)@binding(15)var<storage,read_write>summaryDelta:array<u32>;
 @compute @workgroup_size(64)
 fn publishLosassoVolumeBridge(@builtin(global_invocation_id)invocation:vec3u){let row=invocation.x;let good=arena[0]==MAGIC;
+ let reuse=p.schedule.x==0u&&arrayLength(&coarseControl)>5u&&coarseControl[5]==1u;
+ if(reuse){let retainedGood=arrayLength(&previousArena)>=20u&&previousArena[0]==MAGIC;
+  let retainedCount=select(0u,min(previousArena[2],p.rowCapacity),retainedGood);
+  if(row==0u){volumeDirectory[0]=select(0u,0x80000000u,retainedGood);
+   volumeDirectory[1]=previousArena[12];volumeDirectory[2]=retainedCount;volumeDirectory[3]=p.maximumLeafSize;
+   volumeDirectory[4]=p.dimensions.x;volumeDirectory[5]=p.dimensions.y;volumeDirectory[6]=p.dimensions.z;
+   volumeDirectory[7]=bitcast<u32>(p.cellSize);volumePublication[0]=0u;volumePublication[2]=retainedCount;
+   volumePublication[10]=previousArena[12];volumePublication[11]=select(0u,0x80000000u,retainedGood);
+   summaryDelta[0]=retainedCount;summaryDelta[1]=previousArena[12];summaryDelta[2]=0u;
+   summaryDelta[3]=select(0u,0x80000000u,retainedGood);}
+  if(row<retainedCount){let sourceBase=previousArena[9]+8u*row;let destination=8u+8u*row;
+   for(var word=0u;word<8u;word+=1u){volumeDirectory[destination+word]=previousArena[sourceBase+word];}
+   volumeDirectory[destination+5u]=9u;physicalVolumes[row]=bitcast<f32>(previousArena[sourceBase+7u]);
+   let record=16u+4u*row;summaryDelta[record]=previousArena[sourceBase];summaryDelta[record+1u]=previousArena[sourceBase+1u];
+   summaryDelta[record+2u]=row;summaryDelta[record+3u]=1u;}
+  return;}
  let count=select(0u,min(arena[2],p.rowCapacity),good);let priorGood=arrayLength(&previousArena)>=20u&&previousArena[0]==MAGIC;
  let priorCount=select(0u,min(previousArena[2],p.rowCapacity),priorGood);if(row==0u){volumeDirectory[0]=select(0u,0x80000000u,good);
   volumeDirectory[1]=arena[12];volumeDirectory[2]=count;volumeDirectory[3]=p.maximumLeafSize;
@@ -210,4 +281,19 @@ fn publishLosassoVolumeBridge(@builtin(global_invocation_id)invocation:vec3u){le
   summaryDelta[record]=select(arena[sourceArenaBase],previousArena[sourceArenaBase],prior);
   summaryDelta[record+1u]=select(arena[sourceArenaBase+1u],previousArena[sourceArenaBase+1u],prior);
   summaryDelta[record+2u]=itemRow;summaryDelta[record+3u]=select(1u,2u,prior);}}
+
+@compute @workgroup_size(64)
+fn refreshLosassoVolumeBridge(@builtin(global_invocation_id)invocation:vec3u){let row=invocation.x;let good=arena[0]==MAGIC;
+ let count=select(0u,min(arena[2],p.rowCapacity),good);if(row==0u){volumeDirectory[0]=select(0u,0x80000000u,good);
+  volumeDirectory[1]=arena[12];volumeDirectory[2]=count;volumeDirectory[3]=p.maximumLeafSize;
+  volumeDirectory[4]=p.dimensions.x;volumeDirectory[5]=p.dimensions.y;volumeDirectory[6]=p.dimensions.z;
+  volumeDirectory[7]=bitcast<u32>(p.cellSize);volumePublication[0]=0u;volumePublication[2]=count;
+  volumePublication[10]=arena[12];volumePublication[11]=select(0u,0x80000000u,good);
+  summaryDelta[0]=count;summaryDelta[1]=arena[12];summaryDelta[2]=0u;
+  summaryDelta[3]=select(0u,0x80000000u,good);}
+ if(row<count){let sourceBase=arena[9]+8u*row;let destination=8u+8u*row;
+  for(var word=0u;word<8u;word+=1u){volumeDirectory[destination+word]=arena[sourceBase+word];}
+  volumeDirectory[destination+5u]=9u;physicalVolumes[row]=bitcast<f32>(arena[sourceBase+7u]);
+  let record=16u+4u*row;summaryDelta[record]=arena[sourceBase];summaryDelta[record+1u]=arena[sourceBase+1u];
+  summaryDelta[record+2u]=row;summaryDelta[record+3u]=1u;}}
 `;

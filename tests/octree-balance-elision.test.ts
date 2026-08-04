@@ -66,6 +66,21 @@ test("host scheduling guards recurring setup and cold/recurring grading dispatch
   );
   assert.match(
     octreeSource,
+    /compaction\[frontierTopologyReuseBase\(\)\] = select\(0u, 1u,[\s\S]*validDelta && totalTiles == 0u\)/,
+    "the GPU structural classifier must retain quiescence across the grading worklist restore",
+  );
+  assert.match(
+    octreeSource,
+    /fn balanceTopologyDelta[\s\S]*if \(topologyStructurallyQuiescent\(\)\) \{ return; \}/,
+    "a quiescent recurring epoch must skip fine grading work without a host branch",
+  );
+  assert.match(
+    octreeSource,
+    /let inBounds = all\(origin < dims\(\)\) && !topologyStructurallyQuiescent\(\);/,
+    "a quiescent recurring epoch must uniformly disable cooperative coarse grading",
+  );
+  assert.match(
+    octreeSource,
     /for \(let round = 0; round < this\.balanceRounds; round \+= 1\) \{[\s\S]*dispatchCandidates\(this\.balancePipeline, this\.balanceDeltaPipeline\);/,
     "the zero round count must suppress both cold full-domain and recurring delta balance dispatches",
   );

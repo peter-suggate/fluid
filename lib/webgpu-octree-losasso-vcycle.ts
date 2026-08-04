@@ -20,12 +20,10 @@ export interface OctreeLosassoVCycleLevelSource {
 export interface OctreeLosassoVCycleTransferSource {
   /** Fine row -> one parent coarse row. */
   readonly fineParents: GPUBuffer;
-  /** Fine-cell voxel volumes; combined with the parent inverse for R and P. */
-  readonly fineVolumes: GPUBuffer;
-  /** Reciprocal child-volume sum; R and P both use Vfine/Vparent, so P=R^T. */
-  readonly coarseInverseVolumes: GPUBuffer;
-  /** Exact signed radix-256 restriction accumulator, one scalar per parent. */
-  readonly restrictionPartials: GPUBuffer;
+  /** Parent -> ascending fine-row child range. */
+  readonly childOffsets: GPUBuffer;
+  /** Fine row IDs grouped by parent and sorted ascending within each range. */
+  readonly childList: GPUBuffer;
   readonly fineRowDispatch: GPUBuffer;
 }
 
@@ -33,6 +31,26 @@ export interface OctreeLosassoVCycleHierarchySource {
   /** Finest first; every level uses the same closed-form axis-face operator. */
   readonly levels: readonly OctreeLosassoVCycleLevelSource[];
   readonly transfers: readonly OctreeLosassoVCycleTransferSource[];
+  /**
+   * Packed, publication-owned view of levels L1..Ln.  Keeping this view current
+   * while hierarchy coefficients are published lets one workgroup execute the
+   * complete sub-L0 cycle without copying geometry on every MGPCG iteration.
+   */
+  readonly fusedSubL0?: {
+    readonly arena: GPUBuffer;
+    readonly rowCapacity: number;
+    readonly faceCapacity: number;
+    readonly transitionStrideWords: number;
+    readonly controlOffsetWords: number;
+    readonly rowOffsetsOffsetWords: number;
+    readonly rowFacesOffsetWords: number;
+    readonly facesOffsetWords: number;
+    readonly parentsOffsetWords: number;
+    readonly childOffsetsOffsetWords: number;
+    readonly childListOffsetWords: number;
+    /** Safe per-level vector bounds derived from dyadic domain cell counts. */
+    readonly levelRowCapacities: readonly number[];
+  };
 }
 
 /**

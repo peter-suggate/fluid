@@ -26,6 +26,15 @@ export interface SymmetryWallState {
   readonly touched: boolean;
 }
 
+export interface HorizontalFrontCircularity {
+  readonly threshold: number;
+  readonly axisRadius_cells: number;
+  readonly diagonalRadius_cells: number;
+  /** Positive means the axis-aligned front leads the diagonal front. */
+  readonly axisLead_cells: number;
+  readonly diagonalToAxisRatio: number;
+}
+
 export interface FluidSymmetryObservation {
   readonly time_s: number;
   readonly grid: readonly [number, number, number];
@@ -49,7 +58,64 @@ export interface FluidSymmetryObservation {
   readonly preconditionerInnerCorrection?: SymmetryFieldMetrics;
   readonly preconditionerPostCorrected?: SymmetryFieldMetrics;
   readonly topology: SymmetryFieldMetrics;
+  /** Bottom-layer half-volume contour sampled along the four axes/diagonals. */
+  readonly frontCircularity: HorizontalFrontCircularity;
   readonly walls: Readonly<Record<"negativeX" | "positiveX" | "negativeZ" | "positiveZ", SymmetryWallState>>;
+}
+
+/**
+ * Measure radial front shape independently of D4 symmetry. A square or
+ * axis-biased field can be exactly D4 while still being far from circular.
+ * Bilinear ray samples avoid making the result depend on whether an interface
+ * happens to cross a cell centre.
+ */
+export function measureHorizontalFrontCircularity(
+  volume: ArrayLike<number>,
+  grid: readonly [number, number, number],
+  threshold = 0.5,
+): HorizontalFrontCircularity {
+  const [nx, ny, nz] = grid;
+  if (!(threshold > 0 && threshold < 1) || nx < 2 || ny < 1 || nz < 2) {
+    throw new RangeError("Horizontal front circularity needs a 2-D grid and threshold in (0,1)");
+  }
+  const cx = 0.5 * (nx - 1), cz = 0.5 * (nz - 1);
+  const alpha = (x: number, z: number): number => {
+    if (x < 0 || x > nx - 1 || z < 0 || z > nz - 1) return 0;
+    const x0 = Math.floor(x), z0 = Math.floor(z);
+    const x1 = Math.min(nx - 1, x0 + 1), z1 = Math.min(nz - 1, z0 + 1);
+    const tx = x - x0, tz = z - z0;
+    const at = (ix: number, iz: number) => Number(volume[ix + nx * ny * iz] ?? 0);
+    return (1 - tz) * ((1 - tx) * at(x0, z0) + tx * at(x1, z0))
+      + tz * ((1 - tx) * at(x0, z1) + tx * at(x1, z1));
+  };
+  const radius = (dx: number, dz: number): number => {
+    const bound = Math.min(
+      dx > 0 ? (nx - 1 - cx) / dx : dx < 0 ? cx / -dx : Infinity,
+      dz > 0 ? (nz - 1 - cz) / dz : dz < 0 ? cz / -dz : Infinity,
+    );
+    const step = 1 / 32;
+    let previousR = 0, previous = alpha(cx, cz), crossing = 0;
+    for (let r = step; r <= bound + 1e-9; r += step) {
+      const value = alpha(cx + r * dx, cz + r * dz);
+      if (previous >= threshold && value < threshold) {
+        const fraction = (previous - threshold) / Math.max(previous - value, 1e-12);
+        crossing = previousR + fraction * (r - previousR);
+      }
+      previousR = r; previous = value;
+    }
+    if (previous >= threshold) crossing = bound;
+    return crossing;
+  };
+  const invSqrt2 = Math.SQRT1_2;
+  const axes = [[1, 0], [-1, 0], [0, 1], [0, -1]] as const;
+  const diagonals = [[invSqrt2, invSqrt2], [invSqrt2, -invSqrt2],
+    [-invSqrt2, invSqrt2], [-invSqrt2, -invSqrt2]] as const;
+  const mean = (directions: readonly (readonly [number, number])[]) =>
+    directions.reduce((sum, [dx, dz]) => sum + radius(dx, dz), 0) / directions.length;
+  const axisRadius_cells = mean(axes), diagonalRadius_cells = mean(diagonals);
+  return Object.freeze({ threshold, axisRadius_cells, diagonalRadius_cells,
+    axisLead_cells: axisRadius_cells - diagonalRadius_cells,
+    diagonalToAxisRatio: axisRadius_cells > 0 ? diagonalRadius_cells / axisRadius_cells : 1 });
 }
 
 export interface FluidSymmetryState {
@@ -180,6 +246,11 @@ function compareVelocityField(
         result.comparedValues += 1;
         if (!expectedFinite || !targetFinite) {
           result.nonFiniteCount += 1;
+          result.first ??= {
+            transform, source: [x, y, z], target,
+            component: componentNames[component], sourceValue, expectedValue,
+            targetValue, absoluteError: Number.POSITIVE_INFINITY,
+          };
           continue;
         }
         const error = Math.abs(targetValue - expectedValue);
@@ -291,6 +362,7 @@ export function measureFluidSymmetry(state: FluidSymmetryState): FluidSymmetryOb
     ...(state.preconditionerPostCorrected
       ? { preconditionerPostCorrected: compareScalarField(state.preconditionerPostCorrected, state.grid) } : {}),
     topology: compareScalarField(state.topology, state.grid),
+    frontCircularity: measureHorizontalFrontCircularity(state.volume, state.grid),
     walls: {
       negativeX: wallState(negativeX, state.wallLiquidThreshold),
       positiveX: wallState(positiveX, state.wallLiquidThreshold),

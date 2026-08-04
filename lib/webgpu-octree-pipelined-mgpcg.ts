@@ -620,7 +620,7 @@ export class WebGPUOctreePipelinedMGPCG {
   readonly iterationBudget: number;
   readonly control: GPUBuffer;
   readonly allocatedBytes: number;
-  readonly encodedPassTransitionCountPerIteration: 2 | 4;
+  readonly encodedPassTransitionCountPerIteration: 0 | 4;
   readonly reductionsPerOuterIteration = 2 as const;
   readonly usesCombinedReductionDrains: boolean;
   /**
@@ -706,7 +706,7 @@ export class WebGPUOctreePipelinedMGPCG {
       );
     }
     this.encodedPassTransitionCountPerIteration =
-      this.usesCombinedReductionDrains ? 2 : 4;
+      this.usesCombinedReductionDrains ? 0 : 4;
     const preconditioner = source.preconditioner;
     if (!preconditioner || preconditioner.operatorOrder !== 1
       || preconditioner.isSymmetricPositiveDefinite !== true
@@ -1056,7 +1056,11 @@ export class WebGPUOctreePipelinedMGPCG {
 
     for (let iteration = 0; iteration < encodedIterationBudget; iteration += 1) {
       pass = broker.compute({ label: `Pipelined MGPCG outer iteration ${iteration}` });
-      this.runIndirect(pass, "advancePCGState", iteration, 0, resources);
+      if (this.usesCombinedReductionDrains) {
+        this.runAcceptedRowsIndirect(pass, "advancePCGState", resources);
+      } else {
+        this.runIndirect(pass, "advancePCGState", iteration, 0, resources);
+      }
       preconditioner.encodeCorrection(broker, {
         rhs: this.source.vectors.residual,
         correction: this.source.vectors.preconditioned,
@@ -1077,9 +1081,15 @@ export class WebGPUOctreePipelinedMGPCG {
         pass = broker.compute({ label: "Pipelined MGPCG merged reduction finish" });
         this.runDirect(pass, "finishMergedReduction", [1, 1, 1], resources);
       }
-      broker.fence("pipelined MGPCG convergence-tail publication");
+      if (!this.usesCombinedReductionDrains) {
+        broker.fence("pipelined MGPCG convergence-tail publication");
+      }
       pass = broker.compute({ label: "Pipelined MGPCG direction update" });
-      this.runIndirect(pass, "updateDirections", iteration, 3, resources);
+      if (this.usesCombinedReductionDrains) {
+        this.runAcceptedRowsIndirect(pass, "updateDirections", resources);
+      } else {
+        this.runIndirect(pass, "updateDirections", iteration, 3, resources);
+      }
       this.source.operator.encode(
         broker, this.source.vectors.direction, this.source.vectors.directionImage,
         this.control,
@@ -1100,7 +1110,9 @@ export class WebGPUOctreePipelinedMGPCG {
         pass = broker.compute({ label: "Pipelined MGPCG direct curvature finish" });
         this.runDirect(pass, "finishDirectionCurvature", [1, 1, 1], resources);
       }
-      broker.fence("pipelined MGPCG direct curvature publication");
+      if (!this.usesCombinedReductionDrains) {
+        broker.fence("pipelined MGPCG direct curvature publication");
+      }
     }
     pass = broker.compute({ label: "Pipelined MGPCG fail-closed publication" });
     this.bind(pass, "finalizeAndPublish", resources);
@@ -1237,6 +1249,22 @@ export class WebGPUOctreePipelinedMGPCG {
     resources: readonly (GPUBuffer | undefined)[],
   ): void {
     this.runOuterIndirect(pass, name, iteration, stage, resources);
+  }
+
+  /** Row kernels already gate on `control.stopped()`. In the cooperative-drain
+   * schedule, route them through the accepted immutable row record so scalar
+   * drains can remain in the same compute pass instead of publishing a mutable
+   * per-iteration indirect tail. */
+  private runAcceptedRowsIndirect(
+    pass: GPUComputePassEncoder,
+    name: "advancePCGState" | "updateDirections",
+    resources: readonly (GPUBuffer | undefined)[],
+  ): void {
+    this.bind(pass, name, resources);
+    pass.dispatchWorkgroupsIndirect(
+      this.source.rowDispatch,
+      this.source.rowDispatchOffsetBytes ?? 0,
+    );
   }
 
   private runOuterIndirect(

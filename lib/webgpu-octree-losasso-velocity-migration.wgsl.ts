@@ -4,20 +4,23 @@ const INVALID:u32=0xffffffffu;const LIMBS:u32=36u;const FACE_SEPARATED:u32=0x200
 struct Params{dimensions:vec3u,maximumLeafSize:u32,faceCapacity:u32,directoryCapacity:u32,reserved0:u32,reserved1:u32}
 struct Face{negativeRow:u32,positiveRow:u32,axis:u32,reserved:u32,area:f32,inverseDistance:f32,openFraction:f32,normalVelocity:f32}
 @group(0)@binding(0)var<uniform>p:Params;
-@group(0)@binding(1)var<storage,read>oldControl:array<u32>;
+@group(0)@binding(1)var<storage,read_write>oldControl:array<u32>;
 @group(0)@binding(2)var<storage,read_write>oldGeometry:array<vec4u>;
 @group(0)@binding(3)var<storage,read>sourceFaces:array<Face>;
-@group(0)@binding(4)var<storage,read>oldDirectory:array<vec2u>;
-@group(0)@binding(5)var<storage,read>oldVelocity:array<f32>;
+@group(0)@binding(4)var<storage,read_write>oldDirectory:array<vec2u>;
+@group(0)@binding(5)var<storage,read_write>oldVelocity:array<f32>;
 @group(0)@binding(6)var<storage,read>newControl:array<u32>;
 @group(0)@binding(7)var<storage,read>newGeometry:array<vec4u>;
 @group(0)@binding(8)var<storage,read_write>newFaces:array<Face>;
 @group(0)@binding(9)var<storage,read_write>newVelocity:array<f32>;
+@group(0)@binding(10)var<storage,read>newDirectory:array<vec2u>;
+@group(0)@binding(11)var<storage,read>sourceVelocity:array<f32>;
 fn finite(v:f32)->bool{return v==v&&abs(v)<=3.402823e38;}
 fn hashFace(packed:u32,q:vec3u)->u32{var value=(packed+1u)*0x9e3779b1u;
  value=(value^q.x)*0x85ebca6bu;value=(value^q.y)*0xc2b2ae35u;return(value^q.z)*0x27d4eb2du;}
-fn exactOld(packed:u32,q:vec3u)->u32{if(p.directoryCapacity==0u||(p.directoryCapacity&(p.directoryCapacity-1u))!=0u){return INVALID;}
- let hash=hashFace(packed,q);let mask=p.directoryCapacity-1u;for(var probe=0u;probe<32u;probe+=1u){
+fn exactOld(packed:u32,q:vec3u)->u32{let capacity=oldControl[6];
+ if(capacity==0u||capacity>p.directoryCapacity||(capacity&(capacity-1u))!=0u){return INVALID;}
+ let hash=hashFace(packed,q);let mask=capacity-1u;for(var probe=0u;probe<32u;probe+=1u){
   let record=oldDirectory[(hash+probe)&mask];if(record.x==0u){return INVALID;}let face=record.x-1u;
   if(record.y==hash&&face<oldControl[2]&&face<arrayLength(&oldGeometry)){
    let geometry=oldGeometry[face];if((geometry.x&~FACE_SEPARATED)==packed&&all(geometry.yzw==q)){return face;}
@@ -45,8 +48,17 @@ fn tangentA(axis:u32)->vec3u{return select(vec3u(1,0,0),vec3u(0,1,0),axis==0u);}
 fn tangentB(axis:u32)->vec3u{return select(vec3u(0,0,1),vec3u(0,1,0),axis==2u);}
 @compute @workgroup_size(64)
 fn snapshotLosassoFaceState(@builtin(global_invocation_id)invocation:vec3u){let face=invocation.x;
- if(face>=oldControl[2]||face>=arrayLength(&oldGeometry)||face>=arrayLength(&sourceFaces)){return;}
+ if(face<min(8u,min(arrayLength(&oldControl),arrayLength(&newControl)))){oldControl[face]=newControl[face];}
+ if(face>=newControl[2]||face>=arrayLength(&oldGeometry)||face>=arrayLength(&newGeometry)
+  ||face>=arrayLength(&sourceFaces)){return;}
+ oldGeometry[face]=newGeometry[face];
  oldGeometry[face].x=(oldGeometry[face].x&~FACE_SEPARATED)|(sourceFaces[face].reserved&FACE_SEPARATED);}
+@compute @workgroup_size(64)
+fn snapshotLosassoFaceLookup(@builtin(global_invocation_id)invocation:vec3u){let item=invocation.x;
+ if(item<min(oldControl[6],min(arrayLength(&oldDirectory),arrayLength(&newDirectory)))){
+  oldDirectory[item]=newDirectory[item];}
+ if(item<oldControl[2]&&item<arrayLength(&oldVelocity)&&item<arrayLength(&sourceVelocity)){
+  oldVelocity[item]=sourceVelocity[item];}}
 @compute @workgroup_size(64)
 fn migrateLosassoLaggedVelocity(@builtin(global_invocation_id)invocation:vec3u){let face=invocation.x;
  if(face>=p.faceCapacity||face>=newControl[2]||face>=arrayLength(&newVelocity)){return;}

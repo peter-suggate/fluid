@@ -57,14 +57,17 @@ test("symmetric expansion Dawn lane samples every accepted step and gates every 
   assert.ok(hook);
   assert.deepEqual(hook.parameters, {
     maximumVolumeAbsoluteError: 0,
-    maximumVelocityAbsoluteError_m_s: 0,
-    maximumPressureAbsoluteError: 0,
-    maximumRhsAbsoluteError: 0,
+    maximumVelocityAbsoluteError_m_s: 1e-6,
+    maximumPressureAbsoluteError: 0.03125,
+    maximumRhsAbsoluteError: 0.015625,
     maximumDiagonalAbsoluteError: 0,
     requireExactTopology: true,
     requireAllWallsReached: true,
     minimumCheckpointCount: 250,
     maximumWallContactStepSpread: 0,
+    circularityEvaluationStart_s: 0.168,
+    circularityEvaluationEnd_s: 0.2,
+    maximumAxisDiagonalFrontDifference_cells: 1,
   });
 
   const fine = getSceneWebGPUSmokeLane("symmetric-expansion", "fine-factor-4");
@@ -86,9 +89,9 @@ test("symmetric expansion Dawn lane samples every accepted step and gates every 
   assert.equal(oneStep.methods[0]?.overrides.globalFineLevelSetFactor, "4");
   assert.deepEqual(oneStep.hooks[0]?.parameters, {
     maximumVolumeAbsoluteError: 0,
-    maximumVelocityAbsoluteError_m_s: 0,
-    maximumPressureAbsoluteError: 0,
-    maximumRhsAbsoluteError: 0,
+    maximumVelocityAbsoluteError_m_s: 1e-6,
+    maximumPressureAbsoluteError: 0.03125,
+    maximumRhsAbsoluteError: 0.015625,
     maximumDiagonalAbsoluteError: 0,
     requirePressureStageAudit: true,
     requireExactTopology: true,

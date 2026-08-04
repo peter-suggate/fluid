@@ -211,7 +211,7 @@ export class WebGPUFineLevelSetSummaries {
     "ensureFineSummaryDirectoryPages", "ensureFineSummaryCoarseDirectoryPages",
     "ensureFineSummaryRanks", "ensureFineSummaryCoarseRanks",
     "publishFineSummaryCoarseRows", "prepareFineSummaryRecompute", "recomputeFineSummaryBase",
-    "recomputeFineSummaryParents", "publishFineSummaryDirect",
+    "recomputeFineSummaryAllParents", "publishFineSummaryDirect",
   ] as const;
   private readonly pipelinesDeferred: boolean;
   private cachedGroups?: {
@@ -225,7 +225,7 @@ export class WebGPUFineLevelSetSummaries {
     readonly ensureFineRanks: GPUBindGroup; readonly ensureCoarseRanks: GPUBindGroup;
     readonly addFine: GPUBindGroup;
     readonly publishCoarse: GPUBindGroup; readonly prepareRecompute: GPUBindGroup;
-    readonly base: GPUBindGroup; readonly parents: readonly GPUBindGroup[]; readonly publish: GPUBindGroup;
+    readonly base: GPUBindGroup; readonly parents: GPUBindGroup; readonly publish: GPUBindGroup;
   };
   private destroyed = false;
 
@@ -366,8 +366,7 @@ export class WebGPUFineLevelSetSummaries {
         prepareRecompute: bind("prepareFineSummaryRecompute", this.params[0],
           [[12, this.workState], [18, this.recomputeDispatch]]),
         base: bind("recomputeFineSummaryBase", this.params[0], baseSamples),
-        parents: Object.freeze(Array.from({ length: this.plan.maximumLevel }, (_, index) =>
-          bind("recomputeFineSummaryParents", this.params[index + 1], parentSamples))),
+        parents: bind("recomputeFineSummaryAllParents", this.params[0], parentSamples),
         publish: bind("publishFineSummaryDirect", this.params[0], [[5, this.directory], [6, coarseDirectory],
           [7, this.fineEntries], [9, this.coarseRows], [11, this.rankKeys], [12, this.workState]]),
       };
@@ -414,10 +413,8 @@ export class WebGPUFineLevelSetSummaries {
     broker.fence("fine-summary recompute dispatch publication");
     indirect("recomputeFineSummaryBase", boundGroups.base, this.recomputeDispatch, 0,
       "Recompute direct fine-summary bases");
-    for (let level = 1; level <= this.plan.maximumLevel; level += 1) {
-      indirect("recomputeFineSummaryParents", boundGroups.parents[level - 1]!, this.recomputeDispatch, 0,
-        `Recompute direct fine-summary parents level ${level}`);
-    }
+    indirect("recomputeFineSummaryAllParents", boundGroups.parents, this.recomputeDispatch, 0,
+      "Recompute all direct fine-summary parents");
     run("publishFineSummaryDirect", boundGroups.publish, "Publish direct fine-summary directory and active mip");
   }
 
@@ -466,6 +463,8 @@ var<workgroup>errors:array<u32,64>;var<workgroup>children:array<Entry,8>;
 var<workgroup>exactValid:array<u32,64>;var<workgroup>exactNegative:array<u32,64>;
 var<workgroup>centerBits:array<u32,8>;var<workgroup>centerStates:array<u32,8>;
 var<workgroup>publishErrors:array<u32,256>;
+var<workgroup>parentPartials:array<Entry,64>;
+var<workgroup>parentKeyPlusOne:u32;var<workgroup>parentRankValid:u32;
 fn finite(v:f32)->bool{return v==v&&abs(v)<3.402823e38;}
 fn ordered(v:f32)->u32{let bits=bitcast<u32>(v);return select(bits^0x80000000u,~bits,(bits&0x80000000u)!=0u);}
 fn emptyEntry(key:u32)->Entry{return Entry(key,0xffffffffu,0u,bitcast<u32>(3.402823e38),0u,0u,0u,0u,0u,0u,0u,0u);}
@@ -664,15 +663,17 @@ fn addFineBase(key:u32){let baseRank=rankForKey(key);if(baseRank==INVALID){setEr
 @compute @workgroup_size(1)fn prepareFineSummaryRecompute(){if(atomicLoad(&state[0])==0u){atomicStore(&state[15],STATE_READY);}
  let count=select(0u,atomicLoad(&state[7]),atomicLoad(&state[0])==0u);writeDispatch(28u,count,1u);
  publishDispatch(0u,count,1u);}
-fn centerSampleAt(key:u32,corner:u32)->vec2u{if(key<p.levelOffset||key>=p.levelOffset+p.levelKeyCount){return vec2u(0u);}
- let local=key-p.levelOffset;let xy=p.levelDims.x*p.levelDims.y;let z=local/xy;let rem=local-z*xy;let y=rem/p.levelDims.x;
- let coord=vec3u(rem-y*p.levelDims.x,y,z);let resolution=select(4u,8u,p.samplesPerBrick==512u);
- let span=(1u<<p.level)*resolution;let low=coord*span+vec3u(span/2u-1u);let q=low+vec3u(corner&1u,(corner>>1u)&1u,(corner>>2u)&1u);
+fn centerSampleAtLevel(key:u32,corner:u32,level:u32,levelOffset:u32,levelDims:vec3u)->vec2u{
+ let levelCount=levelDims.x*levelDims.y*levelDims.z;if(key<levelOffset||key>=levelOffset+levelCount){return vec2u(0u);}
+ let local=key-levelOffset;let xy=levelDims.x*levelDims.y;let z=local/xy;let rem=local-z*xy;let y=rem/levelDims.x;
+ let coord=vec3u(rem-y*levelDims.x,y,z);let resolution=select(4u,8u,p.samplesPerBrick==512u);
+ let span=(1u<<level)*resolution;let low=coord*span+vec3u(span/2u-1u);let q=low+vec3u(corner&1u,(corner>>1u)&1u,(corner>>2u)&1u);
  let brick=q/resolution;if(any(brick>=p.baseDims)){return vec2u(0u);}let key0=brick.x+p.baseDims.x*(brick.y+p.baseDims.y*brick.z);
  let page=finePage(key0);if(page==INVALID){return vec2u(0u);}let within=q-brick*resolution;
  let index=page*p.samplesPerBrick+within.x+resolution*(within.y+resolution*within.z);
  if(index>=arrayLength(&samples)){return vec2u(0u,NONFINITE);}
  let value=finePackedPhi(index);return select(vec2u(bitcast<u32>(value),1u),vec2u(0u,NONFINITE),!finite(value));}
+fn centerSampleAt(key:u32,corner:u32)->vec2u{return centerSampleAtLevel(key,corner,p.level,p.levelOffset,p.levelDims);}
 fn finishCenter(value:Entry)->Entry{var result=value;var center=0.0;var mask=0u;result.flags&=~CENTER_COMPLETE;
  for(var corner=0u;corner<8u;corner+=1u){result.flags|=centerStates[corner]&NONFINITE;if((centerStates[corner]&1u)!=0u){
   center+=0.125*bitcast<f32>(centerBits[corner]);mask|=1u<<corner;}}if(mask==0xffu){result.centerPhi=bitcast<u32>(center);result.flags|=CENTER_COMPLETE;}return result;}
@@ -713,6 +714,31 @@ fn finishCenter(value:Entry)->Entry{var result=value;var center=0.0;var mask=0u;
   centerBits[lid]=center.x;centerStates[lid]=center.y;}workgroupBarrier();
  if(lid==0u&&enabled){var value=emptyEntry(key);for(var child=0u;child<8u;child+=1u){if(present(children[child])){value=combine(value,children[child]);}}
   fineEntries[rank]=finishCenter(value);}}
+// Parent fields use associative integer/min/max aggregates. Rebuilding each
+// active parent directly from its published base descendants therefore emits
+// the same bits without a global dispatch boundary between every mip level.
+@compute @workgroup_size(64)fn recomputeFineSummaryAllParents(@builtin(workgroup_id)wid:vec3u,
+ @builtin(local_invocation_index)lid:u32,@builtin(num_workgroups)n:vec3u){let rank=fineLinearWorkgroup(wid,n);
+ let high=atomicLoad(&state[7]);let inRange=rank<high&&rank<p.entryCapacity&&rank<arrayLength(&rankKeys);
+ if(lid==0u){parentRankValid=select(0u,1u,inRange);parentKeyPlusOne=0u;if(inRange){parentKeyPlusOne=atomicLoad(&rankKeys[rank]);}
+  if(rank<high&&!inRange){setError(CAPACITY,rank);}}
+ let valid=workgroupUniformLoad(&parentRankValid);let keyPlusOne=workgroupUniformLoad(&parentKeyPlusOne);
+ let key=select(0u,keyPlusOne-1u,keyPlusOne!=0u);if(valid==0u||keyPlusOne==0u){return;}
+ var level=0u;var offset=0u;var dims=p.baseDims;var found=false;loop{let count=dims.x*dims.y*dims.z;
+  if(key>=offset&&key<offset+count){found=true;break;}offset+=count;if(level>=p.maximumLevel){break;}
+  dims=(dims+vec3u(1u))/2u;level+=1u;}if(!found){if(lid==0u){setError(STALE,key);}return;}if(level==0u){return;}
+ let local=key-offset;let xy=dims.x*dims.y;let z=local/xy;let rem=local-z*xy;let y=rem/dims.x;
+ let coord=vec3u(rem-y*dims.x,y,z);let span=1u<<level;let low=coord*span;
+ let highCoord=min(low+vec3u(span),p.baseDims);let extent=highCoord-low;let count=extent.x*extent.y*extent.z;
+ var partial=emptyEntry(key);for(var descendant=lid;descendant<count;descendant+=64u){let dz=descendant/(extent.x*extent.y);
+  let rest=descendant-dz*extent.x*extent.y;let dy=rest/extent.x;let q=low+vec3u(rest-dy*extent.x,dy,dz);
+  let baseKey=q.x+p.baseDims.x*(q.y+p.baseDims.y*q.z);let baseRank=rankForKey(baseKey);
+  if(baseRank!=INVALID){let item=fineEntries[baseRank];if(present(item)){partial=combine(partial,item);}}}
+ parentPartials[lid]=partial;workgroupBarrier();for(var stride=32u;stride>0u;stride>>=1u){
+  if(lid<stride&&present(parentPartials[lid+stride])){parentPartials[lid]=combine(parentPartials[lid],parentPartials[lid+stride]);}
+  workgroupBarrier();}if(lid<8u){let center=centerSampleAtLevel(key,lid,level,offset,dims);
+  centerBits[lid]=center.x;centerStates[lid]=center.y;}workgroupBarrier();
+ if(lid==0u){fineEntries[rank]=finishCenter(parentPartials[0]);}}
 fn coarseEntryAt(key:u32,rank:u32)->Entry{var value=emptyEntry(key);
  // Defensive mirror of the factor-1 scheduling gate: never interpret a
  // colliding sub-brick coarseRows representative as B4 summary authority.

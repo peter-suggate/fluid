@@ -1,4 +1,5 @@
 import { OCTREE_LOSASSO_FACE_WORDS } from "./octree-losasso-operator";
+import { octreeCompensatedF32WGSL } from "./octree-compensated-f32.wgsl";
 import { octreeOwnerPageLookupWgsl } from "./webgpu-octree-owner-pages";
 
 /**
@@ -57,6 +58,9 @@ struct Face {
 @group(0) @binding(18) var<storage, read> solidCells: array<u32>;
 @group(0) @binding(19) var<storage, read> rigidBodies: array<RigidBody>;
 @group(0) @binding(21) var<storage, read> ownerCandidate: array<u32>;
+@group(0) @binding(22) var<storage, read> acceptedAuthority: array<u32>;
+
+var<workgroup> prefixTotals: array<u32, 256>;
 
 struct RigidBody {
   positionShape:vec4f, dimensions:vec4f, orientation:vec4f,
@@ -70,7 +74,8 @@ ${octreeOwnerPageLookupWgsl.replaceAll("ownerPageLookupParams", "params").replac
   let table = 1u - acceptedTable;`,
 )}
 
-fn rows() -> u32 { return min(atomicLoad(&authority[1]), params.capacities.x); }
+fn topologyReused()->bool{return atomicLoad(&authority[5])==1u;}
+fn rows() -> u32 { return select(min(atomicLoad(&authority[1]), params.capacities.x),0u,topologyReused()); }
 fn faceCountBase() -> u32 { return 0u; }
 fn faceBaseBase() -> u32 { return params.capacities.x; }
 fn incidenceCountBase() -> u32 { return 2u * params.capacities.x; }
@@ -90,6 +95,7 @@ fn losassoExactValue(source:ptr<function,array<i32,36>>)->f32{var limbs=(*source
   for(var limb=0u;limb+1u<36u;limb+=1u){let normalized=losassoFloorDiv256(limbs[limb]);limbs[limb]=normalized.y;limbs[limb+1u]+=normalized.x;}}
  var magnitude=0.;for(var limb=0u;limb<36u;limb+=1u){magnitude+=ldexp(f32(limbs[limb]),-152+i32(limb*8u));}
  return select(magnitude,-magnitude,negative);}
+${octreeCompensatedF32WGSL}
 
 fn originOf(header: LeafHeader) -> vec3u {
   let dimensions = params.dimensionsMaximumLeaf.xyz;
@@ -237,6 +243,20 @@ fn negativeBoundaryPlan(header: LeafHeader, axis: u32) -> FacePatchPlan {
   return FacePatchPlan(mask, 2u);
 }
 
+fn exactRowTopologyReuse(generation:u32,count:u32)->bool{
+ let base=10u+3u*params.capacities.x;
+ return base+15u<arrayLength(&sourceFrontier)&&sourceFrontier[base+8u]==0x52444c54u
+  &&sourceFrontier[base]==count&&sourceFrontier[base+1u]==count
+  &&sourceFrontier[base+2u]==count&&sourceFrontier[base+3u]==0u
+  &&sourceFrontier[base+4u]==0u&&sourceFrontier[base+5u]==0u
+  &&sourceFrontier[base+6u]==0u&&sourceFrontier[base+7u]==generation
+  &&sourceFrontier[base+15u]==1u&&arrayLength(&acceptedAuthority)>=8u
+  &&acceptedAuthority[0]!=0u&&acceptedAuthority[1]==count
+  &&acceptedAuthority[2]<=params.capacities.y&&acceptedAuthority[3]==1u
+  &&acceptedAuthority[4]==0u&&acceptedAuthority[6]>=2u*acceptedAuthority[2]
+  &&acceptedAuthority[6]<=params.capacities.w
+  &&(acceptedAuthority[6]&(acceptedAuthority[6]-1u))==0u;}
+
 @compute @workgroup_size(1)
 fn beginLosassoPublication() {
   var rawRows = 0u;
@@ -255,18 +275,28 @@ fn beginLosassoPublication() {
     }
   }
   let count = min(rawRows, params.capacities.x);
+  let reuse=sourceValid&&rawRows<=params.capacities.x&&exactRowTopologyReuse(generation,count);
   atomicStore(&authority[0], select(0u, generation, sourceValid));
   atomicStore(&authority[1], count);
-  atomicStore(&authority[2], 0u);
-  atomicStore(&authority[3], 0u);
+  atomicStore(&authority[2], select(0u,acceptedAuthority[2],reuse));
+  atomicStore(&authority[3], select(0u,1u,reuse));
   atomicStore(&authority[4], select(ERROR_OWNER,
     select(0u, ERROR_CAPACITY, rawRows > params.capacities.x), sourceValid));
-  for (var word = 5u; word < 8u; word += 1u) { atomicStore(&authority[word], 0u); }
+  atomicStore(&authority[5],select(0u,1u,reuse));
+  atomicStore(&authority[6],select(0u,acceptedAuthority[6],reuse));
+  atomicStore(&authority[7],0u);
   rowDispatch[0] = 0u; rowDispatch[1] = 1u; rowDispatch[2] = 1u;
   faceDispatch[0] = 0u; faceDispatch[1] = 1u; faceDispatch[2] = 1u;
+  faceDispatch[3] = 0u; faceDispatch[4] = 1u; faceDispatch[5] = 1u;
   solverAuthority[0] = ERROR_CAPACITY;
   solverAuthority[1] = 0u;
   for (var word = 2u; word < 7u; word += 1u) { solverAuthority[word] = 0u; }
+  rowDispatch[0] = select(0u, (count + 63u) / 64u,
+    sourceValid && rawRows <= params.capacities.x && !reuse);
+  if(reuse){rowDispatch[0]=(count+63u)/64u;faceDispatch[0]=(acceptedAuthority[2]+63u)/64u;
+   solverAuthority[0]=0u;solverAuthority[1]=INVALID;solverAuthority[2]=count;
+   solverAuthority[3]=acceptedAuthority[2];solverAuthority[4]=generation;
+   solverAuthority[5]=0u;solverAuthority[6]=generation;}
 }
 
 @compute @workgroup_size(64)
@@ -294,15 +324,41 @@ fn countLosassoFaces(@builtin(global_invocation_id) invocation: vec3u) {
   rhs[row] = 0.0;
 }
 
-@compute @workgroup_size(1)
-fn prefixLosassoFaces() {
-  var total = 0u;
-  for (var row = 0u; row < rows(); row += 1u) {
+@compute @workgroup_size(256)
+fn prefixLosassoFaces(@builtin(local_invocation_index) lane: u32) {
+  let count = rows();
+  let chunk = (count + 255u) / 256u;
+  let begin = min(lane * chunk, count);
+  let end = min(begin + chunk, count);
+  var laneTotal = 0u;
+  for (var row = begin; row < end; row += 1u) {
+    laneTotal += atomicLoad(&scratch[faceCountBase() + row]);
+  }
+  prefixTotals[lane] = laneTotal;
+  workgroupBarrier();
+  for (var offset = 1u; offset < 256u; offset *= 2u) {
+    var addend = 0u;
+    if (lane >= offset) { addend = prefixTotals[lane - offset]; }
+    workgroupBarrier();
+    prefixTotals[lane] += addend;
+    workgroupBarrier();
+  }
+  var total = prefixTotals[lane] - laneTotal;
+  for (var row = begin; row < end; row += 1u) {
     atomicStore(&scratch[faceBaseBase() + row], total);
     total += atomicLoad(&scratch[faceCountBase() + row]);
   }
-  if (total > params.capacities.y) { fail(ERROR_CAPACITY); total = 0u; }
-  atomicStore(&authority[2], total);
+  if (lane == 255u && !topologyReused()) {
+    total = prefixTotals[lane];
+    if (total > params.capacities.y) { fail(ERROR_CAPACITY); total = 0u; }
+    atomicStore(&authority[2], total);
+    faceDispatch[0] = (total + 63u) / 64u;
+    var directoryCapacity=2u;
+    while(directoryCapacity<2u*total&&directoryCapacity<params.capacities.w){directoryCapacity*=2u;}
+    if(directoryCapacity<2u*total||directoryCapacity>params.capacities.w){fail(ERROR_CAPACITY);directoryCapacity=0u;}
+    atomicStore(&authority[6],directoryCapacity);
+    faceDispatch[3]=(directoryCapacity+63u)/64u;
+  }
 }
 
 fn writeFace(faceId: u32, row: u32, neighbor: OctreeOwnerPageLookupResult, axis: u32,
@@ -457,16 +513,36 @@ fn emitLosassoFaces(@builtin(global_invocation_id) invocation: vec3u) {
   }
 }
 
-@compute @workgroup_size(1)
-fn prefixLosassoIncidences() {
-  var total = 0u;
-  for (var row = 0u; row < rows(); row += 1u) {
+@compute @workgroup_size(256)
+fn prefixLosassoIncidences(@builtin(local_invocation_index) lane: u32) {
+  let count = rows();
+  let chunk = (count + 255u) / 256u;
+  let begin = min(lane * chunk, count);
+  let end = min(begin + chunk, count);
+  var laneTotal = 0u;
+  for (var row = begin; row < end; row += 1u) {
+    laneTotal += atomicLoad(&scratch[incidenceCountBase() + row]);
+  }
+  prefixTotals[lane] = laneTotal;
+  workgroupBarrier();
+  for (var offset = 1u; offset < 256u; offset *= 2u) {
+    var addend = 0u;
+    if (lane >= offset) { addend = prefixTotals[lane - offset]; }
+    workgroupBarrier();
+    prefixTotals[lane] += addend;
+    workgroupBarrier();
+  }
+  var total = prefixTotals[lane] - laneTotal;
+  for (var row = begin; row < end; row += 1u) {
     rowFaceOffsets[row] = total;
     total += atomicLoad(&scratch[incidenceCountBase() + row]);
     atomicStore(&scratch[incidenceCursorBase() + row], 0u);
   }
-  rowFaceOffsets[rows()] = total;
-  if (total > params.capacities.z) { fail(ERROR_CAPACITY); }
+  if (lane == 255u && !topologyReused()) {
+    total = prefixTotals[lane];
+    rowFaceOffsets[count] = total;
+    if (total > params.capacities.z) { fail(ERROR_CAPACITY); }
+  }
 }
 
 @compute @workgroup_size(64)
@@ -500,8 +576,8 @@ fn sortLosassoIncidences(@builtin(global_invocation_id) invocation: vec3u) {
     }
     rowFaces[insertion] = value;
   }
-  var exactDiagonal:array<i32,36>;
-  var exactFlux:array<i32,36>;
+  var diagonalSum=CompensatedF32(0.,0.);
+  var fluxSum=CompensatedF32(0.,0.);
   var valid=true;
   for (var cursor = begin; cursor < end; cursor += 1u) {
     let faceId=rowFaces[cursor];if(faceId>=atomicLoad(&authority[2])||faceId>=arrayLength(&faces)){valid=false;continue;}
@@ -510,21 +586,36 @@ fn sortLosassoIncidences(@builtin(global_invocation_id) invocation: vec3u) {
     let sign = select(-1.0, 1.0, face.negativeRow == row);
     let flux=sign * face.openFraction * face.area * face.normalVelocity;
     if(!losassoFinite(coefficient)||coefficient<0.||!losassoFinite(flux)){valid=false;continue;}
-    losassoAddExact(&exactDiagonal,coefficient);losassoAddExact(&exactFlux,flux);
+    diagonalSum=addCompensatedF32(diagonalSum,coefficient);
+    fluxSum=addCompensatedF32(fluxSum,flux);
   }
-  let diagonalValue=losassoExactValue(&exactDiagonal);let integratedFlux=losassoExactValue(&exactFlux);
+  let diagonalValue=compensatedValue(diagonalSum);
+  let integratedFlux=compensatedValue(fluxSum);
   if(!valid||!losassoFinite(diagonalValue)||!losassoFinite(integratedFlux)||!(diagonalValue>0.)){
     fail(ERROR_HEADER);diagonal[row]=0.;rhs[row]=0.;return;}
   diagonal[row] = diagonalValue;
   rhs[row] = integratedFlux;
 }
 
+@compute @workgroup_size(64)
+fn clearLosassoFaceDirectory(@builtin(global_invocation_id) invocation: vec3u) {
+  if(topologyReused()){return;}
+  let slot = invocation.x;
+  if (slot < atomicLoad(&authority[6])) { faceDirectory[slot] = vec2u(0u); }
+}
+
+@compute @workgroup_size(64)
+fn clearLosassoAdjacencyOffsets(@builtin(global_invocation_id) invocation: vec3u) {
+  let face = invocation.x;
+  let count = atomicLoad(&authority[2]);
+  if (face < count) { adjacencyOffsets[face] = 0u; }
+  if (face == 0u) { adjacencyOffsets[count] = 0u; }
+}
+
 @compute @workgroup_size(1)
 fn finishLosassoPublication() {
-  let directoryCapacity = params.capacities.w;
-  for (var slot = 0u; slot < directoryCapacity; slot += 1u) {
-    faceDirectory[slot] = vec2u(0u);
-  }
+  if(topologyReused()){return;}
+  let directoryCapacity = atomicLoad(&authority[6]);
   let mask = directoryCapacity - 1u;
   let count = atomicLoad(&authority[2]);
   for (var face = 0u; face < count; face += 1u) {
@@ -549,7 +640,6 @@ fn finishLosassoPublication() {
     atomicStore(&authority[3], 1u);
     rowDispatch[0] = (rows() + 63u) / 64u;
     faceDispatch[0] = (atomicLoad(&authority[2]) + 63u) / 64u;
-    for (var face = 0u; face <= count; face += 1u) { adjacencyOffsets[face] = 0u; }
     solverAuthority[0] = 0u;
     solverAuthority[1] = INVALID;
     solverAuthority[2] = rows();

@@ -25,6 +25,7 @@ struct Params{
 @group(0)@binding(8)var<storage,read>extendedVelocity:array<f32>;
 @group(0)@binding(9)var<storage,read>faceDirectory:array<vec2u>;
 @group(0)@binding(10)var<storage,read_write>delta:array<u32>;
+@group(0)@binding(11)var<storage,read_write>liveDispatch:array<atomic<u32>>;
 fn finite(v:f32)->bool{return v==v&&abs(v)<3.402823e38;}
 fn finite3(v:vec3f)->bool{return all(v==v)&&all(abs(v)<vec3f(3.402823e38));}
 // Keep characteristic offsets on a lattice finer than 1e-6 m at factor four.
@@ -56,19 +57,23 @@ fn sampleFinePhiGrid(grid:vec3f)->f32{
  }
  return losassoExactValue(exact);
 }
-fn acceptedVelocity()->bool{return arrayLength(&coarse)>=4u&&coarse[3]==1u
+fn acceptedVelocity()->bool{return arrayLength(&coarse)>=7u&&coarse[3]==1u
  &&(p.expectedVelocityEpoch==0u||coarse[0]==p.expectedVelocityEpoch)
  &&coarse[2]<=arrayLength(&faceGeometry)&&coarse[2]<=arrayLength(&extendedVelocity)
- &&p.directoryCapacity<=arrayLength(&faceDirectory);}
+ &&losassoDirectoryCapacity()>=2u*coarse[2]
+ &&losassoDirectoryCapacity()<=arrayLength(&faceDirectory);}
 fn acceptedStep()->bool{return atomicLoad(&control[6])==0u&&atomicLoad(&control[7])==0u
  &&atomicLoad(&control[1])==0u&&atomicLoad(&control[0])==0u;}
 
 @compute @workgroup_size(64)
 fn prepareLosassoFineTransport(@builtin(local_invocation_index)lane:u32){
  if(lane<16u){atomicStore(&control[lane],select(0u,INVALID,lane==12u||lane==13u));}if(lane<8u){delta[lane]=0u;}workgroupBarrier();
- if(lane==0u){if(!acceptedVelocity()){atomicStore(&control[6],1u);}
-  if(arrayLength(&worklist)<7u||worklist[0]!=p.generation||worklist[2]!=p.pageCapacity
-    ||worklist[3]!=3u||worklist[5]!=1u||worklist[6]!=1u){atomicStore(&control[7],1u);}}
+ if(lane==0u){let velocityValid=acceptedVelocity();let worklistValid=arrayLength(&worklist)>=7u
+   &&worklist[0]==p.generation&&worklist[2]==p.pageCapacity
+   &&worklist[3]==3u&&worklist[5]==1u&&worklist[6]==1u;
+  if(!velocityValid){atomicStore(&control[6],1u);}if(!worklistValid){atomicStore(&control[7],1u);}
+  atomicStore(&liveDispatch[0],select(0u,min(worklist[1],p.pageCapacity),velocityValid&&worklistValid));
+  atomicStore(&liveDispatch[1],1u);atomicStore(&liveDispatch[2],1u);}
 }
 
 @compute @workgroup_size(64)

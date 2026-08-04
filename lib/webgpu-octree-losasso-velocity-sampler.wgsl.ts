@@ -24,9 +24,17 @@ fn losassoFaceHash(packedAxisSpan:u32,q:vec3u)->u32{
  value=(value^q.y)*0xc2b2ae35u;
  return (value^q.z)*0x27d4eb2du;
 }
+fn losassoDirectoryCapacity()->u32{
+ let advertised=select(0u,coarse[6],arrayLength(&coarse)>=7u);
+ let valid=advertised>=2u*coarse[2]&&advertised<=p.directoryCapacity
+  &&(advertised&(advertised-1u))==0u;
+ return select(p.directoryCapacity,advertised,valid);
+}
 fn losassoFace(axis:u32,q:vec3u)->u32{
- if(p.directoryCapacity==0u||(p.directoryCapacity&(p.directoryCapacity-1u))!=0u){return INVALID;}
- let mask=p.directoryCapacity-1u;var span=1u;var logSpan=0u;
+ let directoryCapacity=losassoDirectoryCapacity();
+ if(directoryCapacity==0u||directoryCapacity>p.directoryCapacity
+  ||(directoryCapacity&(directoryCapacity-1u))!=0u){return INVALID;}
+ let mask=directoryCapacity-1u;var span=1u;var logSpan=0u;
  loop{
   var origin=q;for(var tangent=0u;tangent<3u;tangent+=1u){if(tangent!=axis){origin[tangent]=(q[tangent]/span)*span;}}
   let packed=axis|(logSpan<<2u);let hash=losassoFaceHash(packed,origin);

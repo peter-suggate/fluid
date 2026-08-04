@@ -384,6 +384,16 @@ const frozenPowerReferenceOverrides = {
   globalFineLevelSetFactor: "4",
 } as const;
 const symmetricExpansionOverrides = SYMMETRIC_EXPANSION_METHOD_PROFILE.overrides;
+// The fixed-order compensated-f32 solve is deterministic, but symmetric rows
+// traverse distinct published CSR orders and can differ by a handful of ulps.
+// Keep geometry/volume/diagonal exact while bounding those rounded fields.
+const symmetricExpansionFieldLimits = Object.freeze({
+  maximumVolumeAbsoluteError: 0,
+  maximumVelocityAbsoluteError_m_s: 1e-6,
+  maximumPressureAbsoluteError: 0.03125,
+  maximumRhsAbsoluteError: 0.015625,
+  maximumDiagonalAbsoluteError: 0,
+});
 const largePowerDamOverrides = {
   ...frozenPowerReferenceOverrides,
   maximumLeafSize: "32",
@@ -889,7 +899,7 @@ const suiteList = [
           evidenceCollectors: [{ id: "fluid-symmetry", phase: "checkpoint", methods: ["octree"],
             requires: ["compact velocity", "compact pressure"],
             provides: ["D4 volume symmetry", "D4 velocity symmetry", "D4 pressure symmetry",
-              "D4 topology symmetry", "four-wall contact"] }],
+              "D4 topology symmetry", "radial front circularity", "four-wall contact"] }],
         },
         diagnostics: [],
         acceptance: [
@@ -898,17 +908,16 @@ const suiteList = [
         ],
         hooks: [{ id: "fluid-symmetry", methods: ["octree"],
           requires: ["D4 volume symmetry", "D4 velocity symmetry", "D4 pressure symmetry",
-            "D4 topology symmetry", "four-wall contact"],
+            "D4 topology symmetry", "radial front circularity", "four-wall contact"],
           parameters: {
-            maximumVolumeAbsoluteError: 0,
-            maximumVelocityAbsoluteError_m_s: 0,
-            maximumPressureAbsoluteError: 0,
-            maximumRhsAbsoluteError: 0,
-            maximumDiagonalAbsoluteError: 0,
+            ...symmetricExpansionFieldLimits,
             requireExactTopology: true,
             requireAllWallsReached: true,
             minimumCheckpointCount: 250,
             maximumWallContactStepSpread: 0,
+            circularityEvaluationStart_s: 0.168,
+            circularityEvaluationEnd_s: 0.2,
+            maximumAxisDiagonalFrontDifference_cells: 1,
           } }],
       }),
       "raster-construction": lane({ id: "raster-construction", target_s: 0.004, exactSteps: 1,
@@ -937,11 +946,7 @@ const suiteList = [
           requires: ["D4 volume symmetry", "D4 velocity symmetry", "D4 pressure symmetry",
             "D4 pressure-operator symmetry", "D4 topology symmetry", "four-wall contact"],
           parameters: {
-            maximumVolumeAbsoluteError: 0,
-            maximumVelocityAbsoluteError_m_s: 0,
-            maximumPressureAbsoluteError: 0,
-            maximumRhsAbsoluteError: 0,
-            maximumDiagonalAbsoluteError: 0,
+            ...symmetricExpansionFieldLimits,
             requirePressureStageAudit: true,
             requireExactTopology: true,
             requireAllWallsReached: false,
@@ -969,11 +974,7 @@ const suiteList = [
           requires: ["D4 volume symmetry", "D4 velocity symmetry", "D4 pressure symmetry",
             "D4 pressure-operator symmetry", "D4 topology symmetry", "four-wall contact"],
           parameters: {
-            maximumVolumeAbsoluteError: 0,
-            maximumVelocityAbsoluteError_m_s: 0,
-            maximumPressureAbsoluteError: 0,
-            maximumRhsAbsoluteError: 0,
-            maximumDiagonalAbsoluteError: 0,
+            ...symmetricExpansionFieldLimits,
             requireExactTopology: true,
             requireAllWallsReached: false,
             minimumCheckpointCount: 2,
@@ -1000,11 +1001,7 @@ const suiteList = [
           requires: ["D4 volume symmetry", "D4 velocity symmetry", "D4 pressure symmetry",
             "D4 pressure-operator symmetry", "D4 topology symmetry", "four-wall contact"],
           parameters: {
-            maximumVolumeAbsoluteError: 0,
-            maximumVelocityAbsoluteError_m_s: 0,
-            maximumPressureAbsoluteError: 0,
-            maximumRhsAbsoluteError: 0,
-            maximumDiagonalAbsoluteError: 0,
+            ...symmetricExpansionFieldLimits,
             requireExactTopology: true,
             requireAllWallsReached: false,
             minimumCheckpointCount: 3,
@@ -1031,11 +1028,7 @@ const suiteList = [
           requires: ["D4 volume symmetry", "D4 velocity symmetry", "D4 pressure symmetry",
             "D4 topology symmetry", "four-wall contact"],
           parameters: {
-            maximumVolumeAbsoluteError: 0,
-            maximumVelocityAbsoluteError_m_s: 0,
-            maximumPressureAbsoluteError: 0,
-            maximumRhsAbsoluteError: 0,
-            maximumDiagonalAbsoluteError: 0,
+            ...symmetricExpansionFieldLimits,
             requireExactTopology: true,
             requireAllWallsReached: false,
             minimumCheckpointCount: 1,

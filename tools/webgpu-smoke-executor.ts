@@ -35,6 +35,7 @@ import {
 } from "../lib/webgpu-pass-broker";
 import { requiredFluidDeviceLimits } from "../lib/webgpu-device-limits";
 import { fluidExecutionDeviceFeatures } from "../lib/gpu-startup";
+import { measureHorizontalFrontCircularity } from "../lib/fluid-symmetry-diagnostic";
 import {
   OCTREE_OWNER_ARENA_MAGIC,
   OCTREE_OWNER_PAGE_CONTROL_WORDS,
@@ -2678,6 +2679,7 @@ async function runGPU(
             console.log(JSON.stringify({ scenario: scenarioId, method: resultMethod,
               phase: "speed-map", time_s: solver.info.submittedTime_s,
               layerMaxSpeed: layerMax.map((value) => Number(value.toFixed(2))),
+              frontCircularity: measureHorizontalFrontCircularity(cubic.field, [nx, ny, nz]),
               centerline,
               top: cells.slice(0, 12).map(({ cell, speed, alpha }) => ({
                 i: cell % nx, j: Math.floor(cell / nx) % ny, k: Math.floor(cell / (nx * ny)),

@@ -91,16 +91,23 @@ fn finePhiCells(positionCells:vec3f)->PhiSample{
  // faces and hard-failed transport as soon as a corner splash entered the band.
  let grid=clamp(positionCells*(p.velocityOriginCell.w/p.fineCellWidth)-vec3f(.5),
   vec3f(0.),vec3f(p.sampleDimensions)-vec3f(1.));
- let base=vec3i(floor(grid));let fraction=fract(grid);var exact:array<i32,36>;
+ let base=vec3i(floor(grid));let fraction=fract(grid);var exact:array<i32,36>;var exactWeight:array<i32,36>;
  for(var corner=0u;corner<8u;corner+=1u){let offset=vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));
   let w=vec3f(select(1.-fraction.x,fraction.x,(corner&1u)!=0u),select(1.-fraction.y,fraction.y,(corner&2u)!=0u),
    select(1.-fraction.z,fraction.z,(corner&4u)!=0u));let weight=symmetricWeight(w);if(weight==0.){continue;}let coordinate=base+offset;
-  if(any(coordinate<vec3i(0))||any(coordinate>=vec3i(p.sampleDimensions))){return PhiSample(0.,0u);}let q=vec3u(coordinate);
-  let brick=q/p.brickResolution;let page=bandFineBrick(packBrick(brick));if(page==INVALID){return PhiSample(0.,0u);}let local=q-brick*p.brickResolution;
+  if(any(coordinate<vec3i(0))||any(coordinate>=vec3i(p.sampleDimensions))){continue;}let q=vec3u(coordinate);
+  let brick=q/p.brickResolution;let page=bandFineBrick(packBrick(brick));if(page==INVALID){continue;}let local=q-brick*p.brickResolution;
   let index=page*p.samplesPerBrick+local.x+p.brickResolution*(local.y+p.brickResolution*local.z);
-  if(index>=arrayLength(&samples)||(bandFinePackedFlags(index)&VALID)==0u){return PhiSample(0.,0u);}let sample=bandFinePackedPhi(index);
-  if(!finite(sample)){return PhiSample(0.,0u);}exactAdd(&exact,weight*sample);}
- return PhiSample(exactValue(exact),1u);}
+  if(index>=arrayLength(&samples)||(bandFinePackedFlags(index)&VALID)==0u){continue;}let sample=bandFinePackedPhi(index);
+  if(!finite(sample)){continue;}exactAdd(&exact,weight*sample);exactAdd(&exactWeight,weight);}
+ let total=exactValue(exactWeight);if(!finite(total)||total<=0.){return PhiSample(0.,0u);}
+ // This probe decides velocity-support membership; it is not a transported
+ // phi sample. Sparse fine topology may legitimately end through one half of
+ // its trilinear stencil while a resident transport sample still needs this
+ // MAC face. Renormalizing the available valid corners gives the boundary
+ // face its one-sided signed-distance estimate instead of punching a diagonal
+ // hole in the W7 velocity graph. Exact accumulators retain D4 invariance.
+ return PhiSample(exactValue(exact)/total,1u);}
 fn exactCompact(packed:u32,q:vec3u)->u32{let hash=hashFace(packed,q);let mask=p.band.y-1u;
  for(var probe=0u;probe<32u;probe+=1u){let slot=(hash+probe)&mask;let encoded=atomicLoad(&directory[2u*slot]);if(encoded==0u){return INVALID;}
   let face=encoded-1u;if(atomicLoad(&directory[2u*slot+1u])==hash&&face<atomicLoad(&control[2])&&all(geometry[face]==vec4u(packed,q))){return face;}}
@@ -141,7 +148,17 @@ fn publishLosassoAirBandFaces(@builtin(workgroup_id)group:vec3u,@builtin(local_i
  var upper=vec3i(p.velocityDimensions)-vec3i(1);upper[axis]=i32(p.velocityDimensions[axis]);
  if(any(q<vec3i(0))||any(q>upper)){return;}let faceQ=vec3u(q);var centre=vec3f(faceQ);
  for(var c=0u;c<3u;c+=1u){if(c!=axis){centre[c]+=.5;}}
- let sample=finePhiCells(centre);let width=f32(p.band.w)*p.velocityOriginCell.w;
+ var sample=finePhiCells(centre);
+ // The complete MAC stencil around a valid fine transport sample reaches one
+ // coarse face past that sample's B4 page. At a diagonal sparse-topology edge,
+ // every phi corner at that face may therefore be unresident even though the
+ // originating page is valid and needs the face. Fall back to the nearest
+ // sample-centre point inside that page. This is a one-sided membership
+ // estimate only; transport still gathers phi strictly from resident pages.
+ if(sample.valid==0u){let inset=.5*p.fineCellWidth/p.velocityOriginCell.w;
+  let pageLow=vec3f(cell)+vec3f(inset);let pageHigh=vec3f(cell+vec3u(coarseSpan))-vec3f(inset);
+  sample=finePhiCells(clamp(centre,pageLow,pageHigh));}
+ let width=f32(p.band.w)*p.velocityOriginCell.w;
  // Fine phi, not the coarse pressure-row sign, owns the production surface.
  // A finest MAC face can therefore lie on the liquid side of that surface
  // without belonging to any coarse wet-row incidence.  Publish the complete
@@ -166,6 +183,7 @@ fn dilateAirFace(id:u32,sourceLayer:u32,targetLayer:u32){let count=min(atomicLoa
    appendAirFace(proposed,vec4u(axis,ACTIVE,bitcast<u32>(f32(targetLayer)*p.velocityOriginCell.w),targetLayer));}}}}
 @compute @workgroup_size(64)fn dilateLosassoAirBand5(@builtin(workgroup_id)g:vec3u,@builtin(local_invocation_index)l:u32){dilateAirFace(linearInvocation(g,l),4u,5u);}
 @compute @workgroup_size(64)fn dilateLosassoAirBand6(@builtin(workgroup_id)g:vec3u,@builtin(local_invocation_index)l:u32){dilateAirFace(linearInvocation(g,l),5u,6u);}
+@compute @workgroup_size(64)fn dilateLosassoAirBand7(@builtin(workgroup_id)g:vec3u,@builtin(local_invocation_index)l:u32){dilateAirFace(linearInvocation(g,l),6u,7u);}
 
 @compute @workgroup_size(64)
 fn buildLosassoExtensionAdjacency(@builtin(workgroup_id)group:vec3u,@builtin(local_invocation_index)lane:u32){let id=linearInvocation(group,lane);let count=min(atomicLoad(&control[2]),p.band.x);

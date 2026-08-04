@@ -2627,6 +2627,11 @@ export class WebGPUOctreeProjection {
         relativeTolerance: this.solveTailPolicy.relativeTolerance,
         maximumIterations: this.solveTailPolicy.hardOuterIterationCeiling,
         hardIterationCeiling: this.solveTailPolicy.hardOuterIterationCeiling,
+        // The cooperative drain is bounded by the compact coarse row arena,
+        // not by the independent fine level-set factor. Keep larger coarse
+        // problems on the ordinary partial-plus-finish schedule.
+        factorOneCombinedReductionDrains:
+          this.coarseOnlySurfaceTracking && rowCapacity <= 4_096,
       },
       rigidPressureReaction: {
         solidCells: this.solidCells,
@@ -4860,7 +4865,7 @@ export class WebGPUOctreeProjection {
       this.losassoCoarsePhi.encode(redistanceBroker, pending.target,
         this.losassoCoarsePhiInput());
       this.losassoConditionedOperator?.encodeAfterGhostDistances(redistanceBroker);
-      this.losassoBackend?.encodeHierarchyRefresh(redistanceBroker, this.leafHeaders);
+      this.losassoBackend?.encodeHierarchyCoefficientRefresh(redistanceBroker);
       this.refreshLosassoProjectionGroups();
     }
     pending.volume?.encode(redistanceBroker);
@@ -4868,10 +4873,10 @@ export class WebGPUOctreeProjection {
       if (!this.losassoCoarsePhi) throw new Error("Losasso coarse-phi exchange is unavailable");
       // Volume correction may move fine phi. Republish the final conditioned
       // operator and hierarchy from the corrected, fully redistanced band.
-      this.losassoCoarsePhi.encode(redistanceBroker, pending.target,
+      this.losassoCoarsePhi.encodeFieldRefresh(redistanceBroker, pending.target,
         this.losassoCoarsePhiInput());
       this.losassoConditionedOperator?.encodeAfterGhostDistances(redistanceBroker);
-      this.losassoBackend?.encodeHierarchyRefresh(redistanceBroker, this.leafHeaders);
+      this.losassoBackend?.encodeHierarchyCoefficientRefresh(redistanceBroker);
       this.refreshLosassoProjectionGroups();
     }
     encoder = redistanceBroker.commandEncoder();
@@ -5139,10 +5144,10 @@ export class WebGPUOctreeProjection {
           const coarseBroker = new PassBroker(encoder);
           if (this.coarseDynamics.backend === "losasso") {
             if (!this.losassoCoarsePhi) throw new Error("Losasso coarse-phi exchange is unavailable");
-            this.losassoCoarsePhi.encode(coarseBroker, publicationTarget,
+            this.losassoCoarsePhi.encodeFieldRefresh(coarseBroker, publicationTarget,
               this.losassoCoarsePhiInput());
             this.losassoConditionedOperator?.encodeAfterGhostDistances(coarseBroker);
-            this.losassoBackend?.encodeHierarchyRefresh(coarseBroker, this.leafHeaders);
+            this.losassoBackend?.encodeHierarchyCoefficientRefresh(coarseBroker);
             this.refreshLosassoProjectionGroups();
           } else {
             this.encodeCoarsePhiCorrection(coarseBroker, publicationTarget,
@@ -6001,7 +6006,8 @@ export class WebGPUOctreeProjection {
       buffer: this.structuredVelocity.source.section63.coefficients,
       size: this.structuredVelocity.source.section63.coefficientBankStrideWords * 4,
     } : undefined;
-    const symmetry = this.pipelinedMGPCG?.symmetryStageAuditBuffers;
+    const symmetry = this.pipelinedMGPCG?.symmetryStageAuditBuffers
+      ?? this.losassoBackend?.solverSymmetryStageAuditBuffers;
     return fineTransportGovernor || pressureRhs || section63Coefficients || symmetry ? Object.freeze({
       ...(fineTransportGovernor ? { fineTransportGovernor } : {}),
       ...(pressureRhs ? { pressureRhs } : {}),
@@ -6335,6 +6341,8 @@ export class WebGPUOctreeProjection {
 
   async readLosassoAuthorityDiagnostics(): Promise<Readonly<{
     authority: readonly number[];
+    candidate: readonly number[];
+    candidateHeader: readonly number[];
     solver: readonly number[];
     coarsePhi: readonly number[];
   }> | undefined> {
@@ -6342,22 +6350,26 @@ export class WebGPUOctreeProjection {
     if (!backend || !coarse) return undefined;
     const readback = this.device.createBuffer({
       label: "Read Losasso reduced authority",
-      size: 32 + 32 + 80,
+      size: 32 + 32 + 48 + 32 + 80,
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
     });
     const encoder = this.device.createCommandEncoder({ label: "Read Losasso authority controls" });
     encoder.copyBufferToBuffer(backend.sources.operator.control, 0, readback, 0, 32);
+    encoder.copyBufferToBuffer(backend.candidateAuthorityControl, 0, readback, 32, 32);
+    encoder.copyBufferToBuffer(this.candidateLeafHeaders, 0, readback, 64, 48);
     const solver = backend.solverControl ?? backend.sources.rowCount;
-    encoder.copyBufferToBuffer(solver, 0, readback, 32, Math.min(32, solver.size));
-    encoder.copyBufferToBuffer(coarse.source.arena, 0, readback, 64, 80);
+    encoder.copyBufferToBuffer(solver, 0, readback, 112, Math.min(32, solver.size));
+    encoder.copyBufferToBuffer(coarse.source.arena, 0, readback, 144, 80);
     this.device.queue.submit([encoder.finish()]);
     try {
       await readback.mapAsync(GPUMapMode.READ);
       const words = new Uint32Array(readback.getMappedRange());
       return Object.freeze({
         authority: Array.from(words.slice(0, 8)),
-        solver: Array.from(words.slice(8, 16)),
-        coarsePhi: Array.from(words.slice(16, 36)),
+        candidate: Array.from(words.slice(8, 16)),
+        candidateHeader: Array.from(words.slice(16, 28)),
+        solver: Array.from(words.slice(28, 36)),
+        coarsePhi: Array.from(words.slice(36, 56)),
       });
     } finally {
       if (readback.mapState === "mapped") readback.unmap();
@@ -7306,7 +7318,11 @@ fn pressureVariableExists(owner: Owner) -> bool {
 // then residual sums rr/bb.
 fn pressureControlBase() -> u32 { return arrayLength(&compaction) - 8u; }
 fn pressureOverflowed() -> bool {
-  return compaction[pressureControlBase()] != 0u || atomicLoad(&owners[2]) != 0u;
+  // Owner probes made while refining dry support may reject pages which never
+  // become pressure rows. Do not let that transaction-wide diagnostic suppress
+  // every row write. Each emitted row revalidates its own owner below, and the
+  // downstream operator publisher fails closed if any header remains absent.
+  return compaction[pressureControlBase()] != 0u;
 }
 fn axisVector(axis: u32) -> vec3i { return select(select(vec3i(0,0,1), vec3i(0,1,0), axis == 1u), vec3i(1,0,0), axis == 0u); }
 fn worldCell(p: vec3i) -> vec3f {
@@ -7513,6 +7529,14 @@ fn rejectDirtyAuthority(reason: u32, stage: u32, slot: u32, tileIndex: u32,
 fn frontierGenerationReused() -> bool {
   return compaction[11] == FRONTIER_REUSE_MAGIC
     || compaction[frontierTopologyReuseBase()] != 0u;
+}
+// Between structural-delta classification and beginFrontier this word is the
+// exact quiescence latch.  The resident grading closure restores compaction's
+// capacity-shaped active-tile header, so it cannot recover the prior zero
+// dirty count from words 0..10.  beginFrontier clears the latch before the
+// same word resumes its existing frontier-publication meaning.
+fn topologyStructurallyQuiescent() -> bool {
+  return compaction[frontierTopologyReuseBase()] != 0u;
 }
 
 fn residencyTiledDispatch(blocks: u32) -> vec2u {
@@ -7853,6 +7877,11 @@ fn buildDirtyTileDelta() {
   let candidateDispatch = residencyTiledDispatch(
     totalTiles * candidateBlocks * candidateBlocks * candidateBlocks);
   compaction[8] = candidateDispatch.x; compaction[9] = candidateDispatch.y; compaction[10] = 1u;
+  // Persist the zero-delta decision across the full-residency worklist restore
+  // used by grading.  This is GPU-authored and consumed by the grading
+  // kernels; the host continues to encode the same static closure.
+  compaction[frontierTopologyReuseBase()] = select(0u, 1u,
+    validDelta && totalTiles == 0u);
   if (validDelta && compaction[dirtyFailureBase()] == 0u) {
     compaction[dirtyFailureBase()] = 0x100u;
   }
@@ -8690,6 +8719,7 @@ fn balanceTopology(@builtin(global_invocation_id) gid: vec3u) {
 
 @compute @workgroup_size(4,4,4)
 fn balanceTopologyDelta(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_id) lid: vec3u) {
+  if (topologyStructurallyQuiescent()) { return; }
   let base = deltaTopologyCandidate(wid, lid);
   for (var parity = 0u; parity < 8u; parity += 1u) {
     balanceTopologyAt(base + vec3u(parity & 1u, (parity >> 1u) & 1u, (parity >> 2u) & 1u));
@@ -8725,7 +8755,7 @@ fn balanceCoarseBlock(origin: vec3u, lid: u32) {
   // See refineCoarseBlock: bounds rejection flows through the
   // lane-0 eligibility store to keep barrier control flow formally uniform.
   if (lid == 0u) {
-    let inBounds = all(origin < dims());
+    let inBounds = all(origin < dims()) && !topologyStructurallyQuiescent();
     let owner = ownerAt(vec3i(min(origin, dims() - vec3u(1u))));
     atomicStore(&balanceEligible, select(0u, 1u, inBounds && ownerValid(owner)
       && owner.size == targetRefinementSize && isOrigin(origin, owner)));
@@ -9434,7 +9464,12 @@ fn finalizeFrontier(@builtin(local_invocation_index)lid:u32){
   let added=candidateCount;
   let retired=select(previousCount-carried,0u,carried>previousCount);
   let valid=rowDeltaReduce[0].x==0u&&rowDeltaReduce[0].y==0u&&carried<=previousCount
-    &&required==carried+added&&required==previousCount+added-retired;
+    &&required==carried+added&&required==previousCount+added-retired
+    // A transient wetness-authority gap must never turn a live topology into
+    // the terminal zero-row state. Dirty discovery only visits active tiles,
+    // so accepting this transition would make recovery impossible even when
+    // the next generation's fine/coarse publications are healthy again.
+    &&(previousCount==0u||required>0u);
   if(!valid){
     compaction[dirtyFailureBase()]=0x300u;
     compaction[dirtyFailureBase()+1u]=required;
@@ -9961,10 +9996,11 @@ fn gradingRoundActive() -> bool {
   // rather than as a shader error -- so this gate rides the lane-zero
   // eligibility store that already exists for exactly this reason.
   splice(
-    `    let inBounds = all(origin < dims());
+    `    let inBounds = all(origin < dims()) && !topologyStructurallyQuiescent();
     let owner = ownerAt(vec3i(min(origin, dims() - vec3u(1u))));
     atomicStore(&balanceEligible, select(0u, 1u, inBounds && ownerValid(owner)`,
-    `    let inBounds = all(origin < dims()) && gradingRoundActive();
+    `    let inBounds = all(origin < dims()) && !topologyStructurallyQuiescent()
+      && gradingRoundActive();
     let owner = ownerAt(vec3i(min(origin, dims() - vec3u(1u))));
     atomicStore(&balanceEligible, select(0u, 1u, inBounds && ownerValid(owner)`);
   splice(

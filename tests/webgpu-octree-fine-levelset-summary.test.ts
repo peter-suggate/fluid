@@ -71,7 +71,8 @@ test("fine-summary publication mutates a direct rank directory without sort, mer
     /@binding\(18\)var<storage,read_write>publishedDispatch:array<u32>[\s\S]*fn publishDispatch/,
     "singleton producers must write the exact dispatch records directly");
   assert.match(encode, /removeFineSummaryPages[\s\S]*addFineSummaryPages[\s\S]*publishFineSummaryCoarseRows/);
-  assert.match(encode, /recomputeFineSummaryBase[\s\S]*recomputeFineSummaryParents[\s\S]*publishFineSummaryDirect/);
+  assert.match(encode,
+    /recomputeFineSummaryBase[\s\S]*recomputeFineSummaryAllParents[\s\S]*publishFineSummaryDirect/);
   assert.doesNotMatch(encode, /sort|merge|recordScratch|carryRecords/);
   assert.doesNotMatch(fineLevelSetSummaryWGSL,
     /sortFineSummary|mergeFineSummary|recordLowerBound|while\(low<high\)|while\(lo<hi\)/);

@@ -41,6 +41,11 @@ test("the hybrid LoSasso lane uses the shared donor contract for its single trac
   ), "utf8");
   assert.match(host, /words\[30\] = 1;/,
     "the donor bound must not silently turn into a fixed transport-stage count");
+  assert.match(host, /dispatchWorkgroupsIndirect\([\s\S]*this\.liveDispatch, 0\)/,
+    "advect and commit must consume the GPU-published live page count");
+  assert.doesNotMatch(host, /dispatchWorkgroups\(this\.plan\.pageCapacity\)/);
+  assert.match(transport,
+    /atomicStore\(&liveDispatch\[0\],select\(0u,min\(worklist\[1\],p\.pageCapacity\)/);
 });
 
 test("warm redistance counts validated carried closest points as seed authority", () => {

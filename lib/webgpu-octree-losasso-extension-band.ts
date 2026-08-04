@@ -85,6 +85,7 @@ const ENTRY_POINTS = [
   "publishLosassoAirBandFaces",
   "dilateLosassoAirBand5",
   "dilateLosassoAirBand6",
+  "dilateLosassoAirBand7",
   "buildLosassoExtensionAdjacency",
   "finishLosassoExtensionBand",
   "gatherLosassoProjectedSeeds",
@@ -98,6 +99,7 @@ const BINDINGS: Readonly<Record<EntryPoint, readonly number[]>> = Object.freeze(
   publishLosassoAirBandFaces: [0, 1, 2, 3, 8, 9, 10, 13, 17],
   dilateLosassoAirBand5: [0, 8, 9, 10, 13, 17],
   dilateLosassoAirBand6: [0, 8, 9, 10, 13, 17],
+  dilateLosassoAirBand7: [0, 8, 9, 10, 13, 17],
   buildLosassoExtensionAdjacency: [0, 8, 10, 11, 12, 13],
   finishLosassoExtensionBand: [0, 4, 8],
   gatherLosassoProjectedSeeds: [0, 7, 8, 14, 16],
@@ -128,6 +130,8 @@ export class WebGPUOctreeLosassoExtensionBand {
   private readonly seedWetFace: GPUBuffer;
   private readonly geometricClaims: GPUBuffer;
   private readonly extension: WebGPUOctreeLosassoVelocityExtension;
+  private readonly bindGroupCache = new Map<GPUComputePipeline,
+    { entries: readonly { binding: number; buffer: GPUBuffer }[]; group: GPUBindGroup }[]>();
   private pipelines?: Readonly<Record<EntryPoint, GPUComputePipeline>>;
   private publishedFineGeneration = 0;
   private destroyed = false;
@@ -208,6 +212,21 @@ export class WebGPUOctreeLosassoExtensionBand {
     await this.extension.initialize();
   }
 
+  private cachedBindGroup(pipeline: GPUComputePipeline,
+    entries: readonly { binding: number; buffer: GPUBuffer }[]): GPUBindGroup {
+    const variants = this.bindGroupCache.get(pipeline) ?? [];
+    const cached = variants.find((variant) => variant.entries.length === entries.length
+      && variant.entries.every((entry, index) => entry.binding === entries[index]!.binding
+        && entry.buffer === entries[index]!.buffer));
+    if (cached) return cached.group;
+    const stableEntries = entries.map((entry) => ({ ...entry }));
+    const group = this.device.createBindGroup({ layout: pipeline.getBindGroupLayout(0),
+      entries: stableEntries.map(({ binding, buffer }) =>
+        ({ binding, resource: { buffer } })) });
+    variants.push({ entries: stableEntries, group }); this.bindGroupCache.set(pipeline, variants);
+    return group;
+  }
+
   /** Publish geometry, air classification, graph layers, seeds, and sampler lookup. */
   encodePublication(broker: PassBroker, fine: WebGPUFineLevelSetBrickSource): void {
     this.assertReady();
@@ -242,9 +261,8 @@ export class WebGPUOctreeLosassoExtensionBand {
       const pipeline = this.pipelines![entryPoint];
       const pass = broker.compute({ label: `Losasso extension band - ${entryPoint}` });
       pass.setPipeline(pipeline);
-      pass.setBindGroup(0, this.device.createBindGroup({ layout: pipeline.getBindGroupLayout(0),
-        entries: BINDINGS[entryPoint].map((binding) => ({ binding,
-          resource: { buffer: buffers.get(binding)! } })) }));
+      pass.setBindGroup(0, this.cachedBindGroup(pipeline,
+        BINDINGS[entryPoint].map((binding) => ({ binding, buffer: buffers.get(binding)! }))));
       const groupsX = Math.min(groups, 65_535), groupsY = Math.ceil(groups / groupsX);
       if (groupsY > 65_535) throw new RangeError("Losasso compact band exceeds 2D dispatch limits");
       pass.dispatchWorkgroups(groupsX, groupsY);
@@ -258,6 +276,11 @@ export class WebGPUOctreeLosassoExtensionBand {
       Math.ceil(macFacesPerBrick * finePlan.maximumResidentBricks / 64));
     run("dilateLosassoAirBand5", Math.ceil(this.plan.faceCapacity / 64));
     run("dilateLosassoAirBand6", Math.ceil(this.plan.faceCapacity / 64));
+    // A finest MAC trilinear corner can be three face-adjacency (L1) steps
+    // from the signed W4 transport core. The old two closures advertised W7
+    // but only guaranteed W6, leaving diagonal/corner traces without velocity
+    // coverage and biasing an otherwise D4-exact front toward the grid axes.
+    run("dilateLosassoAirBand7", Math.ceil(this.plan.faceCapacity / 64));
     run("buildLosassoExtensionAdjacency", Math.ceil(this.plan.faceCapacity / 64));
     run("finishLosassoExtensionBand", 1);
     this.publishedFineGeneration = fine.generation;
@@ -271,26 +294,24 @@ export class WebGPUOctreeLosassoExtensionBand {
     }
     const gather = this.pipelines!.gatherLosassoProjectedSeeds;
     let pass = broker.compute({ label: "Losasso extension band - gather projected seeds" });
-    pass.setPipeline(gather); pass.setBindGroup(0, this.device.createBindGroup({
-      layout: gather.getBindGroupLayout(0), entries: [
-        { binding: 0, resource: { buffer: this.params } },
-        { binding: 7, resource: { buffer: this.options.wet.projectedVelocity } },
-        { binding: 8, resource: { buffer: this.control } },
-        { binding: 14, resource: { buffer: this.projectedSeeds } },
-        { binding: 16, resource: { buffer: this.seedWetFace } },
-      ] }));
+    pass.setPipeline(gather); pass.setBindGroup(0, this.cachedBindGroup(gather, [
+      { binding: 0, buffer: this.params },
+      { binding: 7, buffer: this.options.wet.projectedVelocity },
+      { binding: 8, buffer: this.control },
+      { binding: 14, buffer: this.projectedSeeds },
+      { binding: 16, buffer: this.seedWetFace },
+    ]));
     const groups = Math.ceil(this.plan.faceCapacity / 64);
     pass.dispatchWorkgroups(Math.min(groups, 65_535), Math.ceil(groups / Math.min(groups, 65_535)));
     const encoded = this.extension.encodeOncePerAdvance(broker, advance, topologyEpoch);
     if (!encoded) return false;
     const publish = this.pipelines!.publishLosassoWetExtended;
     pass = broker.compute({ label: "Losasso extension band - publish wet velocity view" });
-    pass.setPipeline(publish); pass.setBindGroup(0, this.device.createBindGroup({
-      layout: publish.getBindGroupLayout(0), entries: [
-        { binding: 4, resource: { buffer: this.options.wet.control } },
-        { binding: 7, resource: { buffer: this.options.wet.projectedVelocity } },
-        { binding: 15, resource: { buffer: this.options.wet.extendedVelocity } },
-      ] }));
+    pass.setPipeline(publish); pass.setBindGroup(0, this.cachedBindGroup(publish, [
+      { binding: 4, buffer: this.options.wet.control },
+      { binding: 7, buffer: this.options.wet.projectedVelocity },
+      { binding: 15, buffer: this.options.wet.extendedVelocity },
+    ]));
     pass.dispatchWorkgroups(Math.ceil(this.options.wet.projectedVelocity.size / 4 / 64));
     return true;
   }
@@ -302,6 +323,7 @@ export class WebGPUOctreeLosassoExtensionBand {
     for (const buffer of [this.params, this.control, this.metrics, this.geometry,
       this.adjacencyOffsets, this.adjacency, this.directory, this.projectedSeeds,
       this.extended, this.seedWetFace, this.geometricClaims]) buffer.destroy();
+    this.bindGroupCache.clear();
     this.pipelines = undefined;
   }
   private assertReady(): void { this.assertLive(); if (!this.pipelines) throw new Error("Losasso extension band is not initialized"); }

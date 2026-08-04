@@ -1,9 +1,5 @@
 import { OCTREE_LOSASSO_CONTROL_WORDS, OCTREE_LOSASSO_FACE_BYTES } from
   "./octree-losasso-operator";
-import {
-  planSignedRadix256F32Reduction,
-  SIGNED_RADIX_256_F32_MAX_TERMS,
-} from "./webgpu-exact-f32-reduction";
 import { octreeLosassoHierarchyWGSL } from "./webgpu-octree-losasso-hierarchy.wgsl";
 import type {
   OctreeLosassoVCycleHierarchySource,
@@ -29,20 +25,21 @@ export interface WebGPUOctreeLosassoHierarchyCandidate {
 
 interface OwnedLevel extends OctreeLosassoVCycleLevelSource {
   readonly cells: GPUBuffer;
+  readonly coarseFaceSources: GPUBuffer;
 }
 
 interface OwnedTransfer extends OctreeLosassoVCycleTransferSource {
   readonly directory: GPUBuffer;
-  readonly scratch: GPUBuffer;
   readonly params: GPUBuffer;
 }
 
 const ENTRY_POINTS = [
   "extractLosassoFinestCells",
   "buildLosassoParentRows",
-  "finishLosassoParentRows",
   "buildLosassoCoarseFaces",
   "buildLosassoCoarseCSR",
+  "refreshLosassoCoarseFaces",
+  "refreshLosassoReusedCoarseFaces",
 ] as const;
 
 function positive(value: number, label: string): number {
@@ -59,13 +56,29 @@ function nextPowerOfTwo(value: number): number {
 }
 
 function parameterData(options: WebGPUOctreeLosassoHierarchyOptions,
-  targetSpan: number, directoryCapacity: number): ArrayBuffer {
-  const words = new Uint32Array(12);
+  targetSpan: number, directoryCapacity: number, fusedBaseWords: number): ArrayBuffer {
+  const words = new Uint32Array(16);
   words.set([...options.dimensions, targetSpan], 0);
   words.set([options.rowCapacity, options.rowCapacity, options.faceCapacity,
     directoryCapacity], 4);
   new Float32Array(words.buffer).set([...options.physicalCellSize, 0], 8);
+  words[12] = fusedBaseWords;
   return words.buffer;
+}
+
+function fusedLayout(rowCapacity: number, faceCapacity: number) {
+  const controlOffsetWords = 0;
+  const rowOffsetsOffsetWords = controlOffsetWords + OCTREE_LOSASSO_CONTROL_WORDS;
+  const rowFacesOffsetWords = rowOffsetsOffsetWords + rowCapacity + 1;
+  const facesOffsetWords = rowFacesOffsetWords + 2 * faceCapacity;
+  const parentsOffsetWords = facesOffsetWords + 8 * faceCapacity;
+  const childOffsetsOffsetWords = parentsOffsetWords + rowCapacity;
+  const childListOffsetWords = childOffsetsOffsetWords + rowCapacity + 1;
+  const transitionStrideWords = childListOffsetWords + rowCapacity;
+  return Object.freeze({ rowCapacity, faceCapacity, transitionStrideWords,
+    controlOffsetWords, rowOffsetsOffsetWords, rowFacesOffsetWords,
+    facesOffsetWords, parentsOffsetWords, childOffsetsOffsetWords,
+    childListOffsetWords });
 }
 
 /**
@@ -81,8 +94,13 @@ export class WebGPUOctreeLosassoHierarchyPublisher {
   readonly allocatedBytes: number;
 
   private readonly finestCells: GPUBuffer;
+  private readonly fusedArena: GPUBuffer;
   private readonly ownedLevels: readonly OwnedLevel[];
   private readonly ownedTransfers: readonly OwnedTransfer[];
+  private readonly bindGroupCache = new Map<GPUComputePipeline, {
+    readonly bindings: readonly number[]; readonly buffers: readonly GPUBuffer[];
+    readonly group: GPUBindGroup;
+  }[]>();
   private pipelines?: Readonly<Record<typeof ENTRY_POINTS[number], GPUComputePipeline>>;
   private destroyed = false;
 
@@ -99,9 +117,6 @@ export class WebGPUOctreeLosassoHierarchyPublisher {
     if (options.dimensions.some((value) => value % maximumLeafSize !== 0)) {
       throw new RangeError("Losasso hierarchy dimensions must be divisible by maximum leaf size");
     }
-    if (rows > SIGNED_RADIX_256_F32_MAX_TERMS) {
-      throw new RangeError("Losasso hierarchy row capacity exceeds exact restriction capacity");
-    }
     for (const [axis, size] of options.physicalCellSize.entries()) {
       if (!Number.isFinite(size) || size <= 0) {
         throw new RangeError(`Losasso hierarchy cell size ${axis} must be positive and finite`);
@@ -117,12 +132,18 @@ export class WebGPUOctreeLosassoHierarchyPublisher {
     const levels: OwnedLevel[] = [];
     const transfers: OwnedTransfer[] = [];
     const directoryCapacity = nextPowerOfTwo(2 * rows);
-    const exact = planSignedRadix256F32Reduction(rows, 1);
+    const transitionCount = Math.log2(maximumLeafSize);
+    const packed = fusedLayout(rows, faces);
+    const levelRowCapacities = [rows];
+    this.fusedArena = make("packed fused sub-L0 hierarchy",
+      Math.max(1, transitionCount) * packed.transitionStrideWords * 4);
     let fineDispatch = options.finest.rowDispatch;
     for (let targetSpan = 2, level = 1; targetSpan <= maximumLeafSize;
       targetSpan *= 2, level += 1) {
+      levelRowCapacities.push(Math.min(rows,
+        (nx / targetSpan) * (ny / targetSpan) * (nz / targetSpan)));
       const control = make(`L${level} control`, OCTREE_LOSASSO_CONTROL_WORDS * 4);
-      const rowDispatch = make(`L${level} row dispatch`, 12, indirect);
+      const rowDispatch = make(`L${level} row and face dispatch`, 24, indirect);
       const ownedLevel: OwnedLevel = Object.freeze({
         rowCapacity: rows,
         control,
@@ -131,19 +152,19 @@ export class WebGPUOctreeLosassoHierarchyPublisher {
         faces: make(`L${level} axis faces`, faces * OCTREE_LOSASSO_FACE_BYTES),
         rowDispatch,
         cells: make(`L${level} row geometry`, rows * 16),
+        coarseFaceSources: make(`L${level} fine-face provenance`, faces * 4),
       });
-      const params = make(`L${level} publication parameters`, 48,
+      const params = make(`L${level} publication parameters`, 64,
         GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
       device.queue.writeBuffer(params, 0,
-        parameterData(options, targetSpan, directoryCapacity));
+        parameterData(options, targetSpan, directoryCapacity,
+          (level - 1) * packed.transitionStrideWords));
       transfers.push(Object.freeze({
         fineParents: make(`L${level - 1} parent rows`, rows * 4),
-        fineVolumes: make(`L${level - 1} voxel volumes`, rows * 4),
-        coarseInverseVolumes: make(`L${level} inverse wet volumes`, rows * 4),
-        restrictionPartials: make(`L${level} exact restriction limbs`, exact.byteLength),
+        childOffsets: make(`L${level} child offsets`, (rows + 1) * 4),
+        childList: make(`L${level} ascending child rows`, rows * 4),
         fineRowDispatch: fineDispatch,
         directory: make(`L${level} parent directory`, directoryCapacity * 8),
-        scratch: make(`L${level} integer volume and CSR scratch`, rows * 4),
         params,
       }));
       levels.push(ownedLevel);
@@ -154,13 +175,16 @@ export class WebGPUOctreeLosassoHierarchyPublisher {
     this.hierarchy = Object.freeze({
       levels: Object.freeze([options.finest, ...levels]),
       transfers: Object.freeze([...transfers]),
+      fusedSubL0: Object.freeze({ arena: this.fusedArena, ...packed,
+        levelRowCapacities: Object.freeze(levelRowCapacities) }),
     });
-    this.allocatedBytes = this.finestCells.size
+    this.allocatedBytes = this.finestCells.size + this.fusedArena.size
       + [...levels.flatMap((level) => [level.control, level.rowFaceOffsets,
-        level.rowFaces, level.faces, level.rowDispatch, level.cells]),
-      ...transfers.flatMap((transfer) => [transfer.fineParents, transfer.fineVolumes,
-        transfer.coarseInverseVolumes, transfer.restrictionPartials,
-        transfer.directory, transfer.scratch, transfer.params])]
+        level.rowFaces, level.faces, level.rowDispatch, level.cells,
+        level.coarseFaceSources]),
+      ...transfers.flatMap((transfer) => [transfer.fineParents, transfer.childOffsets,
+        transfer.childList,
+        transfer.directory, transfer.params])]
         .filter((buffer, index, all) => all.indexOf(buffer) === index)
         .reduce((sum, buffer) => sum + buffer.size, 0);
     this.initializationTasks = [{ label: "Compile reduced Losasso hierarchy publisher",
@@ -183,6 +207,24 @@ export class WebGPUOctreeLosassoHierarchyPublisher {
       Record<typeof ENTRY_POINTS[number], GPUComputePipeline>;
   }
 
+  private cachedBindGroup(pipeline: GPUComputePipeline, label: string,
+    bindings: readonly number[], buffers: readonly GPUBuffer[]): GPUBindGroup {
+    const variants = this.bindGroupCache.get(pipeline) ?? [];
+    const cached = variants.find((variant) => variant.bindings.length === bindings.length
+      && variant.bindings.every((binding, index) => binding === bindings[index]
+        && variant.buffers[index] === buffers[index]));
+    if (cached) return cached.group;
+    const stableBindings = [...bindings], stableBuffers = [...buffers];
+    const group = this.device.createBindGroup({ label,
+      layout: pipeline.getBindGroupLayout(0),
+      entries: stableBindings.map((binding, index) =>
+        ({ binding, resource: { buffer: stableBuffers[index]! } })),
+    });
+    variants.push({ bindings: stableBindings, buffers: stableBuffers, group });
+    this.bindGroupCache.set(pipeline, variants);
+    return group;
+  }
+
   encodeCandidatePublication(broker: PassBroker,
     candidate: WebGPUOctreeLosassoHierarchyCandidate): void {
     this.assertLive();
@@ -195,15 +237,9 @@ export class WebGPUOctreeLosassoHierarchyPublisher {
     let fineCells = this.finestCells;
     let fineFaces = candidate.finestFaces;
     const extract = this.pipelines.extractLosassoFinestCells;
-    const extractGroup = this.device.createBindGroup({
-      label: "Losasso hierarchy finest geometry bindings",
-      layout: extract.getBindGroupLayout(0), entries: [
-        { binding: 0, resource: { buffer: this.ownedTransfers[0]!.params } },
-        { binding: 1, resource: { buffer: candidate.leafHeaders } },
-        { binding: 2, resource: { buffer: fineControl } },
-        { binding: 3, resource: { buffer: fineCells } },
-      ],
-    });
+    const extractGroup = this.cachedBindGroup(extract,
+      "Losasso hierarchy finest geometry bindings", [0, 1, 2, 3],
+      [this.ownedTransfers[0]!.params, candidate.leafHeaders, fineControl, fineCells]);
     const pass = broker.compute({ label: "Losasso hierarchy - publish geometric levels" });
     pass.setPipeline(extract); pass.setBindGroup(0, extractGroup);
     pass.dispatchWorkgroups(Math.ceil(this.options.rowCapacity / 64));
@@ -211,7 +247,35 @@ export class WebGPUOctreeLosassoHierarchyPublisher {
       const coarse = this.ownedLevels[index]!;
       const transfer = this.ownedTransfers[index]!;
       this.encodeTransition(pass, { fineControl, fineCells, fineFaces, coarse, transfer });
+      this.encodeReusedTransitionRefresh(pass, { fineControl, fineCells, fineFaces, coarse, transfer });
       fineControl = coarse.control; fineCells = coarse.cells; fineFaces = coarse.faces;
+    }
+  }
+
+  /** Refresh face coefficients while retaining the topology built for this epoch. */
+  encodeCoefficientRefresh(broker: PassBroker, finest: {
+    readonly control: GPUBuffer;
+    readonly faces: GPUBuffer;
+  }): void {
+    this.assertLive();
+    if (!this.pipelines) throw new Error("Losasso hierarchy publisher is not initialized");
+    if (this.ownedLevels.length === 0) return;
+    const pipeline = this.pipelines.refreshLosassoCoarseFaces;
+    const pass = broker.compute({ label: "Losasso hierarchy - refresh face coefficients" });
+    let fineControl = finest.control;
+    let fineCells = this.finestCells;
+    let fineFaces = finest.faces;
+    for (const [index, coarse] of this.ownedLevels.entries()) {
+      const bindings = [0, 2, 3, 4, 5, 6, 7, 16, 17];
+      const group = this.cachedBindGroup(pipeline,
+        "Losasso hierarchy coefficient refresh bindings", bindings,
+        [this.ownedTransfers[index]!.params, fineControl, fineCells, fineFaces,
+          coarse.control, coarse.cells, coarse.faces, coarse.coarseFaceSources, this.fusedArena]);
+      pass.setPipeline(pipeline); pass.setBindGroup(0, group);
+      pass.dispatchWorkgroupsIndirect(coarse.rowDispatch, 12);
+      fineControl = coarse.control;
+      fineCells = coarse.cells;
+      fineFaces = coarse.faces;
     }
   }
 
@@ -223,52 +287,67 @@ export class WebGPUOctreeLosassoHierarchyPublisher {
     const buffers = [input.transfer.params, input.fineControl, input.fineCells,
       input.fineFaces, input.coarse.control, input.coarse.cells, input.coarse.faces,
       input.coarse.rowFaceOffsets, input.coarse.rowFaces, input.coarse.rowDispatch,
-      input.transfer.fineParents, input.transfer.fineVolumes,
-      input.transfer.coarseInverseVolumes, input.transfer.directory,
-      input.transfer.scratch];
+      input.transfer.fineParents, input.transfer.childOffsets,
+      input.transfer.childList, input.transfer.directory,
+      input.coarse.coarseFaceSources, this.fusedArena];
     const bindingBuffers = new Map<number, GPUBuffer>([
       [0, buffers[0]!], [2, buffers[1]!], [3, buffers[2]!], [4, buffers[3]!],
       [5, buffers[4]!], [6, buffers[5]!], [7, buffers[6]!], [8, buffers[7]!],
       [9, buffers[8]!], [10, buffers[9]!], [11, buffers[10]!], [12, buffers[11]!],
-      [13, buffers[12]!], [14, buffers[13]!], [15, buffers[14]!],
+      [13, buffers[12]!], [14, buffers[13]!], [16, buffers[14]!],
+      [17, buffers[15]!],
     ]);
     const bindings: Readonly<Record<Exclude<typeof ENTRY_POINTS[number],
       "extractLosassoFinestCells">, readonly number[]>> = {
-        buildLosassoParentRows: [0, 2, 3, 5, 6, 11, 12, 14, 15],
-        finishLosassoParentRows: [5, 10, 13, 15],
-        buildLosassoCoarseFaces: [0, 2, 3, 4, 5, 6, 7, 11],
-        buildLosassoCoarseCSR: [0, 5, 7, 8, 9, 10, 15],
-      };
-    const transitionEntryPoints = ENTRY_POINTS.slice(1) as readonly
-      Exclude<typeof ENTRY_POINTS[number], "extractLosassoFinestCells">[];
+        buildLosassoParentRows: [0, 2, 3, 5, 6, 10, 11, 12, 13, 14, 17],
+        buildLosassoCoarseFaces: [0, 2, 3, 4, 5, 6, 7, 11, 16, 17],
+        buildLosassoCoarseCSR: [0, 2, 5, 7, 8, 9, 10, 17],
+      refreshLosassoCoarseFaces: [0, 2, 3, 4, 5, 6, 7, 16, 17],
+      refreshLosassoReusedCoarseFaces: [0, 2, 3, 4, 5, 6, 7, 16, 17],
+    };
+    const transitionEntryPoints = ["buildLosassoParentRows", "buildLosassoCoarseFaces",
+      "buildLosassoCoarseCSR"] as const;
     for (const entryPoint of transitionEntryPoints) {
       const pipeline = this.pipelines![entryPoint];
-      const group = this.device.createBindGroup({
-        label: `Losasso hierarchy bindings - ${entryPoint}`,
-        layout: pipeline.getBindGroupLayout(0),
-        entries: bindings[entryPoint].map((binding) => ({ binding,
-          resource: { buffer: bindingBuffers.get(binding)! } })),
-      });
+      const selected = bindings[entryPoint];
+      const group = this.cachedBindGroup(pipeline,
+        `Losasso hierarchy bindings - ${entryPoint}`, selected,
+        selected.map((binding) => bindingBuffers.get(binding)!));
       pass.setPipeline(pipeline); pass.setBindGroup(0, group);
-      pass.dispatchWorkgroups(entryPoint === "finishLosassoParentRows"
-        ? Math.ceil(this.options.rowCapacity / 64) : 1);
+      pass.dispatchWorkgroups(1);
     }
+  }
+
+  private encodeReusedTransitionRefresh(pass: GPUComputePassEncoder, input: {
+    readonly fineControl: GPUBuffer; readonly fineCells: GPUBuffer;
+    readonly fineFaces: GPUBuffer; readonly coarse: OwnedLevel;
+    readonly transfer: OwnedTransfer;
+  }): void {
+    const pipeline = this.pipelines!.refreshLosassoReusedCoarseFaces;
+    const group = this.cachedBindGroup(pipeline,
+      "Losasso hierarchy exact-reuse coefficient refresh bindings",
+      [0, 2, 3, 4, 5, 6, 7, 16, 17], [input.transfer.params, input.fineControl,
+        input.fineCells, input.fineFaces, input.coarse.control, input.coarse.cells,
+        input.coarse.faces, input.coarse.coarseFaceSources, this.fusedArena]);
+    pass.setPipeline(pipeline); pass.setBindGroup(0, group);
+    pass.dispatchWorkgroupsIndirect(input.coarse.rowDispatch, 12);
   }
 
   destroy(): void {
     if (this.destroyed) return;
     this.destroyed = true;
-    const buffers = [this.finestCells,
+    const buffers = [this.finestCells, this.fusedArena,
       ...this.ownedLevels.flatMap((level) => [level.control, level.rowFaceOffsets,
-        level.rowFaces, level.faces, level.rowDispatch, level.cells]),
+        level.rowFaces, level.faces, level.rowDispatch, level.cells,
+        level.coarseFaceSources]),
       ...this.ownedTransfers.flatMap((transfer) => [transfer.fineParents,
-        transfer.fineVolumes, transfer.coarseInverseVolumes,
-        transfer.restrictionPartials,
-        transfer.directory, transfer.scratch, transfer.params])];
+        transfer.childOffsets, transfer.childList,
+        transfer.directory, transfer.params])];
     for (const buffer of buffers.filter((value, index, all) => all.indexOf(value) === index)) {
       buffer.destroy();
     }
     this.pipelines = undefined;
+    this.bindGroupCache.clear();
   }
 
   private assertLive(): void {

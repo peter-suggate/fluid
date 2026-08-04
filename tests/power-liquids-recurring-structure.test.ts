@@ -263,8 +263,8 @@ test("fine-summary builder publishes one exact indirect extent for the rank-inde
     /fine-summary recompute dispatch publication[\s\S]*this\.recomputeDispatch,\s*0/,
     "the direct dispatch arena must cross one explicit storage-to-indirect legality boundary");
   assert.match(encode,
-    /indirect\("recomputeFineSummaryBase"[\s\S]*for\s*\(let level\s*=\s*1;level\s*<=\s*this\.plan\.maximumLevel[\s\S]*indirect\("recomputeFineSummaryParents"/,
-    "the base and every parent mip level must share the exact active-rank extent");
+    /indirect\("recomputeFineSummaryBase"[\s\S]*indirect\("recomputeFineSummaryAllParents"/,
+    "the base and fused all-parent rebuild must share the exact active-rank extent");
 });
 
 test("coarse-phi delta commit broadcasts authority and bounds before every barrier", () => {

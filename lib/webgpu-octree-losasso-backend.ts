@@ -101,6 +101,7 @@ export interface WebGPUOctreeLosassoPressureSolver {
   readonly allocatedBytes?: number;
   readonly control?: GPUBuffer;
   readonly iterationBudget?: number;
+  readonly symmetryStageAuditBuffers?: WebGPUOctreePipelinedMGPCG["symmetryStageAuditBuffers"];
   encodeSolve(broker: PassBroker, input: {
     readonly pressureSeed: GPUBuffer;
     readonly pressureOut: GPUBuffer;
@@ -151,8 +152,9 @@ export interface WebGPUOctreeLosassoBackendOptions {
 
 const PUBLISH_ENTRY_POINTS = [
   "beginLosassoPublication", "countLosassoFaces", "prefixLosassoFaces",
+  "clearLosassoFaceDirectory",
   "emitLosassoFaces", "conditionLosassoFaces", "prefixLosassoIncidences", "scatterLosassoIncidences",
-  "sortLosassoIncidences", "finishLosassoPublication",
+  "sortLosassoIncidences", "clearLosassoAdjacencyOffsets", "finishLosassoPublication",
 ] as const;
 const AUTHORITY_COMMIT_ENTRY_POINTS = [
   "commitLosassoAuthorityRows", "commitLosassoAuthorityIncidences",
@@ -221,6 +223,8 @@ class WebGPUOctreeLosassoTopologyPublisher implements WebGPUOctreeLosassoCandida
   private readonly scratch: GPUBuffer;
   private readonly hierarchyPublisher?: WebGPUOctreeLosassoHierarchyPublisher;
   private readonly velocityMigration: WebGPUOctreeLosassoVelocityMigration;
+  private readonly bindGroupCache = new Map<GPUComputePipeline,
+    { bindings: readonly number[]; buffers: readonly GPUBuffer[]; group: GPUBindGroup }[]>();
   private pipelines?: readonly GPUComputePipeline[];
   private commitPipelines?: readonly GPUComputePipeline[];
   private destroyed = false;
@@ -325,6 +329,24 @@ class WebGPUOctreeLosassoTopologyPublisher implements WebGPUOctreeLosassoCandida
       })));
   }
 
+  private cachedBindGroup(pipeline: GPUComputePipeline, label: string,
+    bindings: readonly number[], buffers: readonly GPUBuffer[]): GPUBindGroup {
+    const variants = this.bindGroupCache.get(pipeline) ?? [];
+    const cached = variants.find((variant) => variant.bindings.length === bindings.length
+      && variant.bindings.every((binding, index) => binding === bindings[index]
+        && variant.buffers[index] === buffers[index]));
+    if (cached) return cached.group;
+    const stableBindings = [...bindings], stableBuffers = [...buffers];
+    const group = this.device.createBindGroup({ label,
+      layout: pipeline.getBindGroupLayout(0),
+      entries: stableBindings.map((binding, index) =>
+        ({ binding, resource: { buffer: stableBuffers[index]! } })),
+    });
+    variants.push({ bindings: stableBindings, buffers: stableBuffers, group });
+    this.bindGroupCache.set(pipeline, variants);
+    return group;
+  }
+
   encodeCandidatePublication(broker: PassBroker, input: WebGPUOctreeLosassoCandidateInput): void {
     this.assertLive();
     this.encode(broker, input, this.authority.candidate);
@@ -350,31 +372,36 @@ class WebGPUOctreeLosassoTopologyPublisher implements WebGPUOctreeLosassoCandida
       candidate.diagonal, accepted.diagonal, candidate.solverAuthority,
       accepted.solverAuthority, accepted.control];
     const bindings = [
-      [0, 1, 2, 3, 4, 5, 14, 15, 28, 29],
-      [0, 1, 2, 3, 4, 6, 7],
-      [0, 1, 2, 3, 8, 9, 24, 25],
-      [0, 1, 2, 3, 16, 17, 18, 19, 20, 21],
-      [0, 1, 2, 3, 22, 23],
-      [0, 1, 2, 3, 26, 27],
+      [0, 1, 2, 3, 4, 5, 14, 15, 28, 29, 32],
+      [0, 1, 2, 3, 4, 6, 7, 32],
+      [0, 1, 2, 3, 8, 9, 24, 25, 32],
+      [0, 1, 2, 3, 16, 17, 18, 19, 20, 21, 32],
+      [0, 1, 2, 3, 22, 23, 32],
+      [0, 1, 2, 3, 26, 27, 32],
       [0, 1, 2, 3, 10, 11, 12, 13, 30, 31, 32],
     ] as const;
-    const groups = this.commitPipelines.map((pipeline, pipelineIndex) =>
-      this.device.createBindGroup({
-        label: `Losasso ready authority bindings - ${AUTHORITY_COMMIT_ENTRY_POINTS[pipelineIndex]}`,
-        layout: pipeline.getBindGroupLayout(0),
-        entries: bindings[pipelineIndex]!.map((binding) =>
-          ({ binding, resource: { buffer: buffers[binding]! } })),
-      }));
+    const groups = this.commitPipelines.map((pipeline, pipelineIndex) => {
+      const selected = bindings[pipelineIndex]!;
+      return this.cachedBindGroup(pipeline,
+        `Losasso ready authority bindings - ${AUTHORITY_COMMIT_ENTRY_POINTS[pipelineIndex]}`,
+        selected, selected.map((binding) => buffers[binding]!));
+    });
     const capacities = accepted.capacities;
     const dispatches = [Math.ceil((capacities.rows + 1) / 64),
       Math.ceil(capacities.incidences / 64), Math.ceil(capacities.faces / 64),
       Math.ceil(Math.max(capacities.faces + 1, capacities.faceAdjacencies) / 64),
       Math.ceil(capacities.faces / 64), Math.ceil(accepted.faceDirectoryCapacity / 64), 1];
     const pass = broker.compute({ label: "Losasso topology - commit ready authority bank" });
+    const dispatchLimit = this.device.limits.maxComputeWorkgroupsPerDimension;
     for (let index = 0; index < this.commitPipelines.length; index += 1) {
       pass.setPipeline(this.commitPipelines[index]!);
       pass.setBindGroup(0, groups[index]!);
-      pass.dispatchWorkgroups(dispatches[index]!, 1, 1);
+      if (index === 5) pass.dispatchWorkgroupsIndirect(candidate.faceDispatch, 12);
+      else {
+        const count = dispatches[index]!;
+        const width = Math.min(count, dispatchLimit);
+        pass.dispatchWorkgroups(width, Math.ceil(count / Math.max(1, width)), 1);
+      }
     }
   }
 
@@ -390,6 +417,17 @@ class WebGPUOctreeLosassoTopologyPublisher implements WebGPUOctreeLosassoCandida
     return true;
   }
 
+  /** Refresh only accepted coarse face fields; row/face topology stays fixed. */
+  encodeHierarchyCoefficientRefresh(broker: PassBroker): boolean {
+    this.assertLive();
+    if (!this.hierarchyPublisher) return false;
+    this.hierarchyPublisher.encodeCoefficientRefresh(broker, {
+      control: this.authority.writable.control,
+      faces: this.authority.writable.faces,
+    });
+    return true;
+  }
+
   private encode(broker: PassBroker, input: WebGPUOctreeLosassoCandidateInput,
     output: WebGPUOctreeLosassoWritableAuthority): void {
     this.assertLive();
@@ -399,6 +437,7 @@ class WebGPUOctreeLosassoTopologyPublisher implements WebGPUOctreeLosassoCandida
     }
     this.velocityMigration.encodeSnapshot(broker, {
       control: this.authority.writable.control,
+      faceDispatch: this.authority.writable.faceDispatch,
       faces: this.authority.writable.faces,
       faceGeometry: this.authority.writable.faceGeometry,
       axisFaceDirectory: this.authority.writable.axisFaceDirectory,
@@ -412,36 +451,44 @@ class WebGPUOctreeLosassoTopologyPublisher implements WebGPUOctreeLosassoCandida
       output.solverAuthority, input.solidCells, input.rigidBodies,
       // Binding 20 is intentionally unused: candidate rows do not have an
       // accepted-index phi. Preserve binding 21's owner-transaction ABI.
-      input.ownerCandidateTransaction, input.ownerCandidateTransaction];
+      input.ownerCandidateTransaction, input.ownerCandidateTransaction,
+      this.authority.writable.control];
     const bindings = [
-      [0, 2, 3, 4, 8, 9, 17, 21],
+      [0, 2, 3, 4, 8, 9, 17, 21, 22],
       [0, 1, 3, 4, 10, 13],
-      [0, 4, 13],
+      [0, 4, 9, 13],
+      [4, 15],
       [0, 1, 3, 4, 7, 11, 13, 14],
       [0, 4, 7, 14, 18, 19],
       [0, 4, 5, 13],
       [0, 4, 5, 6, 7, 13],
       [0, 4, 5, 6, 7, 10, 16],
-      [0, 4, 8, 9, 12, 14, 15, 17],
+      [4, 12],
+      [0, 4, 8, 9, 14, 15, 17],
     ] as const;
-    const groups = this.pipelines.map((pipeline, pipelineIndex) =>
-      this.device.createBindGroup({
-        label: `Losasso compact publication bindings - ${PUBLISH_ENTRY_POINTS[pipelineIndex]}`,
-        layout: pipeline.getBindGroupLayout(0),
-        entries: bindings[pipelineIndex]!.map((binding) =>
-          ({ binding, resource: { buffer: buffers[binding]! } })),
-      }));
-    const rowGroups = Math.ceil(output.capacities.rows / 64);
-    const faceGroups = Math.ceil(output.capacities.faces / 64);
-    const dispatches = [1, rowGroups, 1, rowGroups, faceGroups, 1, faceGroups, rowGroups, 1];
+    const groups = this.pipelines.map((pipeline, pipelineIndex) => {
+      const selected = bindings[pipelineIndex]!;
+      return this.cachedBindGroup(pipeline,
+        `Losasso compact publication bindings - ${PUBLISH_ENTRY_POINTS[pipelineIndex]}`,
+        selected, selected.map((binding) => buffers[binding]!));
+    });
+    const dispatches = ["single", "row", "single", "directory", "row", "face",
+      "single", "face", "row", "face", "single"] as const;
     const pass = broker.compute({ label: "Losasso topology - publish compact axis faces" });
     for (let index = 0; index < this.pipelines.length; index += 1) {
       pass.setPipeline(this.pipelines[index]!);
       pass.setBindGroup(0, groups[index]!);
-      pass.dispatchWorkgroups(dispatches[index]!, 1, 1);
+      const dispatch = dispatches[index]!;
+      if (dispatch === "row") pass.dispatchWorkgroupsIndirect(output.rowDispatch, 0);
+      else if (dispatch === "face") pass.dispatchWorkgroupsIndirect(output.faceDispatch, 0);
+      else if (dispatch === "directory") {
+        pass.dispatchWorkgroupsIndirect(output.faceDispatch, 12);
+      }
+      else pass.dispatchWorkgroups(1, 1, 1);
     }
     this.velocityMigration.encodeMigration(broker, {
       control: output.control,
+      faceDispatch: output.faceDispatch,
       faces: output.faces,
       faceGeometry: output.faceGeometry,
       axisFaceDirectory: output.axisFaceDirectory,
@@ -458,6 +505,7 @@ class WebGPUOctreeLosassoTopologyPublisher implements WebGPUOctreeLosassoCandida
     this.hierarchyPublisher?.destroy();
     this.velocityMigration.destroy();
     this.authority.destroy();
+    this.bindGroupCache.clear();
     this.pipelines = undefined;
     this.commitPipelines = undefined;
   }
@@ -475,6 +523,7 @@ class WebGPUOctreeLosassoWideSolver implements WebGPUOctreeLosassoPressureSolver
   private readonly executor: WebGPUOctreePipelinedMGPCG;
   get control(): GPUBuffer { return this.executor.control; }
   get iterationBudget(): number { return this.executor.iterationBudget; }
+  get symmetryStageAuditBuffers() { return this.executor.symmetryStageAuditBuffers; }
 
   constructor(device: GPUDevice, input: {
     readonly rowCapacity: number;
@@ -554,6 +603,7 @@ export class WebGPUOctreeLosassoCoarseBackend {
   readonly extensionPublication = "W7-finest-air-face-band" as const;
   get solverControl(): GPUBuffer | undefined { return this.solver.control; }
   get solverIterationBudget(): number | undefined { return this.solver.iterationBudget; }
+  get solverSymmetryStageAuditBuffers() { return this.solver.symmetryStageAuditBuffers; }
 
   private readonly publisher: WebGPUOctreeLosassoTopologyPublisher;
   private initialized = false;
@@ -694,6 +744,13 @@ export class WebGPUOctreeLosassoCoarseBackend {
   encodeHierarchyRefresh(broker: PassBroker, acceptedLeafHeaders: GPUBuffer): boolean {
     this.assertReady();
     return this.publisher.encodeHierarchyRefresh(broker, acceptedLeafHeaders);
+  }
+
+
+  /** Call when ghost conditioning changed fields without changing topology. */
+  encodeHierarchyCoefficientRefresh(broker: PassBroker): boolean {
+    this.assertReady();
+    return this.publisher.encodeHierarchyCoefficientRefresh(broker);
   }
 
   encodeSolve(broker: PassBroker, input: {
