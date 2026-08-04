@@ -327,6 +327,10 @@ const findSpan = (spans: readonly { start: number; end: number }[], time: number
  * frame timeline starts at the frame's work rather than merely having the
  * correct period. */
 export const GPU_FRAME_START_LABELS = [
+  // Losasso has its own reduced ready-commit path and therefore never emits
+  // the shared Power topology gate below. This validation is the first real
+  // recurring dispatch in that backend's command buffer.
+  "Losasso - validate ready row commit",
   "Open coupled topology ready-commit gate",
   // This recurring publication is submitted immediately before the topology
   // gate. Depending on where the attached encoder metadata stream warms up,

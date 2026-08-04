@@ -589,7 +589,8 @@ const startWorker = (
         announceConstructed();
       }
       if (record.phase === "before-first-advance"
-        && (record as { profileGate?: string }).profileGate === "waiting-for-sigusr1") {
+        && ["waiting-for-sigusr2", "waiting-for-sigusr1"].includes(
+          (record as { profileGate?: string }).profileGate ?? "")) {
         announceBeforeFirstAdvance();
       }
     } catch { /* progress lines are not all JSON */ }
@@ -942,6 +943,11 @@ const main = async (): Promise<void> => {
             recordingStartedAt = Date.now();
             observeCaptureScratch();
             if (profileGate) {
+              // Make Instruments observe one disposable compute pass before
+              // the first real advance. Without this, attached recordings can
+              // retain the GPU intervals but omit every Metal encoder label
+              // from the first Losasso command buffer.
+              process.kill(handle.pid, "SIGUSR2");
               releaseGate = delay(counterGateWarmupMs).then(() => {
                 process.kill(handle.pid, "SIGUSR1");
               });

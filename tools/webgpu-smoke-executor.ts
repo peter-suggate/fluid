@@ -386,6 +386,14 @@ const firstAdvanceProfileGateReleased = firstAdvanceProfileGate
     process.once("SIGUSR1", resolve);
   })
   : undefined;
+/** An attached Metal recording does not publish encoder metadata until it has
+ * observed GPU work from the target process. Prime that stream while the real
+ * first advance is still gated so its isolated Losasso pass labels survive. */
+const firstAdvanceProfileMetadataWarm = firstAdvanceProfileGate
+  ? new Promise<void>((resolve) => {
+    process.once("SIGUSR2", resolve);
+  })
+  : undefined;
 const regressionArtifactRequested = process.env.FLUID_REGRESSION_ARTIFACT === "1";
 const genericPhaseTraceRequested = process.env.FLUID_GPU_FINE_TIMESTAMPS === "1";
 /** X-6 needs the buffer dependency DAG without also enabling the semantic
@@ -1462,7 +1470,21 @@ async function runGPU(
         leaves: { live, core, halo, minimumPhi, maximumPhi } }));
     }
   }
-  if (firstAdvanceProfileGateReleased) {
+  if (firstAdvanceProfileGateReleased && firstAdvanceProfileMetadataWarm) {
+    console.log(JSON.stringify({ scenario: scenarioId, method: resultMethod,
+      phase: "before-first-advance", profileGate: "waiting-for-sigusr2" }));
+    await firstAdvanceProfileMetadataWarm;
+    const metadataWarmEncoder = instrumentedDevice.createCommandEncoder({
+      label: "Profile encoder metadata warmup",
+    });
+    const metadataWarmPass = metadataWarmEncoder.beginComputePass({
+      label: "Profile encoder metadata warmup",
+    });
+    metadataWarmPass.end();
+    instrumentedDevice.queue.submit([metadataWarmEncoder.finish()]);
+    await instrumentedDevice.queue.onSubmittedWorkDone();
+    console.log(JSON.stringify({ scenario: scenarioId, method: resultMethod,
+      phase: "before-first-advance", profileGate: "metadata-warm" }));
     console.log(JSON.stringify({ scenario: scenarioId, method: resultMethod,
       phase: "before-first-advance", profileGate: "waiting-for-sigusr1" }));
     await firstAdvanceProfileGateReleased;
