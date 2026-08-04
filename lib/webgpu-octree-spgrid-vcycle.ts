@@ -713,6 +713,18 @@ export interface OctreeSPGridVCycleSource {
   readonly coefficientBankStrideWords: number;
 }
 
+/** Accepted authority consumed by the accurate A2 operator. It may be newer
+ * than the structured publication used to build the immutable SPGrid pages. */
+export interface OctreeSPGridAccurateAuthority {
+  readonly control: GPUBuffer;
+  readonly worksets: GPUBuffer;
+  readonly coefficients: GPUBuffer;
+  readonly worksetStrideWords: number;
+  readonly worksetBankStrideWords: number;
+  readonly epochControlWord: number;
+  readonly bankControlWord: number;
+}
+
 // Key/class/diagonal, six Cartesian and twelve octree-edge coefficients, three
 // vectors, the adaptive owner of active/ghost storage, and one transactional
 // scaled-operator spectral publication per level. Accurate A2 reads the
@@ -1305,6 +1317,7 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
   private readonly persistentImageCarry = typeof process !== "undefined"
     && process.env?.FLUID_SPGRID_PERSISTENT_IMAGES === "1";
   private readonly accurateBindings: CachedAccurateApply[] = [];
+  private accurateAuthority!: OctreeSPGridAccurateAuthority;
   private readonly params: readonly GPUBuffer[];
   private readonly candidateParams: readonly GPUBuffer[];
   private setupShaderModule!: GPUShaderModule;
@@ -1450,6 +1463,41 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     return Object.freeze({ topology: this.topology, state: this.state,
       geometry: this.capturedGeometry, layout: this.accurateWorksetLayout,
       dispatch: this.dispatchMeta });
+  }
+
+  /** Route accurate A2 applies through the final dynamic-boundary publication
+   * while leaving hierarchy construction on its structured source authority. */
+  configureAccurateAuthority(authority: OctreeSPGridAccurateAuthority): void {
+    this.assertLive();
+    if (!this.hierarchicalExecutorCompiled) {
+      throw new Error("SPGrid accurate authority requires the hierarchical executor");
+    }
+    if (this.accurateOperatorRowsGroup || this.accurateBindings.length > 0) {
+      throw new Error("SPGrid accurate authority must be configured before pipeline initialization");
+    }
+    for (const [value, label] of [
+      [authority.worksetStrideWords, "workset stride"],
+      [authority.worksetBankStrideWords, "workset bank stride"],
+      [authority.epochControlWord, "epoch control word"],
+      [authority.bankControlWord, "bank control word"],
+    ] as const) {
+      if (!Number.isSafeInteger(value) || value < 0) {
+        throw new RangeError(`SPGrid accurate ${label} is invalid`);
+      }
+    }
+    if (authority.worksetStrideWords < this.plan.rowCapacity + 7
+      || authority.worksetBankStrideWords < 5 * authority.worksetStrideWords
+      || authority.control.size < 4 * (Math.max(
+        authority.epochControlWord, authority.bankControlWord,
+      ) + 1)
+      || authority.coefficients.size < 2 * this.plan.rowCapacity * 19 * 4) {
+      throw new RangeError("SPGrid accurate authority buffers are too small");
+    }
+    this.accurateAuthority = Object.freeze({ ...authority });
+    this.device.queue.writeBuffer(this.accurateWorksetLayout, 0, new Uint32Array([
+      authority.worksetStrideWords, authority.worksetBankStrideWords,
+      authority.epochControlWord, authority.bankControlWord,
+    ]));
   }
 
   get workAccountingPlan(): Readonly<{ levelCount: number; levelCapacities: readonly number[];
@@ -1650,14 +1698,27 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
       || pageOffsets[this.plan.levelCount] !== this.plan.pageDirectoryBytes / 4) {
       throw new RangeError("SPGrid level tables disagree with the allocated plan");
     }
+    const canonicalAccurateWorksets = source.worksets.regularInterior;
+    this.accurateAuthority = {
+      control: source.control,
+      worksets: "buffer" in canonicalAccurateWorksets
+        ? canonicalAccurateWorksets.buffer : canonicalAccurateWorksets,
+      coefficients: source.coefficients,
+      worksetStrideWords: source.worksetStrideWords ?? this.plan.rowCapacity + 7,
+      worksetBankStrideWords: source.worksetBankStrideWords
+        ?? 4 * (this.plan.rowCapacity + 7),
+      epochControlWord: 3,
+      bankControlWord: 4,
+    };
     this.accurateWorksetLayout = device.createBuffer({
       label: "SPGrid Section 6.3 page operator layout", size: ACCURATE_LAYOUT_BYTES,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
     const accurateLayout = new ArrayBuffer(ACCURATE_LAYOUT_BYTES);
     const accurateWords = new Uint32Array(accurateLayout);
-    accurateWords.set([source.worksetStrideWords ?? this.plan.rowCapacity + 7,
-      source.worksetBankStrideWords ?? 4 * (this.plan.rowCapacity + 7), 0, 0,
+    accurateWords.set([this.accurateAuthority.worksetStrideWords,
+      this.accurateAuthority.worksetBankStrideWords,
+      this.accurateAuthority.epochControlWord, this.accurateAuthority.bankControlWord,
       options.dimensions[0], options.dimensions[1], options.dimensions[2], this.plan.rowCapacity,
       this.plan.levelCount, this.plan.levelStride, this.plan.totalLevelSlots,
       source.coefficientBankStrideWords]);
@@ -1771,35 +1832,24 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
       encodedResidualDispatchCount: 4,
       encodedMergedBandDispatchCount: 3,
       encode: (broker: PassBroker, input: GPUBuffer, output: GPUBuffer, solverControl: GPUBuffer) => {
-        if (!this.source.classDispatch) {
-          throw new Error("SPGrid accurate A2 requires accepted class dispatch publication");
-        }
-        const canonical = this.source.worksets.regularInterior;
-        const binding = "buffer" in canonical ? canonical : { buffer: canonical };
         this.encodeAccurateWorksets(broker, input, output, solverControl,
-          { buffer: binding.buffer }, this.source.classDispatch, this.accurateWorksetLayout,
-          this.source.classDispatchOffsetBytes ?? 0);
+          { buffer: this.accurateAuthority.worksets }, this.accurateClassDispatch,
+          this.accurateWorksetLayout, 0);
       },
       encodeGate: (pass: GPUComputePassEncoder, input: GPUBuffer, output: GPUBuffer,
         solverControl: GPUBuffer) => {
-        const canonical = this.source.worksets.regularInterior;
-        const binding = "buffer" in canonical ? canonical : { buffer: canonical };
         this.encodeAccurateGate(pass, input, output, solverControl,
-          { buffer: binding.buffer }, this.accurateWorksetLayout);
+          { buffer: this.accurateAuthority.worksets }, this.accurateWorksetLayout);
       },
       encodeBody: (broker: PassBroker, input: GPUBuffer, output: GPUBuffer,
         solverControl: GPUBuffer) => {
-        const canonical = this.source.worksets.regularInterior;
-        const binding = "buffer" in canonical ? canonical : { buffer: canonical };
         this.encodeAccurateBody(broker, input, output, solverControl,
-          { buffer: binding.buffer }, this.accurateWorksetLayout);
+          { buffer: this.accurateAuthority.worksets }, this.accurateWorksetLayout);
       },
       encodeResidualBody: (broker: PassBroker, input: GPUBuffer, residualRhs: GPUBuffer,
         residual: GPUBuffer, solverControl: GPUBuffer) => {
-        const canonical = this.source.worksets.regularInterior;
-        const binding = "buffer" in canonical ? canonical : { buffer: canonical };
         this.encodeAccurateResidualBody(broker, input, residualRhs, residual, solverControl,
-          { buffer: binding.buffer }, this.accurateWorksetLayout);
+          { buffer: this.accurateAuthority.worksets }, this.accurateWorksetLayout);
       },
       encodeWorksets: (broker: PassBroker, input: GPUBuffer, output: GPUBuffer,
         solverControl: GPUBuffer, worksets: GPUBuffer, classDispatch: GPUBuffer,
@@ -1913,9 +1963,8 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
       "SPGrid accurate A2 · compile fine-adjoint rows", "buildAccurateAdjointRows", constants);
     const common = [
       { binding: 6, resource: { buffer: this.topology } },
-      { binding: 3, resource: { buffer: this.source.control } },
-      { binding: 4, resource: { buffer: "buffer" in this.source.worksets.regularInterior
-        ? this.source.worksets.regularInterior.buffer : this.source.worksets.regularInterior } },
+      { binding: 3, resource: { buffer: this.accurateAuthority.control } },
+      { binding: 4, resource: { buffer: this.accurateAuthority.worksets } },
       { binding: 5, resource: { buffer: this.accurateWorksetLayout } },
       { binding: 7, resource: { buffer: this.state } },
       { binding: 8, resource: { buffer: this.capturedGeometry } },
@@ -1930,7 +1979,9 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     this.accurateOperatorRowsGroup = this.device.createBindGroup({
       label: "SPGrid accurate A2 · operator image bindings",
       layout: this.accurateOperatorRowsPipeline.getBindGroupLayout(0),
-      entries: [...common, { binding: 13, resource: { buffer: this.accurateOperatorRows } }, ...tail],
+      entries: [...common,
+        { binding: 10, resource: { buffer: this.accurateAuthority.coefficients } },
+        { binding: 13, resource: { buffer: this.accurateOperatorRows } }, ...tail],
     });
     this.accurateAdjointRowsGroup = this.device.createBindGroup({
       label: "SPGrid accurate A2 · fine-adjoint image bindings",
@@ -2451,12 +2502,13 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     if (!cached.mergedTermGroup) {
       const shared = new Map<number, GPUBufferBinding>([
         [0, { buffer: input }], [2, { buffer: solverControl }],
-        [3, { buffer: this.source.control }],
+        [3, { buffer: this.accurateAuthority.control }],
         [4, { buffer: cached.worksets, offset: cached.worksetOffset,
           ...(cached.worksetSize === undefined ? {} : { size: cached.worksetSize }) }],
         [5, { buffer: worksetLayout }], [6, { buffer: this.topology }],
         [7, { buffer: this.state }], [8, { buffer: this.capturedGeometry }],
-        [9, { buffer: this.source.topologyMetrics }], [10, { buffer: this.source.coefficients }],
+        [9, { buffer: this.source.topologyMetrics }],
+        [10, { buffer: this.accurateAuthority.coefficients }],
         [11, { buffer: this.accurateWorksetLayout }], [12, { buffer: this.accurateTerms }],
         [13, { buffer: this.accurateOperatorRows }],
       ]);
@@ -2477,12 +2529,13 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     if (!cached.mergedAdjointGroup) {
       const shared = new Map<number, GPUBufferBinding>([
         [0, { buffer: input }], [2, { buffer: solverControl }],
-        [3, { buffer: this.source.control }],
+        [3, { buffer: this.accurateAuthority.control }],
         [4, { buffer: cached.worksets, offset: cached.worksetOffset,
           ...(cached.worksetSize === undefined ? {} : { size: cached.worksetSize }) }],
         [5, { buffer: worksetLayout }], [6, { buffer: this.topology }],
         [7, { buffer: this.state }], [8, { buffer: this.capturedGeometry }],
-        [9, { buffer: this.source.topologyMetrics }], [10, { buffer: this.source.coefficients }],
+        [9, { buffer: this.source.topologyMetrics }],
+        [10, { buffer: this.accurateAuthority.coefficients }],
         [11, { buffer: this.accurateWorksetLayout }], [12, { buffer: this.accurateTerms }],
         [14, { buffer: this.accurateAdjointRows }],
       ]);
@@ -2532,13 +2585,13 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
     if (!cached) {
       const shared = new Map<number, GPUBufferBinding>([
         [0, { buffer: input }], [1, { buffer: output }], [2, { buffer: solverControl }],
-        [3, { buffer: this.source.control }],
+        [3, { buffer: this.accurateAuthority.control }],
         [4, { buffer: worksets.buffer, offset: worksetOffset,
           ...(worksetSize === undefined ? {} : { size: worksetSize }) }],
         [5, { buffer: worksetLayout }], [6, { buffer: this.topology }],
         [7, { buffer: this.state }], [8, { buffer: this.capturedGeometry }],
         [9, { buffer: this.source.topologyMetrics }],
-        [10, { buffer: this.source.coefficients }],
+        [10, { buffer: this.accurateAuthority.coefficients }],
         [11, { buffer: this.accurateWorksetLayout }],
       ]);
       const makeGroup = (pipeline: GPUComputePipeline, bindings: readonly number[], label: string) => this.device.createBindGroup({
@@ -2554,7 +2607,7 @@ export class WebGPUOctreeSPGridVCycle implements OctreeFirstOrderSPDVCycle {
           { binding: 1, resource: { buffer: worksets.buffer, offset: worksetOffset,
             ...(worksetSize === undefined ? {} : { size: worksetSize }) } },
           { binding: 2, resource: { buffer: worksetLayout } },
-          { binding: 3, resource: { buffer: this.source.control } },
+          { binding: 3, resource: { buffer: this.accurateAuthority.control } },
           { binding: 4, resource: { buffer: this.accurateClassDispatch } },
         ],
       });
@@ -2632,7 +2685,9 @@ fn publishAccurateDispatch(at:u32,blocks:u32,live:bool){
 @compute @workgroup_size(1)
 fn prepareAccurateDispatches(){
  let solveLive=activeSolve();
- let bank=select(0u,accepted[4]&1u,arrayLength(&accepted)>4u);
+ let epochWord=worksetLayout.z;let bankWord=worksetLayout.w;
+ let authorityValid=epochWord<arrayLength(&accepted)&&bankWord<arrayLength(&accepted);
+ let bank=select(0u,accepted[bankWord]&1u,authorityValid);
  var unionRows=0u;var transitionRows=0u;var unionValid=true;
  for(var cls=0u;cls<5u;cls+=1u){
   let base=bank*worksetLayout.y+cls*worksetLayout.x;
@@ -2659,7 +2714,7 @@ fn prepareAccurateDispatches(){
  classDispatch[23]=max(classDispatch[23],unionRows);
  classDispatch[24]=max(classDispatch[24],transitionRows);
  classDispatch[25]=max(classDispatch[25],bank);
- classDispatch[26]=max(classDispatch[26],select(0u,accepted[3],arrayLength(&accepted)>3u));
+ classDispatch[26]=max(classDispatch[26],select(0u,accepted[epochWord],authorityValid));
  classDispatch[27]+=select(0u,1u,solveLive);
  classDispatch[28]+=select(0u,1u,solveLive&&unionValid&&unionRows>0u);
 }
@@ -2882,9 +2937,10 @@ const CHANNEL_SKIP=0xffff0000u;
 const ROW_DELTA_VALID=0x52444c54u;const ROW_DELTA_STRUCTURAL=0x40000000u;
 var<workgroup> compiledImagePredecessor:u32;
 fn channelCode(primary:u32,secondary:u32)->u32{return CHANNEL_CODE_BASE|(secondary<<8u)|primary;}
-fn operatorImageBank()->u32{return select(0u,accepted[3]&1u,
+fn acceptedEpoch()->u32{return accepted[p.workset.z];}
+fn operatorImageBank()->u32{return select(0u,acceptedEpoch()&1u,
  arrayLength(&operatorRows)>=2u*capacity()*OPERATOR_ROW_WORDS);}
-fn adjointImageBank()->u32{return select(0u,accepted[3]&1u,
+fn adjointImageBank()->u32{return select(0u,acceptedEpoch()&1u,
  arrayLength(&adjointRows)>=2u*capacity()*ADJOINT_ROW_WORDS);}
 fn operatorRowBase(row:u32)->u32{return(operatorImageBank()*capacity()+row)*OPERATOR_ROW_WORDS;}
 fn adjointRowBase(row:u32)->u32{return(adjointImageBank()*capacity()+row)*ADJOINT_ROW_WORDS;}
@@ -2897,14 +2953,14 @@ fn reportAt(flag:u32,stage:u32,row:u32){if(arrayLength(&solverControl)>0u){
  if(arrayLength(&solverControl)>7u){let claim=atomicCompareExchangeWeak(&solverControl[6],0u,stage);
   if(claim.exchanged){atomicStore(&solverControl[7],row);}}
 }}
-fn acceptedBank()->u32{return accepted[4]&1u;}
+fn acceptedBank()->u32{return accepted[p.workset.w]&1u;}
 fn persistentImagePredecessor(row:u32,bank:u32)->u32{
  if(!persistentImageCarry||arrayLength(&imageEpochs)<2u||bank>1u
-  ||accepted[3]==0u
-  ||atomicLoad(&imageEpochs[1u-bank])!=accepted[3]){return INVALID;}
+  ||acceptedEpoch()==0u
+  ||atomicLoad(&imageEpochs[1u-bank])!=acceptedEpoch()){return INVALID;}
  let base=imageDelta.controlOffset;
  if(base+15u>=arrayLength(&rowDelta)||row>=rowDelta[base]
-  ||rowDelta[base]>capacity()||rowDelta[base+7u]!=accepted[3]
+  ||rowDelta[base]>capacity()||rowDelta[base+7u]!=acceptedEpoch()
   ||rowDelta[base+8u]!=ROW_DELTA_VALID
   ||imageDelta.newToOldOffset>arrayLength(&rowDelta)
   ||row>=arrayLength(&rowDelta)-imageDelta.newToOldOffset){return INVALID;}
@@ -2922,7 +2978,7 @@ fn worksetBase(cls:u32)->u32{return acceptedBank()*worksetLayout.y+cls*worksetLa
 fn linearLane(wg:vec3u,groups:vec3u,lane:u32)->u32{return((wg.z*groups.y+wg.y)*groups.x+wg.x)*64u+lane;}
 fn linearGroup(wg:vec3u,groups:vec3u)->u32{return(wg.z*groups.y+wg.y)*groups.x+wg.x;}
 fn workRow(item:u32,cls:u32)->u32{let base=worksetBase(cls);if(base+WORKSET_HEADER_WORDS>arrayLength(&worksets)
- ||worksets[base]!=accepted[3]||worksets[base+1u]>worksets[base+2u]||item>=worksets[base+1u]
+ ||worksets[base]!=acceptedEpoch()||worksets[base+1u]>worksets[base+2u]||item>=worksets[base+1u]
  ||base+WORKSET_HEADER_WORDS+item>=arrayLength(&worksets)){return INVALID;}return worksets[base+WORKSET_HEADER_WORDS+item];}
 fn levels()->u32{return p.hierarchy.x;}fn maxStride()->u32{return p.hierarchy.y;}fn capacity()->u32{return p.dimsCapacity.w;}
 // The level stride is 2^l by construction, so the ceiling division is a shift.
@@ -3191,7 +3247,9 @@ fn stageDirectTerm(row:u32,channel:u32){let destination=row*162u+channel;
  if(m.error!=0u||(m.transformAndFlags&0x80000000u)==0u||base+19u>arrayLength(&section63Coefficients)){reportAt(1u,26u,row);return;}
  let c=section63Coefficients[base+1u+channel];var term=0.0;
  if(c!=0.0){let image=operatorRowBase(row);
-  if(image+OPERATOR_ROW_WORDS>arrayLength(&operatorRows)||(operatorRows[image]&~HYBRID_REGULAR_ROW)!=0u){reportAt(2u,31u,row);return;}
+  if(image+OPERATOR_ROW_WORDS>arrayLength(&operatorRows)){reportAt(2u,31u,row);return;}
+  let status=operatorRows[image]&~HYBRID_REGULAR_ROW;
+  if(status!=0u){reportAt(select(2u,1u,status==26u||status==32u),status,row);return;}
   let code=operatorRows[image+1u+channel];
   if(code>=CHANNEL_CODE_BASE){reportChannelCode(code,row);}
   else{term=c*(inputVector[row]-inputVector[code]);}}
@@ -3233,9 +3291,9 @@ fn buildOperatorRow(row:u32,word:u32,predecessor:u32){
   if(page!=INVALID&&page<levelCapacity(l)){status=0u;}}
  let regular=m.caseId==0u&&(m.transformAndFlags&0x3f00u)==0u;
  if(word==0u&&regular&&status==0u){let base=coefficientBase(row);
-  if(base+19u>arrayLength(&section63Coefficients)){reportAt(1u,26u,row);status=26u;}
+  if(base+19u>arrayLength(&section63Coefficients)){status=26u;}
   else{for(var channel=6u;channel<18u;channel+=1u){
-   if(section63Coefficients[base+1u+channel]!=0.0){reportAt(1u,32u,row);status=32u;break;}}}}
+   if(section63Coefficients[base+1u+channel]!=0.0){status=32u;break;}}}}
  if(word==0u){operatorRows[image]=status|select(0u,HYBRID_REGULAR_ROW,regular&&status==0u);return;}
  if(status!=0u){operatorRows[image+word]=CHANNEL_SKIP;return;}
  if(regular){operatorRows[image+word]=resolveRegularChannel(
@@ -3251,7 +3309,7 @@ fn buildOperatorRow(row:u32,word:u32,predecessor:u32){
  workgroupBarrier();
  if(row!=INVALID&&lane<OPERATOR_ROW_WORDS){buildOperatorRow(row,lane,compiledImagePredecessor);}
  if(item==0u&&lane==0u&&arrayLength(&imageEpochs)>=2u){
-  atomicStore(&imageEpochs[operatorImageBank()],accepted[3]+1u);}
+  atomicStore(&imageEpochs[operatorImageBank()],acceptedEpoch()+1u);}
 }
 
 // E^T, one lane per (row, child, candidate) instead of one lane per (row,
@@ -3326,7 +3384,7 @@ fn buildAdjointRow(row:u32,word:u32,predecessor:u32){
  workgroupBarrier();
  if(row!=INVALID){for(var word=lane;word<ADJOINT_ROW_WORDS;word+=64u){buildAdjointRow(row,word,compiledImagePredecessor);}}
  if(item==0u&&lane==0u&&arrayLength(&imageEpochs)>=2u){
-  atomicStore(&imageEpochs[adjointImageBank()],accepted[3]+1u);}
+  atomicStore(&imageEpochs[adjointImageBank()],acceptedEpoch()+1u);}
 }
 // Reference arm of the operator-image differential. This is
 // stageAdjointCandidate's body from before the compiled image: it re-runs both
@@ -3404,18 +3462,18 @@ fn finalizeStagedResidualRow(row:u32){
 fn stagedRowIdsBase()->u32{return capacity()*162u;}
 fn stagedCountIndex()->u32{return capacity()*163u;}
 fn validWorkCount(cls:u32)->u32{let base=worksetBase(cls);
- if(base+WORKSET_HEADER_WORDS>arrayLength(&worksets)||worksets[base]!=accepted[3]
+ if(base+WORKSET_HEADER_WORDS>arrayLength(&worksets)||worksets[base]!=acceptedEpoch()
   ||worksets[base+1u]>worksets[base+2u]){return 0u;}
  return worksets[base+1u];}
 fn acceptedUnionCount()->u32{var count=0u;
  for(var cls=0u;cls<5u;cls+=1u){let base=worksetBase(cls);
-  if(base+WORKSET_HEADER_WORDS>arrayLength(&worksets)||worksets[base]!=accepted[3]
+  if(base+WORKSET_HEADER_WORDS>arrayLength(&worksets)||worksets[base]!=acceptedEpoch()
    ||worksets[base+1u]>worksets[base+2u]){return 0u;}
   count+=worksets[base+1u];}
  return count;}
 fn unionRow(item:u32)->u32{var remaining=item;
  for(var cls=0u;cls<5u;cls+=1u){let base=worksetBase(cls);
-  if(base+WORKSET_HEADER_WORDS>arrayLength(&worksets)||worksets[base]!=accepted[3]
+ if(base+WORKSET_HEADER_WORDS>arrayLength(&worksets)||worksets[base]!=acceptedEpoch()
    ||worksets[base+1u]>worksets[base+2u]){return INVALID;}
   let count=worksets[base+1u];if(remaining<count){
    if(base+WORKSET_HEADER_WORDS+remaining>=arrayLength(&worksets)){return INVALID;}
@@ -3426,13 +3484,13 @@ fn unionRow(item:u32)->u32{var remaining=item;
 // regular and physical-only rows therefore have an identically zero E^T tail.
 fn transitionUnionCount()->u32{var count=0u;
  for(var index=0u;index<2u;index+=1u){let cls=select(1u,3u,index==1u);let base=worksetBase(cls);
-  if(base+WORKSET_HEADER_WORDS>arrayLength(&worksets)||worksets[base]!=accepted[3]
+  if(base+WORKSET_HEADER_WORDS>arrayLength(&worksets)||worksets[base]!=acceptedEpoch()
    ||worksets[base+1u]>worksets[base+2u]){return 0u;}
   count+=worksets[base+1u];}
  return count;}
 fn transitionUnionRow(item:u32)->u32{var remaining=item;
  for(var index=0u;index<2u;index+=1u){let cls=select(1u,3u,index==1u);let base=worksetBase(cls);
-  if(base+WORKSET_HEADER_WORDS>arrayLength(&worksets)||worksets[base]!=accepted[3]
+  if(base+WORKSET_HEADER_WORDS>arrayLength(&worksets)||worksets[base]!=acceptedEpoch()
    ||worksets[base+1u]>worksets[base+2u]){return INVALID;}
   let count=worksets[base+1u];if(remaining<count){
    if(base+WORKSET_HEADER_WORDS+remaining>=arrayLength(&worksets)){return INVALID;}

@@ -2602,12 +2602,6 @@ async function runGPU(
         } : {}),
       });
       for (const capability of collected.available) collectedEvidence.add(capability);
-      if (process.env.FLUID_SYMMETRY_STAGE_AUDIT === "1"
-        && collected.values["fluid-symmetry"]) {
-        console.log(JSON.stringify({ scenario: scenarioId, method: resultMethod,
-          phase: "fluid-symmetry-checkpoint-stages",
-          observation: collected.values["fluid-symmetry"] }));
-      }
       checkpoints.push({ time_s: solver.info.submittedTime_s ?? 0, field: cubic.field, summary: cubic.summary,
         raster, globalFineGeneration, preProjectionVelocity, postProjectionVelocity, compactMechanicalEnergy,
         ...(Object.keys(collected.values).length > 0 ? { evidence: collected.values } : {}) });

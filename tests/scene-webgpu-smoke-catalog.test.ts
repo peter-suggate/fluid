@@ -87,7 +87,7 @@ test("generic health and backend packs declare every reusable acceptance constan
 
   const octree = diagnostic(lane, "octree-authority").parameters!;
   assert.equal(octree.expectedGridKind, "octree");
-  assert.equal(octree.pressureSolverNameIncludes, "persistent executor");
+  assert.equal(octree.pressureSolverNameIncludes, "exact-reduction executor");
   assert.equal(octree.maximumPressureRelativeResidualSquared, 1e-8);
   assert.equal(octree.damBreakMaximumProjectionEnergyRatioWithoutAdaptiveTransport, 1.1);
   assert.deepEqual(octree.damBreakImpactWindow_s, [0.9, 1.3]);

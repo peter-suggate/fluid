@@ -70,7 +70,7 @@ test("t=0 rejection preserves named downstream evidence after device disposal", 
   assert.match(outcome.label, /"structuredBoundary"/);
 });
 
-test("t=0 power pressure requires nonempty resolved rows and persistent convergence", () => {
+test("t=0 power pressure requires nonempty resolved rows and Section 4.3 convergence", () => {
   const control = new Uint32Array(16);
   control.set([0, 1, 6, 7, 12]);
   const floats = new Float32Array(control.buffer);
@@ -79,6 +79,9 @@ test("t=0 power pressure requires nonempty resolved rows and persistent converge
   const accepted = { authoritative: true, solverLabel: "Octree power MGPCG · persistent executor",
     pressureRows: 12, capacityOverflow: false, mgpcgControl: control };
   assert.equal(initialPowerPressureReadiness(accepted).ready, true);
+  assert.equal(initialPowerPressureReadiness({ ...accepted,
+    solverLabel: "Octree power MGPCG · row-parallel exact-reduction executor",
+  }).ready, true);
   assert.match(initialPowerPressureReadiness({ ...accepted, pressureRows: 0 }).label, /resolved power rows/);
   control[1] = 0;
   assert.match(initialPowerPressureReadiness(accepted).label, /did not converge/);

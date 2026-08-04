@@ -6,9 +6,13 @@ export const OCTREE_FIRST_ORDER_CHEBYSHEV_DEGREES = Object.freeze([2, 4] as cons
 export const OCTREE_FIRST_ORDER_CHEBYSHEV_LOWER_FRACTION = 1 / 30;
 /** Stable capability marker shared by the solver label and UI diagnostics. */
 export const OCTREE_PERSISTENT_MGPCG_SOLVER_LABEL_MARKER = "persistent executor";
+export const OCTREE_EXACT_REDUCTION_MGPCG_SOLVER_LABEL_MARKER = "exact-reduction executor";
 
+/** Legacy name retained for UI callers; recognizes either production §4.3
+ * executor capability marker. */
 export function isOctreePersistentMGPCGSolverLabel(label: string | undefined): boolean {
-  return label?.includes(OCTREE_PERSISTENT_MGPCG_SOLVER_LABEL_MARKER) === true;
+  return label?.includes(OCTREE_PERSISTENT_MGPCG_SOLVER_LABEL_MARKER) === true
+    || label?.includes(OCTREE_EXACT_REDUCTION_MGPCG_SOLVER_LABEL_MARKER) === true;
 }
 /**
  * Live-row ceiling for the single-dispatch persistent executor

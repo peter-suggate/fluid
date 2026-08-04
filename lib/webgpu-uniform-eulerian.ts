@@ -641,8 +641,8 @@ export interface InitialPowerPressureDiagnostics {
 export function initialPowerPressureReadiness(
   value: InitialPowerPressureDiagnostics,
 ): InitialSparseAuthorityReadiness {
-  const persistent = isOctreePersistentMGPCGSolverLabel(value.solverLabel);
-  if (!value.authoritative || !persistent) {
+  const section43MGPCG = isOctreePersistentMGPCGSolverLabel(value.solverLabel);
+  if (!value.authoritative || !section43MGPCG) {
     return { ready: false, label: "power MGPCG authority is unavailable" };
   }
   if (value.capacityOverflow || value.pressureRows === 0) {
@@ -661,7 +661,7 @@ export function initialPowerPressureReadiness(
     || !Number.isFinite(relativeSquared) || !residualAccepted) {
     return { ready: false, label: "selected pressure solver did not converge through its residual gate" };
   }
-  return { ready: true, label: `Persistent power pressure published (${value.pressureRows} rows)` };
+  return { ready: true, label: `Power pressure published (${value.pressureRows} rows)` };
 }
 
 /**

@@ -58,17 +58,19 @@ import {
 } from "./webgpu-octree-air-velocity-support-gpu";
 import { WebGPUOctreeSolidVertexSdf } from "./webgpu-octree-solid-vertex-sdf";
 import {
-  OCTREE_PERSISTENT_MGPCG_SOLVER_LABEL_MARKER,
-  OCTREE_SECTION43_BOUNDARY_BAND_LAYERS,
   normalizeOctreeSection43BoundarySmoothing,
   type OctreeFirstOrderSPDVCycle,
 } from "./webgpu-octree-section43-contract";
 import {
-  OCTREE_PERSISTENT_MGPCG_CONTROL_BYTES,
-  WebGPUOctreePersistentMGPCG,
-} from "./webgpu-octree-persistent-mgpcg";
+  WebGPUOctreePipelinedMGPCG,
+  type OctreePipelinedMGPCGVectors,
+  type OctreePipelinedWorksetLinearOperator,
+} from "./webgpu-octree-pipelined-mgpcg";
+import { WebGPUOctreeSection43HybridPreconditioner } from
+  "./webgpu-octree-section43-preconditioner";
 import {
   spgridRowCapacityForBindingLimit,
+  type OctreeSPGridAccurateAuthority,
   WebGPUOctreeSPGridVCycle,
 } from "./webgpu-octree-spgrid-vcycle";
 import { WebGPUOctreeTopologyEpoch } from "./webgpu-octree-topology-epoch";
@@ -1362,6 +1364,8 @@ export function octreeBalanceRounds(maximumLeafSize: 2 | 4 | 8 | 16 | 32): numbe
 
 type OctreeFirstOrderVCycleImplementation = OctreeFirstOrderSPDVCycle & {
   readonly plan: { readonly levelCount: number };
+  readonly accurateOperator: OctreePipelinedWorksetLinearOperator;
+  configureAccurateAuthority(authority: OctreeSPGridAccurateAuthority): void;
   readPublishedHierarchyForDiagnostics(): ReturnType<
     WebGPUOctreeSPGridVCycle["readPublishedHierarchyForDiagnostics"]
   >;
@@ -1657,8 +1661,10 @@ export class WebGPUOctreeProjection {
    * factors four/eight allocate the separate sparse fine band. */
   private readonly coarseOnlySurfaceTracking: boolean;
   private pressureSolverControl!: GPUBuffer;
-  /** Single-dispatch production pressure executor. */
-  private persistentMGPCG?: WebGPUOctreePersistentMGPCG;
+  /** Row-parallel production pressure executor with exact integer reductions. */
+  private pipelinedMGPCG?: WebGPUOctreePipelinedMGPCG;
+  private section43HybridPreconditioner?: WebGPUOctreeSection43HybridPreconditioner;
+  private pipelinedMGPCGVectors?: OctreePipelinedMGPCGVectors;
   private firstOrderVCycle!: OctreeFirstOrderVCycleImplementation;
   private structuredVelocity?: WebGPUDirectStructuredVelocityAuthority;
   private structuredBoundary?: WebGPUStructuredBoundaryCoefficients;
@@ -2824,7 +2830,8 @@ export class WebGPUOctreeProjection {
           await this.powerCoarseLevelSet!.initializePipeline();
           await this.powerCoarseLevelSetSchedule!.initializePipelines();
           await this.fineToPowerCoarseLevelSet?.initializePipelines();
-          await this.persistentMGPCG!.initializePipeline();
+          await this.section43HybridPreconditioner!.initializePipelines();
+          await this.pipelinedMGPCG!.initializePipelines();
           await this.powerSolidVertices?.initializePipelines();
           await this.structuredBoundary!.initializePipelines();
           await this.topologyEpoch!.initializePipelines();
@@ -2939,18 +2946,12 @@ export class WebGPUOctreeProjection {
       ...section63Source, rowGeometry: structuredSource.rowGeometry, rowDelta,
     }, { dimensions: [this.dims.nx, this.dims.ny, this.dims.nz], rowCapacity,
       finestCellWidth: this.scene.container.width_m / this.dims.nx,
-      compileHierarchicalExecutor: false,
+      compileHierarchicalExecutor: true,
       deferPipelineCompilation: this.deferPipelineCompilation,
     });
-    const smootherDegree = this.firstOrderVCycle.smootherContract?.degree;
-    if (smootherDegree === undefined) {
-      throw new Error("Persistent MGPCG requires the published V-cycle smoother contract");
+    if (this.firstOrderVCycle.smootherContract?.degree === undefined) {
+      throw new Error("Wide MGPCG requires the published V-cycle smoother contract");
     }
-    this.pressureSolverControl = this.device.createBuffer({
-      label: "Persistent MGPCG shared solve control",
-      size: OCTREE_PERSISTENT_MGPCG_CONTROL_BYTES,
-      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
-    });
     const spgrid = this.firstOrderVCycle.section63Topology;
     // The paper evolves coarse octree phi regardless of whether the optional
     // factor-1/factor-4/factor-8 interface band exists. It is also the complete
@@ -3097,32 +3098,65 @@ export class WebGPUOctreeProjection {
         damBreakDimensions: this.scene.fluid.initialDamBreakDimensions_m,
       } } : {}),
     });
-    // Shipping Bet 4 authority: class 0 is selected only after this epoch's
-    // GFM theta, cut apertures, liquid membership, solid/world faces, and
-    // level transitions have all been resolved by the dynamic boundary pass.
-    this.persistentMGPCG = new WebGPUOctreePersistentMGPCG(this.device, {
-      dimensions: [this.dims.nx, this.dims.ny, this.dims.nz], rowCapacity,
-      state: spgrid.state, topology: spgrid.topology, geometry: spgrid.geometry,
-      dispatchMeta: spgrid.dispatch,
-      coefficients: section63Source.coefficients,
-      coefficientBankStrideWords: section63Source.coefficientBankStrideWords,
-      metrics: section63Source.topologyMetrics,
-      acceptedAuthority: this.structuredBoundary.control,
+    this.firstOrderVCycle.configureAccurateAuthority({
+      control: this.structuredBoundary.control,
       worksets: this.structuredBoundary.worksets,
+      coefficients: section63Source.coefficients,
       worksetStrideWords: this.structuredBoundary.worksetStrideWords,
       worksetBankStrideWords: this.structuredBoundary.worksetBankStrideWords,
-      rhs: this.structuredDivergenceRhs,
-      control: this.pressureSolverControl,
-    }, {
-      maximumIterations: this.solveTailPolicy.encodedOuterIterations,
-      boundarySmoothingIterations:
-        normalizeOctreeSection43BoundarySmoothing(
+      epochControlWord: 4,
+      bankControlWord: 5,
+    });
+    // All stencil and smoother stages run over the GPU-published row/page
+    // schedules. Only their scalar dependencies cross dispatch boundaries,
+    // and those reductions use exact integer superaccumulators.
+    const vector = (label: string) => this.device.createBuffer({
+      label, size: rowCapacity * 4,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
+    });
+    this.pipelinedMGPCGVectors = Object.freeze({
+      pressure: vector("Octree wide MGPCG pressure"),
+      residual: vector("Octree wide MGPCG residual"),
+      preconditioned: vector("Octree wide MGPCG preconditioned residual"),
+      preconditionedImage: vector("Octree wide MGPCG A(Mr)"),
+      direction: vector("Octree wide MGPCG direction"),
+      directionImage: vector("Octree wide MGPCG A(direction)"),
+    });
+    const accurateOperator = this.firstOrderVCycle.accurateOperator;
+    this.section43HybridPreconditioner = new WebGPUOctreeSection43HybridPreconditioner(
+      this.device, {
+        rowCount: this.compaction,
+        firstOrderVCycle: this.firstOrderVCycle,
+        secondOrderOperator: accurateOperator,
+        section63: {
+          coefficients: section63Source.coefficients,
+          control: this.structuredBoundary.control,
+          metrics: section63Source.topologyMetrics,
+          ...spgrid,
+        },
+      }, {
+        rowCapacity,
+        boundarySmoothingIterations: normalizeOctreeSection43BoundarySmoothing(
           this.solveTailPolicy.boundarySmoothingIterations,
         ),
-      chebyshevDegree: smootherDegree,
-      boundaryBandLayers: OCTREE_SECTION43_BOUNDARY_BAND_LAYERS,
+      },
+    );
+    this.pipelinedMGPCG = new WebGPUOctreePipelinedMGPCG(this.device, {
+      coefficients: section63Source.coefficients,
+      rhs: this.structuredDivergenceRhs,
+      rowCount: this.compaction,
+      rowDispatch: structuredSource.liveRowDispatch,
+      acceptedAuthority: this.structuredBoundary.control,
+      operator: accurateOperator,
+      preconditioner: this.section43HybridPreconditioner,
+      vectors: this.pipelinedMGPCGVectors,
+    }, {
+      rowCapacity,
       relativeTolerance: this.solveTailPolicy.relativeTolerance,
+      maximumIterations: this.solveTailPolicy.encodedOuterIterations,
+      hardIterationCeiling: this.solveTailPolicy.hardOuterIterationCeiling,
     });
+    this.pressureSolverControl = this.pipelinedMGPCG.control;
     this.topologyEpoch = new WebGPUOctreeTopologyEpoch(this.device, {
       ownerArena: this.ownerPages.arena,
       ownerCandidate: this.ownerPages.candidateTransaction,
@@ -3325,7 +3359,8 @@ export class WebGPUOctreeProjection {
     this.workAccounting.setAuthorityBytes("power", powerAllocated);
     this.workAccounting.setAuthorityBytes("fine-level-set", fineAllocated);
     this.workAccounting.setScratchBytes("pressure-mgpcg",
-      (this.persistentMGPCG?.allocatedBytes ?? 0) + this.pressureSolverControl.size);
+      (this.pipelinedMGPCG?.allocatedBytes ?? 0)
+      + (this.section43HybridPreconditioner?.allocatedBytes ?? 0));
     this.workAccounting.setScratchBytes("multigrid", this.firstOrderVCycle.allocatedBytes);
     this.workAccounting.sealAllocationInventory();
     this.info.powerDiagramReady = true;
@@ -3961,9 +3996,9 @@ export class WebGPUOctreeProjection {
 
   finishTopologyCandidate() { this.info.topologyReuseCount += 1; }
   get pressureSolverLabel() {
-    const budget = this.persistentMGPCG?.iterationBudget ?? this.info.pressureIterationBudget;
+    const budget = this.pipelinedMGPCG?.iterationBudget ?? this.info.pressureIterationBudget;
     const levels = this.firstOrderVCycle?.plan.levelCount ?? 0;
-    return `Octree power MGPCG · ${OCTREE_PERSISTENT_MGPCG_SOLVER_LABEL_MARKER} · Section 4.3 fixed schedule · up to ${budget} iterations · ${levels}-level L1 V-cycle`;
+    return `Octree power MGPCG · row-parallel exact-reduction executor · Section 4.3 fixed schedule · up to ${budget} iterations · ${levels}-level L1 V-cycle`;
   }
 
   private encodeNativePowerAssembly(
@@ -4105,7 +4140,7 @@ export class WebGPUOctreeProjection {
     },
     scope: "complete" | "power-operator-only" = "complete",
   ): GPUCommandEncoder {
-    const solveBudget = this.persistentMGPCG?.iterationBudget
+    const solveBudget = this.pipelinedMGPCG?.iterationBudget
       ?? this.solveTailPolicy.encodedOuterIterations;
     this.workAccounting.beginSubstep();
     this.info.pressureIterationBudget = solveBudget;
@@ -4134,17 +4169,19 @@ export class WebGPUOctreeProjection {
     const pressureOut = initialInA ? this.pressureB : this.pressureA;
     if (!this.structuredVelocity) throw new Error("Pressure solve requires the accepted structured authority");
     const solveBroker = new PassBroker(encoder);
-    const persistent = this.persistentMGPCG;
-    if (!persistent) throw new Error("Persistent pressure executor was not constructed");
-    persistent.encodeSolve(solveBroker, {
+    const pipelined = this.pipelinedMGPCG;
+    if (!pipelined) throw new Error("Row-parallel pressure executor was not constructed");
+    // The SPGrid hierarchy and compiled A2 images are GPU-published before
+    // the wide recurrence consumes them. Every following stencil/smoother
+    // launch is row/page parallel; only the exact integer scalar finish is a
+    // singleton.
+    this.firstOrderVCycle.encodeSetup(solveBroker, {
+      solverControl: this.pressureSolverControl, rowCount: this.compaction,
+    });
+    pipelined.encode(solveBroker, {
       pressureSeed: pressureIn,
       pressureOut,
-    }, (setupBroker) => {
-      // SPGrid publishes the level worklists and dispatch words consumed by
-      // the single-dispatch kernel before its metadata staging copies.
-      this.firstOrderVCycle.encodeSetup(setupBroker, {
-        solverControl: this.pressureSolverControl, rowCount: this.compaction,
-      });
+      encodedIterationBudget: solveBudget,
     });
     this.latestPressureInA = !initialInA;
     // Stage solve feedback (residual sums + row/entry counts) while this
@@ -5205,6 +5242,16 @@ export class WebGPUOctreeProjection {
     fineTransportGovernor?: GPUBufferBinding;
     pressureRhs?: GPUBufferBinding;
     section63Coefficients?: GPUBufferBinding;
+    symmetryInitialResidual?: GPUBufferBinding;
+    symmetryInitialPreconditioned?: GPUBufferBinding;
+    symmetryInitialPreconditionedImage?: GPUBufferBinding;
+    symmetryPreconditionerPreSmoothed?: GPUBufferBinding;
+    symmetryPreconditionerZeroSmoothed?: GPUBufferBinding;
+    symmetryPreconditionerFirstOperatorImage?: GPUBufferBinding;
+    symmetryPreconditionerFirstSmoothed?: GPUBufferBinding;
+    symmetryPreconditionerInnerResidual?: GPUBufferBinding;
+    symmetryPreconditionerInnerCorrection?: GPUBufferBinding;
+    symmetryPreconditionerPostCorrected?: GPUBufferBinding;
   }> | undefined {
     const fineTransportGovernor = this.lastGlobalFineTransport ? {
         buffer: this.lastGlobalFineTransport.governor,
@@ -5216,17 +5263,32 @@ export class WebGPUOctreeProjection {
       buffer: this.structuredVelocity.source.section63.coefficients,
       size: this.structuredVelocity.source.section63.coefficientBankStrideWords * 4,
     } : undefined;
-    return fineTransportGovernor || pressureRhs || section63Coefficients ? Object.freeze({
+    const symmetry = this.pipelinedMGPCG?.symmetryStageAuditBuffers;
+    return fineTransportGovernor || pressureRhs || section63Coefficients || symmetry ? Object.freeze({
       ...(fineTransportGovernor ? { fineTransportGovernor } : {}),
       ...(pressureRhs ? { pressureRhs } : {}),
       ...(section63Coefficients ? { section63Coefficients } : {}),
+      ...(symmetry ? {
+        symmetryInitialResidual: { buffer: symmetry.initialResidual },
+        symmetryInitialPreconditioned: { buffer: symmetry.initialPreconditioned },
+        symmetryInitialPreconditionedImage: { buffer: symmetry.initialPreconditionedImage },
+        symmetryPreconditionerPreSmoothed: { buffer: symmetry.preconditionerPreSmoothed },
+        symmetryPreconditionerZeroSmoothed: { buffer: symmetry.preconditionerZeroSmoothed },
+        symmetryPreconditionerFirstOperatorImage: {
+          buffer: symmetry.preconditionerFirstOperatorImage,
+        },
+        symmetryPreconditionerFirstSmoothed: { buffer: symmetry.preconditionerFirstSmoothed },
+        symmetryPreconditionerInnerResidual: { buffer: symmetry.preconditionerInnerResidual },
+        symmetryPreconditionerInnerCorrection: { buffer: symmetry.preconditionerInnerCorrection },
+        symmetryPreconditionerPostCorrected: { buffer: symmetry.preconditionerPostCorrected },
+      } : {}),
     }) : undefined;
   }
   get workAccountingPlan(): Readonly<{
     pressure: Readonly<{ maximumOuterIterations: number }>;
   }> {
     return Object.freeze({ pressure: Object.freeze({
-      maximumOuterIterations: this.persistentMGPCG?.iterationBudget
+      maximumOuterIterations: this.pipelinedMGPCG?.iterationBudget
         ?? this.solveTailPolicy.encodedOuterIterations,
     }) });
   }
@@ -5814,7 +5876,7 @@ export class WebGPUOctreeProjection {
   }
   /** Post-submit Bet-4 machinery census from the shipping persistent solve. */
   readPowerHybridCensus() {
-    return this.persistentMGPCG?.readHybridCensus() ?? Promise.resolve(null);
+    return Promise.resolve(null);
   }
   /**
    * Post-submit class-0 census of the Section 4.3 band shell. `null` unless
@@ -5822,372 +5884,12 @@ export class WebGPUOctreeProjection {
    * emission that authors those words, so it cannot report a stale arena.
    */
   readPersistentBandCensus() {
-    return this.persistentMGPCG?.readBandCensus() ?? Promise.resolve(null);
+    return Promise.resolve(null);
   }
-  /** Diagnostic-only proof that the five dynamic hybrid classes themselves
-   * respect the scene's D4 row orbits. This never feeds simulation control. */
-  async readPowerHybridClassSymmetry() {
-    const boundary = this.structuredBoundary, structured = this.structuredVelocity?.source;
-    if (!boundary || !structured || this.dims.nx !== this.dims.nz) return undefined;
-    const persistent = this.persistentMGPCG;
-    if (!persistent) return undefined;
-    const hierarchy = await this.firstOrderVCycle?.readPublishedHierarchyForDiagnostics();
-    const controlBytes = 28;
-    const worksetBytes = boundary.worksets.size;
-    const geometryBytes = structured.plan.rowCapacity * 16;
-    const arenaBytes = persistent.workAccountingBuffers.arena.size;
-    const sourceRhs = this.structuredDivergenceRhs;
-    if (!sourceRhs) return undefined;
-    const sourceRhsBytes = structured.plan.rowCapacity * 4;
-    const readback = this.device.createBuffer({ label: "Hybrid class D4 diagnostic readback",
-      size: controlBytes + worksetBytes + geometryBytes + arenaBytes + sourceRhsBytes,
-      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
-    const encoder = this.device.createCommandEncoder({ label: "Read hybrid class D4 diagnostics" });
-    encoder.copyBufferToBuffer(boundary.control, 0, readback, 0, controlBytes);
-    encoder.copyBufferToBuffer(boundary.worksets, 0, readback, controlBytes, worksetBytes);
-    encoder.copyBufferToBuffer(structured.rowGeometry, 0, readback,
-      controlBytes + worksetBytes, geometryBytes);
-    encoder.copyBufferToBuffer(persistent.workAccountingBuffers.arena, 0, readback,
-      controlBytes + worksetBytes + geometryBytes, arenaBytes);
-    encoder.copyBufferToBuffer(sourceRhs, 0, readback,
-      controlBytes + worksetBytes + geometryBytes + arenaBytes, sourceRhsBytes);
-    this.device.queue.submit([encoder.finish()]);
-    try {
-      await readback.mapAsync(GPUMapMode.READ);
-      const mapped = readback.getMappedRange();
-      const control = new Uint32Array(mapped, 0, 7);
-      const worksets = new Uint32Array(mapped, controlBytes, worksetBytes / 4);
-      const geometry = new Uint32Array(mapped, controlBytes + worksetBytes, geometryBytes / 4);
-      const arena = new Uint32Array(mapped, controlBytes + worksetBytes + geometryBytes,
-        arenaBytes / 4);
-      const rhsSourceWords = new Uint32Array(mapped,
-        controlBytes + worksetBytes + geometryBytes + arenaBytes, sourceRhsBytes / 4);
-      const rows = Math.min(control[2]!, structured.plan.rowCapacity), bank = control[5]! & 1;
-      const classes = new Uint32Array(rows); classes.fill(0xffff_ffff);
-      const counts: number[] = [];
-      for (let cls = 0; cls < 5; cls += 1) {
-        const base = bank * boundary.worksetBankStrideWords + cls * boundary.worksetStrideWords;
-        const count = Math.min(worksets[base + 1] ?? 0, rows); counts.push(count);
-        for (let item = 0; item < count; item += 1) {
-          const row = worksets[base + 7 + item]!;
-          if (row < rows) classes[row] = cls;
-        }
-      }
-      const [nx, ny, nz] = [this.dims.nx, this.dims.ny, this.dims.nz];
-      const rowByCell = new Map<string, number>();
-      const origin = (row: number) => {
-        const cell = geometry[4 * row]!, size = geometry[4 * row + 1]!;
-        return { x: cell % nx, y: Math.floor(cell / nx) % ny,
-          z: Math.floor(cell / (nx * ny)), size };
-      };
-      for (let row = 0; row < rows; row += 1) {
-        const q = origin(row); rowByCell.set(`${q.x},${q.y},${q.z},${q.size}`, row);
-      }
-      let compared = 0, mismatches = 0, missing = 0;
-      let first: Record<string, unknown> | undefined;
-      for (let row = 0; row < rows; row += 1) {
-        const q = origin(row);
-        const transforms = [
-          [nx - q.x - q.size, q.y, q.z], [q.x, q.y, nz - q.z - q.size],
-          [nx - q.x - q.size, q.y, nz - q.z - q.size], [q.z, q.y, q.x],
-          [nz - q.z - q.size, q.y, q.x], [q.z, q.y, nx - q.x - q.size],
-          [nz - q.z - q.size, q.y, nx - q.x - q.size],
-        ] as const;
-        for (const target of transforms) {
-          const other = rowByCell.get(`${target[0]},${target[1]},${target[2]},${q.size}`);
-          if (other === undefined) { missing += 1; continue; }
-          compared += 1;
-          if (classes[row] !== classes[other]) {
-            mismatches += 1;
-            first ??= { row, other, sourceClass: classes[row], targetClass: classes[other],
-              source: [q.x, q.y, q.z, q.size], target };
-          }
-        }
-      }
-      const channelNames = ["pressure", "residual", "preconditioned", "preconditionedImage",
-        "direction", "directionImage", "hybridA", "hybridB", "innerRhs", "innerCorrection",
-        "operatorImage", "bandA", "bandB", "bandList", "rhs", "pressureSeed"] as const;
-      const rowStride = persistent.diagnosticRowStride(rows);
-      const channelSymmetry: Record<string, { compared: number; mismatches: number;
-        first?: Record<string, unknown> }> = {};
-      const compareArenaRegion = (name: string, base: number): void => {
-        let channelCompared = 0, channelMismatches = 0;
-        let channelFirst: Record<string, unknown> | undefined;
-        for (let row = 0; row < rows; row += 1) {
-          const q = origin(row), source = arena[base + row]!;
-          const transforms = [
-            [nx - q.x - q.size, q.y, q.z], [q.x, q.y, nz - q.z - q.size],
-            [nx - q.x - q.size, q.y, nz - q.z - q.size], [q.z, q.y, q.x],
-            [nz - q.z - q.size, q.y, q.x], [q.z, q.y, nx - q.x - q.size],
-            [nz - q.z - q.size, q.y, nx - q.x - q.size],
-          ] as const;
-          for (const target of transforms) {
-            const other = rowByCell.get(`${target[0]},${target[1]},${target[2]},${q.size}`);
-            if (other === undefined) continue;
-            channelCompared += 1;
-            const targetBits = arena[base + other]!;
-            if (source !== targetBits) {
-              channelMismatches += 1;
-              channelFirst ??= { row, other, sourceBits: source, targetBits,
-                source: [q.x, q.y, q.z, q.size], target };
-            }
-          }
-        }
-        channelSymmetry[name] = { compared: channelCompared,
-          mismatches: channelMismatches, ...(channelFirst ? { first: channelFirst } : {}) };
-      };
-      for (let channel = 0; channel < channelNames.length; channel += 1) {
-        compareArenaRegion(channelNames[channel]!, 1024 + channel * rowStride);
-      }
-      if (typeof process !== "undefined" && process.env.FLUID_SYMMETRY_STAGE_AUDIT === "1") {
-        const requestedStage = process.env.FLUID_PERSISTENT_MGPCG_STAGE_CAPTURE;
-        compareArenaRegion(requestedStage === "section43Boundary"
-          ? "section43Presmooth" : requestedStage === "section43First"
-            ? "section43Initial" : requestedStage === "section43Inputs"
-              ? "section43InputRhs" : "initialResidual",
-          persistent.diagnosticStageByteOffset("initialResidual") / 4);
-        compareArenaRegion(requestedStage === "section43Boundary"
-          ? "section43InnerRhs" : requestedStage === "section43First"
-            ? "section43FirstIteration" : requestedStage === "section43Inputs"
-              ? "section43InputDiagonal" : (requestedStage ?? "initialPreconditioned"),
-          persistent.diagnosticStageByteOffset("initialPreconditioned") / 4);
-      }
-      let sourceRhsCompared = 0, sourceRhsMismatches = 0;
-      let sourceRhsFirst: Record<string, unknown> | undefined;
-      for (let row = 0; row < rows; row += 1) {
-        const q = origin(row), source = rhsSourceWords[row]!;
-        const transforms = [[nx - q.x - q.size, q.y, q.z], [q.x, q.y, nz - q.z - q.size],
-          [nx - q.x - q.size, q.y, nz - q.z - q.size], [q.z, q.y, q.x],
-          [nz - q.z - q.size, q.y, q.x], [q.z, q.y, nx - q.x - q.size],
-          [nz - q.z - q.size, q.y, nx - q.x - q.size]] as const;
-        for (const target of transforms) {
-          const other = rowByCell.get(`${target[0]},${target[1]},${target[2]},${q.size}`);
-          if (other === undefined) continue;
-          sourceRhsCompared += 1;
-          if (source !== rhsSourceWords[other]!) {
-            sourceRhsMismatches += 1;
-            sourceRhsFirst ??= { row, other, sourceBits: source, targetBits: rhsSourceWords[other] };
-          }
-        }
-      }
-      let m1Compared = 0, m1Mismatches = 0;
-      let m1First: Record<string, unknown> | undefined;
-      let transferCompared = 0, transferMismatches = 0;
-      let transferFirst: Record<string, unknown> | undefined;
-      if (hierarchy) {
-        const { plan, state, topology } = hierarchy;
-        const total = plan.totalLevelSlots;
-        const rowMapBase = 16;
-        const neighbourBase = topology.length - 6 * total;
-        const directions = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0],
-          [0, 0, 1], [0, 0, -1]] as const;
-        const directionIndex = new Map(directions.map((direction, index) =>
-          [direction.join(","), index]));
-        const directionTransforms = [
-          (d: readonly number[]) => [-d[0]!, d[1]!, d[2]!],
-          (d: readonly number[]) => [d[0]!, d[1]!, -d[2]!],
-          (d: readonly number[]) => [-d[0]!, d[1]!, -d[2]!],
-          (d: readonly number[]) => [d[2]!, d[1]!, d[0]!],
-          (d: readonly number[]) => [-d[2]!, d[1]!, d[0]!],
-          (d: readonly number[]) => [d[2]!, d[1]!, -d[0]!],
-          (d: readonly number[]) => [-d[2]!, d[1]!, -d[0]!],
-        ] as const;
-        const stateAt = (channel: number, level: number, slot: number) =>
-          state[channel * total + plan.levelOffsets[level]! + slot]!;
-        const rowSlot = (level: number, row: number) =>
-          topology[rowMapBase + level * plan.rowCapacity + row]!;
-        for (let row = 0; row < rows; row += 1) {
-          const q = origin(row), level = Math.round(Math.log2(q.size));
-          if (level < 0 || level >= plan.levelCount) continue;
-          const slot = rowSlot(level, row);
-          if (slot >= plan.levelCapacities[level]!) continue;
-          const transforms = [
-            [nx - q.x - q.size, q.y, q.z], [q.x, q.y, nz - q.z - q.size],
-            [nx - q.x - q.size, q.y, nz - q.z - q.size], [q.z, q.y, q.x],
-            [nz - q.z - q.size, q.y, q.x], [q.z, q.y, nx - q.x - q.size],
-            [nz - q.z - q.size, q.y, nx - q.x - q.size],
-          ] as const;
-          for (let transform = 0; transform < transforms.length; transform += 1) {
-            const target = transforms[transform]!;
-            const other = rowByCell.get(`${target[0]},${target[1]},${target[2]},${q.size}`);
-            if (other === undefined) continue;
-            const otherSlot = rowSlot(level, other);
-            if (otherSlot >= plan.levelCapacities[level]!) continue;
-            m1Compared += 1;
-            if (stateAt(2, level, slot) !== stateAt(2, level, otherSlot)) {
-              m1Mismatches += 1;
-              m1First ??= { kind: "diagonal", row, other, level,
-                sourceBits: stateAt(2, level, slot), targetBits: stateAt(2, level, otherSlot) };
-            }
-            for (let channel = 0; channel < directions.length; channel += 1) {
-              const mapped = directionTransforms[transform]!(directions[channel]!);
-              const targetChannel = directionIndex.get(mapped.join(","));
-              if (targetChannel === undefined) continue;
-              m1Compared += 1;
-              const sourceNeighbour = topology[neighbourBase + channel * total
-                + plan.levelOffsets[level]! + slot]!;
-              const targetNeighbour = topology[neighbourBase + targetChannel * total
-                + plan.levelOffsets[level]! + otherSlot]!;
-              const sourceKey = sourceNeighbour < plan.levelCapacities[level]!
-                ? stateAt(0, level, sourceNeighbour) : 0;
-              const targetKey = targetNeighbour < plan.levelCapacities[level]!
-                ? stateAt(0, level, targetNeighbour) : 0;
-              m1Compared += 1;
-              if (sourceKey === 0 || targetKey === 0) {
-                if (sourceKey !== targetKey) {
-                  m1Mismatches += 1;
-                  m1First ??= { kind: "neighbor-validity", row, other, level, channel,
-                    targetChannel, sourceKey, targetKey };
-                }
-                continue;
-              }
-              const scale = 2 ** level;
-              const levelDims = [Math.ceil(nx / scale), Math.ceil(ny / scale),
-                Math.ceil(nz / scale)] as const;
-              const decodeKey = (key: number) => { const value = key - 1;
-                return [value % levelDims[0], Math.floor(value / levelDims[0]) % levelDims[1],
-                  Math.floor(value / (levelDims[0] * levelDims[1]))] as const; };
-              const sourceCoord = decodeKey(sourceKey), targetCoord = decodeKey(targetKey);
-              const expected = transform === 0
-                ? [levelDims[0] - 1 - sourceCoord[0], sourceCoord[1], sourceCoord[2]]
-                : transform === 1
-                  ? [sourceCoord[0], sourceCoord[1], levelDims[2] - 1 - sourceCoord[2]]
-                  : transform === 2
-                    ? [levelDims[0] - 1 - sourceCoord[0], sourceCoord[1],
-                      levelDims[2] - 1 - sourceCoord[2]]
-                    : transform === 3
-                      ? [sourceCoord[2], sourceCoord[1], sourceCoord[0]]
-                      : transform === 4
-                        ? [levelDims[2] - 1 - sourceCoord[2], sourceCoord[1], sourceCoord[0]]
-                        : transform === 5
-                          ? [sourceCoord[2], sourceCoord[1], levelDims[0] - 1 - sourceCoord[0]]
-                          : [levelDims[2] - 1 - sourceCoord[2], sourceCoord[1],
-                            levelDims[0] - 1 - sourceCoord[0]];
-              if (targetCoord[0] !== expected[0] || targetCoord[1] !== expected[1]
-                || targetCoord[2] !== expected[2]) {
-                m1Mismatches += 1;
-                m1First ??= { kind: "neighbor-identity", row, other, level, channel,
-                  targetChannel, sourceCoord, targetCoord, expected };
-              }
-            }
-          }
-        }
-        const workBase = rowMapBase + plan.levelCount * plan.rowCapacity;
-        const pageWorkBase = workBase + total;
-        const pageDirectoryBase = pageWorkBase + plan.pageRecordWords * total;
-        const transferBase = pageDirectoryBase + plan.pageDirectoryBytes / 4;
-        const transformKey = (level: number, key: number, transform: number): number => {
-          if (key === 0) return 0;
-          const scale = 2 ** level;
-          const dx = Math.ceil(nx / scale), dy = Math.ceil(ny / scale);
-          const dz = Math.ceil(nz / scale), value = key - 1;
-          const x = value % dx, y = Math.floor(value / dx) % dy;
-          const z = Math.floor(value / (dx * dy));
-          const target = transform === 0 ? [dx - 1 - x, y, z]
-            : transform === 1 ? [x, y, dz - 1 - z]
-              : transform === 2 ? [dx - 1 - x, y, dz - 1 - z]
-                : transform === 3 ? [z, y, x]
-                  : transform === 4 ? [dz - 1 - z, y, x]
-                    : transform === 5 ? [z, y, dx - 1 - x]
-                      : [dz - 1 - z, y, dx - 1 - x];
-          return target[0]! + dx * (target[1]! + dy * target[2]!) + 1;
-        };
-        const slotsByKey = plan.levelCapacities.map((capacity, level) => {
-          const result = new Map<number, number>();
-          for (let slot = 0; slot < capacity; slot += 1) {
-            const key = stateAt(0, level, slot);
-            if (key !== 0) result.set(key, slot);
-          }
-          return result;
-        });
-        const sameMultiset = (source: readonly string[], target: readonly string[]) => {
-          if (source.length !== target.length) return false;
-          const a = [...source].sort(), b = [...target].sort();
-          return a.every((value, index) => value === b[index]);
-        };
-        for (let level = 0; level + 1 < plan.levelCount; level += 1) {
-          const capacity = plan.levelCapacities[level]!;
-          const coarseCapacity = plan.levelCapacities[level + 1]!;
-          const recordCapacity = plan.transferCapacities[level]!;
-          const recordCount = Math.min(hierarchy.dispatch[level * 12 + 1]!, recordCapacity);
-          const base = transferBase + plan.transferOffsets[level]!;
-          const parentHeadBase = base + 4 * recordCapacity;
-          const fineHeadBase = parentHeadBase + 2 * capacity;
-          const fineCountBase = fineHeadBase + capacity;
-          const recordFine = (record: number) => topology[base + 4 * record]!;
-          const recordCoarse = (record: number) => topology[base + 4 * record + 1]!;
-          const recordWeight = (record: number) => topology[base + 4 * record + 2]!;
-          const recordNext = (record: number) => topology[base + 4 * record + 3]!;
-          const fineTransfers = (slot: number, transform: number) => {
-            const first = topology[fineHeadBase + slot]!;
-            const count = Math.min(topology[fineCountBase + slot]!, 8);
-            const result: string[] = [];
-            if (count === 0) return result;
-            if (first >= recordCount || first + count > recordCount) return ["invalid"];
-            for (let corner = 0; corner < count; corner += 1) {
-              const record = first + corner, coarse = recordCoarse(record);
-              if (recordFine(record) !== slot || coarse >= coarseCapacity) return ["invalid"];
-              const coarseKey = stateAt(0, level + 1, coarse);
-              result.push(`${transform < 0 ? coarseKey : transformKey(level + 1, coarseKey, transform)}:${recordWeight(record)}`);
-            }
-            return result;
-          };
-          const parentTransfers = (slot: number, transform: number) => {
-            const result: string[] = [];
-            let record = topology[parentHeadBase + slot]!, visited = 0;
-            while (record !== 0xffff_ffff && visited <= recordCount) {
-              if (record >= recordCount || recordCoarse(record) !== slot) return ["invalid"];
-              const fine = recordFine(record);
-              if (fine >= capacity) return ["invalid"];
-              const fineKey = stateAt(0, level, fine);
-              result.push(`${transform < 0 ? fineKey : transformKey(level, fineKey, transform)}:${recordWeight(record)}`);
-              record = recordNext(record); visited += 1;
-            }
-            if (visited > recordCount) return ["cycle"];
-            return result;
-          };
-          for (let slot = 0; slot < capacity; slot += 1) {
-            const key = stateAt(0, level, slot);
-            if (key === 0 || topology[fineCountBase + slot] === 0) continue;
-            for (let transform = 0; transform < 7; transform += 1) {
-              const other = slotsByKey[level]!.get(transformKey(level, key, transform));
-              transferCompared += 1;
-              const source = fineTransfers(slot, transform);
-              const target = other === undefined ? ["missing"] : fineTransfers(other, -1);
-              if (!sameMultiset(source, target)) {
-                transferMismatches += 1;
-                transferFirst ??= { kind: "fine-transfer", level, slot, other, source, target };
-              }
-            }
-          }
-          for (let slot = 0; slot < coarseCapacity; slot += 1) {
-            const key = stateAt(0, level + 1, slot);
-            if (key === 0) continue;
-            for (let transform = 0; transform < 7; transform += 1) {
-              const other = slotsByKey[level + 1]!.get(transformKey(level + 1, key, transform));
-              transferCompared += 1;
-              const source = parentTransfers(slot, transform);
-              const target = other === undefined ? ["missing"] : parentTransfers(other, -1);
-              if (!sameMultiset(source, target)) {
-                transferMismatches += 1;
-                transferFirst ??= { kind: "parent-transfer", level, slot, other, source, target };
-              }
-            }
-          }
-        }
-      }
-      return { rows, epoch: control[4], bank, classCounts: counts, compared, mismatches, missing,
-        first, sourceRhsSymmetry: { compared: sourceRhsCompared, mismatches: sourceRhsMismatches,
-          ...(sourceRhsFirst ? { first: sourceRhsFirst } : {}) }, channelSymmetry,
-        m1Symmetry: { compared: m1Compared, mismatches: m1Mismatches,
-          ...(m1First ? { first: m1First } : {}) },
-        transferSymmetry: { compared: transferCompared, mismatches: transferMismatches,
-          ...(transferFirst ? { first: transferFirst } : {}) } };
-    } finally {
-      if (readback.mapState === "mapped") readback.unmap();
-      readback.destroy();
-    }
-  }
+  /** The retired persistent arena owned the optional class-level D4 snapshot.
+   * Scene field symmetry remains covered by the authoritative smoke oracle. */
+  async readPowerHybridClassSymmetry() { return undefined; }
+
   get fluidBrickCapacity() { return this.topologyResidency.capacity; }
   readFluidBrickResidencyStats() { return this.topologyResidency.readStats(); }
   readFluidBulkBrickResidencyStats() { return this.sparseBrickWorld?.readBulkResidencyStats(); }
@@ -6219,8 +5921,9 @@ export class WebGPUOctreeProjection {
     // constructor, so a failure during initialization reaches this cleanup
     // with them still unassigned. Destroying them unconditionally throws a
     // TypeError that replaces the failure the caller is about to rethrow.
-    this.persistentMGPCG?.destroy();
-    this.pressureSolverControl?.destroy();
+    this.pipelinedMGPCG?.destroy();
+    this.section43HybridPreconditioner?.destroy();
+    for (const buffer of Object.values(this.pipelinedMGPCGVectors ?? {})) buffer.destroy();
     this.firstOrderVCycle?.destroy();
     this.topologyEpoch?.destroy();
     this.readyEpochAudit?.destroy();

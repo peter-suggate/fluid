@@ -95,7 +95,7 @@ test("persistent SPGrid construction compiles setup but not hierarchical solve p
   assert.equal(hierarchical.length, Object.keys(OCTREE_SPGRID_VCYCLE_BINDINGS).length);
 });
 
-test("persistent SPGrid constructor creates only reachable setup pipelines", () => {
+test("persistent SPGrid initializes only reachable setup pipelines", async () => {
   Object.assign(globalThis, {
     GPUBufferUsage: { STORAGE: 1, COPY_DST: 2, COPY_SRC: 4, UNIFORM: 8, INDIRECT: 16 },
   });
@@ -106,7 +106,7 @@ test("persistent SPGrid constructor creates only reachable setup pipelines", () 
     queue: { writeBuffer() {} },
     createBuffer: ({ size, usage }: { size: number; usage: number }) => buffer(size, usage),
     createShaderModule: () => ({}),
-    createComputePipeline: ({ label }: { label: string }) => {
+    createComputePipelineAsync: async ({ label }: { label: string }) => {
       labels.push(label);
       return { label, getBindGroupLayout: () => ({}) };
     },
@@ -118,6 +118,7 @@ test("persistent SPGrid constructor creates only reachable setup pipelines", () 
     { dimensions: [16, 16, 16], rowCapacity: 128, finestCellWidth: 1,
       compileHierarchicalExecutor: false },
   );
+  await cycle.initializePipelines();
   assert.equal(labels.length, octreeSPGridPipelineNamesForExecutor(false).length);
   assert.equal(labels.every((label) => label.startsWith("SPGrid V-cycle · ")), true);
   assert.equal(labels.some((label) => /accurate A2|Section 6\.3/.test(label)), false);
@@ -651,8 +652,11 @@ test("accurate A2 stages wide direct terms before an ordered row fold", () => {
     /fn coefficientBase\(row:u32\)->u32\{return acceptedBank\(\)\*p\.hierarchy\.w\+row\*19u;/,
     "A2 must read the accepted dynamic Section 6.3 bank");
   assert.match(octreeSPGridAccurateOperatorShader,
-    /if\(word==0u&&regular&&status==0u\)[^]*for\(var channel=6u;channel<18u;channel\+=1u\)[^]*reportAt\(1u,32u,row\)/,
-    "the compiled regular-row image must reject a nonzero omitted edge coefficient");
+    /if\(word==0u&&regular&&status==0u\)[^]*for\(var channel=6u;channel<18u;channel\+=1u\)[^]*status=32u/,
+    "the compiled regular-row image must encode a nonzero omitted edge coefficient");
+  assert.match(octreeSPGridAccurateOperatorShader,
+    /status==26u\|\|status==32u\),status,row/,
+    "the image consumer must replay builder validation failures");
   assert.match(octreeSPGridAccurateOperatorShader, /fn pageSlot[\s\S]*pageNeighbour/);
   assert.match(octreeSPGridAccurateOperatorShader, /fn finerAdjoint[\s\S]*state\[at\(OWNER,fine,ghost\)\]!=row\+1u/);
   // The compiled operator image carries u32 indices and nothing else. A float
@@ -1128,17 +1132,18 @@ test("every SPGrid auto-layout binds the complete reachable resource ABI", () =>
   }
 });
 
-test("one correction gates then executes exact indirect records with cached descriptors", () => {
+test("one correction gates then executes exact indirect records with cached descriptors", async () => {
   Object.assign(globalThis, { GPUBufferUsage: { STORAGE: 1, COPY_DST: 2, COPY_SRC: 4, UNIFORM: 8, INDIRECT: 16 } });
   let passes = 0, dispatches = 0, groups = 0;
   const buffer = (size: number, usage = 31) => ({ size, usage, destroy() {} }) as unknown as GPUBuffer;
   const device = {
     queue: { writeBuffer() {} }, createBuffer: ({ size, usage }: { size: number; usage: number }) => buffer(size, usage),
-    createShaderModule: () => ({}), createComputePipeline: ({ label }: { label: string }) => ({ label, getBindGroupLayout: () => ({}) }),
+    createShaderModule: () => ({}), createComputePipelineAsync: async ({ label }: { label: string }) => ({ label, getBindGroupLayout: () => ({}) }),
     createBindGroup: () => { groups += 1; return {}; },
   } as unknown as GPUDevice;
   const cycle = new WebGPUOctreeSPGridVCycle(device, spgridSource(buffer, 128, 8 * 512),
     { dimensions: [16, 16, 16], rowCapacity: 128, maximumLevels: 5, finestCellWidth: 1 });
+  await cycle.initializePipelines();
   const encoder = {
     clearBuffer() {}, copyBufferToBuffer() {}, beginComputePass: () => {
       passes += 1; return { setPipeline() {}, setBindGroup() {},
@@ -1168,7 +1173,7 @@ test("one correction gates then executes exact indirect records with cached desc
   cycle.destroy();
 });
 
-test("accurate A2 encodes one gate, one wide term stage, and one ordered fold", () => {
+test("accurate A2 encodes one gate, one wide term stage, and one ordered fold", async () => {
   Object.assign(globalThis, { GPUBufferUsage: { STORAGE: 1, COPY_DST: 2, COPY_SRC: 4, UNIFORM: 8, INDIRECT: 16 } });
   let direct = 0, indirect = 0, groups = 0;
   const buffer = (size: number, usage = 31) => ({ size, usage, destroy() {} }) as unknown as GPUBuffer;
@@ -1176,11 +1181,12 @@ test("accurate A2 encodes one gate, one wide term stage, and one ordered fold", 
   const source = { ...base, classDispatch: buffer(48, GPUBufferUsage.INDIRECT | GPUBufferUsage.STORAGE) };
   const device = {
     queue: { writeBuffer() {} }, createBuffer: ({ size, usage }: { size: number; usage: number }) => buffer(size, usage),
-    createShaderModule: () => ({}), createComputePipeline: ({ label }: { label: string }) => ({ label, getBindGroupLayout: () => ({}) }),
+    createShaderModule: () => ({}), createComputePipelineAsync: async ({ label }: { label: string }) => ({ label, getBindGroupLayout: () => ({}) }),
     createBindGroup: () => { groups += 1; return {}; },
   } as unknown as GPUDevice;
   const cycle = new WebGPUOctreeSPGridVCycle(device, source,
     { dimensions: [16, 16, 16], rowCapacity: 128, finestCellWidth: 1 });
+  await cycle.initializePipelines();
   const pass = { setPipeline() {}, setBindGroup() {}, dispatchWorkgroups() { direct += 1; },
     dispatchWorkgroupsIndirect() { indirect += 1; }, end() {} } as unknown as GPUComputePassEncoder;
   const broker = new PassBroker({ beginComputePass: () => pass } as unknown as GPUCommandEncoder);
@@ -1228,7 +1234,7 @@ test("accurate accepted-union rows concatenate all five published classes", () =
     /fn unionRow\(item:u32\)->u32\{var remaining=item;\s*for\(var cls=0u;cls<5u;cls\+=1u\)/,
     "the compiled operator and staged apply must share an exact five-class row resolver");
   assert.match(shader,
-    /worksets\[base\]!=accepted\[3\][\s\S]*worksets\[base\+1u\]>worksets\[base\+2u\][\s\S]*return INVALID/,
+    /worksets\[base\]!=acceptedEpoch\(\)[\s\S]*worksets\[base\+1u\]>worksets\[base\+2u\][\s\S]*return INVALID/,
     "the union resolver must fail closed on stale or over-capacity worksets");
 });
 
@@ -1262,7 +1268,7 @@ test("large native pyramids expose only the section 6.3 operator", () => {
   assert.equal("persistentMGPCG" in cycle, false); cycle.destroy();
 });
 
-test("setup retires the prior live generation without unconditional full-buffer clears", () => {
+test("setup retires the prior live generation without unconditional full-buffer clears", async () => {
   Object.assign(globalThis, { GPUBufferUsage: { STORAGE: 1, COPY_DST: 2, COPY_SRC: 4, UNIFORM: 8, INDIRECT: 16 } });
   const created: Array<{ label?: string; size: number; usage: number; buffer: GPUBuffer }> = [];
   const buffer = (size: number, usage = 31, label?: string) => ({ size, usage, label, destroy() {} }) as unknown as GPUBuffer;
@@ -1270,10 +1276,11 @@ test("setup retires the prior live generation without unconditional full-buffer 
     createBuffer: ({ label, size, usage }: { label?: string; size: number; usage: number }) => {
       const gpuBuffer = buffer(size, usage, label); created.push({ label, size, usage, buffer: gpuBuffer }); return gpuBuffer;
     }, createShaderModule: () => ({}),
-    createComputePipeline: ({ label }: { label: string }) => ({ label, getBindGroupLayout: () => ({}) }), createBindGroup: () => ({}),
+    createComputePipelineAsync: async ({ label }: { label: string }) => ({ label, getBindGroupLayout: () => ({}) }), createBindGroup: () => ({}),
   } as unknown as GPUDevice;
   const cycle = new WebGPUOctreeSPGridVCycle(device, spgridSource(buffer, 32, 256),
     { dimensions: [8, 8, 8], rowCapacity: 32, finestCellWidth: 1 });
+  await cycle.initializePipelines();
   const events: string[] = []; let dispatches = 0, current = "";
   const encoder = {
     clearBuffer() { throw new Error("warm SPGrid setup must not clear full buffers"); },
@@ -1303,7 +1310,7 @@ test("setup retires the prior live generation without unconditional full-buffer 
   assert.ok(events.some((event) => event === "direct:validateCandidateHierarchy"));
   assert.ok(events.some((event) => event.startsWith("indirect:commitChangedL1:")));
   assert.ok(events.some((event) => event === "direct:finalizeL1CapturePublication"));
-  assert.ok(events.some((event) => event.startsWith("indirect:commitCandidateLevels:84:")));
+  assert.ok(events.some((event) => event.startsWith("indirect:commitCandidateLevelsParallel:84:")));
   assert.ok(events.some((event) => event === "direct:finalizeLifecycle"));
   assert.ok(events.at(-1)?.includes("SPGrid live indirect dispatches:0"));
   const metadata = created.find((entry) => entry.label === "SPGrid worklist counts and published dispatches")!;
@@ -1537,15 +1544,16 @@ test("failed level publication is terminal and has no full-capacity recovery fal
     "successful recurring generations must not write full sparse capacity");
 });
 
-test("correction covers the shared L1/L2 pressure-row domain and uses live slot dispatches internally", () => {
+test("correction covers the shared L1/L2 pressure-row domain and uses live slot dispatches internally", async () => {
   Object.assign(globalThis, { GPUBufferUsage: { STORAGE: 1, COPY_DST: 2, COPY_SRC: 4, UNIFORM: 8, INDIRECT: 16 } });
   const buffer = (size: number, usage = 31, label?: string) => ({ size, usage, label, destroy() {} }) as unknown as GPUBuffer;
   const device = { queue: { writeBuffer() {} },
     createBuffer: ({ label, size, usage }: { label?: string; size: number; usage: number }) => buffer(size, usage, label),
-    createShaderModule: () => ({}), createComputePipeline: () => ({ getBindGroupLayout: () => ({}) }), createBindGroup: () => ({}),
+    createShaderModule: () => ({}), createComputePipelineAsync: async () => ({ getBindGroupLayout: () => ({}) }), createBindGroup: () => ({}),
   } as unknown as GPUDevice;
   const cycle = new WebGPUOctreeSPGridVCycle(device, spgridSource(buffer, 32, 256),
     { dimensions: [8, 8, 8], rowCapacity: 32, finestCellWidth: 1 });
+  await cycle.initializePipelines();
   const offsets: number[] = []; const sources = new Set<GPUBuffer>(); let direct = 0;
   const pass = { setPipeline() {}, setBindGroup() {}, dispatchWorkgroups() { direct += 1; },
     dispatchWorkgroupsIndirect(source: GPUBuffer, offset: number) { sources.add(source); offsets.push(offset); }, end() {} } as unknown as GPUComputePassEncoder;
@@ -1615,7 +1623,7 @@ test("Dawn accepts the native sparse V-cycle shader", {
   assert.equal(validationError, null, validationError?.message); device.destroy();
 });
 
-test("Dawn accepts the four class-specialized accurate operator and convergence gate", {
+test("Dawn accepts every production accurate operator and convergence gate", {
   skip: !process.env.WEBGPU_NODE_MODULE && "set WEBGPU_NODE_MODULE for accurate operator validation",
 }, async () => {
   const dawn = await import(pathToFileURL(process.env.WEBGPU_NODE_MODULE!).href) as {
@@ -1626,9 +1634,12 @@ test("Dawn accepts the four class-specialized accurate operator and convergence 
   const adapter = await nativeGpu.requestAdapter(); assert.ok(adapter);
   const device = await adapter.requestDevice({ requiredLimits: { maxStorageBuffersPerShaderStage: 10 } });
   for (const [code, entryPoints] of [
-    [octreeSPGridAccurateOperatorShader, ["stageAcceptedUnionTerms", "stageMergedBandTerms",
-      "stageAcceptedUnionAdjoints", "stageMergedBandAdjoints",
-      "finalizeStagedUnionRows", "buildAccurateOperatorRows"]],
+    [octreeSPGridAccurateOperatorShader, ["stageAcceptedUnionTerms",
+      "stageAcceptedUnionTermsByChase", "stageMergedBandTerms",
+      "stageMergedBandTermsByChase", "stageAcceptedUnionAdjoints",
+      "stageMergedBandAdjoints", "stageMergedBandAdjointsByChase",
+      "finalizeStagedUnionRows", "finalizeStagedUnionResidualRows",
+      "buildAccurateOperatorRows", "buildAccurateAdjointRows"]],
     [octreeSPGridAccurateDispatchGateShader, ["prepareAccurateDispatches"]],
   ] as const) {
     const shaderModule = device.createShaderModule({ code });
@@ -1636,7 +1647,15 @@ test("Dawn accepts the four class-specialized accurate operator and convergence 
     assert.deepEqual(info.messages.filter((message) => message.type === "error")
       .map((message) => `${message.lineNum}:${message.linePos} ${message.message}`), []);
     for (const entryPoint of entryPoints) {
-      device.createComputePipeline({ layout: "auto", compute: { module: shaderModule, entryPoint } });
+      try {
+        await device.createComputePipelineAsync({
+          label: entryPoint, layout: "auto", compute: { module: shaderModule, entryPoint,
+            constants: code === octreeSPGridAccurateOperatorShader
+              && entryPoint.startsWith("buildAccurate") ? { persistentImageCarry: 0 } : undefined },
+        });
+      } catch (error) {
+        throw new Error(`Dawn rejected ${entryPoint}`, { cause: error });
+      }
     }
   }
   device.destroy();
