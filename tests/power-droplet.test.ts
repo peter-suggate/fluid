@@ -94,7 +94,8 @@ test("both authored reserves are constants of the family, above the planner's ow
 
   assert.equal(POWER_DROPLET_METHOD_PROFILE.methodId, "octree");
   assert.deepEqual(POWER_DROPLET_METHOD_PROFILE.overrides, {
-    maximumLeafSize: "32",
+    coarseBackend: "losasso",
+    maximumLeafSize: "16",
     interfaceRefinementBandCells: 1,
     globalFineLevelSetFactor: "4",
     pressureRowCapacity: POWER_DROPLET_PRESSURE_ROW_CAPACITY,

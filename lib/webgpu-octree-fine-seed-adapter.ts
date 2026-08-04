@@ -115,6 +115,13 @@ export interface OctreeFineSeedAdapterCoarsePhiSource {
   readonly control: GPUBuffer;
 }
 
+/** Backend-neutral row motion seam; both Power and Losasso publishers satisfy it. */
+export interface OctreeFineSeedRowMotionSource {
+  readonly plan: { readonly rowCapacity: number };
+  readonly control: GPUBuffer;
+  readonly rowVelocities: GPUBuffer;
+}
+
 function positiveDyadic(value: number, label: string): number {
   if (!Number.isSafeInteger(value) || value < 1 || (value & (value - 1)) !== 0) {
     throw new RangeError(`${label} must be a positive power of two`);
@@ -235,7 +242,7 @@ export class WebGPUOctreeFineSeedAdapter {
   private readonly device:GPUDevice;
   private readonly topology:OctreeFineSeedAdapterTopology;
   private readonly bootstrapLevelSet:GPUTexture;
-  private structuredVelocity?:DirectStructuredVelocitySource;
+  private structuredVelocity?:OctreeFineSeedRowMotionSource;
   private coarsePhi?:OctreeFineSeedAdapterCoarsePhiSource;
   private buildPipeline!: GPUComputePipeline;
   private planDispatchPipeline!: GPUComputePipeline;
@@ -425,6 +432,11 @@ export class WebGPUOctreeFineSeedAdapter {
 
   /** Routes leaf motion to the accepted packed structured-velocity bank. */
   setStructuredVelocitySource(source:DirectStructuredVelocitySource):void{
+    this.setRowMotionSource(source);
+  }
+
+  /** Routes leaf motion from any compact-row backend publication. */
+  setRowMotionSource(source:OctreeFineSeedRowMotionSource):void{
     if(source.plan.rowCapacity!==this.plan.rowCapacity){
       throw new RangeError("Octree fine-seed adapter and structured-velocity row capacities must match");
     }

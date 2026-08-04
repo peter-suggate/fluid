@@ -65,10 +65,12 @@ export function safeBrowserGPUBringupViolations(config: SafeBrowserGPUBringupCon
     .filter((key) => JSON.stringify(values[key]) !== JSON.stringify(canonical[key]));
   const approvedQueryKeys = new Set([
     "gpu", "method", "scene", "quality", "voxels",
+    "param.octree.coarseBackend",
     "param.octree.globalFineLevelSetFactor",
     "param.octree.maximumLeafSize",
     "param.octree.interfaceRefinementBandCells",
     "param.octree.surfaceRefinementGradingLayers",
+    "param.octree.topologyCadenceAdvances",
   ]);
   const unapprovedQueryKeys = [...new Set([...query.keys()].filter((key) => !approvedQueryKeys.has(key)))];
   return [

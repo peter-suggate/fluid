@@ -22,6 +22,22 @@ import { WebGPUQuadtreeSurfaceState, type SurfaceInflowState } from "./webgpu-qu
 import { OctreeSparseBrickWorld } from "./webgpu-octree-sparse-bricks";
 import type { SparseScenePrimitiveUpdate } from "./webgpu-sparse-scene-proxies";
 import {
+  DEFAULT_OCTREE_COARSE_BACKEND,
+  resolveOctreeCoarseDynamics,
+  type OctreeCoarseDynamicsConfiguration,
+} from "./octree-coarse-backend";
+import { WebGPUOctreeLosassoCoarseBackend } from "./webgpu-octree-losasso-backend";
+import { WebGPUOctreeLosassoReadyCommit } from "./webgpu-octree-losasso-ready-commit";
+import {
+  makeOctreeLosassoCoarsePhiSampleWGSL,
+  WebGPUOctreeLosassoCoarsePhiExchange,
+  type WebGPUOctreeLosassoCoarsePhiInput,
+} from "./webgpu-octree-losasso-coarse-phi";
+import { WebGPUOctreeLosassoFineTransport } from "./webgpu-octree-losasso-fine-transport";
+import { WebGPUOctreeLosassoRowMotion } from "./webgpu-octree-losasso-row-motion";
+import { WebGPUOctreeLosassoConditionedOperator } from
+  "./webgpu-octree-losasso-conditioned-operator";
+import {
   FLUID_TILE_ACTIVE_CANDIDATE_DISPATCH_OFFSET_BYTES,
   FLUID_TILE_ACTIVE_DISPATCH_OFFSET_BYTES,
   GPUFluidBrickResidency,
@@ -262,6 +278,8 @@ export function octreeFluidGatedBoundaryWouldRefine(input: {
 }
 
 export interface OctreeProjectionOptions {
+  /** Construction-time coarse backend seam; never represented in WGSL. */
+  coarseDynamics?: OctreeCoarseDynamicsConfiguration;
   maximumLeafSize?: 2 | 4 | 8 | 16 | 32;
   /** Default liquid-proximity boundary gate; false selects the unconditional control. */
   fluidGatedBoundaryRefinement?: boolean;
@@ -351,7 +369,7 @@ interface PendingFinePublication {
   readonly topology: WebGPUFineLevelSetTopology;
   readonly redistance: WebGPUFineLevelSetRedistance;
   readonly volume?: WebGPUFineLevelSetVolumeCorrection;
-  readonly transport?: WebGPUFineLevelSetTransport;
+  readonly transport?: WebGPUFineLevelSetTransport | WebGPUOctreeLosassoFineTransport;
   readonly target: WebGPUFineLevelSetBrickSource;
   readonly targetIsA: boolean;
   readonly redistanceBandCells: number;
@@ -1354,7 +1372,25 @@ export function octreeEffectiveLeafSize(
   return size as 2 | 4 | 8 | 16 | 32;
 }
 
-export function octreeBalanceRounds(maximumLeafSize: 2 | 4 | 8 | 16 | 32): number {
+/**
+ * Losasso's geometric parent rows are complete dyadic cubes. Unlike the
+ * boundary-clipped Power topology, every hierarchy span must therefore divide
+ * all three finest-grid dimensions. Keep the authored maximum as a ceiling and
+ * select the coarsest exact tiling; a unit-leaf result is the intentional
+ * single-level hierarchy for domains with an odd axis.
+ */
+export function octreeLosassoTopologyLeafSize(
+  maximumLeafSize: 2 | 4 | 8 | 16 | 32,
+  dims: { nx: number; ny: number; nz: number },
+): OctreeOwnerLeafSize {
+  let size: number = maximumLeafSize;
+  while (size > 1 && [dims.nx, dims.ny, dims.nz].some((value) => value % size !== 0)) {
+    size >>= 1;
+  }
+  return size as OctreeOwnerLeafSize;
+}
+
+export function octreeBalanceRounds(maximumLeafSize: OctreeOwnerLeafSize): number {
   if (maximumLeafSize <= 2) return 0;
   // Ordinary 2:1 balance needs at most one propagation per tree level. The
   // paper's stronger mixed-ring rule can renew an ordinary imbalance, so
@@ -1519,7 +1555,9 @@ export class WebGPUOctreeProjection {
   private globalFineVolumeB?: WebGPUFineLevelSetVolumeCorrection;
   private globalFineTransportA?: WebGPUFineLevelSetTransport;
   private globalFineTransportB?: WebGPUFineLevelSetTransport;
-  private lastGlobalFineTransport?: WebGPUFineLevelSetTransport;
+  private losassoFineTransportA?: WebGPUOctreeLosassoFineTransport;
+  private losassoFineTransportB?: WebGPUOctreeLosassoFineTransport;
+  private lastGlobalFineTransport?: WebGPUFineLevelSetTransport | WebGPUOctreeLosassoFineTransport;
   private readonly globalFineSummaries?: WebGPUFineLevelSetSummaries;
   private coarseOnlySummary?: WebGPUOctreeCoarseSummary;
   private readonly unpublishedFineSummaryDirectory: GPUBuffer;
@@ -1651,6 +1689,10 @@ export class WebGPUOctreeProjection {
   private advanceGradingRoundPipeline!: GPUComputePipeline;
   private materializePipeline?: GPUComputePipeline;
   private readonly maxLeafSize: 2 | 4 | 8 | 16 | 32;
+  /** Backend-normalized maximum consumed by the structural topology. */
+  private readonly topologyMaximumLeafSize: OctreeOwnerLeafSize;
+  private readonly coarseDynamics: OctreeCoarseDynamicsConfiguration;
+  private topologyCadenceCursor = 0;
   private readonly fluidGatedBoundaryRefinement: boolean;
   private readonly topologyTileSize: number;
   private readonly adaptivity: number;
@@ -1666,6 +1708,11 @@ export class WebGPUOctreeProjection {
   private section43HybridPreconditioner?: WebGPUOctreeSection43HybridPreconditioner;
   private pipelinedMGPCGVectors?: OctreePipelinedMGPCGVectors;
   private firstOrderVCycle!: OctreeFirstOrderVCycleImplementation;
+  private losassoBackend?: WebGPUOctreeLosassoCoarseBackend;
+  private losassoReadyCommit?: WebGPUOctreeLosassoReadyCommit;
+  private losassoCoarsePhi?: WebGPUOctreeLosassoCoarsePhiExchange;
+  private losassoRowMotion?: WebGPUOctreeLosassoRowMotion;
+  private losassoConditionedOperator?: WebGPUOctreeLosassoConditionedOperator;
   private structuredVelocity?: WebGPUDirectStructuredVelocityAuthority;
   private structuredBoundary?: WebGPUStructuredBoundaryCoefficients;
   private topologyEpoch?: WebGPUOctreeTopologyEpoch;
@@ -1685,7 +1732,7 @@ export class WebGPUOctreeProjection {
   /** Immutable cold-bootstrap and optional diagnostic dispatch records. */
   private readonly coldDispatch: GPUBuffer;
   private readonly coldDispatchOffsetBySize = new Map<number, number>();
-  private readonly effectiveLeafSize: 2 | 4 | 8 | 16 | 32;
+  private readonly effectiveLeafSize: OctreeOwnerLeafSize;
   private readonly refinementSizes: readonly number[];
   private readonly coarseRefinementSizes: readonly number[];
   private readonly balanceRounds: number;
@@ -1729,7 +1776,16 @@ export class WebGPUOctreeProjection {
     );
     reportAllocation(0);
     const count = dims.nx * dims.ny * dims.nz;
+    this.coarseDynamics = options.coarseDynamics ?? resolveOctreeCoarseDynamics({
+      // Direct construction follows the product default. Frozen Power
+      // reference lanes must opt in explicitly at their call site.
+      backend: DEFAULT_OCTREE_COARSE_BACKEND,
+      globalFineLevelSetFactor: options.globalFineLevelSetFactor ?? 4,
+    });
     this.maxLeafSize = octreeLeafSize(options.maximumLeafSize ?? 16);
+    this.topologyMaximumLeafSize = this.coarseDynamics.backend === "losasso"
+      ? octreeLosassoTopologyLeafSize(this.maxLeafSize, dims)
+      : this.maxLeafSize;
     this.fluidGatedBoundaryRefinement = options.fluidGatedBoundaryRefinement ?? true;
     this.solveTailPolicy = planOctreeSolveTail({
       finestDimensions: [dims.nx, dims.ny, dims.nz],
@@ -1741,7 +1797,9 @@ export class WebGPUOctreeProjection {
       closedTop: scene.container.top === "closed",
       requestedRelativeTolerance: scene.numerics.pressureRelativeTolerance,
     });
-    this.effectiveLeafSize = octreeEffectiveLeafSize(this.maxLeafSize, dims);
+    this.effectiveLeafSize = this.coarseDynamics.backend === "losasso"
+      ? this.topologyMaximumLeafSize
+      : octreeEffectiveLeafSize(this.maxLeafSize, dims);
     this.refinementSizes = Object.freeze((() => {
       const sizes: number[] = [];
       for (let size = this.effectiveLeafSize; size >= 2; size >>= 1) sizes.push(size);
@@ -1801,7 +1859,7 @@ export class WebGPUOctreeProjection {
     );
     const fluidFootprint = planOctreeFluidFootprintBudget(scene, dims);
     const plannedPressureCapacity = planOctreePressureCapacity(
-      dims, this.maxLeafSize, this.interfaceRefinementBandCells,
+      dims, this.topologyMaximumLeafSize, this.interfaceRefinementBandCells,
       options.pressureRowCapacity,
       scene.container.top === "closed",
       scene.container.fillFraction,
@@ -1819,7 +1877,7 @@ export class WebGPUOctreeProjection {
       throw new RangeError("Octree row authorities cannot fit one row in the storage binding limit");
     }
     this.pressureCapacity = planOctreePressureCapacity(
-      dims, this.maxLeafSize, this.interfaceRefinementBandCells,
+      dims, this.topologyMaximumLeafSize, this.interfaceRefinementBandCells,
       options.pressureRowCapacity,
       scene.container.top === "closed",
       scene.container.fillFraction,
@@ -1869,8 +1927,13 @@ export class WebGPUOctreeProjection {
     // bootstrap bounds are healthy at tile 16 (4 active tiles, not 0) and
     // planOctreeCompactionAllocation is sane. The flag exists so the remaining
     // localization costs one run rather than a red tree.
-    this.topologyTileSize = Math.max(8, octreeTopologyTileClampEnabled()
-      ? this.effectiveLeafSize : this.maxLeafSize);
+    // The Losasso hierarchy requires an exact domain tiling, so its normalized
+    // topology maximum is also the tile ABI consumed by the host residency
+    // plan and `topologyTileSize()` in WGSL. Power retains its frozen authored-
+    // leaf default and the existing diagnostic clamp experiment.
+    this.topologyTileSize = Math.max(8, this.coarseDynamics.backend === "losasso"
+      ? this.topologyMaximumLeafSize
+      : octreeTopologyTileClampEnabled() ? this.effectiveLeafSize : this.maxLeafSize);
     const allocateSparseWorld = octreeSparseWorldRequired(sceneHasTerrain(scene), scene.rigidBodies.length);
     const sparseWorldBrickSize = scene.voxelDomain.brickSize_cells;
     if (allocateSparseWorld) this.sparseBrickWorld = new OctreeSparseBrickWorld(device, scene, [dims.nx, dims.ny, dims.nz], {
@@ -1966,7 +2029,7 @@ export class WebGPUOctreeProjection {
     this.surfaceState = new WebGPUQuadtreeSurfaceState(
       device, dims, cell, undefined,
       analyticSparseBootstrap
-        ? new Float32Array([Math.max(cell.x, cell.y, cell.z) * this.maxLeafSize])
+        ? new Float32Array([Math.max(cell.x, cell.y, cell.z) * this.topologyMaximumLeafSize])
         : initialOctreeLevelSet(scene, dims, cell), undefined,
       undefined, false, false, true, true, this.hasDenseSolidCells ? this.solidCells : undefined, {
         worklist: this.topologyResidency.worklist,
@@ -2127,8 +2190,11 @@ export class WebGPUOctreeProjection {
     this.frontierSortPipelineLayout = device.createPipelineLayout({
       bindGroupLayouts: [this.frontierSortLayout, ...activityLayoutSuffix],
     });
+    const backendProjectionShader = this.coarseDynamics.backend === "losasso"
+      ? octreeLosassoSurfaceGradingShader(octreeProjectionShader)
+      : octreeProjectionShader;
     const projectionShaderVariant = this.projectionActivity.module(
-      octreeProjectionActivityShader(this.projectionActivity),
+      octreeProjectionActivityShader(this.projectionActivity, backendProjectionShader),
       `${OCTREE_PROJECTION_ACTIVITY_MODULE_ID}/${projectionActivityProfile.cacheKey}`,
     );
     this.projectionActivityShaderKey = this.projectionActivity.enabled
@@ -2202,12 +2268,13 @@ export class WebGPUOctreeProjection {
       usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST,
     });
     device.queue.writeBuffer(this.coldDispatch, 0, new Uint32Array(coldRecords));
-    const fullyCoarseEstimate = Math.ceil(count / (this.maxLeafSize ** 3));
+    const fullyCoarseEstimate = Math.ceil(count / (this.topologyMaximumLeafSize ** 3));
     const approximateLeaves = Math.ceil(count * (1 - this.adaptivity) + fullyCoarseEstimate * this.adaptivity);
     this.info = {
       leafCount: approximateLeaves, pressureSampleCount: approximateLeaves, liquidDofCount: approximateLeaves,
       faceCount: 0, mlsProjectionRowCount: 0, tallSegmentCount: 0, ghostFaceCount: 0,
-      maximumNeighborRatio: 2, maximumFluidScale: this.maxLeafSize, compressionRatio: approximateLeaves / Math.max(1, count),
+      maximumNeighborRatio: 2, maximumFluidScale: this.topologyMaximumLeafSize,
+      compressionRatio: approximateLeaves / Math.max(1, count),
       allocatedBytes: this.ownerPages.allocatedBytes + this.solidCells.size
         + surfaceStateAllocation.allocatedBytes
         + this.pressureA.size + this.pressureB.size + this.candidatePressure.size
@@ -2280,7 +2347,7 @@ export class WebGPUOctreeProjection {
           // Every live core/halo leaf may therefore seed the narrow band; a
           // coarse interface leaf must not be discarded merely because its
           // pressure degree of freedom spans more than one finest cell.
-          finestLeafSize: this.maxLeafSize,
+          finestLeafSize: this.topologyMaximumLeafSize,
           // Seeding must reach at least as far as the widest band that
           // consumes the seeds. An over-wide halo only produces seeds the
           // redistance cutoff later invalidates; an under-wide one leaves the
@@ -2334,20 +2401,31 @@ export class WebGPUOctreeProjection {
             maximumBacktraceFineCells,
             interpolationSupportFineCells: 1,
             redistanceBandFineCells,
-            safetyBrickRings: 1,
+            safetyBrickRings: 1 + this.coarseDynamics.topology.extraDilationRings,
             transportBandFineCells,
           });
-          const capacityDilationBrickRings = planFineLevelSetCapacityDilationBrickRings(
-            brickResolution, this.fineLevelSetBandCells, globalFineFactor,
+          const capacityDilationBrickRings = Math.max(
+            physicalBand.dilationBrickRings,
+            planFineLevelSetCapacityDilationBrickRings(
+              brickResolution, this.fineLevelSetBandCells, globalFineFactor,
+            ) + this.coarseDynamics.topology.extraDilationRings,
           );
           const footprintBrickDimensions = [0, 1, 2].map((axis) => Math.max(1,
             Math.ceil((fluidFootprint.maximumCell[axis]! - fluidFootprint.minimumCell[axis]!)
               * globalFineFactor / brickResolution))) as [number, number, number];
           const inflowFineBricks = Math.ceil(fluidFootprint.inflowLiquidCells
             * (globalFineFactor / brickResolution) ** 3);
+          // Losasso transports the authored band from a wider valid donor
+          // envelope (backtrace plus trilinear support). In a shallow D4 tank
+          // that envelope plus the mandatory publication ring can span the
+          // entire short axis; a fractional area reserve merely rejects one
+          // dilation round later. Permit the physical plan to reach the full
+          // logical lattice (the capacity planner still clamps there). Keep
+          // the frozen Power reference's historical 1.5x reserve unchanged.
+          const surfaceGrowthSafety = this.coarseDynamics.backend === "losasso" ? 2 : 1.5;
           const defaultCapacity = planFluidFootprintFineNarrowBandBrickCapacity(
             brickDimensions, footprintBrickDimensions, capacityDilationBrickRings,
-            inflowFineBricks,
+            inflowFineBricks, surfaceGrowthSafety,
           ).maximumResidentBricks;
           const requestedCapacity = Math.min(logicalBrickCount,
             options.globalFineLevelSetMaximumBricks ?? defaultCapacity);
@@ -2426,8 +2504,203 @@ export class WebGPUOctreeProjection {
           this.info.globalFineLevelSetLogicalBrickCount = globalPlan.logicalBrickCount;
         }
     this.sparseBrickWorldAccountedBytes = this.sparseBrickWorld?.allocatedBytes ?? 0;
+    if (this.coarseDynamics.backend === "losasso") this.initializeLosassoAuthority();
     reportAllocation(8);
     this.writeParams();
+  }
+
+  /** Construct the reduced Losasso graph synchronously so initialization can
+   * enumerate only its own shader tasks. No Power catalogue or structured
+   * authority is reachable from this construction branch. */
+  private initializeLosassoAuthority(): void {
+    if (this.losassoBackend || this.powerLifecycleDisposed) return;
+    const rowCapacity = this.pressureCapacity.rowCapacity;
+    const extensionBandBrickCapacity = this.globalFineSourceA?.plan.maximumResidentBricks
+      ?? (this.coarseOnlySurfaceTracking ? 1 : undefined);
+    if (extensionBandBrickCapacity === undefined) {
+      throw new Error("Losasso factor-4/8 construction requires the sparse fine-phi page plan");
+    }
+    // A 2:1 row can expose four subfaces on each positive axis plus the
+    // corresponding negative/free-surface patches. Twenty-four per row is a
+    // conservative pre-deduplication bound; using the ordinary six-face count
+    // would fail exactly at graded T-junctions.
+    const faceCapacity = 24 * rowCapacity;
+    const largestFaceArenaBytes = 32 * faceCapacity;
+    const maximumStorageBytes = Math.min(this.device.limits.maxStorageBufferBindingSize,
+      this.device.limits.maxBufferSize);
+    if (!Number.isSafeInteger(faceCapacity) || largestFaceArenaBytes > maximumStorageBytes) {
+      throw new RangeError("Losasso 2:1 axis-face capacity exceeds this device's storage binding limit");
+    }
+    const cellSize = this.scene.container.width_m / this.dims.nx;
+    const closedTop = this.scene.container.top === "closed";
+    this.losassoCoarsePhi = new WebGPUOctreeLosassoCoarsePhiExchange(
+      this.device, rowCapacity, faceCapacity,
+    );
+    this.losassoBackend = new WebGPUOctreeLosassoCoarseBackend({
+      device: this.device,
+      capacities: { rows: rowCapacity, faces: faceCapacity, incidences: 2 * faceCapacity },
+      topology: {
+        dimensions: [this.dims.nx, this.dims.ny, this.dims.nz],
+        maximumLeafSize: this.topologyMaximumLeafSize,
+        physicalCellSize: [cellSize, cellSize, cellSize],
+        domainOrigin: [0, 0, 0],
+        ownerPages: this.ownerPages.plan,
+      },
+      density: this.scene.fluid.density_kg_m3,
+      extensionBandBrickCapacity,
+      closedBoundaries: [true, true, true, closedTop, true, true],
+      solver: {
+        relativeTolerance: this.solveTailPolicy.relativeTolerance,
+        // Losasso is not constrained by the frozen Power paper's observed
+        // 6--10 iteration envelope. Encode the full safety tail and let the
+        // exact residual gate retire unused iterations on the GPU.
+        maximumIterations: this.solveTailPolicy.hardOuterIterationCeiling,
+        hardIterationCeiling: this.solveTailPolicy.hardOuterIterationCeiling,
+      },
+      rigidPressureReaction: {
+        solidCells: this.solidCells,
+        rigidBodies: this.resources.rigidBodies,
+        rigidExchange: this.resources.rigidExchange,
+        rigidWorldOrigin: [
+          -0.5 * this.scene.container.width_m,
+          0,
+          -0.5 * this.scene.container.depth_m,
+        ],
+      },
+    });
+    this.pressureSolverControl = this.losassoBackend.solverControl
+      ?? this.losassoBackend.sources.rowCount;
+    this.losassoReadyCommit = new WebGPUOctreeLosassoReadyCommit(this.device, {
+      candidateAuthority: this.losassoBackend.candidateAuthorityControl,
+      ownerCandidateTransaction: this.ownerPages.candidateTransaction,
+      frontier: this.leafFrontier,
+      candidateLeafHeaders: this.candidateLeafHeaders,
+      acceptedLeafHeaders: this.leafHeaders,
+      candidatePressure: this.candidatePressure,
+      pressureA: this.pressureA,
+      pressureB: this.pressureB,
+      acceptedRowCount: this.compaction,
+    }, rowCapacity);
+    const finest = this.losassoBackend.sources.operator;
+    this.losassoRowMotion = new WebGPUOctreeLosassoRowMotion(this.device, {
+      authority: finest.control,
+      rowFaceOffsets: finest.rowFaceOffsets,
+      rowFaces: finest.rowFaces,
+      faces: finest.faces,
+      extendedVelocity: this.losassoBackend.sources.extension.extendedVelocity,
+    }, rowCapacity);
+    this.fineSeedAdapter?.setRowMotionSource(this.losassoRowMotion.source);
+    const wide = this.losassoBackend.sources.wideSolver;
+    if (!wide) throw new Error("Losasso wide solver authority was not published");
+    this.losassoConditionedOperator = new WebGPUOctreeLosassoConditionedOperator(this.device, {
+      authority: finest.control,
+      rowFaceOffsets: finest.rowFaceOffsets,
+      rowFaces: finest.rowFaces,
+      faces: finest.faces,
+      diagonal: wide.diagonal,
+      solverAuthority: wide.acceptedAuthority,
+    }, rowCapacity);
+    this.fineSeedAdapter?.setCoarsePhiSource(
+      this.losassoCoarsePhi.fineSeedCoarsePhiSource());
+    this.refreshLosassoProjectionGroups();
+
+    const fineA = this.globalFineSourceA, fineB = this.globalFineSourceB;
+    const sampler = this.losassoBackend.sources.velocitySampler;
+    if (fineA && fineB) {
+      if (!sampler) throw new Error("Losasso factor-4 transport requires its reduced velocity sampler");
+      const coarseWGSL = makeOctreeLosassoCoarsePhiSampleWGSL(9);
+      this.globalFineTopologyAB = new WebGPUFineLevelSetTopology(
+        this.device, fineA, fineB, coarseWGSL, this.deferPipelineCompilation,
+      );
+      this.globalFineTopologyBA = new WebGPUFineLevelSetTopology(
+        this.device, fineB, fineA, coarseWGSL, this.deferPipelineCompilation,
+      );
+      const changedKeysOffsetWords = this.globalFineTopologyAB.pageDeltaLayout.changedKeysOffsetWords;
+      if (changedKeysOffsetWords !== this.globalFineTopologyBA.pageDeltaLayout.changedKeysOffsetWords) {
+        throw new Error("Losasso fine topology A/B page-delta layouts disagree");
+      }
+      this.device.queue.writeBuffer(this.params, 36, new Uint32Array([changedKeysOffsetWords]));
+      const redistanceOptions = (source: WebGPUFineLevelSetBrickSource) => ({
+        deferPipelineCompilation: this.deferPipelineCompilation,
+        maximumRequiredJfaStride: maximumFineLevelSetJFAStride(
+          planFineLevelSetBandFineCells(this.fineLevelSetBandCells,
+            source.plan.fineFactor).redistanceBandFineCells),
+      });
+      this.globalFineRedistanceA = new WebGPUFineLevelSetRedistance(
+        this.device, fineA, this.globalFineTopologyBA, redistanceOptions(fineA),
+      );
+      this.globalFineRedistanceB = new WebGPUFineLevelSetRedistance(
+        this.device, fineB, this.globalFineTopologyAB, redistanceOptions(fineB),
+      );
+      this.losassoFineTransportA = new WebGPUOctreeLosassoFineTransport(
+        this.device, fineA, sampler);
+      this.losassoFineTransportB = new WebGPUOctreeLosassoFineTransport(
+        this.device, fineB, sampler);
+      const coarseInput = this.losassoCoarsePhiInput();
+      const coarseVolume = this.losassoCoarsePhi.volumeCoarseSource(coarseInput);
+      this.globalFineVolumeA = new WebGPUFineLevelSetVolumeCorrection(
+        this.device, fineA, coarseVolume, undefined, this.deferPipelineCompilation,
+      );
+      this.globalFineVolumeB = new WebGPUFineLevelSetVolumeCorrection(
+        this.device, fineB, coarseVolume, this.globalFineVolumeA.control,
+        this.deferPipelineCompilation,
+      );
+    }
+    const coarseAllocated = this.losassoBackend.allocatedBytes
+      + this.losassoReadyCommit.allocatedBytes + this.losassoCoarsePhi.plan.allocatedBytes
+      + this.losassoConditionedOperator.allocatedBytes + this.losassoRowMotion.plan.allocatedBytes;
+    const allocated = coarseAllocated
+      + (this.globalFineTopologyAB?.allocatedBytes ?? 0)
+      + (this.globalFineTopologyBA?.allocatedBytes ?? 0)
+      + (this.globalFineRedistanceA?.allocatedBytes ?? 0)
+      + (this.globalFineRedistanceB?.allocatedBytes ?? 0)
+      + (this.losassoFineTransportA?.plan.allocatedBytes ?? 0)
+      + (this.losassoFineTransportB?.plan.allocatedBytes ?? 0)
+      + (this.globalFineVolumeA?.allocatedBytes ?? 0)
+      + (this.globalFineVolumeB?.allocatedBytes ?? 0);
+    this.info.allocatedBytes += allocated;
+    this.info.globalFineLevelSetAllocatedBytes += allocated - coarseAllocated;
+    this.info.powerDiagramReady = false;
+    this.info.powerDiagramAuthoritative = false;
+    this.workAccounting.setAuthorityBytes("losasso", coarseAllocated);
+    this.workAccounting.setAuthorityBytes("fine-level-set", Math.max(0,
+      allocated - coarseAllocated));
+    this.workAccounting.sealAllocationInventory();
+  }
+
+  private losassoCoarsePhiInput(): WebGPUOctreeLosassoCoarsePhiInput {
+    const backend = this.losassoBackend;
+    if (!backend) throw new Error("Losasso coarse authority was not constructed");
+    return {
+      leafHeaders: this.leafHeaders,
+      coarseControl: backend.sources.operator.control,
+      faces: backend.sources.projection.faces,
+      faceGeometry: backend.sources.dynamics.faceGeometry,
+      dimensions: [this.dims.nx, this.dims.ny, this.dims.nz],
+      maximumLeafSize: this.topologyMaximumLeafSize,
+      cellSize: this.scene.container.width_m / this.dims.nx,
+    };
+  }
+
+  private refreshLosassoProjectionGroups(): void {
+    const directory = this.losassoCoarsePhi?.source.arena;
+    if (!directory) return;
+    this.groups = {
+      ab: this.createProjectionGroup(this.pressureA, this.pressureB, directory),
+      ba: this.createProjectionGroup(this.pressureB, this.pressureA, directory),
+    };
+    this.candidateRowGroups = {
+      fromA: this.createProjectionGroup(this.pressureA, this.candidatePressure, directory,
+        this.candidateLeafHeaders),
+      fromB: this.createProjectionGroup(this.pressureB, this.candidatePressure, directory,
+        this.candidateLeafHeaders),
+    };
+    const summary = this.globalFineSummaries?.directory
+      ?? this.unpublishedFineSummaryDirectory;
+    this.fineSummarySizingGroup = this.createProjectionGroup(summary, this.pressureB, directory);
+    this.topologyDecisionGroup = this.createProjectionGroup(
+      summary, this.topologyResidency.topologyTileStateBuffer, directory,
+    );
   }
 
   private createProjectionGroup(
@@ -2576,7 +2849,9 @@ export class WebGPUOctreeProjection {
       reachability: stableEntries(reachability),
       shaderCapabilities: this.shaderCapabilities().cacheKey,
       maximumLeafSize: this.maxLeafSize,
+      topologyMaximumLeafSize: this.topologyMaximumLeafSize,
       effectiveLeafSize: this.effectiveLeafSize,
+      coarseBackend: this.coarseDynamics.backend,
       requiredEntryPoints: WebGPUOctreeProjection.pipelineEntryPoints
         .filter((entryPoint) => octreeProjectionPipelineRequired(entryPoint, reachability)),
       ...(this.projectionActivityShaderKey
@@ -2624,6 +2899,7 @@ export class WebGPUOctreeProjection {
   }
 
   get topologyTexture() { return this.topologyDiagnosticTexture; }
+  get coarseBackend() { return this.coarseDynamics.backend; }
   get pressureSamplesTexture() { return this.pressureSamplesDiagnosticTexture; }
   get pressureTexture() { return this.pressureDiagnosticTexture; }
   get hasDiagnosticTextures() { return this.diagnosticGroups !== undefined; }
@@ -2787,7 +3063,57 @@ export class WebGPUOctreeProjection {
     } else if (tasks.length > 1) {
       tasks.push({ id: "octree.pipeline-cache.publish", phase: "adaptive-topology", label: "Publish compiled adaptive variants", run: () => this.publishPipelineCache() });
     }
-    if (!this.powerDescriptor) {
+    if (this.coarseDynamics.backend === "losasso") {
+      const reducedTasks = [
+        ...(this.losassoBackend ? [{ label: "Compile complete Losasso coarse backend",
+          run: () => this.losassoBackend!.initialize() }] : []),
+        ...(this.losassoReadyCommit?.initializationTasks ?? []),
+        ...(this.losassoCoarsePhi?.initializationTasks ?? []),
+        ...(this.losassoRowMotion?.initializationTasks ?? []),
+        ...(this.losassoConditionedOperator?.initializationTasks ?? []),
+      ];
+      reducedTasks.forEach((task, index) => tasks.push({
+        id: `octree.losasso.pipeline.${index}`,
+        phase: "solver-pipelines",
+        label: task.label,
+        run: () => task.run(),
+      }));
+      if (this.globalFineSourceA && this.globalFineSourceB) {
+        tasks.push({
+          id: "octree.losasso.fine-topology",
+          phase: "solver-pipelines",
+          label: "Compile Losasso factor-4 fine topology",
+          run: async () => {
+            await this.globalFineTopologyAB!.initializePipelines();
+            await this.globalFineTopologyBA!.initializePipelines();
+          },
+        }, {
+          id: "octree.losasso.fine-redistance",
+          phase: "solver-pipelines",
+          label: "Compile Losasso factor-4 redistance",
+          run: async () => {
+            await this.globalFineRedistanceA!.initializePipelines();
+            await this.globalFineRedistanceB!.initializePipelines();
+          },
+        }, {
+          id: "octree.losasso.fine-transport",
+          phase: "solver-pipelines",
+          label: "Compile Losasso factor-4 direct face transport",
+          run: async () => {
+            await this.losassoFineTransportA!.initializePipelines();
+            await this.losassoFineTransportB!.initializePipelines();
+          },
+        }, {
+          id: "octree.losasso.fine-volume",
+          phase: "solver-pipelines",
+          label: "Compile Losasso factor-4 volume bridge",
+          run: async () => {
+            await this.globalFineVolumeA!.initializePipelines();
+            await this.globalFineVolumeB!.initializePipelines();
+          },
+        });
+      }
+    } else if (!this.powerDescriptor) {
       let catalog: GeneratedOctreePowerCatalogViews | undefined;
       tasks.push({
       id: "octree.power-catalog.load",
@@ -3423,7 +3749,9 @@ export class WebGPUOctreeProjection {
 
   private writeParams() {
     const data = new ArrayBuffer(160);
-    new Uint32Array(data, 0, 4).set([this.dims.nx, this.dims.ny, this.dims.nz, this.maxLeafSize]);
+    new Uint32Array(data, 0, 4).set([
+      this.dims.nx, this.dims.ny, this.dims.nz, this.topologyMaximumLeafSize,
+    ]);
     new Float32Array(data, 16, 4).set([
       this.scene.container.width_m / this.dims.nx,
       this.scene.container.height_m / this.dims.ny,
@@ -3895,6 +4223,23 @@ export class WebGPUOctreeProjection {
    * component writes only candidate storage or the inactive structured bank;
    * the final singleton is the sole cross-component validation reduction. */
   private encodeInactiveCoupledPowerCandidate(encoder: GPUCommandEncoder): void {
+    if (this.coarseDynamics.backend === "losasso") {
+      const backend = this.losassoBackend;
+      if (!backend || this.candidatePowerGeneration === 0) {
+        throw new Error("Inactive topology candidate requires the reduced Losasso authority");
+      }
+      const broker = new PassBroker(encoder);
+      backend.encodeCandidatePublication(broker, {
+        leafHeaders: this.candidateLeafHeaders,
+        frontier: this.leafFrontier,
+        ownerArena: this.ownerPages.arena,
+        ownerCandidateTransaction: this.ownerPages.candidateTransaction,
+        solidCells: this.solidCells,
+        rigidBodies: this.resources.rigidBodies,
+      });
+      broker.fence("inactive Losasso axis-face candidate published");
+      return;
+    }
     const descriptor = this.powerDescriptor, topology = this.powerTopology;
     const structured = this.structuredVelocity, boundary = this.structuredBoundary;
     const epoch = this.topologyEpoch;
@@ -3951,12 +4296,39 @@ export class WebGPUOctreeProjection {
   }
 
   encodeReadyTopologyFlip(encoder: GPUCommandEncoder): void {
+    if (this.coarseDynamics.backend === "losasso") {
+      if (this.candidatePowerGeneration === 0
+        && this.coarseDynamics.topology.advancesPerEpoch > 1) {
+        this.info.topologyReused = true;
+        return;
+      }
+      if (!this.losassoReadyCommit || !this.losassoBackend
+        || this.candidatePowerGeneration === 0) {
+        throw new Error("Ready topology flip requires a complete inactive Losasso candidate");
+      }
+      const broker = new PassBroker(encoder);
+      // The row/pressure and reduced-operator copies validate the exact same
+      // candidate transaction immediately before the owner selector flips.
+      this.losassoReadyCommit.encodeReadyCommit(broker);
+      this.losassoBackend.encodeReadyCommit(broker, {
+        frontier: this.leafFrontier,
+        ownerCandidateTransaction: this.ownerPages.candidateTransaction,
+      });
+      this.ownerPages.encodeReadyCommit(broker);
+      this.losassoBackend.encodeHierarchyRefresh(broker, this.leafHeaders);
+      // Candidate publication migrates the lagged wet-face field by geometric
+      // identity. Reconstruct row motion immediately so encodeSurface never
+      // observes row indices from the retired epoch.
+      this.losassoRowMotion?.encode(broker);
+      broker.fence("accepted Losasso row and owner epoch published");
+      this.activePowerGeneration = this.candidatePowerGeneration;
+      this.candidatePowerGeneration = 0;
+      this.info.topologyReused = false;
+      return;
+    }
     const descriptor = this.powerDescriptor, topology = this.powerTopology;
     const structured = this.structuredVelocity, boundary = this.structuredBoundary;
     const epoch = this.topologyEpoch;
-    // A pending target has not completed redistance/settlement yet. Section 5
-    // demand must be derived only from the currently accepted fine source.
-    const fine = this.globalFineCurrentIsA ? this.globalFineSourceA : this.globalFineSourceB;
     if (!descriptor || !topology || !structured || !boundary || !epoch
       || this.candidatePowerGeneration === 0) {
       throw new Error("Ready topology flip requires a complete inactive coupled candidate");
@@ -3992,10 +4364,37 @@ export class WebGPUOctreeProjection {
     }
     this.activePowerGeneration = acceptedGeneration;
     this.candidatePowerGeneration = 0;
+    this.info.topologyReused = false;
   }
 
   finishTopologyCandidate() { this.info.topologyReuseCount += 1; }
+
+  /**
+   * Tail scheduling for the Losasso k-advance epoch. The fine band is still
+   * transported every advance; its construction-time page plan includes the
+   * corresponding extra dilation rings. Power 2017 always takes the legacy
+   * every-advance path.
+   */
+  encodeInactiveTopologyCandidateIfDue(encoder: GPUCommandEncoder): boolean {
+    const cadence = this.coarseDynamics.topology.advancesPerEpoch;
+    if (this.coarseDynamics.backend === "power2017" || cadence === 1) {
+      return this.encodeInactiveTopologyCandidate(encoder);
+    }
+    this.topologyCadenceCursor += 1;
+    if (this.topologyCadenceCursor < cadence) {
+      this.info.topologyReused = true;
+      this.info.topologyReuseCount += 1;
+      return false;
+    }
+    this.topologyCadenceCursor = 0;
+    return this.encodeInactiveTopologyCandidate(encoder);
+  }
   get pressureSolverLabel() {
+    if (this.coarseDynamics.backend === "losasso") {
+      const budget = this.losassoBackend?.solverIterationBudget
+        ?? this.info.pressureIterationBudget;
+      return `Octree Losasso MGPCG · exact-reduction wide solve · plain first-order V-cycle · up to ${budget} iterations`;
+    }
     const budget = this.pipelinedMGPCG?.iterationBudget ?? this.info.pressureIterationBudget;
     const levels = this.firstOrderVCycle?.plan.levelCount ?? 0;
     return `Octree power MGPCG · row-parallel exact-reduction executor · Section 4.3 fixed schedule · up to ${budget} iterations · ${levels}-level L1 V-cycle`;
@@ -4140,6 +4539,9 @@ export class WebGPUOctreeProjection {
     },
     scope: "complete" | "power-operator-only" = "complete",
   ): GPUCommandEncoder {
+    if (this.coarseDynamics.backend === "losasso") {
+      return this.encodeLosasso(encoder, options, scope);
+    }
     const solveBudget = this.pipelinedMGPCG?.iterationBudget
       ?? this.solveTailPolicy.encodedOuterIterations;
     this.workAccounting.beginSubstep();
@@ -4220,6 +4622,62 @@ export class WebGPUOctreeProjection {
     this.encodeOverlayMaterialization(encoder, finalInA);
     if (this.powerTimestep_s > 0) this.powerAdvancingPressureSteps += 1;
     splitProductionPhase("rowEngineB", "structuredProjectionTail");
+    return encoder;
+  }
+
+  private encodeLosasso(
+    encoder: GPUCommandEncoder,
+    options?: { productionBoundary?: OctreeSemanticBoundary; step?: number },
+    scope: "complete" | "power-operator-only" = "complete",
+  ): GPUCommandEncoder {
+    const backend = this.losassoBackend;
+    if (!backend || this.activePowerGeneration === 0) {
+      throw new Error("Losasso pressure step requires an accepted compact authority");
+    }
+    const solveBudget = backend.solverIterationBudget
+      ?? this.solveTailPolicy.encodedOuterIterations;
+    this.workAccounting.beginSubstep();
+    this.info.pressureIterationBudget = solveBudget;
+    this.info.pressureIterationHardBudget = this.solveTailPolicy.hardOuterIterationCeiling;
+    const step = {
+      dt_s: this.powerTimestep_s,
+      gravity_m_s2: [
+        this.scene.fluid.gravity_m_s2.x,
+        this.scene.fluid.gravity_m_s2.y,
+        this.scene.fluid.gravity_m_s2.z,
+      ] as const,
+      inflow: this.surfaceInflow,
+    };
+    let broker = new PassBroker(encoder);
+    backend.encodeAdvection(broker, step);
+    backend.encodeForcesAndDivergence(broker, step);
+    broker.fence("Losasso first-order axis-face RHS published");
+    if (options?.productionBoundary) {
+      encoder = options.productionBoundary("structuredAdvectionBoundaryRhs", encoder);
+      broker = new PassBroker(encoder);
+    }
+    const initialInA = !this.latestPressureInA;
+    const pressureIn = initialInA ? this.pressureA : this.pressureB;
+    const pressureOut = initialInA ? this.pressureB : this.pressureA;
+    backend.encodeSolve(broker, { pressureSeed: pressureIn, pressureOut });
+    this.latestPressureInA = !initialInA;
+    broker.fence("Losasso wide exact-reduction pressure solve complete");
+    if (options?.productionBoundary) {
+      encoder = options.productionBoundary("mgpcgSolve", encoder);
+      broker = new PassBroker(encoder);
+    }
+    backend.encodeProjection(broker, pressureOut, step, this.dynamicCouplingBodyCount);
+    broker.fence("Losasso projected wet axis faces published");
+    if (scope === "power-operator-only") return encoder;
+    if (options?.productionBoundary) {
+      encoder = options.productionBoundary("structuredProjection", encoder);
+    }
+    encoder = this.encodePendingFineSettlement(encoder, options?.productionBoundary);
+    this.encodeOverlayMaterialization(encoder, this.latestPressureInA);
+    if (this.powerTimestep_s > 0) this.powerAdvancingPressureSteps += 1;
+    if (options?.productionBoundary) {
+      encoder = options.productionBoundary("structuredProjectionTail", encoder);
+    }
     return encoder;
   }
 
@@ -4309,7 +4767,27 @@ export class WebGPUOctreeProjection {
       closedBoundary: true,
       openTopBoundary: this.scene.container.top !== "closed",
     });
+    if (this.coarseDynamics.backend === "losasso" && !this.globalFineBootstrapped) {
+      if (!this.losassoCoarsePhi) throw new Error("Losasso coarse-phi exchange is unavailable");
+      // Bootstrap the generic coarse-volume directory before the first volume
+      // correction. Later settlements already have the pre-force exchange.
+      this.losassoCoarsePhi.encode(redistanceBroker, pending.target,
+        this.losassoCoarsePhiInput());
+      this.losassoConditionedOperator?.encodeAfterGhostDistances(redistanceBroker);
+      this.losassoBackend?.encodeHierarchyRefresh(redistanceBroker, this.leafHeaders);
+      this.refreshLosassoProjectionGroups();
+    }
     pending.volume?.encode(redistanceBroker);
+    if (this.coarseDynamics.backend === "losasso") {
+      if (!this.losassoCoarsePhi) throw new Error("Losasso coarse-phi exchange is unavailable");
+      // Volume correction may move fine phi. Republish the final conditioned
+      // operator and hierarchy from the corrected, fully redistanced band.
+      this.losassoCoarsePhi.encode(redistanceBroker, pending.target,
+        this.losassoCoarsePhiInput());
+      this.losassoConditionedOperator?.encodeAfterGhostDistances(redistanceBroker);
+      this.losassoBackend?.encodeHierarchyRefresh(redistanceBroker, this.leafHeaders);
+      this.refreshLosassoProjectionGroups();
+    }
     encoder = redistanceBroker.commandEncoder();
     split("closestPointWaves", "fineRedistance");
 
@@ -4319,8 +4797,10 @@ export class WebGPUOctreeProjection {
       ...(pending.volume ? { volume: pending.volume.control } : {}),
       ...(pending.transport ? { transport: pending.transport.control } : {}),
     });
-    this.encodeCoarsePhiCorrection(restrictionBroker, pending.target, pending.topology, 0);
-    if (this.powerCoarseLevelSetSchedule) {
+    if (this.coarseDynamics.backend === "power2017") {
+      this.encodeCoarsePhiCorrection(restrictionBroker, pending.target, pending.topology, 0);
+    }
+    if (this.coarseDynamics.backend === "power2017" && this.powerCoarseLevelSetSchedule) {
       const coarse = this.powerCoarseLevelSetSchedule.sampleSource;
       this.globalFineSummaries?.encode(restrictionBroker, pending.target, {
         buffer: pending.topology.pageDelta,
@@ -4332,6 +4812,21 @@ export class WebGPUOctreeProjection {
         deltaHeaderWords: coarse.deltaHeaderWords,
         deltaRecordWords: coarse.deltaRecordWords,
       });
+    } else if (this.coarseDynamics.backend === "losasso" && this.losassoCoarsePhi) {
+      this.globalFineSummaries?.encode(restrictionBroker, pending.target, {
+        buffer: pending.topology.pageDelta,
+        layout: pending.topology.pageDeltaLayout,
+      }, this.losassoCoarsePhi.summaryCoarseSource());
+    }
+    if (this.coarseDynamics.backend === "losasso") {
+      const backend = this.losassoBackend;
+      if (!backend) throw new Error("Losasso extension-band backend is unavailable");
+      backend.encodeExtensionBandPublication(restrictionBroker, pending.target);
+      const advanceSerial = this.powerTimestep_s > 0
+        ? this.powerAdvancingPressureSteps + 1 : 0;
+      backend.encodeExtension(restrictionBroker, advanceSerial,
+        this.activePowerGeneration);
+      this.losassoRowMotion?.encode(restrictionBroker);
     }
     encoder = restrictionBroker.commandEncoder();
     this.globalFinePublicationByEncoder.set(encoder, pending.targetIsA);
@@ -4428,33 +4923,51 @@ export class WebGPUOctreeProjection {
           : this.globalFineSeeds.encodeFromAllInterfaceLeaves(
             seedBroker, { buffer: this.fineSeedAdapter.leaves }, { buffer: this.compaction },
           );
-        const compactCoarseEntry: GPUBindGroupEntry = { binding: 9,
-          resource: { buffer: this.powerCoarseLevelSetSchedule!.sampleSource.directory } };
+        const compactCoarseEntry: GPUBindGroupEntry = this.coarseDynamics.backend === "losasso"
+          ? this.losassoCoarsePhi!.fineTopologyEntry(9)
+          : { binding: 9,
+            resource: { buffer: this.powerCoarseLevelSetSchedule!.sampleSource.directory } };
         // Same planner as allocation. The final three cells cover the complete
         // 3-D trilinear stencil and its centre on the closed cutoff.
         const { transportBandFineCells: bandCells,
           redistanceBandFineCells: redistanceBandCells, maximumBacktraceFineCells }
           = planFineLevelSetBandFineCells(this.fineLevelSetBandCells,
             this.globalFineLevelSet!.plan.fineFactor);
-        const transport = this.globalFineCurrentIsA ? this.globalFineTransportA : this.globalFineTransportB;
+        const transport = this.coarseDynamics.backend === "losasso"
+          ? (this.globalFineCurrentIsA ? this.losassoFineTransportA : this.losassoFineTransportB)
+          : (this.globalFineCurrentIsA ? this.globalFineTransportA : this.globalFineTransportB);
         let transportEncoded = false;
         // Adapter publication, coarse bootstrap and compact interface seeding
         // precede characteristic transport. Keep them out of the transport
         // bucket so the generic trace names the measured work.
         seedBroker.fence("fine interface seed publication complete");
         splitProductionPhase(undefined, "finePreparation");
-        if (this.globalFineBootstrapped && transport && structuredSource) {
+        if (this.globalFineBootstrapped && transport
+          && (structuredSource || this.coarseDynamics.backend === "losasso")) {
           const transportBroker = new PassBroker(encoder);
           this.lastGlobalFineTransport = transport;
-          const completedTransportBroker = transport.encode(transportBroker, {
-            timestep: dt_s,
-            ...(inflow ? { inflow } : {}),
-            boundaryPolicy: "closed-neumann",
-            openTopBoundary: this.scene.container.top !== "closed",
-            dynamicBoundary: this.scene.rigidBodies.length > 0,
-            transportBandCells: bandCells,
-            maximumBacktraceFineCells,
-          });
+          const completedTransportBroker = this.coarseDynamics.backend === "losasso"
+            ? (transport as WebGPUOctreeLosassoFineTransport).encode(transportBroker, {
+              timestep: dt_s,
+              // S1 deliberately consumes the previous advance's settled W7
+              // field. A ready topology flip may already have advanced the
+              // wet-face epoch, while this lagged sampler remains physically
+              // valid by geometric identity until S3e rebuilds it below.
+              velocityEpoch: 0,
+              boundaryPolicy: "closed-neumann",
+              openTopBoundary: this.scene.container.top !== "closed",
+              transportBandCells: bandCells,
+              maximumBacktraceFineCells,
+            })
+            : (transport as WebGPUFineLevelSetTransport).encode(transportBroker, {
+              timestep: dt_s,
+              ...(inflow ? { inflow } : {}),
+              boundaryPolicy: "closed-neumann",
+              openTopBoundary: this.scene.container.top !== "closed",
+              dynamicBoundary: this.scene.rigidBodies.length > 0,
+              transportBandCells: bandCells,
+              maximumBacktraceFineCells,
+            });
           // Topology may reuse the shared physical payload pool. Capture the
           // transported old phi by logical sample before that reuse, then
           // intersect it with the new generation after topology publication.
@@ -4485,7 +4998,7 @@ export class WebGPUOctreeProjection {
             maximumBacktraceFineCells,
             interpolationSupportFineCells: 1,
             redistanceBandFineCells: redistanceBandCells,
-            safetyBrickRings: 1,
+            safetyBrickRings: 1 + this.coarseDynamics.topology.extraDilationRings,
           }, true, this.globalFineBootstrapped
             ? { kind: "delta", producer: publicationTransport!.topologyDelta }
             : { kind: "bootstrap" }, inflow, this.scene.container.top !== "closed");
@@ -4503,7 +5016,7 @@ export class WebGPUOctreeProjection {
             maximumBacktraceFineCells,
             interpolationSupportFineCells: 1,
             redistanceBandFineCells: redistanceBandCells,
-            safetyBrickRings: 1,
+            safetyBrickRings: 1 + this.coarseDynamics.topology.extraDilationRings,
           }, true, this.globalFineBootstrapped
             ? { kind: "delta", producer: publicationTransport!.topologyDelta }
             : { kind: "bootstrap" }, inflow, this.scene.container.top !== "closed");
@@ -4536,22 +5049,34 @@ export class WebGPUOctreeProjection {
         // the complete narrow band, so its sole correction occurs at settlement.
         if (wasBootstrapped && !coarseBootstrappedThisStep) {
           const coarseBroker = new PassBroker(encoder);
-          this.encodeCoarsePhiCorrection(coarseBroker, publicationTarget,
-            publicationTopology, dt_s, true);
+          if (this.coarseDynamics.backend === "losasso") {
+            if (!this.losassoCoarsePhi) throw new Error("Losasso coarse-phi exchange is unavailable");
+            this.losassoCoarsePhi.encode(coarseBroker, publicationTarget,
+              this.losassoCoarsePhiInput());
+            this.losassoConditionedOperator?.encodeAfterGhostDistances(coarseBroker);
+            this.losassoBackend?.encodeHierarchyRefresh(coarseBroker, this.leafHeaders);
+            this.refreshLosassoProjectionGroups();
+          } else {
+            this.encodeCoarsePhiCorrection(coarseBroker, publicationTarget,
+              publicationTopology, dt_s, true);
+          }
           coarseBroker.fence("transported fine and coarse phi published before forces");
           encoder = coarseBroker.commandEncoder();
         }
         if (!wasBootstrapped || dt_s === 0) {
           encoder = this.encodePendingFineSettlement(encoder, productionBoundary);
-          if (!this.airVelocitySupport || !this.globalFineBootstrapped
-            || this.activePowerGeneration === 0) {
+          if (this.coarseDynamics.backend === "power2017"
+            && (!this.airVelocitySupport || !this.globalFineBootstrapped
+              || this.activePowerGeneration === 0)) {
             throw new Error("Settled t=0 fine authority requires Section 5 air support");
           }
-          const supportBroker = new PassBroker(encoder);
-          this.airVelocitySupport.encode(supportBroker, this.activePowerGeneration,
-            this.globalFineCurrentIsA ? 0 : 1, this.airSupportGravityImpulse(dt_s));
-          supportBroker.fence("settled t=0 fine-demand air support published");
-          encoder = supportBroker.commandEncoder();
+          if (this.airVelocitySupport) {
+            const supportBroker = new PassBroker(encoder);
+            this.airVelocitySupport.encode(supportBroker, this.activePowerGeneration,
+              this.globalFineCurrentIsA ? 0 : 1, this.airSupportGravityImpulse(dt_s));
+            supportBroker.fence("settled t=0 fine-demand air support published");
+            encoder = supportBroker.commandEncoder();
+          }
           if (productionBoundary) {
             encoder = productionBoundary("structuredProjectionTail", encoder);
           }
@@ -4615,6 +5140,47 @@ export class WebGPUOctreeProjection {
     this.pendingSurfaceReferenceVolume_m3 += cells * cellVolume;
   }
   async readSolveDiagnostics() {
+    if (this.coarseBackend === "losasso") {
+      const backend = this.losassoBackend;
+      if (!backend) throw new Error("Losasso solve diagnostics require the reduced backend");
+      const solverControl = backend.solverControl ?? backend.sources.rowCount;
+      const readback = this.device.createBuffer({
+        label: "Octree Losasso live pressure diagnostics",
+        size: 32 + 64,
+        usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+      });
+      const encoder = this.device.createCommandEncoder({
+        label: "Read octree Losasso pressure diagnostics",
+      });
+      encoder.copyBufferToBuffer(backend.sources.operator.control, 0, readback, 0, 32);
+      encoder.copyBufferToBuffer(solverControl, 0, readback, 32,
+        Math.min(64, solverControl.size));
+      this.device.queue.submit([encoder.finish()]);
+      try {
+        await readback.mapAsync(GPUMapMode.READ);
+        const mapped = readback.getMappedRange();
+        const authority = new Uint32Array(mapped, 0, 8);
+        const rows = authority[1] ?? 0;
+        const valid = authority[3] === 1 && authority[4] === 0;
+        this.info.pressureCapacityOverflow = !valid;
+        this.info.frontierCapacityOverflow = !valid;
+        this.info.frontierRequiredLeaves = rows;
+        this.info.pressureRequiredRows = rows;
+        this.info.pressureSampleCount = rows;
+        this.info.liquidDofCount = rows;
+        this.info.faceCount = authority[2] ?? 0;
+        this.info.compressionRatio = rows
+          / Math.max(1, this.dims.nx * this.dims.ny * this.dims.nz);
+        this.residualRms = undefined;
+        this.initialResidualRms = undefined;
+        this.relativeResidual = undefined;
+        this.applyMGPCGDiagnostics(new Uint32Array(mapped, 32, 16));
+      } finally {
+        if (readback.mapState === "mapped") readback.unmap();
+        readback.destroy();
+      }
+      return;
+    }
     // The staging buffer was copied inside the solve encoder, so it can never
     // race the next rebuild's worklist copy over the compaction header. It
     // carries [overflow, required rows, required entries, exact dispatch xyz,
@@ -4931,7 +5497,10 @@ export class WebGPUOctreeProjection {
     });
     const capture = (region: OctreeFrontierFailureRegion, source: GPUBuffer, sourceOffset = 0) => {
       const span = layout.span(region);
-      encoder.copyBufferToBuffer(source, sourceOffset, readback, span.bytes, span.count * 4);
+      const byteLength = Math.min(span.count * 4, Math.max(0, source.size - sourceOffset));
+      if (byteLength > 0) {
+        encoder.copyBufferToBuffer(source, sourceOffset, readback, span.bytes, byteLength);
+      }
     };
     capture("frontier", this.leafFrontier);
     capture("compaction", this.compaction);
@@ -4939,12 +5508,22 @@ export class WebGPUOctreeProjection {
     capture("frontierFailure", this.compaction, this.compaction.size - 8 * 4);
     capture("frontierPublication", this.compaction, this.frontierPublicationOffsetBytes);
     capture("dirtyAuthorityState", this.compaction, this.dirtyAuthorityStateOffsetBytes);
-    capture("descriptorCandidate", this.powerDescriptor!.control);
-    capture("topologyCandidate", this.powerTopology!.control);
-    capture("structuredCandidate", this.structuredVelocity!.candidateControl);
-    capture("boundaryCandidate", this.structuredBoundary!.candidateControl);
-    capture("spgridCandidate", this.firstOrderVCycle.candidateControl);
-    capture("epoch", this.topologyEpoch!.state);
+    const losassoControl = this.losassoBackend?.sources.operator.control;
+    if (losassoControl) {
+      // Preserve the long-standing failure receipt shape for callers while
+      // exposing the single reduced authority that replaces the five Power
+      // publication controls. Unused regions remain zero-initialized.
+      for (const region of ["descriptorCandidate", "topologyCandidate",
+        "structuredCandidate", "boundaryCandidate", "spgridCandidate",
+        "epoch"] as const) capture(region, losassoControl);
+    } else {
+      capture("descriptorCandidate", this.powerDescriptor!.control);
+      capture("topologyCandidate", this.powerTopology!.control);
+      capture("structuredCandidate", this.structuredVelocity!.candidateControl);
+      capture("boundaryCandidate", this.structuredBoundary!.candidateControl);
+      capture("spgridCandidate", this.firstOrderVCycle.candidateControl);
+      capture("epoch", this.topologyEpoch!.state);
+    }
     capture("rowDelta", this.leafFrontier,
       this.frontierAllocation.rowDeltaControlOffsetWords * 4);
     capture("ownerCandidate", this.ownerPages.candidateTransaction);
@@ -4970,15 +5549,19 @@ export class WebGPUOctreeProjection {
       this.frontierAllocation.rowDeltaNewToOldOffsetWords * 4);
     capture("rowDeltaAffectedRows", this.leafFrontier,
       this.frontierAllocation.rowDeltaAffectedRowsOffsetWords * 4);
-    capture("descriptorCandidates", this.powerDescriptor!.candidateDescriptors);
-    capture("descriptorStatuses", this.powerDescriptor!.dispatch, 4 * 4);
+    if (this.powerDescriptor) {
+      capture("descriptorCandidates", this.powerDescriptor.candidateDescriptors);
+      capture("descriptorStatuses", this.powerDescriptor.dispatch, 4 * 4);
+    }
     // The structured publication's nine indirect records. Words 3..5 are the
     // slot dispatch consumed by `classifyStructuredCatalogSlots`, while words
     // 18..20 are the exact changed-face transfer record. A record Dawn's
     // indirect-args validator zeroed raises no error and simply never runs the
     // stage, which is indistinguishable from a physics rejection in the
     // control words alone.
-    capture("structuredDispatch", this.structuredVelocity!.liveRowDispatch);
+    if (this.structuredVelocity) {
+      capture("structuredDispatch", this.structuredVelocity.liveRowDispatch);
+    }
     // The three compact schedules the emission/sort/carry stages actually
     // consume, beside the head of the compact candidate list they fill. A
     // published row count with an empty candidate record is invisible in the
@@ -5066,18 +5649,21 @@ export class WebGPUOctreeProjection {
       if (readback.mapState === "mapped") readback.unmap();
       readback.destroy();
     }
-    const spgridFailure = await this.firstOrderVCycle.readCandidateFailureDiagnostics();
-    result.spgridLevelDelta = spgridFailure.levelDelta;
-    result.spgridCandidateDispatch = spgridFailure.candidateDispatch;
+    if (this.firstOrderVCycle) {
+      const spgridFailure = await this.firstOrderVCycle.readCandidateFailureDiagnostics();
+      result.spgridLevelDelta = spgridFailure.levelDelta;
+      result.spgridCandidateDispatch = spgridFailure.candidateDispatch;
+    }
     const descriptorFirstError = Number(result.descriptorCandidate[3]) >>> 0;
-    if (Number(result.descriptorCandidate[2]) !== 0
+    if (this.powerDescriptor && Number(result.descriptorCandidate[2]) !== 0
       && descriptorFirstError < this.pressureCapacity.rowCapacity) {
       result.descriptorFailureRow =
         await this.readPowerDescriptorCandidateFailure(descriptorFirstError);
     }
     const boundary = result.boundaryCandidate;
     const boundaryFirstError = Number(boundary[1]) >>> 0;
-    if ((Number(boundary[0]) & 2) !== 0 && boundaryFirstError < this.pressureCapacity.rowCapacity) {
+    if (this.powerDescriptor && (Number(boundary[0]) & 2) !== 0
+      && boundaryFirstError < this.pressureCapacity.rowCapacity) {
       result.boundaryFailureRow = await this.readPowerDescriptorCandidateFailure(boundaryFirstError);
     }
     const coarseFirstError = Number(result.coarseControl[1]) >>> 0;
@@ -5217,7 +5803,7 @@ export class WebGPUOctreeProjection {
     dimensions: readonly [number, number, number];
   } {
     return { buffer: this.ownerPages.arena,
-      maximumLeafSize: this.maxLeafSize,
+      maximumLeafSize: this.topologyMaximumLeafSize,
       dimensions: [this.dims.nx, this.dims.ny, this.dims.nz] };
   }
   /** QA-only compact surface producer header feeding recurring topology residency. */
@@ -5236,6 +5822,44 @@ export class WebGPUOctreeProjection {
   get topologyEpochState(): GPUBuffer | undefined { return this.topologyEpoch?.state; }
   get airSupportScratch(): GPUBuffer | undefined { return this.airVelocitySupport?.scratch; }
   get spgridLevelDelta(): GPUBuffer | undefined { return this.firstOrderVCycle?.levelDelta; }
+  /** End-of-step copy sources for the Losasso-native diagnostic receipt. */
+  get losassoAuthorityControl(): GPUBuffer | undefined {
+    return this.losassoBackend?.sources.operator.control;
+  }
+  get losassoCoarsePhiControl(): GPUBuffer | undefined {
+    return this.losassoCoarsePhi?.source.arena;
+  }
+  get losassoExtensionControl(): GPUBuffer | undefined {
+    return this.losassoBackend?.extensionBand.source.control;
+  }
+  /** End-of-step diagnostic source for the fine generation whose publication
+   * was just encoded. `globalFinePublishedIsA` advances only after submission,
+   * so it still names the preceding generation while the snapshot copies run
+   * at the tail of the current command encoder. */
+  get globalFineCurrentWorklist(): GPUBuffer | undefined {
+    if (!this.globalFineBootstrapped) return undefined;
+    return (this.globalFineCurrentIsA
+      ? this.globalFineSourceA : this.globalFineSourceB)?.worklist;
+  }
+  get losassoVelocityDebug() {
+    const source = this.losassoBackend?.sources.velocitySampler;
+    return source ? {
+      control: source.control,
+      faceGeometry: source.faceGeometry,
+      extendedVelocity: source.extendedVelocity,
+      dimensions: source.dimensions,
+      maximumLeafSize: source.maximumLeafSize,
+    } : undefined;
+  }
+  get losassoPressureDebug() {
+    const source = this.losassoBackend?.sources;
+    const wide = source?.wideSolver;
+    return source && wide ? {
+      control: source.operator.control,
+      rightHandSide: source.rightHandSide,
+      diagonal: wide.diagonal,
+    } : undefined;
+  }
 
   /** Minimal production telemetry retained after hierarchical accounting was removed. */
   get workAccountingBuffers(): Readonly<{
@@ -5253,7 +5877,8 @@ export class WebGPUOctreeProjection {
     symmetryPreconditionerInnerCorrection?: GPUBufferBinding;
     symmetryPreconditionerPostCorrected?: GPUBufferBinding;
   }> | undefined {
-    const fineTransportGovernor = this.lastGlobalFineTransport ? {
+    const fineTransportGovernor = this.lastGlobalFineTransport
+      && "governor" in this.lastGlobalFineTransport ? {
         buffer: this.lastGlobalFineTransport.governor,
         size: 4 * (4 + 64),
       } : undefined;
@@ -5306,7 +5931,14 @@ export class WebGPUOctreeProjection {
     if (!this.globalFineLevelSet || !this.globalFineBootstrapped) return undefined;
     const fine = this.globalFinePublishedIsA ? this.globalFineSourceA : this.globalFineSourceB;
     if (!fine) return undefined;
-    const coarse = this.powerCoarseLevelSetSchedule?.sampleSource;
+    const powerCoarse = this.powerCoarseLevelSetSchedule?.sampleSource;
+    const losassoCoarse = this.losassoCoarsePhi?.source;
+    const coarse = powerCoarse ?? (losassoCoarse
+      // Generic rendering and QA consumers use the shared eight-word coarse
+      // directory ABI. The Losasso arena is its private topology-sampling
+      // hash table and must never leak through this backend-neutral source.
+      ? { directory: losassoCoarse.volumeDirectory, rowCapacity: losassoCoarse.rowCapacity }
+      : undefined);
     const topology = this.globalFinePublishedIsA ? this.globalFineTopologyBA : this.globalFineTopologyAB;
     return { ...fine,
       ...(coarse ? { coarsePhiDirectory: coarse.directory, coarsePhiRowCapacity: coarse.rowCapacity } : {}),
@@ -5586,6 +6218,38 @@ export class WebGPUOctreeProjection {
   get structuredProjectionEnergyStats(): GPUBuffer | undefined {
     return this.structuredDynamics?.projectionEnergyStats;
   }
+
+  async readLosassoAuthorityDiagnostics(): Promise<Readonly<{
+    authority: readonly number[];
+    solver: readonly number[];
+    coarsePhi: readonly number[];
+  }> | undefined> {
+    const backend = this.losassoBackend, coarse = this.losassoCoarsePhi;
+    if (!backend || !coarse) return undefined;
+    const readback = this.device.createBuffer({
+      label: "Read Losasso reduced authority",
+      size: 32 + 32 + 80,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+    const encoder = this.device.createCommandEncoder({ label: "Read Losasso authority controls" });
+    encoder.copyBufferToBuffer(backend.sources.operator.control, 0, readback, 0, 32);
+    const solver = backend.solverControl ?? backend.sources.rowCount;
+    encoder.copyBufferToBuffer(solver, 0, readback, 32, Math.min(32, solver.size));
+    encoder.copyBufferToBuffer(coarse.source.arena, 0, readback, 64, 80);
+    this.device.queue.submit([encoder.finish()]);
+    try {
+      await readback.mapAsync(GPUMapMode.READ);
+      const words = new Uint32Array(readback.getMappedRange());
+      return Object.freeze({
+        authority: Array.from(words.slice(0, 8)),
+        solver: Array.from(words.slice(8, 16)),
+        coarsePhi: Array.from(words.slice(16, 36)),
+      });
+    } finally {
+      if (readback.mapState === "mapped") readback.unmap();
+      readback.destroy();
+    }
+  }
   /**
    * Diagnostic-only census of the accepted structural owner topology.
    *
@@ -5610,7 +6274,7 @@ export class WebGPUOctreeProjection {
       await readback.mapAsync(GPUMapMode.READ);
       const words = new Uint32Array(readback.getMappedRange());
       return censusOctreeTopologyLeaves(
-        words, this.ownerPages.plan, this.maxLeafSize as OctreeOwnerLeafSize,
+        words, this.ownerPages.plan, this.topologyMaximumLeafSize,
       );
     } finally {
       if (readback.mapState === "mapped") readback.unmap();
@@ -5922,6 +6586,11 @@ export class WebGPUOctreeProjection {
     // with them still unassigned. Destroying them unconditionally throws a
     // TypeError that replaces the failure the caller is about to rethrow.
     this.pipelinedMGPCG?.destroy();
+    this.losassoReadyCommit?.destroy();
+    this.losassoCoarsePhi?.destroy();
+    this.losassoRowMotion?.destroy();
+    this.losassoConditionedOperator?.destroy();
+    this.losassoBackend?.destroy();
     this.section43HybridPreconditioner?.destroy();
     for (const buffer of Object.values(this.pipelinedMGPCGVectors ?? {})) buffer.destroy();
     this.firstOrderVCycle?.destroy();
@@ -5947,6 +6616,7 @@ export class WebGPUOctreeProjection {
     this.analyticBootstrapWorklist?.destroy();
     this.globalFineVolumeA?.destroy(); this.globalFineVolumeB?.destroy();
     this.globalFineTransportA?.destroy(); this.globalFineTransportB?.destroy();
+    this.losassoFineTransportA?.destroy(); this.losassoFineTransportB?.destroy();
     this.globalFineTopologyAB?.destroy(); this.globalFineTopologyBA?.destroy();
     this.globalFineSeeds?.destroy(); this.globalFineLevelSet?.destroy();
     this.globalFineSummaries?.destroy();
@@ -9167,6 +9837,23 @@ export const octreeProjectionShader = octreeGradingFixpointEnabled()
   ? octreeGradingFixpointShader(octreeProjectionShaderBase)
   : octreeProjectionShaderBase;
 
+/**
+ * Losasso owns a distinct topology shader module. Its free-surface shell is
+ * uniformly finest, so a size-two leaf with finite near-interface evidence is
+ * allowed to fall through to the normal distance predicate and split. The
+ * frozen Power module keeps the compact size-two surface rows verbatim.
+ */
+export function octreeLosassoSurfaceGradingShader(source: string): string {
+  const compactSurfaceRows = `  if (fineSummaryFactor != 1u && size <= 2u) {
+    return false;
+  }`;
+  if (!source.includes(compactSurfaceRows)) {
+    throw new Error("Losasso grading transform could not locate the Power surface-row clause");
+  }
+  return source.replace(compactSurfaceRows,
+    `  // Losasso: size-two rows inside the two-fine-cell shell split to unit rows.`);
+}
+
 function projectionWGSLClosingDelimiter(
   source: string,
   openIndex: number,
@@ -9185,22 +9872,23 @@ function projectionWGSLClosingDelimiter(
  * mode returns the production shader byte-for-byte. */
 export function octreeProjectionActivityShader(
   activity: GPULogicalActivityAdoptionContext,
+  shaderSource = octreeProjectionShader,
 ): string {
-  if (!activity.enabled) return octreeProjectionShader;
+  if (!activity.enabled) return shaderSource;
   const edits: Array<{ start: number; end: number; replacement: string }> = [];
   for (const entryPoint of OCTREE_PROJECTION_ACTIVITY_ENTRY_POINTS) {
     const declaration = new RegExp(
       `@compute\\s+@workgroup_size\\s*\\(([^)]*)\\)\\s*fn\\s+${entryPoint}\\s*\\(`,
-    ).exec(octreeProjectionShader);
+    ).exec(shaderSource);
     if (!declaration) throw new Error(`Projection activity entry point is missing: ${entryPoint}`);
-    const functionIndex = octreeProjectionShader.indexOf("fn", declaration.index);
-    const parametersOpen = octreeProjectionShader.indexOf("(", functionIndex);
+    const functionIndex = shaderSource.indexOf("fn", declaration.index);
+    const parametersOpen = shaderSource.indexOf("(", functionIndex);
     const parametersClose = projectionWGSLClosingDelimiter(
-      octreeProjectionShader, parametersOpen, "(", ")",
+      shaderSource, parametersOpen, "(", ")",
     );
-    const bodyOpen = octreeProjectionShader.indexOf("{", parametersClose);
+    const bodyOpen = shaderSource.indexOf("{", parametersClose);
     if (bodyOpen < 0) throw new Error(`Projection activity entry point has no body: ${entryPoint}`);
-    const parameters = octreeProjectionShader.slice(parametersOpen + 1, parametersClose);
+    const parameters = shaderSource.slice(parametersOpen + 1, parametersClose);
     const builtinName = (builtin: string) => new RegExp(
       `@builtin\\(${builtin}\\)\\s*([A-Za-z_]\\w*)\\s*:`,
     ).exec(parameters)?.[1];
@@ -9242,7 +9930,7 @@ export function octreeProjectionActivityShader(
   }
   return edits.sort((left, right) => right.start - left.start).reduce(
     (source, edit) => source.slice(0, edit.start) + edit.replacement + source.slice(edit.end),
-    octreeProjectionShader,
+    shaderSource,
   );
 }
 

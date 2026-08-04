@@ -174,7 +174,7 @@ export const OCTREE_STEP_PROGRAM: PhysicsStepProgram = Object.freeze({
       [],
       ["render-world"]),
     stage("step-snapshot",
-      "Copy the accepted structured/boundary controls, fine worklist header, stats words, topology-epoch state, SPGrid per-level setup delta, air-support failure words, and fine-transport governor schedule into the step-coherent snapshot ring (the only sanctioned diagnostics source)",
+      "Copy the selected backend's accepted authority, solve, surface, extension/support, and transport receipts into its step-coherent snapshot ring (the only sanctioned diagnostics source)",
       "other",
       ["accepted-structured-velocity", "accepted-boundary-controls", "fine-generation", "solve-stats", "projection-energy-stats", "accepted-epoch", "candidate-epoch", "air-support", "fine-level-set"],
       [],

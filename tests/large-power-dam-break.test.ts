@@ -62,7 +62,8 @@ test("large power dam break is available as a comparison preset", () => {
     "band-1 reserves seven floor-sheet layers plus one footprint of deformation headroom");
   assert.equal(preset.id, "large-power-dam-break");
   assert.equal(preset.methodProfile, LARGE_POWER_DAM_METHOD_PROFILE);
-  assert.equal(preset.methodProfile.overrides.maximumLeafSize, "32");
+  assert.equal(preset.methodProfile.overrides.coarseBackend, "losasso");
+  assert.equal(preset.methodProfile.overrides.maximumLeafSize, "4");
   assert.equal(preset.methodProfile.overrides.interfaceRefinementBandCells, 1);
   assert.equal(preset.methodProfile.overrides.globalFineLevelSetMaximumBricks,
     LARGE_POWER_DAM_FINE_BRICK_CAPACITY);

@@ -52,8 +52,13 @@ export function DiagnosticsPanel() {
   // that a nonempty accepted system was solved.
   const acceptedPressureSolve = (gpuInfo?.quadtreePressureIterationsUsed ?? 0) > 0
     && gpuInfo?.quadtreePressureConverged === true;
+  const losassoCoarseDynamics = gpuInfo?.coarseDynamicsBackend === "losasso"
+    || (gpuInfo?.coarseDynamicsBackend === undefined && methodValues.coarseBackend === "losasso");
   const resolvedPowerPublished = Boolean(gpuInfo?.powerDiagramAuthoritative)
     && (reportedPressureRows !== undefined || acceptedPressureSolve);
+  const resolvedPressurePublished = losassoCoarseDynamics
+    ? acceptedPressureSolve
+    : resolvedPowerPublished;
   const pressureRowsLabel = reportedPressureRows?.toLocaleString()
     ?? (acceptedPressureSolve ? "GPU-resident" : "—");
   const publishedPowerSolver = isOctreePersistentMGPCGSolverLabel(gpuInfo?.pressureSolver)
@@ -147,14 +152,14 @@ export function DiagnosticsPanel() {
         <MetricCard label="GPU divergence pre → post" value={gpuInfo?.maxDivergenceBefore_s !== undefined && gpuInfo.maxDivergenceAfter_s !== undefined ? `${gpuInfo.maxDivergenceBefore_s.toExponential(2)} → ${gpuInfo.maxDivergenceAfter_s.toExponential(2)}` : "—"} unit={`s⁻¹ · ratio ${gpuInfo?.projectionDivergenceRatio?.toExponential(2) ?? "—"} · post ${formatGridLocation(gpuInfo?.maxDivergenceAfterLocation)}`} tone={gpuInfo?.lastDt_s && gpuInfo?.maxDivergenceAfter_s !== undefined && gpuInfo.maxDivergenceAfter_s * gpuInfo.lastDt_s > 0.5 ? "warn" : "neutral"} />
         <MetricCard label="GPU pressure residual" value={gpuInfo?.pressureRelativeResidual !== undefined ? gpuInfo.pressureRelativeResidual.toExponential(2) : "—"} unit={`relative L∞ · raw ${gpuInfo?.pressureResidual?.toExponential(2) ?? "—"} at ${formatGridLocation(gpuInfo?.maxPressureResidualLocation)}`} tone={gpuInfo?.pressureRelativeResidual !== undefined && gpuInfo.pressureRelativeResidual <= 0.1 ? "good" : "warn"} />
         {gpuInfo?.gridKind === "octree" && <MetricCard
-          label="Power pressure authority"
-          value={resolvedPowerPublished
-            ? publishedPowerSolver
+          label={losassoCoarseDynamics ? "Losasso pressure authority" : "Power pressure authority"}
+          value={resolvedPressurePublished
+            ? losassoCoarseDynamics ? "LOSASSO + WIDE MGPCG" : publishedPowerSolver
             : (gpuInfo.encodedSteps ?? 0) > 0
-              ? "POWER PUBLICATION FAILED"
-              : "POWER PENDING"}
-          unit={`${pressureRowsLabel} resolved rows${reportedPressureRows === undefined && acceptedPressureSolve ? " · count readback pending" : ""} · fixed case-local handles · ${gpuInfo.pressureSolver ?? "solver pending"}`}
-          tone={resolvedPowerPublished && !gpuInfo.pressureCapacityOverflow ? "good" : (gpuInfo.encodedSteps ?? 0) > 0 ? "warn" : "neutral"}
+              ? `${losassoCoarseDynamics ? "LOSASSO" : "POWER"} PUBLICATION FAILED`
+              : `${losassoCoarseDynamics ? "LOSASSO" : "POWER"} PENDING`}
+          unit={`${pressureRowsLabel} resolved rows${reportedPressureRows === undefined && acceptedPressureSolve ? " · count readback pending" : ""} · ${losassoCoarseDynamics ? "axis-aligned face authority" : "fixed case-local handles"} · ${gpuInfo.pressureSolver ?? "solver pending"}`}
+          tone={resolvedPressurePublished && !gpuInfo.pressureCapacityOverflow ? "good" : (gpuInfo.encodedSteps ?? 0) > 0 ? "warn" : "neutral"}
         />}
         <MetricCard label={octreePressurePotential ? "GPU pressure-potential maximum" : "GPU pressure maximum"} value={gpuInfo?.maxPressure_Pa !== undefined ? gpuInfo.maxPressure_Pa.toExponential(2) : "—"} unit={`${octreePressurePotential ? "m²/s · stored dt·p/ρ" : "Pa"} at ${formatGridLocation(gpuInfo?.maxPressureLocation)}`} />
         <MetricCard label="GPU component CFL" value={gpuInfo?.maxComponentCfl !== undefined ? gpuInfo.maxComponentCfl.toFixed(3) : "—"} unit={`${gpuInfo?.highCflCellCount ?? 0} wet samples above 1`} tone={gpuInfo?.maxComponentCfl !== undefined && gpuInfo.maxComponentCfl <= 4 && (gpuInfo.highCflCellCount ?? 0) < 32 ? "good" : "warn"} />

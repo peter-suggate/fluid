@@ -218,12 +218,10 @@ export const POWER_DAM_LANE_ENVIRONMENT: Record<PowerDamRuntimeLane, Record<stri
     FLUID_SCENE: "ocean-seiche", FLUID_TARGET_S: "0.01",
     FLUID_MAX_DT: "0.005", FLUID_ORACLE_STEPS: "2", FLUID_EXPECT_EXACT_STEPS: "2",
     FLUID_WEBGPU_MAX_STORAGE_BINDING_BYTES: "2147483648",
-    FLUID_POWER_GENERATION_AUDIT: "1", FLUID_POWER_GENERATION_AUDIT_LOG: "1",
-    // The unpublished-next-candidate forensic is intentionally not a capture
-    // gate: frame 1/2 can be valid while generation 3 is rejected, and that
-    // post-frame diagnosis must not discard an otherwise complete xctrace.
-    FLUID_POWER_STAGE_AUDIT: "1",
-    FLUID_POWER_AUDIT_EVERY_STEPS: "1", FLUID_STABILITY_ENVELOPE: "1",
+    // Ocean is a product-default Losasso lane. The benchmark-level audit
+    // suppression stays authoritative; Power generation/stage controls belong
+    // only to the explicitly frozen reference lanes above.
+    FLUID_STABILITY_ENVELOPE: "1",
   },
   "symmetric-expansion": {
     // The D4 symmetry oracle scene, at the fine factor its `fine-factor-4`

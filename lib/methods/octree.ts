@@ -2,12 +2,18 @@ import { WebGPUUniformEulerianSolver } from "../webgpu-uniform-eulerian";
 import { numberValue, type MethodParamSpec, type MethodParamValues, type SimulationMethod } from "./types";
 import type { GPUQuality } from "../tall-cell-grid";
 import type { SceneDescription } from "../model";
+import {
+  DEFAULT_OCTREE_COARSE_BACKEND,
+  resolveOctreeCoarseDynamics,
+} from "../octree-coarse-backend";
 
 const params: MethodParamSpec[] = [
+  { kind: "select", key: "coarseBackend", label: "Coarse dynamics", default: DEFAULT_OCTREE_COARSE_BACKEND, tier: "coarse", options: [{ value: "losasso", label: "Losasso 2004 · default" }, { value: "power2017", label: "Power 2017 · frozen reference" }], hint: "Construction-time backend choice. Each backend owns distinct pipelines, layouts, and velocity channels; the frozen Power path remains available for reference lanes." },
   { kind: "select", key: "globalFineLevelSetFactor", label: "Surface tracking", default: "4", tier: "coarse", options: [{ value: "1", label: "Coarse octree only · no fine band" }, { value: "4", label: "4× fine band · paper default" }, { value: "8", label: "8× fine band · experimental" }], hint: "Factor 1 transports φ directly on the adaptive octree and allocates no separate fine-band grid. Factors 4/8 maintain the sparse higher-resolution interface band." },
-  { kind: "select", key: "maximumLeafSize", label: "Largest pressure cell", default: "32", tier: "fine", options: [{ value: "2", label: "2³ finest cells" }, { value: "4", label: "4³ finest cells" }, { value: "8", label: "8³ finest cells" }, { value: "16", label: "16³ finest cells" }, { value: "32", label: "32³ finest cells · default" }], hint: "Largest dyadic octree cell away from interfaces. Every authored scene defaults to 32, and the topology remains strictly 2:1 graded for valid power-diagram stencils." },
+  { kind: "select", key: "maximumLeafSize", label: "Largest pressure cell", default: "32", tier: "fine", options: [{ value: "2", label: "2³ finest cells" }, { value: "4", label: "4³ finest cells" }, { value: "8", label: "8³ finest cells" }, { value: "16", label: "16³ finest cells" }, { value: "32", label: "32³ finest cells · default" }], hint: "Largest dyadic octree cell away from interfaces. Scene profiles choose the largest compatible root while preserving strict 2:1 grading." },
   { kind: "number", key: "interfaceRefinementBandCells", label: "Band reach", unit: "level", min: 0, max: 4, step: 1, digits: 0, default: 4, tier: "fine", hint: "One coupled reach level for pressure refinement and Section 5 surface tracking. Experimental level 0 uses one fine brick; level 1 retains the two-finest-cell moving-surface floor while still reducing pressure reach and recurring residency. Level 4 is the paper/default reach." },
   { kind: "number", key: "surfaceRefinementGradingLayers", label: "Surface grading", unit: "layers", min: 1, max: 4, step: 1, digits: 0, default: 1, tier: "fine", hint: "Intermediate pressure-cell layers retained per octree level around the surface. 1 is the existing sharp 2:1 transition; 3 is the progressive-refinement experiment." },
+  { kind: "number", key: "topologyCadenceAdvances", label: "Topology cadence", unit: "advances", min: 1, max: 8, step: 1, digits: 0, default: 1, tier: "fine", hint: "Losasso candidate epochs may cover k accepted advances. Each skipped rebuild is represented spatially by an extra dilation ring; band 4 remains canonical." },
 ];
 
 const maximumLeafSize = (value: unknown): 2 | 4 | 8 | 16 | 32 => {
@@ -25,6 +31,12 @@ const globalFineLevelSetFactor = (value: unknown): 1 | 4 | 8 => {
 export const octreeSolverOptions = (scene: SceneDescription, quality: GPUQuality, values: MethodParamValues) => {
   const bandReachCells = numberValue(values, params, "interfaceRefinementBandCells");
   const fineFactor = globalFineLevelSetFactor(values.globalFineLevelSetFactor);
+  const coarseDynamics = resolveOctreeCoarseDynamics({
+    backend: values.coarseBackend,
+    globalFineLevelSetFactor: fineFactor,
+    topologyCadenceAdvances: values.topologyCadenceAdvances,
+    topologyDisplacementRingsPerAdvance: values.topologyDisplacementRingsPerAdvance,
+  });
   // Not a product control. Keep the fine-only override available to the Dawn
   // harness for fault injection and planner isolation without letting normal
   // configurations drift into the restriction-starvation pairing.
@@ -33,6 +45,7 @@ export const octreeSolverOptions = (scene: SceneDescription, quality: GPUQuality
     ? Math.max(0, Math.min(32, Math.round(values.fineLevelSetBandCells)))
     : bandReachCells;
   return {
+    coarseDynamics,
     densitySharpening: false,
     velocityTransport: "maccormack" as const,
     octree: {
@@ -72,11 +85,11 @@ export const octreeSolverOptions = (scene: SceneDescription, quality: GPUQuality
 
 export const octreeMethod: SimulationMethod = {
   id: "octree",
-  label: "Power-diagram octree",
-  shortLabel: "Power octree",
-  badge: "POWER OCTREE",
-  description: "GPU-resident adaptive power cells with persistent MGPCG pressure and selectable compact-coarse or fine-band surface tracking.",
-  detail: "2:1-graded adaptive pressure cells and six structured velocity families, one persistent Section 4.3 fixed-schedule MGPCG authority, factor-4 signed-distance narrow band, frame-lagged variational rigid-body coupling, and no topology readbacks or alternate solver path",
+  label: "Adaptive octree",
+  shortLabel: "Octree",
+  badge: "OCTREE",
+  description: "GPU-resident adaptive liquid simulation with selectable Losasso coarse dynamics and a frozen Power 2017 reference backend.",
+  detail: "Shared fine-band transport over a construction-time coarse-dynamics seam. Losasso uses a uniformly-fine surface shell, axis-aligned face velocities, and wide MGPCG; Power 2017 retains the frozen power-cell pipeline for reference lanes.",
   backend: "webgpu",
   resource: {
     id: "fluid.power-octree",
@@ -100,12 +113,14 @@ export const octreeMethod: SimulationMethod = {
   qualityLabels: { balanced: "paper defaults", high: "paper defaults", ultra: "paper defaults" },
   showQualityControl: false,
   params,
-  pressureMapping: "The production lane uses the matrix-free persistent Section 4.3 fixed-schedule MGPCG authority over the current adaptive liquid frontier. Failure is terminal for the publication; no alternate pressure solver is retained.",
+  pressureMapping: "Losasso uses the wide, warm-started V-cycle-preconditioned MGPCG authority. The frozen Power 2017 backend retains its persistent Section 4.3 solver; neither backend falls through to the other after construction.",
   presetFor: () => ({
+    coarseBackend: DEFAULT_OCTREE_COARSE_BACKEND,
     maximumLeafSize: "32",
     interfaceRefinementBandCells: 4,
     surfaceRefinementGradingLayers: 1,
     globalFineLevelSetFactor: "4",
+    topologyCadenceAdvances: 1,
   }),
   createSolver: (device, scene, quality, values, onRigidLoads) => new WebGPUUniformEulerianSolver(device, scene, quality, onRigidLoads, octreeSolverOptions(scene, quality, values)),
   createSolverAsync: (device, scene, quality, values, onRigidLoads, onProgress, signal) => WebGPUUniformEulerianSolver.createAsync(

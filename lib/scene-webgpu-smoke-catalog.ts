@@ -7,6 +7,7 @@ import {
   DEEP_POWER_HYDROSTATIC_PRESSURE_ROW_CAPACITY,
   LARGE_POWER_DAM_FINE_BRICK_CAPACITY,
   LARGE_POWER_HYDROSTATIC_PRESSURE_ROW_CAPACITY,
+  OCEAN_SEICHE_METHOD_PROFILE,
   POWER_DROPLET_EDGE_CELLS,
   POWER_DROPLET_FINE_BRICK_CAPACITY,
   POWER_DROPLET_PRESSURE_ROW_CAPACITY,
@@ -77,7 +78,17 @@ function methods(
   overrides: Partial<Record<WebGPUSmokeMethodId, Readonly<MethodParamValues>>> = {},
   quality: SceneWebGPUSmokeMethod["quality"] = "balanced",
 ): SceneWebGPUSmokeMethod[] {
-  return ids.map((id) => ({ id, quality, overrides: { ...(overrides[id] ?? {}) } }));
+  return ids.map((id) => ({
+    id,
+    quality,
+    // Generic authored-scene lanes exercise the product default (Losasso).
+    // Frozen Power reference suites opt in through their named profiles below.
+    overrides: { ...(overrides[id] ?? {}) },
+  }));
+}
+
+function usesPowerReference(methods: readonly SceneWebGPUSmokeMethod[]): boolean {
+  return methods.find(({ id }) => id === "octree")?.overrides.coarseBackend === "power2017";
 }
 
 const coreDiagnostics: readonly SceneWebGPUDiagnosticPack[] = [
@@ -203,15 +214,19 @@ interface LaneOptions {
 function backendAcceptance(configuredMethods: readonly SceneWebGPUSmokeMethod[]): SceneWebGPUAcceptanceRule[] {
   const ids = new Set(configuredMethods.map(({ id }) => id));
   const rules: SceneWebGPUAcceptanceRule[] = [];
-  if (ids.has("octree")) rules.push(
+  if (ids.has("octree")) {
+    rules.push(
     { id: "octree-grid-kind", metric: "methods.octree.info.gridKind", operator: "equal", expected: "octree" },
     { id: "octree-neighbor-ratio", metric: "methods.octree.info.quadtreeMaximumNeighborRatio", operator: "at-most", expected: 2 },
     { id: "octree-topology-readback", metric: "methods.octree.info.quadtreeTopologyReadbackBytes", operator: "equal", expected: 0 },
-    { id: "octree-power-ready", metric: "methods.octree.info.powerDiagramReady", operator: "equal", expected: true },
-    { id: "octree-power-authoritative", metric: "methods.octree.info.powerDiagramAuthoritative", operator: "equal", expected: true },
-    { id: "octree-power-descriptor-errors", metric: "methods.octree.octreePowerTopologyDiagnostics.descriptor.errorCount", operator: "equal", expected: 0 },
-    { id: "octree-power-topology-errors", metric: "methods.octree.octreePowerTopologyDiagnostics.topology.invalidCount", operator: "equal", expected: 0 },
-  );
+    );
+    if (usesPowerReference(configuredMethods)) rules.push(
+      { id: "octree-power-ready", metric: "methods.octree.info.powerDiagramReady", operator: "equal", expected: true },
+      { id: "octree-power-authoritative", metric: "methods.octree.info.powerDiagramAuthoritative", operator: "equal", expected: true },
+      { id: "octree-power-descriptor-errors", metric: "methods.octree.octreePowerTopologyDiagnostics.descriptor.errorCount", operator: "equal", expected: 0 },
+      { id: "octree-power-topology-errors", metric: "methods.octree.octreePowerTopologyDiagnostics.topology.invalidCount", operator: "equal", expected: 0 },
+    );
+  }
   if (ids.has("quadtree-tall-cell")) rules.push(
     { id: "quadtree-grid-kind", metric: "methods.quadtree-tall-cell.info.gridKind", operator: "equal", expected: "quadtree-tall-cell" },
     { id: "quadtree-neighbor-ratio", metric: "methods.quadtree-tall-cell.info.quadtreeMaximumNeighborRatio", operator: "at-most", expected: 2 },
@@ -320,7 +335,12 @@ function diagnosticAcceptance(
 
 function lane(options: LaneOptions): SceneWebGPUSmokeLane {
   const configuredMethods = options.methods ?? methods();
-  const configuredDiagnostics = [...coreDiagnostics, ...(options.diagnostics ?? [])];
+  const powerReference = usesPowerReference(configuredMethods);
+  const configuredDiagnostics = [
+    ...coreDiagnostics.filter((diagnostic) => diagnostic.id !== "octree-authority"
+      || powerReference),
+    ...(options.diagnostics ?? []),
+  ];
   const maximumRepresentedVolumeDrift = options.maximumRepresentedVolumeDrift === undefined
     ? 0.01 : options.maximumRepresentedVolumeDrift;
   return {
@@ -353,21 +373,26 @@ function lane(options: LaneOptions): SceneWebGPUSmokeLane {
   };
 }
 
-const octreePowerOverrides = {
+/**
+ * Frozen Power-2017 comparison profile. New and backend-agnostic smoke lanes
+ * must inherit the octree product default instead of spreading this profile.
+ */
+const frozenPowerReferenceOverrides = {
+  coarseBackend: "power2017",
   maximumLeafSize: "32",
   interfaceRefinementBandCells: 3,
   globalFineLevelSetFactor: "4",
 } as const;
 const symmetricExpansionOverrides = SYMMETRIC_EXPANSION_METHOD_PROFILE.overrides;
 const largePowerDamOverrides = {
-  ...octreePowerOverrides,
+  ...frozenPowerReferenceOverrides,
   maximumLeafSize: "32",
   interfaceRefinementBandCells: 1,
   pressureRowCapacity: 8_192,
   globalFineLevelSetMaximumBricks: LARGE_POWER_DAM_FINE_BRICK_CAPACITY,
 } as const;
 const largePowerHydrostaticOverrides = {
-  ...octreePowerOverrides,
+  ...frozenPowerReferenceOverrides,
   maximumLeafSize: "32",
   interfaceRefinementBandCells: 1,
   pressureRowCapacity: LARGE_POWER_HYDROSTATIC_PRESSURE_ROW_CAPACITY,
@@ -707,13 +732,13 @@ const suiteList = [
       collect: { globalFineGeneration: true, fieldStats: "none" } }),
     "two-step": lane({ id: "two-step", target_s: 0.016, exactSteps: 2, maxDt_s: 0.008, oracleSteps: 2, cpuOracle: false,
       methods: methods(["octree"]), collect: { stabilityEnvelope: true, spatialField: true, fieldStats: "checkpoints", checkpointEvery_s: 0.008,
-        raster: "checkpoints", globalFineGeneration: true, powerGenerationAudit: { everySteps: 1, log: false } },
-      diagnostics: powerDiagnostics, hooks: [{ id: "water-raster-integrity", methods: ["octree"], requires: ["global fine generation", "front/back raster"],
+        raster: "checkpoints", globalFineGeneration: true },
+      hooks: [{ id: "water-raster-integrity", methods: ["octree"], requires: ["global fine generation", "front/back raster"],
         parameters: standardWaterRasterParameters }], timeout_ms: 240_000 }),
     runtime: lane({ id: "runtime", target_s: 1.52, exactSteps: 190, maxDt_s: 0.008, oracleSteps: 190, cpuOracle: false,
       methods: methods(["octree"]), collect: { stabilityEnvelope: true, spatialField: true, fieldStats: "checkpoints", checkpointEvery_s: 0.1,
-        raster: "checkpoints", globalFineGeneration: true, powerGenerationAudit: { everySteps: 1, log: false } },
-      diagnostics: powerDiagnostics, hooks: [{ id: "water-raster-integrity", methods: ["octree"], requires: ["global fine generation", "front/back raster"],
+        raster: "checkpoints", globalFineGeneration: true },
+      hooks: [{ id: "water-raster-integrity", methods: ["octree"], requires: ["global fine generation", "front/back raster"],
         parameters: standardWaterRasterParameters }], timeout_ms: 240_000 }),
     performance: lane({ id: "performance", description: "Release-like profiler lane", target_s: 0.496, exactSteps: 62, maxDt_s: 0.008, oracleSteps: 62, cpuOracle: false,
       methods: methods(["octree"]), collect: { fieldStats: "none", performanceProfile: true }, diagnostics: [{ id: "performance" }], timeout_ms: 240_000 }),
@@ -724,13 +749,13 @@ const suiteList = [
   suite("settled-tank", "Hydrostatic preservation in a closed level pool", { definitionId: "water-box-tank-fill", variantId: "gpu-smoke" }, {
     default: lane({ target_s: 0.1, oracleSteps: 2, diagnostics: [equilibriumDiagnostic] }),
     acceptance: lane({ id: "acceptance", target_s: 0.0667, oracleSteps: 2, cpuOracle: false,
-      methods: methods(["octree"]), collect: { stabilityEnvelope: true, fieldStats: "final", powerGenerationAudit: { everySteps: 1, log: false }, boundaryThetaHistogram: true },
-      diagnostics: [equilibriumDiagnostic, powerDiagnostics[0]], timeout_ms: 240_000 }),
+      methods: methods(["octree"]), collect: { stabilityEnvelope: true, fieldStats: "final", boundaryThetaHistogram: true },
+      diagnostics: [equilibriumDiagnostic], timeout_ms: 240_000 }),
   }),
   suite("settled-tank-ui", "Exact browser settled-tank preset with rigid bodies", { definitionId: "water-box-tank-fill" }, {
     default: lane({ target_s: 0.2, oracleSteps: 2, diagnostics: [equilibriumDiagnostic] }),
     acceptance: lane({ id: "acceptance", target_s: 0.0667, oracleSteps: 2, cpuOracle: false, methods: methods(["octree"]),
-      collect: { stabilityEnvelope: true, fieldStats: "final", powerGenerationAudit: { everySteps: 1, log: false } }, diagnostics: [equilibriumDiagnostic], timeout_ms: 240_000 }),
+      collect: { stabilityEnvelope: true, fieldStats: "final" }, diagnostics: [equilibriumDiagnostic], timeout_ms: 240_000 }),
   }),
   suite("dam-break-boxes", "Three-dimensional dam break with immersed boxes", { definitionId: "dam-break-boxes" }, {
     default: lane({ target_s: Math.max(paperFigureStep_s * 8, 0.05), oracleSteps: 2,
@@ -790,7 +815,7 @@ const suiteList = [
   }),
   suite("hydrostatic-power-two-level", "16-cubed settled leaf-32 power grid", { definitionId: "hydrostatic-power-two-level" }, {
     default: lane({ target_s: 0.2, exactSteps: 50, maxDt_s: 0.004, oracleSteps: 50, cpuOracle: false,
-      methods: methods(["octree"], { octree: octreePowerOverrides }),
+      methods: methods(["octree"], { octree: frozenPowerReferenceOverrides }),
       collect: { fieldStats: "checkpoints", checkpointEvery_s: 0.2, spatialField: true, stabilityEnvelope: true, structuredValidation: true,
         globalFineGeneration: true, powerGenerationAudit: { everySteps: 1, log: false } }, diagnostics: exhaustivePowerDiagnostics(1e-4),
       acceptance: [...powerAcceptance,
@@ -799,7 +824,7 @@ const suiteList = [
   }),
   suite("hydrostatic-power-large-offset", "32x24x16 cell-cut leaf-32 power grid", { definitionId: "hydrostatic-power-large-offset" }, {
     default: lane({ target_s: 0.004, exactSteps: 1, maxDt_s: 0.004, oracleSteps: 1, cpuOracle: false,
-      methods: methods(["octree"], { octree: { ...octreePowerOverrides, interfaceRefinementBandCells: 4 } }),
+      methods: methods(["octree"], { octree: { ...frozenPowerReferenceOverrides, interfaceRefinementBandCells: 4 } }),
       collect: { fieldStats: "checkpoints", checkpointEvery_s: 0.004, spatialField: true, stabilityEnvelope: true, structuredValidation: true,
         raster: "checkpoints", globalFineGeneration: true, powerGenerationAudit: { everySteps: 1, log: true } },
       diagnostics: [powerDiagnostics[0], powerDiagnostics[2],
@@ -810,7 +835,7 @@ const suiteList = [
   }),
   suite("minimal-power-dam-break", "Minimal dynamic leaf-32 analytic dam", { definitionId: "minimal-power-dam-break" }, {
     default: lane({ target_s: 2, exactSteps: 500, maxDt_s: 0.004, oracleSteps: 500, cpuOracle: false,
-      methods: methods(["octree"], { octree: octreePowerOverrides }), timeout_ms: 240_000,
+      methods: methods(["octree"], { octree: frozenPowerReferenceOverrides }), timeout_ms: 240_000,
       collect: { fieldStats: "checkpoints", checkpointEvery_s: 0.1, energyEverySteps: 50, spatialField: true, stabilityEnvelope: true, structuredValidation: true,
         raster: "checkpoints", globalFineGeneration: true, powerGenerationAudit: { everySteps: 1, log: false } },
       diagnostics: [...exhaustivePowerDiagnostics(0.01),
@@ -832,7 +857,7 @@ const suiteList = [
         { id: "water-raster-integrity", methods: ["octree"], requires: ["global fine generation", "front/back raster"],
           parameters: minimalDamRasterParameters }] }),
     "two-step": lane({ id: "two-step", target_s: 0.008, exactSteps: 2, maxDt_s: 0.004, oracleSteps: 2, cpuOracle: false,
-      methods: methods(["octree"], { octree: octreePowerOverrides }), timeout_ms: 240_000,
+      methods: methods(["octree"], { octree: frozenPowerReferenceOverrides }), timeout_ms: 240_000,
       collect: { fieldStats: "checkpoints", checkpointEvery_s: 0.004, spatialField: true, stabilityEnvelope: true, structuredValidation: true,
         raster: "checkpoints", globalFineGeneration: true, powerGenerationAudit: { everySteps: 1, log: false } },
       diagnostics: [...exhaustivePowerDiagnostics(0.01),
@@ -840,18 +865,18 @@ const suiteList = [
       hooks: [{ id: "water-raster-integrity", methods: ["octree"], requires: ["global fine generation", "front/back raster"],
         parameters: minimalDamRasterParameters }] }),
     performance: lane({ id: "performance", target_s: 0.248, exactSteps: 62, maxDt_s: 0.004, oracleSteps: 62, cpuOracle: false,
-      methods: methods(["octree"], { octree: octreePowerOverrides }), collect: { fieldStats: "none", performanceProfile: true, gpuCommandAudit: true }, diagnostics: [{ id: "performance" }], timeout_ms: 240_000 }),
+      methods: methods(["octree"], { octree: frozenPowerReferenceOverrides }), collect: { fieldStats: "none", performanceProfile: true, gpuCommandAudit: true }, diagnostics: [{ id: "performance" }], timeout_ms: 240_000 }),
     throughput: lane({ id: "throughput", target_s: 0.248, exactSteps: 62, maxDt_s: 0.004, oracleSteps: 62, cpuOracle: false,
-      methods: methods(["octree"], { octree: octreePowerOverrides }), collect: { fieldStats: "none", performanceProfile: true, gpuCommandAudit: true }, diagnostics: [{ id: "performance" }], timeout_ms: 240_000 }),
-    motion: lane({ id: "motion", target_s: 0.5, oracleSteps: 1, cpuOracle: false, methods: methods(["octree"], { octree: octreePowerOverrides }),
+      methods: methods(["octree"], { octree: frozenPowerReferenceOverrides }), collect: { fieldStats: "none", performanceProfile: true, gpuCommandAudit: true }, diagnostics: [{ id: "performance" }], timeout_ms: 240_000 }),
+    motion: lane({ id: "motion", target_s: 0.5, oracleSteps: 1, cpuOracle: false, methods: methods(["octree"], { octree: frozenPowerReferenceOverrides }),
       collect: { fieldStats: "checkpoints", checkpointEvery_s: 0.016, spatialField: true, raster: "checkpoints", globalFineGeneration: true },
       hooks: [{ id: "minimal-dam-motion", methods: ["octree"], requires: ["stability envelope", "initial/final raster"],
         parameters: minimalDamMotionParameters }], timeout_ms: 240_000 }),
     "fine-factor-4": lane({ id: "fine-factor-4", target_s: 0.004, exactSteps: 1, maxDt_s: 0.004, oracleSteps: 1, cpuOracle: false,
-      methods: methods(["octree"], { octree: { ...octreePowerOverrides, globalFineLevelSetFactor: "4" } }),
+      methods: methods(["octree"], { octree: { ...frozenPowerReferenceOverrides, globalFineLevelSetFactor: "4" } }),
       collect: { fieldStats: "final", globalFineGeneration: true, powerGenerationAudit: { everySteps: 1, log: false } }, diagnostics: powerDiagnostics, timeout_ms: 240_000 }),
     "fine-factor-8": lane({ id: "fine-factor-8", target_s: 0.004, exactSteps: 1, maxDt_s: 0.004, oracleSteps: 1, cpuOracle: false,
-      methods: methods(["octree"], { octree: { ...octreePowerOverrides, globalFineLevelSetFactor: "8" } }),
+      methods: methods(["octree"], { octree: { ...frozenPowerReferenceOverrides, globalFineLevelSetFactor: "8" } }),
       collect: { fieldStats: "final", globalFineGeneration: true, powerGenerationAudit: { everySteps: 1, log: false } }, diagnostics: powerDiagnostics, timeout_ms: 240_000 }),
   }),
   suite("symmetric-expansion", "Central 2x1x2-brick liquid body with horizontal D4 symmetry",
@@ -868,8 +893,7 @@ const suiteList = [
         },
         diagnostics: [],
         acceptance: [
-          { id: "structured-authority", metric: "methods.octree.info.powerDiagramAuthoritative", operator: "equal", expected: true },
-          { id: "balanced-power-grid", metric: "methods.octree.info.quadtreeMaximumNeighborRatio", operator: "at-most", expected: 2 },
+          { id: "balanced-octree-grid", metric: "methods.octree.info.quadtreeMaximumNeighborRatio", operator: "at-most", expected: 2 },
           { id: "expected-grid", metric: "methods.octree.grid", operator: "equal", expected: [32, 16, 32] },
         ],
         hooks: [{ id: "fluid-symmetry", methods: ["octree"],
@@ -907,7 +931,6 @@ const suiteList = [
         },
         diagnostics: [],
         acceptance: [
-          { id: "structured-authority", metric: "methods.octree.info.powerDiagramAuthoritative", operator: "equal", expected: true },
           { id: "expected-grid", metric: "methods.octree.grid", operator: "equal", expected: [32, 16, 32] },
         ],
         hooks: [{ id: "fluid-symmetry", methods: ["octree"],
@@ -940,7 +963,6 @@ const suiteList = [
         },
         diagnostics: [],
         acceptance: [
-          { id: "structured-authority", metric: "methods.octree.info.powerDiagramAuthoritative", operator: "equal", expected: true },
           { id: "expected-grid", metric: "methods.octree.grid", operator: "equal", expected: [32, 16, 32] },
         ],
         hooks: [{ id: "fluid-symmetry", methods: ["octree"],
@@ -972,7 +994,6 @@ const suiteList = [
         },
         diagnostics: [],
         acceptance: [
-          { id: "structured-authority", metric: "methods.octree.info.powerDiagramAuthoritative", operator: "equal", expected: true },
           { id: "expected-grid", metric: "methods.octree.grid", operator: "equal", expected: [32, 16, 32] },
         ],
         hooks: [{ id: "fluid-symmetry", methods: ["octree"],
@@ -1003,7 +1024,7 @@ const suiteList = [
         },
         diagnostics: [],
         acceptance: [
-          { id: "structured-authority", metric: "methods.octree.info.powerDiagramAuthoritative", operator: "equal", expected: true },
+          { id: "losasso-coarse-backend", metric: "methods.octree.info.coarseDynamicsBackend", operator: "equal", expected: "losasso" },
           { id: "expected-grid", metric: "methods.octree.grid", operator: "equal", expected: [32, 16, 32] },
         ],
         hooks: [{ id: "fluid-symmetry", methods: ["octree"],
@@ -1040,19 +1061,16 @@ const suiteList = [
         methods: methods(["octree"], { octree: COARSE_ONLY_POWER_DAM_METHOD_PROFILE.overrides }),
         timeout_ms: 240_000,
         collect: { fieldStats: "final", spatialField: true, stabilityEnvelope: true, structuredValidation: true,
-          globalFineGeneration: true, powerGenerationAudit: { everySteps: 1, log: false } },
-        diagnostics: [powerDiagnostics[0], powerDiagnostics[2]],
-        acceptance: [...powerAcceptance,
+          globalFineGeneration: true },
+        acceptance: [
           { id: "expected-grid", metric: "methods.octree.grid", operator: "equal", expected: [32, 32, 32] }] }),
       "surface-regression": lane({ id: "surface-regression", target_s: 0.5, exactSteps: 125,
         maxDt_s: 0.004, oracleSteps: 125, cpuOracle: false,
         methods: methods(["octree"], { octree: COARSE_ONLY_POWER_DAM_METHOD_PROFILE.overrides }),
         timeout_ms: 240_000,
         collect: { fieldStats: "final", spatialField: true, stabilityEnvelope: true, structuredValidation: true,
-          raster: "checkpoints", checkpointEvery_s: 0.5, globalFineGeneration: true,
-          powerGenerationAudit: { everySteps: 1, log: false } },
-        diagnostics: [powerDiagnostics[0], powerDiagnostics[2]],
-        acceptance: [...powerAcceptance,
+          raster: "checkpoints", checkpointEvery_s: 0.5, globalFineGeneration: true },
+        acceptance: [
           { id: "expected-grid", metric: "methods.octree.grid", operator: "equal", expected: [32, 32, 32] },
           { id: "coarse-surface-interface-area",
             metric: "methods.octree.finalGlobalFineGeneration.volumeInterfaceArea",
@@ -1079,9 +1097,8 @@ const suiteList = [
         methods: methods(["octree"], { octree: COARSE_ONLY_POWER_DAM_METHOD_PROFILE.overrides }),
         timeout_ms: 240_000,
         collect: { fieldStats: "final", spatialField: true, stabilityEnvelope: true, structuredValidation: true,
-          globalFineGeneration: true, powerGenerationAudit: { everySteps: 1, log: false } },
-        diagnostics: [powerDiagnostics[0], powerDiagnostics[2]],
-        acceptance: [...powerAcceptance,
+          globalFineGeneration: true },
+        acceptance: [
           { id: "expected-grid", metric: "methods.octree.grid", operator: "equal", expected: [64, 64, 64] }] }),
     }),
   suite("large-power-dam-break", "20x-volume authored dam cold-start and one-step regression",
@@ -1316,12 +1333,13 @@ const suiteList = [
           : "Seeded brick on two vertical walls clear of the lid: seam adhesion without ceiling contact",
     { definitionId: id }, {
       default: lane({ target_s: 0.5, oracleSteps: 2, cpuOracle: false,
-        methods: methods(["octree"], { octree: id === "ceiling-slab-drop"
-          ? CEILING_DROP_METHOD_PROFILE.overrides : octreePowerOverrides }),
+        // These are standing product-physics oracles, not frozen trajectory
+        // comparisons, so all four exercise the Losasso scene profile.
+        methods: methods(["octree"], { octree: CEILING_DROP_METHOD_PROFILE.overrides }),
         collect: { fieldStats: "checkpoints", checkpointEvery_s: 0.02, spatialField: true, raster: "checkpoints", globalFineGeneration: true, structuredValidation: true,
           evidenceCollectors: [{ id: "free-fall-contact-attribution", phase: "checkpoint", methods: ["octree"],
             requires: ["compact velocity", "fine upper surface"], provides: ["free-fall contact attribution"] }] },
-        diagnostics: [powerDiagnostics[0],
+        diagnostics: [
           { id: "authoritative-water-raster", methods: ["octree"], parameters: standardWaterRasterParameters }],
         hooks: [{ id: "free-fall-contact", methods: ["octree"], requires: ["checkpoint centroid", "ceiling wet cells", "front/back raster", "free-fall contact attribution"],
           parameters: { gravityOracle: true, impactTime_s: 0.29, minimumRunTime_s: 0.3,
@@ -1355,26 +1373,28 @@ const suiteList = [
             ...CEILING_DROP_METHOD_PROFILE.overrides, globalFineLevelSetFactor: "1",
           } }),
           collect: { fieldStats: "final", globalFineGeneration: true },
-          diagnostics: [powerDiagnostics[2]], timeout_ms: 240_000 }),
+          timeout_ms: 240_000 }),
       } : {}),
     })),
   suite("power-hybrid-deep-ocean", "Deep-interior Bet-4 shipping work gate", { definitionId: "power-hybrid-deep-ocean" }, {
     default: lane({ target_s: 0.004, exactSteps: 1, maxDt_s: 0.004, oracleSteps: 1, cpuOracle: false,
       methods: methods(["octree"], { octree: {
-        maximumLeafSize: "32", interfaceRefinementBandCells: 1, globalFineLevelSetFactor: "1",
+        ...frozenPowerReferenceOverrides, maximumLeafSize: "32", interfaceRefinementBandCells: 1,
+        globalFineLevelSetFactor: "1",
       } }),
       collect: { fieldStats: "none" },
       timeout_ms: 240_000 }),
   }),
   suite("ocean-seiche", "Long gravity wave crossing a wide deep tank", { definitionId: "ocean-seiche", variantId: "gpu-smoke" }, {
     default: lane({ target_s: 6, oracleSteps: 1, cpuOracle: false,
-      methods: methods(["octree"], { octree: { maximumLeafSize: "32" } }),
+      // 320x96x80 admits leaf 16, not the old Power-era leaf-32 ceiling.
+      methods: methods(["octree"], { octree: OCEAN_SEICHE_METHOD_PROFILE.overrides }),
       collect: { fieldStats: "checkpoints", checkpointEvery_s: 0.5, spatialField: true, stabilityEnvelope: true },
       hooks: [{ id: "ocean-wave-profile", requires: ["checkpoint fields"],
         parameters: { expectedGrid: [320, 96, 80], stationCount: 12, baselineHeightCells: 72, minimumCheckpoints: 3,
           minimumFarHalfDisturbanceWidthRatio: 3.6 } }] }),
     "global-fine-one-step": lane({ id: "global-fine-one-step", target_s: 0.004, oracleSteps: 1, cpuOracle: false,
-      methods: methods(["octree"], { octree: { maximumLeafSize: "32" } }), collect: { fieldStats: "none", stabilityEnvelope: true, checkpointEvery_s: 0.004 } }),
+      methods: methods(["octree"], { octree: OCEAN_SEICHE_METHOD_PROFILE.overrides }), collect: { fieldStats: "none", stabilityEnvelope: true, checkpointEvery_s: 0.004 } }),
   }),
 ] satisfies readonly SceneWebGPUSmokeSuite<SceneWebGPUSmokeId>[];
 

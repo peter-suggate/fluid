@@ -258,7 +258,7 @@ test("safe browser bring-up admits one step and rejects continuous running", (t)
   assert.equal(simulation.time(), 0.004, "continuous scheduling must remain disabled in safe mode");
 });
 
-test("loading the minimal power dam applies its reproducible Dawn solver profile", () => {
+test("loading the minimal power dam applies its Losasso scene profile", () => {
   const originalScene = cloneScene(useSceneStore.getState().scene);
   const originalRunState = useRuntimeStore.getState().runState;
   const originalMethod = useMethodStore.getState();
@@ -273,7 +273,8 @@ test("loading the minimal power dam applies its reproducible Dawn solver profile
     const values = resolvedMethodValues(method);
     assert.equal(method.methodId, "octree");
     assert.equal(method.quality, "balanced");
-    assert.equal(values.maximumLeafSize, "32");
+    assert.equal(values.coarseBackend, "losasso");
+    assert.equal(values.maximumLeafSize, "16");
     assert.equal(values.interfaceRefinementBandCells, 3);
     assert.equal(values.globalFineLevelSetFactor, "4");
   } finally {

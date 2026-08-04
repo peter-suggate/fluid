@@ -126,6 +126,7 @@ test("both reserves are constants of the family, above the largest member's ask"
 
   assert.equal(POWER_FILL_METHOD_PROFILE.methodId, "octree");
   assert.deepEqual(POWER_FILL_METHOD_PROFILE.overrides, {
+    coarseBackend: "losasso",
     maximumLeafSize: "32",
     interfaceRefinementBandCells: 1,
     globalFineLevelSetFactor: "4",

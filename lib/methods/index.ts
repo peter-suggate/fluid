@@ -3,6 +3,7 @@ import { cpuReferenceMethod } from "./cpu-reference";
 import type { SimulationMethod } from "./types";
 
 export * from "./types";
+export * from "../octree-coarse-backend";
 
 /** Complete registry used by runtime lookup and offline comparison tooling. */
 export const simulationMethods: ReadonlyArray<SimulationMethod> = [

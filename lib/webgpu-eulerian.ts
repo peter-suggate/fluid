@@ -35,6 +35,8 @@ export interface GPUEulerianInfo {
   cellSize_m: number;
   pressureIterations: number;
   pressureSolver?: string;
+  /** Construction-time octree coarse-dynamics selection. */
+  coarseDynamicsBackend?: "losasso" | "power2017";
   allocatedBytes: number;
   /** Fixed GPU ring capacity for one-way escaped spray droplets. */
   secondaryParticleCapacity?: number;

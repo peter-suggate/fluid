@@ -103,6 +103,20 @@ export interface GPUSolverInstance {
   readonly globalFineRedistanceControl?: GPUBuffer;
   readonly globalFineVolumeControl?: GPUBuffer;
   readonly structuredProjectionEnergyStats?: GPUBuffer;
+  /** QA-only native Losasso axis-face authority for Dawn field reconstruction. */
+  readonly losassoVelocityDebug?: {
+    readonly control: GPUBuffer;
+    readonly faceGeometry: GPUBuffer;
+    readonly extendedVelocity: GPUBuffer;
+    readonly dimensions: readonly [number, number, number];
+    readonly maximumLeafSize: number;
+  };
+  /** QA-only accepted Losasso row operator, with no Power structured ABI. */
+  readonly losassoPressureDebug?: {
+    readonly control: GPUBuffer;
+    readonly rightHandSide: GPUBuffer;
+    readonly diagonal: GPUBuffer;
+  };
   /** QA-only compact topology-delta streams for rejection forensics. */
   readonly globalFinePageDeltaDebug?: {
     readonly buffer: GPUBuffer;

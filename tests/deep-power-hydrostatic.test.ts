@@ -162,7 +162,7 @@ test("the deep lane's reserves are derived from its fluid footprint, not raised 
     >= DEEP_POWER_HYDROSTATIC_PRESSURE_ROW_CAPACITY + airReachCells);
 });
 
-test("the deep lane is an authored preset sharing every solver knob with the 20x still lane", () => {
+test("the deep lane shares surface settings while using its compatible hierarchy root", () => {
   const preset = getScenePreset("deep-power-hydrostatic");
   assert.equal(preset.id, "deep-power-hydrostatic");
   assert.equal(preset.create().sceneId, "deep-power-hydrostatic");
@@ -173,13 +173,14 @@ test("the deep lane is an authored preset sharing every solver knob with the 20x
     LARGE_POWER_HYDROSTATIC_METHOD_PROFILE.methodId);
   assert.equal(DEEP_POWER_HYDROSTATIC_METHOD_PROFILE.quality,
     LARGE_POWER_HYDROSTATIC_METHOD_PROFILE.quality);
-  assert.equal(deep.maximumLeafSize, shallow.maximumLeafSize);
+  assert.equal(shallow.maximumLeafSize, "4");
+  assert.equal(deep.maximumLeafSize, "16");
   assert.equal(deep.interfaceRefinementBandCells, shallow.interfaceRefinementBandCells);
   assert.equal(deep.globalFineLevelSetFactor, shallow.globalFineLevelSetFactor);
-  // Only the two footprint-derived reserves may differ.
+  // The two footprint-derived reserves and the domain-compatible root differ.
   assert.deepEqual(
     Object.keys(deep).filter((key) => deep[key] !== shallow[key]).sort(),
-    ["globalFineLevelSetMaximumBricks", "pressureRowCapacity"]);
+    ["globalFineLevelSetMaximumBricks", "maximumLeafSize", "pressureRowCapacity"]);
 });
 
 test("both deep smoke lanes carry the interior-coarsening claim as a named gate", () => {

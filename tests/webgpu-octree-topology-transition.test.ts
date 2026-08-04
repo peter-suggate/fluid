@@ -15,13 +15,14 @@ interface TransitionRecord {
   tileCapacity: number;
 }
 
-test("Dawn preserves a deep dam-break pressure row across bounded recurring topology publications", {
+test("frozen Power reference preserves a deep dam-break pressure row across bounded recurring topology publications", {
   skip: !process.env.WEBGPU_NODE_MODULE && "set WEBGPU_NODE_MODULE for the production topology-transition gate",
   timeout: 90_000,
 }, () => {
   const child = spawnSync(process.execPath, ["--import", "tsx", "tools/run-webgpu-smoke.ts"], {
     cwd: process.cwd(), encoding: "utf8", timeout: 75_000, killSignal: "SIGKILL", maxBuffer: 32 * 1024 * 1024,
     env: { ...process.env, FLUID_SCENE: "dam-break-ui", FLUID_METHOD: "octree",
+      FLUID_COARSE_BACKEND: "power2017",
       FLUID_TARGET_S: "0.008", FLUID_ORACLE_STEPS: "2", FLUID_VOXEL_CELL_SIZE: "0.02",
       FLUID_CPU_ORACLE: "0", FLUID_FIELD_STATS: "0",
       FLUID_OCTREE_GLOBAL_FINE_FACTOR: "4",

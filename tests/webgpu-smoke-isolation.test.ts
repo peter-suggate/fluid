@@ -205,10 +205,6 @@ test("the ocean first-frame lane runs two exact advances under the browser stora
     FLUID_ORACLE_STEPS: "2",
     FLUID_EXPECT_EXACT_STEPS: "2",
     FLUID_WEBGPU_MAX_STORAGE_BINDING_BYTES: "2147483648",
-    FLUID_POWER_GENERATION_AUDIT: "1",
-    FLUID_POWER_GENERATION_AUDIT_LOG: "1",
-    FLUID_POWER_STAGE_AUDIT: "1",
-    FLUID_POWER_AUDIT_EVERY_STEPS: "1",
     FLUID_STABILITY_ENVELOPE: "1",
   });
 });

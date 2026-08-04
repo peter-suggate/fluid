@@ -103,13 +103,11 @@ export interface FineLevelSetTopologyBand {
  * the mini lane at 5 dilation rings against a floor of 17, one ring above
  * failure.
  *
- * Physical redistance does not duplicate the complete backtrace allowance.
- * Topology covers the separate `transport + backtrace + interpolation`
- * residency floor directly, crediting the mandatory outer safety ring only
- * after proving the remaining radius. Level zero is the one exception: its
- * one-cell transported core needs one additional finest-cell shell of valid
- * redistance samples so Section 5 can interpolate every size-two coarse
- * interface row. This is restriction support, not transported work.
+ * Physical redistance must leave the complete donor halo valid, not merely
+ * resident. Topology pages outside the signed-distance cutoff carry invalid
+ * samples, so they cannot satisfy a departure gather by themselves. The
+ * validity width is therefore `transport + backtrace + interpolation`; the
+ * mandatory outer safety ring remains a publication guard beyond it.
  */
 export function fineLevelSetResidencyFloorCells(
   transportBandFineCells: number,
@@ -151,9 +149,9 @@ export interface FineLevelSetBandFineCells {
  * band must stay wide enough that the surface still falls inside it after
  * advection. Width beyond the derived trajectory and interpolation support
  * buys coarse-phi correction coverage, not per-sample surface accuracy, and
- * costs band volume plus JFA passes. Topology independently covers the
- * complete departure stencil, interpolation, and its mandatory
- * publication-safety ring outside this physical cutoff.
+ * costs band volume plus JFA passes. Redistance leaves the complete departure
+ * donor stencil valid, while topology adds its mandatory publication-safety
+ * ring outside that physical cutoff.
  */
 export function planFineLevelSetBandFineCells(
   bandCells: number,
@@ -165,28 +163,23 @@ export function planFineLevelSetBandFineCells(
   if (!Number.isSafeInteger(fineFactor) || fineFactor < 1) {
     throw new RangeError("Fine level-set factor must be a positive integer");
   }
-  // The 256-cell sanity cap applies to the transported physical band.
-  // Normally redistance shares the transport cutoff. The deliberately narrow
-  // level-zero transport keeps one additional finest-cell shell valid for the
-  // eight-sample coarse restriction stencil. Without it, a moving interface
-  // can outrun the centres of size-two pressure leaves even though transport,
-  // redistance and pressure all remain individually valid. The failure first
-  // appeared with the single-dispatch pressure path because its slightly
-  // different trajectory exposed the pre-existing coverage hole at step 19.
+  // The 256-cell sanity cap applies to the complete valid signed-distance
+  // field. A transported sample at the authored cutoff can depart by the full
+  // configured characteristic and then read the adjacent trilinear corner.
+  // Resident pages alone are insufficient: redistance clears VALID outside
+  // its cutoff, so the complete donor halo must be part of that cutoff.
   const authoredBandCells = Math.round(bandCells);
   const surfaceSupportCells = authoredBandCells === 0
     ? 1
     : Math.max(2, authoredBandCells);
-  const redistanceReachFineCells = authoredBandCells === 0 ? fineFactor : 0;
-  const transportBandFineCells = Math.min(256 - redistanceReachFineCells,
-    surfaceSupportCells * fineFactor);
-  // The redistancer retains reachable samples on the closed authored cutoff;
-  // departure/interpolation residency outside it is topology's independent
-  // responsibility and is not duplicated in this physical validity width.
-  const redistanceBandFineCells = transportBandFineCells + redistanceReachFineCells;
   // The regular UI lane advances by 0.008 s. Its characteristic can cross more
   // than one finest octree cell once the dam accelerates.
   const maximumBacktraceFineCells = 2 * fineFactor;
+  const interpolationSupportFineCells = 1;
+  const donorHaloFineCells = maximumBacktraceFineCells + interpolationSupportFineCells;
+  const transportBandFineCells = Math.min(256 - donorHaloFineCells,
+    surfaceSupportCells * fineFactor);
+  const redistanceBandFineCells = transportBandFineCells + donorHaloFineCells;
   return { transportBandFineCells, redistanceBandFineCells, maximumBacktraceFineCells };
 }
 

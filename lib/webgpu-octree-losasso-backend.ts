@@ -1,0 +1,764 @@
+import type { OctreeOwnerPagePlan } from "./webgpu-octree-owner-pages";
+import type { PassBroker } from "./webgpu-pass-broker";
+import type { OctreeFirstOrderSPDVCycle } from "./webgpu-octree-section43-contract";
+import {
+  WebGPUOctreeLosassoAuthority,
+  type WebGPUOctreeLosassoAuthorityCapacities,
+  type WebGPUOctreeLosassoWritableAuthority,
+} from "./webgpu-octree-losasso-authority";
+import { webgpuOctreeLosassoBackendWGSL } from "./webgpu-octree-losasso-backend.wgsl";
+import { webgpuOctreeLosassoAuthorityCommitWGSL } from
+  "./webgpu-octree-losasso-authority-commit.wgsl";
+import {
+  assertOctreeLosassoVCycle,
+  type OctreeLosassoFirstOrderVCycle,
+  type OctreeLosassoVCycleHierarchySource,
+  type OctreeLosassoVCycleLevelSource,
+  type OctreeLosassoVCycleTransferSource,
+} from "./webgpu-octree-losasso-vcycle";
+import { WebGPUOctreeLosassoVCycle } from "./webgpu-octree-losasso-vcycle-gpu";
+import { WebGPUOctreeLosassoHierarchyPublisher } from
+  "./webgpu-octree-losasso-hierarchy";
+import {
+  WebGPUOctreeLosassoOperator,
+  type WebGPUOctreeLosassoOperatorSource,
+} from "./webgpu-octree-losasso-operator";
+import {
+  WebGPUOctreeLosassoProjection,
+  type WebGPUOctreeLosassoProjectionSource,
+} from "./webgpu-octree-losasso-projection";
+import type { WebGPUOctreeLosassoVelocityExtensionSource } from
+  "./webgpu-octree-losasso-velocity-extension";
+import {
+  WebGPUOctreeLosassoExtensionBand,
+} from "./webgpu-octree-losasso-extension-band";
+import { WebGPUOctreeLosassoVelocityMigration } from
+  "./webgpu-octree-losasso-velocity-migration";
+import type { WebGPUFineLevelSetBrickSource } from
+  "./webgpu-octree-fine-levelset-bricks";
+import type { WebGPUOctreeLosassoVelocitySamplerSource } from
+  "./webgpu-octree-losasso-velocity-sampler";
+import {
+  WebGPUOctreeLosassoDynamics,
+  type WebGPUOctreeLosassoDynamicsSource,
+  type WebGPUOctreeLosassoDynamicsStep,
+} from "./webgpu-octree-losasso-dynamics";
+import { WebGPUOctreeLosassoRigidPressureReaction } from
+  "./webgpu-octree-losasso-rigid-pressure-reaction";
+import {
+  WebGPUOctreePipelinedMGPCG,
+  type OctreePipelinedMGPCGOptions,
+  type OctreePipelinedMGPCGVectors,
+} from "./webgpu-octree-pipelined-mgpcg";
+
+export interface LosassoInitializationTask {
+  readonly label: string;
+  readonly run: () => Promise<void>;
+}
+
+/** The complete recurring topology input. No Power-only source can be passed. */
+export interface WebGPUOctreeLosassoCandidateInput {
+  /** Existing 48-byte compact pressure LeafHeader rows. */
+  readonly leafHeaders: GPUBuffer;
+  /** Finalized dual-bank frontier; words 7/0/1 select the candidate row count. */
+  readonly frontier: GPUBuffer;
+  /** Dual-bank owner arena; publication reads the inactive candidate table. */
+  readonly ownerArena: GPUBuffer;
+  /** Owner-page transaction whose inactive table matches candidate rows. */
+  readonly ownerCandidateTransaction: GPUBuffer;
+  /** Dense two-word `{solidFraction, rigidOwner}` records on finest cells. */
+  readonly solidCells: GPUBuffer;
+  /** Shared scene rigid-body state, using the coarse projection's 32-f32 ABI. */
+  readonly rigidBodies: GPUBuffer;
+}
+
+export interface WebGPUOctreeLosassoPublishedSources {
+  readonly operator: WebGPUOctreeLosassoOperatorSource;
+  readonly projection: WebGPUOctreeLosassoProjectionSource;
+  readonly dynamics: WebGPUOctreeLosassoDynamicsSource;
+  readonly extension: WebGPUOctreeLosassoVelocityExtensionSource;
+  readonly vcycle: OctreeLosassoVCycleHierarchySource;
+  readonly rightHandSide: GPUBuffer;
+  readonly rowCount: GPUBuffer;
+  /** Present on the constructible backend's owned authority. */
+  readonly velocitySampler?: WebGPUOctreeLosassoVelocitySamplerSource;
+  readonly wideSolver?: Readonly<{
+    diagonal: GPUBuffer;
+    acceptedAuthority: GPUBuffer;
+  }>;
+}
+
+export interface WebGPUOctreeLosassoCandidatePublisher {
+  readonly initializationTasks?: readonly LosassoInitializationTask[];
+  readonly sources: WebGPUOctreeLosassoPublishedSources;
+  readonly allocatedBytes?: number;
+  encodeCandidatePublication(broker: PassBroker, input: WebGPUOctreeLosassoCandidateInput): void;
+  destroy(): void;
+}
+
+export interface WebGPUOctreeLosassoPressureSolver {
+  readonly initializationTasks?: readonly LosassoInitializationTask[];
+  readonly allocatedBytes?: number;
+  readonly control?: GPUBuffer;
+  readonly iterationBudget?: number;
+  encodeSolve(broker: PassBroker, input: {
+    readonly pressureSeed: GPUBuffer;
+    readonly pressureOut: GPUBuffer;
+    readonly rightHandSide: GPUBuffer;
+    readonly rowCount: GPUBuffer;
+  }): void;
+  destroy(): void;
+}
+
+export interface WebGPUOctreeLosassoTopologyPlan {
+  readonly dimensions: readonly [number, number, number];
+  readonly maximumLeafSize: number;
+  readonly physicalCellSize: readonly [number, number, number];
+  readonly domainOrigin?: readonly [number, number, number];
+  /** The plan belonging to `candidate.ownerArena`; its immutable offsets form
+   * the owner lookup ABI and do not load any Power descriptor state. */
+  readonly ownerPages: Pick<OctreeOwnerPagePlan,
+    "brickDimensions" | "logicalBrickCount" | "ownerDirectoryOffsetWords"
+    | "ownerPagesOffsetWords" | "capacity" | "pageVoxels">;
+}
+
+export interface WebGPUOctreeLosassoBackendOptions {
+  readonly device: GPUDevice;
+  readonly capacities: WebGPUOctreeLosassoAuthorityCapacities;
+  readonly topology: WebGPUOctreeLosassoTopologyPlan;
+  readonly density: number;
+  /** Compact air-face headroom: six velocity-cell faces per resident B4 page. */
+  readonly extensionBandBrickCapacity: number;
+  readonly closedBoundaries?: readonly [boolean, boolean, boolean, boolean, boolean, boolean];
+  /** Coarser levels use exactly the same first-order axis-face operator. */
+  readonly coarseLevels?: readonly OctreeLosassoVCycleLevelSource[];
+  readonly transfers?: readonly OctreeLosassoVCycleTransferSource[];
+  readonly createVCycle?: (source: OctreeLosassoVCycleHierarchySource) => OctreeFirstOrderSPDVCycle;
+  readonly createSolver?: (input: {
+    readonly operator: WebGPUOctreeLosassoOperator;
+    readonly preconditioner: OctreeLosassoFirstOrderVCycle;
+  }) => WebGPUOctreeLosassoPressureSolver;
+  readonly solver?: Omit<OctreePipelinedMGPCGOptions, "rowCapacity">;
+  /** Shared rigid exchange seam. Kept optional for standalone reduced backends. */
+  readonly rigidPressureReaction?: Readonly<{
+    solidCells: GPUBuffer;
+    rigidBodies: GPUBuffer;
+    rigidExchange: GPUBuffer;
+    /** Finest-cell lattice origin in the centred rigid-body world. */
+    rigidWorldOrigin: readonly [number, number, number];
+  }>;
+}
+
+const PUBLISH_ENTRY_POINTS = [
+  "beginLosassoPublication", "countLosassoFaces", "prefixLosassoFaces",
+  "emitLosassoFaces", "conditionLosassoFaces", "prefixLosassoIncidences", "scatterLosassoIncidences",
+  "sortLosassoIncidences", "finishLosassoPublication",
+] as const;
+const AUTHORITY_COMMIT_ENTRY_POINTS = [
+  "commitLosassoAuthorityRows", "commitLosassoAuthorityIncidences",
+  "commitLosassoAuthorityFaces", "commitLosassoAuthorityFaceAux",
+  "commitLosassoAuthorityVelocity", "commitLosassoAuthorityDirectory",
+  "finishLosassoAuthorityCommit",
+] as const;
+
+function positiveInteger(value: number, label: string): number {
+  if (!Number.isSafeInteger(value) || value < 1 || value > 0xffff_ffff) {
+    throw new RangeError(`Losasso ${label} must be a positive u32`);
+  }
+  return value;
+}
+
+function topologyParameterWords(plan: WebGPUOctreeLosassoTopologyPlan,
+  capacities: Readonly<Required<WebGPUOctreeLosassoAuthorityCapacities>>,
+  closedBoundaries?: readonly [boolean, boolean, boolean, boolean, boolean, boolean],
+): ArrayBuffer {
+  const [nx, ny, nz] = plan.dimensions;
+  [nx, ny, nz].forEach((value, axis) => positiveInteger(value, `dimension ${axis}`));
+  positiveInteger(plan.maximumLeafSize, "maximum leaf size");
+  if ((plan.maximumLeafSize & (plan.maximumLeafSize - 1)) !== 0) {
+    throw new RangeError("Losasso maximum leaf size must be dyadic");
+  }
+  for (const [axis, value] of plan.physicalCellSize.entries()) {
+    if (!Number.isFinite(value) || value <= 0) {
+      throw new RangeError(`Losasso physical cell size ${axis} must be positive and finite`);
+    }
+  }
+  const owner = plan.ownerPages;
+  const words = new Uint32Array(28);
+  words.set([nx, ny, nz, plan.maximumLeafSize], 0);
+  words.set([...owner.brickDimensions, owner.logicalBrickCount], 4);
+  words.set([owner.ownerDirectoryOffsetWords, owner.ownerPagesOffsetWords,
+    owner.capacity, owner.pageVoxels], 8);
+  // The directory is power-of-two and at most half full by construction.
+  let directoryCapacity = 1;
+  while (directoryCapacity < 2 * capacities.faces) directoryCapacity *= 2;
+  words.set([capacities.rows, capacities.faces, capacities.incidences,
+    directoryCapacity], 12);
+  new Float32Array(words.buffer).set([...plan.physicalCellSize, 0], 16);
+  const origin = plan.domainOrigin ?? [0, 0, 0];
+  if (origin.some((value) => !Number.isFinite(value))) {
+    throw new RangeError("Losasso domain origin must be finite");
+  }
+  new Float32Array(words.buffer).set([...origin, 0], 20);
+  words[24] = (closedBoundaries ?? [true,true,true,true,true,true])
+    .reduce((mask,value,index)=>mask|(value?1<<index:0),0)>>>0;
+  return words.buffer;
+}
+
+/**
+ * GPU-owned compact face publisher. Candidate construction is isolated from
+ * the fixed accepted buffers consumed by the live solver and dynamics graph.
+ */
+class WebGPUOctreeLosassoTopologyPublisher implements WebGPUOctreeLosassoCandidatePublisher {
+  readonly authority: WebGPUOctreeLosassoAuthority;
+  readonly sources: WebGPUOctreeLosassoPublishedSources;
+  readonly allocatedBytes: number;
+  readonly publication = "candidate-ready-commit" as const;
+  readonly extensionPublication = "all-projected-faces-are-seeds" as const;
+
+  private readonly params: GPUBuffer;
+  private readonly commitParams: GPUBuffer;
+  private readonly scratch: GPUBuffer;
+  private readonly hierarchyPublisher?: WebGPUOctreeLosassoHierarchyPublisher;
+  private readonly velocityMigration: WebGPUOctreeLosassoVelocityMigration;
+  private pipelines?: readonly GPUComputePipeline[];
+  private commitPipelines?: readonly GPUComputePipeline[];
+  private destroyed = false;
+
+  constructor(private readonly device: GPUDevice,
+    options: Pick<WebGPUOctreeLosassoBackendOptions,
+      "capacities" | "topology" | "coarseLevels" | "transfers" | "closedBoundaries">) {
+    // The geometric publisher has no non-seed extension graph yet. One valid
+    // adjacency word keeps the reduced binding constructible without carrying
+    // the old frontier arena.
+    if ((options.coarseLevels === undefined) !== (options.transfers === undefined)) {
+      throw new Error("Losasso coarse levels and transfers must be supplied together");
+    }
+    this.authority = new WebGPUOctreeLosassoAuthority(device, {
+      capacities: { ...options.capacities, faceAdjacencies: 1 },
+      coarseLevels: options.coarseLevels,
+      transfers: options.transfers,
+      encodeCandidate: (broker, input, output) => this.encode(broker, input, output),
+    });
+    if (!options.coarseLevels) {
+      this.hierarchyPublisher = new WebGPUOctreeLosassoHierarchyPublisher(device, {
+        rowCapacity: options.capacities.rows,
+        faceCapacity: options.capacities.faces,
+        dimensions: options.topology.dimensions,
+        maximumLeafSize: options.topology.maximumLeafSize,
+        physicalCellSize: options.topology.physicalCellSize,
+        finest: this.authority.sources.vcycle.levels[0]!,
+      });
+    }
+    this.velocityMigration = new WebGPUOctreeLosassoVelocityMigration(device, {
+      dimensions: options.topology.dimensions,
+      maximumLeafSize: options.topology.maximumLeafSize,
+      faceCapacity: this.authority.writable.capacities.faces,
+      directoryCapacity: this.authority.writable.faceDirectoryCapacity,
+    });
+    this.sources = Object.freeze({ ...this.authority.sources,
+      vcycle: this.hierarchyPublisher?.hierarchy ?? this.authority.sources.vcycle,
+      velocitySampler: {
+        control: this.authority.writable.control,
+        faceGeometry: this.authority.writable.faceGeometry,
+        extendedVelocity: this.authority.writable.extendedVelocity,
+        axisFaceDirectory: this.authority.writable.axisFaceDirectory,
+        directoryCapacity: this.authority.writable.faceDirectoryCapacity,
+        dimensions: options.topology.dimensions,
+        maximumLeafSize: options.topology.maximumLeafSize,
+        fineCellSize: options.topology.physicalCellSize[0],
+      },
+      wideSolver: {
+        diagonal: this.authority.writable.diagonal,
+        acceptedAuthority: this.authority.writable.solverAuthority,
+      },
+    });
+    const capacities = this.authority.writable.capacities;
+    this.params = device.createBuffer({ label: "Losasso compact topology parameters",
+      size: 112, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    device.queue.writeBuffer(this.params, 0,
+      topologyParameterWords(options.topology, capacities, options.closedBoundaries));
+    this.scratch = device.createBuffer({ label: "Losasso compact face publication scratch",
+      size: Math.max(16, capacities.rows * 4 * 4), usage: GPUBufferUsage.STORAGE });
+    this.commitParams = device.createBuffer({ label: "Losasso authority commit parameters",
+      // WGSL aligns the trailing vec3u to 16 bytes, so the five scalar words
+      // plus padding occupy a 48-byte uniform binding.
+      size: 48, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    device.queue.writeBuffer(this.commitParams, 0, Uint32Array.of(capacities.rows,
+      capacities.faces, capacities.incidences, capacities.faceAdjacencies,
+      this.authority.writable.faceDirectoryCapacity, 0, 0, 0));
+    this.allocatedBytes = this.authority.allocatedBytes + this.params.size
+      + this.commitParams.size + this.scratch.size
+      + (this.hierarchyPublisher?.allocatedBytes ?? 0) + this.velocityMigration.allocatedBytes;
+  }
+
+  get initializationTasks(): readonly LosassoInitializationTask[] {
+    return [{ label: "Compile Losasso compact topology publisher", run: () => this.initialize() },
+      ...(this.hierarchyPublisher?.initializationTasks ?? []),
+      ...this.velocityMigration.initializationTasks];
+  }
+
+  async initialize(): Promise<void> {
+    this.assertLive();
+    if (this.pipelines) return;
+    const shaderModule = this.device.createShaderModule({
+      label: "Losasso compact topology publication shader",
+      code: webgpuOctreeLosassoBackendWGSL,
+    });
+    this.pipelines = await Promise.all(PUBLISH_ENTRY_POINTS.map((entryPoint) =>
+      this.device.createComputePipelineAsync({
+        label: `Losasso publication - ${entryPoint}`,
+        // Each entry point reaches at most six storage buffers. A shared
+        // superset layout would expose thirteen and exceed WebGPU's portable
+        // per-stage limit even though no kernel uses that many.
+        layout: "auto",
+        compute: { module: shaderModule, entryPoint },
+      })));
+    const commitModule = this.device.createShaderModule({
+      label: "Losasso candidate-to-accepted authority commit shader",
+      code: webgpuOctreeLosassoAuthorityCommitWGSL,
+    });
+    this.commitPipelines = await Promise.all(AUTHORITY_COMMIT_ENTRY_POINTS.map((entryPoint) =>
+      this.device.createComputePipelineAsync({
+        label: `Losasso authority commit - ${entryPoint}`,
+        layout: "auto", compute: { module: commitModule, entryPoint },
+      })));
+  }
+
+  encodeCandidatePublication(broker: PassBroker, input: WebGPUOctreeLosassoCandidateInput): void {
+    this.assertLive();
+    this.encode(broker, input, this.authority.candidate);
+  }
+
+  /** Atomically expose a valid candidate through the fixed accepted buffers. */
+  encodeReadyCommit(broker: PassBroker, input: {
+    readonly frontier: GPUBuffer;
+    readonly ownerCandidateTransaction: GPUBuffer;
+  }): void {
+    this.assertLive();
+    if (!this.commitPipelines) throw new Error("Losasso authority commit is not initialized");
+    const candidate = this.authority.candidate, accepted = this.authority.writable;
+    const buffers = [this.commitParams, candidate.control, input.ownerCandidateTransaction,
+      input.frontier, candidate.rowFaceOffsets, accepted.rowFaceOffsets,
+      candidate.rowFaces, accepted.rowFaces, candidate.faces, accepted.faces,
+      candidate.rowDispatch, accepted.rowDispatch, candidate.faceDispatch,
+      accepted.faceDispatch, candidate.rightHandSide, accepted.rightHandSide,
+      candidate.faceMetrics, accepted.faceMetrics, candidate.faceAdjacencyOffsets,
+      accepted.faceAdjacencyOffsets, candidate.faceAdjacency, accepted.faceAdjacency,
+      candidate.extendedVelocity, accepted.extendedVelocity, candidate.faceGeometry,
+      accepted.faceGeometry, candidate.axisFaceDirectory, accepted.axisFaceDirectory,
+      candidate.diagonal, accepted.diagonal, candidate.solverAuthority,
+      accepted.solverAuthority, accepted.control];
+    const bindings = [
+      [0, 1, 2, 3, 4, 5, 14, 15, 28, 29],
+      [0, 1, 2, 3, 4, 6, 7],
+      [0, 1, 2, 3, 8, 9, 24, 25],
+      [0, 1, 2, 3, 16, 17, 18, 19, 20, 21],
+      [0, 1, 2, 3, 22, 23],
+      [0, 1, 2, 3, 26, 27],
+      [0, 1, 2, 3, 10, 11, 12, 13, 30, 31, 32],
+    ] as const;
+    const groups = this.commitPipelines.map((pipeline, pipelineIndex) =>
+      this.device.createBindGroup({
+        label: `Losasso ready authority bindings - ${AUTHORITY_COMMIT_ENTRY_POINTS[pipelineIndex]}`,
+        layout: pipeline.getBindGroupLayout(0),
+        entries: bindings[pipelineIndex]!.map((binding) =>
+          ({ binding, resource: { buffer: buffers[binding]! } })),
+      }));
+    const capacities = accepted.capacities;
+    const dispatches = [Math.ceil((capacities.rows + 1) / 64),
+      Math.ceil(capacities.incidences / 64), Math.ceil(capacities.faces / 64),
+      Math.ceil(Math.max(capacities.faces + 1, capacities.faceAdjacencies) / 64),
+      Math.ceil(capacities.faces / 64), Math.ceil(accepted.faceDirectoryCapacity / 64), 1];
+    const pass = broker.compute({ label: "Losasso topology - commit ready authority bank" });
+    for (let index = 0; index < this.commitPipelines.length; index += 1) {
+      pass.setPipeline(this.commitPipelines[index]!);
+      pass.setBindGroup(0, groups[index]!);
+      pass.dispatchWorkgroups(dispatches[index]!, 1, 1);
+    }
+  }
+
+  /** Rebuild owned coarse levels from the accepted, possibly phi-conditioned L0 operator. */
+  encodeHierarchyRefresh(broker: PassBroker, acceptedLeafHeaders: GPUBuffer): boolean {
+    this.assertLive();
+    if (!this.hierarchyPublisher) return false;
+    this.hierarchyPublisher.encodeCandidatePublication(broker, {
+      leafHeaders: acceptedLeafHeaders,
+      finestControl: this.authority.writable.control,
+      finestFaces: this.authority.writable.faces,
+    });
+    return true;
+  }
+
+  private encode(broker: PassBroker, input: WebGPUOctreeLosassoCandidateInput,
+    output: WebGPUOctreeLosassoWritableAuthority): void {
+    this.assertLive();
+    if (!this.pipelines) throw new Error("Losasso topology publisher is not initialized");
+    if (input.leafHeaders.size < output.capacities.rows * 48) {
+      throw new RangeError("Losasso LeafHeader source is smaller than row capacity");
+    }
+    this.velocityMigration.encodeSnapshot(broker, {
+      control: this.authority.writable.control,
+      faceGeometry: this.authority.writable.faceGeometry,
+      axisFaceDirectory: this.authority.writable.axisFaceDirectory,
+      extendedVelocity: this.authority.writable.extendedVelocity,
+    });
+    const buffers = [this.params, input.leafHeaders, input.frontier, input.ownerArena,
+      output.control, output.rowFaceOffsets, output.rowFaces, output.faces,
+      output.rowDispatch, output.faceDispatch, output.rightHandSide,
+      output.faceMetrics, output.faceAdjacencyOffsets, this.scratch,
+      output.faceGeometry, output.axisFaceDirectory, output.diagonal,
+      output.solverAuthority, input.solidCells, input.rigidBodies,
+      // Binding 20 is intentionally unused: candidate rows do not have an
+      // accepted-index phi. Preserve binding 21's owner-transaction ABI.
+      input.ownerCandidateTransaction, input.ownerCandidateTransaction];
+    const bindings = [
+      [0, 2, 3, 4, 8, 9, 17, 21],
+      [0, 1, 3, 4, 10, 13],
+      [0, 4, 13],
+      [0, 1, 3, 4, 7, 11, 13, 14],
+      [0, 4, 7, 14, 18, 19],
+      [0, 4, 5, 13],
+      [0, 4, 5, 6, 7, 13],
+      [0, 4, 5, 6, 7, 10, 16],
+      [0, 4, 8, 9, 12, 14, 15, 17],
+    ] as const;
+    const groups = this.pipelines.map((pipeline, pipelineIndex) =>
+      this.device.createBindGroup({
+        label: `Losasso compact publication bindings - ${PUBLISH_ENTRY_POINTS[pipelineIndex]}`,
+        layout: pipeline.getBindGroupLayout(0),
+        entries: bindings[pipelineIndex]!.map((binding) =>
+          ({ binding, resource: { buffer: buffers[binding]! } })),
+      }));
+    const rowGroups = Math.ceil(output.capacities.rows / 64);
+    const faceGroups = Math.ceil(output.capacities.faces / 64);
+    const dispatches = [1, rowGroups, 1, rowGroups, faceGroups, 1, faceGroups, rowGroups, 1];
+    const pass = broker.compute({ label: "Losasso topology - publish compact axis faces" });
+    for (let index = 0; index < this.pipelines.length; index += 1) {
+      pass.setPipeline(this.pipelines[index]!);
+      pass.setBindGroup(0, groups[index]!);
+      pass.dispatchWorkgroups(dispatches[index]!, 1, 1);
+    }
+    this.velocityMigration.encodeMigration(broker, {
+      control: output.control,
+      faceGeometry: output.faceGeometry,
+      axisFaceDirectory: output.axisFaceDirectory,
+      extendedVelocity: output.extendedVelocity,
+    });
+  }
+
+  destroy(): void {
+    if (this.destroyed) return;
+    this.destroyed = true;
+    this.params.destroy();
+    this.commitParams.destroy();
+    this.scratch.destroy();
+    this.hierarchyPublisher?.destroy();
+    this.velocityMigration.destroy();
+    this.authority.destroy();
+    this.pipelines = undefined;
+    this.commitPipelines = undefined;
+  }
+
+  private assertLive(): void {
+    if (this.destroyed) throw new Error("Losasso topology publisher is destroyed");
+  }
+}
+
+/** Concrete wide exact-reduction solver adapter over the reduced diagonal ABI. */
+class WebGPUOctreeLosassoWideSolver implements WebGPUOctreeLosassoPressureSolver {
+  readonly initializationTasks: readonly LosassoInitializationTask[];
+  readonly allocatedBytes: number;
+  readonly vectors: OctreePipelinedMGPCGVectors;
+  private readonly executor: WebGPUOctreePipelinedMGPCG;
+  get control(): GPUBuffer { return this.executor.control; }
+  get iterationBudget(): number { return this.executor.iterationBudget; }
+
+  constructor(device: GPUDevice, input: {
+    readonly rowCapacity: number;
+    readonly diagonal: GPUBuffer;
+    readonly rightHandSide: GPUBuffer;
+    readonly control: GPUBuffer;
+    readonly acceptedAuthority: GPUBuffer;
+    readonly rowDispatch: GPUBuffer;
+    readonly operator: WebGPUOctreeLosassoOperator;
+    readonly preconditioner: OctreeLosassoFirstOrderVCycle;
+    readonly options?: Omit<OctreePipelinedMGPCGOptions, "rowCapacity">;
+  }) {
+    const storage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+      | GPUBufferUsage.COPY_SRC;
+    const vector = (label: string) => device.createBuffer({
+      label: `Losasso wide MGPCG ${label}`, size: input.rowCapacity * 4, usage: storage,
+    });
+    this.vectors = Object.freeze({
+      pressure: vector("pressure"), residual: vector("residual"),
+      preconditioned: vector("preconditioned residual"),
+      preconditionedImage: vector("preconditioned image"),
+      direction: vector("direction"), directionImage: vector("direction image"),
+    });
+    this.executor = new WebGPUOctreePipelinedMGPCG(device, {
+      diagonal: input.diagonal,
+      diagonalStrideWords: 1,
+      diagonalBankStrideWords: 0,
+      rhs: input.rightHandSide,
+      rowCount: input.control,
+      rowDispatch: input.rowDispatch,
+      acceptedAuthority: input.acceptedAuthority,
+      operator: input.operator,
+      preconditioner: input.preconditioner,
+      vectors: this.vectors,
+    }, { rowCapacity: input.rowCapacity, ...input.options });
+    this.initializationTasks = [{ label: "Compile Losasso wide exact-reduction MGPCG",
+      run: () => this.executor.initializePipelines() }];
+    this.allocatedBytes = this.executor.allocatedBytes
+      + Object.values(this.vectors).reduce((sum, buffer) => sum + buffer.size, 0);
+  }
+
+  encodeSolve(broker: PassBroker, input: {
+    readonly pressureSeed: GPUBuffer;
+    readonly pressureOut: GPUBuffer;
+    readonly rightHandSide: GPUBuffer;
+    readonly rowCount: GPUBuffer;
+  }): void {
+    this.executor.encode(broker, { pressureSeed: input.pressureSeed,
+      pressureOut: input.pressureOut });
+  }
+
+  destroy(): void {
+    this.executor.destroy();
+    for (const buffer of Object.values(this.vectors)) buffer.destroy();
+  }
+}
+
+/**
+ * Constructible pipeline seam for the Losasso coarse side. It owns the
+ * reduced face authority and topology publisher, then exposes the operator,
+ * V-cycle, pressure solver, axis-face projection, and fixed-K extension as one
+ * lifetime. No Power resource type is imported by this module.
+ */
+export class WebGPUOctreeLosassoCoarseBackend {
+  readonly kind = "losasso" as const;
+  readonly gradingPolicy = "uniform-fine-free-surface-shell" as const;
+  readonly operator: WebGPUOctreeLosassoOperator;
+  readonly preconditioner: OctreeLosassoFirstOrderVCycle;
+  readonly solver: WebGPUOctreeLosassoPressureSolver;
+  readonly dynamics: WebGPUOctreeLosassoDynamics;
+  readonly projection: WebGPUOctreeLosassoProjection;
+  readonly extensionBand: WebGPUOctreeLosassoExtensionBand;
+  readonly rigidPressureReaction?: WebGPUOctreeLosassoRigidPressureReaction;
+  readonly sources: WebGPUOctreeLosassoPublishedSources;
+  readonly allocatedBytes: number;
+  readonly authorityPublication = "staged-fail-closed" as const;
+  readonly extensionPublication = "W7-finest-air-face-band" as const;
+  get solverControl(): GPUBuffer | undefined { return this.solver.control; }
+  get solverIterationBudget(): number | undefined { return this.solver.iterationBudget; }
+
+  private readonly publisher: WebGPUOctreeLosassoTopologyPublisher;
+  private initialized = false;
+  private destroyed = false;
+
+  constructor(private readonly options: WebGPUOctreeLosassoBackendOptions) {
+    this.publisher = new WebGPUOctreeLosassoTopologyPublisher(options.device, options);
+    const published = this.publisher.sources;
+    this.extensionBand = new WebGPUOctreeLosassoExtensionBand(options.device, {
+      dimensions: options.topology.dimensions,
+      maximumLeafSize: options.topology.maximumLeafSize,
+      cellSize: options.topology.physicalCellSize[0],
+      domainOrigin: options.topology.domainOrigin,
+      wetFaceCapacity: options.capacities.faces,
+      maximumResidentFineBricks: options.extensionBandBrickCapacity,
+      wet: {
+        control: published.operator.control,
+        faceGeometry: published.dynamics.faceGeometry,
+        axisFaceDirectory: published.dynamics.axisFaceDirectory,
+        directoryCapacity: published.dynamics.faceDirectoryCapacity,
+        projectedVelocity: published.projection.projectedVelocity,
+        extendedVelocity: published.extension.extendedVelocity,
+      },
+    });
+    this.sources = Object.freeze({ ...published,
+      velocitySampler: this.extensionBand.samplerSource });
+    this.operator = new WebGPUOctreeLosassoOperator(options.device, this.sources.operator);
+    const cycle = options.createVCycle
+      ? options.createVCycle(this.sources.vcycle)
+      : new WebGPUOctreeLosassoVCycle(options.device, this.sources.vcycle);
+    assertOctreeLosassoVCycle(cycle);
+    this.preconditioner = cycle;
+    this.solver = options.createSolver
+      ? options.createSolver({ operator: this.operator, preconditioner: cycle })
+      : new WebGPUOctreeLosassoWideSolver(options.device, {
+        rowCapacity: options.capacities.rows,
+        diagonal: this.publisher.authority.writable.diagonal,
+        rightHandSide: this.sources.rightHandSide,
+        control: this.publisher.authority.writable.control,
+        acceptedAuthority: this.publisher.authority.writable.solverAuthority,
+        rowDispatch: this.publisher.authority.writable.rowDispatch,
+        operator: this.operator,
+        preconditioner: cycle,
+        options: options.solver,
+      });
+    this.dynamics = new WebGPUOctreeLosassoDynamics(options.device,
+      this.sources.dynamics, {
+        dimensions: options.topology.dimensions,
+        maximumLeafSize: options.topology.maximumLeafSize,
+        physicalCellSize: options.topology.physicalCellSize,
+        domainOrigin: options.topology.domainOrigin,
+        density: options.density,
+        closedBoundaries: options.closedBoundaries,
+      }, {
+        control: this.extensionBand.source.control,
+        faceGeometry: this.extensionBand.samplerSource.faceGeometry,
+        axisFaceDirectory: this.extensionBand.samplerSource.axisFaceDirectory,
+        extendedVelocity: this.extensionBand.source.extendedVelocity,
+        faceCapacity: this.extensionBand.plan.faceCapacity,
+        directoryCapacity: this.extensionBand.plan.directoryCapacity,
+      });
+    this.projection = new WebGPUOctreeLosassoProjection(options.device,
+      this.sources.projection);
+    if (options.rigidPressureReaction) {
+      this.rigidPressureReaction = new WebGPUOctreeLosassoRigidPressureReaction(options.device, {
+        rowCapacity: options.capacities.rows,
+        faceCapacity: options.capacities.faces,
+        rowDispatch: published.operator.rowDispatch,
+        rowFaceOffsets: published.operator.rowFaceOffsets,
+        rowFaces: published.operator.rowFaces,
+        faces: published.operator.faces,
+        faceGeometry: published.dynamics.faceGeometry,
+        solidCells: options.rigidPressureReaction.solidCells,
+        rigidBodies: options.rigidPressureReaction.rigidBodies,
+        rigidExchange: options.rigidPressureReaction.rigidExchange,
+      }, {
+        dimensions: options.topology.dimensions,
+        physicalCellSize: options.topology.physicalCellSize,
+        rigidWorldOrigin: options.rigidPressureReaction.rigidWorldOrigin,
+      });
+    }
+    if (this.sources.projection.projectedVelocity
+      !== this.sources.extension.projectedVelocity) {
+      throw new Error("Losasso projection output must be the fixed-K extension seed field");
+    }
+    const preconditionerBytes = (cycle as OctreeLosassoFirstOrderVCycle &
+      { allocatedBytes?: number }).allocatedBytes ?? 0;
+    this.allocatedBytes = this.publisher.allocatedBytes + this.dynamics.allocatedBytes
+      + this.extensionBand.allocatedBytes
+      + (this.rigidPressureReaction?.allocatedBytes ?? 0)
+      + 16 + (this.solver.allocatedBytes ?? 0) + preconditionerBytes;
+  }
+
+  get initializationTasks(): readonly LosassoInitializationTask[] {
+    return [
+      ...this.publisher.initializationTasks,
+      ...this.operator.initializationTasks,
+      ...(this.preconditioner as OctreeLosassoFirstOrderVCycle & {
+        initializationTasks?: readonly LosassoInitializationTask[];
+      }).initializationTasks ?? [],
+      ...(this.solver.initializationTasks ?? []),
+      ...this.dynamics.initializationTasks,
+      ...this.projection.initializationTasks,
+      ...(this.rigidPressureReaction?.initializationTasks ?? []),
+      ...this.extensionBand.initializationTasks,
+    ];
+  }
+
+  async initialize(): Promise<void> {
+    this.assertLive();
+    if (this.initialized) return;
+    for (const task of this.initializationTasks) await task.run();
+    this.initialized = true;
+  }
+
+  /** Candidate construction and ready publication are one fail-closed GPU pass. */
+  encodeCandidatePublication(broker: PassBroker,
+    input: WebGPUOctreeLosassoCandidateInput): void {
+    this.assertReady();
+    this.publisher.encodeCandidatePublication(broker, input);
+  }
+
+  /** Candidate authority used only by the ready validator. */
+  get candidateAuthorityControl(): GPUBuffer { return this.publisher.authority.candidate.control; }
+
+  encodeReadyCommit(broker: PassBroker, input: {
+    readonly frontier: GPUBuffer;
+    readonly ownerCandidateTransaction: GPUBuffer;
+  }): void {
+    this.assertReady();
+    this.publisher.encodeReadyCommit(broker, input);
+  }
+
+  /** Call immediately after accepted ghost conditioning changes L0 coefficients. */
+  encodeHierarchyRefresh(broker: PassBroker, acceptedLeafHeaders: GPUBuffer): boolean {
+    this.assertReady();
+    return this.publisher.encodeHierarchyRefresh(broker, acceptedLeafHeaders);
+  }
+
+  encodeSolve(broker: PassBroker, input: {
+    readonly pressureSeed: GPUBuffer;
+    readonly pressureOut: GPUBuffer;
+  }): void {
+    this.assertReady();
+    this.solver.encodeSolve(broker, { ...input, rightHandSide: this.sources.rightHandSide,
+      rowCount: this.sources.rowCount });
+  }
+
+  encodeAdvection(broker: PassBroker, step: WebGPUOctreeLosassoDynamicsStep): void {
+    this.assertReady();
+    this.dynamics.encodeAdvection(broker, step);
+  }
+
+  encodeForcesAndDivergence(
+    broker: PassBroker,
+    step: WebGPUOctreeLosassoDynamicsStep,
+  ): void {
+    this.assertReady();
+    this.dynamics.encodeForcesAndDivergence(broker, step);
+  }
+
+  encodeProjection(
+    broker: PassBroker,
+    pressure: GPUBuffer,
+    step: WebGPUOctreeLosassoDynamicsStep,
+    dynamicCouplingBodyCount = 0,
+  ): void {
+    this.assertReady();
+    this.projection.encode(broker, pressure, step.dt_s / this.options.density);
+    this.rigidPressureReaction?.encode(
+      broker, pressure, step.dt_s, dynamicCouplingBodyCount,
+    );
+    this.dynamics.encodeInflowConstraint(broker, step);
+  }
+
+  /** Publish the factor-4/8 phi-classified W=7 graph before its first S3e use. */
+  encodeExtensionBandPublication(broker: PassBroker,
+    fine: WebGPUFineLevelSetBrickSource): void {
+    this.assertReady();
+    this.extensionBand.encodePublication(broker, fine);
+  }
+
+  encodeExtension(broker: PassBroker, advance: number, topologyEpoch: number): boolean {
+    this.assertReady();
+    return this.extensionBand.encodeOncePerAdvance(broker, advance, topologyEpoch);
+  }
+
+  destroy(): void {
+    if (this.destroyed) return;
+    this.destroyed = true;
+    this.solver.destroy();
+    const preconditioner = this.preconditioner as OctreeLosassoFirstOrderVCycle
+      & { destroy?: () => void };
+    preconditioner.destroy?.();
+    this.operator.destroy();
+    this.dynamics.destroy();
+    this.projection.destroy();
+    this.rigidPressureReaction?.destroy();
+    this.extensionBand.destroy();
+    this.publisher.destroy();
+  }
+
+  private assertReady(): void {
+    this.assertLive();
+    if (!this.initialized) throw new Error("Losasso coarse backend is not initialized");
+  }
+  private assertLive(): void {
+    if (this.destroyed) throw new Error("Losasso coarse backend is destroyed");
+  }
+}

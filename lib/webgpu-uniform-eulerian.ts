@@ -44,6 +44,7 @@ import {
 } from "./webgpu-eulerian";
 import type { SceneDescription } from "./model";
 import type { SparseScenePrimitiveUpdate } from "./webgpu-sparse-scene-proxies";
+import type { OctreeCoarseDynamicsConfiguration } from "./octree-coarse-backend";
 import { createTallCellLayout } from "./tall-cell-grid";
 import { sceneLatticeDimensions } from "./scene-lattice";
 import { planGPUAdvance } from "./tall-cell-diagnostics";
@@ -88,6 +89,8 @@ import {
   structuredStepWorkObservation,
   type StructuredStepSnapshotRecord,
 } from "./structured-step-snapshot";
+import { losassoStepSnapshotFailures, WebGPUOctreeLosassoStepSnapshotRing }
+  from "./webgpu-octree-losasso-step-snapshot";
 import {
   OCTREE_STEP_PROGRAM,
   PhysicsStepPredictionLedger,
@@ -111,10 +114,14 @@ interface PendingStepSnapshotSources {
   readonly topologyEpochState?: GPUBuffer;
   readonly spgridLevelDelta?: GPUBuffer;
   readonly airSupportScratch?: GPUBuffer;
+  readonly losassoAuthorityControl?: GPUBuffer;
+  readonly losassoCoarsePhiControl?: GPUBuffer;
+  readonly losassoExtensionControl?: GPUBuffer;
+  readonly globalFineCurrentWorklist?: GPUBuffer;
 }
 
 export type UniformVelocityTransport = GPUVelocityTransport;
-export interface WebGPUUniformEulerianOptions { pressureIterations?: number; velocityTransport?: UniformVelocityTransport; densitySharpening?: boolean; tallCellSettings?: Partial<import("./tall-cell-grid").TallCellSettings>; octree?: Partial<OctreeProjectionOptions>; /** Allocate escaped spray droplets and set their initial live state. */ secondaryParticles?: boolean; secondaryParticleCapacity?: number; deferPipelineCompilation?: boolean; /** Internal lifecycle channel for the worker-owned allocation graph. */ allocationProgress?: (label: string, completed: number, total: number) => void }
+export interface WebGPUUniformEulerianOptions { pressureIterations?: number; velocityTransport?: UniformVelocityTransport; densitySharpening?: boolean; tallCellSettings?: Partial<import("./tall-cell-grid").TallCellSettings>; octree?: Partial<OctreeProjectionOptions>; /** Construction-time coarse authority selection. Never uploaded as a shader flag. */ coarseDynamics?: OctreeCoarseDynamicsConfiguration; /** Allocate escaped spray droplets and set their initial live state. */ secondaryParticles?: boolean; secondaryParticleCapacity?: number; deferPipelineCompilation?: boolean; /** Internal lifecycle channel for the worker-owned allocation graph. */ allocationProgress?: (label: string, completed: number, total: number) => void }
 
 /** One shared-host unit followed by the octree-owned allocation stages. */
 export const OCTREE_SOLVER_ALLOCATION_WORK_UNITS = 1 + OCTREE_ALLOCATION_STAGES.length;
@@ -761,6 +768,7 @@ export class WebGPUUniformEulerianSolver {
   private hardwarePhysicsTraceInvalid = false;
   /** Step-coherent structured diagnostics; written by the step's own encoder. */
   private stepSnapshotRing?: StructuredStepSnapshotRing;
+  private losassoStepSnapshotRing?: WebGPUOctreeLosassoStepSnapshotRing;
   private readonly stepSequenceRecorder = new StepSequenceRecorder();
   private stepSequenceFaulted = false;
   /**
@@ -950,6 +958,7 @@ export class WebGPUUniformEulerianSolver {
         globalFineLevelSetFactor: options.octree.globalFineLevelSetFactor ?? 4,
         globalFineLevelSetMaximumBricks: options.octree.globalFineLevelSetMaximumBricks,
         pressureRowCapacity: options.octree.pressureRowCapacity,
+        coarseDynamics: options.coarseDynamics,
       }, options.deferPipelineCompilation, (label, completed) => options.allocationProgress?.(
         label, completed + 1, OCTREE_SOLVER_ALLOCATION_WORK_UNITS,
       ));
@@ -1394,6 +1403,27 @@ fn recordPhysicsPhaseBoundary(
   private async validateInitialSparseAuthority() {
     const projection = this.octreeProjection;
     if (!projection) throw new Error("Initial sparse authority requires an octree projection");
+    if (projection.coarseBackend === "losasso") {
+      const reduced = await projection.readLosassoAuthorityDiagnostics();
+      this.applyOctreeInfo(projection);
+      const authority = reduced?.authority ?? [];
+      const solver = reduced?.solver ?? [];
+      const coarsePhi = reduced?.coarsePhi ?? [];
+      const ready = authority.length >= 5 && authority[0] !== 0
+        && authority[1] > 0 && authority[2] > 0
+        && authority[3] === 1 && authority[4] === 0;
+      const solverReady = solver.length >= 3 && solver[0] === 0 && solver[1] !== 0;
+      if (!ready || !solverReady) {
+        const owner = await projection.readOwnerPageControl();
+        throw new Error("Paused t=0 Losasso authority rejected: authority="
+          + JSON.stringify(authority) + "; solver=" + JSON.stringify(solver)
+          + "; coarsePhi=" + JSON.stringify(coarsePhi)
+          + "; owner=" + JSON.stringify(owner));
+      }
+      this.info.quadtreePressureConverged = solverReady;
+      this.info.quadtreePressureIterationsUsed = solver[2] ?? 0;
+      return;
+    }
     const [, fine, mgpcg] = await Promise.all([
       projection.readSolveDiagnostics(), projection.readGlobalFineLevelSetDiagnostics(),
       projection.readMGPCGDiagnostics(),
@@ -1494,6 +1524,8 @@ fn recordPhysicsPhaseBoundary(
   get structuredVelocityControl() { return this.octreeProjection?.structuredVelocityControl; }
   get structuredBoundaryControl() { return this.octreeProjection?.structuredBoundaryControl; }
   get structuredRowVelocities() { return this.octreeProjection?.structuredRowVelocities; }
+  get losassoVelocityDebug() { return this.octreeProjection?.losassoVelocityDebug; }
+  get losassoPressureDebug() { return this.octreeProjection?.losassoPressureDebug; }
   get structuredAuthority() { return this.octreeProjection?.structuredAuthority; }
   get structuredWorksets() { return this.octreeProjection?.structuredWorksets; }
   /** Post-submit diagnostics only; never consumed by the simulation schedule. */
@@ -1727,6 +1759,7 @@ fn recordPhysicsPhaseBoundary(
       surfaceField: "levelset",
       volumeControl: true,
       pressureSolver: projection.pressureSolverLabel,
+      coarseDynamicsBackend: projection.coarseBackend,
       compressionRatio: octree.compressionRatio,
       activeCompressionRatio: octree.compressionRatio,
       activeSampleCount: octree.liquidDofCount,
@@ -1971,7 +2004,7 @@ fn recordPhysicsPhaseBoundary(
           }
         );
         this.stepSequenceRecorder.record("pressure-projection");
-        inlineRebuildEncoded = this.octreeProjection.encodeInactiveTopologyCandidate(encoder);
+        inlineRebuildEncoded = this.octreeProjection.encodeInactiveTopologyCandidateIfDue(encoder);
         this.stepSequenceRecorder.record("inactive-topology-candidate");
         encoder = completePhysicsPhase(
           encoder,
@@ -2037,11 +2070,40 @@ fn recordPhysicsPhaseBoundary(
     // with the Dawn harness audit (structured-authority-audit); readStats
     // consumes the record instead of racing the live control buffers.
     if (this.octreeProjection) {
-      const velocityControl = this.structuredVelocityControl;
-      const boundaryControl = this.structuredBoundaryControl;
+      const pending = this.octreeProjection as unknown as PendingStepSnapshotSources;
+      const losasso = this.octreeProjection.coarseBackend === "losasso";
       const fine = this.globalFineLevelSetSource;
       const coarse = this.coarseLevelSetSource;
       const surfaceHeader = fine?.worklist ?? coarse?.directory.buffer;
+      if (losasso) {
+        const sources = pending.losassoAuthorityControl && pending.losassoCoarsePhiControl
+          && pending.losassoExtensionControl && this.mgpcgControl
+          && pending.globalFineCurrentWorklist
+          && this.globalFineTransportControl ? {
+            authority: pending.losassoAuthorityControl,
+            solver: this.mgpcgControl,
+            fineWorklist: pending.globalFineCurrentWorklist,
+            coarsePhi: pending.losassoCoarsePhiControl,
+            extension: pending.losassoExtensionControl,
+            fineTransport: this.globalFineTransportControl,
+          } : undefined;
+        this.losassoStepSnapshotRing ??= new WebGPUOctreeLosassoStepSnapshotRing(
+          this.device, structuredStepSnapshotSlotCount());
+        if (sources && this.losassoStepSnapshotRing.encode(
+          encoder, sources, this.info.encodedSteps ?? 0)) {
+          this.stepSequenceRecorder.record("step-snapshot");
+        } else if (!this.stepSnapshotFaulted) {
+          this.stepSnapshotFaulted = true;
+          console.error("[step-snapshot]", JSON.stringify({
+            backend: "losasso", step: this.info.encodedSteps,
+            slots: this.losassoStepSnapshotRing.slotCount,
+            skipped: this.losassoStepSnapshotRing.skippedRecords,
+            reason: sources ? "every ring slot was mapping" : "native receipt source absent",
+          }));
+        }
+      } else {
+      const velocityControl = this.structuredVelocityControl;
+      const boundaryControl = this.structuredBoundaryControl;
       if (velocityControl && boundaryControl && surfaceHeader) {
         // Slot count derives from the in-flight ceiling: an under-sized ring
         // makes `encode` skip the record when every slot is mapping, and a
@@ -2057,7 +2119,6 @@ fn recordPhysicsPhaseBoundary(
         // lights the segments up the moment those accessors land, and until
         // then the ring reports the segments absent rather than copying zeros
         // that a skip predicate could mistake for evidence.
-        const pending = this.octreeProjection as unknown as PendingStepSnapshotSources;
         if (this.stepSnapshotRing.encode(encoder, {
           structuredVelocityControl: velocityControl,
           structuredBoundaryControl: boundaryControl,
@@ -2088,6 +2149,7 @@ fn recordPhysicsPhaseBoundary(
             reason: "every ring slot was mapping; raise the slot count",
           }));
         }
+      }
       }
     }
     if (shouldCaptureLogicalActivity) this.encodeLogicalActivityFrameEnd(encoder);
@@ -2331,27 +2393,53 @@ fn recordPhysicsPhaseBoundary(
     const surfaceDiagnosticsPromise = compactFineExpected
       ? undefined
       : this.octreeProjection?.readSurfaceDiagnostics();
-    const globalFineDiagnosticsPromise = this.octreeProjection?.readGlobalFineLevelSetDiagnostics();
+    const globalFineDiagnosticsPromise = this.octreeProjection?.coarseBackend === "power2017"
+      ? this.octreeProjection.readGlobalFineLevelSetDiagnostics() : undefined;
     // The step-coherent record supersedes the racing live-buffer sample for
     // authority health: its words were copied by the step's own encoder.
-    const stepSnapshotPromise = this.stepSnapshotRing?.readLatest();
+      const stepSnapshotPromise = this.stepSnapshotRing?.readLatest();
+      const losassoStepSnapshotPromise = this.losassoStepSnapshotRing?.readLatest();
     try {
       await mapPromise;
-      const [, , surfaceDiagnostics, globalFineDiagnostics, fluidBrickStats, fluidBulkBrickStats, stepRecord] = await Promise.all([
-        this.validationPromise, solveDiagnostics, surfaceDiagnosticsPromise, globalFineDiagnosticsPromise, this.octreeProjection?.readFluidBrickResidencyStats(), this.octreeProjection?.readFluidBulkBrickResidencyStats(), stepSnapshotPromise,
+      const [, , surfaceDiagnostics, globalFineDiagnostics, fluidBrickStats, fluidBulkBrickStats,
+        stepRecord, losassoStepRecord] = await Promise.all([
+        this.validationPromise, solveDiagnostics, surfaceDiagnosticsPromise, globalFineDiagnosticsPromise,
+        this.octreeProjection?.readFluidBrickResidencyStats(),
+        this.octreeProjection?.readFluidBulkBrickResidencyStats(), stepSnapshotPromise,
+        losassoStepSnapshotPromise,
       ]);
+    if (losassoStepRecord) {
+      const failures = losassoStepSnapshotFailures(losassoStepRecord);
+      if (failures.length > 0 && !this.stepSequenceFaulted) {
+        this.stepSequenceFaulted = true;
+        this.info.stepSequenceDeviations = failures.map((failure) =>
+          `Losasso step ${losassoStepRecord.step} receipt: ${failure}`);
+        console.error("[losasso-step-receipt]", JSON.stringify({
+          step: losassoStepRecord.step,
+          authority: Array.from(losassoStepRecord.authority),
+          solver: Array.from(losassoStepRecord.solver),
+          fine: Array.from(losassoStepRecord.fine),
+          coarsePhi: Array.from(losassoStepRecord.coarsePhi),
+          extension: Array.from(losassoStepRecord.extension),
+          fineTransport: Array.from(losassoStepRecord.fineTransport),
+          failures,
+        }));
+      }
+    }
     if(globalFineDiagnostics)this.applyGlobalFineDiagnostics(globalFineDiagnostics);
     // One-shot forensic dump: a structured epoch that stalls while the fine
     // generation keeps advancing is the browser-only candidate freeze
     // (accepted epoch retained "valid" while every new candidate poisons).
     // Capture the coupled candidate controls the first time it is observable.
-    {
+    if (this.octreeProjection?.coarseBackend === "power2017") {
       // Prefer the step-coherent record: acceptedEpoch and the published fine
       // generation were copied at the SAME step boundary, so the lag is exact
       // whole-step staleness and cannot be inflated by pipeline depth or
       // diagnostics cadence (the legacy pair mixes a fenced GPU word with the
       // live host counter and legally over-reads by the in-flight depth).
-      const stepHealth = stepRecord ? structuredAuthorityStepHealth(stepRecord) : undefined;
+      const powerStepRecord = stepRecord;
+      const stepHealth = powerStepRecord
+        ? structuredAuthorityStepHealth(powerStepRecord) : undefined;
       if (stepHealth) {
         this.info.structuredSnapshotStep = stepHealth.step;
         this.info.structuredAuthorityLagSteps = stepHealth.authorityLagSteps;
@@ -2362,7 +2450,7 @@ fn recordPhysicsPhaseBoundary(
         this.info.structuredSnapshotActiveFineBricks = stepHealth.activeFineBricks;
         this.info.structuredSnapshotFineBandOverflow = stepHealth.fineBandCapacityOverflow;
       }
-      if (stepRecord) this.resolveStepPrediction(stepRecord);
+      if (powerStepRecord) this.resolveStepPrediction(powerStepRecord);
       const frozenEpoch = stepHealth?.acceptedEpoch ?? this.info.structuredVelocityGeneration ?? 0;
       const liveFine = stepHealth?.publishedFineGeneration ?? this.info.globalFineGeneration ?? 0;
       const lag = stepHealth ? stepHealth.authorityLagSteps : liveFine - frozenEpoch;
@@ -2460,7 +2548,7 @@ fn recordPhysicsPhaseBoundary(
     const words = this.reductionBuffer
       ? new Uint32Array(buffer.getMappedRange(0, 16))
       : new Uint32Array(4);
-    const structuredEnergy = stepRecord
+    const structuredEnergy = this.octreeProjection?.coarseBackend === "power2017" && stepRecord
       ? decodeStructuredProjectionEnergy(stepRecord.snapshot.projectionEnergyControl)
       : structuredProjectionEnergy
         ? decodeStructuredProjectionEnergy(new Uint32Array(
@@ -2576,6 +2664,8 @@ fn recordPhysicsPhaseBoundary(
     this.disposed = true;
     this.stepSnapshotRing?.destroy();
     this.stepSnapshotRing = undefined;
+    this.losassoStepSnapshotRing?.destroy();
+    this.losassoStepSnapshotRing = undefined;
     this.octreeProjection?.destroy();
     const textures = this.hostAllocation
       ? [this.velocityA, this.velocityB, this.velocityC, this.velocityD,

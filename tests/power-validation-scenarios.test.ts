@@ -50,7 +50,7 @@ test("larger hydrostatic oracle is a 32x24x16 body-free tank with a quarter-cell
   }
 });
 
-test("minimal power dam uses an authoritative analytic initializer in a 16-cubed leaf-32 tank", () => {
+test("minimal power dam uses an authoritative analytic initializer in a 16-cubed leaf-16 tank", () => {
   const scene = createMinimalPowerDamBreakScene();
   assert.deepEqual(validateScene(scene), []);
   assert.deepEqual(scene.container, {
@@ -105,7 +105,7 @@ test("32- and 64-cubed coarse-only dams preserve the mini dam's physical experim
   }
 });
 
-test("both power-validation scenes are shared by presets and the smoke registry", () => {
+test("Power-reference smoke lanes reuse Losasso-default scene documents", () => {
   for (const id of ["hydrostatic-power-large-offset", "minimal-power-dam-break"] as const) {
     const preset = getScenePreset(id);
     assert.equal(preset.id, id);
@@ -113,8 +113,9 @@ test("both power-validation scenes are shared by presets and the smoke registry"
     const smoke = createSmokeScenario(id);
     assert.deepEqual(validateScene(smoke.scene), []);
     assert.deepEqual(smoke.scene, preset.create(), `${id} Dawn scene must be the UI preset scene`);
-    assert.deepEqual(smoke.methodProfile, preset.methodProfile,
-      `${id} Dawn method profile must be the UI preset profile`);
+    assert.equal(preset.methodProfile?.overrides.coarseBackend, "losasso");
+    assert.equal(smoke.methodProfile?.overrides.coarseBackend, "power2017",
+      `${id} opts into Power only in its frozen Dawn reference lane`);
   }
   const hydro = createSmokeScenario("hydrostatic-power-large-offset");
   assert.equal(hydro.oracleSteps, 1);
@@ -129,6 +130,7 @@ test("32- and 64-cubed dam presets pin the coarse-only progressive-refinement ex
     methodId: "octree",
     quality: "balanced",
     overrides: {
+      coarseBackend: "losasso",
       maximumLeafSize: "32",
       interfaceRefinementBandCells: 3,
       surfaceRefinementGradingLayers: 3,
@@ -147,12 +149,13 @@ test("32- and 64-cubed dam presets pin the coarse-only progressive-refinement ex
   }
 });
 
-test("power-validation UI presets carry the exact authoritative Dawn method profile", () => {
+test("validation UI presets default to compatible Losasso hierarchies", () => {
   assert.deepEqual(POWER_VALIDATION_METHOD_PROFILE, {
     methodId: "octree",
     quality: "balanced",
     overrides: {
-      maximumLeafSize: "32",
+      coarseBackend: "losasso",
+      maximumLeafSize: "16",
       interfaceRefinementBandCells: 3,
       globalFineLevelSetFactor: "4",
     },
@@ -163,6 +166,7 @@ test("power-validation UI presets carry the exact authoritative Dawn method prof
   assert.deepEqual(LARGE_HYDROSTATIC_POWER_METHOD_PROFILE, {
     ...POWER_VALIDATION_METHOD_PROFILE,
     overrides: { ...POWER_VALIDATION_METHOD_PROFILE.overrides,
+      maximumLeafSize: "8",
       interfaceRefinementBandCells: 4 },
   });
   assert.equal(getScenePreset("hydrostatic-power-large-offset").methodProfile,
@@ -170,17 +174,16 @@ test("power-validation UI presets carry the exact authoritative Dawn method prof
   assert.deepEqual(CEILING_DROP_METHOD_PROFILE, {
     ...POWER_VALIDATION_METHOD_PROFILE,
     overrides: { ...POWER_VALIDATION_METHOD_PROFILE.overrides,
+      maximumLeafSize: "8",
       interfaceRefinementBandCells: 1 },
   });
-  assert.equal(getScenePreset("ceiling-slab-drop").methodProfile,
-    CEILING_DROP_METHOD_PROFILE);
-  for (const id of ["corner-brick-drop", "midair-brick-drop", "midair-corner-drop"] as const) {
-    assert.equal(getScenePreset(id).methodProfile, POWER_VALIDATION_METHOD_PROFILE,
-      `${id} must retain the shared band-3 validation profile`);
+  for (const id of ["ceiling-slab-drop", "corner-brick-drop", "midair-brick-drop", "midair-corner-drop"] as const) {
+    assert.equal(getScenePreset(id).methodProfile, CEILING_DROP_METHOD_PROFILE,
+      `${id} must use the common leaf-8 free-fall profile`);
   }
 });
 
-test("authored validation profiles share the leaf-32 production shell", () => {
+test("authored Losasso profiles use roots that divide their scene dimensions", () => {
   const planPreset = (id: "ceiling-slab-drop" | "hydrostatic-power-large-offset" | "ocean-seiche") => {
     const preset = getScenePreset(id);
     const scene = preset.create();
@@ -219,7 +222,7 @@ test("authored validation profiles share the leaf-32 production shell", () => {
   "the lid-flush analytic seed must remain within every global-fine domain extent");
   assert.equal(ceiling.values.interfaceRefinementBandCells, 1);
   assert.equal(ceiling.values.globalFineLevelSetFactor, "4");
-  assert.equal(ceiling.values.maximumLeafSize, "32");
+  assert.equal(ceiling.values.maximumLeafSize, "8");
   assert.equal(ceiling.policy.boundarySmoothingIterations,
     OCTREE_SECTION43_PRODUCTION_SHELL_DEPTH);
 

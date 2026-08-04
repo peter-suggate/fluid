@@ -1513,7 +1513,70 @@ export async function readCompactOctreeVelocityField3D(
   const controlBuffer = structured.structuredVelocityControl;
   const headerBuffer = solver.powerLeafHeaders;
   const velocityBuffer = structured.structuredRowVelocities;
-  if (!controlBuffer || !headerBuffer || !velocityBuffer) return undefined;
+  if (!controlBuffer || !headerBuffer || !velocityBuffer) {
+    const losasso = solver.losassoVelocityDebug;
+    if (!losasso || losasso.dimensions.some((value, axis) => value !== dimensions[axis])) {
+      return undefined;
+    }
+    const controlBytes = await readBufferBinding(device, { buffer: losasso.control }, 32);
+    const control = new Uint32Array(controlBytes.buffer, controlBytes.byteOffset, 8);
+    const faceCount = control[2] ?? 0;
+    if (control[3] !== 1 || faceCount === 0
+      || faceCount * 16 > losasso.faceGeometry.size
+      || faceCount * 4 > losasso.extendedVelocity.size) return undefined;
+    const [geometryBytes, velocityBytes] = await Promise.all([
+      readBufferBinding(device, { buffer: losasso.faceGeometry }, faceCount * 16),
+      readBufferBinding(device, { buffer: losasso.extendedVelocity }, faceCount * 4),
+    ]);
+    const geometry = new Uint32Array(geometryBytes.buffer, geometryBytes.byteOffset, 4 * faceCount);
+    const values = new Float32Array(velocityBytes.buffer, velocityBytes.byteOffset, faceCount);
+    const faces = new Map<string, number>();
+    const key = (packed: number, x: number, y: number, z: number) => `${packed}|${x}|${y}|${z}`;
+    for (let face = 0; face < faceCount; face += 1) {
+      const at = 4 * face;
+      faces.set(key(geometry[at]!, geometry[at + 1]!, geometry[at + 2]!, geometry[at + 3]!),
+        values[face]!);
+    }
+    const [nx, ny, nz] = dimensions;
+    const sample = (axis: number, x: number, y: number, z: number): number | undefined => {
+      const q = [x, y, z];
+      for (let span = 1, logSpan = 0; span <= losasso.maximumLeafSize;
+        span *= 2, logSpan += 1) {
+        const origin = [...q];
+        for (let component = 0; component < 3; component += 1) {
+          if (component !== axis) origin[component] = Math.floor(origin[component]! / span) * span;
+        }
+        const found = faces.get(key(axis | (logSpan << 2), origin[0]!, origin[1]!, origin[2]!));
+        if (found !== undefined) return found;
+      }
+      // Closed normal walls are valid zero-velocity faces even when the
+      // compact W7 directory does not materialize a record for them.
+      return q[axis] === 0 || q[axis] === dimensions[axis] ? 0 : undefined;
+    };
+    const field = new Float32Array(3 * nx * ny * nz);
+    field.fill(Number.NaN);
+    let coveredCells = 0;
+    for (let z = 0; z < nz; z += 1) for (let y = 0; y < ny; y += 1) {
+      for (let x = 0; x < nx; x += 1) {
+        const cell = x + nx * (y + ny * z);
+        let complete = true;
+        for (let axis = 0; axis < 3; axis += 1) {
+          const lower = sample(axis, x, y, z);
+          const upper = sample(axis, x + (axis === 0 ? 1 : 0),
+            y + (axis === 1 ? 1 : 0), z + (axis === 2 ? 1 : 0));
+          if (lower === undefined || upper === undefined
+            || !Number.isFinite(lower) || !Number.isFinite(upper)) complete = false;
+          else field[3 * cell + axis] = 0.5 * (lower + upper);
+        }
+        if (complete) coveredCells += 1;
+      }
+    }
+    return {
+      field, coveredCells, overlapCells: 0, invalidRows: 0,
+      publicationValid: control[3] === 1 && (control[4] ?? 0) === 0,
+      rowCount: faceCount, reconstructedRows: faceCount,
+    };
+  }
   const controlBytes = await readBufferBinding(device, { buffer: controlBuffer }, 24);
   const control = unpackStructuredVelocityControl(new Uint32Array(
     controlBytes.buffer, controlBytes.byteOffset, controlBytes.byteLength / 4));
@@ -1576,6 +1639,58 @@ export async function readCompactOctreePressureState3D(
   const controlBuffer = structured.structuredVelocityControl;
   const headerBuffer = solver.powerLeafHeaders;
   const pressureBuffer = solver.powerPressureBuffer;
+  if (!controlBuffer && headerBuffer && pressureBuffer && solver.losassoPressureDebug) {
+    const debug = solver.losassoPressureDebug;
+    const controlBytes = await readBufferBinding(device, { buffer: debug.control }, 32);
+    const control = new Uint32Array(controlBytes.buffer, controlBytes.byteOffset, 8);
+    const rowCount = control[1] ?? 0;
+    if (control[3] !== 1 || rowCount === 0 || rowCount * 48 > headerBuffer.size
+      || rowCount * 4 > pressureBuffer.size || rowCount * 4 > debug.rightHandSide.size
+      || rowCount * 4 > debug.diagonal.size) return undefined;
+    const [headerBytes, pressureBytes, rhsBytes, diagonalBytes] = await Promise.all([
+      readBufferBinding(device, { buffer: headerBuffer }, rowCount * 48),
+      readBufferBinding(device, { buffer: pressureBuffer }, rowCount * 4),
+      readBufferBinding(device, { buffer: debug.rightHandSide }, rowCount * 4),
+      readBufferBinding(device, { buffer: debug.diagonal }, rowCount * 4),
+    ]);
+    const headers = new Uint32Array(headerBytes.buffer, headerBytes.byteOffset, rowCount * 12);
+    const rows = new Float32Array(pressureBytes.buffer, pressureBytes.byteOffset, rowCount);
+    const rhsRows = new Float32Array(rhsBytes.buffer, rhsBytes.byteOffset, rowCount);
+    const diagonalRows = new Float32Array(diagonalBytes.buffer, diagonalBytes.byteOffset, rowCount);
+    const [nx, ny, nz] = dimensions, cellCount = nx * ny * nz;
+    const pressure = new Float32Array(cellCount), rhs = new Float32Array(cellCount);
+    const diagonal = new Float32Array(cellCount), topology = new Uint32Array(cellCount);
+    pressure.fill(Number.NaN); rhs.fill(Number.NaN); diagonal.fill(Number.NaN);
+    const owners = new Int32Array(cellCount); owners.fill(-1);
+    let coveredCells = 0, overlapCells = 0, invalidRows = 0;
+    for (let row = 0; row < rowCount; row += 1) {
+      const cell = headers[12 * row] >>> 0, size = headers[12 * row + 3] >>> 0;
+      const origin = [cell % nx, Math.floor(cell / nx) % ny,
+        Math.floor(cell / (nx * ny))] as const;
+      const valid = size > 0 && cell < cellCount
+        && origin[0] + size <= nx && origin[1] + size <= ny && origin[2] + size <= nz
+        && Number.isFinite(rows[row]) && Number.isFinite(rhsRows[row])
+        && Number.isFinite(diagonalRows[row]);
+      if (!valid) invalidRows += 1;
+      if (size === 0 || cell >= cellCount || origin[0] + size > nx
+        || origin[1] + size > ny || origin[2] + size > nz) continue;
+      for (let z = origin[2]; z < origin[2] + size; z += 1) {
+        for (let y = origin[1]; y < origin[1] + size; y += 1) {
+          for (let x = origin[0]; x < origin[0] + size; x += 1) {
+            const index = x + nx * (y + ny * z);
+            if (owners[index] >= 0) { overlapCells += 1; pressure[index] = Number.NaN;
+              rhs[index] = Number.NaN; diagonal[index] = Number.NaN; topology[index] = 0; continue; }
+            owners[index] = row; coveredCells += 1; topology[index] = size;
+            if (valid) { pressure[index] = rows[row]!; rhs[index] = rhsRows[row]!;
+              diagonal[index] = diagonalRows[row]!; }
+          }
+        }
+      }
+    }
+    return { pressure, rhs, diagonal, topology, coveredCells, overlapCells, invalidRows, rowCount,
+      publicationValid: control[3] === 1 && (control[4] ?? 0) === 0
+        && coveredCells === cellCount && overlapCells === 0 && invalidRows === 0 };
+  }
   if (!controlBuffer || !headerBuffer || !pressureBuffer) return undefined;
   const controlBytes = await readBufferBinding(device, { buffer: controlBuffer }, 24);
   const control = unpackStructuredVelocityControl(new Uint32Array(

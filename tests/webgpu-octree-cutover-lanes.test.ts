@@ -20,8 +20,9 @@ test("cutover evidence lanes are isolated and the aggregate runs them serially",
     assert.doesNotMatch(command, /tools\/run-webgpu-smoke\.ts(?:\s|$)/,
       `${name} must not bypass the isolated lock-owning runner`);
     assert.match(command, /FLUID_METHOD=octree/);
+    assert.match(command, /FLUID_COARSE_BACKEND=losasso/);
     assert.match(command, /FLUID_EXPECT_EXACT_STEPS=1/);
-    assert.match(command, /FLUID_POWER_GENERATION_AUDIT=1/);
+    assert.match(command, /FLUID_POWER_GENERATION_AUDIT=0/);
   }
   assert.match(packageJson.scripts[laneNames[0]]!,
     /tools\/run-webgpu-exclusive\.ts --import tsx tools\/run-octree-lagged-rigid-smoke\.ts$/,
@@ -44,22 +45,22 @@ test("the moving-solid/open-top lane combines both lifecycle conditions", () => 
     "the lane must reject a nominal moving-solid case with no actual body motion");
 });
 
-test("factor-4 and factor-8 lanes differ only at the requested fine cutover", () => {
+test("factor-4 gates the visible D4 path while factor-8 remains a compact diagnostic", () => {
   const factor4 = packageJson.scripts[laneNames[1]]!;
   const factor8 = packageJson.scripts[laneNames[2]]!;
   for (const command of [factor4, factor8]) {
-    assert.match(command, /FLUID_SCENE=minimal-power-dam-break/);
     assert.match(command, /FLUID_TARGET_S=0\.004/);
     assert.match(command, /FLUID_MAX_DT=0\.004/);
     assert.match(command, /FLUID_ORACLE_STEPS=1/);
-    assert.match(command, /FLUID_EXPECT_GRID=16,16,16/);
     assert.match(command, /FLUID_GLOBAL_FINE_GENERATION_TRANSITION=1/);
   }
+  assert.match(factor4, /FLUID_SCENE=symmetric-expansion/);
+  assert.match(factor4, /FLUID_EXPECT_GRID=32,16,32/);
+  assert.match(factor4, /FLUID_OCTREE_INTERFACE_BAND=4/);
+  assert.match(factor4, /FLUID_RASTER_CHECKPOINTS=1/);
+  assert.match(factor4, /FLUID_RASTER_MESH_SYMMETRY=1/);
   assert.match(factor4, /FLUID_OCTREE_GLOBAL_FINE_FACTOR=4/);
+  assert.match(factor8, /FLUID_SCENE=minimal-power-dam-break/);
+  assert.match(factor8, /FLUID_EXPECT_GRID=16,16,16/);
   assert.match(factor8, /FLUID_OCTREE_GLOBAL_FINE_FACTOR=8/);
-  assert.equal(
-    factor4.replace("FLUID_LANE=fine-factor-4", "FLUID_LANE=fine-factor-8")
-      .replace("FACTOR=4", "FACTOR=8"),
-    factor8,
-    "fine-factor evidence must not drift into two incomparable smoke contracts");
 });

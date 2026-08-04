@@ -85,7 +85,10 @@ test("generic health and backend packs declare every reusable acceptance constan
   assert.equal(topology.sparseFluidColorTolerance, 1e-6);
   assert.equal(topology.wetFlipCensusImpliedSpeed_m_s, 12.5);
 
-  const octree = diagnostic(lane, "octree-authority").parameters!;
+  assert.equal(lane.diagnostics.some(({ id }) => id === "octree-authority"), false,
+    "product-default Losasso lanes must not inherit the frozen Power authority pack");
+  const octree = diagnostic(getSceneWebGPUSmokeLane("hydrostatic-power-two-level"),
+    "octree-authority").parameters!;
   assert.equal(octree.expectedGridKind, "octree");
   assert.equal(octree.pressureSolverNameIncludes, "exact-reduction executor");
   assert.equal(octree.maximumPressureRelativeResidualSquared, 1e-8);
@@ -175,7 +178,8 @@ test("Bet-4 deep-ocean lane is a bounded volumetric shipping fixture", () => {
   const lane = getSceneWebGPUSmokeLane("power-hybrid-deep-ocean");
   assert.deepEqual(lane.stop, { simulatedTime_s: 0.004, exactSteps: 1, maxDt_s: 0.004 });
   assert.deepEqual(lane.methods[0]?.overrides, {
-    maximumLeafSize: "32", interfaceRefinementBandCells: 1, globalFineLevelSetFactor: "1",
+    coarseBackend: "power2017", maximumLeafSize: "32",
+    interfaceRefinementBandCells: 1, globalFineLevelSetFactor: "1",
   });
   const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
     scripts: Record<string, string>;
@@ -222,7 +226,7 @@ test("structured power lanes own exhaustive thresholds and raster policy", () =>
     id === "coarse-surface-no-rejected-generations" && expected === 0));
 });
 
-test("ceiling smoke follows its dedicated band-1 UI profile only", () => {
+test("free-fall smoke lanes share the product Losasso band-1 profile", () => {
   const defaultLane = getSceneWebGPUSmokeLane("ceiling-slab-drop");
   assert.equal(defaultLane.methods[0].overrides.interfaceRefinementBandCells, 1);
   assert.equal(defaultLane.collect.evidenceCollectors?.[0]?.requires?.includes("fine upper surface"), true);
@@ -232,7 +236,7 @@ test("ceiling smoke follows its dedicated band-1 UI profile only", () => {
   assert.equal(performance.collect.performanceProfile, true);
   assert.equal(performance.collect.fieldStats, "none");
   assert.deepEqual(performance.diagnostics.map(({ id }) => id), [
-    "core-webgpu-health", "volume-and-topology", "octree-authority", "performance",
+    "core-webgpu-health", "volume-and-topology", "performance",
   ]);
   assert.deepEqual(performance.hooks, []);
   const baseline = getSceneWebGPUSmokeLane("ceiling-slab-drop", "coarse-baseline-post-impact");
@@ -240,11 +244,11 @@ test("ceiling smoke follows its dedicated band-1 UI profile only", () => {
   assert.equal(baseline.methods[0].overrides.globalFineLevelSetFactor, "1");
   assert.equal(baseline.methods[0].overrides.interfaceRefinementBandCells, 1);
   assert.deepEqual(baseline.diagnostics.map(({ id }) => id), [
-    "core-webgpu-health", "volume-and-topology", "octree-authority", "global-fine-publication",
+    "core-webgpu-health", "volume-and-topology",
   ]);
   for (const id of ["corner-brick-drop", "midair-brick-drop", "midair-corner-drop"] as const) {
     assert.equal(getSceneWebGPUSmokeLane(id).methods[0]
-      .overrides.interfaceRefinementBandCells, 3);
+      .overrides.interfaceRefinementBandCells, 1);
   }
 });
 

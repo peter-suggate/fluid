@@ -186,7 +186,8 @@ test("a bare link to a profiled preset resolves to that preset's authored method
 
   const values = resolveMethodValues(getMethod(parsed.methodId), parsed.quality,
     parsed.overrides[parsed.methodId] ?? {});
-  assert.equal(values.maximumLeafSize, "32");
+  assert.equal(values.coarseBackend, "losasso");
+  assert.equal(values.maximumLeafSize, "16");
   assert.equal(values.interfaceRefinementBandCells, 3);
   assert.equal(values.globalFineLevelSetFactor, "4");
 
@@ -205,7 +206,8 @@ test("a bare ceiling-drop link hydrates the dedicated band-1 UI profile", () => 
   const parsed = parseQueryState("?scene=ceiling-slab-drop");
   const values = resolveMethodValues(getMethod(parsed.methodId), parsed.quality,
     parsed.overrides[parsed.methodId] ?? {});
-  assert.equal(values.maximumLeafSize, "32");
+  assert.equal(values.coarseBackend, "losasso");
+  assert.equal(values.maximumLeafSize, "8");
   assert.equal(values.interfaceRefinementBandCells, 1);
   assert.equal(values.globalFineLevelSetFactor, "4");
   assert.deepEqual(parsed.overrides[profile.methodId], { ...profile.overrides });
@@ -218,7 +220,7 @@ test("an explicit param key overrides one value of a profiled preset", () => {
     parsed.overrides[parsed.methodId] ?? {});
   assert.equal(values.interfaceRefinementBandCells, 0);
   // Every other authored setting is still the profile's.
-  assert.equal(values.maximumLeafSize, "32");
+  assert.equal(values.maximumLeafSize, "16");
   assert.equal(values.globalFineLevelSetFactor, "4");
 });
 

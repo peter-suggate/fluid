@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createOceanSeicheScene, getScenePreset } from "../lib/scenes";
+import { createOceanSeicheScene, getScenePreset, OCEAN_SEICHE_METHOD_PROFILE } from "../lib/scenes";
 import { combineInitialBrickWet, initialFluidBrickContainsCell } from "../lib/initial-fluid";
 import { createTallCellLayout, initialLiquidPhi, type GPUQuality } from "../lib/tall-cell-grid";
 import { createSmokeScenario, isSmokeScenarioId, minimumOceanFarHalfDisturbanceCells } from "../tools/webgpu-smoke-scenarios";
@@ -75,7 +75,9 @@ test("ocean scene is registered in the UI presets and the smoke harness with lea
   assert.ok(scenario.target_s >= 5, "the wave needs several crossings of observation time");
   const lane = getSceneWebGPUSmokeLane("ocean-seiche");
   assert.deepEqual(lane.methods.map(({ id }) => id), ["octree"]);
-  assert.equal(lane.methods[0].overrides.maximumLeafSize, "32");
+  assert.equal(getScenePreset("ocean-seiche").methodProfile, OCEAN_SEICHE_METHOD_PROFILE);
+  assert.equal(lane.methods[0].overrides.coarseBackend, "losasso");
+  assert.equal(lane.methods[0].overrides.maximumLeafSize, "16");
   assert.equal(lane.collect.sparsePublication, false,
     "production ocean benchmarks must not allocate the lazy raw-inspection publication");
   assert.ok(lane.hooks.some(({ id }) => id === "ocean-wave-profile"));

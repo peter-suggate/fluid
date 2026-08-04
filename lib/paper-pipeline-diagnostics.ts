@@ -39,6 +39,7 @@ export function paperPipelineStages(
   }
 
   const t0Ready = info.initialSparseAuthorityReady === true;
+  const losasso = info.coarseDynamicsBackend === "losasso";
   const powerGeneration = info.powerDiagramGeneration;
   const fineGeneration = info.globalFineGeneration;
   const coarseOnlySurface = info.globalFineLevelSetEnabled === false
@@ -60,11 +61,18 @@ export function paperPipelineStages(
   const powerHealthy = info.powerDiagramAuthoritative === true
     && (powerGeneration !== undefined || (info.pressureRequiredRows ?? 0) > 0)
     && info.pressureCapacityOverflow !== true;
-  stages.push(powerHealthy
-    ? { id: "power", section: "§4.1–4.2/§6", label: "Resolved implicit power rows", state: "AUTHORITATIVE", tone: "healthy", generation: generation(powerGeneration), detail: `${info.pressureRequiredRows?.toLocaleString()} rows · fixed case-local handles · six structured families` }
+  const coarseHealthy = losasso
+    ? t0Ready && info.pressureCapacityOverflow !== true
+    : powerHealthy;
+  const coarseStage = losasso
+    ? { id: "coarse", section: "Losasso 2004", label: "First-order graded rows", generation: generation(fineGeneration), detail: `${info.pressureRequiredRows?.toLocaleString() ?? "GPU-resident"} rows · closed-form coupling · axis-aligned face authority` }
+    : { id: "power", section: "§4.1–4.2/§6", label: "Resolved implicit power rows", generation: generation(powerGeneration), detail: `${info.pressureRequiredRows?.toLocaleString()} rows · fixed case-local handles · six structured families` };
+  stages.push(coarseHealthy
+    ? { ...coarseStage, state: "AUTHORITATIVE", tone: "healthy" }
     : t0Ready
-      ? { id: "power", section: "§4.1–4.2/§6", label: "Resolved implicit power rows", state: "REJECTED", tone: "rejected", generation: generation(powerGeneration), detail: "Authoritative resolved-row publication is incomplete." }
-      : pending("power", "§4.1–4.2/§6", "Resolved implicit power rows", "Waiting for compact cases and structured velocity families."));
+      ? { ...coarseStage, state: "REJECTED", tone: "rejected", detail: "Authoritative coarse-row publication is incomplete." }
+      : pending(coarseStage.id, coarseStage.section, coarseStage.label,
+        losasso ? "Waiting for compact Losasso rows and axis-face authority." : "Waiting for compact cases and structured velocity families."));
 
   const fineRejected = info.globalFineRolledBack === true
     || info.globalFinePublished === false
@@ -101,7 +109,15 @@ export function paperPipelineStages(
   const structuredCurrent = structuredGeneration === undefined || powerGeneration === undefined
     || structuredGeneration === powerGeneration;
   const dynamicStructuredAttempted = (info.encodedSteps ?? 0) > 0;
-  stages.push(structuredValid && structuredCurrent
+  stages.push(losasso && (info.encodedSteps ?? 0) === 0 && t0Ready
+    ? { id: "extrapolation", section: "§5", label: "W7 axis-face extension", state: "PREPARED", tone: "healthy", generation: generation(fineGeneration), detail: "The fenced t=0 axis-face field is ready; its first recurring receipt appears after transport." }
+    : losasso && info.globalFineTransportCommitted === true
+      ? { id: "extrapolation", section: "§5", label: "W7 axis-face extension", state: "PUBLISHED", tone: "healthy", generation: generation(fineGeneration), detail: "The fixed-sweep signed W7 face field supplied every accepted fine-transport sample." }
+      : losasso && info.globalFineTransportCommitted === false && dynamicStructuredAttempted
+        ? { id: "extrapolation", section: "§5", label: "W7 axis-face extension", state: "REJECTED", tone: "rejected", generation: generation(fineGeneration), detail: "The current W7 face field did not support a complete fine-transport transaction." }
+        : losasso
+          ? pending("extrapolation", "§5", "W7 axis-face extension", "Waiting for the first recurring extension and transport receipt.")
+    : structuredValid && structuredCurrent
     ? { id: "extrapolation", section: "§5", label: "Structured velocity extension", state: "PUBLISHED", tone: "healthy", generation: generation(structuredGeneration), detail: `${info.structuredVelocityRows ?? 0} rows · ${info.structuredVelocitySlots ?? 0} six-family slots · projected full-vector CPT seeds published` }
     : structuredValid
       ? { id: "extrapolation", section: "§5", label: "Structured velocity extension", state: "STALE", tone: "stale", generation: generation(structuredGeneration), detail: `Structured generation ${structuredGeneration ?? "?"} does not match topology generation ${powerGeneration ?? "?"}.` }
@@ -128,13 +144,19 @@ export function paperPipelineStages(
   const persistentSection43 = isOctreePersistentMGPCGSolverLabel(info.pressureSolver);
   const pressureSection = persistentSection43 ? "§4.3" : "pressure";
   const residual = info.pressureRelativeResidual;
-  stages.push(powerHealthy && persistentSection43
+  const losassoPressureHealthy = coarseHealthy && (info.encodedSteps ?? 0) === 0
+    || coarseHealthy && info.quadtreePressureConverged === true;
+  stages.push(losasso && losassoPressureHealthy
+    ? (info.encodedSteps ?? 0) === 0
+      ? { id: "pressure", section: pressureSection, label: "Pressure projection", state: "PREPARED", tone: "healthy", generation: generation(fineGeneration), detail: `${info.pressureSolver} · wide exact-reduction MGPCG and first-order V-cycle are ready.` }
+      : { id: "pressure", section: pressureSection, label: "Pressure projection", state: "CONVERGED", tone: "healthy", generation: generation(fineGeneration), detail: `${info.pressureSolver} · accepted converged solve.` }
+    : !losasso && powerHealthy && persistentSection43
     ? (info.encodedSteps ?? 0) === 0
       ? { id: "pressure", section: pressureSection, label: "Pressure projection", state: "PREPARED", tone: "healthy", generation: generation(powerGeneration), detail: `${info.pressureSolver} · selected operator and fenced t=0 solve are ready; dynamic-step convergence appears after stepping.` }
       : { id: "pressure", section: pressureSection, label: "Pressure projection", state: residual !== undefined && residual <= 1e-4 ? "CONVERGED" : "CHECK", tone: residual !== undefined && residual <= 1e-4 ? "healthy" : "warning", generation: generation(powerGeneration), detail: residual === undefined ? `${info.pressureSolver} · latest solve residual is unavailable` : `${info.pressureSolver} · relative L2 residual ${residual.toExponential(2)} (target 1e-4)` }
     : t0Ready
       ? { id: "pressure", section: pressureSection, label: "Pressure projection", state: "REJECTED", tone: "rejected", generation: generation(powerGeneration), detail: info.pressureSolver ?? "Selected pressure authority is unavailable." }
-      : pending("pressure", pressureSection, "Pressure projection", "Waiting for the selected authoritative power-pressure path."));
+      : pending("pressure", pressureSection, "Pressure projection", `Waiting for the selected authoritative ${losasso ? "Losasso" : "power"} pressure path.`));
 
   const rasterGenerationCurrent = water?.globalFineAttachedGeneration !== undefined
     && water.meshPublicationGeneration !== undefined
@@ -171,7 +193,8 @@ export function paperPipelineStages(
 export function paperPipelineHealthFlags(
   info: GPUEulerianInfo | null | undefined,
 ): readonly string[] {
+  const backend = info?.coarseDynamicsBackend === "losasso" ? "losasso" : "2017";
   return paperPipelineStages(info, undefined)
     .filter((stage) => stage.tone === "rejected" || stage.tone === "stale")
-    .map((stage) => `2017-${stage.id}-${stage.state.toLowerCase()}`);
+    .map((stage) => `${backend}-${stage.id}-${stage.state.toLowerCase()}`);
 }

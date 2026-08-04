@@ -10,6 +10,8 @@ import { summarizeDriftOscillation } from "../lib/tall-cell-diagnostics";
 import type { WebGPUFineLevelSetBrickSource } from "../lib/webgpu-octree-fine-levelset-bricks";
 import { FINE_LEVELSET_VOLUME_VALID, unpackFineLevelSetGPUVolumeControl }
   from "../lib/webgpu-octree-fine-levelset-volume";
+import { OCTREE_LOSASSO_COARSE_PHI_MAGIC }
+  from "../lib/webgpu-octree-losasso-coarse-phi.wgsl";
 import { decodeFineLevelSetRecurringRejectionClauses, FINE_LEVELSET_TOPOLOGY_ERROR,
   unpackFineLevelSetGPUTopologyControl }
   from "../lib/webgpu-octree-fine-levelset-topology";
@@ -153,6 +155,57 @@ function exactFieldFingerprint(field: ArrayLike<number>): Readonly<{
   }
   return Object.freeze({ length: field.length,
     hashA: a.toString(16).padStart(8, "0"), hashB: b.toString(16).padStart(8, "0") });
+}
+
+function losassoRasterCutoverFailures(
+  raster: HybridPresentationSmokeStats,
+  fineGeneration: number,
+): readonly string[] {
+  const failures: string[] = [];
+  const reverse = raster.reverseView;
+  if (raster.frontInterfacePixels === 0 || raster.backInterfacePixels === 0
+    || raster.pairedInterfacePixels === 0 || raster.backOnlyInterfacePixels !== 0) {
+    failures.push("forward raster lacks closed paired front/back interface coverage");
+  }
+  if (!reverse || reverse.frontInterfacePixels === 0 || reverse.backInterfacePixels === 0
+    || reverse.pairedInterfacePixels === 0 || reverse.backOnlyInterfacePixels !== 0) {
+    failures.push("reverse raster lacks closed paired front/back interface coverage");
+  }
+  const holeCount = raster.enclosedSurfaceHoles.front.count
+    + raster.enclosedSurfaceHoles.back.count
+    + (reverse?.enclosedSurfaceHoles.front.count ?? 0)
+    + (reverse?.enclosedSurfaceHoles.back.count ?? 0);
+  const slitCount = raster.narrowVerticalSlits.count
+    + (reverse?.narrowVerticalSlits.count ?? 0);
+  if (holeCount !== 0) failures.push(`raster contains ${holeCount} enclosed surface holes`);
+  if (slitCount !== 0) failures.push(`raster contains ${slitCount} narrow vertical slits`);
+  if (raster.rendererValidationErrorCount !== 0 || raster.rendererUncapturedErrorCount !== 0) {
+    failures.push("renderer reported validation or uncaptured GPU errors");
+  }
+  if (raster.surfaceGeometrySource !== "global-fine-coarse"
+    || raster.globalFineCrossingPublished !== true
+    || raster.presentationFallbackActive !== false
+    || (raster.globalFineAuthorityLatch ?? 0) === 0) {
+    failures.push("renderer did not consume the current production global-fine/coarse geometry");
+  }
+  if ((raster.vertexCount ?? 0) === 0 || (raster.activeCubeCount ?? 0) === 0
+    || raster.vertexAllocator !== raster.vertexCount
+    || (raster.vertexCount ?? Infinity) > (raster.vertexCapacity ?? -1)
+    || (raster.activeCubeCount ?? Infinity) > (raster.activeCubeCapacity ?? -1)) {
+    failures.push("production surface geometry is empty or its allocation receipt is invalid");
+  }
+  const retained = raster.globalFineAuthorityTransition;
+  if (!retained || retained.cleanFineCoarseRequired !== true
+    || retained.validGeneration !== fineGeneration
+    || retained.unpublishedGeneration !== fineGeneration + 1
+    || retained.retainedGeometrySource !== "retained-previous"
+    || retained.retainedFrontInterfacePixels !== raster.frontInterfacePixels
+    || retained.retainedBackInterfacePixels !== raster.backInterfacePixels
+    || retained.retainedFrontInterfaceHash !== raster.frontInterfaceHash
+    || retained.retainedBackInterfaceHash !== raster.backInterfaceHash) {
+    failures.push("unpublished-generation probe did not coherently retain the accepted raster");
+  }
+  return Object.freeze(failures);
 }
 // Dawn quantizes timestamp-query results to 65536 ns unless told not to, so
 // every pass reads as an integer number of 65.536 us quanta and anything
@@ -444,6 +497,19 @@ if (octreeSurfaceGradingOverride !== undefined
     || octreeSurfaceGradingOverride < 1 || octreeSurfaceGradingOverride > 4)) {
   throw new Error("FLUID_OCTREE_SURFACE_GRADING must be an integer from 1 through 4");
 }
+const octreeCoarseBackendOverride = process.env.FLUID_COARSE_BACKEND;
+if (octreeCoarseBackendOverride !== undefined
+  && octreeCoarseBackendOverride !== "losasso"
+  && octreeCoarseBackendOverride !== "power2017") {
+  throw new Error("FLUID_COARSE_BACKEND must be losasso or power2017");
+}
+const octreeTopologyCadenceOverride = process.env.FLUID_TOPOLOGY_CADENCE_ADVANCES === undefined
+  ? undefined : Number(process.env.FLUID_TOPOLOGY_CADENCE_ADVANCES);
+if (octreeTopologyCadenceOverride !== undefined
+  && (!Number.isSafeInteger(octreeTopologyCadenceOverride)
+    || octreeTopologyCadenceOverride < 1 || octreeTopologyCadenceOverride > 8)) {
+  throw new Error("FLUID_TOPOLOGY_CADENCE_ADVANCES must be an integer from 1 through 8");
+}
 // Section 5 surface-band thickness, independent of the pressure band above.
 // Unset leaves the projection on the pressure band, so an A/B against a lane's
 // recorded numbers only needs this one variable.
@@ -481,6 +547,10 @@ if (octreeGlobalFineFactorOverride !== undefined && !["1", "4", "8"].includes(oc
   throw new Error("FLUID_FINE_FACTOR/FLUID_OCTREE_GLOBAL_FINE_FACTOR must be 1, 4, or 8");
 }
 const powerGenerationAuditLog = process.env.FLUID_POWER_GENERATION_AUDIT_LOG !== "0";
+/** Identity marker for the production-visible factor-4 D4 cutover command.
+ * Generic Losasso lanes still receive the native authority oracle, while this
+ * marker additionally refuses any drift in the named release gate's wiring. */
+const losassoD4CutoverRequested = process.env.FLUID_LOSASSO_D4_CUTOVER === "1";
 const powerCandidateAuditRequested = process.env.FLUID_POWER_CANDIDATE_AUDIT === "1";
 const powerAuditEverySteps = Number(process.env.FLUID_POWER_AUDIT_EVERY_STEPS ?? 1);
 if (!Number.isSafeInteger(powerAuditEverySteps) || powerAuditEverySteps < 1) {
@@ -1142,6 +1212,12 @@ async function runGPU(
   if (method.id === "quadtree-tall-cell" && rebuildTopologyOverride !== undefined) values.rebuildTopology = rebuildTopologyOverride;
   if (method.id === "quadtree-tall-cell" && maximumLeafSizeOverride !== undefined) values.maximumLeafSize = maximumLeafSizeOverride;
   if (method.id === "octree" && maximumLeafSizeOverride !== undefined) values.maximumLeafSize = maximumLeafSizeOverride;
+  if (method.id === "octree" && octreeCoarseBackendOverride !== undefined) {
+    values.coarseBackend = octreeCoarseBackendOverride;
+  }
+  if (method.id === "octree" && octreeTopologyCadenceOverride !== undefined) {
+    values.topologyCadenceAdvances = octreeTopologyCadenceOverride;
+  }
   if (method.id === "octree" && octreeInterfaceBandOverride !== undefined) {
     values.interfaceRefinementBandCells = octreeInterfaceBandOverride;
   }
@@ -1152,12 +1228,33 @@ async function runGPU(
     values.fineLevelSetBandCells = octreeFineBandOverride;
   }
   if (method.id === "octree" && octreeGlobalFineFactorOverride !== undefined) values.globalFineLevelSetFactor = octreeGlobalFineFactorOverride;
+  const losassoCutoverLane = method.id === "octree" && values.coarseBackend === "losasso";
   // Factor one transports phi directly on the accepted octree rows and owns
   // no separate sparse fine-band publication.
   const hasSeparateFineLevelSetBand = method.id === "octree"
     && Number(values.globalFineLevelSetFactor) !== 1;
   const verifyGlobalFineGenerationTransition = globalFineGenerationTransitionRequested
     && hasSeparateFineLevelSetBand;
+  if (losassoD4CutoverRequested) {
+    const wiringFailures = [
+      ...(scenarioId === "symmetric-expansion" ? [] : [`scene=${scenarioId}`]),
+      ...(scenario.lane.id === "fine-factor-4" ? [] : [`lane=${scenario.lane.id}`]),
+      ...(method.id === "octree" ? [] : [`method=${method.id}`]),
+      ...(values.coarseBackend === "losasso" ? [] : [`backend=${String(values.coarseBackend)}`]),
+      ...(Number(values.maximumLeafSize) === 16 ? [] : [`maximumLeafSize=${String(values.maximumLeafSize)}`]),
+      ...(Number(values.interfaceRefinementBandCells) === 4
+        ? [] : [`interfaceBand=${String(values.interfaceRefinementBandCells)}`]),
+      ...(Number(values.globalFineLevelSetFactor) === 4
+        ? [] : [`fineFactor=${String(values.globalFineLevelSetFactor)}`]),
+      ...(rasterInitialFinalRequested ? [] : ["initial-final-raster=off"]),
+      ...(rasterCheckpointRequested ? [] : ["checkpoint-raster=off"]),
+      ...(verifyGlobalFineGenerationTransition ? [] : ["retained-generation-probe=off"]),
+      ...(process.env.FLUID_RASTER_MESH_SYMMETRY === "1" ? [] : ["exact-D4-raster=off"]),
+    ];
+    if (wiringFailures.length > 0) {
+      throw new Error(`Losasso D4 cutover gate wiring drifted: ${wiringFailures.join(", ")}`);
+    }
+  }
   if (method.id === "octree" && octreePressureRowCapacityOverride !== undefined) {
     values.pressureRowCapacity = octreePressureRowCapacityOverride;
   }
@@ -1478,7 +1575,7 @@ async function runGPU(
   let mgpcgIterationMinimum = Number.POSITIVE_INFINITY;
   let mgpcgIterationMaximum = 0;
   const mgpcgIterationHistogram: Record<string, number> = {};
-  const powerGenerationAuditCapacity = method.id === "octree"
+  const powerGenerationAuditCapacity = method.id === "octree" && !losassoCutoverLane
     && (powerGenerationAuditRequested || collectStabilityEnvelope)
     ? Math.max(1, exactStepCount ?? 0, oracleSteps,
       Math.ceil(target_s / Math.max(scene.numerics.maxDt_s, Number.EPSILON)) + 1)
@@ -1529,9 +1626,9 @@ async function runGPU(
    * other octree run captures them opportunistically: a trip still fails, but
    * a scene with no compact fine authority is "not applicable" rather than a
    * wiring failure. */
-  const tripwiresRequired = !tripwiresDisabled && method.id === "octree"
+  const tripwiresRequired = !tripwiresDisabled && method.id === "octree" && !losassoCutoverLane
     && (tripwiresForcedRequired || powerGenerationAuditRequested || performanceProfileRequested);
-  const tripwireCapacity = !tripwiresDisabled && method.id === "octree"
+  const tripwireCapacity = !tripwiresDisabled && method.id === "octree" && !losassoCutoverLane
     ? Math.max(1, exactStepCount ?? 0, oracleSteps,
       Math.ceil(target_s / Math.max(scene.numerics.maxDt_s, Number.EPSILON)) + 1)
     : 0;
@@ -1957,7 +2054,7 @@ async function runGPU(
       }
     }
     const auditThisPowerStep = steps % powerAuditEverySteps === 0 || requestedTime + 1e-9 >= target_s;
-    const captureCompactPowerStep = method.id === "octree"
+    const captureCompactPowerStep = method.id === "octree" && !losassoCutoverLane
       && (collectStabilityEnvelope || powerGenerationAuditRequested && auditThisPowerStep);
     if (captureCompactPowerStep) {
       const audited = solver as GPUSolverInstance & {
@@ -2636,6 +2733,90 @@ async function runGPU(
   const simulationWall_ms = queueCompleteSimulationWall_ms(
     runStarted, simulationCompletedAt_ms, samplingWall_ms,
   );
+  let losassoCutoverAuthority: Readonly<Record<string, unknown>> | undefined;
+  let losassoCutoverRaster: HybridPresentationSmokeStats | undefined;
+  if (losassoCutoverLane) {
+    const projection = (solver as GPUSolverInstance & { octreeProjection?: {
+      readLosassoAuthorityDiagnostics(): Promise<Readonly<{
+        authority: readonly number[]; solver: readonly number[]; coarsePhi: readonly number[];
+      }> | undefined>;
+    } }).octreeProjection;
+    const [native, fine, raster] = await Promise.all([
+      projection?.readLosassoAuthorityDiagnostics(),
+      hasSeparateFineLevelSetBand
+        ? readGlobalFineGenerationDiagnostics(device, solver) : Promise.resolve(undefined),
+      hasSeparateFineLevelSetBand
+        ? smokeRenderHybridPresentation(instrumentedDevice, solver, scene, bodies, true)
+        : Promise.resolve(undefined),
+    ]);
+    losassoCutoverRaster = raster;
+    const authority = native?.authority ?? [], pressure = native?.solver ?? [];
+    const coarsePhi = native?.coarsePhi ?? [];
+    const failures: string[] = [];
+    if (steps < 1) failures.push("no accepted advance executed");
+    if (authority.length < 5 || authority[0] === 0 || authority[1] === 0
+      || authority[2] === 0 || authority[3] !== 1 || authority[4] !== 0) {
+      failures.push("reduced authority is invalid or empty");
+    }
+    if (pressure.length < 5 || pressure[0] !== 0 || pressure[1] === 0
+      || pressure[4] !== authority[1]) {
+      failures.push("MGPCG did not converge on the accepted row authority");
+    }
+    if (coarsePhi.length < 15 || coarsePhi[0] !== OCTREE_LOSASSO_COARSE_PHI_MAGIC
+      || coarsePhi[1] !== authority[0] || coarsePhi[2] !== authority[1]
+      || coarsePhi[3] !== authority[2] || coarsePhi[13] !== 0) {
+      failures.push("coarse phi is invalid or disagrees with the reduced authority");
+    }
+    if (hasSeparateFineLevelSetBand && (!fine || !fine.publicationValid
+      || fine.validSamples === 0 || fine.finiteValidSamples !== fine.validSamples
+      || fine.negativeValidSamples === 0 || fine.positiveValidSamples === 0
+      || coarsePhi[12] !== fine.generation || coarsePhi[14] !== fine.generation)) {
+      failures.push("factor-4 fine phi is invalid, non-finite, one-sided, or generation-incoherent");
+    }
+    if (hasSeparateFineLevelSetBand) {
+      if (!fine || !raster) failures.push("factor-4 production raster evidence is unavailable");
+      else failures.push(...losassoRasterCutoverFailures(raster, fine.generation));
+    }
+    losassoCutoverAuthority = Object.freeze({ backend: "losasso", steps,
+      submittedTime_s: solver.info.submittedTime_s, authority, solver: pressure, coarsePhi,
+      fine: fine ? { generation: fine.generation, worklistGeneration: fine.worklistGeneration,
+        activePages: fine.activePages, capacity: fine.configuredBrickCapacity,
+        validSamples: fine.validSamples, finiteValidSamples: fine.finiteValidSamples,
+        negativeValidSamples: fine.negativeValidSamples,
+        positiveValidSamples: fine.positiveValidSamples,
+        publicationValid: fine.publicationValid } : undefined,
+      raster: raster ? {
+        geometrySource: raster.surfaceGeometrySource,
+        frontInterfacePixels: raster.frontInterfacePixels,
+        backInterfacePixels: raster.backInterfacePixels,
+        pairedInterfacePixels: raster.pairedInterfacePixels,
+        backOnlyInterfacePixels: raster.backOnlyInterfacePixels,
+        narrowVerticalSlits: raster.narrowVerticalSlits,
+        enclosedSurfaceHoles: raster.enclosedSurfaceHoles,
+        reverseView: raster.reverseView ? {
+          frontInterfacePixels: raster.reverseView.frontInterfacePixels,
+          backInterfacePixels: raster.reverseView.backInterfacePixels,
+          pairedInterfacePixels: raster.reverseView.pairedInterfacePixels,
+          backOnlyInterfacePixels: raster.reverseView.backOnlyInterfacePixels,
+          narrowVerticalSlits: raster.reverseView.narrowVerticalSlits,
+          enclosedSurfaceHoles: raster.reverseView.enclosedSurfaceHoles,
+        } : undefined,
+        vertexCount: raster.vertexCount, activeCubeCount: raster.activeCubeCount,
+        authorityTransition: raster.globalFineAuthorityTransition,
+      } : undefined,
+      failures: Object.freeze(failures) });
+    console.log(JSON.stringify({ scenario: scenarioId, method: resultMethod,
+      phase: "losasso-cutover-oracle", ...losassoCutoverAuthority }));
+    if (failures.length > 0) {
+      throw new Error(`Losasso cutover oracle rejected: ${JSON.stringify(losassoCutoverAuthority)}`);
+    }
+    if (!tripwiresDisabled) {
+      console.log(JSON.stringify({ scenario: scenarioId, method: resultMethod,
+        phase: "tripwires", backend: "losasso", oracle: "losasso-cutover",
+        capturedSteps: steps, required: tripwiresForcedRequired,
+        tripped: 0, mode: "native-terminal-receipt" }));
+    }
+  }
   captureGenericPhaseTrace();
   // Ghost-fluid theta census. The failure dump already carries these words, but
   // a converging scene never takes that path, so the control case in any
@@ -2937,6 +3118,11 @@ async function runGPU(
   // would silently assign zero duration to every DAG node.
   let finalPerformanceAuthority: Readonly<Record<string, unknown>> | undefined;
   if (performanceProfileRequested && method.id === "octree") {
+    if (losassoCutoverLane) {
+      finalPerformanceAuthority = losassoCutoverAuthority;
+      console.log(JSON.stringify({ scenario: scenarioId, method: resultMethod,
+        phase: "final-performance-authority", ...finalPerformanceAuthority }));
+    } else {
     const authority = solver as GPUSolverInstance & {
       structuredVelocityControl?: GPUBuffer;
       structuredBoundaryControl?: GPUBuffer;
@@ -3003,6 +3189,7 @@ async function runGPU(
         throw new Error(`final performance authority rejected: ${JSON.stringify(finalAuthority)}`);
       }
     }
+    }
   }
   solver.info.completedTime_s = Math.max(solver.info.completedTime_s ?? 0, solver.info.submittedTime_s ?? 0);
   solver.info.simulatedTime_s = solver.info.submittedTime_s;
@@ -3065,11 +3252,11 @@ async function runGPU(
     }
   }
   const info = { ...await solver.readStats() };
-  // The compact paper path never dispatches the dense velocity reduction.
-  // Exact QA checkpoints already reconstruct the accepted structured rows on
-  // the fine lattice, so reuse that evidence rather than adding a production
-  // pass, fallback, or second readback solely for scalar telemetry.
-  if (method.id === "octree" && info.powerDiagramAuthoritative === true) {
+  // Neither compact octree backend dispatches the dense velocity reduction.
+  // Exact QA checkpoints already reconstruct the accepted compact rows on the
+  // fine lattice, so reuse that backend-neutral evidence rather than adding a
+  // production pass, fallback, or second readback solely for scalar telemetry.
+  if (method.id === "octree") {
     const compactVelocity = checkpoints.findLast(
       (checkpoint) => checkpoint.compactMechanicalEnergy !== undefined,
     )?.compactMechanicalEnergy;
@@ -3093,8 +3280,21 @@ async function runGPU(
       summary: summarizeScalarField(new Float32Array(info.nx * info.ny * info.nz), info.nx, info.ny, info.nz) }
     : await readCubicVolumeField(device, solver);
   const final = includeFinalFieldStats && steps !== oracleSteps ? await readCubicVolumeField(device, solver) : matched;
+  // Losasso deliberately has no Power fine-volume receipt. Generic smoke QA
+  // already holds an exact matched/final field, so when solver-native volume
+  // telemetry is absent publish the same represented-volume quantity from
+  // that evidence instead of leaving a backend-dependent hole in the result.
+  const representedVolumeEvidence = final?.summary ?? matched.summary;
+  const initialVolumeCellSum = info.initialVolumeCellSum ?? Number.NaN;
+  if (!Number.isFinite(info.representedVolumeDrift ?? NaN)
+    && Number.isFinite(initialVolumeCellSum)
+    && Number.isFinite(representedVolumeEvidence.cellSum)) {
+    const reference = Math.max(1, Math.abs(initialVolumeCellSum));
+    info.representedVolumeCellSum = representedVolumeEvidence.cellSum;
+    info.representedVolumeDrift = (representedVolumeEvidence.cellSum - initialVolumeCellSum) / reference;
+  }
   let terminalCompactVelocity: Awaited<ReturnType<typeof readCompactOctreeVelocityField3D>>;
-  if (method.id === "octree" && info.powerDiagramAuthoritative === true && final
+  if (method.id === "octree" && final
     && (!Number.isFinite(info.maxSpeed_m_s ?? NaN)
       || !Number.isFinite(info.maxComponentCfl ?? NaN))) {
     terminalCompactVelocity = await readCompactOctreeVelocityField3D(
@@ -3117,7 +3317,7 @@ async function runGPU(
     }
   }
   if (terminalSources.has("compact velocity") && method.id === "octree"
-    && info.powerDiagramAuthoritative === true && final && !terminalCompactVelocity) {
+    && final && !terminalCompactVelocity) {
     terminalCompactVelocity = await readCompactOctreeVelocityField3D(
       device, solver, [info.nx, info.ny, info.nz],
     );
@@ -3166,16 +3366,35 @@ async function runGPU(
     : { values: {}, available: [] };
   for (const capability of terminalCollected.available) collectedEvidence.add(capability);
   const hybridPresentationStats = sparseStatsRequested && method.id === "octree"
-    ? await smokeRenderHybridPresentation(instrumentedDevice, solver, scene, bodies)
+    ? losassoCutoverRaster
+      ?? await smokeRenderHybridPresentation(instrumentedDevice, solver, scene, bodies)
     : undefined;
   // Always captured for octree: the structured-validation gates require the
   // final generation diagnostics, and a gate that reads `undefined` reports
   // a wiring failure rather than evaluating the solver's actual state.
   const finalGlobalFineGeneration = method.id === "octree"
     ? await readGlobalFineGenerationDiagnostics(device, solver) : undefined;
+  // Prefer the accepted fine-volume receipt when the backend publishes one.
+  // The cubic QA reconstruction and initialVolumeCellSum intentionally use
+  // different representations at a cut interface; comparing those two makes
+  // the initial representation offset look like transport drift. Reference
+  // and current below come from the same native fine-volume generation.
+  if (finalGlobalFineGeneration?.volumeInitialized
+    && Number.isFinite(finalGlobalFineGeneration.volumeReference ?? NaN)
+    && Number.isFinite(finalGlobalFineGeneration.volumeCurrent ?? NaN)) {
+    const reference_m3 = finalGlobalFineGeneration.volumeReference!;
+    const current_m3 = finalGlobalFineGeneration.volumeCurrent!;
+    const baseCellVolume_m3 = scene.container.width_m * scene.container.height_m
+      * scene.container.depth_m / (info.nx * info.ny * info.nz);
+    info.referenceLiquidVolume_cells = reference_m3 / baseCellVolume_m3;
+    info.representedVolumeCellSum = current_m3 / baseCellVolume_m3;
+    info.representedVolumeDrift = (current_m3 - reference_m3)
+      / Math.max(1e-30, Math.abs(reference_m3));
+  }
   const finalGlobalFineRaster = rasterInitialFinalRequested && method.id === "octree"
-    ? await smokeRenderHybridPresentation(instrumentedDevice, solver, scene, bodies,
-      verifyGlobalFineGenerationTransition)
+    ? losassoCutoverRaster
+      ?? await smokeRenderHybridPresentation(instrumentedDevice, solver, scene, bodies,
+        verifyGlobalFineGenerationTransition)
     : undefined;
   if (process.env.FLUID_SYMMETRY_STAGE_AUDIT === "1" && method.id === "octree") {
     const levelSet = solver.surfaceFieldTexture

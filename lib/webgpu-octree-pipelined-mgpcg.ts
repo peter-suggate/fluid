@@ -19,6 +19,11 @@ import {
 } from "./gpu-logical-activity-adoption";
 import { performanceShaderVariant } from "./stores/performance-instrumentation-store";
 import { gpuCompilationManagerFor } from "./gpu-compilation-manager";
+import {
+  SIGNED_RADIX_256_F32_LIMBS,
+  createSignedRadix256F32ReductionWGSL,
+  planSignedRadix256F32Reduction,
+} from "./webgpu-exact-f32-reduction";
 
 export const OCTREE_PIPELINED_PCG_WORKGROUP_SIZE =
   FLUID_M1_MAX_REDUCTION_LANES;
@@ -40,11 +45,14 @@ export const OCTREE_PIPELINED_PCG_CONTROL_BYTES = 128;
  * contributes at most four byte digits to a scalar, so one i32 limb cannot
  * overflow anywhere inside WebGPU's maximum one-dimensional row dispatch.
  */
-export const OCTREE_PIPELINED_PCG_FIXED_POINT_LIMBS = 36;
+export const OCTREE_PIPELINED_PCG_FIXED_POINT_LIMBS =
+  SIGNED_RADIX_256_F32_LIMBS;
 export const OCTREE_PIPELINED_PCG_FIXED_POINT_SCALARS = 4;
 export const OCTREE_PIPELINED_PCG_PARTIAL_BYTES =
-  OCTREE_PIPELINED_PCG_FIXED_POINT_LIMBS
-  * OCTREE_PIPELINED_PCG_FIXED_POINT_SCALARS * 4;
+  planSignedRadix256F32Reduction(
+    OCTREE_PIPELINED_PCG_FIXED_POINT_SCALARS,
+    1,
+  ).bytesPerPartial;
 export const OCTREE_PIPELINED_PCG_INDIRECT_STRIDE_BYTES = 16;
 export const OCTREE_PIPELINED_PCG_DISPATCHES_PER_ITERATION = 4;
 export const OCTREE_PIPELINED_MGPCG_ACTIVITY_MODULE_ID = "octree/pipelined-mgpcg";
@@ -197,8 +205,10 @@ export function planOctreePipelinedMGPCG(
   if (hardIterationCeiling !== OCTREE_PIPELINED_PCG_HARD_ITERATION_CEILING) {
     throw new RangeError("Pipelined MGPCG hard iteration ceiling is fixed at 16");
   }
-  if (maximumIterations < 4 || maximumIterations > 10) {
-    throw new RangeError("Pipelined MGPCG encoded iterations must remain in [4,10]");
+  if (maximumIterations < 4 || maximumIterations > hardIterationCeiling) {
+    throw new RangeError(
+      `Pipelined MGPCG encoded iterations must remain in [4,${hardIterationCeiling}]`,
+    );
   }
   const reductionPartialCount = Math.ceil(
     rowCapacity / OCTREE_PIPELINED_PCG_WORKGROUP_SIZE,
@@ -327,8 +337,13 @@ extends OctreePipelinedLinearOperator {
 }
 
 export interface OctreePipelinedMGPCGSource {
-  /** Banked Section 6.3 diagonal + eighteen canonical coefficients. */
-  readonly coefficients: GPUBuffer;
+  /** Legacy banked Section 6.3 diagonal + eighteen canonical coefficients. */
+  readonly coefficients?: GPUBuffer;
+  /** Reduced operator diagonal. When present, the solver reads only this
+   * generic row-strided lane and carries no Section 6.3 coefficient image. */
+  readonly diagonal?: GPUBuffer;
+  readonly diagonalStrideWords?: number;
+  readonly diagonalBankStrideWords?: number;
   /** Current divergence/RHS authority, one f32 per compact row. */
   readonly rhs: GPUBuffer;
   readonly rowCount: GPUBuffer;
@@ -721,7 +736,14 @@ export class WebGPUOctreePipelinedMGPCG {
     if (this.relativeTolerance === 0 && this.absoluteTolerance === 0) {
       throw new RangeError("Pipelined MGPCG requires a non-zero stopping tolerance");
     }
-    if (source.coefficients.size < 2 * this.plan.rowCapacity * 19 * 4
+    const diagonalStrideWords = source.diagonalStrideWords ?? 19;
+    const diagonalBankStrideWords = source.diagonalBankStrideWords
+      ?? this.plan.rowCapacity * 19;
+    const diagonal = source.diagonal ?? source.coefficients;
+    if (!diagonal || !Number.isSafeInteger(diagonalStrideWords) || diagonalStrideWords < 1
+      || !Number.isSafeInteger(diagonalBankStrideWords) || diagonalBankStrideWords < 0
+      || diagonal.size < (diagonalBankStrideWords + this.plan.rowCapacity
+        * diagonalStrideWords) * 4
       || source.rhs.size < this.plan.rowCapacity * 4
       || source.rowCount.size < 4
       || source.operator.convergenceTail !== "gpu-zero-indirect"
@@ -780,6 +802,8 @@ export class WebGPUOctreePipelinedMGPCG {
     words[1] = this.plan.maximumIterations;
     words[2] = this.plan.rowDispatch[0];
     words[3] = this.plan.reductionPartialCount;
+    words[8] = diagonalStrideWords;
+    words[9] = diagonalBankStrideWords;
     floats[4] = this.relativeTolerance;
     floats[5] = this.absoluteTolerance;
     floats[6] = 1e-30;
@@ -1088,7 +1112,7 @@ export class WebGPUOctreePipelinedMGPCG {
     const vectors = this.source.vectors;
     return [
       this.params,
-      this.source.coefficients,
+      this.source.diagonal ?? this.source.coefficients,
       this.source.acceptedAuthority,
       this.source.rowCount,
       undefined,
@@ -1476,10 +1500,16 @@ struct MergedScalars {
 @group(0) @binding(11) var<storage, read_write> direction: array<f32>;
 @group(0) @binding(12) var<storage, read_write> directionImage: array<f32>;
 @group(0) @binding(13) var<storage, read_write> control: array<atomic<u32>>;
-// One exact signed radix-256 superaccumulator per reduction workgroup.  The
-// integer limbs make the result independent of workgroup scheduling, row
-// partitioning, and D4's row permutation; no floating-point fold crosses rows.
-@group(0) @binding(14) var<storage, read_write> partials: array<atomic<i32>>;
+${createSignedRadix256F32ReductionWGSL({
+  group: 0,
+  binding: 14,
+  scalarCount: OCTREE_PIPELINED_PCG_FIXED_POINT_SCALARS,
+  reductionLanes: OCTREE_PIPELINED_PCG_WORKGROUP_SIZE,
+  livePartialCountExpression: "livePartialCount()",
+  // The executor's independent 64-lane row-dispatch ceiling is the tighter
+  // bound on the number of values ever deposited into a scalar.
+  maximumTermCount: 64 * 65_535,
+})}
 @group(0) @binding(15) var<storage, read_write> outerDispatch: array<u32>;
 @group(0) @binding(16) var<storage, read> rhs: array<f32>;
 
@@ -1493,10 +1523,6 @@ const INVALID = 0xffffffffu;
 const DISPATCHES_PER_ITERATION = 4u;
 const DISPATCH_STRIDE_WORDS = 4u;
 const REDUCTION_LANES = ${OCTREE_PIPELINED_PCG_WORKGROUP_SIZE}u;
-const FIXED_LIMBS = ${OCTREE_PIPELINED_PCG_FIXED_POINT_LIMBS}u;
-const FIXED_SCALARS = ${OCTREE_PIPELINED_PCG_FIXED_POINT_SCALARS}u;
-const FIXED_WORDS_PER_PARTIAL = FIXED_LIMBS * FIXED_SCALARS;
-const FIXED_MIN_EXPONENT = -152;
 
 fn finite(value: f32) -> bool {
   return value == value && abs(value) <= 3.402823e38;
@@ -1513,7 +1539,8 @@ fn rows() -> u32 {
 }
 fn acceptedBank() -> u32 { return acceptedAuthority[5]; }
 fn diagonalAt(row: u32) -> f32 {
-  return section63Coefficients[(acceptedBank() * capacity() + row) * 19u];
+  return section63Coefficients[acceptedBank() * params.padding0.y
+    + row * params.padding0.x];
 }
 fn failed() -> bool { return atomicLoad(&control[0]) != 0u; }
 fn stopped() -> bool { return failed() || atomicLoad(&control[1]) != 0u; }
@@ -1578,91 +1605,6 @@ fn mergeScalars(a: MergedScalars, b: MergedScalars) -> MergedScalars {
     mergeCompensatedF32(a.rr, b.rr),
     mergeCompensatedF32(a.bb, b.bb),
   );
-}
-
-fn fixedAt(partial: u32, scalar: u32, limb: u32) -> u32 {
-  return partial * FIXED_WORDS_PER_PARTIAL + scalar * FIXED_LIMBS + limb;
-}
-
-fn clearFixedPartial(partial: u32, lane: u32) {
-  for (var word = lane; word < FIXED_WORDS_PER_PARTIAL; word += REDUCTION_LANES) {
-    atomicStore(&partials[partial * FIXED_WORDS_PER_PARTIAL + word], 0);
-  }
-  workgroupBarrier();
-}
-
-// Deposit the exact finite f32 bit pattern into four signed radix-256 limbs.
-// Normal values have value=M*2^(rawExponent-150); subnormals have M*2^-149.
-// FIXED_MIN_EXPONENT leaves a non-negative shift for both forms.  Splitting M
-// after that shift into byte digits keeps every atomic add far below i32 range:
-// 255 * (64*65535 rows) < 2^31.
-fn addFixedF32(partial: u32, scalar: u32, value: f32) {
-  let bits = bitcast<u32>(value);
-  let magnitude = bits & 0x7fffffffu;
-  if (magnitude == 0u) { return; }
-  let rawExponent = (magnitude >> 23u) & 0xffu;
-  let fraction = magnitude & 0x7fffffu;
-  let significand = select(fraction, 0x800000u | fraction, rawExponent != 0u);
-  let shift = select(3u, rawExponent + 2u, rawExponent != 0u);
-  let firstLimb = shift >> 3u;
-  let shifted = significand << (shift & 7u);
-  let sign = select(1, -1, (bits & 0x80000000u) != 0u);
-  for (var digit = 0u; digit < 4u; digit += 1u) {
-    let limb = firstLimb + digit;
-    let byte = i32((shifted >> (digit * 8u)) & 0xffu);
-    if (byte != 0 && limb < FIXED_LIMBS) {
-      atomicAdd(&partials[fixedAt(partial, scalar, limb)], sign * byte);
-    }
-  }
-}
-
-fn floorDiv256(value: i32) -> vec2i {
-  var carry = value / 256;
-  var digit = value - carry * 256;
-  if (digit < 0) { digit += 256; carry -= 1; }
-  return vec2i(carry, digit);
-}
-
-// The singleton finish performs integer-only merging.  Its order is
-// deliberately irrelevant: integer addition is exact, associative and
-// commutative.  Only after canonical carry propagation do we round once back
-// onto the f32 recurrence surface.
-fn fixedScalarValue(scalar: u32) -> f32 {
-  var limbs: array<i32, ${OCTREE_PIPELINED_PCG_FIXED_POINT_LIMBS}>;
-  for (var partial = 0u; partial < livePartialCount(); partial += 1u) {
-    for (var limb = 0u; limb < FIXED_LIMBS; limb += 1u) {
-      limbs[limb] += atomicLoad(&partials[fixedAt(partial, scalar, limb)]);
-    }
-  }
-  for (var limb = 0u; limb + 1u < FIXED_LIMBS; limb += 1u) {
-    let normalized = floorDiv256(limbs[limb]);
-    limbs[limb] = normalized.y;
-    limbs[limb + 1u] += normalized.x;
-  }
-
-  // A signed canonical radix expansion keeps the sign in its top limb.  Do
-  // not Horner-fold that expansion before applying FIXED_MIN_EXPONENT: the
-  // unscaled integer can exceed f32 even when the represented physical value
-  // is ordinary.  Convert negatives to a positive magnitude first, then add
-  // already-scaled non-negative limbs.  Every intermediate is bounded by the
-  // final magnitude, while the integer merge above remains exact and
-  // partition-independent.
-  let negative = limbs[FIXED_LIMBS - 1u] < 0;
-  if (negative) {
-    for (var limb = 0u; limb < FIXED_LIMBS; limb += 1u) {
-      limbs[limb] = -limbs[limb];
-    }
-    for (var limb = 0u; limb + 1u < FIXED_LIMBS; limb += 1u) {
-      let normalized = floorDiv256(limbs[limb]);
-      limbs[limb] = normalized.y;
-      limbs[limb + 1u] += normalized.x;
-    }
-  }
-  var magnitude = 0.0;
-  for (var limb = 0u; limb < FIXED_LIMBS; limb += 1u) {
-    magnitude += ldexp(f32(limbs[limb]), FIXED_MIN_EXPONENT + i32(limb * 8u));
-  }
-  return select(magnitude, -magnitude, negative);
 }
 
 fn fixedMergedValue() -> MergedScalars {

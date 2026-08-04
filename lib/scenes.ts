@@ -45,7 +45,10 @@ export const POWER_VALIDATION_METHOD_PROFILE: MethodProfile = Object.freeze({
   methodId: "octree",
   quality: "balanced",
   overrides: Object.freeze({
-    maximumLeafSize: "32",
+    // Historical profile name retained for callers. Product scenes start on
+    // Losasso; the smoke catalog opts into the frozen Power backend explicitly.
+    coarseBackend: "losasso",
+    maximumLeafSize: "16",
     interfaceRefinementBandCells: 3,
     globalFineLevelSetFactor: "4",
   }),
@@ -58,7 +61,9 @@ export const SYMMETRIC_EXPANSION_METHOD_PROFILE: MethodProfile = Object.freeze({
   methodId: "octree",
   quality: "balanced",
   overrides: Object.freeze({
-    maximumLeafSize: "32",
+    coarseBackend: "losasso",
+    // The visible D4 gate is 32x16x32, so 16 is its largest common dyadic leaf.
+    maximumLeafSize: "16",
     interfaceRefinementBandCells: 4,
     globalFineLevelSetFactor: "4",
   }),
@@ -73,6 +78,7 @@ export const COARSE_ONLY_POWER_DAM_METHOD_PROFILE: MethodProfile = Object.freeze
   methodId: "octree",
   quality: "balanced",
   overrides: Object.freeze({
+    coarseBackend: "losasso",
     maximumLeafSize: "32",
     interfaceRefinementBandCells: 3,
     surfaceRefinementGradingLayers: 3,
@@ -93,7 +99,8 @@ export const LARGE_POWER_DAM_METHOD_PROFILE: MethodProfile = Object.freeze({
   ...POWER_VALIDATION_METHOD_PROFILE,
   overrides: Object.freeze({
     ...POWER_VALIDATION_METHOD_PROFILE.overrides,
-    maximumLeafSize: "32",
+    // 64x20x64: four is the largest dyadic leaf dividing every axis.
+    maximumLeafSize: "4",
     interfaceRefinementBandCells: 1,
     // The authored 1,472-cell reservoir publishes 1,185 rows at t=0. An
     // 8,192-row footprint pool leaves >6.9x growth headroom while the existing
@@ -113,7 +120,8 @@ export const LARGE_POWER_HYDROSTATIC_METHOD_PROFILE: MethodProfile = Object.free
   ...POWER_VALIDATION_METHOD_PROFILE,
   overrides: Object.freeze({
     ...POWER_VALIDATION_METHOD_PROFILE.overrides,
-    maximumLeafSize: "32",
+    // This scene shares the 64x20x64 container with the large dam.
+    maximumLeafSize: "4",
     interfaceRefinementBandCells: 1,
     pressureRowCapacity: LARGE_POWER_HYDROSTATIC_PRESSURE_ROW_CAPACITY,
   }),
@@ -163,13 +171,14 @@ export const DEEP_POWER_HYDROSTATIC_PRESSURE_ROW_CAPACITY = 65_536;
  */
 export const DEEP_POWER_HYDROSTATIC_FINE_BRICK_CAPACITY = 67_584;
 
-/** The deep still-water lane keeps every solver knob of the 20x still lane —
- * maximum leaf 32, interface band 1, global fine factor 4 — so a measurement
- * against `large-power-hydrostatic` differs only in scene geometry. */
+/** The deep still-water lane keeps the 20x still lane's interface and fine
+ * surface settings. Its 64x48x64 domain can use a larger compatible leaf than
+ * the shallow 64x20x64 tank. */
 export const DEEP_POWER_HYDROSTATIC_METHOD_PROFILE: MethodProfile = Object.freeze({
   ...LARGE_POWER_HYDROSTATIC_METHOD_PROFILE,
   overrides: Object.freeze({
     ...LARGE_POWER_HYDROSTATIC_METHOD_PROFILE.overrides,
+    maximumLeafSize: "16",
     pressureRowCapacity: DEEP_POWER_HYDROSTATIC_PRESSURE_ROW_CAPACITY,
     globalFineLevelSetMaximumBricks: DEEP_POWER_HYDROSTATIC_FINE_BRICK_CAPACITY,
   }),
@@ -268,7 +277,7 @@ export const POWER_DROPLET_PRESSURE_ROW_CAPACITY = 4_096;
  */
 export const POWER_DROPLET_FINE_BRICK_CAPACITY = 4_096;
 
-/** Every discretization knob of the 20x still lane — leaf 32, interface band 1,
+/** Every surface discretization knob of the 20x still lane — interface band 1,
  * fine factor 4 — so the droplet sweep's intercept is comparable to the
  * hydrostatic family's wall. Only the two footprint reserves are re-authored,
  * and both are constants of the family rather than functions of N. */
@@ -276,6 +285,8 @@ export const POWER_DROPLET_METHOD_PROFILE: MethodProfile = Object.freeze({
   ...LARGE_POWER_HYDROSTATIC_METHOD_PROFILE,
   overrides: Object.freeze({
     ...LARGE_POWER_HYDROSTATIC_METHOD_PROFILE.overrides,
+    // All swept cube edges (64, 128, 240, 256) are divisible by 16.
+    maximumLeafSize: "16",
     pressureRowCapacity: POWER_DROPLET_PRESSURE_ROW_CAPACITY,
     globalFineLevelSetMaximumBricks: POWER_DROPLET_FINE_BRICK_CAPACITY,
   }),
@@ -398,7 +409,7 @@ export const POWER_FILL_PRESSURE_ROW_CAPACITY = 65_536;
  */
 export const POWER_FILL_FINE_BRICK_CAPACITY = 65_536;
 
-/** Every discretization knob of the droplet family — leaf 32, interface band 1,
+/** Every surface discretization knob of the droplet family — interface band 1,
  * fine factor 4, 0.05 m cells, 0.004 s steps — so a per-label capture on a fill
  * lane is directly comparable to a droplet one. Only the two reserves differ,
  * and both are constants of the family rather than functions of the member. */
@@ -406,6 +417,8 @@ export const POWER_FILL_METHOD_PROFILE: MethodProfile = Object.freeze({
   ...LARGE_POWER_HYDROSTATIC_METHOD_PROFILE,
   overrides: Object.freeze({
     ...LARGE_POWER_HYDROSTATIC_METHOD_PROFILE.overrides,
+    // The fill family is a fixed 256-cubed domain.
+    maximumLeafSize: "32",
     pressureRowCapacity: POWER_FILL_PRESSURE_ROW_CAPACITY,
     globalFineLevelSetMaximumBricks: POWER_FILL_FINE_BRICK_CAPACITY,
   }),
@@ -481,18 +494,34 @@ export const POWER_HYBRID_DEEP_OCEAN_METHOD_PROFILE: MethodProfile = Object.free
   methodId: "octree",
   quality: "balanced",
   overrides: Object.freeze({
-    maximumLeafSize: "32",
+    coarseBackend: "losasso",
+    // 64x64x48: sixteen is the largest common dyadic leaf.
+    maximumLeafSize: "16",
     interfaceRefinementBandCells: 1,
     globalFineLevelSetFactor: "1",
   }),
 });
 
-/** The ceiling-drop UI oracle uses the narrow fast-formulation interface
- * reach without changing the shared power-validation profile. */
+/** Product profile for the 320x96x80 rolling-wave scene. The old leaf-32 UI
+ * suggestion could not divide the 80-cell depth; leaf 16 is the largest
+ * Losasso hierarchy root common to all axes. */
+export const OCEAN_SEICHE_METHOD_PROFILE: MethodProfile = Object.freeze({
+  methodId: "octree",
+  quality: "balanced",
+  overrides: Object.freeze({
+    coarseBackend: "losasso",
+    maximumLeafSize: "16",
+  }),
+});
+
+/** The ceiling-drop UI oracle uses the narrow interface reach and the common
+ * leaf-8 Losasso hierarchy shared by all four free-fall scenes. */
 export const CEILING_DROP_METHOD_PROFILE: MethodProfile = Object.freeze({
   ...POWER_VALIDATION_METHOD_PROFILE,
   overrides: Object.freeze({
     ...POWER_VALIDATION_METHOD_PROFILE.overrides,
+    // Both 24x16x24 and 24-cubed free-fall variants admit leaf 8.
+    maximumLeafSize: "8",
     interfaceRefinementBandCells: 1,
   }),
 });
@@ -504,6 +533,8 @@ export const LARGE_HYDROSTATIC_POWER_METHOD_PROFILE: MethodProfile = Object.free
   ...POWER_VALIDATION_METHOD_PROFILE,
   overrides: Object.freeze({
     ...POWER_VALIDATION_METHOD_PROFILE.overrides,
+    // 32x24x16: eight is the largest common dyadic leaf.
+    maximumLeafSize: "8",
     interfaceRefinementBandCells: 4,
   }),
 });
@@ -1240,10 +1271,11 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
   defineScene({
     id: "ocean-seiche",
     name: "Ocean · rolling wave",
-    blurb: "A broad 8 m tank of deep calm water; a raised slab along one wall releases a long wave that ripples across and reflects. With the octree method, set Maximum leaf to 32³ to watch the deep interior coarsen into 16³/32³ pressure cells.",
+    blurb: "A broad 8 m tank of deep calm water; a raised slab along one wall releases a long wave that ripples across and reflects. Losasso starts with the compatible leaf-16 hierarchy so the deep interior coarsens without a non-divisible root.",
     audience: "explore",
     shelf: "Open water",
     environment: "research-station",
+    methodProfile: OCEAN_SEICHE_METHOD_PROFILE,
     build: createOceanSeicheScene,
     camera: { azimuth_rad: 0.35, elevation_rad: 0.32, distance_m: 9.0, target_m: { x: 0, y: 1.1, z: 0 } },
     variants: {
@@ -1436,7 +1468,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
   defineScene({
     id: "hydrostatic-power-two-level",
     name: "Octree · tiny hydrostatic",
-    blurb: "A 16³ settled tank for the first power-diagram oracle. Maximum leaf 32³ matches every other authored scene while interface band 3 keeps the surface support explicit.",
+    blurb: "A 16³ settled tank for the first coarse-pressure oracle. Leaf 16 is the largest hierarchy root that divides the authored domain, while interface band 3 keeps the surface support explicit.",
     audience: "validation",
     shelf: "Hydrostatic oracles",
     environment: "default",
@@ -1447,7 +1479,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
   defineScene({
     id: "hydrostatic-power-large-offset",
     name: "Octree · larger hydrostatic",
-    blurb: "A 32x24x16 settled tank with a cell-cut free surface. Maximum leaf 32³ matches every other authored scene while exercising a larger adaptive pressure layout than the tiny oracle.",
+    blurb: "A 32x24x16 settled tank with a cell-cut free surface. Leaf 8 is the largest hierarchy root shared by all three axes, while exercising a larger adaptive pressure layout than the tiny oracle.",
     audience: "validation",
     shelf: "Hydrostatic oracles",
     environment: "default",
@@ -1561,7 +1593,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
   defineScene({
     id: "large-power-dam-break",
     name: "Octree · 20× dam break",
-    blurb: "The mini dam break's exact water block in a tank with 20× the volume: 4× longer, 4× wider, and 25% taller, using maximum leaf 32³ and a band-1 interface.",
+    blurb: "The mini dam break's exact water block in a tank with 20× the volume: 4× longer, 4× wider, and 25% taller, using the compatible leaf-4 hierarchy and a band-1 interface.",
     audience: "validation",
     shelf: "Dam-break ladder",
     environment: "default",
@@ -1598,7 +1630,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     audience: "validation",
     shelf: "Free-fall contact",
     environment: "default",
-    methodProfile: POWER_VALIDATION_METHOD_PROFILE,
+    methodProfile: CEILING_DROP_METHOD_PROFILE,
     build: createCornerBrickDropScene,
     camera: { distance_m: 2.4, target_m: { x: 0, y: 0.4, z: 0 } },
   }),
@@ -1609,7 +1641,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     audience: "validation",
     shelf: "Free-fall contact",
     environment: "default",
-    methodProfile: POWER_VALIDATION_METHOD_PROFILE,
+    methodProfile: CEILING_DROP_METHOD_PROFILE,
     build: createMidairBrickDropScene,
     camera: { distance_m: 3, target_m: { x: 0, y: 0.6, z: 0 } },
   }),
@@ -1620,7 +1652,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     audience: "validation",
     shelf: "Free-fall contact",
     environment: "default",
-    methodProfile: POWER_VALIDATION_METHOD_PROFILE,
+    methodProfile: CEILING_DROP_METHOD_PROFILE,
     build: createMidairCornerDropScene,
     camera: { distance_m: 3, target_m: { x: 0, y: 0.6, z: 0 } },
   }),
