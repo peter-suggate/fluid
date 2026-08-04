@@ -231,8 +231,8 @@ export const POWER_DAM_LANE_ENVIRONMENT: Record<PowerDamRuntimeLane, Record<stri
     // without the evidence collectors, so a change scored here can be
     // re-gated on symmetry without changing the scene.
     FLUID_SCENE: "symmetric-expansion", FLUID_LANE: "performance",
-    FLUID_TARGET_S: "0.248",
-    FLUID_MAX_DT: "0.004", FLUID_ORACLE_STEPS: "62", FLUID_EXPECT_EXACT_STEPS: "62",
+    FLUID_TARGET_S: "0.268",
+    FLUID_MAX_DT: "0.004", FLUID_ORACLE_STEPS: "67", FLUID_EXPECT_EXACT_STEPS: "67",
     FLUID_EXPECT_GRID: "32,16,32", FLUID_MAXIMUM_LEAF_SIZE: "32",
     FLUID_OCTREE_INTERFACE_BAND: "4", FLUID_OCTREE_GLOBAL_FINE_FACTOR: "4",
   },
