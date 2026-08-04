@@ -573,7 +573,10 @@ export class WebGPUFineLevelSetLeafSeeds {
     analytic?: { initialCondition: "dam-break" | "tank-fill"; fillFraction: number;
       damBreakDimensions?: readonly [number, number, number] }
       | { initialCondition: "box"; minimum: readonly [number, number, number];
-        maximum: readonly [number, number, number] },
+        maximum: readonly [number, number, number] }
+      | { initialCondition: "boxes"; boxes: readonly {
+        minimum: readonly [number, number, number]; maximum: readonly [number, number, number];
+      }[] },
     sourceCapacity?: FineLevelSetLeafSeedSourceCapacity,
     _deferPipelineCompilation = true) {
     this.pipelinesDeferred = true;
@@ -592,16 +595,19 @@ export class WebGPUFineLevelSetLeafSeeds {
       throw new RangeError(`Fine seed deterministic sort scratch requires ${scratchBytes} bytes, `
         + `exceeding the device storage-buffer binding limit ${maximumBindingBytes}`);
     }
+    const analyticTailWords = analytic?.initialCondition === "boxes"
+      ? Math.max(6, 1 + 6 * analytic.boxes.length) : 6;
     this.allocatedBytes = fineLevelSetLeafSeedAllocatedBytes(
       target.plan.maximumResidentBricks, rawRecordCapacity,
-    );
+    ) + (analyticTailWords - 6) * 4;
     this.buffer = device.createBuffer({ label: "global fine brick seed keys",
-      size: (10 + 10 * target.plan.maximumResidentBricks) * 4,
+      size: (4 + 10 * target.plan.maximumResidentBricks + analyticTailWords) * 4,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
     const descriptor = new ArrayBuffer(8); const descriptorWords = new Uint32Array(descriptor);
     descriptorWords[0] = analytic?.initialCondition === "tank-fill" ? 1
       : analytic?.initialCondition === "dam-break" ? 2
-        : analytic?.initialCondition === "box" ? 3 : 0;
+        : analytic?.initialCondition === "box" ? 3
+          : analytic?.initialCondition === "boxes" ? 4 : 0;
     new Float32Array(descriptor)[1] = analytic && "fillFraction" in analytic ? analytic.fillFraction : 0;
     device.queue.writeBuffer(this.buffer, 8, descriptor);
     const authoredDam = analytic && "damBreakDimensions" in analytic
@@ -617,18 +623,45 @@ export class WebGPUFineLevelSetLeafSeeds {
         || value <= analytic.minimum[axis]!))) {
       throw new RangeError("Global fine analytic box bounds must lie inside the domain");
     }
+    if (analytic?.initialCondition === "boxes" && (analytic.boxes.length === 0
+      || analytic.boxes.some((box) => box.minimum.some((value, axis) =>
+        !Number.isFinite(value) || value < target.plan.domainOrigin[axis]!
+          - 1e-6 * extent[axis]!)
+        || box.maximum.some((value, axis) => !Number.isFinite(value)
+          || value > target.plan.domainOrigin[axis]! + extent[axis]!
+            + 1e-6 * extent[axis]!
+          || value <= box.minimum[axis]!)))) {
+      throw new RangeError("Global fine analytic component boxes must lie inside the domain");
+    }
     // Store exact boxes in fine-lattice coordinates. Integer-aligned authored
     // faces then remain bit-identical under reflection; evaluating q*h in
     // world space first gives opposite sides different f32 rounding histories.
+    const latticeBounds = (box: { minimum: readonly [number, number, number];
+      maximum: readonly [number, number, number] }) => [
+      ...box.minimum.map((value, axis) => Math.round(
+        (value - target.plan.domainOrigin[axis]!) / target.plan.fineCellWidth)),
+      ...box.maximum.map((value, axis) => Math.round(
+        (value - target.plan.domainOrigin[axis]!) / target.plan.fineCellWidth)),
+    ];
     const tail = analytic?.initialCondition === "box"
       ? [...analytic.minimum.map((value, axis) =>
         (value - target.plan.domainOrigin[axis]!) / target.plan.fineCellWidth),
       ...analytic.maximum.map((value, axis) =>
         (value - target.plan.domainOrigin[axis]!) / target.plan.fineCellWidth)]
+      : analytic?.initialCondition === "boxes"
+        ? analytic.boxes.flatMap(latticeBounds)
       : [...authoredDam, 0, 0, 0];
+    const tailBytes = new ArrayBuffer(analyticTailWords * 4);
+    const tailFloats = new Float32Array(tailBytes);
+    if (analytic?.initialCondition === "boxes") {
+      new Uint32Array(tailBytes)[0] = analytic.boxes.length;
+      tailFloats.set(tail, 1);
+    } else {
+      tailFloats.set(tail);
+    }
     device.queue.writeBuffer(this.buffer,
       (4 + 10 * target.plan.maximumResidentBricks) * 4,
-      new Float32Array(tail));
+      tailBytes);
     this.params = device.createBuffer({ label: "global fine seed parameters", size: 64,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.scratch = device.createBuffer({ label: "global fine deterministic seed transaction",
@@ -1850,7 +1883,8 @@ fn externalSeedTaggedValue(key:u32)->u32{if(arrayLength(&externalSeeds)<4u){retu
 fn currentFinePublished()->bool{return arrayLength(&currentWorklist)>=7u&&currentWorklist[0]==params.currentGeneration
  &&currentWorklist[2]==params.pageCapacity&&(currentWorklist[3]&3u)==3u&&currentWorklist[5]==1u&&currentWorklist[6]==1u;}
 fn currentFinePopulated()->bool{return currentFinePublished()&&currentWorklist[1]>0u;}
-fn exactAnalyticSeedPhi(finestPoint:vec3f)->f32{if(arrayLength(&externalSeeds)<4u){return 3.402823e38;}let mode=externalSeeds[2u];let fill=bitcast<f32>(externalSeeds[3u]);if(mode==0u){return 3.402823e38;}let extent=vec3f(params.sampleDimensions)*params.fineCellWidth;let point=params.domainOrigin+finestPoint*(params.fineCellWidth*f32(params.fineFactor));let tail=4u+10u*params.pageCapacity;if(mode==3u){if(arrayLength(&externalSeeds)<tail+6u){return 3.402823e38;}let minimum=vec3f(bitcast<f32>(externalSeeds[tail]),bitcast<f32>(externalSeeds[tail+1u]),bitcast<f32>(externalSeeds[tail+2u]));let maximum=vec3f(bitcast<f32>(externalSeeds[tail+3u]),bitcast<f32>(externalSeeds[tail+4u]),bitcast<f32>(externalSeeds[tail+5u]));let centre=.5*(minimum+maximum);let half=.5*(maximum-minimum);let q=abs(finestPoint*f32(params.fineFactor)-centre)-half;return (length(max(q,vec3f(0.0)))+min(max(q.x,max(q.y,q.z)),0.0))*params.fineCellWidth;}if(!finite(fill)||fill<0.0||fill>1.0){return 3.402823e38;}if(mode==1u){return point.y-fill*extent.y;}let heightFraction=max(0.92,fill);let footprintFraction=sqrt(fill/max(heightFraction,1e-9));let fallback=vec3f(footprintFraction*extent.x,heightFraction*extent.y,footprintFraction*extent.z);var authored=vec3f(0.0);if(arrayLength(&externalSeeds)>=tail+3u){authored=vec3f(bitcast<f32>(externalSeeds[tail]),bitcast<f32>(externalSeeds[tail+1u]),bitcast<f32>(externalSeeds[tail+2u]));}let damDimensions=select(fallback,authored,any(authored>vec3f(0.0)));let exposedMaximum=params.domainOrigin+damDimensions;let q=point-exposedMaximum;return length(max(q,vec3f(0.0)))+min(max(q.x,max(q.y,q.z)),0.0);}
+fn boxSeedPhi(point:vec3f,minimum:vec3f,maximum:vec3f)->f32{let centre=.5*(minimum+maximum);let half=.5*(maximum-minimum);let q=abs(point-centre)-half;return length(max(q,vec3f(0.0)))+min(max(q.x,max(q.y,q.z)),0.0);}
+fn exactAnalyticSeedPhi(finestPoint:vec3f)->f32{if(arrayLength(&externalSeeds)<4u){return 3.402823e38;}let mode=externalSeeds[2u];let fill=bitcast<f32>(externalSeeds[3u]);if(mode==0u){return 3.402823e38;}let extent=vec3f(params.sampleDimensions)*params.fineCellWidth;let point=params.domainOrigin+finestPoint*(params.fineCellWidth*f32(params.fineFactor));let tail=4u+10u*params.pageCapacity;let finePoint=finestPoint*f32(params.fineFactor);if(mode==3u){if(arrayLength(&externalSeeds)<tail+6u){return 3.402823e38;}let minimum=vec3f(bitcast<f32>(externalSeeds[tail]),bitcast<f32>(externalSeeds[tail+1u]),bitcast<f32>(externalSeeds[tail+2u]));let maximum=vec3f(bitcast<f32>(externalSeeds[tail+3u]),bitcast<f32>(externalSeeds[tail+4u]),bitcast<f32>(externalSeeds[tail+5u]));return boxSeedPhi(finePoint,minimum,maximum)*params.fineCellWidth;}if(mode==4u){if(arrayLength(&externalSeeds)<=tail){return 3.402823e38;}let count=externalSeeds[tail];if(count==0u||count>params.pageCapacity||arrayLength(&externalSeeds)<tail+1u+6u*count){return 3.402823e38;}var result=3.402823e38;for(var box=0u;box<count;box+=1u){let base=tail+1u+6u*box;let minimum=vec3f(bitcast<f32>(externalSeeds[base]),bitcast<f32>(externalSeeds[base+1u]),bitcast<f32>(externalSeeds[base+2u]));let maximum=vec3f(bitcast<f32>(externalSeeds[base+3u]),bitcast<f32>(externalSeeds[base+4u]),bitcast<f32>(externalSeeds[base+5u]));result=min(result,boxSeedPhi(finePoint,minimum,maximum));}return result*params.fineCellWidth;}if(!finite(fill)||fill<0.0||fill>1.0){return 3.402823e38;}if(mode==1u){return point.y-fill*extent.y;}let heightFraction=max(0.92,fill);let footprintFraction=sqrt(fill/max(heightFraction,1e-9));let fallback=vec3f(footprintFraction*extent.x,heightFraction*extent.y,footprintFraction*extent.z);var authored=vec3f(0.0);if(arrayLength(&externalSeeds)>=tail+3u){authored=vec3f(bitcast<f32>(externalSeeds[tail]),bitcast<f32>(externalSeeds[tail+1u]),bitcast<f32>(externalSeeds[tail+2u]));}let damDimensions=select(fallback,authored,any(authored>vec3f(0.0)));let exposedMaximum=params.domainOrigin+damDimensions;let q=point-exposedMaximum;return length(max(q,vec3f(0.0)))+min(max(q.x,max(q.y,q.z)),0.0);}
 fn externalSeedPhi(key:u32,finestPoint:vec3f)->f32{if(params.affineSeeds==0u||currentFinePopulated()){return 3.402823e38;}let analytic=exactAnalyticSeedPhi(finestPoint);if(finite(analytic)){return analytic;}if(params.fineFactor==1u){return 3.402823e38;}let tagged=externalSeedTaggedValue(key);if(tagged==INVALID){return 3.402823e38;}let seed=tagged&0x7fffffffu;if(seed>=params.pageCapacity){return 3.402823e38;}let planeBase=4u+2u*params.pageCapacity;let base=planeBase+seed*8u;let leafOrigin=vec3f(vec3u(externalSeeds[base],externalSeeds[base+1u],externalSeeds[base+2u]));let size=f32(externalSeeds[base+3u]);let centre=leafOrigin+vec3f(0.5*size);let value=bitcast<f32>(externalSeeds[base+4u]);let gradient=vec3f(bitcast<f32>(externalSeeds[base+5u]),bitcast<f32>(externalSeeds[base+6u]),bitcast<f32>(externalSeeds[base+7u]));return value+dot(gradient,finestPoint-centre);}
 fn externalSeedClassificationPhi(key:u32,finestPoint:vec3f)->f32{let seeded=externalSeedPhi(key,finestPoint);if(finite(seeded)||params.fineFactor!=1u){return seeded;}let position=params.domainOrigin+finestPoint*(params.fineCellWidth*f32(params.fineFactor));return sampleCoarseOctreePhi(position);}
 // The initial A/B source is a deliberately published empty generation. It is

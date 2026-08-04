@@ -97,32 +97,33 @@ export interface InitialFluidBrickUnionBounds {
   readonly maximum: Vec3;
 }
 
-/** Returns exact world-space bounds when the authored brick seeds form one
- * completely filled axis-aligned box. Disconnected or L-shaped unions return
- * undefined rather than being silently replaced by their bounding box. */
-export function initialFluidBrickUnionBounds(
+function initialFluidBrickCoordinates(
   scene: SceneDescription,
   dimensions: readonly [number, number, number],
-  brickSize = INITIAL_FLUID_BRICK_SIZE,
-): InitialFluidBrickUnionBounds | undefined {
+  brickSize: number,
+): readonly [number, number, number][] | undefined {
   const seeds = scene.fluid.initialBrickSeeds_m;
   if (!seeds?.length || scene.fluid.initialBrickSeedsAdditive) return undefined;
-  const cells = seeds.map((seed) => seedCell(scene, seed, dimensions));
-  const bricks = new Set(cells.map((cell) => [Math.floor(cell.x / brickSize),
-    Math.floor(cell.y / brickSize), Math.floor(cell.z / brickSize)].join(",")));
-  const coordinates = [...bricks].map((key) => key.split(",").map(Number) as [number, number, number]);
+  const unique = new Map<string, [number, number, number]>();
+  for (const seed of seeds) {
+    const cell = seedCell(scene, seed, dimensions);
+    const brick: [number, number, number] = [Math.floor(cell.x / brickSize),
+      Math.floor(cell.y / brickSize), Math.floor(cell.z / brickSize)];
+    unique.set(brick.join(","), brick);
+  }
+  return [...unique.values()];
+}
+
+function brickBounds(
+  scene: SceneDescription,
+  dimensions: readonly [number, number, number],
+  brickSize: number,
+  coordinates: readonly [number, number, number][],
+): InitialFluidBrickUnionBounds {
   const minimumBrick = [0, 1, 2].map((axis) =>
     Math.min(...coordinates.map((q) => q[axis]!))) as [number, number, number];
   const maximumBrick = [0, 1, 2].map((axis) =>
     Math.max(...coordinates.map((q) => q[axis]!))) as [number, number, number];
-  const expected = (maximumBrick[0] - minimumBrick[0] + 1)
-    * (maximumBrick[1] - minimumBrick[1] + 1)
-    * (maximumBrick[2] - minimumBrick[2] + 1);
-  if (bricks.size !== expected) return undefined;
-  for (let bz = minimumBrick[2]; bz <= maximumBrick[2]; bz += 1)
-    for (let by = minimumBrick[1]; by <= maximumBrick[1]; by += 1)
-      for (let bx = minimumBrick[0]; bx <= maximumBrick[0]; bx += 1)
-        if (!bricks.has(`${bx},${by},${bz}`)) return undefined;
   const c = scene.container;
   const h = [c.width_m / dimensions[0], c.height_m / dimensions[1], c.depth_m / dimensions[2]] as const;
   const origin = [minimumBrick[0] * brickSize, minimumBrick[1] * brickSize,
@@ -136,6 +137,69 @@ export function initialFluidBrickUnionBounds(
     maximum: { x: -0.5 * c.width_m + end[0] * h[0], y: end[1] * h[1],
       z: -0.5 * c.depth_m + end[2] * h[2] },
   };
+}
+
+function filledBrickBox(coordinates: readonly [number, number, number][]): boolean {
+  const keys = new Set(coordinates.map((brick) => brick.join(",")));
+  const minimum = [0, 1, 2].map((axis) =>
+    Math.min(...coordinates.map((q) => q[axis]!))) as [number, number, number];
+  const maximum = [0, 1, 2].map((axis) =>
+    Math.max(...coordinates.map((q) => q[axis]!))) as [number, number, number];
+  const expected = (maximum[0] - minimum[0] + 1)
+    * (maximum[1] - minimum[1] + 1) * (maximum[2] - minimum[2] + 1);
+  if (keys.size !== expected) return false;
+  for (let bz = minimum[2]; bz <= maximum[2]; bz += 1)
+    for (let by = minimum[1]; by <= maximum[1]; by += 1)
+      for (let bx = minimum[0]; bx <= maximum[0]; bx += 1)
+        if (!keys.has(`${bx},${by},${bz}`)) return false;
+  return true;
+}
+
+/** Exact bounds for disconnected rectangular components of authored brick
+ * seeds. Components that are L-shaped or otherwise non-rectangular return
+ * undefined: replacing them with bounding boxes would invent liquid. */
+export function initialFluidBrickComponentBounds(
+  scene: SceneDescription,
+  dimensions: readonly [number, number, number],
+  brickSize = INITIAL_FLUID_BRICK_SIZE,
+): readonly InitialFluidBrickUnionBounds[] | undefined {
+  const coordinates = initialFluidBrickCoordinates(scene, dimensions, brickSize);
+  if (!coordinates) return undefined;
+  const remaining = new Map(coordinates.map((brick) => [brick.join(","), brick]));
+  const components: [number, number, number][][] = [];
+  while (remaining.size > 0) {
+    const first = remaining.values().next().value as [number, number, number];
+    const component: [number, number, number][] = [];
+    const pending = [first];
+    remaining.delete(first.join(","));
+    while (pending.length > 0) {
+      const brick = pending.pop()!;
+      component.push(brick);
+      for (let axis = 0; axis < 3; axis += 1) for (const direction of [-1, 1]) {
+        const neighbor = [...brick] as [number, number, number];
+        neighbor[axis] += direction;
+        const key = neighbor.join(",");
+        const present = remaining.get(key);
+        if (present) { remaining.delete(key); pending.push(present); }
+      }
+    }
+    if (!filledBrickBox(component)) return undefined;
+    components.push(component);
+  }
+  return components.map((component) => brickBounds(scene, dimensions, brickSize, component));
+}
+
+/** Returns exact world-space bounds when the authored brick seeds form one
+ * completely filled axis-aligned box. Disconnected or L-shaped unions return
+ * undefined rather than being silently replaced by their bounding box. */
+export function initialFluidBrickUnionBounds(
+  scene: SceneDescription,
+  dimensions: readonly [number, number, number],
+  brickSize = INITIAL_FLUID_BRICK_SIZE,
+): InitialFluidBrickUnionBounds | undefined {
+  const coordinates = initialFluidBrickCoordinates(scene, dimensions, brickSize);
+  if (!coordinates || !filledBrickBox(coordinates)) return undefined;
+  return brickBounds(scene, dimensions, brickSize, coordinates);
 }
 
 /** True when a finest cell belongs to any explicitly seeded initial brick. */

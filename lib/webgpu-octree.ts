@@ -12,7 +12,8 @@ import { PassBroker } from "./webgpu-pass-broker";
 import { planOctreeSurfaceStateAllocation } from "./octree-surface-allocation";
 import { planOctreeAnalyticBootstrapBounds } from "./octree-analytic-bootstrap";
 import { WebGPUOctreeAnalyticBootstrapWorklist } from "./webgpu-octree-analytic-bootstrap";
-import { combineInitialBrickWet, damBreakBoxContains, initialFluidBrickContainsCell,
+import { combineInitialBrickWet, damBreakBoxContains, initialFluidBrickComponentBounds,
+  initialFluidBrickContainsCell,
   initialFluidBrickSignedDistanceAtCell, initialFluidBrickUnionBounds,
   sceneDamBreakBox, sceneDamBreakFractions, sceneDamBreakIsOffsetFromCorner } from "./initial-fluid";
 import { integratedInflowVolume } from "./inflow-boundary";
@@ -2538,6 +2539,9 @@ export class WebGPUOctreeProjection {
           const brickUnionBounds = initialFluidBrickUnionBounds(
             this.scene, [dims.nx, dims.ny, dims.nz], this.scene.voxelDomain.brickSize_cells,
           );
+          const brickComponentBounds = brickUnionBounds ? undefined : initialFluidBrickComponentBounds(
+            this.scene, [dims.nx, dims.ny, dims.nz], this.scene.voxelDomain.brickSize_cells,
+          );
           // Dense topology is still required around terrain and rigid bodies,
           // but those solids do not make the authored liquid SDF non-analytic.
           // Preserve the exact tank/dam phi for every cold fine halo page so
@@ -2553,6 +2557,15 @@ export class WebGPUOctreeProjection {
               maximum: [brickUnionBounds.maximum.x + 0.5 * this.scene.container.width_m,
                 brickUnionBounds.maximum.y,
                 brickUnionBounds.maximum.z + 0.5 * this.scene.container.depth_m] as const }
+            : brickComponentBounds
+              ? { initialCondition: "boxes" as const, boxes: brickComponentBounds.map((bounds) => ({
+                minimum: [bounds.minimum.x + 0.5 * this.scene.container.width_m,
+                  bounds.minimum.y,
+                  bounds.minimum.z + 0.5 * this.scene.container.depth_m] as const,
+                maximum: [bounds.maximum.x + 0.5 * this.scene.container.width_m,
+                  bounds.maximum.y,
+                  bounds.maximum.z + 0.5 * this.scene.container.depth_m] as const,
+              })) }
             : (this.scene.fluid.initialBrickSeeds_m?.length ?? 0) === 0
             && !sceneDamBreakIsOffsetFromCorner(this.scene)
             ? { initialCondition: this.scene.fluid.initialCondition,

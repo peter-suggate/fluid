@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createTwinDamCollisionScene, getSceneDefinition, getScenePreset } from "../lib/scenes";
-import { initialFluidBrickContainsCell } from "../lib/initial-fluid";
+import { initialFluidBrickComponentBounds, initialFluidBrickContainsCell,
+  initialFluidBrickUnionBounds } from "../lib/initial-fluid";
 import { createTallCellLayout, tallCellSettings, type GPUQuality } from "../lib/tall-cell-grid";
 import { createSmokeScenario, isSmokeScenarioId } from "../tools/webgpu-smoke-scenarios";
 import { validateScene } from "../lib/model";
@@ -100,6 +101,24 @@ test("both reservoirs are 2x1x1 brick slabs on diagonally opposite floor corners
     assert.ok(initialFluidBrickContainsCell(scene, 44, y, 12, DIMENSIONS),
       `layer ${y} of the +x reservoir must be wet`);
   }
+});
+
+test("the disconnected reservoirs expose two exact analytic bootstrap boxes", () => {
+  const scene = createTwinDamCollisionScene();
+  assert.equal(initialFluidBrickUnionBounds(scene, DIMENSIONS), undefined,
+    "disconnected reservoirs must never be replaced by their bounding box");
+  const components = initialFluidBrickComponentBounds(scene, DIMENSIONS);
+  assert.equal(components?.length, 2);
+  const rounded = components?.map(({ minimum, maximum }) => ({
+    minimum: Object.fromEntries(Object.entries(minimum).map(([axis, value]) =>
+      [axis, Math.round(value * 10) / 10])),
+    maximum: Object.fromEntries(Object.entries(maximum).map(([axis, value]) =>
+      [axis, Math.round(value * 10) / 10])),
+  }));
+  assert.deepEqual(rounded, [
+    { minimum: { x: -1.4, y: 0, z: -0.4 }, maximum: { x: -0.6, y: 0.4, z: 0 } },
+    { minimum: { x: 0.6, y: 0, z: 0 }, maximum: { x: 1.4, y: 0.4, z: 0.4 } },
+  ]);
 });
 
 test("the seeded reservoirs replace the analytic dam rather than adding to it", () => {
