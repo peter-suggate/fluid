@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import { create } from "zustand";
-import type { SceneDescription } from "../model";
+import { markSceneRevision, type SceneDescription } from "../model";
 import { useSceneStore } from "./scene-store";
 
 /**
@@ -72,11 +72,20 @@ export const useSceneDraftStore = create<SceneDraftStore>((set) => ({
 }));
 
 /** The scene as the pointer currently proposes it. */
+let cachedDraftBase: SceneDescription | undefined;
+let cachedDraft: SceneDraft | undefined;
+let cachedDraftScene: SceneDescription | undefined;
+
 export function applySceneDraft(
   scene: SceneDescription,
   draft: SceneDraft | undefined,
 ): SceneDescription {
-  return draft ? { ...scene, ...draft.patch } : scene;
+  if (!draft) return scene;
+  if (scene === cachedDraftBase && draft === cachedDraft && cachedDraftScene) return cachedDraftScene;
+  cachedDraftBase = scene;
+  cachedDraft = draft;
+  cachedDraftScene = markSceneRevision({ ...scene, ...draft.patch });
+  return cachedDraftScene;
 }
 
 /**

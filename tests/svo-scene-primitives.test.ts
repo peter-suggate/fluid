@@ -3,6 +3,7 @@ import test from "node:test";
 import { cloneScene, defaultScene } from "../lib/model";
 import { getScenePreset } from "../lib/scenes";
 import { unpackSvoPrimitiveRecords } from "../lib/svo-primitive-abi";
+import { SVO_PRIMITIVE_CANDIDATE_MAXIMUM_LEAVES } from "../lib/svo-primitive-candidates";
 import {
   SVO_SCENE_DEFAULT_MAXIMUM_PRIMITIVES,
   buildSvoScenePrimitives,
@@ -150,7 +151,13 @@ test("scene convenience API follows the selected environment and enforces a hard
   scene.environment = "conservatory";
   const selected = buildSvoScenePrimitives(scene);
   assert.equal(selected.environmentId, "conservatory");
-  assert.equal(SVO_SCENE_DEFAULT_MAXIMUM_PRIMITIVES, 4_096);
+  // 16 384 since W0 of the raster-visibility program raised it from 4 096 for
+  // the `hero-garden-hose-x10` acceptance scene: 5 039 records did not draw at
+  // all under the old ceiling. Pinned to the candidate arena's own leaf count
+  // rather than to a literal, because the two are deliberately the same number
+  // — a scene that clears this bound must not then be refused by the BVH.
+  assert.equal(SVO_SCENE_DEFAULT_MAXIMUM_PRIMITIVES, SVO_PRIMITIVE_CANDIDATE_MAXIMUM_LEAVES);
+  assert.equal(SVO_SCENE_DEFAULT_MAXIMUM_PRIMITIVES, 16_384);
   assert.throws(
     () => buildSvoScenePrimitives(scene, { maximumPrimitives: selected.descriptors.length - 1 }),
     /exceeding the .* record limit/,

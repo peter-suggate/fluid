@@ -32,8 +32,23 @@ import { ENVIRONMENT_VOXEL_MATERIAL_BASE } from "./webgpu-octree-sparse-bricks";
 // draws nothing — with no error anywhere.
 import { packSvoDrySceneClusters, svoDrySceneClusterReference } from "./webgpu-svo-dry-scene";
 
-/** Defensive ceiling: current authored catalogs contain fewer than 64 entries. */
-export const SVO_SCENE_DEFAULT_MAXIMUM_PRIMITIVES = 4_096;
+/**
+ * Defensive ceiling on what one environment may publish.
+ *
+ * Raised from 4 096 to match `SVO_PRIMITIVE_CANDIDATE_MAXIMUM_LEAVES` for the
+ * 10x acceptance scene (`hero-garden-hose-x10`,
+ * `docs/svo-raster-visibility-handoff.md` W0): the hero garden publishes 501
+ * records and its 10x densification publishes 5 039, and this is the *first* of
+ * the two 4 096s that fired — a `RangeError` from the throw below, caught as
+ * `console.error` + `{state: "blocked"}` in `lib/webgpu-renderer.ts:2020`, so
+ * the scene did not draw at all.
+ *
+ * It costs nothing on its own; it is a bound on a number the candidate arena
+ * has already reserved space for. Kept equal to the candidate ceiling rather
+ * than merely below it, so a scene that gets past this one cannot then be
+ * rejected by the BVH for the same reason one line later.
+ */
+export const SVO_SCENE_DEFAULT_MAXIMUM_PRIMITIVES = SVO_PRIMITIVE_CANDIDATE_MAXIMUM_LEAVES;
 export const SVO_SCENE_PRIMITIVE_VERSION = "1" as const;
 
 const scenePrimitiveCache = new Map<string, SvoScenePrimitiveBuild>();

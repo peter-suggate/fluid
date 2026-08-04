@@ -2,8 +2,9 @@
 /**
  * The GPU render-health lane for dry SVO scenes, and the hero garden's gate.
  *
- * `npm run test:webgpu:hero-garden-hose`  — the hero lane, 800x460, pinned
- * `npm run test:webgpu:svo-dry-render`    — the same lane, scene selectable
+ * `npm run test:webgpu:hero-garden-hose`      — the hero lane, 800x460, pinned
+ * `npm run test:webgpu:hero-garden-hose-x10`  — the 10x acceptance scene, same size
+ * `npm run test:webgpu:svo-dry-render`        — the same lane, scene selectable
  * `FLUID_SVO_DRY_SMOKE_SCENE=<preset> npm run test:webgpu:svo-dry-render`
  *
  * This repository has no CI runner — no workflow file, no pipeline config, no
@@ -41,15 +42,19 @@
  *      `lightingVisibilityStatus`, and on the warning text, because those four
  *      are not the same check and the cheapest one to trip has no console at all.
  *
- *   2. `per-brick-candidates` — `OCTREE_LIVE_SCENE_CANDIDATES_PER_BRICK` is a
- *      density, 64 primitives per brick, and overflow is a **silent drop**:
+ *   2. `per-brick-candidates` — two densities, once one constant. The planner
+ *      refines a brick above `OCTREE_LIVE_SCENE_REFINEMENT_CANDIDATE_TARGET`
+ *      (64), while `OCTREE_LIVE_SCENE_CANDIDATES_PER_BRICK` (512) is the arena
+ *      binning actually writes into, and overflowing *that* is a **silent drop**:
  *      `binDirtyBrickCandidates` writes nothing for the losers of an atomic
  *      race, so surplus primitives are absent from the opacity pyramid and the
  *      radiance atlas while still drawing in primary visibility. The GPU raises
  *      `SPARSE_SCENE_MAINTENANCE_OVERFLOW.candidates` and then deliberately
  *      declines to let it block the revision, with no readback to any CPU
  *      consumer, so this lane recomputes the binning on the host from the real
- *      published lattice. See the ceiling table below.
+ *      published lattice. It ratchets on the 64 target and fails on the 512
+ *      arena — holding the ratchet to the arena would only notice density after
+ *      primitives were already being lost. See the ceiling table below.
  *
  *   3. `primitive-budget` — crossing `SVO_PRIMITIVE_CANDIDATE_MAXIMUM_LEAVES`
  *      (4 096) makes `canConsumeSparseVoxelPrimitiveCandidates` return false,
@@ -94,6 +99,8 @@
  * ---------------------------------------------------------------------------
  *   WEBGPU_NODE_MODULE                    path to the Dawn node module
  *   FLUID_SVO_DRY_SMOKE_SCENE             scene preset id (default hero-garden-hose)
+ *   FLUID_SVO_DRY_SMOKE_RECORD_MULTIPLIER 1..10 on hero-garden-hose-x10 only; sweeps
+ *                                         the acceptance scene's authored record count
  *   FLUID_SVO_DRY_SMOKE_WIDTH / _HEIGHT   render size (default 800 x 460)
  *   FLUID_SVO_DRY_SMOKE_FRAMES            timed frames after warmup (default 6)
  *   FLUID_SVO_DRY_SMOKE_WARMUPS           warmup frames (default 3)
@@ -114,23 +121,42 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import type { EnvironmentId } from "../lib/environments";
+import {
+  createHeroGardenHoseStressScene,
+  HERO_GARDEN_STRESS_MAXIMUM_MULTIPLIER,
+} from "../lib/hero-garden-stress-scene";
 import { defaultCamera, type CameraState } from "../lib/model";
 import { getScenePreset } from "../lib/scenes";
 import { SVO_PRIMITIVE_RECORD_STRIDE_BYTES } from "../lib/svo-primitive-abi";
 import { SVO_PRIMITIVE_CANDIDATE_MAXIMUM_LEAVES } from "../lib/svo-primitive-candidates";
+import { SPARSE_BRICK_GPU_LAYOUT } from "../lib/sparse-brick-octree";
+import {
+  planSparseSceneTerrainField,
+  sparseSceneTerrainColumnRange,
+} from "../lib/sparse-scene-terrain-field";
+import { SVO_NODE_MIP_LAYOUT } from "../lib/svo-node-mip-pyramid";
+import { VOXEL_MATERIAL_IDS } from "../lib/voxel-scene";
 import { DEFAULT_SVO_RENDER_TUNING } from "../lib/svo-render-tuning";
 import { WebGPULiveSvoScene } from "../lib/webgpu-live-svo-scene";
-import { OCTREE_LIVE_SCENE_CANDIDATES_PER_BRICK } from "../lib/webgpu-octree-sparse-bricks";
+import {
+  OCTREE_LIVE_SCENE_CANDIDATES_PER_BRICK,
+  OCTREE_LIVE_SCENE_REFINEMENT_CANDIDATE_TARGET,
+  octreeLiveSceneTerrainVoxelsEnabled,
+} from "../lib/webgpu-octree-sparse-bricks";
+import { SPARSE_SCENE_CLUSTER_CAPACITY } from "../lib/webgpu-sparse-scene-proxies";
 import {
   canConsumeSparseVoxelPbrMaterials,
   canConsumeSparseVoxelPrimitiveCandidates,
   SparseVoxelDrySceneRenderer,
   sparseVoxelDrySceneContractFailure,
   svoConePrepassSize,
+  SVO_DRY_SCENE_CLUSTER_CAPACITY,
   type SvoConeLightingScale,
 } from "../lib/webgpu-svo-dry-scene";
 import { SVO_GBUFFER_RENDER_TARGET_CONTRACT } from "../lib/webgpu-svo-gbuffer-targets";
+import { FLUID_RASTER_PRIMARY_COLOR_BYTES_PER_SAMPLE } from "../lib/webgpu-device-limits";
 import { resolveDisplayGrade } from "../lib/webgpu-lighting";
+import { SVO_SCREEN_SPACE_TERMINATION_CONTRACT } from "../lib/svo-screen-space-termination";
 import { frameRadianceRange, writeFramePng } from "./write-frame-png";
 import {
   buildSvoDrySceneAssembly,
@@ -163,15 +189,47 @@ import {
  * the radiance atlas on every frame the scene draws right now.
  */
 const SCENE_PER_BRICK_CEILING: Readonly<Record<string, number>> = Object.freeze({
-  // Measured 2026-08-03 at 1 233 published primitives on the 72x24x48 / brick-8
-  // lattice (200 mm bricks). Ratchet down, never up.
-  "hero-garden-hose": 122,
+  // Ratcheted 2026-08-04: 122 -> 67. The 122 was measured at 1 233 published
+  // primitives on the 72x24x48 / brick-8 lattice (200 mm bricks); ABI-true
+  // voxelization and the terrain field moved the real number to 67 busiest with
+  // 1 of 113 occupied bricks over the 64 refinement target. Ratchet down, never up.
+  "hero-garden-hose": 67,
+  // The 10x acceptance scene, and its entry is a *different kind of number*.
+  // `hero-garden-hose-x10` publishes 5 039 records on the same 200 mm lattice as
+  // the hero's 501, so its density is over the 64-per-brick contract by
+  // construction and by roughly the multiplier. That is the scene's whole
+  // subject rather than a regression in it: W2 owns removing the per-brick
+  // overflow, and until it does, this lane's job on this scene is to report the
+  // density rather than to be red about it. Ratchet down when W2 lands.
+  "hero-garden-hose-x10": 512,
 });
 
 /** Bricks may exceed the contract density only where the table above says so. */
 const SCENE_OVERFLOWED_BRICK_CEILING: Readonly<Record<string, number>> = Object.freeze({
-  // Measured 2026-08-03: 12 of 84 occupied bricks. See SCENE_PER_BRICK_CEILING.
-  "hero-garden-hose": 12,
+  // Ratcheted 2026-08-04 to **zero on both scenes**, and this row changed meaning
+  // with the arena/target split: it now counts bricks over the 512-slot *arena*,
+  // i.e. bricks that actually drop primitives out of the opacity pyramid and the
+  // radiance atlas, not bricks merely over the 64 refinement target. Busiest brick
+  // is 67 on the hero and 442 on the 10x scene, both under 512, so nothing is
+  // dropped anywhere and the honest ceiling is 0. The old 12 and 128 tolerated
+  // real silent drops. Ratchet down, never up.
+  "hero-garden-hose": 0,
+  "hero-garden-hose-x10": 0,
+});
+
+/**
+ * Scenes whose published record count is the point, so the 90 %-of-ceiling
+ * approach warning is not.
+ *
+ * `primitive-budget` fails on the *approach* to `SVO_PRIMITIVE_CANDIDATE_MAXIMUM_LEAVES`
+ * because crossing it stops a scene drawing entirely, and that is right for
+ * every authored scene. The acceptance scene exists to sit at ten times the
+ * hero's record count, so it is held to the ceiling itself instead — it must
+ * still be buildable, it is simply not expected to leave 10 % of the arena
+ * unspent. Overridable per run by FLUID_SVO_DRY_SMOKE_PRIMITIVE_HEADROOM.
+ */
+const SCENE_PRIMITIVE_HEADROOM: Readonly<Record<string, number>> = Object.freeze({
+  "hero-garden-hose-x10": 1,
 });
 
 // ---------------------------------------------------------------------------
@@ -183,7 +241,8 @@ const height = Number(process.env.FLUID_SVO_DRY_SMOKE_HEIGHT ?? 460);
 const timedFrames = Number(process.env.FLUID_SVO_DRY_SMOKE_FRAMES ?? 6);
 const warmups = Number(process.env.FLUID_SVO_DRY_SMOKE_WARMUPS ?? 3);
 const coneScaleRaw = Number(process.env.FLUID_SVO_DRY_SMOKE_CONE_SCALE ?? 0.5);
-const primitiveHeadroom = Number(process.env.FLUID_SVO_DRY_SMOKE_PRIMITIVE_HEADROOM ?? 0.9);
+const primitiveHeadroom = Number(process.env.FLUID_SVO_DRY_SMOKE_PRIMITIVE_HEADROOM
+  ?? SCENE_PRIMITIVE_HEADROOM[process.env.FLUID_SVO_DRY_SMOKE_SCENE ?? "hero-garden-hose"] ?? 0.9);
 const frameBudget_ms = process.env.FLUID_SVO_DRY_SMOKE_FRAME_BUDGET_MS === undefined
   ? undefined : Number(process.env.FLUID_SVO_DRY_SMOKE_FRAME_BUDGET_MS);
 const pinnedImageHash = process.env.FLUID_SVO_DRY_SMOKE_IMAGE_HASH;
@@ -262,7 +321,7 @@ assert.ok(frameBudget_ms === undefined || (Number.isFinite(frameBudget_ms) && fr
   "FLUID_SVO_DRY_SMOKE_FRAME_BUDGET_MS must be a positive number");
 const coneScale = coneScaleRaw as SvoConeLightingScale;
 const perBrickCeiling = Number(process.env.FLUID_SVO_DRY_SMOKE_MAX_PER_BRICK
-  ?? SCENE_PER_BRICK_CEILING[scenePresetId] ?? OCTREE_LIVE_SCENE_CANDIDATES_PER_BRICK);
+  ?? SCENE_PER_BRICK_CEILING[scenePresetId] ?? OCTREE_LIVE_SCENE_REFINEMENT_CANDIDATE_TARGET);
 const overflowedBrickCeiling = SCENE_OVERFLOWED_BRICK_CEILING[scenePresetId] ?? 0;
 
 const log = (message: string) => process.stderr.write(`${message}\n`);
@@ -334,14 +393,37 @@ const { adapterInfo, device, validationErrors } = await createDawnRenderDevice({
 log(`Adapter: ${JSON.stringify(adapterInfo)}`);
 
 const preset = getScenePreset(scenePresetId);
-const scene = preset.create();
+/**
+ * The acceptance scene's one knob, and the only place a lane may turn it.
+ *
+ * `hero-garden-hose-x10` is registered at its acceptance multiplier, which is
+ * what a preset should be — a scene, not a slider. But W0's whole subject is
+ * *record count as a variable*, and the capacities between here and 10x are
+ * cliffs: knowing which rung a scene stops drawing on is the measurement, and
+ * it cannot be taken by rebuilding the catalog. So the multiplier is an
+ * override on this one preset, resolved through the same factory the preset
+ * itself uses, and refused on every other scene rather than silently ignored.
+ */
+const recordMultiplierRaw = process.env.FLUID_SVO_DRY_SMOKE_RECORD_MULTIPLIER;
+const recordMultiplier = recordMultiplierRaw === undefined ? undefined : Number(recordMultiplierRaw);
+if (recordMultiplier !== undefined) {
+  assert.equal(scenePresetId, "hero-garden-hose-x10",
+    "FLUID_SVO_DRY_SMOKE_RECORD_MULTIPLIER only means anything on hero-garden-hose-x10");
+  assert.ok(Number.isFinite(recordMultiplier) && recordMultiplier >= 1
+    && recordMultiplier <= HERO_GARDEN_STRESS_MAXIMUM_MULTIPLIER,
+  `FLUID_SVO_DRY_SMOKE_RECORD_MULTIPLIER must be between 1 and ${HERO_GARDEN_STRESS_MAXIMUM_MULTIPLIER}`);
+}
+const scene = recordMultiplier === undefined
+  ? preset.create()
+  : createHeroGardenHoseStressScene({ recordMultiplier });
 const camera: CameraState = {
   ...defaultCamera,
   ...preset.camera,
   target_m: { ...(preset.camera?.target_m ?? defaultCamera.target_m) },
 };
 const environmentId: EnvironmentId = (scene.environment ?? "default") as EnvironmentId;
-log(`Scene ${scenePresetId} at ${width}x${height}, cone scale ${coneScale}`);
+log(`Scene ${scenePresetId}${recordMultiplier === undefined ? "" : ` at record multiplier ${recordMultiplier}`}`
+  + ` at ${width}x${height}, cone scale ${coneScale}`);
 
 const solver = await WebGPULiveSvoScene.create(device, scene, "balanced",
   ({ label, completed, total }) => log(`  [world] ${label} (${completed}/${total})`));
@@ -373,26 +455,56 @@ record("primitive-budget", primitiveCount <= primitiveLimit,
 record("primitive-candidate-arena", canConsumeSparseVoxelPrimitiveCandidates(drySceneData),
   "candidate BVH is buildable from the published records", primitiveCount, SVO_PRIMITIVE_CANDIDATE_MAXIMUM_LEAVES);
 
+/**
+ * The renderer's cluster arena and the voxelizer's must be the same size, or a
+ * scene the renderer draws throws `Live scene aggregate arena capacity exceeded`
+ * when it is voxelized. They cannot be one derived constant — importing the
+ * renderer into `webgpu-sparse-scene-proxies` is a module cycle — so the equality
+ * is enforced here, where importing both is safe. They had already drifted once
+ * at 1_024 apiece while the 10x scene published 948.
+ */
+record("cluster-arena-capacity", SPARSE_SCENE_CLUSTER_CAPACITY === SVO_DRY_SCENE_CLUSTER_CAPACITY,
+  `voxelizer arena ${SPARSE_SCENE_CLUSTER_CAPACITY} matches renderer arena ${SVO_DRY_SCENE_CLUSTER_CAPACITY}`,
+  SPARSE_SCENE_CLUSTER_CAPACITY, SVO_DRY_SCENE_CLUSTER_CAPACITY);
+
 // (2) Per-brick candidate density, recomputed on the host from the real lattice.
 const density = svoScenePrimitiveBrickDensity(scenePrimitives.descriptors, {
   worldOrigin_m: structuralDomain.worldOrigin_m,
   cellSize_m: structuralDomain.cellSize_m,
   dimensionsCells: structuralDomain.dimensionsCells,
   brickSize: structuralDomain.brickSize,
+}, OCTREE_LIVE_SCENE_REFINEMENT_CANDIDATE_TARGET);
+/**
+ * Two ceilings, deliberately not one. `OCTREE_LIVE_SCENE_REFINEMENT_CANDIDATE_TARGET`
+ * (64) is the *quality* contract — the density above which the planner refines —
+ * and `OCTREE_LIVE_SCENE_CANDIDATES_PER_BRICK` (512) is the *arena*, the density
+ * above which binning actually drops primitives out of the opacity pyramid and the
+ * radiance atlas. They were the same constant until the arena was raised to absorb
+ * the 10x scene, and passing the arena here would have silently loosened this lane's
+ * ratchet from 64 to 512 — turning the check that exists to notice creeping density
+ * into one that only fires after primitives are already being lost.
+ */
+const arenaDensity = svoScenePrimitiveBrickDensity(scenePrimitives.descriptors, {
+  worldOrigin_m: structuralDomain.worldOrigin_m,
+  cellSize_m: structuralDomain.cellSize_m,
+  dimensionsCells: structuralDomain.dimensionsCells,
+  brickSize: structuralDomain.brickSize,
 }, OCTREE_LIVE_SCENE_CANDIDATES_PER_BRICK);
 const densityDetail = `busiest brick ${density.maximumPerBrick}`
-  + ` (contract ${OCTREE_LIVE_SCENE_CANDIDATES_PER_BRICK}, lane ceiling ${perBrickCeiling}),`
-  + ` ${density.overflowedBricks} of ${density.occupiedBricks} occupied bricks over the contract,`
+  + ` (refinement target ${OCTREE_LIVE_SCENE_REFINEMENT_CANDIDATE_TARGET},`
+  + ` arena ${OCTREE_LIVE_SCENE_CANDIDATES_PER_BRICK}, lane ceiling ${perBrickCeiling}),`
+  + ` ${density.overflowedBricks} of ${density.occupiedBricks} occupied bricks over the target,`
   + ` ${(density.brickEdge_m * 1000).toFixed(1)} mm bricks`;
 record("per-brick-candidates", density.maximumPerBrick <= perBrickCeiling, densityDetail,
   density.maximumPerBrick, perBrickCeiling);
-record("per-brick-overflow-count", density.overflowedBricks <= overflowedBrickCeiling,
-  `${density.overflowedBricks} bricks silently drop primitives from the opacity pyramid`
-  + ` and radiance atlas (lane ceiling ${overflowedBrickCeiling})`,
-  density.overflowedBricks, overflowedBrickCeiling);
-if (density.maximumPerBrick > OCTREE_LIVE_SCENE_CANDIDATES_PER_BRICK) {
-  log(`  [note] ${scenePresetId} is over the ${OCTREE_LIVE_SCENE_CANDIDATES_PER_BRICK}-per-brick contract today;`
-    + " the lane ceiling above is a ratchet, not permission");
+record("per-brick-overflow-count", arenaDensity.overflowedBricks <= overflowedBrickCeiling,
+  `${arenaDensity.overflowedBricks} bricks exceed the ${OCTREE_LIVE_SCENE_CANDIDATES_PER_BRICK}-slot arena and`
+  + ` silently drop primitives from the opacity pyramid and radiance atlas`
+  + ` (lane ceiling ${overflowedBrickCeiling})`,
+  arenaDensity.overflowedBricks, overflowedBrickCeiling);
+if (density.maximumPerBrick > OCTREE_LIVE_SCENE_REFINEMENT_CANDIDATE_TARGET) {
+  log(`  [note] ${scenePresetId} is over the ${OCTREE_LIVE_SCENE_REFINEMENT_CANDIDATE_TARGET}-per-brick`
+    + " refinement target today; the lane ceiling above is a ratchet, not permission");
 }
 
 // The production dry-scene contract, in full.
@@ -438,6 +550,146 @@ record("radiance-black-pages", radiance !== undefined && blackPages === 0,
   blackPages, 0);
 
 // ---------------------------------------------------------------------------
+// (5) The ground, in the scene lanes.
+//
+// Terrain used to be the one large surface the opacity pyramid could not see:
+// primary visibility drew it analytically scene-wide and the octree held none of
+// it, so every cone, shadow and GI ray passed through the garden's floor. It is
+// now ordinary voxel coverage, and "ordinary" is exactly what has to be asserted
+// rather than looked at — a ground that reaches the frame but not the lanes
+// looks identical in a screenshot and lights nothing.
+//
+// Two independent facts, because they fail separately. The first is that ground
+// voxels exist and reach real node-mip pages. The second is that the ground is
+// *solid*: every voxel buried under the lowest column of its own footprint must
+// carry full scene coverage, whoever ends up owning its material — read off the
+// coverage lane rather than the identity lane so a prop standing in the soil
+// cannot make a hole in the check.
+// ---------------------------------------------------------------------------
+async function readGpuBuffer(buffer: GPUBuffer, offset: number, size: number): Promise<Uint32Array> {
+  const staging = device.createBuffer({
+    label: "Smoke structural readback", size,
+    usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+  });
+  const encoder = device.createCommandEncoder({ label: "Smoke structural readback" });
+  encoder.copyBufferToBuffer(buffer, offset, staging, 0, size);
+  device.queue.submit([encoder.finish()]);
+  await device.queue.onSubmittedWorkDone();
+  await staging.mapAsync(GPUMapMode.READ);
+  const words = new Uint32Array(staging.getMappedRange().slice(0));
+  staging.unmap();
+  staging.destroy();
+  return words;
+}
+
+/** Mirrors `decodeMorton` in the structural WGSL: three interleaved bit planes. */
+function decodeBrickMorton(low: number, high: number, level: number): [number, number, number] {
+  const bit = (index: number) => (index >= 32 ? (high >>> (index - 32)) & 1 : (low >>> index) & 1);
+  const coordinate: [number, number, number] = [0, 0, 0];
+  for (let index = 0; index < level; index += 1) {
+    for (let axis = 0; axis < 3; axis += 1) coordinate[axis] += bit(3 * index + axis) * 2 ** index;
+  }
+  return coordinate;
+}
+
+const terrainVoxelsEnabled = octreeLiveSceneTerrainVoxelsEnabled();
+const terrainField = !terrainVoxelsEnabled ? undefined : planSparseSceneTerrainField(scene.terrain, {
+  worldOrigin_m: structuralDomain.worldOrigin_m as [number, number, number],
+  cellSize_m: structuralDomain.cellSize_m as [number, number, number],
+  dimensionsCells: structuralDomain.dimensionsCells as [number, number, number],
+});
+const terrainReport: Record<string, unknown> = {
+  present: terrainField !== undefined, bakingEnabled: terrainVoxelsEnabled,
+};
+if (!terrainField) {
+  record("terrain-in-scene-lanes", true, terrainVoxelsEnabled
+    ? `${scenePresetId} authors no ground; nothing to bake`
+    : "ground baking is off (FLUID_SVO_TERRAIN_VOXELS=0); this run is the A/B reference");
+} else {
+  const brickSize = structuralDomain.brickSize;
+  const capacities = source.structural.capacities;
+  const control = await readGpuBuffer(source.structural.control.buffer,
+    source.structural.control.offset ?? 0, SPARSE_BRICK_GPU_LAYOUT.controlStrideBytes);
+  const publishedLeaves = Math.min(control[1], capacities.leaves);
+  const leaves = await readGpuBuffer(source.structural.leaves.buffer,
+    source.structural.leaves.offset ?? 0, capacities.leaves * SPARSE_BRICK_GPU_LAYOUT.leafStrideBytes);
+  const nodes = await readGpuBuffer(source.structural.nodes.buffer,
+    source.structural.nodes.offset ?? 0, capacities.nodes * SPARSE_BRICK_GPU_LAYOUT.nodeStrideBytes);
+  const sceneMaterials = await readGpuBuffer(source.structural.sceneMaterialOwners.buffer,
+    source.structural.sceneMaterialOwners.offset ?? 0,
+    capacities.voxels * SPARSE_BRICK_GPU_LAYOUT.materialOwnerStrideBytes);
+  const sceneGeometry = await readGpuBuffer(source.structural.sceneGeometry.buffer,
+    source.structural.sceneGeometry.offset ?? 0,
+    capacities.voxels * SPARSE_BRICK_GPU_LAYOUT.geometryStrideBytes);
+  const sceneFraction = new Float32Array(sceneGeometry.buffer);
+
+  const nodeWords = SPARSE_BRICK_GPU_LAYOUT.nodeStrideBytes / 4;
+  const leafWords = SPARSE_BRICK_GPU_LAYOUT.leafStrideBytes / 4;
+  const terrainPages = new Set<string>();
+  let terrainVoxels = 0, buriedVoxels = 0, buriedWithoutCoverage = 0;
+  for (let leafIndex = 0; leafIndex < publishedLeaves; leafIndex += 1) {
+    const nodeIndex = leaves[leafIndex * leafWords];
+    const voxelOffset = leaves[leafIndex * leafWords + 1];
+    if (nodeIndex >= capacities.nodes) continue;
+    const level = nodes[nodeIndex * nodeWords + 2];
+    const brick = decodeBrickMorton(leaves[leafIndex * leafWords + 2], leaves[leafIndex * leafWords + 3], level);
+    const scale = 2 ** Math.max(0, structuralDomain.maximumDepth - level);
+    for (let localIndex = 0; localIndex < brickSize ** 3; localIndex += 1) {
+      const local = [
+        localIndex % brickSize,
+        Math.floor(localIndex / brickSize) % brickSize,
+        Math.floor(localIndex / (brickSize * brickSize)),
+      ];
+      const cell = local.map((value, axis) => (brick[axis] * brickSize + value) * scale);
+      const voxel = voxelOffset + localIndex;
+      if (voxel >= capacities.voxels) continue;
+      const material = sceneMaterials[voxel] & 0xffff;
+      if (material === VOXEL_MATERIAL_IDS.terrain) {
+        terrainVoxels += 1;
+        // A node-mip base page is one finest brick, so a voxel's page is its
+        // finest cell coordinate divided by the page interior.
+        terrainPages.add(cell.map((value) => Math.floor(value / SVO_NODE_MIP_LAYOUT.interiorSize)).join(","));
+      }
+      // "Buried" is decided against the *lowest* column under the voxel's own
+      // footprint, so the test never depends on where inside the cell the
+      // surface sits — only on voxels the ground unambiguously contains.
+      const range = sparseSceneTerrainColumnRange(terrainField,
+        cell[0], cell[2], cell[0] + scale - 1, cell[2] + scale - 1);
+      const top = structuralDomain.worldOrigin_m[1] + (cell[1] + scale) * structuralDomain.cellSize_m[1];
+      if (top >= range.minimum_m) continue;
+      buriedVoxels += 1;
+      if (!(sceneFraction[voxel * 4 + 2] >= 0.999)) buriedWithoutCoverage += 1;
+    }
+  }
+  const plannedBasePages = new Set((nodeMip?.plan.pages ?? [])
+    .filter(({ key }) => key.level === 0)
+    .map(({ key }) => key.coordinate.join(",")));
+  const unplannedTerrainPages = [...terrainPages].filter((page) => !plannedBasePages.has(page));
+  Object.assign(terrainReport, {
+    voxels: terrainVoxels, pages: terrainPages.size, buriedVoxels, buriedWithoutCoverage,
+    unplannedPages: unplannedTerrainPages.length,
+    columns: terrainField.dimensions[0] * terrainField.dimensions[1],
+    heightRange_m: [terrainField.minimumHeight_m, terrainField.maximumHeight_m],
+  });
+  record("terrain-in-scene-lanes", terrainVoxels > 0 && terrainPages.size > 0,
+    `${terrainVoxels} ground voxels across ${terrainPages.size} node-mip base pages`
+    + ` (${terrainField.dimensions.join("x")} columns, ${terrainField.minimumHeight_m.toFixed(3)}`
+    + `..${terrainField.maximumHeight_m.toFixed(3)} m); zero means every cone, shadow and GI ray`
+    + " still passes through the ground",
+    { voxels: terrainVoxels, pages: terrainPages.size }, 1);
+  record("terrain-coverage-solid", buriedVoxels > 0 && buriedWithoutCoverage === 0,
+    `${buriedVoxels - buriedWithoutCoverage} of ${buriedVoxels} voxels buried under the ground carry full`
+    + " scene coverage; a buried voxel that reads empty is a hole the pyramid lights through",
+    buriedWithoutCoverage, 0);
+  record("terrain-pages-planned", unplannedTerrainPages.length === 0,
+    unplannedTerrainPages.length === 0
+      ? `every ground page is in the ${plannedBasePages.size}-page base address plan`
+      : `${unplannedTerrainPages.length} ground pages are outside the address plan`
+        + ` (first ${unplannedTerrainPages[0]}); those pages read as empty space to every consumer`,
+    unplannedTerrainPages.length, 0);
+}
+
+// ---------------------------------------------------------------------------
 // The frame, through the production dry renderer.
 // ---------------------------------------------------------------------------
 const uniformBuffer = device.createBuffer({
@@ -456,11 +708,57 @@ device.queue.writeBuffer(uniformBuffer, 0, packSvoDryViewUniforms({
 }));
 device.queue.writeBuffer(bodyBuffer, 0, bodies.data);
 
-// Production defaults throughout: canonical-parametric traversal, split shading,
-// no raster arms, no experiments. A health check that renders a configuration
-// nobody ships is evidence about that configuration.
+// Production defaults throughout: split shading, no experiments. "A health check
+// that renders a configuration nobody ships is evidence about that configuration"
+// — the principle was already written here, and this lane was violating it. It
+// pinned `canonical-parametric` while `webgpu-renderer.ts` ships
+// `DEFAULT_SVO_LIGHTING_OPTIONS.primaryTraversal ?? "raster"`, i.e.
+// `raster-primary`. That is not a cosmetic difference: measured on the 10x
+// acceptance scene the two traversals disagree by ~2x on the record-count
+// scaling ratio (raster-primary 2.06x, canonical-parametric 5.22x, both before
+// the primary rework), so every frame-time and scaling conclusion this lane
+// produced described a path production does not take.
+//
+// `FLUID_SVO_DRY_SMOKE_TRAVERSAL=canonical-parametric` keeps the old arm for
+// comparison. Raster primary needs a wider colour attachment than the parametric
+// path, so a device that cannot carry it falls back loudly rather than silently
+// re-testing the wrong configuration.
+const requestedTraversal = process.env.FLUID_SVO_DRY_SMOKE_TRAVERSAL ?? "raster-primary";
+if (requestedTraversal !== "raster-primary" && requestedTraversal !== "canonical-parametric") {
+  throw new RangeError(`FLUID_SVO_DRY_SMOKE_TRAVERSAL must be raster-primary or canonical-parametric, got ${requestedTraversal}`);
+}
+const traversalMode = requestedTraversal === "raster-primary"
+  && device.limits.maxColorAttachmentBytesPerSample < FLUID_RASTER_PRIMARY_COLOR_BYTES_PER_SAMPLE
+  ? "canonical-parametric" as const
+  : requestedTraversal as "raster-primary" | "canonical-parametric";
+if (traversalMode !== requestedTraversal) {
+  log(`  [note] device exposes maxColorAttachmentBytesPerSample=${device.limits.maxColorAttachmentBytesPerSample},`
+    + ` below the ${FLUID_RASTER_PRIMARY_COLOR_BYTES_PER_SAMPLE} raster primary needs;`
+    + " falling back to canonical-parametric — this lane is NOT testing what production ships");
+}
+// Raster primary is not a lone flag: the constructor requires split shading with
+// raster glass *and* rigid discovery together (`webgpu-svo-dry-scene.ts:5278`),
+// because those arms are how that traversal discovers the surfaces the megakernel
+// would otherwise have marched. Parametric wants them off.
+const rasterArms = traversalMode === "raster-primary";
+// Arms for the visibility candidate-BVH ordering. `bounded` ships; `unbounded`
+// is the control that reproduces the pre-reorder order; `probe-off` deletes the
+// term outright and is image-wrong, so it only ever bounds the prize.
+const visibilityArm = process.env.FLUID_SVO_DRY_SMOKE_VISIBILITY_ANALYTIC ?? "bounded";
+if (visibilityArm !== "bounded" && visibilityArm !== "unbounded" && visibilityArm !== "probe-off") {
+  throw new RangeError(
+    `FLUID_SVO_DRY_SMOKE_VISIBILITY_ANALYTIC must be bounded, unbounded or probe-off, got ${visibilityArm}`);
+}
+const experiments = {
+  unboundedAnalyticVisibility: visibilityArm === "unbounded",
+  visibilityAnalyticDisabledProbe: visibilityArm === "probe-off",
+} as const;
+log(`Primary traversal ${traversalMode}${rasterArms ? " (production default), raster glass + rigid discovery on" : ""}`);
+log(`Visibility analytic order: ${visibilityArm}`);
 const renderer = new SparseVoxelDrySceneRenderer(device, uniformBuffer, bodyBuffer, "rgba16float",
-  "canonical-parametric", "off", "split", 0, "off", false, false, false, {});
+  traversalMode, "off", "split",
+  rasterArms ? SVO_SCREEN_SPACE_TERMINATION_CONTRACT.defaultThresholdPixels : 0,
+  "off", rasterArms, rasterArms, true, experiments);
 await renderer.initialize((label, completed, total) => log(`  [pipeline] ${label} (${completed}/${total})`));
 renderer.setRigidBodyCount(bodies.count);
 renderer.setRenderTuning({ ...DEFAULT_SVO_RENDER_TUNING, coneLightingScale: coneScale });
@@ -650,6 +948,7 @@ const failures = checks.filter(({ state }) => state === "fail");
 const report = {
   lane: "svo-dry-render-smoke",
   scene: scenePresetId,
+  recordMultiplier,
   resolution: { width, height },
   coneScale,
   adapter: adapterInfo,
@@ -687,6 +986,7 @@ const report = {
     },
     derivedLighting: derivedLighting ?? null,
     lightingVisibility: visibility,
+    terrain: terrainReport,
   },
   checks,
   warnings: capturedWarnings,

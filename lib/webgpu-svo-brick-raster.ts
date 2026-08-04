@@ -31,6 +31,14 @@ export const SVO_BRICK_RASTER_CONTRACT = Object.freeze({
    */
   cullMode: "back" as GPUCullMode,
   sortBuckets: 1024,
+  /**
+   * The instance word is `nodeIndex | (sortKey << 22)`: 22 bits of node index
+   * under 10 bits of bucket. Ten bits is exactly `sortBuckets`, so the split is
+   * not a free parameter — widening the node index costs sort resolution and
+   * vice versa. `svoBrickRasterAddressableNodes` is the derived ceiling and
+   * `assertSvoBrickRasterNodeAddressable` is the loud check; see both for what
+   * happens past it.
+   */
   sortKeyShift: 22,
   nodeIndexMask: (1 << 22) - 1,
   emitWorkgroupSize: 64,
@@ -61,6 +69,12 @@ export const SVO_BRICK_RASTER_CONTRACT = Object.freeze({
   instanceDrawBinding: 2,
   coverageCountBinding: 3,
   coverageCandidateBinding: 4,
+  /** Nearest sub-pixel proxy key published by the depth-tested coverage tier. */
+  lodKeyBinding: 6,
+  /** Current primary geometry, sampled by later coverage tiers for occlusion. */
+  primaryGeometryBinding: 7,
+  /** Current primary owner/field metadata for suppressing redundant upgrades. */
+  primaryIdentityBinding: 8,
   /** `SvoMapping` prefix of `DryParams`; bound directly so the two cannot drift. */
   mappingBindingBytes: 48,
   sortStateHeaderWords: 8,
@@ -86,11 +100,106 @@ export function svoBrickRasterPublicationInstanceOffsetBytes(): number {
   return Math.ceil(svoBrickRasterSortStateBytes() / 256) * 256;
 }
 
-export function svoBrickRasterInstanceBytes(leafCapacity: number): number {
+/**
+ * How many octree nodes the instance word can name: 2^22 = 4,194,304.
+ *
+ * Every drawn instance carries `nodeIndex | (sortKey << sortKeyShift)` in one
+ * u32, and the resolve reads the node index back with `nodeIndexMask`. A node
+ * index at or above this ceiling cannot survive that round trip.
+ */
+export function svoBrickRasterAddressableNodes(): number {
+  return SVO_BRICK_RASTER_CONTRACT.nodeIndexMask + 1;
+}
+
+/**
+ * The loud half of the node-index ceiling.
+ *
+ * The quiet half is in `svoBrickEmitMain`, which refuses to emit an instance
+ * whose node index does not fit and so *drops the brick* rather than drawing
+ * some other brick's payload in its place. That is the right degrade — there is
+ * no coarser proxy to fall back to for a single brick — but on its own it is a
+ * scene that renders with holes and says nothing, which is precisely the
+ * failure `docs/svo-raster-visibility-handoff.md` §5/W4 exists to remove.
+ *
+ * (The handoff's table calls this row "silent aliasing past 4.19 M leaves". At
+ * HEAD it is a silent *drop*, not aliasing: the `nodeIndex > MASK` clause in
+ * the emit kernel already prevents the corruption. The remaining defect is the
+ * silence, and the count of dropped leaves — see
+ * `svoBrickRasterSortStateDiagnostics().unaddressable`, which this kernel now
+ * makes derivable from the published counters.)
+ *
+ * Call this wherever a published node count first becomes known — it is a
+ * scalar compare, and it turns "the far half of the world stopped drawing" into
+ * a message that names the ceiling, the overage, and the two ways past it.
+ */
+export function assertSvoBrickRasterNodeAddressable(nodeCount: number, context = "published octree"): void {
+  const addressable = svoBrickRasterAddressableNodes();
+  if (!Number.isSafeInteger(nodeCount) || nodeCount < 0) {
+    throw new RangeError(`Brick-raster node count for ${context} must be a non-negative safe integer`);
+  }
+  if (nodeCount > addressable) {
+    throw new RangeError(
+      `Brick-raster node index overflow: ${context} publishes ${nodeCount} nodes and the instance word addresses `
+      + `${addressable} (${SVO_BRICK_RASTER_CONTRACT.sortKeyShift} bits under a `
+      + `${32 - SVO_BRICK_RASTER_CONTRACT.sortKeyShift}-bit sort key). Every node past the ceiling is dropped by `
+      + `svoBrickEmitMain and never drawn. Fix by lowering SVO_BRICK_RASTER_CONTRACT.sortBuckets to 512 or 256 and `
+      + `raising sortKeyShift to 23 or 24 (coarser front-to-back bucketing, which is a performance lever only), or `
+      + `by carrying the sort key in a second instance word.`);
+  }
+}
+
+/**
+ * Instance arena bytes for a published leaf capacity.
+ *
+ * `nodeCapacity` is optional only because the leaf count alone already proves
+ * a violation — every leaf names a distinct node, so leaves > addressable nodes
+ * cannot be drawn — while the node count is what the shader actually masks.
+ * Pass it wherever it is known and the check becomes exact instead of necessary.
+ */
+export function svoBrickRasterInstanceBytes(leafCapacity: number, nodeCapacity?: number): number {
   if (!Number.isSafeInteger(leafCapacity) || leafCapacity < 1) {
     throw new RangeError("Brick-raster leaf capacity must be a positive safe integer");
   }
+  assertSvoBrickRasterNodeAddressable(nodeCapacity ?? leafCapacity,
+    nodeCapacity === undefined ? "published leaf capacity" : "published node capacity");
   return leafCapacity * SVO_BRICK_RASTER_CONTRACT.instanceStrideBytes;
+}
+
+/**
+ * The published sort state, decoded — including the count the kernel cannot
+ * print.
+ *
+ * `resident` is incremented for every leaf the emit kernel looked at, before
+ * any rejection, and each of the three rejections has its own counter, so
+ * whatever is left over is the number of leaves whose node index was stale or
+ * past `nodeIndexMask`. That residual is the GPU-side tripwire for the row
+ * above: it is zero on every scene that fits, and a capacity sweep that reads
+ * it can fail on the first rung where a brick stops being drawable.
+ */
+export function svoBrickRasterSortStateDiagnostics(words: ArrayLike<number>): {
+  vertexCount: number;
+  drawn: number;
+  candidates: number;
+  culled: number;
+  empty: number;
+  resident: number;
+  unaddressable: number;
+} {
+  const value = (index: number) => Number(words[index] ?? 0);
+  const drawn = value(1);
+  const candidates = value(4);
+  const culled = value(5);
+  const empty = value(6);
+  const resident = value(7);
+  return {
+    vertexCount: value(0),
+    drawn,
+    candidates,
+    culled,
+    empty,
+    resident,
+    unaddressable: Math.max(0, resident - candidates - culled - empty),
+  };
 }
 
 export function svoBrickRasterCoverageCountBytes(width: number, height: number): number {
@@ -103,6 +212,310 @@ export function svoBrickRasterCoverageCountBytes(width: number, height: number):
 export function svoBrickRasterCoverageCandidateBytes(width: number, height: number): number {
   return svoBrickRasterCoverageCountBytes(width, height)
     * SVO_BRICK_RASTER_CONTRACT.coverageCandidatesPerPixel;
+}
+
+/**
+ * One arena, two disjoint coverage passes, plus the depth seed between them.
+ *
+ * Bricks and authored SDF proxies are rasterized into per-pixel candidate lists
+ * by passes that never overlap in time — the brick coverage/resolve/overflow
+ * triple completes before the scene-primitive coverage pass clears the counters
+ * — so a second allocation would only duplicate the largest buffer in the
+ * renderer. Each pass addresses the arena with its own stride and the wider of
+ * the two sizes the allocation.
+ *
+ * The tail beyond `pixels * candidatesPerPixel` holds one word per pixel: the
+ * nearest opaque distance the brick resolve published, which is what lets the
+ * scene-primitive resolve reject a candidate that starts behind an already
+ * resolved surface. It lives here rather than in a fifth binding so the shipped
+ * coverage bind-group layout is unchanged, and it sits *after* every candidate
+ * slot so neither stride can reach it.
+ */
+export function svoRasterCoverageArenaBytes(
+  width: number, height: number, candidatesPerPixel: number,
+): number {
+  if (!Number.isSafeInteger(candidatesPerPixel) || candidatesPerPixel < SVO_BRICK_RASTER_CONTRACT.coverageCandidatesPerPixel) {
+    throw new RangeError("Shared coverage arena must be at least the brick candidate capacity");
+  }
+  return svoBrickRasterCoverageCountBytes(width, height) * (candidatesPerPixel + 1);
+}
+
+/**
+ * Overflow-driven indirect draw for the conservative coverage arms.
+ *
+ * Both overflow passes — the brick one and the authored-SDF one — exist purely
+ * so that arena capacity is a performance parameter and never an image change.
+ * They almost never write: garden's measured maximum crossing is 18 against a
+ * 24-entry arena, so the overflow fragment discards on every pixel. Yet each
+ * still runs its *vertex* stage over the whole instance list every frame —
+ * 0.841 ms measured today, and vertex work is linear in instances, so ~8 ms at
+ * a 10x brick count for a pass that draws nothing.
+ *
+ * The fix is an indirect draw whose instance count is zero unless some pixel
+ * actually overflowed. Three facts decide where the state lives:
+ *
+ *   - only the coverage *fragment* knows a pixel overflowed, and the one
+ *     read-write buffer it binds is the per-pixel count buffer;
+ *   - only the cull *compute* pass knows how many instances survived culling,
+ *     and it cannot see the count buffer;
+ *   - the draw is issued between them.
+ *
+ * So the count buffer carries a short tail past its per-pixel range: the
+ * fragment raises the flag there, a one-lane compute pass folds the flag and
+ * the published instance count into a draw-args block in the same tail, and the
+ * overflow pass draws indirectly from it. Nothing about the per-pixel range
+ * moves, so every existing index into it stays valid, and a frame that clears
+ * only `svoBrickRasterCoverageCountBytes` leaves the tail intact by
+ * construction.
+ */
+/**
+ * Integration, for the owner of `lib/webgpu-svo-dry-scene.ts`.
+ *
+ * Six edits, none of which touch a shipped layout or a pinned constant. Line
+ * numbers are against the tree this was written on and will have moved.
+ *
+ * 1. `ensureBrickCoverageBuffers` (~:5347) — size the count buffer with the
+ *    tail and let it be drawn from:
+ *      -  size: svoBrickRasterCoverageCountBytes(width, height),
+ *      -  usage: STORAGE | COPY_DST | COPY_SRC,
+ *      +  size: svoRasterCoverageCountAllocationBytes(width, height),
+ *      +  usage: STORAGE | COPY_DST | COPY_SRC | INDIRECT,
+ *
+ * 2. Both `encoder.clearBuffer(this.brickCoverageCountBuffer!)` calls (~:5571,
+ *    ~:5648) — clear the pixel range only, so the tail survives:
+ *      +  encoder.clearBuffer(this.brickCoverageCountBuffer!, 0,
+ *      +    svoBrickRasterCoverageCountBytes(this.brickCoverageWidth!, this.brickCoverageHeight!));
+ *
+ * 3. Coverage fragments (~:2687 for bricks, and the authored-SDF one) — raise
+ *    the flag on the fragment that takes the *first* slot past capacity, so the
+ *    counter counts overflowing pixels rather than surplus fragments:
+ *        if(slot<CAPACITY){ ...append...; discard; }
+ *      +  if(slot==CAPACITY){svoRasterCoverageOverflowSignal();}
+ *        return 1u;
+ *    with `${svoRasterCoverageOverflowSignalWGSL}` included beside them. It
+ *    reads `svoBrickCoverageCounts`, which both fragments already bind.
+ *
+ * 4. A publisher pipeline from `createSvoRasterCoverageOverflowArgsWGSL()` over
+ *    `svoRasterCoverageOverflowArgsBindGroupLayoutEntries()`, bound to
+ *    {0: brickSortStateBuffer at brickSortStateOffsetBytes, 1: the count
+ *    buffer}. For the authored-SDF arm pass
+ *    `{ verticesPerInstance: SVO_SCENE_PRIMITIVE_RASTER_CONTRACT.verticesPerProxy,
+ *       overflowInstanceCount: this.primitiveCount }` — that arm's instance
+ *    count is a host number, not a GPU-culled one, so it needs no publication.
+ *
+ * 5. One `beginComputePass` dispatching it (1 workgroup) between the resolve and
+ *    the overflow pass of each arm.
+ *
+ * 6. The overflow draws:
+ *      -  overflow.drawIndirect(this.brickSortStateBuffer!, this.brickSortStateOffsetBytes);
+ *      +  overflow.drawIndirect(this.brickCoverageCountBuffer!,
+ *      +    svoRasterCoverageOverflowDrawArgsOffsetBytes(this.brickCoverageWidth!, this.brickCoverageHeight!));
+ *    and the authored-SDF arm's `overflow.draw(verticesPerProxy, primitiveCount)`
+ *    becomes the same `drawIndirect`.
+ *
+ * 7. Once (3) is in, the overflow *rate* is one word instead of a
+ *    width-by-height readback, which is what makes it cheap enough to report
+ *    every frame. Add a `copyCoverageOverflowCount(encoder, target)` beside the
+ *    existing `copyCoverageCounts` and pass the result through
+ *    `svoRasterCoverageOverflowStatus`; a `console.warn` on the first
+ *    `over-budget` frame is the whole of the loud half. Today that row is
+ *    observable only by scanning every pixel, which is why nothing does it —
+ *    `tools/run-svo-capacity-sweep-smoke.ts` scans, and measures 0 overflowing
+ *    pixels at every record rung to 10x at 800x460, busiest pixel 37 of 40.
+ *    That zero is not reassurance: it means the overflow pass currently draws
+ *    its entire instance list, rasterizes every proxy and discards every
+ *    fragment, and edit (6) removes all of it.
+ *
+ * The guards that read `arrayLength(&svoBrickCoverageCounts)` as a pixel bound
+ * stay correct — `pixel < width*height <= arrayLength - tailWords` — but they
+ * become permissive by `tailWords`, so tightening them to an explicit pixel
+ * count is worth doing in the same edit.
+ *
+ * Verification without the renderer: `tools/run-svo-capacity-sweep-smoke.ts`
+ * compiles this module and asserts both arms of the publisher — zero instances
+ * with the flag clear, the published count with it raised.
+ */
+export const SVO_RASTER_COVERAGE_OVERFLOW_CONTRACT = Object.freeze({
+  /** Words appended past `width * height`. */
+  tailWords: 8,
+  /** Tail word raised once per overflowing pixel; also the "did anything overflow" flag. */
+  overflowPixelWord: 0,
+  /** `{vertexCount, instanceCount, firstVertex, firstInstance}` for `drawIndirect`. */
+  drawArgsWord: 4,
+  entryPoints: Object.freeze({
+    publishArgs: "svoRasterCoverageOverflowArgsMain" as const,
+  }),
+  bindings: Object.freeze({
+    publication: 0,
+    coverageCounts: 1,
+  }),
+  /** Word index of `drawInstanceCount` inside the published sort state. */
+  publicationInstanceCountWord: 1,
+});
+
+/**
+ * The fraction of covered pixels allowed to exceed the per-pixel arena.
+ *
+ * W1's gate ("overflow rate < 1 % of covered pixels",
+ * `docs/svo-raster-visibility-handoff.md` §5/W1) as a number the code can
+ * enforce rather than a sentence in a document. Overflow is image-preserving by
+ * construction — the overflow pass re-runs the exact fragment for the pixels
+ * that exceeded capacity — which is exactly why nothing has ever noticed it
+ * moving: the frame stays correct and only the cost changes.
+ */
+export const SVO_RASTER_COVERAGE_OVERFLOW_BUDGET = 0.01;
+
+/**
+ * The arena's overflow rate, classified, with the fix named.
+ *
+ * This is the row the capacity table calls "silent-by-design overflow", and
+ * silent-by-design is the correct design for the *image* and the wrong one for
+ * the *frame*: on this path an overflowing arena moves the cost from one
+ * bounded per-pixel walk to a second full re-march of every covering proxy, and
+ * at 10x records that has been measured as the single largest item in the
+ * frame. Capacity remaining a performance parameter is the guarantee; nobody
+ * ever promised the performance would be good, and nothing was reporting when
+ * it stopped being.
+ *
+ * Deliberately a classifier and not a throw: unlike the node index, this
+ * capacity is *meant* to be crossed occasionally and the degrade is exact.
+ * The tripwire is that crossing it in bulk becomes a named, measured statement
+ * instead of a slow frame nobody can attribute.
+ */
+export function svoRasterCoverageOverflowStatus(input: {
+  coveredPixels: number;
+  overflowPixels: number;
+  candidatesPerPixel: number;
+  arm: string;
+  budget?: number;
+}): { state: "clear" | "within-budget" | "over-budget"; fraction: number; message: string } {
+  const budget = input.budget ?? SVO_RASTER_COVERAGE_OVERFLOW_BUDGET;
+  const fraction = input.coveredPixels > 0 ? input.overflowPixels / input.coveredPixels : 0;
+  const percent = (100 * fraction).toFixed(3);
+  if (input.overflowPixels === 0) {
+    return {
+      state: "clear",
+      fraction,
+      message: `${input.arm} coverage arena: no pixel exceeded ${input.candidatesPerPixel} candidates`
+        + ` over ${input.coveredPixels} covered pixels`,
+    };
+  }
+  if (fraction <= budget) {
+    return {
+      state: "within-budget",
+      fraction,
+      message: `${input.arm} coverage arena: ${input.overflowPixels} of ${input.coveredPixels} covered pixels`
+        + ` (${percent} %) exceeded ${input.candidatesPerPixel} candidates and were re-marched by the overflow pass`,
+    };
+  }
+  return {
+    state: "over-budget",
+    fraction,
+    message: `${input.arm} coverage arena overflow: ${input.overflowPixels} of ${input.coveredPixels} covered pixels`
+      + ` (${percent} %) exceeded ${input.candidatesPerPixel} candidates, against a ${(100 * budget).toFixed(1)} %`
+      + ` budget. The image is still exact — the overflow pass re-marches every covering proxy for those pixels —`
+      + ` but that pass is the exact per-fragment cost the arena exists to avoid, so this is the frame going`
+      + ` quadratic in covering proxies again. Fix by raising coverageCandidatesPerPixel (linear arena memory:`
+      + ` width * height * 4 B per candidate), by shrinking the covering set (W3's near-field band), or by`
+      + ` accepting it and giving the overflow pass an overflow-driven indirect count so at least the frames`
+      + ` that do not overflow stop paying for it.`,
+  };
+}
+
+/**
+ * Bytes to allocate for the per-pixel count buffer: the pixel range plus the
+ * overflow tail. `svoBrickRasterCoverageCountBytes` remains the *pixel* range
+ * and is what a per-frame clear must use, so the tail survives the clear.
+ *
+ * The buffer needs `GPUBufferUsage.INDIRECT` in addition to its existing usage,
+ * because the tail is what the overflow pass draws from.
+ */
+export function svoRasterCoverageCountAllocationBytes(width: number, height: number): number {
+  return svoBrickRasterCoverageCountBytes(width, height)
+    + SVO_RASTER_COVERAGE_OVERFLOW_CONTRACT.tailWords * Uint32Array.BYTES_PER_ELEMENT;
+}
+
+/** Byte offset of the draw-args block, for `drawIndirect`. */
+export function svoRasterCoverageOverflowDrawArgsOffsetBytes(width: number, height: number): number {
+  return svoBrickRasterCoverageCountBytes(width, height)
+    + SVO_RASTER_COVERAGE_OVERFLOW_CONTRACT.drawArgsWord * Uint32Array.BYTES_PER_ELEMENT;
+}
+
+/**
+ * Raise the overflow flag. Included by the dry scene beside its coverage
+ * fragments, which declare the count buffer as `array<atomic<u32>>`.
+ *
+ * Called only on the fragment that takes the first slot past capacity, so the
+ * counter is a count of overflowing *pixels* rather than of surplus fragments —
+ * which is the number the W1 gate ("overflow rate < 1 % of covered pixels")
+ * asks for, and a diagnostic worth having on its own.
+ */
+export const svoRasterCoverageOverflowSignalWGSL = /* wgsl */ `
+const SVO_RASTER_COVERAGE_TAIL_WORDS:u32=${SVO_RASTER_COVERAGE_OVERFLOW_CONTRACT.tailWords}u;
+fn svoRasterCoverageOverflowSignal(){
+  let words=arrayLength(&svoBrickCoverageCounts);
+  if(words<SVO_RASTER_COVERAGE_TAIL_WORDS){return;}
+  atomicAdd(&svoBrickCoverageCounts[words-SVO_RASTER_COVERAGE_TAIL_WORDS+${SVO_RASTER_COVERAGE_OVERFLOW_CONTRACT.overflowPixelWord}u],1u);
+}
+`;
+
+/**
+ * Group-zero layout of the one-lane publisher.
+ *
+ * Deliberately its own layout and its own module rather than a fourth entry
+ * point on the cull module: the cull module already binds the publication as
+ * read-write at group 0, and one module cannot declare the same slot twice with
+ * two access modes. Keeping it separate also leaves every shipped layout in
+ * this file byte-identical.
+ */
+export function svoRasterCoverageOverflowArgsBindGroupLayoutEntries(): GPUBindGroupLayoutEntry[] {
+  const { bindings } = SVO_RASTER_COVERAGE_OVERFLOW_CONTRACT;
+  const visibility = GPUShaderStage.COMPUTE;
+  return [
+    { binding: bindings.publication, visibility, buffer: { type: "read-only-storage" } },
+    { binding: bindings.coverageCounts, visibility, buffer: { type: "storage" } },
+  ];
+}
+
+/**
+ * The publisher. One lane, no loop: it reads the flag the coverage fragment
+ * raised and the instance count the scan published, and writes the draw-args
+ * block. `instanceCount` is the *culled* count, not the arena capacity, because
+ * the whole point is to stop paying vertex work for instances that exist.
+ *
+ * `overflowInstanceCount` overrides that source for the authored-SDF arm, whose
+ * coverage pass draws a host-known record count rather than a GPU-culled one.
+ */
+export function createSvoRasterCoverageOverflowArgsWGSL(options: {
+  verticesPerInstance?: number;
+  overflowInstanceCount?: number;
+} = {}): string {
+  const contract = SVO_RASTER_COVERAGE_OVERFLOW_CONTRACT;
+  const { bindings } = contract;
+  const vertices = options.verticesPerInstance ?? SVO_BRICK_RASTER_CONTRACT.verticesPerInstance;
+  const instances = options.overflowInstanceCount === undefined
+    ? `svoRasterOverflowPublication[${contract.publicationInstanceCountWord}u]`
+    : `${options.overflowInstanceCount}u`;
+  return /* wgsl */ `
+@group(0) @binding(${bindings.publication}) var<storage,read> svoRasterOverflowPublication:array<u32>;
+@group(0) @binding(${bindings.coverageCounts}) var<storage,read_write> svoRasterOverflowCounts:array<u32>;
+const SVO_RASTER_COVERAGE_TAIL_WORDS:u32=${contract.tailWords}u;
+@compute @workgroup_size(1)
+fn ${contract.entryPoints.publishArgs}(){
+  let words=arrayLength(&svoRasterOverflowCounts);
+  if(words<SVO_RASTER_COVERAGE_TAIL_WORDS){return;}
+  let tail=words-SVO_RASTER_COVERAGE_TAIL_WORDS;
+  let overflowed=svoRasterOverflowCounts[tail+${contract.overflowPixelWord}u];
+  let args=tail+${contract.drawArgsWord}u;
+  // The vertex count is written every frame rather than once per allocation:
+  // the frame's own clear of the pixel range must be allowed to grow into the
+  // tail without silently turning the overflow pass into a no-op.
+  svoRasterOverflowCounts[args]=${vertices}u;
+  svoRasterOverflowCounts[args+1u]=select(0u,${instances},overflowed!=0u);
+  svoRasterOverflowCounts[args+2u]=0u;
+  svoRasterOverflowCounts[args+3u]=0u;
+}
+`;
 }
 
 /** Standalone group-zero layout for the emission, scan and scatter passes. */
@@ -135,16 +548,16 @@ export function svoBrickRasterDrawBindGroupLayoutEntries(): GPUBindGroupLayoutEn
 export function svoBrickRasterCoverageBindGroupLayoutEntries(): GPUBindGroupLayoutEntry[] {
   return [
     { binding: SVO_BRICK_RASTER_CONTRACT.instanceDrawBinding,
-      visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
+      visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT | GPUShaderStage.COMPUTE,
       buffer: { type: "read-only-storage" } },
     {
       binding: SVO_BRICK_RASTER_CONTRACT.coverageCountBinding,
-      visibility: GPUShaderStage.FRAGMENT,
+      visibility: GPUShaderStage.FRAGMENT | GPUShaderStage.COMPUTE,
       buffer: { type: "storage" },
     },
     {
       binding: SVO_BRICK_RASTER_CONTRACT.coverageCandidateBinding,
-      visibility: GPUShaderStage.FRAGMENT,
+      visibility: GPUShaderStage.FRAGMENT | GPUShaderStage.COMPUTE,
       buffer: { type: "storage" },
     },
   ];
@@ -295,8 +708,13 @@ fn ${SVO_BRICK_RASTER_CONTRACT.entryPoints.emit}(@builtin(global_invocation_id) 
   if(leafIndex>=svoBrickControl(1u)||leafIndex>=arrayLength(&svoBrickCandidates)){return;}
   let leaf=svoBrickLeaf(leafIndex).topology;
   let nodeIndex=leaf.x;
-  if(nodeIndex>=svoBrickControl(0u)||nodeIndex>SVO_BRICK_NODE_INDEX_MASK){return;}
+  // Counted before any rejection, so that resident - candidates - culled -
+  // empty is exactly the number of leaves the line below dropped for having an
+  // unaddressable or stale node index. Nothing in the emit kernel can print;
+  // this residual is what makes that drop visible to a reader of the published
+  // state (svoBrickRasterSortStateDiagnostics) instead of silent.
   atomicAdd(&svoBrickRaster.sort.resident,1u);
+  if(nodeIndex>=svoBrickControl(0u)||nodeIndex>SVO_BRICK_NODE_INDEX_MASK){return;}
   let node=svoBrickNode(nodeIndex);
   let occupancy=svoBrickOccupancyDecode(node.links.w);
   // An empty brick can never produce a primary hit, so it is never drawn. The

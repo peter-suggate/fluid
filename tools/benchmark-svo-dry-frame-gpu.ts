@@ -30,6 +30,9 @@
  *      FLUID_SVO_DRY_FRAME_BRICK_OCCUPANCY (off | bounds | macro | macro-hdda; default off),
  *      FLUID_SVO_DRY_FRAME_BRICK_SIZE (4 | 8; renderer-only scene override),
  *      FLUID_SVO_DRY_FRAME_SHADING (inline | split; default split production path),
+ *      FLUID_SVO_DRY_FRAME_SCENE_PRIMITIVE_DIRECT (1 forces the authored-SDF set back onto the
+ *      direct proxy fragment; the per-arm control that _DIRECT_BRICK cannot give, since that
+ *      one moves the brick arm and this one together),
  *      FLUID_SVO_DRY_FRAME_RASTER_GLASS (1 enables coverage-scaled pane discovery),
  *      FLUID_SVO_DRY_FRAME_RASTER_RIGID (1 enables current-frame rigid impostor discovery),
  *      FLUID_SVO_DRY_FRAME_RASTER_RIGID_FORCE (1 forces the raster arm below its adaptive body-count crossover),
@@ -60,10 +63,18 @@
  *      FLUID_SVO_DRY_FRAME_SYNTHETIC_RIGID_TRANSITION=1 pre-warms static GI,
  *      then marks that body moving and reports its first six frames.
  *      FLUID_SVO_DRY_FRAME_TIMING selects wall (default) for serialized
- *      submit-to-fence timing or gpu for strict hardware timestamps. A gpu
- *      request fails closed when the adapter cannot provide timestamp queries.
- *      FLUID_SVO_DRY_FRAME_PHASE_TRACE=1 captures one configured frame as
- *      individually timestamped production render stages before timing.
+ *      submit-to-fence timing or gpu for hardware timestamps — per-pass
+ *      begin/end counter pairs, reported as the frame's span from earliest
+ *      begin to latest end, which excludes the wall lane's ~11 ms/frame of
+ *      Dawn encoder.finish(). A gpu request fails closed when the adapter
+ *      cannot provide timestamp queries.
+ *      FLUID_SVO_DRY_FRAME_BUDGET_MS optionally fails the lane when its frame
+ *      median exceeds the authored ceiling.
+ *      FLUID_SVO_DRY_FRAME_PHASE_TRACE=1 captures one configured frame per
+ *      pass, reported under `configuredPassTiming` (span, sum, overlap and
+ *      every pass by name) plus `configuredPhaseTrace` folded onto phase ids.
+ *      Both lanes previously used marker-pass boundary chains and aborted on
+ *      Dawn/Metal; see lib/performance-trace.ts GPUPassTimestampRecorder.
  *      FLUID_SVO_DRY_FRAME_PROFILE_SECONDS runs a clean, continuously submitted
  *      render-only frame loop for external xctrace attachment and exits before
  *      the benchmark's timestamp queries, A/Bs, or readbacks.
@@ -79,14 +90,19 @@ import zlib from "node:zlib";
 import type { EnvironmentId } from "../lib/environments";
 import { defaultCamera, type CameraState, type SceneDescription } from "../lib/model";
 import {
-  DynamicGPUPerformanceTraceRecorder,
-  GPUPerformanceTraceRecorder,
-  type GPUTimestampPhase,
+  GPUPassTimestampRecorder,
+  passTimestampPerformanceTrace,
+  type GPUPassTimestampReading,
+  type GPUPassTimestampSample,
+  type PaperPhaseId,
   type PerformanceTrace,
 } from "../lib/performance-trace";
+import { heroGardenCamera } from "../lib/hero-garden-scene";
+import { createHeroGardenHoseStressScene } from "../lib/hero-garden-stress-scene";
 import { getScenePreset } from "../lib/scenes";
 import type { SvoConeTracingMode } from "../lib/svo-render-options";
 import { DEFAULT_SVO_RENDER_TUNING, type SvoConeRadianceReconstruction } from "../lib/svo-render-tuning";
+import { effectiveSvoScreenSpaceThresholdPixels, SVO_SCREEN_SPACE_TERMINATION_CONTRACT } from "../lib/svo-screen-space-termination";
 import { WebGPULiveSvoScene } from "../lib/webgpu-live-svo-scene";
 import { LIVE_SVO_RADIANCE_FEEDBACK } from "../lib/webgpu-svo-live-derived-builder";
 import {
@@ -175,11 +191,35 @@ const scenePresetId = process.env.FLUID_SVO_DRY_FRAME_SCENE ?? "garden-svo-light
 const radianceFeedbackFrames = radianceFeedbackEnabled
   ? Number(process.env.FLUID_SVO_DRY_FRAME_FEEDBACK_FRAMES ?? LIVE_SVO_RADIANCE_FEEDBACK.settleFrameCount)
   : 1;
+/**
+ * The paired record-scale lane: the same scene at two authored record counts,
+ * measured per pass, interleaved.
+ *
+ * `FLUID_SVO_DRY_FRAME_RECORD_SCALE=1,10` builds `hero-garden-hose` densified
+ * to each multiplier (`lib/hero-garden-stress-scene.ts`) behind the *same*
+ * camera, then alternates A/B/A/B capturing one GPU-timestamp phase partition
+ * per frame. Interleaved rather than run-then-run because everything that drifts
+ * over a process — thermal state, the persistent GI cache converging, Dawn's
+ * allocator — drifts across both arms equally that way and cancels in the pair,
+ * while two consecutive blocks would attribute all of it to whichever arm ran
+ * second.
+ *
+ * Timestamps rather than the `PROFILE_SECONDS` wall lane, deliberately: that
+ * lane's frame wall carries ~11 ms/frame of Dawn `encoder.finish()` CPU
+ * translation, which is not GPU work and is not what a 10x record count is
+ * expected to move (`docs/svo-raster-visibility-handoff.md` §5/W0).
+ */
+const recordScaleMultipliers: readonly number[] | undefined = process.env.FLUID_SVO_DRY_FRAME_RECORD_SCALE
+  ? process.env.FLUID_SVO_DRY_FRAME_RECORD_SCALE.split(",").map(Number)
+  : undefined;
+const recordScaleCycles = Number(process.env.FLUID_SVO_DRY_FRAME_RECORD_SCALE_CYCLES ?? 8);
 const profileSeconds = Number(process.env.FLUID_SVO_DRY_FRAME_PROFILE_SECONDS ?? 0);
 const profileBatch = Number(process.env.FLUID_SVO_DRY_FRAME_PROFILE_BATCH ?? 1);
 const isolateProfilePassEncoders = process.env.FLUID_SVO_DRY_FRAME_ISOLATE_PASS_ENCODERS === "1";
 const readConeBoundaryCount = process.env.FLUID_SVO_DRY_FRAME_BOUNDARY_COUNT === "1";
 const timingMode = process.env.FLUID_SVO_DRY_FRAME_TIMING ?? "wall";
+const frameBudget_ms = process.env.FLUID_SVO_DRY_FRAME_BUDGET_MS === undefined
+  ? undefined : Number(process.env.FLUID_SVO_DRY_FRAME_BUDGET_MS);
 const forceWallTiming = timingMode === "wall";
 const phaseTraceEnabled = process.env.FLUID_SVO_DRY_FRAME_PHASE_TRACE === "1";
 const traversalModeRaw = process.env.FLUID_SVO_DRY_FRAME_TRAVERSAL ?? "canonical-parametric";
@@ -205,6 +245,16 @@ const optimizationExperiments: SvoDryOptimizationExperiments = {
   shortTraversalStack: process.env.FLUID_SVO_DRY_FRAME_SHORT_STACK === "1",
   tinyTraversalStack: process.env.FLUID_SVO_DRY_FRAME_TINY_STACK === "1",
   rasterPrimaryDirect: process.env.FLUID_SVO_DRY_FRAME_DIRECT_BRICK === "1",
+  /**
+   * The per-arm control for W1's authored-SDF coverage/resolve arena.
+   *
+   * `FLUID_SVO_DRY_FRAME_DIRECT_BRICK` also forces this one on
+   * (`lib/webgpu-svo-dry-scene.ts:4934`), which is right for its own subject —
+   * a direct brick path has no arena for the SDF set to share — and useless for
+   * attributing a pixel or a millisecond, because it moves both arms at once.
+   * This flag moves the authored-SDF arm alone, so a paired run isolates it.
+   */
+  scenePrimitiveDirect: process.env.FLUID_SVO_DRY_FRAME_SCENE_PRIMITIVE_DIRECT === "1",
   rasterPrimaryNoFragmentDepth: process.env.FLUID_SVO_DRY_FRAME_NO_FRAG_DEPTH === "1",
   rasterPrimaryHsrProbe: process.env.FLUID_SVO_DRY_FRAME_HSR_PROBE === "1",
   scenePrimitiveHsrProbe: process.env.FLUID_SVO_DRY_FRAME_SCENE_HSR_PROBE === "1",
@@ -256,6 +306,8 @@ assert.ok(silhouetteRefinementRaw === "0" || silhouetteRefinementRaw === "1",
   "FLUID_SVO_DRY_FRAME_PRIMARY_SEAM_CLOSURE must be 0 or 1");
 assert.ok(timingMode === "wall" || timingMode === "gpu",
   "FLUID_SVO_DRY_FRAME_TIMING must be wall or gpu");
+assert.ok(frameBudget_ms === undefined || Number.isFinite(frameBudget_ms) && frameBudget_ms > 0,
+  "FLUID_SVO_DRY_FRAME_BUDGET_MS must be a positive finite number");
 assert.ok(["nearest", "gated-linear", "joint-bilateral", "wide-relight", "full-res-relight"].includes(radianceReconstructionRaw),
   "FLUID_SVO_DRY_FRAME_RADIANCE_RECONSTRUCTION must be nearest, gated-linear, joint-bilateral, wide-relight, or full-res-relight");
 assert.ok(Number.isFinite(profileSeconds) && profileSeconds >= 0,
@@ -402,10 +454,348 @@ const { adapterInfo, device, timestampsSupported, validationErrors } = await cre
   dawnFeatures: (process.env.FLUID_WEBGPU_DAWN_FEATURES ?? "").split(","),
   // FLUID_SVO_DRY_FRAME_TIMING=gpu asked for hardware timestamps, so a wall-time
   // fallback would silently report a different measurement than the one requested.
-  requireTimestampQuery: timingMode === "gpu",
+  // The record-scale lane reports per-pass numbers and nothing else, so it fails
+  // closed on the same condition without having to be asked.
+  requireTimestampQuery: timingMode === "gpu" || recordScaleMultipliers !== undefined,
   requireShaderF16: f16Requested,
 });
 log(`Adapter: ${JSON.stringify(adapterInfo)} timestamps=${timestampsSupported}`);
+
+// ---------------------------------------------------------------------------
+// Paired, interleaved record-scale lane. Runs instead of everything below.
+// ---------------------------------------------------------------------------
+if (recordScaleMultipliers) {
+  assert.ok(recordScaleMultipliers.length >= 2 && recordScaleMultipliers.every((value) => Number.isFinite(value)),
+    "FLUID_SVO_DRY_FRAME_RECORD_SCALE needs at least two comma-separated multipliers");
+  assert.ok(Number.isSafeInteger(recordScaleCycles) && recordScaleCycles > 0,
+    "FLUID_SVO_DRY_FRAME_RECORD_SCALE_CYCLES must be a positive integer");
+  assert.ok(GPUPassTimestampRecorder.supported(device),
+    "the record-scale lane reports per-pass GPU timestamps; this adapter offers none");
+
+  interface RecordScaleArm {
+    readonly multiplier: number;
+    readonly recordCount: number;
+    readonly clusterCount: number;
+    readonly solver: WebGPULiveSvoScene;
+    readonly renderer: SparseVoxelDrySceneRenderer;
+    readonly target: GPUTexture;
+    readonly uniformBuffer: GPUBuffer;
+    readonly bodyBuffer: GPUBuffer;
+    readonly nodeMipPages: number;
+  }
+
+  /**
+   * One arm: its own world, its own dry-scene publication, its own renderer.
+   *
+   * Two live worlds on one device rather than two processes, because the pair
+   * has to be interleaved to be worth anything and a process boundary cannot be
+   * interleaved. Everything not under test is shared by construction — one
+   * adapter, one device, one camera, one viewport, one set of render options.
+   */
+  async function createRecordScaleArm(multiplier: number): Promise<RecordScaleArm> {
+    const armScene = createHeroGardenHoseStressScene({ recordMultiplier: multiplier });
+    const armCamera: CameraState = {
+      ...defaultCamera, ...heroGardenCamera,
+      target_m: { ...(heroGardenCamera.target_m ?? defaultCamera.target_m) },
+    };
+    const armEnvironment: EnvironmentId = (armScene.environment ?? "default") as EnvironmentId;
+    const armSolver = await WebGPULiveSvoScene.create(device, armScene, "balanced",
+      ({ label, completed, total }) => log(`  [world x${multiplier}] ${label} (${completed}/${total})`));
+    const publication = device.createCommandEncoder({ label: `Record-scale x${multiplier} initial publication` });
+    armSolver.encodeSceneMaintenance(publication);
+    device.queue.submit([publication.finish()]);
+    await device.queue.onSubmittedWorkDone();
+    const armSource = armSolver.sparseVoxelSceneSource;
+    assert.ok(armSource?.structural, `x${multiplier} published no structural scene source`);
+    const { drySceneData: armDryScene, scenePrimitives: armPrimitives } = buildSvoDrySceneAssembly(armScene, armSource);
+    assert.ok(canEncodeSparseVoxelDryScene(armSource, armDryScene),
+      `the production dry-scene contract rejected the x${multiplier} source`);
+    const armUniforms = device.createBuffer({
+      label: `Record-scale x${multiplier} view uniforms`,
+      size: SVO_VIEW_UNIFORM_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+    const armBodyBuffer = device.createBuffer({
+      label: `Record-scale x${multiplier} rigid bodies`,
+      size: 12 * 64,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+    const armBodies = packSvoDryRigidBodies(armScene);
+    device.queue.writeBuffer(armUniforms, 0, packSvoDryViewUniforms({
+      scene: armScene, camera: armCamera, environmentId: armEnvironment,
+      info: armSolver.info, bodyCount: armBodies.count, width, height,
+    }));
+    device.queue.writeBuffer(armBodyBuffer, 0, armBodies.data);
+    const armRenderer = new SparseVoxelDrySceneRenderer(device, armUniforms, armBodyBuffer, "rgba16float",
+      traversalMode, brickOccupancyMode, shadingPath, screenSpaceTerminationPixels, rayCoherenceMode,
+      rasterGlassDiscovery, rasterRigidDiscovery, coneFanout, optimizationExperiments);
+    await armRenderer.initialize();
+    armRenderer.setRigidBodyCount(armBodies.count);
+    armRenderer.setRenderTuning({ ...DEFAULT_SVO_RENDER_TUNING, coneLightingScale: coneScale,
+      coneRadianceReconstruction: radianceReconstruction, maximumShadedLights });
+    armRenderer.setLightingOptions({
+      shadowsEnabled, ambientOcclusionEnabled, silhouetteRefinementEnabled,
+      coneLightingScale: coneScale, coneTracingMode,
+    });
+    if (coneTracingMode === "cones" && coneScale !== 1) await armRenderer.ensureConeLightingPrepass();
+    armRenderer.setSource(armSource);
+    armRenderer.publishScene(armDryScene);
+    armRenderer.ensureSize(width, height);
+    return {
+      multiplier,
+      recordCount: armPrimitives.packedRecords.byteLength / 64,
+      clusterCount: armPrimitives.clusterPackings.length,
+      solver: armSolver,
+      renderer: armRenderer,
+      nodeMipPages: armSource.nodeMipPyramid?.plan.pages.length ?? 0,
+      uniformBuffer: armUniforms,
+      bodyBuffer: armBodyBuffer,
+      target: device.createTexture({
+        label: `Record-scale x${multiplier} radianceDepth target`,
+        size: [width, height],
+        format: SVO_GBUFFER_RENDER_TARGET_CONTRACT.externalRadianceDepthFormat,
+        usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC,
+      }),
+    };
+  }
+
+  const arms: RecordScaleArm[] = [];
+  const blocked: { multiplier: number; error: string }[] = [];
+  for (const multiplier of recordScaleMultipliers) {
+    try {
+      arms.push(await createRecordScaleArm(multiplier));
+    } catch (error) {
+      // A capacity cliff between here and 10x is the thing this program is
+      // cataloguing, so it is a *result*, not a crash: name the arm, keep the
+      // message verbatim, and let the arms that did build still be measured.
+      blocked.push({ multiplier, error: error instanceof Error ? error.message : String(error) });
+      log(`  [x${multiplier}] blocked: ${blocked[blocked.length - 1].error}`);
+    }
+  }
+
+  // A blocked arm raises Dawn validation errors on its way out (a capacity
+  // cliff shows up as an oversized `writeBuffer` before it shows up as a
+  // throw), and those belong to the arm that failed rather than to the frames
+  // measured below. Baseline here so the assertions after warmup are about the
+  // measurement and not about the diagnosis.
+  const validationBaseline = validationErrors.length;
+  const passSamples = new Map<number, GPUPassTimestampReading[]>();
+  const wall_ms = new Map<number, number[]>();
+  for (const arm of arms) {
+    passSamples.set(arm.multiplier, []);
+    wall_ms.set(arm.multiplier, []);
+    for (let index = 0; index < Math.max(1, warmups); index += 1) {
+      const encoder = device.createCommandEncoder({ label: `Record-scale x${arm.multiplier} warmup ${index}` });
+      const result = arm.renderer.encode(encoder, arm.target, undefined);
+      assert.ok(result && result.encoded, `x${arm.multiplier} declined the frame`);
+      device.queue.submit([encoder.finish()]);
+    }
+  }
+  await device.queue.onSubmittedWorkDone();
+  assert.equal(validationErrors.length, validationBaseline,
+    `GPU validation errors during record-scale warmup: ${validationErrors.slice(validationBaseline).join(" | ")}`);
+
+  /**
+   * One instrumented frame, retried.
+   *
+   * The retry is for the first frame on a renderer, where a pass whose pipeline
+   * Dawn compiles inline can miss its counter sample; `read()` refuses a frame
+   * with any zero or inverted pair rather than reporting a plausible number.
+   */
+  async function timeOneFrame(arm: RecordScaleArm, label: string): Promise<GPUPassTimestampReading | undefined> {
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const timestamps = new GPUPassTimestampRecorder(device, 512, `Record-scale x${arm.multiplier}`);
+      const encoder = device.createCommandEncoder({ label: `${label} attempt ${attempt}` });
+      // Everywhere the raw encoder would have gone: a pass opened on the
+      // unwrapped encoder carries no counters and is invisible to the report.
+      const instrumented = timestamps.instrument(encoder);
+      const result = arm.renderer.encode(instrumented, arm.target, undefined);
+      assert.ok(result && result.encoded, `x${arm.multiplier} declined an instrumented frame`);
+      if (!timestamps.resolve(encoder)) continue;
+      const started = performance.now();
+      device.queue.submit([encoder.finish()]);
+      await device.queue.onSubmittedWorkDone();
+      const elapsed_ms = performance.now() - started;
+      const reading = await timestamps.read();
+      if (reading) {
+        wall_ms.get(arm.multiplier)!.push(elapsed_ms);
+        return reading;
+      }
+    }
+    return undefined;
+  }
+
+  // One discarded instrumented frame per arm, so the first *counted* one is not
+  // the first this renderer has ever seen instrumented.
+  for (const arm of arms) await timeOneFrame(arm, `Record-scale x${arm.multiplier} timing warmup`);
+  for (const arm of arms) wall_ms.set(arm.multiplier, []);
+
+  // A/B/A/B. One instrumented frame per arm per cycle, each its own submission
+  // and fence, so a slow arm cannot hide inside a batch with a fast one.
+  for (let cycle = 0; cycle < recordScaleCycles; cycle += 1) {
+    for (const arm of arms) {
+      const reading = await timeOneFrame(arm, `Record-scale x${arm.multiplier} cycle ${cycle}`);
+      if (reading) passSamples.get(arm.multiplier)!.push(reading);
+    }
+  }
+  for (const arm of arms) {
+    assert.ok(passSamples.get(arm.multiplier)!.length > 0,
+      `x${arm.multiplier} produced no usable per-pass GPU timestamps in ${3 * recordScaleCycles} attempts`);
+  }
+  assert.equal(validationErrors.length, validationBaseline,
+    `GPU validation errors during the record-scale pair: ${validationErrors.slice(validationBaseline).join(" | ")}`);
+
+  /**
+   * Per-pass medians, keyed by the pass's ordinal *and* label.
+   *
+   * A frame opens more than one pass under the same label — the split shading
+   * path runs its dry-lighting pass per variant — so folding on the label alone
+   * would silently add two unrelated numbers together.
+   *
+   * **Render passes report no number.** Their counter pair brackets the
+   * tiler-hoisted vertex stage through the deferred fragment stage, so the
+   * window is not the pass's cost — see `GPUPassTimestampSample.trusted`. This
+   * lane used to publish those windows as durations and it produced a wrong
+   * finding that survived into a handoff, so the row is kept (its absence would
+   * be its own lie about what the frame contains) with a null median and the
+   * reason attached. `tools/profile-svo-render-xctrace.ts` is the lane that can
+   * attribute a render pass on this hardware.
+   */
+  const RENDER_PASS_UNAVAILABLE = "render-pass counter pairs bracket [tiler-hoisted vertex start,"
+    + " deferred fragment end] on this GPU; the window is not the pass's cost"
+    + " (measured 200x wrong). Use tools/profile-svo-render-xctrace.ts for per-stage attribution.";
+  function passMedians(samples: readonly GPUPassTimestampReading[]): {
+    key: string; kind: "compute" | "render"; median_ms: number | null; sampled: boolean;
+    windowMedian_ms?: number; unavailable?: string;
+  }[] {
+    if (samples.length === 0) return [];
+    const byKey = new Map<string, { values: number[]; sampled: boolean; kind: "compute" | "render" }>();
+    for (const frame of samples) {
+      const seen = new Map<string, number>();
+      for (const pass of frame.passes) {
+        const ordinal = (seen.get(pass.label) ?? 0) + 1;
+        seen.set(pass.label, ordinal);
+        const key = `${pass.label}#${ordinal}`;
+        const row = byKey.get(key) ?? { values: [], sampled: false, kind: pass.kind };
+        row.values.push(pass.duration_ms);
+        row.sampled = row.sampled || pass.sampled;
+        byKey.set(key, row);
+      }
+    }
+    return [...byKey]
+      .map(([key, row]) => {
+        const window_ms = Number(median(row.values).toFixed(4));
+        return row.kind === "compute"
+          ? { key, kind: row.kind, median_ms: window_ms, sampled: row.sampled }
+          : {
+            key, kind: row.kind, median_ms: null, sampled: row.sampled,
+            windowMedian_ms: window_ms, unavailable: RENDER_PASS_UNAVAILABLE,
+          };
+      })
+      .sort((left, right) => (right.median_ms ?? -1) - (left.median_ms ?? -1));
+  }
+
+  const armReports = arms.map((arm) => {
+    const samples = passSamples.get(arm.multiplier)!;
+    // The sum of the passes, not an independent measurement of the frame, and
+    // measurably not one: at x1 the passes sum to 191.8 ms inside a 99.0 ms
+    // submit-to-fence, because an Apple GPU keeps stages of adjacent passes in
+    // flight together and each pass's own begin/end counters therefore bracket
+    // time its neighbour is also using. Gaps between passes, symmetrically, are
+    // counted by nobody. It is the right number to compare *between arms* under
+    // identical instrumentation and the wrong one to compare against a clock.
+    // Compute passes only. The render-pass windows that used to be in this sum
+    // each carried most of the frame wall, so the "frame GPU" number it
+    // produced was several frames long and moved with anything that moved the
+    // frame — which is exactly how a pass that costs 0.144 ms was reported as
+    // scaling 10.5x with record count.
+    const summed_ms = samples.map(({ trustedSum_ms }) => trustedSum_ms);
+    // The span each frame's passes actually occupied: earliest sampled begin to
+    // latest sampled end. Overlap is inside it exactly once, so unlike the sum
+    // this *is* comparable against a clock — it is the submit-to-fence wall
+    // above minus Dawn's CPU translation and the queue's own latency.
+    const span_ms = samples.map(({ span_ms: value }) => value);
+    return {
+      multiplier: arm.multiplier,
+      recordCount: arm.recordCount,
+      clusterCount: arm.clusterCount,
+      nodeMipPages: arm.nodeMipPages,
+      timedFrames: samples.length,
+      passCount: samples[0]?.passes.length ?? 0,
+      /** Render passes, whose per-pass windows this lane refuses to report. */
+      unattributablePassCount: samples[0]?.untrustedPassCount ?? 0,
+      /** Passes the hardware declined to sample; reported at zero, never guessed. */
+      unsampledPasses: (samples[0]?.passes ?? []).filter(({ sampled }) => !sampled).map(({ label }) => label),
+      /** Sum over compute passes only; see `unattributablePassCount`. */
+      computePassGpuMedian_ms: samples.length === 0 ? undefined : Number(median(summed_ms).toFixed(4)),
+      computePassGpuP95_ms: samples.length === 0 ? undefined : Number(percentile95(summed_ms).toFixed(4)),
+      frameGpuMedian_ms: samples.length === 0 ? undefined : Number(median(samples.map(({ span_ms }) => span_ms)).toFixed(4)),
+      frameGpuSpanMedian_ms: samples.length === 0 ? undefined : Number(median(span_ms).toFixed(4)),
+      /** sum / span. 1 is strictly serial; above 1 is how much the passes overlap. */
+      passOverlapMedian: samples.length === 0 ? undefined
+        : Number(median(samples.map(({ overlap }) => overlap)).toFixed(3)),
+      // Traced frames, so this carries the marker passes and Dawn's own
+      // encode/finish CPU as well as the GPU work. The per-pass medians below
+      // are the measurement; this is context for them.
+      tracedSubmitToFenceMedian_ms: Number(median(wall_ms.get(arm.multiplier)!).toFixed(4)),
+      passes: passMedians(samples),
+    };
+  });
+  // The pair itself, as ratios per pass against the first arm — which is the
+  // number W3's gate is stated in ("frame cost < 1.3x at 10x records").
+  const base = armReports[0];
+  const pairs = armReports.slice(1).map((arm) => ({
+    against: `x${base?.multiplier} -> x${arm.multiplier}`,
+    recordRatio: base ? Number((arm.recordCount / base.recordCount).toFixed(3)) : undefined,
+    frameRatio: base?.frameGpuMedian_ms && arm.frameGpuMedian_ms
+      ? Number((arm.frameGpuMedian_ms / base.frameGpuMedian_ms).toFixed(3)) : undefined,
+    passRatios: arm.passes.map((pass) => {
+      const reference = base?.passes.find(({ key }) => key === pass.key);
+      return {
+        key: pass.key,
+        kind: pass.kind,
+        median_ms: pass.median_ms,
+        referenceMedian_ms: reference?.median_ms ?? null,
+        // A ratio of two tiler windows is a ratio of two frame walls wearing a
+        // shader's name, so render passes get none.
+        ratio: pass.median_ms !== null && reference?.median_ms
+          ? Number((pass.median_ms / reference.median_ms).toFixed(3)) : undefined,
+        unavailable: pass.unavailable,
+      };
+    }),
+  }));
+
+  const recordScaleReport = {
+    phase: "svo-dry-frame-record-scale",
+    lane: "paired-interleaved-gpu-timestamps",
+    scene: "hero-garden-hose (densified per multiplier)",
+    camera: "heroGardenCamera, unchanged across arms",
+    adapter: adapterInfo,
+    resolution: { width, height },
+    coneScale,
+    coneTracingMode,
+    traversalMode,
+    shadingPath,
+    cycles: recordScaleCycles,
+    warmups: Math.max(1, warmups),
+    arms: armReports,
+    pairs,
+    blocked,
+  };
+  const recordScaleOut = process.env.FLUID_SVO_DRY_FRAME_OUT ?? "/tmp/svo-bench/record-scale.json";
+  mkdirSync(path.dirname(recordScaleOut), { recursive: true });
+  writeFileSync(recordScaleOut, `${JSON.stringify(recordScaleReport, null, 2)}\n`);
+  console.log(JSON.stringify(recordScaleReport, null, 2));
+  for (const arm of arms) {
+    arm.renderer.destroy();
+    arm.target.destroy();
+    arm.uniformBuffer.destroy();
+    arm.bodyBuffer.destroy();
+    arm.solver.destroy();
+  }
+  device.destroy();
+  process.exit(blocked.length > 0 ? 1 : 0);
+}
 
 // ---------------------------------------------------------------------------
 // Build the shipped garden lighting-study world (sparse bricks + node-mip
@@ -575,7 +965,7 @@ const primaryCoherenceKey = rayCoherenceMode === "static-primary"
 function encodeFrame(
   encoder: GPUCommandEncoder,
   reuseKey = primaryCoherenceKey,
-  tracePhase?: (phase: GPUTimestampPhase) => void,
+  tracePhase?: (phase: { id: PaperPhaseId; label: string }) => void,
 ): void {
   const instrumentedEncoder = passEncoderIsolationScratch
     ? isolateComputePassEncoders(encoder, passEncoderIsolationScratch) : encoder;
@@ -622,18 +1012,94 @@ if (readConeBoundaryCount && coneTracingMode === "cones" && coneScale !== 1) {
   readback.destroy();
 }
 
+/**
+ * The frame's own pass labels, folded onto the paper's phase vocabulary.
+ *
+ * Substrings rather than an exhaustive table, because the pass list is the
+ * renderer's to grow and an unmatched pass must land somewhere honest rather
+ * than fail the capture. Order is significant: the authored-SDF passes carry
+ * both "primitive" and "coverage", and they are the row this program is about,
+ * so they are tested first.
+ */
+function classifyDryScenePass(label: string): PaperPhaseId {
+  const text = label.toLowerCase();
+  if (text.includes("live-scene primitive")) return "svo-scene-primitive";
+  if (text.includes("brick instance cull")) return "svo-brick-cull";
+  if (text.includes("rigid")) return "svo-rigid";
+  if (text.includes("glass")) return "svo-glass";
+  if (text.includes("gi ") || text.includes("global illumination") || text.includes("environment")) return "svo-environment-gi";
+  if (text.includes("cone")) return "svo-cone-lighting";
+  if (text.includes("brick") || text.includes("primary") || text.includes("terrain")) return "svo-primary";
+  if (text.includes("lighting") || text.includes("shading") || text.includes("composite")) return "dry-scene";
+  return "other";
+}
+
+/**
+ * One instrumented frame, as per-pass hardware time.
+ *
+ * This used to be a `DynamicGPUPerformanceTraceRecorder` boundary chain and it
+ * never once resolved on this machine — the assertion below fired on every run,
+ * three attempts each. The cause is in `lib/performance-trace.ts`
+ * (`GPUPassTimestampRecorder`): a standalone marker compute pass is scheduled
+ * away from the work it brackets on Dawn/Metal, and one displaced boundary
+ * invalidates the whole partition. Per-pass counter pairs have no such failure
+ * mode, so this lane now reports rather than aborts. What it gives up is that
+ * the pass durations no longer sum to the frame: `span_ms` is the frame time
+ * and the trace's total is the (over-counting) sum, which the `:pass-sum`
+ * context suffix records.
+ */
 let traceSampleId = 0;
 let configuredPhaseTrace: PerformanceTrace | undefined;
-if (phaseTraceEnabled && profileSeconds <= 0 && GPUPerformanceTraceRecorder.supported(device)) {
+let configuredPassTiming: {
+  frameSpan_ms: number;
+  computePassSum_ms: number;
+  allPassWindowSum_ms: number;
+  overlap: number;
+  unattributableRenderPasses: number;
+  passes: {
+    label: string; phase: PaperPhaseId; kind: "compute" | "render";
+    duration_ms: number | null; windowDuration_ms?: number; sampled: boolean; unavailable?: string;
+  }[];
+} | undefined;
+if (phaseTraceEnabled && profileSeconds <= 0 && GPUPassTimestampRecorder.supported(device)) {
   for (let attempt = 0; attempt < 3 && !configuredPhaseTrace; attempt += 1) {
     const encoder = device.createCommandEncoder({ label: `SVO configured phase trace ${attempt}` });
-    const recorder = await DynamicGPUPerformanceTraceRecorder.create(device, ++traceSampleId, "presentation", "svo-dry-frame:configured");
-    recorder.begin(encoder);
-    encodeFrame(encoder, primaryCoherenceKey === undefined ? undefined : `${primaryCoherenceKey}|phase-trace-${attempt}`,
-      (phase) => recorder.completePhase(encoder, phase));
-    recorder.resolve(encoder);
+    const recorder = new GPUPassTimestampRecorder(device, 512, "SVO configured phase trace");
+    const instrumented = recorder.instrument(encoder);
+    encodeFrame(instrumented, primaryCoherenceKey === undefined ? undefined : `${primaryCoherenceKey}|phase-trace-${attempt}`);
+    if (!recorder.resolve(encoder)) { recorder.destroy(); continue; }
     device.queue.submit([encoder.finish()]);
-    configuredPhaseTrace = await recorder.read();
+    const reading = await recorder.read();
+    if (!reading) continue;
+    configuredPhaseTrace = passTimestampPerformanceTrace({
+      reading,
+      sampleId: ++traceSampleId,
+      lane: "presentation",
+      context: "svo-dry-frame:configured",
+      classify: classifyDryScenePass,
+    });
+    configuredPassTiming = {
+      frameSpan_ms: Number(reading.span_ms.toFixed(4)),
+      computePassSum_ms: Number(reading.trustedSum_ms.toFixed(4)),
+      allPassWindowSum_ms: Number(reading.sum_ms.toFixed(4)),
+      overlap: Number(reading.overlap.toFixed(3)),
+      unattributableRenderPasses: reading.untrustedPassCount,
+      // A render pass reports its window under `windowDuration_ms` and nothing
+      // under `duration_ms`, because on this tiler the window is the frame and
+      // not the pass. Reading one as the other is the mistake this field split
+      // exists to prevent.
+      passes: reading.passes.map((pass: GPUPassTimestampSample) => ({
+        label: pass.label,
+        phase: classifyDryScenePass(pass.label),
+        kind: pass.kind,
+        duration_ms: pass.trusted ? Number(pass.duration_ms.toFixed(4)) : null,
+        ...(pass.trusted ? {} : {
+          windowDuration_ms: Number(pass.duration_ms.toFixed(4)),
+          unavailable: "tiler-hoisted vertex start to deferred fragment end; not this pass's cost",
+        }),
+        sampled: pass.sampled,
+      })).sort((left, right) => (right.duration_ms ?? -1) - (left.duration_ms ?? -1)),
+    };
   }
   assert.ok(configuredPhaseTrace, "configured GPU phase trace did not resolve");
   const restore = device.createCommandEncoder({ label: "SVO phase-trace cache restore" });
@@ -717,27 +1183,41 @@ if (profileSeconds > 0) {
 // in-flight passes overlap on Metal and would inflate each pass's span.
 // ---------------------------------------------------------------------------
 let timingMethod: string;
+/**
+ * `FLUID_SVO_DRY_FRAME_TIMING=gpu`: hardware time for the frame, without Dawn's
+ * CPU.
+ *
+ * This was a two-boundary `GPUPerformanceTraceRecorder` chain — one marker pass
+ * before the frame, one after — and it aborted every run on this machine with
+ * "generic GPU performance trace did not resolve", for the reason documented on
+ * `GPUPassTimestampRecorder`: the marker passes do not stay where they were
+ * encoded. Per-pass counter pairs do, and the frame's hardware interval is then
+ * the *span* from the earliest sampled begin to the latest sampled end. Overlap
+ * between passes falls inside that span exactly once, so unlike a sum of passes
+ * it is a frame time and may be compared with the wall lane; what it excludes,
+ * which is the entire point of asking for it, is the ~11 ms/frame of Dawn
+ * `encoder.finish()` translation the wall lane counts.
+ */
 async function timeFrames(count: number, label: string): Promise<number[]> {
   const samples: number[] = [];
-  if (GPUPerformanceTraceRecorder.supported(device) && !forceWallTiming) {
-    timingMethod = "generic-performance-trace";
+  if (GPUPassTimestampRecorder.supported(device) && !forceWallTiming) {
+    timingMethod = "gpu-pass-timestamp-span";
     for (let cycle = 0; cycle < count; cycle += 1) {
-      const encoder = device.createCommandEncoder({ label: `${label} cycle ${cycle}` });
-      const traceRecorder = new GPUPerformanceTraceRecorder(
-        device,
-        ++traceSampleId,
-        "presentation",
-        `svo-dry-frame:${label}`,
-        [{ id: "dry-scene", label: "SVO traversal + dry shading" }],
-      );
-      traceRecorder.boundary(encoder, `${label} trace start`);
-      encodeFrame(encoder);
-      traceRecorder.boundary(encoder, `${label} trace end`);
-      traceRecorder.resolve(encoder);
-      device.queue.submit([encoder.finish()]);
-      const trace = await traceRecorder.read();
-      assert.ok(trace, `generic GPU performance trace did not resolve${validationErrors.length > 0 ? `; device errors: ${validationErrors.join(" | ")}` : ""}`);
-      samples.push(trace.total_ms);
+      let reading: GPUPassTimestampReading | undefined;
+      // Dawn can compile a pipeline inline on a frame and lose that pass's
+      // counters; a frame with any zero or inverted pair is refused rather than
+      // reported, so retry before failing the lane.
+      for (let attempt = 0; attempt < 3 && !reading; attempt += 1) {
+        const encoder = device.createCommandEncoder({ label: `${label} cycle ${cycle} attempt ${attempt}` });
+        const recorder = new GPUPassTimestampRecorder(device, 512, `${label} cycle ${cycle}`);
+        encodeFrame(recorder.instrument(encoder));
+        if (!recorder.resolve(encoder)) { recorder.destroy(); continue; }
+        device.queue.submit([encoder.finish()]);
+        reading = await recorder.read();
+      }
+      assert.ok(reading, `per-pass GPU timestamps did not resolve for ${label} cycle ${cycle}`
+        + `${validationErrors.length > 0 ? `; device errors: ${validationErrors.join(" | ")}` : ""}`);
+      samples.push(reading.span_ms);
     }
   } else {
     timingMethod = `submit-to-onSubmittedWorkDone-wall-time-over-${encodesPerSample}-encodes`;
@@ -753,8 +1233,8 @@ async function timeFrames(count: number, label: string): Promise<number[]> {
   return samples;
 }
 
-timingMethod = GPUPerformanceTraceRecorder.supported(device) && !forceWallTiming
-  ? "generic-performance-trace" : `submit-to-onSubmittedWorkDone-wall-time-over-${encodesPerSample}-encodes`;
+timingMethod = GPUPassTimestampRecorder.supported(device) && !forceWallTiming
+  ? "gpu-pass-timestamp-span" : `submit-to-onSubmittedWorkDone-wall-time-over-${encodesPerSample}-encodes`;
 let rigidMotionTransition_ms: number[] | undefined;
 if (syntheticRigidTransition) {
   // Re-establish a genuinely warm reduced scene cache after the scale-1
@@ -772,6 +1252,10 @@ if (syntheticRigidTransition) {
 const samples = await timeFrames(cycles, "Bench");
 assert.equal(samples.length, cycles);
 assert.deepEqual(validationErrors, [], "GPU validation errors during timing");
+if (frameBudget_ms !== undefined) {
+  assert.ok(median(samples) <= frameBudget_ms,
+    `frame median ${median(samples).toFixed(2)} ms exceeds ${frameBudget_ms.toFixed(2)} ms budget`);
+}
 
 // Primary seam-closure cost is measured in one process with the exact same
 // scene, camera, caches, and pipeline bundle. Alternating order each cycle
@@ -1427,7 +1911,11 @@ const result = {
   optimizationExperiments,
   screenSpaceTermination: {
     thresholdPixels: screenSpaceTerminationPixels,
-    mode: screenSpaceTerminationPixels > 0 ? "diagnostic-conservative-aabb-proxy" : "exact",
+    thresholdUnits: `reference-pixels-at-${SVO_SCREEN_SPACE_TERMINATION_CONTRACT.referenceViewportHeightPixels}px-height`,
+    effectiveThresholdPixels: effectiveSvoScreenSpaceThresholdPixels(screenSpaceTerminationPixels, height),
+    mode: screenSpaceTerminationPixels > 0
+      ? traversalMode === "raster-primary" ? "resident-cell-and-record-proxy" : "diagnostic-conservative-aabb-proxy"
+      : "exact",
     shadowsRemainExact: true,
     representativeMaterial: false,
     representativeNormal: false,
@@ -1456,8 +1944,10 @@ const result = {
     median_ms: median(samples),
     p95_ms: percentile95(samples),
     samples_ms: samples,
+    budget_ms: frameBudget_ms,
   },
   configuredPhaseTrace,
+  configuredPassTiming,
   coneLighting: {
     scale: coneScale,
     radianceReconstruction,

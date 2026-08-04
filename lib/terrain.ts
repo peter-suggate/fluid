@@ -210,6 +210,50 @@ export function terrainCeiling(terrain: TerrainDescription | undefined): number 
   return terrain.baseHeight_m + mounds + TERRAIN_CEILING_MARGIN_M;
 }
 
+/** An arbitrary column lattice to bake ground heights onto. */
+export interface TerrainColumnLattice {
+  /** World position of the lattice's minimum corner, not of its first sample. */
+  originX_m: number;
+  originZ_m: number;
+  cellX_m: number;
+  cellZ_m: number;
+  nx: number;
+  nz: number;
+  /** Heights are clamped here, as every solver's column texture assumes. */
+  maximumHeight_m: number;
+}
+
+/**
+ * Bake per-column ground heights (metres) at the centres of any cell lattice.
+ * Row-major, index x + nx * z — the layout every solver's column texture uses.
+ *
+ * Extracted from {@link terrainColumnHeights} because the ground has two
+ * consumers with two different lattices and exactly one definition. The solver
+ * wants the container footprint; the render octree wants its own domain, which
+ * is wider than the container wherever scenery stands outside it — and a bake
+ * that stopped at the container would leave that ground out of the opacity
+ * pyramid while the analytic marcher kept drawing it, which is the same
+ * mismatch (ground drawn, ground not occluding) this bake exists to remove.
+ *
+ * Outside an authored grid the height clamps to the edge sample, exactly as
+ * `sampleTerrainGrid` does, so the wider lattice extends the ground rather than
+ * inventing one.
+ */
+export function terrainColumnHeightsForLattice(
+  terrain: TerrainDescription | undefined,
+  lattice: TerrainColumnLattice,
+): Float32Array<ArrayBuffer> {
+  const { originX_m, originZ_m, cellX_m, cellZ_m, nx, nz, maximumHeight_m } = lattice;
+  const heights = new Float32Array(new ArrayBuffer(nx * nz * Float32Array.BYTES_PER_ELEMENT));
+  if (!terrain) return heights;
+  for (let z = 0; z < nz; z += 1) for (let x = 0; x < nx; x += 1) {
+    const worldX = originX_m + (x + 0.5) * cellX_m;
+    const worldZ = originZ_m + (z + 0.5) * cellZ_m;
+    heights[x + nx * z] = Math.min(maximumHeight_m, terrainHeightAt(terrain, worldX, worldZ));
+  }
+  return heights;
+}
+
 /**
  * Bake per-column ground heights (metres) at cell centres of an nx-by-nz
  * lattice spanning the container footprint. Row-major, index x + nx * z —
@@ -221,14 +265,12 @@ export function terrainColumnHeights(
   nz: number
 ): Float32Array {
   const c = scene.container;
-  const heights = new Float32Array(nx * nz);
-  if (!sceneHasTerrain(scene)) return heights;
-  for (let z = 0; z < nz; z += 1) for (let x = 0; x < nx; x += 1) {
-    const worldX = -0.5 * c.width_m + (x + 0.5) * (c.width_m / nx);
-    const worldZ = -0.5 * c.depth_m + (z + 0.5) * (c.depth_m / nz);
-    heights[x + nx * z] = Math.min(c.height_m, terrainHeightAt(scene.terrain, worldX, worldZ));
-  }
-  return heights;
+  if (!sceneHasTerrain(scene)) return new Float32Array(nx * nz);
+  return terrainColumnHeightsForLattice(scene.terrain, {
+    originX_m: -0.5 * c.width_m, originZ_m: -0.5 * c.depth_m,
+    cellX_m: c.width_m / nx, cellZ_m: c.depth_m / nz,
+    nx, nz, maximumHeight_m: c.height_m,
+  });
 }
 
 /** Solid fraction of a grid cell cut by the terrain column height. */

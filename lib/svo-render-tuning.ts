@@ -15,6 +15,16 @@ export const SVO_CONE_RADIANCE_RECONSTRUCTION_CODES = Object.freeze({
 /** Audited compile-time ceiling for primary-ray leaf continuation. */
 export const SVO_PRIMARY_LEAF_VISIT_HARD_LIMIT = 256;
 
+/**
+ * Ceiling on the analytic band's budget: the authored record ceiling itself.
+ *
+ * Mirrors `SVO_PRIMITIVE_CANDIDATE_MAXIMUM_LEAVES` deliberately rather than
+ * importing it — this module is on the browser's tuning path and has no other
+ * reason to pull in the candidate BVH — and a budget above the record ceiling
+ * is indistinguishable from an unbounded one anyway.
+ */
+export const SVO_NEAR_FIELD_BAND_MAXIMUM_RECORDS = 16_384;
+
 /** Additional authored-environment subdivision beyond the legacy SVO brick plan. */
 export const SVO_ENVIRONMENT_BRICK_REFINEMENT_MAXIMUM = 1;
 
@@ -70,7 +80,43 @@ export interface SvoRenderTuning {
   readonly giConeCount: number;
   readonly coneNormalEscapeCells: number;
   readonly coneEmitterClearanceCells: number;
+  /**
+   * Near-field analytic band: projected voxel size, in pixels, above which an
+   * authored record is still drawn analytically through the coverage arena.
+   *
+   * Zero disables the band and every record stays analytic, which is the exact
+   * historical image. A positive threshold hands everything below it to the
+   * voxel primary, where the owning record's own surface is still what resolves
+   * the hit — the accelerator changes, the authority does not.
+   *
+   * See `lib/svo-scene-primitive-band.ts` for the measure and the budget.
+   */
+  readonly nearFieldBandPixels: number;
+  /** Exit threshold as a fraction of the entry threshold. One removes hysteresis. */
+  readonly nearFieldBandHysteresis: number;
+  /** Hard ceiling on analytic records per frame. Zero leaves the band unbounded. */
+  readonly nearFieldBandBudget: number;
 }
+
+/**
+ * Diagnostic overrides for the band, read once at module load.
+ *
+ * The acceptance lanes for this policy (`tools/benchmark-svo-dry-frame-gpu.ts`,
+ * `tools/run-svo-dry-render-smoke.ts`) build their tuning by spreading
+ * `DEFAULT_SVO_RENDER_TUNING`, so an A/B over the band would otherwise mean
+ * editing a constant between arms — and the one measurement rule this program
+ * has is that arms are interleaved rather than run in blocks. These are read
+ * exactly like the octree solver's diagnostic switches and default to the
+ * authored production values.
+ */
+const bandEnvironment = typeof process !== "undefined" ? process.env : undefined;
+const bandOverride = (name: string, fallback: number): number => {
+  const raw = bandEnvironment?.[name];
+  if (raw === undefined || raw === "") return fallback;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value < 0) throw new RangeError(`${name} must be a non-negative finite number`);
+  return value;
+};
 
 export const DEFAULT_SVO_RENDER_TUNING: SvoRenderTuning = Object.freeze({
   resolutionScale: 0.72,
@@ -117,6 +163,13 @@ export const DEFAULT_SVO_RENDER_TUNING: SvoRenderTuning = Object.freeze({
   giConeCount: 4,
   coneNormalEscapeCells: 0.5,
   coneEmitterClearanceCells: 3,
+  // Off by default until the band's silhouette evidence is authored per scene:
+  // zero reproduces the historical analytic set exactly, so enabling the voxel
+  // primary underneath it (which only ever seeds a tighter depth) cannot be
+  // confused with the band's own image effect.
+  nearFieldBandPixels: bandOverride("FLUID_SVO_BAND_PIXELS", 0),
+  nearFieldBandHysteresis: bandOverride("FLUID_SVO_BAND_HYSTERESIS", 0.8),
+  nearFieldBandBudget: bandOverride("FLUID_SVO_BAND_BUDGET", 256),
 });
 
 export const SVO_RENDER_TUNING_PRESETS = Object.freeze({
@@ -206,6 +259,9 @@ export function normalizeSvoRenderTuning(value: SvoRenderTuning): SvoRenderTunin
     giConeCount: integer(value.giConeCount ?? DEFAULT_SVO_RENDER_TUNING.giConeCount, 3, 4),
     coneNormalEscapeCells: bounded(value.coneNormalEscapeCells, 0, 2),
     coneEmitterClearanceCells: bounded(value.coneEmitterClearanceCells, 0, 8),
+    nearFieldBandPixels: bounded(value.nearFieldBandPixels ?? DEFAULT_SVO_RENDER_TUNING.nearFieldBandPixels, 0, 4096),
+    nearFieldBandHysteresis: bounded(value.nearFieldBandHysteresis ?? DEFAULT_SVO_RENDER_TUNING.nearFieldBandHysteresis, 0.25, 1),
+    nearFieldBandBudget: integer(value.nearFieldBandBudget ?? DEFAULT_SVO_RENDER_TUNING.nearFieldBandBudget, 0, SVO_NEAR_FIELD_BAND_MAXIMUM_RECORDS),
   };
 }
 

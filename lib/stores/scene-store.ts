@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { SceneDescription } from "../model";
+import { markSceneRevision, type SceneDescription } from "../model";
 import { defaultScenePresetId, getScenePreset } from "../scenes";
 
 /**
@@ -20,11 +20,11 @@ interface SceneStore {
 }
 
 export const useSceneStore = create<SceneStore>((set) => ({
-  scene: getScenePreset(defaultScenePresetId).create(),
+  scene: markSceneRevision(getScenePreset(defaultScenePresetId).create()),
   presetId: defaultScenePresetId,
-  setScene: (scene, presetId) => set((state) => ({ scene, presetId: presetId ?? state.presetId })),
-  patchScene: (patch) => set((state) => ({ scene: { ...state.scene, ...patch } })),
-  patchContainer: (patch) => set((state) => ({ scene: { ...state.scene, container: { ...state.scene.container, ...patch } } })),
-  patchFluid: (patch) => set((state) => ({ scene: { ...state.scene, fluid: { ...state.scene.fluid, ...patch } } })),
-  patchNumerics: (patch) => set((state) => ({ scene: { ...state.scene, numerics: { ...state.scene.numerics, ...patch } } }))
+  setScene: (scene, presetId) => set((state) => ({ scene: markSceneRevision(scene), presetId: presetId ?? state.presetId })),
+  patchScene: (patch) => set((state) => ({ scene: markSceneRevision({ ...state.scene, ...patch }) })),
+  patchContainer: (patch) => set((state) => ({ scene: markSceneRevision({ ...state.scene, container: { ...state.scene.container, ...patch } }) })),
+  patchFluid: (patch) => set((state) => ({ scene: markSceneRevision({ ...state.scene, fluid: { ...state.scene.fluid, ...patch } }) })),
+  patchNumerics: (patch) => set((state) => ({ scene: markSceneRevision({ ...state.scene, numerics: { ...state.scene.numerics, ...patch } }) }))
 }));

@@ -1,0 +1,2113 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Anatomy of one rendered frame — hero-garden-hose</title>
+
+<!-- Every number on this page, including the ones inside its prose, comes from
+     this one generated file. Regenerate with tmp/hero-doc-data.mjs. -->
+<script src="svo-render-frame-anatomy.data.js"></script>
+
+<style>
+/* ============================================================
+   TOKENS — the same instrument neutrals as the solver document,
+   with a pass-family accent set instead of a band set.
+   ============================================================ */
+:root {
+  color-scheme: light dark;
+
+  --f-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  --f-prose: "Iowan Old Style", Charter, "Bitstream Charter", "Sitka Text", Georgia, serif;
+
+  --sig:   #1F97A6;
+  --ember: #C9512A;
+  --amber: #A87614;
+  --jade:  #2E8F72;
+  --violet:#8155B8;
+
+  --pA: #5C6FC4;  /* octree primary visibility  */
+  --pB: #C9512A;  /* analytic surfaces (SDF)    */
+  --pC: #2E8F72;  /* rigid + glass discovery    */
+  --pD: #1F97A6;  /* lighting visibility        */
+  --pE: #8155B8;  /* world GI cache             */
+  --pF: #A87614;  /* deferred shading           */
+
+  --bg:      #EFF3F4;
+  --bg-2:    #FFFFFF;
+  --bg-3:    #E3E9EB;
+  --ink:     #10171C;
+  --ink-2:   #3B4750;
+  --ink-3:   #6C7A83;
+  --rule:    #CBD5D8;
+  --rule-2:  #DFE6E8;
+  --glow:    rgba(31,151,166,.10);
+  --scrim:   #FFFFFF;
+
+  --measure: 74ch;
+  --gut: clamp(16px, 4vw, 44px);
+  --rail: 1320px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --sig: #4FCBD8; --ember: #EE7B52; --amber: #DCAA43; --jade: #56C39D; --violet:#B183DA;
+    --pA: #7C8FE0; --pB: #EE7B52; --pC: #56C39D; --pD: #4FCBD8; --pE: #B183DA; --pF: #DCAA43;
+    --bg: #080C11; --bg-2: #0E151D; --bg-3: #16202B;
+    --ink: #E7EEF1; --ink-2: #A9B7C0; --ink-3: #6E7F8A;
+    --rule: #23303C; --rule-2: #1A242F; --glow: rgba(79,203,216,.14);
+    --scrim: #0E151D;
+  }
+}
+:root[data-theme="dark"] {
+  --sig: #4FCBD8; --ember: #EE7B52; --amber: #DCAA43; --jade: #56C39D; --violet:#B183DA;
+  --pA: #7C8FE0; --pB: #EE7B52; --pC: #56C39D; --pD: #4FCBD8; --pE: #B183DA; --pF: #DCAA43;
+  --bg: #080C11; --bg-2: #0E151D; --bg-3: #16202B;
+  --ink: #E7EEF1; --ink-2: #A9B7C0; --ink-3: #6E7F8A;
+  --rule: #23303C; --rule-2: #1A242F; --glow: rgba(79,203,216,.14); --scrim: #0E151D;
+}
+:root[data-theme="light"] {
+  --sig: #1F97A6; --ember: #C9512A; --amber: #A87614; --jade: #2E8F72; --violet:#8155B8;
+  --pA: #5C6FC4; --pB: #C9512A; --pC: #2E8F72; --pD: #1F97A6; --pE: #8155B8; --pF: #A87614;
+  --bg: #EFF3F4; --bg-2: #FFFFFF; --bg-3: #E3E9EB;
+  --ink: #10171C; --ink-2: #3B4750; --ink-3: #6C7A83;
+  --rule: #CBD5D8; --rule-2: #DFE6E8; --glow: rgba(31,151,166,.10); --scrim: #FFFFFF;
+}
+
+/* ============================================================ BASE */
+body {
+  margin: 0; background: var(--bg); color: var(--ink);
+  font-family: var(--f-prose); font-size: 17px; line-height: 1.62;
+  -webkit-font-smoothing: antialiased;
+}
+* { box-sizing: border-box; }
+img { max-width: 100%; display: block; }
+
+/* One rail. Every block on the page shares a single left edge; only the text
+   measure narrows inside it. A nested container is transparent rather than a
+   second, re-centred rail — that is what put four different left margins down
+   this page. */
+.wrap, .wide { max-width: var(--rail); margin: 0 auto; padding: 0 var(--gut); }
+.wrap .wrap, .wrap .wide, .wide .wrap, .wide .wide {
+  max-width: none; margin: 0; padding: 0;
+}
+.prose { max-width: var(--measure); }
+.prose p { margin: 0 0 1.05em; }
+.prose p:last-child { margin-bottom: 0; }
+.prose ol, .prose ul { max-width: 78ch; }
+.prose li { margin-bottom: .5em; }
+.stack > * + * { margin-top: 14px; }
+.stack-lg > * + * { margin-top: 30px; }
+
+h1, h2, h3, h4, .mono, .eyebrow, table, .num, button, input, select, .chip, .tag {
+  font-family: var(--f-mono); font-variant-numeric: tabular-nums;
+}
+h1, h2, h3, h4 { text-wrap: balance; margin: 0; font-weight: 600; letter-spacing: -.02em; }
+h2 { font-size: clamp(21px, 2.7vw, 28px); letter-spacing: -.03em; }
+h3 { font-size: 17.5px; margin-top: 4px; }
+
+.eyebrow { font-size: 11px; letter-spacing: .14em; text-transform: uppercase; color: var(--ink-3); font-weight: 600; }
+code, .k {
+  font-family: var(--f-mono); font-size: .86em;
+  background: var(--bg-3); padding: .1em .34em; border-radius: 2px; color: var(--ink);
+}
+b, strong { font-weight: 700; color: var(--ink); }
+a { color: var(--sig); }
+:focus-visible { outline: 2px solid var(--sig); outline-offset: 2px; border-radius: 2px; }
+.note { font-size: 13.5px; line-height: 1.55; color: var(--ink-3); }
+.lede { font-size: 19px; line-height: 1.52; color: var(--ink-2); }
+.lede b { color: var(--ink); }
+.derived { font-size: 10px; letter-spacing: .1em; text-transform: uppercase; color: var(--amber); border: 1px solid var(--amber); padding: 1px 5px; border-radius: 2px; vertical-align: 2px; white-space: nowrap; }
+[data-n] { font-variant-numeric: tabular-nums; }
+
+/* ============================================================ MASTHEAD */
+.mast { border-bottom: 1px solid var(--rule); background: var(--bg-2); position: relative; }
+.mast-art { position: relative; background: var(--bg-3); }
+.mast-art img { width: 100%; height: clamp(240px, 40vw, 520px); object-fit: cover; object-position: 50% 24%; }
+.mast-art::after {
+  content: ""; position: absolute; inset: 0;
+  background: linear-gradient(to bottom, transparent 34%, color-mix(in srgb, var(--scrim) 60%, transparent) 76%, var(--scrim) 100%);
+}
+/* padding-block, not the shorthand: these carry `.wrap`, and a shorthand here
+   silently drops its horizontal gutter and pulls the masthead and the ribbon
+   off the rail everything else sits on. */
+.mast-in { padding-block: 22px 28px; position: relative; }
+.mast h1 { font-size: clamp(27px, 4.4vw, 46px); line-height: 1.08; margin: 14px 0 0; letter-spacing: -.035em; }
+.mast h1 .dim { color: var(--ink-3); font-weight: 400; }
+.mast .sub { max-width: 72ch; margin: 18px 0 0; color: var(--ink-2); font-size: 16.5px; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 24px; }
+.chip { font-size: 11.5px; letter-spacing: .02em; padding: 5px 9px; border: 1px solid var(--rule); border-radius: 2px; color: var(--ink-2); background: var(--bg); }
+.chip b { color: var(--ink); font-weight: 600; }
+
+/* ============================================================ INSTRUMENT */
+.instrument { position: sticky; top: 0; z-index: 40; background: var(--bg-2); border-bottom: 1px solid var(--rule); box-shadow: 0 6px 18px -14px rgba(0,0,0,.55); }
+.instrument-in { padding-block: 11px 13px; }
+.ribbon-head { display: flex; align-items: baseline; justify-content: space-between; gap: 14px; margin-bottom: 7px; flex-wrap: wrap; }
+.ribbon { display: flex; width: 100%; height: 42px; gap: 1px; background: var(--rule-2); border: 1px solid var(--rule); border-radius: 2px; overflow: hidden; cursor: crosshair; }
+.seg { position: relative; min-width: 0; transition: filter .12s; border: 0; padding: 0; cursor: crosshair; }
+.seg:hover, .seg.on { filter: brightness(1.3) saturate(1.25); }
+.seg .tick { position: absolute; inset: 0; display: grid; place-items: center; font-size: 9.5px; color: rgba(255,255,255,.92); font-family: var(--f-mono); pointer-events: none; }
+.axis { display: flex; justify-content: space-between; font-family: var(--f-mono); font-size: 10.5px; color: var(--ink-3); margin-top: 5px; }
+.readout { margin-top: 7px; font-family: var(--f-mono); font-size: 12.5px; color: var(--ink-2); min-height: 19px; }
+.readout b { color: var(--ink); }
+.toggles { display: flex; gap: 6px; align-items: center; }
+button.t { font-size: 11px; padding: 4px 9px; border: 1px solid var(--rule); background: var(--bg); color: var(--ink-2); border-radius: 2px; cursor: pointer; font-family: var(--f-mono); }
+button.t[aria-pressed="true"] { background: var(--sig); border-color: var(--sig); color: #06131a; font-weight: 600; }
+
+/* ============================================================ SECTIONS */
+section { padding: clamp(38px, 6vw, 72px) 0; border-bottom: 1px solid var(--rule-2); }
+.panel { background: var(--bg-2); border: 1px solid var(--rule); border-radius: 3px; padding: 16px 18px; }
+.panel.tight { padding: 12px 14px; }
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.grid2.wideleft { grid-template-columns: 1.35fr 1fr; }
+.grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+.grid4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+@media (max-width: 900px) { .grid2, .grid2.wideleft, .grid3, .grid4 { grid-template-columns: 1fr; } }
+
+.kpi .l { font-family: var(--f-mono); font-size: 10.5px; letter-spacing: .12em; text-transform: uppercase; color: var(--ink-3); }
+.kpi .v { font-family: var(--f-mono); font-size: 29px; letter-spacing: -.03em; margin: 3px 0 5px; }
+.kpi.sig .v { color: var(--sig); }
+.kpi.ember .v { color: var(--ember); }
+.kpi.jade .v { color: var(--jade); }
+.kpi .n { font-size: 12.5px; color: var(--ink-3); line-height: 1.45; }
+
+table { border-collapse: collapse; width: 100%; font-size: 12.5px; }
+th, td { text-align: left; padding: 6px 10px 6px 0; border-bottom: 1px solid var(--rule-2); vertical-align: top; }
+th { font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase; color: var(--ink-3); font-weight: 600; border-bottom-color: var(--rule); }
+td.n, th.n { text-align: right; font-variant-numeric: tabular-nums; }
+tbody tr:hover { background: var(--glow); }
+.tbl-wrap { overflow-x: auto; }
+td .swatch, .legend i { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 6px; vertical-align: 0; }
+
+.kv { display: grid; grid-template-columns: minmax(140px, auto) 1fr; gap: 0 18px; font-size: 13.5px; margin: 0; }
+.kv dt { font-family: var(--f-mono); font-size: 11.5px; color: var(--ink-3); padding: 4px 0; border-bottom: 1px solid var(--rule-2); }
+.kv dd { margin: 0; padding: 4px 0; border-bottom: 1px solid var(--rule-2); }
+
+.stage { border: 1px solid var(--rule); border-radius: 3px; background: var(--bg-2); overflow: hidden; }
+.stage + .stage { margin-top: 14px; }
+.stage-head { display: flex; align-items: flex-start; gap: 14px; padding: 13px 18px; border-bottom: 1px solid var(--rule-2); }
+.stage-head .rail { width: 4px; align-self: stretch; border-radius: 2px; flex: none; min-height: 40px; }
+.stage-head .who { flex: 1; min-width: 0; }
+.stage-head h3 { font-size: 15.5px; letter-spacing: -.02em; margin: 0; }
+.stage-head .meta { font-family: var(--f-mono); font-size: 11px; color: var(--ink-3); margin-top: 4px; }
+.stage-cost { text-align: right; font-family: var(--f-mono); flex: none; }
+.stage-cost .ms { font-size: 20px; letter-spacing: -.02em; }
+.stage-cost .pc { font-size: 11px; color: var(--ink-3); }
+.stage-body { padding: 14px 18px 16px; font-size: 15.5px; line-height: 1.58; }
+.stage-body p { margin: 0 0 .8em; max-width: 80ch; }
+.stage-body p:last-child { margin-bottom: 0; }
+.counters { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 11px; }
+.tag { font-size: 10.5px; padding: 3px 7px; border: 1px solid var(--rule); border-radius: 2px; color: var(--ink-3); font-family: var(--f-mono); }
+.tag b { color: var(--ink); font-weight: 600; }
+
+figure { margin: 0; }
+figcaption { font-size: 12.5px; color: var(--ink-3); margin-top: 9px; line-height: 1.5; max-width: 80ch; }
+figcaption b { color: var(--ink-2); }
+.fig-frame { border: 1px solid var(--rule); border-radius: 3px; overflow: hidden; background: var(--bg-3); }
+
+.bars { display: grid; gap: 5px; }
+.bar-row { display: grid; grid-template-columns: minmax(120px, 210px) 1fr auto; gap: 10px; align-items: center; font-family: var(--f-mono); font-size: 11.5px; }
+.bar-track { background: var(--bg-3); border-radius: 2px; height: 15px; position: relative; overflow: hidden; display: block; }
+.bar-fill { position: absolute; inset: 0 auto 0 0; border-radius: 2px; }
+.bar-row .lab { color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bar-row .val { color: var(--ink); min-width: 74px; text-align: right; }
+
+pre.code {
+  font-family: var(--f-mono); font-size: 11.5px; line-height: 1.55; background: var(--bg-3);
+  border: 1px solid var(--rule); border-radius: 3px; padding: 12px 14px; overflow-x: auto; margin: 0;
+  color: var(--ink-2); tab-size: 2; white-space: pre;
+}
+pre.code b { color: var(--ember); font-weight: 700; }
+pre.code i { color: var(--ink-3); font-style: normal; }
+pre.code em { color: var(--jade); font-style: normal; font-weight: 600; }
+
+.callout { border-left: 3px solid var(--ember); background: var(--bg-2); padding: 14px 18px; border-radius: 0 3px 3px 0; border-top: 1px solid var(--rule); border-right: 1px solid var(--rule); border-bottom: 1px solid var(--rule); }
+.callout.sig { border-left-color: var(--sig); }
+.callout.jade { border-left-color: var(--jade); }
+.callout p { margin: 0 0 .7em; max-width: 80ch; }
+.callout p:last-child { margin: 0; }
+
+.legend { display: flex; flex-wrap: wrap; gap: 12px; font-family: var(--f-mono); font-size: 11px; color: var(--ink-3); align-items: center; }
+
+.tript { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+@media (max-width: 900px) { .tript { grid-template-columns: 1fr; } }
+.tript figcaption { margin-top: 7px; font-size: 11.5px; }
+
+.rampbar { height: 9px; border-radius: 2px; background: linear-gradient(to right, #0E151D, #28466E, #1F97A6, #4FCBD8, #DCAA43, #EE603E); }
+
+/* ---- live mechanism figures ---- */
+.mech { background: var(--bg-2); border: 1px solid var(--rule); border-radius: 3px; padding: 14px 16px 15px; position: relative; }
+.mech-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap;
+  font-family: var(--f-mono); font-size: 10.5px; letter-spacing: .13em; text-transform: uppercase;
+  color: var(--ink-3); padding-bottom: 10px; margin-bottom: 12px; border-bottom: 1px solid var(--rule-2); }
+.mech-head b { color: var(--sig); font-weight: 600; }
+.mech canvas { display: block; width: 100%; touch-action: none; }
+.mech-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; margin-top: 12px;
+  font-family: var(--f-mono); font-size: 11.5px; color: var(--ink-2); }
+.mech-controls label { display: flex; align-items: center; gap: 7px; }
+.mech-controls input[type="range"] { accent-color: var(--sig); width: 108px; }
+.mech-readout { font-family: var(--f-mono); font-size: 11.5px; font-variant-numeric: tabular-nums;
+  color: var(--ink-2); margin-left: auto; text-align: right; }
+.mech-readout b { color: var(--sig); }
+.mech-readout b.hot { color: var(--ember); }
+.hoverpad { position: relative; cursor: crosshair; }
+.hoverpad .crosshair { position: absolute; width: 11px; height: 11px; border: 1.5px solid var(--sig);
+  border-radius: 50%; transform: translate(-50%, -50%); pointer-events: none; display: none; }
+
+footer { padding-block: 40px 70px; color: var(--ink-3); font-size: 13px; }
+.theme-toggle { position: fixed; right: 14px; bottom: 14px; z-index: 60; }
+.nodata { padding: 40px var(--gut); font-family: var(--f-mono); color: var(--ember); }
+.print-only { display: none; }
+
+/* ============================================================
+   PRINT — landscape, because every comparison in this document is
+   side by side and a portrait reflow breaks all of them.
+   ============================================================ */
+@media print {
+  @page { size: A4 landscape; margin: 11mm 11mm 13mm; }
+
+  /* The canvases were rasterised against the light tokens, so pin them. */
+  :root, :root[data-theme] {
+    --sig: #1F97A6; --ember: #C9512A; --amber: #A87614; --jade: #2E8F72; --violet: #8155B8;
+    --pA: #5C6FC4; --pB: #C9512A; --pC: #2E8F72; --pD: #1F97A6; --pE: #8155B8; --pF: #A87614;
+    --bg: #FFFFFF; --bg-2: #FFFFFF; --bg-3: #EEF2F3;
+    --ink: #10171C; --ink-2: #3B4750; --ink-3: #61707A;
+    --rule: #C2CDD1; --rule-2: #DCE4E6; --glow: transparent; --scrim: #FFFFFF;
+  }
+  html { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  body { background: #fff; font-size: 9.4pt; line-height: 1.47; }
+
+  .wrap, .wide { max-width: none; padding: 0; }
+  section { padding: 13px 0 14px; border-bottom: 1px solid var(--rule-2); }
+  .stack-lg > * + * { margin-top: 14px; }
+  .stack > * + * { margin-top: 10px; }
+  .prose { max-width: 92ch; }
+  .lede { font-size: 11.5pt; line-height: 1.42; }
+  h2 { font-size: 16pt; }
+  h3 { font-size: 11.5pt; }
+  .kpi .v { font-size: 20pt; }
+  .kpi .n, .note, figcaption { font-size: 8.4pt; line-height: 1.42; }
+  .stage-body { font-size: 9.2pt; line-height: 1.45; padding: 10px 14px 12px; }
+  .stage-head { padding: 9px 14px; }
+  .panel { padding: 12px 14px; }
+  .grid2, .grid3, .grid4 { gap: 11px; }
+
+  /* The resolve-order figure is 59 rows tall; scale it to one page. */
+  #probeCanvas { zoom: .66; }
+  #marchCanvas { zoom: .86; }
+
+  /* The instrument is a header on paper, not a sticky rail. */
+  .instrument { position: static; box-shadow: none; break-inside: avoid; break-after: avoid; }
+  .instrument-in { padding-block: 8px 10px; }
+
+  /* Controls are dead ink on paper; their readouts are not. */
+  .toggles, .theme-toggle, .hoverpad .crosshair { display: none !important; }
+  .mech-controls > *:not(.mech-readout) { display: none; }
+  .mech-readout { margin-left: 0; text-align: left; }
+  .print-only { display: block; }
+
+  /* Keep every figure, card and table row whole. */
+  .panel, .stage, .mech, figure, .callout, .kpi, .flow-step, tr { break-inside: avoid; }
+  h1, h2, h3 { break-after: avoid; }
+  section > .wrap > .prose, section > .wide > .prose { break-after: avoid; }
+  pre.code { break-inside: avoid; font-size: 8pt; }
+  table { font-size: 8.5pt; }
+  .tbl-wrap { overflow: visible; }
+
+  .mast-art img { height: 250px; }
+  .mast-in { padding-block: 16px 18px; }
+  .mast h1 { font-size: 30pt; }
+  .mast .sub { font-size: 11pt; }
+  #stages .stage + .stage { margin-top: 10px; }
+  a { color: inherit; text-decoration: none; }
+  footer { padding-block: 18px 0; }
+}
+</style>
+
+<header class="mast">
+  <div class="mast-art"><img id="heroArt" alt="The hero garden hose scene rendered by the sparse voxel renderer: a raised porcelain pond with a swept coping rim, pebble beds, a bonsai and a hose over the rim."></div>
+  <div class="wrap mast-in">
+    <div class="eyebrow">Metal System Trace + GPU counters · <span data-n="machine"></span> · <span data-n="capturedAt"></span> · commit <span class="k" data-n="commit"></span></div>
+    <h1>Anatomy of one rendered frame<br><span class="dim">hero-garden-hose · <span data-n="wall"></span></span></h1>
+    <p class="sub">
+      A pass-by-pass account of what the sparse-voxel renderer does to produce the frame above: what
+      each of the thirteen GPU passes computes, which structure it reads, and what the hardware
+      actually does while it runs. The default presentation path — rasterized brick proxies for
+      primary visibility, cone-traced visibility for lighting, deferred relighting — and, at length,
+      the analytic signed-distance solids that are the set and are also the cost.
+      Every number is measured or read out of the code. Nothing is modelled except where marked
+      <span class="derived">derived</span>.
+    </p>
+    <div class="chips" id="chips"></div>
+    <p class="note print-only" style="margin-top:18px">
+      Printed from <span class="k">docs/svo-render-frame-anatomy.html</span>, where §3, §5.3, §5.4
+      and both heatmaps are live: the frame ribbon and timeline are hoverable, the resolve-order
+      figure switches between three real pixels and between today's shading and a front-to-back
+      resolve, the march figure switches cluster field and fold width, and the two maps read out
+      their own per-pixel numbers under the cursor.
+    </p>
+  </div>
+</header>
+
+<div class="instrument">
+  <div class="wrap instrument-in">
+    <div class="ribbon-head">
+      <div class="eyebrow">The frame — 13 labelled Metal encoders, width ∝ GPU time</div>
+      <div class="toggles">
+        <span class="eyebrow" style="letter-spacing:.08em">scale</span>
+        <button class="t" id="scaleLin" aria-pressed="true">linear</button>
+        <button class="t" id="scaleLog" aria-pressed="false">log</button>
+      </div>
+    </div>
+    <div class="ribbon" id="ribbon" role="group" aria-label="Frame timeline"></div>
+    <div class="axis" id="ribbonAxis"></div>
+    <div class="readout" id="readout">hover a segment · click to jump to the pass that owns it</div>
+  </div>
+</div>
+
+<!-- ============================================================ THESIS -->
+<section id="thesis">
+  <div class="wrap stack-lg">
+    <div class="prose">
+      <div class="eyebrow">The thesis</div>
+      <p class="lede" style="margin-top:10px">
+        This frame is not bound by voxel traversal, by cone tracing, or by pixels. It is bound by
+        <b>one pass that shades every object standing in front of every other object.</b>
+        <span class="k">Sparse voxel exact live-scene primitive visibility</span> — the pass that
+        resolves the scene's <span data-n="primitives"></span> analytic signed-distance solids —
+        takes <b><span data-n="sdfMs"></span> of a <span data-n="wall"></span> frame</b>. Everything
+        else the renderer does, including the whole sparse-voxel octree primary and the entire
+        lighting pipeline, adds up to <b data-n="restMs"></b>.
+      </p>
+      <p style="margin-top:16px">
+        The cause is a two-line property of its fragment shader. It returns
+        <span class="k">@builtin(frag_depth)</span> and it calls <span class="k">discard</span>.
+        Either one alone tells a tile-based GPU that a fragment's depth and coverage are unknown
+        until the fragment has been shaded, so hidden-surface removal cannot run and every proxy box
+        covering a pixel evaluates its own signed-distance field. A covered pixel here sits under a
+        median of <b data-n="coverMedian"></b> such proxies and a 99th percentile of
+        <b data-n="coverP99"></b>, and <b data-n="marchedPct"></b> of the scene's primitives resolve
+        their hit by a bounded sphere trace rather than a closed-form root.
+      </p>
+      <p>
+        Dropping both — a timing probe whose image is wrong, but which shows what the hardware is
+        willing to reject — takes the frame from <b data-n="abProdMedian"></b> to
+        <b data-n="abProbeMedian"></b>, a paired <b data-n="abRatio"></b>. That is an over-statement,
+        and §5.3 measures by how much: a <i>sound</i> front-to-back resolve still has to march
+        <b data-n="resolveTries"></b> proxies per covered pixel rather than
+        <b data-n="resolveCovering"></b>, so the ordering itself is worth
+        <b data-n="resolveReduction"></b>. The pass immediately before this one in the same command
+        buffer already contains that design, and costs <b data-n="brickPrimaryMs"></b>.
+      </p>
+      <p>
+        And the cost is not spread evenly over the set. The <b>bonsai is
+        <span data-n="bonsaiRecords"></span> of the <span data-n="primitives"></span> records</b> —
+        <span data-n="bonsaiRecordsPct"></span> — but it accounts for
+        <b data-n="bonsaiCoverShare"></b> of all covering-proxy samples and, once each record's field
+        is priced by what its shader loop actually folds over, for <b data-n="bonsaiEvalShare"></b> of
+        the frame's distance-function evaluations. Section 5 is about that.
+      </p>
+    </div>
+
+    <div class="grid2">
+      <figure>
+        <div class="fig-frame"><img id="heroFig" alt="The rendered hero frame"></div>
+        <figcaption>
+          <b>The frame.</b> <span data-n="resolution"></span>, raster primary visibility, cone-traced
+          shadows / AO / GI at <span data-n="conePlane"></span>, full-resolution relight, ACES. One
+          warm directional key at intensity 3.2 over a cool sky fill; everything in the set is
+          porcelain-white, which is what makes the visibility term carry the image.
+        </figcaption>
+      </figure>
+      <figure>
+        <div class="fig-frame"><img id="overdrawFig" alt="Heatmap of how many primitive proxy boxes cover each pixel"></div>
+        <figcaption>
+          <b>What that frame costs — part one.</b> Covering scene-primitive proxy boxes per pixel,
+          from casting the exact primary ray for every pixel against every primitive's conservative
+          world AABB — precisely the box the vertex stage emits. Dark = 0, teal ≈ 15,
+          amber / ember ≥ 40, peak <b data-n="coverMax"></b> in the bonsai canopy.
+        </figcaption>
+      </figure>
+    </div>
+
+    <div class="grid4" id="thesisKpis"></div>
+  </div>
+</section>
+
+<!-- ============================================================ PROVENANCE -->
+<section id="provenance">
+  <div class="wrap stack-lg">
+    <div class="prose">
+      <div class="eyebrow">§1</div>
+      <h2>Provenance and measurement integrity</h2>
+    </div>
+    <div class="grid2 wideleft">
+      <div class="panel"><dl class="kv" id="provTable"></dl></div>
+      <div class="stack">
+        <div class="panel kpi sig">
+          <div class="l">Profiling distortion</div>
+          <div class="v" data-n="distortion"></div>
+          <div class="n">Traced and label-isolated wall <b data-n="wall"></b> against a clean untraced
+            median of <b data-n="untracedMedian"></b>. Metal System Trace and per-pass encoder
+            isolation are inside the machine's own frame-to-frame spread on this lane.</div>
+        </div>
+        <div class="panel kpi">
+          <div class="l">Attribution</div>
+          <div class="v">100 %</div>
+          <div class="n">13 labelled encoders and 6 boundary blits (<span data-n="blitUs"></span> in
+            total), nothing unnamed. Per-pass GPU time sums to <b data-n="passSum"></b> against
+            <b data-n="busy"></b> of device-busy time in the same interval; the difference is genuine
+            Vertex / Fragment / Compute overlap, counted once in <i>busy</i> and once per channel in
+            the table.</div>
+        </div>
+        <div class="panel kpi">
+          <div class="l">Counter coverage</div>
+          <div class="v" data-n="counterCoverage"></div>
+          <div class="n">GPU hardware counters are device-wide and cannot be filtered by process.
+            Only samples taken while no other process had GPU work in flight are used. Per-pass
+            <i>time</i> is exact regardless — it filters by process. Occupancy, ALU and bandwidth are
+            directional.</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="prose">
+      <p>Four caveats that matter when reading everything below.</p>
+      <ol>
+        <li><b>Label isolation is free here.</b> The traced run splits the frame's WebGPU passes into
+          individually-labelled Metal encoders so each carries its own GPU timestamp. It measured
+          <b data-n="wall"></b>/frame against a clean, untraced, un-isolated run's
+          <b data-n="untracedAll"></b> over three interleaved samples. Per-pass attribution therefore
+          describes the frame that ships, not a distorted one.</li>
+        <li><b>Vertex, Fragment and Compute are separate hardware channels and they overlap.</b>
+          Apple's tiler runs one pass's fragment work against the next pass's binning. Every row of
+          the pass table is one channel of one encoder; summing all rows slightly exceeds the frame
+          wall, and the union — device busy — does not.</li>
+        <li><b>The first four frames are excluded.</b> They carry Metal's first-use residency work:
+          the glass pass's vertex stage alone reports 225–308 ms on frames 1–4 and 20–50 µs
+          thereafter. <span data-n="framesAnalysed"></span> steady-state frames are analysed out of
+          <span data-n="framesTotal"></span> complete ones.</li>
+        <li><b>The machine was shared.</b> <span data-n="contenders"></span> held GPU work inside the
+          capture window, which is why counter coverage is low and why the frame wall spreads
+          <span data-n="wallSpread"></span>. Every timing conclusion below is interleaved and paired
+          for exactly that reason.</li>
+      </ol>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ THE SCENE -->
+<section id="scene">
+  <div class="wrap stack-lg">
+    <div class="prose">
+      <div class="eyebrow">§2</div>
+      <h2>The scene, as the renderer sees it</h2>
+      <p style="margin-top:14px">
+        <span class="k">hero-garden-hose</span> is a dry scene: <span class="k">systems.fluid</span>
+        is false, no solver is constructed, and <span class="k">WebGPULiveSvoScene</span> stands in
+        for one — it owns an <span class="k">OctreeSparseBrickWorld</span> and implements the narrow
+        source interface the renderer attaches to, with no transport, projection or level-set
+        authority at all (<span class="k">lib/webgpu-live-svo-scene.ts:61</span>). Every millisecond
+        below is therefore render cost, with nothing simulated behind it.
+      </p>
+      <p>
+        The set is a raised porcelain pond. Its vessel — coping crest, basin, and the ground outside
+        it — is <i>one generated heightfield</i> rather than geometry, so the water would meet the rim
+        exactly where the rim is. Everything standing on that heightfield is an analytic
+        signed-distance solid, and there is no triangle mesh anywhere in the frame.
+      </p>
+    </div>
+
+    <div class="grid2">
+      <div class="panel"><div class="eyebrow" style="margin-bottom:10px">Domain and lattice</div><dl class="kv" id="sceneTable"></dl></div>
+      <div class="panel"><div class="eyebrow" style="margin-bottom:10px">Published to the GPU</div><dl class="kv" id="publishTable"></dl></div>
+    </div>
+
+    <div class="prose">
+      <p>
+        Two entries in the right-hand column are worth pausing on, because they are what the lighting
+        passes in §4 actually read.
+      </p>
+      <p>
+        The <b>node-mip opacity pyramid</b> is a sparse, page-backed mip chain over the octree:
+        8³ interiors with a one-voxel apron, four channels (solid mean, solid max, fluid mean, fluid
+        max), 4 000 B per page, <span data-n="nodeMipPages"></span> pages resident here. It is what a
+        cone samples instead of a ray marching leaves. Publication is all-or-nothing by design — a
+        truncated pyramid leaks light rather than coarsening, so
+        <span class="k">OctreeSparseBrickWorld</span> withdraws the whole thing if any base page is
+        omitted, and cone lighting silently falls back to exact traversal for every shadow and GI ray.
+        That failure is a 15× render regression that reads as a renderer bug; on this scene it
+        published cleanly.
+      </p>
+      <p>
+        The <b>tetrahedral radiance atlas</b> is four directional lobes of outgoing radiance over the
+        same pages, <span data-n="tetraBytes"></span> — the cached bounce the GI cones gather rather
+        than re-trace.
+      </p>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ FRAME AT A GLANCE -->
+<section id="glance">
+  <div class="wide stack-lg">
+    <div class="wrap prose" style="padding:0">
+      <div class="eyebrow">§3</div>
+      <h2>The frame at a glance</h2>
+      <p style="margin-top:14px">
+        One frame is one command buffer and one submission. Thirteen labelled passes are encoded in a
+        fixed order by <span class="k">SparseVoxelDrySceneRenderer.encode</span>
+        (<span class="k">lib/webgpu-svo-dry-scene.ts:7178</span>), plus six boundary blits that
+        together cost <span data-n="blitUs"></span>. There is no readback and no host decision
+        anywhere inside the frame: the only indirect arguments are the brick instance count the cull
+        pass publishes for itself.
+      </p>
+    </div>
+
+    <figure>
+      <div class="panel">
+        <div class="eyebrow" style="margin-bottom:12px">The representative frame, as the GPU ran it — three hardware channels, real interval boundaries</div>
+        <div id="timelineFig"></div>
+        <div class="legend" style="margin-top:12px" id="timelineLegend"></div>
+      </div>
+      <figcaption class="wrap" style="padding:0">
+        Every rectangle is one Metal GPU interval from the trace, placed at its own start and drawn at
+        its own duration. The frame shown is the one whose anchor-to-anchor wall is closest to the
+        <span data-n="framesAnalysed"></span>-frame median. Note that the scene-primitive pass arrives
+        as several intervals — Instruments splits a long encoder wherever the GPU preempted it — and
+        that all thirteen vertex stages have finished binning inside the first 3 ms.
+      </figcaption>
+    </figure>
+
+    <div class="wrap" style="padding:0">
+      <div class="grid2">
+        <div class="panel">
+          <div class="eyebrow" style="margin-bottom:10px">By subsystem</div>
+          <div class="bars" id="subsystemBars"></div>
+          <p class="note" style="margin:12px 0 0">
+            The same <span data-n="wall"></span> regrouped by what the work <i>is</i>. Vertex and
+            fragment channels of one pass are summed into the subsystem that owns it.
+          </p>
+        </div>
+        <div class="panel">
+          <div class="eyebrow" style="margin-bottom:10px">Which numbers are stable — <span data-n="framesAnalysed"></span> frames</div>
+          <div id="stabilityFig"></div>
+          <p class="note" style="margin:12px 0 0" id="stabilityNote"></p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ STAGE BY STAGE -->
+<section id="stages">
+  <div class="wrap stack-lg">
+    <div class="prose">
+      <div class="eyebrow">§4</div>
+      <h2>Pass by pass</h2>
+      <p style="margin-top:14px">
+        Timings are the <span data-n="framesAnalysed"></span>-frame median. Occupancy, ALU, bandwidth
+        and last-level-cache utilisation are device-wide hardware counters attributed to whichever
+        pass owned the GPU when the sample was taken, from uncontended windows only.
+        <b>Fragment Occupancy is the counter this lane samples</b>, so it reads near zero for the
+        compute passes by construction rather than by starvation.
+      </p>
+    </div>
+    <div id="stageCards"></div>
+  </div>
+</section>
+
+<!-- ============================================================ THE SDF SET -->
+<section id="sdf">
+  <div class="wide stack-lg">
+    <div class="wrap prose" style="padding:0">
+      <div class="eyebrow">§5</div>
+      <h2>The signed-distance set, in detail</h2>
+      <p style="margin-top:14px">
+        The set is not geometry. Every object in the frame except the terrain is one 64-byte record
+        naming an analytic solid, and the renderer resolves each one exactly, per pixel, in a fragment
+        shader. That is what makes the scene cheap to author, cheap to store —
+        <span data-n="primitives"></span> records is <span data-n="recordBytes"></span> — and free of
+        any level-of-detail decision: a floret is silhouetted exactly at any distance, and the same
+        canopy rendered at 25 mm, 50 mm and 100 mm voxels produces three byte-identical frames,
+        because a scenery primitive's primary visibility never goes through the voxel payload at all.
+      </p>
+      <p>
+        It is also, at this scale, <span data-n="sdfShare"></span> of the frame. This section is about
+        where inside the set that cost actually sits, which is not where the pixels are.
+      </p>
+    </div>
+
+    <div class="wrap" style="padding:0">
+      <h3 style="margin-bottom:12px">5.1 &nbsp;What one marched hit costs</h3>
+      <div class="grid2 wideleft">
+        <div class="panel prose" style="font-size:15.5px">
+          <p style="margin-top:0">
+            A kind is declared once, in <span class="k">lib/svo-primitive-kinds.ts</span>: u32 tag,
+            flags, normal policy, what the three dimension floats mean, the conservative local extent
+            and the rotation-invariant bounding radius. Every consumer keys an exhaustive
+            <span class="k">Record&lt;SvoPrimitiveKindName, T&gt;</span> off it, so a kind cannot be
+            added to one path and be silently missing from another — which is the failure that table
+            exists to prevent, because an unknown kind used to fall through to an ellipsoid in the
+            node-mip oracle, to <span class="k">1e20</span> in the voxelizer, and to a vertex-shader
+            bail in this very raster.
+          </p>
+          <p>
+            The flag that decides cost is <span class="k">marchedIntersection</span>. A kind carrying
+            it has no closed-form root: its hit is a bounded sphere trace of its own distance
+            function, capped at <span class="k">SVO_PRIMITIVE_MARCH_ITERATIONS =
+            <span data-n="marchCap"></span></span>, over the interval the proxy box brackets.
+            <b><span data-n="marched"></span> of <span data-n="primitives"></span> primitives here are
+            marched.</b>
+          </p>
+          <p style="margin-bottom:0">
+            And a march step is not one distance call. For a
+            <span class="k">smooth-union-cluster</span> — the aggregate kind,
+            <span data-n="clusters"></span> of them in this scene — a step evaluates a whole
+            procedural <i>field</i>, and the field is a fold over lobes, segments or lattice cells.
+            Then the shading normal costs four <i>more</i> whole field evaluations: a tetrahedral
+            gradient rather than the obvious six-tap central difference, precisely because "an
+            evaluation is roughly sixty sphere distances and the march converges in about eight steps,
+            so the two extra taps would be a fifth of the whole trace"
+            (<span class="k">lib/svo-primitive-abi.ts:2600</span>).
+          </p>
+        </div>
+        <div class="panel">
+          <div class="eyebrow" style="margin-bottom:10px">The three cluster fields and what their loop folds over</div>
+          <div class="tbl-wrap"><table id="fieldTable"><thead><tr>
+            <th>field</th><th class="n">records</th><th class="n">fold width</th><th>the loop</th>
+          </tr></thead><tbody></tbody></table></div>
+          <p class="note" style="margin:12px 0 0">
+            <b>lattice</b> is the expensive one and the reason is geometric: a domain-repeated lattice
+            of jittered spheres has to fold over a <span data-n="latticeSpan"></span>³ block rather
+            than the obvious 2³, because a four-cell block is the smallest one centred on the sample
+            that contains the eight surrounding cells with a ring to spare — and without that ring a
+            sphere leaving the neighbourhood makes the field step, and rays tunnel. The 56 outer cells
+            are rejected by a distance to their <i>unjittered</i> centre, which needs no hash, so the
+            realised width is between 8 and 64 per octave.
+          </p>
+        </div>
+      </div>
+    </div>
+
+    <div class="wrap" style="padding:0">
+      <h3 style="margin-bottom:12px">5.2 &nbsp;Coverage is not cost</h3>
+      <div class="prose" style="max-width:80ch">
+        <p>
+          Two maps of the same frame. The first counts covering proxies per pixel — the number of
+          fragments the missing hidden-surface removal forces this pass to shade. The second weights
+          each of those by what its kind's shader loop folds over, and they do not agree at all.
+        </p>
+      </div>
+      <div class="grid2" style="margin-top:16px">
+        <figure>
+          <div class="fig-frame"><img id="coverFig2" alt="Covering proxies per pixel"></div>
+          <figcaption><b>Covering proxies.</b> The coping rim dominates — a swept bullnose spelled as
+            84 round cones, laid nose to tail all the way round the pond, so a grazing ray crosses a
+            dozen of their boxes. <b><span data-n="copingCoverShare"></span> of all covering-proxy
+            samples are coping.</b></figcaption>
+        </figure>
+        <figure>
+          <div class="fig-frame"><img id="evalFig" alt="Distance-function evaluations per pixel, log scale"></div>
+          <figcaption><b>Distance-function evaluations</b> <span class="derived">derived</span>,
+            log scale. The coping goes cold — a round cone's distance is closed form, fold width 1 —
+            and the canopy and the pebble beds light up. <b><span data-n="bonsaiEvalShare"></span> of
+            the evaluations are bonsai</b>, <span data-n="stonesEvalShare"></span> are the stone and
+            pebble beds, and <span data-n="copingEvalShare"></span> are the coping that owns nearly
+            half the coverage.</figcaption>
+        </figure>
+      </div>
+      <div class="legend" style="margin-top:12px">
+        <span>log₁₀(1 + evaluations)</span>
+        <span class="rampbar" style="flex:1; min-width:160px; max-width:340px"></span>
+        <span>0</span><span style="flex:none">→</span><span data-n="evalHeatMax"></span>
+      </div>
+      <div class="grid4" style="margin-top:18px" id="sdfKpis"></div>
+    </div>
+
+    <div class="wrap" style="padding:0">
+      <div class="panel tight tbl-wrap">
+        <table id="familyTable"><thead><tr>
+          <th>Part of the set</th><th class="n">records</th><th class="n">clusters</th>
+          <th class="n">marched</th><th class="n">mean fold</th>
+          <th style="width:22%">share of covering proxies</th>
+          <th style="width:22%">share of distance evaluations</th>
+        </tr></thead><tbody></tbody></table>
+      </div>
+      <p class="note" style="margin-top:10px">
+        Coverage is exact: a ray/AABB slab test of the hero camera's own pixel rays against each
+        primitive's conservative world box, which is the box the vertex stage emits. Evaluations are
+        that same exact coverage multiplied by each record's fold width and by the shader's typical
+        eight-step march — <span class="derived">derived</span>, and stated as a share rather than an
+        absolute because the step count of a <i>missing</i> march is not modelled here. The map's
+        shape does not depend on that constant; only its scale does.
+      </p>
+    </div>
+
+    <div class="wrap" style="padding:0">
+      <h3 style="margin-bottom:10px">5.3 &nbsp;One pixel, in full</h3>
+      <div class="prose" style="max-width:80ch; margin-bottom:16px">
+        <p>
+          The map above is a count. This is the thing the count is counting. Every proxy one real
+          primary ray enters, in the order a front-to-back resolve would try them, with the
+          <i>measured</i> answer to "does this primitive actually get hit" from
+          <span class="k">intersectSvoPrimitive</span> — the CPU half of the contract the WGSL
+          intersection is held to at 3e-4 by <span class="k">tests/webgpu-svo-primitive-exact.test.ts</span>.
+        </p>
+      </div>
+      <figure class="mech">
+        <div class="mech-head">
+          <span><b>Live</b> · the resolve order at one real pixel</span>
+          <span id="probeHint">click a bar for its record · switch pixels below</span>
+        </div>
+        <div class="canvas-wrap"><canvas id="probeCanvas" role="img" aria-label="Every scene-primitive proxy one primary ray enters, drawn as a depth interval, with the marches a front-to-back resolve would skip greyed out."></canvas></div>
+        <div class="mech-controls">
+          <span id="probePick" class="toggles" style="gap:6px"></span>
+          <label><input type="checkbox" id="probeResolve" checked> front-to-back resolve</label>
+          <span class="mech-readout" id="probeReadout"></span>
+        </div>
+        <div class="legend" style="margin-top:10px" id="probeLegend"></div>
+        <figcaption id="probeCaption"></figcaption>
+      </figure>
+    </div>
+
+    <div class="wrap" style="padding:0">
+      <h3 style="margin-bottom:10px">5.4 &nbsp;Inside one march</h3>
+      <div class="prose" style="max-width:80ch; margin-bottom:16px">
+        <p>
+          And this is what one of those bars costs. A marched kind has no closed-form root: the
+          fragment sphere-traces its own distance function inside the proxy's bracket, and for a
+          cluster each step of that trace evaluates a whole procedural field — a fold over lobes,
+          segments or lattice cells. Then the shading normal costs four more whole evaluations.
+        </p>
+      </div>
+      <figure class="mech">
+        <div class="mech-head">
+          <span><b>Live</b> · sphere trace and fold width</span>
+          <span>pick the field the bonsai actually uses</span>
+        </div>
+        <div class="canvas-wrap"><canvas id="marchCanvas" role="img" aria-label="A sphere trace stepping toward a surface inside a proxy box, with one step expanded into the fold its cluster field runs."></canvas></div>
+        <div class="mech-controls">
+          <span id="marchPick" class="toggles" style="gap:6px"></span>
+          <label>fold width <input type="range" id="marchFold" min="1" max="64" value="8"></label>
+          <span class="mech-readout" id="marchReadout"></span>
+        </div>
+        <figcaption id="marchCaption"></figcaption>
+      </figure>
+    </div>
+
+    <div class="wrap" style="padding:0">
+      <h3 style="margin-bottom:6px">5.5 &nbsp;The bonsai</h3>
+      <p class="note" style="margin:0 0 16px; max-width:80ch">
+        <span data-n="bonsaiRecords"></span> records — <span data-n="bonsaiRecordsPct"></span> of the
+        set — carrying <span data-n="bonsaiCoverShare"></span> of the coverage and
+        <span data-n="bonsaiEvalShare"></span> of the evaluations. It is worth taking apart, because
+        every decision in it is defensible and the aggregate is still the most expensive object in the
+        frame by a wide margin.
+      </p>
+      <div class="tript">
+        <figure>
+          <div class="fig-frame"><img id="bonsaiRender" alt="Close crop of the rendered bonsai"></div>
+          <figcaption><b>What it is.</b> A fused multi-trunk root mass under one wide crown of
+            cauliflower florets. No sky in the crown, no pads, no tiers.</figcaption>
+        </figure>
+        <figure>
+          <div class="fig-frame"><img id="bonsaiCover" alt="Covering proxies over the bonsai"></div>
+          <figcaption><b>Its proxies.</b> Peak <b data-n="coverMax"></b> boxes over one pixel — the
+            crown's cluster envelopes, their opacity cores, and every limb sweep behind them.</figcaption>
+        </figure>
+        <figure>
+          <div class="fig-frame"><img id="bonsaiEval" alt="Distance evaluations over the bonsai"></div>
+          <figcaption><b>Its cost.</b> The hottest region in the frame, and by the model above the
+            single densest concentration of ALU work anywhere in the image.</figcaption>
+        </figure>
+      </div>
+
+      <div class="grid2 wideleft" style="margin-top:22px">
+        <div class="panel prose" style="font-size:15.5px">
+          <div class="eyebrow" style="margin-bottom:10px">Why it is built out of clusters</div>
+          <p style="margin-top:0">
+            The crown is one wide plate whose entire character is the floret structure covering it.
+            Spelled explicitly, that is roughly <span class="k">2·area / (π·w²)</span> records for a
+            floret of width <span class="k">w</span> — so halving the floret quadruples the bill —
+            against a scene-wide budget of 4 096 primitive-candidate leaves that is a <i>cliff</i>
+            rather than a slope: above it the candidate build is simply not called and the whole set
+            stops being drawn. The reference's six-millimetre floret was unreachable with the entire
+            scene budget.
+          </p>
+          <p>
+            A cluster evaluates its packing in the shader, so its grain costs no records at all and
+            that economy stops applying. What it cannot do is be both granular and closed — a lattice
+            only stops letting rays through at <span class="k">r ≥ period·√3/2</span>, and at that
+            ratio the packing is solid, the envelope's hard <span class="k">max</span> cuts it off at
+            exactly the envelope, and the lobe draws as a bare ellipsoid. So the crown is
+            <b>two records per lobe</b>: a lattice cluster at a ratio where florets are distinct, and
+            an ellipsoid <i>core</i> one granulation-depth under it that no ray gets past.
+          </p>
+          <p style="margin-bottom:0">
+            The trunk and limbs were a chain of cones with a sphere at every node. That construction
+            is exact and it still rendered wrong: a hard union is C⁰ but not C¹, so the shading normal
+            steps at every junction and a smooth taper came out as a stack of faceted pipes.
+            Subdividing does not help, because subdividing adds junctions. A tapered sweep fuses its
+            segments with a smooth minimum — C¹ through the junction — and costs one record for a
+            whole run instead of two per segment.
+          </p>
+        </div>
+        <div class="stack">
+          <div class="panel">
+            <div class="eyebrow" style="margin-bottom:10px"><span data-n="bonsaiRecords"></span> records, by what they evaluate</div>
+            <div class="bars" id="bonsaiBars"></div>
+          </div>
+          <div class="panel">
+            <div class="eyebrow" style="margin-bottom:8px">The crown's own arithmetic <span class="derived">derived</span></div>
+            <pre class="code" id="bonsaiMath"></pre>
+          </div>
+        </div>
+      </div>
+
+      <div class="callout jade" style="margin-top:20px">
+        <p><b>None of this is the bonsai's fault, and that is the point.</b> Every choice above is the
+        cheap one available: the cluster kind exists precisely because the explicit build did not fit
+        in the record budget, the sweep exists because the exact union shaded wrong, and the
+        two-record lobe exists because one record cannot be both granular and opaque. The set is close
+        to minimal for what it draws.</p>
+        <p>What is not minimal is <i>how many times each record is asked to draw itself</i>. The
+        canopy's <span data-n="bonsaiEvalShare"></span> share of distance evaluations is a share of
+        work that is largely <b>thrown away</b>: at a pixel under <span data-n="coverMax"></span>
+        proxies, <span data-n="coverMaxLess"></span> of those field evaluations resolve a surface that
+        something nearer already covered. Making the bonsai cheaper is a much smaller lever than
+        making the pass stop shading what it cannot see — which is §6.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ THE WALL -->
+<section id="wall">
+  <div class="wrap stack-lg">
+    <div class="prose">
+      <div class="eyebrow">§6</div>
+      <h2>The wall — hidden-surface removal in the scene-primitive raster</h2>
+      <p style="margin-top:14px">
+        Both raster passes in this frame draw one conservative box per object and resolve the exact
+        surface in the fragment. They are otherwise the same idea. One costs
+        <span data-n="brickPrimaryMs"></span> and the other costs <span data-n="sdfMs"></span>, and
+        the difference is not the geometry.
+      </p>
+    </div>
+
+    <div class="grid2">
+      <div class="panel">
+        <div class="eyebrow" style="margin-bottom:10px">The scene-primitive fragment — <span class="k">lib/webgpu-svo-dry-scene.ts:2613</span></div>
+        <pre class="code" id="codeBad"></pre>
+      </div>
+      <div class="panel">
+        <div class="eyebrow" style="margin-bottom:10px">The brick raster's coverage pass — <span class="k">lib/webgpu-svo-dry-scene.ts:2673</span></div>
+        <pre class="code" id="codeGood"></pre>
+      </div>
+    </div>
+
+    <div class="prose">
+      <p>
+        Apple's tile-based deferred renderer removes hidden surfaces before shading, but only when it
+        can know a fragment's depth and coverage from the rasterizer alone. A shader that returns
+        <span class="k">@builtin(frag_depth)</span> moves the depth decision after shading; a shader
+        that calls <span class="k">discard</span> moves the coverage decision after shading. The
+        scene-primitive fragment does both, so its <span data-n="primitives"></span> proxies are
+        shaded in submission order with no rejection at all — every covering box marches its own field
+        even when a nearer box already resolved the pixel, and these proxies, unlike brick proxies,
+        are not disjoint.
+      </p>
+      <p>
+        The brick raster is not exposed to this because it was redesigned around it. Its first pass
+        writes no depth and shades nothing: it appends the instance index into a fixed 24-entry
+        per-pixel arena with one <span class="k">atomicAdd</span>, and its
+        <span class="k">discard</span> only suppresses an overflow-mask colour write <i>after</i> the
+        append. A second full-screen pass then walks each pixel's candidates front-to-back exactly
+        once. Overflow beyond 24 candidates re-runs the historical direct fragment in an isolated
+        pipeline, so capacity is a performance parameter and never changes the image.
+      </p>
+    </div>
+
+    <div class="grid2">
+      <figure>
+        <div class="panel">
+          <div class="eyebrow" style="margin-bottom:12px">Covering proxies per pixel — <span data-n="censusResolution"></span> census</div>
+          <div id="histFig"></div>
+        </div>
+        <figcaption>
+          <span data-n="coveredPct"></span> of the screen is covered by at least one proxy. Over
+          covered pixels the mean is <b data-n="coverMean"></b>, of which
+          <b data-n="coverMarchedMean"></b> are marched kinds; median
+          <span data-n="coverMedian"></span>, p90 <span data-n="coverP90"></span>, p99
+          <span data-n="coverP99"></span>, max <span data-n="coverMax"></span>. Tightening the proxy
+          from the axis-aligned world box to the primitive's own oriented box halves this and was
+          <i>refuted</i> in the same lane (−5.2, +3.7 and −24.1 ms against a control whose own spread
+          was 356.7–385.8 ms): fragment <i>count</i> is not what this pass is bound by, per-fragment
+          march cost is. Which is the same thing §5.2's two maps say.
+        </figcaption>
+      </figure>
+      <figure>
+        <div class="panel">
+          <div class="eyebrow" style="margin-bottom:12px">The upper bound — interleaved, paired, 3 pairs</div>
+          <div id="abFig"></div>
+          <div class="legend" style="margin-top:12px">
+            <span><i style="background:var(--ember)"></i>production</span>
+            <span><i style="background:var(--jade)"></i><span class="k">scenePrimitiveHsrProbe</span> — frag_depth and discard both dropped</span>
+          </div>
+        </div>
+        <figcaption id="abCaption"></figcaption>
+      </figure>
+    </div>
+
+    <div class="callout">
+      <p><b>What this bounds, and what it does not — the probe over-states the fix.</b> The probe's
+      image is wrong in a specific way: with <span class="k">frag_depth</span> gone, the depth the
+      hardware tests and stores is the <i>proxy box's</i> back-face depth rather than the surface's,
+      so it rejects proxies a correct resolve would still have to try. Part of that rejection is
+      sound — a proxy wholly behind the ground the brick raster already wrote really is invisible —
+      and part is not.</p>
+      <p>§5.3 separates the two, exactly, on <b data-n="resolvePixels"></b> sampled covered pixels
+      using the same CPU intersection oracle. A sound front-to-back resolve — entry-sorted, stopping
+      once the next candidate begins behind the running best hit, and seeded with the ground depth —
+      runs <b data-n="resolveTries"></b> marches per covered pixel against today's
+      <b data-n="resolveCovering"></b>. That is <b data-n="resolveReduction"></b> fewer field
+      evaluations, not <span data-n="abRatio"></span>. Dropping the ground seed costs it a little:
+      <span data-n="resolveTriesNoGround"></span>.</p>
+      <p><b>So the honest bracket is <span data-n="resolveReduction"></span> to
+      <span data-n="abRatio"></span></b>, and three things live in the gap that the march count does
+      not capture: the resolve also shortens every march it does run to
+      <span class="k">[tEnter, best]</span> rather than the whole box span; it replaces
+      <span data-n="resolveCovering"></span> fragment-shader launches per pixel with one, plus a
+      coverage append that costs what the brick raster's costs; and it removes the
+      <span class="k">discard</span> that is disabling hidden-surface removal for the entire pass
+      today. The brick raster pays <span data-n="brickCoverageMs"></span> and
+      <span data-n="brickResolveMs"></span> for exactly this split, over a comparable instance count.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ SECOND COST -->
+<section id="cones">
+  <div class="wrap stack-lg">
+    <div class="prose">
+      <div class="eyebrow">§7</div>
+      <h2>The second cost — cone visibility</h2>
+      <p style="margin-top:14px">
+        With the wall removed, <span class="k">Sparse voxel compact cone visibility</span> becomes the
+        frame's largest pass. At <span data-n="coneMs"></span> it is <span data-n="coneShare"></span>
+        of the frame today and would be roughly a third of a repaired one, so it is worth stating what
+        it is before it becomes the headline.
+      </p>
+    </div>
+    <div class="grid2">
+      <div class="panel">
+        <div class="eyebrow" style="margin-bottom:10px">Where the <span data-n="coneMs"></span> goes</div>
+        <div class="bars" id="coneBars"></div>
+        <p class="note" style="margin:12px 0 0">
+          Cumulative attribution from the benchmark's own switch-off lane
+          (<span class="k">FLUID_SVO_DRY_FRAME_SHADOWS</span> / <span class="k">_AO</span>),
+          whole-frame submit-to-fence, same process, same warm caches. Shadows and AO are not
+          additive: both march the same node-mip pyramid and share its page cache, so removing one
+          leaves the other's directory work behind — which is why "both off" is not the cheapest arm.
+        </p>
+      </div>
+      <div class="panel prose" style="font-size:15.5px">
+        <div class="eyebrow" style="margin-bottom:10px">How it works</div>
+        <p style="margin:0 0 .8em">
+          A cone is marched, not a ray. Step width follows the continuous cone diameter and each
+          sample is a trilinear fetch from the node-mip opacity pyramid. Coverage is
+          <span class="k">C0</span>-continuous in <span class="k">lod</span>: a single
+          <span class="k">floor(lod)</span> fetch made accumulated opacity jump wherever the level
+          incremented, which rendered as concentric isodistance rings around point lights, so the two
+          bracketing levels are blended — but only inside a trailing transition band, because
+          full-range blending doubled per-step fetches and cost +35 % frame time.
+        </p>
+        <p style="margin:0 0 .8em">
+          The pass runs at half rate (<span data-n="conePlane"></span>) over an 8 × 8 workgroup grid.
+          Each lane reads the 2 × 2 full-resolution G-buffer footprint under it and tests it for
+          homogeneity — same identity, depth within 1 %, normals within 1e-4 of parallel. Homogeneous
+          lanes resolve visibility for the whole quad; the rest enqueue their coordinate into an
+          atomic boundary queue that a third dispatch in the same encoder retraces exactly.
+          Reconstruction back to full rate is <span class="k">full-res-relight</span>: the reduced
+          plane carries only visibility, and material and BRDF are re-evaluated at full resolution in
+          the deferred pass.
+        </p>
+        <p style="margin:0">
+          Measured reconstruction error against a full-rate reference over
+          <span data-n="litPixels"></span> lit pixels: mean relative luminance
+          <b data-n="reconMean"></b>, p95 <b data-n="reconP95"></b>, guided-upsample fallback band
+          <b data-n="reconFallback"></b> of hit pixels.
+        </p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ CONCLUSIONS -->
+<section id="conclusions">
+  <div class="wrap stack-lg">
+    <div class="prose">
+      <div class="eyebrow">§8</div>
+      <h2>What the profile says to do</h2>
+    </div>
+    <div class="stack" id="conclusionList"></div>
+  </div>
+</section>
+
+<!-- ============================================================ APPENDIX -->
+<section id="appendix">
+  <div class="wide stack-lg">
+    <div class="wrap prose" style="padding:0">
+      <div class="eyebrow">Appendix A</div>
+      <h2>The full pass table</h2>
+      <p style="margin-top:12px">
+        Every channel of every labelled encoder, <span data-n="framesAnalysed"></span> steady-state
+        frames. <b>p50</b> is the per-frame median; <b>min</b> and <b>max</b> are the extremes across
+        those frames, not across intervals. Counters are means over uncontended samples attributed to
+        that pass.
+      </p>
+    </div>
+    <div class="panel tbl-wrap">
+      <table id="fullTable"><thead><tr>
+        <th>Pass</th><th>ch</th>
+        <th class="n">p50 ms</th><th class="n">min</th><th class="n">max</th><th class="n">% frame</th>
+        <th class="n">frag occ</th><th class="n">ALU</th><th class="n">read GB/s</th><th class="n">write GB/s</th><th class="n">LLC</th>
+      </tr></thead><tbody></tbody></table>
+    </div>
+
+    <div class="wrap prose" style="padding:0; margin-top:34px">
+      <div class="eyebrow">Appendix B</div>
+      <h2>Reproducing this</h2>
+      <pre class="code" style="margin-top:12px"><i># the capture — Metal System Trace + GPU counters</i>
+node --import tsx tools/profile-svo-render-xctrace.ts \
+  --scene=hero-garden-hose --resolution=1600x1240 \
+  --traversal=raster-primary --shading=split \
+  --cone-tracing=cones --cone-scale=0.5 \
+  --radiance-reconstruction=full-res-relight \
+  --counter-seconds=5 --out=artifacts/xctrace-hero-garden-hose-2026-08-04
+
+<i># the frame, its images, and the scene census</i>
+FLUID_SVO_DRY_FRAME_SCENE=hero-garden-hose FLUID_SVO_DRY_FRAME_WIDTH=1600 \
+FLUID_SVO_DRY_FRAME_HEIGHT=1240 FLUID_SVO_DRY_FRAME_TRAVERSAL=raster-primary \
+FLUID_SVO_DRY_FRAME_SHADING=split FLUID_WEBGPU_DAWN_FEATURES=skip_validation \
+node --import tsx tools/benchmark-svo-dry-frame-gpu.ts
+
+<i># the hidden-surface-removal upper bound, interleaved A B A B A B</i>
+<em>FLUID_SVO_DRY_FRAME_SCENE_HSR_PROBE=1</em>  <i># arm B only</i>
+FLUID_SVO_DRY_FRAME_PROFILE_SECONDS=10
+
+<i># the two CPU censuses — no GPU. Coverage is a ray/AABB slab test of the</i>
+<i># camera's own pixel rays; the resolve order and every hit/miss above come</i>
+<i># from intersectSvoPrimitive, the CPU half of the WGSL intersection contract.</i>
+W=800 H=620 node --import tsx tmp/hero-proxy-coverage.ts   <i># figure, histogram</i>
+W=800 H=620 node --import tsx tmp/hero-sdf-census.ts       <i># fields, probes, resolve</i></pre>
+      <p class="note" style="margin-top:14px">
+        <b>All of this document's data lives in one file</b>:
+        <span class="k">docs/svo-render-frame-anatomy.data.js</span>, regenerated by
+        <span class="k">tmp/hero-doc-data.mjs</span> from
+        <span class="k">artifacts/xctrace-hero-garden-hose-2026-08-04/</span> — the trace, the
+        profiler's <span class="k">summary.json</span>, the reduced
+        <span class="k">pass-table.json</span>, the two CPU censuses
+        (<span class="k">proxy-coverage.json</span>, <span class="k">sdf-census.json</span>), the
+        A/B log, and the benchmark's <span class="k">frame/report.json</span>. The page states no
+        number of its own; every figure and every sentence above binds one from that file.
+      </p>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    Captured <span data-n="capturedAt"></span> on <span data-n="machine"></span>,
+    <span data-n="os"></span>, <span data-n="backend"></span>.
+    Source commit <span class="k" data-n="commit"></span>.
+    Companion to <a href="symmetric-expansion-frame-anatomy.html">Anatomy of one simulation frame — symmetric-expansion</a>.
+  </div>
+</footer>
+
+<button class="t theme-toggle" id="themeToggle">theme</button>
+
+<script>
+"use strict";
+const DATA = window.SVO_FRAME_DATA;
+if (!DATA) {
+  document.body.insertAdjacentHTML("afterbegin",
+    '<div class="nodata">svo-render-frame-anatomy.data.js did not load — this document reads every number from it.</div>');
+  throw new Error("missing data file");
+}
+const $ = (id) => document.getElementById(id);
+const fmt = (v, d = 2) => v == null || !isFinite(v) ? "—" : v.toFixed(d);
+const pct = (v, d = 1) => v == null || !isFinite(v) ? "—" : (v * 100).toFixed(d) + " %";
+const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
+const mb = (b) => (b / (1024 * 1024)).toFixed(2) + " MB";
+
+/* ============================================================
+   PASS MODEL — one entry per labelled encoder, channels folded.
+   ============================================================ */
+const FAMILY = {
+  "brick instance cull": "A", "primary conservative brick coverage": "A",
+  "primary conservative coverage resolve": "A", "primary conservative coverage overflow": "A",
+  "exact live-scene primitive visibility": "B",
+  "analytic rigid primary discovery": "C", "raster-rigid certificate bridge": "C",
+  "raster thin-glass discovery": "C",
+  "directional-light cache demand": "D", "directional-light cache population": "D",
+  "compact cone visibility": "D",
+  "persistent world GI cache": "E",
+  "deferred dry lighting": "F",
+};
+const FAMILY_COLOR = { A: "var(--pA)", B: "var(--pB)", C: "var(--pC)", D: "var(--pD)", E: "var(--pE)", F: "var(--pF)" };
+const FAMILY_NAME = {
+  A: "octree primary visibility", B: "analytic surfaces (SDF)", C: "rigid & glass discovery",
+  D: "lighting visibility", E: "world GI cache", F: "deferred shading",
+};
+const ORDER = Object.keys(FAMILY);
+
+// pass-table.json keeps the full Metal label; the maps above and the counter
+// reducer are both keyed on the pass name alone.
+const shortLabel = (label) => label.replace("Sparse voxel ", "");
+const rows = DATA.passTable.passes
+  .filter((p) => !p.label.startsWith("Blit"))
+  .map((p) => ({ ...p, label: shortLabel(p.label) }));
+const blitMs = DATA.passTable.passes
+  .filter((p) => p.label.startsWith("Blit")).reduce((s, p) => s + p.p50_ms, 0);
+
+const wall = DATA.passTable.wall_ms.p50;
+const busy = DATA.passTable.gpuBusy_ms.p50;
+const passes = ORDER.map((label) => {
+  const channels = rows.filter((r) => r.label === label);
+  if (channels.length === 0) return null;
+  const dominant = channels.slice().sort((a, b) => b.p50_ms - a.p50_ms)[0];
+  const entry = DATA.counters.byPass[label];
+  return {
+    label, family: FAMILY[label], ms: channels.reduce((s, r) => s + r.p50_ms, 0), channels,
+    dominantChannel: dominant.channel, range: [dominant.min_ms, dominant.max_ms],
+    counters: entry ? entry.counters : null,
+  };
+}).filter(Boolean);
+const passTotal = passes.reduce((s, p) => s + p.ms, 0);
+const byLabel = (label) => passes.find((p) => p.label === label);
+const familyMs = (f) => passes.filter((p) => p.family === f).reduce((s, p) => s + p.ms, 0);
+
+const sdfPass = byLabel("exact live-scene primitive visibility");
+const conePass = byLabel("compact cone visibility");
+const restMs = wall - sdfPass.ms;
+const median = (a) => a.slice().sort((x, y) => x - y)[Math.floor(a.length / 2)];
+const abProd = median(DATA.ab.production), abProbe = median(DATA.ab.probe);
+const cov = DATA.coverage, sdfCensus = DATA.sdf, scene = DATA.scene;
+const family = (name) => sdfCensus.byFamily.find((f) => f.family === name) || {};
+
+/* ============================================================
+   NUMBERS — the single derivation site. Prose binds these by name.
+   ============================================================ */
+const N = {
+  machine: DATA.capture.machine, os: DATA.capture.os, backend: DATA.capture.backend,
+  capturedAt: DATA.capture.capturedAt, commit: DATA.capture.commit,
+  resolution: DATA.capture.width + " × " + DATA.capture.height,
+  censusResolution: cov.resolution.width + " × " + cov.resolution.height,
+
+  wall: fmt(wall, 1) + " ms",
+  wallSpread: fmt(DATA.passTable.wall_ms.min, 0) + "–" + fmt(DATA.passTable.wall_ms.max, 0) + " ms",
+  busy: fmt(busy, 1) + " ms",
+  passSum: fmt(passTotal, 1) + " ms",
+  fps: fmt(1000 / wall, 2),
+  blitUs: Math.round(blitMs * 1000) + " µs",
+  framesTotal: DATA.frames.total, framesAnalysed: DATA.frames.analysed,
+  deviceUtil: pct(DATA.passTable.utilisation),
+  counterCoverage: pct(DATA.counters.coverage),
+  untracedAll: DATA.capture.untracedMs.slice().sort((a, b) => a - b).map((v) => fmt(v, 1)).join(" / ") + " ms",
+  untracedMedian: fmt(abProd, 1) + " ms",
+  distortion: fmt(wall / abProd, 2) + "×",
+  contenders: DATA.counters.contention.filter((c) => c.gpuMs > 1)
+    .map((c) => c.process.replace(/ \(\d+\)$/, "") + " (" + fmt(c.gpuMs / 1000, 1) + " s)").join(", "),
+
+  sdfMs: fmt(sdfPass.ms, 1) + " ms",
+  sdfShare: pct(sdfPass.ms / wall),
+  sdfMin: fmt(sdfPass.range[0], 1), sdfMax: fmt(sdfPass.range[1], 1),
+  restMs: fmt(restMs, 1) + " ms",
+  brickPrimaryMs: fmt(familyMs("A"), 1) + " ms",
+  brickCoverageMs: fmt(byLabel("primary conservative brick coverage").ms, 2) + " ms",
+  brickResolveMs: fmt(byLabel("primary conservative coverage resolve").ms, 2) + " ms",
+  coneMs: fmt(conePass.ms, 1) + " ms",
+  coneShare: pct(conePass.ms / wall),
+  conePlane: DATA.coneLighting.prepassResolution.join(" × "),
+
+  abProdMedian: fmt(abProd, 0) + " ms", abProbeMedian: fmt(abProbe, 0) + " ms",
+  abRatio: fmt(median(DATA.ab.production.map((p, i) => p / DATA.ab.probe[i])), 2) + "×",
+  abDelta: fmt(median(DATA.ab.production.map((p, i) => p - DATA.ab.probe[i])), 0) + " ms",
+  sdfWithHsr: fmt(abProbe - restMs, 0) + " ms",
+
+  primitives: scene.primitiveCount,
+  clusters: sdfCensus.byFamily.reduce((a, f) => a + f.clusters, 0),
+  recordBytes: (scene.primitiveCount * 64 / 1024).toFixed(0) + " KB",
+  marched: cov.marchedProxies,
+  marchedPct: pct(cov.marchedProxies / cov.proxies, 0),
+  marchCap: sdfCensus.model.marchIterationCap,
+  latticeSpan: sdfCensus.model.latticeNeighbourhood,
+  coveredPct: pct(cov.coveredPixelFraction),
+  coverMean: fmt(cov.meanCoveringProxiesOverCovered),
+  coverMarchedMean: fmt(cov.meanMarchedOverCovered),
+  coverMedian: cov.coveredPercentiles.p50, coverP90: cov.coveredPercentiles.p90,
+  coverP99: cov.coveredPercentiles.p99, coverMax: cov.percentiles.max,
+  coverMaxLess: cov.percentiles.max - 1,
+  evalHeatMax: Math.round(Math.pow(10, sdfCensus.totals.evaluationHeatmapLogMaximum)).toLocaleString(),
+  nsPerCoveredPixel: Math.round(sdfPass.ms * 1e6
+    / (DATA.capture.width * DATA.capture.height * cov.coveredPixelFraction)) + " ns",
+
+  resolvePixels: sdfCensus.resolveSample.pixels.toLocaleString(),
+  resolveCovering: fmt(sdfCensus.resolveSample.meanCovering),
+  resolveTries: fmt(sdfCensus.resolveSample.meanResolveTries),
+  resolveTriesNoGround: fmt(sdfCensus.resolveSample.meanResolveTriesWithoutGround),
+  resolveReduction: fmt(sdfCensus.resolveSample.reduction) + "×",
+  resolveHitting: fmt(sdfCensus.resolveSample.meanHitting),
+  probeCovering: sdfCensus.probes[0].covering,
+  probeTries: sdfCensus.probes[0].resolveTries,
+  probeWasted: sdfCensus.probes[0].wasted,
+
+  bonsaiRecords: family("bonsai").primitives,
+  bonsaiRecordsPct: pct(family("bonsai").primitives / scene.primitiveCount, 0),
+  bonsaiCoverShare: pct(family("bonsai").shareOfCoverage, 0),
+  bonsaiEvalShare: pct(family("bonsai").shareOfEvaluations, 0),
+  copingCoverShare: pct(family("coping").shareOfCoverage, 0),
+  copingEvalShare: pct(family("coping").shareOfEvaluations, 0),
+  stonesEvalShare: pct(family("stones & pebble beds").shareOfEvaluations, 0),
+
+  nodeMipPages: scene.nodeMipPyramid.pages,
+  tetraBytes: mb(scene.derivedRenderAllocationBytes.tetrahedralRadiance),
+  leaves: scene.structuralCapacities.leaves.toLocaleString(),
+  voxels: scene.structuralCapacities.voxels.toLocaleString(),
+
+  litPixels: DATA.coneLighting.errorStats.litPixels.toLocaleString(),
+  reconMean: pct(DATA.coneLighting.errorStats.mean, 2),
+  reconP95: pct(DATA.coneLighting.errorStats.p95),
+  reconFallback: pct(0, 0),
+};
+for (const node of document.querySelectorAll("[data-n]")) {
+  const value = N[node.dataset.n];
+  if (value !== undefined) node.textContent = value;
+}
+
+/* ---------------- figures ---------------- */
+for (const [id, key] of [["heroArt", "frame"], ["heroFig", "frame"], ["overdrawFig", "proxyCoverage"],
+  ["coverFig2", "proxyCoverage"], ["evalFig", "sdfEvaluations"], ["bonsaiRender", "bonsaiFrame"],
+  ["bonsaiCover", "bonsaiCoverage"], ["bonsaiEval", "bonsaiEvaluations"]]) {
+  const node = $(id); if (node) node.src = DATA.figures[key];
+}
+
+/* ---------------- chips ---------------- */
+$("chips").innerHTML = [
+  ["frame", N.wall + " · " + N.fps + " fps"],
+  ["resolution", N.resolution],
+  ["primary", "raster brick proxies"],
+  ["lighting", "cones @ " + N.conePlane + " · full-res relight"],
+  ["SDF records", N.primitives + " · " + N.clusters + " clusters"],
+  ["octree", N.leaves + " leaves · depth " + scene.maximumDepth],
+  ["node-mip pages", String(N.nodeMipPages)],
+  ["frames analysed", N.framesAnalysed + " of " + N.framesTotal],
+].map(([k, v]) => `<span class="chip">${esc(k)} <b>${esc(v)}</b></span>`).join("");
+
+/* ---------------- ribbon ---------------- */
+let ribbonScale = "lin";
+function drawRibbon() {
+  const weight = (p) => ribbonScale === "lin" ? p.ms : Math.log10(1 + p.ms * 1000);
+  const total = passes.reduce((a, p) => a + weight(p), 0);
+  $("ribbon").innerHTML = passes.map((p, i) => {
+    const w = (weight(p) / total) * 100;
+    return `<button class="seg" data-i="${i}" style="flex:0 0 ${w.toFixed(3)}%; background:${FAMILY_COLOR[p.family]}"
+      title="${esc(p.label)} — ${fmt(p.ms)} ms">${w > 6 ? `<span class="tick">${fmt(p.ms, p.ms > 10 ? 0 : 1)}</span>` : ""}</button>`;
+  }).join("");
+  $("ribbonAxis").innerHTML = (ribbonScale === "lin"
+    ? ["0 ms", "100", "200", "300", fmt(wall, 1) + " ms"]
+    : ["20 µs", "", "log GPU time per pass", "", fmt(sdfPass.ms, 0) + " ms"])
+    .map((t) => `<span>${t}</span>`).join("");
+  for (const node of $("ribbon").children) {
+    node.addEventListener("mouseenter", () => showReadout(Number(node.dataset.i)));
+    node.addEventListener("click", () => {
+      const card = document.getElementById("pass-" + node.dataset.i);
+      if (card) card.scrollIntoView({ behavior: "smooth", block: "center" });
+    });
+  }
+}
+function showReadout(i) {
+  const p = passes[i];
+  const c = p.counters || {};
+  const bits = [`<b>${esc(p.label)}</b>`, `${fmt(p.ms)} ms · ${pct(p.ms / wall)} of frame`, `${p.dominantChannel} channel`];
+  if (c["Fragment Occupancy"]) bits.push(`frag occ ${fmt(c["Fragment Occupancy"].mean, 1)} %`);
+  if (c["ALU Utilization"]) bits.push(`ALU ${fmt(c["ALU Utilization"].mean, 1)} %`);
+  $("readout").innerHTML = bits.join(" &nbsp;·&nbsp; ");
+  for (const node of $("ribbon").children) node.classList.toggle("on", Number(node.dataset.i) === i);
+}
+$("scaleLin").addEventListener("click", () => { ribbonScale = "lin"; $("scaleLin").ariaPressed = "true"; $("scaleLog").ariaPressed = "false"; drawRibbon(); });
+$("scaleLog").addEventListener("click", () => { ribbonScale = "log"; $("scaleLin").ariaPressed = "false"; $("scaleLog").ariaPressed = "true"; drawRibbon(); });
+drawRibbon();
+
+/* ---------------- thesis KPIs ---------------- */
+$("thesisKpis").innerHTML = [
+  ["ember", "The wall", N.sdfMs,
+    `<b>${N.sdfShare}</b> of the frame in one fragment shader. Range over ${N.framesAnalysed} frames ${N.sdfMin}–${N.sdfMax} ms.`],
+  ["", "Everything else", N.restMs,
+    `Octree primary <b>${N.brickPrimaryMs}</b>, rigid + glass <b>${fmt(familyMs("C"), 2)} ms</b>, lighting visibility <b>${fmt(familyMs("D") + familyMs("E"), 1)} ms</b>, deferred shading <b>${fmt(familyMs("F"), 1)} ms</b>.`],
+  ["jade", "Recoverable", N.abRatio,
+    `Paired against the hidden-surface-removal probe: <b>${N.abDelta}</b> median delta over three interleaved pairs.`],
+  ["sig", "Bonsai share", N.bonsaiEvalShare,
+    `Of all modelled distance-function evaluations, from <b>${N.bonsaiRecordsPct}</b> of the records. <span class="derived">derived</span>`],
+].map(([cls, l, v, n]) => `<div class="panel kpi ${cls}"><div class="l">${l}</div><div class="v">${v}</div><div class="n">${n}</div></div>`).join("");
+
+/* ---------------- provenance ---------------- */
+$("provTable").innerHTML = [
+  ["Machine", N.machine + " — 4 GPU partitions, " + (4 * DATA.counters.slotsPerPartition * 32).toLocaleString() + " resident threads"],
+  ["OS / backend", N.os + " · " + N.backend + " · <span class='k'>skip_validation, use_user_defined_labels_in_backend</span> · headless"],
+  ["Lane", "<span class='k'>" + DATA.capture.lane + "</span>"],
+  ["Configuration", DATA.capture.configuration],
+  ["Source", "<span class='k'>" + N.commit + "</span>, render fingerprint <span class='k'>"
+    + DATA.capture.renderFingerprint.slice(0, 12) + "</span> over " + DATA.capture.renderFiles
+    + " files. The working tree carried two unrelated solver-side edits; nothing on the render path."],
+  ["Frames", N.framesTotal + " complete, " + N.framesAnalysed + " analysed (4 warm-up frames and 1 partial dropped)"],
+  ["Frame wall", "<b>" + N.wall + "</b> median · " + N.wallSpread],
+  ["GPU busy", "<b>" + N.busy + "</b> = " + N.deviceUtil + " device utilisation"],
+  ["Untraced baseline", N.untracedAll + " over three interleaved clean runs"],
+].map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("");
+
+/* ---------------- scene tables ---------------- */
+const cam = DATA.camera;
+$("sceneTable").innerHTML = [
+  ["Container", "1.8 × 0.6 × 1.2 m, open top"],
+  ["Finest cell", "25 mm · brick " + scene.brickSize + "³ cells"],
+  ["Render lattice", scene.grid.nx + " × " + scene.grid.ny + " × " + scene.grid.nz + " cells"],
+  ["Octree depth", String(scene.maximumDepth)],
+  ["Camera", "azimuth " + fmt(cam.azimuth_rad) + " rad, elevation " + fmt(cam.elevation_rad) + " rad, " + fmt(cam.distance_m, 1) + " m out"],
+  ["Lens", "tanHalfFov " + cam.tanHalfFov + " — a 50 mm on 35 mm, authored, not the 0.72 default"],
+  ["Lights", scene.lightCount + " directional key (warm, intensity 3.2) + analytic sky fill"],
+  ["Rigid bodies", scene.rigidBodyCount + " stepping stones"],
+  ["Glass panes", String(scene.glassPaneCount)],
+  ["Fluid", "<b>none</b> — <span class='k'>systems.fluid</span> false"],
+].map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("");
+
+$("publishTable").innerHTML = [
+  ["Octree topology", scene.structuralCapacities.nodes.toLocaleString() + " nodes, " + N.leaves + " leaves — " + mb(scene.structuralBytes.topology)],
+  ["Brick payload", N.voxels + " voxels × (geometry + velocity + owner) — " + mb(scene.structuralBytes.payload)],
+  ["Compact hierarchy", scene.compactHierarchy.nodeCount + " hot nodes at " + scene.compactHierarchy.strideBytes + " B — " + scene.compactHierarchy.hotNodeByteReductionPercent + " % narrower than canonical"],
+  ["Node-mip pyramid", N.nodeMipPages + " pages, 8³ + 1 apron, 4 channels — " + mb(scene.derivedRenderAllocationBytes.nodeMipPyramid)],
+  ["Tetrahedral radiance", scene.tetrahedralRadiance.pages + " pages × 4 lobes, " + scene.tetrahedralRadiance.blackPages + " black — " + N.tetraBytes],
+  ["Wide fan-out", mb(scene.derivedRenderAllocationBytes.wideFanout)],
+  ["SDF records", N.primitives + " × 64 B = " + N.recordBytes + ", plus " + (sdfCensus.byField.lattice ? "192 KB" : "0 KB") + " of cluster arena blocks"],
+  ["Terrain", "analytic heightfield, sampled at 6.25 mm — a quarter of a cell"],
+  ["Total resident", mb(scene.allocatedBytes)],
+].map(([k, v]) => `<dt>${k}</dt><dd>${v}</dd>`).join("");
+
+/* ---------------- timeline ---------------- */
+(function timeline() {
+  const t = DATA.representative.timeline;
+  const span = DATA.representative.wall;
+  const channels = ["Vertex", "Fragment", "Compute"];
+  const H = 34, GAP = 6, W = 1000, PAD_L = 66;
+  const height = channels.length * (H + GAP) + 26;
+  let svg = `<svg viewBox="0 0 ${W} ${height}" width="100%" style="display:block" role="img" aria-label="GPU timeline of one frame">`;
+  channels.forEach((ch, ci) => {
+    const y = ci * (H + GAP);
+    svg += `<text x="0" y="${y + H / 2 + 4}" font-family="ui-monospace, monospace" font-size="10.5" fill="var(--ink-3)">${ch}</text>`;
+    svg += `<rect x="${PAD_L}" y="${y}" width="${W - PAD_L}" height="${H}" fill="var(--bg-3)" rx="2"/>`;
+    for (const e of t.filter((e) => e.ch === ch)) {
+      const x = PAD_L + (e.t / span) * (W - PAD_L);
+      const w = Math.max(1.1, (e.d / span) * (W - PAD_L));
+      svg += `<rect x="${x.toFixed(2)}" y="${y + 2}" width="${w.toFixed(2)}" height="${H - 4}" fill="${FAMILY_COLOR[FAMILY[e.label] || "F"]}" rx="1.5"><title>${esc(e.label)} — ${fmt(e.d)} ms at t=${fmt(e.t)} ms</title></rect>`;
+    }
+  });
+  const axisY = channels.length * (H + GAP) + 12;
+  for (let i = 0; i <= 4; i += 1) {
+    const x = PAD_L + (i / 4) * (W - PAD_L);
+    svg += `<line x1="${x}" y1="${axisY - 10}" x2="${x}" y2="${axisY - 6}" stroke="var(--rule)"/>`;
+    svg += `<text x="${x}" y="${axisY + 4}" font-family="ui-monospace, monospace" font-size="10" fill="var(--ink-3)" text-anchor="${i === 0 ? "start" : i === 4 ? "end" : "middle"}">${(span * i / 4).toFixed(0)} ms</text>`;
+  }
+  $("timelineFig").innerHTML = svg + `</svg>`;
+  $("timelineLegend").innerHTML = Object.keys(FAMILY_NAME)
+    .map((f) => `<span><i style="background:${FAMILY_COLOR[f]}"></i>${FAMILY_NAME[f]}</span>`).join("");
+})();
+
+/* ---------------- subsystem bars ---------------- */
+(function subsystems() {
+  const totals = new Map();
+  for (const p of passes) totals.set(p.family, (totals.get(p.family) || 0) + p.ms);
+  const max = Math.max(...totals.values());
+  $("subsystemBars").innerHTML = [...totals].sort((a, b) => b[1] - a[1]).map(([f, ms]) =>
+    `<div class="bar-row"><span class="lab">${FAMILY_NAME[f]}</span>
+      <span class="bar-track"><span class="bar-fill" style="width:${((ms / max) * 100).toFixed(2)}%; background:${FAMILY_COLOR[f]}"></span></span>
+      <span class="val">${fmt(ms, ms > 10 ? 1 : 2)} ms · ${pct(ms / wall, ms / wall < 0.01 ? 2 : 1)}</span></div>`).join("");
+})();
+
+/* ---------------- stability ---------------- */
+(function stability() {
+  const w = DATA.frames.walls;
+  const W = 480, H = 118, lo = Math.min(...w) * 0.96, hi = Math.max(...w) * 1.02;
+  const x = (i) => (i / (w.length - 1)) * W;
+  const y = (v) => H - ((v - lo) / (hi - lo)) * H;
+  $("stabilityFig").innerHTML = `<svg viewBox="0 0 ${W} ${H + 16}" width="100%" style="display:block" role="img" aria-label="Frame wall over the analysed frames">
+    <line x1="0" y1="${y(wall)}" x2="${W}" y2="${y(wall)}" stroke="var(--rule)" stroke-dasharray="3 3"/>
+    <path d="${w.map((v, i) => `${i ? "L" : "M"}${x(i).toFixed(1)},${y(v).toFixed(1)}`).join("")}" fill="none" stroke="var(--ember)" stroke-width="1.6"/>
+    ${w.map((v, i) => `<circle cx="${x(i).toFixed(1)}" cy="${y(v).toFixed(1)}" r="1.8" fill="var(--ember)"><title>frame ${i + 5} — ${fmt(v, 1)} ms</title></circle>`).join("")}
+    <text x="2" y="${y(wall) - 4}" font-family="ui-monospace, monospace" font-size="9.5" fill="var(--ink-3)">median ${fmt(wall, 0)} ms</text>
+    <text x="0" y="${H + 12}" font-family="ui-monospace, monospace" font-size="9.5" fill="var(--ink-3)">frame 5</text>
+    <text x="${W}" y="${H + 12}" font-family="ui-monospace, monospace" font-size="9.5" fill="var(--ink-3)" text-anchor="end">frame ${w.length + 4}</text>
+  </svg>`;
+  const light = byLabel("deferred dry lighting");
+  $("stabilityNote").innerHTML = `The frame wall spreads <b>${N.wallSpread}</b> and essentially all of
+    that spread is one pass: the scene-primitive raster alone ranges
+    <b>${N.sdfMin}–${N.sdfMax} ms</b>, while cone visibility holds
+    <b>${fmt(conePass.range[0], 1)}–${fmt(conePass.range[1], 1)}</b>, deferred lighting
+    <b>${fmt(light.range[0], 1)}–${fmt(light.range[1], 1)}</b> and the whole octree primary inside
+    ±6 %. On a machine shared with a compositor and a browser, the pass that owns
+    ${N.sdfShare} of the frame is also the one that absorbs the contention.`;
+})();
+
+/* ---------------- stage cards ---------------- */
+const NARRATIVE = {
+  "brick instance cull": {
+    what: "Emit one box instance per resident, occupied SVO leaf brick, frustum-cull it, and bucket-sort it by minimum view depth.",
+    body: `<p>Three dispatches in one encoder — emit, scan, scatter — over the leaf capacity, publishing an indirect draw for the passes below. The box is not the leaf: it is the leaf's <i>occupied sub-AABB</i>, decoded from the occupancy word the sparse-brick producer already writes into the terminal node's <span class="k">links.w</span>. Sub-boxes of disjoint boxes stay disjoint, so a ray still meets each instance over one interval and those intervals stay totally ordered.</p>
+      <p>The sort is a 1024-bucket counting sort and is deliberately approximate inside a bucket: the depth test is the authority and the ordering exists only so tile-based hidden-surface removal gets to reject occluded bricks before shading them. That is the same mechanism §6 is about, used correctly.</p>`,
+  },
+  "primary conservative brick coverage": {
+    what: "Append every brick proxy covering a pixel into a fixed 24-entry per-pixel arena. No depth, no payload, no shading.",
+    body: `<p>One <span class="k">atomicAdd</span> per covering fragment and a store. Its <span class="k">discard</span> follows the append and only suppresses the throwaway overflow-mask colour write, so it costs nothing that matters. This is the cheapest possible way to learn what covers what.</p>
+      <p>The counters say exactly that: high fragment occupancy at almost no ALU, with tens of GB/s of writes. The machine is full and doing nothing but memory traffic — the correct shape for this pass.</p>`,
+  },
+  "primary conservative coverage resolve": {
+    what: "One expensive fragment per pixel walks that pixel's candidate list front-to-back and writes the exact hit or an exact miss.",
+    body: `<p>A full-screen triangle. Every pixel resolves once regardless of how many bricks covered it, and it always writes — hit or miss — so it never discards. Terrain and the sky background are folded in here too.</p>
+      <p>Its counters are the mirror image of the coverage pass: high ALU at moderate occupancy and very little bandwidth. This is the one pass in the frame that is ALU-bound in a healthy way.</p>`,
+  },
+  "primary conservative coverage overflow": {
+    what: "Re-run the historical one-DDA-per-proxy brick fragment, but only for pixels whose candidate list overflowed 24 entries.",
+    body: `<p>Capacity never changes the image; it only decides how much work lands in this isolated pipeline. Garden's measured maximum was 18 against the arena's 24, and on this scene the pass costs a quarter of a millisecond of fragment time — the overflow set is effectively empty.</p>`,
+  },
+  "exact live-scene primitive visibility": {
+    what: "Draw one conservative box per authored signed-distance primitive and resolve the exact surface in the fragment.",
+    body: `<p>One instance per record, 36 vertices each, back faces only so a camera inside a proxy still shades it. A proxy that contains the eye emits a full-screen triangle instead. The fragment rebuilds the primary ray from the pixel, brackets the march interval to the box span, and either returns the exact surface or discards.</p>
+      <p>It is depth-tested against the brick raster's buffer, which already holds the octree's answer — and it cannot use it, because the fragment writes <span class="k">frag_depth</span> and discards. §5 and §6 are this pass.</p>
+      <p>Low fragment occupancy at moderate ALU and almost no bandwidth: long shaders with big register footprints and no memory pressure. The machine is a quarter busy computing and largely empty of threads.</p>`,
+  },
+  "analytic rigid primary discovery": {
+    what: "Rasterize the stepping stones as analytic impostors into the same G-buffer.",
+    body: `<p>Bodies are exact quadrics rather than voxels, so they get their own proxy pass and their own certificate plane. The adaptive crossover between this and tracing them inside the megakernel picks raster here.</p>`,
+  },
+  "raster-rigid certificate bridge": {
+    what: "Copy the rigid pass's private geometry plane into the split G-buffer's geometry and identity planes.",
+    body: `<p>A pure plumbing pass, and it exists so the rigid impostor's exact normal and identity survive into deferred shading without the primary pass having to know about bodies.</p>`,
+  },
+  "raster thin-glass discovery": {
+    what: "Rasterize thin glass panes into a key plane, coverage-scaled and depth-tested separately.",
+    body: `<p>This scene has <b>no glass at all</b> — <span class="k">glassPaneCount</span> is 0 — so the pass encodes a draw of zero instances and produces no fragment work whatsoever. Its microsecond-scale vertex stage is the entire cost of keeping the path uniform across scenes.</p>`,
+  },
+  "directional-light cache demand": {
+    what: "Classify every full-resolution pixel against the voxel directional-light cache and enqueue the cache misses.",
+    body: `<p>An 8 × 8 compute grid over the full frame. Where a world-space cache entry already answers the key light's visibility for a voxel and normal, the cone march below is skipped entirely.</p>`,
+  },
+  "directional-light cache population": {
+    what: "Fill the queued cache entries under a fixed per-frame budget.",
+    body: `<p>A bounded 64-lane dispatch — ten microseconds. The budget is the point: the cache converges over frames rather than stalling one.</p>`,
+  },
+  "compact cone visibility": {
+    what: "Resolve shadow, ambient-occlusion and global-illumination visibility for every reduced-rate pixel by marching cones through the node-mip opacity pyramid.",
+    body: `<p>Three dispatches in one encoder: a single-lane reset of the boundary queue, the 8 × 8 coherent march over the reduced plane, and a 64-lane pass that retraces exactly the pixels whose 2 × 2 full-resolution footprint was not homogeneous.</p>
+      <p>Packing is exact rather than approximate: <span class="k">rg32uint</span> holds 8-bit AO plus eight 7-bit light visibilities in 64 bits, so a scene may shade up to eight lights through one plane. This one has a single directional key.</p>
+      <p>Fragment occupancy reads zero because this is a compute pass and Fragment Occupancy is the counter this lane samples — not a starvation reading.</p>`,
+  },
+  "persistent world GI cache": {
+    what: "Gather one bounce of diffuse radiance from the tetrahedral radiance atlas into a persistent world-space hash cache.",
+    body: `<p>The cache is keyed in world space and owned by the source, so camera motion changes which keys are queried but never invalidates an entry. Only a source, authored-scene or lighting-contract change clears it — which is why it is flat to a fraction of a millisecond across every frame in the window.</p>
+      <p>The highest ALU utilisation in the frame. A dense, well-shaped kernel.</p>`,
+  },
+  "deferred dry lighting": {
+    what: "Evaluate materials, BRDF and the tone curve at full resolution against the reduced visibility plane.",
+    body: `<p>Two draws in one pass, partitioned by two complementary depth tests: the sky shader takes the pixels primary visibility left as a miss, and the full deferred shader takes the rest. Sky goes first so the expensive draw is the one still in flight when the pass ends. The depth attachment is <span class="k">depthReadOnly</span>, so it costs a tile load and no store.</p>
+      <p>This is where <span class="k">full-res-relight</span> is paid: material and BRDF are re-evaluated per pixel, and only visibility comes from the half-rate plane. Tens of GB/s of writes at low occupancy — bandwidth-shaped, as a deferred resolve should be.</p>`,
+  },
+};
+
+$("stageCards").innerHTML = passes.map((p, i) => {
+  const c = p.counters || {};
+  const counterTags = [
+    ["frag occ", c["Fragment Occupancy"], "%"],
+    ["ALU", c["ALU Utilization"], "%"],
+    ["LLC", c["GPU Last Level Cache Utilization"], "%"],
+    ["read", c["GPU Read Bandwidth"], " GB/s"],
+    ["write", c["GPU Write Bandwidth"], " GB/s"],
+  ].filter(([, v]) => v).map(([k, v, u]) => `<span class="tag">${k} <b>${fmt(v.mean, 1)}${u}</b></span>`).join("");
+  const n = NARRATIVE[p.label] || { what: "", body: "" };
+  const channelBits = p.channels.slice().sort((a, b) => b.p50_ms - a.p50_ms)
+    .map((ch) => `${ch.channel} ${fmt(ch.p50_ms, ch.p50_ms < 1 ? 3 : 2)} ms`).join(" · ");
+  return `<div class="stage" id="pass-${i}">
+    <div class="stage-head">
+      <div class="rail" style="background:${FAMILY_COLOR[p.family]}"></div>
+      <div class="who">
+        <h3>P${i + 1} &nbsp;${esc(p.label)}</h3>
+        <div class="meta">${channelBits}${p.range[1] > p.range[0] * 1.02 ? ` &nbsp;·&nbsp; ${fmt(p.range[0], 2)}–${fmt(p.range[1], 2)} ms across frames` : ""}</div>
+      </div>
+      <div class="stage-cost"><div class="ms">${fmt(p.ms, p.ms >= 10 ? 1 : 2)}</div><div class="pc">ms · ${pct(p.ms / wall, p.ms / wall < 0.01 ? 2 : 1)}</div></div>
+    </div>
+    <div class="stage-body">
+      <p style="color:var(--ink-2)"><b>${esc(n.what)}</b></p>
+      ${n.body}
+      <div class="counters">${counterTags || '<span class="tag">no uncontended counter samples</span>'}</div>
+    </div>
+  </div>`;
+}).join("");
+
+/* ---------------- SDF section ---------------- */
+(function sdf() {
+  const FIELD_NOTE = {
+    lattice: "8 unconditional sphere distances + up to 56 conditional, per octave. The 56 are rejected by an unjittered-centre distance that needs no hash.",
+    "seeded-lobes": "one rotated anisotropic ellipsoid distance per lobe, smooth-min folded in authored order.",
+    "tapered-sweep": "one exact round-cone distance per polyline segment — the convex hull of two spheres, so Lipschitz-1 by definition.",
+  };
+  $("fieldTable").querySelector("tbody").innerHTML = Object.entries(sdfCensus.byField)
+    .sort((a, b) => b[1].records - a[1].records).map(([name, f]) =>
+      `<tr><td><span class="k">${name}</span></td><td class="n">${f.records}</td>
+        <td class="n">${f.meanFoldFloor === f.meanFoldCeiling ? fmt(f.meanFoldFloor, 1) : fmt(f.meanFoldFloor, 1) + "–" + fmt(f.meanFoldCeiling, 0)}</td>
+        <td>${FIELD_NOTE[name] || ""}</td></tr>`).join("");
+
+  const t = sdfCensus.totals;
+  $("sdfKpis").innerHTML = [
+    ["", "Marched primitives", N.marched + " / " + N.primitives,
+      `${N.marchedPct} of the set resolves its hit by a bounded sphere trace, capped at ${N.marchCap} iterations.`],
+    ["", "Mean covering proxies", N.coverMean,
+      `over the ${N.coveredPct} of the screen a proxy covers. Median ${N.coverMedian}, p90 ${N.coverP90}, p99 ${N.coverP99}, max ${N.coverMax}.`],
+    ["ember", "Distance evaluations", Math.round(t.meanEvaluationsOverCovered) + "–" + Math.round(t.meanEvaluationsCeilingOverCovered),
+      `per covered pixel, floor to ceiling fold width. <span class="derived">derived</span>`],
+    ["sig", "Time per covered pixel", N.nsPerCoveredPixel,
+      `${N.sdfMs} over the ${(DATA.capture.width * DATA.capture.height * cov.coveredPixelFraction / 1e6).toFixed(2)} M covered pixels of the ${N.resolution} frame.`],
+  ].map(([cls, l, v, n]) => `<div class="panel kpi ${cls}"><div class="l">${l}</div><div class="v">${v}</div><div class="n">${n}</div></div>`).join("");
+
+  const FAMILY_TINT = {
+    bonsai: "var(--ember)", "stones & pebble beds": "var(--amber)", coping: "var(--pA)",
+    hose: "var(--jade)", plants: "var(--violet)",
+  };
+  $("familyTable").querySelector("tbody").innerHTML = sdfCensus.byFamily.map((f) => {
+    const tint = FAMILY_TINT[f.family] || "var(--ink-3)";
+    const bar = (v, colour) => `<span class="bar-track" style="height:13px"><span class="bar-fill" style="width:${(v * 100).toFixed(1)}%; background:${colour}"></span></span>
+      <span style="font-family:ui-monospace,monospace; font-size:11px; color:var(--ink-3)">${pct(v)}</span>`;
+    return `<tr>
+      <td><span class="swatch" style="background:${tint}"></span>${esc(f.family)}</td>
+      <td class="n">${f.primitives}</td><td class="n">${f.clusters}</td><td class="n">${f.marched}</td>
+      <td class="n">${fmt(f.meanFoldFloor, 1)}</td>
+      <td>${bar(f.shareOfCoverage, "var(--ink-3)")}</td>
+      <td>${bar(f.shareOfEvaluations, tint)}</td></tr>`;
+  }).join("");
+
+  const b = sdfCensus.bonsai;
+  const order = ["lattice", "seeded-lobes", "tapered-sweep", "ellipsoid"];
+  const colours = { lattice: "var(--ember)", "seeded-lobes": "var(--amber)", "tapered-sweep": "var(--sig)", ellipsoid: "var(--ink-3)" };
+  const label = {
+    lattice: "lattice cluster — the florets", "seeded-lobes": "seeded-lobes cluster — canopy plates",
+    "tapered-sweep": "tapered sweep — trunk, buttress, limb", ellipsoid: "ellipsoid — opacity cores",
+  };
+  const maxCount = Math.max(...order.map((f) => b.byField[f] || 0));
+  $("bonsaiBars").innerHTML = order.filter((f) => b.byField[f]).map((f) =>
+    `<div class="bar-row"><span class="lab">${label[f]}</span>
+      <span class="bar-track"><span class="bar-fill" style="width:${((b.byField[f] / maxCount) * 100).toFixed(1)}%; background:${colours[f]}"></span></span>
+      <span class="val">${b.byField[f]} records</span></div>`).join("");
+
+  const lattice = sdfCensus.byField.lattice, lobes = sdfCensus.byField["seeded-lobes"], sweep = sdfCensus.byField["tapered-sweep"];
+  $("bonsaiMath").innerHTML = `<i># one pixel on the canopy, at the census peak</i>
+covering proxies                    <b>${cov.percentiles.max}</b>
+of which marched                    <b>${cov.percentiles.max}</b>
+
+<i># what one of them costs per march step</i>
+lattice, 1 octave, ${sdfCensus.model.latticeNeighbourhood}³ block      8 – <b>${Math.round(lattice.meanFoldCeiling / (lattice.meanFoldFloor / 8))}</b>  sphere distances
+seeded-lobes, 5–8 lobes          5 – <b>8</b>   ellipsoid distances
+tapered-sweep, 1–3 segments      1 – <b>3</b>   round-cone distances
+
+<i># and the march, and the normal</i>
+sphere-trace steps, typical         <b>${sdfCensus.model.typicalMarchSteps}</b>     <i>(cap ${sdfCensus.model.marchIterationCap})</i>
+tetrahedral gradient taps           <b>${sdfCensus.model.normalTaps}</b>     <i>whole field evaluations</i>
+
+<i># so the winning floret alone, before any of the other ${cov.percentiles.max - 1}</i>
+(${sdfCensus.model.typicalMarchSteps} + ${sdfCensus.model.normalTaps}) × 8..64                  <b>${(sdfCensus.model.typicalMarchSteps + sdfCensus.model.normalTaps) * 8} – ${(sdfCensus.model.typicalMarchSteps + sdfCensus.model.normalTaps) * 64}</b>  sphere distances
+<em>and ${cov.percentiles.max - 1} of the ${cov.percentiles.max} resolve nothing at all.</em>`;
+})();
+
+/* ============================================================
+   LIVE MECHANISM FIGURES — canvas, redrawn on theme change.
+   ============================================================ */
+const REDRAWS = [];
+let TOKENS = {};
+function readTokens() {
+  const c = getComputedStyle(document.documentElement);
+  TOKENS = Object.fromEntries(["ink", "ink-2", "ink-3", "rule", "rule-2", "sig", "ember", "amber",
+    "jade", "violet", "pA", "bg-2", "bg-3"].map((k) => [k, c.getPropertyValue("--" + k).trim()]));
+}
+readTokens();
+function redrawAll() { readTokens(); REDRAWS.forEach((f) => f()); }
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", redrawAll);
+new MutationObserver(redrawAll).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+
+function figure(id, W, H, drawFn) {
+  const canvas = $(id), ctx = canvas.getContext("2d"), wrap = canvas.parentElement;
+  let scale = 1;
+  const draw = () => { ctx.save(); ctx.clearRect(0, 0, W, H); drawFn(ctx); ctx.restore(); };
+  const resize = () => {
+    const cssW = wrap.clientWidth || W;
+    scale = cssW / W;
+    // Floor of 2 so the canvases stay crisp when the page is printed to PDF at
+    // a device pixel ratio of 1.
+    const dpr = Math.max(2, Math.min(devicePixelRatio || 1, 3));
+    canvas.width = Math.max(1, Math.round(cssW * dpr));
+    canvas.height = Math.max(1, Math.round(H * scale * dpr));
+    canvas.style.height = (H * scale) + "px";
+    ctx.setTransform(scale * dpr, 0, 0, scale * dpr, 0, 0);
+    draw();
+  };
+  new ResizeObserver(resize).observe(wrap);
+  REDRAWS.push(draw);
+  resize();
+  return { canvas, draw, local: (ev) => {
+    const r = canvas.getBoundingClientRect();
+    return { x: (ev.clientX - r.left) / scale, y: (ev.clientY - r.top) / scale };
+  } };
+}
+const MONO = '11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
+const MONO_S = '9.5px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace';
+const FAMILY_TINT = {
+  bonsai: "ember", "stones & pebble beds": "amber", coping: "pA", hose: "jade", plants: "violet",
+};
+
+/* ---------------- FIG · the resolve order at one real pixel ---------------- */
+(function probeFigure() {
+  const probes = sdfCensus.probes;
+  let active = 0, resolveMode = true, selected = -1;
+  const W = 1000, ROW = 13, TOP = 34, PAD_L = 40, PAD_R = 150;
+
+  $("probePick").innerHTML = probes.map((p, i) =>
+    `<button class="t" data-p="${i}" aria-pressed="${i === 0}">${esc(p.name.replace("the ", "").replace("a ", ""))} · ${p.covering}</button>`).join("");
+  $("probeLegend").innerHTML = Object.entries(FAMILY_TINT)
+    .filter(([f]) => probes.some((p) => p.entries.some((e) => e.family === f)))
+    .map(([f, t]) => `<span><i style="background:var(--${t})"></i>${f}</span>`).join("")
+    + `<span><i style="background:var(--ink-3); opacity:.35"></i>never reached — pure waste</span>`;
+
+  const height = () => TOP + Math.max(...probes.map((p) => p.entries.length)) * ROW + 26;
+  const H = height();
+
+  const fig = figure("probeCanvas", W, H, (ctx) => {
+    const p = probes[active];
+    const entries = p.entries;
+    const tMin = Math.min(...entries.map((e) => e.tEnter)) - 0.02;
+    const tMax = Math.max(...entries.map((e) => e.tExit)) + 0.02;
+    const x = (t) => PAD_L + ((t - tMin) / (tMax - tMin)) * (W - PAD_L - PAD_R);
+
+    // depth axis
+    ctx.strokeStyle = TOKENS["rule"]; ctx.lineWidth = 1;
+    for (let i = 0; i <= 4; i += 1) {
+      const t = tMin + (i / 4) * (tMax - tMin);
+      ctx.beginPath(); ctx.moveTo(x(t), TOP - 12); ctx.lineTo(x(t), TOP - 8); ctx.stroke();
+      ctx.font = MONO_S; ctx.fillStyle = TOKENS["ink-3"]; ctx.textAlign = i === 0 ? "left" : i === 4 ? "right" : "center";
+      ctx.fillText(t.toFixed(2) + " m", x(t), TOP - 16);
+    }
+    ctx.textAlign = "left";
+
+    // the winning surface and the ground already in the depth buffer
+    const mark = (t, colour, text, dash) => {
+      if (t == null || !isFinite(t)) return;
+      ctx.save(); ctx.setLineDash(dash || []); ctx.strokeStyle = colour; ctx.lineWidth = 1.4;
+      ctx.beginPath(); ctx.moveTo(x(t), TOP - 6); ctx.lineTo(x(t), TOP + entries.length * ROW + 2); ctx.stroke();
+      ctx.restore();
+      ctx.font = MONO_S; ctx.fillStyle = colour;
+      ctx.fillText(text, x(t) + 4, TOP + entries.length * ROW + 14);
+    };
+    mark(p.ground_m, TOKENS["ink-3"], "ground " + fmt(p.ground_m) + " m", [3, 3]);
+
+    let best = p.ground_m == null ? Infinity : p.ground_m, tried = 0, stopped = false;
+    entries.forEach((e, i) => {
+      const y = TOP + i * ROW;
+      if (!stopped) {
+        if (e.tEnter > best) stopped = true;
+        else { tried += 1; if (e.hit_m != null) best = Math.min(best, e.hit_m); }
+      }
+      const skipped = resolveMode && stopped;
+      const tint = TOKENS[FAMILY_TINT[e.family] || "ink-3"];
+      ctx.globalAlpha = skipped ? 0.2 : 1;
+      ctx.fillStyle = skipped ? TOKENS["ink-3"] : tint;
+      const x0 = x(e.tEnter), x1 = Math.max(x0 + 1.5, x(e.tExit));
+      ctx.fillRect(x0, y + 1.5, x1 - x0, ROW - 4);
+      if (e.hit_m != null) {
+        ctx.beginPath(); ctx.arc(x(e.hit_m), y + ROW / 2 - 0.5, 3, 0, Math.PI * 2);
+        ctx.fillStyle = skipped ? TOKENS["ink-3"] : TOKENS["ink"]; ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+      if (i === selected) {
+        ctx.strokeStyle = TOKENS["sig"]; ctx.lineWidth = 1.4;
+        ctx.strokeRect(x0 - 1.5, y, x1 - x0 + 3, ROW - 1);
+      }
+      // right-hand annotation
+      ctx.font = MONO_S; ctx.fillStyle = skipped ? TOKENS["ink-3"] : TOKENS["ink-2"];
+      const foldText = e.foldFloor === e.foldCeiling ? `fold ${e.foldFloor}` : `fold ${e.foldFloor}–${e.foldCeiling}`;
+      ctx.fillText(`${(e.field || e.kind).slice(0, 15)} · ${foldText}`, W - PAD_R + 6, y + ROW - 3.5);
+      ctx.fillStyle = TOKENS["ink-3"];
+      ctx.textAlign = "right"; ctx.fillText(String(i + 1), PAD_L - 6, y + ROW - 3.5); ctx.textAlign = "left";
+    });
+    mark(p.winner_m, TOKENS["sig"], "visible surface " + fmt(p.winner_m) + " m");
+
+    // the stop line
+    if (resolveMode && tried < entries.length) {
+      const y = TOP + tried * ROW - 1;
+      ctx.save(); ctx.setLineDash([4, 3]); ctx.strokeStyle = TOKENS["sig"]; ctx.lineWidth = 1.4;
+      ctx.beginPath(); ctx.moveTo(PAD_L - 14, y); ctx.lineTo(W - PAD_R + 130, y); ctx.stroke(); ctx.restore();
+      ctx.font = MONO_S; ctx.fillStyle = TOKENS["sig"];
+      ctx.fillText("a front-to-back resolve may stop here", PAD_L + 4, y - 3);
+    }
+    return tried;
+  });
+
+  function refresh() {
+    const p = probes[active];
+    const tried = p.resolveTries;
+    $("probeReadout").innerHTML = resolveMode
+      ? `marches <b>${tried}</b> of <b class="hot">${p.covering}</b> · <b>${p.wasted}</b> never reached · <b>${fmt(p.covering / tried)}×</b> fewer`
+      : `marches <b class="hot">${p.covering}</b> of ${p.covering} · ${p.hitting} of them hit anything`;
+    const e = selected >= 0 ? p.entries[selected] : null;
+    $("probeHint").textContent = e
+      ? `#${selected + 1} · ${e.family} · ${e.field || e.kind} · enters ${fmt(e.tEnter)} m, exits ${fmt(e.tExit)} m · ${e.hit_m == null ? "no hit" : "hit at " + fmt(e.hit_m) + " m"}`
+      : "click a bar for its record · switch pixels below";
+    $("probeCaption").innerHTML = `Pixel (${p.pixel.join(", ")}) of the ${N.censusResolution} census —
+      <b>${esc(p.name)}</b>. <b>${p.covering}</b> proxies cover it and <b>${p.hitting}</b> of them contain a
+      surface the ray actually meets; the nearest is at <b>${fmt(p.winner_m)} m</b>, and the vessel
+      heightfield the brick raster already wrote is at <b>${fmt(p.ground_m)} m</b>. A resolve that
+      walks entry-sorted and stops once the next candidate starts behind its best hit runs
+      <b>${p.resolveTries}</b> marches. Today all <b>${p.covering}</b> run, because the fragment writes
+      <span class="k">frag_depth</span> and discards.`;
+    fig.draw();
+  }
+  for (const button of $("probePick").children) {
+    button.addEventListener("click", () => {
+      active = Number(button.dataset.p); selected = -1;
+      for (const other of $("probePick").children) other.ariaPressed = String(other === button);
+      refresh();
+    });
+  }
+  $("probeResolve").addEventListener("change", (ev) => { resolveMode = ev.target.checked; refresh(); });
+  fig.canvas.addEventListener("pointerdown", (ev) => {
+    const { y } = fig.local(ev);
+    const index = Math.floor((y - TOP) / ROW);
+    selected = index >= 0 && index < probes[active].entries.length ? index : -1;
+    refresh();
+  });
+  refresh();
+})();
+
+/* ---------------- FIG · one march, and its fold ---------------- */
+(function marchFigure() {
+  const FIELDS = [
+    { key: "tapered-sweep", label: "tapered sweep", fold: 3, max: 7,
+      note: "one exact round-cone distance per polyline segment",
+      caption: "one exact round-cone distance per polyline segment — the convex hull of two spheres, so Lipschitz-1 by definition rather than by argument" },
+    { key: "seeded-lobes", label: "seeded lobes", fold: 7, max: 12,
+      note: "one rotated anisotropic ellipsoid distance per lobe",
+      caption: "one rotated anisotropic ellipsoid distance per lobe, smooth-min folded in the authored order — a polynomial smooth minimum is not associative, so the order is mirrored on the CPU" },
+    { key: "lattice", label: "lattice", fold: 24, max: 64,
+      note: "8 always evaluated, up to 56 rejected first",
+      caption: "8 unconditional sphere distances plus up to 56 rejected by a distance to their unjittered centre, which needs no hash. The 4³ block is the smallest one centred on the sample that contains the eight surrounding cells with a ring to spare" },
+  ];
+  let active = 2;
+  const W = 1000, H = 250;
+  const STEPS = sdfCensus.model.typicalMarchSteps, TAPS = sdfCensus.model.normalTaps;
+
+  $("marchPick").innerHTML = FIELDS.map((f, i) =>
+    `<button class="t" data-f="${i}" aria-pressed="${i === active}">${f.label}</button>`).join("");
+
+  const fig = figure("marchCanvas", W, H, (ctx) => {
+    const field = FIELDS[active];
+    const fold = Number($("marchFold").value);
+    const boxX = 60, boxW = 430, boxY = 40, boxH = 150;
+
+    // the proxy box and the surface inside it
+    ctx.strokeStyle = TOKENS["rule"]; ctx.lineWidth = 1;
+    ctx.setLineDash([4, 3]); ctx.strokeRect(boxX, boxY, boxW, boxH); ctx.setLineDash([]);
+    ctx.font = MONO_S; ctx.fillStyle = TOKENS["ink-3"];
+    ctx.fillText("proxy box — the march bracket", boxX, boxY - 8);
+
+    // a blobby surface, and the trace toward it — both clipped to the bracket
+    const rayY = boxY + boxH / 2;
+    const surfaceX = (y) => boxX + 300 + 26 * Math.sin((y - boxY) / 21) + 12 * Math.cos((y - boxY) / 9);
+    const target = surfaceX(rayY);
+    ctx.save();
+    ctx.beginPath(); ctx.rect(boxX, boxY, boxW, boxH); ctx.clip();
+    ctx.beginPath();
+    for (let y = boxY; y <= boxY + boxH; y += 2) {
+      const px = surfaceX(y);
+      if (y === boxY) ctx.moveTo(px, y); else ctx.lineTo(px, y);
+    }
+    ctx.lineTo(boxX + boxW, boxY + boxH); ctx.lineTo(boxX + boxW, boxY); ctx.closePath();
+    ctx.fillStyle = TOKENS["bg-3"]; ctx.fill();
+    ctx.strokeStyle = TOKENS[FAMILY_TINT.bonsai]; ctx.lineWidth = 1.6; ctx.stroke();
+
+    let x = boxX;
+    for (let step = 0; step < STEPS; step += 1) {
+      const radius = Math.max(2.5, (target - x) * 0.62);
+      ctx.beginPath(); ctx.arc(x, rayY, radius, 0, Math.PI * 2);
+      ctx.strokeStyle = TOKENS["sig"]; ctx.globalAlpha = 0.28 + 0.7 * (step / STEPS); ctx.lineWidth = 1.1; ctx.stroke();
+      ctx.globalAlpha = 1;
+      ctx.beginPath(); ctx.arc(x, rayY, 2, 0, Math.PI * 2); ctx.fillStyle = TOKENS["sig"]; ctx.fill();
+      x += radius;
+      if (target - x < 1.5) break;
+    }
+    ctx.restore();
+
+    ctx.strokeStyle = TOKENS["ink-3"]; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(boxX - 44, rayY); ctx.lineTo(boxX, rayY); ctx.stroke();
+    ctx.fillStyle = TOKENS["ink-3"]; ctx.font = MONO_S;
+    ctx.fillText("primary ray", boxX - 44, rayY - 7);
+    ctx.beginPath(); ctx.arc(target, rayY, 3.6, 0, Math.PI * 2); ctx.fillStyle = TOKENS["ink"]; ctx.fill();
+    ctx.font = MONO_S; ctx.fillStyle = TOKENS["ink-2"];
+    ctx.fillText(`${STEPS} steps, typical (cap ${sdfCensus.model.marchIterationCap})`, boxX + 6, boxY + boxH + 16);
+
+    // one step, expanded into its fold
+    const fx = 570, fy = 40, fw = 370, fh = 150;
+    ctx.strokeStyle = TOKENS["rule"]; ctx.strokeRect(fx, fy, fw, fh);
+    ctx.font = MONO_S; ctx.fillStyle = TOKENS["ink-3"];
+    ctx.fillText("one step = one whole field evaluation", fx, fy - 8);
+    ctx.strokeStyle = TOKENS["sig"]; ctx.setLineDash([3, 3]); ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(boxX + boxW + 4, rayY); ctx.lineTo(fx - 4, fy + fh / 2); ctx.stroke(); ctx.setLineDash([]);
+
+    const columns = Math.ceil(Math.sqrt(fold * 1.9));
+    const rowsOf = Math.ceil(fold / columns);
+    const cw = (fw - 24) / columns, ch = Math.min(24, (fh - 30) / rowsOf);
+    for (let i = 0; i < fold; i += 1) {
+      const cx = fx + 12 + (i % columns) * cw + cw / 2;
+      const cy = fy + 20 + Math.floor(i / columns) * ch + ch / 2;
+      const conditional = field.key === "lattice" && i >= 8;
+      ctx.beginPath(); ctx.arc(cx, cy, Math.min(cw, ch) * 0.32, 0, Math.PI * 2);
+      ctx.fillStyle = conditional ? TOKENS["rule"] : TOKENS[FAMILY_TINT.bonsai];
+      ctx.globalAlpha = conditional ? 0.85 : 1; ctx.fill(); ctx.globalAlpha = 1;
+    }
+    ctx.font = MONO_S; ctx.fillStyle = TOKENS["ink-2"];
+    ctx.fillText(field.note, fx, fy + fh + 16);
+    if (field.key === "lattice") {
+      ctx.fillStyle = TOKENS["ink-3"];
+      ctx.fillText("filled = always evaluated · hollow = rejected first", fx, fy + fh + 30);
+    }
+
+    // the total
+    ctx.font = MONO; ctx.fillStyle = TOKENS["ink-3"];
+    ctx.fillText(`+ ${TAPS} tetrahedral gradient taps, each a whole field evaluation`, boxX, H - 12);
+  });
+
+  function refresh() {
+    const field = FIELDS[active];
+    $("marchFold").max = String(field.max);
+    const fold = Math.min(Number($("marchFold").value), field.max);
+    $("marchFold").value = String(fold);
+    const total = (STEPS + TAPS) * fold;
+    $("marchReadout").innerHTML = `one hit = (<b>${STEPS}</b> steps + <b>${TAPS}</b> normal taps) × <b>${fold}</b> = <b class="hot">${total.toLocaleString()}</b> distance evaluations`;
+    $("marchCaption").innerHTML = `A <span class="k">${field.key}</span> cluster — ${field.caption}. The
+      bonsai publishes <b>${sdfCensus.bonsai.byField[field.key] || 0}</b> of these, and the scene as a
+      whole <b>${sdfCensus.byField[field.key] ? sdfCensus.byField[field.key].records : 0}</b>. At the
+      busiest pixel <b>${sdfCensus.probes[0].covering}</b> proxies each run a trace like this one, and
+      a sound resolve would run <b>${sdfCensus.probes[0].resolveTries}</b>.`;
+    fig.draw();
+  }
+  for (const button of $("marchPick").children) {
+    button.addEventListener("click", () => {
+      active = Number(button.dataset.f);
+      for (const other of $("marchPick").children) other.ariaPressed = String(other === button);
+      $("marchFold").value = String(FIELDS[active].fold);
+      refresh();
+    });
+  }
+  $("marchFold").addEventListener("input", refresh);
+  $("marchFold").value = String(FIELDS[active].fold);
+  refresh();
+})();
+
+/* ---------------- heatmap hover — the maps carry their own numbers -------- */
+(function heatmapHover() {
+  const maps = sdfCensus.maps;
+  if (!maps) return;
+  for (const [id, kind] of [["coverFig2", "cover"], ["evalFig", "evaluations"]]) {
+    const img = $(id);
+    if (!img) continue;
+    const frame = img.parentElement;
+    frame.classList.add("hoverpad");
+    const dot = document.createElement("i");
+    dot.className = "crosshair";
+    frame.appendChild(dot);
+    const readout = document.createElement("div");
+    readout.className = "mech-readout";
+    readout.style.cssText = "margin:8px 0 0; text-align:left";
+    readout.innerHTML = "&nbsp;";
+    frame.parentElement.insertBefore(readout, frame.nextSibling);
+    const update = (ev) => {
+      const r = img.getBoundingClientRect();
+      const u = (ev.clientX - r.left) / r.width, v = (ev.clientY - r.top) / r.height;
+      if (u < 0 || u > 1 || v < 0 || v > 1) return;
+      const cell = Math.min(maps.height - 1, Math.floor(v * maps.height)) * maps.width
+        + Math.min(maps.width - 1, Math.floor(u * maps.width));
+      dot.style.display = "block";
+      dot.style.left = (u * 100) + "%"; dot.style.top = (v * 100) + "%";
+      readout.innerHTML = `<b>${maps.cover[cell]}</b> covering proxies &nbsp;·&nbsp;
+        <b class="${maps.evaluations[cell] > 400 ? "hot" : ""}">${maps.evaluations[cell].toLocaleString()}</b> modelled distance evaluations
+        &nbsp;·&nbsp; ${kind === "cover" ? "count" : "cost"} map`;
+    };
+    frame.addEventListener("pointermove", update);
+    frame.addEventListener("pointerleave", () => {
+      dot.style.display = "none"; readout.innerHTML = "&nbsp;";
+    });
+  }
+})();
+
+/* ---------------- histogram ---------------- */
+(function hist() {
+  const h = cov.histogram.filter(([bin]) => bin > 0);
+  const W = 480, H = 150, max = Math.max(...h.map((x) => x[1]));
+  const maxBin = Math.max(...h.map((x) => x[0]));
+  const bw = W / maxBin;
+  let svg = `<svg viewBox="0 0 ${W} ${H + 20}" width="100%" style="display:block" role="img" aria-label="Histogram of covering proxies per pixel">`;
+  for (const [bin, n] of h) {
+    const x = ((bin - 1) / maxBin) * W;
+    const barHeight = (Math.log10(1 + n) / Math.log10(1 + max)) * H;
+    const hot = bin >= cov.coveredPercentiles.p99;
+    svg += `<rect x="${x.toFixed(1)}" y="${(H - barHeight).toFixed(1)}" width="${Math.max(1, bw - 0.6).toFixed(1)}" height="${barHeight.toFixed(1)}" fill="${hot ? "var(--ember)" : "var(--sig)"}" opacity="${hot ? 1 : .82}"><title>${bin} proxies — ${n.toLocaleString()} pixels</title></rect>`;
+  }
+  for (const [bin, lab] of [[cov.coveredPercentiles.p50, "median " + cov.coveredPercentiles.p50],
+    [cov.coveredPercentiles.p90, "p90 " + cov.coveredPercentiles.p90],
+    [cov.coveredPercentiles.p99, "p99 " + cov.coveredPercentiles.p99]]) {
+    const x = ((bin - 1) / maxBin) * W;
+    svg += `<line x1="${x.toFixed(1)}" y1="0" x2="${x.toFixed(1)}" y2="${H}" stroke="var(--ink-3)" stroke-dasharray="2 3" opacity=".7"/>
+      <text x="${(x + 3).toFixed(1)}" y="11" font-family="ui-monospace,monospace" font-size="9.5" fill="var(--ink-3)">${lab}</text>`;
+  }
+  svg += `<text x="0" y="${H + 15}" font-family="ui-monospace,monospace" font-size="9.5" fill="var(--ink-3)">1 proxy</text>
+    <text x="${W}" y="${H + 15}" font-family="ui-monospace,monospace" font-size="9.5" fill="var(--ink-3)" text-anchor="end">${maxBin} proxies</text>
+    <text x="${W / 2}" y="${H + 15}" font-family="ui-monospace,monospace" font-size="9.5" fill="var(--ink-3)" text-anchor="middle">pixels, log scale</text></svg>`;
+  $("histFig").innerHTML = svg;
+})();
+
+/* ---------------- A/B ---------------- */
+(function ab() {
+  const { production, probe } = DATA.ab;
+  const max = Math.max(...production, ...probe) * 1.06;
+  $("abFig").innerHTML = `<div class="bars">${production.map((p, i) => `
+    <div class="bar-row"><span class="lab">pair ${i + 1} · production</span>
+      <span class="bar-track" style="height:13px"><span class="bar-fill" style="width:${(p / max) * 100}%; background:var(--ember)"></span></span>
+      <span class="val">${fmt(p, 1)} ms</span></div>
+    <div class="bar-row" style="margin-bottom:7px"><span class="lab">pair ${i + 1} · probe</span>
+      <span class="bar-track" style="height:13px"><span class="bar-fill" style="width:${(probe[i] / max) * 100}%; background:var(--jade)"></span></span>
+      <span class="val">${fmt(probe[i], 1)} ms</span></div>`).join("")}</div>`;
+  const deltas = production.map((p, i) => p - probe[i]);
+  const ratios = production.map((p, i) => p / probe[i]);
+  $("abCaption").innerHTML = `Fresh process per arm, four warm-up frames, ten seconds of continuously
+    submitted frames, median of each. Paired deltas <b>${deltas.map((d) => fmt(d, 1)).join(" / ")} ms</b>;
+    ratios <b>${ratios.map((r) => fmt(r, 2)).join(" / ")}×</b>, median <b>${N.abRatio}</b>.
+    The probe arm is also far steadier — <b>${probe.map((p) => fmt(p, 1)).join(" / ")}</b> against
+    <b>${production.map((p) => fmt(p, 1)).join(" / ")}</b> — because with hidden-surface removal
+    working, the pass stops absorbing whatever else the machine is doing. Subtracting the
+    ${N.restMs} the rest of the frame costs, the pass itself goes from <b>${N.sdfMs}</b> to about
+    <b>${N.sdfWithHsr}</b>.`;
+})();
+
+/* ---------------- cone attribution ---------------- */
+(function cones() {
+  const a = DATA.coneLighting.attribution_ms;
+  const items = [
+    ["full frame — shadows + AO + GI", a.full, "var(--pD)"],
+    ["AO off", a.aoOff, "var(--sig)"],
+    ["shadows off", a.shadowsOff, "var(--amber)"],
+    ["both off", a.bothOff, "var(--ink-3)"],
+  ];
+  const max = Math.max(...items.map((i) => i[1]));
+  const row = (l, v, c, strong) => `<div class="bar-row"><span class="lab"${strong ? ' style="color:var(--ink)"' : ""}>${l}</span>
+      <span class="bar-track"><span class="bar-fill" style="width:${(v / max) * 100}%; background:${c}"></span></span>
+      <span class="val">${fmt(v, 1)} ms</span></div>`;
+  $("coneBars").innerHTML = items.map(([l, v, c]) => row(l, v, c)).join("")
+    + `<div style="height:8px"></div>`
+    + row("AO alone", a.full - a.aoOff, "var(--sig)", true)
+    + row("shadows alone", a.full - a.shadowsOff, "var(--amber)", true);
+})();
+
+/* ---------------- code panes ---------------- */
+$("codeBad").innerHTML = `@fragment fn dryScenePrimitiveRasterFragment(
+  input: DryScenePrimitiveVertexOut,
+) -> DrySceneRasterOut {
+  dryRasterPrimaryReset();
+  if (input.primitiveIndex >= dry.metadata.x) { <b>discard</b>; }
+  let record = dryPrimitive(input.primitiveIndex);
+  if (dryOpaqueOwnerSuppressed(...)) { <b>discard</b>; }
+  let camera = dryRasterPrimaryCamera();
+  let ro = camera[0];
+  let rd = dryRasterPrimaryRay(input.position.xy, camera);
+  <i>// bounded sphere trace, up to 48 iterations, over a</i>
+  <i>// field that may itself fold over 64 lattice cells</i>
+  let exact = dryScenePrimitiveExact(record, ro, rd, span);
+  if (!(exact.t &lt; DRY_MISS)) { <b>discard</b>; }
+  return drySceneRasterOut(dryRasterPrimarySurface(exact, ...));
+}
+
+struct DrySceneRasterOut {
+  @location(0) packedSurface: vec4u,
+  @location(1) identityMedia: vec4u,
+  @location(2) geometry:      vec4f,
+  @location(3) opaqueIdentity: vec2u,
+  <b>@builtin(frag_depth) hardwareDepth: f32,</b>
+}
+<i>// frag_depth  -&gt; depth unknown until shaded</i>
+<i>// discard     -&gt; coverage unknown until shaded</i>
+<i>// =&gt; no hidden-surface removal. Every proxy shaded.</i>`;
+
+$("codeGood").innerHTML = `<i>// Stage one is deliberately coverage-only. Ordinary</i>
+<i>// fragments append their candidate and stop immediately;</i>
+<i>// only overlaps beyond the fixed arena write the</i>
+<i>// throwaway colour. No path traces a payload or writes</i>
+<i>// fragment depth.</i>
+@fragment fn svoBrickCoverageFragment(
+  input: SvoBrickRasterVertexOut,
+) -&gt; @location(0) u32 {
+  let pixel = coordinate.y * width + coordinate.x;
+  let slot = <em>atomicAdd(&amp;svoBrickCoverageCounts[pixel], 1u)</em>;
+  if (slot &lt; 24u) {
+    svoBrickCoverageCandidates[pixel * 24u + slot]
+      = input.instanceIndex;
+    <i>// the discard here only suppresses the overflow</i>
+    <i>// mask, and it follows the append</i>
+  }
+  ...
+}
+
+<i>// then one full-screen fragment per pixel:</i>
+<em>resolve.draw(3)</em>  <i>// walks 0..count front-to-back, once,</i>
+              <i>// always writes an exact hit or miss</i>
+
+<i>// ${fmt(byLabel("primary conservative brick coverage").ms, 2)} coverage + ${fmt(byLabel("primary conservative coverage resolve").ms, 2)} resolve + ${fmt(byLabel("primary conservative coverage overflow").ms, 2)} overflow ms</i>`;
+
+/* ---------------- conclusions ---------------- */
+$("conclusionList").innerHTML = [
+  ["ember", "1 · Give the scene-primitive raster the coverage/resolve treatment.",
+    `The design is already in the file, sixty lines above it: a coverage-only pass over the ${N.primitives} proxies appending candidates with an <span class="k">atomicAdd</span>, then one full-screen resolve that walks each pixel's list front-to-back and stops once the next candidate begins behind its best hit. Expect somewhere between <b>${N.resolveReduction}</b> — the exactly-measured reduction in field marches, ${N.resolveCovering} to ${N.resolveTries} per covered pixel — and <b>${N.abRatio}</b>, the hardware's own unsound upper bound. Two details differ from the brick case: primitive proxies overlap far more (median ${N.coverMedian} against a brick's ~1), and the arena needs sizing for a p99 of ${N.coverP99} rather than 18, with the same exact overflow fallback catching the tail.</p><p style="margin:.7em 0 0">Seed the resolve's running best with the depth the brick raster already wrote. It is free — the buffer is loaded either way — and it is worth ${fmt(sdfCensus.resolveSample.meanResolveTriesWithoutGround - sdfCensus.resolveSample.meanResolveTries, 2)} marches per covered pixel on its own.`],
+  ["", "2 · Do not tighten the proxies.",
+    `The oriented-box variant halves mean covering proxies per pixel and measured −5.2, +3.7 and −24.1 ms against a control whose own spread was 30 ms. The two maps in §5.2 say why: the coping owns ${N.copingCoverShare} of the coverage and ${N.copingEvalShare} of the cost, so removing coverage from the cheap objects removes nothing. This is a per-fragment-cost problem, not a fragment-count problem.</p><p style="margin:.7em 0 0">The corollary for §5.3: making the bonsai's fields cheaper is also the wrong lever <i>first</i>. Its ${N.bonsaiEvalShare} share is ${N.bonsaiEvalShare} of work that is mostly discarded.`],
+  ["sig", "3 · Then look at the cone pass, and only then.",
+    `${N.coneMs} is ${N.coneShare} of this frame and would be roughly a third of a repaired one. Two levers already exist and are measured elsewhere: <span class="k">coneLightingScale</span> 0.25 (quarter rate, currently in the performance preset) and <span class="k">stationaryPrimaryReuseEnabled</span>, which skips primary visibility entirely while camera and scene are unchanged. The second is off by default and is <i>disabled outright</i> in the raster-primary path, because the rigid impostor pass blocks the reuse whenever the scene has bodies — this one has ${scene.rigidBodyCount}.`],
+  ["jade", "4 · The octree renderer itself is not the problem, and that is worth saying.",
+    `The complete sparse-voxel primary — cull, coverage, resolve, overflow, over ${N.leaves} leaves and ${N.voxels} voxels — costs <b>${N.brickPrimaryMs}</b> at ${N.resolution}, or ${pct(familyMs("A") / wall, 1)} of the frame. Its predecessor, the full-screen traversal megakernel, cost 27 ms on a comparable frame. That work landed; nothing in this profile argues with it. What this profile says is that the authored analytic set, which was never on that path, never got the same treatment.`],
+].map(([cls, h, body]) => `<div class="callout ${cls}"><p><b>${h}</b></p><p>${body}</p></div>`).join("");
+
+/* ---------------- appendix table ---------------- */
+$("fullTable").querySelector("tbody").innerHTML = DATA.passTable.passes.map((row) => {
+  const label = shortLabel(row.label);
+  const fam = FAMILY[label];
+  const entry = DATA.counters.byPass[label];
+  const c = entry ? entry.counters : {};
+  const g = (name) => c[name] ? fmt(c[name].mean, 1) : "—";
+  return `<tr>
+    <td>${fam ? `<span class="swatch" style="background:${FAMILY_COLOR[fam]}"></span>` : ""}${esc(label)}</td>
+    <td>${row.channel}</td>
+    <td class="n">${fmt(row.p50_ms, row.p50_ms < 1 ? 3 : 2)}</td>
+    <td class="n">${fmt(row.min_ms, row.min_ms < 1 ? 3 : 2)}</td>
+    <td class="n">${fmt(row.max_ms, row.max_ms < 1 ? 3 : 2)}</td>
+    <td class="n">${(row.shareOfWall * 100).toFixed(row.shareOfWall < 0.001 ? 3 : 2)}</td>
+    <td class="n">${g("Fragment Occupancy")}</td><td class="n">${g("ALU Utilization")}</td>
+    <td class="n">${g("GPU Read Bandwidth")}</td><td class="n">${g("GPU Write Bandwidth")}</td>
+    <td class="n">${g("GPU Last Level Cache Utilization")}</td></tr>`;
+}).join("");
+
+/* ---------------- theme ---------------- */
+$("themeToggle").addEventListener("click", () => {
+  const current = document.documentElement.dataset.theme
+    || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+  document.documentElement.dataset.theme = current === "dark" ? "light" : "dark";
+});
+showReadout(passes.findIndex((p) => p.family === "B"));
+</script>

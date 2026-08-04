@@ -1,14 +1,27 @@
 import type { SvoAabb, SvoVec3 } from "./webgpu-svo-traversal";
 
 /**
- * Screen-space termination is diagnostic-only until the render hierarchy
- * publishes a representative material and normal for every internal node.
- * The canonical topology currently proves only that descendants exist.
+ * Screen-space termination contract shared by the canonical diagnostic and
+ * the production raster-primary resolve.
+ *
+ * Internal canonical nodes still lack representative shading data, so that
+ * path remains an AABB diagnostic. Raster-primary has a stronger interim
+ * contract: it walks a resident leaf to the first occupied cell and resolves
+ * that cell with its published material/owner, avoiding the exact primitive
+ * upgrade once the cell is sub-pixel.
  */
 export const SVO_SCREEN_SPACE_TERMINATION_CONTRACT = Object.freeze({
   disabledThresholdPixels: 0,
+  // The predicate measures the diameter of the conservative enclosing sphere.
+  // Three sphere-diameter pixels corresponds to roughly one projected cell
+  // edge for the cubic resident cells in the production lattice.
+  defaultThresholdPixels: 3,
+  // Thresholds are authored at this reference height and scale with the actual
+  // render target. This makes the predicate angular rather than device-pixel
+  // based: changing DPR or resolutionScale cannot silently request more detail.
+  referenceViewportHeightPixels: 460,
   defaultTanHalfVerticalFov: 0.72,
-  shading: "conservative-aabb-proxy" as const,
+  shading: "resident-cell-proxy" as const,
   exactShadows: true,
   hasRepresentativeMaterial: false,
   hasRepresentativeNormal: false,
@@ -16,12 +29,28 @@ export const SVO_SCREEN_SPACE_TERMINATION_CONTRACT = Object.freeze({
 
 export interface SvoScreenSpaceTerminationOptions {
   /** Zero disables termination and preserves exact traversal. */
+  /** Pixel threshold at the contract's reference viewport height. */
   thresholdPixels: number;
   viewportHeightPixels: number;
   /** Must match the camera ray generator. The dry renderer currently uses 0.72. */
   tanHalfVerticalFov?: number;
   /** Never approximate nodes shallower than this level. */
   minimumLevel?: number;
+}
+
+/** Convert an authored threshold into physical pixels for a render target. */
+export function effectiveSvoScreenSpaceThresholdPixels(
+  thresholdPixels: number,
+  viewportHeightPixels: number,
+): number {
+  if (!Number.isFinite(thresholdPixels) || thresholdPixels < 0) {
+    throw new RangeError("SVO screen-space threshold must be a non-negative finite pixel count");
+  }
+  if (!Number.isFinite(viewportHeightPixels) || viewportHeightPixels <= 0) {
+    throw new RangeError("SVO screen-space viewport height must be positive and finite");
+  }
+  return thresholdPixels * viewportHeightPixels
+    / SVO_SCREEN_SPACE_TERMINATION_CONTRACT.referenceViewportHeightPixels;
 }
 
 function finiteVec3(value: SvoVec3, label: string): void {
@@ -87,7 +116,8 @@ export function shouldTerminateSvoNodeScreenSpace(
 ): boolean {
   const checked = validatedOptions(options);
   if (checked.thresholdPixels === 0 || level < checked.minimumLevel) return false;
-  return projectedSvoNodeFootprintPixels(bounds, cameraPosition, checked) <= checked.thresholdPixels;
+  return projectedSvoNodeFootprintPixels(bounds, cameraPosition, checked)
+    <= effectiveSvoScreenSpaceThresholdPixels(checked.thresholdPixels, checked.viewportHeightPixels);
 }
 
 /** Generic WGSL helper shared by future canonical and wide diagnostic paths. */

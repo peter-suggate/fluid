@@ -204,12 +204,12 @@ test("unavailable structural fields reject live SVO before GPU encoding", () => 
 test("renderer atomically replaces structural sources before retiring the previous solver", () => {
   expectSource(rendererSource, /private svoDryScenePipeline\?: SparseVoxelDrySceneRenderer/,
     "FluidLabRenderer must own the direct renderer lifecycle");
-  expectSource(rendererSource, /this\.svoDryScenePipeline\?\.setSource\(sparseSceneSource\)/,
+  expectSource(rendererSource, /this\.svoDryScenePipeline\?\.setSource\(source\)/,
     "solver attachment must replace only the mutable acceleration source");
   expectSource(rendererSource, /this\.svoDryScenePipeline && !this\.svoDryScenePipeline\.publishScene\(publication\)/,
     "presentation scene publication must remain independent of solver attachment");
 
-  const attach = rendererSource.indexOf("this.svoDryScenePipeline?.setSource(sparseSceneSource)");
+  const attach = rendererSource.indexOf("this.svoDryScenePipeline?.setSource(source)");
   const retire = rendererSource.indexOf("this.retireGPUFluid(previous)", attach);
   assert.ok(attach >= 0, "the warmed structural source must replace the active binding");
   assert.ok(retire > attach, "the new binding must be installed before the previous solver is retired");
@@ -227,7 +227,7 @@ test("SVO is offered to the water pipeline beneath every structural view", () =>
 });
 
 test("raw voxels and brick-grid are overlays on the GLOBAL frame", () => {
-  assert.match(rendererSource, /this\.voxelInspectionSource = requestedVoxelDebugGeneration >= 0 \? this\.gpuFluid\?\.sparseVoxelRenderSource : undefined/,
+  assert.match(rendererSource, /this\.voxelInspectionSource = requestedVoxelDebugGeneration >= 0 \? sparseSceneProducer\?\.sparseVoxelRenderSource : undefined/,
     "debug mode materialization must remain gated by inspection visibility");
   assert.match(rendererSource, /this\.voxelDebugPipeline\?\.setSource\(this\.voxelInspectionSource\)/,
     "debug modes consume expanded records only while inspection is visible");

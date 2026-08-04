@@ -24,6 +24,7 @@ test("node-mip page ceiling requests the adapter value, not the WebGPU default",
     maxBufferSize: 1,
     maxTextureDimension3D: 1,
     maxSampledTexturesPerShaderStage: 16,
+    maxStorageTexturesPerShaderStage: 8,
     maxColorAttachmentBytesPerSample: 128,
     maxComputeInvocationsPerWorkgroup: 1024,
     maxComputeWorkgroupSizeX: 1024,
@@ -53,6 +54,7 @@ test("colour-attachment request never exceeds the adapter and never drops below 
     maxTextureDimension2D: 8192,
     maxTextureDimension3D: 1,
     maxSampledTexturesPerShaderStage: 16,
+    maxStorageTexturesPerShaderStage: 8,
     maxComputeInvocationsPerWorkgroup: 1024,
     maxComputeWorkgroupSizeX: 1024,
   };
@@ -95,6 +97,7 @@ test("compute workgroup width requests the adapter value, not the WebGPU default
     maxTextureDimension2D: 16384,
     maxTextureDimension3D: 1,
     maxSampledTexturesPerShaderStage: 16,
+    maxStorageTexturesPerShaderStage: 8,
     maxColorAttachmentBytesPerSample: 128,
   };
   const granted = requiredFluidDeviceLimits({

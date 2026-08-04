@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   compareSvoScreenSpaceImages,
   createSvoScreenSpaceTraversalWGSL,
+  effectiveSvoScreenSpaceThresholdPixels,
   projectedSvoNodeFootprintPixels,
   shouldTerminateSvoNodeScreenSpace,
   SVO_SCREEN_SPACE_TERMINATION_CONTRACT,
@@ -30,6 +31,12 @@ test("conservative enclosing-sphere footprint shrinks with distance and grows wi
   assert.ok(near > far);
   assert.ok(Math.abs(highResolution - 2 * far) < 1e-10);
   assert.equal(projectedSvoNodeFootprintPixels(unitNode, [0, 0, 0], { viewportHeightPixels: 720 }), Infinity);
+});
+
+test("authored threshold scales with render-target height", () => {
+  assert.equal(effectiveSvoScreenSpaceThresholdPixels(3, 460), 3);
+  assert.equal(effectiveSvoScreenSpaceThresholdPixels(3, 920), 6);
+  assert.equal(effectiveSvoScreenSpaceThresholdPixels(3, 1784), 1784 * 3 / 460);
 });
 
 test("screen-space threshold and minimum level jointly gate a coarse proxy", () => {
@@ -74,7 +81,25 @@ test("dry-scene proxy is compile-time opt-in and primary-only", () => {
   assert.match(diagnostic, /fn dryTraversalCursorNext\([^]*svoTraversalContinuationNext\(/,
     "exact traversal entry remains available for shadow rays");
   assert.throws(() => createSvoDrySceneFragmentWGSL(1, "wide", "off", "inline", 1), /requires canonical inline/);
-  assert.throws(() => createSvoDrySceneFragmentWGSL(1, "canonical", "off", "split", 1), /requires canonical inline/);
+  assert.throws(() => createSvoDrySceneFragmentWGSL(1, "canonical", "off", "split", 1), /requires canonical inline or raster-primary split/);
+  const raster = createSvoDrySceneFragmentWGSL(0.5, "raster-primary", "off", "split", 1,
+    false, true, true, true);
+  assert.match(raster, /fn dryPrimaryBoundsSubPixel/);
+  assert.match(raster, /effectiveThresholdPixels=1\*uniforms\.viewport\.y\/460/);
+  assert.match(raster, /dryPrimaryVoxelProxyHit/);
+  assert.match(raster, /dryPrimaryPrimitiveProxyHit/);
+  assert.match(raster, /if\(dryPrimaryBoundsSubPixel\(cellBounds\)\)/);
+  assert.match(raster, /let proxySpan=vec2f\(span\.x,min\(span\.y,limit\)\)/);
+  assert.match(raster, /@fragment fn svoBrickLodResolveFragment/);
+  assert.match(raster, /@fragment fn svoBrickExactResolveFragment/);
+  assert.match(raster, /@fragment fn svoScenePrimitiveLodResolveFragment/);
+  assert.match(raster, /@compute @workgroup_size\(1\) fn svoScenePrimitiveTieredComputeArgs/);
+  assert.match(raster, /@compute @workgroup_size\(64\) fn svoScenePrimitiveTieredComputeResolve/);
+  assert.match(raster, /dryTieredResolveQueue\.pixels\[queueIndex\]=pixel/);
+  assert.match(raster, /textureStore\(dryTierPackedSurfaceWrite/);
+  assert.match(raster, /DRY_GBUFFER_FIELD_RESIDENT_CELL_PROXY:u32=14u/);
+  assert.match(raster, /svoPrimitiveOwnerId\(record\)/,
+    "the analytic tier can suppress the redundant exact upgrade for the resident-cell owner");
 });
 
 test("image comparison reports changed luminance and silhouette directions", () => {

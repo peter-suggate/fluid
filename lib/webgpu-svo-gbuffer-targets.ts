@@ -56,7 +56,8 @@ export class SparseVoxelGBufferTargetArena {
     }
     if (this.packedSurface && this.identityMedia && this.hardwareDepth && this.width === width && this.height === height) return false;
     this.releaseTextures();
-    const colorUsage = GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC;
+    const colorUsage = GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING
+      | GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.COPY_SRC;
     this.packedSurface = this.device.createTexture({
       label: "Sparse voxel G-buffer packed surface",
       size: [width, height],

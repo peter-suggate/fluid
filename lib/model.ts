@@ -234,6 +234,30 @@ export function canonicalScene(scene: SceneDescription): string {
   return JSON.stringify(stable(scene));
 }
 
+// Scene documents are immutable at the application boundary: every editor and
+// store mutation replaces the document. Keep the hot render loop keyed by that
+// mutation surface instead of recursively sorting and cloning the same document
+// every frame. The WeakMap deliberately stays out of serialization; callers
+// that do not enter through `markSceneRevision` retain the canonical-string
+// fallback in the renderer.
+const sceneRevisionByDocument = new WeakMap<SceneDescription, number>();
+let nextSceneDocumentRevision = 1;
+
+/** Stamp a newly published immutable scene document and return it unchanged. */
+export function markSceneRevision(scene: SceneDescription): SceneDescription {
+  if (!sceneRevisionByDocument.has(scene)) {
+    sceneRevisionByDocument.set(scene, nextSceneDocumentRevision);
+    nextSceneDocumentRevision = nextSceneDocumentRevision >= Number.MAX_SAFE_INTEGER
+      ? 1 : nextSceneDocumentRevision + 1;
+  }
+  return scene;
+}
+
+/** Monotonic application revision, or undefined for an external/unversioned document. */
+export function sceneRevision(scene: SceneDescription): number | undefined {
+  return sceneRevisionByDocument.get(scene);
+}
+
 export function serializeScene(scene: SceneDescription): string {
   return JSON.stringify(scene, null, 2) + "\n";
 }

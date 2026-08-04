@@ -9,7 +9,25 @@ import { VOXEL_MATERIAL_IDS } from "./voxel-scene";
  * camera uniform and live BodyGPU buffer, then draws 36 vertices per body.
  */
 export const SVO_RIGID_RASTER_CONTRACT = Object.freeze({
+  /**
+   * Bodies this pass can draw, and the *soft* half of a two-part ceiling.
+   *
+   * Twelve is a shape three things agree on and can be moved together: the
+   * `rigidMotion` uniform array, `bodyBufferBytes`, and the instance count the
+   * dry scene draws (`lib/webgpu-svo-dry-scene.ts:7719`, `:7731`). Raising it
+   * costs one uniform slot and one proxy instance per body.
+   *
+   * `maximumAddressableBodies` below is the *hard* half and does not move with
+   * it: the current-frame primary-geometry certificate packs the owner into
+   * four bits (`rigidPackPrimaryGeometryMetadata`), so body 16 would be read
+   * back as body 0 by the split bridge — the one aliasing failure in this file.
+   * Past twelve and up to sixteen, `assertSvoRigidRasterBodyCount` is what turns
+   * the vertex stage's silent `min(bodyCount, RIGID_RASTER_MAX_BODIES)` clamp
+   * (bodies simply stop being drawn) into a message.
+   */
   maximumBodies: 12,
+  /** Four bits of owner in the certificate word; see `maximumBodies`. */
+  maximumAddressableBodies: 16,
   bodyStrideBytes: 64,
   bodyBufferBytes: 12 * 64,
   bodySourcePolicy: "bind-live-buffer-directly" as const,
@@ -143,10 +161,36 @@ export const SVO_RIGID_RASTER_INTEGRATION = Object.freeze({
   history: "none" as const,
 });
 
+/**
+ * The loud check for a live body count, before the vertex stage drops the tail.
+ *
+ * `rigidRasterVertex` clamps to `min(options.z, RIGID_RASTER_MAX_BODIES)`, so a
+ * thirteenth body is not drawn and nothing anywhere says so — a "loud" row in
+ * the capacity table whose loud half only fires if someone happens to call
+ * `packSvoRigidRasterSplitIdentity`. Call this once where the scene's body
+ * count becomes known and the drop becomes a message that names both ceilings.
+ */
+export function assertSvoRigidRasterBodyCount(bodyCount: number, context = "scene"): void {
+  const { maximumBodies, maximumAddressableBodies } = SVO_RIGID_RASTER_CONTRACT;
+  if (!Number.isSafeInteger(bodyCount) || bodyCount < 0) {
+    throw new RangeError(`Rigid raster body count for ${context} must be a non-negative safe integer`);
+  }
+  if (bodyCount > maximumBodies) {
+    throw new RangeError(
+      `Rigid raster body overflow: ${context} has ${bodyCount} bodies and the pass draws ${maximumBodies}. `
+      + `Bodies past the ceiling are silently not drawn by rigidRasterVertex. Raise `
+      + `SVO_RIGID_RASTER_CONTRACT.maximumBodies (with bodyBufferBytes and the rigidMotion uniform array, which `
+      + `derive from it) up to at most ${maximumAddressableBodies}; past that the split bridge's four-bit owner `
+      + `field aliases body n onto body n & 15 and the certificate must widen first.`);
+  }
+}
+
 /** CPU mirror of the two uints written to the existing split identity bridge. */
 export function packSvoRigidRasterSplitIdentity(bodyIndex: number, featureId: number): readonly [number, number] {
   if (!Number.isInteger(bodyIndex) || bodyIndex < 0 || bodyIndex >= SVO_RIGID_RASTER_CONTRACT.maximumBodies) {
-    throw new RangeError(`Rigid raster body index must be from 0 to ${SVO_RIGID_RASTER_CONTRACT.maximumBodies - 1}`);
+    throw new RangeError(`Rigid raster body index must be from 0 to ${SVO_RIGID_RASTER_CONTRACT.maximumBodies - 1};`
+      + ` raise SVO_RIGID_RASTER_CONTRACT.maximumBodies (hard ceiling`
+      + ` ${SVO_RIGID_RASTER_CONTRACT.maximumAddressableBodies}, the certificate's four-bit owner field)`);
   }
   if (!Number.isInteger(featureId) || featureId < 0 || featureId > 0xf) {
     throw new RangeError("Rigid raster feature ID must fit four bits");

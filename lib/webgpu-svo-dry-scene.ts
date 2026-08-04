@@ -151,16 +151,23 @@ import { svoTetrahedralRadianceConeCoreWGSL } from "./svo-tetrahedral-radiance-c
 import { svoBrickOccupancyWGSL } from "./svo-brick-occupancy";
 import {
   createSvoBrickRasterCullWGSL,
+  createSvoRasterCoverageOverflowArgsWGSL,
   svoBrickRasterCullBindGroupLayoutEntries,
   svoBrickRasterCoverageBindGroupLayoutEntries,
-  svoBrickRasterCoverageCandidateBytes,
   svoBrickRasterCoverageCountBytes,
+  svoRasterCoverageArenaBytes,
+  svoRasterCoverageCountAllocationBytes,
+  svoRasterCoverageOverflowArgsBindGroupLayoutEntries,
+  svoRasterCoverageOverflowDrawArgsOffsetBytes,
+  svoRasterCoverageOverflowSignalWGSL,
+  svoRasterCoverageOverflowStatus,
   svoBrickRasterDrawBindGroupLayoutEntries,
   svoBrickRasterInstanceBytes,
   svoBrickRasterPublicationInstanceOffsetBytes,
   svoBrickRasterSharedWGSL,
   svoBrickRasterSortStateBytes,
   SVO_BRICK_RASTER_CONTRACT,
+  SVO_RASTER_COVERAGE_OVERFLOW_CONTRACT,
 } from "./webgpu-svo-brick-raster";
 import {
   createSvoBrickRasterProbeWGSL,
@@ -168,7 +175,65 @@ import {
   SparseVoxelBrickRasterProbeBuffers,
   SVO_BRICK_RASTER_PROBE_CONTRACT,
 } from "./webgpu-svo-brick-raster-probe";
-import { createSvoScreenSpaceTraversalWGSL } from "./svo-screen-space-termination";
+import { SPARSE_BRICK_NO_OWNER } from "./sparse-brick-octree";
+import { createSvoScreenSpaceTraversalWGSL, SVO_SCREEN_SPACE_TERMINATION_CONTRACT } from "./svo-screen-space-termination";
+import {
+  createSvoScenePrimitiveBandWGSL,
+  packSvoScenePrimitiveBandParams,
+  readSvoScenePrimitiveCoverageAudit,
+  svoScenePrimitiveBandComputeBindGroupLayoutEntries,
+  svoScenePrimitiveBandReadBindGroupLayoutEntries,
+  svoScenePrimitiveBandReadWGSL,
+  SVO_SCENE_PRIMITIVE_BAND_CONTRACT,
+  SVO_SCENE_PRIMITIVE_BAND_COUNTER_BYTES,
+  SVO_SCENE_PRIMITIVE_BAND_PARAMS_BYTES,
+  SVO_SCENE_PRIMITIVE_BAND_STATE_BYTES,
+  SVO_SCENE_PRIMITIVE_COVERAGE_AUDIT_BYTES,
+  type SvoScenePrimitiveCoverageAudit,
+} from "./svo-scene-primitive-band";
+
+/**
+ * Exact owner upgrades one leaf's payload walk may attempt.
+ *
+ * See `traceLeafPayload`. Historically this counted *voxels*, and at that
+ * granularity it was the quality/cost knob of the whole promotion — measured on
+ * the hero at 800x460 with cone lighting off:
+ *
+ *   unbounded  138.2 ms band-off / 104.7 band-on, depth vs analytic p99 7.8 mm
+ *   2          75.0 ms / 55.4 ms,                 depth vs analytic p99 169 mm
+ *
+ * because a bounded walk abandoned cells whose exact test would have succeeded.
+ * A budget that has to buy accuracy with frame time is not a shipping knob.
+ *
+ * It now counts *runs of consecutive cells naming one owner*, which is what
+ * unhooks the two: a ray crossing an aggregate meets one owner, so one upgrade
+ * covers the whole crossing rather than one per 25 mm of it. Swept on the hero
+ * at 800x460 with the production cone rate, against the analytic reference over
+ * the bonsai crop (serialized submit-to-fence, all arms interleaved):
+ *
+ *   budget    2      8     32
+ *   runs   113.0  115.4  113.1 ms,  242 / 259 / 259 differing pixels
+ *   cells      -   152.7  167.8 ms,        309 / 325 differing pixels
+ *
+ * The run curve is flat in frame time and converged in image by eight, while
+ * the per-cell curve still buys its accuracy with 10 % of the frame per
+ * doubling. Sixteen is the authored point: above where the image converges, so
+ * the budget is a backstop rather than a quality dial, and the override exists
+ * so the trade can still be swept without an edit.
+ */
+const SVO_DRY_VOXEL_OWNER_UPGRADES_PER_LEAF = Math.max(1, Math.min(32,
+  Number((typeof process !== "undefined" ? process.env?.FLUID_SVO_VOXEL_OWNER_UPGRADES : undefined) ?? 16)));
+/** Sentinel owner meaning "no run is open" in the payload walk. */
+const DRY_UPGRADE_RUN_NONE = 0xffffffff;
+/** The audited bound the shader is compiled against, wherever the value came from. */
+function normalizeSvoVoxelOwnerUpgradeBudget(value: number): number {
+  if (!Number.isFinite(value)) throw new RangeError("Voxel owner upgrade budget must be finite");
+  return Math.max(1, Math.min(32, Math.round(value)));
+}
+/** `{vertexCount, instanceCount, firstVertex, firstInstance}`. */
+const SVO_DRAW_INDIRECT_ARGS_BYTES = 16;
+/** How often the arena-pressure tripwire samples; roughly once a second at 60 Hz. */
+const SVO_SCENE_PRIMITIVE_COVERAGE_AUDIT_PERIOD_FRAMES = 60;
 import {
   DEFAULT_SVO_RENDER_TUNING,
   SVO_CONE_RADIANCE_RECONSTRUCTION_CODES,
@@ -251,6 +316,15 @@ export interface SparseVoxelDrySceneData {
 }
 
 export const SVO_DRY_RIGID_MOTION_CAPACITY = 12;
+/**
+ * Authored PBR materials one scene may publish.
+ *
+ * One material per record plus the 32 environment slots, so the acceptance
+ * scene's 5 039 records ask for 5 071 — inside this ceiling with 38 % headroom,
+ * which is why W3 raises the cluster arena beside it and leaves this alone. The
+ * next rung that would cross it is roughly 16x the hero, and the authored record
+ * ceiling (16 384) fires first.
+ */
 export const SVO_DRY_SCENE_MATERIAL_CAPACITY = 8_192;
 export const SVO_DRY_SCENE_MATERIAL_ARENA_SIZE_BYTES =
   SVO_DRY_SCENE_MATERIAL_CAPACITY * SVO_MATERIAL_RECORD_STRIDE_BYTES;
@@ -281,15 +355,22 @@ export const SVO_DRY_SCENE_TERRAIN_ARENA_MAXIMUM_BYTES =
 /**
  * How many aggregate clusters one scene may publish.
  *
- * A cluster costs one of the 4 096 primitive records, so this ceiling is well
- * above anything the record budget can reach. A block is now a 192-byte slot
- * rather than the 32 bytes it was when the kind held one field — the tapered sweep
- * carries an eight-point polyline — so the region is 192 KB reserved once,
- * against an arena that already carries three quarters of a megabyte of
- * material and candidate space. It is written once per publication, not per
- * frame.
+ * A block is a 192-byte slot (the tapered sweep carries an eight-point
+ * polyline), written once per publication rather than per frame.
+ *
+ * Raised from 1 024 with the record ceilings W0 took from 4 096 to 16 384. The
+ * old value was chosen when it was "well above anything the record budget can
+ * reach", and that stopped being true: `hero-garden-hose-x10` spends **948** of
+ * 1 024 blocks at its acceptance multiplier, so the 10x rung only fit at all
+ * because that scene is authored deliberately cluster-light — one miniature
+ * bonsai per nine stands. Any species mix nearer the hero's own 41.5 % aggregate
+ * share could not reach 10x, which would have made the ceiling, rather than the
+ * renderer, the thing the acceptance gate measured. Four thousand and ninety-six
+ * blocks is 786 KB reserved once, against a scene arena that already carries
+ * three quarters of a megabyte of material and candidate space and a coverage
+ * arena three orders of magnitude larger.
  */
-export const SVO_DRY_SCENE_CLUSTER_CAPACITY = 1_024;
+export const SVO_DRY_SCENE_CLUSTER_CAPACITY = 4_096;
 export const SVO_DRY_SCENE_CLUSTER_BLOCK_BYTES =
   SVO_SMOOTH_UNION_CLUSTER_ARENA_WORDS * Uint32Array.BYTES_PER_ELEMENT;
 export const SVO_DRY_SCENE_CLUSTER_ARENA_SIZE_BYTES =
@@ -1692,6 +1773,24 @@ export interface SvoDryOptimizationExperiments {
    */
   readonly rasterPrimaryDirect?: boolean;
   /**
+   * Retain the historical no-op leaf payload: voxel owners accelerate nothing
+   * and every authored surface comes from the analytic passes.
+   *
+   * The control for the voxel-resolved primary, which is otherwise the default.
+   * Keeping it selectable is what makes "the voxel is the accelerator" a
+   * measurable claim rather than an assertion.
+   */
+  readonly voxelOwnerPrimaryDisabled?: boolean;
+  /**
+   * Retain the one-fragment-per-covering-proxy scene-primitive raster as the
+   * exact control for its conservative coverage/resolve arm.
+   *
+   * Deliberately separate from `rasterPrimaryDirect`, which switches the *brick*
+   * arm at the same time: an image comparison that moves both cannot say which
+   * one moved the pixels.
+   */
+  readonly scenePrimitiveDirect?: boolean;
+  /**
    * Drop only the brick raster's frag_depth write, leaving the empty-brick
    * discard in place. Brick proxies are disjoint along any ray and a brick
    * with no hit still discards, so the interpolated proxy exit depth picks the
@@ -1737,6 +1836,59 @@ export interface SvoDryOptimizationExperiments {
    * the marched kinds were written against.
    */
   readonly scenePrimitiveUnboundedMarch?: boolean;
+  /**
+   * Override the compiled owner-run upgrade budget of `traceLeafPayload`.
+   *
+   * Present so the frame/accuracy curve over the budget can be swept with both
+   * arms alive in one process and interleaved, which a module-load environment
+   * override cannot do. Omitted means the authored/environment value.
+   */
+  readonly voxelOwnerUpgradesPerLeaf?: number;
+  /**
+   * Retain the per-voxel exact upgrade of `traceLeafPayload` instead of the
+   * per-owner-run one. The control for the run merge, and the shape W3 shipped:
+   * one exact march per solid cell, each over its own padded cell interval.
+   */
+  readonly voxelOwnerPerCellUpgrades?: boolean;
+  /**
+   * Re-derive an incoherent cone-prepass receiver by tracing the analytic scene
+   * again, instead of taking it from the full-resolution primary G-buffer.
+   *
+   * The control for the G-buffer receiver, which is otherwise the default. See
+   * `dryPrepassCoherentMain`: the analytic arm is `O(authored records)` per
+   * boundary texel and is what made the cone prepass the one lighting stage that
+   * scaled with scene size.
+   */
+  readonly analyticConeBoundaries?: boolean;
+  /**
+   * Run the analytic candidate-BVH walk of `traceStatic` first and unbounded,
+   * as it historically did, instead of seeding it with the voxel-resolved hit.
+   *
+   * The control for the bounded order. Both produce the same surface; the
+   * unbounded one descends every candidate box the ray meets anywhere along its
+   * length, which is where the primary's record-count scaling lived.
+   */
+  readonly unboundedAnalyticPrimary?: boolean;
+  /**
+   * Retain the pre-bounded visibility order: the candidate-BVH walk runs first
+   * for every shadow/AO/GI ray, bounded only by the ray's own tMax.
+   *
+   * The control for {@link unboundedAnalyticPrimary}'s counterpart on the
+   * lighting path. The primary shed this term by seeding the analytic walk with
+   * the voxel hit; visibility carried it unchanged, which is why it was the
+   * largest remaining record-count residual after the primary was fixed.
+   */
+  readonly unboundedAnalyticVisibility?: boolean;
+  /**
+   * Skip the visibility candidate-BVH walk entirely.
+   *
+   * Deliberately image-wrong and never a shipping arm: authored records that
+   * are not voxel-resolved stop casting shadows. It exists to bound the prize —
+   * the reordering can recover at most what deleting the term recovers — so a
+   * disappointing reorder can be told apart from a term that was never
+   * expensive in the first place.
+   */
+  readonly visibilityAnalyticDisabledProbe?: boolean;
 }
 
 /** Pure policy seam used by the renderer and by fail-closed contract tests. */
@@ -1840,6 +1992,10 @@ export interface SvoDrySceneDirtyBounds {
 export interface SvoDryPrimitiveArenaChange {
   readonly dirtyBounds: readonly SvoDrySceneDirtyBounds[];
   readonly derivedLighting: "unchanged" | "global";
+  /** Present for animation: only these fixed-stride records are uploaded. */
+  readonly dirtyPrimitiveIndices?: readonly number[];
+  /** Candidate-node ancestor closure updated by the incremental refit. */
+  readonly dirtyCandidateNodeIndices?: readonly number[];
 }
 
 export function svoDryPrimitiveArenaCacheInvalidation(change: SvoDryPrimitiveArenaChange): {
@@ -1976,11 +2132,14 @@ export function createSvoDrySceneFragmentWGSL(
   if (!Number.isFinite(screenSpaceTerminationPixels) || screenSpaceTerminationPixels < 0) {
     throw new RangeError("Dry-scene screen-space termination must be a non-negative finite pixel count");
   }
-  if (screenSpaceTerminationPixels > 0 && (traversalMode !== "canonical" || shadingPath !== "inline")) {
-    throw new RangeError("Diagnostic screen-space termination currently requires canonical inline traversal");
+  const screenSpaceTerminationSupported = (traversalMode === "canonical" && shadingPath === "inline")
+    || (traversalMode === "raster-primary" && shadingPath === "split");
+  if (screenSpaceTerminationPixels > 0 && !screenSpaceTerminationSupported) {
+    throw new RangeError("Screen-space termination requires canonical inline or raster-primary split traversal");
   }
   const reduced = coneLightingScale !== 1;
   const split = shadingPath === "split";
+  const splitGroup = reduced ? 2 : 1;
   const voxelLightCache = split && experiments.voxelLightCache !== false;
   const edgeReceiverRecovery = reduced && experiments.edgeReceiverRecovery !== false;
   // Full-rate/inline shaders still own the diagnostic overlay. The reduced
@@ -1989,9 +2148,34 @@ export function createSvoDrySceneFragmentWGSL(
   if (experiments.halfPrecisionLighting && !reduced) {
     throw new RangeError("Half-precision lighting is restricted to reduced-rate shaders");
   }
+  // What a prepass texel whose 2x2 full-resolution neighbourhood disagrees does.
+  //
+  // Both analytic arms re-derive the receiver by tracing the scene again from
+  // the prepass ray, and that trace walks the candidate BVH with an exact
+  // primitive intersection per leaf — `O(authored records)` per boundary texel,
+  // on roughly half of them. Measured on the hero: 43 137 of 92 000 texels at
+  // 501 records and 52 497 at 5 039, with the cost *per* re-trace growing 4.05x
+  // for 10.06x records. The queue depth barely moves; the walk is the scaling.
+  //
+  // The default takes the receiver from the full-resolution primary G-buffer
+  // instead, which already holds the exact primary hit for every one of those
+  // four samples — the same plane `drySilhouetteRefineMain` consumes rather than
+  // retraces. It is a quality decision and not a free one: no full-resolution
+  // pixel centre coincides with the prepass ray, which is why the homogeneity
+  // test exists at all, so the nearest of the four is chosen rather than a
+  // fixed corner. At a silhouette that is the foreground surface, which is the
+  // receiver a cone from this texel would actually have found, and it is the
+  // one the reduced-rate reconstruction can recover the other side of.
+  //
+  // Measured on the hero at 800x460, cone scale 0.5, all arms interleaved in one
+  // process (serialized submit-to-fence): 292.5 -> 227.4 ms at 501 records and
+  // 1564.4 -> 1190.7 ms at 5 039, with the boundary queue reading zero and the
+  // depth plane unchanged against the analytic reference at both rungs.
   const inlineBoundaryWGSL = experiments.inlineConeBoundaries
     ? "let opaque=traceOpaqueScene(ray[0],ray[1]);dryPrepassStore(coordinate,opaque,ray[0],ray[1]);return;"
-    : "let queueIndex=atomicAdd(&dryPrepassBoundaryQueue.count,1u);dryPrepassBoundaryQueue.coordinates[queueIndex]=globalId.y*dimensions.x+globalId.x;return;";
+    : experiments.analyticConeBoundaries
+      ? "let queueIndex=atomicAdd(&dryPrepassBoundaryQueue.count,1u);dryPrepassBoundaryQueue.coordinates[queueIndex]=globalId.y*dimensions.x+globalId.x;return;"
+      : "var nearest=3u;var nearestDepth=DRY_MISS;for(var sample=0u;sample<4u;sample+=1u){let candidate=primaryGeometry[sample].w;if(candidate<nearestDepth){nearestDepth=candidate;nearest=sample;}}referenceGeometry=primaryGeometry[nearest];referenceIdentity=primaryIdentity[nearest];";
   // Secondary rays keep the measured production traversal; only the primary
   // changes shape in raster-primary mode.
   //
@@ -2005,6 +2189,32 @@ export function createSvoDrySceneFragmentWGSL(
   const secondaryTraversalMode = traversalMode === "raster-primary" ? "canonical-parametric" : traversalMode;
   const hsrProbe = experiments.rasterPrimaryHsrProbe === true;
   const scenePrimitiveHsrProbe = experiments.scenePrimitiveHsrProbe === true;
+  const voxelOwnerPrimary = experiments.voxelOwnerPrimaryDisabled !== true;
+  const analyticPrimaryUnbounded = experiments.unboundedAnalyticPrimary === true;
+  const analyticVisibilityUnbounded = experiments.unboundedAnalyticVisibility === true;
+  const analyticVisibilityProbeOff = experiments.visibilityAnalyticDisabledProbe === true;
+  // The bounded order has to reach the analytic walk *after* the octree loop, so
+  // every early exit inside that loop becomes a flagged break instead. The
+  // control arm keeps the returns exactly where they were.
+  const visibilityExhaustedWGSL = analyticVisibilityUnbounded
+    ? "return dryVisibilityStep(SVO_VIS_STEP_EXHAUSTED,nodeVisits,leafVisits,workItems,DRY_MISS);"
+    : "walkExhausted=true;break;";
+  const visibilityPayloadHitWGSL = analyticVisibilityUnbounded
+    ? "return dryVisibilityStep(SVO_VIS_STEP_HIT,nodeVisits,leafVisits,workItems,payload.t_m);"
+    : "voxelT=payload.t_m;break;";
+  // Owners along the ray, not voxels along the ray. See `traceLeafPayload`.
+  const primaryUpgradeBudget = normalizeSvoVoxelOwnerUpgradeBudget(
+    experiments.voxelOwnerUpgradesPerLeaf ?? SVO_DRY_VOXEL_OWNER_UPGRADES_PER_LEAF);
+  // One flush of the pending same-owner run. Emitted at every place the run can
+  // end — an owner change, a macro-occupancy skip over empty space, and the exit
+  // of the DDA — so that the run is always closed by whatever ended it.
+  const primaryUpgradeFlushWGSL = /* wgsl */ `if(runOwner!=${DRY_UPGRADE_RUN_NONE}u&&upgrades<${primaryUpgradeBudget}u){upgrades+=1u;let candidate=primitiveHit(dryPrimitive(runOwner),ro,rd,max(0.0,runStart-tolerance),runEnd+tolerance);if(candidate.t<DRY_MISS){return candidate;}}runOwner=${DRY_UPGRADE_RUN_NONE}u;`;
+  // The control arm never extends an open run past its first cell, so every
+  // owned cell flushes on its own interval exactly as the per-cell walk did —
+  // same intervals, same order, same budget accounting, one iteration later.
+  const primaryUpgradeRunMergeWGSL = experiments.voxelOwnerPerCellUpgrades === true
+    ? `cellOwner==${DRY_UPGRADE_RUN_NONE}u&&runOwner==${DRY_UPGRADE_RUN_NONE}u`
+    : "cellOwner==runOwner";
   // The exact hit is unchanged either way — this only decides how much empty
   // interval the sphere trace is asked to walk before it reaches the solid.
   const scenePrimitiveMarchSpanWGSL = experiments.scenePrimitiveUnboundedMarch === true
@@ -2050,7 +2260,8 @@ fn dryLeafCurrent(hit:SvoTraversalHit)->bool{return svoBrickLifecycleCurrent(svo
 `;
   const primaryTraversalCursorWGSL = screenSpaceTerminationPixels > 0 ? /* wgsl */ `
 fn drySvoShouldTerminateNodeScreenSpace(bounds:mat2x3f,level:u32)->bool{
-  return svoShouldTerminateNodeScreenSpace(bounds,uniforms.cameraPosition.xyz,uniforms.viewport.y,cameraTanHalfFov(),${screenSpaceTerminationPixels},level,0u);
+  let effectiveThresholdPixels=${screenSpaceTerminationPixels}*uniforms.viewport.y/${SVO_SCREEN_SPACE_TERMINATION_CONTRACT.referenceViewportHeightPixels};
+  return svoShouldTerminateNodeScreenSpace(bounds,uniforms.cameraPosition.xyz,uniforms.viewport.y,cameraTanHalfFov(),effectiveThresholdPixels,level,0u);
 }
 fn dryTraversalCursorNextPrimary(ray:SvoRay,mapping:SvoMapping,cursor:ptr<function,DryTraversalCursor>)->SvoTraversalHit{
   return svoTraversalContinuationNextScreenSpace(ray,mapping,dryDiagnosticMaximumDepth(),&(*cursor).canonical);
@@ -2060,6 +2271,7 @@ fn dryTraversalCursorNextPrimary(ray:SvoRay,mapping:SvoMapping,cursor:ptr<functi
 `;
   const screenSpaceProxyWGSL = screenSpaceTerminationPixels > 0 ? /* wgsl */ `
 const DRY_GBUFFER_FIELD_SCREEN_SPACE_PROXY:u32=15u;
+const DRY_GBUFFER_FIELD_RESIDENT_CELL_PROXY:u32=14u;
 fn dryScreenSpaceProxyHit(ro:vec3f,rd:vec3f,hit:SvoTraversalHit)->DryHit{
   let bounds=svoNodeBounds(svoNodeLoad(hit.nodeIndex),dry.mapping);let point=ro+rd*hit.tEnter;
   let faceDistance=min(abs(point-bounds[0]),abs(bounds[1]-point));var axis=0u;
@@ -2070,6 +2282,142 @@ fn dryScreenSpaceProxyHit(ro:vec3f,rd:vec3f,hit:SvoTraversalHit)->DryHit{
 ` : "";
   const screenSpaceProxyTraceWGSL = screenSpaceTerminationPixels > 0 ? /* wgsl */ `if(leaf.status==SVO_STATUS_SCREEN_SPACE_PROXY){return dryScreenSpaceProxyHit(ro,rd,leaf);}` : "";
   const screenSpaceProxyShadeWGSL = screenSpaceTerminationPixels > 0 ? /* wgsl */ `if(hit.fieldSource==DRY_GBUFFER_FIELD_SCREEN_SPACE_PROXY){let depthBand=clamp(f32(hit._padding.x)/21.0,0.0,1.0);return mix(vec3f(.02,.06,.18),vec3f(1.0,.04,.72),depthBand);}` : "";
+  const screenSpacePrimaryProxyWGSL = screenSpaceTerminationPixels > 0 ? /* wgsl */ `
+fn dryPrimaryBoundsSubPixel(bounds:mat2x3f)->bool{
+  let effectiveThresholdPixels=${screenSpaceTerminationPixels}*uniforms.viewport.y/${SVO_SCREEN_SPACE_TERMINATION_CONTRACT.referenceViewportHeightPixels};
+  return svoShouldTerminateNodeScreenSpace(bounds,uniforms.cameraPosition.xyz,uniforms.viewport.y,
+    cameraTanHalfFov(),effectiveThresholdPixels,0u,0u);
+}
+fn dryPrimaryBrickCellsSubPixel(bounds:mat2x3f)->bool{
+  let extent=(bounds[1]-bounds[0])/f32(max(dry.mapping.brickSize,1u));let halfExtent=extent*.5;
+  // Test the resident cell nearest the camera. Its enclosing sphere has the
+  // largest projected footprint in this brick, so if it terminates every cell
+  // behind it does too.
+  let centre=clamp(uniforms.cameraPosition.xyz,bounds[0]+halfExtent,bounds[1]-halfExtent);
+  return dryPrimaryBoundsSubPixel(mat2x3f(centre-halfExtent,centre+halfExtent));
+}
+fn dryPrimaryProxyNormal(bounds:mat2x3f,point:vec3f)->vec3f{
+  let faceDistance=min(abs(point-bounds[0]),abs(bounds[1]-point));var axis=0u;
+  if(faceDistance.y<faceDistance.x){axis=1u;}if(faceDistance.z<faceDistance[axis]){axis=2u;}
+  var normal=vec3f(0.0);
+  normal[axis]=select(-1.0,1.0,abs(point[axis]-bounds[1][axis])<abs(point[axis]-bounds[0][axis]));
+  return normal;
+}
+fn dryPrimaryVoxelProxyHit(ro:vec3f,rd:vec3f,bounds:mat2x3f,tEnter:f32,tExit:f32,identity:u32)->DryHit{
+  let t=mix(tEnter,tExit,0.5);let owner=identity>>16u;let material=identity&0xffffu;
+  return DryHit(t,dryPrimaryProxyNormal(bounds,ro+rd*t),material,owner,SVO_FEATURE_SMOOTH,
+    DRY_GBUFFER_FIELD_RESIDENT_CELL_PROXY,DRY_GBUFFER_MOTION_STATIC,0u,0.0,vec3u(0u));
+}
+fn dryPrimaryLeafProxyHit(ro:vec3f,rd:vec3f,bounds:mat2x3f,tEnter:f32,tExit:f32,voxelOffset:u32)->DryHit{
+  let brickSize=max(dry.mapping.brickSize,1u);let extent=(bounds[1]-bounds[0])/f32(brickSize);
+  var entry=max(tEnter,0.0);let point=ro+rd*(entry+1e-5);
+  var cell=vec3i(clamp(floor((point-bounds[0])/extent),vec3f(0.0),vec3f(f32(brickSize-1u))));
+  let step=select(vec3i(-1),vec3i(1),rd>=vec3f(0.0));let nextBoundary=bounds[0]+(vec3f(cell)+select(vec3f(0.0),vec3f(1.0),step>vec3i(0)))*extent;
+  var nextT=select(vec3f(DRY_MISS),(nextBoundary-ro)/rd,abs(rd)>vec3f(1e-9));let deltaT=select(vec3f(DRY_MISS),abs(extent/rd),abs(rd)>vec3f(1e-9));
+  for(var iteration=0u;iteration<32u;iteration+=1u){
+    if(any(cell<vec3i(0))||any(cell>=vec3i(i32(brickSize)))||entry>tExit){break;}
+    let cellExit=min(min(nextT.x,nextT.y),min(nextT.z,tExit));let index=svoBrickVoxelIndex(voxelOffset,vec3u(cell),brickSize);
+    if(index<arrayLength(&materialOwners)){
+      let identity=materialOwners[index];let owner=identity>>16u;
+      if(identity!=0u&&owner!=${SPARSE_BRICK_NO_OWNER}u&&owner>=dry.metadata.y&&!dryOpaqueOwnerSuppressed(owner)){
+        let cellBounds=mat2x3f(bounds[0]+vec3f(cell)*extent,bounds[0]+(vec3f(cell)+vec3f(1.0))*extent);
+        return dryPrimaryVoxelProxyHit(ro,rd,cellBounds,entry,cellExit,identity);
+      }
+    }
+    let advance=min(nextT.x,min(nextT.y,nextT.z));if(nextT.x<=advance+1e-6){cell.x+=step.x;nextT.x+=deltaT.x;}if(nextT.y<=advance+1e-6){cell.y+=step.y;nextT.y+=deltaT.y;}if(nextT.z<=advance+1e-6){cell.z+=step.z;nextT.z+=deltaT.z;}entry=advance;
+  }
+  return missHit();
+}
+fn dryPrimaryPrimitiveProxyHit(record:SvoPrimitiveRecord,ro:vec3f,rd:vec3f,span:vec2f)->DryHit{
+  let localExtent=svoPrimitiveLocalExtent_m(svoPrimitiveKind(record),svoPrimitiveDimensions_m(record));
+  let extent=dryScenePrimitiveWorldExtent(localExtent,record.orientation);let centre=svoPrimitiveCenter_m(record);
+  let bounds=mat2x3f(centre-extent,centre+extent);let t=mix(span.x,span.y,0.5);
+  return DryHit(t,dryPrimaryProxyNormal(bounds,ro+rd*t),svoPrimitiveMaterialId(record),
+    svoPrimitiveOwnerId(record),SVO_FEATURE_SMOOTH,DRY_GBUFFER_FIELD_ANALYTIC,
+    DRY_GBUFFER_MOTION_STATIC,0u,0.0,vec3u(0u));
+}
+` : "";
+  const tieredComputeResolveDeclarationsWGSL = screenSpaceTerminationPixels > 0 ? /* wgsl */ `
+// W2 scene-primitive compute tier. The four color planes are storage-written
+// only for winning pixels; a tiny depth-only bridge commits reversed-Z after
+// the compute pass, avoiding another full 48-byte MRT load/store cycle.
+@group(${splitGroup + 1}) @binding(0) var dryTierCurrentDepth:texture_depth_2d;
+@group(${splitGroup + 1}) @binding(1) var dryTierPackedSurfaceWrite:texture_storage_2d<rgba32uint,write>;
+@group(${splitGroup + 1}) @binding(2) var dryTierIdentityMediaWrite:texture_storage_2d<rgba16uint,write>;
+@group(${splitGroup + 1}) @binding(3) var dryTierGeometryWrite:texture_storage_2d<rgba32float,write>;
+@group(${splitGroup + 1}) @binding(4) var dryTierOpaqueIdentityWrite:texture_storage_2d<rg32uint,write>;
+@group(${splitGroup + 1}) @binding(5) var dryTierDepthWrite:texture_storage_2d<r32float,write>;
+struct DryTieredResolveQueue{
+  dispatchX:atomic<u32>,dispatchY:atomic<u32>,dispatchZ:atomic<u32>,pixelCount:atomic<u32>,pixels:array<u32>,
+}
+@group(${splitGroup + 1}) @binding(8) var<storage,read_write> dryTieredResolveQueue:DryTieredResolveQueue;
+` : "";
+  const sceneCoverageReturnTypeWGSL = screenSpaceTerminationPixels > 0
+    ? "->DryBrickCoverageOut" : "->@location(0) u32";
+  const sceneCoverageMissWGSL = screenSpaceTerminationPixels > 0
+    ? "return DryBrickCoverageOut(0u,0.0);" : "return 0u;";
+  const sceneCoverageOverflowWGSL = screenSpaceTerminationPixels > 0
+    ? "return DryBrickCoverageOut(0u,0.0);" : "return 1u;";
+  const screenSpaceSceneCoverageWGSL = screenSpaceTerminationPixels > 0 ? /* wgsl */ `
+  let localExtent=svoPrimitiveLocalExtent_m(svoPrimitiveKind(record),svoPrimitiveDimensions_m(record));
+  let worldExtent=dryScenePrimitiveWorldExtent(localExtent,record.orientation);let centre=svoPrimitiveCenter_m(record);
+  if(dryPrimaryBoundsSubPixel(mat2x3f(centre-worldExtent,centre+worldExtent))){
+    return DryBrickCoverageOut(input.primitiveIndex+1u,dryHardwareDepth(span.x,rd,camera[1]));
+  }
+  let resolvedDepth=textureLoad(dryRasterPrimaryGeometryRead,vec2i(coordinate),0).w;
+  let resolvedMetadata=textureLoad(dryRasterPrimaryIdentityRead,vec2i(coordinate),0).y;
+  if(((resolvedMetadata>>20u)&15u)==DRY_GBUFFER_FIELD_RESIDENT_CELL_PROXY
+    &&(resolvedMetadata&0xffffu)==svoPrimitiveOwnerId(record)){${sceneCoverageMissWGSL}}
+  if(!(span.x<resolvedDepth)){${sceneCoverageMissWGSL}}
+` : "";
+  const screenSpaceVoxelResolveWGSL = screenSpaceTerminationPixels > 0 ? /* wgsl */ `
+        let cellBounds=mat2x3f(bounds[0]+vec3f(cell)*extent,bounds[0]+(vec3f(cell)+vec3f(1.0))*extent);
+        if(dryPrimaryBoundsSubPixel(cellBounds)){
+          ${primaryUpgradeFlushWGSL}
+          return dryPrimaryVoxelProxyHit(ro,rd,cellBounds,entry,cellExit,identity);
+        }` : "";
+  const screenSpacePrimitiveResolveWGSL = screenSpaceTerminationPixels > 0
+    ? "let proxyLocalExtent=svoPrimitiveLocalExtent_m(svoPrimitiveKind(record),svoPrimitiveDimensions_m(record));let proxyExtent=dryScenePrimitiveWorldExtent(proxyLocalExtent,record.orientation);let proxyCentre=svoPrimitiveCenter_m(record);if(dryPrimaryBoundsSubPixel(mat2x3f(proxyCentre-proxyExtent,proxyCentre+proxyExtent))){let proxySpan=vec2f(span.x,min(span.y,limit));return dryPrimaryPrimitiveProxyHit(record,ro,rd,proxySpan);}"
+    : "";
+  const brickCoverageOutputWGSL = screenSpaceTerminationPixels > 0 ? /* wgsl */ `
+struct DryBrickCoverageOut{@location(0) key:u32,@builtin(frag_depth) hardwareDepth:f32}
+` : "";
+  const brickCoverageReturnTypeWGSL = screenSpaceTerminationPixels > 0
+    ? "->DryBrickCoverageOut" : "->@location(0) u32";
+  const brickCoverageMissWGSL = screenSpaceTerminationPixels > 0
+    ? "return DryBrickCoverageOut(0u,0.0);" : "return 0u;";
+  const brickCoverageOverflowWGSL = screenSpaceTerminationPixels > 0
+    ? "return DryBrickCoverageOut(0u,0.0);" : "return 1u;";
+  const screenSpaceBrickCoverageWGSL = screenSpaceTerminationPixels > 0 ? /* wgsl */ `
+  let proxyBounds=mat2x3f(input.proxyMinimum,input.proxyMaximum);
+  if(dryPrimaryBrickCellsSubPixel(proxyBounds)){
+    let camera=dryRasterPrimaryCamera();let ro=camera[0];let rd=dryRasterPrimaryRay(input.position.xy,camera);
+    let interval=svoRayAabbWithInverse(SvoRay(ro,0.0,rd,DRY_MISS),1.0/rd,proxyBounds);
+    if(interval.x!=0.0){let entry=max(interval.y,0.0);return DryBrickCoverageOut(input.instanceIndex+1u,dryHardwareDepth(entry,rd,camera[1]));}
+  }
+` : "";
+  const screenSpaceBrickResolveWGSL = screenSpaceTerminationPixels > 0 ? /* wgsl */ `
+  let lodKey=textureLoad(drySplitGlassKeyRead,vec2i(position),0).x;
+  if(lodKey>0u){let instanceIndex=lodKey-1u;if(instanceIndex<arrayLength(&svoBrickInstances)){
+    let record=svoBrickInstances[instanceIndex];let proxyBounds=mat2x3f(record.proxyMinimum,record.proxyMaximum);
+    let interval=svoRayAabbWithInverse(SvoRay(ro,0.0,rd,DRY_MISS),1.0/rd,proxyBounds);
+    if(interval.x!=0.0){let proxy=dryPrimaryLeafProxyHit(ro,rd,proxyBounds,max(interval.y,0.0),interval.z,record.voxelOffset);
+      if(proxy.t<opaque.t){opaque=proxy;producer=SVO_GBUFFER_PRODUCER_BRICK;}}
+  }}
+` : "";
+  // The thresholded production graph resolves background, LOD and exact
+  // surfaces in separate passes, so it has no single full-screen writer for
+  // the old candidate-arena depth seed. Hardware depth remains authoritative;
+  // omit this optional early-out instead of consulting stale arena words.
+  const sceneCoverageSeedCullWGSL = screenSpaceTerminationPixels > 0 ? "" : /* wgsl */ `
+  let seedIndex=dryPrimaryCoverageSeedIndex(pixel);
+  if(seedIndex<arrayLength(&svoBrickCoverageCandidates)
+    &&!(span.x<bitcast<f32>(svoBrickCoverageCandidates[seedIndex]))){return 0u;}
+`;
+  const sceneCoverageSeedLimitWGSL = screenSpaceTerminationPixels > 0 ? "" : /* wgsl */ `
+  let seedIndex=dryPrimaryCoverageSeedIndex(pixel);
+  if(seedIndex<arrayLength(&svoBrickCoverageCandidates)){limit=bitcast<f32>(svoBrickCoverageCandidates[seedIndex]);}
+`;
   const traversalCursorWGSL = canonicalTraversal ? /* wgsl */ `
 struct DryTraversalCursor{canonical:SvoTraversalContinuation}
 fn dryTraversalCursorBegin(ray:SvoRay,mapping:SvoMapping,cursor:ptr<function,DryTraversalCursor>){svoTraversalContinuationBegin(ray,mapping,&(*cursor).canonical);}
@@ -2117,7 +2465,7 @@ fn dryBrickMacroSkip(summary:SvoBrickOccupancy,local:vec3u,bounds:mat2x3f,extent
   if(brickSummary.ready!=0u){if(brickSummary.occupied==0u){return missHit();}let occupiedInterval=svoRayAabbWithInverse(SvoRay(ro,entry,rd,brickExit),1.0/rd,svoBrickOccupiedBounds(brickSummary,bounds[0],extent));if(occupiedInterval.x==0.0){return missHit();}entry=max(entry,occupiedInterval.y);brickExit=min(brickExit,occupiedInterval.z);}
   let point=ro+rd*(entry+1e-5);var cell=vec3i(clamp(floor((point-bounds[0])/extent),vec3f(0.0),vec3f(f32(dry.mapping.brickSize-1u))));`;
   const primaryBrickExitWGSL = brickOccupancyMode === "off" ? "hit.tExit" : "brickExit";
-  const primaryMacroSkipWGSL = brickOccupancyMode === "macro" ? /* wgsl */ `let macroSkip=dryBrickMacroSkip(brickSummary,vec3u(cell),bounds,extent,ro,rd,entry);if(macroSkip.x!=0.0){if(macroSkip.y>=brickExit||macroSkip.y>=DRY_MISS){break;}entry=macroSkip.y;let skipPoint=ro+rd*(entry+max(1e-5,length(extent)*1e-4));cell=vec3i(clamp(floor((skipPoint-bounds[0])/extent),vec3f(0.0),vec3f(f32(dry.mapping.brickSize-1u))));let skipBoundary=bounds[0]+(vec3f(cell)+select(vec3f(0.0),vec3f(1.0),step>vec3i(0)))*extent;nextT=select(vec3f(DRY_MISS),(skipBoundary-ro)/rd,abs(rd)>vec3f(1e-9));continue;}
+  const primaryMacroSkipWGSL = brickOccupancyMode === "macro" ? /* wgsl */ `let macroSkip=dryBrickMacroSkip(brickSummary,vec3u(cell),bounds,extent,ro,rd,entry);if(macroSkip.x!=0.0){${primaryUpgradeFlushWGSL}if(macroSkip.y>=brickExit||macroSkip.y>=DRY_MISS){break;}entry=macroSkip.y;let skipPoint=ro+rd*(entry+max(1e-5,length(extent)*1e-4));cell=vec3i(clamp(floor((skipPoint-bounds[0])/extent),vec3f(0.0),vec3f(f32(dry.mapping.brickSize-1u))));let skipBoundary=bounds[0]+(vec3f(cell)+select(vec3f(0.0),vec3f(1.0),step>vec3i(0)))*extent;nextT=select(vec3f(DRY_MISS),(skipBoundary-ro)/rd,abs(rd)>vec3f(1e-9));continue;}
     ` : "";
   const shadowBrickSetupWGSL = brickOccupancyMode === "off"
     ? /* wgsl */ `let bounds=dryLeafBounds(hit.nodeIndex);let extent=(bounds[1]-bounds[0])/f32(dry.mapping.brickSize);
@@ -2288,7 +2636,9 @@ fn dryPrepassResolve(pixel:vec2f,depth:f32,normalIn:vec3f,hit:DryHit){
     accumulated1+=dryPrepassUnpack1(packed)*weight;
     accumulated2+=dryPrepassUnpack2(packed)*weight;
     if(weight>bestRadianceWeight){bestRadianceWeight=weight;bestRadianceTexel=texel;}
-    if((dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.globalIllumination}u)!=0u){accumulatedGi+=textureLoad(dryPrepassRadianceTexture,texel,0)*weight;giWeightSum+=weight;}
+    if((dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.globalIllumination}u)!=0u
+      &&(dry.tuningCounts2.w==${SVO_CONE_RADIANCE_RECONSTRUCTION_CODES["wide-relight"]}u
+        ||dry.tuningCounts2.w==${SVO_CONE_RADIANCE_RECONSTRUCTION_CODES["full-res-relight"]}u)){accumulatedGi+=textureLoad(dryPrepassRadianceTexture,texel,0)*weight;giWeightSum+=weight;}
     if(dry.tuningCounts2.w==${SVO_CONE_RADIANCE_RECONSTRUCTION_CODES["joint-bilateral"]}u){accumulatedRadiance+=textureLoad(dryPrepassRadianceTexture,texel,0)*weight;radianceWeightSum+=weight;}
     weightSum+=weight;
   }}
@@ -2301,16 +2651,18 @@ fn dryPrepassResolve(pixel:vec2f,depth:f32,normalIn:vec3f,hit:DryHit){
     dryPrepassExactEdgeState=1u;return;
   }
   dryPrepassData0=accumulated0/weightSum;dryPrepassData1=accumulated1/weightSum;dryPrepassData2=accumulated2/weightSum;dryPrepassState=1u;
-  if(giWeightSum>=${SVO_DRY_CONE_PREPASS_CONTRACT.minimumReconstructionWeight}){dryPrepassGi=accumulatedGi/giWeightSum;dryPrepassGiState=1u;}
-  else if((dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.globalIllumination}u)!=0u){dryDerivedPageFailure|=${SVO_DRY_DERIVED_FAILURE.reducedReconstruction}u;}
+  if(dry.tuningCounts2.w==${SVO_CONE_RADIANCE_RECONSTRUCTION_CODES["wide-relight"]}u
+    ||dry.tuningCounts2.w==${SVO_CONE_RADIANCE_RECONSTRUCTION_CODES["full-res-relight"]}u){
+    if(giWeightSum>=${SVO_DRY_CONE_PREPASS_CONTRACT.minimumReconstructionWeight}){dryPrepassGi=accumulatedGi/giWeightSum;dryPrepassGiState=1u;}
+    else if((dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.globalIllumination}u)!=0u){dryDerivedPageFailure|=${SVO_DRY_DERIVED_FAILURE.reducedReconstruction}u;}
+  }
   if(dry.tuningCounts2.w==${SVO_CONE_RADIANCE_RECONSTRUCTION_CODES["gated-linear"]}u&&linearSafe!=0u&&bestRadianceWeight>0.0){
-    dryPrepassRadiance=textureSampleLevel(dryPrepassRadianceTexture,nodeMipSampler,pixel/max(uniforms.viewport.xy,vec2f(1.0)),0.0);dryPrepassRadianceState=1u;
+    let reconstructed=textureSampleLevel(dryPrepassRadianceTexture,nodeMipSampler,pixel/max(uniforms.viewport.xy,vec2f(1.0)),0.0);if(reconstructed.a>=0.0){dryPrepassRadiance=reconstructed;dryPrepassRadianceState=1u;}
   }else if(dry.tuningCounts2.w==${SVO_CONE_RADIANCE_RECONSTRUCTION_CODES["joint-bilateral"]}u&&radianceWeightSum>1e-6){
-    dryPrepassRadiance=accumulatedRadiance/radianceWeightSum;dryPrepassRadianceState=1u;
-  }else if(dry.tuningCounts2.w!=${SVO_CONE_RADIANCE_RECONSTRUCTION_CODES["wide-relight"]}u&&dry.tuningCounts2.w!=${SVO_CONE_RADIANCE_RECONSTRUCTION_CODES["full-res-relight"]}u&&bestRadianceWeight>0.0){dryPrepassRadiance=textureLoad(dryPrepassRadianceTexture,bestRadianceTexel,0);dryPrepassRadianceState=1u;}
+    let reconstructed=accumulatedRadiance/radianceWeightSum;if(reconstructed.a>=0.0){dryPrepassRadiance=reconstructed;dryPrepassRadianceState=1u;}
+  }else if(dry.tuningCounts2.w!=${SVO_CONE_RADIANCE_RECONSTRUCTION_CODES["wide-relight"]}u&&dry.tuningCounts2.w!=${SVO_CONE_RADIANCE_RECONSTRUCTION_CODES["full-res-relight"]}u&&bestRadianceWeight>0.0){let reconstructed=textureLoad(dryPrepassRadianceTexture,bestRadianceTexel,0);if(reconstructed.a>=0.0){dryPrepassRadiance=reconstructed;dryPrepassRadianceState=1u;}}
 }
 ` : "";
-  const splitGroup = reduced ? 2 : 1;
   const splitGlassKeyDeclarationWGSL = rasterGlassDiscovery
     ? /* wgsl */ `@group(${splitGroup}) @binding(6) var drySplitGlassKeyRead:texture_2d<u32>;
 `
@@ -2472,6 +2824,23 @@ fn dryVoxelLightReject(pageIndex:u32,local:vec3u){
 @group(${splitGroup}) @binding(${SVO_BRICK_RASTER_CONTRACT.instanceDrawBinding}) var<storage,read> svoBrickInstances:array<SvoBrickInstance>;
 @group(${splitGroup}) @binding(${SVO_BRICK_RASTER_CONTRACT.coverageCountBinding}) var<storage,read_write> svoBrickCoverageCounts:array<atomic<u32>>;
 @group(${splitGroup}) @binding(${SVO_BRICK_RASTER_CONTRACT.coverageCandidateBinding}) var<storage,read_write> svoBrickCoverageCandidates:array<u32>;
+${screenSpaceTerminationPixels > 0 ? `@group(${splitGroup}) @binding(${SVO_BRICK_RASTER_CONTRACT.primaryGeometryBinding}) var dryRasterPrimaryGeometryRead:texture_2d<f32>;` : ""}
+${screenSpaceTerminationPixels > 0 ? `@group(${splitGroup}) @binding(${SVO_BRICK_RASTER_CONTRACT.primaryIdentityBinding}) var dryRasterPrimaryIdentityRead:texture_2d<u32>;` : ""}
+${svoScenePrimitiveBandReadWGSL(splitGroup + 1, SVO_SCENE_PRIMITIVE_RASTER_CONTRACT.coverageCandidatesPerPixel)}
+${svoRasterCoverageOverflowSignalWGSL}
+// Pixels the count buffer actually addresses.
+//
+// The allocation now carries an eight-word tail past the pixel range — the
+// overflow flag and the indirect draw args — so arrayLength stopped being a
+// pixel bound. It is still a *safe* one (every guard using it is permissive by
+// exactly the tail), but a fragment that read the tail as a pixel would corrupt
+// the draw the overflow pass is about to issue, so the bound is explicit.
+fn dryCoveragePixelLimit()->u32{
+  let words=arrayLength(&svoBrickCoverageCounts);
+  if(words<=SVO_RASTER_COVERAGE_TAIL_WORDS){return 0u;}
+  return min(words-SVO_RASTER_COVERAGE_TAIL_WORDS,
+    max(u32(uniforms.viewport.x),1u)*max(u32(uniforms.viewport.y),1u));
+}
 ${svoBrickRasterSharedWGSL}
 struct DryRasterPrimaryOut{
   @location(0) packedSurface:vec4u,
@@ -2576,10 +2945,7 @@ fn dryScenePrimitiveWorldExtent(localExtent:vec3f,orientation:vec4f)->vec3f{
 // the sign is not even stable. Fragment *count* is not what this pass is bound
 // by; per-fragment march cost is, and the proxies the oriented box shrinks are
 // the cheap round cones rather than the tapered-sweep clusters beside them.
-@vertex fn ${SVO_SCENE_PRIMITIVE_RASTER_CONTRACT.entryPoints.vertex}(
-  @builtin(vertex_index) vertexIndex:u32,
-  @builtin(instance_index) primitiveIndex:u32,
-)->DryScenePrimitiveVertexOut{
+fn dryScenePrimitiveProxyVertex(vertexIndex:u32,primitiveIndex:u32)->DryScenePrimitiveVertexOut{
   var position=vec4f(2.0,2.0,0.0,1.0);
   if(primitiveIndex>=dry.metadata.x){return DryScenePrimitiveVertexOut(position,primitiveIndex);}
   let record=dryPrimitive(primitiveIndex);let localExtent=svoPrimitiveLocalExtent_m(svoPrimitiveKind(record),svoPrimitiveDimensions_m(record));
@@ -2596,6 +2962,34 @@ fn dryScenePrimitiveWorldExtent(localExtent:vec3f,orientation:vec4f)->vec3f{
     position=vec4f(dot(relative,right)/(aspect*cameraTanHalfFov()),dot(relative,up)/cameraTanHalfFov(),DRY_REVERSED_Z_NEAR_M,viewDepth);
   }
   return DryScenePrimitiveVertexOut(position,primitiveIndex);
+}
+// The exact historical set: every authored record gets its proxy. This entry
+// point stays band-free on purpose — it feeds the direct fragment, which is the
+// overflow fallback and the control the coverage arm is measured against, and a
+// control that had already had records removed from it would measure nothing.
+@vertex fn ${SVO_SCENE_PRIMITIVE_RASTER_CONTRACT.entryPoints.vertex}(
+  @builtin(vertex_index) vertexIndex:u32,
+  @builtin(instance_index) primitiveIndex:u32,
+)->DryScenePrimitiveVertexOut{
+  return dryScenePrimitiveProxyVertex(vertexIndex,primitiveIndex);
+}
+// The banded set, for the coverage and overflow passes.
+//
+// Rejection happens here rather than in the fragment because this is where it is
+// free: all thirty-six vertices collapse onto the same clip-space point, the
+// triangles are degenerate, and the rasterizer produces nothing at all — so a
+// record the band dropped costs no fragment, no arena slot, and no march. The
+// two passes must agree on the set (overflow re-runs the pixels whose coverage
+// list was full, and a list built from a different set would be re-marched
+// against the wrong geometry), which is exactly why they share this entry point.
+@vertex fn ${SVO_SCENE_PRIMITIVE_RASTER_CONTRACT.entryPoints.bandVertex}(
+  @builtin(vertex_index) vertexIndex:u32,
+  @builtin(instance_index) primitiveIndex:u32,
+)->DryScenePrimitiveVertexOut{
+  if(!dryScenePrimitiveBandMember(primitiveIndex)){
+    return DryScenePrimitiveVertexOut(vec4f(2.0,2.0,0.0,1.0),primitiveIndex);
+  }
+  return dryScenePrimitiveProxyVertex(vertexIndex,primitiveIndex);
 }
 // Scene-primitive fragments carry their own output struct for the same reason
 // the brick ones do: the hidden-surface-removal probe drops frag_depth here
@@ -2668,78 +3062,309 @@ ${scenePrimitiveHsrProbe
 // the throwaway colour. No path traces a payload or writes fragment depth. The
 // expensive resolve below consequently runs exactly once per pixel rather than
 // once per overlapping brick.
+${brickCoverageOutputWGSL}
 @fragment fn ${SVO_BRICK_RASTER_CONTRACT.entryPoints.coverage}(
   input:SvoBrickRasterVertexOut,
-)->@location(0) u32{
+ )${brickCoverageReturnTypeWGSL}{
   let width=max(u32(uniforms.viewport.x),1u);let coordinate=vec2u(input.position.xy);
   let pixel=coordinate.y*width+coordinate.x;
-  if(pixel>=arrayLength(&svoBrickCoverageCounts)){return 0u;}
+  if(pixel>=dryCoveragePixelLimit()){${brickCoverageMissWGSL}}
+  ${screenSpaceBrickCoverageWGSL}
   let slot=atomicAdd(&svoBrickCoverageCounts[pixel],1u);
   if(slot<${SVO_BRICK_RASTER_CONTRACT.coverageCandidatesPerPixel}u){
     let address=pixel*${SVO_BRICK_RASTER_CONTRACT.coverageCandidatesPerPixel}u+slot;
     if(address<arrayLength(&svoBrickCoverageCandidates)){svoBrickCoverageCandidates[address]=input.instanceIndex;}
     discard;
   }
-  return 1u;
+  // The fragment that takes the *first* slot past capacity raises the flag, so
+  // the counter counts overflowing pixels rather than surplus fragments — and
+  // so a frame with none of them can skip the overflow draw entirely.
+  if(slot==${SVO_BRICK_RASTER_CONTRACT.coverageCandidatesPerPixel}u){svoRasterCoverageOverflowSignal();}
+  ${brickCoverageOverflowWGSL}
 }
 fn dryBrickCoveragePixel(position:vec2f)->u32{
   return u32(position.y)*max(u32(uniforms.viewport.x),1u)+u32(position.x);
+}
+// One word per pixel past every candidate slot of the shared arena. Both
+// coverage passes address the arena from zero with their own stride, and the
+// wider of the two (the scene-primitive capacity) sizes the allocation, so this
+// tail is unreachable from either — see svoRasterCoverageArenaBytes.
+const DRY_SCENE_COVERAGE_CAPACITY:u32=${SVO_SCENE_PRIMITIVE_RASTER_CONTRACT.coverageCandidatesPerPixel}u;
+const DRY_SCENE_COVERAGE_INDEX_MASK:u32=${SVO_SCENE_PRIMITIVE_COVERAGE_MAXIMUM_RECORDS - 1}u;
+fn dryPrimaryCoverageSeedIndex(pixel:u32)->u32{
+  return max(u32(uniforms.viewport.x),1u)*max(u32(uniforms.viewport.y),1u)*DRY_SCENE_COVERAGE_CAPACITY+pixel;
+}
+fn dryBrickCoverageExactHit(position:vec2f,ro:vec3f,rd:vec3f,tLimit:f32)->DryHit{
+  let pixel=dryBrickCoveragePixel(position);var opaque=missHit();opaque.t=tLimit;
+  if(pixel>=dryCoveragePixelLimit()){return opaque;}
+  let count=min(atomicLoad(&svoBrickCoverageCounts[pixel]),${SVO_BRICK_RASTER_CONTRACT.coverageCandidatesPerPixel}u);
+  let base=pixel*${SVO_BRICK_RASTER_CONTRACT.coverageCandidatesPerPixel}u;var visited=0u;var iteration=0u;
+  while(iteration<count){
+    var bestSlot=0xffffffffu;var bestEntry=DRY_MISS;var bestExit=DRY_MISS;var slot=0u;
+    while(slot<count){
+      if((visited&(1u<<slot))==0u){
+        let address=base+slot;
+        if(address<arrayLength(&svoBrickCoverageCandidates)){
+          let instanceIndex=svoBrickCoverageCandidates[address];
+          if(instanceIndex<arrayLength(&svoBrickInstances)){
+            let record=svoBrickInstances[instanceIndex];
+            let interval=svoRayAabbWithInverse(SvoRay(ro,0.0,rd,DRY_MISS),1.0/rd,mat2x3f(record.proxyMinimum,record.proxyMaximum));
+            let entry=select(DRY_MISS,max(interval.y,0.0),interval.x!=0.0);
+            if(entry<bestEntry){bestEntry=entry;bestExit=interval.z;bestSlot=slot;}
+          }
+        }
+      }
+      slot+=1u;
+    }
+    if(bestSlot==0xffffffffu||bestEntry>=opaque.t){break;}visited|=1u<<bestSlot;
+    let instanceIndex=svoBrickCoverageCandidates[base+bestSlot];let record=svoBrickInstances[instanceIndex];
+    let leaf=SvoTraversalHit(SVO_STATUS_HIT,0u,record.nodeIndexKey&SVO_BRICK_NODE_INDEX_MASK,0u,record.voxelOffset,0u,bestEntry,bestExit);
+    let payload=traceLeafPayload(ro,rd,leaf);
+    if(payload.t<DRY_MISS){if(payload.t<opaque.t){opaque=payload;}break;}
+    iteration+=1u;
+  }
+  return opaque;
 }
 fn dryBrickCoverageResolve(position:vec2f)->DryRasterPrimaryOut{
   dryRasterPrimaryReset();
   let camera=dryRasterPrimaryCamera();let ro=camera[0];let rd=dryRasterPrimaryRay(position,camera);
   var opaque=traceTerrain(ro,rd);var producer=SVO_GBUFFER_PRODUCER_RASTER_BACKGROUND;
-  let pixel=dryBrickCoveragePixel(position);
-  if(pixel<arrayLength(&svoBrickCoverageCounts)){
-    let count=min(atomicLoad(&svoBrickCoverageCounts[pixel]),${SVO_BRICK_RASTER_CONTRACT.coverageCandidatesPerPixel}u);
-    let base=pixel*${SVO_BRICK_RASTER_CONTRACT.coverageCandidatesPerPixel}u;var visited=0u;
-    var iteration=0u;while(iteration<count){
-      var bestSlot=0xffffffffu;var bestEntry=DRY_MISS;var bestExit=DRY_MISS;var slot=0u;
-      while(slot<count){
-        if((visited&(1u<<slot))==0u){
-          let address=base+slot;
-          if(address<arrayLength(&svoBrickCoverageCandidates)){
-            let instanceIndex=svoBrickCoverageCandidates[address];
-            if(instanceIndex<arrayLength(&svoBrickInstances)){
-              let record=svoBrickInstances[instanceIndex];
-              let interval=svoRayAabbWithInverse(SvoRay(ro,0.0,rd,DRY_MISS),1.0/rd,mat2x3f(record.proxyMinimum,record.proxyMaximum));
-              let entry=select(DRY_MISS,max(interval.y,0.0),interval.x!=0.0);
-              if(entry<bestEntry){bestEntry=entry;bestExit=interval.z;bestSlot=slot;}
-            }
-          }
-        }
-        slot+=1u;
-      }
-      if(bestSlot==0xffffffffu||bestEntry>=opaque.t){break;}visited|=1u<<bestSlot;
-      let instanceIndex=svoBrickCoverageCandidates[base+bestSlot];let record=svoBrickInstances[instanceIndex];
-      let leaf=SvoTraversalHit(SVO_STATUS_HIT,0u,record.nodeIndexKey&SVO_BRICK_NODE_INDEX_MASK,0u,record.voxelOffset,0u,bestEntry,bestExit);
-      let payload=traceLeafPayload(ro,rd,leaf);
-      // Proxy boxes are subsets of disjoint SVO leaf cells. Once the
-      // nearest-entry proxy hits, every remaining proxy starts at or beyond
-      // this proxy's exit, so none can contain a nearer payload.
-      if(payload.t<DRY_MISS){if(payload.t<opaque.t){opaque=payload;producer=SVO_GBUFFER_PRODUCER_BRICK;}break;}
-      iteration+=1u;
-    }
+  ${screenSpaceBrickResolveWGSL}
+  let pixel=dryBrickCoveragePixel(position);let exact=dryBrickCoverageExactHit(position,ro,rd,opaque.t);
+  if(exact.t<opaque.t){opaque=exact;producer=SVO_GBUFFER_PRODUCER_BRICK;}
+  // The rigid impostor fold. Raster-primary's background pass traces terrain
+  // only, which is the whole reason a scene with any body at all had to keep the
+  // twelve-instance impostor pass switched on — and that pass, not the bodies,
+  // is what forfeited stationary primary reuse. One analytic body loop inside
+  // the resolve that already owns this pixel costs a bounding-sphere reject on
+  // every ray that misses the set, and it publishes bodies through exactly the
+  // same G-buffer encoder as every other producer here.
+  if(svoRigidBoundsIntersect(ro,rd,opaque.t)){
+    let rigid=nearestBody(ro,rd);
+    if(rigid.t<opaque.t){opaque=rigid;producer=SVO_GBUFFER_PRODUCER_RIGID;}
   }
+  // Publish this pixel's nearest opaque for the scene-primitive resolve. One
+  // full-screen invocation per pixel writes it exactly once, so the store needs
+  // no atomic and races with nothing. The brick overflow arm can still find a
+  // nearer brick afterwards, which only makes the seed conservative: it is an
+  // upper bound on the true nearest, so it can never cull a winning candidate.
+  let seedIndex=dryPrimaryCoverageSeedIndex(pixel);
+  if(seedIndex<arrayLength(&svoBrickCoverageCandidates)){svoBrickCoverageCandidates[seedIndex]=bitcast<u32>(opaque.t);}
   if(opaque.t<DRY_MISS){return dryRasterPrimarySurface(opaque,ro,rd,camera[1],producer);}
   return dryRasterPrimaryMiss();
 }
 @fragment fn ${SVO_BRICK_RASTER_CONTRACT.entryPoints.resolve}(input:VertexOut)->DryRasterPrimaryOut{
   return dryBrickCoverageResolve(input.position.xy);
 }
+${screenSpaceTerminationPixels > 0 ? /* wgsl */ `
+// The production threshold keeps the heavyweight exact marcher out of sky and
+// sub-pixel tiles entirely. Entry-point reachability gives each tier its own
+// Metal register budget even though the source module remains shared.
+@fragment fn svoBrickLodResolveFragment(input:VertexOut)->DryRasterPrimaryOut{
+  let position=input.position.xy;let lodKey=textureLoad(drySplitGlassKeyRead,vec2i(position),0).x;
+  if(lodKey==0u){discard;}let instanceIndex=lodKey-1u;if(instanceIndex>=arrayLength(&svoBrickInstances)){discard;}
+  dryRasterPrimaryReset();let camera=dryRasterPrimaryCamera();let ro=camera[0];let rd=dryRasterPrimaryRay(position,camera);
+  let record=svoBrickInstances[instanceIndex];let bounds=mat2x3f(record.proxyMinimum,record.proxyMaximum);
+  let interval=svoRayAabbWithInverse(SvoRay(ro,0.0,rd,DRY_MISS),1.0/rd,bounds);if(interval.x==0.0){discard;}
+  let proxy=dryPrimaryLeafProxyHit(ro,rd,bounds,max(interval.y,0.0),interval.z,record.voxelOffset);
+  if(!(proxy.t<DRY_MISS)){discard;}return dryRasterPrimarySurface(proxy,ro,rd,camera[1],SVO_GBUFFER_PRODUCER_BRICK);
+}
+@fragment fn svoBrickExactResolveFragment(input:VertexOut)->DryRasterPrimaryOut{
+  let position=input.position.xy;let pixel=dryBrickCoveragePixel(position);
+  if(pixel>=dryCoveragePixelLimit()||atomicLoad(&svoBrickCoverageCounts[pixel])==0u){discard;}
+  dryRasterPrimaryReset();let camera=dryRasterPrimaryCamera();let ro=camera[0];let rd=dryRasterPrimaryRay(position,camera);
+  let exact=dryBrickCoverageExactHit(position,ro,rd,DRY_MISS);if(!(exact.t<DRY_MISS)){discard;}
+  return dryRasterPrimarySurface(exact,ro,rd,camera[1],SVO_GBUFFER_PRODUCER_BRICK);
+}
+` : ""}
 // Overflow is correctness-only and isolated in its own proxy entry point. It
 // repeats the historical direct fragment only on marked pixels, which makes
 // capacity performance-only without importing canonical brick-boundary tie
 // arithmetic into the raster arm.
 @fragment fn ${SVO_BRICK_RASTER_CONTRACT.entryPoints.overflowResolve}(input:SvoBrickRasterVertexOut)->DryRasterPrimaryOut{
   let pixel=dryBrickCoveragePixel(input.position.xy);
-  if(pixel>=arrayLength(&svoBrickCoverageCounts)||atomicLoad(&svoBrickCoverageCounts[pixel])<=${SVO_BRICK_RASTER_CONTRACT.coverageCandidatesPerPixel}u){discard;}
+  if(pixel>=dryCoveragePixelLimit()||atomicLoad(&svoBrickCoverageCounts[pixel])<=${SVO_BRICK_RASTER_CONTRACT.coverageCandidatesPerPixel}u){discard;}
   dryRasterPrimaryReset();let camera=dryRasterPrimaryCamera();let ro=camera[0];let rd=dryRasterPrimaryRay(input.position.xy,camera);
   let interval=svoRayAabbWithInverse(SvoRay(ro,0.0,rd,DRY_MISS),1.0/rd,mat2x3f(input.proxyMinimum,input.proxyMaximum));
   if(interval.x==0.0){discard;}
   let leaf=SvoTraversalHit(SVO_STATUS_HIT,0u,input.nodeIndex,0u,input.voxelOffset,0u,max(interval.y,0.0),interval.z);
   let payload=traceLeafPayload(ro,rd,leaf);if(!(payload.t<DRY_MISS)){discard;}
   return dryRasterPrimarySurface(payload,ro,rd,camera[1],SVO_GBUFFER_PRODUCER_BRICK);
+}
+// ---------------------------------------------------------------------------
+// The authored SDF set on the same coverage/resolve/overflow shape as bricks.
+//
+// The direct fragment above it marches the record's field once per covering
+// proxy, and it writes frag_depth *and* discards, so a tiler can reject nothing:
+// a covered pixel under a median of seven proxies marches all seven even after
+// the nearest one has resolved it. WGSL has no conservative depth to promise
+// monotonicity with (gpuweb#5342), so the substitute is the arena the brick
+// raster already proves out: append candidates without evaluating any field,
+// then walk one per-pixel list front to back exactly once.
+// ---------------------------------------------------------------------------
+fn dryScenePrimitiveCoverageKey(entry_m:f32,primitiveIndex:u32)->u32{
+  return ((bitcast<u32>(max(entry_m,0.0))>>16u)<<16u)|(primitiveIndex&DRY_SCENE_COVERAGE_INDEX_MASK);
+}
+/** The key's floored entry distance: a lower bound, which is what makes the early-out sound. */
+fn dryScenePrimitiveCoverageEntry(key:u32)->f32{return bitcast<f32>(key&0xffff0000u);}
+// Coverage evaluates no field. It repeats only the oriented-box bracket the
+// resolve will march inside, which is a quaternion rotate and a slab test, and
+// that bracket is also the sort key. The three rejections here (retired index,
+// suppressed owner, ray misses the local box) are exactly the ones the direct
+// fragment discards on, so a candidate that never enters the arena is one the
+// historical pass would have thrown away after paying for it.
+@fragment fn ${SVO_SCENE_PRIMITIVE_RASTER_CONTRACT.entryPoints.coverage}(
+  input:DryScenePrimitiveVertexOut,
+ )${sceneCoverageReturnTypeWGSL}{
+  if(input.primitiveIndex>=dry.metadata.x){${sceneCoverageMissWGSL}}
+  let width=max(u32(uniforms.viewport.x),1u);let coordinate=vec2u(input.position.xy);
+  let pixel=coordinate.y*width+coordinate.x;
+  if(pixel>=dryCoveragePixelLimit()){${sceneCoverageMissWGSL}}
+  dryRasterPrimaryReset();
+  let record=dryPrimitive(input.primitiveIndex);
+  if(dryOpaqueOwnerSuppressed(svoPrimitiveOwnerId(record))){${sceneCoverageMissWGSL}}
+  let camera=dryRasterPrimaryCamera();let ro=camera[0];let rd=dryRasterPrimaryRay(input.position.xy,camera);
+  let span=dryScenePrimitiveMarchSpan(record,ro,rd);
+  if(!(span.x<=span.y)){${sceneCoverageMissWGSL}}
+  ${screenSpaceSceneCoverageWGSL}
+  // Occlusion, one pass earlier than the resolve applies it.
+  //
+  // The brick/terrain/body resolve has already published this pixel's nearest
+  // opaque, and after the voxel primary that surface is usually an authored
+  // record's own exact hit rather than a miss. A proxy whose entry is at or
+  // beyond it cannot hold a nearer surface — the identical front-to-back
+  // argument the resolve's walk makes — so it is not a candidate at all.
+  //
+  // Rejecting it here rather than there is what keeps the arena from filling:
+  // capacity is per pixel and unconditional, so a candidate the resolve would
+  // have skipped in one comparison still consumed a slot, and slots are what the
+  // overflow pass re-marches. This is image-exact — a rejected candidate is one
+  // whose conservative lower bound is already behind a resolved surface.
+  ${sceneCoverageSeedCullWGSL}
+  let slot=atomicAdd(&svoBrickCoverageCounts[pixel],1u);
+  ${screenSpaceTerminationPixels > 0 ? `if(dryCoveragePixelLimit()>=${1 << 20}u&&slot==0u){let queueIndex=atomicAdd(&dryTieredResolveQueue.pixelCount,1u);if(queueIndex<dryCoveragePixelLimit()){dryTieredResolveQueue.pixels[queueIndex]=pixel;}}` : ""}
+  if(slot<DRY_SCENE_COVERAGE_CAPACITY){
+    let address=pixel*DRY_SCENE_COVERAGE_CAPACITY+slot;
+    if(address<arrayLength(&svoBrickCoverageCandidates)){
+      svoBrickCoverageCandidates[address]=dryScenePrimitiveCoverageKey(span.x,input.primitiveIndex);
+    }
+    discard;
+  }
+  if(slot==DRY_SCENE_COVERAGE_CAPACITY){svoRasterCoverageOverflowSignal();}
+  ${sceneCoverageOverflowWGSL}
+}
+// One expensive fragment per pixel. Candidates are extracted in increasing key
+// order — unique, because back-face culling gives a primitive at most one
+// fragment per pixel — so no visited set is needed and the walk is not bounded
+// by a 32-bit mask the way the brick resolve's is.
+fn dryScenePrimitiveCoverageResolve(position:vec2f,ro:vec3f,rd:vec3f)->DryHit{
+  var best=missHit();
+  let pixel=dryBrickCoveragePixel(position);
+  if(pixel>=dryCoveragePixelLimit()){return best;}
+  let appended=atomicLoad(&svoBrickCoverageCounts[pixel]);
+  dryScenePrimitiveAuditCoverage(pixel,appended);
+  let count=min(appended,DRY_SCENE_COVERAGE_CAPACITY);
+  if(count==0u){return best;}
+  // Seeded with the surface the brick/terrain/body resolve already published:
+  // this is the depth authority for the pixel at this point in the frame, and
+  // marching past it is the work the direct pass could never avoid.
+  var limit=DRY_MISS;
+  ${sceneCoverageSeedLimitWGSL}
+  ${screenSpaceTerminationPixels > 0 ? /* wgsl */ `
+  // Overflow is the deep tier: it walks the authored set at this pixel instead
+  // of retaining a full-MRT overflow render pass in every frame.
+  if(appended>DRY_SCENE_COVERAGE_CAPACITY){
+    for(var recordIndex=0u;recordIndex<dry.metadata.x;recordIndex+=1u){
+      if(!dryScenePrimitiveBandMember(recordIndex)){continue;}
+      let record=dryPrimitive(recordIndex);if(dryOpaqueOwnerSuppressed(svoPrimitiveOwnerId(record))){continue;}
+      let span=dryScenePrimitiveMarchSpan(record,ro,rd);if(!(span.x<=span.y)||!(span.x<limit)){continue;}
+      let localExtent=svoPrimitiveLocalExtent_m(svoPrimitiveKind(record),svoPrimitiveDimensions_m(record));
+      let worldExtent=dryScenePrimitiveWorldExtent(localExtent,record.orientation);let centre=svoPrimitiveCenter_m(record);
+      if(dryPrimaryBoundsSubPixel(mat2x3f(centre-worldExtent,centre+worldExtent))){continue;}
+      let exact=primitiveHit(record,ro,rd,span.x,min(span.y,limit));if(exact.t<limit){limit=exact.t;best=exact;}
+    }
+    return best;
+  }` : ""}
+  let base=pixel*DRY_SCENE_COVERAGE_CAPACITY;
+  var previousKey=0u;var started=false;
+  for(var iteration=0u;iteration<DRY_SCENE_COVERAGE_CAPACITY;iteration+=1u){
+    if(iteration>=count){break;}
+    var nextKey=0xffffffffu;var found=false;
+    for(var slot=0u;slot<DRY_SCENE_COVERAGE_CAPACITY;slot+=1u){
+      if(slot>=count){break;}
+      let key=svoBrickCoverageCandidates[base+slot];
+      if((!started||key>previousKey)&&key<nextKey){nextKey=key;found=true;}
+    }
+    if(!found){break;}
+    previousKey=nextKey;started=true;
+    // Front-to-back termination. Every remaining candidate enters at or beyond
+    // this one, so none of them can hold a nearer surface than the best hit.
+    if(!(dryScenePrimitiveCoverageEntry(nextKey)<limit)){break;}
+    let record=dryPrimitive(nextKey&DRY_SCENE_COVERAGE_INDEX_MASK);
+    let span=dryScenePrimitiveMarchSpan(record,ro,rd);
+    ${screenSpacePrimitiveResolveWGSL}
+    // Marched only over what is still visible: the far end is clamped to the
+    // best hit so far, so a sphere trace never walks behind a resolved surface.
+    let exact=primitiveHit(record,ro,rd,span.x,min(span.y,limit));
+    if(exact.t<limit){limit=exact.t;best=exact;}
+  }
+  return best;
+}
+@fragment fn ${SVO_SCENE_PRIMITIVE_RASTER_CONTRACT.entryPoints.resolve}(input:VertexOut)->DryRasterPrimaryOut{
+  dryRasterPrimaryReset();
+  let camera=dryRasterPrimaryCamera();let ro=camera[0];let rd=dryRasterPrimaryRay(input.position.xy,camera);
+  let exact=dryScenePrimitiveCoverageResolve(input.position.xy,ro,rd);
+  if(!(exact.t<DRY_MISS)){discard;}
+  return dryRasterPrimarySurface(exact,ro,rd,camera[1],SVO_GBUFFER_PRODUCER_SCENE_PRIMITIVE);
+}
+${screenSpaceTerminationPixels > 0 ? /* wgsl */ `
+@compute @workgroup_size(1) fn svoScenePrimitiveTieredComputeArgs(){
+  let count=min(atomicLoad(&dryTieredResolveQueue.pixelCount),dryCoveragePixelLimit());
+  atomicStore(&dryTieredResolveQueue.dispatchX,(count+63u)/64u);
+  atomicStore(&dryTieredResolveQueue.dispatchY,1u);atomicStore(&dryTieredResolveQueue.dispatchZ,1u);
+}
+@compute @workgroup_size(64) fn svoScenePrimitiveTieredComputeResolve(
+  @builtin(global_invocation_id) id:vec3u,
+){
+  let dimensions=vec2u(max(u32(uniforms.viewport.x),1u),max(u32(uniforms.viewport.y),1u));
+  let count=min(atomicLoad(&dryTieredResolveQueue.pixelCount),dryCoveragePixelLimit());if(id.x>=count){return;}
+  let pixel=dryTieredResolveQueue.pixels[id.x];let pixelCoordinate=vec2u(pixel%dimensions.x,pixel/dimensions.x);
+  let coordinate=vec2i(pixelCoordinate);let position=vec2f(pixelCoordinate)+vec2f(.5);dryRasterPrimaryReset();
+  let camera=dryRasterPrimaryCamera();let ro=camera[0];let rd=dryRasterPrimaryRay(position,camera);
+  let exact=dryScenePrimitiveCoverageResolve(position,ro,rd);if(!(exact.t<DRY_MISS)){return;}
+  let hardwareDepth=dryHardwareDepth(exact.t,rd,camera[1]);
+  if(!(hardwareDepth>textureLoad(dryTierCurrentDepth,coordinate,0))){return;}
+  let surface=dryRasterPrimarySurface(exact,ro,rd,camera[1],SVO_GBUFFER_PRODUCER_SCENE_PRIMITIVE);
+  textureStore(dryTierPackedSurfaceWrite,coordinate,surface.packedSurface);
+  textureStore(dryTierIdentityMediaWrite,coordinate,surface.identityMedia);
+  textureStore(dryTierGeometryWrite,coordinate,surface.geometry);
+  textureStore(dryTierOpaqueIdentityWrite,coordinate,vec4u(surface.opaqueIdentity,0u,0u));
+  textureStore(dryTierDepthWrite,coordinate,vec4f(hardwareDepth,0.0,0.0,0.0));
+}
+@fragment fn svoScenePrimitiveLodResolveFragment(input:VertexOut)->DryRasterPrimaryOut{
+  let position=input.position.xy;let key=textureLoad(drySplitGlassKeyRead,vec2i(position),0).x;
+  if(key==0u){discard;}let recordIndex=key-1u;if(recordIndex>=dry.metadata.x){discard;}
+  dryRasterPrimaryReset();let camera=dryRasterPrimaryCamera();let ro=camera[0];let rd=dryRasterPrimaryRay(position,camera);
+  let record=dryPrimitive(recordIndex);let span=dryScenePrimitiveMarchSpan(record,ro,rd);if(!(span.x<=span.y)){discard;}
+  let proxy=dryPrimaryPrimitiveProxyHit(record,ro,rd,span);return dryRasterPrimarySurface(proxy,ro,rd,camera[1],SVO_GBUFFER_PRODUCER_SCENE_PRIMITIVE);
+}
+` : ""}
+// Correctness-only, exactly as the brick arm: the historical direct fragment,
+// verbatim, on the pixels whose conservative list overflowed. Capacity is
+// therefore a performance parameter and never an image change.
+@fragment fn ${SVO_SCENE_PRIMITIVE_RASTER_CONTRACT.entryPoints.overflowResolve}(
+  input:DryScenePrimitiveVertexOut,
+)->DryRasterPrimaryOut{
+  let pixel=dryBrickCoveragePixel(input.position.xy);
+  if(pixel>=dryCoveragePixelLimit()||atomicLoad(&svoBrickCoverageCounts[pixel])<=DRY_SCENE_COVERAGE_CAPACITY){discard;}
+  dryRasterPrimaryReset();
+  if(input.primitiveIndex>=dry.metadata.x){discard;}
+  let record=dryPrimitive(input.primitiveIndex);
+  if(dryOpaqueOwnerSuppressed(svoPrimitiveOwnerId(record))){discard;}
+  let camera=dryRasterPrimaryCamera();let ro=camera[0];let rd=dryRasterPrimaryRay(input.position.xy,camera);
+  ${scenePrimitiveMarchSpanWGSL}
+  if(!(exact.t<DRY_MISS)){discard;}
+  return dryRasterPrimarySurface(exact,ro,rd,camera[1],SVO_GBUFFER_PRODUCER_SCENE_PRIMITIVE);
 }
 // Brick fragments carry their own output struct so the hidden-surface-removal
 // probe can drop frag_depth here without disturbing the background pass, whose
@@ -2893,22 +3518,48 @@ fn drySilhouetteTraceVisibilityExact(opaque:DryHit,ro:vec3f,rd:vec3f)->DrySilhou
   let ndc=input.uv*2.0-1.0;let ro=uniforms.cameraPosition.xyz;let forward=normalize(uniforms.cameraTarget.xyz-ro);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));let rd=normalize(forward+right*ndc.x*uniforms.viewport.x/max(uniforms.viewport.y,1.0)*cameraTanHalfFov()+up*ndc.y*cameraTanHalfFov());
   return dryPrepassTraceVisibility(opaque,ro,rd);
 }
+fn dryPrepassShadeNoGi(opaque:DryHit,ro:vec3f,rd:vec3f)->vec3f{
+  let position=ro+rd*opaque.t;let surface=dryEvaluateSurfaceMaterial(opaque,position);
+  if(surface.valid==0u){return vec3f(0.0);}
+  let closure=unifiedPbrMaterial(surface.baseColor,surface.metallic,surface.roughness,vec3f(0.0),0.0,surface.specularF0,surface.specularWeight,vec3f(0.0),0.0);
+  var direct=vec3f(0.0);var sampleBudget=0u;let lightCount=min(dryLighting.metadata.x,min(dry.tuningCounts0.z,${SVO_LIGHT_MAXIMUM_RECORDS}u));
+  for(var lightIndex=0u;lightIndex<${SVO_DRY_SCENE_MAX_SHADED_LIGHTS}u;lightIndex+=1u){
+    if(lightIndex>=lightCount||sampleBudget>=dry.tuningCounts0.z){break;}let light=dryLighting.lights[lightIndex];if(light.identity.w!=dryLighting.metadata.y){continue;}
+    let area=light.identity.x==SVO_LIGHT_SPHERE_AREA||light.identity.x==SVO_LIGHT_RECTANGLE_AREA;let sampleCount=select(1u,select(dry.tuningCounts1.x,dry.tuningCounts0.w,${SVO_DRY_SCENE_CAMERA_SETTLED_WGSL}),area);
+    for(var sampleIndex=0u;sampleIndex<${SVO_DRY_SCENE_AREA_LIGHT_SAMPLES}u;sampleIndex+=1u){
+      if(sampleIndex>=sampleCount||sampleBudget>=dry.tuningCounts0.z){break;}sampleBudget+=1u;let sample=dryLightSample(light,sampleIndex,position);if(sample.valid==0u||dot(opaque.normal,sample.towardLight)<=0.0){continue;}
+      let maximumDistance=select(directionalLightSceneExitDistance(position,sample.towardLight),sample.finiteDistance_m,sample.finiteDistance_m>0.0);
+      let rigidBlocked=anyBodyBlockerIgnoring(position,sample.towardLight,opaque.ownerId,maximumDistance);let raw=select(dryPrepassChannel(1u+lightIndex),0.0,rigidBlocked);let visibility=vec3f(mix(1.0,raw,dry.tuningRays0.y));
+      let lighting=unifiedLightingInputWithGeometry(opaque.normal,opaque.normal,-rd,sample.towardLight,sample.radiance*visibility/f32(sampleCount));direct+=shadeUnifiedSurface(closure,lighting);
+    }
+  }
+  let viewDirection=normalize(-rd);let reflected=reflect(rd,opaque.normal);let diffuseColor=surface.baseColor*(1.0-surface.metallic);let f0=mix(surface.specularF0*surface.specularWeight,surface.baseColor,surface.metallic);let environmentBrdf=unifiedEnvironmentBrdf(max(dot(opaque.normal,viewDirection),0.0),surface.roughness,f0);let diffuseEnergy=max(vec3f(0.0),vec3f(1.0)-environmentBrdf);
+  let diffuseVisibility=dryDiffuseMultiBounceVisibility(dryPrepassData0.x,diffuseColor);let diffuseEnvironment=diffuseColor*diffuseEnergy*svoEnvironmentDiffuseIrradiance(dryLighting.environment,opaque.normal)*diffuseVisibility/UNIFIED_PI;let specularEnvironment=dryEnvironment(reflected,surface.roughness)*environmentBrdf;
+  return dryHoverRim(max(surface.emissive+diffuseEnvironment+specularEnvironment+direct*dry.giLighting.w,vec3f(0.0)),opaque,viewDirection);
+}
 @fragment fn dryPrepassShadeMain(input:VertexOut)->@location(0) vec4f{
   let coordinate=vec2i(input.position.xy);let geometry=textureLoad(dryPrepassGeometryTexture,coordinate,0);
   if(geometry.x<=0.0){return vec4f(0.0);}
   let identity=textureLoad(dryPrepassIdentityTexture,coordinate,0).x;let metadata=u32(round(geometry.w));
   let opaque=DryHit(geometry.x,dryPrepassDecodeNormal(geometry.yz),identity&0xffffu,identity>>16u,metadata&15u,(metadata>>4u)&15u,(metadata>>8u)&3u,(metadata>>10u)&1u,0.0,vec3u(0u));
   let ndc=input.uv*2.0-1.0;let ro=uniforms.cameraPosition.xyz;let forward=normalize(uniforms.cameraTarget.xyz-ro);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));let rd=normalize(forward+right*ndc.x*uniforms.viewport.x/max(uniforms.viewport.y,1.0)*cameraTanHalfFov()+up*ndc.y*cameraTanHalfFov());
-  // GLOBAL stores a current-frame, world-space surface GI result. The full-rate
-  // consumer reconstructs it only across matching identity/depth/normal and
-  // publishes an explicit invalid marker when the requested derived page is
-  // unavailable. The full-rate consumer never substitutes an exact traversal.
-  if((dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.globalIllumination}u)!=0u){dryPrepassGiState=0u;let ignoredBodyOwner=select(DRY_OWNER_NONE,opaque.ownerId,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);let gi=dryGlobalIllumination(ro+rd*opaque.t,opaque.normal,ignoredBodyOwner);return vec4f(gi.radiance,select(-1.0,gi.visibility,gi.valid!=0u));}
   // Until GLOBAL data is ready, rigid opaque radiance remains exact at full
   // rate, so avoid doing an unusable complete material evaluation here.
   if(opaque.motionKind!=DRY_GBUFFER_MOTION_STATIC){return vec4f(0.0);}
   let packed=textureLoad(dryPrepassVisibilityKeyTexture,coordinate,0);let packedValid=!all(packed.xy==DRY_PREPASS_INVALID_PACKED);dryPrepassData0=dryPrepassUnpack0(packed);dryPrepassData1=dryPrepassUnpack1(packed);dryPrepassData2=dryPrepassUnpack2(packed);
-  dryPrepassState=select(0u,1u,packedValid);dryPrepassRadianceState=0u;if(!packedValid){dryDerivedPageFailure|=${SVO_DRY_DERIVED_FAILURE.reducedReconstruction}u;}dryCurrentLightSlot=0xffffffffu;dryVisibilityIgnoredOwner=DRY_OWNER_NONE;dryThickGlassEnabled=0u;
+  dryPrepassState=select(0u,1u,packedValid);dryPrepassRadianceState=0u;dryPrepassGiState=0u;if(!packedValid){dryDerivedPageFailure|=${SVO_DRY_DERIVED_FAILURE.reducedReconstruction}u;return vec4f(0.0,0.0,0.0,-1.0);}dryCurrentLightSlot=0xffffffffu;dryVisibilityIgnoredOwner=DRY_OWNER_NONE;dryThickGlassEnabled=0u;
+  // Full-res relight stores only the expensive GI closure and evaluates the
+  // material/direct/environment terms at every receiver. Reconstruction modes
+  // instead cache the complete reduced-rate radiance: seed the private GI
+  // closure first so shadeDryOpaque consumes this exact sample without tracing
+  // it a second time. Invalid samples carry a negative alpha and are rejected
+  // by the full-rate reconstruction, which then falls through to exact relight.
+  if((dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.globalIllumination}u)==0u){return vec4f(dryPrepassShadeNoGi(opaque,ro,rd),opaque.t);}
+  {let ignoredBodyOwner=select(DRY_OWNER_NONE,opaque.ownerId,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);let gi=dryGlobalIllumination(ro+rd*opaque.t,opaque.normal,ignoredBodyOwner);
+    if(dry.tuningCounts2.w==${SVO_CONE_RADIANCE_RECONSTRUCTION_CODES["wide-relight"]}u
+      ||dry.tuningCounts2.w==${SVO_CONE_RADIANCE_RECONSTRUCTION_CODES["full-res-relight"]}u){return vec4f(gi.radiance,select(-1.0,gi.visibility,gi.valid!=0u));}
+    if(gi.valid==0u){return vec4f(0.0,0.0,0.0,-1.0);}dryPrepassGi=vec4f(gi.radiance,gi.visibility);dryPrepassGiState=1u;
+  }
   return vec4f(shadeDryOpaque(opaque,ro,rd),opaque.t);
 }
 ` : "";
@@ -2963,11 +3614,19 @@ fn dryPrimarySeamHit(sample:DryPrimarySeamSample)->DryHit{
   if(opaque.t<DRY_MISS){let media=dryMediumPair(rd,opaque.normal,DRY_MEDIUM_OPAQUE);let rigidSurface=dryRigidMotionSurface(opaque,ro+rd*opaque.t);let motionVelocity=select(vec3f(0.0),rigidSurface.velocity_m_s,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);let motionGeneration=select(generation,rigidSurface.generation,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);let motionValid=select(opaque.motionValid,rigidSurface.valid,opaque.motionKind==DRY_GBUFFER_MOTION_RIGID);var flags=select(0u,SVO_GBUFFER_MOTION_VALID,motionValid!=0u)|svoGBufferProducerFlags(SVO_GBUFFER_PRODUCER_TRACED);if(opaque.featureId!=SVO_FEATURE_SMOOTH){flags|=DRY_GBUFFER_HARD_FEATURE;}let targets=svoGBufferSurface(vec3f(0.0),opaque.t,opaque.normal,opaque.normal,vec4u(dryResolvedMaterialId(opaque),opaque.ownerId,media.x,media.y),motionVelocity,opaque.motionKind,opaque.fieldSource,motionGeneration,flags,opaque.featureId);return drySplitVisibilityOut(targets,dryHardwareDepth(opaque.t,rd,forward));}
   return drySplitVisibilityOut(svoGBufferMiss(vec3f(0.0),0u,generation,DRY_GBUFFER_NO_INTERSECTION,svoGBufferProducerFlags(SVO_GBUFFER_PRODUCER_TRACED)),0.0);
 }
-@fragment fn dryLightingMain(input:VertexOut)->@location(0) vec4f{
+${reduced ? `@fragment fn dryReconstructedLightingMain(input:VertexOut)->@location(0) vec4f{
+  let coordinate=vec2i(input.position.xy);let geometry=drySplitGeometryAt(coordinate);if(!(geometry.w<DRY_MISS)){discard;}
+  let opaqueIdentity=drySplitIdentityAt(coordinate);let packedOpaqueMaterial=opaqueIdentity.x;${splitOpaqueMaterialDecodeWGSL}let metadata=opaqueIdentity.y;let opaque=DryHit(geometry.w,geometry.xyz,opaqueMaterial,metadata&0xffffu,(metadata>>16u)&15u,(metadata>>20u)&15u,(metadata>>24u)&3u,(metadata>>26u)&1u,0.0,vec3u(0u));
+  dryPrepassData0=vec4f(1.0);dryPrepassData1=vec4f(1.0);dryPrepassData2=vec4f(1.0);dryPrepassRadiance=vec4f(0.0);dryPrepassGi=vec4f(0.0,0.0,0.0,1.0);dryPrepassState=0u;dryPrepassRadianceState=0u;dryPrepassGiState=0u;dryPrepassExactEdgeState=0u;dryCurrentLightSlot=0xffffffffu;
+  if(dryNodeMipReady()){dryPrepassResolve(input.position.xy,opaque.t,opaque.normal,opaque);}if(dryPrepassRadianceState!=1u){discard;}
+  ${rasterGlassDiscovery ? "let glassKey=textureLoad(drySplitGlassKeyRead,coordinate,0).x;" : "let glassKey=(packedOpaqueMaterial>>16u)&0x1ffu;"}if(glassKey>0u){discard;}
+  let ndc=input.uv*2.0-1.0;let vignette=1.0-.14*dot(ndc*.58,ndc*.58);return vec4f(max(dryPrepassRadiance.rgb,vec3f(0.0))*vignette,opaque.t);
+}
+` : ""}@fragment fn dryLightingMain(input:VertexOut)->@location(0) vec4f{
   let ndc=input.uv*2.0-1.0;let ro=uniforms.cameraPosition.xyz;let forward=normalize(uniforms.cameraTarget.xyz-ro);let right=normalize(cross(forward,vec3f(0,1,0)));let up=normalize(cross(right,forward));let rd=normalize(forward+right*ndc.x*uniforms.viewport.x/max(uniforms.viewport.y,1.0)*cameraTanHalfFov()+up*ndc.y*cameraTanHalfFov());dryVisibilityIgnoredOwner=DRY_OWNER_NONE;dryThickGlassFailure=0u;dryThickGlassEnabled=0u;
   let coordinate=vec2i(input.position.xy);var geometry=drySplitGeometryAt(coordinate);var opaqueIdentity=drySplitIdentityAt(coordinate);if((dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.silhouetteRefinement}u)!=0u){let seam=dryPrimarySeamSample(coordinate);if(seam.valid!=0u){geometry=seam.geometry;opaqueIdentity=vec4u(seam.identity,0u,0u);}}var opaque=missHit();
   let packedOpaqueMaterial=opaqueIdentity.x;${splitOpaqueMaterialDecodeWGSL}if(geometry.w<DRY_MISS){let metadata=opaqueIdentity.y;opaque=DryHit(geometry.w,geometry.xyz,opaqueMaterial,metadata&0xffffu,(metadata>>16u)&15u,(metadata>>20u)&15u,(metadata>>24u)&3u,(metadata>>26u)&1u,0.0,vec3u(0u));}
-  ${prepassResolveCallWGSL}var glass=dryGlassMiss();${splitGlassKeyLoadWGSL}if(glassKey>0u){let recordIndex=glassKey-1u;if(recordIndex<dry.terrain.y){let record=dryGlassPane(recordIndex);let candidate=svoThinGlassIntersect(record,ro,rd,0.0,opaque.t,1e-6,record.extentIorEpsilon.w);if(candidate.valid!=0u){glass=DryGlassHit(candidate,recordIndex);}}}var color=shadeDryOpaque(opaque,ro,rd);var depth=opaque.t;let glassVisible=glass.hit.valid!=0u&&glass.hit.t_m<opaque.t;if(glassVisible){let glassSurface=shadeThinGlass(glass,opaque,ro,rd);color=glassSurface.color;depth=glassSurface.depth;}
+  ${prepassResolveCallWGSL}var glass=dryGlassMiss();${splitGlassKeyLoadWGSL}${reduced ? `if(dry.tuningCounts2.w!=${SVO_CONE_RADIANCE_RECONSTRUCTION_CODES["wide-relight"]}u&&dry.tuningCounts2.w!=${SVO_CONE_RADIANCE_RECONSTRUCTION_CODES["full-res-relight"]}u&&dryPrepassRadianceState==1u&&glassKey==0u){discard;}` : ""}if(glassKey>0u){let recordIndex=glassKey-1u;if(recordIndex<dry.terrain.y){let record=dryGlassPane(recordIndex);let candidate=svoThinGlassIntersect(record,ro,rd,0.0,opaque.t,1e-6,record.extentIorEpsilon.w);if(candidate.valid!=0u){glass=DryGlassHit(candidate,recordIndex);}}}var color=shadeDryOpaque(opaque,ro,rd);var depth=opaque.t;let glassVisible=glass.hit.valid!=0u&&glass.hit.t_m<opaque.t;if(glassVisible){let glassSurface=shadeThinGlass(glass,opaque,ro,rd);color=glassSurface.color;depth=glassSurface.depth;}
   let vignette=1.0-.14*dot(ndc*.58,ndc*.58);return vec4f(max(color*vignette,vec3f(0.0)),select(0.0,depth,depth<DRY_MISS));
 }
 @fragment fn drySkyLightingMain(input:VertexOut)->@location(0) vec4f{
@@ -3017,7 +3676,7 @@ fn dryPrepassStore(coordinate:vec2i,opaque:DryHit,ro:vec3f,rd:vec3f){if(!(opaque
   var primaryGeometry:array<vec4f,4>;var primaryIdentity:array<vec4u,4>;var allMiss=true;
   for(var sample=0u;sample<4u;sample+=1u){let sourceCoordinate=clamp(sampleBase+vec2i(i32(sample&1u),i32(sample>>1u)),vec2i(0),maximumCoordinate);primaryGeometry[sample]=drySplitGeometryAt(sourceCoordinate);primaryIdentity[sample]=drySplitIdentityAt(sourceCoordinate);allMiss=allMiss&&!(primaryGeometry[sample].w<DRY_MISS);}
   if(allMiss){dryPrepassStore(coordinate,missHit(),ray[0],ray[1]);return;}
-  let referenceGeometry=primaryGeometry[3];let referenceIdentity=primaryIdentity[3];var homogeneous=referenceGeometry.w<DRY_MISS;
+  var referenceGeometry=primaryGeometry[3];var referenceIdentity=primaryIdentity[3];var homogeneous=referenceGeometry.w<DRY_MISS;
   for(var sample=0u;sample<3u;sample+=1u){let geometry=primaryGeometry[sample];let hit=geometry.w<DRY_MISS;let sameIdentity=(primaryIdentity[sample].x&0x8000ffffu)==(referenceIdentity.x&0x8000ffffu)&&primaryIdentity[sample].y==referenceIdentity.y;let depthClose=abs(geometry.w-referenceGeometry.w)<=max(.0001,.01*referenceGeometry.w);let normalClose=dot(normalize(geometry.xyz),normalize(referenceGeometry.xyz))>=.9999;homogeneous=homogeneous&&hit&&sameIdentity&&depthClose&&normalClose;}
   if(!homogeneous){${inlineBoundaryWGSL}}
   let metadata=referenceIdentity.y;let packedMaterial=referenceIdentity.x;let material=select(packedMaterial&0xffffu,0x80000000u|(packedMaterial&0xffffu),(packedMaterial&0x80000000u)!=0u);let opaque=DryHit(referenceGeometry.w,normalize(referenceGeometry.xyz),material,metadata&0xffffu,(metadata>>16u)&15u,(metadata>>20u)&15u,(metadata>>24u)&3u,(metadata>>26u)&1u,0.0,vec3u(0u));dryPrepassStore(coordinate,opaque,ray[0],ray[1]);
@@ -3376,7 +4035,7 @@ fn dryPublicationWord(index:u32)->u32{return svoStructure[dry.structureOffsets.y
 // can fail closed. They are diagnostics, not scene colour output.
 var<private> dryDerivedPageFailure:u32=0u;
 
-${canonicalTraversalWGSL}${screenSpaceTraversalWGSL}
+${canonicalTraversalWGSL}${screenSpaceTraversalWGSL}${screenSpacePrimaryProxyWGSL}${tieredComputeResolveDeclarationsWGSL}
 ${wideTraversalWGSL}${compactTraversalWGSL}${brickOccupancyHelpersWGSL}
 ${liveLeafLifecycleWGSL}
 ${createSvoDryConeMarcherWGSL({ branchlessMorton: true, rangedDirectorySearch: true, fluidCoverage: true, directPageTable: true })}
@@ -3805,25 +4464,98 @@ fn traceLeafPayload(ro:vec3f,rd:vec3f,hit:SvoTraversalHit)->DryHit {
   ${primaryBrickSetupWGSL}
   let step=select(vec3i(-1),vec3i(1),rd>=vec3f(0.0)); let nextBoundary=bounds[0]+(vec3f(cell)+select(vec3f(0.0),vec3f(1.0),step>vec3i(0)))*extent;
   var nextT=select(vec3f(DRY_MISS),(nextBoundary-ro)/rd,abs(rd)>vec3f(1e-9)); let deltaT=select(vec3f(DRY_MISS),abs(extent/rd),abs(rd)>vec3f(1e-9));
-  let tolerance=length(extent)*1.05;
+  let tolerance=length(extent)*1.05;var upgrades=0u;
+  // The voxel is the accelerator and the authored surface is the authority.
+  //
+  // A solid voxel names its owning record, and the record's own exact
+  // intersection is then taken over just that interval, so what this returns is
+  // a point on the real analytic surface rather than a cell face. It is an upper
+  // bound on the true nearest hit and never a wrong one: every candidate it
+  // produces is a genuine surface of a genuine record, so a resolve seeded with
+  // it can only terminate earlier, never wrongly. That is the whole promotion —
+  // resolution independence is retained exactly where it is visible, and the
+  // search that finds the surface gets cheaper.
+  //
+  // What is upgraded is a *run* of consecutive cells naming the same owner, not
+  // a cell. The exact test is a first-hit march, so marching one owner once over
+  // the union of its cells' intervals returns exactly what marching each cell in
+  // DDA order returns — the intervals are contiguous and their padded union is
+  // the padded run — while paying one bounding-sphere clamp and one march ramp
+  // instead of k of them. Per-cell upgrades re-marched the same three-octave
+  // lattice field once per 25 mm of the same aggregate, and each one that
+  // *missed* paid the full 48-iteration ceiling to discover it: the miss is the
+  // expensive case, and a run collapses a run-length's worth of them into one.
+  //
+  // The budget therefore counts owners along the ray rather than voxels, which
+  // is what decouples it from crown accuracy — see
+  // SVO_DRY_VOXEL_OWNER_UPGRADES_PER_LEAF.
+  //
+  // Not the published voxel distance lane, and that is a measured choice rather
+  // than an omission. The field is 1-Lipschitz, so a surface point satisfies
+  // |p - c| >= d(c) and the only *sound* rejection is "the whole interval this
+  // call is given lies inside the ball of radius d(c)" — which, against an
+  // interval padded by 1.05 |extent| at both ends, needs d(c) above roughly two
+  // and a third cells. Censused over the hero's 82 975 solid scene voxels
+  // (tmp/w6-distance-census.ts): median -4.93 cells, p99 +1.11, max +1.70. Zero
+  // voxels clear the sound threshold; 2.1 % clear an unsound cell-local variant.
+  // A predicate that rejects nothing while adding a payload fetch per cell is a
+  // cost, and a cell-local one would be the quality dial again under a new name.
+  var runOwner=${DRY_UPGRADE_RUN_NONE}u;var runStart=0.0;var runEnd=0.0;
   for(var iteration=0u;iteration<32u;iteration+=1u){
     if(any(cell<vec3i(0))||any(cell>=vec3i(i32(dry.mapping.brickSize)))||entry>${primaryBrickExitWGSL}){break;}
     ${primaryMacroSkipWGSL}
+    let cellExit=min(min(nextT.x,nextT.y),min(nextT.z,${primaryBrickExitWGSL}));
+    var cellOwner=${DRY_UPGRADE_RUN_NONE}u;
     let payloadIndex=svoBrickVoxelIndex(hit.voxelOffset,vec3u(cell),dry.mapping.brickSize);
-    if(payloadIndex<arrayLength(&materialOwners)){
+    if(payloadIndex<arrayLength(&materialOwners)${voxelOwnerPrimary ? "" : "&&false"}){
       let identity=materialOwners[payloadIndex];let owner=identity>>16u;
-      // Live analytic geometry is authoritative in traceScenePrimitives. SVO
-      // owner payloads only accelerate non-analytic scene fields.
+      // Air is packMaterialOwner(0, SPARSE_BRICK_NO_OWNER); a brick that exists
+      // but was never voxelized is all zeroes. Both must miss, and the zero one
+      // would otherwise resolve to record zero in every empty cell of the scene.
+      if(identity!=0u&&owner!=${SPARSE_BRICK_NO_OWNER}u&&owner>=dry.metadata.y&&!dryOpaqueOwnerSuppressed(owner)){
+        let primitiveIndex=owner-dry.metadata.y;
+        if(primitiveIndex<dry.metadata.x){${screenSpaceVoxelResolveWGSL}cellOwner=primitiveIndex;}
+      }
+    }
+    if(${primaryUpgradeRunMergeWGSL}){runEnd=cellExit;}
+    else{
+      ${primaryUpgradeFlushWGSL}
+      // Nothing after an exhausted budget can produce a hit, and the DDA is not
+      // free: stop stepping rather than walking the rest of the brick for a
+      // decision that has already been made.
+      if(upgrades>=${primaryUpgradeBudget}u){break;}
+      runOwner=cellOwner;runStart=entry;runEnd=cellExit;
     }
     let advance=min(nextT.x,min(nextT.y,nextT.z)); if(nextT.x<=advance+1e-6){cell.x+=step.x;nextT.x+=deltaT.x;}if(nextT.y<=advance+1e-6){cell.y+=step.y;nextT.y+=deltaT.y;}if(nextT.z<=advance+1e-6){cell.z+=step.z;nextT.z+=deltaT.z;}entry=advance;
   }
+  ${primaryUpgradeFlushWGSL}
   return missHit();
 }
 ${macroHddaPrimaryWGSL}
 
+// The voxel-resolved surface first, the analytic set bounded by it second.
+//
+// Both tiers answer the same question and the frame keeps whichever is nearer,
+// so the order between them is free to choose — and it is not free to get
+// wrong. The analytic tier is one candidate-BVH walk whose node rejection is
+// dryBoundsInterval(..., tMin, best.t): seeded with DRY_MISS it descends every
+// box the ray touches anywhere along its whole length, which costs one interval
+// test per record standing behind the first surface and is exactly the term
+// that made this path scale with authored record count. Seeded with the voxel
+// hit it descends only the boxes in front of a surface already found.
+//
+// The image is unchanged by construction: the walk still reports the nearest
+// analytic hit that is nearer than the voxel one, and a walk that finds nothing
+// returns its own tMax sentinel, which the comparison below reads as "no nearer
+// analytic surface" rather than as a hit.
+//
+// Measured on the hero at 800x460, cone scale 0.5, all arms interleaved in one
+// process (serialized submit-to-fence): 292.5 -> 222.0 ms at 501 records and
+// 1564.4 -> 546.3 ms at 5 039. It is the single largest term in the 10x gap.
 fn traceStatic(ro:vec3f,rd:vec3f)->DryHit {
-  let live=traceScenePrimitives(ro,rd,0.0,DRY_MISS,DRY_OWNER_NONE);
-  if(dryPublicationWord(0u)==0u||(dryPublicationWord(1u)&REQUIRED_FIELDS)!=REQUIRED_FIELDS){return live;}
+  if(dryPublicationWord(0u)==0u||(dryPublicationWord(1u)&REQUIRED_FIELDS)!=REQUIRED_FIELDS){return traceScenePrimitives(ro,rd,0.0,DRY_MISS,DRY_OWNER_NONE);}
+  ${analyticPrimaryUnbounded ? "let seeded=traceScenePrimitives(ro,rd,0.0,DRY_MISS,DRY_OWNER_NONE);" : "let seeded=missHit();"}
+  var voxel=missHit();
   var minimum=0.0;
   let mapping=dryConfiguredMapping();
   let leafBudget=clamp(dry.tuningCounts0.x,1u,${SVO_PRIMARY_LEAF_VISIT_HARD_LIMIT}u);
@@ -3845,7 +4577,9 @@ fn traceStatic(ro:vec3f,rd:vec3f)->DryHit {
 
 
     let payloadHit=${primaryLeafTraceCallWGSL}(ro,rd,leaf);
-    if(payloadHit.t<live.t){return payloadHit;}
+    // Leaves partition space and are visited front to back, so the first payload
+    // hit is the nearest voxel-resolved surface and no later leaf can beat it.
+    if(payloadHit.t<seeded.t){voxel=payloadHit;break;}
 
     minimum=leaf.tExit+max(1e-5,length(dry.mapping.cellSize)*1e-3);
   }
@@ -3853,7 +4587,9 @@ fn traceStatic(ro:vec3f,rd:vec3f)->DryHit {
   // traversal exhaustion, not an empty scene. Keep that visible in the
   // existing failure heatmap instead of silently returning black.
   if(!traversalFinished){}
-  return live;
+  ${analyticPrimaryUnbounded
+    ? "if(voxel.t<seeded.t){return voxel;}return seeded;"
+    : "let live=traceScenePrimitives(ro,rd,0.0,voxel.t,DRY_OWNER_NONE);if(live.t<voxel.t){return live;}return voxel;"}
 }
 
 struct DryGlassHit{hit:SvoThinGlassHit,recordIndex:u32}
@@ -3939,23 +4675,59 @@ fn svoVisibilityNext(ray:SvoVisibilityRay,tMin_m:f32,remaining:SvoVisibilityBudg
     let body=bodies[bodyIndex];if(!bodyBoundingSphereVisible(ray.origin_m,ray.direction,body,tMin_m,bestT)){continue;}let shape=i32(round(body.halfSizeShape.w));if(shape>=2&&!bodyCandidateVisible(ray.origin_m,ray.direction,body,tMin_m,bestT)){continue;}let candidate=bodyHit(ray.origin_m,ray.direction,body);if(candidate.t>=tMin_m&&candidate.t<bestT){return dryVisibilityStep(SVO_VIS_STEP_HIT,nodeVisits,leafVisits,workItems,candidate.t);}
   }
 
-  let livePrimitive=traceScenePrimitives(ray.origin_m,ray.direction,tMin_m,bestT,dryVisibilityIgnoredOwner);
+  // The voxel-resolved tier first, the analytic set bounded by it second.
+  //
+  // The same reordering traceStatic took, on the path that kept the old order.
+  // Every shadow, AO and GI ray used to open with a candidate-BVH walk bounded
+  // only by its own tMax — for a shadow ray that is the whole distance to the
+  // light — so each one paid an interval test per record standing anywhere
+  // along it. That is the identical term that made the primary scale with
+  // authored record count, and the primary shedding it is what promoted this
+  // one to the largest remaining residual.
+  //
+  // Semantics are preserved rather than approximated. Both orders return the
+  // nearer of {analytic, voxel}; both let an analytic win fall through to the
+  // terrain and glass tail and both let a voxel win short-circuit it. What
+  // changes is only which tier supplies the other's bound. A walk that now runs
+  // past where the analytic hit used to stop it can only find a farther voxel,
+  // which the bounded analytic call then still beats.
+  //
+  // Exhaustion is the one place the reorder could have lost an answer, and it
+  // gains one instead. The old order discarded the analytic hit on every
+  // exhausted ray anyway (each exhausted return carries DRY_MISS), but a ray
+  // bounded by a near analytic surface often terminated before it could exhaust
+  // at all. So the walk reports how far it got, the analytic call is bounded by
+  // that reach, and a hit nearer than the reach is returned as a genuine HIT:
+  // nothing the unfinished walk could still find lies in front of it.
+${analyticVisibilityUnbounded ? "" : "  var voxelT=DRY_MISS;var walkExhausted=false;\n"}${analyticVisibilityUnbounded ? `  let livePrimitive=traceScenePrimitives(ray.origin_m,ray.direction,tMin_m,bestT,dryVisibilityIgnoredOwner);
   if(livePrimitive.t<bestT){bestT=livePrimitive.t;found=true;opaque=true;}
-
+` : ""}
   var cursor=max(tMin_m,0.0);var shadowContinuation:DryTraversalCursor;let initialShadowMapping=dryConfiguredMapping();dryTraversalCursorBegin(SvoRay(ray.origin_m,cursor,ray.direction,bestT),initialShadowMapping,&shadowContinuation);
   for(var leafAttempt=0u;leafAttempt<${SVO_VISIBILITY_LIMITS.leafVisits}u;leafAttempt+=1u){
-    if(cursor>=bestT){break;}if(leafVisits>=remaining.leafVisits||nodeVisits>=remaining.nodeVisits){return dryVisibilityStep(SVO_VIS_STEP_EXHAUSTED,nodeVisits,leafVisits,workItems,DRY_MISS);}
+    if(cursor>=bestT){break;}if(leafVisits>=remaining.leafVisits||nodeVisits>=remaining.nodeVisits){${visibilityExhaustedWGSL}}
     var shadowMapping=dryConfiguredMapping();shadowMapping.maxVisits=min(shadowMapping.maxVisits,remaining.nodeVisits-nodeVisits);
     let leaf=dryTraversalCursorNext(SvoRay(ray.origin_m,cursor,ray.direction,bestT),shadowMapping,&shadowContinuation);nodeVisits+=leaf.visits;
     if(leaf.status==SVO_STATUS_MISS){break;}
-    if(leaf.status==SVO_STATUS_WORK_EXHAUSTED||leaf.status==SVO_STATUS_STACK_OVERFLOW||leaf.status==SVO_STATUS_SOURCE_OVERFLOW){return dryVisibilityStep(SVO_VIS_STEP_EXHAUSTED,nodeVisits,leafVisits,workItems,DRY_MISS);}
+    if(leaf.status==SVO_STATUS_WORK_EXHAUSTED||leaf.status==SVO_STATUS_STACK_OVERFLOW||leaf.status==SVO_STATUS_SOURCE_OVERFLOW){${visibilityExhaustedWGSL}}
     if(leaf.status!=SVO_STATUS_HIT){dryVisibilityStepInvalidReason=3u;return dryVisibilityStep(SVO_VIS_STEP_INVALID,nodeVisits,leafVisits,workItems,DRY_MISS);}leafVisits+=1u;
     if(!dryLeafCurrent(leaf)){cursor=leaf.tExit+max(1e-5,length(dry.mapping.cellSize)*1e-3);continue;}
     let payloadRay=SvoVisibilityRay(ray.origin_m,bestT,ray.direction,ray.originBias_m);let payload=${shadowLeafTraceCallWGSL}(payloadRay,tMin_m,leaf,remaining.workItems-workItems);workItems+=payload.workItems;
-    if(payload.status==SVO_VIS_STEP_HIT){return dryVisibilityStep(SVO_VIS_STEP_HIT,nodeVisits,leafVisits,workItems,payload.t_m);}if(payload.status!=SVO_VIS_STEP_MISS){if(payload.status==SVO_VIS_STEP_INVALID){dryVisibilityStepInvalidReason=3u;}return dryVisibilityStep(payload.status,nodeVisits,leafVisits,workItems,payload.t_m);}
+    if(payload.status==SVO_VIS_STEP_HIT){${visibilityPayloadHitWGSL}}if(payload.status!=SVO_VIS_STEP_MISS){if(payload.status==SVO_VIS_STEP_INVALID){dryVisibilityStepInvalidReason=3u;}return dryVisibilityStep(payload.status,nodeVisits,leafVisits,workItems,payload.t_m);}
     cursor=leaf.tExit+max(1e-5,length(dry.mapping.cellSize)*1e-3);
   }
-  if(cursor<bestT&&leafVisits>=remaining.leafVisits){return dryVisibilityStep(SVO_VIS_STEP_EXHAUSTED,nodeVisits,leafVisits,workItems,DRY_MISS);}
+${analyticVisibilityUnbounded ? `  if(cursor<bestT&&leafVisits>=remaining.leafVisits){return dryVisibilityStep(SVO_VIS_STEP_EXHAUSTED,nodeVisits,leafVisits,workItems,DRY_MISS);}
+` : `  // Only when the walk produced no hit of its own: a payload hit leaves the
+  // cursor short of bestT by construction and is not an exhaustion.
+  if(voxelT>=DRY_MISS&&cursor<bestT&&leafVisits>=remaining.leafVisits){walkExhausted=true;}
+  // Anything an unfinished walk could still find lies at or beyond the cursor.
+  let analyticReach=select(min(bestT,voxelT),min(bestT,cursor),walkExhausted);
+${analyticVisibilityProbeOff
+  ? "  var livePrimitive=missHit();livePrimitive.t=analyticReach;"
+  : "  let livePrimitive=traceScenePrimitives(ray.origin_m,ray.direction,tMin_m,analyticReach,dryVisibilityIgnoredOwner);"}
+  if(livePrimitive.t<analyticReach){bestT=livePrimitive.t;found=true;opaque=true;}
+  else if(walkExhausted){return dryVisibilityStep(SVO_VIS_STEP_EXHAUSTED,nodeVisits,leafVisits,workItems,DRY_MISS);}
+  else if(voxelT<bestT){return dryVisibilityStep(SVO_VIS_STEP_HIT,nodeVisits,leafVisits,workItems,voxelT);}
+`}
 
   if(terrainEnabled()){
     let terrainWork=${SVO_TERRAIN_FALLBACK_STEPS + SVO_TERRAIN_FALLBACK_REFINEMENTS + 6}u;
@@ -4147,7 +4919,6 @@ fn shadeDryOpaque(hit:DryHit,ro:vec3f,rd:vec3f)->vec3f {
   var shaded=max(surface.emissive+diffuseEnvironment+specularEnvironment+direct*directScale+indirectDiffuse,vec3f(0.0));
   return dryHoverRim(shaded,hit,viewDirection);
 }
-
 struct DryGlassSurface{color:vec3f,depth:f32,materialId:u32,ownerId:u32,paneId:u32,_padding:u32}
 fn shadeThinGlass(glass:DryGlassHit,opaque:DryHit,ro:vec3f,rd:vec3f)->DryGlassSurface {
   let record=dryGlassPane(glass.recordIndex);let incidentIor=dryThinGlassIncidentIor();let optics=svoThinGlassOptics(record,glass.hit,incidentIor);
@@ -4437,11 +5208,49 @@ export const SVO_SCENE_PRIMITIVE_RASTER_CONTRACT = Object.freeze({
    * full-screen triangle instead, and that one is wound front-facing.
    */
   cullMode: SVO_BRICK_RASTER_CONTRACT.cullMode,
+  /**
+   * Fixed per-pixel conservative candidate arena for the authored SDF set.
+   *
+   * WGSL has no conservative depth (gpuweb#5342), so the direct fragment — which
+   * writes `frag_depth` *and* discards — lets the tiler reject nothing and every
+   * covering proxy marches. The hero framing puts a median of 7 proxies over a
+   * covered pixel, p99 33 and max 59; forty entries keep the overflow arm below
+   * one percent of covered pixels while capacity stays a performance parameter
+   * and never an image change. Deliberately larger than the brick arena's 24 and
+   * *not* built on its 32-entry u32 `visited` mask, which p99=33 already exceeds:
+   * candidates here carry their own ordering key and are walked by monotone
+   * extraction instead.
+   */
+  coverageCandidatesPerPixel: 40,
+  /**
+   * Candidate key = floored 16-bit entry distance over a 16-bit record index.
+   *
+   * Truncating the low half of a non-negative float's bit pattern is monotone
+   * and rounds *down*, so ordering by the packed word orders by a conservative
+   * lower bound on the ray's entry into the primitive's oriented box. That is
+   * exactly what front-to-back early termination needs: a candidate whose lower
+   * bound is already behind the best hit cannot produce a nearer one. Sixteen
+   * bits of index cap the arena at 65,536 authored records; past that the
+   * encode falls back to the historical direct pass rather than aliasing.
+   */
+  coverageIndexBits: 16,
   entryPoints: Object.freeze({
     vertex: "dryScenePrimitiveRasterVertex",
+    /** The same proxy, behind the near-field band's membership bit. */
+    bandVertex: "dryScenePrimitiveBandVertex",
     fragment: "dryScenePrimitiveRasterFragment",
+    coverage: "dryScenePrimitiveCoverageFragment",
+    resolve: "dryScenePrimitiveCoverageResolveFragment",
+    overflowResolve: "dryScenePrimitiveCoverageOverflowFragment",
   }),
 } as const);
+
+/** Records addressable by a coverage candidate key; beyond it the direct pass runs. */
+export const SVO_SCENE_PRIMITIVE_COVERAGE_MAXIMUM_RECORDS =
+  1 << SVO_SCENE_PRIMITIVE_RASTER_CONTRACT.coverageIndexBits;
+
+/** Below this pixel count, Metal's TBDR fragment resolve remains faster. */
+export const SVO_SCENE_PRIMITIVE_COMPUTE_MINIMUM_PIXELS = 1 << 20;
 
 interface SvoDrySplitPipelineBundle {
   readonly visibility: GPURenderPipeline;
@@ -4449,14 +5258,24 @@ interface SvoDrySplitPipelineBundle {
   /** Optional one-pixel primary coverage closure before the sky/surface partition. */
   readonly primarySeamClosure: GPURenderPipeline;
   readonly lighting: GPURenderPipeline;
+  readonly reconstructedLighting?: GPURenderPipeline;
   /** Complement of `lighting`: the pixels primary visibility left as a miss. */
   readonly skyLighting: GPURenderPipeline;
   readonly brickBackground?: GPURenderPipeline;
   readonly brickRaster?: GPURenderPipeline;
   readonly brickCoverage?: GPURenderPipeline;
   readonly brickCoverageResolve?: GPURenderPipeline;
+  readonly brickLodResolve?: GPURenderPipeline;
+  readonly brickExactResolve?: GPURenderPipeline;
   readonly brickCoverageOverflow?: GPURenderPipeline;
   readonly scenePrimitiveRaster?: GPURenderPipeline;
+  readonly scenePrimitiveCoverage?: GPURenderPipeline;
+  readonly scenePrimitiveLodResolve?: GPURenderPipeline;
+  readonly scenePrimitiveComputeArgs?: GPUComputePipeline;
+  readonly scenePrimitiveComputeResolve?: GPUComputePipeline;
+  readonly scenePrimitiveDepthBridge?: GPURenderPipeline;
+  readonly scenePrimitiveCoverageResolve?: GPURenderPipeline;
+  readonly scenePrimitiveCoverageOverflow?: GPURenderPipeline;
   readonly prepassReset?: GPUComputePipeline;
   readonly prepassCoherent?: GPUComputePipeline;
   readonly prepassBoundary?: GPUComputePipeline;
@@ -4486,6 +5305,7 @@ export class SparseVoxelDrySceneRenderer {
   private splitRasterRigidVisibilityPipeline?: GPURenderPipeline;
   private primarySeamClosurePipeline?: GPURenderPipeline;
   private splitLightingPipeline?: GPURenderPipeline;
+  private splitReconstructedLightingPipeline?: GPURenderPipeline;
   private splitSkyLightingPipeline?: GPURenderPipeline;
   private rasterGlassPipeline?: GPURenderPipeline;
   private rasterRigidPipeline?: GPURenderPipeline;
@@ -4561,28 +5381,90 @@ export class SparseVoxelDrySceneRenderer {
   private splitDiagnosticsActive = false;
   private rasterGlassFirstRecord = 0;
   private rasterGlassRecordCount = 0;
+  private rasterGlassPaneCount = 0;
   private rasterRigidActive: boolean;
   /** Raster-assisted primary visibility (traversal mode `raster-primary`). */
   private readonly rasterPrimary: boolean;
   /** Exact historical direct-fragment arm retained as a benchmark control. */
   private readonly rasterPrimaryDirect: boolean;
+  /** The same control for the scene-primitive arm, selectable on its own. */
+  private readonly scenePrimitiveDirect: boolean;
   private brickCullLayout?: GPUBindGroupLayout;
   private brickDrawLayout?: GPUBindGroupLayout;
   private brickCoverageLayout?: GPUBindGroupLayout;
+  private brickCoverageResolveLayout?: GPUBindGroupLayout;
+  private scenePrimitiveCoverageLayout?: GPUBindGroupLayout;
+  private scenePrimitiveComputeOutputLayout?: GPUBindGroupLayout;
+  private scenePrimitiveDepthBridgeLayout?: GPUBindGroupLayout;
   private brickResolveSceneLayout?: GPUBindGroupLayout;
   private brickCullBindGroup?: GPUBindGroup;
   private brickDrawBindGroup?: GPUBindGroup;
   private brickCoverageBindGroup?: GPUBindGroup;
+  private brickCoverageResolveBindGroup?: GPUBindGroup;
+  private scenePrimitiveCoverageBindGroup?: GPUBindGroup;
+  private scenePrimitiveComputeOutputBindGroup?: GPUBindGroup;
+  private scenePrimitiveDepthBridgeBindGroup?: GPUBindGroup;
   private brickResolveSceneBindGroup?: GPUBindGroup;
+  private scenePrimitiveComputeDepth?: GPUTexture;
+  private scenePrimitiveComputeDepthView?: GPUTextureView;
+  private scenePrimitiveComputeQueue?: GPUBuffer;
+  private scenePrimitiveComputeIndirect?: GPUBuffer;
   private brickEmitPipeline?: GPUComputePipeline;
   private brickScanPipeline?: GPUComputePipeline;
   private brickScatterPipeline?: GPUComputePipeline;
   private brickRasterPipeline?: GPURenderPipeline;
   private brickCoveragePipeline?: GPURenderPipeline;
   private brickCoverageResolvePipeline?: GPURenderPipeline;
+  private brickLodResolvePipeline?: GPURenderPipeline;
+  private brickExactResolvePipeline?: GPURenderPipeline;
   private brickCoverageOverflowPipeline?: GPURenderPipeline;
   private brickBackgroundPipeline?: GPURenderPipeline;
   private scenePrimitiveRasterPipeline?: GPURenderPipeline;
+  private scenePrimitiveCoveragePipeline?: GPURenderPipeline;
+  private scenePrimitiveLodResolvePipeline?: GPURenderPipeline;
+  private scenePrimitiveComputeArgsPipeline?: GPUComputePipeline;
+  private scenePrimitiveComputeResolvePipeline?: GPUComputePipeline;
+  private scenePrimitiveDepthBridgePipeline?: GPURenderPipeline;
+  private scenePrimitiveCoverageResolvePipeline?: GPURenderPipeline;
+  private scenePrimitiveCoverageOverflowPipeline?: GPURenderPipeline;
+  /** One-shot: an authored set past the candidate key's index width. */
+  private scenePrimitiveCoverageCapacityReported = false;
+  /**
+   * The near-field analytic band (`lib/svo-scene-primitive-band.ts`).
+   *
+   * Two compute dispatches per frame over the authored record set — never over
+   * pixels — plus one 64 KB state buffer that survives the frame so the
+   * hysteresis has a previous membership to be sticky about.
+   */
+  private bandComputeLayout?: GPUBindGroupLayout;
+  private bandReadLayout?: GPUBindGroupLayout;
+  private bandComputeBindGroup?: GPUBindGroup;
+  private bandReadBindGroup?: GPUBindGroup;
+  private bandClassifyPipeline?: GPUComputePipeline;
+  private bandResolvePipeline?: GPUComputePipeline;
+  private bandStateBuffer?: GPUBuffer;
+  private bandParamsBuffer?: GPUBuffer;
+  /**
+   * The overflow arm's indirect count.
+   *
+   * `scenePrimitiveOverflowPublicationBuffer` exists because the publisher reads
+   * its instance count from a storage buffer, and the authored-SDF arm's count
+   * is a host number that changes with every publication — baking it into the
+   * shader would mean recompiling the module per scene.
+   */
+  private coverageOverflowArgsLayout?: GPUBindGroupLayout;
+  private coverageOverflowIndirectBuffer?: GPUBuffer;
+  private coverageOverflowArgsPipeline?: GPUComputePipeline;
+  private brickOverflowArgsBindGroup?: GPUBindGroup;
+  private scenePrimitiveOverflowArgsBindGroup?: GPUBindGroup;
+  private scenePrimitiveOverflowPublicationBuffer?: GPUBuffer;
+  private coverageOverflowReported = false;
+  /** Sampled per-pixel arena pressure, and the one-frame-late read that reports it. */
+  private coverageAuditBuffer?: GPUBuffer;
+  private coverageAuditStaging?: GPUBuffer;
+  private coverageAuditCopied = false;
+  private coverageAuditReading = false;
+  private coverageAuditFrame = 0;
   private brickCandidateBuffer?: GPUBuffer;
   private brickInstanceBuffer?: GPUBuffer;
   private brickSortStateBuffer?: GPUBuffer;
@@ -4735,11 +5617,19 @@ export class SparseVoxelDrySceneRenderer {
     if (shadingPath !== "inline" && shadingPath !== "split") throw new RangeError(`Unsupported dry-scene shading path: ${shadingPath}`);
     if (rayCoherenceMode !== "off" && rayCoherenceMode !== "static-primary") throw new RangeError(`Unsupported dry-scene ray coherence mode: ${rayCoherenceMode}`);
     if (rayCoherenceMode === "static-primary" && shadingPath !== "split") throw new RangeError("Static-primary ray coherence requires split shading");
-    if (screenSpaceTerminationPixels > 0 && (traversalMode !== "canonical" || shadingPath !== "inline")) throw new RangeError("Diagnostic screen-space termination currently requires canonical inline traversal");
+    if (screenSpaceTerminationPixels > 0
+      && !((traversalMode === "canonical" && shadingPath === "inline")
+        || (traversalMode === "raster-primary" && shadingPath === "split"))) {
+      throw new RangeError("Screen-space termination requires canonical inline or raster-primary split traversal");
+    }
     this.rasterPrimary = traversalMode === "raster-primary";
     this.rasterPrimaryDirect = experiments.rasterPrimaryDirect === true
       || experiments.rasterPrimaryNoFragmentDepth === true
       || experiments.rasterPrimaryHsrProbe === true;
+    // The scene-primitive arm follows the brick arm's control switch unless it
+    // is selected on its own, so the existing `rasterPrimaryDirect` lane stays
+    // the fully historical raster-primary graph it has always been.
+    this.scenePrimitiveDirect = this.rasterPrimaryDirect || experiments.scenePrimitiveDirect === true;
     if (this.rasterPrimary) {
       if (!(shadingPath === "split" && rasterGlassDiscovery && rasterRigidDiscovery)) {
         throw new RangeError("Raster-primary traversal requires split shading with raster glass and rigid discovery");
@@ -4751,7 +5641,11 @@ export class SparseVoxelDrySceneRenderer {
         throw new RangeError(`Raster-primary traversal needs maxColorAttachmentBytesPerSample >= ${SVO_BRICK_RASTER_CONTRACT.colorAttachmentBytesPerSample}`);
       }
     }
-    this.rasterRigidActive = rasterRigidDiscovery;
+    // The thresholded graph deliberately removes bodies from its exact-only
+    // brick shader, so it keeps the independently depth-tested rigid arm. The
+    // threshold-zero coverage resolve still folds the small analytic loop.
+    this.rasterRigidActive = rasterRigidDiscovery
+      && (!(this.rasterPrimary && !this.rasterPrimaryDirect) || this.screenSpaceTerminationPixels > 0);
     this.paramsBuffer = device.createBuffer({ label: "Sparse voxel dry scene parameters", size: SVO_DRY_SCENE_PARAMS_LAYOUT.sizeBytes, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.sceneArenaBuffer = device.createBuffer({
       label: "Live authored scene arena (materials, primitives/BVH, thin glass, terrain)",
@@ -4762,6 +5656,41 @@ export class SparseVoxelDrySceneRenderer {
     this.rigidMotionUniformBuffer = device.createBuffer({ label: "Sparse voxel rigid motion uniform mirror", size: SVO_DRY_RIGID_MOTION_UNIFORM_BYTES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.thickGlassUniformBuffer = device.createBuffer({ label: "Sparse voxel thick-glass uniform binder", size: SVO_DRY_THICK_GLASS_ARENA_LAYOUT.sizeBytes, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.rasterGlassParamsBuffer = device.createBuffer({ label: "Sparse voxel raster-glass parameters", size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    if (this.rasterPrimary) {
+      // Viewport-independent by construction: the band is per authored record,
+      // not per pixel, so it survives every resize the coverage arena does not.
+      this.bandStateBuffer = device.createBuffer({
+        label: "Sparse voxel near-field analytic band state",
+        size: SVO_SCENE_PRIMITIVE_BAND_STATE_BYTES,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
+      });
+      this.bandParamsBuffer = device.createBuffer({
+        label: "Sparse voxel near-field analytic band controls",
+        size: SVO_SCENE_PRIMITIVE_BAND_PARAMS_BYTES,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+      });
+      this.coverageAuditBuffer = device.createBuffer({
+        label: "Sparse voxel scene-primitive coverage arena audit",
+        size: SVO_SCENE_PRIMITIVE_COVERAGE_AUDIT_BYTES,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
+      });
+      this.coverageAuditStaging = device.createBuffer({
+        label: "Sparse voxel scene-primitive coverage audit readback",
+        size: SVO_SCENE_PRIMITIVE_COVERAGE_AUDIT_BYTES,
+        usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+      });
+      this.scenePrimitiveOverflowPublicationBuffer = device.createBuffer({
+        label: "Sparse voxel scene-primitive overflow instance publication",
+        size: 32,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+      });
+      this.coverageOverflowIndirectBuffer = device.createBuffer({
+        label: "Sparse voxel coverage overflow draw arguments",
+        size: SVO_DRAW_INDIRECT_ARGS_BYTES,
+        usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST,
+      });
+      this.writeBandParams();
+    }
     if (coneFanout) {
       this.coneFanoutFrameBuffer = device.createBuffer({
         label: "Sparse voxel cone fan-out frame",
@@ -4927,6 +5856,7 @@ export class SparseVoxelDrySceneRenderer {
     this.splitRasterRigidVisibilityPipeline = bundle.rasterRigidVisibility;
     this.primarySeamClosurePipeline = bundle.primarySeamClosure;
     this.splitLightingPipeline = bundle.lighting;
+    this.splitReconstructedLightingPipeline = bundle.reconstructedLighting;
     this.splitSkyLightingPipeline = bundle.skyLighting;
     this.conePrepassResetPipeline = bundle.prepassReset;
     this.conePrepassCoherentPipeline = bundle.prepassCoherent;
@@ -4939,8 +5869,17 @@ export class SparseVoxelDrySceneRenderer {
     this.brickRasterPipeline = bundle.brickRaster;
     this.brickCoveragePipeline = bundle.brickCoverage;
     this.brickCoverageResolvePipeline = bundle.brickCoverageResolve;
+    this.brickLodResolvePipeline = bundle.brickLodResolve;
+    this.brickExactResolvePipeline = bundle.brickExactResolve;
     this.brickCoverageOverflowPipeline = bundle.brickCoverageOverflow;
     this.scenePrimitiveRasterPipeline = bundle.scenePrimitiveRaster;
+    this.scenePrimitiveCoveragePipeline = bundle.scenePrimitiveCoverage;
+    this.scenePrimitiveLodResolvePipeline = bundle.scenePrimitiveLodResolve;
+    this.scenePrimitiveComputeArgsPipeline = bundle.scenePrimitiveComputeArgs;
+    this.scenePrimitiveComputeResolvePipeline = bundle.scenePrimitiveComputeResolve;
+    this.scenePrimitiveDepthBridgePipeline = bundle.scenePrimitiveDepthBridge;
+    this.scenePrimitiveCoverageResolvePipeline = bundle.scenePrimitiveCoverageResolve;
+    this.scenePrimitiveCoverageOverflowPipeline = bundle.scenePrimitiveCoverageOverflow;
     this.splitPipelineScale = scale;
     if (this.requestedBundleFailure?.scale === scale) this.requestedBundleFailure = undefined;
     this.requestedBundleResourceFailure = undefined;
@@ -4970,13 +5909,17 @@ export class SparseVoxelDrySceneRenderer {
         this.writeParams(this.source, this.scene);
       }
     }
-    // Raster-primary has no analytic body loop to fall back to: its background
-    // pass traces terrain only, so any body at all must come from the rigid
-    // impostors. A scene with no bodies needs no impostor pass, and leaving the
-    // raster path switched on there would forfeit stationary primary reuse
-    // below for nothing — which costs far more than the pass it would skip.
-    const active = svoDryRigidPrimaryStrategy(bodyCount, this.rasterRigidDiscovery) === "raster"
-      || (this.rasterPrimary && bodyCount > 0);
+    // The coverage resolve carries an analytic body loop of its own (W1's
+    // impostor fold), so raster-primary no longer needs the twelve-instance
+    // impostor pass to see a body at all — and dropping it is what releases
+    // stationary primary reuse, which is worth far more than the pass it
+    // replaces. The direct arm keeps the impostors: its background pass traces
+    // terrain only, so there a body can come from nowhere else.
+    const foldedIntoCoverageResolve = this.rasterPrimary && !this.rasterPrimaryDirect
+      && this.screenSpaceTerminationPixels === 0;
+    const active = !foldedIntoCoverageResolve
+      && (svoDryRigidPrimaryStrategy(bodyCount, this.rasterRigidDiscovery) === "raster"
+        || (this.rasterPrimary && bodyCount > 0));
     if (active === this.rasterRigidActive) return;
     this.rasterRigidActive = active;
     this.clearReusableFrame();
@@ -5086,11 +6029,74 @@ export class SparseVoxelDrySceneRenderer {
         label: "Sparse voxel conservative brick coverage bindings",
         entries: svoBrickRasterCoverageBindGroupLayoutEntries(),
       });
+      this.brickCoverageResolveLayout = this.device.createBindGroupLayout({
+        label: "Sparse voxel conservative brick resolve bindings",
+        entries: [...svoBrickRasterCoverageBindGroupLayoutEntries(), {
+          binding: SVO_BRICK_RASTER_CONTRACT.lodKeyBinding,
+          visibility: GPUShaderStage.FRAGMENT,
+          texture: { sampleType: "uint" },
+        }],
+      });
+      this.scenePrimitiveCoverageLayout = this.device.createBindGroupLayout({
+        label: "Sparse voxel scene-primitive occlusion coverage bindings",
+        entries: [...svoBrickRasterCoverageBindGroupLayoutEntries(), {
+          binding: SVO_BRICK_RASTER_CONTRACT.primaryGeometryBinding,
+          visibility: GPUShaderStage.FRAGMENT,
+          texture: { sampleType: "unfilterable-float" },
+        }, {
+          binding: SVO_BRICK_RASTER_CONTRACT.primaryIdentityBinding,
+          visibility: GPUShaderStage.FRAGMENT,
+          texture: { sampleType: "uint" },
+        }],
+      });
       const resolveBindings = new Set([0, 1, 2, 3, 4, 9, 14, 15]);
       this.brickResolveSceneLayout = this.device.createBindGroupLayout({
         label: "Sparse voxel conservative brick resolve scene bindings",
           entries: sparseVoxelDrySceneBindGroupLayoutEntries(this.traversalMode).filter((entry) => resolveBindings.has(entry.binding)),
       });
+      this.bandComputeLayout = this.device.createBindGroupLayout({
+        label: "Sparse voxel near-field band selection bindings",
+        entries: svoScenePrimitiveBandComputeBindGroupLayoutEntries(),
+      });
+      this.bandReadLayout = this.device.createBindGroupLayout({
+        label: "Sparse voxel near-field band membership binding",
+        entries: [
+          ...svoScenePrimitiveBandReadBindGroupLayoutEntries(),
+          ...(this.screenSpaceTerminationPixels > 0
+            ? [{ binding: 8, visibility: GPUShaderStage.FRAGMENT | GPUShaderStage.COMPUTE,
+              buffer: { type: "storage" as const } }]
+            : []),
+        ],
+      });
+      this.coverageOverflowArgsLayout = this.device.createBindGroupLayout({
+        label: "Sparse voxel coverage overflow draw-args bindings",
+        entries: svoRasterCoverageOverflowArgsBindGroupLayoutEntries(),
+      });
+      // One module for both arms: the brick proxy and the authored-SDF proxy are
+      // the same thirty-six vertices, and the instance count each arm publishes
+      // comes from its own publication buffer rather than from the shader.
+      const overflowArgsModule = await checkedModule(this.device, "Sparse voxel coverage overflow draw args",
+        createSvoRasterCoverageOverflowArgsWGSL({
+          verticesPerInstance: SVO_SCENE_PRIMITIVE_RASTER_CONTRACT.verticesPerProxy,
+        }));
+      this.coverageOverflowArgsPipeline = await this.device.createComputePipelineAsync({
+        label: "Sparse voxel coverage overflow draw args",
+        layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.coverageOverflowArgsLayout] }),
+        compute: { module: overflowArgsModule, entryPoint: SVO_RASTER_COVERAGE_OVERFLOW_CONTRACT.entryPoints.publishArgs },
+      });
+      const bandModule = await checkedModule(this.device, "Sparse voxel near-field analytic band",
+        createSvoScenePrimitiveBandWGSL({
+          primitiveWordOffset: SVO_DRY_SCENE_ARENA_LAYOUT.primitiveOffsetBytes / 4,
+        }));
+      const bandLayout = this.device.createPipelineLayout({ bindGroupLayouts: [this.bandComputeLayout] });
+      [this.bandClassifyPipeline, this.bandResolvePipeline] = await Promise.all(
+        ([SVO_SCENE_PRIMITIVE_BAND_CONTRACT.entryPoints.classify,
+          SVO_SCENE_PRIMITIVE_BAND_CONTRACT.entryPoints.resolve] as const).map((entryPoint) =>
+          this.device.createComputePipelineAsync({
+            label: `Sparse voxel near-field band ${entryPoint}`,
+            layout: bandLayout,
+            compute: { module: bandModule, entryPoint },
+          })));
       const module = await checkedModule(this.device, "Sparse voxel brick instance emission",
         createSvoBrickRasterCullWGSL({ reversedZNear_m: SVO_DRY_SCENE_REVERSED_Z_NEAR_M }));
       const layout = this.device.createPipelineLayout({ bindGroupLayouts: [this.brickCullLayout] });
@@ -5135,6 +6141,8 @@ export class SparseVoxelDrySceneRenderer {
     this.brickCullBindGroup = undefined;
     this.brickDrawBindGroup = undefined;
     this.brickCoverageBindGroup = undefined;
+    this.brickCoverageResolveBindGroup = undefined;
+    this.scenePrimitiveCoverageBindGroup = undefined;
   }
 
   /** Per-pixel conservative candidate storage; controls bind one dummy lane. */
@@ -5142,23 +6150,73 @@ export class SparseVoxelDrySceneRenderer {
     if (!this.rasterPrimary || !this.targetWidth || !this.targetHeight) return;
     const width = this.rasterPrimaryDirect ? 1 : this.targetWidth;
     const height = this.rasterPrimaryDirect ? 1 : this.targetHeight;
+    const tieredCompute = this.screenSpaceTerminationPixels > 0
+      && this.device.limits.maxStorageTexturesPerShaderStage >= 5;
     if (this.brickCoverageCountBuffer && this.brickCoverageCandidateBuffer
+      && (!tieredCompute || (this.scenePrimitiveComputeQueue && this.scenePrimitiveComputeIndirect))
       && this.brickCoverageWidth === width && this.brickCoverageHeight === height) return;
     this.brickCoverageCountBuffer?.destroy();
     this.brickCoverageCandidateBuffer?.destroy();
+    this.scenePrimitiveComputeQueue?.destroy();
+    this.scenePrimitiveComputeIndirect?.destroy();
+    // One word per pixel, plus the eight-word tail: the overflow flag the
+    // coverage fragments raise and the draw args the overflow pass draws from.
+    // The draw args are staged out of here into their own indirect-only buffer
+    // before each overflow pass: the overflow fragment binds this buffer as
+    // writable storage to read its own pixel's count, and WebGPU forbids a
+    // buffer being writable storage and the indirect source inside one pass.
     this.brickCoverageCountBuffer = this.device.createBuffer({
-      label: "Sparse voxel conservative brick coverage counts",
-      size: svoBrickRasterCoverageCountBytes(width, height),
-      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+      label: "Sparse voxel conservative coverage counts",
+      size: svoRasterCoverageCountAllocationBytes(width, height),
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
     });
+    // One arena for both coverage passes plus the seed tail between them; the
+    // brick pass strides by its own 24 inside the wider scene-primitive
+    // allocation. At 1600x1240 that is 1,984,000 px x (40+1) x 4 B = 325.4 MB,
+    // against 190.5 MB for the brick arena alone — a second arena for the SDF
+    // set would have cost 317 MB on top of it instead.
+    const arenaBytes = svoRasterCoverageArenaBytes(width, height,
+      SVO_SCENE_PRIMITIVE_RASTER_CONTRACT.coverageCandidatesPerPixel);
+    // This allocation is the renderer's largest and it grows with the square of
+    // the viewport. Left alone it fails as a Dawn validation error inside a bind
+    // group several calls later, which is the "silent memory pressure" row of
+    // the capacity audit; name it here instead, with the number.
+    const arenaLimit = Math.min(this.device.limits.maxStorageBufferBindingSize, this.device.limits.maxBufferSize);
+    if (arenaBytes > arenaLimit) {
+      throw new RangeError(`Conservative coverage arena needs ${arenaBytes} B at ${width}x${height} `
+        + `(${SVO_SCENE_PRIMITIVE_RASTER_CONTRACT.coverageCandidatesPerPixel} candidates per pixel plus the primary `
+        + `depth seed) and the device grants ${arenaLimit} B`);
+    }
     this.brickCoverageCandidateBuffer = this.device.createBuffer({
-      label: "Sparse voxel conservative brick coverage candidates",
-      size: svoBrickRasterCoverageCandidateBytes(width, height),
-      usage: GPUBufferUsage.STORAGE,
+      label: "Sparse voxel conservative coverage candidate arena",
+      size: arenaBytes,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
     });
+    if (tieredCompute) {
+      // Four atomic header words followed by one packed coordinate per pixel.
+      // Dispatch arguments are copied to a distinct buffer because the queue is
+      // writable storage in the resolve pass and WebGPU forbids aliasing that
+      // same buffer as an indirect source in the pass.
+      this.scenePrimitiveComputeQueue = this.device.createBuffer({
+        label: "Sparse voxel tiered scene-primitive exact-pixel queue",
+        size: 4 * Uint32Array.BYTES_PER_ELEMENT + width * height * Uint32Array.BYTES_PER_ELEMENT,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
+      });
+      this.scenePrimitiveComputeIndirect = this.device.createBuffer({
+        label: "Sparse voxel tiered scene-primitive indirect dispatch",
+        size: 3 * Uint32Array.BYTES_PER_ELEMENT,
+        usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST,
+      });
+    } else {
+      this.scenePrimitiveComputeQueue = undefined;
+      this.scenePrimitiveComputeIndirect = undefined;
+    }
     this.brickCoverageWidth = width;
     this.brickCoverageHeight = height;
     this.brickCoverageBindGroup = undefined;
+    this.brickCoverageResolveBindGroup = undefined;
+    this.scenePrimitiveCoverageBindGroup = undefined;
+    this.scenePrimitiveComputeOutputBindGroup = undefined;
   }
 
   /**
@@ -5210,9 +6268,11 @@ export class SparseVoxelDrySceneRenderer {
   private rebuildBrickRasterBindGroups(): void {
     const structural = this.source?.structural;
     if (!this.rasterPrimary || !structural || !this.brickCullLayout || !this.brickDrawLayout
-      || !this.brickCoverageLayout || !this.brickResolveSceneLayout
+      || !this.brickCoverageLayout || !this.brickCoverageResolveLayout || !this.scenePrimitiveCoverageLayout
+      || !this.brickResolveSceneLayout
       || !this.brickCandidateBuffer || !this.brickInstanceBuffer || !this.brickSortStateBuffer
-      || !this.brickCoverageCountBuffer || !this.brickCoverageCandidateBuffer) return;
+      || !this.brickCoverageCountBuffer || !this.brickCoverageCandidateBuffer
+      || !this.splitGlassKeyView || !this.splitGeometryView || !this.splitOpaqueIdentityView) return;
     const { bindings } = SVO_BRICK_RASTER_CONTRACT;
     this.brickCullBindGroup = this.device.createBindGroup({
       label: "Sparse voxel brick instance emission binding",
@@ -5241,6 +6301,74 @@ export class SparseVoxelDrySceneRenderer {
         { binding: SVO_BRICK_RASTER_CONTRACT.coverageCandidateBinding, resource: { buffer: this.brickCoverageCandidateBuffer } },
       ],
     });
+    this.brickCoverageResolveBindGroup = this.device.createBindGroup({
+      label: "Sparse voxel conservative brick resolve binding",
+      layout: this.brickCoverageResolveLayout,
+      entries: [
+        { binding: SVO_BRICK_RASTER_CONTRACT.instanceDrawBinding, resource: { buffer: this.brickInstanceBuffer, offset: this.brickInstanceOffsetBytes } },
+        { binding: SVO_BRICK_RASTER_CONTRACT.coverageCountBinding, resource: { buffer: this.brickCoverageCountBuffer } },
+        { binding: SVO_BRICK_RASTER_CONTRACT.coverageCandidateBinding, resource: { buffer: this.brickCoverageCandidateBuffer } },
+        { binding: SVO_BRICK_RASTER_CONTRACT.lodKeyBinding, resource: this.splitGlassKeyView },
+      ],
+    });
+    this.scenePrimitiveCoverageBindGroup = this.device.createBindGroup({
+      label: "Sparse voxel scene-primitive occlusion coverage binding",
+      layout: this.scenePrimitiveCoverageLayout,
+      entries: [
+        { binding: SVO_BRICK_RASTER_CONTRACT.instanceDrawBinding, resource: { buffer: this.brickInstanceBuffer, offset: this.brickInstanceOffsetBytes } },
+        { binding: SVO_BRICK_RASTER_CONTRACT.coverageCountBinding, resource: { buffer: this.brickCoverageCountBuffer } },
+        { binding: SVO_BRICK_RASTER_CONTRACT.coverageCandidateBinding, resource: { buffer: this.brickCoverageCandidateBuffer } },
+        { binding: SVO_BRICK_RASTER_CONTRACT.primaryGeometryBinding, resource: this.splitGeometryView! },
+        { binding: SVO_BRICK_RASTER_CONTRACT.primaryIdentityBinding, resource: this.splitOpaqueIdentityView! },
+      ],
+    });
+    if (this.bandComputeLayout && this.bandReadLayout && this.bandStateBuffer && this.bandParamsBuffer
+      && this.coverageAuditBuffer && (this.screenSpaceTerminationPixels === 0 || this.scenePrimitiveComputeQueue)) {
+      const band = SVO_SCENE_PRIMITIVE_BAND_CONTRACT.bindings;
+      this.bandComputeBindGroup = this.device.createBindGroup({
+        label: "Sparse voxel near-field band selection binding",
+        layout: this.bandComputeLayout,
+        entries: [
+          { binding: band.uniforms, resource: { buffer: this.uniformBuffer } },
+          // Mapping plus metadata: the projected voxel size needs the lattice's
+          // cell size, and the record loop needs the published record count.
+          { binding: band.params, resource: { buffer: this.paramsBuffer, offset: 0, size: SVO_BRICK_RASTER_CONTRACT.mappingBindingBytes + 16 } },
+          { binding: band.scene, resource: { buffer: this.sceneArenaBuffer } },
+          { binding: band.state, resource: { buffer: this.bandStateBuffer } },
+          { binding: band.band, resource: { buffer: this.bandParamsBuffer } },
+        ],
+      });
+      if (this.coverageOverflowArgsLayout && this.scenePrimitiveOverflowPublicationBuffer) {
+        const overflow = SVO_RASTER_COVERAGE_OVERFLOW_CONTRACT.bindings;
+        this.brickOverflowArgsBindGroup = this.device.createBindGroup({
+          label: "Sparse voxel brick overflow draw-args binding",
+          layout: this.coverageOverflowArgsLayout,
+          entries: [
+            { binding: overflow.publication, resource: { buffer: this.brickSortStateBuffer, offset: this.brickSortStateOffsetBytes } },
+            { binding: overflow.coverageCounts, resource: { buffer: this.brickCoverageCountBuffer } },
+          ],
+        });
+        this.scenePrimitiveOverflowArgsBindGroup = this.device.createBindGroup({
+          label: "Sparse voxel scene-primitive overflow draw-args binding",
+          layout: this.coverageOverflowArgsLayout,
+          entries: [
+            { binding: overflow.publication, resource: { buffer: this.scenePrimitiveOverflowPublicationBuffer } },
+            { binding: overflow.coverageCounts, resource: { buffer: this.brickCoverageCountBuffer } },
+          ],
+        });
+      }
+      this.bandReadBindGroup = this.device.createBindGroup({
+        label: "Sparse voxel near-field band membership binding",
+        layout: this.bandReadLayout,
+        entries: [
+          { binding: SVO_SCENE_PRIMITIVE_BAND_CONTRACT.readGroupBinding, resource: { buffer: this.bandStateBuffer } },
+          { binding: SVO_SCENE_PRIMITIVE_BAND_CONTRACT.auditGroupBinding, resource: { buffer: this.coverageAuditBuffer! } },
+          ...(this.screenSpaceTerminationPixels > 0
+            ? [{ binding: 8, resource: { buffer: this.scenePrimitiveComputeQueue! } }]
+            : []),
+        ],
+      });
+    }
     this.brickResolveSceneBindGroup = this.device.createBindGroup({
       label: "Sparse voxel conservative brick resolve scene binding",
       layout: this.brickResolveSceneLayout,
@@ -5291,6 +6419,407 @@ export class SparseVoxelDrySceneRenderer {
    * interval and those intervals are totally ordered, so the depth test alone
    * resolves visibility exactly regardless of submission order.
    */
+  /** The four depth-tested primary planes every raster-primary pass writes. */
+  private rasterPrimaryAttachments(
+    gBufferViews: SparseVoxelGBufferViews, loadOp: GPULoadOp,
+  ): GPURenderPassColorAttachment[] {
+    return [
+      { view: gBufferViews.packedSurface, clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp, storeOp: "store" },
+      { view: gBufferViews.identityMedia, clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp, storeOp: "store" },
+      { view: this.splitGeometryView!, clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp, storeOp: "store" },
+      { view: this.splitOpaqueIdentityView!, clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp, storeOp: "store" },
+    ];
+  }
+
+  /**
+   * The band's authored controls, mirrored into their own tiny uniform.
+   *
+   * Deliberately not folded into `SVO_DRY_SCENE_PARAMS_LAYOUT`: that uniform is
+   * exactly full at 576 bytes and two live tests pin its shape word for word,
+   * and the band's consumer is a standalone compute module that binds nothing
+   * else of it anyway.
+   */
+  /**
+   * The instance count the authored-SDF overflow arm draws when it draws at all.
+   *
+   * Word one, because that is where the brick arm's scan publishes its own
+   * culled count and one publisher module serves both.
+   */
+  /**
+   * Publish the overflow pass's draw args between an arm's resolve and its
+   * overflow draw. One workgroup, one lane, four words.
+   */
+  private encodeCoverageOverflowArgs(
+    encoder: GPUCommandEncoder, bindGroup: GPUBindGroup | undefined, label: string,
+  ): void {
+    if (!this.coverageOverflowArgsPipeline || !bindGroup || !this.coverageOverflowIndirectBuffer) return;
+    const pass = encoder.beginComputePass({ label });
+    pass.setPipeline(this.coverageOverflowArgsPipeline);
+    pass.setBindGroup(0, bindGroup);
+    pass.dispatchWorkgroups(1);
+    pass.end();
+    // Sixteen bytes out to a buffer whose only usage is INDIRECT. The overflow
+    // pass binds the count buffer as writable storage — it reads its own pixel's
+    // count — and a buffer may not be both writable storage and the indirect
+    // source within one render pass's usage scope.
+    encoder.copyBufferToBuffer(this.brickCoverageCountBuffer!,
+      svoRasterCoverageOverflowDrawArgsOffsetBytes(this.brickCoverageWidth, this.brickCoverageHeight),
+      this.coverageOverflowIndirectBuffer, 0, SVO_DRAW_INDIRECT_ARGS_BYTES);
+  }
+
+  private writeScenePrimitiveOverflowPublication(): void {
+    if (!this.scenePrimitiveOverflowPublicationBuffer) return;
+    const words = new Uint32Array(8);
+    words[SVO_RASTER_COVERAGE_OVERFLOW_CONTRACT.publicationInstanceCountWord] = this.primitiveCount;
+    this.device.queue.writeBuffer(this.scenePrimitiveOverflowPublicationBuffer, 0, words);
+  }
+
+  private writeBandParams(): void {
+    if (!this.bandParamsBuffer) return;
+    const tuning = this.renderTuning;
+    this.device.queue.writeBuffer(this.bandParamsBuffer, 0, packSvoScenePrimitiveBandParams({
+      enterPixels: tuning.nearFieldBandPixels,
+      exitPixels: tuning.nearFieldBandPixels * tuning.nearFieldBandHysteresis,
+      budgetRecords: tuning.nearFieldBandBudget,
+    }));
+    // With the band disabled every authored record is a member. Publish that
+    // fail-open state once when tuning changes, then omit the per-frame
+    // classify/resolve pair entirely. The record words deliberately survive
+    // frame clears because positive thresholds use them as hysteresis state.
+    if (tuning.nearFieldBandPixels === 0 && this.bandStateBuffer) {
+      const membership = new Uint32Array(SVO_SCENE_PRIMITIVE_BAND_CONTRACT.maximumRecords);
+      membership.fill(SVO_SCENE_PRIMITIVE_BAND_CONTRACT.memberBit);
+      const recordOffsetBytes = (SVO_SCENE_PRIMITIVE_BAND_CONTRACT.headerWords
+        + SVO_SCENE_PRIMITIVE_BAND_CONTRACT.buckets) * Uint32Array.BYTES_PER_ELEMENT;
+      this.device.queue.writeBuffer(this.bandStateBuffer, recordOffsetBytes, membership);
+    }
+  }
+
+  /** Whether the authored threshold currently removes any record from the analytic set. */
+  get nearFieldBandActive(): boolean {
+    return this.rasterPrimary && this.renderTuning.nearFieldBandPixels > 0
+      && Boolean(this.bandClassifyPipeline && this.bandResolvePipeline && this.bandComputeBindGroup);
+  }
+
+  /**
+   * Copies the band's header — cutoff bucket, candidates, admitted, highest
+   * occupied bucket — for a lane that needs to report the band's actual size.
+   *
+   * The band never changes what a pixel is allowed to be, only which pass
+   * resolves it, so its size is invisible in the image and this is the only way
+   * to see it move.
+   */
+  copyScenePrimitiveBandHeader(encoder: GPUCommandEncoder, target: GPUBuffer): boolean {
+    const bytes = SVO_SCENE_PRIMITIVE_BAND_CONTRACT.headerWords * Uint32Array.BYTES_PER_ELEMENT;
+    if (!this.bandStateBuffer || target.size < bytes) return false;
+    encoder.copyBufferToBuffer(this.bandStateBuffer, 0, target, 0, bytes);
+    return true;
+  }
+
+  /**
+   * Authored SDF records, on the brick raster's coverage/resolve/overflow shape.
+   *
+   * The historical direct arm survives here for two reasons and no others: it is
+   * the overflow fallback, and it is the control the coverage arm is measured
+   * against (`rasterPrimaryDirect`, and the `scenePrimitiveHsrProbe` experiment
+   * that drops its frag_depth to bracket what conservative depth would be worth
+   * if WGSL had it).
+   */
+  private encodeScenePrimitivePrimary(
+    encoder: GPUCommandEncoder,
+    gBufferViews: SparseVoxelGBufferViews,
+    usePrepass: boolean,
+    splitGroup: number,
+    tracePhase?: RenderPathTracePhase,
+  ): void {
+    const tieredComputeActive = this.screenSpaceTerminationPixels > 0
+      && this.targetWidth * this.targetHeight >= SVO_SCENE_PRIMITIVE_COMPUTE_MINIMUM_PIXELS;
+    const coverageReady = Boolean(this.scenePrimitiveCoveragePipeline
+      && this.scenePrimitiveCoverageResolvePipeline && this.scenePrimitiveCoverageOverflowPipeline
+      && (this.screenSpaceTerminationPixels === 0
+        || (this.scenePrimitiveLodResolvePipeline && this.scenePrimitiveCoverageBindGroup
+          && this.scenePrimitiveComputeArgsPipeline && this.scenePrimitiveComputeResolvePipeline
+          && this.scenePrimitiveDepthBridgePipeline && this.scenePrimitiveComputeQueue
+          && this.scenePrimitiveComputeIndirect
+          && this.scenePrimitiveComputeOutputBindGroup && this.scenePrimitiveDepthBridgeBindGroup))
+      && this.brickResolveSceneBindGroup && this.brickCoverageBindGroup
+      && this.brickCoverageCountBuffer && this.splitGlassKeyView
+      // The band's membership word is what the coverage vertex stage reads, so
+      // an unbuilt band is a reason to fall back to the exact direct pass rather
+      // than to draw a set nothing decided.
+      && this.bandReadBindGroup && this.bandComputeBindGroup
+      && this.bandClassifyPipeline && this.bandResolvePipeline);
+    // Sixteen bits of the candidate key address the record. Past that the key
+    // would alias one record onto another, so the arm degrades to the exact
+    // direct pass rather than drawing the wrong surface.
+    const addressable = this.primitiveCount <= SVO_SCENE_PRIMITIVE_COVERAGE_MAXIMUM_RECORDS;
+    if (!addressable && !this.scenePrimitiveCoverageCapacityReported) {
+      this.scenePrimitiveCoverageCapacityReported = true;
+      console.warn(`Sparse voxel scene-primitive coverage disabled: ${this.primitiveCount} records exceed the `
+        + `${SVO_SCENE_PRIMITIVE_COVERAGE_MAXIMUM_RECORDS}-record candidate key; the direct pass is drawing instead`);
+    }
+    if (this.scenePrimitiveDirect || !coverageReady || !addressable) {
+      const exactScene = encoder.beginRenderPass({
+        label: "Sparse voxel exact live-scene primitive visibility",
+        colorAttachments: this.rasterPrimaryAttachments(gBufferViews, "load"),
+        depthStencilAttachment: {
+          view: gBufferViews.hardwareDepth,
+          depthLoadOp: "load",
+          depthStoreOp: "store",
+        },
+      });
+      exactScene.setPipeline(this.scenePrimitiveRasterPipeline!);
+      exactScene.setBindGroup(0, this.bindGroup);
+      exactScene.draw(SVO_SCENE_PRIMITIVE_RASTER_CONTRACT.verticesPerProxy, this.primitiveCount);
+      exactScene.end();
+      tracePhase?.({ id: "svo-scene-primitive", label: "SVO exact live-scene primitive visibility" });
+      return;
+    }
+    if (this.primitiveCount < 1) return;
+    // The near-field band, before anything is drawn from it. Two dispatches over
+    // records — 79 workgroups at the acceptance scene's 5 039 — decide which
+    // records the two proxy passes below will even emit vertices for.
+    //
+    // The counters are cleared rather than accumulated, but the per-record state
+    // words are not: last frame's membership is this frame's hysteresis input,
+    // which is the whole reason the buffer outlives the frame.
+    const bandBindGroup = this.bandReadBindGroup;
+    if (this.nearFieldBandActive && this.bandClassifyPipeline && this.bandResolvePipeline
+      && this.bandComputeBindGroup && bandBindGroup) {
+      encoder.clearBuffer(this.bandStateBuffer!, 0, SVO_SCENE_PRIMITIVE_BAND_COUNTER_BYTES);
+      const band = encoder.beginComputePass({ label: "Sparse voxel near-field analytic band selection" });
+      band.setBindGroup(0, this.bandComputeBindGroup);
+      band.setPipeline(this.bandClassifyPipeline);
+      band.dispatchWorkgroups(Math.ceil(
+        Math.min(this.primitiveCount, SVO_SCENE_PRIMITIVE_BAND_CONTRACT.maximumRecords)
+        / SVO_SCENE_PRIMITIVE_BAND_CONTRACT.workgroupSize));
+      // One workgroup: the histogram is 256 words and the budget is a scan over
+      // it, so the resolve is a single group that then marks every record.
+      band.setPipeline(this.bandResolvePipeline);
+      band.dispatchWorkgroups(1);
+      band.end();
+      tracePhase?.({ id: "svo-band", label: "SVO near-field analytic band selection" });
+    }
+    // The brick arm is finished with the arena — its overflow pass has already
+    // read the counters — so both coverage passes share one allocation.
+    // Pixel range and the overflow flag, not the draw-args block: the publisher
+    // below rewrites the args every frame, and clearing them here would only
+    // hand the overflow pass a zero vertex count if the publisher ever failed.
+    encoder.clearBuffer(this.brickCoverageCountBuffer!, 0,
+      svoRasterCoverageCountAllocationBytes(this.brickCoverageWidth, this.brickCoverageHeight)
+      - SVO_RASTER_COVERAGE_OVERFLOW_CONTRACT.drawArgsWord * Uint32Array.BYTES_PER_ELEMENT);
+    encoder.clearBuffer(this.coverageAuditBuffer!);
+    if (tieredComputeActive) {
+      // Reset only the four-word queue header. Pixel storage is count-delimited.
+      encoder.clearBuffer(this.scenePrimitiveComputeQueue!, 0, 4 * Uint32Array.BYTES_PER_ELEMENT);
+      // The exact kernel writes only queued pixels, so clear last frame's depth
+      // before the full-screen depth-only bridge samples this scratch plane.
+      const clearTieredDepth = encoder.beginRenderPass({
+        label: "Sparse voxel tiered scene-primitive depth clear",
+        colorAttachments: [{
+          view: this.scenePrimitiveComputeDepthView!,
+          clearValue: { r: 0, g: 0, b: 0, a: 0 },
+          loadOp: "clear",
+          storeOp: "store",
+        }],
+      });
+      clearTieredDepth.end();
+    }
+    this.pollCoverageAudit();
+    const coverage = encoder.beginRenderPass({
+      label: "Sparse voxel conservative live-scene primitive coverage",
+      colorAttachments: [{
+        view: this.splitGlassKeyView!, clearValue: { r: 0, g: 0, b: 0, a: 0 },
+        loadOp: "clear", storeOp: this.screenSpaceTerminationPixels > 0 ? "store" : "discard",
+      }],
+      ...(this.screenSpaceTerminationPixels > 0 ? { depthStencilAttachment: {
+        view: this.splitGlassDepthView!,
+        depthClearValue: SVO_GBUFFER_RENDER_TARGET_CONTRACT.depthClearValue,
+        depthLoadOp: "clear" as const,
+        depthStoreOp: "store" as const,
+      } } : {}),
+    });
+    coverage.setPipeline(this.scenePrimitiveCoveragePipeline!);
+    coverage.setBindGroup(0, this.brickResolveSceneBindGroup!);
+    if (usePrepass) coverage.setBindGroup(1, this.conePrepassBindGroup!);
+    coverage.setBindGroup(splitGroup, this.screenSpaceTerminationPixels > 0
+      ? this.scenePrimitiveCoverageBindGroup! : this.brickCoverageBindGroup!);
+    coverage.setBindGroup(splitGroup + 1, bandBindGroup!);
+    coverage.draw(SVO_SCENE_PRIMITIVE_RASTER_CONTRACT.verticesPerProxy, this.primitiveCount);
+    coverage.end();
+
+    if (this.screenSpaceTerminationPixels > 0) {
+      const lod = encoder.beginRenderPass({
+        label: "Sparse voxel resident-record LOD resolve",
+        colorAttachments: this.rasterPrimaryAttachments(gBufferViews, "load"),
+        depthStencilAttachment: { view: gBufferViews.hardwareDepth, depthLoadOp: "load", depthStoreOp: "store" },
+      });
+      lod.setPipeline(this.scenePrimitiveLodResolvePipeline!);
+      lod.setBindGroup(0, this.brickResolveSceneBindGroup!);
+      if (usePrepass) lod.setBindGroup(1, this.conePrepassBindGroup!);
+      lod.setBindGroup(splitGroup, this.brickCoverageResolveBindGroup!);
+      lod.setBindGroup(splitGroup + 1, bandBindGroup!);
+      lod.draw(3);
+      lod.end();
+    }
+
+    if (tieredComputeActive) {
+      const args = encoder.beginComputePass({ label: "Sparse voxel tiered scene-primitive dispatch args" });
+      args.setPipeline(this.scenePrimitiveComputeArgsPipeline!);
+      args.setBindGroup(0, this.brickResolveSceneBindGroup!);
+      if (usePrepass) args.setBindGroup(1, this.conePrepassBindGroup!);
+      args.setBindGroup(splitGroup, this.brickCoverageBindGroup!);
+      args.setBindGroup(splitGroup + 1, this.scenePrimitiveComputeOutputBindGroup!);
+      args.dispatchWorkgroups(1);
+      args.end();
+      encoder.copyBufferToBuffer(this.scenePrimitiveComputeQueue!, 0,
+        this.scenePrimitiveComputeIndirect!, 0, 3 * Uint32Array.BYTES_PER_ELEMENT);
+      const resolve = encoder.beginComputePass({ label: "Sparse voxel tiered scene-primitive compute resolve" });
+      resolve.setPipeline(this.scenePrimitiveComputeResolvePipeline!);
+      resolve.setBindGroup(0, this.brickResolveSceneBindGroup!);
+      if (usePrepass) resolve.setBindGroup(1, this.conePrepassBindGroup!);
+      resolve.setBindGroup(splitGroup, this.brickCoverageBindGroup!);
+      resolve.setBindGroup(splitGroup + 1, this.scenePrimitiveComputeOutputBindGroup!);
+      resolve.dispatchWorkgroupsIndirect(this.scenePrimitiveComputeIndirect!, 0);
+      resolve.end();
+      const depthBridge = encoder.beginRenderPass({
+        label: "Sparse voxel tiered scene-primitive depth bridge",
+        colorAttachments: [],
+        depthStencilAttachment: { view: gBufferViews.hardwareDepth, depthLoadOp: "load", depthStoreOp: "store" },
+      });
+      depthBridge.setPipeline(this.scenePrimitiveDepthBridgePipeline!);
+      depthBridge.setBindGroup(0, this.scenePrimitiveDepthBridgeBindGroup!);
+      depthBridge.draw(3);
+      depthBridge.end();
+    } else {
+      const resolve = encoder.beginRenderPass({
+        label: "Sparse voxel conservative live-scene primitive resolve",
+        colorAttachments: this.rasterPrimaryAttachments(gBufferViews, "load"),
+        depthStencilAttachment: { view: gBufferViews.hardwareDepth, depthLoadOp: "load", depthStoreOp: "store" },
+      });
+      resolve.setPipeline(this.scenePrimitiveCoverageResolvePipeline!);
+      resolve.setBindGroup(0, this.brickResolveSceneBindGroup!);
+      if (usePrepass) resolve.setBindGroup(1, this.conePrepassBindGroup!);
+      resolve.setBindGroup(splitGroup, this.brickCoverageBindGroup!);
+      resolve.setBindGroup(splitGroup + 1, bandBindGroup!);
+      resolve.draw(3);
+      resolve.end();
+    }
+    if (this.screenSpaceTerminationPixels === 0) {
+      this.encodeCoverageOverflowArgs(encoder, this.scenePrimitiveOverflowArgsBindGroup,
+        "Sparse voxel scene-primitive overflow draw args");
+
+      const overflow = encoder.beginRenderPass({
+        label: "Sparse voxel conservative live-scene primitive overflow",
+        colorAttachments: this.rasterPrimaryAttachments(gBufferViews, "load"),
+        depthStencilAttachment: {
+          view: gBufferViews.hardwareDepth,
+          depthLoadOp: "load",
+          depthStoreOp: "store",
+        },
+      });
+      overflow.setPipeline(this.scenePrimitiveCoverageOverflowPipeline!);
+      overflow.setBindGroup(0, this.brickResolveSceneBindGroup!);
+      if (usePrepass) overflow.setBindGroup(1, this.conePrepassBindGroup!);
+      overflow.setBindGroup(splitGroup, this.brickCoverageBindGroup!);
+      overflow.setBindGroup(splitGroup + 1, bandBindGroup!);
+      overflow.drawIndirect(this.coverageOverflowIndirectBuffer!, 0);
+      overflow.end();
+    }
+    // One sampled snapshot a second, staged for the *next* encode to read: by
+    // then the caller has submitted this frame, so the map resolves against real
+    // numbers rather than an unsubmitted copy.
+    this.coverageAuditFrame += 1;
+    if (!this.coverageAuditCopied && !this.coverageAuditReading
+      && this.coverageAuditFrame % SVO_SCENE_PRIMITIVE_COVERAGE_AUDIT_PERIOD_FRAMES === 0
+      && this.coverageAuditStaging) {
+      encoder.copyBufferToBuffer(this.coverageAuditBuffer!, 0, this.coverageAuditStaging, 0,
+        SVO_SCENE_PRIMITIVE_COVERAGE_AUDIT_BYTES);
+      this.coverageAuditCopied = true;
+    }
+    tracePhase?.({ id: "svo-scene-primitive", label: "SVO exact live-scene primitive visibility" });
+  }
+
+  /**
+   * The arena-pressure tripwire.
+   *
+   * W1 gated at "overflow rate < 1 % of covered pixels" and measured 0.0 % at
+   * the hero's 501 records. It is still 0 % at 5 039 — but the busiest pixel is
+   * 37 of 40 at 8x, so a wider viewport or a closer camera crosses it, and the
+   * degrade is a second full re-march of every covering proxy on those pixels.
+   * Capacity remaining a performance parameter is the guarantee; nothing was
+   * reporting when the performance stopped being good.
+   *
+   * The rate is estimated from the sampled counters rather than from the exact
+   * tail word, because covered pixels are only counted on the sample and mixing
+   * an exact numerator with a sampled denominator would inflate it by the
+   * stride. `copyCoverageOverflowCount` exposes the exact number beside it.
+   */
+  private pollCoverageAudit(): void {
+    if (!this.coverageAuditCopied || this.coverageAuditReading || !this.coverageAuditStaging) return;
+    this.coverageAuditCopied = false;
+    this.coverageAuditReading = true;
+    const staging = this.coverageAuditStaging;
+    void staging.mapAsync(GPUMapMode.READ).then(() => {
+      const words = new Uint32Array(staging.getMappedRange().slice(0));
+      staging.unmap();
+      this.coverageAuditReading = false;
+      const audit = readSvoScenePrimitiveCoverageAudit(words);
+      this.lastCoverageAudit = audit;
+      const status = svoRasterCoverageOverflowStatus({
+        coveredPixels: audit.coveredPixels,
+        overflowPixels: audit.overflowedPixels,
+        candidatesPerPixel: SVO_SCENE_PRIMITIVE_RASTER_CONTRACT.coverageCandidatesPerPixel,
+        arm: "Sparse voxel scene-primitive",
+      });
+      if (status.state !== "over-budget") {
+        this.coverageOverflowReported = false;
+        return;
+      }
+      if (this.coverageOverflowReported) return;
+      this.coverageOverflowReported = true;
+      console.warn(`${status.message} (mean ${audit.meanCandidates.toFixed(1)} candidates, `
+        + `max ${audit.maximumCandidates}, 1-in-${audit.samplingStride} pixel sample of `
+        + `${this.primitiveCount} records)`);
+    }).catch(() => { this.coverageAuditReading = false; });
+  }
+
+  /**
+   * Exact count of pixels whose candidate list exceeded capacity last frame.
+   *
+   * One word rather than a width-by-height scan, which is what makes the rate
+   * cheap enough to report every frame. It is also the word the overflow pass's
+   * indirect instance count is derived from, so a non-zero reading is exactly
+   * the condition under which that pass draws at all.
+   */
+  copyCoverageOverflowCount(encoder: GPUCommandEncoder, target: GPUBuffer): boolean {
+    if (!this.brickCoverageCountBuffer || !this.brickCoverageWidth || !this.brickCoverageHeight) return false;
+    if (target.size < Uint32Array.BYTES_PER_ELEMENT) return false;
+    const offset = svoBrickRasterCoverageCountBytes(this.brickCoverageWidth, this.brickCoverageHeight)
+      + SVO_RASTER_COVERAGE_OVERFLOW_CONTRACT.overflowPixelWord * Uint32Array.BYTES_PER_ELEMENT;
+    encoder.copyBufferToBuffer(this.brickCoverageCountBuffer, offset, target, 0, Uint32Array.BYTES_PER_ELEMENT);
+    return true;
+  }
+
+  /** The brick cull's published sort state: draw args, candidate, culled, empty, resident. */
+  copyBrickSortState(encoder: GPUCommandEncoder, target: GPUBuffer): boolean {
+    if (!this.brickSortStateBuffer) return false;
+    const bytes = SVO_BRICK_RASTER_CONTRACT.sortStateHeaderWords * Uint32Array.BYTES_PER_ELEMENT;
+    if (target.size < bytes) return false;
+    encoder.copyBufferToBuffer(this.brickSortStateBuffer, this.brickSortStateOffsetBytes, target, 0, bytes);
+    return true;
+  }
+
+  /** The most recent sampled arena-pressure reading, if one has completed. */
+  lastCoverageAudit?: SvoScenePrimitiveCoverageAudit;
+
+  /** Copies the sampled arena-pressure counters for an offline lane. */
+  copyScenePrimitiveCoverageAudit(encoder: GPUCommandEncoder, target: GPUBuffer): boolean {
+    if (!this.coverageAuditBuffer || target.size < SVO_SCENE_PRIMITIVE_COVERAGE_AUDIT_BYTES) return false;
+    encoder.copyBufferToBuffer(this.coverageAuditBuffer, 0, target, 0, SVO_SCENE_PRIMITIVE_COVERAGE_AUDIT_BYTES);
+    return true;
+  }
+
   private encodeRasterPrimary(
     encoder: GPUCommandEncoder,
     gBufferViews: SparseVoxelGBufferViews,
@@ -5300,7 +6829,8 @@ export class SparseVoxelDrySceneRenderer {
   ): void {
     // Word zero is the constant indirect vertex count; everything after it is
     // per-frame state.
-    encoder.clearBuffer(this.brickSortStateBuffer!, this.brickSortStateOffsetBytes + Uint32Array.BYTES_PER_ELEMENT);
+    encoder.clearBuffer(this.brickSortStateBuffer!, this.brickSortStateOffsetBytes + Uint32Array.BYTES_PER_ELEMENT,
+      svoBrickRasterSortStateBytes() - Uint32Array.BYTES_PER_ELEMENT);
     const cull = encoder.beginComputePass({ label: "Sparse voxel brick instance cull" });
     cull.setBindGroup(0, this.brickCullBindGroup!);
     cull.setPipeline(this.brickEmitPipeline!);
@@ -5312,24 +6842,28 @@ export class SparseVoxelDrySceneRenderer {
     cull.end();
     tracePhase?.({ id: "svo-brick-cull", label: "SVO brick instance cull" });
 
-    const attachments = (loadOp: GPULoadOp): GPURenderPassColorAttachment[] => [
-      { view: gBufferViews.packedSurface, clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp, storeOp: "store" },
-      { view: gBufferViews.identityMedia, clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp, storeOp: "store" },
-      { view: this.splitGeometryView!, clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp, storeOp: "store" },
-      { view: this.splitOpaqueIdentityView!, clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp, storeOp: "store" },
-    ];
+    const attachments = (loadOp: GPULoadOp): GPURenderPassColorAttachment[] =>
+      this.rasterPrimaryAttachments(gBufferViews, loadOp);
     if (!this.rasterPrimaryDirect) {
       // Coverage is conservative and cheap: clear only counters, append the
       // sorted instance index for each proxy/pixel overlap, and stop before any
       // payload trace. Discard here only suppresses the overflow-mask colour
       // write; it follows the candidate append and precedes all expensive work.
-      encoder.clearBuffer(this.brickCoverageCountBuffer!);
+      encoder.clearBuffer(this.brickCoverageCountBuffer!, 0,
+        svoRasterCoverageCountAllocationBytes(this.brickCoverageWidth, this.brickCoverageHeight)
+        - SVO_RASTER_COVERAGE_OVERFLOW_CONTRACT.drawArgsWord * Uint32Array.BYTES_PER_ELEMENT);
       const coverage = encoder.beginRenderPass({
         label: "Sparse voxel primary conservative brick coverage",
         colorAttachments: [{
           view: this.splitGlassKeyView!, clearValue: { r: 0, g: 0, b: 0, a: 0 },
-          loadOp: "clear", storeOp: "discard",
+          loadOp: "clear", storeOp: this.screenSpaceTerminationPixels > 0 ? "store" : "discard",
         }],
+        ...(this.screenSpaceTerminationPixels > 0 ? { depthStencilAttachment: {
+          view: this.splitGlassDepthView!,
+          depthClearValue: SVO_GBUFFER_RENDER_TARGET_CONTRACT.depthClearValue,
+          depthLoadOp: "clear" as const,
+          depthStoreOp: "store" as const,
+        } } : {}),
       });
       coverage.setPipeline(this.brickCoveragePipeline!);
       coverage.setBindGroup(0, this.brickResolveSceneBindGroup!);
@@ -5338,28 +6872,77 @@ export class SparseVoxelDrySceneRenderer {
       coverage.drawIndirect(this.brickSortStateBuffer!, this.brickSortStateOffsetBytes);
       coverage.end();
 
-      // One expensive fragment per pixel resolves front-to-back candidates.
-      // It always writes an exact hit or miss and therefore never discards.
-      const resolve = encoder.beginRenderPass({
-        label: "Sparse voxel primary conservative coverage resolve",
-        colorAttachments: attachments("clear"),
-        depthStencilAttachment: {
-          view: gBufferViews.hardwareDepth,
-          depthClearValue: SVO_GBUFFER_RENDER_TARGET_CONTRACT.depthClearValue,
-          depthLoadOp: "clear",
-          depthStoreOp: "store",
-        },
-      });
-      resolve.setPipeline(this.brickCoverageResolvePipeline!);
-      resolve.setBindGroup(0, this.brickResolveSceneBindGroup!);
-      if (usePrepass) resolve.setBindGroup(1, this.conePrepassBindGroup!);
-      resolve.setBindGroup(splitGroup, this.brickCoverageBindGroup!);
-      resolve.draw(3);
-      resolve.end();
+      if (this.screenSpaceTerminationPixels > 0) {
+        // Establish the plane with the small terrain/sky entry point first.
+        // The next two draws load it and only touch their own classified pixels;
+        // in particular, the exact marcher is unreachable from the far LOD arm.
+        const background = encoder.beginRenderPass({
+          label: "Sparse voxel primary background and terrain",
+          colorAttachments: attachments("clear"),
+          depthStencilAttachment: {
+            view: gBufferViews.hardwareDepth,
+            depthClearValue: SVO_GBUFFER_RENDER_TARGET_CONTRACT.depthClearValue,
+            depthLoadOp: "clear",
+            depthStoreOp: "store",
+          },
+        });
+        background.setPipeline(this.brickBackgroundPipeline!);
+        background.setBindGroup(0, this.bindGroup);
+        if (usePrepass) background.setBindGroup(1, this.conePrepassBindGroup!);
+        background.draw(3);
+        background.end();
+
+        const lod = encoder.beginRenderPass({
+          label: "Sparse voxel primary resident-cell LOD resolve",
+          colorAttachments: attachments("load"),
+          depthStencilAttachment: { view: gBufferViews.hardwareDepth, depthLoadOp: "load", depthStoreOp: "store" },
+        });
+        lod.setPipeline(this.brickLodResolvePipeline!);
+        lod.setBindGroup(0, this.brickResolveSceneBindGroup!);
+        if (usePrepass) lod.setBindGroup(1, this.conePrepassBindGroup!);
+        lod.setBindGroup(splitGroup, this.brickCoverageResolveBindGroup!);
+        lod.draw(3);
+        lod.end();
+
+        const exact = encoder.beginRenderPass({
+          label: "Sparse voxel primary exact-only coverage resolve",
+          colorAttachments: attachments("load"),
+          depthStencilAttachment: { view: gBufferViews.hardwareDepth, depthLoadOp: "load", depthStoreOp: "store" },
+        });
+        exact.setPipeline(this.brickExactResolvePipeline!);
+        exact.setBindGroup(0, this.brickResolveSceneBindGroup!);
+        if (usePrepass) exact.setBindGroup(1, this.conePrepassBindGroup!);
+        exact.setBindGroup(splitGroup, this.brickCoverageBindGroup!);
+        exact.draw(3);
+        exact.end();
+      } else {
+        // Threshold-zero reference: one exact fragment per pixel resolves
+        // front-to-back candidates and publishes the scene-primitive seed.
+        const resolve = encoder.beginRenderPass({
+          label: "Sparse voxel primary conservative coverage resolve",
+          colorAttachments: attachments("clear"),
+          depthStencilAttachment: {
+            view: gBufferViews.hardwareDepth,
+            depthClearValue: SVO_GBUFFER_RENDER_TARGET_CONTRACT.depthClearValue,
+            depthLoadOp: "clear",
+            depthStoreOp: "store",
+          },
+        });
+        resolve.setPipeline(this.brickCoverageResolvePipeline!);
+        resolve.setBindGroup(0, this.brickResolveSceneBindGroup!);
+        if (usePrepass) resolve.setBindGroup(1, this.conePrepassBindGroup!);
+        resolve.setBindGroup(splitGroup, this.brickCoverageResolveBindGroup!);
+        resolve.draw(3);
+        resolve.end();
+      }
+      this.encodeCoverageOverflowArgs(encoder, this.brickOverflowArgsBindGroup,
+        "Sparse voxel brick overflow draw args");
 
       // Capacity never changes the image. Only pixels whose conservative list
       // overflowed re-run the historical direct brick fragment in this
       // isolated pipeline; garden's 24-entry arena exceeds the measured max=18.
+      // The draw is overflow-driven: with no overflowing pixel the published
+      // instance count is zero and the pass rasterizes nothing.
       const overflow = encoder.beginRenderPass({
         label: "Sparse voxel primary conservative coverage overflow",
         colorAttachments: attachments("load"),
@@ -5373,7 +6956,7 @@ export class SparseVoxelDrySceneRenderer {
       overflow.setBindGroup(0, this.brickResolveSceneBindGroup!);
       if (usePrepass) overflow.setBindGroup(1, this.conePrepassBindGroup!);
       overflow.setBindGroup(splitGroup, this.brickCoverageBindGroup!);
-      overflow.drawIndirect(this.brickSortStateBuffer!, this.brickSortStateOffsetBytes);
+      overflow.drawIndirect(this.coverageOverflowIndirectBuffer!, 0);
       overflow.end();
       return;
     }
@@ -5480,6 +7063,27 @@ export class SparseVoxelDrySceneRenderer {
           : []),
       ],
     });
+    if (this.rasterPrimary && this.screenSpaceTerminationPixels > 0
+      && this.device.limits.maxStorageTexturesPerShaderStage >= 5) {
+      this.scenePrimitiveComputeOutputLayout ??= this.device.createBindGroupLayout({
+        label: "Sparse voxel tiered compute resolve outputs",
+        entries: [
+          { binding: 0, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "depth" } },
+          { binding: 1, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: "write-only", format: SVO_GBUFFER_RENDER_TARGET_CONTRACT.packedSurfaceFormat } },
+          { binding: 2, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: "write-only", format: SVO_GBUFFER_RENDER_TARGET_CONTRACT.identityMediaFormat } },
+          { binding: 3, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: "write-only", format: SVO_DRY_SPLIT_GEOMETRY_FORMAT } },
+          { binding: 4, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: "write-only", format: SVO_DRY_SPLIT_IDENTITY_FORMAT } },
+          { binding: 5, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: "write-only", format: "r32float" } },
+          { binding: SVO_SCENE_PRIMITIVE_BAND_CONTRACT.readGroupBinding, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
+          { binding: SVO_SCENE_PRIMITIVE_BAND_CONTRACT.auditGroupBinding, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+          { binding: 8, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+        ],
+      });
+      this.scenePrimitiveDepthBridgeLayout ??= this.device.createBindGroupLayout({
+        label: "Sparse voxel tiered compute depth bridge",
+        entries: [{ binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "unfilterable-float" } }],
+      });
+    }
     const voxelLightCacheEnabled = this.experiments.voxelLightCache !== false
       && this.device.limits.maxSampledTexturesPerShaderStage >= 17;
     if (voxelLightCacheEnabled && !this.voxelLightConsumerLayout) {
@@ -5511,18 +7115,18 @@ export class SparseVoxelDrySceneRenderer {
     const compile = (async (): Promise<SvoDrySplitPipelineBundle> => {
       const [module, rasterRigidModule] = await Promise.all([
         checkedModule(this.device, `Sparse voxel dry scene split x${scale} (${this.traversalMode}, brick-${this.brickOccupancyMode})`,
-          createSvoDrySceneFragmentWGSL(scale, this.traversalMode, this.brickOccupancyMode, "split", 0, false,
+          createSvoDrySceneFragmentWGSL(scale, this.traversalMode, this.brickOccupancyMode, "split", this.screenSpaceTerminationPixels, false,
             this.rasterGlassDiscovery, false, this.coneFanout && scale !== 1, shaderExperiments)),
         this.rasterRigidDiscovery
           ? checkedModule(this.device, `Sparse voxel dry scene raster-rigid split x${scale} (${this.traversalMode}, brick-${this.brickOccupancyMode})`,
-            createSvoDrySceneFragmentWGSL(scale, this.traversalMode, this.brickOccupancyMode, "split", 0, false,
+            createSvoDrySceneFragmentWGSL(scale, this.traversalMode, this.brickOccupancyMode, "split", this.screenSpaceTerminationPixels, false,
               this.rasterGlassDiscovery, true, this.coneFanout && scale !== 1, shaderExperiments))
           : Promise.resolve(undefined),
       ]);
       const middleLayouts = scale === 1 ? [] : [this.conePrepassLayout!];
       const cacheConsumerLayouts = voxelLightCacheEnabled ? [this.voxelLightConsumerLayout!] : [];
       const visibilityLayout = this.device.createPipelineLayout({ bindGroupLayouts: [layout, ...middleLayouts, this.splitVisibilityLayout] });
-      const [visibility, rasterRigidVisibility, primarySeamClosure, lighting, skyLighting, prepassReset, prepassCoherent, prepassBoundary,
+      const [visibility, rasterRigidVisibility, primarySeamClosure, lighting, reconstructedLighting, skyLighting, prepassReset, prepassCoherent, prepassBoundary,
         worldGiFrame, worldGiCache, voxelLightDemand, voxelLightPopulate] = await Promise.all([
         this.device.createRenderPipelineAsync({
         label: `Sparse voxel primary visibility (${this.traversalMode}, brick-${this.brickOccupancyMode})`,
@@ -5588,6 +7192,18 @@ export class SparseVoxelDrySceneRenderer {
           depthCompare: "less",
         },
       }),
+      scale === 1 ? Promise.resolve(undefined) : this.device.createRenderPipelineAsync({
+        label: `Sparse voxel reconstructed dry lighting x${scale}`,
+        layout: this.device.createPipelineLayout({ bindGroupLayouts: [layout, ...middleLayouts, this.splitLightingLayout, ...cacheConsumerLayouts] }),
+        vertex: { module: vertexModule, entryPoint: "vertexMain" },
+        fragment: { module, entryPoint: "dryReconstructedLightingMain", targets: [{ format: SVO_GBUFFER_RENDER_TARGET_CONTRACT.externalRadianceDepthFormat }] },
+        primitive: { topology: "triangle-list" },
+        depthStencil: {
+          format: SVO_GBUFFER_RENDER_TARGET_CONTRACT.hardwareDepthFormat,
+          depthWriteEnabled: false,
+          depthCompare: "less",
+        },
+      }),
       this.device.createRenderPipelineAsync({
         label: `Sparse voxel deferred sky lighting x${scale}`,
         layout: this.device.createPipelineLayout({ bindGroupLayouts: [layout, ...middleLayouts, this.splitLightingLayout, ...cacheConsumerLayouts] }),
@@ -5640,8 +7256,24 @@ export class SparseVoxelDrySceneRenderer {
         compute: { module, entryPoint: "dryVoxelLightPopulateMain" },
       }) : Promise.resolve(undefined),
       ]);
+      const coverageLayouts = () => this.device.createPipelineLayout({
+        bindGroupLayouts: [this.brickResolveSceneLayout!, ...middleLayouts, this.brickCoverageLayout!],
+      });
+      // The scene-primitive arm carries one group more than the brick arm: the
+      // band's membership words, which its vertex stage reads and the brick
+      // proxies have no use for.
+      const bandedCoverageLayouts = () => this.device.createPipelineLayout({
+        bindGroupLayouts: [this.brickResolveSceneLayout!, ...middleLayouts, this.brickCoverageLayout!, this.bandReadLayout!],
+      });
+      const bandedCoverageResolveLayouts = () => this.device.createPipelineLayout({
+        bindGroupLayouts: [this.brickResolveSceneLayout!, ...middleLayouts, this.brickCoverageResolveLayout!, this.bandReadLayout!],
+      });
+      const bandedOcclusionCoverageLayouts = () => this.device.createPipelineLayout({
+        bindGroupLayouts: [this.brickResolveSceneLayout!, ...middleLayouts, this.scenePrimitiveCoverageLayout!, this.bandReadLayout!],
+      });
       const [brickBackground, brickRaster, brickCoverage, brickCoverageResolve,
-        brickCoverageOverflow, scenePrimitiveRaster] = this.rasterPrimary
+        brickLodResolve, brickExactResolve, brickCoverageOverflow, scenePrimitiveRaster,
+        scenePrimitiveCoverage, scenePrimitiveLodResolve, scenePrimitiveCoverageResolve, scenePrimitiveCoverageOverflow] = this.rasterPrimary
         ? await Promise.all([
           this.device.createRenderPipelineAsync({
             label: "Sparse voxel primary background and terrain",
@@ -5677,10 +7309,15 @@ export class SparseVoxelDrySceneRenderer {
             vertex: { module, entryPoint: SVO_BRICK_RASTER_CONTRACT.entryPoints.vertex },
             fragment: { module, entryPoint: SVO_BRICK_RASTER_CONTRACT.entryPoints.coverage, targets: [{ format: "r32uint" }] },
             primitive: { topology: "triangle-list", cullMode: SVO_BRICK_RASTER_CONTRACT.cullMode },
+            ...(this.screenSpaceTerminationPixels > 0 ? { depthStencil: {
+              format: SVO_GBUFFER_RENDER_TARGET_CONTRACT.hardwareDepthFormat,
+              depthWriteEnabled: true,
+              depthCompare: SVO_GBUFFER_RENDER_TARGET_CONTRACT.depthCompare,
+            } } : {}),
           }),
           this.device.createRenderPipelineAsync({
             label: "Sparse voxel primary conservative coverage resolve",
-            layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.brickResolveSceneLayout!, ...middleLayouts, this.brickCoverageLayout!] }),
+            layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.brickResolveSceneLayout!, ...middleLayouts, this.brickCoverageResolveLayout!] }),
             vertex: { module: vertexModule, entryPoint: "vertexMain" },
             fragment: { module, entryPoint: SVO_BRICK_RASTER_CONTRACT.entryPoints.resolve, targets: rasterPrimaryTargets },
             primitive: { topology: "triangle-list" },
@@ -5690,6 +7327,30 @@ export class SparseVoxelDrySceneRenderer {
               depthCompare: "always",
             },
           }),
+          this.screenSpaceTerminationPixels > 0 ? this.device.createRenderPipelineAsync({
+            label: "Sparse voxel primary resident-cell LOD resolve",
+            layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.brickResolveSceneLayout!, ...middleLayouts, this.brickCoverageResolveLayout!] }),
+            vertex: { module: vertexModule, entryPoint: "vertexMain" },
+            fragment: { module, entryPoint: "svoBrickLodResolveFragment", targets: rasterPrimaryTargets },
+            primitive: { topology: "triangle-list" },
+            depthStencil: {
+              format: SVO_GBUFFER_RENDER_TARGET_CONTRACT.hardwareDepthFormat,
+              depthWriteEnabled: true,
+              depthCompare: SVO_GBUFFER_RENDER_TARGET_CONTRACT.depthCompare,
+            },
+          }) : Promise.resolve(undefined),
+          this.screenSpaceTerminationPixels > 0 ? this.device.createRenderPipelineAsync({
+            label: "Sparse voxel primary exact-only coverage resolve",
+            layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.brickResolveSceneLayout!, ...middleLayouts, this.brickCoverageLayout!] }),
+            vertex: { module: vertexModule, entryPoint: "vertexMain" },
+            fragment: { module, entryPoint: "svoBrickExactResolveFragment", targets: rasterPrimaryTargets },
+            primitive: { topology: "triangle-list" },
+            depthStencil: {
+              format: SVO_GBUFFER_RENDER_TARGET_CONTRACT.hardwareDepthFormat,
+              depthWriteEnabled: true,
+              depthCompare: SVO_GBUFFER_RENDER_TARGET_CONTRACT.depthCompare,
+            },
+          }) : Promise.resolve(undefined),
           this.device.createRenderPipelineAsync({
             label: "Sparse voxel primary conservative coverage overflow",
             layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.brickResolveSceneLayout!, ...middleLayouts, this.brickCoverageLayout!] }),
@@ -5716,11 +7377,100 @@ export class SparseVoxelDrySceneRenderer {
               depthCompare: SVO_GBUFFER_RENDER_TARGET_CONTRACT.depthCompare,
             },
           }),
+          // Coverage-only: the same proxy instances, no depth state at all, and
+          // a throwaway one-channel target whose only reader is the overflow
+          // gate. Nothing here evaluates a field.
+          this.device.createRenderPipelineAsync({
+            label: "Sparse voxel conservative live-scene primitive coverage",
+            layout: this.screenSpaceTerminationPixels > 0 ? bandedOcclusionCoverageLayouts() : bandedCoverageLayouts(),
+            vertex: { module, entryPoint: SVO_SCENE_PRIMITIVE_RASTER_CONTRACT.entryPoints.bandVertex },
+            fragment: { module, entryPoint: SVO_SCENE_PRIMITIVE_RASTER_CONTRACT.entryPoints.coverage, targets: [{ format: "r32uint" }] },
+            primitive: { topology: "triangle-list", cullMode: SVO_SCENE_PRIMITIVE_RASTER_CONTRACT.cullMode },
+            ...(this.screenSpaceTerminationPixels > 0 ? { depthStencil: {
+              format: SVO_GBUFFER_RENDER_TARGET_CONTRACT.hardwareDepthFormat,
+              depthWriteEnabled: true,
+              depthCompare: SVO_GBUFFER_RENDER_TARGET_CONTRACT.depthCompare,
+            } } : {}),
+          }),
+          this.screenSpaceTerminationPixels > 0 ? this.device.createRenderPipelineAsync({
+            label: "Sparse voxel resident-record LOD resolve",
+            layout: bandedCoverageResolveLayouts(),
+            vertex: { module: vertexModule, entryPoint: "vertexMain" },
+            fragment: { module, entryPoint: "svoScenePrimitiveLodResolveFragment", targets: rasterPrimaryTargets },
+            primitive: { topology: "triangle-list" },
+            depthStencil: {
+              format: SVO_GBUFFER_RENDER_TARGET_CONTRACT.hardwareDepthFormat,
+              depthWriteEnabled: true,
+              depthCompare: SVO_GBUFFER_RENDER_TARGET_CONTRACT.depthCompare,
+            },
+          }) : Promise.resolve(undefined),
+          this.device.createRenderPipelineAsync({
+            label: "Sparse voxel conservative live-scene primitive resolve",
+            layout: bandedCoverageLayouts(),
+            vertex: { module: vertexModule, entryPoint: "vertexMain" },
+            fragment: { module, entryPoint: SVO_SCENE_PRIMITIVE_RASTER_CONTRACT.entryPoints.resolve, targets: rasterPrimaryTargets },
+            primitive: { topology: "triangle-list" },
+            // Unlike the brick resolve this one does not establish the plane —
+            // it competes with the surface already on it, so it keeps the
+            // production reversed-Z test the direct fragment used.
+            depthStencil: {
+              format: SVO_GBUFFER_RENDER_TARGET_CONTRACT.hardwareDepthFormat,
+              depthWriteEnabled: true,
+              depthCompare: SVO_GBUFFER_RENDER_TARGET_CONTRACT.depthCompare,
+            },
+          }),
+          this.device.createRenderPipelineAsync({
+            label: "Sparse voxel conservative live-scene primitive overflow",
+            layout: bandedCoverageLayouts(),
+            vertex: { module, entryPoint: SVO_SCENE_PRIMITIVE_RASTER_CONTRACT.entryPoints.bandVertex },
+            fragment: { module, entryPoint: SVO_SCENE_PRIMITIVE_RASTER_CONTRACT.entryPoints.overflowResolve, targets: rasterPrimaryTargets },
+            primitive: { topology: "triangle-list", cullMode: SVO_SCENE_PRIMITIVE_RASTER_CONTRACT.cullMode },
+            depthStencil: {
+              format: SVO_GBUFFER_RENDER_TARGET_CONTRACT.hardwareDepthFormat,
+              depthWriteEnabled: true,
+              depthCompare: SVO_GBUFFER_RENDER_TARGET_CONTRACT.depthCompare,
+            },
+          }),
         ])
-        : [undefined, undefined, undefined, undefined, undefined, undefined];
-      const bundle = { visibility, rasterRigidVisibility, primarySeamClosure, lighting, skyLighting, prepassReset, prepassCoherent, prepassBoundary,
+        : [undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined];
+      const tieredComputeEnabled = this.rasterPrimary && this.screenSpaceTerminationPixels > 0
+        && this.scenePrimitiveComputeOutputLayout && this.scenePrimitiveDepthBridgeLayout;
+      const depthBridgeModule = tieredComputeEnabled
+        ? await checkedModule(this.device, "Sparse voxel tiered compute depth bridge", /* wgsl */ `
+@group(0) @binding(0) var tieredDepth:texture_2d<f32>;
+@fragment fn tieredDepthBridge(@builtin(position) position:vec4f)->@builtin(frag_depth) f32{
+  let depth=textureLoad(tieredDepth,vec2i(position.xy),0).x;if(!(depth>0.0)){discard;}return depth;
+}`) : undefined;
+      const [scenePrimitiveComputeArgs, scenePrimitiveComputeResolve, scenePrimitiveDepthBridge] = tieredComputeEnabled ? await Promise.all([
+        this.device.createComputePipelineAsync({
+          label: "Sparse voxel tiered scene-primitive dispatch args",
+          layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.brickResolveSceneLayout!, ...middleLayouts, this.brickCoverageLayout!, this.scenePrimitiveComputeOutputLayout!] }),
+          compute: { module, entryPoint: "svoScenePrimitiveTieredComputeArgs" },
+        }),
+        this.device.createComputePipelineAsync({
+          label: "Sparse voxel tiered scene-primitive compute resolve",
+          layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.brickResolveSceneLayout!, ...middleLayouts, this.brickCoverageLayout!, this.scenePrimitiveComputeOutputLayout!] }),
+          compute: { module, entryPoint: "svoScenePrimitiveTieredComputeResolve" },
+        }),
+        this.device.createRenderPipelineAsync({
+          label: "Sparse voxel tiered scene-primitive depth bridge",
+          layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.scenePrimitiveDepthBridgeLayout!] }),
+          vertex: { module: vertexModule, entryPoint: "vertexMain" },
+          fragment: { module: depthBridgeModule!, entryPoint: "tieredDepthBridge", targets: [] },
+          primitive: { topology: "triangle-list" },
+          depthStencil: {
+            format: SVO_GBUFFER_RENDER_TARGET_CONTRACT.hardwareDepthFormat,
+            depthWriteEnabled: true,
+            depthCompare: SVO_GBUFFER_RENDER_TARGET_CONTRACT.depthCompare,
+          },
+        }),
+      ]) : [undefined, undefined, undefined];
+      const bundle = { visibility, rasterRigidVisibility, primarySeamClosure, lighting, reconstructedLighting, skyLighting, prepassReset, prepassCoherent, prepassBoundary,
         worldGiFrame, worldGiCache, voxelLightDemand, voxelLightPopulate,
-        brickBackground, brickRaster, brickCoverage, brickCoverageResolve, brickCoverageOverflow, scenePrimitiveRaster };
+        brickBackground, brickRaster, brickCoverage, brickCoverageResolve, brickLodResolve, brickExactResolve,
+        brickCoverageOverflow, scenePrimitiveRaster,
+        scenePrimitiveCoverage, scenePrimitiveLodResolve, scenePrimitiveComputeArgs, scenePrimitiveComputeResolve, scenePrimitiveDepthBridge,
+        scenePrimitiveCoverageResolve, scenePrimitiveCoverageOverflow };
       this.splitPipelineBundles.set(scale, bundle);
       return bundle;
     })();
@@ -5741,6 +7491,7 @@ export class SparseVoxelDrySceneRenderer {
       || !this.splitVisibilityLayout || !this.splitLightingLayout) return;
     this.ensureBrickCoverageBuffers();
     if (!this.splitGeometry || !this.splitOpaqueIdentity || (this.rasterGlassDiscovery && (!this.splitGlassKey || !this.splitGlassDepth))
+      || (this.screenSpaceTerminationPixels > 0 && !this.scenePrimitiveComputeDepth)
       || (this.rasterRigidDiscovery && !this.rasterRigidPrimaryGeometry)
       || this.splitWidth !== this.targetWidth || this.splitHeight !== this.targetHeight) {
       this.clearPrimaryVisibilityCache();
@@ -5749,6 +7500,7 @@ export class SparseVoxelDrySceneRenderer {
       this.splitGlassKey?.destroy();
       this.splitGlassDepth?.destroy();
       this.rasterRigidPrimaryGeometry?.destroy();
+      this.scenePrimitiveComputeDepth?.destroy();
       this.splitGeometry = this.device.createTexture({
         label: "Sparse voxel split exact primary geometry",
         size: [this.targetWidth, this.targetHeight],
@@ -5765,6 +7517,15 @@ export class SparseVoxelDrySceneRenderer {
           | (this.rasterRigidDiscovery || this.rasterPrimary ? GPUTextureUsage.RENDER_ATTACHMENT : 0),
       });
       this.splitOpaqueIdentityView = this.splitOpaqueIdentity.createView();
+      if (this.screenSpaceTerminationPixels > 0) {
+        this.scenePrimitiveComputeDepth = this.device.createTexture({
+          label: "Sparse voxel tiered scene-primitive compute depth",
+          size: [this.targetWidth, this.targetHeight],
+          format: "r32float",
+          usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT,
+        });
+        this.scenePrimitiveComputeDepthView = this.scenePrimitiveComputeDepth.createView();
+      }
       if (this.rasterRigidDiscovery) {
         this.rasterRigidPrimaryGeometry = this.device.createTexture({
           label: "Sparse voxel raster-rigid packed primary geometry",
@@ -5811,6 +7572,31 @@ export class SparseVoxelDrySceneRenderer {
         ...(this.rasterGlassDiscovery ? [{ binding: 6, resource: this.splitGlassKeyView! }] : []),
       ],
     });
+    const gBufferViews = this.gBufferTargets.views;
+    if (this.scenePrimitiveComputeOutputLayout && this.scenePrimitiveDepthBridgeLayout
+      && this.scenePrimitiveComputeDepthView && this.scenePrimitiveComputeQueue
+      && gBufferViews && this.bandStateBuffer && this.coverageAuditBuffer) {
+      this.scenePrimitiveComputeOutputBindGroup = this.device.createBindGroup({
+        label: "Sparse voxel tiered compute resolve output binding",
+        layout: this.scenePrimitiveComputeOutputLayout,
+        entries: [
+          { binding: 0, resource: gBufferViews.hardwareDepth },
+          { binding: 1, resource: gBufferViews.packedSurface },
+          { binding: 2, resource: gBufferViews.identityMedia },
+          { binding: 3, resource: this.splitGeometryView! },
+          { binding: 4, resource: this.splitOpaqueIdentityView! },
+          { binding: 5, resource: this.scenePrimitiveComputeDepthView },
+          { binding: SVO_SCENE_PRIMITIVE_BAND_CONTRACT.readGroupBinding, resource: { buffer: this.bandStateBuffer } },
+          { binding: SVO_SCENE_PRIMITIVE_BAND_CONTRACT.auditGroupBinding, resource: { buffer: this.coverageAuditBuffer } },
+          { binding: 8, resource: { buffer: this.scenePrimitiveComputeQueue } },
+        ],
+      });
+      this.scenePrimitiveDepthBridgeBindGroup = this.device.createBindGroup({
+        label: "Sparse voxel tiered compute depth bridge binding",
+        layout: this.scenePrimitiveDepthBridgeLayout,
+        entries: [{ binding: 0, resource: this.scenePrimitiveComputeDepthView }],
+      });
+    }
     if (this.rasterGlassDiscovery && this.rasterGlassLayout) {
       this.rasterGlassBindGroup = this.device.createBindGroup({
         label: "Sparse voxel raster-glass discovery binding",
@@ -6390,6 +8176,7 @@ export class SparseVoxelDrySceneRenderer {
     this.primitiveDirtyBounds = [];
     this.scene = scene;
     this.primitiveCount = primitiveArena.primitiveCount;
+    this.writeScenePrimitiveOverflowPublication();
     this.primitiveCandidateArena = primitiveArena;
     this.ensureVoxelLightCache(source, scene);
     this.coneFanoutLightCount = Math.min(
@@ -6405,6 +8192,7 @@ export class SparseVoxelDrySceneRenderer {
       }));
     }
     const paneCount = (scene.glassRecords?.byteLength ?? 0) / SVO_THIN_GLASS_RECORD_STRIDE_BYTES;
+    this.rasterGlassPaneCount = paneCount;
     const paneIdBase = scene.primaryCompositeOwnedGlassPaneIdBase ?? 0xffff_ffff;
     const compositePaneCount = scene.primaryCompositeOwnedGlassPaneCount ?? 0;
     const records = scene.glassRecords;
@@ -6493,17 +8281,48 @@ export class SparseVoxelDrySceneRenderer {
         throw new RangeError("Live scene dirty bounds must be finite ordered AABBs");
       }
     }
-    const arena = packSvoPrimitiveCandidateArena(records, candidates);
-    if (arena.packedRecords.byteLength > SVO_PRIMITIVE_CANDIDATE_ARENA_SIZE_BYTES) throw new RangeError("Live scene primitive arena capacity exceeded");
-    this.device.queue.writeBuffer(this.sceneArenaBuffer, SVO_DRY_SCENE_ARENA_LAYOUT.primitiveOffsetBytes, arena.packedRecords);
+    const incremental = change.dirtyPrimitiveIndices !== undefined
+      && change.dirtyCandidateNodeIndices !== undefined
+      && this.primitiveCandidateArena?.primitiveCount === candidates.primitiveCount
+      && this.primitiveCandidateArena.candidateNodeCount === candidates.nodes.length
+      && records.byteLength === candidates.primitiveCount * SVO_PRIMITIVE_RECORD_STRIDE_BYTES;
+    let arena = this.primitiveCandidateArena;
+    if (incremental && arena) {
+      const uploadRecords = (indices: readonly number[], source: Uint32Array<ArrayBuffer>, arenaRecordBase: number): void => {
+        const ordered = [...new Set(indices)].sort((left, right) => left - right);
+        for (const index of ordered) {
+          if (!Number.isSafeInteger(index) || index < 0 || index >= source.length / SVO_PRIMITIVE_RECORD_WORDS) {
+            throw new RangeError("Live scene dirty primitive-arena index is invalid");
+          }
+          const sourceWord = index * SVO_PRIMITIVE_RECORD_WORDS;
+          const arenaWord = (arenaRecordBase + index) * SVO_PRIMITIVE_RECORD_WORDS;
+          const record = source.subarray(sourceWord, sourceWord + SVO_PRIMITIVE_RECORD_WORDS);
+          arena!.packedRecords.set(record, arenaWord);
+          this.device.queue.writeBuffer(this.sceneArenaBuffer,
+            SVO_DRY_SCENE_ARENA_LAYOUT.primitiveOffsetBytes + arenaWord * Uint32Array.BYTES_PER_ELEMENT,
+            record);
+        }
+      };
+      uploadRecords(change.dirtyPrimitiveIndices!, records, 0);
+      uploadRecords(change.dirtyCandidateNodeIndices!, candidates.packedRecords, candidates.primitiveCount);
+    } else {
+      arena = packSvoPrimitiveCandidateArena(records, candidates);
+      if (arena.packedRecords.byteLength > SVO_PRIMITIVE_CANDIDATE_ARENA_SIZE_BYTES) throw new RangeError("Live scene primitive arena capacity exceeded");
+      this.device.queue.writeBuffer(this.sceneArenaBuffer, SVO_DRY_SCENE_ARENA_LAYOUT.primitiveOffsetBytes, arena.packedRecords);
+    }
     this.primitiveCount = arena.primitiveCount;
+    this.writeScenePrimitiveOverflowPublication();
     this.primitiveCandidateArena = arena;
     this.scene = { ...this.scene, renderRevision, primitiveRecords: records, primitiveCandidates: candidates };
     this.writeParams(this.source, this.scene);
     this.pickingFrameToken += 1;
     this.lastPickingTarget = undefined;
     this.clearReusableFrame();
-    this.clearPrimaryVisibilityCache();
+    // sceneEpoch (pickingFrameToken above) is part of the primary reuse key, so
+    // an incremental pose cannot reuse the previous G-buffer. Avoid separately
+    // destroying the cache: stationary visibility remains reusable again as
+    // soon as the caller's generation stops changing.
+    if (!incremental) this.clearPrimaryVisibilityCache();
     this.primitiveDirtyBounds = change.dirtyBounds;
     const invalidation = svoDryPrimitiveArenaCacheInvalidation(change);
     if (invalidation.worldGi) this.worldGiCacheDirty = true;
@@ -6578,6 +8397,19 @@ export class SparseVoxelDrySceneRenderer {
   setRenderTuning(tuning: SvoRenderTuning): void {
     const normalized = normalizeSvoRenderTuning(tuning);
     if (Object.keys(normalized).every((key) => normalized[key as keyof SvoRenderTuning] === this.renderTuning[key as keyof SvoRenderTuning])) return;
+    // The band is a *visibility* control and nothing else: it decides which pass
+    // resolves a pixel, never what a light sees. Lighting reads the node-mip
+    // pyramid and the analytic BVH, neither of which the coverage arena touches,
+    // so retuning it must not drop the persistent world-GI cache — otherwise an
+    // A/B over the band measures a GI rebuild in both arms and nothing else.
+    const bandKeys = ["nearFieldBandPixels", "nearFieldBandHysteresis", "nearFieldBandBudget"] as const;
+    const bandOnly = (Object.keys(normalized) as (keyof SvoRenderTuning)[])
+      .every((key) => normalized[key] === this.renderTuning[key] || (bandKeys as readonly string[]).includes(key));
+    if (bandOnly) {
+      this.renderTuning = normalized;
+      this.writeBandParams();
+      return;
+    }
     const invalidateVoxelVisibility = normalized.coneStepBudget !== this.renderTuning.coneStepBudget
       || normalized.shadowBiasCells !== this.renderTuning.shadowBiasCells
       || normalized.shadowConeAperture !== this.renderTuning.shadowConeAperture
@@ -6590,6 +8422,7 @@ export class SparseVoxelDrySceneRenderer {
     if (invalidateVoxelVisibility) this.invalidateVoxelLightCache();
     this.clearReusableFrame();
     this.worldGiCacheDirty = true;
+    this.writeBandParams();
     if (this.source && this.scene && canEncodeSparseVoxelDryScene(this.source, this.scene)) this.writeParams(this.source, this.scene);
   }
 
@@ -6828,6 +8661,27 @@ export class SparseVoxelDrySceneRenderer {
   }
 
   /** Copies the compacted boundary count for offline Dawn experiment diagnosis. */
+  /**
+   * Per-pixel conservative candidate counts left by the last coverage pass of
+   * the encoded frame — the scene-primitive one on the production arm.
+   *
+   * The audit this exists for is the arena's: what fraction of covered pixels
+   * exceeded capacity and had to be re-marched by the overflow arm. Capacity
+   * never changes the image, so this is the only way to see it move.
+   */
+  copyCoverageCounts(encoder: GPUCommandEncoder, target: GPUBuffer): boolean {
+    if (!this.brickCoverageCountBuffer || !this.brickCoverageWidth || !this.brickCoverageHeight) return false;
+    const bytes = svoBrickRasterCoverageCountBytes(this.brickCoverageWidth, this.brickCoverageHeight);
+    if (target.size < bytes) return false;
+    encoder.copyBufferToBuffer(this.brickCoverageCountBuffer, 0, target, 0, bytes);
+    return true;
+  }
+
+  /** Capacity the coverage counts above are compared against. */
+  get scenePrimitiveCoverageCapacity(): number {
+    return SVO_SCENE_PRIMITIVE_RASTER_CONTRACT.coverageCandidatesPerPixel;
+  }
+
   copyConeBoundaryCount(encoder: GPUCommandEncoder, target: GPUBuffer): boolean {
     if (!this.coneBoundaryCountSnapshot) return false;
     encoder.copyBufferToBuffer(this.coneBoundaryCountSnapshot, 0, target, 0, Uint32Array.BYTES_PER_ELEMENT);
@@ -6900,12 +8754,23 @@ export class SparseVoxelDrySceneRenderer {
     pass.setBindGroup(splitGroup, this.splitLightingBindGroup);
     if (cacheBindings) pass.setBindGroup(splitGroup + 1, this.voxelLightConsumerBindGroup!);
     pass.dispatchWorkgroups(Math.ceil(this.conePrepassWidth / 8), Math.ceil(this.conePrepassHeight / 8));
-    if (!this.experiments.inlineConeBoundaries) {
+    if (this.conePrepassBoundaryQueueActive) {
       pass.setPipeline(this.conePrepassBoundaryPipeline);
       pass.dispatchWorkgroups(Math.ceil(this.conePrepassWidth * this.conePrepassHeight / 64));
     }
     pass.end();
     return true;
+  }
+
+  /**
+   * Whether the coherent kernel still queues incoherent receivers for a second,
+   * scene-tracing dispatch. The default resolves them from the primary G-buffer
+   * inside the coherent kernel, so the queue stays empty and its consumer is not
+   * encoded at all — the entry point remains compiled as the analytic control.
+   */
+  private get conePrepassBoundaryQueueActive(): boolean {
+    return this.experiments.analyticConeBoundaries === true
+      && this.experiments.inlineConeBoundaries !== true;
   }
 
   get voxelLightCacheAllocatedBytes(): number {
@@ -7183,6 +9048,8 @@ export class SparseVoxelDrySceneRenderer {
         && this.conePrepassShadePipeline && this.coneReducedPipeline
         && this.conePrepassBindGroup && this.conePrepassVisibilityBindGroup && this.conePrepassShadeBindGroup && this.conePrepassVisibilityView
         && this.conePrepassGeometryView && this.conePrepassIdentityView && this.conePrepassRadianceView);
+    const reconstructReducedRadiance = this.renderTuning.coneRadianceReconstruction !== "wide-relight"
+      && this.renderTuning.coneRadianceReconstruction !== "full-res-relight";
     const effectiveScale: SvoConeLightingScale = usePrepass ? this.coneScale : 1;
     // Recorded for the probe, which is encoded after this frame's passes and
     // cannot observe the reduced pass from inside its own full-rate composition.
@@ -7193,9 +9060,15 @@ export class SparseVoxelDrySceneRenderer {
       : this.splitVisibilityPipeline;
     const brickRasterReady = Boolean(this.brickBackgroundPipeline && this.brickRasterPipeline
       && this.brickCoveragePipeline && this.brickCoverageResolvePipeline && this.brickCoverageOverflowPipeline
+      && (this.screenSpaceTerminationPixels === 0 || (this.brickLodResolvePipeline && this.brickExactResolvePipeline))
       && this.scenePrimitiveRasterPipeline
+      && (this.scenePrimitiveDirect || (this.scenePrimitiveCoveragePipeline
+        && this.scenePrimitiveCoverageResolvePipeline && this.scenePrimitiveCoverageOverflowPipeline
+        && (this.screenSpaceTerminationPixels === 0 || this.scenePrimitiveLodResolvePipeline)))
       && this.brickEmitPipeline && this.brickScanPipeline && this.brickScatterPipeline
       && this.brickCullBindGroup && this.brickDrawBindGroup && this.brickCoverageBindGroup
+      && this.brickCoverageResolveBindGroup
+      && (this.screenSpaceTerminationPixels === 0 || this.scenePrimitiveCoverageBindGroup)
       && this.brickResolveSceneBindGroup && this.brickSortStateBuffer
       && this.brickCoverageCountBuffer && this.brickCoverageCandidateBuffer
       && this.splitOpaqueIdentityView);
@@ -7207,6 +9080,7 @@ export class SparseVoxelDrySceneRenderer {
         && (!this.rasterPrimary || brickRasterReady)
         && (!this.silhouetteRefinementEnabled || Boolean(this.primarySeamClosurePipeline))
         && Boolean(activeSplitVisibilityPipeline && this.splitLightingPipeline && this.splitSkyLightingPipeline
+        && (!usePrepass || !reconstructReducedRadiance || this.splitReconstructedLightingPipeline)
         && (!usePrepass || (this.conePrepassResetPipeline && this.conePrepassCoherentPipeline && this.conePrepassBoundaryPipeline
           && this.conePrepassComputeBindGroup && this.conePrepassBoundaryQueue && this.coneBoundaryCountSnapshot
           && this.coneDerivedFailureSnapshot
@@ -7310,27 +9184,7 @@ export class SparseVoxelDrySceneRenderer {
         }
         tracePhase?.({ id: "svo-primary", label: "SVO primary visibility" });
         if (this.rasterPrimary) {
-          const exactScene = encoder.beginRenderPass({
-            label: "Sparse voxel exact live-scene primitive visibility",
-            colorAttachments: [
-              { view: gBufferViews.packedSurface, loadOp: "load", storeOp: "store" },
-              { view: gBufferViews.identityMedia, loadOp: "load", storeOp: "store" },
-              { view: this.splitGeometryView!, loadOp: "load", storeOp: "store" },
-              { view: this.splitOpaqueIdentityView!, loadOp: "load", storeOp: "store" },
-            ],
-            depthStencilAttachment: {
-              view: gBufferViews.hardwareDepth,
-              depthLoadOp: "load",
-              depthStoreOp: "store",
-            },
-          });
-          exactScene.setPipeline(this.scenePrimitiveRasterPipeline!);
-          exactScene.setBindGroup(0, this.bindGroup);
-          exactScene.draw(
-            SVO_SCENE_PRIMITIVE_RASTER_CONTRACT.verticesPerProxy,
-            this.primitiveCount,
-          );
-          exactScene.end();
+          this.encodeScenePrimitivePrimary(encoder, gBufferViews, usePrepass, splitGroup, tracePhase);
         }
         if (this.rasterRigidActive) {
           const rigid = encoder.beginRenderPass({
@@ -7364,7 +9218,7 @@ export class SparseVoxelDrySceneRenderer {
           bridge.end();
           tracePhase?.({ id: "svo-rigid", label: "SVO analytic rigid discovery" });
         }
-        if (this.rasterGlassDiscovery) {
+        if (this.rasterGlassDiscovery && this.rasterGlassPaneCount > 0) {
           const glass = encoder.beginRenderPass({
             label: "Sparse voxel raster thin-glass discovery",
             colorAttachments: [
@@ -7452,7 +9306,7 @@ export class SparseVoxelDrySceneRenderer {
         coherent.setBindGroup(splitGroup, this.splitLightingBindGroup!);
         if (voxelLightBindingsRequired) coherent.setBindGroup(splitGroup + 1, this.voxelLightConsumerBindGroup!);
         coherent.dispatchWorkgroups(Math.ceil(this.conePrepassWidth / 8), Math.ceil(this.conePrepassHeight / 8));
-        if (!this.experiments.inlineConeBoundaries) {
+        if (this.conePrepassBoundaryQueueActive) {
           coherent.setPipeline(this.conePrepassBoundaryPipeline!);
           coherent.dispatchWorkgroups(Math.ceil(this.conePrepassWidth * this.conePrepassHeight / 64));
         }
@@ -7485,28 +9339,56 @@ export class SparseVoxelDrySceneRenderer {
         }
         tracePhase?.({ id: "svo-cone-lighting", label: "SVO compacted cone lighting" });
 
-        // The cache is world-space and source-owned: camera motion changes
-        // which keys are queried but never invalidates entries. Only source,
-        // authored-scene, or lighting-contract changes clear it.
-        if (this.worldGiCacheDirty) {
-          encoder.clearBuffer(this.worldGiCacheBuffer!);
-          this.worldGiCacheDirty = false;
+        if (!reconstructReducedRadiance) {
+          // The cache is world-space and source-owned: camera motion changes
+          // which keys are queried but never invalidates entries. Only source,
+          // authored-scene, or lighting-contract changes clear it. Its output is
+          // a GI closure, not final surface radiance, so only the full-rate
+          // relight modes are allowed to consume it as such.
+          if (this.worldGiCacheDirty) {
+            encoder.clearBuffer(this.worldGiCacheBuffer!);
+            this.worldGiCacheDirty = false;
+          }
+          const gi = encoder.beginComputePass({ label: "Sparse voxel persistent world GI cache" });
+          gi.setPipeline(this.worldGiFramePipeline!);
+          gi.setBindGroup(0, this.bindGroup);
+          gi.setBindGroup(1, this.conePrepassShadeBindGroup!);
+          gi.setBindGroup(2, this.worldGiCacheBindGroup!);
+          if (voxelLightBindingsRequired) gi.setBindGroup(3, this.voxelLightConsumerBindGroup!);
+          gi.dispatchWorkgroups(1);
+          gi.setPipeline(this.worldGiCachePipeline!);
+          gi.setBindGroup(0, this.bindGroup);
+          gi.setBindGroup(1, this.conePrepassShadeBindGroup!);
+          gi.setBindGroup(2, this.worldGiCacheBindGroup!);
+          if (voxelLightBindingsRequired) gi.setBindGroup(3, this.voxelLightConsumerBindGroup!);
+          gi.dispatchWorkgroups(Math.ceil(this.conePrepassWidth / 8), Math.ceil(this.conePrepassHeight / 8));
+          gi.end();
+          tracePhase?.({ id: "svo-environment-gi", label: "SVO persistent world-space environmental GI" });
         }
-        const gi = encoder.beginComputePass({ label: "Sparse voxel persistent world GI cache" });
-        gi.setPipeline(this.worldGiFramePipeline!);
-        gi.setBindGroup(0, this.bindGroup);
-        gi.setBindGroup(1, this.conePrepassShadeBindGroup!);
-        gi.setBindGroup(2, this.worldGiCacheBindGroup!);
-        if (voxelLightBindingsRequired) gi.setBindGroup(3, this.voxelLightConsumerBindGroup!);
-        gi.dispatchWorkgroups(1);
-        gi.setPipeline(this.worldGiCachePipeline!);
-        gi.setBindGroup(0, this.bindGroup);
-        gi.setBindGroup(1, this.conePrepassShadeBindGroup!);
-        gi.setBindGroup(2, this.worldGiCacheBindGroup!);
-        if (voxelLightBindingsRequired) gi.setBindGroup(3, this.voxelLightConsumerBindGroup!);
-        gi.dispatchWorkgroups(Math.ceil(this.conePrepassWidth / 8), Math.ceil(this.conePrepassHeight / 8));
-        gi.end();
-        tracePhase?.({ id: "svo-environment-gi", label: "SVO persistent world-space environmental GI" });
+      }
+
+      if (usePrepass && reconstructReducedRadiance && !this.voxelLightExclusive) {
+        // Reconstruction modes interpolate a complete reduced-rate material
+        // result. The world-GI cache above deliberately stores only
+        // {indirect radiance, visibility}; using that texture as final radiance
+        // made directly lit terrain nearly black. Evaluate the full material at
+        // reduced rate after visibility is ready, then let the deferred pass
+        // reconstruct this colour with its depth/normal/identity guide.
+        const shade = encoder.beginRenderPass({
+          label: "Sparse voxel reduced-rate opaque shading",
+          colorAttachments: [{
+            view: this.conePrepassRadianceView!,
+            clearValue: { r: 0, g: 0, b: 0, a: -1 },
+            loadOp: "clear",
+            storeOp: "store",
+          }],
+        });
+        shade.setPipeline(this.conePrepassShadePipeline!);
+        shade.setBindGroup(0, this.bindGroup);
+        shade.setBindGroup(1, this.conePrepassShadeBindGroup!);
+        shade.draw(3);
+        shade.end();
+        tracePhase?.({ id: "svo-cone-lighting", label: "SVO reduced-rate opaque shading" });
       }
 
       const lighting = encoder.beginRenderPass({
@@ -7526,6 +9408,10 @@ export class SparseVoxelDrySceneRenderer {
       // so the expensive draw is the one still in flight when the pass ends.
       lighting.setPipeline(this.splitSkyLightingPipeline!);
       lighting.draw(3);
+      if (usePrepass && reconstructReducedRadiance) {
+        lighting.setPipeline(this.splitReconstructedLightingPipeline!);
+        lighting.draw(3);
+      }
       lighting.setPipeline(this.splitLightingPipeline!);
       lighting.draw(3);
       lighting.end();
@@ -7579,6 +9465,25 @@ export class SparseVoxelDrySceneRenderer {
     this.brickRasterPublicationBuffer?.destroy();
     this.brickCoverageCountBuffer?.destroy();
     this.brickCoverageCandidateBuffer?.destroy();
+    this.bandStateBuffer?.destroy();
+    this.bandParamsBuffer?.destroy();
+    this.coverageAuditBuffer?.destroy();
+    if (!this.coverageAuditReading) this.coverageAuditStaging?.destroy();
+    this.scenePrimitiveOverflowPublicationBuffer?.destroy();
+    this.coverageOverflowIndirectBuffer?.destroy();
+    this.scenePrimitiveOverflowPublicationBuffer = undefined;
+    this.coverageOverflowIndirectBuffer = undefined;
+    this.brickOverflowArgsBindGroup = undefined;
+    this.scenePrimitiveOverflowArgsBindGroup = undefined;
+    this.coverageOverflowArgsPipeline = undefined;
+    this.bandStateBuffer = undefined;
+    this.bandParamsBuffer = undefined;
+    this.coverageAuditBuffer = undefined;
+    this.coverageAuditStaging = undefined;
+    this.bandComputeBindGroup = undefined;
+    this.bandReadBindGroup = undefined;
+    this.bandClassifyPipeline = undefined;
+    this.bandResolvePipeline = undefined;
     this.brickCandidateBuffer = undefined;
     this.brickInstanceBuffer = undefined;
     this.brickSortStateBuffer = undefined;
@@ -7589,10 +9494,19 @@ export class SparseVoxelDrySceneRenderer {
     this.brickCoverageCandidateBuffer = undefined;
     this.brickCoveragePipeline = undefined;
     this.brickCoverageResolvePipeline = undefined;
+    this.brickLodResolvePipeline = undefined;
+    this.brickExactResolvePipeline = undefined;
     this.brickCoverageOverflowPipeline = undefined;
     this.brickCoverageWidth = 0;
     this.brickCoverageHeight = 0;
     this.scenePrimitiveRasterPipeline = undefined;
+    this.scenePrimitiveCoveragePipeline = undefined;
+    this.scenePrimitiveLodResolvePipeline = undefined;
+    this.scenePrimitiveComputeArgsPipeline = undefined;
+    this.scenePrimitiveComputeResolvePipeline = undefined;
+    this.scenePrimitiveDepthBridgePipeline = undefined;
+    this.scenePrimitiveCoverageResolvePipeline = undefined;
+    this.scenePrimitiveCoverageOverflowPipeline = undefined;
     this.brickLeafCapacity = 0;
     this.splitGeometry?.destroy();
     this.splitOpaqueIdentity?.destroy();
@@ -7603,6 +9517,15 @@ export class SparseVoxelDrySceneRenderer {
     this.splitGeometryView = undefined;
     this.splitOpaqueIdentity = undefined;
     this.splitOpaqueIdentityView = undefined;
+    this.scenePrimitiveComputeDepth?.destroy();
+    this.scenePrimitiveComputeQueue?.destroy();
+    this.scenePrimitiveComputeIndirect?.destroy();
+    this.scenePrimitiveComputeDepth = undefined;
+    this.scenePrimitiveComputeDepthView = undefined;
+    this.scenePrimitiveComputeQueue = undefined;
+    this.scenePrimitiveComputeIndirect = undefined;
+    this.scenePrimitiveComputeOutputBindGroup = undefined;
+    this.scenePrimitiveDepthBridgeBindGroup = undefined;
     this.splitGlassKey = undefined;
     this.splitGlassKeyView = undefined;
     this.splitGlassDepth = undefined;
@@ -7617,6 +9540,7 @@ export class SparseVoxelDrySceneRenderer {
     this.splitVisibilityPipeline = undefined;
     this.primarySeamClosurePipeline = undefined;
     this.splitLightingPipeline = undefined;
+    this.splitReconstructedLightingPipeline = undefined;
     this.splitSkyLightingPipeline = undefined;
     this.rasterGlassPipeline = undefined;
     this.rasterRigidPipeline = undefined;

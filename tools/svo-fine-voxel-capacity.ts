@@ -19,12 +19,24 @@
  *   node --import tsx tools/svo-fine-voxel-capacity.ts [cellSize_mm ...]
  */
 import { planAdaptiveSparseBrickOctree } from "../lib/adaptive-sparse-brick-plan";
+import { createHeroGardenHoseStressScene } from "../lib/hero-garden-stress-scene";
 import { buildEnvironmentProxyCatalog, environmentProxyPrimitives } from "../lib/voxel-environments";
 import type { SceneDescription } from "../lib/model";
 import { getScenePreset } from "../lib/scenes";
 import { planSparseSceneDomain } from "../lib/sparse-scene-domain";
 import { SPARSE_BRICK_GPU_LAYOUT } from "../lib/sparse-brick-octree";
 import { planSvoNodeMipPyramid } from "../lib/svo-node-mip-pyramid";
+import { SVO_PRIMITIVE_RECORD_STRIDE_BYTES } from "../lib/svo-primitive-abi";
+import { SVO_PRIMITIVE_CANDIDATE_ARENA_SIZE_BYTES } from "../lib/svo-primitive-candidates";
+import { svoTetrahedralRadianceAtlasBytes } from "../lib/svo-tetrahedral-radiance";
+import {
+  svoBrickRasterInstanceBytes,
+  svoBrickRasterPublicationInstanceOffsetBytes,
+  svoRasterCoverageArenaBytes,
+  svoRasterCoverageCountAllocationBytes,
+  SVO_BRICK_RASTER_CONTRACT,
+} from "../lib/webgpu-svo-brick-raster";
+import { SVO_SCENE_PRIMITIVE_RASTER_CONTRACT } from "../lib/webgpu-svo-dry-scene";
 import { buildSvoScenePrimitives } from "../lib/svo-scene-primitives";
 import { svoPrimitiveCandidateBounds } from "../lib/svo-primitive-candidates";
 import { createTallCellLayout } from "../lib/tall-cell-grid";
@@ -152,11 +164,11 @@ function primitivesPerBrick(scene: SceneDescription, cells: readonly [number, nu
   return { primitives, maximumPerBrick, overflowedBricks, brickEdge_m };
 }
 
-function sweep(cellSize_m: number) {
+function sweep(cellSize_m: number, sceneFactory: () => SceneDescription = () => getScenePreset("hero-garden-hose").create()) {
   // Through the catalog, not the factory: the environment is attached on the
   // way out, and it is the environment's proxy AABBs that decide how far the
   // sparse address space extends past the container.
-  const scene: SceneDescription = getScenePreset("hero-garden-hose").create();
+  const scene: SceneDescription = sceneFactory();
   scene.voxelDomain = { ...scene.voxelDomain, finestCellSize_m: cellSize_m };
   const result: Record<string, unknown> = { cellSize_mm: cellSize_m * 1000 };
 
@@ -255,11 +267,203 @@ function sweep(cellSize_m: number) {
     result.mipPagesRequested = mipPlan.requestedPageCount;
     result.mipAtlasTexels = mipPlan.atlas.texels;
     result.mipAtlasMiB = mib(mipPlan.allocatedBytes);
+    // The tetrahedral radiance atlas shares the pyramid's page plan and its
+    // capacity, at 10^3 x 16 B = 16,000 B a physical page. It is a separate
+    // allocation of comparable size and section 8 of the handoff names it
+    // explicitly, so it is reported beside the pyramid rather than folded in.
+    result.radianceAtlasMiB = mib(svoTetrahedralRadianceAtlasBytes(mipPlan));
+    result.mipAllocatedBytes = mipPlan.allocatedBytes;
+    result.radianceAllocatedBytes = svoTetrahedralRadianceAtlasBytes(mipPlan);
     result.mipState = !mipPlan.complete ? "capacity"
       : mipPlan.atlas.texels.some((value) => value > M1_MAX_LIMITS.maxTextureDimension3D) ? "atlas-texture-limit"
       : "ready";
   }
   return result;
+}
+
+/**
+ * ---------------------------------------------------------------------------
+ * The 10x memory audit (`docs/svo-raster-visibility-handoff.md` section 8)
+ * ---------------------------------------------------------------------------
+ *
+ * "56 B/voxel across lanes, pyramid pages, radiance atlas (16 KB/page), ~190 MB
+ * coverage buffer, candidate arena. W4's audit must produce totals before W2
+ * commits to a finest-voxel size at 10x."
+ *
+ * The sweep above answers the *first* question — what one cell size costs the
+ * octree — for one scene at one record count. This mode answers section 8's
+ * question, which is a different one: what does the whole renderer allocate,
+ * across every arena the handoff names, at the acceptance scene's record rungs
+ * and at candidate finest-voxel sizes, and which of those configurations do not
+ * fit on this machine.
+ *
+ * Two axes, because the two costs are independent and are routinely confused:
+ *
+ *   - **record count** (`recordMultiplier` 1 / 8 / 10, spanning exactly
+ *     `hero-garden-hose` at 501 records to `hero-garden-hose-x10` at 5,039)
+ *     moves the primitive records, the candidate arena and — through the
+ *     proxy AABBs that decide which bricks exist — the octree itself;
+ *   - **finest cell size** moves the octree as h^-2 to h^-3 and moves nothing
+ *     else at all.
+ *
+ * The viewport-sized arenas move with neither, which is the point worth taking
+ * away: W1's shared coverage arena is 325.4 MB at 1600x1240 whatever the scene
+ * contains, and it is already the largest single allocation in the renderer at
+ * every rung the acceptance scene draws at.
+ *
+ * `FLUID_SVO_CAPACITY_AUDIT=1 node --import tsx tools/svo-fine-voxel-capacity.ts [cellSize_mm ...]`
+ *   FLUID_SVO_CAPACITY_MULTIPLIERS  record rungs (default 1,8,10)
+ *   FLUID_SVO_CAPACITY_VIEWPORT     WxH for the viewport arenas (default 1600x1240)
+ */
+const auditMode = process.env.FLUID_SVO_CAPACITY_AUDIT === "1";
+const auditMultipliers = (process.env.FLUID_SVO_CAPACITY_MULTIPLIERS ?? "1,8,10")
+  .split(",").map(Number).filter((value) => Number.isFinite(value) && value >= 1);
+const [auditWidth, auditHeight] = (process.env.FLUID_SVO_CAPACITY_VIEWPORT ?? "1600x1240")
+  .split("x").map(Number);
+
+/**
+ * Arenas whose size is decided by the viewport, not by the scene.
+ *
+ * The coverage arena is one allocation shared by the brick pass and the
+ * authored-SDF pass (W1) — `width * height * (candidates + 1) * 4`, where the
+ * `+ 1` is the per-pixel nearest-opaque seed the brick resolve publishes for
+ * the scene-primitive resolve to reject against. The count buffer beside it
+ * carries the overflow tail this workstream added.
+ */
+function viewportArenas(width: number, height: number) {
+  const coverageArenaBytes = svoRasterCoverageArenaBytes(width, height,
+    SVO_SCENE_PRIMITIVE_RASTER_CONTRACT.coverageCandidatesPerPixel);
+  const coverageCountBytes = svoRasterCoverageCountAllocationBytes(width, height);
+  // Raster-primary's four colour attachments plus the depth plane. Attachments
+  // are not storage bindings, so they answer to maxTextureDimension2D rather
+  // than to maxStorageBufferBindingSize, but they are real device memory.
+  const gBufferBytes = width * height * (SVO_BRICK_RASTER_CONTRACT.colorAttachmentBytesPerSample + 4);
+  return {
+    coverageArenaBytes,
+    coverageCountBytes,
+    gBufferBytes,
+    total: coverageArenaBytes + coverageCountBytes + gBufferBytes,
+  };
+}
+
+function auditRow(recordMultiplier: number, cellSize_m: number) {
+  const scene = createHeroGardenHoseStressScene({ recordMultiplier });
+  const octree = sweep(cellSize_m, () => createHeroGardenHoseStressScene({ recordMultiplier }));
+  const recordCount = buildSvoScenePrimitives(scene).descriptors.length;
+  const leafCapacity = Math.max(1, Number(octree.voxelCapacity ?? 0) / (scene.voxelDomain.brickSize_cells === 4 ? 64 : 512));
+  const view = viewportArenas(auditWidth, auditHeight);
+
+  // Per-record host publications. The candidate arena is a fixed allocation
+  // (W0 raised it with the leaf ceiling), so it is charged in full whatever the
+  // record count is — that is what "cliff to slope" cost.
+  const recordBytes = recordCount * SVO_PRIMITIVE_RECORD_STRIDE_BYTES;
+  const candidateArenaBytes = SVO_PRIMITIVE_CANDIDATE_ARENA_SIZE_BYTES;
+  // Brick-raster instance arenas: the sorted publication and the pre-sort
+  // candidate list, both one 32-byte record per leaf of published capacity.
+  const brickInstanceBytes = svoBrickRasterInstanceBytes(Math.round(leafCapacity));
+  const brickRasterBytes = 2 * brickInstanceBytes + svoBrickRasterPublicationInstanceOffsetBytes();
+
+  const octreeBytes = Math.round(Number(octree.payloadMiB ?? 0) * 1024 ** 2)
+    + Math.round(Number(octree.structureMiB ?? 0) * 1024 ** 2)
+    + Math.round(Number(octree.sourceMiB ?? 0) * 1024 ** 2)
+    + Math.round(Number(octree.denseTextureMiB ?? 0) * 1024 ** 2);
+  const lightingBytes = Number(octree.mipAllocatedBytes ?? 0) + Number(octree.radianceAllocatedBytes ?? 0);
+  const total = octreeBytes + lightingBytes + view.total + recordBytes + candidateArenaBytes + brickRasterBytes;
+
+  // Two different device limits, kept apart because conflating them is how an
+  // audit says "fits" about a configuration that cannot be allocated.
+  //
+  //   * `maxBufferSize` bounds one **allocation**. The octree payload is a
+  //     single buffer holding all five per-voxel lanes end to end, so that is
+  //     the limit it answers to.
+  //   * `maxStorageBufferBindingSize` bounds one **binding**. The lanes inside
+  //     the payload are bound as separate sub-ranges, so the geometry lane —
+  //     the widest of them at 16 B/voxel — is the one that hits this ceiling.
+  //
+  // On this adapter both are 4,294,967,295 B, which is why the distinction
+  // costs nothing here and would cost the whole verdict on hardware where they
+  // differ (they commonly do; 128 MiB and 256 MiB binding limits are ordinary).
+  const allocations = ([
+    { name: "octree payload buffer (56 B/voxel over five lanes)", bytes: Math.round(Number(octree.payloadMiB ?? 0) * 1024 ** 2), limit: "buffer" },
+    { name: "shared coverage candidate arena", bytes: view.coverageArenaBytes, limit: "binding" },
+    { name: "octree geometry lane (16 B/voxel)", bytes: Math.round(Number(octree.largestBindingMiB ?? 0) * 1024 ** 2), limit: "binding" },
+    { name: "octree CPU staging source", bytes: Math.round(Number(octree.sourceMiB ?? 0) * 1024 ** 2), limit: "buffer" },
+    { name: "brick raster instances", bytes: brickRasterBytes, limit: "binding" },
+    { name: "primitive candidate arena", bytes: candidateArenaBytes, limit: "binding" },
+    { name: "coverage counts + overflow tail", bytes: view.coverageCountBytes, limit: "binding" },
+  ] as { name: string; bytes: number; limit: "buffer" | "binding" }[]).sort((left, right) => right.bytes - left.bytes);
+  const bindings = allocations;
+  const overBinding = allocations.filter(({ bytes, limit }) => bytes > (limit === "buffer"
+    ? M1_MAX_LIMITS.maxBufferSize : M1_MAX_LIMITS.maxStorageBufferBindingSize));
+
+  return {
+    recordMultiplier,
+    recordCount,
+    cellSize_mm: cellSize_m * 1000,
+    leaves: octree.leaves,
+    nodes: octree.nodes,
+    voxelCapacity: octree.voxelCapacity,
+    maximumPerBrick: octree.maximumPerBrick,
+    overflowedBricks: octree.overflowedBricks,
+    mipState: octree.mipState,
+    mipPagesRequested: octree.mipPagesRequested,
+    bytes: {
+      octreePayload: Math.round(Number(octree.payloadMiB ?? 0) * 1024 ** 2),
+      octreeStructure: Math.round(Number(octree.structureMiB ?? 0) * 1024 ** 2),
+      octreeCpuSource: Math.round(Number(octree.sourceMiB ?? 0) * 1024 ** 2),
+      denseFluidTextures: Math.round(Number(octree.denseTextureMiB ?? 0) * 1024 ** 2),
+      nodeMipAtlas: Number(octree.mipAllocatedBytes ?? 0),
+      radianceAtlas: Number(octree.radianceAllocatedBytes ?? 0),
+      coverageArena: view.coverageArenaBytes,
+      coverageCounts: view.coverageCountBytes,
+      gBufferAttachments: view.gBufferBytes,
+      primitiveRecords: recordBytes,
+      candidateArena: candidateArenaBytes,
+      brickRasterInstances: brickRasterBytes,
+    },
+    totalMiB: Number(mib(total).toFixed(1)),
+    largestBinding: bindings[0],
+    largestBindingMiB: Number(mib(bindings[0].bytes).toFixed(1)),
+    bindingLimitMiB: Number(mib(M1_MAX_LIMITS.maxStorageBufferBindingSize).toFixed(1)),
+    fits: overBinding.length === 0 && octree.mipState === "ready",
+    doesNotFitBecause: [
+      ...overBinding.map(({ name, bytes, limit }) =>
+        `${name} needs ${mib(bytes).toFixed(1)} MiB against a ${mib(limit === "buffer"
+          ? M1_MAX_LIMITS.maxBufferSize : M1_MAX_LIMITS.maxStorageBufferBindingSize).toFixed(1)} MiB ${limit} limit`),
+      ...(octree.mipState === "ready" ? []
+        : [`node-mip pyramid state is "${octree.mipState}", not "ready" — cone lighting withdraws to exact traversal`]),
+    ],
+  };
+}
+
+if (auditMode) {
+  const auditRows: unknown[] = [];
+  for (const millimetres of cellSizes_mm) {
+    for (const multiplier of auditMultipliers) {
+      const started = performance.now();
+      try {
+        const row = { ...auditRow(multiplier, millimetres / 1000), audit_ms: Math.round(performance.now() - started) };
+        auditRows.push(row);
+        console.log(JSON.stringify(row));
+      } catch (error) {
+        const row = {
+          recordMultiplier: multiplier,
+          cellSize_mm: millimetres,
+          fits: false,
+          threw: error instanceof Error ? `${error.name}: ${error.message}` : String(error),
+        };
+        auditRows.push(row);
+        console.log(JSON.stringify(row));
+      }
+    }
+  }
+  console.log(JSON.stringify({
+    record: "svo-10x-memory-audit",
+    viewport: { width: auditWidth, height: auditHeight },
+    limits: M1_MAX_LIMITS,
+    rows: auditRows,
+  }));
+  process.exit(0);
 }
 
 const rows: Record<string, unknown>[] = [];

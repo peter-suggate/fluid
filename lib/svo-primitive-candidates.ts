@@ -17,10 +17,41 @@ export const SVO_PRIMITIVE_CANDIDATE_VERSION = 1;
  * must never fall off the acceleration structure merely because an editor
  * grows the scene beyond today's authored examples.
  */
-export const SVO_PRIMITIVE_CANDIDATE_MAXIMUM_LEAVES = 4_096;
+/**
+ * Raised from 4 096 for the 10x acceptance scene (`hero-garden-hose-x10`,
+ * `docs/svo-raster-visibility-handoff.md` W0). The hero publishes 501 records
+ * and its 10x densification publishes 5 039, so 4 096 stopped that scene
+ * drawing at all — loudly, from `buildSvoPrimitiveCandidates` below.
+ *
+ * **What 16 384 costs, in bytes.** The arena is
+ * `(leaves + nodes) x 64 B` with `nodes = 2 x leaves - 1`, so it is linear:
+ * 4 096 leaves reserved 786 368 B (0.75 MiB) and 16 384 reserve 3 145 664 B
+ * (3.00 MiB). That allocation is per dry-scene renderer, once, as one region of
+ * `SVO_DRY_SCENE_ARENA_LAYOUT`; only the records a scene actually publishes are
+ * ever uploaded into it. Against the ~190 MB per-pixel coverage buffer the same
+ * program is sizing (handoff §8), 2.25 MiB is not the memory worth arguing
+ * about — but it is linear in this constant, so the next raise costs the same
+ * again and the number belongs beside it.
+ *
+ * Four times the hero's 10x need rather than exactly it: the surrounding
+ * capacities are cliffs, and a ceiling that a scene sits just under is a ceiling
+ * someone hits while authoring.
+ */
+export const SVO_PRIMITIVE_CANDIDATE_MAXIMUM_LEAVES = 16_384;
 export const SVO_PRIMITIVE_CANDIDATE_MAXIMUM_NODES = 2 * SVO_PRIMITIVE_CANDIDATE_MAXIMUM_LEAVES - 1;
-/** Balanced median construction needs ceil(log2(4096)) + the current node. */
-export const SVO_PRIMITIVE_CANDIDATE_MAXIMUM_STACK = 16;
+/**
+ * Balanced median construction needs ceil(log2(leaves)) + the current node.
+ *
+ * Derived rather than written down, because it stops being right the moment the
+ * leaf count moves and the failure is not loud: the shader's traversal drops
+ * children it has no stack room for (`stackSize+2u<=MAX`, the WGSL in
+ * `lib/webgpu-svo-dry-scene.ts`), so an undersized stack is *missing geometry*
+ * rather than an error. The three-entry margin is the one 16 carried against
+ * 4 096's twelve levels, kept so the value is unchanged in spirit; at 16 384 it
+ * resolves to 18, which is two more u32 of shader stack per traversal.
+ */
+export const SVO_PRIMITIVE_CANDIDATE_MAXIMUM_STACK =
+  Math.ceil(Math.log2(SVO_PRIMITIVE_CANDIDATE_MAXIMUM_LEAVES)) + 1 + 3;
 export const SVO_PRIMITIVE_CANDIDATE_LEAF_SENTINEL = 0xffff_ffff;
 
 export interface SvoPrimitiveCandidateBounds {
@@ -53,7 +84,14 @@ export interface SvoPrimitiveCandidateArena {
   readonly cacheKey: string;
 }
 
-/** Fixed GPU arena capacity: live primitives followed by their complete BVH. */
+/**
+ * Fixed GPU arena capacity: live primitives followed by their complete BVH.
+ *
+ * 3 145 664 B at 16 384 leaves, against 786 368 B at the 4 096 this held before
+ * W0. Linear in the leaf count — see the note on
+ * `SVO_PRIMITIVE_CANDIDATE_MAXIMUM_LEAVES` — and consumed by
+ * `SVO_DRY_SCENE_ARENA_LAYOUT`, which is where the buffer is actually created.
+ */
 export const SVO_PRIMITIVE_CANDIDATE_ARENA_RECORD_CAPACITY =
   SVO_PRIMITIVE_CANDIDATE_MAXIMUM_LEAVES + SVO_PRIMITIVE_CANDIDATE_MAXIMUM_NODES;
 export const SVO_PRIMITIVE_CANDIDATE_ARENA_SIZE_BYTES =
@@ -116,14 +154,21 @@ function union(entries: readonly SvoPrimitiveCandidateBounds[]): SvoPrimitiveCan
 function packNodes(nodes: readonly SvoPrimitiveCandidateNode[]): Uint32Array<ArrayBuffer> {
   const buffer = new ArrayBuffer(nodes.length * SVO_PRIMITIVE_RECORD_STRIDE_BYTES);
   const words = new Uint32Array(buffer), floats = new Float32Array(buffer);
-  nodes.forEach((node, index) => {
-    const base = index * SVO_PRIMITIVE_RECORD_WORDS;
-    floats.set([node.minimum_m.x, node.minimum_m.y, node.minimum_m.z], base);
-    words[base + 3] = node.leftOrPrimitiveIndex;
-    floats.set([node.maximum_m.x, node.maximum_m.y, node.maximum_m.z], base + 4);
-    words[base + 7] = node.rightChildIndex;
-  });
+  nodes.forEach((node, index) => writePackedNode(words, floats, index, node));
   return words;
+}
+
+function writePackedNode(
+  words: Uint32Array,
+  floats: Float32Array,
+  index: number,
+  node: SvoPrimitiveCandidateNode,
+): void {
+  const base = index * SVO_PRIMITIVE_RECORD_WORDS;
+  floats.set([node.minimum_m.x, node.minimum_m.y, node.minimum_m.z], base);
+  words[base + 3] = node.leftOrPrimitiveIndex;
+  floats.set([node.maximum_m.x, node.maximum_m.y, node.maximum_m.z], base + 4);
+  words[base + 7] = node.rightChildIndex;
 }
 
 function hashPacked(words: Uint32Array): string {
@@ -221,6 +266,93 @@ export function refitSvoPrimitiveCandidates(
     packedRecords,
     cacheKey: `svo-primitive-candidates-v${SVO_PRIMITIVE_CANDIDATE_VERSION}:refit-${hashPacked(packedRecords)}`,
   });
+}
+
+/** Topology-only state built once for O(dirty * depth) live refits. */
+export interface SvoPrimitiveCandidateRefitPlan {
+  readonly publication: SvoPrimitiveCandidatePublication;
+  readonly parentByNode: Int32Array<ArrayBuffer>;
+  readonly depthByNode: Uint16Array<ArrayBuffer>;
+  readonly leafByPrimitive: Int32Array<ArrayBuffer>;
+}
+
+/** Validate once, then detach mutable node/packing mirrors for animation. */
+export function createSvoPrimitiveCandidateRefitPlan(
+  source: SvoPrimitiveCandidatePublication,
+): SvoPrimitiveCandidateRefitPlan {
+  validateCandidatePublication(source);
+  const nodes = source.nodes.map((node) => ({
+    minimum_m: { ...node.minimum_m }, maximum_m: { ...node.maximum_m },
+    leftOrPrimitiveIndex: node.leftOrPrimitiveIndex,
+    rightChildIndex: node.rightChildIndex,
+  }));
+  const parentByNode = new Int32Array(nodes.length); parentByNode.fill(-1);
+  const depthByNode = new Uint16Array(nodes.length);
+  const leafByPrimitive = new Int32Array(source.primitiveCount); leafByPrimitive.fill(-1);
+  const stack: { index: number; depth: number }[] = [{ index: source.rootNodeIndex, depth: 0 }];
+  while (stack.length) {
+    const { index, depth } = stack.pop()!;
+    depthByNode[index] = depth;
+    const node = nodes[index];
+    if (node.rightChildIndex === SVO_PRIMITIVE_CANDIDATE_LEAF_SENTINEL) {
+      leafByPrimitive[node.leftOrPrimitiveIndex] = index;
+    } else {
+      parentByNode[node.leftOrPrimitiveIndex] = index;
+      parentByNode[node.rightChildIndex] = index;
+      stack.push({ index: node.leftOrPrimitiveIndex, depth: depth + 1 },
+        { index: node.rightChildIndex, depth: depth + 1 });
+    }
+  }
+  const publication: SvoPrimitiveCandidatePublication = Object.freeze({
+    version: source.version,
+    primitiveCount: source.primitiveCount,
+    rootNodeIndex: source.rootNodeIndex,
+    nodes,
+    packedRecords: new Uint32Array(source.packedRecords),
+    // A live refit intentionally has no per-frame content hash.
+    cacheKey: `${source.cacheKey}:incremental`,
+  });
+  return Object.freeze({ publication, parentByNode, depthByNode, leafByPrimitive });
+}
+
+/** Refit dirty leaves and their ancestor closure, updating only their packed records. */
+export function refitSvoPrimitiveCandidatesIncremental(
+  descriptors: readonly SvoFinitePrimitiveDescriptor[],
+  plan: SvoPrimitiveCandidateRefitPlan,
+  dirtyPrimitiveIndices: readonly number[],
+): { readonly publication: SvoPrimitiveCandidatePublication; readonly dirtyNodeIndices: readonly number[] } {
+  const publication = plan.publication;
+  if (descriptors.length !== publication.primitiveCount) throw new Error("SVO primitive candidate refit count mismatch");
+  const dirtyNodes = new Set<number>();
+  for (const primitiveIndex of dirtyPrimitiveIndices) {
+    if (!Number.isSafeInteger(primitiveIndex) || primitiveIndex < 0 || primitiveIndex >= descriptors.length) {
+      throw new RangeError("SVO primitive candidate dirty index is invalid");
+    }
+    let nodeIndex = plan.leafByPrimitive[primitiveIndex];
+    if (nodeIndex < 0) continue; // Deliberately omitted owner (for example an open shell).
+    while (nodeIndex >= 0 && !dirtyNodes.has(nodeIndex)) {
+      dirtyNodes.add(nodeIndex);
+      nodeIndex = plan.parentByNode[nodeIndex];
+    }
+  }
+  const ordered = [...dirtyNodes].sort((left, right) => plan.depthByNode[right] - plan.depthByNode[left]);
+  const nodes = publication.nodes as SvoPrimitiveCandidateNode[];
+  const words = publication.packedRecords;
+  const floats = new Float32Array(words.buffer, words.byteOffset, words.length);
+  for (const nodeIndex of ordered) {
+    const topology = nodes[nodeIndex];
+    const bounds = topology.rightChildIndex === SVO_PRIMITIVE_CANDIDATE_LEAF_SENTINEL
+      ? svoPrimitiveCandidateBounds(descriptors[topology.leftOrPrimitiveIndex])
+      : union([nodes[topology.leftOrPrimitiveIndex], nodes[topology.rightChildIndex]]);
+    const node = {
+      ...bounds,
+      leftOrPrimitiveIndex: topology.leftOrPrimitiveIndex,
+      rightChildIndex: topology.rightChildIndex,
+    };
+    nodes[nodeIndex] = node;
+    writePackedNode(words, floats, nodeIndex, node);
+  }
+  return { publication, dirtyNodeIndices: ordered };
 }
 
 function validateCandidatePublication(publication: SvoPrimitiveCandidatePublication): void {

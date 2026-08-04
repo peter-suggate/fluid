@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { cloneScene, validateScene, type SceneDescription } from "../lib/model";
+import { cloneScene, markSceneRevision, sceneRevision, validateScene, type SceneDescription } from "../lib/model";
 import { getScenePreset } from "../lib/scenes";
 import { applySceneDraft, useSceneDraftStore } from "../lib/stores/scene-draft-store";
 import { useSceneStore } from "../lib/stores/scene-store";
@@ -40,6 +40,17 @@ test("the committed scene is returned unchanged when nothing is being dragged", 
   const scene = preset("water-box-dam-break");
   assert.equal(applySceneDraft(scene, undefined), scene,
     "identity must be preserved at rest, so nothing downstream re-derives per frame");
+});
+
+test("scene revisions advance only when the immutable document changes", () => {
+  const scene = markSceneRevision(preset("water-box-dam-break"));
+  const draft = { subject: "terrain" as const, label: "terrain", patch: { randomSeed: scene.randomSeed + 1 } };
+  const first = applySceneDraft(scene, draft);
+  const repeated = applySceneDraft(scene, draft);
+  assert.equal(repeated, first, "a stable draft must not allocate or republish every render frame");
+  assert.equal(sceneRevision(repeated), sceneRevision(first));
+  const changed = applySceneDraft(scene, { ...draft, patch: { randomSeed: scene.randomSeed + 2 } });
+  assert.notEqual(sceneRevision(changed), sceneRevision(first));
 });
 
 test("a draft never reaches the solver's rebuild identity", () => {

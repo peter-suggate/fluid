@@ -11,7 +11,15 @@ export type PerformanceLane = "main-thread" | "physics" | "presentation";
 export type PerformanceMeasurementSource =
   | "cpu-active-wall"
   | "gpu-hardware-timestamp"
-  | "gpu-queue-wall";
+  | "gpu-queue-wall"
+  /**
+   * Per-pass `beginningOfPassWriteIndex`/`endOfPassWriteIndex` pairs.
+   *
+   * Still genuine hardware execution time, but *not* a partition of a frame:
+   * see `GPUPassTimestampRecorder` for why a boundary chain cannot be one on
+   * Dawn/Metal, and what the resulting total does and does not mean.
+   */
+  | "gpu-pass-timestamp";
 
 export type PaperPhaseId =
   | "frame-control"
@@ -32,6 +40,21 @@ export type PaperPhaseId =
   | "svo-cone-lighting"
   | "svo-environment-gi"
   | "svo-primary"
+  /**
+   * The authored SDF set's own visibility passes (coverage → resolve →
+   * overflow, or the direct proxy raster they replace).
+   *
+   * Distinct from `svo-primary`, which is the octree brick primary. The two
+   * shared one id while the SDF set had only the direct fragment, and that made
+   * the largest row in the hero frame — 85 % of it — invisible to every
+   * aggregation that groups by phase id rather than by label.
+   */
+  | "svo-scene-primitive"
+  /**
+   * The near-field analytic band (W3): the camera-local record set that stays
+   * analytic while everything behind it resolves from voxels.
+   */
+  | "svo-band"
   | "svo-brick-cull"
   | "svo-rigid"
   | "svo-glass"
@@ -853,6 +876,336 @@ export class GPUStageTimestampRecorder {
     this.encoderBreakSource.destroy();
     this.encoderBreakTarget.destroy();
   }
+}
+
+/** One pass, bracketed by its own pair of counters. */
+export interface GPUPassTimestampSample {
+  label: string;
+  kind: "compute" | "render";
+  /** Nanosecond-domain begin, rebased on the earliest sampled begin in the frame. */
+  begin_ms: number;
+  end_ms: number;
+  /**
+   * End minus begin. **Only a cost when `trusted`.** For a render pass on a
+   * tile-based deferred GPU this is a *window*, not a duration — see `trusted`.
+   */
+  duration_ms: number;
+  /** False when the hardware wrote no counter for this pass; see `read`. */
+  sampled: boolean;
+  /**
+   * Whether `duration_ms` is this pass's cost.
+   *
+   * True for compute passes, false for render passes on a tile-based deferred
+   * renderer, and the difference is measured rather than assumed. Apple's tiler
+   * hoists every pass's vertex stage to the front of the frame and defers its
+   * fragment stage to the back, and the counter pair brackets [vertex start,
+   * fragment end] — so a render pass's window can span nearly the whole frame
+   * whatever it cost. From this repository's own xctrace capture
+   * (`docs/svo-render-frame-anatomy.data.js`): the deferred dry-lighting pass
+   * runs its vertex stage at t=1.159 and its fragment stage at t=393.659 inside
+   * a 405.6 ms frame, so its pair reads ~403 ms for 10.7 ms of work.
+   *
+   * Cross-checked against xctrace on the SVO render path: compute passes agree
+   * (compact cone visibility, 29.62 timestamp vs 28.29 xctrace) and render
+   * passes do not (live-scene primitive overflow, 29.82 vs 0.144 — 200x). The
+   * tell is that the last-encoded render pass tracks the frame wall minus a
+   * constant across an 8x frame-time change.
+   *
+   * Render-pass attribution on this hardware needs per-stage sampling, which
+   * WebGPU does not expose; `tools/profile-svo-render-xctrace.ts` is the lane
+   * that can answer it. Nothing here may quietly present a window as a cost.
+   */
+  trusted: boolean;
+}
+
+export interface GPUPassTimestampReading {
+  passes: readonly GPUPassTimestampSample[];
+  /**
+   * Earliest sampled begin to latest sampled end. This *is* a real hardware
+   * interval and is the honest answer to "how long was the GPU busy with this
+   * frame": both endpoints are genuine hardware events (the first stage to
+   * start and the last to finish), and overlap between passes is inside it
+   * exactly once. It survives the tiler reordering that invalidates individual
+   * render-pass durations, because reordering moves stages *within* the span.
+   */
+  span_ms: number;
+  /**
+   * Sum of every per-pass duration, trusted or not. Retained only so a caller
+   * can see how far the render-pass windows inflate it; it is not a frame time
+   * and it is not an attribution. Prefer `trustedSum_ms`.
+   */
+  sum_ms: number;
+  /**
+   * Sum over compute passes alone — the passes whose counters bracket their own
+   * work. Still an over-count where adjacent compute stages stay in flight
+   * (measured at up to 1.9x on this path), so it is a ratio instrument between
+   * arms under identical instrumentation, never a clock.
+   */
+  trustedSum_ms: number;
+  /** `sum_ms / span_ms`. 1 is strictly serial; above 1 is the overlap factor. */
+  overlap: number;
+  sampledPassCount: number;
+  /** Passes whose duration is a tiler window rather than a cost. */
+  untrustedPassCount: number;
+}
+
+/**
+ * Per-pass GPU time, taken from each pass's own begin/end counters.
+ *
+ * ## Why this exists beside the boundary-chain recorders above
+ *
+ * `GPUPerformanceTraceRecorder`, `DynamicGPUPerformanceTraceRecorder` and
+ * `GPUStageTimestampRecorder` all read a frame as one *chain*: boundary i and
+ * i+1 delimit phase i, so the phases partition the whole interval by
+ * construction and nothing can be double counted. That is the right model when
+ * the boundaries land where they were encoded. On Dawn/Metal in the SVO render
+ * path they do not — a standalone marker compute pass gets scheduled away from
+ * the work it was meant to bracket, and one displaced boundary poisons the
+ * entire frame rather than one phase. Measured on this path: a 95 ms frame came
+ * back as five boundaries spanning 327 us with one 90 ms sample *ahead* of its
+ * successor, and `decodeGPUTimestampPartition` correctly rejected all eighteen
+ * attempts. That is what makes `FLUID_SVO_DRY_FRAME_PHASE_TRACE=1` and
+ * `FLUID_SVO_DRY_FRAME_TIMING=gpu` abort rather than mis-report.
+ *
+ * A `beginningOfPassWriteIndex`/`endOfPassWriteIndex` pair has no such failure
+ * mode: the two counters bracket that pass and nothing else, so a reordered
+ * pass reports its own duration in the wrong place in the list rather than
+ * corrupting its neighbours.
+ *
+ * ## What is given up, stated plainly
+ *
+ * Two things, and the second is the sharper one.
+ *
+ * **The durations no longer sum to the frame.** Apple keeps adjacent stages in
+ * flight, so `sum_ms` over-counts — 191.8 ms of passes inside a 99.0 ms fence,
+ * in the capture that motivated this class. `span_ms` is the frame-time answer,
+ * the sums are the attribution answer, and `overlap` reports how far apart they
+ * are so a caller cannot quietly treat one as the other.
+ *
+ * **A render pass's pair is not a duration at all.** See `trusted` on
+ * `GPUPassTimestampSample`: this is a tile-based deferred GPU, the pair
+ * brackets [tiler-hoisted vertex start, deferred fragment end], and the window
+ * can span the frame whatever the pass cost — measured 200x wrong on this path.
+ * So render-pass rows here carry `trusted: false`, they are excluded from
+ * `trustedSum_ms` and from `passTimestampPerformanceTrace`, and any report that
+ * shows them must mark them unavailable rather than plot them. That is not a
+ * conservative stance: publishing a window as a cost has already produced one
+ * wrong conclusion on this program ("deferred lighting scales 10.5x with record
+ * count"; it is 2.70 ms at 1x and 6.21 ms at 10x).
+ */
+export class GPUPassTimestampRecorder {
+  private readonly querySet: GPUQuerySet;
+  private readonly resolveBuffer: GPUBuffer;
+  private readonly readBuffer: GPUBuffer;
+  /** Dawn/Metal folds adjacent compute passes into one encoder, and a folded
+   * pass never receives its counter sample. A 4-byte blit ahead of the pass
+   * forces the encoder break that makes the sample observable. It is the only
+   * command this recorder adds. */
+  private readonly encoderBreakSource: GPUBuffer;
+  private readonly encoderBreakTarget: GPUBuffer;
+  private readonly labels: { label: string; kind: "compute" | "render" }[] = [];
+  private resolved = false;
+  private disposed = false;
+
+  static supported(device: GPUDevice): boolean {
+    return device.features.has("timestamp-query");
+  }
+
+  constructor(
+    private readonly device: GPUDevice,
+    /** Two counters per pass. */
+    private readonly capacity = 512,
+    private readonly label = "pass timestamps",
+  ) {
+    this.querySet = device.createQuerySet({ type: "timestamp", count: capacity });
+    this.resolveBuffer = device.createBuffer({
+      label: `${label} resolve`,
+      size: capacity * 8,
+      usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC,
+    });
+    this.readBuffer = device.createBuffer({
+      label: `${label} read`,
+      size: capacity * 8,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+    this.encoderBreakSource = device.createBuffer({
+      label: `${label} encoder break source`, size: 4, usage: GPUBufferUsage.COPY_SRC,
+    });
+    this.encoderBreakTarget = device.createBuffer({
+      label: `${label} encoder break target`, size: 4, usage: GPUBufferUsage.COPY_DST,
+    });
+  }
+
+  /**
+   * Wrap the frame's encoder; every pass opened through it carries a pair.
+   * A descriptor that already asked for timestamp writes belongs to another
+   * recorder and is never displaced.
+   */
+  instrument(encoder: GPUCommandEncoder): GPUCommandEncoder {
+    const claim = (target: GPUCommandEncoder, descriptorLabel: string | undefined, occupied: boolean,
+      kind: "compute" | "render") => {
+      if (occupied || this.disposed || 2 * (this.labels.length + 1) > this.capacity) return undefined;
+      const base = 2 * this.labels.length;
+      this.labels.push({ label: descriptorLabel ?? `pass ${this.labels.length}`, kind });
+      target.copyBufferToBuffer(this.encoderBreakSource, 0, this.encoderBreakTarget, 0, 4);
+      return { querySet: this.querySet, beginningOfPassWriteIndex: base, endOfPassWriteIndex: base + 1 };
+    };
+    return new Proxy(encoder, {
+      get: (target, property) => {
+        if (property === "beginComputePass") {
+          return (descriptor?: GPUComputePassDescriptor) => {
+            const writes = claim(target, descriptor?.label, descriptor?.timestampWrites !== undefined, "compute");
+            return target.beginComputePass(writes ? { ...descriptor, timestampWrites: writes } : descriptor);
+          };
+        }
+        if (property === "beginRenderPass") {
+          return (descriptor: GPURenderPassDescriptor) => {
+            const writes = claim(target, descriptor.label, descriptor.timestampWrites !== undefined, "render");
+            return target.beginRenderPass(writes ? { ...descriptor, timestampWrites: writes } : descriptor);
+          };
+        }
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    }) as GPUCommandEncoder;
+  }
+
+  /** False when the instrumented encoder opened no pass at all. */
+  resolve(encoder: GPUCommandEncoder): boolean {
+    if (this.labels.length === 0 || this.disposed) return false;
+    this.resolved = true;
+    const count = 2 * this.labels.length;
+    encoder.resolveQuerySet(this.querySet, 0, count, this.resolveBuffer, 0);
+    encoder.copyBufferToBuffer(this.resolveBuffer, 0, this.readBuffer, 0, count * 8);
+    return true;
+  }
+
+  /**
+   * Every pass, with the ones the hardware never sampled marked rather than
+   * guessed at.
+   *
+   * A pass whose counters both come back zero was folded away or ran no stage —
+   * `raster-primary` encodes a thin-glass discovery pass with an instance count
+   * of zero, and that reports nothing on this hardware. Failing the whole frame
+   * on it would mean the raster path could never be measured at all, so an
+   * unsampled pass keeps its place in the list at zero. An *inverted* sampled
+   * pair still fails the frame, because that is the hardware disagreeing with
+   * itself rather than declining to answer.
+   */
+  async read(): Promise<GPUPassTimestampReading | undefined> {
+    try {
+      if (!this.resolved || this.disposed) return undefined;
+      const bytes = 2 * this.labels.length * 8;
+      await this.readBuffer.mapAsync(GPUMapMode.READ, 0, bytes);
+      const stamps = new BigUint64Array(this.readBuffer.getMappedRange(0, bytes).slice(0));
+      let origin: bigint | undefined;
+      let latest: bigint | undefined;
+      for (let index = 0; index < this.labels.length; index += 1) {
+        const begin = stamps[2 * index];
+        const end = stamps[2 * index + 1];
+        if (begin === 0n || end === 0n) continue;
+        if (end < begin) return undefined;
+        if (origin === undefined || begin < origin) origin = begin;
+        if (latest === undefined || end > latest) latest = end;
+      }
+      if (origin === undefined || latest === undefined) return undefined;
+      const passes: GPUPassTimestampSample[] = [];
+      let sum_ms = 0;
+      let trustedSum_ms = 0;
+      for (let index = 0; index < this.labels.length; index += 1) {
+        const { label, kind } = this.labels[index];
+        const trusted = kind === "compute";
+        const begin = stamps[2 * index];
+        const end = stamps[2 * index + 1];
+        if (begin === 0n || end === 0n) {
+          passes.push({ label, kind, begin_ms: 0, end_ms: 0, duration_ms: 0, sampled: false, trusted: false });
+          continue;
+        }
+        const duration_ms = Number(end - begin) / 1e6;
+        sum_ms += duration_ms;
+        if (trusted) trustedSum_ms += duration_ms;
+        passes.push({
+          label,
+          kind,
+          begin_ms: Number(begin - origin) / 1e6,
+          end_ms: Number(end - origin) / 1e6,
+          duration_ms,
+          sampled: true,
+          trusted,
+        });
+      }
+      const span_ms = Number(latest - origin) / 1e6;
+      if (!Number.isFinite(span_ms) || span_ms <= 0 || span_ms >= 10_000) return undefined;
+      return {
+        passes,
+        span_ms,
+        sum_ms,
+        trustedSum_ms,
+        overlap: sum_ms / span_ms,
+        sampledPassCount: passes.filter(({ sampled }) => sampled).length,
+        untrustedPassCount: passes.filter(({ sampled, trusted }) => sampled && !trusted).length,
+      };
+    } finally {
+      if (this.readBuffer.mapState === "mapped") this.readBuffer.unmap();
+      this.destroy();
+    }
+  }
+
+  destroy(): void {
+    if (this.disposed) return;
+    this.disposed = true;
+    this.querySet.destroy();
+    this.resolveBuffer.destroy();
+    this.readBuffer.destroy();
+    this.encoderBreakSource.destroy();
+    this.encoderBreakTarget.destroy();
+  }
+}
+
+/**
+ * A per-pass reading as a `PerformanceTrace`, laid out end to end.
+ *
+ * The intervals are synthetic — consecutive, in encode order — because the real
+ * ones overlap and `partitionPerformanceTrace` rejects overlap rather than
+ * clipping it into a lie. The total is therefore `sum_ms`, not `span_ms`, and
+ * the context carries `:pass-sum` so no consumer can read the total as a frame
+ * time by accident. `span_ms` is what a frame time should be taken from.
+ */
+export function passTimestampPerformanceTrace(input: {
+  reading: GPUPassTimestampReading;
+  sampleId: number;
+  lane: "physics" | "presentation";
+  context: string;
+  capturedAt_ms?: number;
+  classify?: (label: string) => PaperPhaseId;
+}): PerformanceTrace | undefined {
+  // Compute passes only. A render pass's counter pair is a tiler window and
+  // putting it in a phase would publish the frame wall under a shader's name —
+  // the failure this whole file exists to make impossible.
+  const sampled = input.reading.passes.filter(({ sampled, trusted }) => sampled && trusted);
+  if (sampled.length === 0) return undefined;
+  let cursor = 0;
+  const intervals: PerformanceInterval[] = sampled.map((pass) => {
+    const start_ms = cursor;
+    cursor += pass.duration_ms;
+    return {
+      id: input.classify?.(pass.label) ?? "other",
+      label: pass.label,
+      start_ms,
+      end_ms: cursor,
+    };
+  });
+  return partitionPerformanceTrace({
+    sampleId: input.sampleId,
+    domain: "gpu",
+    lane: input.lane,
+    context: `${input.context}:compute-pass-sum`,
+    measurementSource: "gpu-pass-timestamp",
+    capturedAt_ms: input.capturedAt_ms,
+    start_ms: 0,
+    end_ms: cursor,
+    intervals,
+  });
 }
 
 /**

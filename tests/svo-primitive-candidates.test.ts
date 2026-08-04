@@ -9,9 +9,11 @@ import {
   SVO_PRIMITIVE_CANDIDATE_MAXIMUM_NODES,
   SVO_PRIMITIVE_CANDIDATE_MAXIMUM_STACK,
   buildSvoPrimitiveCandidates,
+  createSvoPrimitiveCandidateRefitPlan,
   packSvoPrimitiveCandidateArena,
   querySvoPrimitiveCandidates,
   refitSvoPrimitiveCandidates,
+  refitSvoPrimitiveCandidatesIncremental,
   svoPrimitiveCandidateBounds,
   traceSvoPrimitiveCandidates,
 } from "../lib/svo-primitive-candidates";
@@ -145,6 +147,28 @@ test("live refit moves bounds without rebuilding BVH topology", () => {
     built.nodes.map(({ leftOrPrimitiveIndex, rightChildIndex }) => [leftOrPrimitiveIndex, rightChildIndex]));
   assert.ok(!querySvoPrimitiveCandidates(refit, { origin_m: { x: 0, y: 0, z: 2 }, direction: { x: 0, y: 0, z: -1 } }).primitiveIndices.includes(0));
   assert.ok(querySvoPrimitiveCandidates(refit, { origin_m: { x: 10, y: 0, z: 2 }, direction: { x: 0, y: 0, z: -1 } }).primitiveIndices.includes(0));
+});
+
+test("incremental live refit touches only a dirty leaf and its ancestor closure", () => {
+  const rest: SvoFinitePrimitiveDescriptor[] = Array.from({ length: 8 }, (_, index) => ({
+    kind: "sphere", primitiveId: index + 1, materialId: 2, ownerId: index,
+    center_m: { x: index * 2, y: 0, z: 0 }, radius_m: .5,
+  }));
+  const built = buildSvoPrimitiveCandidates(rest);
+  const plan = createSvoPrimitiveCandidateRefitPlan(built);
+  const before = new Uint32Array(plan.publication.packedRecords);
+  const moved = [...rest];
+  moved[5] = { ...rest[5], center_m: { x: 10, y: 3, z: 0 } };
+  const incremental = refitSvoPrimitiveCandidatesIncremental(moved, plan, [5]);
+  const full = refitSvoPrimitiveCandidates(moved, built);
+  assert.deepEqual(incremental.publication.packedRecords, full.packedRecords);
+  assert.ok(incremental.dirtyNodeIndices.length <= Math.ceil(Math.log2(rest.length)) + 1);
+  const dirty = new Set(incremental.dirtyNodeIndices);
+  for (let nodeIndex = 0; nodeIndex < built.nodes.length; nodeIndex += 1) {
+    if (dirty.has(nodeIndex)) continue;
+    const start = nodeIndex * 16;
+    assert.deepEqual(incremental.publication.packedRecords.slice(start, start + 16), before.slice(start, start + 16));
+  }
 });
 
 test("balanced BVH work is bounded and empty rays perform zero exact intersections", () => {

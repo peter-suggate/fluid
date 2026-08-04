@@ -644,8 +644,17 @@ test("halving the floret quadruples what the surface costs", () => {
     planBonsai(specFor(BONSAI_POND_CANOPY)).leafCount,
     "an aggregate's grain must cost no records at all; that is the whole trade",
   );
-  assert.ok(fine.leafCount > 0.6 * SVO_PRIMITIVE_CANDIDATE_MAXIMUM_LEAVES,
-    "one halving should already take most of the whole scene's candidate index");
+  // Against 2 458 — six tenths of the 4 096 the scene-wide candidate index held
+  // when this was written — rather than against the constant, which W0 of the
+  // raster-visibility program raised to 16 384 for the `hero-garden-hose-x10`
+  // acceptance scene. The claim being made is about the *record budget a set is
+  // authored inside of*, and that is still the hero's: a crown allowed to spend
+  // 2 600 records on one halving is the economy the aggregate exists to escape,
+  // whatever headroom the arena has since been given for a ten-times scene.
+  assert.ok(fine.leafCount > 0.6 * 4_096,
+    "one halving should already take most of the record budget the hero set is authored inside of");
+  assert.ok(SVO_PRIMITIVE_CANDIDATE_MAXIMUM_LEAVES >= 4_096,
+    "the candidate index may grow, but this bound was measured against its 4 096");
 });
 
 test("the floret's span on a lattice is reported, and is not the constraint", () => {

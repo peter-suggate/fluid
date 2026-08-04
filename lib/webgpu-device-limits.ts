@@ -5,6 +5,7 @@ type FluidAdapterLimits = Pick<GPUSupportedLimits,
   | "maxTextureDimension2D"
   | "maxTextureDimension3D"
   | "maxSampledTexturesPerShaderStage"
+  | "maxStorageTexturesPerShaderStage"
   | "maxColorAttachmentBytesPerSample"
   | "maxComputeInvocationsPerWorkgroup"
   | "maxComputeWorkgroupSizeX"
@@ -42,6 +43,10 @@ export function requiredFluidDeviceLimits(limits: FluidAdapterLimits): Record<st
     // deferred fragment stage. Request the adapter value; capability checks in
     // the renderer still fail closed on devices that cannot expose it.
     maxSampledTexturesPerShaderStage: limits.maxSampledTexturesPerShaderStage,
+    // W2's compute resolve storage-writes the four G-buffer colour planes plus
+    // a transient r32float depth plane. Request the adapter's advertised value;
+    // adapters below five keep the exact fragment resolve fallback.
+    maxStorageTexturesPerShaderStage: limits.maxStorageTexturesPerShaderStage,
     // Requested, never assumed: adapters that cannot grant this still produce a
     // valid device, and the raster-primary renderer fails closed against the
     // granted device limit rather than against this request.

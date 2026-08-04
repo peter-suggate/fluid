@@ -105,7 +105,7 @@ test("production rasterizes requested primary visibility or fails closed", () =>
   // keeps the raster path from advertising a cache that can never fill.
   assert.match(rendererSource, /const coherence = traversal === "raster-primary" \? "off" as const : "static-primary" as const/,
     "stationary primary reuse must follow the traversal, not be requested unconditionally");
-  assert.match(rendererSource, /new SparseVoxelDrySceneRenderer\([^]*traversal, "off", "split", 0, coherence, true, true, true\)/,
+  assert.match(rendererSource, /new SparseVoxelDrySceneRenderer\([^]*traversal, "off", "split",[^]*defaultThresholdPixels[^]*coherence, true, true, true\)/,
     "the production renderer must retain the measured split/coherence and analytic-raster capability");
   assert.match(rendererSource, /const primaryCoherenceKey = activeSvoTuning\.stationaryPrimaryReuseEnabled[^]*!sceneRuntime\.fluidSolver \|\| !this\.simulationRunning[^]*presentationCoherenceKey[^]*sceneEpoch/,
     "the opt-in must still restrict complete caller-owned keys to live scenes and paused solvers");

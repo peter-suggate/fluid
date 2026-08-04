@@ -23,6 +23,17 @@ import { VOXEL_MATERIAL_IDS } from "./voxel-scene";
 import type { SvoVec3 } from "./webgpu-svo-traversal";
 
 export const SVO_SCENE_GLASS_VERSION = "1" as const;
+/**
+ * Panes one environment may declare.
+ *
+ * Raising it is a one-line edit with a linear cost and no cliff behind it:
+ * three derived sites read this constant and move together — the packed arena
+ * (`SVO_SCENE_GLASS_ARENA_BYTES`, `lib/webgpu-svo-dry-scene.ts:258`), the
+ * traversal loop bound and its `dryVisibilityStepInvalidReason` guard
+ * (`:4013`, `:4078`). `traceGlass` breaks at the live pane count rather than
+ * the bound, so unused capacity costs nothing per ray; resident panes cost one
+ * bounding-sphere reject each.
+ */
 export const SVO_SCENE_GLASS_MAXIMUM_PANES = 256;
 
 const sceneGlassCache = new Map<string, SvoSceneGlassBuild>();
@@ -96,7 +107,9 @@ interface AuthoredSceneGlassPane {
 
 function positiveInteger(value: number, maximum: number, label: string): number {
   if (!Number.isSafeInteger(value) || value < 1 || value > maximum) {
-    throw new RangeError(`${label} must be an integer from 1 to ${maximum}`);
+    throw new RangeError(`${label} must be an integer from 1 to ${maximum};`
+      + " a caller cannot exceed the arena the shader was compiled against, so raise"
+      + " SVO_SCENE_GLASS_MAXIMUM_PANES (lib/svo-scene-glass.ts) instead of the per-call override");
   }
   return value;
 }
@@ -233,7 +246,11 @@ export function svoSceneGlassFromEnvironmentCatalog(
     ...environmentPanes(catalog, thickness_m),
   ];
   if (authored.length > maximumPanes) {
-    throw new RangeError(`Environment ${catalog.environmentId} needs ${authored.length} glass panes, exceeding the ${maximumPanes} record limit`);
+    throw new RangeError(`Environment ${catalog.environmentId} needs ${authored.length} glass panes, exceeding the `
+      + `${maximumPanes} record limit. There is no degrade below this: the whole glass build fails, and the caller`
+      + ` (lib/webgpu-renderer.ts) reports the scene blocked rather than dropping panes. Fix by raising`
+      + ` SVO_SCENE_GLASS_MAXIMUM_PANES to at least ${authored.length} — the arena bytes and the WGSL loop bound both`
+      + ` derive from it — or by declaring fewer glazing nodes in the environment catalog.`);
   }
   const unsupportedEntries = unsupportedCatalogGlass(catalog);
   const contentRevision = hashSvoPublication(new Uint32Array(), JSON.stringify({

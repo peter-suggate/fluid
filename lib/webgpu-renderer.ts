@@ -1,7 +1,7 @@
 import { WebGpuSvoFluidCoverage } from "./webgpu-svo-fluid-coverage";
 import { cameraBasis, dot } from "./math";
 import { sceneLatticeDimensions } from "./scene-lattice";
-import { canonicalScene, type CameraState, type SceneDescription } from "./model";
+import { canonicalScene, sceneRevision, type CameraState, type SceneDescription } from "./model";
 import { boundingRadius, type RigidBodyState } from "./rigid-body";
 import type { EulerianRenderState } from "./eulerian-solver";
 import type { GPUEulerianInfo, GPURigidLoad, GPUQuality } from "./webgpu-eulerian";
@@ -29,8 +29,14 @@ import { buildSparseVoxelDrySceneLightingMirrors, canConsumeSparseVoxelLighting,
 import {
   buildSvoScenePrimitives,
 } from "./svo-scene-primitives";
-import { buildSvoPrimitiveCandidates, refitSvoPrimitiveCandidates, svoPrimitiveCandidateBounds, type SvoPrimitiveCandidatePublication } from "./svo-primitive-candidates";
-import { packSvoPrimitiveRecords, type SvoPrimitiveDescriptor } from "./svo-primitive-abi";
+import {
+  buildSvoPrimitiveCandidates,
+  createSvoPrimitiveCandidateRefitPlan,
+  refitSvoPrimitiveCandidatesIncremental,
+  svoPrimitiveCandidateBounds,
+  type SvoPrimitiveCandidateRefitPlan,
+} from "./svo-primitive-candidates";
+import { packSvoPrimitiveRecords, SVO_PRIMITIVE_RECORD_WORDS, type SvoPrimitiveDescriptor } from "./svo-primitive-abi";
 import { swayedPrimitiveDescriptor, type EnvironmentProxySway } from "./scenery-sway";
 import {
   buildDefaultSvoMaterialRecords,
@@ -51,6 +57,7 @@ import {
 import { DEFAULT_SVO_RENDER_DIAGNOSTICS, normalizeSvoRenderDiagnostics, type SvoRenderDiagnostics } from "./svo-render-diagnostics";
 import { SparseVoxelRenderStageOverlay } from "./webgpu-svo-stage-overlay";
 import { DEFAULT_SVO_RENDER_TUNING, normalizeSvoRenderTuning, svoRenderTuningKey, type SvoRenderTuning } from "./svo-render-tuning";
+import { SVO_SCREEN_SPACE_TERMINATION_CONTRACT } from "./svo-screen-space-termination";
 import { isGPUInitializationAbort } from "./gpu-initialization";
 import { createGlobalFineLevelSetConsumerSource } from "./octree-consumer-sampling";
 import { OCTREE_TECHNIQUE_OVERLAY_CODES, isOctreeTechniqueOverlayMode, type OctreeTechniqueOverlayMode } from "./octree-technique-debug";
@@ -754,12 +761,15 @@ export class FluidLabRenderer {
   private svoDrySceneData?: SparseVoxelDrySceneData;
   /** Live render publication identity; deliberately independent of solver identity. */
   private renderSceneKey = "";
+  private renderSceneStamp = 0;
   private renderSceneRevision = 0;
   private liveSceneAnimation?: {
     readonly rest: readonly SvoPrimitiveDescriptor[];
     readonly sway: readonly (EnvironmentProxySway | undefined)[];
-    current: readonly SvoPrimitiveDescriptor[];
-    candidates: SvoPrimitiveCandidatePublication;
+    readonly swayIndices: readonly number[];
+    readonly current: SvoPrimitiveDescriptor[];
+    readonly records: Uint32Array<ArrayBuffer>;
+    readonly refitPlan: SvoPrimitiveCandidateRefitPlan;
     origin_ms?: number;
   };
   /** Deduplicates a visible failed-closed diagnostic while the previous pose remains authoritative. */
@@ -1027,6 +1037,7 @@ export class FluidLabRenderer {
     this.svoDrySceneSource = source;
     this.svoDrySceneData = undefined;
     this.renderSceneKey = "";
+    this.renderSceneStamp = 0;
     this.svoDryScenePipeline?.setSource(source);
     this.pendingLiveSvoPresentation = source
       ? new PendingLiveSvoPresentation(
@@ -1143,7 +1154,12 @@ export class FluidLabRenderer {
         // bodies. Asking for it there would only make a dead mode look live.
         const coherence = traversal === "raster-primary" ? "off" as const : "static-primary" as const;
         return new SparseVoxelDrySceneRenderer(device, this.uniformBuffer!, this.bodyBuffer!, "rgba16float",
-          traversal, "off", "split", 0, coherence, true, true, true);
+          traversal, "off", "split",
+          // Authored at the termination contract's reference viewport height;
+          // the shader scales it to the actual render target, including DPR
+          // and resolutionScale, so LOD is stable across displays.
+          traversal === "raster-primary" ? SVO_SCREEN_SPACE_TERMINATION_CONTRACT.defaultThresholdPixels : 0,
+          coherence, true, true, true);
       },
       (pipeline) => pipeline.initialize((label, completed, total) => this.reportSvoPipelineProgress(label, completed, total)),
       (pipeline) => {
@@ -1563,7 +1579,7 @@ export class FluidLabRenderer {
     this.device = undefined; this.context = undefined;
     this.upscalePipeline = undefined; this.upscaleSampler = undefined; this.upscaleBindGroup = undefined;
     this.waterPipeline = undefined; this.gridOverlayPipeline = undefined; this.techniqueOverlayPipeline = undefined; this.techniqueAuditOverlayPipeline = undefined; this.voxelDebugPipeline = undefined; this.svoDryScenePipeline = undefined; this.secondaryParticlePipeline = undefined; this.svoStageOverlay = undefined;
-    this.optionalPipelineTasks.clear(); this.failedOptionalPipelines.clear(); this.optionalPipelineFailures.clear(); this.svoDrySceneSource = undefined; this.svoSceneSidecar = undefined; this.svoDrySceneData = undefined; this.liveSceneAnimation = undefined; this.liveSceneAnimationFailure = undefined; this.renderSceneKey = ""; this.svoPipelineProgress = undefined; this.svoPipelineStartedAt_ms = undefined; this.pendingLiveSvoPresentation = undefined;
+    this.optionalPipelineTasks.clear(); this.failedOptionalPipelines.clear(); this.optionalPipelineFailures.clear(); this.svoDrySceneSource = undefined; this.svoSceneSidecar = undefined; this.svoDrySceneData = undefined; this.liveSceneAnimation = undefined; this.liveSceneAnimationFailure = undefined; this.renderSceneKey = ""; this.renderSceneStamp = 0; this.svoPipelineProgress = undefined; this.svoPipelineStartedAt_ms = undefined; this.pendingLiveSvoPresentation = undefined;
     this.svoPipelineAvailable = false; this.svoSourceAvailable = false; this.svoPublicationFailure = undefined; this.svoTerrainSupported = true; this.svoGlassSupported = true; this.svoMaterialsSupported = true; this.svoLightingSupported = true;
     this.uniformBuffer = undefined; this.bodyBuffer = undefined;
     this.presentationTexture = undefined; this.voxelDebugDepth = undefined; this.presentationTextureKey = "";
@@ -1804,7 +1820,7 @@ export class FluidLabRenderer {
         this.secondaryParticlePipeline?.setSource(undefined);
         this.voxelInspectionSource?.inspectionPublication?.setEnabled(false);this.voxelInspectionSource=undefined;
         this.voxelDebugPipeline?.setSource(undefined);this.voxelDebugSourceGeneration=-1;
-        this.svoDrySceneSource=undefined;this.svoDrySceneData=undefined;this.liveSceneAnimation=undefined;this.liveSceneAnimationFailure=undefined;this.renderSceneKey="";this.svoDryScenePipeline?.setSource(undefined);
+        this.svoDrySceneSource=undefined;this.svoDrySceneData=undefined;this.liveSceneAnimation=undefined;this.liveSceneAnimationFailure=undefined;this.renderSceneKey="";this.renderSceneStamp=0;this.svoDryScenePipeline?.setSource(undefined);
         previous.destroy();previousDestroyedForReset=true;
       }
       if(this.svoSceneSidecar===previousSidecar&&previousSidecar){
@@ -1893,8 +1909,11 @@ export class FluidLabRenderer {
    * next submitted frame without allocation or bind-group churn.
    */
   private publishRenderScene(scene: SceneDescription, solver: GPUSolverInstance | undefined): void {
-    const sceneKey = canonicalScene(scene);
-    if (sceneKey === this.renderSceneKey) return;
+    const stampedRevision = sceneRevision(scene);
+    const sceneKey = stampedRevision === undefined ? canonicalScene(scene) : "";
+    if (stampedRevision === undefined
+      ? sceneKey === this.renderSceneKey
+      : stampedRevision === this.renderSceneStamp) return;
     solver?.stageSceneUpdate?.(scene);
     const source = solver?.sparseVoxelSceneSource ?? this.svoDrySceneSource;
     if (!source) {
@@ -2009,14 +2028,18 @@ export class FluidLabRenderer {
       return;
     }
     const sway = scenePrimitives.metadata.map(({ sway: authoredSway }) => authoredSway);
-    this.liveSceneAnimation = sway.some(Boolean) ? {
+    const swayIndices = sway.flatMap((value, index) => value ? [index] : []);
+    this.liveSceneAnimation = swayIndices.length ? {
       rest: scenePrimitives.descriptors,
       sway,
-      current: scenePrimitives.descriptors,
-      candidates: primitiveCandidates,
+      swayIndices,
+      current: [...scenePrimitives.descriptors],
+      records: new Uint32Array(scenePrimitives.packedRecords),
+      refitPlan: createSvoPrimitiveCandidateRefitPlan(primitiveCandidates),
     } : undefined;
     this.renderSceneRevision = revision;
     this.renderSceneKey = sceneKey;
+    this.renderSceneStamp = stampedRevision ?? 0;
     this.pausedPresentationRevision += 1;
     } catch (error) {
       // The authored live scene is the sole authority. Retaining the prior
@@ -2041,19 +2064,41 @@ export class FluidLabRenderer {
     const now_ms = performance.now();
     animation.origin_ms ??= now_ms;
     const time_s = Math.max(0, now_ms - animation.origin_ms) / 1000;
-    const descriptors = animation.rest.map((descriptor, index) => {
-      const sway = animation.sway[index];
-      return sway ? swayedPrimitiveDescriptor(descriptor, sway, time_s) : descriptor;
-    });
-    const candidates = refitSvoPrimitiveCandidates(
-      descriptors as Parameters<typeof refitSvoPrimitiveCandidates>[0],
-      animation.candidates,
+    const dirtyBounds: SvoDrySceneDirtyBounds[] = [];
+    for (const index of animation.swayIndices) {
+      const before = animation.current[index];
+      const sway = animation.sway[index]!;
+      const after = swayedPrimitiveDescriptor(animation.rest[index], sway, time_s);
+      animation.current[index] = after;
+      animation.records.set(packSvoPrimitiveRecords([after]), index * SVO_PRIMITIVE_RECORD_WORDS);
+      if (before.kind === "terrain-heightfield" || after.kind === "terrain-heightfield") continue;
+      const oldBounds = svoPrimitiveCandidateBounds(before);
+      const newBounds = svoPrimitiveCandidateBounds(after);
+      dirtyBounds.push({
+        minimum: [
+          Math.min(oldBounds.minimum_m.x, newBounds.minimum_m.x),
+          Math.min(oldBounds.minimum_m.y, newBounds.minimum_m.y),
+          Math.min(oldBounds.minimum_m.z, newBounds.minimum_m.z),
+        ],
+        maximum: [
+          Math.max(oldBounds.maximum_m.x, newBounds.maximum_m.x),
+          Math.max(oldBounds.maximum_m.y, newBounds.maximum_m.y),
+          Math.max(oldBounds.maximum_m.z, newBounds.maximum_m.z),
+        ],
+      });
+    }
+    const refit = refitSvoPrimitiveCandidatesIncremental(
+      animation.current as Parameters<typeof refitSvoPrimitiveCandidatesIncremental>[0],
+      animation.refitPlan,
+      animation.swayIndices,
     );
-    const records = packSvoPrimitiveRecords(descriptors);
-    const dirtyBounds = svoSwayDirtyBounds(animation.current, descriptors, animation.sway);
+    const candidates = refit.publication;
+    const records = animation.records;
     const revision = this.renderSceneRevision >= 0xffff_fffe ? 1 : this.renderSceneRevision + 1;
     if (!pipeline.publishPrimitiveArena(records, candidates, revision, {
       dirtyBounds,
+      dirtyPrimitiveIndices: animation.swayIndices,
+      dirtyCandidateNodeIndices: refit.dirtyNodeIndices,
       // Authored sway is constrained to the finest-cell ownership margin. The
       // exact analytic surface moves, while its sparse owner and baked lighting
       // remain valid at the reference pose. Restaging the sparse world here
@@ -2067,8 +2112,6 @@ export class FluidLabRenderer {
       return;
     }
     this.liveSceneAnimationFailure = undefined;
-    animation.current = descriptors;
-    animation.candidates = candidates;
     this.renderSceneRevision = revision;
     this.svoDrySceneData = { ...this.svoDrySceneData, renderRevision: revision, primitiveRecords: records, primitiveCandidates: candidates };
   }

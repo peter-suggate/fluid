@@ -117,8 +117,8 @@ test("reduced scales use declared receiver and full-rate edge tiers without hidi
       "the gated-linear mode must use the resident linear sampler without another pass");
     assert.match(reduced, /accumulatedRadiance\+=textureLoad\(dryPrepassRadianceTexture,texel,0\)\*weight;radianceWeightSum\+=weight/,
       "joint-bilateral mode must reuse the visibility guide weights for edge-aware radiance reconstruction");
-    assert.match(reduced, /materialPublication\.w&16u\)!=0u\)\{accumulatedGi\+=textureLoad\(dryPrepassRadianceTexture,texel,0\)\*weight;giWeightSum\+=weight/,
-      "GLOBAL must reconstruct current-frame environmental GI only from exact-identity neighbours");
+    assert.match(reduced, /materialPublication\.w&16u\)!=0u[^]*tuningCounts2\.w==3u[^]*tuningCounts2\.w==4u[^]*accumulatedGi\+=textureLoad\(dryPrepassRadianceTexture,texel,0\)\*weight;giWeightSum\+=weight/,
+      "relight modes must reconstruct current-frame environmental GI only from exact-identity neighbours");
     assert.match(reduced, /if\(giWeightSum>=0\.05\)\{dryPrepassGi=accumulatedGi\/giWeightSum;dryPrepassGiState=1u;\}[^]*else if[^]*dryDerivedPageFailure\|=8u/,
       "insufficient geometry-guided GI support must fail visibly without a hidden full-resolution retry");
     assert.match(reduced, /if\(dryPrepassGiState==1u\)\{[^]*return DryGlobalIllumination/,
@@ -131,8 +131,17 @@ test("reduced scales use declared receiver and full-rate edge tiers without hidi
     assert.match(reduced, /let opaque=DryHit\(geometry\.x,dryPrepassDecodeNormal\(geometry\.yz\),identity&0xffffu,identity>>16u/);
     assert.match(reduced, /return vec4f\(shadeDryOpaque\(opaque,ro,rd\),opaque\.t\)/,
       "the isolated reduced-rate pass must shade the reconstructed coarse hit without another primary trace");
-    assert.match(reduced, /materialPublication\.w&16u\)!=0u\)\{dryPrepassGiState=0u;let ignoredBodyOwner=select\(DRY_OWNER_NONE,opaque\.ownerId,opaque\.motionKind==DRY_GBUFFER_MOTION_RIGID\);let gi=dryGlobalIllumination\(ro\+rd\*opaque\.t,opaque\.normal,ignoredBodyOwner\);return vec4f\(gi\.radiance,select\(-1\.0,gi\.visibility,gi\.valid!=0u\)\)/,
-      "GLOBAL's reduced target must store only reusable indirect radiance and occlusion, not a baked material closure");
+    const noGiStart = reduced.indexOf("fn dryPrepassShadeNoGi(");
+    const noGiEnd = reduced.indexOf("@fragment fn dryPrepassShadeMain", noGiStart);
+    const noGiTier = reduced.slice(noGiStart, noGiEnd);
+    assert.ok(noGiStart >= 0 && noGiEnd > noGiStart);
+    assert.doesNotMatch(noGiTier, /dryGlobalIllumination|dryLightVisibility|dryContactVisibility/,
+      "the directly-lit tier must consume packed visibility without re-entering any live cone or exact-ray closure");
+    assert.match(noGiTier, /dryPrepassChannel\(1u\+lightIndex\)/);
+    assert.match(reduced, /if\(!packedValid\)[^]*return vec4f\(0\.0,0\.0,0\.0,-1\.0\)/,
+      "an unresolved reduced receiver must fall through to exact full-rate lighting");
+    assert.match(reduced, /let gi=dryGlobalIllumination\(ro\+rd\*opaque\.t,opaque\.normal,ignoredBodyOwner\)[^]*if\(dry\.tuningCounts2\.w==3u[^]*\|\|dry\.tuningCounts2\.w==4u\)\{return vec4f\(gi\.radiance,select\(-1\.0,gi\.visibility,gi\.valid!=0u\)\);\}[^]*dryPrepassGiState=1u;[^]*return vec4f\(shadeDryOpaque\(opaque,ro,rd\),opaque\.t\)/,
+      "relight modes store a GI closure while reconstruction modes store a complete reduced-rate material result");
     assert.match(reduced, /if\(hit\.t>=DRY_MISS\)[^]*dryPrepassRadianceState==1u&&hit\.motionKind==DRY_GBUFFER_MOTION_STATIC[^]*let position=ro\+rd\*hit\.t;let surface=dryEvaluateSurfaceMaterial/,
       "exact-matched static radiance must return before full-resolution procedural material evaluation");
   }
@@ -155,6 +164,12 @@ test("reduced scales use declared receiver and full-rate edge tiers without hidi
     "GLOBAL must not retain a selectable lighting backend");
   assert.match(rendererSource, /label: "Sparse voxel persistent world GI cache"[^]*gi\.setPipeline\(this\.worldGiFramePipeline!\)[^]*gi\.setPipeline\(this\.worldGiCachePipeline!\)/,
     "split GLOBAL must produce the reduced GI target through the persistent world-space cache");
+  assert.match(rendererSource, /if \(!reconstructReducedRadiance\)[^]*label: "Sparse voxel persistent world GI cache"/,
+    "GI-only cache output must be restricted to full-rate relight modes");
+  assert.match(rendererSource, /if \(usePrepass && reconstructReducedRadiance[^]*label: "Sparse voxel reduced-rate opaque shading"/,
+    "radiance reconstruction modes must execute the complete reduced-rate material pass");
+  assert.match(rendererSource, /entryPoint: "dryReconstructedLightingMain"[^]*if \(usePrepass && reconstructReducedRadiance\)[^]*splitReconstructedLightingPipeline[^]*splitLightingPipeline/,
+    "reconstructed receivers and exact edge fallbacks must run as separate occupancy tiers");
   const compactVisibility = rendererSource.indexOf('label: "Sparse voxel compact cone visibility"');
   const persistentGi = rendererSource.indexOf('label: "Sparse voxel persistent world GI cache"', compactVisibility);
   const deferredLighting = rendererSource.indexOf('label: "Sparse voxel deferred dry lighting"', persistentGi);

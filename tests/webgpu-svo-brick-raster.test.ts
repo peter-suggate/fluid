@@ -64,16 +64,16 @@ test("brick instances are sized, keyed and bound so the sorted list reaches the 
   }]);
   assert.deepEqual(svoBrickRasterCoverageBindGroupLayoutEntries(), [
     { binding: SVO_BRICK_RASTER_CONTRACT.instanceDrawBinding,
-      visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
+      visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT | GPUShaderStage.COMPUTE,
       buffer: { type: "read-only-storage" } },
     {
       binding: SVO_BRICK_RASTER_CONTRACT.coverageCountBinding,
-      visibility: GPUShaderStage.FRAGMENT,
+      visibility: GPUShaderStage.FRAGMENT | GPUShaderStage.COMPUTE,
       buffer: { type: "storage" },
     },
     {
       binding: SVO_BRICK_RASTER_CONTRACT.coverageCandidateBinding,
-      visibility: GPUShaderStage.FRAGMENT,
+      visibility: GPUShaderStage.FRAGMENT | GPUShaderStage.COMPUTE,
       buffer: { type: "storage" },
     },
   ]);
@@ -180,8 +180,14 @@ test("raster-primary resolves live scene primitive overlap with exact per-primit
   assert.equal(SVO_SCENE_PRIMITIVE_RASTER_CONTRACT.verticesPerProxy, 36);
   assert.match(shader, new RegExp(`@vertex fn ${entryPoints.vertex}`));
   assert.match(shader, new RegExp(`@fragment fn ${entryPoints.fragment}`));
+  // Two entry points share one proxy body now: the exact historical set, and
+  // the same set behind the near-field band's membership word. The proxy
+  // derivation asserted below is the shared body, so the slice starts there
+  // rather than at the entry point that used to contain it.
+  assert.match(shader, new RegExp(`@vertex fn ${entryPoints.bandVertex}`),
+    "the banded proxy is a separate entry point, so the direct control keeps drawing every record");
 
-  const vertexStart = shader.indexOf(`@vertex fn ${entryPoints.vertex}`);
+  const vertexStart = shader.indexOf("fn dryScenePrimitiveProxyVertex(");
   const fragmentStart = shader.indexOf(`@fragment fn ${entryPoints.fragment}`);
   const fragment = shader.slice(fragmentStart, shader.indexOf("\n}", fragmentStart) + 2);
   assert.ok(vertexStart > 0 && fragmentStart > vertexStart);
@@ -293,9 +299,9 @@ test("the raster-primary exact live-scene primitive entries compile on WebGPU",
   { skip: modulePath ? false : "set WEBGPU_NODE_MODULE" }, async () => {
     const gpuDevice = await device();
     const layout = gpuDevice.createBindGroupLayout({ entries: sparseVoxelDrySceneBindGroupLayoutEntries() });
-    for (const scale of [1, 0.5] as const) {
+    for (const [scale, threshold] of [[1, 0], [0.5, 1]] as const) {
       const shaderModule = gpuDevice.createShaderModule({
-        code: createSvoDrySceneFragmentWGSL(scale, "raster-primary", "off", "split", 0, false, true, true),
+        code: createSvoDrySceneFragmentWGSL(scale, "raster-primary", "off", "split", threshold, false, true, true),
       });
       const info = await shaderModule.getCompilationInfo();
       assert.deepEqual(info.messages.filter((message) => message.type === "error")

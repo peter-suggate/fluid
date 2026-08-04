@@ -2,6 +2,10 @@ import { cloneScene, defaultCamera, defaultScene, DEFAULT_GPU_CPU_TIMESTEP_RATIO
 import { createPaperScenario } from "./paper-scenarios";
 import { applyGardenPool, GARDEN_DAM_BRICK_SEED_M, GARDEN_WATERLINE_M, gardenPoolTerrain } from "./garden-scene";
 import { createHeroGardenHoseScene, heroGardenCamera } from "./hero-garden-scene";
+import {
+  createHeroGardenHoseStressScene,
+  HERO_GARDEN_STRESS_MAXIMUM_MULTIPLIER,
+} from "./hero-garden-stress-scene";
 import { withHeroLayout } from "./voxel-scenery/hero-layout";
 import { terrainHeightAt } from "./terrain";
 import type { EnvironmentId } from "./environments";
@@ -1313,6 +1317,31 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     // no lane claims is a fork by another name. The settling lane returns with
     // the inner-face fix that phase 1 is currently blocked on — see
     // docs/HERO_GARDEN_HOSE_SCENE_PLAN.md.
+  }),
+  defineScene({
+    id: "hero-garden-hose-x10",
+    name: "Porcelain pond · ten times the set",
+    blurb: "The same pond, the same camera, and ten times as many authored records standing on its banks. The acceptance scene for raster visibility: the hero frame spends 85 % of itself on a pass whose cost tracks record count, and this is where that stops being an argument.",
+    // Disclosed rather than offered: it is a measurement rig, and it opens at
+    // ~5 000 records on a path that is currently 405 ms at 501.
+    //
+    // It also does not open *yet*, and that is the point of registering it. The
+    // live sparse world refuses 5 039 records at construction — its PBR material
+    // table holds 32 + 4 096 (`webgpu-octree-sparse-bricks.ts:229`) — so the
+    // acceptance scene names a capacity that has to be raised rather than
+    // quietly sitting under it. 8x is the largest rung that draws today; the
+    // smoke lane's FLUID_SVO_DRY_SMOKE_RECORD_MULTIPLIER walks the sweep.
+    audience: "validation",
+    shelf: "Garden",
+    environment: "garden",
+    // `heroGardenCamera`, unchanged and deliberately so — W3's gate is stated
+    // against an *unchanged camera*, and a stress scene that reframed itself
+    // could not discharge it. The factory composes the blocking layout itself,
+    // so unlike the hero above there is nothing to append here.
+    build: () => createHeroGardenHoseStressScene({
+      recordMultiplier: HERO_GARDEN_STRESS_MAXIMUM_MULTIPLIER,
+    }),
+    camera: heroGardenCamera,
   }),
   defineScene({
     id: "garden-pond",
