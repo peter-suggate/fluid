@@ -234,8 +234,8 @@ test("the deep benchmark lane pins the scene, the still step count and the Bet-4
   assert.equal(deep.FLUID_PRESSURE_ROW_CAPACITY,
     String(DEEP_POWER_HYDROSTATIC_PRESSURE_ROW_CAPACITY));
   // The deep lane's other reserve is a reduction below the planner default, so
-  // it stays correct on the benchmark path even though
-  // `globalFineLevelSetMaximumBricks` has no environment override at all.
+  // it stays correct on the benchmark path without using the diagnostic-only
+  // `FLUID_OCTREE_GLOBAL_FINE_MAXIMUM_BRICKS` A/B override.
   const rings = planFineLevelSetCapacityDilationBrickRings(4, BAND_CELLS, FINE_FACTOR);
   assert.ok(DEEP_POWER_HYDROSTATIC_FINE_BRICK_CAPACITY
     < planFluidFootprintFineNarrowBandBrickCapacity([...GRID], [64, WET_LAYERS, 64], rings)

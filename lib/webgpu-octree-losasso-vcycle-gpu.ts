@@ -75,14 +75,12 @@ function transferWGSL(coarseRowCapacity:number,fineRowCapacity:number):string{re
 @group(0)@binding(0)var<storage,read> fineControl:array<u32>;
 @group(0)@binding(1)var<storage,read> coarseControl:array<u32>;
 @group(0)@binding(2)var<storage,read> parents:array<u32>;
-@group(0)@binding(3)var<storage,read> weights:array<f32>;
 @group(0)@binding(4)var<storage,read> input:array<f32>;
 @group(0)@binding(5)var<storage,read_write> output:array<f32>;
 @group(0)@binding(6)var<storage,read> solve:array<u32>;
 ${createSignedRadix256F32ReductionWGSL({group:0,binding:7,
   scalarCount:coarseRowCapacity,reductionLanes:64,
   livePartialCountExpression:"1u",maximumTermCount:fineRowCapacity})}
-@group(0)@binding(8)var<storage,read> coarseInverseVolumes:array<f32>;
 fn stopped()->bool{return solve[0]!=0u||solve[1]!=0u
  ||fineControl[3]!=1u||coarseControl[3]!=1u;}
 @compute @workgroup_size(64)fn clearRestriction(@builtin(local_invocation_index)lane:u32){
@@ -91,7 +89,7 @@ fn stopped()->bool{return solve[0]!=0u||solve[1]!=0u
 @compute @workgroup_size(64)fn depositRestriction(@builtin(global_invocation_id)g:vec3u){
  let row=g.x;if(stopped()||row>=fineControl[1]){return;}let parent=parents[row];
  if(parent<coarseControl[1]){
-  addFixedF32(0u,parent,(weights[row]*coarseInverseVolumes[parent])*input[row]);
+  addFixedF32(0u,parent,input[row]);
  }
 }
 @compute @workgroup_size(64)fn finishRestriction(@builtin(global_invocation_id)g:vec3u){
@@ -101,7 +99,7 @@ fn stopped()->bool{return solve[0]!=0u||solve[1]!=0u
 @compute @workgroup_size(64)fn prolongLevel(@builtin(global_invocation_id)g:vec3u){
  let row=g.x;if(stopped()||row>=fineControl[1]){return;}let parent=parents[row];
  if(parent<coarseControl[1]){
-  output[row]+=(weights[row]*coarseInverseVolumes[parent])*input[parent];
+  output[row]+=input[parent];
  }
 }
 `;}
@@ -232,7 +230,7 @@ export class WebGPUOctreeLosassoVCycle implements OctreeLosassoFirstOrderVCycle 
       pass.setPipeline(transferPipelines.clear);pass.setBindGroup(0,
         transferGroup(transferPipelines.clear,[7]));pass.dispatchWorkgroups(1);
       pass.setPipeline(transferPipelines.deposit);pass.setBindGroup(0,
-        transferGroup(transferPipelines.deposit,[0,1,2,3,4,6,7,8]));
+        transferGroup(transferPipelines.deposit,[0,1,2,4,6,7]));
       pass.dispatchWorkgroupsIndirect(transfer.fineRowDispatch,0);
       pass.setPipeline(transferPipelines.finish);pass.setBindGroup(0,
         transferGroup(transferPipelines.finish,[0,1,5,6,7]));
@@ -250,7 +248,7 @@ export class WebGPUOctreeLosassoVCycle implements OctreeLosassoFirstOrderVCycle 
         transfer.fineParents,transfer.fineVolumes,this.xA[level+1]!,this.xA[level]!,
         input.solverControl,transfer.restrictionPartials,transfer.coarseInverseVolumes];
       const group=this.device.createBindGroup({layout:transferPipeline.getBindGroupLayout(0),entries:
-        [0,1,2,3,4,5,6,8].map(binding=>({binding,resource:{buffer:buffers[binding]!}}))});
+        [0,1,2,4,5,6].map(binding=>({binding,resource:{buffer:buffers[binding]!}}))});
       pass.setPipeline(transferPipeline);pass.setBindGroup(0,group);
       pass.dispatchWorkgroupsIndirect(transfer.fineRowDispatch,0);
       const pipes=this.levelPipelines[level]!;

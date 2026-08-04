@@ -41,10 +41,9 @@ fn losassoFace(axis:u32,q:vec3u)->u32{
  return INVALID;
 }
 struct LosassoVelocitySample{value:vec3f,valid:u32}
-fn losassoVelocityAt(position:vec3f)->LosassoVelocitySample{
+fn losassoVelocityAtGrid(grid:vec3f)->LosassoVelocitySample{
  if(arrayLength(&coarse)<4u||coarse[3]!=1u||coarse[2]>arrayLength(&faceGeometry)
    ||coarse[2]>arrayLength(&extendedVelocity)){return LosassoVelocitySample(vec3f(0),0u);}
- let grid=(position-p.domainOrigin)/p.velocityCellSize;
  var velocity=vec3f(0);
  for(var axis=0u;axis<3u;axis+=1u){
   var staggered=grid-vec3f(.5);staggered[axis]=grid[axis];
@@ -70,10 +69,26 @@ fn losassoVelocityAt(position:vec3f)->LosassoVelocitySample{
     let openTop=axis==1u&&q.y==p.velocityDimensions.y&&p.openTop!=0u;
     if(p.closed==0u||!onWall||openTop){return LosassoVelocitySample(vec3f(0),0u);}
    }else{value=extendedVelocity[face];if(!finite(value)){return LosassoVelocitySample(vec3f(0),0u);}}
+   // The pressure face is zero while liquid still contacts a closed wall, but
+   // level-set kinematics must permit unilateral separation. Extend the first
+   // interior normal face onto the wall only when it points back into the
+   // domain; an into-wall value remains exactly zero. Once coarse phi proves
+   // an air gap, the wall face itself carries the projected free-surface value.
+   let lowWall=q[axis]==0u;let highWall=q[axis]==p.velocityDimensions[axis];
+   let openTop=axis==1u&&highWall&&p.openTop!=0u;
+   if(p.closed!=0u&&(lowWall||highWall)&&!openTop){var interiorQ=q;
+    interiorQ[axis]=select(p.velocityDimensions[axis]-1u,1u,lowWall);
+    let interiorFace=losassoFace(axis,interiorQ);
+    if(interiorFace!=INVALID&&interiorFace<arrayLength(&extendedVelocity)){
+     let interior=extendedVelocity[interiorFace];if(!finite(interior)){return LosassoVelocitySample(vec3f(0),0u);}
+     let away=select((interior<0.),(interior>0.),lowWall);if(away){value=interior;}}}
    losassoExactAdd(&exact,weight*value);
   }
   velocity[axis]=losassoExactValue(exact);
  }
  return LosassoVelocitySample(velocity,select(0u,1u,finite3(velocity)));
+}
+fn losassoVelocityAt(position:vec3f)->LosassoVelocitySample{
+ return losassoVelocityAtGrid((position-p.domainOrigin)/p.velocityCellSize);
 }
 `;

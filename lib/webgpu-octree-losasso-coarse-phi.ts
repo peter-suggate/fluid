@@ -197,7 +197,7 @@ export class WebGPUOctreeLosassoCoarsePhiExchange {
     run("restrict", [0, 1, 2, 3, 4, 5, 8, 9], Math.ceil(this.plan.rowCapacity / 64));
     run("finalize", [8], 1);
     run("volume", [0, 8, 11, 12, 13, 14, 15], Math.ceil(2 * this.plan.rowCapacity / 64));
-    run("ghost", [0, 1, 2, 3, 5, 6, 7, 8, 10], Math.ceil(this.plan.faceCapacity / 64));
+    run("ghost", [0, 1, 2, 3, 4, 5, 6, 7, 8, 10], Math.ceil(this.plan.faceCapacity / 64));
     return this.source;
   }
 

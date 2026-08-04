@@ -344,6 +344,14 @@ test("the ceiling profiler uses the authored band-1 fast formulation", async () 
     "performance captures must rely on exact execution and packed final authority, not disabled scene collectors");
 });
 
+test("the smoke executor admits an explicit fine-capacity parity override", async () => {
+  const smokeSource = await readFile(new URL("../tools/webgpu-smoke-executor.ts", import.meta.url), "utf8");
+  assert.match(smokeSource,
+    /FLUID_OCTREE_GLOBAL_FINE_MAXIMUM_BRICKS must be a positive integer/);
+  assert.match(smokeSource,
+    /values\.globalFineLevelSetMaximumBricks = octreeGlobalFineMaximumBricksOverride/);
+});
+
 test("the large dam profiler pins leaf-32 and band-1", () => {
   const lane = POWER_DAM_LANE_ENVIRONMENT.large;
   assert.equal(lane.FLUID_SCENE, "large-power-dam-break");

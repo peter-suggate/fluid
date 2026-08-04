@@ -462,6 +462,8 @@ export interface FinePhiSymmetryMetrics {
   readonly exactValueMismatchCount: number;
   readonly nonFiniteCount: number;
   readonly maximumAbsoluteError: number;
+  readonly firstMismatch?: Readonly<Record<string, unknown>>;
+  readonly worstMismatch?: Readonly<Record<string, unknown>>;
 }
 
 export async function readFinePhiSymmetrySource(
@@ -508,7 +510,11 @@ export async function readFinePhiSymmetrySource(
     (x: number, z: number) => [z, x] as const,
   ];
   let comparedSamples = 0, supportMismatchCount = 0, exactValueMismatchCount = 0, maximumAbsoluteError = 0;
-  for (const transform of transforms) for (let z = 0; z < nz; z += 1) for (let y = 0; y < ny; y += 1) for (let x = 0; x < nx; x += 1) {
+  let firstMismatch: Record<string, unknown> | undefined;
+  let worstMismatch: Record<string, unknown> | undefined;
+  for (const [transformName, transform] of [
+    ["reflect-x", transforms[0]], ["reflect-z", transforms[1]], ["swap-xz", transforms[2]],
+  ] as const) for (let z = 0; z < nz; z += 1) for (let y = 0; y < ny; y += 1) for (let x = 0; x < nx; x += 1) {
     const at = x + nx * (y + ny * z);
     if (!valid[at]) continue;
     comparedSamples += 1;
@@ -516,11 +522,18 @@ export async function readFinePhiSymmetrySource(
     if (!valid[target]) { supportMismatchCount += 1; continue; }
     const sourceBits = (denseWords[at]! & 0x7fff) === 0 ? 0 : denseWords[at]!;
     const targetBits = (denseWords[target]! & 0x7fff) === 0 ? 0 : denseWords[target]!;
-    if (sourceBits !== targetBits) exactValueMismatchCount += 1;
-    maximumAbsoluteError = Math.max(maximumAbsoluteError, Math.abs(denseValues[at]! - denseValues[target]!));
+    const absoluteError = Math.abs(denseValues[at]! - denseValues[target]!);
+    if (sourceBits !== targetBits) {
+      exactValueMismatchCount += 1;
+      const detail = { transform: transformName, source: [x, y, z], target: [tx, y, tz],
+        sourceBits, targetBits, sourceValue: denseValues[at], targetValue: denseValues[target], absoluteError };
+      firstMismatch ??= detail;
+      if (!worstMismatch || absoluteError > Number(worstMismatch.absoluteError)) worstMismatch = detail;
+    }
+    maximumAbsoluteError = Math.max(maximumAbsoluteError, absoluteError);
   }
   return { validSamples, comparedSamples, supportMismatchCount, exactValueMismatchCount,
-    nonFiniteCount, maximumAbsoluteError };
+    nonFiniteCount, maximumAbsoluteError, firstMismatch, worstMismatch };
 }
 
 async function readFinePhiSymmetry(device: GPUDevice, solver: GPUSolverInstance): Promise<FinePhiSymmetryMetrics | undefined> {

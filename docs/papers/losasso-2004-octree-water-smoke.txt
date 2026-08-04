@@ -1,0 +1,420 @@
+                Simulating Water and Smoke with an Octree Data Structure
+                              Frank Losasso∗                    Frédéric Gibou†                    Ron Fedkiw‡
+                           Stanford University                Stanford University                Stanford University
+                         Industrial Light + Magic                                              Industrial Light + Magic
+
+
+
+
+    Figure 1: Ellipse traveling through a shallow pool of water (left), formation of a milk crown (center), smoke rising past a sphere (right).
+
+Abstract                                                                     believability relies on an adequate representation and presentation
+                                                                             of the small scale visual details such as thin films in water, small
+We present a method for simulating water and smoke on an unre-               rolling vortices in smoke, droplets and sprays, etc. Thus, it is desir-
+stricted octree data structure exploiting mesh refinement techniques         able to have both simulation and rendering techniques that can deal
+to capture the small scale visual detail. We propose a new technique         with levels of detail.
+for discretizing the Poisson equation on this octree grid. The result-           Recent improvements in simulation techniques have led to im-
+ing linear system is symmetric positive definite enabling the use of         pressive simulations of both smoke and water on uniform grids.
+fast solution methods such as preconditioned conjugate gradients,            Empowered by the semi-Lagrangian work of [Stam 1999], [Fedkiw
+whereas the standard approximation to the Poisson equation on an             et al. 2001] used vorticity confinement to simulate smoke with vi-
+octree grid results in a non-symmetric linear system which is more           sually rich small scale rolling motions. Similarly using both semi-
+computationally challenging to invert. The semi-Lagrangian char-             Lagrangian methods and hybridized particle and implicit surface
+acteristic tracing technique is used to advect the velocity, smoke           techniques, [Foster and Fedkiw 2001; Enright et al. 2002b] sim-
+density, and even the level set making implementation on an octree           ulated splashing water with both smooth surfaces and thin sheets.
+straightforward. In the case of smoke, we have multiple refine-              While these methods have achieved great success, their applica-
+ment criteria including object boundaries, optical depth, and vortic-        tion is limited by the computational hardware (i.e. CPU, RAM, disk
+ity concentration. In the case of water, we refine near the interface        space) required for the simulations. In an attempt to alleviate this,
+as determined by the zero isocontour of the level set function.              [Rasmussen et al. 2003] proposed a method that combines inter-
+CR Categories: I.3.7 [Computer Graphics]: Three-Dimensional                  polation and two-dimensional simulation to obtain highly detailed
+Graphics and Realism—Animation                                               simulations of large scale smoke-like phenomena. While stunning
+                                                                             results were obtained, this method does not faithfully reproduce
+Keywords:      octree data structure, adaptive mesh refinement,              the three-dimensional Navier-Stokes equations and thus is unable
+physics-based animation, smoke, water, level set, particles                  to obtain results for various fully three-dimensional phenomena.
+                                                                             Moreover, water was not addressed.
+                                                                                 In order to optimize the use of computational resources, we use
+1      Introduction                                                          an adaptive mesh or a level of detail approach where more grid
+Realistic simulations of smoke and water are among the most de-              cells are placed in visually interesting regions with rolling smoke or
+sired in the special effects industry, since they provide the direc-         sheeting water. Although adaptive mesh strategies for incompress-
+tor with explicit control over the environment enabling the creation         ible flow are quite common, see e.g. [Ham et al. 2002], implemen-
+of otherwise impossible content. These phenomena contain highly              tations based on recursive structures, such as the octrees we propose
+complex motions and rich visual detail, especially when they in-             here, are less common. In fact, [Popinet 2003] claims to have the
+teract with inanimate objects or the actors themselves. Moreover,            first octree implementation of incompressible flow, although there
+a significant portion of the entertainment value and much of the             are certainly similar works such as the nested dyadic grids used for
+    ∗ e-mail: losasso@graphics.stanford.edu
+                                                                             parabolic equations in [Roussel et al. 2003]. We extend the work
+    † e-mail: fgibou@math.stanford.edu
+                                                                             of [Popinet 2003] in two ways. First, we extend octrees to free
+    ‡ e-mail: fedkiw@cs.stanford.com
+                                                                             surface flows allowing the modeling of a liquid interface. Second,
+                                                                             we consider unrestricted octrees whereas [Popinet 2003]’s octrees
+                                                                             were restricted.
+                                                                                 Adaptive meshing strategies lead to nonuniform stencils and thus
+                                                                             a nonsymmetric system of linear equations when solving for the
+                                                                             pressure, which is needed to enforce the divergence free condition.
+                                                                             Although [Popinet 2003] solved this nonsymmetric linear system
+                                                                             with a multilevel Poisson solver, [Day et al. 1998] pointed out that
+                                                                             these multigrid approaches can be problematic in the presence of
+
+
+Figure 2: Simulation of smoke past a sphere. The rightmost two figures are close up views. The effective resolution is 1024 3 and the
+computational time is about 4-5 minutes per frame.
+objects with high frequency detail. Moreover, the situation wors-          2001] popularized the use of signed distance functions on octree
+ens in the presence of interfaces (such as that between water and          grids. In order to simulate water, we need to solve the partial
+air), especially since the faithful coarse mesh representation of wa-      differential equations that govern the motion of the signed dis-
+tertight isosurfaces is a difficult research problem in itself, see e.g.   tance function. [Strain 1999b] advocated using quadtrees and semi-
+[Lee et al. 2003]. Although multigrid solvers can be efficiently ap-       Lagrangian methods to solve these equations. Reinitialization for
+plied if the density is smeared out across the interface as in [Suss-      maintaining the signed distance property was addressed in [Strain
+man et al. 1999] (resembling a one-phase variable density flow as          1999a], and extrapolation of velocities was considered in [Strain
+in [Almgren et al. 1998]), this damps out the surface wave genera-         2000]. One difficulty with semi-Lagrangian methods for solving
+tion that relies on horizontal pressure differences caused by stack-       level set equations is that extreme mass loss (and thus visual arti-
+ing different heights of high-density fluid. That is, damping these        facts) usually occurs, however [Enright et al. 2004] recently showed
+high frequency pressure differentials makes multigrid efficient, but       that the particles in the particle level set method alleviate this diffi-
+also damps the wave motion leading to visually uninteresting overly        culty. A quadtree structure for level set evolution was also proposed
+viscous flows.                                                             in [Sochnikov and Efrima 2003]. However, none of these authors
+   More recently, [Sussman 2003] departed from a smeared out               considered level sets in the context of incompressible flows with
+density approach and instead solves a free surface problem as in           interfaces such as water.
+[Enright et al. 2002b]. Moreover, [Sussman 2003] switches from                Starting with the seminal works of [Berger and Oliger 1984;
+multigrid to a preconditioned conjugate gradient (PCG) method              Berger and Colella 1989], adaptive mesh refinement (AMR) typ-
+stating that the pressure can be robustly solved for with PCG since        ically utilizes uniform overlapping Cartesian grids of various sizes.
+the matrix is symmetric. However, the symmetry requirement lim-            This is because AMR originally focused on compressible flow with
+its his work to uniform non-adaptive grids. Our new formulation            shock waves, and a block structured approach is better able to avoid
+alleviates this restriction by providing a symmetric positive definite     spurious shock reflections from changing grid levels (since there are
+discretization of the Poisson equation on an unrestricted octree data      less of them). However, in the absence of shocks, a more optimal
+structure allowing fast solvers such as PCG to be applied, even in         unrestricted octree approach can be used for incompressible flow.
+the presence of interfaces.
+
+
+2    Previous Work                                                         3     The Octree Data Structure
+[Kass and Miller 1990] solved a linearized form of the three dimen-
+                                                                           Figure 3 illustrates our unrestricted octree data structure (see e.g.
+sional Navier-Stokes equations, and [Chen and Lobo 1994] solved
+                                                                           [Samet 1989]) with a standard MAC grid arrangement [Harlow and
+the two dimensional Navier-Stokes equations using the pressure to
+                                                                           Welch 1965], except that all the scalars except the pressure are
+define a height field. The full three dimensional Navier-Stokes
+                                                                           stored on the nodes or corners of the cell. This is convenient since
+equations were solved in [Foster and Metaxas 1996; Foster and
+                                                                           interpolations are more difficult with cell centered data (see e.g.
+Metaxas 1997a; Foster and Metaxas 1997b] for both water and
+                                                                           [Strain 1999a]).
+smoke. Large strides in efficiency were made when [Stam 1999]
+introduced the use of semi-Lagrangian numerical techniques, and                Coarsening is performed from the smaller cells to the larger cells,
+[Fedkiw et al. 2001] advocated using vorticity confinement in order        i.e. from the leaves to the root. When coarsening, nodal values are
+to preserve the small scale structure of the flow. [Foster and Fed-        either deleted or unchanged, and the new velocity components at
+kiw 2001; Enright et al. 2002b] proposed hybridizing particle and          the faces are computed by averaging the old values from that face.
+level set methods for water. The incompressible form of the Navier         Refinement is performed from the larger cells to the smaller cells.
+Stokes equations has been used and augmented to model fire [Lam-           The value of a new node on an edge is defined as the average of
+orlette and Foster 2002; Nguyen et al. 2002], clouds [Miyazaki et al.      its two neighbors, and the value of a new node at a face center is
+2002], particle explosions [Feldman et al. 2003], variable viscosity       defined as the average of the values on the four corners of that face.
+[Carlson et al. 2002], bubbles and surface tension [Hong and Kim           The velocities on the new faces are defined by first computing the
+2003], splash and foam [Takahashi et al. 2003], etc. [Treuille et al.      velocities at the nodes, and then averaging back to the face cen-
+2003] proposed a method for control and used it to make letters out        ters. Nodal velocities are computed by averaging the four values
+of smoke, and [Stam 2003] solved these equations on surfaces cre-          from the surrounding cell faces as long as the faces are all the same
+ating beautiful imagery. The compressible version of these equa-           size. Otherwise, using the coarsest neighboring face as the scale,
+tions were used to couple fracture to explosions in [Yngve et al.          we compute temporary coarsened velocities on the other faces to
+2000]. There are also other approaches such as SPH methods [Pre-           be used in the averaging.
+moze et al. 2003; Müller et al. 2003].                                        For all variables, we constrain T-junction nodes on edges to be
+   The representation of implicit surfaces on octree data structures       linearly interpolated from their neighbors on that edge. Similarly,
+has a long history in the marching cubes community, see the re-            T-junction nodes on faces are constrained to be the average of the
+cent papers of [Ju et al. 2002; Ohtake et al. 2003] and the refer-         four surrounding corner values. See, e.g. [Westermann et al. 1999]
+ences therein. Moreover, [Frisken et al. 2000; Perry and Frisken           for more details.
+
+
+                                                                  v i,j+1/2,k           T, ρ, Φ
+                                                                                                                                                          Cell 10
+
+                                                                                                                                                 p
+                                                                                                                                                     10
+                         u*
+                          3                                   p                 u i+1/2,j,k
+                 u*                                           *
+                  2                            wi,j,k−1/2
+      u*                             ∆y                     (i,j,k)                                                                                  p
+       1                                                                                                                                                  y
+                         u*
+                 u*
+                          4                                                                                                                                      ^p           p        p
+                  5                                                                                                                                                   x           2        6
+                                                                                         ∆z
+                                                                                                                                         p
+                                                                                                                                             a                            p
+                                                                                                                                                                          x
+                                                                                                       ∆y                                                                     Cell 2   Cell 6
+                                                   ∆x                                                                                            p
+Figure 3: Left: One large cell neighboring four smaller cells. The                                                                                   1
+
+u∗i represent the x components of the intermediate velocity u∗ de-                                                                                            Cell 1
+fined at the cell faces. Right: Zoom of one computational cell. The
+velocity components are defined on the cell faces, while the pres-
+                                                                                                                       ∆x
+sure is defined at the center of the cell. The density, temperature
+and level set function φ are stored at the nodes.                                                            Figure 4: Discretization of the pressure gradient.
+
+                                                                                                    Moreover, substituting equation 3 into equation 5 implies Vcell ∇ ·
+4      Navier Stokes Equations on Octrees                                                           u = 0 or ∇ · u = 0 as desired.
+We use the inviscid, incompressible Navier-Stokes equations for the                                   Invoking the second vector form of Green’s theorem, one can
+conservation of mass and momentum                                                                   write
+                                                                                                                     Vcell ∇ · u∗ = ∑ (u∗face · n) Aface ,
+                       ut + u · ∇u    =   −∇p + f,                                            (1)                                    faces
+
+                             ∇·u      =   0,                                                  (2)   where n is the outward unit normal of the large cell and Aface rep-
+                                                                                                    resents the area of a cell face. In the case of figure 3, the dis-
+where u = (u, v, w) is the velocity field, f accounts for the external                              cretization of the x component ∂ u∗ /∂ x of the divergence reads
+forces, and the spatially constant density of the mixture has been                                  4x4y4z∂ u∗ /∂ x = u∗2 A2 + u∗3 A3 + u∗4 A4 + u∗5 A5 − u∗1 A1 , where
+absorbed into the pressure p. Equation 1 is solved in two steps.                                    the minus sign in front of u∗1 A1 accounts for the fact that the unit
+First we compute an intermediate velocity u∗ ignoring the pressure                                  normal points to the left. Then ∂ u∗ /∂ x = ((u∗2 + u∗3 + u∗4 + u∗5 )/4 −
+term, and then we compute the velocity update via                                                   u∗1 )/4x. The y and z directions are treated similarly.
+                                                                                                        Once, the divergence is computed at the cell center, equation 4
+                              u = u∗ − ∆t∇p                                                   (3)   is used to construct a linear system of equations for the pressure.
+                                                                                                    Invoking again the second vector form of Green’s theorem, one can
+where the pressure is defined as the solution to the Poisson equa-                                  write
+tion,
+                                                                                                            Vcell ∇ · (4t∇p) = ∑ ((4t∇p)face · n) Aface .                                       (6)
+                          ∇2 p = ∇ · u∗ /4t.                                                  (4)                                faces
+
+   The external forces are discretized at the cell faces and we post-                               Therefore, once the pressure gradient is computed at every face, we
+pone the details of their discretization to sections 5 and 6. The                                   can carry out the computation in a manner similar to that of the
+convective part of the velocity update is solved using a semi-                                      velocity divergence above. There exist different choices in the dis-
+Lagrangian stable fluids approach as in [Stam 1999]. First we com-                                  cretization of (∇p)face , and we seek to discretize the pressure gra-
+pute nodal velocities, and then we average these values to the cell                                 dient in a fashion that yields a symmetric linear system. Efficient
+faces (see section 3). The cell face values are used to trace back                                  iterative methods such as PCG (see e.g. [Saad 1996]) can be ap-
+characteristics, and trilinear interpolation of nodal values is used to                             plied to symmetric positive definite matrices offering a significant
+define the new intermediate value of the velocity component on the                                  advantage over methods for nonsymmetric linear systems. More-
+face in question.                                                                                   over, since data access for the octree is not as convenient as for
+                                                                                                    regular grids, there is a strong benefit in designing a discretization
+                                                                                                    that leads to a symmetric linear system.
+4.1        The Divergence Operator
+Equation 4 is solved by first evaluating the right hand side at every                               4.2     The Pressure Gradient
+cell center in the domain. Then a linear system for the pressure is
+constructed and inverted. Consider the discretization of equation                                   Consider the configuration in figure 4. In the case where two cells
+4 for a large cell with dimensions 4x, 4y and 4z neighboring                                        of the same size juxtapose each other, standard central differencing
+small cells as depicted in figure 3. Since the discretization is closely                            defines the pressure gradient at the face between them, as is the case
+related to the second vector form of Green’s theorem that relates a                                 for py = (p10 − p1 )/4y.
+volume integral to a surface integral, we first rescale equation 4 by                                   Consider the discretization of the pressure gradient in the x di-
+the volume of the large cell to obtain Vcell 4t∇2 p = Vcell ∇·u∗ . The                              rection at the face between cell 1 and cell 2. A standard approach
+right hand side now represents the quantity of mass flowing in and                                  is to first compute a weighted average value pa for the pressure, by
+out of the large cell within a time step 4t in m3 s−1 . This can be                                 interpolating between the pressure values p1 and p10 . Then, since
+further rewritten as                                                                                standard differencing of p̂x = (p2 − pa )/(.754x) does not define p̂x
+                                                                                                    at the cell face but midway between the locations of pa and p2 , one
+                      Vcell ∇ · (u∗ − 4t∇p) = 0.                                              (5)   usually resorts to more complex discretizations. A typical choice is
+                                                                                                    to pass a quadratic interpolant through pa , p2 and p6 and evaluate
+This equation implies that the ∇p term is most naturally evaluated                                  its derivative at the cell face, see e.g. [Chen et al. 1997]. However,
+at the same location as u∗ , namely at the cell faces, and that there                               this approach yields a nonsymmetric linear system that is slow to
+is a direct correspondence between the components of ∇p and u ∗ .                                   invert. The nonsymmetric nature of the linear system comes from
+
+
+Figure 5: An ellipsoid slips along through shallow water illustrating our method’s ability to resolve thin sheets. The effective resolution is
+5123 and the computational time is about 4-5 minutes per frame.
+
+the non-locality of the discretization, i.e. pa depends on p10 and        LU Cholesky factorization that we modify to ensure that the row
+the quadratic interpolation would depend on p6 . Consequently, the        sum of LU is equal to the row sum of the original matrix (see [Saad
+equation for cell 1 involves both p10 and p6 . It is unlikely that the    1996]). This yields a significant speed up in the matrix inversion.
+equation for cell 6 depends on p1 , since cell 6 juxtaposes another          The matrix constructed above is negative definite, as is usual
+cell of the same size, namely cell 2. And even if it did, the coeffi-     when discretizing equation 4. We simply multiply all equations by
+cients of dependence would not be symmetric.                              −1 to make it positive definite. We also note that Dirichlet or Neu-
+   Our approach is based on the fact that O(4x) perturbations in          mann boundary conditions do not disrupt the symmetry. In the case
+the pressure location still yield consistent approximations as in [Gi-    of a Neumann boundary condition, the term (p2 − p1 )/4 disap-
+bou et al. 2002]. Therefore defining px = (p2 − pa )/(.754x) at           pears from both row 1 and row 2. In the case of a Dirichlet boundary
+the cell face still yields a convergent approximation, since the lo-      condition, e.g. for p2 , the equation for p2 drops out of the system
+cation of p̂x is perturbed by a small amount proportional to a grid       and all the terms involving p2 are moved to the right hand side of
+cell. Moreover, we can avoid the dependence of pa on values other         the linear system.
+than p1 by simply setting pa = p1 . This corresponds to an O(4x)
+perturbation of the location of p1 , and therefore still yields a con-
+                                                                          4.3    Accuracy
+vergent approximation. Thus, our discretization of px is simply
+px = (p2 − p1 )/(.754x). Moreover, since only p1 and p2 are con-          We stress that the dominant errors are due to the first order accu-
+sidered, one can define px = (p2 − p1 )/4 where 4 can be defined          rate semi-Lagrangian advection scheme. The velocity averaging
+as the size of the large cell, 4x, the size of the small cell, .54x,      is second order accurate and is required in all MAC grid methods
+the Euclidean distance between p1 and p2 , etc. We have carried           in order to define a full velocity vector at a common location for
+out numerical tests against known analytic solutions to the Poisson       the semi-Lagrangian advection. Dropping the Poisson solver from
+equation demonstrating that all these choices converge. Currently,        second to first order accuracy merely puts it on par asymptotically
+we are investigating the impact of different 4 definitions on smoke       with the semi-Lagrangian scheme. However, we still solve for a
+and water simulations.                                                    fully divergence free velocity field to machine precision just as in
+   In light of equation 6, px contributes to both row 1 and row 2         a non-adaptive setting. We tested our Poisson solver on many ex-
+of the matrix representing the linear system of equations, since it is    act solutions and readily obtain several digits of accuracy indicating
+located at the cell face between cell 1 and cell 2. More precisely,       that the errors from this part of the algorithm are small. See table 1
+the contribution to row 1 occurs through the term                         for a typical result.
+                                   p2 − p 1
+             4t px n1 Aface = 4t            (1)Aface ,
+                                      4                                   5     Smoke
+since n1 , the x component of the outward normal to cell 1, points to     The external forces due to buoyancy and heat convection are mod-
+the right (hence n1 = 1). Likewise, the contribution to row 2 occurs      eled as fbuoy = −αρ z + β (T − Tamb ) z, where z = (0, 0, 1), Tamb is
+through the term                                                          the ambient temperature and α and β are parameters controlling the
+                                                                          influence of the density and the temperature. The density and the
+                                  p2 − p 1                                temperature are passively advected with the flow velocity and are
+            4t px n1 Aface = 4t            (−1)Aface ,                    updated with the semi-Lagrangian method using velocities defined
+                                     4
+                                                                          at the nodes (see section 3). Both the density and the temperature
+since n1 , the x component of the outward normal to cell 2, points        are then averaged to the faces in order to evaluate the forcing term.
+to the left (hence n1 = −1). Therefore, the coefficient for p2 in            The vorticity confinement force is calculated as follows. First
+row 1 and the coefficient for p1 for row 2 are identical, namely          we define velocities at the centers of cells by using area weighted
+4tAface /4. The same procedure is applied to all faces, and the           averaging of face values. Then all the derivatives needed to com-
+discretization of the y and z components of the pressure gradient         pute the vorticity, ω = ∇ × u, are computed on cell faces using the
+are carried out in a similar manner. Hence, our discretization yields     same method used to compute pressure derivatives. Area weighted
+a symmetric linear system that can be efficiently inverted with a         averaging is used (again) to define all these derivatives at the cell
+PCG method. The preconditioner we use is based on an incomplete           center, and then we compute the vorticity and its magnitude (at
+
+
+             L1 error      order        L∞ error      order
+          4.083 × 10−2      −−       6.332 × 10−2      −−
+          8.713 × 10−3     2.22      2.203 × 10−2     1.523
+          2.952 × 10−3     1.56      1.292 × 10−2      .770
+          9.980 × 10−4     1.56      7.745 × 10−3      .739
+          4.010 × 10−4     1.31      4.249 × 10−3      .866
+          1.820 × 10−4     1.14      2.287 × 10−3      .894
+                                                                          Figure 6: Formation of a milk crown demonstrating the effect of
+ Table 1: Poisson solver accuracy on an unrestricted octree grid.         surface tension. We take σ = 0 (left) and σ = .0005 (right). The
+                                                                          effective resolution is 5123 and the computational time is about 4-5
+the cell center). Next, the gradients of the vorticity are computed
+                                                                          minutes per frame.
+at the cell faces, and averaged back to the cell center to define
+N = ∇|ω |/|∇|ω ||. Finally, the unscaled force can be computed at
+                                                                          as updated, and all its non-updated neighbors are tagged trial. This
+the cell centers as N × ω . Cell face values of this term are obtained
+                                                                          process is repeated to fill in a band of values near the interface.
+by averaging the values from the two cells that contain the face.
+                                                                          For many grid nodes there are neighboring values of φ in all six
+Then this term is scaled by the diagonal of the face h and a tunable
+                                                                          directions, but at T-junctions there are directions where φ is missing
+parameter ε .
+                                                                          some of its neighbors. Since we coarsen as we move away from
+   Inside an object, we set the temperature to the object temperature
+                                                                          the interface, these directions will generally not contribute to the
+and the density to zero. For velocity, we clip the component normal
+                                                                          potential value of φ . Thus, we trivially ignore them.
+to the object so that it is guaranteed to be separating. Furthermore,
+                                                                              Velocity extrapolation is carried out by first defining nodal veloc-
+we apply Neumann boundary conditions to the cell faces that in-
+                                                                          ities, extrapolating them, and then computing the face velocities. If
+tersect the object when solving for the pressure. This keeps these
+                                                                          we perform this algorithm as in [Enright et al. 2002a], we will oc-
+velocities fixed.
+                                                                          casionally encounter grid points that have no neighboring values of
+   In the case of smoke, we utilize three different refinement crite-
+                                                                          velocity and cannot be updated. While this is rare (but not impos-
+ria. First, we refine near objects since their interactions with smoke
+                                                                          sible) for uniform grids, T-junctions exacerbate their occurrence on
+will introduce small scales features that enhance believability. Sec-
+                                                                          octree grids. When this happens, we skip over these nodes until one
+ond, we refine near concentrations of high vorticity. Third, we re-
+                                                                          of their neighbors is updated (and then we update them in the usual
+fine in a band of density values (for example .1 < ρ < .3). This last
+                                                                          manner).
+criteria prunes out both the low densities that cannot be seen as well
+as the high densities interior to the smoke which are self-occluded.
+                                                                          7    Conclusions
+6    Water                                                                Our new symmetric formulation reduces the pressure solver to ap-
+                                                                          proximately 25% of the total simulation time requiring only about
+We use the particle level set method of [Enright et al. 2002a] with
+                                                                          20 iterations to converge to an accuracy of machine precision. This
+φ ≤ 0 designating the water and φ > 0 representing the air. When
+                                                                          leaves little room for improvement and even a zero cost pressure
+solving for the pressure, one only needs to consider cells in the
+                                                                          solver would only make the code 25% faster. On the other hand,
+water. Dirichlet boundary conditions of pI = pair + σ κ are set in the
+                                                                          nonsymmetric formulations requiring BiCGSTAB or GMRES and
+air cells bordering the water, where σ is a surface tension coefficient
+                                                                          nonoptimal preconditioners easily lead to an order of magnitude
+and κ = ∇ · (∇φ /|∇φ |) is the local interface curvature. We note
+                                                                          slowdown, or in the worst case scenario problems with robustly
+that [Hong and Kim 2003] considered surface tension in the case of
+                                                                          finding a solution at all. The symmetric formulation enables a full
+bubbles, but not for films. κ is computed by averaging nodal values
+                                                                          octree discretization of the equations that govern both the flow of
+of φ to the cell center, computing derivatives of φ on the cell faces,
+                                                                          smoke and water. Moreover, we achieved reasonable computational
+averaging these back to the cell center, using these cell centered
+                                                                          costs on grids as fine as 10243 allowing us to capture fine scale
+values to obtain the normal, computing derivatives of the normal
+                                                                          rolling motion in smoke and thin films for water.
+on the cell faces, averaging these values back to the cell center,
+and finally using these cell centered values to obtain the curvature.
+The only external force we account for is gravity via u += 4tg.           8    Acknowledgement
+The interaction with objects is similar to that of smoke. We apply
+adaptive refinement to a band about the interface (focusing more          Research supported in part by an ONR YIP award and a
+heavily on the water side), noting that the signed distance property      PECASE award (ONR N00014-01-1-0620), a Packard Founda-
+of φ makes this straightforward.                                          tion Fellowship, a Sloan Research Fellowship, ONR N00014-03-
+   Recently, [Enright et al. 2004] showed that the particle level set     1-0071, ONR N00014-02-1-0720, ARO DAAD19-03-1-0331, NSF
+method relies on particles for accuracy and the level set for connec-     DMS-0106694, NSF ITR-0121288, NSF IIS-0326388, NSF ACI-
+tivity. Moreover, they showed that one could use a simple semi-           0323866 and NSF ITR-0205671. In addition, F. G. was supported
+Lagrangian method on the level set with no significant accuracy           in part by an NSF Postdoctoral Fellowship (DMS-0102029).
+penalty as long as the particles are evolved with at least second            We’d also like to thank Mike Houston for providing computing
+order Runge-Kutta. Thus, we update φ with the semi-Lagrangian             resources used for rendering.
+method using velocities defined at the nodes (see section 3). The
+particles are advected using second order Runge-Kutta and trilin-         References
+early interpolated nodal velocities.
+   We use the fast marching method [Tsitsiklis 1995; Sethian 1996]        A LMGREN , A., B ELL , J., C OLELLA , P., H OWELL , L., AND W ELCOME ,
+to maintain the signed distance property of φ . First, the signed            M. 1998. A conservative adaptive projection method for the variable
+distance is computed at all the nodes around the interface, and they         density incompressible navier-stokes equations. J. Comput. Phys. 142,
+are marked as updated. The nodes adjacent to the updated nodes               1–46.
+are tagged trial. Then we compute potential values of φ at all trial      B ERGER , M., AND C OLELLA , P. 1989. Local adaptive mesh refinement
+nodes using only updated nodes. The smallest of these is tagged              for shock hydrodynamics. J. Comput. Phys. 82, 64–84.
+
+
+B ERGER , M., AND O LIGER , J. 1984. Adaptive mesh refinement for hy-                simulation for interactive applications. In Proc. of the 2003 ACM SIG-
+     perbolic partial differential equations. J. Comput. Phys. 53, 484–512.          GRAPH/Eurographics Symposium on Computer Animation, 154–159.
+C ARLSON , M., M UCHA , P., VAN H ORN III, R., AND T URK , G. 2002.               N GUYEN , D., F EDKIW, R., AND J ENSEN , H. 2002. Physically based
+     Melting and flowing. In ACM SIGGRAPH Symposium on Computer An-                  modeling and animation of fire. In ACM Trans. Graph. (SIGGRAPH
+     imation, 167–174.                                                               Proc.), vol. 29, 721–728.
+C HEN , J., AND L OBO , N. 1994. Toward interactive-rate simulation of flu-       O HTAKE , Y., B ELYAEV, A., A LEXA , M., T URK , G., AND S EIDEL , H.
+     ids with moving obstacles using the navier-stokes equations. Computer           2003. Multi-Level Partition of Unity Implicits. ACM Trans. Graph.
+     Graphics and Image Processing 57, 107–116.                                      (SIGGRAPH Proc.) 22, 3, 463–470.
+C HEN , S., M ERRIMAN , B., O SHER , S., AND S MEREKA , P. 1997. A                P ERRY, R., AND F RISKEN , S. 2001. Kizamu: a system for sculpting digital
+     simple level set method for solving stefan problems. 8–29.                      characters. In Proc. SIGGRAPH 2001, vol. 20, 47–56.
+DAY, M., C OLELLA , P., L IJEWSKI , M., R ENDLEMAN , C., AND M AR -               P OPINET, S. 2003. Gerris: A tree-based adaptive solver for the incom-
+     CUS , D. 1998. Embedded boundary algorithms for solving the poisson             pressible euler equations in complex geometries. J. Comp. Phys. 190,
+     equation on complex domains. Tech. rep., Lawrence Berkeley National             572–600.
+     Laboratory (LBNL-41811).                                                     P REMOZE , S., TASDIZEN , T., B IGLER , J., L EFOHN , A., AND
+E NRIGHT, D., F EDKIW, R., F ERZIGER , J., AND M ITCHELL , I. 2002.                  W HITAKER , R. 2003. Particle–based simulation of fluids. In Comp.
+     A hybrid particle level set method for improved interface capturing. J.         Graph. Forum (Eurographics Proc.), vol. 22, 401–410.
+     Comp. Phys. 183, 83–116.                                                     R ASMUSSEN , N., N GUYEN , D., G EIGER , W., AND F EDKIW, R. 2003.
+E NRIGHT, D., M ARSCHNER , S., AND F EDKIW, R. 2002. Animation and                   Smoke simulation for large scale phenomena. ACM Trans. Graph. (SIG-
+     rendering of complex water surfaces. ACM Trans. Graph. (SIGGRAPH                GRAPH Proc.) 22, 703–707.
+     Proc.) 21, 3, 736–744.                                                       ROUSSEL , O., S CHNEIDER , K., T SIGULIN , A., AND B OCKHORN , H.
+E NRIGHT, D., L OSASSO , F., AND F EDKIW, R. 2004. A fast and accurate               2003. A conservative fully adaptive multiresolution algorithm for
+     semi-Lagrangian particle level set method. Computers and Structures,            parabolic pdes. J. Comput. Phys. 188, 493–523.
+     (in press).                                                                  S AAD , Y. 1996. Iterative methods for sparse linear systems. PWS Publish-
+F EDKIW, R., S TAM , J., AND J ENSEN , H. 2001. Visual simulation of                 ing. New York, NY.
+     smoke. In Proc. of ACM SIGGRAPH 2001, 15–22.                                 S AMET, H. 1989. The Design and Analysis of Spatial Data Structures.
+F ELDMAN , B. E., O’B RIEN , J. F., AND A RIKAN , O. 2003. Animating                 Addison-Wesley, New York.
+     suspended particle explosions. ACM Trans. Graph. (SIGGRAPH Proc.)            S ETHIAN , J. 1996. A fast marching level set method for monotonically
+     22, 3, 708–715.                                                                 advancing fronts. Proc. Natl. Acad. Sci. 93, 1591–1595.
+F OSTER , N., AND F EDKIW, R. 2001. Practical animation of liquids. In            S OCHNIKOV, V., AND E FRIMA , S. 2003. Level set calculations of the
+     Proc. of ACM SIGGRAPH 2001, 23–30.                                              evolution of boundaries on a dynamically adaptive grid. Int. J. Num.
+F OSTER , N., AND M ETAXAS , D. 1996. Realistic animation of liquids.                Methods in Eng. 56, 1913–1929.
+     Graph. Models and Image Processing 58, 471–483.                              S TAM , J. 1999. Stable fluids. In Proc. of SIGGRAPH 99, 121–128.
+F OSTER , N., AND M ETAXAS , D. 1997. Controlling fluid animation. In             S TAM , J. 2003. Flows on surfaces of arbitrary topology. ACM Trans.
+     Computer Graphics International 1997, 178–188.                                  Graph. (SIGGRAPH Proc.) 22, 724–731.
+F OSTER , N., AND M ETAXAS , D. 1997. Modeling the motion of a hot,               S TRAIN , J. 1999. Fast tree-based redistancing for level set computations.
+     turbulent gas. In Proc. of SIGGRAPH 97, 181–188.                                J. Comput. Phys. 152, 664–686.
+F RISKEN , S., P ERRY, R., ROCKWOOD , A., AND J ONES , T. 2000. Adap-             S TRAIN , J. 1999. Tree methods for moving interfaces. J. Comput. Phys.
+     tively sampled distance fields: a general representation of shape for com-      151, 616–648.
+     puter graphics. In Proc. SIGGRAPH 2000, 249–254.                             S TRAIN , J. 2000. A fast modular semi-lagrangian method for moving
+G IBOU , F., F EDKIW, R., C HENG , L.-T., AND K ANG , M. 2002. A second–             interfaces. J. Comput. Phys. 161, 512–536.
+     order–accurate symmetric discretization of the poisson equation on irreg-    S USSMAN , M., A LMGREN , A., B ELL , J., C OLELLA , P., H OWELL , L.,
+     ular domains. 205–227.                                                          AND W ELCOME , M. 1999. An adaptive level set approach for incom-
+H AM , F., L IEN , F., AND S TRONG , A. 2002. A fully conservative second-           pressible two-phase flows. J. Comput. Phys. 148, 81–124.
+     order finite difference scheme for incompressible flow on nonuniform         S USSMAN , M. 2003. A second order coupled level set and volume-of-fluid
+     grids. J. Comput. Phys. 117, 117–133.                                           method for computing growth and collapse of vapor bubbles. J. Comp.
+H ARLOW, F., AND W ELCH , J. 1965. Numerical calculation of time-                    Phys. 187, 110–136.
+     dependent viscous incompressible flow of fluid with free surface. Phys.      TAKAHASHI , T., F UJII , H., K UNIMATSU , A., H IWADA , K., S AITO , T.,
+     Fluids 8, 2182–2189.                                                            TANAKA , K., AND U EKI , H. 2003. Realistic animation of fluid with
+H ONG , J.-M., AND K IM , C.-H. 2003. Animation of bubbles in liquid.                splash and foam. Comp. Graph. Forum (Eurographics Proc.) 22, 3, 391–
+     Comp. Graph. Forum (Eurographics Proc.) 22, 3, 253–262.                         400.
+J U , T., L OSASSO , F., S CHAEFER , S., AND WARREN , J. 2002. Dual               T REUILLE , A., M C NAMARA , A., P OPOVI Ć , Z., AND S TAM , J. 2003.
+     contouring of Hermite data. ACM Trans. Graph. (SIGGRAPH Proc.) 21,              Keyframe control of smoke simulations. ACM Trans. Graph. (SIG-
+     3, 339–346.                                                                     GRAPH Proc.) 22, 3, 716–723.
+K ASS , M., AND M ILLER , G. 1990. Rapid, stable fluid dynamics for com-          T SITSIKLIS , J. 1995. Efficient algorithms for globally optimal trajectories.
+     puter graphics. In Computer Graphics (Proc. of SIGGRAPH 90), vol. 24,           IEEE Trans. on Automatic Control 40, 1528–1538.
+     49–57.                                                                       W ESTERMANN , R., KOBBELT, L., AND E RTL , T. 1999. Real-time explo-
+L AMORLETTE , A., AND F OSTER , N. 2002. Structural modeling of natural              ration of regular volume data by adaptive reconstruction of isosurfaces.
+     flames. ACM Trans. Graph. (SIGGRAPH Proc.) 21, 3, 729–735.                      The Vis. Comput. 15, 2, 100–111.
+L EE , H., D ESBRUN , M., AND S CHRODER , P. 2003. Progressive encoding           Y NGVE , G., O’B RIEN , J., AND H ODGINS , J. 2000. Animating explosions.
+     of complex isosurfaces. ACM Trans. Graph. (SIGGRAPH Proc.) 22, 3,               In Proc. SIGGRAPH 2000, vol. 19, 29–36.
+     471–476.
+M IYAZAKI , R., D OBASHI , Y., AND N ISHITA , T. 2002. Simulation of
+     cumuliform clouds based on computational fluid dynamics. Proc. Euro-
+     graphics 2002 Short Presentation, 405–410.
+M ÜLLER , M., C HARYPAR , D., AND G ROSS , M. 2003. Particle-based fluid
+
+

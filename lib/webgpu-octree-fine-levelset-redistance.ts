@@ -69,6 +69,11 @@ export interface FineLevelSetRedistanceConstructionOptions {
    * redistance band the owning solver can request. Pipelines above this bound
    * are not compiled. */
   readonly maximumRequiredJfaStride?: number;
+  /** Resolve equal-distance seed directions at the sample centre. A single
+   * axis winner cannot be equivariant under an x/z swap when the crossing is
+   * exactly tied; LoSasso's symmetric-expansion lane opts into the neutral
+   * centre sentinel while the frozen Power pipeline retains its prior rule. */
+  readonly axisPermutationInvariantSeeds?: boolean;
 }
 
 /** The exact immutable page-delta ABI authored by fine topology.
@@ -383,6 +388,8 @@ export class WebGPUFineLevelSetRedistance {
   readonly allocatedBytes: number;
   /** True when the opt-in B4-specialized flood addressing variant is compiled. */
   readonly b4Addressing: boolean;
+  /** Construction-stable neutral handling for exactly tied seed directions. */
+  readonly axisPermutationInvariantSeeds: boolean;
   /** Construction-stable A/B selection; zero restores recurring support-wide floods. */
   readonly dirtyFrontier: boolean;
   private readonly reductions: GPUBuffer;
@@ -499,11 +506,15 @@ export class WebGPUFineLevelSetRedistance {
     // form only replaces exact integer division with the shifts the fixed tap
     // table above already uses.
     this.b4Addressing = fineLevelSetJFAB4AddressingRequested(source.plan);
+    this.axisPermutationInvariantSeeds = constructionOptions.axisPermutationInvariantSeeds === true;
     this.dirtyFrontier = fineLevelSetJFADirtyFrontierEnabled();
+    const jfaSource = this.axisPermutationInvariantSeeds
+      ? buildFineLevelSetJFACPTWGSL(this.b4Addressing, true, true)
+      : this.b4Addressing ? fineLevelSetJFACPTB4AddressingWGSL : fineLevelSetJFACPTWGSL;
     const jfaVariant = jfaActivity.module(
-      fineLevelSetJFAActivityShader(jfaActivity, this.b4Addressing
-        ? fineLevelSetJFACPTB4AddressingWGSL : fineLevelSetJFACPTWGSL),
-      `octree/fine-redistance-jfa/${jfaProfile.cacheKey}${this.b4Addressing ? "/b4-addressing" : ""}`,
+      fineLevelSetJFAActivityShader(jfaActivity, jfaSource),
+      `octree/fine-redistance-jfa/${jfaProfile.cacheKey}${this.b4Addressing ? "/b4-addressing" : ""}${
+        this.axisPermutationInvariantSeeds ? "/axis-permutation-invariant-seeds" : ""}`,
     );
     this.pipelineActivity = jfaActivity;
     // The shader source is identical, but the bundle's immutable pipeline
@@ -974,7 +985,16 @@ fn cooperativeFlood(id:u32,centerBrick:vec3u,lid:u32,fromA:bool){
 /** Sparse 1+JFA closest-point transform. Seed keys are global fine-sample
  * linear indices, so the deterministic secondary ordering is independent of
  * physical page IDs and A/B generation allocation order. */
-function buildFineLevelSetJFACPTWGSL(b4Addressing: boolean, voxelLanes = true): string {
+function buildFineLevelSetJFACPTWGSL(
+  b4Addressing: boolean,
+  voxelLanes = true,
+  axisPermutationInvariantSeeds = false,
+): string {
+  const seedTieDeclaration = axisPermutationInvariantSeeds ? "var tied=false;" : "";
+  const seedSelection = axisPermutationInvariantSeeds
+    ? "if(d2<best){best=d2;bestDirection=direction;bestFraction=fraction;tied=false;}else if(d2==best&&direction!=bestDirection){tied=true;}"
+    : "if(d2<best||(d2==best&&direction<bestDirection)){best=d2;bestDirection=direction;bestFraction=fraction;}";
+  const seedTieResolution = axisPermutationInvariantSeeds ? "if(tied){return 6u<<24u;}" : "";
   return /* wgsl */ `
 ${voxelLanes ? "" : "enable subgroups;"}
 ${fineLevelSetLinearWorkgroupWGSL}
@@ -1092,7 +1112,7 @@ fn carriedSeed(index:u32)->u32{
 // toward it — the surface of a film separating from the lid stays
 // representable even though every in-lattice neighbor is still liquid.
 // Deeper liquid (center <= -fineWidth) wets the wall and seeds nothing.
-fn seedClosestPointCode(q:vec3u,index:u32)->u32{let center=finePackedPhi(index);if(center==0.){return 6u<<24u;}var best=LARGE;var bestDirection=INVALID;var bestFraction=0.;for(var direction=0u;direction<6u;direction+=1u){let nq=vec3i(q)+directionDelta(direction);var other=0.;if(any(nq<vec3i(0))||any(nq>=vec3i(p.sampleDims))){if(p.closed==0u||(p.openTop!=0u&&direction==3u)){continue;}other=center+p.fineWidth;}else{let neighbor=sampleIndex(vec3u(nq));if(neighbor==INVALID){continue;}other=finePackedPhi(neighbor);}if(!finite(other)||(other<0.)==(center<0.)){continue;}let denominator=abs(center)+abs(other);let fraction=select(0.,abs(center)/denominator,denominator>0.);let d2=fraction*fraction;if(d2<best||(d2==best&&direction<bestDirection)){best=d2;bestDirection=direction;bestFraction=fraction;}}if(bestDirection==INVALID){return INVALID;}let quantized=min(u32(round(clamp(bestFraction,0.,1.)*CP_FRACTION_SCALE)),CP_FRACTION_MASK);if(quantized==0u){return 7u<<24u;}return (bestDirection<<24u)|(quantized&CP_FRACTION_MASK);}
+fn seedClosestPointCode(q:vec3u,index:u32)->u32{let center=finePackedPhi(index);if(center==0.){return 6u<<24u;}var best=LARGE;var bestDirection=INVALID;var bestFraction=0.;${seedTieDeclaration}for(var direction=0u;direction<6u;direction+=1u){let nq=vec3i(q)+directionDelta(direction);var other=0.;if(any(nq<vec3i(0))||any(nq>=vec3i(p.sampleDims))){if(p.closed==0u||(p.openTop!=0u&&direction==3u)){continue;}other=center+p.fineWidth;}else{let neighbor=sampleIndex(vec3u(nq));if(neighbor==INVALID){continue;}other=finePackedPhi(neighbor);}if(!finite(other)||(other<0.)==(center<0.)){continue;}let denominator=abs(center)+abs(other);let fraction=select(0.,abs(center)/denominator,denominator>0.);let d2=fraction*fraction;${seedSelection}}if(bestDirection==INVALID){return INVALID;}${seedTieResolution}let quantized=min(u32(round(clamp(bestFraction,0.,1.)*CP_FRACTION_SCALE)),CP_FRACTION_MASK);if(quantized==0u){return 7u<<24u;}return (bestDirection<<24u)|(quantized&CP_FRACTION_MASK);}
 fn hasCachedClosestPoint(index:u32)->bool{return (finePackedFlags(index)>>SAMPLE_FLAG_BITS)!=0u;}
 @compute @workgroup_size(64)fn refreshClosestPointCodes(@builtin(workgroup_id)wid:vec3u,@builtin(local_invocation_index)lid:u32,@builtin(num_workgroups)nw:vec3u){
  let id=activePage(wid,nw);if(id==INVALID||lid>=p.samplesPerBrick){return;}let index=id*p.samplesPerBrick+lid;let brick=unpackBrick(metadata[id*4u+1u]);let q=brick*p.brickResolution+localCoord(lid);let persistent=finePackedFlags(index)&((1u<<SAMPLE_FLAG_BITS)-1u);fineWritePackedFlags(index,persistent);if(any(q>=p.sampleDims)||!finite(finePackedPhi(index))){return;}let closest=seedClosestPointCode(q,index);if(closest!=INVALID){fineWritePackedFlags(index,persistent|(closest<<SAMPLE_FLAG_BITS));}
@@ -1109,7 +1129,7 @@ fn resolvedSeed(index:u32)->u32{return workA[index];}
   let persistent=p.frontierRequested==2u&&p.frontierEnabled!=0u;var work=fineLinearWorkgroup(wid,nw);var id=deltaPageAt(work,persistent==false);
   if(!persistent){work=activeWork(wid,nw);id=select(INVALID,deltaPageAt(work,true),work!=INVALID);}var seedCount=0u;var errorFlags=0u;var firstError=INVALID;
   if(lid==0u&&work!=INVALID){errorFlags=select(deltaSupportRecordError(work),deltaPersistentSeedRecordError(work),persistent);firstError=select(INVALID,work,errorFlags!=0u);}
-  if(id!=INVALID&&lid<p.samplesPerBrick){let index=id*p.samplesPerBrick+lid;let brick=unpackBrick(metadata[id*4u+1u]);let q=brick*p.brickResolution+localCoord(lid);let carried=carriedSeed(index);workA[index]=carried;workB[index]=INVALID;if(p.warmStart==0u){fineWritePackedFlags(index,finePackedFlags(index)&((1u<<SAMPLE_FLAG_BITS)-1u));}if(!any(q>=p.sampleDims)){let value=finePackedPhi(index);if(!finite(value)){errorFlags|=NONFINITE;firstError=min(firstError,index);}else if(p.warmStart!=0u){if(hasCachedClosestPoint(index)){workA[index]=index;seedCount=1u;}}else{let closest=seedClosestPointCode(q,index);if(closest!=INVALID){workA[index]=index;fineWritePackedFlags(index,(finePackedFlags(index)&((1u<<SAMPLE_FLAG_BITS)-1u))|(closest<<SAMPLE_FLAG_BITS));seedCount=1u;}}}}
+  if(id!=INVALID&&lid<p.samplesPerBrick){let index=id*p.samplesPerBrick+lid;let brick=unpackBrick(metadata[id*4u+1u]);let q=brick*p.brickResolution+localCoord(lid);let carried=carriedSeed(index);workA[index]=carried;workB[index]=INVALID;if(p.warmStart==0u){fineWritePackedFlags(index,finePackedFlags(index)&((1u<<SAMPLE_FLAG_BITS)-1u));}if(!any(q>=p.sampleDims)){let value=finePackedPhi(index);if(!finite(value)){errorFlags|=NONFINITE;firstError=min(firstError,index);}else if(p.warmStart!=0u){seedCount=select(0u,1u,carried!=INVALID);if(hasCachedClosestPoint(index)){workA[index]=index;seedCount=1u;}}else{let closest=seedClosestPointCode(q,index);if(closest!=INVALID){workA[index]=index;fineWritePackedFlags(index,(finePackedFlags(index)&((1u<<SAMPLE_FLAG_BITS)-1u))|(closest<<SAMPLE_FLAG_BITS));seedCount=1u;}}}}
   reduceLane(lid,seedCount,0u,0u,0u,0u,errorFlags,firstError,32u);publishSeedPartial(work,lid);
 }
 @compute @workgroup_size(64)fn resolveClosestPointsAToB(@builtin(workgroup_id)wid:vec3u,@builtin(local_invocation_index)lid:u32,@builtin(num_workgroups)nw:vec3u){

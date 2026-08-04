@@ -12,7 +12,7 @@ struct Params{
  velocityDimensions:vec3u,directoryCapacity:u32,
  velocityCellSize:f32,maximumLeafSize:u32,reservedVelocity0:u32,reservedVelocity1:u32,
  bandCells:u32,maxBacktrace:u32,closed:u32,openTop:u32,
- dt:f32,expectedVelocityEpoch:u32,reserved0:u32,reserved1:u32,
+ dt:f32,expectedVelocityEpoch:u32,substeps:u32,reserved1:u32,
 }
 @group(0)@binding(0)var<uniform>p:Params;
 @group(0)@binding(1)var<storage,read_write>metadata:array<u32>;
@@ -27,6 +27,11 @@ struct Params{
 @group(0)@binding(10)var<storage,read_write>delta:array<u32>;
 fn finite(v:f32)->bool{return v==v&&abs(v)<3.402823e38;}
 fn finite3(v:vec3f)->bool{return all(v==v)&&all(abs(v)<vec3f(3.402823e38));}
+// Keep characteristic offsets on a lattice finer than 1e-6 m at factor four.
+// This is still coarser than the ulp of the largest sample index, so adding an
+// offset to q and its reflected opposite produces complementary fractions
+// instead of losing a different low bit on the two sides of the tank.
+fn quantizeTraceOffset(v:vec3f)->vec3f{return round(v*65536.)/65536.;}
 ${fineLevelSetPackedSampleWGSL("samples", true)}
 ${makeFineLevelSetSortedWorklistLookupWGSL("p", "metadata", "worklist", "losassoFineBrick")}
 ${octreeLosassoVelocitySamplingWGSL}
@@ -37,8 +42,7 @@ fn localCoord(index:u32)->vec3u{let z=index/(p.brickResolution*p.brickResolution
 fn sampleIndex(q:vec3u)->u32{let brick=q/p.brickResolution;let page=losassoFineBrick(packBrick(brick));
  if(page==INVALID){return INVALID;}let local=q-brick*p.brickResolution;
  return page*p.samplesPerBrick+local.x+p.brickResolution*(local.y+p.brickResolution*local.z);}
-fn sampleFinePhi(position:vec3f)->f32{
- let grid=(position-p.domainOrigin)/p.fineCellWidth-vec3f(.5);
+fn sampleFinePhiGrid(grid:vec3f)->f32{
  let base=vec3i(floor(grid));let fraction=fract(grid);var exact:array<i32,36>;
  for(var corner=0u;corner<8u;corner+=1u){let offset=vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));
   let weights=vec3f(select(1.-fraction.x,fraction.x,(corner&1u)!=0u),
@@ -61,7 +65,7 @@ fn acceptedStep()->bool{return atomicLoad(&control[6])==0u&&atomicLoad(&control[
 
 @compute @workgroup_size(64)
 fn prepareLosassoFineTransport(@builtin(local_invocation_index)lane:u32){
- if(lane<16u){atomicStore(&control[lane],select(0u,INVALID,lane==12u));}if(lane<8u){delta[lane]=0u;}workgroupBarrier();
+ if(lane<16u){atomicStore(&control[lane],select(0u,INVALID,lane==12u||lane==13u));}if(lane<8u){delta[lane]=0u;}workgroupBarrier();
  if(lane==0u){if(!acceptedVelocity()){atomicStore(&control[6],1u);}
   if(arrayLength(&worklist)<7u||worklist[0]!=p.generation||worklist[2]!=p.pageCapacity
     ||worklist[3]!=3u||worklist[5]!=1u||worklist[6]!=1u){atomicStore(&control[7],1u);}}
@@ -79,19 +83,34 @@ fn advectLosassoFinePhi(@builtin(workgroup_id)group:vec3u,@builtin(local_invocat
   let old=finePackedPhi(index);nextPhi[index]=old;if(!finite(old)){atomicAdd(&control[1],1u);continue;}
   let q=brick*p.brickResolution+localCoord(local);if(any(q>=p.sampleDimensions)){continue;}
   if(abs(old)>f32(p.bandCells)*p.fineCellWidth){atomicAdd(&control[2],1u);continue;}
-  let position=p.domainOrigin+(vec3f(q)+vec3f(.5))*p.fineCellWidth;
-  let first=losassoVelocityAt(position);if(first.valid==0u){atomicAdd(&control[7],1u);atomicAdd(&control[8],1u);atomicMin(&control[12],index);continue;}
-  var midpoint=position-.5*p.dt*first.value;let low=p.domainOrigin+vec3f(.5*p.fineCellWidth);
-  var high=p.domainOrigin+(vec3f(p.sampleDimensions)-vec3f(.5))*p.fineCellWidth;
-  if(p.openTop!=0u){high.y=max(high.y,midpoint.y);}
-  if(p.closed!=0u){midpoint=clamp(midpoint,low,high);}else if(any(midpoint<low)||any(midpoint>high)){atomicAdd(&control[0],1u);continue;}
-  let middle=losassoVelocityAt(midpoint);if(middle.valid==0u){atomicAdd(&control[7],1u);atomicAdd(&control[9],1u);atomicMin(&control[12],index);continue;}
-  var departure=position-p.dt*middle.value;if(p.openTop!=0u){high.y=max(high.y,departure.y);}
-  if(p.closed!=0u){departure=clamp(departure,low,high);}else if(any(departure<low)||any(departure>high)){atomicAdd(&control[0],1u);continue;}
-  let displacement=u32(ceil(length(middle.value)*p.dt/max(p.fineCellWidth,1e-20)));
+  let position=vec3f(q);let low=vec3f(0);var high=vec3f(p.sampleDimensions)-vec3f(1);
+  let stages=max(1u,p.substeps);let subDt=p.dt/f32(stages);var departure=position;
+  var exitCells=0.;var validTrace=true;
+  // One explicit-midpoint trace is sufficient for the host time step. The
+  // donor bound governs topology residency and rejects an unexpectedly long
+  // characteristic; it must not silently increase the number of time stages.
+  for(var stage=0u;stage<stages;stage+=1u){
+   let firstGrid=(departure+vec3f(.5))*(p.fineCellWidth/p.velocityCellSize);
+   let first=losassoVelocityAtGrid(firstGrid);if(first.valid==0u){atomicAdd(&control[7],1u);atomicAdd(&control[8],1u);atomicMin(&control[12],index);atomicMin(&control[13],brickKey);validTrace=false;break;}
+   var midpoint=departure+quantizeTraceOffset(-.5*(subDt/p.fineCellWidth)*first.value);if(p.openTop!=0u){high.y=max(high.y,midpoint.y);}
+   if(p.closed!=0u){midpoint=clamp(midpoint,low,high);}else if(any(midpoint<low)||any(midpoint>high)){atomicAdd(&control[0],1u);validTrace=false;break;}
+   let middleGrid=(midpoint+vec3f(.5))*(p.fineCellWidth/p.velocityCellSize);
+   let middle=losassoVelocityAtGrid(middleGrid);if(middle.valid==0u){atomicAdd(&control[7],1u);atomicAdd(&control[9],1u);atomicMin(&control[12],index);atomicMin(&control[13],brickKey);validTrace=false;break;}
+   let traced=departure+quantizeTraceOffset(-(subDt/p.fineCellWidth)*middle.value);if(p.openTop!=0u){high.y=max(high.y,traced.y);}
+   if(p.closed!=0u){let interior=clamp(traced,low,high);exitCells+=distance(traced,interior);departure=interior;}
+   else if(any(traced<low)||any(traced>high)){atomicAdd(&control[0],1u);validTrace=false;break;}
+   else{departure=traced;}
+  }
+  if(!validTrace){continue;}
+  let displacement=u32(ceil(distance(position,departure)+exitCells));
   atomicMax(&control[5],displacement);if(displacement>p.maxBacktrace){atomicAdd(&control[0],1u);continue;}
-  let transported=sampleFinePhi(departure);if(!finite(transported)){atomicAdd(&control[7],1u);atomicAdd(&control[10],1u);atomicMin(&control[12],index);continue;}
-  nextPhi[index]=transported;atomicAdd(&control[2],1u);
+  let transported=sampleFinePhiGrid(departure);if(!finite(transported)){atomicAdd(&control[7],1u);atomicAdd(&control[10],1u);atomicMin(&control[12],index);continue;}
+  // A characteristic leaving a closed wall originates in solid/air. Adding
+  // its distance outside the sample lattice gives phi the unit outward slope
+  // needed for a receding interface; clamping alone re-samples a wall film and
+  // pins it indefinitely. This is the reduced LoSasso form of the established
+  // Power transport boundary extension.
+  nextPhi[index]=transported+exitCells*p.fineCellWidth;atomicAdd(&control[2],1u);
  }
 }
 

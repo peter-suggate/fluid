@@ -163,7 +163,7 @@ export class WebGPUOctreeLosassoFineTransport {
     for (const [label, value, minimum, maximum] of [
       ["generation", generation, 1, 0xffff_ffff], ["velocity epoch", velocityEpoch, 0, 0xffff_ffff],
       ["transport band", band, 1, 0xffff],
-      ["maximum backtrace", maximumBacktrace, 1, 2 * this.source.plan.fineFactor],
+      ["maximum backtrace", maximumBacktrace, 1, 4 * this.source.plan.fineFactor],
     ] as const) {
       if (!Number.isSafeInteger(value) || value < minimum || value > maximum) {
         throw new RangeError(`Losasso fine transport ${label} is outside [${minimum},${maximum}]`);
@@ -180,6 +180,12 @@ export class WebGPUOctreeLosassoFineTransport {
       options.boundaryPolicy === "closed-neumann" ? 1 : 0,
       options.openTopBoundary ? 1 : 0], 24);
     floats[28] = options.timestep; words[29] = velocityEpoch;
+    // The bound sizes donor residency; it is not a measured CFL. Advancing a
+    // fixed number of stages derived from that bound adds rounding and diffusion
+    // even when the accepted 4 ms characteristic moves less than one fine cell.
+    // The direct LoSasso lane therefore uses the same single midpoint trace as
+    // the paper path and rejects an actual trace that exceeds the bound.
+    words[30] = 1;
     this.device.queue.writeBuffer(this.params, 0, bytes);
     const pass = broker.compute({ label: "Losasso fine transport - direct axis-face sampling" });
     pass.setPipeline(this.prepare); pass.setBindGroup(0, this.group); pass.dispatchWorkgroups(1);

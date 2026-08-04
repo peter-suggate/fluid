@@ -22,6 +22,9 @@
  *                                    after applying the lane preset
  *   --first-frame                    gate before advance 1 and reduce the
  *                                    capture to literal advance 1
+ *   --losasso-d4-first-frame         one-command production-cutover preset:
+ *                                    symmetric-expansion, Losasso, factor/band
+ *                                    4, one complete post-construction advance
  *   --counter-start-gate             gate before advance 1 only until the
  *                                    counter recorder is live, then reduce a
  *                                    representative recurring advance
@@ -84,6 +87,7 @@ import { createWriteStream, existsSync, mkdirSync, readFileSync, readdirSync, re
   from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { createInterface } from "node:readline";
+import { arch, platform, release } from "node:os";
 import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 import {
@@ -108,17 +112,25 @@ const worker = fileURLToPath(new URL("./run-webgpu-smoke-isolated-worker.ts", im
 const flag = (name: string): string | undefined => process.argv
   .find((argument) => argument.startsWith(`--${name}=`))?.slice(name.length + 3);
 
-const lane = (flag("lane") ?? "mini") as PowerDamRuntimeLane;
+const losassoD4FirstFrame = process.argv.includes("--losasso-d4-first-frame");
+if (losassoD4FirstFrame && flag("lane") !== undefined
+  && flag("lane") !== "symmetric-expansion") {
+  throw new Error("--losasso-d4-first-frame is locked to --lane=symmetric-expansion");
+}
+const lane = (flag("lane") ?? (losassoD4FirstFrame
+  ? "symmetric-expansion" : "mini")) as PowerDamRuntimeLane;
 if (!(lane in POWER_DAM_LANE_ENVIRONMENT)) {
   throw new Error(`--lane must be one of ${Object.keys(POWER_DAM_LANE_ENVIRONMENT).join(", ")}`);
 }
-const bandLevel = flag("band") === undefined ? undefined : Number(flag("band"));
+const bandLevel = flag("band") === undefined
+  ? losassoD4FirstFrame ? 4 : undefined : Number(flag("band"));
 if (bandLevel !== undefined
   && (!Number.isInteger(bandLevel) || bandLevel < 0 || bandLevel > 4)) {
   throw new Error("--band must be an integer from 0 through 4");
 }
-const steps = flag("steps") === undefined ? undefined : Number(flag("steps"));
-const firstFrame = process.argv.includes("--first-frame");
+const steps = flag("steps") === undefined
+  ? losassoD4FirstFrame ? 1 : undefined : Number(flag("steps"));
+const firstFrame = losassoD4FirstFrame || process.argv.includes("--first-frame");
 // Counter attach takes ~2.7 s, while the isolated Metal-encoder metadata
 // stream can fill its bounded trace buffer in ~4 s. A normal warmup therefore
 // cannot make labels and counters overlap reliably. This gate starts the
@@ -127,11 +139,12 @@ const firstFrame = process.argv.includes("--first-frame");
 const counterStartGate = process.argv.includes("--counter-start-gate");
 const profileGate = firstFrame || counterStartGate;
 const counters = true;
-const counterSeconds = Number(flag("counter-seconds") ?? 3);
+const counterSeconds = Number(flag("counter-seconds") ?? (losassoD4FirstFrame ? 5 : 3));
 if (!Number.isFinite(counterSeconds) || counterSeconds < 3) {
   throw new Error("--counter-seconds must be at least 3 for full labels plus occupancy");
 }
-const counterGateWarmupMs = Number(flag("counter-gate-warmup-ms") ?? 1_200);
+const counterGateWarmupMs = Number(flag("counter-gate-warmup-ms")
+  ?? (losassoD4FirstFrame ? 3_000 : 1_200));
 if (!Number.isFinite(counterGateWarmupMs) || counterGateWarmupMs < 0
   || counterGateWarmupMs > counterSeconds * 1_000) {
   throw new Error("--counter-gate-warmup-ms must be between 0 and the counter window");
@@ -160,7 +173,9 @@ if (!Number.isFinite(counterReduction) || counterReduction < 1) {
 const discardTables = process.argv.includes("--discard-tables");
 const discardTrace = process.argv.includes("--discard-trace");
 const reuseTables = process.argv.includes("--reuse-tables");
-const outputDirectory = resolve(root, flag("out") ?? "artifacts/xctrace-mini-dam");
+const outputDirectory = resolve(root, flag("out")
+  ?? (losassoD4FirstFrame
+    ? "artifacts/xctrace-losasso-d4-frame" : "artifacts/xctrace-mini-dam"));
 
 /** Stage timings and labels come from Metal interval tables and are never
  * downsampled. These are the only counter series consumed by the report; LLC
@@ -208,20 +223,20 @@ export const makeCounterExtractionPolicy = (
 };
 
 export class CounterRowSelector {
-  private timestamp: string | undefined;
-  private timestampIndex = -1;
-  private retainTimestamp = false;
-
   public constructor(private readonly policy: CounterExtractionPolicy) {}
 
   public keep(row: Readonly<Record<string, unknown>>): boolean {
     const timestamp = String(row.timestamp ?? "");
-    if (timestamp !== this.timestamp) {
-      this.timestamp = timestamp;
-      this.timestampIndex += 1;
-      this.retainTimestamp = this.timestampIndex % this.policy.timestampStride === 0;
+    // xctrace does not guarantee that counter rows are timestamp-sorted: a
+    // repeated timestamp can reappear after another counter or ring stream.
+    // A stable hash keeps every selected counter/ring at the same timestamp
+    // without depending on export order, while still retaining about 1/N.
+    let timestampHash = 0x811c9dc5;
+    for (let index = 0; index < timestamp.length; index += 1) {
+      timestampHash ^= timestamp.charCodeAt(index);
+      timestampHash = Math.imul(timestampHash, 0x01000193);
     }
-    return this.retainTimestamp
+    return (timestampHash >>> 0) % this.policy.timestampStride === 0
       && this.policy.retainedCounterIds.has(String(row["counter-id"] ?? ""));
   }
 }
@@ -417,6 +432,63 @@ const profileEnvironment: Record<string, string> = {
   // win against startWorker's explicit environment, which previously made
   // comparative traces silently profile the lane's default band every time.
   ...(bandLevel === undefined ? {} : { FLUID_OCTREE_INTERFACE_BAND: String(bandLevel) }),
+  ...(losassoD4FirstFrame ? {
+    FLUID_COARSE_BACKEND: "losasso",
+    FLUID_LOSASSO_D4_CUTOVER: "1",
+    FLUID_MAXIMUM_LEAF_SIZE: "16",
+    FLUID_OCTREE_GLOBAL_FINE_FACTOR: "4",
+    FLUID_GLOBAL_FINE_GENERATION_TRANSITION: "1",
+  } : {}),
+};
+type FrameReportResult = Awaited<ReturnType<typeof buildFrameReport>>;
+const commandVersion = (command: string, arguments_: readonly string[]): string | undefined => {
+  try { return execFileSync(command, arguments_).toString().trim(); } catch { return undefined; }
+};
+const writeCaptureManifest = async (
+  status: "prepared" | "complete",
+  report?: FrameReportResult,
+): Promise<void> => {
+  const dirtyPaths = (commandVersion("git", ["status", "--porcelain", "--untracked-files=all"])
+    ?? "").split("\n").filter(Boolean);
+  await writeFile(`${outputDirectory}/capture-manifest.json`, `${JSON.stringify({
+    schemaVersion: 1,
+    status,
+    generatedAt: new Date().toISOString(),
+    preset: losassoD4FirstFrame ? "losasso-d4-first-frame" : undefined,
+    reproduce: losassoD4FirstFrame ? "npm run profile:losasso-d4-xctrace" : undefined,
+    argv: process.argv.slice(2),
+    git: {
+      revision: commandVersion("git", ["rev-parse", "HEAD"]),
+      dirty: dirtyPaths.length > 0,
+      dirtyPaths,
+    },
+    runtime: {
+      node: process.version, os: `${platform()} ${release()}`, architecture: arch(),
+      xctrace: commandVersion("xcrun", ["xctrace", "version"]),
+    },
+    configuration: {
+      lane, scene: profileEnvironment.FLUID_SCENE, method: profileEnvironment.FLUID_METHOD,
+      backend: profileEnvironment.FLUID_COARSE_BACKEND,
+      grid: profileEnvironment.FLUID_EXPECT_GRID,
+      maximumLeafSize: profileEnvironment.FLUID_MAXIMUM_LEAF_SIZE,
+      interfaceBand: profileEnvironment.FLUID_OCTREE_INTERFACE_BAND,
+      fineFactor: profileEnvironment.FLUID_OCTREE_GLOBAL_FINE_FACTOR,
+      steps: profileEnvironment.FLUID_ORACLE_STEPS,
+      counterSeconds, counterGateWarmupMs, counterReduction,
+      retainedCounters: [...RETAINED_GPU_COUNTERS],
+      fullLabelIsolation: isolatePassLabels,
+      environment: profileEnvironment,
+    },
+    ...(report ? { result: {
+      frameAnchor: report.frames.anchor,
+      firstAdvance: report.frames.firstAdvance,
+      frameMs: report.frames.medianMs,
+      exactBuckets: report.attribution.exactBuckets,
+      compositeBuckets: report.attribution.compositeBuckets,
+      counterPartitions: report.counters.partitionCount,
+      validation: "passed",
+    } } : {}),
+  }, null, 2)}\n`);
 };
 /** Shipping command graph used as the wall-clock control. A targeted capture
  * intentionally adds pass/Metal-encoder boundaries, so comparing it with an
@@ -753,6 +825,7 @@ const requireExclusiveGPU = async (): Promise<void> => {
 
 const main = async (): Promise<void> => {
   mkdirSync(outputDirectory, { recursive: true });
+  await writeCaptureManifest("prepared");
   const tracePath = `${outputDirectory}/mini-dam.trace`;
   const scratchBefore = instrumentsScratchSnapshot();
   const observedScratch = new Map(scratchBefore);
@@ -848,6 +921,7 @@ const main = async (): Promise<void> => {
     assertCompleteOccupancyReport(report);
     await writeFile(`${outputDirectory}/summary.json`, `${JSON.stringify(report, null, 2)}\n`);
     await writeFile(`${outputDirectory}/report.html`, renderFrameReportHtml(report));
+    await writeCaptureManifest("complete", report);
     if (discardTables) {
       for (const path of Object.values(tables)) rmSync(path, { force: true });
       console.log("discarded derived trace tables; the report and source trace are retained");
@@ -1139,6 +1213,7 @@ const main = async (): Promise<void> => {
   assertCompleteOccupancyReport(report);
   await writeFile(`${outputDirectory}/summary.json`, `${JSON.stringify(report, null, 2)}\n`);
   await writeFile(`${outputDirectory}/report.html`, renderFrameReportHtml(report));
+  await writeCaptureManifest("complete", report);
   if (discardTables) {
     for (const path of Object.values(tables)) rmSync(path, { force: true });
     console.log(discardTrace

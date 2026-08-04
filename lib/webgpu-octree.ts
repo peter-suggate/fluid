@@ -33,6 +33,7 @@ import {
   WebGPUOctreeLosassoCoarsePhiExchange,
   type WebGPUOctreeLosassoCoarsePhiInput,
 } from "./webgpu-octree-losasso-coarse-phi";
+import { OCTREE_LOSASSO_COARSE_PHI_MAGIC } from "./webgpu-octree-losasso-coarse-phi.wgsl";
 import { WebGPUOctreeLosassoFineTransport } from "./webgpu-octree-losasso-fine-transport";
 import { WebGPUOctreeLosassoRowMotion } from "./webgpu-octree-losasso-row-motion";
 import { WebGPUOctreeLosassoConditionedOperator } from
@@ -1017,6 +1018,55 @@ export function planFluidFootprintFineNarrowBandBrickCapacity(
   return Object.freeze({ ...base, maximumInterfaceAreaBricks, bandBrickCount,
     surfaceGrowthHeadroomBricks: maximumResidentBricks - bandBrickCount,
     maximumResidentBricks });
+}
+
+/**
+ * Exact publication floor for a rectangular authored liquid footprint.
+ *
+ * The rolling area-times-width estimate above is the right asymptotic reserve,
+ * but it omits the edge and corner terms of the first Chebyshev dilation. That
+ * omission is material for compact seeds: an 8-cubed drop with a six-brick
+ * publication radius occupies a clipped box-shell volume, not six unrelated
+ * face slabs. The GPU publisher discovers that volume exactly and rejects the
+ * generation when the page pool was sized only from the slab estimate. Callers
+ * include the extra transport membership ring when planning recurring updates.
+ *
+ * Bounds are half-open in logical fine-brick coordinates. The returned shell
+ * is the largest translated expanded box that fits in the domain minus the
+ * box interior farther than `dilationBrickRings` from every authored face.
+ * Planning the initial clipped position is insufficient: a lid- or wall-flush
+ * seed consumes the un-clipped envelope as soon as it separates.
+ */
+export function planFluidFootprintFineBandBrickFloor(
+  logicalBrickDimensions: readonly [number, number, number],
+  footprintMinimumBrick: readonly [number, number, number],
+  footprintMaximumBrick: readonly [number, number, number],
+  dilationBrickRings: number,
+): number {
+  if (logicalBrickDimensions.some((value) => !Number.isSafeInteger(value) || value < 1)
+    || !Number.isSafeInteger(dilationBrickRings) || dilationBrickRings < 1
+    || footprintMinimumBrick.some((value, axis) => !Number.isSafeInteger(value)
+      || value < 0 || value >= footprintMaximumBrick[axis]!)
+    || footprintMaximumBrick.some((value, axis) => !Number.isSafeInteger(value)
+      || value > logicalBrickDimensions[axis]!)) {
+    throw new RangeError("Fluid-footprint fine-band bounds are invalid");
+  }
+  const outerExtents = logicalBrickDimensions.map((dimension, axis) => Math.min(
+    dimension,
+    footprintMaximumBrick[axis]! - footprintMinimumBrick[axis]!
+      + 2 * dilationBrickRings,
+  ));
+  const innerExtents = logicalBrickDimensions.map((_dimension, axis) => Math.max(0,
+    footprintMaximumBrick[axis]! - footprintMinimumBrick[axis]!
+      - 2 * dilationBrickRings));
+  const volume = (extents: readonly number[]) => extents.reduce((product, value) => {
+    const next = product * value;
+    if (!Number.isSafeInteger(next)) {
+      throw new RangeError("Fluid-footprint fine-band volume exceeds exact integer range");
+    }
+    return next;
+  }, 1);
+  return volume(outerExtents) - volume(innerExtents);
 }
 
 /**
@@ -2395,8 +2445,11 @@ export class WebGPUOctreeProjection {
           // unreachable cutoff sentinel is still rejected by seed identity.
           // These widths are re-derived per step from the same planner; the
           // shared helper is what keeps allocation and encode in agreement.
+          const fineBandPlan = planFineLevelSetBandFineCells(
+            this.fineLevelSetBandCells, globalFineFactor,
+          );
           const { transportBandFineCells, redistanceBandFineCells, maximumBacktraceFineCells }
-            = planFineLevelSetBandFineCells(this.fineLevelSetBandCells, globalFineFactor);
+            = fineBandPlan;
           const physicalBand = planFineLevelSetTopologyBand(brickResolution, {
             maximumBacktraceFineCells,
             interpolationSupportFineCells: 1,
@@ -2427,8 +2480,29 @@ export class WebGPUOctreeProjection {
             brickDimensions, footprintBrickDimensions, capacityDilationBrickRings,
             inflowFineBricks, surfaceGrowthSafety,
           ).maximumResidentBricks;
+          // The sparse area estimate intentionally ignores edge/corner terms,
+          // while LoSasso's cold publisher dilates the complete authored box.
+          // Recurring direct transport then tags the one-page near-zero shell
+          // as interface membership before applying the same physical band.
+          // Reserve the largest translated envelope plus one deformation ring
+          // on each side as a floor. A rigid translated-box proof was 308 pages
+          // short by generation 11 of ceiling-slab-drop as its surface settled;
+          // this extra ring also covers that Section-5 interface growth without
+          // changing the frozen Power allocation policy.
+          const bandFloor = this.coarseDynamics.backend === "losasso"
+            ? planFluidFootprintFineBandBrickFloor(
+              brickDimensions,
+              [0, 1, 2].map((axis) => Math.floor(
+                fluidFootprint.minimumCell[axis]! * globalFineFactor / brickResolution,
+              )) as [number, number, number],
+              [0, 1, 2].map((axis) => Math.ceil(
+                fluidFootprint.maximumCell[axis]! * globalFineFactor / brickResolution,
+              )) as [number, number, number],
+              capacityDilationBrickRings + 2,
+            ) : 0;
+          const plannedCapacity = Math.max(defaultCapacity, bandFloor);
           const requestedCapacity = Math.min(logicalBrickCount,
-            options.globalFineLevelSetMaximumBricks ?? defaultCapacity);
+            options.globalFineLevelSetMaximumBricks ?? plannedCapacity);
           const requestedPlan = planFineLevelSetBricks({
             domainOrigin: [0, 0, 0], finestCellDimensions: [dims.nx, dims.ny, dims.nz],
             finestCellWidth: minimumCell, fineFactor: globalFineFactor, brickResolution,
@@ -2441,7 +2515,7 @@ export class WebGPUOctreeProjection {
           // binding feasibility; a true page overflow remains fail-closed.
           const kernelBrickLimit = device.limits.maxComputeWorkgroupsPerDimension;
           const configuredCapacity = resolveGlobalFineBrickCapacity(
-            defaultCapacity, options.globalFineLevelSetMaximumBricks, kernelBrickLimit, 64,
+            plannedCapacity, options.globalFineLevelSetMaximumBricks, kernelBrickLimit, 64,
             Math.min(device.limits.maxStorageBufferBindingSize, device.limits.maxBufferSize),
             brickResolution ** 3,
             (() => { let levels = 1, levelDims = brickDimensions;
@@ -2551,9 +2625,6 @@ export class WebGPUOctreeProjection {
       closedBoundaries: [true, true, true, closedTop, true, true],
       solver: {
         relativeTolerance: this.solveTailPolicy.relativeTolerance,
-        // Losasso is not constrained by the frozen Power paper's observed
-        // 6--10 iteration envelope. Encode the full safety tail and let the
-        // exact residual gate retire unused iterations on the GPU.
         maximumIterations: this.solveTailPolicy.hardOuterIterationCeiling,
         hardIterationCeiling: this.solveTailPolicy.hardOuterIterationCeiling,
       },
@@ -2622,6 +2693,7 @@ export class WebGPUOctreeProjection {
       this.device.queue.writeBuffer(this.params, 36, new Uint32Array([changedKeysOffsetWords]));
       const redistanceOptions = (source: WebGPUFineLevelSetBrickSource) => ({
         deferPipelineCompilation: this.deferPipelineCompilation,
+        axisPermutationInvariantSeeds: true,
         maximumRequiredJfaStride: maximumFineLevelSetJFAStride(
           planFineLevelSetBandFineCells(this.fineLevelSetBandCells,
             source.plan.fineFactor).redistanceBandFineCells),
@@ -4315,7 +4387,21 @@ export class WebGPUOctreeProjection {
         ownerCandidateTransaction: this.ownerPages.candidateTransaction,
       });
       this.ownerPages.encodeReadyCommit(broker);
+      const currentFine = this.globalFineCurrentIsA
+        ? this.globalFineSourceA : this.globalFineSourceB;
+      if (this.globalFineBootstrapped && currentFine && this.losassoCoarsePhi) {
+        // Losasso et al. 2004 Section 4, equations 5-6, requires the pressure
+        // operator to use the same face boundary state as divergence. A ready
+        // topology commit replaces the accepted face records, so reapply the
+        // current fine-phi ghost distances (including unilateral closed-wall
+        // separation) before building the hierarchy or solving this epoch.
+        // See docs/papers/losasso-2004-octree-water-smoke.txt, Sections 4.1-4.2.
+        this.losassoCoarsePhi.encode(broker, currentFine,
+          this.losassoCoarsePhiInput());
+        this.losassoConditionedOperator?.encodeAfterGhostDistances(broker);
+      }
       this.losassoBackend.encodeHierarchyRefresh(broker, this.leafHeaders);
+      this.refreshLosassoProjectionGroups();
       // Candidate publication migrates the lagged wet-face field by geometric
       // identity. Reconstruct row motion immediately so encodeSurface never
       // observes row indices from the retired epoch.
@@ -4929,10 +5015,12 @@ export class WebGPUOctreeProjection {
             resource: { buffer: this.powerCoarseLevelSetSchedule!.sampleSource.directory } };
         // Same planner as allocation. The final three cells cover the complete
         // 3-D trilinear stencil and its centre on the closed cutoff.
+        const fineBandPlan = planFineLevelSetBandFineCells(
+          this.fineLevelSetBandCells, this.globalFineLevelSet!.plan.fineFactor,
+        );
         const { transportBandFineCells: bandCells,
           redistanceBandFineCells: redistanceBandCells, maximumBacktraceFineCells }
-          = planFineLevelSetBandFineCells(this.fineLevelSetBandCells,
-            this.globalFineLevelSet!.plan.fineFactor);
+          = fineBandPlan;
         const transport = this.coarseDynamics.backend === "losasso"
           ? (this.globalFineCurrentIsA ? this.losassoFineTransportA : this.losassoFineTransportB)
           : (this.globalFineCurrentIsA ? this.globalFineTransportA : this.globalFineTransportB);
@@ -5042,7 +5130,7 @@ export class WebGPUOctreeProjection {
           targetIsA: !this.globalFineCurrentIsA,
           redistanceBandCells,
           maximumDisplacementFineCells: maximumBacktraceFineCells,
-          warmClosestPoints: wasBootstrapped,
+          warmClosestPoints: wasBootstrapped && this.coarseDynamics.backend !== "losasso",
         };
         // On recurring steps, coarse phi consumes the transported target before
         // any current-step force. Bootstrap first needs redistance to populate
@@ -5843,13 +5931,30 @@ export class WebGPUOctreeProjection {
   }
   get losassoVelocityDebug() {
     const source = this.losassoBackend?.sources.velocitySampler;
+    const extension = this.losassoBackend?.extensionBand.source;
+    const wet = this.losassoBackend?.sources;
     return source ? {
       control: source.control,
       faceGeometry: source.faceGeometry,
+      projectedVelocity: extension!.projectedVelocity,
       extendedVelocity: source.extendedVelocity,
+      wetControl: wet!.operator.control,
+      wetFaceGeometry: wet!.dynamics.faceGeometry,
+      wetAdvectedVelocity: wet!.dynamics.advectedVelocity,
+      wetPredictedVelocity: wet!.dynamics.predictedVelocity,
+      wetProjectedVelocity: wet!.projection.projectedVelocity,
+      wetExtendedVelocity: wet!.extension.extendedVelocity,
       dimensions: source.dimensions,
       maximumLeafSize: source.maximumLeafSize,
     } : undefined;
+  }
+  /** Frontier/dirty-tile forensics: the leaf-frontier header plus the shared
+   * compaction scratch header. Read-only diagnostic surface. */
+  get losassoFrontierDebug() {
+    return this.coarseDynamics.backend === "losasso"
+      ? { frontier: this.leafFrontier, compaction: this.compaction,
+        dirtyFailureOffsetBytes: this.dirtyFailureOffsetBytes }
+      : undefined;
   }
   get losassoPressureDebug() {
     const source = this.losassoBackend?.sources;
@@ -5858,6 +5963,14 @@ export class WebGPUOctreeProjection {
       control: source.operator.control,
       rightHandSide: source.rightHandSide,
       diagonal: wide.diagonal,
+    } : undefined;
+  }
+  get losassoCoarsePhiDebug() {
+    const source = this.losassoCoarsePhi?.source;
+    const control = this.losassoBackend?.sources.operator.control;
+    return source && control ? {
+      control, rowPhi: source.rowPhi, leafHeaders: this.leafHeaders,
+      dimensions: [this.dims.nx, this.dims.ny, this.dims.nz] as const,
     } : undefined;
   }
 
@@ -6205,12 +6318,13 @@ export class WebGPUOctreeProjection {
   /** Rejection-only producer state for an unpublished fine summary. */
   get globalFineSummaryDebug() {
     const summaries = this.globalFineSummaries;
-    const coarse = this.powerCoarseLevelSetSchedule;
-    if (!summaries || !coarse) return undefined;
+    const powerCoarse = this.powerCoarseLevelSetSchedule;
+    const losassoCoarse = this.losassoCoarsePhi;
+    if (!summaries || (!powerCoarse && !losassoCoarse)) return undefined;
     return {
       ...summaries.diagnosticBuffers,
-      coarseControl: coarse.control,
-      coarseDelta: coarse.sampleSource.delta,
+      coarseControl: powerCoarse?.control ?? losassoCoarse!.source.volumePublication,
+      coarseDelta: powerCoarse?.sampleSource.delta ?? losassoCoarse!.source.summaryDelta,
     };
   }
   get fineSeedAuthority() { return Boolean(this.fineSeedAdapter && this.globalFineLevelSet); }
@@ -6793,11 +6907,58 @@ fn coarseDirectoryAuthority()->bool{
     &&rowCount<=actualCapacity&&rowCount>0u
     &&coarseWord(3u)>0u&&(coarseWord(3u)&(coarseWord(3u)-1u))==0u;
 }
+// The reduced Losasso backend binds its compact coarse-phi arena at this
+// slot instead of the Power corrected directory. The arena magic is stamped
+// only after a fault-free fine-to-coarse exchange and cleared on any fault,
+// so arena liveness carries the same fail-closed meaning as the Power
+// generation gate above.
+fn losassoCoarseArenaAuthority()->bool{
+  if(arrayLength(&bulkWorklist)<20u
+      ||coarseWord(0u)!=${OCTREE_LOSASSO_COARSE_PHI_MAGIC}u){return false;}
+  let directoryDims=vec3u(coarseWord(5u),coarseWord(6u),coarseWord(7u));
+  let physicalCellSize=bitcast<f32>(coarseWord(8u));
+  let rowCount=coarseWord(2u);let maximumLeaf=coarseWord(4u);
+  return all(directoryDims==dims())&&coarseFinite(physicalCellSize)&&physicalCellSize>0.0
+    &&abs(physicalCellSize-params.cellRelax.x)<=1e-5*max(physicalCellSize,params.cellRelax.x)
+    &&rowCount>0u&&maximumLeaf>0u&&(maximumLeaf&(maximumLeaf-1u))==0u;
+}
+// Hash lookup into the Losasso arena's row directory (header words 10/11,
+// 4-word entries: cell+1, size, row+1, hash) — the same scheme
+// sampleCoarseOctreePhi uses from the fine-topology binding.
+fn losassoArenaLookup(cell:u32,size:u32)->u32{
+  let capacity=coarseWord(11u);if(capacity==0u||(capacity&(capacity-1u))!=0u){return 0xffffffffu;}
+  let hash=((cell*0x9e3779b1u)^size)*0x85ebca6bu;let base=coarseWord(10u);let mask=capacity-1u;
+  for(var probe=0u;probe<32u;probe+=1u){let at=base+4u*((hash+probe)&mask);let key=coarseWord(at);
+   if(key==0u){return 0xffffffffu;}
+   if(key==cell+1u&&coarseWord(at+1u)==size&&coarseWord(at+3u)==hash){return coarseWord(at+2u)-1u;}}
+  return 0xffffffffu;
+}
 fn coarseMortonPart(value:u32)->u32{var x=value&1023u;x=(x|(x<<16u))&0x030000ffu;x=(x|(x<<8u))&0x0300f00fu;x=(x|(x<<4u))&0x030c30c3u;x=(x|(x<<2u))&0x09249249u;return x;}
 fn coarseMorton(cell:u32)->u32{let d=dims();let q=vec3u(cell%d.x,(cell/d.x)%d.y,cell/(d.x*d.y));return coarseMortonPart(q.x)|(coarseMortonPart(q.y)<<1u)|(coarseMortonPart(q.z)<<2u);}
 fn coarseLookup(cell:u32,size:u32)->u32{let count=min(coarseWord(2u),(arrayLength(&bulkWorklist)-8u)/8u);let wantedLevel=31u-countLeadingZeros(size);let wantedMorton=coarseMorton(cell);var low=0u;var high=count;while(low<high){let middle=low+(high-low)/2u;let base=8u+middle*8u;let entryLevel=31u-countLeadingZeros(coarseWord(base+1u));let entryMorton=coarseMorton(coarseWord(base)-1u);if(entryLevel<wantedLevel||(entryLevel==wantedLevel&&entryMorton<wantedMorton)){low=middle+1u;}else{high=middle;}}if(low<count){let base=8u+low*8u;if(coarseWord(base)==cell+1u&&coarseWord(base+1u)==size){return base;}}return 0xffffffffu;}
 fn correctedCoarsePhi(point:vec3f)->CorrectedCoarsePhi{
-  if(!coarseDirectoryAuthority()||any(point<vec3f(0.0))||any(point>=vec3f(dims()))){return CorrectedCoarsePhi(false,0.0,0.0,0.0,0u);}
+  if(any(point<vec3f(0.0))||any(point>=vec3f(dims()))){return CorrectedCoarsePhi(false,0.0,0.0,0.0,0u);}
+  // Losasso branch: classify from the live arena's restricted row phi. This is
+  // the coarse backstop that keeps wet rows carried through a one-generation
+  // fine-summary gap; without it every unsummarized cell reads dry, a single
+  // hiccup validly retires the whole frontier, and a zero-row topology is
+  // terminal (dirty marking only visits active tiles).
+  if(losassoCoarseArenaAuthority()){
+    let arenaQ=vec3u(floor(point));var size=1u;let maximumLeaf=coarseWord(4u);
+    loop{let origin=(arenaQ/vec3u(size))*vec3u(size);
+     let cell=origin.x+dims().x*(origin.y+dims().y*origin.z);
+     let row=losassoArenaLookup(cell,size);
+     if(row!=0xffffffffu&&row<coarseWord(2u)){let entry=coarseWord(9u)+8u*row;
+      let flags=coarseWord(entry+5u);let value=bitcast<f32>(coarseWord(entry+2u));
+      if((flags&3u)==3u&&coarseFinite(value)){return CorrectedCoarsePhi(true,value,value,value,size);}
+      return CorrectedCoarsePhi(false,0.0,0.0,0.0,0u);}
+     if(size>=maximumLeaf){break;}size*=2u;}
+    // A valid sparse arena defines every directory miss as coarse air, matching
+    // sampleCoarseOctreePhi's half-width convention.
+    let air=0.5*bitcast<f32>(coarseWord(8u));
+    return CorrectedCoarsePhi(true,air,air,air,0u);
+  }
+  if(!coarseDirectoryAuthority()){return CorrectedCoarsePhi(false,0.0,0.0,0.0,0u);}
   let q=vec3u(floor(point));let denseCell=q.x+dims().x*(q.y+dims().y*q.z);
   let volume=dims().x*dims().y*dims().z;let actualCapacity=(arrayLength(&bulkWorklist)-8u)/8u;
   if((coarseWord(1u)&0x40000000u)!=0u&&actualCapacity>=volume){let denseBase=8u+(actualCapacity-volume+denseCell)*8u;
@@ -7063,7 +7224,14 @@ fn samplePhiPoint(point:vec3f)->f32{
 // and never consult the directory, so they are always available.
 fn liquidAuthorityAvailable()->bool{
   if(bootstrapPhiEnabled()){return true;}
-  return coarseDirectoryAuthority()||authoredAnalyticPhiAvailable();
+  // The Losasso lane classifies wetness from the fine summaries backed by its
+  // coarse-phi arena; a live arena is that lane's liquid authority. Without
+  // this clause the first topology candidate that needs row additions is
+  // rejected on availability, the rejection retries forever, and the frozen
+  // t=0 wet-row set holds the collapse front statically at the authored dam
+  // boundary while the projected field recirculates inside it.
+  return coarseDirectoryAuthority()||losassoCoarseArenaAuthority()
+    ||authoredAnalyticPhiAvailable();
 }
 fn liquidOwner(owner: Owner) -> bool {
   if (!ownerValid(owner)) { return false; }
@@ -9218,20 +9386,27 @@ fn finalizeFrontier(@builtin(local_invocation_index)lid:u32){
     for(var row=lid;row<boundedCandidates;row+=256u){
       let cell=frontier[frontierCandidateBase()+row];let size=ownerAtIndex(cell).size;
       if(row>0u){let prior=frontier[frontierCandidateBase()+row-1u];
-        invalid|=select(0u,1u,!rowIdentityLess(prior,ownerAtIndex(prior).size,cell,size));}
+        let unordered=!rowIdentityLess(prior,ownerAtIndex(prior).size,cell,size);
+        invalid|=select(0u,1u,unordered);
+        firstFailure=min(firstFailure,select(0xffffffffu,0x10000000u|row,unordered));}
       let old=previousLowerBound(cell,size,previous,previousCount);
       let exact=old<previousCount&&frontierCell(previous,old)==cell&&leafHeaders[old].size==size;
       matched+=select(0u,1u,exact);
       // Delta candidate generation filters every exact previous identity.
       // Seeing one here means the temporal-coherence partition was malformed.
       invalid|=select(0u,1u,exact);
+      firstFailure=min(firstFailure,select(0xffffffffu,0x18000000u|row,exact));
     }
     for(var row=lid;row<min(required,frontierListCapacity());row+=256u){
       let cell=frontier[frontierBase(next)+row];let size=ownerAtIndex(cell).size;
-      invalid|=select(0u,1u,!isOrigin(cellCoord(cell),ownerAtIndex(cell))
-        ||!currentPressureOwnerWet(ownerAtIndex(cell)));
+      let invalidMember=!isOrigin(cellCoord(cell),ownerAtIndex(cell))
+        ||!currentPressureOwnerWet(ownerAtIndex(cell));
+      invalid|=select(0u,1u,invalidMember);
+      firstFailure=min(firstFailure,select(0xffffffffu,0x20000000u|row,invalidMember));
       if(row>0u){let prior=frontier[frontierBase(next)+row-1u];
-        invalid|=select(0u,1u,!rowIdentityLess(prior,ownerAtIndex(prior).size,cell,size));}
+        let unordered=!rowIdentityLess(prior,ownerAtIndex(prior).size,cell,size);
+        invalid|=select(0u,1u,unordered);
+        firstFailure=min(firstFailure,select(0xffffffffu,0x30000000u|row,unordered));}
     }
   }
   rowDeltaReduce[lid]=vec4u(matched,invalid,firstFailure,exactFailures);workgroupBarrier();
@@ -9264,7 +9439,7 @@ fn finalizeFrontier(@builtin(local_invocation_index)lid:u32){
     compaction[dirtyFailureBase()]=0x300u;
     compaction[dirtyFailureBase()+1u]=required;
     compaction[dirtyFailureBase()+2u]=carried;
-    compaction[dirtyFailureBase()+3u]=rowDeltaReduce[0].x;
+    compaction[dirtyFailureBase()+3u]=rowDeltaReduce[0].z;
     compaction[dirtyFailureBase()+4u]=rowDeltaReduce[0].y;
     compaction[dirtyFailureBase()+5u]=candidateCount;
     compaction[dirtyFailureBase()+6u]=previousCount;

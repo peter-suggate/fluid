@@ -15,6 +15,8 @@ const ERROR_CAPACITY: u32 = 1u;
 const ERROR_HEADER: u32 = 2u;
 const ERROR_OWNER: u32 = 4u;
 const ERROR_NEIGHBOR_ROW: u32 = 8u;
+const FACE_CLOSED_BOUNDARY: u32 = 0x40000000u;
+const FACE_ROW_ON_POSITIVE_SIDE: u32 = 0x80000000u;
 
 struct Params {
   dimensionsMaximumLeaf: vec4u,
@@ -164,35 +166,75 @@ fn negativeProbe(origin: vec3u, size: u32, axis: u32, a: u32, b: u32,
     + tangentB(axis) * vec3u(b * span + span / 2u);
   return vec3i(origin + offset) - vec3i(axisVector(axis));
 }
-fn faceMultiplicity(header: LeafHeader, axis: u32) -> u32 {
+struct FacePatchPlan { mask: u32, subdivision: u32 }
+
+fn validFaceNeighbor(header: LeafHeader, neighbor: OctreeOwnerPageLookupResult) -> bool {
+  if ((neighbor.status & OWNER_PAGE_LOOKUP_INVALID) != 0u) {
+    fail(ERROR_OWNER); return false;
+  }
+  if ((neighbor.status & OWNER_PAGE_LOOKUP_MISSING) == 0u
+      && (neighbor.size * 2u < header.size || neighbor.size > 2u * header.size)) {
+    fail(ERROR_OWNER); return false;
+  }
+  return true;
+}
+
+fn positiveFacePlan(header: LeafHeader, axis: u32) -> FacePatchPlan {
   let origin = originOf(header);
   let dimensions = params.dimensionsMaximumLeaf.xyz;
   if (origin[axis] + header.size >= dimensions[axis]) {
-    return select(1u,0u,(params.boundary.x&(1u<<(2u*axis+1u)))!=0u);
+    // Closed wall faces remain in the compact graph. Fine phi conditions them
+    // to zero-aperture Neumann while wet and opens them as ghost-fluid
+    // Dirichlet faces only after the surface has separated.
+    return FacePatchPlan(1u, 1u);
   }
-  let first = octreeOwnerPageLookup(positiveProbe(origin, header.size, axis, 0u, 0u, 1u));
-  if ((first.status & OWNER_PAGE_LOOKUP_INVALID) != 0u) { fail(ERROR_OWNER); return 0u; }
-  if ((first.status & OWNER_PAGE_LOOKUP_MISSING) != 0u) { return 1u; }
-  if (first.size * 2u < header.size || first.size > 2u * header.size) {
-    fail(ERROR_OWNER); return 0u;
+  // A centre probe observes only one quadrant of a 2:1 seam. Inspect all four
+  // quadrants before deciding whether this row owns one full face or four fine
+  // patches; otherwise a partially wet seam can be counted at the wrong area.
+  var split = false;
+  for (var b = 0u; b < 2u; b += 1u) {
+    for (var a = 0u; a < 2u; a += 1u) {
+      let neighbor = octreeOwnerPageLookup(positiveProbe(origin, header.size, axis, a, b, 2u));
+      if (!validFaceNeighbor(header, neighbor)) { return FacePatchPlan(0u, 1u); }
+      if ((neighbor.status & OWNER_PAGE_LOOKUP_MISSING) == 0u
+          && neighbor.size < header.size) { split = true; }
+    }
   }
-  return select(1u, 4u, first.size < header.size);
+  if (split) { return FacePatchPlan(0xfu, 2u); }
+  return FacePatchPlan(1u, 1u);
 }
-fn negativeBoundaryMultiplicity(header: LeafHeader, axis: u32) -> u32 {
+
+fn negativeBoundaryPlan(header: LeafHeader, axis: u32) -> FacePatchPlan {
   let origin = originOf(header);
   if (origin[axis] == 0u) {
-    return select(1u,0u,(params.boundary.x&(1u<<(2u*axis)))!=0u);
+    return FacePatchPlan(1u, 1u);
   }
-  let first = octreeOwnerPageLookup(negativeProbe(origin, header.size, axis, 0u, 0u, 1u));
-  if ((first.status & OWNER_PAGE_LOOKUP_INVALID) != 0u) { fail(ERROR_OWNER); return 0u; }
-  if ((first.status & OWNER_PAGE_LOOKUP_MISSING) != 0u) { return 1u; }
-  if (first.size * 2u < header.size || first.size > 2u * header.size) {
-    fail(ERROR_OWNER); return 0u;
+  var split = false;
+  for (var b = 0u; b < 2u; b += 1u) {
+    for (var a = 0u; a < 2u; a += 1u) {
+      let neighbor = octreeOwnerPageLookup(negativeProbe(origin, header.size, axis, a, b, 2u));
+      if (!validFaceNeighbor(header, neighbor)) { return FacePatchPlan(0u, 1u); }
+      if ((neighbor.status & OWNER_PAGE_LOOKUP_MISSING) == 0u
+          && neighbor.size < header.size) { split = true; }
+    }
   }
-  // A compact wet row on the negative side already owns this face through its
-  // positive-axis emission. Only an absent wet row is a free-surface face.
-  if (findRow(first.origin, first.size) != INVALID) { return 0u; }
-  return select(1u, 4u, first.size < header.size);
+  if (!split) {
+    let neighbor = octreeOwnerPageLookup(negativeProbe(origin, header.size, axis, 0u, 0u, 1u));
+    if (!validFaceNeighbor(header, neighbor)) { return FacePatchPlan(0u, 1u); }
+    var missing = (neighbor.status & OWNER_PAGE_LOOKUP_MISSING) != 0u;
+    if (!missing) { missing = findRow(neighbor.origin, neighbor.size) == INVALID; }
+    return FacePatchPlan(select(0u, 1u, missing), 1u);
+  }
+  var mask = 0u;
+  for (var b = 0u; b < 2u; b += 1u) {
+    for (var a = 0u; a < 2u; a += 1u) {
+      let neighbor = octreeOwnerPageLookup(negativeProbe(origin, header.size, axis, a, b, 2u));
+      var missing = (neighbor.status & OWNER_PAGE_LOOKUP_MISSING) != 0u;
+      if (!missing) { missing = findRow(neighbor.origin, neighbor.size) == INVALID; }
+      if (missing) { mask |= 1u << (a + 2u * b); }
+    }
+  }
+  return FacePatchPlan(mask, 2u);
 }
 
 @compute @workgroup_size(1)
@@ -241,7 +283,8 @@ fn countLosassoFaces(@builtin(global_invocation_id) invocation: vec3u) {
       fail(ERROR_OWNER);
     } else {
       for (var axis = 0u; axis < 3u; axis += 1u) {
-        count += faceMultiplicity(header, axis) + negativeBoundaryMultiplicity(header, axis);
+        count += countOneBits(positiveFacePlan(header, axis).mask)
+          + countOneBits(negativeBoundaryPlan(header, axis).mask);
       }
     }
   }
@@ -272,8 +315,11 @@ fn writeFace(faceId: u32, row: u32, neighbor: OctreeOwnerPageLookupResult, axis:
   // No compact positive row denotes the free-surface Dirichlet side. The
   // geometric centre distance is a conservative staged value; the dynamics
   // producer replaces it with its phi-clamped ghost-fluid distance.
-  faces[faceId] = Face(row, neighborRow, axis, subSize,
-    physicalArea, 1.0 / distance, 1.0, 0.0);
+  let closedBoundary = geometry[axis] == params.dimensionsMaximumLeaf[axis]
+    && (params.boundary.x & (1u << (2u * axis + 1u))) != 0u;
+  faces[faceId] = Face(row, neighborRow, axis,
+    subSize | select(0u, FACE_CLOSED_BOUNDARY, closedBoundary),
+    physicalArea, 1.0 / distance, select(1.0, 0.0, closedBoundary), 0.0);
   let packedAxisSpan = axis | ((31u - countLeadingZeros(subSize)) << 2u);
   faceGeometry[faceId] = vec4u(packedAxisSpan, geometry);
   // Staged extension publication: every geometric face remains a projection
@@ -293,8 +339,12 @@ fn writeNegativeBoundaryFace(faceId: u32, row: u32, neighborSize: u32, axis: u32
   let distance = 0.5 * (f32(rowSize) + f32(neighborSize)) * params.cellSize[axis];
   // High bit records that the compact row is geometrically on the positive
   // side. Projection uses it to preserve the +axis pressure-gradient sign.
-  faces[faceId] = Face(row, INVALID, axis, 0x80000000u | subSize,
-    physicalArea, 1.0 / distance, 1.0, 0.0);
+  let closedBoundary = geometry[axis] == 0u
+    && (params.boundary.x & (1u << (2u * axis))) != 0u;
+  faces[faceId] = Face(row, INVALID, axis,
+    FACE_ROW_ON_POSITIVE_SIDE | subSize
+      | select(0u, FACE_CLOSED_BOUNDARY, closedBoundary),
+    physicalArea, 1.0 / distance, select(1.0, 0.0, closedBoundary), 0.0);
   let packedAxisSpan = axis | ((31u - countLeadingZeros(subSize)) << 2u);
   faceGeometry[faceId] = vec4u(packedAxisSpan, geometry);
   faceMetrics[faceId] = vec4u(axis, 1u, bitcast<u32>(0.0), 0u);
@@ -339,8 +389,9 @@ fn conditionLosassoFaces(@builtin(global_invocation_id) invocation:vec3u){
  let openSum=losassoExactValue(&exactOpen);let solidVelocitySum=losassoExactValue(&exactSolidVelocity);
  let solidWeight=losassoExactValue(&exactSolidWeight);if(!valid||!losassoFinite(openSum)||!losassoFinite(solidVelocitySum)
    ||!losassoFinite(solidWeight)){fail(ERROR_HEADER);return;}
- face.openFraction=openSum/f32(span*span);
- face.normalVelocity=select(0.,solidVelocitySum/solidWeight,solidWeight>0.);
+ let closedBoundary=(face.reserved&FACE_CLOSED_BOUNDARY)!=0u;
+ face.openFraction=select(openSum/f32(span*span),0.,closedBoundary);
+ face.normalVelocity=select(select(0.,solidVelocitySum/solidWeight,solidWeight>0.),0.,closedBoundary);
  // Candidate rows have no accepted-index phi. Keep the geometric dual
  // distance here; the accepted fine-to-coarse exchange conditions free-
  // surface faces and republishes the matching diagonal after ready commit.
@@ -355,12 +406,13 @@ fn emitLosassoFaces(@builtin(global_invocation_id) invocation: vec3u) {
   let origin = originOf(header);
   var faceId = atomicLoad(&scratch[faceBaseBase() + row]);
   for (var axis = 0u; axis < 3u; axis += 1u) {
-    let negativeMultiplicity = negativeBoundaryMultiplicity(header, axis);
-    let negativeSubdivision = select(1u, 2u, negativeMultiplicity == 4u);
+    let negativePlan = negativeBoundaryPlan(header, axis);
+    let negativeSubdivision = negativePlan.subdivision;
     let negativeSubSize = header.size / negativeSubdivision;
     for (var b = 0u; b < negativeSubdivision; b += 1u) {
       for (var a = 0u; a < negativeSubdivision; a += 1u) {
-        if (negativeMultiplicity != 0u) {
+        let patchBit = 1u << (a + negativeSubdivision * b);
+        if ((negativePlan.mask & patchBit) != 0u) {
           var neighborSize=header.size;
           if(origin[axis]>0u){let owner=octreeOwnerPageLookup(negativeProbe(origin,header.size,axis,
             a,b,negativeSubdivision));neighborSize=select(header.size,owner.size,
@@ -373,12 +425,13 @@ fn emitLosassoFaces(@builtin(global_invocation_id) invocation: vec3u) {
         }
       }
     }
-    let multiplicity = faceMultiplicity(header, axis);
-    let subdivision = select(1u, 2u, multiplicity == 4u);
+    let plan = positiveFacePlan(header, axis);
+    let subdivision = plan.subdivision;
     let subSize = header.size / subdivision;
     for (var b = 0u; b < subdivision; b += 1u) {
       for (var a = 0u; a < subdivision; a += 1u) {
-        if (multiplicity != 0u) {
+        let patchBit = 1u << (a + subdivision * b);
+        if ((plan.mask & patchBit) != 0u) {
           var owner:OctreeOwnerPageLookupResult;
           if(origin[axis]+header.size>=params.dimensionsMaximumLeaf[axis]){
             owner.origin=origin+axisVector(axis)*vec3u(header.size);

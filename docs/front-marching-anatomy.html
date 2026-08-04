@@ -1,0 +1,1278 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Front marching — what our Aanjaneya 2017 implementation actually does</title>
+
+<style>
+/* ============================================================
+   TOKENS — the repo instrument system (symmetric-expansion-frame-anatomy),
+   extended with one reserved role: EMBER is the front, and nothing else.
+   ============================================================ */
+:root {
+  color-scheme: light dark;
+
+  --f-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  --f-prose: "Iowan Old Style", Charter, "Bitstream Charter", "Sitka Text", Georgia, serif;
+
+  --sig:   #1F97A6;   /* signal cyan — lattice, seeds, structure */
+  --ember: #C9512A;   /* THE FRONT — the marching cost, reserved */
+  --amber: #A87614;   /* serialized / idle lanes */
+  --jade:  #2E8F72;   /* a kernel that is actually fed */
+  --violet:#6B54A8;   /* the paper's prescription */
+
+  --bg:      #EFF3F4;
+  --bg-2:    #FFFFFF;
+  --bg-3:    #E3E9EB;
+  --ink:     #10171C;
+  --ink-2:   #3B4750;
+  --ink-3:   #6C7A83;
+  --rule:    #CBD5D8;
+  --rule-2:  #DFE6E8;
+  --glow:    rgba(31,151,166,.10);
+  --ember-wash: rgba(201,81,42,.10);
+  --shadow:  0 1px 2px rgba(16,23,28,.05), 0 8px 24px rgba(16,23,28,.05);
+
+  --measure: 72ch;
+  --gut: clamp(16px, 4vw, 44px);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --sig: #4FCBD8; --ember: #EE7B52; --amber: #DCAA43; --jade: #56C39D; --violet: #A48BDC;
+    --bg: #080C11; --bg-2: #0E151D; --bg-3: #16202B;
+    --ink: #E7EEF1; --ink-2: #A9B7C0; --ink-3: #6E7F8A;
+    --rule: #23303C; --rule-2: #1A242F;
+    --glow: rgba(79,203,216,.14);
+    --ember-wash: rgba(238,123,82,.14);
+    --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.35);
+  }
+}
+:root[data-theme="dark"] {
+  --sig: #4FCBD8; --ember: #EE7B52; --amber: #DCAA43; --jade: #56C39D; --violet: #A48BDC;
+  --bg: #080C11; --bg-2: #0E151D; --bg-3: #16202B;
+  --ink: #E7EEF1; --ink-2: #A9B7C0; --ink-3: #6E7F8A;
+  --rule: #23303C; --rule-2: #1A242F;
+  --glow: rgba(79,203,216,.14); --ember-wash: rgba(238,123,82,.14);
+  --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.35);
+}
+:root[data-theme="light"] {
+  --sig: #1F97A6; --ember: #C9512A; --amber: #A87614; --jade: #2E8F72; --violet: #6B54A8;
+  --bg: #EFF3F4; --bg-2: #FFFFFF; --bg-3: #E3E9EB;
+  --ink: #10171C; --ink-2: #3B4750; --ink-3: #6C7A83;
+  --rule: #CBD5D8; --rule-2: #DFE6E8;
+  --glow: rgba(31,151,166,.10); --ember-wash: rgba(201,81,42,.10);
+  --shadow: 0 1px 2px rgba(16,23,28,.05), 0 8px 24px rgba(16,23,28,.05);
+}
+
+/* ---- SVG marks paint through the theme tokens, never a literal hue ---- */
+.fSig    { fill: var(--sig); }     .sSig    { stroke: var(--sig); }
+.fEmber  { fill: var(--ember); }   .sEmber  { stroke: var(--ember); }
+.fAmber  { fill: var(--amber); }   .sAmber  { stroke: var(--amber); }
+.fViolet { fill: var(--violet); }  .sViolet { stroke: var(--violet); }
+.fJade   { fill: var(--jade); }    .sJade   { stroke: var(--jade); }
+
+/* ============================================================ BASE */
+body {
+  margin: 0; background: var(--bg); color: var(--ink);
+  font-family: var(--f-prose); font-size: 17px; line-height: 1.62;
+  -webkit-font-smoothing: antialiased;
+}
+* { box-sizing: border-box; }
+.wrap { max-width: 1160px; margin: 0 auto; padding: 0 var(--gut); }
+.prose { max-width: var(--measure); }
+.prose p { margin: 0 0 1.05em; }
+.prose p:last-child { margin-bottom: 0; }
+
+h1, h2, h3, h4, .mono, .eyebrow, table, .num, button, input, .chip, .tag, figcaption, .cap {
+  font-family: var(--f-mono); font-variant-numeric: tabular-nums;
+}
+h1, h2, h3, h4 { text-wrap: balance; margin: 0; font-weight: 600; letter-spacing: -.02em; }
+h1 { font-size: clamp(28px, 4.4vw, 46px); line-height: 1.08; }
+h2 { font-size: clamp(20px, 2.6vw, 27px); line-height: 1.18; }
+h3 { font-size: 17px; letter-spacing: -.01em; }
+h4 { font-size: 14px; }
+
+.eyebrow {
+  font-size: 11px; letter-spacing: .14em; text-transform: uppercase;
+  color: var(--ink-3); font-weight: 600;
+}
+.lede { font-size: 19px; color: var(--ink-2); }
+code, .k { font-family: var(--f-mono); font-size: .88em;
+  background: var(--bg-3); padding: .1em .34em; border-radius: 3px; }
+a { color: var(--sig); }
+em.term { font-style: normal; font-weight: 600; color: var(--ink); }
+
+/* ============================================================ SHELL */
+header.mast {
+  border-bottom: 1px solid var(--rule);
+  background:
+    radial-gradient(120% 150% at 88% 0%, var(--ember-wash), transparent 62%),
+    radial-gradient(90% 120% at 6% 10%, var(--glow), transparent 60%);
+  padding: clamp(38px, 7vw, 74px) 0 clamp(30px, 5vw, 52px);
+}
+.mast-grid { display: grid; gap: 26px; }
+.mast .prose { max-width: 66ch; }
+
+.themebar { display: flex; justify-content: flex-end; padding-top: 14px; }
+button.theme {
+  font-size: 11px; letter-spacing: .1em; text-transform: uppercase;
+  background: none; border: 1px solid var(--rule); color: var(--ink-3);
+  padding: 5px 11px; border-radius: 999px; cursor: pointer;
+}
+button.theme:hover { color: var(--ink); border-color: var(--sig); }
+:focus-visible { outline: 2px solid var(--sig); outline-offset: 2px; border-radius: 3px; }
+
+section { padding: clamp(38px, 6vw, 66px) 0; border-bottom: 1px solid var(--rule-2); }
+.sec-head { display: grid; gap: 10px; margin-bottom: 30px; }
+
+/* ============================================================ PANELS */
+.panel {
+  background: var(--bg-2); border: 1px solid var(--rule);
+  border-radius: 9px; padding: clamp(16px, 2.4vw, 24px); box-shadow: var(--shadow);
+}
+.panel + .panel { margin-top: 16px; }
+.cols { display: grid; gap: 16px; }
+@media (min-width: 860px) { .cols.two { grid-template-columns: 1fr 1fr; align-items: start; } }
+@media (min-width: 960px) { .cols.side { grid-template-columns: minmax(0,1fr) 340px; align-items: start; } }
+
+.cap { font-size: 12.5px; color: var(--ink-3); line-height: 1.55; }
+figure { margin: 0; }
+figcaption { font-size: 12.5px; color: var(--ink-3); line-height: 1.55; margin-top: 12px; }
+.scroll { overflow-x: auto; }
+
+/* ============================================================ CHIPS / TAGS */
+.chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 11px; letter-spacing: .06em; text-transform: uppercase;
+  border: 1px solid var(--rule); border-radius: 999px; padding: 3px 10px; color: var(--ink-3);
+}
+.chip .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.chip.ember { color: var(--ember); border-color: color-mix(in srgb, var(--ember) 40%, transparent); }
+.chip.sig   { color: var(--sig);   border-color: color-mix(in srgb, var(--sig) 40%, transparent); }
+.chip.jade  { color: var(--jade);  border-color: color-mix(in srgb, var(--jade) 40%, transparent); }
+.chip.violet{ color: var(--violet);border-color: color-mix(in srgb, var(--violet) 40%, transparent); }
+.chiprow { display: flex; flex-wrap: wrap; gap: 8px; }
+
+/* ============================================================ FRAME BAR */
+.framebar { display: flex; width: 100%; height: 62px; border-radius: 6px; overflow: hidden;
+  border: 1px solid var(--rule); background: var(--bg-3); }
+.framebar button {
+  border: none; cursor: pointer; padding: 0; position: relative;
+  transition: filter .16s ease; min-width: 3px;
+  border-right: 1px solid color-mix(in srgb, var(--bg) 55%, transparent);
+}
+.framebar button:last-child { border-right: none; }
+.framebar button:hover, .framebar button[aria-pressed="true"] { filter: brightness(1.14) saturate(1.15); }
+.framebar button[aria-pressed="true"] { box-shadow: inset 0 0 0 2px var(--ink); }
+.framebar .lab {
+  position: absolute; inset: 0; display: flex; flex-direction: column;
+  justify-content: center; align-items: center; gap: 1px;
+  font-family: var(--f-mono); font-size: 11px; color: #fff; mix-blend-mode: normal;
+  text-shadow: 0 1px 3px rgba(0,0,0,.5); pointer-events: none;
+}
+.framebar .lab .n { font-size: 13px; font-weight: 600; }
+.framebar .lab .t { font-size: 9.5px; letter-spacing: .04em; opacity: .92; }
+.frame-detail { margin-top: 14px; padding: 14px 16px; border-radius: 7px;
+  background: var(--bg-3); border-left: 3px solid var(--sig); }
+.frame-detail .h { font-family: var(--f-mono); font-size: 13px; font-weight: 600; margin-bottom: 4px; }
+.frame-detail .b { font-size: 15px; color: var(--ink-2); }
+.legend { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 12px; font-family: var(--f-mono); font-size: 11.5px; color: var(--ink-3); }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.legend i { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+
+/* ============================================================ TABLES */
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { text-align: right; padding: 7px 9px; border-bottom: 1px solid var(--rule-2); white-space: nowrap; }
+th:first-child, td:first-child { text-align: left; white-space: normal; min-width: 210px; }
+thead th { font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-3); font-weight: 600;
+  border-bottom: 1px solid var(--rule); }
+tbody tr:hover { background: var(--bg-3); }
+td.hot { color: var(--ember); font-weight: 600; }
+td.good { color: var(--jade); }
+td.warn { color: var(--amber); }
+.metergrid { display: grid; grid-template-columns: 1fr; gap: 2px; }
+
+/* meter cell */
+.meter { position: relative; height: 15px; background: var(--bg-3); border-radius: 3px; overflow: hidden; min-width: 84px; }
+.meter i { position: absolute; inset: 0 auto 0 0; display: block; border-radius: 3px; }
+.meter b { position: absolute; inset: 0; display: flex; align-items: center; justify-content: flex-end;
+  padding-right: 5px; font-family: var(--f-mono); font-size: 10.5px; font-weight: 500; color: var(--ink-2); }
+
+/* ============================================================ STAGE WALK */
+.walk { display: grid; gap: 3px; }
+.walk button {
+  display: grid; grid-template-columns: 26px minmax(0,1fr) 96px 62px;
+  align-items: center; gap: 10px; width: 100%; text-align: left;
+  background: none; border: 1px solid transparent; border-radius: 6px;
+  padding: 7px 9px; cursor: pointer; color: var(--ink);
+  font-family: var(--f-mono); font-size: 12.5px;
+}
+.walk button:hover { background: var(--bg-3); }
+.walk button[aria-pressed="true"] { border-color: var(--sig); background: var(--bg-3); }
+.walk .idx { color: var(--ink-3); font-size: 11px; }
+.walk .nm { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.walk .ms { text-align: right; font-variant-numeric: tabular-nums; }
+.walk button.wall .ms { color: var(--ember); font-weight: 600; }
+.walk button.wall .nm { font-weight: 600; }
+.bar { height: 9px; background: var(--bg-3); border-radius: 2px; overflow: hidden; }
+.bar i { display: block; height: 100%; background: var(--sig); border-radius: 2px; }
+.walk button.wall .bar i { background: var(--ember); }
+
+.detail { border-left: 3px solid var(--sig); background: var(--bg-3); border-radius: 0 7px 7px 0;
+  padding: 15px 17px; min-height: 210px; }
+.detail.wall { border-left-color: var(--ember); }
+.detail h4 { margin-bottom: 3px; }
+.detail .sub { font-family: var(--f-mono); font-size: 11px; color: var(--ink-3);
+  letter-spacing: .06em; text-transform: uppercase; margin-bottom: 11px; }
+.detail p { font-size: 14.5px; margin: 0 0 .8em; color: var(--ink-2); }
+.detail p:last-child { margin-bottom: 0; }
+.detail .kv { display: flex; flex-wrap: wrap; gap: 6px 16px; font-family: var(--f-mono);
+  font-size: 11.5px; color: var(--ink-3); margin-bottom: 12px; }
+.detail .kv b { color: var(--ink); font-weight: 600; }
+
+/* ============================================================ CONTROLS */
+.controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 16px; }
+.seg { display: inline-flex; border: 1px solid var(--rule); border-radius: 6px; overflow: hidden; }
+.seg button {
+  font-family: var(--f-mono); font-size: 11.5px; letter-spacing: .04em;
+  background: var(--bg-2); border: none; color: var(--ink-3); padding: 6px 13px; cursor: pointer;
+  border-right: 1px solid var(--rule);
+}
+.seg button:last-child { border-right: none; }
+.seg button[aria-pressed="true"] { background: var(--sig); color: var(--bg-2); font-weight: 600; }
+.seg button:hover:not([aria-pressed="true"]) { color: var(--ink); }
+
+.slider { display: grid; gap: 5px; }
+.slider label { font-family: var(--f-mono); font-size: 11.5px; color: var(--ink-3);
+  display: flex; justify-content: space-between; gap: 12px; }
+.slider label b { color: var(--ink); font-weight: 600; }
+input[type=range] { width: 100%; accent-color: var(--sig); }
+
+/* ============================================================ LANE GRID */
+.lanes { display: grid; grid-template-columns: repeat(32, 1fr); gap: 2px; }
+.lanes i { aspect-ratio: 1; border-radius: 1.5px; background: var(--bg-3); transition: background .18s ease; }
+.lanes i.on { background: var(--sig); }
+.lanes i.red { background: var(--amber); }
+.readout { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 12px; margin-top: 14px; }
+.readout .cell { background: var(--bg-3); border-radius: 6px; padding: 10px 12px; }
+.readout .cell .k2 { font-family: var(--f-mono); font-size: 10px; letter-spacing: .09em;
+  text-transform: uppercase; color: var(--ink-3); }
+.readout .cell .v { font-family: var(--f-mono); font-size: 21px; font-weight: 600; letter-spacing: -.02em; }
+.readout .cell .v small { font-size: 12px; font-weight: 400; color: var(--ink-3); letter-spacing: 0; }
+.readout .cell.hot .v { color: var(--ember); }
+.readout .cell.good .v { color: var(--jade); }
+
+.phaseline { display: flex; gap: 2px; height: 34px; align-items: flex-end; margin-top: 4px; }
+.phaseline i { flex: 1 1 0; min-width: 2px; border-radius: 1.5px 1.5px 0 0; background: var(--amber); }
+.phaseline i.leaf { background: var(--sig); }
+
+/* ============================================================ LADDER */
+.ladder { display: flex; flex-wrap: wrap; gap: 7px; }
+.rung { display: grid; gap: 3px; justify-items: center; padding: 8px 11px;
+  border: 1px solid var(--rule); border-radius: 6px; background: var(--bg-2); min-width: 62px; }
+.rung .s { font-family: var(--f-mono); font-size: 16px; font-weight: 600; }
+.rung .t { font-family: var(--f-mono); font-size: 9.5px; letter-spacing: .07em;
+  text-transform: uppercase; color: var(--ink-3); }
+.rung.repair { border-style: dashed; }
+.rung.repair .s { color: var(--amber); }
+.rung.dead { opacity: .42; }
+.rung.dead .s { color: var(--ink-3); }
+
+/* ============================================================ TRAJECTORY */
+.traj { display: grid; gap: 2px; }
+.traj .row { display: grid; grid-template-columns: 224px minmax(0,1fr) 74px; gap: 12px; align-items: center;
+  font-family: var(--f-mono); font-size: 12px; padding: 5px 0; }
+.traj .row .nm { color: var(--ink-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.traj .row .val { text-align: right; font-weight: 600; }
+.traj .track { height: 17px; background: var(--bg-3); border-radius: 3px; overflow: hidden; position: relative; }
+.traj .track i { display: block; height: 100%; background: var(--ember); border-radius: 3px;
+  transition: width .5s cubic-bezier(.4,0,.2,1); }
+.traj .row.dim { opacity: .55; }
+.traj .row.dim .track i { background: var(--ink-3); }
+
+/* ============================================================ CALLOUT */
+.callout { border: 1px solid color-mix(in srgb, var(--ember) 32%, var(--rule));
+  background: var(--ember-wash); border-radius: 8px; padding: 15px 18px; }
+.callout h4 { color: var(--ember); margin-bottom: 6px; }
+.callout p { font-size: 15px; color: var(--ink-2); margin: 0 0 .7em; }
+.callout p:last-child { margin: 0; }
+.callout.calm { border-color: color-mix(in srgb, var(--sig) 32%, var(--rule)); background: var(--glow); }
+.callout.calm h4 { color: var(--sig); }
+
+.quotes { display: grid; gap: 20px; }
+@media (min-width: 900px) { .quotes { grid-template-columns: repeat(3, 1fr); gap: 24px; } }
+blockquote { margin: 0; padding: 2px 0 2px 16px; border-left: 2px solid var(--violet);
+  font-size: 15.5px; color: var(--ink-2); font-style: italic; }
+blockquote cite { display: block; font-family: var(--f-mono); font-style: normal;
+  font-size: 11px; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-3); margin-top: 7px; }
+
+footer { padding: 40px 0 60px; color: var(--ink-3); font-family: var(--f-mono); font-size: 12px; }
+footer p { margin: 0 0 .5em; max-width: 74ch; line-height: 1.7; }
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; animation: none !important; }
+}
+</style>
+
+<div class="wrap themebar">
+  <button class="theme" id="themeToggle" type="button">theme</button>
+</div>
+
+<header class="mast">
+  <div class="wrap mast-grid">
+    <div class="chiprow">
+      <span class="chip sig"><span class="dot"></span>symmetric-expansion · 32×16×32 · fineFactor 1 · band 4</span>
+      <span class="chip"><span class="dot"></span>M1 Max · xctrace · one representative advance</span>
+    </div>
+    <h1>Front marching, exactly.</h1>
+    <div class="prose">
+      <p class="lede">Aanjaneya&nbsp;et&nbsp;al. 2017 asks for <em class="term">two</em> fast marches per
+      step: one that redistances the level set, one that extends velocity into air.
+      Both are described as ordered, serial algorithms. Neither of ours is. This page
+      is what we actually run instead, and where the 50&nbsp;ms goes.</p>
+    </div>
+    <div class="readout" style="max-width:820px">
+      <div class="cell hot"><div class="k2">Both marches</div><div class="v">50.05<small> ms</small></div></div>
+      <div class="cell hot"><div class="k2">of GPU busy</div><div class="v">39.2<small> %</small></div></div>
+      <div class="cell"><div class="k2">Velocity march alone</div><div class="v">35.61<small> ms</small></div></div>
+      <div class="cell good"><div class="k2">φ redistance (JFA)</div><div class="v">5.81<small> ms</small></div></div>
+    </div>
+  </div>
+</header>
+
+<!-- ============================================================ 1. FRAME -->
+<section>
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="eyebrow">Where the advance goes</span>
+      <h2>One advance, 127.60 ms of GPU busy</h2>
+      <div class="prose"><p>235 labelled compute passes, all exactly attributed. Click a band.
+      The two front-marching jobs together are within 8&nbsp;% of the whole pressure solve.</p></div>
+    </div>
+
+    <div class="framebar" id="framebar" role="group" aria-label="Frame cost by stage group"></div>
+    <div class="legend" id="frameLegend"></div>
+    <div class="frame-detail" id="frameDetail">
+      <div class="h">Pick a band</div>
+      <div class="b">Every segment is the summed exact GPU time of its labelled passes in a single captured advance.</div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ 2. THE PAPER -->
+<section>
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="eyebrow">§5 — what the paper prescribes</span>
+      <h2>Two marches, one operation</h2>
+    </div>
+
+    <div>
+      <div>
+        <figure class="panel">
+          <div class="scroll">
+            <svg viewBox="0 0 960 448" role="img" width="960"
+              aria-label="The paper prescribes two fast marches: an ordered eikonal solve that redistances phi on octree cell centres by accepting the smallest trial value first, and a face-graph march that copies whole velocity values from the face closest to the free surface into air."
+              style="max-width:100%;height:auto;display:block">
+              <defs>
+                <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                  <path class="fEmber" d="M0,0 L10,5 L0,10 z"/>
+                </marker>
+                <marker id="arV" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                  <path class="fViolet" d="M0,0 L10,5 L0,10 z"/>
+                </marker>
+              </defs>
+
+              <!-- ================= LEFT — redistance phi ================= -->
+              <text x="20" y="22" font-family="ui-monospace,monospace" font-size="12" font-weight="600" fill="currentColor">MARCH 1 — REDISTANCE φ</text>
+              <text x="20" y="40" font-family="ui-monospace,monospace" font-size="10.5" fill="currentColor" opacity=".6">values live on octree CELL CENTRES</text>
+
+              <g stroke="currentColor" fill="none" opacity=".32">
+                <rect x="20" y="60" width="78" height="78"/><rect x="98" y="60" width="78" height="78"/>
+                <rect x="20" y="138" width="78" height="78"/>
+                <rect x="98" y="138" width="39" height="39"/><rect x="137" y="138" width="39" height="39"/>
+                <rect x="98" y="177" width="39" height="39"/><rect x="137" y="177" width="39" height="39"/>
+                <rect x="20" y="216" width="78" height="78"/><rect x="98" y="216" width="78" height="78"/>
+              </g>
+
+              <path class="sSig" d="M20,208 C58,192 82,214 118,202 C146,193 162,204 176,200"
+                stroke-width="2.6" fill="none"/>
+
+              <g>
+                <circle class="fSig" cx="59" cy="177" r="5"/>
+                <circle class="fSig" cx="117" cy="196" r="4.2"/>
+                <circle class="fSig" cx="156" cy="196" r="4.2"/>
+                <circle class="fEmber" cx="59" cy="99"  r="5" opacity=".85"/>
+                <circle class="fEmber" cx="137" cy="99" r="5" opacity=".45"/>
+                <circle class="fEmber" cx="117" cy="157" r="4.2" opacity=".85"/>
+                <circle class="fEmber" cx="156" cy="157" r="4.2" opacity=".55"/>
+                <circle class="fEmber" cx="59" cy="255" r="5" opacity=".85"/>
+                <circle class="fEmber" cx="137" cy="255" r="5" opacity=".45"/>
+              </g>
+              <g class="sEmber" fill="none" stroke-width="1.4" marker-end="url(#ar)" opacity=".82">
+                <line x1="59" y1="169" x2="59" y2="112"/>
+                <line x1="59" y1="185" x2="59" y2="242"/>
+                <line x1="120" y1="189" x2="120" y2="167"/>
+              </g>
+              <text class="fSig" x="20" y="312" font-family="ui-monospace,monospace" font-size="10.5">free surface, φ = 0</text>
+
+              <!-- left annotations -->
+              <g font-family="ui-monospace,monospace" font-size="10.5" fill="currentColor">
+                <text class="fEmber" x="212" y="76" font-size="10" font-weight="600" letter-spacing="1">AN ORDERED SOLVE</text>
+                <text x="212" y="100" opacity=".8">1 · accept the smallest trial value</text>
+                <text x="212" y="118" opacity=".8">2 · relax its neighbours by the eikonal</text>
+                <text x="212" y="136" opacity=".8">     update |∇φ| = 1</text>
+                <text x="212" y="154" opacity=".8">3 · repeat, one cell at a time, off a heap</text>
+                <text x="212" y="186" opacity=".55">the order IS the algorithm: a cell may not be</text>
+                <text x="212" y="204" opacity=".55">accepted until every closer cell already has.</text>
+                <text x="212" y="236" opacity=".55">this is what makes it serial, and it is what</text>
+                <text x="212" y="254" opacity=".55">we do not reproduce.</text>
+              </g>
+
+              <!-- T-junction inset -->
+              <g transform="translate(20,336)">
+                <rect x="0" y="0" width="422" height="96" rx="5" fill="none" stroke="currentColor" opacity=".26"/>
+                <text class="fViolet" x="14" y="24" font-family="ui-monospace,monospace" font-size="10" font-weight="600" letter-spacing="1">AT A T-JUNCTION</text>
+                <text x="14" y="46" font-family="ui-monospace,monospace" font-size="10" fill="currentColor" opacity=".72">the axis-aligned stencil is incomplete, so</text>
+                <text x="14" y="63" font-family="ui-monospace,monospace" font-size="10" fill="currentColor" opacity=".72">the update runs on a local Delaunay</text>
+                <text x="14" y="80" font-family="ui-monospace,monospace" font-size="10" fill="currentColor" opacity=".72">tetrahedralization of the cell + neighbours</text>
+                <text class="fViolet" x="300" y="88" font-family="ui-monospace,monospace" font-size="10">solid angle &lt; π/2</text>
+                <g class="sViolet" fill="none" stroke-width="1.3">
+                  <path d="M306,52 L344,18 L392,40 Z"/><path d="M306,52 L392,40 L356,60 Z"/>
+                </g>
+                <circle class="fViolet" cx="306" cy="52" r="3"/><circle class="fViolet" cx="344" cy="18" r="3"/>
+                <circle class="fViolet" cx="392" cy="40" r="3"/><circle class="fViolet" cx="356" cy="60" r="3"/>
+              </g>
+
+              <line x1="472" y1="14" x2="472" y2="434" stroke="currentColor" opacity=".16" stroke-dasharray="3 6"/>
+
+              <!-- ================= RIGHT — extend velocity ================= -->
+              <text x="500" y="22" font-family="ui-monospace,monospace" font-size="12" font-weight="600" fill="currentColor">MARCH 2 — EXTEND VELOCITY</text>
+              <text x="500" y="40" font-family="ui-monospace,monospace" font-size="10.5" fill="currentColor" opacity=".6">values live on regular octree FACES</text>
+
+              <g stroke="currentColor" fill="none" opacity=".32">
+                <rect x="500" y="60" width="78" height="78"/><rect x="578" y="60" width="78" height="78"/>
+                <rect x="500" y="138" width="78" height="78"/>
+                <rect x="578" y="138" width="39" height="39"/><rect x="617" y="138" width="39" height="39"/>
+                <rect x="578" y="177" width="39" height="39"/><rect x="617" y="177" width="39" height="39"/>
+                <rect x="500" y="216" width="78" height="78"/><rect x="578" y="216" width="78" height="78"/>
+              </g>
+
+              <path class="sSig" d="M500,208 C538,192 562,214 598,202 C626,193 642,204 656,200"
+                stroke-width="2.6" fill="none"/>
+
+              <!-- seed faces: wet side -->
+              <g class="fSig">
+                <rect x="528" y="214" width="22" height="4.5" rx="2"/>
+                <rect x="586" y="214" width="22" height="4.5" rx="2"/>
+                <rect x="625" y="214" width="22" height="4.5" rx="2"/>
+              </g>
+              <!-- air faces: receive a copy -->
+              <g class="fEmber">
+                <rect x="528" y="136" width="22" height="4.5" rx="2" opacity=".85"/>
+                <rect x="586" y="136" width="22" height="4.5" rx="2" opacity=".55"/>
+                <rect x="528" y="58"  width="22" height="4.5" rx="2" opacity=".45"/>
+                <rect x="586" y="175" width="22" height="4.5" rx="2" opacity=".85"/>
+              </g>
+              <g class="sEmber" fill="none" stroke-width="1.4" marker-end="url(#ar)" opacity=".82">
+                <path d="M539,210 L539,150"/>
+                <path d="M539,132 L539,74"/>
+                <path d="M597,210 L597,190"/>
+              </g>
+              <text class="fSig" x="500" y="312" font-family="ui-monospace,monospace" font-size="10.5">seed faces — already carry a real velocity</text>
+
+              <!-- right annotations -->
+              <g font-family="ui-monospace,monospace" font-size="10.5" fill="currentColor">
+                <text class="fEmber" x="692" y="76" font-size="10" font-weight="600" letter-spacing="1">A COPY, NOT A SOLVE</text>
+                <text x="692" y="100" opacity=".8">each air face takes the whole VALUE of</text>
+                <text x="692" y="118" opacity=".8">the seed face closest to the free surface.</text>
+                <text x="692" y="146" opacity=".8">no eikonal update. no gradient. no</text>
+                <text x="692" y="164" opacity=".8">intermediate distances to converge.</text>
+                <text x="692" y="196" opacity=".55">so the field is defined as a CLOSEST-POINT</text>
+                <text x="692" y="214" opacity=".55">TRANSFORM over the seed set — a statement</text>
+                <text x="692" y="232" opacity=".55">about the answer, not about a method.</text>
+                <text class="fSig" x="692" y="264" font-weight="600">any procedure that finds the nearest</text>
+                <text class="fSig" x="692" y="282" font-weight="600">seed is a legal implementation.</text>
+              </g>
+
+              <!-- round trip inset -->
+              <g transform="translate(500,336)">
+                <rect x="0" y="0" width="440" height="96" rx="5" fill="none" stroke="currentColor" opacity=".26"/>
+                <text class="fViolet" x="14" y="24" font-family="ui-monospace,monospace" font-size="10" font-weight="600" letter-spacing="1">THE ROUND TRIP THE MARCH SITS INSIDE</text>
+                <g class="fViolet" font-family="ui-monospace,monospace" font-size="10">
+                  <rect class="sViolet" x="16" y="44" width="106" height="28" rx="4" fill="none"/>
+                  <text x="30" y="62">power faces</text>
+                  <rect class="sViolet" x="170" y="44" width="110" height="28" rx="4" fill="none"/>
+                  <text x="184" y="62">regular faces</text>
+                  <rect class="sViolet" x="328" y="44" width="106" height="28" rx="4" fill="none"/>
+                  <text x="342" y="62">power faces</text>
+                </g>
+                <g class="sViolet" marker-end="url(#arV)" stroke-width="1.3">
+                  <line x1="124" y1="58" x2="166" y2="58"/><line x1="282" y1="58" x2="324" y2="58"/>
+                </g>
+                <text class="fViolet" x="126" y="40" font-family="ui-monospace,monospace" font-size="9">interpolate</text>
+                <text class="fViolet" x="284" y="40" font-family="ui-monospace,monospace" font-size="9">interp + project</text>
+                <text class="fEmber" x="176" y="88" font-family="ui-monospace,monospace" font-size="9.5">↑ the march happens here</text>
+              </g>
+            </svg>
+          </div>
+          <figcaption>Left: redistancing propagates φ outward from the interface by <em>accepting the smallest
+          trial value first</em> — a heap-ordered eikonal solve, with local Delaunay tetrahedra wherever a
+          T-junction breaks the axis-aligned stencil. Right: velocity extrapolation is not an eikonal solve at
+          all — it copies whole velocity values from the face nearest the surface, and lives inside a power-face
+          → regular-face → power-face round trip.</figcaption>
+        </figure>
+      </div>
+
+      <div class="panel" style="margin-top:16px">
+        <span class="eyebrow">Verbatim, §5</span>
+        <div class="quotes" style="margin-top:12px">
+          <blockquote>…we store level set values φ on cell centers of the octree, and solve for fast marching in
+          uniform regions similar to Foster and Fedkiw [2001]. Near T-junctions we adopt the approach of Sethian
+          and Vladimirsky [2000] and run fast marching on a tetrahedral mesh.<cite>redistancing</cite></blockquote>
+          <blockquote>To extrapolate velocities outside the liquid region we first interpolate velocities from
+          power faces to regular octree faces and use an approach similar to fast marching, this time operating
+          on faces instead of cells and <em>copying over the velocity value from the face closest to the free
+          surface</em>.<cite>velocity extrapolation</cite></blockquote>
+          <blockquote>…maintenance of the narrow band is efficient enough to not be the bottleneck, even though
+          we rely on a serial Fast Marching method.<cite>the paper's own cost note</cite></blockquote>
+        </div>
+      </div>
+    </div>
+
+    <div class="panel callout calm" style="margin-top:18px">
+      <h4>The load-bearing sentence</h4>
+      <div class="prose" style="max-width:80ch">
+        <p>“Copying over the velocity value from the face closest to the free surface” defines the extrapolated
+        field as a <em class="term">closest-point transform over the seed set</em> — not as the limit of a
+        propagation. That is a definition of the answer, not of a method, so any procedure that finds the nearest
+        seed is a legal implementation. Everything below trades on that: our marches are unordered parallel
+        transforms, and they are exact rather than approximate because the target was never an ordering.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ 3. JFA -->
+<section>
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="eyebrow">March 1 — our implementation</span>
+      <h2>φ redistance: a jump-flood closest-point transform</h2>
+      <div class="prose"><p>The serial FMM and its runtime selector are deleted. Production redistance is a
+      fail-closed JFA-CPT over the sparse fine narrow band: instead of propagating a distance, every band cell
+      carries the <em class="term">index of its nearest interface crossing</em> and distance is recomputed
+      exactly from that closest point at the end. One workgroup per resident support page, over an unordered
+      compacted page list.</p></div>
+    </div>
+
+    <div class="cols side">
+      <div class="panel">
+        <div class="controls">
+          <div class="seg" role="group" aria-label="Publication kind">
+            <button type="button" data-ladder="warm" aria-pressed="true">warm — recurring step</button>
+            <button type="button" data-ladder="cold">cold — full rebuild</button>
+          </div>
+        </div>
+        <div class="ladder" id="ladder"></div>
+        <p class="cap" id="ladderNote" style="margin-top:14px"></p>
+
+        <div style="margin-top:22px">
+          <span class="eyebrow">Measured, per advance</span>
+          <div class="scroll" style="margin-top:10px">
+            <table>
+              <thead><tr><th>JFA pass</th><th>ms</th><th>calls</th><th>occupancy</th><th>ALU</th><th>read GB/s</th></tr></thead>
+              <tbody id="jfaTable"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <div style="display:grid;gap:16px">
+        <div class="panel callout calm">
+          <h4>This is what a fed kernel looks like</h4>
+          <p>The stride-1 and stride-2 floods run at <b>41–53&nbsp;% occupancy and 68–73&nbsp;% ALU</b>, pulling
+          5–9&nbsp;GB/s. One voxel per lane, dense inner loop, no divergent addressing. Hold that number — the
+          velocity march reaches 34&nbsp;% ALU at best.</p>
+        </div>
+        <div class="panel">
+          <span class="eyebrow">Why a ladder, not a sweep</span>
+          <div class="prose" style="font-size:15px">
+            <p>Reach is the <em class="term">sum</em> of the descending strides, not the first one: a schedule
+            starting at P covers P+P/2+…+1 = 2P−1, and the binary decomposition of any offset below that sum is
+            exactly what the passes walk. Band 4 therefore needs a first stride of 4, not 8.</p>
+            <p>An ordered 6-direction sweep is not a substitute. Dispatch is one workgroup per support page, so a
+            sweep propagates 4 cells plus halo — the same pass count, minus the 32-lane subgroup reduction, plus
+            divergent workgroup-memory addressing. Measured 26&nbsp;% worse.</p>
+          </div>
+        </div>
+        <div class="panel">
+          <span class="eyebrow">The trailing 1s</span>
+          <div class="prose" style="font-size:15px">
+            <p>Sparse pages break the clean binary landing: a closest-point route can turn across a page corner
+            and need several local hops. Two repairs covered the mini dam and left 176,898 ocean band samples
+            unresolved at the first rolling-wave expansion, so cold runs five. The fallback ladder is
+            <em class="term">encoded every frame</em> and dispatches zero workgroups when unused — that is most
+            of the 0.046 ms bucketed row above, 25 encoded passes costing 2 µs each.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ 4. SECTION 5 CHAIN -->
+<section>
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="eyebrow">March 2 — our implementation</span>
+      <h2>The Section 5 chain, and the wall inside it</h2>
+      <div class="prose"><p>The velocity march is not one pass. It is a ten-stage publication that builds the
+      face graph, decides which faces demand support, seeds the ones touching liquid, marches, and interpolates
+      back onto power faces. The whole chain runs <em class="term">twice per advance</em> — once when the
+      topology epoch is committed, once after the fine surface settles. Click a stage.</p></div>
+    </div>
+
+    <div class="cols side">
+      <div class="panel">
+        <div class="controls">
+          <div class="seg" role="group" aria-label="Call site">
+            <button type="button" data-site="both" aria-pressed="true">both sites</button>
+            <button type="button" data-site="topology-commit">topology-commit</button>
+            <button type="button" data-site="settled-fine">settled-fine</button>
+          </div>
+        </div>
+        <div class="walk" id="walk" role="group" aria-label="Section 5 stages"></div>
+      </div>
+      <div class="detail" id="stageDetail"></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ 5. THE KERNEL -->
+<section>
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="eyebrow">The expensive part</span>
+      <h2>Inside <code>marchAirSupportFacesChangedFrontier</code></h2>
+      <div class="prose"><p>17.88&nbsp;ms and 17.73&nbsp;ms, at 34&nbsp;% and 28&nbsp;% ALU, moving
+      0.64&nbsp;and 1.59&nbsp;GB/s. Nothing about that says bandwidth and nothing says arithmetic. The kernel is
+      <em class="term">shape-bound</em>: a whole 128-lane workgroup is spent on one closest-seed query, and for
+      most of that query 127 of its lanes have nothing to do.</p>
+      <p>Note which counter is which. Occupancy still reads 21&nbsp;% and 30&nbsp;% because the idle lanes are
+      <em class="term">resident</em> — parked on a workgroup barrier, holding their slots, retiring nothing. The
+      machine is not starved of threads. It is holding threads that have no work.</p></div>
+    </div>
+
+    <figure class="panel">
+      <div class="scroll">
+        <svg viewBox="0 0 960 400" role="img" width="960"
+          aria-label="Each 128-lane workgroup answers one closest-seed query. Lane zero alone walks a BVH stack while 127 lanes wait; only when a leaf block is reached do all 128 lanes test seeds in parallel and reduce."
+          style="max-width:100%;height:auto;display:block">
+          <defs>
+            <marker id="ar2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+              <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+            </marker>
+            <marker id="arE" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path class="fEmber" d="M0,0 L10,5 L0,10 z"/>
+            </marker>
+          </defs>
+
+          <!-- work domain -->
+          <text x="16" y="22" font-family="ui-monospace,monospace" font-size="11.5" font-weight="600" fill="currentColor">WORK DOMAIN</text>
+          <rect x="16" y="34" width="196" height="96" rx="5" fill="none" stroke="currentColor" opacity=".3"/>
+          <text x="28" y="56" font-family="ui-monospace,monospace" font-size="11" fill="currentColor">face row × 4 quadrants</text>
+          <text x="28" y="74" font-family="ui-monospace,monospace" font-size="11" fill="currentColor">× 3 axes</text>
+          <text class="fEmber" x="28" y="98" font-family="ui-monospace,monospace" font-size="10.5">1 query = 1 workgroup</text>
+          <text class="fEmber" x="28" y="115" font-family="ui-monospace,monospace" font-size="10.5">1 workgroup = 128 lanes</text>
+
+          <line x1="212" y1="82" x2="256" y2="82" stroke="currentColor" marker-end="url(#ar2)" opacity=".55"/>
+
+          <!-- the query -->
+          <text x="264" y="22" font-family="ui-monospace,monospace" font-size="11.5" font-weight="600" fill="currentColor">THE QUERY</text>
+          <rect class="sEmber" x="264" y="34" width="230" height="96" rx="5" fill="none" opacity=".55"/>
+          <text x="276" y="55" font-family="ui-monospace,monospace" font-size="10.5" fill="currentColor">nearest SEED face, such that:</text>
+          <text x="276" y="73" font-family="ui-monospace,monospace" font-size="10" fill="currentColor" opacity=".8">· same axis</text>
+          <text x="276" y="89" font-family="ui-monospace,monospace" font-size="10" fill="currentColor" opacity=".8">· same corridor component</text>
+          <text x="276" y="105" font-family="ui-monospace,monospace" font-size="10" fill="currentColor" opacity=".8">· min (d², |v|, offset, index)</text>
+          <text class="fSig" x="276" y="122" font-family="ui-monospace,monospace" font-size="10">warm-started from previousFaces</text>
+
+          <!-- BVH -->
+          <text x="546" y="22" font-family="ui-monospace,monospace" font-size="11.5" font-weight="600" fill="currentColor">SEED BVH — one per axis</text>
+          <g stroke="currentColor" fill="none" opacity=".45">
+            <line x1="716" y1="46" x2="646" y2="72"/><line x1="716" y1="46" x2="786" y2="72"/>
+            <line x1="646" y1="80" x2="606" y2="106"/><line x1="646" y1="80" x2="686" y2="106"/>
+            <line x1="786" y1="80" x2="746" y2="106"/><line x1="786" y1="80" x2="826" y2="106"/>
+          </g>
+          <circle class="sEmber" cx="716" cy="42" r="7" fill="none" stroke-width="1.6"/>
+          <circle class="sEmber" cx="646" cy="76" r="6" fill="none" stroke-width="1.5"/>
+          <circle cx="786" cy="76" r="6" fill="none" stroke="currentColor" opacity=".4"/>
+          <circle class="fEmber sEmber" cx="606" cy="110" r="5.5" opacity=".3"/>
+          <circle cx="686" cy="110" r="5.5" fill="none" stroke="currentColor" opacity=".4"/>
+          <circle cx="746" cy="110" r="5.5" fill="none" stroke="currentColor" opacity=".4"/>
+          <circle cx="826" cy="110" r="5.5" fill="none" stroke="currentColor" opacity=".4"/>
+          <text x="846" y="44" font-family="ui-monospace,monospace" font-size="9.5" fill="currentColor" opacity=".62">2048 top leaves</text>
+          <text x="846" y="60" font-family="ui-monospace,monospace" font-size="9.5" fill="currentColor" opacity=".62">node = {min, max,</text>
+          <text x="846" y="74" font-family="ui-monospace,monospace" font-size="9.5" fill="currentColor" opacity=".62">component, block}</text>
+          <text class="fEmber" x="846" y="94" font-family="ui-monospace,monospace" font-size="9.5">128 seed slots</text>
+          <text class="fEmber" x="846" y="108" font-family="ui-monospace,monospace" font-size="9.5">per leaf block</text>
+          <text x="516" y="94" font-family="ui-monospace,monospace" font-size="9.5" font-weight="600" fill="currentColor" opacity=".7">A NODE IS REJECTED IF</text>
+          <text x="516" y="110" font-family="ui-monospace,monospace" font-size="9.5" fill="currentColor" opacity=".58">· empty</text>
+          <text x="516" y="124" font-family="ui-monospace,monospace" font-size="9.5" fill="currentColor" opacity=".58">· wrong component</text>
+          <text x="516" y="138" font-family="ui-monospace,monospace" font-size="9.5" fill="currentColor" opacity=".58">· lower-bound d² &gt; best</text>
+
+          <line x1="16" y1="166" x2="944" y2="166" stroke="currentColor" opacity=".18"/>
+
+          <!-- ===== the loop, lane activity ===== -->
+          <text x="16" y="192" font-family="ui-monospace,monospace" font-size="11.5" font-weight="600" fill="currentColor">THE LOOP — who is actually working</text>
+
+          <!-- node step -->
+          <rect class="sAmber" x="16" y="206" width="440" height="172" rx="6" fill="none" opacity=".55"/>
+          <text class="fAmber" x="32" y="230" font-family="ui-monospace,monospace" font-size="11" font-weight="600">NODE STEP — lane 0 only</text>
+          <text x="32" y="250" font-family="ui-monospace,monospace" font-size="10" fill="currentColor" opacity=".78">pop a 16-deep workgroup stack, test the node,</text>
+          <text x="32" y="265" font-family="ui-monospace,monospace" font-size="10" fill="currentColor" opacity=".78">push 2 children or signal a leaf block</text>
+          <text x="32" y="284" font-family="ui-monospace,monospace" font-size="10" fill="currentColor" opacity=".62">the other 127 sit in workgroupUniformLoad</text>
+          <!-- 128 lane squares, 1 lit -->
+          <g>
+            <rect class="fAmber" x="32" y="300" width="7" height="7" rx="1"/>
+          </g>
+          <g fill="currentColor" opacity=".14">
+            <rect x="41" y="300" width="7" height="7" rx="1"/><rect x="50" y="300" width="7" height="7" rx="1"/>
+            <rect x="59" y="300" width="7" height="7" rx="1"/><rect x="68" y="300" width="7" height="7" rx="1"/>
+            <rect x="77" y="300" width="7" height="7" rx="1"/><rect x="86" y="300" width="7" height="7" rx="1"/>
+            <rect x="95" y="300" width="7" height="7" rx="1"/><rect x="104" y="300" width="7" height="7" rx="1"/>
+            <rect x="113" y="300" width="7" height="7" rx="1"/><rect x="122" y="300" width="7" height="7" rx="1"/>
+            <rect x="131" y="300" width="7" height="7" rx="1"/><rect x="140" y="300" width="7" height="7" rx="1"/>
+            <rect x="149" y="300" width="7" height="7" rx="1"/><rect x="158" y="300" width="7" height="7" rx="1"/>
+            <rect x="167" y="300" width="7" height="7" rx="1"/><rect x="176" y="300" width="7" height="7" rx="1"/>
+            <rect x="185" y="300" width="7" height="7" rx="1"/><rect x="194" y="300" width="7" height="7" rx="1"/>
+            <rect x="203" y="300" width="7" height="7" rx="1"/><rect x="212" y="300" width="7" height="7" rx="1"/>
+            <rect x="221" y="300" width="7" height="7" rx="1"/><rect x="230" y="300" width="7" height="7" rx="1"/>
+            <rect x="239" y="300" width="7" height="7" rx="1"/>
+          </g>
+          <text x="256" y="307" font-family="ui-monospace,monospace" font-size="10" fill="currentColor" opacity=".6">… 128 lanes</text>
+          <text class="fAmber" x="32" y="334" font-family="ui-monospace,monospace" font-size="14" font-weight="600">1 / 128 active</text>
+          <text x="32" y="356" font-family="ui-monospace,monospace" font-size="10" fill="currentColor" opacity=".6">and node steps far outnumber leaf steps</text>
+
+          <!-- leaf step -->
+          <rect class="sSig" x="482" y="206" width="462" height="172" rx="6" fill="none" opacity=".55"/>
+          <text class="fSig" x="498" y="230" font-family="ui-monospace,monospace" font-size="11" font-weight="600">LEAF BLOCK — all 128, then a taper</text>
+          <text x="498" y="250" font-family="ui-monospace,monospace" font-size="10" fill="currentColor" opacity=".78">every lane tests one compacted seed, then a</text>
+          <text x="498" y="265" font-family="ui-monospace,monospace" font-size="10" fill="currentColor" opacity=".78">7-level workgroup tree picks the best</text>
+          <!-- taper bars -->
+          <g>
+            <rect class="fSig" x="498" y="284" width="52" height="26" rx="2"/>
+            <rect class="fSig" x="558" y="290" width="46" height="20" rx="2" opacity=".82"/>
+            <rect class="fSig" x="612" y="294" width="40" height="16" rx="2" opacity=".68"/>
+            <rect class="fSig" x="660" y="297" width="34" height="13" rx="2" opacity=".56"/>
+            <rect class="fSig" x="702" y="300" width="28" height="10" rx="2" opacity=".46"/>
+            <rect class="fSig" x="738" y="302" width="22" height="8" rx="2" opacity=".38"/>
+            <rect class="fSig" x="768" y="303" width="16" height="7" rx="2" opacity=".32"/>
+            <rect class="fSig" x="792" y="304" width="10" height="6" rx="2" opacity=".26"/>
+          </g>
+          <g font-family="ui-monospace,monospace" font-size="9" fill="currentColor" opacity=".6">
+            <text x="504" y="324">128</text><text x="566" y="324">64</text><text x="620" y="324">32</text>
+            <text x="666" y="324">16</text><text x="708" y="324">8</text><text x="742" y="324">4</text>
+            <text x="770" y="324">2</text><text x="792" y="324">1</text>
+          </g>
+          <text class="fSig" x="498" y="350" font-family="ui-monospace,monospace" font-size="14" font-weight="600">255 lane-slots over 8 phases = 31.9 avg</text>
+          <text x="498" y="368" font-family="ui-monospace,monospace" font-size="10" fill="currentColor" opacity=".6">so even the good phase averages 25 % of the workgroup</text>
+        </svg>
+      </div>
+      <figcaption>The traversal is <em>workgroup-serial by construction</em>: <code>airSupportBvhQueryControl</code>
+      is written by lane 0 and broadcast with <code>workgroupUniformLoad</code>, so descending the tree cannot be
+      spread across lanes. Parallelism exists only in the leaf phase, and the reduction that follows it halves the
+      active lane count seven times.</figcaption>
+    </figure>
+
+    <div class="cols two" style="margin-top:16px">
+      <div class="panel">
+        <span class="eyebrow">Move the query shape</span>
+        <h3 style="margin:8px 0 6px">How much of the workgroup is doing work?</h3>
+        <p class="cap" style="margin-bottom:14px">Count the lane-slots a query actually uses and divide by the
+        128 it holds. Compare against measured <b>ALU utilization, 28–34 %</b> — not against occupancy, for the
+        reason below.</p>
+        <div style="display:grid;gap:14px">
+          <div class="slider">
+            <label for="sN">node steps per query <b><span id="sNv">12</span></b></label>
+            <input type="range" id="sN" min="2" max="80" value="12">
+          </div>
+          <div class="slider">
+            <label for="sL">leaf blocks visited <b><span id="sLv">8</span></b></label>
+            <input type="range" id="sL" min="1" max="24" value="8">
+          </div>
+        </div>
+        <div class="phaseline" id="phaseline" aria-hidden="true"></div>
+        <p class="cap" style="margin-top:6px">Each bar is one loop phase, scaled by active lanes.
+          <span style="color:var(--amber)">amber = node step</span>,
+          <span style="color:var(--sig)">cyan = leaf block and its reduction</span>.</p>
+        <div class="readout">
+          <div class="cell"><div class="k2">mean active lanes</div><div class="v" id="mAvg">—</div></div>
+          <div class="cell hot"><div class="k2">lane-activity fraction</div><div class="v" id="mOcc">—<small> %</small></div></div>
+          <div class="cell"><div class="k2">measured ALU</div><div class="v">28–34<small> %</small></div></div>
+        </div>
+        <p class="cap" style="margin-top:14px">Landing in the measured band needs roughly <b>1–2 node steps per
+        leaf block visited</b>. That is a weakly-pruned search: the query is opening many blocks, not descending
+        decisively to one.</p>
+      </div>
+
+      <div style="display:grid;gap:16px">
+        <div class="panel">
+          <span class="eyebrow">Corridor components</span>
+          <div class="prose" style="font-size:15px">
+            <p>Before the march, 17 rounds of pointer-jumping union–find label every face row with its connected
+            component of the demand corridor. A query then rejects any BVH subtree whose component differs — real
+            pruning, and a correctness fix.</p>
+            <p>The corridor is not connected in general. On the large dam, one step produced an
+            <em class="term">island</em> of 1316 of 6209 support rows, all size 1 and 2, along the floor, with no
+            seed inside it and no catalog incidence leaving it. When a component carries no seed on an axis,
+            <code>globalSearch</code> drops the component filter for those queries rather than leaving them unresolved.</p>
+          </div>
+        </div>
+        <div class="panel callout">
+          <h4>The candidate scan was never the cost</h4>
+          <p>The predecessor design relaxed a changed frontier, and its inner loop gathered up to 30 incident rows
+          × 4 quadrants = 120 candidates per destination. That looked like the wall. Running the whole scan
+          <em>twice</em> — result-preserving, zero tripwires — moved the pass from 39.68 to 43.52 ms. One complete
+          scan therefore costs ~3.84 ms of 39.68, against a 3.65 ms A/A floor. <b>The other ~36 ms was the frontier
+          machinery around it.</b></p>
+        </div>
+        <div class="panel callout">
+          <h4>Do not ablate a fixed point</h4>
+          <p>Collapsing that scan to a single candidate made the pass <b>2× slower</b> (82.59 ms) and moved a
+          neighbouring pass by +8.6 ms — because picking a non-closest face changes the marched field, so the
+          iteration stops converging. An ablation that perturbs a fixed-point iteration measures its own
+          divergence, not the loop you removed.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ 6. TRAJECTORY -->
+<section>
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="eyebrow">The cutover</span>
+      <h2>Relaxation → BVH → compact BVH → packet BVH</h2>
+      <div class="prose"><p>Four consecutive captures of the same lane on one night. Only the march moves across
+      the last three; MGPCG holds at 57–58&nbsp;ms and the JFA at 5.2–5.4&nbsp;ms, so the deltas are the
+      march's own.</p></div>
+    </div>
+    <div class="panel">
+      <div class="traj" id="traj"></div>
+      <p class="cap" style="margin-top:16px">The first row is a different solver state — the compiled
+      fine-advection work landed between it and the second row, taking <code>Advect</code> from 50.37 to
+      12.15 ms. Compare it for the march column only. The last row is a <em>different advance</em> of the same
+      174-step run, not a regression: the changed frontier is larger there. Step-to-step, this march ranges
+      27.18–35.61 ms on an otherwise identical lane.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ 7. STANDING -->
+<section style="border-bottom:none">
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="eyebrow">Where that leaves it</span>
+      <h2>What is still on the table</h2>
+    </div>
+    <div class="cols two">
+      <div class="panel">
+        <h3>Structural, not micro</h3>
+        <div class="prose" style="font-size:15px;margin-top:10px">
+          <p>Both the old relaxation and the new packet BVH spend their time on <em class="term">query shape</em>,
+          not on the arithmetic inside a query. The lever is the ratio of node steps to leaf blocks, and the number
+          of lanes idle during a node step — which is a mapping decision, not an instruction-selection one.</p>
+          <p>The obvious unspent move is to stop giving one query a whole workgroup: batch many queries per
+          workgroup and let lanes traverse independently, or make the stack step itself parallel over a wider
+          node fan-out so descending the tree does not cost 127 idle lanes.</p>
+        </div>
+      </div>
+      <div class="panel">
+        <h3>And the free one</h3>
+        <div class="prose" style="font-size:15px;margin-top:10px">
+          <p>The chain runs twice per advance — <code>topology-commit</code> and <code>settled-fine</code> —
+          for 35.61 ms of march. The second site exists because the fine surface settles after the epoch is
+          committed. Whether both publications are load-bearing on a step where topology did not actually
+          change is a question the counters can answer, and it is worth 17.9 ms if the answer is no.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<footer class="wrap">
+  <p>Source: <code>artifacts/xctrace-symmetric-packet-bvh-step67/summary.json</code> — one representative advance
+  of the 174-step <code>symmetric-expansion</code> lane on an Apple M1&nbsp;Max, full label isolation, 235 exact
+  stages, 0 composite. Frame wall 149.19 ms, GPU busy 127.50 ms (85.5 %). Occupancy and ALU are hardware counter
+  means over the pass, sampled every 17th timestamp.</p>
+  <p>Code: <code>lib/webgpu-octree-air-velocity-support-gpu.ts</code> (velocity march),
+  <code>lib/webgpu-octree-fine-levelset-redistance.ts</code> (φ redistance),
+  <code>lib/physics-step-program.ts</code> (stage order). Paper:
+  <code>docs/papers/aanjaneya-2017-power-liquids.txt</code> §5.</p>
+</footer>
+
+<script>
+"use strict";
+
+/* ---------- theme ---------- */
+(function () {
+  var root = document.documentElement, btn = document.getElementById("themeToggle");
+  btn.addEventListener("click", function () {
+    var now = root.getAttribute("data-theme");
+    if (!now) {
+      now = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+    }
+    root.setAttribute("data-theme", now === "dark" ? "light" : "dark");
+  });
+})();
+
+var TOTAL = 127.60;
+
+/* ============================================================ FRAME BAR */
+var FRAME = [
+  { key: "mgpcg", name: "Pressure solve", ms: 46.55, color: "var(--ink-3)",
+    note: "Octree persistent MGPCG — the whole V-cycle in one workgroup. Still the largest single stage, and unrelated to marching." },
+  { key: "march", name: "Velocity march", ms: 35.61, color: "var(--ember)",
+    note: "March Section 5 sparse changed frontier to a fixed point, run at both call sites: 17.88 ms at topology-commit and 17.73 ms at settled-fine. Two passes. 27.9 % of the advance." },
+  { key: "chain", name: "Rest of Section 5", ms: 8.62, color: "color-mix(in srgb, var(--ember) 45%, var(--bg-3))",
+    note: "The other 18 passes of the air-support chain: identity publication, fine-band demand closure, the power→regular face interpolation with component labelling and BVH build, and the reconstruction back onto power faces." },
+  { key: "jfa", name: "φ redistance", ms: 5.81, color: "var(--jade)",
+    note: "The complete fine JFA-CPT: 35 encoded passes, of which the four floods and the seed/refresh/resolve carry all the time. 4.6 % of the advance." },
+  { key: "rest", name: "Everything else", ms: 31.00, color: "var(--bg-3)",
+    note: "Advection (14.99 ms), grading closure, volume reductions, topology signatures, SPGrid publication, and 150-odd small stages." }
+];
+
+(function () {
+  var bar = document.getElementById("framebar");
+  var legend = document.getElementById("frameLegend");
+  var detail = document.getElementById("frameDetail");
+  FRAME.forEach(function (f) {
+    var b = document.createElement("button");
+    b.type = "button";
+    b.style.flex = f.ms + " 1 0";
+    b.style.background = f.color;
+    b.setAttribute("aria-pressed", "false");
+    b.setAttribute("aria-label", f.name + ", " + f.ms.toFixed(2) + " milliseconds");
+    var pct = (f.ms / TOTAL * 100);
+    var dark = f.key === "rest" || f.key === "chain";
+    b.innerHTML = '<span class="lab"' + (dark ? ' style="color:var(--ink);text-shadow:none"' : '') + '>' +
+      '<span class="n">' + pct.toFixed(1) + '%</span>' +
+      '<span class="t">' + f.ms.toFixed(2) + ' ms</span></span>';
+    b.addEventListener("click", function () {
+      Array.prototype.forEach.call(bar.children, function (c) { c.setAttribute("aria-pressed", "false"); });
+      b.setAttribute("aria-pressed", "true");
+      detail.style.borderLeftColor = f.color;
+      detail.innerHTML = '<div class="h">' + f.name + ' — ' + f.ms.toFixed(2) + ' ms · ' +
+        pct.toFixed(1) + '% of GPU busy</div><div class="b">' + f.note + '</div>';
+    });
+    bar.appendChild(b);
+
+    var s = document.createElement("span");
+    s.innerHTML = '<i style="background:' + f.color + '"></i>' + f.name;
+    legend.appendChild(s);
+  });
+})();
+
+/* ============================================================ JFA LADDER */
+var LADDERS = {
+  warm: {
+    strides: [
+      { s: 2, t: "flood", live: true }, { s: 1, t: "flood", live: true },
+      { s: 1, t: "repair", live: true }, { s: 1, t: "repair", live: true }
+    ],
+    note: "Recurring publication. Topology already carried and recycle-safely remapped the closest-point field, " +
+      "so the ladder only has to repair it over one step's transport displacement — 2 fine cells, not the 4-cell " +
+      "band. First stride 2 (reach 2+1 = 3), then two local collar repairs. Four floods, 4.56 ms. " +
+      "The five-repair cold ladder is still encoded behind a fail-closed on-GPU check and dispatches zero workgroups."
+  },
+  cold: {
+    strides: [
+      { s: 4, t: "flood", live: true }, { s: 2, t: "flood", live: true }, { s: 1, t: "flood", live: true },
+      { s: 1, t: "repair", live: true }, { s: 1, t: "repair", live: true }, { s: 1, t: "repair", live: true },
+      { s: 1, t: "repair", live: true }, { s: 1, t: "repair", live: true }
+    ],
+    note: "Full rebuild — no transported seed field to repair, so the ladder must reach every cell of the 4-cell " +
+      "signed band. Reach is the SUM of the strides: 4+2+1 = 7 ≥ 4. Rounding the band up to a power of two would " +
+      "have picked 8 and spent its first pass gathering entirely outside the band. Then five collar repairs."
+  }
+};
+
+(function () {
+  var el = document.getElementById("ladder"), note = document.getElementById("ladderNote");
+  function draw(kind) {
+    var L = LADDERS[kind];
+    el.innerHTML = "";
+    var seed = document.createElement("div");
+    seed.className = "rung";
+    seed.style.borderColor = "var(--sig)";
+    seed.innerHTML = '<span class="s" style="color:var(--sig)">◉</span><span class="t">seed</span>';
+    el.appendChild(seed);
+    L.strides.forEach(function (r) {
+      var d = document.createElement("div");
+      d.className = "rung" + (r.t === "repair" ? " repair" : "");
+      d.innerHTML = '<span class="s">' + r.s + '</span><span class="t">' + r.t + '</span>';
+      el.appendChild(d);
+    });
+    var res = document.createElement("div");
+    res.className = "rung";
+    res.style.borderColor = "var(--jade)";
+    res.innerHTML = '<span class="s" style="color:var(--jade)">√</span><span class="t">resolve</span>';
+    el.appendChild(res);
+    note.textContent = L.note;
+  }
+  Array.prototype.forEach.call(document.querySelectorAll("[data-ladder]"), function (b) {
+    b.addEventListener("click", function () {
+      Array.prototype.forEach.call(document.querySelectorAll("[data-ladder]"), function (o) {
+        o.setAttribute("aria-pressed", "false");
+      });
+      b.setAttribute("aria-pressed", "true");
+      draw(b.getAttribute("data-ladder"));
+    });
+  });
+  draw("warm");
+})();
+
+/* ============================================================ JFA TABLE */
+var JFA = [
+  ["Fine JFA — cooperative flood B to A stride 1", 2.299, 2, 48.8, 68.3, 4.85],
+  ["Fine JFA — cooperative flood A to B stride 1", 1.260, 1, 41.3, 67.8, 8.63],
+  ["Fine JFA — cooperative flood A to B stride 2", 1.000, 1, 52.5, 73.4, 5.47],
+  ["Fine JFA — seed closest points", 0.453, 1, 16.6, 17.2, 4.04],
+  ["Fine JFA — refresh transported closest-point codes", 0.384, 1, 48.6, 73.7, 6.12],
+  ["Fine JFA — resolve A to B", 0.267, 1, 16.6, 24.2, 6.90],
+  ["Fine JFA — prepare warm fallback", 0.032, 1, null, null, null],
+  ["Fine JFA — finalize", 0.029, 1, null, null, null],
+  ["Fine JFA — commit distances", 0.027, 1, null, null, null],
+  ["Fine JFA — publish support mask", 0.017, 1, null, null, null],
+  ["25 further passes (frontier build, fail-closed fallback ladder)", 0.046, 25, null, null, null]
+];
+(function () {
+  var tb = document.getElementById("jfaTable");
+  JFA.forEach(function (r) {
+    var tr = document.createElement("tr");
+    var occCls = r[3] === null ? "" : (r[3] >= 40 ? "good" : "");
+    tr.innerHTML =
+      "<td>" + r[0] + "</td>" +
+      "<td>" + r[1].toFixed(3) + "</td>" +
+      "<td>" + r[2] + "</td>" +
+      '<td class="' + occCls + '">' + (r[3] === null ? "—" : r[3].toFixed(1) + " %") + "</td>" +
+      '<td class="' + occCls + '">' + (r[4] === null ? "—" : r[4].toFixed(1) + " %") + "</td>" +
+      "<td>" + (r[5] === null ? "—" : r[5].toFixed(2)) + "</td>";
+    tb.appendChild(tr);
+  });
+})();
+
+/* ============================================================ SECTION 5 WALK */
+var STAGES = [
+  {
+    n: "Initialize publication", tc: 0.026, sf: 0.050, wall: false,
+    kind: "bookkeeping",
+    d: "Zero the arena control words and open a new air-support publication against the committed topology epoch. " +
+       "A single-lane dispatch; everything downstream is indirect off the schedules this writes."
+  },
+  {
+    n: "Publish structured identities", tc: 0.553, sf: 0.574, wall: false,
+    kind: "dedup · open-addressed hash",
+    d: "Every consumer that will need an extended velocity emits a cell identity. Those are deduplicated into an " +
+       "open-addressed hash keyed by cell, each slot claiming a winner and a direct pressure row if one exists. " +
+       "This is the authority every later stage reads its flags from — the demand candidates' own flag words are write-only."
+  },
+  {
+    n: "Close fine-band demand", tc: 0.912, sf: 0.904, wall: false,
+    kind: "stencil closure",
+    d: "The fine narrow band samples velocity at arbitrary points, so it does not demand a face — it demands a whole " +
+       "interpolation stencil. This walks each fine brick's neighbourhood and marks the regular cells whose faces must " +
+       "carry a value. It is why the corridor is a demand cone rather than a shell, and why the corridor can be disconnected."
+  },
+  {
+    n: "Emit fine-band candidates", tc: 0.038, sf: 0.039, wall: false,
+    kind: "compaction",
+    d: "Scatter the closed fine demand into the candidate array as support rows, appended after the direct pressure rows."
+  },
+  {
+    n: "Canonicalize footprint", tc: 0.405, sf: 0.254, wall: false,
+    kind: "radix sort · 4 passes",
+    d: "A four-pass 8-bit radix sort over the touched hash slots gives the publication a deterministic row order " +
+       "independent of hash probe order. Without it the same scene produces a different row numbering run to run."
+  },
+  {
+    n: "Publish canonical candidates", tc: 0.022, sf: 0.020, wall: false,
+    kind: "bookkeeping",
+    d: "Freeze the canonical candidate list and publish its count into the indirect dispatch words."
+  },
+  {
+    n: "Resolve and hash live owners", tc: 0.261, sf: 0.142, wall: false,
+    kind: "octree lookup",
+    d: "Scatter records, resolve each identity's owning octree leaf against the live owner pages, resolve tags to rows, " +
+       "and publish the adaptive owner directory. Fails closed on an out-of-bounds, unpublished, or wrong-generation " +
+       "owner rather than synthesizing a canonical coarse owner."
+  },
+  {
+    n: "Faces, components, seeds, BVH", tc: 1.130, sf: 1.680, wall: false,
+    kind: "the whole pre-march build",
+    d: "One labelled pass doing five things: resolve each face row's adjacency record once (the loop-invariant centre " +
+       "and incidence the march would otherwise re-derive per candidate); validate frontier reciprocity; run 17 rounds " +
+       "of pointer-jumping union–find to label corridor components; interpolate power-face velocities onto regular " +
+       "octree faces and seed every face that touches the interface; then compact the seed set and build a 2048-leaf " +
+       "BVH per axis — clear, per-block build, prefix scan, scatter, top-down reduction. At settled-fine it reads " +
+       "15.49 GB/s at 3 % occupancy: pure gather, no arithmetic."
+  },
+  {
+    n: "March to a fixed point", tc: 17.880, sf: 17.730, wall: true,
+    kind: "128-lane packet BVH query per face",
+    d: "The paper's transform, evaluated exactly. Each (face row, quadrant, axis) gets one 128-lane workgroup that " +
+       "finds the nearest seed face on its axis within its corridor component, warm-started from the previous step's " +
+       "answer. There is no propagation order and no convergence phase — every query is independent and exact, which " +
+       "is legal precisely because §5 defines the field as a closest-point transform. " +
+       "21 % / 30 % occupancy, 34 % / 28 % ALU, 0.64 / 1.59 GB/s read. 27.9 % of the advance."
+  },
+  {
+    n: "Reconstruct support vectors", tc: 0.812, sf: 0.800, wall: false,
+    kind: "interp back · project",
+    d: "The other half of the paper's round trip. Interpolate the marched regular-face field at each power-face " +
+       "centroid, then project once onto that face's normal. Regular cells average their axis-aligned faces; power " +
+       "cells take a least-squares fit over all face normal components. Sums are canonically ordered by magnitude " +
+       "so the D4 symmetry gate stays exact. At a closed wall with no carrier on this side, the stationary-solid " +
+       "value is supplied — but only then, or a receding lid film gets pinned."
+  }
+];
+
+(function () {
+  var walk = document.getElementById("walk");
+  var detail = document.getElementById("stageDetail");
+  var site = "both";
+  var selected = 8;
+
+  function msFor(s) {
+    return site === "both" ? s.tc + s.sf : site === "topology-commit" ? s.tc : s.sf;
+  }
+  function maxMs() {
+    return STAGES.reduce(function (a, s) { return Math.max(a, msFor(s)); }, 0);
+  }
+
+  function showDetail(i) {
+    var s = STAGES[i];
+    detail.className = "detail" + (s.wall ? " wall" : "");
+    detail.innerHTML =
+      "<h4>" + (i + 1) + ". " + s.n + "</h4>" +
+      '<div class="sub">' + s.kind + "</div>" +
+      '<div class="kv">' +
+        "<span>topology-commit <b>" + s.tc.toFixed(3) + " ms</b></span>" +
+        "<span>settled-fine <b>" + s.sf.toFixed(3) + " ms</b></span>" +
+        "<span>per advance <b>" + (s.tc + s.sf).toFixed(3) + " ms</b></span>" +
+        "<span>share <b>" + ((s.tc + s.sf) / TOTAL * 100).toFixed(1) + " %</b></span>" +
+      "</div><p>" + s.d + "</p>";
+  }
+
+  function render() {
+    walk.innerHTML = "";
+    var mx = maxMs();
+    STAGES.forEach(function (s, i) {
+      var ms = msFor(s);
+      var b = document.createElement("button");
+      b.type = "button";
+      b.className = s.wall ? "wall" : "";
+      b.setAttribute("aria-pressed", i === selected ? "true" : "false");
+      b.innerHTML =
+        '<span class="idx">' + (i + 1) + '</span>' +
+        '<span class="nm">' + s.n + '</span>' +
+        '<span class="bar"><i style="width:' + (ms / mx * 100).toFixed(1) + '%"></i></span>' +
+        '<span class="ms">' + ms.toFixed(2) + '</span>';
+      b.addEventListener("click", function () {
+        selected = i;
+        Array.prototype.forEach.call(walk.children, function (c) { c.setAttribute("aria-pressed", "false"); });
+        b.setAttribute("aria-pressed", "true");
+        showDetail(i);
+      });
+      walk.appendChild(b);
+    });
+  }
+
+  Array.prototype.forEach.call(document.querySelectorAll("[data-site]"), function (b) {
+    b.addEventListener("click", function () {
+      Array.prototype.forEach.call(document.querySelectorAll("[data-site]"), function (o) {
+        o.setAttribute("aria-pressed", "false");
+      });
+      b.setAttribute("aria-pressed", "true");
+      site = b.getAttribute("data-site");
+      render();
+    });
+  });
+
+  render();
+  showDetail(selected);
+})();
+
+/* ============================================================ OCCUPANCY MODEL */
+(function () {
+  var sN = document.getElementById("sN"), sL = document.getElementById("sL");
+  var line = document.getElementById("phaseline");
+  var REDUCE = [128, 64, 32, 16, 8, 4, 2, 1];
+
+  function update() {
+    var N = +sN.value, L = +sL.value;
+    document.getElementById("sNv").textContent = String(N);
+    document.getElementById("sLv").textContent = L;
+
+    // interleave node steps and leaf blocks the way a descent actually runs
+    var phases = [];
+    var perGap = Math.max(1, Math.round(N / (L + 1)));
+    var placed = 0;
+    for (var b = 0; b <= L; b++) {
+      for (var k = 0; k < perGap && placed < N; k++) { phases.push({ lanes: 1, leaf: false }); placed++; }
+      if (b < L) REDUCE.forEach(function (w) { phases.push({ lanes: w, leaf: true }); });
+    }
+    while (placed < N) { phases.push({ lanes: 1, leaf: false }); placed++; }
+
+    var slots = phases.reduce(function (a, p) { return a + p.lanes; }, 0);
+    var avg = slots / phases.length;
+    var occ = avg / 128 * 100;
+
+    document.getElementById("mAvg").textContent = avg.toFixed(1);
+    document.getElementById("mOcc").textContent = occ.toFixed(1);
+
+    line.innerHTML = "";
+    var cap = Math.min(phases.length, 180);
+    for (var i = 0; i < cap; i++) {
+      var p = phases[i];
+      var el = document.createElement("i");
+      el.style.height = Math.max(6, p.lanes / 128 * 100) + "%";
+      if (p.leaf) el.className = "leaf";
+      line.appendChild(el);
+    }
+  }
+  sN.addEventListener("input", update);
+  sL.addEventListener("input", update);
+  update();
+})();
+
+/* ============================================================ TRAJECTORY */
+var TRAJ = [
+  { n: "frontier relaxation", march: 60.07, busy: 212.6, dim: true },
+  { n: "BVH", march: 55.91, busy: 157.4 },
+  { n: "compact BVH", march: 43.15, busy: 142.8 },
+  { n: "packet BVH", march: 27.18, busy: 128.6 },
+  { n: "packet BVH · harder step", march: 35.61, busy: 127.5, dim: true }
+];
+(function () {
+  var el = document.getElementById("traj");
+  var mx = 62;
+  TRAJ.forEach(function (t, i) {
+    var r = document.createElement("div");
+    r.className = "row" + (t.dim ? " dim" : "");
+    r.innerHTML =
+      '<span class="nm">' + t.n + '</span>' +
+      '<span class="track"><i style="width:0%"></i></span>' +
+      '<span class="val">' + t.march.toFixed(2) + '</span>';
+    el.appendChild(r);
+    var fill = r.querySelector("i");
+    setTimeout(function () { fill.style.width = (t.march / mx * 100).toFixed(1) + "%"; }, 80 + i * 90);
+  });
+  var head = document.createElement("div");
+  head.className = "row";
+  head.style.cssText = "font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3);padding-bottom:2px";
+  head.innerHTML = '<span class="nm">capture</span><span></span><span class="val">march ms</span>';
+  el.insertBefore(head, el.firstChild);
+})();
+</script>

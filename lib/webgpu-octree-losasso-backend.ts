@@ -399,6 +399,7 @@ class WebGPUOctreeLosassoTopologyPublisher implements WebGPUOctreeLosassoCandida
     }
     this.velocityMigration.encodeSnapshot(broker, {
       control: this.authority.writable.control,
+      faces: this.authority.writable.faces,
       faceGeometry: this.authority.writable.faceGeometry,
       axisFaceDirectory: this.authority.writable.axisFaceDirectory,
       extendedVelocity: this.authority.writable.extendedVelocity,
@@ -441,6 +442,7 @@ class WebGPUOctreeLosassoTopologyPublisher implements WebGPUOctreeLosassoCandida
     }
     this.velocityMigration.encodeMigration(broker, {
       control: output.control,
+      faces: output.faces,
       faceGeometry: output.faceGeometry,
       axisFaceDirectory: output.axisFaceDirectory,
       extendedVelocity: output.extendedVelocity,
@@ -614,7 +616,10 @@ export class WebGPUOctreeLosassoCoarseBackend {
         directoryCapacity: this.extensionBand.plan.directoryCapacity,
       });
     this.projection = new WebGPUOctreeLosassoProjection(options.device,
-      this.sources.projection);
+      this.sources.projection, {
+        density: options.density,
+        physicalCellSize: options.topology.physicalCellSize[0],
+      });
     if (options.rigidPressureReaction) {
       this.rigidPressureReaction = new WebGPUOctreeLosassoRigidPressureReaction(options.device, {
         rowCapacity: options.capacities.rows,
@@ -720,7 +725,8 @@ export class WebGPUOctreeLosassoCoarseBackend {
     dynamicCouplingBodyCount = 0,
   ): void {
     this.assertReady();
-    this.projection.encode(broker, pressure, step.dt_s / this.options.density);
+    this.projection.encode(broker, pressure, step.dt_s / this.options.density,
+      step.gravity_m_s2);
     this.rigidPressureReaction?.encode(
       broker, pressure, step.dt_s, dynamicCouplingBodyCount,
     );

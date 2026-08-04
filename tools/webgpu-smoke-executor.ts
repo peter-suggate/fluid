@@ -10,6 +10,8 @@ import { summarizeDriftOscillation } from "../lib/tall-cell-diagnostics";
 import type { WebGPUFineLevelSetBrickSource } from "../lib/webgpu-octree-fine-levelset-bricks";
 import { FINE_LEVELSET_VOLUME_VALID, unpackFineLevelSetGPUVolumeControl }
   from "../lib/webgpu-octree-fine-levelset-volume";
+import { fineLevelSetSummaryDirectEntryBase, planFineLevelSetSummaryLeafLookup }
+  from "../lib/webgpu-octree-fine-levelset-summary-direct";
 import { OCTREE_LOSASSO_COARSE_PHI_MAGIC }
   from "../lib/webgpu-octree-losasso-coarse-phi.wgsl";
 import { decodeFineLevelSetRecurringRejectionClauses, FINE_LEVELSET_TOPOLOGY_ERROR,
@@ -553,6 +555,16 @@ const octreeGlobalFineFactorOverride =
   process.env.FLUID_FINE_FACTOR ?? process.env.FLUID_OCTREE_GLOBAL_FINE_FACTOR;
 if (octreeGlobalFineFactorOverride !== undefined && !["1", "4", "8"].includes(octreeGlobalFineFactorOverride)) {
   throw new Error("FLUID_FINE_FACTOR/FLUID_OCTREE_GLOBAL_FINE_FACTOR must be 1, 4, or 8");
+}
+/** Diagnostic-only reserve parity for backend A/B runs. Authored method
+ * profiles remain authoritative when this is unset. */
+const octreeGlobalFineMaximumBricksOverride =
+  process.env.FLUID_OCTREE_GLOBAL_FINE_MAXIMUM_BRICKS === undefined
+    ? undefined : Number(process.env.FLUID_OCTREE_GLOBAL_FINE_MAXIMUM_BRICKS);
+if (octreeGlobalFineMaximumBricksOverride !== undefined
+  && (!Number.isSafeInteger(octreeGlobalFineMaximumBricksOverride)
+    || octreeGlobalFineMaximumBricksOverride < 1)) {
+  throw new Error("FLUID_OCTREE_GLOBAL_FINE_MAXIMUM_BRICKS must be a positive integer");
 }
 const powerGenerationAuditLog = process.env.FLUID_POWER_GENERATION_AUDIT_LOG !== "0";
 /** Identity marker for the production-visible factor-4 D4 cutover command.
@@ -1236,6 +1248,9 @@ async function runGPU(
     values.fineLevelSetBandCells = octreeFineBandOverride;
   }
   if (method.id === "octree" && octreeGlobalFineFactorOverride !== undefined) values.globalFineLevelSetFactor = octreeGlobalFineFactorOverride;
+  if (method.id === "octree" && octreeGlobalFineMaximumBricksOverride !== undefined) {
+    values.globalFineLevelSetMaximumBricks = octreeGlobalFineMaximumBricksOverride;
+  }
   const losassoCutoverLane = method.id === "octree" && values.coarseBackend === "losasso";
   // Factor one transports phi directly on the accepted octree rows and owns
   // no separate sparse fine-band publication.
@@ -1648,9 +1663,9 @@ async function runGPU(
    * other octree run captures them opportunistically: a trip still fails, but
    * a scene with no compact fine authority is "not applicable" rather than a
    * wiring failure. */
-  const tripwiresRequired = !tripwiresDisabled && method.id === "octree" && !losassoCutoverLane
+  const tripwiresRequired = !tripwiresDisabled && method.id === "octree"
     && (tripwiresForcedRequired || powerGenerationAuditRequested || performanceProfileRequested);
-  const tripwireCapacity = !tripwiresDisabled && method.id === "octree" && !losassoCutoverLane
+  const tripwireCapacity = !tripwiresDisabled && method.id === "octree"
     ? Math.max(1, exactStepCount ?? 0, oracleSteps,
       Math.ceil(target_s / Math.max(scene.numerics.maxDt_s, Number.EPSILON)) + 1)
     : 0;
@@ -1748,35 +1763,39 @@ async function runGPU(
     encoder: GPUCommandEncoder, sources: ReturnType<typeof tripwireSources>,
     destination: GPUBuffer, base: number,
   ): void => {
-    encoder.copyBufferToBuffer(sources.topology!.buffer, sources.topology!.offset ?? 0,
-      destination, base + TRIPWIRE_RECORD.topologyOffsetBytes,
+    if (sources.topology) encoder.copyBufferToBuffer(sources.topology.buffer,
+      sources.topology.offset ?? 0, destination, base + TRIPWIRE_RECORD.topologyOffsetBytes,
       TRIPWIRE_RECORD.topologyBytes);
-    encoder.copyBufferToBuffer(sources.restriction!, 0, destination,
+    if (sources.restriction) encoder.copyBufferToBuffer(sources.restriction, 0, destination,
       base + TRIPWIRE_RECORD.restrictionOffsetBytes, TRIPWIRE_RECORD.restrictionBytes);
-    encoder.copyBufferToBuffer(sources.mgpcg!, 0, destination,
+    if (sources.mgpcg) encoder.copyBufferToBuffer(sources.mgpcg, 0, destination,
       base + TRIPWIRE_RECORD.mgpcgOffsetBytes, TRIPWIRE_RECORD.mgpcgBytes);
-    encoder.copyBufferToBuffer(sources.coarse!, 0, destination,
+    if (sources.coarse) encoder.copyBufferToBuffer(sources.coarse, 0, destination,
       base + TRIPWIRE_RECORD.coarseOffsetBytes, TRIPWIRE_RECORD.coarseBytes);
-    encoder.copyBufferToBuffer(sources.fineWorklist!, 0, destination,
+    if (sources.fineWorklist) encoder.copyBufferToBuffer(sources.fineWorklist, 0, destination,
       base + TRIPWIRE_RECORD.fineHeaderOffsetBytes, TRIPWIRE_RECORD.fineHeaderBytes);
-    encoder.copyBufferToBuffer(sources.airSupport!, 0, destination,
-      base + TRIPWIRE_RECORD.airSupportOffsetBytes, 8);
-    encoder.copyBufferToBuffer(sources.airSupport!, 38 * 4, destination,
-      base + TRIPWIRE_RECORD.airSupportOffsetBytes + 8, 8);
-    encoder.copyBufferToBuffer(sources.airSupport!, 41 * 4, destination,
-      base + TRIPWIRE_RECORD.airSupportLedgerOffsetBytes,
-      TRIPWIRE_RECORD.airSupportLedgerBytes);
-    encoder.copyBufferToBuffer(sources.airSupport!, 74 * 4, destination,
-      base + TRIPWIRE_RECORD.airSupportForensicOffsetBytes,
-      TRIPWIRE_RECORD.airSupportForensicBytes);
-    encoder.copyBufferToBuffer(sources.transportGovernor!.buffer,
-      sources.transportGovernor!.offset ?? 0, destination,
-      base + TRIPWIRE_RECORD.transportScheduleOffsetBytes,
-      TRIPWIRE_RECORD.transportScheduleBytes);
-    encoder.copyBufferToBuffer(sources.transportGovernor!.buffer,
-      (sources.transportGovernor!.offset ?? 0) + 46 * 4, destination,
-      base + TRIPWIRE_RECORD.transportSleepOffsetBytes,
-      TRIPWIRE_RECORD.transportSleepBytes);
+    if (sources.airSupport) {
+      encoder.copyBufferToBuffer(sources.airSupport, 0, destination,
+        base + TRIPWIRE_RECORD.airSupportOffsetBytes, 8);
+      encoder.copyBufferToBuffer(sources.airSupport, 38 * 4, destination,
+        base + TRIPWIRE_RECORD.airSupportOffsetBytes + 8, 8);
+      encoder.copyBufferToBuffer(sources.airSupport, 41 * 4, destination,
+        base + TRIPWIRE_RECORD.airSupportLedgerOffsetBytes,
+        TRIPWIRE_RECORD.airSupportLedgerBytes);
+      encoder.copyBufferToBuffer(sources.airSupport, 74 * 4, destination,
+        base + TRIPWIRE_RECORD.airSupportForensicOffsetBytes,
+        TRIPWIRE_RECORD.airSupportForensicBytes);
+    }
+    if (sources.transportGovernor) {
+      encoder.copyBufferToBuffer(sources.transportGovernor.buffer,
+        sources.transportGovernor.offset ?? 0, destination,
+        base + TRIPWIRE_RECORD.transportScheduleOffsetBytes,
+        TRIPWIRE_RECORD.transportScheduleBytes);
+      encoder.copyBufferToBuffer(sources.transportGovernor.buffer,
+        (sources.transportGovernor.offset ?? 0) + 46 * 4, destination,
+        base + TRIPWIRE_RECORD.transportSleepOffsetBytes,
+        TRIPWIRE_RECORD.transportSleepBytes);
+    }
   };
   /** Decode and evaluate ONE captured record.
    *
@@ -1884,17 +1903,19 @@ async function runGPU(
     //    the real two-authority receipt instead: every accepted fine row
     //    becomes one coarse correction and those rows cover the complete
     //    interface set.
-    const restrictionWords = words(TRIPWIRE_RECORD.restrictionOffsetBytes,
-      TRIPWIRE_RECORD.restrictionBytes);
-    const restriction = unpackFineToCoarseGPUControl(restrictionWords);
-    const coarseWords = words(TRIPWIRE_RECORD.coarseOffsetBytes,
-      TRIPWIRE_RECORD.coarseBytes);
-    const coarse = unpackOctreePowerCoarseLevelSetControl(coarseWords);
-    const restrictionAudit = auditSection5FineRestriction(restriction, coarse);
-    if (restrictionAudit.failure && hasSeparateFineLevelSetBand) {
-      trip("restriction-unaccepted", { reason: restrictionAudit.failure,
-        ...restrictionAudit, restrictionControl: Array.from(restrictionWords),
-        coarseControl: Array.from(coarseWords), fatalChainForensics });
+    if (!losassoCutoverLane) {
+      const restrictionWords = words(TRIPWIRE_RECORD.restrictionOffsetBytes,
+        TRIPWIRE_RECORD.restrictionBytes);
+      const restriction = unpackFineToCoarseGPUControl(restrictionWords);
+      const coarseWords = words(TRIPWIRE_RECORD.coarseOffsetBytes,
+        TRIPWIRE_RECORD.coarseBytes);
+      const coarse = unpackOctreePowerCoarseLevelSetControl(coarseWords);
+      const restrictionAudit = auditSection5FineRestriction(restriction, coarse);
+      if (restrictionAudit.failure && hasSeparateFineLevelSetBand) {
+        trip("restriction-unaccepted", { reason: restrictionAudit.failure,
+          ...restrictionAudit, restrictionControl: Array.from(restrictionWords),
+          coarseControl: Array.from(coarseWords), fatalChainForensics });
+      }
     }
     // 3. Solver convergence. Non-convergence at the encoded budget
     //    publishes the SEED pressure and fails nothing today; this is the
@@ -1944,7 +1965,7 @@ async function runGPU(
     // rejection before the harness sees it.
     const liveAirSupportFailure = (airSupport[0] ?? 0) !== 0;
     const latchedAirSupportFailure = (airSupport[2] ?? 0) !== 0;
-    if (liveAirSupportFailure || latchedAirSupportFailure) {
+    if (!losassoCutoverLane && (liveAirSupportFailure || latchedAirSupportFailure)) {
       trip("air-support-failure", { ...airSupportCarrierForensics(), fatalChainForensics });
     }
     return trips;
@@ -2122,8 +2143,11 @@ async function runGPU(
       // so the throughput lanes stay comparable across builds.
       const tripwireCaptureStartedAt_ms = performance.now();
       const sources = tripwireSources();
-      const missing = Object.entries(sources)
-        .filter(([, buffer]) => !buffer).map(([name]) => name);
+      const requiredSourceNames = losassoCutoverLane
+        ? ["topology", "mgpcg", "fineWorklist"] as const
+        : ["topology", "restriction", "mgpcg", "coarse", "fineWorklist",
+          "airSupport", "transportGovernor"] as const;
+      const missing: string[] = requiredSourceNames.filter((name) => !sources[name]);
       // A narrowed topology binding would silently truncate the record rather
       // than surface the rollback word, so treat it as an unreadable counter.
       if (sources.topology && (sources.topology.size ?? TRIPWIRE_RECORD.topologyBytes)
@@ -2541,7 +2565,29 @@ async function runGPU(
     if (checkpointEvery_s > 0 && (solver.info.submittedTime_s ?? 0) + 1e-9 >= nextCheckpoint_s) {
       await awaitAdvanceCompletion();
       const samplingStartedAt = performance.now();
-      const cubic = steps === oracleSteps && matched ? matched : await readCubicVolumeField(device, solver);
+      let cubic;
+      try {
+        cubic = steps === oracleSteps && matched ? matched : await readCubicVolumeField(device, solver);
+      } catch (readbackFailure) {
+        // Diagnostic context for a mid-run QA trip: the frontier header and
+        // dirty-failure words name which topology stage rejected the step.
+        const failureFrontier = (solver as GPUSolverInstance & { losassoFrontierDebug?: {
+          frontier: GPUBuffer; compaction: GPUBuffer; dirtyFailureOffsetBytes: number;
+        } }).losassoFrontierDebug;
+        if (failureFrontier) {
+          const [frontierBytes, failureBytes] = await Promise.all([
+            readBufferBinding(device, { buffer: failureFrontier.frontier }, 64),
+            readBufferBinding(device, { buffer: failureFrontier.compaction,
+              offset: failureFrontier.dirtyFailureOffsetBytes }, 64),
+          ]);
+          const words = (bytes: Uint8Array) => Array.from(new Uint32Array(
+            bytes.buffer, bytes.byteOffset, bytes.byteLength / 4));
+          console.log(JSON.stringify({ scenario: scenarioId, method: method.id,
+            phase: "fluid-symmetry-losasso-frontier-at-failure", steps,
+            frontier: words(frontierBytes), dirtyFailure: words(failureBytes) }));
+        }
+        throw readbackFailure;
+      }
       if (steps === oracleSteps) matched = cubic;
       if (stabilityEnvelope && method.id === "octree") {
         if (!Number.isFinite(cubic.summary.minimum) || !Number.isFinite(cubic.summary.maximum)
@@ -2619,9 +2665,20 @@ async function runGPU(
               cells.push({ cell, speed, alpha });
             }
             cells.sort((a, b) => b.speed - a.speed);
+            // Bottom-layer centreline profile (+x from centre): the exact dam
+            // front trajectory, alpha and outward velocity per cell.
+            const kMid = Math.floor(nz / 2);
+            const centerline = Array.from({ length: nx - Math.floor(nx / 2) }, (_v, offset) => {
+              const i = Math.floor(nx / 2) + offset;
+              const cell = i + nx * (0 + ny * kMid);
+              return { i,
+                a: Number((cubic.field[cell] ?? 0).toFixed(3)),
+                vx: Number((compact.field[3 * cell] ?? NaN).toFixed(2)) };
+            });
             console.log(JSON.stringify({ scenario: scenarioId, method: resultMethod,
               phase: "speed-map", time_s: solver.info.submittedTime_s,
               layerMaxSpeed: layerMax.map((value) => Number(value.toFixed(2))),
+              centerline,
               top: cells.slice(0, 12).map(({ cell, speed, alpha }) => ({
                 i: cell % nx, j: Math.floor(cell / nx) % ny, k: Math.floor(cell / (nx * ny)),
                 speed: Number(speed.toFixed(2)), alpha: Number(alpha.toFixed(3)),
@@ -3228,6 +3285,8 @@ async function runGPU(
       octreeProjection?: {
         readSolveDiagnostics(): Promise<void>;
         readPowerFrontierFailure(): Promise<{
+          frontier: number[]; compaction: number[]; dirtyAuthority: number[];
+          frontierFailure: number[]; frontierPublication: number[]; dirtyAuthorityState: number[];
           rowDelta: number[]; finePageDelta: number[]; structuredDispatch: number[];
           descriptorCandidate: number[]; topologyCandidate: number[];
           structuredCandidate: number[]; boundaryCandidate: number[];
@@ -3249,7 +3308,11 @@ async function runGPU(
       if (process.env.FLUID_WORKSET_CENSUS === "1") {
         const snapshot = await projection.readPowerFrontierFailure();
         console.log(JSON.stringify({ scenario: scenarioId, method: method.id,
-          phase: "settled-maintenance-census", rowDelta: snapshot.rowDelta,
+          phase: "settled-maintenance-census", frontier: snapshot.frontier,
+          compaction: snapshot.compaction, dirtyAuthority: snapshot.dirtyAuthority,
+          frontierFailure: snapshot.frontierFailure,
+          frontierPublication: snapshot.frontierPublication,
+          dirtyAuthorityState: snapshot.dirtyAuthorityState, rowDelta: snapshot.rowDelta,
           finePageDelta: snapshot.finePageDelta,
           structuredDispatch: snapshot.structuredDispatch,
           descriptorCandidate: snapshot.descriptorCandidate,
@@ -3484,6 +3547,268 @@ async function runGPU(
       console.log(JSON.stringify({ scenario: scenarioId, method: resultMethod,
         phase: "fluid-symmetry-fine-transport",
         metrics: await readFinePhiSymmetrySource(device, transported) }));
+      const published = pair.publishedIsA ? pair.a : pair.b;
+      console.log(JSON.stringify({ scenario: scenarioId, method: resultMethod,
+        phase: "fluid-symmetry-fine-published",
+        metrics: await readFinePhiSymmetrySource(device, published) }));
+    }
+    const coarsePhiDebug = (solver as GPUSolverInstance & { losassoCoarsePhiDebug?: {
+      control: GPUBuffer; rowPhi: GPUBuffer; leafHeaders: GPUBuffer;
+      dimensions: readonly [number, number, number];
+    } }).losassoCoarsePhiDebug;
+    if (coarsePhiDebug) {
+      const controlBytes = await readBufferBinding(device, { buffer: coarsePhiDebug.control }, 32);
+      const control = new Uint32Array(controlBytes.buffer, controlBytes.byteOffset, 8);
+      const rowCount = control[1] ?? 0;
+      const [headerBytes, phiBytes] = await Promise.all([
+        readBufferBinding(device, { buffer: coarsePhiDebug.leafHeaders }, rowCount * 48),
+        readBufferBinding(device, { buffer: coarsePhiDebug.rowPhi }, rowCount * 16),
+      ]);
+      const headers = new Uint32Array(headerBytes.buffer, headerBytes.byteOffset, rowCount * 12);
+      const phi = new Float32Array(phiBytes.buffer, phiBytes.byteOffset, rowCount * 4);
+      const [nx, ny, nz] = coarsePhiDebug.dimensions;
+      let rowIdentityHash = 0x811c9dc5;
+      const rowOriginMinimum = [nx, ny, nz], rowOriginMaximum = [0, 0, 0];
+      const rowCountsBySize: Record<string, number> = {};
+      for (let row = 0; row < rowCount; row += 1) {
+        const cell = headers[12 * row]!, size = headers[12 * row + 3]!;
+        const ox = cell % nx, oy = Math.floor(cell / nx) % ny, oz = Math.floor(cell / (nx * ny));
+        for (const word of [cell, size]) {
+          rowIdentityHash = Math.imul(rowIdentityHash ^ word, 0x01000193) >>> 0;
+        }
+        rowOriginMinimum[0] = Math.min(rowOriginMinimum[0]!, ox);
+        rowOriginMinimum[1] = Math.min(rowOriginMinimum[1]!, oy);
+        rowOriginMinimum[2] = Math.min(rowOriginMinimum[2]!, oz);
+        rowOriginMaximum[0] = Math.max(rowOriginMaximum[0]!, ox);
+        rowOriginMaximum[1] = Math.max(rowOriginMaximum[1]!, oy);
+        rowOriginMaximum[2] = Math.max(rowOriginMaximum[2]!, oz);
+        rowCountsBySize[String(size)] = (rowCountsBySize[String(size)] ?? 0) + 1;
+      }
+      const dense = new Float32Array(nx * ny * nz); dense.fill(Number.NaN);
+      for (let row = 0; row < rowCount; row += 1) {
+        const cell = headers[12 * row]!, size = headers[12 * row + 3]!;
+        const ox = cell % nx, oy = Math.floor(cell / nx) % ny, oz = Math.floor(cell / (nx * ny));
+        for (let z = oz; z < oz + size; z += 1) for (let y = oy; y < oy + size; y += 1) {
+          for (let x = ox; x < ox + size; x += 1) dense[x + nx * (y + ny * z)] = phi[4 * row]!;
+        }
+      }
+      let exactMismatchCount = 0, maximumAbsoluteError = 0;
+      let first: Record<string, unknown> | undefined;
+      for (let z = 0; z < nz; z += 1) for (let y = 0; y < ny; y += 1) for (let x = 0; x < nx; x += 1) {
+        const source = dense[x + nx * (y + ny * z)]!;
+        for (const [transform, tx, tz] of [["reflect-x", nx - 1 - x, z],
+          ["reflect-z", x, nz - 1 - z], ["swap-xz", z, x]] as const) {
+          const target = dense[tx + nx * (y + ny * tz)]!, absoluteError = Math.abs(source - target);
+          if (!Object.is(source, target)) { exactMismatchCount += 1;
+            first ??= { transform, source: [x, y, z], target: [tx, y, tz], sourceValue: source,
+              targetValue: target, absoluteError }; }
+          maximumAbsoluteError = Math.max(maximumAbsoluteError, absoluteError);
+        }
+      }
+      console.log(JSON.stringify({ scenario: scenarioId, method: resultMethod,
+        phase: "fluid-symmetry-losasso-coarse-phi",
+        metrics: { exactMismatchCount, maximumAbsoluteError, first, rowCount,
+          rowIdentityHash, rowOriginMinimum, rowOriginMaximum, rowCountsBySize } }));
+    }
+    const fineSummaryDebug = solver as GPUSolverInstance & {
+      globalFineSummaryDirectory?: GPUBuffer;
+      globalFineSummaryDebug?: { workState: GPUBuffer; coarseControl: GPUBuffer;
+        coarseDelta: GPUBuffer };
+    };
+    if (fineSummaryDebug.globalFineSummaryDirectory && fineSummaryDebug.globalFineSummaryDebug) {
+      const [directoryBytes, workStateBytes, coarseControlBytes, coarseDeltaBytes] = await Promise.all([
+        readBufferBinding(device, { buffer: fineSummaryDebug.globalFineSummaryDirectory },
+          fineSummaryDebug.globalFineSummaryDirectory.size),
+        readBufferBinding(device, { buffer: fineSummaryDebug.globalFineSummaryDebug.workState }, 128),
+        readBufferBinding(device, { buffer: fineSummaryDebug.globalFineSummaryDebug.coarseControl }, 64),
+        readBufferBinding(device, { buffer: fineSummaryDebug.globalFineSummaryDebug.coarseDelta }, 64),
+      ]);
+      const words = (bytes: Uint8Array) => Array.from(new Uint32Array(
+        bytes.buffer, bytes.byteOffset, bytes.byteLength / 4,
+      ));
+      const directoryWords = new Uint32Array(directoryBytes.buffer, directoryBytes.byteOffset,
+        directoryBytes.byteLength / 4);
+      const bitcastFloat = (word: number) => {
+        const bits = new Uint32Array([word >>> 0]);
+        return new Float32Array(bits.buffer)[0]!;
+      };
+      const orderedFloat = (word: number) => bitcastFloat(
+        (word ^ ((word & 0x8000_0000) === 0 ? 0xffff_ffff : 0x8000_0000)) >>> 0,
+      );
+      const probes: Array<Record<string, unknown>> = [];
+      for (const z of [7, 8, 15, 16, 23, 24]) for (const y of [0, 3, 6, 7]) {
+        for (const x of [7, 8, 23, 24]) {
+          const lookup = planFineLevelSetSummaryLeafLookup(
+            [info.nx, info.ny, info.nz], [info.nx, info.ny, info.nz], [x, y, z], 1, 64, 4,
+          );
+          const base = fineLevelSetSummaryDirectEntryBase(directoryWords, lookup.key);
+          if (base === undefined) {
+            probes.push({ origin: [x, y, z], found: false, key: lookup.key });
+          } else {
+            probes.push({ origin: [x, y, z], found: true, key: lookup.key,
+              minimumPhi: orderedFloat(directoryWords[base + 1]!),
+              maximumPhi: orderedFloat(directoryWords[base + 2]!),
+              minimumAbsolutePhi: bitcastFloat(directoryWords[base + 3]!),
+              sampleCount: directoryWords[base + 4], brickCount: directoryWords[base + 5],
+              flags: directoryWords[base + 6], centerPhi: bitcastFloat(directoryWords[base + 7]!) });
+          }
+        }
+      }
+      for (const origin of [[6, 0, 14], [8, 0, 14], [22, 0, 14], [24, 0, 14],
+        [6, 0, 16], [8, 0, 16], [22, 0, 16], [24, 0, 16]] as const) {
+        const lookup = planFineLevelSetSummaryLeafLookup(
+          [info.nx, info.ny, info.nz], [info.nx, info.ny, info.nz], origin, 2, 64, 4,
+        );
+        const base = fineLevelSetSummaryDirectEntryBase(directoryWords, lookup.key);
+        probes.push(base === undefined
+          ? { origin, size: 2, found: false, key: lookup.key }
+          : { origin, size: 2, found: true, key: lookup.key,
+            minimumPhi: orderedFloat(directoryWords[base + 1]!),
+            maximumPhi: orderedFloat(directoryWords[base + 2]!),
+            minimumAbsolutePhi: bitcastFloat(directoryWords[base + 3]!),
+            sampleCount: directoryWords[base + 4], brickCount: directoryWords[base + 5],
+            flags: directoryWords[base + 6], centerPhi: bitcastFloat(directoryWords[base + 7]!) });
+      }
+      console.log(JSON.stringify({ scenario: scenarioId, method: resultMethod,
+        phase: "fluid-symmetry-losasso-fine-summary",
+        directory: words(directoryBytes.slice(0, 64)), probes, workState: words(workStateBytes),
+        coarseControl: words(coarseControlBytes), coarseDelta: words(coarseDeltaBytes) }));
+    }
+    const frontierDebug = (solver as GPUSolverInstance & { losassoFrontierDebug?: {
+      frontier: GPUBuffer; compaction: GPUBuffer; dirtyFailureOffsetBytes: number;
+    } }).losassoFrontierDebug;
+    if (frontierDebug) {
+      const [frontierBytes, compactionBytes, failureBytes] = await Promise.all([
+        readBufferBinding(device, { buffer: frontierDebug.frontier }, 64),
+        readBufferBinding(device, { buffer: frontierDebug.compaction }, 64),
+        readBufferBinding(device, { buffer: frontierDebug.compaction,
+          offset: frontierDebug.dirtyFailureOffsetBytes }, 64),
+      ]);
+      const words = (bytes: Uint8Array) => Array.from(new Uint32Array(
+        bytes.buffer, bytes.byteOffset, bytes.byteLength / 4));
+      console.log(JSON.stringify({ scenario: scenarioId, method: resultMethod,
+        phase: "fluid-symmetry-losasso-frontier",
+        frontier: words(frontierBytes), compaction: words(compactionBytes),
+        dirtyFailure: words(failureBytes) }));
+    }
+    const velocityDebug = (solver as GPUSolverInstance & { losassoVelocityDebug?: {
+      control: GPUBuffer; faceGeometry: GPUBuffer; projectedVelocity: GPUBuffer;
+      extendedVelocity: GPUBuffer;
+      wetControl: GPUBuffer; wetFaceGeometry: GPUBuffer; wetAdvectedVelocity: GPUBuffer;
+      wetPredictedVelocity: GPUBuffer; wetProjectedVelocity: GPUBuffer;
+      wetExtendedVelocity: GPUBuffer;
+      dimensions: readonly [number, number, number];
+    } }).losassoVelocityDebug;
+    if (velocityDebug) {
+      const controlBytes = await readBufferBinding(device, { buffer: velocityDebug.control }, 32);
+      const control = new Uint32Array(controlBytes.buffer, controlBytes.byteOffset, 8);
+      const count = control[2] ?? 0;
+      const [geometryBytes, projectedBytes, extendedBytes] = await Promise.all([
+        readBufferBinding(device, { buffer: velocityDebug.faceGeometry }, count * 16),
+        readBufferBinding(device, { buffer: velocityDebug.projectedVelocity }, count * 4),
+        readBufferBinding(device, { buffer: velocityDebug.extendedVelocity }, count * 4),
+      ]);
+      const geometry = new Uint32Array(geometryBytes.buffer, geometryBytes.byteOffset, count * 4);
+      const key = (packed: number, x: number, y: number, z: number) => `${packed}:${x}:${y}:${z}`;
+      const [nx, _ny, nz] = velocityDebug.dimensions;
+      const auditVelocity = (stageCount: number, stageGeometry: Uint32Array,
+        velocity: Float32Array) => {
+        const faces = new Map<string, number>();
+        let maximumAbsoluteValue = 0;
+        for (let face = 0; face < stageCount; face += 1) faces.set(key(stageGeometry[4 * face]!,
+          stageGeometry[4 * face + 1]!, stageGeometry[4 * face + 2]!,
+          stageGeometry[4 * face + 3]!), velocity[face]!);
+        for (let face = 0; face < stageCount; face += 1) {
+          maximumAbsoluteValue = Math.max(maximumAbsoluteValue, Math.abs(velocity[face]!));
+        }
+        let supportMismatchCount = 0, exactValueMismatchCount = 0, maximumAbsoluteError = 0;
+        let first: Record<string, unknown> | undefined, worst: Record<string, unknown> | undefined;
+        for (let face = 0; face < stageCount; face += 1) {
+          const packed = stageGeometry[4 * face]!, axis = packed & 3, span = 1 << (packed >>> 2);
+          const x = stageGeometry[4 * face + 1]!, y = stageGeometry[4 * face + 2]!,
+            z = stageGeometry[4 * face + 3]!, source = velocity[face]!;
+          for (const [transform, targetPacked, tx, tz, sign] of [
+            ["reflect-x", packed, axis === 0 ? nx - x : nx - span - x, z, axis === 0 ? -1 : 1],
+            ["reflect-z", packed, x, axis === 2 ? nz - z : nz - span - z, axis === 2 ? -1 : 1],
+            ["swap-xz", (axis === 0 ? 2 : axis === 2 ? 0 : 1) | (packed & ~3), z, x, 1],
+          ] as const) {
+            const target = faces.get(key(targetPacked, tx, y, tz));
+            if (target === undefined) { supportMismatchCount += 1; continue; }
+            const expected = sign * source, absoluteError = Math.abs(expected - target);
+            if (expected !== target) { exactValueMismatchCount += 1;
+              const detail = { transform, source: [packed, x, y, z], target: [targetPacked, tx, y, tz],
+                sourceValue: source, expectedValue: expected, targetValue: target, absoluteError };
+              first ??= detail; if (!worst || absoluteError > Number(worst.absoluteError)) worst = detail; }
+            maximumAbsoluteError = Math.max(maximumAbsoluteError, absoluteError);
+          }
+        }
+        return { count: stageCount, supportMismatchCount, exactValueMismatchCount,
+          maximumAbsoluteError, maximumAbsoluteValue, first, worst };
+      };
+      for (const [stage, bytes] of [["projected", projectedBytes], ["extended", extendedBytes]] as const) {
+        const velocity = new Float32Array(bytes.buffer, bytes.byteOffset, count);
+        console.log(JSON.stringify({ scenario: scenarioId, method: resultMethod,
+          phase: `fluid-symmetry-losasso-${stage}-velocity`,
+          metrics: auditVelocity(count, geometry, velocity) }));
+      }
+      {
+        // Diagnostic: x-axis faces along the +x front centreline (z=15..16,
+        // y=0..2, x=20..31) with their extended-band velocities.
+        const extended = new Float32Array(extendedBytes.buffer, extendedBytes.byteOffset, count);
+        const front: Record<string, unknown>[] = [];
+        for (let face = 0; face < count; face += 1) {
+          const packed = geometry[4 * face]!, axis = packed & 3;
+          const x = geometry[4 * face + 1]!, y = geometry[4 * face + 2]!,
+            z = geometry[4 * face + 3]!;
+          if (axis !== 0 || y > 2 || z < 15 || z > 16 || x < 20) continue;
+          front.push({ span: 1 << (packed >>> 2), x, y, z,
+            u: Number(extended[face]!.toFixed(3)) });
+        }
+        front.sort((a, b) => Number(a.x) - Number(b.x) || Number(a.y) - Number(b.y)
+          || Number(a.z) - Number(b.z));
+        console.log(JSON.stringify({ scenario: scenarioId, method: resultMethod,
+          phase: "fluid-symmetry-losasso-front-faces", faces: front }));
+      }
+      const wetControlBytes = await readBufferBinding(device, { buffer: velocityDebug.wetControl }, 32);
+      const wetControl = new Uint32Array(wetControlBytes.buffer, wetControlBytes.byteOffset, 8);
+      const wetCount = wetControl[2] ?? 0;
+      const [wetGeometryBytes, ...wetVelocityBytes] = await Promise.all([
+        readBufferBinding(device, { buffer: velocityDebug.wetFaceGeometry }, wetCount * 16),
+        readBufferBinding(device, { buffer: velocityDebug.wetAdvectedVelocity }, wetCount * 4),
+        readBufferBinding(device, { buffer: velocityDebug.wetPredictedVelocity }, wetCount * 4),
+        readBufferBinding(device, { buffer: velocityDebug.wetProjectedVelocity }, wetCount * 4),
+        readBufferBinding(device, { buffer: velocityDebug.wetExtendedVelocity }, wetCount * 4),
+      ]);
+      const wetGeometry = new Uint32Array(wetGeometryBytes.buffer,
+        wetGeometryBytes.byteOffset, wetCount * 4);
+      for (const [stage, bytes] of ["advected", "predicted", "projected", "extended"]
+        .map((stage, index) => [stage, wetVelocityBytes[index]!] as const)) {
+        const velocity = new Float32Array(bytes.buffer, bytes.byteOffset, wetCount);
+        console.log(JSON.stringify({ scenario: scenarioId, method: resultMethod,
+          phase: `fluid-symmetry-losasso-wet-${stage}-velocity`,
+          metrics: auditVelocity(wetCount, wetGeometry, velocity) }));
+      }
+      {
+        // Diagnostic: wet x-axis faces along the +x front centreline with all
+        // four stage values, to locate where the surface face loses its value.
+        const stages = ["adv", "pre", "proj", "ext"].map((label, index) => [label,
+          new Float32Array(wetVelocityBytes[index]!.buffer,
+            wetVelocityBytes[index]!.byteOffset, wetCount)] as const);
+        const front: Record<string, unknown>[] = [];
+        for (let face = 0; face < wetCount; face += 1) {
+          const packed = wetGeometry[4 * face]!, axis = packed & 3;
+          const x = wetGeometry[4 * face + 1]!, y = wetGeometry[4 * face + 2]!,
+            z = wetGeometry[4 * face + 3]!;
+          if (axis !== 0 || y > 2 || z < 15 || z > 16 || x < 20) continue;
+          front.push({ span: 1 << (packed >>> 2), x, y, z,
+            ...Object.fromEntries(stages.map(([label, values]) =>
+              [label, Number(values[face]!.toFixed(3))])) });
+        }
+        front.sort((a, b) => Number(a.x) - Number(b.x) || Number(a.y) - Number(b.y)
+          || Number(a.z) - Number(b.z));
+        console.log(JSON.stringify({ scenario: scenarioId, method: resultMethod,
+          phase: "fluid-symmetry-losasso-front-wet-faces", faces: front }));
+      }
     }
   }
   const sparseVoxelStats = sparseStatsRequested && sparseSource

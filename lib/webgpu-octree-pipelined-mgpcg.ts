@@ -35,6 +35,10 @@ export const OCTREE_PIPELINED_PCG_WORKGROUP_SIZE =
 export const OCTREE_PIPELINED_PCG_DEFAULT_ITERATIONS = 10;
 /** Retained as validation metadata; production never emits this many bodies. */
 export const OCTREE_PIPELINED_PCG_HARD_ITERATION_CEILING = 16;
+/** The reduced LoSasso operator may request this wider fail-safe tail. Power
+ * keeps the frozen 16-iteration ceiling; both paths still retire the unused
+ * suffix through the same GPU residual gate. */
+export const OCTREE_PIPELINED_PCG_MAXIMUM_HARD_ITERATION_CEILING = 32;
 export const OCTREE_PIPELINED_PCG_CONTROL_BYTES = 128;
 /**
  * Exact radix-256 superaccumulator geometry.
@@ -136,7 +140,7 @@ export function compensatedF32Value(value: CompensatedF32): number {
 export interface OctreePipelinedMGPCGPlan {
   readonly rowCapacity: number;
   readonly maximumIterations: number;
-  readonly hardIterationCeiling: 16;
+  readonly hardIterationCeiling: number;
   readonly reductionLanes: 128;
   readonly rowDispatch: readonly [number, number, number];
   readonly reductionDispatch: readonly [number, number, number];
@@ -202,8 +206,9 @@ export function planOctreePipelinedMGPCG(
     options.hardIterationCeiling ?? OCTREE_PIPELINED_PCG_HARD_ITERATION_CEILING,
     "Pipelined MGPCG hard iteration ceiling",
   );
-  if (hardIterationCeiling !== OCTREE_PIPELINED_PCG_HARD_ITERATION_CEILING) {
-    throw new RangeError("Pipelined MGPCG hard iteration ceiling is fixed at 16");
+  if (hardIterationCeiling < OCTREE_PIPELINED_PCG_HARD_ITERATION_CEILING
+    || hardIterationCeiling > OCTREE_PIPELINED_PCG_MAXIMUM_HARD_ITERATION_CEILING) {
+    throw new RangeError("Pipelined MGPCG hard iteration ceiling must remain in [16,32]");
   }
   if (maximumIterations < 4 || maximumIterations > hardIterationCeiling) {
     throw new RangeError(
@@ -227,7 +232,7 @@ export function planOctreePipelinedMGPCG(
   return Object.freeze({
     rowCapacity,
     maximumIterations,
-    hardIterationCeiling: OCTREE_PIPELINED_PCG_HARD_ITERATION_CEILING,
+    hardIterationCeiling,
     reductionLanes: OCTREE_PIPELINED_PCG_WORKGROUP_SIZE,
     rowDispatch: [rowGroups, 1, 1] as const,
     reductionDispatch: [reductionPartialCount, 1, 1] as const,

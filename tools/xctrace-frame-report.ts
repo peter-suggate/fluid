@@ -628,11 +628,16 @@ export const buildFrameReport = async (input: BuildFrameReportInput): Promise<Fr
 
   let literalFrameUsesCommandBufferCompletion = false;
   const detected = input.firstFrame ? await (async () => {
+    // Backends can emit different semantic starts in the same advance. Select
+    // the first preferred label that is actually present; combining every
+    // preferred label would mistake the next fallback marker for advance 2.
+    const preferredLabel = GPU_FRAME_START_LABELS.find((label) => ours.some(
+      (interval) => interval.encoders.includes(label),
+    ));
     const starts: number[] = [];
     const seen = new Set<string>();
     for (const interval of ours) {
-      if (!interval.encoders.some((label) => GPU_FRAME_START_LABELS.includes(
-        label as (typeof GPU_FRAME_START_LABELS)[number]))) continue;
+      if (preferredLabel === undefined || !interval.encoders.includes(preferredLabel)) continue;
       const invocation = interval.encoderId ?? `${interval.label}\0${interval.start}`;
       if (seen.has(invocation)) continue;
       seen.add(invocation);
@@ -640,7 +645,7 @@ export const buildFrameReport = async (input: BuildFrameReportInput): Promise<Fr
     }
     starts.sort((left, right) => left - right);
     if (starts.length >= 2) {
-      return { boundaries: starts.slice(0, 2), anchor: GPU_FRAME_START_LABELS[0] };
+      return { boundaries: starts.slice(0, 2), anchor: preferredLabel };
     }
     if (starts.length === 1 && input.tables["command-buffer-submissions"]
       && input.tables["command-buffer-completed"]) {
@@ -666,7 +671,7 @@ export const buildFrameReport = async (input: BuildFrameReportInput): Promise<Fr
       if (frameCommandBuffer && frameCommandBuffer.encoders > 1) {
         literalFrameUsesCommandBufferCompletion = true;
         return { boundaries: [starts[0], frameCommandBuffer.end],
-          anchor: GPU_FRAME_START_LABELS[0] };
+          anchor: preferredLabel };
       }
     }
     throw new Error(`literal first-frame capture found ${starts.length} semantic frame starts and`
@@ -1281,7 +1286,8 @@ export const buildFrameReport = async (input: BuildFrameReportInput): Promise<Fr
   // harness reports; the shape census then describes the run, and a varying
   // shape is a finding about the solver, not a fault in the segmentation.
   {
-    const anchors = boundaries.length;
+    const anchors = literalFrameUsesCommandBufferCompletion
+      ? Math.max(0, boundaries.length - 1) : boundaries.length;
     const steps = input.traced?.steps;
     const perAdvance = steps === undefined || steps === 0 ? undefined : anchors / steps;
     lines.push(`frame boundary:  "${anchor}" fired ${anchors}x`

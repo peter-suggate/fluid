@@ -83,7 +83,14 @@ fn exactValue(input:array<i32,36>)->f32{var limbs=input;for(var limb=0u;limb+1u<
 fn symmetricWeight(w:vec3f)->f32{let lo=min(w.x,min(w.y,w.z));let hi=max(w.x,max(w.y,w.z));
  let mid=max(min(w.x,w.y),max(min(w.x,w.z),min(w.y,w.z)));return(lo*mid)*hi;}
 struct PhiSample{value:f32,valid:u32}
-fn finePhi(position:vec3f)->PhiSample{let grid=(position-p.domainOrigin)/p.fineCellWidth-vec3f(.5);
+fn finePhiCells(positionCells:vec3f)->PhiSample{
+ // Fine samples are cell centred, so a face centre in the outermost half cell
+ // of a closed domain has no in-lattice trilinear support. Clamp the probe to
+ // the sample-centre lattice: the membership decision tolerates the half-cell
+ // bias, while rejecting the probe silently unpublished the wall/lid corner
+ // faces and hard-failed transport as soon as a corner splash entered the band.
+ let grid=clamp(positionCells*(p.velocityOriginCell.w/p.fineCellWidth)-vec3f(.5),
+  vec3f(0.),vec3f(p.sampleDimensions)-vec3f(1.));
  let base=vec3i(floor(grid));let fraction=fract(grid);var exact:array<i32,36>;
  for(var corner=0u;corner<8u;corner+=1u){let offset=vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));
   let w=vec3f(select(1.-fraction.x,fraction.x,(corner&1u)!=0u),select(1.-fraction.y,fraction.y,(corner&2u)!=0u),
@@ -134,7 +141,7 @@ fn publishLosassoAirBandFaces(@builtin(workgroup_id)group:vec3u,@builtin(local_i
  var upper=vec3i(p.velocityDimensions)-vec3i(1);upper[axis]=i32(p.velocityDimensions[axis]);
  if(any(q<vec3i(0))||any(q>upper)){return;}let faceQ=vec3u(q);var centre=vec3f(faceQ);
  for(var c=0u;c<3u;c+=1u){if(c!=axis){centre[c]+=.5;}}
- let sample=finePhi(p.velocityOriginCell.xyz+centre*p.velocityOriginCell.w);let width=f32(p.band.w)*p.velocityOriginCell.w;
+ let sample=finePhiCells(centre);let width=f32(p.band.w)*p.velocityOriginCell.w;
  // Fine phi, not the coarse pressure-row sign, owns the production surface.
  // A finest MAC face can therefore lie on the liquid side of that surface
  // without belonging to any coarse wet-row incidence.  Publish the complete

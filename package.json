@@ -119,6 +119,7 @@
     "benchmark:power-dam-quiescent": "node --import tsx tools/benchmark-power-dam.ts --lane=quiescent",
     "benchmark:power-dam-ui": "FLUID_MAX_ADVANCE_MS=${FLUID_MAX_ADVANCE_MS:-15} FLUID_MAX_DISPATCHES_PER_ADVANCE=${FLUID_MAX_DISPATCHES_PER_ADVANCE:-300} FLUID_MAX_PASSES_PER_ADVANCE=${FLUID_MAX_PASSES_PER_ADVANCE:-60} node --import tsx tools/benchmark-power-dam.ts --lane=ui",
     "profile:mini-dam-xctrace": "node --import tsx tools/profile-mini-dam-xctrace.ts --counters --isolate-pass-labels",
+    "profile:losasso-d4-xctrace": "node --import tsx tools/profile-mini-dam-xctrace.ts --losasso-d4-first-frame",
     "profile:large-dam-xctrace": "node --import tsx tools/profile-mini-dam-xctrace.ts --lane=large --counters --isolate-pass-labels",
     "experiment:power-liquids-dt-elasticity": "node --import tsx tools/measure-power-liquids-dt-elasticity.ts",
     "experiment:power-liquids-cost-change": "node --import tsx tools/analyze-power-liquids-cost-change.ts",

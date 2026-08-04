@@ -1282,7 +1282,8 @@ fn recordPhysicsPhaseBoundary(
     this.info.globalFineCoarseLevelSetFirstErrorRow = coarse.firstErrorRow;
     const velocity = value.structuredVelocityControl;
     const boundary = value.structuredBoundaryControl;
-    this.info.structuredVelocityValid = velocity.length >= 6 && velocity[0] === 0
+    const powerStructuredAuthority = this.octreeProjection?.coarseBackend === "power2017";
+    this.info.structuredVelocityValid = powerStructuredAuthority && velocity.length >= 6 && velocity[0] === 0
       && (velocity[2] ?? 0) > 0 && (velocity[3] ?? 0) > 0 && (velocity[4] ?? 2) <= 1;
     this.info.structuredVelocityRows = velocity[2] ?? 0;
     this.info.structuredVelocityGeneration = velocity[3] ?? 0;
@@ -1290,11 +1291,17 @@ fn recordPhysicsPhaseBoundary(
     // Word 1 is the GPU reject carry and was previously read back and dropped.
     // Naming the stage here is what separates "a face was rejected in the
     // divergence gather" from the silent freeze it otherwise becomes.
-    const reject = decodeOctreeStructuredRejectCarry(
-      (value.structuredRejectCarry?.length ?? 0) >= 2 ? value.structuredRejectCarry! : velocity);
-    this.info.structuredRejectStage = reject.stage;
-    this.info.structuredRejectIndex = reject.index;
-    this.info.structuredRejectSummary = reject.clean ? undefined : reject.summary;
+    if (powerStructuredAuthority) {
+      const reject = decodeOctreeStructuredRejectCarry(
+        (value.structuredRejectCarry?.length ?? 0) >= 2 ? value.structuredRejectCarry! : velocity);
+      this.info.structuredRejectStage = reject.stage;
+      this.info.structuredRejectIndex = reject.index;
+      this.info.structuredRejectSummary = reject.clean ? undefined : reject.summary;
+    } else {
+      this.info.structuredRejectStage = undefined;
+      this.info.structuredRejectIndex = undefined;
+      this.info.structuredRejectSummary = undefined;
+    }
     // A failed Section 5 air-support publication rejects EVERY advect lane
     // next step (supportPublicationValid gate) and freezes the epoch; name
     // the producer's own error record once per distinct failure word.
@@ -1306,9 +1313,9 @@ fn recordPhysicsPhaseBoundary(
     this.info.structuredAirSupportSeedFaces = support?.[11] ?? 0;
     this.info.structuredAirSupportMarchDepth = support?.[12] ?? 0;
     const latched = value.firstAirSupportFailure ?? [];
-    const liveFailure = !!support && support.length >= 16
+    const liveFailure = powerStructuredAuthority && !!support && support.length >= 16
       && (support[0] !== 0 || (support[1] ?? 0xffff_ffff) !== 0xffff_ffff);
-    const latchedFailure = (latched[0] ?? 0) !== 0;
+    const latchedFailure = powerStructuredAuthority && (latched[0] ?? 0) !== 0;
     const failureWord = liveFailure ? support![1] : latchedFailure ? latched[1] : undefined;
     this.info.structuredAirSupportFailureFlags = liveFailure
       ? support![0] : latchedFailure ? latched[0] : undefined;
@@ -1352,7 +1359,7 @@ fn recordPhysicsPhaseBoundary(
         firstQuadrant: local === undefined ? undefined : local % 4 }));
     }
     this.info.structuredBoundaryGeneration = boundary[4] ?? 0;
-    this.info.structuredBoundaryValid = boundary.length >= 7 && boundary[0] === 0
+    this.info.structuredBoundaryValid = powerStructuredAuthority && boundary.length >= 7 && boundary[0] === 0
       && boundary[2] === velocity[2] && boundary[4] === velocity[3]
       && boundary[5] === velocity[4] && boundary[6] === velocity[3];
     // Accepted structured control is the GPU-owned coupled-epoch receipt.
@@ -1525,7 +1532,9 @@ fn recordPhysicsPhaseBoundary(
   get structuredBoundaryControl() { return this.octreeProjection?.structuredBoundaryControl; }
   get structuredRowVelocities() { return this.octreeProjection?.structuredRowVelocities; }
   get losassoVelocityDebug() { return this.octreeProjection?.losassoVelocityDebug; }
+  get losassoFrontierDebug() { return this.octreeProjection?.losassoFrontierDebug; }
   get losassoPressureDebug() { return this.octreeProjection?.losassoPressureDebug; }
+  get losassoCoarsePhiDebug() { return this.octreeProjection?.losassoCoarsePhiDebug; }
   get structuredAuthority() { return this.octreeProjection?.structuredAuthority; }
   get structuredWorksets() { return this.octreeProjection?.structuredWorksets; }
   /** Post-submit diagnostics only; never consumed by the simulation schedule. */
@@ -2393,8 +2402,8 @@ fn recordPhysicsPhaseBoundary(
     const surfaceDiagnosticsPromise = compactFineExpected
       ? undefined
       : this.octreeProjection?.readSurfaceDiagnostics();
-    const globalFineDiagnosticsPromise = this.octreeProjection?.coarseBackend === "power2017"
-      ? this.octreeProjection.readGlobalFineLevelSetDiagnostics() : undefined;
+    const globalFineDiagnosticsPromise = compactFineExpected
+      ? this.octreeProjection?.readGlobalFineLevelSetDiagnostics() : undefined;
     // The step-coherent record supersedes the racing live-buffer sample for
     // authority health: its words were copied by the step's own encoder.
       const stepSnapshotPromise = this.stepSnapshotRing?.readLatest();
@@ -2410,7 +2419,7 @@ fn recordPhysicsPhaseBoundary(
       ]);
     if (losassoStepRecord) {
       const failures = losassoStepSnapshotFailures(losassoStepRecord);
-      if (failures.length > 0 && !this.stepSequenceFaulted) {
+      if (failures.length > 0) {
         this.stepSequenceFaulted = true;
         this.info.stepSequenceDeviations = failures.map((failure) =>
           `Losasso step ${losassoStepRecord.step} receipt: ${failure}`);

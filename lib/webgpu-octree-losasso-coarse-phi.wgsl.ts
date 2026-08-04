@@ -6,6 +6,7 @@ export const OCTREE_LOSASSO_COARSE_PHI_MAGIC = 0x4c50_4849;
 export const octreeLosassoCoarsePhiWGSL = /* wgsl */ `
 const INVALID:u32=0xffffffffu;const VALID:u32=1u;const FINITE:u32=2u;
 const INTERFACE:u32=4u;const FINE_RESTRICTED:u32=8u;const MAGIC:u32=${OCTREE_LOSASSO_COARSE_PHI_MAGIC}u;
+const FACE_SEPARATED:u32=0x20000000u;const FACE_CLOSED_BOUNDARY:u32=0x40000000u;const FACE_ROW_ON_POSITIVE_SIDE:u32=0x80000000u;
 struct Params{brickDimensions:vec3u,brickResolution:u32,sampleDimensions:vec3u,samplesPerBrick:u32,
  domainOrigin:vec3f,fineCellWidth:f32,pageCapacity:u32,generation:u32,worklistCapacity:u32,worklistHeaderWords:u32,
  dimensions:vec3u,maximumLeafSize:u32,cellSize:f32,directoryCapacity:u32,rowCapacity:u32,faceCapacity:u32}
@@ -108,15 +109,47 @@ fn finalizeLosassoCoarsePhi(){if(atomicLoad(&arena[13])==0u){atomicStore(&arena[
 
 @compute @workgroup_size(64)
 fn publishLosassoGhostDistances(@builtin(global_invocation_id)invocation:vec3u){let faceId=invocation.x;if(faceId>=faceCount()){return;}
- var face=faces[faceId];var flags=0u;var distance=0.;if(face.inverseDistance>0.){distance=1./face.inverseDistance;}var theta=1.;var airPhi=0.;
+ var face=faces[faceId];var flags=0u;var distance=0.;var theta=1.;var airPhi=0.;
  if(atomicLoad(&arena[0])!=MAGIC){ghosts[faceId]=vec4u(0u,bitcast<u32>(1.),0u,8u);return;}
  if(face.positiveRow==INVALID){let geometry=faceGeometry[faceId];let axis=geometry.x&3u;let span=1u<<(geometry.x>>2u);
   let origin=geometry.yzw;let boundary=origin[axis]==0u||origin[axis]==p.dimensions[axis];
-  if(boundary){flags=2u;}else if(face.negativeRow<atomicLoad(&arena[2])){let entry=atomicLoad(&arena[9])+8u*face.negativeRow;
+  if(boundary&&(face.reserved&FACE_CLOSED_BOUNDARY)!=0u&&face.negativeRow<atomicLoad(&arena[2])){
+   let entry=atomicLoad(&arena[9])+8u*face.negativeRow;let liquid=bitcast<f32>(atomicLoad(&arena[entry+2u]));
+   let rowSize=atomicLoad(&arena[entry+1u]);let rowFlags=atomicLoad(&arena[entry+5u]);
+   let towardAir=select(1.,-1.,(face.reserved&FACE_ROW_ON_POSITIVE_SIDE)!=0u);var centroid=vec3f(origin);
+   for(var tangent=0u;tangent<3u;tangent+=1u){if(tangent!=axis){centroid[tangent]+=.5*f32(span);}}
+   // Fine samples are cell centred. Probe the outermost interior centre; a
+   // positive value there proves an air gap between the liquid row and wall.
+   // The lagged unilateral active set may open it one solve earlier; otherwise
+   // the face remains exact zero-aperture Neumann.
+   var wallSample=centroid;wallSample[axis]-=towardAir*.5*p.fineCellWidth/p.cellSize;
+   let sampled=finePhi(wallSample);face.openFraction=0.;flags=2u;
+   let separated=(face.reserved&FACE_SEPARATED)!=0u;
+   if(separated||((rowFlags&(VALID|FINITE))==(VALID|FINITE)&&liquid<0.&&sampled.valid!=0u&&sampled.value>0.)){
+    let dual=max(.5*p.fineCellWidth,.5*f32(rowSize)*p.cellSize-.5*p.fineCellWidth);
+    if(sampled.valid!=0u&&sampled.value>0.&&liquid<0.){airPhi=sampled.value;
+     // Match the established ghost-fluid robustness floor used by the Power
+     // reference. A 1e-4 cut-cell fraction makes this first-order operator up
+     // to 100x stiffer than the 2017 path and exhausts the fixed MGPCG tail
+     // before the symmetric dam front has crossed one coarse cell.
+     theta=clamp(-liquid/(airPhi-liquid),1e-2,1.);distance=theta*dual;
+    }else{distance=max(.5*p.fineCellWidth,.5*f32(rowSize)*p.cellSize);}
+    face.inverseDistance=1./distance;face.openFraction=1.;flags=3u;}
+   faces[faceId]=face;
+  }else if(boundary){
+   // An authored open boundary is pressure-Dirichlet at the wall plane.
+   let rowSize=select(1u,headers[face.negativeRow].size,face.negativeRow<rows());
+   distance=max(.5*p.fineCellWidth,.5*f32(rowSize)*p.cellSize);face.inverseDistance=1./distance;
+   face.openFraction=1.;faces[faceId]=face;flags=1u;
+  }else if(face.negativeRow<atomicLoad(&arena[2])){let entry=atomicLoad(&arena[9])+8u*face.negativeRow;
    let liquid=bitcast<f32>(atomicLoad(&arena[entry+2u]));let rowSize=atomicLoad(&arena[entry+1u]);let rowFlags=atomicLoad(&arena[entry+5u]);
    let sign=select(1.,-1.,(face.reserved&0x80000000u)!=0u);var centroid=vec3f(origin);
    for(var tangent=0u;tangent<3u;tangent+=1u){if(tangent!=axis){centroid[tangent]+=.5*f32(span);}}
-   let dual=select(p.cellSize,distance,distance>0.);let faceToAir=max(.5*p.fineCellWidth,dual-.5*f32(rowSize)*p.cellSize);
+   // A missing pressure neighbor is staged at the same size as this row, so
+   // its immutable centre-to-centre dual is exactly one row width. Rebuild it
+   // from geometry: face.inverseDistance may already contain this pass's prior
+   // theta-conditioned write and is therefore not an admissible input.
+   let dual=f32(rowSize)*p.cellSize;distance=dual;let faceToAir=.5*dual;
    var endpoint=centroid;endpoint[axis]+=sign*faceToAir/p.cellSize;
    let sampled=finePhi(endpoint);if((rowFlags&(VALID|FINITE))==(VALID|FINITE)&&liquid<0.&&sampled.valid!=0u&&sampled.value>0.){airPhi=sampled.value;
     theta=clamp(-liquid/(airPhi-liquid),1e-4,1.);distance=theta*dual;face.inverseDistance=1./distance;faces[faceId]=face;flags=1u;}

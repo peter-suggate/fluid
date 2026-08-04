@@ -122,12 +122,8 @@ fn closedDomainFace(axis: u32, coordinate: vec3u) -> bool {
 // First-order staggered sampling. Piecewise-constant tangential sampling is
 // intentional: it is conservative at a 2:1 face and requires no virtual fine
 // velocities or Power edge channels.
-fn velocityAt(positionValue: vec3f) -> VelocitySample {
-  let origin = params.domainOriginDt.xyz;
-  let width = params.cellWidthDensity.xyz;
-  let upperPosition = origin + vec3f(params.dimensionsMaximumLeaf.xyz) * width;
-  let position = clamp(positionValue, origin, upperPosition);
-  let grid = (position - origin) / width;
+fn velocityAtGrid(gridValue: vec3f) -> VelocitySample {
+  let grid = clamp(gridValue, vec3f(0.0), vec3f(params.dimensionsMaximumLeaf.xyz));
   var result = vec3f(0.0);
   for (var axis = 0u; axis < 3u; axis += 1u) {
     var coordinate = vec3i(floor(grid));
@@ -135,23 +131,52 @@ fn velocityAt(positionValue: vec3f) -> VelocitySample {
     var upper = vec3i(params.dimensionsMaximumLeaf.xyz) - vec3i(1);
     upper[axis] = i32(params.dimensionsMaximumLeaf[axis]);
     coordinate = clamp(coordinate, vec3i(0), upper);
-    let unsignedCoordinate = vec3u(coordinate);
-    let face = containingFace(axis, unsignedCoordinate);
-    if (face == INVALID_FACE || face >= arrayLength(&bandVelocity)) {
-      if (closedDomainFace(axis, unsignedCoordinate)) {
-        result[axis] = 0.0;
-        continue;
+    // An even-span face centre can lie exactly between two first-order
+    // tangential samples. A one-sided floor chooses the upper cell on both
+    // reflected sides and is therefore not D4-equivariant. Average only the
+    // exact tie (two samples, or four at a tangential corner); all other
+    // positions retain the piecewise-constant first-order sample.
+    var splitMask = 0u;
+    var tangent = 0u;
+    for (var component = 0u; component < 3u; component += 1u) {
+      if (component == axis) { continue; }
+      if (grid[component] == floor(grid[component]) && coordinate[component] > 0) {
+        splitMask |= 1u << tangent;
       }
-      return VelocitySample(vec3f(0.0), false);
+      tangent += 1u;
     }
-    let component = bandVelocity[face];
-    if (!finite(component)) { return VelocitySample(vec3f(0.0), false); }
-    result[axis] = component;
+    var exact: array<i32,36>;
+    var sampleCount = 0u;
+    for (var candidate = 0u; candidate < 4u; candidate += 1u) {
+      if ((candidate & ~splitMask) != 0u) { continue; }
+      var sampleCoordinate = coordinate;
+      tangent = 0u;
+      for (var component = 0u; component < 3u; component += 1u) {
+        if (component == axis) { continue; }
+        if ((candidate & (1u << tangent)) != 0u) { sampleCoordinate[component] -= 1; }
+        tangent += 1u;
+      }
+      let unsignedCoordinate = vec3u(sampleCoordinate);
+      let face = containingFace(axis, unsignedCoordinate);
+      var componentValue = 0.0;
+      if (face == INVALID_FACE || face >= arrayLength(&bandVelocity)) {
+        if (!closedDomainFace(axis, unsignedCoordinate)) {
+          return VelocitySample(vec3f(0.0), false);
+        }
+      } else {
+        componentValue = bandVelocity[face];
+        if (!finite(componentValue)) { return VelocitySample(vec3f(0.0), false); }
+      }
+      addExact(&exact, componentValue);
+      sampleCount += 1u;
+    }
+    if (sampleCount == 0u) { return VelocitySample(vec3f(0.0), false); }
+    result[axis] = exactValue(&exact) / f32(sampleCount);
   }
   return VelocitySample(result, true);
 }
 
-fn faceCenter(faceId: u32) -> vec3f {
+fn faceCenterGrid(faceId: u32) -> vec3f {
   let record = faceGeometry[faceId];
   let axis = record.x & 3u;
   let span = 1u << (record.x >> 2u);
@@ -159,7 +184,11 @@ fn faceCenter(faceId: u32) -> vec3f {
   for (var component = 0u; component < 3u; component += 1u) {
     if (component != axis) { coordinate[component] += 0.5 * f32(span); }
   }
-  return params.domainOriginDt.xyz + coordinate * params.cellWidthDensity.xyz;
+  return coordinate;
+}
+
+fn faceCenter(faceId: u32) -> vec3f {
+  return params.domainOriginDt.xyz + faceCenterGrid(faceId) * params.cellWidthDensity.xyz;
 }
 
 fn inflowAxis() -> u32 {
@@ -215,18 +244,19 @@ fn inflowNormalVelocity(faceId: u32) -> vec2f {
 fn advectLosassoFaces(@builtin(global_invocation_id) invocation: vec3u) {
   let faceId = invocation.x;
   if (faceId >= liveFaces() || faceId >= arrayLength(&advectedVelocity)) { return; }
-  let centre = faceCenter(faceId);
-  let prior = velocityAt(centre);
+  let centre = faceCenterGrid(faceId);
+  let prior = velocityAtGrid(centre);
   let previous = select(0.0, prior.value[faces[faceId].axis], prior.valid);
   if (params.domainOriginDt.w == 0.0) {
     advectedVelocity[faceId] = select(0.0, previous, finite(previous));
     return;
   }
-  let carrier = velocityAt(centre);
+  let carrier = velocityAtGrid(centre);
   var value = previous;
   if (carrier.valid) {
-    let departure = centre - params.domainOriginDt.w * carrier.value;
-    let sample = velocityAt(departure);
+    let departure = centre
+      - (params.domainOriginDt.w / params.cellWidthDensity.xyz) * carrier.value;
+    let sample = velocityAtGrid(departure);
     if (sample.valid) { value = sample.value[faces[faceId].axis]; }
   }
   advectedVelocity[faceId] = select(0.0, value, finite(value));
