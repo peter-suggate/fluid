@@ -8,6 +8,8 @@
 export const OCTREE_COARSE_BACKENDS = ["losasso", "power2017"] as const;
 
 export type OctreeCoarseBackend = typeof OCTREE_COARSE_BACKENDS[number];
+export type LosassoFreeSurfacePressureMode = "subcell-contact" | "cell-centered-air";
+export type LosassoVelocityExtensionMode = "fixed-jacobi" | "causal-front";
 
 export const DEFAULT_OCTREE_COARSE_BACKEND: OctreeCoarseBackend = "losasso";
 
@@ -123,6 +125,10 @@ export function topologyDilationRings(
 
 export interface OctreeCoarseDynamicsConfiguration extends OctreeCoarseBackendPolicy {
   readonly topology: OctreeTopologyCadencePolicy;
+  /** Construction-time A/B seam for the free-surface pressure condition. */
+  readonly losassoFreeSurfacePressure: LosassoFreeSurfacePressureMode;
+  /** Construction-time A/B seam for Section 5 velocity extrapolation. */
+  readonly losassoVelocityExtension: LosassoVelocityExtensionMode;
 }
 
 export interface OctreeCoarseDynamicsSelection {
@@ -130,6 +136,8 @@ export interface OctreeCoarseDynamicsSelection {
   readonly globalFineLevelSetFactor: 1 | 4 | 8;
   readonly topologyCadenceAdvances?: unknown;
   readonly topologyDisplacementRingsPerAdvance?: unknown;
+  readonly losassoFreeSurfacePressure?: unknown;
+  readonly losassoVelocityExtension?: unknown;
 }
 
 function integerSetting(value: unknown, fallback: number, name: string): number {
@@ -161,8 +169,18 @@ export function resolveOctreeCoarseDynamics(
     1,
     "Topology displacement padding",
   );
+  const pressure = selection.losassoFreeSurfacePressure ?? "subcell-contact";
+  if (pressure !== "subcell-contact" && pressure !== "cell-centered-air") {
+    throw new Error(`Unknown Losasso free-surface pressure mode ${String(pressure)}`);
+  }
+  const extension = selection.losassoVelocityExtension ?? "fixed-jacobi";
+  if (extension !== "fixed-jacobi" && extension !== "causal-front") {
+    throw new Error(`Unknown Losasso velocity extension mode ${String(extension)}`);
+  }
   return Object.freeze({
     ...policy,
     topology: topologyCadencePolicy(advancesPerEpoch, ringsPerAdvance),
+    losassoFreeSurfacePressure: pressure,
+    losassoVelocityExtension: extension,
   });
 }

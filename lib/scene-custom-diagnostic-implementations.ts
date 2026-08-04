@@ -439,17 +439,30 @@ const fluidSymmetry = defineSceneHookImplementation({
     const circularityEvaluationEnd_s = numeric(context.parameters, "circularityEvaluationEnd_s");
     const maximumAxisDiagonalFrontDifference_cells = numeric(
       context.parameters, "maximumAxisDiagonalFrontDifference_cells");
+    const maximumRadialRmsDeviation_cells = numeric(
+      context.parameters, "maximumRadialRmsDeviation_cells");
+    const maximumRadialDeviation_cells = numeric(
+      context.parameters, "maximumRadialDeviation_cells");
+    const minimumCircularityAngularSamples = numeric(
+      context.parameters, "minimumCircularityAngularSamples");
     const circularityValues = [circularityEvaluationStart_s, circularityEvaluationEnd_s,
-      maximumAxisDiagonalFrontDifference_cells];
+      maximumAxisDiagonalFrontDifference_cells, maximumRadialRmsDeviation_cells,
+      maximumRadialDeviation_cells, minimumCircularityAngularSamples];
     if (!limits || requireExactTopology === undefined || requireAllWallsReached === undefined) {
       return parameterFailure("fluid-symmetry", [...keys, "requireExactTopology", "requireAllWallsReached"]);
     }
     if (circularityValues.some((value) => value !== undefined)
       && (circularityValues.some((value) => value === undefined)
         || circularityEvaluationEnd_s! < circularityEvaluationStart_s!
-        || maximumAxisDiagonalFrontDifference_cells! < 0)) {
+        || maximumAxisDiagonalFrontDifference_cells! < 0
+        || maximumRadialRmsDeviation_cells! < 0
+        || maximumRadialDeviation_cells! < 0
+        || !Number.isSafeInteger(minimumCircularityAngularSamples)
+        || minimumCircularityAngularSamples! < 16)) {
       return parameterFailure("fluid-symmetry", ["circularityEvaluationStart_s",
-        "circularityEvaluationEnd_s", "maximumAxisDiagonalFrontDifference_cells"]);
+        "circularityEvaluationEnd_s", "maximumAxisDiagonalFrontDifference_cells",
+        "maximumRadialRmsDeviation_cells", "maximumRadialDeviation_cells",
+        "minimumCircularityAngularSamples"]);
     }
     return context.selectedMethods.flatMap((method) => {
       const diagnostics = recordValue(context.getMethod(method)?.diagnostics);
@@ -528,7 +541,10 @@ const fluidSymmetry = defineSceneHookImplementation({
 
       if (circularityEvaluationStart_s !== undefined
         && circularityEvaluationEnd_s !== undefined
-        && maximumAxisDiagonalFrontDifference_cells !== undefined) {
+        && maximumAxisDiagonalFrontDifference_cells !== undefined
+        && maximumRadialRmsDeviation_cells !== undefined
+        && maximumRadialDeviation_cells !== undefined
+        && minimumCircularityAngularSamples !== undefined) {
         // The authored body starts square and the tank itself is square. Judge
         // the freely propagating front only after the initial rarefaction has
         // rounded it and before axis rays contact the walls; after contact a
@@ -538,13 +554,31 @@ const fluidSymmetry = defineSceneHookImplementation({
         const firstFailure = circularity.find(({ observation }) => {
           const metric = recordValue(observation.frontCircularity);
           const difference = numberPath(metric, "axisLead_cells");
+          const rms = numberPath(metric, "radialRmsDeviation_cells");
+          const maximum = numberPath(metric, "radialMaximumDeviation_cells");
+          const samples = numberPath(metric, "angularSampleCount");
           return difference === undefined
-            || Math.abs(difference) > maximumAxisDiagonalFrontDifference_cells;
+            || rms === undefined || maximum === undefined || samples === undefined
+            || Math.abs(difference) > maximumAxisDiagonalFrontDifference_cells
+            || rms > maximumRadialRmsDeviation_cells
+            || maximum > maximumRadialDeviation_cells
+            || samples < minimumCircularityAngularSamples;
         });
         const maximumObserved = circularity.reduce((value, { observation }) => {
-          const difference = numberPath(recordValue(observation.frontCircularity), "axisLead_cells");
-          return Math.max(value, difference === undefined ? Infinity : Math.abs(difference));
-        }, 0);
+          const metric = recordValue(observation.frontCircularity);
+          const difference = numberPath(metric, "axisLead_cells");
+          const rms = numberPath(metric, "radialRmsDeviation_cells");
+          const maximum = numberPath(metric, "radialMaximumDeviation_cells");
+          return {
+            axisLead_cells: Math.max(value.axisLead_cells,
+              difference === undefined ? Infinity : Math.abs(difference)),
+            radialRmsDeviation_cells: Math.max(value.radialRmsDeviation_cells,
+              rms ?? Infinity),
+            radialMaximumDeviation_cells: Math.max(value.radialMaximumDeviation_cells,
+              maximum ?? Infinity),
+          };
+        }, { axisLead_cells: 0, radialRmsDeviation_cells: 0,
+          radialMaximumDeviation_cells: 0 });
         const passed = circularity.length > 0 && !firstFailure;
         findings.push(hookFinding({
           id: `${method}.front-circularity`, method, passed,
@@ -555,7 +589,10 @@ const fluidSymmetry = defineSceneHookImplementation({
               : "no dam-front circularity checkpoint was collected in the declared window",
           expected: { evaluationStart_s: circularityEvaluationStart_s,
             evaluationEnd_s: circularityEvaluationEnd_s,
-            maximumAbsoluteAxisLead_cells: maximumAxisDiagonalFrontDifference_cells },
+            minimumAngularSamples: minimumCircularityAngularSamples,
+            maximumAbsoluteAxisLead_cells: maximumAxisDiagonalFrontDifference_cells,
+            maximumRadialRmsDeviation_cells,
+            maximumRadialDeviation_cells },
           actual: firstFailure ? {
             step: firstFailure.step, time_s: firstFailure.time_s,
             metrics: firstFailure.observation.frontCircularity, maximumObserved,
@@ -613,6 +650,7 @@ const settling = defineDiagnosticPackImplementation({
     return evaluateSettlingDiagnostic({
       scene: context.scene, evidence: context.evidence,
       parameters: {
+        expectAsymptoticRest: boolean(context.parameters, "expectAsymptoticRest") ?? true,
         maximumFinalExactVolumeDrift: values.maximumFinalSampledExactVolumeDrift,
         maximumNormalizedNetProjectionEnergyDelta: values.maximumNormalizedNetProjectionEnergyDelta,
         maximumNormalizedLateMechanicalEnergySlopePerSecond: values.maximumNormalizedLateMechanicalEnergySlopePerSecond,

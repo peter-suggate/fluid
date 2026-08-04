@@ -1,5 +1,7 @@
 import type { OctreeOwnerPagePlan } from "./webgpu-octree-owner-pages";
 import type { PassBroker } from "./webgpu-pass-broker";
+import type { LosassoFreeSurfacePressureMode, LosassoVelocityExtensionMode } from
+  "./octree-coarse-backend";
 import type { OctreeFirstOrderSPDVCycle } from "./webgpu-octree-section43-contract";
 import {
   WebGPUOctreeLosassoAuthority,
@@ -130,6 +132,8 @@ export interface WebGPUOctreeLosassoBackendOptions {
   readonly density: number;
   /** Compact air-face headroom: six velocity-cell faces per resident B4 page. */
   readonly extensionBandBrickCapacity: number;
+  readonly freeSurfacePressureMode?: LosassoFreeSurfacePressureMode;
+  readonly velocityExtensionMode?: LosassoVelocityExtensionMode;
   readonly closedBoundaries?: readonly [boolean, boolean, boolean, boolean, boolean, boolean];
   /** Coarser levels use exactly the same first-order axis-face operator. */
   readonly coarseLevels?: readonly OctreeLosassoVCycleLevelSource[];
@@ -619,6 +623,7 @@ export class WebGPUOctreeLosassoCoarseBackend {
       domainOrigin: options.topology.domainOrigin,
       wetFaceCapacity: options.capacities.faces,
       maximumResidentFineBricks: options.extensionBandBrickCapacity,
+      velocityExtensionMode: options.velocityExtensionMode,
       wet: {
         control: published.operator.control,
         faceGeometry: published.dynamics.faceGeometry,
@@ -669,6 +674,7 @@ export class WebGPUOctreeLosassoCoarseBackend {
       this.sources.projection, {
         density: options.density,
         physicalCellSize: options.topology.physicalCellSize[0],
+        freeSurfacePressureMode: options.freeSurfacePressureMode,
       });
     if (options.rigidPressureReaction) {
       this.rigidPressureReaction = new WebGPUOctreeLosassoRigidPressureReaction(options.device, {

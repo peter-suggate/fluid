@@ -1,4 +1,4 @@
-/** Reduced first-order axis-face dynamics for the Losasso coarse backend. */
+/** Axis-face dynamics for the Losasso coarse backend. */
 export const octreeLosassoDynamicsWGSL = /* wgsl */ `
 const INVALID_FACE: u32 = 0xffffffffu;
 const INVALID_ROW: u32 = 0xffffffffu;
@@ -119,44 +119,29 @@ fn closedDomainFace(axis: u32, coordinate: vec3u) -> bool {
   return onBoundary && (params.capacities.w & (1u << side)) != 0u;
 }
 
-// First-order staggered sampling. Piecewise-constant tangential sampling is
-// intentional: it is conservative at a 2:1 face and requires no virtual fine
-// velocities or Power edge channels.
-fn velocityAtGrid(gridValue: vec3f) -> VelocitySample {
-  let grid = clamp(gridValue, vec3f(0.0), vec3f(params.dimensionsMaximumLeaf.xyz));
+// Losasso et al. first reconstruct all three velocity components at octree
+// nodes by averaging the incident MAC faces.  At a 2:1 transition,
+// containingFace maps each fine quadrant to its owning coarse face; repeated
+// ownership therefore gives the coarse value its covered-area weight without
+// inventing virtual fine velocities.
+fn velocityAtNode(node: vec3u) -> VelocitySample {
   var result = vec3f(0.0);
   for (var axis = 0u; axis < 3u; axis += 1u) {
-    var coordinate = vec3i(floor(grid));
-    coordinate[axis] = i32(floor(grid[axis] + 0.5));
-    var upper = vec3i(params.dimensionsMaximumLeaf.xyz) - vec3i(1);
-    upper[axis] = i32(params.dimensionsMaximumLeaf[axis]);
-    coordinate = clamp(coordinate, vec3i(0), upper);
-    // An even-span face centre can lie exactly between two first-order
-    // tangential samples. A one-sided floor chooses the upper cell on both
-    // reflected sides and is therefore not D4-equivariant. Average only the
-    // exact tie (two samples, or four at a tangential corner); all other
-    // positions retain the piecewise-constant first-order sample.
-    var splitMask = 0u;
-    var tangent = 0u;
-    for (var component = 0u; component < 3u; component += 1u) {
-      if (component == axis) { continue; }
-      if (grid[component] == floor(grid[component]) && coordinate[component] > 0) {
-        splitMask |= 1u << tangent;
-      }
-      tangent += 1u;
-    }
     var exact: array<i32,36>;
     var sampleCount = 0u;
-    for (var candidate = 0u; candidate < 4u; candidate += 1u) {
-      if ((candidate & ~splitMask) != 0u) { continue; }
-      var sampleCoordinate = coordinate;
-      tangent = 0u;
+    for (var quadrant = 0u; quadrant < 4u; quadrant += 1u) {
+      var coordinate = vec3i(node);
+      var tangent = 0u;
+      var inside = true;
       for (var component = 0u; component < 3u; component += 1u) {
         if (component == axis) { continue; }
-        if ((candidate & (1u << tangent)) != 0u) { sampleCoordinate[component] -= 1; }
+        coordinate[component] += select(0, -1, (quadrant & (1u << tangent)) != 0u);
+        inside = inside && coordinate[component] >= 0
+          && coordinate[component] < i32(params.dimensionsMaximumLeaf[component]);
         tangent += 1u;
       }
-      let unsignedCoordinate = vec3u(sampleCoordinate);
+      if (!inside) { continue; }
+      let unsignedCoordinate = vec3u(coordinate);
       let face = containingFace(axis, unsignedCoordinate);
       var componentValue = 0.0;
       if (face == INVALID_FACE || face >= arrayLength(&bandVelocity)) {
@@ -172,6 +157,28 @@ fn velocityAtGrid(gridValue: vec3f) -> VelocitySample {
     }
     if (sampleCount == 0u) { return VelocitySample(vec3f(0.0), false); }
     result[axis] = exactValue(&exact) / f32(sampleCount);
+  }
+  return VelocitySample(result, true);
+}
+
+// Trilinear interpolation of the reconstructed nodal field is the Section 5
+// sampling rule.  Zero-weight corners are not fetched: sparse extension only
+// has to cover the stencil that actually contributes to this sample.
+fn velocityAtGrid(gridValue: vec3f) -> VelocitySample {
+  let grid = clamp(gridValue, vec3f(0.0), vec3f(params.dimensionsMaximumLeaf.xyz));
+  let lower = vec3u(floor(grid));
+  let upper = min(lower + vec3u(1u), params.dimensionsMaximumLeaf.xyz);
+  let fraction = grid - vec3f(lower);
+  var result = vec3f(0.0);
+  for (var corner = 0u; corner < 8u; corner += 1u) {
+    let high = vec3u(corner & 1u, (corner >> 1u) & 1u, (corner >> 2u) & 1u);
+    let weightVector = select(vec3f(1.0) - fraction, fraction, high != vec3u(0u));
+    let weight = weightVector.x * weightVector.y * weightVector.z;
+    if (weight == 0.0) { continue; }
+    let node = select(lower, upper, high != vec3u(0u));
+    let sample = velocityAtNode(node);
+    if (!sample.valid) { return VelocitySample(vec3f(0.0), false); }
+    result += weight * sample.value;
   }
   return VelocitySample(result, true);
 }
@@ -254,8 +261,9 @@ fn advectLosassoFaces(@builtin(global_invocation_id) invocation: vec3u) {
   let carrier = velocityAtGrid(centre);
   var value = previous;
   if (carrier.valid) {
-    let departure = centre
-      - (params.domainOriginDt.w / params.cellWidthDensity.xyz) * carrier.value;
+    let gridDt = params.domainOriginDt.w / params.cellWidthDensity.xyz;
+    let midpoint = velocityAtGrid(centre - 0.5 * gridDt * carrier.value);
+    let departure = centre - gridDt * select(carrier.value, midpoint.value, midpoint.valid);
     let sample = velocityAtGrid(departure);
     if (sample.valid) { value = sample.value[faces[faceId].axis]; }
   }

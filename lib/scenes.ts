@@ -66,6 +66,8 @@ export const SYMMETRIC_EXPANSION_METHOD_PROFILE: MethodProfile = Object.freeze({
   quality: "balanced",
   overrides: Object.freeze({
     coarseBackend: "losasso",
+    losassoFreeSurfacePressure: "cell-centered-air",
+    losassoVelocityExtension: "causal-front",
     // The visible D4 gate is 32x16x32, so 16 is its largest common dyadic leaf.
     maximumLeafSize: "16",
     interfaceRefinementBandCells: 4,
@@ -668,6 +670,10 @@ export function createSymmetricExpansionScene(): SceneDescription {
   delete scene.fluid.initialBrickSeedsAdditive;
   delete scene.fluid.initialDamBreakDimensions_m;
   delete scene.fluid.inflow;
+  // This is the Losasso-2004 fidelity oracle.  That method solves inviscid
+  // Euler flow; zero the inherited water viscosity rather than presenting a
+  // damped scene parameter that the reduced backend does not consume.
+  scene.fluid.dynamicViscosity_Pa_s = 0;
   scene.fluid.surfaceTension_N_m = 0;
   scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 0.004;
   return scene;

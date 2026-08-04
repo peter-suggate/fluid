@@ -263,7 +263,7 @@ test("Losasso diagnostics and tripwires are no longer backend-gated", () => {
     /losassoCutoverLane\s*\? \["topology", "mgpcg", "fineWorklist"\]/);
 });
 
-test("Losasso returns to the shared sixteen-iteration hard ceiling", () => {
+test("Losasso consumes the shared residual-gated hard iteration ceiling", () => {
   const source = read("../lib/webgpu-octree.ts");
   const construction = source.slice(source.indexOf("this.losassoBackend ="),
     source.indexOf("this.pressureSolverControl", source.indexOf("this.losassoBackend =")));
@@ -289,14 +289,35 @@ test("Losasso resolves ambiguous redistance seeds without changing Power", () =>
   assert.match(losasso, /axisPermutationInvariantSeeds: true/);
 });
 
-test("Losasso coarse advection averages exact tangential sampling ties", () => {
+test("Losasso coarse advection reconstructs nodes and trilinearly samples them", () => {
   const source = readFileSync(new URL(
     "../lib/webgpu-octree-losasso-dynamics.wgsl.ts", import.meta.url,
   ), "utf8");
-  assert.match(source, /fn velocityAtGrid\(gridValue: vec3f\)/);
-  assert.match(source, /grid\[component\] == floor\(grid\[component\]\)/);
-  assert.match(source, /splitMask \|= 1u << tangent/);
+  assert.match(source, /fn velocityAtNode\(node: vec3u\)/);
+  assert.match(source, /for \(var quadrant = 0u; quadrant < 4u; quadrant \+= 1u\)/);
+  assert.match(source, /let face = containingFace\(axis, unsignedCoordinate\)/);
   assert.match(source, /result\[axis\] = exactValue\(&exact\) \/ f32\(sampleCount\)/);
+  assert.match(source, /fn velocityAtGrid\(gridValue: vec3f\)/);
+  assert.match(source, /for \(var corner = 0u; corner < 8u; corner \+= 1u\)/);
+  assert.match(source, /result \+= weight \* sample\.value/);
+  assert.match(source, /let midpoint = velocityAtGrid/,
+    "characteristics should use a midpoint carrier rather than forward Euler");
+});
+
+test("Losasso paper-fidelity pressure and extension remain construction-time A/B choices", () => {
+  const method = read("../lib/methods/octree.ts");
+  const coarse = read("../lib/webgpu-octree-losasso-coarse-phi.wgsl.ts");
+  const projection = read("../lib/webgpu-octree-losasso-projection.ts");
+  const extension = read("../lib/webgpu-octree-losasso-velocity-extension.wgsl.ts");
+  assert.match(method, /losassoFreeSurfacePressure/);
+  assert.match(method, /losassoVelocityExtension/);
+  assert.match(coarse, /let cellCenteredAir=p\.schedule\.w==1u/);
+  assert.match(coarse, /theta=1\.;distance=dual;face\.inverseDistance=1\.\/dual/);
+  assert.match(projection, /params\.reserved0 == 0u/,
+    "the cell-centered paper A/B must disable unilateral wall contact");
+  assert.match(extension, /if \(params\.causalFront != 0u\)/);
+  assert.match(extension, /if \(layer < params\.sweep\)/);
+  assert.match(extension, /if \(layer > params\.sweep\)/);
 });
 
 test("Losasso diagnostics do not interpret absent Power controls as failures", () => {

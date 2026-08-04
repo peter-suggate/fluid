@@ -8,6 +8,8 @@ import {
 } from "./scene-hook-evidence";
 
 export interface SettlingDiagnosticParameters {
+  /** False validates an inviscid bounded-motion run without requiring rest. */
+  readonly expectAsymptoticRest?: boolean;
   maximumFinalExactVolumeDrift: number;
   maximumNormalizedNetProjectionEnergyDelta: number;
   maximumNormalizedLateMechanicalEnergySlopePerSecond: number;
@@ -36,10 +38,14 @@ export function evaluateSettlingDiagnostic(input: {
         "final sampled exact-volume drift"],
       ["projection-energy", "normalizedNetProjectionEnergyDelta", input.parameters.maximumNormalizedNetProjectionEnergyDelta,
         "normalized net projection-energy delta"],
-      ["late-energy-slope", "normalizedLateMechanicalEnergySlopePerSecond",
-        input.parameters.maximumNormalizedLateMechanicalEnergySlopePerSecond, "normalized late mechanical-energy slope"],
-      ["kinetic-envelope", "lateToMiddleKineticEnvelopeRatio",
-        input.parameters.maximumLateToMiddleKineticEnvelopeRatio, "late-to-middle kinetic envelope ratio"],
+      ...(input.parameters.expectAsymptoticRest === false ? [] : [
+        ["late-energy-slope", "normalizedLateMechanicalEnergySlopePerSecond",
+          input.parameters.maximumNormalizedLateMechanicalEnergySlopePerSecond,
+          "normalized late mechanical-energy slope"],
+        ["kinetic-envelope", "lateToMiddleKineticEnvelopeRatio",
+          input.parameters.maximumLateToMiddleKineticEnvelopeRatio,
+          "late-to-middle kinetic envelope ratio"],
+      ] as const),
     ] as const;
     for (const [id, key, maximum, label] of checks) {
       const actual = numberPath(energy, key);
@@ -51,7 +57,16 @@ export function evaluateSettlingDiagnostic(input: {
         expected: { maximum }, actual,
       }));
     }
-    if (input.scene.fluid.initialCondition !== "dam-break") continue;
+    findings.push(hookFinding({
+      id: `${method}.motion-model`, method, passed: true,
+      message: input.parameters.expectAsymptoticRest === false
+        ? "inviscid fidelity selected; bounded motion is required but asymptotic rest is not"
+        : "damped settling selected; the late kinetic envelope must contract",
+      expected: { expectAsymptoticRest: input.parameters.expectAsymptoticRest !== false },
+      actual: { dynamicViscosity_Pa_s: input.scene.fluid.dynamicViscosity_Pa_s },
+    }));
+    if (input.parameters.expectAsymptoticRest === false
+      || input.scene.fluid.initialCondition !== "dam-break") continue;
     const signChanges = numberPath(energy, "driftSignChanges");
     const peakToPeak = numberPath(energy, "latePeakToPeakDrift");
     findings.push(hookFinding({

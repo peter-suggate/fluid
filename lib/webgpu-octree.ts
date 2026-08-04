@@ -2538,6 +2538,11 @@ export class WebGPUOctreeProjection {
           const brickUnionBounds = initialFluidBrickUnionBounds(
             this.scene, [dims.nx, dims.ny, dims.nz], this.scene.voxelDomain.brickSize_cells,
           );
+          // Dense topology is still required around terrain and rigid bodies,
+          // but those solids do not make the authored liquid SDF non-analytic.
+          // Preserve the exact tank/dam phi for every cold fine halo page so
+          // Losasso bootstrap does not depend circularly on its coarse-phi
+          // exchange, which is first published after fine redistance.
           const exactAnalyticFineSeed = brickUnionBounds
             ? { initialCondition: "box" as const,
               // Fine SPGrid coordinates are container-local while authored
@@ -2548,8 +2553,8 @@ export class WebGPUOctreeProjection {
               maximum: [brickUnionBounds.maximum.x + 0.5 * this.scene.container.width_m,
                 brickUnionBounds.maximum.y,
                 brickUnionBounds.maximum.z + 0.5 * this.scene.container.depth_m] as const }
-            : this.analyticSparseBootstrap
-            && (this.scene.fluid.initialBrickSeeds_m?.length ?? 0) === 0
+            : (this.scene.fluid.initialBrickSeeds_m?.length ?? 0) === 0
+            && !sceneDamBreakIsOffsetFromCorner(this.scene)
             ? { initialCondition: this.scene.fluid.initialCondition,
               fillFraction: this.scene.container.fillFraction,
               damBreakDimensions: this.scene.fluid.initialDamBreakDimensions_m
@@ -2609,6 +2614,7 @@ export class WebGPUOctreeProjection {
     const closedTop = this.scene.container.top === "closed";
     this.losassoCoarsePhi = new WebGPUOctreeLosassoCoarsePhiExchange(
       this.device, rowCapacity, faceCapacity,
+      this.coarseDynamics.losassoFreeSurfacePressure,
     );
     this.losassoBackend = new WebGPUOctreeLosassoCoarseBackend({
       device: this.device,
@@ -2622,6 +2628,8 @@ export class WebGPUOctreeProjection {
       },
       density: this.scene.fluid.density_kg_m3,
       extensionBandBrickCapacity,
+      freeSurfacePressureMode: this.coarseDynamics.losassoFreeSurfacePressure,
+      velocityExtensionMode: this.coarseDynamics.losassoVelocityExtension,
       closedBoundaries: [true, true, true, closedTop, true, true],
       solver: {
         relativeTolerance: this.solveTailPolicy.relativeTolerance,

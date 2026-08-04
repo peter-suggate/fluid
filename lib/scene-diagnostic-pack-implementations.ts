@@ -535,6 +535,7 @@ const settling = defineDiagnosticPackImplementation({
     evidence: context.evidence,
     methods: context.selectedMethods,
     parameters: {
+      expectAsymptoticRest: parameterBoolean(context, "expectAsymptoticRest", true),
       maximumFinalExactVolumeDrift: parameterNumber(context, "maximumFinalSampledExactVolumeDrift", 0.01),
       maximumNormalizedNetProjectionEnergyDelta: parameterNumber(context, "maximumNormalizedNetProjectionEnergyDelta", 0.01),
       maximumNormalizedLateMechanicalEnergySlopePerSecond: parameterNumber(context, "maximumNormalizedLateMechanicalEnergySlopePerSecond", 1e-3),

@@ -21,6 +21,8 @@ test("symmetric expansion is the minimum dyadic four-brick horizontal oracle", (
     { x: -0.2, y: 0.2, z: 0.2 }, { x: 0.2, y: 0.2, z: 0.2 },
   ]);
   assert.equal(scene.fluid.surfaceTension_N_m, 0);
+  assert.equal(scene.fluid.dynamicViscosity_Pa_s, 0,
+    "the Losasso fidelity oracle must declare its inviscid motion model");
   assert.equal(scene.fluid.inflow, undefined);
   assert.deepEqual(scene.rigidBodies, []);
   assert.deepEqual([
@@ -50,6 +52,10 @@ test("symmetric expansion Dawn lane samples every accepted step and gates every 
   assert.equal(lane.collect.checkpointEvery_s, 0.004);
   assert.equal(lane.methods[0]?.overrides.globalFineLevelSetFactor, "4");
   assert.equal(lane.methods[0]?.overrides.interfaceRefinementBandCells, 4);
+  assert.equal(lane.methods[0]?.overrides.losassoFreeSurfacePressure, "cell-centered-air");
+  assert.equal(lane.methods[0]?.overrides.losassoVelocityExtension, "causal-front");
+  assert.equal(lane.collect.stabilityEnvelope, true);
+  assert.equal(lane.collect.energyEverySteps, 10);
   const collector = lane.collect.evidenceCollectors.find(({ id }) => id === "fluid-symmetry");
   assert.ok(collector);
   assert.deepEqual(collector.requires, ["compact velocity", "compact pressure"]);
@@ -68,6 +74,9 @@ test("symmetric expansion Dawn lane samples every accepted step and gates every 
     circularityEvaluationStart_s: 0.168,
     circularityEvaluationEnd_s: 0.2,
     maximumAxisDiagonalFrontDifference_cells: 1,
+    maximumRadialRmsDeviation_cells: 0.5,
+    maximumRadialDeviation_cells: 1,
+    minimumCircularityAngularSamples: 64,
   });
 
   const fine = getSceneWebGPUSmokeLane("symmetric-expansion", "fine-factor-4");
@@ -132,6 +141,7 @@ test("symmetric expansion has an isolated Dawn reproduction command", () => {
   assert.match(command, /FLUID_EXPECT_GRID=32,16,32/);
   assert.match(command, /FLUID_CHECKPOINT_EVERY_S=0\.004/);
   assert.match(command, /FLUID_EXPECT_EXACT_STEPS=250/);
+  assert.match(command, /FLUID_STABILITY_ENVELOPE=1/);
   assert.match(command, /FLUID_OCTREE_INTERFACE_BAND=4/);
   assert.match(command, /FLUID_OCTREE_GLOBAL_FINE_FACTOR=4/);
   assert.match(command, /FLUID_GLOBAL_FINE_GENERATION_TRANSITION=1/);

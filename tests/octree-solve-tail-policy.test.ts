@@ -165,13 +165,16 @@ test("solve-tail policy encodes the paper upper envelope and keeps scene score a
     planOctreeSolveTail(PROFILES.largerTwoLevel), planOctreeSolveTail(PROFILES.ocean)]) {
     assert.ok(policy.encodedOuterIterations >= 4
       && policy.encodedOuterIterations <= 10);
-    assert.equal(policy.hardOuterIterationCeiling, 16);
+    assert.equal(policy.hardOuterIterationCeiling, 32);
     assert.equal(policy.boundarySmoothingIterations,
       OCTREE_SECTION43_PRODUCTION_SHELL_DEPTH);
     assert.ok(policy.relativeTolerance >= OCTREE_SOLVE_TAIL_RELATIVE_TOLERANCE);
   }
-  assert.equal(quiescent.relativeTolerance, 1e-4,
-    "production retains the established f32 residual acceptance floor");
+  assert.equal(quiescent.relativeTolerance, 1e-6,
+    "the authored tolerance remains unchanged");
+  assert.equal(planOctreeSolveTail({ ...PROFILES.quiescent,
+    requestedRelativeTolerance: 1e-8 }).relativeTolerance, 1e-8,
+  "the paper-fidelity tolerance must not be clamped back to 1e-4");
 });
 
 test("solve-tail policy admits an explicit symmetric Section 4.3 shell-depth experiment", () => {

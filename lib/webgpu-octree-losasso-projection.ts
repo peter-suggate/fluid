@@ -1,5 +1,6 @@
 import { OCTREE_LOSASSO_INVALID_ROW } from "./octree-losasso-operator";
 import type { PassBroker } from "./webgpu-pass-broker";
+import type { LosassoFreeSurfacePressureMode } from "./octree-coarse-backend";
 
 export const octreeLosassoProjectionWGSL = /* wgsl */ `
 const INVALID_ROW: u32 = ${OCTREE_LOSASSO_INVALID_ROW}u;
@@ -36,7 +37,7 @@ fn projectLosassoFaces(@builtin(global_invocation_id) invocation: vec3u) {
   // separating interface; this lagged active-set bit makes the next coarse
   // operator use the matching p=0 air ghost without post-solve pressure
   // clamping (Aanjaneya et al. 2017 Sections 4-5; Losasso et al. 2004 4.1-4.2).
-  if ((face.reserved & FACE_CLOSED_BOUNDARY) != 0u) {
+  if (params.reserved0 == 0u && (face.reserved & FACE_CLOSED_BOUNDARY) != 0u) {
     let weight = length(params.gravity.xyz);
     let outward = select(1.0, -1.0, rowOnPositiveSide);
     let overhead = weight > 1e-6 && outward * (-params.gravity[face.axis] / weight) > 0.5;
@@ -74,7 +75,8 @@ export class WebGPUOctreeLosassoProjection {
 
   constructor(private readonly device: GPUDevice,
     readonly source: WebGPUOctreeLosassoProjectionSource,
-    private readonly physical: Readonly<{ density: number; physicalCellSize: number }>,
+    private readonly physical: Readonly<{ density: number; physicalCellSize: number;
+      freeSurfacePressureMode?: LosassoFreeSurfacePressureMode }>,
     pressureScale = 1) {
     if (!Number.isFinite(pressureScale) || pressureScale < 0) {
       throw new RangeError("Losasso projection scale must be non-negative and finite");
@@ -86,7 +88,7 @@ export class WebGPUOctreeLosassoProjection {
     }
     this.params = device.createBuffer({ label: "Losasso projection constants", size: 32,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-    device.queue.writeBuffer(this.params, 0, Float32Array.of(pressureScale, 0, 0, 0, 0, 0, 0, 0));
+    this.uploadParams(pressureScale, 0, [0, 0, 0]);
     const readOnly = { type: "read-only-storage" as const };
     this.layout = device.createBindGroupLayout({ label: "Losasso axis-face projection reduced layout",
       entries: [
@@ -125,8 +127,7 @@ export class WebGPUOctreeLosassoProjection {
       const weight = Math.hypot(...gravity);
       const contactPressure = 0.25 * this.physical.density * weight
         * this.physical.physicalCellSize;
-      this.device.queue.writeBuffer(this.params, 0, Float32Array.of(pressureScale,
-        contactPressure, 0, 0, ...gravity, 0));
+      this.uploadParams(pressureScale, contactPressure, gravity);
     }
     let group = this.groups.get(pressure);
     if (!group) {
@@ -139,6 +140,15 @@ export class WebGPUOctreeLosassoProjection {
     const pass = broker.compute({ label: "Losasso pressure - axis-face projection" });
     pass.setPipeline(this.pipeline); pass.setBindGroup(0, group);
     pass.dispatchWorkgroupsIndirect(this.source.faceDispatch, this.source.faceDispatchOffsetBytes ?? 0);
+  }
+  private uploadParams(pressureScale: number, contactPressure: number,
+    gravity: readonly [number, number, number]): void {
+    const bytes = new ArrayBuffer(32);
+    const floats = new Float32Array(bytes), words = new Uint32Array(bytes);
+    floats[0] = pressureScale; floats[1] = contactPressure;
+    words[2] = this.physical.freeSurfacePressureMode === "cell-centered-air" ? 1 : 0;
+    floats.set(gravity, 4);
+    this.device.queue.writeBuffer(this.params, 0, bytes);
   }
   destroy(): void { if (this.destroyed) return; this.destroyed = true; this.params.destroy(); this.pipeline = undefined; }
   private assertLive(): void { if (this.destroyed) throw new Error("Losasso projection is destroyed"); }

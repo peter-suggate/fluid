@@ -66,6 +66,10 @@ test("radial diagnostic distinguishes circular and axis-leading D4 fronts", () =
   }
   const round = measureHorizontalFrontCircularity(circle, grid);
   const biased = measureHorizontalFrontCircularity(axisBiased, grid);
+  assert.equal(round.angularSampleCount, 64);
+  assert.ok(round.radialRmsDeviation_cells < 0.2, JSON.stringify(round));
+  assert.ok(round.radialMaximumDeviation_cells < 0.35, JSON.stringify(round));
   assert.ok(Math.abs(round.axisLead_cells) < 0.2, JSON.stringify(round));
   assert.ok(biased.axisLead_cells > 2, JSON.stringify(biased));
+  assert.ok(biased.radialRmsDeviation_cells > 0.5, JSON.stringify(biased));
 });

@@ -1,4 +1,5 @@
 import type { PassBroker } from "./webgpu-pass-broker";
+import type { LosassoVelocityExtensionMode } from "./octree-coarse-backend";
 import { octreeLosassoVelocityExtensionWGSL } from "./webgpu-octree-losasso-velocity-extension.wgsl";
 
 /** Production D4 support: four-cell band + two-cell backtrace + one MAC stencil cell. */
@@ -59,6 +60,7 @@ export class WebGPUOctreeLosassoVelocityExtension {
   readonly allocatedBytes: number;
 
   private readonly params: GPUBuffer;
+  private readonly uniformStride: number;
   private readonly scratchA: GPUBuffer;
   private readonly scratchB: GPUBuffer;
   private readonly layout: GPUBindGroupLayout;
@@ -72,22 +74,33 @@ export class WebGPUOctreeLosassoVelocityExtension {
   constructor(
     private readonly device: GPUDevice,
     readonly source: WebGPUOctreeLosassoVelocityExtensionSource,
+    private readonly mode: LosassoVelocityExtensionMode = "fixed-jacobi",
   ) {
     this.plan = planOctreeLosassoVelocityExtension(source.faceCapacity);
     const storage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST;
-    this.params = device.createBuffer({ label: "Losasso extension constants", size: 16,
+    this.uniformStride = device.limits.minUniformBufferOffsetAlignment;
+    this.params = device.createBuffer({ label: "Losasso extension constants",
+      size: this.uniformStride * OCTREE_LOSASSO_EXTENSION_SWEEPS,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.scratchA = device.createBuffer({ label: "Losasso extension Jacobi A",
       size: source.faceCapacity * 4, usage: storage });
     this.scratchB = device.createBuffer({ label: "Losasso extension Jacobi B",
       size: source.faceCapacity * 4, usage: storage });
-    device.queue.writeBuffer(this.params, 0, Uint32Array.of(source.faceCapacity,
-      OCTREE_LOSASSO_EXTENSION_WIDTH, 0, 0));
+    const parameterBytes = new ArrayBuffer(this.params.size);
+    const parameterWords = new Uint32Array(parameterBytes);
+    for (let sweep = 0; sweep < OCTREE_LOSASSO_EXTENSION_SWEEPS; sweep += 1) {
+      const at = sweep * this.uniformStride / 4;
+      parameterWords.set([source.faceCapacity, OCTREE_LOSASSO_EXTENSION_WIDTH,
+        sweep + 1, mode === "causal-front" ? 1 : 0], at);
+    }
+    device.queue.writeBuffer(this.params, 0, parameterBytes);
     const readOnly = { type: "read-only-storage" as const };
     this.layout = device.createBindGroupLayout({
       label: "Losasso axis-face extension reduced layout",
       entries: [
-        { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
+        { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: {
+          type: "uniform", hasDynamicOffset: true, minBindingSize: 16,
+        } },
         { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: readOnly },
         { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: readOnly },
         { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: readOnly },
@@ -123,7 +136,7 @@ export class WebGPUOctreeLosassoVelocityExtension {
     this.groups = Array.from({ length: OCTREE_LOSASSO_EXTENSION_SWEEPS }, (_, sweep) =>
       this.device.createBindGroup({ label: `Losasso Jacobi sweep ${sweep + 1}`,
         layout: this.layout, entries: [
-          { binding: 0, resource: { buffer: this.params } },
+          { binding: 0, resource: { buffer: this.params, size: 16 } },
           { binding: 1, resource: { buffer: this.source.control } },
           { binding: 2, resource: { buffer: this.source.faceMetrics } },
           { binding: 3, resource: { buffer: this.source.adjacencyOffsets } },
@@ -149,10 +162,10 @@ export class WebGPUOctreeLosassoVelocityExtension {
     }
     this.lastAdvance = advance;
     this.lastEpoch = topologyEpoch;
-    const pass = broker.compute({ label: "Losasso S3e - fixed-K axis-face extension" });
-    for (const group of this.groups) {
+    const pass = broker.compute({ label: `Losasso S3e - ${this.mode} axis-face extension` });
+    for (const [sweep, group] of this.groups.entries()) {
       pass.setPipeline(this.pipeline);
-      pass.setBindGroup(0, group);
+      pass.setBindGroup(0, group, [sweep * this.uniformStride]);
       pass.dispatchWorkgroups(...this.plan.dispatch);
     }
     return true;

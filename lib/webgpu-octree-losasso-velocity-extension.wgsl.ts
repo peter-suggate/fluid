@@ -2,8 +2,8 @@ export const octreeLosassoVelocityExtensionWGSL = /* wgsl */ `
 struct Params {
   faceCapacity: u32,
   width: u32,
-  reserved0: u32,
-  reserved1: u32,
+  sweep: u32,
+  causalFront: u32,
 };
 
 @group(0) @binding(0) var<uniform> params: Params;
@@ -57,6 +57,13 @@ fn jacobiLosassoAxisFaces(@builtin(workgroup_id) group:vec3u,
   // Bit one is the explicit band-membership flag. Seed-only legacy sources
   // remain active because bit zero takes the early path above.
   if ((flags & 2u) == 0u) { outputVelocity[face] = 0.0; return; }
+  // Paper A/B: advance exactly one graph layer from values that were already
+  // valid at the start of this dispatch. Earlier layers are carried verbatim;
+  // later layers cannot observe zeros or partially propagated values.
+  if (params.causalFront != 0u) {
+    if (layer < params.sweep) { outputVelocity[face] = inputVelocity[face]; return; }
+    if (layer > params.sweep) { outputVelocity[face] = 0.0; return; }
+  }
   var exact:array<i32,36>;
   var count = 0u;
   let begin = adjacencyOffsets[face];

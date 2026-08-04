@@ -9,6 +9,8 @@ import {
 
 const params: MethodParamSpec[] = [
   { kind: "select", key: "coarseBackend", label: "Coarse dynamics", default: DEFAULT_OCTREE_COARSE_BACKEND, tier: "coarse", options: [{ value: "losasso", label: "Losasso 2004 · default" }, { value: "power2017", label: "Power 2017 · frozen reference" }], hint: "Construction-time backend choice. Each backend owns distinct pipelines, layouts, and velocity channels; the frozen Power path remains available for reference lanes." },
+  { kind: "select", key: "losassoFreeSurfacePressure", label: "Losasso air pressure", default: "subcell-contact", tier: "fine", options: [{ value: "subcell-contact", label: "Subcell ghost + contact" }, { value: "cell-centered-air", label: "Losasso 2004 cell-centred air" }], hint: "Construction-time A/B control. The paper mode uses a cell-centred p_air=0 neighbor and closed-wall Neumann faces; the production extension retains subcell theta and unilateral overhead separation." },
+  { kind: "select", key: "losassoVelocityExtension", label: "Losasso extrapolation", default: "fixed-jacobi", tier: "fine", options: [{ value: "fixed-jacobi", label: "Fixed Jacobi control" }, { value: "causal-front", label: "Causal layer front" }], hint: "Construction-time A/B control for Section 5 air velocity extension. Causal-front publishes one graph layer per sweep from already-valid inner layers." },
   { kind: "select", key: "globalFineLevelSetFactor", label: "Surface tracking", default: "4", tier: "coarse", options: [{ value: "1", label: "Coarse octree only · no fine band" }, { value: "4", label: "4× fine band · paper default" }, { value: "8", label: "8× fine band · experimental" }], hint: "Factor 1 transports φ directly on the adaptive octree and allocates no separate fine-band grid. Factors 4/8 maintain the sparse higher-resolution interface band." },
   { kind: "select", key: "maximumLeafSize", label: "Largest pressure cell", default: "32", tier: "fine", options: [{ value: "2", label: "2³ finest cells" }, { value: "4", label: "4³ finest cells" }, { value: "8", label: "8³ finest cells" }, { value: "16", label: "16³ finest cells" }, { value: "32", label: "32³ finest cells · default" }], hint: "Largest dyadic octree cell away from interfaces. Scene profiles choose the largest compatible root while preserving strict 2:1 grading." },
   { kind: "number", key: "interfaceRefinementBandCells", label: "Band reach", unit: "level", min: 0, max: 4, step: 1, digits: 0, default: 4, tier: "fine", hint: "One coupled reach level for pressure refinement and Section 5 surface tracking. Experimental level 0 uses one fine brick; level 1 retains the two-finest-cell moving-surface floor while still reducing pressure reach and recurring residency. Level 4 is the paper/default reach." },
@@ -36,6 +38,8 @@ export const octreeSolverOptions = (scene: SceneDescription, quality: GPUQuality
     globalFineLevelSetFactor: fineFactor,
     topologyCadenceAdvances: values.topologyCadenceAdvances,
     topologyDisplacementRingsPerAdvance: values.topologyDisplacementRingsPerAdvance,
+    losassoFreeSurfacePressure: values.losassoFreeSurfacePressure,
+    losassoVelocityExtension: values.losassoVelocityExtension,
   });
   // Not a product control. Keep the fine-only override available to the Dawn
   // harness for fault injection and planner isolation without letting normal
@@ -116,6 +120,8 @@ export const octreeMethod: SimulationMethod = {
   pressureMapping: "Losasso uses the wide, warm-started V-cycle-preconditioned MGPCG authority. The frozen Power 2017 backend retains its persistent Section 4.3 solver; neither backend falls through to the other after construction.",
   presetFor: () => ({
     coarseBackend: DEFAULT_OCTREE_COARSE_BACKEND,
+    losassoFreeSurfacePressure: "subcell-contact",
+    losassoVelocityExtension: "fixed-jacobi",
     maximumLeafSize: "32",
     interfaceRefinementBandCells: 4,
     surfaceRefinementGradingLayers: 1,

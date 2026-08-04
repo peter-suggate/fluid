@@ -1,5 +1,6 @@
 import type { WebGPUFineLevelSetBrickSource } from "./webgpu-octree-fine-levelset-bricks";
 import type { PassBroker } from "./webgpu-pass-broker";
+import type { LosassoVelocityExtensionMode } from "./octree-coarse-backend";
 import {
   WebGPUOctreeLosassoVelocityExtension,
   OCTREE_LOSASSO_EXTENSION_WIDTH,
@@ -28,6 +29,7 @@ export interface WebGPUOctreeLosassoExtensionBandOptions {
   readonly domainOrigin?: readonly [number, number, number];
   readonly wetFaceCapacity: number;
   readonly maximumResidentFineBricks: number;
+  readonly velocityExtensionMode?: LosassoVelocityExtensionMode;
   readonly wet: WebGPUOctreeLosassoWetFaceSource;
 }
 
@@ -186,7 +188,8 @@ export class WebGPUOctreeLosassoExtensionBand {
       extendedVelocity: this.extended, axisFaceDirectory: this.directory,
       directoryCapacity: this.plan.directoryCapacity, dimensions: options.dimensions,
       maximumLeafSize: options.maximumLeafSize, fineCellSize: options.cellSize });
-    this.extension = new WebGPUOctreeLosassoVelocityExtension(device, this.source);
+    this.extension = new WebGPUOctreeLosassoVelocityExtension(device, this.source,
+      options.velocityExtensionMode);
     this.allocatedBytes = this.plan.allocatedBytes + this.extension.allocatedBytes;
   }
 

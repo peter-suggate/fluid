@@ -646,6 +646,7 @@ const crossMethodFieldParityDiagnostic: SceneWebGPUDiagnosticPack = {
 const settlingDiagnostic: SceneWebGPUDiagnosticPack = {
   id: "settling",
   parameters: {
+    expectAsymptoticRest: true,
     maximumFinalSampledExactVolumeDrift: 0.01,
     maximumNormalizedNetProjectionEnergyDelta: 0.01,
     maximumNormalizedLateMechanicalEnergySlopePerSecond: 1e-3,
@@ -656,6 +657,11 @@ const settlingDiagnostic: SceneWebGPUDiagnosticPack = {
     energyLateWindowStartFraction: 0.8,
     energyRegressionWindowStartFraction: 0.5,
   },
+};
+
+const inviscidStabilityDiagnostic: SceneWebGPUDiagnosticPack = {
+  ...settlingDiagnostic,
+  parameters: { ...settlingDiagnostic.parameters, expectAsymptoticRest: false },
 };
 
 const standardWaterRasterParameters = {
@@ -895,16 +901,19 @@ const suiteList = [
         methods: methods(["octree"], { octree: symmetricExpansionOverrides }), timeout_ms: 240_000,
         collect: {
           fieldStats: "checkpoints", checkpointEvery_s: 0.004, spatialField: true,
+          stabilityEnvelope: true, energyEverySteps: 10,
           structuredValidation: true, raster: "initial-final", globalFineGeneration: true,
           evidenceCollectors: [{ id: "fluid-symmetry", phase: "checkpoint", methods: ["octree"],
             requires: ["compact velocity", "compact pressure"],
             provides: ["D4 volume symmetry", "D4 velocity symmetry", "D4 pressure symmetry",
               "D4 topology symmetry", "radial front circularity", "four-wall contact"] }],
         },
-        diagnostics: [],
+        diagnostics: [inviscidStabilityDiagnostic],
         acceptance: [
           { id: "balanced-octree-grid", metric: "methods.octree.info.quadtreeMaximumNeighborRatio", operator: "at-most", expected: 2 },
           { id: "expected-grid", metric: "methods.octree.grid", operator: "equal", expected: [32, 16, 32] },
+          { id: "paper-pressure-residual", metric: "methods.octree.stabilityEnvelope.maximumPressureRelativeResidual", operator: "at-most", expected: 1e-8 },
+          { id: "post-projection-divergence", metric: "methods.octree.stabilityEnvelope.maximumProjectedVariationalResidual", operator: "at-most", expected: 1e-5 },
         ],
         hooks: [{ id: "fluid-symmetry", methods: ["octree"],
           requires: ["D4 volume symmetry", "D4 velocity symmetry", "D4 pressure symmetry",
@@ -918,6 +927,9 @@ const suiteList = [
             circularityEvaluationStart_s: 0.168,
             circularityEvaluationEnd_s: 0.2,
             maximumAxisDiagonalFrontDifference_cells: 1,
+            maximumRadialRmsDeviation_cells: 0.5,
+            maximumRadialDeviation_cells: 1,
+            minimumCircularityAngularSamples: 64,
           } }],
       }),
       "raster-construction": lane({ id: "raster-construction", target_s: 0.004, exactSteps: 1,

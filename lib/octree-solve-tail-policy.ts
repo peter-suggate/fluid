@@ -8,8 +8,12 @@
 
 export const OCTREE_SOLVE_TAIL_MINIMUM_OUTER_ITERATIONS = 4;
 export const OCTREE_SOLVE_TAIL_MAXIMUM_ENCODED_OUTER_ITERATIONS = 10;
-/** Validation/diagnostic ceiling. It is deliberately not host-encoded. */
-export const OCTREE_SOLVE_TAIL_HARD_OUTER_ITERATION_CEILING = 16;
+/**
+ * Wide Losasso solve envelope.  The paper reports roughly twenty iterations
+ * to machine precision; thirty-two leaves a real f32 convergence tail while
+ * the same-step residual gate makes the unused commands no-ops.
+ */
+export const OCTREE_SOLVE_TAIL_HARD_OUTER_ITERATION_CEILING = 32;
 export const OCTREE_FACTOR1_PREDICTED_SOLVE_TAIL_ENVIRONMENT =
   "FLUID_OCTREE_FACTOR1_PREDICTED_SOLVE_TAIL";
 /**
@@ -19,7 +23,8 @@ export const OCTREE_FACTOR1_PREDICTED_SOLVE_TAIL_ENVIRONMENT =
  * topology-changing, failed, or non-adjacent evidence.
  */
 export const OCTREE_FACTOR1_PREDICTED_SOLVE_TAIL_SAFETY_MARGIN = 2;
-export const OCTREE_SOLVE_TAIL_RELATIVE_TOLERANCE = 1e-4;
+/** Default paper-fidelity target; authored scene tolerances are not clamped to it. */
+export const OCTREE_SOLVE_TAIL_RELATIVE_TOLERANCE = 1e-8;
 /** Section 4.3 reports k≈8 as a general choice. */
 export const OCTREE_SECTION43_PRODUCTION_SHELL_DEPTH = 8;
 /** The retained compact leaf-2 experiment selects the established k=4 shell. */
@@ -135,8 +140,8 @@ export interface OctreeSolveTailSceneProfile {
 export interface OctreeSolveTailPolicy {
   /** Paper-backed upper envelope; the GPU residual gate zeroes the live tail. */
   readonly encodedOuterIterations: number;
-  /** Retained only for validation and diagnostics; no commands are emitted. */
-  readonly hardOuterIterationCeiling: 16;
+  /** Wide Losasso MGPCG envelope; convergence retires its unused indirect tail. */
+  readonly hardOuterIterationCeiling: number;
   readonly relativeTolerance: number;
   readonly boundarySmoothingIterations: number;
   readonly sceneComplexityScore: number;
@@ -339,10 +344,9 @@ export function planOctreeSolveTail(
   return Object.freeze({
     encodedOuterIterations,
     hardOuterIterationCeiling: OCTREE_SOLVE_TAIL_HARD_OUTER_ITERATION_CEILING,
-    relativeTolerance: Math.max(
-      profile.requestedRelativeTolerance,
-      OCTREE_SOLVE_TAIL_RELATIVE_TOLERANCE,
-    ),
+    // The scene owns the accuracy request.  In particular, never turn an
+    // authored 1e-8 projection into the former 1e-4 residual floor.
+    relativeTolerance: profile.requestedRelativeTolerance,
     boundarySmoothingIterations,
     sceneComplexityScore: score,
     reasons: Object.freeze(reasons),

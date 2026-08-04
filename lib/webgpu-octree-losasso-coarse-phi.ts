@@ -3,6 +3,7 @@ import type { PassBroker } from "./webgpu-pass-broker";
 import type { FineLevelSetVolumeCoarseSource } from "./webgpu-octree-fine-levelset-volume";
 import type { FineLevelSetSummaryCoarseSource } from "./webgpu-octree-fine-levelset-summary-direct";
 import type { OctreeFineSeedAdapterCoarsePhiSource } from "./webgpu-octree-fine-seed-adapter";
+import type { LosassoFreeSurfacePressureMode } from "./octree-coarse-backend";
 import {
   OCTREE_LOSASSO_COARSE_PHI_MAGIC,
   octreeLosassoCoarsePhiWGSL,
@@ -88,7 +89,7 @@ fn sampleCoarseOctreePhi(position:vec3f)->f32{let invalidPhi=3.402823e38;
   if(row!=0xffffffffu&&row<losassoCoarsePhi[2]){let entry=losassoCoarsePhi[9]+8u*row;let flags=losassoCoarsePhi[entry+5u];
    let value=bitcast<f32>(losassoCoarsePhi[entry+2u]);if((flags&3u)==3u&&value==value){return value;}return invalidPhi;}
   if(size>=losassoCoarsePhi[4]){break;}size*=2u;}
- return .5*width;}
+ return invalidPhi;}
 `;
 }
 
@@ -107,7 +108,8 @@ export class WebGPUOctreeLosassoCoarsePhiExchange {
   private destroyed = false;
 
   constructor(private readonly device: GPUDevice,
-    rowCapacity: number, faceCapacity: number) {
+    rowCapacity: number, faceCapacity: number,
+    private readonly freeSurfacePressureMode: LosassoFreeSurfacePressureMode = "subcell-contact") {
     this.plan = planOctreeLosassoCoarsePhi(rowCapacity, faceCapacity);
     const storage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST;
     this.params = device.createBuffer({ label: "Losasso coarse-phi exchange constants", size: 112,
@@ -243,6 +245,7 @@ export class WebGPUOctreeLosassoCoarsePhiExchange {
     words[22] = this.plan.rowCapacity; words[23] = this.plan.faceCapacity;
     words[24] = scheduleMode; words[25] = Math.ceil(this.plan.rowCapacity / 64);
     words[26] = Math.ceil(this.plan.arenaBytes / 4 / 64);
+    words[27] = this.freeSurfacePressureMode === "cell-centered-air" ? 1 : 0;
     this.device.queue.writeBuffer(this.params, 0, bytes);
   }
 

@@ -28,6 +28,14 @@ export interface SymmetryWallState {
 
 export interface HorizontalFrontCircularity {
   readonly threshold: number;
+  readonly angularSampleCount: number;
+  readonly meanRadius_cells: number;
+  readonly minimumRadius_cells: number;
+  readonly maximumRadius_cells: number;
+  /** RMS distance from the all-angle mean contour radius. */
+  readonly radialRmsDeviation_cells: number;
+  /** Worst absolute distance from the all-angle mean contour radius. */
+  readonly radialMaximumDeviation_cells: number;
   readonly axisRadius_cells: number;
   readonly diagonalRadius_cells: number;
   /** Positive means the axis-aligned front leads the diagonal front. */
@@ -73,10 +81,13 @@ export function measureHorizontalFrontCircularity(
   volume: ArrayLike<number>,
   grid: readonly [number, number, number],
   threshold = 0.5,
+  angularSampleCount = 64,
 ): HorizontalFrontCircularity {
   const [nx, ny, nz] = grid;
-  if (!(threshold > 0 && threshold < 1) || nx < 2 || ny < 1 || nz < 2) {
-    throw new RangeError("Horizontal front circularity needs a 2-D grid and threshold in (0,1)");
+  if (!(threshold > 0 && threshold < 1) || nx < 2 || ny < 1 || nz < 2
+    || !Number.isSafeInteger(angularSampleCount) || angularSampleCount < 16
+    || angularSampleCount % 8 !== 0) {
+    throw new RangeError("Horizontal front circularity needs a 2-D grid, threshold in (0,1), and an angular sample count divisible by eight and at least sixteen");
   }
   const cx = 0.5 * (nx - 1), cz = 0.5 * (nz - 1);
   const alpha = (x: number, z: number): number => {
@@ -113,7 +124,20 @@ export function measureHorizontalFrontCircularity(
   const mean = (directions: readonly (readonly [number, number])[]) =>
     directions.reduce((sum, [dx, dz]) => sum + radius(dx, dz), 0) / directions.length;
   const axisRadius_cells = mean(axes), diagonalRadius_cells = mean(diagonals);
-  return Object.freeze({ threshold, axisRadius_cells, diagonalRadius_cells,
+  const radii = Array.from({ length: angularSampleCount }, (_, sample) => {
+    const angle = 2 * Math.PI * sample / angularSampleCount;
+    return radius(Math.cos(angle), Math.sin(angle));
+  });
+  const meanRadius_cells = radii.reduce((sum, value) => sum + value, 0) / radii.length;
+  const deviations = radii.map((value) => Math.abs(value - meanRadius_cells));
+  const radialRmsDeviation_cells = Math.sqrt(radii.reduce(
+    (sum, value) => sum + (value - meanRadius_cells) ** 2, 0,
+  ) / radii.length);
+  return Object.freeze({ threshold, angularSampleCount, meanRadius_cells,
+    minimumRadius_cells: Math.min(...radii), maximumRadius_cells: Math.max(...radii),
+    radialRmsDeviation_cells,
+    radialMaximumDeviation_cells: Math.max(...deviations),
+    axisRadius_cells, diagonalRadius_cells,
     axisLead_cells: axisRadius_cells - diagonalRadius_cells,
     diagonalToAxisRatio: axisRadius_cells > 0 ? diagonalRadius_cells / axisRadius_cells : 1 });
 }

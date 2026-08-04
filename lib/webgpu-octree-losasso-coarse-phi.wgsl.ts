@@ -116,19 +116,19 @@ fn prepareLosassoCoarsePhiRefresh(){let valid=atomicLoad(&arena[0])==MAGIC
 fn restrictLosassoCoarsePhiRow(row:u32,rebuildDirectory:bool,usePublished:bool){if(row>=rows()){return;}
  let header=headers[row];let origin=originOf(header);let centre=vec3f(origin)+vec3f(.5*f32(header.size));
  let centreFine=finePhi(centre);let seed=rowPhi[row];var centrePhi=bitcast<f32>(seed.x);
- var minimum=bitcast<f32>(seed.y);var maximum=bitcast<f32>(seed.z);var flags=VALID|FINITE;
+ var minimum=bitcast<f32>(seed.y);var maximum=bitcast<f32>(seed.z);var flags=seed.w&(VALID|FINITE|FINE_RESTRICTED);
  if(header.size==0u||header.size>p.maximumLeafSize){rowPhi[row]=vec4u(0u);targetOr(13u,2u,usePublished);return;}
  let entry=20u+8u*row;
  if(!rebuildDirectory&&(targetLoad(entry,usePublished)!=header.cell+1u
    ||targetLoad(entry+1u,usePublished)!=header.size
    ||targetLoad(entry+6u,usePublished)!=row)){rowPhi[row]=vec4u(0u);targetOr(13u,16u,usePublished);return;}
- if(centreFine.valid!=0u){centrePhi=centreFine.value;minimum=centrePhi;maximum=centrePhi;var complete=1u;
+ if(centreFine.valid!=0u){flags=VALID|FINITE;centrePhi=centreFine.value;minimum=centrePhi;maximum=centrePhi;var complete=1u;
   for(var corner=0u;corner<8u;corner+=1u){let offset=vec3u(corner&1u,(corner>>1u)&1u,(corner>>2u)&1u);
    let point=vec3f(origin+offset*header.size);let sample=finePhi(point);
    if(sample.valid==0u){complete=0u;}else{minimum=min(minimum,sample.value);maximum=max(maximum,sample.value);}}
   if(complete!=0u){flags|=FINE_RESTRICTED;}else{let extent=.5*f32(header.size)*p.cellSize;minimum=centrePhi-extent;maximum=centrePhi+extent;}
  }
- if(minimum<=0.&&maximum>=0.){flags|=INTERFACE;}rowPhi[row]=vec4u(bitcast<u32>(centrePhi),bitcast<u32>(minimum),bitcast<u32>(maximum),flags);
+ if((flags&(VALID|FINITE))==(VALID|FINITE)&&minimum<=0.&&maximum>=0.){flags|=INTERFACE;}rowPhi[row]=vec4u(bitcast<u32>(centrePhi),bitcast<u32>(minimum),bitcast<u32>(maximum),flags);
  targetStore(entry,header.cell+1u,usePublished);targetStore(entry+1u,header.size,usePublished);
  targetStore(entry+2u,bitcast<u32>(centrePhi),usePublished);targetStore(entry+3u,bitcast<u32>(minimum),usePublished);
  targetStore(entry+4u,bitcast<u32>(maximum),usePublished);targetStore(entry+5u,flags,usePublished);
@@ -175,8 +175,8 @@ fn publishLosassoGhostDistances(@builtin(global_invocation_id)invocation:vec3u){
    // the face remains exact zero-aperture Neumann.
    var wallSample=centroid;wallSample[axis]-=towardAir*.5*p.fineCellWidth/p.cellSize;
    let sampled=finePhi(wallSample);face.openFraction=0.;flags=2u;
-   let separated=(face.reserved&FACE_SEPARATED)!=0u;
-   if(separated||((rowFlags&(VALID|FINITE))==(VALID|FINITE)&&liquid<0.&&sampled.valid!=0u&&sampled.value>0.)){
+   let contactEnabled=p.schedule.w==0u;let separated=contactEnabled&&(face.reserved&FACE_SEPARATED)!=0u;
+   if(contactEnabled&&(separated||((rowFlags&(VALID|FINITE))==(VALID|FINITE)&&liquid<0.&&sampled.valid!=0u&&sampled.value>0.))){
     let dual=max(.5*p.fineCellWidth,.5*f32(rowSize)*p.cellSize-.5*p.fineCellWidth);
     if(sampled.valid!=0u&&sampled.value>0.&&liquid<0.){airPhi=sampled.value;
      // Match the established ghost-fluid robustness floor used by the Power
@@ -202,7 +202,12 @@ fn publishLosassoGhostDistances(@builtin(global_invocation_id)invocation:vec3u){
    // theta-conditioned write and is therefore not an admissible input.
    let dual=f32(rowSize)*p.cellSize;distance=dual;let faceToAir=.5*dual;
    var endpoint=centroid;endpoint[axis]+=sign*faceToAir/p.cellSize;
-   let sampled=finePhi(endpoint);if((rowFlags&(VALID|FINITE))==(VALID|FINITE)&&liquid<0.&&sampled.valid!=0u&&sampled.value>0.){airPhi=sampled.value;
+   let sampled=finePhi(endpoint);let cellCenteredAir=p.schedule.w==1u;
+   if(cellCenteredAir&&(rowFlags&(VALID|FINITE))==(VALID|FINITE)&&liquid<0.){
+    // Losasso 2004 places the p_air=0 Dirichlet value at the neighboring air
+    // cell centre.  No subcell theta enters the pressure operator in this A/B.
+    theta=1.;distance=dual;face.inverseDistance=1./dual;faces[faceId]=face;flags=1u;
+   }else if((rowFlags&(VALID|FINITE))==(VALID|FINITE)&&liquid<0.&&sampled.valid!=0u&&sampled.value>0.){airPhi=sampled.value;
     theta=clamp(-liquid/(airPhi-liquid),1e-4,1.);distance=theta*dual;face.inverseDistance=1./distance;faces[faceId]=face;flags=1u;}
    else{flags=4u;}}
  }ghosts[faceId]=vec4u(bitcast<u32>(distance),bitcast<u32>(theta),bitcast<u32>(airPhi),flags);}
