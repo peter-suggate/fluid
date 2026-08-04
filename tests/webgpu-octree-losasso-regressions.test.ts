@@ -320,6 +320,54 @@ test("Losasso paper-fidelity pressure and extension remain construction-time A/B
   assert.match(extension, /if \(layer > params\.sweep\)/);
 });
 
+test("Losasso inflow overrides the visual nozzle's solid aperture", () => {
+  const source = read("../lib/webgpu-octree-losasso-dynamics.wgsl.ts");
+  const host = read("../lib/webgpu-octree-losasso-dynamics.ts");
+  const force = source.slice(source.indexOf("fn forceLosassoFaces"),
+    source.indexOf("@group(0) @binding(11)"));
+  assert.match(force,
+    /let resolved = face\.solidNormalVelocity[\s\S]*let value = select\(resolved, inflow\.x, inflow\.y > 0\.5\)/,
+    "the divergence input must receive the prescribed source even through the solid nozzle cap");
+  assert.doesNotMatch(force,
+    /face\.openFraction \* \(inflow\.x - face\.solidNormalVelocity\)/,
+    "the source boundary condition must not be attenuated by visual solid coverage");
+
+  const constraint = source.slice(source.indexOf("fn constrainLosassoInflowFaces"),
+    source.indexOf("fn divergenceLosassoRows"));
+  assert.match(constraint,
+    /projectedVelocity\[faceId\] = select\(0\.0, inflow\.x, finite\(inflow\.x\)\)/,
+    "post-projection restoration must preserve the exact authored source velocity");
+  assert.doesNotMatch(constraint, /face\.openFraction/,
+    "the visual nozzle aperture must not erase the restored source");
+  assert.match(host, /constrainLosassoInflowFaces: \[0, 1, 3, 11\]/,
+    "the constraint bind group must omit the solid-face buffer it no longer reads");
+});
+
+test("Losasso recurring fine transport keeps the authored nozzle source alive", () => {
+  const host = read("../lib/webgpu-octree.ts");
+  const transport = read("../lib/webgpu-octree-losasso-fine-transport.ts");
+  const shader = read("../lib/webgpu-octree-losasso-fine-transport.wgsl.ts");
+  const selection = host.slice(host.indexOf("transport as WebGPUOctreeLosassoFineTransport"),
+    host.indexOf(": (transport as WebGPUFineLevelSetTransport"));
+  assert.match(selection, /\.\.\.\(inflow \? \{ inflow \} : \{\}\)/,
+    "the Losasso transport call must receive the same live source state as Power");
+  assert.match(transport, /readonly inflow\?: SurfaceInflowState/);
+  assert.match(shader,
+    /fn applyInflowPhi[\s\S]*nextPhi\[index\]=applyInflowPhi\(transported\+exitCells\*p\.fineCellWidth,world\)/,
+    "resident nozzle pages must have source phi restored after every accepted characteristic");
+});
+
+test("Losasso cold fine bootstrap retains the analytic liquid SDF around solids", () => {
+  const source = read("../lib/webgpu-octree.ts");
+  const selection = source.slice(source.indexOf("const exactAnalyticFineSeed"),
+    source.indexOf("this.globalFineSeeds = new WebGPUFineLevelSetLeafSeeds"));
+  assert.match(selection,
+    /initialBrickSeeds_m\?\.length \?\? 0\) === 0[\s\S]*!sceneDamBreakIsOffsetFromCorner\(this\.scene\)/,
+    "unseeded tank/dam liquid keeps exact phi even when solids require dense topology");
+  assert.doesNotMatch(selection, /this\.analyticSparseBootstrap/,
+    "rigid geometry must not make the authored liquid SDF unavailable to cold halo pages");
+});
+
 test("Losasso diagnostics do not interpret absent Power controls as failures", () => {
   const source = read("../lib/webgpu-uniform-eulerian.ts");
   assert.match(source,

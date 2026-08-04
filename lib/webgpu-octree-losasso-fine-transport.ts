@@ -2,6 +2,7 @@ import type { WebGPUFineLevelSetBrickSource } from "./webgpu-octree-fine-levelse
 import type { PassBroker } from "./webgpu-pass-broker";
 import { octreeLosassoFineTransportWGSL } from "./webgpu-octree-losasso-fine-transport.wgsl";
 import type { WebGPUOctreeLosassoVelocitySamplerSource } from "./webgpu-octree-losasso-velocity-sampler";
+import type { SurfaceInflowState } from "./webgpu-quadtree-builder";
 
 export const OCTREE_LOSASSO_FINE_TRANSPORT_CONTROL_BYTES = 64;
 export const OCTREE_LOSASSO_FINE_TRANSPORT_DISPATCH_BYTES = 16;
@@ -10,6 +11,8 @@ export type OctreeLosassoFineTransportBoundaryPolicy = "strict" | "closed-neuman
 
 export interface OctreeLosassoFineTransportOptions {
   readonly timestep: number;
+  /** Authored nozzle source applied directly to every recurring fine-phi generation. */
+  readonly inflow?: SurfaceInflowState;
   readonly generation?: number;
   readonly velocityEpoch?: number;
   readonly transportBandCells?: number;
@@ -45,7 +48,7 @@ export function planOctreeLosassoFineTransport(
   return Object.freeze({ pageCapacity: pages,
     sampleCapacity: pages * source.plan.samplesPerBrick,
     encodedDispatchCount: 4 as const, topologyDeltaBytes,
-    allocatedBytes: 128 + OCTREE_LOSASSO_FINE_TRANSPORT_CONTROL_BYTES
+    allocatedBytes: 160 + OCTREE_LOSASSO_FINE_TRANSPORT_CONTROL_BYTES
       + OCTREE_LOSASSO_FINE_TRANSPORT_DISPATCH_BYTES + topologyDeltaBytes });
 }
 
@@ -95,7 +98,7 @@ export class WebGPUOctreeLosassoFineTransport {
       throw new RangeError("Losasso fine transport sampler does not match the uniform-fine lattice");
     }
     const storage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST;
-    this.params = device.createBuffer({ label: "Losasso fine transport constants", size: 128,
+    this.params = device.createBuffer({ label: "Losasso fine transport constants", size: 160,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.control = device.createBuffer({ label: "Losasso fine transport control",
       size: OCTREE_LOSASSO_FINE_TRANSPORT_CONTROL_BYTES, usage: storage });
@@ -211,7 +214,7 @@ export class WebGPUOctreeLosassoFineTransport {
         throw new RangeError(`Losasso fine transport ${label} is outside [${minimum},${maximum}]`);
       }
     }
-    const bytes = new ArrayBuffer(128), words = new Uint32Array(bytes), floats = new Float32Array(bytes);
+    const bytes = new ArrayBuffer(160), words = new Uint32Array(bytes), floats = new Float32Array(bytes);
     words.set(this.source.plan.brickDimensions, 0); words[3] = this.source.plan.brickResolution;
     words.set(this.source.plan.sampleDimensions, 4); words[7] = this.source.plan.samplesPerBrick;
     floats.set(this.source.plan.domainOrigin, 8); floats[11] = this.source.plan.fineCellWidth;
@@ -228,6 +231,13 @@ export class WebGPUOctreeLosassoFineTransport {
     // The direct LoSasso lane therefore uses the same single midpoint trace as
     // the paper path and rejects an actual trace that exceeds the bound.
     words[30] = 1;
+    const inflow = options.inflow;
+    if (inflow) {
+      floats.set([inflow.outletCenter_m.x, inflow.outletCenter_m.y,
+        inflow.outletCenter_m.z, inflow.radius_m], 32);
+      floats.set([inflow.velocity_m_s.x, inflow.velocity_m_s.y,
+        inflow.velocity_m_s.z, inflow.strength], 36);
+    }
     this.device.queue.writeBuffer(this.params, 0, bytes);
     const prepare = broker.compute({ label: "Losasso fine transport - prepare live dispatch" });
     prepare.setPipeline(this.prepare); prepare.setBindGroup(0, this.prepareGroup);

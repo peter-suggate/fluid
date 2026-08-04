@@ -503,6 +503,9 @@ test("fine topology isolates cold closure and publishes recurring sparse deltas"
     /fnapplyInflowPhi[\s\S]*fninitializeDesiredSamples[\s\S]*value=applyInflowPhi\(value,position\)/,
     "new nozzle pages initialize source phi before Section 5 fast marching");
   assert.match(wgsl,
+    /letsourceHalo=f32\(\(params\.dilationBrickRings\+1u\)\*params\.brickResolution\)\*params\.fineCellWidth;if\(params\.inflowVelocityStrength\.w>0\.&&finite\(source\)&&source<=sourceHalo\)\{value=source;\}/,
+    "the allocated nozzle halo uses its analytic source SDF instead of seedless coarse-band fallback values");
+  assert.match(wgsl,
     /fnseedRecurringHalo[\s\S]*atomicOr\(&topologyErrors\[key\],2u\)[\s\S]*fndilateRecurringHaloX[\s\S]*fndilateRecurringHaloY[\s\S]*fndilateRecurringHaloZ[\s\S]*fncommitRecurringHalo[\s\S]*fnscanRecurringDesiredRecords[\s\S]*scanIdentityBlock[\s\S]*desiredScan\[item\]=prefix[\s\S]*fnscatterRecurringSparseBand[\s\S]*output=desiredScan\[key\][\s\S]*targetB\[7u\+output\]=key/,
     "compact seeds undergo separable halo dilation, rank in parallel, and publish canonical keys exactly once");
   assert.match(wgsl,
@@ -958,11 +961,11 @@ test("fine redistance is fixed-pass JFA-CPT", () => {
   assert.equal(FINE_LEVELSET_JFA_WARM_FALLBACK_COLLAR_REPAIR_PASSES, 3);
   const warmSchedule = planFineLevelSetJFAStrides(
     23, 8, FINE_LEVELSET_JFA_WARM_COLLAR_REPAIR_PASSES);
-  assert.deepEqual([
-    ...warmSchedule,
-    ...Array(FINE_LEVELSET_JFA_WARM_FALLBACK_COLLAR_REPAIR_PASSES).fill(1),
-  ], planFineLevelSetJFAStrides(23, 8, FINE_LEVELSET_JFA_COLD_COLLAR_REPAIR_PASSES),
-  "a triggered warm fallback must finish the same five-pass collar closure as cold publication");
+  const coldFallbackSchedule = planFineLevelSetJFAStrides(
+    23, 23, FINE_LEVELSET_JFA_COLD_COLLAR_REPAIR_PASSES);
+  assert.equal(warmSchedule[0], 8);
+  assert.equal(coldFallbackSchedule[0], 16,
+    "a warm miss must restore the physical-band ladder for a newly born interface");
   assert.deepEqual(planFineLevelSetJFAStrides(21), [4, 2, 1, 1, 1, 1, 1, 1]);
   assert.deepEqual(planFineLevelSetJFAStrides(21, 21), [16, 8, 4, 2, 1, 1, 1, 1, 1, 1]);
   assert.deepEqual(planFineLevelSetJFAStrides(8, 8), [8, 4, 2, 1, 1, 1, 1, 1, 1],
@@ -1010,11 +1013,11 @@ test("fine redistance is fixed-pass JFA-CPT", () => {
     /refresh transported closest-point codes[\s\S]*seed closest points/,
     "current closest-point codes must be globally refreshed before carried destinations inspect them");
   assert.match(encodedJFA,
-    /prepare warm fallback[\s\S]*seed full-support fallback[\s\S]*strides\.forEach[\s\S]*complete support fallback[\s\S]*resolve complete support fallback/,
+    /prepare warm fallback[\s\S]*seed full-support fallback[\s\S]*fallbackStrides\.forEach[\s\S]*complete support fallback[\s\S]*resolve complete support fallback/,
     "a GPU-resident miss must rerun the complete support-wide ladder from a clean seed field");
   assert.match(encodedJFA,
-    /FINE_LEVELSET_JFA_WARM_FALLBACK_COLLAR_REPAIR_PASSES[\s\S]*complete support fallback collar repair/,
-    "the fallback must append the three cold collar repairs omitted by the warm ladder");
+    /fallbackStrides[\s\S]*planFineLevelSetJFAStrides\(bandCells,bandCells,FINE_LEVELSET_JFA_COLD_COLLAR_REPAIR_PASSES\)/,
+    "the fallback must restore both the cold physical radius and its five collar repairs");
   assert.match(fineLevelSetJFACPTWGSL,
     /let value=finePackedPhi\(index\);if\(!finite\(value\)\)\{errorFlags\|=NONFINITE/,
     "recurring redistance must reject non-finite transported phi");

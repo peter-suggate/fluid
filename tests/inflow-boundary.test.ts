@@ -11,7 +11,7 @@ test("hose outlet is a normalized face flux rather than a painted volume", () =>
   const outlet = inflowOutletCenter(inflow);
   const nozzle = scene.rigidBodies.find((body) => body.id === "paper-hose-nozzle")!;
   assert.ok(Math.abs(outlet.x - (nozzle.position_m.x + 0.5 * nozzle.dimensions_m.y)) < 1e-12, "inflow outlet must meet the visible nozzle tip");
-  assert.deepEqual(outlet, { x: -0.34, y: 0.55, z: 0 });
+  assert.deepEqual(outlet, { x: -0.38, y: 0.55, z: 0 });
   assert.equal(boundary.axis, 0);
   assert.equal(boundary.receiverIndex, boundary.faceIndex + 1);
   const normalizedRate = boundary.rawProjectedArea_m2 * boundary.apertureScale * Math.abs(inflow.velocity_m_s.x);

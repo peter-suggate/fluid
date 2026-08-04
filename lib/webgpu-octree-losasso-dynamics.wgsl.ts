@@ -284,11 +284,13 @@ fn forceLosassoFaces(@builtin(global_invocation_id) invocation: vec3u) {
   let fluid = advectedVelocity[faceId]
     + params.domainOriginDt.w * params.gravity[face.axis];
   let inflow = inflowNormalVelocity(faceId);
-  let drivenFluid = select(fluid, inflow.x, inflow.y > 0.5);
   // Aperture blends the resolved fluid face toward the prescribed moving-solid
-  // normal velocity. Closed faces therefore contribute exactly the solid flux.
-  let value = face.solidNormalVelocity
-    + face.openFraction * (drivenFluid - face.solidNormalVelocity);
+  // normal velocity. The authored inflow is a boundary condition, however,
+  // and must override the visual nozzle's closed solid cap just as it does in
+  // the Power path; masking it by openFraction leaves a stationary hose mouth.
+  let resolved = face.solidNormalVelocity
+    + face.openFraction * (fluid - face.solidNormalVelocity);
+  let value = select(resolved, inflow.x, inflow.y > 0.5);
   predictedVelocity[faceId] = select(face.solidNormalVelocity, value, finite(value));
 }
 
@@ -301,10 +303,9 @@ fn constrainLosassoInflowFaces(@builtin(global_invocation_id) invocation: vec3u)
       || faceId >= arrayLength(&projectedVelocity)) { return; }
   let inflow = inflowNormalVelocity(faceId);
   if (inflow.y <= 0.5) { return; }
-  let face = faces[faceId];
-  let value = face.solidNormalVelocity
-    + face.openFraction * (inflow.x - face.solidNormalVelocity);
-  projectedVelocity[faceId] = select(face.solidNormalVelocity, value, finite(value));
+  // Projection must not turn the prescribed source back into the nozzle's
+  // solid velocity, including where the visual cap has zero open fraction.
+  projectedVelocity[faceId] = select(0.0, inflow.x, finite(inflow.x));
 }
 
 @compute @workgroup_size(64)

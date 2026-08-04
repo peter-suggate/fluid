@@ -687,10 +687,16 @@ export class WebGPUFineLevelSetRedistance {
       warmStart
         ? FINE_LEVELSET_JFA_WARM_COLLAR_REPAIR_PASSES
         : FINE_LEVELSET_JFA_COLD_COLLAR_REPAIR_PASSES);
+    const fallbackStrides = warmStart
+      ? planFineLevelSetJFAStrides(
+        bandCells, bandCells, FINE_LEVELSET_JFA_COLD_COLLAR_REPAIR_PASSES,
+      )
+      : strides;
     if (strides.length > FINE_LEVELSET_JFA_MAX_PASSES) throw new RangeError("Fine JFA pass budget exceeded");
-    if (strides.some((stride) => stride > this.maximumRequiredJfaStride)) {
+    if (fallbackStrides.length > FINE_LEVELSET_JFA_MAX_PASSES
+      || fallbackStrides.some((stride) => stride > this.maximumRequiredJfaStride)) {
       throw new RangeError(
-        `Fine JFA schedule requires stride ${strides[0]}, above the immutable compiled maximum ${this.maximumRequiredJfaStride}`,
+        `Fine JFA schedule requires stride ${fallbackStrides[0]}, above the immutable compiled maximum ${this.maximumRequiredJfaStride}`,
       );
     }
     // Retained so provenance diagnostics compare the observed hops against the
@@ -829,26 +835,12 @@ export class WebGPUFineLevelSetRedistance {
       run("Fine JFA - seed full-support fallback closest points", this.jfaSeedPipeline,
         baseParams, [1, 2, 3, 4, 5, 6, 7, 9, 13, 14], "fallback");
       let fallbackInA = true;
-      strides.forEach((stride, stage) => {
+      fallbackStrides.forEach((stride, stage) => {
         const pipeline = (fallbackInA ? this.jfaABPipelines : this.jfaBAPipelines).get(stride)!;
         run(`Fine JFA - complete support fallback ${stage + 1} stride ${stride}`,
           pipeline, baseParams, [1, 2, 3, 4, 5, 6, 7, 10, 13, 14], "fallback");
         fallbackInA = !fallbackInA;
       });
-      // The normal warm ladder already includes two local collar repairs.
-      // A fallback means that closure was insufficient, so finish the five
-      // repairs used by the cold exact schedule before resolving. The old
-      // path only replayed the same two-repair ladder and could therefore
-      // reject successive Hose Tank generations with otherwise clean inputs.
-      for (let repair = 0;
-        repair < FINE_LEVELSET_JFA_WARM_FALLBACK_COLLAR_REPAIR_PASSES;
-        repair += 1) {
-        const pipeline = (fallbackInA ? this.jfaABPipelines : this.jfaBAPipelines).get(1)!;
-        run(`Fine JFA - complete support fallback collar repair ${
-          repair + FINE_LEVELSET_JFA_WARM_COLLAR_REPAIR_PASSES + 1}`,
-          pipeline, baseParams, [1, 2, 3, 4, 5, 6, 7, 10, 13, 14], "fallback");
-        fallbackInA = !fallbackInA;
-      }
       run("Fine JFA - resolve complete support fallback",
         fallbackInA ? this.jfaResolveAToBPipeline : this.jfaResolveBToCanonicalPipeline,
         baseParams, [2, 3, 4, 5, 6, 7, 9, 13, 14], "fallback");

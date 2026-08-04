@@ -62,7 +62,7 @@ const BINDINGS = Object.freeze({
   advectLosassoFaces: [0, 1, 2, 3, 6, 12, 13, 14, 15],
   forceLosassoFaces: [0, 1, 2, 3, 6, 7],
   divergenceLosassoRows: [0, 1, 2, 7, 8, 9, 10],
-  constrainLosassoInflowFaces: [0, 1, 2, 3, 11],
+  constrainLosassoInflowFaces: [0, 1, 3, 11],
 } as const);
 
 function positiveInteger(value: number, label: string): number {

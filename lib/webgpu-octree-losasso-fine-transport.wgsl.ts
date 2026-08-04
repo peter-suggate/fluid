@@ -13,6 +13,7 @@ struct Params{
  velocityCellSize:f32,maximumLeafSize:u32,reservedVelocity0:u32,reservedVelocity1:u32,
  bandCells:u32,maxBacktrace:u32,closed:u32,openTop:u32,
  dt:f32,expectedVelocityEpoch:u32,substeps:u32,reserved1:u32,
+ inflowPositionRadius:vec4f,inflowVelocityStrength:vec4f,
 }
 @group(0)@binding(0)var<uniform>p:Params;
 @group(0)@binding(1)var<storage,read_write>metadata:array<u32>;
@@ -64,6 +65,23 @@ fn acceptedVelocity()->bool{return arrayLength(&coarse)>=7u&&coarse[3]==1u
  &&losassoDirectoryCapacity()<=arrayLength(&faceDirectory);}
 fn acceptedStep()->bool{return atomicLoad(&control[6])==0u&&atomicLoad(&control[7])==0u
  &&atomicLoad(&control[1])==0u&&atomicLoad(&control[0])==0u;}
+// The nozzle is an authored boundary condition around Section 5 transport.
+// Reapply its short downstream plug after every accepted characteristic;
+// topology initialization alone only reaches newly allocated pages and lets
+// a resident source disappear after its first generation.
+fn inflowLatticePosition()->vec3f{let extent=vec3f(p.sampleDimensions)*p.fineCellWidth;
+ return p.inflowPositionRadius.xyz+vec3f(.5*extent.x,0.,.5*extent.z);}
+fn inflowSourcePhi(position:vec3f)->f32{
+ let velocity=p.inflowVelocityStrength.xyz;let speed=length(velocity);if(speed<=1e-6){return 3.402823e38;}
+ let direction=velocity/speed;let relative=position-inflowLatticePosition();let axial=dot(relative,direction);
+ let radial=length(relative-axial*direction);let depth=2.*p.velocityCellSize;
+ return max(radial-p.inflowPositionRadius.w,max(-axial,axial-depth));
+}
+fn applyInflowPhi(value:f32,position:vec3f)->f32{
+ let strength=clamp(p.inflowVelocityStrength.w,0.,1.);let source=inflowSourcePhi(position);
+ let enabled=strength>0.&&p.inflowPositionRadius.w>0.&&source<=.70710678*p.fineCellWidth;
+ return select(value,min(value,max(source,-.5*p.fineCellWidth*strength)),enabled);
+}
 
 @compute @workgroup_size(64)
 fn prepareLosassoFineTransport(@builtin(local_invocation_index)lane:u32){
@@ -115,7 +133,8 @@ fn advectLosassoFinePhi(@builtin(workgroup_id)group:vec3u,@builtin(local_invocat
   // needed for a receding interface; clamping alone re-samples a wall film and
   // pins it indefinitely. This is the reduced LoSasso form of the established
   // Power transport boundary extension.
-  nextPhi[index]=transported+exitCells*p.fineCellWidth;atomicAdd(&control[2],1u);
+  let world=p.domainOrigin+(vec3f(q)+vec3f(.5))*p.fineCellWidth;
+  nextPhi[index]=applyInflowPhi(transported+exitCells*p.fineCellWidth,world);atomicAdd(&control[2],1u);
  }
 }
 

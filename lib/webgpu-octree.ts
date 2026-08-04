@@ -5050,6 +5050,7 @@ export class WebGPUOctreeProjection {
           const completedTransportBroker = this.coarseDynamics.backend === "losasso"
             ? (transport as WebGPUOctreeLosassoFineTransport).encode(transportBroker, {
               timestep: dt_s,
+              ...(inflow ? { inflow } : {}),
               // S1 deliberately consumes the previous advance's settled W7
               // field. A ready topology flip may already have advanced the
               // wet-face epoch, while this lagged sampler remains physically
@@ -5143,7 +5144,7 @@ export class WebGPUOctreeProjection {
           targetIsA: !this.globalFineCurrentIsA,
           redistanceBandCells,
           maximumDisplacementFineCells: maximumBacktraceFineCells,
-          warmClosestPoints: wasBootstrapped && this.coarseDynamics.backend !== "losasso",
+          warmClosestPoints: wasBootstrapped,
         };
         // On recurring steps, coarse phi consumes the transported target before
         // any current-step force. Bootstrap first needs redistance to populate
