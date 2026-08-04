@@ -105,54 +105,6 @@ export function octreeAirSupportMarchFastPathEnabled(
   return resolved?.[OCTREE_AIR_SUPPORT_MARCH_FAST_PATH_ENVIRONMENT] !== "0";
 }
 const octreeAirSupportMarchFastPath = octreeAirSupportMarchFastPathEnabled();
-const OCTREE_AIR_SUPPORT_BVH_BLOCK_FACE_SLOTS = 128;
-const OCTREE_AIR_SUPPORT_BVH_TOP_LEAVES = 2048;
-const OCTREE_AIR_SUPPORT_BVH_NODE_WORDS = 8;
-const OCTREE_AIR_SUPPORT_COMPONENT_ROUNDS = 17;
-const OCTREE_AIR_SUPPORT_BVH_PREFIX_CHUNK = OCTREE_AIR_SUPPORT_BVH_TOP_LEAVES / 256;
-const octreeAirSupportComponentHookCallsWGSL = Array.from(
-  { length: OCTREE_GENERATED_POWER_CATALOG_MANIFEST.maximumFaceIncidence },
-  (_, edge) => `hookAirSupportComponentEdge(faceRow,${edge}u,count);`,
-).join("\n");
-const octreeAirSupportBvhTopReductionWGSL = Array.from(
-  { length: Math.log2(OCTREE_AIR_SUPPORT_BVH_TOP_LEAVES) },
-  (_, level) => {
-    const count = OCTREE_AIR_SUPPORT_BVH_TOP_LEAVES >> (level + 1);
-    const first = count;
-    const calls = Array.from({ length: Math.ceil(count / 256) }, (_, batch) => {
-      const offset = batch * 256;
-      return `if(lane+${offset}u<${count}u){mergeAirSupportBvhNode(axis,${first + offset}u+lane);}`;
-    }).join("\n");
-    return `${calls}\nstorageBarrier();workgroupBarrier();`;
-  },
-).join("\n");
-const octreeAirSupportBvhCandidateReductionWGSL = Array.from(
-  { length: 7 }, (_, level) => {
-    const width = 64 >> level;
-    return `if(lane<${width}u&&betterFace(item,airSupportBvhQueryCandidates[lane+${width}u],airSupportBvhQueryCandidates[lane])){
-      airSupportBvhQueryCandidates[lane]=airSupportBvhQueryCandidates[lane+${width}u];}workgroupBarrier();`;
-  },
-).join("\n");
-const octreeAirSupportBvhPrefixChunkLoadsWGSL = Array.from(
-  { length: OCTREE_AIR_SUPPORT_BVH_PREFIX_CHUNK },
-  (_, local) => `let blockCount${local}=airSupportBvhLeafSeedCount(axis,lane*${OCTREE_AIR_SUPPORT_BVH_PREFIX_CHUNK}u+${local}u);blockTotal+=blockCount${local};`,
-).join("\n");
-const octreeAirSupportBvhPrefixScanWGSL = Array.from(
-  { length: 8 }, (_, level) => {
-    const offset = 1 << level;
-    return `var add${level}=0u;if(lane>=${offset}u){add${level}=bvhPrefix[lane-${offset}u];}workgroupBarrier();bvhPrefix[lane]+=add${level};workgroupBarrier();`;
-  },
-).join("\n");
-const octreeAirSupportBvhPrefixChunkStoresWGSL = Array.from(
-  { length: OCTREE_AIR_SUPPORT_BVH_PREFIX_CHUNK },
-  (_, local) => `seedCompact[airSupportBvhBlockOffsetAt(axis,lane*${OCTREE_AIR_SUPPORT_BVH_PREFIX_CHUNK}u+${local}u)]=cursor;cursor+=blockCount${local};`,
-).join("\n");
-const octreeAirSupportBvhLocalSeedScanWGSL = Array.from(
-  { length: 7 }, (_, level) => {
-    const offset = 1 << level;
-    return `var localAdd${level}=0u;if(lane>=${offset}u){localAdd${level}=bvhSeedCount[lane-${offset}u];}workgroupBarrier();bvhSeedCount[lane]+=localAdd${level};workgroupBarrier();`;
-  },
-).join("\n");
 
 /** Words 41/42 are the stationary-air fallback latch: count of face patches
  * the march never reached, and the first such (cell<<3)|axis identity.
@@ -325,6 +277,40 @@ export function octreeAirSupportTopologyReuseEnabled(
   return resolved?.FLUID_OCTREE_AIR_SUPPORT_TOPOLOGY_REUSE !== "0";
 }
 
+/** Sparse changed-frontier marching is the production path. Explicit zero
+ * restores the preceding fixed 12+12+exact-tail schedule as a construction-
+ * stable A/B oracle: both pipeline families and all arenas are still built. */
+/**
+ * Retained Section-5 solution refresh: the one part of the sparse
+ * changed-frontier path that does not re-march at all. On a same-receipt
+ * publication it refreshes each settled face's value from its previously
+ * winning seed instead of rediscovering the winner.
+ *
+ * Default OFF, because the premise does not hold. `betterFace` orders
+ * equidistant candidates by normal-velocity magnitude -- deliberately, since
+ * magnitude is the one quantity invariant under every axis reflection and
+ * permutation, and a purely spatial order cannot resolve a seed orbit without
+ * breaking one of its reflection stabilizers. But magnitude is a LIVE value:
+ * two equidistant seeds can exchange winners between advances while the
+ * receipt (topology, bank, liquid epoch, fine generation) is unchanged. The
+ * refresh never re-evaluates the winner, so it carries the previous one's
+ * value. Same-receipt does not imply same-winner.
+ *
+ * Measured on `symmetric-expansion` at 110 steps, with the sparse march itself
+ * left on: bitwise D4 for velocity/pressure/rhs moves 18 -> 99 and for
+ * diagonal/topology 41 -> 105, i.e. exact until the first wall contact, and
+ * identical to disabling the whole changed-frontier path. It costs ~18% of the
+ * advance to give that up; earn it back by re-running only the magnitude
+ * tie-break over the retained equidistant set, not by carrying the winner.
+ */
+export function octreeAirSupportRetainedGraphEnabled(
+  environment?: Readonly<Record<string, string | undefined>>,
+): boolean {
+  const resolved = environment
+    ?? (typeof process !== "undefined" ? process.env : undefined);
+  return resolved?.FLUID_OCTREE_AIR_SUPPORT_RETAINED_GRAPH === "1";
+}
+
 /**
  * Clear the preceding advance's fine-candidate count before the begin pass
  * takes the candidate bound from it.
@@ -495,25 +481,16 @@ export const OCTREE_AIR_SUPPORT_GPU_ENTRY_BINDINGS = Object.freeze({
   prepareAirSupportFaces: Object.freeze([0,7,29,31]),
   resolveAirSupportFaceAdjacency: Object.freeze([0,2,3,7,8,11,15,16,23]),
   validateAirSupportFrontierReciprocity: Object.freeze([0,7,23]),
-  preservePreviousAirSupportFaces: Object.freeze([7,19,33]),
-  seedAirSupportFaces: Object.freeze([0,2,7,8,15,16,18,19,20,21,23]),
+  seedAirSupportFaces: Object.freeze([0,2,7,8,15,16,18,19,21,23]),
   seedRetainedAirSupportFaces: Object.freeze([0,2,7,8,15,16,18,20,21,23]),
-  compactAirSupportSeedFrontier: Object.freeze([0,7,19]),
-  initializeAirSupportComponents: Object.freeze([0,7,29]),
-  hookAirSupportComponents: Object.freeze([0,7,23,29]),
-  compressAirSupportComponents: Object.freeze([7,29]),
-  clearAirSupportSeedBvh: Object.freeze([0,7,29,32]),
-  buildAirSupportSeedBvhBlocks: Object.freeze([0,7,20,23,29,32]),
-  prefixAirSupportSeedBvhBlocks: Object.freeze([32,34]),
-  scatterAirSupportSeedBvhItems: Object.freeze([0,7,20,34]),
-  buildAirSupportSeedBvhTop: Object.freeze([32]),
+  compactAirSupportSeedFrontier: Object.freeze([0,7,19,29]),
   refreshRetainedAirSupportFaceValues: Object.freeze([7,19,20]),
   finalizeRetainedAirSupportMarchSchedule: Object.freeze([0,7,29,31]),
   expandAirSupportChangedFrontier: Object.freeze([0,7,19,23,29]),
   relaxAirSupportChangedFrontier: Object.freeze([0,2,7,8,19,20,23,29]),
   commitAirSupportChangedFrontier: Object.freeze([0,7,19,20,29]),
   advanceAirSupportChangedFrontier: Object.freeze([0,7,29,31]),
-  marchAirSupportFacesChangedFrontier: Object.freeze([0,2,7,8,19,20,23,29,32,33,34]),
+  marchAirSupportFacesChangedFrontier: Object.freeze([0,2,7,8,19,20,23,29]),
   extendAirSupportFacesAtoB: Object.freeze([0,2,7,8,19,20,23]),
   extendAirSupportFacesBtoA: Object.freeze([0,2,7,8,19,20,23]),
   advanceAirSupportMarchWave: Object.freeze([7]),
@@ -554,8 +531,6 @@ export interface OctreeAirVelocitySupportGPUPlan {
   readonly faceAdjacencyStride: number;
   readonly faceAdjacencyBytes: number;
   readonly faceFrontierBytes: number;
-  readonly seedBvhBytes: number;
-  readonly seedCompactBytes: number;
   readonly directAirVectorBytes: number;
   /**
    * One consolidated module-private face arena: `faceAdjacencyBytes` of
@@ -746,20 +721,10 @@ export function planOctreeAirVelocitySupportGPU(
   const faceAdjacencyStride = OCTREE_AIR_SUPPORT_GPU_FACE_ADJACENCY_STRIDE;
   const faceAdjacencyBytes = checkedProduct("Air-support face-adjacency bytes",
     faceCellCapacity, faceAdjacencyStride, 4);
-  const bvhBlockCapacity = Math.ceil((4 * faceCellCapacity)
-    / OCTREE_AIR_SUPPORT_BVH_BLOCK_FACE_SLOTS);
-  if (bvhBlockCapacity > OCTREE_AIR_SUPPORT_BVH_TOP_LEAVES) {
-    throw new RangeError("Air-support seed BVH exceeds its published top-tree capacity");
-  }
-  // Component labels and per-root axis masks remain atomic. Immutable BVH
-  // nodes use a separate plain-storage arena so traversal is not serialized by
-  // atomic loads.
+  // 16 control words, two face-capacity queues, and one generation mark per
+  // face. The three axis queues partition each face-capacity bank exactly.
   const faceFrontierBytes = checkedProduct("Air-support changed-frontier bytes",
-    16 + 2 * faceCellCapacity, 4);
-  const seedBvhBytes = checkedProduct("Air-support seed-BVH bytes",
-    3 * 2 * OCTREE_AIR_SUPPORT_BVH_TOP_LEAVES * OCTREE_AIR_SUPPORT_BVH_NODE_WORDS, 4);
-  const seedCompactBytes = checkedProduct("Air-support compact seed bytes",
-    3 * (OCTREE_AIR_SUPPORT_BVH_TOP_LEAVES + 1 + 4 * faceCellCapacity), 4);
+    16 + 3 * faceCapacity, 4);
   const directAirVectorBytes = checkedProduct("Air-support direct-air staging bytes", rowCapacity, 16);
   const offsets = {
     control: 0 as const,
@@ -788,11 +753,11 @@ export function planOctreeAirVelocitySupportGPU(
     rowCandidateCapacity, fineCandidateCapacity, candidateCapacity, candidateBlockCapacity,
     identityCapacity: compact.identityCapacity, hashCapacity: compact.hashCapacity,
     faceCellCapacity, faceCapacity, faceBytes,
-    faceAdjacencyStride, faceAdjacencyBytes, faceFrontierBytes, seedBvhBytes, seedCompactBytes, directAirVectorBytes,
+    faceAdjacencyStride, faceAdjacencyBytes, faceFrontierBytes, directAirVectorBytes,
     faceArenaBytes: faceAdjacencyBytes + directAirVectorBytes,
     support, records, scratchWords,
     scratchBytes, indirectBytes, offsets: Object.freeze(offsets),
-    allocatedBytes: support.totalBytes + records.allocatedBytes + 4 * faceBytes + faceAdjacencyBytes + faceFrontierBytes + seedBvhBytes + seedCompactBytes + directAirVectorBytes
+    allocatedBytes: support.totalBytes + records.allocatedBytes + 3 * faceBytes + faceAdjacencyBytes + faceFrontierBytes + directAirVectorBytes
       + scratchBytes + indirectBytes + 512 });
 }
 
@@ -856,14 +821,11 @@ export class WebGPUOctreeAirVelocitySupportProducer {
   readonly indirect: GPUBuffer;
   readonly faceA: GPUBuffer;
   readonly faceB: GPUBuffer;
-  readonly previousFaces: GPUBuffer;
   readonly incidentFaces: GPUBuffer;
   /** Adjacency records followed by the direct-air staging vectors; see
    * `OctreeAirVelocitySupportGPUPlan.faceArenaBytes`. */
   readonly faceAdjacency: GPUBuffer;
   readonly faceFrontier: GPUBuffer;
-  readonly seedBvh: GPUBuffer;
-  readonly seedCompact: GPUBuffer;
   /**
    * One `STORAGE | INDIRECT | COPY_SRC` arena per schedule-producing kernel,
    * each laid out exactly like `indirect` so a record keeps its canonical
@@ -936,8 +898,7 @@ export class WebGPUOctreeAirVelocitySupportProducer {
     for (const [label, bytes] of [["support", this.plan.support.totalBytes],
       ["record", this.plan.records.allocatedBytes], ["scratch", this.plan.scratchBytes],
       ["face", this.plan.faceBytes], ["face-arena", this.plan.faceArenaBytes],
-      ["face-frontier", this.plan.faceFrontierBytes], ["seed-bvh", this.plan.seedBvhBytes],
-      ["seed-compact", this.plan.seedCompactBytes]] as const) {
+      ["face-frontier", this.plan.faceFrontierBytes]] as const) {
       if (bytes > maximumBinding) throw new RangeError(`Air-support GPU ${label} arena exceeds binding limits`);
     }
     const storage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST;
@@ -953,8 +914,6 @@ export class WebGPUOctreeAirVelocitySupportProducer {
       size: this.plan.faceBytes, usage: storage });
     this.faceB = device.createBuffer({ label: "Structured ordinary-face extension B",
       size: this.plan.faceBytes, usage: storage });
-    this.previousFaces = device.createBuffer({ label: "Previous structured ordinary-face winners",
-      size: this.plan.faceBytes, usage: storage });
     this.incidentFaces = device.createBuffer({ label: "Retained missing incident-face closure",
       size: this.plan.faceBytes, usage: storage });
     this.faceAdjacency = device.createBuffer({
@@ -962,10 +921,6 @@ export class WebGPUOctreeAirVelocitySupportProducer {
       size: this.plan.faceArenaBytes, usage: storage });
     this.faceFrontier = device.createBuffer({ label: "Structured ordinary-face changed frontier",
       size: this.plan.faceFrontierBytes, usage: storage });
-    this.seedBvh = device.createBuffer({ label: "Structured ordinary-face seed BVH",
-      size: this.plan.seedBvhBytes, usage: storage });
-    this.seedCompact = device.createBuffer({ label: "Structured ordinary-face compact seeds",
-      size: this.plan.seedCompactBytes, usage: storage });
     this.indirect = device.createBuffer({ label: "Structured air-support indirect schedules",
       size: this.plan.indirectBytes, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.INDIRECT });
     this.dispatchArenas = Object.freeze(Object.fromEntries(
@@ -1017,7 +972,6 @@ export class WebGPUOctreeAirVelocitySupportProducer {
       [18, this.inputs.liquidMask], [19, this.faceA], [20, this.faceB],
       [21, structured.authority],
       [23, this.faceAdjacency], [24, this.arena], [29, this.faceFrontier], [30, this.incidentFaces],
-      [32, this.seedBvh], [33, this.previousFaces], [34, this.seedCompact],
       ...(this.inputs.fineSources ? [[25, this.inputs.fineSources[0].metadata],
         [26, this.inputs.fineSources[0].worklist], [27, this.inputs.fineSources[0].samples]] as const : []),
     ]);
@@ -1147,7 +1101,8 @@ export class WebGPUOctreeAirVelocitySupportProducer {
     gravityDt: readonly [number, number, number] = [0, 0, 0],
     changedFrontier = octreeAirSupportChangedFrontierEnabled(),
     compactFineCells = fineSlot !== undefined,
-    indirectFrontierGate = octreeAirSupportIndirectFrontierGateEnabled()): ArrayBuffer {
+    indirectFrontierGate = octreeAirSupportIndirectFrontierGateEnabled(),
+    retainedGraph = octreeAirSupportRetainedGraphEnabled()): ArrayBuffer {
     if (!Number.isSafeInteger(expectedEpoch) || expectedEpoch < 1 || expectedEpoch > 0xffff_ffff) {
       throw new RangeError("Air-support expected epoch must be a published uint32 generation");
     }
@@ -1176,7 +1131,8 @@ export class WebGPUOctreeAirVelocitySupportProducer {
       this.inputs.structured.plan.offsets.rowSlotSigns,
       this.inputs.structured.plan.offsets.rowCatalogSlots,
       (this.publicationCount > 0 ? 1 : 0) | (changedFrontier ? 2 : 0)
-        | (compactFineCells ? 4 : 0) | (indirectFrontierGate ? 8 : 0),
+        | (compactFineCells ? 4 : 0) | (indirectFrontierGate ? 8 : 0)
+        | (changedFrontier && retainedGraph ? 16 : 0),
       this.plan.faceAdjacencyStride,
       this.plan.support.ownerDirectoryOffsetWords,
       this.plan.fineCandidateOffset,
@@ -1372,47 +1328,24 @@ export class WebGPUOctreeAirVelocitySupportProducer {
       pass.setPipeline(this.pipelines.validateAirSupportFrontierReciprocity!);
       pass.setBindGroup(0, groups.validateAirSupportFrontierReciprocity!);
       pass.dispatchWorkgroupsIndirect(indirectFor(60), 60);
-      pass.setPipeline(this.pipelines.initializeAirSupportComponents!);
-      pass.setBindGroup(0, groups.initializeAirSupportComponents!);
-      pass.dispatchWorkgroups(Math.ceil(this.plan.faceCellCapacity / 256));
-      for (let round = 0; round < OCTREE_AIR_SUPPORT_COMPONENT_ROUNDS; round += 1) {
-        pass.setPipeline(this.pipelines.hookAirSupportComponents!);
-        pass.setBindGroup(0, groups.hookAirSupportComponents!);
-        pass.dispatchWorkgroups(Math.ceil(this.plan.faceCellCapacity / 256));
-        pass.setPipeline(this.pipelines.compressAirSupportComponents!);
-        pass.setBindGroup(0, groups.compressAirSupportComponents!);
-        pass.dispatchWorkgroups(Math.ceil(this.plan.faceCellCapacity / 256));
-      }
-    }
-    if (changedFrontier) {
-      pass.setPipeline(this.pipelines.preservePreviousAirSupportFaces!);
-      pass.setBindGroup(0, groups.preservePreviousAirSupportFaces!);
-      pass.dispatchWorkgroupsIndirect(indirectFor(48), 48);
     }
     pass.setPipeline(this.pipelines.seedAirSupportFaces!); pass.setBindGroup(0, groups.seedAirSupportFaces!);
     pass.dispatchWorkgroupsIndirect(indirectFor(48), 48);
     if (changedFrontier) {
+      pass.setPipeline(this.pipelines.seedRetainedAirSupportFaces!);
+      pass.setBindGroup(0, groups.seedRetainedAirSupportFaces!);
+      pass.dispatchWorkgroupsIndirect(indirectFor(48), 48);
       pass.setPipeline(this.pipelines.compactAirSupportSeedFrontier!);
       pass.setBindGroup(0, groups.compactAirSupportSeedFrontier!);
       pass.dispatchWorkgroupsIndirect(indirectFor(48), 48);
-      pass.setPipeline(this.pipelines.clearAirSupportSeedBvh!);
-      pass.setBindGroup(0, groups.clearAirSupportSeedBvh!);
-      pass.dispatchWorkgroups(Math.ceil(Math.max(this.plan.faceCellCapacity,
-        3 * OCTREE_AIR_SUPPORT_BVH_TOP_LEAVES) / 256));
-      pass.setPipeline(this.pipelines.buildAirSupportSeedBvhBlocks!);
-      pass.setBindGroup(0, groups.buildAirSupportSeedBvhBlocks!);
-      pass.dispatchWorkgroups(Math.ceil((4 * this.plan.faceCellCapacity)
-        / OCTREE_AIR_SUPPORT_BVH_BLOCK_FACE_SLOTS), 3);
-      pass.setPipeline(this.pipelines.prefixAirSupportSeedBvhBlocks!);
-      pass.setBindGroup(0, groups.prefixAirSupportSeedBvhBlocks!);
-      pass.dispatchWorkgroups(1, 3);
-      pass.setPipeline(this.pipelines.scatterAirSupportSeedBvhItems!);
-      pass.setBindGroup(0, groups.scatterAirSupportSeedBvhItems!);
-      pass.dispatchWorkgroups(Math.ceil((4 * this.plan.faceCellCapacity)
-        / OCTREE_AIR_SUPPORT_BVH_BLOCK_FACE_SLOTS), 3);
-      pass.setPipeline(this.pipelines.buildAirSupportSeedBvhTop!);
-      pass.setBindGroup(0, groups.buildAirSupportSeedBvhTop!);
-      pass.dispatchWorkgroups(1, 3);
+      // On an admitted same-topology publication, the winning seed identity
+      // and squared distance of every settled face are immutable. Refresh the
+      // seed values and update each retained carrier directly; no graph wave
+      // can change its ordering tuple. Fresh publications still compact seeds
+      // and author the ordinary sparse march schedule below.
+      pass.setPipeline(this.pipelines.refreshRetainedAirSupportFaceValues!);
+      pass.setBindGroup(0, groups.refreshRetainedAirSupportFaceValues!);
+      pass.dispatchWorkgroupsIndirect(indirectFor(60), 60);
       pass.setPipeline(this.pipelines.finalizeRetainedAirSupportMarchSchedule!);
       pass.setBindGroup(0, groups.finalizeRetainedAirSupportMarchSchedule!);
       pass.dispatchWorkgroups(1);
@@ -1425,18 +1358,75 @@ export class WebGPUOctreeAirVelocitySupportProducer {
       }
     }
     broker.fence("Section 5 ordinary-face seeds published");
+    if (changedFrontier) {
+      // The retained refresh publishes a zero schedule; a fresh publication
+      // republishes the original face schedule. That GPU decision needs a
+      // visibility boundary before the march reads it, and the explicit fence
+      // above already is one -- these publications ride it in both arms, which
+      // is why the staged copies here were already idempotent.
+      publish(32, [4], "march", "", false);
+      if (indirectFrontierGate) publish(10, [0, 1, 2], "march", "", false);
+      broker.clearBuffer(this.scratch, 32 * 4, 6 * 4);
+    }
     pass = broker.compute({ label: siteLabel(changedFrontier
       ? "March Section 5 sparse changed frontier to a fixed point"
       : "March Section 5 fixed domain-wide oracle to a fixed point") });
+    // One workgroup owns each independent velocity-axis graph. Seeds authored
+    // the initial queues; every subsequent queue contains only faces whose
+    // value actually changed. The shader expands those changes through the
+    // reciprocal incidence graph, deduplicates destinations on the GPU, and
+    // stops only when the next changed queue is empty. Thus settled and
+    // disconnected air never enters another relaxation wave, while the same
+    // |V_axis| proof bound and final no-change ledger remain authoritative.
     if (changedFrontier) {
-      // Every (32-row tile, axis) evaluates the exact closest-seed transform
-      // independently. There is no propagation order or convergence phase.
+      // Occupancy-wide sparse waves keep the GPU fed while the frontier is
+      // broad. Each phase maps packed (axis,local-frontier-index) lanes across
+      // the live face schedule; settled faces never execute extendFace. The
+      // one-thread advance only publishes counts/reset state between dispatch
+      // barriers. It cannot safely be folded into the last commit workgroup:
+      // WGSL has no device-wide barrier, and a hand-rolled last-workgroup latch
+      // would allow the winner to observe incomplete storage writes. Factor 1
+      // instead lets this proven singleton publish the next phase, singleton,
+      // and residual-tail indirect records. The persistent tail remains the
+      // exact unbounded authority.
+      const frontierWaves = octreeAirSupportParallelFrontierWaves();
+      for (let wave = 0; wave < frontierWaves; wave += 1) {
+        const waveOffset = indirectFrontierGate ? 0 : 48;
+        pass.setPipeline(this.pipelines.expandAirSupportChangedFrontier!);
+        pass.setBindGroup(0, groups.expandAirSupportChangedFrontier!);
+        pass.dispatchWorkgroupsIndirect(indirectFor(waveOffset), waveOffset);
+        pass.setPipeline(this.pipelines.relaxAirSupportChangedFrontier!);
+        pass.setBindGroup(0, groups.relaxAirSupportChangedFrontier!);
+        pass.dispatchWorkgroupsIndirect(indirectFor(waveOffset), waveOffset);
+        pass.setPipeline(this.pipelines.commitAirSupportChangedFrontier!);
+        pass.setBindGroup(0, groups.commitAirSupportChangedFrontier!);
+        pass.dispatchWorkgroupsIndirect(indirectFor(waveOffset), waveOffset);
+        pass.setPipeline(this.pipelines.advanceAirSupportChangedFrontier!);
+        // A wave publishes into the arena the NEXT wave dispatches from, never
+        // the one it is reading, so the singleton alternates between two
+        // frontier arenas. Nothing alternates on the staged path, where the
+        // schedules travel by copy.
+        const alternate = directArgs && (wave & 1) === 1;
+        pass.setBindGroup(0, alternate
+          ? this.frontierAlternateGroups![parameterSlot]
+          : groups.advanceAirSupportChangedFrontier!);
+        if (indirectFrontierGate) {
+          pass.dispatchWorkgroupsIndirect(indirectFor(12), 12);
+          // The singleton's storage-authored schedules need a usage-scope
+          // boundary before becoming INDIRECT. It is deliberately host encoded;
+          // it replaces an unsafe cross-workgroup completion latch.
+          publish(10, [0, 1, 2], alternate ? "frontierB" : "frontierA",
+            "air-support frontier wave schedules published");
+          pass = broker.compute({ label: siteLabel(
+            "March Section 5 sparse changed frontier to a fixed point") });
+        } else {
+          pass.dispatchWorkgroups(1);
+        }
+      }
       pass.setPipeline(this.pipelines.marchAirSupportFacesChangedFrontier!);
       pass.setBindGroup(0, groups.marchAirSupportFacesChangedFrontier!);
-      const faceAxisCapacity = 4 * this.plan.faceCellCapacity;
-      const facePacketWidth = Math.min(256, faceAxisCapacity);
-      pass.dispatchWorkgroups(facePacketWidth,
-        Math.ceil(faceAxisCapacity / facePacketWidth), 3);
+      if (indirectFrontierGate) pass.dispatchWorkgroupsIndirect(indirectFor(24), 24);
+      else pass.dispatchWorkgroups(3);
     } else {
       for (let wave = 0; wave < OCTREE_AIR_SUPPORT_GPU_WIDE_MARCH_WAVES; wave += 1) {
         if (wave % OCTREE_AIR_SUPPORT_GPU_WIDE_MARCH_GROUP === 0) {
@@ -1487,7 +1477,7 @@ export class WebGPUOctreeAirVelocitySupportProducer {
     if (this.destroyed) return;
     this.destroyed = true;
     if (this.ownsArena) this.arena.destroy();
-    for (const buffer of [this.recordArena, this.scratch, this.faceA, this.faceB, this.previousFaces, this.incidentFaces, this.faceAdjacency, this.faceFrontier, this.seedBvh, this.seedCompact,
+    for (const buffer of [this.recordArena, this.scratch, this.faceA, this.faceB, this.incidentFaces, this.faceAdjacency, this.faceFrontier,
       this.indirect, this.ownerParams, ...this.params,
       ...Object.values(this.dispatchArenas)]) buffer.destroy();
   }
@@ -1563,9 +1553,6 @@ ${fineLevelSetPackedSampleWGSL("fineSamples")}
 // face-capacity queue banks, then one generation mark per face slot.
 @group(0)@binding(29)var<storage,read_write>faceFrontier:array<atomic<u32>>;
 @group(0)@binding(30)var<storage,read_write>incidentFaces:array<vec4u>;
-@group(0)@binding(32)var<storage,read_write>seedBvh:array<vec4u>;
-@group(0)@binding(33)var<storage,read_write>previousFaces:array<vec4u>;
-@group(0)@binding(34)var<storage,read_write>seedCompact:array<u32>;
 // The per-phase direct dispatch arena of whichever schedule producer is
 // running. Every entry point that calls writeDispatch reaches it, and the host
 // binds each of them a DIFFERENT buffer, so no compute pass ever writes the
@@ -1785,11 +1772,10 @@ fn demand(row:u32,cell:i32,size:u32,flags:u32,tagWord:u32,item:u32){
   let reuseTopology=p.reuseTopology!=0u&&(existingReady||identityReady)&&precedingSupportRows<=p.supportCapacity;
   sw(47u,select(0u,1u,reuseTopology));sw(48u,select(0u,precedingSupportRows,reuseTopology));
   let precedingSeeds=atomicLoad(&supportArena[p.airControlOffset+11u]);
-  // Hashes, tags, adjacency, seed membership, and face centres are structural
-  // and may cross an exact-identity epoch. A settled Section 5 solution may be
-  // retained only within the same receipt: then its seed is provably still at
-  // the minimum distance and temporal coherence chooses the same member of an
-  // otherwise unspecified equidistant set.
+  // Hashes, tags, and adjacency are structural and may cross an exact-identity
+  // epoch. The settled Section 5 solution may not: betterFace uses the live
+  // seed magnitude to break equal-distance ties, so refreshing only the old
+  // winner is equivalent to a fresh march only within the same receipt.
   let retainedGraph=existingReady&&(p.capturePreceding&16u)!=0u
     &&atomicLoad(&faceFrontier[11u])==RETAINED_GRAPH_VALID
     &&precedingSeeds<=3u*p.candidateCapacity&&precedingSeeds<=p.faceCapacity;
@@ -2650,12 +2636,11 @@ fn signedFaceCenterQuarter(faceRow:u32,axis:u32,quadrant:u32,positive:bool)->vec
   return center;}
 
 fn frontierAxisCapacity()->u32{return 4u*p.faceCellCapacity;}
-fn frontierSeedBase(axis:u32)->u32{return 16u+axis*frontierAxisCapacity();}
-fn frontierQueueBase(bank:u32,axis:u32)->u32{return frontierSeedBase(axis)+bank*0u;}
-fn frontierMark(axis:u32,faceRow:u32)->u32{return frontierSeedBase(axis)+faceRow;}
+fn frontierQueueBase(bank:u32,axis:u32)->u32{return 16u+bank*p.faceCapacity+axis*frontierAxisCapacity();}
+fn frontierMarkBase()->u32{return 16u+2u*p.faceCapacity;}
 fn appendSeedFrontier(axis:u32,item:u32){let at=atomicAdd(&faceFrontier[axis],1u);
   if(at>=frontierAxisCapacity()){fail(item,ERROR_CAPACITY);return;}
-  atomicStore(&faceFrontier[frontierSeedBase(axis)+at],item);}
+  atomicStore(&faceFrontier[frontierQueueBase(0u,axis)+at],item);}
 
 var<workgroup> seedCounts:array<u32,256>;
 fn airSupportSeedCarrier(item:u32)->vec4u{let faceRow=item/${STRUCTURED_AIR_SUPPORT_OWNED_FACE_SLOTS}u;
@@ -2676,16 +2661,10 @@ fn airSupportSeedCarrier(item:u32)->vec4u{let faceRow=item/${STRUCTURED_AIR_SUPP
   if(seed.y>0.){return vec4u(bitcast<u32>(seed.x),0u,item,1u);}
   return vec4u(0u,INVALID,INVALID,0u);}
 
-@compute @workgroup_size(256)fn preservePreviousAirSupportFaces(
-  @builtin(local_invocation_index)lane:u32,@builtin(workgroup_id)wid:vec3u,
-  @builtin(num_workgroups)groups:vec3u){let item=linearItem(wid,lane,groups,256u);
-  if(item<s(29u)&&s(0u)==0u&&s(47u)!=0u&&s(50u)==0u){previousFaces[item]=faceA[item];}}
-
 @compute @workgroup_size(256)fn seedAirSupportFaces(@builtin(local_invocation_index)lane:u32,
   @builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)groups:vec3u){let item=linearItem(wid,lane,groups,256u);var seeded=0u;
-  if(item<s(29u)&&s(0u)==0u&&s(50u)==0u){let empty=vec4u(0u,INVALID,INVALID,0u);
-    faceA[item]=empty;faceB[item]=empty;let carrier=airSupportSeedCarrier(item);
-    if(carrier.w!=0u){faceA[item]=carrier;faceB[item]=carrier;seeded=1u;}}
+  if(item<s(29u)&&s(0u)==0u&&s(50u)==0u){faceA[item]=vec4u(0u,INVALID,INVALID,0u);
+    let carrier=airSupportSeedCarrier(item);if(carrier.w!=0u){faceA[item]=carrier;seeded=1u;}}
   seedCounts[lane]=seeded;workgroupBarrier();for(var width=128u;width>0u;width>>=1u){if(lane<width){seedCounts[lane]+=seedCounts[lane+width];}workgroupBarrier();}
   if(lane==0u&&seedCounts[0]!=0u){atomicAdd(&scratch[25u],seedCounts[0]);}}
 @compute @workgroup_size(256)fn seedRetainedAirSupportFaces(@builtin(local_invocation_index)lane:u32,
@@ -2702,115 +2681,24 @@ fn airSupportSeedCarrier(item:u32)->vec4u{let faceRow=item/${STRUCTURED_AIR_SUPP
   if(lane==0u&&seedCounts[0]!=0u){atomicAdd(&scratch[25u],seedCounts[0]);}}
 @compute @workgroup_size(256)fn compactAirSupportSeedFrontier(@builtin(local_invocation_index)lane:u32,
   @builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)groups:vec3u){let item=linearItem(wid,lane,groups,256u);
-  if(item>=s(29u)||s(0u)!=0u||s(50u)!=0u){return;}
+  if(item>=s(29u)||s(0u)!=0u||s(50u)!=0u){return;}atomicStore(&faceFrontier[frontierMarkBase()+item],0u);
   if(faceA[item].w!=0u){let at=atomicAdd(&scratch[49u],1u);
-    if(at>=p.faceCapacity){fail(item,ERROR_CAPACITY);}}}
-
-// Exact component authority for the unordered closest-seed transform. Labels
-// are retained with topology; every hook round joins roots in parallel and the
-// following pointer-jump compresses all rows before the next round.
-fn airSupportComponentLabelBase()->u32{return 16u;}
-fn airSupportComponentMaskBase()->u32{return airSupportComponentLabelBase()+p.faceCellCapacity;}
-fn airSupportComponentLabel(faceRow:u32)->u32{return atomicLoad(&faceFrontier[airSupportComponentLabelBase()+faceRow]);}
-fn hookAirSupportComponentEdge(faceRow:u32,edge:u32,count:u32){if(edge>=count){return;}
-  let other=adjacencyIncident(faceRow,edge);let faceRows=s(2u)+s(8u);if(other>=faceRows){return;}
-  let a=airSupportComponentLabel(faceRow);let b=airSupportComponentLabel(other);
-  let high=max(a,b);let low=min(a,b);atomicMin(&faceFrontier[airSupportComponentLabelBase()+high],low);}
-@compute @workgroup_size(256)fn initializeAirSupportComponents(@builtin(global_invocation_id)gid:vec3u){let faceRow=gid.x;
-  if(faceRow>=p.faceCellCapacity||s(0u)!=0u||s(47u)!=0u){return;}
-  atomicStore(&faceFrontier[airSupportComponentLabelBase()+faceRow],faceRow);}
-@compute @workgroup_size(256)fn hookAirSupportComponents(@builtin(global_invocation_id)gid:vec3u){let faceRow=gid.x;
-  let faceRows=s(2u)+s(8u);if(faceRow>=faceRows||s(0u)!=0u||s(47u)!=0u){return;}
-  let count=adjacencyIncidentCount(faceRow);if(count>${OCTREE_GENERATED_POWER_CATALOG_MANIFEST.maximumFaceIncidence}u){fail(faceRow,ERROR_CAPACITY);return;}
-  ${octreeAirSupportComponentHookCallsWGSL}}
-@compute @workgroup_size(256)fn compressAirSupportComponents(@builtin(global_invocation_id)gid:vec3u){let faceRow=gid.x;
-  let faceRows=s(2u)+s(8u);if(faceRow>=faceRows||s(0u)!=0u||s(47u)!=0u){return;}
-  let parent=airSupportComponentLabel(faceRow);if(parent>=faceRows){failTopology(9u,faceRow);return;}
-  let grand=airSupportComponentLabel(parent);atomicStore(&faceFrontier[airSupportComponentLabelBase()+faceRow],grand);}
-
-const AIR_SUPPORT_BVH_EMPTY:u32=0xffffffffu;
-const AIR_SUPPORT_BVH_MIXED:u32=0xfffffffeu;
-fn airSupportBvhNodeBase(axis:u32,node:u32)->u32{return 2u*(axis*${2 * OCTREE_AIR_SUPPORT_BVH_TOP_LEAVES}u+node);}
-fn airSupportBvhBlockOffsetAt(axis:u32,block:u32)->u32{return axis*${OCTREE_AIR_SUPPORT_BVH_TOP_LEAVES + 1}u+block;}
-fn airSupportBvhCompactItemBase()->u32{return ${3 * (OCTREE_AIR_SUPPORT_BVH_TOP_LEAVES + 1)}u;}
-fn airSupportCompactSeedItem(axis:u32,index:u32)->u32{return seedCompact[
-  airSupportBvhCompactItemBase()+axis*(4u*p.faceCellCapacity)+index];}
-fn airSupportBvhLeafSeedCount(axis:u32,block:u32)->u32{let at=airSupportBvhNodeBase(
-  axis,${OCTREE_AIR_SUPPORT_BVH_TOP_LEAVES}u+block)+1u;let count=seedBvh[at].w;
-  return select(count,0u,count==INVALID);}
-fn clearAirSupportBvhNode(axis:u32,node:u32){let at=airSupportBvhNodeBase(axis,node);
-  seedBvh[at]=vec4u(0xffffffffu,0xffffffffu,0xffffffffu,AIR_SUPPORT_BVH_EMPTY);
-  seedBvh[at+1u]=vec4u(0u,0u,0u,INVALID);}
-@compute @workgroup_size(256)fn clearAirSupportSeedBvh(@builtin(global_invocation_id)gid:vec3u){let local=gid.x;
-  if(s(0u)!=0u||s(50u)!=0u){return;}
-  if(local<p.faceCellCapacity){atomicStore(&faceFrontier[airSupportComponentMaskBase()+local],0u);}
-  if(local<${3 * OCTREE_AIR_SUPPORT_BVH_TOP_LEAVES}u){let axis=local/${OCTREE_AIR_SUPPORT_BVH_TOP_LEAVES}u;
-    let leaf=local%${OCTREE_AIR_SUPPORT_BVH_TOP_LEAVES}u;clearAirSupportBvhNode(axis,${OCTREE_AIR_SUPPORT_BVH_TOP_LEAVES}u+leaf);}}
-
-var<workgroup> bvhMinimum:array<vec4u,${OCTREE_AIR_SUPPORT_BVH_BLOCK_FACE_SLOTS}>;
-var<workgroup> bvhMaximum:array<vec4u,${OCTREE_AIR_SUPPORT_BVH_BLOCK_FACE_SLOTS}>;
-var<workgroup> bvhSeedCount:array<u32,${OCTREE_AIR_SUPPORT_BVH_BLOCK_FACE_SLOTS}>;
-var<workgroup> bvhPrefix:array<u32,256>;
-fn mergeAirSupportBvhPair(left:vec4u,leftMax:vec4u,right:vec4u,rightMax:vec4u)->array<vec4u,2>{
-  var result:array<vec4u,2>;if(left.w==AIR_SUPPORT_BVH_EMPTY){result[0]=right;result[1]=rightMax;return result;}
-  if(right.w==AIR_SUPPORT_BVH_EMPTY){result[0]=left;result[1]=leftMax;return result;}
-  result[0]=vec4u(min(left.xyz,right.xyz),select(AIR_SUPPORT_BVH_MIXED,left.w,left.w==right.w));
-  result[1]=vec4u(max(leftMax.xyz,rightMax.xyz),INVALID);return result;}
-@compute @workgroup_size(${OCTREE_AIR_SUPPORT_BVH_BLOCK_FACE_SLOTS})fn buildAirSupportSeedBvhBlocks(
-  @builtin(local_invocation_index)lane:u32,@builtin(workgroup_id)wid:vec3u){let axis=wid.y;
-  let local=wid.x*${OCTREE_AIR_SUPPORT_BVH_BLOCK_FACE_SLOTS}u+lane;let faceRow=local/4u;let quadrant=local%4u;
-  let faceRows=s(2u)+s(8u);var minimum=vec4u(0xffffffffu,0xffffffffu,0xffffffffu,AIR_SUPPORT_BVH_EMPTY);
-  var maximum=vec4u(0u,0u,0u,INVALID);var seedCount=0u;
-  if(axis<3u&&faceRow<faceRows&&s(0u)==0u&&s(50u)==0u){let item=faceRow*${STRUCTURED_AIR_SUPPORT_OWNED_FACE_SLOTS}u+4u*axis+quadrant;
-    let seed=faceB[item];if(seed.w!=0u&&seed.y==0u&&seed.z==item){let center=vec3u(faceCenterQuarter(item));let component=airSupportComponentLabel(faceRow);
-      minimum=vec4u(center,component);maximum=vec4u(center,item);seedCount=1u;
-      atomicOr(&faceFrontier[airSupportComponentMaskBase()+component],1u<<axis);}}
-  bvhMinimum[lane]=minimum;bvhMaximum[lane]=maximum;bvhSeedCount[lane]=seedCount;workgroupBarrier();
-  for(var width=${OCTREE_AIR_SUPPORT_BVH_BLOCK_FACE_SLOTS / 2}u;width>0u;width>>=1u){if(lane<width){let merged=mergeAirSupportBvhPair(
-      bvhMinimum[lane],bvhMaximum[lane],bvhMinimum[lane+width],bvhMaximum[lane+width]);
-      bvhMinimum[lane]=merged[0];bvhMaximum[lane]=merged[1];bvhSeedCount[lane]+=bvhSeedCount[lane+width];}workgroupBarrier();}
-  if(lane==0u&&axis<3u&&wid.x<${OCTREE_AIR_SUPPORT_BVH_TOP_LEAVES}u){let at=airSupportBvhNodeBase(axis,${OCTREE_AIR_SUPPORT_BVH_TOP_LEAVES}u+wid.x);
-    seedBvh[at]=bvhMinimum[0];seedBvh[at+1u]=vec4u(bvhMaximum[0].xyz,bvhSeedCount[0]);}}
-
-@compute @workgroup_size(256)fn prefixAirSupportSeedBvhBlocks(
-  @builtin(local_invocation_index)lane:u32,@builtin(workgroup_id)wid:vec3u){let axis=wid.y;
-  var blockTotal=0u;${octreeAirSupportBvhPrefixChunkLoadsWGSL}
-  bvhPrefix[lane]=blockTotal;workgroupBarrier();${octreeAirSupportBvhPrefixScanWGSL}
-  var cursor=0u;if(lane>0u){cursor=bvhPrefix[lane-1u];}${octreeAirSupportBvhPrefixChunkStoresWGSL}
-  if(lane==255u){seedCompact[airSupportBvhBlockOffsetAt(axis,${OCTREE_AIR_SUPPORT_BVH_TOP_LEAVES}u)]=cursor;}}
-
-@compute @workgroup_size(${OCTREE_AIR_SUPPORT_BVH_BLOCK_FACE_SLOTS})fn scatterAirSupportSeedBvhItems(
-  @builtin(local_invocation_index)lane:u32,@builtin(workgroup_id)wid:vec3u){let axis=wid.y;
-  let local=wid.x*${OCTREE_AIR_SUPPORT_BVH_BLOCK_FACE_SLOTS}u+lane;let faceRow=local/4u;let quadrant=local%4u;
-  let faceRows=s(2u)+s(8u);var present=0u;var seedItem=INVALID;
-  if(axis<3u&&faceRow<faceRows&&s(0u)==0u&&s(50u)==0u){seedItem=faceRow*${STRUCTURED_AIR_SUPPORT_OWNED_FACE_SLOTS}u+4u*axis+quadrant;
-    let seed=faceB[seedItem];present=select(0u,1u,seed.w!=0u&&seed.y==0u&&seed.z==seedItem);}
-  bvhSeedCount[lane]=present;workgroupBarrier();${octreeAirSupportBvhLocalSeedScanWGSL}
-  if(present!=0u){let rank=bvhSeedCount[lane]-1u;let begin=seedCompact[airSupportBvhBlockOffsetAt(axis,wid.x)];
-    seedCompact[airSupportBvhCompactItemBase()+axis*(4u*p.faceCellCapacity)+begin+rank]=seedItem;}}
-
-fn mergeAirSupportBvhNode(axis:u32,node:u32){let leftAt=airSupportBvhNodeBase(axis,2u*node);
-  let rightAt=airSupportBvhNodeBase(axis,2u*node+1u);
-  let left=seedBvh[leftAt];let leftMax=seedBvh[leftAt+1u];
-  let right=seedBvh[rightAt];let rightMax=seedBvh[rightAt+1u];
-  let merged=mergeAirSupportBvhPair(left,leftMax,right,rightMax);let at=airSupportBvhNodeBase(axis,node);
-  seedBvh[at]=merged[0];seedBvh[at+1u]=vec4u(merged[1].xyz,INVALID);}
-@compute @workgroup_size(256)fn buildAirSupportSeedBvhTop(@builtin(local_invocation_index)lane:u32,
-  @builtin(workgroup_id)wid:vec3u){let axis=wid.y;
-  ${octreeAirSupportBvhTopReductionWGSL}}
+    if(at>=3u*p.candidateCapacity){fail(item,ERROR_CAPACITY);return;}
+    appendSeedFrontier((item%${STRUCTURED_AIR_SUPPORT_OWNED_FACE_SLOTS}u)/4u,item);}}
 
 // Same topology and liquid-mask authority imply the closest-source ordering
 // tuple (squared distance, seed identity) is immutable. Only the projected
-// velocity carried by each seed is dynamic. The exact published face schedule
-// assigns one invocation to each carrier, so no row lane serializes twelve
-// dependent storage gathers. Unchanged values do not write, and no
-// domain/frontier relaxation is needed.
+// velocity carried by each seed is dynamic. Each row refreshes its twelve
+// settled carriers from the newly staged value of its retained winning seed;
+// unchanged values do not write, and no domain/frontier relaxation is needed.
 @compute @workgroup_size(256)fn refreshRetainedAirSupportFaceValues(@builtin(local_invocation_index)lane:u32,
-  @builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)groups:vec3u){let item=linearItem(wid,lane,groups,256u);
-  if(item>=s(29u)||s(0u)!=0u||s(50u)==0u){return;}var carrier=faceA[item];
-  if(carrier.w==0u){return;}let seedItem=carrier.z;if(seedItem>=s(29u)){failTopology(10u,item);return;}
-  let seed=faceB[seedItem];if(seed.w==0u||seed.y!=0u||seed.z!=seedItem){failTopology(10u,item);return;}
-  if(carrier.x!=seed.x){carrier.x=seed.x;faceA[item]=carrier;}}
+  @builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)groups:vec3u){let faceRow=linearItem(wid,lane,groups,256u);
+  let faceRows=s(2u)+s(8u);if(faceRow>=faceRows||s(0u)!=0u||s(50u)==0u){return;}
+  for(var local=0u;local<${STRUCTURED_AIR_SUPPORT_OWNED_FACE_SLOTS}u;local+=1u){let item=faceRow*${STRUCTURED_AIR_SUPPORT_OWNED_FACE_SLOTS}u+local;
+    var carrier=faceA[item];if(carrier.w==0u){continue;}let seedItem=carrier.z;
+    if(seedItem>=s(29u)){failTopology(10u,item);continue;}let seed=faceB[seedItem];
+    if(seed.w==0u||seed.y!=0u||seed.z!=seedItem){failTopology(10u,item);continue;}
+    if(carrier.x!=seed.x){carrier.x=seed.x;faceA[item]=carrier;}}}
 
 // Publish the next march schedule after seed recount. A retained solution must
 // reproduce exactly the preceding seed membership; any mismatch fails closed.
@@ -2984,16 +2872,10 @@ fn closestSeedFaceAt(faceRow:u32,axis:u32,quadrant:u32,positive:bool)->vec4u{
 // loop in Section 5. The per-candidate faceCenter below is now a four-word read
 // of the candidate's own adjacency record — the gather and the divisions are
 // resolved once per face row by resolveAirSupportFaceAdjacency.
-fn extendFaceCandidate(item:u32,itemCenter:vec3i,faceCount:u32,source:u32,readA:bool,best:vec4u)->vec4u{
-  if(source>=faceCount){return best;}var candidate=faceBank(source,readA);if(candidate.w!=0u){
-    let distanceSquared=${octreeAirSupportMarchFastPath
-      ? "faceDistanceSquaredFrom(itemCenter,candidate.z)"
-      : "faceDistanceSquared(item,candidate.z)"};
-    if(!finiteValue(distanceSquared)){fail(item,ERROR_SOURCE);return best;}candidate.y=bitcast<u32>(distanceSquared);}
-  return select(best,candidate,betterFace(item,candidate,best));}
 fn extendFace(item:u32,readA:bool)->bool{let current=faceBank(item,readA);
   let faceRow=item/${STRUCTURED_AIR_SUPPORT_OWNED_FACE_SLOTS}u;let local=item%${STRUCTURED_AIR_SUPPORT_OWNED_FACE_SLOTS}u;let axis=local/4u;var best=current;
-  let faceCount=s(29u);let itemCenter=faceCenterQuarter(item);
+  let faceCount=s(29u);${octreeAirSupportMarchFastPath
+    ? "let itemCenter=faceCenterQuarter(item);" : ""}
   let incidence=adjacencyIncidentCount(faceRow);if(incidence>${OCTREE_GENERATED_POWER_CATALOG_MANIFEST.maximumFaceIncidence}u){fail(item,ERROR_CAPACITY);return false;}
   // MEASURED: this 30x4 candidate scan is only ~10% of this pass.
   //
@@ -3015,24 +2897,20 @@ fn extendFace(item:u32,readA:bool)->bool{let current=faceBank(item,readA);
   // fixed-point iteration measures its own divergence, not the loop.
   for(var localFace=0u;localFace<incidence;localFace+=1u){let otherRow=adjacencyIncident(faceRow,localFace);
     if(otherRow==INVALID){continue;}let sourceBase=otherRow*${STRUCTURED_AIR_SUPPORT_OWNED_FACE_SLOTS}u+4u*axis;
-    // Four fixed calls are the compiled patch program. There is no runtime
-    // quadrant iterator or address derivation inside the frontier wave.
-    best=extendFaceCandidate(item,itemCenter,faceCount,sourceBase,readA,best);
-    best=extendFaceCandidate(item,itemCenter,faceCount,sourceBase+1u,readA,best);
-    best=extendFaceCandidate(item,itemCenter,faceCount,sourceBase+2u,readA,best);
-    best=extendFaceCandidate(item,itemCenter,faceCount,sourceBase+3u,readA,best);}
+    for(var quadrant=0u;quadrant<4u;quadrant+=1u){let source=sourceBase+quadrant;
+      if(source>=faceCount){continue;}var candidate=faceBank(source,readA);if(candidate.w!=0u){
+        // candidate.z is the ORIGINAL seed patch, preserved verbatim through
+        // every copy, so the carrier metric is the true Euclidean distance to
+        // the free surface — the reference lane's closest-point transform.
+        // Accumulating per-hop path length instead made the metric an
+        // axis-graph geodesic (Manhattan-like), which under-drives diagonal
+        // spreading and squares off the dam front.
+        let distanceSquared=${octreeAirSupportMarchFastPath
+          ? "faceDistanceSquaredFrom(itemCenter,candidate.z)"
+          : "faceDistanceSquared(item,candidate.z)"};
+        if(!finiteValue(distanceSquared)){fail(item,ERROR_SOURCE);continue;}candidate.y=bitcast<u32>(distanceSquared);}
+      if(betterFace(item,candidate,best)){best=candidate;}}}
   let changed=any(best!=current);if(readA){faceB[item]=best;}else{faceA[item]=best;}return changed;}
-
-// One row-axis is the frontier scheduling tile, but each quadrant remains an
-// independent lane so compact scheduling never serializes the expensive face
-// relaxation or reduces SIMD occupancy.
-fn frontierFaceItem(faceRow:u32,axis:u32,quadrant:u32)->u32{
-  return faceRow*${STRUCTURED_AIR_SUPPORT_OWNED_FACE_SLOTS}u+4u*axis+quadrant;}
-fn commitFrontierFace(item:u32)->bool{let proposal=faceB[item];let previous=faceA[item];
-  let changed=any(proposal!=previous);if(changed){faceA[item]=proposal;}return changed;}
-fn settledSeedRow(faceRow:u32,axis:u32)->bool{
-  let base=faceRow*${STRUCTURED_AIR_SUPPORT_OWNED_FACE_SLOTS}u+4u*axis;
-  return settledSeedFace(base)&&settledSeedFace(base+1u)&&settledSeedFace(base+2u)&&settledSeedFace(base+3u);}
 
 // Construction-stable dense oracle retained for exact A/B isolation. It is
 // not selected unless FLUID_OCTREE_AIR_SUPPORT_CHANGED_FRONTIER=0.
@@ -3089,23 +2967,18 @@ var<workgroup> frontierCurrentCount:u32;
 var<workgroup> frontierActiveCount:u32;
 var<workgroup> frontierChangedCount:u32;
 var<workgroup> frontierFailed:u32;
-fn appendFrontierDestination(axis:u32,faceRow:u32,generation:u32){
+fn appendFrontierDestination(axis:u32,item:u32,generation:u32){
   // Wave zero's frontier is every seed, and the liquid interior is seeded
   // solid, so most of its reciprocal destinations are themselves seeds. Those
   // relax to no-ops (see settledSeedFace), and dropping them here removes both
   // the dedup atomic and the destination's whole 30x4 candidate scan without
   // changing which faces the march can still reach through them: an unseeded
   // face on a liquid row keeps its queue slot exactly as before.
-  if(settledSeedRow(faceRow,axis)){return;}
-  let prior=atomicExchange(&faceFrontier[frontierMark(axis,faceRow)],generation);
+  if(settledSeedFace(item)){return;}
+  let prior=atomicExchange(&faceFrontier[frontierMarkBase()+item],generation);
   if(prior==generation){return;}let at=atomicAdd(&faceFrontier[3u+axis],1u);
-  if(at>=frontierAxisCapacity()){fail(faceRow,ERROR_CAPACITY);return;}
-  atomicStore(&faceFrontier[frontierQueueBase(1u,axis)+at],faceRow);}
-fn appendChangedFrontierRow(axis:u32,faceRow:u32,generation:u32){
-  let prior=atomicExchange(&faceFrontier[frontierMark(axis,faceRow)],generation);
-  if(prior==generation){return;}let at=atomicAdd(&faceFrontier[6u+axis],1u);
-  if(at>=frontierAxisCapacity()){fail(faceRow,ERROR_CAPACITY);return;}
-  atomicStore(&faceFrontier[frontierQueueBase(0u,axis)+at],faceRow);}
+  if(at>=frontierAxisCapacity()){fail(item,ERROR_CAPACITY);return;}
+  atomicStore(&faceFrontier[frontierQueueBase(1u,axis)+at],item);}
 
 // Packed work mapping for the occupancy-wide frontier prefix. Consecutive
 // lanes alternate axes and advance one queue slot every three lanes, avoiding
@@ -3114,35 +2987,38 @@ fn appendChangedFrontierRow(axis:u32,faceRow:u32,generation:u32){
 fn packedFrontierLane(packed:u32)->vec2u{return vec2u(packed%3u,packed/3u);}
 @compute @workgroup_size(256)fn expandAirSupportChangedFrontier(@builtin(local_invocation_index)lane:u32,
   @builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)groups:vec3u){
-  let packed=linearItem(wid,lane,groups,256u);let liveAxisCapacity=s(2u)+s(8u);
+  let packed=linearItem(wid,lane,groups,256u);let liveAxisCapacity=4u*(s(2u)+s(8u));
   if(packed>=3u*liveAxisCapacity||s(0u)!=0u||atomicLoad(&faceFrontier[10u])!=0u){return;}
   let work=packedFrontierLane(packed);let axis=work.x;let local=work.y;
   let current=atomicLoad(&faceFrontier[axis]);if(local>=current){return;}
-  let sourceRow=atomicLoad(&faceFrontier[frontierQueueBase(0u,axis)+local]);
-  if(sourceRow>=s(2u)+s(8u)){fail(sourceRow,ERROR_CAPACITY);return;}
+  let source=atomicLoad(&faceFrontier[frontierQueueBase(0u,axis)+local]);
+  let sourceRow=source/${STRUCTURED_AIR_SUPPORT_OWNED_FACE_SLOTS}u;
+  if(source>=p.faceCapacity||sourceRow>=s(2u)+s(8u)
+      ||((source%${STRUCTURED_AIR_SUPPORT_OWNED_FACE_SLOTS}u)/4u)!=axis){fail(source,ERROR_CAPACITY);return;}
   let incidence=adjacencyIncidentCount(sourceRow);
-  if(incidence>${OCTREE_GENERATED_POWER_CATALOG_MANIFEST.maximumFaceIncidence}u){fail(sourceRow,ERROR_CAPACITY);return;}
+  if(incidence>${OCTREE_GENERATED_POWER_CATALOG_MANIFEST.maximumFaceIncidence}u){fail(source,ERROR_CAPACITY);return;}
   let generation=atomicLoad(&faceFrontier[9u])+1u;
   for(var edge=0u;edge<incidence;edge+=1u){let destinationRow=adjacencyIncident(sourceRow,edge);
     if(destinationRow>=s(2u)+s(8u)){failTopology(9u,sourceRow);continue;}
-    appendFrontierDestination(axis,destinationRow,generation);}}
+    for(var quadrant=0u;quadrant<4u;quadrant+=1u){
+      appendFrontierDestination(axis,destinationRow*${STRUCTURED_AIR_SUPPORT_OWNED_FACE_SLOTS}u+4u*axis+quadrant,generation);}}}
 @compute @workgroup_size(256)fn relaxAirSupportChangedFrontier(@builtin(local_invocation_index)lane:u32,
   @builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)groups:vec3u){
   let packed=linearItem(wid,lane,groups,256u);let liveAxisCapacity=4u*(s(2u)+s(8u));
   if(packed>=3u*liveAxisCapacity||s(0u)!=0u||atomicLoad(&faceFrontier[10u])!=0u){return;}
-  let work=packedFrontierLane(packed);let axis=work.x;let rowLocal=work.y/4u;let quadrant=work.y%4u;
-  if(rowLocal>=atomicLoad(&faceFrontier[3u+axis])){return;}
-  let faceRow=atomicLoad(&faceFrontier[frontierQueueBase(1u,axis)+rowLocal]);
-  extendFace(frontierFaceItem(faceRow,axis,quadrant),true);}
+  let work=packedFrontierLane(packed);let axis=work.x;let local=work.y;
+  if(local>=atomicLoad(&faceFrontier[3u+axis])){return;}
+  let item=atomicLoad(&faceFrontier[frontierQueueBase(1u,axis)+local]);extendFace(item,true);}
 @compute @workgroup_size(256)fn commitAirSupportChangedFrontier(@builtin(local_invocation_index)lane:u32,
   @builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)groups:vec3u){
   let packed=linearItem(wid,lane,groups,256u);let liveAxisCapacity=4u*(s(2u)+s(8u));
   if(packed>=3u*liveAxisCapacity||s(0u)!=0u||atomicLoad(&faceFrontier[10u])!=0u){return;}
-  let work=packedFrontierLane(packed);let axis=work.x;let rowLocal=work.y/4u;let quadrant=work.y%4u;
-  if(rowLocal>=atomicLoad(&faceFrontier[3u+axis])){return;}
-  let faceRow=atomicLoad(&faceFrontier[frontierQueueBase(1u,axis)+rowLocal]);
-  if(commitFrontierFace(frontierFaceItem(faceRow,axis,quadrant))){
-    appendChangedFrontierRow(axis,faceRow,0x80000000u|(atomicLoad(&faceFrontier[9u])+1u));}}
+  let work=packedFrontierLane(packed);let axis=work.x;let local=work.y;
+  if(local>=atomicLoad(&faceFrontier[3u+axis])){return;}
+  let item=atomicLoad(&faceFrontier[frontierQueueBase(1u,axis)+local]);let proposal=faceB[item];let previous=faceA[item];
+  if(any(proposal!=previous)){faceA[item]=proposal;let at=atomicAdd(&faceFrontier[6u+axis],1u);
+    if(at>=frontierAxisCapacity()){fail(item,ERROR_CAPACITY);}
+    else{atomicStore(&faceFrontier[frontierQueueBase(0u,axis)+at],item);}}}
 @compute @workgroup_size(1)fn advanceAirSupportChangedFrontier(){
   var changed=0u;for(var axis=0u;axis<3u;axis+=1u){let count=atomicLoad(&faceFrontier[6u+axis]);changed+=count;
     atomicStore(&faceFrontier[axis],count);atomicStore(&faceFrontier[3u+axis],0u);atomicStore(&faceFrontier[6u+axis],0u);}
@@ -3151,80 +3027,39 @@ fn packedFrontierLane(packed:u32)->vec2u{return vec2u(packed%3u,packed/3u);}
     writeDispatch(10u,0u,select(vec3u(0u,1u,1u),dispatchFor(12u*(s(2u)+s(8u)),256u),waveActive));
     writeDispatch(13u,1u,select(vec3u(0u,1u,1u),vec3u(1u),waveActive));
     writeDispatch(16u,2u,select(vec3u(0u,1u,1u),vec3u(3u,1u,1u),waveActive));}}
-struct AirSupportBvhNode {minimum:vec3u,component:u32,maximum:vec3u,block:u32}
-fn airSupportBvhNode(axis:u32,node:u32)->AirSupportBvhNode{let at=airSupportBvhNodeBase(axis,node);
-  let minimum=seedBvh[at];let maximum=seedBvh[at+1u];
-  return AirSupportBvhNode(minimum.xyz,minimum.w,maximum.xyz,maximum.w);}
-fn airSupportBvhLowerDistanceSquared(point:vec3i,node:AirSupportBvhNode)->f32{
-  let low=vec3i(node.minimum);let high=vec3i(node.maximum);
-  let delta=max(max(low-point,point-high),vec3i(0));
-  return .0625*f32(delta.x*delta.x+delta.y*delta.y+delta.z*delta.z);}
-fn considerAirSupportBvhSeed(item:u32,itemCenter:vec3i,component:u32,globalSearch:bool,
-  seedItem:u32,best:vec4u)->vec4u{let seedRow=seedItem/${STRUCTURED_AIR_SUPPORT_OWNED_FACE_SLOTS}u;
-  if(seedRow>=s(2u)+s(8u)){return best;}
-  if(!globalSearch&&airSupportComponentLabel(seedRow)!=component){return best;}
-  let axis=(item%${STRUCTURED_AIR_SUPPORT_OWNED_FACE_SLOTS}u)/4u;
-  if((seedItem%${STRUCTURED_AIR_SUPPORT_OWNED_FACE_SLOTS}u)/4u!=axis){return best;}
-  let seed=faceB[seedItem];if(seed.w==0u||seed.y!=0u||seed.z!=seedItem){return best;}
-  var candidate=seed;let distance=faceDistanceSquaredFrom(itemCenter,seedItem);
-  if(!finiteValue(distance)){fail(item,ERROR_SOURCE);return best;}candidate.y=bitcast<u32>(distance);
-  return select(best,candidate,best.w==0u||betterFace(item,candidate,best));}
-fn retainedAirSupportBvhSeed(item:u32,itemCenter:vec3i,component:u32,globalSearch:bool)->vec4u{
-  if(s(47u)==0u){return vec4u(0u,INVALID,INVALID,0u);}let retained=previousFaces[item];
-  if(retained.w==0u||retained.z>=s(29u)){return vec4u(0u,INVALID,INVALID,0u);}
-  let seedItem=retained.z;let seedRow=seedItem/${STRUCTURED_AIR_SUPPORT_OWNED_FACE_SLOTS}u;
-  if(!globalSearch&&airSupportComponentLabel(seedRow)!=component){return vec4u(0u,INVALID,INVALID,0u);}
-  let seed=faceB[seedItem];if(seed.w==0u||seed.y!=0u||seed.z!=seedItem){return vec4u(0u,INVALID,INVALID,0u);}
-  var candidate=seed;let distance=faceDistanceSquaredFrom(itemCenter,seedItem);
-  if(!finiteValue(distance)){fail(item,ERROR_SOURCE);return vec4u(0u,INVALID,INVALID,0u);}
-  candidate.y=bitcast<u32>(distance);return candidate;}
-var<workgroup> airSupportBvhQueryStack:array<u32,16>;
-var<workgroup> airSupportBvhQueryControl:array<u32,3>;
-var<workgroup> airSupportBvhQueryBest:array<vec4u,1>;
-var<workgroup> airSupportBvhQueryCandidates:array<vec4u,${OCTREE_AIR_SUPPORT_BVH_BLOCK_FACE_SLOTS}>;
-@compute @workgroup_size(${OCTREE_AIR_SUPPORT_BVH_BLOCK_FACE_SLOTS})fn marchAirSupportFacesChangedFrontier(
-  @builtin(local_invocation_index)lane:u32,@builtin(workgroup_id)wid:vec3u,
-  @builtin(num_workgroups)groups:vec3u){let axis=wid.z;
-  let local=wid.y*groups.x+wid.x;let faceRow=local/4u;let quadrant=local%4u;
-  let faceRows=s(2u)+s(8u);let valid=axis<3u&&faceRow<faceRows&&s(0u)==0u&&s(50u)==0u;
-  var item=0u;var itemCenter=vec3i(0);var component=0u;var globalSearch=false;var queryActive=false;
-  if(valid){item=faceRow*${STRUCTURED_AIR_SUPPORT_OWNED_FACE_SLOTS}u+4u*axis+quadrant;
-    let current=faceA[item];queryActive=!(current.w!=0u&&current.y==0u&&current.z==item);
-    if(queryActive){itemCenter=faceCenterQuarter(item);component=airSupportComponentLabel(faceRow);
-      let componentMask=atomicLoad(&faceFrontier[airSupportComponentMaskBase()+component]);
-      globalSearch=(componentMask&(1u<<axis))==0u;}}
-  if(lane==0u){airSupportBvhQueryBest[0]=vec4u(0u,INVALID,INVALID,0u);airSupportBvhQueryControl[0]=0u;
-    if(queryActive){airSupportBvhQueryBest[0]=retainedAirSupportBvhSeed(item,itemCenter,component,globalSearch);
-      airSupportBvhQueryStack[0]=1u;airSupportBvhQueryControl[0]=1u;}airSupportBvhQueryControl[1]=0u;}
-  workgroupBarrier();
-  loop{
-    if(lane==0u){airSupportBvhQueryControl[1]=0u;var stackSize=airSupportBvhQueryControl[0];
-      if(stackSize==0u){airSupportBvhQueryControl[1]=2u;}
-      else{stackSize-=1u;let nodeIndex=airSupportBvhQueryStack[stackSize];let node=airSupportBvhNode(axis,nodeIndex);
-        var rejected=node.component==AIR_SUPPORT_BVH_EMPTY;
-        rejected=rejected||(!globalSearch&&node.component!=AIR_SUPPORT_BVH_MIXED&&node.component!=component);
-        if(!rejected){let best=airSupportBvhQueryBest[0];let lowerDistance=airSupportBvhLowerDistanceSquared(itemCenter,node);
-          rejected=best.w!=0u&&lowerDistance>bitcast<f32>(best.y);}
-        if(!rejected&&nodeIndex<${OCTREE_AIR_SUPPORT_BVH_TOP_LEAVES}u){
-          if(stackSize+2u>16u){fail(item,ERROR_CAPACITY);airSupportBvhQueryControl[1]=2u;}
-          else{airSupportBvhQueryStack[stackSize]=2u*nodeIndex+1u;
-            airSupportBvhQueryStack[stackSize+1u]=2u*nodeIndex;stackSize+=2u;}}
-        else if(!rejected){airSupportBvhQueryControl[1]=1u;
-          airSupportBvhQueryControl[2]=nodeIndex-${OCTREE_AIR_SUPPORT_BVH_TOP_LEAVES}u;}
-        airSupportBvhQueryControl[0]=stackSize;}}
-    let action=workgroupUniformLoad(&airSupportBvhQueryControl[1]);if(action==2u){break;}
-    if(action==1u){let block=workgroupUniformLoad(&airSupportBvhQueryControl[2]);
-      let seedBegin=seedCompact[airSupportBvhBlockOffsetAt(axis,block)];
-      let seedEnd=seedCompact[airSupportBvhBlockOffsetAt(axis,block+1u)];
-      var candidate=vec4u(0u,INVALID,INVALID,0u);
-      if(seedBegin+lane<seedEnd){let seedItem=airSupportCompactSeedItem(axis,seedBegin+lane);
-        candidate=considerAirSupportBvhSeed(item,itemCenter,component,globalSearch,seedItem,candidate);}
-      airSupportBvhQueryCandidates[lane]=candidate;workgroupBarrier();
-      ${octreeAirSupportBvhCandidateReductionWGSL}
-      if(lane==0u&&betterFace(item,airSupportBvhQueryCandidates[0],airSupportBvhQueryBest[0])){
-        airSupportBvhQueryBest[0]=airSupportBvhQueryCandidates[0];}}
+@compute @workgroup_size(256)fn marchAirSupportFacesChangedFrontier(@builtin(local_invocation_index)lane:u32,
+  @builtin(workgroup_id)wid:vec3u){let axis=wid.x;
+  if(lane==0u){frontierFaceRows=s(2u)+s(8u);frontierCurrentCount=atomicLoad(&faceFrontier[axis]);
+    frontierFailed=select(0u,1u,s(0u)!=0u||axis>=3u);sw(32u+axis,0u);sw(35u+axis,0u);}
+  workgroupBarrier();if(workgroupUniformLoad(&frontierFailed)!=0u){return;}
+  let faceRows=workgroupUniformLoad(&frontierFaceRows);let axisCapacity=4u*faceRows;
+  let prefixWaves=atomicLoad(&faceFrontier[9u]);var wave=0u;
+  loop{let current=workgroupUniformLoad(&frontierCurrentCount);if(current==0u){break;}
+    if(lane==0u){atomicStore(&faceFrontier[3u+axis],0u);}workgroupBarrier();
+    let generation=prefixWaves+wave+1u;for(var local=lane;local<current;local+=256u){
+      let source=atomicLoad(&faceFrontier[frontierQueueBase(0u,axis)+local]);
+      if(source>=p.faceCapacity||((source/${STRUCTURED_AIR_SUPPORT_OWNED_FACE_SLOTS}u)>=faceRows)
+          ||((source%${STRUCTURED_AIR_SUPPORT_OWNED_FACE_SLOTS}u)/4u)!=axis){fail(source,ERROR_CAPACITY);continue;}
+      let sourceRow=source/${STRUCTURED_AIR_SUPPORT_OWNED_FACE_SLOTS}u;let incidence=adjacencyIncidentCount(sourceRow);
+      if(incidence>${OCTREE_GENERATED_POWER_CATALOG_MANIFEST.maximumFaceIncidence}u){fail(source,ERROR_CAPACITY);continue;}
+      for(var edge=0u;edge<incidence;edge+=1u){let destinationRow=adjacencyIncident(sourceRow,edge);
+        if(destinationRow>=faceRows){failTopology(9u,sourceRow);continue;}
+        for(var quadrant=0u;quadrant<4u;quadrant+=1u){
+          appendFrontierDestination(axis,destinationRow*${STRUCTURED_AIR_SUPPORT_OWNED_FACE_SLOTS}u+4u*axis+quadrant,generation);}}}
+    storageBarrier();workgroupBarrier();if(lane==0u){frontierActiveCount=atomicLoad(&faceFrontier[3u+axis]);
+      atomicStore(&faceFrontier[6u+axis],0u);}workgroupBarrier();let activeCount=workgroupUniformLoad(&frontierActiveCount);
+    for(var local=lane;local<activeCount;local+=256u){let item=atomicLoad(&faceFrontier[frontierQueueBase(1u,axis)+local]);
+      extendFace(item,true);}
+    storageBarrier();workgroupBarrier();
+    for(var local=lane;local<activeCount;local+=256u){let item=atomicLoad(&faceFrontier[frontierQueueBase(1u,axis)+local]);
+      let proposal=faceB[item];let previous=faceA[item];if(any(proposal!=previous)){faceA[item]=proposal;
+        let at=atomicAdd(&faceFrontier[6u+axis],1u);if(at>=frontierAxisCapacity()){fail(item,ERROR_CAPACITY);}
+        else{atomicStore(&faceFrontier[frontierQueueBase(0u,axis)+at],item);}}}
+    storageBarrier();workgroupBarrier();if(lane==0u){frontierChangedCount=atomicLoad(&faceFrontier[6u+axis]);
+      frontierCurrentCount=frontierChangedCount;wave+=1u;sw(32u+axis,prefixWaves+wave);
+      if(frontierChangedCount!=0u&&prefixWaves+wave>=max(1u,axisCapacity)){sw(35u+axis,1u);frontierCurrentCount=0u;}}
     workgroupBarrier();}
-  if(lane==0u&&airSupportBvhQueryBest[0].w!=0u){faceA[item]=airSupportBvhQueryBest[0];}}
+}
 
 fn quadrantAt(cell:vec4u,axis:u32,point:vec3f)->u32{let origin=vec3f(coord(cell.x));var result=0u;var transverse=0u;
   for(var a=0u;a<3u;a+=1u){if(a==axis){continue;}if(point[a]>=origin[a]+.5*f32(cell.y)){result|=1u<<transverse;}transverse+=1u;}return result;}

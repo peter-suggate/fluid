@@ -1027,8 +1027,8 @@ const suiteList = [
        * validation one; correctness stays with `fine-factor-4`, which is the
        * lane that must still pass after any change scored here.
        */
-      performance: lane({ id: "performance", target_s: 0.268, exactSteps: 67,
-        maxDt_s: 0.004, oracleSteps: 67, cpuOracle: false,
+      performance: lane({ id: "performance", target_s: 0.248, exactSteps: 62,
+        maxDt_s: 0.004, oracleSteps: 62, cpuOracle: false,
         methods: methods(["octree"], { octree: symmetricExpansionOverrides }),
         collect: { fieldStats: "none", performanceProfile: true, gpuCommandAudit: true },
         diagnostics: [{ id: "performance" }], timeout_ms: 240_000 }),
