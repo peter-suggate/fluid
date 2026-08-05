@@ -109,15 +109,17 @@ test("resident fine phi is carved by the analytic rigid SDF before redistance", 
     /this\.scene\.rigidBodies\.length > 0[\s\S]*pending\.volume\.encodeMeasurement/);
 });
 
-test("pressure reaction owns buoyancy while occupancy drives drag and added mass", () => {
+test("pressure reaction separates analytic hydrostatics from dynamic p-grad-chi", () => {
   const reaction = read("../lib/webgpu-octree-losasso-rigid-pressure-reaction.ts");
   assert.match(reaction, /atomicMax\(&rigidExchange\[base\+10u\],1\)/);
-  assert.match(reaction, /addWetSurfaceEstimate/);
+  assert.match(reaction, /fn immersedVolumeAtReference/);
+  assert.match(reaction, /3\.141592653589793\*cap\*cap\*\(radius-cap\/3\.\)/);
   assert.match(reaction, /let blocked=1\.-face\.openFraction/);
   assert.match(reaction, /solidGradient=positive\.x-negative\.x/);
   assert.match(reaction, /facePressure-hydrostaticPressure/);
-  assert.match(reaction, /buoyancyImpulse=-p\.rigidWorldOriginDt\.w\*p\.cellSize\.w\*immersedPatch\*p\.gravity\.xyz/);
+  assert.match(reaction, /let impulse=-p\.rigidWorldOriginDt\.w\*p\.cellSize\.w\*displaced\*p\.gravity\.xyz/);
   assert.match(reaction, /dispatchWorkgroupsIndirect\(this\.source\.faceDispatch/);
+  assert.match(reaction, /dispatchWorkgroups\(Math\.ceil\(bodyCount \/ 64\)\)/);
   const rigid = read("../lib/webgpu-rigid-body.ts");
   assert.match(rigid, /pressureCoupled=atomicLoad\(&exchange\[base\+10u\]\)!=0/);
   assert.match(rigid, /buoyancy=select\(-rho\*displaced\*params\.gravity\.xyz,vec3f\(0\),pressureCoupled\)/);

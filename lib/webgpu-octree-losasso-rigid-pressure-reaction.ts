@@ -96,16 +96,38 @@ fn rigidVolume(body:RigidBody)->f32{let d=body.dimensions.xyz;let shape=i32(roun
  if(shape==0){return 4.1887902047863905*d.x*d.x*d.x;}if(shape==1){return d.x*d.y*d.z;}
  if(shape==3){return 3.141592653589793*d.x*d.x*d.y;}
  return 3.141592653589793*d.x*d.x*d.y+4.1887902047863905*d.x*d.x*d.x;}
-fn rigidSurfaceArea(body:RigidBody)->f32{let d=body.dimensions.xyz;let shape=i32(round(body.positionShape.w));
- if(shape==0){return 12.566370614359172*d.x*d.x;}
- if(shape==1){return 2.*(d.x*d.y+d.x*d.z+d.y*d.z);}
- if(shape==3){return 6.283185307179586*d.x*(d.x+d.y);}
- return 6.283185307179586*d.x*d.y+12.566370614359172*d.x*d.x;}
-fn addWetSurfaceEstimate(body:u32,blockedArea:f32){let base=body*${RIGID_EXCHANGE_WORDS}u;
- if(base+6u>=arrayLength(&rigidExchange)||body>=arrayLength(&rigidBodies)){return;}
- let rb=rigidBodies[body];let cellVolume=p.cellSize.x*p.cellSize.y*p.cellSize.z;
- let wetCells=blockedArea/max(rigidSurfaceArea(rb),1e-9)*rigidVolume(rb)/max(cellVolume,1e-12);
- if(finite(wetCells)&&wetCells>0.){atomicAdd(&rigidExchange[base+6u],i32(round(wetCells*65536.)));}}
+fn immersedVolumeAtReference(body:RigidBody)->f32{
+ let d=body.dimensions.xyz;let shape=i32(round(body.positionShape.w));
+ let waterline=p.gravity.w;
+ if(shape==0){
+  let radius=max(d.x,1e-9);
+  let cap=clamp(waterline-(body.positionShape.y-radius),0.,2.*radius);
+  return 3.141592653589793*cap*cap*(radius-cap/3.);
+ }
+ // The production coupling accepts all primitive kinds.  Spheres have the
+ // exact cap formula used by the oracle; the other current primitives retain
+ // a bounded vertical-prism estimate until their oriented cap integrals land.
+ var halfHeight=.5*d.y;
+ if(shape==2){halfHeight+=d.x;}
+ let fraction=clamp((waterline-(body.positionShape.y-halfHeight))
+  /max(2.*halfHeight,1e-9),0.,1.);
+ return rigidVolume(body)*fraction;
+}
+@compute @workgroup_size(64)
+fn exchangeLosassoRigidBuoyancy(@builtin(global_invocation_id)invocation:vec3u){
+ let bodyIndex=invocation.x;
+ if(bodyIndex>=p.dimensionsBodyCount.w||bodyIndex>=p.capacities.z
+   ||bodyIndex>=arrayLength(&rigidBodies)){return;}
+ let displaced=immersedVolumeAtReference(rigidBodies[bodyIndex]);
+ let impulse=-p.rigidWorldOriginDt.w*p.cellSize.w*displaced*p.gravity.xyz;
+ addExchange(bodyIndex,impulse,vec3f(0.));
+ let base=bodyIndex*${RIGID_EXCHANGE_WORDS}u;
+ let cellVolume=p.cellSize.x*p.cellSize.y*p.cellSize.z;
+ let wetCells=displaced/max(cellVolume,1e-12);
+ if(base+6u<arrayLength(&rigidExchange)&&finite(wetCells)&&wetCells>0.){
+  atomicAdd(&rigidExchange[base+6u],i32(round(wetCells*65536.)));
+ }
+}
 @compute @workgroup_size(64)
 fn exchangeLosassoRigidPressure(@builtin(global_invocation_id)invocation:vec3u){
  let faceId=invocation.x;
@@ -152,16 +174,8 @@ fn exchangeLosassoRigidPressure(@builtin(global_invocation_id)invocation:vec3u){
     world-vec3f(0.,p.gravity.w,0.)));
    let dynamicImpulse=p.rigidWorldOriginDt.w*(facePressure-hydrostaticPressure)
     *area*solidGradient*axisNormal;
-   let rb=rigidBodies[u32(owner)];
-   let immersedPatch=area*blocked/max(rigidSurfaceArea(rb),1e-9)*rigidVolume(rb);
-   let buoyancyImpulse=-p.rigidWorldOriginDt.w*p.cellSize.w*immersedPatch*p.gravity.xyz;
-   let impulse=dynamicImpulse+buoyancyImpulse;
-   let torque=cross(world-rigidBodies[u32(owner)].positionShape.xyz,impulse);
-   if(abs(solidGradient)>1e-8){addExchange(u32(owner),impulse,torque);}
-   // This kernel already visits each geometric face exactly once.
-   // Surface-area immersion gives the analytic body-volume fraction required
-   // by drag/added mass without reintroducing buoyancy in the integrator.
-   if(blocked>0.){addWetSurfaceEstimate(u32(owner),area*blocked);}
+   let torque=cross(world-rigidBodies[u32(owner)].positionShape.xyz,dynamicImpulse);
+   if(abs(solidGradient)>1e-8){addExchange(u32(owner),dynamicImpulse,torque);}
   }}
 }
 `;
@@ -189,7 +203,8 @@ export class WebGPUOctreeLosassoRigidPressureReaction {
   private readonly pipelineLayout: GPUPipelineLayout;
   private readonly groups = new WeakMap<GPUBuffer, GPUBindGroup>();
   private readonly bodyCapacity: number;
-  private pipeline?: GPUComputePipeline;
+  private pressurePipeline?: GPUComputePipeline;
+  private buoyancyPipeline?: GPUComputePipeline;
   private destroyed = false;
 
   constructor(private readonly device: GPUDevice,
@@ -233,22 +248,31 @@ export class WebGPUOctreeLosassoRigidPressureReaction {
   }
 
   async initialize(): Promise<void> {
-    this.assertLive(); if (this.pipeline) return;
+    this.assertLive(); if (this.pressurePipeline && this.buoyancyPipeline) return;
     const shaderModule = this.device.createShaderModule({
       label: "Losasso rigid pressure reaction shader",
       code: webgpuOctreeLosassoRigidPressureReactionWGSL,
     });
-    this.pipeline = await this.device.createComputePipelineAsync({
-      label: "Exchange Losasso pressure impulse with dynamic rigids",
-      layout: this.pipelineLayout,
-      compute: { module: shaderModule, entryPoint: "exchangeLosassoRigidPressure" },
-    });
+    [this.pressurePipeline, this.buoyancyPipeline] = await Promise.all([
+      this.device.createComputePipelineAsync({
+        label: "Exchange Losasso dynamic pressure impulse with rigids",
+        layout: this.pipelineLayout,
+        compute: { module: shaderModule, entryPoint: "exchangeLosassoRigidPressure" },
+      }),
+      this.device.createComputePipelineAsync({
+        label: "Exchange Losasso analytic hydrostatic impulse with rigids",
+        layout: this.pipelineLayout,
+        compute: { module: shaderModule, entryPoint: "exchangeLosassoRigidBuoyancy" },
+      }),
+    ]);
   }
 
   encode(broker: PassBroker, pressure: GPUBuffer, dt_s: number, bodyCount: number,
     gravity: readonly [number, number, number]): boolean {
     this.assertLive();
-    if (!this.pipeline) throw new Error("Losasso rigid pressure reaction is not initialized");
+    if (!this.pressurePipeline || !this.buoyancyPipeline) {
+      throw new Error("Losasso rigid pressure reaction is not initialized");
+    }
     if (!Number.isFinite(dt_s) || dt_s < 0) {
       throw new RangeError("Losasso rigid pressure reaction timestep must be non-negative and finite");
     }
@@ -280,13 +304,16 @@ export class WebGPUOctreeLosassoRigidPressureReaction {
       this.groups.set(pressure, group);
     }
     const pass = broker.compute({ label: "Losasso pressure - dynamic rigid reaction" });
-    pass.setPipeline(this.pipeline); pass.setBindGroup(0, group);
+    pass.setPipeline(this.pressurePipeline); pass.setBindGroup(0, group);
     pass.dispatchWorkgroupsIndirect(this.source.faceDispatch, 0);
+    pass.setPipeline(this.buoyancyPipeline);
+    pass.dispatchWorkgroups(Math.ceil(bodyCount / 64));
     return true;
   }
 
   destroy(): void {
-    if (this.destroyed) return; this.destroyed = true; this.params.destroy(); this.pipeline = undefined;
+    if (this.destroyed) return; this.destroyed = true; this.params.destroy();
+    this.pressurePipeline = undefined; this.buoyancyPipeline = undefined;
   }
   private assertLive(): void {
     if (this.destroyed) throw new Error("Losasso rigid pressure reaction is destroyed");
