@@ -41,11 +41,11 @@ test("the hybrid LoSasso lane uses the shared donor contract for its single trac
   ), "utf8");
   assert.match(host, /words\[30\] = 1;/,
     "the donor bound must not silently turn into a fixed transport-stage count");
-  assert.match(host, /dispatchWorkgroupsIndirect\([\s\S]*this\.liveDispatch, 0\)/,
-    "advect and commit must consume the GPU-published live page count");
+  assert.match(host, /dispatchWorkgroupsIndirect\([\s\S]*this\.liveDispatch, 16\)/,
+    "advect and commit must consume the GPU-compacted awake page count");
   assert.doesNotMatch(host, /dispatchWorkgroups\(this\.plan\.pageCapacity\)/);
   assert.match(transport,
-    /atomicStore\(&liveDispatch\[0\],select\(0u,min\(worklist\[1\],p\.pageCapacity\)/);
+    /atomicStore\(&liveDispatch\[4\],select\(0u,activeCount,acceptedStep\(\)\)\)/);
 });
 
 test("warm redistance counts validated carried closest points as seed authority", () => {
@@ -62,7 +62,8 @@ test("Losasso wall transport adds the closed-boundary characteristic exit distan
     "../lib/webgpu-octree-losasso-fine-transport.wgsl.ts", import.meta.url,
   ), "utf8");
   assert.match(source, /exitCells\+=distance\(traced,interior\)/);
-  assert.match(source, /nextPhi\[index\]=transported\+exitCells\*p\.fineCellWidth/);
+  assert.match(source,
+    /nextPhi\[index\]=applyInflowPhi\(transported\+exitCells\*p\.fineCellWidth,world\)/);
 });
 
 test("Losasso keeps closed wall faces for fine-phi separation conditioning", () => {
@@ -96,10 +97,15 @@ test("Losasso couples the 2017 fine band to a unilateral coarse wall active set"
     "../lib/webgpu-octree-losasso-velocity-migration.wgsl.ts", import.meta.url,
   ), "utf8");
   assert.match(projection, /contactPressure = 0\.25 \* this\.physical\.density \* weight/);
-  assert.match(projection, /outward \* \(-params\.gravity\[face\.axis\] \/ weight\) > 0\.5/);
+  assert.match(projection, /let releasePressure = select\(0\.0, params\.contactPressure, overhead\)/,
+    "all closed walls release under tension while only the ceiling receives a hydrostatic bias");
+  assert.match(projection, /let wasSeparated = \(face\.reserved & FACE_SEPARATED\) != 0u/);
+  assert.match(projection, /solved < renewalPressure, wasSeparated/,
+    "a released wall face must not re-weld on a p approximately zero duty cycle");
   assert.match(projection, /face\.reserved \| FACE_SEPARATED/);
-  assert.match(coarsePhi, /let separated=\(face\.reserved&FACE_SEPARATED\)!=0u/);
-  assert.match(coarsePhi, /separated\|\|\(\(rowFlags&\(VALID\|FINITE\)\)/,
+  assert.match(coarsePhi,
+    /let separated=contactEnabled&&\(face\.reserved&FACE_SEPARATED\)!=0u/);
+  assert.match(coarsePhi, /contactEnabled&&\(separated\|\|\(\(rowFlags&\(VALID\|FINITE\)\)/,
     "either the active set or a resolved fine-phi air gap must open a p=0 ghost");
   assert.match(migration, /oldGeometry\[old\]\.x&FACE_SEPARATED/);
   assert.match(migration, /newFaces\[face\]\.reserved\|=FACE_SEPARATED/,

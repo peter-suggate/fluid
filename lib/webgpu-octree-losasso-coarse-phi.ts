@@ -89,7 +89,7 @@ fn sampleCoarseOctreePhi(position:vec3f)->f32{let invalidPhi=3.402823e38;
   if(row!=0xffffffffu&&row<losassoCoarsePhi[2]){let entry=losassoCoarsePhi[9]+8u*row;let flags=losassoCoarsePhi[entry+5u];
    let value=bitcast<f32>(losassoCoarsePhi[entry+2u]);if((flags&3u)==3u&&value==value){return value;}return invalidPhi;}
   if(size>=losassoCoarsePhi[4]){break;}size*=2u;}
- return invalidPhi;}
+ return .5*width;}
 `;
 }
 

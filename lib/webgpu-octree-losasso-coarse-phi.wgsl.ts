@@ -6,7 +6,7 @@ export const OCTREE_LOSASSO_COARSE_PHI_MAGIC = 0x4c50_4849;
 export const octreeLosassoCoarsePhiWGSL = /* wgsl */ `
 const INVALID:u32=0xffffffffu;const VALID:u32=1u;const FINITE:u32=2u;
 const INTERFACE:u32=4u;const FINE_RESTRICTED:u32=8u;const MAGIC:u32=${OCTREE_LOSASSO_COARSE_PHI_MAGIC}u;
-const FACE_SEPARATED:u32=0x20000000u;const FACE_CLOSED_BOUNDARY:u32=0x40000000u;const FACE_ROW_ON_POSITIVE_SIDE:u32=0x80000000u;
+const FACE_INTERFACE_NEARBY:u32=0x10000000u;const FACE_SEPARATED:u32=0x20000000u;const FACE_CLOSED_BOUNDARY:u32=0x40000000u;const FACE_ROW_ON_POSITIVE_SIDE:u32=0x80000000u;
 struct Params{brickDimensions:vec3u,brickResolution:u32,sampleDimensions:vec3u,samplesPerBrick:u32,
  domainOrigin:vec3f,fineCellWidth:f32,pageCapacity:u32,generation:u32,worklistCapacity:u32,worklistHeaderWords:u32,
  dimensions:vec3u,maximumLeafSize:u32,cellSize:f32,directoryCapacity:u32,rowCapacity:u32,faceCapacity:u32,
@@ -160,7 +160,11 @@ fn publishLosassoCoarsePhiArena(@builtin(global_invocation_id)invocation:vec3u){
 @compute @workgroup_size(64)
 fn publishLosassoGhostDistances(@builtin(global_invocation_id)invocation:vec3u){let faceId=invocation.x;if(faceId>=faceCount()){return;}
  let reuse=exactTopologyReuse();
- var face=faces[faceId];var flags=0u;var distance=0.;var theta=1.;var airPhi=0.;
+ var face=faces[faceId];face.reserved&=~FACE_INTERFACE_NEARBY;
+ let rowBase=targetLoad(9u,reuse);
+ if((face.negativeRow<rows()&&(targetLoad(rowBase+8u*face.negativeRow+5u,reuse)&INTERFACE)!=0u)
+   ||(face.positiveRow<rows()&&(targetLoad(rowBase+8u*face.positiveRow+5u,reuse)&INTERFACE)!=0u)){face.reserved|=FACE_INTERFACE_NEARBY;}
+ var flags=0u;var distance=0.;var theta=1.;var airPhi=0.;
  if(targetLoad(0u,reuse)!=MAGIC){ghosts[faceId]=vec4u(0u,bitcast<u32>(1.),0u,8u);return;}
  if(face.positiveRow==INVALID){let geometry=faceGeometry[faceId];let axis=geometry.x&3u;let span=1u<<(geometry.x>>2u);
   let origin=geometry.yzw;let boundary=origin[axis]==0u||origin[axis]==p.dimensions[axis];
@@ -210,7 +214,7 @@ fn publishLosassoGhostDistances(@builtin(global_invocation_id)invocation:vec3u){
    }else if((rowFlags&(VALID|FINITE))==(VALID|FINITE)&&liquid<0.&&sampled.valid!=0u&&sampled.value>0.){airPhi=sampled.value;
     theta=clamp(-liquid/(airPhi-liquid),1e-4,1.);distance=theta*dual;face.inverseDistance=1./distance;faces[faceId]=face;flags=1u;}
    else{flags=4u;}}
- }ghosts[faceId]=vec4u(bitcast<u32>(distance),bitcast<u32>(theta),bitcast<u32>(airPhi),flags);}
+ }faces[faceId]=face;ghosts[faceId]=vec4u(bitcast<u32>(distance),bitcast<u32>(theta),bitcast<u32>(airPhi),flags);}
 `;
 
 export const octreeLosassoWarmPhiWGSL = /* wgsl */ `

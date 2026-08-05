@@ -46,12 +46,16 @@ export interface WebGPUOctreeLosassoDynamicsSamplerSource {
   readonly faceGeometry: GPUBuffer;
   readonly axisFaceDirectory: GPUBuffer;
   readonly extendedVelocity: GPUBuffer;
+  /** Forward predictor extended over the same sampler geometry. */
+  readonly predictorExtendedVelocity: GPUBuffer;
   readonly faceCapacity: number;
   readonly directoryCapacity: number;
 }
 
 const ENTRY_POINTS = [
   "advectLosassoFaces",
+  "reverseLosassoFaces",
+  "correctLosassoFaces",
   "forceLosassoFaces",
   "divergenceLosassoRows",
   "constrainLosassoInflowFaces",
@@ -59,7 +63,9 @@ const ENTRY_POINTS = [
 type DynamicsEntryPoint = typeof ENTRY_POINTS[number];
 
 const BINDINGS = Object.freeze({
-  advectLosassoFaces: [0, 1, 2, 3, 6, 12, 13, 14, 15],
+  advectLosassoFaces: [0, 1, 2, 3, 6, 12, 13, 14, 15, 16],
+  reverseLosassoFaces: [0, 1, 2, 3, 7, 12, 13, 14, 15, 16],
+  correctLosassoFaces: [0, 1, 2, 3, 6, 7, 12, 13, 14, 15, 16],
   forceLosassoFaces: [0, 1, 2, 3, 6, 7],
   divergenceLosassoRows: [0, 1, 2, 7, 8, 9, 10],
   constrainLosassoInflowFaces: [0, 1, 3, 11],
@@ -160,7 +166,8 @@ export class WebGPUOctreeLosassoDynamics {
       this.source.advectedVelocity, this.source.predictedVelocity,
       this.source.rowFaceOffsets, this.source.rowFaces, this.source.rightHandSide,
       this.source.projectedVelocity, this.sampler.control, this.sampler.faceGeometry,
-      this.sampler.axisFaceDirectory, this.sampler.extendedVelocity];
+      this.sampler.axisFaceDirectory, this.sampler.extendedVelocity,
+      this.sampler.predictorExtendedVelocity];
     this.groups = Object.freeze(Object.fromEntries(ENTRY_POINTS.map((entryPoint) => [entryPoint,
       this.device.createBindGroup({
         label: `Losasso dynamics bindings - ${entryPoint}`,
@@ -170,13 +177,26 @@ export class WebGPUOctreeLosassoDynamics {
       })]))) as Readonly<Record<DynamicsEntryPoint, GPUBindGroup>>;
   }
 
-  encodeAdvection(broker: PassBroker, step: WebGPUOctreeLosassoDynamicsStep): void {
+  encodeAdvection(
+    broker: PassBroker,
+    step: WebGPUOctreeLosassoDynamicsStep,
+    extendPredictor: () => boolean,
+  ): void {
     this.assertReady();
     this.writeStep(step);
-    const pass = broker.compute({ label: "Losasso S1 - advect graded axis faces" });
-    pass.setPipeline(this.pipelines!.advectLosassoFaces);
-    pass.setBindGroup(0, this.groups!.advectLosassoFaces);
-    pass.dispatchWorkgroupsIndirect(this.source.faceDispatch, 0);
+    const predict = broker.compute({ label: "Losasso S1a - advect graded axis faces" });
+    predict.setPipeline(this.pipelines!.advectLosassoFaces);
+    predict.setBindGroup(0, this.groups!.advectLosassoFaces);
+    predict.dispatchWorkgroupsIndirect(this.source.faceDispatch, 0);
+    if (!extendPredictor()) return;
+    const reverse = broker.compute({ label: "Losasso S1b - reverse velocity advection" });
+    reverse.setPipeline(this.pipelines!.reverseLosassoFaces);
+    reverse.setBindGroup(0, this.groups!.reverseLosassoFaces);
+    reverse.dispatchWorkgroupsIndirect(this.source.faceDispatch, 0);
+    const correct = broker.compute({ label: "Losasso S1c - bounded MacCormack correction" });
+    correct.setPipeline(this.pipelines!.correctLosassoFaces);
+    correct.setBindGroup(0, this.groups!.correctLosassoFaces);
+    correct.dispatchWorkgroupsIndirect(this.source.faceDispatch, 0);
   }
 
   encodeForcesAndDivergence(

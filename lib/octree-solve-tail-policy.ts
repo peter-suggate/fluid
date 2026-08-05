@@ -10,10 +10,10 @@ export const OCTREE_SOLVE_TAIL_MINIMUM_OUTER_ITERATIONS = 4;
 export const OCTREE_SOLVE_TAIL_MAXIMUM_ENCODED_OUTER_ITERATIONS = 10;
 /**
  * Wide Losasso solve envelope.  The paper reports roughly twenty iterations
- * to machine precision; thirty-two leaves a real f32 convergence tail while
+ * to machine precision; forty leaves a real f32 impact-transient tail while
  * the same-step residual gate makes the unused commands no-ops.
  */
-export const OCTREE_SOLVE_TAIL_HARD_OUTER_ITERATION_CEILING = 32;
+export const OCTREE_SOLVE_TAIL_HARD_OUTER_ITERATION_CEILING = 40;
 export const OCTREE_FACTOR1_PREDICTED_SOLVE_TAIL_ENVIRONMENT =
   "FLUID_OCTREE_FACTOR1_PREDICTED_SOLVE_TAIL";
 /**

@@ -30,24 +30,36 @@ fn projectLosassoFaces(@builtin(global_invocation_id) invocation: vec3u) {
     positivePressure = pressure[face.negativeRow];
     negativePressure = 0.0;
   }
-  projectedVelocity[faceId] = predictedVelocity[faceId] - params.pressureScale
+  var projected = predictedVelocity[faceId] - params.pressureScale
     * (positivePressure - negativePressure)
     * face.inverseDistance * face.openFraction;
-  // Closed overhead contact is unilateral. The 2017 fine band transports the
-  // separating interface; this lagged active-set bit makes the next coarse
-  // operator use the matching p=0 air ghost without post-solve pressure
-  // clamping (Aanjaneya et al. 2017 Sections 4-5; Losasso et al. 2004 4.1-4.2).
+  // Closed contact is unilateral. The fine band transports the separating
+  // interface; this lagged active-set bit makes the next coarse operator use
+  // the matching p=0 air ghost without post-solve pressure clamping. Every
+  // wall may release under tension. A gravity-opposed ceiling gets the small
+  // hydrostatic bias needed to release a stationary film before strict
+  // negative pressure appears; other walls open only below ambient pressure.
   if (params.reserved0 == 0u && (face.reserved & FACE_CLOSED_BOUNDARY) != 0u) {
     let weight = length(params.gravity.xyz);
     let outward = select(1.0, -1.0, rowOnPositiveSide);
     let overhead = weight > 1e-6 && outward * (-params.gravity[face.axis] / weight) > 0.5;
     let solved = pressure[face.negativeRow];
-    let opening = overhead && solved == solved && abs(solved) <= 3.402823e38
-      && solved < params.contactPressure;
+    let finitePressure = solved == solved && abs(solved) <= 3.402823e38;
+    let wasSeparated = (face.reserved & FACE_SEPARATED) != 0u;
+    // A separated face is an air-pressure contact, not an open boundary. The
+    // active-set bit is one solve behind, so reject a returning characteristic
+    // immediately instead of allowing one step of liquid flux into the wall.
+    if (wasSeparated) { projected = outward * max(0.0, outward * projected); }
+    let releasePressure = select(0.0, params.contactPressure, overhead);
+    let renewalPressure = max(releasePressure, 1e-4 * params.contactPressure);
+    let opening = finitePressure && select(solved < releasePressure,
+      solved < renewalPressure, wasSeparated);
     face.reserved = select(face.reserved & ~FACE_SEPARATED,
       face.reserved | FACE_SEPARATED, opening);
     faces[faceId] = face;
   }
+  projectedVelocity[faceId] = select(0.0, projected,
+    projected == projected && abs(projected) <= 3.402823e38);
 }
 `;
 

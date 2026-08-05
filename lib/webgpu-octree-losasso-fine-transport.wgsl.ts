@@ -4,6 +4,7 @@ import { octreeLosassoVelocitySamplingWGSL } from "./webgpu-octree-losasso-veloc
 
 export const octreeLosassoFineTransportWGSL = /* wgsl */ `
 const INVALID:u32=0xffffffffu;const VALID:u32=1u;const PAGE_INTERFACE:u32=2u;const PAGE_DIRTY:u32=8u;
+const PAGE_ACTIVITY_VALID:u32=16u;const PAGE_ACTIVITY_MOVING:u32=32u;const PAGE_WAKE_HALO:u32=64u;
 struct Params{
  brickDimensions:vec3u,brickResolution:u32,
  sampleDimensions:vec3u,samplesPerBrick:u32,
@@ -65,6 +66,9 @@ fn acceptedVelocity()->bool{return arrayLength(&coarse)>=7u&&coarse[3]==1u
  &&losassoDirectoryCapacity()<=arrayLength(&faceDirectory);}
 fn acceptedStep()->bool{return atomicLoad(&control[6])==0u&&atomicLoad(&control[7])==0u
  &&atomicLoad(&control[1])==0u&&atomicLoad(&control[0])==0u;}
+fn pageAwake(flags:u32)->bool{return (flags&PAGE_ACTIVITY_VALID)==0u
+ ||(flags&(PAGE_INTERFACE|PAGE_ACTIVITY_MOVING|PAGE_WAKE_HALO|PAGE_DIRTY))!=0u
+ ||p.inflowVelocityStrength.w>0.;}
 // The nozzle is an authored boundary condition around Section 5 transport.
 // Reapply its short downstream plug after every accepted characteristic;
 // topology initialization alone only reaches newly allocated pages and lets
@@ -90,15 +94,40 @@ fn prepareLosassoFineTransport(@builtin(local_invocation_index)lane:u32){
    &&worklist[0]==p.generation&&worklist[2]==p.pageCapacity
    &&worklist[3]==3u&&worklist[5]==1u&&worklist[6]==1u;
   if(!velocityValid){atomicStore(&control[6],1u);}if(!worklistValid){atomicStore(&control[7],1u);}
-  atomicStore(&liveDispatch[0],select(0u,min(worklist[1],p.pageCapacity),velocityValid&&worklistValid));
-  atomicStore(&liveDispatch[1],1u);atomicStore(&liveDispatch[2],1u);}
+  let live=select(0u,min(worklist[1],p.pageCapacity),velocityValid&&worklistValid);
+  atomicStore(&liveDispatch[0],(live+63u)/64u);atomicStore(&liveDispatch[1],1u);atomicStore(&liveDispatch[2],1u);
+  atomicStore(&liveDispatch[4],0u);atomicStore(&liveDispatch[5],1u);atomicStore(&liveDispatch[6],1u);
+  atomicStore(&liveDispatch[8],live);atomicStore(&liveDispatch[9],1u);atomicStore(&liveDispatch[10],1u);}
 }
 
 @compute @workgroup_size(64)
+fn classifyLosassoFineActivity(@builtin(global_invocation_id)gid:vec3u){
+ let work=gid.x;let live=min(worklist[1],p.pageCapacity);if(!acceptedVelocity()||work>=live){return;}
+ let page=worklist[7u+work];if(page>=p.pageCapacity||metadata[4u*page+2u]!=p.generation){
+  atomicAdd(&control[7],1u);atomicAdd(&control[11],1u);return;}
+ let awake=pageAwake(metadata[4u*page+3u]);delta[8u+page]=select(0u,0x80000000u,awake);
+ if(awake){let rank=atomicAdd(&control[14],1u);if(rank<p.pageCapacity){delta[8u+2u*p.pageCapacity+rank]=work;}else{atomicAdd(&control[0],1u);}}
+ else{atomicAdd(&control[15],1u);}
+}
+
+@compute @workgroup_size(1)
+fn finalizeLosassoFineActivity(){
+ let live=min(worklist[1],p.pageCapacity);let activeCount=atomicLoad(&control[14]);let sleeping=atomicLoad(&control[15]);
+ if(activeCount+sleeping!=live){atomicAdd(&control[7],1u);atomicAdd(&control[11],1u);}
+ atomicStore(&liveDispatch[4],select(0u,activeCount,acceptedStep()));
+ atomicStore(&liveDispatch[5],1u);atomicStore(&liveDispatch[6],1u);
+}
+
+var<workgroup> pageMotion:array<u32,64>;
+@compute @workgroup_size(64)
 fn advectLosassoFinePhi(@builtin(workgroup_id)group:vec3u,@builtin(local_invocation_index)lane:u32){
- let work=group.x;if(!acceptedVelocity()||work>=min(worklist[1],p.pageCapacity)){return;}
- let page=worklist[7u+work];if(page>=p.pageCapacity||metadata[4u*page+2u]!=p.generation){atomicAdd(&control[7],1u);atomicAdd(&control[11],1u);return;}
- let brickKey=metadata[4u*page+1u];let xy=p.brickDimensions.x*p.brickDimensions.y;
+ let rank=group.x;let activeCount=atomicLoad(&control[14]);var work=INVALID;
+ if(rank<activeCount){work=delta[8u+2u*p.pageCapacity+rank];}
+ var page=INVALID;if(work<min(worklist[1],p.pageCapacity)){let candidate=worklist[7u+work];
+  if(candidate<p.pageCapacity&&metadata[4u*candidate+2u]==p.generation){page=candidate;}
+  else{atomicAdd(&control[7],1u);atomicAdd(&control[11],1u);}}
+ var localMotion=0u;
+ if(page!=INVALID){let brickKey=metadata[4u*page+1u];let xy=p.brickDimensions.x*p.brickDimensions.y;
  let bz=brickKey/xy;let remainder=brickKey-bz*xy;let by=remainder/p.brickDimensions.x;
  let brick=vec3u(remainder-by*p.brickDimensions.x,by,bz);
  for(var local=lane;local<p.samplesPerBrick;local+=64u){let index=page*p.samplesPerBrick+local;
@@ -125,7 +154,8 @@ fn advectLosassoFinePhi(@builtin(workgroup_id)group:vec3u,@builtin(local_invocat
    else{departure=traced;}
   }
   if(!validTrace){continue;}
-  let displacement=u32(ceil(distance(position,departure)+exitCells));
+  let displacementCells=distance(position,departure)+exitCells;
+  localMotion=max(localMotion,bitcast<u32>(displacementCells));let displacement=u32(ceil(displacementCells));
   atomicMax(&control[5],displacement);if(displacement>p.maxBacktrace){atomicAdd(&control[0],1u);continue;}
   let transported=sampleFinePhiGrid(departure);if(!finite(transported)){atomicAdd(&control[7],1u);atomicAdd(&control[10],1u);atomicMin(&control[12],index);continue;}
   // A characteristic leaving a closed wall originates in solid/air. Adding
@@ -135,14 +165,17 @@ fn advectLosassoFinePhi(@builtin(workgroup_id)group:vec3u,@builtin(local_invocat
   // Power transport boundary extension.
   let world=p.domainOrigin+(vec3f(q)+vec3f(.5))*p.fineCellWidth;
   nextPhi[index]=applyInflowPhi(transported+exitCells*p.fineCellWidth,world);atomicAdd(&control[2],1u);
- }
+ }}
+ pageMotion[lane]=localMotion;workgroupBarrier();for(var width=32u;width>0u;width>>=1u){if(lane<width){pageMotion[lane]=max(pageMotion[lane],pageMotion[lane+width]);}workgroupBarrier();}
+ if(lane==0u&&page!=INVALID){delta[8u+page]=0x80000000u|pageMotion[0];}
 }
 
 var<workgroup> changed:array<u32,64>;
 @compute @workgroup_size(64)
 fn commitLosassoFinePhi(@builtin(workgroup_id)group:vec3u,@builtin(local_invocation_index)lane:u32){
- let work=group.x;var page=INVALID;let live=acceptedStep()&&work<min(worklist[1],p.pageCapacity);
- if(live){page=worklist[7u+work];if(page>=p.pageCapacity||metadata[4u*page+2u]!=p.generation){page=INVALID;}}
+ let rank=group.x;var work=INVALID;if(acceptedStep()&&rank<atomicLoad(&control[14])){work=delta[8u+2u*p.pageCapacity+rank];}
+ var page=INVALID;if(work<min(worklist[1],p.pageCapacity)){page=worklist[7u+work];
+  if(page>=p.pageCapacity||metadata[4u*page+2u]!=p.generation){page=INVALID;}}
  // One reduction carries three independent facts: liquid samples, air
  // samples, and a sign change. Recurring topology is seeded from the current
  // zero set, not merely from samples that happened to cross zero this step;
@@ -156,19 +189,30 @@ fn commitLosassoFinePhi(@builtin(workgroup_id)group:vec3u,@builtin(local_invocat
   localChanged|=select(0u,4u,(old<0.)!=(fresh<0.));
   localChanged|=select(0u,8u,abs(fresh)<=p.fineCellWidth);}}
  changed[lane]=localChanged;workgroupBarrier();for(var width=32u;width>0u;width>>=1u){if(lane<width){changed[lane]|=changed[lane+width];}workgroupBarrier();}
- if(page!=INVALID&&lane==0u){let key=metadata[4u*page+1u];let prior=metadata[4u*page+3u];
+ if(page!=INVALID&&lane==0u){let prior=metadata[4u*page+3u];
   let dirty=(changed[0]&4u)!=0u;let onInterface=((changed[0]&3u)==3u)||(changed[0]&8u)!=0u;
-  metadata[4u*page+3u]=(prior&~(PAGE_INTERFACE|PAGE_DIRTY))
-   |select(0u,PAGE_INTERFACE,onInterface)|select(0u,PAGE_DIRTY,dirty);
-  delta[8u+page]=select(INVALID,key,onInterface);
-  delta[8u+p.pageCapacity+work]=key;delta[8u+2u*p.pageCapacity+page]=select(INVALID,key,dirty);}
+  let moving=(delta[8u+page]&0x7fffffffu)!=0u;
+  metadata[4u*page+3u]=(prior&~(PAGE_INTERFACE|PAGE_DIRTY|PAGE_ACTIVITY_MOVING))|PAGE_ACTIVITY_VALID
+   |select(0u,PAGE_INTERFACE,onInterface)|select(0u,PAGE_DIRTY,dirty)
+   |select(0u,PAGE_ACTIVITY_MOVING,moving);}
  workgroupBarrier();if(page!=INVALID){for(var local=lane;local<p.samplesPerBrick;local+=64u){let index=page*p.samplesPerBrick+local;
   if((finePackedFlags(index)&VALID)!=0u){fineWritePackedPhi(index,nextPhi[index]);}}}
 }
 
 @compute @workgroup_size(64)
+fn publishLosassoFineDelta(@builtin(workgroup_id)group:vec3u,@builtin(local_invocation_index)lane:u32){
+ let work=group.x;if(!acceptedStep()||work>=min(worklist[1],p.pageCapacity)){return;}
+ let page=worklist[7u+work];if(page>=p.pageCapacity||metadata[4u*page+2u]!=p.generation){if(lane==0u){atomicAdd(&control[7],1u);}return;}
+ if(lane==0u){let key=metadata[4u*page+1u];var flags=metadata[4u*page+3u];let awake=(delta[8u+page]&0x80000000u)!=0u;
+  if(!awake){flags=(flags&~(PAGE_DIRTY|PAGE_ACTIVITY_MOVING))|PAGE_ACTIVITY_VALID;metadata[4u*page+3u]=flags;}
+  delta[8u+page]=select(INVALID,key,(flags&PAGE_INTERFACE)!=0u);
+  delta[8u+p.pageCapacity+work]=key;delta[8u+2u*p.pageCapacity+page]=select(INVALID,key,(flags&PAGE_DIRTY)!=0u);}
+}
+
+@compute @workgroup_size(64)
 fn finalizeLosassoFineTransport(@builtin(local_invocation_index)lane:u32){if(lane!=0u){return;}
- let accepted=acceptedStep()&&atomicLoad(&control[2])>0u;let count=select(0u,min(worklist[1],p.pageCapacity),accepted);
+ let live=min(worklist[1],p.pageCapacity);let activePages=atomicLoad(&control[14]);
+ let accepted=acceptedStep()&&(live==0u||activePages==0u||atomicLoad(&control[2])>0u);let count=select(0u,live,accepted);
  atomicStore(&control[3],select(0u,1u,accepted));delta[0]=count;delta[1]=p.generation;
  delta[2]=select(0u,1u,accepted);delta[3]=min(worklist[1],p.pageCapacity);
  delta[4]=select(0u,(count+63u)/64u,count>0u);delta[5]=1u;delta[6]=1u;delta[7]=atomicLoad(&control[5]);

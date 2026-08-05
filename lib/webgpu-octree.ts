@@ -2738,10 +2738,11 @@ export class WebGPUOctreeProjection {
       const coarseVolume = this.losassoCoarsePhi.volumeCoarseSource(coarseInput);
       this.globalFineVolumeA = new WebGPUFineLevelSetVolumeCorrection(
         this.device, fineA, coarseVolume, undefined, this.deferPipelineCompilation,
+        "moving-pages",
       );
       this.globalFineVolumeB = new WebGPUFineLevelSetVolumeCorrection(
         this.device, fineB, coarseVolume, this.globalFineVolumeA.control,
-        this.deferPipelineCompilation,
+        this.deferPipelineCompilation, "moving-pages",
       );
     }
     const coarseAllocated = this.losassoBackend.allocatedBytes
@@ -4889,11 +4890,23 @@ export class WebGPUOctreeProjection {
       this.losassoBackend?.encodeHierarchyCoefficientRefresh(redistanceBroker);
       this.refreshLosassoProjectionGroups();
     }
-    pending.volume?.encode(redistanceBroker);
+    if (pending.volume) {
+      // Losasso uses a regional correction restricted to pages whose main
+      // surface actually moved. This preserves semi-Lagrangian liquid volume
+      // without regrowing sleeping wall films and detached fragments. The env
+      // switch retains a measure-only Dawn A/B for drift attribution.
+      const measureOnlyLosasso = this.coarseDynamics.backend === "losasso"
+        && typeof process !== "undefined" && process.env.FLUID_VOLUME_CONTROL === "0";
+      if (measureOnlyLosasso) {
+        pending.volume.encodeMeasurement(redistanceBroker);
+      } else {
+        pending.volume.encode(redistanceBroker);
+      }
+    }
     if (this.coarseDynamics.backend === "losasso") {
       if (!this.losassoCoarsePhi) throw new Error("Losasso coarse-phi exchange is unavailable");
-      // Volume correction may move fine phi. Republish the final conditioned
-      // operator and hierarchy from the corrected, fully redistanced band.
+      // Republish the final conditioned operator and hierarchy from the fully
+      // redistanced band. Losasso volume telemetry does not move fine phi.
       this.losassoCoarsePhi.encodeFieldRefresh(redistanceBroker, pending.target,
         this.losassoCoarsePhiInput());
       this.losassoConditionedOperator?.encodeAfterGhostDistances(redistanceBroker);

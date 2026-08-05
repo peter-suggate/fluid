@@ -38,7 +38,7 @@ export const OCTREE_PIPELINED_PCG_HARD_ITERATION_CEILING = 16;
 /** The reduced LoSasso operator may request this wider fail-safe tail. Power
  * keeps the frozen 16-iteration ceiling; both paths still retire the unused
  * suffix through the same GPU residual gate. */
-export const OCTREE_PIPELINED_PCG_MAXIMUM_HARD_ITERATION_CEILING = 32;
+export const OCTREE_PIPELINED_PCG_MAXIMUM_HARD_ITERATION_CEILING = 40;
 export const OCTREE_PIPELINED_PCG_CONTROL_BYTES = 128;
 /**
  * Exact radix-256 superaccumulator geometry.
@@ -208,7 +208,7 @@ export function planOctreePipelinedMGPCG(
   );
   if (hardIterationCeiling < OCTREE_PIPELINED_PCG_HARD_ITERATION_CEILING
     || hardIterationCeiling > OCTREE_PIPELINED_PCG_MAXIMUM_HARD_ITERATION_CEILING) {
-    throw new RangeError("Pipelined MGPCG hard iteration ceiling must remain in [16,32]");
+    throw new RangeError("Pipelined MGPCG hard iteration ceiling must remain in [16,40]");
   }
   if (maximumIterations < 4 || maximumIterations > hardIterationCeiling) {
     throw new RangeError(

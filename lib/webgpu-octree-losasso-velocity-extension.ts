@@ -67,6 +67,7 @@ export class WebGPUOctreeLosassoVelocityExtension {
   private readonly pipelineLayout: GPUPipelineLayout;
   private pipeline?: GPUComputePipeline;
   private groups?: readonly GPUBindGroup[];
+  private predictorGroups?: readonly GPUBindGroup[];
   private lastAdvance = -1;
   private lastEpoch = 0;
   private destroyed = false;
@@ -133,17 +134,23 @@ export class WebGPUOctreeLosassoVelocityExtension {
     const velocities = [this.source.projectedVelocity, this.scratchA, this.scratchB,
       this.scratchA, this.scratchB, this.scratchA, this.scratchB, this.scratchA,
       this.source.extendedVelocity] as const;
-    this.groups = Array.from({ length: OCTREE_LOSASSO_EXTENSION_SWEEPS }, (_, sweep) =>
-      this.device.createBindGroup({ label: `Losasso Jacobi sweep ${sweep + 1}`,
+    const predictorVelocities = [this.source.projectedVelocity, this.scratchA, this.scratchB,
+      this.scratchA, this.scratchB, this.scratchA, this.scratchB, this.scratchA,
+      this.source.projectedVelocity] as const;
+    const makeGroups = (fields: readonly GPUBuffer[], label: string) =>
+      Array.from({ length: OCTREE_LOSASSO_EXTENSION_SWEEPS }, (_, sweep) =>
+      this.device.createBindGroup({ label: `Losasso ${label} Jacobi sweep ${sweep + 1}`,
         layout: this.layout, entries: [
           { binding: 0, resource: { buffer: this.params, size: 16 } },
           { binding: 1, resource: { buffer: this.source.control } },
           { binding: 2, resource: { buffer: this.source.faceMetrics } },
           { binding: 3, resource: { buffer: this.source.adjacencyOffsets } },
           { binding: 4, resource: { buffer: this.source.adjacencyFaces } },
-          { binding: 5, resource: { buffer: velocities[sweep]! } },
-          { binding: 6, resource: { buffer: velocities[sweep + 1]! } },
+          { binding: 5, resource: { buffer: fields[sweep]! } },
+          { binding: 6, resource: { buffer: fields[sweep + 1]! } },
         ] }));
+    this.groups = makeGroups(velocities, "published");
+    this.predictorGroups = makeGroups(predictorVelocities, "predictor");
   }
 
   encodeOncePerAdvance(broker: PassBroker, advance: number, topologyEpoch: number): boolean {
@@ -171,11 +178,25 @@ export class WebGPUOctreeLosassoVelocityExtension {
     return true;
   }
 
+  /** Extend a gathered MacCormack predictor in place without consuming S3e's once-per-advance slot. */
+  encodePredictor(broker: PassBroker): void {
+    this.assertLive();
+    if (!this.pipeline || !this.predictorGroups) {
+      throw new Error("Losasso velocity extension pipeline is not initialized");
+    }
+    const pass = broker.compute({ label: `Losasso S1b - ${this.mode} predictor extension` });
+    for (const [sweep, group] of this.predictorGroups.entries()) {
+      pass.setPipeline(this.pipeline);
+      pass.setBindGroup(0, group, [sweep * this.uniformStride]);
+      pass.dispatchWorkgroups(...this.plan.dispatch);
+    }
+  }
+
   destroy(): void {
     if (this.destroyed) return;
     this.destroyed = true;
     this.params.destroy(); this.scratchA.destroy(); this.scratchB.destroy();
-    this.pipeline = undefined; this.groups = undefined;
+    this.pipeline = undefined; this.groups = undefined; this.predictorGroups = undefined;
   }
 
   private assertLive(): void {

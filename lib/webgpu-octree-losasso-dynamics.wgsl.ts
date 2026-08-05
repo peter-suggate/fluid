@@ -2,6 +2,10 @@
 export const octreeLosassoDynamicsWGSL = /* wgsl */ `
 const INVALID_FACE: u32 = 0xffffffffu;
 const INVALID_ROW: u32 = 0xffffffffu;
+const INVALID_VELOCITY: f32 = 3.402823e38;
+const BAND_FIELD: u32 = 0u;
+const ADVECTED_FIELD: u32 = 1u;
+const FACE_INTERFACE_NEARBY: u32 = 0x10000000u;
 
 struct Params {
   dimensionsMaximumLeaf: vec4u,
@@ -39,6 +43,7 @@ struct Face {
 @group(0) @binding(13) var<storage, read> bandGeometry: array<vec4u>;
 @group(0) @binding(14) var<storage, read> bandDirectory: array<vec2u>;
 @group(0) @binding(15) var<storage, read> bandVelocity: array<f32>;
+@group(0) @binding(16) var<storage, read> predictorBandVelocity: array<f32>;
 
 fn finite(value: f32) -> bool {
   return value == value && abs(value) <= 3.402823e38;
@@ -110,7 +115,30 @@ fn containingFace(axis: u32, coordinate: vec3u) -> u32 {
   return INVALID_FACE;
 }
 
-struct VelocitySample { value: vec3f, valid: bool };
+struct VelocitySample {
+  value: vec3f,
+  lower: vec3f,
+  upper: vec3f,
+  valid: bool,
+  boundary: bool,
+};
+
+fn invalidVelocitySample() -> VelocitySample {
+  return VelocitySample(vec3f(0.0), vec3f(0.0), vec3f(0.0), false, false);
+}
+
+fn symmetricProduct3(value: vec3f) -> f32 {
+  let lowPair = min(value.x, value.y);
+  let highPair = max(value.x, value.y);
+  let low = min(lowPair, value.z);
+  let high = max(highPair, value.z);
+  let middle = max(lowPair, min(highPair, value.z));
+  return (low * middle) * high;
+}
+
+fn quantizeTraceOffset(value: vec3f) -> vec3f {
+  return round(value * 65536.0) / 65536.0;
+}
 
 fn closedDomainFace(axis: u32, coordinate: vec3u) -> bool {
   let side = select(2u * axis + 1u, 2u * axis, coordinate[axis] == 0u);
@@ -124,8 +152,9 @@ fn closedDomainFace(axis: u32, coordinate: vec3u) -> bool {
 // containingFace maps each fine quadrant to its owning coarse face; repeated
 // ownership therefore gives the coarse value its covered-area weight without
 // inventing virtual fine velocities.
-fn velocityAtNode(node: vec3u) -> VelocitySample {
+fn velocityAtNode(node: vec3u, field: u32) -> VelocitySample {
   var result = vec3f(0.0);
+  var boundary = false;
   for (var axis = 0u; axis < 3u; axis += 1u) {
     var exact: array<i32,36>;
     var sampleCount = 0u;
@@ -144,43 +173,79 @@ fn velocityAtNode(node: vec3u) -> VelocitySample {
       let unsignedCoordinate = vec3u(coordinate);
       let face = containingFace(axis, unsignedCoordinate);
       var componentValue = 0.0;
-      if (face == INVALID_FACE || face >= arrayLength(&bandVelocity)) {
+      if (face == INVALID_FACE) {
         if (!closedDomainFace(axis, unsignedCoordinate)) {
-          return VelocitySample(vec3f(0.0), false);
+          return invalidVelocitySample();
         }
-      } else {
+        boundary = true;
+      } else if (field == BAND_FIELD) {
+        if (face >= arrayLength(&bandVelocity)) { return invalidVelocitySample(); }
         componentValue = bandVelocity[face];
-        if (!finite(componentValue)) { return VelocitySample(vec3f(0.0), false); }
+        if (!finite(componentValue)) { return invalidVelocitySample(); }
+      } else {
+        if (face >= arrayLength(&predictorBandVelocity)) { return invalidVelocitySample(); }
+        componentValue = predictorBandVelocity[face];
+        if (!finite(componentValue)) { return invalidVelocitySample(); }
       }
       addExact(&exact, componentValue);
       sampleCount += 1u;
     }
-    if (sampleCount == 0u) { return VelocitySample(vec3f(0.0), false); }
+    if (sampleCount == 0u) { return invalidVelocitySample(); }
     result[axis] = exactValue(&exact) / f32(sampleCount);
   }
-  return VelocitySample(result, true);
+  return VelocitySample(result, result, result, true, boundary);
 }
 
 // Trilinear interpolation of the reconstructed nodal field is the Section 5
 // sampling rule.  Zero-weight corners are not fetched: sparse extension only
 // has to cover the stencil that actually contributes to this sample.
-fn velocityAtGrid(gridValue: vec3f) -> VelocitySample {
+fn velocityAtGrid(gridValue: vec3f, field: u32) -> VelocitySample {
   let grid = clamp(gridValue, vec3f(0.0), vec3f(params.dimensionsMaximumLeaf.xyz));
   let lower = vec3u(floor(grid));
   let upper = min(lower + vec3u(1u), params.dimensionsMaximumLeaf.xyz);
   let fraction = grid - vec3f(lower);
-  var result = vec3f(0.0);
+  var exactX: array<i32,36>;
+  var exactY: array<i32,36>;
+  var exactZ: array<i32,36>;
+  var stencilLower = vec3f(3.402823e38);
+  var stencilUpper = vec3f(-3.402823e38);
+  var boundary = any(grid != gridValue);
   for (var corner = 0u; corner < 8u; corner += 1u) {
     let high = vec3u(corner & 1u, (corner >> 1u) & 1u, (corner >> 2u) & 1u);
     let weightVector = select(vec3f(1.0) - fraction, fraction, high != vec3u(0u));
-    let weight = weightVector.x * weightVector.y * weightVector.z;
+    let weight = symmetricProduct3(weightVector);
     if (weight == 0.0) { continue; }
     let node = select(lower, upper, high != vec3u(0u));
-    let sample = velocityAtNode(node);
-    if (!sample.valid) { return VelocitySample(vec3f(0.0), false); }
-    result += weight * sample.value;
+    let sample = velocityAtNode(node, field);
+    if (!sample.valid) { return invalidVelocitySample(); }
+    boundary = boundary || sample.boundary;
+    addExact(&exactX, weight * sample.value.x);
+    addExact(&exactY, weight * sample.value.y);
+    addExact(&exactZ, weight * sample.value.z);
+    stencilLower = min(stencilLower, sample.value);
+    stencilUpper = max(stencilUpper, sample.value);
   }
-  return VelocitySample(result, true);
+  let result = vec3f(exactValue(&exactX), exactValue(&exactY), exactValue(&exactZ));
+  return VelocitySample(result, stencilLower, stencilUpper, true, boundary);
+}
+
+struct VelocityTrace {
+  point: vec3f,
+  valid: bool,
+  boundary: bool,
+};
+
+// A signed midpoint characteristic. Positive dt backtraces the forward
+// predictor; negative dt traces the predictor forward for MacCormack reversal.
+fn traceVelocity(origin: vec3f, dt: f32, field: u32) -> VelocityTrace {
+  let first = velocityAtGrid(origin, field);
+  if (!first.valid) { return VelocityTrace(origin, false, false); }
+  let gridDt = dt / params.cellWidthDensity.xyz;
+  let midpointOffset = quantizeTraceOffset(-0.5 * gridDt * first.value);
+  let midpoint = velocityAtGrid(origin + midpointOffset, field);
+  let carrier = select(first.value, midpoint.value, midpoint.valid);
+  return VelocityTrace(origin + quantizeTraceOffset(-gridDt * carrier), true,
+    first.boundary || (midpoint.valid && midpoint.boundary));
 }
 
 fn faceCenterGrid(faceId: u32) -> vec3f {
@@ -252,22 +317,69 @@ fn advectLosassoFaces(@builtin(global_invocation_id) invocation: vec3u) {
   let faceId = invocation.x;
   if (faceId >= liveFaces() || faceId >= arrayLength(&advectedVelocity)) { return; }
   let centre = faceCenterGrid(faceId);
-  let prior = velocityAtGrid(centre);
+  let prior = velocityAtGrid(centre, BAND_FIELD);
   let previous = select(0.0, prior.value[faces[faceId].axis], prior.valid);
   if (params.domainOriginDt.w == 0.0) {
     advectedVelocity[faceId] = select(0.0, previous, finite(previous));
     return;
   }
-  let carrier = velocityAtGrid(centre);
   var value = previous;
-  if (carrier.valid) {
-    let gridDt = params.domainOriginDt.w / params.cellWidthDensity.xyz;
-    let midpoint = velocityAtGrid(centre - 0.5 * gridDt * carrier.value);
-    let departure = centre - gridDt * select(carrier.value, midpoint.value, midpoint.valid);
-    let sample = velocityAtGrid(departure);
+  let departure = traceVelocity(centre, params.domainOriginDt.w, BAND_FIELD);
+  if (departure.valid) {
+    let sample = velocityAtGrid(departure.point, BAND_FIELD);
     if (sample.valid) { value = sample.value[faces[faceId].axis]; }
   }
   advectedVelocity[faceId] = select(0.0, value, finite(value));
+}
+
+// predictedVelocity is scratch here; the force pass overwrites it after the
+// correction. An invalid reversal explicitly disables correction if the
+// published W7 predictor support cannot provide a complete nodal stencil.
+@compute @workgroup_size(64)
+fn reverseLosassoFaces(@builtin(global_invocation_id) invocation: vec3u) {
+  let faceId = invocation.x;
+  if (faceId >= liveFaces() || faceId >= arrayLength(&predictedVelocity)) { return; }
+  let centre = faceCenterGrid(faceId);
+  let arrival = traceVelocity(centre, -params.domainOriginDt.w, ADVECTED_FIELD);
+  if (arrival.valid && !arrival.boundary
+      && (faces[faceId].span & FACE_INTERFACE_NEARBY) == 0u) {
+    let reversed = velocityAtGrid(arrival.point, ADVECTED_FIELD);
+    if (reversed.valid && !reversed.boundary) {
+      predictedVelocity[faceId] = reversed.value[faces[faceId].axis];
+      return;
+    }
+  }
+  predictedVelocity[faceId] = INVALID_VELOCITY;
+}
+
+@compute @workgroup_size(64)
+fn correctLosassoFaces(@builtin(global_invocation_id) invocation: vec3u) {
+  let faceId = invocation.x;
+  if (faceId >= liveFaces() || faceId >= arrayLength(&advectedVelocity)
+      || faceId >= arrayLength(&predictedVelocity)
+      || params.domainOriginDt.w == 0.0) { return; }
+  let prediction = advectedVelocity[faceId];
+  let reversed = predictedVelocity[faceId];
+  if (!finite(prediction) || !finite(reversed) || reversed == INVALID_VELOCITY) { return; }
+  let centre = faceCenterGrid(faceId);
+  let original = velocityAtGrid(centre, BAND_FIELD);
+  let departure = traceVelocity(centre, params.domainOriginDt.w, BAND_FIELD);
+  if (!original.valid || !departure.valid) { return; }
+  let sourceStencil = velocityAtGrid(departure.point, BAND_FIELD);
+  if (!sourceStencil.valid) { return; }
+  // Selle-style fallback: keep the first-order S1a prediction anywhere the
+  // forward or reverse characteristic touched a solid/domain clamp or the
+  // one-cell interface seed layer. MacCormack remains enabled in the bulk.
+  if (original.boundary || departure.boundary || sourceStencil.boundary
+      || (faces[faceId].span & FACE_INTERFACE_NEARBY) != 0u) { return; }
+  let axis = faces[faceId].axis;
+  let corrected = prediction + 0.5 * (original.value[axis] - reversed);
+  if (!finite(corrected)) { return; }
+  // Bounded MacCormack: the correction may restore transported extrema but
+  // cannot create values outside the eight reconstructed source nodes that
+  // contributed to this face's forward prediction.
+  advectedVelocity[faceId] = clamp(corrected,
+    sourceStencil.lower[axis], sourceStencil.upper[axis]);
 }
 
 @compute @workgroup_size(64)

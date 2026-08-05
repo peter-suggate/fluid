@@ -4,7 +4,7 @@ import { makeFineLevelSetSortedWorklistLookupWGSL } from
 
 /** Compact W=7 extension faces published from wet faces plus resident fine bricks. */
 export const octreeLosassoExtensionBandWGSL = /* wgsl */ `
-const INVALID:u32=0xffffffffu;const VALID:u32=1u;const SEED:u32=1u;const ACTIVE:u32=2u;
+const INVALID:u32=0xffffffffu;const MULTI_OWNER:u32=0xfffffffeu;const VALID:u32=1u;const SEED:u32=1u;const ACTIVE:u32=2u;
 const ERROR_CAPACITY:u32=1u;const ERROR_DIRECTORY:u32=2u;const ERROR_WET_AUTHORITY:u32=4u;
 struct Params{
  velocityDimensions:vec3u,maximumLeafSize:u32,
@@ -23,7 +23,6 @@ struct FineLookupParams{brickDimensions:vec3u,brickResolution:u32,sampleDimensio
 @group(0)@binding(3)var<storage,read>samples:array<u32>;
 @group(0)@binding(4)var<storage,read>wetControl:array<u32>;
 @group(0)@binding(5)var<storage,read>wetGeometry:array<vec4u>;
-@group(0)@binding(6)var<storage,read>wetDirectory:array<vec2u>;
 @group(0)@binding(7)var<storage,read>wetProjected:array<f32>;
 @group(0)@binding(8)var<storage,read_write>control:array<atomic<u32>>;
 @group(0)@binding(9)var<storage,read_write>metrics:array<vec4u>;
@@ -35,6 +34,8 @@ struct FineLookupParams{brickDimensions:vec3u,brickResolution:u32,sampleDimensio
 @group(0)@binding(15)var<storage,read_write>wetExtended:array<f32>;
 @group(0)@binding(16)var<storage,read_write>seedWetFace:array<u32>;
 @group(0)@binding(17)var<storage,read_write>geometricClaims:array<atomic<u32>>;
+@group(0)@binding(18)var<storage,read_write>denseWetFace:array<atomic<u32>>;
+@group(0)@binding(19)var<storage,read_write>liveFaceDispatch:array<u32>;
 fn fineParams()->FineLookupParams{return FineLookupParams(p.brickDimensions,p.brickResolution,
  p.sampleDimensions,p.samplesPerBrick,p.domainOrigin,p.fineCellWidth,
  p.fineAuthority.x,p.fineAuthority.y,p.fineAuthority.z,p.fineAuthority.w);}
@@ -112,6 +113,8 @@ fn exactCompact(packed:u32,q:vec3u)->u32{let hash=hashFace(packed,q);let mask=p.
  for(var probe=0u;probe<32u;probe+=1u){let slot=(hash+probe)&mask;let encoded=atomicLoad(&directory[2u*slot]);if(encoded==0u){return INVALID;}
   let face=encoded-1u;if(atomicLoad(&directory[2u*slot+1u])==hash&&face<atomicLoad(&control[2])&&all(geometry[face]==vec4u(packed,q))){return face;}}
  return INVALID;}
+fn tangentA(axis:u32)->vec3u{return select(vec3u(1,0,0),vec3u(0,1,0),axis==0u);}
+fn tangentB(axis:u32)->vec3u{return select(vec3u(0,0,1),vec3u(0,1,0),axis==2u);}
 fn containingCompact(axis:u32,q:vec3u)->u32{var span=1u;var logSpan=0u;loop{var origin=q;
  for(var c=0u;c<3u;c+=1u){if(c!=axis){origin[c]=(q[c]/span)*span;}}let found=exactCompact(axis|(logSpan<<2u),origin);
  if(found!=INVALID){return found;}if(span>=p.maximumLeafSize){break;}span*=2u;logSpan+=1u;}return INVALID;}
@@ -134,19 +137,18 @@ fn publishLosassoAirBandFaces(@builtin(workgroup_id)group:vec3u,@builtin(local_i
  let fineFactor=max(1u,u32(round(p.velocityOriginCell.w/p.fineCellWidth)));
  let coarseSpan=(p.brickResolution+fineFactor-1u)/fineFactor;
  let tangentSpan=coarseSpan+2u;let facesPerAxis=(coarseSpan+1u)*tangentSpan*tangentSpan;
- let facesPerBrick=3u*facesPerAxis;let candidate=linearInvocation(group,lane);
- let work=candidate/facesPerBrick;let local=candidate%facesPerBrick;
+ let facesPerBrick=3u*facesPerAxis;let work=linearInvocation(group,lane);
  if(work>=min(worklist[1],p.fineAuthority.y)){return;}let page=worklist[7u+work];if(page>=p.fineAuthority.x||4u*page+2u>=arrayLength(&metadata)
   ||metadata[4u*page+2u]!=p.fineAuthority.w){return;}let key=metadata[4u*page+1u];let xy=p.brickDimensions.x*p.brickDimensions.y;
  let bz=key/xy;let remainder=key-bz*xy;let by=remainder/p.brickDimensions.x;let brick=vec3u(remainder-by*p.brickDimensions.x,by,bz);
  let cell=(brick*p.brickResolution)/fineFactor;
- if(any(cell>=p.velocityDimensions)){return;}let axis=local/facesPerAxis;let faceLocal=local%facesPerAxis;
+ if(any(cell>=p.velocityDimensions)){return;}for(var local=0u;local<facesPerBrick;local+=1u){let axis=local/facesPerAxis;let faceLocal=local%facesPerAxis;
  let normalSide=faceLocal/(tangentSpan*tangentSpan);let tangentCode=faceLocal%(tangentSpan*tangentSpan);
  var q=vec3i(cell);q[axis]+=i32(normalSide);var tangent=0u;
  for(var component=0u;component<3u;component+=1u){if(component!=axis){let digit=select(tangentCode%tangentSpan,tangentCode/tangentSpan,tangent!=0u);
    q[component]+=i32(digit)-1;tangent+=1u;}}
  var upper=vec3i(p.velocityDimensions)-vec3i(1);upper[axis]=i32(p.velocityDimensions[axis]);
- if(any(q<vec3i(0))||any(q>upper)){return;}let faceQ=vec3u(q);var centre=vec3f(faceQ);
+ if(any(q<vec3i(0))||any(q>upper)){continue;}let faceQ=vec3u(q);var centre=vec3f(faceQ);
  for(var c=0u;c<3u;c+=1u){if(c!=axis){centre[c]+=.5;}}
  var sample=finePhiCells(centre);
  // The complete MAC stencil around a valid fine transport sample reaches one
@@ -164,9 +166,13 @@ fn publishLosassoAirBandFaces(@builtin(workgroup_id)group:vec3u,@builtin(local_i
  // without belonging to any coarse wet-row incidence.  Publish the complete
  // signed W7 support footprint; wet pressure faces were claimed first and
  // remain the projected seeds wherever the two authorities overlap.
- if(sample.valid==0u||abs(sample.value)>width){return;}
+ if(sample.valid==0u||abs(sample.value)>width){continue;}
  let layer=min(p.band.w,max(1u,u32(ceil(abs(sample.value)/p.velocityOriginCell.w))));
- appendAirFace(vec4u(axis,faceQ),vec4u(axis,ACTIVE,bitcast<u32>(abs(sample.value)),layer));}
+ appendAirFace(vec4u(axis,faceQ),vec4u(axis,ACTIVE,bitcast<u32>(abs(sample.value)),layer));}}
+
+@compute @workgroup_size(1)
+fn prepareLosassoBandDispatch(){let count=min(atomicLoad(&control[2]),p.band.x);
+ liveFaceDispatch[0]=(count+63u)/64u;liveFaceDispatch[1]=1u;liveFaceDispatch[2]=1u;}
 
 fn dilateAirFace(id:u32,sourceLayer:u32,targetLayer:u32){let count=min(atomicLoad(&control[2]),p.band.x);if(id>=count){return;}
  let metric=metrics[id];if((metric.y&ACTIVE)==0u||(metric.y&SEED)!=0u||metric.w!=sourceLayer){return;}
@@ -200,8 +206,44 @@ fn finishLosassoExtensionBand(){let wetValid=arrayLength(&wetControl)>=4u&&wetCo
  atomicStore(&control[3],select(0u,1u,wetValid&&atomicLoad(&control[4])==0u));}
 
 @compute @workgroup_size(64)
+fn clearLosassoDenseWetFaces(@builtin(workgroup_id)group:vec3u,@builtin(local_invocation_index)lane:u32){let id=linearInvocation(group,lane);
+ if(id<arrayLength(&denseWetFace)){atomicStore(&denseWetFace[id],INVALID);}}
+
+@compute @workgroup_size(64)
+fn scatterLosassoDenseWetFaces(@builtin(workgroup_id)group:vec3u,@builtin(local_invocation_index)lane:u32){let wet=linearInvocation(group,lane);
+ if(arrayLength(&wetControl)<4u||wetControl[3]!=1u||wet>=wetControl[2]||wet>=arrayLength(&wetGeometry)){return;}
+ let record=wetGeometry[wet];let axis=record.x&3u;let logSpan=record.x>>2u;let span=1u<<logSpan;
+ // Prefer the finest owner if transition records overlap. Compact face ids
+ // occupy the low 27 bits, leaving five bits for the dyadic level priority.
+ let encoded=(logSpan<<27u)|(wet+1u);for(var b=0u;b<span;b+=1u){for(var a=0u;a<span;a+=1u){let q=record.yzw
+   +tangentA(axis)*vec3u(a)+tangentB(axis)*vec3u(b);let key=geometricKey(vec4u(axis,q));
+  if(key<arrayLength(&denseWetFace)){atomicMin(&denseWetFace[key],encoded);}}}}
+
+@compute @workgroup_size(64)
+fn remapLosassoWetSeedFaces(@builtin(workgroup_id)group:vec3u,@builtin(local_invocation_index)lane:u32){let id=linearInvocation(group,lane);
+ if(arrayLength(&wetControl)<4u||wetControl[3]!=1u||id>=min(atomicLoad(&control[2]),p.band.x)){return;}let record=geometry[id];let axis=record.x&3u;let span=1u<<(record.x>>2u);
+ var owner=INVALID;var uniformOwner=true;for(var b=0u;b<span;b+=1u){for(var a=0u;a<span;a+=1u){let q=record.yzw
+   +tangentA(axis)*vec3u(a)+tangentB(axis)*vec3u(b);let key=geometricKey(vec4u(axis,q));
+  var encoded=INVALID;if(key<arrayLength(&denseWetFace)){encoded=atomicLoad(&denseWetFace[key]);}
+  let wet=select(INVALID,(encoded&0x07ffffffu)-1u,encoded!=INVALID);
+  if(wet==INVALID){uniformOwner=false;}else if(owner==INVALID){owner=wet;}else if(wet!=owner){uniformOwner=false;}}}
+ // A coarsened/current face maps directly. A retired coarse record spanning
+ // several refined wet faces carries a tagged multi-owner mapping; gathering
+ // then averages every finest covered face with its physical area weight.
+ // Missing coverage remains unseeded, while an invalid wet publication leaves
+ // the prior mapping intact through the early return above.
+ let seeded=owner!=INVALID;seedWetFace[id]=select(INVALID,select(MULTI_OWNER,owner,uniformOwner),seeded);
+ metrics[id].y=select(metrics[id].y&~SEED,metrics[id].y|SEED,seeded);}
+
+@compute @workgroup_size(64)
 fn gatherLosassoProjectedSeeds(@builtin(workgroup_id)group:vec3u,@builtin(local_invocation_index)lane:u32){let id=linearInvocation(group,lane);if(id>=min(atomicLoad(&control[2]),p.band.x)){return;}
- let wet=seedWetFace[id];if(atomicLoad(&control[3])!=1u||wet==INVALID||wet>=arrayLength(&wetProjected)){seedVelocity[id]=0.;return;}
+ let wet=seedWetFace[id];if(atomicLoad(&control[3])!=1u||wet==INVALID){seedVelocity[id]=0.;return;}
+ if(wet==MULTI_OWNER){let record=geometry[id];let axis=record.x&3u;let span=1u<<(record.x>>2u);var exact:array<i32,36>;var count=0.;
+  for(var b=0u;b<span;b+=1u){for(var a=0u;a<span;a+=1u){let q=record.yzw+tangentA(axis)*vec3u(a)+tangentB(axis)*vec3u(b);let key=geometricKey(vec4u(axis,q));
+   if(key<arrayLength(&denseWetFace)){let encoded=atomicLoad(&denseWetFace[key]);if(encoded!=INVALID){let mapped=(encoded&0x07ffffffu)-1u;
+    if(mapped<arrayLength(&wetProjected)){let value=wetProjected[mapped];if(finite(value)){exactAdd(&exact,value);count+=1.;}}}}}}
+  seedVelocity[id]=select(0.,exactValue(exact)/max(1.,count),count>0.);return;}
+ if(wet>=arrayLength(&wetProjected)){seedVelocity[id]=0.;return;}
  let value=wetProjected[wet];seedVelocity[id]=select(0.,value,finite(value));}
 
 @compute @workgroup_size(64)

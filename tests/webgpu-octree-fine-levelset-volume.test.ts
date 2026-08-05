@@ -69,16 +69,19 @@ test("fine volume classifies compact-air overlap only through the authoritative 
   assert.doesNotMatch(shader, /OWNER_ABSENT\)\{if\(value>=0\.0\)/,
     "fine-only liquid must not be confused with an uncertain owner lookup");
   assert.match(shader,
-    /letflat=fineLinearWorkgroup\(w,n\)\*64u\+lid;if\(flat==0u\)\{control\.corrected=1u;\}leta=activeSample\(flat\)/,
-    "the completed correction pass must publish independently of whether sparse sample zero is valid");
+    /letflat=fineLinearWorkgroup\(w,n\)\*64u\+lid;leta=activeSample\(flat\)[\s\S]*if\(flat==0u&&c\.pad0==0u\)\{control\.currentVolume=control\.referenceVolume;control\.corrected=1u;\}/,
+    "only the completed global correction may publish an analytic target");
+  assert.match(shader,
+    /if\(c\.pad0!=0u&&\(metadata\[a\.x\*4u\+3u\]&PAGE_ACTIVITY_MOVING\)==0u\)\{return;\}/,
+    "regional correction must not regrow sleeping wall films or fragments");
   assert.match(shader, /fnoccupancy\(value:f32,width:f32\)->f32\{returnclamp\(\.5-value\/width,0\.,1\.\);\}/,
     "the conservative controller must use the same compact-field Heaviside width as the published-field QA");
   assert.match(shader,
     /@compute@workgroup_size\(256\)fnfinalizeMeasuredFineVolume\(@builtin\(local_invocation_index\)lid:u32\)\{finalizeCorrectedMeasurement\(false,lid\);\}/,
     "saturated correction telemetry retains the measured fallback");
   assert.match(shader,
-    /letsaturated=published&&abs\(control\.correction\)>=\.5\*p\.fineCellWidth[\s\S]*correctionDispatch\[3\]=measureX[\s\S]*if\(published&&!saturated\)\{control\.currentVolume=control\.referenceVolume;control\.corrected=1u;\}/,
-    "an unsaturated linear correction must retire both full-band remeasurement rounds on the GPU");
+    /letsaturated=published&&\(c\.pad0!=0u\|\|abs\(control\.correction\)>=\.5\*p\.fineCellWidth\)[\s\S]*correctionDispatch\[3\]=measureX[\s\S]*if\(published&&control\.correction==0\.\)\{control\.corrected=1u;\}/,
+    "regional and saturated correction must retain measured rather than analytic volume");
   assert.match(shader,
     /fnbalancedReductionRange\(count:u32,lid:u32\)->vec2u\{letwidth=count\/256u;letremainder=count%256u;letbegin=lid\*width\+min\(lid,remainder\)/,
     "final reductions must partition the partial arena into deterministic contiguous lane ranges");

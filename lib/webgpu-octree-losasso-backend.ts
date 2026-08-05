@@ -667,6 +667,7 @@ export class WebGPUOctreeLosassoCoarseBackend {
         faceGeometry: this.extensionBand.samplerSource.faceGeometry,
         axisFaceDirectory: this.extensionBand.samplerSource.axisFaceDirectory,
         extendedVelocity: this.extensionBand.source.extendedVelocity,
+        predictorExtendedVelocity: this.extensionBand.predictorVelocity,
         faceCapacity: this.extensionBand.plan.faceCapacity,
         directoryCapacity: this.extensionBand.plan.directoryCapacity,
       });
@@ -744,6 +745,10 @@ export class WebGPUOctreeLosassoCoarseBackend {
   }): void {
     this.assertReady();
     this.publisher.encodeReadyCommit(broker, input);
+    // The W7 graph spans topology epochs, but its cached wet ids do not. Refresh
+    // them through the dense finest-face owner map at the topology boundary so
+    // both projected and MacCormack gathers stay direct in the advance path.
+    this.extensionBand.encodeTopologyRemap(broker);
   }
 
   /** Call immediately after accepted ghost conditioning changes L0 coefficients. */
@@ -770,7 +775,10 @@ export class WebGPUOctreeLosassoCoarseBackend {
 
   encodeAdvection(broker: PassBroker, step: WebGPUOctreeLosassoDynamicsStep): void {
     this.assertReady();
-    this.dynamics.encodeAdvection(broker, step);
+    this.dynamics.encodeAdvection(broker, step, () =>
+      this.extensionBand.encodePredictorExtension(
+        broker, this.sources.dynamics.advectedVelocity,
+      ));
   }
 
   encodeForcesAndDivergence(

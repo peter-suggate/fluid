@@ -80,7 +80,7 @@ test("Losasso W7 extension closes the third diagonal MAC support layer", () => {
   assert.match(shader, /sample=finePhiCells\(clamp\(centre,pageLow,pageHigh\)\)/,
     "a completely absent diagonal stencil must use its originating B4 page");
   assert.match(shader, /dilateAirFace\(linearInvocation\(g,l\),6u,7u\)/);
-  assert.match(host, /run\("dilateLosassoAirBand7"/,
+  assert.match(host, /run(?:Indirect)?\("dilateLosassoAirBand7"/,
     "W4 transport plus a three-axis trilinear corner requires all three closure layers");
 });
 
@@ -293,15 +293,105 @@ test("Losasso coarse advection reconstructs nodes and trilinearly samples them",
   const source = readFileSync(new URL(
     "../lib/webgpu-octree-losasso-dynamics.wgsl.ts", import.meta.url,
   ), "utf8");
-  assert.match(source, /fn velocityAtNode\(node: vec3u\)/);
+  assert.match(source, /fn velocityAtNode\(node: vec3u, field: u32\)/);
   assert.match(source, /for \(var quadrant = 0u; quadrant < 4u; quadrant \+= 1u\)/);
-  assert.match(source, /let face = containingFace\(axis, unsignedCoordinate\)/);
+  assert.match(source, /face = containingFace\(axis, unsignedCoordinate\)/);
   assert.match(source, /result\[axis\] = exactValue\(&exact\) \/ f32\(sampleCount\)/);
-  assert.match(source, /fn velocityAtGrid\(gridValue: vec3f\)/);
+  assert.match(source, /fn velocityAtGrid\(gridValue: vec3f, field: u32\)/);
   assert.match(source, /for \(var corner = 0u; corner < 8u; corner \+= 1u\)/);
-  assert.match(source, /result \+= weight \* sample\.value/);
-  assert.match(source, /let midpoint = velocityAtGrid/,
+  assert.match(source, /addExact\(&exactX, weight \* sample\.value\.x\)/);
+  assert.match(source, /let weight = symmetricProduct3\(weightVector\)/);
+  assert.match(source, /quantizeTraceOffset\(-0\.5 \* gridDt \* first\.value\)/);
+  assert.match(source, /let midpoint = velocityAtGrid\(origin \+ midpointOffset, field\)/,
     "characteristics should use a midpoint carrier rather than forward Euler");
+});
+
+test("Losasso velocity advection uses a bounded MacCormack correction", () => {
+  const shader = read("../lib/webgpu-octree-losasso-dynamics.wgsl.ts");
+  const host = read("../lib/webgpu-octree-losasso-dynamics.ts");
+  const backend = read("../lib/webgpu-octree-losasso-backend.ts");
+  const band = read("../lib/webgpu-octree-losasso-extension-band.ts");
+  const bandShader = read("../lib/webgpu-octree-losasso-extension-band.wgsl.ts");
+  const extension = read("../lib/webgpu-octree-losasso-velocity-extension.ts");
+  assert.match(shader, /fn reverseLosassoFaces/);
+  assert.match(shader, /traceVelocity\(centre, -params\.domainOriginDt\.w, ADVECTED_FIELD\)/);
+  assert.match(shader,
+    /let corrected = prediction \+ 0\.5 \* \(original\.value\[axis\] - reversed\)/);
+  assert.match(shader,
+    /advectedVelocity\[faceId\] = clamp\(corrected,[\s\S]*sourceStencil\.lower\[axis\],[\s\S]*sourceStencil\.upper\[axis\]\)/,
+    "the error correction must stay inside the forward source stencil");
+  assert.match(shader, /predictedVelocity\[faceId\] = INVALID_VELOCITY/,
+    "missing sparse reverse support must disable rather than extrapolate a correction");
+  assert.match(shader,
+    /if \(original\.boundary \|\| departure\.boundary \|\| sourceStencil\.boundary[\s\S]*FACE_INTERFACE_NEARBY\) != 0u\) \{ return; \}/,
+    "MacCormack must fall back to first order at closed walls and the liquid interface");
+  assert.match(shader,
+    /if \(arrival\.valid && !arrival\.boundary[\s\S]*FACE_INTERFACE_NEARBY\) == 0u\)/,
+    "the reverse characteristic must not re-enable correction across a wall or surface");
+  const coarsePhi = read("../lib/webgpu-octree-losasso-coarse-phi.wgsl.ts");
+  assert.match(coarsePhi,
+    /face\.reserved&=~FACE_INTERFACE_NEARBY;[\s\S]*targetLoad\(rowBase\+8u\*face\.negativeRow\+5u,reuse\)&INTERFACE/,
+    "coarse publication must stamp interface adjacency onto the existing face ABI");
+  const advection = host.slice(host.indexOf("encodeAdvection("),
+    host.indexOf("encodeForcesAndDivergence("));
+  assert.ok(advection.indexOf("advectLosassoFaces") < advection.indexOf("reverseLosassoFaces"));
+  assert.ok(advection.indexOf("reverseLosassoFaces") < advection.indexOf("correctLosassoFaces"));
+  assert.match(shader, /predictedVelocity is scratch here/,
+    "MacCormack should reuse the force output field rather than allocate another face array");
+  assert.match(backend, /encodePredictorExtension\([\s\S]*advectedVelocity/,
+    "the reverse pass must sample a complete predictor on the published W7 graph");
+  assert.match(band, /this\.predictorVelocity = this\.projectedSeeds/,
+    "the band predictor should reuse the projected-seed arena");
+  const gather = bandShader.slice(bandShader.indexOf("fn gatherLosassoProjectedSeeds"));
+  assert.match(gather, /let wet=seedWetFace\[id\]/,
+    "advance-time seed gathering must remain one direct mapped read");
+  assert.doesNotMatch(gather, /containingWet|wetDirectory/,
+    "topology lookup must not leak into the advection-time gather");
+  assert.match(band, /encodeTopologyRemap\(broker: PassBroker\)/,
+    "topology changes should refresh direct seed ids once at the epoch boundary");
+  const remap = bandShader.slice(bandShader.indexOf("fn clearLosassoDenseWetFaces"),
+    bandShader.indexOf("fn gatherLosassoProjectedSeeds"));
+  assert.match(remap, /atomicMin\(&denseWetFace\[key\],encoded\)/,
+    "topology remapping should scatter into a bounded dense finest-face map");
+  assert.doesNotMatch(remap, /wetDirectory|exactWet|containingWet|for\(var probe/,
+    "topology remapping must not chase the wet hash directory");
+  assert.match(remap, /MULTI_OWNER/,
+    "a retired coarse seed spanning refined owners must remain a live averaged seed");
+  const multiGather = bandShader.slice(bandShader.indexOf("fn gatherLosassoProjectedSeeds"));
+  assert.match(multiGather, /wet==MULTI_OWNER[\s\S]*exactAdd\(&exact,value\)[\s\S]*exactValue\(exact\)\/max\(1\.,count\)/,
+    "multi-owner seeds must area-average the finest projected faces instead of becoming zero");
+  assert.match(backend,
+    /publisher\.encodeReadyCommit\(broker, input\);[\s\S]*extensionBand\.encodeTopologyRemap\(broker\)/,
+    "the seed remap must observe the newly accepted wet authority");
+  assert.match(extension,
+    /predictorVelocities = \[this\.source\.projectedVelocity,[\s\S]*this\.source\.projectedVelocity\]/,
+    "the existing Jacobi scratch pair should extend the predictor in place");
+});
+
+test("Losasso wall release uses regional volume control without porous contacts", () => {
+  const projection = read("../lib/webgpu-octree-losasso-projection.ts");
+  const host = read("../lib/webgpu-octree.ts");
+  assert.match(projection, /let releasePressure = select\(0\.0, params\.contactPressure, overhead\)/,
+    "side walls should release under tension instead of remaining welded Neumann faces");
+  assert.match(projection, /solved < renewalPressure, wasSeparated/,
+    "released wall contact needs hysteresis around ambient pressure");
+  assert.match(projection, /projected = outward \* max\(0\.0, outward \* projected\)/,
+    "a released contact must reject velocity returning into the wall");
+  assert.match(host,
+    /measureOnlyLosasso[\s\S]*pending\.volume\.encodeMeasurement\(redistanceBroker\)[\s\S]*pending\.volume\.encode\(redistanceBroker\)/,
+    "Losasso should apply regional correction by default while retaining a measure-only Dawn A\/B");
+  assert.match(host, /"moving-pages"/,
+    "Losasso volume replacement must exclude sleeping wall films and fragments");
+});
+
+test("Losasso coarse publication cannot resurrect an invalid retired row", () => {
+  const shader = read("../lib/webgpu-octree-losasso-coarse-phi.wgsl.ts");
+  const restrict = shader.slice(shader.indexOf("fn restrictLosassoCoarsePhiRow"),
+    shader.indexOf("@compute", shader.indexOf("fn restrictLosassoCoarsePhiRow")));
+  assert.match(restrict, /flags=seed\.w&\(VALID\|FINITE\|FINE_RESTRICTED\)/);
+  assert.match(restrict, /if\(centreFine\.valid!=0u\)\{flags=VALID\|FINITE/);
+  assert.match(restrict, /if\(\(flags&\(VALID\|FINITE\)\)==\(VALID\|FINITE\)&&minimum<=0\./,
+    "a stale or zeroed seed must remain invisible rather than publish a phantom interface");
 });
 
 test("Losasso paper-fidelity pressure and extension remain construction-time A/B choices", () => {

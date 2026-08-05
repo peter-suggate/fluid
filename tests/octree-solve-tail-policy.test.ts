@@ -165,7 +165,7 @@ test("solve-tail policy encodes the paper upper envelope and keeps scene score a
     planOctreeSolveTail(PROFILES.largerTwoLevel), planOctreeSolveTail(PROFILES.ocean)]) {
     assert.ok(policy.encodedOuterIterations >= 4
       && policy.encodedOuterIterations <= 10);
-    assert.equal(policy.hardOuterIterationCeiling, 32);
+    assert.equal(policy.hardOuterIterationCeiling, 40);
     assert.equal(policy.boundarySmoothingIterations,
       OCTREE_SECTION43_PRODUCTION_SHELL_DEPTH);
     assert.ok(policy.relativeTolerance >= OCTREE_SOLVE_TAIL_RELATIVE_TOLERANCE);

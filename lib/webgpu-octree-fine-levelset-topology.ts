@@ -745,7 +745,14 @@ export class WebGPUFineLevelSetLeafSeeds {
   private run(pass: GPUComputePassEncoder, entryPoint: string, workgroups: number,
     entries: GPUBindGroupEntry[]): void {
     pass.setPipeline(this.pipelines[entryPoint]); pass.setBindGroup(0, this.group(entryPoint, entries));
-    pass.dispatchWorkgroups(workgroups);
+    const limit = this.device.limits.maxComputeWorkgroupsPerDimension;
+    const width = workgroups <= limit ? workgroups
+      : Math.min(limit, Math.ceil(Math.sqrt(workgroups)));
+    const height = Math.ceil(workgroups / Math.max(1, width));
+    if (height > limit) {
+      throw new RangeError(`Fine seed ${entryPoint} requires ${workgroups} workgroups, exceeding the portable 2-D dispatch limit`);
+    }
+    pass.dispatchWorkgroups(width, height);
   }
 
   private encodeRecords(pass: GPUComputePassEncoder, entries: GPUBindGroupEntry[],
@@ -1783,6 +1790,7 @@ export function makeFineLevelSetTopologyWGSL(
 ): string {
   return /* wgsl */ `
 	const INVALID:u32=0xffffffffu;const VALID:u32=1u;const CAPACITY:u32=1u;const NONFINITE:u32=4u;const MALFORMED:u32=8u;
+const PAGE_WAKE_HALO:u32=64u;
 const REASON_CONES:bool=${reasonCones ? "true" : "false"};
 const DELTA_RADIUS_MASK:bool=${deltaRadiusMask ? "true" : "false"};
 const DELTA_DIRTY:u32=0x100u;const DELTA_SUPPORT:u32=0x200u;
@@ -2640,6 +2648,8 @@ fn repairNeighbor(key:u32)->bool{
   // samples remain visible after the interface retreats. Compact JFA frontier
   // publication may reduce dependency work, but never the semantic output set.
   let dirty=affected.x!=0u;let support=affected.y!=0u;
+  if(error==0u){let flags=sourceC[id*4u+3u];sourceC[id*4u+3u]=(flags&~PAGE_WAKE_HALO)
+    |select(0u,PAGE_WAKE_HALO,support);}
   pageDelta[dirtyCandidatesOffset()+work]=select(INVALID,id,dirty);
   var promotion=0u;if(error==0u){let producerValid=params.recurringDelta!=0u
     &&arrayLength(&transportDelta)>=8u+3u*params.pageCapacity
@@ -2822,15 +2832,16 @@ fn sourceRow(index:u32)->vec2u{if(index>=sourceCount()){return vec2u(0u);}if(par
 fn sourceRecordCount(index:u32)->u32{let source=sourceRow(index);if(source.y==0u){return 0u;}return leafCount(leaves[source.x]);}
 fn sourceBlockCount()->u32{return max(1u,(params.scan.x+63u)/64u);}
 var<workgroup> laneCounts:array<u32,64>;var<workgroup> scanValues:array<u32,256>;
-@compute @workgroup_size(64) fn clearSeedState(@builtin(global_invocation_id)gid:vec3u){let item=gid.x;if(item==0u){seeds[0]=0u;seeds[1]=0u;scratch[metaBase()]=0u;scratch[metaBase()+1u]=0u;}if(item<sortCapacity()){scratch[item*4u]=INVALID;}}
-@compute @workgroup_size(64) fn classifySourceBlocks(@builtin(workgroup_id)wid:vec3u,@builtin(local_invocation_index)lid:u32){let item=wid.x*64u+lid;laneCounts[lid]=sourceRecordCount(item);workgroupBarrier();if(lid==0u){var total=0u;for(var lane=0u;lane<64u;lane+=1u){total+=laneCounts[lane];}scratch[blockBase()+wid.x]=total;}}
+fn linearGroup(wid:vec3u,nwg:vec3u)->u32{return wid.x+wid.y*nwg.x;}
+@compute @workgroup_size(64) fn clearSeedState(@builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)nwg:vec3u,@builtin(local_invocation_index)lid:u32){let item=linearGroup(wid,nwg)*64u+lid;if(item==0u){seeds[0]=0u;seeds[1]=0u;scratch[metaBase()]=0u;scratch[metaBase()+1u]=0u;}if(item<sortCapacity()){scratch[item*4u]=INVALID;}}
+@compute @workgroup_size(64) fn classifySourceBlocks(@builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)nwg:vec3u,@builtin(local_invocation_index)lid:u32){let block=linearGroup(wid,nwg);if(block>=sourceBlockCount()){return;}let item=block*64u+lid;laneCounts[lid]=sourceRecordCount(item);workgroupBarrier();if(lid==0u){var total=0u;for(var lane=0u;lane<64u;lane+=1u){total+=laneCounts[lane];}scratch[blockBase()+block]=total;}}
 @compute @workgroup_size(256) fn scanSourceBlocks(@builtin(local_invocation_index)lid:u32){let blocks=sourceBlockCount();let chunk=max(1u,(blocks+255u)/256u);let first=lid*chunk;let last=min(first+chunk,blocks);var subtotal=0u;for(var block=first;block<last;block+=1u){subtotal+=scratch[blockBase()+block];}scanValues[lid]=subtotal;workgroupBarrier();for(var offset=1u;offset<256u;offset<<=1u){var add=0u;if(lid>=offset){add=scanValues[lid-offset];}workgroupBarrier();scanValues[lid]+=add;workgroupBarrier();}var cursor=scanValues[lid]-subtotal;for(var block=first;block<last;block+=1u){let count=scratch[blockBase()+block];scratch[blockBase()+block]=cursor;cursor+=count;}let finalLane=(blocks-1u)/chunk;if(lid==finalLane){scratch[metaBase()]=cursor;scratch[metaBase()+1u]=cursor;if(cursor>sortCapacity()){seeds[1]=1u;}}}
-@compute @workgroup_size(64) fn emitSourceRecords(@builtin(workgroup_id)wid:vec3u,@builtin(local_invocation_index)lid:u32){let item=wid.x*64u+lid;let source=sourceRow(item);var count=0u;if(source.y!=0u){count=leafCount(leaves[source.x]);}laneCounts[lid]=count;workgroupBarrier();var localOffset=0u;for(var lane=0u;lane<lid;lane+=1u){localOffset+=laneCounts[lane];}if(count==0u){return;}let leaf=leaves[source.x];var output=scratch[blockBase()+wid.x]+localOffset;for(var local=0u;local<count;local+=1u){if(output<sortCapacity()){storeRecord(output,vec4u(leafKey(leaf,local),source.x,0u,item));}output+=1u;}}
+@compute @workgroup_size(64) fn emitSourceRecords(@builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)nwg:vec3u,@builtin(local_invocation_index)lid:u32){let block=linearGroup(wid,nwg);if(block>=sourceBlockCount()){return;}let item=block*64u+lid;let source=sourceRow(item);var count=0u;if(source.y!=0u){count=leafCount(leaves[source.x]);}laneCounts[lid]=count;workgroupBarrier();var localOffset=0u;for(var lane=0u;lane<lid;lane+=1u){localOffset+=laneCounts[lane];}if(count==0u){return;}let leaf=leaves[source.x];var output=scratch[blockBase()+block]+localOffset;for(var local=0u;local<count;local+=1u){if(output<sortCapacity()){storeRecord(output,vec4u(leafKey(leaf,local),source.x,0u,item));}output+=1u;}}
 fn recordGreater(left:vec4u,right:vec4u)->bool{return left.x>right.x||(left.x==right.x&&(left.y>right.y||(left.y==right.y&&(left.z>right.z||(left.z==right.z&&left.w>right.w)))));}
 @compute @workgroup_size(256) fn sortSeedRecords(@builtin(local_invocation_index)lid:u32){let count=sortCapacity();for(var width=2u;width<=count;width<<=1u){for(var stride=width>>1u;stride>0u;stride>>=1u){for(var index=lid;index<count;index+=256u){let partner=index^stride;if(partner>index){let left=loadRecord(index);let right=loadRecord(partner);let descending=(index&width)!=0u;if(recordGreater(left,right)!=descending){storeRecord(index,right);storeRecord(partner,left);}}}workgroupBarrier();}}}
 fn runStart(index:u32)->bool{let key=loadRecord(index).x;return key!=INVALID&&(index==0u||loadRecord(index-1u).x!=key);}
-@compute @workgroup_size(64) fn classifySeedRuns(@builtin(workgroup_id)wid:vec3u,@builtin(local_invocation_index)lid:u32){let index=wid.x*64u+lid;laneCounts[lid]=select(0u,1u,runStart(index));workgroupBarrier();if(lid==0u){var total=0u;for(var lane=0u;lane<64u;lane+=1u){total+=laneCounts[lane];}scratch[blockBase()+wid.x]=total;}}
+@compute @workgroup_size(64) fn classifySeedRuns(@builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)nwg:vec3u,@builtin(local_invocation_index)lid:u32){let block=linearGroup(wid,nwg);if(block>=sortCapacity()/64u){return;}let index=block*64u+lid;laneCounts[lid]=select(0u,1u,runStart(index));workgroupBarrier();if(lid==0u){var total=0u;for(var lane=0u;lane<64u;lane+=1u){total+=laneCounts[lane];}scratch[blockBase()+block]=total;}}
 @compute @workgroup_size(256) fn scanSeedRuns(@builtin(local_invocation_index)lid:u32){let blocks=sortCapacity()/64u;let chunk=(blocks+255u)/256u;let first=lid*chunk;let last=min(first+chunk,blocks);var subtotal=0u;for(var block=first;block<last;block+=1u){subtotal+=scratch[blockBase()+block];}scanValues[lid]=subtotal;workgroupBarrier();for(var offset=1u;offset<256u;offset<<=1u){var add=0u;if(lid>=offset){add=scanValues[lid-offset];}workgroupBarrier();scanValues[lid]+=add;workgroupBarrier();}var cursor=scanValues[lid]-subtotal;for(var block=first;block<last;block+=1u){let count=scratch[blockBase()+block];scratch[blockBase()+block]=cursor;cursor+=count;}let finalLane=(blocks-1u)/chunk;if(lid==finalLane){seeds[0]=min(cursor,params.tail.y);if(cursor>params.tail.y){seeds[1]=1u;}}}
 fn writePlane(index:u32,owner:u32){let base=seedPlaneBase()+index*8u;if(owner!=INVALID){let leaf=leaves[owner];seeds[base]=leaf.originX;seeds[base+1u]=leaf.originY;seeds[base+2u]=leaf.originZ;seeds[base+3u]=leaf.size;seeds[base+4u]=bitcast<u32>(leaf.phiGradient.x);seeds[base+5u]=bitcast<u32>(leaf.phiGradient.y);seeds[base+6u]=bitcast<u32>(leaf.phiGradient.z);seeds[base+7u]=bitcast<u32>(leaf.phiGradient.w);}else{seeds[base]=0u;seeds[base+1u]=0u;seeds[base+2u]=0u;seeds[base+3u]=1u;seeds[base+4u]=bitcast<u32>(3.402823e38);seeds[base+5u]=0u;seeds[base+6u]=0u;seeds[base+7u]=0u;}}
-@compute @workgroup_size(64) fn emitSeedRuns(@builtin(workgroup_id)wid:vec3u,@builtin(local_invocation_index)lid:u32){let index=wid.x*64u+lid;let start=runStart(index);laneCounts[lid]=select(0u,1u,start);workgroupBarrier();if(!start){return;}var localOffset=0u;for(var lane=0u;lane<lid;lane+=1u){localOffset+=laneCounts[lane];}let output=scratch[blockBase()+wid.x]+localOffset;if(output>=params.tail.y){return;}let record=loadRecord(index);seeds[4u+output]=record.x;seeds[seedTagBase()+output]=output;writePlane(output,record.y);}
+@compute @workgroup_size(64) fn emitSeedRuns(@builtin(workgroup_id)wid:vec3u,@builtin(num_workgroups)nwg:vec3u,@builtin(local_invocation_index)lid:u32){let block=linearGroup(wid,nwg);if(block>=sortCapacity()/64u){return;}let index=block*64u+lid;let start=runStart(index);laneCounts[lid]=select(0u,1u,start);workgroupBarrier();if(!start){return;}var localOffset=0u;for(var lane=0u;lane<lid;lane+=1u){localOffset+=laneCounts[lane];}let output=scratch[blockBase()+block]+localOffset;if(output>=params.tail.y){return;}let record=loadRecord(index);seeds[4u+output]=record.x;seeds[seedTagBase()+output]=output;writePlane(output,record.y);}
 `;

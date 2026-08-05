@@ -36,13 +36,13 @@ test("wide MGPCG reductions use exact integer limbs", () => {
   assert.equal(plan.reductionPartialBytes,
     Math.ceil(65_537 / 128) * OCTREE_PIPELINED_PCG_PARTIAL_BYTES);
   const reducedLosasso = planOctreePipelinedMGPCG({
-    rowCapacity: 1_152, maximumIterations: 32, hardIterationCeiling: 32,
+    rowCapacity: 1_152, maximumIterations: 40, hardIterationCeiling: 40,
   });
-  assert.equal(reducedLosasso.maximumIterations, 32);
-  assert.equal(reducedLosasso.hardIterationCeiling, 32);
+  assert.equal(reducedLosasso.maximumIterations, 40);
+  assert.equal(reducedLosasso.hardIterationCeiling, 40);
   assert.throws(() => planOctreePipelinedMGPCG({
-    rowCapacity: 1_152, maximumIterations: 33, hardIterationCeiling: 33,
-  }), /remain in \[16,32\]/);
+    rowCapacity: 1_152, maximumIterations: 41, hardIterationCeiling: 41,
+  }), /remain in \[16,40\]/);
 });
 
 test("wide MGPCG and its Section 4.3 shell are accepted by naga", () => {
