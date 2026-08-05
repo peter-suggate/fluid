@@ -20,6 +20,10 @@
  *   --lane=mini|large|moving-interface|ui|ocean|ceiling-drop scene lane (default mini)
  *   --band=0|1|2|3|4                override the octree interface-band level
  *                                    after applying the lane preset
+ *   --fine-factor=N                  override the global fine factor
+ *   --maximum-leaf-size=N            override the maximum octree leaf size
+ *   --coarse-backend=NAME            override the coarse solver backend
+ *   --no-tripwires                   disable runtime control-buffer tripwires
  *   --first-frame                    gate before advance 1 and reduce the
  *                                    capture to literal advance 1
  *   --losasso-d4-first-frame         one-command production-cutover preset:
@@ -128,6 +132,18 @@ if (bandLevel !== undefined
   && (!Number.isInteger(bandLevel) || bandLevel < 0 || bandLevel > 4)) {
   throw new Error("--band must be an integer from 0 through 4");
 }
+const fineFactor = flag("fine-factor") === undefined
+  ? undefined : Number(flag("fine-factor"));
+if (fineFactor !== undefined && (!Number.isInteger(fineFactor) || fineFactor < 1)) {
+  throw new Error("--fine-factor must be a positive integer");
+}
+const maximumLeafSize = flag("maximum-leaf-size") === undefined
+  ? undefined : Number(flag("maximum-leaf-size"));
+if (maximumLeafSize !== undefined
+  && (!Number.isInteger(maximumLeafSize) || maximumLeafSize < 1)) {
+  throw new Error("--maximum-leaf-size must be a positive integer");
+}
+const coarseBackend = flag("coarse-backend");
 const steps = flag("steps") === undefined
   ? losassoD4FirstFrame ? 1 : undefined : Number(flag("steps"));
 const firstFrame = losassoD4FirstFrame || process.argv.includes("--first-frame");
@@ -154,6 +170,7 @@ const counterTimeLimit = Number.isInteger(counterSeconds)
 const requestedWarmupSeconds = flag("counter-warmup") === undefined
   ? undefined : Number(flag("counter-warmup"));
 const runBaseline = !process.argv.includes("--no-baseline");
+const tripwires = !process.argv.includes("--no-tripwires");
 const isolatePassLabels = true;
 const isolateLabelPrefix = undefined;
 if (process.argv.some((argument) => argument.startsWith("--isolate-label-prefix="))) {
@@ -425,7 +442,7 @@ const profileEnvironment: Record<string, string> = {
   FLUID_SPARSE_STATS: "0",
   FLUID_RASTER_CHECKPOINTS: "0",
   FLUID_WEBGPU_SMOKE_TIMEOUT_MS: "240000",
-  FLUID_TRIPWIRES: "1",
+  FLUID_TRIPWIRES: tripwires ? "1" : "0",
   FLUID_PROFILE_FIRST_ADVANCE_GATE: profileGate ? "1" : "0",
   ...laneEnvironment,
   // This deliberately follows the lane preset. A shell-level override cannot
@@ -442,6 +459,13 @@ const profileEnvironment: Record<string, string> = {
     FLUID_OCTREE_GLOBAL_FINE_FACTOR: "4",
     FLUID_GLOBAL_FINE_GENERATION_TRANSITION: "1",
   } : {}),
+  ...(coarseBackend === undefined ? {} : { FLUID_COARSE_BACKEND: coarseBackend }),
+  ...(maximumLeafSize === undefined ? {}
+    : { FLUID_MAXIMUM_LEAF_SIZE: String(maximumLeafSize) }),
+  ...(fineFactor === undefined ? {} : {
+    FLUID_OCTREE_GLOBAL_FINE_FACTOR: String(fineFactor),
+    FLUID_GLOBAL_FINE_GENERATION_TRANSITION: fineFactor > 1 ? "1" : "0",
+  }),
 };
 type FrameReportResult = Awaited<ReturnType<typeof buildFrameReport>>;
 const commandVersion = (command: string, arguments_: readonly string[]): string | undefined => {
