@@ -3,6 +3,7 @@ import type { PassBroker } from "./webgpu-pass-broker";
 import { octreeLosassoFineTransportWGSL } from "./webgpu-octree-losasso-fine-transport.wgsl";
 import type { WebGPUOctreeLosassoVelocitySamplerSource } from "./webgpu-octree-losasso-velocity-sampler";
 import type { SurfaceInflowState } from "./webgpu-quadtree-builder";
+import { coarsePhiBFECCEnabled } from "./webgpu-octree-fine-levelset-transport";
 
 export const OCTREE_LOSASSO_FINE_TRANSPORT_CONTROL_BYTES = 64;
 export const OCTREE_LOSASSO_FINE_TRANSPORT_DISPATCH_BYTES = 48;
@@ -24,7 +25,7 @@ export interface OctreeLosassoFineTransportOptions {
 export interface OctreeLosassoFineTransportPlan {
   readonly pageCapacity: number;
   readonly sampleCapacity: number;
-  readonly encodedDispatchCount: 7;
+  readonly encodedDispatchCount: number;
   readonly topologyDeltaBytes: number;
   readonly allocatedBytes: number;
 }
@@ -62,8 +63,8 @@ export class WebGPUOctreeLosassoFineTransport {
   readonly plan: OctreeLosassoFineTransportPlan;
   readonly control: GPUBuffer;
   readonly topologyDelta: OctreeLosassoFineTransportTopologyDelta;
-  readonly bindingCount = 11;
-  readonly storageBindingCount = 10;
+  readonly bindingCount: number;
+  readonly storageBindingCount: number;
 
   private readonly params: GPUBuffer;
   private readonly liveDispatch: GPUBuffer;
@@ -75,18 +76,34 @@ export class WebGPUOctreeLosassoFineTransport {
   private classifyActivity?: GPUComputePipeline;
   private finalizeActivity?: GPUComputePipeline;
   private advect?: GPUComputePipeline;
+  private reverse?: GPUComputePipeline;
+  private correct?: GPUComputePipeline;
   private commit?: GPUComputePipeline;
   private publishDelta?: GPUComputePipeline;
   private finalize?: GPUComputePipeline;
   private group?: GPUBindGroup;
+  private reverseGroup?: GPUBindGroup;
+  private correctGroup?: GPUBindGroup;
   private prepareGroup?: GPUBindGroup;
   private initialization?: Promise<void>;
   private destroyed = false;
+  private readonly bfeccEnabled: boolean;
+  private readonly reversePhi?: GPUBuffer;
 
   constructor(private readonly device: GPUDevice,
     readonly source: WebGPUFineLevelSetBrickSource,
     readonly velocity: WebGPUOctreeLosassoVelocitySamplerSource) {
-    this.plan = planOctreeLosassoFineTransport(source);
+    this.bfeccEnabled = coarsePhiBFECCEnabled(source.plan.fineFactor);
+    // The main transport lane deliberately remains at the portable ten-storage
+    // ceiling. Optional MacCormack passes use smaller entry-point-derived
+    // layouts rather than adding their scratch field to this group.
+    this.bindingCount = 11;
+    this.storageBindingCount = 10;
+    const basePlan = planOctreeLosassoFineTransport(source);
+    const reverseBytes = this.bfeccEnabled ? basePlan.sampleCapacity * 4 : 0;
+    this.plan = Object.freeze({ ...basePlan,
+      encodedDispatchCount: basePlan.encodedDispatchCount + (this.bfeccEnabled ? 2 : 0),
+      allocatedBytes: basePlan.allocatedBytes + reverseBytes });
     if (!(velocity.fineCellSize > 0) || !Number.isFinite(velocity.fineCellSize)
       || velocity.dimensions.some((value, axis) => !Number.isSafeInteger(value) || value < 1
         || Math.abs(value * velocity.fineCellSize
@@ -113,6 +130,10 @@ export class WebGPUOctreeLosassoFineTransport {
     this.topologyDelta = Object.freeze({ buffer: delta, pageCapacity: this.plan.pageCapacity,
       maximumDisplacementOffsetWords: 7 as const, candidateKeysOffsetWords: 8 as const,
       changedKeysOffsetWords: 8 + this.plan.pageCapacity });
+    if (this.bfeccEnabled) {
+      this.reversePhi = device.createBuffer({ label: "Losasso bounded MacCormack reverse phi",
+        size: reverseBytes, usage: storage });
+    }
     const readOnly = { type: "read-only-storage" as const };
     this.layout = device.createBindGroupLayout({ label: "Losasso fine transport reduced layout",
       entries: [
@@ -176,12 +197,42 @@ export class WebGPUOctreeLosassoFineTransport {
         make("advectLosassoFinePhi"), make("commitLosassoFinePhi"),
         make("publishLosassoFineDelta"), make("finalizeLosassoFineTransport"),
       ]);
+      if (this.bfeccEnabled) {
+        [this.reverse, this.correct] = await Promise.all([
+          this.device.createComputePipelineAsync({ label: "reverseLosassoFinePhi", layout: "auto",
+            compute: { module: shaderModule, entryPoint: "reverseLosassoFinePhi" } }),
+          this.device.createComputePipelineAsync({ label: "correctLosassoFinePhi", layout: "auto",
+            compute: { module: shaderModule, entryPoint: "correctLosassoFinePhi" } }),
+        ]);
+      }
       this.group = this.device.createBindGroup({ label: "Losasso fine transport reduced bindings",
         layout: this.layout, entries: [
           this.params, this.source.metadata, this.source.worklist, this.source.samples, this.source.workB,
           this.control, this.velocity.control, this.velocity.faceGeometry, this.velocity.extendedVelocity,
           this.velocity.axisFaceDirectory, this.topologyDelta.buffer,
         ].map((buffer, binding) => ({ binding, resource: { buffer } })) });
+      if (this.reverse && this.correct && this.reversePhi) {
+        const common = [
+          { binding: 0, resource: { buffer: this.params } },
+          { binding: 1, resource: { buffer: this.source.metadata } },
+          { binding: 2, resource: { buffer: this.source.worklist } },
+          { binding: 4, resource: { buffer: this.source.workB } },
+          { binding: 6, resource: { buffer: this.velocity.control } },
+          { binding: 7, resource: { buffer: this.velocity.faceGeometry } },
+          { binding: 8, resource: { buffer: this.velocity.extendedVelocity } },
+          { binding: 9, resource: { buffer: this.velocity.axisFaceDirectory } },
+          { binding: 12, resource: { buffer: this.reversePhi } },
+        ];
+        this.reverseGroup = this.device.createBindGroup({
+          label: "Losasso fine MacCormack reverse bindings",
+          layout: this.reverse.getBindGroupLayout(0), entries: common,
+        });
+        this.correctGroup = this.device.createBindGroup({
+          label: "Losasso fine MacCormack correction bindings",
+          layout: this.correct.getBindGroupLayout(0),
+          entries: [...common, { binding: 3, resource: { buffer: this.source.samples } }],
+        });
+      }
       this.prepareGroup = this.device.createBindGroup({
         label: "Losasso fine transport prepare bindings", layout: this.prepareLayout,
         entries: [
@@ -205,6 +256,8 @@ export class WebGPUOctreeLosassoFineTransport {
     this.assertLive();
     if (!this.prepare || !this.classifyActivity || !this.finalizeActivity
       || !this.advect || !this.commit || !this.publishDelta || !this.finalize
+      || (this.bfeccEnabled && (!this.reverse || !this.correct
+        || !this.reverseGroup || !this.correctGroup))
       || !this.group || !this.prepareGroup) {
       throw new Error("Losasso fine transport pipelines are not initialized");
     }
@@ -262,6 +315,13 @@ export class WebGPUOctreeLosassoFineTransport {
     pass.setBindGroup(0, this.group);
     pass.setPipeline(this.advect); pass.dispatchWorkgroupsIndirect(
       this.liveDispatch, 16);
+    if (this.reverse && this.correct && this.reverseGroup && this.correctGroup) {
+      pass.setBindGroup(0, this.reverseGroup);
+      pass.setPipeline(this.reverse); pass.dispatchWorkgroupsIndirect(this.liveDispatch, 0);
+      pass.setBindGroup(0, this.correctGroup);
+      pass.setPipeline(this.correct); pass.dispatchWorkgroupsIndirect(this.liveDispatch, 0);
+      pass.setBindGroup(0, this.group);
+    }
     pass.setPipeline(this.commit); pass.dispatchWorkgroupsIndirect(
       this.liveDispatch, 16);
     pass.setPipeline(this.publishDelta); pass.dispatchWorkgroupsIndirect(
@@ -274,9 +334,12 @@ export class WebGPUOctreeLosassoFineTransport {
     if (this.destroyed) return; this.destroyed = true;
     this.params.destroy(); this.control.destroy(); this.liveDispatch.destroy();
     this.topologyDelta.buffer.destroy();
+    this.reversePhi?.destroy();
     this.prepare = undefined; this.classifyActivity = undefined; this.finalizeActivity = undefined;
-    this.advect = undefined; this.commit = undefined; this.publishDelta = undefined;
-    this.finalize = undefined; this.group = undefined; this.prepareGroup = undefined;
+    this.advect = undefined; this.reverse = undefined; this.correct = undefined;
+    this.commit = undefined; this.publishDelta = undefined;
+    this.finalize = undefined; this.group = undefined; this.reverseGroup = undefined;
+    this.correctGroup = undefined; this.prepareGroup = undefined;
   }
   private assertLive(): void { if (this.destroyed) throw new Error("Losasso fine transport is destroyed"); }
 }

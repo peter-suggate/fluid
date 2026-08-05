@@ -421,6 +421,17 @@ fn solidNormal(owner:i32,axis:u32,world:vec3f)->f32{
  let velocity=body.linearVelocity.xyz+cross(body.angularVelocity.xyz,world-body.positionShape.xyz);
  return velocity[axis];
 }
+fn quaternionRotate(q:vec4f,v:vec3f)->vec3f{let uv=cross(q.yzw,v);let uuv=cross(q.yzw,uv);return v+2.*(q.x*uv+uuv);}
+fn quaternionInverseRotate(q:vec4f,v:vec3f)->vec3f{return quaternionRotate(vec4f(q.x,-q.yzw),v);}
+fn rigidSdf(body:RigidBody,world:vec3f)->f32{
+ let q=quaternionInverseRotate(body.orientation,world-body.positionShape.xyz);
+ let d=body.dimensions.xyz;let shape=i32(round(body.positionShape.w));
+ if(shape==0){return length(q)-d.x;}
+ if(shape==1){let b=abs(q)-.5*d;return length(max(b,vec3f(0)))+min(max(b.x,max(b.y,b.z)),0.);}
+ if(shape==2){let cy=clamp(q.y,-.5*d.y,.5*d.y);return length(vec3f(q.x,q.y-cy,q.z))-d.x;}
+ let radial=length(q.xz)-d.x;let axial=abs(q.y)-.5*d.y;
+ return length(max(vec2f(radial,axial),vec2f(0)))+min(max(radial,axial),0.);
+}
 @compute @workgroup_size(64)
 fn conditionLosassoFaces(@builtin(global_invocation_id) invocation:vec3u){
  let faceId=invocation.x;if(faceId>=atomicLoad(&authority[2])||atomicLoad(&authority[4])!=0u){return;}
@@ -431,14 +442,33 @@ fn conditionLosassoFaces(@builtin(global_invocation_id) invocation:vec3u){
  for(var b=0u;b<span;b+=1u){for(var a=0u;a<span;a+=1u){
   var q=origin+tangentA(axis)*vec3u(a)+tangentB(axis)*vec3u(b);
   let positive=denseSolid(vec3i(q));let negative=denseSolid(vec3i(q)-vec3i(axisVector(axis)));
-  let selected=select(negative,positive,positive.x>negative.x);let solid=max(negative.x,positive.x);
+  let selected=select(negative,positive,positive.x>negative.x);var solid=max(negative.x,positive.x);
+  var centre=vec3f(q);for(var component=0u;component<3u;component+=1u){if(component!=axis){centre[component]+=.5;}}
+  let owner=i32(selected.y);
+  // Cell occupancy is only a broad-phase owner attribution.  Resolve the
+  // actual blocked area on the face plane from four analytic SDF samples,
+  // matching the structured lane's clamp(.5+sdf/h) aperture model.  Terrain
+  // has no analytic rigid owner and retains its dense fractional fallback.
+  var solidVelocity=0.;
+  if(owner>=0&&u32(owner)<arrayLength(&rigidBodies)){
+   solid=0.;let body=rigidBodies[u32(owner)];
+   for(var sample=0u;sample<4u;sample+=1u){
+    var point=centre;
+    let ta=tangentA(axis);let tb=tangentB(axis);
+    point+=(select(.25,.75,(sample&1u)!=0u)-.5)*vec3f(ta);
+    point+=(select(.25,.75,(sample&2u)!=0u)-.5)*vec3f(tb);
+    let world=params.domainOrigin.xyz+point*params.cellSize.xyz;
+    let aperture=clamp(.5+rigidSdf(body,world)/max(params.cellSize[axis],1e-20),0.,1.);
+    let blocked=.25*(1.-aperture);solid+=blocked;
+    solidVelocity+=blocked*solidNormal(owner,axis,world);
+   }
+  }else if(solid>0.){
+   let world=params.domainOrigin.xyz+centre*params.cellSize.xyz;
+   solidVelocity=solid*solidNormal(owner,axis,world);
+  }
   losassoAddExact(&exactOpen,1.-solid);
   if(solid>0.){
-   var centre=vec3f(q);for(var component=0u;component<3u;component+=1u){
-    if(component!=axis){centre[component]+=0.5;}
-   }
-   let world=params.domainOrigin.xyz+centre*params.cellSize.xyz;
-   let velocityTerm=solid*solidNormal(i32(selected.y),axis,world);if(!losassoFinite(velocityTerm)){valid=false;}
+   let velocityTerm=solidVelocity;if(!losassoFinite(velocityTerm)){valid=false;}
    else{losassoAddExact(&exactSolidVelocity,velocityTerm);}losassoAddExact(&exactSolidWeight,solid);
   }
  }}
@@ -578,7 +608,7 @@ fn sortLosassoIncidences(@builtin(global_invocation_id) invocation: vec3u) {
   }
   var diagonalSum=CompensatedF32(0.,0.);
   var fluxSum=CompensatedF32(0.,0.);
-  var valid=true;
+  var valid=true;var allSolidBlocked=end>begin;
   for (var cursor = begin; cursor < end; cursor += 1u) {
     let faceId=rowFaces[cursor];if(faceId>=atomicLoad(&authority[2])||faceId>=arrayLength(&faces)){valid=false;continue;}
     let face = faces[faceId];
@@ -586,11 +616,18 @@ fn sortLosassoIncidences(@builtin(global_invocation_id) invocation: vec3u) {
     let sign = select(-1.0, 1.0, face.negativeRow == row);
     let flux=sign * face.openFraction * face.area * face.normalVelocity;
     if(!losassoFinite(coefficient)||coefficient<0.||!losassoFinite(flux)){valid=false;continue;}
+    allSolidBlocked=allSolidBlocked&&face.openFraction<=1e-7;
     diagonalSum=addCompensatedF32(diagonalSum,coefficient);
     fluxSum=addCompensatedF32(fluxSum,flux);
   }
   let diagonalValue=compensatedValue(diagonalSum);
   let integratedFlux=compensatedValue(fluxSum);
+  if(valid&&allSolidBlocked&&losassoFinite(integratedFlux)){
+    // Degenerate all-solid wet rows are harmless identities, not malformed
+    // topology.  The wet classifier normally removes them; this fallback
+    // keeps a raster/publication race from poisoning the complete candidate.
+    diagonal[row]=1.;rhs[row]=0.;return;
+  }
   if(!valid||!losassoFinite(diagonalValue)||!losassoFinite(integratedFlux)||!(diagonalValue>0.)){
     fail(ERROR_HEADER);diagonal[row]=0.;rhs[row]=0.;return;}
   diagonal[row] = diagonalValue;

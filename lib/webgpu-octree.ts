@@ -117,6 +117,7 @@ import {
   WebGPUFineLevelSetTransport,
 } from "./webgpu-octree-fine-levelset-transport";
 import { WebGPUFineLevelSetVolumeCorrection } from "./webgpu-octree-fine-levelset-volume";
+import { WebGPUFineLevelSetRigidCarve } from "./webgpu-octree-fine-levelset-rigid-carve";
 import {
   createGPULogicalActivityAdoptionContext,
   type GPULogicalActivityAdoptionContext,
@@ -1604,6 +1605,8 @@ export class WebGPUOctreeProjection {
   private globalFineRedistanceB?: WebGPUFineLevelSetRedistance;
   private globalFineVolumeA?: WebGPUFineLevelSetVolumeCorrection;
   private globalFineVolumeB?: WebGPUFineLevelSetVolumeCorrection;
+  private globalFineRigidCarveA?: WebGPUFineLevelSetRigidCarve;
+  private globalFineRigidCarveB?: WebGPUFineLevelSetRigidCarve;
   private globalFineTransportA?: WebGPUFineLevelSetTransport;
   private globalFineTransportB?: WebGPUFineLevelSetTransport;
   private losassoFineTransportA?: WebGPUOctreeLosassoFineTransport;
@@ -2734,6 +2737,17 @@ export class WebGPUOctreeProjection {
         this.device, fineA, sampler);
       this.losassoFineTransportB = new WebGPUOctreeLosassoFineTransport(
         this.device, fineB, sampler);
+      if (this.scene.rigidBodies.length > 0) {
+        const carveOptions = {
+          bodyCount: this.scene.rigidBodies.length,
+          rigidWorldOrigin: [-0.5 * this.scene.container.width_m, 0,
+            -0.5 * this.scene.container.depth_m] as const,
+        };
+        this.globalFineRigidCarveA = new WebGPUFineLevelSetRigidCarve(
+          this.device, fineA, this.resources.rigidBodies, carveOptions);
+        this.globalFineRigidCarveB = new WebGPUFineLevelSetRigidCarve(
+          this.device, fineB, this.resources.rigidBodies, carveOptions);
+      }
       const coarseInput = this.losassoCoarsePhiInput();
       const coarseVolume = this.losassoCoarsePhi.volumeCoarseSource(coarseInput);
       this.globalFineVolumeA = new WebGPUFineLevelSetVolumeCorrection(
@@ -2755,6 +2769,8 @@ export class WebGPUOctreeProjection {
       + (this.globalFineRedistanceB?.allocatedBytes ?? 0)
       + (this.losassoFineTransportA?.plan.allocatedBytes ?? 0)
       + (this.losassoFineTransportB?.plan.allocatedBytes ?? 0)
+      + (this.globalFineRigidCarveA?.allocatedBytes ?? 0)
+      + (this.globalFineRigidCarveB?.allocatedBytes ?? 0)
       + (this.globalFineVolumeA?.allocatedBytes ?? 0)
       + (this.globalFineVolumeB?.allocatedBytes ?? 0);
     this.info.allocatedBytes += allocated;
@@ -3201,6 +3217,14 @@ export class WebGPUOctreeProjection {
           run: async () => {
             await this.losassoFineTransportA!.initializePipelines();
             await this.losassoFineTransportB!.initializePipelines();
+          },
+        }, {
+          id: "octree.losasso.fine-rigid-carve",
+          phase: "solver-pipelines",
+          label: "Compile Losasso fine rigid-body carve",
+          run: async () => {
+            await this.globalFineRigidCarveA?.initializePipelines();
+            await this.globalFineRigidCarveB?.initializePipelines();
           },
         }, {
           id: "octree.losasso.fine-volume",
@@ -4762,6 +4786,10 @@ export class WebGPUOctreeProjection {
       inflow: this.surfaceInflow,
     };
     let broker = new PassBroker(encoder);
+    if (backend.encodeRigidBoundaryRefresh(broker)) {
+      this.losassoConditionedOperator?.encodeAfterGhostDistances(broker);
+      backend.encodeHierarchyCoefficientRefresh(broker);
+    }
     backend.encodeAdvection(broker, step);
     backend.encodeForcesAndDivergence(broker, step);
     broker.fence("Losasso first-order axis-face RHS published");
@@ -4868,6 +4896,9 @@ export class WebGPUOctreeProjection {
       if (productionBoundary && phase) encoder = productionBoundary(phase, encoder);
     };
     const redistanceBroker = new PassBroker(encoder);
+    const rigidCarve = pending.targetIsA
+      ? this.globalFineRigidCarveA : this.globalFineRigidCarveB;
+    rigidCarve?.encode(redistanceBroker);
     pending.redistance.encode(redistanceBroker, {
       bandCells: pending.redistanceBandCells,
       maximumDisplacementFineCells: pending.maximumDisplacementFineCells,
@@ -4896,7 +4927,8 @@ export class WebGPUOctreeProjection {
       // without regrowing sleeping wall films and detached fragments. The env
       // switch retains a measure-only Dawn A/B for drift attribution.
       const measureOnlyLosasso = this.coarseDynamics.backend === "losasso"
-        && typeof process !== "undefined" && process.env.FLUID_VOLUME_CONTROL === "0";
+        && (this.scene.rigidBodies.length > 0
+          || (typeof process !== "undefined" && process.env.FLUID_VOLUME_CONTROL === "0"));
       if (measureOnlyLosasso) {
         pending.volume.encodeMeasurement(redistanceBroker);
       } else {
@@ -6776,6 +6808,7 @@ export class WebGPUOctreeProjection {
     this.globalFineRedistanceA?.destroy(); this.globalFineRedistanceB?.destroy();
     this.analyticBootstrapWorklist?.destroy();
     this.globalFineVolumeA?.destroy(); this.globalFineVolumeB?.destroy();
+    this.globalFineRigidCarveA?.destroy(); this.globalFineRigidCarveB?.destroy();
     this.globalFineTransportA?.destroy(); this.globalFineTransportB?.destroy();
     this.losassoFineTransportA?.destroy(); this.losassoFineTransportB?.destroy();
     this.globalFineTopologyAB?.destroy(); this.globalFineTopologyBA?.destroy();
@@ -8032,6 +8065,7 @@ struct FineLeafSummary {
   centerValid: bool,
   exactCellValid: bool,
   exactCellNegative: bool,
+  sizingRefinement: bool,
   centerPhi: f32,
   minimumPhi: f32,
   maximumPhi: f32,
@@ -8047,7 +8081,7 @@ fn fineSummaryOrderedFloat(value: u32) -> f32 {
 fn fineSummaryLength() -> u32 { return arrayLength(&pressureIn); }
 fn fineSummaryWord(index: u32) -> u32 { return bitcast<u32>(pressureIn[index]); }
 fn fineLeafSummary(origin: vec3u, size: u32) -> FineLeafSummary {
-  var result = FineLeafSummary(false, false, false, false, false, false, 0.0,
+  var result = FineLeafSummary(false, false, false, false, false, false, false, 0.0,
     3.402823e38, -3.402823e38, 3.402823e38);
   if (fineSummaryLength() < 16u || fineSummaryWord(0u) != 0u
       || fineSummaryWord(9u) != 0x80000000u) { return result; }
@@ -8120,6 +8154,7 @@ fn fineLeafSummary(origin: vec3u, size: u32) -> FineLeafSummary {
     result.found = true; result.minimumPhi = minimumPhi; result.maximumPhi = maximumPhi;
     result.minimumAbsolutePhi = minimumAbsolutePhi;
     result.coarseAuthority = (entryFlags & 0x80000000u) != 0u;
+    result.sizingRefinement = (entryFlags & 0x40000000u) != 0u;
     let samplesPerBrick = fineSummaryWord(11u);
     let fineComplete = fineSummaryWord(base + 5u) == expectedBricks
       && (samplesPerBrick == 64u || samplesPerBrick == 512u)
@@ -8229,6 +8264,12 @@ fn pressureRefinementEvidence(origin: vec3u, size: u32) -> bool {
   // complete size-8/16 summary here strands factor-1 surface bricks inside the
   // coarse leaf and prevents the later per-level passes from ever seeing them.
   if (crossesInterface) { return true; }
+  // Fine transport advects and exponentially decays section-6 curvature and
+  // diagonal velocity-gradient evidence in the page flags. The direct
+  // hierarchy summary propagates that bit to every covering candidate, so a
+  // locally active feature can force the real pressure/velocity octree down
+  // to unit cells instead of merely receiving a finer visual phi mesh.
+  if (summary.sizingRefinement) { return true; }
   // A size-two adaptive pressure row can represent the factor-4/8 free-surface
   // cut directly. Splitting every merely-near row to unit size inflated the
   // first recurring mini-dam frontier from 1,248 to 1,500 rows and exhausted
@@ -8922,6 +8963,23 @@ fn currentPressureOwnerWet(owner: Owner) -> bool {
       else if(fine.minimumPhi>=0.0){wet=false;}
       else{let centre=vec3f(origin)+vec3f(0.5*f32(owner.size-1u));wet=samplePhiPoint(centre)<0.0;}
     }
+  }
+  // A pressure row represents fluid volume, not the extrapolated level-set
+  // values retained inside a rigid for interpolation.  Once every finest
+  // cell covered by the adaptive owner is fully solid, keeping the row wet
+  // creates a sealed liquid plug whose six prescribed faces have no pressure
+  // degree of freedom.  Exclude that owner from the candidate frontier while
+  // leaving partially cut owners in the variational system.
+  if(wet&&denseSolidField){
+    var fullySolid=true;
+    for(var z=0u;z<owner.size&&fullySolid;z+=1u){
+      for(var y=0u;y<owner.size&&fullySolid;y+=1u){
+        for(var x=0u;x<owner.size;x+=1u){
+          if(solidAt(vec3i(origin+vec3u(x,y,z))).fraction<0.999999){fullySolid=false;break;}
+        }
+      }
+    }
+    if(fullySolid){wet=false;}
   }
   return wet;
 }

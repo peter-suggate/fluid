@@ -229,6 +229,7 @@ class WebGPUOctreeLosassoTopologyPublisher implements WebGPUOctreeLosassoCandida
   private readonly velocityMigration: WebGPUOctreeLosassoVelocityMigration;
   private readonly bindGroupCache = new Map<GPUComputePipeline,
     { bindings: readonly number[]; buffers: readonly GPUBuffer[]; group: GPUBindGroup }[]>();
+  private acceptedRigidBoundaryGroup?: GPUBindGroup;
   private pipelines?: readonly GPUComputePipeline[];
   private commitPipelines?: readonly GPUComputePipeline[];
   private destroyed = false;
@@ -354,6 +355,31 @@ class WebGPUOctreeLosassoTopologyPublisher implements WebGPUOctreeLosassoCandida
   encodeCandidatePublication(broker: PassBroker, input: WebGPUOctreeLosassoCandidateInput): void {
     this.assertLive();
     this.encode(broker, input, this.authority.candidate);
+  }
+
+  /** Refresh the accepted cut-face aperture and analytic normal velocity
+   * without waiting for the next topology transaction. */
+  encodeAcceptedRigidBoundaryRefresh(
+    broker: PassBroker,
+    solidCells: GPUBuffer,
+    rigidBodies: GPUBuffer,
+  ): void {
+    this.assertLive();
+    if (!this.pipelines) throw new Error("Losasso topology publisher is not initialized");
+    const pipeline = this.pipelines[PUBLISH_ENTRY_POINTS.indexOf("conditionLosassoFaces")]!;
+    const accepted = this.authority.writable;
+    const bindings = [0, 4, 7, 14, 18, 19] as const;
+    const buffers = [this.params, accepted.control, accepted.faces,
+      accepted.faceGeometry, solidCells, rigidBodies];
+    const group = this.acceptedRigidBoundaryGroup ??= this.device.createBindGroup({
+      label: "Losasso accepted rigid boundary refresh",
+      layout: pipeline.getBindGroupLayout(0),
+      entries: bindings.map((binding, index) =>
+        ({ binding, resource: { buffer: buffers[index]! } })),
+    });
+    const pass = broker.compute({ label: "Losasso boundary - refresh accepted rigid faces" });
+    pass.setPipeline(pipeline); pass.setBindGroup(0, group);
+    pass.dispatchWorkgroupsIndirect(accepted.faceDispatch, 0);
   }
 
   /** Atomically expose a valid candidate through the fixed accepted buffers. */
@@ -510,6 +536,7 @@ class WebGPUOctreeLosassoTopologyPublisher implements WebGPUOctreeLosassoCandida
     this.velocityMigration.destroy();
     this.authority.destroy();
     this.bindGroupCache.clear();
+    this.acceptedRigidBoundaryGroup = undefined;
     this.pipelines = undefined;
     this.commitPipelines = undefined;
   }
@@ -779,6 +806,16 @@ export class WebGPUOctreeLosassoCoarseBackend {
       this.extensionBand.encodePredictorExtension(
         broker, this.sources.dynamics.advectedVelocity,
       ));
+  }
+
+  encodeRigidBoundaryRefresh(broker: PassBroker): boolean {
+    this.assertReady();
+    const rigid = this.options.rigidPressureReaction;
+    if (!rigid) return false;
+    this.publisher.encodeAcceptedRigidBoundaryRefresh(
+      broker, rigid.solidCells, rigid.rigidBodies,
+    );
+    return true;
   }
 
   encodeForcesAndDivergence(

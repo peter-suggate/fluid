@@ -115,6 +115,8 @@ export interface WaterSurfacePresentationDiagnostics {
   readonly meshPublicationGeneration?: number;
   readonly globalFineCrossingPublished: boolean;
   readonly presentationFallbackActive: boolean;
+  /** Per-pipeline frames rendered after a source receipt was available. */
+  readonly sourceFrameCounts?: Readonly<Record<WaterSurfaceGeometrySource, number>>;
 }
 
 export interface WaterRenderDiagnostics extends WaterSurfacePresentationDiagnostics {
@@ -1351,6 +1353,13 @@ export class RasterWaterPipeline {
   private pendingSurfaceDiagnosticGlobalFine = false;
   private pendingSurfaceDiagnosticCoarse = false;
   private pendingSurfaceDiagnosticGlobalFineGeneration?: number;
+  private readonly surfaceSourceFrameCounts: Record<WaterSurfaceGeometrySource, number> = {
+    "global-fine-coarse": 0,
+    "compact-coarse": 0,
+    "retained-previous": 0,
+    empty: 0,
+    volume: 0,
+  };
 
   constructor(
     private readonly device: GPUDevice,
@@ -1740,6 +1749,7 @@ export class RasterWaterPipeline {
         meshPublicationGeneration,
         globalFineCrossingPublished: surfaceGeometrySource === "global-fine-coarse",
         presentationFallbackActive: surfaceGeometrySource === "retained-previous",
+        sourceFrameCounts: { ...this.surfaceSourceFrameCounts },
       };
       console.info("Water render diagnostics", JSON.stringify(this.lastSurfaceDiagnostics));
       const result = this.lastSurfaceDiagnostics;
@@ -1859,7 +1869,13 @@ export class RasterWaterPipeline {
     return bindGroup;
   }
 
-  encode(encoder: GPUCommandEncoder, output: GPUTexture | GPUTextureView, nx: number, ny: number, nz: number, restrictedTallCell: boolean, maximumNeighborDelta: number, revision: number, drySceneReplacement?: DrySceneReplacementEncoder, traceBoundary?: () => void, tracePhase?: RenderPathTracePhase): RasterWaterEncodeResult | false {
+  encode(encoder: GPUCommandEncoder, output: GPUTexture | GPUTextureView, nx: number, ny: number, nz: number, restrictedTallCell: boolean, maximumNeighborDelta: number, revision: number, drySceneReplacement?: DrySceneReplacementEncoder, traceBoundary?: () => void, tracePhase?: RenderPathTracePhase, forceSurfaceDiagnostics = false): RasterWaterEncodeResult | false {
+    // Count only frames whose source has a completed GPU receipt. The
+    // diagnostics/visual panels request full-rate receipts, making this an
+    // exact source-mode counter while it is being used to judge fidelity.
+    if (this.lastSurfaceDiagnostics) {
+      this.surfaceSourceFrameCounts[this.lastSurfaceDiagnostics.surfaceGeometrySource] += 1;
+    }
     const compactSurface = this.globalFineLevelSet ?? this.coarseLevelSet;
     const geometryDimensions = compactSurface?.sampleDimensions ?? [nx, ny, nz] as const;
     this.ensureGeometry(geometryDimensions[0],geometryDimensions[1],geometryDimensions[2]);

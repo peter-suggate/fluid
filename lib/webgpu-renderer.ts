@@ -1768,6 +1768,7 @@ export class FluidLabRenderer {
         meshPublicationGeneration: water.meshPublicationGeneration,
         globalFineCrossingPublished: water.globalFineCrossingPublished,
         presentationFallbackActive: water.presentationFallbackActive,
+        sourceFrameCounts: water.sourceFrameCounts,
       } } : {}),
     };
   }

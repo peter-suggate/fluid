@@ -58,16 +58,16 @@ export function fineTransportB4AddressingEnabled(
 }
 
 export const FLUID_COARSE_PHI_BFECC_ENV = "FLUID_COARSE_PHI_BFECC";
-/** Optional factor-1 quality ladder from the coarse-only plan.  It remains
- * opt-in until its moving-surface benefit clears the volume/energy acceptance
- * gates; factor-4/8 always retain the established transport regardless of the
- * switch. */
+/** Optional bounded MacCormack quality ladder. Factor one retains its original
+ * experiment and factor four joins it behind the same re-bless flag; factor
+ * eight stays first order until its larger scratch/cost has been measured. */
 export function coarsePhiBFECCEnabled(
   fineFactor: number,
   environment: Record<string, string | undefined> | undefined
     = typeof process !== "undefined" ? process.env : undefined,
 ): boolean {
-  return fineFactor === 1 && environment?.[FLUID_COARSE_PHI_BFECC_ENV] === "1";
+  return (fineFactor === 1 || fineFactor === 4)
+    && environment?.[FLUID_COARSE_PHI_BFECC_ENV] === "1";
 }
 
 export const FINE_LEVELSET_TRANSPORT_CONTROL_BYTES = 64;
@@ -377,7 +377,7 @@ export class WebGPUFineLevelSetTransport {
       candidateKeysOffsetWords: 8,
       changedKeysOffsetWords: 8 + source.plan.maximumResidentBricks };
     if (this.bfeccEnabled) {
-      this.reversePhi = device.createBuffer({ label: "Factor-1 bounded MacCormack reverse phi",
+      this.reversePhi = device.createBuffer({ label: "Fine bounded MacCormack reverse phi",
         size: bfeccScratchBytes, usage: storage });
     }
     const stagedFineAddressing = fineTransportStagedAddressingRequested() ? 1 : 0;
@@ -628,14 +628,14 @@ export class WebGPUFineLevelSetTransport {
         (4 + 7 * FINE_LEVELSET_TRANSPORT_WORKSET_CLASSES[index]! + 4) * 4);
     });
     this.reversePipelines.forEach((pipeline, index) => {
-      const reverse = broker.compute({ label: `Reverse factor-1 predicted phi ${classNames[index]}` });
+      const reverse = broker.compute({ label: `Reverse predicted fine phi ${classNames[index]}` });
       reverse.setPipeline(pipeline); reverse.setBindGroup(0, this.reverseGroups[index]!);
       reverse.dispatchWorkgroupsIndirect(this.indirectDispatch,
         (4 + 7 * FINE_LEVELSET_TRANSPORT_WORKSET_CLASSES[index]! + 4) * 4);
     });
     this.correctionPipelines.forEach((pipeline, index) => {
       const correction = broker.compute({
-        label: `Apply bounded factor-1 MacCormack correction ${classNames[index]}`,
+        label: `Apply bounded fine MacCormack correction ${classNames[index]}`,
       });
       correction.setPipeline(pipeline); correction.setBindGroup(0, this.correctionGroups[index]!);
       correction.dispatchWorkgroupsIndirect(this.indirectDispatch,

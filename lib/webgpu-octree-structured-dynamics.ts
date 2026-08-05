@@ -2752,13 +2752,14 @@ fn rigidSdf(body:RigidBody,world:vec3f)->f32{
 fn solidWorld(x:vec3f)->vec3f{return x-vec3f(.5*f32(p.dimensionX)*p.physical.x,0.,.5*f32(p.dimensionZ)*p.physical.x);}
 fn accumulateBodyImpulse(body:u32,impulse:vec3f,torque:vec3f){
   let base=body*12u;
-  if(base+5u>=arrayLength(&rigidExchange)){return;}
+  if(base+10u>=arrayLength(&rigidExchange)){return;}
   atomicAdd(&rigidExchange[base],i32(round(impulse.x*1e6)));
   atomicAdd(&rigidExchange[base+1u],i32(round(impulse.y*1e6)));
   atomicAdd(&rigidExchange[base+2u],i32(round(impulse.z*1e6)));
   atomicAdd(&rigidExchange[base+3u],i32(round(torque.x*1e6)));
   atomicAdd(&rigidExchange[base+4u],i32(round(torque.y*1e6)));
   atomicAdd(&rigidExchange[base+5u],i32(round(torque.z*1e6)));
+  atomicMax(&rigidExchange[base+10u],1);
 }
 fn bodyImpulseRow(cls:u32,index:u32){
   let row=workItem(cls,index);

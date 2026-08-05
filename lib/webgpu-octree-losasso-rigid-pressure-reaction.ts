@@ -81,14 +81,32 @@ fn patchArea(axis:u32)->f32{
 }
 fn addExchange(body:u32,impulse:vec3f,torque:vec3f){
  let base=body*${RIGID_EXCHANGE_WORDS}u;
- if(base+5u>=arrayLength(&rigidExchange)||!finite3(impulse)||!finite3(torque)){return;}
+ if(base+10u>=arrayLength(&rigidExchange)||!finite3(impulse)||!finite3(torque)){return;}
  atomicAdd(&rigidExchange[base],i32(round(impulse.x*FIXED_POINT_SCALE)));
  atomicAdd(&rigidExchange[base+1u],i32(round(impulse.y*FIXED_POINT_SCALE)));
  atomicAdd(&rigidExchange[base+2u],i32(round(impulse.z*FIXED_POINT_SCALE)));
  atomicAdd(&rigidExchange[base+3u],i32(round(torque.x*FIXED_POINT_SCALE)));
  atomicAdd(&rigidExchange[base+4u],i32(round(torque.y*FIXED_POINT_SCALE)));
  atomicAdd(&rigidExchange[base+5u],i32(round(torque.z*FIXED_POINT_SCALE)));
+ // Pressure already contains gravity, so its closed-share reaction carries
+ // hydrostatic buoyancy.  Mark the exchange epoch to keep the resident rigid
+ // integrator from adding a second analytic Archimedes force.
+ atomicMax(&rigidExchange[base+10u],1);
 }
+fn rigidVolume(body:RigidBody)->f32{let d=body.dimensions.xyz;let shape=i32(round(body.positionShape.w));
+ if(shape==0){return 4.1887902047863905*d.x*d.x*d.x;}if(shape==1){return d.x*d.y*d.z;}
+ if(shape==3){return 3.141592653589793*d.x*d.x*d.y;}
+ return 3.141592653589793*d.x*d.x*d.y+4.1887902047863905*d.x*d.x*d.x;}
+fn rigidSurfaceArea(body:RigidBody)->f32{let d=body.dimensions.xyz;let shape=i32(round(body.positionShape.w));
+ if(shape==0){return 12.566370614359172*d.x*d.x;}
+ if(shape==1){return 2.*(d.x*d.y+d.x*d.z+d.y*d.z);}
+ if(shape==3){return 6.283185307179586*d.x*(d.x+d.y);}
+ return 6.283185307179586*d.x*d.y+12.566370614359172*d.x*d.x;}
+fn addWetSurfaceEstimate(body:u32,blockedArea:f32){let base=body*${RIGID_EXCHANGE_WORDS}u;
+ if(base+6u>=arrayLength(&rigidExchange)||body>=arrayLength(&rigidBodies)){return;}
+ let rb=rigidBodies[body];let cellVolume=p.cellSize.x*p.cellSize.y*p.cellSize.z;
+ let wetCells=blockedArea/max(rigidSurfaceArea(rb),1e-9)*rigidVolume(rb)/max(cellVolume,1e-12);
+ if(finite(wetCells)&&wetCells>0.){atomicAdd(&rigidExchange[base+6u],i32(round(wetCells*65536.)));}}
 @compute @workgroup_size(64)
 fn exchangeLosassoRigidPressure(@builtin(global_invocation_id)invocation:vec3u){
  let row=invocation.x;
@@ -112,7 +130,11 @@ fn exchangeLosassoRigidPressure(@builtin(global_invocation_id)invocation:vec3u){
   for(var b=0u;b<span;b+=1u){for(var a=0u;a<span;a+=1u){
    let q=origin+tangentA(axis)*vec3u(a)+tangentB(axis)*vec3u(b);
    let positive=denseSolid(vec3i(q));let negative=denseSolid(vec3i(q)-vec3i(axisStep));
-   let selected=select(negative,positive,positive.x>negative.x);let blocked=max(negative.x,positive.x);
+   let selected=select(negative,positive,positive.x>negative.x);
+   // The accepted face aperture is the operator's analytic four-sample area
+   // fraction.  Reuse it verbatim so K^T p is the exact adjoint of the flux
+   // constraint instead of reverting to the old max-of-cell approximation.
+   let blocked=1.-face.openFraction;
    let owner=i32(selected.y);
    if(blocked<=0.||owner<0||u32(owner)>=p.dimensionsBodyCount.w
      ||u32(owner)>=p.capacities.z||u32(owner)>=arrayLength(&rigidBodies)){continue;}
@@ -122,6 +144,12 @@ fn exchangeLosassoRigidPressure(@builtin(global_invocation_id)invocation:vec3u){
    let impulse=p.rigidWorldOriginDt.w*solved*area*blocked*normal;
    let torque=cross(world-rigidBodies[u32(owner)].positionShape.xyz,impulse);
    addExchange(u32(owner),impulse,torque);
+   // Count each geometric face once even when both pressure rows are wet.
+   // Surface-area immersion gives the analytic body-volume fraction required
+   // by drag/added mass without reintroducing buoyancy in the integrator.
+   if(face.negativeRow==row||face.negativeRow==INVALID_ROW){
+    addWetSurfaceEstimate(u32(owner),area*blocked);
+   }
   }}
  }
 }

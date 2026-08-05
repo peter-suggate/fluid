@@ -2043,10 +2043,18 @@ fn recordPhysicsPhaseBoundary(
         if (this.transportConservativeVolume) encoder.copyTextureToTexture({ texture: this.volumeB }, { texture: this.volumeA }, [this.info.nx, this.info.ny, this.info.nz]);
         encoder.copyTextureToTexture({ texture: this.velocityB }, { texture: this.velocityA }, [this.info.nx, this.info.ny, this.info.nz]);
       }
+      if (activeBodies.length > 0) {
+        // Keep the analytic rigid state on the same temporal grid as the
+        // pressure/face boundary condition. Each substep consumes only its
+        // own exchange and publishes the updated pose before the next
+        // Losasso accepted-face refresh.
+        const cellVolume = c.width_m * c.height_m * c.depth_m
+          / (this.info.nx * this.info.ny * this.info.nz);
+        this.rigidSystem.encode(encoder, dt, cellVolume, 1, c.height_m / this.info.ny);
+        if (substep + 1 < substeps) encoder.clearBuffer(this.rigidExchangeBuffer);
+      }
     }
     if (activeBodies.length > 0) {
-      const cellVolume = c.width_m * c.height_m * c.depth_m / (this.info.nx * this.info.ny * this.info.nz);
-      this.rigidSystem.encode(encoder, delta, cellVolume, substeps, c.height_m / this.info.ny);
       if (this.octreeProjection) this.stepSequenceRecorder.record("rigid-exchange");
       encoder = completePhysicsPhase(
         encoder,

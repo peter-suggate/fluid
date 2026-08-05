@@ -1,6 +1,23 @@
 import { makeOctreePowerCoarseLevelSetSampleWGSL } from "./webgpu-octree-power-coarse-levelset";
 import { fineLevelSetPackedSampleWGSL } from "./fine-levelset-packed-sample";
 
+export const FLUID_FINE_FILTERED_NORMALS_ENV = "FLUID_FINE_FILTERED_NORMALS";
+
+/** Factor one keeps its established compensator; oversampled bands opt in so
+ * existing image baselines remain unchanged until explicitly re-blessed. */
+export function fineSurfaceFilteredNormalsEnabled(
+  fineFactor: number,
+  environment: Record<string, string | undefined> | undefined
+    = typeof process !== "undefined" ? process.env : undefined,
+): boolean {
+  return fineFactor === 1 || ((fineFactor === 4 || fineFactor === 8)
+    && environment?.[FLUID_FINE_FILTERED_NORMALS_ENV] === "1");
+}
+
+const filteredFineFactorsWGSL = fineSurfaceFilteredNormalsEnabled(4)
+  ? "(factor==1u||factor==4u||factor==8u)"
+  : "factor==1u";
+
 const TETS = [
   [0, 1, 2, 6], [0, 2, 3, 6], [0, 3, 7, 6],
   [0, 7, 4, 6], [0, 5, 6, 4], [0, 5, 1, 6],
@@ -69,9 +86,10 @@ fn signedPhi(qi:vec3i)->f32{
   return sampleCoarseOctreePhi(p.settings.xyz+(vec3f(q)+vec3f(.5))*p.settings.w);
 }
 fn filteredNormalAt(lattice:vec3f,fallback:vec3f,filterEnabled:bool)->vec3f{
-  // Preserve the established factor-4/factor-8 image byte-for-byte. Only the
-  // factor-1 baseline pays for the rendering-only quality compensator.
-  if(u32(round(p.cell.x))!=1u||!filterEnabled){return fallback;}
+  // Factor-4/8 filtering is compiled in only under the fidelity flag, keeping
+  // the established baseline byte-for-byte when the flag is absent.
+  let factor=u32(round(p.cell.x));
+  if(!(${filteredFineFactorsWGSL})||!filterEnabled){return fallback;}
   let x=lattice-vec3f(1.0);
   let center=vec3i(round(x));
   var weightSum=0.0;var phiSum=0.0;

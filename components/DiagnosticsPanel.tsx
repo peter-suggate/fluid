@@ -135,9 +135,9 @@ export function DiagnosticsPanel() {
               : waterSurfacePresentation.surfaceGeometrySource === "retained-previous" ? "RETAINED PREVIOUS MESH"
                 : waterSurfacePresentation.surfaceGeometrySource === "volume" ? "VOLUME FIELD" : "EMPTY"}
             unit={waterSurfacePresentation.globalFineCrossingPublished
-              ? `${waterRasterGenerationCurrent ? "current" : "unproven/current mismatch"} fine/coarse crossing · attached gen ${waterSurfacePresentation.globalFineAttachedGeneration ?? "?"} · mesh gen ${waterSurfacePresentation.meshPublicationGeneration ?? "?"} · sampled gen ${gpuInfo?.globalFineGeneration ?? "?"}`
+              ? `${waterRasterGenerationCurrent ? "current" : "unproven/current mismatch"} fine/coarse crossing · attached gen ${waterSurfacePresentation.globalFineAttachedGeneration ?? "?"} · mesh gen ${waterSurfacePresentation.meshPublicationGeneration ?? "?"} · sampled gen ${gpuInfo?.globalFineGeneration ?? "?"}${waterSurfacePresentation.sourceFrameCounts ? ` · frames fine ${waterSurfacePresentation.sourceFrameCounts["global-fine-coarse"]} / retained ${waterSurfacePresentation.sourceFrameCounts["retained-previous"]} / compact ${waterSurfacePresentation.sourceFrameCounts["compact-coarse"]}` : ""}`
               : waterSurfacePresentation.presentationFallbackActive
-                ? "presentation fallback only · solver authority unchanged"
+                ? `presentation fallback only · solver authority unchanged${waterSurfacePresentation.sourceFrameCounts ? ` · frames fine ${waterSurfacePresentation.sourceFrameCounts["global-fine-coarse"]} / retained ${waterSurfacePresentation.sourceFrameCounts["retained-previous"]} / compact ${waterSurfacePresentation.sourceFrameCounts["compact-coarse"]}` : ""}`
                 : waterSurfacePresentation.globalFineAttached
                   ? "no current crossing · no fallback geometry"
                   : "volume presentation source"}

@@ -9,6 +9,7 @@ import type { GPUInitializationTask } from "./gpu-initialization";
 export const FINE_LEVELSET_SUMMARY_VALID = 0x8000_0000;
 export const FINE_LEVELSET_SUMMARY_COARSE_AUTHORITY = 0x8000_0000;
 export const FINE_LEVELSET_SUMMARY_CENTER_COMPLETE = 0x3fc0_0000;
+export const FINE_LEVELSET_SUMMARY_SIZING_REFINEMENT = 0x4000_0000;
 export const FINE_LEVELSET_SUMMARY_DIRECTORY_PAGE_SIZE = 32;
 export const FINE_LEVELSET_SUMMARY_ENTRY_WORDS = 12;
 export const FINE_LEVELSET_SUMMARY_ERROR = Object.freeze({ capacity: 1, staleGeneration: 4,
@@ -433,6 +434,7 @@ ${fineLevelSetLinearWorkgroupWGSL}
 const INVALID:u32=0xffffffffu;const VALID:u32=1u;const PUBLISHED:u32=0x80000000u;
 const CAPACITY:u32=1u;const STALE:u32=4u;const NONFINITE:u32=8u;
 const COARSE_AUTHORITY:u32=0x80000000u;const CENTER_COMPLETE:u32=0x3fc00000u;const STATE_READY:u32=0x51a7e001u;
+const SIZING_REFINEMENT:u32=0x40000000u;const PAGE_SIZING_MASK:u32=0xff0000u;
 struct P{baseDims:vec3u,samplesPerBrick:u32,pageCapacity:u32,entryCapacity:u32,generation:u32,level:u32,
  levelOffset:u32,levelKeyCount:u32,levelDims:vec3u,maximumLevel:u32,hierarchyKeyCapacity:u32,
  worklistHeaderWords:u32,coarseEntryCapacity:u32,finestDims:vec3u,changedKeysOffset:u32,maxWorkgroups:u32,
@@ -696,6 +698,7 @@ fn finishCenter(value:Entry)->Entry{var result=value;var center=0.0;var mask=0u;
  if(lid<8u){var center=vec2u(0u);if(enabled){center=centerSampleAt(key,lid);}centerBits[lid]=center.x;centerStates[lid]=center.y;}workgroupBarrier();
  if(lid==0u&&enabled){var value=emptyEntry(key);value.flags=errors[0];if(validSamples[0]>0u){value.minimumPhi=ordered(minimumPhi[0]);
   value.maximumPhi=ordered(maximumPhi[0]);value.minimumAbsolutePhi=bitcast<u32>(minimumAbsolutePhi[0]);value.samples=validSamples[0];value.bricks=1u;}
+  let page=finePage(key);if(page!=INVALID&&(metadata[4u*page+3u]&PAGE_SIZING_MASK)>=0x400000u){value.flags|=SIZING_REFINEMENT;}
   if(p.fineFactor==1u&&p.samplesPerBrick==64u){for(var bit=0u;bit<32u;bit+=1u){
    value.validMaskLow|=exactValid[bit]<<bit;value.validMaskHigh|=exactValid[bit+32u]<<bit;
    value.negativeMaskLow|=exactNegative[bit]<<bit;value.negativeMaskHigh|=exactNegative[bit+32u]<<bit;}}
