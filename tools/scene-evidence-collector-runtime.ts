@@ -32,6 +32,7 @@ export interface SceneCheckpointEvidenceContext {
   /** Authoritative fine-phi upper-interface height, in coarse-cell units, for
    * each coarse x/z column. NaN denotes a column without an upper crossing. */
   readonly fineUpperSurfaceField?: Float32Array;
+  readonly rigidCouplingSnapshot?: Readonly<Record<string, unknown>>;
   readonly compactVelocityEvidence?: Readonly<Record<string, unknown>>;
 }
 

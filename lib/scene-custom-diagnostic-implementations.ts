@@ -14,6 +14,7 @@ import {
   evaluateFreeFallContactDiagnostic,
   type FreeFallContactDiagnosticParameters,
 } from "./scene-free-fall-contact-diagnostic";
+import { evaluateRigidCouplingDiagnostic } from "./scene-rigid-coupling-diagnostic";
 import {
   evaluateGardenBrickMigrationDiagnostic,
   type GardenBrickMigrationDiagnosticParameters,
@@ -123,6 +124,16 @@ const freeFallContact = defineSceneHookImplementation({
       methods: context.selectedMethods,
     });
   },
+});
+
+const rigidCouplingOracle = defineSceneHookImplementation({
+  id: "rigid-coupling-oracle",
+  requires: ["rigid coupling", "checkpoint fields", "front/back raster"],
+  evaluate: (context) => evaluateRigidCouplingDiagnostic({
+    scene: context.scene as SceneDescription,
+    evidence: context.evidence,
+    methods: context.selectedMethods,
+  }),
 });
 
 const gardenSourceBrickMigration = defineSceneHookImplementation({
@@ -628,6 +639,7 @@ const fluidSymmetry = defineSceneHookImplementation({
 
 export const sceneCustomHookImplementations = Object.freeze({
   "free-fall-contact": freeFallContact,
+  "rigid-coupling-oracle": rigidCouplingOracle,
   "garden-source-brick-migration": gardenSourceBrickMigration,
   "minimal-dam-motion": minimalDamMotion,
   "dam-break-velocity-parity": damBreakVelocityParity,

@@ -532,6 +532,17 @@ export const CEILING_DROP_METHOD_PROFILE: MethodProfile = Object.freeze({
   }),
 });
 
+/** Minimal 16-cubed Losasso coupling oracle profile. */
+export const RIGID_COUPLING_ORACLE_METHOD_PROFILE: MethodProfile = Object.freeze({
+  ...POWER_VALIDATION_METHOD_PROFILE,
+  overrides: Object.freeze({
+    ...POWER_VALIDATION_METHOD_PROFILE.overrides,
+    maximumLeafSize: "8",
+    interfaceRefinementBandCells: 4,
+    globalFineLevelSetFactor: "4",
+  }),
+});
+
 /** The larger offset tank needs one additional interface-support cell to keep
  * its adaptive Section 5 band inside complete catalog support. This mirrors the
  * isolated Dawn oracle instead of inheriting the tiny 16-cubed profile. */
@@ -978,6 +989,42 @@ export function createMidairBrickDropScene(): SceneDescription {
 export function createMidairCornerDropScene(): SceneDescription {
   return createFreeFallDropScene("midair-corner-drop");
 }
+
+export type RigidCouplingOracleSceneId = "rigid-hydrostatic" | "rigid-float" | "rigid-sink";
+
+/** Three small analytic sphere/tank scenes used by the Dawn coupling oracle. */
+export function createRigidCouplingOracleScene(id: RigidCouplingOracleSceneId): SceneDescription {
+  const scene = cloneScene(defaultScene);
+  scene.sceneId = id;
+  scene.duration_s = id === "rigid-hydrostatic" ? 0.5 : id === "rigid-float" ? 2 : 1;
+  scene.container = { ...scene.container, width_m: 0.8, height_m: 0.8, depth_m: 0.8,
+    fillFraction: 0.5, top: "closed", fluidWallMode: "free-slip" };
+  scene.voxelDomain = { finestCellSize_m: 0.05, brickSize_cells: 8 };
+  scene.fluid.initialCondition = "tank-fill";
+  scene.fluid.surfaceTension_N_m = 0;
+  delete scene.fluid.initialBrickSeeds_m;
+  delete scene.fluid.initialBrickSeedsAdditive;
+  delete scene.fluid.inflow;
+  delete scene.terrain;
+  scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 0.004;
+  const radius = id === "rigid-float" ? 0.15 : 0.10;
+  scene.rigidBodies = [{
+    id: `${id}-sphere`, name: id, shape: "sphere",
+    dimensions_m: { x: radius, y: radius, z: radius },
+    density_kg_m3: id === "rigid-float" ? 500 : id === "rigid-sink" ? 2400 : 1000,
+    position_m: { x: 0, y: id === "rigid-hydrostatic" ? 0.20 : id === "rigid-float" ? 0.40 : 0.60, z: 0 },
+    orientation: { w: 1, x: 0, y: 0, z: 0 },
+    linearVelocity_m_s: { x: 0, y: 0, z: 0 },
+    angularVelocity_rad_s: { x: 0, y: 0, z: 0 },
+    restitution: 0.05, friction: 0.3,
+    motion: id === "rigid-hydrostatic" ? "static" : "dynamic",
+  }];
+  return scene;
+}
+
+export const createRigidHydrostaticScene = () => createRigidCouplingOracleScene("rigid-hydrostatic");
+export const createRigidFloatScene = () => createRigidCouplingOracleScene("rigid-float");
+export const createRigidSinkScene = () => createRigidCouplingOracleScene("rigid-sink");
 
 /**
  * A tank sized so the finest solver grid is exactly 16x8x16 cells: a 2x2 x/z
@@ -1657,6 +1704,33 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     methodProfile: CEILING_DROP_METHOD_PROFILE,
     build: createCeilingSlabDropScene,
     camera: { distance_m: 2.4, target_m: { x: 0, y: 0.4, z: 0 } },
+  }),
+  defineScene({
+    id: "rigid-hydrostatic",
+    name: "Rigid coupling · hydrostatic sphere",
+    blurb: "A fully submerged static sphere measures pressure buoyancy, volume displacement, and publication liveness.",
+    audience: "validation", shelf: "Rigid coupling", environment: "default",
+    methodProfile: RIGID_COUPLING_ORACLE_METHOD_PROFILE,
+    build: createRigidHydrostaticScene,
+    camera: { distance_m: 1.8, target_m: { x: 0, y: 0.3, z: 0 } },
+  }),
+  defineScene({
+    id: "rigid-float",
+    name: "Rigid coupling · buoyant sphere",
+    blurb: "A half-density sphere released at the waterline checks settling, drag, and plunge-through.",
+    audience: "validation", shelf: "Rigid coupling", environment: "default",
+    methodProfile: RIGID_COUPLING_ORACLE_METHOD_PROFILE,
+    build: createRigidFloatScene,
+    camera: { distance_m: 1.8, target_m: { x: 0, y: 0.4, z: 0 } },
+  }),
+  defineScene({
+    id: "rigid-sink",
+    name: "Rigid coupling · dense sphere drop",
+    blurb: "A dense sphere enters from above and checks bounded splash, conserved displacement, and floor arrival.",
+    audience: "validation", shelf: "Rigid coupling", environment: "default",
+    methodProfile: RIGID_COUPLING_ORACLE_METHOD_PROFILE,
+    build: createRigidSinkScene,
+    camera: { distance_m: 1.8, target_m: { x: 0, y: 0.4, z: 0 } },
   }),
   defineScene({
     id: "corner-brick-drop",

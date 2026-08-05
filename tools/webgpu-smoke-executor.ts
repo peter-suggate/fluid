@@ -2743,11 +2743,85 @@ async function runGPU(
         ? await readFineUpperSurfaceField(device, solver,
           [solver.info.nx, solver.info.ny, solver.info.nz])
         : undefined;
+      let rigidCouplingSnapshot: Readonly<Record<string, unknown>> | undefined;
+      if (checkpointSources.has("rigid coupling") && method.id === "octree") {
+        const debug = (solver as GPUSolverInstance & { rigidCouplingDebug?: {
+          state: GPUBuffer; exchange: GPUBuffer; immersedVolumes: GPUBuffer;
+          sealedPlugDiagnostics?: GPUBuffer; rigidBoundaryRefreshDiagnostics?: GPUBuffer;
+          bodyCount: number;
+        }; octreeProjection?: { readLosassoAuthorityDiagnostics(): Promise<Readonly<{
+          authority: readonly number[]; candidate: readonly number[]; candidateHeader: readonly number[];
+        }>> } }).rigidCouplingDebug;
+        if (!debug || debug.bodyCount < 1) throw new Error("rigid coupling evidence has no GPU body source");
+        const bodyCount = Math.min(12, debug.bodyCount);
+        const [stateBytes, exchangeBytes, immersedBytes, sealedPlugBytes, refreshBytes, authority] = await Promise.all([
+          readBufferBinding(device, { buffer: debug.state }, bodyCount * 32 * 4),
+          readBufferBinding(device, { buffer: debug.exchange }, bodyCount * 12 * 4),
+          readBufferBinding(device, { buffer: debug.immersedVolumes }, bodyCount * 4),
+          debug.sealedPlugDiagnostics
+            ? readBufferBinding(device, { buffer: debug.sealedPlugDiagnostics }, 16)
+            : undefined,
+          debug.rigidBoundaryRefreshDiagnostics
+            ? readBufferBinding(device, { buffer: debug.rigidBoundaryRefreshDiagnostics }, 24)
+            : undefined,
+          (solver as GPUSolverInstance & { octreeProjection?: {
+            readLosassoAuthorityDiagnostics(): Promise<Readonly<{
+              authority: readonly number[]; candidate: readonly number[]; candidateHeader: readonly number[];
+            }>>;
+          } }).octreeProjection?.readLosassoAuthorityDiagnostics(),
+        ]);
+        const state = new Float32Array(stateBytes.buffer, stateBytes.byteOffset,
+          stateBytes.byteLength / 4);
+        const exchange = new Int32Array(exchangeBytes.buffer, exchangeBytes.byteOffset,
+          exchangeBytes.byteLength / 4);
+        const immersed = new Float32Array(immersedBytes.buffer, immersedBytes.byteOffset,
+          immersedBytes.byteLength / 4);
+        const sealedPlugDiagnostics = sealedPlugBytes
+          ? new Uint32Array(sealedPlugBytes.buffer, sealedPlugBytes.byteOffset,
+            sealedPlugBytes.byteLength / 4) : undefined;
+        const refreshDiagnostics = refreshBytes
+          ? new Uint32Array(refreshBytes.buffer, refreshBytes.byteOffset,
+            refreshBytes.byteLength / 4) : undefined;
+        rigidCouplingSnapshot = {
+          dt_s: stepDt,
+          bodies: Array.from({ length: bodyCount }, (_unused, index) => {
+            const stateBase = 32 * index, exchangeBase = 12 * index;
+            return {
+              position_m: { x: state[stateBase]!, y: state[stateBase + 1]!, z: state[stateBase + 2]! },
+              shape: state[stateBase + 3]!, dimensions_m: {
+                x: state[stateBase + 4]!, y: state[stateBase + 5]!, z: state[stateBase + 6]!,
+              },
+              linearVelocity_m_s: {
+                x: state[stateBase + 12]!, y: state[stateBase + 13]!, z: state[stateBase + 14]!,
+              },
+              impulse_N_s: {
+                x: exchange[exchangeBase]! * 1e-6,
+                y: exchange[exchangeBase + 1]! * 1e-6,
+                z: exchange[exchangeBase + 2]! * 1e-6,
+              },
+              angularImpulse_N_m_s: {
+                x: exchange[exchangeBase + 3]! * 1e-6,
+                y: exchange[exchangeBase + 4]! * 1e-6,
+                z: exchange[exchangeBase + 5]! * 1e-6,
+              },
+              displacedVolume_m3: immersed[index]!,
+              wetSurfaceCells: exchange[exchangeBase + 6]! / 65536,
+              pressureCoupled: exchange[exchangeBase + 10] !== 0,
+            };
+          }),
+          authorityGeneration: authority?.authority[0] ?? 0,
+          authorityErrorFlags: authority?.authority[4] ?? 0,
+          candidateErrorFlags: authority?.candidate[4] ?? 0,
+          sealedPlugCount: sealedPlugDiagnostics?.[0] ?? 0,
+          rigidBoundaryRefreshErrorFlags: refreshDiagnostics?.[4] ?? 0,
+        };
+      }
       const collected = collectSceneEvidence(sceneEvidenceCollectorRegistry, evidenceCollectors, "checkpoint", {
         scene, method: method.id as WebGPUSmokeMethodId, grid: [solver.info.nx, solver.info.ny, solver.info.nz],
         time_s: solver.info.submittedTime_s ?? 0, volumeField: cubic.field,
         ...(compactVelocityField ? { velocityField: compactVelocityField } : {}),
         ...(fineUpperSurfaceField ? { fineUpperSurfaceField } : {}),
+        ...(rigidCouplingSnapshot ? { rigidCouplingSnapshot } : {}),
         ...(compactPressureState ? {
           pressureField: compactPressureState.pressure,
           pressureRhsField: compactPressureState.rhs,
@@ -2856,7 +2930,15 @@ async function runGPU(
     }
     if (hasSeparateFineLevelSetBand) {
       if (!fine || !raster) failures.push("factor-4 production raster evidence is unavailable");
-      else failures.push(...losassoRasterCutoverFailures(raster, fine.generation));
+      else if (checkpointSources.has("rigid coupling")) {
+        // Coupling oracles own a deliberately narrower rendering assertion:
+        // current fine geometry, not silhouette pixel identity around a solid.
+        if (raster.surfaceGeometrySource !== "global-fine-coarse"
+          || raster.globalFineCrossingPublished !== true
+          || raster.presentationFallbackActive !== false) {
+          failures.push("rigid coupling raster did not consume current global-fine geometry");
+        }
+      } else failures.push(...losassoRasterCutoverFailures(raster, fine.generation));
     }
     losassoCutoverAuthority = Object.freeze({ backend: "losasso", steps,
       submittedTime_s: solver.info.submittedTime_s, authority, solver: pressure, coarsePhi,

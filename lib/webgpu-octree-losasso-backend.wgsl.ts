@@ -442,7 +442,9 @@ fn conditionLosassoFaces(@builtin(global_invocation_id) invocation:vec3u){
  for(var b=0u;b<span;b+=1u){for(var a=0u;a<span;a+=1u){
   var q=origin+tangentA(axis)*vec3u(a)+tangentB(axis)*vec3u(b);
   let positive=denseSolid(vec3i(q));let negative=denseSolid(vec3i(q)-vec3i(axisVector(axis)));
-  let selected=select(negative,positive,positive.x>negative.x);var solid=max(negative.x,positive.x);
+  let preferPositive=positive.x>negative.x
+   ||(positive.x==negative.x&&positive.y>=0.&&negative.y<0.);
+  let selected=select(negative,positive,preferPositive);var solid=max(negative.x,positive.x);
   var centre=vec3f(q);for(var component=0u;component<3u;component+=1u){if(component!=axis){centre[component]+=.5;}}
   let owner=i32(selected.y);
   // Cell occupancy is only a broad-phase owner attribution.  Resolve the

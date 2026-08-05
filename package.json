@@ -93,6 +93,7 @@
     "test:webgpu:octree-lagged-rigid": "node --import tsx tools/run-webgpu-exclusive.ts --import tsx tools/run-octree-lagged-rigid-smoke.ts",
     "test:webgpu:octree-solid-topology": "WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js FLUID_WEBGPU_BACKEND=metal FLUID_WEBGPU_ADAPTER='Apple M1 Max' FLUID_MAXIMUM_LEAF_SIZE=32 FLUID_OCTREE_INTERFACE_BAND=3 FLUID_WEBGPU_SMOKE_TIMEOUT_MS=240000 node --import tsx tools/run-webgpu-exclusive.ts --import tsx tools/run-octree-solid-topology-smoke.ts",
     "test:webgpu:octree-rigid-buoyancy": "WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js FLUID_WEBGPU_BACKEND=metal FLUID_WEBGPU_ADAPTER='Apple M1 Max' FLUID_MAXIMUM_LEAF_SIZE=32 FLUID_OCTREE_INTERFACE_BAND=3 FLUID_RIGID_STEPS=250 FLUID_WEBGPU_SMOKE_TIMEOUT_MS=240000 FLUID_RIGID_RELEASE=float node --import tsx tools/run-webgpu-exclusive.ts --import tsx tools/run-octree-rigid-buoyancy-smoke.ts",
+    "test:webgpu:rigid-oracles": "WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js FLUID_WEBGPU_BACKEND=metal FLUID_WEBGPU_ADAPTER='Apple M1 Max' sh -c 'for scene in rigid-hydrostatic rigid-float rigid-sink; do FLUID_SCENE=$scene FLUID_METHOD=octree FLUID_WEBGPU_SMOKE_TIMEOUT_MS=240000 node --import tsx tools/run-webgpu-smoke-isolated.ts || exit 1; done'",
     "test:water-shaders": "node --import tsx tools/validate-water-shaders.ts",
     "benchmark:water": "node --import tsx tools/benchmark-water-extraction.ts",
     "benchmark:spray": "node --import tsx tools/benchmark-secondary-particles.ts",

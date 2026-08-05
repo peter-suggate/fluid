@@ -21,6 +21,8 @@ export interface WebGPUOctreeLosassoCoarsePhiInput {
   readonly coarseControl: GPUBuffer;
   readonly faces: GPUBuffer;
   readonly faceGeometry: GPUBuffer;
+  /** Finest-cell solid fraction/owner pairs for solid-aware ghosting. */
+  readonly solidCells: GPUBuffer;
   readonly dimensions: readonly [number, number, number];
   readonly maximumLeafSize: number;
   readonly cellSize: number;
@@ -188,7 +190,7 @@ export class WebGPUOctreeLosassoCoarsePhiExchange {
       [10, this.source.ghostDistances],
       [11, this.source.volumeDirectory], [12, this.source.volumePublication],
       [13, this.source.physicalVolumes], [14, previousArena], [15, this.source.summaryDelta],
-      [16, this.readyDispatch],
+      [16, this.readyDispatch], [17, input.solidCells],
     ]);
     const run = this.runner(broker, buffers);
     run("prepare", [0, 4, 5, 6, 8, 14, 16], 1);
@@ -196,7 +198,7 @@ export class WebGPUOctreeLosassoCoarsePhiExchange {
     run("restrict", [0, 1, 2, 3, 4, 5, 8, 9, 14], Math.ceil(this.plan.rowCapacity / 64));
     run("finalize", [0, 5, 8, 14], 1);
     run("volume", [0, 5, 8, 11, 12, 13, 14, 15], Math.ceil(2 * this.plan.rowCapacity / 64));
-    run("ghost", [0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 14], Math.ceil(this.plan.faceCapacity / 64));
+    run("ghost", [0, 1, 2, 3, 5, 6, 7, 8, 10, 14, 17], Math.ceil(this.plan.faceCapacity / 64));
     run("publish", [0, 5, 8, 14], [this.readyDispatch, 12]);
     return this.source;
   }
@@ -215,15 +217,32 @@ export class WebGPUOctreeLosassoCoarsePhiExchange {
       [7, input.faceGeometry], [8, arena], [9, this.source.rowPhi],
       [10, this.source.ghostDistances], [11, this.source.volumeDirectory],
       [12, this.source.volumePublication], [13, this.source.physicalVolumes],
-      [14, this.arenas[1]], [15, this.source.summaryDelta],
+      [14, this.arenas[1]], [15, this.source.summaryDelta], [17, input.solidCells],
     ]);
     const run = this.runner(broker, buffers);
     run("prepareRefresh", [0, 4, 5, 6, 8], 1);
     run("refresh", [0, 1, 2, 3, 4, 5, 8, 9, 14], Math.ceil(this.plan.rowCapacity / 64));
     run("finalize", [0, 5, 8, 14], 1);
     run("volumeRefresh", [0, 8, 11, 12, 13, 15], Math.ceil(this.plan.rowCapacity / 64));
-    run("ghost", [0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 14], Math.ceil(this.plan.faceCapacity / 64));
+    run("ghost", [0, 1, 2, 3, 5, 6, 7, 8, 10, 14, 17], Math.ceil(this.plan.faceCapacity / 64));
     return this.source;
+  }
+
+  /** Rebuild only aperture/free-surface ghost state after an analytic rigid
+   * boundary refresh. Row identities and coarse phi remain unchanged. */
+  encodeGhostRefresh(broker: PassBroker, fine: WebGPUFineLevelSetBrickSource,
+    input: WebGPUOctreeLosassoCoarsePhiInput): void {
+    this.assertLive();
+    if (!this.pipelines) throw new Error("Losasso coarse-phi pipelines are not initialized");
+    this.updateParams(fine, input, 1);
+    const buffers = new Map<number, GPUBuffer>([
+      [0, this.params], [1, fine.metadata], [2, fine.worklist], [3, fine.samples],
+      [4, input.leafHeaders], [5, input.coarseControl], [6, input.faces],
+      [7, input.faceGeometry], [8, this.source.arena], [10, this.source.ghostDistances],
+      [14, this.arenas[1]], [17, input.solidCells],
+    ]);
+    this.runner(broker, buffers)("ghost", [0, 1, 2, 3, 5, 6, 7, 8, 10, 14, 17],
+      Math.ceil(this.plan.faceCapacity / 64));
   }
 
   private updateParams(fine: WebGPUFineLevelSetBrickSource,

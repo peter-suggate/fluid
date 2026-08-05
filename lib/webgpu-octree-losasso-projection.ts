@@ -4,6 +4,7 @@ import type { LosassoFreeSurfacePressureMode } from "./octree-coarse-backend";
 
 export const octreeLosassoProjectionWGSL = /* wgsl */ `
 const INVALID_ROW: u32 = ${OCTREE_LOSASSO_INVALID_ROW}u;
+const FACE_SOLID_NEUMANN: u32 = 0x08000000u;
 const FACE_SEPARATED: u32 = 0x20000000u;
 const FACE_CLOSED_BOUNDARY: u32 = 0x40000000u;
 const FACE_ROW_ON_POSITIVE_SIDE: u32 = 0x80000000u;
@@ -30,9 +31,16 @@ fn projectLosassoFaces(@builtin(global_invocation_id) invocation: vec3u) {
     positivePressure = pressure[face.negativeRow];
     negativePressure = 0.0;
   }
-  var projected = predictedVelocity[faceId] - params.pressureScale
-    * (positivePressure - negativePressure)
-    * face.inverseDistance * face.openFraction;
+  // A missing solid-interior row is Neumann, not atmospheric Dirichlet.
+  // Its only admissible normal velocity is the prescribed body velocity.
+  // The open liquid share has no pressure cell on the far side, so retaining
+  // the gravity-forced intermediate value here creates a one-sided jet.
+  let solidNeumann = (face.reserved & FACE_SOLID_NEUMANN) != 0u;
+  var projected = select(predictedVelocity[faceId], face.normalVelocity, solidNeumann);
+  if (!solidNeumann) {
+    projected -= params.pressureScale * (positivePressure - negativePressure)
+      * face.inverseDistance * face.openFraction;
+  }
   // Closed contact is unilateral. The fine band transports the separating
   // interface; this lagged active-set bit makes the next coarse operator use
   // the matching p=0 air ghost without post-solve pressure clamping. Every

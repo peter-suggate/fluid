@@ -151,6 +151,8 @@ export interface WebGPUOctreeLosassoBackendOptions {
     rigidExchange: GPUBuffer;
     /** Finest-cell lattice origin in the centred rigid-body world. */
     rigidWorldOrigin: readonly [number, number, number];
+    /** Authored hydrostatic gauge plane used to isolate dynamic pressure. */
+    hydrostaticReferenceY_m: number;
   }>;
 }
 
@@ -177,6 +179,7 @@ function positiveInteger(value: number, label: string): number {
 function topologyParameterWords(plan: WebGPUOctreeLosassoTopologyPlan,
   capacities: Readonly<Required<WebGPUOctreeLosassoAuthorityCapacities>>,
   closedBoundaries?: readonly [boolean, boolean, boolean, boolean, boolean, boolean],
+  rigidWorldOrigin?: readonly [number, number, number],
 ): ArrayBuffer {
   const [nx, ny, nz] = plan.dimensions;
   [nx, ny, nz].forEach((value, axis) => positiveInteger(value, `dimension ${axis}`));
@@ -201,7 +204,10 @@ function topologyParameterWords(plan: WebGPUOctreeLosassoTopologyPlan,
   words.set([capacities.rows, capacities.faces, capacities.incidences,
     directoryCapacity], 12);
   new Float32Array(words.buffer).set([...plan.physicalCellSize, 0], 16);
-  const origin = plan.domainOrigin ?? [0, 0, 0];
+  // Topology itself is indexed in grid-local coordinates. The only world-space
+  // consumer of this origin is analytic rigid conditioning, whose state buffer
+  // lives in the centred rigid-body world.
+  const origin = rigidWorldOrigin ?? plan.domainOrigin ?? [0, 0, 0];
   if (origin.some((value) => !Number.isFinite(value))) {
     throw new RangeError("Losasso domain origin must be finite");
   }
@@ -229,14 +235,21 @@ class WebGPUOctreeLosassoTopologyPublisher implements WebGPUOctreeLosassoCandida
   private readonly velocityMigration: WebGPUOctreeLosassoVelocityMigration;
   private readonly bindGroupCache = new Map<GPUComputePipeline,
     { bindings: readonly number[]; buffers: readonly GPUBuffer[]; group: GPUBindGroup }[]>();
+  /** Refresh-time validation lives here, never in the accepted authority. */
+  private readonly acceptedRigidBoundaryControl: GPUBuffer;
   private acceptedRigidBoundaryGroup?: GPUBindGroup;
   private pipelines?: readonly GPUComputePipeline[];
   private commitPipelines?: readonly GPUComputePipeline[];
   private destroyed = false;
 
+  get acceptedRigidBoundaryDiagnostics(): GPUBuffer {
+    return this.acceptedRigidBoundaryControl;
+  }
+
   constructor(private readonly device: GPUDevice,
     options: Pick<WebGPUOctreeLosassoBackendOptions,
-      "capacities" | "topology" | "coarseLevels" | "transfers" | "closedBoundaries">) {
+      "capacities" | "topology" | "coarseLevels" | "transfers" | "closedBoundaries"
+      | "rigidPressureReaction">) {
     // The geometric publisher has no non-seed extension graph yet. One valid
     // adjacency word keeps the reduced binding constructible without carrying
     // the old frontier arena.
@@ -286,9 +299,17 @@ class WebGPUOctreeLosassoTopologyPublisher implements WebGPUOctreeLosassoCandida
     this.params = device.createBuffer({ label: "Losasso compact topology parameters",
       size: 112, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     device.queue.writeBuffer(this.params, 0,
-      topologyParameterWords(options.topology, capacities, options.closedBoundaries));
+      topologyParameterWords(options.topology, capacities, options.closedBoundaries,
+        options.rigidPressureReaction?.rigidWorldOrigin));
     this.scratch = device.createBuffer({ label: "Losasso compact face publication scratch",
       size: Math.max(16, capacities.rows * 4 * 4), usage: GPUBufferUsage.STORAGE });
+    this.acceptedRigidBoundaryControl = device.createBuffer({
+      label: "Losasso accepted rigid-boundary refresh diagnostics",
+      size: 24,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
+    });
+    device.queue.writeBuffer(this.acceptedRigidBoundaryControl, 0,
+      Uint32Array.of(0, 0, 0, 1, 0, 0));
     this.commitParams = device.createBuffer({ label: "Losasso authority commit parameters",
       // WGSL aligns the trailing vec3u to 16 bytes, so the five scalar words
       // plus padding occupy a 48-byte uniform binding.
@@ -297,7 +318,7 @@ class WebGPUOctreeLosassoTopologyPublisher implements WebGPUOctreeLosassoCandida
       capacities.faces, capacities.incidences, capacities.faceAdjacencies,
       this.authority.writable.faceDirectoryCapacity, 0, 0, 0));
     this.allocatedBytes = this.authority.allocatedBytes + this.params.size
-      + this.commitParams.size + this.scratch.size
+      + this.commitParams.size + this.scratch.size + this.acceptedRigidBoundaryControl.size
       + (this.hierarchyPublisher?.allocatedBytes ?? 0) + this.velocityMigration.allocatedBytes;
   }
 
@@ -366,10 +387,15 @@ class WebGPUOctreeLosassoTopologyPublisher implements WebGPUOctreeLosassoCandida
   ): void {
     this.assertLive();
     if (!this.pipelines) throw new Error("Losasso topology publisher is not initialized");
-    const pipeline = this.pipelines[PUBLISH_ENTRY_POINTS.indexOf("conditionLosassoFaces")]!;
     const accepted = this.authority.writable;
+    // conditionLosassoFaces only consumes the accepted face count and error
+    // word. Snapshot those control words into private storage so refresh-time
+    // validation can never mutate or reject the live accepted epoch.
+    broker.copyBufferToBuffer(accepted.control, 0,
+      this.acceptedRigidBoundaryControl, 0, 24);
+    const pipeline = this.pipelines[PUBLISH_ENTRY_POINTS.indexOf("conditionLosassoFaces")]!;
     const bindings = [0, 4, 7, 14, 18, 19] as const;
-    const buffers = [this.params, accepted.control, accepted.faces,
+    const buffers = [this.params, this.acceptedRigidBoundaryControl, accepted.faces,
       accepted.faceGeometry, solidCells, rigidBodies];
     const group = this.acceptedRigidBoundaryGroup ??= this.device.createBindGroup({
       label: "Losasso accepted rigid boundary refresh",
@@ -535,6 +561,7 @@ class WebGPUOctreeLosassoTopologyPublisher implements WebGPUOctreeLosassoCandida
     this.hierarchyPublisher?.destroy();
     this.velocityMigration.destroy();
     this.authority.destroy();
+    this.acceptedRigidBoundaryControl.destroy();
     this.bindGroupCache.clear();
     this.acceptedRigidBoundaryGroup = undefined;
     this.pipelines = undefined;
@@ -708,9 +735,7 @@ export class WebGPUOctreeLosassoCoarseBackend {
       this.rigidPressureReaction = new WebGPUOctreeLosassoRigidPressureReaction(options.device, {
         rowCapacity: options.capacities.rows,
         faceCapacity: options.capacities.faces,
-        rowDispatch: published.operator.rowDispatch,
-        rowFaceOffsets: published.operator.rowFaceOffsets,
-        rowFaces: published.operator.rowFaces,
+        faceDispatch: this.publisher.authority.writable.faceDispatch,
         faces: published.operator.faces,
         faceGeometry: published.dynamics.faceGeometry,
         solidCells: options.rigidPressureReaction.solidCells,
@@ -720,6 +745,8 @@ export class WebGPUOctreeLosassoCoarseBackend {
         dimensions: options.topology.dimensions,
         physicalCellSize: options.topology.physicalCellSize,
         rigidWorldOrigin: options.rigidPressureReaction.rigidWorldOrigin,
+        density: options.density,
+        hydrostaticReferenceY_m: options.rigidPressureReaction.hydrostaticReferenceY_m,
       });
     }
     if (this.sources.projection.projectedVelocity
@@ -765,6 +792,10 @@ export class WebGPUOctreeLosassoCoarseBackend {
 
   /** Candidate authority used only by the ready validator. */
   get candidateAuthorityControl(): GPUBuffer { return this.publisher.authority.candidate.control; }
+  /** Refresh-only validation control; never aliases accepted authority. */
+  get rigidBoundaryRefreshDiagnostics(): GPUBuffer {
+    return this.publisher.acceptedRigidBoundaryDiagnostics;
+  }
 
   encodeReadyCommit(broker: PassBroker, input: {
     readonly frontier: GPUBuffer;
@@ -836,7 +867,7 @@ export class WebGPUOctreeLosassoCoarseBackend {
     this.projection.encode(broker, pressure, step.dt_s / this.options.density,
       step.gravity_m_s2);
     this.rigidPressureReaction?.encode(
-      broker, pressure, step.dt_s, dynamicCouplingBodyCount,
+      broker, pressure, step.dt_s, dynamicCouplingBodyCount, step.gravity_m_s2,
     );
     this.dynamics.encodeInflowConstraint(broker, step);
   }

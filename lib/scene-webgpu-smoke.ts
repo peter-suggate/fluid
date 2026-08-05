@@ -39,13 +39,14 @@ export type SceneWebGPURasterPolicy = "none" | "initial-final" | "checkpoints";
 
 export type SceneWebGPUEvidenceCollectorId =
   | "free-fall-contact-attribution"
+  | "rigid-coupling"
   | "hose-jet-drift"
   | "collocated-velocity"
   | "fluid-symmetry";
 
 export type SceneWebGPUEvidenceCollectionPhase = "checkpoint" | "terminal";
 export type SceneWebGPUEvidenceSource = "compact velocity" | "collocated velocity" | "compact pressure"
-  | "fine upper surface";
+  | "fine upper surface" | "rigid coupling";
 
 /** Scene-declared adapter for evidence that cannot be collected generically. */
 export interface SceneWebGPUEvidenceCollector {
@@ -114,6 +115,7 @@ export type SceneWebGPUHookId =
   | "ocean-wave-profile"
   | "minimal-dam-motion"
   | "free-fall-contact"
+  | "rigid-coupling-oracle"
   | "dam-break-velocity-parity"
   | "dam-break-perturbed-cadence"
   | "water-raster-integrity"

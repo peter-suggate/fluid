@@ -946,7 +946,9 @@ export class WebGPUUniformEulerianSolver {
     this.initializeVolume();
     if (options.octree) {
       this.octreeProjection = new WebGPUOctreeProjection(device, scene, { nx, ny, nz }, {
-        rigidBodies: this.rigidBuffer, rigidExchange: this.rigidExchangeBuffer, terrain: this.terrainTexture,
+        rigidBodies: this.rigidBuffer, rigidExchange: this.rigidExchangeBuffer,
+        rigidImmersedVolumes: this.rigidSystem.immersedVolumeBuffer,
+        terrain: this.terrainTexture,
       }, {
         maximumLeafSize: options.octree.maximumLeafSize ?? 16,
         adaptivity: options.octree.adaptivity ?? 1,
@@ -1414,6 +1416,8 @@ fn recordPhysicsPhaseBoundary(
       const reduced = await projection.readLosassoAuthorityDiagnostics();
       this.applyOctreeInfo(projection);
       const authority = reduced?.authority ?? [];
+      const candidate = reduced?.candidate ?? [];
+      const candidateHeader = reduced?.candidateHeader ?? [];
       const solver = reduced?.solver ?? [];
       const coarsePhi = reduced?.coarsePhi ?? [];
       const ready = authority.length >= 5 && authority[0] !== 0
@@ -1423,7 +1427,9 @@ fn recordPhysicsPhaseBoundary(
       if (!ready || !solverReady) {
         const owner = await projection.readOwnerPageControl();
         throw new Error("Paused t=0 Losasso authority rejected: authority="
-          + JSON.stringify(authority) + "; solver=" + JSON.stringify(solver)
+          + JSON.stringify(authority) + "; candidate=" + JSON.stringify(candidate)
+          + "; candidateHeader=" + JSON.stringify(candidateHeader)
+          + "; solver=" + JSON.stringify(solver)
           + "; coarsePhi=" + JSON.stringify(coarsePhi)
           + "; owner=" + JSON.stringify(owner));
       }
@@ -1508,6 +1514,14 @@ fn recordPhysicsPhaseBoundary(
   get volumeTexture() { return this.octreeProjection?.levelSetTexture ?? this.volumeA; }
   get rigidRenderBuffer() { return this.rigidSystem.renderBuffer; }
   get rigidMotionBuffer() { return this.rigidSystem.motionBuffer; }
+  get rigidCouplingDebug() { return {
+    state: this.rigidSystem.stateBuffer,
+    exchange: this.rigidExchangeBuffer,
+    immersedVolumes: this.rigidSystem.immersedVolumeBuffer,
+    sealedPlugDiagnostics: this.octreeProjection?.rigidCouplingDiagnosticBuffer,
+    rigidBoundaryRefreshDiagnostics: this.octreeProjection?.rigidBoundaryRefreshDiagnosticBuffer,
+    bodyCount: this.scene.rigidBodies.length,
+  }; }
   setSelectedRigidBody(index: number) { this.rigidSystem.setSelectedIndex(index); }
   pickRigidBody(origin: RigidBodyState["position_m"], direction: RigidBodyState["position_m"]) { return this.rigidSystem.pick(origin,direction); }
   // Rendering contours the smooth resident level set when the quadtree

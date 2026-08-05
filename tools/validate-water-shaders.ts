@@ -24,6 +24,7 @@ import { fluidCellTraceGatherShader } from "../lib/webgpu-fluid-cell-trace";
 import { secondaryParticleComputeShader, secondaryParticleOpticalShader } from "../lib/webgpu-secondary-particles";
 import { sparseBrickDenseFieldShader } from "../lib/sparse-brick-octree";
 import { octreeSparseBrickDebugPublicationShader } from "../lib/webgpu-octree-sparse-bricks";
+import { voxelDebugComputeShader, voxelDebugRenderShader } from "../lib/webgpu-voxel-debug";
 import { octreeProjectionShader } from "../lib/webgpu-octree";
 import { octreeSPGridAccurateDispatchGateShader, octreeSPGridAccurateOperatorShader,
   octreeSPGridVCycleShader } from "../lib/webgpu-octree-spgrid-vcycle";
@@ -86,6 +87,11 @@ fn sampleCoarseOctreePhi(position:vec3f)->f32{return coarsePhi[u32(position.x)*0
   "secondary-liquid-particle-compute": secondaryParticleComputeShader,
   "sparse-brick-dense-field": sparseBrickDenseFieldShader,
   "sparse-brick-debug-publication": octreeSparseBrickDebugPublicationShader,
+  // The raw/level/brick inspection views. They are the only way to look at
+  // resolved voxels directly, so a stale decode in them is invisible to every
+  // other lane in this file until somebody opens the render panel.
+  "sparse-voxel-inspection-compaction": voxelDebugComputeShader,
+  "sparse-voxel-inspection-render": voxelDebugRenderShader,
   "octree-projection": octreeProjectionShader,
   "octree-spgrid-vcycle": octreeSPGridVCycleShader,
   "octree-section63-operator": octreeSPGridAccurateOperatorShader,

@@ -1,6 +1,6 @@
 import type { SceneDescription } from "./model";
 import type { Quaternion, Vec3 } from "./model";
-import type { RigidBodyState } from "./rigid-body";
+import { primitiveVolume, type RigidBodyState } from "./rigid-body";
 import { SVO_PRIMITIVE_MOTION_STRIDE_BYTES, svoPrimitiveMotionWGSL } from "./svo-primitive-motion";
 import { sceneHasTerrain } from "./terrain";
 import { VOXEL_MATERIAL_IDS } from "./voxel-scene";
@@ -12,6 +12,7 @@ export const GPU_RIGID_STATE_BYTES = GPU_RIGID_BODY_CAPACITY * GPU_RIGID_STATE_F
 export const GPU_RIGID_RENDER_FLOATS = 16;
 export const GPU_RIGID_RENDER_BYTES = GPU_RIGID_BODY_CAPACITY * GPU_RIGID_RENDER_FLOATS * 4;
 export const GPU_RIGID_MOTION_BYTES = GPU_RIGID_BODY_CAPACITY * SVO_PRIMITIVE_MOTION_STRIDE_BYTES;
+export const GPU_RIGID_IMMERSED_VOLUME_BYTES = GPU_RIGID_BODY_CAPACITY * 4;
 const GPU_RIGID_PICK_BYTES = 48;
 
 export interface GPURigidBodyPick {
@@ -51,6 +52,7 @@ struct PickResult { index: u32, hit: u32, distance: f32, pad: f32, position: vec
 @group(0) @binding(5) var<uniform> pickParams: PickParams;
 @group(0) @binding(6) var<storage, read_write> pickResult: PickResult;
 @group(0) @binding(7) var<storage, read_write> rigidMotion: array<SvoPrimitiveMotionRecord, 12>;
+@group(0) @binding(8) var<storage, read_write> immersedVolumes: array<f32>;
 
 fn qConjugate(q: vec4f) -> vec4f { return vec4f(q.x, -q.yzw); }
 fn qMultiply(a: vec4f, b: vec4f) -> vec4f {
@@ -195,7 +197,10 @@ fn integrate(@builtin(global_invocation_id) id: vec3u) {
   if(any(id!=vec3u(0))){return;}let count=u32(round(params.step.z));let dt=params.step.x;let rho=max(params.step.y,1e-9);let snapshots=max(params.step.w,1.0);
   var previousBodies:array<RigidBody,12>;for(var index=0u;index<12u;index++){previousBodies[index]=bodies[index];}
   for(var index=0u;index<12u;index++){if(index>=count){break;}var body=bodies[index];
-    if(body.material.z>0.5){let base=index*12u;let impulse=vec3f(f32(atomicLoad(&exchange[base])),f32(atomicLoad(&exchange[base+1u])),f32(atomicLoad(&exchange[base+2u])))*1e-6;let angularImpulse=vec3f(f32(atomicLoad(&exchange[base+3u])),f32(atomicLoad(&exchange[base+4u])),f32(atomicLoad(&exchange[base+5u])))*1e-6;let wet=f32(atomicLoad(&exchange[base+6u]))/65536.0/snapshots;let weighted=vec3f(f32(atomicLoad(&exchange[base+7u])),f32(atomicLoad(&exchange[base+8u])),f32(atomicLoad(&exchange[base+9u])))*1e-4/snapshots;let pressureCoupled=atomicLoad(&exchange[base+10u])!=0;let meanVelocity=select(vec3f(0),weighted/wet,wet>1e-8);let displaced=min(max(0.0,wet*params.coupling.x),bodyVolume(body));let scaledInverseMass=body.inverseMassInertia.x;let mass=select(1e30,rho/scaledInverseMass,scaledInverseMass>0.0);let immersed=clamp(displaced/max(bodyVolume(body),1e-9),0.0,1.0);let relative=body.linearVelocity.xyz-meanVelocity;let speed=length(relative);let drag=-.5*rho*params.coupling.y*3.141592653589793*body.dimensions.w*body.dimensions.w*immersed*speed*relative;let buoyancy=select(-rho*displaced*params.gravity.xyz,vec3f(0),pressureCoupled);let added=params.coupling.z*rho*displaced;let acceleration=(mass*params.gravity.xyz+impulse/max(dt,1e-8)+drag+buoyancy)/max(mass+added,1e-8);body.linearVelocity=vec4f(body.linearVelocity.xyz+acceleration*dt,body.linearVelocity.w);body.angularMomentumRestitution=vec4f(body.angularMomentumRestitution.xyz+angularImpulse,body.angularMomentumRestitution.w);body.positionShape=vec4f(body.positionShape.xyz+body.linearVelocity.xyz*dt,body.positionShape.w);body.angularVelocity=vec4f(inverseInertia(body,body.angularMomentumRestitution.xyz),body.angularVelocity.w);let derivative=qMultiply(vec4f(0,body.angularVelocity.xyz),body.orientation);body.orientation=normalize(body.orientation+.5*dt*derivative);bodies[index]=body;}
+    let base=index*12u;let wet=f32(atomicLoad(&exchange[base+6u]))/65536.0/snapshots;let displaced=min(max(0.0,wet*params.coupling.x),bodyVolume(body));
+    // Static bodies retain the analytic authored-waterline volume uploaded by
+    // syncBodies. Only an integrating pose needs a recurring immersed update.
+    if(body.material.z>0.5){if(index<arrayLength(&immersedVolumes)){immersedVolumes[index]=displaced;}let impulse=vec3f(f32(atomicLoad(&exchange[base])),f32(atomicLoad(&exchange[base+1u])),f32(atomicLoad(&exchange[base+2u])))*1e-6;let angularImpulse=vec3f(f32(atomicLoad(&exchange[base+3u])),f32(atomicLoad(&exchange[base+4u])),f32(atomicLoad(&exchange[base+5u])))*1e-6;let weighted=vec3f(f32(atomicLoad(&exchange[base+7u])),f32(atomicLoad(&exchange[base+8u])),f32(atomicLoad(&exchange[base+9u])))*1e-4/snapshots;let pressureCoupled=atomicLoad(&exchange[base+10u])!=0;let meanVelocity=select(vec3f(0),weighted/wet,wet>1e-8);let scaledInverseMass=body.inverseMassInertia.x;let mass=select(1e30,rho/scaledInverseMass,scaledInverseMass>0.0);let immersed=clamp(displaced/max(bodyVolume(body),1e-9),0.0,1.0);let relative=body.linearVelocity.xyz-meanVelocity;let speed=length(relative);let drag=-.5*rho*params.coupling.y*3.141592653589793*body.dimensions.w*body.dimensions.w*immersed*speed*relative;let buoyancy=select(-rho*displaced*params.gravity.xyz,vec3f(0),pressureCoupled);let added=params.coupling.z*rho*displaced;let acceleration=(mass*params.gravity.xyz+impulse/max(dt,1e-8)+drag+buoyancy)/max(mass+added,1e-8);body.linearVelocity=vec4f(body.linearVelocity.xyz+acceleration*dt,body.linearVelocity.w);body.angularMomentumRestitution=vec4f(body.angularMomentumRestitution.xyz+angularImpulse,body.angularMomentumRestitution.w);body.positionShape=vec4f(body.positionShape.xyz+body.linearVelocity.xyz*dt,body.positionShape.w);body.angularVelocity=vec4f(inverseInertia(body,body.angularMomentumRestitution.xyz),body.angularVelocity.w);let derivative=qMultiply(vec4f(0,body.angularVelocity.xyz),body.orientation);body.orientation=normalize(body.orientation+.5*dt*derivative);bodies[index]=body;}
   }
   for(var iteration=0u;iteration<6u;iteration++){for(var index=0u;index<12u;index++){if(index>=count){break;}var body=bodies[index];planeContact(&body,vec3f(1,0,0),-.5*params.container.x);planeContact(&body,vec3f(-1,0,0),-.5*params.container.x);planeContact(&body,vec3f(0,0,1),-.5*params.container.z);planeContact(&body,vec3f(0,0,-1),-.5*params.container.z);planeContact(&body,vec3f(0,1,0),0);if(params.terrain.y>.5){planeContact(&body,vec3f(0,-1,0),-params.container.y);}let terrain=terrainPlane(body.positionShape.xyz);planeContact(&body,terrain.xyz,terrain.w);bodies[index]=body;}for(var a=0u;a<12u;a++){if(a>=count){break;}for(var b=a+1u;b<12u;b++){if(b>=count){break;}solveBodyPair(a,b);}}}
   for(var index=0u;index<12u;index++){if(index<count){publish(index);publishMotion(index,previousBodies[index],bodies[index],dt);}else{renderBodies[index]=RenderBody(vec4f(0),vec4f(0),vec4f(1,0,0,0),vec4f(0));rigidMotion[index]=SvoPrimitiveMotionRecord();}}
@@ -210,6 +215,9 @@ export class WebGPURigidBodySystem {
   readonly renderBuffer: GPUBuffer;
   /** GPU-authored 128-byte records used by surface motion and swept preactivation. */
   readonly motionBuffer: GPUBuffer;
+  /** Persistent displaced volume; survives exchange clears and drives the
+   * fine-volume target as bodies enter or leave the liquid. */
+  readonly immersedVolumeBuffer: GPUBuffer;
   private readonly stateScratch: GPUBuffer;
   private readonly renderScratch: GPUBuffer;
   private readonly motionScratch: GPUBuffer;
@@ -239,6 +247,9 @@ export class WebGPURigidBodySystem {
     this.stateBuffer = device.createBuffer({ label: "GPU authoritative rigid-body state", size: GPU_RIGID_STATE_BYTES, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
     this.renderBuffer = device.createBuffer({ label: "GPU rigid-body render records", size: GPU_RIGID_RENDER_BYTES, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
     this.motionBuffer = device.createBuffer({ label: "GPU rigid primitive motion sidecar", size: GPU_RIGID_MOTION_BYTES, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
+    this.immersedVolumeBuffer = device.createBuffer({ label: "GPU rigid immersed volumes",
+      size: GPU_RIGID_IMMERSED_VOLUME_BYTES,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
     this.stateScratch = device.createBuffer({ label: "GPU rigid-body roster scratch", size: GPU_RIGID_STATE_BYTES, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
     this.renderScratch = device.createBuffer({ label: "GPU rigid render roster scratch", size: GPU_RIGID_RENDER_BYTES, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
     this.motionScratch = device.createBuffer({ label: "GPU rigid motion roster scratch", size: GPU_RIGID_MOTION_BYTES, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
@@ -263,6 +274,7 @@ export class WebGPURigidBodySystem {
       { binding: 2, resource: { buffer: this.renderBuffer } },
       { binding: 3, resource: { buffer: this.paramsBuffer } },
       { binding: 7, resource: { buffer: this.motionBuffer } },
+      { binding: 8, resource: { buffer: this.immersedVolumeBuffer } },
       { binding: 4, resource: this.terrainTexture.createView() },
     ] });
   }
@@ -298,6 +310,7 @@ export class WebGPURigidBodySystem {
     this.bodyCount = active.length;
     const stateStorage = new ArrayBuffer(GPU_RIGID_STATE_BYTES), state = new Float32Array(stateStorage), stateWords = new Uint32Array(stateStorage);
     const render = new Float32Array(GPU_RIGID_BODY_CAPACITY * GPU_RIGID_RENDER_FLOATS);
+    const immersed = new Float32Array(GPU_RIGID_BODY_CAPACITY);
     const nextMotionGenerations = ids.map((id, index) => {
       const previous = this.bodyIds.indexOf(id);
       if (previous < 0) return 1;
@@ -318,9 +331,22 @@ export class WebGPURigidBodySystem {
       stateWords[o+29]=nextMotionGenerations[index];
       const half = body.description.shape === "box" ? [d.x/2,d.y/2,d.z/2] : body.description.shape === "sphere" ? [d.x,d.x,d.x] : [d.x,d.y/2,d.x];
       render.set([body.position_m.x,body.position_m.y,body.position_m.z,state[o+7],half[0],half[1],half[2],shape,q.w,q.x,q.y,q.z,...palette[shape],0],index*GPU_RIGID_RENDER_FLOATS);
+      const volume = primitiveVolume(body.description.shape, body.description.dimensions_m);
+      const waterline = this.scene.container.fillFraction * this.scene.container.height_m;
+      if (body.description.shape === "sphere") {
+        const radius = body.description.dimensions_m.x;
+        const cap = Math.max(0, Math.min(2 * radius,
+          waterline - (body.position_m.y - radius)));
+        immersed[index] = Math.PI * cap * cap * (radius - cap / 3);
+      } else {
+        const radiusY = Math.max(1e-9, half[1]);
+        immersed[index] = volume * Math.max(0, Math.min(1,
+          (waterline - (body.position_m.y - radiusY)) / (2 * radiusY)));
+      }
     });
     if (this.bodyIds.length === 0) {
       this.device.queue.writeBuffer(this.stateBuffer,0,state);this.device.queue.writeBuffer(this.renderBuffer,0,render);
+      this.device.queue.writeBuffer(this.immersedVolumeBuffer,0,immersed);
     } else {
       const rosterChanged = ids.length !== this.bodyIds.length || ids.some((id,index) => id !== this.bodyIds[index]);
       if (rosterChanged) {
@@ -377,5 +403,5 @@ export class WebGPURigidBodySystem {
     const pass=encoder.beginComputePass({label:"GPU resident rigid-body integration and contacts"});pass.setPipeline(this.pipeline);pass.setBindGroup(0,this.bindGroup);pass.dispatchWorkgroups(1);pass.end();
   }
 
-  destroy() { this.stateBuffer.destroy();this.renderBuffer.destroy();this.motionBuffer.destroy();this.stateScratch.destroy();this.renderScratch.destroy();this.motionScratch.destroy();this.paramsBuffer.destroy();this.pickParamsBuffer.destroy();this.pickResultBuffer.destroy(); }
+  destroy() { this.stateBuffer.destroy();this.renderBuffer.destroy();this.motionBuffer.destroy();this.immersedVolumeBuffer.destroy();this.stateScratch.destroy();this.renderScratch.destroy();this.motionScratch.destroy();this.paramsBuffer.destroy();this.pickParamsBuffer.destroy();this.pickResultBuffer.destroy(); }
 }

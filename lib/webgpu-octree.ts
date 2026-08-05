@@ -39,6 +39,8 @@ import { WebGPUOctreeLosassoFineTransport } from "./webgpu-octree-losasso-fine-t
 import { WebGPUOctreeLosassoRowMotion } from "./webgpu-octree-losasso-row-motion";
 import { WebGPUOctreeLosassoConditionedOperator } from
   "./webgpu-octree-losasso-conditioned-operator";
+import { WebGPUOctreeRigidCouplingDiagnostics } from
+  "./webgpu-octree-rigid-coupling-diagnostics";
 import {
   FLUID_TILE_ACTIVE_CANDIDATE_DISPATCH_OFFSET_BYTES,
   FLUID_TILE_ACTIVE_DISPATCH_OFFSET_BYTES,
@@ -1368,6 +1370,7 @@ export function planOctreeCompactionAllocation(
 interface OctreeProjectionResources {
   rigidBodies: GPUBuffer;
   rigidExchange: GPUBuffer;
+  rigidImmersedVolumes: GPUBuffer;
   terrain: GPUTexture;
 }
 
@@ -1767,6 +1770,7 @@ export class WebGPUOctreeProjection {
   private losassoCoarsePhi?: WebGPUOctreeLosassoCoarsePhiExchange;
   private losassoRowMotion?: WebGPUOctreeLosassoRowMotion;
   private losassoConditionedOperator?: WebGPUOctreeLosassoConditionedOperator;
+  private rigidCouplingDiagnostics?: WebGPUOctreeRigidCouplingDiagnostics;
   private structuredVelocity?: WebGPUDirectStructuredVelocityAuthority;
   private structuredBoundary?: WebGPUStructuredBoundaryCoefficients;
   private topologyEpoch?: WebGPUOctreeTopologyEpoch;
@@ -2666,6 +2670,8 @@ export class WebGPUOctreeProjection {
           0,
           -0.5 * this.scene.container.depth_m,
         ],
+        hydrostaticReferenceY_m:
+          this.scene.container.fillFraction * this.scene.container.height_m,
       },
     });
     this.pressureSolverControl = this.losassoBackend.solverControl
@@ -2700,6 +2706,14 @@ export class WebGPUOctreeProjection {
       diagonal: wide.diagonal,
       solverAuthority: wide.acceptedAuthority,
     }, rowCapacity);
+    if (this.scene.rigidBodies.length > 0) {
+      this.rigidCouplingDiagnostics = new WebGPUOctreeRigidCouplingDiagnostics(this.device, {
+        authority: finest.control,
+        leafHeaders: this.leafHeaders,
+        solidCells: this.solidCells,
+        dimensions: [this.dims.nx, this.dims.ny, this.dims.nz],
+      }, rowCapacity);
+    }
     this.fineSeedAdapter?.setCoarsePhiSource(
       this.losassoCoarsePhi.fineSeedCoarsePhiSource());
     this.refreshLosassoProjectionGroups();
@@ -2750,18 +2764,23 @@ export class WebGPUOctreeProjection {
       }
       const coarseInput = this.losassoCoarsePhiInput();
       const coarseVolume = this.losassoCoarsePhi.volumeCoarseSource(coarseInput);
+      const rigidVolumeTarget = this.scene.rigidBodies.length > 0 ? {
+        immersedVolumes: this.resources.rigidImmersedVolumes,
+        bodyCount: this.scene.rigidBodies.length,
+      } : undefined;
       this.globalFineVolumeA = new WebGPUFineLevelSetVolumeCorrection(
         this.device, fineA, coarseVolume, undefined, this.deferPipelineCompilation,
-        "moving-pages",
+        "moving-pages", rigidVolumeTarget,
       );
       this.globalFineVolumeB = new WebGPUFineLevelSetVolumeCorrection(
         this.device, fineB, coarseVolume, this.globalFineVolumeA.control,
-        this.deferPipelineCompilation, "moving-pages",
+        this.deferPipelineCompilation, "moving-pages", rigidVolumeTarget,
       );
     }
     const coarseAllocated = this.losassoBackend.allocatedBytes
       + this.losassoReadyCommit.allocatedBytes + this.losassoCoarsePhi.plan.allocatedBytes
-      + this.losassoConditionedOperator.allocatedBytes + this.losassoRowMotion.plan.allocatedBytes;
+      + this.losassoConditionedOperator.allocatedBytes + this.losassoRowMotion.plan.allocatedBytes
+      + (this.rigidCouplingDiagnostics?.allocatedBytes ?? 0);
     const allocated = coarseAllocated
       + (this.globalFineTopologyAB?.allocatedBytes ?? 0)
       + (this.globalFineTopologyBA?.allocatedBytes ?? 0)
@@ -2791,6 +2810,7 @@ export class WebGPUOctreeProjection {
       coarseControl: backend.sources.operator.control,
       faces: backend.sources.projection.faces,
       faceGeometry: backend.sources.dynamics.faceGeometry,
+      solidCells: this.solidCells,
       dimensions: [this.dims.nx, this.dims.ny, this.dims.nz],
       maximumLeafSize: this.topologyMaximumLeafSize,
       cellSize: this.scene.container.width_m / this.dims.nx,
@@ -3186,6 +3206,7 @@ export class WebGPUOctreeProjection {
         ...(this.losassoCoarsePhi?.initializationTasks ?? []),
         ...(this.losassoRowMotion?.initializationTasks ?? []),
         ...(this.losassoConditionedOperator?.initializationTasks ?? []),
+        ...(this.rigidCouplingDiagnostics?.initializationTasks ?? []),
       ];
       reducedTasks.forEach((task, index) => tasks.push({
         id: `octree.losasso.pipeline.${index}`,
@@ -4786,10 +4807,17 @@ export class WebGPUOctreeProjection {
       inflow: this.surfaceInflow,
     };
     let broker = new PassBroker(encoder);
-    if (backend.encodeRigidBoundaryRefresh(broker)) {
+    if (this.scene.rigidBodies.length > 0 && backend.encodeRigidBoundaryRefresh(broker)) {
+      const currentFine = this.globalFineCurrentIsA
+        ? this.globalFineSourceA : this.globalFineSourceB;
+      if (currentFine && this.losassoCoarsePhi) {
+        this.losassoCoarsePhi.encodeGhostRefresh(broker, currentFine,
+          this.losassoCoarsePhiInput());
+      }
       this.losassoConditionedOperator?.encodeAfterGhostDistances(broker);
       backend.encodeHierarchyCoefficientRefresh(broker);
     }
+    this.rigidCouplingDiagnostics?.encode(broker);
     backend.encodeAdvection(broker, step);
     backend.encodeForcesAndDivergence(broker, step);
     broker.fence("Losasso first-order axis-face RHS published");
@@ -4807,7 +4835,11 @@ export class WebGPUOctreeProjection {
       encoder = options.productionBoundary("mgpcgSolve", encoder);
       broker = new PassBroker(encoder);
     }
-    backend.encodeProjection(broker, pressureOut, step, this.dynamicCouplingBodyCount);
+    // Static oracle bodies do not integrate, but their pressure reaction is
+    // still observable evidence (and validates the same K^T p used by dynamic
+    // bodies). The reaction pass therefore sees every authored body.
+    backend.encodeProjection(broker, pressureOut, step,
+      Math.min(12, this.scene.rigidBodies.length));
     broker.fence("Losasso projected wet axis faces published");
     if (scope === "power-operator-only") return encoder;
     if (options?.productionBoundary) {
@@ -4927,8 +4959,7 @@ export class WebGPUOctreeProjection {
       // without regrowing sleeping wall films and detached fragments. The env
       // switch retains a measure-only Dawn A/B for drift attribution.
       const measureOnlyLosasso = this.coarseDynamics.backend === "losasso"
-        && (this.scene.rigidBodies.length > 0
-          || (typeof process !== "undefined" && process.env.FLUID_VOLUME_CONTROL === "0"));
+        && typeof process !== "undefined" && process.env.FLUID_VOLUME_CONTROL === "0";
       if (measureOnlyLosasso) {
         pending.volume.encodeMeasurement(redistanceBroker);
       } else {
@@ -6405,6 +6436,13 @@ export class WebGPUOctreeProjection {
   get structuredProjectionEnergyStats(): GPUBuffer | undefined {
     return this.structuredDynamics?.projectionEnergyStats;
   }
+  /** Observational sealed-wet-owner tripwire, never consumed by simulation. */
+  get rigidCouplingDiagnosticBuffer(): GPUBuffer | undefined {
+    return this.rigidCouplingDiagnostics?.diagnosticBuffer;
+  }
+  get rigidBoundaryRefreshDiagnosticBuffer(): GPUBuffer | undefined {
+    return this.losassoBackend?.rigidBoundaryRefreshDiagnostics;
+  }
 
   async readLosassoAuthorityDiagnostics(): Promise<Readonly<{
     authority: readonly number[];
@@ -6783,6 +6821,7 @@ export class WebGPUOctreeProjection {
     this.losassoCoarsePhi?.destroy();
     this.losassoRowMotion?.destroy();
     this.losassoConditionedOperator?.destroy();
+    this.rigidCouplingDiagnostics?.destroy();
     this.losassoBackend?.destroy();
     this.section43HybridPreconditioner?.destroy();
     for (const buffer of Object.values(this.pipelinedMGPCGVectors ?? {})) buffer.destroy();
@@ -7422,6 +7461,21 @@ fn bodySolidFraction(body: RigidBody, p: vec3i) -> f32 {
   }
   return inside / 8.0;
 }
+// Occupancy samples measure volume, but they are not a safe broad phase: a
+// small curved body can cross a cell while missing all eight sample points.
+// Preserve a conservative owner in that case so the face conditioner can run
+// its analytic SDF. The stored fraction remains zero and therefore cannot turn
+// a merely nearby cell into a solid pressure owner.
+fn bodyMayIntersectCell(body: RigidBody, p: vec3i) -> bool {
+  let d = body.dimensions.xyz;
+  let shape = i32(round(body.positionShape.w));
+  var radius = d.x;
+  if (shape == 1) { radius = 0.5 * length(d); }
+  else if (shape == 2) { radius = d.x + 0.5 * d.y; }
+  else if (shape == 3) { radius = length(vec2f(d.x, 0.5 * d.y)); }
+  let halfDiagonal = 0.5 * length(params.cellRelax.xyz);
+  return distance(worldCell(p), body.positionShape.xyz) <= radius + halfDiagonal;
+}
 // Evaluate the current authored occupancy without mutating the retained dense
 // publication. The previous record and this evaluator form the exact old/new
 // transaction consumed by topology dirty marking.
@@ -7436,6 +7490,8 @@ fn currentSolidAt(p: vec3i) -> SolidCell {
       if (bodyIndex >= params.control.w) { break; }
       let candidate = bodySolidFraction(rigidBodies[bodyIndex], p);
       if (candidate > fraction) { fraction = candidate; owner = i32(bodyIndex); }
+      else if (fraction == 0.0 && owner < 0
+        && bodyMayIntersectCell(rigidBodies[bodyIndex], p)) { owner = i32(bodyIndex); }
     }
   }
   return SolidCell(fraction, owner);

@@ -6,7 +6,7 @@ export const OCTREE_LOSASSO_COARSE_PHI_MAGIC = 0x4c50_4849;
 export const octreeLosassoCoarsePhiWGSL = /* wgsl */ `
 const INVALID:u32=0xffffffffu;const VALID:u32=1u;const FINITE:u32=2u;
 const INTERFACE:u32=4u;const FINE_RESTRICTED:u32=8u;const MAGIC:u32=${OCTREE_LOSASSO_COARSE_PHI_MAGIC}u;
-const FACE_INTERFACE_NEARBY:u32=0x10000000u;const FACE_SEPARATED:u32=0x20000000u;const FACE_CLOSED_BOUNDARY:u32=0x40000000u;const FACE_ROW_ON_POSITIVE_SIDE:u32=0x80000000u;
+const FACE_SOLID_NEUMANN:u32=0x08000000u;const FACE_INTERFACE_NEARBY:u32=0x10000000u;const FACE_SEPARATED:u32=0x20000000u;const FACE_CLOSED_BOUNDARY:u32=0x40000000u;const FACE_ROW_ON_POSITIVE_SIDE:u32=0x80000000u;
 struct Params{brickDimensions:vec3u,brickResolution:u32,sampleDimensions:vec3u,samplesPerBrick:u32,
  domainOrigin:vec3f,fineCellWidth:f32,pageCapacity:u32,generation:u32,worklistCapacity:u32,worklistHeaderWords:u32,
  dimensions:vec3u,maximumLeafSize:u32,cellSize:f32,directoryCapacity:u32,rowCapacity:u32,faceCapacity:u32,
@@ -26,10 +26,15 @@ struct Face{negativeRow:u32,positiveRow:u32,axis:u32,reserved:u32,area:f32,inver
 @group(0)@binding(10)var<storage,read_write>ghosts:array<vec4u>;
 @group(0)@binding(14)var<storage,read_write>publishedArena:array<atomic<u32>>;
 @group(0)@binding(16)var<storage,read_write>readyDispatch:array<u32>;
+@group(0)@binding(17)var<storage,read>solidCells:array<u32>;
 fn finite(v:f32)->bool{return v==v&&abs(v)<3.402823e38;}
 ${fineLevelSetPackedSampleWGSL("samples")}
 ${makeFineLevelSetSortedWorklistLookupWGSL("p", "metadata", "worklist", "losassoCoarseFineBrick")}
 fn rows()->u32{return min(min(coarseControl[1],p.rowCapacity),arrayLength(&headers));}
+// The ghost entry point deliberately avoids the leaf-header binding so its
+// solid-aware fine-phi classification stays within ten storage buffers. The
+// accepted directory has already validated and published this same row count.
+fn ghostRows()->u32{return min(coarseControl[1],p.rowCapacity);}
 fn faceCount()->u32{return min(min(coarseControl[2],p.faceCapacity),arrayLength(&faces));}
 fn originOf(header:LeafHeader)->vec3u{return vec3u(header.cell%p.dimensions.x,
  (header.cell/p.dimensions.x)%p.dimensions.y,header.cell/(p.dimensions.x*p.dimensions.y));}
@@ -63,6 +68,13 @@ fn finePhi(positionCells:vec3f)->FinePhi{let grid=positionCells*(p.cellSize/p.fi
    *select(1.-fraction.y,fraction.y,(corner&2u)!=0u)
    *select(1.-fraction.z,fraction.z,(corner&4u)!=0u);addExact(&exact,weight*sample);}
  return FinePhi(exactValue(&exact),1u);}
+fn denseSolidFraction(cell:vec3i)->f32{if(any(cell<vec3i(0))||any(vec3u(cell)>=p.dimensions)){return 0.;}
+ let q=vec3u(cell);let index=q.x+p.dimensions.x*(q.y+p.dimensions.y*q.z);let word=2u*index;
+ if(word>=arrayLength(&solidCells)){return 0.;}let value=bitcast<f32>(solidCells[word]);
+ return clamp(select(0.,value,value==value),0.,1.);}
+fn denseRigidOwner(cell:vec3i)->i32{if(any(cell<vec3i(0))||any(vec3u(cell)>=p.dimensions)){return -1;}
+ let q=vec3u(cell);let index=q.x+p.dimensions.x*(q.y+p.dimensions.y*q.z);let word=2u*index+1u;
+ if(word>=arrayLength(&solidCells)){return -1;}return bitcast<i32>(solidCells[word]);}
 fn directoryHash(cell:u32,size:u32)->u32{return ((cell*0x9e3779b1u)^size)*0x85ebca6bu;}
 fn entryBase(row:u32)->u32{return atomicLoad(&arena[9])+8u*row;}
 fn directoryBase(slot:u32)->u32{return atomicLoad(&arena[10])+4u*slot;}
@@ -160,10 +172,10 @@ fn publishLosassoCoarsePhiArena(@builtin(global_invocation_id)invocation:vec3u){
 @compute @workgroup_size(64)
 fn publishLosassoGhostDistances(@builtin(global_invocation_id)invocation:vec3u){let faceId=invocation.x;if(faceId>=faceCount()){return;}
  let reuse=exactTopologyReuse();
- var face=faces[faceId];face.reserved&=~FACE_INTERFACE_NEARBY;
+ var face=faces[faceId];face.reserved&=~FACE_SOLID_NEUMANN;face.reserved&=~FACE_INTERFACE_NEARBY;
  let rowBase=targetLoad(9u,reuse);
- if((face.negativeRow<rows()&&(targetLoad(rowBase+8u*face.negativeRow+5u,reuse)&INTERFACE)!=0u)
-   ||(face.positiveRow<rows()&&(targetLoad(rowBase+8u*face.positiveRow+5u,reuse)&INTERFACE)!=0u)){face.reserved|=FACE_INTERFACE_NEARBY;}
+ if((face.negativeRow<ghostRows()&&(targetLoad(rowBase+8u*face.negativeRow+5u,reuse)&INTERFACE)!=0u)
+   ||(face.positiveRow<ghostRows()&&(targetLoad(rowBase+8u*face.positiveRow+5u,reuse)&INTERFACE)!=0u)){face.reserved|=FACE_INTERFACE_NEARBY;}
  var flags=0u;var distance=0.;var theta=1.;var airPhi=0.;
  if(targetLoad(0u,reuse)!=MAGIC){ghosts[faceId]=vec4u(0u,bitcast<u32>(1.),0u,8u);return;}
  if(face.positiveRow==INVALID){let geometry=faceGeometry[faceId];let axis=geometry.x&3u;let span=1u<<(geometry.x>>2u);
@@ -193,7 +205,8 @@ fn publishLosassoGhostDistances(@builtin(global_invocation_id)invocation:vec3u){
    faces[faceId]=face;
   }else if(boundary){
    // An authored open boundary is pressure-Dirichlet at the wall plane.
-   let rowSize=select(1u,headers[face.negativeRow].size,face.negativeRow<rows());
+   let rowSize=select(1u,targetLoad(rowBase+8u*face.negativeRow+1u,reuse),
+    face.negativeRow<ghostRows());
    distance=max(.5*p.fineCellWidth,.5*f32(rowSize)*p.cellSize);face.inverseDistance=1./distance;
    face.openFraction=1.;faces[faceId]=face;flags=1u;
   }else if(face.negativeRow<targetLoad(2u,reuse)){let entry=targetLoad(9u,reuse)+8u*face.negativeRow;
@@ -207,7 +220,18 @@ fn publishLosassoGhostDistances(@builtin(global_invocation_id)invocation:vec3u){
    let dual=f32(rowSize)*p.cellSize;distance=dual;let faceToAir=.5*dual;
    var endpoint=centroid;endpoint[axis]+=sign*faceToAir/p.cellSize;
    let sampled=finePhi(endpoint);let cellCenteredAir=p.schedule.w==1u;
-   if(cellCenteredAir&&(rowFlags&(VALID|FINITE))==(VALID|FINITE)&&liquid<0.){
+   let endpointCell=vec3i(floor(endpoint));let solidFraction=denseSolidFraction(endpointCell);
+   // Rigid carving can remove a pressure row before the cell becomes fully
+   // occupied. On an analytically blocked, rigid-owned face that missing row
+   // is still solid Neumann, never atmospheric air.
+   let solidNeighbor=solidFraction>=.999999
+    ||(denseRigidOwner(endpointCell)>=0&&face.openFraction<.999999);
+   if(solidNeighbor){
+    // Carving makes a rigid interior positive in phi, but that is not air.
+    // The cut-face aperture owns the solid and this pressure face remains
+    // Neumann; only a genuine liquid/air neighbor may install p_air = 0.
+    face.reserved|=FACE_SOLID_NEUMANN;flags=4u;
+   }else if(cellCenteredAir&&(rowFlags&(VALID|FINITE))==(VALID|FINITE)&&liquid<0.){
     // Losasso 2004 places the p_air=0 Dirichlet value at the neighboring air
     // cell centre.  No subcell theta enters the pressure operator in this A/B.
     theta=1.;distance=dual;face.inverseDistance=1./dual;faces[faceId]=face;flags=1u;

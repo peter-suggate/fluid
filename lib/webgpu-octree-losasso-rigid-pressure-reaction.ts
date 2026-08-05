@@ -8,9 +8,7 @@ const FIXED_POINT_SCALE = 1e6;
 export interface WebGPUOctreeLosassoRigidPressureReactionSource {
   readonly rowCapacity: number;
   readonly faceCapacity: number;
-  readonly rowDispatch: GPUBuffer;
-  readonly rowFaceOffsets: GPUBuffer;
-  readonly rowFaces: GPUBuffer;
+  readonly faceDispatch: GPUBuffer;
   readonly faces: GPUBuffer;
   readonly faceGeometry: GPUBuffer;
   readonly solidCells: GPUBuffer;
@@ -23,6 +21,8 @@ export interface WebGPUOctreeLosassoRigidPressureReactionOptions {
   readonly physicalCellSize: readonly [number, number, number];
   /** Origin of the finest-cell lattice in the centred rigid-body world. */
   readonly rigidWorldOrigin: readonly [number, number, number];
+  readonly density: number;
+  readonly hydrostaticReferenceY_m: number;
 }
 
 export const webgpuOctreeLosassoRigidPressureReactionWGSL = /* wgsl */ `
@@ -33,6 +33,7 @@ struct Params{
  capacities:vec4u,
  rigidWorldOriginDt:vec4f,
  cellSize:vec4f,
+ gravity:vec4f,
 };
 struct Face{
  negativeRow:u32,positiveRow:u32,axis:u32,reserved:u32,
@@ -44,14 +45,12 @@ struct RigidBody{
  angularMomentumRestitution:vec4f,material:vec4f,
 };
 @group(0)@binding(0)var<uniform>p:Params;
-@group(0)@binding(1)var<storage,read>rowFaceOffsets:array<u32>;
-@group(0)@binding(2)var<storage,read>rowFaces:array<u32>;
-@group(0)@binding(3)var<storage,read>faces:array<Face>;
-@group(0)@binding(4)var<storage,read>faceGeometry:array<vec4u>;
-@group(0)@binding(5)var<storage,read>solidCells:array<u32>;
-@group(0)@binding(6)var<storage,read>rigidBodies:array<RigidBody>;
-@group(0)@binding(7)var<storage,read>pressure:array<f32>;
-@group(0)@binding(8)var<storage,read_write>rigidExchange:array<atomic<i32>>;
+@group(0)@binding(1)var<storage,read>faces:array<Face>;
+@group(0)@binding(2)var<storage,read>faceGeometry:array<vec4u>;
+@group(0)@binding(3)var<storage,read>solidCells:array<u32>;
+@group(0)@binding(4)var<storage,read>rigidBodies:array<RigidBody>;
+@group(0)@binding(5)var<storage,read>pressure:array<f32>;
+@group(0)@binding(6)var<storage,read_write>rigidExchange:array<atomic<i32>>;
 
 fn finite(value:f32)->bool{return value==value&&abs(value)<3.402823e38;}
 fn finite3(value:vec3f)->bool{return finite(value.x)&&finite(value.y)&&finite(value.z);}
@@ -109,49 +108,61 @@ fn addWetSurfaceEstimate(body:u32,blockedArea:f32){let base=body*${RIGID_EXCHANG
  if(finite(wetCells)&&wetCells>0.){atomicAdd(&rigidExchange[base+6u],i32(round(wetCells*65536.)));}}
 @compute @workgroup_size(64)
 fn exchangeLosassoRigidPressure(@builtin(global_invocation_id)invocation:vec3u){
- let row=invocation.x;
- if(p.rigidWorldOriginDt.w<=0.||p.dimensionsBodyCount.w==0u||row>=p.capacities.x
-   ||row>=arrayLength(&pressure)||row+1u>=arrayLength(&rowFaceOffsets)){return;}
- let solved=pressure[row];if(!finite(solved)){return;}
- let begin=rowFaceOffsets[row];let end=rowFaceOffsets[row+1u];
- if(end<begin||end>arrayLength(&rowFaces)||end-begin>24u){return;}
- for(var incidence=begin;incidence<end;incidence+=1u){
-  let faceId=rowFaces[incidence];
-  if(faceId>=p.capacities.y||faceId>=arrayLength(&faces)||faceId>=arrayLength(&faceGeometry)){continue;}
-  let face=faces[faceId];if(face.axis>2u||face.openFraction>=1.){continue;}
-  var outward=0.;
-  if(face.negativeRow==row){outward=select(1.,-1.,face.positiveRow==INVALID_ROW&&(face.reserved&0x80000000u)!=0u);}
-  else if(face.positiveRow==row){outward=-1.;}
-  else{continue;}
-  let geometry=faceGeometry[faceId];let span=face.reserved&0xffffu;
-  if(span==0u||span>2896u||geometry.x!=(face.axis|((31u-countLeadingZeros(span))<<2u))){continue;}
-  let axis=face.axis;let axisStep=axisVector(axis);let origin=geometry.yzw;
-  let normal=outward*vec3f(axisStep);let area=patchArea(axis);
-  for(var b=0u;b<span;b+=1u){for(var a=0u;a<span;a+=1u){
+ let faceId=invocation.x;
+ if(p.rigidWorldOriginDt.w<=0.||p.dimensionsBodyCount.w==0u||faceId>=p.capacities.y
+   ||faceId>=arrayLength(&faces)||faceId>=arrayLength(&faceGeometry)){return;}
+ let face=faces[faceId];if(face.axis>2u){return;}
+ let geometry=faceGeometry[faceId];let span=face.reserved&0xffffu;
+ if(span==0u||span>2896u||geometry.x!=(face.axis|((31u-countLeadingZeros(span))<<2u))){return;}
+ let negativeValid=face.negativeRow!=INVALID_ROW&&face.negativeRow<p.capacities.x
+  &&face.negativeRow<arrayLength(&pressure);
+ let positiveValid=face.positiveRow!=INVALID_ROW&&face.positiveRow<p.capacities.x
+  &&face.positiveRow<arrayLength(&pressure);
+ if(!negativeValid&&!positiveValid){return;}
+ var facePressure=0.;
+ if(negativeValid&&positiveValid){facePressure=.5*(pressure[face.negativeRow]+pressure[face.positiveRow]);}
+ else if(negativeValid){facePressure=pressure[face.negativeRow]
+   +.5*p.cellSize[face.axis]*p.cellSize.w*p.gravity[face.axis];}
+ else{facePressure=pressure[face.positiveRow]
+   -.5*p.cellSize[face.axis]*p.cellSize.w*p.gravity[face.axis];}
+ if(!finite(facePressure)){return;}
+ let axis=face.axis;let axisStep=axisVector(axis);let origin=geometry.yzw;
+ let axisNormal=vec3f(axisStep);let area=patchArea(axis);
+ for(var b=0u;b<span;b+=1u){for(var a=0u;a<span;a+=1u){
    let q=origin+tangentA(axis)*vec3u(a)+tangentB(axis)*vec3u(b);
    let positive=denseSolid(vec3i(q));let negative=denseSolid(vec3i(q)-vec3i(axisStep));
-   let selected=select(negative,positive,positive.x>negative.x);
-   // The accepted face aperture is the operator's analytic four-sample area
-   // fraction.  Reuse it verbatim so K^T p is the exact adjoint of the flux
-   // constraint instead of reverting to the old max-of-cell approximation.
-   let blocked=1.-face.openFraction;
+   let preferPositive=positive.x>negative.x
+    ||(positive.x==negative.x&&positive.y>=0.&&negative.y<0.);
+   let selected=select(negative,positive,preferPositive);
+   // p grad(chi_s) is the conservative pressure reaction. Unlike summing
+   // pressure times blocked coordinate faces, it is a closed discrete surface:
+   // a linear hydrostatic pressure produces rho*g times rasterized volume.
+   let blocked=1.-face.openFraction;let solidGradient=positive.x-negative.x;
    let owner=i32(selected.y);
-   if(blocked<=0.||owner<0||u32(owner)>=p.dimensionsBodyCount.w
+   if(owner<0||u32(owner)>=p.dimensionsBodyCount.w
      ||u32(owner)>=p.capacities.z||u32(owner)>=arrayLength(&rigidBodies)){continue;}
    var centre=vec3f(q);
    for(var component=0u;component<3u;component+=1u){if(component!=axis){centre[component]+=.5;}}
    let world=p.rigidWorldOriginDt.xyz+centre*p.cellSize.xyz;
-   let impulse=p.rigidWorldOriginDt.w*solved*area*blocked*normal;
+   // Remove the analytically known hydrostatic field from the sparse pressure
+   // shell, then add its Archimedes contribution from the same blocked-area
+   // immersion measure. This keeps dynamic pressure conservative without
+   // requiring pressure rows inside the carved solid.
+   let hydrostaticPressure=max(0.,p.cellSize.w*dot(p.gravity.xyz,
+    world-vec3f(0.,p.gravity.w,0.)));
+   let dynamicImpulse=p.rigidWorldOriginDt.w*(facePressure-hydrostaticPressure)
+    *area*solidGradient*axisNormal;
+   let rb=rigidBodies[u32(owner)];
+   let immersedPatch=area*blocked/max(rigidSurfaceArea(rb),1e-9)*rigidVolume(rb);
+   let buoyancyImpulse=-p.rigidWorldOriginDt.w*p.cellSize.w*immersedPatch*p.gravity.xyz;
+   let impulse=dynamicImpulse+buoyancyImpulse;
    let torque=cross(world-rigidBodies[u32(owner)].positionShape.xyz,impulse);
-   addExchange(u32(owner),impulse,torque);
-   // Count each geometric face once even when both pressure rows are wet.
+   if(abs(solidGradient)>1e-8){addExchange(u32(owner),impulse,torque);}
+   // This kernel already visits each geometric face exactly once.
    // Surface-area immersion gives the analytic body-volume fraction required
    // by drag/added mass without reintroducing buoyancy in the integrator.
-   if(face.negativeRow==row||face.negativeRow==INVALID_ROW){
-    addWetSurfaceEstimate(u32(owner),area*blocked);
-   }
+   if(blocked>0.){addWetSurfaceEstimate(u32(owner),area*blocked);}
   }}
- }
 }
 `;
 
@@ -163,12 +174,13 @@ function positiveInteger(value: number, label: string): number {
 }
 
 /**
- * Exact-adjoint pressure reaction for the compact Losasso row/face graph.
- * Every finest patch performs one fixed-point integer deposit, so scheduling
- * and face ordering cannot change the shared rigid exchange.
+ * Conservative pressure reaction for the compact Losasso face graph. The
+ * volume-fraction gradient is a closed discrete solid surface, and every
+ * finest patch uses a fixed-point deposit so scheduling cannot change the
+ * shared rigid exchange.
  */
 export class WebGPUOctreeLosassoRigidPressureReaction {
-  readonly allocatedBytes = 64;
+  readonly allocatedBytes = 80;
   readonly initializationTasks: readonly {
     readonly label: string; readonly run: () => Promise<void>;
   }[];
@@ -186,9 +198,10 @@ export class WebGPUOctreeLosassoRigidPressureReaction {
     positiveInteger(source.rowCapacity, "row capacity");
     positiveInteger(source.faceCapacity, "face capacity");
     options.dimensions.forEach((value, axis) => positiveInteger(value, `dimension ${axis}`));
-    if ([...options.physicalCellSize, ...options.rigidWorldOrigin]
+    if ([...options.physicalCellSize, ...options.rigidWorldOrigin, options.density,
+      options.hydrostaticReferenceY_m]
       .some((value) => !Number.isFinite(value))
-      || options.physicalCellSize.some((value) => value <= 0)) {
+      || options.physicalCellSize.some((value) => value <= 0) || options.density <= 0) {
       throw new RangeError("Losasso rigid reaction geometry must be finite and cell sizes positive");
     }
     this.bodyCapacity = Math.min(
@@ -196,21 +209,20 @@ export class WebGPUOctreeLosassoRigidPressureReaction {
       Math.floor(source.rigidExchange.size / (RIGID_EXCHANGE_WORDS * 4)),
     );
     if (this.bodyCapacity < 1) throw new RangeError("Losasso rigid reaction needs one shared body slot");
-    if (source.rowFaceOffsets.size < (source.rowCapacity + 1) * 4
-      || source.faces.size < source.faceCapacity * 32
+    if (source.faces.size < source.faceCapacity * 32
       || source.faceGeometry.size < source.faceCapacity * 16) {
       throw new RangeError("Losasso rigid reaction compact authority buffers are undersized");
     }
-    this.params = device.createBuffer({ label: "Losasso rigid pressure reaction constants", size: 64,
+    this.params = device.createBuffer({ label: "Losasso rigid pressure reaction constants", size: 80,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     const readOnly = { type: "read-only-storage" as const };
     this.layout = device.createBindGroupLayout({
       label: "Losasso rigid pressure reaction reduced layout",
       entries: [
         { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
-        ...[1, 2, 3, 4, 5, 6, 7].map((binding) =>
+        ...[1, 2, 3, 4, 5].map((binding) =>
           ({ binding, visibility: GPUShaderStage.COMPUTE, buffer: readOnly })),
-        { binding: 8, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+        { binding: 6, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
       ],
     });
     this.pipelineLayout = device.createPipelineLayout({
@@ -233,7 +245,8 @@ export class WebGPUOctreeLosassoRigidPressureReaction {
     });
   }
 
-  encode(broker: PassBroker, pressure: GPUBuffer, dt_s: number, bodyCount: number): boolean {
+  encode(broker: PassBroker, pressure: GPUBuffer, dt_s: number, bodyCount: number,
+    gravity: readonly [number, number, number]): boolean {
     this.assertLive();
     if (!this.pipeline) throw new Error("Losasso rigid pressure reaction is not initialized");
     if (!Number.isFinite(dt_s) || dt_s < 0) {
@@ -242,21 +255,24 @@ export class WebGPUOctreeLosassoRigidPressureReaction {
     if (!Number.isSafeInteger(bodyCount) || bodyCount < 0 || bodyCount > this.bodyCapacity) {
       throw new RangeError("Losasso rigid pressure reaction body count exceeds shared capacity");
     }
+    if (gravity.some((value) => !Number.isFinite(value))) {
+      throw new RangeError("Losasso rigid reaction gravity must be finite");
+    }
     if (pressure.size < this.source.rowCapacity * 4) {
       throw new RangeError("Losasso rigid pressure reaction pressure buffer is undersized");
     }
     if (dt_s === 0 || bodyCount === 0) return false;
-    const words = new Uint32Array(16); const floats = new Float32Array(words.buffer);
+    const words = new Uint32Array(20); const floats = new Float32Array(words.buffer);
     words.set([...this.options.dimensions, bodyCount], 0);
     words.set([this.source.rowCapacity, this.source.faceCapacity, this.bodyCapacity, 24], 4);
     floats.set([...this.options.rigidWorldOrigin, dt_s], 8);
-    floats.set([...this.options.physicalCellSize, 0], 12);
+    floats.set([...this.options.physicalCellSize, this.options.density], 12);
+    floats.set([...gravity, this.options.hydrostaticReferenceY_m], 16);
     this.device.queue.writeBuffer(this.params, 0, words);
     let group = this.groups.get(pressure);
     if (!group) {
-      const buffers = [this.params, this.source.rowFaceOffsets, this.source.rowFaces,
-        this.source.faces, this.source.faceGeometry, this.source.solidCells,
-        this.source.rigidBodies, pressure, this.source.rigidExchange];
+      const buffers = [this.params, this.source.faces, this.source.faceGeometry,
+        this.source.solidCells, this.source.rigidBodies, pressure, this.source.rigidExchange];
       group = this.device.createBindGroup({
         label: "Losasso rigid pressure reaction bindings", layout: this.layout,
         entries: buffers.map((buffer, binding) => ({ binding, resource: { buffer } })),
@@ -265,7 +281,7 @@ export class WebGPUOctreeLosassoRigidPressureReaction {
     }
     const pass = broker.compute({ label: "Losasso pressure - dynamic rigid reaction" });
     pass.setPipeline(this.pipeline); pass.setBindGroup(0, group);
-    pass.dispatchWorkgroupsIndirect(this.source.rowDispatch, 0);
+    pass.dispatchWorkgroupsIndirect(this.source.faceDispatch, 0);
     return true;
   }
 

@@ -8,17 +8,21 @@ import {
 import { performanceShaderVariant } from "./stores/performance-instrumentation-store";
 import { fineLevelSetPackedSampleWGSL } from "./fine-levelset-packed-sample";
 
-export const FINE_LEVELSET_VOLUME_CONTROL_BYTES = 64;
+export const FINE_LEVELSET_VOLUME_CONTROL_BYTES = 80;
+/** Stable readback prefix; the trailing submerged-volume words are internal. */
+export const FINE_LEVELSET_VOLUME_CONTROL_READBACK_BYTES = 64;
 export const FINE_LEVELSET_VOLUME_VALID = 0x8000_0000;
 const FINE_LEVELSET_VOLUME_INDIRECT_BYTES = 16;
 const FINE_LEVELSET_VOLUME_CORRECTION_INDIRECT_BYTES = 36;
 const FINE_LEVELSET_VOLUME_RESIDUAL_INDIRECT_BYTES = 24;
+const GPU_RIGID_VOLUME_TARGET_CAPACITY = 12;
 export const FLUID_FINE_VOLUME_CADENCE_ENV = "FLUID_FINE_VOLUME_CADENCE";
 const volumeCadenceTicks = new WeakMap<GPUBuffer, number>();
 
 interface FineLevelSetVolumePipelineBundle {
   readonly resetPipeline: GPUComputePipeline;
   readonly addReferencePipeline: GPUComputePipeline;
+  readonly updateRigidTargetPipeline: GPUComputePipeline;
   readonly coarsePartialPipeline: GPUComputePipeline;
   readonly prepareCoarseDispatchPipeline: GPUComputePipeline;
   readonly coarseFinalizePipeline: GPUComputePipeline;
@@ -60,7 +64,9 @@ export interface FineLevelSetGPUVolumeControl {
 }
 
 export function unpackFineLevelSetGPUVolumeControl(data: ArrayBuffer): FineLevelSetGPUVolumeControl {
-  if (data.byteLength < FINE_LEVELSET_VOLUME_CONTROL_BYTES) throw new RangeError("Fine volume control needs 64 bytes");
+  if (data.byteLength < FINE_LEVELSET_VOLUME_CONTROL_READBACK_BYTES) {
+    throw new RangeError("Fine volume control needs 64 bytes");
+  }
   const u = new Uint32Array(data, 0, 16), f = new Float32Array(data, 0, 16);
   return { flags: u[0], initialized: u[1] !== 0, samples: u[2], referenceVolume: f[3], currentVolume: f[4],
     interfaceArea: f[5], correction: f[6], corrected: u[7] !== 0, coarseVolume: f[8], fineVolume: f[9],
@@ -81,6 +87,11 @@ export interface FineLevelSetVolumeCoarseSource {
 }
 
 export type FineLevelSetVolumeCorrectionMode = "global" | "moving-pages";
+
+export interface FineLevelSetRigidVolumeTarget {
+  readonly immersedVolumes: GPUBuffer;
+  readonly bodyCount: number;
+}
 
 export interface FineLevelSetGPUVolumePlan {
   readonly coarseRowCapacity: number; readonly fineSampleCapacity: number;
@@ -133,6 +144,7 @@ export class WebGPUFineLevelSetVolumeCorrection {
   private readonly coarseDispatch: GPUBuffer;
   private resetPipeline!: GPUComputePipeline;
   private addReferencePipeline!: GPUComputePipeline;
+  private updateRigidTargetPipeline!: GPUComputePipeline;
   private coarsePartialPipeline!: GPUComputePipeline;
   private prepareCoarseDispatchPipeline!: GPUComputePipeline;
   private coarseFinalizePipeline!: GPUComputePipeline;
@@ -154,7 +166,8 @@ export class WebGPUFineLevelSetVolumeCorrection {
   constructor(private readonly device: GPUDevice, readonly source: WebGPUFineLevelSetBrickSource,
     private readonly coarse: FineLevelSetVolumeCoarseSource, sharedControl?: GPUBuffer,
     _deferPipelineCompilation = true,
-    correctionMode: FineLevelSetVolumeCorrectionMode = "global") {
+    correctionMode: FineLevelSetVolumeCorrectionMode = "global",
+    private readonly rigidTarget?: FineLevelSetRigidVolumeTarget) {
     if (!Number.isSafeInteger(coarse.sampleRowCapacity) || coarse.sampleRowCapacity < 1) {
       throw new RangeError("Fine volume coarse row-directory capacity must be positive");
     }
@@ -195,6 +208,8 @@ export class WebGPUFineLevelSetVolumeCorrection {
     f[6] = coarse.physicalCellSize;
     u[7] = this.plan.coarsePartialCount; u[8] = this.plan.finePartialCount;
     u[9] = device.limits.maxComputeWorkgroupsPerDimension;
+    u[10] = Math.min(GPU_RIGID_VOLUME_TARGET_CAPACITY,
+      Math.max(0, Math.floor(rigidTarget?.bodyCount ?? 0)));
     device.queue.writeBuffer(this.coarseParams, 0, bytes);
     const volumeProfile = performanceShaderVariant();
     const volumeActivity = createGPULogicalActivityAdoptionContext({
@@ -213,6 +228,7 @@ export class WebGPUFineLevelSetVolumeCorrection {
   private installPipelineBundle(pipelines: FineLevelSetVolumePipelineBundle): void {
     this.resetPipeline = pipelines.resetPipeline;
     this.addReferencePipeline = pipelines.addReferencePipeline;
+    this.updateRigidTargetPipeline = pipelines.updateRigidTargetPipeline;
     this.prepareCoarseDispatchPipeline = pipelines.prepareCoarseDispatchPipeline;
     this.coarsePartialPipeline = pipelines.coarsePartialPipeline;
     this.coarseFinalizePipeline = pipelines.coarseFinalizePipeline;
@@ -228,6 +244,8 @@ export class WebGPUFineLevelSetVolumeCorrection {
     };
     cache(this.resetPipeline, [[5, this.control]]);
     cache(this.addReferencePipeline, [[5, this.control], [16, this.referenceDeltaParams]]);
+    if (this.rigidTarget) cache(this.updateRigidTargetPipeline,
+      [[5, this.control], [6, this.coarseParams], [19, this.rigidTarget.immersedVolumes]]);
     cache(this.prepareCoarseDispatchPipeline, [[0, this.source.params], [6, this.coarseParams], [11, this.coarse.sampleDirectory],
       [12, this.reductionScratch], [13, this.coarse.publicationControl], [15, this.coarseDispatch]]);
     cache(this.coarsePartialPipeline, [[0, this.source.params], [6, this.coarseParams],
@@ -264,6 +282,7 @@ export class WebGPUFineLevelSetVolumeCorrection {
     });
     const resetPipeline = await pipeline("resetVolumeControl");
     const addReferencePipeline = await pipeline("addReferenceVolume");
+    const updateRigidTargetPipeline = await pipeline("updateRigidVolumeTarget");
     const prepareCoarseDispatchPipeline = await pipeline("prepareCoarseVolumeDispatch");
     const coarsePartialPipeline = await pipeline("reduceCoarseVolumePartials");
     const coarseFinalizePipeline = await pipeline("finalizeCoarseVolume");
@@ -274,7 +293,8 @@ export class WebGPUFineLevelSetVolumeCorrection {
       await pipeline("applyFineVolumeCorrection"));
     const correctedFinalizePipeline = await pipeline("finalizeCorrectedFineVolume");
     const measuredFinalizePipeline = await pipeline("finalizeMeasuredFineVolume");
-    return { resetPipeline, addReferencePipeline, prepareCoarseDispatchPipeline,
+    return { resetPipeline, addReferencePipeline, updateRigidTargetPipeline,
+      prepareCoarseDispatchPipeline,
       coarsePartialPipeline, coarseFinalizePipeline, prepareFineDispatchPipeline,
       finePartialPipeline, fineFinalizePipeline, applyPipeline,
       correctedFinalizePipeline, measuredFinalizePipeline };
@@ -362,6 +382,11 @@ export class WebGPUFineLevelSetVolumeCorrection {
         "Advance global fine inflow volume reference");
       this.pendingReferenceVolume = 0;
     }
+    if (this.rigidTarget && this.rigidTarget.bodyCount > 0) {
+      run(this.updateRigidTargetPipeline,
+        [[5, this.control], [6, this.coarseParams], [19, this.rigidTarget.immersedVolumes]], 1,
+        "Update global fine submerged-solid volume target");
+    }
     run(this.resetPipeline, [[5, this.control]], 1, "Reset global volume reduction");
     run(this.prepareCoarseDispatchPipeline, [[0, this.source.params], [6, this.coarseParams], [11, this.coarse.sampleDirectory],
       [12, this.reductionScratch], [13, this.coarse.publicationControl], [15, this.coarseDispatch]], 1,
@@ -446,7 +471,7 @@ struct CoarseParams{dimensions:vec3u,maximumLeafSize:u32,rowCapacity:u32,pad0:u3
 struct ReferenceDelta{volume:f32,p0:f32,p1:f32,p2:f32}
 struct Header{cell:u32,a:u32,b:u32,size:u32,x:f32,y:f32,z:u32,w:u32,g:vec4f}struct CoarsePhi{phi:f32,minimumPhi:f32,maximumPhi:f32,flags:u32}
 struct CoarseSample{cellPlusOne:u32,size:u32,phi:f32,minimumPhi:f32,maximumPhi:f32,flags:u32,row:u32,physicalVolume:f32}struct CoarseDirectory{state:u32,generation:u32,rowCount:u32,maximumLeafSize:u32,dimensions:vec3u,physicalCellSize:f32,entries:array<CoarseSample>}
-struct Control{flags:u32,initialized:u32,samples:u32,referenceVolume:f32,currentVolume:f32,interfaceArea:f32,correction:f32,corrected:u32,coarseVolume:f32,fineVolume:f32,replacedCoarseVolume:f32,coarseRows:u32,expectedAir:u32,generation:u32,lookupFailures:u32,staleOwners:u32}
+struct Control{flags:u32,initialized:u32,samples:u32,referenceVolume:f32,currentVolume:f32,interfaceArea:f32,correction:f32,corrected:u32,coarseVolume:f32,fineVolume:f32,replacedCoarseVolume:f32,coarseRows:u32,expectedAir:u32,generation:u32,lookupFailures:u32,staleOwners:u32,submergedSolidVolume:f32,pad0:f32,pad1:f32,pad2:f32}
 @group(0)@binding(0)var<uniform>p:FineParams;@group(0)@binding(1)var<storage,read>metadata:array<u32>;@group(0)@binding(2)var<storage,read>worklist:array<u32>;@group(0)@binding(3)var<storage,read_write>samples:array<u32>;@group(0)@binding(5)var<storage,read_write>control:Control;
 ${fineLevelSetPackedSampleWGSL("samples", true)}
 @group(0)@binding(16)var<uniform>referenceDelta:ReferenceDelta;
@@ -457,6 +482,7 @@ ${fineLevelSetPackedSampleWGSL("samples", true)}
 @group(0)@binding(15)var<storage,read_write>coarseDispatch:array<u32>;
 @group(0)@binding(17)var<storage,read_write>residualDispatch:array<u32>;
 @group(0)@binding(18)var<storage,read_write>correctionDispatch:array<u32>;
+@group(0)@binding(19)var<storage,read>rigidImmersedVolumes:array<f32>;
 var<workgroup> sum0:array<f32,256>;var<workgroup> sum1:array<f32,256>;var<workgroup> sum2:array<f32,256>;
 var<workgroup> words0:array<u32,256>;var<workgroup> words1:array<u32,256>;var<workgroup> words2:array<u32,256>;var<workgroup> words3:array<u32,256>;var<workgroup> words4:array<u32,256>;
 struct CoarseVolumeReduction{volume:f32,rows:u32,errors:u32}
@@ -468,8 +494,12 @@ fn validDirectory()->bool{if(arrayLength(&coarsePublication)<12u){return false;}
 fn find(cell:u32,size:u32)->vec2u{let count=min(coarseDirectory.rowCount,arrayLength(&coarseDirectory.entries));let wantedLevel=level(size);let wantedMorton=morton(cell);var low=0u;var high=count;while(low<high){let middle=low+(high-low)/2u;let entry=coarseDirectory.entries[middle];let entryMorton=morton(entry.cellPlusOne-1u);if(less(level(entry.size),entryMorton,wantedLevel,wantedMorton)){low=middle+1u;}else{high=middle;}}if(low<count){let entry=coarseDirectory.entries[low];if(entry.cellPlusOne==cell+1u&&entry.size==size){return vec2u(low,OWNER_FOUND);}}return vec2u(INVALID,OWNER_ABSENT);}
 fn owner(x:vec3f)->vec2u{if(!validDirectory()){return vec2u(INVALID,OWNER_MALFORMED);}let grid=x/c.physicalCellSize;if(any(grid<vec3f(0))||any(grid>=vec3f(c.dimensions))){return vec2u(INVALID,OWNER_OUTSIDE);}let q=vec3u(floor(grid));var size=1u;var unresolved=OWNER_ABSENT;loop{let o=(q/size)*size;let cell=o.x+c.dimensions.x*(o.y+c.dimensions.y*o.z);let found=find(cell,size);if(found.y==OWNER_FOUND){let entry=coarseDirectory.entries[found.x];if(entry.row>=coarsePublication[2]||(entry.flags&9u)!=9u||!finite(entry.phi)||!finite(entry.minimumPhi)||!finite(entry.maximumPhi)||entry.minimumPhi>entry.phi||entry.phi>entry.maximumPhi||!finite(entry.physicalVolume)||entry.physicalVolume<=0.0){return vec2u(INVALID,OWNER_MALFORMED);}return found;}if(found.y!=OWNER_ABSENT){unresolved=found.y;}if(size>=c.maximumLeafSize){break;}size*=2u;}return vec2u(INVALID,unresolved);}
 fn activeSample(flat:u32)->vec2u{let count=min(worklist[1],p.pageCapacity);if(flat>=count*p.samplesPerBrick){return vec2u(INVALID);}let w=flat/p.samplesPerBrick;let local=flat-w*p.samplesPerBrick;let id=worklist[7u+w];if(id>=p.pageCapacity||metadata[id*4u+2u]!=p.generation){return vec2u(INVALID);}return vec2u(id,local);}fn unpackBrick(key:u32)->vec3u{let xy=p.brickDimensions.x*p.brickDimensions.y;let z=key/xy;let r=key-z*xy;let y=r/p.brickDimensions.x;return vec3u(r-y*p.brickDimensions.x,y,z);}fn localCoord(local:u32)->vec3u{let r=p.brickResolution;let z=local/(r*r);let q=local-z*r*r;let y=q/r;return vec3u(q-y*r,y,z);}
-@compute @workgroup_size(1)fn resetVolumeControl(){let initialized=control.initialized;let reference=control.referenceVolume;control=Control(0u,initialized,0u,reference,0.,0.,0.,0u,0.,0.,0.,0u,0u,0u,0u,0u);}
+@compute @workgroup_size(1)fn resetVolumeControl(){let initialized=control.initialized;let reference=control.referenceVolume;let submerged=control.submergedSolidVolume;control=Control(0u,initialized,0u,reference,0.,0.,0.,0u,0.,0.,0.,0u,0u,0u,0u,0u,submerged,0.,0.,0.);}
 @compute @workgroup_size(1)fn addReferenceVolume(){if(control.initialized!=0u&&finite(referenceDelta.volume)&&referenceDelta.volume>0.){control.referenceVolume+=referenceDelta.volume;}}
+@compute @workgroup_size(1)fn updateRigidVolumeTarget(){var submerged=0.;let count=min(c.p3,arrayLength(&rigidImmersedVolumes));
+ for(var body=0u;body<count;body+=1u){let value=rigidImmersedVolumes[body];if(finite(value)&&value>0.){submerged+=value;}}
+ if(control.initialized!=0u){control.referenceVolume+=control.submergedSolidVolume-submerged;}
+ control.submergedSolidVolume=submerged;}
 @compute @workgroup_size(256)fn prepareCoarseVolumeDispatch(@builtin(local_invocation_index)lid:u32){
  let count=select(0u,min(coarseDirectory.rowCount,c.rowCapacity),validDirectory());let groups=(count+63u)/64u;
  for(var word=groups*4u+lid;word<c.p0*4u;word+=256u){partials[word]=0u;}

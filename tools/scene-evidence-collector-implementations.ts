@@ -5,6 +5,31 @@ import { inflowOutletCenter } from "../lib/inflow-boundary";
 import { measureFluidSymmetry } from "../lib/fluid-symmetry-diagnostic";
 
 export const sceneEvidenceCollectorRegistry: SceneEvidenceCollectorRegistry = {
+  "rigid-coupling": {
+    id: "rigid-coupling",
+    phase: "checkpoint",
+    collect: ({ rigidCouplingSnapshot, velocityField, volumeField, grid }) => {
+      if (!rigidCouplingSnapshot) throw new Error("rigid coupling requires GPU body/exchange evidence");
+      if (!velocityField) throw new Error("rigid coupling requires compact velocity evidence");
+      let maximum = 0, cell = 0, component = 0;
+      for (let index = 0; index < volumeField.length; index += 1) {
+        if (!(volumeField[index]! > 0.5)) continue;
+        for (let axis = 0; axis < 3; axis += 1) {
+          const value = Math.abs(velocityField[3 * index + axis] ?? NaN);
+          if (Number.isFinite(value) && value > maximum) {
+            maximum = value; cell = index; component = axis;
+          }
+        }
+      }
+      const [nx, ny] = grid;
+      const signed = velocityField[3 * cell + component] ?? NaN;
+      return { ...rigidCouplingSnapshot, maximumLiquidComponentSpeed_m_s: maximum,
+        maximumLiquidComponentLocation: {
+          x: cell % nx, y: Math.floor(cell / nx) % ny, z: Math.floor(cell / (nx * ny)), component,
+          signedVelocity_m_s: signed,
+        } };
+    },
+  },
   "free-fall-contact-attribution": {
     id: "free-fall-contact-attribution",
     phase: "checkpoint",

@@ -15,6 +15,7 @@ import {
   POWER_FILL_FINE_BRICK_CAPACITY,
   POWER_FILL_LIQUID_CELLS,
   POWER_FILL_PRESSURE_ROW_CAPACITY,
+  RIGID_COUPLING_ORACLE_METHOD_PROFILE,
   SYMMETRIC_EXPANSION_METHOD_PROFILE,
   findSceneDefinition,
   powerFillReservoirCells,
@@ -61,6 +62,9 @@ export const sceneWebGPUSmokeIds = [
   "power-fill-256-100",
   "power-fill-256-800",
   "power-fill-256-6400",
+  "rigid-hydrostatic",
+  "rigid-float",
+  "rigid-sink",
   "ceiling-slab-drop",
   "corner-brick-drop",
   "midair-brick-drop",
@@ -1329,6 +1333,29 @@ const suiteList = [
           acceptance: [...powerAcceptance, ...pinned,
             { id: "power-fill-volume-drift", metric: "methods.octree.stabilityEnvelope.maximumExactVolumeDrift",
               operator: "at-most", expected: 1e-4 }] }),
+      });
+  }),
+  ...(["rigid-hydrostatic", "rigid-float", "rigid-sink"] as const).map((id) => {
+    const target_s = id === "rigid-hydrostatic" ? 0.5 : id === "rigid-float" ? 2 : 1;
+    const checkpointEvery_s = id === "rigid-hydrostatic" ? 0.05 : 0.1;
+    return suite(id,
+      id === "rigid-hydrostatic" ? "Static submerged sphere pressure-buoyancy oracle"
+        : id === "rigid-float" ? "Dynamic half-density sphere settling oracle"
+          : "Dense sphere bounded-entry and displacement oracle",
+      { definitionId: id }, {
+        default: lane({ target_s, exactSteps: Math.round(target_s / 0.004),
+          maxDt_s: 0.004, oracleSteps: 2, cpuOracle: false,
+          methods: methods(["octree"], { octree: RIGID_COUPLING_ORACLE_METHOD_PROFILE.overrides }),
+          collect: { fieldStats: "checkpoints", checkpointEvery_s, spatialField: true,
+            stabilityEnvelope: true, raster: "checkpoints", globalFineGeneration: true,
+            structuredValidation: true,
+            evidenceCollectors: [{ id: "rigid-coupling", phase: "checkpoint", methods: ["octree"],
+              requires: ["rigid coupling", "compact velocity"], provides: ["rigid coupling"] }] },
+          hooks: [{ id: "rigid-coupling-oracle", methods: ["octree"],
+            requires: ["rigid coupling", "checkpoint fields", "front/back raster"],
+            parameters: { oracleVersion: 1 } }],
+          maximumRepresentedVolumeDrift: 0.005,
+          timeout_ms: 240_000 }),
       });
   }),
   ...(["ceiling-slab-drop", "corner-brick-drop", "midair-brick-drop", "midair-corner-drop"] as const).map((id) => suite(id,
