@@ -2635,6 +2635,7 @@ export class WebGPUOctreeProjection {
     this.losassoCoarsePhi = new WebGPUOctreeLosassoCoarsePhiExchange(
       this.device, rowCapacity, faceCapacity,
       this.coarseDynamics.losassoFreeSurfacePressure,
+      this.coarseOnlySurfaceTracking ? this.dims.nx * this.dims.ny * this.dims.nz : 0,
     );
     this.losassoBackend = new WebGPUOctreeLosassoCoarseBackend({
       device: this.device,
@@ -2720,6 +2721,41 @@ export class WebGPUOctreeProjection {
 
     const fineA = this.globalFineSourceA, fineB = this.globalFineSourceB;
     const sampler = this.losassoBackend.sources.velocitySampler;
+    if (this.coarseOnlySurfaceTracking) {
+      if (!sampler) throw new Error("Losasso factor-one transport requires its velocity sampler");
+      const volume = this.dims.nx * this.dims.ny * this.dims.nz;
+      const trackerLayout = planOctreeAirVelocitySupport(
+        rowCapacity, rowCapacity, this.device.limits.minStorageBufferOffsetAlignment,
+        volume, octreeAirSupportFootprintCapacity(rowCapacity, volume),
+      );
+      const coarseCell = {
+        x: this.scene.container.width_m / this.dims.nx,
+        y: this.scene.container.height_m / this.dims.ny,
+        z: this.scene.container.depth_m / this.dims.nz,
+      };
+      this.coarseOnlySummary = new WebGPUOctreeCoarseSummary(this.device, {
+        directory: this.losassoCoarsePhi.source.volumeDirectory,
+        rowCapacity: this.losassoCoarsePhi.source.rowCapacity,
+      }, [this.dims.nx, this.dims.ny, this.dims.nz], {
+        // These two bindings are Power-only. Reuse published Losasso storage
+        // buffers as inert sentinels so factor one does not allocate the
+        // legacy structured/air-support graph merely to satisfy bind layouts.
+        arena: sampler.control,
+        rowVelocities: sampler.extendedVelocity,
+        layout: trackerLayout,
+        initialPhi: initialOctreeLevelSet(this.scene, this.dims, coarseCell),
+        physicalCellSize: coarseCell.x,
+        timestep_s: this.scene.numerics.maxDt_s,
+        maximumLeafSize: this.maxLeafSize,
+        losassoVelocity: sampler,
+        openTopBoundary: this.scene.container.top !== "closed",
+      });
+      // The initial Losasso group refresh precedes construction of this
+      // factor-one-only object. Rebind refinement/topology decisions now so
+      // the cold pass consumes the tracker instead of the unpublished
+      // sentinel summary.
+      this.refreshLosassoProjectionGroups();
+    }
     if (fineA && fineB) {
       if (!sampler) throw new Error("Losasso factor-4 transport requires its reduced velocity sampler");
       const coarseWGSL = makeOctreeLosassoCoarsePhiSampleWGSL(9);
@@ -2780,6 +2816,7 @@ export class WebGPUOctreeProjection {
     const coarseAllocated = this.losassoBackend.allocatedBytes
       + this.losassoReadyCommit.allocatedBytes + this.losassoCoarsePhi.plan.allocatedBytes
       + this.losassoConditionedOperator.allocatedBytes + this.losassoRowMotion.plan.allocatedBytes
+      + (this.coarseOnlySummary?.plan.allocatedBytes ?? 0)
       + (this.rigidCouplingDiagnostics?.allocatedBytes ?? 0);
     const allocated = coarseAllocated
       + (this.globalFineTopologyAB?.allocatedBytes ?? 0)
@@ -2831,7 +2868,7 @@ export class WebGPUOctreeProjection {
         this.candidateLeafHeaders),
     };
     const summary = this.globalFineSummaries?.directory
-      ?? this.unpublishedFineSummaryDirectory;
+      ?? this.coarseOnlySummary?.directory ?? this.unpublishedFineSummaryDirectory;
     this.fineSummarySizingGroup = this.createProjectionGroup(summary, this.pressureB, directory);
     this.topologyDecisionGroup = this.createProjectionGroup(
       summary, this.topologyResidency.topologyTileStateBuffer, directory,
@@ -3207,12 +3244,13 @@ export class WebGPUOctreeProjection {
         ...(this.losassoRowMotion?.initializationTasks ?? []),
         ...(this.losassoConditionedOperator?.initializationTasks ?? []),
         ...(this.rigidCouplingDiagnostics?.initializationTasks ?? []),
+        ...(this.coarseOnlySummary?.initializationTasks() ?? []),
       ];
       reducedTasks.forEach((task, index) => tasks.push({
         id: `octree.losasso.pipeline.${index}`,
         phase: "solver-pipelines",
         label: task.label,
-        run: () => task.run(),
+        run: (signal) => task.run(signal),
       }));
       if (this.globalFineSourceA && this.globalFineSourceB) {
         tasks.push({
@@ -3459,6 +3497,9 @@ export class WebGPUOctreeProjection {
       this.info.allocatedBytes += this.coarseOnlySummary.plan.allocatedBytes;
       this.workAccounting.setAuthorityBytes("coarse-summary",
         this.coarseOnlySummary.plan.allocatedBytes);
+    }
+    if (this.coarseOnlySurfaceTracking && !this.coarseOnlySummary) {
+      throw new Error("Factor-one allocation did not construct the dense coarse tracker");
     }
     const coarseDirectory = this.powerCoarseLevelSetSchedule.sampleSource.directory;
     // Binding 15 is the compact coarse-phi directory for the mandatory power
@@ -4047,7 +4088,20 @@ export class WebGPUOctreeProjection {
    * phase; product startup appends all checkpoints to one command buffer. */
   encodeInitialSparseAuthorityPhase(encoder: GPUCommandEncoder, phase: OctreeInitialSparseAuthorityPhaseId) {
     switch (phase) {
-      case "cold-topology": this.encodeColdBootstrapRebuild(encoder); break;
+      case "cold-topology": {
+        // Factor one has no fine-summary bootstrap. Publish its complete
+        // analytic coarse lattice first so the cold pressure tree receives
+        // the same interface-band refinement evidence as factor four, rather
+        // than assembling free-surface T-junctions from an empty summary.
+        if (this.coarseOnlySurfaceTracking && this.coarseOnlySummary) {
+          const broker = new PassBroker(encoder);
+          this.coarseOnlySummary.encode(broker);
+          broker.fence("factor-one analytic coarse summary published before cold topology");
+          encoder = broker.commandEncoder();
+        }
+        this.encodeColdBootstrapRebuild(encoder);
+        break;
+      }
       case "structured-authority":
         this.encode(
           encoder, this.dims.nx, this.dims.ny, this.dims.nz,
@@ -4471,6 +4525,30 @@ export class WebGPUOctreeProjection {
         this.losassoCoarsePhi.encode(broker, currentFine,
           this.losassoCoarsePhiInput());
         this.losassoConditionedOperator?.encodeAfterGhostDistances(broker);
+      } else if (this.coarseOnlySurfaceTracking && this.losassoCoarsePhi
+        && this.fineSeedAdapter && this.losassoBackend.sources.velocitySampler) {
+        // The ready commit above replaces every accepted face record, including
+        // the cell-centred p_air distances installed by encodeSurface. Factor
+        // four already re-restricts its retained fine field here. Factor one
+        // must do the same from its retained dense coarse lattice; dt=0 holds
+        // that transported field while remapping it to the newly accepted row
+        // identities and reconditioning their missing-neighbour faces.
+        this.losassoCoarsePhi.encodeCoarseOnly(
+          broker,
+          this.losassoCoarsePhiInput(),
+          this.fineSeedAdapter.leaves,
+          this.losassoBackend.sources.velocitySampler,
+          0,
+          this.surfaceInflow,
+          this.scene.container.top !== "closed",
+        );
+        this.losassoConditionedOperator?.encodeAfterGhostDistances(broker);
+        // encodeReadyCommit already remapped the retained W7 graph to the new
+        // wet-face ids.  Rebuilding the graph here happened after S3e had
+        // published this advance's projected seeds, replacing that live
+        // extension with an unextended zero-seed graph.  Factor four retains
+        // and remaps the graph across this same topology flip; factor one must
+        // do likewise because dt=0 does not change interface membership.
       }
       this.losassoBackend.encodeHierarchyRefresh(broker, this.leafHeaders);
       this.refreshLosassoProjectionGroups();
@@ -4841,6 +4919,23 @@ export class WebGPUOctreeProjection {
     backend.encodeProjection(broker, pressureOut, step,
       Math.min(12, this.scene.rigidBodies.length));
     broker.fence("Losasso projected wet axis faces published");
+    if (this.coarseOnlySurfaceTracking && backend.extensionBandPublished) {
+      // Factor four settles its transported fine generation below and builds
+      // S3e there. Factor one has no pending fine transaction, so publish the
+      // same post-projection extension explicitly. Doing this in encodeSurface
+      // consumed the once-per-advance serial with the preceding (cold on step
+      // one) projected field and left the next transport with an all-zero W7.
+      const advanceSerial = this.powerTimestep_s > 0
+        ? this.powerAdvancingPressureSteps + 1 : 0;
+      const coarsePhi = this.losassoCoarsePhi;
+      if (!coarsePhi) throw new Error("Factor-one S3e requires compact coarse phi");
+      backend.encodeCoarseExtensionBandPublication(
+        broker, coarsePhi.source, coarsePhi.coarseOnlyPublishedGeneration,
+      );
+      backend.encodeExtension(broker, advanceSerial, this.activePowerGeneration);
+      this.losassoRowMotion?.encode(broker);
+      broker.fence("Losasso coarse-only post-projection W7 velocity published");
+    }
     if (scope === "power-operator-only") return encoder;
     if (options?.productionBoundary) {
       encoder = options.productionBoundary("structuredProjection", encoder);
@@ -5079,10 +5174,68 @@ export class WebGPUOctreeProjection {
             maximumLeafSize: this.maxLeafSize,
             generation: this.powerCoarseLevelSetGeneration & 0x3fff_ffff,
           });
-          this.coarseOnlySummary?.encode(preparationBroker);
+          // The dense coarse tracker consumes the backend that owns the
+          // surface step.  Losasso publishes it below, after its staggered
+          // velocity source is ready; advancing it here as part of the legacy
+          // Power bootstrap transported the same surface twice on step zero.
+          if (this.coarseDynamics.backend === "power2017") {
+            this.coarseOnlySummary?.encode(preparationBroker);
+          }
           this.powerCoarseLevelSetBootstrapped = true;
           coarseBootstrappedThisStep = true;
         }
+      }
+      if (this.coarseOnlySurfaceTracking && this.coarseDynamics.backend === "losasso") {
+        const coarsePhi = this.losassoCoarsePhi;
+        const backend = this.losassoBackend;
+        const sampler = backend?.sources.velocitySampler;
+        if (!coarsePhi || !backend || !sampler) {
+          throw new Error("Losasso coarse-only surface authority is unavailable");
+        }
+        // Cold topology already published the complete analytic dense bank.
+        // Before the t=0 graph exists there is no velocity publication to
+        // advance it with, so encoding the tracker here records a false held
+        // advance. Positive-time steps consume the preceding settled W7.
+        if (dt_s > 0) {
+          this.coarseOnlySummary?.encode(preparationBroker);
+          preparationBroker.fence("Losasso coarse-only transported lattice published");
+        }
+        coarsePhi.encodeCoarseOnly(
+          preparationBroker,
+          this.losassoCoarsePhiInput(),
+          this.fineSeedAdapter.leaves,
+          sampler,
+          dt_s,
+          inflow,
+          this.scene.container.top !== "closed",
+        );
+        this.losassoConditionedOperator?.encodeAfterGhostDistances(preparationBroker);
+        backend.encodeHierarchyCoefficientRefresh(preparationBroker);
+        this.refreshLosassoProjectionGroups();
+        preparationBroker.fence("Losasso compact coarse-only phi published");
+        // S1 above consumed the preceding advance's settled W7 velocity. The
+        // retained graph must remain intact through wet-velocity advection.
+        // encodeLosasso rebuilds it from this transported phi only after this
+        // substep's projection. At t=0 the explicit structured-authority
+        // checkpoint has already projected, so bootstrap can publish now.
+        if (dt_s === 0) {
+          backend.encodeCoarseExtensionBandPublication(
+            preparationBroker,
+            coarsePhi.source,
+            coarsePhi.coarseOnlyPublishedGeneration,
+          );
+          backend.encodeExtension(preparationBroker, 0, this.activePowerGeneration);
+          this.losassoRowMotion?.encode(preparationBroker);
+        }
+        preparationBroker.fence(dt_s === 0
+          ? "Losasso coarse-only cold W7 graph published"
+          : "Losasso coarse-only phi published with retained lagged W7 graph");
+        this.refreshLosassoProjectionGroups();
+        encoder = preparationBroker.commandEncoder();
+        if (productionBoundary) {
+          encoder = productionBoundary("structuredProjectionTail", encoder);
+        }
+        return encoder;
       }
       if (this.globalFineSeeds && this.globalFineTopologyAB && this.globalFineTopologyBA
         && this.globalFineRedistanceA && this.globalFineRedistanceB) {
@@ -5473,6 +5626,9 @@ export class WebGPUOctreeProjection {
    * held surface on the difference, which is what intermittent publication
    * looks like from outside. */
   async readCoarseSurfaceTrackerReceipt() {
+    if (this.coarseOnlySurfaceTracking && !this.coarseOnlySummary) {
+      throw new Error("Factor-one surface tracking was constructed without its dense coarse tracker");
+    }
     return this.coarseOnlySummary?.readReceipt();
   }
   /** Presentation-only texture identity. The sparse octree solver never samples it. */
@@ -5520,7 +5676,10 @@ export class WebGPUOctreeProjection {
   get sparseVoxelRenderSource() {
     if (this.sparseBrickWorld) {
       const source = this.sparseBrickWorld.inspectionSource;
-      if (!source) void this.sparseBrickWorld.ensureInspectionSource();
+      // A device refusal is logged once by the producer and then re-thrown to
+      // every caller; swallow it here so a frame getter cannot raise one
+      // unhandled rejection per frame.
+      if (!source) void this.sparseBrickWorld.ensureInspectionSource().catch(() => undefined);
       const currentBytes = this.sparseBrickWorld.allocatedBytes;
       this.info.allocatedBytes += currentBytes - this.sparseBrickWorldAccountedBytes;
       this.sparseBrickWorldAccountedBytes = currentBytes;
@@ -6062,10 +6221,16 @@ export class WebGPUOctreeProjection {
   get losassoPressureDebug() {
     const source = this.losassoBackend?.sources;
     const wide = source?.wideSolver;
-    return source && wide ? {
+    const coarsePhi = this.losassoCoarsePhi?.source;
+    return source && wide && coarsePhi ? {
       control: source.operator.control,
       rightHandSide: source.rightHandSide,
       diagonal: wide.diagonal,
+      faces: source.operator.faces,
+      faceGeometry: source.dynamics.faceGeometry,
+      leafHeaders: this.leafHeaders,
+      rowPhi: coarsePhi.rowPhi,
+      ghostDistances: coarsePhi.ghostDistances,
     } : undefined;
   }
   get losassoCoarsePhiDebug() {
@@ -6170,19 +6335,32 @@ export class WebGPUOctreeProjection {
   }
   /** Renderer-only view of the sole moving surface in coarse-1 mode. */
   get coarseLevelSetSource() {
-    const coarse = this.powerCoarseLevelSetSchedule?.sampleSource;
-    if (!this.coarseOnlySurfaceTracking || !this.powerCoarseLevelSetBootstrapped || !coarse) {
+    if (!this.coarseOnlySurfaceTracking) {
       return undefined;
     }
+    const power = this.coarseDynamics.backend === "power2017"
+      ? this.powerCoarseLevelSetSchedule?.sampleSource : undefined;
+    const losasso = this.losassoCoarsePhi;
+    const coarse = power ?? (losasso ? {
+      directory: losasso.source.volumeDirectory,
+      control: losasso.source.volumePublication,
+      rowCapacity: losasso.source.rowCapacity,
+    } : undefined);
+    const generation = power
+      ? (this.powerCoarseLevelSetGeneration & 0x3fff_ffff)
+      : (losasso?.coarseOnlyPublishedGeneration ?? 0);
+    if (!coarse || generation < 1
+      || (power ? !this.powerCoarseLevelSetBootstrapped : false)) return undefined;
     return {
       kind: "coarse-levelset-sampling" as const,
       directory: { buffer: coarse.directory },
       control: { buffer: coarse.control },
+      ...(power || !losasso ? {} : { gradients: { buffer: losasso.source.rowGradient } }),
       rowCapacity: coarse.rowCapacity,
       sampleDimensions: [this.dims.nx, this.dims.ny, this.dims.nz] as const,
       physicalCellSize: this.scene.container.width_m / this.dims.nx,
       domainOrigin: [0, 0, 0] as const,
-      generation: this.powerCoarseLevelSetGeneration & 0x3fff_ffff,
+      generation,
     };
   }
   /**
@@ -6789,7 +6967,8 @@ export class WebGPUOctreeProjection {
   readFluidBrickResidencyStats() { return this.topologyResidency.readStats(); }
   readFluidBulkBrickResidencyStats() { return this.sparseBrickWorld?.readBulkResidencyStats(); }
   encodeSparseBrickWorld(encoder: GPUCommandEncoder, _dt_s = 0) {
-    if ((!this.globalFineBootstrapped && !this.powerCoarseLevelSetBootstrapped)
+    if ((!this.globalFineBootstrapped && !this.powerCoarseLevelSetBootstrapped
+      && (this.losassoCoarsePhi?.coarseOnlyPublishedGeneration ?? 0) < 1)
       || !this.fineSeedAdapter) {
       throw new Error("Sparse render publication requires a settled surface authority and compact seeds");
     }

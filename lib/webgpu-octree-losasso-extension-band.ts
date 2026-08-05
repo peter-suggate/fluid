@@ -8,6 +8,8 @@ import {
 } from "./webgpu-octree-losasso-velocity-extension";
 import type { WebGPUOctreeLosassoVelocitySamplerSource } from
   "./webgpu-octree-losasso-velocity-sampler";
+import type { WebGPUOctreeLosassoCoarsePhiSource } from
+  "./webgpu-octree-losasso-coarse-phi";
 import { octreeLosassoExtensionBandWGSL } from
   "./webgpu-octree-losasso-extension-band.wgsl";
 
@@ -86,7 +88,11 @@ const ENTRY_POINTS = [
   "beginLosassoExtensionBand",
   "publishLosassoWetSeedFaces",
   "publishLosassoAirBandFaces",
+  "publishLosassoCoarseAirBandFaces",
   "prepareLosassoBandDispatch",
+  "dilateLosassoAirBand2",
+  "dilateLosassoAirBand3",
+  "dilateLosassoAirBand4",
   "dilateLosassoAirBand5",
   "dilateLosassoAirBand6",
   "dilateLosassoAirBand7",
@@ -104,7 +110,11 @@ const BINDINGS: Readonly<Record<EntryPoint, readonly number[]>> = Object.freeze(
   beginLosassoExtensionBand: [0, 4, 8, 9, 13, 14, 16, 17],
   publishLosassoWetSeedFaces: [0, 4, 5, 8, 9, 10, 13, 16, 17],
   publishLosassoAirBandFaces: [0, 1, 2, 3, 8, 9, 10, 13, 17],
+  publishLosassoCoarseAirBandFaces: [0, 8, 9, 10, 13, 17, 20],
   prepareLosassoBandDispatch: [0, 8, 19],
+  dilateLosassoAirBand2: [0, 8, 9, 10, 13, 17],
+  dilateLosassoAirBand3: [0, 8, 9, 10, 13, 17],
+  dilateLosassoAirBand4: [0, 8, 9, 10, 13, 17],
   dilateLosassoAirBand5: [0, 8, 9, 10, 13, 17],
   dilateLosassoAirBand6: [0, 8, 9, 10, 13, 17],
   dilateLosassoAirBand7: [0, 8, 9, 10, 13, 17],
@@ -130,6 +140,10 @@ export class WebGPUOctreeLosassoExtensionBand {
   readonly allocatedBytes: number;
   readonly width = OCTREE_LOSASSO_EXTENSION_WIDTH;
   readonly publication = "compact-fine-brick-W7-same-axis-band" as const;
+
+  /** Host-side scheduling fact: at least one complete graph publication has
+   * been encoded before a consumer attempts S3e. */
+  get hasPublishedGraph(): boolean { return this.publishedFineGeneration > 0; }
 
   private readonly params: GPUBuffer;
   private readonly control: GPUBuffer;
@@ -328,6 +342,74 @@ export class WebGPUOctreeLosassoExtensionBand {
     runIndirect("buildLosassoExtensionAdjacency");
     run("finishLosassoExtensionBand", 1);
     this.publishedFineGeneration = fine.generation;
+  }
+
+  /** Publish the same W7 sampler graph from factor-one compact coarse phi.
+   * This path deliberately binds no fine metadata, page worklist, or samples. */
+  encodeCoarsePublication(
+    broker: PassBroker,
+    coarsePhi: WebGPUOctreeLosassoCoarsePhiSource,
+    generation: number,
+  ): void {
+    this.assertReady();
+    if (!Number.isSafeInteger(generation) || generation < 1) {
+      throw new RangeError("Losasso coarse extension publication requires a positive generation");
+    }
+    const bytes = new ArrayBuffer(112), words = new Uint32Array(bytes), floats = new Float32Array(bytes);
+    words.set([...this.plan.dimensions, this.options.maximumLeafSize], 0);
+    words.set([this.plan.faceCapacity, this.plan.directoryCapacity,
+      this.options.wet.directoryCapacity, OCTREE_LOSASSO_EXTENSION_WIDTH], 4);
+    floats.set([...(this.options.domainOrigin ?? [0, 0, 0]), this.options.cellSize], 8);
+    floats[23] = this.options.cellSize;
+    words.set([0, 0, 0, generation], 24);
+    this.device.queue.writeBuffer(this.params, 0, bytes);
+    const buffers = new Map<number, GPUBuffer>([
+      [0, this.params], [4, this.options.wet.control], [5, this.options.wet.faceGeometry],
+      [8, this.control], [9, this.metrics], [10, this.geometry],
+      [11, this.adjacencyOffsets], [12, this.adjacency], [13, this.directory],
+      [14, this.projectedSeeds], [15, this.options.wet.extendedVelocity],
+      [16, this.seedWetFace], [17, this.geometricClaims], [19, this.liveFaceDispatch],
+      // Factor one's dense complement is the transported level-set authority.
+      // Compact pressure rows are only a restriction cache and can omit the
+      // air-side samples needed to classify a complete W7 graph.
+      [20, coarsePhi.volumeDirectory],
+    ]);
+    const run = (entryPoint: EntryPoint, groups: number) => {
+      const pipeline = this.pipelines![entryPoint];
+      const pass = broker.compute({ label: `Losasso coarse extension band - ${entryPoint}` });
+      pass.setPipeline(pipeline);
+      pass.setBindGroup(0, this.cachedBindGroup(pipeline,
+        BINDINGS[entryPoint].map((binding) => ({ binding, buffer: buffers.get(binding)! }))));
+      const groupsX = Math.min(groups, 65_535), groupsY = Math.ceil(groups / Math.max(1, groupsX));
+      if (groupsY > 65_535) throw new RangeError("Losasso compact band exceeds 2D dispatch limits");
+      pass.dispatchWorkgroups(groupsX, groupsY);
+    };
+    const runIndirect = (entryPoint: EntryPoint) => {
+      const pipeline = this.pipelines![entryPoint];
+      const pass = broker.compute({ label: `Losasso coarse extension band - ${entryPoint}` });
+      pass.setPipeline(pipeline);
+      pass.setBindGroup(0, this.cachedBindGroup(pipeline,
+        BINDINGS[entryPoint].map((binding) => ({ binding, buffer: buffers.get(binding)! }))));
+      pass.dispatchWorkgroupsIndirect(this.liveFaceDispatch, 0);
+    };
+    run("beginLosassoExtensionBand", Math.ceil(Math.max(this.plan.faceCapacity,
+      this.plan.directoryCapacity) / 64));
+    run("publishLosassoWetSeedFaces", Math.ceil(this.options.wetFaceCapacity / 64));
+    const [nx, ny, nz] = this.plan.dimensions;
+    const finestMacFaces = (nx + 1) * ny * nz + nx * (ny + 1) * nz + nx * ny * (nz + 1);
+    run("publishLosassoCoarseAirBandFaces", Math.ceil(finestMacFaces / 64));
+    broker.fence("Losasso coarse-only extension-band seed faces published");
+    for (const layer of [2, 3, 4, 5, 6, 7] as const) {
+      run("prepareLosassoBandDispatch", 1);
+      broker.fence(`Losasso coarse-only extension-band layer-${layer} dispatch published`);
+      runIndirect(`dilateLosassoAirBand${layer}`);
+      broker.fence(`Losasso coarse-only extension-band layer ${layer} published`);
+    }
+    run("prepareLosassoBandDispatch", 1);
+    broker.fence("Losasso coarse-only extension-band adjacency dispatch published");
+    runIndirect("buildLosassoExtensionAdjacency");
+    run("finishLosassoExtensionBand", 1);
+    this.publishedFineGeneration = generation;
   }
 
   /** Gather current projected wet seeds, run exactly K=8, then publish the wet view. */

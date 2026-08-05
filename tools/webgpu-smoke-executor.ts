@@ -96,6 +96,8 @@ import { encodeStructuredAuditRecordCopies, exactStructuredGenerationAuditFailur
   from "./webgpu-smoke-structured-audit";
 import { decodeOctreeMGPCGDiagnostics, octreeProjectedVariationalResidualRms,
   type OctreeMGPCGDiagnostics } from "./webgpu-smoke-pressure";
+import { decodeFineLevelSetActivityCensus,
+  type FineLevelSetActivityCensus } from "../lib/fine-levelset-activity-census";
 import { compactLiquidVelocityDiagnostic, compactMechanicalEnergyDiagnostic } from "./webgpu-smoke-power-diagnostics";
 import { queueCompleteSimulationWall_ms } from "./webgpu-smoke-timing";
 import type { PaperPhaseId, PerformanceTrace } from "../lib/performance-trace";
@@ -649,6 +651,13 @@ const checkpointEvery_s = Number(process.env.FLUID_CHECKPOINT_EVERY_S ?? 0);
 const energyEverySteps = Number(process.env.FLUID_ENERGY_EVERY_STEPS ?? 0);
 const globalFineGenerationTransitionRequested = process.env.FLUID_GLOBAL_FINE_GENERATION_TRANSITION === "1";
 const octreeTopologyCensusRequested = process.env.FLUID_OCTREE_TOPOLOGY_CENSUS === "1";
+/** AP0 observability for the activity-scaled LoSasso program. The samples ride
+ * the existing post-advance tripwire ring and are mapped only after the timed
+ * window, so enabling the census never introduces an advance-path readback. */
+const fineActivityCensusRequested = process.env.FLUID_FINE_ACTIVITY_CENSUS === "1";
+if (fineActivityCensusRequested && tripwiresDisabled) {
+  throw new Error("FLUID_FINE_ACTIVITY_CENSUS requires FLUID_TRIPWIRES=1 or failfast");
+}
 // Publication-transition acceptance needs the existing bounded renderer
 // counter readback so it can distinguish global fine/coarse authority from an
 // adaptive or retained presentation fallback. This is QA-only and adds no
@@ -1658,14 +1667,19 @@ async function runGPU(
     // `air-support-failure` trip names no face at all.
     airSupportLedgerOffsetBytes: 344, airSupportLedgerBytes: 8,
     airSupportForensicOffsetBytes: 352, airSupportForensicBytes: 88,
-    strideBytes: 440,
+    // Finalized fine page-delta header: direct PAGE_DIRTY membership, expanded
+    // dirty/support halos, lifecycle churn, and measured displacement.
+    finePageDeltaOffsetBytes: 440, finePageDeltaBytes: 64,
+    fineTransportControlOffsetBytes: 504, fineTransportControlBytes: 64,
+    strideBytes: 568,
   });
   /** The benchmark and acceptance lanes must evaluate every tripwire. Any
    * other octree run captures them opportunistically: a trip still fails, but
    * a scene with no compact fine authority is "not applicable" rather than a
    * wiring failure. */
   const tripwiresRequired = !tripwiresDisabled && method.id === "octree"
-    && (tripwiresForcedRequired || powerGenerationAuditRequested || performanceProfileRequested);
+    && (tripwiresForcedRequired || powerGenerationAuditRequested || performanceProfileRequested
+      || fineActivityCensusRequested);
   const tripwireCapacity = !tripwiresDisabled && method.id === "octree"
     ? Math.max(1, exactStepCount ?? 0, oracleSteps,
       Math.ceil(target_s / Math.max(scene.numerics.maxDt_s, Number.EPSILON)) + 1)
@@ -1714,6 +1728,7 @@ async function runGPU(
    * later step dies they are the chain that led to it, and the end-of-run walk
    * that normally reports them never gets to run. */
   const tripwireLiveAllowed: TripwireTrip[] = [];
+  const fineActivitySamples: FineLevelSetActivityCensus[] = [];
   let tripwireLiveFence_ms = 0, tripwireLiveDecode_ms = 0;
   if (tripwiresDisabled) {
     console.error("[tripwires] DISABLED by FLUID_TRIPWIRES=0: topology rollback,"
@@ -1739,6 +1754,8 @@ async function runGPU(
       globalFineSummaryDebug?: { coarseControl: GPUBuffer };
       airSupportScratch?: GPUBuffer;
       workAccountingBuffers?: { fineTransportGovernor?: GPUBufferBinding };
+      globalFinePageDeltaDebug?: { buffer: GPUBuffer };
+      globalFineTransportControl?: GPUBuffer;
     };
     const topologyControl = authority.globalFineLevelSetSource?.topologyControl;
     const topology: GPUBufferBinding | undefined = topologyControl
@@ -1752,6 +1769,8 @@ async function runGPU(
       fineWorklist: authority.globalFineLevelSetSource?.worklist,
       airSupport: authority.airSupportScratch,
       transportGovernor: authority.workAccountingBuffers?.fineTransportGovernor,
+      finePageDelta: authority.globalFinePageDeltaDebug?.buffer,
+      fineTransportControl: authority.globalFineTransportControl,
     };
   };
   /** Encode one complete tripwire record into `destination` at `base`.
@@ -1797,6 +1816,12 @@ async function runGPU(
         base + TRIPWIRE_RECORD.transportSleepOffsetBytes,
         TRIPWIRE_RECORD.transportSleepBytes);
     }
+    if (sources.finePageDelta) encoder.copyBufferToBuffer(sources.finePageDelta, 0,
+      destination, base + TRIPWIRE_RECORD.finePageDeltaOffsetBytes,
+      TRIPWIRE_RECORD.finePageDeltaBytes);
+    if (sources.fineTransportControl) encoder.copyBufferToBuffer(sources.fineTransportControl, 0,
+      destination, base + TRIPWIRE_RECORD.fineTransportControlOffsetBytes,
+      TRIPWIRE_RECORD.fineTransportControlBytes);
   };
   /** Decode and evaluate ONE captured record.
    *
@@ -1970,6 +1995,80 @@ async function runGPU(
       trip("air-support-failure", { ...airSupportCarrierForensics(), fatalChainForensics });
     }
     return trips;
+  };
+  const decodeActivityRecord = (
+    words: (offsetBytes: number, byteLength: number) => Uint32Array,
+    step: number,
+  ): FineLevelSetActivityCensus | undefined => {
+    const mgpcg = decodeOctreeMGPCGDiagnostics(words(
+      TRIPWIRE_RECORD.mgpcgOffsetBytes, TRIPWIRE_RECORD.mgpcgBytes));
+    return decodeFineLevelSetActivityCensus(
+      step,
+      words(TRIPWIRE_RECORD.fineHeaderOffsetBytes, TRIPWIRE_RECORD.fineHeaderBytes),
+      words(TRIPWIRE_RECORD.finePageDeltaOffsetBytes, TRIPWIRE_RECORD.finePageDeltaBytes),
+      mgpcg.iterations,
+      words(TRIPWIRE_RECORD.fineTransportControlOffsetBytes,
+        TRIPWIRE_RECORD.fineTransportControlBytes),
+    );
+  };
+  const emitFineActivityCensus = () => {
+    const validSamples = fineActivitySamples.filter((sample) => sample.receiptValid);
+    const mean = (select: (sample: FineLevelSetActivityCensus) => number) =>
+      validSamples.length === 0 ? 0
+        : validSamples.reduce((sum, sample) => sum + select(sample), 0)
+          / validSamples.length;
+    console.log(JSON.stringify({
+      scenario: scenarioId,
+      method: method.id,
+      phase: "fine-activity-census",
+      samples: fineActivitySamples,
+      summary: {
+        advances: fineActivitySamples.length,
+        invalidReceipts: fineActivitySamples.length - validSamples.length,
+        invalidTransportReceipts: fineActivitySamples.filter(
+          (sample) => !sample.transportReceiptValid).length,
+        meanLiveBandPages: mean((sample) => sample.liveBandPages),
+        meanDirtyFraction: mean((sample) => sample.dirtyFraction),
+        meanDirtyHaloFraction: mean((sample) => sample.dirtyHaloFraction),
+        meanSupportHaloFraction: mean((sample) => sample.supportHaloFraction),
+        meanTransportActivityFraction: mean((sample) => sample.transportActivityFraction),
+        maximumDisplacementFineCells: validSamples.reduce((maximum, sample) =>
+          Math.max(maximum, sample.maximumDisplacementFineCells ?? 0), 0),
+        meanExecutedSolveIterations: mean((sample) => sample.executedSolveIterations),
+      },
+    }));
+  };
+  /** Map the diagnostics-only ring at the first post-window queue fence. This
+   * deliberately precedes terminal oracles: a red lane still needs to publish
+   * the activity evidence that explains why it was red. The ring is unmapped,
+   * retained, and later evaluated by the normal tripwire walk. */
+  const captureFineActivityCensus = async () => {
+    if (!fineActivityCensusRequested || !tripwireSnapshot
+      || fineActivitySamples.length !== 0) return;
+    if (tripwireSteps.length === 0) {
+      throw new Error("fine activity census captured no accepted advances");
+    }
+    const snapshotBytes = tripwireSteps.length * TRIPWIRE_RECORD.strideBytes;
+    try {
+      await tripwireSnapshot.mapAsync(GPUMapMode.READ, 0, snapshotBytes);
+      const mapped = new Uint8Array(tripwireSnapshot.getMappedRange(0, snapshotBytes));
+      for (let record = 0; record < tripwireSteps.length; record += 1) {
+        const words = (offsetBytes: number, byteLength: number) => new Uint32Array(
+          mapped.buffer,
+          mapped.byteOffset + record * TRIPWIRE_RECORD.strideBytes + offsetBytes,
+          byteLength / 4,
+        );
+        const sample = decodeActivityRecord(words, tripwireSteps[record]!);
+        if (!sample) {
+          throw new Error(`fine activity census rejected the unpublished or mismatched`
+            + ` page-delta receipt at step ${tripwireSteps[record]}`);
+        }
+        fineActivitySamples.push(sample);
+      }
+    } finally {
+      if (tripwireSnapshot.mapState === "mapped") tripwireSnapshot.unmap();
+    }
+    emitFineActivityCensus();
   };
   /** The single failure report. `where` is the only difference between dying
    * at the step that tripped and the end-of-run walk; every field of the
@@ -2149,6 +2248,10 @@ async function runGPU(
         : ["topology", "restriction", "mgpcg", "coarse", "fineWorklist",
           "airSupport", "transportGovernor"] as const;
       const missing: string[] = requiredSourceNames.filter((name) => !sources[name]);
+      if (fineActivityCensusRequested && !sources.finePageDelta) missing.push("finePageDelta");
+      if (fineActivityCensusRequested && !sources.fineTransportControl) {
+        missing.push("fineTransportControl");
+      }
       // A narrowed topology binding would silently truncate the record rather
       // than surface the rollback word, so treat it as an unreadable counter.
       if (sources.topology && (sources.topology.size ?? TRIPWIRE_RECORD.topologyBytes)
@@ -2888,6 +2991,7 @@ async function runGPU(
   const simulationWall_ms = queueCompleteSimulationWall_ms(
     runStarted, simulationCompletedAt_ms, samplingWall_ms,
   );
+  await captureFineActivityCensus();
   let losassoCutoverAuthority: Readonly<Record<string, unknown>> | undefined;
   let losassoCutoverRaster: HybridPresentationSmokeStats | undefined;
   if (losassoCutoverLane) {
@@ -3669,20 +3773,30 @@ async function runGPU(
         rowCountsBySize[String(size)] = (rowCountsBySize[String(size)] ?? 0) + 1;
       }
       const dense = new Float32Array(nx * ny * nz); dense.fill(Number.NaN);
+      const denseSize = new Uint32Array(nx * ny * nz);
       for (let row = 0; row < rowCount; row += 1) {
         const cell = headers[12 * row]!, size = headers[12 * row + 3]!;
         const ox = cell % nx, oy = Math.floor(cell / nx) % ny, oz = Math.floor(cell / (nx * ny));
         for (let z = oz; z < oz + size; z += 1) for (let y = oy; y < oy + size; y += 1) {
-          for (let x = ox; x < ox + size; x += 1) dense[x + nx * (y + ny * z)] = phi[4 * row]!;
+          for (let x = ox; x < ox + size; x += 1) {
+            const at = x + nx * (y + ny * z);
+            dense[at] = phi[4 * row]!; denseSize[at] = size;
+          }
         }
       }
-      let exactMismatchCount = 0, maximumAbsoluteError = 0;
-      let first: Record<string, unknown> | undefined;
+      let exactMismatchCount = 0, maximumAbsoluteError = 0, sizeMismatchCount = 0;
+      let first: Record<string, unknown> | undefined, firstSize: Record<string, unknown> | undefined;
       for (let z = 0; z < nz; z += 1) for (let y = 0; y < ny; y += 1) for (let x = 0; x < nx; x += 1) {
         const source = dense[x + nx * (y + ny * z)]!;
         for (const [transform, tx, tz] of [["reflect-x", nx - 1 - x, z],
           ["reflect-z", x, nz - 1 - z], ["swap-xz", z, x]] as const) {
           const target = dense[tx + nx * (y + ny * tz)]!, absoluteError = Math.abs(source - target);
+          const targetAt = tx + nx * (y + ny * tz);
+          if (denseSize[x + nx * (y + ny * z)] !== denseSize[targetAt]) {
+            sizeMismatchCount += 1;
+            firstSize ??= { transform, source: [x, y, z], target: [tx, y, tz],
+              sourceSize: denseSize[x + nx * (y + ny * z)], targetSize: denseSize[targetAt] };
+          }
           if (!Object.is(source, target)) { exactMismatchCount += 1;
             first ??= { transform, source: [x, y, z], target: [tx, y, tz], sourceValue: source,
               targetValue: target, absoluteError }; }
@@ -3691,8 +3805,75 @@ async function runGPU(
       }
       console.log(JSON.stringify({ scenario: scenarioId, method: resultMethod,
         phase: "fluid-symmetry-losasso-coarse-phi",
-        metrics: { exactMismatchCount, maximumAbsoluteError, first, rowCount,
+        metrics: { exactMismatchCount, maximumAbsoluteError, first, sizeMismatchCount, firstSize, rowCount,
           rowIdentityHash, rowOriginMinimum, rowOriginMaximum, rowCountsBySize } }));
+    }
+    const pressureDebug = (solver as GPUSolverInstance & { losassoPressureDebug?: {
+      control: GPUBuffer; faces: GPUBuffer; faceGeometry: GPUBuffer; leafHeaders: GPUBuffer;
+      rowPhi: GPUBuffer; ghostDistances: GPUBuffer;
+    } }).losassoPressureDebug;
+    if (pressureDebug) {
+      const controlBytes = await readBufferBinding(device, { buffer: pressureDebug.control }, 32);
+      const control = new Uint32Array(controlBytes.buffer, controlBytes.byteOffset, 8);
+      const faceCount = control[2] ?? 0;
+      const [faceBytes, geometryBytes, headerBytes, phiBytes, ghostBytes] = await Promise.all([
+        readBufferBinding(device, { buffer: pressureDebug.faces }, faceCount * 32),
+        readBufferBinding(device, { buffer: pressureDebug.faceGeometry }, faceCount * 16),
+        readBufferBinding(device, { buffer: pressureDebug.leafHeaders }, (control[1] ?? 0) * 48),
+        readBufferBinding(device, { buffer: pressureDebug.rowPhi }, (control[1] ?? 0) * 16),
+        readBufferBinding(device, { buffer: pressureDebug.ghostDistances }, faceCount * 16),
+      ]);
+      const faceWords = new Uint32Array(faceBytes.buffer, faceBytes.byteOffset, faceCount * 8);
+      const faceFloats = new Float32Array(faceBytes.buffer, faceBytes.byteOffset, faceCount * 8);
+      const geometry = new Uint32Array(geometryBytes.buffer, geometryBytes.byteOffset, faceCount * 4);
+      const headers = new Uint32Array(headerBytes.buffer, headerBytes.byteOffset, headerBytes.byteLength / 4);
+      const phi = new Float32Array(phiBytes.buffer, phiBytes.byteOffset, phiBytes.byteLength / 4);
+      const ghosts = new Uint32Array(ghostBytes.buffer, ghostBytes.byteOffset, faceCount * 4);
+      const row = (face: number) => faceWords[8 * face]!;
+      const rowHeader = (face: number) => {
+        const id = row(face), cell = headers[12 * id]!, size = headers[12 * id + 3]!;
+        return { id, cell, origin: [cell % info.nx, Math.floor(cell / info.nx) % info.ny,
+          Math.floor(cell / (info.nx * info.ny))], size, phi: phi[4 * id] };
+      };
+      const key = (packed: number, x: number, y: number, z: number) => `${packed}:${x}:${y}:${z}`;
+      const byGeometry = new Map<string, number>();
+      for (let face = 0; face < faceCount; face += 1) byGeometry.set(key(
+        geometry[4 * face]!, geometry[4 * face + 1]!, geometry[4 * face + 2]!, geometry[4 * face + 3]!), face);
+      let exactMismatchCount = 0, maximumAbsoluteError = 0;
+      let first: Record<string, unknown> | undefined, worst: Record<string, unknown> | undefined;
+      for (let face = 0; face < faceCount; face += 1) {
+        const packed = geometry[4 * face]!, axis = packed & 3, span = 1 << (packed >>> 2);
+        const x = geometry[4 * face + 1]!, y = geometry[4 * face + 2]!, z = geometry[4 * face + 3]!;
+        const coefficient = faceFloats[8 * face + 4]! * faceFloats[8 * face + 5]!
+          * faceFloats[8 * face + 6]!;
+        for (const [transform, targetPacked, tx, tz] of [
+          ["reflect-x", packed, axis === 0 ? info.nx - x : info.nx - span - x, z],
+          ["reflect-z", packed, x, axis === 2 ? info.nz - z : info.nz - span - z],
+          ["swap-xz", (axis === 0 ? 2 : axis === 2 ? 0 : 1) | (packed & ~3), z, x],
+        ] as const) {
+          const target = byGeometry.get(key(targetPacked, tx, y, tz));
+          if (target === undefined) continue;
+          const targetCoefficient = faceFloats[8 * target + 4]! * faceFloats[8 * target + 5]!
+            * faceFloats[8 * target + 6]!;
+          const absoluteError = Math.abs(coefficient - targetCoefficient);
+          if (!Object.is(coefficient, targetCoefficient)) {
+            exactMismatchCount += 1;
+            const detail = { transform, source: [packed, x, y, z], target: [targetPacked, tx, y, tz],
+              coefficient, targetCoefficient, absoluteError,
+              sourceRow: rowHeader(face), targetRow: rowHeader(target),
+              sourceGhost: Array.from(ghosts.slice(4 * face, 4 * face + 4)),
+              targetGhost: Array.from(ghosts.slice(4 * target, 4 * target + 4)),
+              sourceFace: Array.from(faceWords.slice(8 * face, 8 * face + 8)),
+              targetFace: Array.from(faceWords.slice(8 * target, 8 * target + 8)) };
+            first ??= detail;
+            if (!worst || absoluteError > Number(worst.absoluteError)) worst = detail;
+          }
+          maximumAbsoluteError = Math.max(maximumAbsoluteError, absoluteError);
+        }
+      }
+      console.log(JSON.stringify({ scenario: scenarioId, method: resultMethod,
+        phase: "fluid-symmetry-losasso-face-coefficients",
+        metrics: { faceCount, exactMismatchCount, maximumAbsoluteError, first, worst } }));
     }
     const fineSummaryDebug = solver as GPUSolverInstance & {
       globalFineSummaryDirectory?: GPUBuffer;
@@ -4031,6 +4212,7 @@ async function runGPU(
     gpuPassTimestamps?.byLabel ?? gpuFineTimestamps?.byLabel,
   );
   const diagnosticProjection = solver as GPUSolverInstance & {
+    readCoarseSurfaceTrackerReceipt?(): Promise<Record<string, unknown> | undefined>;
     octreeProjection?: {
       readGlobalFineLevelSetDiagnostics(): Promise<{
         topologyControl: readonly number[];
@@ -4140,7 +4322,7 @@ async function runGPU(
   // surface the raster held rather than refreshed, which is what an apparent
   // two-state flicker looks like from inside the tracker.
   const coarseTrackerReceipt = process.env.FLUID_COARSE_TRACKER_RECEIPT === "1"
-    ? await diagnosticProjection.octreeProjection?.readCoarseSurfaceTrackerReceipt()
+    ? await diagnosticProjection.readCoarseSurfaceTrackerReceipt?.()
     : undefined;
   if (coarseTrackerReceipt) console.log(JSON.stringify({ scenario: scenarioId, method: resultMethod,
     phase: "coarse-tracker-receipt", metrics: coarseTrackerReceipt }));

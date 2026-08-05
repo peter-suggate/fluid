@@ -38,6 +38,8 @@ import { WebGPUOctreeLosassoVelocityMigration } from
   "./webgpu-octree-losasso-velocity-migration";
 import type { WebGPUFineLevelSetBrickSource } from
   "./webgpu-octree-fine-levelset-bricks";
+import type { WebGPUOctreeLosassoCoarsePhiSource } from
+  "./webgpu-octree-losasso-coarse-phi";
 import type { WebGPUOctreeLosassoVelocitySamplerSource } from
   "./webgpu-octree-losasso-velocity-sampler";
 import {
@@ -879,10 +881,21 @@ export class WebGPUOctreeLosassoCoarseBackend {
     this.extensionBand.encodePublication(broker, fine);
   }
 
+  encodeCoarseExtensionBandPublication(
+    broker: PassBroker,
+    coarsePhi: WebGPUOctreeLosassoCoarsePhiSource,
+    generation: number,
+  ): void {
+    this.assertReady();
+    this.extensionBand.encodeCoarsePublication(broker, coarsePhi, generation);
+  }
+
   encodeExtension(broker: PassBroker, advance: number, topologyEpoch: number): boolean {
     this.assertReady();
     return this.extensionBand.encodeOncePerAdvance(broker, advance, topologyEpoch);
   }
+
+  get extensionBandPublished(): boolean { return this.extensionBand.hasPublishedGraph; }
 
   destroy(): void {
     if (this.destroyed) return;

@@ -4,6 +4,7 @@ import test from "node:test";
 import { validateScene } from "../lib/model";
 import { initialFluidBrickUnionBounds } from "../lib/initial-fluid";
 import { getSceneWebGPUSmokeLane } from "../lib/scene-webgpu-smoke-catalog";
+import { sceneCustomHookImplementations } from "../lib/scene-custom-diagnostic-implementations";
 import { createSymmetricExpansionScene, getScenePreset } from "../lib/scenes";
 import { initialOctreeLevelSet } from "../lib/webgpu-octree";
 
@@ -73,6 +74,8 @@ test("symmetric expansion Dawn lane samples every accepted step and gates every 
     maximumWallContactStepSpread: 0,
     circularityEvaluationStart_s: 0.168,
     circularityEvaluationEnd_s: 0.2,
+    frontAdvanceEvaluationEnd_s: 0.2,
+    minimumMeanFrontAdvance_cells: 1,
     maximumAxisDiagonalFrontDifference_cells: 1,
     maximumRadialRmsDeviation_cells: 0.5,
     maximumRadialDeviation_cells: 1,
@@ -132,6 +135,37 @@ test("brick-authored octree bootstrap preserves the exact analytic box SDF and D
   assert.ok(at(8, 7, 8) < 0 && at(8, 8, 8) > 0, "the top face crosses exactly halfway between cell centres");
 });
 
+test("symmetric expansion rejects a stationary front even when every field remains D4 symmetric", () => {
+  const metric = { maximumAbsoluteError: 0, nonFiniteCount: 0 };
+  const observation = (meanRadius_cells: number) => ({
+    volume: metric, velocity: metric, pressure: metric, rhs: metric, diagonal: metric,
+    topology: { ...metric, exactMismatchCount: 0 },
+    frontCircularity: { meanRadius_cells },
+    walls: {
+      negativeX: { touched: false }, positiveX: { touched: false },
+      negativeZ: { touched: false }, positiveZ: { touched: false },
+    },
+  });
+  const checkpoints = (finalRadius: number) => [
+    { time_s: 0.004, evidence: { "fluid-symmetry": observation(8) } },
+    { time_s: 0.2, evidence: { "fluid-symmetry": observation(finalRadius) } },
+  ];
+  const evaluate = (finalRadius: number) => sceneCustomHookImplementations["fluid-symmetry"].evaluate({
+    parameters: {
+      maximumVolumeAbsoluteError: 0, maximumVelocityAbsoluteError_m_s: 0,
+      maximumPressureAbsoluteError: 0, maximumRhsAbsoluteError: 0,
+      maximumDiagonalAbsoluteError: 0, minimumCheckpointCount: 2,
+      maximumWallContactStepSpread: 0, requireExactTopology: true,
+      requireAllWallsReached: false, frontAdvanceEvaluationEnd_s: 0.2,
+      minimumMeanFrontAdvance_cells: 1,
+    },
+    selectedMethods: ["octree"],
+    getMethod: () => ({ available: [], diagnostics: { field: { checkpoints: checkpoints(finalRadius) } } }),
+  } as never);
+  assert.equal(evaluate(8).find(({ id }) => id === "octree.front-advance")?.passed, false);
+  assert.equal(evaluate(9.1).find(({ id }) => id === "octree.front-advance")?.passed, true);
+});
+
 test("symmetric expansion has an isolated Dawn reproduction command", () => {
   const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
     scripts: Record<string, string>;
@@ -142,10 +176,60 @@ test("symmetric expansion has an isolated Dawn reproduction command", () => {
   assert.match(command, /FLUID_CHECKPOINT_EVERY_S=0\.004/);
   assert.match(command, /FLUID_EXPECT_EXACT_STEPS=250/);
   assert.match(command, /FLUID_STABILITY_ENVELOPE=1/);
+  assert.match(command, /FLUID_WEBGPU_SMOKE_TIMEOUT_MS=600000/,
+    "per-step D4 field readbacks need a larger allowance than the shipping performance lane");
   assert.match(command, /FLUID_OCTREE_INTERFACE_BAND=4/);
   assert.match(command, /FLUID_OCTREE_GLOBAL_FINE_FACTOR=4/);
   assert.match(command, /FLUID_GLOBAL_FINE_GENERATION_TRANSITION=1/);
   assert.match(command, /run-webgpu-smoke-isolated\.ts$/);
+
+  const coarseOnlyCommand = packageJson.scripts["test:webgpu:symmetric-expansion:coarse-only"];
+  assert.ok(coarseOnlyCommand);
+  assert.match(coarseOnlyCommand, /FLUID_LANE=coarse-only/);
+  assert.match(coarseOnlyCommand, /FLUID_EXPECT_EXACT_STEPS=250/);
+  assert.match(coarseOnlyCommand, /FLUID_OCTREE_INTERFACE_BAND=4/);
+  assert.match(coarseOnlyCommand, /FLUID_OCTREE_GLOBAL_FINE_FACTOR=1/);
+  assert.doesNotMatch(coarseOnlyCommand, /FLUID_GLOBAL_FINE_GENERATION_TRANSITION=1/,
+    "coarse-only Dawn validation must not request a separate fine publication");
+
+  const coarseOnlyLane = getSceneWebGPUSmokeLane("symmetric-expansion", "coarse-only");
+  assert.equal(coarseOnlyLane.stop.exactSteps, 250);
+  assert.equal(coarseOnlyLane.methods[0]?.overrides.globalFineLevelSetFactor, "1");
+  assert.equal(coarseOnlyLane.diagnostics.some(({ id }) => id === "settling"), false,
+    "the coarse symmetry lane must not require mechanical-energy evidence it does not collect");
+  assert.equal(coarseOnlyLane.hooks[0]?.parameters?.minimumCheckpointCount, 250);
+  assert.equal(coarseOnlyLane.hooks[0]?.parameters?.requireAllWallsReached, true);
+  assert.equal(coarseOnlyLane.hooks[0]?.parameters?.maximumWallContactStepSpread, 0);
+  assert.equal(coarseOnlyLane.collect.raster, "initial-final");
+  assert.equal(coarseOnlyLane.hooks[0]?.parameters?.frontAdvanceEvaluationEnd_s, 0.2);
+  assert.equal(coarseOnlyLane.hooks[0]?.parameters?.minimumMeanFrontAdvance_cells, 1);
+  assert.equal(coarseOnlyLane.hooks[0]?.parameters?.circularityEvaluationStart_s, 0.168,
+    "factor one must pass the same physical front window as the factor-4 baseline");
+
+  const band2Command = packageJson.scripts["test:webgpu:symmetric-expansion:band2"];
+  assert.ok(band2Command);
+  assert.match(band2Command, /FLUID_LANE=default/);
+  assert.match(band2Command, /FLUID_EXPECT_EXACT_STEPS=250/);
+  assert.match(band2Command, /FLUID_STABILITY_ENVELOPE=1/);
+  assert.match(band2Command, /FLUID_MAXIMUM_LEAF_SIZE=32/,
+    "the accuracy A/B must differ from the established scene gate only by band width");
+  assert.match(band2Command, /FLUID_OCTREE_INTERFACE_BAND=2/);
+  assert.match(band2Command, /FLUID_OCTREE_GLOBAL_FINE_FACTOR=4/);
+  assert.match(band2Command, /FLUID_WEBGPU_SMOKE_TIMEOUT_MS=600000/,
+    "per-step D4 field readbacks need a larger allowance than the shipping performance lane");
+
+  for (const band of [2, 4]) {
+    const performanceCommand = packageJson.scripts[
+      `test:webgpu:symmetric-expansion:band${band}-performance`
+    ];
+    assert.ok(performanceCommand);
+    assert.match(performanceCommand, /FLUID_LANE=performance/);
+    assert.match(performanceCommand, /FLUID_EXPECT_EXACT_STEPS=62/);
+    assert.match(performanceCommand, /FLUID_PERFORMANCE_PROFILE=1/);
+    assert.match(performanceCommand, new RegExp(`FLUID_OCTREE_INTERFACE_BAND=${band}`));
+    assert.match(performanceCommand, /FLUID_MAXIMUM_LEAF_SIZE=32/,
+      "the performance A/B must use the established scene hierarchy");
+  }
 
   const fineCommand = packageJson.scripts["test:webgpu:symmetric-expansion:fine"];
   assert.ok(fineCommand);

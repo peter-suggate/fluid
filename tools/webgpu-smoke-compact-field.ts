@@ -363,7 +363,9 @@ function finePhiAt(snapshot: CompactOctreeFieldSnapshot, position: readonly [num
     ? value : undefined;
 }
 
-function coarsePhiAt(snapshot: Pick<CompactOctreeFieldSnapshot, "coarseDirectory">,
+function coarsePhiAt(snapshot: Pick<CompactOctreeFieldSnapshot, "coarseDirectory"> & {
+    readonly coarseGradients?: Float32Array;
+  },
   position: readonly [number, number, number]): { phi: number; positiveAir: boolean } {
   const words = snapshot.coarseDirectory;
   const rowCount = words[2], maximumLeafSize = words[3];
@@ -372,6 +374,18 @@ function coarsePhiAt(snapshot: Pick<CompactOctreeFieldSnapshot, "coarseDirectory
   const q = position.map((value) => Math.floor(value / physicalCellSize));
   if (q.some((value, axis) => value < 0 || value >= dimensions[axis])) {
     throw new Error("Compact octree QA sample lies outside the coarse publication");
+  }
+  const actualCapacity = (words.length - 8) / 8;
+  const volume = dimensions[0] * dimensions[1] * dimensions[2];
+  if ((words[1] & 0x4000_0000) !== 0 && actualCapacity >= volume) {
+    const cell = q[0]! + dimensions[0] * (q[1]! + dimensions[1] * q[2]!);
+    const base = 8 + 8 * (actualCapacity - volume + cell);
+    const value = finiteFloat(words, base + 2);
+    const required = OCTREE_COARSE_PHI_FLAG.valid | OCTREE_COARSE_PHI_FLAG.finite;
+    if (words[base] === cell + 1 && words[base + 1] === 1
+      && (words[base + 5] & required) === required && Number.isFinite(value)) {
+      return { phi: value, positiveAir: false };
+    }
   }
   for (let size = 1; size <= maximumLeafSize; size *= 2) {
     const origin = q.map((value) => Math.floor(value / size) * size);
@@ -392,6 +406,18 @@ function coarsePhiAt(snapshot: Pick<CompactOctreeFieldSnapshot, "coarseDirectory
         if ((words[base + 5] & OCTREE_COARSE_PHI_FLAG.valid) === 0 || !Number.isFinite(value)) {
           throw new Error("Compact octree QA encountered an invalid containing coarse leaf");
         }
+        const row = words[base + 6];
+        const gradients = snapshot.coarseGradients;
+        if (gradients && 4 * row + 3 < gradients.length) {
+          const gx = gradients[4 * row]!, gy = gradients[4 * row + 1]!, gz = gradients[4 * row + 2]!;
+          const valid = gradients[4 * row + 3] === 1;
+          if (valid && Number.isFinite(gx) && Number.isFinite(gy) && Number.isFinite(gz)) {
+            const centre = origin.map((coordinate) => (coordinate + 0.5 * size) * physicalCellSize);
+            const affine = value + gx * (position[0] - centre[0]!)
+              + gy * (position[1] - centre[1]!) + gz * (position[2] - centre[2]!);
+            if (Number.isFinite(affine)) return { phi: affine, positiveAir: false };
+          }
+        }
         return { phi: value, positiveAir: false };
       }
     }
@@ -409,6 +435,7 @@ export function reconstructCoarseOnlyOctreeOccupancyField(
   coarseDirectory: Uint32Array,
   generation: number,
   dimensions: readonly [number, number, number],
+  coarseGradients?: Float32Array,
 ): { field: Float32Array; coarseSamples: number; positiveAirSamples: number } {
   if (coarseDirectory.length < 8 || coarseDirectory[0] !== OCTREE_POWER_COARSE_LEVELSET_VALID) {
     throw new Error(`Coarse-only octree QA publication is not valid: state=${coarseDirectory[0] ?? "missing"}, generation=${coarseDirectory[1] ?? "missing"}, rows=${coarseDirectory[2] ?? "missing"}`);
@@ -450,7 +477,7 @@ export function reconstructCoarseOnlyOctreeOccupancyField(
   }
   const field = new Float32Array(dimensions[0] * dimensions[1] * dimensions[2]);
   let positiveAirSamples = 0;
-  const snapshot = { coarseDirectory };
+  const snapshot = { coarseDirectory, coarseGradients };
   for (let z = 0; z < dimensions[2]; z += 1) {
     for (let y = 0; y < dimensions[1]; y += 1) {
       for (let x = 0; x < dimensions[0]; x += 1) {

@@ -367,7 +367,12 @@ fn writeFace(faceId: u32, row: u32, neighbor: OctreeOwnerPageLookupResult, axis:
   let physicalArea = select(select(params.cellSize.x * params.cellSize.y,
       params.cellSize.x * params.cellSize.z, axis == 1u),
       params.cellSize.y * params.cellSize.z, axis == 0u) * f32(subSize * subSize);
-  let distance = 0.5 * (f32(rowSize) + f32(neighbor.size)) * params.cellSize[axis];
+  // A missing compact row is the bordering air cell used by the pressure
+  // Dirichlet condition. Stage it at this wet row's own size: owner lookup can
+  // legally return a dry placeholder with size zero, which used to make only
+  // one face orientation half a cell wide before the accepted ghost refresh.
+  let neighborSize=select(rowSize,neighbor.size,neighborRow!=INVALID&&neighbor.size>0u);
+  let distance = 0.5 * (f32(rowSize) + f32(neighborSize)) * params.cellSize[axis];
   // No compact positive row denotes the free-surface Dirichlet side. The
   // geometric centre distance is a conservative staged value; the dynamics
   // producer replaces it with its phi-clamped ghost-fluid distance.
@@ -392,7 +397,10 @@ fn writeNegativeBoundaryFace(faceId: u32, row: u32, neighborSize: u32, axis: u32
   let physicalArea = select(select(params.cellSize.x * params.cellSize.y,
       params.cellSize.x * params.cellSize.z, axis == 1u),
       params.cellSize.y * params.cellSize.z, axis == 0u) * f32(subSize * subSize);
-  let distance = 0.5 * (f32(rowSize) + f32(neighborSize)) * params.cellSize[axis];
+  // This entry point emits a face with no compact neighbor. Its pressure-air
+  // dual is therefore one row width regardless of a dry owner placeholder's
+  // reported size. Keep the parameter for the topology probe ABI above.
+  let distance = f32(rowSize) * params.cellSize[axis];
   // High bit records that the compact row is geometrically on the positive
   // side. Projection uses it to preserve the +axis pressure-gradient sign.
   let closedBoundary = geometry[axis] == 0u

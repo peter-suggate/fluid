@@ -4,6 +4,21 @@ import test from "node:test";
 
 const read = (path: string) => readFileSync(new URL(path, import.meta.url), "utf8");
 
+test("Losasso compact coarse-only ghost predicates are valid WGSL boolean expressions", () => {
+  const source = read("../lib/webgpu-octree-losasso-coarse-phi.wgsl.ts");
+  const coarseOnly = source.slice(source.indexOf("octreeLosassoCoarseOnlyPhiWGSL"),
+    source.indexOf("octreeLosassoCoarsePhiWGSL"));
+  assert.match(coarseOnly, /let negativeNearby=.*&&.*;[\s\S]*let positiveNearby=.*&&.*;[\s\S]*if\(negativeNearby\|\|positiveNearby\)/,
+    "Dawn must not have to parse mixed conjunction and disjunction operators in one expression");
+  assert.match(coarseOnly, /let contactEnabled=.*;let separated=.*;let sampledAir=.*&&.*;[\s\S]*if\(contactEnabled&&\(separated\|\|sampledAir\)\)/,
+    "the separated-or-air classification should give each conjunction an explicit name");
+  assert.match(coarseOnly, /vec3f\(vec3u\(leaf\.originX,leaf\.originY,leaf\.originZ\)\)/,
+    "WGSL requires an explicit vector conversion from integer seed origins");
+  assert.match(coarseOnly,
+    /let transported=trackerPhi\(centre\)[\s\S]*nextGradient\[row\]=vec4f\(gradient,1\)/,
+    "compact rows must be a restriction of the transported dense coarse lattice");
+});
+
 test("Losasso ghost conditioning reconstructs its dual from geometry", () => {
   const source = read("../lib/webgpu-octree-losasso-coarse-phi.wgsl.ts");
   const publish = source.slice(source.indexOf("fn publishLosassoGhostDistances"));
@@ -14,6 +29,19 @@ test("Losasso ghost conditioning reconstructs its dual from geometry", () => {
   assert.match(publish, /let faceToAir=\.5\*dual/);
   assert.match(publish, /theta=clamp\(-liquid\/\(airPhi-liquid\),1e-4,1\.\)/,
     "idempotence, not a raised theta floor, bounds repeated conditioning");
+});
+
+test("Losasso candidate faces stage missing air neighbors at one wet-row width", () => {
+  const source = read("../lib/webgpu-octree-losasso-backend.wgsl.ts");
+  const positive = source.slice(source.indexOf("fn writeFace"),
+    source.indexOf("fn writeNegativeBoundaryFace"));
+  const negative = source.slice(source.indexOf("fn writeNegativeBoundaryFace"),
+    source.indexOf("fn denseSolid"));
+  assert.match(positive,
+    /let neighborSize=select\(rowSize,neighbor\.size,neighborRow!=INVALID&&neighbor\.size>0u\)/,
+    "a dry positive-side owner placeholder must not create a half-cell pressure dual");
+  assert.match(negative, /let distance = f32\(rowSize\) \* params\.cellSize\[axis\]/,
+    "a missing negative-side pressure neighbor must stage the same full dual");
 });
 
 test("Losasso coarse phi publishes through a stable arena binding", () => {
@@ -82,6 +110,93 @@ test("Losasso W7 extension closes the third diagonal MAC support layer", () => {
   assert.match(shader, /dilateAirFace\(linearInvocation\(g,l\),6u,7u\)/);
   assert.match(host, /run(?:Indirect)?\("dilateLosassoAirBand7"/,
     "W4 transport plus a three-axis trilinear corner requires all three closure layers");
+});
+
+test("Losasso factor-one transport has no fine-page dependency", () => {
+  const octree = read("../lib/webgpu-octree.ts");
+  const exchange = read("../lib/webgpu-octree-losasso-coarse-phi.ts");
+  const extension = read("../lib/webgpu-octree-losasso-extension-band.wgsl.ts");
+  assert.match(octree,
+    /coarseOnlySurfaceTracking && this\.coarseDynamics\.backend === "losasso"[\s\S]*encodeCoarseOnly[\s\S]*encodeCoarseExtensionBandPublication/,
+    "factor one must cut over before the global-fine transaction");
+  const coarseOnly = exchange.slice(exchange.indexOf("  encodeCoarseOnly("),
+    exchange.indexOf("  get coarseOnlyPublishedGeneration"));
+  assert.doesNotMatch(coarseOnly, /WebGPUFineLevelSetBrickSource|metadata|worklist|samples/,
+    "compact transport must not smuggle a fine-page authority into factor one");
+  assert.match(coarseOnly, /velocity\.control[\s\S]*input\.coarseControl/,
+    "velocity interpolation and pressure row counts are distinct authorities");
+  assert.match(coarseOnly,
+    /this\.coarseOnlyNextGradient, input\.faceGeometry, velocity\.extendedVelocity/,
+    "factor-one ghost conditioning must index the accepted pressure-face geometry");
+  assert.doesNotMatch(coarseOnly,
+    /this\.coarseOnlyNextGradient, velocity\.faceGeometry, velocity\.extendedVelocity/,
+    "W7 extension geometry is not ordered by pressure face id");
+  assert.match(read("../lib/webgpu-octree-losasso-coarse-phi.wgsl.ts"),
+    /else if\(liquid<0\.&&\(p\.closed&2u\)!=0u\)\{theta=1\.;distance=dual;face\.inverseDistance=1\.\/dual;flags=1u;\}/,
+    "paper mode must place p_air at every non-solid missing neighbour without a fine-sample proof");
+  assert.match(read("../lib/webgpu-octree-losasso-coarse-phi.wgsl.ts"),
+    /let rowSize=headers\[face\.negativeRow\]\.size;let dual=f32\(rowSize\)\*p\.velocityCellSize/,
+    "factor-one cell-centred air must use the accepted wet-row centre distance");
+  assert.match(read("../lib/webgpu-octree-losasso-coarse-phi.wgsl.ts"),
+    /previousGradient\[row\]\.w==1\.[\s\S]*nextGradient\[row\]=vec4f\(gradient,1\)/,
+    "coarse-only transport must bootstrap an absent gradient and explicitly publish its validity");
+  assert.match(exchange,
+    /words\.set\(\[1, generation, Math\.ceil\(this\.plan\.arenaBytes \/ 4 \/ 64\), 0\], 12\)/,
+    "factor-one must publish the complete arena, including its trailing row hash directory");
+  assert.match(read("../lib/webgpu-octree-fine-seed-adapter.ts"),
+    /gradient=coarseGradientAt\(row\)/,
+    "recurring topology seeds must retain the coarse affine gradient");
+  assert.match(extension,
+    /coarsePhiDirectory\[1\]&0x40000000u[\s\S]*capacity-volume\+linearCell/,
+    "coarse W7 support must sample the transported dense complement rather than pressure-row flags");
+  assert.match(extension,
+    /let crossing=[\s\S]*let close=[\s\S]*if\(!crossing&&!close\)/,
+    "coarse W7 seeds must cover signed crossings and the adjacent one-cell phi band");
+  const tracker = read("../lib/webgpu-octree-coarse-summary.ts");
+  assert.match(tracker,
+    /sum_i\(max\(u-a_i,0\)\^2\)=h\^2[\s\S]*sqrt\(discriminant\)/,
+    "coarse redistance must solve the Euclidean upwind Eikonal equation");
+  assert.match(tracker,
+    /fn quantizePhi[\s\S]*let predicted=quantizePhi[\s\S]*let value=quantizePhi/,
+    "coarse transport and volume correction must retain exact D4 phi pairs");
+  for (const layer of [2, 3, 4, 5, 6, 7]) {
+    assert.match(extension, new RegExp(`dilateLosassoAirBand${layer}`),
+      `coarse support must publish deterministic graph layer ${layer}`);
+  }
+  const readyFlipStart = octree.indexOf("  encodeReadyTopologyFlip(");
+  const readyFlip = octree.slice(readyFlipStart,
+    octree.indexOf("\n  finishTopologyCandidate()", readyFlipStart));
+  assert.doesNotMatch(readyFlip, /encodeCoarseExtensionBandPublication/,
+    "a ready flip must retain the already-extended W7 graph after remapping wet ids");
+  const surfaceStart = octree.indexOf("  encodeSurface(");
+  const coarseSurfaceStart = octree.indexOf(
+    "if (this.coarseOnlySurfaceTracking && this.coarseDynamics.backend === \"losasso\")",
+    surfaceStart);
+  const coarseSurface = octree.slice(coarseSurfaceStart,
+    octree.indexOf("if (this.globalFineSeeds", coarseSurfaceStart));
+  assert.match(coarseSurface,
+    /if \(dt_s === 0\)[\s\S]*encodeCoarseExtensionBandPublication[\s\S]*backend\.encodeExtension\(/,
+    "only the already-projected t=0 checkpoint may publish and extend a graph during surface setup");
+  assert.match(coarseSurface,
+    /if \(dt_s > 0\)[\s\S]*coarseOnlySummary\?\.encode/,
+    "the already-published analytic t=0 tracker must not record a false missing-velocity advance");
+  assert.doesNotMatch(coarseSurface,
+    /const advanceSerial[\s\S]*backend\.encodeExtension\(/,
+    "a live factor-one graph publication must not consume S3e before projection");
+  const losassoStepStart = octree.indexOf("  private encodeLosasso(");
+  const losassoStep = octree.slice(losassoStepStart,
+    octree.indexOf("\n  /** Publish lazily allocated diagnostic textures", losassoStepStart));
+  assert.match(losassoStep,
+    /encodeProjection[\s\S]*coarseOnlySurfaceTracking[\s\S]*encodeCoarseExtensionBandPublication[\s\S]*encodeExtension[\s\S]*powerAdvancingPressureSteps \+= 1/,
+    "factor one must rebuild and extend from the current projection before advancing the host serial");
+});
+
+test("Losasso factor-one permits a held surface only for its cold publication", () => {
+  const source = readFileSync(new URL("../lib/webgpu-octree-coarse-summary.ts", import.meta.url), "utf8");
+  assert.match(source, /losassoMode\(\)&&atomicLoad\(&state\[19\]\)==0u/,
+    "only the first encoded publication may break the cold phi/velocity dependency cycle");
+  assert.doesNotMatch(source, /trackerRunnable\(\)->bool\{[^}]*state\[16\]/,
+    "the persistent initialized-bank bit must not excuse missing transport forever");
 });
 
 test("Losasso frontier cannot accept a live-to-empty topology transition", () => {

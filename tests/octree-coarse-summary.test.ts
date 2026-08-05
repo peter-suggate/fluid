@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { scenePresets } from "../lib/scenes";
 import { planOctreeCoarseSummary } from "../lib/webgpu-octree-coarse-summary";
 
 test("factor-one coarse summary uses B4 nodes and bounded sparse entries", () => {
@@ -18,4 +19,21 @@ test("coarse summary entry capacity is bounded by live-row ancestry", () => {
   assert.ok(plan.entryCapacity <= 128 * plan.levelDimensions.length);
   assert.ok(plan.entryCapacity < plan.hierarchyKeyCapacity);
   assert.ok(plan.directoryPageCapacity <= plan.entryCapacity);
+});
+
+test("every authored scene fits the coarse-only surface tracker catalog budget", () => {
+  const maximumBytes = 256 * 1_024 * 1_024;
+  for (const preset of scenePresets) {
+    const scene = preset.create();
+    const h = scene.voxelDomain.finestCellSize_m;
+    const dimensions = [
+      Math.max(8, Math.round(scene.container.width_m / h)),
+      Math.max(8, Math.round(scene.container.height_m / h)),
+      Math.max(8, Math.round(scene.container.depth_m / h)),
+    ] as const;
+    const domainVolume = dimensions[0] * dimensions[1] * dimensions[2];
+    const plan = planOctreeCoarseSummary(dimensions, domainVolume);
+    assert.ok(plan.allocatedBytes <= maximumBytes,
+      `${preset.id} needs ${(plan.allocatedBytes / 1_048_576).toFixed(1)} MiB for factor-one tracking`);
+  }
 });

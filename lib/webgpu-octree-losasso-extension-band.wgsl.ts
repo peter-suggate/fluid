@@ -36,6 +36,7 @@ struct FineLookupParams{brickDimensions:vec3u,brickResolution:u32,sampleDimensio
 @group(0)@binding(17)var<storage,read_write>geometricClaims:array<atomic<u32>>;
 @group(0)@binding(18)var<storage,read_write>denseWetFace:array<atomic<u32>>;
 @group(0)@binding(19)var<storage,read_write>liveFaceDispatch:array<u32>;
+@group(0)@binding(20)var<storage,read>coarsePhiDirectory:array<u32>;
 fn fineParams()->FineLookupParams{return FineLookupParams(p.brickDimensions,p.brickResolution,
  p.sampleDimensions,p.samplesPerBrick,p.domainOrigin,p.fineCellWidth,
  p.fineAuthority.x,p.fineAuthority.y,p.fineAuthority.z,p.fineAuthority.w);}
@@ -170,6 +171,33 @@ fn publishLosassoAirBandFaces(@builtin(workgroup_id)group:vec3u,@builtin(local_i
  let layer=min(p.band.w,max(1u,u32(ceil(abs(sample.value)/p.velocityOriginCell.w))));
  appendAirFace(vec4u(axis,faceQ),vec4u(axis,ACTIVE,bitcast<u32>(abs(sample.value)),layer));}}
 
+fn coarsePhi(position:vec3f)->PhiSample{
+ let dimensions=p.velocityDimensions;let volume=dimensions.x*dimensions.y*dimensions.z;
+ if(arrayLength(&coarsePhiDirectory)<8u||coarsePhiDirectory[0]!=0x80000000u
+  ||(coarsePhiDirectory[1]&0x40000000u)==0u){return PhiSample(0.,0u);}
+ let cell=vec3i(floor(position));if(any(cell<vec3i(0))||any(cell>=vec3i(dimensions))){return PhiSample(0.,0u);}let q=vec3u(cell);
+ let capacity=(arrayLength(&coarsePhiDirectory)-8u)/8u;if(capacity<volume){return PhiSample(0.,0u);}
+ let linearCell=q.x+dimensions.x*(q.y+dimensions.y*q.z);let entry=8u+8u*(capacity-volume+linearCell);
+ if(entry+5u>=arrayLength(&coarsePhiDirectory)||coarsePhiDirectory[entry]!=linearCell+1u
+  ||coarsePhiDirectory[entry+1u]!=1u||(coarsePhiDirectory[entry+5u]&9u)!=9u){return PhiSample(0.,0u);}
+ let value=bitcast<f32>(coarsePhiDirectory[entry+2u]);return PhiSample(value,select(0u,1u,finite(value)));}
+
+@compute @workgroup_size(64)
+fn publishLosassoCoarseAirBandFaces(@builtin(workgroup_id)group:vec3u,@builtin(local_invocation_index)lane:u32){
+ let d=p.velocityDimensions;let countX=(d.x+1u)*d.y*d.z;let countY=d.x*(d.y+1u)*d.z;let countZ=d.x*d.y*(d.z+1u);
+ let work=linearInvocation(group,lane);if(work>=countX+countY+countZ){return;}var axis=0u;var q=vec3u(0);var code=work;
+ if(code<countX){q.x=code%(d.x+1u);code/=d.x+1u;q.y=code%d.y;q.z=code/d.y;}
+ else{code-=countX;axis=1u;if(code<countY){q.x=code%d.x;code/=d.x;q.y=code%(d.y+1u);q.z=code/(d.y+1u);}
+  else{code-=countY;axis=2u;q.x=code%d.x;code/=d.x;q.y=code%d.y;q.z=code/d.y;}}
+ var centre=vec3f(q);for(var component=0u;component<3u;component+=1u){if(component!=axis){centre[component]+=.5;}}
+ var lowPoint=centre;var highPoint=centre;lowPoint[axis]-=.25;highPoint[axis]+=.25;
+ let low=coarsePhi(lowPoint);let high=coarsePhi(highPoint);
+ let crossing=low.valid!=0u&&high.valid!=0u&&((low.value<0.)!=(high.value<0.));
+ let close=(low.valid!=0u&&abs(low.value)<=p.velocityOriginCell.w)
+  ||(high.valid!=0u&&abs(high.value)<=p.velocityOriginCell.w);
+ if(!crossing&&!close){return;}
+ appendAirFace(vec4u(axis,q),vec4u(axis,ACTIVE,0u,1u));}
+
 @compute @workgroup_size(1)
 fn prepareLosassoBandDispatch(){let count=min(atomicLoad(&control[2]),p.band.x);
  liveFaceDispatch[0]=(count+63u)/64u;liveFaceDispatch[1]=1u;liveFaceDispatch[2]=1u;}
@@ -187,6 +215,9 @@ fn dilateAirFace(id:u32,sourceLayer:u32,targetLayer:u32){let count=min(atomicLoa
   else{if(neighbor[c]>=upper[c]){inDomain=false;}else{neighbor[c]+=1u;}}
   if(inDomain){let proposed=vec4u(axis,neighbor);if(exactCompact(axis,neighbor)==INVALID){
    appendAirFace(proposed,vec4u(axis,ACTIVE,bitcast<u32>(f32(targetLayer)*p.velocityOriginCell.w),targetLayer));}}}}
+@compute @workgroup_size(64)fn dilateLosassoAirBand2(@builtin(workgroup_id)g:vec3u,@builtin(local_invocation_index)l:u32){dilateAirFace(linearInvocation(g,l),1u,2u);}
+@compute @workgroup_size(64)fn dilateLosassoAirBand3(@builtin(workgroup_id)g:vec3u,@builtin(local_invocation_index)l:u32){dilateAirFace(linearInvocation(g,l),2u,3u);}
+@compute @workgroup_size(64)fn dilateLosassoAirBand4(@builtin(workgroup_id)g:vec3u,@builtin(local_invocation_index)l:u32){dilateAirFace(linearInvocation(g,l),3u,4u);}
 @compute @workgroup_size(64)fn dilateLosassoAirBand5(@builtin(workgroup_id)g:vec3u,@builtin(local_invocation_index)l:u32){dilateAirFace(linearInvocation(g,l),4u,5u);}
 @compute @workgroup_size(64)fn dilateLosassoAirBand6(@builtin(workgroup_id)g:vec3u,@builtin(local_invocation_index)l:u32){dilateAirFace(linearInvocation(g,l),5u,6u);}
 @compute @workgroup_size(64)fn dilateLosassoAirBand7(@builtin(workgroup_id)g:vec3u,@builtin(local_invocation_index)l:u32){dilateAirFace(linearInvocation(g,l),6u,7u);}

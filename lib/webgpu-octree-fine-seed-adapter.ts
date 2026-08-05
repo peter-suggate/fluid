@@ -111,6 +111,8 @@ export interface OctreeFineSeedAdapterSource extends OctreeFineSeedLeafResources
 export interface OctreeFineSeedAdapterCoarsePhiSource {
   /** One `{phi, minimumPhi, maximumPhi, flags}` record per compact row. */
   readonly values: GPUBuffer;
+  /** One `{gradient.xyz, valid}` affine reconstruction per compact row. */
+  readonly gradients?: GPUBuffer;
   /** Power-coarse publication control; words 2/11 are row count/valid. */
   readonly control: GPUBuffer;
 }
@@ -348,6 +350,7 @@ export class WebGPUOctreeFineSeedAdapter {
       { binding: 11, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
       { binding: 12, visibility: GPUShaderStage.COMPUTE,
         texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
+      { binding: 13, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
     ] });
     this.pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [this.layout] });
     this.selectLayout = device.createBindGroupLayout({ label: "Octree fine-seed candidate selection layout", entries: [
@@ -428,6 +431,7 @@ export class WebGPUOctreeFineSeedAdapter {
       {binding:10,resource:{buffer:this.coarsePhi?.values??this.bindingSentinel}},
       {binding:11,resource:{buffer:this.coarsePhi?.control??this.bindingSentinel}},
       {binding:12,resource:this.bootstrapLevelSet.createView({dimension:"3d"})},
+      {binding:13,resource:{buffer:this.coarsePhi?.gradients??this.bindingSentinel}},
     ] });}
 
   /** Routes leaf motion to the accepted packed structured-velocity bank. */
@@ -521,6 +525,7 @@ struct Params { dimsCapacity:vec4u, selection:vec4u, cellHalo:vec4f, change:vec4
 struct CoarsePhi { phi:f32, minimumPhi:f32, maximumPhi:f32, flags:u32 }
 @group(0) @binding(10) var<storage,read> coarsePhi:array<CoarsePhi>;
 @group(0) @binding(11) var<storage,read> coarseControl:array<u32>;
+@group(0) @binding(13) var<storage,read> coarseGradient:array<vec4f>;
 const INVALID=0xffffffffu;const CORE=${OCTREE_FINE_SEED_STATE.core}u;const HALO=${OCTREE_FINE_SEED_STATE.halo}u;const LIVE=${OCTREE_FINE_SEED_STATE.live}u;
 const COARSE_VALID=${OCTREE_COARSE_PHI_FLAG.valid}u;const COARSE_FINITE=${OCTREE_COARSE_PHI_FLAG.finite}u;
 fn dims()->vec3u{return params.dimsCapacity.xyz;}
@@ -558,6 +563,11 @@ fn coarsePublicationValid()->bool{return arrayLength(&coarseControl)>=12u&&coars
 fn coarseRowValid(row:u32)->bool{return coarsePublicationValid()&&row<coarseControl[2]
   &&row<arrayLength(&coarsePhi)&&(coarsePhi[row].flags&(COARSE_VALID|COARSE_FINITE))==(COARSE_VALID|COARSE_FINITE)
   &&finite(coarsePhi[row].phi)&&finite(coarsePhi[row].minimumPhi)&&finite(coarsePhi[row].maximumPhi);}
+fn coarseGradientAt(row:u32)->vec3f{
+  if(row>=arrayLength(&coarseGradient)){return vec3f(0.0);}
+  let record=coarseGradient[row];
+  return select(vec3f(0.0),record.xyz,record.w==1.0&&finite(record.x)&&finite(record.y)&&finite(record.z));
+}
 fn liveRow(row:u32,header:LeafHeader)->bool{
   return header.cell<cellCount()&&structuredVelocityPublicationValid()
     &&row<structuredVelocityControl[2];
@@ -576,7 +586,7 @@ fn structuredVelocityRowValid(row:u32)->bool{
 }
 @compute @workgroup_size(64) fn buildFineSeedLeaves(@builtin(global_invocation_id) gid:vec3u,
  @builtin(num_workgroups) nwg:vec3u){let lanes=max(1u,nwg.x*64u);let liveRows=min(params.dimsCapacity.w,structuredVelocityControl[2]);
- for(var row=gid.x;row<liveRows&&row<arrayLength(&leafHeaders)&&row<arrayLength(&fineSeedLeaves);row+=lanes){let header=leafHeaders[row];if(header.size==0u||!liveRow(row,header)||!structuredVelocityRowValid(row)){fineSeedLeaves[row].flags=0u;continue;}let origin=coord(header.cell);let centre=vec3f(origin)+vec3f(0.5*f32(header.size));let coarse=coarseRowValid(row);if(!coarse&&params.selection.z==0u){continue;}var centrePhi=0.0;var minimumPhi=0.0;var maximumPhi=0.0;var gradient=vec3f(0.0);if(coarse){let sample=coarsePhi[row];centrePhi=sample.phi;minimumPhi=sample.minimumPhi;maximumPhi=sample.maximumPhi;}else{centrePhi=bootstrapPhi(centre);gradient=vec3f(0.5*(bootstrapPhi(centre+vec3f(1,0,0))-bootstrapPhi(centre-vec3f(1,0,0))),0.5*(bootstrapPhi(centre+vec3f(0,1,0))-bootstrapPhi(centre-vec3f(0,1,0))),0.5*(bootstrapPhi(centre+vec3f(0,0,1))-bootstrapPhi(centre-vec3f(0,0,1))));let radius=0.5*f32(header.size)*length(params.cellHalo.xyz);minimumPhi=centrePhi-radius;maximumPhi=centrePhi+radius;}let openTop=bitcast<u32>(params.damDimensions.w)!=0u;
+ for(var row=gid.x;row<liveRows&&row<arrayLength(&leafHeaders)&&row<arrayLength(&fineSeedLeaves);row+=lanes){let header=leafHeaders[row];if(header.size==0u||!liveRow(row,header)||!structuredVelocityRowValid(row)){fineSeedLeaves[row].flags=0u;continue;}let origin=coord(header.cell);let centre=vec3f(origin)+vec3f(0.5*f32(header.size));let coarse=coarseRowValid(row);if(!coarse&&params.selection.z==0u){continue;}var centrePhi=0.0;var minimumPhi=0.0;var maximumPhi=0.0;var gradient=vec3f(0.0);if(coarse){let sample=coarsePhi[row];centrePhi=sample.phi;minimumPhi=sample.minimumPhi;maximumPhi=sample.maximumPhi;gradient=coarseGradientAt(row);}else{centrePhi=bootstrapPhi(centre);gradient=vec3f(0.5*(bootstrapPhi(centre+vec3f(1,0,0))-bootstrapPhi(centre-vec3f(1,0,0))),0.5*(bootstrapPhi(centre+vec3f(0,1,0))-bootstrapPhi(centre-vec3f(0,1,0))),0.5*(bootstrapPhi(centre+vec3f(0,0,1))-bootstrapPhi(centre-vec3f(0,0,1))));let radius=0.5*f32(header.size)*length(params.cellHalo.xyz);minimumPhi=centrePhi-radius;maximumPhi=centrePhi+radius;}let openTop=bitcast<u32>(params.damDimensions.w)!=0u;
   // Liquid against a closed lid has no in-domain sign-changing edge. Publish
   // the cutoff leaf so the fine topology exists while that surface separates.
   let virtualInterface=!openTop&&origin.y+header.size>=dims().y&&centrePhi<0.0;let core=(minimumPhi<=0.0&&maximumPhi>=0.0)||virtualInterface;let halo=!core&&abs(centrePhi)<=params.cellHalo.w;let candidateFlags=select(select(0u,HALO,halo),CORE,core);let flags=LIVE|candidateFlags;let motion=structuredRowVelocities[structuredVelocityRowIndex(row)].xyz;fineSeedLeaves[row]=FineSeedLeaf(origin.x,origin.y,origin.z,header.size,flags,fineSeedLeaves[row].pad0,0u,0u,vec4f(centrePhi,gradient),vec4f(motion,length(motion)));}

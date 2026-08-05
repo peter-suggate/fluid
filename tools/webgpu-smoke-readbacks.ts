@@ -2897,12 +2897,46 @@ export async function readCubicVolumeField(
   const coarseOnly = gridKind === "octree" && !solver.globalFineLevelSetSource
     ? solver.coarseLevelSetSource : undefined;
   if (coarseOnly) {
-    const [directoryBytes, controlBytes] = await Promise.all([
-      readBufferBinding(device, coarseOnly.directory, 32 + coarseOnly.rowCapacity * 32),
+    if (typeof process !== "undefined" && process.env.FLUID_COARSE_TRACKER_RECEIPT === "1") {
+      const receiptReader = (solver as GPUSolverInstance & {
+        readCoarseSurfaceTrackerReceipt?(): Promise<Record<string, unknown> | undefined>;
+      }).readCoarseSurfaceTrackerReceipt;
+      const receipt = await receiptReader?.call(solver);
+      console.log(JSON.stringify({ phase: "coarse-tracker-receipt",
+        reader: typeof receiptReader, metrics: receipt ?? null }));
+    }
+    const [directoryBytes, controlBytes, gradientBytes] = await Promise.all([
+      readBufferBinding(device, coarseOnly.directory, coarseOnly.directory.size
+        ?? coarseOnly.directory.buffer.size - (coarseOnly.directory.offset ?? 0)),
       readBufferBinding(device, coarseOnly.control, 64),
+      coarseOnly.gradients
+        ? readBufferBinding(device, coarseOnly.gradients, coarseOnly.rowCapacity * 16)
+        : Promise.resolve(undefined),
     ]);
     const directoryWords = new Uint32Array(directoryBytes.buffer,
       directoryBytes.byteOffset, directoryBytes.byteLength / 4);
+    if (typeof process !== "undefined" && process.env.FLUID_COARSE_TRACKER_RECEIPT === "1") {
+      const volume = nx * ny * nz;
+      const capacity = (directoryWords.length - 8) / 8;
+      const start = capacity - volume;
+      let minimumPhi = Number.POSITIVE_INFINITY, maximumPhi = Number.NEGATIVE_INFINITY;
+      let negative = 0, zero = 0, positive = 0, valid = 0;
+      if ((directoryWords[1]! & 0x4000_0000) !== 0 && start >= coarseOnly.rowCapacity) {
+        for (let cell = 0; cell < volume; cell += 1) {
+          const base = 8 + 8 * (start + cell);
+          const phi = new Float32Array(directoryWords.buffer,
+            directoryWords.byteOffset + 4 * (base + 2), 1)[0]!;
+          if (directoryWords[base] !== cell + 1 || directoryWords[base + 1] !== 1
+            || (directoryWords[base + 5]! & 9) !== 9 || !Number.isFinite(phi)) continue;
+          valid += 1; minimumPhi = Math.min(minimumPhi, phi); maximumPhi = Math.max(maximumPhi, phi);
+          if (phi < 0) negative += 1; else if (phi > 0) positive += 1; else zero += 1;
+        }
+      }
+      console.log(JSON.stringify({ phase: "coarse-tracker-lattice", metrics: {
+        valid, volume, negative, zero, positive,
+        minimumPhi: valid ? minimumPhi : null, maximumPhi: valid ? maximumPhi : null,
+      } }));
+    }
     if (typeof process !== "undefined" && process.env.FLUID_HEAD_DIFFERENTIAL === "1") {
       const rows = Math.min(directoryWords[2] ?? 0, coarseOnly.rowCapacity);
       const entries = directoryWords.subarray(8, 8 + 8 * rows);
@@ -2930,6 +2964,8 @@ export async function readCubicVolumeField(
       directoryWords,
       coarseOnly.generation,
       [nx, ny, nz],
+      gradientBytes ? new Float32Array(gradientBytes.buffer,
+        gradientBytes.byteOffset, gradientBytes.byteLength / 4) : undefined,
     );
     return {
       field: reconstructed.field,

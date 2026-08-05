@@ -1,7 +1,142 @@
 import { fineLevelSetPackedSampleWGSL } from "./fine-levelset-packed-sample";
 import { makeFineLevelSetSortedWorklistLookupWGSL } from "./webgpu-octree-fine-levelset-bricks";
+import { octreeLosassoVelocitySamplingWGSL } from "./webgpu-octree-losasso-velocity-sampler.wgsl";
+import { OCTREE_FINE_SEED_STATE } from "./octree-fine-seed-leaves";
 
 export const OCTREE_LOSASSO_COARSE_PHI_MAGIC = 0x4c50_4849;
+
+/** Factor-one transport over compact Losasso rows. It deliberately has no
+ * fine-page bindings: the accepted row directory and axis-face sampler are
+ * the complete surface/velocity authorities in this construction. */
+export const octreeLosassoCoarseOnlyPhiWGSL = /* wgsl */ `
+const INVALID:u32=0xffffffffu;const VALID:u32=1u;const FINITE:u32=2u;const INTERFACE:u32=4u;
+const MAGIC:u32=${OCTREE_LOSASSO_COARSE_PHI_MAGIC}u;
+const FACE_SOLID_NEUMANN:u32=0x08000000u;const FACE_INTERFACE_NEARBY:u32=0x10000000u;
+const FACE_SEPARATED:u32=0x20000000u;const FACE_CLOSED_BOUNDARY:u32=0x40000000u;
+const FACE_ROW_ON_POSITIVE_SIDE:u32=0x80000000u;
+struct Params{velocityDimensions:vec3u,directoryCapacity:u32,domainOrigin:vec3f,dt:f32,
+ velocityCellSize:f32,maximumLeafSize:u32,closed:u32,openTop:u32,rowCapacity:u32,faceCapacity:u32,
+ arenaDirectoryCapacity:u32,generation:u32,inflowPositionRadius:vec4f,inflowVelocityStrength:vec4f}
+struct LeafHeader{cell:u32,entryStart:u32,entryCount:u32,size:u32,diagonal:f32,rhs:f32,pad0:u32,pad1:u32,gradient:vec4f}
+struct FineSeedLeaf{originX:u32,originY:u32,originZ:u32,size:u32,flags:u32,pad0:u32,pad1:u32,pad2:u32,phiGradient:vec4f,motion:vec4f}
+struct Face{negativeRow:u32,positiveRow:u32,axis:u32,reserved:u32,area:f32,inverseDistance:f32,openFraction:f32,normalVelocity:f32}
+@group(0)@binding(0)var<uniform>p:Params;
+@group(0)@binding(1)var<storage,read>coarse:array<u32>;
+@group(0)@binding(2)var<storage,read>headers:array<LeafHeader>;
+@group(0)@binding(3)var<storage,read>seedLeaves:array<FineSeedLeaf>;
+@group(0)@binding(4)var<storage,read>previousArena:array<u32>;
+@group(0)@binding(5)var<storage,read_write>rowPhi:array<vec4u>;
+@group(0)@binding(6)var<storage,read>previousGradient:array<vec4f>;
+@group(0)@binding(7)var<storage,read_write>nextGradient:array<vec4f>;
+@group(0)@binding(8)var<storage,read>faceGeometry:array<vec4u>;
+@group(0)@binding(9)var<storage,read>extendedVelocity:array<f32>;
+@group(0)@binding(10)var<storage,read>faceDirectory:array<vec2u>;
+@group(0)@binding(11)var<storage,read_write>nextArena:array<atomic<u32>>;
+@group(0)@binding(12)var<storage,read_write>faces:array<Face>;
+@group(0)@binding(13)var<storage,read_write>ghosts:array<vec4u>;
+@group(0)@binding(14)var<storage,read>solidCells:array<u32>;
+@group(0)@binding(15)var<storage,read>authority:array<u32>;
+@group(0)@binding(16)var<storage,read>coarseTracker:array<u32>;
+fn finite(v:f32)->bool{return v==v&&abs(v)<3.402823e38;}
+fn finite3(v:vec3f)->bool{return all(v==v)&&all(abs(v)<vec3f(3.402823e38));}
+${octreeLosassoVelocitySamplingWGSL}
+fn rows()->u32{return min(min(authority[1],p.rowCapacity),arrayLength(&headers));}
+fn faceCount()->u32{return min(min(authority[2],p.faceCapacity),arrayLength(&faces));}
+fn cellOf(index:u32)->vec3u{return vec3u(index%p.velocityDimensions.x,
+ (index/p.velocityDimensions.x)%p.velocityDimensions.y,index/(p.velocityDimensions.x*p.velocityDimensions.y));}
+fn hash(cell:u32,size:u32)->u32{return ((cell*0x9e3779b1u)^size)*0x85ebca6bu;}
+fn priorRow(cell:u32,size:u32)->u32{if(arrayLength(&previousArena)<20u||previousArena[0]!=MAGIC){return INVALID;}
+ let capacity=previousArena[11];if(capacity==0u||(capacity&(capacity-1u))!=0u){return INVALID;}let wanted=hash(cell,size);let mask=capacity-1u;
+ for(var probe=0u;probe<32u;probe+=1u){let at=previousArena[10]+4u*((wanted+probe)&mask);if(at+3u>=arrayLength(&previousArena)){return INVALID;}
+  let key=previousArena[at];if(key==0u){return INVALID;}if(key==cell+1u&&previousArena[at+1u]==size&&previousArena[at+3u]==wanted){return previousArena[at+2u]-1u;}}
+ return INVALID;}
+struct PhiSample{value:f32,gradient:vec3f,valid:u32}
+fn priorPhi(position:vec3f)->PhiSample{let q=vec3u(clamp(vec3i(floor(position)),vec3i(0),vec3i(p.velocityDimensions)-vec3i(1)));var size=1u;
+ loop{let origin=(q/vec3u(size))*vec3u(size);let cell=origin.x+p.velocityDimensions.x*(origin.y+p.velocityDimensions.y*origin.z);let row=priorRow(cell,size);
+  if(row!=INVALID&&row<previousArena[2]&&row<arrayLength(&previousGradient)){let entry=previousArena[9]+8u*row;if(entry+5u<arrayLength(&previousArena)&&(previousArena[entry+5u]&(VALID|FINITE))==(VALID|FINITE)&&previousGradient[row].w==1.){
+    let centre=vec3f(origin)+vec3f(.5*f32(size));let gradient=previousGradient[row].xyz;let value=bitcast<f32>(previousArena[entry+2u])+dot(gradient,(position-centre)*p.velocityCellSize);
+    return PhiSample(value,gradient,select(0u,1u,finite(value)&&finite3(gradient)));}}
+  if(size>=p.maximumLeafSize){break;}size*=2u;}return PhiSample(0.,vec3f(0),0u);}
+fn seedPhi(row:u32,position:vec3f)->PhiSample{if(row>=arrayLength(&seedLeaves)){return PhiSample(0.,vec3f(0),0u);}let leaf=seedLeaves[row];let gradient=leaf.phiGradient.yzw;
+ let centre=vec3f(vec3u(leaf.originX,leaf.originY,leaf.originZ))+vec3f(.5*f32(leaf.size));let value=leaf.phiGradient.x+dot(gradient,(position-centre)*p.velocityCellSize);
+ return PhiSample(value,gradient,select(0u,1u,(leaf.flags&${OCTREE_FINE_SEED_STATE.live}u)!=0u&&leaf.size>0u&&finite(value)&&finite3(gradient)));}
+fn trackerValue(position:vec3f)->PhiSample{let volume=p.velocityDimensions.x*p.velocityDimensions.y*p.velocityDimensions.z;
+ let capacity=(max(arrayLength(&coarseTracker),8u)-8u)/8u;
+ if(arrayLength(&coarseTracker)<8u||coarseTracker[0]!=0x80000000u||(coarseTracker[1]&0x40000000u)==0u
+  ||capacity<p.rowCapacity+volume||any(vec3u(coarseTracker[4],coarseTracker[5],coarseTracker[6])!=p.velocityDimensions)){
+  return PhiSample(0.,vec3f(0),0u);}
+ let bounded=clamp(position,vec3f(.5),vec3f(p.velocityDimensions)-vec3f(.5));let low=vec3i(floor(bounded-vec3f(.5)));
+ let fraction=bounded-(vec3f(low)+vec3f(.5));var value=0.;var total=0.;
+ for(var corner=0u;corner<8u;corner+=1u){let offset=vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));
+  let q=vec3u(clamp(low+offset,vec3i(0),vec3i(p.velocityDimensions)-vec3i(1)));let cell=q.x+p.velocityDimensions.x*(q.y+p.velocityDimensions.y*q.z);
+  let base=8u+8u*(p.rowCapacity+cell);let sample=bitcast<f32>(coarseTracker[base+2u]);
+  if((coarseTracker[base+5u]&9u)!=9u||!finite(sample)){return PhiSample(0.,vec3f(0),0u);}
+  let weight=select(1.-fraction.x,fraction.x,(corner&1u)!=0u)*select(1.-fraction.y,fraction.y,(corner&2u)!=0u)
+   *select(1.-fraction.z,fraction.z,(corner&4u)!=0u);value+=weight*sample;total+=weight;}
+ return PhiSample(value/max(total,1e-12),vec3f(0),select(0u,1u,total>.999&&finite(value)));}
+fn trackerPhi(position:vec3f)->PhiSample{let centre=trackerValue(position);if(centre.valid==0u){return centre;}var gradient=vec3f(0);
+ for(var axis=0u;axis<3u;axis+=1u){var low=position;var high=position;low[axis]-=1.;high[axis]+=1.;let a=trackerValue(low);let b=trackerValue(high);
+  if(a.valid==0u||b.valid==0u){return PhiSample(0.,vec3f(0),0u);}gradient[axis]=.5*(b.value-a.value)/p.velocityCellSize;}
+ return PhiSample(centre.value,gradient,select(0u,1u,finite3(gradient)));}
+fn quantize(v:vec3f)->vec3f{return round(v*65536.)/65536.;}
+fn inflowPhi(world:vec3f)->f32{let velocity=p.inflowVelocityStrength.xyz;let speed=length(velocity);if(speed<=1e-6||p.inflowPositionRadius.w<=0.){return 3.402823e38;}
+ let direction=velocity/speed;let extent=vec3f(p.velocityDimensions)*p.velocityCellSize;let centre=p.inflowPositionRadius.xyz+vec3f(.5*extent.x,0.,.5*extent.z);
+ let relative=world-centre;let axial=dot(relative,direction);let radial=length(relative-axial*direction);return max(radial-p.inflowPositionRadius.w,max(-axial,axial-2.*p.velocityCellSize));}
+@compute @workgroup_size(64)
+fn advectLosassoCoarsePhi(@builtin(global_invocation_id)gid:vec3u){let row=gid.x;if(row>=p.rowCapacity||row>=arrayLength(&headers)){return;}let header=headers[row];if(header.size==0u||header.size>p.maximumLeafSize){rowPhi[row]=vec4u(0);nextGradient[row]=vec4f(0);return;}
+ let origin=cellOf(header.cell);let centre=vec3f(origin)+vec3f(.5*f32(header.size));let transported=trackerPhi(centre);
+ if(transported.valid==0u){rowPhi[row]=vec4u(0);nextGradient[row]=vec4f(0);return;}
+ var value=transported.value;let world=p.domainOrigin+centre*p.velocityCellSize;let sourceValue=inflowPhi(world);if(p.inflowVelocityStrength.w>0.&&finite(sourceValue)){value=min(value,max(sourceValue,-.5*p.velocityCellSize*clamp(p.inflowVelocityStrength.w,0.,1.)));}
+ // Compact pressure rows are a restriction cache, not a second transported
+ // affine surface.  Keep their centre value exact and derive the interface
+ // bit from the dense coarse lattice's six neighbouring row-width samples;
+ // renderer/topology consumers read the dense complement directly.
+ let gradient=vec3f(0);let minimum=value;let maximum=value;var flags=VALID|FINITE;
+ for(var axis=0u;axis<3u;axis+=1u){for(var side=0u;side<2u;side+=1u){var neighbor=centre;
+  neighbor[axis]+=select(-f32(header.size),f32(header.size),side!=0u);let sample=trackerValue(neighbor);
+  if(sample.valid!=0u&&((value<0.)!=(sample.value<0.))){flags|=INTERFACE;}}}
+ rowPhi[row]=vec4u(bitcast<u32>(value),bitcast<u32>(minimum),bitcast<u32>(maximum),flags);nextGradient[row]=vec4f(gradient,1);}
+@compute @workgroup_size(64)
+fn publishLosassoCoarseOnlyRows(@builtin(global_invocation_id)gid:vec3u){let row=gid.x;if(row>=rows()){return;}let header=headers[row];let value=rowPhi[row];let entry=20u+8u*row;
+ atomicStore(&nextArena[entry],header.cell+1u);atomicStore(&nextArena[entry+1u],header.size);atomicStore(&nextArena[entry+2u],value.x);atomicStore(&nextArena[entry+3u],value.y);
+ atomicStore(&nextArena[entry+4u],value.z);atomicStore(&nextArena[entry+5u],value.w);atomicStore(&nextArena[entry+6u],row);atomicStore(&nextArena[entry+7u],bitcast<u32>(f32(header.size*header.size*header.size)*p.velocityCellSize*p.velocityCellSize*p.velocityCellSize));
+ let wanted=hash(header.cell,header.size);let mask=p.arenaDirectoryCapacity-1u;var installed=false;for(var probe=0u;probe<32u;probe+=1u){let at=20u+8u*p.rowCapacity+4u*((wanted+probe)&mask);var claimed=atomicCompareExchangeWeak(&nextArena[at],0u,header.cell+1u);
+  loop{if(claimed.exchanged||claimed.old_value!=0u){break;}claimed=atomicCompareExchangeWeak(&nextArena[at],0u,header.cell+1u);}if(claimed.exchanged){atomicStore(&nextArena[at+1u],header.size);atomicStore(&nextArena[at+2u],row+1u);atomicStore(&nextArena[at+3u],wanted);installed=true;break;}}
+ if(!installed){atomicOr(&nextArena[13],4u);}}
+fn currentPhi(position:vec3f)->PhiSample{let q=vec3u(clamp(vec3i(floor(position)),vec3i(0),vec3i(p.velocityDimensions)-vec3i(1)));var size=1u;loop{let origin=(q/vec3u(size))*vec3u(size);let cell=origin.x+p.velocityDimensions.x*(origin.y+p.velocityDimensions.y*origin.z);let wanted=hash(cell,size);let mask=p.arenaDirectoryCapacity-1u;
+  for(var probe=0u;probe<32u;probe+=1u){let at=20u+8u*p.rowCapacity+4u*((wanted+probe)&mask);let key=atomicLoad(&nextArena[at]);if(key==0u){break;}if(key==cell+1u&&atomicLoad(&nextArena[at+1u])==size&&atomicLoad(&nextArena[at+3u])==wanted){let row=atomicLoad(&nextArena[at+2u])-1u;let entry=20u+8u*row;if(row>=p.rowCapacity||row>=arrayLength(&nextGradient)||entry+5u>=arrayLength(&nextArena)||nextGradient[row].w!=1.){return PhiSample(0.,vec3f(0),0u);}let centre=vec3f(origin)+vec3f(.5*f32(size));let gradient=nextGradient[row].xyz;let value=bitcast<f32>(atomicLoad(&nextArena[entry+2u]))+dot(gradient,(position-centre)*p.velocityCellSize);return PhiSample(value,gradient,select(0u,1u,finite(value)&&finite3(gradient)));}}
+  if(size>=p.maximumLeafSize){break;}size*=2u;}return PhiSample(0.,vec3f(0),0u);}
+fn currentRowPhi(row:u32,position:vec3f)->PhiSample{
+ if(row>=rows()||row>=arrayLength(&nextGradient)||nextGradient[row].w!=1.){return PhiSample(0.,vec3f(0),0u);}
+ let header=headers[row];let origin=cellOf(header.cell);let centre=vec3f(origin)+vec3f(.5*f32(header.size));
+ let gradient=nextGradient[row].xyz;let value=bitcast<f32>(rowPhi[row].x)+dot(gradient,(position-centre)*p.velocityCellSize);
+ return PhiSample(value,gradient,select(0u,1u,(rowPhi[row].w&(VALID|FINITE))==(VALID|FINITE)&&finite(value)&&finite3(gradient)));}
+fn solidFraction(cell:vec3i)->f32{if(any(cell<vec3i(0))||any(cell>=vec3i(p.velocityDimensions))){return 0.;}let q=vec3u(cell);let word=2u*(q.x+p.velocityDimensions.x*(q.y+p.velocityDimensions.y*q.z));if(word>=arrayLength(&solidCells)){return 0.;}let value=bitcast<f32>(solidCells[word]);return clamp(select(0.,value,value==value),0.,1.);}
+@compute @workgroup_size(64)
+fn publishLosassoCoarseOnlyGhosts(@builtin(global_invocation_id)gid:vec3u){let faceId=gid.x;if(faceId>=faceCount()){return;}var face=faces[faceId];face.reserved&=~FACE_SOLID_NEUMANN;face.reserved&=~FACE_INTERFACE_NEARBY;
+ let negativeNearby=face.negativeRow<rows()&&(rowPhi[face.negativeRow].w&INTERFACE)!=0u;
+ let positiveNearby=face.positiveRow<rows()&&(rowPhi[face.positiveRow].w&INTERFACE)!=0u;
+ if(negativeNearby||positiveNearby){face.reserved|=FACE_INTERFACE_NEARBY;}
+ var distance=0.;var theta=1.;var airPhi=0.;var flags=0u;if(face.positiveRow==INVALID){let geometry=faceGeometry[faceId];let axis=geometry.x&3u;let span=1u<<(geometry.x>>2u);let origin=geometry.yzw;let boundary=origin[axis]==0u||origin[axis]==p.velocityDimensions[axis];
+     if(boundary&&(face.reserved&FACE_CLOSED_BOUNDARY)!=0u&&face.negativeRow<rows()){let liquid=bitcast<f32>(rowPhi[face.negativeRow].x);let towardAir=select(1.,-1.,(face.reserved&FACE_ROW_ON_POSITIVE_SIDE)!=0u);var point=vec3f(origin);for(var tangent=0u;tangent<3u;tangent+=1u){if(tangent!=axis){point[tangent]+=.5*f32(span);}}point[axis]-=towardAir*.5;var sampled=currentPhi(point);if(sampled.valid==0u){sampled=currentRowPhi(face.negativeRow,point);}face.openFraction=0.;flags=2u;
+   let contactEnabled=(p.closed&2u)==0u;let separated=contactEnabled&&(face.reserved&FACE_SEPARATED)!=0u;let sampledAir=liquid<0.&&sampled.valid!=0u&&sampled.value>0.;
+   if(contactEnabled&&(separated||sampledAir)){airPhi=sampled.value;let dual=max(.5,.5*f32(span)-.5)*p.velocityCellSize;theta=select(1.,clamp(-liquid/(airPhi-liquid),1e-2,1.),sampled.valid!=0u&&airPhi>0.&&liquid<0.);distance=theta*dual;face.inverseDistance=1./max(distance,1e-9);face.openFraction=1.;flags=3u;}}
+  else if(boundary){distance=.5*p.velocityCellSize;face.inverseDistance=1./distance;face.openFraction=1.;flags=1u;}
+     else if(face.negativeRow<rows()){let liquid=bitcast<f32>(rowPhi[face.negativeRow].x);
+      let sign=select(1.,-1.,(face.reserved&FACE_ROW_ON_POSITIVE_SIDE)!=0u);var point=vec3f(origin);
+      for(var tangent=0u;tangent<3u;tangent+=1u){if(tangent!=axis){point[tangent]+=.5*f32(span);}}point[axis]+=sign*.5*f32(span);
+      var sampled=trackerValue(point);if(sampled.valid==0u){sampled=currentPhi(point);}if(sampled.valid==0u){sampled=currentRowPhi(face.negativeRow,point);}
+      // Losasso's p_air value is at the centre of a same-sized bordering air
+      // cell.  A coarse row may emit several smaller T-junction subfaces, but
+      // their areas do not move that pressure sample closer to the wet-row
+      // centre.  Match the factor-four ghost kernel and the staged topology
+      // coefficient by using the accepted row width, not the subface span.
+      let rowSize=headers[face.negativeRow].size;let dual=f32(rowSize)*p.velocityCellSize;distance=dual;
+   if(solidFraction(vec3i(floor(point)))>=.999999){face.reserved|=FACE_SOLID_NEUMANN;flags=4u;}
+     else if(liquid<0.&&(p.closed&2u)!=0u){theta=1.;distance=dual;face.inverseDistance=1./dual;flags=1u;}
+   else if(liquid<0.&&sampled.valid!=0u&&sampled.value>0.){airPhi=sampled.value;theta=clamp(-liquid/(airPhi-liquid),1e-4,1.);distance=theta*dual;face.inverseDistance=1./distance;face.openFraction=1.;flags=1u;}else{flags=4u;}}}
+ faces[faceId]=face;ghosts[faceId]=vec4u(bitcast<u32>(distance),bitcast<u32>(theta),bitcast<u32>(airPhi),flags);}
+`;
 
 export const octreeLosassoCoarsePhiWGSL = /* wgsl */ `
 const INVALID:u32=0xffffffffu;const VALID:u32=1u;const FINITE:u32=2u;
@@ -280,13 +415,16 @@ struct Params{brickDimensions:vec3u,brickResolution:u32,sampleDimensions:vec3u,s
 @group(0)@binding(13)var<storage,read_write>physicalVolumes:array<f32>;
 @group(0)@binding(14)var<storage,read>previousArena:array<u32>;
 @group(0)@binding(15)var<storage,read_write>summaryDelta:array<u32>;
+fn denseTrackerFlag()->u32{let volume=p.dimensions.x*p.dimensions.y*p.dimensions.z;
+ let capacity=(max(arrayLength(&volumeDirectory),8u)-8u)/8u;
+ return select(0u,0x40000000u,capacity>=p.rowCapacity+volume&&(volumeDirectory[1]&0x40000000u)!=0u);}
 @compute @workgroup_size(64)
 fn publishLosassoVolumeBridge(@builtin(global_invocation_id)invocation:vec3u){let row=invocation.x;let good=arena[0]==MAGIC;
  let reuse=p.schedule.x==0u&&arrayLength(&coarseControl)>5u&&coarseControl[5]==1u;
  if(reuse){let retainedGood=arrayLength(&previousArena)>=20u&&previousArena[0]==MAGIC;
   let retainedCount=select(0u,min(previousArena[2],p.rowCapacity),retainedGood);
   if(row==0u){volumeDirectory[0]=select(0u,0x80000000u,retainedGood);
-   volumeDirectory[1]=previousArena[12];volumeDirectory[2]=retainedCount;volumeDirectory[3]=p.maximumLeafSize;
+   volumeDirectory[1]=previousArena[12]|denseTrackerFlag();volumeDirectory[2]=retainedCount;volumeDirectory[3]=p.maximumLeafSize;
    volumeDirectory[4]=p.dimensions.x;volumeDirectory[5]=p.dimensions.y;volumeDirectory[6]=p.dimensions.z;
    volumeDirectory[7]=bitcast<u32>(p.cellSize);volumePublication[0]=0u;volumePublication[2]=retainedCount;
    volumePublication[10]=previousArena[12];volumePublication[11]=select(0u,0x80000000u,retainedGood);
@@ -300,7 +438,7 @@ fn publishLosassoVolumeBridge(@builtin(global_invocation_id)invocation:vec3u){le
   return;}
  let count=select(0u,min(arena[2],p.rowCapacity),good);let priorGood=arrayLength(&previousArena)>=20u&&previousArena[0]==MAGIC;
  let priorCount=select(0u,min(previousArena[2],p.rowCapacity),priorGood);if(row==0u){volumeDirectory[0]=select(0u,0x80000000u,good);
-  volumeDirectory[1]=arena[12];volumeDirectory[2]=count;volumeDirectory[3]=p.maximumLeafSize;
+  volumeDirectory[1]=arena[12]|denseTrackerFlag();volumeDirectory[2]=count;volumeDirectory[3]=p.maximumLeafSize;
   volumeDirectory[4]=p.dimensions.x;volumeDirectory[5]=p.dimensions.y;volumeDirectory[6]=p.dimensions.z;
   volumeDirectory[7]=bitcast<u32>(p.cellSize);volumePublication[0]=0u;volumePublication[2]=count;
   volumePublication[10]=arena[12];volumePublication[11]=select(0u,0x80000000u,good);
@@ -318,7 +456,7 @@ fn publishLosassoVolumeBridge(@builtin(global_invocation_id)invocation:vec3u){le
 @compute @workgroup_size(64)
 fn refreshLosassoVolumeBridge(@builtin(global_invocation_id)invocation:vec3u){let row=invocation.x;let good=arena[0]==MAGIC;
  let count=select(0u,min(arena[2],p.rowCapacity),good);if(row==0u){volumeDirectory[0]=select(0u,0x80000000u,good);
-  volumeDirectory[1]=arena[12];volumeDirectory[2]=count;volumeDirectory[3]=p.maximumLeafSize;
+  volumeDirectory[1]=arena[12]|denseTrackerFlag();volumeDirectory[2]=count;volumeDirectory[3]=p.maximumLeafSize;
   volumeDirectory[4]=p.dimensions.x;volumeDirectory[5]=p.dimensions.y;volumeDirectory[6]=p.dimensions.z;
   volumeDirectory[7]=bitcast<u32>(p.cellSize);volumePublication[0]=0u;volumePublication[2]=count;
   volumePublication[10]=arena[12];volumePublication[11]=select(0u,0x80000000u,good);
