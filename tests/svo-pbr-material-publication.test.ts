@@ -15,30 +15,23 @@ import {
 import { cloneScene, defaultScene } from "../lib/model";
 import { environmentIds } from "../lib/environments";
 import { buildEnvironmentProxyCatalog, environmentProxyPrimitives } from "../lib/voxel-environments";
-import type { SparseVoxelRenderSource } from "../lib/webgpu-voxel-debug";
+import type { SparseVoxelSceneRenderSource } from "../lib/webgpu-voxel-debug";
 import { VOXEL_MATERIALS } from "../lib/voxel-scene";
 
-test("PBR publication is optional and leaves the legacy debug source ABI intact", () => {
+test("PBR publication is optional and leaves the rest of the scene source ABI intact", () => {
   const binding = { buffer: {} as GPUBuffer };
   const legacy = {
-    voxelRecords: binding,
-    voxelCount: binding,
-    brickRecords: binding,
-    brickCount: binding,
-    materials: binding,
-    voxelCapacity: 64,
-    brickCapacity: 8,
     materialCount: 20,
     revision: 3,
-  } satisfies SparseVoxelRenderSource;
-  assert.equal(legacy.materials, binding);
+  } satisfies SparseVoxelSceneRenderSource;
+  assert.ok(!("pbrMaterials" in legacy), "the PBR table stays optional");
 
   const modern = {
     ...legacy,
     pbrMaterials: { binding, count: 20, strideBytes: 96, revision: 7 },
-  } satisfies SparseVoxelRenderSource;
+  } satisfies SparseVoxelSceneRenderSource;
   assert.equal(modern.pbrMaterials.binding, binding);
-  assert.equal(modern.materials, legacy.materials);
+  assert.equal(modern.materialCount, legacy.materialCount);
 });
 
 test("producer table is a dense 96-byte direct-index publication with explicit revision", () => {

@@ -9,6 +9,7 @@ import {
   type OctreeOwnerPagePlan,
 } from "./webgpu-octree-owner-pages";
 import { PassBroker } from "./webgpu-pass-broker";
+import { OCTREE_LOSASSO_CONTROL_WORDS } from "./octree-losasso-operator";
 import { planOctreeSurfaceStateAllocation } from "./octree-surface-allocation";
 import { planOctreeAnalyticBootstrapBounds } from "./octree-analytic-bootstrap";
 import { WebGPUOctreeAnalyticBootstrapWorklist } from "./webgpu-octree-analytic-bootstrap";
@@ -6300,6 +6301,91 @@ export class WebGPUOctreeProjection {
       } : {}),
     }) : undefined;
   }
+  /**
+   * How much of the initial residual one preconditioner application removes.
+   *
+   * `FLUID_SYMMETRY_STAGE_AUDIT=1` already captures r0, M*r0 and A*M*r0 for the
+   * first solve of an advance. The error-propagation factor of the stationary
+   * iteration built on M is ||r0 - A*M*r0|| / ||r0||: a working V-cycle sits
+   * around 0.05-0.2, while a smoother-only preconditioner sits at 0.9 or above.
+   * Iteration COUNT cannot distinguish those two — a degraded preconditioner
+   * still converges, just with a count that tracks resolution — so this ratio,
+   * not the count, is the preconditioner's regression metric.
+   */
+  async readLosassoPreconditionerContraction() {
+    const symmetry = this.pipelinedMGPCG?.symmetryStageAuditBuffers
+      ?? this.losassoBackend?.solverSymmetryStageAuditBuffers;
+    const control = this.losassoBackend?.sources.operator.control;
+    if (!symmetry || !control) return undefined;
+    const words = OCTREE_LOSASSO_CONTROL_WORDS;
+    const header = this.device.createBuffer({
+      label: "Losasso contraction row count",
+      size: words * 4, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+    let rowCount = 0;
+    {
+      const encoder = this.device.createCommandEncoder({
+        label: "Read Losasso contraction row count",
+      });
+      encoder.copyBufferToBuffer(control, 0, header, 0, words * 4);
+      this.device.queue.submit([encoder.finish()]);
+      try {
+        await header.mapAsync(GPUMapMode.READ);
+        const controlWords = new Uint32Array(header.getMappedRange().slice(0));
+        if (controlWords[3] !== 1) return undefined;
+        rowCount = controlWords[1] ?? 0;
+      } finally {
+        header.destroy();
+      }
+    }
+    const vectorBytes = rowCount * 4;
+    if (rowCount === 0 || vectorBytes > symmetry.initialResidual.size) return undefined;
+    const readback = this.device.createBuffer({
+      label: "Losasso preconditioner contraction",
+      size: vectorBytes * 3, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+    const encoder = this.device.createCommandEncoder({
+      label: "Read Losasso preconditioner contraction",
+    });
+    encoder.copyBufferToBuffer(symmetry.initialResidual, 0, readback, 0, vectorBytes);
+    encoder.copyBufferToBuffer(symmetry.initialPreconditioned, 0, readback, vectorBytes, vectorBytes);
+    encoder.copyBufferToBuffer(
+      symmetry.initialPreconditionedImage, 0, readback, vectorBytes * 2, vectorBytes);
+    this.device.queue.submit([encoder.finish()]);
+    try {
+      await readback.mapAsync(GPUMapMode.READ);
+      const all = new Float32Array(readback.getMappedRange().slice(0));
+      const residual = all.subarray(0, rowCount);
+      const preconditioned = all.subarray(rowCount, rowCount * 2);
+      const image = all.subarray(rowCount * 2, rowCount * 3);
+      let residualSquared = 0, remainderSquared = 0, imageSquared = 0, preconditionedDotResidual = 0;
+      let nonFinite = 0;
+      for (let row = 0; row < rowCount; row += 1) {
+        const r = residual[row]!, m = preconditioned[row]!, a = image[row]!;
+        if (!Number.isFinite(r) || !Number.isFinite(m) || !Number.isFinite(a)) {
+          nonFinite += 1;
+          continue;
+        }
+        residualSquared += r * r;
+        remainderSquared += (r - a) * (r - a);
+        imageSquared += a * a;
+        preconditionedDotResidual += m * r;
+      }
+      const residualNorm = Math.sqrt(residualSquared);
+      return {
+        rows: rowCount,
+        nonFiniteRows: nonFinite,
+        residualNorm,
+        // The headline number. >= ~0.9 means the V-cycle is not acting as one.
+        contraction: residualNorm > 0 ? Math.sqrt(remainderSquared) / residualNorm : Number.NaN,
+        imageNorm: Math.sqrt(imageSquared),
+        // Must be > 0 for CG: it is the first gamma the recurrence divides by.
+        preconditionedDotResidual,
+      };
+    } finally {
+      readback.destroy();
+    }
+  }
   get workAccountingPlan(): Readonly<{
     pressure: Readonly<{ maximumOuterIterations: number }>;
   }> {
@@ -6951,6 +7037,81 @@ export class WebGPUOctreeProjection {
   /** Post-submit diagnostic census; never participates in pressure scheduling. */
   readSPGridHierarchyCensus() {
     return this.firstOrderVCycle?.readHierarchyCensus();
+  }
+  /**
+   * Per-level publication census for the Losasso multigrid hierarchy.
+   *
+   * Nothing else reads these words. An unpublished sub-level silently disables
+   * the fused sub-L0 cycle (its enable predicate requires word 3 == 1 on every
+   * level), which degrades the preconditioner to four damped-Jacobi sweeps on
+   * L0 without failing anything — CG then simply takes more iterations. This
+   * census is the only surface that can tell that apart from a healthy solve.
+   *
+   * Both the level control buffer and the fused arena's mirror of it are read:
+   * the coefficient-refresh path can set the level's error word without ever
+   * writing words 3/4 back into the arena, so they can legitimately disagree,
+   * and it is the arena copy the V-cycle actually gates on.
+   */
+  async readLosassoHierarchyCensus() {
+    const vcycle = this.losassoBackend?.sources.vcycle;
+    if (!vcycle) return undefined;
+    const words = OCTREE_LOSASSO_CONTROL_WORDS;
+    const bytes = words * 4;
+    const levels = vcycle.levels;
+    const fused = vcycle.fusedSubL0;
+    // Transitions mirror L1..Ln, so the arena holds one fewer record than levels.
+    const arenaRecords = fused ? Math.max(0, levels.length - 1) : 0;
+    const readback = this.device.createBuffer({
+      label: "Losasso hierarchy publication census",
+      size: (levels.length + arenaRecords) * bytes,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+    const encoder = this.device.createCommandEncoder({
+      label: "Read Losasso hierarchy publication census",
+    });
+    levels.forEach((level, index) => {
+      encoder.copyBufferToBuffer(level.control, 0, readback, index * bytes, bytes);
+    });
+    for (let transition = 0; transition < arenaRecords; transition += 1) {
+      encoder.copyBufferToBuffer(
+        fused!.arena,
+        (transition * fused!.transitionStrideWords + fused!.controlOffsetWords) * 4,
+        readback, (levels.length + transition) * bytes, bytes,
+      );
+    }
+    this.device.queue.submit([encoder.finish()]);
+    try {
+      await readback.mapAsync(GPUMapMode.READ);
+      const all = new Uint32Array(readback.getMappedRange().slice(0));
+      const record = (base: number) => ({
+        generation: all[base]!, rows: all[base + 1]!, faces: all[base + 2]!,
+        published: all[base + 3]!, errorBits: all[base + 4]!,
+        topologyReused: all[base + 5]!, directoryCapacity: all[base + 6]!,
+      });
+      const levelRecords = levels.map((_, index) => ({
+        level: index, ...record(index * words),
+      }));
+      const arena = Array.from({ length: arenaRecords }, (_, transition) => ({
+        level: transition + 1, ...record((levels.length + transition) * words),
+      }));
+      // The fused predicate's exact conjunction, reproduced on the host so a
+      // census can state the consequence rather than leave it to be inferred.
+      const capacities = fused?.levelRowCapacities ?? [];
+      const cycleEnabled = arena.length > 0 && arena.every((entry) => entry.published === 1
+        && entry.rows <= (capacities[entry.level] ?? 0));
+      return {
+        levelCount: levels.length,
+        levels: levelRecords,
+        arena,
+        levelRowCapacities: [...capacities],
+        cycleEnabled,
+        firstUnpublishedLevel: levelRecords.find((entry) =>
+          entry.level > 0 && entry.published !== 1)?.level,
+        firstErroredLevel: levelRecords.find((entry) => entry.errorBits !== 0)?.level,
+      };
+    } finally {
+      readback.destroy();
+    }
   }
   /** Terminal-only proof that the compact directory differential executed. */
   readSPGridTouchedDirectoryTripwire() {

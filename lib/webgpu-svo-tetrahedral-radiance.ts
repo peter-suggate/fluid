@@ -24,6 +24,48 @@ export const WEBGPU_SVO_TETRAHEDRAL_RADIANCE_LAYOUT = Object.freeze({
   usage: Object.freeze(["texture-binding", "copy-dst"] as const),
 } as const);
 
+/**
+ * Storage format for the *live*, GPU-built radiance atlas.
+ *
+ * The upload-based atlas above is `rgb9e5ufloat`: three unsigned channels in one
+ * word, no alpha, filterable. The live atlas cannot use it because RGB9E5 is not
+ * a storage format, so it fell back to `rgba16float` — twice the bytes, a sign
+ * bit radiance never uses, and an alpha channel the builder writes a literal
+ * `1.0` into. At 4 lobes that is 32 of the 36 000 bytes a pyramid page costs.
+ *
+ * `rg11b10ufloat` is the storage-capable member of the same family: 4 B/texel,
+ * three unsigned float channels (5-bit exponent, 6/6/5-bit mantissa), no fourth
+ * channel to waste. Devices grant it as a storage texture only with
+ * `texture-formats-tier1`, so `rgba16float` stays the fallback rather than a
+ * hard requirement — the choice is per device, never per scene.
+ */
+export const LIVE_SVO_RADIANCE_STORAGE = Object.freeze({
+  preferredFormat: "rg11b10ufloat" as GPUTextureFormat,
+  fallbackFormat: "rgba16float" as GPUTextureFormat,
+  requiredFeature: "texture-formats-tier1" as GPUFeatureName,
+} as const);
+
+/** Bytes one texel of a live radiance lobe occupies. */
+export function liveSvoRadianceBytesPerTexel(format: GPUTextureFormat): number {
+  return format === LIVE_SVO_RADIANCE_STORAGE.preferredFormat ? 4 : 8;
+}
+
+/**
+ * The narrowest radiance storage format this device can actually write.
+ *
+ * `FLUID_SVO_RADIANCE_FORMAT=rgba16float` pins the wide format so an A/B can
+ * hold everything else fixed — the two arms are otherwise indistinguishable
+ * from outside, and a scene whose radiance atlas is all zeros (no emissive
+ * material, feedback GI off) renders bit-identically either way.
+ */
+export function liveSvoRadianceAtlasFormat(features: { has(feature: string): boolean } | undefined): GPUTextureFormat {
+  const pinned = typeof process !== "undefined" ? process.env?.FLUID_SVO_RADIANCE_FORMAT : undefined;
+  if (pinned === LIVE_SVO_RADIANCE_STORAGE.fallbackFormat) return LIVE_SVO_RADIANCE_STORAGE.fallbackFormat;
+  return features?.has(LIVE_SVO_RADIANCE_STORAGE.requiredFeature)
+    ? LIVE_SVO_RADIANCE_STORAGE.preferredFormat
+    : LIVE_SVO_RADIANCE_STORAGE.fallbackFormat;
+}
+
 /** Four packed RGB9E5 words, in the tetrahedral direction order defined by the CPU/GPU ABI. */
 export type SvoPackedTetrahedralRadiance = readonly [number, number, number, number];
 
@@ -50,16 +92,17 @@ function assertInterior(interior: Uint32Array): void {
   }
 }
 
-/** Creates a physical 10^3 packed page whose apron clamps the 8^3 interior. */
+/** Creates a physical packed page, clamping the 8^3 interior into any apron the layout declares. */
 export function createSvoTetrahedralRadiancePage(interior: Uint32Array): Uint32Array<ArrayBuffer> {
   assertInterior(interior);
   const n = SVO_NODE_MIP_LAYOUT.interiorSize;
+  const apron = SVO_NODE_MIP_LAYOUT.apron;
   const physical = SVO_NODE_MIP_LAYOUT.physicalSize;
   const result = new Uint32Array(PHYSICAL_WORDS);
   for (let z = 0; z < physical; z += 1) for (let y = 0; y < physical; y += 1) for (let x = 0; x < physical; x += 1) {
-    const sourceX = Math.max(0, Math.min(n - 1, x - 1));
-    const sourceY = Math.max(0, Math.min(n - 1, y - 1));
-    const sourceZ = Math.max(0, Math.min(n - 1, z - 1));
+    const sourceX = Math.max(0, Math.min(n - 1, x - apron));
+    const sourceY = Math.max(0, Math.min(n - 1, y - apron));
+    const sourceZ = Math.max(0, Math.min(n - 1, z - apron));
     result.set(packedSample(interior, spatialTexelOffset(sourceX, sourceY, sourceZ, n)), spatialTexelOffset(x, y, z, physical));
   }
   return result;
@@ -73,10 +116,11 @@ export function createSvoTetrahedralRadiancePageWithApron(
 ): Uint32Array<ArrayBuffer> {
   const result = createSvoTetrahedralRadiancePage(interior);
   const n = SVO_NODE_MIP_LAYOUT.interiorSize;
+  const apron = SVO_NODE_MIP_LAYOUT.apron;
   const physical = SVO_NODE_MIP_LAYOUT.physicalSize;
   for (let z = 0; z < physical; z += 1) for (let y = 0; y < physical; y += 1) for (let x = 0; x < physical; x += 1) {
-    if (x > 0 && x < n + 1 && y > 0 && y < n + 1 && z > 0 && z < n + 1) continue;
-    const address = resolveSvoNodeMipVirtualTexel(pageCoordinate, [x - 1, y - 1, z - 1]);
+    if (x >= apron && x < n + apron && y >= apron && y < n + apron && z >= apron && z < n + apron) continue;
+    const address = resolveSvoNodeMipVirtualTexel(pageCoordinate, [x - apron, y - apron, z - apron]);
     const sample = address && sampleNeighbour(address);
     if (sample) result.set(packedSample(sample, 0), spatialTexelOffset(x, y, z, physical));
   }
@@ -91,6 +135,14 @@ export interface WebGpuSvoTetrahedralRadianceVisibleGeneration {
   blackSlots: ReadonlySet<number>;
   textures: readonly [GPUTexture, GPUTexture, GPUTexture, GPUTexture];
   views: readonly [GPUTextureView, GPUTextureView, GPUTextureView, GPUTextureView];
+  /**
+   * Finest level with a radiance page. A consumer sampling below it must read
+   * the ancestor at this level instead; residency is ancestor-closed, so that
+   * page is always there. Absent means zero — a page at every level.
+   */
+  radianceFloorLevel?: number;
+  /** Slot the atlas begins at: `slot - slotOffset` is the physical page. */
+  slotOffset?: number;
 }
 
 interface OwnedGeneration extends WebGpuSvoTetrahedralRadianceVisibleGeneration {
@@ -291,8 +343,24 @@ export class WebGpuSvoTetrahedralRadiance {
 }
 
 export interface WebGpuLiveSvoTetrahedralRadianceOptions {
+  /**
+   * Slot *index* space, shared with the opacity pyramid.
+   *
+   * Page validity and the black-page certificate are addressed by the opacity
+   * slot at every level, so this stays the full pyramid capacity even when the
+   * atlas below holds far fewer pages.
+   */
   pageCapacity: number;
+  /** Texels of the atlas, which after the radiance floor is smaller than opacity's. */
   atlasTexels: readonly [number, number, number];
+  /** Physical radiance slots. Defaults to `pageCapacity` — no floor, old behaviour. */
+  atlasPageCapacity?: number;
+  /** First opacity slot that owns an atlas page: `slot - slotOffset` addresses it. */
+  slotOffset?: number;
+  /** Finest level with a radiance page; carried through to every consumer. */
+  radianceFloorLevel?: number;
+  /** Overrides the device-derived choice; tests and A/B lanes only. */
+  format?: GPUTextureFormat;
   label?: string;
 }
 
@@ -305,16 +373,33 @@ export interface WebGpuLiveSvoTetrahedralRadianceGpuTarget {
   pageValidity: LiveSvoDerivedPageValidityBinding;
   atlasPages: readonly [number, number, number];
   pageCapacity: number;
+  /** Physical atlas slots, which the radiance floor makes smaller than `pageCapacity`. */
+  atlasPageCapacity?: number;
+  /**
+   * `slot - slotOffset` is the atlas slot; slots below it own no radiance page.
+   * Absent means zero — every slot has a page, the behaviour before the floor.
+   */
+  slotOffset?: number;
+  /**
+   * Storage format the builder must declare for its scratch and its copy
+   * destination. Absent means the historical `rgba16float`, so a caller that
+   * predates the narrow format keeps working unchanged.
+   */
+  format?: GPUTextureFormat;
 }
 
 /** Fixed-capacity live radiance atlas sharing node-mip physical page slots. */
 export class WebGpuLiveSvoTetrahedralRadiance {
   readonly pageState: WebGpuLiveSvoDerivedPageState;
   readonly allocatedBytes: number;
+  /** Chosen from device features once, then carried on every GPU target. */
+  readonly format: GPUTextureFormat;
+  readonly atlasPageCapacity: number;
 
   private readonly textures: [GPUTexture, GPUTexture, GPUTexture, GPUTexture];
   private readonly views: [GPUTextureView, GPUTextureView, GPUTextureView, GPUTextureView];
   private readonly blackSlots = new Set<number>();
+  private slotOffset: number;
   private plan?: SvoNodeMipPyramidPlan;
   private pendingPlan?: SvoNodeMipPyramidPlan;
   private destroyed = false;
@@ -322,23 +407,44 @@ export class WebGpuLiveSvoTetrahedralRadiance {
   constructor(private readonly device: GPUDevice, private readonly options: WebGpuLiveSvoTetrahedralRadianceOptions) {
     if (!Number.isSafeInteger(options.pageCapacity) || options.pageCapacity <= 0) throw new RangeError("Live radiance page capacity must be positive");
     if (options.atlasTexels.some((value) => !Number.isSafeInteger(value) || value <= 0)) throw new RangeError("Live radiance atlas dimensions must be positive integers");
+    this.atlasPageCapacity = options.atlasPageCapacity ?? options.pageCapacity;
+    this.slotOffset = options.slotOffset ?? 0;
+    if (!Number.isSafeInteger(this.atlasPageCapacity) || this.atlasPageCapacity <= 0
+      || this.atlasPageCapacity > options.pageCapacity) {
+      throw new RangeError("Live radiance atlas page capacity must be positive and fit the slot index space");
+    }
+    if (!Number.isSafeInteger(this.slotOffset) || this.slotOffset < 0
+      || this.slotOffset + this.atlasPageCapacity > options.pageCapacity) {
+      throw new RangeError("Live radiance slot offset must leave its atlas inside the slot index space");
+    }
     if (options.atlasTexels.some((value) => value % SVO_NODE_MIP_LAYOUT.physicalSize !== 0)
-      || options.atlasTexels.reduce((product, value) => product * (value / SVO_NODE_MIP_LAYOUT.physicalSize), 1) < options.pageCapacity) {
+      || options.atlasTexels.reduce((product, value) => product * (value / SVO_NODE_MIP_LAYOUT.physicalSize), 1) < this.atlasPageCapacity) {
       throw new RangeError("Live radiance atlas must be page-aligned and contain its declared capacity");
     }
     const label = options.label ?? "Live SVO tetrahedral radiance";
+    this.format = options.format ?? liveSvoRadianceAtlasFormat(device.features);
     this.textures = [0, 1, 2, 3].map((direction) => device.createTexture({ label: `${label} lobe ${direction}`,
-      size: options.atlasTexels, dimension: "3d", format: "rgba16float",
+      size: options.atlasTexels, dimension: "3d", format: this.format,
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.COPY_DST })) as [GPUTexture, GPUTexture, GPUTexture, GPUTexture];
     this.views = this.textures.map((texture) => texture.createView({ dimension: "3d" })) as [GPUTextureView, GPUTextureView, GPUTextureView, GPUTextureView];
     this.pageState = new WebGpuLiveSvoDerivedPageState(device, options.pageCapacity, label);
-    this.allocatedBytes = options.atlasTexels.reduce((a, b) => a * b, 4 * 8) + this.pageState.allocatedBytes;
+    this.allocatedBytes = options.atlasTexels.reduce((a, b) => a * b, 4 * liveSvoRadianceBytesPerTexel(this.format))
+      + this.pageState.allocatedBytes;
   }
 
-  prepareGpuUpdate(plan: SvoNodeMipPyramidPlan): WebGpuLiveSvoTetrahedralRadianceGpuTarget {
+  /**
+   * Stage a plan. `slotOffset` moves with a re-plan, because renumbered slots
+   * change how many of them fall below the radiance floor; the atlas shape does
+   * not, because it was sized for the domain rather than for one plan.
+   */
+  prepareGpuUpdate(plan: SvoNodeMipPyramidPlan, slotOffset = this.slotOffset): WebGpuLiveSvoTetrahedralRadianceGpuTarget {
     this.assertAlive();
     if (plan.pages.length > this.options.pageCapacity) throw new RangeError("Live radiance page capacity exceeded");
-    if (plan.atlas.texels.some((value, axis) => value > this.options.atlasTexels[axis])) throw new RangeError("Live radiance atlas capacity exceeded");
+    if (!Number.isSafeInteger(slotOffset) || slotOffset < 0
+      || plan.pages.length - slotOffset > this.atlasPageCapacity) {
+      throw new RangeError("Live radiance atlas cannot hold the plan's pages above the radiance floor");
+    }
+    this.slotOffset = slotOffset;
     this.pendingPlan = plan;
     return this.gpuTarget();
   }
@@ -352,13 +458,15 @@ export class WebGpuLiveSvoTetrahedralRadiance {
     const physical = SVO_NODE_MIP_LAYOUT.physicalSize;
     return { textures: this.textures, pageValidity: this.pageState.validity,
       atlasPages: this.options.atlasTexels.map((value) => Math.floor(value / physical)) as [number, number, number],
-      pageCapacity: this.options.pageCapacity };
+      pageCapacity: this.options.pageCapacity, atlasPageCapacity: this.atlasPageCapacity,
+      slotOffset: this.slotOffset, format: this.format };
   }
 
   visibleGeneration(): WebGpuLiveSvoTetrahedralRadianceVisibleGeneration | undefined {
     if (!this.plan) return undefined;
     return { generation: this.plan.generation, plan: this.plan, textures: this.textures, views: this.views,
-      blackSlots: this.blackSlots, pageValidity: this.pageState.validity };
+      blackSlots: this.blackSlots, pageValidity: this.pageState.validity,
+      radianceFloorLevel: this.options.radianceFloorLevel ?? 0, slotOffset: this.slotOffset };
   }
 
   destroy(): void {

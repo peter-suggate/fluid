@@ -20,9 +20,17 @@ interface RangeControlProps {
   /** Shown when the value differs from a preset baseline; click resets. */
   onReset?: () => void;
   modified?: boolean;
+  /** Extra class on the control's own element, for a grid to promote one. */
+  className?: string;
+  /**
+   * Inert but present. A control whose value is real and whose *edit* is
+   * unavailable — a depth this scene cannot spend — has to keep showing the
+   * value, because removing it reads as "there is no such setting".
+   */
+  disabled?: boolean;
 }
 
-export function RangeControl({ label, unit, value, min, max, step, onChange, displayDigits = 3, hint, onReset, modified }: RangeControlProps) {
+export function RangeControl({ label, unit, value, min, max, step, onChange, displayDigits = 3, hint, onReset, modified, className, disabled = false }: RangeControlProps) {
   const [draft, setDraft] = useState<string | null>(null);
   const [rangeDraft, setRangeDraft] = useState<{ base: number; value: number } | null>(null);
   const commit = () => {
@@ -39,7 +47,7 @@ export function RangeControl({ label, unit, value, min, max, step, onChange, dis
   };
   const displayedValue = rangeDraft?.base === value ? rangeDraft.value : value;
   return (
-    <label className="range-control" title={hint}>
+    <label className={[className ? `range-control ${className}` : "range-control", disabled ? "is-disabled" : ""].filter(Boolean).join(" ")} title={hint}>
       <span className="control-heading">
         <span>{label}{modified && onReset && <button type="button" className="reset-chip" onClick={(event) => { event.preventDefault(); onReset(); }} title="Reset to preset value">↺</button>}</span>
         {draft !== null
@@ -53,10 +61,11 @@ export function RangeControl({ label, unit, value, min, max, step, onChange, dis
               onBlur={commit}
               onKeyDown={(event) => { if (event.key === "Enter") commit(); else if (event.key === "Escape") setDraft(null); }}
             />
-          : <output title="Double-click to type a value" onDoubleClick={(event) => { event.preventDefault(); setDraft(String(value)); }}>{formatNumber(displayedValue, displayDigits)} <small>{unit}</small></output>}
+          : <output title={disabled ? undefined : "Double-click to type a value"}
+              onDoubleClick={(event) => { event.preventDefault(); if (!disabled) setDraft(String(value)); }}>{formatNumber(displayedValue, displayDigits)} <small>{unit}</small></output>}
       </span>
       <input
-        type="range" min={min} max={max} step={step} value={displayedValue}
+        type="range" disabled={disabled} min={min} max={max} step={step} value={displayedValue}
         onChange={(event) => setRangeDraft({ base: value, value: Number(event.currentTarget.value) })}
         onPointerUp={(event) => commitRange(Number(event.currentTarget.value))}
         onPointerCancel={() => setRangeDraft(null)}

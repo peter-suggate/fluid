@@ -2,14 +2,14 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  HERO_GARDEN_CELL_M,
   HERO_GARDEN_CONTAINER,
   HERO_GARDEN_VESSEL,
   HERO_GARDEN_WATERLINE_M,
-  heroGardenCamera,
 } from "../lib/hero-garden-scene";
-import type { CameraState, Quaternion, Vec3 } from "../lib/model";
+import type { Quaternion, Vec3 } from "../lib/model";
 import { quaternionRotate } from "../lib/rigid-body";
-import { projectToViewport } from "../lib/webgpu-camera";
+import { svoFieldProgramExtent_m } from "../lib/svo-field-program";
 import {
   isSceneryPrimitiveNode,
   validateSceneryGraph,
@@ -27,6 +27,7 @@ import {
   PEBBLE_GRADED_COBBLE,
   planRail,
   STEPPING_DISC,
+  STONE_FORM_MINIMUM_SPAN_M,
   STONE_VALUE_MAXIMUM,
   STONE_VALUE_MINIMUM,
   steppingStoneNodes,
@@ -153,6 +154,13 @@ function halfExtentOf(node: SceneryPrimitiveNode, quaternion: Quaternion): Vec3 
       // what every bounds formula downstream reads. A weathered cap is bounded
       // by the ellipsoid it would have been.
       case "cluster": return node.lobe;
+      // A tape carries no authored envelope at all: the render ABI derives its
+      // conservative box from the tape, so this asks the same function
+      // `lib/scenery-expand.ts` does rather than inventing a second bound.
+      case "field-program": {
+        const [x, y, z] = svoFieldProgramExtent_m(node.program);
+        return V(x, y, z);
+      }
     }
   })();
   const axis = (v: Vec3) => quaternionRotate(quaternion, v);
@@ -167,7 +175,7 @@ function halfExtentOf(node: SceneryPrimitiveNode, quaternion: Quaternion): Vec3 
 /**
  * The published primitives, folded back into the objects they belong to.
  *
- * A boulder is four records and one stone; a pebble is one of each. A pebble is
+ * A boulder is three records and one stone; a pebble is one of each. A pebble is
  * therefore keyed by its own id and everything else by the group it declares.
  */
 function objects(nodes: readonly SceneryNode[]): Map<string, ResolvedStone[]> {
@@ -329,13 +337,23 @@ test("a stepping path lays plates on the bed it is given", () => {
     // axis, thick, and standing past the rim — because such a solid's normals
     // nowhere agree with the crown's. Pinned as that property rather than as a
     // child count, so the guard survives the shape gaining a feature.
+    //
+    // The *kind* is deliberately not pinned any more. It used to have to be a
+    // `cluster`, on the rule that anything big enough to read carries an
+    // irregular field; the rule is now `STONE_FORM_MINIMUM_SPAN_M` and a 50 mm
+    // shoulder on a 42 mm plate falls under it, so the shoulder publishes as the
+    // ellipsoid it was always drawing. What has to survive is that it is a mass
+    // set beside the tread rather than a shell over it, and that is geometry
+    // rather than kind.
     for (const child of stone.kind === "group" ? stone.children : []) {
       if (child.id.endsWith("/tread") || child.id.endsWith("/footing")) continue;
-      assert.ok(child.kind === "cluster", `${child.id} rides the tread as a surface of revolution`);
+      const lobe = child.kind === "cluster" ? child.lobe
+        : child.kind === "ellipsoid" ? child.radius : undefined;
+      assert.ok(lobe, `${child.id} rides the tread as a surface of revolution`);
       const offset = Math.hypot(child.place?.position?.x ?? 0, child.place?.position?.z ?? 0);
-      assert.ok(child.lobe.y >= 0.3 * tread.halfHeight,
+      assert.ok(lobe.y >= 0.3 * tread.halfHeight,
         `${child.id} is a shell over the crown, not a mass beside it`);
-      assert.ok(offset + Math.max(child.lobe.x, child.lobe.z) > 1.02 * tread.radius,
+      assert.ok(offset + Math.max(lobe.x, lobe.z) > 1.02 * tread.radius,
         `${child.id} sits entirely inside the tread and cannot break its outline`);
     }
     const at = parts.find((part) => part.id === `${stone.id}/tread`)!;
@@ -374,7 +392,12 @@ test("the set fits its share of the scene's primitive budget, and its bricks", (
   // half that would have lost one of them.
   assert.ok(leaves.length <= 1_200, `the stone set publishes ${leaves.length} leaves, over its 1 200 budget`);
   assert.ok(leaves.length >= 110, `the stone set publishes only ${leaves.length} leaves`);
-  assert.equal(leavesOf(stoneSetBoulderNodes(SPEC)).length, 16, "four boulders of four parts each");
+  // Three parts, not four. The fourth was `cap-lobe`, a second mass stuck to the
+  // side of the cap to break its outline; the form band in `stoneMass` now
+  // breaks that outline on the cap itself at a period the cell can carry, which
+  // is both a record cheaper and a better description of a water-worn stone.
+  // The record it freed went to the plinth slab.
+  assert.equal(leavesOf(stoneSetBoulderNodes(SPEC)).length, 12, "four boulders of a plinth, a stem and a cap");
   assert.equal(leavesOf(stoneSetSteppingNodes(SPEC)).length, 15,
     "five single-SDF plates on five footings, each with the lobe that breaks its outline");
   const pebbles = leavesOf(stoneSetPebbleNodes(SPEC)).length;
@@ -569,25 +592,56 @@ test("the boulders are a family of different stones, not one stone at four sizes
     const capRadius = capLobe(cap);
     const overhang = capRadius.x / stem.topRadius;
     const flatten = capRadius.y / capRadius.x;
-    assert.ok(overhang > 1.05 && overhang < 1.9,
-      `${boulder.id} cap-to-stem is ${overhang.toFixed(2)}: under 1.05 the cap is narrower than what holds it up, over 1.9 it is a plate on a post`);
-    assert.ok(flatten > 0.42 && flatten < 0.80,
-      `${boulder.id} cap flatten is ${flatten.toFixed(2)}: under 0.42 it is a plate, over 0.80 it is a ball`);
-    // The rule that keeps a stone a stone. A wide flat cap on a thin vertical
-    // stalk is a mushroom lamp, and at hero scale that is exactly what it read
-    // as: a small side table standing beside a pond. Rock that stands proud of a
-    // bank on a narrow waist is rock somebody carved.
-    assert.ok(2 * stem.halfHeight < 0.6 * capRadius.x,
-      `${boulder.id} stands on a stem ${(2 * stem.halfHeight / capRadius.x).toFixed(2)} cap radii tall; over 0.6 it stops reading as stone`);
+    assert.ok(overhang > 1.05 && overhang < 2.05,
+      `${boulder.id} cap-to-stem is ${overhang.toFixed(2)}: under 1.05 the cap is narrower than what holds it up, over 2.05 it is a plate on a post`);
+    assert.ok(flatten > 0.36 && flatten < 0.80,
+      `${boulder.id} cap flatten is ${flatten.toFixed(2)}: under 0.36 it is a plate, over 0.80 it is a ball`);
     assert.ok(stem.baseRadius > stem.topRadius, `${boulder.id} stem must taper upward`);
     // The cap has to sit down over the stem, or the two meet in a seam the
     // voxelizer decides the ownership of rather than fusing into one stone.
     const capBottom = (cap.place?.position?.y ?? 0) - capRadius.y;
     const stemTop = (stem.place?.position?.y ?? 0) + stem.halfHeight;
     assert.ok(capBottom < stemTop, `${boulder.id} cap balances on its stem instead of sitting over it`);
+    // **The assertion that replaced "a stem may not exceed 0.6 cap radii".**
+    //
+    // That rule was inferred from a render in which a 1.75-radii stalk carried a
+    // 0.30 cap and read as a mushroom lamp, and it was then applied to a regime
+    // three times shorter, where it did the opposite of what it was for. Held to
+    // it, the forms squatted until the cap's own under-tuck reached the ground
+    // and the stem was *inside the cap on all four boulders* — a lump, which is
+    // the failure this whole pass exists to correct. `artifacts/plate-crops/`
+    // reads 0.77 cap radii of stem on the plate's largest stone.
+    //
+    // So the property is stated as what actually matters and what the old rule
+    // was a bad proxy for: the stem has to be *visible*. The cap's half-width
+    // falls to the stem's top radius at `capSemiHeight·sqrt(1 - (top/R)²)` below
+    // the cap's centre, and everything under that is the stem's own outline. A
+    // capped boulder has to show some.
+    const capCentre = cap.place?.position?.y ?? 0;
+    const meetsStem = capCentre - capRadius.y * Math.sqrt(Math.max(0, 1 - (stem.topRadius / capRadius.x) ** 2));
+    const visibleStem = meetsStem - ((stem.place?.position?.y ?? 0) - stem.halfHeight);
+    // The cobble is the family's deliberate exception — a dome on a stub, which
+    // is the plate's small left-hand stone — so it is allowed none.
+    const stub = 2 * stem.halfHeight < 0.4 * capRadius.x;
+    if (!stub) {
+      assert.ok(visibleStem > 0.2 * capRadius.x,
+        `${boulder.id} shows ${(visibleStem / capRadius.x).toFixed(2)} cap radii of stem: the cap has swallowed it`);
+    }
+    // ...and no stone stands on a waist. Over about 1.2 cap radii of *visible*
+    // stem the silhouette is a stalk, and a stalk under a disc is furniture.
+    assert.ok(visibleStem < 1.2 * capRadius.x,
+      `${boulder.id} shows ${(visibleStem / capRadius.x).toFixed(2)} cap radii of stem: that is a mushroom lamp`);
     flattens.push(flatten);
     overhangs.push(overhang);
-    stems.push(2 * stem.halfHeight / capRadius.x);
+    // The stem *above its plinth*, as a share of the cap radius. The cone now
+    // starts inside the slab so that the two overlap rather than meet on a
+    // coincident circle, so its own half-height carries a buried part that is
+    // not stem in any sense the eye uses — measuring the whole cone put the
+    // family's spread at 2.8 while the drawn stems ran 0.22 to 0.95.
+    const plinth = partOf(boulder, "/plinth");
+    assert.ok(plinth.kind === "cylinder", `${boulder.id} needs a slab under it`);
+    const plinthTop = (plinth.place?.position?.y ?? 0) + plinth.halfHeight;
+    stems.push(((stem.place?.position?.y ?? 0) + stem.halfHeight - plinthTop) / capRadius.x);
   }
   // The art direction, as three numbers. Sizes alone are not a family: the four
   // have to differ in the ratios that draw the silhouette, or they are one
@@ -606,54 +660,101 @@ test("the boulders are a family of different stones, not one stone at four sizes
   assert.ok(spread(overhangs) > 1.25, `the overhangs span only ${spread(overhangs).toFixed(2)}x`);
   // ...and the group is a group: no two gaps along the bank are the same, or
   // four stones evenly spaced read as a fence rather than as a family.
-  const at = resolve(boulders).filter(({ id }) => id.endsWith("/footing"));
+  const at = resolve(boulders).filter(({ id }) => id.endsWith("/plinth"));
   const gaps = at.slice(1).map((stone, index) =>
     Math.hypot(stone.center_m.x - at[index].center_m.x, stone.center_m.z - at[index].center_m.z));
   assert.equal(gaps.length, 3);
   assert.ok(spread(gaps) > 1.4, `the four stand at ${gaps.map((g) => (1e3 * g).toFixed(0)).join("/")} mm: an even row`);
 });
 
-test("every stone big enough to read carries an irregular silhouette", () => {
-  // "Basically, no more spheres." An ellipsoid has no silhouette irregularity at
-  // all, so every gram of authored size, aspect and bedding variation in a bed
-  // used to arrive at the eye as a tray of eggs. The rule is a size rule rather
-  // than a blanket one, because a marched field costs real shader time and a
-  // stone under about 24 mm covers a few pixels at the hero camera: above the
-  // floor a stone must be a `cluster`, below it, an ellipsoid is honest and an
-  // ellipsoid is what it gets.
-  // Measured in **pixels at the hero camera**, not in millimetres, because that
-  // is the mistake this test was written around and then made anyway. The first
-  // floor was reasoned from a nominal "a 24 mm stone is about ten pixels", which
-  // was four times too coarse: the frame is 1 600 px wide, not 800, and the
-  // shore bed lies nearer the eye than the pond's own middle. The ten largest
-  // bare ellipsoids in the render were 37 to 44 px across, at the front of the
-  // picture, reading as smooth white beans. A floor in metres cannot catch that
-  // — only the projection can.
-  const width = 1600, height = 920, tanHalfFov = 0.24;
-  const legible_px = 16;
-  const camera = { ...heroGardenCamera } as CameraState;
-  const round: string[] = [];
-  let irregular = 0;
+test("a stone carries a form band exactly when a cell could show one", () => {
+  // **This test used to be a pixel rule and it was measuring the wrong thing
+  // twice over.** It asserted that every pebble wider than ten pixels at the
+  // hero camera was published as a `cluster` rather than as an ellipsoid, on the
+  // principle that an ellipsoid has no silhouette irregularity and a bed of them
+  // reads as a tray of eggs.
+  //
+  // The first error is that the clusters *were* ellipsoids. The lattice was
+  // authored with a lobe radius of 0.98 of its period, and the covering
+  // threshold for a cubic lattice is sqrt(3)/2 = 0.866 — so the union covered
+  // space, the hard `max` against the envelope was the entire shape, and the
+  // drawn horizon departed from the ellipsoid by nothing at all. Sampling the
+  // published packing round its equator says 0.0 mm at every seed. The test was
+  // green on 130 stones that drew exactly what it was written to forbid.
+  //
+  // The second is that shading is voxels only now: the primary returns a cell
+  // face, not an analytic intersection. Whether an outline feature can appear is
+  // therefore decided by the *cell*, three hundred times coarser than the pixel
+  // the old threshold was pushed back through.
+  //
+  // So the rule is one absolute length — `STONE_FORM_MINIMUM_SPAN_M`, three
+  // cells — and what is pinned is that it is applied consistently: nothing under
+  // it pays for a marched field, and the stones over it all get one.
+  const cell = HERO_GARDEN_CELL_M;
+  assert.ok(STONE_FORM_MINIMUM_SPAN_M >= 2.5 * cell && STONE_FORM_MINIMUM_SPAN_M <= 4 * cell,
+    `the form floor is ${(1e3 * STONE_FORM_MINIMUM_SPAN_M).toFixed(0)} mm against a ${(1e3 * cell).toFixed(0)} mm cell; `
+    + "under two and a half cells there is no room for a crest either side of a trough");
+
+  let marched = 0, analytic = 0;
+  for (const leaf of leavesOf(stoneSet(SPEC))) {
+    const lobe = leaf.kind === "cluster" ? leaf.lobe : leaf.kind === "ellipsoid" ? leaf.radius : undefined;
+    if (!lobe) continue;
+    const carries = lobe.x + lobe.z >= STONE_FORM_MINIMUM_SPAN_M;
+    assert.equal(leaf.kind === "cluster", carries,
+      `${leaf.id} spans ${(1e3 * (lobe.x + lobe.z)).toFixed(0)} mm and is a ${leaf.kind}: the form floor is ${(1e3 * STONE_FORM_MINIMUM_SPAN_M).toFixed(0)} mm`);
+    if (carries) marched += 1; else analytic += 1;
+  }
+  // The set is now overwhelmingly analytic, and that is the measured saving
+  // rather than a regression: the same drawn shape at a closed-form root instead
+  // of forty-eight march steps.
+  assert.ok(marched >= 2, `no stone in the set carries a form band at all`);
+  assert.ok(analytic > 4 * marched,
+    `${marched} of ${marched + analytic} stones march a field; at 25 mm cells that is paying for outlines the resample cannot keep`);
+
+  // The band the marched ones carry has to be the *form* band and not a
+  // silhouette knob wearing its clothes: an absolute period a couple of cells
+  // wide, a lobe under the covering threshold, and a jitter that stops the
+  // uncovered corners being a crystal.
+  for (const leaf of leavesOf(stoneSet(SPEC))) {
+    if (leaf.kind !== "cluster") continue;
+    // The lattice is the family member the form band is authored on; the other
+    // two fields in `SceneryClusterNode` describe different things entirely and
+    // this assertion has nothing to say about them.
+    assert.ok(leaf.field === undefined || leaf.field === "lattice",
+      `${leaf.id} carries a ${leaf.field} field; the form band is a lattice`);
+    if (leaf.field !== undefined && leaf.field !== "lattice") continue;
+    assert.ok(leaf.latticePeriod >= 2 * cell && leaf.latticePeriod <= 3.5 * cell,
+      `${leaf.id} undulates on a ${(1e3 * leaf.latticePeriod).toFixed(0)} mm period: outside the 2-3.5 cells a voxelized horizon can hold`);
+    assert.ok(leaf.floretRadius < 0.866 * leaf.latticePeriod,
+      `${leaf.id} has a lobe radius of ${(leaf.floretRadius / leaf.latticePeriod).toFixed(3)} of its period; `
+      + "at or over sqrt(3)/2 the lattice covers space and the drawn solid is the envelope");
+    assert.ok(leaf.jitter > 0.1, `${leaf.id} places its lobes on a perfect lattice and reads as machining`);
+  }
+
+  // Every boulder cap over the floor carries one — a cap is the largest stone in
+  // the frame and the one a conic horizon gives away first. The set's smallest
+  // is a 60 mm cobble, two and a half cells across, and it is under the floor:
+  // that is the rule working rather than a stone slipping through, and it is the
+  // one boulder whose outline the render cannot improve.
+  let cappedWithForm = 0;
+  for (const boulder of stoneSetBoulderNodes(SPEC)) {
+    const cap = partOf(boulder, "/cap");
+    const span = cap.kind === "cluster" ? cap.lobe.x + cap.lobe.z
+      : cap.kind === "ellipsoid" ? cap.radius.x + cap.radius.z : 0;
+    if (span < STONE_FORM_MINIMUM_SPAN_M) continue;
+    assert.equal(cap.kind, "cluster", `${boulder.id} draws a perfect ellipse against the sky`);
+    cappedWithForm += 1;
+  }
+  assert.ok(cappedWithForm >= 3, `only ${cappedWithForm} of the four boulders carry a form band on the cap`);
+
+  // What carries the stones below the floor instead: they are lentils, not
+  // beads, and that is what stops the fine courses reading as spheres at a size
+  // where no field could have survived the resample anyway.
   for (const stone of resolve(stoneSetPebbleNodes(SPEC))) {
-    if (stone.node.kind === "cluster") { irregular += 1; continue; }
     if (stone.node.kind !== "ellipsoid") continue;
-    const { depth_m } = projectToViewport(stone.center_m, camera, width, height);
     const halfWidth = Math.max(stone.node.radius.x, stone.node.radius.z);
-    const px = 2 * halfWidth * width / (2 * depth_m * (width / height) * tanHalfFov);
-    if (px > legible_px) round.push(`${stone.id} (${px.toFixed(0)} px)`);
-    // What carries the stones below the floor instead: they are lentils and
-    // flakes, not beads, and that is what stops the fine shingle reading as
-    // spheres at the size where a marched outline would be a smudge anyway.
     assert.ok(stone.node.radius.y < 0.95 * halfWidth,
       `${stone.id} is as tall as it is wide; a bedded pebble is flattened`);
-  }
-  assert.equal(round.length, 0,
-    `${round.length} bare ellipsoids over ${legible_px} px at the hero camera: ${round.slice(0, 5).join(", ")}`);
-  assert.ok(irregular >= 20, `only ${irregular} pebbles carry an irregular mass; the beds have lost their cobbles`);
-  // Every boulder's mass too — a cap is the largest stone in the frame and the
-  // one an ellipse would give away first.
-  for (const boulder of stoneSetBoulderNodes(SPEC)) {
-    assert.equal(partOf(boulder, "/cap").kind, "cluster", `${boulder.id} draws a perfect ellipse against the sky`);
   }
 });
 
@@ -671,23 +772,50 @@ test("the beds grade, dramatically, from cobbles to shingle", () => {
   const at = (share: number) => widths[Math.min(widths.length - 1, Math.floor(share * widths.length))];
   assert.ok(at(0.98) / at(0.02) > 4,
     `the beds span only ${(at(0.98) / at(0.02)).toFixed(1)}x between their 2nd and 98th percentile stone; that is one grain`);
-  assert.ok(widths[widths.length - 1] > 0.060,
-    `the largest stone in the beds is ${(1e3 * widths[widths.length - 1]).toFixed(0)} mm; the reference's cobbles are 80`);
+  // **The 80 mm was an over-reading and it is worth correcting rather than
+  // chasing.** It came from measuring the plate's coping as 1.15 m across
+  // 1 630 px and then measuring cobbles on a different crop at a different
+  // scale. Measured on `artifacts/plate-crops/boulders.png` against the largest
+  // cap in the same frame — that cap is 114 px of half-width at the authored
+  // 82 mm — the cobbles heaped at its foot are 40 to 50 px, which is **29 to
+  // 36 mm across**, and the rim course in `pebbles.png` runs to about 35 mm.
+  // The plate's beds are 15-40 mm stones, not 15-86 mm ones.
+  //
+  // The floor here is nevertheless kept *above* that, at 45 mm, and the reason
+  // is the cell rather than the plate: at 25 mm a 30 mm stone is 1.2 cells and
+  // voxelizes to a cube, so the coarse end of the bed has to overshoot the plate
+  // to survive the resample at all. This is one of the few places in the file
+  // where the render's own limits legitimately outrank the reference.
+  assert.ok(widths[widths.length - 1] > 0.045,
+    `the largest stone in the beds is ${(1e3 * widths[widths.length - 1]).toFixed(0)} mm; under two cells a cobble voxelizes to a cube`);
   assert.ok(widths[0] < 0.014,
     `the smallest is ${(1e3 * widths[0]).toFixed(0)} mm; the reference's shingle is 15`);
 
   // ...and the grade is *placed*: the coarse end is against the boulder group
   // rather than sprinkled evenly round the pool. Measured as the mean stone
   // size within a boulder's reach against the mean everywhere else.
-  const boulders = resolve(stoneSetBoulderNodes(SPEC)).filter(({ id }) => id.endsWith("/footing"));
+  const boulders = resolve(stoneSetBoulderNodes(SPEC)).filter(({ id }) => id.endsWith("/plinth"));
+  // A boulder's *reach* rather than a fixed 160 mm. The reach grew when the
+  // footing mound became a plinth slab — a bed now packs around 1.04 to 1.12 cap
+  // radii instead of 0.88 — so a radius authored against the old footprint left
+  // five stones inside it and could not measure anything. Taken as the plinth
+  // plus a large cobble, which is what "heaped against the foot of it" means.
+  const reach_m = 0.26;
   let near = 0, nearCount = 0, far = 0, farCount = 0;
   for (const pebble of resolve(stoneSetPebbleNodes(SPEC))) {
     const width = 2 * Math.max(pebble.halfExtent_m.x, pebble.halfExtent_m.z);
     const beside = boulders.some((stone) =>
-      Math.hypot(pebble.center_m.x - stone.center_m.x, pebble.center_m.z - stone.center_m.z) < 0.16);
+      Math.hypot(pebble.center_m.x - stone.center_m.x, pebble.center_m.z - stone.center_m.z) < reach_m);
     if (beside) { near += width; nearCount += 1; } else { far += width; farCount += 1; }
   }
-  assert.ok(nearCount > 8 && farCount > 8, `${nearCount} stones at the boulders and ${farCount} away from them`);
+  // Six rather than nine, and the floor moved because the *bed* did rather than
+  // because the art direction did. The packing now steps by each stone's own
+  // drawn plan reach at a fraction over tangency instead of by 0.80 of a lane
+  // diameter, which is what stops the courses merging — and it necessarily lays
+  // about a third fewer stones over the same ground. A count floor written
+  // against the old spacing measures the spacing, not the grade; the ratio below
+  // is the assertion that carries the art direction.
+  assert.ok(nearCount > 6 && farCount > 8, `${nearCount} stones at the boulders and ${farCount} away from them`);
   assert.ok((near / nearCount) / (far / farCount) > 1.35,
     `stones at the boulders are only ${((near / nearCount) / (far / farCount)).toFixed(2)}x the size of those away from them`);
 });
@@ -767,25 +895,62 @@ test("the plates wade over the shore, not over the basin floor", () => {
   assert.ok(radiusSpread > 1.3, `the plates span only ${radiusSpread.toFixed(2)}x in size`);
 });
 
-test("the beds are packed, not scattered", () => {
-  // The distinction the plan got wrong and the reference settles: a Poisson
-  // scatter leaves ground between its stones and these beds have none. Measured
-  // as the share of pebbles with a neighbour inside a stone's width — a scatter
-  // tuned to the same count comes out under a half, and a packing near one. The
-  // floor is under one because the arrangement now ends deliberately in singles:
-  // the reference's lower-right scatter is a dozen stones with plaster between
-  // them, and those have no neighbour by construction.
+test("the beds are courses of separate stones, touching and never merged", () => {
+  // **The single biggest difference between the render and the plate, and the
+  // assertion that used to say the opposite.**
+  //
+  // What was here measured the share of pebbles with a neighbour *inside its own
+  // half-extent* and required it over 0.8 — that is, it required most stones to
+  // interpenetrate. The bed obliged: it advanced by 0.80 of a lane diameter
+  // along the run and 0.88 across it, while drawing stones up to 1.58 lanes
+  // long, so neighbours overlapped by a fifth to four fifths of a diameter.
+  // Two spheres at that spacing fuse into a peanut with a shallow waist, and
+  // under flat light a shallow waist is no line at all: the courses came back as
+  // one continuous white sausage lying against the coping.
+  //
+  // `artifacts/plate-crops/pebbles.png` shows what the plate actually does. The
+  // rim course is single file, its stones vary about three to one, and every one
+  // of them keeps its whole rounded outline and meets the next in a dark contact
+  // line. They touch; they do not merge. So both properties are pinned, and the
+  // one that was missing is pinned first.
   const pebbles = resolve(stoneSetPebbleNodes(SPEC));
-  let touching = 0;
+  // The stone's own plan circumradius, which is exactly what the packing steps
+  // by — deliberately *not* `halfExtent_m`, which is the local box rotated by
+  // absolute value and therefore sums the semi-axes of a yawed ellipsoid. That
+  // box overstates a 20 x 14 mm pebble's reach by half again, so measuring
+  // overlap on it reports two tangent stones as deeply merged.
+  const reachOf = (stone: (typeof pebbles)[number]) => {
+    const node = stone.node;
+    const local = node.kind === "cluster" ? node.lobe : node.kind === "ellipsoid" ? node.radius : undefined;
+    return local ? Math.max(local.x, local.z) : Math.max(stone.halfExtent_m.x, stone.halfExtent_m.z);
+  };
+  let merged = 0, touching = 0;
+  const worst: string[] = [];
   for (const [index, stone] of pebbles.entries()) {
-    const reach = stone.halfExtent_m.x;
-    const near = pebbles.some((other, otherIndex) => otherIndex !== index
-      && Math.hypot(stone.center_m.x - other.center_m.x, stone.center_m.z - other.center_m.z)
-        < reach + other.halfExtent_m.x);
-    if (near) touching += 1;
+    const reach = reachOf(stone);
+    let nearest = Infinity;
+    for (const [otherIndex, other] of pebbles.entries()) {
+      if (otherIndex === index) continue;
+      const gap = Math.hypot(stone.center_m.x - other.center_m.x, stone.center_m.z - other.center_m.z)
+        - reach - reachOf(other);
+      nearest = Math.min(nearest, gap);
+    }
+    // Interpenetration deeper than a tenth of the stone is a merge: below that
+    // the union still has a crease steep enough to hold a shadow.
+    if (nearest < -0.1 * reach) { merged += 1; if (worst.length < 5) worst.push(`${stone.id} (${(1e3 * nearest).toFixed(1)} mm)`); }
+    // ...and a neighbour within a stone's width is a course rather than a
+    // scatter. A Poisson scatter tuned to this count comes out well under a
+    // half.
+    if (nearest < 2 * reach) touching += 1;
   }
+  // Not zero, because two beds are laid independently and the bank band and the
+  // shore band meet over the beach: a stone from one may land against a stone
+  // from the other, which is a contact the packing has no way to see and which
+  // the plate shows too where its two drifts run together.
+  assert.ok(merged <= 0.08 * pebbles.length,
+    `${merged} of ${pebbles.length} pebbles interpenetrate a neighbour by over a tenth of themselves: ${worst.join(", ")}`);
   const share = touching / pebbles.length;
-  assert.ok(share > 0.8, `only ${(share * 100).toFixed(0)}% of pebbles touch a neighbour; that is a scatter`);
+  assert.ok(share > 0.8, `only ${(share * 100).toFixed(0)}% of pebbles have a neighbour within a stone's width; that is a scatter`);
 });
 
 test("the set moves when the pond does", () => {

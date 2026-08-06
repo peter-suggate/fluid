@@ -21,7 +21,6 @@ import { DEFAULT_SVO_RENDER_TUNING, normalizeSvoRenderTuning, type SvoRenderTuni
 import { SVO_PIXEL_TRACE_LAYERS, type SvoPixelTraceLayer } from "../svo-pixel-trace";
 import { FLUID_CELL_TRACE_LAYERS, type FluidCellTraceLayer } from "../fluid-cell-trace";
 import type { GridOverlayConfig, GridOverlayMode } from "../webgpu-renderer";
-import type { VoxelRenderMode } from "../webgpu-voxel-debug";
 
 export type RightPanel = "visual" | "bodies" | "diagnostics" | "performance" | null;
 
@@ -71,8 +70,6 @@ interface UIStore {
   gridOverlaySlice: number;
   /** Field painted on the slice, including adaptive pressure diagnostics. */
   gridOverlayMode: GridOverlayMode;
-  /** Unified sparse-brick representation: smooth surface, raw voxels, or brick bounds. */
-  voxelRenderMode: VoxelRenderMode;
   svoShadowsEnabled: boolean;
   svoAmbientOcclusionEnabled: boolean;
   /** Full-rate visibility refinement at reduced-cone geometry silhouettes. */
@@ -154,7 +151,6 @@ interface UIStore {
   setGridOverlayAxis: (axis: GridOverlayConfig["axis"]) => void;
   setGridOverlaySlice: (slice: number) => void;
   setGridOverlayMode: (mode: GridOverlayMode) => void;
-  setVoxelRenderMode: (mode: VoxelRenderMode) => void;
   setSvoShadowsEnabled: (enabled: boolean) => void;
   setSvoAmbientOcclusionEnabled: (enabled: boolean) => void;
   setSilhouetteRefinementEnabled: (enabled: boolean) => void;
@@ -203,7 +199,6 @@ export const useUIStore = create<UIStore>((set) => ({
   gridOverlayAxis: "off",
   gridOverlaySlice: 0.5,
   gridOverlayMode: "structure",
-  voxelRenderMode: "smooth",
   svoShadowsEnabled: DEFAULT_SVO_LIGHTING_OPTIONS.shadowsEnabled,
   svoAmbientOcclusionEnabled: DEFAULT_SVO_LIGHTING_OPTIONS.ambientOcclusionEnabled,
   silhouetteRefinementEnabled: DEFAULT_SVO_LIGHTING_OPTIONS.silhouetteRefinementEnabled ?? false,
@@ -246,7 +241,6 @@ export const useUIStore = create<UIStore>((set) => ({
   setGridOverlayAxis: (gridOverlayAxis) => set({ gridOverlayAxis }),
   setGridOverlaySlice: (gridOverlaySlice) => set({ gridOverlaySlice: Math.max(0, Math.min(1, gridOverlaySlice)) }),
   setGridOverlayMode: (gridOverlayMode) => set({ gridOverlayMode }),
-  setVoxelRenderMode: (voxelRenderMode) => set({ voxelRenderMode }),
   setSvoShadowsEnabled: (svoShadowsEnabled) => set({ svoShadowsEnabled }),
   setSvoAmbientOcclusionEnabled: (svoAmbientOcclusionEnabled) => set({ svoAmbientOcclusionEnabled }),
   setSilhouetteRefinementEnabled: (silhouetteRefinementEnabled) => set({ silhouetteRefinementEnabled }),

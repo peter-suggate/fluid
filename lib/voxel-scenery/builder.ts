@@ -6,6 +6,9 @@ import type { EnvironmentProxySway } from "../scenery-sway";
 // packing rather than a flattened copy of it, and a value import here would put
 // the primitive ABI in every module that draws a box.
 import type { SvoSmoothUnionClusterPacking } from "../svo-primitive-abi";
+// Type-only for the same reason: a tape travels whole on the proxy, and a value
+// import of the evaluator here would put it in every module that draws a box.
+import type { SvoFieldProgram } from "../svo-field-program";
 
 export type { EnvironmentProxySway } from "../scenery-sway";
 
@@ -125,6 +128,28 @@ export interface EnvironmentClusterProxy extends EnvironmentProxyBase {
   readonly packing: SvoSmoothUnionClusterPacking;
 }
 
+/**
+ * A record whose geometry is a tape, clipped to nothing at all.
+ *
+ * The cluster's arrangement one level up, with one deliberate difference:
+ * `halfExtent_m` is a conservative **box** derived from the tape by
+ * `svoFieldProgramExtent_m`, not an authored ellipsoid the field is clipped to.
+ * A warp displaces the evaluation point by at most its amplitude per component,
+ * so the zero set is bounded axis by axis and the containing solid is a box —
+ * which is also why the ray ABI takes that box's corner as the rotation-
+ * invariant radius rather than its longest half-axis. See the `field-program`
+ * row of `SVO_PRIMITIVE_KIND_TABLE`.
+ *
+ * Every non-render consumer sees exactly that box, so it over-occludes a
+ * fissured interior — the same safe direction the cluster's envelope takes.
+ */
+export interface EnvironmentFieldProgramProxy extends EnvironmentProxyBase {
+  readonly kind: "field-program";
+  /** Conservative half-extent of the tape's zero set, along the record's own axes. */
+  readonly halfExtent_m: Vec3;
+  readonly program: SvoFieldProgram;
+}
+
 export type EnvironmentProxyPrimitive =
   | EnvironmentBoxProxy
   | EnvironmentCylinderProxy
@@ -132,7 +157,8 @@ export type EnvironmentProxyPrimitive =
   | EnvironmentCapsuleProxy
   | EnvironmentTorusProxy
   | EnvironmentConeProxy
-  | EnvironmentClusterProxy;
+  | EnvironmentClusterProxy
+  | EnvironmentFieldProgramProxy;
 
 export interface EnvironmentProxyShell {
   readonly kind: "room" | "terrain-heightfield";
@@ -318,6 +344,23 @@ export class ProxyBuilder {
     });
   }
 
+  /**
+   * A tape. `halfExtent_m` is the conservative box the render ABI derives from
+   * it — `svoFieldProgramExtent_m` — and is passed in rather than computed here
+   * so this module keeps its property of having no value import from the render
+   * ABI at all. `lib/scenery-expand.ts` is the single site that derives it, so
+   * the box and the tape cannot come from two different opinions.
+   */
+  fieldProgram(key: string, group: string, center_m: Vec3, halfExtent_m: Vec3, program: SvoFieldProgram,
+    colorLinear: EnvironmentLinearColor, emission = 0, tags: readonly string[] = [], orientation?: Quaternion): EnvironmentFieldProgramProxy {
+    return this.emit<EnvironmentFieldProgramProxy>({
+      kind: "field-program", key: `${this.environmentId}/${key}`, ownerIndex: this.nextOwner++, group, tags,
+      center_m, orientation, halfExtent_m, program,
+      material: { colorLinear, emission, roughness: roughnessFor(group, emission) },
+      aabb_m: aabb(center_m, rotatedExtent(halfExtent_m, orientation)),
+    });
+  }
+
   cone(key: string, group: string, center_m: Vec3, baseRadius_m: number, topRadius_m: number, halfHeight_m: number, colorLinear: EnvironmentLinearColor, emission = 0, tags: readonly string[] = [], orientation?: Quaternion, roundedEnds = false): EnvironmentConeProxy {
     const widest = Math.max(baseRadius_m, topRadius_m);
     const localHalfHeight = halfHeight_m + (roundedEnds ? widest : 0);
@@ -343,4 +386,21 @@ export interface EnvironmentSceneryContext {
   readonly roomHalf_m: Vec3;
   /** Physical thickness of finite room shell faces. */
   readonly shellThickness_m: number;
+  /**
+   * The finest voxel this set will be drawn at, in metres.
+   *
+   * `scene.voxelDomain.detailCellSize_m` when the document names one, and
+   * `finestCellSize_m` otherwise — see the field's note in `lib/model.ts` for
+   * why the two differ. This is the number a *legibility floor* is measured in:
+   * shading is the voxel cell's surface rather than an analytic intersection
+   * with the record, so a feature under about three voxels across does not draw
+   * small, it draws as aliasing.
+   *
+   * It is on the context rather than on any node's parameters for the same
+   * reason `groundHeightAt` is — see `SceneryGeneratorRequest`. A species has an
+   * opinion about proportion and no opinion at all about what resolution a scene
+   * runs; a saved document that pinned one would go stale the first time the
+   * lattice moved, which is exactly the drift this field exists to end.
+   */
+  readonly detailCellSize_m: number;
 }

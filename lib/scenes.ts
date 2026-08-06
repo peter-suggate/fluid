@@ -1,7 +1,12 @@
 import { cloneScene, defaultCamera, defaultScene, DEFAULT_GPU_CPU_TIMESTEP_RATIO, type CameraState, type SceneDescription } from "./model";
+import { applyHeroGardenNodeOverrides } from "./hero-garden-overrides";
 import { createPaperScenario } from "./paper-scenarios";
 import { applyGardenPool, GARDEN_DAM_BRICK_SEED_M, GARDEN_WATERLINE_M, gardenPoolTerrain } from "./garden-scene";
-import { createHeroGardenHoseScene, heroGardenCamera } from "./hero-garden-scene";
+import {
+  createHeroGardenHoseScene,
+  heroGardenCamera,
+  type HeroGardenHoseOptions,
+} from "./hero-garden-scene";
 import {
   createHeroGardenHoseStressScene,
   HERO_GARDEN_STRESS_MAXIMUM_MULTIPLIER,
@@ -19,6 +24,8 @@ import {
   sceneDocument,
   type SceneCard,
   type SceneDefinition,
+  type SceneLattice,
+  type ScenePresentationMode,
   type SceneVariant,
 } from "./scene-definition";
 
@@ -43,6 +50,8 @@ export interface ScenePreset {
   methodProfile?: MethodProfile;
   /** Art-directed background that is part of this preset's presentation. */
   background: EnvironmentId;
+  /** Whether the authored dry world is presented behind the raster water. */
+  presentationMode: ScenePresentationMode;
 }
 
 export const POWER_VALIDATION_METHOD_PROFILE: MethodProfile = Object.freeze({
@@ -1272,6 +1281,41 @@ function pinStep(scene: SceneDescription, dt_s: number): void {
 }
 
 /**
+ * The hero garden, vessel and set, as one document.
+ *
+ * The set is composed here rather than inside `createHeroGardenHoseScene`
+ * because the layout depends on the vessel — it seats every prop through
+ * `pondVesselHeightAt` and runs its pebble beds along `pondVesselPlanCurve` —
+ * and a scene module that imported it back would close a cycle that dies in the
+ * temporal dead zone. Vessel, then set, then catalog is the one ordering with no
+ * arrow pointing backwards.
+ *
+ * Exported, and with the factory's own options, because a lane that wants this
+ * scene at another lattice has exactly one place to ask. The alternative was the
+ * one `tools/run-svo-dry-render-smoke.ts` used to take: build the preset, then
+ * overwrite `voxelDomain.finestCellSize_m` on the finished document. That moves
+ * the octree and nothing else — the heightfield is already baked at whatever
+ * spacing the default asked for and every generator has already expanded at the
+ * 25 mm leaf — so the lattice got finer and nothing that feeds it did. A size
+ * has to be an *input* to construction, which is what this signature is for.
+ * `FLUID_SVO_DRY_SMOKE_RECORD_MULTIPLIER` already set the precedent by calling
+ * `createHeroGardenHoseStressScene` rather than editing a built scene.
+ */
+export function createHeroGardenHoseSceneWithSet(
+  options: HeroGardenHoseOptions = {},
+): SceneDescription {
+  const scene = createHeroGardenHoseScene(options);
+  // Appending rather than mutating matters: `scene.scenery` is composed fresh
+  // per document, and `withHeroLayout` reads the same vessel and waterline the
+  // factory just solved.
+  if (!scene.scenery) return scene;
+  const composed = withHeroLayout(scene);
+  // And the shape lab's overrides once more, over the nodes the layout added —
+  // see `lib/hero-garden-overrides.ts`. Idempotent on the ones already replaced.
+  return { ...scene, scenery: { ...composed, nodes: [...applyHeroGardenNodeOverrides(composed.nodes)] } };
+}
+
+/**
  * The scene catalog.
  *
  * One list, one identity per scene, one accessor (`sceneDocument`). Order is
@@ -1292,6 +1336,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     audience: "explore",
     shelf: "Tanks",
     environment: "default",
+    presentationMode: "fluid-only",
     build: () => {
       const scene = cloneScene(defaultScene);
       scene.rigidBodies = [];
@@ -1389,10 +1434,15 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     // ordering with no arrow pointing backwards. Appending rather than mutating
     // matters too: `scene.scenery` is a module-level constant shared by every
     // document the factory produces.
-    build: () => {
-      const scene = createHeroGardenHoseScene();
-      return scene.scenery ? { ...scene, scenery: withHeroLayout(scene) } : scene;
-    },
+    build: () => createHeroGardenHoseSceneWithSet(),
+    // The one route to this scene at another lattice, and the reason it is a
+    // member of the definition rather than a call somewhere: the terrain bake,
+    // the layout composed against it and every generator's legibility floor are
+    // resolved while the document is built, so the sizes have to arrive before
+    // it exists. `tools/run-svo-dry-render-smoke.ts` already reached the factory
+    // directly for `FLUID_SVO_DRY_SMOKE_REFINEMENT`; this is the same call, from
+    // the side the product loads scenes on.
+    buildAt: (lattice: SceneLattice) => createHeroGardenHoseSceneWithSet(lattice),
     camera: heroGardenCamera,
     // No GPU lane yet, and so deliberately no variant: an authored variant that
     // no lane claims is a fork by another name. The settling lane returns with
@@ -1421,6 +1471,10 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     // so unlike the hero above there is nothing to append here.
     build: () => createHeroGardenHoseStressScene({
       recordMultiplier: HERO_GARDEN_STRESS_MAXIMUM_MULTIPLIER,
+    }),
+    buildAt: (lattice: SceneLattice) => createHeroGardenHoseStressScene({
+      recordMultiplier: HERO_GARDEN_STRESS_MAXIMUM_MULTIPLIER,
+      ...lattice,
     }),
     camera: heroGardenCamera,
   }),
@@ -1829,6 +1883,7 @@ export const scenePresets: ReadonlyArray<ScenePreset> = SCENE_CATALOG.map((defin
   group: definition.shelf,
   description: definition.blurb,
   background: definition.environment,
+  presentationMode: definition.presentationMode ?? "full-scene",
   camera: definition.camera,
   methodProfile: definition.methodProfile,
   create: () => sceneDocument(definition),

@@ -11,10 +11,11 @@
  * nothing has been parked inside the container where the water lives.
  */
 import { environmentIds, type EnvironmentId } from "../lib/environments";
-import { createHeroGardenHoseScene } from "../lib/hero-garden-scene";
+import { createHeroGardenHoseScene, HERO_GARDEN_CELL_M } from "../lib/hero-garden-scene";
 import { cloneScene, defaultScene, type SceneDescription } from "../lib/model";
 import { buildSvoEnvironmentCoverage } from "../lib/svo-scene-coverage";
 import { SVO_LIGHT_MAXIMUM_RECORDS } from "../lib/svo-light-abi";
+import { terrainSampleShape } from "../lib/terrain";
 import { buildEnvironmentProxyCatalog, environmentProxyPrimitives } from "../lib/voxel-environments";
 
 /**
@@ -38,9 +39,36 @@ interface ScenerySubject {
   readonly build: () => SceneDescription;
 }
 
+/**
+ * The hero garden at both ends of the detail ladder.
+ *
+ * A generator sizes its features in *detail voxels* — `bonsaiCanopyLadder`
+ * raises its floret to a floor of leaves, and every other legibility floor in
+ * `lib/voxel-scenery` is the same kind of number — so "is this set richer at a
+ * finer leaf?" is a question with an answer, and it is one this check can give
+ * in seconds where the Dawn lane needs the exclusive lock and eight minutes.
+ *
+ * Both rungs are built through `createHeroGardenHoseScene`'s own options rather
+ * than by writing a size onto a finished document, because that is the only
+ * thing that reaches a bake or a generator; see `SceneLattice`.
+ *
+ * `÷8` is the bottom of the ladder the octree can spend
+ * (`SVO_ENVIRONMENT_REFINEMENT_DEPTH_MAXIMUM` = 3), so between these two rows
+ * is the whole of what a finer lattice is able to buy this set today.
+ */
+const HERO_GARDEN_FINE_DIVISOR = 8;
+
 const SUBJECTS: readonly ScenerySubject[] = [
   ...environmentIds.map((environment) => ({ id: environment, environment, build: () => cloneScene(defaultScene) })),
   { id: "hero-garden", environment: "garden" as EnvironmentId, build: () => createHeroGardenHoseScene() },
+  {
+    id: "hero-garden-fine",
+    environment: "garden" as EnvironmentId,
+    build: () => createHeroGardenHoseScene({
+      cellSize_m: HERO_GARDEN_CELL_M,
+      detailCellSize_m: HERO_GARDEN_CELL_M / HERO_GARDEN_FINE_DIVISOR,
+    }),
+  },
 ];
 
 const requested = process.argv.slice(2).filter((value) => !value.startsWith("-"));
@@ -96,7 +124,17 @@ for (const { id, environment, build } of targets) {
   if (omitted.length) fail(id, `${omitted.length} light(s) dropped past the ${SVO_LIGHT_MAXIMUM_RECORDS}-record cap: ${omitted.map(({ key }) => key).join(", ")}`);
 
   const lit = first.primitives.filter(({ tags }) => tags.includes("light")).length;
-  console.log(`${failures ? " " : "✓"} ${id.padEnd(17)} props ${String(first.primitives.length).padStart(4)}  shell ${String(first.shell.primitives.length).padStart(2)}  lights ${String(lit).padStart(2)}  coverage ${coverage.summary.complete}✓ ${coverage.summary.degraded}~ ${coverage.summary.unsupported}✗`);
+  // The lattice the set was expanded at, and the ground it was seated on. Both
+  // are inputs to construction, so a row that reports them is the only way to
+  // tell a set that got richer at a finer leaf from one that ignored it.
+  const detail_m = scene.voxelDomain.detailCellSize_m ?? scene.voxelDomain.finestCellSize_m;
+  const bake_m = terrainSampleShape(scene.terrain)?.spacing_m;
+  console.log(`${failures ? " " : "✓"} ${id.padEnd(17)} props ${String(first.primitives.length).padStart(4)}`
+    + `  shell ${String(first.shell.primitives.length).padStart(2)}  lights ${String(lit).padStart(2)}`
+    + `  coverage ${coverage.summary.complete}✓ ${coverage.summary.degraded}~ ${coverage.summary.unsupported}✗`
+    + `  leaf ${(detail_m * 1000).toFixed(4).replace(/\.?0+$/, "").padStart(6)} mm`
+    + (bake_m === undefined ? "" : `  ground ${(bake_m * 1000).toFixed(4).replace(/\.?0+$/, "")} mm`
+      + ` = ${(bake_m / detail_m).toFixed(2)} leaves`));
 }
 
 if (failures) { console.error(`\n${failures} scenery check failure(s)`); process.exit(1); }

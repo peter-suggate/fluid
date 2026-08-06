@@ -27,12 +27,12 @@ function normalizeWhitespace(source: string): string {
   return source.replace(/\s+/g, " ");
 }
 
-test("isolated smoke timeout is validated in the 60-240 second safety envelope", () => {
+test("isolated smoke timeout is validated in the 60-600 second safety envelope", () => {
   assert.equal(parseWebGPUSmokeTimeout(undefined), DEFAULT_WEBGPU_SMOKE_TIMEOUT_MS);
   assert.equal(parseWebGPUSmokeTimeout("60000"), MINIMUM_WEBGPU_SMOKE_TIMEOUT_MS);
-  assert.equal(parseWebGPUSmokeTimeout("240000"), MAXIMUM_WEBGPU_SMOKE_TIMEOUT_MS);
-  for (const value of ["59999", "240001", "120000.5", "Infinity", "not-a-timeout"]) {
-    assert.throws(() => parseWebGPUSmokeTimeout(value), /must be an integer from 60000 to 240000/);
+  assert.equal(parseWebGPUSmokeTimeout("600000"), MAXIMUM_WEBGPU_SMOKE_TIMEOUT_MS);
+  for (const value of ["59999", "600001", "120000.5", "Infinity", "not-a-timeout"]) {
+    assert.throws(() => parseWebGPUSmokeTimeout(value), /must be an integer from 60000 to 600000/);
   }
   assert.equal(WEBGPU_EXCLUSIVE_LOCK, "/tmp/fluid-webgpu-exclusive.lock");
 });

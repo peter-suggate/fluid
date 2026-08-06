@@ -43,6 +43,12 @@ function installGpuConstants() {
   };
 }
 
+// Atlas extents follow the layout's physical page size rather than pinning the
+// 10^3 page the apron used to require. See SVO_NODE_MIP_LAYOUT.
+const PHYSICAL = SVO_NODE_MIP_LAYOUT.physicalSize;
+const PAGES_2x2x1: readonly [number, number, number] = [2 * PHYSICAL, 2 * PHYSICAL, PHYSICAL];
+const PAGES_2x1x1: readonly [number, number, number] = [2 * PHYSICAL, PHYSICAL, PHYSICAL];
+
 test("live derived state immediately invalidates dirty pages and publishes only a complete worklist", () => {
   const restore = installGpuConstants();
   try {
@@ -71,7 +77,7 @@ test("fixed node-mip atlas stages GPU-built generations without CPU page content
   try {
     const mock = mockDevice();
     const owner = new WebGpuLiveSvoNodeMipPyramid(mock.device, {
-      pageCapacity: 4, atlasTexels: [20, 20, 10], directPageTableDimensions: [4, 4, 4],
+      pageCapacity: 4, atlasTexels: PAGES_2x2x1, directPageTableDimensions: [4, 4, 4],
     });
     const allocations = [mock.buffers.length, mock.textures.length];
     const first = planSvoNodeMipPyramid({ generation: 1, occupiedPages: [[0, 0, 0]], levelCount: 1 });
@@ -93,7 +99,7 @@ test("fixed radiance atlas exposes storage targets without CPU content uploads",
   const restore = installGpuConstants();
   try {
     const mock = mockDevice();
-    const owner = new WebGpuLiveSvoTetrahedralRadiance(mock.device, { pageCapacity: 2, atlasTexels: [20, 10, 10] });
+    const owner = new WebGpuLiveSvoTetrahedralRadiance(mock.device, { pageCapacity: 2, atlasTexels: PAGES_2x1x1 });
     const allocations = [mock.buffers.length, mock.textures.length];
     const plan = planSvoNodeMipPyramid({ generation: 1, occupiedPages: [[0, 0, 0]], levelCount: 1 });
     const target = owner.prepareGpuUpdate(plan); owner.acceptGpuUpdate(1);

@@ -73,8 +73,9 @@ test("WebGPU owner uploads directory/pages and atomically swaps complete generat
   assert.equal(mock.textureWrites.length, 3, "sampled directory, direct page table, and page payload are uploaded");
   assert.deepEqual(mock.textureWrites[1].size, [1, 1, 1]);
   assert.equal(mock.textureWrites[1].data[0], 1, "direct-table zero is reserved for non-resident pages");
-  assert.deepEqual(mock.textureWrites[2].size, [10, 10, 10]);
-  assert.equal(mock.textureWrites[2].layout.bytesPerRow, 40);
+  assert.deepEqual(mock.textureWrites[2].size, Array.from({ length: 3 }, () => SVO_NODE_MIP_LAYOUT.physicalSize));
+  assert.equal(mock.textureWrites[2].layout.bytesPerRow,
+    SVO_NODE_MIP_LAYOUT.physicalSize * SVO_NODE_MIP_LAYOUT.bytesPerTexel);
   assert.equal(mock.textureWrites[2].data.byteLength, SVO_NODE_MIP_LAYOUT.bytesPerPage);
   assert.equal(owner.visibleGeneration()?.directoryTexture, mock.textures[1] as unknown as GPUTexture);
   assert.equal(owner.visibleGeneration()?.directPageTableTexture, mock.textures[2] as unknown as GPUTexture);

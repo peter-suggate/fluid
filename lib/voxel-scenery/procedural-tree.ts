@@ -1,6 +1,10 @@
 import type { Quaternion, Vec3 } from "../model";
 import type { EnvironmentProxySway } from "../scenery-sway";
 import {
+  SVO_CLUSTER_LATTICE_MAXIMUM_OCTAVES,
+  type SvoClusterLatticeField,
+} from "../svo-primitive-abi";
+import {
   alongAxis,
   V,
   type EnvironmentLinearColor,
@@ -46,6 +50,114 @@ export interface ProceduralTreeSpec {
   readonly bark: (value: number) => EnvironmentLinearColor;
   /** Foliage colour, by value. */
   readonly leaf: (value: number) => EnvironmentLinearColor;
+  /**
+   * The finest voxel this tree will be drawn at, in metres.
+   *
+   * Placement rather than form — see `SceneryGeneratorRequest.detailCellSize_m`.
+   * The only thing it decides is how many octaves of granulation the foliage
+   * pads carry; every length in the plan below is the tree's own proportion.
+   * Absent is {@link PROCEDURAL_TREE_DEFAULT_LEAF_SIZE_M} and reproduces the
+   * 25 mm tree exactly.
+   */
+  readonly leafSize_m?: number;
+}
+
+/** The leaf a tree is drawn at when nobody says, in metres. */
+export const PROCEDURAL_TREE_DEFAULT_LEAF_SIZE_M = 0.025;
+
+/**
+ * The granulation a foliage pad carries, in metres, and the octaves of it.
+ *
+ * **A pad was a bare ellipsoid, and a bare ellipsoid is the one shape a cloud of
+ * leaves is definitely not.** It stayed one because the record economy said so:
+ * the alternative anybody reaches for is more pads, and a niwaki spelled as
+ * pads-of-pads is fifteen records becoming a hundred and fifty, into the same
+ * per-brick candidate ceiling that the bonsai's explicit-floret canopy already
+ * broke. A `lattice` cluster is the same **one** record with a jittered sphere
+ * lattice inside it, evaluated by the shader, clipped to the pad's own envelope
+ * — so the silhouette the eye reads is granular and the count does not move.
+ *
+ * The period is a *length* and not a share of the pad, for the reason
+ * `stone-set.ts` gives at {@link StoneMassSpec} and had to learn twice: what
+ * decides whether a bump appears is its size against the voxel, so a count would
+ * make a low tier's grain three cells across and a leader's a twentieth of one.
+ * 90 mm is a hand's width of foliage — the scale a pruned pad actually clumps at
+ * — and the octaves under it are what the leaf buys:
+ *
+ *   leaf        octaves   finest grain
+ *   25 mm          1         90.0 mm
+ *   12.5 mm        2         45.0 mm
+ *   6.25 mm        3         22.5 mm
+ *   3.125 mm       4         11.3 mm
+ *   1.5625 mm      5          5.6 mm
+ *   0.78125 mm     5          5.6 mm
+ *
+ * Same ladder and the same three-leaf admission test as the quarry's; see
+ * `stoneFormOctaves`. The last row is the one place foliage is *clamped* rather
+ * than admitted: its 90 mm period is coarser than the quarry's 55 mm, so at the
+ * finest leaf the test would take a sixth octave at 2.81 mm, and
+ * `SVO_CLUSTER_LATTICE_MAXIMUM_OCTAVES` stops at five. That is deliberate and
+ * the cost data behind it is on the constant — a sixth octave serves foliage
+ * alone, sits on the three-leaf floor, and costs a further fifth of the most
+ * expensive record kind in a scene.
+ */
+export const FOLIAGE_GRAIN_PERIOD_M = 0.090;
+
+/**
+ * Lattice sphere radius as a fraction of the period, and the blend that fuses
+ * them.
+ *
+ * `sqrt(3)/2 = 0.866` is where the union covers space outright and the hard
+ * `max` against the envelope draws the bare ellipsoid back — the failure
+ * `STONE_FORM_LOBE_SHARE` documents in detail. 0.72 is further under it than the
+ * quarry's 0.69 because a pad is *meant* to open: foliage that reads as a solid
+ * with dents in it is the lollipop this generator exists to replace, and the
+ * gaps between clumps are where the lantern's light gets through the canopy.
+ */
+const FOLIAGE_GRAIN_LOBE_SHARE = 0.72;
+const FOLIAGE_GRAIN_BLEND_SHARE = 0.26;
+/** Displacement from the cell centre. At the ABI's ceiling: a crystal reads as one. */
+const FOLIAGE_GRAIN_JITTER = 0.28;
+
+/** Octaves of {@link FOLIAGE_GRAIN_PERIOD_M} this leaf can draw, 1..3. */
+export function foliageGrainOctaves(leafSize_m: number = PROCEDURAL_TREE_DEFAULT_LEAF_SIZE_M): number {
+  if (!(leafSize_m > 0)) throw new RangeError("Procedural tree leaf size must be positive");
+  let octaves = 1;
+  while (octaves < SVO_CLUSTER_LATTICE_MAXIMUM_OCTAVES
+    && FOLIAGE_GRAIN_PERIOD_M * 2 ** -octaves >= 3 * leafSize_m) octaves += 1;
+  return octaves;
+}
+
+/**
+ * The packing a foliage pad publishes at this leaf, or undefined for a pad too
+ * small to hold one.
+ *
+ * Two ways a pad declines one, and both matter. A pad narrower than about a
+ * period and a half has nowhere to put a gap, and a lattice on it is forty-eight
+ * march steps that draw the envelope it was already drawing — the leader's pads
+ * on a small tree are exactly that case. And a *lattice* whose coarsest octave
+ * cannot clear three leaves is not granulation, it is the aliasing band, so
+ * below that the pad goes back to being the ellipsoid it always was. That second
+ * test is why every preset in the app is untouched: they run at a 50 mm leaf,
+ * where 90 mm is 1.8 leaves and this returns nothing.
+ */
+export function foliageGrainPacking(
+  radii_m: Vec3, seed: number, leafSize_m: number = PROCEDURAL_TREE_DEFAULT_LEAF_SIZE_M,
+): SvoClusterLatticeField | undefined {
+  if (FOLIAGE_GRAIN_PERIOD_M < 3 * leafSize_m) return undefined;
+  const octaves = foliageGrainOctaves(leafSize_m);
+  const finestPeriod_m = FOLIAGE_GRAIN_PERIOD_M * 2 ** -(octaves - 1);
+  if (2 * Math.min(radii_m.x, radii_m.z) < 1.5 * finestPeriod_m) return undefined;
+  const latticeLobeRadius_m = FOLIAGE_GRAIN_LOBE_SHARE * FOLIAGE_GRAIN_PERIOD_M;
+  return {
+    field: "lattice",
+    latticeLobeRadius_m,
+    latticePeriod_m: FOLIAGE_GRAIN_PERIOD_M,
+    jitter: FOLIAGE_GRAIN_JITTER,
+    smoothRadius_m: FOLIAGE_GRAIN_BLEND_SHARE * latticeLobeRadius_m,
+    seed: (seed >>> 0) || 1,
+    octaves,
+  };
 }
 
 export type ProceduralTreeShape =
@@ -344,12 +456,25 @@ export function treeSwayFor(plan: ProceduralTreePlan, part: ProceduralTreePart, 
  * it every frame with a single buffer write.
  */
 export function emitProceduralTree(builder: ProxyBuilder, plan: ProceduralTreePlan, sway?: ProceduralTreeSwaySpec): void {
+  const leafSize_m = plan.spec.leafSize_m ?? PROCEDURAL_TREE_DEFAULT_LEAF_SIZE_M;
   const publish = () => {
-    for (const part of plan.parts) {
+    for (const [index, part] of plan.parts.entries()) {
       const key = `${plan.spec.key}/${part.key}`;
       const tags = ["tree", part.role];
       if (part.shape.kind === "cone") {
         builder.cone(key, part.group, part.center_m, part.shape.baseRadius_m, part.shape.topRadius_m, part.shape.halfHeight_m,
+          part.colorLinear, 0, tags, part.orientation);
+        continue;
+      }
+      // A pad is the one part of a tree whose surface is supposed to be broken,
+      // so it is the one part that takes a field. Same record either way; see
+      // `foliageGrainPacking`. Trunks and limbs stay exact cones — a run's shape
+      // is its centreline, and no lattice on it would be anything but noise.
+      const packing = part.role === "foliage"
+        ? foliageGrainPacking(part.shape.radii_m, plan.spec.seed + 0x0f_01 + 31 * index, leafSize_m)
+        : undefined;
+      if (packing) {
+        builder.cluster(key, part.group, part.center_m, part.shape.radii_m, packing,
           part.colorLinear, 0, tags, part.orientation);
       } else {
         builder.ellipsoid(key, part.group, part.center_m, part.shape.radii_m, part.colorLinear, 0, tags, part.orientation);

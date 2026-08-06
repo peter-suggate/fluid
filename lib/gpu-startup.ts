@@ -45,7 +45,6 @@ export interface SafeBrowserGPUBringupConfig {
   readonly methodValues: Readonly<Record<string, unknown>>;
   readonly canonicalMethodValues: Readonly<Record<string, unknown>>;
   readonly exactScene: boolean;
-  readonly voxelRenderMode: string;
   readonly diagnosticsOpen: boolean;
   readonly rightPanel: string | null;
   readonly gridOverlayAxis: string;
@@ -64,7 +63,7 @@ export function safeBrowserGPUBringupViolations(config: SafeBrowserGPUBringupCon
     .filter((key) => !safeVariantKeys.has(key))
     .filter((key) => JSON.stringify(values[key]) !== JSON.stringify(canonical[key]));
   const approvedQueryKeys = new Set([
-    "gpu", "method", "scene", "quality", "voxels",
+    "gpu", "method", "scene", "quality",
     "param.octree.coarseBackend",
     "param.octree.globalFineLevelSetFactor",
     "param.octree.maximumLeafSize",
@@ -82,7 +81,6 @@ export function safeBrowserGPUBringupViolations(config: SafeBrowserGPUBringupCon
       && "global fine level set must be factor 1, 4, or 8",
     values.maximumLeafSize !== "16" && "maximum leaf size must be 16",
     parameterDrift.length > 0 && `method profile drifted: ${parameterDrift.join(", ")}`,
-    config.voxelRenderMode !== "smooth" && "voxel inspection must be smooth/off",
     config.diagnosticsOpen && "diagnostics panel must remain closed",
     config.rightPanel !== null && "all right-side panels must remain closed",
     config.gridOverlayAxis !== "off" && "grid overlays must remain off",
@@ -178,7 +176,12 @@ export function fluidExecutionDeviceFeatures(
   features: { has(feature: string): boolean },
 ): GPUFeatureName[] {
   const requested = performanceTraceDeviceFeatures(features);
-  for (const feature of ["shader-f16", "subgroups"] as const) {
+  // `texture-formats-tier1` is what makes `rg11b10ufloat` a *storage* format.
+  // The live radiance atlas is four lobes of it against four of rgba16float:
+  // 16 B/texel instead of 32, which is 16 000 of the 36 000 bytes every
+  // node-mip page costs. Never assumed — `liveSvoRadianceAtlasFormat` reads the
+  // granted device features and falls back to rgba16float without it.
+  for (const feature of ["shader-f16", "subgroups", "texture-formats-tier1"] as const) {
     if (features.has(feature)) requested.push(feature as GPUFeatureName);
   }
   return requested;

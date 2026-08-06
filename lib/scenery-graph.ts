@@ -1,5 +1,12 @@
 import type { Quaternion, Vec3 } from "./model";
 import type { SceneryGeneratorParamsByKind } from "./scenery-generators";
+// Type-only, exactly like `PondVesselSpec` below and for the same reason: this
+// module is runtime-imported by `lib/model.ts` to validate a parsed document,
+// and a value import of the field-program machinery would put the tape
+// evaluator, its noise library and its WGSL generator in every bundle that
+// parses a scene. Types are erased, so the schema can name a tape without
+// carrying one.
+import type { SvoFieldProgram } from "./svo-field-program";
 import type { PondVesselSpec } from "./voxel-scenery/pond-vessel";
 
 /**
@@ -274,11 +281,14 @@ export interface SceneryLatticeClusterNode extends SceneryClusterNodeBase {
    */
   readonly jitter: number;
   /**
-   * Halvings of the lattice fused onto it, 1..3. Absent is one.
+   * Halvings of the lattice fused onto it, up to
+   * `SVO_CLUSTER_LATTICE_MAXIMUM_OCTAVES`. Absent is one.
    *
    * Each octave repeats twice as finely with lobes and a blend half the size,
    * adding a scale of detail an octave below the last. It costs one whole
-   * lattice evaluation per octave.
+   * lattice evaluation per octave and — measured — no march steps, no records
+   * and no per-brick owners at all; the ceiling is a pure cost bound and the
+   * data behind its value is on the constant.
    */
   readonly octaves?: number;
 }
@@ -340,6 +350,48 @@ export type SceneryClusterNode =
   | SceneryLatticeClusterNode
   | ScenerySeededLobesClusterNode
   | SceneryTaperedSweepClusterNode;
+
+/**
+ * A node whose geometry is a **program**: a short tape of composed field ops —
+ * a warp over a source solid, a Worley subtraction, a recursive scatter —
+ * evaluated as one SDF. See lib/svo-field-program.ts.
+ *
+ * This is `cluster` one level up, and the reason it is a separate kind rather
+ * than a fourth `field` of that one is that a cluster's envelope is *authored*
+ * and a tape's is *derived*: a warp displaces the evaluation point by at most
+ * its amplitude per component and a scatter replicates the occupant, so
+ * `svoFieldProgramExtent_m` computes the conservative box from the tape itself.
+ * Asking an author to also state it would be asking them to re-derive a bound
+ * the machine already knows, and the first one that disagreed would clip a
+ * silhouette. So there is no `lobe` here, and that absence is the point.
+ *
+ * ## Every length in the tape is metres
+ *
+ * A sphere's radius, a warp's amplitude, a Worley period and a scatter's cell
+ * are all parameters of *ops*, and which of an op's five scalars are lengths is
+ * the op's own business. Scaling a tape would therefore mean a per-op table of
+ * which parameter is a length — a second, drifting copy of the op table. The
+ * alternative is this: a tape is authored in metres and the node must resolve
+ * to a unit scale of exactly one. `lib/scenery-expand.ts` checks that and names
+ * the node when it does not, so the failure is a message rather than a shape
+ * quietly drawn at the wrong size.
+ *
+ * Placement still composes normally — the record is centred at the frame's
+ * origin and rotated by its orientation, exactly as a cluster is — because
+ * neither of those is a length inside the tape.
+ */
+export interface SceneryFieldProgramNode extends SceneryNodeBase {
+  readonly kind: "field-program";
+  /**
+   * The tape. Every length in it is metres; see the note above.
+   *
+   * Validated by the render ABI at expansion, with the node's id attached, so
+   * an author sees which node in a four-thousand-primitive graph is the one
+   * that will not publish.
+   */
+  readonly program: SvoFieldProgram;
+  readonly material: SceneryMaterial;
+}
 
 /**
  * One object assembled from parts. The group's placement is the object's, so
@@ -519,7 +571,8 @@ export type SceneryPrimitiveNode =
   | SceneryCapsuleNode
   | SceneryTorusNode
   | SceneryConeNode
-  | SceneryClusterNode;
+  | SceneryClusterNode
+  | SceneryFieldProgramNode;
 
 export type SceneryShellNode =
   | SceneryRoomShellNode
@@ -560,7 +613,7 @@ export function isSceneryShellNode(node: SceneryNode): node is SceneryShellNode 
 export function isSceneryPrimitiveNode(node: SceneryNode): node is SceneryPrimitiveNode {
   return node.kind === "box" || node.kind === "cylinder" || node.kind === "ellipsoid"
     || node.kind === "capsule" || node.kind === "torus" || node.kind === "cone"
-    || node.kind === "cluster";
+    || node.kind === "cluster" || node.kind === "field-program";
 }
 
 /** Depth-first walk in expansion order, so callers see nodes as they publish. */

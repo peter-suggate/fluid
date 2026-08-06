@@ -1,4 +1,6 @@
 import type { GPUEulerianInfo, GPURigidLoad } from "./webgpu-eulerian";
+import type { SceneDescription } from "./model";
+import { terrainContentStamp, type TerrainDescription } from "./terrain";
 import type {
   EffectiveRendererStatus,
   FluidLabRenderer,
@@ -7,6 +9,9 @@ import type {
 } from "./webgpu-renderer";
 
 type DrawArguments = Parameters<FluidLabRenderer["draw"]>;
+type DrawArgumentsWithoutScene = DrawArguments extends [infer Time, unknown, ...infer Rest]
+  ? [Time, ...Rest]
+  : never;
 type PickArguments = Parameters<FluidLabRenderer["pickRigidBody"]>;
 type PickResult = Awaited<ReturnType<FluidLabRenderer["pickRigidBody"]>>;
 
@@ -29,7 +34,8 @@ export interface WebGPURenderWorkerSnapshot {
 export type WebGPURenderWorkerRequest =
   | { type: "attach"; canvas: OffscreenCanvas }
   | { type: "initialize"; requestId: number }
-  | { type: "draw"; frameId: number; args: DrawArguments; viewport: { width: number; height: number; devicePixelRatio: number } }
+  | { type: "set-render-scene"; revision: number; scene: SceneDescription; terrainContentStamp: string }
+  | { type: "draw"; frameId: number; sceneRevision: number; args: DrawArgumentsWithoutScene; viewport: { width: number; height: number; devicePixelRatio: number } }
   | { type: "set-simulation-scene"; scene: DrawArguments[1] | undefined }
   | { type: "set-hover-highlight"; range: { first: number; last: number } | undefined }
   | { type: "set-simulation-running"; requestId: number; running: boolean }
@@ -86,6 +92,11 @@ export class WebGPURenderWorkerClient {
   private readonly worker: Worker;
   private requestId = 0;
   private frameId = 0;
+  private nextRenderSceneRevision = 0;
+  private publishedRenderSceneRevision = 0;
+  private readonly renderSceneRevisionByDocument = new WeakMap<SceneDescription, number>();
+  private readonly terrainStampByDocument = new WeakMap<TerrainDescription, string>();
+  private simulationScene?: SceneDescription;
   private frameInFlight = false;
   /** Control edges fence frame dispatch until the worker has observed them. */
   private simulationControlRevision = 0;
@@ -150,11 +161,14 @@ export class WebGPURenderWorkerClient {
       presentationSubmitted: false,
     };
     this.completedMetrics = undefined;
+    const [time_s, scene, ...remainingArgs] = args;
+    const sceneRevision = this.publishRenderScene(scene);
     const rect = this.canvas.getBoundingClientRect();
     const message: Extract<WebGPURenderWorkerRequest, { type: "draw" }> = {
       type: "draw",
       frameId: ++this.frameId,
-      args,
+      sceneRevision,
+      args: [time_s, ...remainingArgs] as DrawArgumentsWithoutScene,
       viewport: {
         width: Math.max(1, rect.width),
         height: Math.max(1, rect.height),
@@ -167,6 +181,8 @@ export class WebGPURenderWorkerClient {
   }
 
   setSimulationScene(scene: DrawArguments[1] | undefined): void {
+    if (scene === this.simulationScene) return;
+    this.simulationScene = scene;
     this.post({ type: "set-simulation-scene", scene });
   }
 
@@ -220,6 +236,26 @@ export class WebGPURenderWorkerClient {
   }
 
   private nextRequestId() { return ++this.requestId; }
+
+  private publishRenderScene(scene: SceneDescription): number {
+    let revision = this.renderSceneRevisionByDocument.get(scene);
+    if (revision === undefined) {
+      this.nextRenderSceneRevision = this.nextRenderSceneRevision >= Number.MAX_SAFE_INTEGER
+        ? 1 : this.nextRenderSceneRevision + 1;
+      revision = this.nextRenderSceneRevision;
+      this.renderSceneRevisionByDocument.set(scene, revision);
+    }
+    if (revision === this.publishedRenderSceneRevision) return revision;
+    this.publishedRenderSceneRevision = revision;
+    const terrain = scene.terrain;
+    let stamp = terrain && this.terrainStampByDocument.get(terrain);
+    if (stamp === undefined) {
+      stamp = terrainContentStamp(terrain);
+      if (terrain) this.terrainStampByDocument.set(terrain, stamp);
+    }
+    this.post({ type: "set-render-scene", revision, scene, terrainContentStamp: stamp });
+    return revision;
+  }
 
   private request<T>(message: Extract<WebGPURenderWorkerRequest, { requestId: number }>): Promise<T> {
     return new Promise<T>((resolve, reject) => {

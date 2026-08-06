@@ -60,7 +60,10 @@ const number = (name: string, fallback: number) => {
 const FORM_UNDER_TEST = {
   ...SWEPT_COPING_POND_BULLNOSE,
   crestHeight_m: number("FLUID_COPING_CREST", SWEPT_COPING_POND_BULLNOSE.crestHeight_m),
-  undercut: number("FLUID_COPING_UNDERCUT", SWEPT_COPING_POND_BULLNOSE.undercut),
+  // Was `FLUID_COPING_UNDERCUT`. The section is authored as a footprint width
+  // over a crest height now, and two is the semicircle where the old undercut
+  // fraction's whole range ran out — see `SweptCopingForm.widthToHeight`.
+  widthToHeight: number("FLUID_COPING_WIDTH", SWEPT_COPING_POND_BULLNOSE.widthToHeight),
   sectionVariation: number("FLUID_COPING_VARIATION", SWEPT_COPING_POND_BULLNOSE.sectionVariation),
   crestVariation: number("FLUID_COPING_VARIATION", SWEPT_COPING_POND_BULLNOSE.crestVariation),
   relief_m: number("FLUID_COPING_RELIEF", SWEPT_COPING_POND_BULLNOSE.relief_m),

@@ -118,6 +118,8 @@ export interface CoarseLevelSetConsumerSource {
   readonly kind: "coarse-levelset-sampling";
   readonly directory: GPUBufferBinding;
   readonly control: GPUBufferBinding;
+  /** Optional affine gradient `{xyz, valid}` for each directory row. */
+  readonly gradients?: GPUBufferBinding;
   readonly rowCapacity: number;
   readonly sampleDimensions: readonly [number, number, number];
   readonly physicalCellSize: number;

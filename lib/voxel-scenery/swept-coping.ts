@@ -25,11 +25,12 @@ import { alongAxis, V } from "./builder";
  *    plaster and there is a hard shadow line all the way round it. An honest
  *    union of a solid with the ground has that line for free: the two surfaces
  *    meet at whatever angle they meet at, and the normal jumps.
- *  - **No roll-back.** A height is a function of (x, z), so nothing can lie
- *    under anything. A circular section whose centre stands *above* the plaster
- *    does: between its widest point and the ground the flank turns back under
- *    itself, which is the undercut the reference shows and the reason its rim
- *    reads as a fat kerb rather than as a swelling.
+ *  - **No section wider than the plaster it stands on.** A heightfield rim is a
+ *    swelling of the ground, so its width and its height are the same profile
+ *    read twice and it cannot be broad and low without the plaster around it
+ *    becoming broad and low too. A solid section is authored on its own terms —
+ *    `widthToHeight` below is the whole point of this generator now — and the
+ *    reference's rim is 2.8 times as wide as it is tall.
  *  - **No sharpening without a global tax.** The grid carries one Lipschitz
  *    slope bound for the whole scene (`terrainGridExtent`) and the dry render's
  *    march steps by it everywhere, so steepening any one feature is stepped for
@@ -42,25 +43,48 @@ import { alongAxis, V } from "./builder";
  * (`VoxelSceneSource` is container ∪ terrain ∪ rigid bodies). That is affordable
  * here and it is worth saying exactly why rather than waving at it: a coping is
  * the part of a vessel that stands *above* the still waterline. On the hero pond
- * the crest is 55 mm above the outer ground and the waterline sits 42.5 mm below
- * it, so the water at rest never reaches the coping at all — the wall it presses
- * against is the plaster the coping is set into, which is terrain either way.
- * A coping swept as scenery over a vessel whose *wet* surfaces are still
+ * the crest is 46 mm above the outer ground and the waterline sits 40.9 mm below
+ * the lowest plaster outside it, so the water at rest never reaches the coping at all — the wall it
+ * presses against is the plaster the coping is set into, which is terrain either
+ * way. A coping swept as scenery over a vessel whose *wet* surfaces are still
  * heightfield is not a rim the water pours through; it is a rim the water was
  * never going to touch. Splash is a different question and the answer to it is
  * freeboard in the terrain, not geometry in the renderer.
  *
  * ## The section, and the two numbers that describe it
  *
- * The section is a circle, because a bullnose is a circle. It is authored as how
- * far the crest stands proud of the ground (`crestHeight_m`) and how far the
- * circle's centre is lifted above the ground as a fraction of its own radius
- * (`undercut`) — both of which are things you can see — and the radius is
- * derived. At `undercut = 0` the centre sits in the plaster and the flank leaves
- * it vertically: a crisp line, no roll-back. Above zero the widest point rises
- * above the ground and the flank turns back under itself by
- * `radius * (1 - sqrt(1 - undercut^2))`. Past about a half the rim starts to
- * read as a pipe lying on the floor rather than as a kerb set into it.
+ * The section is a circle, because a bullnose is an arc. It is authored as the
+ * two things you can stand in front of the pond and see: how far the crest stands
+ * proud of the ground (`crestHeight_m`), and how wide the rim's footprint on that
+ * ground is as a multiple of that height (`widthToHeight`). The radius and the
+ * depth the circle's centre is bedded to are derived from those, because neither
+ * is a thing anybody can look at and estimate.
+ *
+ * The one number worth carrying in your head is that **`widthToHeight = 2` is a
+ * semicircle**, and it is the hinge of the whole family:
+ *
+ *  - Below two the circle's centre stands *above* the plaster and its widest
+ *    point with it, so between that widest point and the ground the flank turns
+ *    back under itself. That is an undercut, and it costs height: for a circle,
+ *    `crestHeight >= radius >= groundHalfWidth` whenever the centre is above the
+ *    plaster, so **no undercut section can be more than twice as wide as it is
+ *    tall**. It is also what makes a rim read as a pipe lying on the floor rather
+ *    than as a kerb set into it, and at the 1.15 this form used to carry it read
+ *    as one in the frame.
+ *  - Above two the centre is bedded *below* the plaster and the visible solid is
+ *    a circular cap: a broad gently domed top rolling over into a steep flank
+ *    that enters the plaster with no overhang. At the 2.8 authored below, the
+ *    flank meets the ground running 71.1 degrees from horizontal, which is still
+ *    a hard line with a 71-degree normal jump against the flat plaster — the
+ *    meeting this generator exists for — but it is a line the rim stands *behind*
+ *    rather than one it hangs over.
+ *
+ * What is paid for the cap is burial: the radius goes as `groundHalfWidth^2 /
+ * (2 * crestHeight)` once the width dominates, so the hero rim carries 90.2 mm of
+ * circle under the plaster to show 46 mm above it. That is free in occupancy —
+ * the buried part is inside a terrain that is solid to the container floor there,
+ * so the union has exactly the same surface — and it is not free in the record's
+ * proxy box, which is what the stride table below is about.
  *
  * ## Records
  *
@@ -76,7 +100,9 @@ import { alongAxis, V } from "./builder";
  * cone chain's shading normal stepped by the whole turn angle at every joint and
  * a convincing rim cost 336 segments at 1.1 degrees apiece. With round cones the
  * joint angle costs nothing, and the only thing rail resolution still buys is
- * chord sag — `c^2 / 8R`, which is 0.57 mm at the 84 stations used here.
+ * chord sag — `c^2 / 8R`. The hero plan's tightest turn has a 186 mm radius, so
+ * the 36.4 mm chords the 67 stations used here leave 0.89 mm of sag on a 128.8 mm
+ * rim. It was 0.57 mm at 84 stations and 29.1 mm chords.
  *
  * **Its density is the ceiling, not its total.**
  * `OCTREE_LIVE_SCENE_CANDIDATES_PER_BRICK` is 64 primitives per 200 mm brick and
@@ -87,22 +113,34 @@ import { alongAxis, V } from "./builder";
  * run at a fixed segment rate is *uniformly* dense all the way round, so it
  * overflows everywhere at once or nowhere.
  *
- * Both together are why `segmentStride` is 4. Measured on the hero garden, with
- * the rest of the scene held fixed — the normal step is between adjacent
- * stride-1 stations on the crest, through the published records:
+ * Both together are why `segmentStride` is 5, and why it used to be 4: **the
+ * stride is the price of the section's radius.** A record's proxy box is its
+ * round cone's, so a section that went from a 36.7 mm radius to a 68.1 mm one
+ * reaches into more bricks in both directions across the rail, and the count in
+ * the bricks the rim does occupy goes up with it. Measured on the hero garden's
+ * published proxies against a 200 mm brick — `rim/brick` is the most rim records
+ * any one brick holds, which is deliberately *not* the busiest brick in the scene
+ * (that is the canopy, and it holds no rim at all, so it moves when the bonsai
+ * moves and tells you nothing about a coping):
  *
- *   stride  recs  scene  busiest  over-64   normal p90   max    over 5 deg
- *      1     336    729     103       8       4.04     8.72      20 / 336
- *      2     168    561      74       4       3.16     6.51      13 / 336
- *      3     112    505      67       2       2.75     7.59       4 / 336
- *      4      84    477      67       1       2.42     7.77       4 / 336
+ *   section          stride   rim recs   rim/brick
+ *   63.5 x 55 mm        4         84         14
+ *   128.8 x 46 mm       3        112         24
+ *   128.8 x 46 mm       4         84         18
+ *   128.8 x 46 mm       5         67         15
+ *   128.8 x 46 mm       6         56         13
  *
- * Coarsening the rail makes the rim *smoother*, which is the opposite of what
- * the old cone-chain rule predicted and is the clearest evidence that the rule
- * died with the cap: what the extra stations were carrying was not curvature, it
- * was `relief_m` sampled faster than the eye wants it. `reliefLobes` came down
- * with the stride to keep four stations per lobe, which is the band limit its
- * own doc comment asks for.
+ * Widening the section at the old stride would have cost 29 % of the rim's
+ * per-brick headroom against a 64-record ceiling whose overflow is a *silent
+ * drop*. Stride 5 buys it all back — 15 against the old 14 — for 0.32 mm of
+ * extra chord sag and 17 fewer records than the rim used to publish.
+ *
+ * Coarsening the rail also makes the rim *smoother*, which is the opposite of
+ * what the old cone-chain rule predicted and is the clearest evidence that the
+ * rule died with the cap: what the extra stations were carrying was not
+ * curvature, it was `relief_m` sampled faster than the eye wants it.
+ * `reliefLobes` came down with the stride to keep four stations per lobe, which
+ * is the band limit its own doc comment asks for.
  *
  * ## The marched sweep was tried here, and does not fit
  *
@@ -116,7 +154,8 @@ import { alongAxis, V } from "./builder";
  * A cluster is clipped to a fitted ellipsoid by a hard `max`, and the fitter
  * minimises envelope volume subject to every *station* clearing a Lipschitz-1
  * lower bound on the ellipsoid distance. On a hose that is fine. On a coping the
- * run is short and fat — 37 mm of section over 60 mm of rail — so the envelope
+ * run is short and fat — it was 73 mm of section over 29 mm of rail when this was
+ * measured and the broad section makes it 136 over 36 — so the envelope
  * hugs the solid, and measured, the rim's own surface comes within 0.81 mm of
  * its clipping envelope on 21 of 64 records, always at a record's ends. Nothing
  * is actually cut. What breaks is the *normal*: the shading gradient is a
@@ -137,21 +176,115 @@ import { alongAxis, V } from "./builder";
  * stride 4 with a fifth of the shading defects.
  */
 
+/**
+ * Widest section this generator will grow, as a multiple of the crest height.
+ *
+ * A typo guard rather than a shape limit. The buried radius goes as
+ * `widthToHeight^2 * crestHeight / 8`, so at eight the circle carries sixteen
+ * crest heights of itself under the plaster to show one above it, and a proxy
+ * box that size stops being a rim as far as the brick binning is concerned.
+ */
+export const SWEPT_COPING_MAXIMUM_WIDTH_TO_HEIGHT = 8;
+
+/**
+ * The rim's surface grain, and why it is a constant here rather than geometry.
+ *
+ * The plate's rim is cast stone: a dense, even pitting at about two millimetres,
+ * *finer* than the water-worn boulders beside it and subtractive — pits, not
+ * ridges. That is a shape, not a shading trick, and the destination for it is a
+ * `field-program` record (`lib/svo-field-program.ts`) whose tape subtracts a
+ * Worley field from the swept section.
+ *
+ * It is not emitted, and both halves of the reason belong here:
+ *
+ *  - **There is no `field-program` scenery node kind.** `SceneryNode` runs box,
+ *    cylinder, ellipsoid, capsule, torus, cone, cluster and group
+ *    (`lib/scenery-graph.ts`), and a generator cannot mint a record kind the
+ *    graph cannot carry. **Still the blocker**, and now the only one shared with
+ *    `stone-set.ts` and `bonsai.ts` — all three species want the same one node
+ *    kind for three different tapes.
+ *  - ~~The op set is not there yet.~~ **The modifiers landed.** The table now
+ *    carries `worley-subtract` and the variable-k `smooth-union` /
+ *    `smooth-subtract` / `smooth-intersect` family the grain asks for.
+ *  - **What is still missing is a source op for a swept run.** The tape's
+ *    sources are `sphere`, `ellipsoid` and `box`, all centred blobs, so a field
+ *    program cannot carry a coping's *body* — only decorate one. The shape that
+ *    would is already specified next door as a cluster field rather than a tape
+ *    op: `SvoClusterTaperedSweepField`, a round-cone chain through up to eight
+ *    control points as **one record**, exact and Lipschitz-1. Sixty-four coping
+ *    records are nine of those. Nothing in this file authors one, and doing so
+ *    is a much smaller change than a tape — it needs no new node kind at all,
+ *    because `kind: "cluster"` already carries a tapered sweep.
+ *
+ * The numbers are recorded so that whoever wires it does not have to re-derive
+ * them from the plate, and so the decision that they are *invisible today* is
+ * written down rather than rediscovered: shading is voxel cell faces at
+ * `HERO_GARDEN_CELL_M` = 25 mm, and a 2 mm feature is a twelfth of a cell. It
+ * resolves when leaves do, which is the point of authoring it as a field rather
+ * than as records.
+ */
+export const SWEPT_COPING_GRAIN = Object.freeze({
+  /** Deepest a pit cuts into the section, in metres. Subtractive only. */
+  depth_m: 0.002,
+  /** Mean spacing of the pits, in metres. Cast aggregate, not river-worn. */
+  period_m: 0.002,
+  /**
+   * How far in from the section's inner ground line the grain is faded out.
+   *
+   * The inner edge is the sharpest line in the plate and it is what makes the
+   * pond read as a vessel. Unmasked erosion crumbles exactly that. Three
+   * millimetres is a pit and a half of run, which is enough to bring the
+   * amplitude to zero without the fade itself being a visible band.
+   */
+  lipMaskRun_m: 0.003,
+} as const);
+
+/**
+ * The grain's amplitude at a point on the section, as a fraction of `depth_m`.
+ *
+ * `inwardOffset_m` is measured from the section's inner ground line, positive
+ * outward across the rim. Zero at the lip, one by `lipMaskRun_m`, smoothstepped
+ * so the fade has no edge of its own — a linear ramp puts a crease where it
+ * reaches full, which on a 2 mm grain is a bigger defect than the grain.
+ *
+ * Exported and unit-tested rather than inlined into a tape that does not exist
+ * yet, because this is the part of the grain that is a *decision* and the rest
+ * is a noise call.
+ */
+export function sweptCopingGrainAmplitude(inwardOffset_m: number): number {
+  const t = Math.min(1, Math.max(0, inwardOffset_m / SWEPT_COPING_GRAIN.lipMaskRun_m));
+  return t * t * (3 - 2 * t);
+}
+
 /** Shape only: the species, with no rail, no ground and no seed. */
 export interface SweptCopingForm {
   /** How far the crest stands above the ground the coping is set into. */
   readonly crestHeight_m: number;
   /**
-   * Lift of the section's centre above that ground, as a fraction of the
-   * section radius. Zero is a vertical meeting with no roll-back; a half is a
-   * pronounced undercut. Must be in [0, 1).
+   * The rim's full footprint on that ground, as a multiple of `crestHeight_m`.
+   *
+   * Two is a semicircle and is the hinge described in the module header: below
+   * it the section undercuts and cannot be more than twice as wide as it is
+   * tall, above it the section is a bedded circular cap with no overhang. Must
+   * be in (0, 8]; the upper bound is a typo guard, not a shape limit — at eight
+   * the buried radius is already sixteen times the crest.
+   *
+   * This replaced an `undercut` fraction that authored the same family in the
+   * other coordinates (`undercut` in [0, 1) is `widthToHeight` in (0, 2]), and
+   * the swap is not cosmetic: the reference's rim is at 2.8, which the old
+   * parameterization could not spell at all.
    */
-  readonly undercut: number;
+  readonly widthToHeight: number;
   /**
    * How much the section swells and narrows along the run, as a fraction of the
    * radius. This is the difference between a formed kerb and an extrusion, and
    * it is the same argument `PondVesselSpec.sectionWidthVariation` makes: the
    * eye reads an unvarying crest line long before it reads a wandering outline.
+   *
+   * A fraction of the *radius*, so it has to come down when the radius goes up:
+   * the eye reads the swell in millimetres of footprint, not in percent. The
+   * hero form went from 14 % of a 36.7 mm radius to 7 % of a 68.1 mm one, which
+   * is 5.1 mm of swell against 4.8 mm — the same rim, not a calmer one.
    */
   readonly sectionVariation: number;
   /** How much the crest rises and falls along the run, as a fraction of `crestHeight_m`. */
@@ -194,32 +327,106 @@ export interface SweptCopingForm {
 }
 
 /**
- * The pond's rim: a fat bullnose, as tall as it is nearly wide, with a real
- * undercut.
+ * The pond's rim: a broad flattened bullnose, nearly three times as wide as it
+ * is tall.
  *
- * 55 mm proud at a half-radius lift makes a section of radius 36.7 mm and a
- * footprint 63.6 mm across — taller and narrower than the heightfield vessel's
- * 110 mm swell, and closer to the reference, whose coping reads about as wide as
- * it is tall. The roll-back is 4.9 mm and the flank leaves the plaster with its
- * normal 30 degrees below horizontal, which is what puts a shadow line under the
- * lip all the way round.
+ * ## What the plate says, in numbers
+ *
+ * Measured off `artifacts/plate-crops/coping.png` and the plate it is cut from
+ * (`output/imagegen/garden-pond-hose-fill-simplified.png`), against the render it
+ * is registered to (`artifacts/hero-now/frame.png`, exactly half the plate's
+ * 1672 x 941). The camera is shared, so the two are directly comparable in
+ * pixels and no camera has to be solved to compare a rim to a rim.
+ *
+ * On the near arc the rim shows as one band running from its crest — which is
+ * what silhouettes against the water, because the inner face behind it faces
+ * away — down to where its outer flank meets the floor. Measured as the run from
+ * the luminance step at the water's edge to the contact-shadow minimum at the
+ * foot, along five columns that cross the near rim cleanly in both images:
+ *
+ *   plate column   plate span   frame column   frame span   x2    ratio
+ *        400          144            200           63        126   1.14
+ *        450          144            225           64        128   1.13
+ *        500          141            250           62        124   1.14
+ *        550          142            275           63        126   1.13
+ *        350          145            175           57        114   1.27
+ *
+ * The last row is dropped: at frame x=175 the pebble course crosses the rim's
+ * foot and the shadow minimum being measured is the pebbles', not the rim's. The
+ * four that stand give **1.135**, and they agree to a percent, which is what says
+ * the two images are registered well enough for this to mean anything.
+ *
+ * With the camera 24 degrees above horizontal, a section offset of `a` outward
+ * and `h` up projects to `a*sin24 + h*cos24 = 0.407a + 0.914h` of screen. The
+ * render is `a = 31.75, h = 55`, which is 63.2 mm of screen and measures 126
+ * plate-equivalent pixels: 1.99 px per screen-millimetre. So the plate's rim is
+ * **`0.407a + 0.914h = 71.7 mm`**, and that is the one hard constraint the plate
+ * hands over. It is a line, not a point — every section on it draws the same
+ * band, from 88 x 55 mm to 176 x 40 — and the proportion has to come from
+ * looking:
+ *
+ *   - the plate's rim has **no dark band under its lip**. The render's flank
+ *     turns under and its last 8 px go to luminance 41 against a 146 floor; the
+ *     plate's falls smoothly 217 -> 104 and recovers to 147 over the 35 px of
+ *     cast shadow beyond the foot. There is no overhang, which caps the section
+ *     at `widthToHeight = 2` before anything else is decided.
+ *   - the top is broad: the plate holds within 7 % of its peak luminance for
+ *     36 px past the crest where the render holds for 16.
+ *
+ * At `widthToHeight = 2.8` and `crestHeight_m = 0.046` the constraint reads
+ * `0.407*64.4 + 0.914*46 = 68.2 mm` against the measured 71.7 — 4.9 % short,
+ * which is inside the error in calling where the plate's foot is against a
+ * contact shadow. The section that lands it exactly at the same proportion is
+ * 135 x 48 mm, and the two differ by a quarter of a solver cell.
+ *
+ * ## What it costs and what it moves
+ *
+ * A 128.8 mm footprint on a 46 mm crest makes a circle of radius 68.1 mm bedded
+ * 22.1 mm below the plaster. Against the 63.5 x 55 mm it replaces: the footprint
+ * doubles, the crest comes down 9 mm, and the ratio goes from 1.15 to 2.80.
+ *
+ * `HERO_GARDEN_VESSEL.rimHalfWidth_m` is derived from this section's
+ * `groundHalfWidth_m`, so the flat plaster band the rim is bedded into widens
+ * with it and the pond's wetted plan comes in about 33 mm per side. Containment
+ * does not move at all: `pondVesselWaterline` is `groundHeight - relief - below`
+ * and the plaster outside the rail is `groundHeight + terrace + relief` for every
+ * width. Measured on the baked grid either way: the lowest plaster outside the rim
+ * is 298.42 mm and the still waterline is 257.50 mm, so the clearance is 40.92 mm
+ * before the change and 40.92 mm after it.
+ *
+ * The crest is deliberately **not** at 50 mm. The solver lattice is 25 mm with
+ * the plaster at 300 mm, which is a cell boundary exactly; 46 mm puts the crest
+ * 4 mm *under* the 350 mm boundary rather than on it or just over it. Just over
+ * is the bad side — it lays one extra 25 mm cell layer along the whole rim for
+ * the sake of a few millimetres of stone — and 4 mm under, with the crest
+ * modulating plus or minus 8 mm, means the high lobes reach that layer and the
+ * rest do not. That is the crest undulation reading as a crest undulation
+ * instead of as a lattice artifact.
  */
 export const SWEPT_COPING_POND_BULLNOSE: SweptCopingForm = Object.freeze({
-  crestHeight_m: 0.055,
-  undercut: 0.5,
-  sectionVariation: 0.14,
+  crestHeight_m: 0.046,
+  widthToHeight: 2.8,
+  // Seven per cent of a 68.1 mm radius is 4.8 mm of swell, which is what the old
+  // form's 14 % of 36.7 mm was in millimetres. See `sectionVariation`.
+  sectionVariation: 0.07,
   crestVariation: 0.11,
+  // Eleven lobes on a 2.9 m run is a 264 mm period — a good fraction of the
+  // pond's 450 mm radius, which is the wavelength the crest wanders on in the
+  // plate. Deliberately nowhere near the 40-80 mm band: a rim that undulated
+  // there would read as slumped rather than as hand-formed.
   variationLobes: 11,
   relief_m: 0.0015,
   // Four stations a lobe at the stride below, which is what the relief's own
-  // doc comment asks for and what stops it reading as a caterpillar. It was 44
-  // against 336 stations; the stride change would have left it at 1.9.
-  reliefLobes: 21,
-  // The rail is walked one point in four. See the module header: with round-cone
-  // segments the joint angle is free, so this is bounded by chord sag (0.57 mm)
-  // and by the relief's band limit, not by the shading — and it is what takes
-  // the hero scene's busiest brick from 103 to 67.
-  segmentStride: 4,
+  // doc comment asks for and what stops it reading as a caterpillar.
+  reliefLobes: 17,
+  // The rail is walked one point in five. See the module header: with round-cone
+  // segments the joint angle is free, so this is bounded by chord sag (0.89 mm
+  // at the 36.4 mm chords this leaves) and by the relief's band limit, not by
+  // the shading. It went from four to five with the section: a record whose
+  // radius nearly doubled reaches into more bricks and takes the busiest rim
+  // brick from 14 to 18 against a ceiling of 64 whose overflow is silent. Five
+  // puts it back at 15. See the table in the module header.
+  segmentStride: 5,
 });
 
 export interface SweptCopingSpec extends SweptCopingForm {
@@ -255,6 +462,100 @@ export interface SweptCopingSpec extends SweptCopingForm {
   readonly material: SceneryMaterial;
   /** The only entropy. Any integer. */
   readonly seed: number;
+  /**
+   * The finest voxel this rim will be drawn at, in metres.
+   *
+   * Placement rather than form — see `SceneryGeneratorRequest.detailCellSize_m`.
+   * The rim has exactly one feature whose legibility is decided by the leaf and
+   * not by the plate, and it is the chord sag of the walked rail; see
+   * {@link sweptCopingSegmentStride}. Absent is
+   * {@link SWEPT_COPING_DEFAULT_LEAF_SIZE_M} and reproduces the 25 mm rim
+   * exactly.
+   */
+  readonly leafSize_m?: number;
+}
+
+/**
+ * The leaf a rim is drawn at when nobody says, in metres. `HERO_GARDEN_CELL_M`.
+ */
+export const SWEPT_COPING_DEFAULT_LEAF_SIZE_M = 0.025;
+
+/**
+ * How much of a leaf the walked rail may cut off the outline.
+ *
+ * Half. A silhouette error under half a leaf cannot move a voxelized outline —
+ * the surface the primary returns is the cell's face, so an error that never
+ * crosses a cell boundary is not drawable — and above about one leaf it is a
+ * visible flat on the near arc. Half is the largest budget that is still
+ * provably invisible, which is the right side of the line to be on for a number
+ * whose only cost is records.
+ */
+const SWEPT_COPING_SAG_LEAVES = 0.5;
+
+/**
+ * Largest perpendicular distance from the walked chords to the rail they skip,
+ * in metres.
+ *
+ * Measured off the rail rather than modelled from a curvature: a coping follows
+ * whatever outline it is handed, and a species that assumed a circle would be
+ * wrong on exactly the lobed plans this one exists for. This is the silhouette
+ * error the stride actually costs, at the actual pond.
+ */
+export function sweptCopingChordSag_m(rail: readonly (readonly [number, number])[], stride: number): number {
+  if (stride <= 1) return 0;
+  const count = Math.floor(rail.length / stride);
+  let worst = 0;
+  for (let index = 0; index < count; index += 1) {
+    const [ax, az] = rail[index * stride];
+    const [bx, bz] = rail[((index + 1) % count) * stride % rail.length];
+    const dx = bx - ax, dz = bz - az;
+    const lengthSquared = dx * dx + dz * dz;
+    if (!(lengthSquared > 0)) continue;
+    for (let step = 1; step < stride; step += 1) {
+      const [px, pz] = rail[(index * stride + step) % rail.length];
+      const t = Math.min(1, Math.max(0, ((px - ax) * dx + (pz - az) * dz) / lengthSquared));
+      worst = Math.max(worst, Math.hypot(px - ax - t * dx, pz - az - t * dz));
+    }
+  }
+  return worst;
+}
+
+/**
+ * The stride this rail may be walked at for this leaf.
+ *
+ * **The one number on this rim that the lattice decides.** The authored stride
+ * is a ceiling and this only ever comes down from it, so a scene that says
+ * nothing draws exactly the rim it drew before. What moves it is the sag test
+ * above: at the hero pond and `segmentStride: 5` the walked chords cut 0.89 mm
+ * off the outline, which is a seventh of a 6.25 mm leaf and invisible, and a
+ * fifty-seventh of a 0.78 mm one is not — at the bottom of the ladder that same
+ * 0.89 mm is 1.1 leaves and draws as a flat on the near arc.
+ *
+ * Measured on `HERO_GARDEN_VESSEL`'s 336-point rail:
+ *
+ *   leaf         budget    stride   sag       records
+ *   25 mm       12.50 mm     5      0.89 mm      67
+ *   6.25 mm      3.13 mm     5      0.89 mm      67
+ *   3.125 mm     1.56 mm     5      0.89 mm      67
+ *   1.5625 mm    0.78 mm     4      0.57 mm      84
+ *   0.78125 mm   0.39 mm     3      0.32 mm     112
+ *
+ * So it costs nothing at all until the leaf is under two millimetres, which is
+ * the property that lets it land without touching the depth-0 ratchets. It is
+ * also the *only* leaf-following lever this species has and it is a records
+ * lever, which is the finding rather than the fix: the rim's own grain is
+ * {@link SWEPT_COPING_GRAIN}, it is a field, and it still has nowhere to live.
+ */
+export function sweptCopingSegmentStride(
+  rail: readonly (readonly [number, number])[],
+  authoredStride: number,
+  leafSize_m: number = SWEPT_COPING_DEFAULT_LEAF_SIZE_M,
+): number {
+  if (!(leafSize_m > 0)) throw new RangeError("Swept coping leaf size must be positive");
+  const budget_m = SWEPT_COPING_SAG_LEAVES * leafSize_m;
+  let stride = Math.max(1, Math.floor(authoredStride));
+  while (stride > 1 && sweptCopingChordSag_m(rail, stride) > budget_m) stride -= 1;
+  return stride;
 }
 
 /** Integer avalanche hash in [0, 1). The same coping on every rebuild. */
@@ -295,17 +596,40 @@ function modulation(count: number, seed: number): number[] {
  * Exported because it is the answer to "how wide is this rim and how far does it
  * hang over", which the generators that place things against a coping — a pebble
  * course at its foot, a stepping path over its lip — need without re-deriving
- * the trigonometry.
+ * the trigonometry. `HERO_GARDEN_VESSEL.rimHalfWidth_m` is `groundHalfWidth_m`,
+ * so widening a section here widens the flat plaster band the rim is bedded into
+ * and moves every pebble course that offsets from it; that is the intent, and it
+ * is why the two numbers are one derivation rather than two constants.
+ *
+ * `axisLift_m` is signed. Positive is a centre standing out of the plaster and a
+ * section that undercuts; negative is a centre bedded under it and a section that
+ * is a circular cap. Callers that only want "how deep is this thing buried" want
+ * `radius_m - crestHeight_m`, which is `-axisLift_m`.
  */
-export function sweptCopingSection(form: Pick<SweptCopingForm, "crestHeight_m" | "undercut">): {
+export function sweptCopingSection(form: Pick<SweptCopingForm, "crestHeight_m" | "widthToHeight">): {
   radius_m: number; axisLift_m: number; groundHalfWidth_m: number; rollBack_m: number;
 } {
-  const { crestHeight_m, undercut } = form;
+  const { crestHeight_m, widthToHeight } = form;
   if (!(crestHeight_m > 0)) throw new RangeError("Swept coping crest height must be positive");
-  if (!(undercut >= 0 && undercut < 1)) throw new RangeError("Swept coping undercut must be in [0, 1)");
-  const radius_m = crestHeight_m / (1 + undercut);
-  const groundHalfWidth_m = radius_m * Math.sqrt(1 - undercut * undercut);
-  return { radius_m, axisLift_m: radius_m * undercut, groundHalfWidth_m, rollBack_m: radius_m - groundHalfWidth_m };
+  if (!(widthToHeight > 0 && widthToHeight <= SWEPT_COPING_MAXIMUM_WIDTH_TO_HEIGHT)) {
+    throw new RangeError(`Swept coping width-to-height must be in (0, ${SWEPT_COPING_MAXIMUM_WIDTH_TO_HEIGHT}]`);
+  }
+  const groundHalfWidth_m = 0.5 * widthToHeight * crestHeight_m;
+  // The circle through the crest at (0, crest) and the ground line at
+  // (groundHalfWidth, 0), centred on the rail: `(radius - crest)^2 +
+  // groundHalfWidth^2 = radius^2`. `axisLift_m` is signed and is the whole shape
+  // decision — positive lifts the centre out of the plaster and the section
+  // undercuts, negative beds it and the section is a cap. It is exactly zero at
+  // `widthToHeight = 2`, where the identity collapses to `radius = crest`.
+  const radius_m = 0.5 * (groundHalfWidth_m * groundHalfWidth_m / crestHeight_m + crestHeight_m);
+  const axisLift_m = crestHeight_m - radius_m;
+  // How far the widest point of the section hangs out past the ground line — a
+  // question about the *visible* solid, so a section whose widest point is
+  // buried has none rather than having a negative one. `rollBack_m` is what a
+  // generator placing something against the rim's foot needs, and a pebble bedded
+  // against a buried bulge would be bedded against nothing.
+  const rollBack_m = axisLift_m > 0 ? radius_m - groundHalfWidth_m : 0;
+  return { radius_m, axisLift_m, groundHalfWidth_m, rollBack_m };
 }
 
 /**
@@ -352,8 +676,13 @@ export function sweptCopingStations(spec: SweptCopingSpec): readonly SweptCoping
   for (const [count, label] of [[spec.variationLobes, "variation"], [spec.reliefLobes, "relief"]] as const) {
     if (!Number.isInteger(count) || count < 3) throw new RangeError(`Swept coping needs at least three ${label} lobes`);
   }
-  const stride = spec.segmentStride ?? 1;
-  if (!Number.isInteger(stride) || stride < 1) throw new RangeError("Swept coping segment stride must be a positive integer");
+  const authoredStride = spec.segmentStride ?? 1;
+  if (!Number.isInteger(authoredStride) || authoredStride < 1) {
+    throw new RangeError("Swept coping segment stride must be a positive integer");
+  }
+  // The authored stride is a ceiling, not the answer: a finer leaf resolves the
+  // chord sag it costs. See `sweptCopingSegmentStride`.
+  const stride = sweptCopingSegmentStride(rail, authoredStride, spec.leafSize_m);
   const base = sweptCopingSection(spec);
 
   const radiusModulation = modulation(spec.variationLobes, seed);
@@ -377,11 +706,19 @@ export function sweptCopingStations(spec: SweptCopingSpec): readonly SweptCoping
       + relief_m * periodicSpline(radiusRelief, turn);
     const crest = spec.crestHeight_m * (1 + spec.crestVariation * periodicSpline(crestModulation, turn))
       + relief_m * periodicSpline(crestRelief, turn);
-    // The lift stays proportional to the *authored* radius rather than to this
-    // station's, so a swell widens the rim without also lifting it out of the
-    // ground and undoing its own undercut.
+    // The centre is placed off *this station's* radius, so the crest lands
+    // exactly where the crest modulation says and the section swell shows as a
+    // wider footprint bedded deeper rather than as a taller rim.
+    //
+    // It used to be placed off the authored radius, which let a swell push the
+    // crest up with it — deliberate then, because the section undercut and
+    // holding the axis was what kept the widest point above the plaster. With a
+    // bedded cap there is no undercut to protect and the coupling is only a
+    // defect: at the hero form's 68.1 mm radius a 7 % swell would have moved the
+    // crest by 4.8 mm on a 46 mm rim, so a tenth of the height would have been
+    // an accident of the width modulation rather than the crest's own.
     const ground = spec.groundHeightAt(x, z);
-    return { at: V(x, ground + crest - base.radius_m, z), radius: Math.max(1e-4, radius), turn };
+    return { at: V(x, ground + crest - radius, z), radius: Math.max(1e-4, radius), turn };
   });
 }
 

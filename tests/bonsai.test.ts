@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { createHeroGardenHoseScene, HERO_GARDEN_VESSEL } from "../lib/hero-garden-scene";
+import { growSceneryGenerator } from "../lib/scenery-generators";
 import { SVO_MATERIAL_FUNCTION_IDS, svoMaterialFunctionIdForEnvironmentProxy } from "../lib/svo-material-abi";
 import {
   isSceneryPrimitiveNode,
@@ -15,7 +17,8 @@ import {
   BONSAI_COURTYARD_STANDARD,
   BONSAI_POND_CANOPY,
   BONSAI_SHELF_MINIATURE,
-  bonsaiCanopyGrain,
+  BONSAI_DEFAULT_LEAF_SIZE_M,
+  bonsaiCanopyLadder,
   bonsaiFloretVoxelSpan,
   bonsaiNodes,
   planBonsai,
@@ -101,7 +104,37 @@ const POND_FLORETS: BonsaiForm = {
   lobes: 18,
   lobeFill: 1.34,
   lobeSwell: 0.58,
+  // Its own grain, too. `canopyGrainAcross` used to be the number both crowns
+  // were spelled with; it is the aggregate's alone now, and the explicit build
+  // is spelled with `floretRadius_m`, so what this arm needs is the head layout
+  // it was tuned against and nothing the aggregate has since moved.
+  canopyGrainAcross: 64,
 };
+
+/**
+ * A swept run's control point in the specimen's own frame.
+ *
+ * `sweptTubeNodes` fits a frame to each run and places the record with *both* a
+ * position and an orientation, so a control point is in that rotated frame and
+ * adding the position alone lands somewhere else entirely — which is how the
+ * coping oracle below first came back reporting a root station 83 mm off the
+ * axis when it was the one authored *on* the axis.
+ */
+function pointInSpecimen(node: SceneryNode, position: { x: number; y: number; z: number }): { x: number; y: number; z: number } {
+  const place = node.place;
+  const origin = place?.position ?? { x: 0, y: 0, z: 0 };
+  const q = place?.orientation;
+  if (!q) return { x: origin.x + position.x, y: origin.y + position.y, z: origin.z + position.z };
+  // v + 2 * cross(q.xyz, cross(q.xyz, v) + q.w * v), the standard rotation.
+  const tx = 2 * (q.y * position.z - q.z * position.y);
+  const ty = 2 * (q.z * position.x - q.x * position.z);
+  const tz = 2 * (q.x * position.y - q.y * position.x);
+  return {
+    x: origin.x + position.x + q.w * tx + (q.y * tz - q.z * ty),
+    y: origin.y + position.y + q.w * ty + (q.z * tx - q.x * tz),
+    z: origin.z + position.z + q.w * tz + (q.x * ty - q.y * tx),
+  };
+}
 
 /** Primitive leaves under the specimen's group, which is what the budget counts. */
 function leaves(nodes: readonly SceneryNode[]): SceneryNode[] {
@@ -162,66 +195,101 @@ test("every form stays inside its own leaf budget, and the scene's", () => {
   assert.equal(BONSAI_POND_CANOPY.maximumLeaves, 1_500);
   // The aggregate's whole argument, as a number. Spelled out, this crown is
   // about 1 160 records — better than a quarter of the scene-wide 4 096 — and it
-  // is now two records a head plus the trunk. The explicit form still spends its
-  // share, which is what the budget ceiling above is guarding.
-  assert.ok(planBonsai(specFor(POND_FLORETS)).leafCount > 1_000,
+  // is now one record a head plus a six-record bed plus the trunk. The explicit
+  // form still spends its share, which is what the budget ceiling above is
+  // guarding.
+  assert.ok(planBonsai(specFor(POND_FLORETS)).leafCount > 900,
     "the explicit form should be spending most of its share; a large drop means the culls broke");
   const aggregate = planBonsai(specFor(BONSAI_POND_CANOPY)).leafCount;
-  assert.ok(aggregate < 300, `the aggregate crown published ${aggregate}; it is meant to collapse the floret field`);
-  // Two records a head, not one. The cluster carries the granulation and the
-  // ellipsoid core under it carries the closure — a lattice cannot do both, and
-  // a crown that publishes one record a head has gone back to the ratio at which
-  // it drew as a row of smooth ellipsoids. See `CANOPY_FLORET_PERIOD_SHARE`.
+  assert.ok(aggregate < 150, `the aggregate crown published ${aggregate}; it is meant to collapse the floret field`);
+  // One record a head, not two, and that is what the closure core paid for.
+  //
+  // A lattice cluster cannot be both granular and closed — it only stops letting
+  // rays through at `r >= P*sqrt(3)/2`, where the packing is a solid the
+  // envelope's `max` cuts off flush — so it needed an ellipsoid core a
+  // granulation depth beneath it, and that core is what the frame's black pits
+  // were the bottom of. `seeded-lobes` is closed by construction and silhouettes
+  // on its own lobes, so the record it freed went to *more heads* instead.
   const crown = leaves(planBonsai(specFor(BONSAI_POND_CANOPY)).nodes)
     .filter((node) => node.tags?.includes("crown"));
-  assert.equal(crown.filter((node) => node.kind === "cluster").length, BONSAI_POND_CANOPY.lobes);
-  assert.equal(crown.filter((node) => node.kind === "ellipsoid").length, BONSAI_POND_CANOPY.lobes);
+  const heads = crown.filter((node) => node.id.includes("/lobe-"));
+  const bed = crown.filter((node) => node.id.includes("/bed-"));
+  assert.equal(heads.length, BONSAI_POND_CANOPY.lobes);
+  assert.ok(heads.every((node) => node.kind === "cluster" && node.field === "seeded-lobes"),
+    "a canopy head that is not a seeded-lobes cluster has gone back to needing a closure core");
+  // The bed is the one place an exact ellipsoid is the right answer, and the
+  // count is small: six records close a plate that twenty-four heads leave 15%
+  // open to a vertical ray. See the emission for the measurement.
+  assert.ok(bed.length > 0 && bed.length <= BONSAI_POND_CANOPY.lobes / 3,
+    `the canopy bed is ${bed.length} records against ${heads.length} heads`);
+  assert.ok(bed.every((node) => node.kind === "ellipsoid"),
+    "the bed exists to be closed; a procedural field fills some fraction of its envelope and an ellipsoid fills all of it");
   // And nothing below the crown is a cone. A hard union is C0 but not C1, so a
   // chain of them steps its shading normal at every junction and a taper renders
   // as stacked faceted pipes; every run is one swept record now.
   assert.equal(leaves(planBonsai(specFor(BONSAI_POND_CANOPY)).nodes).filter((node) => node.kind === "cone").length, 0);
 });
 
-test("the crown's granulation is fine enough to read as curd, and distinct enough to read at all", () => {
-  // The two numbers the reference is read for, pinned because both were wrong in
-  // a way no assertion here caught. The grain: florets across the crown's own
-  // width, of which the reference shows upwards of sixty.
-  const grain = bonsaiCanopyGrain(BONSAI_POND_CANOPY);
-  const across = 2 * BONSAI_POND_CANOPY.crownRadius_m[0] / grain.finePeriod_m;
-  assert.ok(across >= 60, `only ${across.toFixed(0)} florets span the crown; the curd has become cobbles`);
+test("every published scale clears the leaf that has to draw it", () => {
+  // The band law, which is the constraint this whole object was rebuilt under.
+  // Shading is the voxel cell's surface rather than an analytic intersection
+  // with the record, so a feature whose period is under about two leaves renders
+  // as aliasing and one over about three renders as geometry. The crown that
+  // shipped before had its three lattice octaves at 45, 22.5 and 11.25 mm
+  // against a 25 mm leaf — 1.8, 0.9 and 0.45 — and not one of them could draw.
+  const ladder = bonsaiCanopyLadder(BONSAI_POND_CANOPY);
+  assert.equal(ladder.leafSize_m, BONSAI_DEFAULT_LEAF_SIZE_M);
+  assert.ok(ladder.headLeaves >= 3,
+    `a canopy head spans ${ladder.headLeaves.toFixed(1)} leaves; under three it is not a head, it is noise`);
+  assert.ok(ladder.floretLeaves >= 2,
+    `a floret spans ${ladder.floretLeaves.toFixed(1)} leaves; under two it does not render as a floret at all`);
 
-  // The hierarchy, which is what makes it curd rather than cobbles: the octave
-  // stack has to span from a head-sized mass down to that grain, and each octave
-  // is exactly a halving so the whole ladder is one number and a count.
-  assert.ok(grain.octaves >= 3, "a cauliflower has more than two scales in it");
-  assert.ok(Math.abs(grain.latticePeriod_m - grain.finePeriod_m * 2 ** (grain.octaves - 1)) < 1e-12);
-  assert.ok(grain.latticePeriod_m > 0.05 * BONSAI_POND_CANOPY.crownRadius_m[0],
-    "the coarsest octave is too fine to read as a mass");
+  // The head is published *coarser* than the plate on purpose while the leaf is
+  // the shading resolution — a legible head at 24% of the crown beats a faithful
+  // one at 17% that is marginal — and this pins how much coarser, so "slightly"
+  // cannot drift into "a disc". Nine heads, which is what shipped, measured 2.6.
+  const coarsening = ladder.headWidth_m / ladder.plateHeadWidth_m;
+  assert.ok(coarsening > 1.15 && coarsening < 1.75,
+    `the head is ${coarsening.toFixed(2)} times the plate's own; that is either marginal or a disc`);
 
-  // And the ratio, which is the defect that shipped: a lattice closes at
-  // `r = P*sqrt(3)/2`, and at or above that the packing is a solid whose
-  // envelope clip cuts it off flush — every mass drawing as the bare ellipsoid
-  // the cluster exists to avoid. Octaves make that worse rather than better,
-  // because stacking n lattices of density `phi` gives `1 - (1 - phi)^n`, so the
-  // ratio has to come *down* as the octave count goes up.
-  const ratio = grain.floretRadius_m / grain.latticePeriod_m;
-  assert.ok(ratio < 0.5, `florets are ${ratio.toFixed(2)} of the period; three octaves of that is a solid`);
-  assert.ok(ratio > 0.3, `florets are ${ratio.toFixed(2)} of the period; the crown is beads scattered on its own core`);
+  // Three scales, each the next one's cluster, which is what makes this a
+  // Romanesco rather than a lumpy ball. Two florets across a head is not a
+  // cluster of anything.
+  assert.ok(ladder.headWidth_m / ladder.floretWidth_m > 2,
+    "a head has to be a cluster of florets, not a pair of them");
+  assert.ok(ladder.crownWidth_m / ladder.headWidth_m > 3,
+    "the crown has to be a cluster of heads");
 
-  // The blend cannot be allowed to fill what the ratio just bought: a smooth
-  // minimum rounds away everything under its own radius, and what it must leave
-  // open is the gap between two neighbouring florets.
-  const gap = grain.latticePeriod_m - 2 * grain.floretRadius_m;
-  assert.ok(grain.blendRadius_m < 0.5 * gap,
-    `the blend is ${(grain.blendRadius_m / gap).toFixed(2)} of the gap it has to leave open`);
-
-  // Every form's grain scales with its own crown rather than being re-authored,
-  // which is the point of counting florets instead of measuring them.
-  for (const [name, form] of FORMS) {
-    const each = bonsaiCanopyGrain(form);
-    assert.ok(Math.abs(2 * form.crownRadius_m[0] / each.finePeriod_m - across) < 1e-9,
-      `${name} does not carry the pond form's grain`);
+  // And the ladder converges on the plate as the leaf shrinks rather than being
+  // re-authored — the whole reason the floret is derived and not a number in the
+  // form. At a 6 mm leaf nothing is floored and the floret is the plate's own.
+  for (const leaf of [BONSAI_DEFAULT_LEAF_SIZE_M, 0.0125, 0.006]) {
+    const fine = bonsaiCanopyLadder(BONSAI_POND_CANOPY, leaf);
+    assert.ok(fine.floretWidth_m <= ladder.floretWidth_m + 1e-9,
+      `a ${1000 * leaf} mm leaf published a coarser floret than a ${1000 * BONSAI_DEFAULT_LEAF_SIZE_M} mm one`);
   }
+  const converged = bonsaiCanopyLadder(BONSAI_POND_CANOPY, 0.006);
+  assert.ok(Math.abs(converged.floretWidth_m - converged.plateFloretWidth_m) < 1e-9,
+    `at a 6 mm leaf the floret is ${(1000 * converged.floretWidth_m).toFixed(1)} mm and the plate asks for ${(1000 * converged.plateFloretWidth_m).toFixed(1)}`);
+
+  // Every form's ladder is solved against its own crown rather than re-authored,
+  // which is the point of counting florets instead of measuring them. The small
+  // forms cannot reach the floret floor — a 0.25 m crown has nowhere to put a
+  // 75 mm floret — and what they must not do is fail silently, so the ABI's own
+  // containment cap is asserted rather than the floor.
+  for (const [name, form] of FORMS) {
+    const each = bonsaiCanopyLadder(form);
+    assert.ok(each.headLeaves >= 3, `${name}'s head spans only ${each.headLeaves.toFixed(1)} leaves`);
+    assert.ok(each.floretSpan <= 0.47,
+      `${name} publishes florets at ${each.floretSpan.toFixed(2)} of their head; the ABI clip will slice them`);
+    assert.ok(Math.abs(each.plateFloretWidth_m * form.canopyGrainAcross - each.crownWidth_m) < 1e-9,
+      `${name} does not carry its own authored grain`);
+  }
+
+  // The published floret in leaves, through the function the rest of the code
+  // asks with, at the leaf sizes that matter.
+  assert.ok(bonsaiFloretVoxelSpan(BONSAI_POND_CANOPY, BONSAI_DEFAULT_LEAF_SIZE_M) >= 2.9);
+  assert.ok(bonsaiFloretVoxelSpan(BONSAI_POND_CANOPY, 0.006) >= 4.9);
 });
 
 test("every swept run publishes a packing the render ABI will accept", () => {
@@ -251,36 +319,79 @@ test("every swept run publishes a packing the render ABI will accept", () => {
   }
 });
 
-test("the buttresses are separate blades on the bank, not a collar of lumps over the water", () => {
-  // Three properties, and the object failed all three in one round: a fin as
-  // thick as it is tall reads as a bread roll, fins that touch all the way round
-  // read as one lumpy collar, and a fin over the coping is a root growing out of
-  // open water.
+test("the buttresses are rounded roots on the bank, not a collar of lumps over the water", () => {
+  // Three properties, and the object failed all three in one round: a root as
+  // thin as a leaf reads as a row of disconnected cell faces, roots that touch
+  // all the way round read as one lumpy collar, and a root over the coping is a
+  // root growing out of open water.
+  //
+  // This used to assert a *fin*: several `seeded-lobes` envelopes chained along
+  // each bearing, a quarter as thick as they were tall. Both halves of that
+  // argument went with analytic shading — see the emission — and what replaced
+  // it is one round swept run per bearing, which is also what the plate shows.
   for (const seed of [0x8017a1, 1, 7, 0x51ed, 0x7fff_ffff]) {
     const plan = planBonsai(specFor(BONSAI_POND_CANOPY, { seed }));
-    const fins = leaves(plan.nodes).filter((node) => node.kind === "cluster" && node.field === "seeded-lobes");
-    assert.ok(fins.length >= 12, `seed ${seed}: ${fins.length} fin envelopes; the chain has collapsed back to one per root`);
+    // By tag, not by field. Every run below the crown is a `tapered-sweep` now,
+    // so a filter on the field alone picks up the trunks and the limbs too.
+    const roots = leaves(plan.nodes).filter((node) => node.tags?.includes("root"));
+    assert.ok(roots.every((node) => node.kind === "cluster" && node.field === "tapered-sweep"),
+      "a buttress that is not a swept run has a hard union at every junction of it");
+    assert.ok(roots.length >= 3, `seed ${seed}: ${roots.length} root runs; the bearings have stopped publishing`);
 
-    // A blade. The thin axis against the tall one, which is the section a
-    // buttress is read by — a quarter is the thick end of what still reads as a
-    // plate, and it is what the march's own eccentricity cap allows.
-    for (const fin of fins) {
-      if (fin.kind !== "cluster") continue;
-      const section = Math.min(fin.lobe.x, fin.lobe.y, fin.lobe.z) / fin.lobe.y;
-      assert.ok(section <= 0.26, `seed ${seed}: ${fin.id} is ${section.toFixed(2)} as thick as it is tall; that is a lump`);
+    for (const root of roots) {
+      if (root.kind !== "cluster" || root.field !== "tapered-sweep") continue;
+      // Every station over a leaf and a half across at the shoulder, tapering to
+      // the toe, which is where a root is meant to disappear into the ground it
+      // is bedded in. Under a leaf anywhere but the last station is a run the
+      // voxel surface cannot carry.
+      root.points.forEach((point, index) => {
+        const across_mm = 2000 * point.radius;
+        const floor_mm = index >= root.points.length - 1 ? 25 : 1.5 * 25;
+        assert.ok(across_mm >= floor_mm,
+          `seed ${seed}: ${root.id} station ${index} is ${across_mm.toFixed(0)} mm across, under ${floor_mm} mm`);
+      });
+      // And tapering rather than parallel-sided, which is the difference between
+      // a root and a length of pipe.
+      const first = root.points[0].radius;
+      const last = root.points[root.points.length - 1].radius;
+      assert.ok(last < first, `seed ${seed}: ${root.id} does not taper along its run`);
     }
 
-    // Air between them, at mid-run, where a real buttress system has its deep V
-    // valleys. The merge is meant to happen only inside the base.
-    const mids = fins.filter((node) => node.id.endsWith("-2")).map((node) => {
-      const at = node.place?.position;
-      assert.ok(at, "every fin is placed");
-      return {
-        angle: Math.atan2(at.z, at.x),
-        radius: Math.hypot(at.x, at.z),
-        half: node.kind === "cluster" ? Math.min(node.lobe.x, node.lobe.y, node.lobe.z) : 0,
-      };
-    }).sort((a, b) => a.angle - b.angle);
+    // Air between them, where a real buttress system has its deep V valleys. The
+    // merge is meant to happen only inside the base.
+    //
+    // Sampled at one fixed radius from the axis rather than at each root's own
+    // mid-station, and both halves of that matter. Per record is wrong because a
+    // run whose best single envelope wastes too much volume is *split*, so one
+    // bearing can publish two records a few degrees apart and comparing those
+    // measures the splitter. Per root's own mid-station is wrong because a
+    // bearing whose bank runs out publishes a stub whose stations are all inside
+    // the base — its median station sits 30 mm from the axis and 25 mm thick, and
+    // subtends fifty-six degrees on its own, which came back as *minus* sixty-one
+    // degrees of air between neighbours. A stub that never leaves the flare
+    // cannot make a collar, so the sample skips it.
+    const AIR_RADIUS_M = 1.8 * BONSAI_POND_CANOPY.boleRadius_m;
+    const byBearing = new Map<string, { radial: number; radius: number; angle: number }[]>();
+    for (const root of roots) {
+      if (root.kind !== "cluster" || root.field !== "tapered-sweep") continue;
+      const bearing = /root-\d+/.exec(root.id)?.[0] ?? root.id;
+      const stations = byBearing.get(bearing) ?? [];
+      for (const point of root.points) {
+        const at = pointInSpecimen(root, point.position);
+        stations.push({ radial: Math.hypot(at.x, at.z), radius: point.radius, angle: Math.atan2(at.z, at.x) });
+      }
+      byBearing.set(bearing, stations);
+    }
+    const mids = [...byBearing.values()]
+      .map((stations) => stations.filter((station) => station.radial >= AIR_RADIUS_M)
+        .sort((a, b) => a.radial - b.radial)[0])
+      .filter((station): station is NonNullable<typeof station> => station !== undefined)
+      .map((station) => ({ angle: station.angle, radius: station.radial, half: station.radius }))
+      .sort((a, b) => a.angle - b.angle);
+    // Three bearings clear 1.8 bole radii at every seed tried; at 2.0 the bank
+    // has run out under two of them and the sample stops meaning anything, which
+    // is why the radius is 1.8 and not further.
+    assert.ok(mids.length >= 3, `seed ${seed}: only ${mids.length} bearings reach ${(1000 * AIR_RADIUS_M).toFixed(0)} mm out`);
     let narrowest = Infinity;
     for (let i = 0; i < mids.length; i += 1) {
       const here = mids[i], next = mids[(i + 1) % mids.length];
@@ -288,67 +399,33 @@ test("the buttresses are separate blades on the bank, not a collar of lumps over
       const subtended = Math.asin(Math.min(1, here.half / here.radius)) + Math.asin(Math.min(1, next.half / next.radius));
       narrowest = Math.min(narrowest, (between - subtended) * 180 / Math.PI);
     }
-    assert.ok(narrowest > 12, `seed ${seed}: only ${narrowest.toFixed(0)} degrees of air between adjacent fins; they will fuse into a collar`);
+    // Nine degrees is the worst of eight seeds at this radius, which is 14 mm of
+    // gap — a notch rather than a valley, and that is correct here: the roots are
+    // *meant* to fuse inside the flare and separate beyond it. Measured at 2.0
+    // and 2.4 bole radii, where the run has left the base, the same seeds open to
+    // 18 and 21 degrees. What this bar catches is the failure the fins had, which
+    // was zero and negative — one lumpy collar all the way round.
+    assert.ok(narrowest > 6, `seed ${seed}: only ${narrowest.toFixed(0)} degrees of air between adjacent roots; they will fuse into a collar`);
 
-    // And on the bank. The whole envelope, sampled round its own bounding
-    // circle, against the coping's outer foot — a fin may reach the foot and no
-    // further, whatever the authored `rootReach` asked for.
-    for (const fin of fins) {
-      const at = fin.place?.position;
-      assert.ok(at, "every fin is placed");
-      const reach = fin.kind === "cluster" ? Math.max(fin.lobe.x, fin.lobe.y, fin.lobe.z) : 0;
-      for (let i = 0; i < 48; i += 1) {
-        const angle = 2 * Math.PI * i / 48;
-        const x = STAND_M[0] + at.x + reach * Math.cos(angle);
-        const z = STAND_M[1] + at.z + reach * Math.sin(angle);
-        assert.ok(pondVesselPlanDistance(CURVE, x, z) > VESSEL.rimHalfWidth_m,
-          `seed ${seed}: ${fin.id} reaches over the coping`);
+    // And on the bank. Every station's own ball against the coping's outer foot
+    // — a root may reach the foot and no further, whatever `rootReach` asked for.
+    // The stations bound the run exactly, because a sweep is the union of balls
+    // about them; the fitted envelope is much larger and would fail a root that
+    // stops well short.
+    for (const root of roots) {
+      if (root.kind !== "cluster" || root.field !== "tapered-sweep") continue;
+      for (const point of root.points) {
+        const at = pointInSpecimen(root, point.position);
+        for (let i = 0; i < 24; i += 1) {
+          const angle = 2 * Math.PI * i / 24;
+          const x = STAND_M[0] + at.x + point.radius * Math.cos(angle);
+          const z = STAND_M[1] + at.z + point.radius * Math.sin(angle);
+          assert.ok(pondVesselPlanDistance(CURVE, x, z) > VESSEL.rimHalfWidth_m,
+            `seed ${seed}: ${root.id} reaches over the coping`);
+        }
       }
     }
   }
-});
-
-test("a buttress fin is eccentric enough to be a plate and not so eccentric the march misses it", () => {
-  // The trade this field is here for. A buttress root is a fin — long, tall,
-  // thin — which a swept tube cannot be at all, because a sweep is circular in
-  // section at every station; built that way the base read as a bundle of pipes.
-  // The cost of the anisotropic field is that a cluster is clipped by
-  // `(|p/R| - 1)·min R`, whose slack goes as the envelope's own eccentricity, so
-  // a fin far longer than it is thin makes the march understep and a grazing ray
-  // runs out of its forty-eight iterations before it arrives. That failure is a
-  // *hole*, reported nowhere.
-  let shot = 0, missed = 0, worst = 0;
-  for (const node of leaves(planBonsai(specFor(BONSAI_POND_CANOPY)).nodes)) {
-    if (node.kind !== "cluster" || node.field !== "seeded-lobes") continue;
-    const lobe = node.lobe;
-    worst = Math.max(worst, Math.max(lobe.x, lobe.y, lobe.z) / Math.min(lobe.x, lobe.y, lobe.z));
-    const record = {
-      kind: "smooth-union-cluster", primitiveId: 1, materialId: 1,
-      center_m: { x: 0, y: 0, z: 0 }, lobeRadii_m: lobe, clusterReference: 0,
-      packing: {
-        field: "seeded-lobes", smoothRadius_m: node.smoothRadius, seed: node.seed >>> 0,
-        lobeCount: node.lobeCount, anisotropy: node.anisotropy,
-      },
-    } as const;
-    // Through the envelope's own centre from every direction, so a miss can only
-    // be the march giving up: the field is guaranteed to contain its centre.
-    for (let i = 0; i < 14; i += 1) {
-      for (let j = 0; j < 14; j += 1) {
-        const theta = Math.PI * (j + 0.5) / 14;
-        const phi = 2 * Math.PI * (i + 0.5) / 14;
-        const d = { x: Math.sin(theta) * Math.cos(phi), y: Math.cos(theta), z: Math.sin(theta) * Math.sin(phi) };
-        shot += 1;
-        if (!intersectSvoPrimitive(record, {
-          origin_m: { x: -2 * d.x, y: -2 * d.y, z: -2 * d.z }, direction: d, tMin_m: 0, tMax_m: 4,
-        })) missed += 1;
-      }
-    }
-  }
-  assert.ok(shot > 0, "the buttresses are not anisotropic fields any more");
-  assert.equal(missed, 0, `${missed} of ${shot} rays march through a fin without finding it`);
-  // And the other side of the trade: a fin that has regularised back toward a
-  // tube is the defect this replaced.
-  assert.ok(worst > 3.5, `the fins are only ${worst.toFixed(1)} times longer than thick; they will read as tubes again`);
 });
 
 test("the budget is enforced rather than merely documented", () => {
@@ -553,9 +630,21 @@ test("the buttress roots meet the bank they run out over, and grip it", () => {
     Math.hypot(foot.x - STAND_M[0], foot.z - STAND_M[1])));
   assert.ok(spread > 2 * BONSAI_POND_CANOPY.boleRadius_m,
     `the buttresses reach ${(1000 * spread).toFixed(0)} mm against a ${(1000 * BONSAI_POND_CANOPY.boleRadius_m).toFixed(0)} mm bole; the flare has gone`);
-  // And thick where they leave, not just long: a buttress under about four
-  // fifths of the stump emerges as a rib on the flare rather than as part of it.
-  assert.ok(BONSAI_POND_CANOPY.rootWidth > 0.8, "the buttresses have gone back to being fingers");
+  // And thick where they leave, not just long — but measured in leaves rather
+  // than as a share of the stump, which is the change round roots forced.
+  //
+  // Under fins `rootWidth` was a fin *height* and had to be near one, because a
+  // fin leaves the axis inside the stump and anything much thinner emerged as a
+  // rib on the flare rather than as part of it. Under round roots it is a
+  // *radius*, and a root as thick as the bole it leaves is not a root — the plate
+  // has them at about half. What has to hold instead is the floor the leaf sets:
+  // the shoulder over a leaf and a half, which is asserted station by station in
+  // the test above, and the toe still bedded rather than floating, which is
+  // asserted from `rootFeet_m` at the top of this one.
+  assert.ok(BONSAI_POND_CANOPY.rootWidth > 0.45 && BONSAI_POND_CANOPY.rootWidth < 0.85,
+    "a root as thick as its own stump is a buttress fin again; one under half a leaf is nothing");
+  assert.ok(2000 * BONSAI_POND_CANOPY.rootWidth * BONSAI_POND_CANOPY.boleRadius_m >= 1.5 * 25,
+    "the shoulder of a root has to clear a leaf and a half");
 });
 
 test("a specimen is one selectable object built from porcelain", () => {
@@ -657,17 +746,95 @@ test("halving the floret quadruples what the surface costs", () => {
     "the candidate index may grow, but this bound was measured against its 4 096");
 });
 
-test("the floret's span on a lattice is reported, and is not the constraint", () => {
-  // Kept because it is the first thing anyone asks, and the answer is now
-  // emphatic: the hero crown's floret is *half a cell* across on a 25 mm
-  // lattice, and it still silhouettes exactly, because a scenery primitive's
-  // primary visibility is a BVH over exact records and never consults the
-  // per-voxel material owner. Under the explicit crown the same specimen's cap
-  // spanned two and a third cells — and rendered no better. What the number
-  // bounds is how coarsely the cone tracer lights the crown, not what shape it
-  // is, which is why an aggregate could go four times finer without asking.
-  assert.ok(Math.abs(bonsaiFloretVoxelSpan(BONSAI_POND_CANOPY, 0.025) - 0.351) < 0.01);
+test("the floret's span in leaves is the constraint, and is reported", () => {
+  // This test used to assert the opposite, and the sentence it asserted was
+  // measured: "the hero crown's floret is half a cell across on a 25 mm lattice,
+  // and it still silhouettes exactly, because a scenery primitive's primary
+  // visibility is a BVH over exact records and never consults the per-voxel
+  // material owner". True then. Analytic shading is gone — the primary returns
+  // the voxel cell's surface — so the leaf is the geometric resolution and this
+  // number is the whole constraint on the object rather than a curiosity.
+  //
+  // The hero crown's published floret is three leaves at 25 mm, where the crown
+  // that shipped was 0.35 of one.
+  assert.ok(bonsaiFloretVoxelSpan(BONSAI_POND_CANOPY, 0.025) >= 2.9,
+    `the hero floret spans ${bonsaiFloretVoxelSpan(BONSAI_POND_CANOPY, 0.025).toFixed(2)} leaves`);
+  // And it *follows* the leaf rather than being a fixed length, so the same form
+  // resolves further as the leaf shrinks instead of being re-authored. Halving
+  // the leaf does not double the span, because the floret shrinks with it until
+  // it reaches the plate's own proportion and then stops.
+  const coarse = bonsaiFloretVoxelSpan(BONSAI_POND_CANOPY, 0.025);
+  const fine = bonsaiFloretVoxelSpan(BONSAI_POND_CANOPY, 0.0125);
+  assert.ok(fine >= coarse, "a finer leaf must not draw a coarser floret");
+  assert.ok(fine < 2 * coarse, "the floret is following the leaf down, not standing still");
+  // The explicit crown is a fixed authored length and does not follow anything,
+  // which is the difference the aggregate exists for.
   assert.ok(Math.abs(bonsaiFloretVoxelSpan(POND_FLORETS, 0.025) - 2.34) < 0.02);
-  assert.ok(bonsaiFloretVoxelSpan(BONSAI_SHELF_MINIATURE, 0.025) < 1);
+  assert.equal(bonsaiFloretVoxelSpan(POND_FLORETS, 0.0125), 2 * bonsaiFloretVoxelSpan(POND_FLORETS, 0.025));
   assert.throws(() => bonsaiFloretVoxelSpan(BONSAI_POND_CANOPY, 0), /positive cell size/);
+});
+
+/**
+ * The convergence is *connected*, which for two years it was not.
+ *
+ * `bonsaiCanopyLadder` was built so that a shrinking leaf carries the published
+ * floret down to the plate's own proportion with nothing re-authored — 75 mm at
+ * a 25 mm leaf, 37.5 at 12.5, and the plate's 30 mm from 6.25 mm down. Every
+ * part of that existed except the wire: `BonsaiSpec.leafSize_m` is optional, no
+ * document passed one, and the hero garden therefore drew 75 mm florets no
+ * matter what lattice it was rendered on.
+ *
+ * The leaf now comes from `SceneryGeneratorRequest.detailCellSize_m`, which is
+ * the scene's own. This walks the hero document's own bonsai node through
+ * `growSceneryGenerator` at each rung and reads the floret back off the records,
+ * so it is checking what the scene publishes rather than what the ladder
+ * returns.
+ */
+test("the hero document's specimen draws at the scene's own leaf", () => {
+  const scene = createHeroGardenHoseScene();
+  const node = scene.scenery?.nodes.find(({ id }) => id === "bonsai");
+  assert.ok(node?.kind === "generator" && node.generator === "bonsai",
+    "the hero document must hold its specimen as a generator node");
+  const form = node.params as { readonly lobes: number };
+  /** Published floret width, in metres: `lobeSpan` is a share of the envelope. */
+  const floretWidth_m = (detailCellSize_m: number): number => {
+    const grown = growSceneryGenerator(node.generator, node.params, {
+      key: node.id,
+      seed: node.seed,
+      groundHeightAt: () => HERO_GARDEN_VESSEL.groundHeight_m,
+      detailCellSize_m,
+      vessel: () => { throw new Error("a bonsai names no vessel"); },
+    });
+    const heads: number[] = [];
+    for (const { node: child } of walkSceneryNodes(grown)) {
+      if (child.kind !== "cluster" || child.field !== "seeded-lobes") continue;
+      if (!child.id.includes("lobe")) continue;
+      heads.push((child.lobeSpan ?? 0) * 2 * child.lobe.x);
+    }
+    assert.ok(heads.length === form.lobes, "the crown must publish one seeded-lobe head per lobe");
+    return Math.max(...heads);
+  };
+  // The authored default is untouched, which is the regression bar.
+  assert.ok(Math.abs(floretWidth_m(BONSAI_DEFAULT_LEAF_SIZE_M) - 0.075) < 1e-9,
+    "at the authored 25 mm leaf the crown must still publish its 75 mm floret");
+  // And it converges, monotonically, onto the plate's own 30 mm — which is
+  // `crownWidth / canopyGrainAcross` and therefore a *proportion*, so it stops
+  // there rather than continuing to shrink with the lattice.
+  const ladder = [0.025, 0.0125, 0.00625, 0.003125, 0.0015625].map(floretWidth_m);
+  for (let index = 1; index < ladder.length; index += 1) {
+    assert.ok(ladder[index] <= ladder[index - 1] + 1e-12, "a finer leaf must never publish a coarser floret");
+  }
+  assert.ok(Math.abs(ladder[2] - 0.030) < 1e-9, "by a 6.25 mm leaf the specimen has become the plate");
+  assert.ok(Math.abs(ladder[4] - 0.030) < 1e-9, "and stays there: 30 mm is a proportion, not a resolution");
+  // Free, and that is why it can be taken now. The floret is a packing parameter
+  // of a record that already exists, so a converged crown is the same records.
+  const counts = [0.025, 0.00625].map((leaf) => {
+    let total = 0;
+    for (const { node: child } of walkSceneryNodes(growSceneryGenerator(node.generator, node.params, {
+      key: node.id, seed: node.seed, groundHeightAt: () => HERO_GARDEN_VESSEL.groundHeight_m,
+      detailCellSize_m: leaf, vessel: () => { throw new Error("a bonsai names no vessel"); },
+    }))) if (isSceneryPrimitiveNode(child)) total += 1;
+    return total;
+  });
+  assert.equal(counts[0], counts[1], "converging the crown must not cost a record");
 });

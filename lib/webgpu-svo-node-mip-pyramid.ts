@@ -2,6 +2,7 @@ import {
   SVO_NODE_MIP_LAYOUT,
   createSvoNodeMipPage,
   packSvoNodeMipPageKey,
+  svoNodeMipOpacityChannels,
   publishSvoNodeMipGeneration,
   type SvoNodeMipPageKey,
   type SvoNodeMipPagePlan,
@@ -20,7 +21,23 @@ export const WEBGPU_SVO_NODE_MIP_LAYOUT = Object.freeze({
   directoryTextureFormat: "rgba32uint" as GPUTextureFormat,
   directPageTableTextureFormat: "r32uint" as GPUTextureFormat,
   directPageTableMaximumLevels: 12,
-  directPageTableMaximumBytes: 64 * 1024 * 1024,
+  /**
+   * The table is *dense over the domain's page grid* while the pages in it are
+   * sparse, so its size follows the world's extent rather than its occupancy:
+   * `hero-garden-hose` needs 0.2 MB at a 6.25 mm leaf, 11.4 MB at 1.5625 mm and
+   * **90.9 MB at 0.78 mm**. At 64 MB the 0.78 mm rung fell off the direct path
+   * entirely — `ready` false is fatal at the one call site
+   * (`webgpu-octree-sparse-bricks.ts`, "capacity cannot cover the declared
+   * editable domain"), so the whole derived-lighting path withdrew for want of
+   * an *addressing* structure, with the atlas it addresses comfortably inside
+   * the device. 192 MB clears that rung with headroom and is still an order of
+   * magnitude under the atlas budget it serves.
+   *
+   * This is a ceiling, not an allocation: a domain that does not need the space
+   * does not take it, and one that outruns it still degrades to the sorted
+   * directory the binary-search fallback searches rather than to nothing.
+   */
+  directPageTableMaximumBytes: 192 * 1024 * 1024,
   directoryTexelsPerPage: 2,
   dimension: "3d" as GPUTextureDimension,
   directoryStrideBytes: SVO_NODE_MIP_LAYOUT.directoryBytesPerPage,
@@ -99,6 +116,8 @@ ${svoNodeMipSamplingWGSL}
 export interface WebGpuSvoNodeMipVisibleGeneration {
   generation: number;
   plan: SvoNodeMipPyramidPlan;
+  /** Opacity storage format; absent means the historical four-lane page. */
+  format?: GPUTextureFormat;
   texture: GPUTexture;
   view: GPUTextureView;
   sampler: GPUSampler;
@@ -403,6 +422,13 @@ export interface WebGpuLiveSvoNodeMipOptions {
   atlasTexels: readonly [number, number, number];
   /** Fixed direct-table extent. Omit to use only the compact sampled directory. */
   directPageTableDimensions?: readonly [number, number, number];
+  /**
+   * Opacity page width. See `SVO_NODE_MIP_OPACITY_STORAGE`: a dry world halves
+   * the page by dropping two lanes it provably never writes. The builder's
+   * scratch and publish pass must be given the same format, which is why
+   * `gpuTarget()` carries it rather than leaving each side to decide.
+   */
+  format?: GPUTextureFormat;
   label?: string;
 }
 
@@ -415,6 +441,8 @@ export interface WebGpuLiveSvoNodeMipGpuTarget {
   pageValidity: LiveSvoDerivedPageValidityBinding;
   atlasPages: readonly [number, number, number];
   pageCapacity: number;
+  /** Opacity storage format the builder's scratch, WGSL and publish pass must match. */
+  format?: GPUTextureFormat;
   directPageTableTexture: GPUTexture;
   directPageTableDimensions: readonly [number, number, number];
   directPageTableLevelZOffsets: Uint32Array<ArrayBuffer>;
@@ -429,6 +457,8 @@ export interface WebGpuLiveSvoNodeMipGpuTarget {
 export class WebGpuLiveSvoNodeMipPyramid {
   readonly allocatedBytes: number;
   readonly pageState: WebGpuLiveSvoDerivedPageState;
+  /** Opacity storage format; `SVO_NODE_MIP_OPACITY_STORAGE.wideFormat` unless narrowed. */
+  readonly format: GPUTextureFormat;
 
   private readonly texture: GPUTexture;
   private readonly view: GPUTextureView;
@@ -459,7 +489,8 @@ export class WebGpuLiveSvoNodeMipPyramid {
     const direct = options.directPageTableDimensions ?? [1, 1, 1];
     if (direct.some((value) => !Number.isSafeInteger(value) || value <= 0)) throw new RangeError("Live node-mip direct-table dimensions must be positive integers");
     const label = options.label ?? "Live SVO node mips";
-    this.texture = device.createTexture({ label: `${label} atlas`, size: atlasTexels, dimension: "3d", format: WEBGPU_SVO_NODE_MIP_LAYOUT.format,
+    this.format = options.format ?? WEBGPU_SVO_NODE_MIP_LAYOUT.format;
+    this.texture = device.createTexture({ label: `${label} atlas`, size: atlasTexels, dimension: "3d", format: this.format,
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.COPY_DST });
     this.view = this.texture.createView({ dimension: "3d" });
     this.sampler = device.createSampler({ label: `${label} sampler`, addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge",
@@ -477,7 +508,7 @@ export class WebGpuLiveSvoNodeMipPyramid {
       format: WEBGPU_SVO_NODE_MIP_LAYOUT.directPageTableTextureFormat, usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST });
     this.directPageTableView = this.directPageTableTexture.createView({ dimension: "3d" });
     this.pageState = new WebGpuLiveSvoDerivedPageState(device, pageCapacity, label);
-    this.allocatedBytes = atlasTexels[0] * atlasTexels[1] * atlasTexels[2] * SVO_NODE_MIP_LAYOUT.bytesPerTexel
+    this.allocatedBytes = atlasTexels[0] * atlasTexels[1] * atlasTexels[2] * svoNodeMipOpacityChannels(this.format)
       + pageCapacity * SVO_NODE_MIP_LAYOUT.directoryBytesPerPage
       + this.directoryShape.columns * this.directoryShape.rows * SVO_NODE_MIP_LAYOUT.directoryBytesPerPage
       + direct[0] * direct[1] * direct[2] * 4 + this.pageState.allocatedBytes;
@@ -534,13 +565,14 @@ export class WebGpuLiveSvoNodeMipPyramid {
     const physical = SVO_NODE_MIP_LAYOUT.physicalSize;
     return { texture: this.texture, pageValidity: this.pageState.validity,
       atlasPages: this.options.atlasTexels.map((value) => Math.floor(value / physical)) as [number, number, number],
-      pageCapacity: this.options.pageCapacity, directPageTableTexture: this.directPageTableTexture,
+      pageCapacity: this.options.pageCapacity, format: this.format, directPageTableTexture: this.directPageTableTexture,
       directPageTableDimensions: this.directPageTableDimensions, directPageTableLevelZOffsets: this.directPageTableLevelZOffsets };
   }
 
   visibleGeneration(): WebGpuLiveSvoNodeMipVisibleGeneration | undefined {
     if (!this.plan) return undefined;
-    return { generation: this.plan.generation, plan: this.plan, texture: this.texture, view: this.view, sampler: this.sampler,
+    return { generation: this.plan.generation, plan: this.plan, format: this.format,
+      texture: this.texture, view: this.view, sampler: this.sampler,
       directory: this.directory, directoryTexture: this.directoryTexture, directoryView: this.directoryView,
       directPageTableTexture: this.directPageTableTexture, directPageTableView: this.directPageTableView,
       directPageTableDimensions: this.directPageTableDimensions, directPageTableLevelZOffsets: this.directPageTableLevelZOffsets,

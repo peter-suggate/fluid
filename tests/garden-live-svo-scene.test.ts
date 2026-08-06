@@ -259,7 +259,13 @@ test("live SVO startup bypasses the simulation solver and t=0 raster gate", () =
     "the first sparse frame must explicitly close the presentation resource activity");
   assert.doesNotMatch(liveSource, /WebGPUUniformEulerianSolver/);
   assert.match(liveSource, /fluid authority intentionally absent/);
-  assert.match(liveSource, /new OctreeSparseBrickWorld/);
+  // The sparse world is still what a live scene is made of; it is now built
+  // through the interruptible factory rather than the constructor, so the
+  // render worker can service a message — including the abort of this very
+  // request — while a refined scene is being planned.
+  assert.match(liveSource, /await OctreeSparseBrickWorld\.create\(/);
+  assert.match(liveSource, /interrupt: CooperativeBuildOptions/,
+    "the live scene must pass supersession and a slice budget down into the world build");
   assert.doesNotMatch(liveSource, /emptyPhi|onSubmittedWorkDone/,
     "renderer-only startup must not bake or fence scene content");
 });
@@ -295,18 +301,22 @@ test("GPU scene rebuild identity includes captured container and owner-layout in
     "authored lighting is hot-published and must not rebuild the shared SVO arenas");
 });
 
-test("live SVO scenes lazily expose raw-voxel inspection records", () => {
+/**
+ * A live SVO scene used to carry a second, lazily allocated publication: one
+ * 48-byte expanded record per resolved voxel and per leaf, materialized the
+ * first time the render panel asked for a raw/brick view. Its arenas were large
+ * enough (~295 MB on the widened ocean) that the getter had to fold them into
+ * renderer telemetry after the fact. Both the lane and the accounting are gone,
+ * so what this pins now is that a renderer-only scene publishes exactly one
+ * source — the always-resident structural one — and knows its own footprint at
+ * construction.
+ */
+test("live SVO scenes publish only the always-resident structural source", () => {
   const liveSource = readFileSync(new URL("../lib/webgpu-live-svo-scene.ts", import.meta.url), "utf8");
 
-  assert.match(liveSource, /get sparseVoxelRenderSource\(\)/,
-    "the renderer's existing inspection attachment must work for fluid-free scenes");
-  assert.match(liveSource, /this\.world\.ensureInspectionSource\(\)/,
-    "raw records should be derived from the same authoritative static octree");
-  assert.match(liveSource, /worldBytes - this\.accountedWorldBytes/,
-    "lazy inspection allocation must be reflected in renderer telemetry");
-
-  const constructorStart = liveSource.indexOf("private constructor(");
-  const getterStart = liveSource.indexOf("get sparseVoxelRenderSource()", constructorStart);
-  assert.doesNotMatch(liveSource.slice(constructorStart, getterStart), /ensureInspectionSource\(\)/,
-    "normal smooth SVO startup must not allocate capacity-sized debug records");
+  assert.match(liveSource, /this\.sparseVoxelSceneSource = this\.world\.sceneSource;/,
+    "the structural scene source is attached once, at construction");
+  for (const removed of [
+    "sparseVoxelRenderSource", "ensureInspectionSource", "accountedWorldBytes",
+  ]) assert.doesNotMatch(liveSource, new RegExp(removed), `${removed} must not survive the inspection removal`);
 });

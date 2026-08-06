@@ -1,8 +1,10 @@
 import type { EnvironmentId } from "./environments";
 import type { SceneDescription } from "./model";
 import { swayedPrimitiveDescriptor, type EnvironmentProxySway } from "./scenery-sway";
+import type { SvoFieldProgram } from "./svo-field-program";
 import {
   packSvoPrimitiveRecords,
+  sampleSvoPrimitive,
   type SvoFinitePrimitiveDescriptor,
   type SvoPrimitiveDescriptor,
   type SvoSmoothUnionClusterPacking,
@@ -25,12 +27,17 @@ import {
   type EnvironmentProxyPrimitive,
 } from "./voxel-environments";
 import { VOXEL_MATERIAL_IDS } from "./voxel-scene";
-import { ENVIRONMENT_VOXEL_MATERIAL_BASE } from "./webgpu-octree-sparse-bricks";
+import { ENVIRONMENT_VOXEL_MATERIAL_BASE, type SparseSceneSolidReach } from "./webgpu-octree-sparse-bricks";
 // The arena layout an aggregate's word-13 reference points into. Imported
 // rather than restated because a reference that does not name the region the
 // renderer uploads resolves to nothing, and a cluster that resolves to nothing
 // draws nothing — with no error anywhere.
-import { packSvoDrySceneClusters, svoDrySceneClusterReference } from "./webgpu-svo-dry-scene";
+import {
+  packSvoDrySceneClusters,
+  packSvoDrySceneFieldPrograms,
+  svoDrySceneClusterReference,
+  svoDrySceneFieldProgramReference,
+} from "./webgpu-svo-dry-scene";
 
 /**
  * Defensive ceiling on what one environment may publish.
@@ -113,6 +120,10 @@ export interface SvoScenePrimitiveBuild {
   clusterPackings: readonly SvoSmoothUnionClusterPacking[];
   /** The same, packed for the scene arena's cluster region. Absent means no aggregates. */
   clusterBlocks?: Uint32Array<ArrayBuffer>;
+  /** Field-program tapes in publication order; index `i` is reference `i`. */
+  fieldPrograms: readonly SvoFieldProgram[];
+  /** The same, packed for the scene arena's tape region. Absent means no tapes. */
+  fieldProgramBlocks?: Uint32Array<ArrayBuffer>;
   /** @deprecated Offline audit index; the renderer always uses SVO payload traversal. */
   primitiveCandidates?: SvoPrimitiveCandidatePublication;
   metadata: readonly SvoEnvironmentPrimitiveMetadata[];
@@ -181,6 +192,7 @@ function descriptorForProxy(
   scene: Pick<SceneDescription, "rigidBodies">,
   primitive: EnvironmentProxyPrimitive,
   clusterIndex = 0,
+  fieldProgramIndex = 0,
 ): SvoPrimitiveDescriptor {
   const identity = environmentIdentity(scene, primitive);
   // Primitive ID follows the scene-global owner ID. It is stable for the same
@@ -224,6 +236,17 @@ function descriptorForProxy(
       lobeRadii_m: { ...primitive.radius_m },
       clusterReference: svoDrySceneClusterReference(clusterIndex),
       packing: primitive.packing,
+    };
+  }
+  // Both halves again, for the same reason and against a second arena: a tape
+  // that lost its warp draws a smooth box, which is exactly the frame the kind
+  // exists to stop producing.
+  if (primitive.kind === "field-program") {
+    return {
+      ...base, kind: "field-program",
+      envelopeRadii_m: { ...primitive.halfExtent_m },
+      fieldProgramReference: svoDrySceneFieldProgramReference(fieldProgramIndex),
+      program: primitive.program,
     };
   }
   return { ...base, kind: "ellipsoid", radii_m: { ...primitive.radius_m } };
@@ -306,6 +329,8 @@ export function svoScenePrimitivesFromEnvironmentCatalog(
   // names. Expansion is depth-first in document order, so two builds of the
   // same graph assign the same references.
   const clusterPackings: SvoSmoothUnionClusterPacking[] = [];
+  // The second arena, assigned by the same rule and for the same reason.
+  const fieldPrograms: SvoFieldProgram[] = [];
   let openShellOwnerId: number | undefined;
 
   for (const primitive of primitives) {
@@ -317,8 +342,9 @@ export function svoScenePrimitivesFromEnvironmentCatalog(
     if (openShell && openShellOwnerId !== undefined) throw new Error("Environment catalog contains multiple front/open shell owners");
     if (openShell) openShellOwnerId = ownerId;
 
-    const descriptor = descriptorForProxy(scene, primitive, clusterPackings.length);
+    const descriptor = descriptorForProxy(scene, primitive, clusterPackings.length, fieldPrograms.length);
     if (descriptor.kind === "smooth-union-cluster" && descriptor.packing) clusterPackings.push(descriptor.packing);
+    if (descriptor.kind === "field-program" && descriptor.program) fieldPrograms.push(descriptor.program);
     descriptors.push(descriptor);
     metadata.push({
       primitiveIndex,
@@ -356,6 +382,8 @@ export function svoScenePrimitivesFromEnvironmentCatalog(
     packedRecords,
     clusterPackings,
     clusterBlocks: clusterPackings.length > 0 ? packSvoDrySceneClusters(clusterPackings) : undefined,
+    fieldPrograms,
+    fieldProgramBlocks: fieldPrograms.length > 0 ? packSvoDrySceneFieldPrograms(fieldPrograms) : undefined,
     primitiveCandidates,
     metadata,
     primitiveIndexByOwnerId,
@@ -408,6 +436,43 @@ export function packSvoScenePrimitiveAnimation(animation: SvoScenePrimitiveAnima
     const sway = animation.sway[index];
     return sway ? swayedPrimitiveDescriptor(descriptor, sway, time_s) : descriptor;
   }));
+}
+
+/**
+ * The build's solids as brick selection sees them: a containing box and an
+ * exact distance.
+ *
+ * The pairing is the point. A brick claim is made from boxes, and a box
+ * over-claims — the corners a cone or a floret never enters are still 512
+ * voxels of air and a node-mip page of zeros. The exact distance is what turns
+ * that box back into the solid, and it is already here: `sampleSvoPrimitive` is
+ * the CPU mirror of the same evaluation the voxeliser runs on the device, so
+ * the two cannot disagree about which bricks hold geometry.
+ *
+ * A descriptor this evaluator cannot resolve — a terrain heightfield, whose
+ * resolver is not part of the build — reports `-Infinity` rather than throwing,
+ * which reads as "reaches everywhere" and keeps every brick it bounds. Being
+ * wrong in that direction costs allocation; being wrong in the other costs
+ * geometry.
+ */
+export function svoScenePrimitiveSolidReach(build: SvoScenePrimitiveBuild): SparseSceneSolidReach[] {
+  const clusterResolver = (reference: number) => build.clusterPackings[reference];
+  return build.metadata.map((entry) => {
+    const descriptor = build.descriptors[entry.primitiveIndex];
+    const { min, max } = entry.coverageBounds.conservative_m;
+    return {
+      minimum: [min.x, min.y, min.z] as const,
+      maximum: [max.x, max.y, max.z] as const,
+      distance_m: (x: number, y: number, z: number): number => {
+        try {
+          const sample = sampleSvoPrimitive(descriptor, { x, y, z }, undefined, clusterResolver);
+          return Number.isFinite(sample.signedDistance_m) ? sample.signedDistance_m : Number.NEGATIVE_INFINITY;
+        } catch {
+          return Number.NEGATIVE_INFINITY;
+        }
+      },
+    };
+  });
 }
 
 /** Build the selected scene environment catalog and convert it in one call. */

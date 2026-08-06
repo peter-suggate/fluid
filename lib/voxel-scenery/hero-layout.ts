@@ -1199,6 +1199,24 @@ export function heroGardenInWater(x: number, y: number, z: number): boolean {
 export function withHeroLayout(scene: SceneDescription, options: LayoutOptions = {}): SceneryGraph {
   const base = scene.scenery;
   if (!base) throw new Error("The hero layout extends a scenery graph the scene must already carry");
+  /**
+   * The layout is solved against one level and the document has to be at it.
+   *
+   * `HERO_STONE_SET` and every station read off it are module constants at
+   * `HERO_GARDEN_WATERLINE_M`, and the level moves with the *solver's* lattice —
+   * `heroGardenWaterBelowGround_m` is a floor in cells, so a wet document at
+   * 12.5 mm sits 20 mm higher than this. Composing this layout onto that
+   * document would bed stones against a shore the pond does not have, and it
+   * would do it silently. Loud instead: nothing reaches this today, because the
+   * only caller is a dry preset, and a caller that does should pass the level in
+   * rather than have the answer guessed for it.
+   */
+  const documentWaterline_m = scene.container.fillFraction * scene.container.height_m;
+  if (Math.abs(documentWaterline_m - HERO_GARDEN_WATERLINE_M) > 1e-9) {
+    throw new Error(`The hero layout is solved at a ${(HERO_GARDEN_WATERLINE_M * 1e3).toFixed(1)} mm waterline`
+      + ` and this document sits at ${(documentWaterline_m * 1e3).toFixed(1)} mm;`
+      + " give the layout its own level before composing it onto a scene at another lattice");
+  }
   const kept = base.nodes.filter((node) => !node.id.startsWith(HERO_LAYOUT_NODE_PREFIX));
   const nodes = layoutPlaceholderNodes(heroGardenLayout(), heroGardenLayoutWorld(scene), options);
   // Spread rather than name the fields: everything on the graph except the node

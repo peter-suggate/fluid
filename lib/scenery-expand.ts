@@ -17,6 +17,7 @@ import {
   type SceneryUnits,
 } from "./scenery-graph";
 import { validateSvoClusterPacking, type SvoSmoothUnionClusterPacking } from "./svo-primitive-abi";
+import { svoFieldProgramExtent_m, validateSvoFieldProgram } from "./svo-field-program";
 import {
   aabb,
   V,
@@ -303,6 +304,31 @@ function emitPrimitiveGeometry(
         clusterPacking(node, frame, envelope_m), color, emission, tags, frame.orientation);
       return;
     }
+    case "field-program": {
+      // The one node kind whose lengths this function does not scale, because
+      // they are not its lengths: which of an op's five scalars is a length is
+      // the op's own business, and a scaling rule here would be a second copy of
+      // the op table that drifts from the first. See `SceneryFieldProgramNode`.
+      // The check is on the *resolved* metres-per-unit, so a metres node under a
+      // scaled group is caught as well as one authored in scene-scale.
+      const unitScale = frame.unit_m * frame.scale;
+      if (Math.abs(unitScale - 1) > 1e-9) {
+        throw new RangeError(`Scenery field-program node "${node.id}" resolves to ${unitScale} metres per authored unit;`
+          + ` a tape is authored in metres, so it needs \`units: "metres"\` and no enclosing \`place.scale\``);
+      }
+      // The extent bound is derived here and nowhere else, so the proxy box and
+      // the tape can never be two opinions. The validator runs first: a tape the
+      // machine cannot run has no extent, and a bound computed from one would be
+      // a number rather than a box.
+      try {
+        validateSvoFieldProgram(node.program);
+      } catch (error) {
+        throw new RangeError(`Scenery field-program node "${node.id}": ${(error as Error).message}`);
+      }
+      const [x, y, z] = svoFieldProgramExtent_m(node.program);
+      builder.fieldProgram(node.id, group, centre, V(x, y, z), node.program, color, emission, tags, frame.orientation);
+      return;
+    }
     default:
       node satisfies never;
   }
@@ -430,16 +456,29 @@ function emitTree(
     leanXZ: node.lean,
     bark: ramp(node.bark),
     leaf: ramp(node.leaf),
+    // The same number the generator catalog hands every species, and for the
+    // same reason — see `SceneryGeneratorRequest.detailCellSize_m`. `tree` is
+    // the one node kind that grows its own geometry without going through that
+    // catalog, so it was the one that never received a leaf at all.
+    leafSize_m: context.detailCellSize_m,
   });
+  // The *render* lattice, not the solver's. The excursion is the margin inside
+  // which a re-posed analytic surface still belongs to the voxel that owns it,
+  // and the voxel that owns it is a leaf of the tree the prop was rasterised
+  // into — which on a scene that spent `environmentRefinementDepth` levels is
+  // `finestCellSize_m / 2^depth`. Taking the solver's number there granted a
+  // gust up to eight times the margin it actually had, which is why
+  // `DEFAULT_SVO_RENDER_TUNING` keeps refinement off by default and names this
+  // as the reason.
   emitProceduralTree(builder, plan, node.sway
-    ? { excursion_m: sceneryMaximumSwayExcursion_m(context.scene.voxelDomain.finestCellSize_m) }
+    ? { excursion_m: sceneryMaximumSwayExcursion_m(context.detailCellSize_m) }
     : undefined);
 }
 
 /**
  * Grow the nodes a generator node stands for, in publication order.
  *
- * The two things a document cannot hold are supplied here and nowhere else.
+ * The three things a document cannot hold are supplied here and nowhere else.
  *
  * The **ground query** is the whole reason a generator is a node kind rather
  * than a serialized function: a bonsai seats its root fingers on the heightfield
@@ -453,6 +492,13 @@ function emitTree(
  * rather than enumerated. `validateSceneryGraph` refuses a node naming one the
  * graph does not declare; the throw below is for a generator that needs a vessel
  * and was given none, which no valid document reaches.
+ *
+ * The **leaf** — `detailCellSize_m` — is the finest voxel the set will be drawn
+ * at, and it is here for the same reason: a species carries legibility floors
+ * measured in voxels across a feature, and a document that pinned a leaf would
+ * be a bake of the lattice it was saved at. It reaches the context from
+ * `voxelDomain.detailCellSize_m`, and is `finestCellSize_m` when a scene has not
+ * asked for extra octree levels under the solver's.
  *
  * The generated nodes are visited in the generator node's own frame, so a
  * generator with no `place` publishes exactly what the same nodes would have
@@ -470,6 +516,7 @@ function growGenerator(
     groundHeightAt: (x_m, z_m) => context.scene.terrain
       ? terrainHeightAt(context.scene.terrain, x_m, z_m)
       : context.floorY_m,
+    detailCellSize_m: context.detailCellSize_m,
     vessel: () => {
       const spec = node.vessel === undefined ? undefined : graph.vessels?.[node.vessel];
       if (!spec) {

@@ -75,7 +75,11 @@ export function requiredFluidDeviceLimits(limits: FluidAdapterLimits): Record<st
   };
 }
 
-export const FLUID_REDUCTION_BYTES_PER_LANE = 32;
+/**
+ * 32 bytes for the merged-scalar fold slot (four compensated pairs) plus the
+ * 4-byte limb share the cooperative exact-reduction fold writes per lane.
+ */
+export const FLUID_REDUCTION_BYTES_PER_LANE = 36;
 export const FLUID_M1_MAX_REDUCTION_LANES = 128;
 
 /**

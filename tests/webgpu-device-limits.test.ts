@@ -67,7 +67,8 @@ test("colour-attachment request never exceeds the adapter and never drops below 
 });
 
 test("sole 128-lane target reduction is fail-closed on device limits", () => {
-  assert.equal(FLUID_REDUCTION_BYTES_PER_LANE, 32);
+  // 32 merged-scalar bytes plus the cooperative exact-fold's 4-byte limb share.
+  assert.equal(FLUID_REDUCTION_BYTES_PER_LANE, 36);
   assert.equal(supportsFluidM1MaxReduction({
     maxComputeInvocationsPerWorkgroup: 1024,
     maxComputeWorkgroupStorageSize: 32 * 1024,

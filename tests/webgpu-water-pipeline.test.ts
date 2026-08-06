@@ -7,6 +7,7 @@ import {
 } from "../lib/webgpu-octree-power-coarse-levelset";
 import {
   activeCubeCapacity,
+  causticReceiverContentKey,
   compositeShader,
   CONTACT_RESOLVE_BAND_CELLS,
   EXTRACTION_POLYGONISE_WORKGROUP,
@@ -21,6 +22,27 @@ import {
   WATER_DISABLED_STORAGE_BYTES,
   WATER_INTERFACE_CULL_MODES
 } from "../lib/webgpu-water-pipeline";
+import { terrainContentStamp, type TerrainDescription } from "../lib/terrain";
+
+test("caustic receiver invalidation follows sculpted content at a fixed shape", () => {
+  const terrain: TerrainDescription = {
+    baseHeight_m: 0.2,
+    features: [],
+    grid: {
+      kind: "grid", origin_m: { x: -1, z: -1 }, spacing_m: 1,
+      size: { nx: 2, nz: 2 }, heights_m: [0.2, 0.2, 0.2, 0.2],
+    },
+  };
+  const sculpted = {
+    ...terrain,
+    grid: { ...terrain.grid!, heights_m: [0.2, 0.2, 0.3, 0.2] },
+  };
+  assert.notEqual(
+    causticReceiverContentKey(terrain, 3, 2, terrainContentStamp(terrain)),
+    causticReceiverContentKey(sculpted, 3, 2, terrainContentStamp(sculpted)),
+    "a brush stroke must rebake the receiver without resizing its grid or container",
+  );
+});
 
 test("filtered caustic coverage blends back to the neutral floor without erasing overlaps", () => {
   assert.deepEqual(resolvePremultipliedCausticSample([0, 0, 0, 0]), [1, 1, 1]);
@@ -115,6 +137,19 @@ test("missing dry-scene publication does not suppress authoritative water", () =
   assert.match(source,
     /clearValue:\{r:\.18,g:0,b:\.045,a:65504\}/,
     "the missing dry scene remains unmistakably failed closed behind the water");
+});
+
+test("fluid-only presentation retains one clear background behind unchanged raster water", () => {
+  const source = readFileSync(new URL("../lib/webgpu-water-pipeline.ts", import.meta.url), "utf8")
+    .replace(/\s+/g, "");
+  assert.match(source, /backgroundMode==="clear"/);
+  assert.match(source, /if\(!this\.clearBackgroundEncoded\)\{/,
+    "the empty background must clear once rather than write every pixel every frame");
+  assert.match(source, /label:"Fluid-onlyclearbackground"/);
+  assert.match(source, /this\.sceneHasFluid\)\{interfacePass\("Water\+sprayfrontinterfaces"/,
+    "fluid-only mode must retain the exact raster interface passes");
+  assert.match(source, /composite\.setPipeline\(this\.compositePipeline\);composite\.setBindGroup/,
+    "fluid-only mode must retain the pretty optical composite");
 });
 
 test("surface extraction follows the fixed presentation cadence", () => {
@@ -214,7 +249,7 @@ test("global-fine presentation compiles and encodes only the combined mesh path"
 
   const globalStart = source.indexOf("if(globalFine){");
   const volumeStart = source.indexOf("}else{", globalStart);
-  const extractionEnd = source.indexOf("this.encodeSurfaceDiagnostics(encoder)", volumeStart);
+  const extractionEnd = source.indexOf("this.encodeSurfaceDiagnostics(encoder,forceSurfaceDiagnostics)", volumeStart);
   assert.ok(globalStart >= 0 && volumeStart > globalStart && extractionEnd > volumeStart);
   const globalBranch = source.slice(globalStart, volumeStart);
   assert.match(globalBranch, /polygoniseGlobalFineScanPipeline/);

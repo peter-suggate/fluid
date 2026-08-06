@@ -10,7 +10,7 @@ import {
   svoDrySceneShader,
   type SparseVoxelDrySceneData,
 } from "../lib/webgpu-svo-dry-scene";
-import type { SparseVoxelRenderSource } from "../lib/webgpu-voxel-debug";
+import type { SparseVoxelSceneRenderSource } from "../lib/webgpu-voxel-debug";
 import { svoDrySceneFixture } from "./svo-dry-scene-test-fixture";
 
 const rendererSource = readFileSync(new URL("../lib/webgpu-renderer.ts", import.meta.url), "utf8");
@@ -19,11 +19,10 @@ const panelSource = readFileSync(new URL("../components/VisualPanel.tsx", import
 
 function structuralSource(
   pbrBinding: GPUBufferBinding = { buffer: {} as GPUBuffer, size: 8 * SVO_MATERIAL_RECORD_STRIDE_BYTES },
-): SparseVoxelRenderSource {
+): SparseVoxelSceneRenderSource {
   const resource = { buffer: {} as GPUBuffer };
   return {
     materialCount: 8,
-    materials: resource,
     pbrMaterials: { binding: pbrBinding, count: 8, strideBytes: SVO_MATERIAL_RECORD_STRIDE_BYTES, revision: 3 },
     structural: {
       structure: resource,
@@ -44,7 +43,7 @@ function structuralSource(
       },
       generation: { published: 1, completed: 1 },
     },
-  } as unknown as SparseVoxelRenderSource;
+  } as unknown as SparseVoxelSceneRenderSource;
 }
 
 const scene: SparseVoxelDrySceneData = svoDrySceneFixture;
@@ -64,19 +63,19 @@ test("binding 4 consumes the fixed renderer-owned authored scene arena", () => {
   assert.doesNotMatch(dryRendererSource, /@group\(0\) @binding\(10\)/);
   assert.doesNotMatch(dryRendererSource, /svoStructuralGeometry|svoStructuralLeafStates/,
     "the dry pass must not retain structural fluid-march payload bindings");
-  assert.match(readFileSync(new URL("../lib/webgpu-voxel-debug.ts", import.meta.url), "utf8"), /materials: GPUBufferBinding/,
-    "inspection keeps its compact legacy material binding");
+  assert.doesNotMatch(readFileSync(new URL("../lib/webgpu-voxel-debug.ts", import.meta.url), "utf8"), /materials: GPUBufferBinding/,
+    "the inspection material table went with the expanded-record renderer");
 });
 
 test("published count, revision, direct identity, flags, and material functions are enforced in WGSL", () => {
   assert.deepEqual(SVO_DRY_SCENE_PARAMS_LAYOUT, {
-    sizeBytes: 576, terrainWordOffset: 24, terrainMaterialWordOffset: 28, materialPublicationWordOffset: 32,
+    sizeBytes: 592, terrainWordOffset: 24, terrainMaterialWordOffset: 28, materialPublicationWordOffset: 32,
     nodeMipWordOffset: 36, nodeMipAtlasWordOffset: 40,
     wideFanoutWordOffset: 44, nodeMipLevelStartWordOffset: 48,
     nodeMipOriginWordOffset: 60, fluidCoverageWordOffset: 64, tuningWordOffset: 76,
     nodeMipDirectWordOffset: 96, nodeMipDirectLevelZWordOffset: 100, tetrahedralRadianceWordOffset: 112, nodeMipExtentWordOffset: 116,
     giLightingWordOffset: 120, giConesWordOffset: 124, rigidBoundsWordOffset: 128, primitiveCandidatesWordOffset: 132,
-    structureOffsetsWordOffset: 136, derivedTraversalWordOffset: 140,
+    structureOffsetsWordOffset: 136, derivedTraversalWordOffset: 140, lodWordOffset: 144,
   });
   assert.match(dryRendererSource, /const visibilityFlags = \(!giReady && ambientOcclusionEnabled \? SVO_DRY_VISIBILITY_FLAGS\.exactContact \| SVO_DRY_VISIBILITY_FLAGS\.ambientOcclusion : 0\)[^]*SVO_DRY_VISIBILITY_FLAGS\.exactShadow[^]*SVO_DRY_VISIBILITY_FLAGS\.coneLightingRequested[^]*SVO_DRY_VISIBILITY_FLAGS\.globalIllumination/,
     "the visibility lane keeps ambient occlusion, shadows, and requested cone lighting independently switchable");
@@ -96,12 +95,11 @@ test("shared PBR consumes all opaque surface fields from the producer record", (
   assert.match(svoDrySceneShader, /surface\.emissive\+diffuseEnvironment\+specularEnvironment\+direct/);
 });
 
-test("renderer binds its live material arena, never producer or inspection buffers", () => {
+test("renderer binds its live material arena, never the producer PBR table", () => {
   const previousUsage = globalThis.GPUBufferUsage;
   const previousTextureUsage = globalThis.GPUTextureUsage;
   Object.assign(globalThis, { GPUBufferUsage: { UNIFORM: 1, COPY_DST: 2, STORAGE: 4 } });
   Object.assign(globalThis, { GPUTextureUsage: { TEXTURE_BINDING: 1 } });
-  const legacyBuffer = {} as GPUBuffer;
   const pbrBuffer = {} as GPUBuffer;
   let entries: readonly GPUBindGroupEntry[] = [];
   const device = {
@@ -113,7 +111,6 @@ test("renderer binds its live material arena, never producer or inspection buffe
   } as unknown as GPUDevice;
   try {
     const source = structuralSource({ buffer: pbrBuffer, size: 8 * SVO_MATERIAL_RECORD_STRIDE_BYTES });
-    source.materials = { buffer: legacyBuffer };
     const renderer = new SparseVoxelDrySceneRenderer(device, {} as GPUBuffer, {} as GPUBuffer, "rgba16float", "canonical");
     const internals = renderer as unknown as { layout: GPUBindGroupLayout; pipeline: GPURenderPipeline };
     internals.layout = {} as GPUBindGroupLayout;
@@ -122,7 +119,6 @@ test("renderer binds its live material arena, never producer or inspection buffe
     renderer.publishScene(scene);
     assert.equal(((entries.find(({ binding }) => binding === 4)?.resource as GPUBufferBinding).buffer as unknown as { label?: string }).label, "Live authored scene arena (materials, primitives/BVH, thin glass, terrain)");
     assert.notEqual((entries.find(({ binding }) => binding === 4)?.resource as GPUBufferBinding).buffer, pbrBuffer);
-    assert.notEqual((entries.find(({ binding }) => binding === 4)?.resource as GPUBufferBinding).buffer, legacyBuffer);
     renderer.destroy();
   } finally {
     Object.assign(globalThis, { GPUBufferUsage: previousUsage });

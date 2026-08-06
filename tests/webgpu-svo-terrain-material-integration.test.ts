@@ -12,13 +12,13 @@ import {
   svoDrySceneShader,
   type SparseVoxelDrySceneData,
 } from "../lib/webgpu-svo-dry-scene";
-import type { SparseVoxelRenderSource } from "../lib/webgpu-voxel-debug";
+import type { SparseVoxelSceneRenderSource } from "../lib/webgpu-voxel-debug";
 import { svoDrySceneFixture } from "./svo-dry-scene-test-fixture";
 
 const rendererSource = readFileSync(new URL("../lib/webgpu-renderer.ts", import.meta.url), "utf8");
 const dryFrameHarnessSource = readFileSync(new URL("../tools/svo-dry-frame-harness.ts", import.meta.url), "utf8");
 
-function structuralSource(): SparseVoxelRenderSource {
+function structuralSource(): SparseVoxelSceneRenderSource {
   const resource = { buffer: {} as GPUBuffer };
   return {
     materialCount: 8,
@@ -42,7 +42,7 @@ function structuralSource(): SparseVoxelRenderSource {
       },
       generation: { published: 1, completed: 1 },
     },
-  } as unknown as SparseVoxelRenderSource;
+  } as unknown as SparseVoxelSceneRenderSource;
 }
 
 function gardenMaterial() {
@@ -70,13 +70,13 @@ test("production garden metadata is packed into the existing dry uniform without
     "headless evidence must use the same scene-wide porcelain closure as production");
   assert.equal(SVO_TERRAIN_MATERIAL_METADATA_STRIDE_BYTES, 16);
   assert.deepEqual(SVO_DRY_SCENE_PARAMS_LAYOUT, {
-    sizeBytes: 576, terrainWordOffset: 24, terrainMaterialWordOffset: 28, materialPublicationWordOffset: 32,
+    sizeBytes: 592, terrainWordOffset: 24, terrainMaterialWordOffset: 28, materialPublicationWordOffset: 32,
     nodeMipWordOffset: 36, nodeMipAtlasWordOffset: 40,
     wideFanoutWordOffset: 44, nodeMipLevelStartWordOffset: 48,
     nodeMipOriginWordOffset: 60, fluidCoverageWordOffset: 64, tuningWordOffset: 76,
     nodeMipDirectWordOffset: 96, nodeMipDirectLevelZWordOffset: 100, tetrahedralRadianceWordOffset: 112, nodeMipExtentWordOffset: 116,
     giLightingWordOffset: 120, giConesWordOffset: 124, rigidBoundsWordOffset: 128, primitiveCandidatesWordOffset: 132,
-    structureOffsetsWordOffset: 136, derivedTraversalWordOffset: 140,
+    structureOffsetsWordOffset: 136, derivedTraversalWordOffset: 140, lodWordOffset: 144,
   });
   assert.match(svoDrySceneShader, /terrainMaterial:SvoTerrainMaterialMetadata/);
   assert.doesNotMatch(svoDrySceneShader, /svoStructuralGeometry|svoStructuralLeafStates/);

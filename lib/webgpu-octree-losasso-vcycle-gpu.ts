@@ -6,6 +6,16 @@ import {
   type OctreeLosassoVCycleHierarchySource,
 } from "./webgpu-octree-losasso-vcycle";
 
+/**
+ * Largest sub-L0 level the single-workgroup fused cycle may own.
+ *
+ * 4,096 is the resident tier's row bound throughout this solver (the hierarchy
+ * CSR's shared-memory cursor array and the combined MGPCG reduction drains use
+ * the same figure), and at that size the fused kernel's 256 lanes are at most
+ * sixteen rows deep per sweep. Above it the serial walk is the wall.
+ */
+const FUSED_SUB_L0_MAXIMUM_LEVEL_ROWS = 4_096;
+
 const vcycleWGSL = /* wgsl */ `
 const INVALID:u32=0xffffffffu;
 struct Params { damping:f32, reserved0:u32, reserved1:u32, reserved2:u32 }
@@ -273,9 +283,25 @@ export class WebGPUOctreeLosassoVCycle implements OctreeLosassoFirstOrderVCycle 
     if(hierarchy.levels.length<1||hierarchy.transfers.length!==hierarchy.levels.length-1){
       throw new RangeError("Losasso V-cycle needs a complete one-or-more-level hierarchy");
     }
-    // The fixed-order result is covered by the bounded-f32 D4 gate; every
-    // multi-level production hierarchy therefore uses the fused schedule.
-    this.useFusedSubL0=Boolean(hierarchy.fusedSubL0&&hierarchy.levels.length>1);
+    // The fixed-order result is covered by the bounded-f32 D4 gate, so the
+    // fused schedule is preferred -- but ONLY while it is the right shape. The
+    // fused kernel is a single 256-lane workgroup that grid-strides every row
+    // of every sub-L0 level, so its cost is linear in the largest of them with
+    // no parallelism to spend. That is ideal for the resident tier (an L1 of a
+    // few hundred rows is one row per lane) and catastrophic above it: a 128^3
+    // hierarchy has ~30K rows at L1, which one workgroup walks ~120 deep per
+    // sweep, per level, per iteration. Hand those to the per-level path, whose
+    // dispatches are sized indirectly from each level's own row count.
+    //
+    // This gate was dead code until 2026-08-06: a coarse-face geometry defect
+    // unpublished L2 (128^3) and L4 (guide lane), the fused enable predicate
+    // then returned immediately on every scene, and nothing ever ran the
+    // one-workgroup walk at scale. See coarseBoundaryDistance in
+    // webgpu-octree-losasso-hierarchy.wgsl.ts.
+    const subLevelRows=(hierarchy.fusedSubL0?.levelRowCapacities??[]).slice(1);
+    this.useFusedSubL0=Boolean(hierarchy.fusedSubL0&&hierarchy.levels.length>1
+      &&subLevelRows.length>0
+      &&subLevelRows.every(capacity=>capacity<=FUSED_SUB_L0_MAXIMUM_LEVEL_ROWS));
     const storage=GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC;
     this.params=device.createBuffer({label:"Losasso V-cycle Jacobi constants",size:16,
       usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});

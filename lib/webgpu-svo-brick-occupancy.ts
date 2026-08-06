@@ -1,4 +1,8 @@
-import { SPARSE_BRICK_GPU_LAYOUT, type SparseBrickOctreeGPU } from "./sparse-brick-octree";
+import {
+  SPARSE_BRICK_GPU_LAYOUT,
+  type SparseBrickOctreeGPU,
+  type SparseBrickPayloadProfileName,
+} from "./sparse-brick-octree";
 import { SVO_BRICK_LIFECYCLE, SVO_BRICK_OCCUPANCY } from "./svo-brick-occupancy";
 
 /** Externally owned fixed-capacity leaf worklist consumed by occupancy maintenance. */
@@ -27,7 +31,14 @@ export interface SvoBrickOccupancyLeafWorklist {
  * This avoids an additional persistent allocation and stays independent of
  * renderer bind-group limits.
  */
-export const webgpuSvoBrickOccupancyBuildWGSL = /* wgsl */ `
+export function webgpuSvoBrickOccupancyBuildWGSLFor(
+  profile: SparseBrickPayloadProfileName = "full",
+): string {
+  // A dry world has no dynamic material lane. `structure[18]` is then the
+  // absent-lane page and `+voxelOffset+localIndex` runs straight off it into
+  // the scene geometry lane, so the union degenerates to the scene word alone.
+  const fluidMaterial = profile === "dry" ? "0u" : "payload[payloadIndex]&0xffffu";
+  return /* wgsl */ `
 @group(0) @binding(0) var<storage,read_write> structure:array<u32>;
 @group(0) @binding(2) var<storage,read> payload:array<u32>;
 @group(0) @binding(3) var<storage,read> leafWorklist:array<u32>;
@@ -77,7 +88,7 @@ fn rebuildLeaf(leafIndex:u32){
   for(var localIndex=0u;localIndex<512u;localIndex+=1u){
     let payloadIndex=materialOffset+localIndex;
     if(payloadIndex>=arrayLength(&payload)){continue;}
-    let fluidMaterial=payload[payloadIndex]&0xffffu;
+    let fluidMaterial=${fluidMaterial};
     let sceneMaterial=sceneMaterialOwners[voxelOffset+localIndex]&0xffffu;
     if(fluidMaterial==0u&&sceneMaterial==0u){continue;}
     let local=vec3u(localIndex&7u,(localIndex>>3u)&7u,localIndex>>6u);
@@ -128,6 +139,10 @@ fn buildFluidResidencyBrickOccupancy(@builtin(global_invocation_id) gid:vec3u){
   rebuildLeaf(leafWorklist[entry]);
 }
 `;
+}
+
+/** The `full` expansion. Byte-identical to the pre-profile shader. */
+export const webgpuSvoBrickOccupancyBuildWGSL = webgpuSvoBrickOccupancyBuildWGSLFor("full");
 
 export type SvoBrickOccupancyBuildStatus = "encoded" | "unsupported-brick-size";
 
@@ -138,14 +153,18 @@ export class WebGpuSvoBrickOccupancyBuilder {
   private fluidResidencyPipeline!: GPUComputePipeline;
   private module!: GPUShaderModule;
 
-  constructor(private readonly device: GPUDevice) {
+  constructor(
+    private readonly device: GPUDevice,
+    /** Must match the tree later handed to `bindings`; it decides which lanes exist. */
+    private readonly payloadProfile: SparseBrickPayloadProfileName = "full",
+  ) {
   }
 
   async initializePipelines(): Promise<void> {
     if (this.allLeavesPipeline) return;
     this.module = this.device.createShaderModule({
       label: "SVO brick occupancy build shader",
-      code: webgpuSvoBrickOccupancyBuildWGSL,
+      code: webgpuSvoBrickOccupancyBuildWGSLFor(this.payloadProfile),
     });
     this.allLeavesPipeline = await this.device.createComputePipelineAsync({
       label: "SVO brick occupancy initialization pipeline",

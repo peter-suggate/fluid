@@ -287,3 +287,35 @@ test("loading the minimal power dam applies its Losasso scene profile", () => {
     useRuntimeStore.getState().setRunState(originalRunState);
   }
 });
+
+test("coarse-only surface tracking survives scene profile changes", () => {
+  const originalScene = cloneScene(useSceneStore.getState().scene);
+  const originalRunState = useRuntimeStore.getState().runState;
+  const originalMethod = useMethodStore.getState();
+  try {
+    originalMethod.setMethodId("octree");
+    originalMethod.setParam("octree", "globalFineLevelSetFactor", "1");
+
+    simulation.loadPreset("symmetric-expansion");
+    assert.equal(
+      resolvedMethodValues(useMethodStore.getState()).globalFineLevelSetFactor,
+      "1",
+      "opening a factor-4 validation scene must not silently re-enable its fine band",
+    );
+
+    simulation.loadPreset("minimal-power-dam-break");
+    assert.equal(
+      resolvedMethodValues(useMethodStore.getState()).globalFineLevelSetFactor,
+      "1",
+      "the user's coarse-only execution shape must apply to every octree scene",
+    );
+  } finally {
+    useMethodStore.setState({
+      methodId: originalMethod.methodId,
+      quality: originalMethod.quality,
+      overrides: originalMethod.overrides,
+    });
+    simulation.reset(originalScene);
+    useRuntimeStore.getState().setRunState(originalRunState);
+  }
+});

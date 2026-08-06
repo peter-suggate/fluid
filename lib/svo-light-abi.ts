@@ -124,6 +124,14 @@ function proxyEmitterRadius(proxy: EnvironmentProxyPrimitive, policy: "bounding"
     const { x, y, z } = proxy.radius_m;
     return policy === "bounding" ? Math.max(x, y, z) : Math.cbrt(x * y * z);
   }
+  // A tape emits as its conservative box, for the same reason. The bounding
+  // policy takes the box's corner rather than its longest half-extent — the
+  // `field-program` kind's own `boundingRadius_m`, which is a corner because the
+  // solid is a box and not an ellipsoid.
+  if (proxy.kind === "field-program") {
+    const { x, y, z } = proxy.halfExtent_m;
+    return policy === "bounding" ? Math.hypot(x, y, z) : Math.cbrt(x * y * z);
+  }
   return Math.max(proxy.halfSize_m.x, proxy.halfSize_m.y, proxy.halfSize_m.z);
 }
 

@@ -204,6 +204,10 @@ test("live GPU resources are fixed-capacity, hot-written, and encode invalidate-
     leafOffsetBytes: 768,
     topologyOffsetBytes: 512,
     materialOwnerOffsetBytes: 4096,
+    // The banded lanes a `dense` tree still declares. Zero offsets are inert here:
+    // the codec that would read them is not compiled into a `dense` shader at all.
+    leafPayloadMode: "dense", bandedLaneWordOffsets: [0, 0, 0, 0, 0], bandedRecordCapacity: 0,
+    payloadLayout: { bandedBlobWords: 0 },
   } as unknown as import("../lib/sparse-brick-octree").SparseBrickOctreeGPU;
   const pass = {
     setPipeline: () => undefined,
@@ -225,8 +229,14 @@ test("live GPU resources are fixed-capacity, hot-written, and encode invalidate-
       candidatesPerDirtyBrick: 4,
     });
     assert.equal(voxelizer.primitiveCount, 0);
-    assert.equal(voxelizer.allocatedBytes, 532);
-    assert.deepEqual(buffers.map((buffer) => buffer.descriptor.size), [96, 304, 36, 96]);
+    // 592, not 532, and every one of the 60 bytes is named: the parameter uniform
+    // grew 32 bytes for the banded lane offsets and their two capacities, the
+    // maintenance state block grew 16 for a fourth indirect-dispatch triple, and the
+    // dispatch-argument buffer grew 12 to carry it. `dense` allocates all three
+    // regardless — the arena is fixed-capacity, and a size that depends on a lever
+    // is a size no test can pin.
+    assert.equal(voxelizer.allocatedBytes, 592);
+    assert.deepEqual(buffers.map((buffer) => buffer.descriptor.size), [96, 320, 48, 128]);
     assert.equal(writes.length, 0, "construction allocates capacity but does not bake scene content");
     voxelizer.publish({
       revision: 1,
@@ -254,7 +264,7 @@ test("live GPU resources are fixed-capacity, hot-written, and encode invalidate-
       "material offset comes from control word 18 in the shared payload arena");
     assert.equal(voxelizer.encodeMaintenance(encoder), true);
     assert.equal(voxelizer.encodeMaintenance(encoder), false, "a revision is maintained exactly once");
-    assert.deepEqual(clears.map(({ offset, size }) => [offset, size]), [[224, 80]]);
+    assert.deepEqual(clears.map(({ offset, size }) => [offset, size]), [[224, 96]]);
     assert.deepEqual(passLabels, [
       "Invalidate live scene dirty bricks",
       "Prepare live scene maintenance dispatches",
@@ -263,7 +273,7 @@ test("live GPU resources are fixed-capacity, hot-written, and encode invalidate-
       "Finalize live scene dirty bricks",
     ]);
     assert.deepEqual(dispatches, [[2, 1, 1], [1, 1, 1]]);
-    assert.deepEqual(copies.map(({ sourceOffset, destinationOffset, size }) => [sourceOffset, destinationOffset, size]), [[256, 0, 36]]);
+    assert.deepEqual(copies.map(({ sourceOffset, destinationOffset, size }) => [sourceOffset, destinationOffset, size]), [[256, 0, 48]]);
     assert.equal(copies[0].source, buffers[1]);
     assert.equal(copies[0].destination, buffers[2]);
     assert.deepEqual(indirectDispatches.map(({ offset }) => offset), [0, 12, 24]);
@@ -300,6 +310,10 @@ test("live publication rejects overflow, missing invalidation coverage, and revi
   const tree = {
     brickSize: 8, leafCapacity: 2, structure, control: structure, topology: structure,
     topologyOffsetBytes: 512, payload: {},
+    // The banded lanes a `dense` tree still declares. Zero offsets are inert here:
+    // the codec that would read them is not compiled into a `dense` shader at all.
+    leafPayloadMode: "dense", bandedLaneWordOffsets: [0, 0, 0, 0, 0], bandedRecordCapacity: 0,
+    payloadLayout: { bandedBlobWords: 0 },
   } as unknown as import("../lib/sparse-brick-octree").SparseBrickOctreeGPU;
   try {
     const voxelizer = new SparseSceneProxyVoxelizer(device, tree, {
@@ -337,6 +351,10 @@ test("Dawn accepts live maintenance storage and indirect dispatches in disjoint 
     structure, control: structure, topology: structure, topologyOffsetBytes: 512,
     payload, brickSize: 8, leafCapacity: 1,
     sceneGeometryOffsetBytes: 0, sceneMaterialOwnerOffsetBytes: 4096,
+    // The banded lanes a `dense` tree still declares. Zero offsets are inert here:
+    // the codec that would read them is not compiled into a `dense` shader at all.
+    leafPayloadMode: "dense", bandedLaneWordOffsets: [0, 0, 0, 0, 0], bandedRecordCapacity: 0,
+    payloadLayout: { bandedBlobWords: 0 },
   } as unknown as import("../lib/sparse-brick-octree").SparseBrickOctreeGPU;
   device.pushErrorScope("validation");
   const voxelizer = new SparseSceneProxyVoxelizer(device, tree, {

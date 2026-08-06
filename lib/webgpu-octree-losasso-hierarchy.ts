@@ -33,6 +33,15 @@ interface OwnedTransfer extends OctreeLosassoVCycleTransferSource {
   readonly params: GPUBuffer;
 }
 
+/**
+ * Smallest coarse level worth building.
+ *
+ * A level below this has too few rows to relax with any parallelism while still
+ * carrying tens of thousands of retained face patches, so it costs far more
+ * than the extra contraction it buys. See the depth sweep in the constructor.
+ */
+export const MINIMUM_COARSE_LEVEL_ROWS = 1_024;
+
 const ENTRY_POINTS = [
   "extractLosassoFinestCells",
   "buildLosassoParentRows",
@@ -134,16 +143,36 @@ export class WebGPUOctreeLosassoHierarchyPublisher {
     const levels: OwnedLevel[] = [];
     const transfers: OwnedTransfer[] = [];
     const directoryCapacity = nextPowerOfTwo(2 * rows);
-    const transitionCount = Math.log2(maximumLeafSize);
+    // Aggregation collapses rows eightfold per transition but only retains and
+    // re-parents face patches, so face count -- which is what the smoother
+    // actually walks -- decays far slower. Measured on the 128^3 lane
+    // (2026-08-06): rows 125,067 -> 30,315 -> 6,883 -> 1,311 -> 200 -> 36 while
+    // faces went 406,004 -> 243,572 -> 145,348 -> 78,132 -> 53,556 -> 42,585.
+    // The bottom two levels therefore carry 96,000 faces spread over 236 rows
+    // -- almost no parallelism and almost no coarsening -- and a depth sweep
+    // priced them at ~460 ms of the frame to buy 27 iterations down to 17:
+    //
+    //   depth 1: 72 iterations, 395 ms   depth 3: 27 iterations, 389 ms
+    //   depth 2: 44 iterations, 376 ms   depth 5: 17 iterations, 850 ms
+    //
+    // Stop where a level still has enough rows to relax in parallel. This keeps
+    // the 128^3 hierarchy at depth 3, its measured optimum and a win against
+    // the 453 ms this lane cost while the V-cycle was inert.
+    const levelRowCapacityAt = (targetSpan: number) => Math.min(rows,
+      (nx / targetSpan) * (ny / targetSpan) * (nz / targetSpan));
+    let transitionCount = 0;
+    for (let targetSpan = 2; targetSpan <= maximumLeafSize; targetSpan *= 2) {
+      if (levelRowCapacityAt(targetSpan) < MINIMUM_COARSE_LEVEL_ROWS) break;
+      transitionCount += 1;
+    }
     const packed = fusedLayout(rows, faces);
     const levelRowCapacities = [rows];
     this.fusedArena = make("packed fused sub-L0 hierarchy",
       Math.max(1, transitionCount) * packed.transitionStrideWords * 4);
     let fineDispatch = options.finest.rowDispatch;
-    for (let targetSpan = 2, level = 1; targetSpan <= maximumLeafSize;
+    for (let targetSpan = 2, level = 1; level <= transitionCount;
       targetSpan *= 2, level += 1) {
-      levelRowCapacities.push(Math.min(rows,
-        (nx / targetSpan) * (ny / targetSpan) * (nz / targetSpan)));
+      levelRowCapacities.push(levelRowCapacityAt(targetSpan));
       const control = make(`L${level} control`, OCTREE_LOSASSO_CONTROL_WORDS * 4);
       const rowDispatch = make(`L${level} row and face dispatch`, 24, indirect);
       const ownedLevel: OwnedLevel = Object.freeze({

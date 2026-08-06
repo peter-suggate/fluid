@@ -47,6 +47,84 @@ import { MAX_TERRAIN_GRID_SAMPLES, MIN_TERRAIN_GRID_SIZE, type TerrainGrid } fro
  * on the geometry that comes out of here.
  */
 
+/**
+ * A formed wall's cross-section: what the eye reads as "this was built".
+ *
+ * Authored as four lengths in metres rather than as a band width, because each
+ * one controls exactly one feature — see {@link PondVesselTerrace.wall} for why
+ * that matters and what it replaces.
+ */
+export interface WallProfile {
+  /** Radius of the roll where the plateau turns over into the face. */
+  readonly crestRadius_m: number;
+  /** Radius of the fillet where the face meets the ground. */
+  readonly footRadius_m: number;
+  /**
+   * How far the face leans out from vertical, in radians.
+   *
+   * Must be positive, and that is the medium rather than a style choice: a plumb
+   * face is multivalued in plan distance and a heightfield cannot carry one. Real
+   * formed walls are battered anyway, or the shuttering could not be struck.
+   */
+  readonly batter_rad: number;
+}
+
+/**
+ * Height above the outside ground at signed plan distance `d`, where `d = 0` is
+ * the **crest line** — the edge of the plateau — and `d` runs positive outward.
+ *
+ * Same convention as the coping, whose rail is its crest centreline, so a bed
+ * outline and a coping rail mean the same thing and can be offset from each
+ * other without a conversion.
+ *
+ * Reading outward from the plateau: a circular roll of `crestRadius_m`, a
+ * straight face leaning `batter_rad` off vertical, a circular fillet of
+ * `footRadius_m`, then the ground. Both arcs are tangent to the face and to
+ * their own flat by construction, so the surface is C¹ everywhere and what the
+ * eye reads as an edge is the *curvature* jump at each tangent point. That is
+ * what a formed edge is — a casting has no zero-radius arris either.
+ *
+ * Drawn and measured by `tools/shape-lab.ts wall`, which is where the numbers
+ * for the hero garden's beds were chosen: 184 mm of flat top and an 82 degree
+ * face, against a smoothstep that has neither at any setting.
+ */
+export function wallProfile_m(profile: WallProfile, rise_m: number, d: number): number {
+  const batter = Math.max(0.02, profile.batter_rad);
+  const cos = Math.cos(batter), sin = Math.sin(batter), tan = Math.tan(batter);
+  // The two arcs eat into the rise by `r(1 - sin)` each; whatever is left is the
+  // straight face. Radii too fat for the rise are shared down rather than
+  // rejected, so a short wall degrades to two tangent arcs and no flat face.
+  const appetite = (profile.crestRadius_m + profile.footRadius_m) * (1 - sin);
+  const fit = appetite > rise_m ? rise_m / appetite : 1;
+  const crest = profile.crestRadius_m * fit;
+  const foot = profile.footRadius_m * fit;
+  const crestCentreY = rise_m - crest;
+  const crestTangent = { d: crest * cos, y: crestCentreY + crest * sin };
+  const footTangentY = foot * (1 - sin);
+  const footTangentD = crestTangent.d + (crestTangent.y - footTangentY) * tan;
+  const footCentreD = footTangentD + foot * cos;
+  if (d <= 0) return rise_m;
+  if (d >= footCentreD) return 0;
+  if (d <= crestTangent.d) return crestCentreY + Math.sqrt(Math.max(0, crest * crest - d * d));
+  if (d >= footTangentD) {
+    const dx = d - footCentreD;
+    return foot - Math.sqrt(Math.max(0, foot * foot - dx * dx));
+  }
+  return crestTangent.y - (d - crestTangent.d) / tan;
+}
+
+/** How far out a wall profile reaches from its crest line, in metres. */
+export function wallProfileRun_m(profile: WallProfile, rise_m: number): number {
+  let run = 0;
+  // Walked rather than solved: the tangent-point algebra is already in the
+  // profile and a second copy of it here is a second chance to disagree.
+  while (run < 4 * rise_m + profile.crestRadius_m + profile.footRadius_m) {
+    if (wallProfile_m(profile, rise_m, run) <= 0) return run;
+    run += 0.0005;
+  }
+  return run;
+}
+
 export interface PondVesselTerrace {
   /** Footprint centre in world metres, container-centred like every other feature. */
   readonly center_m: readonly [number, number];
@@ -57,6 +135,63 @@ export interface PondVesselTerrace {
   readonly rotation_rad?: number;
   /** Fraction of the radius that is a flat plateau, in [0, 1). */
   readonly flat?: number;
+  /**
+   * Wobble on the footprint, as a fraction of the radius, and how many lobes it
+   * runs on. A bed cast as a bare ellipse reads as a machine part; the pond's
+   * own outline wanders for the same reason and by the same construction.
+   */
+  readonly wobble?: number;
+  readonly lobes?: number;
+  /**
+   * The rise taken as a **formed wall** rather than as a mound: a flat top, a
+   * rolled crest, a steep battered face and a fillet at its foot.
+   *
+   * Present is the whole difference between a raised bed and a dune, and the
+   * reason it is a profile rather than another parameter of the smoothstep is
+   * worth stating, because two art passes were lost to it. `ramp` is
+   * `t^2(3-2t)`: its derivative is zero at *both* ends, so it has no flat and no
+   * crest and there is exactly one knob — the band width — which moves the
+   * crest, the face and the foot together. Narrowing it does not make a wall. It
+   * makes a narrower dome. No amount of tuning inside that function could
+   * produce the shape the reference shows, and measuring the slope at its
+   * steepest point said nothing about whether a flat top existed.
+   *
+   * {@link wallProfile_m} is a piecewise function of the signed plan distance
+   * instead, and each of its lengths controls one visible feature and nothing
+   * else. It is the same construction `pondVesselHeightAt` already uses for the
+   * pond, which composes a named inner-face profile with a named dish rather
+   * than asking one smoothstep to be both.
+   */
+  readonly wall?: WallProfile;
+  /**
+   * The rise taken as a *wall* over this much run, in metres, instead of as a
+   * mound over everything outside {@link flat}.
+   *
+   * A terrace was a swelling of the ground, and on the hero garden that is what
+   * it looked like: the bonsai's plateau took its 75 mm over 308 mm of run, and
+   * because a smoothstep concentrates its slope in the middle, what the frame
+   * showed was a soft mound with one steep patch across it — measured 307 to
+   * 352 mm over 44 mm of run — which reads as a fault line in the plaster rather
+   * than as an edge anything was built to.
+   *
+   * The reference's raised beds are *formed*: a flat top, a defined crest, and a
+   * short steep face down to the ground. That is one number — how much run the
+   * whole rise is allowed — and the smoothstep already has the right shape for
+   * it: a convex roll at the crest, a near-straight face, a concave fillet at the
+   * foot. It only ever needed to be given a hand's breadth instead of a third of
+   * a metre.
+   *
+   * It also voxelizes better, which is not a coincidence. A 20-degree ramp
+   * crosses a voxel boundary every few centimetres and each crossing is a face
+   * normal flipping, so a soft terrace comes back as a contour map; a face near
+   * enough vertical is parallel to the voxel faces it is drawn into and a flat
+   * top is parallel to the others.
+   *
+   * Measured against the ellipse's mean radius, so a terrace keeps one face
+   * width all the way round rather than a wider one on its long axis. Omitted
+   * keeps the mound, which is what a bank or a dune wants.
+   */
+  readonly faceRun_m?: number;
 }
 
 /**
@@ -126,7 +261,32 @@ export interface PondVesselSpec {
    * actually rests against is the outer plaster either way. Omitting the crest
    * lowers nothing the water can reach.
    */
-  readonly crest?: "bullnose" | "flat";
+  readonly crest?: "bullnose" | "flat" | "wall";
+  /**
+   * The coping's section when `crest` is `"wall"`: a **flat top with rolled
+   * edges**, mirrored across the plan curve.
+   *
+   * This exists because a swept solid could not produce one. `sweptCopingNodes`
+   * emits a chain of **round cones**, so its cross-section is a circular arc by
+   * construction, and `widthToHeight` only chooses how much of that circle is
+   * above ground. At the hero rim's 2.8 you see **142 degrees of a circle** — a
+   * tube laid around the pond, which is exactly what the frame showed — and the
+   * parameter cannot reach flat: it buys arc with footprint, and even at 5.2 it
+   * is still 84 degrees on a rim 239 mm wide, a quarter of the pond.
+   *
+   * A coping is a narrow raised bed, so it takes the same {@link wallProfile_m}
+   * the beds take, mirrored about the rail: plateau across the crown, a small
+   * roll at each edge, steep flanks down to the plaster. The rolls are what stop
+   * it being an arris; the flat between them is what stops it being a tube.
+   *
+   * The reason the crest left the heightfield in the first place was the
+   * *meeting* — a tangent heightfield rim leaves the plaster with a continuous
+   * normal and there is no line where the two join. This profile has a foot
+   * fillet of a few millimetres rather than a tangent approach, so the line is
+   * back: at the depth-2 leaf a 3 mm fillet is two voxels, which is as hard an
+   * edge as the lattice can carry.
+   */
+  readonly crestWall?: WallProfile;
   /**
    * Run from the coping's inner foot down to the *edge* of the floor's dish.
    *
@@ -496,8 +656,84 @@ function segmentDistanceSquared(px: number, pz: number, ax: number, az: number, 
  *
  * Nearest-segment for the magnitude and a crossing count for the sign, which is
  * exact for the simple closed loop the curve is and costs one pass either way.
+ *
+ * "One pass" is 112 segments, and this is the single hottest arithmetic in the
+ * whole scene build: `bakePondVesselTerrain` asks for it once per heightfield
+ * node, which is 222 k nodes at the shipping leaf and **14.16 M** three
+ * refinement rungs down. Measured at 1.70 us per call it was 80 % of a
+ * derivation that took 38.3 s at that rung — the wait before the first frame,
+ * not a frame cost. So above a threshold of queries the polyline earns an index
+ * (`pondVesselPlanIndex`) and the scan stops being over all of it.
+ *
+ * The index changes the *set* each loop runs over and nothing else. Both
+ * quantities survive that exactly rather than approximately, and for two
+ * different reasons worth stating because they are what makes this safe:
+ *
+ *   - the magnitude is a **selection**. `nearestSquared` is the minimum of a
+ *     set of f64 values, and a min taken over any subset that still contains
+ *     the argmin is the identical f64. It is not a sum, so no term is dropped
+ *     and no rounding is reordered. The grid's candidate rule is a proof that
+ *     the argmin is present (see `buildPondVesselPlanIndex`).
+ *   - the sign is a **parity**. Only segments that straddle the query's z can
+ *     satisfy `(az > z) !== (bz > z)`; every other segment toggles nothing, so
+ *     omitting them cannot change the count's parity, and toggling a boolean is
+ *     order-independent.
+ *
+ * Verified rather than argued: `tests/pond-vessel.test.ts` walks the hero
+ * vessel's footprint and requires `Object.is` against the linear scan, which is
+ * bit equality including the sign of zero.
  */
 export function pondVesselPlanDistance(
+  curve: readonly (readonly [number, number])[],
+  x: number,
+  z: number,
+): number {
+  const index = pondVesselPlanIndex(curve);
+  if (!index) return pondVesselPlanDistanceLinear(curve, x, z);
+
+  const { points, count } = index;
+  let nearestSquared = Infinity;
+  const cellX = Math.floor((x - index.gridOriginX) * index.gridInversePitch);
+  const cellZ = Math.floor((z - index.gridOriginZ) * index.gridInversePitch);
+  if (cellX >= 0 && cellX < index.gridNx && cellZ >= 0 && cellZ < index.gridNz) {
+    const cell = cellX + index.gridNx * cellZ;
+    const end = index.cellStart[cell + 1];
+    for (let slot = index.cellStart[cell]; slot < end; slot += 1) {
+      const segment = index.cellItems[slot], next = segment + 1 < count ? segment + 1 : 0;
+      const squared = segmentDistanceSquared(x, z,
+        points[2 * segment], points[2 * segment + 1], points[2 * next], points[2 * next + 1]);
+      if (squared < nearestSquared) nearestSquared = squared;
+    }
+  } else {
+    // Outside the indexed box the candidate rule has nothing to say, so the
+    // honest answer is the whole polyline. The box is three times the plan's
+    // own extent, so no lattice this vessel is baked on reaches here.
+    for (let segment = 0; segment < count; segment += 1) {
+      const next = segment + 1 < count ? segment + 1 : 0;
+      const squared = segmentDistanceSquared(x, z,
+        points[2 * segment], points[2 * segment + 1], points[2 * next], points[2 * next + 1]);
+      if (squared < nearestSquared) nearestSquared = squared;
+    }
+  }
+
+  let inside = false;
+  const band = Math.floor((z - index.bandOriginZ) * index.bandInversePitch);
+  if (band >= 0 && band < index.bandCount) {
+    const end = index.bandStart[band + 1];
+    for (let slot = index.bandStart[band]; slot < end; slot += 1) {
+      const segment = index.bandItems[slot], next = segment + 1 < count ? segment + 1 : 0;
+      const az = points[2 * segment + 1], bz = points[2 * next + 1];
+      if ((az > z) !== (bz > z)
+        && x < points[2 * segment] + ((z - az) / (bz - az)) * (points[2 * next] - points[2 * segment])) {
+        inside = !inside;
+      }
+    }
+  }
+  return (inside ? -1 : 1) * Math.sqrt(nearestSquared);
+}
+
+/** The scan the index replaces, and the oracle every exactness test compares against. */
+export function pondVesselPlanDistanceLinear(
   curve: readonly (readonly [number, number])[],
   x: number,
   z: number,
@@ -512,6 +748,232 @@ export function pondVesselPlanDistance(
     if ((az > z) !== (bz > z) && x < ax + ((z - az) / (bz - az)) * (bx - ax)) inside = !inside;
   }
   return (inside ? -1 : 1) * Math.sqrt(nearestSquared);
+}
+
+/**
+ * Segments a query can reach, bucketed twice because the two answers this
+ * function computes prune on different things.
+ *
+ * The magnitude prunes on *proximity*: a uniform grid over the plan's
+ * neighbourhood, each cell carrying the segments that could be nearest to any
+ * point inside it. The sign prunes on *z alone*: a segment that does not
+ * straddle the query's z cannot cross the ray, so a band index over z is both
+ * necessary and sufficient, and it is far tighter than the grid — a horizontal
+ * line meets a simple closed loop twice, so a band holds about three segments
+ * against the grid cell's dozen.
+ */
+interface PondVesselPlanIndex {
+  /** The polyline as flat f64 pairs. Same values, one indirection fewer. */
+  readonly points: Float64Array;
+  readonly count: number;
+  readonly gridOriginX: number;
+  readonly gridOriginZ: number;
+  readonly gridInversePitch: number;
+  readonly gridNx: number;
+  readonly gridNz: number;
+  /** CSR offsets into `cellItems`, one per cell plus a terminator. */
+  readonly cellStart: Int32Array;
+  readonly cellItems: Int32Array;
+  readonly bandOriginZ: number;
+  readonly bandInversePitch: number;
+  readonly bandCount: number;
+  readonly bandStart: Int32Array;
+  readonly bandItems: Int32Array;
+}
+
+/**
+ * Queries a polyline must take before it is worth indexing.
+ *
+ * `heroGardenPondPlanDistance` builds a fresh curve per call, so an index built
+ * eagerly would be built once per query and never amortized. A bake asks
+ * millions of times off one curve and a layout asks a handful off many, and
+ * counting is the only thing that tells those apart from inside here. Below the
+ * threshold the linear scan is what runs, and 64 scans of 112 segments is 12 us
+ * — under the cost of building the index once.
+ */
+const POND_VESSEL_PLAN_INDEX_QUERIES = 64;
+
+/** Cells the grid aims for. Enough that a cell holds a handful of segments. */
+const POND_VESSEL_PLAN_INDEX_CELLS = 4096;
+
+/**
+ * Relative slack on the candidate rule.
+ *
+ * The rule is exact in exact arithmetic — see `buildPondVesselPlanIndex` — and
+ * the bound it compares against is itself computed in f64, so it can land a
+ * unit in the last place below the true maximum. Widening the acceptance by a
+ * relative 1e-9 admits a segment or two more per cell and makes the containment
+ * argument independent of that rounding. It cannot change any *result*: a
+ * larger candidate set still yields the same minimum.
+ */
+const POND_VESSEL_PLAN_INDEX_SLACK = 1 + 1e-9;
+
+/**
+ * A one-entry inline cache in front of the `WeakMap`.
+ *
+ * The bake queries the same curve tens of millions of times in a row, so the
+ * common case should be a reference comparison rather than a hash lookup.
+ */
+let lastPlanCurve: readonly (readonly [number, number])[] | undefined;
+let lastPlanIndex: PondVesselPlanIndex | undefined;
+const planIndexCache = new WeakMap<object, PondVesselPlanIndex | number>();
+
+function pondVesselPlanIndex(
+  curve: readonly (readonly [number, number])[],
+): PondVesselPlanIndex | undefined {
+  if (curve === lastPlanCurve) return lastPlanIndex;
+  const entry = planIndexCache.get(curve);
+  if (typeof entry === "object") {
+    lastPlanCurve = curve;
+    return lastPlanIndex = entry;
+  }
+  const queries = (entry ?? 0) + 1;
+  if (queries < POND_VESSEL_PLAN_INDEX_QUERIES || curve.length < 3) {
+    planIndexCache.set(curve, queries);
+    return undefined;
+  }
+  const index = buildPondVesselPlanIndex(curve);
+  planIndexCache.set(curve, index);
+  lastPlanCurve = curve;
+  return lastPlanIndex = index;
+}
+
+/**
+ * The containment argument, which is the whole of why the index is exact.
+ *
+ * For a cell `C` let `bound = min over segments s of max over p in C of
+ * dist(p, s)^2`. Distance to a segment is a convex function of the point, so
+ * its maximum over a box is attained at a corner and four evaluations give that
+ * maximum exactly. Then for every `p` in `C`:
+ *
+ *   - `dist(p, s*)^2 = min_s dist(p, s)^2 <= bound`, because the outer min is
+ *     over the same segments and each term is no larger than its own maximum;
+ *   - any `s` with `minDist(C, s)^2 > bound` has `dist(p, s)^2 > bound >=
+ *     dist(p, s*)^2`, so it is not the argmin and dropping it is free.
+ *
+ * `minDist` is taken as the box-to-segment-bounding-box distance, which is a
+ * lower bound on the true one — a looser bound admits more candidates and can
+ * only ever be conservative, never wrong. The segments here are ~25 mm chords
+ * of a smooth loop, so their boxes are tight and the looseness costs little.
+ *
+ * The far field prunes too, and that is the part worth saying out loud, because
+ * "everything is equidistant far away" is the intuition that says it should
+ * not. What matters is not the distance but the *spread*: seen from anywhere,
+ * the far side of the loop is about the loop's own diameter further away than
+ * the near side, and the bound only has to separate a cell's own slack —
+ * roughly one cell diagonal plus one segment — from that diameter. So a distant
+ * cell keeps the arc facing it and drops the rest.
+ */
+function buildPondVesselPlanIndex(
+  curve: readonly (readonly [number, number])[],
+): PondVesselPlanIndex {
+  const count = curve.length;
+  const points = new Float64Array(2 * count);
+  let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+  for (let index = 0; index < count; index += 1) {
+    const [x, z] = curve[index];
+    points[2 * index] = x;
+    points[2 * index + 1] = z;
+    if (x < minX) minX = x;
+    if (x > maxX) maxX = x;
+    if (z < minZ) minZ = z;
+    if (z > maxZ) maxZ = z;
+  }
+
+  // Three times the plan's extent in each axis. Every lattice this vessel is
+  // baked on spans its own container, which is comfortably inside that, and a
+  // query beyond it falls back to the scan rather than answering wrongly.
+  const spanX = Math.max(maxX - minX, 1e-6), spanZ = Math.max(maxZ - minZ, 1e-6);
+  const margin = Math.max(spanX, spanZ);
+  const gridOriginX = minX - margin, gridOriginZ = minZ - margin;
+  const boxX = spanX + 2 * margin, boxZ = spanZ + 2 * margin;
+  const pitch = Math.sqrt(boxX * boxZ / POND_VESSEL_PLAN_INDEX_CELLS);
+  const gridNx = Math.max(1, Math.ceil(boxX / pitch)), gridNz = Math.max(1, Math.ceil(boxZ / pitch));
+  /**
+   * Slack on the cell's own extent, and the reason it is needed at all.
+   *
+   * A cell's candidates are computed from the box `[origin + k * pitch, origin +
+   * (k + 1) * pitch]`, while a query lands in it through `floor((x - origin) *
+   * (1 / pitch))`. Those two are the same partition in exact arithmetic and can
+   * disagree by an ulp in f64, which would hand a point candidates computed for
+   * the box next door. Widening the box a millionth of a cell makes the rule
+   * hold for the point either partition assigns, and — like every other widening
+   * here — it can only admit candidates, never drop one.
+   */
+  const cellSlack = pitch * 1e-6;
+
+  const cellStart = new Int32Array(gridNx * gridNz + 1);
+  const cellItems: number[] = [];
+  // Segment bounding boxes, for the lower bound. Hoisted so the cell loop is
+  // one pass over flat arrays rather than a repeated min/max of the polyline.
+  const segMinX = new Float64Array(count), segMaxX = new Float64Array(count);
+  const segMinZ = new Float64Array(count), segMaxZ = new Float64Array(count);
+  for (let segment = 0; segment < count; segment += 1) {
+    const next = segment + 1 < count ? segment + 1 : 0;
+    const ax = points[2 * segment], az = points[2 * segment + 1];
+    const bx = points[2 * next], bz = points[2 * next + 1];
+    segMinX[segment] = Math.min(ax, bx); segMaxX[segment] = Math.max(ax, bx);
+    segMinZ[segment] = Math.min(az, bz); segMaxZ[segment] = Math.max(az, bz);
+  }
+
+  for (let cellZ = 0; cellZ < gridNz; cellZ += 1) {
+    const z0 = gridOriginZ + cellZ * pitch - cellSlack, z1 = z0 + pitch + 2 * cellSlack;
+    for (let cellX = 0; cellX < gridNx; cellX += 1) {
+      const x0 = gridOriginX + cellX * pitch - cellSlack, x1 = x0 + pitch + 2 * cellSlack;
+      let bound = Infinity;
+      for (let segment = 0; segment < count; segment += 1) {
+        const next = segment + 1 < count ? segment + 1 : 0;
+        const ax = points[2 * segment], az = points[2 * segment + 1];
+        const bx = points[2 * next], bz = points[2 * next + 1];
+        const corner = Math.max(
+          segmentDistanceSquared(x0, z0, ax, az, bx, bz),
+          segmentDistanceSquared(x1, z0, ax, az, bx, bz),
+          segmentDistanceSquared(x0, z1, ax, az, bx, bz),
+          segmentDistanceSquared(x1, z1, ax, az, bx, bz));
+        if (corner < bound) bound = corner;
+      }
+      const admit = bound * POND_VESSEL_PLAN_INDEX_SLACK;
+      cellStart[cellX + gridNx * cellZ] = cellItems.length;
+      for (let segment = 0; segment < count; segment += 1) {
+        const gapX = Math.max(0, Math.max(segMinX[segment] - x1, x0 - segMaxX[segment]));
+        const gapZ = Math.max(0, Math.max(segMinZ[segment] - z1, z0 - segMaxZ[segment]));
+        if (gapX * gapX + gapZ * gapZ <= admit) cellItems.push(segment);
+      }
+    }
+  }
+  cellStart[gridNx * gridNz] = cellItems.length;
+
+  // One band per two segments: dense enough that a band holds the two or three
+  // segments a horizontal line actually meets, cheap enough to build.
+  const bandCount = Math.max(8, Math.min(1024, count * 2));
+  // The identical expression the query uses, and that identity is the argument:
+  // `v -> floor((v - minZ) * inverse)` is monotone in `v` for any fixed
+  // `inverse`, so a segment bucketed from its own z extremes covers every band
+  // a z between them can land in. Written as `/ pitch` here and `* inverse`
+  // there, the two could round apart and the containment would not hold.
+  const bandInversePitch = bandCount / Math.max(maxZ - minZ, Number.MIN_VALUE);
+  const bandBuckets: number[][] = [];
+  for (let band = 0; band < bandCount; band += 1) bandBuckets.push([]);
+  for (let segment = 0; segment < count; segment += 1) {
+    const low = Math.max(0, Math.min(bandCount - 1, Math.floor((segMinZ[segment] - minZ) * bandInversePitch)));
+    const high = Math.max(0, Math.min(bandCount - 1, Math.floor((segMaxZ[segment] - minZ) * bandInversePitch)));
+    for (let band = low; band <= high; band += 1) bandBuckets[band].push(segment);
+  }
+  const bandStart = new Int32Array(bandCount + 1);
+  const bandItems: number[] = [];
+  for (let band = 0; band < bandCount; band += 1) {
+    bandStart[band] = bandItems.length;
+    for (const segment of bandBuckets[band]) bandItems.push(segment);
+  }
+  bandStart[bandCount] = bandItems.length;
+
+  return {
+    points, count,
+    gridOriginX, gridOriginZ, gridInversePitch: 1 / pitch, gridNx, gridNz,
+    cellStart, cellItems: Int32Array.from(cellItems),
+    bandOriginZ: minZ, bandInversePitch, bandCount,
+    bandStart, bandItems: Int32Array.from(bandItems),
+  };
 }
 
 /**
@@ -556,10 +1018,51 @@ function terraceWeight(terrace: PondVesselTerrace, x: number, z: number): number
   const localX = (cos * dx + sin * dz) / terrace.radius_m[0];
   const localZ = (-sin * dx + cos * dz) / terrace.radius_m[1];
   const distance = Math.hypot(localX, localZ);
-  const flat = terrace.flat ?? .45;
-  if (distance <= flat) return 1;
+  // A wall takes the whole rise over its own run at the footprint's edge; a
+  // mound spreads it from `flat` outward. See `PondVesselTerrace.faceRun_m`.
+  const inner = terrace.faceRun_m === undefined
+    ? terrace.flat ?? .45
+    // Normalised against the ellipse's mean radius rather than against whichever
+    // semi-axis this bearing is nearest, so the face is one width all the way
+    // round instead of a wall on the short axis and a ramp on the long one.
+    : Math.max(0, 1 - Math.min(.95, Math.max(1e-3,
+      terrace.faceRun_m / Math.sqrt(terrace.radius_m[0] * terrace.radius_m[1]))));
+  if (distance <= inner) return 1;
   if (distance >= 1) return 0;
-  return ramp(1 - (distance - flat) / (1 - flat));
+  return ramp(1 - (distance - inner) / (1 - inner));
+}
+
+/**
+ * A terrace's rise at a world point, in metres.
+ *
+ * Two constructions behind one signature. A terrace carrying a {@link
+ * PondVesselTerrace.wall} is a formed bed: its outline is the wall's *crest
+ * line*, and the height comes from {@link wallProfile_m} of the signed plan
+ * distance to it — the same shape of rule the coping and the inner face already
+ * use. A terrace without one is the old mound, unchanged, because a bank or a
+ * dune wants exactly that and nothing else in the repository should move.
+ */
+function terraceLift_m(terrace: PondVesselTerrace, x: number, z: number): number {
+  if (!terrace.wall) return terrace.height_m * terraceWeight(terrace, x, z);
+  const rotation = terrace.rotation_rad ?? 0;
+  const cos = Math.cos(rotation), sin = Math.sin(rotation);
+  const dx = x - terrace.center_m[0], dz = z - terrace.center_m[1];
+  const localX = cos * dx + sin * dz;
+  const localZ = -sin * dx + cos * dz;
+  // The outline wanders, on the plan's own lobe construction rather than a
+  // second kind of noise: a bed cast as a bare ellipse reads as a machine part
+  // beside a pond whose rim is deliberately hand-formed.
+  const bearing = Math.atan2(localZ, localX);
+  const wander = 1 + (terrace.wobble ?? 0) * Math.sin((terrace.lobes ?? 5) * bearing + 0.7);
+  const rx = Math.max(1e-4, terrace.radius_m[0] * wander);
+  const rz = Math.max(1e-4, terrace.radius_m[1] * wander);
+  const q = Math.hypot(localX / rx, localZ / rz);
+  // Signed plan distance in metres, gradient-normalised so a wall is one width
+  // all the way round an eccentric footprint. `(q - 1)/|grad q|` is the standard
+  // first-order distance to an implicit curve, and it is exact on a circle.
+  const gradient = Math.hypot(localX / (rx * rx), localZ / (rz * rz));
+  const d = gradient > 1e-9 ? ((q - 1) * q) / gradient : (q - 1) * Math.sqrt(rx * rz);
+  return wallProfile_m(terrace.wall, terrace.height_m, d);
 }
 
 /**
@@ -606,13 +1109,24 @@ export function pondVesselHeightAt(
     + dish * ramp(inward / pondVesselFloorDishReach(spec, curve))
   );
   const base = spec.groundHeight_m - fall;
-  const crest = spec.crest === "flat" ? 0 : rimHeight * pondVesselCrestProfile(Math.abs(distance) / rimHalfWidth);
+  const crest = spec.crest === "flat" ? 0
+    : spec.crest === "wall" && spec.crestWall
+      // Mirrored about the rail: the profile's own `d = 0` is the plateau edge,
+      // so the crown runs from the centreline out to `rimHalfWidth - run` and the
+      // rolled flank takes the rest. Both sides get it from `|distance|`, which
+      // is what makes the section symmetric all the way round a wandering plan.
+      ? wallProfile_m(
+        spec.crestWall,
+        rimHeight,
+        Math.abs(distance) - Math.max(0, rimHalfWidth - wallProfileRun_m(spec.crestWall, rimHeight)),
+      )
+      : rimHeight * pondVesselCrestProfile(Math.abs(distance) / rimHalfWidth);
   let lift = 0;
   if (spec.terraces?.length) {
     // One rim-width of fade beyond the crest, so a terrace arrives outside the
     // coping rather than growing out of its shoulder.
     const outside = ramp((distance - rimHalfWidth) / rimHalfWidth);
-    for (const terrace of spec.terraces) lift = Math.max(lift, terrace.height_m * terraceWeight(terrace, x, z) * outside);
+    for (const terrace of spec.terraces) lift = Math.max(lift, terraceLift_m(terrace, x, z) * outside);
   }
   return Math.max(0, base + crest + lift + spec.relief_m * relief(x, z, spec.seed ^ 0x51ed_2701));
 }
@@ -746,6 +1260,17 @@ export function bakePondVesselTerrain(
   spec: PondVesselSpec,
   container: { readonly width_m: number; readonly height_m: number; readonly depth_m: number },
   spacing_m: number,
+  /**
+   * The budget the caller is spending, defaulting to the document's.
+   *
+   * A bake that lands in `scene.terrain.grid` is JSON that every clone and
+   * every worker hand-off carries, and `MAX_TERRAIN_GRID_SAMPLES` is what keeps
+   * that survivable. A bake that is *derived* from `TerrainProcedural` is
+   * neither serialized nor transported, so it answers to host memory instead —
+   * see `MAX_TERRAIN_DERIVED_GRID_SAMPLES`. The budget is therefore the
+   * caller's to name rather than a property of this function.
+   */
+  maximumSamples: number = MAX_TERRAIN_GRID_SAMPLES,
 ): TerrainGrid {
   if (!(spacing_m > 0)) throw new RangeError("Pond vessel grid spacing must be positive");
   if (!(spec.rimHalfWidth_m > 0) || !(spec.innerFace_m > 0)) throw new RangeError("Pond vessel rim width and inner face must be positive");
@@ -756,7 +1281,7 @@ export function bakePondVesselTerrain(
 
   const nx = Math.max(MIN_TERRAIN_GRID_SIZE, Math.ceil(container.width_m / spacing_m) + 1);
   const nz = Math.max(MIN_TERRAIN_GRID_SIZE, Math.ceil(container.depth_m / spacing_m) + 1);
-  if (nx * nz > MAX_TERRAIN_GRID_SAMPLES) throw new RangeError(`Pond vessel grid ${nx}x${nz} exceeds ${MAX_TERRAIN_GRID_SAMPLES} samples`);
+  if (nx * nz > maximumSamples) throw new RangeError(`Pond vessel grid ${nx}x${nz} exceeds ${maximumSamples} samples`);
 
   const curve = pondVesselPlanCurve(spec);
   const origin_m = { x: -.5 * container.width_m, z: -.5 * container.depth_m };

@@ -1,0 +1,114 @@
+{
+  "scene": "hero-garden-hose",
+  "plate": "output/imagegen/garden-pond-hose-fill-simplified.png",
+  "grid": {
+    "width": 836,
+    "height": 470
+  },
+  "reps": 4,
+  "deltaE00Mean": 12.812641557540966,
+  "gradientDistanceMean": 1.7918765132358185,
+  "regions": [
+    {
+      "id": "pond",
+      "subject": "open pond surface: refraction, caustic net, ripple rings — the H6 region",
+      "bounds": {
+        "x": 276,
+        "y": 226,
+        "width": 242,
+        "height": 112
+      },
+      "deltaE00Mean": 21.08307815892365,
+      "deltaE00P95": 35.47398430614903,
+      "gradientDistance": 3.4699715909090916,
+      "gradientBias": 3.4699715909090916,
+      "gradientMeanFrame": 0.05253075403942586,
+      "gradientMeanPlate": 0.3786044291051512,
+      "noise": {
+        "deltaE00HalfRange": 0,
+        "gradientDistanceHalfRange": 0
+      }
+    },
+    {
+      "id": "coping",
+      "subject": "near coping: the plate's brightest plaster, and H1's cleanest tone target",
+      "bounds": {
+        "x": 184,
+        "y": 432,
+        "width": 276,
+        "height": 36
+      },
+      "deltaE00Mean": 3.3056894469695073,
+      "deltaE00P95": 8.061775654400918,
+      "gradientDistance": 1.1435165306998711,
+      "gradientBias": 0.7592582653499361,
+      "gradientMeanFrame": 0.12827346571749593,
+      "gradientMeanPlate": 0.13819786594105904,
+      "noise": {
+        "deltaE00HalfRange": 0,
+        "gradientDistanceHalfRange": 0
+      }
+    },
+    {
+      "id": "stones",
+      "subject": "mushroom stones and their pebble bed — the H2 form target",
+      "bounds": {
+        "x": 46,
+        "y": 94,
+        "width": 238,
+        "height": 141
+      },
+      "deltaE00Mean": 13.876420925378016,
+      "deltaE00P95": 37.2488852735459,
+      "gradientDistance": 1.5640737410071939,
+      "gradientBias": 1.5543569381782705,
+      "gradientMeanFrame": 0.08997660745762276,
+      "gradientMeanPlate": 0.1578754312424214,
+      "noise": {
+        "deltaE00HalfRange": 0,
+        "gradientDistanceHalfRange": 0
+      }
+    },
+    {
+      "id": "canopy",
+      "subject": "coral canopy: the recursive-scatter target (H2 op 7)",
+      "bounds": {
+        "x": 385,
+        "y": 5,
+        "width": 284,
+        "height": 66
+      },
+      "deltaE00Mean": 23.364874387264873,
+      "deltaE00P95": 51.18868909823495,
+      "gradientDistance": 1.2435172872340428,
+      "gradientBias": 0.5603806515957448,
+      "gradientMeanFrame": 0.4306931117104826,
+      "gradientMeanPlate": 0.3268873558008467,
+      "noise": {
+        "deltaE00HalfRange": 0,
+        "gradientDistanceHalfRange": 0
+      }
+    },
+    {
+      "id": "ground",
+      "subject": "backdrop and floor sweep — the H2b cove region",
+      "bounds": {
+        "x": 25,
+        "y": 9,
+        "width": 159,
+        "height": 57
+      },
+      "deltaE00Mean": 2.4331448691687805,
+      "deltaE00P95": 4.310278804180223,
+      "gradientDistance": 1.5383034163288936,
+      "gradientBias": -0.7658946149392003,
+      "gradientMeanFrame": 0.3439002800880826,
+      "gradientMeanPlate": 0.12878344902198677,
+      "noise": {
+        "deltaE00HalfRange": 0,
+        "gradientDistanceHalfRange": 0
+      }
+    }
+  ],
+  "blessed": "H0 + H1 grade half: solved camera (1.667 m, 0.50 rad) and solved grade (exposure 0.2952, warm balance). Re-bless with FLUID_HERO_FIDELITY_BASELINE= npm run gate:hero-fidelity then copy artifacts/hero-fidelity/report.json here."
+}

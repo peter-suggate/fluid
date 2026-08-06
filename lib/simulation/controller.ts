@@ -7,8 +7,16 @@ import type { RigidShape } from "../model";
 import { sceneEditRequiresReset } from "../webgpu-renderer";
 import type { RendererFrameMetrics, SimulationBackend } from "../webgpu-renderer";
 import { getMethod } from "../methods";
-import { getSceneDefinition } from "../scenes";
-import { sceneCardForDefinition, type SceneCard } from "../scene-definition";
+import { findSceneDefinition, getSceneDefinition } from "../scenes";
+import {
+  sceneCardForDefinition,
+  sceneDefinitionCamera,
+  sceneDefinitionTakesLattice,
+  sceneDocumentAtLattice,
+  type SceneCard,
+} from "../scene-definition";
+import { svoSceneryDetailCellSize_m, svoSceneryRefinementDepth, SVO_ENVIRONMENT_REFINEMENT_DEPTH_MAXIMUM } from "../svo-render-tuning";
+import { terrainSampleShape } from "../terrain";
 import { savedSceneCard } from "../scene-cards";
 import { SCENE_STARTERS } from "../empty-scene";
 import { useShellStore } from "../stores/shell-store";
@@ -556,6 +564,160 @@ class SimulationController {
     runtime.setNotice(enabled
       ? "Water enabled · solver rebuilding, paused at t = 0"
       : "Water off · live SVO scene, so nothing waits on a solver");
+  }
+
+  /**
+   * Re-author the open document at a lattice, rather than patch one onto it.
+   *
+   * The asymmetry this closes. `tools/run-svo-dry-render-smoke.ts` has been able
+   * to ask for the hero garden at another lattice since
+   * `createHeroGardenHoseSceneWithSet` took options: it calls the factory with
+   * `cellSize_m` and `detailCellSize_m` as *inputs*, so the heightfield is baked
+   * at that spacing and every generator resolves its legibility floors against
+   * that detail voxel. The browser had no equivalent. Its two lattice controls
+   * both wrote onto a finished document — "Finest cell" patches
+   * `voxelDomain.finestCellSize_m`, and `environmentRefinementDepth` was a
+   * render tuning that never reached the document at all — so the tree got finer
+   * while the thing it voxelizes stayed exactly as coarse as it was built.
+   *
+   * **This is now the only way the depth moves.** It used to be *silently* two
+   * numbers: `webgpu-octree-sparse-bricks.ts` divided the tree's cell by
+   * `2^depth` from `SvoRenderTuning`, while `buildEnvironmentProxyCatalog` read
+   * `voxelDomain.detailCellSize_m` off the document and got whatever was
+   * authored. The tuning field is gone; the renderer derives the depth from the
+   * document through `svoSceneryRefinementDepth`, and the document is the only
+   * carrier that reaches the render worker. Two settings that can disagree is
+   * the bug, not the drift between them.
+   *
+   * A rebuild is a reload: the document comes from the preset's factory, so
+   * scenery edits, container edits and inflow edits made since it was opened do
+   * not survive it. It goes on the undo stack for exactly that reason.
+   *
+   * Refused while water is on, and that is the engine's own rule rather than a
+   * caution: `svoSceneryDetailCellSize_m` returns depth zero for a fluid scene
+   * because a solver brick pins its node and leaves nowhere to descend, so there
+   * is no finer document for a wet scene to be authored at.
+   */
+  rebuildSceneAtLattice(request: {
+    readonly cellSize_m?: number;
+    readonly environmentRefinementDepth?: number;
+  }): boolean {
+    const runtime = useRuntimeStore.getState();
+    const sceneStore = useSceneStore.getState();
+    const { scene, presetId } = sceneStore;
+    const definition = findSceneDefinition(presetId);
+    if (!definition || !sceneDefinitionTakesLattice(definition)) {
+      runtime.setNotice(`${scene.sceneId} cannot be re-authored at another lattice`
+        + " · its factory takes no cell size, so the tree is all a lattice can move here", "warn");
+      return false;
+    }
+    if (scene.systems?.fluid !== false) {
+      runtime.setNotice("Turn water off to re-author this scene at a finer lattice"
+        + " · a solver brick pins its node, so a wet document has no finer rung", "warn");
+      return false;
+    }
+    const cellSize_m = request.cellSize_m ?? scene.voxelDomain.finestCellSize_m;
+    if (!(cellSize_m > 0) || !Number.isFinite(cellSize_m)) return false;
+    // The document's own depth is the fallback, because the document is where
+    // the depth lives. A request that names only a cell size keeps the rung the
+    // set was last expanded at rather than silently flattening it to zero.
+    const depth = Math.min(SVO_ENVIRONMENT_REFINEMENT_DEPTH_MAXIMUM, Math.max(0, Math.trunc(
+      request.environmentRefinementDepth ?? svoSceneryRefinementDepth(scene.voxelDomain, { fluid: false }))));
+    const detailCellSize_m = svoSceneryDetailCellSize_m(cellSize_m, {
+      environmentRefinementDepth: depth,
+      fluid: false,
+    });
+    const already = scene.voxelDomain.finestCellSize_m === cellSize_m
+      && (scene.voxelDomain.detailCellSize_m ?? scene.voxelDomain.finestCellSize_m) === detailCellSize_m;
+    if (already) return false;
+    const label = `Re-author at ${(cellSize_m * 1000).toFixed(4).replace(/\.?0+$/, "")} mm`
+      + (depth > 0 ? ` / ${(detailCellSize_m * 1000).toFixed(5).replace(/\.?0+$/, "")} mm set` : "");
+    let rebuilt;
+    try {
+      rebuilt = sceneDocumentAtLattice(definition, { cellSize_m, detailCellSize_m });
+    } catch (error) {
+      runtime.setNotice(error instanceof Error ? error.message : `${definition.name} refused that lattice`, "warn");
+      return false;
+    }
+    this.announceGPURebuild(label);
+    this.recordHistory(label.toLowerCase());
+    // Nothing to synchronize: the rebuilt document carries the depth, and the
+    // renderer reads it from there. That is the whole point of there being one.
+    this.reset(rebuilt.scene, presetId);
+    useUIStore.getState().setCamera(sceneDefinitionCamera(definition));
+    useRuntimeStore.getState().setRunState("paused");
+    useRuntimeStore.getState().setNotice(`${definition.name} re-authored`
+      + ` · lattice ${(cellSize_m * 1000).toFixed(4).replace(/\.?0+$/, "")} mm, set drawn at`
+      + ` ${(detailCellSize_m * 1000).toFixed(5).replace(/\.?0+$/, "")} mm`
+      + ` · terrain at ${((terrainSampleShape(rebuilt.scene.terrain)?.spacing_m ?? 0) * 1000).toFixed(4).replace(/\.?0+$/, "")} mm`);
+    return true;
+  }
+
+  /**
+   * Move the one refinement depth there is, by whichever route this scene has.
+   *
+   * The depth is `voxelDomain.detailCellSize_m` and nothing else — see
+   * `svoSceneryRefinementDepth`. What differs between scenes is only how far a
+   * change to it can propagate, and that turns out to be a much smaller
+   * difference than `rebuildSceneAtLattice` alone implied:
+   *
+   *  - **Every** scenery generator reads the leaf off the document at
+   *    *expansion* time, not at `create()` time — `growGenerator` takes it from
+   *    `EnvironmentSceneryContext.detailCellSize_m`, which the render worker
+   *    builds per world. So a plain patch already re-resolves every legibility
+   *    floor in the set. That is the bulk of what a finer lattice buys.
+   *  - A **factory** additionally re-bakes whatever it stored into the document
+   *    at construction. For the hero garden that is `scene.terrain.spacing_m`,
+   *    which `heroGardenTerrainSample_m` derives from the detail cell. A patch
+   *    leaves that at the pitch it was authored with.
+   *
+   * So a factory rebuild is preferred and a patch is the fallback, rather than
+   * the fallback being *nothing*. Only two of the catalogue's presets declare
+   * `buildAt`, and refusing the other thirty-seven outright removed a control
+   * that did real work on them: the proxies are exact analytic SDFs, so a finer
+   * leaf resolves them genuinely better even with no new authored detail.
+   *
+   * Wet scenes are the one true refusal, and it is the engine's rule rather than
+   * a caution — a solver brick pins its node, so there is nowhere to descend.
+   */
+  setEnvironmentRefinementDepth(depth: number): boolean {
+    const runtime = useRuntimeStore.getState();
+    const sceneStore = useSceneStore.getState();
+    const { scene, presetId } = sceneStore;
+    if (scene.systems?.fluid !== false) {
+      runtime.setNotice("Turn water off to spend refinement depth"
+        + " · a solver brick pins its node, so a wet scene has no finer rung", "warn");
+      return false;
+    }
+    const requested = Math.min(SVO_ENVIRONMENT_REFINEMENT_DEPTH_MAXIMUM, Math.max(0, Math.trunc(depth)));
+    if (requested === svoSceneryRefinementDepth(scene.voxelDomain, { fluid: false })) return false;
+    const definition = findSceneDefinition(presetId);
+    if (definition && sceneDefinitionTakesLattice(definition)) {
+      return this.rebuildSceneAtLattice({ environmentRefinementDepth: requested });
+    }
+    const finestCellSize_m = scene.voxelDomain.finestCellSize_m;
+    const detailCellSize_m = svoSceneryDetailCellSize_m(finestCellSize_m, {
+      environmentRefinementDepth: requested, fluid: false,
+    });
+    const label = `Draw the set at ${(detailCellSize_m * 1000).toFixed(5).replace(/\.?0+$/, "")} mm`;
+    this.announceGPURebuild(label);
+    this.recordHistory(label.toLowerCase());
+    sceneStore.patchScene({
+      voxelDomain: {
+        ...scene.voxelDomain,
+        // Omitted rather than equal, so an unrefined document keeps saying
+        // nothing about its detail cell and `svoSceneryRefinementDepth` reads
+        // the same zero from either spelling.
+        ...(detailCellSize_m < finestCellSize_m ? { detailCellSize_m } : { detailCellSize_m: undefined }),
+      },
+    });
+    runtime.setNotice(`Set drawn at ${(detailCellSize_m * 1000).toFixed(5).replace(/\.?0+$/, "")} mm`
+      + ` · every generator re-resolves its legibility floors at that leaf`
+      + (terrainSampleShape(scene.terrain)
+        ? `, but ${scene.sceneId}'s factory takes no lattice, so its terrain keeps the`
+          + ` ${((terrainSampleShape(scene.terrain)?.spacing_m ?? 0) * 1000).toFixed(4).replace(/\.?0+$/, "")} mm pitch it was authored at`
+        : ""));
+    return true;
   }
 
   setQuality(quality: Parameters<ReturnType<typeof useMethodStore.getState>["setQuality"]>[0]) {

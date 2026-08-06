@@ -456,9 +456,14 @@ const fluidSymmetry = defineSceneHookImplementation({
       context.parameters, "maximumRadialDeviation_cells");
     const minimumCircularityAngularSamples = numeric(
       context.parameters, "minimumCircularityAngularSamples");
+    const frontAdvanceEvaluationEnd_s = numeric(
+      context.parameters, "frontAdvanceEvaluationEnd_s");
+    const minimumMeanFrontAdvance_cells = numeric(
+      context.parameters, "minimumMeanFrontAdvance_cells");
     const circularityValues = [circularityEvaluationStart_s, circularityEvaluationEnd_s,
       maximumAxisDiagonalFrontDifference_cells, maximumRadialRmsDeviation_cells,
       maximumRadialDeviation_cells, minimumCircularityAngularSamples];
+    const advanceValues = [frontAdvanceEvaluationEnd_s, minimumMeanFrontAdvance_cells];
     if (!limits || requireExactTopology === undefined || requireAllWallsReached === undefined) {
       return parameterFailure("fluid-symmetry", [...keys, "requireExactTopology", "requireAllWallsReached"]);
     }
@@ -474,6 +479,13 @@ const fluidSymmetry = defineSceneHookImplementation({
         "circularityEvaluationEnd_s", "maximumAxisDiagonalFrontDifference_cells",
         "maximumRadialRmsDeviation_cells", "maximumRadialDeviation_cells",
         "minimumCircularityAngularSamples"]);
+    }
+    if (advanceValues.some((value) => value !== undefined)
+      && (advanceValues.some((value) => value === undefined)
+        || frontAdvanceEvaluationEnd_s! <= 0
+        || minimumMeanFrontAdvance_cells! <= 0)) {
+      return parameterFailure("fluid-symmetry", ["frontAdvanceEvaluationEnd_s",
+        "minimumMeanFrontAdvance_cells"]);
     }
     return context.selectedMethods.flatMap((method) => {
       const diagnostics = recordValue(context.getMethod(method)?.diagnostics);
@@ -549,6 +561,35 @@ const fluidSymmetry = defineSceneHookImplementation({
           metrics: firstTopologyFailure.observation.topology,
         } : undefined,
       }));
+
+      if (frontAdvanceEvaluationEnd_s !== undefined
+        && minimumMeanFrontAdvance_cells !== undefined) {
+        const initial = observations[0];
+        const initialMetric = recordValue(initial?.observation.frontCircularity);
+        const initialRadius = numberPath(initialMetric, "meanRadius_cells");
+        const evaluation = observations.filter(({ time_s }) =>
+          time_s > (initial?.time_s ?? Infinity) && time_s <= frontAdvanceEvaluationEnd_s);
+        const final = evaluation.at(-1);
+        const finalRadius = numberPath(recordValue(final?.observation.frontCircularity),
+          "meanRadius_cells");
+        const advance = initialRadius === undefined || finalRadius === undefined
+          ? Number.NEGATIVE_INFINITY : finalRadius - initialRadius;
+        const passed = advance >= minimumMeanFrontAdvance_cells;
+        findings.push(hookFinding({
+          id: `${method}.front-advance`, method, passed,
+          message: passed
+            ? "the mean dam front advanced before its circularity window"
+            : "the symmetric dam front did not advance far enough",
+          expected: { evaluationEnd_s: frontAdvanceEvaluationEnd_s,
+            minimumMeanFrontAdvance_cells },
+          actual: { initialStep: initial?.step, initialTime_s: initial?.time_s,
+            initialMeanRadius_cells: initialRadius,
+            evaluationStep: final?.step, evaluationTime_s: final?.time_s,
+            evaluationMeanRadius_cells: finalRadius,
+            meanFrontAdvance_cells: Number.isFinite(advance) ? advance : undefined,
+            evaluatedCheckpoints: evaluation.length },
+        }));
+      }
 
       if (circularityEvaluationStart_s !== undefined
         && circularityEvaluationEnd_s !== undefined

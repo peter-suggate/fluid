@@ -69,13 +69,14 @@ import {
 } from "../lib/svo-node-mip-address-plan";
 import type { SvoNodeMipCoordinate } from "../lib/svo-node-mip-pyramid";
 import { SVO_SMOOTH_UNION_CLUSTER_ARENA_WORDS, type SvoSmoothUnionClusterPacking } from "../lib/svo-primitive-abi";
-import { unpackMaterialOwner } from "../lib/sparse-brick-octree";
+import { SPARSE_BRICK_PAYLOAD_PROFILES, unpackMaterialOwner } from "../lib/sparse-brick-octree";
 import { packSvoDrySceneClusters } from "../lib/webgpu-svo-dry-scene";
 import { WebGPULiveSvoScene } from "../lib/webgpu-live-svo-scene";
 import {
   ENVIRONMENT_VOXEL_MATERIAL_BASE,
   OCTREE_LIVE_SCENE_CANDIDATES_PER_BRICK,
   OCTREE_LIVE_SCENE_REFINEMENT_CANDIDATE_TARGET,
+  octreeLiveSceneDryPayloadProfile,
   type OctreeSparseBrickWorld,
 } from "../lib/webgpu-octree-sparse-bricks";
 import {
@@ -619,7 +620,19 @@ const sceneMaterials = await readBuffer(structural.sceneMaterialOwners.buffer,
   structural.sceneMaterialOwners.offset ?? 0, structural.sceneMaterialOwners.size!);
 const sceneGeometry = await readBuffer(structural.sceneGeometry.buffer,
   structural.sceneGeometry.offset ?? 0, structural.sceneGeometry.size!);
-/** The published signed distance lane, as floats. Word 1 of each voxel's vec4. */
+/**
+ * The published signed distance lane, as floats.
+ *
+ * Both the stride and the channel come from the active profile: `dry` prunes
+ * the two channels no scene writer touches, so `solidSignedDistance` sits at
+ * word 0 of a 2-word voxel there and word 1 of a 4-word voxel under `full`. A
+ * hardcoded index reads a neighbour's bytes and reports the difference as NaN.
+ */
+const sceneGeometryChannels = SPARSE_BRICK_PAYLOAD_PROFILES[octreeLiveSceneDryPayloadProfile()]
+  .find((lane) => lane.name === "sceneGeometry")?.channels;
+if (!sceneGeometryChannels) throw new Error("Active payload profile has no sceneGeometry lane");
+const solidDistanceChannel = sceneGeometryChannels.indexOf("solidSignedDistance");
+if (solidDistanceChannel < 0) throw new Error("Active sceneGeometry lane carries no solidSignedDistance channel");
 const sceneDistance = new Float32Array(sceneGeometry.buffer);
 
 /** Morton decode mirroring `decodeMorton` in the voxelization shader. */
@@ -684,7 +697,7 @@ for (let leaf = 0; leaf < leafCount; leaf += 1) {
     const envelope_m = envelopeDistance(world_m);
     if (envelope_m > 0) continue;
     envelopeVoxels += 1;
-    const published_m = sceneDistance[(voxelOffset + local) * 4 + 1];
+    const published_m = sceneDistance[(voxelOffset + local) * sceneGeometryChannels.length + solidDistanceChannel];
     // Strictly outside every published surface, while strictly inside the
     // envelope: air the blob claimed as solid.
     if (published_m > 0) airVoxels += 1;

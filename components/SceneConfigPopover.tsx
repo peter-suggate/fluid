@@ -7,6 +7,11 @@ import { SceneLibraryPanel } from "./SceneLibraryPanel";
 import { simulation } from "@/lib/simulation/controller";
 import { useSceneStore } from "@/lib/stores/scene-store";
 import { useUIStore } from "@/lib/stores/ui-store";
+import { HERO_GARDEN_SOLVER_CELL_M } from "@/lib/hero-garden-scene";
+import { findSceneDefinition } from "@/lib/scenes";
+import { sceneDefinitionTakesLattice } from "@/lib/scene-definition";
+import { SVO_ENVIRONMENT_REFINEMENT_DEPTH_MAXIMUM } from "@/lib/svo-render-tuning";
+import { terrainSampleShape } from "@/lib/terrain";
 import type { FluidInflow } from "@/lib/model";
 
 const defaultInflow: FluidInflow = {
@@ -41,6 +46,7 @@ export function SceneConfigPopover() {
   const open = useUIStore((state) => state.sceneModalOpen);
   const setOpen = useUIStore((state) => state.setSceneModalOpen);
   const scene = useSceneStore((state) => state.scene);
+  const presetId = useSceneStore((state) => state.presetId);
   const patchScene = useSceneStore((state) => state.patchScene);
   const patchContainer = useSceneStore((state) => state.patchContainer);
   const patchFluid = useSceneStore((state) => state.patchFluid);
@@ -55,6 +61,13 @@ export function SceneConfigPopover() {
   const inflow = scene.fluid.inflow;
   const voxelDomain = scene.voxelDomain;
   const fluidEnabled = scene.systems?.fluid !== false;
+  // Whether this scene's factory takes a lattice, and can therefore be
+  // *re-authored* at one rather than only patched. See
+  // `simulation.rebuildSceneAtLattice` for why the two are not the same edit.
+  const definition = findSceneDefinition(presetId);
+  const rebuildable = definition !== undefined && sceneDefinitionTakesLattice(definition);
+  const detailCell_m = (voxelDomain.detailCellSize_m ?? voxelDomain.finestCellSize_m);
+  const authoredDepth = Math.round(Math.log2(voxelDomain.finestCellSize_m / detailCell_m));
   const voxelDimensions = [scene.container.width_m, scene.container.height_m, scene.container.depth_m]
     .map((extent) => Math.max(8, Math.round(extent / voxelDomain.finestCellSize_m)));
   const patchVoxelDomain = (patch: Partial<typeof voxelDomain>) => patchScene({ voxelDomain: { ...voxelDomain, ...patch } });
@@ -128,11 +141,69 @@ export function SceneConfigPopover() {
             <section data-testid="voxel-domain-controls">
               <h3>Unified voxel domain</h3>
               <div className="field-grid">
-                <NumberField label="Finest cell" unit="m" value={voxelDomain.finestCellSize_m} step={0.005} min={0.01} max={0.25} onChange={(value) => patchVoxelDomain({ finestCellSize_m: Math.max(0.01, value) })} />
+                {/* Floors at 1.5625 mm, the bottom of the halving ladder every
+                    container dimension stays a whole number of 8-cell bricks at.
+                    The old 10 mm floor predates the dry render and made the
+                    entire fine ladder unreachable from the UI. Note this patches
+                    a built document: it changes the tree, not the terrain bake
+                    or the generators' legibility ladders, which are inputs to
+                    construction. Reload the scene to rebuild the set. */}
+                <NumberField label="Finest cell" unit="m" value={voxelDomain.finestCellSize_m} step={0.0015625} min={0.0015625} max={0.25} onChange={(value) => patchVoxelDomain({ finestCellSize_m: Math.max(0.0015625, value) })} />
               </div>
               <Segmented ariaLabel="Sparse voxel brick size" value={String(voxelDomain.brickSize_cells)} options={[{ value: "4", label: "4³-cell leaves", disabled: fluidEnabled, title: fluidEnabled ? "4³ leaves require a renderer-only scene; fluid owner pages currently use 8³ bricks." : undefined }, { value: "8", label: "8³-cell leaves" }]} onChange={(value) => patchVoxelDomain({ brickSize_cells: value === "4" ? 4 : 8 })} />
               <small className="control-hint">Container lattice: {voxelDimensions.join(" × ")} finest cells. The sparse world grows automatically to include authored environment objects and optional scene bounds.{fluidEnabled ? " Fluid scenes require 8³ leaves; 4³ is available for renderer-only scenes." : ""}</small>
             </section>
+            {/* The rebuild, and why it is a second control rather than a fix to
+                the one above. "Finest cell" writes onto a finished document, and
+                for a scene whose whole body is a container of water that is the
+                complete edit. It is not for a scene that *bakes* something: the
+                hero garden bakes a heightfield, composes its set against the
+                surface that bake produced, and hands every generator a detail
+                voxel to size its features against — none of which a patch
+                reaches. The size has to be an input, so this reloads the preset
+                through its own factory. Only offered where a factory takes one.
+                Mirrors FLUID_SVO_DRY_SMOKE_REFINEMENT in
+                tools/run-svo-dry-render-smoke.ts, which is the lane that could
+                already do this. */}
+            {rebuildable && <section data-testid="scene-lattice-rebuild">
+              <h3>Re-author at a lattice</h3>
+              <Segmented
+                ariaLabel="Set detail lattice"
+                value={String(Math.min(SVO_ENVIRONMENT_REFINEMENT_DEPTH_MAXIMUM, Math.max(0, authoredDepth)))}
+                options={Array.from({ length: SVO_ENVIRONMENT_REFINEMENT_DEPTH_MAXIMUM + 1 }, (_unused, depth) => ({
+                  value: String(depth),
+                  label: depth === 0 ? "Cell" : `÷${2 ** depth}`,
+                  disabled: fluidEnabled,
+                  title: fluidEnabled
+                    ? "A solver brick pins its node, so a wet document has no finer rung. Turn water off first."
+                    : `Rebuild with the set drawn at ${(voxelDomain.finestCellSize_m * 1000) / 2 ** depth} mm`,
+                }))}
+                onChange={(value) => simulation.rebuildSceneAtLattice({ environmentRefinementDepth: Number(value) })}
+              />
+              <div className="field-grid">
+                <button
+                  className="quiet-button"
+                  disabled={fluidEnabled}
+                  onClick={() => simulation.rebuildSceneAtLattice({ cellSize_m: voxelDomain.finestCellSize_m })}
+                >Rebuild at {(voxelDomain.finestCellSize_m * 1000).toFixed(4).replace(/\.?0+$/, "")} mm</button>
+              </div>
+              <small className="control-hint">
+                Regenerates {definition.name} through its own factory with these sizes as inputs, so the heightfield is
+                re-baked and every generator re-resolves its legibility floors — which patching the cell above cannot do.
+                The set is drawn at {(detailCell_m * 1000).toFixed(5).replace(/\.?0+$/, "")} mm
+                {(() => {
+                  // Shape, not samples: a described ground would have to be derived to be
+                  // counted, and a status line must never be the thing that forces that.
+                  const ground = terrainSampleShape(scene.terrain);
+                  return ground
+                    ? `, terrain ${ground.derived ? "derived" : "baked"} at ${(ground.spacing_m * 1000).toFixed(4).replace(/\.?0+$/, "")} mm (${ground.nx}×${ground.nz})`
+                    : "";
+                })()}.
+                A rebuild reloads the preset, so scenery and container edits made since it was opened do not survive it —
+                it goes on the undo stack for that reason. The renderer reads its refinement depth off this document, so
+                there is no second setting to fall out of step; the render panel&apos;s depth slider is this same control.
+              </small>
+            </section>}
           </>}
           {section === "fluid" && <>
             <section>
@@ -141,7 +212,19 @@ export function SceneConfigPopover() {
                   scene instead of a solver, so a set can be looked at while its
                   water is still in bring-up — and everything below stays
                   authored, describing the pond that returns when it is on. */}
-              <Segmented ariaLabel="Fluid system" value={fluidEnabled ? "on" : "off"} options={[{ value: "off", label: "Off" }, { value: "on", label: "On" }]} onChange={(value) => simulation.setFluidSystem(value === "on")} />
+              {/* Turning water on coarsens the lattice back to one the solver can
+                  carry. A dry hero garden opens four times finer than its solver
+                  rung — the 7.5 mm dispatch ceiling is issued by fluid scenes
+                  alone — so enabling fluid on a document already open would hand
+                  the solver a lattice it overruns. Restoring it here is the
+                  honest half of that asymmetry, and the coarsening is visible
+                  rather than silent because the picture changes with it. */}
+              <Segmented ariaLabel="Fluid system" value={fluidEnabled ? "on" : "off"} options={[{ value: "off", label: "Off" }, { value: "on", label: "On" }]} onChange={(value) => {
+                if (value === "on" && voxelDomain.finestCellSize_m < HERO_GARDEN_SOLVER_CELL_M) {
+                  patchVoxelDomain({ finestCellSize_m: HERO_GARDEN_SOLVER_CELL_M });
+                }
+                simulation.setFluidSystem(value === "on");
+              }} />
               <small className="control-hint">{fluidEnabled
                 ? "The fluid solver owns this scene. Turning water off renders the set alone, with no solver to bring up and no transport."
                 : "Renderer only: the set draws from the live sparse scene and nothing waits on a fluid authority. The settings below are still authored, and take effect when water is turned back on."}</small>

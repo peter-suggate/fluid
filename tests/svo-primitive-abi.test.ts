@@ -12,11 +12,13 @@ import {
   canonicalSvoPrimitive,
   packSvoPrimitiveRecords,
   sampleSvoPrimitive,
+  svoFieldProgramAbsentWGSL,
   svoPrimitiveForRigidBody,
   svoPrimitiveWGSL,
   unpackSvoPrimitiveRecords,
   type SvoPrimitiveDescriptor,
 } from "../lib/svo-primitive-abi";
+import { evaluateSvoFieldProgram, type SvoFieldProgram } from "../lib/svo-field-program";
 
 const close = (actual: number, expected: number, tolerance = 1e-6) => {
   assert.ok(Math.abs(actual - expected) <= tolerance, `${actual} should be within ${tolerance} of ${expected}`);
@@ -69,7 +71,7 @@ test("primitive ABI uses four aligned lanes and stable kind values", () => {
   // captured by an older build still decode to the shape they were written as.
   assert.deepEqual(SVO_PRIMITIVE_KINDS, {
     sphere: 1, box: 2, capsule: 3, cylinder: 4, ellipsoid: 5, terrainHeightfield: 6, torus: 7, cone: 8,
-    smoothUnionCluster: 9, roundCone: 10, roundedCylinder: 11,
+    smoothUnionCluster: 9, roundCone: 10, roundedCylinder: 11, fieldProgram: 12,
   });
 
   const packed = packSvoPrimitiveRecords(descriptors);
@@ -428,4 +430,46 @@ test("WGSL mirror preserves integer identity and explicit hard-feature normal se
   assert.match(svoPrimitiveWGSL, /if \(capDistance >= radialDistance\)/);
   assert.match(svoPrimitiveWGSL, /worldPoint_m\.y - terrainHeight_m/);
   assert.doesNotMatch(svoPrimitiveWGSL, /mix\([^\n]*SVO_FEATURE_BOX/);
+});
+
+test("the field-program march steps a Lipschitz-divided distance on both sides of the ABI", () => {
+  // The single line that keeps a warped shape from being full of holes. A domain
+  // warp makes the composed field L-Lipschitz, the march steps by exactly what
+  // this returns, and an "obvious" simplification back to `.distance_m` is a
+  // silent tunnelling bug rather than a compile error. Pinned here so the
+  // simplification fails a test instead of a frame.
+  assert.match(svoPrimitiveWGSL,
+    /fn svoFieldProgramDistance_m[\s\S]*?return value\.distance_m \/ max\(1\.0, value\.lipschitz\);/,
+    "the WGSL field-program distance must divide by the tape's Lipschitz constant");
+  assert.match(svoPrimitiveWGSL, /if \(kind == SVO_KIND_FIELD_PROGRAM\) \{ return svoFieldProgramDistance_m\(/,
+    "the marched-distance dispatch must go through the divided form, never the raw sample");
+  // The host hook is the only thing this library does not carry, so its contract
+  // is part of the ABI: a module that cannot resolve a tape says so with 1e20,
+  // which the record-validity arm reads as unresolved rather than as empty.
+  assert.match(svoFieldProgramAbsentWGSL, /fn svoFieldProgramReferenceSample\(reference:u32,localPoint:vec3f\)->SvoFieldValue/);
+  assert.match(svoFieldProgramAbsentWGSL, /return SvoFieldValue\(1e20,1\.0\);/);
+  assert.doesNotMatch(svoFieldProgramAbsentWGSL, /@group|@binding/,
+    "the absent hook must stay binding-free so any module can splice it");
+  assert.match(svoPrimitiveWGSL, /dimensionsValid = all\(dimensions_m > vec3f\(0\.0\)\) && svoFieldProgramResolved\(/,
+    "a record whose tape did not resolve must report invalid, never draw its conservative box");
+
+  // The CPU mirror divides by the same constant, which is what makes the two
+  // agree at all: the raw field at this point is L times further away.
+  const program: SvoFieldProgram = {
+    ops: [
+      { op: "domain-warp", out: 1, point: 0, seed: 0x51ed_2701, parameters: { a: 0.02, b: 7 } },
+      { op: "sphere", out: 0, point: 1, parameters: { a: 0.2 } },
+    ],
+    result: 0,
+  };
+  const point = { x: 0.33, y: 0.07, z: -0.11 };
+  const raw = evaluateSvoFieldProgram(program, point);
+  assert.ok(raw.lipschitz > 1.2, "the fixture must have a Lipschitz constant worth dividing by");
+  const descriptor: SvoPrimitiveDescriptor = {
+    kind: "field-program", primitiveId: 1, materialId: 3, center_m: { x: 0, y: 0, z: 0 },
+    envelopeRadii_m: { x: 0.01, y: 0.01, z: 0.01 }, fieldProgramReference: 0, program,
+  };
+  const sampled = sampleSvoPrimitive(descriptor, point).signedDistance_m;
+  close(sampled, raw.distance_m / raw.lipschitz, 1e-9);
+  assert.ok(sampled < raw.distance_m, "an undivided distance would step past the surface");
 });

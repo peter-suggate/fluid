@@ -8,28 +8,21 @@ import {
   buildOctreeSvoLightPublication,
   OCTREE_SVO_LIGHT_REVISION,
 } from "../lib/webgpu-octree-sparse-bricks";
-import type { SparseVoxelRenderSource } from "../lib/webgpu-voxel-debug";
+import type { SparseVoxelSceneRenderSource } from "../lib/webgpu-voxel-debug";
 
 test("light publication is optional and preserves legacy producer compatibility", () => {
   const binding = { buffer: {} as GPUBuffer };
   const legacy = {
-    voxelRecords: binding,
-    voxelCount: binding,
-    brickRecords: binding,
-    brickCount: binding,
-    materials: binding,
-    voxelCapacity: 64,
-    brickCapacity: 8,
     materialCount: 20,
     revision: 3,
-  } satisfies SparseVoxelRenderSource;
-  assert.equal(legacy.materials, binding);
+  } satisfies SparseVoxelSceneRenderSource;
+  assert.ok(!("lights" in legacy), "a producer with no authored fixtures publishes no light table");
   const modern = {
     ...legacy,
     lights: { binding, count: 4, strideBytes: SVO_LIGHT_RECORD_STRIDE_BYTES, revision: 7 },
-  } satisfies SparseVoxelRenderSource;
+  } satisfies SparseVoxelSceneRenderSource;
   assert.equal(modern.lights.binding, binding);
-  assert.equal(modern.materials, legacy.materials);
+  assert.equal(modern.materialCount, legacy.materialCount);
 });
 
 test("night-lab and conservatory publish their authored emissive fixtures", () => {
@@ -82,7 +75,13 @@ test("bounded producer publication reports every omitted lower-priority fixture"
 
 test("octree world owns, publishes, accounts, and destroys its light buffer once", () => {
   const source = readFileSync(new URL("../lib/webgpu-octree-sparse-bricks.ts", import.meta.url), "utf8");
-  assert.match(source, /private readonly lightBuffer: GPUBuffer/);
+  // Declared once and assigned once. Not `readonly` any more: the build moved
+  // out of the constructor into a generator so it can be interrupted, and
+  // TypeScript only admits a readonly assignment from a constructor. The
+  // single-assignment claim is the next line, which is the one that matters.
+  assert.match(source, /private lightBuffer!: GPUBuffer/);
+  assert.equal(source.match(/this\.lightBuffer = /g)?.length, 1,
+    "the light buffer must be assigned exactly once");
   assert.match(source, /this\.lightBuffer = storageBuffer\(/);
   assert.match(source, /binding: \{ buffer: this\.lightBuffer, size: lights\.packedRecords\.byteLength \}/);
   assert.match(source, /count: lights\.count/);
@@ -91,6 +90,7 @@ test("octree world owns, publishes, accounts, and destroys its light buffer once
   assert.match(source, /\+ this\.pbrMaterialBuffer\.size \+ this\.materialEmissionBuffer\.size \+ this\.lightBuffer\.size/);
   const destroy = source.slice(source.indexOf("  destroy(): void {"));
   assert.match(destroy, /this\.pbrMaterialBuffer, this\.materialEmissionBuffer, this\.lightBuffer, this\.environmentLightingBuffer/);
-  assert.match(destroy, /\.\.\.\(this\.inspection\?\.buffers \?\? \[\]\)/);
+  assert.doesNotMatch(destroy, /this\.inspection/,
+    "the expanded-record arenas were removed, so nothing lazy is left to tear down");
   assert.equal((destroy.match(/this\.lightBuffer/g) ?? []).length, 1);
 });

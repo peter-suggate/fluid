@@ -14,7 +14,8 @@
  *
  * Usage:
  *   node --import tsx tools/profile-svo-render-xctrace.ts
- *     [--scene=hose-tank] [--resolution=660x662]
+ *     [--scene=hose-tank] [--scene-module=tools/…-scene.ts] [--resolution=660x662]
+ *     [--screen-space-pixels=3] [--cone-fanout=1]
  *     [--variant=baseline] [--traversal=hybrid|canonical|canonical-parametric|compact|wide|raster-primary]
  *     [--shading=inline|split]
  *     [--cone-scale=0.5|0.25|0.125] [--cone-tracing=cones|exact|off] [--warmups=4]
@@ -41,6 +42,7 @@ import {
   releaseWebGPUExclusiveLockSync,
   WEBGPU_EXCLUSIVE_LOCK,
 } from "./webgpu-smoke-isolation";
+import { SVO_SCREEN_SPACE_TERMINATION_CONTRACT } from "../lib/svo-screen-space-termination";
 import { SVO_DRY_TRAVERSAL_MODES, type SvoDryTraversalMode } from "../lib/webgpu-svo-dry-scene";
 import { buildFrameReport, renderFrameReportHtml, type FrameReport } from "./xctrace-frame-report";
 import { parseTraceTable, readTraceRows } from "./xctrace-trace-tables";
@@ -93,6 +95,28 @@ const warmups = Number(flag("warmups") ?? 4);
 if (!Number.isSafeInteger(warmups) || warmups < 1) {
   throw new Error("--warmups must be a positive integer");
 }
+/**
+ * A scene from a module instead of the catalog, forwarded to the worker's
+ * `FLUID_SVO_DRY_FRAME_SCENE_MODULE`. This is how a camera framing gets
+ * profiled — the catalog id fixes the scene, not where you are standing.
+ */
+const sceneModule = flag("scene-module");
+if (sceneModule !== undefined && !existsSync(resolve(root, sceneModule))) {
+  throw new Error(`--scene-module ${sceneModule} does not exist`);
+}
+/**
+ * Screen-space termination and cone fan-out default to what
+ * `webgpu-renderer.ts` builds the production pipeline with, not to the
+ * worker's own historical defaults (0 and off). An unflagged run of the
+ * benchmark measures the pre-W1 path with a pass production does not run,
+ * which is a good way to profile a frame the app never ships.
+ */
+const screenSpacePixels = Number(flag("screen-space-pixels")
+  ?? (traversal === "raster-primary" ? SVO_SCREEN_SPACE_TERMINATION_CONTRACT.defaultThresholdPixels : 0));
+if (!Number.isFinite(screenSpacePixels) || screenSpacePixels < 0) {
+  throw new Error("--screen-space-pixels must be a non-negative finite number");
+}
+const coneFanout = (flag("cone-fanout") ?? "1") === "1";
 const keepTables = process.argv.includes("--keep-tables");
 const reuseTrace = process.argv.includes("--reuse-trace");
 const reuseTables = process.argv.includes("--reuse-tables");
@@ -287,17 +311,31 @@ const assertRenderReport = (report: FrameReport): void => {
   // the megakernel is replaced by the brick coverage/resolve pair plus one
   // exact per-primitive proxy pass, so demanding that label rejects every
   // capture of the shipping raster path rather than catching anything.
-  const expectedLabels = split
+  // The live-scene primitive stage has two encodings and the shipping one is
+  // the conservative pair: `Sparse voxel exact live-scene primitive visibility`
+  // is the *fallback* the dry scene takes only when the coverage pipelines are
+  // unbuilt, the record count exceeds the 16-bit candidate key, or
+  // `scenePrimitiveDirect` is set. Naming just that label rejected every
+  // capture of the production path — the identical mistake the comment above
+  // records for `Sparse voxel primary visibility`, one stage later. Either
+  // form satisfies the gate; requiring both would fail whichever did not run.
+  const expectedLabels: readonly (string | readonly string[])[] = split
     ? (traversal === "raster-primary"
-      ? ["Sparse voxel exact live-scene primitive visibility", "Sparse voxel deferred dry lighting"]
+      ? [["Sparse voxel exact live-scene primitive visibility",
+        "Sparse voxel conservative live-scene primitive resolve"], "Sparse voxel deferred dry lighting"]
       : ["Sparse voxel primary visibility", "Sparse voxel deferred dry lighting"])
     : coneTracing === "cones"
       ? ["Sparse voxel cone-lighting prepass", "Sparse voxel dry scene"]
       : ["Sparse voxel dry scene"];
-  for (const label of expectedLabels) {
-    const pass = report.passes.find((candidate) => candidate.label === label);
-    if (!pass || (!timingOnly && (pass.counterSamples === 0 || pass.occupancy === undefined || pass.alu === undefined))) {
-      failures.push(`${label} has no attributed occupancy/ALU samples`);
+  for (const expected of expectedLabels) {
+    const alternatives = typeof expected === "string" ? [expected] : expected;
+    const attributed = alternatives.some((label) => {
+      const pass = report.passes.find((candidate) => candidate.label === label);
+      return pass !== undefined
+        && (timingOnly || (pass.counterSamples > 0 && pass.occupancy !== undefined && pass.alu !== undefined));
+    });
+    if (!attributed) {
+      failures.push(`${alternatives.join(" / ")} has no attributed occupancy/ALU samples`);
     }
   }
   const compactConeLabel = "Sparse voxel compact cone visibility";
@@ -447,6 +485,7 @@ const main = async (): Promise<void> => {
   // capture rather than accidentally claiming the source state at rebuild time.
   await writeFile(capturePath, `${JSON.stringify({
     state: "capturing", variant, traversal, shading, coneScale, coneTracing, radianceReconstruction, warmups, scene,
+    sceneModule, screenSpacePixels, coneFanout,
     resolution: { width, height }, counterSeconds, counterReduction, source,
     tracePath, startedAt: new Date().toISOString(),
   }, null, 2)}\n`);
@@ -486,6 +525,8 @@ cd ${JSON.stringify(root)}
 export WEBGPU_NODE_MODULE=${JSON.stringify(resolve(root, "node_modules/webgpu/index.js"))}
 export FLUID_WEBGPU_DAWN_FEATURES=skip_validation,use_user_defined_labels_in_backend
 export FLUID_SVO_DRY_FRAME_SCENE=${JSON.stringify(scene)}
+${sceneModule === undefined ? "" : `export FLUID_SVO_DRY_FRAME_SCENE_MODULE=${JSON.stringify(sceneModule)}\n`}export FLUID_SVO_DRY_FRAME_SCREEN_SPACE_PIXELS=${screenSpacePixels}
+export FLUID_SVO_DRY_FRAME_CONE_FANOUT=${coneFanout ? 1 : 0}
 export FLUID_SVO_DRY_FRAME_WIDTH=${width}
 export FLUID_SVO_DRY_FRAME_HEIGHT=${height}
 export FLUID_SVO_DRY_FRAME_WARMUPS=${warmups}

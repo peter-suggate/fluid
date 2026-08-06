@@ -174,6 +174,21 @@ function proxySurface(proxy: EnvironmentProxyPrimitive, world: Triple): SurfaceS
     const k1 = Math.hypot(p[0] / (r[0] * r[0]), p[1] / (r[1] * r[1]), p[2] / (r[2] * r[2]));
     distance_m = k1 > 1e-12 ? k0 * (k0 - 1) / k1 : -Math.min(...r);
     normal = normalized(p.map((value, axis) => value / (r[axis] * r[axis])) as Triple);
+  } else if (proxy.kind === "field-program") {
+    // A tape contributes as its conservative box, for the same reason an
+    // aggregate contributes as its lobe: the tape is a render-only refinement
+    // inside exactly this box, and a fissured emitter would give a radiance
+    // estimate that depended on which pit a sample landed in rather than on how
+    // much of the mass is glowing. Same solve as the box arm above.
+    const h = [proxy.halfExtent_m.x, proxy.halfExtent_m.y, proxy.halfExtent_m.z] as Triple;
+    const q = p.map((value, axis) => Math.abs(value) - h[axis]) as Triple;
+    const outside: Triple = q.map((value) => Math.max(value, 0)) as Triple;
+    distance_m = length(outside) + Math.min(Math.max(q[0], q[1], q[2]), 0);
+    if (length(outside) > 1e-12) normal = normalized(outside.map((value, axis) => value * Math.sign(p[axis] || 1)) as Triple);
+    else {
+      const axis = q.indexOf(Math.max(...q));
+      normal = [0, 0, 0]; normal[axis] = Math.sign(p[axis] || 1);
+    }
   } else if (proxy.kind === "cylinder") {
     const radial = Math.hypot(p[0], p[2]), side = radial - proxy.radius_m, cap = Math.abs(p[1]) - proxy.halfHeight_m;
     distance_m = Math.hypot(Math.max(side, 0), Math.max(cap, 0)) + Math.min(Math.max(side, cap), 0);
@@ -276,6 +291,12 @@ function proxyLightRadius(proxy: EnvironmentProxyPrimitive, bounding: boolean): 
   if (proxy.kind === "cone") {
     const widest = Math.max(proxy.baseRadius_m, proxy.topRadius_m);
     return bounding ? Math.max(widest, proxy.halfHeight_m) : Math.cbrt(widest ** 2 * proxy.halfHeight_m);
+  }
+  // The same split `svo-light-abi.ts` makes, and this function exists to mirror
+  // it: the bounding radius of a box is its corner, not its longest half-extent.
+  if (proxy.kind === "field-program") {
+    const { x, y, z } = proxy.halfExtent_m;
+    return bounding ? Math.hypot(x, y, z) : Math.cbrt(x * y * z);
   }
   return Math.max(proxy.radius_m.x, proxy.radius_m.y, proxy.radius_m.z);
 }

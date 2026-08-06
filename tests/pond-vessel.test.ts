@@ -7,13 +7,16 @@ import {
   HERO_GARDEN_WATER_BELOW_GROUND_M,
   HERO_GARDEN_HOSE_MOUTH_M,
   HERO_GARDEN_HOSE_IMPACT_M,
+  HERO_GARDEN_TERRAIN_SAMPLE_M,
   HERO_GARDEN_VESSEL,
   HERO_GARDEN_WATERLINE_M,
   createHeroGardenHoseScene,
+  heroGardenTerrainSample_m,
+  heroGardenWaterBelowGround_m,
 } from "../lib/hero-garden-scene";
 import { validateScene } from "../lib/model";
 import { planSceneRuntime } from "../lib/scene-runtime";
-import { sampleTerrainGrid, terrainHeightAt, validateTerrain } from "../lib/terrain";
+import { MAX_TERRAIN_GRID_SAMPLES, sampleTerrainGrid, terrainHeightAt, terrainSampleShape, validateTerrain } from "../lib/terrain";
 import {
   bakePondVesselTerrain,
   pondVesselCrestProfile,
@@ -229,12 +232,39 @@ test("water is one flag, and turning it on changes nothing else", () => {
   // feedback given on it would be feedback on something that is not the hero.
   assert.equal(planSceneRuntime(dry).fluidSolver, false, "the scene opens without a solver");
   assert.equal(planSceneRuntime(wet).fluidSolver, true);
+  /**
+   * Two fields, and the second one is a *sampling rate* rather than the scene.
+   *
+   * `systems.fluid` is the flag. `voxelDomain.finestCellSize_m` is the one other
+   * field the factory is documented to move, because the solver cannot carry the
+   * picture's lattice — 7.5 mm overruns a one-workgroup-per-interface-leaf
+   * dispatch at WebGPU's 65 535 ceiling — so a wet document is clamped to
+   * `HERO_GARDEN_SOLVER_CELL_M` and a dry one draws at `HERO_GARDEN_CELL_M`.
+   *
+   * Excluding it is not a weakening, and it is written as three assertions
+   * instead of one so that it cannot become one. What this test is *for* is the
+   * composition: the vessel, the fill, the scenery, the stepping colliders, the
+   * jet, the lights and the camera all have to be the same objects at the same
+   * metres, because that is what makes a dry render feedback on the hero. That
+   * comparison is untouched and it is the one that actually regressed — a
+   * clearance rule defaulted to the picture's cell instead of the solver's and
+   * moved the fill, the shore and five stone positions with it. The lattice, by
+   * contrast, is the difference the two documents exist to have, it moves in one
+   * direction only, and both ends of it are pinned below.
+   */
   assert.deepEqual(
-    { ...dry, systems: undefined },
-    { ...wet, systems: undefined },
-    "dry and wet must be the same document apart from systems.fluid",
+    { ...dry, systems: undefined, voxelDomain: undefined },
+    { ...wet, systems: undefined, voxelDomain: undefined },
+    "dry and wet must be the same document apart from systems.fluid and the solver's lattice",
   );
   assert.deepEqual(dry.systems, { ...wet.systems, fluid: false });
+  assert.deepEqual(
+    { ...dry.voxelDomain, finestCellSize_m: 0 },
+    { ...wet.voxelDomain, finestCellSize_m: 0 },
+    "the lattice is the only thing the solver may coarsen, and only the cell of it",
+  );
+  assert.equal(dry.voxelDomain!.finestCellSize_m, HERO_GARDEN_CELL_M, "a dry document draws at the authored leaf");
+  assert.equal(wet.voxelDomain!.finestCellSize_m, HERO_GARDEN_SOLVER_CELL_M, "a wet one is clamped to what the solver carries");
 
   // Including the water itself: the fill and the jet are authored in both, so
   // turning it on fills the pond that was designed rather than an empty tank.
@@ -335,4 +365,93 @@ test("the drawn hose and the injected jet leave from the same place, pointing th
   const head = worldPoints[0][0];
   assert.ok(Math.hypot(head.x - HERO_GARDEN_HOSE_MOUTH_M.x, head.y - HERO_GARDEN_HOSE_MOUTH_M.y,
     head.z - HERO_GARDEN_HOSE_MOUTH_M.z) < 1e-9, "the tube must start at the nozzle");
+});
+
+/**
+ * The bake follows the lattice, and it follows it by landing on a node.
+ *
+ * "A quarter of a cell" was always shorthand for the property that matters: the
+ * live voxeliser takes one height per finest column at the column *centre*
+ * (`terrainColumnHeightsForLattice`), so with spacing `h` under a render cell
+ * `c` the sample lands `(k + 1/2) * c / h` nodes out — an integer exactly when
+ * `c / h` is even. `heroGardenTerrainSample_m` is that rule, and it now holds at
+ * *every* rung rather than at the handful a document budget could afford: the
+ * grid is no longer carried by the document at all (`TerrainProcedural`), so
+ * there is nothing left for `MAX_TERRAIN_GRID_SAMPLES` to clamp.
+ */
+test("hero garden bakes its vessel on the lattice it will be drawn at", () => {
+  assert.equal(heroGardenTerrainSample_m(), HERO_GARDEN_TERRAIN_SAMPLE_M,
+    "the default must still be the authored spacing");
+  assert.equal(HERO_GARDEN_TERRAIN_SAMPLE_M, HERO_GARDEN_CELL_M / 2);
+  for (const detail_m of [0.025, HERO_GARDEN_CELL_M, 0.0125, 0.00625, 0.003125, 0.0015625, 0.00078125]) {
+    const spacing_m = heroGardenTerrainSample_m(detail_m);
+    // Never coarser than the authored bake, which every pinned clearance in this
+    // file and in `tests/swept-coping.test.ts` was measured against.
+    assert.ok(spacing_m <= HERO_GARDEN_TERRAIN_SAMPLE_M + 1e-12,
+      `${detail_m * 1e3} mm asked for a ${spacing_m * 1e3} mm bake, coarser than the authored one`);
+    // An even divisor of the lattice, so a column centre is a grid node and the
+    // bilinear fetch returns the vessel rather than an interpolation of it.
+    const ratio = detail_m / spacing_m;
+    assert.ok(Math.abs(ratio - Math.round(ratio)) < 1e-9 && Math.round(ratio) % 2 === 0,
+      `a ${detail_m * 1e3} mm cell over a ${spacing_m * 1e3} mm bake is ${ratio} nodes per cell, which is not even`);
+  }
+});
+
+/**
+ * The ground follows the leaf all the way down, and the document stays small.
+ *
+ * This is the property the old clamp took away. `MAX_TERRAIN_GRID_SAMPLES` is
+ * 262 144 and this container asks for 1153x769 — 886 657, 3.4x over — at
+ * 1.5625 mm, so a *carried* grid had to be coarsened back to 3.125 mm at every
+ * rung, and at a 0.78 mm leaf the ground sat 2.75 leaves from the surface that
+ * was authored. A described ground is derived at the lattice in use instead, so
+ * the spacing halves with the leaf and the budget it answers to is host memory
+ * (`MAX_TERRAIN_DERIVED_GRID_SAMPLES`), not JSON.
+ */
+test("hero garden terrain spacing follows the leaf without a document budget", () => {
+  const rungs: readonly [number, number][] = [
+    [0.025, 0.003125], [0.00625, 0.003125], [0.003125, 0.0015625],
+    [0.0015625, 0.00078125], [0.00078125, 0.000390625],
+  ];
+  for (const [detail_m, expected_m] of rungs) {
+    assert.equal(heroGardenTerrainSample_m(detail_m), expected_m,
+      `${detail_m * 1e3} mm should derive its ground at ${expected_m * 1e3} mm`);
+  }
+  const scene = createHeroGardenHoseScene({ cellSize_m: HERO_GARDEN_CELL_M, detailCellSize_m: 0.00078125 });
+  const shape = terrainSampleShape(scene.terrain);
+  assert.ok(shape?.derived, "the finest rung must describe its ground rather than carry it");
+  assert.ok(shape!.nx * shape!.nz > MAX_TERRAIN_GRID_SAMPLES,
+    "and it must be free to be finer than any document could spell out");
+  // The whole point: the samples never reach the wire.
+  assert.ok(JSON.stringify(scene).length < 64 * 1024,
+    "a described ground keeps the whole document inside 64 KB");
+});
+
+/**
+ * A finer picture must not re-compose the set.
+ *
+ * `heroGardenWaterBelowGround_m` is a clearance in *solver* cells — a guard
+ * against a tank fill reaching the outer ground through rounding — and a dry
+ * render has no fill to round. The shore, the bedded stones, the wading path's
+ * freeboard and the plunge point are all solved against the waterline, so a
+ * document that moved it between two rungs of a resolution ladder could not be
+ * compared with itself.
+ */
+test("hero garden holds its waterline across the dry resolution ladder", () => {
+  for (const cellSize_m of [HERO_GARDEN_CELL_M, 0.0125, 0.00625, 0.003125, 0.0015625]) {
+    const scene = createHeroGardenHoseScene({ cellSize_m, detailCellSize_m: cellSize_m });
+    assert.equal(scene.container.fillFraction * HERO_GARDEN_CONTAINER.height_m, HERO_GARDEN_WATERLINE_M,
+      `a dry document at ${cellSize_m * 1e3} mm moved its own shore`);
+    assert.equal(scene.rigidBodies.length, 5, "the same five stepping discs stand in the same water");
+  }
+  // With the solver on it does move, and by the rule the constant states: 1.6
+  // cells, floored at 20 mm, so it stops moving once the floor binds at 12.5 mm.
+  assert.equal(heroGardenWaterBelowGround_m(HERO_GARDEN_CELL_M), HERO_GARDEN_WATER_BELOW_GROUND_M);
+  for (const cellSize_m of [0.0125, 0.00625, 0.003125]) {
+    assert.ok(Math.abs(heroGardenWaterBelowGround_m(cellSize_m) - 0.02) < 1e-9,
+      `the 20 mm floor must bind at ${cellSize_m * 1e3} mm cells`);
+  }
+  const wet = createHeroGardenHoseScene({ water: true, cellSize_m: 0.0125 });
+  assert.ok(wet.container.fillFraction * HERO_GARDEN_CONTAINER.height_m > HERO_GARDEN_WATERLINE_M,
+    "a finer solver lattice needs less clearance and therefore holds more water");
 });

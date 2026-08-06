@@ -24,9 +24,17 @@ import {
 } from "../lib/svo-primitive-kinds";
 import {
   packSvoDrySceneClusters,
+  packSvoDrySceneFieldPrograms,
   svoDrySceneClusterReference,
   svoDrySceneClusterResolver,
+  svoDrySceneFieldProgramReference,
+  svoDrySceneFieldProgramResolver,
 } from "../lib/webgpu-svo-dry-scene";
+import {
+  evaluateSvoFieldProgram,
+  svoFieldProgramExtent_m,
+  type SvoFieldProgram,
+} from "../lib/svo-field-program";
 
 /**
  * One representative of every kind, as a `Record` rather than a list.
@@ -38,6 +46,24 @@ import {
  * ray hit belongs to the separate heightfield tracer.
  */
 const CLUSTER_REFERENCE = svoDrySceneClusterReference(0);
+const FIELD_PROGRAM_REFERENCE = svoDrySceneFieldProgramReference(0);
+
+/**
+ * A warped sphere: the whole of op 1, and the smallest tape that is not simply a
+ * shape the ABI already has.
+ *
+ * The amplitude and frequency are chosen so the Lipschitz constant is well above
+ * one — 1 + 0.012 * 9 * 3√3 ≈ 1.56 — because a tape whose constant happened to
+ * be one would pass the march test below without exercising the division that
+ * makes the march safe at all.
+ */
+const FIELD_PROGRAM: SvoFieldProgram = Object.freeze<SvoFieldProgram>({
+  ops: [
+    { op: "domain-warp", out: 1, point: 0, seed: 0x5701_e5, parameters: { a: 0.012, b: 9 } },
+    { op: "sphere", out: 0, point: 1, parameters: { a: 0.1 } },
+  ],
+  result: 0,
+});
 
 const CLUSTER_PACKING = Object.freeze({
   // The regime `docs/HERO_GARDEN_AGGREGATE_SDF_ASSESSMENT.md` §3 measured at zero
@@ -72,6 +98,15 @@ const FIXTURES: Record<SvoPrimitiveKindName, SvoFinitePrimitiveDescriptor | null
     kind: "rounded-cylinder", primitiveId: 11, materialId: 3,
     center_m: { x: 0, y: 0, z: 0 }, radius_m: 0.08, halfHeight_m: 0.03, edgeRadius_m: 0.01,
   },
+  "field-program": {
+    kind: "field-program", primitiveId: 12, materialId: 3,
+    center_m: { x: 0, y: 0, z: 0 },
+    // Deliberately narrower than the tape needs: the ABI widens it to the
+    // derived extent, and this fixture is what proves the floor never wins.
+    envelopeRadii_m: { x: 0.1, y: 0.1, z: 0.1 },
+    fieldProgramReference: FIELD_PROGRAM_REFERENCE,
+    program: FIELD_PROGRAM,
+  },
 };
 
 /** Deterministic 32-bit generator; the oracles below must not move between runs. */
@@ -94,6 +129,7 @@ test("the kind table is frozen, its codes are stable, and the WGSL is generated 
   assert.deepEqual(SVO_PRIMITIVE_KINDS, {
     sphere: 1, box: 2, capsule: 3, cylinder: 4, ellipsoid: 5,
     terrainHeightfield: 6, torus: 7, cone: 8, smoothUnionCluster: 9, roundCone: 10, roundedCylinder: 11,
+    fieldProgram: 12,
   });
 
   for (const entry of SVO_PRIMITIVE_KIND_ENTRIES) {
@@ -290,6 +326,124 @@ test("a cluster round-trips through the record and recovers its packing from the
   // Evaluating a recovered record without a resolver is an error, not a guess.
   assert.throws(() => sampleSvoPrimitive(recovered as SvoPrimitiveDescriptor, { x: 0, y: 0, z: 0 }));
   assert.ok(sampleSvoPrimitive(recovered as SvoPrimitiveDescriptor, { x: 0, y: 0, z: 0 }, undefined, resolve).signedDistance_m < 0);
+});
+
+test("a field program round-trips through the record and recovers its tape from the arena", () => {
+  const authored = FIXTURES["field-program"]!;
+  assert.ok(authored.kind === "field-program");
+  const [recovered] = unpackSvoPrimitiveRecords(packSvoPrimitiveRecords([authored]));
+  assert.equal(recovered.kind, "field-program");
+  assert.ok(recovered.kind === "field-program");
+  // The record carries the widened box and the reference and nothing else. It
+  // must not invent a tape: a default one is the source solid with its warp
+  // dropped, which renders a plausible smooth ellipsoid nobody authored and
+  // raises nothing anywhere.
+  assert.equal(recovered.program, undefined);
+  assert.equal(recovered.fieldProgramReference, FIELD_PROGRAM_REFERENCE);
+
+  // The packed dimensions are the tape's own conservative extent, not the
+  // narrower envelope the fixture authored — that is what stops the warp being
+  // clipped out of the proxy box and the dirty region.
+  const derived = svoFieldProgramExtent_m(FIELD_PROGRAM);
+  for (const [index, axis] of (["x", "y", "z"] as const).entries()) {
+    assert.ok(derived[index] > authored.envelopeRadii_m[axis], "the fixture must exercise the widening");
+    assert.equal(recovered.envelopeRadii_m[axis], Math.fround(derived[index]));
+  }
+  // And re-canonicalizing the recovered record is a fixed point: a bound that
+  // grew on every republication would eventually swallow the scene.
+  const [again] = unpackSvoPrimitiveRecords(packSvoPrimitiveRecords([recovered]));
+  assert.ok(again.kind === "field-program");
+  assert.deepEqual(again.envelopeRadii_m, recovered.envelopeRadii_m);
+
+  // The block is a header and eight words per op, all f32 or u32, so the tape
+  // comes back at the precision the shader evaluates it at.
+  const resolve = svoDrySceneFieldProgramResolver(packSvoDrySceneFieldPrograms([FIELD_PROGRAM]));
+  const recoveredProgram = resolve(FIELD_PROGRAM_REFERENCE)!;
+  assert.ok(recoveredProgram);
+  assert.equal(recoveredProgram.result, FIELD_PROGRAM.result);
+  assert.deepEqual(recoveredProgram.ops.map((op) => op.op), FIELD_PROGRAM.ops.map((op) => op.op));
+  FIELD_PROGRAM.ops.forEach((op, index) => {
+    const recoveredOp = recoveredProgram.ops[index];
+    assert.equal(recoveredOp.out, op.out);
+    assert.equal(recoveredOp.point ?? 0, op.point ?? 0);
+    assert.equal(recoveredOp.seed ?? 0, op.seed ?? 0);
+    for (const parameter of ["a", "b", "c", "d"] as const) {
+      // Single precision, because the block is what the shader reads: an
+      // authored 0.012 is 0.012000000104308128 on both sides after the trip.
+      assert.equal(recoveredOp.parameters?.[parameter] ?? 0, Math.fround(op.parameters?.[parameter] ?? 0));
+    }
+  });
+  // The same field, to the precision the block can carry. Compared as a field
+  // rather than as parameters because that is what the four call sites this ABI
+  // has to keep in agreement actually evaluate.
+  const probe = { x: 0.03, y: -0.02, z: 0.05 };
+  assert.ok(
+    Math.abs(evaluateSvoFieldProgram(recoveredProgram, probe).distance_m
+      - evaluateSvoFieldProgram(FIELD_PROGRAM, probe).distance_m) < 1e-6,
+    "the recovered tape must describe the same field the authored one does",
+  );
+
+  // A reference that does not name a filled block resolves to nothing rather
+  // than to a zeroed tape, which would evaluate as an unauthored shape.
+  assert.equal(resolve(svoDrySceneFieldProgramReference(1)), undefined);
+  assert.equal(resolve(FIELD_PROGRAM_REFERENCE + 1), undefined);
+  assert.equal(svoDrySceneFieldProgramResolver(undefined)(FIELD_PROGRAM_REFERENCE), undefined);
+
+  // Evaluating a recovered record without a resolver is an error, not a guess.
+  assert.throws(() => sampleSvoPrimitive(recovered as SvoPrimitiveDescriptor, { x: 0, y: 0, z: 0 }));
+  assert.ok(sampleSvoPrimitive(
+    recovered as SvoPrimitiveDescriptor, { x: 0, y: 0, z: 0 }, undefined, undefined, resolve,
+  ).signedDistance_m < 0);
+});
+
+test("a field program is hit through its warp from outside and missed beside its extent", () => {
+  const program = FIXTURES["field-program"]!;
+  assert.ok(program.kind === "field-program");
+  const extent = svoPrimitiveLocalExtent_m(program);
+  const start = 4 * Math.hypot(extent.x, extent.y, extent.z);
+
+  // Every ray here aims at the centre from a different direction, so each one
+  // crosses a different part of the warped surface. What is being checked is not
+  // that the march converges — a sphere would do that — but that it converges
+  // *without stepping past* a surface an L-Lipschitz field puts closer than its
+  // own reported distance. A field-program arm returning the undivided distance
+  // fails this on the rays whose noise gradient runs against them.
+  const random = generator(0x1f12_3bb5);
+  let hits = 0;
+  for (let index = 0; index < 200; index += 1) {
+    const theta = random() * 2 * Math.PI;
+    const phi = Math.acos(2 * random() - 1);
+    const direction = {
+      x: -Math.sin(phi) * Math.cos(theta),
+      y: -Math.cos(phi),
+      z: -Math.sin(phi) * Math.sin(theta),
+    };
+    const origin = { x: -direction.x * start, y: -direction.y * start, z: -direction.z * start };
+    const hit = intersectSvoPrimitive(program, { origin_m: origin, direction });
+    assert.ok(hit, `ray ${index} missed a shape it is aimed through the middle of`);
+    hits += 1;
+    // The hit is on the surface the CPU field describes, not merely somewhere
+    // along the ray, and the normal points back the way the ray came.
+    const sample = sampleSvoPrimitive(program, hit.position_m);
+    assert.ok(Math.abs(sample.signedDistance_m) < 1e-3 * start,
+      `ray ${index} stopped ${sample.signedDistance_m} m from the surface`);
+    assert.ok(hit.normal.x * direction.x + hit.normal.y * direction.y + hit.normal.z * direction.z < 0,
+      `ray ${index} reported a back-facing normal`);
+    // A Lipschitz-safe march can only stop at or before its own zero crossing,
+    // so the hit is never inside the solid by more than the acceptance band.
+    assert.ok(sample.signedDistance_m > -1e-3 * start, `ray ${index} stopped inside the solid`);
+  }
+  assert.equal(hits, 200);
+
+  // A ray that passes outside the conservative extent must miss. The extent is
+  // the proxy box, the dirty region and the BVH leaf all at once, so a hit
+  // outside it would mean the record draws where nothing claims it can.
+  const clear = 1.5 * Math.max(extent.x, extent.y, extent.z);
+  const missed = intersectSvoPrimitive(program, {
+    origin_m: { x: -start, y: clear, z: 0 },
+    direction: { x: 1, y: 0, z: 0 },
+  });
+  assert.equal(missed, null, "a ray passing clear of the declared extent reported a hit");
 });
 
 test("the jitter cap is enforced where a scene can reach it", () => {

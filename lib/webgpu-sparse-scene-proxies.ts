@@ -3,7 +3,12 @@ import {
   SPARSE_BRICK_NO_OWNER,
   packMaterialOwner,
   sparseBrickDispatchDimensions,
+  sparseBrickSceneGeometryCodecWGSL,
+  sparseBrickBandedLeafCodecWGSL,
   type SparseBrickOctreeGPU,
+  type SparseBrickPayloadProfileName,
+  type SparseBrickSceneGeometryFormat,
+  type SparseBrickLeafPayloadMode,
 } from "./sparse-brick-octree";
 import { SVO_BRICK_LIFECYCLE, SVO_BRICK_OCCUPANCY } from "./svo-brick-occupancy";
 import type { EnvironmentProxyPrimitive } from "./voxel-environments";
@@ -15,6 +20,14 @@ import {
   type SvoSmoothUnionClusterPacking,
 } from "./svo-primitive-abi";
 import { SVO_CLUSTER_ARENA_BLOCK, packSvoClusterArena, svoClusterArenaDecodeWGSL } from "./svo-cluster-arena";
+import {
+  packSvoFieldProgramArena,
+  svoFieldProgramExtent_m,
+  svoFieldProgramWGSL,
+  SVO_FIELD_PROGRAM_BLOCK_WORDS,
+  type SvoFieldProgram,
+} from "./svo-field-program";
+import { svoProceduralNoiseWGSL } from "./svo-procedural-material";
 import type { SparseSceneTerrainField } from "./sparse-scene-terrain-field";
 import { VOXEL_MATERIAL_IDS } from "./voxel-scene";
 
@@ -66,6 +79,13 @@ export const SPARSE_SCENE_PRIMITIVE_STRIDE_BYTES = 48;
  * These three evaluate the *render ABI's own* distance (`svoPrimitiveDistance_m`),
  * against the real packing, so voxel content and drawn surface finally describe
  * the same solid.
+ *
+ * Shape 10 is there from birth rather than by repair. A field program has no
+ * cheap equivalent even in principle — its geometry *is* a tape, and the only
+ * shape a substitute could name is the conservative box the warp was authored to
+ * escape. Downgrading it would voxelize a boulder as the brick it was carved
+ * from, which is the same failure as the cluster's blob crown and would be paid
+ * by every shadow and GI ray that reads the pyramid.
  */
 export const SPARSE_SCENE_PRIMITIVE_TYPES = Object.freeze({
   box: 1,
@@ -77,6 +97,7 @@ export const SPARSE_SCENE_PRIMITIVE_TYPES = Object.freeze({
   "smooth-union-cluster": 7,
   "round-cone": 8,
   "rounded-cylinder": 9,
+  "field-program": 10,
 } as const);
 
 /**
@@ -99,9 +120,28 @@ export const SPARSE_SCENE_PRIMITIVE_TYPES = Object.freeze({
  */
 export const SPARSE_SCENE_CLUSTER_CAPACITY = 4_096;
 
-/** Type word layout: the low byte is the shape, the rest is a cluster slot. */
+/**
+ * Field-program tapes a live publication may carry.
+ *
+ * Must equal the renderer's own `SVO_DRY_SCENE_FIELD_PROGRAM_CAPACITY`, and is a
+ * separate literal for the same reason the cluster capacity above is: importing
+ * the renderer here is a module cycle. See that constant for why two hundred and
+ * fifty-six is far above what a scene wants — a tape is authored once per
+ * species and instanced, not once per record.
+ */
+export const SPARSE_SCENE_FIELD_PROGRAM_CAPACITY = 256;
+
+/**
+ * Type word layout: the low byte is the shape, the rest is an arena slot.
+ *
+ * One slot field, two arenas. A record names a block in the aggregate arena when
+ * it is a cluster and in the tape arena when it is a field program, and the
+ * shape in the low byte is what says which — so the two numberings are
+ * independent and neither costs the record a lane. A shape with no arena block
+ * leaves the field zero and never looks.
+ */
 const PRIMITIVE_TYPE_MASK = 0xff;
-const PRIMITIVE_CLUSTER_SLOT_SHIFT = 8;
+const PRIMITIVE_ARENA_SLOT_SHIFT = 8;
 
 interface SparseScenePrimitiveBase {
   center: SparseSceneVector3;
@@ -195,6 +235,21 @@ export interface SparseSceneSmoothUnionClusterPrimitive extends SparseScenePrimi
   orientation?: SparseSceneQuaternion;
 }
 
+/**
+ * A record whose geometry is a tape — the warped stone, the fractured boulder.
+ *
+ * `envelopeRadii` is the conservative box the render ABI derives from the tape,
+ * so nothing about dirty regions, binning or topology has to know a tape exists.
+ * Only the per-voxel distance changes, and it changes from "the whole box is
+ * solid" to what the renderer draws.
+ */
+export interface SparseSceneFieldProgramPrimitive extends SparseScenePrimitiveBase {
+  kind: "field-program";
+  envelopeRadii: SparseSceneVector3;
+  program: SvoFieldProgram;
+  orientation?: SparseSceneQuaternion;
+}
+
 export type SparseScenePrimitive =
   | SparseSceneBoxPrimitive
   | SparseSceneCylinderPrimitive
@@ -204,14 +259,16 @@ export type SparseScenePrimitive =
   | SparseSceneConePrimitive
   | SparseSceneRoundConePrimitive
   | SparseSceneRoundedCylinderPrimitive
-  | SparseSceneSmoothUnionClusterPrimitive;
+  | SparseSceneSmoothUnionClusterPrimitive
+  | SparseSceneFieldProgramPrimitive;
 
 /** The kinds this pass evaluates through the render ABI rather than its own SDF library. */
 export function sparseSceneAbiTruePrimitive(
   primitive: SparseScenePrimitive,
-): primitive is SparseSceneRoundConePrimitive | SparseSceneRoundedCylinderPrimitive | SparseSceneSmoothUnionClusterPrimitive {
+): primitive is SparseSceneRoundConePrimitive | SparseSceneRoundedCylinderPrimitive
+  | SparseSceneSmoothUnionClusterPrimitive | SparseSceneFieldProgramPrimitive {
   return primitive.kind === "round-cone" || primitive.kind === "rounded-cylinder"
-    || primitive.kind === "smooth-union-cluster";
+    || primitive.kind === "smooth-union-cluster" || primitive.kind === "field-program";
 }
 
 /**
@@ -223,8 +280,9 @@ export function sparseSceneAbiTruePrimitive(
  * own packed word and never reads them back through the ABI.
  */
 function abiDescriptorForPrimitive(
-  primitive: SparseSceneRoundConePrimitive | SparseSceneRoundedCylinderPrimitive | SparseSceneSmoothUnionClusterPrimitive,
-  clusterReference = 0,
+  primitive: SparseSceneRoundConePrimitive | SparseSceneRoundedCylinderPrimitive
+    | SparseSceneSmoothUnionClusterPrimitive | SparseSceneFieldProgramPrimitive,
+  arenaReference = 0,
 ): SvoPrimitiveDescriptor {
   const [x, y, z, w] = normalizedQuaternion(primitive.orientation);
   const identity = {
@@ -246,10 +304,18 @@ function abiDescriptorForPrimitive(
       radius_m: primitive.radius, halfHeight_m: primitive.halfHeight, edgeRadius_m: primitive.edgeRadius,
     };
   }
+  if (primitive.kind === "field-program") {
+    return {
+      ...identity, kind: "field-program",
+      envelopeRadii_m: { x: primitive.envelopeRadii[0], y: primitive.envelopeRadii[1], z: primitive.envelopeRadii[2] },
+      fieldProgramReference: arenaReference,
+      program: primitive.program,
+    };
+  }
   return {
     ...identity, kind: "smooth-union-cluster",
     lobeRadii_m: { x: primitive.lobeRadii[0], y: primitive.lobeRadii[1], z: primitive.lobeRadii[2] },
-    clusterReference,
+    clusterReference: arenaReference,
     packing: primitive.packing,
   };
 }
@@ -302,6 +368,20 @@ export function sparseScenePrimitiveForSvoDescriptor(descriptor: SvoPrimitiveDes
       packing: descriptor.packing,
     };
   }
+  // A tape voxelizes as the field the renderer draws, for the reason above and
+  // one more: the conservative box a field program declares is its *bound*, not
+  // a shape anybody authored, so substituting it is not even the coarse-but-
+  // recognisable trade the envelope was.
+  if (descriptor.kind === "field-program") {
+    if (!descriptor.program) {
+      throw new RangeError("A live field-program primitive must carry its tape; an unresolved program has no shape");
+    }
+    return {
+      ...base, kind: "field-program",
+      envelopeRadii: [descriptor.envelopeRadii_m.x, descriptor.envelopeRadii_m.y, descriptor.envelopeRadii_m.z],
+      program: descriptor.program,
+    };
+  }
   return { ...base, kind: "ellipsoid", radii: [descriptor.radii_m.x, descriptor.radii_m.y, descriptor.radii_m.z] };
 }
 
@@ -345,6 +425,17 @@ export function sparseScenePrimitiveForProxy(
       lobeRadii: [proxy.radius_m.x, proxy.radius_m.y, proxy.radius_m.z], packing: proxy.packing,
     };
   }
+  // A tape voxelizes as the field the renderer draws, for the reason above and
+  // the extra one `sparseScenePrimitiveForSvoDescriptor` gives: the conservative
+  // box is a *bound*, not a shape anybody authored, so substituting it is not
+  // even the coarse-but-recognisable trade the cluster's envelope was.
+  if (proxy.kind === "field-program") {
+    return {
+      ...base, kind: "field-program",
+      envelopeRadii: [proxy.halfExtent_m.x, proxy.halfExtent_m.y, proxy.halfExtent_m.z],
+      program: proxy.program,
+    };
+  }
   return { ...base, kind: "ellipsoid", radii: [proxy.radius_m.x, proxy.radius_m.y, proxy.radius_m.z] };
 }
 
@@ -370,6 +461,15 @@ export interface SparseSceneProxyVoxelizerOptions {
   candidatesPerDirtyBrick: number;
   /** Fixed aggregate-packing arena capacity; defaults to {@link SPARSE_SCENE_CLUSTER_CAPACITY}. */
   clusterCapacity?: number;
+  /**
+   * Fixed field-program tape arena capacity, or zero for a world with no tapes.
+   *
+   * Zero by default and for the same reason the aggregate arena is: a world with
+   * no field programs should not carry their arena, and a caller that publishes
+   * one without asking for the capacity is refused loudly in `publish` rather
+   * than voxelizing nothing.
+   */
+  fieldProgramCapacity?: number;
   /**
    * Coarse spatial index over the authored records, and the dirty-region brick
    * lattice invalidation is dispatched over.
@@ -468,8 +568,16 @@ export const SPARSE_SCENE_MAINTENANCE_STATE_WORDS = Object.freeze({
   binDispatch: 8,
   rebuildDispatch: 11,
   finalizeDispatch: 14,
+  /**
+   * One workgroup a dirty brick, for the banded leaf encoder. Zero on `dense`.
+   *
+   * Placed *contiguously* after the other three, because all four indirect
+   * argument triples are copied to the dispatch buffer in one
+   * `copyBufferToBuffer` whose offsets are differences from `binDispatch`.
+   */
+  bandDispatch: 17,
   /** Dirty bricks already repaired by earlier chunks of this revision. */
-  chunkCursor: 17,
+  chunkCursor: 20,
   /**
    * The busiest brick's candidate count this revision, capped or not.
    *
@@ -478,8 +586,8 @@ export const SPARSE_SCENE_MAINTENANCE_STATE_WORDS = Object.freeze({
    * brick binds 442 against 64 slots and most of its geometry is missing from
    * the opacity pyramid". A lane cannot ask for headroom it cannot see.
    */
-  maximumBrickCandidates: 18,
-  wordCount: 20,
+  maximumBrickCandidates: 21,
+  wordCount: 24,
 } as const);
 
 /**
@@ -660,6 +768,19 @@ function primitiveExtent(primitive: SparseScenePrimitive): SparseSceneVector3 {
   if (primitive.kind === "smooth-union-cluster") {
     positiveVector(primitive.lobeRadii, "Cluster envelope radii");
     return primitive.lobeRadii;
+  }
+  if (primitive.kind === "field-program") {
+    positiveVector(primitive.envelopeRadii, "Field-program envelope radii");
+    // The render ABI owns the containment argument, so the bound this pass
+    // publishes is the one it derives from the tape rather than the authored
+    // floor. A narrower bound here would drop the warped surface out of
+    // invalidation and out of the opacity pyramid without any error.
+    const extent = svoFieldProgramExtent_m(primitive.program);
+    return [
+      Math.max(primitive.envelopeRadii[0], extent[0]),
+      Math.max(primitive.envelopeRadii[1], extent[1]),
+      Math.max(primitive.envelopeRadii[2], extent[2]),
+    ];
   }
   positiveVector(primitive.radii, "Ellipsoid radii");
   return primitive.radii;
@@ -930,6 +1051,36 @@ export function packSparseSceneClusterArena(
 }
 
 /**
+ * Slot each field program's tape will occupy in its own companion arena.
+ *
+ * Numbered independently of the cluster slots above, because the two arenas are
+ * separate and the shape in the record's type byte is what selects between them.
+ */
+export function sparseSceneFieldProgramSlots(primitives: readonly SparseScenePrimitive[]): readonly number[] {
+  let next = 0;
+  return primitives.map((primitive) => (primitive.kind === "field-program" ? next++ : -1));
+}
+
+/** Tapes of a publication, in the order `sparseSceneFieldProgramSlots` assigns. */
+export function sparseSceneFieldPrograms(
+  primitives: readonly SparseScenePrimitive[],
+): readonly SvoFieldProgram[] {
+  return primitives.flatMap((primitive) => (primitive.kind === "field-program" ? [primitive.program] : []));
+}
+
+/** The companion arena a publication's field programs are evaluated against. */
+export function packSparseSceneFieldProgramArena(
+  primitives: readonly SparseScenePrimitive[],
+  capacity = SPARSE_SCENE_FIELD_PROGRAM_CAPACITY,
+): Uint32Array<ArrayBuffer> {
+  const programs = sparseSceneFieldPrograms(primitives);
+  if (programs.length > capacity) {
+    throw new RangeError(`Live scene publishes ${programs.length} field programs, above the arena's ${capacity}`);
+  }
+  return packSvoFieldProgramArena(programs, capacity);
+}
+
+/**
  * Pack three vec4 words per primitive. The fourth lane of the first two vec4s
  * is bitcast on GPU to preserve exact type and material/owner integer identity:
  * `{ center.xyz, type }, { extent.xyz, packedIdentity }, { quaternion.xyzw }`.
@@ -945,6 +1096,7 @@ export function packSparseScenePrimitives(primitives: readonly SparseScenePrimit
   const words = new Uint32Array(new ArrayBuffer(primitives.length * SPARSE_SCENE_PRIMITIVE_STRIDE_BYTES));
   const floats = new Float32Array(words.buffer);
   const clusterSlots = sparseSceneClusterSlots(primitives);
+  const fieldProgramSlots = sparseSceneFieldProgramSlots(primitives);
   for (let index = 0; index < primitives.length; index += 1) {
     const primitive = primitives[index];
     finiteVector(primitive.center, "Primitive center");
@@ -952,10 +1104,18 @@ export function packSparseScenePrimitives(primitives: readonly SparseScenePrimit
     const extent = primitiveExtent(primitive);
     const orientation = normalizedQuaternion(primitive.orientation);
     const base = index * (SPARSE_SCENE_PRIMITIVE_STRIDE_BYTES / 4);
-    const slot = clusterSlots[index];
-    if (slot >= SPARSE_SCENE_CLUSTER_CAPACITY) throw new RangeError("Live scene aggregate arena capacity exceeded");
+    const clusterSlot = clusterSlots[index];
+    const fieldProgramSlot = fieldProgramSlots[index];
+    if (clusterSlot >= SPARSE_SCENE_CLUSTER_CAPACITY) throw new RangeError("Live scene aggregate arena capacity exceeded");
+    if (fieldProgramSlot >= SPARSE_SCENE_FIELD_PROGRAM_CAPACITY) {
+      throw new RangeError("Live scene field-program arena capacity exceeded");
+    }
+    // At most one of the two is non-negative: a shape is a cluster, a field
+    // program, or neither, and the type byte beside the slot says which arena
+    // the number indexes.
+    const slot = Math.max(clusterSlot, fieldProgramSlot);
     floats.set(primitive.center, base);
-    words[base + 3] = primitiveType(primitive) | (slot < 0 ? 0 : slot << PRIMITIVE_CLUSTER_SLOT_SHIFT);
+    words[base + 3] = primitiveType(primitive) | (slot < 0 ? 0 : slot << PRIMITIVE_ARENA_SLOT_SHIFT);
     floats.set(extent, base + 4);
     words[base + 7] = packMaterialOwner(primitive.materialId, primitive.ownerId);
     floats.set(orientation, base + 8);
@@ -1059,7 +1219,8 @@ export function sparseScenePrimitiveSignedDistance(
     const descriptor = abiDescriptorForPrimitive(primitive);
     return sampleSvoPrimitive(descriptor, { x: worldPoint[0], y: worldPoint[1], z: worldPoint[2] },
       undefined,
-      primitive.kind === "smooth-union-cluster" ? () => primitive.packing : undefined).signedDistance_m;
+      primitive.kind === "smooth-union-cluster" ? () => primitive.packing : undefined,
+      primitive.kind === "field-program" ? () => primitive.program : undefined).signedDistance_m;
   }
   positiveVector(primitive.radii, "Ellipsoid radii");
   return ellipsoidDistance(local, primitive.radii);
@@ -1159,8 +1320,100 @@ export function sampleSparseScenePrimitiveCell(
  * bricks. All variable-length records share one fixed arena to stay below the
  * portable storage-binding limit.
  */
-export const sparseSceneProxyVoxelizationShader = /* wgsl */ `
-${svoPrimitiveWGSL}
+/**
+ * The scene voxeliser, parameterised by the world's payload profile.
+ *
+ * Only two things move between profiles. The scene geometry lane is four
+ * channels wide on `full` and two on `dry` — this pass writes exactly channels
+ * 1 and 2 either way, so the stride changes and the meaning does not. And
+ * `finalizeDirtyBricks` unions the scene and fluid material words when deciding
+ * brick occupancy; a dry world has no fluid word, so that read is compiled out
+ * rather than pointed at the absent-lane page.
+ *
+ * A dry world may additionally narrow the two surviving channels — see
+ * {@link SparseBrickSceneGeometryFormat}. No surviving geometry arm changes how
+ * this pass *writes*; each emits the text it emitted before formats existed, to the
+ * character. What does share a word is the **occupancy mask**, which puts 32 voxels
+ * in one, so the store becomes bit-disjoint atomics and the payload binding becomes
+ * atomic with it — keyed on the payload mode, not the geometry format.
+ */
+export function sparseSceneProxyVoxelizationShaderFor(
+  profile: SparseBrickPayloadProfileName = "full",
+  sceneGeometryFormat: SparseBrickSceneGeometryFormat = "f32x2",
+  leafPayloadMode: SparseBrickLeafPayloadMode = "dense",
+): string {
+  const dry = profile === "dry";
+  const format = dry ? sceneGeometryFormat : "f32x2";
+  const mode = dry ? leafPayloadMode : "dense";
+  // A payload word shared by more than one invocation of this dispatch needs an
+  // atomic binding. Atomicity used to be keyed on the geometry format as well,
+  // which was sound only while a two-voxels-a-word geometry lane existed; the
+  // occupancy mask puts 32 voxels in one word at every geometry width, so the
+  // payload mode is now the whole question.
+  const sharedWord = mode !== "dense";
+  const payloadType = sharedWord ? "array<atomic<u32>>" : "array<u32>";
+  const readPayload = (index: string) => sharedWord ? `atomicLoad(&payload[${index}])` : `payload[${index}]`;
+  const writePayload = (index: string, value: string) =>
+    sharedWord ? `atomicStore(&payload[${index}],${value});` : `payload[${index}]=${value};`;
+  const sceneStride = dry ? "2u" : "4u";
+  const sceneDistance = dry ? "geometryBase" : "geometryBase+1u";
+  const sceneFraction = dry ? "geometryBase+1u" : "geometryBase+2u";
+  const fluidMaterial = dry ? "0u" : `${readPayload("controlLoad(18u)+voxelOffset+localIndex")}&0xffffu`;
+  // The two word-per-voxel arms write through `writePayload` because *another*
+  // lane may have made the binding atomic: an occupancy mask puts 32 voxels in one
+  // word at every geometry width, so atomicity is no longer a property of this
+  // lane's own packing. The `dense` expansion is unchanged to the character.
+  const sceneGeometryStore = format === "f32x2"
+    ? /* wgsl */ `  let geometryBase = sceneGeometryOffset() + output * ${sceneStride};
+  ${writePayload(sceneDistance, "bitcast<u32>(bestDistance)")}
+  ${writePayload(sceneFraction, "bitcast<u32>(primitiveFraction)")}`
+    : format === "f16-unorm8"
+      ? /* wgsl */ `  ${writePayload("sceneGeometryWord(sceneGeometryOffset(),output)",
+        "packSceneGeometry(bestDistance,primitiveFraction,cellRadius)")}`
+      : /* wgsl */ `  // Two voxels share this word. The neighbour is another invocation of this
+  // dispatch, so the half is cleared and set with bit-disjoint atomics: a plain
+  // read-modify-write would drop one of the two.
+  let geometryWord = sceneGeometryWord(sceneGeometryOffset(),output);
+  atomicAnd(&payload[geometryWord],~sceneGeometryMask(output));
+  atomicOr(&payload[geometryWord],
+    packSceneGeometry(bestDistance,primitiveFraction,cellRadius)<<sceneGeometryShift(output));`;
+  // The occupancy bit is written where the identity used to be *inferred*. Two
+  // bit-disjoint atomics rather than one store, because 32 voxels share this word
+  // and 31 of them are other invocations: clear-then-set is idempotent across
+  // rebuilds and cannot drop a neighbour the way a read-modify-write would.
+  const occupancyStore = mode === "dense" ? "" : /* wgsl */ `  let occupancyWord = bandedOccupancyWord(output);
+  atomicAnd(&payload[occupancyWord],~bandedVoxelBit(output));
+  if(primitiveFraction>0.0){atomicOr(&payload[occupancyWord],bandedVoxelBit(output));}`;
+  // `finalizeDirtyBricks` summarises a leaf's occupancy for the macro-HDDA tier,
+  // and it is the site the predicate move is *gated* on: the summary reaches the
+  // primary, so a frame hash that holds proves the bit and the identity test are
+  // the same predicate over the same data.
+  const sceneOccupied = mode === "dense"
+    ? `${readPayload("sceneMaterialOffset()+voxelOffset+localIndex")}&0xffffu`
+    : "select(0u,1u,bandedOccupied(voxelOffset+localIndex))";
+  const bandedCodec = mode === "dense" ? "" : sparseBrickBandedLeafCodecWGSL({
+    occupancyBase: "params.banded.x", recordMaskBase: "params.banded.y",
+    headerBase: "params.banded.z", blobBase: "params.banded.w",
+    recordsBase: "params.bandedCapacities.w",
+    load: (index) => `atomicLoad(&payload[${index}])`,
+    mode,
+  });
+  const bandedEncoder = mode === "banded" ? bandedLeafEncoderWGSL() : "";
+  // The bump allocator resets when a revision rebuilds *every* leaf, because every
+  // allocation it holds is about to be reissued. A partial rebuild deliberately
+  // does not reset: the previous block is still addressed by leaves this chunk is
+  // not touching, so reuse would corrupt them, and the leak shows up as the
+  // high-water mark climbing until the overflow flag fires. Recompacting on the
+  // topology epoch — which `BRICK_RELOCATING` already contemplates — is the fix,
+  // and it is a follow-up rather than a hidden failure.
+  const bandedAllocatorReset = mode !== "banded" ? "" : /* wgsl */ `
+  if(cursor==0u&&dirtyCount>=controlLoad(1u)){
+    atomicStore(&payload[params.banded.w],0u);
+    atomicStore(&payload[params.banded.w+1u],0u);
+    atomicStore(&payload[params.banded.w+2u],0u);
+    atomicStore(&payload[params.banded.w+3u],0u);
+  }`;
+  return /* wgsl */ `
 struct ScenePrimitive {
   centerType: vec4f,
   extentIdentity: vec4f,
@@ -1173,12 +1426,17 @@ struct Params {
   capacities: vec4u,
   offsets: vec4u,
   lanes: vec4u,
+  banded: vec4u,
+  bandedCapacities: vec4u,
 }
 @group(0) @binding(0) var<storage, read_write> structure: array<atomic<u32>>;
-@group(0) @binding(1) var<storage, read_write> payload: array<u32>;
+@group(0) @binding(1) var<storage, read_write> payload: ${payloadType};
 @group(0) @binding(2) var<storage, read> primitives: array<ScenePrimitive>;
 @group(0) @binding(3) var<storage, read_write> maintenance: array<atomic<u32>>;
 @group(0) @binding(4) var<uniform> params: Params;
+${sparseBrickSceneGeometryCodecWGSL(format)}
+${bandedCodec}
+${bandedEncoder}
 
 const BRICK_ACTIVE:u32=${SVO_BRICK_LIFECYCLE.activeBit}u;
 const BRICK_DIRTY:u32=${SVO_BRICK_LIFECYCLE.dirtyBit}u;
@@ -1225,7 +1483,21 @@ fn loadArenaWord(word:u32)->u32{return atomicLoad(&maintenance[word]);}
 // bindings and a fixed 96-byte uniform, and neither ceiling is worth breaking
 // for two integers.
 fn clusterArenaOffset()->u32{return params.offsets.w;}
-fn clusterArenaCapacity()->u32{return params.lanes.w;}
+// Two capacities in one lane, because there is no spare one and growing the
+// fixed 96-byte uniform for a second integer is a worse trade than a mask. Both
+// arenas are fixed-capacity and neither reaches 65 536 blocks, which is checked
+// on the CPU rather than assumed here.
+fn clusterArenaCapacity()->u32{return params.lanes.w&0xffffu;}
+fn fieldProgramArenaCapacity()->u32{return params.lanes.w>>16u;}
+/**
+ * The tape arena sits immediately after the aggregate arena, derived rather than
+ * transmitted — the same arrangement \`indexHeaderOffset\` already uses, and for
+ * the same reason: an offset that is subtracted out of the allocation cannot
+ * disagree with it, while one that had to be transmitted could.
+ */
+fn fieldProgramArenaOffset()->u32{
+  return clusterArenaOffset()+clusterArenaCapacity()*${SVO_CLUSTER_ARENA_BLOCK.strideWords}u;
+}
 // The last two spare uniform lanes. Everything the record index needs beyond
 // these is derived from offsets the block already carries, or read from the
 // index header block below, so the index costs the uniform nothing.
@@ -1242,7 +1514,7 @@ fn maintenanceFlags()->u32{return bitcast<u32>(params.cell.w);}
  * allocation; one that is subtracted out of the allocation cannot.
  */
 fn indexHeaderOffset()->u32{
-  return clusterArenaOffset()+clusterArenaCapacity()*${SVO_CLUSTER_ARENA_BLOCK.strideWords}u;
+  return fieldProgramArenaOffset()+fieldProgramArenaCapacity()*${SVO_FIELD_PROGRAM_BLOCK_WORDS}u;
 }
 fn indexWord(word:u32)->u32{return loadArenaWord(indexHeaderOffset()+word);}
 fn indexFloat(word:u32)->f32{return bitcast<f32>(indexWord(word));}
@@ -1343,6 +1615,25 @@ fn leafAtBrickCoordinate(coordinate:vec3u)->u32{
 fn dirtyBrickTotal()->u32{return min(atomicLoad(&maintenance[stateOffset()]),dirtyBrickCapacity());}
 fn chunkBegin()->u32{return atomicLoad(&maintenance[stateOffset()+CHUNK_BEGIN]);}
 fn chunkEnd()->u32{return atomicLoad(&maintenance[stateOffset()+CHUNK_END]);}
+// The shared render ABI, spliced here rather than at the top of the module
+// because both arena decodes below read through \`loadArenaWord\`, which needs the
+// maintenance binding and the params block above — and because the ABI's own
+// field-program hook has to be declared before it.
+${svoProceduralNoiseWGSL}
+${svoFieldProgramWGSL({
+  functionName: "sceneFieldProgramBlock",
+  loadWord: "loadArenaWord",
+  baseWordExpression: "fieldProgramArenaOffset()",
+  capacityExpression: "fieldProgramArenaCapacity()",
+})}
+// This pass owns its own arena, so its records name a tape by *slot* rather than
+// by the word offset the renderer's records carry. That is the whole point of
+// the hook being host-supplied: the ABI reads the reference the host published
+// and asks the host what it means.
+fn svoFieldProgramReferenceSample(reference:u32,localPoint:vec3f)->SvoFieldValue{
+  return sceneFieldProgramBlock(reference,localPoint);
+}
+${svoPrimitiveWGSL}
 ${svoClusterArenaDecodeWGSL({
   functionName: "sceneClusterPacking",
   loadWord: "loadArenaWord",
@@ -1423,21 +1714,24 @@ fn ellipsoidDistance(point: vec3f, radii: vec3f) -> f32 {
 fn scenePrimitiveType(primitive: ScenePrimitive) -> u32 {
   return bitcast<u32>(primitive.centerType.w) & ${PRIMITIVE_TYPE_MASK}u;
 }
-fn scenePrimitiveClusterSlot(primitive: ScenePrimitive) -> u32 {
-  return bitcast<u32>(primitive.centerType.w) >> ${PRIMITIVE_CLUSTER_SLOT_SHIFT}u;
+fn scenePrimitiveArenaSlot(primitive: ScenePrimitive) -> u32 {
+  return bitcast<u32>(primitive.centerType.w) >> ${PRIMITIVE_ARENA_SLOT_SHIFT}u;
 }
 /**
- * The three kinds with no cheap conservative equivalent, as the render ABI's
- * own record. Built here rather than stored, because the voxelizer's record is
- * a third the size and the two lanes that differ — the identity word and the
+ * The kinds with no cheap conservative equivalent, as the render ABI's own
+ * record. Built here rather than stored, because the voxelizer's record is a
+ * third the size and the two lanes that differ — the identity word and the
  * arena reference — are exactly the two this pass owns differently.
+ *
+ * The reference lands in word 13 exactly where the ABI expects it, carrying this
+ * pass's own convention: a slot, which is what its host hook above resolves.
  */
 fn scenePrimitiveAbiRecord(primitive: ScenePrimitive, kind: u32) -> SvoPrimitiveRecord {
   return SvoPrimitiveRecord(
     vec4u(bitcast<vec3u>(primitive.centerType.xyz), kind),
     vec4u(bitcast<vec3u>(primitive.extentIdentity.xyz), bitcast<u32>(primitive.extentIdentity.w)),
     primitive.rotation,
-    vec4u(0u, 0u, 0u, 0u));
+    vec4u(0u, scenePrimitiveArenaSlot(primitive), 0u, 0u));
 }
 fn primitiveDistance(primitive: ScenePrimitive, world: vec3f) -> f32 {
   let primitiveType = scenePrimitiveType(primitive);
@@ -1449,12 +1743,20 @@ fn primitiveDistance(primitive: ScenePrimitive, world: vec3f) -> f32 {
   if (primitiveType == 4u) { return capsuleDistance(local, primitive.extentIdentity.x, primitive.extentIdentity.y); }
   if (primitiveType == 5u) { return torusDistance(local, primitive.extentIdentity.x, primitive.extentIdentity.y); }
   if (primitiveType == 6u) { return coneDistance(local, primitive.extentIdentity.x, primitive.extentIdentity.y, primitive.extentIdentity.z); }
-  // Shapes 7-9 are the render ABI's, evaluated by the render ABI. Terrain height
+  // Shapes 7-10 are the render ABI's, evaluated by the render ABI. Terrain height
   // is unreachable here: a heightfield is not a finite live primitive and the
   // adapters refuse it before it can be packed.
   if (primitiveType == ${SPARSE_SCENE_PRIMITIVE_TYPES["smooth-union-cluster"]}u) {
     return svoPrimitiveDistance_m(scenePrimitiveAbiRecord(primitive, SVO_KIND_SMOOTH_UNION_CLUSTER), world, 0.0,
-      sceneClusterPacking(scenePrimitiveClusterSlot(primitive)));
+      sceneClusterPacking(scenePrimitiveArenaSlot(primitive)));
+  }
+  // The ABI's arm already divides by the tape's Lipschitz constant, so what comes
+  // back is a 1-Lipschitz lower bound like every other shape here — which is
+  // exactly what the centre-sample occupancy argument and the corner sweep below
+  // are built on. See svoFieldProgramDistance_m in lib/svo-primitive-abi.ts.
+  if (primitiveType == ${SPARSE_SCENE_PRIMITIVE_TYPES["field-program"]}u) {
+    return svoPrimitiveDistance_m(scenePrimitiveAbiRecord(primitive, SVO_KIND_FIELD_PROGRAM), world, 0.0,
+      svoInvalidClusterPacking());
   }
   if (primitiveType == ${SPARSE_SCENE_PRIMITIVE_TYPES["round-cone"]}u) {
     return svoPrimitiveDistance_m(scenePrimitiveAbiRecord(primitive, SVO_KIND_ROUND_CONE), world, 0.0,
@@ -1474,7 +1776,7 @@ fn primitiveDistance(primitive: ScenePrimitive, world: vec3f) -> f32 {
 fn primitiveFeatureRadius(primitive: ScenePrimitive) -> f32 {
   if (scenePrimitiveType(primitive) != ${SPARSE_SCENE_PRIMITIVE_TYPES["smooth-union-cluster"]}u) { return 1e20; }
   return svoClusterFeatureRadius_m(primitive.extentIdentity.xyz,
-    sceneClusterPacking(scenePrimitiveClusterSlot(primitive)));
+    sceneClusterPacking(scenePrimitiveArenaSlot(primitive)));
 }
 /**
  * Nearest solid this primitive puts anywhere in the cell, not just at its
@@ -1611,6 +1913,9 @@ fn prepareMaintenanceDispatch(){
   let brickSize=controlLoad(11u);
   writeDispatch(stateOffset()+${SPARSE_SCENE_MAINTENANCE_STATE_WORDS.rebuildDispatch}u,chunk*brickSize*brickSize*brickSize,256u);
   writeDispatch(stateOffset()+${SPARSE_SCENE_MAINTENANCE_STATE_WORDS.finalizeDispatch}u,chunk,64u);
+  // One workgroup a dirty brick: the banded encoder's reductions are whole-leaf,
+  // so a leaf cannot be split across workgroups.
+  writeDispatch(stateOffset()+${SPARSE_SCENE_MAINTENANCE_STATE_WORDS.bandDispatch}u,chunk,1u);${bandedAllocatorReset}
   // Only invalidation has run at this point, so the mask can only be carrying
   // DIRTY_BRICK_OVERFLOW here; it is spelled the same way as the two later
   // stores so the completion rule has exactly one form in this shader.
@@ -1783,15 +2088,14 @@ fn rebuildDirtyBrickPayload(@builtin(global_invocation_id) gid:vec3u,@builtin(nu
   }
 
   let output = voxelOffset + localIndex;
-  let geometryBase = sceneGeometryOffset() + output * 4u;
   let materialOffset = sceneMaterialOffset() + output;
   let primitiveFraction = clamp(0.5 - bestCoverage / (2.0 * cellRadius), 0.0, 1.0);
   // The scene lane is exclusively owned by this transaction. Fluid and
   // velocity live in disjoint payload lanes, so every material ID—including
   // terrain and rigid-body IDs below the scenery range—can update atomically.
-  payload[geometryBase+1u]=bitcast<u32>(bestDistance);
-  payload[geometryBase+2u]=bitcast<u32>(primitiveFraction);
-  payload[materialOffset]=select(NO_MATERIAL_OWNER,bestIdentity,primitiveFraction>0.0);
+${sceneGeometryStore}
+${occupancyStore}
+  ${writePayload("materialOffset", "select(NO_MATERIAL_OWNER,bestIdentity,primitiveFraction>0.0)")}
 }
 
 @compute @workgroup_size(64)
@@ -1825,8 +2129,8 @@ fn finalizeDirtyBricks(@builtin(global_invocation_id) gid:vec3u,@builtin(num_wor
     var maximum=vec3u(0u);
     var occupied=false;
     for(var localIndex=0u;localIndex<512u;localIndex+=1u){
-      let sceneMaterial=payload[sceneMaterialOffset()+voxelOffset+localIndex]&0xffffu;
-      let fluidMaterial=payload[controlLoad(18u)+voxelOffset+localIndex]&0xffffu;
+      let sceneMaterial=${sceneOccupied};
+      let fluidMaterial=${fluidMaterial};
       if(sceneMaterial==0u&&fluidMaterial==0u){continue;}
       let local=vec3u(localIndex&7u,(localIndex>>3u)&7u,localIndex>>6u);
       minimum=min(minimum,local);maximum=max(maximum,local);
@@ -1854,6 +2158,269 @@ fn finalizeDirtyBricks(@builtin(global_invocation_id) gid:vec3u,@builtin(num_wor
   }
 }
 `;
+}
+
+function bandedLeafEncoderWGSL(): string {
+  return /* wgsl */ `
+/**
+ * The banded leaf encoder, one workgroup a leaf.
+ *
+ * \`lib/svo-banded-leaf-payload.ts\` is the executable spec this mirrors, and
+ * \`encodeBandedLeaf\` is the function to read alongside it: same occupancy
+ * predicate, same band, same stencil dilation, same index-width ladder, same
+ * prefix-popcount addressing.
+ *
+ * Two structural choices worth stating, because both were the alternative's
+ * failure mode rather than a preference.
+ *
+ * **One workgroup owns a whole leaf.** \`rebuildDirtyBrickPayload\` runs 512 voxels
+ * across two workgroups, and no part of this encoding is expressible that way: the
+ * band's stencil dilation, the leaf palette, the index ranks and the record ranks
+ * are all whole-leaf reductions. Owning the leaf also removes every atomic from
+ * the mask writes — 32 voxels share a mask word and all 32 are lanes of this
+ * workgroup, so the word is assembled in workgroup storage and stored once.
+ *
+ * **It reads the dense lanes back rather than re-voxelising.** The distance and
+ * fraction it stores are then bit-identical to what the dense lane holds, which is
+ * what makes the cross-decode a proof rather than a comparison of two
+ * quantisations. It also means the band predicate is computed from the *stored*
+ * fraction, so the encoder and every reader agree about which voxels are band —
+ * a voxel whose true coverage is 0.999 stores 255/255, reads back as 1.0, and is
+ * correctly not a band voxel on both sides. Re-voxelising here would have had to
+ * reproduce that rounding to stay consistent.
+ *
+ * The cost of reading them back is that this pass cannot run in the product shape,
+ * where the dense lanes are gone. Fusing it into \`rebuildDirtyBrickPayload\` — same
+ * arithmetic, staged in the workgroup storage this pass already declares — is the
+ * remaining writer work and adds no new algorithm.
+ */
+const BANDED_ENCODE_VOXELS:u32=512u;
+const BANDED_ENCODE_MASK_WORDS:u32=16u;
+const BANDED_PALETTE_LIMIT:u32=256u;
+const BANDED_RECORD_OVERFLOW:u32=1u;
+const BANDED_BLOB_OVERFLOW:u32=2u;
+const BANDED_PALETTE_OVERFLOW:u32=4u;
+
+var<workgroup> ldsOcc:array<atomic<u32>,16>;
+var<workgroup> ldsBand:array<atomic<u32>,16>;
+var<workgroup> ldsRec:array<atomic<u32>,16>;
+/** The dense geometry word per voxel, so the record write needs no second load. */
+var<workgroup> ldsGeometry:array<u32,512>;
+/**
+ * The packed identity per voxel on the way in, and the leaf-palette *entry* on the
+ * way out. Overwritten in place by the serial palette pass, which consumes index
+ * \`i\` before it writes index \`i\` and never reads an index it has already written.
+ */
+var<workgroup> ldsIdentity:array<u32,512>;
+var<workgroup> ldsPalette:array<u32,256>;
+var<workgroup> ldsIndex:array<u32,128>;
+/** paletteCount, occupied, indexBits, recordCount, recordBase, blobBase, indexWords, abort. */
+var<workgroup> ldsMeta:array<u32,8>;
+
+fn bandedAllocRecordCursor()->u32{return params.banded.w;}
+fn bandedAllocBlobCursor()->u32{return params.banded.w+1u;}
+fn bandedAllocFlags()->u32{return params.banded.w+2u;}
+fn bandedAllocLeafCount()->u32{return params.banded.w+3u;}
+fn bandedRecordCapacity()->u32{return params.bandedCapacities.x;}
+fn bandedBlobWordCapacity()->u32{return params.bandedCapacities.y;}
+
+fn ldsOccBit(i:u32)->bool{return (atomicLoad(&ldsOcc[i>>5u])&(1u<<(i&31u)))!=0u;}
+fn ldsBandBit(i:u32)->bool{return (atomicLoad(&ldsBand[i>>5u])&(1u<<(i&31u)))!=0u;}
+fn ldsRecBit(i:u32)->bool{return (atomicLoad(&ldsRec[i>>5u])&(1u<<(i&31u)))!=0u;}
+
+/** The narrowest index width that addresses \`entries\` leaf-palette slots. */
+fn bandedIndexBitsFor(entries:u32)->u32{
+  if(entries<=1u){return 0u;}
+  if(entries<=2u){return 1u;}
+  if(entries<=4u){return 2u;}
+  if(entries<=16u){return 4u;}
+  return 8u;
+}
+
+/** Set bits of this leaf's record mask before \`local\`, from workgroup storage. */
+fn ldsRecordRank(local:u32)->u32{
+  var count=0u;
+  let word=local>>5u;
+  for(var i=0u;i<word;i+=1u){count+=countOneBits(atomicLoad(&ldsRec[i]));}
+  return count+countOneBits(atomicLoad(&ldsRec[word])&((1u<<(local&31u))-1u));
+}
+
+@compute @workgroup_size(256)
+fn encodeBandedLeaves(
+  @builtin(workgroup_id) workgroup:vec3u,
+  @builtin(num_workgroups) groups:vec3u,
+  @builtin(local_invocation_index) lane:u32,
+){
+  let slot=workgroup.x+workgroup.y*groups.x+workgroup.z*groups.x*groups.y;
+  let dirtyIndex=chunkBegin()+slot;
+  // A flag rather than an early return, and every barrier below sits at the top
+  // level of this function. The bounds *are* uniform across the workgroup — they
+  // are the same two atomics for every lane — but WGSL's uniformity analysis
+  // cannot prove that of a storage load, so a \`return\` here makes every later
+  // \`workgroupBarrier\` non-uniform control flow and the module will not compile.
+  let encoding=dirtyIndex<chunkEnd()&&controlLoad(11u)==8u;
+  let record=dirtyBrickOffset()+dirtyIndex*4u;
+  let leafIndex=select(0u,atomicLoad(&maintenance[record]),encoding);
+  let leafBase=controlLoad(16u)+leafIndex*4u;
+  let nodeIndex=topologyLoad(leafBase);
+  let voxelOffset=topologyLoad(leafBase+1u);
+  let leafSlot=voxelOffset/BANDED_ENCODE_VOXELS;
+  let level=topologyLoad(nodeIndex*8u+2u);
+  var scale=1u;
+  if(finestLevel()!=0xffffffffu&&finestLevel()>level){scale=1u<<(finestLevel()-level);}
+  let cellRadius=0.5*length(params.cell.xyz*f32(scale));
+
+  if(lane<BANDED_ENCODE_MASK_WORDS){
+    atomicStore(&ldsOcc[lane],0u);atomicStore(&ldsBand[lane],0u);atomicStore(&ldsRec[lane],0u);
+  }
+  if(lane<128u){ldsIndex[lane]=0u;}
+  if(lane<8u){ldsMeta[lane]=0u;}
+  workgroupBarrier();
+
+  // Stage the leaf. Occupancy and band come from the *stored* fraction, so the
+  // predicate this encoder uses is the one every reader will see.
+  for(var half=0u;half<2u;half+=1u){
+    if(!encoding){break;}
+    let local=lane+half*256u;
+    let voxel=voxelOffset+local;
+    let word=atomicLoad(&payload[sceneGeometryWord(sceneGeometryOffset(),voxel)]);
+    ldsGeometry[local]=word;
+    ldsIdentity[local]=atomicLoad(&payload[sceneMaterialOffset()+voxel]);
+    let fraction=sceneFractionOf(word,voxel);
+    if(fraction>0.0){atomicOr(&ldsOcc[local>>5u],1u<<(local&31u));}
+    if(fraction>0.0&&fraction<1.0){atomicOr(&ldsBand[local>>5u],1u<<(local&31u));}
+  }
+  workgroupBarrier();
+
+  // The record set is the band dilated by the stencil \`safeNormal\` reads, with the
+  // neighbours clamped inside the leaf exactly as it clamps them. At a face the
+  // clamp folds the outward neighbour onto the voxel itself, which is the same set
+  // \`encodeBandedLeaf\` marks.
+  for(var half=0u;half<2u;half+=1u){
+    if(!encoding){break;}
+    let local=lane+half*256u;
+    if(!ldsBandBit(local)){continue;}
+    let x=local&7u;let y=(local>>3u)&7u;let z=local>>6u;
+    atomicOr(&ldsRec[local>>5u],1u<<(local&31u));
+    let lo=max(vec3u(x,y,z),vec3u(1u))-1u;
+    let hi=min(vec3u(x,y,z)+1u,vec3u(7u));
+    let neighbours=array<u32,6>(
+      lo.x+y*8u+z*64u, hi.x+y*8u+z*64u,
+      x+lo.y*8u+z*64u, x+hi.y*8u+z*64u,
+      x+y*8u+lo.z*64u, x+y*8u+hi.z*64u);
+    for(var n=0u;n<6u;n+=1u){
+      let at=neighbours[n];
+      atomicOr(&ldsRec[at>>5u],1u<<(at&31u));
+    }
+  }
+  workgroupBarrier();
+
+  // The leaf palette, the identity entries and the allocation. Serial in one lane
+  // because interning is inherently sequential and a leaf holds 1.457 identities
+  // on average: the loop is ~800 comparisons on the hero, against a per-voxel
+  // primitive reduction that has already run.
+  if(lane==0u&&encoding){
+    var paletteCount=0u;
+    var occupied=0u;
+    var recordCount=0u;
+    var flags=0u;
+    for(var i=0u;i<BANDED_ENCODE_VOXELS;i+=1u){
+      if(ldsRecBit(i)){recordCount+=1u;}
+      if(!ldsOccBit(i)){continue;}
+      occupied+=1u;
+      let word=ldsIdentity[i];
+      var entry=BANDED_PALETTE_LIMIT;
+      for(var p=0u;p<paletteCount;p+=1u){
+        if(ldsPalette[p]==word){entry=p;break;}
+      }
+      if(entry==BANDED_PALETTE_LIMIT){
+        if(paletteCount<BANDED_PALETTE_LIMIT){
+          ldsPalette[paletteCount]=word;entry=paletteCount;paletteCount+=1u;
+        }else{
+          // A leaf past 256 identities is the dense escape the encoder models, and
+          // there is no dense lane to escape to here. Flagged, never silent: the
+          // provenance probe throws on a non-zero flag word rather than reporting
+          // an arena that is quietly wrong.
+          entry=BANDED_PALETTE_LIMIT-1u;flags|=BANDED_PALETTE_OVERFLOW;
+        }
+      }
+      ldsIdentity[i]=entry;
+    }
+    let indexBits=bandedIndexBitsFor(paletteCount);
+    let indexWords=(occupied*indexBits+31u)/32u;
+    let blobWords=paletteCount+indexWords;
+    var recordBase=atomicAdd(&payload[bandedAllocRecordCursor()],recordCount);
+    var blobBase=atomicAdd(&payload[bandedAllocBlobCursor()],blobWords);
+    var abort=0u;
+    if(recordBase+recordCount>bandedRecordCapacity()){
+      flags|=BANDED_RECORD_OVERFLOW;abort=1u;recordBase=0u;
+    }
+    if(blobBase+blobWords+BANDED_ALLOCATOR_WORDS>bandedBlobWordCapacity()){
+      flags|=BANDED_BLOB_OVERFLOW;abort=1u;blobBase=0u;
+    }
+    if(flags!=0u){atomicOr(&payload[bandedAllocFlags()],flags);}
+    atomicAdd(&payload[bandedAllocLeafCount()],1u);
+    ldsMeta[0]=paletteCount;ldsMeta[1]=occupied;ldsMeta[2]=indexBits;ldsMeta[3]=recordCount;
+    ldsMeta[4]=recordBase;ldsMeta[5]=blobBase;ldsMeta[6]=indexWords;ldsMeta[7]=abort;
+  }
+  workgroupBarrier();
+  // The allocation may have been refused. Folded into \`encoding\` rather than
+  // returned, for the same uniformity reason, and the flag word already carries
+  // *why* so the probe can throw on it.
+  let live=encoding&&ldsMeta[7]==0u;
+  let paletteCount=ldsMeta[0];
+  let indexBits=ldsMeta[2];
+  let recordBase=ldsMeta[4];
+  let blobBase=ldsMeta[5];
+
+  // The identity index, packed in the same order the reader unpacks: rank by
+  // occupancy prefix popcount, entry at \`rank * bits\`. Serial for the same reason
+  // the ranks are.
+  if(lane==0u&&live&&indexBits>0u){
+    var rank=0u;
+    for(var i=0u;i<BANDED_ENCODE_VOXELS;i+=1u){
+      if(!ldsOccBit(i)){continue;}
+      let bit=rank*indexBits;
+      ldsIndex[bit>>5u]|=ldsIdentity[i]<<(bit&31u);
+      rank+=1u;
+    }
+  }
+  workgroupBarrier();
+
+  // Every store below is exclusive to this workgroup: the masks are this leaf's
+  // own 16 words, the header its own 4, and the blob and record ranges came from
+  // an atomic bump nobody else holds.
+  if(lane<BANDED_ENCODE_MASK_WORDS&&live){
+    let maskWord=leafSlot*BANDED_ENCODE_MASK_WORDS+lane;
+    atomicStore(&payload[params.banded.x+maskWord],atomicLoad(&ldsOcc[lane]));
+    atomicStore(&payload[params.banded.y+maskWord],atomicLoad(&ldsRec[lane]));
+  }
+  if(lane==0u&&live){
+    let header=params.banded.z+leafSlot*BANDED_HEADER_WORDS;
+    atomicStore(&payload[header],recordBase);
+    atomicStore(&payload[header+1u],blobBase);
+    atomicStore(&payload[header+2u],
+      (ldsMeta[3]&0xffffu)|((paletteCount&0xffu)<<16u)|((indexBits&0xffu)<<24u));
+    atomicStore(&payload[header+3u],scale);
+  }
+  let blob=params.banded.w+BANDED_ALLOCATOR_WORDS+blobBase;
+  if(live&&lane<paletteCount){atomicStore(&payload[blob+lane],ldsPalette[lane]);}
+  if(live&&lane<ldsMeta[6]){atomicStore(&payload[blob+paletteCount+lane],ldsIndex[lane]);}
+  for(var half=0u;half<2u;half+=1u){
+    if(!live){break;}
+    let local=lane+half*256u;
+    if(!ldsRecBit(local)){continue;}
+    let word=ldsGeometry[local];
+    let voxel=voxelOffset+local;
+    atomicStore(&payload[sceneGeometryWord(params.bandedCapacities.w,recordBase+ldsRecordRank(local))],
+      packSceneGeometry(sceneDistanceOf(word,voxel),sceneFractionOf(word,voxel),cellRadius));
+  }
+}
+`;
+}
+
+/** The `full` expansion. Byte-identical to the pre-profile shader. */
+export const sparseSceneProxyVoxelizationShader = sparseSceneProxyVoxelizationShaderFor("full");
 
 function nonNegativeInteger(value: number, name: string): number {
   if (!Number.isSafeInteger(value) || value < 0) throw new RangeError(`${name} must be a non-negative integer`);
@@ -1896,7 +2463,7 @@ export interface SparseSceneMaintenanceBinding {
 
 /** Maintenance stages, in encode order, as timestamped by {@link SparseSceneMaintenanceTimestamps}. */
 export const SPARSE_SCENE_MAINTENANCE_STAGES = Object.freeze([
-  "invalidate", "prepare", "bin", "rebuild", "finalize",
+  "invalidate", "prepare", "bin", "rebuild", "band", "finalize",
 ] as const);
 
 /**
@@ -1921,6 +2488,7 @@ export class SparseSceneProxyVoxelizer {
   private readonly tree: SparseBrickOctreeGPU;
   private readonly primitiveBuffer: GPUBuffer;
   private readonly clusterCapacity: number;
+  private readonly fieldProgramCapacity: number;
   private readonly maintenanceArena: GPUBuffer;
   private readonly maintenanceDispatch: GPUBuffer;
   private readonly paramsBuffer: GPUBuffer;
@@ -1931,6 +2499,7 @@ export class SparseSceneProxyVoxelizer {
   private indexedBinPipeline?: GPUComputePipeline;
   private rebuildPipeline!: GPUComputePipeline;
   private finalizePipeline!: GPUComputePipeline;
+  private bandPipeline?: GPUComputePipeline;
   private shaderModule!: GPUShaderModule;
   private readonly pipelineLayout: GPUPipelineLayout;
   private readonly label: string;
@@ -1942,6 +2511,7 @@ export class SparseSceneProxyVoxelizer {
   private readonly candidateOffsetWords: number;
   private readonly stateOffsetWords: number;
   private readonly clusterOffsetWords: number;
+  private readonly fieldProgramOffsetWords: number;
   private readonly indexHeaderOffsetWords: number;
   private readonly regionCellOffsetWords: number;
   private readonly gridItemCapacity: number;
@@ -1993,6 +2563,12 @@ export class SparseSceneProxyVoxelizer {
     // carry their arena, and a caller that publishes one without asking for the
     // capacity is refused loudly in `publish` rather than drawing nothing.
     const clusterCapacity = nonNegativeInteger(options.clusterCapacity ?? 0, "Cluster capacity");
+    const fieldProgramCapacity = nonNegativeInteger(options.fieldProgramCapacity ?? 0, "Field program capacity");
+    // Both ride one uniform lane, sixteen bits apiece; see `clusterArenaCapacity`
+    // in the shader for why that is the trade rather than a seventh vec4.
+    if (clusterCapacity > 0xffff || fieldProgramCapacity > 0xffff) {
+      throw new RangeError("Aggregate and field-program arena capacities must each fit sixteen bits");
+    }
     this.dirtyRegionOffsetWords = checkedArenaWords(primitiveCapacity * 8, "Primitive bounds arena");
     this.dirtyBrickOffsetWords = checkedArenaWords(this.dirtyRegionOffsetWords + dirtyRegionCapacity * 8, "Dirty region arena");
     this.candidateOffsetWords = checkedArenaWords(this.dirtyBrickOffsetWords + dirtyBrickCapacity * 4, "Dirty brick arena");
@@ -2001,8 +2577,10 @@ export class SparseSceneProxyVoxelizer {
     // Everything past here is the record index, and every block of it is zero
     // words when the index is absent — so a voxelizer configured without one
     // allocates, clears and writes exactly what it always did.
-    this.indexHeaderOffsetWords = checkedArenaWords(
+    this.fieldProgramOffsetWords = checkedArenaWords(
       this.clusterOffsetWords + clusterCapacity * SVO_CLUSTER_ARENA_BLOCK.strideWords, "Aggregate arena");
+    this.indexHeaderOffsetWords = checkedArenaWords(
+      this.fieldProgramOffsetWords + fieldProgramCapacity * SVO_FIELD_PROGRAM_BLOCK_WORDS, "Field program arena");
     const index = options.recordIndex;
     if (index) {
       if (options.finestLevel === undefined) throw new RangeError("A record index needs the finest topology level to place its lattice");
@@ -2045,8 +2623,8 @@ export class SparseSceneProxyVoxelizer {
     const arenaWords = checkedArenaWords(
       this.terrainFieldOffsetWords + this.terrainFieldCapacityColumns, "Scene maintenance arena");
     this.brickBudget = nonNegativeInteger(options.bricksPerFrameBudget ?? 0, "Bricks per frame budget");
-    const maintenanceDispatchBytes = 3 * 3 * 4;
-    this.allocatedBytes = primitiveBytes + arenaWords * 4 + maintenanceDispatchBytes + 96;
+    const maintenanceDispatchBytes = 4 * 3 * 4;
+    this.allocatedBytes = primitiveBytes + arenaWords * 4 + maintenanceDispatchBytes + 128;
     const label = options.label ?? "Sparse scene proxies";
     this.label = label;
     this.primitiveBuffer = device.createBuffer({
@@ -2054,6 +2632,7 @@ export class SparseSceneProxyVoxelizer {
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     });
     this.clusterCapacity = clusterCapacity;
+    this.fieldProgramCapacity = fieldProgramCapacity;
     this.maintenanceArena = device.createBuffer({
       label: `${label} fixed maintenance arena`, size: arenaWords * 4,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
@@ -2063,7 +2642,7 @@ export class SparseSceneProxyVoxelizer {
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.INDIRECT,
     });
     this.paramsBuffer = device.createBuffer({
-      label: `${label} parameters`, size: 96,
+      label: `${label} parameters`, size: 128,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
     const layout = device.createBindGroupLayout({
@@ -2098,7 +2677,9 @@ export class SparseSceneProxyVoxelizer {
   async initializePipelines(): Promise<void> {
     if (this.invalidatePipeline) return;
     this.shaderModule = this.device.createShaderModule({
-      label: `${this.label} live maintenance shader`, code: sparseSceneProxyVoxelizationShader,
+      label: `${this.label} live maintenance shader`,
+      code: sparseSceneProxyVoxelizationShaderFor(
+        this.tree.payloadProfile, this.tree.sceneGeometryFormat, this.tree.leafPayloadMode),
     });
     const pipeline = (entryPoint: string, stage: string) => this.device.createComputePipelineAsync({
       label: `${this.label} ${stage} pipeline`, layout: this.pipelineLayout,
@@ -2109,6 +2690,9 @@ export class SparseSceneProxyVoxelizer {
     this.binPipeline = await pipeline("binDirtyBrickCandidates", "candidate binning");
     this.rebuildPipeline = await pipeline("rebuildDirtyBrickPayload", "payload rebuild");
     this.finalizePipeline = await pipeline("finalizeDirtyBricks", "finalization");
+    if (this.tree.leafPayloadMode === "banded") {
+      this.bandPipeline = await pipeline("encodeBandedLeaves", "banded leaf encoding");
+    }
     if (this.options.recordIndex) {
       this.indexedInvalidatePipeline = await pipeline("invalidateDirtyBricksFromRegions", "indexed invalidation");
       this.indexedBinPipeline = await pipeline("binDirtyBrickCandidatesIndexed", "indexed candidate binning");
@@ -2224,6 +2808,13 @@ export class SparseSceneProxyVoxelizer {
     const clusterArena = aggregates > 0
       ? packSparseSceneClusterArena(publication.primitives, this.clusterCapacity)
       : undefined;
+    const tapes = sparseSceneFieldPrograms(publication.primitives).length;
+    if (tapes > this.fieldProgramCapacity) {
+      throw new RangeError(`Live scene publishes ${tapes} field programs but the fixed arena holds ${this.fieldProgramCapacity}`);
+    }
+    const fieldProgramArena = tapes > 0
+      ? packSparseSceneFieldProgramArena(publication.primitives, this.fieldProgramCapacity)
+      : undefined;
     const bounds = publication.primitives.map(sparseScenePrimitiveBounds);
     const primitiveBounds = packBounds(bounds);
     const dirtyBounds = packBounds(publication.dirtyRegions);
@@ -2249,10 +2840,13 @@ export class SparseSceneProxyVoxelizer {
     this.lastRegionCellCount = regionCells?.cellCount ?? 0;
     if (packed.byteLength > 0) this.device.queue.writeBuffer(this.primitiveBuffer, 0, packed);
     if (clusterArena) this.device.queue.writeBuffer(this.maintenanceArena, this.clusterOffsetWords * 4, clusterArena);
+    if (fieldProgramArena) {
+      this.device.queue.writeBuffer(this.maintenanceArena, this.fieldProgramOffsetWords * 4, fieldProgramArena);
+    }
     if (primitiveBounds.byteLength > 0) this.device.queue.writeBuffer(this.maintenanceArena, this.primitiveBoundsOffsetWords * 4, primitiveBounds);
     this.device.queue.writeBuffer(this.maintenanceArena, this.dirtyRegionOffsetWords * 4, dirtyBounds);
     if (index && regionCells) this.writeRecordIndex(index, bounds, regionCells, worldOrigin);
-    const parameterData = new ArrayBuffer(96);
+    const parameterData = new ArrayBuffer(128);
     const floats = new Float32Array(parameterData);
     const uints = new Uint32Array(parameterData);
     floats.set(worldOrigin, 0);
@@ -2267,8 +2861,19 @@ export class SparseSceneProxyVoxelizer {
       this.tree.sceneGeometryOffsetBytes / 4,
       this.tree.sceneMaterialOwnerOffsetBytes / 4,
       this.tree.topologyOffsetBytes / 4,
-      this.clusterCapacity,
+      // Two fixed capacities, sixteen bits apiece, in the last spare lane.
+      this.clusterCapacity | (this.fieldProgramCapacity << 16),
     ], 20);
+    // The banded lanes. Zero on `dense`, where the codec that would read them is
+    // not compiled at all, so the words are inert rather than a valid address to
+    // an absent lane.
+    uints.set(this.tree.bandedLaneWordOffsets.slice(0, 4), 24);
+    uints.set([
+      this.tree.bandedRecordCapacity,
+      this.tree.payloadLayout.bandedBlobWords,
+      0,
+      this.tree.bandedLaneWordOffsets[4],
+    ], 28);
     this.device.queue.writeBuffer(this.paramsBuffer, 0, parameterData);
     this.primitiveCount = publication.primitives.length;
     this.sceneRevision = publication.revision;
@@ -2365,7 +2970,7 @@ export class SparseSceneProxyVoxelizer {
       (this.stateOffsetWords + SPARSE_SCENE_MAINTENANCE_STATE_WORDS.binDispatch) * 4,
       this.maintenanceDispatch,
       0,
-      3 * 3 * 4,
+      4 * 3 * 4,
     );
     const runIndirect = (
       stage: (typeof SPARSE_SCENE_MAINTENANCE_STAGES)[number],
@@ -2383,6 +2988,13 @@ export class SparseSceneProxyVoxelizer {
     runIndirect("bin", "Bin live scene primitives into dirty bricks",
       this.indexedBinPipeline ?? this.binPipeline, SPARSE_SCENE_MAINTENANCE_STATE_WORDS.binDispatch);
     runIndirect("rebuild", "Rebuild live scene dirty brick payloads", this.rebuildPipeline, SPARSE_SCENE_MAINTENANCE_STATE_WORDS.rebuildDispatch);
+    // After the dense rebuild, because it reads the lane that pass just wrote, and
+    // before finalization, so the occupancy summary and the banded bytes describe
+    // the same revision.
+    if (this.bandPipeline) {
+      runIndirect("band", "Encode banded leaf payloads", this.bandPipeline,
+        SPARSE_SCENE_MAINTENANCE_STATE_WORDS.bandDispatch);
+    }
     runIndirect("finalize", "Finalize live scene dirty bricks", this.finalizePipeline, SPARSE_SCENE_MAINTENANCE_STATE_WORDS.finalizeDispatch);
     this.pending = false;
     this.chunksRemaining -= 1;

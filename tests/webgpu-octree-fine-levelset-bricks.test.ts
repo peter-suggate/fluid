@@ -232,49 +232,58 @@ test("the authored surface band drives the fine widths in finest-cell units", ()
   // note on `fineLevelSetResidencyFloorCells` documents.
   assert.deepEqual(planFineLevelSetBandFineCells(3, 4), {
     transportBandFineCells: 12,
-    redistanceBandFineCells: 12,
+    redistanceBandFineCells: 21,
     maximumBacktraceFineCells: 8,
   });
   assert.deepEqual(planFineLevelSetBandFineCells(0, 4), {
     transportBandFineCells: 4,
-    redistanceBandFineCells: 8,
+    redistanceBandFineCells: 13,
     maximumBacktraceFineCells: 8,
   }, "level zero keeps one restriction shell without widening transport");
   assert.deepEqual(planFineLevelSetBandFineCells(1, 4), {
     transportBandFineCells: 8,
-    redistanceBandFineCells: 8,
+    redistanceBandFineCells: 17,
     maximumBacktraceFineCells: 8,
   }, "level one retains the measured two-finest-cell moving-surface floor");
+  assert.deepEqual(planFineLevelSetBandFineCells(2, 4), {
+    transportBandFineCells: 8,
+    redistanceBandFineCells: 17,
+    maximumBacktraceFineCells: 8,
+  }, "level two is the narrowest authored band without using the level-one floor");
+  assert.equal(planFineLevelSetTopologyBand(4, {
+    ...planFineLevelSetBandFineCells(2, 4), interpolationSupportFineCells: 1,
+  }).dilationBrickRings, 6,
+  "level two retains six brick rings for transport, backtrace, and publication safety");
   assert.deepEqual(planFineLevelSetTopologyBand(4, {
     ...planFineLevelSetBandFineCells(0, 4), interpolationSupportFineCells: 1,
   }), {
     transportBandFineCells: 4,
-    redistanceBandFineCells: 8,
+    redistanceBandFineCells: 13,
     maximumBacktraceFineCells: 8,
     interpolationSupportFineCells: 1,
     safetyBrickRings: 1,
-    requiredFineCells: 9,
-    dilationBrickRings: 4,
+    requiredFineCells: 13,
+    dilationBrickRings: 5,
   }, "level zero topology independently retains backtrace and the safety ring");
   assert.deepEqual(planFineLevelSetRecurringTopologyBand(4, {
     ...planFineLevelSetBandFineCells(0, 4), interpolationSupportFineCells: 1,
   }, 2), {
     transportBandFineCells: 4,
-    redistanceBandFineCells: 8,
+    redistanceBandFineCells: 13,
     maximumBacktraceFineCells: 8,
     interpolationSupportFineCells: 1,
     safetyBrickRings: 1,
     maximumDisplacementFineCells: 2,
-    requiredFineCells: 8,
-    dilationBrickRings: 3,
+    requiredFineCells: 13,
+    dilationBrickRings: 5,
   }, "level zero recurring topology keeps restriction support plus the paper one-ring");
   assert.equal(planFineLevelSetRecurringTopologyBand(4, {
     ...planFineLevelSetBandFineCells(0, 4), interpolationSupportFineCells: 1,
-  }, 8).dilationBrickRings, 4,
+  }, 8).dilationBrickRings, 5,
   "a worst-case characteristic restores the conservative construction radius");
   assert.equal(planFineLevelSetRecurringTopologyBand(4, {
     ...planFineLevelSetBandFineCells(4, 4), interpolationSupportFineCells: 1,
-  }, 2).dilationBrickRings, 5,
+  }, 2).dilationBrickRings, 8,
   "a wide authored band remains the recurring physical-width authority");
   assert.throws(() => planFineLevelSetRecurringTopologyBand(4, {
     ...planFineLevelSetBandFineCells(0, 4), interpolationSupportFineCells: 1,
@@ -288,7 +297,7 @@ test("the authored surface band drives the fine widths in finest-cell units", ()
     return [widths.redistanceBandFineCells, planFineLevelSetTopologyBand(4, {
       ...widths, interpolationSupportFineCells: 1,
     }).dilationBrickRings];
-  }), [[8, 4], [8, 5], [8, 5], [12, 6], [16, 7]],
+  }), [[13, 5], [17, 6], [17, 6], [21, 7], [25, 8]],
   "level zero is the sole one-brick experiment while nonzero levels retain moving-surface support");
   // Held in finest cells, so the band keeps one physical thickness across the
   // paper's two interface-tracking factors rather than halving at factor 8.
@@ -315,17 +324,17 @@ test("every sweepable surface band stays above the departure residency floor", (
       const floor = fineLevelSetResidencyFloorCells(widths.transportBandFineCells,
         widths.maximumBacktraceFineCells, 1);
       const coverage = plan.dilationBrickRings * 4;
-      assert.ok(coverage >= floor && coverage < floor + 4,
+      assert.ok(coverage >= floor + 4 && coverage < floor + 8,
         `band ${band} at factor ${fineFactor} covers ${plan.dilationBrickRings * 4}`
         + ` fine cells against a floor of ${floor}`);
     }
   }
-  // The reduced redistance policy removes one active ring while retaining the
-  // complete departure-residency floor.
+  // Redistance retains the complete departure donor halo plus the paper's
+  // explicit publication-safety ring.
   assert.equal(planFineLevelSetTopologyBand(4, {
     ...planFineLevelSetBandFineCells(3, 4),
     interpolationSupportFineCells: 1, safetyBrickRings: 1,
-  }).dilationBrickRings, 6);
+  }).dilationBrickRings, 7);
 });
 
 test("fine page delta publishes exact XOR keys and separate dirty/JFA-support sets", () => {

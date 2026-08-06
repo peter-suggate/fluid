@@ -107,6 +107,13 @@ function pointInsideProxy(proxy: EnvironmentProxyPrimitive, point: readonly [num
     const radius_m = proxy.baseRadius_m + (proxy.topRadius_m - proxy.baseRadius_m) * height;
     return dx * dx + dz * dz <= radius_m * radius_m;
   }
+  // A tape is its conservative box here, and that is the same trade one level
+  // up: the box is what every non-render consumer sees, so the pyramid
+  // over-occludes a pitted interior rather than under-populating a page.
+  if (proxy.kind === "field-program") {
+    return Math.abs(dx) <= proxy.halfExtent_m.x && Math.abs(dy) <= proxy.halfExtent_m.y
+      && Math.abs(dz) <= proxy.halfExtent_m.z;
+  }
   // A cluster and an ellipsoid share their `radius_m`, and that is deliberate:
   // this oracle mirrors what the voxelizer writes, and the voxelizer sees an
   // aggregate as its solid lobe. Over-occluding a fissured interior is the safe

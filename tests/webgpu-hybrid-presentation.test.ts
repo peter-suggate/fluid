@@ -25,15 +25,20 @@ test("octree smooth presentation keeps analytic solids and glass", () => {
     "a completed physics step must not be used as a proxy for the warmed t=0 authority");
 });
 
-test("raw voxel and brick-grid inspection overlay the GLOBAL GPU sparse source", () => {
-  assert.match(rendererSource, /voxelRenderMode !== "smooth" && sparseSceneProducer/);
-  assert.match(rendererSource, /this\.voxelInspectionSource = requestedVoxelDebugGeneration >= 0 \? sparseSceneProducer\?\.sparseVoxelRenderSource : undefined/,
-    "capacity-sized debug instance buffers attach only while inspection is visible");
+/**
+ * The GLOBAL sparse frame is now the renderer's only consumer of a sparse
+ * producer. It used to share the producer with a second attachment: the
+ * expanded-record inspection overlay, which pulled `sparseVoxelRenderSource`
+ * (48 bytes per resolved voxel, ~295 MB on the widened ocean scene) whenever a
+ * non-smooth representation was selected, and drew additively over this frame
+ * with its own depth target. Both the overlay and the producer getter that fed
+ * it were removed, so what is pinned here is the single remaining attachment.
+ */
+test("GLOBAL consumes the sparse hierarchy through exactly one attachment", () => {
   assert.match(rendererSource, /sidecar\?\.sparseVoxelSceneSource\?\?solver\.sparseVoxelSceneSource/,
-    "smooth production SVO consumes the solver hierarchy or its renderer-owned sidecar without activating inspection records");
-  assert.match(rendererSource, /if \(voxelRenderMode !== "smooth" && this\.voxelDebugDepth\)/);
-  assert.match(rendererSource, /mode: voxelRenderMode/);
-  assert.match(rendererSource, /Structural views diagnose the same GLOBAL frame[^]*colorLoadOp: "load"/);
+    "smooth production SVO consumes the solver hierarchy or its renderer-owned sidecar");
+  assert.doesNotMatch(rendererSource, /sparseVoxelRenderSource|voxelInspectionSource|voxelDebugDepth|voxelRenderMode/,
+    "no second capacity-sized inspection attachment may return to the frame");
   assert.match(rendererSource, /const drySceneReplacement = \(/);
   assert.match(uniformEulerianSource, /Initial sparse authority: \$\{descriptor\.label\}/);
   assert.match(uniformEulerianSource, /this\.octreeProjection\.encodeInitialSparseAuthorityPhase\(initialSparseScene, phase\)/);

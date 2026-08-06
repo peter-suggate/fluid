@@ -43,7 +43,10 @@ test("right panel width defaults to performance width and clamps resize input", 
 test("presentation defaults to global-illuminated sparse voxels", () => {
   const initial = useUIStore.getInitialState();
   useUIStore.setState(initial, true);
-  assert.equal(useUIStore.getState().voxelRenderMode, "smooth");
+  // `voxelRenderMode` selected the removed expanded-record inspection overlay.
+  // The store must not carry it back: SHADED/RAW are `svoRenderTuning
+  // .surfaceReconstruction` on the production frame now, not a second renderer.
+  assert.equal("voxelRenderMode" in useUIStore.getState(), false);
   assert.equal("svoRenderMode" in useUIStore.getState(), false);
   assert.equal("svoLightingMode" in useUIStore.getState(), false);
   assert.equal(useUIStore.getState().svoShadowsEnabled, true);

@@ -202,6 +202,119 @@ export function createSvoScreenSpaceTraversalWGSL(canonicalTraversalWGSL: string
   return `${svoScreenSpaceTerminationWGSL}\n${derived}`;
 }
 
+/**
+ * The rungs below an octree leaf.
+ *
+ * Refining the lattice makes the tree *deeper*, not the bricks fatter: a brick
+ * is a fixed `brickSize` cells, so the hero garden's move from 25 mm to 6.25 mm
+ * took the brick from 200 mm to 50 mm and left the descent with exactly two
+ * choices — collapse all 512 cells to one box, or walk them. Everything here
+ * exists to name the rungs in between.
+ *
+ * A level at or below the leaf's own is the whole brick; each further level
+ * halves the aggregate, so `leafLevel + log2(brickSize)` is the individual cell
+ * and the exact walk. That is what makes `lodFixedLevel`'s default of 21 a true
+ * no-op on every scene the octree can address.
+ */
+export function svoLodBrickSubLevels(brickSize: number): number {
+  if (brickSize !== 4 && brickSize !== 8) throw new RangeError("SVO brick size must be 4 or 8");
+  return Math.log2(brickSize);
+}
+
+/** Cells per aggregate step when descent is pinned to `fixedLevel`. */
+export function svoLodCellStrideForLevel(leafLevel: number, fixedLevel: number, brickSize: number): number {
+  const subLevels = svoLodBrickSubLevels(brickSize);
+  if (!Number.isInteger(leafLevel) || leafLevel < 0) throw new RangeError("SVO leaf level must be a non-negative integer");
+  if (!Number.isInteger(fixedLevel) || fixedLevel < 0) throw new RangeError("SVO fixed level must be a non-negative integer");
+  return brickSize >>> Math.max(0, Math.min(subLevels, fixedLevel - leafLevel));
+}
+
+/**
+ * Coarsest aggregate whose own projection still respects the authored threshold.
+ *
+ * The rule is the user's, stated exactly: descend only while the parent's
+ * expression on screen exceeds the threshold. So the aggregate that gets drawn
+ * is never *larger* on screen than the author asked to tolerate — which is the
+ * property that makes a single number a fidelity budget rather than a tuning
+ * fudge, and the reason this cannot simply reuse the one-cell test.
+ *
+ * `dryPrimaryBrickCellsSubPixel` did reuse it: it collapsed a whole eight-cell
+ * brick as soon as *one* cell fell under the threshold, an eight-fold
+ * over-coarsening that only became visible once 6.25 mm cells put its onset at
+ * roughly 3.5 m instead of 14 m.
+ *
+ * Each candidate is measured at the brick's camera-nearest aggregate-sized
+ * cube, unaligned to the aggregate grid. Unaligned is deliberately conservative:
+ * no aligned aggregate can be nearer, so the footprint is an upper bound and the
+ * stride can only come out finer than the exact test would allow.
+ */
+export function selectSvoLodCellStride(
+  brickBounds: SvoAabb,
+  cameraPosition: SvoVec3,
+  brickSize: number,
+  options: SvoScreenSpaceTerminationOptions,
+): number {
+  const checked = validatedOptions(options);
+  const subLevels = svoLodBrickSubLevels(brickSize);
+  if (checked.thresholdPixels === 0) return 1;
+  const threshold = effectiveSvoScreenSpaceThresholdPixels(checked.thresholdPixels, checked.viewportHeightPixels);
+  const cell = brickBounds.maximum.map((value, axis) => (value - brickBounds.minimum[axis]) / brickSize);
+  for (let level = subLevels; level >= 1; level -= 1) {
+    const stride = 1 << level;
+    const half = cell.map((size) => size * stride * 0.5) as [number, number, number];
+    const centre = cameraPosition.map((value, axis) => Math.max(
+      brickBounds.minimum[axis] + half[axis],
+      Math.min(brickBounds.maximum[axis] - half[axis], value),
+    )) as [number, number, number];
+    const footprint = projectedSvoNodeFootprintPixels(
+      { minimum: centre.map((value, axis) => value - half[axis]) as [number, number, number],
+        maximum: centre.map((value, axis) => value + half[axis]) as [number, number, number] },
+      cameraPosition, checked,
+    );
+    if (footprint <= threshold) return stride;
+  }
+  return 1;
+}
+
+/**
+ * GPU twin of the ladder above.
+ *
+ * The threshold and the level arrive from the render-tuning uniform rather than
+ * a shader constant, so a sweep costs a 16-byte write instead of a pipeline
+ * rebuild. Whether this machinery is compiled at all remains a constructor
+ * decision: a build with it absent is the bit-exact reference image, and a
+ * runtime threshold of zero reproduces that image from the LOD build.
+ */
+export const svoLodDescentWGSL = /* wgsl */ `
+const SVO_LOD_MODE_SCREEN_SPACE:u32=0u;
+const SVO_LOD_MODE_FIXED_LEVEL:u32=1u;
+fn svoLodCellStrideForLevel(leafLevel:u32,fixedLevel:u32,brickSize:u32)->u32{
+  let subLevels=countTrailingZeros(brickSize);
+  return brickSize>>min(subLevels,select(0u,fixedLevel-leafLevel,fixedLevel>leafLevel));
+}
+fn svoLodScreenSpaceCellStride(
+  brickBounds:mat2x3f,
+  brickSize:u32,
+  cameraPosition:vec3f,
+  viewportHeightPixels:f32,
+  tanHalfVerticalFov:f32,
+  thresholdPixels:f32,
+)->u32{
+  if(!(thresholdPixels>0.0)){return 1u;}
+  let cell=(brickBounds[1]-brickBounds[0])/f32(brickSize);
+  var stride=brickSize;
+  loop{
+    if(stride<2u){break;}
+    let half=cell*f32(stride)*.5;
+    let centre=clamp(cameraPosition,brickBounds[0]+half,brickBounds[1]-half);
+    if(svoProjectedNodeFootprintPixels(mat2x3f(centre-half,centre+half),cameraPosition,
+      viewportHeightPixels,tanHalfVerticalFov)<=thresholdPixels){return stride;}
+    stride=stride>>1u;
+  }
+  return 1u;
+}
+`;
+
 export interface SvoScreenSpaceImageComparison {
   totalPixels: number;
   changedPixels: number;

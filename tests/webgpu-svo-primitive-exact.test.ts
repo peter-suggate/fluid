@@ -6,6 +6,7 @@ import {
   SVO_PRIMITIVE_RECORD_WORDS,
   intersectSvoPrimitive,
   packSvoPrimitiveRecords,
+  svoFieldProgramAbsentWGSL,
   svoPrimitiveWGSL,
   type SvoFinitePrimitiveDescriptor,
   type SvoPrimitiveRay,
@@ -240,7 +241,12 @@ const cases: OracleCase[] = [
   },
 ];
 
-const oracleShader = `${svoPrimitiveWGSL}
+// No tape arena is bound here either, so the shared library's host hook is the
+// "this module has none" declaration. A field-program record offered to the
+// oracle reports itself invalid, which is exactly what a renderer whose arena
+// failed to arrive would do.
+const oracleShader = `${svoFieldProgramAbsentWGSL}
+${svoPrimitiveWGSL}
 struct PrimitiveRayInput { originMin: vec4f, directionMax: vec4f }
 @group(0) @binding(0) var<storage,read> oraclePrimitives: array<SvoPrimitiveRecord>;
 @group(0) @binding(1) var<storage,read> oracleRays: array<PrimitiveRayInput>;

@@ -10,7 +10,7 @@ import {
   svoDrySceneVertexShader,
   type SparseVoxelDrySceneData,
 } from "../lib/webgpu-svo-dry-scene";
-import type { SparseVoxelRenderSource } from "../lib/webgpu-voxel-debug";
+import type { SparseVoxelSceneRenderSource } from "../lib/webgpu-voxel-debug";
 import type { DrySceneReplacementEncoder } from "../lib/webgpu-water-pipeline";
 import { svoDrySceneFixture } from "./svo-dry-scene-test-fixture";
 
@@ -34,7 +34,7 @@ test("GLOBAL SVO is the sole production presentation", () => {
   assert.doesNotMatch(rendererSource, /svoRenderMode|svoLightingMode|SvoRenderMode|SvoLightingMode/);
   expectSource(rendererSource, /type SvoLightingOptions[^]*from "\.\/svo-render-options"/,
     "renderer must retain only GLOBAL visibility effects");
-  expectSource(viewportSource, /ui\.voxelRenderMode,[^]*shadowsEnabled: ui\.svoShadowsEnabled,[^]*ambientOcclusionEnabled: ui\.svoAmbientOcclusionEnabled,[^]*stageView: ui\.svoStageView/,
+  expectSource(viewportSource, /shadowsEnabled: ui\.svoShadowsEnabled,[^]*ambientOcclusionEnabled: ui\.svoAmbientOcclusionEnabled,[^]*stageView: ui\.svoStageView/,
     "viewport must pass lighting effects before the diagnostics argument in the renderer contract");
 });
 
@@ -151,8 +151,8 @@ test("every dry-shader group-zero declaration has one layout and bind-group entr
     "every declared/layout binding must have one production resource expression");
   assert.match(drySceneSource, /\.\.\.\(derivedTraversal \? \[\{ binding: 5, resource: derivedTraversal \}\] : \[\]\)/,
     "derived traversal is bound only for entrypoints that actually consume it");
-  assert.equal(SVO_DRY_SCENE_BINDING_CONTRACT.filter(({ type }) => type === "read-only-storage").length, 4,
-    "the dry pass has a hard four-storage-buffer ceiling");
+  assert.equal(SVO_DRY_SCENE_BINDING_CONTRACT.filter(({ type }) => type === "read-only-storage").length, 5,
+    "the dry pass has a hard five-storage-buffer ceiling");
   assert.deepEqual(SVO_DRY_SCENE_BINDING_CONTRACT.filter(({ binding }) => binding === 11 || binding === 12), []);
   assert.deepEqual(SVO_DRY_SCENE_BINDING_CONTRACT.slice(-12).map(({ binding, type }) => [binding, type]), [
     [16, "texture-3d-float"], [17, "filtering-sampler"], [18, "texture-2d-uint"],
@@ -182,7 +182,7 @@ test("unavailable structural fields reject live SVO before GPU encoding", () => 
         materialOwner: { residency: "all-published-leaves" },
       },
     },
-  } as unknown as SparseVoxelRenderSource;
+  } as unknown as SparseVoxelSceneRenderSource;
   const scene: SparseVoxelDrySceneData = { ...svoDrySceneFixture, ownerBase: 32 };
   assert.equal(canEncodeSparseVoxelDryScene(undefined, scene), false);
   assert.equal(canEncodeSparseVoxelDryScene(source, undefined), false);
@@ -226,13 +226,16 @@ test("SVO is offered to the water pipeline beneath every structural view", () =>
     "the replacement callback must target the water pipeline's internal HDR dry-scene attachment");
 });
 
-test("raw voxels and brick-grid are overlays on the GLOBAL frame", () => {
-  assert.match(rendererSource, /this\.voxelInspectionSource = requestedVoxelDebugGeneration >= 0 \? sparseSceneProducer\?\.sparseVoxelRenderSource : undefined/,
-    "debug mode materialization must remain gated by inspection visibility");
-  assert.match(rendererSource, /this\.voxelDebugPipeline\?\.setSource\(this\.voxelInspectionSource\)/,
-    "debug modes consume expanded records only while inspection is visible");
-  assert.match(rendererSource, /if \(voxelRenderMode !== "smooth" && this\.voxelDebugDepth\)/);
-  assert.match(rendererSource, /mode: voxelRenderMode/);
-  assert.match(rendererSource, /Structural views diagnose the same GLOBAL frame[^]*colorLoadOp: "load"/,
-    "inspection must alpha-blend over the GLOBAL dry scene");
+/**
+ * There is nothing left to overlay the GLOBAL frame with. The expanded-record
+ * inspection views were a second renderer with its own depth attachment, its
+ * own instance arenas and its own additive encode pass after the composite;
+ * they were removed once SHADED/RAW moved onto `surfaceReconstruction` in this
+ * frame. The remaining post-composite passes are read-only diagnostics.
+ */
+test("no second renderer draws over the GLOBAL frame", () => {
+  assert.doesNotMatch(rendererSource, /SparseVoxelDebugRenderer|voxelDebugPipeline|voxelDebugDepth|voxelInspectionSource/,
+    "the inspection overlay renderer, its depth target and its source must all be gone");
+  assert.doesNotMatch(rendererSource, /"voxel-debug"/,
+    "no optional pipeline may still be requested for the removed overlay");
 });

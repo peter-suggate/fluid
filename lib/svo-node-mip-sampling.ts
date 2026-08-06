@@ -96,8 +96,14 @@ fn svoNodeMipDirectoryEntry(directory:texture_2d<u32>,pageIndex:u32)->SvoNodeMip
   let key=textureLoad(directory,texel,0);let location=textureLoad(directory,texel+vec2u(1u,0u),0);
   return SvoNodeMipDirectoryEntry(key.x,key.y,key.z,key.w,location.xyz,location.w);
 }
+// The clamp range *is* the apron. With a one-texel replica apron a coordinate of
+// -0.5 blended the edge texel against a copy of itself; clamping to the edge
+// texel's own centre gives the identical value out of a page that never stored
+// the copy. At a non-zero apron the range reopens to the half-texel shell and
+// this is byte-for-byte the addressing that shipped with 10^3 pages.
 fn svoNodeMipAtlasUv(pageOrigin:vec3u,interiorTexel:vec3f,atlasDimensions:vec3u)->vec3f{
-  let physical=vec3f(pageOrigin)+vec3f(f32(SVO_NODE_MIP_APRON))+clamp(interiorTexel,vec3f(-.5),vec3f(f32(SVO_NODE_MIP_INTERIOR_SIZE)-.5));
+  let physical=vec3f(pageOrigin)+vec3f(f32(SVO_NODE_MIP_APRON))
+    +clamp(interiorTexel,vec3f(${(-0.5 * SVO_NODE_MIP_LAYOUT.apron).toFixed(1)}),vec3f(f32(SVO_NODE_MIP_INTERIOR_SIZE)-${(1 - 0.5 * SVO_NODE_MIP_LAYOUT.apron).toFixed(1)}));
   return (physical+vec3f(.5))/vec3f(atlasDimensions);
 }
 fn svoNodeMipSamplePage(atlas:texture_3d<f32>,atlasSampler:sampler,pageOrigin:vec3u,interiorTexel:vec3f)->SvoNodeMipSample{

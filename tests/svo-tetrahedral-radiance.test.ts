@@ -19,7 +19,7 @@ import {
   type SvoRadianceRgb,
   type SvoTetrahedralRadiance,
 } from "../lib/svo-tetrahedral-radiance";
-import { planSvoNodeMipPyramid } from "../lib/svo-node-mip-pyramid";
+import { SVO_NODE_MIP_LAYOUT, planSvoNodeMipPyramid } from "../lib/svo-node-mip-pyramid";
 
 const close = (actual: number, expected: number, tolerance = 1e-9) => assert.ok(Math.abs(actual - expected) <= tolerance,
   `expected ${actual} to be within ${tolerance} of ${expected}`);
@@ -78,8 +78,9 @@ test("radiance atlas shares sparse page topology at sixteen bytes per texel", ()
   const plan = planSvoNodeMipPyramid({ generation: 1, occupiedPages: [[0, 0, 0]], levelCount: 2, atlasPages: [2, 1, 1] });
   assert.equal(SVO_TETRAHEDRAL_RADIANCE_LAYOUT.textureFormat, "rgb9e5ufloat");
   assert.equal(SVO_TETRAHEDRAL_RADIANCE_LAYOUT.bytesPerTexel, 16);
-  assert.equal(SVO_TETRAHEDRAL_RADIANCE_LAYOUT.bytesPerPhysicalPage, 16_000);
-  assert.equal(svoTetrahedralRadianceAtlasBytes(plan), 32_000, "physical atlas capacity includes its unused slot");
+  const physicalPageBytes = SVO_NODE_MIP_LAYOUT.physicalSize ** 3 * 16;
+  assert.equal(SVO_TETRAHEDRAL_RADIANCE_LAYOUT.bytesPerPhysicalPage, physicalPageBytes);
+  assert.equal(svoTetrahedralRadianceAtlasBytes(plan), 2 * physicalPageBytes, "physical atlas capacity includes its unused slot");
 });
 
 test("WGSL ABI uses four filterable lobes and analytic direction/diffuse reconstruction", () => {

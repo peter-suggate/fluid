@@ -138,6 +138,7 @@ test("the preset projection agrees with the catalog", () => {
     assert.equal(preset.group, entry.shelf);
     assert.equal(preset.description, entry.blurb);
     assert.equal(preset.background, entry.environment);
+    assert.equal(preset.presentationMode, entry.presentationMode ?? "full-scene");
     assert.deepEqual(preset.methodProfile, entry.methodProfile);
     assert.equal(canonicalScene(preset.create()), canonicalScene(sceneDocument(entry)),
       `${entry.id} must be one document however it is reached`);
@@ -149,6 +150,8 @@ test("the cold-load scene is pinned", () => {
   // explicit start, so renaming or reordering it is a runtime behaviour change.
   assert.equal(defaultScenePresetId, "water-box-dam-break");
   assert.equal(SCENE_CATALOG[0].id, defaultScenePresetId);
+  assert.equal(getScenePreset(defaultScenePresetId).presentationMode, "fluid-only",
+    "the performance scene must bypass dry-world construction and presentation");
 });
 
 test("an unknown id falls back rather than throwing", () => {

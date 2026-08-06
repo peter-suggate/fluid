@@ -186,6 +186,9 @@ export type DrySceneReplacementEncoder = (
   tracePhase?: RenderPathTracePhase,
 ) => DrySceneReplacementResult | false;
 
+/** What to put behind raster water when no dry-scene encoder is requested. */
+export type RasterWaterBackgroundMode = "require-dry-scene" | "clear";
+
 /**
  * Restricted tall cells cannot contain a free surface below their cubic band.
  * The interior can therefore follow that band, while a separate perimeter
@@ -1302,6 +1305,8 @@ export class RasterWaterPipeline {
   private surfaceLayout?: GPUBindGroupLayout;
   private surfacePeelLayout?: GPUBindGroupLayout;
   private compositeLayout?: GPUBindGroupLayout;
+  /** A clear fluid-only background is immutable and needs one full-frame clear per attachment lifetime. */
+  private clearBackgroundEncoded = false;
   private sampler?: GPUSampler;
   private vertexBuffer?: GPUBuffer;
   private indirectBuffer?: GPUBuffer;
@@ -1849,6 +1854,7 @@ export class RasterWaterPipeline {
     this.causticTexture?.destroy(); this.causticTexture = this.device.createTexture({ label: "Refracted floor caustics", size: [384,384], format: "rgba16float", usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING });
     this.causticsValid = false;
     this.dryInterfaceClearsEncoded = false;
+    this.clearBackgroundEncoded = false;
     this.targetKey = key; this.rebuildBindGroups();
   }
 
@@ -1933,7 +1939,7 @@ export class RasterWaterPipeline {
     return bindGroup;
   }
 
-  encode(encoder: GPUCommandEncoder, output: GPUTexture | GPUTextureView, nx: number, ny: number, nz: number, restrictedTallCell: boolean, maximumNeighborDelta: number, revision: number, drySceneReplacement?: DrySceneReplacementEncoder, traceBoundary?: () => void, tracePhase?: RenderPathTracePhase, forceSurfaceDiagnostics = false): RasterWaterEncodeResult | false {
+  encode(encoder: GPUCommandEncoder, output: GPUTexture | GPUTextureView, nx: number, ny: number, nz: number, restrictedTallCell: boolean, maximumNeighborDelta: number, revision: number, drySceneReplacement?: DrySceneReplacementEncoder, traceBoundary?: () => void, tracePhase?: RenderPathTracePhase, forceSurfaceDiagnostics = false, backgroundMode: RasterWaterBackgroundMode = "require-dry-scene"): RasterWaterEncodeResult | false {
     // Count only frames whose source has a completed GPU receipt. The
     // diagnostics/visual panels request full-rate receipts, making this an
     // exact source-mode counter while it is being used to judge fidelity.
@@ -2021,7 +2027,21 @@ export class RasterWaterPipeline {
     }
     traceBoundary?.();
     const sparseSceneResult = drySceneReplacement?.(encoder, this.sceneTexture, tracePhase) ?? false;
-    if (!sparseSceneResult) {
+    if (sparseSceneResult) {
+      // A later switch to fluid-only must clear imagery left by this frame.
+      this.clearBackgroundEncoded = false;
+    } else if (backgroundMode === "clear") {
+      // No geometry, shader, draw, or recurring full-frame write. The clear is
+      // retained until a dry-scene encoder writes the attachment or it resizes.
+      if (!this.clearBackgroundEncoded) {
+        encoder.beginRenderPass({label:"Fluid-only clear background",colorAttachments:[{
+          view:this.sceneTextureView!,clearValue:{r:.01,g:.025,b:.024,a:65504},loadOp:"clear",storeOp:"store"
+        }]}).end();
+        this.clearBackgroundEncoded = true;
+        tracePhase?.({ id: "dry-scene", label: "Fluid-only background clear" });
+      }
+    } else {
+      this.clearBackgroundEncoded = false;
       // The live sparse scene is the only dry-scene authority. Its absence is
       // intentionally visible and contains no scene-like substitute. Alpha is
       // far depth so the independently authoritative water interfaces remain

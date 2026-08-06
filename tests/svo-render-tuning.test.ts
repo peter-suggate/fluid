@@ -6,10 +6,18 @@ import {
   DEFAULT_SVO_RENDER_TUNING,
   SVO_CONE_RADIANCE_RECONSTRUCTION_CODES,
   SVO_ENVIRONMENT_BRICK_REFINEMENT_MAXIMUM,
+  SVO_ENVIRONMENT_REFINEMENT_DEPTH_DEFAULT,
+  SVO_ENVIRONMENT_REFINEMENT_DEPTH_MAXIMUM,
+  SVO_LOD_FIXED_LEVEL_MAXIMUM,
+  SVO_LOD_SCREEN_SPACE_PIXELS_MAXIMUM,
   SVO_PRIMARY_LEAF_VISIT_HARD_LIMIT,
   SVO_RENDER_TUNING_PRESETS,
   normalizeSvoRenderTuning,
+  svoSceneryDetailCellSize_m,
+  svoSceneryRefinementDepth,
+  type SvoRenderTuningPreset,
 } from "../lib/svo-render-tuning";
+import { SVO_SCREEN_SPACE_TERMINATION_CONTRACT } from "../lib/svo-screen-space-termination";
 import { svoDrySceneShader } from "../lib/webgpu-svo-dry-scene";
 
 test("primary leaf tuning reaches the audited shader ceiling without recompilation", () => {
@@ -25,6 +33,92 @@ test("primary leaf tuning reaches the audited shader ceiling without recompilati
   }).primaryLeafVisits, SVO_PRIMARY_LEAF_VISIT_HARD_LIMIT);
   assert.match(svoDrySceneShader,
     new RegExp(`leafVisit<${SVO_PRIMARY_LEAF_VISIT_HARD_LIMIT}u&&leafVisit<leafBudget`));
+});
+
+test("level of detail defaults to the shipping screen-space policy in every preset", () => {
+  // Zero, which the contract defines as exact: no node is ever collapsed, so
+  // the default frame is the reference image rather than an approximation of it.
+  //
+  // The machinery is still compiled and the slider still live — this is the
+  // runtime threshold, not the compile flag — so raising it restores the saving.
+  // What it stopped buying is quality: a sub-threshold brick draws as one voxel,
+  // and once the primary began shading a smooth reconstructed normal that tier
+  // was the only part of the frame still terracing.
+  assert.equal(DEFAULT_SVO_RENDER_TUNING.lodScreenSpacePixels, 0);
+  assert.ok(SVO_SCREEN_SPACE_TERMINATION_CONTRACT.defaultThresholdPixels > 0,
+    "the contract keeps its authored threshold so raising the slider has a derived value to return to");
+  // `fixed-level` is a debugging view. A preset reaching it would mean shipping
+  // a frame whose detail is pinned to a level nobody chose for that scene.
+  for (const preset of Object.keys(SVO_RENDER_TUNING_PRESETS) as SvoRenderTuningPreset[]) {
+    assert.equal(SVO_RENDER_TUNING_PRESETS[preset].lodMode, "screen-space", preset);
+  }
+  assert.equal(normalizeSvoRenderTuning({
+    ...DEFAULT_SVO_RENDER_TUNING,
+    lodMode: "screen-space-ish" as never,
+  }).lodMode, "screen-space");
+});
+
+test("a zero screen-space threshold survives normalization as exact traversal", () => {
+  // The acceptance lanes ask for zero to get the unapproximated reference
+  // image. Any clamp that nudged it to a small positive value would give them
+  // a subtly different frame under the name of the exact one, so this is the
+  // one bound in the whole tuning table that must not be inclusive-above-zero.
+  assert.equal(normalizeSvoRenderTuning({
+    ...DEFAULT_SVO_RENDER_TUNING,
+    lodScreenSpacePixels: 0,
+  }).lodScreenSpacePixels, 0);
+  assert.equal(normalizeSvoRenderTuning({
+    ...DEFAULT_SVO_RENDER_TUNING,
+    lodScreenSpacePixels: SVO_LOD_SCREEN_SPACE_PIXELS_MAXIMUM + 10,
+  }).lodScreenSpacePixels, SVO_LOD_SCREEN_SPACE_PIXELS_MAXIMUM);
+  // Continuous, not integral: this is the control that sweeps the cost curve.
+  assert.equal(normalizeSvoRenderTuning({
+    ...DEFAULT_SVO_RENDER_TUNING,
+    lodScreenSpacePixels: 2.5,
+  }).lodScreenSpacePixels, 2.5);
+});
+
+test("the fixed level clamps to the addressable hierarchy and starts at its floor of effect", () => {
+  assert.equal(SVO_LOD_FIXED_LEVEL_MAXIMUM, 21);
+  // Defaulting to the deepest level keeps a mode switch from changing the image
+  // by itself — otherwise the debugging tool becomes the thing under suspicion.
+  assert.equal(DEFAULT_SVO_RENDER_TUNING.lodFixedLevel, SVO_LOD_FIXED_LEVEL_MAXIMUM);
+  assert.equal(normalizeSvoRenderTuning({
+    ...DEFAULT_SVO_RENDER_TUNING,
+    lodFixedLevel: SVO_LOD_FIXED_LEVEL_MAXIMUM + 4,
+  }).lodFixedLevel, SVO_LOD_FIXED_LEVEL_MAXIMUM);
+  assert.equal(normalizeSvoRenderTuning({
+    ...DEFAULT_SVO_RENDER_TUNING,
+    lodFixedLevel: -3,
+  }).lodFixedLevel, 0);
+});
+
+test("the render panel exposes the level-of-detail mode and both of its predicates", () => {
+  const panel = readFileSync(new URL("../components/VisualPanel.tsx", import.meta.url), "utf8");
+  assert.match(panel, /Level of detail/);
+  assert.match(panel, /label="LOD threshold"/);
+  // "Fixed LOD level" said where descent stopped and nothing about what the
+  // number meant. Levels at or below the scene's brick depth all render the
+  // same image — the raster primary instances one proxy per brick — so the
+  // coarse half of the slider is a plateau, and three levels past the brick
+  // depth is already one cell. A user must not have to find either by
+  // experiment, and a hover tooltip is not where they would look, so both
+  // facts are asserted as visible caption text rather than as a `hint`.
+  assert.match(panel, /label="Detail level"/);
+  assert.doesNotMatch(panel, /Fixed LOD level/);
+  const caption = panel.match(/<p className="control-caption">[^]*?<\/p>/)?.[0] ?? "";
+  assert.match(caption, /0 coarsest → 21 exact voxels/);
+  assert.match(caption, /plateau/);
+  assert.match(caption, /no aggregate is ever drawn larger than this/i,
+    "the screen-space predicate states the guarantee it makes, not just its units");
+  // The pre-existing depth slider is a work budget that reports exhaustion, not
+  // a coarser surface. Two "levels" sliders that mean different things is a
+  // support burden; they are now separated — one leads Detail, the other sits
+  // under Advanced — and the one that is a budget still says so.
+  assert.match(panel, /A budget, not a LOD control/);
+  const lead = panel.indexOf('className="control-lead"');
+  const depth = panel.indexOf('label="Maximum traversal depth"');
+  assert.ok(lead > 0 && depth > lead, "the LOD predicate leads; the work budget is elsewhere");
 });
 
 test("environment bricks default one refinement level deeper than the previous plan", () => {
@@ -75,11 +169,53 @@ test("stationary primary visibility reuse is explicit and defaults off", () => {
   }).stationaryPrimaryReuseEnabled, true);
 });
 
-test("shadow cone aperture is exposed in the initially open cone controls", () => {
+test("the render panel is four groups deep and only the two tuning groups open", () => {
   const panel = readFileSync(new URL("../components/VisualPanel.tsx", import.meta.url), "utf8");
-  assert.match(panel, /ControlGroup title="Cone tracing"[^>]* open>/);
+  // Nine peer sections, five of them open, is what this panel grew into once
+  // "add another group" became the answer to "where does this control live?".
+  // The count is asserted rather than described because re-nesting is cheap and
+  // silent: a fifth group costs nothing to add and undoes the whole point.
+  const groups = [...panel.matchAll(/<ControlGroup title="([^"]+)"([^>]*)>/g)]
+    .map(([, title, attributes]) => ({ title, open: attributes.includes(" open") }));
+  assert.deepEqual(groups.map(({ title }) => title), ["Detail", "Lighting", "Diagnostics", "Advanced"]);
+  assert.deepEqual(groups.filter(({ open }) => open).map(({ title }) => title), ["Detail", "Lighting"]);
+});
+
+test("calibration knobs stay reachable under Advanced instead of ranking with the levers", () => {
+  const panel = readFileSync(new URL("../components/VisualPanel.tsx", import.meta.url), "utf8");
   assert.match(panel, /label="Shadow cone aperture"[^>]*value=\{tuning\.shadowConeAperture\}/);
   assert.match(panel, /updateTuning\("shadowConeAperture", value\)/);
+  // Demoted, never deleted: none of these has an environment override or a
+  // benchmark flag, so removing the control would make the field editable only
+  // by recompiling `DEFAULT_SVO_RENDER_TUNING`. What earns the demotion is that
+  // no preset moves any of them — and the ones presets do move, they move
+  // together, which is what the PROFILE strip already is.
+  const advanced = panel.indexOf('<ControlGroup title="Advanced"');
+  assert.ok(advanced > 0, "the Advanced group exists");
+  for (const label of [
+    "Shadow cone aperture", "Shadow strength", "Shadow origin bias",
+    "AO strength", "AO radius", "AO cone aperture",
+    "Direct key", "GI cone aperture", "GI cones",
+    "Normal escape", "Emitter clearance", "Cone step budget", "Shaded lights",
+    "Maximum traversal depth", "Maximum node visits", "Maximum leaf visits",
+    "Visibility nodes", "Visibility leaves", "Visibility voxel work", "Intersections",
+    "Environment brick refinement", "Lighting reconstruction",
+  ]) {
+    const at = panel.indexOf(`>${label}<`) >= 0 ? panel.indexOf(`>${label}<`) : panel.indexOf(`label="${label}"`);
+    assert.ok(at > advanced, `${label} is surfaced under Advanced`);
+  }
+  // The levers stay above it. Each is measured: resolution is pixel-linear,
+  // raster/traced is 29.0 against 49.6 ms at 1500x1500, stationary reuse is
+  // 47.6 -> 20.7 ms, and the screen-space threshold is 24.1 -> 5.0 ms on the
+  // 4 Mpx far arm. Nothing under Advanced has a number like that attached.
+  for (const label of ["Render resolution", "LOD threshold", "GI bounce", "GI occlusion", "Diffuse environment"]) {
+    const at = panel.indexOf(`label="${label}"`);
+    assert.ok(at > 0 && at < advanced, `${label} stays a first-class control`);
+  }
+  for (const label of ["Primary visibility", "Level of detail", "Lighting visibility", "Cone prepass"]) {
+    const at = panel.indexOf(`>${label}<`);
+    assert.ok(at > 0 && at < advanced, `${label} stays a first-class control`);
+  }
 });
 
 test("global illumination exposes image-shaping controls with cinematic balanced defaults", () => {
@@ -150,4 +286,88 @@ test("radiance reconstruction modes normalize and remain available for live visu
     "the measured split relight path is the production default");
   const panel = readFileSync(new URL("../components/VisualPanel.tsx", import.meta.url), "utf8");
   for (const label of ["EXACT", "LINEAR", "BILAT", "WIDE", "RELIGHT"]) assert.ok(panel.includes(`label: "${label}"`));
+});
+
+/**
+ * The refinement depth has exactly one home, and it is the document.
+ *
+ * It used to be two numbers — a `SvoRenderTuning` field that divided the tree's
+ * cell, and `voxelDomain.detailCellSize_m`, which every scenery generator is
+ * expanded against. Nothing held them in step, so the render panel's slider
+ * built a finer tree over a set still authored at the coarse size: on
+ * `hero-garden-hose` the stepping-stone treads stayed 12-17 voxels across while
+ * the tuning claimed a 0.78 mm leaf. These pin the collapse, not the arithmetic.
+ */
+test("the refinement depth is not a tuning field any more", () => {
+  assert.equal("environmentRefinementDepth" in DEFAULT_SVO_RENDER_TUNING, false);
+  for (const preset of Object.keys(SVO_RENDER_TUNING_PRESETS) as SvoRenderTuningPreset[]) {
+    assert.equal("environmentRefinementDepth" in SVO_RENDER_TUNING_PRESETS[preset], false, preset);
+  }
+  // Normalization must not resurrect it from an old persisted or linked value.
+  assert.equal("environmentRefinementDepth" in normalizeSvoRenderTuning({
+    ...DEFAULT_SVO_RENDER_TUNING,
+    environmentRefinementDepth: 3,
+  } as never), false);
+  // And the panel's slider must go through the controller's one setter rather
+  // than write tuning, or the two numbers come straight back with the symptom.
+  const panel = readFileSync(new URL("../components/VisualPanel.tsx", import.meta.url), "utf8");
+  assert.doesNotMatch(panel, /updateTuning\("environmentRefinementDepth"/);
+  assert.match(panel, /simulation\.setEnvironmentRefinementDepth\(/);
+  // Disabled only by water. Gating it on the factory taking a lattice killed the
+  // control on 37 of 39 presets, where a finer leaf still resolves the analytic
+  // proxies genuinely better — see `setEnvironmentRefinementDepth`.
+  assert.match(panel, /disabled=\{!sceneIsDry\}/);
+});
+
+test("the document's depth and its detail cell are exact inverses", () => {
+  for (const finestCellSize_m of [0.025, 0.00625, 0.1]) {
+    for (let depth = 0; depth <= SVO_ENVIRONMENT_REFINEMENT_DEPTH_MAXIMUM; depth += 1) {
+      const detailCellSize_m = svoSceneryDetailCellSize_m(finestCellSize_m, {
+        environmentRefinementDepth: depth, fluid: false,
+      });
+      assert.equal(
+        svoSceneryRefinementDepth({ finestCellSize_m, detailCellSize_m }, { fluid: false }),
+        depth, `${finestCellSize_m} m at depth ${depth}`);
+    }
+  }
+  // An absent detail cell is depth zero, which is what an unauthored document
+  // says: the set was expanded at the lattice's own cell.
+  assert.equal(svoSceneryRefinementDepth({ finestCellSize_m: 0.00625 }, { fluid: false }), 0);
+  // Zero on a wet scene however fine the document claims to be — a solver brick
+  // pins its node, so there is nowhere to descend. Same rule as the forward
+  // function, which is why they cannot disagree about a fluid scene either.
+  assert.equal(svoSceneryRefinementDepth(
+    { finestCellSize_m: 0.00625, detailCellSize_m: 0.00078125 }, { fluid: true }), 0);
+  // Clamped, so an externally supplied lattice cannot ask for an unbounded one.
+  assert.equal(svoSceneryRefinementDepth(
+    { finestCellSize_m: 0.025, detailCellSize_m: 0.025 / 2 ** 9 }, { fluid: false }),
+    SVO_ENVIRONMENT_REFINEMENT_DEPTH_MAXIMUM);
+});
+
+test("a dry document opens at the default refinement rung, through its own factory", async () => {
+  const { getScenePreset, findSceneDefinition } = await import("../lib/scenes");
+  const { sceneDefinitionTakesLattice } = await import("../lib/scene-definition");
+  const hero = getScenePreset("hero-garden-hose").create();
+  assert.equal(hero.systems?.fluid, false, "the hero opens dry, which is what makes a depth legal");
+  assert.equal(
+    svoSceneryRefinementDepth(hero.voxelDomain, { fluid: false }),
+    SVO_ENVIRONMENT_REFINEMENT_DEPTH_DEFAULT,
+    "the document itself carries the rung, because the renderer reads it from there");
+  // Through `buildAt`, not written on afterwards: the terrain pitch follows the
+  // detail cell, so a document that acquired one after construction would claim
+  // a leaf its ground was never sampled for.
+  const { terrainSampleShape } = await import("../lib/terrain");
+  const ground = terrainSampleShape(hero.terrain);
+  assert.ok(ground, "the hero has ground to check the pitch of");
+  assert.ok(ground.spacing_m <= (hero.voxelDomain.detailCellSize_m ?? hero.voxelDomain.finestCellSize_m),
+    `terrain sampled at ${ground.spacing_m} m must not be coarser than the ${hero.voxelDomain.detailCellSize_m} m leaf`);
+  // A definition with no lattice input opens at its own, and must not have a
+  // finer detail cell invented for it — there is no factory to re-run.
+  for (const preset of ["garden-svo-lighting"]) {
+    const definition = findSceneDefinition(preset);
+    if (definition && sceneDefinitionTakesLattice(definition)) continue;
+    const scene = getScenePreset(preset).create();
+    assert.equal(scene.voxelDomain.detailCellSize_m, undefined,
+      `${preset} has no buildAt, so nothing may author a detail cell its generators did not run at`);
+  }
 });

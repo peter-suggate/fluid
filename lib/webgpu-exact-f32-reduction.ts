@@ -107,11 +107,27 @@ function wgslExpression(value: string): string {
 }
 
 /**
+ * Lanes co-operating on one limb column of the partial fold.
+ *
+ * The fold is a `livePartialCount x FIXED_LIMBS` integer matrix summed down its
+ * columns. Assigning `limb = lane % FIXED_LIMBS` makes each group of 36 lanes
+ * read one partial record as a single contiguous 144-byte span, so the strided
+ * partial walk stays coalesced; `group = lane / FIXED_LIMBS` then splits the
+ * partial axis across as many such groups as the workgroup can host.
+ */
+export function signedRadix256F32LimbGroups(reductionLanes: number): number {
+  return Math.floor(
+    positiveInteger(reductionLanes, "Signed radix-256 reduction lane count")
+      / SIGNED_RADIX_256_F32_LIMBS,
+  );
+}
+
+/**
  * Emit the complete WGSL storage/helper ABI for one exact-reduction instance.
  *
  * The emitted public helpers are `clearFixedPartial`, `addFixedF32`, and
  * `fixedScalarValue`. A consumer clears one partial cooperatively, deposits
- * finite row values, then calls `fixedScalarValue` from a singleton finish.
+ * finite row values, then folds with `fixedScalarValue` from a finish kernel.
  * Non-finite inputs must be rejected by the consumer before deposit.
  */
 export function createSignedRadix256F32ReductionWGSL(
@@ -127,6 +143,12 @@ export function createSignedRadix256F32ReductionWGSL(
     options.reductionLanes,
     "Signed radix-256 reduction lane count",
   );
+  const limbGroups = signedRadix256F32LimbGroups(reductionLanes);
+  if (limbGroups < 1) {
+    throw new RangeError(
+      `Signed radix-256 cooperative fold needs at least ${SIGNED_RADIX_256_F32_LIMBS} reduction lanes`,
+    );
+  }
   const livePartialCount = wgslExpression(options.livePartialCountExpression);
   assertSignedRadix256F32TermCapacity(options.maximumTermCount);
 
@@ -139,6 +161,15 @@ const FIXED_LIMBS = ${SIGNED_RADIX_256_F32_LIMBS}u;
 const FIXED_SCALARS = ${scalarCount}u;
 const FIXED_WORDS_PER_PARTIAL = FIXED_LIMBS * FIXED_SCALARS;
 const FIXED_MIN_EXPONENT = ${SIGNED_RADIX_256_F32_MIN_EXPONENT};
+// Independent partial-axis slices the fold splits across; see
+// signedRadix256F32LimbGroups for why the mapping is limb-major.
+const FIXED_LIMB_GROUPS = ${limbGroups}u;
+const FIXED_FOLD_LANES = FIXED_LIMB_GROUPS * FIXED_LIMBS;
+
+/** Live partials the consumer deposited into; the fold's default upper bound. */
+fn fixedLivePartialCount() -> u32 { return ${livePartialCount}; }
+
+var<workgroup> fixedFoldShare: array<i32, ${reductionLanes}>;
 
 fn fixedAt(partial: u32, scalar: u32, limb: u32) -> u32 {
   return partial * FIXED_WORDS_PER_PARTIAL + scalar * FIXED_LIMBS + limb;
@@ -184,13 +215,8 @@ fn floorDiv256(value: i32) -> vec2i {
 // Integer-only merge followed by one f32 rounding. Decode scaled limbs
 // directly: materializing the unscaled integer in f32 can overflow even when
 // its represented physical value is ordinary.
-fn fixedScalarValue(scalar: u32) -> f32 {
-  var limbs: array<i32, ${SIGNED_RADIX_256_F32_LIMBS}>;
-  for (var partial = 0u; partial < ${livePartialCount}; partial += 1u) {
-    for (var limb = 0u; limb < FIXED_LIMBS; limb += 1u) {
-      limbs[limb] += atomicLoad(&partials[fixedAt(partial, scalar, limb)]);
-    }
-  }
+fn fixedDecodeLimbs(totals: array<i32, ${SIGNED_RADIX_256_F32_LIMBS}>) -> f32 {
+  var limbs = totals;
   for (var limb = 0u; limb + 1u < FIXED_LIMBS; limb += 1u) {
     let normalized = floorDiv256(limbs[limb]);
     limbs[limb] = normalized.y;
@@ -213,6 +239,46 @@ fn fixedScalarValue(scalar: u32) -> f32 {
     magnitude += ldexp(f32(limbs[limb]), FIXED_MIN_EXPONENT + i32(limb * 8u));
   }
   return select(magnitude, -magnitude, negative);
+}
+
+// Cooperative partial fold. Bit-identical to a serial walk: the limb totals are
+// integer sums, so associativity and commutativity make them invariant under
+// ANY partition of the (partial, limb) grid, and only lane 0's single carry
+// propagation and f32 rounding follow.
+//
+// EVERY lane of the workgroup must reach this call -- it contains workgroup
+// barriers, so it may only be invoked from uniform control flow. Callers select
+// work by passing partialCount, never by branching around the call: a
+// partialCount of 0 folds nothing and returns exactly +0.0, which is what a
+// cleared (never-deposited) scalar folds to anyway.
+//
+// Only lane 0's return value is meaningful.
+fn fixedScalarValue(scalar: u32, lane: u32, partialCount: u32) -> f32 {
+  let limb = lane % FIXED_LIMBS;
+  let group = lane / FIXED_LIMBS;
+  var slice = 0;
+  if (group < FIXED_LIMB_GROUPS) {
+    for (var partial = group; partial < partialCount; partial += FIXED_LIMB_GROUPS) {
+      slice += atomicLoad(&partials[fixedAt(partial, scalar, limb)]);
+    }
+  }
+  fixedFoldShare[lane] = slice;
+  workgroupBarrier();
+  var value = 0.0;
+  if (lane == 0u) {
+    var totals: array<i32, ${SIGNED_RADIX_256_F32_LIMBS}>;
+    for (var index = 0u; index < FIXED_LIMBS; index += 1u) {
+      var total = 0;
+      for (var slot = 0u; slot < FIXED_LIMB_GROUPS; slot += 1u) {
+        total += fixedFoldShare[slot * FIXED_LIMBS + index];
+      }
+      totals[index] = total;
+    }
+    value = fixedDecodeLimbs(totals);
+  }
+  // Release the share before a caller folds its next scalar into it.
+  workgroupBarrier();
+  return value;
 }
 `;
 }

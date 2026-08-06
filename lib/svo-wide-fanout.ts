@@ -6,6 +6,7 @@
  * terminal covers one. The source octree remains authoritative: terminal
  * records only point back to source node/leaf indices.
  */
+import { completeCooperativeBuild } from "./cooperative-build";
 
 export type SvoWideCoordinate = readonly [number, number, number];
 export type SvoWideVec3 = readonly [number, number, number];
@@ -221,28 +222,96 @@ function terminalSlots(terminal: SvoWideTerminalInput, pageLevel: number): numbe
 
 /** Build a level-major, Morton-sorted 4^3 directory from canonical terminals. */
 export function planSvoWideFanout(input: SvoWideFanoutPlanInput): SvoWideFanoutPlan {
+  return completeCooperativeBuild(planSvoWideFanoutSteps(input));
+}
+
+/** Items per yield offer; see `PLAN_YIELD_BATCH` in `adaptive-sparse-brick-plan`. */
+const WIDE_FANOUT_YIELD_BATCH = 4096;
+
+/**
+ * The same plan, offered as slices.
+ *
+ * Measured on a shell-and-slab claim of 97k leaves — about the shape and half
+ * the size of `hero-garden-hose` at environment refinement depth 3 — this pass
+ * is 527 ms against 27 ms to pack the plan it consumes and 6 ms to pack the
+ * compact hierarchy beside it. It is the longest block left in the allocation
+ * stage, and superlinear in the leaf count, so it is also the one that gets
+ * worse as the depth control is pushed.
+ *
+ * Every yield is between whole terminals or whole pages, and this function owns
+ * no device resource at all — the caller builds the arena from the returned
+ * plan — so an abandoned plan is garbage and nothing else.
+ */
+export function* planSvoWideFanoutSteps(
+  input: SvoWideFanoutPlanInput,
+): Generator<unknown, SvoWideFanoutPlan, undefined> {
   const sourceGeneration = uint32(input.sourceGeneration, "Source generation");
   const generation = uint32(input.generation, "Wide generation");
   if (!Number.isInteger(input.maximumDepth) || input.maximumDepth < 0 || input.maximumDepth > 21) {
     throw new RangeError("Maximum depth must be an integer from 0 to 21");
   }
-  const terminals = input.terminals.map((value) => {
+  // The Morton code is decorated onto each terminal rather than recomputed
+  // inside the comparator. A sort asks its comparator O(n log n) times and this
+  // one built two BigInts per call — at the hero garden's leaf count that is
+  // several million bigint encodes to order a list of n.
+  const ordered: { value: SvoWideTerminalInput; morton: bigint }[] = [];
+  let visited = 0;
+  for (const value of input.terminals) {
     validateLevel(value.level, input.maximumDepth);
     validateCoordinate(value.coordinate, value.level);
     uint32(value.sourceNodeIndex, "Source node index");
     if (value.sourceLeafIndex !== undefined) uint32(value.sourceLeafIndex, "Source leaf index");
     opacityForTerminal(value);
-    return value;
-  }).sort((a, b) => a.level - b.level || (mortonAtLevel(a.coordinate, a.level) < mortonAtLevel(b.coordinate, b.level) ? -1 : 1)
-    || a.sourceNodeIndex - b.sourceNodeIndex);
+    ordered.push({ value, morton: mortonAtLevel(value.coordinate, value.level) });
+    if ((visited += 1) % WIDE_FANOUT_YIELD_BATCH === 0) yield;
+  }
+  // Byte-for-byte the previous comparator, which never returns 0 from its
+  // second clause and therefore never reached its third.
+  ordered.sort((a, b) => a.value.level - b.value.level || (a.morton < b.morton ? -1 : 1));
+  yield;
+  const terminals = ordered.map((entry) => entry.value);
 
-  // Canonical leaves must be disjoint. Detect equal and ancestor/descendant support.
-  for (let a = 0; a < terminals.length; a += 1) for (let b = a + 1; b < terminals.length; b += 1) {
-    const shallow = terminals[a].level <= terminals[b].level ? terminals[a] : terminals[b];
-    const deep = shallow === terminals[a] ? terminals[b] : terminals[a];
-    const divisor = 2 ** (deep.level - shallow.level);
-    if (shallow.coordinate.every((value, axis) => value === Math.floor(deep.coordinate[axis] / divisor))) {
-      throw new RangeError("Canonical wide-fanout terminals must not overlap");
+  // Canonical leaves must be disjoint. Detect equal and ancestor/descendant
+  // support.
+  //
+  // This was an all-pairs scan, and it was the single most expensive thing in a
+  // scene build the moment the tree stopped being small: 14.9 s of a 22.7 s
+  // build on `hero-garden-hose` at environment refinement depth 2, 48 % of the
+  // whole thing, growing as the *square* of the leaf count while every other
+  // stage grows linearly. That is what made each depth rung cost ~10x the last
+  // rather than ~8x.
+  //
+  // Both failures fall out of one index instead. Equal support is two terminals
+  // with the same (level, coordinate); containment is a terminal whose ancestor
+  // at some shallower level is itself a terminal — and a coordinate has exactly
+  // one ancestor per level. So the question is asked once per (terminal,
+  // occupied shallower level) rather than once per pair, and a tree occupies a
+  // handful of levels however many leaves it has.
+  const supportByLevel = new Map<number, Set<string>>();
+  const coordinateKey = (x: number, y: number, z: number) => `${x},${y},${z}`;
+  visited = 0;
+  for (const terminal of terminals) {
+    let support = supportByLevel.get(terminal.level);
+    if (!support) supportByLevel.set(terminal.level, support = new Set<string>());
+    const key = coordinateKey(terminal.coordinate[0], terminal.coordinate[1], terminal.coordinate[2]);
+    if (support.has(key)) throw new RangeError("Canonical wide-fanout terminals must not overlap");
+    support.add(key);
+    if ((visited += 1) % WIDE_FANOUT_YIELD_BATCH === 0) yield;
+  }
+  const occupiedLevels = [...supportByLevel.keys()].sort((a, b) => a - b);
+  visited = 0;
+  for (const terminal of terminals) {
+    if ((visited += 1) % WIDE_FANOUT_YIELD_BATCH === 0) yield;
+    for (const level of occupiedLevels) {
+      if (level >= terminal.level) break;
+      const divisor = 2 ** (terminal.level - level);
+      if (supportByLevel.get(level)!.has(coordinateKey(
+        Math.floor(terminal.coordinate[0] / divisor),
+        Math.floor(terminal.coordinate[1] / divisor),
+        Math.floor(terminal.coordinate[2] / divisor),
+      ))) {
+        throw new RangeError("Canonical wide-fanout terminals must not overlap");
+      }
     }
   }
 
@@ -257,15 +326,19 @@ export function planSvoWideFanout(input: SvoWideFanoutPlanInput): SvoWideFanoutP
     }
     return page;
   };
+  visited = 0;
   for (const terminal of terminals) {
     const finalPageLevel = terminalPageLevel(terminal.level);
     for (let level = 0; level <= finalPageLevel; level += 2) {
       const shift = terminal.level - level;
       ensurePage(level, terminal.coordinate.map((value) => Math.floor(value / 2 ** shift)) as unknown as SvoWideCoordinate);
     }
+    if ((visited += 1) % WIDE_FANOUT_YIELD_BATCH === 0) yield;
   }
   const mutablePages = [...pageByKey.values()].sort((a, b) => a.level - b.level || (a.morton < b.morton ? -1 : a.morton > b.morton ? 1 : 0));
+  yield;
   for (let index = 1; index < mutablePages.length; index += 1) {
+    if (index % WIDE_FANOUT_YIELD_BATCH === 0) yield;
     const child = mutablePages[index];
     const parentLevel = child.level - 2;
     const parentCoordinate = child.coordinate.map((value) => Math.floor(value / 4)) as unknown as SvoWideCoordinate;
@@ -277,7 +350,9 @@ export function planSvoWideFanout(input: SvoWideFanoutPlanInput): SvoWideFanoutP
   }
 
   let terminalSlotCount = 0;
+  visited = 0;
   for (const terminal of terminals) {
+    if ((visited += 1) % WIDE_FANOUT_YIELD_BATCH === 0) yield;
     const level = terminalPageLevel(terminal.level);
     const shift = terminal.level - level;
     const coordinate = terminal.coordinate.map((value) => Math.floor(value / 2 ** shift)) as unknown as SvoWideCoordinate;
@@ -298,6 +373,7 @@ export function planSvoWideFanout(input: SvoWideFanoutPlanInput): SvoWideFanoutP
   const completed = new Array<SvoWidePagePlan>(mutablePages.length);
   let descriptorCount = 0;
   for (let index = mutablePages.length - 1; index >= 0; index -= 1) {
+    if (index % WIDE_FANOUT_YIELD_BATCH === 0) yield;
     const source = mutablePages[index];
     const descriptors = [...source.entries.values()].sort((a, b) => a.slot - b.slot).map((descriptor) => {
       if (descriptor.kind !== "page") return descriptor;

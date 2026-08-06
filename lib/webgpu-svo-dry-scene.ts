@@ -12,10 +12,18 @@ import {
   SVO_PRIMITIVE_RECORD_WORDS,
   SVO_SMOOTH_UNION_CLUSTER_ARENA_WORDS,
   type SvoClusterResolver,
+  type SvoFieldProgramResolver,
   type SvoSmoothUnionClusterPacking,
   type SvoTerrainHeightfieldPrimitive,
   type SvoTerrainResolver,
 } from "./svo-primitive-abi";
+import {
+  packSvoFieldProgramArena,
+  svoFieldProgramWGSL,
+  unpackSvoFieldProgram,
+  SVO_FIELD_PROGRAM_BLOCK_WORDS,
+  type SvoFieldProgram,
+} from "./svo-field-program";
 import type { ResourcePluginDefinition } from "./resource-readiness";
 
 /** Lifecycle metadata lives with the sparse presentation programs it describes. */
@@ -103,13 +111,14 @@ import {
 } from "./svo-thick-glass";
 import { SVO_VISIBILITY_LIMITS, svoVisibilityRaysWGSL } from "./svo-visibility-rays";
 import {
-  MAX_TERRAIN_GRID_SAMPLES,
+  MAX_TERRAIN_DERIVED_GRID_SAMPLES,
   MIN_TERRAIN_GRID_SIZE,
   TERRAIN_CEILING_MARGIN_M,
   terrainCeiling,
   terrainGridExtent,
   terrainHeightAt,
   terrainNormalAt,
+  terrainSampleGrid,
   type TerrainDescription,
   type TerrainGrid,
 } from "./terrain";
@@ -175,8 +184,13 @@ import {
   SparseVoxelBrickRasterProbeBuffers,
   SVO_BRICK_RASTER_PROBE_CONTRACT,
 } from "./webgpu-svo-brick-raster-probe";
-import { SPARSE_BRICK_NO_OWNER } from "./sparse-brick-octree";
-import { createSvoScreenSpaceTraversalWGSL, SVO_SCREEN_SPACE_TERMINATION_CONTRACT } from "./svo-screen-space-termination";
+import {
+  SPARSE_BRICK_NO_OWNER, octreeLiveSceneSceneGeometryFormat, sparseBrickSceneGeometryCodecWGSL,
+  type SparseBrickSceneGeometryFormat,
+} from "./sparse-brick-octree";
+import {
+  createSvoScreenSpaceTraversalWGSL, SVO_SCREEN_SPACE_TERMINATION_CONTRACT, svoLodDescentWGSL,
+} from "./svo-screen-space-termination";
 import {
   createSvoScenePrimitiveBandWGSL,
   packSvoScenePrimitiveBandParams,
@@ -238,9 +252,27 @@ import {
   DEFAULT_SVO_RENDER_TUNING,
   SVO_CONE_RADIANCE_RECONSTRUCTION_CODES,
   SVO_PRIMARY_LEAF_VISIT_HARD_LIMIT,
+  SVO_SURFACE_ANALYTIC_EIKONAL_TOLERANCE,
+  SVO_SURFACE_TERRAIN_GRADIENT_CELLS,
   normalizeSvoRenderTuning,
+  type SvoLodMode,
   type SvoRenderTuning,
+  type SvoSurfaceReconstruction,
 } from "./svo-render-tuning";
+
+/**
+ * Whether a scene-geometry arm stores the distance in metres.
+ *
+ * The eikonal certificate in `dryCertifiedSurfaceNormal` compares the stencil's
+ * gradient magnitude against 1, which is only a statement about the field when
+ * the lane's unit is the same as the lattice's. Both shipping arms store metres;
+ * a band-relative arm would not, and this map is exhaustive so that adding one
+ * is a decision rather than a silently disabled check.
+ */
+const sceneDistanceIsMetres: Readonly<Record<SparseBrickSceneGeometryFormat, boolean>> = Object.freeze({
+  f32x2: true,
+  "f16-unorm8": true,
+});
 import {
   SparseVoxelPixelTraceBuffers,
   createSvoPixelTraceProbeWGSL,
@@ -285,6 +317,14 @@ export interface SparseVoxelDrySceneData {
    * no aggregates, and the region is uploaded as zeroes rather than left alone.
    */
   clusterBlocks?: Uint32Array<ArrayBuffer>;
+  /**
+   * Packed field-program tape blocks, in publication order, as
+   * `packSvoDrySceneFieldPrograms` produces them. Absent means this scene
+   * publishes no tapes, and the region is uploaded as zeroes rather than left
+   * alone — a stale block from the previous scene would otherwise be resolved by
+   * a new scene's record and grow somebody else's shape.
+   */
+  fieldProgramBlocks?: Uint32Array<ArrayBuffer>;
   /** Packed 80-byte finite-pane records. Empty means this scene has no glass. */
   glassRecords?: Uint32Array<ArrayBuffer>;
   /** Versioned live content key used to avoid redundant pane uploads. */
@@ -350,8 +390,16 @@ export const SVO_DRY_SCENE_TERRAIN_HEADER_BYTES =
 /** Bytes a heightfield of `sampleCount` samples occupies, header included. */
 export const svoDrySceneTerrainRegionBytes = (sampleCount: number): number =>
   SVO_DRY_SCENE_TERRAIN_HEADER_BYTES + sampleCount * Float32Array.BYTES_PER_ELEMENT;
+/**
+ * Ceiling on the region, not a reservation: `ensureSceneArenaCapacity` grows the
+ * arena to whatever the publication actually carries, and this is the sanity
+ * bound above it. Sized on the *derived* sample budget rather than the document
+ * one because a described ground (`TerrainProcedural`) is built at the lattice
+ * being drawn — 1153x769 at the first refinement rung, which the document
+ * budget would have rejected as a heightfield it was never being asked to hold.
+ */
 export const SVO_DRY_SCENE_TERRAIN_ARENA_MAXIMUM_BYTES =
-  svoDrySceneTerrainRegionBytes(MAX_TERRAIN_GRID_SAMPLES);
+  svoDrySceneTerrainRegionBytes(MAX_TERRAIN_DERIVED_GRID_SAMPLES);
 /**
  * How many aggregate clusters one scene may publish.
  *
@@ -377,6 +425,29 @@ export const SVO_DRY_SCENE_CLUSTER_ARENA_SIZE_BYTES =
   SVO_DRY_SCENE_CLUSTER_CAPACITY * SVO_DRY_SCENE_CLUSTER_BLOCK_BYTES;
 
 /**
+ * How many field-program tapes one scene may publish.
+ *
+ * Two hundred and fifty-six, and deliberately an order of magnitude under the
+ * aggregate arena beside it, because the two kinds are used at opposite
+ * densities. An aggregate is authored once per *record* — the hero garden
+ * publishes 208 of them against 501 records — while a field program is authored
+ * once per *species*: one boulder tape is instanced across every stone in a set,
+ * and the whole point of the kind is that adding detail to it does not add
+ * records. A scene that genuinely wanted a distinct tape per record would be
+ * saying it has no shared shape language at all, which is the case this kind
+ * exists to replace.
+ *
+ * A block is 528 bytes, so the region is 132 KB reserved once, against a scene
+ * arena that already carries three quarters of a megabyte of material and
+ * candidate space.
+ */
+export const SVO_DRY_SCENE_FIELD_PROGRAM_CAPACITY = 256;
+export const SVO_DRY_SCENE_FIELD_PROGRAM_BLOCK_BYTES =
+  SVO_FIELD_PROGRAM_BLOCK_WORDS * Uint32Array.BYTES_PER_ELEMENT;
+export const SVO_DRY_SCENE_FIELD_PROGRAM_ARENA_SIZE_BYTES =
+  SVO_DRY_SCENE_FIELD_PROGRAM_CAPACITY * SVO_DRY_SCENE_FIELD_PROGRAM_BLOCK_BYTES;
+
+/**
  * One stable renderer-owned storage allocation for every authored scene record.
  *
  * Written as a running offset rather than as nested alignment calls: the terrain
@@ -395,8 +466,12 @@ const drySceneArenaRegions = (() => {
   const primitiveOffsetBytes = region(SVO_PRIMITIVE_CANDIDATE_ARENA_SIZE_BYTES);
   const glassOffsetBytes = region(SVO_DRY_SCENE_GLASS_ARENA_SIZE_BYTES);
   const clusterOffsetBytes = region(SVO_DRY_SCENE_CLUSTER_ARENA_SIZE_BYTES);
+  const fieldProgramOffsetBytes = region(SVO_DRY_SCENE_FIELD_PROGRAM_ARENA_SIZE_BYTES);
   const terrainOffsetBytes = region(SVO_DRY_SCENE_TERRAIN_HEADER_BYTES);
-  return { materialOffsetBytes, primitiveOffsetBytes, glassOffsetBytes, clusterOffsetBytes, terrainOffsetBytes, sizeBytes: offsetBytes };
+  return {
+    materialOffsetBytes, primitiveOffsetBytes, glassOffsetBytes, clusterOffsetBytes, fieldProgramOffsetBytes,
+    terrainOffsetBytes, sizeBytes: offsetBytes,
+  };
 })();
 
 export const SVO_DRY_SCENE_ARENA_LAYOUT = Object.freeze({
@@ -405,6 +480,8 @@ export const SVO_DRY_SCENE_ARENA_LAYOUT = Object.freeze({
   glassOffsetBytes: drySceneArenaRegions.glassOffsetBytes,
   /** Fixed-capacity aggregate parameter blocks, addressed by a record's word-13 reference. */
   clusterOffsetBytes: drySceneArenaRegions.clusterOffsetBytes,
+  /** Fixed-capacity field-program tape blocks, addressed by a record's word-13 reference. */
+  fieldProgramOffsetBytes: drySceneArenaRegions.fieldProgramOffsetBytes,
   terrainOffsetBytes: drySceneArenaRegions.terrainOffsetBytes,
   /**
    * The allocation a scene with no sculpted terrain needs. Every fixed-capacity
@@ -432,6 +509,20 @@ export const SVO_DRY_SCENE_BINDING_CONTRACT = Object.freeze([
   ...[0, 1].map((binding) => ({ binding, type: "uniform" as const })),
   // structure, scene-owner payload, authored scene arena, optional derived traversal.
   ...[2, 3, 4, 5].map((binding) => ({ binding, type: "read-only-storage" as const })),
+  // The scene-geometry lane: signed distance at the voxel centre, plus coverage.
+  //
+  // The one smooth-normal source the world holds, and until this binding existed
+  // the primary could not read it — it shaded from `dryVoxelFaceNormal`, one of
+  // six axis directions, which is why every surface terraced at every lattice.
+  // The voxeliser keeps the field's own value at the voxel centre precisely so
+  // this can be differentiated (lib/webgpu-sparse-scene-proxies.ts).
+  //
+  // Measured against the ceiling before it was added: the worst fragment entry
+  // point of the shipping raster-primary composition reaches six storage buffers
+  // (three here, three in the split group), so this is the seventh against a
+  // spec floor of eight. Binding 5 is filtered out in both shipping traversals,
+  // which is where the headroom comes from.
+  { binding: 6, type: "read-only-storage" as const },
   { binding: 9, type: "uniform" as const },
   ...[13, 14, 15].map((binding) => ({ binding, type: "uniform" as const })),
   { binding: 16, type: "texture-3d-float" as const },
@@ -460,7 +551,7 @@ export function sparseVoxelDrySceneBindGroupLayoutEntries(
   // inputs, but not material shading, glass, or dormant traversal variants.
   // Keeping those fragment-only also stays below WebGPU's per-stage storage
   // binding limit on Apple GPUs.
-  const computeBindings = new Set([0, 1, 2, 3, 4, 5, 9, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27]);
+  const computeBindings = new Set([0, 1, 2, 3, 4, 5, 6, 9, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27]);
   // Raster analytic impostors consume the camera/body uniforms, their scene
   // record arena, and the live primitive-count/structural-offset parameters.
   const vertexBindings = new Set([0, 1, 4, 9]);
@@ -558,7 +649,12 @@ export function packSvoDrySceneTerrainHeightfield(grid: TerrainGrid | undefined)
   if (!Number.isInteger(nx) || !Number.isInteger(nz) || nx < MIN_TERRAIN_GRID_SIZE || nz < MIN_TERRAIN_GRID_SIZE) {
     throw new RangeError(`Sculpted terrain region needs at least ${MIN_TERRAIN_GRID_SIZE} samples per axis`);
   }
-  if (nx * nz > MAX_TERRAIN_GRID_SAMPLES) throw new RangeError(`Sculpted terrain region exceeds ${MAX_TERRAIN_GRID_SAMPLES} samples`);
+  // The *derived* budget, not the document one. `MAX_TERRAIN_GRID_SAMPLES` is
+  // what a scene may carry as JSON; a ground the document only describes is
+  // built at the lattice in use (`terrainSampleGrid`) and can legitimately be
+  // finer than any document would be allowed to spell out — 1153x769 at the
+  // first refinement rung, which is where the coverage holes were.
+  if (nx * nz > MAX_TERRAIN_DERIVED_GRID_SAMPLES) throw new RangeError(`Sculpted terrain region exceeds ${MAX_TERRAIN_DERIVED_GRID_SAMPLES} samples`);
   if (grid.heights_m.length !== nx * nz) throw new RangeError("Sculpted terrain region heights must be row-major nx * nz samples");
   if (!(grid.spacing_m > 0) || !Number.isFinite(grid.spacing_m)) throw new RangeError("Sculpted terrain region spacing must be positive and finite");
   const extent = terrainGridExtent(grid);
@@ -663,6 +759,74 @@ export function svoDrySceneClusterReference(index: number): number {
   }
   return SVO_DRY_SCENE_ARENA_LAYOUT.clusterOffsetBytes / Uint32Array.BYTES_PER_ELEMENT
     + index * SVO_SMOOTH_UNION_CLUSTER_ARENA_WORDS;
+}
+
+/**
+ * Word offset of field-program tape block `index` in the scene arena.
+ *
+ * A word offset rather than a slot, for the reason the terrain and cluster
+ * references are: a shader handed this number reads the block with no further
+ * indirection. It is also what makes a stale reference *checkable* — the block
+ * stride is fixed, so an offset that is not a block start is a corrupt word and
+ * not a tape read from the middle of its neighbour.
+ */
+export function svoDrySceneFieldProgramReference(index: number): number {
+  if (!Number.isInteger(index) || index < 0 || index >= SVO_DRY_SCENE_FIELD_PROGRAM_CAPACITY) {
+    throw new RangeError(
+      `Field-program index ${index} is outside the arena's ${SVO_DRY_SCENE_FIELD_PROGRAM_CAPACITY}-block capacity`,
+    );
+  }
+  return SVO_DRY_SCENE_ARENA_LAYOUT.fieldProgramOffsetBytes / Uint32Array.BYTES_PER_ELEMENT
+    + index * SVO_FIELD_PROGRAM_BLOCK_WORDS;
+}
+
+/**
+ * Pack every tape into the arena's field-program region, in publication order,
+ * so block `i` is what `svoDrySceneFieldProgramReference(i)` names.
+ *
+ * An unfilled block stays zeroed, and a zeroed block decodes as a tape with no
+ * ops — which evaluates to the "not resolved" distance both the CPU resolver and
+ * the shader reject. A record that names one therefore renders as nothing and
+ * reports itself invalid, rather than as the smooth source solid a plausible
+ * default would produce.
+ */
+export function packSvoDrySceneFieldPrograms(
+  programs: readonly SvoFieldProgram[],
+): Uint32Array<ArrayBuffer> {
+  if (programs.length > SVO_DRY_SCENE_FIELD_PROGRAM_CAPACITY) {
+    throw new RangeError(
+      `Scene publishes ${programs.length} field programs, above the arena's ${SVO_DRY_SCENE_FIELD_PROGRAM_CAPACITY}`,
+    );
+  }
+  return packSvoFieldProgramArena(programs, SVO_DRY_SCENE_FIELD_PROGRAM_CAPACITY);
+}
+
+/**
+ * CPU mirror of the shader's tape decode, for the analytic oracles and captures.
+ *
+ * The same rejection discipline as the cluster resolver beside it, and for the
+ * same reason: an oracle that resolves a tape the GPU treats as unresolved
+ * reports a surface the frame does not contain, which is the one failure a
+ * parity test cannot tell apart from a shading bug.
+ */
+export function svoDrySceneFieldProgramResolver(packed: Uint32Array | undefined): SvoFieldProgramResolver {
+  const base = SVO_DRY_SCENE_ARENA_LAYOUT.fieldProgramOffsetBytes / Uint32Array.BYTES_PER_ELEMENT;
+  return (fieldProgramReference: number) => {
+    if (!packed) return undefined;
+    const offset = fieldProgramReference - base;
+    if (offset < 0 || offset % SVO_FIELD_PROGRAM_BLOCK_WORDS !== 0) return undefined;
+    if (offset + SVO_FIELD_PROGRAM_BLOCK_WORDS > packed.length) return undefined;
+    // A never-filled block claims zero ops, and a tape with no ops has no result
+    // register anything wrote. Unpacking it would produce a program the
+    // validator refuses, so it is refused here instead — the "not resolved"
+    // answer, which is what the shader's own probe reports for the same block.
+    if (packed[offset] === 0) return undefined;
+    try {
+      return unpackSvoFieldProgram(packed, offset / SVO_FIELD_PROGRAM_BLOCK_WORDS);
+    } catch {
+      return undefined;
+    }
+  };
 }
 
 /**
@@ -868,7 +1032,7 @@ export function svoDrySceneTerrainResolver(packed: Uint32Array | undefined): Svo
 
 /** Packed dry-scene parameters. */
 export const SVO_DRY_SCENE_PARAMS_LAYOUT = Object.freeze({
-  sizeBytes: 576,
+  sizeBytes: 592,
   terrainWordOffset: 24,
   terrainMaterialWordOffset: 28,
   materialPublicationWordOffset: 32,
@@ -885,7 +1049,10 @@ export const SVO_DRY_SCENE_PARAMS_LAYOUT = Object.freeze({
   nodeMipDirectWordOffset: 96,
   /** Twelve constant-indexed Z-slab offsets, one per supported node-mip level. */
   nodeMipDirectLevelZWordOffset: 100,
-  /** x: matching radiance generation; y: complete and usable; zw: reserved. */
+  /**
+   * x: matching radiance generation; y: complete and usable;
+   * z: finest level with a radiance page; w: the slot its atlas begins at.
+   */
   tetrahedralRadianceWordOffset: 112,
   /** xyz: complete sparse-lighting world extent in metres. */
   nodeMipExtentWordOffset: 116,
@@ -906,7 +1073,34 @@ export const SVO_DRY_SCENE_PARAMS_LAYOUT = Object.freeze({
   structureOffsetsWordOffset: 136,
   /** Optional derived traversal word offsets (wide pages, wide descriptors). */
   derivedTraversalWordOffset: 140,
+  /**
+   * Live level-of-detail controls, deliberately a uniform rather than a shader
+   * constant: the panel's mode switch and both sliders must move without a
+   * pipeline rebuild, and an A/B over the threshold has to be interleavable.
+   *
+   * x: bitcast f32 screen-space threshold at the contract's reference height;
+   * y: `SVO_LOD_MODE_*`; z: fixed level; w: `SVO_SURFACE_RECONSTRUCTION_CODES`.
+   *
+   * The surface mode shares this lane rather than earning its own because it
+   * wants exactly the properties the lane was built for: no pass is added or
+   * removed, no march shape moves, and no cache keys on it, so the panel can
+   * toggle it without dropping the world-GI cache or the stationary primary.
+   */
+  lodWordOffset: 144,
 } as const);
+
+/** `dry.lod.y` codes. Mirrors `SvoLodMode`; the shader constants are in `svoLodDescentWGSL`. */
+export const SVO_LOD_MODES = Object.freeze({
+  "screen-space": 0,
+  "fixed-level": 1,
+} satisfies Record<SvoLodMode, number>);
+
+/** `dry.lod.w` codes. Mirrors `SvoSurfaceReconstruction`. */
+export const SVO_SURFACE_RECONSTRUCTION_CODES = Object.freeze({
+  "voxel-face": 0,
+  trilinear: 1,
+  analytic: 2,
+} satisfies Record<SvoSurfaceReconstruction, number>);
 
 /** materialPublication.w flags shared by the direct and derived-lighting paths. */
 export const SVO_DRY_VISIBILITY_FLAGS = Object.freeze({
@@ -1221,7 +1415,11 @@ export function intersectSvoTerrainHeightfield(
   if (!(directionLength > 1e-9) || !(sceneScale_m > 0) || !Number.isFinite(sceneScale_m)) return undefined;
   const rd = { x: direction.x / directionLength, y: direction.y / directionLength, z: direction.z / directionLength };
   const ceiling = terrainCeiling(terrain);
-  if (terrain.grid) return marchSvoSculptedTerrain(terrain, terrain.grid, origin_m, rd, ceiling, sceneScale_m, normalEpsilon_m);
+  // `terrainSampleGrid` rather than `terrain.grid`: a described ground is a
+  // heightfield too, and this mirror must take the sculpted bracket for it or it
+  // would trace the eight-feature closed form — a flat plane at `baseHeight_m`.
+  const grid = terrainSampleGrid(terrain);
+  if (grid) return marchSvoSculptedTerrain(terrain, grid, origin_m, rd, ceiling, sceneScale_m, normalEpsilon_m);
   let t0 = 0.005;
   if (origin_m.y > ceiling) {
     if (rd.y >= -0.0005) return undefined;
@@ -1685,8 +1883,14 @@ fn dryNodeMipReady()->bool{let generationReady=dry.nodeMip.w==${SVO_DRY_NODE_MIP
 fn dryNodeMipPageValid(pageIndex:u32)->bool{
   let dimensions=textureDimensions(nodeMipPageValidity);return svoDerivedPageValidityResident(dimensions,pageIndex)&&textureLoad(nodeMipPageValidity,svoDerivedPageValidityTexel(dimensions,pageIndex),0).x!=0u;
 }
+// Finest level that owns an opacity page (SVO_OPACITY_LEVEL_FLOOR). The base
+// level is 81 % of the pyramid's pages at refinement depth 3 and is one texel
+// per finest voxel, so a world fine enough to need it stores a resolution no
+// cone ever asks for. Zero is the pyramid that shipped, and there this clamp is
+// the identity — which is why a reference-leaf frame is bit-exact across it.
+fn dryNodeMipOpacityLevelFloor()->u32{return min(dry.nodeMipAtlas.w,dry.nodeMip.z-1u);}
 fn dryNodeMipAt(position_m:vec3f,lodIn:f32,pageCache:ptr<function,DryNodeMipPageCache>)->DryNodeMipLookup{
-  let level=min(u32(max(floor(lodIn),0.0)),dry.nodeMip.z-1u);let levelScale=exp2(f32(level));let virtualVoxel=(position_m-dry.nodeMipOrigin.xyz)/(dry.mapping.cellSize*levelScale);let pageFloor=floor(virtualVoxel/f32(SVO_NODE_MIP_INTERIOR_SIZE));
+  let level=min(max(u32(max(floor(lodIn),0.0)),dryNodeMipOpacityLevelFloor()),dry.nodeMip.z-1u);let levelScale=exp2(f32(level));let virtualVoxel=(position_m-dry.nodeMipOrigin.xyz)/(dry.mapping.cellSize*levelScale);let pageFloor=floor(virtualVoxel/f32(SVO_NODE_MIP_INTERIOR_SIZE));
   if(any(pageFloor<vec3f(0.0))||any(pageFloor>=vec3f(2097152.0))){return DryNodeMipLookup(SvoNodeMipSample(0.0,0.0,0.0,0.0),1u);}let pageCoordinate=vec3u(pageFloor);
   if((*pageCache).generation!=dry.nodeMip.x||(*pageCache).level!=level||any((*pageCache).coordinate!=pageCoordinate)){
     *pageCache=DryNodeMipPageCache(pageCoordinate,level,vec3u(0u),dry.nodeMip.x,0u,0xffffffffu,0u);let pageIndex=dryNodeMipFind(level,pageCoordinate);
@@ -1850,6 +2054,49 @@ export interface SvoDryOptimizationExperiments {
    * one exact march per solid cell, each over its own padded cell interval.
    */
   readonly voxelOwnerPerCellUpgrades?: boolean;
+  /**
+   * Retain the analytic surface in the primary: the per-owner exact upgrade
+   * inside `traceLeafPayload`, and the `traceScenePrimitives` tier that
+   * `traceStatic` runs bounded by the voxel hit.
+   *
+   * **Off is the shipping path and is not a tuning choice.** The renderer shades
+   * from voxels only; an authored SDF exists to be voxelized, and nothing
+   * analytic reaches the screen. What that costs is exact: a hit is a cell face
+   * at `HERO_GARDEN_CELL_M`, so silhouettes are blocky and the depth error
+   * against the analytic surface is the half-cell the census above measures
+   * rather than the 7.8 mm p99 the upgrade bought. That is the pipeline being
+   * honest about its resolution, and the answer to it is smaller leaves.
+   *
+   * This arm survives only as the measurement control — the same role every
+   * other `*Direct`/`*Disabled` flag here plays. It is the reference an
+   * "is the voxel path converging?" comparison needs, and keeping it selectable
+   * is what makes that a measurable claim rather than an assertion. It is not a
+   * fallback and no shipping configuration may turn it on.
+   */
+  readonly analyticPrimaryRetained?: boolean;
+  /**
+   * Shade every opaque surface as neutral white — a clay render.
+   *
+   * Not a shortcut and not a stand-in for unauthored materials: while geometry
+   * and lattice resolution are the work, albedo is the one channel that
+   * *competes* with the thing being judged. A colour difference and a form
+   * difference land in the same pixel, and the eye attributes both to whichever
+   * it noticed first. Neutralising albedo leaves shape, shadow, occlusion and
+   * silhouette carrying the whole image, which is what the reference plate is
+   * being compared on right now.
+   *
+   * Material *resolution* is untouched — the id lookup, the publication check
+   * and `dryInvalidSurfaceMaterial` all still run, and an unpublished or
+   * malformed record still reports as invalid. Only the appearance is replaced.
+   * Returning white before those checks would mean a scene whose material arena
+   * never published rendered perfectly, which is precisely the class of failure
+   * that hid the voxel path behind analytic shading for this whole program.
+   *
+   * Solidity is unaffected: a cell is solid when `identity & 0xffff` is nonzero,
+   * so the material channel is still load-bearing occupancy data no matter what
+   * is done with its colour.
+   */
+  readonly neutralSurfaceAlbedo?: boolean;
   /**
    * Re-derive an incoherent cone-prepass receiver by tracing the analytic scene
    * again, instead of taking it from the full-resolution primary G-buffer.
@@ -2140,6 +2387,12 @@ export function createSvoDrySceneFragmentWGSL(
   const reduced = coneLightingScale !== 1;
   const split = shadingPath === "split";
   const splitGroup = reduced ? 2 : 1;
+  // Compile-time because the codec is: producer and consumer must agree about a
+  // shift, and the selector is the same pure function of the environment that
+  // the voxeliser resolves its own arm from. A mismatch would render a wrong
+  // scene rather than fail, which is exactly what emitting the shared codec —
+  // instead of hand-matching the bits here — is for.
+  const sceneGeometryFormat = octreeLiveSceneSceneGeometryFormat();
   const voxelLightCache = split && experiments.voxelLightCache !== false;
   const edgeReceiverRecovery = reduced && experiments.edgeReceiverRecovery !== false;
   // Full-rate/inline shaders still own the diagnostic overlay. The reduced
@@ -2190,6 +2443,10 @@ export function createSvoDrySceneFragmentWGSL(
   const hsrProbe = experiments.rasterPrimaryHsrProbe === true;
   const scenePrimitiveHsrProbe = experiments.scenePrimitiveHsrProbe === true;
   const voxelOwnerPrimary = experiments.voxelOwnerPrimaryDisabled !== true;
+  // Voxels only. See `analyticPrimaryRetained` for what the control arm is for
+  // and why no shipping configuration turns it on.
+  const voxelsOnlyPrimary = experiments.analyticPrimaryRetained !== true;
+  const neutralSurfaceAlbedo = experiments.neutralSurfaceAlbedo === true;
   const analyticPrimaryUnbounded = experiments.unboundedAnalyticPrimary === true;
   const analyticVisibilityUnbounded = experiments.unboundedAnalyticVisibility === true;
   const analyticVisibilityProbeOff = experiments.visibilityAnalyticDisabledProbe === true;
@@ -2208,7 +2465,47 @@ export function createSvoDrySceneFragmentWGSL(
   // One flush of the pending same-owner run. Emitted at every place the run can
   // end — an owner change, a macro-occupancy skip over empty space, and the exit
   // of the DDA — so that the run is always closed by whatever ended it.
-  const primaryUpgradeFlushWGSL = /* wgsl */ `if(runOwner!=${DRY_UPGRADE_RUN_NONE}u&&upgrades<${primaryUpgradeBudget}u){upgrades+=1u;let candidate=primitiveHit(dryPrimitive(runOwner),ro,rd,max(0.0,runStart-tolerance),runEnd+tolerance);if(candidate.t<DRY_MISS){return candidate;}}runOwner=${DRY_UPGRADE_RUN_NONE}u;`;
+  // Voxels only closes the run without ever solving it: the walk has already
+  // returned the first solid cell's face, so a run can only still be open when
+  // the DDA left the brick without meeting one, and there is nothing to flush.
+  const primaryUpgradeFlushWGSL = voxelsOnlyPrimary
+    ? /* wgsl */ `runOwner=${DRY_UPGRADE_RUN_NONE}u;`
+    : /* wgsl */ `if(runOwner!=${DRY_UPGRADE_RUN_NONE}u&&upgrades<${primaryUpgradeBudget}u){upgrades+=1u;let candidate=primitiveHit(dryPrimitive(runOwner),ro,rd,max(0.0,runStart-tolerance),runEnd+tolerance);if(candidate.t<DRY_MISS){return candidate;}}runOwner=${DRY_UPGRADE_RUN_NONE}u;`;
+  // The first solid cell along the DDA is the surface. `entry` is the ray's
+  // distance to the face it crossed to reach this cell, so the hit sits exactly
+  // on the cell boundary and its normal is that face — read back off the cell
+  // bounds, where the entry point's zero-distance axis is the one it came in
+  // through. No march, no owner solve, no upgrade budget.
+  //
+  // What the *shading* normal is then allowed to be is a separate question, and
+  // the uniform answers it. `t`, hit-versus-miss and the cell face are identical
+  // under every arm: the reconstruction replaces the shaded direction only, which
+  // is what keeps `voxel-face` a bit-exact reference rather than an approximate
+  // one, and what keeps this off the depth-test and coverage paths entirely.
+  //
+  // `analytic` ships. It asks the owner, and the owner is already in hand: the
+  // walk above resolved `cellOwner` for the upgrade path before this line ran,
+  // so the exact normal costs one primitive-record fetch and no payload taps at
+  // all — against the stencil's eight, up to eight of which pay a root-to-leaf
+  // descent when the dual cell straddles a brick face. The cheaper arm is also
+  // the exact one, which is unusual enough to say out loud.
+  //
+  // A cell whose owner names nothing analytic — the ground, and any scenery the
+  // voxeliser filled without an in-range owner — falls through to the stencil,
+  // and the ground then takes `terrainNormalAt`, which differentiates the same
+  // heightfield the writer sampled instead of the vertical pseudo-distance it
+  // stored. The remaining fall-through is the stencil, now required to certify
+  // itself: see `dryReconstructedSurfaceNormal`.
+  const primaryVoxelSurfaceWGSL = voxelsOnlyPrimary
+    ? /* wgsl */ `if(cellSolid){
+      let cellBounds=mat2x3f(bounds[0]+vec3f(cell)*extent,bounds[0]+(vec3f(cell)+vec3f(1.0))*extent);
+      let surfacePoint=ro+rd*entry;
+      let faceNormal=dryVoxelFaceNormal(cellBounds,surfacePoint);
+      let shaded=dryShadingNormal(hit,bounds,extent,surfacePoint,faceNormal,cellOwner,cellIdentity);
+      return DryHit(entry,shaded.normal,cellIdentity&0xffffu,cellIdentity>>16u,
+        shaded.featureId,DRY_GBUFFER_FIELD_VOXEL,DRY_GBUFFER_MOTION_STATIC,0u,0.0,vec3u(0u));
+    }`
+    : "";
   // The control arm never extends an open run past its first cell, so every
   // owned cell flushes on its own interval exactly as the per-cell walk did —
   // same intervals, same order, same budget accounting, one iteration later.
@@ -2248,20 +2545,369 @@ export function createSvoDrySceneFragmentWGSL(
     stackCapacity: experiments.tinyTraversalStack ? 8 : experiments.shortTraversalStack ? 16 : 32 });
   const screenSpaceTraversalWGSL = screenSpaceTerminationPixels > 0
     ? createSvoScreenSpaceTraversalWGSL(canonicalTraversalWGSL) : "";
+  const lodDescentWGSL = screenSpaceTerminationPixels > 0 ? svoLodDescentWGSL : "";
   const leafAccessWGSL = compactTraversal ? /* wgsl */ `
 fn dryLeafBounds(nodeIndex:u32)->mat2x3f{return svoCompactNodeBounds(svoCompactNodes[nodeIndex],dry.mapping);}
 fn dryLeafFlags(nodeIndex:u32)->u32{return svoNodeLoad(nodeIndex).links.w;}
+fn dryLeafLevel(nodeIndex:u32)->u32{return svoNodeLoad(nodeIndex).address.z;}
 ` : /* wgsl */ `
 fn dryLeafBounds(nodeIndex:u32)->mat2x3f{return svoNodeBounds(svoNodeLoad(nodeIndex),dry.mapping);}
 fn dryLeafFlags(nodeIndex:u32)->u32{return svoNodeLoad(nodeIndex).links.w;}
+fn dryLeafLevel(nodeIndex:u32)->u32{return svoNodeLoad(nodeIndex).address.z;}
 `;
   const liveLeafLifecycleWGSL = /* wgsl */ `
 fn dryLeafCurrent(hit:SvoTraversalHit)->bool{return svoBrickLifecycleCurrent(svoBrickLifecycleDecode(dryLeafFlags(hit.nodeIndex)));}
 `;
+  // The scene-geometry lane, decoded by the producer's own emitted codec rather
+  // than by a hand-matched shift here. `f32x2` emits no codec and addresses the
+  // lane directly, exactly as the derived builder's `f32x2` arm does.
+  const sceneDistanceLoadWGSL = sceneGeometryFormat === "f32x2"
+    ? /* wgsl */ `
+fn drySceneDistanceWord(voxel:u32)->u32{return voxel*2u;}
+fn drySceneDistanceDecode(word:u32,voxel:u32)->f32{return bitcast<f32>(sceneGeometry[word]);}`
+    : /* wgsl */ `
+fn drySceneDistanceWord(voxel:u32)->u32{return sceneGeometryWord(0u,voxel);}
+fn drySceneDistanceDecode(word:u32,voxel:u32)->f32{return sceneDistanceOf(sceneGeometry[word],voxel);}`;
+  // The smooth surface, reconstructed from the field the voxeliser already stored.
+  //
+  // The primary's normal used to be `dryVoxelFaceNormal` — one of six axis
+  // directions — and that six-way quantisation is what terraced every surface at
+  // every lattice and banded the interior of flat faces. The fix is not more
+  // voxels: it is to stop throwing away the signed distance the voxeliser writes
+  // at each voxel centre, in metres, and which it deliberately keeps as the
+  // field's own value there rather than the nearer corner sample it uses for
+  // coverage (lib/webgpu-sparse-scene-proxies.ts).
+  //
+  // Trilinear rather than a contour plane, and that ordering is specific to this
+  // codebase rather than the usual advice. A normal-oriented slab needs a normal
+  // it does not have — nothing per-voxel is stored but the packed identity word,
+  // which is full — so it would have to central-difference the same lane anyway,
+  // at six taps plus a centre, and then intersect a plane that is discontinuous
+  // across cell boundaries. Eight taps of the same lane buy a watertight C0
+  // surface whose gradient is analytic from the values already fetched. One extra
+  // fetch for continuity and no cracks.
+  //
+  // Once per ray, never per DDA cell: this runs only where the walk has already
+  // stopped on a solid cell, so the loop keeps its single payload fetch per step.
+  //
+  // The stencil crosses leaves, and that is the whole difference between a
+  // smooth surface and a banded one.
+  //
+  // Clamping the eight taps inside the hit leaf — which is what `safeNormal`
+  // does, and what this did first — collapses a difference to zero whenever the
+  // dual cell straddles a brick face. Measured over a sub-voxel walk across the
+  // pond bowl, that clamp produced 372 normal creases above one degree with a
+  // mean of 17.31 degrees and full 180-degree flips where two axes collapsed at
+  // once; resolving the neighbour leaf instead leaves 133 creases averaging
+  // 3.01 degrees, which is the inherent C0-not-C1 property of trilinear at a
+  // dual-cell boundary and not an artifact.
+  //
+  // Both of the artifacts this removes are the same bug seen on different axes,
+  // which is why they looked like two problems. The x and z brick faces draw a
+  // rectangular lattice over the surface. The y faces cut a *sloped* surface
+  // along lines of constant elevation, so they read as topographic contour
+  // bands, one per brick height. Halving the lattice halved the banding
+  // (7 549 to 4 003 detected edges, mean band width 10.4 to 16.8 px), which is
+  // the signature of a lattice artifact rather than of anything in the field:
+  // the stored terrain distance is exactly \`y - h(column)\`, so the in-leaf
+  // trilinear normal is analytically correct and only the clamp can corrupt it.
+  //
+  // The cost is a root-to-leaf descent per out-of-range tap. Interior taps —
+  // the common case — keep the single fetch they had.
+  const surfaceReconstructionWGSL = /* wgsl */ `
+${sparseBrickSceneGeometryCodecWGSL(sceneGeometryFormat)}
+${sceneDistanceLoadWGSL}
+const DRY_LEAF_NONE:u32=0xffffffffu;
+fn drySurfaceReconstruction()->u32{return u32(dry.lod.w);}
+/** One voxel of a known leaf, by that leaf's own local cell. */
+fn drySceneDistanceOfVoxel(voxel:u32)->f32{
+  let word=drySceneDistanceWord(voxel);
+  // An unpublished or short lane reads as zero, which the caller sees as a
+  // degenerate gradient and answers with the face normal — never as a surface.
+  if(word>=arrayLength(&sceneGeometry)){return 0.0;}
+  return drySceneDistanceDecode(word,voxel);
+}
+/**
+ * The deepest published leaf whose brick covers one finest-lattice cell.
+ *
+ * The same descent \`deepestLeaf\` performs in the derived builder
+ * (lib/webgpu-svo-live-derived-builder.ts), over the same topology arena, so the
+ * two cannot disagree about which leaf owns a cell. It keeps the *last* active
+ * leaf seen on the way down rather than requiring a terminal one, because an
+ * interior node may carry a leaf that a missing child mask stops the walk above.
+ */
+fn dryLeafForGlobalCell(globalCell:vec3u)->u32{
+  let brickSize=max(dry.mapping.brickSize,1u);
+  let finest=dry.mapping.maximumDepth;
+  let brick=globalCell/brickSize;
+  var node=0u;var selected=DRY_LEAF_NONE;
+  for(var level=0u;level<=finest;level+=1u){
+    if(node>=dry.mapping.nodeCount){break;}
+    let record=svoNodeLoad(node);
+    if(record.links.z<dry.mapping.leafCount
+      &&svoBrickLifecycleCurrent(svoBrickLifecycleDecode(record.links.w))){selected=record.links.z;}
+    if(level==finest){break;}
+    let bit=finest-level-1u;
+    let octant=((brick.x>>bit)&1u)|(((brick.y>>bit)&1u)<<1u)|(((brick.z>>bit)&1u)<<2u);
+    let mask=record.address.w&0xffu;
+    if((mask&(1u<<octant))==0u){break;}
+    node=record.links.x+countOneBits(mask&((1u<<octant)-1u));
+  }
+  return selected;
+}
+/** That leaf's payload voxel for the same cell, honouring its own level. */
+fn drySceneDistanceAtGlobalCell(globalCell:vec3u)->f32{
+  let leafIndex=dryLeafForGlobalCell(globalCell);
+  if(leafIndex==DRY_LEAF_NONE){return 0.0;}
+  let leaf=svoLeafLoad(leafIndex);
+  let record=svoNodeLoad(leaf.topology.x);
+  let brickSize=max(dry.mapping.brickSize,1u);
+  // A neighbour may sit at a coarser level, where one of its cells spans
+  // \`scale\` finest cells. The stored distance is in metres rather than in cell
+  // units, so a coarser sample is still a valid distance at that point — only
+  // its centre is further from the tap, which is a smaller error than the zero
+  // gradient a clamp would have produced.
+  let scale=1u<<(dry.mapping.maximumDepth-record.address.z);
+  let origin=svoDecodeMorton(record.address.x,record.address.y,record.address.z)*scale*brickSize;
+  let local=min((globalCell-origin)/scale,vec3u(brickSize-1u));
+  return drySceneDistanceOfVoxel(svoBrickVoxelIndex(leaf.topology.y,local,brickSize));
+}
+/**
+ * One stencil tap.
+ *
+ * Taps inside the hit leaf — the common case, and all eight of them whenever the
+ * dual cell does not straddle a face — read that leaf's own payload directly and
+ * cost one fetch, exactly as the clamped version did. Only a tap that has left
+ * the brick pays the descent, which is what keeps the neighbour resolution off
+ * the price of every shaded pixel.
+ *
+ * A tap below the lattice origin is outside the tree rather than inside a
+ * neighbour, so it answers zero the same way an unpublished lane does: the
+ * caller reads the degenerate gradient and keeps the face normal.
+ */
+fn drySceneDistanceAtTap(voxelOffset:u32,brickSize:u32,origin:vec3i,cell:vec3i,step:i32,offset:vec3i)->f32{
+  let local=cell+offset;
+  if(all(local>=vec3i(0))&&all(local<vec3i(i32(brickSize)))){
+    return drySceneDistanceOfVoxel(svoBrickVoxelIndex(voxelOffset,vec3u(local),brickSize));
+  }
+  let global=origin+local*step;
+  if(any(global<vec3i(0))){return 0.0;}
+  return drySceneDistanceAtGlobalCell(vec3u(global));
+}
+/**
+ * Outward normal of the trilinear reconstruction of the distance field.
+ *
+ * Samples live at voxel *centres*, so the dual cell containing \`point\` is offset
+ * half a voxel from the storage lattice: brick-local coordinate \`c + 0.5\` holds
+ * cell \`c\`'s value, and the interpolation cell is therefore based at
+ * \`floor(local - 0.5)\`. Getting that half-voxel wrong reads as a normal that
+ * lags the surface by half a cell, which looks like a lighting bias rather than
+ * like an addressing bug.
+ *
+ * The gradient is the analytic derivative of the same eight values, so it costs
+ * no further fetches, and it is continuous wherever the eight are. Distance is
+ * negative inside, so the gradient already points outward and needs no flip.
+ *
+ * Taps are addressed on the *finest global lattice* rather than in leaf-local
+ * cells, because a dual cell may straddle a brick face and the whole point is
+ * that it may. \`hit\` supplies the leaf whose bounds set the frame; the taps then
+ * resolve their own leaves, which is what keeps the field continuous across one.
+ */
+fn dryTrilinearSurfaceNormal(hit:SvoTraversalHit,bounds:mat2x3f,extent:vec3f,point:vec3f,brickSize:u32)->vec3f{
+  let local=(point-bounds[0])/extent-vec3f(0.5);
+  let base=floor(local);
+  let f=clamp(local-base,vec3f(0.0),vec3f(1.0));
+  let c=vec3i(base);
+  // The hit leaf's own origin and cell span on the finest lattice. A tap at
+  // leaf-local cell k covers finest cells origin + k*scale up to +scale, and
+  // the half-scale offset picks that span's centre so a tap on a brick face
+  // resolves to the cell it is inside rather than to the one it borders.
+  let node=svoNodeLoad(hit.nodeIndex);
+  let scale=1u<<(dry.mapping.maximumDepth-node.address.z);
+  let origin=vec3i(svoDecodeMorton(node.address.x,node.address.y,node.address.z)*scale*brickSize)
+    +vec3i(i32(scale>>1u));
+  let step=i32(scale);
+  let vo=hit.voxelOffset;
+  let d000=drySceneDistanceAtTap(vo,brickSize,origin,c,step,vec3i(0,0,0));
+  let d100=drySceneDistanceAtTap(vo,brickSize,origin,c,step,vec3i(1,0,0));
+  let d010=drySceneDistanceAtTap(vo,brickSize,origin,c,step,vec3i(0,1,0));
+  let d110=drySceneDistanceAtTap(vo,brickSize,origin,c,step,vec3i(1,1,0));
+  let d001=drySceneDistanceAtTap(vo,brickSize,origin,c,step,vec3i(0,0,1));
+  let d101=drySceneDistanceAtTap(vo,brickSize,origin,c,step,vec3i(1,0,1));
+  let d011=drySceneDistanceAtTap(vo,brickSize,origin,c,step,vec3i(0,1,1));
+  let d111=drySceneDistanceAtTap(vo,brickSize,origin,c,step,vec3i(1,1,1));
+  let gx=mix(mix(d100-d000,d110-d010,f.y),mix(d101-d001,d111-d011,f.y),f.z);
+  let gy=mix(mix(d010-d000,d110-d100,f.x),mix(d011-d001,d111-d101,f.x),f.z);
+  let gz=mix(mix(d001-d000,d101-d100,f.x),mix(d011-d010,d111-d110,f.x),f.y);
+  // The lane's units cancel under normalize — which is what lets the narrowed
+  // \`snorm8\` arm, stored in cell-band units, share this code — but the per-axis
+  // cell size does not, so a non-cubic voxel needs the division.
+  return vec3f(gx,gy,gz)/max(extent,vec3f(1e-20));
+}
+
+struct DryShadingNormal{normal:vec3f,featureId:u32}
+
+/**
+ * The ground's normal, differentiated from the heightfield and limited at its
+ * own edges.
+ *
+ * Differentiating \`h\` and not what was stored of it. The writer folds terrain
+ * into the scene-geometry lane as \`y - h(x,z)\`
+ * (\`webgpu-sparse-scene-proxies.ts\`), a *vertical* pseudo-distance whose
+ * gradient is the surface normal on a gentle slope and collapses toward +Y on a
+ * steep one — which is what drew the pond coping's vertical wall as columns
+ * pointing at the sky. \`(-dh/dx, 1, -dh/dz)\` has no such failure at any slope
+ * the graph can express.
+ *
+ * ## Why the difference is limited rather than centred
+ *
+ * A centred difference at the coping's arris straddles the drop, so the flat top
+ * within one cell of the edge is handed a normal tilted out over the wall, and
+ * the edge grows a dark serrated fringe along every upper silhouette in the
+ * scene. Widening the window makes that worse, not better; narrowing it below a
+ * cell aliases.
+ *
+ * The minmod limiter takes the smaller of the two one-sided slopes, and zero
+ * where they disagree in sign. It is not a tuned threshold — there is nothing to
+ * choose — and it can only ever reduce a slope, never invent one. At the arris
+ * the along-the-top difference is the smaller and the top keeps its own normal,
+ * sharp and unfringed; over ordinary ground the two sides agree and it is the
+ * centred difference it replaces; on the wall face itself it declines to guess,
+ * which leaves that face flat-lit rather than striped.
+ *
+ * A vertical face is a surface a heightfield does not have — the column is
+ * multi-valued there — and no sampling of \`h\` recovers it. Three widths and a
+ * height-aware regime split were measured against the coping and none of them
+ * did; the fix for that face is geometry, not a gradient.
+ */
+fn dryTerrainSurfaceNormal(point:vec3f)->vec3f{
+  let epsilon=max(max(dry.mapping.cellSize.x,dry.mapping.cellSize.z),1e-5)
+    *${SVO_SURFACE_TERRAIN_GRADIENT_CELLS}.0;
+  let centre=terrainHeightAt(point.x,point.z);
+  let forward=vec2f(terrainHeightAt(point.x+epsilon,point.z),terrainHeightAt(point.x,point.z+epsilon));
+  let backward=vec2f(terrainHeightAt(point.x-epsilon,point.z),terrainHeightAt(point.x,point.z-epsilon));
+  let ahead=(forward-vec2f(centre))/epsilon;
+  let behind=(vec2f(centre)-backward)/epsilon;
+  let slope=select(vec2f(0.0),select(ahead,behind,abs(behind)<abs(ahead)),ahead*behind>vec2f(0.0));
+  return normalize(vec3f(-slope.x,1.0,-slope.y));
+}
+
+/**
+ * The exact outward normal of whatever filled this cell, or a zero vector.
+ *
+ * The DDA resolved \`owner\` on its way past this cell for the analytic upgrade
+ * path, and every authored primitive's normal is bound in this same shader, so
+ * the answer is one record fetch and no payload taps at all — against the
+ * stencil's eight, any of which pays a root-to-leaf descent when the dual cell
+ * straddles a brick face.
+ *
+ * ## The normal only, not the sample
+ *
+ * \`svoEvaluatePrimitive\` is the obvious call and it is the wrong one: it
+ * evaluates \`svoPrimitiveDistance_m\` beside the normal, and for a marched kind —
+ * the smooth-union clusters and field programs the garden's canopies are made of
+ * — that distance is a whole field evaluation thrown away unread. Measured on
+ * \`garden-svo-lighting\`, three interleaved rounds, it cost more than the stencil
+ * it replaced. Rotating \`svoPrimitiveLocalNormal\` by hand is the same arithmetic
+ * as that function's tail with the discarded half deleted.
+ *
+ * Terrain is ownerless by construction (\`SPARSE_SCENE_TERRAIN_MATERIAL_OWNER\`),
+ * so it is recognised by material and answered by the heightfield — which is
+ * also why nothing here reads the ground: an authored record is never of terrain
+ * kind, and sampling \`h\` eagerly to serve a case that cannot arise would put
+ * five ground samples on every shaded pixel in the scene.
+ */
+fn dryAnalyticSurfaceNormal(owner:u32,materialId:u32,point:vec3f)->DryShadingNormal{
+  if(owner!=${DRY_UPGRADE_RUN_NONE}u){
+    let record=dryPrimitive(owner);
+    let local=svoPrimitiveLocalNormal(record,svoPrimitiveLocalPoint(record,point),dryClusterPacking(record));
+    let magnitude=length(local.xyz);
+    if(magnitude>1e-8){
+      return DryShadingNormal(svoQuaternionRotate(record.orientation,local.xyz/magnitude),u32(local.w));
+    }
+  }
+  if(terrainEnabled()&&materialId==dry.terrain.x){
+    return DryShadingNormal(dryTerrainSurfaceNormal(point),SVO_FEATURE_TERRAIN);
+  }
+  return DryShadingNormal(vec3f(0.0),SVO_FEATURE_SMOOTH);
+}
+
+/**
+ * The stencil, required to certify itself before it is believed.
+ *
+ * ${sceneDistanceIsMetres[sceneGeometryFormat]
+    ? `A signed distance field satisfies \`|grad d| = 1\`, and this lane stores
+ * metres, so the magnitude \`length\` already computes is a validity certificate
+ * that costs nothing to read. Where the lane is a real distance it is 1 to
+ * within quantisation; where it is \`y - h\`, or a \`min\` over a neighbour brick's
+ * different candidate set, it is not — and those are exactly the cells whose
+ * gradients drew rectangular debris across flat walls.`
+    : `This lane does not store metres, so \`|grad d| = 1\` says nothing about it
+ * and only the degeneracy test applies.`}
+ *
+ * The second test is cheaper and blunter: a surface passing through this cell
+ * cannot face more than a right angle away from the face the ray entered
+ * through. Both failures answer with that face, which is the value the arm
+ * without any reconstruction would have used.
+ */
+fn dryCertifiedSurfaceNormal(hit:SvoTraversalHit,bounds:mat2x3f,extent:vec3f,point:vec3f,faceNormal:vec3f)->vec3f{
+  let gradient=dryTrilinearSurfaceNormal(hit,bounds,extent,point,dry.mapping.brickSize);
+  let magnitude=length(gradient);
+  if(!(magnitude>1e-12)){return faceNormal;}
+${sceneDistanceIsMetres[sceneGeometryFormat]
+    ? `  if(abs(magnitude-1.0)>${SVO_SURFACE_ANALYTIC_EIKONAL_TOLERANCE}){return faceNormal;}\n`
+    : ""}\
+  let normal=gradient/magnitude;
+  if(dot(normal,faceNormal)<=0.0){return faceNormal;}
+  return normal;
+}
+
+/** The uniform's arm, resolved once per shaded voxel hit. */
+fn dryShadingNormal(hit:SvoTraversalHit,bounds:mat2x3f,extent:vec3f,point:vec3f,faceNormal:vec3f,owner:u32,identity:u32)->DryShadingNormal{
+  let mode=drySurfaceReconstruction();
+  if(mode==${SVO_SURFACE_RECONSTRUCTION_CODES.trilinear}u){
+    // The evidence arm, unchanged and uncertified: it is what the analytic arm
+    // is measured against, so it has to keep drawing what it drew.
+    let gradient=dryTrilinearSurfaceNormal(hit,bounds,extent,point,dry.mapping.brickSize);
+    let magnitude=length(gradient);
+    if(magnitude>1e-12){return DryShadingNormal(gradient/magnitude,SVO_FEATURE_SMOOTH);}
+    return DryShadingNormal(faceNormal,SVO_FEATURE_SMOOTH);
+  }
+  if(mode!=${SVO_SURFACE_RECONSTRUCTION_CODES.analytic}u){return DryShadingNormal(faceNormal,SVO_FEATURE_SMOOTH);}
+  let exact=dryAnalyticSurfaceNormal(owner,identity&0xffffu,point);
+  // A normal more than a right angle from the entered face is not this cell's
+  // surface however exactly it was computed — an edge feature resolved from a
+  // point up to a voxel off the primitive can land there — and the face is the
+  // better answer for the same reason it is in the certificate above.
+  if(dot(exact.normal,exact.normal)>0.0&&dot(exact.normal,faceNormal)>0.0){return exact;}
+  return DryShadingNormal(dryCertifiedSurfaceNormal(hit,bounds,extent,point,faceNormal),SVO_FEATURE_SMOOTH);
+}
+`;
+  // The compile flag decides whether the LOD machinery exists; the uniform
+  // decides what it does. A build without it is the bit-exact reference image,
+  // and a runtime threshold of zero reproduces that image from the LOD build —
+  // which is what lets the panel drag the slider to zero and get the reference
+  // rather than "very nearly" it.
+  const lodUniformWGSL = screenSpaceTerminationPixels > 0 ? /* wgsl */ `
+fn dryLodMode()->u32{return u32(dry.lod.y);}
+fn dryLodFixedLevel()->u32{return u32(dry.lod.z);}
+/** Authored at the contract's reference height, rescaled here so it stays angular. */
+fn dryLodThresholdPixels()->f32{
+  if(dryLodMode()==SVO_LOD_MODE_FIXED_LEVEL){return 0.0;}
+  return dry.lod.x*uniforms.viewport.y/${SVO_SCREEN_SPACE_TERMINATION_CONTRACT.referenceViewportHeightPixels};
+}
+/** Cells per aggregate step for one brick. One is the exact per-cell walk. */
+fn dryLodCellStride(brickBounds:mat2x3f,leafLevel:u32)->u32{
+  let brickSize=max(dry.mapping.brickSize,1u);
+  if(dryLodMode()==SVO_LOD_MODE_FIXED_LEVEL){return svoLodCellStrideForLevel(leafLevel,dryLodFixedLevel(),brickSize);}
+  return svoLodScreenSpaceCellStride(brickBounds,brickSize,uniforms.cameraPosition.xyz,
+    uniforms.viewport.y,cameraTanHalfFov(),dryLodThresholdPixels());
+}
+` : "";
   const primaryTraversalCursorWGSL = screenSpaceTerminationPixels > 0 ? /* wgsl */ `
 fn drySvoShouldTerminateNodeScreenSpace(bounds:mat2x3f,level:u32)->bool{
-  let effectiveThresholdPixels=${screenSpaceTerminationPixels}*uniforms.viewport.y/${SVO_SCREEN_SPACE_TERMINATION_CONTRACT.referenceViewportHeightPixels};
-  return svoShouldTerminateNodeScreenSpace(bounds,uniforms.cameraPosition.xyz,uniforms.viewport.y,cameraTanHalfFov(),effectiveThresholdPixels,level,0u);
+  if(dryLodMode()==SVO_LOD_MODE_FIXED_LEVEL){return level>=dryLodFixedLevel();}
+  return svoShouldTerminateNodeScreenSpace(bounds,uniforms.cameraPosition.xyz,uniforms.viewport.y,cameraTanHalfFov(),dryLodThresholdPixels(),level,0u);
 }
 fn dryTraversalCursorNextPrimary(ray:SvoRay,mapping:SvoMapping,cursor:ptr<function,DryTraversalCursor>)->SvoTraversalHit{
   return svoTraversalContinuationNextScreenSpace(ray,mapping,dryDiagnosticMaximumDepth(),&(*cursor).canonical);
@@ -2284,17 +2930,27 @@ fn dryScreenSpaceProxyHit(ro:vec3f,rd:vec3f,hit:SvoTraversalHit)->DryHit{
   const screenSpaceProxyShadeWGSL = screenSpaceTerminationPixels > 0 ? /* wgsl */ `if(hit.fieldSource==DRY_GBUFFER_FIELD_SCREEN_SPACE_PROXY){let depthBand=clamp(f32(hit._padding.x)/21.0,0.0,1.0);return mix(vec3f(.02,.06,.18),vec3f(1.0,.04,.72),depthBand);}` : "";
   const screenSpacePrimaryProxyWGSL = screenSpaceTerminationPixels > 0 ? /* wgsl */ `
 fn dryPrimaryBoundsSubPixel(bounds:mat2x3f)->bool{
-  let effectiveThresholdPixels=${screenSpaceTerminationPixels}*uniforms.viewport.y/${SVO_SCREEN_SPACE_TERMINATION_CONTRACT.referenceViewportHeightPixels};
   return svoShouldTerminateNodeScreenSpace(bounds,uniforms.cameraPosition.xyz,uniforms.viewport.y,
-    cameraTanHalfFov(),effectiveThresholdPixels,0u,0u);
+    cameraTanHalfFov(),dryLodThresholdPixels(),0u,0u);
 }
-fn dryPrimaryBrickCellsSubPixel(bounds:mat2x3f)->bool{
-  let extent=(bounds[1]-bounds[0])/f32(max(dry.mapping.brickSize,1u));let halfExtent=extent*.5;
-  // Test the resident cell nearest the camera. Its enclosing sphere has the
-  // largest projected footprint in this brick, so if it terminates every cell
-  // behind it does too.
-  let centre=clamp(uniforms.cameraPosition.xyz,bounds[0]+halfExtent,bounds[1]-halfExtent);
-  return dryPrimaryBoundsSubPixel(mat2x3f(centre-halfExtent,centre+halfExtent));
+// Whole-brick collapse: everything this instance can draw, measured at once.
+//
+// It used to measure the brick's camera-nearest *cell* and collapse all eight
+// cells across on that answer — an eight-fold over-coarsening that stayed
+// invisible while 25 mm cells put its onset near 14 m, and became structural at
+// 6.25 mm, where it starts around 3.5 m and so claims most of the garden.
+// Compounding it, the bounds handed in are the occupied sub-AABB the emit
+// kernel publishes (webgpu-svo-brick-raster.ts:727), not the brick box, so
+// span/brickSize understated the cell by as much as another eight per axis on
+// exactly the sparse foliage bricks where the error is most visible.
+//
+// The sub-AABB is the right thing to measure *as a whole*: it is the tight
+// bound on every surface the brick can produce, so a sub-threshold sub-AABB
+// genuinely cannot express more than one proxy. Intermediate granularity is now
+// the aggregate stride's job (dryLodCellStride), not this predicate's.
+fn dryPrimaryBrickProxySubPixel(bounds:mat2x3f,leafLevel:u32)->bool{
+  if(dryLodMode()==SVO_LOD_MODE_FIXED_LEVEL){return dryLodFixedLevel()<=leafLevel;}
+  return dryPrimaryBoundsSubPixel(bounds);
 }
 fn dryPrimaryProxyNormal(bounds:mat2x3f,point:vec3f)->vec3f{
   let faceDistance=min(abs(point-bounds[0]),abs(bounds[1]-point));var axis=0u;
@@ -2303,30 +2959,161 @@ fn dryPrimaryProxyNormal(bounds:mat2x3f,point:vec3f)->vec3f{
   normal[axis]=select(-1.0,1.0,abs(point[axis]-bounds[1][axis])<abs(point[axis]-bounds[0][axis]));
   return normal;
 }
-fn dryPrimaryVoxelProxyHit(ro:vec3f,rd:vec3f,bounds:mat2x3f,tEnter:f32,tExit:f32,identity:u32)->DryHit{
-  let t=mix(tEnter,tExit,0.5);let owner=identity>>16u;let material=identity&0xffffu;
-  return DryHit(t,dryPrimaryProxyNormal(bounds,ro+rd*t),material,owner,SVO_FEATURE_SMOOTH,
+// The entry face, not the interval midpoint.
+//
+// The midpoint pushed the proxy half an aggregate behind the surface it stands
+// for — 25 mm at a 50 mm brick — and this hit is depth-tested against the exact
+// tier's, so the bias was not cosmetic: it let an exact neighbouring fragment
+// win a silhouette pixel the proxy actually owned. The entry face is the
+// nearest point of the aggregate the ray touches, which is what a solid
+// aggregate presents, and it makes a stride-one proxy agree with the exact
+// voxel hit exactly rather than approximately.
+fn dryPrimaryVoxelProxyHit(ro:vec3f,rd:vec3f,bounds:mat2x3f,tEnter:f32,identity:u32)->DryHit{
+  let owner=identity>>16u;let material=identity&0xffffu;
+  return DryHit(tEnter,dryPrimaryProxyNormal(bounds,ro+rd*tEnter),material,owner,SVO_FEATURE_SMOOTH,
     DRY_GBUFFER_FIELD_RESIDENT_CELL_PROXY,DRY_GBUFFER_MOTION_STATIC,0u,0.0,vec3u(0u));
 }
-fn dryPrimaryLeafProxyHit(ro:vec3f,rd:vec3f,bounds:mat2x3f,tEnter:f32,tExit:f32,voxelOffset:u32)->DryHit{
-  let brickSize=max(dry.mapping.brickSize,1u);let extent=(bounds[1]-bounds[0])/f32(brickSize);
-  var entry=max(tEnter,0.0);let point=ro+rd*(entry+1e-5);
-  var cell=vec3i(clamp(floor((point-bounds[0])/extent),vec3f(0.0),vec3f(f32(brickSize-1u))));
-  let step=select(vec3i(-1),vec3i(1),rd>=vec3f(0.0));let nextBoundary=bounds[0]+(vec3f(cell)+select(vec3f(0.0),vec3f(1.0),step>vec3i(0)))*extent;
-  var nextT=select(vec3f(DRY_MISS),(nextBoundary-ro)/rd,abs(rd)>vec3f(1e-9));let deltaT=select(vec3f(DRY_MISS),abs(extent/rd),abs(rd)>vec3f(1e-9));
-  for(var iteration=0u;iteration<32u;iteration+=1u){
-    if(any(cell<vec3i(0))||any(cell>=vec3i(i32(brickSize)))||entry>tExit){break;}
-    let cellExit=min(min(nextT.x,nextT.y),min(nextT.z,tExit));let index=svoBrickVoxelIndex(voxelOffset,vec3u(cell),brickSize);
-    if(index<arrayLength(&materialOwners)){
-      let identity=materialOwners[index];let owner=identity>>16u;
-      if(identity!=0u&&owner!=${SPARSE_BRICK_NO_OWNER}u&&owner>=dry.metadata.y&&!dryOpaqueOwnerSuppressed(owner)){
-        let cellBounds=mat2x3f(bounds[0]+vec3f(cell)*extent,bounds[0]+(vec3f(cell)+vec3f(1.0))*extent);
-        return dryPrimaryVoxelProxyHit(ro,rd,cellBounds,entry,cellExit,identity);
+// A material is what makes a cell solid; an owner is what makes it *solvable*.
+// The full argument is at traceLeafPayload, and this is the same test — it
+// has to be. This function is the only resolve a pixel classified into the LOD
+// tier ever gets ("the exact marcher is unreachable from the far LOD arm"), so
+// an owner-range test here is not a missed upgrade, it is a hole: every cell
+// the voxeliser filled without an in-range owner — ground is ownerless by
+// construction, see SPARSE_SCENE_TERRAIN_MATERIAL_OWNER, and on the hero garden
+// so is most of the scenery — discarded the fragment to background.
+fn dryLodCellSolid(identity:u32)->bool{
+  let owner=identity>>16u;
+  return (identity&0xffffu)!=0u&&!(owner!=${SPARSE_BRICK_NO_OWNER}u&&dryOpaqueOwnerSuppressed(owner));
+}
+// One identity standing for the whole brick, for the ray that crosses it
+// without crossing a solid cell.
+//
+// The macrocell mask makes this bounded and exact rather than a search: a set
+// bit promises at least one solid cell inside that 4^3 block, so the first set
+// bit's block is normally the only one scanned, and a typical surface brick
+// answers within a few fetches of entering it. A block whose cells all belong
+// to a suppressed owner is the one case that falls through to the next bit,
+// and a brick that is suppressed outright returns zero — which is a genuine
+// absence of surface, not a missing answer.
+fn dryLodBrickRepresentativeIdentity(voxelOffset:u32,occupancy:SvoBrickOccupancy)->u32{
+  let brickSize=max(dry.mapping.brickSize,1u);
+  for(var macroBit=0u;macroBit<8u;macroBit+=1u){
+    if(occupancy.ready!=0u&&(occupancy.macroMask&(1u<<macroBit))==0u){continue;}
+    let origin=vec3u(macroBit&1u,(macroBit>>1u)&1u,(macroBit>>2u)&1u)*4u;
+    for(var index=0u;index<64u;index+=1u){
+      let local=origin+vec3u(index&3u,(index>>2u)&3u,(index>>4u)&3u);
+      if(any(local>=vec3u(brickSize))){continue;}
+      let address=svoBrickVoxelIndex(voxelOffset,local,brickSize);
+      if(address<arrayLength(&materialOwners)){
+        let identity=materialOwners[address];
+        if(dryLodCellSolid(identity)){return identity;}
       }
+    }
+  }
+  return 0u;
+}
+/** First solid cell of one aggregate, scanned along the ray. Aggregate-local DDA. */
+fn dryLodAggregateIdentity(ro:vec3f,rd:vec3f,brickMinimum:vec3f,extent:vec3f,voxelOffset:u32,
+  cellMinimum:vec3u,stride:u32,tEnter:f32,tExit:f32)->u32{
+  let brickSize=max(dry.mapping.brickSize,1u);
+  let limit=vec3i(cellMinimum+vec3u(stride));
+  var entry=max(tEnter,0.0);let point=ro+rd*(entry+1e-5);
+  var cell=clamp(vec3i(floor((point-brickMinimum)/extent)),vec3i(cellMinimum),limit-vec3i(1));
+  let step=select(vec3i(-1),vec3i(1),rd>=vec3f(0.0));
+  let nextBoundary=brickMinimum+(vec3f(cell)+select(vec3f(0.0),vec3f(1.0),step>vec3i(0)))*extent;
+  var nextT=select(vec3f(DRY_MISS),(nextBoundary-ro)/rd,abs(rd)>vec3f(1e-9));
+  let deltaT=select(vec3f(DRY_MISS),abs(extent/rd),abs(rd)>vec3f(1e-9));
+  // A DDA through an s^3 subgrid crosses at most 3s-2 cells; 24 covers s=8.
+  for(var iteration=0u;iteration<24u;iteration+=1u){
+    if(any(cell<vec3i(cellMinimum))||any(cell>=limit)||entry>tExit){break;}
+    let index=svoBrickVoxelIndex(voxelOffset,vec3u(cell),brickSize);
+    if(index<arrayLength(&materialOwners)){
+      let identity=materialOwners[index];
+      if(dryLodCellSolid(identity)){return identity;}
     }
     let advance=min(nextT.x,min(nextT.y,nextT.z));if(nextT.x<=advance+1e-6){cell.x+=step.x;nextT.x+=deltaT.x;}if(nextT.y<=advance+1e-6){cell.y+=step.y;nextT.y+=deltaT.y;}if(nextT.z<=advance+1e-6){cell.z+=step.z;nextT.z+=deltaT.z;}entry=advance;
   }
+  return 0u;
+}
+// The intermediate rung: step the brick at stride cells and shade the
+// aggregate that stops the ray.
+//
+// The bounds are the brick's own box and never the instance's occupied sub-AABB.
+// The distinction is load-bearing and was the second half of the LOD tier's
+// damage: cell coordinates derived from the sub-AABB were fed straight to
+// svoBrickVoxelIndex as full-brick indices, so a brick whose occupancy filled
+// cells [4..7]^3 rendered a squeezed copy of the whole brick's contents into
+// that corner. Callers clip the *interval* with the proxy and pass the box.
+//
+// What the aggregate cannot do yet is answer without descending: occupancy is
+// aggregated (macroMask, free in the node's flags word) but identity is not,
+// so an occupied aggregate still scans its own cells for the first solid one.
+// The saving is therefore empty space — the mask rejects a 4^3 region in one
+// bit test where the fine walk paid a payload fetch per cell — and the shading
+// is exact-material-at-aggregate-resolution rather than an invented average.
+// One representative identity per macrocell (8 u32 per brick, 134 KB at the
+// hero's 4 187) is what would make an occupied aggregate free as well.
+fn dryPrimaryLeafAggregateHit(ro:vec3f,rd:vec3f,bounds:mat2x3f,tEnter:f32,tExit:f32,
+  voxelOffset:u32,occupancy:SvoBrickOccupancy,stride:u32)->DryHit{
+  let brickSize=max(dry.mapping.brickSize,1u);
+  let extent=(bounds[1]-bounds[0])/f32(brickSize);
+  let aggregates=max(brickSize/max(stride,1u),1u);let aggregateExtent=extent*f32(stride);
+  var entry=max(tEnter,0.0);let point=ro+rd*(entry+1e-5);
+  var block=clamp(vec3i(floor((point-bounds[0])/aggregateExtent)),vec3i(0),vec3i(i32(aggregates)-1));
+  let step=select(vec3i(-1),vec3i(1),rd>=vec3f(0.0));
+  let nextBoundary=bounds[0]+(vec3f(block)+select(vec3f(0.0),vec3f(1.0),step>vec3i(0)))*aggregateExtent;
+  var nextT=select(vec3f(DRY_MISS),(nextBoundary-ro)/rd,abs(rd)>vec3f(1e-9));
+  let deltaT=select(vec3f(DRY_MISS),abs(aggregateExtent/rd),abs(rd)>vec3f(1e-9));
+  for(var iteration=0u;iteration<32u;iteration+=1u){
+    if(any(block<vec3i(0))||any(block>=vec3i(i32(aggregates)))||entry>tExit){break;}
+    let blockExit=min(min(nextT.x,nextT.y),min(nextT.z,tExit));
+    let cellMinimum=vec3u(block)*stride;
+    // Free rejection: the producer publishes a 4^3 macrocell mask in the
+    // terminal node's spare flags word, and an aggregate of four cells or fewer
+    // lies wholly inside one macrocell because the grids are aligned and the
+    // strides divide. A whole-brick aggregate spans all eight macrocells, so it
+    // must consult the occupied bit instead — testing macrocell zero there
+    // would reject any brick whose contents sit in another octant.
+    let aggregateOccupied=select(svoBrickMacroOccupied(occupancy,cellMinimum),
+      occupancy.ready==0u||occupancy.occupied!=0u,stride>4u);
+    if(aggregateOccupied){
+      let identity=dryLodAggregateIdentity(ro,rd,bounds[0],extent,voxelOffset,cellMinimum,stride,entry,blockExit);
+      if(identity!=0u){
+        let blockBounds=mat2x3f(bounds[0]+vec3f(cellMinimum)*extent,
+          bounds[0]+vec3f(cellMinimum+vec3u(stride))*extent);
+        return dryPrimaryVoxelProxyHit(ro,rd,blockBounds,entry,identity);
+      }
+    }
+    let advance=min(nextT.x,min(nextT.y,nextT.z));if(nextT.x<=advance+1e-6){block.x+=step.x;nextT.x+=deltaT.x;}if(nextT.y<=advance+1e-6){block.y+=step.y;nextT.y+=deltaT.y;}if(nextT.z<=advance+1e-6){block.z+=step.z;nextT.z+=deltaT.z;}entry=advance;
+  }
   return missHit();
+}
+// LOD-tier entry: brick box from the node, interval already clipped by the proxy.
+//
+// A sub-threshold brick is drawn as one voxel, and the emphasis is on *drawn*:
+// this arm may not answer "nothing". It keeps exactly one candidate per pixel —
+// the coverage pass depth-tests the proxy boxes and the winner is the only
+// instance the resolve is ever handed — and every brick behind that winner was
+// routed away from the exact arena for being sub-threshold as well. So a miss
+// here is not "try the next brick", it is a hole straight through to terrain or
+// sky, which is what the LOD slider was producing at every threshold high
+// enough to collapse overlapping geometry.
+//
+// Over-covering the proxy box instead is the error the budget already names:
+// the box only exists because it measured at or under the threshold, so drawing
+// it solid can grow a silhouette by at most that many pixels, and at the
+// contract's default of three it is invisible. Descending still runs first and
+// still picks the material, because a proxy box is tens of pixels across at a
+// high threshold and the along-ray cell beats one representative for all of it.
+fn dryPrimaryLeafProxyHit(ro:vec3f,rd:vec3f,nodeIndex:u32,proxyBounds:mat2x3f,tEnter:f32,tExit:f32,voxelOffset:u32)->DryHit{
+  let node=svoNodeLoad(nodeIndex);let bounds=svoNodeBounds(node,dry.mapping);
+  let occupancy=svoBrickOccupancyDecode(node.links.w);
+  let stride=dryLodCellStride(bounds,node.address.z);
+  let descended=dryPrimaryLeafAggregateHit(ro,rd,bounds,tEnter,tExit,voxelOffset,occupancy,stride);
+  if(descended.t<DRY_MISS){return descended;}
+  let identity=dryLodBrickRepresentativeIdentity(voxelOffset,occupancy);
+  if(identity==0u){return missHit();}
+  return dryPrimaryVoxelProxyHit(ro,rd,proxyBounds,max(tEnter,0.0),identity);
 }
 fn dryPrimaryPrimitiveProxyHit(record:SvoPrimitiveRecord,ro:vec3f,rd:vec3f,span:vec2f)->DryHit{
   let localExtent=svoPrimitiveLocalExtent_m(svoPrimitiveKind(record),svoPrimitiveDimensions_m(record));
@@ -2370,11 +3157,26 @@ struct DryTieredResolveQueue{
     &&(resolvedMetadata&0xffffu)==svoPrimitiveOwnerId(record)){${sceneCoverageMissWGSL}}
   if(!(span.x<resolvedDepth)){${sceneCoverageMissWGSL}}
 ` : "";
-  const screenSpaceVoxelResolveWGSL = screenSpaceTerminationPixels > 0 ? /* wgsl */ `
+  // Retired under voxels-only, and the reason is worth keeping.
+  //
+  // This per-cell sub-pixel test sat *inside* the owner-range branch, so once
+  // the walk accepted solidity as `material != 0` every ownerless cell reached
+  // `primaryVoxelSurfaceWGSL` without ever being asked whether it was
+  // sub-pixel. Hoisting it out would have been the obvious repair, and it buys
+  // nothing: what it saved was the analytic `primitiveHit` march, and under
+  // voxels-only there is no march — both arms return at the first solid cell,
+  // and the proxy arm returns the *same* cell with a coarser depth. A test that
+  // costs a footprint evaluation per cell to choose between two identical
+  // answers is a cost, not a level of detail.
+  //
+  // Real intermediate detail is the aggregate stride (`primaryLodStrideWGSL`),
+  // decided once per brick instead of once per cell. The control arm that still
+  // marches records keeps the original test, where it still earns its place.
+  const screenSpaceVoxelResolveWGSL = screenSpaceTerminationPixels > 0 && !voxelsOnlyPrimary ? /* wgsl */ `
         let cellBounds=mat2x3f(bounds[0]+vec3f(cell)*extent,bounds[0]+(vec3f(cell)+vec3f(1.0))*extent);
         if(dryPrimaryBoundsSubPixel(cellBounds)){
           ${primaryUpgradeFlushWGSL}
-          return dryPrimaryVoxelProxyHit(ro,rd,cellBounds,entry,cellExit,identity);
+          return dryPrimaryVoxelProxyHit(ro,rd,cellBounds,entry,identity);
         }` : "";
   const screenSpacePrimitiveResolveWGSL = screenSpaceTerminationPixels > 0
     ? "let proxyLocalExtent=svoPrimitiveLocalExtent_m(svoPrimitiveKind(record),svoPrimitiveDimensions_m(record));let proxyExtent=dryScenePrimitiveWorldExtent(proxyLocalExtent,record.orientation);let proxyCentre=svoPrimitiveCenter_m(record);if(dryPrimaryBoundsSubPixel(mat2x3f(proxyCentre-proxyExtent,proxyCentre+proxyExtent))){let proxySpan=vec2f(span.x,min(span.y,limit));return dryPrimaryPrimitiveProxyHit(record,ro,rd,proxySpan);}"
@@ -2390,7 +3192,7 @@ struct DryBrickCoverageOut{@location(0) key:u32,@builtin(frag_depth) hardwareDep
     ? "return DryBrickCoverageOut(0u,0.0);" : "return 1u;";
   const screenSpaceBrickCoverageWGSL = screenSpaceTerminationPixels > 0 ? /* wgsl */ `
   let proxyBounds=mat2x3f(input.proxyMinimum,input.proxyMaximum);
-  if(dryPrimaryBrickCellsSubPixel(proxyBounds)){
+  if(dryPrimaryBrickProxySubPixel(proxyBounds,dryLeafLevel(input.nodeIndex))){
     let camera=dryRasterPrimaryCamera();let ro=camera[0];let rd=dryRasterPrimaryRay(input.position.xy,camera);
     let interval=svoRayAabbWithInverse(SvoRay(ro,0.0,rd,DRY_MISS),1.0/rd,proxyBounds);
     if(interval.x!=0.0){let entry=max(interval.y,0.0);return DryBrickCoverageOut(input.instanceIndex+1u,dryHardwareDepth(entry,rd,camera[1]));}
@@ -2401,7 +3203,7 @@ struct DryBrickCoverageOut{@location(0) key:u32,@builtin(frag_depth) hardwareDep
   if(lodKey>0u){let instanceIndex=lodKey-1u;if(instanceIndex<arrayLength(&svoBrickInstances)){
     let record=svoBrickInstances[instanceIndex];let proxyBounds=mat2x3f(record.proxyMinimum,record.proxyMaximum);
     let interval=svoRayAabbWithInverse(SvoRay(ro,0.0,rd,DRY_MISS),1.0/rd,proxyBounds);
-    if(interval.x!=0.0){let proxy=dryPrimaryLeafProxyHit(ro,rd,proxyBounds,max(interval.y,0.0),interval.z,record.voxelOffset);
+    if(interval.x!=0.0){let proxy=dryPrimaryLeafProxyHit(ro,rd,record.nodeIndexKey&SVO_BRICK_NODE_INDEX_MASK,proxyBounds,max(interval.y,0.0),interval.z,record.voxelOffset);
       if(proxy.t<opaque.t){opaque=proxy;producer=SVO_GBUFFER_PRODUCER_BRICK;}}
   }}
 ` : "";
@@ -2477,6 +3279,30 @@ fn dryBrickMacroSkip(summary:SvoBrickOccupancy,local:vec3u,bounds:mat2x3f,extent
   const shadowBrickExitWGSL = brickOccupancyMode === "off" ? "hit.tExit" : "brickExit";
   const shadowMacroSkipWGSL = brickOccupancyMode === "macro" ? /* wgsl */ `let macroSkip=dryBrickMacroSkip(brickSummary,vec3u(cell),bounds,extent,ray.origin_m,ray.direction,entry);if(macroSkip.x!=0.0){if(macroSkip.y>=brickExit||macroSkip.y>=DRY_MISS){return dryVisibilityStep(SVO_VIS_STEP_MISS,0u,0u,workItems,DRY_MISS);}entry=macroSkip.y;let skipPoint=ray.origin_m+ray.direction*(entry+max(1e-5,length(extent)*1e-4));cell=vec3i(clamp(floor((skipPoint-bounds[0])/extent),vec3f(0.0),vec3f(f32(dry.mapping.brickSize-1u))));let skipBoundary=bounds[0]+(vec3f(cell)+select(vec3f(0.0),vec3f(1.0),step>vec3i(0)))*extent;nextT=select(vec3f(DRY_MISS),(skipBoundary-ray.origin_m)/ray.direction,abs(ray.direction)>vec3f(1e-9));continue;}
     ` : "";
+  // Where the exact tier becomes adaptive.
+  //
+  // Routing the LOD by *pass* — sub-threshold pixels to the proxy fragment,
+  // the rest to the exact one — only ever offered two granularities, and once
+  // the whole-brick predicate was corrected to measure the whole brick it
+  // stopped firing on anything but far background. The intermediate rungs
+  // therefore have to live inside the exact walk, decided once per brick
+  // fragment from the projected footprint. That is also the cheapest place for
+  // it: `bounds` and the occupancy word are already in hand.
+  //
+  // Stride one leaves the loop below untouched, byte for byte, which is what
+  // keeps a zero threshold the reference image rather than a near-miss of it.
+  const primaryLodStrideWGSL = screenSpaceTerminationPixels > 0 ? /* wgsl */ `
+  // Capped one rung above the whole brick, and that cap is not a taste call: an
+  // aggregate the size of the brick still scans every cell the ray crosses to
+  // find a material, so it pays the exact walk's cost and then discards the
+  // precision it bought. The whole-brick answer is cheap only where it can be
+  // given without touching the payload — the coverage pass, which returns the
+  // proxy face and a hardware depth and stops. Here it is a pure loss.
+  let lodStride=min(dryLodCellStride(bounds,dryLeafLevel(hit.nodeIndex)),max(dry.mapping.brickSize>>1u,1u));
+  if(lodStride>1u){
+    return dryPrimaryLeafAggregateHit(ro,rd,bounds,entry,${primaryBrickExitWGSL},hit.voxelOffset,
+      svoBrickOccupancyDecode(dryLeafFlags(hit.nodeIndex)),lodStride);
+  }` : "";
   const primaryLeafTraceCallWGSL = brickOccupancyMode === "macro-hdda" ? "traceLeafPayloadMacroHdda" : "traceLeafPayload";
   const shadowLeafTraceCallWGSL = brickOccupancyMode === "macro-hdda" ? "traceLeafPayloadVisibilityMacroHdda" : "traceLeafPayloadVisibility";
   const macroHddaPrimaryWGSL = brickOccupancyMode === "macro-hdda" ? /* wgsl */ `
@@ -2710,11 +3536,17 @@ fn dryVoxelLightUnpackNormal(packed:u32)->vec3f{
   let oct=vec2f(f32(packed&255u),f32((packed>>8u)&255u))/255.0*2.0-1.0;
   var normal=vec3f(oct,1.0-abs(oct.x)-abs(oct.y));if(normal.z<0.0){let folded=(vec2f(1.0)-abs(normal.yx))*select(vec2f(-1.0),vec2f(1.0),normal.xy>=vec2f(0.0));normal=vec3f(folded,normal.z);}return normalize(normal);
 }
+// The cache is one entry per texel of a *base* page, and the base is the
+// opacity floor — the pyramid's finest resident level, not level zero. Under a
+// floor of one its entries cover 2^3 finest voxels each, which is the same
+// coarsening the opacity field it caches visibility against already took. At
+// floor zero every line below is the arithmetic that shipped.
 fn dryVoxelLightAddress(position:vec3f)->DryVoxelLightAddress{
   if((dryVoxelLight.control.w&1u)==0u||dry.nodeMipDirect.w==0u){return DryVoxelLightAddress(vec3u(0u),0u,0u);}
-  let virtualVoxelFloor=floor((position-dry.nodeMipOrigin.xyz)/max(dry.mapping.cellSize,vec3f(1e-6)));
+  let baseLevel=dryNodeMipOpacityLevelFloor();
+  let virtualVoxelFloor=floor((position-dry.nodeMipOrigin.xyz)/max(dry.mapping.cellSize*exp2(f32(baseLevel)),vec3f(1e-6)));
   if(any(virtualVoxelFloor<vec3f(0.0))){return DryVoxelLightAddress(vec3u(0u),0u,0u);}
-  let voxel=vec3u(virtualVoxelFloor);let pageCoordinate=voxel/${SVO_NODE_MIP_LAYOUT.interiorSize}u;let pageIndex=dryNodeMipFind(0u,pageCoordinate);
+  let voxel=vec3u(virtualVoxelFloor);let pageCoordinate=voxel/${SVO_NODE_MIP_LAYOUT.interiorSize}u;let pageIndex=dryNodeMipFind(baseLevel,pageCoordinate);
   if(pageIndex==0xffffffffu||pageIndex>=dryVoxelLight.control.x||!dryNodeMipPageValid(pageIndex)){return DryVoxelLightAddress(vec3u(0u),0u,0u);}
   let local=voxel-pageCoordinate*${SVO_NODE_MIP_LAYOUT.interiorSize}u;
   let localIndex=local.x+local.y*${SVO_NODE_MIP_LAYOUT.interiorSize}u+local.z*${SVO_NODE_MIP_LAYOUT.interiorSize ** 2}u;
@@ -2759,8 +3591,11 @@ fn dryVoxelLightReject(pageIndex:u32,local:vec3u){
   let entry=dryVoxelLightQueue.entries[id.x];let pageIndex=entry.x/${SVO_DRY_VOXEL_LIGHT_CACHE_CONTRACT.voxelsPerPage}u;
   let localIndex=entry.x-pageIndex*${SVO_DRY_VOXEL_LIGHT_CACHE_CONTRACT.voxelsPerPage}u;if(pageIndex>=dryVoxelLight.control.x){return;}
   let local=vec3u(localIndex%${SVO_NODE_MIP_LAYOUT.interiorSize}u,(localIndex/${SVO_NODE_MIP_LAYOUT.interiorSize}u)%${SVO_NODE_MIP_LAYOUT.interiorSize}u,localIndex/${SVO_NODE_MIP_LAYOUT.interiorSize ** 2}u);
-  let page=dryVoxelLightPages[pageIndex];if(page.w!=0u){return;}let worldVoxel=page.xyz*${SVO_NODE_MIP_LAYOUT.interiorSize}u+local;
-  let position=dry.nodeMipOrigin.xyz+(vec3f(worldVoxel)+vec3f(.5))*dry.mapping.cellSize;let normal=dryVoxelLightUnpackNormal(entry.y);
+  // Only base-level pages carry cache entries, and the base is the opacity
+  // floor; a coarser page's texels are not the lattice the addresses above use.
+  let baseLevel=dryNodeMipOpacityLevelFloor();
+  let page=dryVoxelLightPages[pageIndex];if(page.w!=baseLevel){return;}let worldVoxel=page.xyz*${SVO_NODE_MIP_LAYOUT.interiorSize}u+local;
+  let position=dry.nodeMipOrigin.xyz+(vec3f(worldVoxel)+vec3f(.5))*dry.mapping.cellSize*exp2(f32(baseLevel));let normal=dryVoxelLightUnpackNormal(entry.y);
   var pageCache=DryNodeMipPageCache(vec3u(0u),0xffffffffu,vec3u(0u),0u,0u,0xffffffffu,0u);let coverage=dryNodeMipAt(position,0.0,&pageCache);
   if(coverage.valid==0u||(coverage.sample.solidMaximum>.85&&coverage.sample.solidMean<.08)){dryVoxelLightReject(pageIndex,local);return;}
   let light=dryLighting.lights[0];if(dryLighting.metadata.x==0u||light.identity.x!=SVO_LIGHT_DIRECTIONAL||light.identity.w!=dryLighting.metadata.y){return;}
@@ -3166,7 +4001,7 @@ ${screenSpaceTerminationPixels > 0 ? /* wgsl */ `
   dryRasterPrimaryReset();let camera=dryRasterPrimaryCamera();let ro=camera[0];let rd=dryRasterPrimaryRay(position,camera);
   let record=svoBrickInstances[instanceIndex];let bounds=mat2x3f(record.proxyMinimum,record.proxyMaximum);
   let interval=svoRayAabbWithInverse(SvoRay(ro,0.0,rd,DRY_MISS),1.0/rd,bounds);if(interval.x==0.0){discard;}
-  let proxy=dryPrimaryLeafProxyHit(ro,rd,bounds,max(interval.y,0.0),interval.z,record.voxelOffset);
+  let proxy=dryPrimaryLeafProxyHit(ro,rd,record.nodeIndexKey&SVO_BRICK_NODE_INDEX_MASK,bounds,max(interval.y,0.0),interval.z,record.voxelOffset);
   if(!(proxy.t<DRY_MISS)){discard;}return dryRasterPrimarySurface(proxy,ro,rd,camera[1],SVO_GBUFFER_PRODUCER_BRICK);
 }
 @fragment fn svoBrickExactResolveFragment(input:VertexOut)->DryRasterPrimaryOut{
@@ -3900,6 +4735,7 @@ struct DryParams {
   materialPublication:vec4u,
   // x: stable address-plan generation; y: directory pages; z: levels; w: publication mode.
   nodeMip:vec4u,
+  // xyz: opacity atlas texels; w: finest level that owns an opacity page.
   nodeMipAtlas:vec4u,
   // x: derived generation; y: canonical source generation; z: pages; w: descriptors.
   wideFanout:vec4u,
@@ -3938,6 +4774,8 @@ struct DryParams {
   structureOffsets:vec4u,
   // Optional derived traversal offsets; zero for canonical and compact modes.
   derivedTraversal:vec4u,
+  // x: screen-space threshold in reference pixels; y: mode; z: fixed level.
+  lod:vec4f,
 }
 struct DryLightingArena {
   // x: light count; y: light revision; z: environment revision; w: environment ABI version.
@@ -3968,6 +4806,9 @@ ${cameraApertureShaderLibrary()}
 @group(0) @binding(1) var<uniform> bodies:array<BodyGPU,12>;
 @group(0) @binding(3) var<storage,read> materialOwners:array<u32>;
 @group(0) @binding(4) var<storage,read> drySceneArena:array<u32>;
+// Bound to the scene-geometry lane itself, not to the whole payload arena, so
+// the lane's own base is zero and the codec's base argument is a literal.
+@group(0) @binding(6) var<storage,read> sceneGeometry:array<u32>;
 @group(0) @binding(9) var<uniform> dry:DryParams;
 @group(0) @binding(13) var<uniform> dryLighting:DryLightingArena;
 @group(0) @binding(14) var<uniform> rigidMotion:array<SvoPrimitiveMotionRecord,12>;
@@ -3990,6 +4831,9 @@ const DRY_SCENE_PRIMITIVE_WORD_OFFSET:u32=${SVO_DRY_SCENE_ARENA_LAYOUT.primitive
 const DRY_SCENE_GLASS_WORD_OFFSET:u32=${SVO_DRY_SCENE_ARENA_LAYOUT.glassOffsetBytes / 4}u;
 const DRY_SCENE_CLUSTER_WORD_OFFSET:u32=${SVO_DRY_SCENE_ARENA_LAYOUT.clusterOffsetBytes / 4}u;
 const DRY_SCENE_CLUSTER_WORD_LIMIT:u32=DRY_SCENE_CLUSTER_WORD_OFFSET+${SVO_DRY_SCENE_CLUSTER_ARENA_SIZE_BYTES / 4}u;
+const DRY_SCENE_FIELD_PROGRAM_WORD_OFFSET:u32=${SVO_DRY_SCENE_ARENA_LAYOUT.fieldProgramOffsetBytes / 4}u;
+const DRY_SCENE_FIELD_PROGRAM_CAPACITY:u32=${SVO_DRY_SCENE_FIELD_PROGRAM_CAPACITY}u;
+const DRY_SCENE_FIELD_PROGRAM_BLOCK_WORDS:u32=${SVO_FIELD_PROGRAM_BLOCK_WORDS}u;
 const DRY_SCENE_TERRAIN_WORD_OFFSET:u32=${SVO_DRY_SCENE_ARENA_LAYOUT.terrainOffsetBytes / 4}u;
 const DRY_SCENE_TERRAIN_SAMPLE_WORD_OFFSET:u32=DRY_SCENE_TERRAIN_WORD_OFFSET+${SVO_DRY_SCENE_TERRAIN_HEADER_WORDS}u;
 fn drySceneWords4(offset:u32)->vec4u{return vec4u(drySceneArena[offset],drySceneArena[offset+1u],drySceneArena[offset+2u],drySceneArena[offset+3u]);}
@@ -4024,6 +4868,25 @@ fn dryClusterPacking(record:SvoPrimitiveRecord)->SvoClusterPacking{
     bitcast<f32>(head[${CLUSTER_BLOCK_SMOOTH_RADIUS_WORD}]),shape.x,shape.y,shape.z,shape.w,
     placement.x,placement.y,placement.z,points);
 }
+fn drySceneWord(offset:u32)->u32{return drySceneArena[offset];}
+${svoFieldProgramWGSL({
+  functionName: "dryFieldProgramBlock",
+  loadWord: "drySceneWord",
+  baseWordExpression: "DRY_SCENE_FIELD_PROGRAM_WORD_OFFSET",
+  capacityExpression: "DRY_SCENE_FIELD_PROGRAM_CAPACITY",
+})}
+// The shared ABI's host hook. The generated evaluator above addresses tapes by
+// slot; a record addresses its own by word offset, exactly as a heightfield and
+// an aggregate do. Translating here is what keeps the reference *checkable*: an
+// offset that is not a block start is a stale or corrupt word rather than a tape
+// read from the middle of its neighbour, and it answers as unresolved — which
+// the ABI reports as an invalid record instead of drawing the conservative box.
+fn svoFieldProgramReferenceSample(reference:u32,localPoint:vec3f)->SvoFieldValue{
+  if(reference<DRY_SCENE_FIELD_PROGRAM_WORD_OFFSET){return SvoFieldValue(1e20,1.0);}
+  let offset=reference-DRY_SCENE_FIELD_PROGRAM_WORD_OFFSET;
+  if(offset%DRY_SCENE_FIELD_PROGRAM_BLOCK_WORDS!=0u){return SvoFieldValue(1e20,1.0);}
+  return dryFieldProgramBlock(offset/DRY_SCENE_FIELD_PROGRAM_BLOCK_WORDS,localPoint);
+}
 fn dryGlassPane(index:u32)->SvoThinGlassRecord{
   let base=DRY_SCENE_GLASS_WORD_OFFSET+index*${SVO_THIN_GLASS_RECORD_WORDS}u;
   return SvoThinGlassRecord(bitcast<vec4f>(drySceneWords4(base)),bitcast<vec4f>(drySceneWords4(base+4u)),
@@ -4035,11 +4898,13 @@ fn dryPublicationWord(index:u32)->u32{return svoStructure[dry.structureOffsets.y
 // can fail closed. They are diagnostics, not scene colour output.
 var<private> dryDerivedPageFailure:u32=0u;
 
-${canonicalTraversalWGSL}${screenSpaceTraversalWGSL}${screenSpacePrimaryProxyWGSL}${tieredComputeResolveDeclarationsWGSL}
+${canonicalTraversalWGSL}${screenSpaceTraversalWGSL}${lodDescentWGSL}${lodUniformWGSL}${screenSpacePrimaryProxyWGSL}${tieredComputeResolveDeclarationsWGSL}
 ${wideTraversalWGSL}${compactTraversalWGSL}${brickOccupancyHelpersWGSL}
 ${liveLeafLifecycleWGSL}
 ${createSvoDryConeMarcherWGSL({ branchlessMorton: true, rangedDirectorySearch: true, fluidCoverage: true, directPageTable: true })}
 var<private> dryGiPageCache:DryNodeMipPageCache;
+/** The ancestor page a sub-floor radiance sample redirects to; coarser, so it changes far less often. */
+var<private> dryGiRadiancePageCache:DryNodeMipPageCache;
 fn dryTetraRadianceReady()->bool{return dry.tetrahedralRadiance.y!=0u&&dry.tetrahedralRadiance.x==dry.nodeMip.x&&dryNodeMipReady();}
 fn dryTetraRadiancePageValid(pageIndex:u32)->bool{
   let dimensions=textureDimensions(tetraRadiancePageValidity);return svoDerivedPageValidityResident(dimensions,pageIndex)&&textureLoad(tetraRadiancePageValidity,svoDerivedPageValidityTexel(dimensions,pageIndex),0).x!=0u;
@@ -4050,9 +4915,34 @@ fn dryNodeMipSceneExitDistance(position:vec3f,direction:vec3f)->f32{
     else{let first=(minimum[axis]-position[axis])/direction[axis];let second=(maximum[axis]-position[axis])/direction[axis];enter=max(enter,min(first,second));exit=min(exit,max(first,second));if(exit<enter){return 0.0;}}}
   return max(exit,0.0);
 }
+/**
+ * The radiance atlas's own page, which is not the opacity page.
+ *
+ * dry.tetrahedralRadiance.z is the finest level that owns a radiance page and
+ * .w is the slot its atlas begins at. A cone sampling finer than the floor
+ * reads the ancestor at the floor instead — legitimate, not a fallback:
+ * planSvoNodeMipPyramid inserts an ancestor at every level above every occupied
+ * base page, so residency is ancestor-closed and the ancestor is always there.
+ * The lookup is recomputed from the query position at the floor level rather
+ * than shifted from the fine page, so the fractional texel is exact instead of
+ * quantised by the fine page's rounding.
+ */
+fn dryTetraRadianceLevelFloor()->u32{return min(dry.tetrahedralRadiance.z,dry.nodeMip.z-1u);}
+/** 2: page unusable, 1: certified black, 0: sample it. Resolved once per page, never per tap. */
+fn dryTetraRadianceState(pageIndex:u32)->u32{
+  if(!dryTetraRadiancePageValid(pageIndex)){return 2u;}
+  if(pageIndex<dry.tetrahedralRadiance.w){return 1u;}
+  return textureLoad(tetraRadianceBlackPages,vec2u(pageIndex,0u),0).x;
+}
+fn dryTetraRadiancePageOrigin(pageIndex:u32)->vec3u{
+  let physical=u32(SVO_NODE_MIP_PHYSICAL_SIZE);
+  let atlasPages=max(textureDimensions(tetraRadianceLobe0)/vec3u(physical),vec3u(1u));
+  let slot=pageIndex-dry.tetrahedralRadiance.w;
+  return vec3u(slot%atlasPages.x,(slot/atlasPages.x)%atlasPages.y,slot/(atlasPages.x*atlasPages.y))*physical;
+}
 fn svoTetraRadianceConeLoad(query:SvoTetraRadianceConeQuery)->SvoTetraRadianceConeSourceSample{
   if(!dryNodeMipReady()){return SvoTetraRadianceConeSourceSample(0.0,SvoTetraRadiance(vec3f(0.0),vec3f(0.0),vec3f(0.0),vec3f(0.0)),0u,0u);}
-  let level=min(u32(max(floor(query.lod),0.0)),dry.nodeMip.z-1u);let levelScale=exp2(f32(level));
+  let level=min(max(u32(max(floor(query.lod),0.0)),dryNodeMipOpacityLevelFloor()),dry.nodeMip.z-1u);let levelScale=exp2(f32(level));
   let virtualVoxel=(query.position_m-dry.nodeMipOrigin.xyz)/(dry.mapping.cellSize*levelScale);let pageFloor=floor(virtualVoxel/f32(SVO_NODE_MIP_INTERIOR_SIZE));
   if(any(pageFloor<vec3f(0.0))||any(pageFloor>=vec3f(2097152.0))){return SvoTetraRadianceConeSourceSample(0.0,SvoTetraRadiance(vec3f(0.0),vec3f(0.0),vec3f(0.0),vec3f(0.0)),1u,1u);}
   let pageCoordinate=vec3u(pageFloor);
@@ -4070,9 +4960,27 @@ fn svoTetraRadianceConeLoad(query:SvoTetraRadianceConeQuery)->SvoTetraRadianceCo
   let local=virtualVoxel-vec3f(pageCoordinate)*f32(SVO_NODE_MIP_INTERIOR_SIZE)-vec3f(.5);
   let opacity=svoNodeMipSamplePage(nodeMipAtlas,nodeMipSampler,dryGiPageCache.pageOrigin,local);
   if(!dryTetraRadianceReady()){return SvoTetraRadianceConeSourceSample(opacity.solidMean,SvoTetraRadiance(vec3f(0.0),vec3f(0.0),vec3f(0.0),vec3f(0.0)),1u,0u);}
-  if(dryGiPageCache.blackRadiance==2u){return SvoTetraRadianceConeSourceSample(opacity.solidMean,SvoTetraRadiance(vec3f(0.0),vec3f(0.0),vec3f(0.0),vec3f(0.0)),1u,0u);}
-  if(dryGiPageCache.blackRadiance==1u){return SvoTetraRadianceConeSourceSample(opacity.solidMean,SvoTetraRadiance(vec3f(0.0),vec3f(0.0),vec3f(0.0),vec3f(0.0)),1u,1u);}
-  let uv=svoNodeMipAtlasUv(dryGiPageCache.pageOrigin,local,textureDimensions(tetraRadianceLobe0));
+  let radianceLevel=max(level,dryTetraRadianceLevelFloor());
+  var radianceIndex=dryGiPageCache.pageIndex;var radianceLocal=local;var radianceState=dryGiPageCache.blackRadiance;
+  if(radianceLevel!=level){
+    let radianceScale=exp2(f32(radianceLevel));
+    let radianceVoxel=(query.position_m-dry.nodeMipOrigin.xyz)/(dry.mapping.cellSize*radianceScale);
+    let radiancePageFloor=floor(radianceVoxel/f32(SVO_NODE_MIP_INTERIOR_SIZE));
+    if(any(radiancePageFloor<vec3f(0.0))){return SvoTetraRadianceConeSourceSample(opacity.solidMean,SvoTetraRadiance(vec3f(0.0),vec3f(0.0),vec3f(0.0),vec3f(0.0)),1u,1u);}
+    let radiancePage=vec3u(radiancePageFloor);
+    if(dryGiRadiancePageCache.generation!=dry.nodeMip.x||dryGiRadiancePageCache.level!=radianceLevel||any(dryGiRadiancePageCache.coordinate!=radiancePage)){
+      dryGiRadiancePageCache=DryNodeMipPageCache(radiancePage,radianceLevel,vec3u(0u),dry.nodeMip.x,0u,0xffffffffu,1u);
+      let ancestor=dryNodeMipFind(radianceLevel,radiancePage);
+      if(ancestor!=0xffffffffu){dryGiRadiancePageCache=DryNodeMipPageCache(radiancePage,radianceLevel,dryTetraRadiancePageOrigin(ancestor),dry.nodeMip.x,1u,ancestor,dryTetraRadianceState(ancestor));}
+    }
+    if(dryGiRadiancePageCache.resident==0u){return SvoTetraRadianceConeSourceSample(opacity.solidMean,SvoTetraRadiance(vec3f(0.0),vec3f(0.0),vec3f(0.0),vec3f(0.0)),1u,1u);}
+    radianceIndex=dryGiRadiancePageCache.pageIndex;radianceState=dryGiRadiancePageCache.blackRadiance;
+    radianceLocal=radianceVoxel-vec3f(radiancePage)*f32(SVO_NODE_MIP_INTERIOR_SIZE)-vec3f(.5);
+  }
+  if(radianceState==2u){return SvoTetraRadianceConeSourceSample(opacity.solidMean,SvoTetraRadiance(vec3f(0.0),vec3f(0.0),vec3f(0.0),vec3f(0.0)),1u,0u);}
+  if(radianceState==1u){return SvoTetraRadianceConeSourceSample(opacity.solidMean,SvoTetraRadiance(vec3f(0.0),vec3f(0.0),vec3f(0.0),vec3f(0.0)),1u,1u);}
+  let radianceOrigin=select(dryTetraRadiancePageOrigin(radianceIndex),dryGiRadiancePageCache.pageOrigin,radianceLevel!=level);
+  let uv=svoNodeMipAtlasUv(radianceOrigin,radianceLocal,textureDimensions(tetraRadianceLobe0));
   return SvoTetraRadianceConeSourceSample(opacity.solidMean,svoTetraSample(tetraRadianceLobe0,tetraRadianceLobe1,tetraRadianceLobe2,tetraRadianceLobe3,nodeMipSampler,uv),1u,1u);
 }
 struct DryGlobalIllumination{radiance:vec3f,visibility:f32,valid:u32}
@@ -4088,6 +4996,7 @@ fn dryGlobalIllumination(position:vec3f,normal:vec3f,ignoredBodyOwner:u32)->DryG
   for(var coneIndex=0u;coneIndex<4u;coneIndex+=1u){
     if(coneIndex>=coneCount){break;}let direction=svoTetraRadianceHemisphereDirection(normal,coneIndex,coneCount,0.0);
     dryGiPageCache=DryNodeMipPageCache(vec3u(0u),0xffffffffu,vec3u(0u),0u,0u,0xffffffffu,0u);
+    dryGiRadiancePageCache=DryNodeMipPageCache(vec3u(0u),0xffffffffu,vec3u(0u),0u,0u,0xffffffffu,0u);
     let sceneExit=dryNodeMipSceneExitDistance(origin,direction);
     // The same reading the direct term needed: a zero-length interval means this
     // cone never enters the pyramid, so there is nothing along it to occlude
@@ -4135,6 +5044,9 @@ const REQUIRED_FIELDS:u32 = ${SVO_DRY_SCENE_REQUIRED_VALID_FIELDS}u; // topology
 const DRY_OWNER_NONE:u32=0xffffu;
 const DRY_MEDIUM_GLASS:u32=2u;const DRY_MEDIUM_OPAQUE:u32=3u;
 const DRY_GBUFFER_FIELD_ANALYTIC:u32=4u;const DRY_GBUFFER_FIELD_TERRAIN:u32=5u;
+// SVO_GBUFFER_FIELD_SOURCES.structuralDiscrete — a cell face, not a solved
+// surface. The voxels-only primary reports this for every opaque hit it makes.
+const DRY_GBUFFER_FIELD_VOXEL:u32=1u;
 const DRY_GBUFFER_MOTION_STATIC:u32=0u;const DRY_GBUFFER_MOTION_RIGID:u32=1u;
 const DRY_GBUFFER_HARD_FEATURE:u32=256u;const DRY_GBUFFER_NO_INTERSECTION:u32=1u;
 const DRY_GBUFFER_WORK_EXHAUSTED:u32=2u;const DRY_GBUFFER_INVALID_FIELD:u32=3u;
@@ -4326,6 +5238,23 @@ fn traceTerrainHeightfield(ro:vec3f,rd:vec3f,grid:DryTerrainGrid)->DryHit{
 // four central-difference normal samples. Only unresolved shallow/grazing rays
 // pay for the smaller graded fallback. Both paths return the first bracket.
 fn traceTerrain(ro:vec3f,rd:vec3f)->DryHit{
+  ${voxelsOnlyPrimary ? /* wgsl */ `
+  // Terrain is voxels like everything else. The heightfield is still authored
+  // and still voxelized — 73 667 cells of material 2 on the hero garden, the
+  // largest single population in the lane — so killing the analytic surface
+  // removes a duplicate, not the ground.
+  //
+  // It was a duplicate that actively hid its twin: the shell has no owner, so
+  // the old owner-gated payload walk dropped every terrain cell, and what
+  // reached the screen was this function alone. Fixing the solidity test made
+  // both draw at once and the ground turned to floating cubes. One of them had
+  // to go, and the analytic one is the one that cannot get better.
+  //
+  // Returning a miss here rather than editing the call sites is deliberate:
+  // shading, the raster background pass and shadow visibility all route through
+  // this function, and a terrain that is invisible but still occludes would be
+  // a worse bug than either surface alone.
+  return missHit();` : ""}
   if(!terrainEnabled()){return missHit();}
   let sculpted=terrainGrid();
   if(terrainSculpted(sculpted)){return traceTerrainHeightfield(ro,rd,sculpted);}
@@ -4460,8 +5389,27 @@ fn traceScenePrimitives(ro:vec3f,rd:vec3f,tMin:f32,tMax:f32,ignoredOwner:u32)->D
   return best;
 }
 
+// The outward normal of the face a point sits on, for an axis-aligned cell.
+//
+// Called with the DDA's entry point, which lies exactly on one face, so the
+// axis whose distance to a bound is zero is the face the ray came in through
+// and wins the minimum outright. A point at a cell corner ties between two
+// legal faces and either answer is a real face of a real cell.
+//
+// Distinct from dryPrimaryProxyNormal, which answers the same way but is only
+// compiled when screen-space termination is on; this one is always here because
+// the voxels-only primary is always here.
+fn dryVoxelFaceNormal(bounds:mat2x3f,point:vec3f)->vec3f{
+  let faceDistance=min(abs(point-bounds[0]),abs(bounds[1]-point));var axis=0u;
+  if(faceDistance.y<faceDistance.x){axis=1u;}if(faceDistance.z<faceDistance[axis]){axis=2u;}
+  var normal=vec3f(0.0);
+  normal[axis]=select(-1.0,1.0,abs(point[axis]-bounds[1][axis])<abs(point[axis]-bounds[0][axis]));
+  return normal;
+}
+${surfaceReconstructionWGSL}
 fn traceLeafPayload(ro:vec3f,rd:vec3f,hit:SvoTraversalHit)->DryHit {
   ${primaryBrickSetupWGSL}
+  ${primaryLodStrideWGSL}
   let step=select(vec3i(-1),vec3i(1),rd>=vec3f(0.0)); let nextBoundary=bounds[0]+(vec3f(cell)+select(vec3f(0.0),vec3f(1.0),step>vec3i(0)))*extent;
   var nextT=select(vec3f(DRY_MISS),(nextBoundary-ro)/rd,abs(rd)>vec3f(1e-9)); let deltaT=select(vec3f(DRY_MISS),abs(extent/rd),abs(rd)>vec3f(1e-9));
   let tolerance=length(extent)*1.05;var upgrades=0u;
@@ -4505,10 +5453,29 @@ fn traceLeafPayload(ro:vec3f,rd:vec3f,hit:SvoTraversalHit)->DryHit {
     if(any(cell<vec3i(0))||any(cell>=vec3i(i32(dry.mapping.brickSize)))||entry>${primaryBrickExitWGSL}){break;}
     ${primaryMacroSkipWGSL}
     let cellExit=min(min(nextT.x,nextT.y),min(nextT.z,${primaryBrickExitWGSL}));
-    var cellOwner=${DRY_UPGRADE_RUN_NONE}u;
+    var cellOwner=${DRY_UPGRADE_RUN_NONE}u;var cellIdentity=0u;var cellSolid=false;
     let payloadIndex=svoBrickVoxelIndex(hit.voxelOffset,vec3u(cell),dry.mapping.brickSize);
     if(payloadIndex<arrayLength(&materialOwners)${voxelOwnerPrimary ? "" : "&&false"}){
       let identity=materialOwners[payloadIndex];let owner=identity>>16u;
+      // A material is what makes a cell solid; an owner is what makes it
+      // *solvable*. Those are not the same test, and conflating them is only
+      // invisible while something else draws the surface.
+      //
+      // The owner-range test below exists to name an authored record for the
+      // analytic march. Under voxels-only there is no march, so requiring it
+      // discards every cell the voxeliser filled without an in-range owner —
+      // which on the hero garden is most of the scenery. It cost nothing before
+      // because a rejected cell merely skipped an upgrade and the analytic tier
+      // drew the prop anyway; with that tier gone the same rejection is a hole.
+      // The raw inspection lane's own solidity test is exactly material != 0
+      // (see resolveMaterial in webgpu-octree-sparse-bricks.ts), and it draws
+      // 86 % of this frame from the same buffer this walk was missing.
+      //
+      // Suppression still applies, but only for an owner that names something:
+      // SPARSE_BRICK_NO_OWNER collides with DRY_OWNER_NONE and would otherwise
+      // suppress every ownerless cell in the scene.
+      let suppressed=owner!=${SPARSE_BRICK_NO_OWNER}u&&dryOpaqueOwnerSuppressed(owner);
+      if((identity&0xffffu)!=0u&&!suppressed){cellSolid=true;cellIdentity=identity;}
       // Air is packMaterialOwner(0, SPARSE_BRICK_NO_OWNER); a brick that exists
       // but was never voxelized is all zeroes. Both must miss, and the zero one
       // would otherwise resolve to record zero in every empty cell of the scene.
@@ -4517,6 +5484,7 @@ fn traceLeafPayload(ro:vec3f,rd:vec3f,hit:SvoTraversalHit)->DryHit {
         if(primitiveIndex<dry.metadata.x){${screenSpaceVoxelResolveWGSL}cellOwner=primitiveIndex;}
       }
     }
+    ${primaryVoxelSurfaceWGSL}
     if(${primaryUpgradeRunMergeWGSL}){runEnd=cellExit;}
     else{
       ${primaryUpgradeFlushWGSL}
@@ -4553,7 +5521,11 @@ ${macroHddaPrimaryWGSL}
 // process (serialized submit-to-fence): 292.5 -> 222.0 ms at 501 records and
 // 1564.4 -> 546.3 ms at 5 039. It is the single largest term in the 10x gap.
 fn traceStatic(ro:vec3f,rd:vec3f)->DryHit {
-  if(dryPublicationWord(0u)==0u||(dryPublicationWord(1u)&REQUIRED_FIELDS)!=REQUIRED_FIELDS){return traceScenePrimitives(ro,rd,0.0,DRY_MISS,DRY_OWNER_NONE);}
+  // An unpublished scene has no voxels, and voxels are the only surface. Drawing
+  // it analytically here would hide exactly the failure worth seeing: a frame
+  // that looks perfect because the voxel path never ran. Miss instead and let
+  // the existing publication tripwire say why.
+  if(dryPublicationWord(0u)==0u||(dryPublicationWord(1u)&REQUIRED_FIELDS)!=REQUIRED_FIELDS){${voxelsOnlyPrimary ? "return missHit();" : "return traceScenePrimitives(ro,rd,0.0,DRY_MISS,DRY_OWNER_NONE);"}}
   ${analyticPrimaryUnbounded ? "let seeded=traceScenePrimitives(ro,rd,0.0,DRY_MISS,DRY_OWNER_NONE);" : "let seeded=missHit();"}
   var voxel=missHit();
   var minimum=0.0;
@@ -4589,7 +5561,9 @@ fn traceStatic(ro:vec3f,rd:vec3f)->DryHit {
   if(!traversalFinished){}
   ${analyticPrimaryUnbounded
     ? "if(voxel.t<seeded.t){return voxel;}return seeded;"
-    : "let live=traceScenePrimitives(ro,rd,0.0,voxel.t,DRY_OWNER_NONE);if(live.t<voxel.t){return live;}return voxel;"}
+    : voxelsOnlyPrimary
+      ? "return voxel;"
+      : "let live=traceScenePrimitives(ro,rd,0.0,voxel.t,DRY_OWNER_NONE);if(live.t<voxel.t){return live;}return voxel;"}
 }
 
 struct DryGlassHit{hit:SvoThinGlassHit,recordIndex:u32}
@@ -4871,9 +5845,19 @@ fn dryEvaluateSurfaceMaterial(hit:DryHit,position:vec3f)->DrySurfaceMaterial {
   if((hit.materialId&0x80000000u)!=0u){let body=bodies[hit.materialId&0x7fffffffu];baseOverride=body.colorSelected.xyz;useBaseOverride=true;selectedEmission=body.colorSelected.w*vec3f(.12,.42,.32);}
   if(materialId>=dry.materialPublication.x){return dryInvalidSurfaceMaterial();}let material=dryMaterial(materialId);if(!dryPublishedMaterialValid(material,materialId)){return dryInvalidSurfaceMaterial();}
   var base=select(material.baseColorOpacity.xyz,baseOverride,useBaseOverride);var roughness=material.emissiveRoughness.w;var regionId=DRY_SURFACE_REGION_NONE;var variationFlags=0u;
+  ${neutralSurfaceAlbedo ? /* wgsl */ `
+  // Clay at 0.8, not 1.0. A unit-albedo surface clips to flat white under the
+  // key light and loses precisely the shading this mode exists to show; 0.8 is
+  // where plaster and porcelain actually sit, and it keeps a highlight's
+  // rolloff on the curve instead of against the ceiling.
+  //
+  // The selection tint survives: it is a cursor affordance, not a material.
+  // So does emission below, because an emitter is a light source and removing
+  // it would change how the room is lit rather than what colour things are.
+  base=select(vec3f(0.8),baseOverride,useBaseOverride);roughness=0.65;` : /* wgsl */ `
   let terrainPolicyValid=material.identity.z==SVO_MATERIAL_FUNCTION_GARDEN_TERRAIN&&dry.terrainMaterial.policyVersion==1u&&dry.terrainMaterial.materialId==materialId&&materialId==dry.terrain.x;
   if(terrainPolicyValid){let terrainSample=svoTerrainMaterial(dry.terrainMaterial,position,hit.normal);base=terrainSample.colorLinear;regionId=terrainSample.regionId;variationFlags=terrainSample.variationFlags;}
-  else{let procedural=svoProceduralMaterial(material.identity.z,base,roughness,position);base=procedural.baseColorLinear;roughness=procedural.roughness;variationFlags=procedural.variationFlags;}
+  else{let procedural=svoProceduralMaterial(material.identity.z,base,roughness,position);base=procedural.baseColorLinear;roughness=procedural.roughness;variationFlags=procedural.variationFlags;}`}
   return DrySurfaceMaterial(base,roughness,material.emissiveRoughness.xyz+selectedEmission,material.surface.x,vec3f(svoMaterialDielectricF0(material)),material.surface.y,regionId,variationFlags,1u,0u);
 }
 /**
@@ -6049,7 +7033,10 @@ export class SparseVoxelDrySceneRenderer {
           texture: { sampleType: "uint" },
         }],
       });
-      const resolveBindings = new Set([0, 1, 2, 3, 4, 9, 14, 15]);
+      // Binding 6 joins the resolve set because `traceLeafPayload` reads the
+      // scene-geometry lane for its shading normal, and the brick resolve
+      // fragment is the entry point that calls it on the shipping path.
+      const resolveBindings = new Set([0, 1, 2, 3, 4, 6, 9, 14, 15]);
       this.brickResolveSceneLayout = this.device.createBindGroupLayout({
         label: "Sparse voxel conservative brick resolve scene bindings",
           entries: sparseVoxelDrySceneBindGroupLayoutEntries(this.traversalMode).filter((entry) => resolveBindings.has(entry.binding)),
@@ -6378,6 +7365,7 @@ export class SparseVoxelDrySceneRenderer {
         { binding: 2, resource: structural.structure },
         { binding: 3, resource: structural.sceneMaterialOwners },
         { binding: 4, resource: { buffer: this.sceneArenaBuffer } },
+        { binding: 6, resource: structural.sceneGeometry },
         { binding: 9, resource: { buffer: this.paramsBuffer } },
         { binding: 14, resource: { buffer: this.rigidMotionUniformBuffer } },
         { binding: 15, resource: { buffer: this.thickGlassUniformBuffer } },
@@ -8217,6 +9205,16 @@ export class SparseVoxelDrySceneRenderer {
       SVO_DRY_SCENE_ARENA_LAYOUT.clusterOffsetBytes,
       scene.clusterBlocks ?? new Uint32Array(SVO_DRY_SCENE_CLUSTER_ARENA_SIZE_BYTES / Uint32Array.BYTES_PER_ELEMENT),
     );
+    // Unconditional for the same reason the cluster region above is: a tape left
+    // behind by the previous scene is a block a new scene's record can resolve,
+    // and it would draw that scene's shape at this one's transform. Zeroes are
+    // the "not resolved" encoding, which draws nothing and reports itself.
+    this.device.queue.writeBuffer(
+      this.sceneArenaBuffer,
+      SVO_DRY_SCENE_ARENA_LAYOUT.fieldProgramOffsetBytes,
+      scene.fieldProgramBlocks
+        ?? new Uint32Array(SVO_DRY_SCENE_FIELD_PROGRAM_ARENA_SIZE_BYTES / Uint32Array.BYTES_PER_ELEMENT),
+    );
     warnOnUnresolvedClusters(scene);
     // The header is written on every publication, never conditionally: a zeroed
     // header is what tells the shader this scene is analytic, and skipping it
@@ -8410,6 +9408,24 @@ export class SparseVoxelDrySceneRenderer {
       this.writeBandParams();
       return;
     }
+    // Same argument as the band, one pass earlier: level of detail decides how
+    // deep the primary descends and nothing else. It adds no pass, moves no
+    // march shape, and lighting never reads it — so a slider drag must cost one
+    // 16-byte write, not a world-GI rebuild and a discarded primary.
+    // `surfaceReconstruction` rides the same lane and earns the same treatment
+    // for the same reason: it changes the shaded direction of an already-found
+    // hit, not `t`, not hit-versus-miss, and not what any light reads. Toggling
+    // the panel between RAW and SHADED is therefore one 16-byte write plus a
+    // reshade, which is also what makes the two arms interleavable in an A/B.
+    const lodKeys = ["lodMode", "lodScreenSpacePixels", "lodFixedLevel", "surfaceReconstruction"] as const;
+    const lodOnly = (Object.keys(normalized) as (keyof SvoRenderTuning)[])
+      .every((key) => normalized[key] === this.renderTuning[key] || (lodKeys as readonly string[]).includes(key));
+    if (lodOnly) {
+      this.renderTuning = normalized;
+      this.writeLodParams();
+      this.clearReusableFrame();
+      return;
+    }
     const invalidateVoxelVisibility = normalized.coneStepBudget !== this.renderTuning.coneStepBudget
       || normalized.shadowBiasCells !== this.renderTuning.shadowBiasCells
       || normalized.shadowConeAperture !== this.renderTuning.shadowConeAperture
@@ -8504,10 +9520,28 @@ export class SparseVoxelDrySceneRenderer {
       structural.structureOffsetsWords.leaves,
     ], SVO_DRY_SCENE_PARAMS_LAYOUT.structureOffsetsWordOffset);
     if (nodeMip && nodeMip.generation > 0 && nodeMip.plan.complete) {
-      words.set([nodeMip.generation, nodeMip.plan.pages.length, Math.max(1, ...nodeMip.plan.pages.map((page) => page.key.level + 1)),
+      // Folded rather than spread. `Math.max(1, ...pages.map(...))` passes one
+      // argument per page, and the hero garden reaches 28 232 bricks at a
+      // 3.125 mm lattice — far past the engine's argument limit, where this
+      // throws `Maximum call stack size exceeded` from a line that reads like
+      // arithmetic. The failure scales with scene refinement, so it stayed
+      // invisible until the lattice moved and then blocked it outright.
+      let nodeMipLevels = 1;
+      // The opacity floor is *read off the plan* rather than plumbed alongside
+      // it: a floored plan seeds every page at or above the floor, and the
+      // ancestor walk only ever goes up, so the finest level present is the
+      // floor. Deriving it here makes a CPU/GPU disagreement impossible, and
+      // an unfloored plan answers 0 — the identity clamp.
+      let opacityFloorLevel = Number.MAX_SAFE_INTEGER;
+      for (const page of nodeMip.plan.pages) {
+        nodeMipLevels = Math.max(nodeMipLevels, page.key.level + 1);
+        opacityFloorLevel = Math.min(opacityFloorLevel, page.key.level);
+      }
+      words.set([nodeMip.generation, nodeMip.plan.pages.length, nodeMipLevels,
         nodeMipUsesPageValidity ? SVO_DRY_NODE_MIP_PUBLICATION_MODE.pageValidity : SVO_DRY_NODE_MIP_PUBLICATION_MODE.matchingStructuralGeneration],
       SVO_DRY_SCENE_PARAMS_LAYOUT.nodeMipWordOffset);
-      words.set([...nodeMip.plan.atlas.texels, 0], SVO_DRY_SCENE_PARAMS_LAYOUT.nodeMipAtlasWordOffset);
+      words.set([...nodeMip.plan.atlas.texels, Math.min(opacityFloorLevel, nodeMipLevels - 1)],
+        SVO_DRY_SCENE_PARAMS_LAYOUT.nodeMipAtlasWordOffset);
       // Directory rows are level-major; boundary i counts pages with level < i so
       // the WGSL binary search can restrict itself to one level's contiguous run.
       const levelStart = new Uint32Array(12);
@@ -8519,7 +9553,11 @@ export class SparseVoxelDrySceneRenderer {
         words.set(nodeMip.directPageTableLevelZOffsets, SVO_DRY_SCENE_PARAMS_LAYOUT.nodeMipDirectLevelZWordOffset);
       }
     }
-    if (giReady) words.set([tetrahedralRadiance!.generation, 1, 0, 0], SVO_DRY_SCENE_PARAMS_LAYOUT.tetrahedralRadianceWordOffset);
+    if (giReady) {
+      words.set([tetrahedralRadiance!.generation, 1,
+        tetrahedralRadiance!.radianceFloorLevel ?? 0, tetrahedralRadiance!.slotOffset ?? 0],
+      SVO_DRY_SCENE_PARAMS_LAYOUT.tetrahedralRadianceWordOffset);
+    }
     const wide = resolveSvoWideTraversalCapability(source.wideFanout, source.revision, structural.domain.maximumDepth);
     if (wide.status === "ready") {
       const publication = wide.publication;
@@ -8528,9 +9566,64 @@ export class SparseVoxelDrySceneRenderer {
       words.set([wide.source.traversalOffsetsWords.pages, wide.source.traversalOffsetsWords.descriptors, 0, 0],
         SVO_DRY_SCENE_PARAMS_LAYOUT.derivedTraversalWordOffset);
     }
+    this.packLodParams(floats, words, SVO_DRY_SCENE_PARAMS_LAYOUT.lodWordOffset);
     if (this.paramsWords?.length === words.length && words.every((word, index) => word === this.paramsWords![index])) return;
     this.device.queue.writeBuffer(this.paramsBuffer, 0, buffer);
     this.paramsWords = Uint32Array.from(words);
+  }
+
+  /**
+   * The live level-of-detail lane.
+   *
+   * A threshold that lived in the shader source made every sweep a pipeline
+   * rebuild, which is the one thing an interleaved A/B cannot afford, and made
+   * the panel's slider impossible. The constructor flag still decides whether
+   * the machinery is compiled at all — that build is the bit-exact reference —
+   * and a zero threshold reproduces its image from the LOD build.
+   */
+  private packLodParams(floats: Float32Array, words: Uint32Array, offset: number): void {
+    const fixed = this.renderTuning.lodMode === "fixed-level";
+    // Zeroing the threshold in fixed-level mode is what keeps the two controls
+    // from compounding: the slider is then the only thing deciding depth, which
+    // is the whole point of a debug view of the hierarchy.
+    floats[offset] = fixed ? 0 : this.renderTuning.lodScreenSpacePixels;
+    words[offset + 1] = fixed ? SVO_LOD_MODES["fixed-level"] : SVO_LOD_MODES["screen-space"];
+    words[offset + 2] = this.renderTuning.lodFixedLevel;
+    // A float lane, so the code goes through `floats`, not `words`.
+    //
+    // `lod` is a vec4f and the shader reads this as `u32(dry.lod.w)` — a value
+    // conversion, not a bitcast. Writing the integer 1 through the u32 view puts
+    // the bit pattern 0x00000001 in a float lane, which is a denormal around
+    // 1.4e-45, and converting *that* to u32 gives zero. The arm therefore always
+    // read as `voxel-face` no matter what the panel said, and it failed silently:
+    // no validation error, a frame that renders, and two arms whose hashes match
+    // to the byte.
+    //
+    // The two lines above have the same defect and are left alone here because
+    // fixing them changes what an existing control does. `screen-space` is 0, so
+    // it survives the round trip by accident; `fixed-level` is 1 and does not, so
+    // `dryLodMode()` never returns it and `dryLodFixedLevel()` is always 0. The
+    // panel's FIXED button is consequently a no-op today.
+    floats[offset + 3] = SVO_SURFACE_RECONSTRUCTION_CODES[this.renderTuning.surfaceReconstruction];
+  }
+
+  /**
+   * Rewrite only the level-of-detail lane.
+   *
+   * Mode, threshold and level change nothing the caches key on — no pass is
+   * added or removed, no march shape moves, and lighting never reads them — so
+   * dragging the panel's slider must not drop the world-GI cache or the
+   * stationary primary. Anything less makes the slider unusable at interactive
+   * rates and makes an A/B over it measure a cache rebuild in both arms.
+   */
+  private writeLodParams(): void {
+    const buffer = new ArrayBuffer(16);
+    const floats = new Float32Array(buffer), words = new Uint32Array(buffer);
+    this.packLodParams(floats, words, 0);
+    this.device.queue.writeBuffer(this.paramsBuffer, SVO_DRY_SCENE_PARAMS_LAYOUT.lodWordOffset * 4, buffer);
+    // Keep the memoized snapshot in step, or the next whole-params write sees a
+    // difference that is already on the device and rewrites 592 bytes for it.
+    this.paramsWords?.set(words, SVO_DRY_SCENE_PARAMS_LAYOUT.lodWordOffset);
   }
 
   private rebuild(): void {
@@ -8575,6 +9668,7 @@ export class SparseVoxelDrySceneRenderer {
       { binding: 3, resource: structural.sceneMaterialOwners },
       { binding: 4, resource: { buffer: this.sceneArenaBuffer } },
       ...(derivedTraversal ? [{ binding: 5, resource: derivedTraversal }] : []),
+      { binding: 6, resource: structural.sceneGeometry },
       { binding: 9, resource: { buffer: this.paramsBuffer } },
       { binding: 13, resource: { buffer: this.lightingBuffer } },
       { binding: 14, resource: { buffer: this.rigidMotionUniformBuffer } },

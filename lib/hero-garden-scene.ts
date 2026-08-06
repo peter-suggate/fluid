@@ -1,12 +1,11 @@
-import { cloneScene, defaultScene, type CameraState, type SceneDescription } from "./model";
+import { cloneScene, defaultScene, DEFAULT_FINEST_CELL_SIZE_M, type CameraState, type SceneDescription } from "./model";
+import { applyHeroGardenNodeOverrides, HERO_GARDEN_OVERRIDES } from "./hero-garden-overrides";
 import type { SceneryGraph, SceneryNode } from "./scenery-graph";
 import {
-  bakePondVesselTerrain,
   pondVesselWaterline,
   type PondVesselSpec,
 } from "./voxel-scenery/pond-vessel";
 import { BONSAI_POND_CANOPY } from "./voxel-scenery/bonsai";
-import { sweptCopingSection, SWEPT_COPING_POND_BULLNOSE } from "./voxel-scenery/swept-coping";
 import { stoneSetBoulderStations, stoneSetSteppingBodies } from "./voxel-scenery/stone-set";
 import { ROSETTE_AIR_PLANT, ROSETTE_GRASS_TUFT, type RosetteForm } from "./voxel-scenery/rosette";
 import { sweptTubeNodes } from "./voxel-scenery/swept-tube";
@@ -59,8 +58,25 @@ import { tanHalfFovFor35mmFocalLength } from "./webgpu-camera";
  */
 
 export const HERO_GARDEN_CONTAINER = { width_m: 1.8, height_m: 0.6, depth_m: 1.2 } as const;
-export const HERO_GARDEN_CELL_M = 0.025;
+/** The global lattice. This scene has no reason to name its own. */
+export const HERO_GARDEN_CELL_M = DEFAULT_FINEST_CELL_SIZE_M;
 export const HERO_GARDEN_BRICK_CELLS = 8 as const;
+
+/**
+ * The lattice a *solved* hero garden may not go below.
+ *
+ * The header above is the record: 7.5 mm overruns a one-workgroup-per-interface-
+ * leaf dispatch at WebGPU's 65 535 ceiling, and 12.5 mm was the finest measured
+ * to publish once the SPGrid page-directory bug was fixed. Held at 25 mm rather
+ * than 12.5 because bring-up measured *publication*, not a settled pond, and
+ * one path that reaches this is a user toggling water on a scene already open —
+ * the wrong moment to discover a finer rung does not hold.
+ *
+ * The clamp lives with the constraint. `DEFAULT_FINEST_CELL_SIZE_M` is what the
+ * picture wants; this is what the solver can carry, and only a document that
+ * asks for fluid pays it.
+ */
+export const HERO_GARDEN_SOLVER_CELL_M = 0.025;
 
 /**
  * How finely the vessel is baked, which is *not* the lattice the solver runs on.
@@ -78,8 +94,72 @@ export const HERO_GARDEN_BRICK_CELLS = 8 as const;
  * the `terrainHeightfield` primitive kind was waiting for, and the ray now hits
  * the surface that was generated here. Sample spacing is therefore a *visual*
  * decision as well as a solver one.
+ *
+ * ---------------------------------------------------------------------------
+ * The alignment argument, generalized — and it is the whole of the rule
+ * ---------------------------------------------------------------------------
+ * "A quarter of a cell" was never the point; *landing on a node* was. The live
+ * voxeliser takes one height per finest column at the column **centre**
+ * (`terrainColumnHeightsForLattice`), so with grid spacing `h` and a render cell
+ * `c` the sample lands `(k + 1/2) * c / h` nodes out — an integer exactly when
+ * `c / h` is even, and worst-case halfway between four nodes when it is one.
+ * Measured on this vessel, against the analytic `pondVesselHeightAt`, as the
+ * greatest error at any column of the render lattice:
+ *
+ *     grid vs render cell     worst column error
+ *     h = c / 2               0.000 mm      (every centre is a node)
+ *     h = c                   0.73 voxels   (every centre is a patch centre)
+ *     h = 2c                  1.15 voxels   (0.04 % of columns off by one)
+ *     h = 4c                  2.77 voxels   (0.21 % off by one, 0.05 % by two)
+ *
+ * The last row is what a 6.25 mm bake looks like under a 1.5625 mm picture: a
+ * fifth of a percent of the ground is a whole voxel — a visible ledge — away
+ * from the vessel that was authored, and the ledges follow the grid rather than
+ * the pond. So the spacing follows the *detail* lattice at half its pitch.
+ *
+ * ---------------------------------------------------------------------------
+ * Why there is no clamp here any more, and what used to happen instead
+ * ---------------------------------------------------------------------------
+ * The rule above is `h = c / 2` and it is the only rule; the `min` is a floor,
+ * not a competing objective. It exists because the *solver's* lattice is 25 mm
+ * (`HERO_GARDEN_SOLVER_CELL_M`) while the picture's is 6.25 mm, and the
+ * alignment argument alone would let a solved document bake at 12.5 mm —
+ * coarser than this scene has ever baked, and coarser than the clearances in
+ * `tests/pond-vessel.test.ts` and `tests/swept-coping.test.ts` were measured
+ * against. So the spacing is half the *finer* of the two lattices, which is
+ * 3.125 mm at every rung at or above the authored one and follows the detail
+ * cell down from there.
+ *
+ * What this function used to do was ask for `min(6.25/4, detail/2)` mm and then
+ * coarsen by powers of two until the bake fitted `MAX_TERRAIN_GRID_SAMPLES`.
+ * That clamp **bound at the authored default** — 1.5625 mm is 1153x769, 3.4x
+ * over the 262 144 a document may carry — so it could never stop binding, and
+ * the ground came out at 3.125 mm at a 25 mm cell and at a 0.78 mm cell alike.
+ * Worst error against the analytic vessel, at the render lattice's own columns:
+ * 0.00 leaves at 6.25 mm, 0.73 at 3.125, 1.23 at 1.5625, **2.75 at 0.78** —
+ * smaller boxes wrapped around coarser geometry, and 37 148 `terrain-partial`
+ * coverage holes at the first refinement rung.
+ *
+ * The clamp is gone because the grid is gone. `scene.terrain` now carries a
+ * `TerrainProcedural` description — the vessel spec, the container and this
+ * spacing, about 700 bytes — and `terrainSampleGrid` derives the heightfield on
+ * demand at exactly this pitch. Nothing serializes it, nothing structured-clones
+ * it, and the only budget left is host memory
+ * (`MAX_TERRAIN_DERIVED_GRID_SAMPLES`), which this rule does not approach until
+ * a 0.78 mm leaf. The document went from 4.34 MB to 9.6 KB and its clone from
+ * 18.8 ms to 0.07 ms.
  */
-export const HERO_GARDEN_TERRAIN_SAMPLE_M = HERO_GARDEN_CELL_M / 4;
+export function heroGardenTerrainSample_m(
+  detailCellSize_m: number = HERO_GARDEN_CELL_M,
+): number {
+  if (!(detailCellSize_m > 0) || !Number.isFinite(detailCellSize_m)) {
+    throw new RangeError("Hero garden terrain sample needs a positive finite detail cell size");
+  }
+  return Math.min(HERO_GARDEN_CELL_M, detailCellSize_m) / 2;
+}
+
+/** The bake this scene has always shipped: `heroGardenTerrainSample_m()` at the authored lattice. */
+export const HERO_GARDEN_TERRAIN_SAMPLE_M = heroGardenTerrainSample_m();
 
 /**
  * How far the still-water level sits below the plaster *outside* the pond.
@@ -94,8 +174,40 @@ export const HERO_GARDEN_TERRAIN_SAMPLE_M = HERO_GARDEN_CELL_M / 4;
  * is actually about: the fill must not reach the outer ground *through rounding*
  * either, so the clearance has to survive the lattice it is sampled on. Under
  * one cell it does not, whatever the metre value says.
+ *
+ * The lattice it is sampled on is the **solver's**, which is the one thing here
+ * that does not follow the picture. A dry render at a finer cell has no fill, no
+ * sampler and no rounding to survive; what it does have is a composition — the
+ * shore, the bedded stones, the wading path and the plunge point are all solved
+ * against this waterline — and re-solving that between two rungs of a resolution
+ * ladder would mean the finer frame could not be compared with the coarser one.
+ *
+ * **So the default is `HERO_GARDEN_SOLVER_CELL_M` and not `HERO_GARDEN_CELL_M`,
+ * and the difference between those two is a bug this signature has already
+ * had.** They were the same 25 mm when this rule was written; the day the
+ * picture's lattice went to `DEFAULT_FINEST_CELL_SIZE_M` the default argument
+ * silently became 6.25 mm, the clearance halved to its 20 mm floor, and
+ * `HERO_GARDEN_WATERLINE_M` — a module constant that `HERO_STONE_SET`,
+ * `heroGardenLayoutWorld`, `HERO_GARDEN_HOSE_IMPACT_M` and every bedded station
+ * are composed against — rose 20 mm under the set standing on it. What that
+ * cost, measured: 56 % of the wading path's footing came out of the bed against
+ * a 50 % bound, the coping stopped holding the still level by a cell, and a
+ * document built with `water: true` no longer matched the dry one it is
+ * supposed to be, which `withHeroLayout` refuses outright.
+ *
+ * A fill is only ever sampled on the solver's lattice, so that is the lattice
+ * this answers to. 20 mm is the floor either way: past 12.5 mm cells the
+ * absolute clearance binds and this stops moving at all.
  */
-export const HERO_GARDEN_WATER_BELOW_GROUND_M = Math.max(0.02, 1.6 * HERO_GARDEN_CELL_M);
+export function heroGardenWaterBelowGround_m(cellSize_m: number = HERO_GARDEN_SOLVER_CELL_M): number {
+  if (!(cellSize_m > 0) || !Number.isFinite(cellSize_m)) {
+    throw new RangeError("Hero garden water clearance needs a positive finite cell size");
+  }
+  return Math.max(0.02, 1.6 * cellSize_m);
+}
+
+/** The clearance at the solver's lattice: 40 mm, and 1.6 cells of it. */
+export const HERO_GARDEN_WATER_BELOW_GROUND_M = heroGardenWaterBelowGround_m();
 
 /**
  * The vessel.
@@ -105,25 +217,44 @@ export const HERO_GARDEN_WATER_BELOW_GROUND_M = Math.max(0.02, 1.6 * HERO_GARDEN
  * little inside these numbers. Seven lobes at an 8 % wobble is enough wander
  * that no two quadrants of the rim repeat, and little enough that the outline
  * still reads as one deliberate curve rather than as a puddle.
+ *
+ * `HERO_GARDEN_OVERRIDES.vessel` replaces the whole of it when the shape lab has
+ * left one there — see `lib/hero-garden-overrides.ts`. It is applied here rather
+ * than at any of the call sites because this constant is the *only* place the
+ * pond is stated: the terrain, the waterline, the stone set and the layout all
+ * derive from it, and a vessel swapped anywhere downstream would move the ground
+ * out from under props already standing on it.
  */
-export const HERO_GARDEN_VESSEL: PondVesselSpec = Object.freeze({
+const HERO_GARDEN_VESSEL_AUTHORED = Object.freeze({
   center_m: [0, 0] as const,
   radius_m: [0.52, 0.38] as const,
   groundHeight_m: 0.30,
   basinDepth_m: 0.155,
   rimHeight_m: 0.055,
   /**
-   * The coping has left the heightfield, so this is no longer a coping width.
+   * Half the coping band: the rim runs from `-rimHalfWidth_m` to `+rimHalfWidth_m`
+   * of signed plan distance, so this is a **60 mm** band.
    *
-   * With `crest: "flat"` the plaster runs level to the plan curve and the inner
-   * face starts falling there, and the solid rim is set into that. The number
-   * that belongs here is therefore the *solid's own footprint* — where its
-   * flanks meet the ground — not the width of a crest that no longer exists.
-   * Leaving it at 55 mm lays a 23 mm shelf of dry plaster inside the rim, which
-   * the reference does not have and which the pebble courses would then bed
-   * against, since they offset from this same number.
+   * It was 64.4 mm — a 129 mm band — inherited from the swept bullnose's ground
+   * footprint so that every bed, stone and disc offsetting from it would stay
+   * where it was placed. Keeping a number for continuity is a good reason to keep
+   * it and no reason at all for it to be right, and this one was not: measured
+   * against the plate at the front of the pond, ours took **5.5 %** of the pond's
+   * screen width where the plate's takes **2.45 %**.
+   *
+   * That comparison is only legitimate between two cameras of similar pitch, and
+   * these are: the plate's stepping discs are circles in plan, so their screen
+   * aspect gives its pitch directly at about 25 degrees, against this camera's
+   * 22.9. Ours foreshortens depth slightly *more*, which shortens a plan band on
+   * screen — so 2.2x is if anything an underestimate of how much wider the rim
+   * was.
+   *
+   * The band still has to hold a section. `wallProfile_m` needs 11.9 mm of run
+   * either side at this rise, and `sectionWidthVariation` swings the half-width
+   * to 23.4 mm at its narrowest, which leaves 11.5 mm of crown there and 36 mm at
+   * the mean — a formed lip rather than a shelf, which is what the plate has.
    */
-  rimHalfWidth_m: sweptCopingSection(SWEPT_COPING_POND_BULLNOSE).groundHalfWidth_m,
+  rimHalfWidth_m: 0.030,
   /**
    * The crest is a swept solid now, not a swelling of the ground.
    *
@@ -141,7 +272,21 @@ export const HERO_GARDEN_VESSEL: PondVesselSpec = Object.freeze({
    * outer ground, never the crest — a coping is by definition the part above the
    * waterline. That is pinned by a test rather than left as an argument.
    */
-  crest: "flat",
+  /**
+   * A **flat-topped coping**, in the heightfield, replacing the swept bullnose
+   * solid — see `PondVesselSpec.crestWall`.
+   *
+   * The solid had to go because it could not be anything but a tube:
+   * `sweptCopingNodes` sweeps round cones, so the section is a circular arc and
+   * `widthToHeight` only picks how much of the circle shows. At 2.8 the rim
+   * showed 142 degrees of a circle and read, correctly, as a pipe laid round the
+   * pond. No setting of it is flat.
+   */
+  crest: "wall",
+  // 4 mm and 3 mm on a 55 mm rise: the arcs take 8 % of the rise, the same
+  // proportion the raised beds use, which is what separates a formed edge from a
+  // rolled one. Measured by `tools/shape-lab.ts wall`.
+  crestWall: { crestRadius_m: 0.004, footRadius_m: 0.003, batter_rad: 0.10 },
   // The inner face is a wall, not a beach. At 0.16 m of run for 0.155 m of drop
   // the basin was a 45-degree dish, and a third of the pond's 1.04 m width was
   // spent on the slope — which is why the first renders read as a crater in
@@ -166,15 +311,83 @@ export const HERO_GARDEN_VESSEL: PondVesselSpec = Object.freeze({
   sectionWidthVariation: 0.22,
   relief_m: 0.0025,
   seed: 0x9a7de11,
+  /**
+   * The raised beds, and both are walls now rather than mounds.
+   *
+   * The reference's garden is *built*: the tree stands on a raised bed with a
+   * flat top and a short formed face, and the boulder group stands on a lower
+   * one of the same construction. What the frame had instead was two swellings
+   * of the plaster whose only visible edge was the steepest patch of a
+   * smoothstep — a fault line across the far bank, which is what a soft terrace
+   * looks like once it is voxelized. See `PondVesselTerrace.faceRun_m`.
+   *
+   * Each carries a `wall` profile rather than a face run, and the difference is
+   * not a refinement — a `faceRun_m` only narrowed the smoothstep, which has no
+   * flat top and no crest at any width. See `PondVesselTerrace.wall`.
+   *
+   * The radii are **small**, and the first pass had them three times larger on
+   * the reasoning that a casting has no zero-radius arris. True, and beside the
+   * point: a 12 mm crest roll and a 10 mm foot fillet on a 75 mm rise spend
+   * 25 % of the *rise* turning over and 73 % of the plan run, which is a rolled
+   * lip — a tube — however steep its steepest point happens to be. At 4 and 3 mm
+   * the arcs take 8 % of the rise and the transition averages 80 degrees, which
+   * is a wall with a formed edge on it. `tools/shape-lab.ts wall` reports both
+   * numbers now; it used to report the slope across the *middle* 70 % of the
+   * rise, which is a statistic that excludes the arcs and therefore could never
+   * have shown this.
+   *
+   * The floor is the lattice rather than taste: at the depth-2 leaf the app runs,
+   * a 4 mm radius is 2.6 voxels, and under about two it stops being a roll and
+   * starts being an aliased corner.
+   *
+   * `radius_m` is now the wall's **crest line**, not its outer footprint — the
+   * profile reaches about 30 mm further out than that — which is the same
+   * convention the coping's rail uses.
+   */
   terraces: [
     // The plateau the bonsai stands on, at the back right.
-    { center_m: [0.62, 0.30] as const, radius_m: [0.44, 0.34] as const, height_m: 0.075, rotation_rad: -0.35, flat: 0.30 },
-    // A lower step at the near left, where the boulder group beds in.
-    { center_m: [-0.64, -0.20] as const, radius_m: [0.36, 0.30] as const, height_m: 0.042, rotation_rad: 0.25, flat: 0.28 },
+    {
+      center_m: [0.62, 0.30] as const, radius_m: [0.43, 0.33] as const,
+      height_m: 0.075, rotation_rad: -0.35,
+      wobble: 0.05, lobes: 5,
+      wall: { crestRadius_m: 0.004, footRadius_m: 0.003, batter_rad: 0.09 },
+    },
+    // A lower step at the near left, where the boulder group beds in. A tighter
+    // crest on the lower wall, so the two read as the same casting at two
+    // heights rather than as one detail scaled.
+    {
+      center_m: [-0.64, -0.20] as const, radius_m: [0.35, 0.29] as const,
+      height_m: 0.042, rotation_rad: 0.25,
+      wobble: 0.06, lobes: 4,
+      wall: { crestRadius_m: 0.0028, footRadius_m: 0.0022, batter_rad: 0.10 },
+    },
   ],
 });
 
-export const HERO_GARDEN_WATERLINE_M = pondVesselWaterline(HERO_GARDEN_VESSEL, HERO_GARDEN_WATER_BELOW_GROUND_M);
+export const HERO_GARDEN_VESSEL: PondVesselSpec = Object.freeze(
+  HERO_GARDEN_OVERRIDES.vessel ?? HERO_GARDEN_VESSEL_AUTHORED,
+);
+
+/**
+ * Still water, `heroGardenWaterBelowGround_m(cellSize_m)` under the outer ground.
+ *
+ * The set's one datum: the shore, the bedded stones, the wading path's freeboard
+ * and the plunge point are all solved against it, so it is derived once and
+ * passed rather than recomputed anywhere.
+ *
+ * The default is the solver's lattice, so this is one level for the whole scene
+ * rather than one per rung — see `heroGardenWaterBelowGround_m`. The parameter
+ * is kept because the clearance rule is genuinely a function of a lattice and a
+ * caller that solves at a coarser cell than `HERO_GARDEN_SOLVER_CELL_M` needs a
+ * deeper pond; what it must not do is hand the *picture's* cell to a rule about
+ * a fill.
+ */
+export function heroGardenWaterline_m(cellSize_m: number = HERO_GARDEN_SOLVER_CELL_M): number {
+  return pondVesselWaterline(HERO_GARDEN_VESSEL, heroGardenWaterBelowGround_m(cellSize_m));
+}
+
+/** The level at the solver's lattice. `withHeroLayout` is solved against this one. */
+export const HERO_GARDEN_WATERLINE_M = heroGardenWaterline_m();
 
 /**
  * Close, and looking down at about twenty-five degrees, so the pond fills the
@@ -208,6 +421,8 @@ export const HERO_GARDEN_AZIMUTH_RAD = 5.4;
 
 /** Screen right in the XZ plane at that azimuth: `(cos az, -sin az)`. */
 const HERO_GARDEN_SCREEN_RIGHT = [Math.cos(HERO_GARDEN_AZIMUTH_RAD), -Math.sin(HERO_GARDEN_AZIMUTH_RAD)] as const;
+/** Screen right is retained as the zero of the key bearing below; nothing else reads it. */
+void HERO_GARDEN_SCREEN_RIGHT;
 
 /**
  * The lens: a 50 mm, which on the 36 x 24 mm frame is a vertical half-tangent
@@ -246,6 +461,29 @@ const HERO_GARDEN_TAN_HALF_FOV = tanHalfFovFor35mmFocalLength(50);
  * What the longer lens buys is controlled perspective. Closing from 2.70 m to
  * 1.40 m spends the safety margin the old framing reserved around the set; the
  * 50 mm aperture keeps the near coping from acquiring an ultra-wide bow.
+ *
+ * ---------------------------------------------------------------------------
+ * An automated solve was tried here and is deliberately not kept
+ * ---------------------------------------------------------------------------
+ * `tools/solve-hero-camera.ts` walks the six camera axes against an edge
+ * alignment objective and lands on 1.667 m / 0.50 rad, improving that objective
+ * from 0.194 to 0.269. **Do not take it.** Put its frame beside the plate and
+ * the reason is immediate: pulling back to 1.667 m puts the whole crown inside
+ * the frame with headroom above it, and the plate's crown is *cut by the top
+ * edge*. The solve bought silhouette overlap and paid for it with the
+ * composition — the one thing about this framing that was never in doubt.
+ *
+ * That is a general lesson about this scene and not a bug in the tool. The
+ * frame and the plate differ structurally — no water, smooth forms, a smaller
+ * canopy — so a scalar that scores how much of one lies on top of the other is
+ * dominated by those differences, and its optimum is wherever they happen to
+ * overlap best rather than wherever the camera belongs. **The camera is judged
+ * against the plate by eye.** The solver stays because it is useful for
+ * bracketing a search once the set actually resembles the plate; its output is
+ * a candidate, never an answer.
+ *
+ * 1.25 m is the standing candidate if this is revisited: it holds the crop and
+ * fills the frame more nearly the way the plate does.
  */
 export const heroGardenCamera: Partial<CameraState> = {
   azimuth_rad: HERO_GARDEN_AZIMUTH_RAD,
@@ -268,10 +506,40 @@ export const heroGardenCamera: Partial<CameraState> = {
  * of this camera. That is the one arrangement that flattens a set of round pale
  * objects into silhouettes, which is most of why the early frames read as grey.
  */
+/**
+ * How far the sun swings toward the camera from screen right, and how high.
+ *
+ * The previous rig put the key at **exactly** screen right — its depth
+ * component, `-(x sin az + z cos az)`, worked out to 0.0000 — which is a pure
+ * side light. On this set that is close to the worst available choice, and the
+ * frame said so long before any metric did: the bonsai stands at the back of
+ * the pond and a side key rakes its canopy's shadow **across the entire bowl
+ * and most of the ground**. The plate has nothing of the kind. It is bright and
+ * airy, with a small soft shadow tucked under the tree and contact shadows
+ * beside the stones.
+ *
+ * Measured rather than reasoned: `FLUID_SVO_DRY_SMOKE_LIGHT_SWEEP` renders a
+ * grid of bearings and elevations from one world build, and the eight-frame
+ * sweep across `theta = 0, -0.3, -0.6, -0.9` at `y = 1.2, 1.9` is unambiguous.
+ * At theta 0 the bowl is a shadow. By -0.6 the shadow has retreated to beneath
+ * the canopy, the coping carries form along its whole length, and the bowl is
+ * open — which is the plate's read. Past -0.9 the set starts to flatten,
+ * because a light that is nearly frontal stops modelling anything.
+ *
+ * `y = 1.9` against the previous 0.62 is a sun at 68 degrees rather than 40.
+ * The plate's is high: its stones have short shadows that stay under them.
+ *
+ * Still derived from `HERO_GARDEN_AZIMUTH_RAD`, so re-aiming the camera still
+ * re-aims the light and the set cannot be relit into silhouettes by a framing
+ * change alone. Only the bearing offset and the elevation are new.
+ */
+const HERO_GARDEN_KEY_BEARING_OFFSET_RAD = -0.6;
+const HERO_GARDEN_KEY_ELEVATION = 1.9;
+const HERO_GARDEN_KEY_BEARING_RAD = HERO_GARDEN_AZIMUTH_RAD + HERO_GARDEN_KEY_BEARING_OFFSET_RAD;
 const HERO_GARDEN_KEY_DIRECTION: readonly [number, number, number] = [
-  0.75 * HERO_GARDEN_SCREEN_RIGHT[0],
-  0.62,
-  0.75 * HERO_GARDEN_SCREEN_RIGHT[1],
+  0.75 * Math.cos(HERO_GARDEN_KEY_BEARING_RAD),
+  HERO_GARDEN_KEY_ELEVATION,
+  -0.75 * Math.sin(HERO_GARDEN_KEY_BEARING_RAD),
 ];
 
 /**
@@ -283,9 +551,26 @@ const HERO_GARDEN_KEY_DIRECTION: readonly [number, number, number] = [
  * obvious way this scene could look wrong, and deriving both from here means it
  * cannot happen by drift.
  */
-export const HERO_GARDEN_HOSE_MOUTH_M = Object.freeze({ x: 0.27, y: 0.40, z: 0.22 });
+/**
+ * 335 mm, which is 78 mm of air over the still water rather than 142.
+ *
+ * The reference's nozzle is *close* to the surface — the falling column is about
+ * a tenth of the pond's width long, and that shortness is most of what makes the
+ * pour read as a hose someone is holding rather than as a spout built into the
+ * garden. At 400 mm the column was nearly twice the pond's own still depth.
+ */
+export const HERO_GARDEN_HOSE_MOUTH_M = Object.freeze({ x: 0.27, y: 0.335, z: 0.20 });
 /** The visible plunge point, so nozzle placement and jet composition share one authority. */
-export const HERO_GARDEN_HOSE_IMPACT_M = Object.freeze({ x: 0.20, y: HERO_GARDEN_WATERLINE_M, z: 0.07 });
+/**
+ * Tucked in under the mouth, which is what puts the aim at 40 degrees below
+ * horizontal instead of the 33 the old pair described.
+ *
+ * The aim is derived from these two points and nothing else, so the plunge point
+ * and the last hand's breadth of tube are one decision. The reference's nozzle
+ * points steeply down and its stream is nearly vertical; a shallow aim throws the
+ * column out across the pond and turns the fill into a jet.
+ */
+export const HERO_GARDEN_HOSE_IMPACT_M = Object.freeze({ x: 0.225, y: HERO_GARDEN_WATERLINE_M, z: 0.12 });
 const HOSE_AIM_LENGTH = Math.hypot(
   HERO_GARDEN_HOSE_IMPACT_M.x - HERO_GARDEN_HOSE_MOUTH_M.x,
   HERO_GARDEN_HOSE_IMPACT_M.y - HERO_GARDEN_HOSE_MOUTH_M.y,
@@ -297,27 +582,48 @@ const HOSE_AIM = Object.freeze({
   z: (HERO_GARDEN_HOSE_IMPACT_M.z - HERO_GARDEN_HOSE_MOUTH_M.z) / HOSE_AIM_LENGTH,
 });
 const HOSE_SPEED_M_S = 1.19;
-const HOSE_BORE_M = 0.013;
+/**
+ * 24 mm, read off the reference against the pond's own width: the tube covers a
+ * little over two per cent of it.
+ */
+const HOSE_BORE_M = 0.012;
 
 /**
  * The hose's run, from the nozzle backwards, in world metres.
  *
  * The first point off the mouth is placed along the aim, so the last hand's
- * breadth of tube points where the water goes. The rest lifts over the back
- * terrace and leaves frame to the right.
+ * breadth of tube points where the water goes. The rest climbs the raised bed's
+ * face, lies along its top, and leaves frame to the right.
  *
  * Authored as the polyline it is rather than as placed beads: a capsule already
  * takes the two ends of the run it follows, which is what a hose is described
  * by. When phase 2 brings in the `swept-tube` generator this becomes its input
  * unchanged.
+ *
+ * **It rests on the bed rather than floating over it.** The back run used to sit
+ * at a flat 460-470 mm, which is 85 mm of clear air above the bonsai terrace's
+ * 375 mm top — a hose suspended over a garden by nothing. The reference's hose
+ * is unambiguously *lying on* the raised bed and draped over its edge, and that
+ * contact is what makes the tube read as heavy. So the back stations sit a bore
+ * radius over the terrace top, and the two between them take the run down the
+ * bed's face on the same curve the water takes off the nozzle.
+ *
+ * The extra station is the curve. Four records over six points bent the run in
+ * two visible places; the hose in the reference is one continuous arc, and a
+ * `swept-tube` fits its envelopes to whatever it is given — so the fix is
+ * stations, not a different primitive.
  */
 const HOSE_PATH_M: readonly (readonly [number, number, number])[] = Object.freeze([
   [HERO_GARDEN_HOSE_MOUTH_M.x, HERO_GARDEN_HOSE_MOUTH_M.y, HERO_GARDEN_HOSE_MOUTH_M.z],
-  [HERO_GARDEN_HOSE_MOUTH_M.x + HOSE_AIM.x * -0.09, HERO_GARDEN_HOSE_MOUTH_M.y + HOSE_AIM.y * -0.09, HERO_GARDEN_HOSE_MOUTH_M.z + HOSE_AIM.z * -0.09],
-  [0.44, 0.470, 0.34],
-  [0.60, 0.460, 0.40],
-  [0.80, 0.460, 0.50],
-  [1.02, 0.460, 0.60],
+  [HERO_GARDEN_HOSE_MOUTH_M.x + HOSE_AIM.x * -0.075, HERO_GARDEN_HOSE_MOUTH_M.y + HOSE_AIM.y * -0.075, HERO_GARDEN_HOSE_MOUTH_M.z + HOSE_AIM.z * -0.075],
+  // Over the rim and up the bed's face.
+  [0.365, 0.372, 0.255],
+  [0.455, 0.398, 0.305],
+  // Along the bed's top, a bore radius clear of it.
+  [0.575, 0.389, 0.365],
+  [0.720, 0.388, 0.440],
+  [0.890, 0.388, 0.520],
+  [1.060, 0.390, 0.600],
 ]);
 
 /**
@@ -353,6 +659,11 @@ function hoseNodes(): SceneryNode[] {
   });
   // The collar, as a short fat capsule rather than a cone, so it is authored by
   // the run it sits on and needs no orientation solved for it.
+  //
+  // 1.6 times the bore and a little longer than it was. At 1.3 the collar was
+  // barely proud of the tube it clamps and read as a bright patch on the hose
+  // rather than as a fitting; the reference's is unmistakably a *step*, and the
+  // step is the whole of why the nozzle end is legible against a white pond.
   nodes.push({
     kind: "capsule",
     id: "hose/ferrule",
@@ -361,11 +672,11 @@ function hoseNodes(): SceneryNode[] {
     place: { units: "metres" },
     from: HERO_GARDEN_HOSE_MOUTH_M,
     to: {
-      x: HERO_GARDEN_HOSE_MOUTH_M.x - HOSE_AIM.x * 0.035,
-      y: HERO_GARDEN_HOSE_MOUTH_M.y - HOSE_AIM.y * 0.035,
-      z: HERO_GARDEN_HOSE_MOUTH_M.z - HOSE_AIM.z * 0.035,
+      x: HERO_GARDEN_HOSE_MOUTH_M.x - HOSE_AIM.x * 0.042,
+      y: HERO_GARDEN_HOSE_MOUTH_M.y - HOSE_AIM.y * 0.042,
+      z: HERO_GARDEN_HOSE_MOUTH_M.z - HOSE_AIM.z * 0.042,
     },
-    radius: 0.017,
+    radius: 1.6 * HOSE_BORE_M,
     material: FERRULE_MATERIAL,
   });
   return nodes;
@@ -409,7 +720,18 @@ const BONSAI_AT_M = [0.55, -0.15] as const;
 const HERO_BONSAI_FORM = Object.freeze({
   ...BONSAI_POND_CANOPY,
   crownRadius_m: [0.36, 0.31] as const,
-  crownThickness_m: 0.125,
+  /**
+   * 4.4 : 1, up from the 5.8 : 1 the note above argues for.
+   *
+   * The argument was sound and the measurement behind it was not available: the
+   * plate *crops* the canopy at the top of frame, so its thickness could only be
+   * read as a lower bound, and 5.8 was that bound taken as the number. What the
+   * plate does show unambiguously is a billowing mass with a domed top, and a
+   * crown thin enough to be a "cloud layer" reads as a disc once its surface is
+   * granulated — the granulation needs depth to sit in or every head lands on
+   * the same plane.
+   */
+  crownThickness_m: 0.165,
 });
 
 /**
@@ -455,10 +777,10 @@ const HERO_BONSAI_FORM = Object.freeze({
  * inside a boulder it cannot be seen against.
  */
 const HERO_BOULDER_PLANT_CLEARANCE = 0.5;
-function heroBoulderPlantStand(): readonly [number, number] {
+function heroBoulderPlantStand(waterline_m: number): readonly [number, number] {
   const family = stoneSetBoulderStations({
     vessel: HERO_GARDEN_VESSEL,
-    waterline_m: HERO_GARDEN_WATERLINE_M,
+    waterline_m,
     seed: HERO_GARDEN_SET_SEED,
   });
   // The outboard end is the station furthest from the pond's centre in x, which
@@ -481,19 +803,38 @@ function heroBoulderPlantStand(): readonly [number, number] {
  * itself, and the boulder-group plant has more of it because it is bedded into
  * that group's own gravel.
  */
-const HERO_PLANT_STANDS: readonly {
+interface HeroPlantStand {
   readonly id: string;
   readonly form: RosetteForm;
   readonly at_m: readonly [number, number];
   readonly bed_m?: number;
   readonly salt: number;
-}[] = Object.freeze([
-  { id: "plant/boulder-group", form: ROSETTE_AIR_PLANT, at_m: heroBoulderPlantStand(), bed_m: 0.035, salt: 0x00a1_7e01 },
-  { id: "plant/terrace-back", form: ROSETTE_AIR_PLANT, at_m: [0.44, 0.42] as const, bed_m: 0.028, salt: 0x00a1_7e02 },
-  { id: "plant/rim-right", form: ROSETTE_GRASS_TUFT, at_m: [0.72, -0.32] as const, bed_m: 0.024, salt: 0x00a1_7e03 },
-]);
+}
+function heroPlantStands(waterline_m: number): readonly HeroPlantStand[] {
+  return [
+    { id: "plant/boulder-group", form: ROSETTE_AIR_PLANT, at_m: heroBoulderPlantStand(waterline_m), bed_m: 0.035, salt: 0x00a1_7e01 },
+    { id: "plant/terrace-back", form: ROSETTE_AIR_PLANT, at_m: [0.44, 0.42] as const, bed_m: 0.028, salt: 0x00a1_7e02 },
+    { id: "plant/rim-right", form: ROSETTE_GRASS_TUFT, at_m: [0.72, -0.32] as const, bed_m: 0.024, salt: 0x00a1_7e03 },
+  ];
+}
 
-function heroGardenScenery(): SceneryGraph {
+/**
+ * The level is a parameter rather than a module constant because it moves with
+ * the *solver's* lattice — see `heroGardenWaterBelowGround_m`. Everything in the
+ * graph that knows where the shore is derives from this one number, so a scene
+ * built at another cell size cannot end up with stones bedded against a
+ * waterline the document does not have.
+ */
+function heroGardenScenery(waterline_m: number): SceneryGraph {
+  const graph = heroGardenAuthoredScenery(waterline_m);
+  // The shape lab's node overrides, applied where the graph is assembled rather
+  // than inside any one species. `withHeroLayout` appends to this and applies
+  // them again over what it added, so an authored node and a laid-out one are
+  // replaced by the same rule.
+  return { ...graph, nodes: [...applyHeroGardenNodeOverrides(graph.nodes)] };
+}
+
+function heroGardenAuthoredScenery(waterline_m: number): SceneryGraph {
   return {
     palettes: {
       clay: { tint: [1, 0.985, 0.955] },
@@ -519,13 +860,9 @@ function heroGardenScenery(): SceneryGraph {
        */
       { kind: "terrain-shell", id: "shell", materialModel: "porcelain" },
       ...hoseNodes(),
-      // The rim, as a solid swept along the same plan curve the basin was cut
-      // from.
-      {
-        kind: "generator", id: "coping", generator: "swept-coping", vessel: "pond",
-        seed: HERO_GARDEN_SET_SEED ^ 0x00c0_9179,
-        params: { ...SWEPT_COPING_POND_BULLNOSE, material: { palette: "stone", value: 0.92, surface: "stone" } },
-      },
+      // No coping node. The rim is the vessel's own `crest: "wall"` section
+      // now — a flat top with rolled edges, which a swept chain of round cones
+      // cannot express at any setting of its width.
       // Boulders, beds and the wading path, all placed in the vessel's own
       // coordinates — a fraction of a turn round the plan curve and a plan
       // distance either side of it — rather than in world metres that could
@@ -533,7 +870,7 @@ function heroGardenScenery(): SceneryGraph {
       {
         kind: "generator", id: "stone", generator: "pond-stone-set", vessel: "pond",
         seed: HERO_GARDEN_SET_SEED,
-        params: { waterline_m: HERO_GARDEN_WATERLINE_M },
+        params: { waterline_m },
       },
       {
         kind: "generator", id: "bonsai", generator: "bonsai",
@@ -550,7 +887,7 @@ function heroGardenScenery(): SceneryGraph {
       // behind the tree's stand — and one grass tuft at the near-right rim,
       // which is the only place in frame with a run of plaster wide enough to
       // stand something on without crowding the coping.
-      ...HERO_PLANT_STANDS.map(({ id, form, at_m, bed_m, salt }): SceneryNode => ({
+      ...heroPlantStands(waterline_m).map(({ id, form, at_m, bed_m, salt }): SceneryNode => ({
         kind: "generator", id, generator: "rosette",
         seed: HERO_GARDEN_SET_SEED ^ salt,
         params: { ...form, at_m, ...(bed_m === undefined ? {} : { bed_m }) },
@@ -592,10 +929,58 @@ export interface HeroGardenHoseOptions {
    * makes this one scene with a switch rather than two scenes that will drift.
    */
   readonly water?: boolean;
+  /**
+   * The octree's own lattice, in metres. Defaults to `HERO_GARDEN_CELL_M`.
+   *
+   * This is `voxelDomain.finestCellSize_m` — the solver's cell when the fluid
+   * owns the document, and the render tree's finest level when it does not. The
+   * header above is the record of what it costs to move: 7.5 mm overruns a hard
+   * one-workgroup-per-interface-leaf dispatch that only a *fluid* scene issues,
+   * so a dry lane may go far below it and a wet one may not.
+   *
+   * Every container dimension has to stay a whole number of 8-cell bricks; the
+   * ladder that does is 25, 12.5, 6.25, 3.125 and 1.5625 mm.
+   */
+  readonly cellSize_m?: number;
+  /**
+   * The finest voxel the *set* will be drawn at, in metres. Defaults to
+   * `cellSize_m`; the rung the *product* opens a scene at is applied by
+   * `sceneDocument`, not here.
+   *
+   * Separate because a dry scene may spend extra octree levels under the tree's
+   * own lattice (`SvoRenderTuning.environmentRefinementDepth`), so the voxel a
+   * bank or a floret is rasterised into is `cellSize_m / 2^depth` — see
+   * `svoSceneryDetailCellSize_m`, which is the function that answers this.
+   *
+   * It is an input to *construction* and not a field set afterwards, and that is
+   * the whole point of it being here. By the time a scene exists its heightfield
+   * is baked and every generator has expanded at whatever leaf it was given, so
+   * a lattice applied to a finished document changes the tree and nothing that
+   * feeds it. `FLUID_SVO_DRY_SMOKE_CELL_MM` did exactly that until this
+   * parameter existed.
+   */
+  readonly detailCellSize_m?: number;
 }
 
 export function createHeroGardenHoseScene(options: HeroGardenHoseOptions = {}): SceneDescription {
   const scene = cloneScene(defaultScene);
+  // The global lattice, coarsened only for a document that asks to be solved.
+  // Every scene wants the finest picture; the solver is the one system that
+  // cannot carry it, so it is the one that pays — rather than the whole product
+  // rendering at the coarsest thing any subsystem happens to need.
+  const requestedCell_m = options.cellSize_m ?? HERO_GARDEN_CELL_M;
+  const cellSize_m = options.water === true
+    ? Math.max(requestedCell_m, HERO_GARDEN_SOLVER_CELL_M)
+    : requestedCell_m;
+  // The factory does what it is told. The *product's* default rung is a
+  // document-construction policy and lives in `sceneDocument`, so a tool or a
+  // test that calls this factory directly gets the lattice it asked for and
+  // nothing else — see `SVO_ENVIRONMENT_REFINEMENT_DEPTH_DEFAULT`.
+  const detailCellSize_m = options.detailCellSize_m ?? cellSize_m;
+  if (!(cellSize_m > 0) || !Number.isFinite(cellSize_m)) throw new RangeError("Hero garden cell size must be positive and finite");
+  if (!(detailCellSize_m > 0) || detailCellSize_m > cellSize_m + 1e-12) {
+    throw new RangeError("Hero garden detail cell size must be positive and no coarser than the lattice");
+  }
   scene.sceneId = "hero-garden-hose";
   scene.systems = { ...scene.systems, fluid: options.water === true };
   scene.container.width_m = HERO_GARDEN_CONTAINER.width_m;
@@ -603,14 +988,49 @@ export function createHeroGardenHoseScene(options: HeroGardenHoseOptions = {}): 
   scene.container.depth_m = HERO_GARDEN_CONTAINER.depth_m;
   scene.container.top = "open";
   scene.container.vessel = "none";
-  scene.voxelDomain = { finestCellSize_m: HERO_GARDEN_CELL_M, brickSize_cells: HERO_GARDEN_BRICK_CELLS };
-  const terrain = {
+  scene.voxelDomain = {
+    finestCellSize_m: cellSize_m,
+    brickSize_cells: HERO_GARDEN_BRICK_CELLS,
+    // Written only when it says something the lattice does not, so a document
+    // built at the authored size round-trips byte for byte as it always did.
+    ...(detailCellSize_m < cellSize_m ? { detailCellSize_m } : {}),
+  };
+  /**
+   * The vessel, described rather than baked.
+   *
+   * `pondVesselHeightAt` is a pure function of (x, z) and the spec is twenty-odd
+   * numbers, so the document has no reason to carry a quarter of a million
+   * samples of it — and every reason not to: the bake was 4.32 MB of a 4.34 MB
+   * scene and 18.5 ms of its 18.6 ms `structuredClone`, paid again on every
+   * pointer-move of an editor drag. `terrainSampleGrid` derives exactly the grid
+   * this used to bake, at `spacing_m`, memoized by content so it survives the
+   * render worker's clone; every consumer still sees one `TerrainGrid` through
+   * one bilinear sampler and none of them learns that it was derived.
+   */
+  scene.terrain = {
     baseHeight_m: HERO_GARDEN_VESSEL.groundHeight_m,
     features: [],
-    grid: bakePondVesselTerrain(HERO_GARDEN_VESSEL, HERO_GARDEN_CONTAINER, HERO_GARDEN_TERRAIN_SAMPLE_M),
+    procedural: {
+      kind: "pond-vessel",
+      spec: HERO_GARDEN_VESSEL,
+      container: { ...HERO_GARDEN_CONTAINER },
+      spacing_m: heroGardenTerrainSample_m(detailCellSize_m),
+    },
   };
-  scene.terrain = terrain;
-  scene.container.fillFraction = HERO_GARDEN_WATERLINE_M / HERO_GARDEN_CONTAINER.height_m;
+  /**
+   * One level for both documents, and that is the point of it.
+   *
+   * The clearance is a rule about a *fill* on the *solver's* lattice, and this
+   * factory's wet path already clamps to `HERO_GARDEN_SOLVER_CELL_M`, so at
+   * every rung either document can be built at, `heroGardenWaterline_m` of the
+   * solver's cell is the answer — a dry render simply has no fill to round. A
+   * lattice that is coarser still is the one case where the water genuinely has
+   * to drop, and it is left to say so: `withHeroLayout` refuses a document whose
+   * level is not the one the set was composed against, which is louder than a
+   * shore that quietly moves under stones already standing on it.
+   */
+  const waterline_m = heroGardenWaterline_m(options.water === true ? cellSize_m : HERO_GARDEN_SOLVER_CELL_M);
+  scene.container.fillFraction = waterline_m / HERO_GARDEN_CONTAINER.height_m;
   scene.fluid.initialCondition = "tank-fill";
   scene.fluid.inflow = heroGardenInflow();
   /**
@@ -668,7 +1088,7 @@ export function createHeroGardenHoseScene(options: HeroGardenHoseOptions = {}): 
    */
   scene.rigidBodies = stoneSetSteppingBodies({
     vessel: HERO_GARDEN_VESSEL,
-    waterline_m: HERO_GARDEN_WATERLINE_M,
+    waterline_m,
     seed: HERO_GARDEN_SET_SEED,
   });
   /**
@@ -757,11 +1177,58 @@ export function createHeroGardenHoseScene(options: HeroGardenHoseOptions = {}): 
      * ACES rather than Reinhard because the reference has a shoulder: its
      * plaster runs to within a few percent of white across a whole coping and
      * still has form in it, and `x / (x + 1)` cannot do that without the scene
-     * pushing radiance far enough up that the shadows go with it. Exposure
-     * stays at 1 — the set is lit correctly in physical terms, and the curve is
-     * the thing that was wrong.
+     * pushing radiance far enough up that the shadows go with it.
+     *
+     * -----------------------------------------------------------------------
+     * Exposure and balance are solved, not chosen
+     * -----------------------------------------------------------------------
+     * Exposure used to be 1, on the reasoning that "the set is lit correctly in
+     * physical terms". The set *is* lit correctly; the frame was still nothing
+     * like the plate, and H1 of `docs/hero-fidelity-1000x-handoff.md` is where
+     * that got measured rather than argued. Per-region mean CIELAB, frame
+     * against plate at the registered camera:
+     *
+     *     region     L* frame   L* plate    b* frame   b* plate
+     *     coping        86.8       60.5         1.1        5.2
+     *     ground        86.9       58.6         1.0        6.0
+     *
+     * Twenty-seven L\* too bright, and neutral where the plate is warm. Neither
+     * is a lighting fault. A photograph of a white set in sun is exposed so the
+     * white does not blow, which puts porcelain at a mid tone and *not* at 87 —
+     * so the frame was not over-lit, it was over-exposed, and the distinction
+     * matters because dropping the key instead would have changed the
+     * lit-to-shadow ratio, which is a physical fact about the set.
+     *
+     * **Re-solved after the key moved.** Opening the canopy's shadow off the
+     * bowl brightened the set, so the previous exposure (0.2952, solved under
+     * the side key) was stale by a third of a stop. Light first, then grade —
+     * the other order solves the grade against a lighting fault and then has to
+     * undo it.
+     *
+     * `tools/solve-hero-grade.ts` searches both against the plate over the
+     * neutral regions — coping, ground and stones, deliberately excluding the
+     * pond (teal water this frame does not have yet, gap #1) and the canopy (a
+     * different material, warm for its own reasons). It lands here, and moves
+     * ΔE₀₀ 20.05 -> 3.30 on the coping and 21.88 -> 2.43 on the ground against
+     * H1's gate of halving them.
+     *
+     * The balance is authored as raw channel gains; `resolveDisplayGrade`
+     * normalises them for luminance, so this knob is pure chromaticity and
+     * cannot double as a second exposure.
+     *
+     * **What this does not fix, and what it exposed.** In the frame the canopy
+     * is *darker* than the coping (L\* 74.6 against 86.8); in the plate it is
+     * *brighter* (66.2 against 60.5). That is a ratio inverted, and no global
+     * exposure can turn it around — the canopy is under-lit relative to the set
+     * around it, which is a fill-and-bounce problem and belongs to the rest of
+     * H1, not to the grade. It is why the canopy region's ΔE₀₀ goes *up* under
+     * this solve, and that regression is real rather than a rounding.
      */
-    grade: { toneCurve: "aces", exposure: 1 },
+    grade: {
+      toneCurve: "aces",
+      exposure: 0.2200,
+      whiteBalance: [1.1006, 1.0, 0.9506],
+    },
   };
   // The set is seated on the grid that was just baked, not on the generator that
   // produced it: the two agree at every grid node by construction and differ
@@ -769,6 +1236,6 @@ export function createHeroGardenHoseScene(options: HeroGardenHoseOptions = {}): 
   // the one the ray actually hits. That is now the expander's doing rather than
   // a closure captured here — it samples `scene.terrain`, which is the grid
   // assigned above.
-  scene.scenery = heroGardenScenery();
+  scene.scenery = heroGardenScenery(waterline_m);
   return scene;
 }

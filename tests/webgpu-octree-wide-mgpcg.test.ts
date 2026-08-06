@@ -21,7 +21,12 @@ test("wide MGPCG reductions use exact integer limbs", () => {
   assert.match(octreePipelinedMGPCGShader,
     /fn addFixedF32[\s\S]*atomicAdd\(&partials/);
   assert.match(octreePipelinedMGPCGShader,
-    /fn fixedScalarValue[\s\S]*atomicLoad\(&partials[\s\S]*floorDiv256/);
+    /fn fixedDecodeLimbs[\s\S]*floorDiv256/);
+  // The fold must stay cooperative: one lane per (limb, partial-slice) slot,
+  // striding the partial axis by FIXED_LIMB_GROUPS. A regression to the
+  // single-lane walk was 76% of the 128-cubed frame.
+  assert.match(octreePipelinedMGPCGShader,
+    /fn fixedScalarValue\(scalar: u32, lane: u32, partialCount: u32\)[\s\S]*?partial \+= FIXED_LIMB_GROUPS\)[\s\S]*?atomicLoad\(&partials/);
   assert.doesNotMatch(octreePipelinedMGPCGShader,
     /fn reduceMergedPartials[\s\S]*partials\[workgroup\.x\] = merged\[0\]/);
   assert.match(octreeSection43HybridPreconditionerShader,

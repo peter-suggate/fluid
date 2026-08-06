@@ -7,23 +7,17 @@ import { SPARSE_SCENE_MAINTENANCE_INCOMPLETE_OVERFLOW } from "../lib/webgpu-spar
 import {
   SPARSE_VOXEL_PUBLICATION_STATE,
   SPARSE_VOXEL_VALID_FIELDS,
-  type SparseVoxelRenderSource,
+  type SparseVoxelSceneRenderSource,
 } from "../lib/webgpu-voxel-debug";
 
-test("structural source remains optional for legacy debug producers", () => {
+test("structural source remains optional for producers that publish scene records only", () => {
   const binding = { buffer: {} as GPUBuffer };
   const legacy = {
-    voxelRecords: binding,
-    voxelCount: binding,
-    brickRecords: binding,
-    brickCount: binding,
-    materials: binding,
-    voxelCapacity: 64,
-    brickCapacity: 8,
     materialCount: 3,
     revision: 7,
-  } satisfies SparseVoxelRenderSource;
+  } satisfies SparseVoxelSceneRenderSource;
   assert.equal(legacy.revision, 7);
+  assert.ok(!("structural" in legacy), "the structural half stays optional");
 });
 
 test("structural publication words and field flags are stable and non-overlapping", () => {

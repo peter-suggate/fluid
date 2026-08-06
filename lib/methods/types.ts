@@ -5,7 +5,7 @@ import type { RigidBodyState } from "../rigid-body";
 import type { GPURigidBodyPick } from "../webgpu-rigid-body";
 import type { Vec3 } from "../model";
 import type { GPUSecondaryParticleSource } from "../webgpu-secondary-particles";
-import type { SparseVoxelRenderSource, SparseVoxelSceneRenderSource } from "../webgpu-voxel-debug";
+import type { SparseVoxelSceneRenderSource } from "../webgpu-voxel-debug";
 import type { WebGPUFineLevelSetBrickSource } from "../webgpu-octree-fine-levelset-bricks";
 import type { GPUInitializationPhase } from "../gpu-initialization";
 import type { OctreeTechniqueDebugSource } from "../octree-technique-debug";
@@ -84,8 +84,6 @@ export interface GPUSolverInstance {
   readonly secondaryParticles?: GPUSecondaryParticleSource;
   /** Always-resident structural sparse scene used by production SVO rendering. */
   readonly sparseVoxelSceneSource?: SparseVoxelSceneRenderSource;
-  /** Lazily allocated expanded records used by raw/grid inspection. */
-  readonly sparseVoxelRenderSource?: SparseVoxelRenderSource;
   /** Exact compact topology/geometry buffers for paper-technique overlays. */
   readonly octreeTechniqueDebugSource?: OctreeTechniqueDebugSource;
   /** QA-only active compact pressure potential, indexed by power-leaf row. */

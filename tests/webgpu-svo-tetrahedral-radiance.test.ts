@@ -32,18 +32,25 @@ test("packed radiance pages clamp missing neighbours and source resident same-le
     }
   }
 
+  const physicalSize = SVO_NODE_MIP_LAYOUT.physicalSize;
+  const apronWidth = SVO_NODE_MIP_LAYOUT.apron;
+  const last = physicalSize - 1;
   const clamped = createSvoTetrahedralRadiancePage(interior);
-  assert.equal(clamped.length, 10 ** 3 * DIRECTIONS);
+  assert.equal(clamped.length, physicalSize ** 3 * DIRECTIONS);
   assert.deepEqual(sample(clamped, 0, 0, 0), [0, 1, 2, 3]);
-  assert.deepEqual(sample(clamped, 9, 9, 9), [7770, 7771, 7772, 7773]);
-  assert.deepEqual(sample(clamped, 4, 5, 6), [5430, 5431, 5432, 5433]);
+  assert.deepEqual(sample(clamped, last, last, last), [7770, 7771, 7772, 7773]);
+  const inner = [4, 5, 6].map((value) => value + apronWidth) as [number, number, number];
+  assert.deepEqual(sample(clamped, ...inner), [6540, 6541, 6542, 6543]);
 
+  // A zero apron leaves no texel for a neighbour to occupy, so the sampler is
+  // never consulted and the page is the interior copy. See SVO_NODE_MIP_LAYOUT.
   const apron = createSvoTetrahedralRadiancePageWithApron([3, 2, 1], interior, ({ page, texel }) =>
     page[0] === 2 && page[1] === 2 && page[2] === 1 && texel[0] === 7
       ? [0x100, 0x200, 0x300, 0x400]
       : undefined);
-  assert.deepEqual(sample(apron, 0, 4, 5), [0x100, 0x200, 0x300, 0x400]);
-  assert.deepEqual(sample(apron, 9, 4, 5), [4370, 4371, 4372, 4373],
+  assert.deepEqual(sample(apron, 0, 4, 5),
+    apronWidth > 0 ? [0x100, 0x200, 0x300, 0x400] : sample(clamped, 0, 4, 5));
+  assert.deepEqual(sample(apron, last, 4, 5), sample(clamped, last, 4, 5),
     "a missing positive-X neighbour clamps to the local interior edge");
 });
 
@@ -110,11 +117,12 @@ test("GPU owner allocates four shared-slot RGB9E5 atlases and deinterleaves phys
   for (const texture of mock.textures) {
     assert.equal(texture.descriptor.format, "rgb9e5ufloat");
     assert.equal(texture.descriptor.dimension, "3d");
-    assert.deepEqual(texture.descriptor.size, [20, 10, 10]);
+    assert.deepEqual(texture.descriptor.size, [2 * SVO_NODE_MIP_LAYOUT.physicalSize, SVO_NODE_MIP_LAYOUT.physicalSize, SVO_NODE_MIP_LAYOUT.physicalSize]);
   }
 
-  const physical = new Uint32Array(10 ** 3 * DIRECTIONS);
-  for (let texel = 0; texel < 10 ** 3; texel += 1) {
+  const physicalTexels = SVO_NODE_MIP_LAYOUT.physicalSize ** 3;
+  const physical = new Uint32Array(physicalTexels * DIRECTIONS);
+  for (let texel = 0; texel < physicalTexels; texel += 1) {
     for (let direction = 0; direction < DIRECTIONS; direction += 1) physical[texel * DIRECTIONS + direction] = texel * 4 + direction;
   }
   owner.uploadPhysicalPage(plan.pages[0].key, physical);
@@ -122,11 +130,11 @@ test("GPU owner allocates four shared-slot RGB9E5 atlases and deinterleaves phys
   mock.textureWrites.forEach((write, direction) => {
     assert.equal(write.destination.texture, mock.textures[direction] as unknown as GPUTexture);
     assert.deepEqual(write.destination.origin, plan.pages[0].atlasTexelOrigin);
-    assert.deepEqual(write.size, [10, 10, 10]);
-    assert.equal(write.layout.bytesPerRow, 40);
-    assert.equal(write.layout.rowsPerImage, 10);
+    assert.deepEqual(write.size, Array.from({ length: 3 }, () => SVO_NODE_MIP_LAYOUT.physicalSize));
+    assert.equal(write.layout.bytesPerRow, SVO_NODE_MIP_LAYOUT.physicalSize * 4);
+    assert.equal(write.layout.rowsPerImage, SVO_NODE_MIP_LAYOUT.physicalSize);
     assert.deepEqual([...write.words.slice(0, 3)], [direction, 4 + direction, 8 + direction]);
-    assert.equal(write.words.at(-1), 3996 + direction);
+    assert.equal(write.words.at(-1), (physicalTexels - 1) * 4 + direction);
   });
   assert.equal(owner.publish().published, true);
   assert.strictEqual(owner.visibleGeneration()?.plan, plan, "the node-mip topology object is the shared slot authority");
@@ -136,7 +144,7 @@ test("GPU owner allocates four shared-slot RGB9E5 atlases and deinterleaves phys
     residentPages: 1,
     uploadedPages: 1,
     blackPages: 0,
-    allocatedBytes: 32_000,
+    allocatedBytes: 2 * SVO_NODE_MIP_LAYOUT.physicalSize ** 3 * 16,
     fallback: "none",
   });
   owner.destroy();
@@ -158,7 +166,8 @@ test("candidate publication is atomic and preserves the prior complete radiance 
   const second = planSvoNodeMipPyramid({ generation: 2, occupiedPages: [[0, 0, 0], [1, 0, 0]], levelCount: 1 });
   owner.beginGeneration(second);
   assert.equal(owner.telemetry().fallback, "previous-complete-generation");
-  assert.equal(owner.telemetry().allocatedBytes, 48_000, "candidate and visible allocations are both reported");
+  assert.equal(owner.telemetry().allocatedBytes, 3 * SVO_NODE_MIP_LAYOUT.physicalSize ** 3 * 16,
+    "candidate and visible allocations are both reported");
   owner.uploadInteriorPage(second.pages[0].key, interior);
   assert.equal(owner.publish().published, false);
   assert.equal(owner.visibleGeneration()?.generation, 1);

@@ -179,7 +179,6 @@ export function WebGPUViewport() {
   const [viewportSize, setViewportSize] = useState({ width: 1, height: 1 });
   const svoStageView = useUIStore((state) => state.svoStageView);
   const svoStageLightSlot = useUIStore((state) => state.svoStageLightSlot);
-  const voxelRenderMode = useUIStore((state) => state.voxelRenderMode);
   const svoStageDefinition = SVO_RENDER_STAGE_DEFINITIONS[svoStageView];
   const svoStageRamp = `linear-gradient(90deg,${svoStageDefinition.legend
     .map((stop) => `${stop.color} ${Math.round(stop.at * 100)}%`).join(",")})`;
@@ -822,7 +821,6 @@ export function WebGPUViewport() {
         methodValues: resolvedMethodValues(methodState),
         canonicalMethodValues: canonicalSafeMethodValues,
         exactScene: canonicalScene(sceneState.scene) === canonicalScene(getScenePreset("water-box-dam-break").create()),
-        voxelRenderMode: ui.voxelRenderMode,
         diagnosticsOpen: ui.diagnosticsOpen,
         rightPanel: ui.rightPanel,
         gridOverlayAxis: ui.gridOverlayAxis,
@@ -902,6 +900,7 @@ export function WebGPUViewport() {
         const method = useMethodStore.getState();
         const state = useDiagnosticsStore.getState();
         const runtime = useRuntimeStore.getState();
+        const scenePreset = getScenePreset(sceneState.presetId);
         // Pausing freezes simulation time, not presentation. Attempt every
         // browser animation frame; the renderer's double buffer bounds latency
         // without changing cadence for camera motion or simulation state.
@@ -912,8 +911,8 @@ export function WebGPUViewport() {
             state.fluidRenderState ?? undefined, simulation.backend,
             { methodId: method.methodId, quality: method.quality, values: resolvedMethodValues(method), simulationEpoch: runtime.simulationEpoch },
             { axis: ui.gridOverlayAxis, position: ui.gridOverlaySlice, mode: ui.gridOverlayMode },
-            getScenePreset(sceneState.presetId).background,
-            ui.voxelRenderMode,
+            scenePreset.background,
+            scenePreset.id === sceneState.presetId ? scenePreset.presentationMode : "full-scene",
             {
               shadowsEnabled: ui.svoShadowsEnabled,
               ambientOcclusionEnabled: ui.svoAmbientOcclusionEnabled,
@@ -1786,7 +1785,7 @@ export function WebGPUViewport() {
       <i /><span>{hover.label}</span>
       <small>{hover.position_m.x.toFixed(2)} · {hover.position_m.y.toFixed(2)} · {hover.position_m.z.toFixed(2)} m</small>
     </div>}
-    {pixelTraceEnabled && voxelRenderMode === "smooth" && <>
+    {pixelTraceEnabled && <>
       {traceReticle?.visible && <div
         className="pixel-trace-reticle"
         data-testid="pixel-trace-reticle"
@@ -1845,7 +1844,7 @@ export function WebGPUViewport() {
     >
       <i /><span>{failure.locationLabel ?? "first recorded failure"}</span>
     </div>}
-    {svoStageView !== "off" && voxelRenderMode === "smooth" && <div className="svo-cost-legend" data-testid="svo-stage-legend">
+    {svoStageView !== "off" && <div className="svo-cost-legend" data-testid="svo-stage-legend">
       <header>
         <span>STAGE · {svoStageDefinition.label}</span>
         <span>{svoRenderStageUsesLightSlot(svoStageView) ? `slot ${svoStageLightSlot} · ` : ""}{svoStageDefinition.plane}</span>

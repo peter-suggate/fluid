@@ -7,6 +7,21 @@ import {
 
 export type SparseSceneProxyCoverage = "volume" | "surface-shell";
 
+/**
+ * Whether the simulation container is claimed as bricks.
+ *
+ * `container` is the historical — and only correct — answer while a solver
+ * runs: fluid kernels address every cell of the tank, so every brick of it must
+ * exist whether or not any geometry is in it. On a world with no solver
+ * (`scene.systems.fluid === false`) that claim buys nothing and costs the whole
+ * container: on `hero-garden-hose` at 6.25 mm it is 10 368 bricks, of which
+ * 3 766 are claimed by nothing else in the scene — 26.6 % of the tree, each one
+ * a leaf of dry payload plus a node-mip page. `none` drops it and leaves the
+ * environment producers (the ground, the authored proxies, the rigid bodies) to
+ * claim what they actually occupy.
+ */
+export type SparseSceneSolverClaim = "container" | "none";
+
 export interface SparseSceneWorldAabb {
   min: Vec3;
   max: Vec3;
@@ -23,6 +38,12 @@ export interface SparseSceneDomainOptions {
   surfaceShellCells?: number;
   /** Optional minimum world-space address bounds; sparse proxies may extend beyond them. */
   worldBounds_m?: SparseSceneWorldBounds;
+  /**
+   * Whether the solver's own container is claimed. Defaults to `container`, so
+   * every existing caller keeps the full cover; only a solverless world may ask
+   * for `none`.
+   */
+  solverClaim?: SparseSceneSolverClaim;
 }
 
 export interface SparseSceneCellRange {
@@ -48,7 +69,7 @@ export interface SparseSceneDomainPlan {
   brickDimensions: readonly [number, number, number];
   solverBounds_m: SparseSceneWorldBounds;
   worldBounds_m: SparseSceneWorldBounds;
-  /** Complete solver-domain cover. */
+  /** Complete solver-domain cover, or empty when {@link SparseSceneDomainOptions.solverClaim} is `none`. */
   solverBrickCoordinates: readonly SparseBrickCoordinate[];
   /** Proxy candidates after removing every brick already covered by the solver. */
   environmentBrickCoordinates: readonly SparseBrickCoordinate[];
@@ -176,6 +197,8 @@ export function planSparseSceneDomain(
   if (!Number.isFinite(surfaceShellCells) || surfaceShellCells < 0) throw new RangeError("Surface shell thickness must be finite and non-negative");
   const defaultCoverage = options.proxyCoverage ?? "volume";
   if (defaultCoverage !== "volume" && defaultCoverage !== "surface-shell") throw new RangeError("Unsupported proxy coverage");
+  const solverClaim = options.solverClaim ?? "container";
+  if (solverClaim !== "container" && solverClaim !== "none") throw new RangeError("Unsupported solver claim");
 
   const proxyRanges = proxies.map((proxy, index) => {
     validateProxy(proxy, index);
@@ -208,7 +231,11 @@ export function planSparseSceneDomain(
     min: [0, 0, 0],
     maxExclusive: dimensions,
   };
-  const solverBrickCoordinates = enumerateBricks(solverRange, latticeMinimum, brickSize, "volume", 0);
+  // The lattice above is derived from `dimensions` regardless, so dropping the
+  // claim moves no address: the same brick coordinate still names the same
+  // cells, the container simply stops being a reason for a brick to exist.
+  const solverBrickCoordinates = solverClaim === "none"
+    ? [] : enumerateBricks(solverRange, latticeMinimum, brickSize, "volume", 0);
   const solverKeys = new Set(solverBrickCoordinates.map(coordinateKey));
   const proxyBrickCoordinates = proxyRanges.map((range, index) => enumerateBricks(
     range,

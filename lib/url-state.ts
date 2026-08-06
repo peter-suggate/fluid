@@ -1,15 +1,21 @@
 import { defaultMethodId, interactiveMethodId, simulationMethods, type MethodParamValue, type MethodParamValues } from "./methods";
 import { cloneScene, validateScene, type CameraState, type SceneDescription } from "./model";
 import { isOctreeTechniqueOverlayMode } from "./octree-technique-debug";
-import { cameraForPreset, defaultScenePresetId, getScenePreset, scenePresets, type ScenePreset } from "./scenes";
+import { cameraForPreset, defaultScenePresetId, findSceneDefinition, getScenePreset, scenePresets, type ScenePreset } from "./scenes";
+import { sceneDefinitionTakesLattice, sceneDocumentAtLattice } from "./scene-definition";
 import { useMethodStore } from "./stores/method-store";
 import { useSceneStore } from "./stores/scene-store";
 import { useShellStore, type ShellView } from "./stores/shell-store";
 import { DEFAULT_RIGHT_PANEL_WIDTH, MAX_RIGHT_PANEL_WIDTH, MIN_RIGHT_PANEL_WIDTH, useUIStore, type RightPanel } from "./stores/ui-store";
 import { DEFAULT_SVO_LIGHTING_OPTIONS, type SvoConeTracingMode, type SvoPrimaryTraversalMode } from "./svo-render-options";
+import {
+  DEFAULT_SVO_RENDER_TUNING,
+  normalizeSvoRenderTuning,
+  SVO_LOD_SCREEN_SPACE_PIXELS_MAXIMUM,
+  type SvoRenderTuning,
+} from "./svo-render-tuning";
 import type { GPUQuality } from "./tall-cell-grid";
 import type { GridOverlayConfig, GridOverlayMode } from "./webgpu-renderer";
-import type { VoxelRenderMode } from "./webgpu-voxel-debug";
 
 const qualities: ReadonlyArray<GPUQuality> = ["balanced", "high", "ultra"];
 const deletedValue = "~delete";
@@ -68,12 +74,22 @@ type UIQueryState = {
   gridOverlayAxis: GridOverlayConfig["axis"];
   gridOverlaySlice: number;
   gridOverlayMode: GridOverlayMode;
-  voxelRenderMode: VoxelRenderMode;
   svoShadowsEnabled: boolean;
   svoAmbientOcclusionEnabled: boolean;
   silhouetteRefinementEnabled: boolean;
   svoConeTracingMode: SvoConeTracingMode;
   svoPrimaryTraversal: SvoPrimaryTraversalMode;
+  /**
+   * The sparse-presentation tuning, of which exactly two fields round-trip.
+   *
+   * The whole record is ~40 numbers and would dominate any link it appeared in,
+   * so only the two an experiment is actually run over are addressable: the
+   * refinement depth, which rebuilds the world at a finer leaf, and the
+   * screen-space LOD threshold, without which a finer leaf is never descended
+   * into and the depth reads as a no-op. Everything else stays a session value
+   * reachable through the PROFILE strip.
+   */
+  svoRenderTuning: SvoRenderTuning;
 };
 
 type SerializableMethodState = Pick<QueryState, "methodId" | "quality" | "overrides">;
@@ -264,7 +280,38 @@ export function parseQueryState(search: string): QueryState {
     }
   }
 
-  const baseScene = preset.create();
+  /**
+   * The lattice comes back through the factory, not as a patched number.
+   *
+   * `voxelDomain` is one of the paths below, so a link from a re-authored
+   * document carries its `detailCellSize_m`. Writing that onto a preset-built
+   * scene would set the number the renderer derives its refinement depth from
+   * while every generator in the document had already expanded at the preset's
+   * coarse size — the same disagreement the tuning field used to carry, arriving
+   * by another road. Re-authoring first makes the restored document the one that
+   * lattice actually describes; the patch loop then runs over it and any other
+   * edit in the link still lands.
+   */
+  const baseScene = ((): SceneDescription => {
+    const plain = preset.create();
+    const raw = query.get("scene.voxelDomain");
+    const definition = findSceneDefinition(preset.id);
+    if (raw === null || !definition || !sceneDefinitionTakesLattice(definition)) return plain;
+    try {
+      const requested = JSON.parse(raw) as SceneDescription["voxelDomain"];
+      if (!compatibleSceneValue(plain.voxelDomain, requested)) return plain;
+      const cellSize_m = requested.finestCellSize_m;
+      const detailCellSize_m = requested.detailCellSize_m ?? cellSize_m;
+      if (!(cellSize_m > 0) || !(detailCellSize_m > 0)) return plain;
+      const authored = plain.voxelDomain.detailCellSize_m ?? plain.voxelDomain.finestCellSize_m;
+      if (cellSize_m === plain.voxelDomain.finestCellSize_m && detailCellSize_m === authored) return plain;
+      return sceneDocumentAtLattice(definition, { cellSize_m, detailCellSize_m }).scene;
+    } catch {
+      // A malformed or refused lattice is not a reason to fail the whole
+      // restore; the preset's own document is always a legal answer.
+      return plain;
+    }
+  })();
   const scene = cloneScene(baseScene);
   for (const path of sceneQueryPaths) {
     const raw = query.get(`scene.${path}`);
@@ -283,7 +330,6 @@ export function parseQueryState(search: string): QueryState {
   const presetCamera = cameraForPreset(preset);
   const grid = query.get("grid");
   const gridMode = query.get("gridMode");
-  const voxels = query.get("voxels");
   const requestedPanel = query.get("panel");
   const rightPanel: RightPanel = requestedPanel === "visual" || requestedPanel === "bodies" || requestedPanel === "diagnostics" || requestedPanel === "performance"
     ? requestedPanel
@@ -320,12 +366,34 @@ export function parseQueryState(search: string): QueryState {
         ? Math.max(0.05, numberParam(query, "gridSlice", initialUI.gridOverlaySlice, 0, 1))
         : numberParam(query, "gridSlice", initialUI.gridOverlaySlice, 0, 1),
       gridOverlayMode: gridMode === "structure" || gridMode === "resolution" || gridMode === "optical" || gridMode === "cfl" || gridMode === "speed" || gridMode === "phi" || gridMode === "divergence" || gridMode === "pressure" || gridMode === "projection" || gridMode === "representation" || (gridMode !== null && isOctreeTechniqueOverlayMode(gridMode)) ? gridMode : initialUI.gridOverlayMode,
-      voxelRenderMode: voxels === "smooth" || voxels === "raw-voxels" || voxels === "surface-voxels" || voxels === "brick-grid" || voxels === "occupied-bricks" ? voxels : initialUI.voxelRenderMode,
       svoShadowsEnabled: query.get("svoShadows") !== "0" ? DEFAULT_SVO_LIGHTING_OPTIONS.shadowsEnabled : false,
       svoAmbientOcclusionEnabled: query.get("svoAO") !== "0" ? DEFAULT_SVO_LIGHTING_OPTIONS.ambientOcclusionEnabled : false,
       silhouetteRefinementEnabled: query.get("svoPrimarySeamClosure") === "1",
       svoConeTracingMode: query.get("svoCones") === "exact" || query.get("svoCones") === "off" ? query.get("svoCones") as SvoConeTracingMode : "cones",
       svoPrimaryTraversal: query.get("svoPrimary") === "traced" ? "traced" : "raster",
+      // Normalized rather than trusted: these are the tuning fields a link can
+      // carry, and the numbers are clamped by the same function the store
+      // applies, so an out-of-range external value lands on the ceiling instead
+      // of reaching the octree as an unbounded depth request.
+      svoRenderTuning: normalizeSvoRenderTuning({
+        ...initialUI.svoRenderTuning,
+        // The refinement depth is deliberately absent. It is not a tuning value
+        // any more — it is `scene.voxelDomain.detailCellSize_m`, which
+        // `sceneQueryPaths` already round-trips as `scene.voxelDomain`. A second
+        // copy in the query is a second thing that can disagree, which is the
+        // failure this collapse removes.
+        environmentPlanarRefinementExemption: query.get("svoFlatExempt") === "1",
+        lodScreenSpacePixels: numberParam(query, "svoLodPixels",
+          initialUI.svoRenderTuning.lodScreenSpacePixels, 0, SVO_LOD_SCREEN_SPACE_PIXELS_MAXIMUM),
+        // The panel's SHADED/RAW choice. It rides here rather than staying
+        // session-local because the two arms are the same frame shaded two ways,
+        // so "look at this terracing" is a link, and because the reference arm
+        // has to be reproducible by whoever is asked to confirm a regression.
+        surfaceReconstruction: query.get("svoSurface") === "voxel-face" ? "voxel-face"
+          : query.get("svoSurface") === "trilinear" ? "trilinear"
+          : query.get("svoSurface") === "analytic" ? "analytic"
+          : initialUI.svoRenderTuning.surfaceReconstruction,
+      }),
     }
   };
 }
@@ -333,7 +401,7 @@ export function parseQueryState(search: string): QueryState {
 function isManagedKey(key: string) {
   return key === "method" || key === "scene" || key === "quality" || key === "view" || key === "diagnostics" || key === "waterdiag" || key === "panel" || key === "panelWidth"
     || key === "performance" || key === "validation" || key === "sceneConfig" || key === "grid" || key === "gridSlice" || key === "gridMode"
-    || key === "render" || key === "svoLighting" || key === "svoShadows" || key === "svoAO" || key === "svoSilhouetteRefinement" || key === "svoPrimarySeamClosure" || key === "svoCones" || key === "svoPrimary" || key === "voxels" || key === "environment" || key === "fps" || key.startsWith("camera.") || key.startsWith("param.") || key.startsWith("scene.");
+    || key === "render" || key === "svoLighting" || key === "svoShadows" || key === "svoAO" || key === "svoSilhouetteRefinement" || key === "svoPrimarySeamClosure" || key === "svoCones" || key === "svoPrimary" || key === "svoFlatExempt" || key === "svoLodPixels" || key === "svoSurface" || key === "environment" || key === "fps" || key.startsWith("camera.") || key.startsWith("param.") || key.startsWith("scene.");
 }
 
 /** Build a canonical query string from the stores, preserving unrelated keys. */
@@ -361,7 +429,21 @@ export function serializeQueryState(
   }
   if (uiState.svoConeTracingMode !== "cones") query.set("svoCones", uiState.svoConeTracingMode);
   if (uiState.svoPrimaryTraversal !== "raster") query.set("svoPrimary", uiState.svoPrimaryTraversal);
-  if (uiState.voxelRenderMode !== "smooth") query.set("voxels", uiState.voxelRenderMode);
+  // A fine-leaf experiment is two values, and a link that carries only one of
+  // them reproduces the wrong frame: at the shipped threshold a 0.78 mm leaf is
+  // never descended into, so the depth alone would read as having done nothing.
+  // The depth itself rides on `scene.voxelDomain`; only the threshold and the
+  // exemption are tuning.
+  if (uiState.svoRenderTuning.environmentPlanarRefinementExemption
+    !== DEFAULT_SVO_RENDER_TUNING.environmentPlanarRefinementExemption) {
+    query.set("svoFlatExempt", uiState.svoRenderTuning.environmentPlanarRefinementExemption ? "1" : "0");
+  }
+  if (uiState.svoRenderTuning.lodScreenSpacePixels !== DEFAULT_SVO_RENDER_TUNING.lodScreenSpacePixels) {
+    query.set("svoLodPixels", String(uiState.svoRenderTuning.lodScreenSpacePixels));
+  }
+  if (uiState.svoRenderTuning.surfaceReconstruction !== DEFAULT_SVO_RENDER_TUNING.surfaceReconstruction) {
+    query.set("svoSurface", uiState.svoRenderTuning.surfaceReconstruction);
+  }
   if (uiState.rightPanel) query.set("panel", uiState.rightPanel);
   if (uiState.rightPanelWidth !== DEFAULT_RIGHT_PANEL_WIDTH) query.set("panelWidth", String(uiState.rightPanelWidth));
   if (uiState.sceneModalOpen) query.set("sceneConfig", "1");

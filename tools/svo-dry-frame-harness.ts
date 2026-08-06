@@ -53,6 +53,7 @@ import {
   sceneHasTerrain,
   TERRAIN_DEFAULT_FLAT,
   TERRAIN_UNION_EXPONENT,
+  terrainSampleGrid,
 } from "../lib/terrain";
 import { requiredFluidDeviceLimits } from "../lib/webgpu-device-limits";
 import { SVO_CAMERA_CHANGING_FRAME } from "../lib/webgpu-renderer";
@@ -164,6 +165,10 @@ export async function createDawnRenderDevice(options: DawnRenderDeviceOptions = 
     requiredFeatures: [
       ...(timestampsSupported ? ["timestamp-query" as GPUFeatureName] : []),
       ...(options.requireShaderF16 ? ["shader-f16" as GPUFeatureName] : []),
+      // Mirrors `fluidExecutionDeviceFeatures`: without it the live radiance
+      // atlas cannot use `rg11b10ufloat` storage and silently doubles, so this
+      // lane would measure an allocation the browser renderer never pays.
+      ...(adapter.features.has("texture-formats-tier1") ? ["texture-formats-tier1" as GPUFeatureName] : []),
     ],
     requiredLimits: requiredFluidDeviceLimits(adapter.limits),
   });
@@ -305,12 +310,15 @@ export function buildSvoDrySceneAssembly(
     // A sculpted vessel is terrain the eight-feature uniform mirror cannot
     // express. Production publishes the grid into the scene arena; without this
     // a headless frame renders a flat plane at `baseHeight_m` and calls it the scene.
-    terrainHeightfield: packSvoDrySceneTerrainHeightfield(scene.terrain?.grid),
+    terrainHeightfield: packSvoDrySceneTerrainHeightfield(terrainSampleGrid(scene.terrain)),
     // The same door, for the aggregate kind. Without it every cluster record
     // names a zeroed arena block, the shader reads that as "not resolved", and
     // the crown of the hero's bonsai draws as nothing at all — which is what a
     // headless frame showed before this line existed.
     clusterBlocks: scenePrimitives.clusterBlocks,
+    // And the same door for the tape kind, which fails identically without it:
+    // every `field-program` record would name a zeroed block and draw nothing.
+    fieldProgramBlocks: scenePrimitives.fieldProgramBlocks,
     glassRecords: sceneGlass.packedRecords,
     glassCacheKey: sceneGlass.cacheKey,
     thickGlassRecords: sceneThickGlass.packedRecords,

@@ -190,7 +190,14 @@ export function packWaterSceneOptics(
     // lets setSceneOptics update every other lane without stale values.
     0, 0, 0, 0,
     0, 0, 0, 0,
-    grade.exposure, SCENE_TONE_CURVE_CODES[grade.toneCurve], 0, 0,
+    // Lane 6 had two free floats and the balance needs three channels, so the
+    // green gain is *not* transported: it is reconstructed in the shader from
+    // the luminance-normalisation constraint the resolver already enforces,
+    // `dot(gain, REC709_LUMINANCE) == 1`. That is exact rather than a rounding,
+    // and it is why `resolveDisplayGrade` normalises rather than leaving the
+    // gains as authored. Widening the block would have moved every lane offset
+    // in two shaders for one float.
+    grade.exposure, SCENE_TONE_CURVE_CODES[grade.toneCurve], grade.whiteBalance[0], grade.whiteBalance[2],
   ]);
 }
 
@@ -228,6 +235,15 @@ fn waterKeyRadiance() -> vec3f { return max(waterScene.keyRadianceCaustic.xyz, v
 fn waterCausticStrength() -> f32 { return clamp(waterScene.keyRadianceCaustic.w, 0.0, 1.0); }
 fn waterDisplayExposure() -> f32 { return max(waterScene.displayGrade.x, 0.0); }
 fn waterDisplayToneCurve() -> u32 { return u32(round(max(waterScene.displayGrade.y, 0.0))); }
+// Green is reconstructed from dot(gain, REC709_LUMINANCE) == 1, the constraint
+// resolveDisplayGrade enforces; see the note in packWaterSceneOptics.
+fn waterDisplayWhiteBalance() -> vec3f {
+  let red = max(waterScene.displayGrade.z, 0.0);
+  let blue = max(waterScene.displayGrade.w, 0.0);
+  if (red <= 0.0 && blue <= 0.0) { return vec3f(1.0); }
+  let green = (1.0 - ${REC709_LUMINANCE[0]} * red - ${REC709_LUMINANCE[2]} * blue) / ${REC709_LUMINANCE[1]};
+  return vec3f(red, max(green, 0.0), blue);
+}
 fn waterReceiverPresent() -> bool { return waterScene.receiverSize.x >= 2.0 && waterScene.receiverSize.y >= 2.0; }
 fn waterReceiverHeight(x: f32, z: f32) -> f32 {
   if (!waterReceiverPresent()) { return 0.0; }
@@ -305,12 +321,39 @@ export const SCENE_TONE_CURVE_CODES = Object.freeze({ reinhard: 0, aces: 1 } as 
 export interface DisplayGradeAuthoring {
   readonly exposure?: number;
   readonly toneCurve?: SceneToneCurve;
+  /**
+   * Per-channel scene-linear gains, before exposure and the curve.
+   *
+   * H1 of `docs/hero-fidelity-1000x-handoff.md` asks for white balance, and the
+   * measurement that motivates it is blunt: on the hero garden the frame's
+   * neutral set sits at b* ≈ 0.5 while the plate's sits at b* ≈ 5. The set is
+   * *neutral* and the plate is *warm*, and nothing in the light rig can fix
+   * that without also changing the lit-to-shadow ratio, which is a physical
+   * fact about the set rather than a grading choice.
+   *
+   * Authored freely; `resolveDisplayGrade` normalises for luminance, so this
+   * knob changes only chromaticity and never brightness. That orthogonality is
+   * what lets exposure and balance be solved independently — see
+   * `tools/solve-hero-grade.ts`, which does exactly that.
+   */
+  readonly whiteBalance?: readonly [number, number, number];
 }
 
 export interface ResolvedDisplayGrade {
   readonly exposure: number;
   readonly toneCurve: SceneToneCurve;
+  /** Luminance-normalised, so `dot(whiteBalance, REC709_LUMINANCE) === 1`. */
+  readonly whiteBalance: readonly [number, number, number];
 }
+
+/**
+ * Rec.709 luminance weights, shared by the resolver and both shader mirrors.
+ *
+ * The white balance is normalised against these, and the WGSL reconstructs the
+ * green gain from them (see `packWaterSceneOptics`), so all three must be the
+ * same three numbers or a warm grade quietly becomes a warm *and darker* one.
+ */
+export const REC709_LUMINANCE = Object.freeze([0.2126, 0.7152, 0.0722] as const);
 
 /**
  * The grade a document gets when it authors nothing.
@@ -319,16 +362,33 @@ export interface ResolvedDisplayGrade {
  * frame this renderer has produced. Every default in this block exists to make
  * "scene says nothing" and "scene did not have the field" the same frame.
  */
-export const DISPLAY_GRADE_NEUTRAL: ResolvedDisplayGrade = Object.freeze({ exposure: 1, toneCurve: "reinhard" });
+export const DISPLAY_GRADE_NEUTRAL: ResolvedDisplayGrade = Object.freeze({
+  exposure: 1,
+  toneCurve: "reinhard",
+  whiteBalance: Object.freeze([1, 1, 1] as const),
+});
+
+/** A channel gain outside this is a colour cast, not a balance; both clamp. */
+export const DISPLAY_WHITE_BALANCE_RANGE = Object.freeze({ minimum: 0.25, maximum: 4 });
 
 /** Exposure below this is a black frame and above it a white one; both clamp. */
 export const DISPLAY_EXPOSURE_RANGE = Object.freeze({ minimum: 0.05, maximum: 20 });
 
 export function resolveDisplayGrade(authored?: DisplayGradeAuthoring): ResolvedDisplayGrade {
+  const clamped = (authored?.whiteBalance ?? DISPLAY_GRADE_NEUTRAL.whiteBalance).map((gain) =>
+    opticalScalar(gain, 1, DISPLAY_WHITE_BALANCE_RANGE.minimum, DISPLAY_WHITE_BALANCE_RANGE.maximum),
+  ) as [number, number, number];
+  // Normalised so a neutral input keeps its luminance: balance is a hue
+  // decision and exposure is a brightness decision, and a knob that did both
+  // could not be solved for either.
+  const luminance =
+    REC709_LUMINANCE[0] * clamped[0] + REC709_LUMINANCE[1] * clamped[1] + REC709_LUMINANCE[2] * clamped[2];
+  const scale = luminance > 1e-6 ? 1 / luminance : 1;
   return {
     exposure: opticalScalar(authored?.exposure, DISPLAY_GRADE_NEUTRAL.exposure,
       DISPLAY_EXPOSURE_RANGE.minimum, DISPLAY_EXPOSURE_RANGE.maximum),
     toneCurve: authored?.toneCurve === "aces" ? "aces" : DISPLAY_GRADE_NEUTRAL.toneCurve,
+    whiteBalance: [clamped[0] * scale, clamped[1] * scale, clamped[2] * scale],
   };
 }
 
@@ -350,9 +410,9 @@ export function sceneLinearToDisplay(
   sceneLinear: LinearRgb,
   grade: ResolvedDisplayGrade = DISPLAY_GRADE_NEUTRAL,
 ): [number, number, number] {
-  return sceneLinear.map((channel) => {
-    const nonNegative = Math.max(0, Number.isFinite(channel) ? channel : 0) * grade.exposure;
-    return toneCurve(nonNegative, grade.toneCurve) ** (1 / 2.2);
+  return sceneLinear.map((channel, index) => {
+    const balanced = Math.max(0, Number.isFinite(channel) ? channel : 0) * grade.whiteBalance[index];
+    return toneCurve(balanced * grade.exposure, grade.toneCurve) ** (1 / 2.2);
   }) as [number, number, number];
 }
 
@@ -383,7 +443,11 @@ fn unifiedToneCurve(exposed: vec3f, toneCurve: u32) -> vec3f {
   return exposed / (exposed + vec3f(1.0));
 }
 fn unifiedDisplayGrade(sceneLinear: vec3f, exposure: f32, toneCurve: u32) -> vec3f {
-  return pow(unifiedToneCurve(max(sceneLinear, vec3f(0.0)) * max(exposure, 0.0), toneCurve), vec3f(1.0 / 2.2));
+  return unifiedDisplayGradeBalanced(sceneLinear, exposure, toneCurve, vec3f(1.0));
+}
+fn unifiedDisplayGradeBalanced(sceneLinear: vec3f, exposure: f32, toneCurve: u32, whiteBalance: vec3f) -> vec3f {
+  let balanced = max(sceneLinear, vec3f(0.0)) * max(whiteBalance, vec3f(0.0));
+  return pow(unifiedToneCurve(balanced * max(exposure, 0.0), toneCurve), vec3f(1.0 / 2.2));
 }
 fn unifiedDisplayTransfer(sceneLinear: vec3f) -> vec3f {
   let nonNegative = max(sceneLinear, vec3f(0.0));

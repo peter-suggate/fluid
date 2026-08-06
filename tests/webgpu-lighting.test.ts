@@ -6,8 +6,12 @@ import {
   dielectricFresnel,
   GLASS_OPTICS,
   integratedEnvironmentBrdf,
+  packWaterSceneOptics,
+  REC709_LUMINANCE,
+  resolveWaterKeyLight,
   resolveWaterOptics,
   resolveDisplayGrade,
+  waterSceneOpticsShaderLibrary,
   sceneLinearToDisplay,
   unifiedDisplayTransferShaderLibrary,
   unifiedLightingShaderLibrary,
@@ -16,7 +20,6 @@ import {
 } from "../lib/webgpu-lighting";
 import { compositeShader } from "../lib/webgpu-water-pipeline";
 import { svoDrySceneShader } from "../lib/webgpu-svo-dry-scene";
-import { voxelDebugRenderShader } from "../lib/webgpu-voxel-debug";
 
 const rendererSource = readFileSync(new URL("../lib/webgpu-renderer.ts", import.meta.url), "utf8");
 
@@ -78,7 +81,7 @@ test("scene-linear lighting reaches the presentation target through exactly one 
   assert.equal((compositeShader.match(/unifiedDisplayTransfer\(c\)/g) ?? []).length, 0,
     "the final compositor must choose the document's resolved grade");
   assert.match(compositeShader,
-    /fn finish\([^}]+return vec4f\(unifiedDisplayGrade\(c,waterDisplayExposure\(\),waterDisplayToneCurve\(\)\),1\);\}/);
+    /fn finish\([^}]+return vec4f\(unifiedDisplayGradeBalanced\(c,waterDisplayExposure\(\),waterDisplayToneCurve\(\),waterDisplayWhiteBalance\(\)\),1\);\}/);
 });
 
 /**
@@ -88,7 +91,7 @@ test("scene-linear lighting reaches the presentation target through exactly one 
  */
 test("an unauthored grade is the identity against the historical transfer", () => {
   const neutral = resolveDisplayGrade(undefined);
-  assert.deepEqual(neutral, { exposure: 1, toneCurve: "reinhard" });
+  assert.deepEqual(neutral, { exposure: 1, toneCurve: "reinhard", whiteBalance: [1, 1, 1] });
   assert.deepEqual(resolveDisplayGrade({}), neutral);
   for (const radiance of [0, 0.18, 1, 4.5] as const) {
     assert.deepEqual(sceneLinearToDisplay([radiance, radiance, radiance], neutral),
@@ -108,7 +111,6 @@ test("an unauthored grade is the identity against the historical transfer", () =
 test("live SVO and optical water/glass consume the canonical closure", () => {
   assert.match(svoDrySceneShader, /shadeUnifiedSurface\(directClosure,lighting\)/,
     "SVO dry materials must use the same resource-independent closure as raster bodies");
-  assert.match(voxelDebugRenderShader, /shadeUnifiedSurface\(closure, lighting\)/, "raw voxel materials must use the same closure");
   // The tank's glass is a renderer constant and stays inlined; the water's
   // optics became a scene property and are now read from a uniform, so the
   // assertion moved from "the number 0.02037 appears" to "the composite asks
@@ -135,10 +137,74 @@ test("analytic tank glass remains enabled for the hybrid octree smooth scene", (
   assert.match(glassFunction, /if\(environmentIndex\(\)==7\)\{return color;\}/, "the open garden remains vessel-free");
 });
 
-test("raw voxel glass uses a separate stable pane pass", () => {
-  assert.match(voxelDebugRenderShader, /fn glassPaneVertex/);
-  assert.match(voxelDebugRenderShader, /fn glassPaneFragment/);
-  assert.match(voxelDebugRenderShader, /input\.materialId == 1u\) \{ discard/);
-  assert.match(rendererSource, /containerBounds: \{/);
-  assert.match(rendererSource, /containerClosedTop: scene\.container\.top === "closed"/);
+/**
+ * The inspection overlay drew the tank as five camera-sorted alpha panes in a
+ * pass of its own, because leaving glass in the parallel compacted draw made
+ * the alpha/depth result depend on atomic instance order. That renderer is
+ * gone, and with it the only consumer of a `containerBounds` render option, so
+ * the frame's glass is once again the raster composite's alone.
+ */
+test("the raster composite is the only glass presentation left", () => {
+  assert.doesNotMatch(rendererSource, /containerBounds: \{/,
+    "no render pass may still take inspection container bounds");
+  assert.match(compositeShader, /fn compositeFrontGlass/,
+    "the authoritative water composite still owns the tank panes");
+});
+
+
+// ---------------------------------------------------------------------------
+// White balance — H1 of docs/hero-fidelity-1000x-handoff.md
+// ---------------------------------------------------------------------------
+
+const waterOpticsLibrary = waterSceneOpticsShaderLibrary(0, 0, 1);
+
+test("white balance changes chromaticity and never luminance", () => {
+  // The orthogonality claim the solve depends on: exposure owns brightness,
+  // balance owns hue. A knob that did both could be solved for neither.
+  for (const authored of [[1.2, 1, 0.8], [0.6, 1, 1.5], [3, 2, 1]] as const) {
+    const grade = resolveDisplayGrade({ whiteBalance: authored });
+    const luminance =
+      REC709_LUMINANCE[0] * grade.whiteBalance[0] +
+      REC709_LUMINANCE[1] * grade.whiteBalance[1] +
+      REC709_LUMINANCE[2] * grade.whiteBalance[2];
+    assert.ok(Math.abs(luminance - 1) < 1e-9, `balance ${authored} has luminance ${luminance}`);
+  }
+  // A neutral grey keeps its display luminance under a warm balance, while its
+  // channels separate.
+  const warm = resolveDisplayGrade({ whiteBalance: [1.15, 1, 0.82], toneCurve: "aces" });
+  const graded = sceneLinearToDisplay([0.4, 0.4, 0.4], warm);
+  assert.ok(graded[0] > graded[1] && graded[1] > graded[2], `warm balance must order R>G>B, got ${graded}`);
+});
+
+test("an authored white balance survives the uniform round trip through two spare floats", () => {
+  // Green is not transported; it is reconstructed from the luminance
+  // constraint. If the resolver ever stops normalising, this is what catches it.
+  const grade = resolveDisplayGrade({ whiteBalance: [1.15, 1, 0.82] });
+  const packed = packWaterSceneOptics(resolveWaterOptics(undefined), resolveWaterKeyLight(undefined), grade);
+  // Lane 6 begins at float 24: exposure, tone-curve code, then the two spare
+  // slots the balance was folded into.
+  const red = packed[26];
+  const blue = packed[27];
+  assert.ok(Math.abs(red - grade.whiteBalance[0]) < 1e-6);
+  assert.ok(Math.abs(blue - grade.whiteBalance[2]) < 1e-6);
+  const green = (1 - REC709_LUMINANCE[0] * red - REC709_LUMINANCE[2] * blue) / REC709_LUMINANCE[1];
+  assert.ok(
+    Math.abs(green - grade.whiteBalance[1]) < 1e-6,
+    `reconstructed green ${green} does not match the resolved ${grade.whiteBalance[1]}`,
+  );
+});
+
+test("the white-balance reconstruction constants agree between resolver and shader", () => {
+  // Three numbers in three places is how a warm grade quietly becomes a warm
+  // and darker one. The shader must spell the resolver's own weights.
+  assert.ok(waterOpticsLibrary.includes(`${REC709_LUMINANCE[0]}`), "shader is missing the red luminance weight");
+  assert.ok(waterOpticsLibrary.includes(`${REC709_LUMINANCE[1]}`), "shader is missing the green luminance weight");
+  assert.ok(waterOpticsLibrary.includes(`${REC709_LUMINANCE[2]}`), "shader is missing the blue luminance weight");
+});
+
+test("an out-of-range channel gain clamps rather than casting the frame", () => {
+  const extreme = resolveDisplayGrade({ whiteBalance: [100, 1, 0.0001] });
+  for (const gain of extreme.whiteBalance) {
+    assert.ok(Number.isFinite(gain) && gain > 0, `clamped gain ${gain} is not usable`);
+  }
 });

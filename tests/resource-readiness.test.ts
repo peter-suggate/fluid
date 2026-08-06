@@ -282,6 +282,9 @@ test("WebGPU resource work is worker-owned and frame traffic is bounded", () => 
     "worker-relative task clocks must be translated before the UI renders elapsed time");
   assert.match(worker, /renderer = new FluidLabRenderer\(/);
   assert.match(worker, /runtime\.setViewportSize/);
+  assert.match(worker, /document: markSceneRevision\(message\.scene\)/,
+    "the retained worker document must recover identity-based scene memoization after cloning");
+  assert.match(client, /type: "set-render-scene", revision, scene, terrainContentStamp: stamp/);
   assert.match(renderer, /HTMLCanvasElement \| OffscreenCanvas/);
   assert.match(initialization, /typeof document !== "undefined" && typeof requestAnimationFrame === "function"/,
     "worker startup must not wait on a presentation rAF that cannot fire yet");
@@ -311,6 +314,7 @@ test("pause drops queued running frames and returns the worker-owned submitted c
     } as unknown as HTMLCanvasElement;
     const client = new WebGPURenderWorkerClient(canvas, { onStatus() {} });
     const drawArgs = Array(16).fill(undefined);
+    drawArgs[1] = {};
     drawArgs[7] = { methodId: "octree" };
     const draw = () => (client.draw as unknown as (...args: unknown[]) => unknown)(...drawArgs);
 
@@ -343,6 +347,69 @@ test("pause drops queued running frames and returns the worker-owned submitted c
     draw();
     assert.equal(worker.messages.filter((message) => (message as { type?: string }).type === "draw").length, 2,
       "the next fresh paused snapshot may resume presentation after acknowledgement");
+  } finally {
+    if (previousWorker) Object.defineProperty(globalThis, "Worker", previousWorker);
+    else Reflect.deleteProperty(globalThis, "Worker");
+  }
+});
+
+test("worker frames carry a retained scene revision instead of cloning the document", () => {
+  class FakeWorker {
+    static instance: FakeWorker;
+    readonly messages: unknown[] = [];
+    constructor() { FakeWorker.instance = this; }
+    addEventListener() {}
+    postMessage(message: unknown) { this.messages.push(message); }
+    terminate() {}
+  }
+  const previousWorker = Object.getOwnPropertyDescriptor(globalThis, "Worker");
+  Object.defineProperty(globalThis, "Worker", { configurable: true, value: FakeWorker });
+  try {
+    const canvas = {
+      transferControlToOffscreen: () => ({}),
+      getBoundingClientRect: () => ({ width: 640, height: 360 }),
+    } as unknown as HTMLCanvasElement;
+    const client = new WebGPURenderWorkerClient(canvas, { onStatus() {} });
+    const terrain = {
+      baseHeight_m: 0.2, features: [],
+      grid: {
+        kind: "grid", origin_m: { x: -1, z: -1 }, spacing_m: 1,
+        size: { nx: 2, nz: 2 }, heights_m: [0.2, 0.2, 0.2, 0.2],
+      },
+    };
+    const firstScene = { terrain };
+    const drawArgs = Array(16).fill(undefined);
+    drawArgs[1] = firstScene;
+    drawArgs[7] = { methodId: "octree" };
+    const draw = () => (client.draw as unknown as (...args: unknown[]) => unknown)(...drawArgs);
+
+    client.setSimulationScene(firstScene as never);
+    client.setSimulationScene(firstScene as never);
+    draw();
+    draw();
+    const worker = FakeWorker.instance;
+    const renderScenes = worker.messages.filter((message) => (message as { type?: string }).type === "set-render-scene") as Array<{
+      revision: number; scene: unknown; terrainContentStamp: string;
+    }>;
+    assert.equal(renderScenes.length, 1, "an unchanged immutable document is published only once");
+    assert.equal(worker.messages.filter((message) => (message as { type?: string }).type === "set-simulation-scene").length, 1,
+      "the solver override is also change-only");
+    const frame = worker.messages.find((message) => (message as { type?: string }).type === "draw") as {
+      sceneRevision: number; args: unknown[];
+    };
+    assert.equal(frame.sceneRevision, renderScenes[0].revision);
+    assert.equal(frame.args.length, 15);
+    assert.ok(!frame.args.includes(firstScene), "the scene document must not ride on the frame message");
+
+    drawArgs[1] = {
+      terrain: { ...terrain, grid: { ...terrain.grid, heights_m: [0.2, 0.2, 0.3, 0.2] } },
+    };
+    draw();
+    const changed = worker.messages.filter((message) => (message as { type?: string }).type === "set-render-scene") as typeof renderScenes;
+    assert.equal(changed.length, 2);
+    assert.notEqual(changed[1].revision, changed[0].revision);
+    assert.notEqual(changed[1].terrainContentStamp, changed[0].terrainContentStamp,
+      "a same-shape brush edit must cross the seam with a new receiver stamp");
   } finally {
     if (previousWorker) Object.defineProperty(globalThis, "Worker", previousWorker);
     else Reflect.deleteProperty(globalThis, "Worker");

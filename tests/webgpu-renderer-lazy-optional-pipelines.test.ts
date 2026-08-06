@@ -8,7 +8,7 @@ const drySceneSource = readFileSync(new URL("../lib/webgpu-svo-dry-scene.ts", im
 
 test("applicable GLOBAL startup requests the sparse renderer", () => {
   assert.deepEqual(optionalRendererPipelineRequests(
-    { axis: "off", position: 0.5 }, "smooth", false, true,
+    { axis: "off", position: 0.5 }, false, true,
   ), ["svo-dry-scene"]);
 
   const initializeStart = rendererSource.indexOf("private async initializeInternal(): Promise<void>");
@@ -18,39 +18,49 @@ test("applicable GLOBAL startup requests the sparse renderer", () => {
     "authoritative water presentation remains part of startup");
   for (const optionalConstructor of [
     "new GridOverlayPipeline", "new OctreeTechniqueOverlayPipeline",
-    "new OctreeTechniqueAuditOverlayPipeline", "new SparseVoxelDebugRenderer",
+    "new OctreeTechniqueAuditOverlayPipeline",
     "new SparseVoxelDrySceneRenderer", "new SecondaryParticleRenderPipeline",
   ]) assert.doesNotMatch(initializeSource, new RegExp(optionalConstructor), `${optionalConstructor} must be deferred`);
 });
 
-test("every water presentation requests its authored SVO shell", () => {
+test("full scenes request their authored SVO shell and fluid-only scenes can skip it", () => {
   assert.deepEqual(optionalRendererPipelineRequests(
-    undefined, "smooth", false, false,
+    undefined, false, false,
   ), ["svo-dry-scene"]);
-  assert.match(rendererSource, /const sparsePresentationRequired = true/,
-    "the dry scene is required even when the fluid method has no sparse hierarchy");
+  assert.match(rendererSource, /const sparsePresentationRequired = presentationMode === "full-scene"/,
+    "the scene definition must own whether the dry world is part of presentation");
+  assert.deepEqual(optionalRendererPipelineRequests(
+    undefined, false, false, false, false, false, false,
+  ), [], "a fluid-only frame requests no sparse presentation pipeline");
   assert.match(rendererSource, /solver\.sparseVoxelSceneSource[\s\S]*WebGPULiveSvoScene\.create[\s\S]*return \{solver,sidecar\}/,
     "a renderer-owned source must fill the method capability gap");
+  assert.match(rendererSource, /presentationMode === "fluid-only" \|\| solver\.sparseVoxelSceneSource/,
+    "fluid-only initialization must not construct a renderer-owned sparse sidecar");
   assert.match(rendererSource, /if \(sparsePresentationRequired\) requested\.push\("svo-dry-scene"\)/,
     "the authored shell must start the sparse presentation task");
 });
 
 test("each optional pipeline has an explicit first-use condition", () => {
   assert.deepEqual(optionalRendererPipelineRequests(
-    { axis: "z", position: 0.5, mode: "structure" }, "smooth", false, false,
+    { axis: "z", position: 0.5, mode: "structure" }, false, false,
   ), ["grid-overlay", "svo-dry-scene"]);
   assert.deepEqual(optionalRendererPipelineRequests(
-    { axis: "volume", position: 0.5, mode: "power-cells" }, "smooth", false, false,
+    { axis: "volume", position: 0.5, mode: "power-cells" }, false, false,
   ), ["technique-overlay", "technique-audit-overlay", "svo-dry-scene"]);
   assert.deepEqual(optionalRendererPipelineRequests(
-    undefined, "raw-voxels", false, false,
-  ), ["voxel-debug", "svo-dry-scene"], "structural inspection overlays the GLOBAL renderer");
-  assert.deepEqual(optionalRendererPipelineRequests(
-    undefined, "smooth", false, false,
+    undefined, false, false,
   ), ["svo-dry-scene"]);
   assert.deepEqual(optionalRendererPipelineRequests(
-    undefined, "smooth", true, true,
+    undefined, true, true,
   ), ["svo-dry-scene", "secondary-particles"]);
+  // The pixel trace and the cell gather are the only diagnostics left that add
+  // an optional pipeline; the expanded-record inspection overlay and its
+  // "voxel-debug" request were removed with the renderer that served them.
+  assert.deepEqual(optionalRendererPipelineRequests(
+    undefined, false, false, true,
+  ), ["svo-dry-scene", "decoration-overlay"]);
+  assert.ok(!optionalRendererPipelineRequests(undefined, false, false, true).includes(
+    "voxel-debug" as never), "the inspection overlay pipeline no longer exists");
 });
 
 test("first-use compilation is single-flight and fails closed per device", () => {

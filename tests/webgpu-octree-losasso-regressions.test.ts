@@ -321,18 +321,35 @@ test("Losasso exact row reuse carries the accepted topology bank on the GPU", ()
     "exact reuse must preserve accepted row headers and pressure rather than copying a candidate bank");
 });
 
-test("Losasso fused sub-L0 schedule is the multi-level default", () => {
+test("Losasso fused sub-L0 schedule is the resident-tier default", () => {
   const source = read("../lib/webgpu-octree-losasso-vcycle-gpu.ts");
   const hierarchy = read("../lib/webgpu-octree-losasso-hierarchy.ts");
   assert.match(source, /fn fusedSubL0\(/);
   assert.doesNotMatch(source, /FLUID_LOSASSO_FUSED_SUB_L0/);
+  assert.match(source, /this\.useFusedSubL0=Boolean\(hierarchy\.fusedSubL0&&hierarchy\.levels\.length>1/);
+  // The fused cycle is ONE workgroup grid-striding every sub-L0 row, so it must
+  // stay size-gated: ungated, a 128-cubed hierarchy walks ~30K L1 rows serially
+  // per sweep per level per iteration. Measured 2026-08-06: removing the gate
+  // costs more wall than the 10x iteration reduction it accompanies wins back.
+  assert.match(source, /const FUSED_SUB_L0_MAXIMUM_LEVEL_ROWS = 4_096;/,
+    "the fused cycle must be bounded by the resident row tier");
   assert.match(source,
-    /this\.useFusedSubL0=Boolean\(hierarchy\.fusedSubL0&&hierarchy\.levels\.length>1\)/);
+    /subLevelRows\.every\(capacity=>capacity<=FUSED_SUB_L0_MAXIMUM_LEVEL_ROWS\)/,
+    "every sub-L0 level must fit the resident tier before the fused form is chosen");
   assert.match(source, /this\.useFusedSubL0\s*\?9:/,
     "the accepted fused graph has nine encoded correction dispatches");
   assert.match(hierarchy,
-    /levelRowCapacities\.push\(Math\.min\(rows,[\s\S]*\(nx \/ targetSpan\) \* \(ny \/ targetSpan\) \* \(nz \/ targetSpan\)\)\)/,
+    /const levelRowCapacityAt = \(targetSpan: number\) => Math\.min\(rows,\s*\(nx \/ targetSpan\) \* \(ny \/ targetSpan\) \* \(nz \/ targetSpan\)\);/,
     "coarse vector bounds should come from the number of dyadic target cells");
+  // A level below the row floor has no parallelism to relax with but still
+  // carries tens of thousands of retained face patches. Measured 2026-08-06:
+  // the bottom two levels of the 128-cubed hierarchy cost ~460 ms to take the
+  // iteration count from 27 to 17.
+  assert.match(hierarchy, /export const MINIMUM_COARSE_LEVEL_ROWS = 1_024;/,
+    "hierarchy depth must stop where a level can no longer be relaxed in parallel");
+  assert.match(hierarchy,
+    /if \(levelRowCapacityAt\(targetSpan\) < MINIMUM_COARSE_LEVEL_ROWS\) break;/,
+    "the depth cap must be applied when the level list is built");
   assert.match(source, /VECTOR_BASES[\s\S]*fn vectorIndex\(level:u32,row:u32\)->u32\{return VECTOR_BASES\[level\]\+row;\}/,
     "the fused cycle must index packed per-level vector sections");
 });

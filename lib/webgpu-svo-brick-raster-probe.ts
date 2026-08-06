@@ -1,5 +1,5 @@
 import { SVO_BRICK_OCCUPANCY } from "./svo-brick-occupancy";
-import { svoPrimitiveWGSL } from "./svo-primitive-abi";
+import { svoFieldProgramAbsentWGSL, svoPrimitiveWGSL } from "./svo-primitive-abi";
 import {
   SVO_PIXEL_TRACE_FLAGS,
   SVO_PIXEL_TRACE_HEADER,
@@ -152,6 +152,11 @@ struct SvoBrickSortStateRead{
 }
 ${svoBrickRasterSharedWGSL}
 ${occupancyWGSL}
+// This probe reads the scene arena's primitive records and nothing else, so it
+// has no field-program tape arena to resolve against. Saying so is the contract:
+// a field-program record here reports itself invalid, exactly as an aggregate
+// whose block never arrived does, rather than drawing its conservative box.
+${svoFieldProgramAbsentWGSL}
 ${svoPrimitiveWGSL}
 
 @group(0) @binding(${bindings.uniforms}) var<uniform> uniforms:Uniforms;

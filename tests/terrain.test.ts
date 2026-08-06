@@ -5,6 +5,7 @@ import {
   sceneHasTerrain,
   terrainCellSolidFraction,
   terrainColumnHeights,
+  terrainContentStamp,
   terrainHeightAt,
   terrainNormalAt,
   validateTerrain,
@@ -22,6 +23,29 @@ test("terrain height is the base level away from features and zero without terra
   assert.equal(terrainHeightAt(undefined, 0.3, -0.2), 0);
   const terrain: TerrainDescription = { baseHeight_m: 0.4, features: [] };
   assert.equal(terrainHeightAt(terrain, 1.2, -0.9), 0.4);
+});
+
+test("terrain content stamps survive cloning and cover fixed-shape authored changes", () => {
+  const terrain: TerrainDescription = {
+    baseHeight_m: 0.2,
+    features: [{
+      kind: "mound", center_m: { x: 0, z: 0 }, radius_m: { x: 0.5, z: 0.4 }, amount_m: 0.1,
+    }],
+    grid: {
+      kind: "grid", origin_m: { x: -1, z: -1 }, spacing_m: 1,
+      size: { nx: 2, nz: 2 }, heights_m: [0.2, 0.25, 0.3, 0.35],
+    },
+  };
+  assert.equal(terrainContentStamp(structuredClone(terrain)), terrainContentStamp(terrain),
+    "the worker's structured clone must retain the same content identity");
+  assert.notEqual(terrainContentStamp({
+    ...terrain,
+    features: [{ ...terrain.features[0], amount_m: 0.11 }],
+  }), terrainContentStamp(terrain), "feature contents, not only feature count, participate");
+  assert.notEqual(terrainContentStamp({
+    ...terrain,
+    grid: { ...terrain.grid!, heights_m: [0.2, 0.25, 0.31, 0.35] },
+  }), terrainContentStamp(terrain), "a brush edit invalidates a fixed-shape grid");
 });
 
 test("a basin carves down to base minus depth at its centre and vanishes past its radius", () => {

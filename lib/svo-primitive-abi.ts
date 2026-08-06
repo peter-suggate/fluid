@@ -1,6 +1,11 @@
 import type { Quaternion, RigidBodyDescription, Vec3 } from "./model";
 import { packMaterialOwner, SPARSE_BRICK_NO_OWNER, unpackMaterialOwner } from "./sparse-brick-octree";
 import {
+  evaluateSvoFieldProgram,
+  svoFieldProgramExtent_m,
+  type SvoFieldProgram,
+} from "./svo-field-program";
+import {
   SVO_PRIMITIVE_KIND_FLAGS,
   SVO_PRIMITIVE_KIND_TABLE,
   svoPrimitiveKindConstantsWGSL,
@@ -44,6 +49,7 @@ export const SVO_PRIMITIVE_KINDS = Object.freeze({
   smoothUnionCluster: SVO_PRIMITIVE_KIND_TABLE["smooth-union-cluster"].code,
   roundCone: SVO_PRIMITIVE_KIND_TABLE["round-cone"].code,
   roundedCylinder: SVO_PRIMITIVE_KIND_TABLE["rounded-cylinder"].code,
+  fieldProgram: SVO_PRIMITIVE_KIND_TABLE["field-program"].code,
 } as const);
 
 export const SVO_PRIMITIVE_FLAGS = SVO_PRIMITIVE_KIND_FLAGS;
@@ -153,12 +159,75 @@ export const SVO_CLUSTER_SWEEP_MAXIMUM_POINTS = 8;
 /**
  * Octaves the lattice field may stack.
  *
- * Three, and the ceiling is a cost bound rather than a soundness one — each
- * octave is an independent ~63-lobe evaluation, so a fourth would put a covering
+ * A cost bound rather than a soundness one, and the number is set from
+ * measurement. It was **three**, argued as "a fourth would put a covering
  * fragment past 250 distance evaluations for detail an eighth of the first
- * octave's, which is below a pixel at any scale this renderer draws.
+ * octave's, which is below a pixel at any scale this renderer draws." Both
+ * halves of that argument were written at a 25 mm leaf and neither survives the
+ * environment-refinement ladder: at `SVO_ENVIRONMENT_REFINEMENT_DEPTH_MAXIMUM`
+ * the hero garden's leaf is 0.78125 mm, a fourth octave of the stone family's
+ * 55 mm period is **6.9 mm** and a fifth is 3.4 mm, and at the hero camera's
+ * measured 1.99 plate-pixels per screen-millimetre those are 13 px and 7 px.
+ * Nothing about them is sub-pixel.
+ *
+ * ## What an octave costs, measured
+ *
+ * On the hero garden's own two lattice regimes — a 82x35x74 mm boulder cap on a
+ * 55 mm period, and a 240x100x220 mm foliage pad on 90 mm — 4 096 covering-
+ * fragment rays each, marched by the same loop and epsilon as
+ * `intersectMarchedLocal`:
+ *
+ *   octaves   finest mm   eval cost   mean march steps   hits/misses/exhausted
+ *      1         55.0       x1.00          13.26            2153/1943/114
+ *      2         27.5       x1.92          13.04            2154/1942/114
+ *      3         13.8       x2.88          13.04            2154/1942/114
+ *      4          6.9       x3.96          13.04            2154/1942/114
+ *      5          3.4       x4.92          13.04            2154/1942/114
+ *      6          1.7       x5.92          13.04            2154/1942/114
+ *
+ * Three findings, and the middle one is the surprise:
+ *
+ *  - **Evaluation cost is exactly linear in octave count**, as the construction
+ *    says it must be: an octave is one independent neighbourhood minimisation.
+ *  - **March step count does not move at all**, and neither do the hit, miss and
+ *    exhaustion counts — bit-identical from octave two upward. This is the
+ *    Lipschitz argument on the tin: each octave is separately a 1-Lipschitz
+ *    lower bound and a smooth minimum of them is a convex combination of their
+ *    gradients, so stacking octaves never costs a step and never tunnels.
+ *  - **It costs no geometry.** Octaves change no record's envelope, no record
+ *    count and no proxy box, so the per-brick owner census is unchanged to the
+ *    integer: measured over the whole ladder, the hero garden's busiest 200 mm
+ *    brick is 103/103/103/103/116 at 25/6.25/3.125/1.5625/0.78125 mm with the
+ *    ceiling at three and *the same five numbers* with it at six.
+ *
+ * So the honest ceiling is the point past which no generator would ask for one.
+ * Every species gates its own octaves on the same three-leaf admission test
+ * (`stoneFormOctaves`, `foliageGrainOctaves`): an octave is only taken when its
+ * period clears three leaves, which is the aliasing floor. At the finest leaf
+ * that can exist — 0.78125 mm — that test asks the stone family for **five**
+ * and foliage's coarser 90 mm period for six.
+ *
+ * **Five**, therefore. It is exactly what the deepest legal refinement admits
+ * for the stone family, which is the whole of the hero garden's lattice
+ * population (117 of 117 lattice records). Six was rejected on cost: it serves
+ * only foliage, whose sixth octave is 2.81 mm — 3.6 leaves, sitting on the
+ * admission floor — and it would buy that by putting a further 20 % on the most
+ * expensive record kind in the scene.
+ *
+ * **This is a no-op at the shipped leaf, by construction.** `HERO_GARDEN_CELL_M`
+ * is 6.25 mm and the admission test asks for two octaves there, so no authored
+ * set moves until a scene spends refinement levels. Verified: `check:scenery`
+ * reports identical prop counts on all ten subjects either side of the change.
+ *
+ * **What is not measured is the frame.** The cost above is per distance
+ * evaluation, on the CPU mirror; what fraction of a depth-3 frame a lattice
+ * record's march actually is was not obtainable — the Dawn lane's depth-3 run
+ * dies on a V8 heap exhaustion before it presents, and frame times in that lane
+ * are not currently reproducible in any case. The bound above is what is known:
+ * linear in octaves, on the records that carry a lattice, with no step-count and
+ * no geometry term.
  */
-export const SVO_CLUSTER_LATTICE_MAXIMUM_OCTAVES = 3;
+export const SVO_CLUSTER_LATTICE_MAXIMUM_OCTAVES = 5;
 
 /**
  * Lobes the seeded-lobes field may fuse.
@@ -565,6 +634,51 @@ export interface SvoSmoothUnionClusterPrimitive extends SvoOrientedPrimitive {
   packing?: SvoSmoothUnionClusterPacking;
 }
 
+/**
+ * A record whose geometry is a field program: a tape in the scene arena,
+ * evaluated as one SDF.
+ *
+ * The same arrangement as {@link SvoSmoothUnionClusterPrimitive}, and for the
+ * same reason — sixty-four bytes leave three floats of per-kind space, and a
+ * tape is up to sixteen ops of eight words. What differs is what the three
+ * floats mean. A cluster's are an *ellipsoid envelope* that the field is hard
+ * `max`ed against, so containment is enforced. A field program is not clipped by
+ * anything: its containment is *derived*, by `svoFieldProgramExtent_m`, from the
+ * source solid's own radii grown by the total warp amplitude on the chain
+ * feeding it. That bound is per axis, so the three floats are a box half-extent.
+ *
+ * Which makes the envelope below an *authored floor* rather than the shape.
+ * `dimensions` takes the componentwise maximum of it and the program's derived
+ * extent, so a caller may reserve room for a tape it intends to grow later
+ * without the bound ever falling below what the current tape actually needs. A
+ * bound that under-covered would delete exactly the silhouette detail the warp
+ * exists to create — silently, and worst at the outline the eye reads first.
+ */
+export interface SvoFieldProgramPrimitive extends SvoOrientedPrimitive {
+  kind: "field-program";
+  /**
+   * Authored conservative half-extent about the centre, along the local axes.
+   *
+   * A floor on the packed dimensions, never a ceiling: see above. This is also
+   * what a descriptor recovered from a packed record carries, because the record
+   * holds the widened result and nothing else.
+   */
+  envelopeRadii_m: Vec3;
+  /** u32 word offset of this record's tape block in the shared scene arena. */
+  fieldProgramReference: number;
+  /**
+   * The tape.
+   *
+   * Present on an authored descriptor and absent on one recovered from a packed
+   * record, exactly as a cluster recovers a reference and not a packing.
+   * Evaluating a field program without either is an error rather than a
+   * plausible-looking default: a tape that silently lost its warp renders a
+   * smooth ellipsoid, which is precisely the frame this kind exists to stop
+   * producing, and it would do it without a single error.
+   */
+  program?: SvoFieldProgram;
+}
+
 export type SvoPrimitiveDescriptor =
   | SvoSpherePrimitive
   | SvoBoxPrimitive
@@ -576,6 +690,7 @@ export type SvoPrimitiveDescriptor =
   | SvoConePrimitive
   | SvoRoundConePrimitive
   | SvoSmoothUnionClusterPrimitive
+  | SvoFieldProgramPrimitive
   | SvoTerrainHeightfieldPrimitive;
 
 export interface SvoPrimitiveSample {
@@ -619,6 +734,25 @@ export type SvoTerrainResolver = (terrainReference: number) => TerrainDescriptio
  * its authored `packing` needs no resolver.
  */
 export type SvoClusterResolver = (clusterReference: number) => SvoSmoothUnionClusterPacking | undefined;
+
+/**
+ * Reads a field program's tape back out of the scene arena.
+ *
+ * The mirror of {@link SvoClusterResolver}, one kind over. A descriptor that
+ * still has its authored `program` needs no resolver.
+ */
+export type SvoFieldProgramResolver = (fieldProgramReference: number) => SvoFieldProgram | undefined;
+
+function resolveFieldProgram(
+  descriptor: SvoFieldProgramPrimitive,
+  fieldProgramResolver?: SvoFieldProgramResolver,
+): ResolvedFieldProgram {
+  const program = descriptor.program ?? fieldProgramResolver?.(descriptor.fieldProgramReference);
+  if (!program) {
+    throw new Error("Field-program evaluation requires its authored tape or an arena resolver");
+  }
+  return { ...descriptor, program };
+}
 
 function resolveCluster(
   descriptor: SvoSmoothUnionClusterPrimitive,
@@ -741,6 +875,28 @@ function dimensions(descriptor: SvoPrimitiveDescriptor): Vec3 {
     }
     if (descriptor.packing) validateSvoClusterPacking(descriptor.packing, descriptor.lobeRadii_m);
     return { ...descriptor.lobeRadii_m };
+  }
+  if (descriptor.kind === "field-program") {
+    finiteVec3(descriptor.envelopeRadii_m, "Field-program envelope radii");
+    positive(descriptor.envelopeRadii_m.x, "Field-program envelope X half extent");
+    positive(descriptor.envelopeRadii_m.y, "Field-program envelope Y half extent");
+    positive(descriptor.envelopeRadii_m.z, "Field-program envelope Z half extent");
+    uint32(descriptor.fieldProgramReference, "Field-program reference");
+    if (descriptor.fieldProgramReference === SVO_PRIMITIVE_INVALID_REFERENCE) {
+      throw new RangeError("Field-program reference may not use the invalid sentinel");
+    }
+    // No tape means this descriptor came back out of a packed record, and the
+    // record already carries the widened bound: re-deriving it here would need
+    // the tape the record deliberately does not hold. Widening on the way in and
+    // trusting the record on the way out is what makes the round trip a fixed
+    // point rather than a bound that grows every time a scene is republished.
+    if (!descriptor.program) return { ...descriptor.envelopeRadii_m };
+    const derived = svoFieldProgramExtent_m(descriptor.program);
+    return {
+      x: Math.max(descriptor.envelopeRadii_m.x, derived[0]),
+      y: Math.max(descriptor.envelopeRadii_m.y, derived[1]),
+      z: Math.max(descriptor.envelopeRadii_m.z, derived[2]),
+    };
   }
   uint32(descriptor.terrainReference, "Terrain reference");
   if (descriptor.terrainReference === SVO_PRIMITIVE_INVALID_REFERENCE) throw new RangeError("Terrain reference may not use the invalid sentinel");
@@ -932,6 +1088,13 @@ export function canonicalSvoPrimitive(descriptor: SvoPrimitiveDescriptor): SvoPr
   if (descriptor.kind === "smooth-union-cluster") {
     return { ...descriptor, center_m: { ...descriptorCenter(descriptor) }, ownerId, orientation: descriptorOrientation(descriptor), lobeRadii_m: d };
   }
+  if (descriptor.kind === "field-program") {
+    // The canonical envelope is the *widened* bound, so canonicalizing twice is
+    // idempotent and a descriptor and the record packed from it describe the
+    // same box. Anything narrower here would let a re-canonicalized descriptor
+    // report a smaller extent than the record already published.
+    return { ...descriptor, center_m: { ...descriptorCenter(descriptor) }, ownerId, orientation: descriptorOrientation(descriptor), envelopeRadii_m: d };
+  }
   return { ...descriptor, ownerId, normalEpsilon_m: d.x };
 }
 
@@ -939,6 +1102,7 @@ export function canonicalSvoPrimitive(descriptor: SvoPrimitiveDescriptor): SvoPr
 function arenaReference(descriptor: SvoPrimitiveDescriptor): number {
   if (descriptor.kind === "terrain-heightfield") return descriptor.terrainReference >>> 0;
   if (descriptor.kind === "smooth-union-cluster") return descriptor.clusterReference >>> 0;
+  if (descriptor.kind === "field-program") return descriptor.fieldProgramReference >>> 0;
   return SVO_PRIMITIVE_INVALID_REFERENCE;
 }
 
@@ -992,6 +1156,13 @@ function descriptorFromRecord(words: Uint32Array, floats: Float32Array, base: nu
     // default here would produce a smooth ellipsoid that renders plausibly and
     // is not the authored shape. A caller that needs the packing resolves it.
     return { ...identity, kind: "smooth-union-cluster", center_m, orientation, lobeRadii_m: d, clusterReference: words[base + 13] };
+  }
+  if (kind === SVO_PRIMITIVE_KINDS.fieldProgram) {
+    // No `program`, for the reason above: a default tape is a smooth ellipsoid,
+    // which is a shape the scene never asked for and would raise nothing. The
+    // record's dimensions are already the widened bound, so the recovered
+    // envelope is the published one rather than a floor that has to be re-grown.
+    return { ...identity, kind: "field-program", center_m, orientation, envelopeRadii_m: d, fieldProgramReference: words[base + 13] };
   }
   if (kind === SVO_PRIMITIVE_KINDS.terrainHeightfield) {
     return { ...identity, kind: "terrain-heightfield", terrainReference: words[base + 13], normalEpsilon_m: d.x };
@@ -1753,7 +1924,62 @@ function clusterLocalNormal(point: Vec3, lobeRadii_m: Vec3, packing: SvoSmoothUn
 /** A cluster whose arena block has been resolved, which is the only form that can be evaluated. */
 type ResolvedCluster = SvoSmoothUnionClusterPrimitive & { packing: SvoSmoothUnionClusterPacking };
 
-type MarchedPrimitive = SvoTorusPrimitive | SvoConePrimitive | SvoRoundConePrimitive | SvoRoundedCylinderPrimitive | ResolvedCluster;
+/** A field program whose tape has been resolved, which is the only form that can be evaluated. */
+type ResolvedFieldProgram = SvoFieldProgramPrimitive & { program: SvoFieldProgram };
+
+type MarchedPrimitive = SvoTorusPrimitive | SvoConePrimitive | SvoRoundConePrimitive | SvoRoundedCylinderPrimitive
+  | ResolvedCluster | ResolvedFieldProgram;
+
+/**
+ * A field program's distance, already divided by the Lipschitz constant the
+ * evaluator returned beside it.
+ *
+ * **Do not "simplify" this back to `value.distance_m`.** A domain warp evaluates
+ * its subtree at a moved point, so the composed field is `L`-Lipschitz rather
+ * than 1-Lipschitz and `|g(p)|` *overestimates* the clearance by up to `L`.
+ * Every consumer in this ABI — the march loop's step, the voxelizer's occupancy
+ * test, the cell-coverage corner sweep — is built on the one contract that a
+ * kind's distance is a **lower bound** on the true clearance, and each of them
+ * breaks differently when it is not: the trace steps through the surface and
+ * punches holes in every warped shape (§2.4 of `docs/hero-fidelity-1000x-
+ * handoff.md`), and voxelization reports empty cells that hold solid.
+ *
+ * Dividing here rather than threading the constant out to each of those call
+ * sites is deliberate. It costs nothing — `L` is a property of the tape, not of
+ * the point, so the division is a uniform positive scale that leaves the sign
+ * and the zero set exactly where they were — and it means a field program is
+ * simply another 1-Lipschitz lower bound to everything downstream, with no new
+ * rule for a later reader to know about and forget. The only visible effect is
+ * that the march's acceptance band stops it up to `L` times its own epsilon
+ * outside the surface, which is the safe side of the surface and is far below
+ * the band the other marched kinds already accept.
+ */
+function fieldProgramDistance_m(program: SvoFieldProgram, localPoint: Vec3): number {
+  const value = evaluateSvoFieldProgram(program, localPoint);
+  return value.distance_m / Math.max(1, value.lipschitz);
+}
+
+/**
+ * Central-difference step for a field program's shading normal.
+ *
+ * Scaled to the record's own extent because a tape has no analytic gradient and
+ * the field's finest feature is a fraction of the shape, not an absolute size.
+ * The absolute floor keeps a millimetre-scale record off the f32 noise shelf.
+ */
+function fieldProgramNormalStep_m(extent_m: Vec3): number {
+  return Math.max(1e-5, 1e-3 * Math.max(extent_m.x, extent_m.y, extent_m.z));
+}
+
+function fieldProgramLocalNormal(descriptor: ResolvedFieldProgram, point: Vec3, extent_m: Vec3): Vec3 | null {
+  const step = fieldProgramNormalStep_m(extent_m);
+  const at = (dx: number, dy: number, dz: number): number =>
+    fieldProgramDistance_m(descriptor.program, { x: point.x + dx, y: point.y + dy, z: point.z + dz });
+  return normalize({
+    x: at(step, 0, 0) - at(-step, 0, 0),
+    y: at(0, step, 0) - at(0, -step, 0),
+    z: at(0, 0, step) - at(0, 0, -step),
+  });
+}
 
 function roundedCylinderLocalSample(descriptor: SvoRoundedCylinderPrimitive, point: Vec3): SvoPrimitiveSample {
   const radial = Math.hypot(point.x, point.z);
@@ -1815,6 +2041,14 @@ function roundConeLocalSample(descriptor: SvoRoundConePrimitive, point: Vec3): S
  * a guarantee that it never steps past a surface.
  */
 function marchedLocalSample(descriptor: MarchedPrimitive, point: Vec3): SvoPrimitiveSample {
+  if (descriptor.kind === "field-program") {
+    const extent_m = svoPrimitiveLocalExtent_m(descriptor);
+    return {
+      signedDistance_m: fieldProgramDistance_m(descriptor.program, point),
+      normal: fieldProgramLocalNormal(descriptor, point, extent_m),
+      featureId: SVO_PRIMITIVE_FEATURES.smooth,
+    };
+  }
   if (descriptor.kind === "smooth-union-cluster") {
     return {
       signedDistance_m: clusterDistance(point, descriptor.lobeRadii_m, descriptor.packing),
@@ -1920,6 +2154,7 @@ function intersectCanonicalSvoPrimitive(
   descriptor: SvoFinitePrimitiveDescriptor,
   ray: CanonicalPrimitiveRay,
   clusterResolver?: SvoClusterResolver,
+  fieldProgramResolver?: SvoFieldProgramResolver,
 ): SvoPrimitiveRayHit | null {
   const { origin, direction, orientation } = localPrimitiveRay(descriptor, ray);
   const localHit = descriptor.kind === "sphere" ? intersectSphereLocal(descriptor, origin, direction, ray)
@@ -1928,9 +2163,11 @@ function intersectCanonicalSvoPrimitive(
         : descriptor.kind === "cylinder" ? intersectCylinderLocal(descriptor, origin, direction, ray)
           : descriptor.kind === "smooth-union-cluster"
             ? intersectMarchedLocal(resolveCluster(descriptor, clusterResolver), origin, direction, ray)
-            : descriptor.kind === "torus" || descriptor.kind === "cone" || descriptor.kind === "round-cone" || descriptor.kind === "rounded-cylinder"
-              ? intersectMarchedLocal(descriptor, origin, direction, ray)
-              : intersectEllipsoidLocal(descriptor, origin, direction, ray);
+            : descriptor.kind === "field-program"
+              ? intersectMarchedLocal(resolveFieldProgram(descriptor, fieldProgramResolver), origin, direction, ray)
+              : descriptor.kind === "torus" || descriptor.kind === "cone" || descriptor.kind === "round-cone" || descriptor.kind === "rounded-cylinder"
+                ? intersectMarchedLocal(descriptor, origin, direction, ray)
+                : intersectEllipsoidLocal(descriptor, origin, direction, ray);
   if (!localHit) return null;
   const normal = worldNormal(orientation, localHit.normal);
   if (!normal) return null;
@@ -1956,10 +2193,11 @@ export function intersectSvoPrimitive(
   input: SvoFinitePrimitiveDescriptor,
   rayInput: SvoPrimitiveRay,
   clusterResolver?: SvoClusterResolver,
+  fieldProgramResolver?: SvoFieldProgramResolver,
 ): SvoPrimitiveRayHit | null {
   const descriptor = canonicalSvoPrimitive(input);
   if (descriptor.kind === "terrain-heightfield") throw new TypeError("Terrain heightfield intersection uses the separate terrain tracer");
-  return intersectCanonicalSvoPrimitive(descriptor, canonicalPrimitiveRay(rayInput), clusterResolver);
+  return intersectCanonicalSvoPrimitive(descriptor, canonicalPrimitiveRay(rayInput), clusterResolver, fieldProgramResolver);
 }
 
 /** Nearest exact finite-primitive hit. Input order is the deterministic tie-breaker. */
@@ -1967,13 +2205,14 @@ export function intersectSvoPrimitives(
   inputs: readonly SvoPrimitiveDescriptor[],
   rayInput: SvoPrimitiveRay,
   clusterResolver?: SvoClusterResolver,
+  fieldProgramResolver?: SvoFieldProgramResolver,
 ): SvoPrimitiveRayHit | null {
   const ray = canonicalPrimitiveRay(rayInput);
   let nearest: SvoPrimitiveRayHit | null = null;
   for (const input of inputs) {
     const descriptor = canonicalSvoPrimitive(input);
     if (descriptor.kind === "terrain-heightfield") continue;
-    const hit = intersectCanonicalSvoPrimitive(descriptor, ray, clusterResolver);
+    const hit = intersectCanonicalSvoPrimitive(descriptor, ray, clusterResolver, fieldProgramResolver);
     if (hit && (!nearest || hit.t_m < nearest.t_m)) nearest = hit;
   }
   return nearest;
@@ -1984,8 +2223,9 @@ export function intersectPackedSvoPrimitiveRecords(
   packed: Uint32Array,
   ray: SvoPrimitiveRay,
   clusterResolver?: SvoClusterResolver,
+  fieldProgramResolver?: SvoFieldProgramResolver,
 ): SvoPrimitiveRayHit | null {
-  return intersectSvoPrimitives(unpackSvoPrimitiveRecords(packed), ray, clusterResolver);
+  return intersectSvoPrimitives(unpackSvoPrimitiveRecords(packed), ray, clusterResolver, fieldProgramResolver);
 }
 
 interface SvoEllipsoidClosestPoint {
@@ -2071,6 +2311,7 @@ export function sampleSvoPrimitive(
   worldPoint_m: Vec3,
   terrainResolver?: SvoTerrainResolver,
   clusterResolver?: SvoClusterResolver,
+  fieldProgramResolver?: SvoFieldProgramResolver,
 ): SvoPrimitiveSample {
   const descriptor = canonicalSvoPrimitive(input);
   if (descriptor.kind === "terrain-heightfield") {
@@ -2121,6 +2362,10 @@ export function sampleSvoPrimitive(
     const local = marchedLocalSample(resolveCluster(descriptor, clusterResolver), point);
     return { ...local, normal: worldNormal(orientation, local.normal) };
   }
+  if (descriptor.kind === "field-program") {
+    const local = marchedLocalSample(resolveFieldProgram(descriptor, fieldProgramResolver), point);
+    return { ...local, normal: worldNormal(orientation, local.normal) };
+  }
   if (descriptor.kind === "cylinder") {
     const radialLength = Math.hypot(point.x, point.z);
     const radialDistance = radialLength - descriptor.radius_m;
@@ -2162,10 +2407,50 @@ export function sampleSvoPrimitive(
 }
 
 /**
+ * The one function {@link svoPrimitiveWGSL} does not carry, and every module
+ * that includes it must declare *before* it:
+ *
+ * ```wgsl
+ * fn svoFieldProgramReferenceSample(reference: u32, localPoint: vec3f) -> SvoFieldValue
+ * ```
+ *
+ * A field program's tape is a hundred and thirty-two words, so the shared
+ * library cannot take it as a parameter the way it takes `SvoClusterPacking` —
+ * that struct is already the largest thing threaded through
+ * `svoIntersectPrimitiveExact`, and this one is four times its size and would be
+ * copied by every primitive of every kind. It also cannot read the arena
+ * itself: three shaders include this library against three different bindings,
+ * and the one thing that has kept it reusable is that it names no binding.
+ *
+ * So the tape is read by the host, which is the same bargain `svoFieldProgram-
+ * WGSL` already makes by taking a `loadWord`. `reference` is the record's word
+ * 13 verbatim, and each host resolves it against whatever arena it owns and by
+ * whatever convention it published — the renderer's is a word offset, the live
+ * voxelizer's is a slot. A reference the host cannot resolve must answer with a
+ * distance of `1e20`, which the ABI reads as "this record did not resolve" and
+ * reports as invalid rather than drawing the envelope.
+ *
+ * This constant is that answer for a module with no field-program arena at all.
+ * It is not a fallback inside the library: a module either has the arena and
+ * generates the real evaluator, or it does not and says so once, here, where a
+ * reader can see which of the two it is.
+ */
+export const svoFieldProgramAbsentWGSL = /* wgsl */ `
+struct SvoFieldValue{distance_m:f32,lipschitz:f32}
+fn svoFieldProgramReferenceSample(reference:u32,localPoint:vec3f)->SvoFieldValue{
+  return SvoFieldValue(1e20,1.0);
+}
+`;
+
+/**
  * Shared WGSL declaration/evaluation library. Terrain height and normal are
  * supplied by the scene's existing terrain evaluator using metadata.y as its
  * stable table reference. Box/cylinder normals select one feature; they never
  * average across hard boundaries.
+ *
+ * Requires the host module to have declared `svoFieldProgramReferenceSample`
+ * first — see {@link svoFieldProgramAbsentWGSL} for the contract and for the
+ * declaration a module without a tape arena uses.
  */
 export const svoPrimitiveWGSL = /* wgsl */ `
 ${svoPrimitiveKindConstantsWGSL}
@@ -2217,12 +2502,15 @@ fn svoPrimitiveDimensions_m(record: SvoPrimitiveRecord) -> vec3f { return bitcas
 fn svoPrimitiveMaterialId(record: SvoPrimitiveRecord) -> u32 { return record.dimensionsIdentity.w & 0xffffu; }
 fn svoPrimitiveOwnerId(record: SvoPrimitiveRecord) -> u32 { return record.dimensionsIdentity.w >> 16u; }
 fn svoPrimitiveId(record: SvoPrimitiveRecord) -> u32 { return record.metadata.x; }
-// One word, two arena-backed kinds. A heightfield names its samples and a
-// cluster names its packing; both are the u32 word offset of a block in the
-// shared scene arena, and neither fits in the record's three dimension floats.
+// One word, three arena-backed kinds. A heightfield names its samples, a
+// cluster names its packing and a field program names its tape; each is a block
+// in the shared scene arena, and none of the three fits in the record's three
+// dimension floats. What the number *means* is the host's convention, not this
+// library's — see svoFieldProgramAbsentWGSL.
 fn svoPrimitiveArenaReference(record: SvoPrimitiveRecord) -> u32 { return record.metadata.y; }
 fn svoPrimitiveTerrainReference(record: SvoPrimitiveRecord) -> u32 { return record.metadata.y; }
 fn svoPrimitiveClusterReference(record: SvoPrimitiveRecord) -> u32 { return record.metadata.y; }
+fn svoPrimitiveFieldProgramReference(record: SvoPrimitiveRecord) -> u32 { return record.metadata.y; }
 
 /**
  * The conservative local half-extent of every kind, generated from the same
@@ -2231,7 +2519,10 @@ fn svoPrimitiveClusterReference(record: SvoPrimitiveRecord) -> u32 { return reco
  */
 fn svoPrimitiveLocalExtent_m(kind: u32, dimensions_m: vec3f) -> vec3f {
   if (kind == SVO_KIND_SPHERE) { return vec3f(dimensions_m.x); }
-  if (kind == SVO_KIND_BOX || kind == SVO_KIND_ELLIPSOID || kind == SVO_KIND_SMOOTH_UNION_CLUSTER) { return dimensions_m; }
+  // A field program's dimensions are already the conservative box its tape's
+  // warps can reach, so the extent is the record verbatim, exactly as a box's is.
+  if (kind == SVO_KIND_BOX || kind == SVO_KIND_ELLIPSOID || kind == SVO_KIND_SMOOTH_UNION_CLUSTER
+    || kind == SVO_KIND_FIELD_PROGRAM) { return dimensions_m; }
   if (kind == SVO_KIND_CAPSULE) { return vec3f(dimensions_m.x, dimensions_m.y + dimensions_m.x, dimensions_m.x); }
   if (kind == SVO_KIND_CYLINDER) { return vec3f(dimensions_m.x, dimensions_m.y, dimensions_m.x); }
   if (kind == SVO_KIND_ROUNDED_CYLINDER) { return vec3f(dimensions_m.x, dimensions_m.y, dimensions_m.x); }
@@ -2669,22 +2960,106 @@ fn svoConeSample(point: vec3f, dimensions_m: vec3f) -> SvoConeSample {
   return SvoConeSample(distance_m, SVO_FEATURE_CYLINDER_SIDE, vec3f(direction.x * lateral.x, lateral.y, direction.y * lateral.x));
 }
 
-fn svoMarchedKind(kind: u32) -> bool {
-  return kind == SVO_KIND_TORUS || kind == SVO_KIND_CONE || kind == SVO_KIND_ROUND_CONE || kind == SVO_KIND_ROUNDED_CYLINDER || kind == SVO_KIND_SMOOTH_UNION_CLUSTER;
+/**
+ * A field program's distance, already divided by the Lipschitz constant the
+ * evaluator returns beside it.
+ *
+ * **Do not "simplify" this to \`.distance_m\`.** A domain warp evaluates its
+ * subtree at a moved point, so the composed field is L-Lipschitz rather than
+ * 1-Lipschitz and |g(p)| *overestimates* the clearance by up to L. The march
+ * below steps by exactly what this returns, and every other consumer of a kind's
+ * distance in this tree — the voxelizer's occupancy test and its cell-coverage
+ * corner sweep — is built on the same contract that the value is a **lower**
+ * bound on the true clearance. Return the undivided distance and the trace steps
+ * through its own surface and punches holes in every warped shape, which is the
+ * failure §2.4 of docs/hero-fidelity-1000x-handoff.md names as the one that
+ * kills naive versions of this design.
+ *
+ * Dividing here rather than threading the constant out to each call site costs
+ * nothing: L is a property of the tape and not of the point, so this is a
+ * uniform positive scale that moves neither the sign nor the zero set. What it
+ * buys is that a field program is just another 1-Lipschitz lower bound to
+ * everything downstream, with no new rule to know about. The only visible effect
+ * is that the acceptance band stops the march up to L times its own epsilon
+ * outside the surface — the safe side, and below the band the other marched
+ * kinds already accept.
+ */
+fn svoFieldProgramDistance_m(reference: u32, point: vec3f) -> f32 {
+  let value = svoFieldProgramReferenceSample(reference, point);
+  return value.distance_m / max(1.0, value.lipschitz);
 }
 
-fn svoMarchedDistance_m(kind: u32, point: vec3f, dimensions_m: vec3f, packing: SvoClusterPacking) -> f32 {
+/**
+ * Central-difference step for a field program's shading normal. Scaled to the
+ * record's own extent because a tape has no analytic gradient and its finest
+ * feature is a fraction of the shape rather than an absolute size; the floor
+ * keeps a millimetre-scale record off the f32 noise shelf.
+ */
+fn svoFieldProgramNormalStep_m(dimensions_m: vec3f) -> f32 {
+  return max(1e-5, 1e-3 * max(dimensions_m.x, max(dimensions_m.y, dimensions_m.z)));
+}
+
+/**
+ * Tetrahedral rather than central: four field evaluations, not six.
+ *
+ * A field program's distance is the most expensive sample in this ABI — a whole
+ * op chain per tap — and the six-tap central difference spent one third of them
+ * on a component the other four already determine. The four offsets are the
+ * vertices of a regular tetrahedron, so the summed contributions span all three
+ * axes; it is the same construction \`svoClusterLocalNormal\` above already uses,
+ * and the only thing that kept the two apart was that they were written at
+ * different times.
+ *
+ * The result is normalised, so the scale factor the two forms differ by falls
+ * out. What does not is second-order error, which a tetrahedral stencil places
+ * differently rather than more of: both are exact on a linear field, and a
+ * displaced field's curvature is what either one smooths.
+ */
+fn svoFieldProgramNormal(reference: u32, point: vec3f, dimensions_m: vec3f) -> vec3f {
+  let step = svoFieldProgramNormalStep_m(dimensions_m);
+  let a = vec3f(1.0, -1.0, -1.0); let b = vec3f(-1.0, -1.0, 1.0);
+  let c = vec3f(-1.0, 1.0, -1.0); let d = vec3f(1.0, 1.0, 1.0);
+  let gradient = a * svoFieldProgramDistance_m(reference, point + a * step)
+    + b * svoFieldProgramDistance_m(reference, point + b * step)
+    + c * svoFieldProgramDistance_m(reference, point + c * step)
+    + d * svoFieldProgramDistance_m(reference, point + d * step);
+  let magnitude = length(gradient);
+  return select(vec3f(0.0), gradient / magnitude, magnitude > 1e-12);
+}
+
+/**
+ * Whether a record's tape resolved at all.
+ *
+ * The evaluator answers 1e20 both for a block past capacity and for one that was
+ * never filled, so a single probe separates a real program from an unresolved
+ * reference: an authored tape has a finite distance everywhere. Probed once per
+ * ray at the local origin rather than per march step, and the local origin is
+ * the cheapest point that is guaranteed to be inside the record's own extent.
+ */
+fn svoFieldProgramResolved(reference: u32) -> bool {
+  return svoFieldProgramReferenceSample(reference, vec3f(0.0)).distance_m < 1e19;
+}
+
+fn svoMarchedKind(kind: u32) -> bool {
+  return kind == SVO_KIND_TORUS || kind == SVO_KIND_CONE || kind == SVO_KIND_ROUND_CONE || kind == SVO_KIND_ROUNDED_CYLINDER || kind == SVO_KIND_SMOOTH_UNION_CLUSTER || kind == SVO_KIND_FIELD_PROGRAM;
+}
+
+fn svoMarchedDistance_m(kind: u32, point: vec3f, dimensions_m: vec3f, packing: SvoClusterPacking, fieldProgramReference: u32) -> f32 {
   if (kind == SVO_KIND_TORUS) { return svoTorusDistance_m(point, dimensions_m); }
   if (kind == SVO_KIND_SMOOTH_UNION_CLUSTER) { return svoClusterDistance_m(point, dimensions_m, packing); }
+  if (kind == SVO_KIND_FIELD_PROGRAM) { return svoFieldProgramDistance_m(fieldProgramReference, point); }
   if (kind == SVO_KIND_ROUND_CONE) { return svoRoundConeDistance_m(point,dimensions_m); }
   if (kind == SVO_KIND_ROUNDED_CYLINDER) { return svoRoundedCylinderDistance_m(point,dimensions_m); }
   return svoConeSample(point, dimensions_m).distance_m;
 }
 
-fn svoMarchedLocalNormal(kind: u32, point: vec3f, dimensions_m: vec3f, packing: SvoClusterPacking) -> vec4f {
+fn svoMarchedLocalNormal(kind: u32, point: vec3f, dimensions_m: vec3f, packing: SvoClusterPacking, fieldProgramReference: u32) -> vec4f {
   if (kind == SVO_KIND_TORUS) { return vec4f(svoTorusNormal(point, dimensions_m), f32(SVO_FEATURE_SMOOTH)); }
   if (kind == SVO_KIND_SMOOTH_UNION_CLUSTER) {
     return vec4f(svoClusterLocalNormal(point, dimensions_m, packing), f32(SVO_FEATURE_SMOOTH));
+  }
+  if (kind == SVO_KIND_FIELD_PROGRAM) {
+    return vec4f(svoFieldProgramNormal(fieldProgramReference, point, dimensions_m), f32(SVO_FEATURE_SMOOTH));
   }
   if (kind == SVO_KIND_ROUND_CONE) { return vec4f(svoRoundConeNormal(point,dimensions_m),f32(SVO_FEATURE_SMOOTH)); }
   if (kind == SVO_KIND_ROUNDED_CYLINDER) { return vec4f(svoRoundedCylinderNormal(point,dimensions_m),f32(SVO_FEATURE_SMOOTH)); }
@@ -2695,6 +3070,12 @@ fn svoMarchedLocalNormal(kind: u32, point: vec3f, dimensions_m: vec3f, packing: 
 /** Rotation-invariant radius that bounds a marched kind about its own centre. */
 fn svoMarchedBoundingRadius_m(kind: u32, dimensions_m: vec3f) -> f32 {
   if (kind == SVO_KIND_TORUS) { return dimensions_m.x + dimensions_m.y; }
+  // A warp displaces the evaluation point by at most its amplitude per
+  // component, so a field program's dimensions bound a *box* and the sphere that
+  // contains it is the one through its corner. Reading them as an ellipsoid's
+  // half-axes — which is right for the aggregate below — would start the march
+  // inside the shape on a diagonal ray and clip the silhouette.
+  if (kind == SVO_KIND_FIELD_PROGRAM) { return length(dimensions_m); }
   // An ellipsoidal lobe is contained in a sphere of its longest half-axis, not
   // of its corner: the corner belongs to the box around it, and using it here
   // would start every march that much earlier for nothing.
@@ -2733,6 +3114,7 @@ fn svoIntersectPrimitiveExact(
   let localDirection = svoQuaternionRotate(inverse, worldDirection);
   let dimensions_m = svoPrimitiveDimensions_m(record);
   let kind = svoPrimitiveKind(record);
+  let fieldProgramReference = svoPrimitiveFieldProgramReference(record);
   let marched = svoMarchedKind(kind);
   let finiteKind = (kind >= SVO_KIND_SPHERE && kind <= SVO_KIND_ELLIPSOID) || marched;
   var dimensionsValid = false;
@@ -2753,6 +3135,12 @@ fn svoIntersectPrimitiveExact(
   // through to a miss would draw a hole where the aggregate is and say nothing.
   else if (kind == SVO_KIND_SMOOTH_UNION_CLUSTER) {
     dimensionsValid = all(dimensions_m > vec3f(0.0)) && svoClusterPackingValid(packing);
+  }
+  // Same refusal as the aggregate's, one kind over: a tape whose arena block did
+  // not resolve is invalid, not empty. Falling through to a miss would draw a
+  // hole where the shape is and say nothing anywhere.
+  else if (kind == SVO_KIND_FIELD_PROGRAM) {
+    dimensionsValid = all(dimensions_m > vec3f(0.0)) && svoFieldProgramResolved(fieldProgramReference);
   }
   if (!finiteKind || !dimensionsValid) { return svoPrimitiveNoRayHit(SVO_PRIMITIVE_RAY_INVALID); }
 
@@ -2837,9 +3225,9 @@ fn svoIntersectPrimitiveExact(
         var marchT_m = start;
         for (var iteration = 0u; iteration <= ${SVO_PRIMITIVE_MARCH_ITERATIONS}u; iteration += 1u) {
           let point_m = localOrigin + localDirection * marchT_m;
-          let distance_m = abs(svoMarchedDistance_m(kind, point_m, dimensions_m, packing));
+          let distance_m = abs(svoMarchedDistance_m(kind, point_m, dimensions_m, packing, fieldProgramReference));
           if (distance_m <= svoMarchSurfaceEpsilon_m(marchT_m)) {
-            let local = svoMarchedLocalNormal(kind, point_m, dimensions_m, packing);
+            let local = svoMarchedLocalNormal(kind, point_m, dimensions_m, packing, fieldProgramReference);
             if (length(local.xyz) > 1e-8) {
               bestT_m = marchT_m;
               bestNormal = local.xyz;
@@ -3054,7 +3442,9 @@ fn svoPrimitiveDistance_m(record: SvoPrimitiveRecord, worldPoint_m: vec3f, terra
   if (kind == SVO_KIND_CAPSULE) { return svoCapsuleDistance_m(point, dimensions_m); }
   if (kind == SVO_KIND_CYLINDER) { return svoCylinderDistance_m(point, dimensions_m); }
   if (kind == SVO_KIND_ELLIPSOID) { return svoEllipsoidDistance_m(point, dimensions_m); }
-  if (svoMarchedKind(kind)) { return svoMarchedDistance_m(kind, point, dimensions_m, packing); }
+  if (svoMarchedKind(kind)) {
+    return svoMarchedDistance_m(kind, point, dimensions_m, packing, svoPrimitiveFieldProgramReference(record));
+  }
   return 3.402823e38;
 }
 
@@ -3088,7 +3478,9 @@ fn svoPrimitiveLocalNormal(record: SvoPrimitiveRecord, point: vec3f, packing: Sv
     return vec4f(normalize(vec3f(point.x, point.y - closestY, point.z)), f32(SVO_FEATURE_SMOOTH));
   }
   if (kind == SVO_KIND_CYLINDER) { return svoCylinderFeatureNormal(point, dimensions_m); }
-  if (svoMarchedKind(kind)) { return svoMarchedLocalNormal(kind, point, dimensions_m, packing); }
+  if (svoMarchedKind(kind)) {
+    return svoMarchedLocalNormal(kind, point, dimensions_m, packing, svoPrimitiveFieldProgramReference(record));
+  }
   if (kind == SVO_KIND_ELLIPSOID) {
     if (any(dimensions_m <= vec3f(0.0))) { return vec4f(0.0); }
     let closest = svoEllipsoidClosestPoint_m(dimensions_m, point);

@@ -233,6 +233,14 @@ export function SceneLibrary() {
           />
           <kbd aria-hidden="true">/</kbd>
         </label>
+        {/*
+          The shape lab is a sibling tool rather than a scene: it draws one
+          authored shape on the CPU at a chosen leaf, with that shape's own
+          parameters on sliders. It belongs in the bar because the alternative to
+          finding it is opening a scene and waiting for a GPU frame to judge a
+          form the lab draws in a second.
+        */}
+        <a className="pill" href="/shape-lab">Shape lab</a>
         <ThemeSwitch />
       </header>
 

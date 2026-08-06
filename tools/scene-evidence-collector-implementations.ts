@@ -102,7 +102,7 @@ export const sceneEvidenceCollectorRegistry: SceneEvidenceCollectorRegistry = {
         preconditionerInnerCorrection: pressurePreconditionerInnerCorrectionField,
         preconditionerPostCorrected: pressurePreconditionerPostCorrectedField,
         topology: topologyField,
-        wallLiquidThreshold: 1e-4,
+        wallLiquidThreshold: 0.5,
       });
     },
   },

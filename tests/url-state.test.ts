@@ -44,14 +44,53 @@ test("an edited sculpted terrain stays out of the URL while analytic terrain rem
     "small analytic terrain edits should still survive a shared-link round trip");
 });
 
-test("query state accepts the finest surface voxel inspection mode", () => {
+/**
+ * `voxels` named the expanded-record inspection overlay (raw-voxels,
+ * voxel-levels, surface-voxels, brick-grid, occupied-bricks). That renderer is
+ * gone, so the key must be neither parsed nor managed — an unmanaged key is
+ * left untouched on the URL, which is what a stale shared link needs, and safe
+ * bring-up rejects it as unapproved rather than silently honouring it.
+ */
+test("the retired voxel inspection query key is no longer parsed or managed", () => {
   const parsed = parseQueryState("?voxels=surface-voxels");
-  assert.equal(parsed.ui.voxelRenderMode, "surface-voxels");
+  assert.equal("voxelRenderMode" in parsed.ui, false);
+  const scene = getScenePreset("water-box-dam-break").create();
+  const query = new URLSearchParams(serializeQueryState(
+    "?voxels=surface-voxels", { presetId: "water-box-dam-break", scene },
+    { methodId: "uniform", quality: "balanced", overrides: {} }, parsed.ui));
+  assert.equal(query.get("voxels"), "surface-voxels",
+    "an unmanaged key survives serialization untouched rather than being rewritten");
 });
 
-test("query state accepts occupied brick inspection", () => {
-  const parsed = parseQueryState("?voxels=occupied-bricks");
-  assert.equal(parsed.ui.voxelRenderMode, "occupied-bricks");
+test("query state round-trips the primary's surface reconstruction", () => {
+  // The exact arm is the default, so it must never appear in a link — a query
+  // key that shows up for the shipping configuration is noise on every share,
+  // and here it would also be rejected by safe bring-up's approved-key gate.
+  const scene = getScenePreset("water-box-dam-break").create();
+  const serialize = (ui: ReturnType<typeof parseQueryState>["ui"]) => new URLSearchParams(serializeQueryState(
+    "", { presetId: "water-box-dam-break", scene },
+    { methodId: "uniform", quality: "balanced", overrides: {} }, ui));
+
+  const shipping = parseQueryState("");
+  assert.equal(shipping.ui.svoRenderTuning.surfaceReconstruction, "analytic");
+  assert.equal(serialize(shipping.ui).get("svoSurface"), null,
+    "the default surface must not be serialized");
+
+  // Both non-default arms have to be nameable. `voxel-face` is the reference the
+  // acceptance gates rest on; `trilinear` is the arm the analytic one was
+  // measured against, and "look at this banding" is only a link if it survives.
+  for (const arm of ["voxel-face", "trilinear"] as const) {
+    const parsed = parseQueryState(`?svoSurface=${arm}`);
+    assert.equal(parsed.ui.svoRenderTuning.surfaceReconstruction, arm,
+      `a link must be able to name the ${arm} arm`);
+    assert.equal(serialize(parsed.ui).get("svoSurface"), arm,
+      `the ${arm} arm must survive a round trip`);
+  }
+
+  // Unknown falls back to the shipping image rather than silently pinning the
+  // frame to a comparison arm, matching normalizeSvoRenderTuning.
+  assert.equal(parseQueryState("?svoSurface=nonsense").ui.svoRenderTuning.surfaceReconstruction,
+    "analytic");
 });
 
 test("query state round-trips the unified scene voxel domain atomically", () => {

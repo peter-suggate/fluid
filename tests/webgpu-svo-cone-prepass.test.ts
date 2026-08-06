@@ -14,7 +14,7 @@ import {
   svoConePrepassSize,
   svoDrySceneShader,
 } from "../lib/webgpu-svo-dry-scene";
-import type { SparseVoxelRenderSource } from "../lib/webgpu-voxel-debug";
+import type { SparseVoxelSceneRenderSource } from "../lib/webgpu-voxel-debug";
 import { svoDrySceneFixture } from "./svo-dry-scene-test-fixture";
 
 const rendererSource = readFileSync(new URL("../lib/webgpu-svo-dry-scene.ts", import.meta.url), "utf8");
@@ -313,7 +313,7 @@ test("prepass target contract and sizing", () => {
   assert.deepEqual(svoConePrepassSize(1280, 720, 1), [1280, 720]);
 });
 
-function mockSource(): SparseVoxelRenderSource {
+function mockSource(): SparseVoxelSceneRenderSource {
   const resource = { buffer: {} as GPUBuffer };
   return {
     materialCount: 8,
@@ -337,7 +337,7 @@ function mockSource(): SparseVoxelRenderSource {
       },
       generation: { published: 1, completed: 1 },
     },
-  } as unknown as SparseVoxelRenderSource;
+  } as unknown as SparseVoxelSceneRenderSource;
 }
 
 test("the cone-lighting scale is an optional lighting option that defaults to the inline path", () => {

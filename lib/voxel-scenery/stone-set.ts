@@ -1,6 +1,7 @@
 import type { Quaternion, RigidBodyDescription, Vec3 } from "../model";
 import { quaternionMultiply } from "../rigid-body";
 import type { SceneryMaterial, SceneryNode, SceneryPlacement } from "../scenery-graph";
+import { SVO_CLUSTER_LATTICE_MAXIMUM_OCTAVES } from "../svo-primitive-abi";
 import { alongAxis, V } from "./builder";
 import {
   pondVesselHeightAt,
@@ -21,16 +22,57 @@ import {
  * come out of one generator. They share a file for the same reason they share a
  * look.
  *
- * **Nothing that is meant to read as rock is a bare ellipsoid.** That was the
- * one thing this file got wrong for longest and the hardest to see from inside
- * it: every number below spends itself on variety — size, aspect, bedding
- * normal, grade — and all of it arrived at the eye as a tray of eggs, because
- * an ellipsoid has no silhouette irregularity at all and no amount of authored
- * spread can give it one. Every mass is now built by {@link stoneMass}, which is
- * also the single seam where a better field gets swapped in. The exception is
- * deliberate and measured: below the size at which a lumpy outline can be
- * resolved, a marched field is cost with nothing on the other end of it, so the
- * fine shingle stays an ellipsoid and earns its variety from aspect instead.
+ * **Three bands, authored separately, measured against the cell.** The set's
+ * surface is not one "weathering" knob; it is three scales that the pipeline
+ * treats completely differently, and conflating them is what produced a bank of
+ * melted lumps. Measured off `artifacts/plate-crops/boulders.png` against
+ * `HERO_GARDEN_CELL_M` = 25 mm:
+ *
+ *  1. **Silhouette, 100 mm and up.** The oblate cap, the tapered stem, the
+ *     plinth slab under them. Primitives, one record each. Under voxel-only
+ *     shading this is nearly the whole of what the eye gets: the stone reads by
+ *     its outline and by the value step between its parts.
+ *  2. **Form, 14-80 mm at 4-8 mm of amplitude.** A slow undulation that stops
+ *     the cap's horizon being a conic. {@link stoneMass} carries it, and it is
+ *     authored as an absolute length rather than as a share of the stone,
+ *     because the thing it has to clear is the cell.
+ *
+ *     **It is a ladder rather than one period now, and the ladder is the leaf's.**
+ *     A lattice field stacks octaves — each a halving of the period, the lobe and
+ *     the blend together — inside the *same one record*, so
+ *     {@link stoneFormOctaves} spends as many of them as the leaf can draw: one
+ *     55 mm undulation at a 25 mm leaf, 55 and 27.5 at 6.25 mm, 55 / 27.5 / 13.75
+ *     at 3.125 mm and finer. Nothing about the silhouette, the record count or
+ *     the per-brick census moves; what moves is how fine the surface under it is.
+ *     {@link stoneFormMinimumSpan_m} follows it down, so smaller stones join the
+ *     band as the lattice refines rather than the beds staying bare ellipsoids
+ *     forever against a floor baked at 25 mm.
+ *  3. **Grain, ~3 mm pitting.** Dense shallow concavities, *subtractive* — the
+ *     plate is pocked, not lumpy, and an additive octave reads as plaster. At
+ *     25 mm cells this was an eighth of a cell and could appear nowhere; at the
+ *     0.78 mm leaf the tree now reaches it is 3.8 leaves and is the right band to
+ *     draw. It is declared in {@link STONE_GRAIN_TAPE} and **still emitted by
+ *     nothing**, because `SceneryNode` has no `field-program` member — the one
+ *     remaining blocker of the three that note used to list. See it.
+ *
+ * **The old lattice drew the envelope exactly, and that is measured.** Every
+ * mass here used to be a `cluster` whose lattice was authored as *lobes across
+ * the stone* with a lobe radius of 0.98 of the period. Sampling the published
+ * packing round its own equator (`sampleSvoPrimitive`, 1 440 rays, bisected to
+ * 0.1 µm) says the drawn horizon departs from the ellipsoid envelope by **0.0
+ * mm at every seed and every lobe count**: at 0.98 the lattice covers space
+ * outright — the covering threshold is √3/2 = 0.866 — so the hard `max` against
+ * the envelope is the whole shape and the field contributes nothing. Two
+ * hundred and eight marched records were buying a sphere trace against an
+ * ellipsoid that a closed-form root already gives. That is the actual root of
+ * "the boulders read as melted lumps": they were ellipsoids, and so was every
+ * pebble.
+ *
+ * So the lobe radius is now **under** the covering threshold and the period is
+ * a length rather than a count, and the band a stone gets is decided by whether
+ * the cell can show it. Below {@link stoneFormMinimumSpan_m} a stone is
+ * published as the ellipsoid it draws anyway, which is honest and costs a
+ * closed-form root instead of forty-eight march steps.
  *
  * **These are species, not props.** Each takes a *form* — shape only, no
  * position, no seed, no id — and a *spec* that adds where this one goes, which
@@ -129,31 +171,28 @@ const quaternionAboutY = (angle_rad: number): Quaternion =>
  */
 
 /**
- * **The seam.** Every solid mass in this quarry — a cap, a shoulder, a cobble —
- * is built here and nowhere else, so the whole set changes shape together.
+ * **The seam.** Every solid mass in this quarry — a cap, a plinth, a cobble —
+ * is built here and nowhere else, so the whole set changes shape together, and
+ * so that band 2 is one measured set of numbers rather than a knob per species.
  *
- * *What it is today.* A jittered sphere lattice clipped to the ellipsoid it
- * would otherwise have been. The parameter that matters is `lobesAcross`: how
- * many spheres of the lattice span the stone. Around seven, which is what the
- * caps used to be authored at, the packing granulates a surface and leaves the
- * ellipse underneath intact — and an ellipse against the sky is the one
- * silhouette a weathered stone never has. Around three or four, each sphere is
- * a third of the stone, the union bulges past the envelope in some directions
- * and falls short of it in others, and what is left is lumpy rather than
- * merely textured. That is the whole reason this file no longer publishes a
- * bare ellipsoid for anything that is meant to read as rock.
+ * It carries **the form band and nothing else**. The silhouette above it is the
+ * caller's primitives; the grain below it is {@link STONE_GRAIN_TAPE} and has
+ * no emitter. What is here is a jittered sphere lattice whose period is a
+ * *length in metres* — 55 mm, a little over two cells — clipped to the
+ * ellipsoid the stone would otherwise have been.
  *
- * *What it will be.* An explicit set of oriented anisotropic lobes placed from
- * the seed — `field: "seeded-lobes"` on `SceneryClusterNode` — which is a
- * strictly better fit for a stone than a lattice, because a lattice is
- * isotropic and periodic and a stone is neither. That field is not wired
- * through to the shader yet. When it is, this function is the only edit: every
- * caller hands it an envelope, a coarseness and a seed, which is exactly the
- * vocabulary the seeded field takes.
+ * The period being absolute is the whole correction. It used to be authored as
+ * `lobesAcross`, a count, on the reasoning that weathering is a proportion of a
+ * stone rather than a fixed size. That is true of a real stone and false of a
+ * *rendered* one: what decides whether an undulation appears is its size
+ * against the cell, so a count made the boulders' features three cells wide and
+ * the shingle's a twentieth of one, and only the first could ever have shown.
  *
- * The three ratios below are the field's safety contract, discharged once here
- * rather than trusted per call site — see {@link SVO_SMOOTH_UNION_CLUSTER_NEIGHBOURHOOD}
- * in `lib/svo-primitive-abi.ts`, which throws on a violation.
+ * Below {@link STONE_FORM_MINIMUM_SPAN_M} the stone cannot carry a period at
+ * all and is published as the ellipsoid it draws anyway. That is not a
+ * concession: at 25 mm cells a 40 mm pebble is under two cells across, and a
+ * marched field on it is forty-eight distance evaluations spent on a feature
+ * that cannot survive the resample.
  */
 interface StoneMassSpec {
   readonly id: string;
@@ -163,84 +202,364 @@ interface StoneMassSpec {
   readonly place: SceneryPlacement;
   /** Half-axes of the envelope. The drawn solid is inside it by construction. */
   readonly radius: Vec3;
-  /**
-   * Lattice spheres spanning the stone's mean horizontal reach.
-   *
-   * Non-positive publishes the bare ellipsoid instead, which is what the fine
-   * shingle takes: below a couple of millimetres on screen a marched field buys
-   * a silhouette nobody can resolve.
-   */
-  readonly lobesAcross: number;
   readonly seed: number;
   readonly material: SceneryMaterial;
+  /**
+   * The finest voxel this stone will be drawn at, in metres.
+   *
+   * Placement, not form — see `SceneryGeneratorRequest.detailCellSize_m`. It
+   * decides two things and nothing else: how many octaves of the band the stone
+   * carries, and how small a stone gets one at all. Absent is
+   * {@link STONE_DEFAULT_LEAF_SIZE_M}, which reproduces the 25 mm set exactly.
+   */
+  readonly leafSize_m?: number;
 }
 
 /**
- * Sphere radius as a fraction of the lattice period.
+ * The leaf a stone is drawn at when nobody says, in metres.
  *
- * Above `sqrt(3)/2 = 0.866` every cell corner is inside a sphere, so the mass
- * is closed rather than a bag of separate beads. Just under one keeps the
- * overlap small enough that the union still shows where its spheres are.
+ * `HERO_GARDEN_CELL_M`, which is the lattice every number in this file's band
+ * table was measured against. A default rather than a constant of the species:
+ * a caller that knows its own leaf passes it and the whole band ladder moves.
  */
-const STONE_MASS_FLORET_SHARE = 0.98;
+export const STONE_DEFAULT_LEAF_SIZE_M = 0.025;
+
+/**
+ * Leaves a feature must span before it renders as that feature.
+ *
+ * The project-wide band law — see `bonsai.ts`'s header for the derivation and
+ * `LEGIBLE_FEATURE_LEAVES` there for the same constant. Shading is the voxel
+ * cell's surface, so under about two leaves a period comes back as aliasing and
+ * at three it starts being geometry.
+ */
+const LEGIBLE_FEATURE_LEAVES = 3;
+
+/**
+ * The form band's period, in metres.
+ *
+ * 55 mm: 2.2 cells at `HERO_GARDEN_CELL_M`, and the middle of the 40-80 mm the
+ * plate's caps show. Under about two cells a period is at the resample's
+ * Nyquist limit and comes back as aliasing rather than as form; much over three
+ * and there is only one undulation on a cap and the horizon is a conic again
+ * with a dent in it.
+ */
+const STONE_FORM_PERIOD_M = 0.055;
+
+/**
+ * Lattice sphere radius as a fraction of the period. **The measured operating
+ * point, not a taste choice, and the number the whole band lives or dies on.**
+ *
+ * `sqrt(3)/2 = 0.866` is where every cell corner falls inside a sphere and the
+ * union covers space outright — above it the hard `max` against the envelope is
+ * the entire shape and the field draws a perfect ellipsoid, which is exactly
+ * what the old 0.98 did and exactly why the caps read as melted. Under it the
+ * corners open into concavities and the drawn horizon finally leaves the
+ * envelope.
+ *
+ * How far under is a genuine trade and it was resolved by sampling **the
+ * published nodes**, not a synthetic envelope: three boulder caps, 720 rays
+ * round each equator bisected against `sampleSvoPrimitive`, residual taken
+ * against the envelope ellipse rather than against the mean radius so the
+ * envelope's own ovality is not mistaken for form.
+ *
+ *   floret | cap 164 mm       | cap 136 mm        | cap 94 mm
+ *   -------|------------------|-------------------|------------------
+ *   0.98   | 0.0 mm           | 0.0 mm            | 0.0 mm
+ *   0.72   | 1.0 mm  (0.6 %)  | 12.6 mm  (3.3 %)  | 0.3 mm  (0.0 %)
+ *   0.70   | 5.4 mm  (1.9 %)  | 22.1 mm  (6.5 %)  | 8.0 mm  (1.8 %)
+ *   0.69   | 7.7 mm  (1.7 %)  | 24.6 mm  (9.0 %)  | 11.7 mm (4.9 %)
+ *   0.68   | 12.5 mm (3.5 %)  | 27.0 mm (11.0 %)  | 15.3 mm (7.0 %)
+ *   0.66   | 27.0 mm (6.4 %)  | 33.2 mm (17.3 %)  | 21.7 mm (15.7 %)
+ *
+ * where the first figure is the horizon's amplitude and the bracket is the
+ * share of the stone's interior left in sealed voids.
+ *
+ * **0.72 is rejected and the reason is the most useful thing in this table.**
+ * On paper it is the safe choice — small inset, almost no voids — and on two of
+ * the three caps it produces *one millimetre*, a twenty-fifth of a cell, which
+ * under cell-face shading is indistinguishable from the ellipsoid it was
+ * supposed to replace. The lattice is anchored on the node's own origin and only
+ * three periods span a cap, so whether an uncovered corner lands near the
+ * equator is close to a coin toss: 12.6 mm on one stone and 0.3 mm on its
+ * neighbour, from the same numbers. A band that works on a third of the set is
+ * not a band.
+ *
+ * 0.69 is where every cap clears a third of a cell — 0.31, 0.98 and 0.47 — which
+ * is the least that can move a voxelized horizon, and it is taken *because* the
+ * lottery exists rather than in spite of it: the number has to be low enough
+ * that the unluckiest phase still shows. What it costs is an inset of 2.6 to
+ * 11.7 mm, so a cap draws up to 9 % narrower than its authored envelope, and up
+ * to 9 % of a stone's interior in voids. Neither is free and both were checked:
+ * the inset is inside the clearance the boulder placements already carry to the
+ * container wall, and the voids are sealed — a 64 x 64 plan-column sweep of all
+ * three caps finds **no hole through any of them** at 0.66 or above, which is
+ * the failure that would actually show.
+ */
+const STONE_FORM_LOBE_SHARE = 0.69;
+/** Smooth-minimum radius, as a fraction of the sphere. Rounds the concavities without filling them. */
+const STONE_FORM_BLEND_SHARE = 0.30;
 /**
  * Sphere displacement from its own cell centre, as a fraction of the period.
  *
- * This is the amplitude of the irregularity: a sphere wandering by `j·p` moves
- * the surface it owns by up to `j·p·sqrt(3)`, which at the coarse periods below
- * is a sixth of the stone. Well under the ABI's 0.3 ceiling, and under the
- * value at which a sphere wanders far enough to open a hole in its own row.
+ * What stops the concavities being a *crystal*. At zero the uncovered corners
+ * sit on a perfect cubic array and read as machining; the ABI's ceiling is 0.3
+ * and the amplitude table above is measured at 0.24, which is where the array
+ * has broken up and no two dents on one stone are the same depth.
  */
-const STONE_MASS_JITTER = 0.16;
-/** Smooth-minimum radius, as a fraction of the sphere. Fuses the lattice without filling it. */
-const STONE_MASS_SMOOTH_SHARE = 0.30;
+const STONE_FORM_JITTER = 0.24;
 
 /**
- * The ABI's condition, evaluated at the ratios above so a violation is a
- * compile-time-visible number rather than a runtime throw:
+ * The smallest plan diameter that got a form band when the leaf was 25 mm.
+ *
+ * Three cells. Two is the Nyquist floor for one period and leaves nothing over
+ * for the crest either side of a trough, so three is the first width at which a
+ * voxelized horizon can hold crest-trough-crest. It is a *plan* measure because
+ * every stone here is flattened and its thickness is never the limit.
+ *
+ * At this floor the hero set's three larger boulder caps and the coarsest bed
+ * cobbles carry the band, and the shingle, the plates' shoulders and the fine
+ * courses do not. That is about a twentieth of the clusters this file used to
+ * publish, for the same record count and the same drawn shape — see the header.
+ *
+ * **It is now the coarse end of a ladder rather than the rule.** Written as a
+ * constant it was a bake of one lattice: 75 mm is `3 × 25 mm`, and at a 6.25 mm
+ * leaf it went on excluding every stone under 75 mm from a band that four leaves
+ * could by then have drawn easily. {@link stoneFormMinimumSpan_m} is the rule;
+ * this is what it returns at {@link STONE_DEFAULT_LEAF_SIZE_M}, kept exported
+ * because it is the number the table above was measured at.
+ */
+export const STONE_FORM_MINIMUM_SPAN_M = 0.075;
+
+/**
+ * How many of the finest octave's periods a stone must span to carry the band.
+ *
+ * Read off the pair the set was authored at rather than invented: 75 mm of
+ * minimum span over a 55 mm period. It is a little over one, which is what
+ * "crest-trough-crest" costs once the trough is allowed to straddle the stone's
+ * own axis, and expressing the floor in *periods* is what lets the floor follow
+ * the octave ladder instead of standing still while the leaf moves.
+ */
+const STONE_FORM_MINIMUM_SPAN_PERIODS = STONE_FORM_MINIMUM_SPAN_M / STONE_FORM_PERIOD_M;
+
+/**
+ * Octaves of the form band this leaf can draw, in
+ * `1..{@link SVO_CLUSTER_LATTICE_MAXIMUM_OCTAVES}`.
+ *
+ * **This is where "detail follows the lattice" actually lives for the whole
+ * quarry, and it costs zero records.** Octave `k` of a lattice field repeats on
+ * `period·2^-k` with lobes and blend scaled with it (see
+ * `SvoClusterLatticeField.octaves`), so a stone that carried one 55 mm
+ * undulation at a 25 mm leaf carries 55 and 27.5 at 6.25 mm and 55, 27.5 and
+ * 13.75 at 3.125 mm — inside **the same one record**, evaluated by the shader.
+ * Nothing about the silhouette, the record count, the owner palette or the
+ * per-brick census moves; what moves is how fine the surface under it is.
+ *
+ * An octave is admitted while its own period still clears
+ * {@link LEGIBLE_FEATURE_LEAVES}, which is the same test every other band in
+ * this tree is judged by. At the leaves the ladder is walked at:
+ *
+ *   leaf      octaves   finest period   floor
+ *   25 mm        1          55.00 mm    75.0 mm
+ *   12.5 mm      1          55.00 mm    75.0 mm
+ *   6.25 mm      2          27.50 mm    37.5 mm
+ *   3.125 mm     3          13.75 mm    18.8 mm
+ *   1.5625 mm    4           6.88 mm     9.4 mm
+ *   0.78125 mm   5           3.44 mm     4.7 mm
+ *
+ * The first row is today's set unchanged, which is the property that makes this
+ * safe to land: a scene that never says what leaf it draws at gets exactly the
+ * geometry it got before.
+ *
+ * **The bottom two rows used to read 13.75 mm as well**, because
+ * `SVO_CLUSTER_LATTICE_MAXIMUM_OCTAVES` was three — a cost bound argued at a
+ * 25 mm leaf, where "detail an eighth of the first octave's" really was below a
+ * pixel. It was re-measured rather than raised on that objection: an octave
+ * costs exactly one more evaluation and provably zero march steps, zero records
+ * and zero per-brick owners, so the ceiling now sits at five, which is what this
+ * ladder asks for at the finest leaf the octree can spend. The numbers are on
+ * the constant.
+ */
+export function stoneFormOctaves(leafSize_m: number = STONE_DEFAULT_LEAF_SIZE_M): number {
+  if (!(leafSize_m > 0)) throw new RangeError("Stone leaf size must be positive");
+  const legible_m = LEGIBLE_FEATURE_LEAVES * leafSize_m;
+  let octaves = 1;
+  while (octaves < SVO_CLUSTER_LATTICE_MAXIMUM_OCTAVES
+    && STONE_FORM_PERIOD_M * 2 ** -octaves >= legible_m) octaves += 1;
+  return octaves;
+}
+
+/** The finest period the band carries at this leaf, in metres. */
+export function stoneFormFinestPeriod_m(leafSize_m: number = STONE_DEFAULT_LEAF_SIZE_M): number {
+  return STONE_FORM_PERIOD_M * 2 ** -(stoneFormOctaves(leafSize_m) - 1);
+}
+
+/**
+ * The smallest plan diameter that gets a form band at this leaf, in metres.
+ *
+ * Two conditions, and the binding one changes as the leaf shrinks. The stone has
+ * to span {@link STONE_FORM_MINIMUM_SPAN_PERIODS} of the finest octave it would
+ * carry — otherwise the band has nowhere to put a trough — and it has to span
+ * {@link LEGIBLE_FEATURE_LEAVES} leaves, or the voxelization cannot hold one
+ * whatever its period. At 25 mm both give 75 mm; below about 8 mm the period
+ * term takes over and the floor stops falling, which is the octave ceiling
+ * showing through.
+ */
+export function stoneFormMinimumSpan_m(leafSize_m: number = STONE_DEFAULT_LEAF_SIZE_M): number {
+  return Math.max(
+    LEGIBLE_FEATURE_LEAVES * leafSize_m,
+    STONE_FORM_MINIMUM_SPAN_PERIODS * stoneFormFinestPeriod_m(leafSize_m),
+  );
+}
+
+/**
+ * The ABI's neighbourhood condition, evaluated at the ratios above so a
+ * violation is a visible number here rather than a throw at publication:
  *
  *   (2 - jitter)·period >= floretRadius + smoothRadius
- *   (2 - 0.16)·p        >= (0.98 + 0.30·0.98)·p
- *   1.84·p              >= 1.274·p                     ✓ 44 % margin
+ *   (2 - 0.24)·p        >= (0.69 + 0.30·0.69)·p
+ *   1.76·p              >= 0.897·p                     ✓ 96 % margin
  *
- * It holds for every period because both sides are proportional to it, which is
- * why the caller may choose `lobesAcross` freely.
+ * It holds for every period because both sides are proportional to it. See
+ * {@link SVO_SMOOTH_UNION_CLUSTER_NEIGHBOURHOOD} in `lib/svo-primitive-abi.ts`.
  */
-const STONE_MASS_NEIGHBOURHOOD_MARGIN =
-  (2 - STONE_MASS_JITTER) / (STONE_MASS_FLORET_SHARE * (1 + STONE_MASS_SMOOTH_SHARE));
-if (!(STONE_MASS_NEIGHBOURHOOD_MARGIN >= 1)) {
+const STONE_FORM_NEIGHBOURHOOD_MARGIN =
+  (2 - STONE_FORM_JITTER) / (STONE_FORM_LOBE_SHARE * (1 + STONE_FORM_BLEND_SHARE));
+if (!(STONE_FORM_NEIGHBOURHOOD_MARGIN >= 1)) {
   throw new RangeError(
-    `Stone mass ratios violate the cluster neighbourhood condition by ${(1 / STONE_MASS_NEIGHBOURHOOD_MARGIN).toFixed(3)}x`,
+    `Stone form ratios violate the cluster neighbourhood condition by ${(1 / STONE_FORM_NEIGHBOURHOOD_MARGIN).toFixed(3)}x`,
   );
 }
 
 /** A cluster's seed is a u32, and a caller's may be anything an integer hash produced. */
 const seed32 = (seed: number): number => (seed >>> 0) || 1;
 
+/** Whether a stone is wide enough that a form period can appear on its horizon. */
+export const stoneCarriesFormBand = (radius: Vec3, leafSize_m: number = STONE_DEFAULT_LEAF_SIZE_M): boolean =>
+  radius.x + radius.z >= stoneFormMinimumSpan_m(leafSize_m);
+
 function stoneMass(spec: StoneMassSpec): SceneryNode {
   const { id, group, tags, place, radius, material } = spec;
-  if (!(spec.lobesAcross > 0)) {
+  const leafSize_m = spec.leafSize_m ?? STONE_DEFAULT_LEAF_SIZE_M;
+  if (!stoneCarriesFormBand(radius, leafSize_m)) {
     return { kind: "ellipsoid", id, group, tags, place, radius, material };
   }
-  // The mean *horizontal* reach, not the largest semi-axis. A bedded stone is
-  // flattened, and a period taken off its height would put thirty spheres
-  // across its plan; one taken off its length would put a third of a sphere
-  // through its thickness and clip the lot back to the bare ellipsoid.
-  const reach = radius.x + radius.z;
-  const latticePeriod = reach / spec.lobesAcross;
-  const floretRadius = STONE_MASS_FLORET_SHARE * latticePeriod;
+  const floretRadius = STONE_FORM_LOBE_SHARE * STONE_FORM_PERIOD_M;
   return {
     kind: "cluster", id, group, tags,
     place,
     lobe: radius,
     floretRadius,
-    latticePeriod,
-    jitter: STONE_MASS_JITTER,
-    smoothRadius: STONE_MASS_SMOOTH_SHARE * floretRadius,
+    latticePeriod: STONE_FORM_PERIOD_M,
+    jitter: STONE_FORM_JITTER,
+    smoothRadius: STONE_FORM_BLEND_SHARE * floretRadius,
+    // The one number in this node that the scene's lattice decides. Every length
+    // beside it is the plate's; this is how many halvings of them the leaf can
+    // show. See `stoneFormOctaves`.
+    octaves: stoneFormOctaves(leafSize_m),
     seed: seed32(spec.seed),
     material,
   };
 }
+
+// ---------------------------------------------------------------------------
+// Band 3: the grain, declared and not yet emitted
+// ---------------------------------------------------------------------------
+
+/**
+ * One op of the grain tape, in the shape `lib/svo-field-program.ts` takes.
+ *
+ * Declared locally rather than imported as `SvoFieldOpDescriptor` because when
+ * this was written two of the ops below did not exist. **They both do now**, and
+ * the mapping is exact: `worley-erosion` is `worley-subtract` (op table code
+ * 10, "the grain band — dense subtractive pitting, measured off the plate at
+ * about three millimetres"), and `footprint-fade` is not an op at all any more
+ * because the fade is *structural* — every op that introduces a spatial period
+ * declares it as `coarsestPeriod_m` and `svoFieldBandLimitFade` attenuates its
+ * amplitude **and its Lipschitz contribution** to zero as that period
+ * approaches twice the sampling length. So parameter `d` below has no home and
+ * needs no home.
+ *
+ * One blocker of the three is left, and it is the same one every module in this
+ * directory records: `SceneryNode` has no `field-program` member. See the note
+ * on {@link STONE_GRAIN_TAPE}.
+ */
+interface StoneGrainOp {
+  readonly op: string;
+  readonly out: number;
+  readonly point?: number;
+  readonly fieldA?: number;
+  readonly fieldB?: number;
+  readonly seed?: number;
+  readonly parameters?: { readonly a?: number; readonly b?: number; readonly c?: number; readonly d?: number };
+}
+
+/**
+ * The grain band, as the field-program tape it wants to be. **Emitted by
+ * nothing.**
+ *
+ * Three things stood between this and a rendered pit. **Two of them are gone**,
+ * and re-reading them is now the shortest path to the third:
+ *
+ *  1. `SceneryNode` has no `field-program` member, so the scenery graph cannot
+ *     carry a tape at all — `lib/svo-primitive-kinds.ts` has kind 12 and
+ *     `lib/scenery-graph.ts` has no node for it. **Still true, and now the only
+ *     thing that is.** It is one node kind, one `scenery-expand` arm and one
+ *     `ProxyBuilder` method away, against machinery that is otherwise complete
+ *     end to end: `SvoFieldProgramPrimitive`, the arena packer, the CPU
+ *     evaluator, the generated WGSL and `webgpu-sparse-scene-proxies`' whole
+ *     `field-program` path all exist and are exercised by tests.
+ *  2. ~~`worley-erosion` and `footprint-fade` are not in
+ *     `SVO_FIELD_OP_TABLE`.~~ **Landed.** The table now runs to thirteen ops
+ *     including `worley-subtract` (code 10), which is this op under its final
+ *     name, and the fade is structural rather than an op — see the note on
+ *     {@link StoneGrainOp}.
+ *  3. ~~It could not show if both existed: the pits are 3 mm against a 25 mm
+ *     cell.~~ **The cell moved.** At the hero garden's authored 6.25 mm leaf a
+ *     3 mm pit is half a leaf and would still alias; at the 0.78 mm leaf the
+ *     tree now reaches it is **3.8 leaves and squarely legible**, which is the
+ *     first rung at which this band is the right thing to draw rather than a
+ *     note about the future.
+ *
+ * It is written down anyway because the *decisions* in it are the expensive
+ * part and they are made here, against the plate, where the plate is open:
+ *
+ *  - **Subtractive, not additive.** `max(solid, -pits)`. The plate's surface is
+ *    pocked — thousands of shallow round concavities, none of them proud of the
+ *    mean surface. An additive octave set puts bumps on instead and reads as
+ *    thrown plaster, which is a different material.
+ *  - **Cellular, not value noise.** A pit has a rim and a floor and a distinct
+ *    neighbour; fBm has neither, and at this amplitude the difference between
+ *    the two is the whole of what "porcelain" means.
+ *  - **Footprint-faded.** The op's own amplitude goes to zero as the sample's
+ *    footprint approaches the pit period, so the band costs nothing and shows
+ *    nothing until the leaf shrinks past it. That is the intended outcome at
+ *    25 mm, not a failure.
+ *  - **One tape for the whole quarry.** A boulder and a pebble carry the same
+ *    grain at the same absolute size, because they came out of the same
+ *    weather. The tape takes the solid it erodes as an operand; nothing about
+ *    it scales with the stone.
+ */
+export const STONE_GRAIN_PERIOD_M = 0.003;
+export const STONE_GRAIN_DEPTH_M = 0.0008;
+
+export const STONE_GRAIN_TAPE: readonly StoneGrainOp[] = Object.freeze([
+  // Register 0 is the solid this erodes: whatever the silhouette and form bands
+  // above have already produced, handed in rather than rebuilt.
+  {
+    op: "worley-erosion",
+    out: 1,
+    point: 0,
+    seed: 0x5701_e5,
+    // a: cell period, b: pit depth, c: how much of a cell a pit occupies —
+    // under a half leaves porcelain between the pits, which is what the plate
+    // shows; at one the surface is a honeycomb.
+    // d: the footprint at which the amplitude has faded to nothing, as a
+    // multiple of the period. Two, so the band is dark until a leaf is half a
+    // pit across.
+    parameters: { a: STONE_GRAIN_PERIOD_M, b: STONE_GRAIN_DEPTH_M, c: 0.42, d: 2.0 },
+  },
+  { op: "subtract", out: 2, fieldA: 0, fieldB: 1 },
+]);
 
 const stone = (value: number): SceneryMaterial => ({ palette: "stone", value, surface: "stone" });
 
@@ -420,12 +739,48 @@ function beddedOrientation(normal: Vec3, follow: number, yaw_rad: number): Quate
 /**
  * What makes a mushroom-cap boulder one, with no position, seed or key in it.
  *
- * The proportions are read straight off the reference and are the whole of what
- * makes these read as *capped* rather than as lumps: the cap is a little under
- * twice the stem's width, it is flattened to a bit over a third of its own
- * width, and it overhangs far enough that the undercut is a visible dark line
- * all the way round. Get any one of those wrong and the silhouette becomes a
- * mound — which is exactly what `BOULDER_ROUNDED_COBBLE` below is.
+ * **The proportions below are measured off the plate, and they replace numbers
+ * that made the stem geometrically impossible to see.** This is the correction
+ * that matters most in the file, so it is worth writing down what was wrong,
+ * because every individual number looked reasonable.
+ *
+ * The cap was a full ellipsoid seated at `stemHeight + 0.42·capSemiHeight`, and
+ * the stems were authored at 0.10-0.50 cap radii under caps flattened to
+ * 0.46-0.72. Put the two together on the largest boulder — cap radius 82 mm,
+ * flatten 0.58, stem 0.30 — and the cap's *lower pole* lands at
+ *
+ *   stemHeight + (0.42 - 1)·capSemiHeight = 0.30R - 0.58·0.58R = -0.036R
+ *
+ * that is, **below the ground**. The cap's own half-width at the stem's top was
+ * 0.91R against a stem of 0.70R. The stem was not narrow, or short, or badly
+ * tapered: it was *inside the cap*, on all four boulders, and the drawn solid
+ * was a single squashed ellipsoid resting on the bank. There is no overhang to
+ * shadow because there is no overhang, and that is the whole of "the boulders
+ * read as melted lumps".
+ *
+ * Measured on `artifacts/plate-crops/boulders.png`, the largest of the three
+ * stones, at native resolution (cap half-width 114 px is the unit):
+ *
+ *   cap half-width         114 px    1.00 R
+ *   cap apex to equator     74 px    0.65 R
+ *   cap equator to underside 15 px   0.13 R   → total thickness 0.78 R, 2.56 : 1
+ *   stem top half-width     82 px    0.72 R
+ *   stem base half-width     87 px   0.76 R
+ *   stem height             88 px    0.77 R
+ *   whole stone             162 px   1.42 R tall on 2.00 R wide
+ *
+ * Two things fall out. The plate's cap is **not an ellipsoid** — it is a dome
+ * over a tight roll-under, so its equator sits at four fifths of its height
+ * rather than at half — and an ellipsoid cap therefore has to choose between
+ * matching the dome's curvature (`capFlatten` 0.65) and matching the total
+ * thickness (0.39). It matches the *thickness*: 2.5 : 1 is the proportion the
+ * brief names, a thicker cap deepens the under-tuck by 0.75·capFlatten·R and
+ * that is the part the stem has to stay clear of. And the stem is **0.77 cap
+ * radii tall**, not the 0.6 this file previously called "the ceiling a stem
+ * stops reading as stone at". That ceiling was inferred from a render in which
+ * a 1.75-radii stalk carried a 0.30 plate — a mushroom lamp, correctly
+ * rejected — and then applied to a regime three times shorter. The plate is the
+ * instruction and the plate has tall stems.
  *
  * This used to carry a naming prohibition — nothing here could be called a
  * "mushroom", because `svoMaterialFunctionIdForEnvironmentProxy` tested that
@@ -436,47 +791,77 @@ function beddedOrientation(normal: Vec3, follow: number, yaw_rad: number): Quate
 export interface CappedBoulderForm {
   /** Cap semi-axis on its long horizontal direction: the boulder's own scale. */
   readonly capRadius_m: number;
-  /** Cap semi-height as a fraction of `capRadius_m`. The reference reads 0.36-0.39. */
+  /**
+   * Cap semi-height as a fraction of `capRadius_m`: half the cap's thickness.
+   *
+   * The plate's caps are 2.5 : 1 wide to thick, so 0.40 is the family's centre.
+   * It is also the parameter the stem's visibility is most sensitive to: the
+   * cap's under-tuck reaches `0.75·capFlatten·R` below its own equator before
+   * it has narrowed to the stem's width, and everything under that line is
+   * cap rather than stem.
+   */
   readonly capFlatten: number;
   /** Cap semi-axis across, as a fraction of along. Under 1 keeps the plan oval. */
   readonly capDepthShare: number;
-  /** Stem top radius as a fraction of the cap's. Under a half is what makes the overhang. */
+  /**
+   * Where the cap's equator sits above the stem's top, as a fraction of the
+   * cap's own semi-height.
+   *
+   * The number that used to be a hard-coded 0.42 and the reason the stem
+   * vanished. It has to be small and positive: positive so the cap's widest
+   * circle is above the stem's top and the overhang is a real horizontal step
+   * rather than a tangency, small so the cap's lower pole stays well clear of
+   * the plinth. At 0.30 the cap overhangs by `R·(1 - sqrt(1 - 0.09)) = 0.05 R`
+   * measured at the stem's top face, growing to `R - stemTop` at the equator.
+   */
+  readonly capSeatShare: number;
+  /** Stem top radius as a fraction of the cap's. The plate reads 0.72. */
   readonly stemTopShare: number;
-  /** Stem base radius as a fraction of the cap's: the taper, wider at the ground. */
+  /** Stem base radius as a fraction of the cap's: the taper, wider at the plinth. */
   readonly stemBaseShare: number;
-  /** Stem height as a fraction of the cap radius. Near zero gives a seated cobble. */
+  /** Stem height as a fraction of the cap radius. The plate reads 0.77. */
   readonly stemHeightShare: number;
-  /** Footing radius as a fraction of the cap's: the fillet where the stone meets the bank. */
-  readonly footingShare: number;
-  /** Footing semi-height as a fraction of the cap radius. */
-  readonly footingHeightShare: number;
+  /**
+   * Plinth radius as a fraction of the cap's, and its thickness.
+   *
+   * The plate stands every one of its stones on a slab: thin, near-elliptical,
+   * flat on top with a rounded edge, and wide enough that a band of it shows
+   * outside the stem's foot all the way round. That band is what carries the
+   * contact shadow, and the contact shadow is half of why the stones read as
+   * *placed on* something rather than as growing out of the plaster.
+   *
+   * It replaced a half-buried ellipsoid mound of 0.88-0.98 R at 0.20-0.26 R
+   * semi-height, whose top stood 0.13 R proud with a plan half-width of 0.82 R
+   * against a stem base of 0.76 R — six per cent of a radius of visible slab,
+   * on a stone 30 mm across. Nothing about it could have read.
+   *
+   * The thickness is a little over the plate's own. Measured on the small
+   * left-hand stone in `artifacts/plate-crops/boulders.png` the slab is 17 px
+   * against a 70 px half-width, so 0.24 R, and at 0.24 R sunk a third the
+   * largest boulder's plinth would stand 13 mm proud — **half a cell.** Under
+   * voxel-only shading half a cell is nothing at all, so the slab is authored at
+   * 0.30-0.36 R sunk a quarter and stands 21 mm, which is most of a cell and can
+   * therefore produce a step. This is one of the few places in the file where
+   * the render's own limits legitimately outrank the reference, and it is
+   * recorded as such rather than smuggled in as a taste change.
+   */
+  readonly plinthShare: number;
+  readonly plinthThicknessShare: number;
+  /** How much of the plinth's thickness is buried, as a fraction of itself. */
+  readonly plinthSinkShare: number;
   /**
    * A second lobe swelling out of the cap, as a fraction of the cap's radius.
    *
-   * The whole reason it exists: a lone ellipsoid draws a perfect ellipse against
-   * the sky, and a perfect ellipse is the one silhouette a weathered stone never
-   * has. Zero omits it and saves a leaf.
+   * Kept on the interface and authored at zero on all four hero forms. It
+   * existed because a lone ellipsoid draws a perfect ellipse against the sky;
+   * the form band in {@link stoneMass} now breaks that ellipse *on the cap
+   * itself*, at a period the cell can carry, which is both cheaper by a record
+   * and a better description of a water-worn stone than a second mass stuck to
+   * the side of the first. The plate has no boulder with a lump on it.
    */
   readonly shoulderShare: number;
   /** How far the shoulder sits off the cap's axis, as a fraction of the cap radius. */
   readonly shoulderOffsetShare: number;
-  /**
-   * How many lobes of the mass span the cap. See {@link StoneMassSpec}.
-   *
-   * This replaced a `capRumple` depth, and the change is not a rename. A rumple
-   * depth of a quarter of the cap put seven spheres across it, which granulated
-   * the *surface* and left the ellipse under it exactly where it was — so the
-   * stone still drew a perfect ellipse against the sky, which is precisely what
-   * the parameter was added to stop. Three or four says the same thing in the
-   * units that decide it: each lobe is a third of the stone, so the silhouette
-   * itself goes lumpy.
-   *
-   * A count rather than a length because it is a *proportion* of the stone.
-   * Weathering that stayed a fixed size would make a small cobble look like a
-   * scale model of a large one. Zero leaves the cap the smooth ellipsoid it
-   * once was, and nothing in this file asks for that any more.
-   */
-  readonly capLobesAcross: number;
   /**
    * How far off plumb the stone is set, in radians, before the seed's own
    * scatter. Slight is the point: the reference's stones lean just enough that
@@ -484,7 +869,7 @@ export interface CappedBoulderForm {
    * about eight degrees stops looking placed and starts looking dropped.
    */
   readonly lean_rad: number;
-  /** Palette value at the cap. The stem and footing ramp down off it. */
+  /** Palette value at the cap. The stem and plinth ramp down off it. */
   readonly value: number;
 }
 
@@ -506,119 +891,155 @@ export interface CappedBoulderForm {
  * what weather leaves is a bun on a low plinth with an overhanging lip, and the
  * reference's whole group is that.
  *
- * So the ranges are now stem heights of 0.10 to 0.50 cap radii — 0.6 is the
- * ceiling a stem stops reading as stone at, and the authored numbers stay under
- * it by the 12 % the per-stone jitter can add on top — and
- * cap flattenings of 0.46 to 0.72, which is a thick dome rather than a plate.
- * Every one of the four is now wider than it is tall by at least 1.6 : 1. What
- * still separates them is where inside those narrow bands they sit, and that
- * turns out to be plenty: at a sixth of a pond's width the difference between a
- * 0.46 dome on a half-height stem and a 0.72 dome on none is unmistakable.
+ * **And then the correction over-shot, which is the third render.** Reading
+ * "not a lamp" as "not tall" put the stems at 0.10-0.50 cap radii under caps of
+ * 0.46-0.72 — and, as the arithmetic in {@link CappedBoulderForm} shows, that
+ * combination puts the cap's lower pole at or below the ground and swallows the
+ * stem whole. The forms had become so squat that the species stopped existing:
+ * four ellipsoids on a bank. A lamp and a lump are two different failures and
+ * the band between them is where the plate actually sits.
+ *
+ * So the ranges are now stem heights of **0.26 to 0.95** cap radii and cap
+ * flattenings of **0.40 to 0.74**, chosen so that on every one of the four the
+ * stem's own outline survives:
+ *
+ *   form            flatten  stem   cap pole   stem visible   stone h : w
+ *   MUSHROOM_CAP     0.40    0.95     0.67 R       0.76 R        1.47 : 2
+ *   LIPPED_DOME      0.44    0.78     0.47 R       0.54 R        1.35 : 2
+ *   SQUAT_ANVIL      0.52    0.55     0.19 R       0.36 R        1.23 : 2
+ *   ROUNDED_COBBLE   0.74    0.22    -0.30 R       none          1.18 : 2
+ *
+ * "cap pole" is where the cap ellipsoid's lowest point lands above the plinth's
+ * top face and "stem visible" is the height over which the stem, not the cap,
+ * is the outline: the cap's half-width equals the stem's top radius at
+ * `capCentre - capSemiHeight·sqrt(1 - stemTopShare²)`, and everything below
+ * that is stem. The plate's own stone is 1.42 : 2 with 0.77 R of visible stem,
+ * so the first two forms are the plate and the other two are the family spread
+ * either side of it. The cobble is the deliberate exception and keeps its
+ * negative pole: it is the plate's small left-hand stone, a dome with a stub
+ * under it, and its whole job in the family is to be the one that is *not*
+ * capped.
  *
  * `capRadius_m` on a form is only its natural size; the hero set overrides it
  * per stone. What a caller is choosing here is the *shape*.
  */
 
 /**
- * The deepest undercut in the set: a thick dome carried just clear of its own
- * footing, so the shadow line runs unbroken round the stone.
+ * The deepest undercut in the set: a thick cap carried well clear of its stem,
+ * so the shadow line runs unbroken round the stone.
  *
- * This is what the tall parasol became. The lip is what that form was really
- * for — the reference's stones are legible at a glance because a dark ring
- * separates cap from ground — and it turns out a lip needs a stem barely two
- * fifths of a cap radius, not one and three quarters. The old height was
- * spending nine tenths of itself on a stalk nobody wanted to look at.
+ * This is what the tall parasol became, and then what the melted lump became.
+ * The lip is what the form was always for — the plate's stones are legible at a
+ * glance because a dark ring separates cap from stem — and it needs two things
+ * at once, which is why it was so easy to lose: a stem narrow enough that the
+ * cap stands past it (0.54 of the cap, the narrowest in the set) *and* a stem
+ * tall enough that the cap's own under-tuck does not reach the ground. Getting
+ * the first without the second is what produced a stone with a 1.83x overhang
+ * and no visible stem at all.
  */
 export const BOULDER_LIPPED_DOME: CappedBoulderForm = Object.freeze({
   capRadius_m: 0.085,
-  capFlatten: 0.52,
+  capFlatten: 0.44,
   capDepthShare: 0.88,
-  stemTopShare: 0.60,
-  stemBaseShare: 0.78,
-  stemHeightShare: 0.44,
-  footingShare: 0.88,
-  footingHeightShare: 0.20,
-  shoulderShare: 0.66,
-  shoulderOffsetShare: 0.42,
-  capLobesAcross: 4.2,
+  capSeatShare: 0.30,
+  stemTopShare: 0.54,
+  stemBaseShare: 0.68,
+  stemHeightShare: 0.78,
+  plinthShare: 1.04,
+  plinthThicknessShare: 0.30,
+  plinthSinkShare: 0.26,
+  shoulderShare: 0,
+  shoulderOffsetShare: 0,
   lean_rad: 0.09,
   value: 0.90,
 });
 
 /**
- * The classic: a dome on a visible plinth, and the tallest stem the set allows.
+ * The classic, and the closest of the four to the plate's own largest stone: a
+ * 2.5 : 1 cap on the tallest stem in the set.
  *
- * Half a cap radius is the ceiling rather than a choice — the seed adds up to
- * 12 % on top and the rule is 0.6 — and it is spent here rather than anywhere
- * else because this is the individual whose whole subject is that you can see it
- * stands on something.
+ * 0.95 cap radii of stem is not a ceiling being spent, it is the measurement —
+ * the plate reads 0.77 and the seed's own scatter takes this to 0.86-1.06, so
+ * the family straddles it. This is the individual whose whole subject is that
+ * you can see what it stands on, and it is the one to look at first in a render
+ * to know whether the correction landed.
  */
 export const BOULDER_MUSHROOM_CAP: CappedBoulderForm = Object.freeze({
   capRadius_m: 0.095,
-  capFlatten: 0.46,
+  capFlatten: 0.40,
   capDepthShare: 0.90,
+  capSeatShare: 0.30,
   stemTopShare: 0.62,
-  stemBaseShare: 0.80,
-  stemHeightShare: 0.50,
-  footingShare: 0.90,
-  footingHeightShare: 0.22,
-  shoulderShare: 0.74,
-  shoulderOffsetShare: 0.36,
-  capLobesAcross: 3.6,
+  stemBaseShare: 0.76,
+  stemHeightShare: 0.95,
+  plinthShare: 1.08,
+  plinthThicknessShare: 0.34,
+  plinthSinkShare: 0.26,
+  shoulderShare: 0,
+  shoulderOffsetShare: 0,
   lean_rad: 0.07,
   value: 0.89,
 });
 
 /**
- * Squat and broad: the mass in the reference's group that reads as *heavy*.
+ * Squat and broad: the mass in the plate's group that reads as *heavy*.
  *
- * Its cap is well over half as thick as it is wide and sits on a stem seven
- * tenths of the cap's own width, so there is a lip rather than a brim and the
+ * Its cap is half again as thick as the classic's and sits on a stem three
+ * quarters of the cap's own width, so there is a lip rather than a brim and the
  * whole thing is one boulder rather than a plate on a post. The oval plan is
- * doing work here — a squat stone drawn on a circle is a drum — and the
- * shoulder is the largest in the set, because at three lobes across the mass
- * this is the individual whose silhouette is most obviously a stone.
+ * doing work here — a squat stone drawn on a circle is a drum — and it carries
+ * the widest plinth in the set, because a heavy stone needs to be seen to be
+ * standing on something that could take it.
  */
 export const BOULDER_SQUAT_ANVIL: CappedBoulderForm = Object.freeze({
   capRadius_m: 0.080,
-  capFlatten: 0.58,
+  capFlatten: 0.52,
   capDepthShare: 0.76,
-  stemTopShare: 0.70,
-  stemBaseShare: 0.86,
-  stemHeightShare: 0.30,
-  footingShare: 0.98,
-  footingHeightShare: 0.26,
-  shoulderShare: 0.86,
-  shoulderOffsetShare: 0.44,
-  capLobesAcross: 3.0,
+  capSeatShare: 0.30,
+  stemTopShare: 0.74,
+  stemBaseShare: 0.88,
+  // 0.55 read correctly on paper — the widest cap in the set needs the shortest
+  // stem — and came out at 29 mm of visible stem, which is 1.1 cells. This is
+  // the group's anchor and the largest stone in the frame; if any boulder's
+  // articulation has to survive the resample it is this one, so the stem buys
+  // back to 1.7 cells at the cost of some of the family's spread.
+  stemHeightShare: 0.72,
+  plinthShare: 1.12,
+  plinthThicknessShare: 0.36,
+  plinthSinkShare: 0.24,
+  shoulderShare: 0,
+  shoulderOffsetShare: 0,
   lean_rad: 0.05,
   value: 0.88,
 });
 
 /**
- * The same species with its stem all but taken away: the rounded stones the
- * reference banks against the tree's plinth on the far side, which are the same
- * quarry seen as boulders rather than as caps. Kept because a bank of these is
- * what most scenes actually want, and because it is the proof that the form
- * carries the silhouette rather than the generator.
+ * The plate's small left-hand stone: a near-round dome on a stub, on its own
+ * slab.
+ *
+ * The one form in the family that is deliberately *not* capped — its cap pole
+ * sits below the plinth's top face, so the dome meets its slab directly and no
+ * stem shows. Measured off the crop, that stone's dome is 0.87 of its own
+ * half-width tall and its stub is a quarter of it, which is what the numbers
+ * here are. It is what stops the group reading as four of one thing, and it is
+ * the proof that the form carries the silhouette rather than the generator.
  */
 export const BOULDER_ROUNDED_COBBLE: CappedBoulderForm = Object.freeze({
   capRadius_m: 0.070,
-  capFlatten: 0.72,
+  capFlatten: 0.74,
   capDepthShare: 0.82,
-  // A lip rather than a brim, and the stem still has to taper: a cobble sits on
-  // a foot wider than the waist under its own crown, like every other stone in
-  // the quarry, or the two solids meet in a re-entrant corner.
-  stemTopShare: 0.86,
-  stemBaseShare: 0.92,
-  stemHeightShare: 0.10,
-  footingShare: 0.98,
-  footingHeightShare: 0.24,
-  shoulderShare: 0.78,
-  shoulderOffsetShare: 0.34,
-  // A cobble is a river stone, and a river stone is worn rounder than a
-  // weathered cap: fewer, larger lobes rather than none.
-  capLobesAcross: 2.8,
+  capSeatShare: 0.30,
+  // A stub still has to taper: a cobble sits on a foot wider than the waist
+  // under its own crown, like every other stone in the quarry, or the two
+  // solids meet in a re-entrant corner the voxelizer has to decide.
+  stemTopShare: 0.80,
+  stemBaseShare: 0.94,
+  stemHeightShare: 0.22,
+  plinthShare: 1.08,
+  plinthThicknessShare: 0.30,
+  plinthSinkShare: 0.30,
+  shoulderShare: 0,
+  shoulderOffsetShare: 0,
   lean_rad: 0.10,
   value: 0.89,
 });
@@ -630,6 +1051,14 @@ export interface CappedBoulderSpec extends CappedBoulderForm {
   readonly at_m: readonly [number, number];
   /** The only entropy. Any integer. */
   readonly seed: number;
+  /**
+   * The finest voxel this stone will be drawn at, in metres.
+   *
+   * Placement rather than form, and the only number here the scene's lattice
+   * decides — see `SceneryGeneratorRequest.detailCellSize_m`. Absent is
+   * {@link STONE_DEFAULT_LEAF_SIZE_M} and reproduces the 25 mm set exactly.
+   */
+  readonly leafSize_m?: number;
 }
 
 const BOULDER_TAGS = Object.freeze(["stone", "boulder"]);
@@ -652,53 +1081,72 @@ export function cappedBoulderNodes(spec: CappedBoulderSpec): SceneryNode[] {
   const stemHeight = capRadius_m * spec.stemHeightShare * (0.90 + 0.22 * hash01(seed + 2));
   const stemTop = capRadius_m * spec.stemTopShare * (0.94 + 0.12 * hash01(seed + 3));
   const stemBase = capRadius_m * spec.stemBaseShare * (0.94 + 0.12 * hash01(seed + 4));
-  const footingRadius = capRadius_m * spec.footingShare * (0.96 + 0.10 * hash01(seed + 7));
-  const footingSemiHeight = capRadius_m * spec.footingHeightShare;
+  const plinthRadius = capRadius_m * spec.plinthShare * (0.96 + 0.10 * hash01(seed + 7));
+  const plinthHalfHeight = 0.5 * capRadius_m * spec.plinthThicknessShare;
 
   const leanAzimuth = 2 * Math.PI * hash01(seed + 5);
   const lean = spec.lean_rad * (0.6 + 0.8 * hash01(seed + 6));
   const tilt = alongAxis(V(Math.sin(lean) * Math.cos(leanAzimuth), Math.cos(lean), Math.sin(lean) * Math.sin(leanAzimuth)));
 
+  // The plinth's top face, which is the datum the stone above it stands on.
+  // Everything else is measured from here rather than from the ground, because
+  // the ground is a heightfield the terrain anchor resolves and the slab is the
+  // thing the stem is actually sitting on.
+  const seat = (2 - 2 * spec.plinthSinkShare) * plinthHalfHeight;
   // The cap sits down over the stem's top rather than balancing on it, so the
   // two fuse into one solid instead of meeting in a seam the voxelizer would
-  // have to decide the ownership of.
-  const capCenterY = stemHeight + 0.42 * capSemiHeight;
+  // have to decide the ownership of. `capSeatShare` is small and positive: see
+  // {@link CappedBoulderForm}, and see the arithmetic there for what the old
+  // hard-coded 0.42 did to the stem.
+  const capCenterY = seat + stemHeight + spec.capSeatShare * capSemiHeight;
   const shoulderAzimuth = 2 * Math.PI * hash01(seed + 13);
 
   const children: SceneryNode[] = [
-    // The footing. Half in the ground, wider than the stem, and the reason the
-    // boulder meets the bank in a shadowed fillet rather than in the clean circle
-    // a cone drawn on a plane gives you.
+    // The plinth: a thin slab with a flat top and a rounded edge, sunk a third
+    // of its own thickness into the bank. One rounded-cylinder SDF rather than
+    // a squashed ellipsoid, because what the plate shows is a *slab* — a flat
+    // face with a band of shadow under a rolled edge — and an ellipsoid's lens
+    // section has no flat face and no edge to roll.
+    //
+    // The edge radius is 0.42 of the half-thickness rather than all of it: at
+    // the full half-thickness the slab is a lens again, and under 0.3 the edge
+    // is a corner the voxelizer aliases into a staircase.
     {
-      kind: "ellipsoid",
-      id: `${key}/footing`,
+      kind: "cylinder",
+      id: `${key}/plinth`,
       group,
-      tags: [...BOULDER_TAGS, "footing"],
-      place: { position: V(0, -0.42 * footingSemiHeight, 0) },
-      radius: V(footingRadius, footingSemiHeight, footingRadius * (0.86 + 0.10 * hash01(seed + 8))),
+      tags: [...BOULDER_TAGS, "footing", "plinth"],
+      place: { position: V(0, (1 - 2 * spec.plinthSinkShare) * plinthHalfHeight, 0) },
+      radius: plinthRadius,
+      halfHeight: plinthHalfHeight,
+      edgeRadius: 0.42 * plinthHalfHeight,
       // The ramps off the cap's value are a *shading* device — a stone is darker
       // where it turns away from the sky — and they are a third of what they
       // were, because the closure under them no longer adds any grain of its
       // own. A 0.14 step used to read as one stone in two lights; on flat
-      // plaster it reads as two stones.
+      // plaster it reads as two stones. Under voxel-only shading they matter
+      // more again, not less: the value step between plinth, stem and cap is
+      // most of what separates the three when the surface itself is cell faces.
       material: value(spec.value - 0.06 + 0.04 * hash01(seed + 9)),
     },
     {
+      // Started a little under the plinth's top face so the two overlap rather
+      // than meet, and run up to the cap. A stem that began exactly on the face
+      // would leave a coincident circle for the tracer to resolve per sample.
       kind: "cone",
       id: `${key}/stem`,
       group,
       tags: [...BOULDER_TAGS, "stem"],
-      place: { position: V(0, 0.5 * stemHeight, 0) },
+      place: { position: V(0, 0.5 * (seat + stemHeight) - 0.15 * plinthHalfHeight, 0) },
       baseRadius: stemBase,
       topRadius: stemTop,
-      halfHeight: 0.5 * stemHeight,
+      halfHeight: 0.5 * (seat + stemHeight) + 0.15 * plinthHalfHeight,
       material: value(spec.value - 0.045 + 0.03 * hash01(seed + 10)),
     },
     stoneMass({
-      id: `${key}/cap`, group, tags: [...BOULDER_TAGS, "cap"],
+      id: `${key}/cap`, group, tags: [...BOULDER_TAGS, "cap"], leafSize_m: spec.leafSize_m,
       place: { position: V(0, capCenterY, 0) },
       radius: V(capRadius_m, capSemiHeight, capRadius_m * spec.capDepthShare * (0.96 + 0.10 * hash01(seed + 11))),
-      lobesAcross: spec.capLobesAcross,
       seed: seed + 12,
       material: value(spec.value - 0.01 + 0.04 * hash01(seed + 12)),
     }),
@@ -707,10 +1155,11 @@ export function cappedBoulderNodes(spec: CappedBoulderSpec): SceneryNode[] {
   if (spec.shoulderShare > 0) {
     // Fused rather than placed — it sits well inside the cap's own surface and
     // only shows where it pushes past it, so what the eye reads is one stone
-    // with a shoulder rather than two stones touching.
+    // with a shoulder rather than two stones touching. Every hero form authors
+    // this at zero now; see {@link CappedBoulderForm}.
     children.push(
       stoneMass({
-        id: `${key}/cap-lobe`, group, tags: [...BOULDER_TAGS, "cap"],
+        id: `${key}/cap-lobe`, group, tags: [...BOULDER_TAGS, "cap"], leafSize_m: spec.leafSize_m,
         place: {
           position: V(
             capRadius_m * spec.shoulderOffsetShare * Math.cos(shoulderAzimuth),
@@ -723,11 +1172,6 @@ export function cappedBoulderNodes(spec: CappedBoulderSpec): SceneryNode[] {
           capSemiHeight * (0.86 + 0.14 * hash01(seed + 16)),
           capRadius_m * spec.shoulderShare * (0.86 + 0.20 * hash01(seed + 17)),
         ),
-        // A shoulder is a smaller mass than the cap it grows out of, so the
-        // same lobe *count* would make it finer-grained than its own stone and
-        // give the join away. Scaled by the two envelopes instead, the two
-        // halves of one boulder are packed at one period.
-        lobesAcross: spec.capLobesAcross * spec.shoulderShare,
         seed: seed + 18,
         material: value(spec.value - 0.01 + 0.04 * hash01(seed + 18)),
       }),
@@ -776,14 +1220,33 @@ export interface PebbleBedForm {
    */
   readonly sizeSpread: readonly [number, number];
   /**
-   * How far a course advances per stone, and how far the run advances per course,
-   * as fractions of a diameter.
+   * How far a course advances per stone, and how far the run advances per
+   * course, as fractions of **the drawn stone's own plan diameter**.
    *
-   * These decide whether the result is a bed or a necklace, and a tenth of a
-   * diameter of overlap gives the necklace. Stones in a real bed rest in the
-   * hollows between the stones under and beside them, so a course has to advance
-   * by appreciably less than a diameter; a quarter is where the bed closes up and
-   * no ground shows through it from a raised camera.
+   * Both halves of that sentence changed, and together they are the fix for
+   * "the pebble courses merge into one continuous sausage".
+   *
+   * *The fraction.* It was 0.80 and 0.88, on the reasoning that stones in a real
+   * bed rest in the hollows between their neighbours and a bed of exactly
+   * tangent spheres reads as beads. The plate says otherwise, plainly:
+   * `artifacts/plate-crops/pebbles.png` shows a single-file course down the
+   * rim's inner edge in which every stone keeps its whole rounded outline and
+   * meets its neighbours in a dark contact line. They are beads. What separates
+   * them from *our* beads is that ours interpenetrated by a fifth of a diameter,
+   * which fuses two spheres into a peanut with a shallow waist, and a shallow
+   * waist under flat light is no line at all. At or just over 1.0 the union has
+   * a cusp between the stones instead, which is the darkest crease a hard union
+   * can make, and that crease is the contact shadow.
+   *
+   * *The measure.* This used to advance by the **lane radius** while drawing
+   * stones of up to 1.58 times it, so the real overlap was never the authored
+   * one: a long stone beside another long stone overlapped by 80 % of a
+   * diameter however the fraction was set. The step is now taken against each
+   * stone's own plan circumradius, `max(semi.x, semi.z)`, so the number here
+   * means what it says at every aspect and every yaw. The circumradius rather
+   * than the support in the step direction because the yaw is free and a stone
+   * that only clears its neighbour at the yaw it happened to draw is a stone
+   * that merges on the next re-seed.
    */
   readonly alongPacking: number;
   readonly acrossPacking: number;
@@ -830,70 +1293,39 @@ export interface PebbleBedForm {
   /** How far a stone leans onto the ground's own normal, and the per-stone jitter on it. */
   readonly bedTiltFollow: number;
   readonly bedNormalJitter: number;
-  /**
-   * Drawn *half-width* at or above which a stone is published as an irregular
-   * mass rather than as an ellipsoid, and how many lobes span one when it is.
-   *
-   * The half-width the stone actually ends up with — `max(semi.x, semi.z)` —
-   * and not the lane radius it was drawn from. Those differ by the aspect band,
-   * which reaches 1.58, so a floor applied to the lane radius let a dozen
-   * stones out at 30 mm wide with a bare elliptical outline while the ones
-   * beside them at 25 mm got a silhouette. The rule is about what is on screen,
-   * so it is measured on what is on screen.
-   *
-   * The line this file was told to draw, and it is a *cost* line rather than a
-   * taste one. Every stone in the reference is an irregular ovoid and none of
-   * them is a sphere, so on looks alone every stone here would be a
-   * {@link stoneMass}. But a cluster is a marched field — up to
-   * `SVO_PRIMITIVE_MARCH_ITERATIONS` field evaluations against an ellipsoid's
-   * one closed-form root — and a bed is the densest population in the scene.
-   *
-   * So the split is by *legibility*. At the hero camera the pond spans about
-   * 1.15 m across the frame, so a stone 24 mm across covers on the order of ten
-   * pixels: enough that a lumpy outline is a lumpy outline, and enough that a
-   * round one reads as a bead. Below that the silhouette is a smudge whatever
-   * shape it is, and what still reads is the stone's *aspect* — which the
-   * spreads above deliver for free. The floor therefore buys the irregularity
-   * exactly where it can be seen and pays nothing for it where it cannot.
-   *
-   * `clusterLobesAcross` is a band, not a number, because the lattice is
-   * anchored on the node's own origin: two stones at one lobe count and one
-   * envelope would carry the same arrangement of lumps, modulated only by the
-   * per-cell jitter. Drawing the count per stone re-phases the lattice against
-   * the envelope and is the cheapest decorrelation available.
-   */
-  readonly clusterFloor_m: number;
-  readonly clusterLobesAcross: readonly [number, number];
   /** Palette value band the bed's stones are drawn from. */
   readonly value: readonly [number, number];
 }
 
 /**
- * The size at which a stone in these beds stops being worth a silhouette.
+ * **Where the "every stone gets a silhouette" rule went, and why.**
  *
- * Not a taste number and not a guess — it is a *pixel* threshold pushed back
- * through the camera the set is composed for, and it is here rather than inline
- * because getting it wrong is invisible until someone renders the scene and says
- * the pebbles look like beans. Which is what happened: the first pass at this
- * reasoned "the pond spans about 1.15 m across the frame, so a 24 mm stone is
- * roughly ten pixels" and set the floor at a 12 mm half-width. The frame was
- * 1 600 pixels wide, not the 800 that estimate assumed, and the beds sit nearer
- * the eye than the pond's own middle. Measured properly:
+ * A bed used to carry `clusterFloor_m` and `clusterLobesAcross` — a size above
+ * which a stone was published as a marched aggregate rather than as an
+ * ellipsoid, and how many lattice lobes spanned it. Both are gone, replaced by
+ * {@link STONE_FORM_MINIMUM_SPAN_M}, and it is worth recording that this is the
+ * *third* setting of the same line rather than a first attempt.
  *
- *   metres per pixel = 2 · depth · aspect · tanHalfFov / width
- *                    = 2 · 1.9 · (1600/920) · 0.24 / 1600  =  0.99 mm
+ * The floor was first reasoned in pixels and set at a 12 mm half-width, which
+ * was four times too coarse: the frame is 1 600 px wide, not the 800 that
+ * estimate assumed, and the beds sit nearer the eye than the pond's own middle.
+ * It came down to 5 mm, and every stone in the beds went marched.
  *
- * at the *far* bank, and half that at the near shore. So the smallest stone
- * these beds lay is already ten pixels across and the ones that came back
- * reading as smooth beans were **forty-four**. The floor was four times too
- * high, and every stone the eye could resolve was on the wrong side of it.
+ * The pixel reasoning is now the wrong reasoning entirely, on two counts. The
+ * measured one is in the header: at a lobe radius of 0.98 of the period the
+ * lattice covers space, so those marched stones drew the ellipsoid envelope
+ * exactly and the floor decided nothing at all. The structural one is that
+ * shading is voxels only — the primary returns a cell face, not an analytic
+ * intersection — so the question "can the eye resolve this outline" is settled
+ * by the *cell* long before it reaches the pixel. At 25 mm cells the whole bed
+ * is one to three cells per stone and no field on it can survive the resample.
  *
- * Ten pixels is where a three-lobe outline stops being distinguishable from an
- * ellipse, and at the worst depth in the set that is a 10 mm stone — so the
- * floor is a 5 mm half-width. It leaves about one stone in twenty analytic:
- * the fine shingle at the tail of a drift, which is a smudge at any floor.
+ * So the rule is one absolute length, applied to every species in the file from
+ * one place, and it lands almost everything in these beds on the ellipsoid
+ * side. That is not a loss of fidelity against what shipped: it is the same
+ * drawn shape, published as the primitive that draws it, at a closed-form root
+ * instead of forty-eight march steps.
  */
-const STONE_LEGIBLE_HALF_WIDTH_M = 0.005;
 
 /**
  * The bank bed: cobbles heaped where a bed is rich, thinning to shingle where it
@@ -927,25 +1359,39 @@ export const PEBBLE_GRADED_COBBLE: PebbleBedForm = Object.freeze({
   radiusRich_m: 0.0210,
   radiusLean_m: 0.0072,
   sizeSpread: [0.46, 1.55] as const,
-  alongPacking: 0.80,
-  acrossPacking: 0.88,
-  // A wide *aspect* band, not just a wide size band, and much wider than it was.
-  // The reference's beds hold flat slabs lying on their side beside near-round
-  // cobbles: the length runs to half again the width and the height falls to a
-  // third of it, so a stone drawn at the ends of these bands is a flake rather
-  // than an egg. This is also what carries the fine shingle, which is below the
-  // size at which a marched silhouette is worth paying for — an ellipsoid at
-  // 0.34 height share does not read as a sphere.
-  lengthShare: [0.88, 1.58] as const,
-  heightShare: [0.34, 0.88] as const,
-  widthShare: [0.60, 1.16] as const,
+  // Just over tangency, measured against the drawn plan circumradius. See
+  // {@link PebbleBedForm} for why these went from under one to over it and why
+  // the measure changed with them.
+  alongPacking: 1.00,
+  acrossPacking: 1.02,
+  // The aspect band, narrowed hard toward the plate. It used to run to a 1.58
+  // length share against a 0.34 height share, authored as "flat slabs lying on
+  // their side beside near-round cobbles" — and that is not what
+  // `artifacts/plate-crops/pebbles.png` holds. Every stone in that course is a
+  // smoothly rounded, slightly flattened ovoid: plan aspect 1.3 to 1.5, height
+  // a little under three quarters of the plan half-width. No flakes, no slabs,
+  // nothing lying on an edge.
+  //
+  // It is also the *other* half of the merging. A stone drawn 1.58 lanes long
+  // reaches most of the way across its second neighbour whatever the packing
+  // says, so the aspect band and the packing fraction had to be corrected
+  // together or one would have undone the other.
+  lengthShare: [0.96, 1.42] as const,
+  heightShare: [0.52, 0.80] as const,
+  widthShare: [0.74, 1.06] as const,
   widthWander: 0.34,
   // Coarsening *outward*, because the bank band grows away from the water: the
   // reference heaps its biggest cobbles up against the boulders and fines to
   // shingle at the shoreline, and a bed of one grain reads as gravel however
   // wide the size spread inside it is.
   crossGrade: 1.34,
-  sinkShare: 0.34,
+  // A fifth of the stone rather than a third. Sinking is what buries the
+  // contact line the plate's stones show: at 0.34 the widest circle of a
+  // flattened pebble is at or under the plaster, so what stands proud is a
+  // shallow cap with no undercut, and a row of shallow caps is a ridge. At 0.20
+  // the stone's own equator clears the ground and the crease between neighbours
+  // runs down to it.
+  sinkShare: 0.20,
   moundShare: 0.55,
   moundWidthFloor_m: 0.09,
   // Deeper than it was but held to the last quarter of the band, and the power
@@ -953,13 +1399,14 @@ export const PEBBLE_GRADED_COBBLE: PebbleBedForm = Object.freeze({
   // thinning that bit at half width would be deleting precisely the largest
   // cobbles it had just graded up — the first pass at these numbers did exactly
   // that and capped the bed at 58 mm when it was authored to reach 86.
-  edgeThinning: 0.74,
-  edgeThinningPower: 2.6,
+  //
+  // Both numbers came down when the packing opened out: a bed laid at tangency
+  // already has plaster showing between its stones, so a thinning tuned against
+  // a bed that overlapped by a fifth now deletes a course that was reading.
+  edgeThinning: 0.52,
+  edgeThinningPower: 2.2,
   bedTiltFollow: 0.72,
   bedNormalJitter: 0.42,
-  // Three to four and a half lobes puts one lump per third of the stone.
-  clusterFloor_m: STONE_LEGIBLE_HALF_WIDTH_M,
-  clusterLobesAcross: [3.0, 4.5] as const,
   value: [0.82, 0.93] as const,
 });
 
@@ -969,35 +1416,35 @@ export const PEBBLE_GRADED_COBBLE: PebbleBedForm = Object.freeze({
  * right and back, where the bed is one course of small stones on the rim's inner
  * slope, and what its left shore fines *to* as the shelf runs into the water.
  *
- * Its cluster floor is the bank bed's, and it used to be *higher* on the theory
- * that a band which fines out into the water is mostly below the size worth
- * marching. The render disagreed in the plainest possible way: this bed lies on
- * the near shore, so its stones are the closest to the eye in the whole set, and
- * the ten largest bare ellipsoids in the frame were all its — 37 to 44 pixels
- * across, sitting at the front of the picture reading as smooth white beans. A
- * floor is about *angular* size and this band's advantage in distance more than
- * cancels its disadvantage in grain.
+ * This is the bed the plate is clearest about and the one the render got most
+ * wrong, so it is the one to judge the change on.
+ * `artifacts/plate-crops/pebbles.png` is almost entirely this species: a course
+ * running down the rim's inner edge, one stone wide for most of its length and
+ * two where it widens, sizes varying about three to one, every stone distinct
+ * with a dark line where it meets the next. Ours came back as a continuous
+ * sausage lying against the coping — the same white value as the rim it rests
+ * on, no crease anywhere along it, no individual stone recoverable.
  */
 export const PEBBLE_FINE_SHINGLE: PebbleBedForm = Object.freeze({
   radiusRich_m: 0.0125,
   radiusLean_m: 0.0058,
   sizeSpread: [0.58, 1.48] as const,
-  alongPacking: 0.82,
-  acrossPacking: 0.90,
-  lengthShare: [0.92, 1.52] as const,
-  heightShare: [0.32, 0.82] as const,
-  widthShare: [0.62, 1.14] as const,
+  // The tightest packing in the set and still clear of one: this is the course
+  // that has to read as separate stones at the front of the frame.
+  alongPacking: 0.99,
+  acrossPacking: 1.01,
+  lengthShare: [0.98, 1.38] as const,
+  heightShare: [0.54, 0.82] as const,
+  widthShare: [0.76, 1.04] as const,
   widthWander: 0.22,
   crossGrade: 0.62,
-  sinkShare: 0.36,
+  sinkShare: 0.22,
   moundShare: 0.40,
   moundWidthFloor_m: 0.07,
-  edgeThinning: 0.72,
-  edgeThinningPower: 1.4,
+  edgeThinning: 0.50,
+  edgeThinningPower: 1.3,
   bedTiltFollow: 0.78,
   bedNormalJitter: 0.46,
-  clusterFloor_m: STONE_LEGIBLE_HALF_WIDTH_M,
-  clusterLobesAcross: [2.8, 4.0] as const,
   value: [0.83, 0.94] as const,
 });
 
@@ -1043,9 +1490,43 @@ export interface PebbleBedSpec extends PebbleBedForm {
   readonly avoid?: readonly StoneFootprint[];
   /** The region the bed may occupy. Default: everywhere the rail reaches. */
   readonly within?: (x_m: number, z_m: number) => boolean;
+  /**
+   * The finest voxel this bed will be drawn at, in metres.
+   *
+   * Placement rather than form, and the only number here the scene's lattice
+   * decides — see `SceneryGeneratorRequest.detailCellSize_m`. Absent is
+   * {@link STONE_DEFAULT_LEAF_SIZE_M} and reproduces the 25 mm set exactly.
+   */
+  readonly leafSize_m?: number;
 }
 
 const PEBBLE_TAGS = Object.freeze(["stone", "pebble"]);
+
+/**
+ * The most one course of a bed may coarsen over the one before it.
+ *
+ * See the use site: this is what keeps a packing that steps by the *last*
+ * course's reach from being overrun by the *next* course's stones. A quarter is
+ * enough that a bed still runs from cobbles to shingle over a drift — twelve
+ * courses at 1.25 is a factor of fourteen — and small enough that no two stones
+ * lying against each other differ by more than the plate's own courses do.
+ */
+const STONE_COURSE_GROWTH = 1.25;
+
+/**
+ * How far a stone is staggered along the run, as a share of its own reach.
+ *
+ * What stops the courses reading as rows. It used to be 0.35 and it used to be
+ * spent out of the packing's own clearance: two stones in adjacent courses each
+ * staggering 0.35 of a reach toward one another close 0.7 of a reach, against
+ * the 0.08 a packing fraction of 1.04 had given them. That is most of a stone of
+ * overlap, invisible in every authored number, and it was the largest single
+ * source of the merging that survived the packing correction.
+ *
+ * It is now smaller *and* paid for: the course advance below carries the same
+ * factor, so the stagger moves stones without ever eating the gap between them.
+ */
+const STONE_COURSE_STAGGER = 0.16;
 
 /**
  * A pebble bed, packed rather than scattered.
@@ -1072,8 +1553,13 @@ export function pebbleBedNodes(spec: PebbleBedSpec): SceneryNode[] {
   let published = 0;
   let arc = 0;
   let course = 0;
+  let previousReach = 0;
 
-  while (arc < rail.length_m) {
+  // The last course has to clear the first one, and `railAt` wraps: a loop that
+  // ran while `arc < length` laid a final course a few millimetres short of the
+  // rail's own end, right on top of course zero. Stopping a whole course's reach
+  // early closes the ring instead of overlapping it.
+  while (arc < rail.length_m - 2 * spec.alongPacking * previousReach) {
     const turn = railAt(rail, arc, 0).turn;
     const grade = Math.min(1, Math.max(0, gradeAt(turn)));
     const density = Math.min(1, Math.max(0, densityAt(turn)));
@@ -1084,9 +1570,28 @@ export function pebbleBedNodes(spec: PebbleBedSpec): SceneryNode[] {
     const meanRadius = spec.radiusLean_m + (spec.radiusRich_m - spec.radiusLean_m) * grade;
     const width = Math.max(0, spec.widthAt(turn)) * (1 + spec.widthWander * (2 * noise - 1));
 
+    // A stone may not be much larger than the course before it. The run advances
+    // by the reach of the course just laid, so the *next* course's stones are
+    // laid at a spacing chosen before they were drawn — and a stone drawn three
+    // times its predecessor (the size spread alone is 3.4 : 1 inside one lane)
+    // reaches back over the whole course behind it. Measured before this ratchet
+    // existed: 31 of 105 pebbles interpenetrated a neighbour by more than a tenth
+    // of themselves and the worst sat entirely inside another stone.
+    //
+    // A quarter of growth per course rather than a hard cap, because a bed's
+    // grain does change along a run — that is what `crossGrade` and the drift
+    // table are for — it just does not change by a factor of three between two
+    // stones lying against each other, and the plate's courses do not either.
+    const reachCeiling = previousReach > 0 ? STONE_COURSE_GROWTH * previousReach : Infinity;
     let across = start_m + direction * (course % 2 === 0 ? 0 : spec.acrossPacking * meanRadius);
     const limit = start_m + direction * width;
     let lane = 0;
+    // The widest stone this course actually laid, so the run advances by what
+    // was drawn rather than by the lane's mean. A course holding one 40 mm
+    // cobble has to clear 40 mm before the next course starts, and stepping by
+    // the mean instead is what let a large stone in a fine course swallow both
+    // its neighbours and the two stones behind it.
+    let courseReach = 0;
     while (direction * (limit - across) > 0) {
       const seed = spec.seed + 0x3f_00 + 31 * published + 7919 * lane + 131 * course;
       const bandFraction = Math.abs(across - start_m) / Math.max(1e-6, width);
@@ -1094,20 +1599,30 @@ export function pebbleBedNodes(spec: PebbleBedSpec): SceneryNode[] {
       // cobbles are at the top of the shelf and the shingle is at the water.
       const laneRadius = meanRadius * (1 + (spec.crossGrade - 1) * Math.min(1, bandFraction));
       const radius = laneRadius * band(spec.sizeSpread, hash01(seed));
-      across += direction * spec.acrossPacking * radius;
-      const centre = across;
-      const at = railAt(rail, arc + (hashSigned(seed + 1) * 0.35 * radius), centre);
-      across += direction * spec.acrossPacking * radius;
-      lane += 1;
 
-      // A wide aspect band, not just a wide size band. The reference's beds hold
-      // flat slabs lying beside near-round cobbles, and a bed whose stones all
-      // share one aspect reads as a tray of eggs however much their sizes differ.
-      const semi = V(
+      // Drawn first, stepped by second. The aspect band is wide enough that the
+      // stone's own plan circumradius and the lane radius it came from differ by
+      // up to half again, and stepping by the lane radius is what made this a
+      // packing of *lanes* rather than a packing of stones.
+      const drawn = V(
         radius * band(spec.lengthShare, hash01(seed + 2)),
         radius * band(spec.heightShare, hash01(seed + 3)),
         radius * band(spec.widthShare, hash01(seed + 4)),
       );
+      // Scaled whole rather than clipped on one axis, so the ratchet takes size
+      // off a stone and never changes its aspect — the aspect is the plate's and
+      // the size is negotiable.
+      const restraint = Math.min(1, reachCeiling / Math.max(drawn.x, drawn.z));
+      const semi = restraint < 1 ? V(drawn.x * restraint, drawn.y * restraint, drawn.z * restraint) : drawn;
+      const planReach = Math.max(semi.x, semi.z);
+      courseReach = Math.max(courseReach, planReach);
+
+      across += direction * spec.acrossPacking * planReach;
+      const centre = across;
+      const at = railAt(rail, arc + (hashSigned(seed + 1) * STONE_COURSE_STAGGER * planReach), centre);
+      across += direction * spec.acrossPacking * planReach;
+      lane += 1;
+
       const sink = spec.sinkShare * semi.y;
       const edge = Math.abs(centre - start_m) / Math.max(1e-6, width);
       // Dispersal along the run, then thinning across the band. Two independent
@@ -1116,7 +1631,7 @@ export function pebbleBedNodes(spec: PebbleBedSpec): SceneryNode[] {
       if (hash01(seed + 11) >= density) continue;
       if (hash01(seed + 7) < spec.edgeThinning * edge ** spec.edgeThinningPower) continue;
       if (spec.within && !spec.within(at.x, at.z)) continue;
-      if (spec.avoid?.some(({ at_m, radius_m }) => Math.hypot(at.x - at_m[0], at.z - at_m[1]) < radius_m + 0.55 * radius)) continue;
+      if (spec.avoid?.some(({ at_m, radius_m }) => Math.hypot(at.x - at_m[0], at.z - at_m[1]) < radius_m + 0.35 * planReach)) continue;
       const lie = groundLie(groundHeightAt, at.x, at.z);
       // The level test is on the stone's own centre, not on the ground: a pebble
       // bedded on a bank that is barely clear of the water still has most of
@@ -1130,6 +1645,7 @@ export function pebbleBedNodes(spec: PebbleBedSpec): SceneryNode[] {
         id: `${key}/pebble-${published}`,
         group,
         tags: PEBBLE_TAGS,
+        leafSize_m: spec.leafSize_m,
         place: {
           units: "metres",
           anchor: "terrain",
@@ -1152,18 +1668,24 @@ export function pebbleBedNodes(spec: PebbleBedSpec): SceneryNode[] {
           ),
         },
         radius: semi,
-        // Tested on the stone's own drawn half-width rather than on the lane's
-        // mean, so a large stone in a fine part of the bed still gets a
-        // silhouette and a small one in a coarse part does not pay for one it
-        // cannot show.
-        lobesAcross: Math.max(semi.x, semi.z) >= spec.clusterFloor_m
-          ? band(spec.clusterLobesAcross, hash01(seed + 10)) : 0,
         seed: seed + 12,
         material: value(band(spec.value, hash01(seed + 6))),
       }));
       published += 1;
     }
-    arc += 2 * spec.alongPacking * meanRadius;
+    // **The rail's arc is measured on its own centreline, and a band laid off it
+    // does not travel that distance.** Offsetting a closed convex outline inward
+    // by `d` removes exactly `2*pi*d` of perimeter, so a course spacing stepped
+    // on the centreline lands an inward band's stones closer together than it
+    // was asked for — on this pond's rail, 2.7 m round, the shore band sits
+    // about 60 mm in and loses 14 % of its spacing. That is a seventh of a stone
+    // of overlap that no packing fraction can see, because the packing is
+    // working in a coordinate the stones are not laid in.
+    const bandOffset = start_m + direction * 0.5 * width;
+    const railScale = rail.length_m / Math.max(0.25 * rail.length_m, rail.length_m + 2 * Math.PI * bandOffset);
+    arc += 2 * spec.alongPacking * (1 + STONE_COURSE_STAGGER) * railScale
+      * (courseReach > 0 ? courseReach : meanRadius);
+    previousReach = courseReach > 0 ? courseReach : previousReach;
     course += 1;
   }
 
@@ -1229,16 +1751,21 @@ export interface SteppingStoneForm {
   readonly dome: number;
   /**
    * The off-axis lobe: its half-width and its offset, both as fractions of the
-   * tread radius, and how many lobes of the mass span it.
+   * tread radius.
    *
    * `shoulderShare + shoulderOffsetShare` a little over one is the whole trick —
    * that surplus is how far the lobe stands past the rim, and at 0.10 it is a
    * bulge on one flank rather than a second stone stuck to the first. Zero
    * omits it and saves a record.
+   *
+   * It no longer carries a lobe count: whether the lobe gets a form band is
+   * decided by its own plan span against {@link STONE_FORM_MINIMUM_SPAN_M}, like
+   * every other mass in the file. At the hero path's 32-42 mm plates the
+   * shoulder is about 50 mm across and falls under the floor, so it publishes as
+   * the ellipsoid it was always drawing.
    */
   readonly shoulderShare: number;
   readonly shoulderOffsetShare: number;
-  readonly shoulderLobesAcross: number;
   /**
    * Footing radii as fractions of the tread's, at the bed and under the tread.
    *
@@ -1303,10 +1830,6 @@ export const STEPPING_DISC: SteppingStoneForm = Object.freeze({
   dome: 0.11,
   shoulderShare: 0.62,
   shoulderOffsetShare: 0.48,
-  // Three lobes across a 45 mm bulge is a lump every 15 mm, which is the grain
-  // of the cobbles heaped on the bank behind it — the right coarseness for a set
-  // that came out of one quarry.
-  shoulderLobesAcross: 3.0,
   footingBaseShare: 0.94,
   footingTopShare: 0.78,
   bed_m: 0.052,
@@ -1341,6 +1864,14 @@ export interface SteppingStonePathSpec extends SteppingStoneForm {
   readonly groundHeightAt: GroundHeightAt;
   /** The still-water level the path wades through. Omit for a dry path. */
   readonly level_m?: number;
+  /**
+   * The finest voxel this set will be drawn at, in metres.
+   *
+   * Placement rather than form, and the only number here the scene's lattice
+   * decides — see `SceneryGeneratorRequest.detailCellSize_m`. Absent is
+   * {@link STONE_DEFAULT_LEAF_SIZE_M} and reproduces the 25 mm set exactly.
+   */
+  readonly leafSize_m?: number;
 }
 
 const STEPPING_TAGS = Object.freeze(["stone", "stepping"]);
@@ -1604,6 +2135,7 @@ export function steppingStoneNodes(spec: SteppingStonePathSpec): SceneryNode[] {
           };
         })(),
         ...(spec.shoulderShare > 0 ? [stoneMass({
+          leafSize_m: spec.leafSize_m,
           // Set at the tread's own mid-height and on a bearing of its own, so
           // the five plates are not all lopsided the same way. Its top is held a
           // little under the crown's apex: a lobe that broke the *upper* surface
@@ -1623,7 +2155,6 @@ export function steppingStoneNodes(spec: SteppingStonePathSpec): SceneryNode[] {
             0.46 * (treadTop - treadBottom),
             radius * spec.shoulderShare * (0.82 + 0.30 * hash01(stoneSeed + 9)),
           ),
-          lobesAcross: spec.shoulderLobesAcross,
           seed: stoneSeed + 10,
           material: value(spec.value - 0.02 + 0.04 * hash01(stoneSeed + 11)),
         })] : []),
@@ -1654,6 +2185,14 @@ export interface StoneSetSpec {
   readonly seed: number;
   /** Key prefix for every node emitted. Defaults to `stone`. */
   readonly key?: string;
+  /**
+   * The finest voxel this set will be drawn at, in metres.
+   *
+   * Placement rather than form, and the only number here the scene's lattice
+   * decides — see `SceneryGeneratorRequest.detailCellSize_m`. Absent is
+   * {@link STONE_DEFAULT_LEAF_SIZE_M} and reproduces the 25 mm set exactly.
+   */
+  readonly leafSize_m?: number;
 }
 
 /**
@@ -1737,8 +2276,11 @@ function vesselGround(spec: StoneSetSpec): GroundHeightAt {
  *
  * The room ran out at the same time. On these bearings the container wall is
  * 0.143 to 0.175 m outside the coping's crest, so a 0.082 m cap at an offset
- * over about 0.14 would put its shoulder through the domain — which is why the
- * offsets below are smaller than the ones the old, roomier corner allowed.
+ * over about 0.14 would put its widest part through the domain — which is why
+ * the offsets below are smaller than the ones the old, roomier corner allowed.
+ * What that widest part *is* changed with the form: it used to be the cap's
+ * off-axis shoulder at 1.30 cap radii, and it is now the plinth slab at 1.12,
+ * so the same offsets carry 14 % more clearance than they were authored with.
  */
 interface BoulderPlacement {
   /** Fraction of a turn round the rail. */
@@ -1751,18 +2293,51 @@ interface BoulderPlacement {
   readonly form: CappedBoulderForm;
 }
 
+/**
+ * **The fifth mistake was that the group had no daylight in it**, and it is the
+ * one a viewer names first: the caps merged into a single lump on the bank.
+ *
+ * "Most of a cap away and set further out so the two overlap in plan" is a
+ * description of a pair that reads as a pair when you can see round both of
+ * them, and this arrangement could not. Measured in plan at the shipped turns,
+ * the anchor and its partner **overlapped by 41 mm of cap** and by 54 mm of
+ * plinth, and the anchor and the third touched at exactly 0 mm — so three of the
+ * four were one silhouette with two bumps on it, at any resolution and under any
+ * light. The plate's group is the opposite: every stone in it is closed by sky
+ * or by shadow on both sides, and that separation is most of why four objects
+ * read as four.
+ *
+ * The turns below are therefore solved against a plan clearance rather than
+ * spaced by eye, and the quantity solved for is the **cap** gap — what the
+ * silhouette does — with the plinth gap carried as a second constraint because a
+ * plinth that overlaps merges the feet even when the caps are clear. Every pair
+ * now holds at least **47 mm of cap gap and 35 mm of plinth gap**, the tightest
+ * being the pair, which is as it should be: they stay the closest two stones in
+ * the group without being one stone.
+ *
+ * Spreading costs room, and the group was already against the domain: the
+ * container wall is 0.143-0.175 m outside the crest on these bearings and the
+ * plaster is |x| <= 0.852, |z| <= 0.552. The offsets came *in* as the turns went
+ * apart to pay for it — the anchor from 0.104 to 0.084 — which also breaks the
+ * near-constant radius the four used to sit at. The whole family clears the
+ * plaster by at least 7 mm at its widest part.
+ *
+ * The turn window is unchanged in spirit: 0.68 to 0.83 is still the upper-left
+ * bank, still clear of the left crop at 0.66, and still short of the bonsai at
+ * 46 % of the frame.
+ */
 const HERO_BOULDERS: readonly BoulderPlacement[] = Object.freeze([
   // The anchor: broad, heavy, seated, and set nearest the rim so it reads in
   // front of the rest. Lands at about a fifth of the way across the frame.
-  { turn: 0.722, offset_m: 0.104, capRadius_m: 0.082, form: BOULDER_SQUAT_ANVIL },
-  // Its partner, most of a cap away and set further out so the two overlap in
-  // plan without standing in line. The pair is what makes the group a group.
-  { turn: 0.694, offset_m: 0.132, capRadius_m: 0.068, form: BOULDER_LIPPED_DOME },
+  { turn: 0.731, offset_m: 0.084, capRadius_m: 0.080, form: BOULDER_SQUAT_ANVIL },
+  // Its partner, a cap and a half away along the bank and further out from the
+  // rim, so the two are a pair seen past one another rather than a pair fused.
+  { turn: 0.680, offset_m: 0.126, capRadius_m: 0.066, form: BOULDER_LIPPED_DOME },
   // The third leans back into the pair rather than continuing the line.
-  { turn: 0.757, offset_m: 0.118, capRadius_m: 0.047, form: BOULDER_MUSHROOM_CAP },
+  { turn: 0.782, offset_m: 0.118, capRadius_m: 0.047, form: BOULDER_MUSHROOM_CAP },
   // Small and low, set along the bank on its own: the thing that stops the group
   // reading as a wall, and the one that carries the eye toward the tree.
-  { turn: 0.788, offset_m: 0.136, capRadius_m: 0.030, form: BOULDER_ROUNDED_COBBLE },
+  { turn: 0.828, offset_m: 0.132, capRadius_m: 0.030, form: BOULDER_ROUNDED_COBBLE },
 ]);
 
 /**
@@ -1797,6 +2372,18 @@ const onPlaster = (x: number, z: number): boolean =>
  * hierarchy binds 64 primitives per 200 mm brick and drops the rest silently, and
  * a continuous double band put more than that into three bricks. Clusters plus
  * the coarser grain halve the set.
+ *
+ * **The table was retuned when the packing was corrected, and the retune is not
+ * art direction.** Stepping by each stone's own drawn plan reach at a fraction
+ * over tangency, instead of by 0.80 of a lane diameter, necessarily lays about
+ * half as many stones over the same ground — that is the whole point of it, and
+ * it is what buys the contact creases the plate has and the render did not. The
+ * bands here are wider and the density tails higher to take about two thirds of
+ * that back (161 stone-set records to 139, against 92 if nothing had moved),
+ * and the `halfLength` runs deliberately were *not* stretched to take the rest:
+ * the bare stretches of coping between the drifts are the composition, they are
+ * pinned by `tests/stone-set.test.ts`, and spending them on record count would
+ * be trading the thing the plate is admired for against a number.
  *
  * **A drift, not a band with a taper.** The first version of this table gave
  * each place one `grade`, so the grain inside a drift was *constant* — the
@@ -1839,20 +2426,25 @@ const HERO_PEBBLE_DRIFTS: readonly PebbleDrift[] = Object.freeze([
   // so a band that ran the old 0.150 m would have its outer courses culled
   // against `onPlaster` in a straight line, which is a machined edge wearing a
   // bed's clothes.
-  { turn: 0.740, halfLength: 0.098, bankWidth_m: 0.118, grade: 1.00, gradeTail: 0.30, density: 1.00, densityTail: 0.30, shore: false },
+  // Re-pinned to 0.755 when the family spread from 0.694-0.788 to 0.680-0.828.
+  // The heart follows the group's own middle, which is the whole reason it is a
+  // number here rather than a constant: "the biggest cobbles are wedged against
+  // the biggest stones" is only true if the two move together. `halfLength` is
+  // deliberately *not* stretched to cover the wider group — see above.
+  { turn: 0.755, halfLength: 0.120, bankWidth_m: 0.132, grade: 1.00, gradeTail: 0.38, density: 1.00, densityTail: 0.60, shore: false },
   // The beach: where the shelf runs down into the water, and the only place
   // both bands meet. Fine from the start and finer as it goes. It no longer
   // joins the heap above — the family moved round the bank and this one did not,
   // because it belongs to the vessel's beach sector rather than to the stones —
   // so what was one long bed is now two places with bare coping between them,
   // which is what the reference shows anyway.
-  { turn: 0.494, halfLength: 0.098, bankWidth_m: 0.072, grade: 0.50, gradeTail: 0.10, density: 0.92, densityTail: 0.26, shore: true },
+  { turn: 0.494, halfLength: 0.116, bankWidth_m: 0.112, grade: 0.50, gradeTail: 0.12, density: 1.00, densityTail: 0.56, shore: true },
   // The course along the right-hand rim, where the tree's terrace comes down to
   // the coping. Narrow, fine, and the one the reference runs *inside* the rim.
-  { turn: 0.080, halfLength: 0.086, bankWidth_m: 0.050, grade: 0.24, gradeTail: 0.05, density: 0.84, densityTail: 0.20, shore: true },
+  { turn: 0.080, halfLength: 0.122, bankWidth_m: 0.084, grade: 0.24, gradeTail: 0.06, density: 1.00, densityTail: 0.52, shore: true },
   // The loose scatter outside the coping at the near right: a dozen stones, no
   // bed under them, which is what a narrow band at half density produces.
-  { turn: 0.230, halfLength: 0.056, bankWidth_m: 0.034, grade: 0.15, gradeTail: 0.02, density: 0.52, densityTail: 0.14, shore: false },
+  { turn: 0.230, halfLength: 0.068, bankWidth_m: 0.052, grade: 0.15, gradeTail: 0.02, density: 0.70, densityTail: 0.26, shore: false },
 ]);
 
 /** How much of a drift's run is full width before it fades out. */
@@ -1863,11 +2455,18 @@ function driftWeight(drift: PebbleDrift, turn: number): number {
 /**
  * The bank band's start, in plan distance from the coping's crest centreline.
  *
- * Beyond the widest the coping's section ever swells to — `rimHalfWidth_m` is
- * modulated by up to 22 % as it runs — so a bed never climbs the rim's outer
- * shoulder.
+ * Beyond the widest the coping's section ever swells to, so a bed never climbs
+ * the rim's outer shoulder. It was 1.14, and that did not actually clear it:
+ * `sectionWidthVariation` is 0.22 but `periodicSpline` reaches about 1.6x its
+ * amplitude, so the widest half-width is **1.35** of the authored mean and a
+ * 1.14 start laid cobbles on the rim wherever the section swelled.
+ *
+ * In absolute terms this moves the bed *toward* the water, not away: the coping
+ * narrowed from 64.4 mm of half-width to 30, so the bank now starts 42 mm out
+ * where it used to start 73. That is the plate, which butts its cobbles against
+ * the rim's foot rather than leaving a bare shelf between the two.
  */
-const HERO_BANK_START_SHARE = 1.14;
+const HERO_BANK_START_SHARE = 1.40;
 
 /**
  * The shore band, and the thing that changed when the pond grew a beach.
@@ -1887,8 +2486,16 @@ const HERO_BANK_START_SHARE = 1.14;
  * is left is the vessel's shoreline rather than a number authored here.
  */
 const HERO_SHORE_START_SHARE = -0.84;
-const HERO_SHORE_RUN_SHARE = 0.62;
-const HERO_SHORE_WIDTH_FLOOR_M = 0.022;
+const HERO_SHORE_RUN_SHARE = 0.80;
+/**
+ * The narrowest the water's-edge course ever runs, in plan metres.
+ *
+ * It was 22 mm, which at this bed's grain is under one stone: a "single course"
+ * that in practice laid one stone and then ran out of band. The plate's course
+ * — `artifacts/plate-crops/pebbles.png` — is one stone wide for most of its
+ * length and two where it widens, so the floor is now a stone and a half.
+ */
+const HERO_SHORE_WIDTH_FLOOR_M = 0.046;
 
 /**
  * The wading path, as rail turns and how deep the bed is under the water there.
@@ -2010,6 +2617,7 @@ export function stoneSetBoulderNodes(spec: StoneSetSpec): SceneryNode[] {
       key: `${key}/boulder-${index}`,
       at_m: [at.x, at.z],
       seed: spec.seed + 0x51_00 + 977 * index,
+      leafSize_m: spec.leafSize_m,
     }));
   }
   return nodes;
@@ -2019,7 +2627,21 @@ export function stoneSetBoulderNodes(spec: StoneSetSpec): SceneryNode[] {
 function boulderFootprints(spec: StoneSetSpec, rail: PlanRail): StoneFootprint[] {
   return HERO_BOULDERS.map((placement) => {
     const at = railTurnAt(rail, placement.turn, placement.offset_m);
-    return { at_m: [at.x, at.z] as const, radius_m: placement.capRadius_m * 0.88 };
+    // **The stem's foot, not the cap and not the plinth.** This used to be 0.88
+    // of the cap radius, which on the largest boulder is a 72 mm circle laid over
+    // a band that starts 40 mm out and runs 132 mm — that is, the whole band, at
+    // every one of the four boulders, whose exclusion circles overlap one another
+    // along the bank. The drift whose entire subject is "the biggest cobbles are
+    // the ones wedged against the biggest stones" had no ground to stand on, and
+    // the only reason it read at all was that the bed was dense enough to put
+    // nine stones in the annulus outside it.
+    //
+    // `artifacts/plate-crops/boulders.png` settles what the clearance should be:
+    // the cobbles butt directly against the boulders' feet and two of them lie
+    // over the rolled edge of a slab. So the circle is the stem's base — what a
+    // stone would actually have to displace — and the per-stone margin is a third
+    // of a pebble rather than a half.
+    return { at_m: [at.x, at.z] as const, radius_m: placement.capRadius_m * placement.form.stemBaseShare };
   });
 }
 
@@ -2065,6 +2687,7 @@ export function stoneSetPebbleNodes(spec: StoneSetSpec): SceneryNode[] {
       ...PEBBLE_GRADED_COBBLE,
       key: `${key}/bank-bed`,
       seed: spec.seed + 0x9e_00,
+      leafSize_m: spec.leafSize_m,
       rail,
       groundHeightAt,
       start_m: HERO_BANK_START_SHARE * rimHalfWidth,
@@ -2080,6 +2703,7 @@ export function stoneSetPebbleNodes(spec: StoneSetSpec): SceneryNode[] {
       ...PEBBLE_FINE_SHINGLE,
       key: `${key}/shore-bed`,
       seed: spec.seed + 0x9e_00 + 104_729,
+      leafSize_m: spec.leafSize_m,
       rail,
       groundHeightAt,
       // Laid deliberately *across* the coping's inner foot, so the waterline test
@@ -2121,6 +2745,7 @@ function heroSteppingPath(spec: StoneSetSpec): SteppingStonePathSpec {
     ...STEPPING_DISC,
     key: `${key}/path`,
     seed: spec.seed,
+    leafSize_m: spec.leafSize_m,
     path: HERO_PATH.map(([turn, submerged_m]) => {
       const run = shorelineRun(groundHeightAt, rail, turn, spec.waterline_m - submerged_m, minimumRun);
       const at = railTurnAt(rail, turn, -run);

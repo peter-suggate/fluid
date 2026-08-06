@@ -51,7 +51,7 @@
  * threshold and the previous frame's *final* membership selects which one
  * applies, which is why the per-record word survives the frame.
  */
-import { svoPrimitiveWGSL } from "./svo-primitive-abi";
+import { svoFieldProgramAbsentWGSL, svoPrimitiveWGSL } from "./svo-primitive-abi";
 import { SVO_PRIMITIVE_CANDIDATE_MAXIMUM_LEAVES } from "./svo-primitive-candidates";
 import { svoScreenSpaceTerminationWGSL } from "./svo-screen-space-termination";
 import { cameraApertureShaderLibrary } from "./webgpu-camera";
@@ -309,6 +309,10 @@ struct Uniforms{viewport:vec4f,cameraPosition:vec4f}
 struct SvoMapping{worldOrigin:vec3f,brickSize:u32,cellSize:vec3f,maximumDepth:u32,nodeCount:u32,leafCount:u32,maxVisits:u32,_padding:u32}
 struct SvoBandParams{mapping:SvoMapping,metadata:vec4u}
 struct SvoBandControls{thresholds:vec2f,budget:u32,flags:u32}
+// Band selection reads a record's extent and its screen footprint; it never
+// evaluates a field. No tape arena is bound here, and a field-program record
+// therefore resolves to nothing rather than to its conservative box.
+${svoFieldProgramAbsentWGSL}
 ${svoPrimitiveWGSL}
 ${svoScreenSpaceTerminationWGSL}
 

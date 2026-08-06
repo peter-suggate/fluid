@@ -5,7 +5,6 @@ import {
   DEFAULT_ENVIRONMENT_BRICK_REFINEMENT_LEVELS,
   ENVIRONMENT_MAXIMUM_COARSENING_POWER,
   environmentMaximumCoarseningPower,
-  octreeSparseBrickDebugPublicationShader,
   planOctreeBrickCoordinates,
   sparseSceneOctreeMaximumDepth,
 } from "../lib/webgpu-octree-sparse-bricks";
@@ -18,21 +17,24 @@ test("octree sparse-brick planning covers the real balanced dam-break lattice", 
   assert.deepEqual(plan.coordinates.at(-1), { x: 7, y: 5, z: 5 });
 });
 
-test("octree sparse-brick render publication preserves owners, materials, and GPU-only counts", () => {
-  assert.match(octreeSparseBrickDebugPublicationShader, /bodyMaterials\[owner\]/);
-  assert.match(octreeSparseBrickDebugPublicationShader, /material != 0u && owner != 0xffffu/);
-  assert.match(octreeSparseBrickDebugPublicationShader, /candidate != 0u && candidateOwner != 0xffffu/);
-  assert.match(octreeSparseBrickDebugPublicationShader, /let payloadIndex = leaf\.topology\.y \+ localIndex;/);
-  assert.match(octreeSparseBrickDebugPublicationShader, /payloadIndex < arrayLength\(&materialOwners\)/);
-  assert.doesNotMatch(octreeSparseBrickDebugPublicationShader, /materialOwners\[index\]/);
-  assert.match(octreeSparseBrickDebugPublicationShader, /control\[2\]/);
-  assert.match(octreeSparseBrickDebugPublicationShader, /select\(0u, 1u, isActive\)/);
-  assert.doesNotMatch(octreeSparseBrickDebugPublicationShader, /mapAsync|getMappedRange/);
-});
-
-test("raw inspection keeps room shells modelled without letting them hide interior props", () => {
+/**
+ * The producer used to also materialize a 48-byte expanded record per resolved
+ * voxel and per leaf, into two arenas it owned, for the render panel's
+ * LEVELS/SURFACE/BRICKS/CONTENT views. Those views and their renderer are gone;
+ * this pins that the arenas, their publication shader and their dispatch went
+ * with them, because the cost of the lane was the arenas (~295 MB on the
+ * widened ocean scene) rather than the buttons.
+ */
+test("the producer no longer allocates or publishes expanded inspection records", () => {
   const source = readFileSync(new URL("../lib/webgpu-octree-sparse-bricks.ts", import.meta.url), "utf8");
-  assert.match(source, /primitive\.tags\.includes\("shell"\) \? 0 : 1/);
+  for (const removed of [
+    "debugPublicationShader", "tiledDebugDispatch", "ensureInspectionSource",
+    "encodeInspectionPublication", "SPARSE_VOXEL_DEBUG_RECORD_STRIDE",
+  ]) assert.doesNotMatch(source, new RegExp(removed), `${removed} must not survive the inspection removal`);
+  assert.doesNotMatch(source, /Sparse voxel debug records|Sparse brick debug records/,
+    "neither expanded record arena may still be allocated");
+  assert.match(source, /get allocatedBytes\(\): number \{ return this\.baseAllocatedBytes; \}/,
+    "the world's footprint is now fully known at build time, with no lazy inspection growth");
 });
 
 test("scene environment defaults one level deeper than the previous brick plan", () => {
@@ -50,10 +52,4 @@ test("sparse scene root depth covers empty positive authored bounds", () => {
   assert.equal(maximumDepth, 6);
   assert.ok(2 ** maximumDepth >= 33,
     "every in-domain cell bit must fit in the root instead of aliasing a low coordinate");
-});
-
-test("debug publication retains anisotropic XYZ extents for exact world bounds", () => {
-  assert.match(octreeSparseBrickDebugPublicationShader, /f32\(scale\) \* params\.cell\.xyz/);
-  assert.match(octreeSparseBrickDebugPublicationShader, /f32\(brickSize \* scale\) \* params\.cell\.xyz/);
-  assert.doesNotMatch(octreeSparseBrickDebugPublicationShader, /min\(params\.cell/);
 });

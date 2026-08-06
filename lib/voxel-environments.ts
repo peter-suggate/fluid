@@ -45,6 +45,17 @@ export interface EnvironmentProxyCatalog {
 export interface EnvironmentProxyCatalogOptions {
   /** Physical thickness of the finite room shell faces. Defaults to the scene nominal resolution. */
   readonly shellThickness_m?: number;
+  /**
+   * Override the finest voxel the set is drawn at, in metres.
+   *
+   * The document's `voxelDomain.detailCellSize_m` is the answer for every
+   * ordinary build and this exists for the lane that knows better than the
+   * document does — a bench that renders one scene at four resolutions without
+   * rebuilding it. Prefer the document: a catalog built at one detail size and a
+   * heightfield baked at another disagree about the ground, and only the
+   * document can carry both to the render worker.
+   */
+  readonly detailCellSize_m?: number;
 }
 
 /** The world frame a scene's scenery is placed in. */
@@ -56,6 +67,14 @@ export function environmentSceneryContext(
   const s = Math.max(scene.container.width_m, scene.container.height_m, scene.container.depth_m);
   const thickness = options.shellThickness_m ?? scene.voxelDomain.finestCellSize_m;
   if (!(thickness > 0) || !Number.isFinite(thickness)) throw new Error("Environment shell thickness must be positive and finite");
+  // Absent means the two lattices are the same, which is every scene that has
+  // not asked for extra octree levels under the solver's own.
+  const detailCellSize_m = options.detailCellSize_m
+    ?? scene.voxelDomain.detailCellSize_m
+    ?? scene.voxelDomain.finestCellSize_m;
+  if (!(detailCellSize_m > 0) || !Number.isFinite(detailCellSize_m)) {
+    throw new Error("Environment detail cell size must be positive and finite");
+  }
   return {
     scene, s,
     floorY_m: environmentId === "night-lab" ? -.72 * s
@@ -66,6 +85,7 @@ export function environmentSceneryContext(
       Math.max(scene.container.depth_m * 2.8, s * 2.25),
     ),
     shellThickness_m: thickness,
+    detailCellSize_m,
   };
 }
 
@@ -110,8 +130,17 @@ const catalogCache = new WeakMap<SceneDescription, Map<string, EnvironmentProxyC
 
 function catalogFingerprint(scene: SceneDescription, environmentId: EnvironmentId, options: EnvironmentProxyCatalogOptions): string {
   const c = scene.container;
+  // The detail cell belongs here for the same reason the finest cell does: it is
+  // an *input to expansion*, not just a size the tree happens to have. A
+  // generator sizes its features in detail voxels — `bonsaiCanopyLadder` raises
+  // its floret to a legibility floor of leaves — so two catalogs built from one
+  // document at two detail cells are two different sets. It was missing, which
+  // made the option's own documented use ("a bench that renders one scene at
+  // four resolutions without rebuilding it") return the first resolution four
+  // times.
   return `${environmentId}|${options.shellThickness_m ?? "scene"}|${c.width_m}:${c.height_m}:${c.depth_m}`
-    + `|${scene.voxelDomain.finestCellSize_m}|${JSON.stringify(scene.terrain ?? null)}`;
+    + `|${scene.voxelDomain.finestCellSize_m}|${options.detailCellSize_m ?? scene.voxelDomain.detailCellSize_m ?? "cell"}`
+    + `|${JSON.stringify(scene.terrain ?? null)}`;
 }
 
 function cachedCatalog(scene: SceneDescription, environmentId: EnvironmentId, options: EnvironmentProxyCatalogOptions): EnvironmentProxyCatalog | undefined {

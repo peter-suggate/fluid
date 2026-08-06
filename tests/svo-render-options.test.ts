@@ -17,14 +17,29 @@ test("GLOBAL SVO exposes effects without retaining alternate render or lighting 
   }
 });
 
-test("visual controls expose one GLOBAL path with structural SVO overlays", () => {
+test("visual controls expose one GLOBAL path with two surface arms", () => {
   const panel = readFileSync(new URL("../components/VisualPanel.tsx", import.meta.url), "utf8");
   assert.doesNotMatch(panel, /aria-label="Renderer"|>RASTER<\/button>|>DIRECT<\/button>|>BEAUTIFUL<\/button>/);
   assert.match(panel, /GLOBAL SVO VIEW/);
-  assert.match(panel, /selectRepresentation\("smooth"\)[^]*>SHADED<\/button>/);
-  assert.match(panel, /selectRepresentation\("raw-voxels"\)[^]*>RAW<\/button>/);
-  assert.match(panel, /selectRepresentation\("surface-voxels"\)[^]*>SURFACE<\/button>/);
-  assert.match(panel, /selectRepresentation\("occupied-bricks"\)[^]*>CONTENT<\/button>/);
+  // SHADED and RAW select what the primary does with a hit, not which renderer
+  // draws it. Both are the real SVO frame: SHADED shades the gradient of the
+  // trilinearly reconstructed distance field, RAW the cube face that shipped.
+  // Pinned as a pair because the pair is the point — RAW is the reference arm,
+  // and a build where it stopped being reachable would leave every smooth-normal
+  // regression with nothing to be compared against.
+  assert.match(panel, /selectSurface\("trilinear"\)[^]*>SHADED<\/button>/);
+  assert.match(panel, /selectSurface\("voxel-face"\)[^]*>RAW<\/button>/);
+  assert.match(panel, /setTuning\(\{ \.\.\.tuning, surfaceReconstruction \}\)/,
+    "the surface choice must reach the renderer as render tuning");
+  // LEVELS / SURFACE / BRICKS / CONTENT selected the expanded-record inspection
+  // overlay — a second renderer, fed from its own 48-byte-per-voxel arenas
+  // (~295 MB on the widened ocean scene), drawn additively over the real SVO
+  // frame. It went with those arenas, and with it the store field the whole
+  // strip switched on, so the view strip is now exactly the two surface arms.
+  assert.doesNotMatch(panel, /voxelRenderMode|selectRepresentation|setVoxelRenderMode/,
+    "no control may still reach for the removed inspection representation");
+  assert.doesNotMatch(panel, />LEVELS<\/button>|>SURFACE<\/button>|>BRICKS<\/button>|>CONTENT<\/button>/,
+    "the inspection representation buttons are gone with their renderer");
   assert.match(panel, /aria-label="SVO lighting effects"[^]*<Toggle label="Shadows"[^]*onChange=\{setSvoShadowsEnabled\}[^]*<Toggle label="AO"[^]*onChange=\{setSvoAmbientOcclusionEnabled\}/);
   assert.match(panel, /<Toggle label="Close primary seams"[^]*checked=\{silhouetteRefinementEnabled\}[^]*onChange=\{setSilhouetteRefinementEnabled\}/,
     "primary seam closure must be an explicit render control");
@@ -35,9 +50,9 @@ test("visual controls expose one GLOBAL path with structural SVO overlays", () =
 
   const renderer = readFileSync(new URL("../lib/webgpu-renderer.ts", import.meta.url), "utf8");
   assert.match(renderer, /requested\.push\("svo-dry-scene"\)/,
-    "GLOBAL remains active for every structural view");
-  assert.match(renderer, /Structural views diagnose the same GLOBAL frame[^]*colorLoadOp: "load"/,
-    "structural views blend over GLOBAL instead of clearing it");
+    "GLOBAL remains the one production presentation");
+  assert.doesNotMatch(renderer, /voxelRenderMode|voxelDebug|voxelInspection|"voxel-debug"/,
+    "the renderer must hold no attachment, depth target or encode path for the removed overlay");
   assert.doesNotMatch(renderer, /failureReason: "inspection-mode"/);
 });
 

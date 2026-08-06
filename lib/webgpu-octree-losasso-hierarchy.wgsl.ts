@@ -235,8 +235,39 @@ fn buildLosassoParentRows(@builtin(local_invocation_index)lane:u32){
 fn centre(cell:vec4u,axis:u32)->f32{
  return f32(cell[axis])+.5*f32(cell.w);
 }
-fn boundaryPlane(cell:vec4u,axis:u32,positiveCell:bool)->f32{
- return f32(cell[axis])+select(f32(cell.w),0.,positiveCell);
+// A coarse row is ONE unknown sitting at the aggregate centre, so the Dirichlet
+// distance for a boundary patch is the aggregate's own half-width -- not the
+// distance from that centre to whichever fine plane produced the patch.
+//
+// The old fine-plane form was two-valued, and provably so: parentSize is
+// max(fine.w, targetSpan) with targetSpan only doubling, so an aggregate spans
+// either 1 or 2 fine cells per axis. Writing S for the aggregate span and w for
+// the fine span, |plane - centre| is w/2 = S/2 when k=1, and either 0 or w = S/2
+// when k=2 -- the 0 arising exactly when the patch faces the aggregate's own
+// mid-plane, which is where a free surface cuts through an aggregate's interior.
+// That zero produced an infinite coefficient, so the build fail-closed with
+// ERROR_GEOMETRY, which unpublished the level and cascaded through
+// controlValid() to every coarser one, which made the fused sub-L0 enable
+// predicate false, which silently left the preconditioner as four damped-Jacobi
+// sweeps on L0. Measured 2026-08-06: L2 on the 128-cubed lane and L4 on the
+// symmetric-expansion guide lane, i.e. the V-cycle was inert on both tiers.
+//
+// This form is bit-identical to the old one on every face where the old one was
+// valid; it only replaces the zeros with the value the sibling patch of the same
+// aggregate already had. It also makes the boundary term exactly the Galerkin
+// image of the fine Dirichlet coefficient at the first transition, and keeps it
+// a fixed 2x the interior term at every span, so the surface pinning neither
+// vanishes nor dominates as the hierarchy deepens.
+//
+// The span is recomputed from the FINE cell exactly as parentCell does rather
+// than read from coarseCells[parent]. They are the same number for a well-formed
+// row, but coarseCells entries past the live parent count are never cleared, so
+// a stale parent index reads a zero-span cell -- which would be a zero distance,
+// i.e. precisely the failure being removed. (The old form consumed that same
+// zeroed cell through centre() and merely happened not to produce 0 from it.)
+// targetSpan is at least 2, so this is positive by construction.
+fn coarseBoundaryDistance(fineCell:vec4u,axis:u32)->f32{
+ return .5*f32(max(fineCell.w,p.dimensionsTarget.w))*p.cellSize[axis];
 }
 
 // Retaining the fine face patches avoids a topology-dependent floating area
@@ -267,12 +298,17 @@ fn buildLosassoCoarseFaces(@builtin(local_invocation_index)lane:u32){
   let negativeCell=coarseCells[negative];var distance=0.;
   if(positive!=INVALID){distance=abs(centre(coarseCells[positive],face.axis)
     -centre(negativeCell,face.axis))*p.cellSize[face.axis];}
-  else{let positiveCell=(face.reserved&0x80000000u)!=0u;
-   distance=abs(boundaryPlane(fineCells[face.negativeRow],face.axis,positiveCell)
-    -centre(negativeCell,face.axis))*p.cellSize[face.axis];}
-  if(!(distance>0.)){coarseControl[4]|=ERROR_GEOMETRY;continue;}
+  else{distance=coarseBoundaryDistance(fineCells[face.negativeRow],face.axis);}
+  // Both arms are now positive by construction, so this is a fail-closed
+  // assertion rather than a live path. It must still not skip the slot: the
+  // counting pass above reserved one per face with negative!=positive, and the
+  // published face count is that prefix total, so skipping the slot would leave
+  // the tail of every lane's range holding the previous epoch's records.
+  let valid=distance>0.;
+  if(!valid){coarseControl[4]|=ERROR_GEOMETRY;}
   var coarseFace=face;coarseFace.negativeRow=negative;coarseFace.positiveRow=positive;
-  coarseFace.inverseDistance=1./distance;coarseFaces[destination]=coarseFace;
+  coarseFace.inverseDistance=select(0.,1./select(1.,distance,valid),valid);
+  coarseFaces[destination]=coarseFace;
   storeFusedFace(destination,coarseFace);
   coarseFaceSources[destination]=faceId;destination+=1u;
  }
@@ -381,9 +417,7 @@ fn refreshCoarseFace(faceId:u32,reusedOnly:bool){
   distance=abs(centre(coarseCells[targetFace.positiveRow],targetFace.axis)
    -centre(negativeCell,targetFace.axis))*p.cellSize[targetFace.axis];
  }else{
-  let positiveCell=(source.reserved&0x80000000u)!=0u;
-  distance=abs(boundaryPlane(fineCells[source.negativeRow],source.axis,positiveCell)
-   -centre(negativeCell,targetFace.axis))*p.cellSize[targetFace.axis];
+  distance=coarseBoundaryDistance(fineCells[source.negativeRow],targetFace.axis);
  }
  if(!(distance>0.)){coarseControl[4]|=ERROR_GEOMETRY;return;}
  targetFace.inverseDistance=1./distance;

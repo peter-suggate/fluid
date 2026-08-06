@@ -4,6 +4,7 @@ import { cameraForPreset, scenePresets } from "./scenes";
 import { buildSvoSceneGlass, type SvoSceneGlassUnsupportedEntry } from "./svo-scene-glass";
 import { buildSvoSceneThickGlass, type SvoSceneThickGlassMetadata } from "./svo-scene-thick-glass";
 import { buildSvoSceneLights } from "./svo-light-abi";
+import { svoFieldProgramFeatureRadius_m } from "./svo-field-program";
 import { svoClusterFeatureRadius_m } from "./svo-primitive-abi";
 import { buildSvoScenePrimitives } from "./svo-scene-primitives";
 import {
@@ -120,6 +121,15 @@ function dimensions(proxy: EnvironmentProxyPrimitive): readonly [number, number,
   // here would let cell-centre voxelization drop it.
   if (proxy.kind === "cluster") {
     const feature = 2 * svoClusterFeatureRadius_m(proxy.radius_m, proxy.packing);
+    return [feature, feature, feature];
+  }
+  // A tape's smallest solid width is the same question one level up, and the
+  // tape answers it directly rather than through an envelope: `worley-subtract`
+  // knows its pit period, a `scatter` knows its cell. Reading the conservative
+  // box here would call a pitted stone thick because the stone is, which is the
+  // failure the cluster arm above exists to avoid.
+  if (proxy.kind === "field-program") {
+    const feature = 2 * svoFieldProgramFeatureRadius_m(proxy.program);
     return [feature, feature, feature];
   }
   return [2 * proxy.radius_m.x, 2 * proxy.radius_m.y, 2 * proxy.radius_m.z];

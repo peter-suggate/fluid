@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
-import { planSvoNodeMipPyramid } from "../lib/svo-node-mip-pyramid";
+import { SVO_NODE_MIP_LAYOUT, planSvoNodeMipPyramid } from "../lib/svo-node-mip-pyramid";
 import { createWebGpuSvoNodeMipDirectPageTable } from "../lib/webgpu-svo-node-mip-pyramid";
 import {
   liveSvoBasePageDimensions,
@@ -16,6 +16,7 @@ import {
   liveSvoDerivedCopyWGSL,
   liveSvoDerivedEmptyInitializationWGSL,
   liveSvoLeafBasePages,
+  liveSvoLeafPage,
   liveSvoRadianceFeedbackWGSL,
   liveSvoDerivedWorklistWGSL,
 } from "../lib/webgpu-svo-live-derived-builder";
@@ -151,7 +152,17 @@ test("4- and 8-cell leaves map generically into fixed 8-cell pages and arbitrary
   assert.deepEqual(liveSvoLeafBasePages({ coordinate: [1, 0, 1], leafLevel: 4, finestLevel: 5, brickSize: 8 }), [
     [2, 0, 2], [3, 0, 2], [2, 1, 2], [3, 1, 2],
     [2, 0, 3], [3, 0, 3], [2, 1, 3], [3, 1, 3],
-  ], "one coarse leaf schedules every base page it spatially covers");
+  ], "the legacy extent expansion covers every base page a coarse leaf spans");
+
+  // What the pyramid is actually seeded from: one page per leaf, at the level
+  // whose texels are its voxels. The eight base pages above hold the same 8^3
+  // voxels between them; page [1,0,1] at level 1 holds them once.
+  assert.deepEqual(liveSvoLeafPage({ coordinate: [3, 2, 1], leafLevel: 5, finestLevel: 5, brickSize: 8 }),
+    { level: 0, coordinate: [3, 2, 1] }, "a finest 8-cell leaf is one base page");
+  assert.deepEqual(liveSvoLeafPage({ coordinate: [1, 0, 1], leafLevel: 4, finestLevel: 5, brickSize: 8 }),
+    { level: 1, coordinate: [1, 0, 1] }, "a coarse leaf is one page at its own level, not 8^p base pages");
+  assert.deepEqual(liveSvoLeafPage({ coordinate: [7, 5, 3], leafLevel: 5, finestLevel: 5, brickSize: 4 }),
+    { level: 0, coordinate: [3, 2, 1] }, "a brick smaller than a page still lands in the page containing it");
 
   for (const [brickSize, brickDimensions, expectedPages] of [
     [4, [5, 3, 7], [3, 2, 4]],
@@ -169,8 +180,10 @@ test("4- and 8-cell leaves map generically into fixed 8-cell pages and arbitrary
     assert.equal(Math.max(...plan.pages.map(({ key }) => key.level)) + 1, levelCount);
   }
   assert.match(liveSvoDerivedWorklistWGSL, /cellMinimum=brickOrigin\*control\[11\]/);
-  assert.match(liveSvoDerivedWorklistWGSL, /firstPage=cellMinimum\/8u/);
-  assert.match(liveSvoDerivedWorklistWGSL, /lastPage=\(cellMaximum-vec3u\(1u\)\)\/8u/);
+  // The GPU mirror of `liveSvoLeafPage`: one seed level per leaf, walked up.
+  assert.match(liveSvoDerivedWorklistWGSL, /seedLevel=firstTrailingBit\(cells\)-3u/);
+  assert.match(liveSvoDerivedWorklistWGSL, /page=cellMinimum\/\(8u<<seedLevel\)/);
+  assert.match(liveSvoDerivedWorklistWGSL, /for\(var level=seedLevel;level<params\.domain\.y/);
   assert.match(liveSvoDerivedWorklistWGSL, /fn deepestLeaf\(globalCell:vec3u\)/);
   assert.match(liveSvoDerivedBuildWGSL, /fn leafLocal\(globalCell:vec3u,leaf:u32\)/);
 });
@@ -188,7 +201,9 @@ test("GPU builder preallocates scratch resources and encodes invalidate then fin
     await builder.initializePipelines();
     assert.deepEqual(mock.textures.map((texture) => texture.descriptor.format), ["rgba8unorm", "rgba16float"]);
     assert.deepEqual(builder.scratchAtlasPages, [2, 1, 1], "scratch follows the largest dirty-level budget, not target atlas capacity");
-    assert.deepEqual(mock.textures.map((texture) => texture.descriptor.size), [[20, 10, 10], [20, 10, 40]]);
+    const physicalSize = SVO_NODE_MIP_LAYOUT.physicalSize;
+    assert.deepEqual(mock.textures.map((texture) => texture.descriptor.size),
+      [[2 * physicalSize, physicalSize, physicalSize], [2 * physicalSize, physicalSize, 4 * physicalSize]]);
     assert.equal(mock.buffers.length, 2, "only fixed scratch-validity and parameter buffers are allocated by the builder");
     assert.deepEqual([...new Uint32Array(mock.writes[0][2] as ArrayBuffer).slice(12, 16)], [64, 128, 192, 256],
       "fluid/dynamic and scene geometry/material lanes remain disjoint inputs");

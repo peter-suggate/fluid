@@ -17,7 +17,7 @@ import {
   svoDryPrimitiveArenaCacheInvalidation,
   svoDrySceneShader,
 } from "../lib/webgpu-svo-dry-scene";
-import type { SparseVoxelRenderSource } from "../lib/webgpu-voxel-debug";
+import type { SparseVoxelSceneRenderSource } from "../lib/webgpu-voxel-debug";
 import { SVO_CONE_RADIANCE_RECONSTRUCTION_CODES } from "../lib/svo-render-tuning";
 import { svoDrySceneFixture } from "./svo-dry-scene-test-fixture";
 
@@ -41,7 +41,7 @@ test("live derived page validity uses sampled uint bindings with zero fallbacks"
     "the edge tier must retain typed failure publication for genuinely unavailable live pages");
 });
 
-function source(): SparseVoxelRenderSource {
+function source(): SparseVoxelSceneRenderSource {
   const resource = { buffer: {} as GPUBuffer };
   return {
     materialCount: 8,
@@ -65,7 +65,7 @@ function source(): SparseVoxelRenderSource {
       },
       generation: { published: 1, completed: 1 },
     },
-  } as unknown as SparseVoxelRenderSource;
+  } as unknown as SparseVoxelSceneRenderSource;
 }
 
 test("GLOBAL lighting and its visibility effects write independent flags", () => {
@@ -117,13 +117,13 @@ test("GLOBAL lighting and its visibility effects write independent flags", () =>
     assert.equal(requestedWithoutDerivedFlags & SVO_DRY_VISIBILITY_FLAGS.globalIlluminationRequested, 0,
       "the effective exact path must not ask shader stages to sample an unavailable GI atlas");
     assert.equal(requestedWithoutDerivedFlags & SVO_DRY_VISIBILITY_FLAGS.globalIllumination, 0);
-    const giSource = source() as unknown as SparseVoxelRenderSource & Record<string, unknown>;
+    const giSource = source() as unknown as SparseVoxelSceneRenderSource & Record<string, unknown>;
     const plan = { generation: 1, complete: true, pages: [{ key: { generation: 1, level: 0, coordinate: [0, 0, 0] }, slot: 0 }], atlas: { texels: [10, 10, 10] } };
     Object.assign(giSource, {
       nodeMipPyramid: { generation: 1, plan, worldOrigin_m: [0, 0, 0], pageValidity: { view: {} } },
       tetrahedralRadiance: { generation: 1, plan, views: [{}, {}, {}, {}] },
     });
-    renderer.setSource(giSource as unknown as SparseVoxelRenderSource);
+    renderer.setSource(giSource as unknown as SparseVoxelSceneRenderSource);
     renderer.publishScene(svoDrySceneFixture);
     const giFlags = flagWord(params().at(-1)!);
     assert.equal(giFlags & SVO_DRY_VISIBILITY_FLAGS.globalIllumination, SVO_DRY_VISIBILITY_FLAGS.globalIllumination);

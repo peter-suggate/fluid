@@ -1640,12 +1640,17 @@ fn mergeScalars(a: MergedScalars, b: MergedScalars) -> MergedScalars {
   );
 }
 
-fn fixedMergedValue() -> MergedScalars {
+// Cooperative fold of the four merged scalars. The fold vector is the live
+// partial count for scalars this call site consumes and 0 for the rest: a scalar
+// the producing pass never deposited into holds cleared limbs, so folding it and
+// skipping it both yield +0.0. Selection is by count, never by branching --
+// fixedScalarValue carries workgroup barriers and must stay uniform.
+fn fixedMergedValue(lane: u32, fold: vec4u) -> MergedScalars {
   return MergedScalars(
-    CompensatedF32(fixedScalarValue(0u), 0.0),
-    CompensatedF32(fixedScalarValue(1u), 0.0),
-    CompensatedF32(fixedScalarValue(2u), 0.0),
-    CompensatedF32(fixedScalarValue(3u), 0.0),
+    CompensatedF32(fixedScalarValue(0u, lane, fold.x), 0.0),
+    CompensatedF32(fixedScalarValue(1u, lane, fold.y), 0.0),
+    CompensatedF32(fixedScalarValue(2u, lane, fold.z), 0.0),
+    CompensatedF32(fixedScalarValue(3u, lane, fold.w), 0.0),
   );
 }
 
@@ -1831,7 +1836,19 @@ fn finishMergedReduction(
   @builtin(subgroup_invocation_id) subgroupLane: u32,
   @builtin(subgroup_size) subgroupSize: u32,
 ) {
-  if (lane == 0u) { finishMergedTotal(fixedMergedValue()); }
+  // finishMergedTotal discards the totals on both of its leading exits (a
+  // failed solve zeroes the remaining dispatch records; a converged one returns
+  // at control[1]). This is a direct [1,1,1] dispatch that indirect retirement
+  // cannot zero, so an encoded-but-retired iteration used to pay a full fold for
+  // a value nobody read. Fold nothing on those paths -- but still CALL
+  // finishMergedTotal, because the failed branch owns the dispatch zeroing.
+  let retired = failed() || atomicLoad(&control[1]) != 0u;
+  let live = select(livePartialCount(), 0u, retired);
+  // delta and bb are deposited by reduceMergedPartials only on the initial
+  // reduction; on every later one their limbs are cleared and fold to +0.0.
+  let initialOnly = select(0u, live, atomicLoad(&control[3]) == 0u);
+  let total = fixedMergedValue(lane, vec4u(live, initialOnly, live, initialOnly));
+  if (lane == 0u) { finishMergedTotal(total); }
 }
 
 @compute @workgroup_size(${OCTREE_PIPELINED_PCG_WORKGROUP_SIZE})
@@ -1950,7 +1967,12 @@ fn finishDirectionCurvature(
   @builtin(subgroup_invocation_id) subgroupLane: u32,
   @builtin(subgroup_size) subgroupSize: u32,
 ) {
-  if (lane == 0u) { finishDirectionCurvatureTotal(fixedMergedValue()); }
+  // reduceDirectionCurvaturePartials deposits scalar 1 alone, and
+  // finishDirectionCurvatureTotal reads delta alone and returns immediately
+  // when stopped: fold that one scalar, and only while the solve is live.
+  let live = select(livePartialCount(), 0u, stopped());
+  let total = fixedMergedValue(lane, vec4u(0u, live, 0u, 0u));
+  if (lane == 0u) { finishDirectionCurvatureTotal(total); }
 }
 
 @compute @workgroup_size(${OCTREE_PIPELINED_PCG_WORKGROUP_SIZE})
@@ -2045,7 +2067,9 @@ const MGPCG_ACTIVITY_ENTRIES: readonly MGPCGActivityEntry[] = [
   { entryPoint: "finishMergedReduction", workgroupLaneCount: 128,
     workgroupId: "activityWorkgroupId", localInvocationIndex: "lane",
     injectWorkgroupId: true, meaningfulWhen: "true",
-    activeWhen: "lane < livePartialCount()" },
+    // The cooperative fold occupies one lane per (limb, partial-slice) slot,
+    // independent of how many partials there are.
+    activeWhen: "lane < FIXED_FOLD_LANES" },
   { entryPoint: "reduceAndFinishMerged", workgroupLaneCount: 128,
     workgroupId: "activityWorkgroupId", localInvocationIndex: "lane",
     injectWorkgroupId: true, meaningfulWhen: "!stopped()",
@@ -2072,7 +2096,7 @@ const MGPCG_ACTIVITY_ENTRIES: readonly MGPCGActivityEntry[] = [
   { entryPoint: "finishDirectionCurvature", workgroupLaneCount: 128,
     workgroupId: "activityWorkgroupId", localInvocationIndex: "lane",
     injectWorkgroupId: true, meaningfulWhen: "!stopped()",
-    activeWhen: "lane < livePartialCount() && !stopped()" },
+    activeWhen: "lane < FIXED_FOLD_LANES && !stopped()" },
   { entryPoint: "reduceAndFinishDirectionCurvature", workgroupLaneCount: 128,
     workgroupId: "activityWorkgroupId", localInvocationIndex: "lane",
     injectWorkgroupId: true, meaningfulWhen: "!stopped()",

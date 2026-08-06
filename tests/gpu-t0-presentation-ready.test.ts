@@ -96,10 +96,14 @@ test("renderer publishes ready only after first raster submission completion and
   assert.match(renderer, /initialRasterSubmission[\s\S]*queue\.onSubmittedWorkDone\(\)\.then\(async\(\)=>[\s\S]*settleInitialRasterPresentation/);
   assert.match(renderer, /initialDiagnostics=await surfaceDiagnosticsCompletion[\s\S]*settleInitialRasterPresentation/,
     "diagnostics mode must settle from the readback belonging to the fenced t=0 submission");
+  assert.match(renderer, /initialRasterSourceReady[\s\S]*surfaceDiagnosticsRequired && initialRasterSourceReady/,
+    "a reset must request a fresh diagnostic receipt for its exact t=0 source");
+  assert.match(renderer, /rasterResult\.surfaceDiagnosticsCaptured/,
+    "the reset fence must not settle from a throttled or still-pending older diagnostic");
   assert.match(renderer, /state: "blocked", label: outcome\.label/,
     "an empty or retained raster diagnostic must remain attached but fail transport closed");
   assert.doesNotMatch(renderer, /initialRasterGlobalFineRequired|globalFineRequired/);
-  assert.match(renderer, /readyGPUFluid\.initialSparseAuthorityReady === true[\s\S]*Boolean\(readyGPUFluid\.globalFineLevelSetSource \|\| readyGPUFluid\.coarseLevelSetSource\)/);
+  assert.match(renderer, /readyGPUFluid\.initialSparseAuthorityReady === true[\s\S]*readyGPUFluid\.globalFineLevelSetSource \|\| readyGPUFluid\.coarseLevelSetSource/);
   assert.match(renderer, /this\.globalFineWaterAttached[\s\S]*rasterResult\.surfaceUpdated/);
   assert.match(controller, /initialSparseAuthorityReady === true[\s\S]*initialRasterSurfaceReady === true/);
   assert.match(transport, /initialSparseAuthorityReady === true[\s\S]*initialRasterSurfaceReady === true/);
@@ -108,4 +112,12 @@ test("renderer publishes ready only after first raster submission completion and
     "a fail-closed raster stays visually inspectable and must not destroy the device");
   assert.match(viewport, /startupMode\(\) === "manual" \|\| startupMode\(\) === "safe"/,
     "manual and safe startup must remain explicit");
+
+  const water = readFileSync(new URL("../lib/webgpu-water-pipeline.ts", import.meta.url), "utf8");
+  assert.match(water, /const updateSurface = forceSurfaceDiagnostics[\s\S]*shouldUpdateWaterSurface/,
+    "a paused reset must retry extraction even though its solver revision is unchanged");
+  assert.match(water, /if \(!force && !this\.surfaceDiagnosticsFullRateRequested\(\)/,
+    "the reset receipt must bypass the ordinary bounded telemetry cadence");
+  assert.match(water, /surfaceDiagnosticPending \|\| !this\.indirectBuffer\) return false/,
+    "a reset must wait rather than overwrite a diagnostic receipt still in flight");
 });

@@ -70,7 +70,7 @@ test("paused solver attachment publications cannot suppress the continuous prese
   const attachStart = rendererSource.indexOf("this.gpuFluidPending=create.then");
   const attachEnd = rendererSource.indexOf("}).catch((error:unknown)", attachStart);
   const attach = rendererSource.slice(attachStart, attachEnd);
-  const sourceAttach = attach.indexOf("this.attachSparsePresentationSource(solver,generation,startedAt_ms)");
+  const sourceAttach = attach.indexOf("this.attachSparsePresentationSource(solver,generation,startedAt_ms,");
   const repaint = attach.indexOf("this.pausedPresentationRevision+=1", sourceAttach);
   assert.ok(sourceAttach >= 0 && repaint > sourceAttach,
     "the repaint revision must publish only after the warmed SVO renderer source attaches");
@@ -123,7 +123,7 @@ test("warm reset republishes t=0 authority and requests its paused raster fence"
     "reset clears the diagnostics store, so the live solver authority must be republished");
   assert.match(reseed, /finally\(\(\)=>\{[\s\S]*pausedPresentationRevision\+=1/,
     "a paused reset must explicitly wake the draw that submits its raster fence");
-  assert.match(reseed, /if\(!reseeded\)\{this\.beginGPUFluidInitialization\(scene,config,key\);return;\}/,
+  assert.match(reseed, /if\(!reseeded\)\{this\.beginGPUFluidInitialization\(scene,config,key,presentationMode\);return;\}/,
     "a declined warm re-seed must proceed directly to replacement instead of retrying forever");
 });
 
@@ -204,7 +204,7 @@ test("reset replacement attaches only after complete t=0 sparse authority is res
     renderer.indexOf("private beginGPUFluidInitialization"),
     renderer.indexOf("private currentGPUFluid"),
   );
-  assert.match(transaction, /const create:Promise<GPUSolverInstance>=prepare\(\)\.then\([\s\S]*method\.createSolverAsync/);
-  assert.match(transaction, /this\.gpuFluidPending=create\.then\(\(solver\)=>[\s\S]*this\.gpuFluid=solver/,
+  assert.match(transaction, /const create:Promise<\{solver:GPUSolverInstance;sidecar\?:WebGPULiveSvoScene\}>=prepare\(\)\.then\([\s\S]*method\.createSolverAsync/);
+  assert.match(transaction, /this\.gpuFluidPending=create\.then\(\(\{solver,sidecar\}\)=>[\s\S]*this\.gpuFluid=solver/,
     "only the fully warmed create promise may publish the replacement solver");
 });

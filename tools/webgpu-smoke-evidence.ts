@@ -32,7 +32,6 @@ function availability(result: UnknownRecord): string[] {
     ["checkpoint centroid", hasCheckpointFields],
     ["ceiling wet cells", hasCheckpointFields],
     ["initial fluid brick stats", result.initialFluidBrickStats !== undefined],
-    ["final sparse publication", result.sparseVoxelStats !== undefined],
     ["stability envelope", result.stabilityEnvelope !== undefined],
     ["tall-cell topology", result.finalTallCellActivity !== undefined
       && result.finalTallVolumeGaps !== undefined],
@@ -135,7 +134,6 @@ export function normalizeWebGPUSmokeEvidence(
         },
         sparse: {
           initialFluidBricks: result.initialFluidBrickStats,
-          finalPublication: result.sparseVoxelStats,
           hybridPresentation: result.hybridPresentationStats,
         },
         velocity: {

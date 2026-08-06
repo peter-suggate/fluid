@@ -9,6 +9,7 @@ import {
   type SparseBrickPlan,
   type SparseBrickSize,
 } from "./sparse-brick-octree";
+import { completeCooperativeBuild } from "./cooperative-build";
 
 export interface AdaptiveSparseBrickPlanOptions {
   brickSize: SparseBrickSize;
@@ -118,30 +119,62 @@ function canonicalCoordinate(
   return { x: coordinate.x, y: coordinate.y, z: coordinate.z };
 }
 
-function canonicalize(options: AdaptiveSparseBrickPlanOptions, solverLevel: number): CanonicalInputs {
+/**
+ * How many items of a flat pass run between yield offers.
+ *
+ * The planner's loops are millions of iterations of a few hundred nanoseconds,
+ * so offering a yield on every one would be dominated by the offer. A batch of
+ * this size is a few hundred microseconds of work — two orders of magnitude
+ * below the driver's slice, so the slice budget rather than the batch is what
+ * decides responsiveness, while the per-item cost of the offer disappears.
+ */
+const PLAN_YIELD_BATCH = 4096;
+
+/**
+ * The same, for the adaptive descent, whose per-item cost is not comparable.
+ *
+ * A flat pass moves a Morton key; a descent evaluates `refineEnvironmentLeaf`,
+ * which on a refined garden asks an exact distance function or a ground-column
+ * pyramid and is measured in tens of microseconds. Sized so a batch stays
+ * inside the driver's slice even at that cost.
+ */
+const PLAN_DESCENT_YIELD_BATCH = 64;
+
+function* canonicalizeSteps(
+  options: AdaptiveSparseBrickPlanOptions,
+  solverLevel: number,
+): Generator<unknown, CanonicalInputs, undefined> {
   const solver = new Map<bigint, SparseBrickCoordinate>();
   const proxy = new Map<bigint, SparseBrickCoordinate>();
+  let visited = 0;
   for (const input of options.solverBricks) {
     // Solver bricks are addressed in their own level's domain, which is coarser
     // than the tree's whenever the environment is being resolved more finely.
     const coordinate = canonicalCoordinate(input, solverLevel, "Solver brick");
     solver.set(mortonEncode3D(coordinate.x, coordinate.y, coordinate.z), coordinate);
+    if ((visited += 1) % PLAN_YIELD_BATCH === 0) yield;
   }
   for (const input of options.proxyBricks) {
     const coordinate = canonicalCoordinate(input, options.maximumDepth, "Proxy brick");
     proxy.set(mortonEncode3D(coordinate.x, coordinate.y, coordinate.z), coordinate);
+    if ((visited += 1) % PLAN_YIELD_BATCH === 0) yield;
   }
   return { solver, proxy };
 }
 
-function prefixSets(finestKeys: Iterable<bigint>, maximumDepth: number): Set<bigint>[] {
+function* prefixSetsSteps(
+  finestKeys: Iterable<bigint>,
+  maximumDepth: number,
+): Generator<unknown, Set<bigint>[], undefined> {
   const levels = Array.from({ length: maximumDepth + 1 }, () => new Set<bigint>());
+  let visited = 0;
   for (const finestKey of finestKeys) {
     let key = finestKey;
     for (let level = maximumDepth; level >= 0; level -= 1) {
       levels[level].add(key);
       key >>= 3n;
     }
+    if ((visited += 1) % PLAN_YIELD_BATCH === 0) yield;
   }
   return levels;
 }
@@ -160,15 +193,36 @@ function popcount8(value: number): number {
  * Plan one pointerless octree containing fine solver leaves and adaptively
  * coarsened environment leaves. A proxy leaf is accepted only when its entire
  * extent is free of solver bricks; otherwise proxy coverage descends locally.
+ *
+ * The one-shot form, for callers that are already synchronous. See
+ * {@link planAdaptiveSparseBrickOctreeSteps} for the interruptible one; both
+ * run the same body, so there is no second definition of the plan.
  */
 export function planAdaptiveSparseBrickOctree(options: AdaptiveSparseBrickPlanOptions): SparseBrickPlan {
+  return completeCooperativeBuild(planAdaptiveSparseBrickOctreeSteps(options));
+}
+
+/**
+ * The same plan, offered as slices.
+ *
+ * At environment refinement depth 3 on `hero-garden-hose` this is the single
+ * longest uninterrupted block in a scene build, and the reason the render
+ * worker cannot service a `draw` — or the abort of the very request that
+ * superseded it — while a refined scene is being planned. Every `yield` here is
+ * at a point where the planner owns nothing but its own local state: no GPU
+ * resource exists yet at any of them, so an abandoned plan is collected rather
+ * than released.
+ */
+export function* planAdaptiveSparseBrickOctreeSteps(
+  options: AdaptiveSparseBrickPlanOptions,
+): Generator<unknown, SparseBrickPlan, undefined> {
   if (options.brickSize !== 4 && options.brickSize !== 8) throw new RangeError("Sparse brick size must be 4 or 8");
   const maximumDepth = assertDepth(options.maximumDepth);
   const solverLevel = assertSolverLevel(options.solverLevel ?? maximumDepth, maximumDepth);
   const coarseningPower = assertCoarseningPower(options.maximumEnvironmentCoarseningPower, solverLevel);
-  const inputs = canonicalize(options, solverLevel);
-  const solverPrefixes = prefixSets(inputs.solver.keys(), solverLevel);
-  const proxyPrefixes = prefixSets(inputs.proxy.keys(), maximumDepth);
+  const inputs = yield* canonicalizeSteps(options, solverLevel);
+  const solverPrefixes = yield* prefixSetsSteps(inputs.solver.keys(), solverLevel);
+  const proxyPrefixes = yield* prefixSetsSteps(inputs.proxy.keys(), maximumDepth);
   const minimumEnvironmentLevel = solverLevel - coarseningPower;
   const refine = options.refineEnvironmentLeaf;
 
@@ -188,30 +242,43 @@ export function planAdaptiveSparseBrickOctree(options: AdaptiveSparseBrickPlanOp
   const leafKeys = new Set<string>();
   for (const key of inputs.solver.keys()) leafKeys.add(`${solverLevel}:${key}`);
 
-  const addProxyLeaves = (level: number, key: bigint): void => {
-    const descend = (): void => {
+  /**
+   * The descent, as a generator so a yield offer reaches the driver from any
+   * depth of the recursion.
+   *
+   * `yield*` costs one generator object per visited node and nothing per
+   * *offer*, because a delegation that never yields is never resumed. The
+   * alternative — offering only at the roots — makes the interrupt granularity
+   * a property of how the scene happens to be laid out, which on a garden whose
+   * geometry sits under a handful of coarse nodes is no granularity at all.
+   */
+  let visited = 0;
+  function* addProxyLeaves(level: number, key: bigint): Generator<unknown, void, undefined> {
+    function* descend(): Generator<unknown, void, undefined> {
       for (let octant = 0; octant < 8; octant += 1) {
         const child = mortonChild(key, octant);
-        if (proxyPrefixes[level + 1].has(child)) addProxyLeaves(level + 1, child);
+        if (proxyPrefixes[level + 1].has(child)) yield* addProxyLeaves(level + 1, child);
       }
-    };
+    }
+    if ((visited += 1) % PLAN_DESCENT_YIELD_BATCH === 0) yield;
     if (solverCovers(level, key)) {
       // The coincident solver leaf provides coverage; nothing below it is ours.
       if (level >= solverLevel) return;
-      descend();
+      yield* descend();
       return;
     }
     if (level < maximumDepth && refine?.(level, coordinateForKey(key, level))) {
-      descend();
+      yield* descend();
       return;
     }
     leafKeys.add(`${level}:${key}`);
-  };
+  }
   for (const key of [...proxyPrefixes[minimumEnvironmentLevel]].sort(compareMorton)) {
-    addProxyLeaves(minimumEnvironmentLevel, key);
+    yield* addProxyLeaves(minimumEnvironmentLevel, key);
   }
 
   const nodesByLevel = Array.from({ length: maximumDepth + 1 }, () => new Map<bigint, SparseBrickCoordinate>());
+  visited = 0;
   for (const leafKey of leafKeys) {
     const separator = leafKey.indexOf(":");
     const leafLevel = Number(leafKey.slice(0, separator));
@@ -220,14 +287,21 @@ export function planAdaptiveSparseBrickOctree(options: AdaptiveSparseBrickPlanOp
       if (!nodesByLevel[level].has(key)) nodesByLevel[level].set(key, coordinateForKey(key, level));
       key >>= 3n;
     }
+    if ((visited += 1) % PLAN_YIELD_BATCH === 0) yield;
   }
 
   const levelOffsets: number[] = [];
   const nodes: SparseBrickNodePlan[] = [];
   const nodeIndex = new Map<string, number>();
+  visited = 0;
   for (let level = 0; level <= maximumDepth; level += 1) {
     levelOffsets.push(nodes.length);
-    for (const [morton, coordinate] of [...nodesByLevel[level]].sort(([a], [b]) => compareMorton(a, b))) {
+    // The sort itself is not interruptible; the level boundary is the finest
+    // grain this pass has, and one level's sort is the residual stall it costs.
+    const ordered = [...nodesByLevel[level]].sort(([a], [b]) => compareMorton(a, b));
+    yield;
+    for (const [morton, coordinate] of ordered) {
+      if ((visited += 1) % PLAN_YIELD_BATCH === 0) yield;
       const index = nodes.length;
       nodeIndex.set(`${level}:${morton}`, index);
       nodes.push({
@@ -244,8 +318,10 @@ export function planAdaptiveSparseBrickOctree(options: AdaptiveSparseBrickPlanOp
   }
   levelOffsets.push(nodes.length);
 
+  visited = 0;
   for (let level = 0; level < maximumDepth; level += 1) {
     for (let index = levelOffsets[level]; index < levelOffsets[level + 1]; index += 1) {
+      if ((visited += 1) % PLAN_YIELD_BATCH === 0) yield;
       const node = nodes[index];
       let firstChild = SPARSE_BRICK_INVALID_INDEX;
       let childMask = 0;
@@ -263,7 +339,9 @@ export function planAdaptiveSparseBrickOctree(options: AdaptiveSparseBrickPlanOp
 
   const voxelsPerBrick = options.brickSize ** 3;
   const leaves: SparseBrickLeafPlan[] = [];
+  visited = 0;
   for (const node of nodes) {
+    if ((visited += 1) % PLAN_YIELD_BATCH === 0) yield;
     if (!leafKeys.has(`${node.level}:${node.morton}`)) continue;
     const index: number = leaves.length;
     node.leafIndex = index;

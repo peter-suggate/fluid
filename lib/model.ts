@@ -98,6 +98,33 @@ export interface SceneDescription {
     finestCellSize_m: number;
     /** Payload edge length of each sparse octree terminal brick. */
     brickSize_cells: 4 | 8;
+    /**
+     * The finest voxel the *set* will be drawn at, when that is not
+     * `finestCellSize_m`. Absent means the two are the same.
+     *
+     * These are two lattices, and conflating them is what makes authored detail
+     * stop following the picture. `finestCellSize_m` is the octree's own — the
+     * one the solver runs on and the one every world bound is measured in. But a
+     * scene the solver does not own may spend extra octree levels below it
+     * (`SvoRenderTuning.environmentRefinementDepth`, resolved in
+     * `webgpu-octree-sparse-bricks.ts` as `renderCellSize = cellSize / 2^depth`),
+     * so the voxel a floret or a bank is actually rasterised into can be four or
+     * eight times smaller than the field above.
+     *
+     * A generator needs the *smaller* number, because every legibility floor it
+     * carries is a count of voxels across a feature — see
+     * `bonsaiCanopyLadder` — and a heightfield needs it because the voxeliser
+     * takes one sample per finest column (`terrainColumnHeightsForLattice`).
+     * Neither can read a render tuning, and neither should: this is the one
+     * place the two lattices meet, and it travels with the document across the
+     * structured-clone boundary into the render worker.
+     *
+     * Validated rather than defaulted, on the same argument as
+     * `container.vessel` above: writing it into every document that round-trips
+     * through `parseScene` would make the optional form change what an authored
+     * scene says.
+     */
+    detailCellSize_m?: number;
     /** Optional minimum address-space bounds. Authored proxies may extend the sparse domain beyond them. */
     bounds_m?: {
       min: Vec3;
@@ -210,6 +237,26 @@ export interface MetricSample {
 export const BUILD_ID = "web-tall-cell-ab-1.3.0";
 export const DEFAULT_GPU_CPU_TIMESTEP_RATIO = 4;
 
+/**
+ * The lattice, for everything. One number, not one per scene.
+ *
+ * Scenes used to name their own spacing — 50 mm here, 25 mm there, a droplet
+ * constant somewhere else — so making the product finer meant finding and
+ * agreeing every one of them, and a scene that was missed simply stayed coarse
+ * without saying so. This is the single knob: change it here and every scene
+ * that has no *physical* reason to differ follows.
+ *
+ * 6.25 mm because that is where the hero garden's set becomes legible — at
+ * 25 mm the stepping discs merge into one mass, the coping's bullnose reads as
+ * a tube and the bonsai's crown is a disc; at 6.25 mm each resolves.
+ *
+ * It is the *render* lattice. A solved scene may not be able to carry it — the
+ * hero garden's fluid path overruns a one-workgroup-per-interface-leaf dispatch
+ * below 7.5 mm — so a factory building for the solver clamps it upward and says
+ * so. That clamp belongs to the system with the constraint, not to the scene.
+ */
+export const DEFAULT_FINEST_CELL_SIZE_M = 0.00625;
+
 export const defaultScene: SceneDescription = sharedDefaultScene as SceneDescription;
 
 export const defaultCamera: CameraState = {
@@ -290,6 +337,10 @@ export function validateScene(scene: SceneDescription): string[] {
   if (lighting?.directional?.intensity !== undefined && (!Number.isFinite(lighting.directional.intensity) || lighting.directional.intensity < 0)) errors.push("Scene directional-light intensity must be non-negative and finite");
   if (lighting?.grade?.exposure !== undefined && (!Number.isFinite(lighting.grade.exposure) || lighting.grade.exposure <= 0)) errors.push("Scene grade exposure must be positive and finite");
   if (lighting?.grade?.toneCurve !== undefined && lighting.grade.toneCurve !== "reinhard" && lighting.grade.toneCurve !== "aces") errors.push("Scene grade tone curve must be reinhard or aces");
+  if (lighting?.grade?.whiteBalance !== undefined) {
+    const balance = lighting.grade.whiteBalance;
+    if (balance.length !== 3 || !balance.every((value) => Number.isFinite(value) && value > 0)) errors.push("Scene grade white balance must contain three positive finite channel gains");
+  }
   for (const [value, label] of [[lighting?.environment?.diffuseScale, "diffuse"], [lighting?.environment?.specularScale, "specular"]] as const) {
     if (value !== undefined && (!Number.isFinite(value) || value < 0)) errors.push(`Scene environment ${label} scale must be non-negative and finite`);
   }
@@ -307,6 +358,15 @@ export function validateScene(scene: SceneDescription): string[] {
   if (!voxelDomain || !Number.isFinite(voxelDomain.finestCellSize_m) || !(voxelDomain.finestCellSize_m > 0)) errors.push("Voxel finest cell size must be positive and finite");
   if (!voxelDomain || (voxelDomain.brickSize_cells !== 4 && voxelDomain.brickSize_cells !== 8)) errors.push("Voxel brick size must be 4 or 8 cells");
   if (scene.systems?.fluid !== false && voxelDomain?.brickSize_cells === 4) errors.push("Fluid-enabled scenes require 8-cell voxel bricks");
+  // Never coarser than the lattice it refines: the field names the voxel a set
+  // is drawn *into*, and an octree spends levels downward from
+  // `finestCellSize_m` or not at all. A larger value would be a request the tree
+  // cannot service and would silently over-report how legible a feature is.
+  if (voxelDomain?.detailCellSize_m !== undefined
+    && (!(voxelDomain.detailCellSize_m > 0) || !Number.isFinite(voxelDomain.detailCellSize_m)
+      || voxelDomain.detailCellSize_m > voxelDomain.finestCellSize_m + 1e-12)) {
+    errors.push("Voxel detail cell size must be positive, finite and no coarser than the finest cell size");
+  }
   if (voxelDomain?.bounds_m) {
     const { min, max } = voxelDomain.bounds_m;
     if (![min?.x, min?.y, min?.z, max?.x, max?.y, max?.z].every(Number.isFinite)) errors.push("Voxel domain bounds must be finite");

@@ -10,13 +10,13 @@ import {
   svoDrySceneShader,
   type SparseVoxelDrySceneData,
 } from "../lib/webgpu-svo-dry-scene";
-import type { SparseVoxelRenderSource } from "../lib/webgpu-voxel-debug";
+import type { SparseVoxelSceneRenderSource } from "../lib/webgpu-voxel-debug";
 import { svoDrySceneFixture } from "./svo-dry-scene-test-fixture";
 
 const rendererSource = readFileSync(new URL("../lib/webgpu-renderer.ts", import.meta.url), "utf8");
 const panelSource = readFileSync(new URL("../components/VisualPanel.tsx", import.meta.url), "utf8");
 
-function structuralSource(): SparseVoxelRenderSource {
+function structuralSource(): SparseVoxelSceneRenderSource {
   const resource = { buffer: {} as GPUBuffer };
   return {
     materialCount: 2,
@@ -48,7 +48,7 @@ function structuralSource(): SparseVoxelRenderSource {
       },
       generation: { published: 1, completed: 1 },
     },
-  } as unknown as SparseVoxelRenderSource;
+  } as unknown as SparseVoxelSceneRenderSource;
 }
 
 test("production scene construction uploads pane records and exposes an explicit lab cutout fallback", () => {

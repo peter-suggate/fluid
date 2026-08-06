@@ -4,6 +4,7 @@ import type { EnvironmentId } from "./environments";
 import { environmentIds } from "./environments";
 import type { MethodProfile } from "./methods";
 import { sceneWithEnvironment } from "./scenery-presets";
+import { svoSceneryDetailCellSize_m, SVO_ENVIRONMENT_REFINEMENT_DEPTH_DEFAULT } from "./svo-render-tuning";
 
 /**
  * What a scene *is*, as data.
@@ -72,6 +73,41 @@ export interface SceneVariant {
   readonly apply: (scene: SceneDescription) => SceneDescription;
 }
 
+/**
+ * The two sizes a document is *built* at, as opposed to patched to.
+ *
+ * `cellSize_m` is the octree's finest cell. `detailCellSize_m` is the finest
+ * voxel the authored set is drawn into, which is smaller whenever a dry scene
+ * spends `SvoRenderTuning.environmentRefinementDepth` levels under the tree's
+ * own lattice — see `svoSceneryDetailCellSize_m`, which is the function that
+ * answers it.
+ *
+ * Both are inputs to construction and that is the whole point of the type. A
+ * heightfield is baked once, and a generator's legibility floors are counts of
+ * detail voxels resolved while it expands; a size written onto a finished
+ * document moves the tree and nothing that feeds it. The smoke lane learned
+ * this the expensive way — `FLUID_SVO_DRY_SMOKE_CELL_MM` overwrote
+ * `voxelDomain.finestCellSize_m` on a built scene until
+ * `createHeroGardenHoseSceneWithSet` took a lattice — and the browser had no
+ * equivalent path at all.
+ */
+export interface SceneLattice {
+  readonly cellSize_m: number;
+  /** Defaults to `cellSize_m`, which is every scene that asks for no extra levels. */
+  readonly detailCellSize_m?: number;
+}
+
+/**
+ * How much of the authored world a scene asks the renderer to present.
+ *
+ * `fluid-only` is the measurement path: the raster water pipeline keeps its
+ * complete surface and optics work, but consumes a retained clear background
+ * instead of constructing or drawing the sparse dry world. It is definition
+ * data rather than a dam-break special case so future simulation-focused scenes
+ * can select the same path without changing the renderer.
+ */
+export type ScenePresentationMode = "full-scene" | "fluid-only";
+
 export interface SceneDefinition {
   /** Stable identity. Persisted in URLs, saved scenes, lane tables and scripts. */
   readonly id: string;
@@ -83,11 +119,28 @@ export interface SceneDefinition {
   readonly shelf: string;
   /** Art-directed environment; part of this scene's presentation. */
   readonly environment: EnvironmentId;
+  /** Defaults to the authored dry world plus raster water. */
+  readonly presentationMode?: ScenePresentationMode;
   readonly camera?: Partial<CameraState>;
   /** Exact solver profile a numerical comparison requires. */
   readonly methodProfile?: MethodProfile;
   /** The document body, without environment or scenery. */
   readonly build: () => SceneDescription;
+  /**
+   * The same body, re-authored at a lattice — the one route to a finer document.
+   *
+   * Optional because most scenes are a container of water whose only size is
+   * `voxelDomain.finestCellSize_m`, and for those a patch and a rebuild are the
+   * same document. It is present on the scenes that bake something at
+   * construction: the hero garden bakes a heightfield, composes a set against
+   * the surface that bake produced, and hands every generator a detail voxel to
+   * resolve its legibility floors against.
+   *
+   * A definition that declares this promises `buildAt({ cellSize_m: c })` agrees
+   * with `build()` when `c` is the scene's authored lattice, so the preset and
+   * the rebuilt document are the same scene rather than two.
+   */
+  readonly buildAt?: (lattice: SceneLattice) => SceneDescription;
   readonly variants?: Readonly<Record<string, SceneVariant>>;
 }
 
@@ -135,12 +188,90 @@ export function defineScene(definition: SceneDefinition): SceneDefinition {
  * keeps it — re-seeding would throw away exactly the edits that make a study
  * scene a study — and from that point the document owns what it looks like.
  */
+/**
+ * The document the product opens, at the rung it opens scenes at.
+ *
+ * A definition's `build()` is its own default and answers to nobody; the
+ * *product's* choice of refinement depth is a policy, and this is the one place
+ * it is applied. A dry definition that declares `buildAt` is therefore built
+ * twice: once plainly, to learn the lattice it chose for itself, and again at
+ * `SVO_ENVIRONMENT_REFINEMENT_DEPTH_DEFAULT` levels under it. Measured at 3-8 ms
+ * a build on the hero garden — the terrain is a procedural description derived
+ * on demand rather than a baked grid, so construction is cheap and the second
+ * pass costs nothing worth avoiding.
+ *
+ * Twice rather than once because the depth is expressed as levels under a
+ * lattice and only the factory knows which lattice that is. Asking for a *depth*
+ * and letting the factory resolve the size is the alternative, and it would put
+ * the same policy into every factory.
+ *
+ * Only through `buildAt`. Writing a finer detail cell onto a document whose
+ * factory already ran would claim a leaf its terrain was never sampled for,
+ * which is the exact class of disagreement this file's lattice type exists to
+ * prevent — see {@link SceneLattice}. A definition with no `buildAt` opens at
+ * its own lattice, and the render panel's depth control patches it from there
+ * with the consequence stated.
+ */
 export function sceneDocument(definition: SceneDefinition, variantId?: string): SceneDescription {
+  const plain = finishSceneDocument(definition, definition.build(), variantId);
+  if (!definition.buildAt || plain.systems?.fluid !== false) return plain;
+  const cellSize_m = plain.voxelDomain.finestCellSize_m;
+  const detailCellSize_m = svoSceneryDetailCellSize_m(cellSize_m, {
+    environmentRefinementDepth: SVO_ENVIRONMENT_REFINEMENT_DEPTH_DEFAULT,
+    fluid: false,
+  });
+  // A factory that already authored a finer set has said something this policy
+  // has no better answer to, so it keeps it.
+  if ((plain.voxelDomain.detailCellSize_m ?? cellSize_m) <= detailCellSize_m) return plain;
+  return finishSceneDocument(definition, definition.buildAt({ cellSize_m, detailCellSize_m }), variantId);
+}
+
+/**
+ * The same document, re-authored at a lattice.
+ *
+ * This is the browser's counterpart to what `tools/run-svo-dry-render-smoke.ts`
+ * does with `FLUID_SVO_DRY_SMOKE_REFINEMENT`: regenerate the preset through its
+ * own factory with the sizes as *inputs*, rather than write them onto a finished
+ * document. A definition with no `buildAt` has nothing that a lattice would
+ * change at construction, so it falls back to `build()` and the caller patches
+ * the tree as it always did — announced by the returned `rebuilt` flag rather
+ * than by silently producing the coarse document.
+ */
+export function sceneDocumentAtLattice(
+  definition: SceneDefinition,
+  lattice: SceneLattice,
+  variantId?: string,
+): { readonly scene: SceneDescription; readonly rebuilt: boolean } {
+  assertSceneLattice(definition.id, lattice);
+  if (!definition.buildAt) return { scene: sceneDocument(definition, variantId), rebuilt: false };
+  return { scene: finishSceneDocument(definition, definition.buildAt(lattice), variantId), rebuilt: true };
+}
+
+/** Whether a lattice is an input this scene's factory takes, or only a patch. */
+export function sceneDefinitionTakesLattice(definition: SceneDefinition): boolean {
+  return definition.buildAt !== undefined;
+}
+
+function assertSceneLattice(id: string, lattice: SceneLattice): void {
+  const { cellSize_m, detailCellSize_m } = lattice;
+  if (!(cellSize_m > 0) || !Number.isFinite(cellSize_m)) {
+    throw new RangeError(`Scene ${id} lattice needs a positive finite cell size`);
+  }
+  if (detailCellSize_m !== undefined
+    && (!(detailCellSize_m > 0) || detailCellSize_m > cellSize_m + 1e-12)) {
+    throw new RangeError(`Scene ${id} detail cell size must be positive and no coarser than the lattice`);
+  }
+}
+
+function finishSceneDocument(
+  definition: SceneDefinition,
+  body: SceneDescription,
+  variantId?: string,
+): SceneDescription {
   const variant = variantId === undefined ? undefined : definition.variants?.[variantId];
   if (variantId !== undefined && !variant) {
     throw new Error(`Scene ${definition.id} has no variant ${variantId}`);
   }
-  const body = definition.build();
   const scene = variant ? variant.apply(body) : body;
   return scene.scenery
     ? { ...scene, environment: definition.environment }

@@ -274,7 +274,11 @@ export function heroGardenStressStandCount(recordMultiplier: number): number {
 export function createHeroGardenHoseStressScene(options: HeroGardenStressOptions = {}): SceneDescription {
   const recordMultiplier = options.recordMultiplier ?? 10;
   const standCount = heroGardenStressStandCount(recordMultiplier);
-  const scene = createHeroGardenHoseScene({ water: options.water });
+  // Spread rather than pick: `HeroGardenStressOptions` extends the hero's own,
+  // and a densified scene that ignored the lattice would bake its ground and
+  // grow its stands at a resolution the render tree is not using.
+  const { recordMultiplier: _ignored, ...heroOptions } = options;
+  const scene = createHeroGardenHoseScene(heroOptions);
   scene.sceneId = `hero-garden-hose-x${Number(recordMultiplier.toFixed(2))}`;
   const base = scene.scenery;
   if (!base) throw new Error("The hero garden must carry a scenery graph to be densified");

@@ -62,8 +62,9 @@ function decodeF16(bits: number): number {
  * an offline frame stops matching what the app shows — which is exactly the
  * thing this file is used to decide — so the curve is transcribed literally.
  */
-function displayGrade(value: number, grade: ResolvedDisplayGrade): number {
-  const exposed = Math.max(0, Number.isFinite(value) ? value : 0) * Math.max(0, grade.exposure);
+function displayGrade(value: number, grade: ResolvedDisplayGrade, channel: number): number {
+  const balanced = Math.max(0, Number.isFinite(value) ? value : 0) * Math.max(0, grade.whiteBalance[channel]);
+  const exposed = balanced * Math.max(0, grade.exposure);
   const mapped = grade.toneCurve === "aces"
     ? Math.min(1, Math.max(0, (exposed * (2.51 * exposed + 0.03)) / (exposed * (2.43 * exposed + 0.59) + 0.14)))
     : exposed / (exposed + 1);
@@ -107,9 +108,9 @@ export function writeFramePng(outPath: string, options: FramePngOptions): string
     for (let x = 0; x < outWidth; x += 1) {
       const source = ((y + originY) * width + (x + originX)) * 4;
       const destination = rowStart + 1 + x * 3;
-      raw[destination] = displayGrade(decodeF16(halfWords[source]), grade);
-      raw[destination + 1] = displayGrade(decodeF16(halfWords[source + 1]), grade);
-      raw[destination + 2] = displayGrade(decodeF16(halfWords[source + 2]), grade);
+      raw[destination] = displayGrade(decodeF16(halfWords[source]), grade, 0);
+      raw[destination + 1] = displayGrade(decodeF16(halfWords[source + 1]), grade, 1);
+      raw[destination + 2] = displayGrade(decodeF16(halfWords[source + 2]), grade, 2);
     }
   }
   const header = new Uint8Array(13);

@@ -143,7 +143,10 @@ function harnessShader(options: SvoDryConeMarcherOptions): string {
   return /* wgsl */ `
 ${svoNodeMipSamplingWGSL}
 struct BenchMapping{worldOrigin:vec3f,pad0:u32,cellSize:vec3f,pad1:u32}
-struct DryParams{mapping:BenchMapping,nodeMip:vec4u,nodeMipLevelStart:array<vec4u,3>}
+// nodeMipAtlas is here only for its w lane, the opacity level floor the marcher
+// clamps against. This benchmark's synthetic pyramid is seeded entirely at
+// level 0, so the lane is zero and the clamp is the identity.
+struct DryParams{mapping:BenchMapping,nodeMip:vec4u,nodeMipAtlas:vec4u,nodeMipLevelStart:array<vec4u,3>}
 struct RayResult{transmittanceBits:u32,valid:u32,steps:u32,fetches:u32,searchIterations:u32,pad0:u32,pad1:u32,pad2:u32}
 struct ProbeResult{mortonLow:u32,mortonHigh:u32,findResult:u32,pad:u32}
 @group(0) @binding(0) var<storage,read_write> rayResults:array<RayResult>;
@@ -236,12 +239,15 @@ const pageValidityView = pageValidity.createView();
 const levelStart = new Uint32Array(12);
 for (const page of plan.pages) if (page.key.level < 11) levelStart[page.key.level + 1] += 1;
 for (let boundary = 1; boundary < levelStart.length; boundary += 1) levelStart[boundary] += levelStart[boundary - 1];
-const paramWords = new Uint32Array(24);
+const paramWords = new Uint32Array(28);
 const paramFloats = new Float32Array(paramWords.buffer);
 paramFloats.set([0, 0, 0], 0);
 paramFloats.set([CELL, CELL, CELL], 4);
 paramWords.set([GENERATION, plan.pages.length, LEVELS, 1], 8);
-paramWords.set(levelStart, 12);
+// xyz unused here (the benchmark resolves page origins through the directory);
+// w is the opacity level floor, and this pyramid has a page at level zero.
+paramWords.set([0, 0, 0, 0], 12);
+paramWords.set(levelStart, 16);
 const paramsBuffer = device.createBuffer({ size: paramWords.byteLength, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
 device.queue.writeBuffer(paramsBuffer, 0, paramWords);
 const publicationBuffer = device.createBuffer({ size: 16, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });

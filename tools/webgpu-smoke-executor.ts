@@ -4240,6 +4240,19 @@ async function runGPU(
         bandRows: number; regularBandRows: number;
         coarseRegularBandRows: number; regularShare: number;
       } | null>;
+      readLosassoHierarchyCensus(): Promise<{
+        levelCount: number;
+        levels: readonly Readonly<Record<string, number>>[];
+        arena: readonly Readonly<Record<string, number>>[];
+        levelRowCapacities: readonly number[];
+        cycleEnabled: boolean;
+        firstUnpublishedLevel?: number;
+        firstErroredLevel?: number;
+      } | undefined>;
+      readLosassoPreconditionerContraction(): Promise<{
+        rows: number; nonFiniteRows: number; residualNorm: number;
+        contraction: number; imageNorm: number; preconditionedDotResidual: number;
+      } | undefined>;
       readPowerHybridClassSymmetry(): Promise<Record<string, unknown> | undefined>;
       readCoarseSurfaceTrackerReceipt(): Promise<Record<string, unknown> | undefined>;
     };
@@ -4299,6 +4312,50 @@ async function runGPU(
     }
     console.log(JSON.stringify({ scenario: scenarioId, method: resultMethod,
       phase: "persistent-band-census", metrics: persistentBandCensus }));
+  }
+  // An unpublished multigrid sub-level fails nothing: the fused sub-L0 cycle
+  // just returns, the preconditioner silently degrades to four damped-Jacobi
+  // sweeps on L0, and CG converges anyway with an iteration count that tracks
+  // resolution. Nothing else in the harness samples these words, so asking for
+  // the census and getting silence has to be loud, and a level that reports an
+  // error bit has to fail the run outright unless explicitly allowed.
+  const losassoHierarchyCensusRequested =
+    process.env.FLUID_LOSASSO_HIERARCHY_CENSUS !== undefined
+    && process.env.FLUID_LOSASSO_HIERARCHY_CENSUS !== "0";
+  const losassoHierarchyCensus = losassoHierarchyCensusRequested
+    ? await diagnosticProjection.octreeProjection?.readLosassoHierarchyCensus()
+    : undefined;
+  if (losassoHierarchyCensusRequested) {
+    if (!losassoHierarchyCensus) {
+      throw new Error("FLUID_LOSASSO_HIERARCHY_CENSUS selected a mode but no hierarchy census"
+        + " was published: no octree projection, or the Losasso coarse backend is not active."
+        + " Multigrid publication was NOT measured; do not read this run as evidence.");
+    }
+    console.log(JSON.stringify({ scenario: scenarioId, method: resultMethod,
+      phase: "losasso-hierarchy-census", metrics: losassoHierarchyCensus }));
+    if (process.env.FLUID_LOSASSO_HIERARCHY_CENSUS === "gate") {
+      const errored = losassoHierarchyCensus.levels.filter((level) => level.errorBits !== 0);
+      if (errored.length > 0 || !losassoHierarchyCensus.cycleEnabled) {
+        throw new Error("Losasso multigrid hierarchy did not publish:"
+          + ` cycleEnabled=${losassoHierarchyCensus.cycleEnabled},`
+          + ` firstUnpublishedLevel=${losassoHierarchyCensus.firstUnpublishedLevel},`
+          + ` firstErroredLevel=${losassoHierarchyCensus.firstErroredLevel}.`
+          + " The V-cycle preconditioner is inert; the solve is smoother-preconditioned CG.");
+      }
+    }
+  }
+  // Iteration count cannot tell a working V-cycle from a smoother: both
+  // converge, one just takes more steps, and "more steps" is indistinguishable
+  // from "harder problem". ||r0 - A*M*r0|| / ||r0|| can — it is the error
+  // propagation factor of one preconditioner application, ~0.05-0.2 for a
+  // healthy V-cycle and >=0.9 for smoothing alone. This is S2's regression
+  // metric; it rides the stage audit that already captures the three vectors.
+  const losassoContraction = process.env.FLUID_SYMMETRY_STAGE_AUDIT === "1"
+    ? await diagnosticProjection.octreeProjection?.readLosassoPreconditionerContraction()
+    : undefined;
+  if (losassoContraction) {
+    console.log(JSON.stringify({ scenario: scenarioId, method: resultMethod,
+      phase: "losasso-preconditioner-contraction", metrics: losassoContraction }));
   }
   const powerHybridClassSymmetry = process.env.FLUID_SYMMETRY_STAGE_AUDIT === "1"
     ? await diagnosticProjection.octreeProjection?.readPowerHybridClassSymmetry()

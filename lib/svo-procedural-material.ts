@@ -247,10 +247,22 @@ const wgslPolicies = SVO_PROCEDURAL_MATERIAL_POLICIES.map((policy, index) => `${
     frequency=vec3f(${policy.frequency_mInv.map((value) => value.toFixed(8)).join(",")});seed=${policy.seed}u;colorAmplitude=${policy.colorAmplitude.toFixed(8)};roughnessAmplitude=${policy.roughnessAmplitude.toFixed(8)};detailOctave=${policy.detailOctave.toFixed(8)};detailWeight=${policy.detailWeight.toFixed(8)};fleckThreshold=${policy.fleckThreshold.toFixed(8)};fleckAmplitude=${policy.fleckAmplitude.toFixed(8)};
   }`).join("\n  ");
 
-/** Binding-free WGSL generated from the same stable policy table as the CPU mirror. */
-export const svoProceduralMaterialWGSL = /* wgsl */ `
-const SVO_PROCEDURAL_VARIATION_ACTIVE:u32=${SVO_PROCEDURAL_VARIATION_ACTIVE}u;
-struct SvoProceduralMaterialSample{baseColorLinear:vec3f,roughness:f32,variationFlags:u32}
+/**
+ * The hash and the value noise on their own, without the material table.
+ *
+ * Split out because the shape language needs the *noise* and nothing else:
+ * `svoFieldProgramWGSL` generates a domain warp over `svoProceduralNoise` and
+ * deliberately does not carry its own copy, so that the CPU evaluator and the
+ * shader agree by construction rather than by transcription. A consumer that
+ * warps geometry has no use for a colour policy table, and the live voxelizer in
+ * particular has no material shading at all — pulling the whole library in for
+ * two functions would put a dozen unused policy branches in a maintenance pass
+ * that holds itself to four storage bindings.
+ *
+ * `svoProceduralMaterialWGSL` is this plus the policies, so there is still one
+ * noise in the tree and one place it is written down.
+ */
+export const svoProceduralNoiseWGSL = /* wgsl */ `
 fn svoProceduralHashCell(cell:vec3i,seed:u32)->f32{
   var hash=seed;
   hash=hash^(bitcast<u32>(cell.x)*0x9e3779b1u);
@@ -267,6 +279,13 @@ fn svoProceduralNoise(position_m:vec3f,frequency_mInv:vec3f,seed:u32)->f32{
   let x11=mix(svoProceduralHashCell(cell+vec3i(0,1,1),seed),svoProceduralHashCell(cell+vec3i(1,1,1),seed),blend.x);
   return mix(mix(x00,x10,blend.y),mix(x01,x11,blend.y),blend.z);
 }
+`;
+
+/** Binding-free WGSL generated from the same stable policy table as the CPU mirror. */
+export const svoProceduralMaterialWGSL = /* wgsl */ `
+const SVO_PROCEDURAL_VARIATION_ACTIVE:u32=${SVO_PROCEDURAL_VARIATION_ACTIVE}u;
+struct SvoProceduralMaterialSample{baseColorLinear:vec3f,roughness:f32,variationFlags:u32}
+${svoProceduralNoiseWGSL}
 fn svoProceduralMaterial(functionId:u32,baseColorLinear:vec3f,roughness:f32,position_m:vec3f)->SvoProceduralMaterialSample{
   var frequency=vec3f(0.0);var seed=0u;var colorAmplitude=0.0;var roughnessAmplitude=0.0;
   var detailOctave=1.0;var detailWeight=0.0;var fleckThreshold=0.75;var fleckAmplitude=0.0;

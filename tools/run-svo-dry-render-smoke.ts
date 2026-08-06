@@ -74,22 +74,31 @@
  * ---------------------------------------------------------------------------
  * The benchmark's fingerprint contract
  * (`tools/benchmark-svo-dry-frame-gpu.ts`) says bit-exact reproduction is
- * expected only on identical hardware and driver. On `hero-garden-hose` it is
- * weaker than that, and **measurably so**: two runs of this lane at identical
- * settings on the same M1 Max produced 0x7eec7076 and 0xd84be85c, while the
- * two consecutive frames *inside* each run were bit-identical.
+ * expected only on identical hardware and driver.
  *
- * That split is not noise, it is failure mode 2 showing itself. Candidate
- * binning happens once per scene publication, so every frame in one process
- * sees the same voxels — but `binDirtyBrickCandidates` drops the losers of an
- * **atomic race**, and with 12 bricks over-subscribed a second process keeps a
- * different 64 primitives in each of them. Different voxels, different pixels.
- * The frame will not become reproducible across processes until the per-brick
- * overflow is gone.
+ * **This lane now meets that contract across processes, and the paragraph that
+ * used to say otherwise was stale.** It reported two runs at identical settings
+ * on one M1 Max producing 0x7eec7076 and 0xd84be85c, and attributed the split to
+ * failure mode 2 — `binDirtyBrickCandidates` dropping the losers of an atomic
+ * race, so a second process keeps a different 64 primitives in each
+ * over-subscribed brick. That mechanism is real and the diagnosis may well have
+ * been right at the time. It is no longer what this lane measures: two separate
+ * `hero-garden-hose` processes now produce byte-identical PNGs and the same
+ * settled hash, and `docs/hero-fidelity-baseline.json` independently records a
+ * `deltaE00HalfRange` of exactly 0 across four reps in every region.
  *
- * So this lane does not pin a hash by default. It reports the FNV-1a-32 of the
- * settled frame, and gates on the two things that *are* stable: the frame is
- * not empty, and the renderer is deterministic within one publication. Pass
+ * So **the pixel noise floor on this lane is zero**, and a pixel A/B here needs
+ * no interleaving and carries no error bar. Two cautions before relying on that.
+ * The frame *time* is a different story: two byte-identical runs measured 24.635
+ * ms and 21.506 ms `medianSubmitToFence`, a 13 % spread, so no timing claim is
+ * available from this lane. And `per-brick-candidates` still fails on the hero
+ * (busiest brick over the 64 refinement target), so the over-subscription that
+ * caused the original split has not gone away — only its effect on the frame
+ * has. Re-check reproducibility rather than assuming it if that check changes.
+ *
+ * This lane still does not pin a hash by default. It reports the FNV-1a-32 of the
+ * settled frame, and gates on the two things that were always stable: the frame
+ * is not empty, and the renderer is deterministic within one publication. Pass
  * `FLUID_SVO_DRY_SMOKE_IMAGE_HASH=0x...` to pin it on a scene and machine where
  * that is meaningful — note the hash also depends on the warmup count, since
  * persistent GI keeps converging.
@@ -101,10 +110,17 @@
  *   FLUID_SVO_DRY_SMOKE_SCENE             scene preset id (default hero-garden-hose)
  *   FLUID_SVO_DRY_SMOKE_RECORD_MULTIPLIER 1..10 on hero-garden-hose-x10 only; sweeps
  *                                         the acceptance scene's authored record count
+ *   FLUID_SVO_DRY_SMOKE_CELL_MM           hero-garden only; rebuilds the scene at this
+ *                                         lattice, so the ground and the set follow it
+ *   FLUID_SVO_DRY_SMOKE_REFINEMENT        extra octree levels under that lattice, which
+ *                                         is what the *set* is voxelized at
  *   FLUID_SVO_DRY_SMOKE_WIDTH / _HEIGHT   render size (default 800 x 460)
  *   FLUID_SVO_DRY_SMOKE_FRAMES            timed frames after warmup (default 6)
  *   FLUID_SVO_DRY_SMOKE_WARMUPS           warmup frames (default 3)
  *   FLUID_SVO_DRY_SMOKE_CONE_SCALE        1 | 0.5 | 0.25 | 0.125 (default 0.5)
+ *   FLUID_SVO_SURFACE                     trilinear | voxel-face (default trilinear);
+ *                                         the panel's SHADED/RAW arm, for a pixel A/B
+ *                                         of the smooth normal against the cube face
  *   FLUID_SVO_DRY_SMOKE_MAX_PER_BRICK     override the per-brick ceiling
  *   FLUID_SVO_DRY_SMOKE_PRIMITIVE_HEADROOM fraction of 4 096 allowed (default 0.9)
  *   FLUID_SVO_DRY_SMOKE_FRAME_BUDGET_MS   optional frame-time ceiling
@@ -121,22 +137,40 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import type { EnvironmentId } from "../lib/environments";
+import { HERO_GARDEN_BRICK_CELLS, HERO_GARDEN_CELL_M, HERO_GARDEN_CONTAINER } from "../lib/hero-garden-scene";
 import {
   createHeroGardenHoseStressScene,
   HERO_GARDEN_STRESS_MAXIMUM_MULTIPLIER,
 } from "../lib/hero-garden-stress-scene";
-import { defaultCamera, type CameraState } from "../lib/model";
-import { getScenePreset } from "../lib/scenes";
+import { defaultCamera, type CameraState, type SceneDescription } from "../lib/model";
+import { createHeroGardenHoseSceneWithSet, getScenePreset } from "../lib/scenes";
 import { SVO_PRIMITIVE_RECORD_STRIDE_BYTES } from "../lib/svo-primitive-abi";
 import { SVO_PRIMITIVE_CANDIDATE_MAXIMUM_LEAVES } from "../lib/svo-primitive-candidates";
-import { SPARSE_BRICK_GPU_LAYOUT } from "../lib/sparse-brick-octree";
+import {
+  SPARSE_BRICK_GPU_LAYOUT, resolveSparseBrickPayloadLayout, sparseBrickSceneFractionAt,
+  type SparseBrickSize,
+} from "../lib/sparse-brick-octree";
+import {
+  octreeLiveSceneDryPayloadProfile, octreeLiveSceneSceneGeometryFormat,
+} from "../lib/webgpu-octree-sparse-bricks";
 import {
   planSparseSceneTerrainField,
   sparseSceneTerrainColumnRange,
 } from "../lib/sparse-scene-terrain-field";
-import { SVO_NODE_MIP_LAYOUT } from "../lib/svo-node-mip-pyramid";
+import {
+  SVO_NODE_MIP_LAYOUT,
+  raiseSvoNodeMipSeedToFloor,
+  svoNodeMipPageBytes,
+  svoNodeMipSeedKey,
+} from "../lib/svo-node-mip-pyramid";
+import { liveSvoLeafPage } from "../lib/webgpu-svo-live-derived-builder";
+import { terrainSampleShape } from "../lib/terrain";
 import { VOXEL_MATERIAL_IDS } from "../lib/voxel-scene";
-import { DEFAULT_SVO_RENDER_TUNING } from "../lib/svo-render-tuning";
+import {
+  DEFAULT_SVO_RENDER_TUNING, SVO_LOD_FIXED_LEVEL_MAXIMUM, SVO_LOD_SCREEN_SPACE_PIXELS_MAXIMUM,
+  svoSceneryDetailCellSize_m,
+  type SvoLodMode,
+} from "../lib/svo-render-tuning";
 import { WebGPULiveSvoScene } from "../lib/webgpu-live-svo-scene";
 import {
   OCTREE_LIVE_SCENE_CANDIDATES_PER_BRICK,
@@ -144,6 +178,8 @@ import {
   octreeLiveSceneTerrainVoxelsEnabled,
 } from "../lib/webgpu-octree-sparse-bricks";
 import { SPARSE_SCENE_CLUSTER_CAPACITY } from "../lib/webgpu-sparse-scene-proxies";
+import { cameraPosition } from "../lib/math";
+import { voxelViewProjectionMatrix } from "../lib/webgpu-renderer";
 import {
   canConsumeSparseVoxelPbrMaterials,
   canConsumeSparseVoxelPrimitiveCandidates,
@@ -238,6 +274,13 @@ const SCENE_PRIMITIVE_HEADROOM: Readonly<Record<string, number>> = Object.freeze
 const scenePresetId = process.env.FLUID_SVO_DRY_SMOKE_SCENE ?? "hero-garden-hose";
 const width = Number(process.env.FLUID_SVO_DRY_SMOKE_WIDTH ?? 800);
 const height = Number(process.env.FLUID_SVO_DRY_SMOKE_HEIGHT ?? 460);
+// Extra octree levels under the solver lattice for the authored environment.
+// 0 is the shipping default and leaves scenery at the scene's own cell size;
+// each level halves it, so the hero garden's 25 mm goes 12.5 / 6.25 / 3.125 mm
+// at 1 / 2 / 3. Only legal on a scene the solver does not own, which every dry
+// scene is. Capacity is derived from the plan rather than budgeted, so the cost
+// of a level is arena memory and build time, not a refused publication.
+const environmentRefinementDepth = Number(process.env.FLUID_SVO_DRY_SMOKE_REFINEMENT ?? 0);
 const timedFrames = Number(process.env.FLUID_SVO_DRY_SMOKE_FRAMES ?? 6);
 const warmups = Number(process.env.FLUID_SVO_DRY_SMOKE_WARMUPS ?? 3);
 const coneScaleRaw = Number(process.env.FLUID_SVO_DRY_SMOKE_CONE_SCALE ?? 0.5);
@@ -413,20 +456,134 @@ if (recordMultiplier !== undefined) {
     && recordMultiplier <= HERO_GARDEN_STRESS_MAXIMUM_MULTIPLIER,
   `FLUID_SVO_DRY_SMOKE_RECORD_MULTIPLIER must be between 1 and ${HERO_GARDEN_STRESS_MAXIMUM_MULTIPLIER}`);
 }
-const scene = recordMultiplier === undefined
-  ? preset.create()
-  : createHeroGardenHoseStressScene({ recordMultiplier });
+/**
+ * Override the domain's finest cell size, in millimetres.
+ *
+ * The scene's own spacing is chosen for solver bring-up — `HERO_GARDEN_CELL_M`
+ * documents 25 mm as "the finest measured to get this scene through solver
+ * bring-up", with 12.5 mm and 15 mm since fixed and 7.5 mm blocked by a
+ * one-workgroup-per-interface-leaf dispatch that only a *fluid* scene issues.
+ * A dry scene runs none of that, and this lane renders dry, so the visual
+ * question ("how fine can the picture go?") is separable from the solver one
+ * and deserves a knob that does not edit the authored scene to ask it.
+ *
+ * Refused unless every container dimension stays a whole number of bricks, which
+ * is the invariant the scene header states and the sparse domain relies on: a
+ * partial brick at a wall is not a worse picture, it is an unpublishable domain.
+ *
+ * ---------------------------------------------------------------------------
+ * It is applied *before* construction, and that is the whole of the fix
+ * ---------------------------------------------------------------------------
+ * This used to overwrite `scene.voxelDomain.finestCellSize_m` on the finished
+ * document. By then the pond's heightfield was baked at whatever spacing the
+ * default asked for and every generator had already expanded at the 25 mm leaf,
+ * so the octree got finer and nothing that feeds it did — the ground stayed a
+ * 6.25 mm bake under a 1.5625 mm picture (up to 2.8 voxels of ledge, see
+ * `heroGardenTerrainSample_m`) and the bonsai kept publishing 75 mm florets its
+ * ladder would have taken to 30 mm. A lattice is an input to construction.
+ */
+const cellOverride_mm = Number(process.env.FLUID_SVO_DRY_SMOKE_CELL_MM ?? 0);
+const heroGardenPresets = new Set(["hero-garden-hose", "hero-garden-hose-x10"]);
+if (cellOverride_mm > 0) {
+  const cell_m = cellOverride_mm / 1000;
+  for (const [axis, extent_m] of [["width", HERO_GARDEN_CONTAINER.width_m], ["height", HERO_GARDEN_CONTAINER.height_m],
+    ["depth", HERO_GARDEN_CONTAINER.depth_m]] as const) {
+    const cells = extent_m / cell_m;
+    assert.ok(Math.abs(cells - Math.round(cells)) < 1e-9 && Math.round(cells) % HERO_GARDEN_BRICK_CELLS === 0,
+      `FLUID_SVO_DRY_SMOKE_CELL_MM=${cellOverride_mm} leaves container ${axis} ${extent_m} m at ${cells}`
+      + ` cells, which is not a whole number of ${HERO_GARDEN_BRICK_CELLS}-cell bricks`);
+  }
+  assert.ok(heroGardenPresets.has(scenePresetId),
+    `FLUID_SVO_DRY_SMOKE_CELL_MM needs a scene whose factory takes a lattice; ${scenePresetId} does not.`
+    + " Give its factory a cellSize_m rather than editing a built document — see lib/hero-garden-scene.ts.");
+}
+/**
+ * The finest voxel the *set* is drawn into, which is not the lattice above.
+ *
+ * `environmentRefinementDepth` spends extra octree levels under the tree's own
+ * cell on a scene the solver does not own, so the voxel a bank or a floret ends
+ * up in is `cell / 2^depth`. Every legibility floor an authored generator
+ * carries is a count of *those*, so this — not `finestCellSize_m` — is what the
+ * scene has to be built at.
+ */
+const latticeCell_m = cellOverride_mm > 0 ? cellOverride_mm / 1000 : HERO_GARDEN_CELL_M;
+const detailCell_m = svoSceneryDetailCellSize_m(latticeCell_m, {
+  environmentRefinementDepth,
+  fluid: false,
+});
+/**
+ * Which factory builds the document, and with what.
+ *
+ * Three cases and no mutation in any of them. The preset is still the answer
+ * whenever nothing is overridden, so the shipped lane is untouched; the two
+ * overrides resolve through the same factories the presets themselves use,
+ * which is the rule `FLUID_SVO_DRY_SMOKE_RECORD_MULTIPLIER` already set.
+ */
+const heroLatticeOverridden = heroGardenPresets.has(scenePresetId)
+  && (cellOverride_mm > 0 || environmentRefinementDepth > 0);
+const latticeOptions = heroLatticeOverridden
+  ? { cellSize_m: latticeCell_m, detailCellSize_m: detailCell_m }
+  : {};
+const buildSmokeScene = (): SceneDescription => {
+  if (recordMultiplier !== undefined) return createHeroGardenHoseStressScene({ recordMultiplier, ...latticeOptions });
+  if (!heroLatticeOverridden) return preset.create();
+  return scenePresetId === "hero-garden-hose"
+    ? createHeroGardenHoseSceneWithSet(latticeOptions)
+    : createHeroGardenHoseStressScene({ recordMultiplier: HERO_GARDEN_STRESS_MAXIMUM_MULTIPLIER, ...latticeOptions });
+};
+const scene = buildSmokeScene();
+if (heroLatticeOverridden) {
+  const groundShape = terrainSampleShape(scene.terrain);
+  log(`Lattice ${scene.voxelDomain.finestCellSize_m * 1000} mm, set drawn at ${detailCell_m * 1000} mm`
+    + ` — terrain ${groundShape?.derived ? "derived" : "baked"} at ${(groundShape?.spacing_m ?? 0) * 1000} mm`
+    + ` (${groundShape?.nx ?? 0}x${groundShape?.nz ?? 0}`
+    + `, ${(groundShape?.nx ?? 0) * (groundShape?.nz ?? 0)} samples)`);
+}
+/**
+ * The camera, and the two ways to move it.
+ *
+ * `FLUID_SVO_DRY_SMOKE_CAMERA` is a partial `CameraState` as JSON, applied over
+ * the preset's. It exists for H0 of `docs/hero-fidelity-1000x-handoff.md` —
+ * "solve the reference camera and pin `heroGardenCamera` to it" — which is not
+ * doable if the only camera this lane can render is the one already committed.
+ *
+ * The key light is deliberately **not** re-derived from an overridden azimuth.
+ * `HERO_GARDEN_KEY_DIRECTION` is a function of the authored
+ * `HERO_GARDEN_AZIMUTH_RAD`, so a sweep that moved the light with the camera
+ * would change two things at once and could not register anything. Solving the
+ * camera against a fixed rig first, then re-aiming the key once, is the only
+ * order in which either result means something.
+ */
+const cameraOverrideRaw = process.env.FLUID_SVO_DRY_SMOKE_CAMERA;
+const cameraOverride = cameraOverrideRaw ? (JSON.parse(cameraOverrideRaw) as Partial<CameraState>) : undefined;
 const camera: CameraState = {
   ...defaultCamera,
   ...preset.camera,
-  target_m: { ...(preset.camera?.target_m ?? defaultCamera.target_m) },
+  ...cameraOverride,
+  target_m: {
+    ...(preset.camera?.target_m ?? defaultCamera.target_m),
+    ...(cameraOverride?.target_m ?? {}),
+  },
 };
+if (cameraOverride) log(`Camera overridden: ${JSON.stringify(camera)}`);
 const environmentId: EnvironmentId = (scene.environment ?? "default") as EnvironmentId;
 log(`Scene ${scenePresetId}${recordMultiplier === undefined ? "" : ` at record multiplier ${recordMultiplier}`}`
   + ` at ${width}x${height}, cone scale ${coneScale}`);
 
+if (environmentRefinementDepth > 0) {
+  log(`Environment refinement depth ${environmentRefinementDepth}`
+    + ` — scenery cells ${(scene.voxelDomain.finestCellSize_m * 1000) / 2 ** environmentRefinementDepth} mm`
+    + ` under a ${scene.voxelDomain.finestCellSize_m * 1000} mm solver lattice`);
+}
+// Diffuse feedback is on by default now that the radiance floor makes it cheap.
+// `FLUID_SVO_DRY_SMOKE_RADIANCE_FEEDBACK=0` holds it off so the floor's own cost
+// can be read separately from the solve it enables.
+const radianceFeedback = process.env.FLUID_SVO_DRY_SMOKE_RADIANCE_FEEDBACK === undefined
+  ? undefined
+  : process.env.FLUID_SVO_DRY_SMOKE_RADIANCE_FEEDBACK !== "0";
 const solver = await WebGPULiveSvoScene.create(device, scene, "balanced",
-  ({ label, completed, total }) => log(`  [world] ${label} (${completed}/${total})`));
+  ({ label, completed, total }) => log(`  [world] ${label} (${completed}/${total})`),
+  undefined, { environmentRefinementDepth, radianceFeedback });
 // Production encodes staged live-scene maintenance before any presentation
 // consumer in the frame; constructing arenas alone leaves completeGeneration at 0.
 const publication = device.createCommandEncoder({ label: "Smoke initial live scene publication" });
@@ -515,20 +672,49 @@ record("pbr-materials", canConsumeSparseVoxelPbrMaterials(source),
   "PBR material publication is available");
 // A dry SVO scene that needs the raster terrain fallback is not being drawn by
 // the path this lane is measuring; the vessel is most of the hero frame.
-record("analytic-terrain", !scenePrimitives.requiresRasterTerrainFallback,
+//
+// This asserts a *publication* property and always did. Its old wording — "terrain
+// renders analytically through the SVO path" — described what the renderer then did
+// with that publication, and under voxels-only shading that sentence now names a
+// bug rather than a pass: `traceTerrain` returns a miss and the ground reaches the
+// frame as ordinary voxels. The property is still worth holding, because a scene
+// that falls back to raster terrain is not publishing the heightfield the voxeliser
+// reads. Renamed so a green check cannot be read as "the analytic surface is alive".
+record("terrain-publication-native", !scenePrimitives.requiresRasterTerrainFallback,
   scenePrimitives.requiresRasterTerrainFallback
-    ? "terrain requires the raster fallback — the SVO path is not drawing it"
-    : "terrain renders analytically through the SVO path");
+    ? "terrain requires the raster fallback — the SVO path never sees the heightfield"
+    : "terrain publishes natively to the SVO path; the ground is drawn from its voxels");
 
 // (1) The node-mip opacity pyramid, from the source side.
 const nodeMip = source.nodeMipPyramid;
 const radiance = source.tetrahedralRadiance;
 const derivedLighting = source.derivedLighting;
 const pyramidHealthy = derivedLightingHealthy(source);
+// Radiance no longer follows the opacity plan page for page: a floor level caps
+// it, so the atlas holds only the plan's pages at or above that level. Reporting
+// the plan's page count here would report a page count radiance does not have.
+const radianceFloorLevel = radiance?.radianceFloorLevel ?? 0;
+const radiancePages = (radiance?.plan.pages ?? []).filter((page) => page.key.level >= radianceFloorLevel).length;
+// The opacity page follows the payload profile now — a dry world drops the two
+// fluid lanes — so a fixed `bytesPerPage` would report a page this scene does
+// not allocate. See `SVO_NODE_MIP_OPACITY_STORAGE`.
+const opacityPageBytes = svoNodeMipPageBytes(nodeMip?.format);
+const pyramidBytes = (nodeMip?.plan.pages.length ?? 0) * opacityPageBytes
+  + radiancePages * 4 * SVO_NODE_MIP_LAYOUT.physicalSize ** 3 * 4;
+// The base level is the *floor*, not level 0: an opacity floor removes the
+// levels beneath it, and counting level-0 pages under one reports zero and then
+// divides the whole pyramid by it. See `SVO_OPACITY_LEVEL_FLOOR`.
+const opacityFloor = (nodeMip?.plan.pages ?? [])
+  .reduce((floor, { key }) => Math.min(floor, key.level), Number.MAX_SAFE_INTEGER);
+const basePages = (nodeMip?.plan.pages ?? []).filter((page) => page.key.level === opacityFloor).length;
 record("derived-lighting", pyramidHealthy,
   pyramidHealthy
     ? `node-mip pyramid ready: ${nodeMip!.plan.pages.length} pages, generation ${nodeMip!.generation},`
-      + ` radiance ${radiance!.plan.pages.length} pages`
+      + ` radiance ${radiancePages} pages at level >= ${radianceFloorLevel} (slot offset ${radiance!.slotOffset ?? 0});`
+      + ` opacity page ${opacityPageBytes} B (${nodeMip?.format ?? "rgba8unorm"},`
+      + ` ${SVO_NODE_MIP_LAYOUT.physicalSize}^3, apron ${SVO_NODE_MIP_LAYOUT.apron});`
+      + ` pyramid ${(pyramidBytes / (1024 * 1024)).toFixed(1)} MB over ${basePages} pages at level ${opacityFloor}`
+      + ` = ${Math.round(pyramidBytes / Math.max(1, basePages))} B/base page`
     : `node-mip opacity pyramid withdrawn — cone visibility falls back to exact rays (~15x frame cost).`
       + ` state=${derivedLighting?.state ?? "absent"} reason=${derivedLighting?.reason ?? "n/a"}`
       + ` detail=${derivedLighting?.detail ?? "n/a"}`
@@ -546,7 +732,7 @@ const blackPages = radiance?.blackSlots.size ?? 0;
 record("radiance-black-pages", radiance !== undefined && blackPages === 0,
   radiance === undefined
     ? "tetrahedral radiance was not published at all"
-    : `${blackPages} of ${radiance.plan.pages.length} tetrahedral radiance pages resolved black`,
+    : `${blackPages} of ${radiancePages} tetrahedral radiance pages resolved black`,
   blackPages, 0);
 
 // ---------------------------------------------------------------------------
@@ -618,15 +804,44 @@ if (!terrainField) {
   const sceneMaterials = await readGpuBuffer(source.structural.sceneMaterialOwners.buffer,
     source.structural.sceneMaterialOwners.offset ?? 0,
     capacities.voxels * SPARSE_BRICK_GPU_LAYOUT.materialOwnerStrideBytes);
+  // The geometry lane's width is a property of the *profile*, not a constant:
+  // `dry` prunes the two channels no scene writer touches, so a hardcoded
+  // 16-byte stride over-copies past the end of the arena and a hardcoded
+  // channel 2 reads the wrong float. Both are resolved from the same function
+  // the world itself uses, so the harness cannot drift from the layout.
+  //
+  // The width is a property of the *format* too, not only the channel count:
+  // a narrowed lane is 4 or 2 bytes a voxel rather than 4 per channel, so the
+  // size comes from the resolved lane and the decode from the same module the
+  // shaders take their packing from.
+  const sceneGeometryFormat = octreeLiveSceneSceneGeometryFormat();
+  const sceneLanes = resolveSparseBrickPayloadLayout(
+    octreeLiveSceneDryPayloadProfile(), capacities.voxels, sceneGeometryFormat);
+  const sceneGeometryLane = sceneLanes.lanes.sceneGeometry;
+  if (!sceneGeometryLane?.present) throw new Error("Resolved payload layout has no sceneGeometry lane to read the ground from");
+  if (!sceneGeometryLane.channels.includes("solidFraction")) {
+    throw new Error("Resolved sceneGeometry lane carries no solidFraction channel");
+  }
   const sceneGeometry = await readGpuBuffer(source.structural.sceneGeometry.buffer,
-    source.structural.sceneGeometry.offset ?? 0,
-    capacities.voxels * SPARSE_BRICK_GPU_LAYOUT.geometryStrideBytes);
-  const sceneFraction = new Float32Array(sceneGeometry.buffer);
+    source.structural.sceneGeometry.offset ?? 0, sceneGeometryLane.bytes);
+  const solidFractionAt = (voxel: number): number =>
+    sparseBrickSceneFractionAt(sceneGeometry, sceneGeometryFormat, voxel);
 
   const nodeWords = SPARSE_BRICK_GPU_LAYOUT.nodeStrideBytes / 4;
   const leafWords = SPARSE_BRICK_GPU_LAYOUT.leafStrideBytes / 4;
   const terrainPages = new Set<string>();
+  // Finest level the published pyramid gives a page. Read off the plan for the
+  // same reason the shader reads it off the uniform: it cannot then disagree
+  // with the plan it is being compared against. Zero is the unfloored pyramid.
+  const publishedOpacityFloorLevel = (nodeMip?.plan.pages ?? [])
+    .reduce((floor, { key }) => Math.min(floor, key.level), Number.MAX_SAFE_INTEGER);
+  const opacityFloorLevel = Number.isSafeInteger(publishedOpacityFloorLevel) ? publishedOpacityFloorLevel : 0;
   let terrainVoxels = 0, buriedVoxels = 0, buriedWithoutCoverage = 0;
+  const emptyByCause: Record<string, number> = {};
+  const emptyByScale: Record<number, number> = {};
+  const emptyExamples: string[] = [];
+  /** Leaves per level, so a failure can be read against the tree that produced it. */
+  const leavesByLevel: Record<number, number> = {};
   for (let leafIndex = 0; leafIndex < publishedLeaves; leafIndex += 1) {
     const nodeIndex = leaves[leafIndex * leafWords];
     const voxelOffset = leaves[leafIndex * leafWords + 1];
@@ -634,6 +849,7 @@ if (!terrainField) {
     const level = nodes[nodeIndex * nodeWords + 2];
     const brick = decodeBrickMorton(leaves[leafIndex * leafWords + 2], leaves[leafIndex * leafWords + 3], level);
     const scale = 2 ** Math.max(0, structuralDomain.maximumDepth - level);
+    leavesByLevel[level] = (leavesByLevel[level] ?? 0) + 1;
     for (let localIndex = 0; localIndex < brickSize ** 3; localIndex += 1) {
       const local = [
         localIndex % brickSize,
@@ -646,9 +862,20 @@ if (!terrainField) {
       const material = sceneMaterials[voxel] & 0xffff;
       if (material === VOXEL_MATERIAL_IDS.terrain) {
         terrainVoxels += 1;
-        // A node-mip base page is one finest brick, so a voxel's page is its
-        // finest cell coordinate divided by the page interior.
-        terrainPages.add(cell.map((value) => Math.floor(value / SVO_NODE_MIP_LAYOUT.interiorSize)).join(","));
+        // A leaf owns exactly one page, at the level whose texels are its
+        // voxels — a *finest* leaf's is one base page, and a coarse leaf's is
+        // one page `log2(scale)` levels up rather than `scale^3` base pages.
+        //
+        // Raised to the published opacity floor before it is asked about,
+        // because that is the level the plan stores. Asking at level 0 under a
+        // floored pyramid measures the oracle rather than the tree: the ground
+        // page is addressed, one level up, and eight of them share it.
+        terrainPages.add(svoNodeMipSeedKey(raiseSvoNodeMipSeedToFloor(liveSvoLeafPage({
+          coordinate: brick as [number, number, number],
+          leafLevel: level,
+          finestLevel: structuralDomain.maximumDepth,
+          brickSize: brickSize as SparseBrickSize,
+        }), opacityFloorLevel)));
       }
       // "Buried" is decided against the *lowest* column under the voxel's own
       // footprint, so the test never depends on where inside the cell the
@@ -658,15 +885,43 @@ if (!terrainField) {
       const top = structuralDomain.worldOrigin_m[1] + (cell[1] + scale) * structuralDomain.cellSize_m[1];
       if (top >= range.minimum_m) continue;
       buriedVoxels += 1;
-      if (!(sceneFraction[voxel * 4 + 2] >= 0.999)) buriedWithoutCoverage += 1;
+      if (!(solidFractionAt(voxel) >= 0.999)) {
+        buriedWithoutCoverage += 1;
+        // Which of the three ways a buried voxel can read empty this is. They
+        // have disjoint fixes, and the count alone cannot tell them apart:
+        //
+        //  - `unwritten`: material 0 *and* fraction 0, i.e. the payload was
+        //    never touched. The leaf never reached the dirty list, or reached it
+        //    and was dropped. Nothing about the ground's arithmetic is involved.
+        //  - `terrain-partial`: the ground wrote it and wrote it short. This is
+        //    the only bucket the coverage arithmetic can produce, and a CPU
+        //    replica of that arithmetic over the real plan reports zero of them
+        //    at every leaf scale — so a non-zero count here contradicts the
+        //    replica and is the interesting case.
+        //  - `primitive`: some record won the cell. A winning record cannot
+        //    lower the fraction below one (it wins only by reporting coverage at
+        //    or below `-cellRadius`, which inverts to a fraction of at least
+        //    one), so this bucket should be unreachable too.
+        const bucket = material === 0 && !(solidFractionAt(voxel) > 0) ? "unwritten"
+          : material === VOXEL_MATERIAL_IDS.terrain ? "terrain-partial" : "primitive";
+        emptyByCause[bucket] = (emptyByCause[bucket] ?? 0) + 1;
+        // Coarse leaves are the whole difference between the depth that passes
+        // and the depths that fail, so the scale is the first thing to look at.
+        emptyByScale[scale] = (emptyByScale[scale] ?? 0) + 1;
+        if (emptyExamples.length < 6) {
+          emptyExamples.push(`leaf ${leafIndex} level ${level} scale ${scale}`
+            + ` cell ${cell.join(",")} material ${material}`
+            + ` fraction ${solidFractionAt(voxel).toFixed(4)}`);
+        }
+      }
     }
   }
   const plannedBasePages = new Set((nodeMip?.plan.pages ?? [])
-    .filter(({ key }) => key.level === 0)
-    .map(({ key }) => key.coordinate.join(",")));
+    .map(({ key }) => svoNodeMipSeedKey({ level: key.level, coordinate: key.coordinate })));
   const unplannedTerrainPages = [...terrainPages].filter((page) => !plannedBasePages.has(page));
   Object.assign(terrainReport, {
     voxels: terrainVoxels, pages: terrainPages.size, buriedVoxels, buriedWithoutCoverage,
+    emptyByCause, emptyByScale, emptyExamples, leavesByLevel,
     unplannedPages: unplannedTerrainPages.length,
     columns: terrainField.dimensions[0] * terrainField.dimensions[1],
     heightRange_m: [terrainField.minimumHeight_m, terrainField.maximumHeight_m],
@@ -679,7 +934,10 @@ if (!terrainField) {
     { voxels: terrainVoxels, pages: terrainPages.size }, 1);
   record("terrain-coverage-solid", buriedVoxels > 0 && buriedWithoutCoverage === 0,
     `${buriedVoxels - buriedWithoutCoverage} of ${buriedVoxels} voxels buried under the ground carry full`
-    + " scene coverage; a buried voxel that reads empty is a hole the pyramid lights through",
+    + " scene coverage; a buried voxel that reads empty is a hole the pyramid lights through"
+    + (buriedWithoutCoverage === 0 ? ""
+      : ` — by cause ${JSON.stringify(emptyByCause)}, by leaf scale ${JSON.stringify(emptyByScale)},`
+        + ` against leaves per level ${JSON.stringify(leavesByLevel)}; first ${emptyExamples[0]}`),
     buriedWithoutCoverage, 0);
   record("terrain-pages-planned", unplannedTerrainPages.length === 0,
     unplannedTerrainPages.length === 0
@@ -749,23 +1007,119 @@ if (visibilityArm !== "bounded" && visibilityArm !== "unbounded" && visibilityAr
   throw new RangeError(
     `FLUID_SVO_DRY_SMOKE_VISIBILITY_ANALYTIC must be bounded, unbounded or probe-off, got ${visibilityArm}`);
 }
+// Clay render: neutral albedo everywhere, so form rather than colour carries
+// the frame. Albedo competes with the thing under judgement — a colour
+// difference and a shape difference land in the same pixel — and geometry and
+// lattice resolution are what this lane is scoring against the reference plate.
+// Material resolution and its validity tripwires are untouched; see
+// `neutralSurfaceAlbedo`.
+const neutralAlbedo = (process.env.FLUID_SVO_DRY_SMOKE_ALBEDO ?? "neutral") === "neutral";
+if (!["neutral", "authored"].includes(process.env.FLUID_SVO_DRY_SMOKE_ALBEDO ?? "neutral")) {
+  throw new RangeError("FLUID_SVO_DRY_SMOKE_ALBEDO must be neutral or authored");
+}
 const experiments = {
   unboundedAnalyticVisibility: visibilityArm === "unbounded",
   visibilityAnalyticDisabledProbe: visibilityArm === "probe-off",
+  neutralSurfaceAlbedo: neutralAlbedo,
 } as const;
+log(`Surface albedo: ${neutralAlbedo ? "neutral clay (0.8)" : "authored materials"}`);
 log(`Primary traversal ${traversalMode}${rasterArms ? " (production default), raster glass + rigid discovery on" : ""}`);
 log(`Visibility analytic order: ${visibilityArm}`);
+// In-brick empty-space skip. `off` ships today; `macro` rejects a 4^3 region on
+// one bit of the occupancy word the producer already publishes in the terminal
+// node's spare flags. Sound under voxels-only because that summary's own test is
+// `sceneMaterial != 0 || fluidMaterial != 0`, which is the walk's solidity test.
+//
+// `macro-hdda` is deliberately not offered. Its inner walk
+// (`traceLeafPayloadFineInterval`) still requires an in-range owner and resolves
+// through the analytic marcher, so under a voxels-only primary it would drop
+// every ownerless cell — ground by construction, and most of the hero's
+// scenery — and read as a speed-up that had deleted the scene.
+const occupancyArm = process.env.FLUID_SVO_DRY_SMOKE_BRICK_OCCUPANCY ?? "off";
+if (occupancyArm !== "off" && occupancyArm !== "macro") {
+  throw new RangeError(`FLUID_SVO_DRY_SMOKE_BRICK_OCCUPANCY must be off or macro, got ${occupancyArm}`);
+}
+log(`Brick occupancy: ${occupancyArm}`);
 const renderer = new SparseVoxelDrySceneRenderer(device, uniformBuffer, bodyBuffer, "rgba16float",
-  traversalMode, "off", "split",
+  traversalMode, occupancyArm, "split",
   rasterArms ? SVO_SCREEN_SPACE_TERMINATION_CONTRACT.defaultThresholdPixels : 0,
   "off", rasterArms, rasterArms, true, experiments);
 await renderer.initialize((label, completed, total) => log(`  [pipeline] ${label} (${completed}/${total})`));
 renderer.setRigidBodyCount(bodies.count);
-renderer.setRenderTuning({ ...DEFAULT_SVO_RENDER_TUNING, coneLightingScale: coneScale });
+// Level of detail, swept from the environment rather than by editing a default.
+//
+// The threshold reaches the shader through the render-tuning uniform now, so
+// arms differ by a 16-byte write and no pipeline rebuild — which is what makes
+// them interleavable in one process, the one measurement rule this program has.
+// Zero is the exact reference and the arm every image comparison is scored
+// against; `fixed-level` pins the descent so a frame shows what one depth can
+// represent, which is how a missing-detail bug is told apart from a level the
+// tree never built.
+const lodMode = (process.env.FLUID_SVO_LOD_MODE ?? "screen-space") as SvoLodMode;
+if (lodMode !== "screen-space" && lodMode !== "fixed-level") {
+  throw new RangeError(`FLUID_SVO_LOD_MODE must be screen-space or fixed-level, got ${lodMode}`);
+}
+const lodPixels = Number(process.env.FLUID_SVO_LOD_PIXELS ?? DEFAULT_SVO_RENDER_TUNING.lodScreenSpacePixels);
+const lodLevel = Number(process.env.FLUID_SVO_LOD_LEVEL ?? DEFAULT_SVO_RENDER_TUNING.lodFixedLevel);
+if (!Number.isFinite(lodPixels) || lodPixels < 0 || lodPixels > SVO_LOD_SCREEN_SPACE_PIXELS_MAXIMUM) {
+  throw new RangeError(`FLUID_SVO_LOD_PIXELS must lie in [0, ${SVO_LOD_SCREEN_SPACE_PIXELS_MAXIMUM}], got ${lodPixels}`);
+}
+if (!Number.isInteger(lodLevel) || lodLevel < 0 || lodLevel > SVO_LOD_FIXED_LEVEL_MAXIMUM) {
+  throw new RangeError(`FLUID_SVO_LOD_LEVEL must be an integer in [0, ${SVO_LOD_FIXED_LEVEL_MAXIMUM}], got ${lodLevel}`);
+}
+// The level ladder is scene-derived and worth printing, because "level 21" means
+// nothing without it: octree levels run to `maximumDepth`, and an N-cell brick
+// adds log2(N) more below its leaf before the walk is per-cell and exact.
+const brickSubLevels = Math.log2(structuralDomain.brickSize);
+const finestLevel = structuralDomain.maximumDepth + brickSubLevels;
+log(`Level of detail: ${lodMode}`
+  + (lodMode === "screen-space" ? ` at ${lodPixels} reference px${lodPixels === 0 ? " (exact reference)" : ""}` : ` pinned to level ${lodLevel}`));
+log(`  levels: 0 = root box .. ${structuralDomain.maximumDepth} = leaf brick`
+  + ` (${(structuralDomain.cellSize_m[1] * structuralDomain.brickSize * 1000).toFixed(1)} mm)`
+  + ` .. ${finestLevel} = one cell (${(structuralDomain.cellSize_m[1] * 1000).toFixed(2)} mm, exact);`
+  + ` anything at or above ${finestLevel} is exact`);
+// The panel's SHADED/RAW arm, on the lane whose pixel noise floor is zero.
+//
+// This is where the smooth-normal work is answerable: the two arms differ only
+// in the shaded direction of an identical hit, so a hash diff here is the
+// reconstruction and nothing else — no interleaving and no error bar needed.
+const surfaceReconstruction = process.env.FLUID_SVO_SURFACE
+  ?? DEFAULT_SVO_RENDER_TUNING.surfaceReconstruction;
+if (surfaceReconstruction !== "trilinear" && surfaceReconstruction !== "voxel-face"
+  && surfaceReconstruction !== "analytic") {
+  throw new RangeError(`FLUID_SVO_SURFACE must be analytic, trilinear or voxel-face, got ${surfaceReconstruction}`);
+}
+log(`Surface: ${surfaceReconstruction}`
+  + (surfaceReconstruction === "analytic"
+    ? " (the owning primitive's own normal; the ground's from the heightfield)"
+    : surfaceReconstruction === "trilinear"
+      ? " (gradient of the trilinearly reconstructed scene-geometry lane)"
+      : " (cube face — the reference arm)"));
+// Secondary-ray escape distances, in cells, overridable so the lattice-phase
+// self-occlusion banding can be A/B'd against the shipped values. The shaded
+// point is the DDA's cell face while the shaded normal is the trilinear
+// isosurface's, so how far a shadow/AO ray has to travel to leave the surface
+// it is standing on is a free parameter rather than an epsilon.
+const shadowBiasCells = Number(process.env.FLUID_SVO_SHADOW_BIAS_CELLS
+  ?? DEFAULT_SVO_RENDER_TUNING.shadowBiasCells);
+const coneNormalEscapeCells = Number(process.env.FLUID_SVO_CONE_ESCAPE_CELLS
+  ?? DEFAULT_SVO_RENDER_TUNING.coneNormalEscapeCells);
+log(`Secondary escape: shadow bias ${shadowBiasCells} cells, cone normal escape ${coneNormalEscapeCells} cells`);
+renderer.setRenderTuning({
+  ...DEFAULT_SVO_RENDER_TUNING, coneLightingScale: coneScale, surfaceReconstruction,
+  lodMode, lodScreenSpacePixels: lodPixels, lodFixedLevel: lodLevel,
+  shadowBiasCells, coneNormalEscapeCells,
+});
+// Which secondary term is on. Both default on, exactly as production; they are
+// switchable so a dark artifact can be attributed to direct visibility, to
+// contact occlusion, or to neither — a normal that is simply wrong.
+const shadowsEnabled = process.env.FLUID_SVO_SHADOWS !== "0";
+const ambientOcclusionEnabled = process.env.FLUID_SVO_AO !== "0";
+log(`Secondary terms: shadows ${shadowsEnabled ? "on" : "off"}, ambient occlusion ${ambientOcclusionEnabled ? "on" : "off"}`);
 function applyLighting(scale: SvoConeLightingScale): void {
   renderer.setLightingOptions({
-    shadowsEnabled: true,
-    ambientOcclusionEnabled: true,
+    shadowsEnabled,
+    ambientOcclusionEnabled,
     silhouetteRefinementEnabled: false,
     coneLightingScale: scale,
     coneTracingMode: "cones",
@@ -895,6 +1249,139 @@ if (pngPath) {
     + ` (${grade.toneCurve} at exposure ${grade.exposure}; scene-linear ${range.min.toFixed(3)}`
     + `..${range.max.toFixed(3)}, mean ${range.mean.toFixed(3)})`);
 }
+
+/**
+ * `FLUID_SVO_DRY_SMOKE_RAW` dumps the settled frame as packed `rgba16float`.
+ *
+ * The PNG beside it has already been through the scene's grade and an 8-bit
+ * quantisation, so it cannot answer the question H1 actually asks: *what
+ * exposure and white balance would put this frame on the plate?* Inverting ACES
+ * out of a clipped byte is not a way to find out — the highlights it needs are
+ * exactly the ones the curve compressed away.
+ *
+ * With the scene-linear frame in hand that search is a CPU solve over a fixed
+ * buffer (`tools/solve-hero-grade.ts`), not a sweep that re-renders per
+ * candidate. The format is the one `tools/compare-svo-screen-space-images.ts`
+ * already reads.
+ */
+const rawPath = process.env.FLUID_SVO_DRY_SMOKE_RAW;
+if (rawPath) {
+  mkdirSync(path.dirname(rawPath), { recursive: true });
+  writeFileSync(rawPath, Buffer.from(firstRows.buffer, firstRows.byteOffset, firstRows.byteLength));
+  log(`Settled frame scene-linear dump written to ${rawPath} (${width}x${height} rgba16float)`);
+}
+
+// ---------------------------------------------------------------------------
+// Camera sweep — many framings, one world build
+// ---------------------------------------------------------------------------
+/**
+ * `FLUID_SVO_DRY_SMOKE_CAMERA_SWEEP` names a JSON file holding
+ * `[{ label, camera }, ...]`; each entry is rendered and written as
+ * `<sweep dir>/<label>.png`.
+ *
+ * A camera solve is a search, and a search that pays for a world build per
+ * candidate cannot afford enough candidates to find anything. Everything
+ * expensive here — the live SVO scene, the voxelized bricks, the renderer, the
+ * derived lighting — is a function of the *scene*, not of the view, so a
+ * candidate costs one uniform rewrite and one capture.
+ *
+ * The sweep runs after the fingerprint block on purpose: that block has already
+ * put the renderer into the one configuration documented as settled and free of
+ * frame-to-frame cache state (cone scale 1, voxel light cache off). Sweeping
+ * before it would compare framings through a converging GI cache.
+ */
+/**
+ * `FLUID_SVO_DRY_SMOKE_LIGHT_SWEEP` — the same trick for the key light.
+ *
+ * Each entry is `{ label, direction: [x, y, z], intensity? }`, rendered and
+ * written as `<sweep dir>/<label>.png`. It exists because the dominant
+ * difference between this frame and the plate is not a material or a grade: the
+ * key sits low enough that the bonsai's canopy throws a soft shadow across the
+ * *entire* pond and most of the ground, and the plate has nothing of the kind —
+ * it is bright and airy with small contact shadows only.
+ *
+ * A light is cheap to move and expensive to argue about, so it gets a sweep and
+ * a look rather than a derivation. Unlike the camera sweep this **does** have to
+ * rewrite lighting state rather than a view uniform, so it goes through the
+ * renderer's own scene-light publication — the same path production takes when
+ * a light moves, which is the only way the shadows and the cone visibility
+ * agree with the direct term.
+ */
+const lightSweepPath = process.env.FLUID_SVO_DRY_SMOKE_LIGHT_SWEEP;
+if (lightSweepPath) {
+  const { readFileSync } = await import("node:fs");
+  const entries = JSON.parse(readFileSync(lightSweepPath, "utf8")) as ReadonlyArray<{
+    readonly label: string;
+    readonly direction: readonly [number, number, number];
+    readonly intensity?: number;
+  }>;
+  const sweepDirectory = process.env.FLUID_SVO_DRY_SMOKE_LIGHT_SWEEP_DIR
+    ?? path.join(path.dirname(pngPath ?? outPath ?? "artifacts/hero-light-sweep/x"), "light-sweep");
+  const grade = resolveDisplayGrade(scene.lighting?.grade);
+  log(`Light sweep: ${entries.length} keys into ${sweepDirectory}`);
+  for (const entry of entries) {
+    const lit = {
+      ...scene,
+      lighting: {
+        ...scene.lighting,
+        directional: {
+          ...scene.lighting?.directional,
+          direction: entry.direction,
+          ...(entry.intensity === undefined ? {} : { intensity: entry.intensity }),
+        },
+      },
+    };
+    renderer.publishScene(buildSvoDrySceneAssembly(lit, source).drySceneData);
+    // Two encodes: the first republishes lighting, the second draws against a
+    // settled arena. One would capture the frame mid-publication.
+    for (let index = 0; index < 2; index += 1) {
+      const encoder = device.createCommandEncoder({ label: `Light sweep warm ${entry.label}` });
+      encodeFrame(encoder);
+      device.queue.submit([encoder.finish()]);
+    }
+    await device.queue.onSubmittedWorkDone();
+    const rows = await captureFrame(`Light sweep ${entry.label}`);
+    writeFramePng(path.join(sweepDirectory, `${entry.label}.png`), { width, height, packedRows: rows, grade });
+  }
+  // Restore the authored rig so nothing downstream reads a swept light.
+  renderer.publishScene(drySceneData);
+  log(`Light sweep wrote ${entries.length} frames`);
+}
+
+const sweepPath = process.env.FLUID_SVO_DRY_SMOKE_CAMERA_SWEEP;
+if (sweepPath) {
+  const { readFileSync } = await import("node:fs");
+  const entries = JSON.parse(readFileSync(sweepPath, "utf8")) as ReadonlyArray<{
+    readonly label: string;
+    readonly camera: Partial<CameraState>;
+  }>;
+  const sweepDirectory = process.env.FLUID_SVO_DRY_SMOKE_CAMERA_SWEEP_DIR
+    ?? path.join(path.dirname(pngPath ?? outPath ?? "artifacts/hero-camera-sweep/x"), "sweep");
+  const grade = resolveDisplayGrade(scene.lighting?.grade);
+  log(`Camera sweep: ${entries.length} framings into ${sweepDirectory}`);
+  for (const entry of entries) {
+    const candidate: CameraState = {
+      ...camera,
+      ...entry.camera,
+      target_m: { ...camera.target_m, ...(entry.camera.target_m ?? {}) },
+    };
+    device.queue.writeBuffer(uniformBuffer, 0, packSvoDryViewUniforms({
+      scene, camera: candidate, environmentId, info: solver.info, bodyCount: bodies.count, width, height,
+    }));
+    // One encode to let any view-dependent reuse settle before the capture.
+    const warm = device.createCommandEncoder({ label: `Sweep warm ${entry.label}` });
+    encodeFrame(warm);
+    device.queue.submit([warm.finish()]);
+    await device.queue.onSubmittedWorkDone();
+    const rows = await captureFrame(`Sweep ${entry.label}`);
+    writeFramePng(path.join(sweepDirectory, `${entry.label}.png`), { width, height, packedRows: rows, grade });
+  }
+  // Restore the lane's own camera so nothing downstream reads a swept view.
+  device.queue.writeBuffer(uniformBuffer, 0, packSvoDryViewUniforms({
+    scene, camera, environmentId, info: solver.info, bodyCount: bodies.count, width, height,
+  }));
+  log(`Camera sweep wrote ${entries.length} frames`);
+}
 const imageHash = fnv1a32(firstRows);
 const repeatHash = fnv1a32(secondRows);
 record("frame-determinism", imageHash === repeatHash,
@@ -937,10 +1424,9 @@ record("gpu-validation", validationErrors.length === 0,
 const svoWarnings = capturedWarnings.filter((message) => message.includes("[svo]"));
 record("no-svo-warnings", svoWarnings.length === 0,
   svoWarnings.length === 0
-    ? "no [svo] console warnings during world build or render"
+    ? "no unexpected [svo] console warnings during world build or render"
     : svoWarnings.join(" | "),
   svoWarnings.length, 0);
-
 // ---------------------------------------------------------------------------
 // Report
 // ---------------------------------------------------------------------------

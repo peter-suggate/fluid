@@ -9,22 +9,15 @@ import {
   buildOctreeSvoEnvironmentLightingPublication,
   OCTREE_SVO_ENVIRONMENT_LIGHTING_REVISION,
 } from "../lib/webgpu-octree-sparse-bricks";
-import type { SparseVoxelRenderSource } from "../lib/webgpu-voxel-debug";
+import type { SparseVoxelSceneRenderSource } from "../lib/webgpu-voxel-debug";
 
 test("environment lighting is optional and preserves legacy producer compatibility", () => {
   const binding = { buffer: {} as GPUBuffer };
   const legacy = {
-    voxelRecords: binding,
-    voxelCount: binding,
-    brickRecords: binding,
-    brickCount: binding,
-    materials: binding,
-    voxelCapacity: 64,
-    brickCapacity: 8,
     materialCount: 20,
     revision: 3,
-  } satisfies SparseVoxelRenderSource;
-  assert.equal(legacy.materials, binding);
+  } satisfies SparseVoxelSceneRenderSource;
+  assert.ok(!("environmentLighting" in legacy), "the environment fallback stays optional");
   const modern = {
     ...legacy,
     environmentLighting: {
@@ -34,9 +27,9 @@ test("environment lighting is optional and preserves legacy producer compatibili
       revision: 2,
       cacheKey: "svo-environment-lighting-v1:default:test",
     },
-  } satisfies SparseVoxelRenderSource;
+  } satisfies SparseVoxelSceneRenderSource;
   assert.equal(modern.environmentLighting.binding, binding);
-  assert.equal(modern.materials, legacy.materials);
+  assert.equal(modern.materialCount, legacy.materialCount);
 });
 
 test("producer selects exactly one stable record for every authored environment", () => {
@@ -79,6 +72,7 @@ test("octree world owns, publishes, accounts, and destroys environment lighting 
   assert.match(source, /\+ this\.lightBuffer\.size \+ this\.environmentLightingBuffer\.size/);
   const destroy = source.slice(source.indexOf("  destroy(): void {"));
   assert.match(destroy, /this\.lightBuffer, this\.environmentLightingBuffer, this\.structuralPublicationState/);
-  assert.match(destroy, /\.\.\.\(this\.inspection\?\.buffers \?\? \[\]\)/);
+  assert.doesNotMatch(destroy, /this\.inspection/,
+    "the expanded-record arenas were removed, so nothing lazy is left to tear down");
   assert.equal((destroy.match(/this\.environmentLightingBuffer/g) ?? []).length, 1);
 });

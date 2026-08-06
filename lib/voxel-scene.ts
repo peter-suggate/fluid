@@ -499,7 +499,11 @@ function cloneTerrain(terrain: TerrainDescription): TerrainDescription {
         size: { ...terrain.grid.size },
         heights_m: terrain.grid.heights_m.slice()
       }
-    } : {})
+    } : {}),
+    // A described ground is copied as its description, which is the whole of
+    // what makes it cheap: the samples it stands for are derived and shared by
+    // content, so there is no array here to alias in the first place.
+    ...(terrain.procedural ? { procedural: { ...terrain.procedural, container: { ...terrain.procedural.container } } } : {})
   };
 }
 

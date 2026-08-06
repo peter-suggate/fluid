@@ -85,10 +85,22 @@ test("dry-scene proxy is compile-time opt-in and primary-only", () => {
   const raster = createSvoDrySceneFragmentWGSL(0.5, "raster-primary", "off", "split", 1,
     false, true, true, true);
   assert.match(raster, /fn dryPrimaryBoundsSubPixel/);
-  assert.match(raster, /effectiveThresholdPixels=1\*uniforms\.viewport\.y\/460/);
+  // The threshold is a uniform lane now, not a shader constant: the panel's
+  // slider and an interleaved A/B both need it to move without a pipeline
+  // rebuild. The constructor argument still decides whether any of this is
+  // compiled, which is what keeps the threshold-zero build the exact reference.
+  assert.match(raster, /dry\.lod\.x\*uniforms\.viewport\.y\/460/);
+  assert.doesNotMatch(raster, /effectiveThresholdPixels=1\*/);
   assert.match(raster, /dryPrimaryVoxelProxyHit/);
   assert.match(raster, /dryPrimaryPrimitiveProxyHit/);
-  assert.match(raster, /if\(dryPrimaryBoundsSubPixel\(cellBounds\)\)/);
+  // The per-cell sub-pixel resolve belongs to the arm that still marches
+  // records. Under voxels-only both arms return at the first solid cell, so it
+  // chose between two identical answers at the cost of a footprint evaluation
+  // per cell; intermediate detail is the aggregate stride's job instead.
+  assert.doesNotMatch(raster, /if\(dryPrimaryBoundsSubPixel\(cellBounds\)\)/);
+  const analyticRetained = createSvoDrySceneFragmentWGSL(0.5, "raster-primary", "off", "split", 1,
+    false, true, true, true, { analyticPrimaryRetained: true });
+  assert.match(analyticRetained, /if\(dryPrimaryBoundsSubPixel\(cellBounds\)\)/);
   assert.match(raster, /let proxySpan=vec2f\(span\.x,min\(span\.y,limit\)\)/);
   assert.match(raster, /@fragment fn svoBrickLodResolveFragment/);
   assert.match(raster, /@fragment fn svoBrickExactResolveFragment/);

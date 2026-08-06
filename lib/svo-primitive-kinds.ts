@@ -47,7 +47,8 @@ export type SvoPrimitiveKindName =
   | "cone"
   | "smooth-union-cluster"
   | "round-cone"
-  | "rounded-cylinder";
+  | "rounded-cylinder"
+  | "field-program";
 
 export const SVO_PRIMITIVE_KIND_FLAGS = Object.freeze({
   exactDistance: 1,
@@ -289,6 +290,42 @@ export const SVO_PRIMITIVE_KIND_TABLE = Object.freeze({
     finite: true,
     localExtent_m: (d) => ({ x: d.x, y: d.y, z: d.x }),
     boundingRadius_m: (d) => Math.hypot(d.x, d.y),
+  },
+  /**
+   * A record whose geometry is a *program*: a short tape of composed field ops
+   * — a domain warp over a source solid, today — evaluated as one SDF.
+   *
+   * The arrangement is `smooth-union-cluster`'s, one level up. The tape does not
+   * fit in three floats, so it lives in an arena block the word-13 reference
+   * names, and every fact this table holds is the same whatever the tape says.
+   * What it buys is stated in `lib/svo-field-program.ts`: effective surface
+   * features become unbounded while the record count does not move, because a
+   * canopy authored as records is fifty thousand of them and hits the cluster
+   * arena, the material table and the BVH in that order.
+   *
+   * The dimension floats are a conservative *box* half-extent rather than an
+   * ellipsoid's half-axes, and that is the one place this row deliberately
+   * departs from the cluster's. A warp displaces the evaluation point by at most
+   * its amplitude **per component**, so `svoFieldProgramExtent_m` bounds the zero
+   * set axis by axis and the containing solid is a box. The rotation-invariant
+   * radius is therefore that box's corner: taking the longest half-axis instead
+   * — which is right for an ellipsoid and wrong here — would start the march
+   * inside the shape on a diagonal ray and clip the silhouette.
+   *
+   * Its distance is a Lipschitz-1 lower bound because the evaluator divides by
+   * the Lipschitz constant it carries alongside; see §2.4 of
+   * `docs/hero-fidelity-1000x-handoff.md` and the arm in `svoMarchedDistance_m`.
+   */
+  "field-program": {
+    name: "field-program",
+    code: 12,
+    wgslConstant: "SVO_KIND_FIELD_PROGRAM",
+    flags: marchedIntersection | arenaBacked,
+    normalPolicy: "smooth",
+    dimensionLabels: ["conservative half extent x", "conservative half extent y", "conservative half extent z"],
+    finite: true,
+    localExtent_m: (d) => ({ ...d }),
+    boundingRadius_m: (d) => Math.hypot(d.x, d.y, d.z),
   },
 } as const satisfies Record<SvoPrimitiveKindName, SvoPrimitiveKindEntry>);
 

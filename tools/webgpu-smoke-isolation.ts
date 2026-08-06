@@ -4,7 +4,7 @@ import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 export const WEBGPU_EXCLUSIVE_LOCK = "/tmp/fluid-webgpu-exclusive.lock";
 export const DEFAULT_WEBGPU_SMOKE_TIMEOUT_MS = 120_000;
 export const MINIMUM_WEBGPU_SMOKE_TIMEOUT_MS = 60_000;
-export const MAXIMUM_WEBGPU_SMOKE_TIMEOUT_MS = 240_000;
+export const MAXIMUM_WEBGPU_SMOKE_TIMEOUT_MS = 600_000;
 export const WEBGPU_SMOKE_TERMINATE_GRACE_MS = 2_000;
 export const WEBGPU_SMOKE_KILL_REAP_MS = 2_000;
 

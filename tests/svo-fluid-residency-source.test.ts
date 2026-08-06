@@ -73,7 +73,11 @@ test("legacy stats remain published while GPUFluidBrickResidency retains lifecyc
   const world = readFileSync(new URL("../lib/webgpu-octree-sparse-bricks.ts", import.meta.url), "utf8");
   assert.match(world, /fluidBrickStats: \{ buffer: this\.residency\.worklist \}/);
   const destroy = world.slice(world.indexOf("  destroy(): void {"));
-  assert.match(destroy, /this\.residency\.destroy\(\)/);
+  // Optionally chained since the build became interruptible: a world abandoned
+  // mid-build is destroyed from wherever it was suspended, and at some of those
+  // points the residency does not exist yet. What this pins is unchanged — the
+  // world, not its consumers, is what releases it.
+  assert.match(destroy, /this\.residency\?\.destroy\(\)/);
   assert.doesNotMatch(destroy, /this\.residency\.(?:stateBuffer|worklist|leafStates)\.destroy/);
   const residency = readFileSync(new URL("../lib/webgpu-fluid-brick-residency.ts", import.meta.url), "utf8");
   const residencyDestroy = residency.slice(residency.indexOf("  destroy(): void {"));

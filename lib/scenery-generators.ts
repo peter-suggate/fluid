@@ -128,6 +128,28 @@ export interface SceneryGeneratorRequest {
    */
   readonly groundHeightAt: (x_m: number, z_m: number) => number;
   /**
+   * The finest voxel this set will be drawn at, in metres.
+   *
+   * The third thing a document cannot hold, and it is here for exactly the
+   * reason `groundHeightAt` is: a species has an opinion about proportion and no
+   * opinion at all about what resolution a scene runs, so the leaf is
+   * *placement* rather than form. `BonsaiSpec.leafSize_m` says so in as many
+   * words and has said so since the canopy ladder was built — and the hero
+   * document never passed one, so the ladder converged on nothing and every
+   * specimen in the app drew at the 25 mm floor the species defaults to.
+   *
+   * Persisting it in `params` was the other option and is the one that goes
+   * stale: a saved node carrying `leafSize_m: 0.025` is a bake of today's
+   * lattice, and re-seeding would not clear it. Coming off the expansion context
+   * means a document written at 25 mm and opened at 3.125 mm draws the finer
+   * specimen with nothing re-authored, which is the property
+   * `bonsaiCanopyLadder` was designed around.
+   *
+   * `EnvironmentSceneryContext.detailCellSize_m` is where it comes from; see
+   * that field for why it is not `voxelDomain.finestCellSize_m`.
+   */
+  readonly detailCellSize_m: number;
+  /**
    * The vessel this node named, resolved against the graph's own table.
    *
    * Throws when the node named none, or named one the graph does not declare.
@@ -179,7 +201,13 @@ export interface PondStoneSetGeneratorParams {
   readonly waterline_m: number;
 }
 
-/** One specimen, standing where it stands and leaning where it leans. */
+/**
+ * One specimen, standing where it stands and leaning where it leans.
+ *
+ * Deliberately without a leaf size. `BonsaiSpec.leafSize_m` is placement, not
+ * form, and it arrives from `SceneryGeneratorRequest.detailCellSize_m` — see the
+ * note there for why a document that pinned it would be a bake.
+ */
 export interface BonsaiGeneratorParams extends BonsaiForm {
   /** Where the trunk meets the ground, in world metres on the plan. */
   readonly at_m: readonly [number, number];
@@ -257,6 +285,7 @@ export const SCENERY_GENERATORS: Readonly<{
       seed: request.seed,
       rail: pondVesselPlanCurve(request.vessel(), railSamplesPerLobe ?? SWEPT_COPING_RAIL_SAMPLES_PER_LOBE),
       groundHeightAt: request.groundHeightAt,
+      leafSize_m: request.detailCellSize_m,
     }),
   },
   "pond-stone-set": {
@@ -275,6 +304,7 @@ export const SCENERY_GENERATORS: Readonly<{
       waterline_m: params.waterline_m,
       seed: request.seed,
       key: request.key,
+      leafSize_m: request.detailCellSize_m,
     }),
   },
   bonsai: {
@@ -286,6 +316,14 @@ export const SCENERY_GENERATORS: Readonly<{
       at_m,
       lean,
       groundHeightAt: request.groundHeightAt,
+      // The scene's own lattice, so `bonsaiCanopyLadder` publishes the finest
+      // floret the picture can actually resolve. At 25 mm the plate's 30 mm
+      // floret is 1.2 leaves and the legibility floor raises it to 75 mm; by
+      // 6.25 mm the floor has stopped binding and the specimen is drawing the
+      // plate's own proportion at 4.8 leaves across. Nothing is re-authored
+      // between those — the ladder was always a derivation, it was simply never
+      // handed the number it derives from.
+      leafSize_m: request.detailCellSize_m,
       seed: request.seed,
     }),
   },
@@ -299,6 +337,7 @@ export const SCENERY_GENERATORS: Readonly<{
       bed_m,
       groundHeightAt: request.groundHeightAt,
       seed: request.seed,
+      leafSize_m: request.detailCellSize_m,
     }),
   },
   "capped-boulder": {
@@ -311,6 +350,7 @@ export const SCENERY_GENERATORS: Readonly<{
       key: request.key,
       at_m,
       seed: request.seed,
+      leafSize_m: request.detailCellSize_m,
     }),
   },
   "stepping-path": {
@@ -328,6 +368,7 @@ export const SCENERY_GENERATORS: Readonly<{
         stride_m,
         level_m,
         groundHeightAt: request.groundHeightAt,
+        leafSize_m: request.detailCellSize_m,
       }),
   },
 });
