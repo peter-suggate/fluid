@@ -118,6 +118,8 @@ interface PendingStepSnapshotSources {
   readonly losassoCoarsePhiControl?: GPUBuffer;
   readonly losassoExtensionControl?: GPUBuffer;
   readonly globalFineCurrentWorklist?: GPUBuffer;
+  readonly fluidBrickResidencyWorklist?: GPUBuffer;
+  readonly fluidBulkBrickResidencyWorklist?: GPUBuffer;
 }
 
 export type UniformVelocityTransport = GPUVelocityTransport;
@@ -957,7 +959,7 @@ export class WebGPUUniformEulerianSolver {
         // Left undefined the projection falls back to the pressure band, which
         // is the width every lane was measured at before the two separated.
         fineLevelSetBandCells: options.octree.fineLevelSetBandCells,
-        globalFineLevelSetFactor: options.octree.globalFineLevelSetFactor ?? 4,
+        globalFineLevelSetFactor: options.octree.globalFineLevelSetFactor ?? 1,
         globalFineLevelSetMaximumBricks: options.octree.globalFineLevelSetMaximumBricks,
         pressureRowCapacity: options.octree.pressureRowCapacity,
         coarseDynamics: options.coarseDynamics,
@@ -1537,11 +1539,6 @@ fn recordPhysicsPhaseBoundary(
     return this.octreeProjection?.stageLivePrimitiveUpdates(updates) ?? false;
   }
   encodeSceneMaintenance(encoder: GPUCommandEncoder) { this.octreeProjection?.encodeSceneMaintenance(encoder); }
-  get sparseVoxelRenderSource() {
-    const source = this.octreeProjection?.sparseVoxelRenderSource;
-    if (this.octreeProjection) this.applyOctreeInfo(this.octreeProjection);
-    return source;
-  }
   get structuredVelocityControl() { return this.octreeProjection?.structuredVelocityControl; }
   get structuredBoundaryControl() { return this.octreeProjection?.structuredBoundaryControl; }
   get structuredRowVelocities() { return this.octreeProjection?.structuredRowVelocities; }
@@ -1556,6 +1553,9 @@ fn recordPhysicsPhaseBoundary(
   get workAccountingBuffers() { return this.octreeProjection?.workAccountingBuffers; }
   get workAccountingPlan() { return this.octreeProjection?.workAccountingPlan; }
   captureWorkAccounting() { return this.octreeProjection?.captureWorkAccounting(); }
+  readCoarseSurfaceTrackerReceipt() {
+    return this.octreeProjection?.readCoarseSurfaceTrackerReceipt();
+  }
   /** QA-only passthrough for the authoritative Section 4.3 solver status. */
   get mgpcgControl() { return this.octreeProjection?.mgpcgControl; }
   get ownerLatticeDebug() { return this.octreeProjection?.ownerLatticeDebug; }
@@ -2107,21 +2107,29 @@ fn recordPhysicsPhaseBoundary(
       const coarse = this.coarseLevelSetSource;
       const surfaceHeader = fine?.worklist ?? coarse?.directory.buffer;
       if (losasso) {
+        const coarseOnly = !fine && coarse !== undefined;
+        const nativeSurfaceSources = coarseOnly
+          || (pending.globalFineCurrentWorklist !== undefined
+            && this.globalFineTransportControl !== undefined);
         const sources = pending.losassoAuthorityControl && pending.losassoCoarsePhiControl
-          && pending.losassoExtensionControl && this.mgpcgControl
-          && pending.globalFineCurrentWorklist
-          && this.globalFineTransportControl ? {
+          && pending.losassoExtensionControl && this.mgpcgControl && nativeSurfaceSources ? {
             authority: pending.losassoAuthorityControl,
             solver: this.mgpcgControl,
-            fineWorklist: pending.globalFineCurrentWorklist,
+            ...(pending.globalFineCurrentWorklist
+              ? { fineWorklist: pending.globalFineCurrentWorklist } : {}),
             coarsePhi: pending.losassoCoarsePhiControl,
             extension: pending.losassoExtensionControl,
-            fineTransport: this.globalFineTransportControl,
+            ...(pending.fluidBrickResidencyWorklist
+              ? { fluidResidency: pending.fluidBrickResidencyWorklist } : {}),
+            ...(pending.fluidBulkBrickResidencyWorklist
+              ? { fluidBulkResidency: pending.fluidBulkBrickResidencyWorklist } : {}),
+            ...(this.globalFineTransportControl
+              ? { fineTransport: this.globalFineTransportControl } : {}),
           } : undefined;
         this.losassoStepSnapshotRing ??= new WebGPUOctreeLosassoStepSnapshotRing(
           this.device, structuredStepSnapshotSlotCount());
         if (sources && this.losassoStepSnapshotRing.encode(
-          encoder, sources, this.info.encodedSteps ?? 0)) {
+          encoder, sources, this.info.encodedSteps ?? 0, coarseOnly ? "coarse" : "fine")) {
           this.stepSequenceRecorder.record("step-snapshot");
         } else if (!this.stepSnapshotFaulted) {
           this.stepSnapshotFaulted = true;
@@ -2403,21 +2411,31 @@ fn recordPhysicsPhaseBoundary(
   async readStats() {
     if ((this.info.encodedSteps ?? 0) === 0 || this.readbackPending) return this.info;
     this.readbackPending = true;
-    const buffer = this.statsReadback(), encoder = this.device.createCommandEncoder();
-    if (this.reductionBuffer) encoder.copyBufferToBuffer(this.reductionBuffer, 0, buffer, 0, 16);
     // With the step-coherent ring active, projection energy comes from the
     // step's own record; the racing mid-pipeline copy exists only as the
     // pre-first-advance fallback.
     const structuredProjectionEnergy = this.stepSnapshotRing
       ? undefined
       : this.octreeProjection?.structuredProjectionEnergyStats;
-    if (structuredProjectionEnergy) encoder.copyBufferToBuffer(
-      structuredProjectionEnergy, 0, buffer, 16, STRUCTURED_PROJECTION_ENERGY_WORDS * 4,
-    );
-    this.device.queue.submit([encoder.finish()]);
-    const mapPromise = buffer.mapAsync(GPUMapMode.READ);
+    const needsStatsReadback = this.reductionBuffer !== undefined
+      || structuredProjectionEnergy !== undefined;
+    const buffer = needsStatsReadback ? this.statsReadback() : undefined;
+    if (buffer) {
+      const encoder = this.device.createCommandEncoder({ label: "Uniform statistics readback" });
+      if (this.reductionBuffer) {
+        encoder.copyBufferToBuffer(this.reductionBuffer, 0, buffer, 0, 16);
+      }
+      if (structuredProjectionEnergy) encoder.copyBufferToBuffer(
+        structuredProjectionEnergy, 0, buffer, 16, STRUCTURED_PROJECTION_ENERGY_WORDS * 4,
+      );
+      this.device.queue.submit([encoder.finish()]);
+    }
+    const mapPromise = buffer?.mapAsync(GPUMapMode.READ) ?? Promise.resolve();
     const compactFineExpected = Boolean(this.octreeProjection?.globalFineLevelSetSource);
-    const solveDiagnostics = this.octreeProjection?.readSolveDiagnostics();
+    const losassoSnapshotExpected = this.octreeProjection?.coarseBackend === "losasso"
+      && this.losassoStepSnapshotRing !== undefined;
+    const solveDiagnostics = losassoSnapshotExpected
+      ? undefined : this.octreeProjection?.readSolveDiagnostics();
     // Once compact global-fine volume is authoritative, the adaptive surface
     // diagnostic is both obsolete and ignored below. Avoid a separate queue
     // submission/map every 250 ms for data that cannot be selected.
@@ -2432,14 +2450,34 @@ fn recordPhysicsPhaseBoundary(
       const losassoStepSnapshotPromise = this.losassoStepSnapshotRing?.readLatest();
     try {
       await mapPromise;
-      const [, , surfaceDiagnostics, globalFineDiagnostics, fluidBrickStats, fluidBulkBrickStats,
+      const [, , surfaceDiagnostics, globalFineDiagnostics, liveFluidBrickStats, liveFluidBulkBrickStats,
         stepRecord, losassoStepRecord] = await Promise.all([
         this.validationPromise, solveDiagnostics, surfaceDiagnosticsPromise, globalFineDiagnosticsPromise,
-        this.octreeProjection?.readFluidBrickResidencyStats(),
-        this.octreeProjection?.readFluidBulkBrickResidencyStats(), stepSnapshotPromise,
+        losassoSnapshotExpected ? undefined : this.octreeProjection?.readFluidBrickResidencyStats(),
+        losassoSnapshotExpected ? undefined : this.octreeProjection?.readFluidBulkBrickResidencyStats(),
+        stepSnapshotPromise,
         losassoStepSnapshotPromise,
       ]);
+    const residency = losassoStepRecord?.fluidResidency;
+    const fluidBrickStats = residency && residency.length >= 16
+      ? { resident: residency[0] ?? 0, retired: residency[11] ?? 0,
+        core: residency[8] ?? 0, halo: residency[9] ?? 0,
+        activated: residency[10] ?? 0, generation: residency[15] ?? 0,
+        capacity: this.octreeProjection?.fluidBrickCapacity ?? 0 }
+      : liveFluidBrickStats;
+    const bulkResidency = losassoStepRecord?.fluidBulkResidency;
+    const fluidBulkBrickStats = bulkResidency && bulkResidency.length >= 16
+      && (this.octreeProjection?.fluidBulkBrickCapacity ?? 0) > 0
+      ? { resident: bulkResidency[0] ?? 0, retired: bulkResidency[11] ?? 0,
+        core: bulkResidency[8] ?? 0, halo: bulkResidency[9] ?? 0,
+        activated: bulkResidency[10] ?? 0, generation: bulkResidency[15] ?? 0,
+        capacity: this.octreeProjection?.fluidBulkBrickCapacity ?? 0 }
+      : liveFluidBulkBrickStats;
     if (losassoStepRecord) {
+      this.octreeProjection?.applyLosassoStepDiagnostics(
+        losassoStepRecord.authority,
+        losassoStepRecord.solver,
+      );
       const failures = losassoStepSnapshotFailures(losassoStepRecord);
       if (failures.length > 0) {
         this.stepSequenceFaulted = true;
@@ -2576,12 +2614,12 @@ fn recordPhysicsPhaseBoundary(
     }
     if(fluidBrickStats){this.info.fluidBrickCapacity=fluidBrickStats.capacity;this.info.fluidBrickResidentCount=fluidBrickStats.resident;this.info.fluidBrickCoreCount=fluidBrickStats.core;this.info.fluidBrickHaloCount=fluidBrickStats.halo;this.info.fluidBrickActivatedCount=fluidBrickStats.activated;this.info.fluidBrickRetiredCount=fluidBrickStats.retired;this.info.fluidBrickGeneration=fluidBrickStats.generation;}
     if(fluidBulkBrickStats){this.info.fluidBulkBrickResidentCount=fluidBulkBrickStats.resident;this.info.fluidBulkBrickHaloCount=fluidBulkBrickStats.halo;this.info.fluidBulkBrickActivatedCount=fluidBulkBrickStats.activated;this.info.fluidBulkBrickRetiredCount=fluidBulkBrickStats.retired;}
-    const words = this.reductionBuffer
+    const words = this.reductionBuffer && buffer
       ? new Uint32Array(buffer.getMappedRange(0, 16))
       : new Uint32Array(4);
     const structuredEnergy = this.octreeProjection?.coarseBackend === "power2017" && stepRecord
       ? decodeStructuredProjectionEnergy(stepRecord.snapshot.projectionEnergyControl)
-      : structuredProjectionEnergy
+      : structuredProjectionEnergy && buffer
         ? decodeStructuredProjectionEnergy(new Uint32Array(
           buffer.getMappedRange(16, STRUCTURED_PROJECTION_ENERGY_WORDS * 4),
         ))
@@ -2686,7 +2724,7 @@ fn recordPhysicsPhaseBoundary(
       // A diagnostic promise can reject before mapAsync settles. The pooled
       // staging buffer cannot be copied again while it is pending or mapped.
       await mapPromise.catch(() => { /* Device loss is handled by the renderer. */ });
-      if (buffer.mapState === "mapped") buffer.unmap();
+      if (buffer?.mapState === "mapped") buffer.unmap();
       this.readbackPending = false;
     }
   }

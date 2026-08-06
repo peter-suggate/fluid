@@ -15,6 +15,8 @@ export interface WebGPUOctreeLosassoVelocityExtensionSource {
   readonly faceCapacity: number;
   /** Shared coarse authority `[epoch,rowCount,faceCount,valid,...]`. */
   readonly control: GPUBuffer;
+  /** Exact GPU-authored dispatch for the published W7 graph. */
+  readonly faceDispatch: GPUBuffer;
   /** vec4u(axis, flags, bitcast(abs(phi)), graphLayer). */
   readonly faceMetrics: GPUBuffer;
   readonly adjacencyOffsets: GPUBuffer;
@@ -173,7 +175,7 @@ export class WebGPUOctreeLosassoVelocityExtension {
     for (const [sweep, group] of this.groups.entries()) {
       pass.setPipeline(this.pipeline);
       pass.setBindGroup(0, group, [sweep * this.uniformStride]);
-      pass.dispatchWorkgroups(...this.plan.dispatch);
+      pass.dispatchWorkgroupsIndirect(this.source.faceDispatch, 0);
     }
     return true;
   }
@@ -188,7 +190,7 @@ export class WebGPUOctreeLosassoVelocityExtension {
     for (const [sweep, group] of this.predictorGroups.entries()) {
       pass.setPipeline(this.pipeline);
       pass.setBindGroup(0, group, [sweep * this.uniformStride]);
-      pass.dispatchWorkgroups(...this.plan.dispatch);
+      pass.dispatchWorkgroupsIndirect(this.source.faceDispatch, 0);
     }
   }
 

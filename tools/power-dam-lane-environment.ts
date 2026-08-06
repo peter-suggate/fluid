@@ -8,7 +8,7 @@
  * number the benchmark gates on.
  */
 
-export type PowerDamRuntimeLane = "mini" | "large" | "hydrostatic-tiny" | "large-hydrostatic" | "deep-hydrostatic" | "hydrostatic" | "ui" | "moving-interface" | "ocean" | "ceiling-drop" | "symmetric-expansion" | "droplet-64" | "droplet-128" | "droplet-240" | "droplet-256" | "fill-100" | "fill-800" | "fill-6400";
+export type PowerDamRuntimeLane = "mini" | "large" | "high-resolution-dam-break" | "hydrostatic-tiny" | "large-hydrostatic" | "deep-hydrostatic" | "hydrostatic" | "ui" | "moving-interface" | "ocean" | "ceiling-drop" | "symmetric-expansion" | "droplet-64" | "droplet-128" | "droplet-240" | "droplet-256" | "fill-100" | "fill-800" | "fill-6400";
 
 /**
  * The droplet sweep, as lane records.
@@ -129,6 +129,14 @@ export const POWER_DAM_LANE_ENVIRONMENT: Record<PowerDamRuntimeLane, Record<stri
     // is still not the scene its smoke lane runs, and its late-lane fine-band
     // behaviour cannot be compared to the 150-step smoke. Closing this needs an
     // override in `lib/methods/octree.ts` + `tools/webgpu-smoke-executor.ts`.
+  },
+  "high-resolution-dam-break": {
+    FLUID_SCENE: "high-resolution-dam-break", FLUID_LANE: "performance",
+    FLUID_TARGET_S: "0.004", FLUID_MAX_DT: "0.004", FLUID_ORACLE_STEPS: "1",
+    FLUID_EXPECT_EXACT_STEPS: "1", FLUID_EXPECT_GRID: "128,128,128",
+    FLUID_COARSE_BACKEND: "losasso", FLUID_MAXIMUM_LEAF_SIZE: "32",
+    FLUID_OCTREE_INTERFACE_BAND: "3", FLUID_OCTREE_SURFACE_GRADING: "3",
+    FLUID_OCTREE_GLOBAL_FINE_FACTOR: "1",
   },
   "hydrostatic-tiny": {
     FLUID_SCENE: "hydrostatic-power-two-level", FLUID_TARGET_S: "0.96",

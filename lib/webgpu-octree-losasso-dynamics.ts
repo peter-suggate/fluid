@@ -48,6 +48,9 @@ export interface WebGPUOctreeLosassoDynamicsSamplerSource {
   readonly extendedVelocity: GPUBuffer;
   /** Forward predictor extended over the same sampler geometry. */
   readonly predictorExtendedVelocity: GPUBuffer;
+  /** Two contiguous vec4u nodal banks: accepted first, then predictor. */
+  readonly stagedVelocity: GPUBuffer;
+  readonly predictorStagedVelocity: GPUBuffer;
   readonly faceCapacity: number;
   readonly directoryCapacity: number;
 }
@@ -63,9 +66,9 @@ const ENTRY_POINTS = [
 type DynamicsEntryPoint = typeof ENTRY_POINTS[number];
 
 const BINDINGS = Object.freeze({
-  advectLosassoFaces: [0, 1, 2, 3, 6, 12, 13, 14, 15, 16],
-  reverseLosassoFaces: [0, 1, 2, 3, 7, 12, 13, 14, 15, 16],
-  correctLosassoFaces: [0, 1, 2, 3, 6, 7, 12, 13, 14, 15, 16],
+  advectLosassoFaces: [0, 1, 2, 3, 6, 12, 15],
+  reverseLosassoFaces: [0, 1, 2, 3, 7, 12, 15],
+  correctLosassoFaces: [0, 1, 2, 3, 6, 7, 12, 15],
   forceLosassoFaces: [0, 1, 2, 3, 6, 7],
   divergenceLosassoRows: [0, 1, 2, 7, 8, 9, 10],
   constrainLosassoInflowFaces: [0, 1, 3, 11],
@@ -87,6 +90,7 @@ export class WebGPUOctreeLosassoDynamics {
   private pipelines?: Readonly<Record<DynamicsEntryPoint, GPUComputePipeline>>;
   private groups?: Readonly<Record<DynamicsEntryPoint, GPUBindGroup>>;
   private step?: WebGPUOctreeLosassoDynamicsStep;
+  private uploadedStep?: WebGPUOctreeLosassoDynamicsStep;
   private destroyed = false;
 
   constructor(
@@ -166,8 +170,8 @@ export class WebGPUOctreeLosassoDynamics {
       this.source.advectedVelocity, this.source.predictedVelocity,
       this.source.rowFaceOffsets, this.source.rowFaces, this.source.rightHandSide,
       this.source.projectedVelocity, this.sampler.control, this.sampler.faceGeometry,
-      this.sampler.axisFaceDirectory, this.sampler.extendedVelocity,
-      this.sampler.predictorExtendedVelocity];
+      this.sampler.axisFaceDirectory, this.sampler.stagedVelocity,
+      this.sampler.predictorStagedVelocity];
     this.groups = Object.freeze(Object.fromEntries(ENTRY_POINTS.map((entryPoint) => [entryPoint,
       this.device.createBindGroup({
         label: `Losasso dynamics bindings - ${entryPoint}`,
@@ -242,6 +246,10 @@ export class WebGPUOctreeLosassoDynamics {
   }
 
   private writeStep(step: WebGPUOctreeLosassoDynamicsStep): void {
+    if (this.uploadedStep === step) {
+      this.step = step;
+      return;
+    }
     if (!Number.isFinite(step.dt_s) || step.dt_s < 0) {
       throw new RangeError("Losasso dynamics timestep must be non-negative and finite");
     }
@@ -260,10 +268,6 @@ export class WebGPUOctreeLosassoDynamics {
       || !Number.isFinite(inflow.strength) || inflow.strength < 0)) {
       throw new RangeError("Losasso dynamics inflow must be finite and non-negative");
     }
-    this.device.queue.writeBuffer(this.params, 8 * 4,
-      Float32Array.of(...(this.options.domainOrigin ?? [0, 0, 0]), step.dt_s));
-    this.device.queue.writeBuffer(this.params, 16 * 4,
-      Float32Array.of(...step.gravity_m_s2, 0));
     const active = inflow && inflow.strength > 0 && inflow.radius_m > 0
       && Math.hypot(inflow.velocity_m_s.x, inflow.velocity_m_s.y,
         inflow.velocity_m_s.z) > 1e-6;
@@ -277,14 +281,21 @@ export class WebGPUOctreeLosassoDynamics {
       origin[2] + inflow.outletCenter_m.z
         + 0.5 * this.options.dimensions[2] * this.options.physicalCellSize[2],
     ] as const : [0, 0, 0] as const;
-    this.device.queue.writeBuffer(this.params, 20 * 4, active
-      ? Float32Array.of(...latticeInflow, inflow.radius_m)
-      : Float32Array.of(0, 0, 0, 0));
     const scale = active ? inflow.strength * inflow.apertureScale : 0;
-    this.device.queue.writeBuffer(this.params, 24 * 4, active
-      ? Float32Array.of(inflow.velocity_m_s.x * scale,
-        inflow.velocity_m_s.y * scale, inflow.velocity_m_s.z * scale, 1)
-      : Float32Array.of(0, 0, 0, 0));
+    // One contiguous upload covers dynamic words 8..27. The immutable cell
+    // widths/density occupy words 12..15 inside that span, so restate them
+    // byte-for-byte rather than issuing four driver-visible subrange writes.
+    const uploaded = new Float32Array(20);
+    uploaded.set([...origin, step.dt_s], 0);
+    uploaded.set([...this.options.physicalCellSize, this.options.density], 4);
+    uploaded.set([...step.gravity_m_s2, 0], 8);
+    if (active) {
+      uploaded.set([...latticeInflow, inflow.radius_m], 12);
+      uploaded.set([inflow.velocity_m_s.x * scale, inflow.velocity_m_s.y * scale,
+        inflow.velocity_m_s.z * scale, 1], 16);
+    }
+    this.device.queue.writeBuffer(this.params, 8 * 4, uploaded);
+    this.uploadedStep = step;
     this.step = step;
   }
 

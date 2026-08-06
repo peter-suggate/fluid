@@ -52,7 +52,7 @@ struct Face {
 @group(0) @binding(12) var<storage, read_write> adjacencyOffsets: array<u32>;
 @group(0) @binding(13) var<storage, read_write> scratch: array<atomic<u32>>;
 @group(0) @binding(14) var<storage, read_write> faceGeometry: array<vec4u>;
-@group(0) @binding(15) var<storage, read_write> faceDirectory: array<vec2u>;
+@group(0) @binding(15) var<storage, read_write> faceDirectory: array<atomic<u32>>;
 @group(0) @binding(16) var<storage, read_write> diagonal: array<f32>;
 @group(0) @binding(17) var<storage, read_write> solverAuthority: array<u32>;
 @group(0) @binding(18) var<storage, read> solidCells: array<u32>;
@@ -80,6 +80,7 @@ fn faceCountBase() -> u32 { return 0u; }
 fn faceBaseBase() -> u32 { return params.capacities.x; }
 fn incidenceCountBase() -> u32 { return 2u * params.capacities.x; }
 fn incidenceCursorBase() -> u32 { return 3u * params.capacities.x; }
+fn facePlanBase() -> u32 { return 4u * params.capacities.x; }
 fn fail(flag: u32) { atomicOr(&authority[4], flag); }
 fn losassoFinite(value:f32)->bool{return value==value&&abs(value)<3.402823e38;}
 fn losassoAddExact(limbs:ptr<function,array<i32,36>>,value:f32){let bits=bitcast<u32>(value);let magnitude=bits&0x7fffffffu;
@@ -88,12 +89,12 @@ fn losassoAddExact(limbs:ptr<function,array<i32,36>>,value:f32){let bits=bitcast
  let firstLimb=shift>>3u;let shifted=significand<<(shift&7u);let sign=select(1,-1,(bits&0x80000000u)!=0u);
  for(var digit=0u;digit<4u;digit+=1u){let limb=firstLimb+digit;let byte=i32((shifted>>(digit*8u))&0xffu);
   if(byte!=0&&limb<36u){(*limbs)[limb]+=sign*byte;}}}
-fn losassoFloorDiv256(value:i32)->vec2i{var carry=value/256;var digit=value-carry*256;if(digit<0){digit+=256;carry-=1;}return vec2i(carry,digit);}
-fn losassoExactValue(source:ptr<function,array<i32,36>>)->f32{var limbs=(*source);
- for(var limb=0u;limb+1u<36u;limb+=1u){let normalized=losassoFloorDiv256(limbs[limb]);limbs[limb]=normalized.y;limbs[limb+1u]+=normalized.x;}
- let negative=limbs[35]<0;if(negative){for(var limb=0u;limb<36u;limb+=1u){limbs[limb]=-limbs[limb];}
-  for(var limb=0u;limb+1u<36u;limb+=1u){let normalized=losassoFloorDiv256(limbs[limb]);limbs[limb]=normalized.y;limbs[limb+1u]+=normalized.x;}}
- var magnitude=0.;for(var limb=0u;limb<36u;limb+=1u){magnitude+=ldexp(f32(limbs[limb]),-152+i32(limb*8u));}
+fn losassoFloorDiv256(value:i32)->vec2i{let carry=value>>8;return vec2i(carry,value-carry*256);}
+fn losassoExactValue(source:ptr<function,array<i32,36>>)->f32{
+ for(var limb=0u;limb+1u<36u;limb+=1u){let normalized=losassoFloorDiv256((*source)[limb]);(*source)[limb]=normalized.y;(*source)[limb+1u]+=normalized.x;}
+ let negative=(*source)[35]<0;if(negative){for(var limb=0u;limb<36u;limb+=1u){(*source)[limb]=-(*source)[limb];}
+  for(var limb=0u;limb+1u<36u;limb+=1u){let normalized=losassoFloorDiv256((*source)[limb]);(*source)[limb]=normalized.y;(*source)[limb+1u]+=normalized.x;}}
+ var magnitude=0.;for(var limb=0u;limb<36u;limb+=1u){magnitude+=ldexp(f32((*source)[limb]),-152+i32(limb*8u));}
  return select(magnitude,-magnitude,negative);}
 ${octreeCompensatedF32WGSL}
 
@@ -173,6 +174,10 @@ fn negativeProbe(origin: vec3u, size: u32, axis: u32, a: u32, b: u32,
   return vec3i(origin + offset) - vec3i(axisVector(axis));
 }
 struct FacePatchPlan { mask: u32, subdivision: u32 }
+fn packedFacePlan(plan:FacePatchPlan)->u32{return plan.mask|(plan.subdivision<<16u);}
+fn storedFacePlan(row:u32,axis:u32,positive:bool)->FacePatchPlan{
+ let at=facePlanBase()+6u*row+2u*axis+select(0u,1u,positive);
+ let packed=atomicLoad(&scratch[at]);return FacePatchPlan(packed&0xffffu,packed>>16u);}
 
 fn validFaceNeighbor(header: LeafHeader, neighbor: OctreeOwnerPageLookupResult) -> bool {
   if ((neighbor.status & OWNER_PAGE_LOOKUP_INVALID) != 0u) {
@@ -313,8 +318,12 @@ fn countLosassoFaces(@builtin(global_invocation_id) invocation: vec3u) {
       fail(ERROR_OWNER);
     } else {
       for (var axis = 0u; axis < 3u; axis += 1u) {
-        count += countOneBits(positiveFacePlan(header, axis).mask)
-          + countOneBits(negativeBoundaryPlan(header, axis).mask);
+        let negative=negativeBoundaryPlan(header,axis);
+        let positive=positiveFacePlan(header,axis);
+        let planAt=facePlanBase()+6u*row+2u*axis;
+        atomicStore(&scratch[planAt],packedFacePlan(negative));
+        atomicStore(&scratch[planAt+1u],packedFacePlan(positive));
+        count += countOneBits(positive.mask)+countOneBits(negative.mask);
       }
     }
   }
@@ -502,7 +511,7 @@ fn emitLosassoFaces(@builtin(global_invocation_id) invocation: vec3u) {
   let origin = originOf(header);
   var faceId = atomicLoad(&scratch[faceBaseBase() + row]);
   for (var axis = 0u; axis < 3u; axis += 1u) {
-    let negativePlan = negativeBoundaryPlan(header, axis);
+    let negativePlan = storedFacePlan(row,axis,false);
     let negativeSubdivision = negativePlan.subdivision;
     let negativeSubSize = header.size / negativeSubdivision;
     for (var b = 0u; b < negativeSubdivision; b += 1u) {
@@ -521,7 +530,7 @@ fn emitLosassoFaces(@builtin(global_invocation_id) invocation: vec3u) {
         }
       }
     }
-    let plan = positiveFacePlan(header, axis);
+    let plan = storedFacePlan(row,axis,true);
     let subdivision = plan.subdivision;
     let subSize = header.size / subdivision;
     for (var b = 0u; b < subdivision; b += 1u) {
@@ -648,7 +657,10 @@ fn sortLosassoIncidences(@builtin(global_invocation_id) invocation: vec3u) {
 fn clearLosassoFaceDirectory(@builtin(global_invocation_id) invocation: vec3u) {
   if(topologyReused()){return;}
   let slot = invocation.x;
-  if (slot < atomicLoad(&authority[6])) { faceDirectory[slot] = vec2u(0u); }
+  if (slot < atomicLoad(&authority[6])) {
+    atomicStore(&faceDirectory[2u*slot],0u);
+    atomicStore(&faceDirectory[2u*slot+1u],0u);
+  }
 }
 
 @compute @workgroup_size(64)
@@ -659,29 +671,33 @@ fn clearLosassoAdjacencyOffsets(@builtin(global_invocation_id) invocation: vec3u
   if (face == 0u) { adjacencyOffsets[count] = 0u; }
 }
 
-@compute @workgroup_size(1)
-fn finishLosassoPublication() {
+@compute @workgroup_size(64)
+fn buildLosassoFaceDirectory(@builtin(global_invocation_id) invocation:vec3u){
   if(topologyReused()){return;}
   let directoryCapacity = atomicLoad(&authority[6]);
   let mask = directoryCapacity - 1u;
   let count = atomicLoad(&authority[2]);
-  for (var face = 0u; face < count; face += 1u) {
-    let geometry = faceGeometry[face];
-    var hash = (geometry.x + 1u) * 0x9e3779b1u;
-    hash = (hash ^ geometry.y) * 0x85ebca6bu;
-    hash = (hash ^ geometry.z) * 0xc2b2ae35u;
-    hash = (hash ^ geometry.w) * 0x27d4eb2du;
-    var installed = false;
-    for (var probe = 0u; probe < 32u; probe += 1u) {
-      let slot = (hash + probe) & mask;
-      if (faceDirectory[slot].x == 0u) {
-        faceDirectory[slot] = vec2u(face + 1u, hash);
-        installed = true;
-        break;
-      }
+  let face=invocation.x;if(face>=count){return;}
+  let geometry=faceGeometry[face];
+  var hash=(geometry.x+1u)*0x9e3779b1u;
+  hash=(hash^geometry.y)*0x85ebca6bu;
+  hash=(hash^geometry.z)*0xc2b2ae35u;
+  hash=(hash^geometry.w)*0x27d4eb2du;
+  var installed=false;
+  for(var probe=0u;probe<32u;probe+=1u){let slot=(hash+probe)&mask;let at=2u*slot;
+    var claim=atomicCompareExchangeWeak(&faceDirectory[at],0u,face+1u);
+    for(var retry=0u;retry<4u&&!claim.exchanged&&claim.old_value==0u;retry+=1u){
+      claim=atomicCompareExchangeWeak(&faceDirectory[at],0u,face+1u);
     }
-    if (!installed) { fail(ERROR_CAPACITY); }
+    if(claim.exchanged){atomicStore(&faceDirectory[at+1u],hash);installed=true;break;}
   }
+  if(!installed){fail(ERROR_CAPACITY);}
+}
+
+@compute @workgroup_size(1)
+fn finishLosassoPublication() {
+  if(topologyReused()){return;}
+  let count = atomicLoad(&authority[2]);
   let valid = atomicLoad(&authority[4]) == 0u && atomicLoad(&authority[0]) != 0u;
   if (valid) {
     atomicStore(&authority[3], 1u);

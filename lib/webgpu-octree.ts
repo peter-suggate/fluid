@@ -1685,10 +1685,16 @@ export class WebGPUOctreeProjection {
   private readonly sparseBrickWorld?: OctreeSparseBrickWorld;
   private readonly topologyResidency: GPUFluidBrickResidency;
   private readonly analyticBootstrapWorklist?: WebGPUOctreeAnalyticBootstrapWorklist;
-  private sparseBrickWorldAccountedBytes = 0;
   private groups: { ab: GPUBindGroup; ba: GPUBindGroup };
   private candidateRowGroups: { fromA: GPUBindGroup; fromB: GPUBindGroup };
   private fineSummarySizingGroup: GPUBindGroup;
+  /** Buffer identities captured by the currently published Losasso projection
+   * groups. Coarse-phi generations rewrite their stable arenas in place, so
+   * repeated refreshes within an advance must not rebuild identical groups. */
+  private losassoProjectionGroupSources?: {
+    readonly directory: GPUBuffer;
+    readonly summary: GPUBuffer;
+  };
   private readonly frontierSortGroups: readonly GPUBindGroup[];
   /** Current fine/coarse classification plus persistent topology-tile membership. */
   private topologyDecisionGroup?: GPUBindGroup;
@@ -1834,11 +1840,12 @@ export class WebGPUOctreeProjection {
     );
     reportAllocation(0);
     const count = dims.nx * dims.ny * dims.nz;
+    const globalFineFactor = options.globalFineLevelSetFactor ?? 1;
     this.coarseDynamics = options.coarseDynamics ?? resolveOctreeCoarseDynamics({
       // Direct construction follows the product default. Frozen Power
       // reference lanes must opt in explicitly at their call site.
       backend: DEFAULT_OCTREE_COARSE_BACKEND,
-      globalFineLevelSetFactor: options.globalFineLevelSetFactor ?? 4,
+      globalFineLevelSetFactor: globalFineFactor,
     });
     this.maxLeafSize = octreeLeafSize(options.maximumLeafSize ?? 16);
     this.topologyMaximumLeafSize = this.coarseDynamics.backend === "losasso"
@@ -1881,7 +1888,7 @@ export class WebGPUOctreeProjection {
     // Factor one is represented only by compact octree rows. Enforce this at
     // the allocation boundary so no caller or authored scene can accidentally
     // pay for a redundant same-resolution fine grid.
-    this.coarseOnlySurfaceTracking = options.globalFineLevelSetFactor === 1;
+    this.coarseOnlySurfaceTracking = globalFineFactor === 1;
     // Analytic dam/tank scenes can construct compact topology and first fine seeds
     // phi without allocating or uploading a box-sized bootstrap texture.
     // Explicitly seeded brick geometry is not one of those closed-form shapes,
@@ -2431,7 +2438,6 @@ export class WebGPUOctreeProjection {
       this.workAccounting.setAuthorityBytes("fine-seed-adapter",
         this.fineSeedAdapter.plan.allocatedBytes);
         reportAllocation(7);
-        const globalFineFactor = options.globalFineLevelSetFactor ?? 4;
         if (!this.coarseOnlySurfaceTracking) {
           if (!this.fineSeedAdapter) {
             throw new RangeError("Global fine level-set authority requires compact fine-seed leaves");
@@ -2602,7 +2608,6 @@ export class WebGPUOctreeProjection {
           this.info.globalFineLevelSetResidentBrickCapacity = globalPlan.maximumResidentBricks;
           this.info.globalFineLevelSetLogicalBrickCount = globalPlan.logicalBrickCount;
         }
-    this.sparseBrickWorldAccountedBytes = this.sparseBrickWorld?.allocatedBytes ?? 0;
     if (this.coarseDynamics.backend === "losasso") this.initializeLosassoAuthority();
     reportAllocation(8);
     this.writeParams();
@@ -2654,7 +2659,11 @@ export class WebGPUOctreeProjection {
       closedBoundaries: [true, true, true, closedTop, true, true],
       solver: {
         relativeTolerance: this.solveTailPolicy.relativeTolerance,
-        maximumIterations: this.solveTailPolicy.hardOuterIterationCeiling,
+        // The <=4K-row factor-one production tier has a measured late-dam
+        // requirement of 31 iterations. Keep two iterations of headroom while
+        // preserving the wider hard ceiling as the fallback contract.
+        maximumIterations: this.coarseOnlySurfaceTracking && rowCapacity <= 4_096
+          ? 33 : this.solveTailPolicy.hardOuterIterationCeiling,
         hardIterationCeiling: this.solveTailPolicy.hardOuterIterationCeiling,
         // The cooperative drain is bounded by the compact coarse row arena,
         // not by the independent fine level-set factor. Keep larger coarse
@@ -2846,6 +2855,7 @@ export class WebGPUOctreeProjection {
       leafHeaders: this.leafHeaders,
       coarseControl: backend.sources.operator.control,
       faces: backend.sources.projection.faces,
+      faceDispatch: backend.sources.projection.faceDispatch,
       faceGeometry: backend.sources.dynamics.faceGeometry,
       solidCells: this.solidCells,
       dimensions: [this.dims.nx, this.dims.ny, this.dims.nz],
@@ -2857,6 +2867,10 @@ export class WebGPUOctreeProjection {
   private refreshLosassoProjectionGroups(): void {
     const directory = this.losassoCoarsePhi?.source.arena;
     if (!directory) return;
+    const summary = this.globalFineSummaries?.directory
+      ?? this.coarseOnlySummary?.directory ?? this.unpublishedFineSummaryDirectory;
+    if (this.losassoProjectionGroupSources?.directory === directory
+      && this.losassoProjectionGroupSources.summary === summary) return;
     this.groups = {
       ab: this.createProjectionGroup(this.pressureA, this.pressureB, directory),
       ba: this.createProjectionGroup(this.pressureB, this.pressureA, directory),
@@ -2867,12 +2881,11 @@ export class WebGPUOctreeProjection {
       fromB: this.createProjectionGroup(this.pressureB, this.candidatePressure, directory,
         this.candidateLeafHeaders),
     };
-    const summary = this.globalFineSummaries?.directory
-      ?? this.coarseOnlySummary?.directory ?? this.unpublishedFineSummaryDirectory;
     this.fineSummarySizingGroup = this.createProjectionGroup(summary, this.pressureB, directory);
     this.topologyDecisionGroup = this.createProjectionGroup(
       summary, this.topologyResidency.topologyTileStateBuffer, directory,
     );
+    this.losassoProjectionGroupSources = { directory, summary };
   }
 
   private createProjectionGroup(
@@ -5503,22 +5516,10 @@ export class WebGPUOctreeProjection {
       try {
         await readback.mapAsync(GPUMapMode.READ);
         const mapped = readback.getMappedRange();
-        const authority = new Uint32Array(mapped, 0, 8);
-        const rows = authority[1] ?? 0;
-        const valid = authority[3] === 1 && authority[4] === 0;
-        this.info.pressureCapacityOverflow = !valid;
-        this.info.frontierCapacityOverflow = !valid;
-        this.info.frontierRequiredLeaves = rows;
-        this.info.pressureRequiredRows = rows;
-        this.info.pressureSampleCount = rows;
-        this.info.liquidDofCount = rows;
-        this.info.faceCount = authority[2] ?? 0;
-        this.info.compressionRatio = rows
-          / Math.max(1, this.dims.nx * this.dims.ny * this.dims.nz);
-        this.residualRms = undefined;
-        this.initialResidualRms = undefined;
-        this.relativeResidual = undefined;
-        this.applyMGPCGDiagnostics(new Uint32Array(mapped, 32, 16));
+        this.applyLosassoStepDiagnostics(
+          new Uint32Array(mapped, 0, 8),
+          new Uint32Array(mapped, 32, 16),
+        );
       } finally {
         if (readback.mapState === "mapped") readback.unmap();
         readback.destroy();
@@ -5575,6 +5576,28 @@ export class WebGPUOctreeProjection {
       if (readback.mapState === "mapped") readback.unmap();
       readback.destroy();
     }
+  }
+
+  /** Decode the pressure receipt copied by the production step snapshot.
+   * This is the same ABI as readSolveDiagnostics(), but consumes bytes already
+   * ordered by the physics submission instead of adding a telemetry submit. */
+  applyLosassoStepDiagnostics(authority: Uint32Array, solver: Uint32Array): void {
+    if (this.coarseBackend !== "losasso") return;
+    const rows = authority[1] ?? 0;
+    const valid = authority[3] === 1 && authority[4] === 0;
+    this.info.pressureCapacityOverflow = !valid;
+    this.info.frontierCapacityOverflow = !valid;
+    this.info.frontierRequiredLeaves = rows;
+    this.info.pressureRequiredRows = rows;
+    this.info.pressureSampleCount = rows;
+    this.info.liquidDofCount = rows;
+    this.info.faceCount = authority[2] ?? 0;
+    this.info.compressionRatio = rows
+      / Math.max(1, this.dims.nx * this.dims.ny * this.dims.nz);
+    this.residualRms = undefined;
+    this.initialResidualRms = undefined;
+    this.relativeResidual = undefined;
+    this.applyMGPCGDiagnostics(solver);
   }
 
   /** One-time startup proof for the paper's Section 4.3 pressure authority.
@@ -5672,20 +5695,6 @@ export class WebGPUOctreeProjection {
   }
   encodeSceneMaintenance(encoder: GPUCommandEncoder) {
     return this.sparseBrickWorld?.encodeSceneMaintenance(encoder) ?? false;
-  }
-  get sparseVoxelRenderSource() {
-    if (this.sparseBrickWorld) {
-      const source = this.sparseBrickWorld.inspectionSource;
-      // A device refusal is logged once by the producer and then re-thrown to
-      // every caller; swallow it here so a frame getter cannot raise one
-      // unhandled rejection per frame.
-      if (!source) void this.sparseBrickWorld.ensureInspectionSource().catch(() => undefined);
-      const currentBytes = this.sparseBrickWorld.allocatedBytes;
-      this.info.allocatedBytes += currentBytes - this.sparseBrickWorldAccountedBytes;
-      this.sparseBrickWorldAccountedBytes = currentBytes;
-      return source;
-    }
-    return undefined;
   }
   get structuredVelocityControl() { return this.structuredVelocity?.control; }
   get structuredBoundaryControl() { return this.structuredBoundary?.control; }
@@ -6964,6 +6973,11 @@ export class WebGPUOctreeProjection {
   async readPowerHybridClassSymmetry() { return undefined; }
 
   get fluidBrickCapacity() { return this.topologyResidency.capacity; }
+  get fluidBrickResidencyWorklist() { return this.topologyResidency.worklist; }
+  get fluidBulkBrickCapacity() { return this.sparseBrickWorld?.bulkResidency?.capacity ?? 0; }
+  get fluidBulkBrickResidencyWorklist() {
+    return this.sparseBrickWorld?.bulkResidencyWorklist;
+  }
   readFluidBrickResidencyStats() { return this.topologyResidency.readStats(); }
   readFluidBulkBrickResidencyStats() { return this.sparseBrickWorld?.readBulkResidencyStats(); }
   encodeSparseBrickWorld(encoder: GPUCommandEncoder, _dt_s = 0) {

@@ -3,11 +3,7 @@ import { damBreakFractions } from "../lib/initial-fluid";
 import { boundingRadius, initializeRigidBodies, type RigidBodyState } from "../lib/rigid-body";
 import type { SceneDescription } from "../lib/model";
 import { VOXEL_MATERIAL_IDS } from "../lib/voxel-scene";
-import {
-  SPARSE_VOXEL_DEBUG_RECORD_STRIDE,
-  SparseVoxelDebugRenderer,
-  type SparseVoxelRenderSource,
-} from "../lib/webgpu-voxel-debug";
+import type { SparseVoxelSceneRenderSource } from "../lib/webgpu-voxel-debug";
 import {
   activeCubeCapacity,
   RasterWaterPipeline,
@@ -227,142 +223,11 @@ export async function readBufferBindingsPacked(
   }
 }
 
-export interface SparseVoxelSmokeStats {
-  voxelCount: number;
-  brickCount: number;
-  activeVoxelCount: number;
-  activeBrickCount: number;
-  fluidVoxelCount: number;
-  environmentVoxelCount: number;
-  materialVoxelCounts: Record<string, number>;
-  nonFiniteRecordCount: number;
-  invalidMaterialCount: number;
-  fluidColorLinear: number[];
-  uiRawVoxelRenderWall_ms: number;
-  uiBrickGridRenderWall_ms: number;
-  fluidBrickCapacity?: number;
-  fluidBrickResidentCount?: number;
-  fluidBrickCoreCount?: number;
-  fluidBrickHaloCount?: number;
-  fluidBrickActivatedCount?: number;
-  fluidBrickRetiredCount?: number;
-  fluidBrickGeneration?: number;
-  fluidBrickCoreOrigins_m?: number[][];
-  fluidBrickHaloOrigins_m?: number[][];
-  sourceBrickFluidVoxelCount?: number;
-  sourceBrickResidency?: "core" | "halo" | "vacant";
-}
-
 export interface FluidBrickSnapshot { resident: number; core: number; halo: number; generation: number }
-export interface WorldBounds { min: [number, number, number]; max: [number, number, number] }
-
-export function initialSeedBrickBounds(scene: SceneDescription, dimensions: readonly [number, number, number], brickSize = 8): WorldBounds | undefined {
-  const seed = scene.fluid.initialBrickSeeds_m?.[0];
-  if (!seed) return undefined;
-  const minimum: [number, number, number] = [-scene.container.width_m / 2, 0, -scene.container.depth_m / 2];
-  const extent: [number, number, number] = [scene.container.width_m, scene.container.height_m, scene.container.depth_m];
-  const point = [seed.x, seed.y, seed.z];
-  const start = point.map((value, axis) => {
-    const cell = Math.max(0, Math.min(dimensions[axis] - 1, Math.floor((value - minimum[axis]) * dimensions[axis] / extent[axis])));
-    return Math.floor(cell / brickSize) * brickSize;
-  });
-  return {
-    min: start.map((cell, axis) => minimum[axis] + cell * extent[axis] / dimensions[axis]) as [number, number, number],
-    max: start.map((cell, axis) => minimum[axis] + Math.min(dimensions[axis], cell + brickSize) * extent[axis] / dimensions[axis]) as [number, number, number]
-  };
-}
-
-export async function readFluidBrickSnapshot(device: GPUDevice, source: SparseVoxelRenderSource): Promise<FluidBrickSnapshot | undefined> {
+export async function readFluidBrickSnapshot(device: GPUDevice, source: SparseVoxelSceneRenderSource): Promise<FluidBrickSnapshot | undefined> {
   if (!source.fluidBrickStats) return undefined;
   const words = new Uint32Array((await readBufferBinding(device, source.fluidBrickStats, 64)).buffer);
   return { resident: words[0], core: words[8], halo: words[9], generation: words[15] };
-}
-
-export async function smokeRenderSparseVoxelDebugModes(device: GPUDevice, source: SparseVoxelRenderSource) {
-  const main = new SparseVoxelDebugRenderer(device, { colorFormat: "rgba8unorm" });
-  await main.initialize();
-  main.setSource(source);
-  const color = device.createTexture({ size: [320, 180], format: "rgba8unorm", usage: GPUTextureUsage.RENDER_ATTACHMENT });
-  const depth = device.createTexture({ size: [320, 180], format: "depth24plus", usage: GPUTextureUsage.RENDER_ATTACHMENT });
-  const matrix = new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
-  const renderMode = async (mode: "raw-voxels" | "brick-grid") => {
-    const started = performance.now();
-    const encoder = device.createCommandEncoder({ label: `Sparse voxel ${mode} WebGPU smoke` });
-    main.encode(encoder, {
-      mode,
-      colorTarget: color.createView(), depthTarget: depth.createView(),
-      colorLoadOp: "clear", depthLoadOp: "clear",
-      viewProjection: matrix, cameraPosition: [0, 0, 4],
-      containerBounds: { min: [-1, 0, -1], max: [1, 2, 1] },
-      containerClosedTop: false
-    });
-    device.queue.submit([encoder.finish()]);
-    await device.queue.onSubmittedWorkDone();
-    return performance.now() - started;
-  };
-  const uiRawVoxelRenderWall_ms = await renderMode("raw-voxels");
-  const uiBrickGridRenderWall_ms = await renderMode("brick-grid");
-  main.destroy(); color.destroy(); depth.destroy();
-  return { uiRawVoxelRenderWall_ms, uiBrickGridRenderWall_ms };
-}
-
-export async function readSparseVoxelStats(device: GPUDevice, source: SparseVoxelRenderSource, sourceBrick?: WorldBounds): Promise<SparseVoxelSmokeStats> {
-  const voxelCount = Math.min(new Uint32Array((await readBufferBinding(device, source.voxelCount, 4)).buffer)[0], source.voxelCapacity);
-  const brickCount = Math.min(new Uint32Array((await readBufferBinding(device, source.brickCount, 4)).buffer)[0], source.brickCapacity);
-  const voxelBytes = await readBufferBinding(device, source.voxelRecords, voxelCount * SPARSE_VOXEL_DEBUG_RECORD_STRIDE);
-  const brickBytes = await readBufferBinding(device, source.brickRecords, brickCount * SPARSE_VOXEL_DEBUG_RECORD_STRIDE);
-  const materialBytes = await readBufferBinding(device, source.materials, source.materialCount * 32);
-  const voxelFloats = new Float32Array(voxelBytes.buffer), voxelWords = new Uint32Array(voxelBytes.buffer);
-  const brickWords = new Uint32Array(brickBytes.buffer), brickFloats = new Float32Array(brickBytes.buffer), materialFloats = new Float32Array(materialBytes.buffer);
-  let activeVoxelCount = 0, activeBrickCount = 0, fluidVoxelCount = 0, environmentVoxelCount = 0, nonFiniteRecordCount = 0, invalidMaterialCount = 0;
-  let sourceBrickFluidVoxelCount = 0;
-  const fluidBrickCoreOrigins_m: number[][] = [], fluidBrickHaloOrigins_m: number[][] = [];
-  const materialVoxelCounts: Record<string, number> = {};
-  for (let index = 0; index < voxelCount; index += 1) {
-    const word = index * 12, material = voxelWords[word + 8], flags = voxelWords[word + 9];
-    if ((flags & 1) === 0) continue;
-    activeVoxelCount += 1;
-    materialVoxelCounts[String(material)] = (materialVoxelCounts[String(material)] ?? 0) + 1;
-    if (material === VOXEL_MATERIAL_IDS.fluid) {
-      fluidVoxelCount += 1;
-      const centre = [voxelFloats[word] + 0.5 * voxelFloats[word + 4], voxelFloats[word + 1] + 0.5 * voxelFloats[word + 5], voxelFloats[word + 2] + 0.5 * voxelFloats[word + 6]];
-      if (sourceBrick && centre.every((value, axis) => value >= sourceBrick.min[axis] - 1e-6 && value < sourceBrick.max[axis] - 1e-6)) sourceBrickFluidVoxelCount += 1;
-    }
-    if (material >= ENVIRONMENT_VOXEL_MATERIAL_BASE) environmentVoxelCount += 1;
-    if (material >= source.materialCount) invalidMaterialCount += 1;
-    if (![...voxelFloats.slice(word, word + 3), ...voxelFloats.slice(word + 4, word + 7)].every(Number.isFinite)
-      || voxelFloats[word + 4] <= 0 || voxelFloats[word + 5] <= 0 || voxelFloats[word + 6] <= 0) nonFiniteRecordCount += 1;
-  }
-  for (let index = 0; index < brickCount; index += 1) {
-    const word = index * 12, flags = brickWords[word + 9];
-    if ((flags & 1) !== 0) activeBrickCount += 1;
-    const origin = () => Array.from(brickFloats.slice(word, word + 3));
-    if ((flags & 2) !== 0) fluidBrickCoreOrigins_m.push(origin());
-    else if ((flags & 4) !== 0) fluidBrickHaloOrigins_m.push(origin());
-  }
-  const colorOffset = VOXEL_MATERIAL_IDS.fluid * 8;
-  const debugRenderTimings = await smokeRenderSparseVoxelDebugModes(device, source);
-  const fluidBrickWords = source.fluidBrickStats
-    ? new Uint32Array((await readBufferBinding(device, source.fluidBrickStats, 64)).buffer)
-    : undefined;
-  return {
-    voxelCount, brickCount, activeVoxelCount, activeBrickCount, fluidVoxelCount, environmentVoxelCount, materialVoxelCounts,
-    nonFiniteRecordCount, invalidMaterialCount,
-    fluidColorLinear: Array.from(materialFloats.slice(colorOffset, colorOffset + 3)),
-    ...debugRenderTimings,
-    ...(fluidBrickWords ? {
-      fluidBrickCapacity: source.fluidBrickCapacity,
-      fluidBrickResidentCount: fluidBrickWords[0], fluidBrickCoreCount: fluidBrickWords[8], fluidBrickHaloCount: fluidBrickWords[9],
-      fluidBrickActivatedCount: fluidBrickWords[10], fluidBrickRetiredCount: fluidBrickWords[11], fluidBrickGeneration: fluidBrickWords[15],
-      fluidBrickCoreOrigins_m, fluidBrickHaloOrigins_m,
-      sourceBrickFluidVoxelCount,
-      sourceBrickResidency: fluidBrickCoreOrigins_m.some((origin) => origin.every((value, axis) => Math.abs(value - (sourceBrick?.min[axis] ?? Infinity)) <= 1e-5))
-        ? "core" as const
-        : fluidBrickHaloOrigins_m.some((origin) => origin.every((value, axis) => Math.abs(value - (sourceBrick?.min[axis] ?? Infinity)) <= 1e-5))
-          ? "halo" as const
-          : "vacant" as const,
-    } : {})
-  };
 }
 
 export interface HybridPresentationSmokeStats {

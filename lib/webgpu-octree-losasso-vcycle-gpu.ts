@@ -203,6 +203,10 @@ fn fusedSubL0(@builtin(local_invocation_index)lane:u32){
  var enabled=solve[0]==0u&&solve[1]==0u;
  for(var level=1u;level<LEVEL_COUNT;level+=1u){enabled=enabled&&levelControl(level,3u)==1u
   &&levelControl(level,1u)<=VECTOR_CAPACITIES[level];}
+ // enabled depends only on solve-wide and level-wide control words, so every
+ // lane takes the same branch. Once MGPCG has converged, retire the fused
+ // suffix before entering its thirty-plus barrier pairs.
+ if(!enabled){return;}
  restrictInto(1u,lane,enabled);
  for(var level=1u;level+1u<LEVEL_COUNT;level+=1u){
   relaxLevel(level,false,lane,enabled);relaxLevel(level,true,lane,enabled);

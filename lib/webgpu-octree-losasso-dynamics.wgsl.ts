@@ -42,8 +42,7 @@ struct Face {
 @group(0) @binding(12) var<storage, read> bandControl: array<u32>;
 @group(0) @binding(13) var<storage, read> bandGeometry: array<vec4u>;
 @group(0) @binding(14) var<storage, read> bandDirectory: array<vec2u>;
-@group(0) @binding(15) var<storage, read> bandVelocity: array<f32>;
-@group(0) @binding(16) var<storage, read> predictorBandVelocity: array<f32>;
+@group(0) @binding(15) var<storage, read> bandVelocityArena: array<vec4u>;
 
 fn finite(value: f32) -> bool {
   return value == value && abs(value) <= 3.402823e38;
@@ -54,12 +53,12 @@ fn addExact(limbs:ptr<function,array<i32,36>>,value:f32){let bits=bitcast<u32>(v
   let firstLimb=shift>>3u;let shifted=significand<<(shift&7u);let sign=select(1,-1,(bits&0x80000000u)!=0u);
   for(var digit=0u;digit<4u;digit+=1u){let limb=firstLimb+digit;let byte=i32((shifted>>(digit*8u))&0xffu);
     if(byte!=0&&limb<36u){(*limbs)[limb]+=sign*byte;}}}
-fn floorDiv256(value:i32)->vec2i{var carry=value/256;var digit=value-carry*256;if(digit<0){digit+=256;carry-=1;}return vec2i(carry,digit);}
-fn exactValue(source:ptr<function,array<i32,36>>)->f32{var limbs=(*source);
-  for(var limb=0u;limb+1u<36u;limb+=1u){let normalized=floorDiv256(limbs[limb]);limbs[limb]=normalized.y;limbs[limb+1u]+=normalized.x;}
-  let negative=limbs[35]<0;if(negative){for(var limb=0u;limb<36u;limb+=1u){limbs[limb]=-limbs[limb];}
-    for(var limb=0u;limb+1u<36u;limb+=1u){let normalized=floorDiv256(limbs[limb]);limbs[limb]=normalized.y;limbs[limb+1u]+=normalized.x;}}
-  var magnitude=0.;for(var limb=0u;limb<36u;limb+=1u){magnitude+=ldexp(f32(limbs[limb]),-152+i32(limb*8u));}
+fn floorDiv256(value:i32)->vec2i{let carry=value>>8;return vec2i(carry,value-carry*256);}
+fn exactValue(source:ptr<function,array<i32,36>>)->f32{
+  for(var limb=0u;limb+1u<36u;limb+=1u){let normalized=floorDiv256((*source)[limb]);(*source)[limb]=normalized.y;(*source)[limb+1u]+=normalized.x;}
+  let negative=(*source)[35]<0;if(negative){for(var limb=0u;limb<36u;limb+=1u){(*source)[limb]=-(*source)[limb];}
+    for(var limb=0u;limb+1u<36u;limb+=1u){let normalized=floorDiv256((*source)[limb]);(*source)[limb]=normalized.y;(*source)[limb+1u]+=normalized.x;}}
+  var magnitude=0.;for(var limb=0u;limb<36u;limb+=1u){magnitude+=ldexp(f32((*source)[limb]),-152+i32(limb*8u));}
   return select(magnitude,-magnitude,negative);}
 fn liveFaces() -> u32 {
   if (arrayLength(&authority) < 4u || authority[3] != 1u) { return 0u; }
@@ -147,53 +146,31 @@ fn closedDomainFace(axis: u32, coordinate: vec3u) -> bool {
   return onBoundary && (params.capacities.w & (1u << side)) != 0u;
 }
 
+fn stagedNodeIndex(node: vec3u) -> u32 {
+  let dimensions = params.dimensionsMaximumLeaf.xyz + vec3u(1u);
+  return node.x + dimensions.x * (node.y + dimensions.y * node.z);
+}
+
 // Losasso et al. first reconstruct all three velocity components at octree
 // nodes by averaging the incident MAC faces.  At a 2:1 transition,
 // containingFace maps each fine quadrant to its owning coarse face; repeated
 // ownership therefore gives the coarse value its covered-area weight without
 // inventing virtual fine velocities.
 fn velocityAtNode(node: vec3u, field: u32) -> VelocitySample {
-  var result = vec3f(0.0);
-  var boundary = false;
-  for (var axis = 0u; axis < 3u; axis += 1u) {
-    var exact: array<i32,36>;
-    var sampleCount = 0u;
-    for (var quadrant = 0u; quadrant < 4u; quadrant += 1u) {
-      var coordinate = vec3i(node);
-      var tangent = 0u;
-      var inside = true;
-      for (var component = 0u; component < 3u; component += 1u) {
-        if (component == axis) { continue; }
-        coordinate[component] += select(0, -1, (quadrant & (1u << tangent)) != 0u);
-        inside = inside && coordinate[component] >= 0
-          && coordinate[component] < i32(params.dimensionsMaximumLeaf[component]);
-        tangent += 1u;
-      }
-      if (!inside) { continue; }
-      let unsignedCoordinate = vec3u(coordinate);
-      let face = containingFace(axis, unsignedCoordinate);
-      var componentValue = 0.0;
-      if (face == INVALID_FACE) {
-        if (!closedDomainFace(axis, unsignedCoordinate)) {
-          return invalidVelocitySample();
-        }
-        boundary = true;
-      } else if (field == BAND_FIELD) {
-        if (face >= arrayLength(&bandVelocity)) { return invalidVelocitySample(); }
-        componentValue = bandVelocity[face];
-        if (!finite(componentValue)) { return invalidVelocitySample(); }
-      } else {
-        if (face >= arrayLength(&predictorBandVelocity)) { return invalidVelocitySample(); }
-        componentValue = predictorBandVelocity[face];
-        if (!finite(componentValue)) { return invalidVelocitySample(); }
-      }
-      addExact(&exact, componentValue);
-      sampleCount += 1u;
-    }
-    if (sampleCount == 0u) { return invalidVelocitySample(); }
-    result[axis] = exactValue(&exact) / f32(sampleCount);
+  if (arrayLength(&bandControl) < 4u || bandControl[3] != 1u) {
+    return invalidVelocitySample();
   }
-  return VelocitySample(result, result, result, true, boundary);
+  let nodeCount = (params.dimensionsMaximumLeaf.x + 1u)
+    * (params.dimensionsMaximumLeaf.y + 1u) * (params.dimensionsMaximumLeaf.z + 1u);
+  let at = stagedNodeIndex(node) + select(nodeCount, 0u, field == BAND_FIELD);
+  if (at >= arrayLength(&bandVelocityArena)) { return invalidVelocitySample(); }
+  let staged = bandVelocityArena[at];
+  if ((staged.w & 1u) == 0u) { return invalidVelocitySample(); }
+  let result = vec3f(bitcast<f32>(staged.x), bitcast<f32>(staged.y), bitcast<f32>(staged.z));
+  if (!all(result == result) || any(abs(result) > vec3f(3.402823e38))) {
+    return invalidVelocitySample();
+  }
+  return VelocitySample(result, result, result, true, (staged.w & 2u) != 0u);
 }
 
 // Trilinear interpolation of the reconstructed nodal field is the Section 5
@@ -237,8 +214,9 @@ struct VelocityTrace {
 
 // A signed midpoint characteristic. Positive dt backtraces the forward
 // predictor; negative dt traces the predictor forward for MacCormack reversal.
-fn traceVelocity(origin: vec3f, dt: f32, field: u32) -> VelocityTrace {
-  let first = velocityAtGrid(origin, field);
+fn traceVelocityFromFirst(
+  origin: vec3f, dt: f32, field: u32, first: VelocitySample,
+) -> VelocityTrace {
   if (!first.valid) { return VelocityTrace(origin, false, false); }
   let gridDt = dt / params.cellWidthDensity.xyz;
   let midpointOffset = quantizeTraceOffset(-0.5 * gridDt * first.value);
@@ -246,6 +224,10 @@ fn traceVelocity(origin: vec3f, dt: f32, field: u32) -> VelocityTrace {
   let carrier = select(first.value, midpoint.value, midpoint.valid);
   return VelocityTrace(origin + quantizeTraceOffset(-gridDt * carrier), true,
     first.boundary || (midpoint.valid && midpoint.boundary));
+}
+
+fn traceVelocity(origin: vec3f, dt: f32, field: u32) -> VelocityTrace {
+  return traceVelocityFromFirst(origin, dt, field, velocityAtGrid(origin, field));
 }
 
 fn faceCenterGrid(faceId: u32) -> vec3f {
@@ -324,7 +306,8 @@ fn advectLosassoFaces(@builtin(global_invocation_id) invocation: vec3u) {
     return;
   }
   var value = previous;
-  let departure = traceVelocity(centre, params.domainOriginDt.w, BAND_FIELD);
+  let departure = traceVelocityFromFirst(
+    centre, params.domainOriginDt.w, BAND_FIELD, prior);
   if (departure.valid) {
     let sample = velocityAtGrid(departure.point, BAND_FIELD);
     if (sample.valid) { value = sample.value[faces[faceId].axis]; }
@@ -363,7 +346,8 @@ fn correctLosassoFaces(@builtin(global_invocation_id) invocation: vec3u) {
   if (!finite(prediction) || !finite(reversed) || reversed == INVALID_VELOCITY) { return; }
   let centre = faceCenterGrid(faceId);
   let original = velocityAtGrid(centre, BAND_FIELD);
-  let departure = traceVelocity(centre, params.domainOriginDt.w, BAND_FIELD);
+  let departure = traceVelocityFromFirst(
+    centre, params.domainOriginDt.w, BAND_FIELD, original);
   if (!original.valid || !departure.valid) { return; }
   let sourceStencil = velocityAtGrid(departure.point, BAND_FIELD);
   if (!sourceStencil.valid) { return; }

@@ -24,6 +24,8 @@ export interface WebGPUOctreeLosassoCoarsePhiInput {
   /** Accepted Losasso authority `[epoch,rowCount,faceCount,valid,...]`. */
   readonly coarseControl: GPUBuffer;
   readonly faces: GPUBuffer;
+  /** GPU-authored exact live-face dispatch for the accepted topology bank. */
+  readonly faceDispatch: GPUBuffer;
   readonly faceGeometry: GPUBuffer;
   /** Finest-cell solid fraction/owner pairs for solid-aware ghosting. */
   readonly solidCells: GPUBuffer;
@@ -261,24 +263,31 @@ export class WebGPUOctreeLosassoCoarsePhiExchange {
       this.coarseOnlyNextGradient, input.faceGeometry, velocity.extendedVelocity,
       velocity.axisFaceDirectory, nextArena, input.faces, this.source.ghostDistances,
       input.solidCells, input.coarseControl, this.source.volumeDirectory];
-    const runCustom = (pipeline: GPUComputePipeline, bindings: readonly number[], groups: number) => {
+    const runCustom = (pipeline: GPUComputePipeline, bindings: readonly number[],
+      groups: number | readonly [GPUBuffer, number]) => {
       const pass = broker.compute({ label: pipeline.label });
       pass.setPipeline(pipeline);
-      pass.setBindGroup(0, this.device.createBindGroup({
+      const bound = bindings.map((binding) => customBuffers[binding]!);
+      const variants = this.bindGroupCache.get(pipeline) ?? [];
+      const cached = variants.find((variant) => variant.buffers.length === bound.length
+        && variant.buffers.every((buffer, index) => buffer === bound[index]));
+      const group = cached?.group ?? this.device.createBindGroup({
         layout: pipeline.getBindGroupLayout(0),
-        entries: bindings.map((binding) => ({ binding,
-          resource: { buffer: customBuffers[binding]! } })),
-      }));
-      pass.dispatchWorkgroups(groups);
+        entries: bindings.map((binding, index) => ({ binding,
+          resource: { buffer: bound[index]! } })),
+      });
+      if (!cached) { variants.push({ buffers: bound, group }); this.bindGroupCache.set(pipeline, variants); }
+      pass.setBindGroup(0, group);
+      if (typeof groups === "number") pass.dispatchWorkgroups(groups);
+      else pass.dispatchWorkgroupsIndirect(groups[0], groups[1]);
     };
     const rowGroups = Math.ceil(this.plan.rowCapacity / 64);
-    const faceGroups = Math.ceil(this.plan.faceCapacity / 64);
     runCustom(this.coarseOnlyPipelines.advect, [0, 2, 5, 7, 16], rowGroups);
     runCustom(this.coarseOnlyPipelines.publish, [0, 2, 5, 11, 15], rowGroups);
     runMain("finalize", [0, 5, 8, 14], 1);
     runMain("volume", [0, 5, 8, 11, 12, 13, 14, 15], Math.ceil(2 * this.plan.rowCapacity / 64));
     runCustom(this.coarseOnlyPipelines.ghost,
-      [0, 2, 5, 7, 8, 11, 12, 13, 14, 15, 16], faceGroups);
+      [0, 2, 5, 7, 8, 11, 12, 13, 14, 15, 16], [input.faceDispatch, 0]);
     runMain("publish", [0, 5, 8, 14], [this.readyDispatch, 12]);
     broker.copyBufferToBuffer(this.coarseOnlyNextGradient, 0,
       this.source.rowGradient, 0, this.source.rowGradient.size);
@@ -314,7 +323,7 @@ export class WebGPUOctreeLosassoCoarsePhiExchange {
     run("restrict", [0, 1, 2, 3, 4, 5, 8, 9, 14], Math.ceil(this.plan.rowCapacity / 64));
     run("finalize", [0, 5, 8, 14], 1);
     run("volume", [0, 5, 8, 11, 12, 13, 14, 15], Math.ceil(2 * this.plan.rowCapacity / 64));
-    run("ghost", [0, 1, 2, 3, 5, 6, 7, 8, 10, 14, 17], Math.ceil(this.plan.faceCapacity / 64));
+    run("ghost", [0, 1, 2, 3, 5, 6, 7, 8, 10, 14, 17], [input.faceDispatch, 0]);
     run("publish", [0, 5, 8, 14], [this.readyDispatch, 12]);
     return this.source;
   }
@@ -340,7 +349,7 @@ export class WebGPUOctreeLosassoCoarsePhiExchange {
     run("refresh", [0, 1, 2, 3, 4, 5, 8, 9, 14], Math.ceil(this.plan.rowCapacity / 64));
     run("finalize", [0, 5, 8, 14], 1);
     run("volumeRefresh", [0, 8, 11, 12, 13, 15], Math.ceil(this.plan.rowCapacity / 64));
-    run("ghost", [0, 1, 2, 3, 5, 6, 7, 8, 10, 14, 17], Math.ceil(this.plan.faceCapacity / 64));
+    run("ghost", [0, 1, 2, 3, 5, 6, 7, 8, 10, 14, 17], [input.faceDispatch, 0]);
     return this.source;
   }
 
@@ -358,7 +367,7 @@ export class WebGPUOctreeLosassoCoarsePhiExchange {
       [14, this.arenas[1]], [17, input.solidCells],
     ]);
     this.runner(broker, buffers)("ghost", [0, 1, 2, 3, 5, 6, 7, 8, 10, 14, 17],
-      Math.ceil(this.plan.faceCapacity / 64));
+      [input.faceDispatch, 0]);
   }
 
   private updateParams(fine: WebGPUFineLevelSetBrickSource,

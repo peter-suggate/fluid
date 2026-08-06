@@ -27,7 +27,7 @@ fn addExact(value:f32){let bits=bitcast<u32>(value);let magnitude=bits&0x7ffffff
  let firstLimb=shift>>3u;let shifted=significand<<(shift&7u);let sign=select(1,-1,(bits&0x80000000u)!=0u);
  for(var digit=0u;digit<4u;digit+=1u){let limb=firstLimb+digit;let byte=i32((shifted>>(digit*8u))&0xffu);
   if(byte!=0&&limb<36u){atomicAdd(&exactLimbs[limb],sign*byte);}}}
-fn floorDiv256(value:i32)->vec2i{var carry=value/256;var digit=value-carry*256;if(digit<0){digit+=256;carry-=1;}return vec2i(carry,digit);}
+fn floorDiv256(value:i32)->vec2i{let carry=value>>8;return vec2i(carry,value-carry*256);}
 fn exactValue()->f32{var limbs:array<i32,36>;for(var limb=0u;limb<36u;limb+=1u){limbs[limb]=atomicLoad(&exactLimbs[limb]);}
  for(var limb=0u;limb+1u<36u;limb+=1u){let normalized=floorDiv256(limbs[limb]);limbs[limb]=normalized.y;limbs[limb+1u]+=normalized.x;}
  let negative=limbs[35]<0;if(negative){for(var limb=0u;limb<36u;limb+=1u){limbs[limb]=-limbs[limb];}
@@ -61,6 +61,7 @@ export class WebGPUOctreeLosassoConditionedOperator {
   readonly allocatedBytes: number;
   private readonly params: GPUBuffer;
   private pipelines?: Readonly<Record<"prepare" | "rebuild" | "finalize", GPUComputePipeline>>;
+  private readonly groups = new Map<GPUComputePipeline, GPUBindGroup>();
   private destroyed = false;
   constructor(private readonly device: GPUDevice, readonly input: WebGPUOctreeLosassoConditionedOperatorInput,
     readonly rowCapacity: number) {
@@ -85,14 +86,16 @@ export class WebGPUOctreeLosassoConditionedOperator {
       this.input.faces, this.input.diagonal, this.input.solverAuthority];
     const run = (pipeline: GPUComputePipeline, bindings: readonly number[], groups: number) => {
       const pass = broker.compute({ label: pipeline.label }); pass.setPipeline(pipeline);
-      pass.setBindGroup(0, this.device.createBindGroup({ layout: pipeline.getBindGroupLayout(0),
-        entries: bindings.map((binding) => ({ binding, resource: { buffer: buffers[binding]! } })) }));
+      const group = this.groups.get(pipeline) ?? this.device.createBindGroup({ layout: pipeline.getBindGroupLayout(0),
+        entries: bindings.map((binding) => ({ binding, resource: { buffer: buffers[binding]! } })) });
+      if (!this.groups.has(pipeline)) this.groups.set(pipeline, group);
+      pass.setBindGroup(0, group);
       pass.dispatchWorkgroups(groups); };
     run(this.pipelines.prepare, [0, 1, 6], 1);
     run(this.pipelines.rebuild, [0, 1, 2, 3, 4, 5, 6],
       Math.min(this.rowCapacity, this.device.limits.maxComputeWorkgroupsPerDimension));
     run(this.pipelines.finalize, [0, 1, 6], 1);
   }
-  destroy(): void { if (this.destroyed) return; this.destroyed = true; this.params.destroy(); this.pipelines = undefined; }
+  destroy(): void { if (this.destroyed) return; this.destroyed = true; this.params.destroy(); this.groups.clear(); this.pipelines = undefined; }
   private assertLive(): void { if (this.destroyed) throw new Error("Losasso conditioned operator is destroyed"); }
 }

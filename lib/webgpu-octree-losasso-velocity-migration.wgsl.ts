@@ -29,20 +29,19 @@ fn containingOld(axis:u32,q:vec3u)->u32{var span=1u;var logSpan=0u;loop{var orig
  for(var component=0u;component<3u;component+=1u){if(component!=axis){origin[component]=(q[component]/span)*span;}}
  let face=exactOld(axis|(logSpan<<2u),origin);if(face!=INVALID){return face;}
  if(span>=p.maximumLeafSize){break;}span*=2u;logSpan+=1u;}return INVALID;}
-fn floorDiv256(value:i32)->vec2i{var carry=value/256;var digit=value-carry*256;
- if(digit<0){digit+=256;carry-=1;}return vec2i(carry,digit);}
+fn floorDiv256(value:i32)->vec2i{let carry=value>>8;return vec2i(carry,value-carry*256);}
 fn addExact(limbs:ptr<function,array<i32,36>>,value:f32){let bits=bitcast<u32>(value);let magnitude=bits&0x7fffffffu;
  if(magnitude==0u){return;}let exponent=(magnitude>>23u)&0xffu;let fraction=magnitude&0x7fffffu;
  let significand=select(fraction,0x800000u|fraction,exponent!=0u);let shift=select(3u,exponent+2u,exponent!=0u);
  let first=shift>>3u;let shifted=significand<<(shift&7u);let sign=select(1,-1,(bits&0x80000000u)!=0u);
  for(var digit=0u;digit<4u;digit+=1u){let limb=first+digit;let byte=i32((shifted>>(digit*8u))&0xffu);
   if(byte!=0&&limb<LIMBS){(*limbs)[limb]+=sign*byte;}}}
-fn exactValue(input:array<i32,36>)->f32{var limbs=input;for(var limb=0u;limb+1u<LIMBS;limb+=1u){
- let normalized=floorDiv256(limbs[limb]);limbs[limb]=normalized.y;limbs[limb+1u]+=normalized.x;}
- let negative=limbs[LIMBS-1u]<0;if(negative){for(var limb=0u;limb<LIMBS;limb+=1u){limbs[limb]=-limbs[limb];}
-  for(var limb=0u;limb+1u<LIMBS;limb+=1u){let normalized=floorDiv256(limbs[limb]);
-   limbs[limb]=normalized.y;limbs[limb+1u]+=normalized.x;}}
- var magnitude=0.;for(var limb=0u;limb<LIMBS;limb+=1u){magnitude+=ldexp(f32(limbs[limb]),-152+i32(8u*limb));}
+fn exactValue(input:ptr<function,array<i32,36>>)->f32{for(var limb=0u;limb+1u<LIMBS;limb+=1u){
+ let normalized=floorDiv256((*input)[limb]);(*input)[limb]=normalized.y;(*input)[limb+1u]+=normalized.x;}
+ let negative=(*input)[LIMBS-1u]<0;if(negative){for(var limb=0u;limb<LIMBS;limb+=1u){(*input)[limb]=-(*input)[limb];}
+  for(var limb=0u;limb+1u<LIMBS;limb+=1u){let normalized=floorDiv256((*input)[limb]);
+   (*input)[limb]=normalized.y;(*input)[limb+1u]+=normalized.x;}}
+ var magnitude=0.;for(var limb=0u;limb<LIMBS;limb+=1u){magnitude+=ldexp(f32((*input)[limb]),-152+i32(8u*limb));}
  return select(magnitude,-magnitude,negative);}
 fn tangentA(axis:u32)->vec3u{return select(vec3u(1,0,0),vec3u(0,1,0),axis==0u);}
 fn tangentB(axis:u32)->vec3u{return select(vec3u(0,0,1),vec3u(0,1,0),axis==2u);}
@@ -70,6 +69,6 @@ fn migrateLosassoLaggedVelocity(@builtin(global_invocation_id)invocation:vec3u){
    if(old<arrayLength(&oldVelocity)){let value=oldVelocity[old];if(finite(value)){addExact(&exact,value);count+=1u;}}
    if(old<arrayLength(&oldGeometry)&&(oldGeometry[old].x&FACE_SEPARATED)!=0u){separated=true;}
   }
- }}newVelocity[face]=select(0.,exactValue(exact)/f32(max(count,1u)),count>0u);
+ }}newVelocity[face]=select(0.,exactValue(&exact)/f32(max(count,1u)),count>0u);
  if(face<arrayLength(&newFaces)&&separated){newFaces[face].reserved|=FACE_SEPARATED;}}
 `;

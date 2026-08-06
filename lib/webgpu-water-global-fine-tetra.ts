@@ -44,6 +44,17 @@ var<workgroup>laneOffsets:array<u32,256>;
 }
 `;
 
+/** Production scan variant that publishes the exact tetrahedron emission grid. */
+export const globalFineClassifiedIndirectScanShader = globalFineClassifiedScanShader
+  .replace(
+    "@group(0)@binding(10)var<uniform>p:P;",
+    "@group(0)@binding(10)var<uniform>p:P;@group(0)@binding(11)var<storage,read_write>emitDispatch:array<u32>;",
+  )
+  .replace(
+    "if(published){let capacity=arrayLength(&out)-arrayLength(&out)%3u;",
+    "emitDispatch[0]=(count+63u)/64u;emitDispatch[1]=6u;emitDispatch[2]=1u;if(published){let capacity=arrayLength(&out)-arrayLength(&out)%3u;",
+  );
+
 const cornerPosition = [
   "vec3f(0,0,0)", "vec3f(1,0,0)", "vec3f(1,1,0)", "vec3f(0,1,0)",
   "vec3f(0,0,1)", "vec3f(1,0,1)", "vec3f(1,1,1)", "vec3f(0,1,1)",

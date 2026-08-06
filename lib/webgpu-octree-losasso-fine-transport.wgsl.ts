@@ -61,7 +61,7 @@ fn sampleFinePhiGrid(grid:vec3f)->f32{
   let value=finePackedPhi(index);if(!finite(value)){return 3.402823e38;}
   losassoExactAdd(&exact,weight*value);
  }
- return losassoExactValue(exact);
+ return losassoExactValue(&exact);
 }
 fn sampleNextPhiGrid(grid:vec3f)->f32{
  let base=vec3i(floor(grid));let fraction=fract(grid);var value=0.;

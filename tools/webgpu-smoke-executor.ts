@@ -63,7 +63,6 @@ import {
 } from "../lib/gpu-initialization";
 import {
   gravitationalPotentialEnergyProxy,
-  initialSeedBrickBounds,
   inspectColumnBases,
   inspectTallVolumeGaps,
   readBufferBinding,
@@ -77,7 +76,6 @@ import {
   readFinePhiSymmetrySource,
   readFluidBrickSnapshot,
   readGlobalFineGenerationDiagnostics,
-  readSparseVoxelStats,
   readTallVelocityField3D,
   readTallVelocityTexture3D,
   readVelocityTexture3D,
@@ -85,7 +83,6 @@ import {
   type FluidBrickSnapshot,
   type GlobalFineGenerationDiagnostics,
   type HybridPresentationSmokeStats,
-  type SparseVoxelSmokeStats,
   type VelocityStageSummary,
 } from "./webgpu-smoke-readbacks";
 import { createPassEncoderIsolationScratch, isolateComputePassEncoders } from "./webgpu-pass-encoder-isolation";
@@ -741,7 +738,6 @@ interface GPUSmokeResult {
   /** Values produced by terminal scene-declared collectors. */
   terminalEvidence: Readonly<Record<string, unknown>>;
   initialFluidBrickStats?: FluidBrickSnapshot;
-  sparseVoxelStats?: SparseVoxelSmokeStats;
   hybridPresentationStats?: HybridPresentationSmokeStats;
   initialGlobalFineGeneration?: GlobalFineGenerationDiagnostics;
   initialGlobalFineRaster?: HybridPresentationSmokeStats;
@@ -985,7 +981,7 @@ function reportResult(scenario: SmokeScenario, result: GPUSmokeResult) {
     finalTallVolumeGaps: result.finalTallVolumeGaps,
     velocitySummary: result.velocitySummary,
     initialFluidBrickStats: result.initialFluidBrickStats,
-    sparseVoxelStats: result.sparseVoxelStats, hybridPresentationStats: result.hybridPresentationStats,
+    hybridPresentationStats: result.hybridPresentationStats,
     initialGlobalFineGeneration: result.initialGlobalFineGeneration,
     initialGlobalFineRaster: result.initialGlobalFineRaster,
     finalGlobalFineGeneration: result.finalGlobalFineGeneration,
@@ -1090,6 +1086,7 @@ async function runGPU(
   const validationErrors: string[] = [];
   device.addEventListener("uncapturederror", (event) => validationErrors.push(event.error.message));
   const commandAudit = gpuCommandAuditRequested ? new GPUCommandAudit() : undefined;
+  const bindGroupOwnerCensus = process.env.FLUID_GPU_BIND_GROUP_OWNER_CENSUS === "1";
   const dataFlowAudit = gpuDataFlowManifestRequested ? new GPUDataFlowAudit() : undefined;
   // Resident footprint, not per-advance allocation. Off by default because it
   // captures a stack per `createBuffer` to attribute the bytes to a module; the
@@ -1189,7 +1186,7 @@ async function runGPU(
         return shaderModule;
       };
       if (property === "createBindGroup") return (descriptor: GPUBindGroupDescriptor) => {
-        commandAudit?.recordBindGroup();
+        commandAudit?.recordBindGroup(descriptor, bindGroupOwnerCensus);
         const bindGroup = target.createBindGroup(descriptor);
         dataFlowAudit?.registry.recordBindGroup(bindGroup, descriptor);
         return bindGroup;
@@ -1352,13 +1349,9 @@ async function runGPU(
   const awaitAdvanceCompletion = async () => {
     await device.queue.onSubmittedWorkDone();
   };
-  // Raw voxel/brick records are a lazy inspection product. Merely reading the
-  // getter allocates their large publication arenas, so production timing and
-  // memory runs must not request them unless the explicit sparse audit is on.
-  const sparseSource = sparseStatsRequested
-    ? (solver as GPUSolverInstance).sparseVoxelRenderSource
-    : undefined;
-  const seedBrickBounds = initialSeedBrickBounds(scene, [solver.info.nx, solver.info.ny, solver.info.nz]);
+  // The evolving-fluid residency header rides the always-resident structural
+  // scene source, so this costs one 64-byte readback and allocates nothing.
+  const sparseSource = (solver as GPUSolverInstance).sparseVoxelSceneSource;
   const initialFluidBrickStats = sparseStatsRequested && sparseSource
     ? await readFluidBrickSnapshot(device, sparseSource)
     : undefined;
@@ -1897,7 +1890,8 @@ async function runGPU(
         }),
       };
     };
-    if (emitTopologyTrace && process.env.FLUID_FINE_TOPOLOGY_TRACE === "1") {
+    if (hasSeparateFineLevelSetBand && emitTopologyTrace
+      && process.env.FLUID_FINE_TOPOLOGY_TRACE === "1") {
       // stderr: the benchmark harness pipes child stdout through an
       // NDJSON filter that would drop this record type.
       console.error(JSON.stringify({ record: "fine-topology-trace", step,
@@ -1912,7 +1906,7 @@ async function runGPU(
         requiredExact: topology.requiredDesiredBricksExact,
         control: Array.from(topologyControl) }));
     }
-    if (topology.rolledBack) {
+    if (hasSeparateFineLevelSetBand && topology.rolledBack) {
       trip("topology-rollback", { rolledBack: true,
         flags: topology.flags, published: topology.published,
         downstreamFinalizeReason: topology.downstreamFinalizeReason,
@@ -1968,22 +1962,24 @@ async function runGPU(
     //    required count in topology control, so both receipts must be
     //    checked. The count is worklist header word ONE; a prior consumer
     //    read word zero (the generation) and printed nonsense.
-    if (header === undefined) {
-      trip("fine-band-sentinel", { unevaluable: true,
-        reason: "fine worklist header could not be decoded", fatalChainForensics });
-    } else if (header.activeCount === 0xffff_ffff) {
-      trip("fine-band-sentinel", { activeCount: header.activeCount,
-        sentinel: "0xFFFFFFFF", capacity: header.capacity,
-        generation: header.generation, flags: header.flags,
-        recurringRejection, fatalChainForensics });
-    } else if ((topology.flags & FINE_LEVELSET_TOPOLOGY_ERROR.capacity) !== 0
-      || topology.requiredDesiredBricks > header.capacity) {
-      trip("fine-band-sentinel", { activeCount: header.activeCount,
-        retainedPublication: topology.rolledBack,
-        requiredDesiredBricks: topology.requiredDesiredBricks,
-        requiredDesiredBricksExact: topology.requiredDesiredBricksExact,
-        capacity: header.capacity, generation: header.generation,
-        topologyFlags: topology.flags, fatalChainForensics });
+    if (hasSeparateFineLevelSetBand) {
+      if (header === undefined) {
+        trip("fine-band-sentinel", { unevaluable: true,
+          reason: "fine worklist header could not be decoded", fatalChainForensics });
+      } else if (header.activeCount === 0xffff_ffff) {
+        trip("fine-band-sentinel", { activeCount: header.activeCount,
+          sentinel: "0xFFFFFFFF", capacity: header.capacity,
+          generation: header.generation, flags: header.flags,
+          recurringRejection, fatalChainForensics });
+      } else if ((topology.flags & FINE_LEVELSET_TOPOLOGY_ERROR.capacity) !== 0
+        || topology.requiredDesiredBricks > header.capacity) {
+        trip("fine-band-sentinel", { activeCount: header.activeCount,
+          retainedPublication: topology.rolledBack,
+          requiredDesiredBricks: topology.requiredDesiredBricks,
+          requiredDesiredBricksExact: topology.requiredDesiredBricksExact,
+          capacity: header.capacity, generation: header.generation,
+          topologyFlags: topology.flags, fatalChainForensics });
+      }
     }
     // 5. Air-support publication. The live scratch verdict and the
     // first preceding failure latch are both copied at this step's queue
@@ -2244,7 +2240,9 @@ async function runGPU(
       const tripwireCaptureStartedAt_ms = performance.now();
       const sources = tripwireSources();
       const requiredSourceNames = losassoCutoverLane
-        ? ["topology", "mgpcg", "fineWorklist"] as const
+        ? (hasSeparateFineLevelSetBand
+          ? ["topology", "mgpcg", "fineWorklist"] as const
+          : ["mgpcg"] as const)
         : ["topology", "restriction", "mgpcg", "coarse", "fineWorklist",
           "airSupport", "transportGovernor"] as const;
       const missing: string[] = requiredSourceNames.filter((name) => !sources[name]);
@@ -4076,9 +4074,6 @@ async function runGPU(
       }
     }
   }
-  const sparseVoxelStats = sparseStatsRequested && sparseSource
-    ? await readSparseVoxelStats(device, sparseSource, seedBrickBounds)
-    : undefined;
   const descriptorControlBytes = finalSolver.powerDescriptorControl
     ? await readBufferBinding(device, { buffer: finalSolver.powerDescriptorControl }, 32) : undefined;
   const topologyControlBytes = finalSolver.powerTopologyControl
@@ -4386,7 +4381,7 @@ async function runGPU(
     } : undefined,
     velocitySummary,
     terminalEvidence: terminalCollected.values,
-    initialFluidBrickStats, sparseVoxelStats, hybridPresentationStats,
+    initialFluidBrickStats, hybridPresentationStats,
     initialGlobalFineGeneration, initialGlobalFineRaster, finalGlobalFineGeneration, finalGlobalFineRaster,
     octreePowerTopologyDiagnostics,
     octreeMGPCGDiagnostics,

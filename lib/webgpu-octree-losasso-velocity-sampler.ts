@@ -13,6 +13,8 @@ export interface WebGPUOctreeLosassoVelocitySamplerSource {
   readonly extendedVelocity: GPUBuffer;
   /** Open-addressed `vec2u(facePlusOne,hash)` records. Zero is empty. */
   readonly axisFaceDirectory: GPUBuffer;
+  /** Dense finest-MAC lattice, finite value bits or a reserved invalid NaN. */
+  readonly stagedVelocity?: GPUBuffer;
   readonly directoryCapacity: number;
   /** Finest-cell dimensions; the selected axis admits coordinate `dimension`. */
   readonly dimensions: readonly [number, number, number];

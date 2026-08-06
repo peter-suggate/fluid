@@ -1175,6 +1175,14 @@ export class GPUFluidBrickResidency {
   private commitModule?: GPUShaderModule;
   private readonly fineSeedCandidateEntryPoints: readonly string[];
   private readonly pipelinesDeferred: boolean;
+  private readonly fineSeedBindGroupCache: {
+    readonly leaves: GPUBuffer;
+    readonly candidates: GPUBuffer;
+    readonly candidateControl: GPUBuffer;
+    readonly candidate: GPUBindGroup;
+    readonly finalPublish: GPUBindGroup;
+    readonly commit: GPUBindGroup;
+  }[] = [];
   private destroyed = false;
 
   constructor(
@@ -1465,14 +1473,46 @@ export class GPUFluidBrickResidency {
     // stale, malformed, or capacity-exhausted generations never publish the
     // commit marker and therefore leave generation A byte-for-byte untouched.
     const broker = new PassBroker(encoder);
-    const bindGroup=this.device.createBindGroup({label:"Fine-seed brick residency candidate bindings",layout:this.fineSeedCandidateLayout,entries:[
-      {binding:0,resource:{buffer:this.states}},{binding:1,resource:{buffer:this.candidateStates}},
-      {binding:2,resource:{buffer:this.candidateWorklist}},{binding:3,resource:{buffer:this.tileStates}},
-      {binding:4,resource:{buffer:this.candidateTileStates}},{binding:5,resource:{buffer:this.candidateTileWorklist}},
-      {binding:6,resource:{buffer:leaves}},{binding:7,resource:{buffer:candidates}},
-      {binding:8,resource:{buffer:candidateControl}},{binding:9,resource:{buffer:this.tileWorklist}},
-      {binding:10,resource:{buffer:this.params}},
-    ]});
+    let groups = this.fineSeedBindGroupCache.find((entry) => entry.leaves === leaves
+      && entry.candidates === candidates && entry.candidateControl === candidateControl);
+    if (!groups) {
+      groups = {
+        leaves, candidates, candidateControl,
+        candidate: this.device.createBindGroup({
+          label: "Fine-seed brick residency candidate bindings",
+          layout: this.fineSeedCandidateLayout, entries: [
+            {binding:0,resource:{buffer:this.states}},{binding:1,resource:{buffer:this.candidateStates}},
+            {binding:2,resource:{buffer:this.candidateWorklist}},{binding:3,resource:{buffer:this.tileStates}},
+            {binding:4,resource:{buffer:this.candidateTileStates}},{binding:5,resource:{buffer:this.candidateTileWorklist}},
+            {binding:6,resource:{buffer:leaves}},{binding:7,resource:{buffer:candidates}},
+            {binding:8,resource:{buffer:candidateControl}},{binding:9,resource:{buffer:this.tileWorklist}},
+            {binding:10,resource:{buffer:this.params}},
+          ],
+        }),
+        finalPublish: this.device.createBindGroup({
+          label: "Fine-seed brick residency final publication bindings",
+          layout: this.fineSeedCandidatePublishLayout, entries: [
+            {binding:0,resource:{buffer:this.states}},{binding:1,resource:{buffer:this.candidateStates}},
+            {binding:2,resource:{buffer:this.candidateWorklist}},{binding:3,resource:{buffer:this.tileStates}},
+            {binding:4,resource:{buffer:this.candidateTileStates}},{binding:5,resource:{buffer:this.candidateTileWorklist}},
+            {binding:7,resource:{buffer:candidates}},{binding:8,resource:{buffer:candidateControl}},
+            {binding:9,resource:{buffer:this.tileWorklist}},
+            {binding:10,resource:{buffer:this.params}},{binding:11,resource:{buffer:this.worklist}},
+          ],
+        }),
+        commit: this.device.createBindGroup({
+          label: "Fine-seed brick residency commit bindings",
+          layout: this.fineSeedCandidateCommitLayout, entries: [
+            {binding:0,resource:{buffer:this.states}},{binding:1,resource:{buffer:this.candidateStates}},
+            {binding:2,resource:{buffer:this.worklist}},{binding:3,resource:{buffer:this.candidateWorklist}},
+            {binding:4,resource:{buffer:this.tileStates}},{binding:5,resource:{buffer:this.candidateTileStates}},
+            {binding:6,resource:{buffer:this.tileWorklist}},{binding:7,resource:{buffer:this.candidateTileWorklist}},
+          ],
+        }),
+      };
+      this.fineSeedBindGroupCache.push(groups);
+    }
+    const bindGroup = groups.candidate;
     const publish=broker.compute({label:"Publish deterministic fine-seed brick residency"});
     publish.setBindGroup(0,bindGroup);
     if (this.currentAllocationPlan.sparseKeyPools) {
@@ -1489,27 +1529,13 @@ export class GPUFluidBrickResidency {
       this.fineSeedCandidatePipelines.slice(0,3).forEach((pipeline, index) => {
         publish.setPipeline(pipeline);publish.dispatchWorkgroups(dispatches[index]!);
       });
-      const finalPublishGroup=this.device.createBindGroup({label:"Fine-seed brick residency final publication bindings",layout:this.fineSeedCandidatePublishLayout,entries:[
-        {binding:0,resource:{buffer:this.states}},{binding:1,resource:{buffer:this.candidateStates}},
-        {binding:2,resource:{buffer:this.candidateWorklist}},{binding:3,resource:{buffer:this.tileStates}},
-        {binding:4,resource:{buffer:this.candidateTileStates}},{binding:5,resource:{buffer:this.candidateTileWorklist}},
-        {binding:7,resource:{buffer:candidates}},{binding:8,resource:{buffer:candidateControl}},
-        {binding:9,resource:{buffer:this.tileWorklist}},
-        {binding:10,resource:{buffer:this.params}},{binding:11,resource:{buffer:this.worklist}},
-      ]});
       publish.setPipeline(this.fineSeedCandidatePipelines[3]!);
-      publish.setBindGroup(0,finalPublishGroup);
+      publish.setBindGroup(0,groups.finalPublish);
       publish.dispatchWorkgroups(1);
     }
     if (this.currentAllocationPlan.sparseKeyPools) {
-      const commitGroup=this.device.createBindGroup({label:"Fine-seed brick residency commit bindings",layout:this.fineSeedCandidateCommitLayout,entries:[
-        {binding:0,resource:{buffer:this.states}},{binding:1,resource:{buffer:this.candidateStates}},
-        {binding:2,resource:{buffer:this.worklist}},{binding:3,resource:{buffer:this.candidateWorklist}},
-        {binding:4,resource:{buffer:this.tileStates}},{binding:5,resource:{buffer:this.candidateTileStates}},
-        {binding:6,resource:{buffer:this.tileWorklist}},{binding:7,resource:{buffer:this.candidateTileWorklist}},
-      ]});
       const commit=broker.compute({label:"Commit fine-seed brick residency"});
-      commit.setPipeline(this.commitFineSeedCandidatesPipeline);commit.setBindGroup(0,commitGroup);
+      commit.setPipeline(this.commitFineSeedCandidatesPipeline);commit.setBindGroup(0,groups.commit);
       commit.dispatchWorkgroups(Math.ceil(Math.max(this.worklistByteLength,this.tileWorklistByteLength,
         this.currentAllocationPlan.stateBytes,this.currentAllocationPlan.tileStateBytes)/4/64));
     }

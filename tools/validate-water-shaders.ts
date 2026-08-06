@@ -23,8 +23,6 @@ import {
 import { fluidCellTraceGatherShader } from "../lib/webgpu-fluid-cell-trace";
 import { secondaryParticleComputeShader, secondaryParticleOpticalShader } from "../lib/webgpu-secondary-particles";
 import { sparseBrickDenseFieldShader } from "../lib/sparse-brick-octree";
-import { octreeSparseBrickDebugPublicationShader } from "../lib/webgpu-octree-sparse-bricks";
-import { voxelDebugComputeShader, voxelDebugRenderShader } from "../lib/webgpu-voxel-debug";
 import { octreeProjectionShader } from "../lib/webgpu-octree";
 import { octreeSPGridAccurateDispatchGateShader, octreeSPGridAccurateOperatorShader,
   octreeSPGridVCycleShader } from "../lib/webgpu-octree-spgrid-vcycle";
@@ -48,7 +46,7 @@ import { octreeFineSeedAdapterShader, octreeFineSeedCandidateShader } from "../l
 import { sparseSceneProxyVoxelizationShader } from "../lib/webgpu-sparse-scene-proxies";
 import { svoDrySceneShader } from "../lib/webgpu-svo-dry-scene";
 import { svoThickGlassWGSL } from "../lib/svo-thick-glass";
-import { globalFineClassifiedEmitShader, globalFineClassifiedEmitShaders, globalFineClassifiedScanShader } from "../lib/webgpu-water-global-fine-tetra";
+import { globalFineClassifiedEmitShader, globalFineClassifiedEmitShaders, globalFineClassifiedIndirectScanShader, globalFineClassifiedScanShader } from "../lib/webgpu-water-global-fine-tetra";
 import { structuredFineLevelSetTransportWGSL } from "../lib/webgpu-octree-fine-levelset-transport";
 import { fineLevelSetVolumeCorrectionWGSL } from "../lib/webgpu-octree-fine-levelset-volume";
 import { fineLevelSetJFACPTWGSL } from "../lib/webgpu-octree-fine-levelset-redistance";
@@ -62,6 +60,7 @@ const shaders = {
   "surface-extraction": surfaceExtractionShader,
   "global-fine-classification": globalFineSurfaceClassificationShader,
   "global-fine-classified-scan": globalFineClassifiedScanShader,
+  "global-fine-classified-indirect-scan": globalFineClassifiedIndirectScanShader,
   ...Object.fromEntries(globalFineClassifiedEmitShaders.map((source, index) => [`global-fine-classified-tetra-${index}`, source])),
   "global-fine-classified-tetrahedra": globalFineClassifiedEmitShader,
   "global-fine-structured-transport": structuredFineLevelSetTransportWGSL,
@@ -86,12 +85,6 @@ fn sampleCoarseOctreePhi(position:vec3f)->f32{return coarsePhi[u32(position.x)*0
   "secondary-liquid-particle-optics": secondaryParticleOpticalShader,
   "secondary-liquid-particle-compute": secondaryParticleComputeShader,
   "sparse-brick-dense-field": sparseBrickDenseFieldShader,
-  "sparse-brick-debug-publication": octreeSparseBrickDebugPublicationShader,
-  // The raw/level/brick inspection views. They are the only way to look at
-  // resolved voxels directly, so a stale decode in them is invisible to every
-  // other lane in this file until somebody opens the render panel.
-  "sparse-voxel-inspection-compaction": voxelDebugComputeShader,
-  "sparse-voxel-inspection-render": voxelDebugRenderShader,
   "octree-projection": octreeProjectionShader,
   "octree-spgrid-vcycle": octreeSPGridVCycleShader,
   "octree-section63-operator": octreeSPGridAccurateOperatorShader,

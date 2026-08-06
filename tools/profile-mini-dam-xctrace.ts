@@ -17,7 +17,8 @@
  * Usage:
  *   node --import tsx tools/profile-mini-dam-xctrace.ts [options]
  *
- *   --lane=mini|large|moving-interface|ui|ocean|ceiling-drop scene lane (default mini)
+ *   --lane=mini|large|high-resolution-dam-break|moving-interface|ui|ocean|ceiling-drop
+ *                                    scene lane (default mini)
  *   --band=0|1|2|3|4                override the octree interface-band level
  *                                    after applying the lane preset
  *   --fine-factor=N                  override the global fine factor

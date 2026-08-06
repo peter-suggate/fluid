@@ -20,8 +20,7 @@ struct Params {
 // integer fold is exact and commutative, so rotating the geometric adjacency
 // cannot change a last bit merely by permuting x/y/z neighbor order.
 const LOCAL_LIMBS:u32=36u;
-fn floorDiv256(value:i32)->vec2i{var carry=value/256;var digit=value-carry*256;
- if(digit<0){digit+=256;carry-=1;}return vec2i(carry,digit);}
+fn floorDiv256(value:i32)->vec2i{let carry=value>>8;return vec2i(carry,value-carry*256);}
 fn addLocalF32(limbs:ptr<function,array<i32,36>>,value:f32){let bits=bitcast<u32>(value);
  let magnitude=bits&0x7fffffffu;if(magnitude==0u){return;}let rawExponent=(magnitude>>23u)&0xffu;
  let fraction=magnitude&0x7fffffu;let significand=select(fraction,0x800000u|fraction,rawExponent!=0u);

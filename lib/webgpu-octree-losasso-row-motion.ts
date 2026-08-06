@@ -36,7 +36,7 @@ fn addExact(scalar:u32,value:f32){let bits=bitcast<u32>(value);let magnitude=bit
  let firstLimb=shift>>3u;let shifted=significand<<(shift&7u);let sign=select(1,-1,(bits&0x80000000u)!=0u);
  for(var digit=0u;digit<4u;digit+=1u){let limb=firstLimb+digit;let byte=i32((shifted>>(digit*8u))&0xffu);
   if(byte!=0&&limb<36u){atomicAdd(&exactLimbs[exactAt(scalar,limb)],sign*byte);}}}
-fn floorDiv256(value:i32)->vec2i{var carry=value/256;var digit=value-carry*256;if(digit<0){digit+=256;carry-=1;}return vec2i(carry,digit);}
+fn floorDiv256(value:i32)->vec2i{let carry=value>>8;return vec2i(carry,value-carry*256);}
 fn exactValue(scalar:u32)->f32{var limbs:array<i32,36>;for(var limb=0u;limb<36u;limb+=1u){limbs[limb]=atomicLoad(&exactLimbs[exactAt(scalar,limb)]);}
  for(var limb=0u;limb+1u<36u;limb+=1u){let normalized=floorDiv256(limbs[limb]);limbs[limb]=normalized.y;limbs[limb+1u]+=normalized.x;}
  let negative=limbs[35]<0;if(negative){for(var limb=0u;limb<36u;limb+=1u){limbs[limb]=-limbs[limb];}
@@ -68,6 +68,7 @@ export class WebGPUOctreeLosassoRowMotion {
   readonly source: OctreeFineSeedRowMotionSource;
   private readonly params: GPUBuffer;
   private pipelines?: Readonly<Record<"prepare" | "reconstruct" | "finalize", GPUComputePipeline>>;
+  private readonly groups = new Map<GPUComputePipeline, GPUBindGroup>();
   private destroyed = false;
 
   constructor(private readonly device: GPUDevice, readonly input: WebGPUOctreeLosassoRowMotionInput,
@@ -98,15 +99,17 @@ export class WebGPUOctreeLosassoRowMotion {
     if (!this.pipelines) throw new Error("Losasso row-motion pipelines are not initialized");
     const buffers = [this.params, this.input.authority, this.input.rowFaceOffsets, this.input.rowFaces,
       this.input.faces, this.input.extendedVelocity, this.source.control, this.source.rowVelocities];
-    const run = (pipeline: GPUComputePipeline, bindings: readonly number[], groups: number) => { const pass = broker.compute({ label: pipeline.label });
-      pass.setPipeline(pipeline); pass.setBindGroup(0, this.device.createBindGroup({ layout: pipeline.getBindGroupLayout(0),
-        entries: bindings.map((binding) => ({ binding, resource: { buffer: buffers[binding]! } })) })); pass.dispatchWorkgroups(groups); };
+    const run = (pipeline: GPUComputePipeline, bindings: readonly number[], workgroups: number) => { const pass = broker.compute({ label: pipeline.label });
+      const group = this.groups.get(pipeline) ?? this.device.createBindGroup({ layout: pipeline.getBindGroupLayout(0),
+        entries: bindings.map((binding) => ({ binding, resource: { buffer: buffers[binding]! } })) });
+      if (!this.groups.has(pipeline)) this.groups.set(pipeline, group);
+      pass.setPipeline(pipeline); pass.setBindGroup(0, group); pass.dispatchWorkgroups(workgroups); };
     run(this.pipelines.prepare, [0, 1, 6], 1);
     run(this.pipelines.reconstruct, [0, 1, 2, 3, 4, 5, 6, 7], this.plan.dispatch[0]);
     run(this.pipelines.finalize, [1, 6], 1);
     return this.source;
   }
   destroy(): void { if (this.destroyed) return; this.destroyed = true; this.params.destroy();
-    this.source.control.destroy(); this.source.rowVelocities.destroy(); this.pipelines = undefined; }
+    this.source.control.destroy(); this.source.rowVelocities.destroy(); this.groups.clear(); this.pipelines = undefined; }
   private assertLive(): void { if (this.destroyed) throw new Error("Losasso row-motion publisher is destroyed"); }
 }

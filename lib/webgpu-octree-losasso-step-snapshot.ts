@@ -6,11 +6,13 @@ export interface LosassoStepSnapshotSources {
   readonly coarsePhi: GPUBuffer;
   readonly extension: GPUBuffer;
   readonly fineTransport?: GPUBuffer;
+  readonly fluidResidency?: GPUBuffer;
+  readonly fluidBulkResidency?: GPUBuffer;
 }
 
 const LAYOUT = Object.freeze({
   authority: 0, solver: 32, fine: 96, coarsePhi: 124, extension: 184,
-  fineTransport: 216, stride: 248,
+  fineTransport: 216, fluidResidency: 248, fluidBulkResidency: 312, stride: 376,
 });
 const COPY_DST = 0x0008, MAP_READ = 0x0001, READ = 0x0001;
 
@@ -23,6 +25,8 @@ export interface LosassoStepSnapshotRecord {
   readonly coarsePhi: Uint32Array;
   readonly extension: Uint32Array;
   readonly fineTransport: Uint32Array;
+  readonly fluidResidency: Uint32Array;
+  readonly fluidBulkResidency: Uint32Array;
 }
 
 export function losassoStepSnapshotFailures(
@@ -103,6 +107,10 @@ export class WebGPUOctreeLosassoStepSnapshotRing {
     copy(sources.extension, LAYOUT.extension, 32);
     if (sources.fineTransport) copy(sources.fineTransport, LAYOUT.fineTransport, 32);
     else encoder.clearBuffer(slot.buffer, LAYOUT.fineTransport, 32);
+    if (sources.fluidResidency) copy(sources.fluidResidency, LAYOUT.fluidResidency, 64);
+    else encoder.clearBuffer(slot.buffer, LAYOUT.fluidResidency, 64);
+    if (sources.fluidBulkResidency) copy(sources.fluidBulkResidency, LAYOUT.fluidBulkResidency, 64);
+    else encoder.clearBuffer(slot.buffer, LAYOUT.fluidBulkResidency, 64);
     slot.sequence = ++this.sequence; slot.step = step; slot.surfaceKind = surfaceKind;
     slot.state = "encoded";
     return true;
@@ -125,7 +133,9 @@ export class WebGPUOctreeLosassoStepSnapshotRing {
       return Object.freeze({ step: slot.step, surfaceKind: slot.surfaceKind,
         authority: words(LAYOUT.authority, 8), solver: words(LAYOUT.solver, 16),
         fine: words(LAYOUT.fine, 7), coarsePhi: words(LAYOUT.coarsePhi, 15),
-        extension: words(LAYOUT.extension, 8), fineTransport: words(LAYOUT.fineTransport, 8) });
+        extension: words(LAYOUT.extension, 8), fineTransport: words(LAYOUT.fineTransport, 8),
+        fluidResidency: words(LAYOUT.fluidResidency, 16),
+        fluidBulkResidency: words(LAYOUT.fluidBulkResidency, 16) });
     } catch {
       return undefined;
     } finally {

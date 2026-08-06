@@ -162,7 +162,8 @@ const PUBLISH_ENTRY_POINTS = [
   "beginLosassoPublication", "countLosassoFaces", "prefixLosassoFaces",
   "clearLosassoFaceDirectory",
   "emitLosassoFaces", "conditionLosassoFaces", "prefixLosassoIncidences", "scatterLosassoIncidences",
-  "sortLosassoIncidences", "clearLosassoAdjacencyOffsets", "finishLosassoPublication",
+  "sortLosassoIncidences", "clearLosassoAdjacencyOffsets", "buildLosassoFaceDirectory",
+  "finishLosassoPublication",
 ] as const;
 const AUTHORITY_COMMIT_ENTRY_POINTS = [
   "commitLosassoAuthorityRows", "commitLosassoAuthorityIncidences",
@@ -304,7 +305,10 @@ class WebGPUOctreeLosassoTopologyPublisher implements WebGPUOctreeLosassoCandida
       topologyParameterWords(options.topology, capacities, options.closedBoundaries,
         options.rigidPressureReaction?.rigidWorldOrigin));
     this.scratch = device.createBuffer({ label: "Losasso compact face publication scratch",
-      size: Math.max(16, capacities.rows * 4 * 4), usage: GPUBufferUsage.STORAGE });
+      // Four publication counters plus six packed +/- axis face plans per row.
+      // The plans are produced by countLosassoFaces and consumed unchanged by
+      // emitLosassoFaces, avoiding a second owner-page traversal.
+      size: Math.max(16, capacities.rows * 10 * 4), usage: GPUBufferUsage.STORAGE });
     this.acceptedRigidBoundaryControl = device.createBuffer({
       label: "Losasso accepted rigid-boundary refresh diagnostics",
       size: 24,
@@ -522,7 +526,8 @@ class WebGPUOctreeLosassoTopologyPublisher implements WebGPUOctreeLosassoCandida
       [0, 4, 5, 6, 7, 13],
       [0, 4, 5, 6, 7, 10, 16],
       [4, 12],
-      [0, 4, 8, 9, 14, 15, 17],
+      [4, 14, 15],
+      [0, 4, 8, 9, 17],
     ] as const;
     const groups = this.pipelines.map((pipeline, pipelineIndex) => {
       const selected = bindings[pipelineIndex]!;
@@ -531,9 +536,19 @@ class WebGPUOctreeLosassoTopologyPublisher implements WebGPUOctreeLosassoCandida
         selected, selected.map((binding) => buffers[binding]!));
     });
     const dispatches = ["single", "row", "single", "directory", "row", "face",
-      "single", "face", "row", "face", "single"] as const;
-    const pass = broker.compute({ label: "Losasso topology - publish compact axis faces" });
+      "single", "face", "row", "face", "face", "single"] as const;
     for (let index = 0; index < this.pipelines.length; index += 1) {
+      // The eight-byte solid-cell sentinel means this scene has neither
+      // terrain nor rigid geometry. emitLosassoFaces already publishes the
+      // exact all-open (or closed world-wall) coefficients for that case, so
+      // the span-by-span analytic aperture fold would only recompute 1/0 and
+      // zero normal velocity for every face.
+      if (index === 5 && input.solidCells.size <= 8) continue;
+      // These labels collapse into the already-open production pass. Under
+      // explicit label-isolation profiling they expose the individual compact
+      // publication stages without changing shipping encoder shape.
+      const pass = broker.compute({ label:
+        `Losasso topology - ${PUBLISH_ENTRY_POINTS[index]}` });
       pass.setPipeline(this.pipelines[index]!);
       pass.setBindGroup(0, groups[index]!);
       const dispatch = dispatches[index]!;
@@ -680,8 +695,10 @@ export class WebGPUOctreeLosassoCoarseBackend {
       wetFaceCapacity: options.capacities.faces,
       maximumResidentFineBricks: options.extensionBandBrickCapacity,
       velocityExtensionMode: options.velocityExtensionMode,
+      closedBoundaries: options.closedBoundaries,
       wet: {
         control: published.operator.control,
+        faceDispatch: published.dynamics.faceDispatch,
         faceGeometry: published.dynamics.faceGeometry,
         axisFaceDirectory: published.dynamics.axisFaceDirectory,
         directoryCapacity: published.dynamics.faceDirectoryCapacity,
@@ -724,6 +741,8 @@ export class WebGPUOctreeLosassoCoarseBackend {
         axisFaceDirectory: this.extensionBand.samplerSource.axisFaceDirectory,
         extendedVelocity: this.extensionBand.source.extendedVelocity,
         predictorExtendedVelocity: this.extensionBand.predictorVelocity,
+        stagedVelocity: this.extensionBand.dynamicsStagedVelocity,
+        predictorStagedVelocity: this.extensionBand.predictorStagedVelocity,
         faceCapacity: this.extensionBand.plan.faceCapacity,
         directoryCapacity: this.extensionBand.plan.directoryCapacity,
       });

@@ -14,6 +14,11 @@ export const OCTREE_SOLVE_TAIL_MAXIMUM_ENCODED_OUTER_ITERATIONS = 10;
  * the same-step residual gate makes the unused commands no-ops.
  */
 export const OCTREE_SOLVE_TAIL_HARD_OUTER_ITERATION_CEILING = 40;
+/** Million-cell domains need a wider first-step pressure envelope. The
+ * residual gate zeroes the suffix after convergence, leaving smaller scenes
+ * and later well-predicted solves unchanged. */
+export const OCTREE_SOLVE_TAIL_LARGE_HARD_OUTER_ITERATION_CEILING = 192;
+export const OCTREE_SOLVE_TAIL_LARGE_FINEST_CELL_CAPACITY = 128 ** 3;
 export const OCTREE_FACTOR1_PREDICTED_SOLVE_TAIL_ENVIRONMENT =
   "FLUID_OCTREE_FACTOR1_PREDICTED_SOLVE_TAIL";
 /**
@@ -343,7 +348,9 @@ export function planOctreeSolveTail(
   const encodedOuterIterations = OCTREE_SOLVE_TAIL_MAXIMUM_ENCODED_OUTER_ITERATIONS;
   return Object.freeze({
     encodedOuterIterations,
-    hardOuterIterationCeiling: OCTREE_SOLVE_TAIL_HARD_OUTER_ITERATION_CEILING,
+    hardOuterIterationCeiling: finestCellCapacity >= OCTREE_SOLVE_TAIL_LARGE_FINEST_CELL_CAPACITY
+      ? OCTREE_SOLVE_TAIL_LARGE_HARD_OUTER_ITERATION_CEILING
+      : OCTREE_SOLVE_TAIL_HARD_OUTER_ITERATION_CEILING,
     // The scene owns the accuracy request.  In particular, never turn an
     // authored 1e-8 projection into the former 1e-4 residual floor.
     relativeTolerance: profile.requestedRelativeTolerance,

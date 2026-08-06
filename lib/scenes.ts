@@ -54,13 +54,13 @@ export const POWER_VALIDATION_METHOD_PROFILE: MethodProfile = Object.freeze({
     coarseBackend: "losasso",
     maximumLeafSize: "16",
     interfaceRefinementBandCells: 3,
-    globalFineLevelSetFactor: "4",
+    globalFineLevelSetFactor: "1",
   }),
 });
 
-/** Canonical paper configuration for the horizontal D4 oracle. Performance,
- * Dawn regression, and the interactive preset must all exercise the same
- * factor-4 fine surface and level-4 coupled reach. */
+/** Canonical coarse-band configuration for the horizontal D4 oracle.
+ * Performance, Dawn regression, and the interactive preset exercise the same
+ * factor-1 surface and level-4 coupled reach. */
 export const SYMMETRIC_EXPANSION_METHOD_PROFILE: MethodProfile = Object.freeze({
   methodId: "octree",
   quality: "balanced",
@@ -71,13 +71,13 @@ export const SYMMETRIC_EXPANSION_METHOD_PROFILE: MethodProfile = Object.freeze({
     // The visible D4 gate is 32x16x32, so 16 is its largest common dyadic leaf.
     maximumLeafSize: "16",
     interfaceRefinementBandCells: 4,
-    globalFineLevelSetFactor: "4",
+    globalFineLevelSetFactor: "1",
   }),
 });
 
 /**
  * Shared coarse-only dam experiment. The surface field and pressure octree use
- * the same lattice; size-16 leaves preserve a materially coarse far field while
+ * the same lattice; size-32 leaves preserve a materially coarse far field while
  * three grading layers expose the intermediate dyadic shells.
  */
 export const COARSE_ONLY_POWER_DAM_METHOD_PROFILE: MethodProfile = Object.freeze({
@@ -539,7 +539,7 @@ export const RIGID_COUPLING_ORACLE_METHOD_PROFILE: MethodProfile = Object.freeze
     ...POWER_VALIDATION_METHOD_PROFILE.overrides,
     maximumLeafSize: "8",
     interfaceRefinementBandCells: 4,
-    globalFineLevelSetFactor: "4",
+    globalFineLevelSetFactor: "1",
   }),
 });
 
@@ -701,6 +701,23 @@ export function createMinimalPowerDamBreak64Scene(): SceneDescription {
   scene.voxelDomain = {
     ...scene.voxelDomain,
     finestCellSize_m: scene.voxelDomain.finestCellSize_m / 4,
+  };
+  return scene;
+}
+
+/**
+ * A watchable 128-cubed version of the analytic mini dam. It keeps the exact
+ * 0.8 m physical tank and reservoir while resolving each axis at 6.25 mm.
+ * Coarse-only surface transport makes that resolution available to the liquid
+ * instead of spending the frame and memory budget on a second 4x lattice.
+ */
+export function createHighResolutionDamBreakScene(): SceneDescription {
+  const scene = createMinimalPowerDamBreakScene();
+  scene.sceneId = "high-resolution-dam-break";
+  scene.duration_s = 20;
+  scene.voxelDomain = {
+    ...scene.voxelDomain,
+    finestCellSize_m: scene.voxelDomain.finestCellSize_m / 8,
   };
   return scene;
 }
@@ -1307,6 +1324,17 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     },
   }),
   defineScene({
+    id: "high-resolution-dam-break",
+    name: "Dam break · high resolution 128³",
+    blurb: "A 0.8 m analytic water column resolved on a 128³ lattice. The factor-1 coarse surface keeps the full frame budget on simulation and rendering, with no separate 4× fine-band allocation.",
+    audience: "explore",
+    shelf: "Tanks",
+    environment: "default",
+    methodProfile: COARSE_ONLY_POWER_DAM_METHOD_PROFILE,
+    build: createHighResolutionDamBreakScene,
+    camera: { distance_m: 1.9, target_m: { x: 0, y: 0.3, z: 0 } },
+  }),
+  defineScene({
     id: "twin-dam-collision",
     name: "Twin dams · corner collision",
     blurb: "A wide tank with a reservoir on each diagonally opposite floor corner. Both release at once, run 1.2 m down the long axis, and meet mid-tank at an angle.",
@@ -1686,7 +1714,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
   defineScene({
     id: "symmetric-expansion",
     name: "Octree · symmetric expansion",
-    blurb: "One exact central 2×1×2-brick water body collapses across the minimum dyadic 32×16×32 tank using the paper-default factor-4 fine band and level-4 coupled reach. Dawn checks D4 symmetry of volume, velocity, pressure, topology, and four-wall contact after every step.",
+    blurb: "One exact central 2×1×2-brick water body collapses across the minimum dyadic 32×16×32 tank using the default factor-1 coarse surface and level-4 coupled reach. Dawn checks D4 symmetry of volume, velocity, pressure, topology, and four-wall contact after every step.",
     audience: "validation",
     shelf: "Symmetry",
     environment: "default",

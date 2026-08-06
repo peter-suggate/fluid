@@ -32,6 +32,10 @@ export const useMethodStore = create<MethodStore>((set) => ({
     return { overrides: { ...state.overrides, [methodId]: rest } };
   }),
   resetParams: (methodId) => set((state) => ({ overrides: { ...state.overrides, [methodId]: {} } })),
+  // Scene profiles are construction contracts: selecting a scene must produce
+  // the same settings in the browser and Dawn. Users can still tune any value
+  // after selection, but an old fine-band choice cannot silently leak into the
+  // next scene and override its authored coarse-only profile.
   applyProfile: ({ methodId, quality, overrides }) => set((state) => ({
     methodId,
     quality,

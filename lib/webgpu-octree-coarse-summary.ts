@@ -2,7 +2,7 @@ import type { GPUInitializationTask } from "./gpu-initialization";
 import type { OctreePowerCoarseLevelSetSampleSource } from "./webgpu-octree-power-coarse-levelset";
 import type { WebGPUOctreeLosassoVelocitySamplerSource } from
   "./webgpu-octree-losasso-velocity-sampler";
-import { octreeLosassoVelocitySamplingWGSL } from
+import { octreeLosassoStagedVelocitySamplingWGSL } from
   "./webgpu-octree-losasso-velocity-sampler.wgsl";
 import { OCTREE_AIR_SUPPORT_LAYOUT_VERSION, OCTREE_AIR_SUPPORT_OWNER_HASH,
   OCTREE_AIR_SUPPORT_TAG, OCTREE_AIR_SUPPORT_VALID, octreeAirSupportOwnerHashStartWGSL,
@@ -11,11 +11,12 @@ import { PassBroker } from "./webgpu-pass-broker";
 
 const PAGE_SIZE = 32;
 const ENTRY_WORDS = 12;
-const coarseSummaryLosassoVelocitySamplingWGSL = octreeLosassoVelocitySamplingWGSL
+const coarseSummaryLosassoVelocitySamplingWGSL = octreeLosassoStagedVelocitySamplingWGSL
   .replace(/\bcoarse\b/g, "losassoControl")
   .replace(/\bfaceGeometry\b/g, "losassoFaceGeometry")
   .replace(/\bextendedVelocity\b/g, "losassoExtendedVelocity")
   .replace(/\bfaceDirectory\b/g, "losassoFaceDirectory")
+  .replace(/\bstagedVelocity\b/g, "losassoStagedVelocity")
   .replace(/p\.velocityDimensions/g, "p.dims")
   .replace(/p\.directoryCapacity/g, "u32(arrayLength(&losassoFaceDirectory))")
   .replace(/p\.closed/g, "1u")
@@ -58,6 +59,15 @@ export function octreeCoarseSummaryIndirectDispatchEnabled(
   const resolved = environment
     ?? (typeof process !== "undefined" ? process.env : undefined);
   return resolved?.FLUID_COARSE_SUMMARY_INDIRECT_DISPATCH === "1";
+}
+
+function coarseSummaryDiagnosticsEnabled(
+  environment?: Readonly<Record<string, string | undefined>>,
+): boolean {
+  const resolved = environment
+    ?? (typeof process !== "undefined" ? process.env : undefined);
+  return resolved?.FLUID_COARSE_SUMMARY_DIAGNOSTICS === "1"
+    || resolved?.FLUID_FIELD_STATS === "1";
 }
 
 export interface OctreeCoarseSummaryPlan {
@@ -117,9 +127,11 @@ export class WebGPUOctreeCoarseSummary {
   private readonly bindingSentinel: GPUBuffer;
   private readonly indirectDispatch = octreeCoarseSummaryIndirectDispatchEnabled();
   private readonly pipelines: Record<string, GPUComputePipeline> = {};
+  private readonly bindGroups = new Map<GPUComputePipeline, GPUBindGroup>();
   private module?: GPUShaderModule;
+  private hierarchyInitialized = false;
   private destroyed = false;
-  private readonly entries = ["resetSummary", "ensureSummaryPages", "ensureSupportSummaryPages",
+  private readonly entries = ["resetSummary", "resetSummaryValues", "ensureSummaryPages", "ensureSupportSummaryPages",
     "ensureSummaryRanks", "ensureSupportSummaryRanks", "predictSummaryCells",
     "seedDenseRedistance", "redistanceScratchToOutput", "redistanceOutputToScratch",
     "summarizeDenseVolume", "prepareVolumeCorrection", "correctAndAggregateSummaryCells",
@@ -186,6 +198,7 @@ export class WebGPUOctreeCoarseSummary {
     // The prepare singleton reproduces the host's 2D dispatch split exactly.
     new Uint32Array(data, 96, 1)[0] = device.limits.maxComputeWorkgroupsPerDimension;
     new Float32Array(data, 100, 1)[0] = air.physicalCellSize;
+    new Uint32Array(data, 104, 1)[0] = coarseSummaryDiagnosticsEnabled() ? 1 : 0;
     device.queue.writeBuffer(this.params, 0, data);
     if (air.initialPhi.length !== dimensions[0] * dimensions[1] * dimensions[2]) {
       throw new RangeError("Coarse-only tracker bootstrap must cover the complete coarse lattice");
@@ -237,8 +250,9 @@ export class WebGPUOctreeCoarseSummary {
       const usesVelocity = entry === "predictSummaryCells";
       const usesState = true;
       const usesLosassoControl = entry === "prepareSummaryDispatch";
-      const group = this.device.createBindGroup({
-        layout: this.pipelines[entry]!.getBindGroupLayout(0),
+      const pipeline = this.pipelines[entry]!;
+      const group = this.bindGroups.get(pipeline) ?? this.device.createBindGroup({
+        layout: pipeline.getBindGroupLayout(0),
         entries: [
           ...(prepare ? [] : [{ binding: 0, resource: { buffer: this.directory } }]),
           ...(usesCoarse ? [
@@ -253,11 +267,7 @@ export class WebGPUOctreeCoarseSummary {
             { binding: 5, resource: { buffer: this.air.rowVelocities } },
             { binding: 7, resource: { buffer: this.air.losassoVelocity?.control
               ?? this.bindingSentinel } },
-            { binding: 8, resource: { buffer: this.air.losassoVelocity?.faceGeometry
-              ?? this.bindingSentinel } },
-            { binding: 9, resource: { buffer: this.air.losassoVelocity?.extendedVelocity
-              ?? this.bindingSentinel } },
-            { binding: 10, resource: { buffer: this.air.losassoVelocity?.axisFaceDirectory
+            { binding: 11, resource: { buffer: this.air.losassoVelocity?.stagedVelocity
               ?? this.bindingSentinel } },
           ] : []),
           ...(usesLosassoControl ? [{ binding: 7, resource: { buffer: this.air.losassoVelocity?.control
@@ -265,8 +275,9 @@ export class WebGPUOctreeCoarseSummary {
           ...(prepare ? [{ binding: 6, resource: { buffer: this.dispatchArgs } }] : []),
         ],
       });
+      if (!this.bindGroups.has(pipeline)) this.bindGroups.set(pipeline, group);
       const pass = broker.compute({ label: `Build coarse-only summary · ${entry}` });
-      pass.setPipeline(this.pipelines[entry]!); pass.setBindGroup(0, group);
+      pass.setPipeline(pipeline); pass.setBindGroup(0, group);
       if (this.indirectDispatch && record !== undefined) {
         pass.dispatchWorkgroupsIndirect(this.dispatchArgs, record * 12);
       } else {
@@ -277,13 +288,20 @@ export class WebGPUOctreeCoarseSummary {
       dispatch("prepareSummaryDispatch", 1);
       broker.fence("coarse-only summary indirect arguments published");
     }
-    // resetSummary stays capacity-shaped: the dense top-word page table must
-    // be cleared wholesale until a touched-key worklist exists (Bet 1 residue).
-    dispatch("resetSummary", Math.max(this.plan.phiOffsetWords, this.plan.entryCapacity));
-    dispatch("ensureSummaryPages", this.coarse.rowCapacity, 1);
-    dispatch("ensureSupportSummaryPages", this.air.layout.ownerDirectoryCellCapacity, 0);
-    dispatch("ensureSummaryRanks", this.coarse.rowCapacity, 1);
-    dispatch("ensureSupportSummaryRanks", this.air.layout.ownerDirectoryCellCapacity, 0);
+    if (!this.hierarchyInitialized) {
+      dispatch("resetSummary", Math.max(this.plan.phiOffsetWords, this.plan.entryCapacity));
+      // The dense tracker covers every B4 base block, so its hierarchy is the
+      // complete [0,keyCapacity) key set. Build that set directly instead of
+      // making all 64 cells in every block race to claim the same key.
+      dispatch("ensureSupportSummaryPages", this.plan.hierarchyKeyCapacity);
+      dispatch("ensureSupportSummaryRanks", this.plan.hierarchyKeyCapacity);
+      this.hierarchyInitialized = true;
+    } else {
+      // Keys, pages and ranks are a construction-time function of the fixed
+      // dense lattice. Retain that directory and reset only per-advance entry
+      // payloads and counters.
+      dispatch("resetSummaryValues", Math.max(this.plan.entryCapacity, 32));
+    }
     if (this.indirectDispatch) {
       // state[1] is final only after both rank stages; the entry record cannot
       // be authored by the head singleton. Both fences keep the argument
@@ -367,6 +385,7 @@ export class WebGPUOctreeCoarseSummary {
 
   destroy(): void {
     if (this.destroyed) return; this.destroyed = true;
+    this.bindGroups.clear();
     this.directory.destroy(); this.state.destroy(); this.params.destroy();
     this.dispatchArgs.destroy(); this.bindingSentinel.destroy();
   }
@@ -378,7 +397,8 @@ const COARSE_AUTHORITY:u32=0x80000000u;const PHI_INTERFACE:u32=4u;
 const PAGE_SIZE:u32=${PAGE_SIZE}u;const ENTRY_WORDS:u32=${ENTRY_WORDS}u;
 struct P{baseDims:vec3u,pad0:u32,dims:vec3u,maximumLeafSize:u32,keyCapacity:u32,topPages:u32,pageCapacity:u32,
  entryCapacity:u32,entryOffset:u32,maximumLevel:u32,rowCapacity:u32,directoryWords:u32,
- airControl:u32,airVectors:u32,airOwners:u32,domainVolume:u32,time:vec4f,maxWorkgroups:u32,physicalCellSize:f32}
+ airControl:u32,airVectors:u32,airOwners:u32,domainVolume:u32,time:vec4f,maxWorkgroups:u32,physicalCellSize:f32,
+ diagnostics:u32}
 struct CoarseEntry{cellPlusOne:u32,size:u32,phi:f32,minimumPhi:f32,maximumPhi:f32,flags:u32,row:u32,volume:f32}
 struct CoarseDirectory{state:u32,generation:u32,rowCount:u32,maximumLeafSize:u32,dimensions:vec3u,
  physicalCellSize:f32,entries:array<CoarseEntry>}
@@ -393,11 +413,12 @@ struct CoarseDirectory{state:u32,generation:u32,rowCount:u32,maximumLeafSize:u32
 @group(0)@binding(8)var<storage,read>losassoFaceGeometry:array<vec4u>;
 @group(0)@binding(9)var<storage,read>losassoExtendedVelocity:array<f32>;
 @group(0)@binding(10)var<storage,read>losassoFaceDirectory:array<vec2u>;
+@group(0)@binding(11)var<storage,read>losassoStagedVelocity:array<u32>;
 fn linear(w:vec3u,n:vec3u,l:u32)->u32{return (w.x+w.y*n.x)*256u+l;}
 fn finite(v:f32)->bool{return v==v&&abs(v)<3.402823e38;}
 fn finite3(v:vec3f)->bool{return all(v==v)&&all(abs(v)<vec3f(3.402823e38));}
-fn canonicalSum8(values:array<f32,8>)->f32{var sorted=values;for(var i=1u;i<8u;i+=1u){let value=sorted[i];var j=i;loop{if(j==0u||abs(sorted[j-1u])<=abs(value)){break;}sorted[j]=sorted[j-1u];j-=1u;}sorted[j]=value;}var sum=0.;var i=0u;loop{if(i>=8u){break;}let magnitude=abs(sorted[i]);var balance=0;var j=i;loop{if(j>=8u||abs(sorted[j])!=magnitude){break;}if(sorted[j]>0.){balance+=1;}else if(sorted[j]<0.){balance-=1;}j+=1u;}sum+=f32(balance)*magnitude;i=j;}return sum;}
-fn canonicalWeight(a:f32,b:f32,c:f32)->f32{var factors=array<f32,3>(a,b,c);for(var i=1u;i<3u;i+=1u){let value=factors[i];var j=i;loop{if(j==0u||factors[j-1u]<=value){break;}factors[j]=factors[j-1u];j-=1u;}factors[j]=value;}return factors[0]*factors[1]*factors[2];}
+fn canonicalSum8(values:ptr<function,array<f32,8>>)->f32{for(var i=1u;i<8u;i+=1u){let value=(*values)[i];var j=i;loop{if(j==0u||abs((*values)[j-1u])<=abs(value)){break;}(*values)[j]=(*values)[j-1u];j-=1u;}(*values)[j]=value;}var sum=0.;var i=0u;loop{if(i>=8u){break;}let magnitude=abs((*values)[i]);var balance=0;var j=i;loop{if(j>=8u||abs((*values)[j])!=magnitude){break;}if((*values)[j]>0.){balance+=1;}else if((*values)[j]<0.){balance-=1;}j+=1u;}sum+=f32(balance)*magnitude;i=j;}return sum;}
+fn canonicalWeight(a:f32,b:f32,c:f32)->f32{var low=a;var middle=b;var high=c;if(low>middle){let swap=low;low=middle;middle=swap;}if(middle>high){let swap=middle;middle=high;high=swap;}if(low>middle){let swap=low;low=middle;middle=swap;}return low*middle*high;}
 fn ordered(v:f32)->u32{let bits=bitcast<u32>(v);return select(bits^0x80000000u,~bits,(bits&0x80000000u)!=0u);}
 fn topWord(key:u32)->u32{return 16u+key/PAGE_SIZE;}
 fn poolOffset()->u32{return 16u+p.topPages;}
@@ -435,7 +456,7 @@ fn interpolatedCoarseAt(point:vec3f)->vec2f{let upper=max(vec3f(p.dims)-vec3f(0.
  for(var corner=0u;corner<8u;corner+=1u){let offset=vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));
   let q=clamp(low+offset,vec3i(0),vec3i(p.dims)-vec3i(1));let sample=extrapolatedCoarseAt(vec3f(q)+vec3f(0.5));
   let weight=canonicalWeight(select(1.0-t.x,t.x,(corner&1u)!=0u),select(1.0-t.y,t.y,(corner&2u)!=0u),select(1.0-t.z,t.z,(corner&4u)!=0u));if(weight>0.0&&sample.y!=0.0){terms[corner]=weight*sample.x;weights[corner]=weight;}}
- let value=canonicalSum8(terms);let total=canonicalSum8(weights);
+ let value=canonicalSum8(&terms);let total=canonicalSum8(&weights);
  return select(vec2f(0.0),vec2f(value/max(total,1e-12),1.0),total>0.999);}
 struct AxisSample{low:i32,lowWeight:f32,highWeight:f32}
 fn centeredAxisSample(value:f32,dimension:u32)->AxisSample{let half=0.5*f32(dimension);let bounded=clamp(value,-half+0.5,half-0.5);let positiveLattice=(half-0.5)+abs(bounded);let positiveLow=i32(floor(positiveLattice));let fraction=fract(positiveLattice);if(bounded>=0.0){return AxisSample(positiveLow,1.0-fraction,fraction);}if(fraction==0.0){return AxisSample(i32(dimension)-1-positiveLow,1.0,0.0);}return AxisSample(i32(dimension)-2-positiveLow,fraction,1.0-fraction);}
@@ -445,7 +466,7 @@ fn densePhiAtCentered(bank:u32,point:vec3f)->vec2f{let ax=centeredAxisSample(poi
   let q=clamp(vec3i(ax.low,ay.low,az.low)+offset,vec3i(0),vec3i(p.dims)-vec3i(1));let item=u32(q.x)+p.dims.x*(u32(q.y)+p.dims.y*u32(q.z));
   let at=phiWord(bank,item);if(at>=arrayLength(&directory)){return vec2f(0.0);}let sample=bitcast<f32>(atomicLoad(&directory[at]));
   if(!finite(sample)){return vec2f(0.0);}let weight=canonicalWeight(select(ax.lowWeight,ax.highWeight,(corner&1u)!=0u),select(ay.lowWeight,ay.highWeight,(corner&2u)!=0u),select(az.lowWeight,az.highWeight,(corner&4u)!=0u));terms[corner]=weight*sample;}
- return vec2f(canonicalSum8(terms),1.0);}
+ return vec2f(canonicalSum8(&terms),1.0);}
 fn densePhiAt(bank:u32,point:vec3f)->vec2f{return densePhiAtCentered(bank,point-0.5*vec3f(p.dims));}
 fn quantizePhi(value:f32)->f32{return round(value*65536.0)/65536.0;}
 // The version word is interpolated, never spelled. It was frozen at a literal
@@ -505,7 +526,7 @@ fn velocityAtCentered(point:vec3f)->vec4f{let ax=centeredAxisSample(point.x,p.di
   let q=clamp(vec3i(ax.low,ay.low,az.low)+offset,vec3i(0),vec3i(p.dims)-vec3i(1));let item=u32(q.x)+p.dims.x*(u32(q.y)+p.dims.y*u32(q.z));
   let v=supportVelocity(supportIdentity(item).x);let weight=canonicalWeight(select(ax.lowWeight,ax.highWeight,(corner&1u)!=0u),select(ay.lowWeight,ay.highWeight,(corner&2u)!=0u),select(az.lowWeight,az.highWeight,(corner&4u)!=0u));
   if(weight>0.0&&v.w>0.0){termsX[corner]=weight*v.x;termsY[corner]=weight*v.y;termsZ[corner]=weight*v.z;weights[corner]=weight;}}
- let result=vec3f(canonicalSum8(termsX),canonicalSum8(termsY),canonicalSum8(termsZ));let total=canonicalSum8(weights);
+ let result=vec3f(canonicalSum8(&termsX),canonicalSum8(&termsY),canonicalSum8(&termsZ));let total=canonicalSum8(&weights);
  // Coverage rule for the trilinear stencil, authored in p.time.y.
  //
  // At 1.0 every one of the eight corners must resolve to a published
@@ -521,8 +542,8 @@ fn velocityAtCentered(point:vec3f)->vec4f{let ax=centeredAxisSample(point.x,p.di
  return select(vec4f(0.0),vec4f(result/max(total,1e-12),1.0),total>=p.time.y);}
 fn velocityAtPoint(point:vec3f)->vec4f{return velocityAtCentered(point-0.5*vec3f(p.dims));}
 ${coarseSummaryLosassoVelocitySamplingWGSL}
-fn transportVelocityAt(point:vec3f)->vec4f{let sample=losassoVelocityAtGrid(point);
- return select(velocityAtPoint(point),vec4f(sample.value,f32(sample.valid)),losassoMode());}
+fn transportVelocityAt(point:vec3f)->vec4f{if(losassoMode()){let sample=losassoVelocityAtGrid(point);
+  return vec4f(sample.value,f32(sample.valid));}return velocityAtPoint(point);}
 fn supportBase(item:u32)->u32{if(item>=p.domainVolume){return INVALID;}
  let q=vec3u(item%p.dims.x,(item/p.dims.x)%p.dims.y,item/(p.dims.x*p.dims.y));
  let b=q/4u;return b.x+p.baseDims.x*(b.y+p.baseDims.y*b.z);}
@@ -548,6 +569,13 @@ fn rankForKey(key:u32)->u32{let pagePlusOne=atomicLoad(&directory[topWord(key)])
  // reports how intermittent the tracker was. Only 18, the per-advance
  // prediction counter the completeness test reads, is cleared here.
  if(i<arrayLength(&state)&&(i<14u||i==15u||i==18u||(i>=27u&&i<=30u))){atomicStore(&state[i],0u);}}
+@compute @workgroup_size(256)fn resetSummaryValues(@builtin(workgroup_id)w:vec3u,@builtin(num_workgroups)n:vec3u,
+ @builtin(local_invocation_index)l:u32){let i=linear(w,n,l);
+ if(i<16u){atomicStore(&directory[i],0u);}
+ if(i<p.entryCapacity){let base=entryBase(i);atomicStore(&directory[base+1u],ordered(3.402823e38));
+  atomicStore(&directory[base+2u],ordered(-3.402823e38));atomicStore(&directory[base+3u],bitcast<u32>(3.402823e38));
+  for(var j=4u;j<ENTRY_WORDS;j+=1u){atomicStore(&directory[base+j],0u);}}
+ if(i<arrayLength(&state)&&((i>=2u&&i<14u)||i==15u||i==18u||(i>=27u&&i<=30u))){atomicStore(&state[i],0u);}}
 @compute @workgroup_size(256)fn ensureSummaryPages(@builtin(workgroup_id)w:vec3u,@builtin(num_workgroups)n:vec3u,
  @builtin(local_invocation_index)l:u32){let row=linear(w,n,l);if(coarse.state!=PUBLISHED||row>=coarse.rowCount||row>=p.rowCapacity){return;}
  let e=coarse.entries[row];let bl=rowBaseAndLevel(e);if(bl.x==INVALID||(e.flags&9u)!=9u){atomicOr(&state[2],1u);return;}
@@ -557,10 +585,9 @@ fn rankForKey(key:u32)->u32{let pagePlusOne=atomicLoad(&directory[topWord(key)])
    for(var j=0u;j<PAGE_SIZE;j+=1u){atomicStore(&directory[poolOffset()+page*PAGE_SIZE+j],0u);}
    atomicStore(&directory[top],page+1u);}}}
 @compute @workgroup_size(256)fn ensureSupportSummaryPages(@builtin(workgroup_id)w:vec3u,@builtin(num_workgroups)n:vec3u,
- @builtin(local_invocation_index)l:u32){let item=linear(w,n,l);let base=supportBase(item);if(base==INVALID){return;}
- for(var level=0u;level<=p.maximumLevel;level+=1u){let key=hierarchyKey(base,level);let top=topWord(key);
+ @builtin(local_invocation_index)l:u32){let key=linear(w,n,l);if(key>=p.keyCapacity){return;}let top=topWord(key);
   var claim=atomicCompareExchangeWeak(&directory[top],0u,INVALID);for(var retry=0u;retry<4u&&!claim.exchanged&&claim.old_value==0u;retry+=1u){claim=atomicCompareExchangeWeak(&directory[top],0u,INVALID);}if(claim.exchanged){let page=atomicAdd(&state[0],1u);
-   if(page>=p.pageCapacity){atomicStore(&directory[top],0u);atomicOr(&state[2],1u);continue;}for(var j=0u;j<PAGE_SIZE;j+=1u){atomicStore(&directory[poolOffset()+page*PAGE_SIZE+j],0u);}atomicStore(&directory[top],page+1u);}}}
+   if(page>=p.pageCapacity){atomicStore(&directory[top],0u);atomicOr(&state[2],1u);return;}for(var j=0u;j<PAGE_SIZE;j+=1u){atomicStore(&directory[poolOffset()+page*PAGE_SIZE+j],0u);}atomicStore(&directory[top],page+1u);}}
 @compute @workgroup_size(256)fn ensureSummaryRanks(@builtin(workgroup_id)w:vec3u,@builtin(num_workgroups)n:vec3u,
  @builtin(local_invocation_index)l:u32){let row=linear(w,n,l);if(coarse.state!=PUBLISHED||row>=coarse.rowCount||row>=p.rowCapacity){return;}
  let bl=rowBaseAndLevel(coarse.entries[row]);if(bl.x==INVALID){return;}for(var level=bl.y;level<=p.maximumLevel;level+=1u){
@@ -571,13 +598,12 @@ fn rankForKey(key:u32)->u32{let pagePlusOne=atomicLoad(&directory[topWord(key)])
    atomicStore(&directory[base+2u],ordered(-3.402823e38));atomicStore(&directory[base+3u],bitcast<u32>(3.402823e38));
    for(var j=4u;j<ENTRY_WORDS;j+=1u){atomicStore(&directory[base+j],0u);}atomicStore(&directory[word],rank+1u);}}}
 @compute @workgroup_size(256)fn ensureSupportSummaryRanks(@builtin(workgroup_id)w:vec3u,@builtin(num_workgroups)n:vec3u,
- @builtin(local_invocation_index)l:u32){let item=linear(w,n,l);let b=supportBase(item);if(b==INVALID){return;}
- for(var level=0u;level<=p.maximumLevel;level+=1u){let key=hierarchyKey(b,level);let pagePlusOne=atomicLoad(&directory[topWord(key)]);
-  if(pagePlusOne==0u||pagePlusOne==INVALID){atomicOr(&state[2],2u);continue;}let word=pageWord(pagePlusOne-1u,key);
+ @builtin(local_invocation_index)l:u32){let key=linear(w,n,l);if(key>=p.keyCapacity){return;}let pagePlusOne=atomicLoad(&directory[topWord(key)]);
+  if(pagePlusOne==0u||pagePlusOne==INVALID){atomicOr(&state[2],2u);return;}let word=pageWord(pagePlusOne-1u,key);
   var claim=atomicCompareExchangeWeak(&directory[word],0u,INVALID);for(var retry=0u;retry<4u&&!claim.exchanged&&claim.old_value==0u;retry+=1u){claim=atomicCompareExchangeWeak(&directory[word],0u,INVALID);}if(claim.exchanged){let rank=atomicAdd(&state[1],1u);
-   if(rank>=p.entryCapacity){atomicStore(&directory[word],0u);atomicOr(&state[2],1u);continue;}let base=entryBase(rank);
+   if(rank>=p.entryCapacity){atomicStore(&directory[word],0u);atomicOr(&state[2],1u);return;}let base=entryBase(rank);
    atomicStore(&directory[base],key);atomicStore(&directory[base+1u],ordered(3.402823e38));atomicStore(&directory[base+2u],ordered(-3.402823e38));
-   atomicStore(&directory[base+3u],bitcast<u32>(3.402823e38));for(var j=4u;j<ENTRY_WORDS;j+=1u){atomicStore(&directory[base+j],0u);}atomicStore(&directory[word],rank+1u);}}}
+   atomicStore(&directory[base+3u],bitcast<u32>(3.402823e38));for(var j=4u;j<ENTRY_WORDS;j+=1u){atomicStore(&directory[base+j],0u);}atomicStore(&directory[word],rank+1u);}}
 @compute @workgroup_size(256)fn aggregateSummaryRows(@builtin(workgroup_id)w:vec3u,@builtin(num_workgroups)n:vec3u,
  @builtin(local_invocation_index)l:u32){let row=linear(w,n,l);if(coarse.state!=PUBLISHED||row>=coarse.rowCount||row>=p.rowCapacity){return;}
  let e=coarse.entries[row];let bl=rowBaseAndLevel(e);if(bl.x==INVALID||(e.flags&9u)!=9u||!finite(e.phi)||!finite(e.minimumPhi)||!finite(e.maximumPhi)){atomicOr(&state[2],4u);return;}
@@ -598,11 +624,11 @@ fn rankForKey(key:u32)->u32{let pagePlusOne=atomicLoad(&directory[topWord(key)])
  if(item>=p.domainVolume||!trackerRunnable()){return;}
  let q=vec3u(item%p.dims.x,(item/p.dims.x)%p.dims.y,item/(p.dims.x*p.dims.y));let point=vec3f(q)+vec3f(0.5);
  let initialized=atomicLoad(&state[16])!=0u;let readBank=atomicLoad(&state[17])&1u;let writeBank=select(0u,1u-readBank,initialized);
- var sample=interpolatedCoarseAt(point);if(initialized){let currentAt=phiWord(readBank,item);
+ var sample=vec2f(0.0);if(!initialized){sample=interpolatedCoarseAt(point);}else{let currentAt=phiWord(readBank,item);
   if(currentAt<arrayLength(&directory)){let current=bitcast<f32>(atomicLoad(&directory[currentAt]));
    sample=vec2f(current,select(0.0,1.0,finite(current)));}}
  let h=p.physicalCellSize;
- let nearInterface=initialized&&abs(sample.x)<=2.0*h;if(nearInterface){atomicAdd(&state[27],1u);}
+ let nearInterface=p.diagnostics!=0u&&initialized&&abs(sample.x)<=2.0*h;if(nearInterface){atomicAdd(&state[27],1u);}
  let velocity=transportVelocityAt(point);if(nearInterface&&velocity.w>0.0){atomicAdd(&state[28],1u);
   atomicMax(&state[30],bitcast<u32>(length(velocity.xyz)));}
  if(initialized&&velocity.w>0.0){let midpoint=point-(0.5*p.time.x/h)*velocity.xyz;

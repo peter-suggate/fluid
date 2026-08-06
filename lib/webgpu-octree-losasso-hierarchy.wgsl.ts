@@ -33,11 +33,16 @@ struct Face {
 @group(0)@binding(11)var<storage,read_write> fineParents:array<u32>;
 @group(0)@binding(12)var<storage,read_write> childOffsets:array<u32>;
 @group(0)@binding(13)var<storage,read_write> childList:array<u32>;
-@group(0)@binding(14)var<storage,read_write> directory:array<vec2u>;
+@group(0)@binding(14)var<storage,read_write> directory:array<atomic<u32>>;
 @group(0)@binding(16)var<storage,read_write> coarseFaceSources:array<u32>;
 @group(0)@binding(17)var<storage,read_write> fusedArena:array<u32>;
 
 var<workgroup> hierarchyPrefixTotals:array<u32,256>;
+// The resident-solve tier never exceeds 4K rows.  Its hierarchy CSR can count
+// face incidences in shared memory, scatter them once, and restore the exact
+// ascending face-id order locally instead of scanning every face for every
+// row twice.  Larger hierarchies retain the wide fallback below.
+var<workgroup> hierarchyRowCursors:array<atomic<u32>,4096>;
 
 fn fusedControl()->u32{return p.fused.x;}
 fn fusedOffsets()->u32{return fusedControl()+8u;}
@@ -66,6 +71,8 @@ fn cellVolume(size:u32)->u32{
 fn controlValid()->bool{
  return arrayLength(&fineControl)>=5u&&fineControl[3]==1u&&fineControl[4]==0u;
 }
+fn parentCell(fine:vec4u)->vec4u{let parentSize=max(fine.w,p.dimensionsTarget.w);
+ return vec4u((fine.xyz/parentSize)*parentSize,parentSize);}
 
 @compute @workgroup_size(64)
 fn extractLosassoFinestCells(@builtin(global_invocation_id)g:vec3u){
@@ -78,6 +85,87 @@ fn extractLosassoFinestCells(@builtin(global_invocation_id)g:vec3u){
  fineCells[row]=vec4u(origin,header.size);
 }
 
+// Small resident tier: hash parents cooperatively, choose the minimum fine-row
+// representative for the exact original first-occurrence row order, then sort
+// each compact child list back to ascending fine row.
+@compute @workgroup_size(256)
+fn buildLosassoParentRowsSmall(@builtin(local_invocation_index)lane:u32){
+ if(fineControl[5]==1u){return;}
+ for(var word=lane;word<8u;word+=256u){coarseControl[word]=0u;}
+ if(lane==0u){atomicStore(&hierarchyRowCursors[4095],0u);}
+ let fineCount=min(fineControl[1],p.capacities.x);
+ for(var slot=lane;slot<p.capacities.w;slot+=256u){
+  atomicStore(&directory[2u*slot],0u);atomicStore(&directory[2u*slot+1u],0u);}
+ storageBarrier();workgroupBarrier();
+ if(!controlValid()&&lane==0u){atomicOr(&hierarchyRowCursors[4095],ERROR_GEOMETRY);}
+ for(var row=lane;row<fineCount;row+=256u){let parent=parentCell(fineCells[row]);
+  let volume=cellVolume(fineCells[row].w);var installedSlot=INVALID;
+  if(volume==0u||any(parent.xyz+vec3u(parent.w)>p.dimensionsTarget.xyz)){
+   atomicOr(&hierarchyRowCursors[4095],ERROR_GEOMETRY);
+  }else{let hash=hashCell(parent);let mask=p.capacities.w-1u;
+   for(var probe=0u;probe<p.capacities.w;probe+=1u){let slot=(hash+probe)&mask;let at=2u*slot;
+    var claim=atomicCompareExchangeWeak(&directory[at],0u,row+1u);
+    for(var retry=0u;retry<4u&&!claim.exchanged&&claim.old_value==0u;retry+=1u){
+     claim=atomicCompareExchangeWeak(&directory[at],0u,row+1u);}
+    if(claim.exchanged){atomicStore(&directory[at+1u],hash);installedSlot=slot;break;}
+    let representative=atomicLoad(&directory[at]);
+    if(representative>0u&&representative<=fineCount
+      &&all(parentCell(fineCells[representative-1u])==parent)){
+     atomicMin(&directory[at],row+1u);installedSlot=slot;break;}
+   }
+  }
+  childOffsets[row]=installedSlot;
+  if(installedSlot==INVALID){atomicOr(&hierarchyRowCursors[4095],ERROR_CAPACITY);}
+ }
+ storageBarrier();workgroupBarrier();
+ if(lane==0u){var coarseCount=0u;
+  coarseControl[4]|=atomicLoad(&hierarchyRowCursors[4095]);
+  for(var row=0u;row<fineCount;row+=1u){let slot=childOffsets[row];
+   if(slot!=INVALID&&atomicLoad(&directory[2u*slot])==row+1u){
+    if(coarseCount>=p.capacities.y){coarseControl[4]|=ERROR_CAPACITY;break;}
+    fineParents[row]=coarseCount;coarseCells[coarseCount]=parentCell(fineCells[row]);coarseCount+=1u;
+   }
+  }
+  coarseControl[0]=fineControl[0];coarseControl[1]=coarseCount;
+  coarseControl[3]=select(0u,1u,coarseControl[4]==0u&&coarseCount!=0u);
+ }
+ storageBarrier();workgroupBarrier();
+ let coarseCount=coarseControl[1];
+ for(var parentRow=lane;parentRow<coarseCount;parentRow+=256u){
+  atomicStore(&hierarchyRowCursors[parentRow],0u);}
+ workgroupBarrier();
+ for(var row=lane;row<fineCount;row+=256u){let slot=childOffsets[row];
+  if(slot==INVALID){continue;}let representative=atomicLoad(&directory[2u*slot])-1u;
+  let parentRow=fineParents[representative];fineParents[row]=parentRow;
+  fusedArena[fusedParents()+row]=parentRow;atomicAdd(&hierarchyRowCursors[parentRow],1u);
+ }
+ storageBarrier();workgroupBarrier();
+ if(lane==0u){var childTotal=0u;
+  for(var parentRow=0u;parentRow<coarseCount;parentRow+=1u){
+   let children=atomicLoad(&hierarchyRowCursors[parentRow]);
+   childOffsets[parentRow]=childTotal;fusedArena[fusedChildOffsets()+parentRow]=childTotal;
+   atomicStore(&hierarchyRowCursors[parentRow],childTotal);childTotal+=children;
+  }
+  childOffsets[coarseCount]=childTotal;fusedArena[fusedChildOffsets()+coarseCount]=childTotal;
+ }
+ storageBarrier();workgroupBarrier();
+ for(var row=lane;row<fineCount;row+=256u){let parentRow=fineParents[row];
+  let at=atomicAdd(&hierarchyRowCursors[parentRow],1u);childList[at]=row;}
+ storageBarrier();workgroupBarrier();
+ for(var parentRow=lane;parentRow<coarseCount;parentRow+=256u){let begin=childOffsets[parentRow];
+  let end=childOffsets[parentRow+1u];
+  for(var at=begin+1u;at<end;at+=1u){let value=childList[at];var cursor=at;
+   while(cursor>begin&&childList[cursor-1u]>value){childList[cursor]=childList[cursor-1u];cursor-=1u;}
+   childList[cursor]=value;
+  }
+  for(var at=begin;at<end;at+=1u){fusedArena[fusedChildList()+at]=childList[at];}
+ }
+ storageBarrier();workgroupBarrier();
+ if(lane==0u){coarseDispatch[0]=select(0u,(coarseCount+63u)/64u,coarseControl[3]==1u);
+  coarseDispatch[1]=1u;coarseDispatch[2]=1u;coarseDispatch[3]=0u;
+  coarseDispatch[4]=1u;coarseDispatch[5]=1u;}
+}
+
 // Candidate rows are compact but mixed-size, so their geometric parents are
 // not necessarily adjacent. A deterministic singleton inserts them into an
 // open-addressed directory and gives every fine row exactly one parent.
@@ -86,29 +174,30 @@ fn buildLosassoParentRows(@builtin(local_invocation_index)lane:u32){
  if(fineControl[5]==1u){return;}
  for(var word=lane;word<8u;word+=256u){coarseControl[word]=0u;}
  let fineCount=min(fineControl[1],p.capacities.x);
- for(var slot=lane;slot<p.capacities.w;slot+=256u){directory[slot]=vec2u(0u);}
+ for(var slot=lane;slot<p.capacities.w;slot+=256u){
+  atomicStore(&directory[2u*slot],0u);atomicStore(&directory[2u*slot+1u],0u);}
  for(var row=lane;row<p.capacities.y;row+=256u){childOffsets[row]=0u;}
  storageBarrier();workgroupBarrier();
  if(lane==0u){
   if(!controlValid()){coarseControl[4]=ERROR_GEOMETRY;}
   else{var coarseCount=0u;let mask=p.capacities.w-1u;
    for(var row=0u;row<fineCount;row+=1u){
-    let fine=fineCells[row];let parentSize=max(fine.w,p.dimensionsTarget.w);
-    let parent=vec4u((fine.xyz/parentSize)*parentSize,parentSize);
+    let fine=fineCells[row];let parent=parentCell(fine);let parentSize=parent.w;
     let volume=cellVolume(fine.w);
     if(volume==0u||any(parent.xyz+vec3u(parentSize)>p.dimensionsTarget.xyz)){
      coarseControl[4]|=ERROR_GEOMETRY;continue;
     }
     let hash=hashCell(parent);var parentRow=INVALID;
     for(var probe=0u;probe<p.capacities.w;probe+=1u){
-     let slot=(hash+probe)&mask;let installed=directory[slot].x;
+     let slot=(hash+probe)&mask;let installed=atomicLoad(&directory[2u*slot]);
      if(installed==0u){
       if(coarseCount>=p.capacities.y){coarseControl[4]|=ERROR_CAPACITY;break;}
       parentRow=coarseCount;coarseCount+=1u;coarseCells[parentRow]=parent;
-      directory[slot]=vec2u(parentRow+1u,hash);break;
+      atomicStore(&directory[2u*slot],parentRow+1u);
+      atomicStore(&directory[2u*slot+1u],hash);break;
      }
      let candidate=installed-1u;
-     if(directory[slot].y==hash&&all(coarseCells[candidate]==parent)){
+     if(atomicLoad(&directory[2u*slot+1u])==hash&&all(coarseCells[candidate]==parent)){
       parentRow=candidate;break;
      }
     }
@@ -188,6 +277,52 @@ fn buildLosassoCoarseFaces(@builtin(local_invocation_index)lane:u32){
   coarseFaceSources[destination]=faceId;destination+=1u;
  }
  if(lane==255u){coarseControl[2]=select(0u,hierarchyPrefixTotals[lane],enabled);}
+}
+
+@compute @workgroup_size(256)
+fn buildLosassoCoarseCSRSmall(@builtin(local_invocation_index)lane:u32){
+ if(fineControl[5]==1u){return;}
+ let enabled=coarseControl[3]==1u;let count=select(0u,coarseControl[2],enabled);
+ let rows=select(0u,coarseControl[1],enabled);
+  for(var row=lane;row<rows;row+=256u){atomicStore(&hierarchyRowCursors[row],0u);}
+  workgroupBarrier();
+  for(var faceId=lane;faceId<count;faceId+=256u){let face=coarseFaces[faceId];
+   atomicAdd(&hierarchyRowCursors[face.negativeRow],1u);
+   if(face.positiveRow!=INVALID){atomicAdd(&hierarchyRowCursors[face.positiveRow],1u);}
+  }
+  workgroupBarrier();
+  if(lane==0u){var total=0u;
+   for(var row=0u;row<rows;row+=1u){let incidences=atomicLoad(&hierarchyRowCursors[row]);
+    coarseOffsets[row]=total;fusedArena[fusedOffsets()+row]=total;
+    atomicStore(&hierarchyRowCursors[row],total);total+=incidences;
+   }
+   coarseOffsets[rows]=total;fusedArena[fusedOffsets()+rows]=total;
+   if(total>2u*p.capacities.z){coarseControl[4]|=ERROR_CAPACITY;}
+   coarseDispatch[3]=select(0u,(count+63u)/64u,coarseControl[4]==0u);
+  }
+  workgroupBarrier();
+  let valid=coarseControl[4]==0u;
+  if(valid){
+   for(var faceId=lane;faceId<count;faceId+=256u){let face=coarseFaces[faceId];
+    let negativeAt=atomicAdd(&hierarchyRowCursors[face.negativeRow],1u);
+    coarseRowFaces[negativeAt]=faceId;
+    if(face.positiveRow!=INVALID){let positiveAt=atomicAdd(&hierarchyRowCursors[face.positiveRow],1u);
+     coarseRowFaces[positiveAt]=faceId;}
+   }
+  }
+  workgroupBarrier();
+  if(valid){for(var row=lane;row<rows;row+=256u){let begin=coarseOffsets[row];let end=coarseOffsets[row+1u];
+    for(var at=begin+1u;at<end;at+=1u){let value=coarseRowFaces[at];var cursor=at;
+     while(cursor>begin&&coarseRowFaces[cursor-1u]>value){coarseRowFaces[cursor]=coarseRowFaces[cursor-1u];cursor-=1u;}
+     coarseRowFaces[cursor]=value;
+    }
+    for(var at=begin;at<end;at+=1u){fusedArena[fusedRowFaces()+at]=coarseRowFaces[at];}
+   }
+  }
+  workgroupBarrier();
+  if(lane==0u){if(!valid){coarseControl[3]=0u;coarseDispatch[0]=0u;}
+   for(var word=0u;word<8u;word+=1u){fusedArena[fusedControl()+word]=coarseControl[word];}
+  }
 }
 
 @compute @workgroup_size(256)

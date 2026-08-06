@@ -2,19 +2,18 @@ import { OCTREE_LOSASSO_AXIS_FACE_MAXIMUM_PROBES } from "./webgpu-octree-losasso
 
 /** Requires globals `p`, `coarse`, `faceGeometry`, `extendedVelocity`, `faceDirectory`. */
 export const octreeLosassoVelocitySamplingWGSL = /* wgsl */ `
-fn losassoFloorDiv256(value:i32)->vec2i{var carry=value/256;var digit=value-carry*256;
- if(digit<0){digit+=256;carry-=1;}return vec2i(carry,digit);}
+fn losassoFloorDiv256(value:i32)->vec2i{let carry=value>>8;return vec2i(carry,value-carry*256);}
 fn losassoExactAdd(limbs:ptr<function,array<i32,36>>,value:f32){let bits=bitcast<u32>(value);let magnitude=bits&0x7fffffffu;
  if(magnitude==0u){return;}let exponent=(magnitude>>23u)&0xffu;let fraction=magnitude&0x7fffffu;
  let significand=select(fraction,0x800000u|fraction,exponent!=0u);let shift=select(3u,exponent+2u,exponent!=0u);
  let first=shift>>3u;let shifted=significand<<(shift&7u);let sign=select(1,-1,(bits&0x80000000u)!=0u);
  for(var digit=0u;digit<4u;digit+=1u){let limb=first+digit;let byte=i32((shifted>>(digit*8u))&0xffu);
   if(byte!=0&&limb<36u){(*limbs)[limb]+=sign*byte;}}}
-fn losassoExactValue(input:array<i32,36>)->f32{var limbs=input;
- for(var limb=0u;limb+1u<36u;limb+=1u){let n=losassoFloorDiv256(limbs[limb]);limbs[limb]=n.y;limbs[limb+1u]+=n.x;}
- let negative=limbs[35]<0;if(negative){for(var limb=0u;limb<36u;limb+=1u){limbs[limb]=-limbs[limb];}
-  for(var limb=0u;limb+1u<36u;limb+=1u){let n=losassoFloorDiv256(limbs[limb]);limbs[limb]=n.y;limbs[limb+1u]+=n.x;}}
- var magnitude=0.;for(var limb=0u;limb<36u;limb+=1u){magnitude+=ldexp(f32(limbs[limb]),-152+i32(8u*limb));}
+fn losassoExactValue(input:ptr<function,array<i32,36>>)->f32{
+ for(var limb=0u;limb+1u<36u;limb+=1u){let n=losassoFloorDiv256((*input)[limb]);(*input)[limb]=n.y;(*input)[limb+1u]+=n.x;}
+ let negative=(*input)[35]<0;if(negative){for(var limb=0u;limb<36u;limb+=1u){(*input)[limb]=-(*input)[limb];}
+  for(var limb=0u;limb+1u<36u;limb+=1u){let n=losassoFloorDiv256((*input)[limb]);(*input)[limb]=n.y;(*input)[limb+1u]+=n.x;}}
+ var magnitude=0.;for(var limb=0u;limb<36u;limb+=1u){magnitude+=ldexp(f32((*input)[limb]),-152+i32(8u*limb));}
  return select(magnitude,-magnitude,negative);}
 fn losassoSymmetricWeight(w:vec3f)->f32{let lo=min(w.x,min(w.y,w.z));let hi=max(w.x,max(w.y,w.z));
  let mid=max(min(w.x,w.y),max(min(w.x,w.z),min(w.y,w.z)));return(lo*mid)*hi;}
@@ -92,7 +91,54 @@ fn losassoVelocityAtGrid(grid:vec3f)->LosassoVelocitySample{
      let away=select((interior<0.),(interior>0.),lowWall);if(away){value=interior;}}}
    losassoExactAdd(&exact,weight*value);
   }
-  velocity[axis]=losassoExactValue(exact);
+  velocity[axis]=losassoExactValue(&exact);
+ }
+ return LosassoVelocitySample(velocity,select(0u,1u,finite3(velocity)));
+}
+fn losassoVelocityAt(position:vec3f)->LosassoVelocitySample{
+ return losassoVelocityAtGrid((position-p.domainOrigin)/p.velocityCellSize);
+}
+`;
+
+/** Requires globals `p`, `coarse`, and dense packed `stagedVelocity: array<u32>`. */
+export const octreeLosassoStagedVelocitySamplingWGSL = /* wgsl */ `
+fn losassoFloorDiv256(value:i32)->vec2i{let carry=value>>8;return vec2i(carry,value-carry*256);}
+fn losassoExactAdd(limbs:ptr<function,array<i32,36>>,value:f32){let bits=bitcast<u32>(value);let magnitude=bits&0x7fffffffu;
+ if(magnitude==0u){return;}let exponent=(magnitude>>23u)&0xffu;let fraction=magnitude&0x7fffffu;
+ let significand=select(fraction,0x800000u|fraction,exponent!=0u);let shift=select(3u,exponent+2u,exponent!=0u);
+ let first=shift>>3u;let shifted=significand<<(shift&7u);let sign=select(1,-1,(bits&0x80000000u)!=0u);
+ for(var digit=0u;digit<4u;digit+=1u){let limb=first+digit;let byte=i32((shifted>>(digit*8u))&0xffu);
+  if(byte!=0&&limb<36u){(*limbs)[limb]+=sign*byte;}}}
+fn losassoExactValue(input:ptr<function,array<i32,36>>)->f32{
+ for(var limb=0u;limb+1u<36u;limb+=1u){let n=losassoFloorDiv256((*input)[limb]);(*input)[limb]=n.y;(*input)[limb+1u]+=n.x;}
+ let negative=(*input)[35]<0;if(negative){for(var limb=0u;limb<36u;limb+=1u){(*input)[limb]=-(*input)[limb];}
+  for(var limb=0u;limb+1u<36u;limb+=1u){let n=losassoFloorDiv256((*input)[limb]);(*input)[limb]=n.y;(*input)[limb+1u]+=n.x;}}
+ var magnitude=0.;for(var limb=0u;limb<36u;limb+=1u){magnitude+=ldexp(f32((*input)[limb]),-152+i32(8u*limb));}
+ return select(magnitude,-magnitude,negative);}
+fn losassoSymmetricWeight(w:vec3f)->f32{let lo=min(w.x,min(w.y,w.z));let hi=max(w.x,max(w.y,w.z));
+ let mid=max(min(w.x,w.y),max(min(w.x,w.z),min(w.y,w.z)));return(lo*mid)*hi;}
+fn losassoStagedIndex(axis:u32,q:vec3u)->u32{let d=p.velocityDimensions;
+ let countX=(d.x+1u)*d.y*d.z;if(axis==0u){return q.x+(d.x+1u)*(q.y+d.y*q.z);}
+ let countY=d.x*(d.y+1u)*d.z;if(axis==1u){return countX+q.x+d.x*(q.y+(d.y+1u)*q.z);}
+ return countX+countY+q.x+d.x*(q.y+d.y*q.z);}
+struct LosassoVelocitySample{value:vec3f,valid:u32}
+fn losassoVelocityAtGrid(grid:vec3f)->LosassoVelocitySample{
+ if(arrayLength(&coarse)<4u||coarse[3]!=1u){return LosassoVelocitySample(vec3f(0),0u);}
+ var velocity=vec3f(0);
+ for(var axis=0u;axis<3u;axis+=1u){var staggered=grid-vec3f(.5);staggered[axis]=grid[axis];
+  let base=vec3i(floor(staggered));let fraction=fract(staggered);var exact:array<i32,36>;
+  for(var corner=0u;corner<8u;corner+=1u){let offset=vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));
+   let weights=vec3f(select(1.-fraction.x,fraction.x,(corner&1u)!=0u),
+    select(1.-fraction.y,fraction.y,(corner&2u)!=0u),select(1.-fraction.z,fraction.z,(corner&4u)!=0u));
+   let weight=losassoSymmetricWeight(weights);if(weight==0.){continue;}var coordinate=base+offset;
+   var upper=p.velocityDimensions-vec3u(1);upper[axis]=p.velocityDimensions[axis];
+   for(var component=0u;component<3u;component+=1u){coordinate[component]=clamp(coordinate[component],0,i32(upper[component]));}
+   let at=losassoStagedIndex(axis,vec3u(coordinate));if(at>=arrayLength(&stagedVelocity)){return LosassoVelocitySample(vec3f(0),0u);}
+   let sample=stagedVelocity[at];if(sample==0x7fc00000u){return LosassoVelocitySample(vec3f(0),0u);}
+   let value=bitcast<f32>(sample);if(!finite(value)){return LosassoVelocitySample(vec3f(0),0u);}
+   losassoExactAdd(&exact,weight*value);
+  }
+  velocity[axis]=losassoExactValue(&exact);
  }
  return LosassoVelocitySample(velocity,select(0u,1u,finite3(velocity)));
 }

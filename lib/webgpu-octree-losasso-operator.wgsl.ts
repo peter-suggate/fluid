@@ -27,12 +27,12 @@ fn addExact(limbs:ptr<function,array<i32,36>>,value:f32){let bits=bitcast<u32>(v
   let firstLimb=shift>>3u;let shifted=significand<<(shift&7u);let sign=select(1,-1,(bits&0x80000000u)!=0u);
   for(var digit=0u;digit<4u;digit+=1u){let limb=firstLimb+digit;let byte=i32((shifted>>(digit*8u))&0xffu);
     if(byte!=0&&limb<36u){(*limbs)[limb]+=sign*byte;}}}
-fn floorDiv256(value:i32)->vec2i{var carry=value/256;var digit=value-carry*256;if(digit<0){digit+=256;carry-=1;}return vec2i(carry,digit);}
-fn exactValue(source:ptr<function,array<i32,36>>)->f32{var limbs=(*source);
-  for(var limb=0u;limb+1u<36u;limb+=1u){let normalized=floorDiv256(limbs[limb]);limbs[limb]=normalized.y;limbs[limb+1u]+=normalized.x;}
-  let negative=limbs[35]<0;if(negative){for(var limb=0u;limb<36u;limb+=1u){limbs[limb]=-limbs[limb];}
-    for(var limb=0u;limb+1u<36u;limb+=1u){let normalized=floorDiv256(limbs[limb]);limbs[limb]=normalized.y;limbs[limb+1u]+=normalized.x;}}
-  var magnitude=0.;for(var limb=0u;limb<36u;limb+=1u){magnitude+=ldexp(f32(limbs[limb]),-152+i32(limb*8u));}
+fn floorDiv256(value:i32)->vec2i{let carry=value>>8;return vec2i(carry,value-carry*256);}
+fn exactValue(source:ptr<function,array<i32,36>>)->f32{
+ for(var limb=0u;limb+1u<36u;limb+=1u){let normalized=floorDiv256((*source)[limb]);(*source)[limb]=normalized.y;(*source)[limb+1u]+=normalized.x;}
+ let negative=(*source)[35]<0;if(negative){for(var limb=0u;limb<36u;limb+=1u){(*source)[limb]=-(*source)[limb];}
+  for(var limb=0u;limb+1u<36u;limb+=1u){let normalized=floorDiv256((*source)[limb]);(*source)[limb]=normalized.y;(*source)[limb+1u]+=normalized.x;}}
+ var magnitude=0.;for(var limb=0u;limb<36u;limb+=1u){magnitude+=ldexp(f32((*source)[limb]),-152+i32(limb*8u));}
   return select(magnitude,-magnitude,negative);}
 
 @compute @workgroup_size(64)

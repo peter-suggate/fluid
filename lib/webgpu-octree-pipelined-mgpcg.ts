@@ -38,7 +38,7 @@ export const OCTREE_PIPELINED_PCG_HARD_ITERATION_CEILING = 16;
 /** The reduced LoSasso operator may request this wider fail-safe tail. Power
  * keeps the frozen 16-iteration ceiling; both paths still retire the unused
  * suffix through the same GPU residual gate. */
-export const OCTREE_PIPELINED_PCG_MAXIMUM_HARD_ITERATION_CEILING = 40;
+export const OCTREE_PIPELINED_PCG_MAXIMUM_HARD_ITERATION_CEILING = 192;
 export const OCTREE_PIPELINED_PCG_CONTROL_BYTES = 128;
 /**
  * Exact radix-256 superaccumulator geometry.
@@ -1710,7 +1710,6 @@ fn formInitialResidual(@builtin(global_invocation_id) global: vec3u) {
 }
 
 var<workgroup> merged: array<MergedScalars, ${OCTREE_PIPELINED_PCG_WORKGROUP_SIZE}>;
-var<workgroup> combinedBlocks: array<MergedScalars, 32>;
 
 @compute @workgroup_size(${OCTREE_PIPELINED_PCG_WORKGROUP_SIZE})
 fn reduceMergedPartials(
@@ -1841,11 +1840,13 @@ fn reduceAndFinishMerged(
   @builtin(subgroup_invocation_id) subgroupLane: u32,
   @builtin(subgroup_size) subgroupSize: u32,
 ) {
-  let blocks = livePartialCount();
-  for (var block = 0u; block < blocks; block += 1u) {
-    var local = zeroMergedScalars();
-    let row = block * REDUCTION_LANES + lane;
-    let initial = atomicLoad(&control[3]) == 0u;
+  // The combined arm is the <=4K-row tier and owns exactly one workgroup.
+  // Accumulate its live rows per lane, then fold the workgroup once. The old
+  // form ran a complete subgroup/workgroup tree for every 256-row block and a
+  // sixth tree over the block results, serializing five tiny reductions.
+  var local = zeroMergedScalars();
+  let initial = atomicLoad(&control[3]) == 0u;
+  for (var row = lane; row < rows(); row += REDUCTION_LANES) {
     if (row < rows() && !stopped()) {
       let r = residual[row];
       let u = preconditioned[row];
@@ -1860,13 +1861,6 @@ fn reduceAndFinishMerged(
         if (initial) { local.bb = addCompensatedF32(local.bb, b * b); }
       }
     }
-${targetSubgroupReductionWGSL}
-    if (lane == 0u) { combinedBlocks[block] = merged[0]; }
-    workgroupBarrier();
-  }
-  var local = zeroMergedScalars();
-  if (lane < blocks) {
-    local = mergeScalars(local, combinedBlocks[lane]);
   }
 ${targetSubgroupReductionWGSL}
   if (lane == 0u) { finishMergedTotal(merged[0]); }
@@ -1965,10 +1959,8 @@ fn reduceAndFinishDirectionCurvature(
   @builtin(subgroup_invocation_id) subgroupLane: u32,
   @builtin(subgroup_size) subgroupSize: u32,
 ) {
-  let blocks = livePartialCount();
-  for (var block = 0u; block < blocks; block += 1u) {
-    var local = zeroMergedScalars();
-    let row = block * REDUCTION_LANES + lane;
+  var local = zeroMergedScalars();
+  for (var row = lane; row < rows(); row += REDUCTION_LANES) {
     if (row < rows() && !stopped()) {
       let d = direction[row];
       let image = directionImage[row];
@@ -1978,13 +1970,6 @@ fn reduceAndFinishDirectionCurvature(
         local.delta = addCompensatedF32(local.delta, d * image);
       }
     }
-${targetSubgroupReductionWGSL}
-    if (lane == 0u) { combinedBlocks[block] = merged[0]; }
-    workgroupBarrier();
-  }
-  var local = zeroMergedScalars();
-  if (lane < blocks) {
-    local = mergeScalars(local, combinedBlocks[lane]);
   }
 ${targetSubgroupReductionWGSL}
   if (lane == 0u) { finishDirectionCurvatureTotal(merged[0]); }

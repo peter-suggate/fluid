@@ -36,8 +36,10 @@ interface OwnedTransfer extends OctreeLosassoVCycleTransferSource {
 const ENTRY_POINTS = [
   "extractLosassoFinestCells",
   "buildLosassoParentRows",
+  "buildLosassoParentRowsSmall",
   "buildLosassoCoarseFaces",
   "buildLosassoCoarseCSR",
+  "buildLosassoCoarseCSRSmall",
   "refreshLosassoCoarseFaces",
   "refreshLosassoReusedCoarseFaces",
 ] as const;
@@ -240,14 +242,15 @@ export class WebGPUOctreeLosassoHierarchyPublisher {
     const extractGroup = this.cachedBindGroup(extract,
       "Losasso hierarchy finest geometry bindings", [0, 1, 2, 3],
       [this.ownedTransfers[0]!.params, candidate.leafHeaders, fineControl, fineCells]);
-    const pass = broker.compute({ label: "Losasso hierarchy - publish geometric levels" });
+    const pass = broker.compute({ label: "Losasso hierarchy - extractLosassoFinestCells" });
     pass.setPipeline(extract); pass.setBindGroup(0, extractGroup);
     pass.dispatchWorkgroups(Math.ceil(this.options.rowCapacity / 64));
     for (let index = 0; index < this.ownedLevels.length; index += 1) {
       const coarse = this.ownedLevels[index]!;
       const transfer = this.ownedTransfers[index]!;
-      this.encodeTransition(pass, { fineControl, fineCells, fineFaces, coarse, transfer });
-      this.encodeReusedTransitionRefresh(pass, { fineControl, fineCells, fineFaces, coarse, transfer });
+      this.encodeTransition(broker, { fineControl, fineCells, fineFaces, coarse, transfer });
+      this.encodeReusedTransitionRefresh(broker,
+        { fineControl, fineCells, fineFaces, coarse, transfer });
       fineControl = coarse.control; fineCells = coarse.cells; fineFaces = coarse.faces;
     }
   }
@@ -279,7 +282,7 @@ export class WebGPUOctreeLosassoHierarchyPublisher {
     }
   }
 
-  private encodeTransition(pass: GPUComputePassEncoder, input: {
+  private encodeTransition(broker: PassBroker, input: {
     readonly fineControl: GPUBuffer; readonly fineCells: GPUBuffer;
     readonly fineFaces: GPUBuffer; readonly coarse: OwnedLevel;
     readonly transfer: OwnedTransfer;
@@ -300,25 +303,30 @@ export class WebGPUOctreeLosassoHierarchyPublisher {
     const bindings: Readonly<Record<Exclude<typeof ENTRY_POINTS[number],
       "extractLosassoFinestCells">, readonly number[]>> = {
         buildLosassoParentRows: [0, 2, 3, 5, 6, 10, 11, 12, 13, 14, 17],
+        buildLosassoParentRowsSmall: [0, 2, 3, 5, 6, 10, 11, 12, 13, 14, 17],
         buildLosassoCoarseFaces: [0, 2, 3, 4, 5, 6, 7, 11, 16, 17],
         buildLosassoCoarseCSR: [0, 2, 5, 7, 8, 9, 10, 17],
+        buildLosassoCoarseCSRSmall: [0, 2, 5, 7, 8, 9, 10, 17],
       refreshLosassoCoarseFaces: [0, 2, 3, 4, 5, 6, 7, 16, 17],
       refreshLosassoReusedCoarseFaces: [0, 2, 3, 4, 5, 6, 7, 16, 17],
     };
-    const transitionEntryPoints = ["buildLosassoParentRows", "buildLosassoCoarseFaces",
-      "buildLosassoCoarseCSR"] as const;
+    const transitionEntryPoints = [this.options.rowCapacity <= 4096
+      ? "buildLosassoParentRowsSmall" : "buildLosassoParentRows", "buildLosassoCoarseFaces",
+      this.options.rowCapacity <= 4096 ? "buildLosassoCoarseCSRSmall"
+        : "buildLosassoCoarseCSR"] as const;
     for (const entryPoint of transitionEntryPoints) {
       const pipeline = this.pipelines![entryPoint];
       const selected = bindings[entryPoint];
       const group = this.cachedBindGroup(pipeline,
         `Losasso hierarchy bindings - ${entryPoint}`, selected,
         selected.map((binding) => bindingBuffers.get(binding)!));
+      const pass = broker.compute({ label: `Losasso hierarchy - ${entryPoint}` });
       pass.setPipeline(pipeline); pass.setBindGroup(0, group);
       pass.dispatchWorkgroups(1);
     }
   }
 
-  private encodeReusedTransitionRefresh(pass: GPUComputePassEncoder, input: {
+  private encodeReusedTransitionRefresh(broker: PassBroker, input: {
     readonly fineControl: GPUBuffer; readonly fineCells: GPUBuffer;
     readonly fineFaces: GPUBuffer; readonly coarse: OwnedLevel;
     readonly transfer: OwnedTransfer;
@@ -329,6 +337,8 @@ export class WebGPUOctreeLosassoHierarchyPublisher {
       [0, 2, 3, 4, 5, 6, 7, 16, 17], [input.transfer.params, input.fineControl,
         input.fineCells, input.fineFaces, input.coarse.control, input.coarse.cells,
         input.coarse.faces, input.coarse.coarseFaceSources, this.fusedArena]);
+    const pass = broker.compute({ label:
+      "Losasso hierarchy - refreshLosassoReusedCoarseFaces" });
     pass.setPipeline(pipeline); pass.setBindGroup(0, group);
     pass.dispatchWorkgroupsIndirect(input.coarse.rowDispatch, 12);
   }

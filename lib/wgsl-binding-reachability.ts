@@ -25,8 +25,21 @@ export type WGSLComputeBindingReachabilityAudit = WGSLBindingReachabilityAudit;
 
 export type WGSLEntryPointStage = "compute" | "fragment" | "vertex";
 
-/** The deliberately small design ceiling used by newly consolidated GPU interfaces. */
-export const WGSL_STORAGE_BUFFER_DESIGN_LIMIT = 4;
+/**
+ * The deliberately small design ceiling used by newly consolidated GPU interfaces.
+ *
+ * Raised from four to five for the dry primary's scene-geometry lane, which is
+ * what its shading normal is a gradient of. That was a real decision rather than
+ * a bump: four was chosen so that a fifth binding fails in a test before it
+ * fails device initialization, and the measurement that justified spending it is
+ * that the shipping raster-primary composition's worst *fragment entry point*
+ * reaches six storage buffers across all groups — three in group 0, three in the
+ * split group — so the lane is the seventh against a spec floor of eight and the
+ * ten browsers report. Group 0's own count is what this constant bounds, and it
+ * is measured against the `hybrid` layout, which binds one buffer (the derived
+ * traversal) that neither shipping traversal reaches.
+ */
+export const WGSL_STORAGE_BUFFER_DESIGN_LIMIT = 5;
 
 export interface WGSLStorageBufferBudgetAudit {
   readonly entryPoint: string;
