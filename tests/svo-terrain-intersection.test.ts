@@ -64,28 +64,37 @@ test("ordinary angled rays keep the nearest root within the fast work cap", () =
   }
 });
 
-test("WGSL terrain path is bounded, refined, and retains terrain material identity", () => {
-  assert.match(svoDrySceneShader, /fn terrainHeightAt\(x:f32,z:f32\)->f32/);
+test("the shader has no terrain path left, and the params layout it published still holds", () => {
+  // The analytic ground is deleted, not disabled. The heightfield is authored and
+  // voxelised, so a terrain sampler, a bracket search, a Lipschitz march or a
+  // terrain field source reappearing in the shader would be a *second* surface
+  // competing with the voxels — which is the bug the deletion closed, where the
+  // shell had no owner, the owner-gated payload walk dropped every terrain cell,
+  // and what reached the screen was the analytic twin alone.
+  for (const gone of [
+    "fn terrainHeightAt", "fn terrainGridHeightAt", "fn terrainCeiling", "fn terrainNormalAt",
+    "fn traceTerrain", "fn traceTerrainHeightfield", "DRY_GBUFFER_FIELD_TERRAIN",
+  ]) {
+    assert.ok(!svoDrySceneShader.includes(gone), `${gone} must not be in the voxels-only shader`);
+  }
+  // The CPU intersector above is not deleted with it: editor hover picks against
+  // the authored heightfield, which is a question about the document rather than
+  // about the frame. Its budgets are what the tests above spend.
   assert.equal(SVO_TERRAIN_FAST_BRACKET_STEPS + SVO_TERRAIN_FAST_REFINEMENTS + 1 + 4, SVO_TERRAIN_FAST_MAX_HEIGHT_EVALUATIONS);
   assert.equal(SVO_TERRAIN_FAST_MAX_HEIGHT_EVALUATIONS, 12);
   assert.equal(SVO_TERRAIN_FALLBACK_STEPS, 20);
   assert.equal(SVO_TERRAIN_FALLBACK_REFINEMENTS, 8);
-  assert.match(svoDrySceneShader, /for\(var bracket=1;bracket<=2;bracket\+=1\)/);
-  assert.match(svoDrySceneShader, /for\(var refinement=0;refinement<5;refinement\+=1\)/);
-  assert.match(svoDrySceneShader, /for\(var iteration=1;iteration<=20;iteration\+=1\)/);
-  assert.match(svoDrySceneShader, /closestField<=0\.0005/);
-  assert.match(svoDrySceneShader, /DryHit\(t,terrainNormalAt\(point\.xz\),dry\.terrain\.x,DRY_OWNER_NONE,SVO_FEATURE_TERRAIN,DRY_GBUFFER_FIELD_TERRAIN,DRY_GBUFFER_MOTION_STATIC,1u,0\.0/);
-  assert.match(svoDrySceneShader, /let terrain=traceTerrain\(ro,rd\);if\(terrain\.t<hit\.t\)\{hit=terrain;\}/);
 
   const source = readFileSync(new URL("../lib/webgpu-svo-dry-scene.ts", import.meta.url), "utf8");
   assert.deepEqual(SVO_DRY_SCENE_PARAMS_LAYOUT, {
-    sizeBytes: 544, terrainWordOffset: 24, terrainMaterialWordOffset: 28, materialPublicationWordOffset: 32,
+    sizeBytes: 624, terrainWordOffset: 24, terrainMaterialWordOffset: 28, materialPublicationWordOffset: 32,
     nodeMipWordOffset: 36, nodeMipAtlasWordOffset: 40,
     wideFanoutWordOffset: 44, nodeMipLevelStartWordOffset: 48,
     nodeMipOriginWordOffset: 60, fluidCoverageWordOffset: 64, tuningWordOffset: 76,
     nodeMipDirectWordOffset: 96, nodeMipDirectLevelZWordOffset: 100, tetrahedralRadianceWordOffset: 112, nodeMipExtentWordOffset: 116,
     giLightingWordOffset: 120, giConesWordOffset: 124, rigidBoundsWordOffset: 128,
-    primitiveCandidatesWordOffset: 132,
+    primitiveCandidatesWordOffset: 132, structureOffsetsWordOffset: 136, derivedTraversalWordOffset: 140,
+    lodWordOffset: 144, payloadLaneWordOffset: 148, payloadLane1WordOffset: 152,
   });
   assert.match(source, /size: SVO_DRY_SCENE_PARAMS_LAYOUT\.sizeBytes/);
   assert.match(source, /new ArrayBuffer\(SVO_DRY_SCENE_PARAMS_LAYOUT\.sizeBytes\)/);

@@ -107,7 +107,12 @@ test("shader populates stable identity/media/generation and consumes exact rigid
     "authored static primitives publish known zero motion");
   assert.match(svoDrySceneShader, /svoPrimitiveOwnerId\(record\),exact\.featureId,DRY_GBUFFER_FIELD_ANALYTIC/,
     "static G-buffer feature identity must come from the shared exact ray hit without a second distance evaluation");
-  assert.match(svoDrySceneShader, /dry\.terrain\.x,DRY_OWNER_NONE,SVO_FEATURE_TERRAIN,DRY_GBUFFER_FIELD_TERRAIN/);
+  // No terrain field source is published any more: the ground is voxels, so the
+  // hit it produces is DRY_GBUFFER_FIELD_VOXEL like every other static surface.
+  // A `terrain` producer reappearing in the G-buffer would mean a second ground.
+  assert.doesNotMatch(svoDrySceneShader, /DRY_GBUFFER_FIELD_TERRAIN/);
+  assert.match(svoDrySceneShader, /sceneIdentityMaterial\(cellIdentity\),DRY_OWNER_NONE,[^]*DRY_GBUFFER_FIELD_VOXEL/,
+    "the voxels-only primary publishes the structural-discrete field source and no owner");
   assert.match(svoDrySceneShader, /dryPublicationGeneration\(\)->u32\{return dry\.primitiveCandidates\.w;\}/,
     "scene history follows the complete live exact-scene publication revision");
   assert.match(svoDrySceneShader, /DRY_REVERSED_Z_NEAR_M\/viewDepth_m/);

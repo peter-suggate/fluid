@@ -107,11 +107,15 @@ test("the producing-pass tag occupies spare flag bits and never collides", () =>
 
 test("each primary pass tags itself so the claimant view is exact", () => {
   const raster = createSvoDrySceneFragmentWGSL(1, "raster-primary", "off", "split", 0, false, true, true);
-  // Terrain, brick and primitive fragments share one surface writer, so each
-  // names its producer at its own call and the writer turns it into flags.
+  // The brick and primitive fragments share one surface writer, so each names
+  // its producer at its own call and the writer turns it into flags.
   assert.match(raster, /fn dryRasterPrimarySurface\(opaque:DryHit,ro:vec3f,rd:vec3f,forward:vec3f,producer:u32\)/);
   assert.match(raster, /svoGBufferProducerFlags\(producer\)/);
-  assert.match(raster, /traceTerrain[^]*dryRasterPrimarySurface\(terrain,camera\[0\],rd,camera\[1\],SVO_GBUFFER_PRODUCER_RASTER_BACKGROUND\)/);
+  // The background pass no longer *draws* anything: the ground is voxels, so the
+  // analytic heightfield it used to trace is gone and what is left is the clear.
+  // Asserted as an absence, because a terrain trace reappearing here would be a
+  // second surface competing with the bricks rather than a new feature.
+  assert.doesNotMatch(raster, /traceTerrain/);
   assert.match(raster, /dryRasterPrimarySurface\(payload,ro,rd,camera\[1\],SVO_GBUFFER_PRODUCER_BRICK\)/);
   assert.match(raster, /dryRasterPrimarySurface\(exact,ro,rd,camera\[1\],SVO_GBUFFER_PRODUCER_SCENE_PRIMITIVE\)/);
   assert.match(raster, /svoGBufferProducerFlags\(SVO_GBUFFER_PRODUCER_TRACED\)/);
@@ -191,5 +195,4 @@ test("render panel contains rendering controls only; solver fields stay in perfo
   assert.doesNotMatch(panelSource, /useMethodStore|gridOverlay|paperPipeline|finePublicationGate/);
   assert.doesNotMatch(panelSource, />Solver grid<|Paper pipeline inspector|CFL load|Projected divergence/);
   assert.match(panelSource, /RENDER OBSERVATORY/);
-  assert.match(panelSource, /GLOBAL SVO VIEW/);
 });

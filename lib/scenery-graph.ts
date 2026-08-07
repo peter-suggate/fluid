@@ -447,6 +447,7 @@ export const SCENERY_GENERATOR_IDS = Object.freeze([
   "swept-coping",
   "pond-stone-set",
   "bonsai",
+  "oak",
   "rosette",
   "capped-boulder",
   "stepping-path",

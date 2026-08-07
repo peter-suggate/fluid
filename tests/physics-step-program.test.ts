@@ -62,6 +62,17 @@ test("the recorder validates then resets for the next step", () => {
   for (const id of FULL_SEQUENCE) recorder.record(id);
   assert.deepEqual(recorder.finishStep(OCTREE_STEP_PROGRAM), []);
   // A second finish with nothing recorded reports every required stage.
+  // `rigid-exchange` is scene-optional, and `step-snapshot` is optional
+  // because its ring arms on consumption: a step whose predecessor's record is
+  // still unread encodes no copies, and no other stage reads what it writes.
+  // Pinned exactly rather than by count, so making a stage optional has to be
+  // an explicit edit here.
   const empty = recorder.finishStep(OCTREE_STEP_PROGRAM);
-  assert.ok(empty.length >= 6);
+  assert.deepEqual(empty, [
+    "required stage ready-topology-flip was never executed",
+    "required stage surface-transport was never executed",
+    "required stage pressure-projection was never executed",
+    "required stage inactive-topology-candidate was never executed",
+    "required stage sparse-brick-world was never executed",
+  ]);
 });

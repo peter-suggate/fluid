@@ -157,11 +157,10 @@ test("the LOD tier resolves from the brick node, never from the instance sub-AAB
 
 test("the LOD tier's solidity test matches the voxels-only walk", () => {
   const lod = createSvoDrySceneFragmentWGSL(0.5, "raster-primary", "off", "split", 3, false, true, true);
-  // Ground is ownerless by construction (SPARSE_SCENE_TERRAIN_MATERIAL_OWNER)
-  // and on the hero garden so is most of the scenery. The LOD resolve is the
-  // only pass a pixel classified into that tier ever gets, so an owner-range
-  // test there is a hole and not a missed upgrade.
+  // The LOD resolve is the only pass a pixel classified into that tier ever
+  // gets, so its solidity test has to be the walk's: the material half of the
+  // identity word, and nothing else. There is no owner half left to reject on.
   assert.ok(lod.includes("fn dryLodCellSolid"));
-  assert.ok(/fn dryLodCellSolid\(identity:u32\)->bool\{\s*let owner=identity>>16u;\s*return \(identity&0xffffu\)!=0u/.test(lod));
+  assert.ok(/fn dryLodCellSolid\(identity:u32\)->bool\{return sceneIdentitySolid\(identity\);\}/.test(lod));
   assert.ok(!/dryLodCellSolid[\s\S]{0,200}dry\.metadata\.y/.test(lod));
 });

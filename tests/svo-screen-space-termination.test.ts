@@ -93,14 +93,12 @@ test("dry-scene proxy is compile-time opt-in and primary-only", () => {
   assert.doesNotMatch(raster, /effectiveThresholdPixels=1\*/);
   assert.match(raster, /dryPrimaryVoxelProxyHit/);
   assert.match(raster, /dryPrimaryPrimitiveProxyHit/);
-  // The per-cell sub-pixel resolve belongs to the arm that still marches
-  // records. Under voxels-only both arms return at the first solid cell, so it
-  // chose between two identical answers at the cost of a footprint evaluation
-  // per cell; intermediate detail is the aggregate stride's job instead.
+  // The per-cell sub-pixel resolve belonged to the arm that still marched
+  // records, and that arm no longer exists: the primary returns at the first
+  // solid cell and shades the normal baked into it, so the resolve chose between
+  // two identical answers at the cost of a footprint evaluation per cell.
+  // Intermediate detail is the aggregate stride's job instead.
   assert.doesNotMatch(raster, /if\(dryPrimaryBoundsSubPixel\(cellBounds\)\)/);
-  const analyticRetained = createSvoDrySceneFragmentWGSL(0.5, "raster-primary", "off", "split", 1,
-    false, true, true, true, { analyticPrimaryRetained: true });
-  assert.match(analyticRetained, /if\(dryPrimaryBoundsSubPixel\(cellBounds\)\)/);
   assert.match(raster, /let proxySpan=vec2f\(span\.x,min\(span\.y,limit\)\)/);
   assert.match(raster, /@fragment fn svoBrickLodResolveFragment/);
   assert.match(raster, /@fragment fn svoBrickExactResolveFragment/);

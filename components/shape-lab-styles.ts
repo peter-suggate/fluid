@@ -59,6 +59,11 @@ export const SHAPE_LAB_STYLES = `
 .sl-segment:hover { border-color: var(--line-strong); }
 .sl-segment-on { background: var(--accent-wash); border-color: var(--accent-line); color: var(--accent-strong); font-weight: 600; }
 .sl-check { display: flex; align-items: center; gap: 7px; font-size: 12px; color: var(--muted); }
+.sl-depth { display: flex; flex-direction: column; align-items: center; gap: 1px; padding: 4px 6px; }
+.sl-depth-rung { font-size: 13px; font-weight: 600; line-height: 1.1; }
+.sl-depth-census { font-size: 9.5px; color: var(--dim); font-variant-numeric: tabular-nums; line-height: 1.1; }
+.sl-segment-on .sl-depth-census { color: var(--accent-strong); }
+.sl-warn { color: var(--amber-ink); }
 
 .sl-metrics { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin: 0; }
 .sl-metrics div { background: var(--well); border-radius: var(--radius-s, 9px); padding: 6px 8px; }

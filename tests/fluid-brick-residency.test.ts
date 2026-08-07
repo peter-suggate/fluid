@@ -150,7 +150,12 @@ test("pressure topology rebuild consumes the shared topology-tile worklist indir
   // The former leaf-size gate is gone: after initialization the tile path is
   // the only rebuild domain at every legal (brickSize, maximumLeafSize) pair.
   assert.doesNotMatch(rebuild, /maxLeafSize <= /);
-  assert.match(octreeProjectionShader, /fn topologyTileSize\(\) -> u32 \{ return max\(8u, params\.dimsMax\.w\); \}/);
+  // The tile edge is its own override, not `params.dimsMax.w`. That word is the
+  // leaf ceiling, and the two stopped being the same number when the ceiling
+  // was freed from having to tile the domain exactly; reading the ceiling here
+  // would have grown the residency/retention tile along with it.
+  assert.match(octreeProjectionShader, /override topologyTileCells: u32 = 8u;/);
+  assert.match(octreeProjectionShader, /fn topologyTileSize\(\) -> u32 \{ return max\(8u, topologyTileCells\); \}/);
   assert.match(octreeProjectionShader, /fn deltaTopologyCell/);
   assert.match(octreeProjectionShader, /fn deltaTopologyCandidate/);
   assert.match(octreeProjectionShader, /subCoord \* 8u \+ local \* 2u/);

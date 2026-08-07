@@ -71,26 +71,15 @@ test("query state round-trips the primary's surface reconstruction", () => {
     "", { presetId: "water-box-dam-break", scene },
     { methodId: "uniform", quality: "balanced", overrides: {} }, ui));
 
+  // `svoSurface` selected between three ways of guessing at the shading normal
+  // per pixel. The voxel carries its own baked normal now, so there is one arm
+  // and no key: an old link naming it must parse rather than throw, and must
+  // not round-trip a query parameter nothing reads.
   const shipping = parseQueryState("");
-  assert.equal(shipping.ui.svoRenderTuning.surfaceReconstruction, "analytic");
   assert.equal(serialize(shipping.ui).get("svoSurface"), null,
-    "the default surface must not be serialized");
-
-  // Both non-default arms have to be nameable. `voxel-face` is the reference the
-  // acceptance gates rest on; `trilinear` is the arm the analytic one was
-  // measured against, and "look at this banding" is only a link if it survives.
-  for (const arm of ["voxel-face", "trilinear"] as const) {
-    const parsed = parseQueryState(`?svoSurface=${arm}`);
-    assert.equal(parsed.ui.svoRenderTuning.surfaceReconstruction, arm,
-      `a link must be able to name the ${arm} arm`);
-    assert.equal(serialize(parsed.ui).get("svoSurface"), arm,
-      `the ${arm} arm must survive a round trip`);
-  }
-
-  // Unknown falls back to the shipping image rather than silently pinning the
-  // frame to a comparison arm, matching normalizeSvoRenderTuning.
-  assert.equal(parseQueryState("?svoSurface=nonsense").ui.svoRenderTuning.surfaceReconstruction,
-    "analytic");
+    "the retired surface key must not be serialized");
+  assert.equal(serialize(parseQueryState("?svoSurface=trilinear").ui).get("svoSurface"), null,
+    "an old link naming a retired arm must parse and drop the key");
 });
 
 test("query state round-trips the unified scene voxel domain atomically", () => {

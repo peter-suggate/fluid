@@ -791,10 +791,16 @@ test("the floret's span in leaves is the constraint, and is reported", () => {
  * returns.
  */
 test("the hero document's specimen draws at the scene's own leaf", () => {
-  const scene = createHeroGardenHoseScene();
-  const node = scene.scenery?.nodes.find(({ id }) => id === "bonsai");
-  assert.ok(node?.kind === "generator" && node.generator === "bonsai",
-    "the hero document must hold its specimen as a generator node");
+  // Built here rather than read off the hero document, because the hero set's
+  // tree is a procedural oak since the cutover and this species no longer stands
+  // in it. What the test is actually about is unchanged and is nothing to do
+  // with that scene: a specimen resolves its canopy ladder against the leaf it
+  // is handed. Reading the node out of the garden only ever supplied params.
+  const node = {
+    kind: "generator", id: "bonsai", generator: "bonsai",
+    seed: 0x8017a1,
+    params: { ...BONSAI_POND_CANOPY, canopy: "aggregate", at_m: [0.55, -0.15], lean: [-0.55, 0.15] },
+  } as const satisfies Extract<SceneryNode, { kind: "generator" }>;
   const form = node.params as { readonly lobes: number };
   /** Published floret width, in metres: `lobeSpan` is a share of the envelope. */
   const floretWidth_m = (detailCellSize_m: number): number => {

@@ -8,6 +8,7 @@
  */
 
 import { SVO_BRICK_LIFECYCLE } from "./svo-brick-occupancy";
+import { SVO_GBUFFER_NORMAL_OCT8_ABSENT } from "./svo-gbuffer";
 
 export type SparseBrickSize = 4 | 8;
 
@@ -245,10 +246,23 @@ export const SPARSE_BRICK_PAYLOAD_PROFILES: Readonly<Record<
  *     predicate over the same data, and it costs 64 bytes a leaf (~1 %). A hash
  *     that moves here is a bug in the predicate move and nothing else.
  *   - `banded` is the layout: masks, a per-leaf header, a suballocated record
- *     arena carrying geometry only, and identity as a per-leaf palette with an
- *     index array over occupied voxels whose width is zero on the 76 % of hero
- *     leaves that hold one identity. An interior voxel costs two bits, both
- *     already inside the fixed masks.
+ *     arena carrying geometry only, the material as a per-leaf palette with an
+ *     index array over occupied voxels whose width is zero on the 94.8 % of hero
+ *     leaves that hold one material, and the baked normal as a raw `u16` per
+ *     voxel, in a fixed 256-word lane at the head of the leaf's blob. An
+ *     interior voxel costs two bits — both already inside the fixed masks — plus
+ *     its normal.
+ *
+ *     **The identity word's two halves are different populations, so they are
+ *     stored differently.** The high half is now a per-voxel baked normal
+ *     ({@link sparseBrickSceneIdentityWordCodecWGSL}) rather than a per-object
+ *     owner id. Measured on `hero-garden-hose` at depth 0: interning the whole
+ *     word gives **29.05** entries a leaf (max 474, 51.9 % of leaves past a 4-bit
+ *     index, 0.11 % past the 256-entry palette entirely), and interning the
+ *     material half alone gives **1.026** (max 28, 94.8 % of leaves at exactly
+ *     one). So the palette interns materials and the normal gets a lane. See
+ *     `lib/svo-banded-leaf-payload.ts` for why that lane spans every occupied
+ *     voxel rather than riding the geometry records.
  *
  * The staging is why `occupancy` is a rung rather than a footnote. `banded` moves
  * occupancy, fraction, distance *and* identity to a new decode path at once, so a
@@ -265,39 +279,68 @@ const BANDED_VOXELS_PER_LEAF = 512;
 /**
  * Record slots the banded arena reserves, as a fraction of voxel capacity.
  *
- * Measured, not guessed: the stencil record set is **6.64 %** of the hero
- * garden's voxels off the device and 6.78 % by CPU census, and 15.7-23.1 % of a
- * `garden-svo-lighting` leaf — that study is the crowded case and the one this
- * has to hold. 25 % carries it with room, costs 1 byte a voxel of *capacity*
- * against the 4 the dense lane spends on every voxel, and the allocator reports
- * its high-water mark so the reservation is checkable rather than assumed.
+ * Measured, not guessed: the stencil record set is **6.63 %** of the hero
+ * garden's voxels (re-measured 2026-08-07 on the published depth-0 arena,
+ * 12 724 leaves / 6.51 M voxels; the pre-cutover figure was 6.64 % and it has not
+ * moved, because the record set is a function of `solidFraction` and the cutover
+ * touched only the identity word), and 15.7-23.1 % of a `garden-svo-lighting`
+ * leaf — that study is the crowded case and the one this has to hold. 25 %
+ * carries it with room, costs 1 byte a voxel of *capacity* against the 4 the
+ * dense lane spends on every voxel, and the allocator reports its high-water mark
+ * so the reservation is checkable rather than assumed.
  *
  * A shared arena rather than a per-leaf reservation because the size-class
- * distribution is long-tailed: the p99 leaf holds 356 records where the median
- * hero leaf holds none, so reserving the p99 class per leaf would cost 1 792
- * bytes a leaf and lose to the dense lane outright.
+ * distribution is long-tailed: the p99 hero leaf holds 301 records where the
+ * median holds none, so reserving the p99 class per leaf would cost 1 204 bytes a
+ * leaf on a scene whose median leaf needs zero.
  */
 export const SPARSE_BRICK_BANDED_RECORD_CAPACITY_FRACTION = 0.25;
 
 /**
- * Bytes a leaf reserved for its palette and identity index together.
+ * Bytes a leaf reserved for its material palette, its index and its normal lane.
  *
- * The leaf palette is one `u32` an entry and the index is 1/2/4/8 bits per
- * *occupied* voxel, so a two-identity leaf costs 8 bytes of palette plus 64 of
- * index and a single-identity leaf costs 4 bytes and nothing else. Measured mean
- * is 1.457 identities a leaf with 76 % at exactly one, which puts the mean blob
- * near 16 bytes; 96 covers a four-identity leaf with a 2-bit index over a fully
- * occupied leaf (16 + 128 = 144 — so it does *not*, and such a leaf takes the
- * dense escape, which is a legal answer the encoder already models).
+ * A global bump allocator hands the blob out, so this is a *mean* budget over the
+ * published leaves rather than a per-leaf cap — a leaf may take more as long as
+ * the scene's total fits, and the allocator raises
+ * {@link SPARSE_BRICK_BANDED_OVERFLOW}`.blob` rather than corrupting anything if
+ * it does not.
+ *
+ * Three terms, measured on `hero-garden-hose` at depth 0 (77.28 % occupancy,
+ * 1.026 materials a leaf, 94.8 % of leaves at exactly one material):
+ *
+ *   - **normals**: a flat 256 words — one `u16` a voxel, all 512 of them.
+ *     **1 024 bytes**, and 78 % of the whole layout.
+ *   - **palette**: `ceil(materials / 2)` words, two `u16` to a word. 4 bytes on
+ *     nineteen leaves in twenty.
+ *   - **index**: `ceil(occupied * indexBits / 32)` words, and `indexBits` is zero
+ *     on those same nineteen leaves. Mean under 1 byte.
+ *
+ * Measured mean is therefore ~1 029 bytes. The reservation is **1 152**: the
+ * normal lane is fixed at 1 024 and can never overflow, and the remaining 128
+ * covers palette and index. So the common case — a single-material leaf, whatever
+ * its occupancy — is exactly 1 028 bytes, and the 12 % headroom absorbs the
+ * multi-material tail against a global bump allocator.
+ *
+ * This constant carried 96 before the unified-voxel cutover, when the blob held a
+ * palette of whole identity words and nothing else. That budget is no longer
+ * expressible: with the normal in the word, interning it needed 29.05 entries a
+ * leaf and an 8-bit index on half of them, which is 380 bytes a leaf of palette
+ * and index — four times the old reservation to store the same information *less*
+ * directly than the raw 792-byte lane does. See `lib/svo-banded-leaf-payload.ts`.
  */
-export const SPARSE_BRICK_BANDED_BLOB_BYTES_PER_LEAF = 96;
+export const SPARSE_BRICK_BANDED_BLOB_BYTES_PER_LEAF = 1_152;
 
 /**
  * The banded layout's per-leaf header, in `u32` words.
  *
  * Four words, 16 bytes, which with the two 64-byte masks is the layout's fixed
- * 144 bytes a leaf — 41 % of the projected depth-3 arena, and therefore the next
- * thing to attack after this.
+ * 144 bytes a leaf — 11 % of the measured 1 308-byte depth-0 leaf, against 41 %
+ * before the normal lane existed.
+ *
+ * It stays at four because the blob's three arrays are ordered so that every one
+ * of them has a derivable start: normals first at a fixed 256 words, then the
+ * material palette, then the index. An earlier arrangement put normals last and
+ * needed a fifth word to address them; ordering is cheaper than an offset.
  */
 export const SPARSE_BRICK_BANDED_HEADER_WORDS = 4;
 
@@ -329,7 +372,7 @@ const LEAF_PAYLOAD_MODE_LANES: Readonly<Record<
     },
     {
       name: "sceneBandedHeader", strideBytes: SPARSE_BRICK_BANDED_HEADER_WORDS * 4, elements: "leaves",
-      channels: ["recordBase", "blobBase", "counts", "flags"],
+      channels: ["recordBase", "blobBase", "counts", "scale"],
       channelFormats: ["u32", "u32", "u32", "u32"],
     },
     {
@@ -416,6 +459,58 @@ export function octreeLiveSceneSceneGeometryFormat(
 }
 
 /**
+ * How a dry world stores a leaf's 512-voxel payload.
+ *
+ * `FLUID_SVO_LEAF_PAYLOAD=dense|occupancy|banded`, **defaulting to `dense`**,
+ * which is the arm that shipped. See {@link SparseBrickLeafPayloadMode} for what
+ * each rung stores and `lib/svo-banded-leaf-payload.ts` for the layout's own
+ * derivation and its executable encoder.
+ *
+ * Every identity reader is now cut over — the dry primary, its shadow walk, the
+ * LOD tier, both probes, the derived builder, the brick-occupancy summary and the
+ * two readback oracles all resolve identity through
+ * {@link sparseBrickSceneIdentityCodecWGSL} rather than the flat lane — so
+ * `banded` is a *correct* arm rather than a producer-only one. The default stays
+ * on the shipped arm for two reasons that are arithmetic, not caution:
+ *
+ * 1. **The saving is not available yet.** `encodeBandedLeaves` builds the palette
+ *    and the normal lane by reading the dense identity lane the voxeliser has just
+ *    written, so a banded world still allocates it (see
+ *    {@link SPARSE_BRICK_BANDED_PRODUCER_DENSE_LANES}). Until that producer stops
+ *    needing a whole-arena staging lane, `banded` *adds* the mask, header, blob
+ *    and record lanes — 3.53 bytes a voxel of reserved capacity — on top of the 8
+ *    the dry profile already spends. Retiring the two staging lanes is what turns
+ *    that into the 8 → 2.56 B/voxel the measured occupancy supports.
+ * 2. A lever that defaults to an arm nobody has cleared *on device* is how one
+ *    recorded "baseline" hash became the `snorm8` arm under test, and it cost
+ *    three agents time. The banded arm is cleared for *fidelity* — mean 0.54/255,
+ *    max 7/255, zero pixels over 16/255, less visible than the `f16-unorm8`
+ *    geometry lane already shipping at 11/255.
+ *
+ * So the arm to measure is `FLUID_SVO_LEAF_PAYLOAD=banded`, and what it buys
+ * today is the per-cell predicate in `traceLeafPayload` — one occupancy bit
+ * instead of a strided 4-byte identity load for every cell the walk *rejects* —
+ * rather than footprint.
+ *
+ * `occupancy` is the bisection rung, not a product state: it costs 64 bytes a
+ * leaf and saves no storage, and exists so that a hash which moves under `banded`
+ * can be attributed to the storage rather than to the predicate move. It is the
+ * arm that carries the predicate move *alone*: same dense identity lane, same
+ * dense geometry lane, `bandedOccupied` as the only new question.
+ */
+export function octreeLiveSceneLeafPayloadMode(
+  environment: Record<string, string | undefined> | undefined
+    = typeof process !== "undefined" ? process.env : undefined,
+): SparseBrickLeafPayloadMode {
+  const raw = environment?.FLUID_SVO_LEAF_PAYLOAD;
+  if (raw === undefined || raw === "") return "dense";
+  if (!SPARSE_BRICK_LEAF_PAYLOAD_MODES.includes(raw as SparseBrickLeafPayloadMode)) {
+    throw new RangeError(`FLUID_SVO_LEAF_PAYLOAD must be one of ${SPARSE_BRICK_LEAF_PAYLOAD_MODES.join(", ")}`);
+  }
+  return raw as SparseBrickLeafPayloadMode;
+}
+
+/**
  * Half-width of a stored distance band, in multiples of the voxel's own cell
  * radius (`0.5 * |cellExtent|`, the same quantity the voxeliser already computes
  * to invert its coverage law).
@@ -494,6 +589,63 @@ fn packSceneGeometry(signedDistance:f32,fraction:f32,cellRadius:f32)->u32{
 }`;
 }
 
+/**
+ * The one definition of the scene identity word, shared by the voxeliser that
+ * writes it and every path that shades from it.
+ *
+ * The low half is unchanged and always was: a material id, and `!= 0` is what
+ * makes a voxel solid. The high half used to be an owner id — a back-pointer to
+ * the authored primitive record — and now carries that primitive's **surface
+ * normal, baked at voxelisation time as oct8**.
+ *
+ * The trade is the whole point of the representation. The producer knows exactly
+ * what it is writing and can evaluate the analytic normal for free at init;
+ * the renderer, asking the same question per pixel, had to load a 64-byte record
+ * through the owner id and re-evaluate a field program or a smooth-union cluster
+ * to answer it. Baking makes the render path depend on the voxel and on nothing
+ * else — no primitive records, no owner ids, no heightfield — and it costs
+ * nothing in memory, because the owner id it replaces was the same two bytes.
+ *
+ * What is lost with the owner is real and was accepted: hover, picking, per-owner
+ * visibility suppression of voxels, and the hard-feature id (a voxel surface now
+ * reports `smooth`, which moves only the contact-visibility ray bias, 0.025 vs
+ * 0.05 cells). Analytic hits — rigid bodies, glass — keep their own owners.
+ *
+ * Emitted as WGSL rather than duplicated as hand-matched shifts for the reason
+ * {@link sparseBrickSceneGeometryCodecWGSL} is: a producer and a consumer that
+ * disagree about a shift render a wrong scene instead of failing to compile.
+ *
+ * The *word*, not its address: {@link sparseBrickSceneIdentityCodecWGSL} decides
+ * which word a voxel's identity lives in under each leaf payload mode, and this
+ * decides what is in it. The two are separable because no reader needs both —
+ * the voxeliser addresses the flat lane directly and every marcher hoists a
+ * `SceneIdentitySource` before it unpacks anything.
+ *
+ * Requires `svoGBufferPackNormalOct8`/`svoGBufferUnpackNormalOct8` in scope —
+ * `SVO_GBUFFER_NORMAL_OCT8_WGSL`, which is where the encoding itself lives.
+ */
+export function sparseBrickSceneIdentityWordCodecWGSL(): string {
+  return /* wgsl */ `
+// scene identity word: material id in the low half, baked oct8 normal in the high.
+const SCENE_IDENTITY_NO_NORMAL:u32=${SVO_GBUFFER_NORMAL_OCT8_ABSENT}u;
+fn sceneIdentityMaterial(word:u32)->u32{return word&0xffffu;}
+// Air is \`packMaterialOwner(0, SPARSE_BRICK_NO_OWNER)\` and an unvoxelised brick
+// is all zeroes; both have a zero material, which is why this one test covers
+// both and why the normal half is free to hold anything.
+fn sceneIdentitySolid(word:u32)->bool{return (word&0xffffu)!=0u;}
+fn sceneIdentityHasNormal(word:u32)->bool{return (word>>16u)!=SCENE_IDENTITY_NO_NORMAL;}
+fn sceneIdentityNormal(word:u32)->vec3f{return svoGBufferUnpackNormalOct8(word>>16u);}
+// A degenerate normal is stored as the absent sentinel rather than as a
+// direction, so a consumer can fall back to the voxel face instead of shading
+// from an arbitrary axis. The producer is the only place that knows the
+// difference between "the field has no gradient here" and "the gradient is +Z".
+fn packSceneIdentity(materialId:u32,normal:vec3f)->u32{
+  let magnitude=length(normal);
+  let packed=select(SCENE_IDENTITY_NO_NORMAL,svoGBufferPackNormalOct8(normal),magnitude>1e-8);
+  return (materialId&0xffffu)|(packed<<16u);
+}`;
+}
+
 /** How a shader addresses the banded lanes, and how it loads a payload word. */
 export interface SparseBrickBandedCodecOptions {
   /** WGSL expression for the occupancy mask lane's first word. */
@@ -510,6 +662,17 @@ export interface SparseBrickBandedCodecOptions {
   readonly load: (index: string) => string;
   /** Which rungs to declare. `occupancy` emits the mask alone. */
   readonly mode: Exclude<SparseBrickLeafPayloadMode, "dense">;
+  /**
+   * Declare the geometry-record accessors. Default `true`, which is the shape
+   * the voxeliser needs and the text every existing caller already emits.
+   *
+   * The pair is separable because it is the *only* part of the codec that reaches
+   * outside itself: `bandedRecordWord` calls `sceneGeometryWord`, so a module that
+   * wants identity alone would otherwise have to emit the whole scene-geometry
+   * codec — and therefore pick a geometry format — to compile a function it never
+   * calls. Identity consumers pass `false`.
+   */
+  readonly records?: boolean;
 }
 
 /**
@@ -523,15 +686,19 @@ export interface SparseBrickBandedCodecOptions {
  * functions mirror, and `tests/svo-banded-leaf-storage.test.ts` holds the two
  * against each other over the same bytes.
  *
- * One deliberate departure from the reference encoder, and it is priced. The
- * encoder interns identities into a scene-global `u16` table and stores slots;
- * the device stores the packed `(ownerId << 16) | materialId` word **inline** in
- * the leaf palette, at four bytes an entry rather than two. That trades a
- * scene-global GPU hash map — the interning is the only part of the layout that
- * needs one — for 2 bytes per leaf-palette entry: at the measured 1.457 entries a
- * leaf that is 2.9 bytes a leaf, **0.66 MB of the projected 80 MB depth-3 arena,
- * 0.8 %**. The decode is unchanged in shape (`leafPalette[entry]`), the packed
- * word is never truncated, and the measured arena figures charge the four bytes.
+ * One deliberate departure from the reference encoder, and it now costs nothing.
+ * The encoder interns materials into a scene-global `u16` table and stores slots;
+ * the device stores the material **inline** in the leaf palette. Since the split
+ * both are `u16`, so the indirection buys no width at all and the device simply
+ * skips the scene-global GPU hash map — the interning was the only part of the
+ * layout that needed one. Leaf palette entries are packed two to a word.
+ *
+ * The blob a leaf owns is three arrays, in this order:
+ *
+ *   `[ceil(palette/2) material words][index words][ceil(occupied/2) normal words]`
+ *
+ * and the header carries the normal array's blob-relative start, so a reader
+ * never re-derives the index width's contribution.
  */
 export function sparseBrickBandedLeafCodecWGSL(options: SparseBrickBandedCodecOptions): string {
   const { load, mode } = options;
@@ -577,6 +744,20 @@ fn bandedHeaderBlobBase(slot:u32)->u32{return bandedHeader(slot,1u);}
 fn bandedHeaderRecordCount(slot:u32)->u32{return bandedHeader(slot,2u)&0xffffu;}
 fn bandedHeaderPaletteCount(slot:u32)->u32{return (bandedHeader(slot,2u)>>16u)&0xffu;}
 fn bandedHeaderIndexBits(slot:u32)->u32{return (bandedHeader(slot,2u)>>24u)&0xffu;}
+// The blob's three arrays, in order:
+//
+//   [BANDED_NORMAL_WORDS normal words][ceil(palette/2) material words][index words]
+//
+// The normal lane is first and fixed-size *so that both of the other two have a
+// derivable start and the header needs no offset word for either*. It spans all
+// 512 voxels rather than the occupied ones for the same reason it is first: a
+// rank-compacted lane saves 22 % of its own bytes and makes every read pay a
+// sixteen-word prefix popcount, which measured +4.1 % on the frame.
+const BANDED_NORMAL_WORDS:u32=BANDED_VOXELS_PER_LEAF/2u;
+/** One \`u16\` of a two-per-word array, by element index. */
+fn bandedHalfWord(base:u32,element:u32)->u32{
+  return (${load("base+(element>>1u)")}>>((element&1u)*16u))&0xffffu;
+}
 // Set bits before \`local\` inside this leaf's own mask, by prefix popcount.
 //
 // Sixteen words means at most fifteen whole-word popcounts and one masked one.
@@ -592,7 +773,7 @@ fn bandedPrefixCount(maskBase:u32,slot:u32,local:u32)->u32{
   // empty at a word boundary rather than total.
   return count+countOneBits(${load("base+word")}&((1u<<(local&31u))-1u));
 }
-/** Where this voxel's geometry record lives, valid only when \`bandedRecorded\`. */
+${options.records === false ? "" : /* wgsl */ `/** Where this voxel's geometry record lives, valid only when \`bandedRecorded\`. */
 fn bandedRecordSlot(voxel:u32)->u32{
   let slot=bandedLeafSlot(voxel);
   return bandedHeaderRecordBase(slot)+bandedPrefixCount(bandedRecordMaskBase(),slot,bandedLeafLocal(voxel));
@@ -600,24 +781,27 @@ fn bandedRecordSlot(voxel:u32)->u32{
 /** The record's own packed geometry word, through the shared scene-geometry codec. */
 fn bandedRecordWord(voxel:u32)->u32{
   return ${load("sceneGeometryWord(bandedRecordsBase(),bandedRecordSlot(voxel))")};
-}
+}`}
 /**
- * The whole packed \`(ownerId << 16) | materialId\` word, never truncated.
+ * The whole packed \`(normal << 16) | materialId\` word, reassembled.
  *
  * Zero index bits is the common case and the reason the ladder starts there: a
- * leaf with one identity resolves every occupied voxel to its single palette
- * word with no per-voxel read at all. 76 % of hero leaves are that leaf.
+ * leaf with one material resolves every occupied voxel to its single palette
+ * entry with no index read at all. 94.8 % of hero leaves are that leaf. The
+ * normal is always a read, because it is per voxel — the same occupancy rank the
+ * index would have used addresses it.
  */
 fn bandedIdentity(voxel:u32)->u32{
   if(!bandedOccupied(voxel)){return BANDED_NO_MATERIAL_OWNER;}
   let slot=bandedLeafSlot(voxel);
+  let local=bandedLeafLocal(voxel);
   let blob=bandedBlobBase()+BANDED_ALLOCATOR_WORDS+bandedHeaderBlobBase(slot);
   let bits=bandedHeaderIndexBits(slot);
-  if(bits==0u){return ${load("blob")};}
+  let normal=bandedHalfWord(blob,local);
+  if(bits==0u){return bandedHalfWord(blob+BANDED_NORMAL_WORDS,0u)|(normal<<16u);}
   let palette=bandedHeaderPaletteCount(slot);
-  let rank=bandedPrefixCount(bandedOccupancyBase(),slot,bandedLeafLocal(voxel));
-  let bitIndex=rank*bits;
-  let indexWord=${load("blob+palette+(bitIndex>>5u)")};
+  let bitIndex=bandedPrefixCount(bandedOccupancyBase(),slot,local)*bits;
+  let indexWord=${load("blob+BANDED_NORMAL_WORDS+((palette+1u)>>1u)+(bitIndex>>5u)")};
   // An entry never straddles a word: the widths are 1/2/4/8 bits, so
   // \`bitIndex % 32 + bits <= 32\` for every rank.
   let entry=(indexWord>>(bitIndex&31u))&((1u<<bits)-1u);
@@ -626,9 +810,148 @@ fn bandedIdentity(voxel:u32)->u32{
   // a visible hole; clamping into the palette would make it a plausible identity
   // and hide it.
   if(entry>=palette){return BANDED_NO_MATERIAL_OWNER;}
-  return ${load("blob+entry")};
+  return bandedHalfWord(blob+BANDED_NORMAL_WORDS,entry)|(normal<<16u);
 }`;
 }
+
+/** How a shader reaches one voxel's scene identity, whatever the leaf payload mode. */
+export interface SparseBrickSceneIdentityCodecOptions {
+  readonly mode: SparseBrickLeafPayloadMode;
+  /**
+   * WGSL expression for the flat owner lane's first word. Read only by the
+   * `dense` and `occupancy` arms; a banded world has no such lane.
+   */
+  readonly materialOwnerBase: string;
+  /** Wrap a payload word index into the load form this shader's binding needs. */
+  readonly load: (index: string) => string;
+}
+
+/**
+ * Scene identity, in the shape a per-cell DDA can actually afford.
+ *
+ * `bandedIdentity` is the correct answer and the wrong *shape* for a marcher: per
+ * cell it costs an occupancy word, three header words, a sixteen-word prefix
+ * popcount and two blob loads, where the flat lane cost one load. Substituting it
+ * into `traceLeafPayload` unchanged is slower than the lane it replaces, and by a
+ * lot.
+ *
+ * None of those loads depend on the *cell* — only on the leaf — so the obvious
+ * repair is to resolve the header once into {@link SceneIdentitySource} before the
+ * walk. **The repair is measured and it is not where the cost is.** Once the
+ * per-cell test is `sceneIdentitySolidAt`, which reads the occupancy mask and
+ * needs no source at all, a hoisted source is spent on every leaf the ray crosses
+ * — including the ones it misses — to save nothing on the at most one cell per ray
+ * that hits; and removing it moved `banded` from **+4.27 % to +4.10 %** against
+ * `dense` on `hero-garden-hose` at depth 1, which is inside that lane's noise.
+ *
+ * The marcher therefore takes one bit per cell from
+ * {@link SCENE_IDENTITY_SOLID_AT_WGSL} and calls `sceneIdentityAt` once, on the
+ * hit — kept because it is the honest structure rather than because it was worth
+ * 0.17 pp. {@link SceneIdentitySource} survives for the readers that resolve many
+ * voxels of one leaf in a row — the derived builder and the readback oracles —
+ * where the amortisation it was designed for is real.
+ *
+ * **What the cost actually is:** the indirection itself. A `banded` hit resolves
+ * from three arena regions — the leaf header, the blob's material palette, the
+ * blob's normal lane — where `dense` read one flat word, and no rearrangement of
+ * *when* those loads happen removes them. The `occupancy` rung isolates it: mask
+ * predicate, flat identity lane, **+0.64 %**. So the predicate move is free and
+ * roughly 3 % is the price of identity not being a lane.
+ *
+ * There is no `full`-brick rung here and the shipped header has no such kind: a
+ * fully solid leaf still carries its 64-byte occupancy mask and still answers the
+ * first cell the DDA enters. That is not a loss, because the DDA returns at the
+ * first solid cell anyway, and the `full` kind would only remove a bit test that
+ * has already been paid for by the load it shares with 31 neighbours.
+ *
+ * The `dense` arm reuses the same two functions so no reader carries two shapes:
+ * the source degenerates to the lane base and the per-cell cost is the one load
+ * it always was, plus an add.
+ */
+export function sparseBrickSceneIdentityCodecWGSL(
+  options: SparseBrickSceneIdentityCodecOptions,
+): string {
+  const { load } = options;
+  const source = /* wgsl */ `
+// Everything about a leaf's identity storage that does not vary per cell.
+//
+// \`base\` is the flat lane's first word under \`dense\` and the leaf's blob under
+// \`banded\`; the two arms never share a reader, so one field carries both.
+// \`normals\` is the leaf's normal lane, already offset off the blob.
+struct SceneIdentitySource{base:u32,bits:u32,palette:u32,single:u32,normals:u32}`;
+  if (options.mode !== "banded") {
+    return /* wgsl */ `${source}
+fn sceneIdentitySourceAt(voxel:u32)->SceneIdentitySource{
+  return SceneIdentitySource(${options.materialOwnerBase},0u,0u,0u,0u);
+}
+fn sceneIdentityOf(source:SceneIdentitySource,voxel:u32)->u32{
+  return ${load("source.base+voxel")};
+}
+fn sceneIdentityAt(voxel:u32)->u32{return ${load(`${options.materialOwnerBase}+voxel`)};}
+${options.mode === "dense" ? "" : SCENE_IDENTITY_SOLID_AT_WGSL}`;
+  }
+  return /* wgsl */ `${source}
+// The leaf slot is \`voxel >> 9\` for any voxel of the leaf, so a caller with only
+// \`leaf.voxelOffset\` and a caller with a global cell index pass the same argument.
+fn sceneIdentitySourceAt(voxel:u32)->SceneIdentitySource{
+  let slot=bandedLeafSlot(voxel);
+  let counts=bandedHeader(slot,2u);
+  let blob=bandedBlobBase()+BANDED_ALLOCATOR_WORDS+bandedHeaderBlobBase(slot);
+  // Palette entry zero, loaded unconditionally: it is the answer for every
+  // occupied voxel of a single-material leaf, and a branch around one load that
+  // is already in flight buys nothing on a leaf that has any other kind.
+  return SceneIdentitySource(blob+BANDED_NORMAL_WORDS,(counts>>24u)&0xffu,(counts>>16u)&0xffu,
+    bandedHalfWord(blob+BANDED_NORMAL_WORDS,0u),blob);
+}
+fn sceneIdentityOf(source:SceneIdentitySource,voxel:u32)->u32{
+  if(!bandedOccupied(voxel)){return BANDED_NO_MATERIAL_OWNER;}
+  // The normal is addressed by the voxel — one load, no rank. Only the material
+  // index is rank-compacted, and only on the one leaf in twenty that needs one.
+  let normal=bandedHalfWord(source.normals,bandedLeafLocal(voxel));
+  if(source.bits==0u){return source.single|(normal<<16u);}
+  let bitIndex=bandedPrefixCount(bandedOccupancyBase(),bandedLeafSlot(voxel),bandedLeafLocal(voxel))*source.bits;
+  let entry=(${load("source.base+((source.palette+1u)>>1u)+(bitIndex>>5u)")}>>(bitIndex&31u))&((1u<<source.bits)-1u);
+  // Same contract as \`bandedIdentity\`: an out-of-range entry is an encoder bug,
+  // and the air sentinel makes it a visible hole rather than a plausible material.
+  if(entry>=source.palette){return BANDED_NO_MATERIAL_OWNER;}
+  return bandedHalfWord(source.base,entry)|(normal<<16u);
+}
+fn sceneIdentityAt(voxel:u32)->u32{return sceneIdentityOf(sceneIdentitySourceAt(voxel),voxel);}
+${SCENE_IDENTITY_SOLID_AT_WGSL}`;
+}
+
+/**
+ * The solidity predicate, in the shape a DDA can afford.
+ *
+ * **This is what the occupancy mask is for, and it takes no source.** Solidity
+ * used to mean loading a 4-byte identity word and testing its low half, so a
+ * marcher paid a strided 4-byte load for every cell it *rejected*. Here it is one
+ * bit of a word shared with 31 neighbours, and the identity — header, palette
+ * entry, prefix popcount, normal — is resolved only for the one cell that answers
+ * yes.
+ *
+ * That it takes no {@link SceneIdentitySource} is the load-bearing part, and it
+ * retires the advice on {@link sparseBrickSceneIdentityCodecWGSL} above. That
+ * advice — hoist the header out of the walk, keep one bit test per cell — was
+ * written when the per-cell *test* still went through the identity, and once the
+ * test is the mask a hoisted source is spent on every leaf the ray crosses,
+ * including the ones it misses, to save nothing on the one cell that hits. Worth
+ * 0.17 pp when measured, which is inside the lane's noise; kept because it is the
+ * honest structure, not because it paid.
+ *
+ * The predicate is the same one over the same data: the voxeliser writes a
+ * material exactly where `solidFraction > 0`, and the encoder sets the occupancy
+ * bit from that same stored fraction. That equality is what makes the `occupancy`
+ * rung hash-identical to `dense` and therefore a bisector.
+ *
+ * Deliberately not declared on the `dense` arm. There is no mask to ask, so the
+ * only honest implementation is `sceneIdentitySolid` on a loaded word — which is
+ * what every dense caller already writes, and which would drag this module's
+ * output into a dependency on the *word* codec that three of its five consumers
+ * do not emit.
+ */
+const SCENE_IDENTITY_SOLID_AT_WGSL = /* wgsl */ `
+fn sceneIdentitySolidAt(voxel:u32)->bool{return bandedOccupied(voxel);}`;
 
 /**
  * One leaf-payload arena, viewed off the device.
@@ -728,6 +1051,9 @@ export function sparseBrickBandedHeaderAt(view: SparseBrickBandedArenaView, slot
   };
 }
 
+/** Words the blob's fixed-size normal lane occupies: one `u16` for each voxel. */
+const BANDED_NORMAL_WORDS_PER_LEAF = BANDED_VOXELS_PER_LEAF / 2;
+
 /** Where a recorded voxel's geometry word lives, in record slots. */
 export function sparseBrickBandedRecordSlotAt(view: SparseBrickBandedArenaView, voxel: number): number {
   const slot = Math.floor(voxel / BANDED_VOXELS_PER_LEAF);
@@ -735,25 +1061,51 @@ export function sparseBrickBandedRecordSlotAt(view: SparseBrickBandedArenaView, 
     + bandedPrefix(view, view.recordMaskBase, slot, voxel % BANDED_VOXELS_PER_LEAF);
 }
 
+/** One `u16` of a two-per-word array, the WGSL `bandedHalfWord` exactly. */
+function bandedHalfWord(view: SparseBrickBandedArenaView, base: number, element: number): number {
+  return (view.words[base + (element >>> 1)] >>> ((element & 1) * 16)) & 0xffff;
+}
+
 /**
- * The whole packed `(ownerId << 16) | materialId` word, never truncated.
+ * The whole packed `(normal << 16) | materialId` word, reassembled.
  *
- * The same five loads the WGSL does, in the same order, so a disagreement between
- * this and the device is a disagreement about the *bytes* rather than about two
+ * The same loads the WGSL does, in the same order, so a disagreement between this
+ * and the device is a disagreement about the *bytes* rather than about two
  * independent implementations of a spec.
  */
 export function sparseBrickBandedIdentityAt(view: SparseBrickBandedArenaView, voxel: number): number {
   if (!sparseBrickBandedOccupiedAt(view, voxel)) return 0xffff0000;
   const slot = Math.floor(voxel / BANDED_VOXELS_PER_LEAF);
+  const local = voxel % BANDED_VOXELS_PER_LEAF;
   const header = sparseBrickBandedHeaderAt(view, slot);
   const blob = view.blobBase + SPARSE_BRICK_BANDED_ALLOCATOR_WORDS + header.blobBase;
-  if (header.indexBits === 0) return view.words[blob] >>> 0;
-  const rank = bandedPrefix(view, view.occupancyBase, slot, voxel % BANDED_VOXELS_PER_LEAF);
-  const bit = rank * header.indexBits;
-  const entry = (view.words[blob + header.paletteCount + (bit >>> 5)] >>> (bit & 31))
+  const palette = blob + BANDED_NORMAL_WORDS_PER_LEAF;
+  const normal = bandedHalfWord(view, blob, local);
+  if (header.indexBits === 0) return ((normal << 16) | bandedHalfWord(view, palette, 0)) >>> 0;
+  const bit = bandedPrefix(view, view.occupancyBase, slot, local) * header.indexBits;
+  const entry = (view.words[palette + ((header.paletteCount + 1) >>> 1) + (bit >>> 5)] >>> (bit & 31))
     & ((1 << header.indexBits) - 1);
   if (entry >= header.paletteCount) return 0xffff0000;
-  return view.words[blob + entry] >>> 0;
+  return ((normal << 16) | bandedHalfWord(view, palette, entry)) >>> 0;
+}
+
+/**
+ * Scene identity off the device, whatever the leaf payload mode.
+ *
+ * The CPU twin of {@link sparseBrickSceneIdentityCodecWGSL}, for the readback
+ * oracles: they hold the whole payload arena and the same word offsets the
+ * shaders are handed, so a mode switch moves the decode in one place instead of
+ * at every oracle. `words` is the arena from word zero, not a lane slice.
+ */
+export function sparseBrickScenePayloadIdentityAt(
+  words: Uint32Array, lanes: SparseBrickScenePayloadLanes, voxel: number,
+): number {
+  if (lanes.mode !== "banded") return words[lanes.materialOwnerWords + voxel] >>> 0;
+  return sparseBrickBandedIdentityAt({
+    words,
+    occupancyBase: lanes.occupancyWords, recordMaskBase: lanes.recordMaskWords,
+    headerBase: lanes.headerWords, blobBase: lanes.blobWords, recordsBase: lanes.recordWords,
+  }, voxel);
 }
 
 /**
@@ -1160,8 +1512,8 @@ export interface SparseBrickOctreeGPUOptions {
   leafPayloadMode?: SparseBrickLeafPayloadMode;
   /** Record slots the banded arena reserves, as a fraction of voxel capacity. */
   bandedRecordCapacityFraction?: number;
-  /** Keep the dense lanes resident so the banded bytes can be cross-decoded against them. */
-  retainDenseLanesForProvenance?: boolean;
+  /** Dense scene lanes a banded world keeps. See {@link SparseBrickPayloadLayoutOptions.retainDenseLanes}. */
+  retainDenseLanes?: readonly SparseBrickDenseSceneLane[];
 }
 
 /** One resolved lane: where it starts, how wide a voxel is, and its channels. */
@@ -1184,9 +1536,9 @@ export interface SparseBrickResolvedPayloadLayout {
   /** Blob words the banded arena reserves, allocator counters included. Zero unless `banded`. */
   readonly bandedBlobWords: number;
   /**
-   * Bytes the arena costs *without* the dense lanes a banded world keeps only for
-   * provenance. Equal to {@link totalBytes} unless
-   * {@link SparseBrickPayloadLayoutOptions.retainDenseLanesForProvenance} is set.
+   * Bytes the arena costs with *no* dense scene lane retained. Equal to
+   * {@link totalBytes} unless
+   * {@link SparseBrickPayloadLayoutOptions.retainDenseLanes} names one.
    */
   readonly productBytes: number;
 }
@@ -1213,23 +1565,47 @@ export interface SparseBrickPayloadLayoutOptions {
   /** Record slots as a fraction of voxel capacity, for the `banded` mode. */
   readonly bandedRecordCapacityFraction?: number;
   /**
-   * Keep the dense per-voxel lanes allocated alongside the banded ones.
+   * Dense per-voxel scene lanes to keep allocated alongside the banded ones.
    *
-   * The provenance shape, not the product one. The banded arm is verified by
-   * **cross-decoding**: the same voxel is read through the banded decode and
-   * through the dense lane the voxeliser also wrote, and the two must agree in
-   * occupancy, fraction, distance and identity over millions of voxels. That is
-   * a far stronger check than a frame hash for the storage itself — a hash proves
-   * the pixels agree, this proves the *bytes* do, channel by channel — and it
-   * needs both lanes resident at once.
+   * Named one lane at a time rather than switched as a pair, because the two
+   * lanes are retained for *different* reasons and are retired by different
+   * pieces of work:
    *
-   * It also costs the whole saving while it is on, which is why the layout
-   * reports {@link SparseBrickResolvedPayloadLayout.productBytes} separately: the
-   * arena a banded world allocates once its readers no longer need the dense
-   * lanes is a function of the same measured leaf count, not a forecast.
+   *   - `sceneMaterialOwners` is the banded encoder's own **input**. The
+   *     voxeliser writes an identity word a voxel and `encodeBandedLeaves`
+   *     reads that lane back to intern the leaf's material palette and to fill
+   *     its normal lane (lib/webgpu-sparse-scene-proxies.ts, "after the dense
+   *     rebuild, because it reads the lane that pass just wrote"). Retiring it is
+   *     a *producer* change — both halves of the identity have to reach the blob
+   *     without a whole-arena staging lane — not a reader cutover, and until that
+   *     lands the lane is load-bearing on every banded world.
+   *   - `sceneGeometry` is still read directly by consumers the banded record
+   *     arena has not replaced: the dry primary's smooth-normal reconstruction
+   *     and the derived builder's `solidDistance`/`sceneCoverage`. That is the
+   *     B2 reader cutover.
+   *
+   * Retention also costs the whole saving while it is on, which is why the
+   * layout reports {@link SparseBrickResolvedPayloadLayout.productBytes}
+   * separately: the arena a banded world allocates once nothing retains a dense
+   * lane is a function of the same measured leaf count, not a forecast.
    */
-  readonly retainDenseLanesForProvenance?: boolean;
+  readonly retainDenseLanes?: readonly SparseBrickDenseSceneLane[];
 }
+
+/** A dense per-voxel scene lane the banded layout is meant to replace. */
+export type SparseBrickDenseSceneLane = "sceneGeometry" | "sceneMaterialOwners";
+
+/**
+ * The dense lanes a banded world must keep for its own *producer* to work.
+ *
+ * Both, today: `encodeBandedLeaves` stages a leaf from the dense identity and
+ * geometry words the voxeliser has just written and compacts them in place — the
+ * identity's low half into the material palette, its high half into the normal
+ * lane, the geometry into the records. A banded world that drops either publishes
+ * an arena built from the absent-lane page.
+ */
+export const SPARSE_BRICK_BANDED_PRODUCER_DENSE_LANES: readonly SparseBrickDenseSceneLane[]
+  = Object.freeze(["sceneGeometry", "sceneMaterialOwners"]);
 
 /**
  * Resolve one profile into byte offsets for a given voxel capacity.
@@ -1294,7 +1670,7 @@ export function resolveSparseBrickPayloadLayout(
     throw new RangeError("Voxel capacity must be a positive safe integer");
   }
   const banded = leafPayloadMode === "banded";
-  const retainDense = banded && options.retainDenseLanesForProvenance === true;
+  const retained = new Set<SparseBrickDenseSceneLane>(banded ? options.retainDenseLanes ?? [] : []);
   const leafCapacity = Math.ceil(voxelCapacity / voxelsPerLeaf);
   const recordCapacity = banded ? Math.ceil(voxelCapacity * recordFraction) : 0;
   const blobWords = banded
@@ -1307,11 +1683,11 @@ export function resolveSparseBrickPayloadLayout(
     // owner word is not narrowed — it is gone. Absent rather than zero-width, so
     // a consumer that still indexes it fails its own `present` check instead of
     // silently reading the lane behind it.
-    if (banded && !retainDense && lane.name === "sceneMaterialOwners") continue;
+    if (banded && !retained.has("sceneMaterialOwners") && lane.name === "sceneMaterialOwners") continue;
     // The dense geometry lane goes the same way as the owner lane: records carry
     // geometry for the 6.6 % of voxels that need one, in their own lane, at the
     // same width and through the same codec.
-    if (banded && !retainDense && lane.name === "sceneGeometry") continue;
+    if (banded && !retained.has("sceneGeometry") && lane.name === "sceneGeometry") continue;
     if (lane.name === "sceneBandedRecords") {
       present.set(lane.name, {
         ...lane, ...SCENE_GEOMETRY_LANES[sceneGeometryFormat], name: "sceneBandedRecords",
@@ -1387,9 +1763,9 @@ export function resolveSparseBrickPayloadLayout(
     // subtracting lane sizes here: the second form would have to re-derive the
     // 256-byte gap padding and would drift from the allocator the moment a lane
     // moved. One code path, two answers.
-    productBytes: retainDense
+    productBytes: retained.size > 0
       ? resolveSparseBrickPayloadLayout(profile, voxelCapacity, sceneGeometryFormat,
-        { ...options, retainDenseLanesForProvenance: false }).totalBytes
+        { ...options, retainDenseLanes: [] }).totalBytes
       : Math.max(SPARSE_BRICK_ABSENT_LANE_PAGE_BYTES, end),
   };
 }
@@ -1657,6 +2033,30 @@ function alignBytes(value: number, alignment = 256): number {
   return Math.ceil(value / alignment) * alignment;
 }
 
+/**
+ * Where a consumer finds scene identity inside one payload arena.
+ *
+ * One block rather than a lane binding, because under `banded` the identity of a
+ * voxel is not a lane read at all: it is an occupancy bit, a per-leaf header and
+ * a palette entry, in four different lanes of the same buffer. A consumer binds
+ * the whole arena once and addresses it through these word offsets, which is the
+ * same shape `structureOffsetsWords` already uses for the structural arena.
+ *
+ * `materialOwnerWords` is the flat lane's own base and is meaningful only while
+ * `mode` is `dense` or `occupancy`; a banded world has no such lane and reports
+ * the absent page's offset, which is why `mode` is carried with the offsets
+ * rather than resolved separately by each consumer.
+ */
+export interface SparseBrickScenePayloadLanes {
+  readonly mode: SparseBrickLeafPayloadMode;
+  readonly materialOwnerWords: number;
+  readonly occupancyWords: number;
+  readonly recordMaskWords: number;
+  readonly headerWords: number;
+  readonly blobWords: number;
+  readonly recordWords: number;
+}
+
 export class SparseBrickOctreeGPU {
   readonly brickSize: SparseBrickSize;
   readonly nodeCapacity: number;
@@ -1712,6 +2112,8 @@ export class SparseBrickOctreeGPU {
    * 1/8-byte stride has no byte offset per voxel to speak of.
    */
   readonly bandedLaneWordOffsets: readonly [number, number, number, number, number];
+  /** Every address a consumer needs to read scene identity out of {@link payload}. */
+  readonly scenePayloadLanes: SparseBrickScenePayloadLanes;
   /** Record slots the banded arena reserves. Zero unless the mode is `banded`. */
   readonly bandedRecordCapacity: number;
   /**
@@ -1766,7 +2168,7 @@ export class SparseBrickOctreeGPU {
         leafPayloadMode: this.leafPayloadMode,
         voxelsPerLeaf: this.brickSize ** 3,
         bandedRecordCapacityFraction: options.bandedRecordCapacityFraction,
-        retainDenseLanesForProvenance: options.retainDenseLanesForProvenance,
+        retainDenseLanes: options.retainDenseLanes,
       });
     this.payloadLayout = layout;
     this.bandedLaneWordOffsets = [
@@ -1774,6 +2176,15 @@ export class SparseBrickOctreeGPU {
       layout.lanes.sceneBandedHeader.offsetBytes / 4, layout.lanes.sceneBandedBlob.offsetBytes / 4,
       layout.lanes.sceneBandedRecords.offsetBytes / 4,
     ];
+    this.scenePayloadLanes = Object.freeze({
+      mode: this.leafPayloadMode,
+      materialOwnerWords: layout.lanes.sceneMaterialOwners.offsetBytes / 4,
+      occupancyWords: this.bandedLaneWordOffsets[0],
+      recordMaskWords: this.bandedLaneWordOffsets[1],
+      headerWords: this.bandedLaneWordOffsets[2],
+      blobWords: this.bandedLaneWordOffsets[3],
+      recordWords: this.bandedLaneWordOffsets[4],
+    });
     this.bandedRecordCapacity = layout.bandedRecordCapacity;
     this.payloadProductBytes = layout.productBytes;
     this.geometryOffsetBytes = layout.lanes.geometry.offsetBytes;

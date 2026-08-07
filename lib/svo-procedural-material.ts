@@ -259,8 +259,9 @@ const wgslPolicies = SVO_PROCEDURAL_MATERIAL_POLICIES.map((policy, index) => `${
  * two functions would put a dozen unused policy branches in a maintenance pass
  * that holds itself to four storage bindings.
  *
- * `svoProceduralMaterialWGSL` is this plus the policies, so there is still one
- * noise in the tree and one place it is written down.
+ * It is the whole of this module's WGSL now — the per-pixel colour policy that
+ * used to wrap it is gone — so there is still one noise in the tree and one place
+ * it is written down.
  */
 export const svoProceduralNoiseWGSL = /* wgsl */ `
 fn svoProceduralHashCell(cell:vec3i,seed:u32)->f32{
@@ -281,31 +282,12 @@ fn svoProceduralNoise(position_m:vec3f,frequency_mInv:vec3f,seed:u32)->f32{
 }
 `;
 
-/** Binding-free WGSL generated from the same stable policy table as the CPU mirror. */
-export const svoProceduralMaterialWGSL = /* wgsl */ `
-const SVO_PROCEDURAL_VARIATION_ACTIVE:u32=${SVO_PROCEDURAL_VARIATION_ACTIVE}u;
-struct SvoProceduralMaterialSample{baseColorLinear:vec3f,roughness:f32,variationFlags:u32}
-${svoProceduralNoiseWGSL}
-fn svoProceduralMaterial(functionId:u32,baseColorLinear:vec3f,roughness:f32,position_m:vec3f)->SvoProceduralMaterialSample{
-  var frequency=vec3f(0.0);var seed=0u;var colorAmplitude=0.0;var roughnessAmplitude=0.0;
-  var detailOctave=1.0;var detailWeight=0.0;var fleckThreshold=0.75;var fleckAmplitude=0.0;
-  ${wgslPolicies}
-  else{return SvoProceduralMaterialSample(baseColorLinear,clamp(roughness,0.04,1.0),0u);}
-  let colorVaries=colorAmplitude>0.0;
-  var tone=0.5;if(colorVaries){tone=svoProceduralNoise(position_m,frequency,seed);}
-  var roughnessNoise=svoProceduralNoise(position_m,frequency,seed^${ROUGHNESS_SALT}u);
-  if(detailWeight>0.0){
-    let fine=frequency*detailOctave;
-    if(colorVaries){tone=mix(tone,svoProceduralNoise(position_m,fine,seed^${DETAIL_SALT}u),detailWeight);}
-    roughnessNoise=mix(roughnessNoise,svoProceduralNoise(position_m,fine,seed^${ROUGHNESS_SALT}u^${DETAIL_SALT}u),detailWeight);
-  }
-  var fleck=0.0;
-  if(fleckAmplitude>0.0){
-    let crystal=svoProceduralNoise(position_m,frequency,seed^${FLECK_SALT}u);
-    fleck=max(0.0,crystal-fleckThreshold)/max(1e-4,1.0-fleckThreshold);
-  }
-  let variedColor=clamp(baseColorLinear*(1.0+colorAmplitude*(2.0*tone-1.0)+fleckAmplitude*fleck),vec3f(0.0),vec3f(1.0));
-  let variedRoughness=clamp(roughness+roughnessAmplitude*(2.0*roughnessNoise-1.0)-fleckAmplitude*fleck,0.04,1.0);
-  return SvoProceduralMaterialSample(variedColor,variedRoughness,SVO_PROCEDURAL_VARIATION_ACTIVE|functionId);
-}
-`;
+/**
+ * The per-pixel WGSL variation policy that used to live here is deleted, for the
+ * same reason the terrain one was: it coloured a surface from its world position,
+ * which is a question the voxel cannot answer and the render path no longer asks.
+ *
+ * `svoProceduralNoiseWGSL` above is retained and is still emitted by both the
+ * voxeliser and the dry pass — the field-program tape and the cluster fields are
+ * *geometry*, and they are built on it.
+ */

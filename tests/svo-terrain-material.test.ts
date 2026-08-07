@@ -11,7 +11,6 @@ import {
   SVO_TERRAIN_MATERIAL_METADATA_STRIDE_BYTES,
   SVO_TERRAIN_REGION_IDS,
   SVO_TERRAIN_VARIATION_FLAGS,
-  svoTerrainMaterialWGSL,
   svoTerrainVariationHash21,
   unpackSvoTerrainMaterialMetadata,
   type SvoTerrainMaterialMetadata,
@@ -130,13 +129,5 @@ test("terrain palette is the established raster/voxel palette, not a second auth
   assert.deepEqual(SVO_GARDEN_TERRAIN_PALETTE.soilLinear, terrain.terrainPalette?.sandLinear);
 });
 
-test("WGSL contract is binding-free and retains exact raster world-space rules", () => {
-  assert.match(svoTerrainMaterialWGSL, /struct SvoTerrainMaterialMetadata/);
-  assert.match(svoTerrainMaterialWGSL, /fn svoTerrainMaterial/);
-  assert.match(svoTerrainMaterialWGSL, /floor\(p\.xz\*26\.0\)/);
-  assert.match(svoTerrainMaterialWGSL, /smoothstep\(metadata\.waterline_m-\.02,metadata\.waterline_m\+\.04,p\.y\)/);
-  assert.match(svoTerrainMaterialWGSL, /smoothstep\(metadata\.baseHeight_m-\.05,metadata\.baseHeight_m-\.008,p\.y\)/);
-  assert.match(svoTerrainMaterialWGSL, /step\(\.962/);
-  assert.match(svoTerrainMaterialWGSL, /step\(\.986/);
-  assert.doesNotMatch(svoTerrainMaterialWGSL, /@group|@binding/);
-});
+// The WGSL ground-colour policy is deleted with the rest of the world-position
+// shading; the CPU model above still decides which ground closure a scene has.

@@ -28,6 +28,14 @@ export interface WebGPUOctreeLosassoVelocityExtensionSource {
   readonly extendedVelocity: GPUBuffer;
 }
 
+/**
+ * Fewest sweeps the ping-pong chain can express.
+ *
+ * One sweep would have to read and write the same buffer within a single bind
+ * group on the predictor path, which is why the floor is two rather than one.
+ */
+export const OCTREE_LOSASSO_MINIMUM_EXTENSION_SWEEPS = 2;
+
 export interface OctreeLosassoVelocityExtensionPlan {
   readonly faceCapacity: number;
   readonly width: typeof OCTREE_LOSASSO_EXTENSION_WIDTH;
@@ -70,6 +78,16 @@ export class WebGPUOctreeLosassoVelocityExtension {
   private pipeline?: GPUComputePipeline;
   private groups?: readonly GPUBindGroup[];
   private predictorGroups?: readonly GPUBindGroup[];
+  /**
+   * Groups that write the DESTINATION field instead of the next scratch bank,
+   * indexed by which scratch bank the last sweep reads. A shortened chain has
+   * to land in `extendedVelocity` (or, for the predictor, back in the
+   * projected field) whatever its length, and only the terminal sweep differs
+   * from the full-length schedule.
+   */
+  private terminalGroups?: Readonly<Record<"a" | "b", GPUBindGroup>>;
+  private predictorTerminalGroups?: Readonly<Record<"a" | "b", GPUBindGroup>>;
+  private sweeps = OCTREE_LOSASSO_EXTENSION_SWEEPS;
   private lastAdvance = -1;
   private lastEpoch = 0;
   private destroyed = false;
@@ -139,20 +157,72 @@ export class WebGPUOctreeLosassoVelocityExtension {
     const predictorVelocities = [this.source.projectedVelocity, this.scratchA, this.scratchB,
       this.scratchA, this.scratchB, this.scratchA, this.scratchB, this.scratchA,
       this.source.projectedVelocity] as const;
+    const group = (label: string, read: GPUBuffer, write: GPUBuffer) =>
+      this.device.createBindGroup({ label, layout: this.layout, entries: [
+        { binding: 0, resource: { buffer: this.params, size: 16 } },
+        { binding: 1, resource: { buffer: this.source.control } },
+        { binding: 2, resource: { buffer: this.source.faceMetrics } },
+        { binding: 3, resource: { buffer: this.source.adjacencyOffsets } },
+        { binding: 4, resource: { buffer: this.source.adjacencyFaces } },
+        { binding: 5, resource: { buffer: read } },
+        { binding: 6, resource: { buffer: write } },
+      ] });
     const makeGroups = (fields: readonly GPUBuffer[], label: string) =>
       Array.from({ length: OCTREE_LOSASSO_EXTENSION_SWEEPS }, (_, sweep) =>
-      this.device.createBindGroup({ label: `Losasso ${label} Jacobi sweep ${sweep + 1}`,
-        layout: this.layout, entries: [
-          { binding: 0, resource: { buffer: this.params, size: 16 } },
-          { binding: 1, resource: { buffer: this.source.control } },
-          { binding: 2, resource: { buffer: this.source.faceMetrics } },
-          { binding: 3, resource: { buffer: this.source.adjacencyOffsets } },
-          { binding: 4, resource: { buffer: this.source.adjacencyFaces } },
-          { binding: 5, resource: { buffer: fields[sweep]! } },
-          { binding: 6, resource: { buffer: fields[sweep + 1]! } },
-        ] }));
+        group(`Losasso ${label} Jacobi sweep ${sweep + 1}`, fields[sweep]!, fields[sweep + 1]!));
+    const makeTerminal = (destination: GPUBuffer, label: string) => Object.freeze({
+      a: group(`Losasso ${label} Jacobi terminal sweep from A`, this.scratchA, destination),
+      b: group(`Losasso ${label} Jacobi terminal sweep from B`, this.scratchB, destination),
+    });
     this.groups = makeGroups(velocities, "published");
     this.predictorGroups = makeGroups(predictorVelocities, "predictor");
+    this.terminalGroups = makeTerminal(this.source.extendedVelocity, "published");
+    this.predictorTerminalGroups = makeTerminal(this.source.projectedVelocity, "predictor");
+  }
+
+  /**
+   * Jacobi sweeps per extension, for both the published field and the
+   * predictor. The default 8 covers the W7 adjacency graph plus one settling
+   * sweep; a shorter chain leaves the outermost air faces holding whatever the
+   * previous advance published, which the next semi-Lagrangian backtrace then
+   * samples. The terminal sweep always writes the destination field, so the
+   * consumers see a complete publication at any length.
+   */
+  setSweeps(sweeps: number): void {
+    this.assertLive();
+    if (!Number.isSafeInteger(sweeps)) {
+      this.sweeps = OCTREE_LOSASSO_EXTENSION_SWEEPS;
+      return;
+    }
+    this.sweeps = Math.min(OCTREE_LOSASSO_EXTENSION_SWEEPS,
+      Math.max(OCTREE_LOSASSO_MINIMUM_EXTENSION_SWEEPS, sweeps));
+  }
+
+  /** Sweeps the next encode will emit. */
+  get encodedSweeps(): number { return this.sweeps; }
+
+  /**
+   * Emit `sweeps` chained dispatches, the last of which writes `destination`.
+   * At full length this is exactly the prebuilt chain; shortened, only the
+   * final bind group differs.
+   */
+  private encodeChain(
+    pass: GPUComputePassEncoder,
+    chain: readonly GPUBindGroup[],
+    terminal: Readonly<Record<"a" | "b", GPUBindGroup>>,
+  ): void {
+    const last = this.sweeps - 1;
+    for (let sweep = 0; sweep < last; sweep += 1) {
+      pass.setPipeline(this.pipeline!);
+      pass.setBindGroup(0, chain[sweep]!, [sweep * this.uniformStride]);
+      pass.dispatchWorkgroupsIndirect(this.source.faceDispatch, 0);
+    }
+    // Odd read indices are scratch A, even ones scratch B; index 0 is the
+    // projected seed, which `setSweeps` keeps out of terminal position.
+    pass.setPipeline(this.pipeline!);
+    pass.setBindGroup(0, last % 2 === 1 ? terminal.a : terminal.b,
+      [last * this.uniformStride]);
+    pass.dispatchWorkgroupsIndirect(this.source.faceDispatch, 0);
   }
 
   encodeOncePerAdvance(broker: PassBroker, advance: number, topologyEpoch: number): boolean {
@@ -172,11 +242,7 @@ export class WebGPUOctreeLosassoVelocityExtension {
     this.lastAdvance = advance;
     this.lastEpoch = topologyEpoch;
     const pass = broker.compute({ label: `Losasso S3e - ${this.mode} axis-face extension` });
-    for (const [sweep, group] of this.groups.entries()) {
-      pass.setPipeline(this.pipeline);
-      pass.setBindGroup(0, group, [sweep * this.uniformStride]);
-      pass.dispatchWorkgroupsIndirect(this.source.faceDispatch, 0);
-    }
+    this.encodeChain(pass, this.groups, this.terminalGroups!);
     return true;
   }
 
@@ -187,11 +253,7 @@ export class WebGPUOctreeLosassoVelocityExtension {
       throw new Error("Losasso velocity extension pipeline is not initialized");
     }
     const pass = broker.compute({ label: `Losasso S1b - ${this.mode} predictor extension` });
-    for (const [sweep, group] of this.predictorGroups.entries()) {
-      pass.setPipeline(this.pipeline);
-      pass.setBindGroup(0, group, [sweep * this.uniformStride]);
-      pass.dispatchWorkgroupsIndirect(this.source.faceDispatch, 0);
-    }
+    this.encodeChain(pass, this.predictorGroups, this.predictorTerminalGroups!);
   }
 
   destroy(): void {
@@ -199,6 +261,7 @@ export class WebGPUOctreeLosassoVelocityExtension {
     this.destroyed = true;
     this.params.destroy(); this.scratchA.destroy(); this.scratchB.destroy();
     this.pipeline = undefined; this.groups = undefined; this.predictorGroups = undefined;
+    this.terminalGroups = undefined; this.predictorTerminalGroups = undefined;
   }
 
   private assertLive(): void {

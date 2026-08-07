@@ -323,6 +323,8 @@ function mockSource(): SparseVoxelSceneRenderSource {
       structureOffsetsWords: { control: 0, publication: 0, nodes: 0, leaves: 0 },
       control: resource, nodes: resource, leaves: resource, geometry: resource,
       velocity: resource, materialOwners: resource, fluidLeafStates: resource,
+      scenePayload: resource,
+      scenePayloadLanes: { mode: "dense" as const, materialOwnerWords: 0, occupancyWords: 0, recordMaskWords: 0, headerWords: 0, blobWords: 0, recordWords: 0 },
       publication: { state: resource, byteLength: 32 },
       domain: { worldOrigin_m: [0, 0, 0], cellSize_m: [.1, .1, .1], dimensionsCells: [16, 16, 16], brickSize: 8, maximumDepth: 1 },
       capacities: { nodes: 8, leaves: 8, geometryVoxels: 4096, velocityVoxels: 4096, materialOwnerVoxels: 4096, fluidLeafStates: 8 },

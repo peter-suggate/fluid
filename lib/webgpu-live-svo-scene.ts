@@ -54,6 +54,13 @@ export interface LiveSvoSceneOptions {
   /** Experimental in-place diffuse feedback; disabled in production. */
   radianceFeedback?: boolean;
   /**
+   * Build the compact hierarchy and the wide-fanout snapshot. See
+   * `OctreeSparseBrickWorldOptions`' option of the same name; off by default
+   * because nothing the renderer ships binds them, so only a lane that selects
+   * the `compact`/`wide`/`hybrid` dry-scene traversal needs to ask.
+   */
+  derivedTraversalStructures?: boolean;
+  /**
    * Longest the build may hold the thread between event-loop yields.
    *
    * Only `create` reads it, and only to hand it to the cooperative driver. Left
@@ -179,6 +186,7 @@ export class WebGPULiveSvoScene implements GPUSolverInstance {
       environmentRefinementDepth: options.environmentRefinementDepth,
       environmentPlanarRefinementExemption: options.environmentPlanarRefinementExemption,
       radianceFeedback: options.radianceFeedback,
+      derivedTraversalStructures: options.derivedTraversalStructures,
       progress: reportStage,
       sceneSolids,
       // The same build, one proxy at a time: what the curvature-driven

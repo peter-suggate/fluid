@@ -75,6 +75,7 @@ export class WebGPUOctreeLosassoStepSnapshotRing {
   private sequence = 0;
   private disposed = false;
   private skipped = 0;
+  private due = true;
 
   constructor(private readonly device: GPUDevice, slotCount: number) {
     this.slots = Array.from({ length: Math.max(2, slotCount) }, (_, index) => ({
@@ -86,6 +87,21 @@ export class WebGPUOctreeLosassoStepSnapshotRing {
 
   get skippedRecords() { return this.skipped; }
   get slotCount() { return this.slots.length; }
+
+  /**
+   * Whether the next step should spend its tail copying a record.
+   *
+   * The destinations are MAP_READ, so every encoded record writes solver state
+   * into host-visible memory and ends the step with a run of transfer commands.
+   * Producing one per step served a consumer that takes one every 250 ms in the
+   * browser, so seven of every eight were staged and discarded. Arming follows
+   * the consumer instead: a record is encoded only once the previous one has
+   * been taken. A harness that reads every step (the smoke lanes do, whenever
+   * an exact step count is pinned) therefore still gets a record per step, and
+   * the record a reader receives is still copied by exactly one step's own
+   * encoder — the coherence the ring exists for is untouched.
+   */
+  get recordDue() { return this.due; }
 
   encode(encoder: GPUCommandEncoder, sources: LosassoStepSnapshotSources, step: number,
     surfaceKind: "fine" | "coarse" = "fine"): boolean {
@@ -113,6 +129,7 @@ export class WebGPUOctreeLosassoStepSnapshotRing {
     else encoder.clearBuffer(slot.buffer, LAYOUT.fluidBulkResidency, 64);
     slot.sequence = ++this.sequence; slot.step = step; slot.surfaceKind = surfaceKind;
     slot.state = "encoded";
+    this.due = false;
     return true;
   }
 
@@ -123,6 +140,9 @@ export class WebGPUOctreeLosassoStepSnapshotRing {
       if (candidate.state !== "encoded") continue;
       if (!slot || candidate.sequence > slot.sequence) slot = candidate;
     }
+    // Re-arm on every consumer visit, including one that found nothing: a
+    // reader asking for a record is what makes the next step owe one.
+    this.due = true;
     if (!slot) return undefined;
     slot.state = "mapping";
     try {

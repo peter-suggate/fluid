@@ -5,7 +5,7 @@ import {
   pondVesselWaterline,
   type PondVesselSpec,
 } from "./voxel-scenery/pond-vessel";
-import { BONSAI_POND_CANOPY } from "./voxel-scenery/bonsai";
+import { OAK_HERO_SPREADING } from "./voxel-scenery/oak";
 import { stoneSetBoulderStations, stoneSetSteppingBodies } from "./voxel-scenery/stone-set";
 import { ROSETTE_AIR_PLANT, ROSETTE_GRASS_TUFT, type RosetteForm } from "./voxel-scenery/rosette";
 import { sweptTubeNodes } from "./voxel-scenery/swept-tube";
@@ -52,12 +52,103 @@ import { tanHalfFovFor35mmFocalLength } from "./webgpu-camera";
  *    rows and the tank scenes do not, which is the whole of why it was
  *    scene-specific. 25/15/12.5 mm all publish now.
  *
- * Every container dimension is a whole number of 8-cell bricks at every spacing
- * named here (0.2 m at 25 mm), so the sparse domain has no partial brick at any
- * wall.
+ * Width and depth are a whole number of 8-cell bricks at every spacing named
+ * here (0.2 m at 25 mm), so the sparse domain has no partial brick at either
+ * wall. **The height is not, at 25 mm — see the constant below.**
  */
 
-export const HERO_GARDEN_CONTAINER = { width_m: 1.8, height_m: 0.6, depth_m: 1.2 } as const;
+/**
+ * The container, which is also the voxel domain's floor and its cell size.
+ *
+ * `WebGPULiveSvoScene` derives its spacing as `container.<axis> / dimensions[i]`
+ * over the counts `sceneLatticeDimensions` rounds out of these extents
+ * (`lib/webgpu-live-svo-scene.ts`), so this box is what sets the voxel size on
+ * every axis, and `planSparseSceneDomain` opens its lattice at `[0, dimensions]`
+ * before it unions anything else in. Nothing above the lid is *cropped* by it —
+ * see the correction below — but everything about the scene's resolution and the
+ * solver's own grid is stated here.
+ *
+ * ---------------------------------------------------------------------------
+ * 1.2 m, raised from 0.6, for the tree that is coming
+ * ---------------------------------------------------------------------------
+ * The set is about to lose its bonsai to a procedural oak of roughly 0.80 m
+ * standing on the same terrace, whose foot is at about y = 0.21 — so it reaches
+ * **y ~= 1.01 m**, nearly twice the old lid. What that has to clear:
+ *
+ *  - `HERO_LAYOUT_CONTAINER_BOUNDS` is this box, and `tests/hero-layout.test.ts`
+ *    asserts that nothing the *layout* places escapes it. That assertion is the
+ *    right one to keep and a 1.01 m crown does not fit under a 0.6 m lid — and
+ *    note which side of it the tree is on: the bonsai is an authored node rather
+ *    than a layout placement, so it has never been checked against this bound at
+ *    all, which is how its crown came to sit 103 mm over the lid unremarked.
+ *  - The domain's height stops being an accident. Measured on the built document
+ *    with `buildEnvironmentProxyCatalog`, the tallest primitive in the set is the
+ *    bonsai's crown at y = 0.7035 — already 103 mm *over* a 0.6 m lid — and the
+ *    planned domain came out 15 bricks tall (0.75 m) purely because that is where
+ *    the crown ended. The extent of the tree was therefore a property of whatever
+ *    prop happened to be tallest, and swapping the bonsai for an oak re-shaped it
+ *    silently. At 1.2 m the container is the taller of the two and says so.
+ *
+ * What the added volume costs is **nothing**, and the reason is that all of it
+ * is empty air *above* the set. A brick exists because something claims it, and
+ * a dry world drops the container claim entirely (`octreeLiveSceneSolverClaim`,
+ * `fluid-only` by default), so the render tree's pages follow the ground and the
+ * props rather than the box. Measured GPU-free at the authored 6.25 mm, dry,
+ * through `sceneLatticeDimensions` -> `planSparseSceneDomain` ->
+ * `planAdaptiveSparseBrickOctree`, over the three candidate heights:
+ *
+ *     depth   height   lattice          bricks         claimed   nodes   leaves
+ *     0       0.6 m    288 x  96 x 192  50 x 15 x 30     3,450   4,295    3,450
+ *     0       1.1 m    288 x 176 x 192  50 x 22 x 30     3,450   4,295    3,450
+ *     0       1.2 m    288 x 192 x 192  50 x 24 x 30     3,450   4,295    3,450
+ *     3       0.6 m    288 x  96 x 192  50 x 15 x 30     3,450   4,295    3,450
+ *     3       1.1 m    288 x 176 x 192  50 x 22 x 30     3,450   4,295    3,450
+ *     3       1.2 m    288 x 192 x 192  50 x 24 x 30     3,450   4,295    3,450
+ *
+ * The claimed brick set is **identical** at every height and at both rungs, and
+ * the plan's voxel count with it — the y lattice grows 96 -> 192 cells and the
+ * domain 15 -> 24 bricks, and not one of the added bricks is claimed by
+ * anything. The refinement ladder scales with *occupancy*, not with the bounding
+ * box, and this is the case that separates the two. Everything downstream is a
+ * function of the claimed set, so the pages do not move either. The world origin
+ * stays at y = 0 and the node and leaf sets are the same objects, so the frame
+ * should not move; the only difference a marcher sees is 600 mm more empty span
+ * above the set before it exits.
+ *
+ * ---------------------------------------------------------------------------
+ * The correction: this lid does not clip geometry, and it never did
+ * ---------------------------------------------------------------------------
+ * `docs/oak-tree-species-plan.md` concern 7 reads "two fifths of the tree would
+ * be outside the domain — that geometry is not cut by the frame, it is not
+ * voxelized at all". That is not what the planner does. `planSparseSceneDomain`
+ * seeds its lattice at the container and then takes the **union** with every
+ * proxy AABB, brick-aligned, so a prop that overhangs the box *extends* the
+ * domain. Measured directly: adding one synthetic proxy reaching y = 1.01 to
+ * the 0.6 m document takes the domain from 15 to 21 bricks on y (0.75 -> 1.05 m)
+ * with the container untouched. So the raise is for the two reasons above, and
+ * a 0.80 m oak under the old lid would have rendered — just into a domain whose
+ * shape no one had authored.
+ *
+ * ---------------------------------------------------------------------------
+ * Why 1.2 and not the 1.1 the oak actually needs
+ * ---------------------------------------------------------------------------
+ * The ladder of cell sizes at which every container dimension is a whole number
+ * of 8-cell bricks is 25, 12.5, 6.25, 3.125 and 1.5625 mm, and the header above
+ * states it as an invariant. 1.1 m holds all of them **except 25 mm**, where 44
+ * cells is 5.5 bricks — and 25 mm is `HERO_GARDEN_SOLVER_CELL_M`, the lattice a
+ * wet document is clamped to, so a solved pond would carry four cells of a brick
+ * above its own ceiling. The visible consequence is small and real:
+ * `FLUID_SVO_DRY_SMOKE_CELL_MM=25` and `=15` abort on the brick guard in
+ * `tools/run-svo-dry-render-smoke.ts`.
+ *
+ * 1.2 m is exactly 6 bricks at 25 mm and whole at every finer rung, and it costs
+ * nothing to prefer it: measured, the wet lane plans the *same* 324 solver bricks
+ * and the same [13, 6, 8] domain at 1.1 and at 1.2, because the rounding has
+ * already been paid. The extra 100 mm over what the tree needs is the price of
+ * keeping a stated invariant true, which is cheaper than a footnote saying one
+ * rung of the ladder no longer works.
+ */
+export const HERO_GARDEN_CONTAINER = { width_m: 1.8, height_m: 1.2, depth_m: 1.2 } as const;
 /** The global lattice. This scene has no reason to name its own. */
 export const HERO_GARDEN_CELL_M = DEFAULT_FINEST_CELL_SIZE_M;
 export const HERO_GARDEN_BRICK_CELLS = 8 as const;
@@ -693,46 +784,35 @@ function hoseNodes(): SceneryNode[] {
 export const HERO_GARDEN_SET_SEED = 0x5701_e5;
 
 /**
- * Where the bonsai stands, and which way it leans.
+ * Where the tree stands, and which way it leans.
  *
  * On the far-right bank, and leaning back toward the pond's centre so the
  * crown overhangs the water the way the reference's does. The lean is the
  * negated stand position for exactly that reason — the tree is told to reach
  * for the middle, not given a bearing that has to be kept in agreement with one.
+ *
+ * Unchanged across the bonsai-to-oak cutover: the terrace it stands on and the
+ * water it reaches over are the same, and moving the stand at the same time as
+ * the species would have made a composition change and a geometry change
+ * indistinguishable in the frame.
  */
-const BONSAI_AT_M = [0.55, -0.15] as const;
+const HERO_TREE_AT_M = [0.55, -0.15] as const;
 
 /**
- * This specimen's crown, which is flatter and slightly narrower than the
- * species'.
+ * The hero specimen, which is the species with nothing overridden — for now.
  *
- * The reference's canopy is a *cloud layer*: it reads as a broad horizontal
- * plate hanging over the water, and the single number that decides whether it
- * does is the crown's width against its own thickness. The species stands at
- * 5.5:1 and this asks for 5.8:1 on a marginally smaller crown — broad enough to
- * overhang the basin, thin enough not to read as a dome on a stick.
+ * The bonsai this replaces carried a two-parameter override here (a flatter,
+ * narrower crown than the catalogue specimen's, because the catalogue is looked
+ * at from a wider frame where a plate that thin reads as a disc). The oak has no
+ * such divergence yet, and an override with nothing in it is better spelled as
+ * the species itself than as a spread that looks like it is doing something.
  *
- * It is an override rather than a species edit because the species is also the
- * catalogue specimen, which is looked at from a wider frame where a plate this
- * thin reads as a disc. Kept in step with the species by hand: the aspect is the
- * thing to preserve if either moves, not the absolute numbers.
+ * When the shape lab produces one — and it will, for the same reason the bonsai
+ * had one — it goes here, beside the argument for it, rather than in
+ * `lib/hero-garden-overrides.ts`, which is a staging area and not a second
+ * authority. See `OAK_HERO_SPREADING` for what this specimen is.
  */
-const HERO_BONSAI_FORM = Object.freeze({
-  ...BONSAI_POND_CANOPY,
-  crownRadius_m: [0.36, 0.31] as const,
-  /**
-   * 4.4 : 1, up from the 5.8 : 1 the note above argues for.
-   *
-   * The argument was sound and the measurement behind it was not available: the
-   * plate *crops* the canopy at the top of frame, so its thickness could only be
-   * read as a lower bound, and 5.8 was that bound taken as the number. What the
-   * plate does show unambiguously is a billowing mass with a domed top, and a
-   * crown thin enough to be a "cloud layer" reads as a disc once its surface is
-   * granulated — the granulation needs depth to sit in or every head lands on
-   * the same plane.
-   */
-  crownThickness_m: 0.165,
-});
+const HERO_OAK_FORM = OAK_HERO_SPREADING;
 
 /**
  * The set, as a description of itself.
@@ -872,10 +952,14 @@ function heroGardenAuthoredScenery(waterline_m: number): SceneryGraph {
         seed: HERO_GARDEN_SET_SEED,
         params: { waterline_m },
       },
+      // The tree. A procedural oak since the cutover; `bonsai` is still a
+      // species and still has its catalogue forms, it simply no longer stands
+      // here. See `docs/oak-tree-species-plan.md` for why an oak is a third
+      // generator rather than a re-tune of either of the first two.
       {
-        kind: "generator", id: "bonsai", generator: "bonsai",
-        seed: HERO_GARDEN_SET_SEED ^ 0x8017a1,
-        params: { ...HERO_BONSAI_FORM, at_m: BONSAI_AT_M, lean: [-BONSAI_AT_M[0], -BONSAI_AT_M[1]] },
+        kind: "generator", id: "oak", generator: "oak",
+        seed: HERO_GARDEN_SET_SEED ^ 0x0a_c0_de,
+        params: { ...HERO_OAK_FORM, at_m: HERO_TREE_AT_M, lean: [-HERO_TREE_AT_M[0], -HERO_TREE_AT_M[1]] },
       },
       // The plants. Built and tested for this scene and then never called by
       // it, which is the failure mode a generator catalog exists to make
@@ -938,8 +1022,13 @@ export interface HeroGardenHoseOptions {
    * one-workgroup-per-interface-leaf dispatch that only a *fluid* scene issues,
    * so a dry lane may go far below it and a wet one may not.
    *
-   * Every container dimension has to stay a whole number of 8-cell bricks; the
-   * ladder that does is 25, 12.5, 6.25, 3.125 and 1.5625 mm.
+   * Every container dimension has to stay a whole number of 8-cell bricks, and
+   * the ladder that does is 25, 12.5, 6.25, 3.125 and 1.5625 mm. Raising the
+   * container for the oak put that invariant at risk — at 1.1 m the 25 mm rung
+   * is 44 cells, which is 5.5 bricks, and 25 mm is what
+   * `HERO_GARDEN_SOLVER_CELL_M` pins a wet document to — so the height went to
+   * 1.2 m instead, which is exactly 6 bricks there and whole at every finer
+   * rung. The ladder is unchanged. See `HERO_GARDEN_CONTAINER`.
    */
   readonly cellSize_m?: number;
   /**

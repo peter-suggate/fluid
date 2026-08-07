@@ -1,5 +1,64 @@
 # Losasso coarse-band 10x — implementation handoff
 
+> **Status update (2026-08-06, evening): B1 and B3b are landed.** The frame is
+> 36 → ~14 ms first-advance after B1, and the pressure solve now runs as ONE
+> resident dispatch (`lib/webgpu-octree-losasso-resident-mgpcg.ts`,
+> selected for the coarse-only ≤4,096-row tier; kill switch
+> `FLUID_OCTREE_LOSASSO_RESIDENT_SOLVE=0`). Measured on this lane:
+>
+> | arm | pipelined (B1 only) | resident (this land) |
+> |---|---:|---:|
+> | steady, 200 advances, untraced | 12.40 ms/adv | **11.21 ms/adv** |
+> | steady solve family (traced) | 7.80 ms | **5.56 ms** (one label) |
+> | first advance, untraced | 14 ms | ~14–15 ms (cold solve is single-core) |
+>
+> The resident loop executes exactly the iterations the residual gate needs
+> (12 warm / 21 cold here, 9 on the leaf-32 gate lane), so **B3a is subsumed
+> on this tier**: there is no encoded envelope to retire and no budget to
+> predict. Numerics: a 3-step full-log diff against the pipelined arm is
+> byte-identical except `control[5]` (envelope accounting), and the 250-step
+> `test:webgpu:symmetric-expansion:coarse-only` gate produces the identical
+> finding set as the pipelined control, including the identical PRE-EXISTING
+> reds (velocity D4 first diverges at step 54, volume at step 245, both arms,
+> bit-equal metrics) — the lane was red at HEAD before this work.
+>
+> **Resident-kernel interior diagnosis (2026-08-06, late).** The kernel has a
+> phase-repeat probe (`FLUID_LOSASSO_RESIDENT_PHASE_REPEAT=<phase>:<n>`,
+> phases `l0-sweep` / `operator` / `bottom`) and a lane override
+> (`FLUID_LOSASSO_RESIDENT_LANES`). Steady-arm attribution of the ~5.2 ms
+> solve: bottom sweeps 1.8–2.0 ms, L0 sweeps 1.3 ms, operator ~1.0 ms —
+> i.e. a **fixed ~18–19 µs per synchronized stage**, ~240 stages/advance.
+> The fixed cost is invariant to (a) fence scope — moving the whole bottom
+> phase into workgroup memory (`sharedBottom`, landed, bit-identical, requires
+> the raised `maxComputeWorkgroupStorageSize` request in
+> `webgpu-device-limits.ts`) changed the sweep cost 1.97 → 1.81 ms — and
+> (b) workgroup width (512 lanes ≈ 1,024; 256 is worse). Conclusion: the
+> wall is the number of barrier-separated stages times iterations, not
+> memory traffic or ALU. The justified next land is the Onodera-style
+> smoother upgrade (symmetric red-black/multicolor SOR): stronger sweeps →
+> ~half the CG iterations → every stage class scales down together. Two
+> open design questions for that land: a proper 2-coloring can NEVER be
+> reflection-invariant on even dimensions (the two center cells swap), so
+> strict bitwise D4 equivariance of a colored Gauss–Seidel is impossible —
+> the land must be judged by the gate's tolerance classes instead; and the
+> coarse-only gate lane is already red at HEAD (velocity step 54, volume
+> step 245), so the evidence standard for a Gate-B numeric change on this
+> lane needs an explicit decision.
+>
+> Kernel facts: 1,024 lanes (the M1 Max threadgroup
+> ceiling; 256 lanes measured 11.2 ms cold vs 8.75 at 1,024), ~430 µs per
+> warm iteration, compute occupancy ~1 % — latency-bound on one core.
+> The device grants only TEN storage buffers per stage, so the kernel binds
+> seven: L0 CSR ×4, fused sub-L0 arena, one consolidated f32 solver arena
+> (staged seed/rhs/diagonal/out + CG vectors + V-cycle levels), and the
+> control buffer; authority is staged into control words 32..38 by an
+> encode-time copy. Remaining solve levers: per-iteration barrier latency
+> (~20 stage boundaries), the operator's per-thread 36-limb stack spill
+> (B1c/B2 apply INSIDE the resident kernel), and a phase-repeat probe for
+> attribution. The steady frame's next wall after the solve is topology and
+> hierarchy maintenance (`buildLosassoParentRowsSmall` 0.62 ms +
+> coarse CSR + frontier ≈ 1.9 ms — Bet 5's retention), then B6 host encode.
+
 **Date:** 2026-08-06
 **Lane:** symmetric-expansion, coarse-band Losasso
 (`--coarse-backend=losasso --fine-factor=1 --band=4 --maximum-leaf-size=16`,

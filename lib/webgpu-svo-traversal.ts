@@ -728,11 +728,9 @@ fn svoTraversalContinuationNext(
         (*continuation).status = SVO_STATUS_INVALID_TOPOLOGY;
         return svoMiss(SVO_STATUS_INVALID_TOPOLOGY, visits);
       }
-      let child = svoNodeLoad(childIndex);
-      if (child.address.z != node.address.z + 1u) {
-        (*continuation).status = SVO_STATUS_INVALID_TOPOLOGY;
-        return svoMiss(SVO_STATUS_INVALID_TOPOLOGY, visits);
-      }
+      // No child record is read here. Child bounds are halved out of the
+      // parent's, and the child's own level is a build-time invariant of the
+      // planner (adaptive-sparse-brick-plan.ts), not a per-ray property.
       if (overflowPending) { continue; }
       let childBounds = svoChildBounds(parentBounds, octant);
       let interval = svoRayAabbWithInverse(ray, (*continuation).inverseDirection, childBounds);
@@ -847,8 +845,8 @@ fn svoTraverseWithDepthLimit(ray: SvoRay, mapping: SvoMapping, maximumTraversalD
       if ((mask & (1u << octant)) == 0u) { continue; }
       let childIndex = node.links.x + svoPopcountBefore(mask, octant);
       if (childIndex >= mapping.nodeCount) { return svoMiss(SVO_STATUS_INVALID_TOPOLOGY, visits); }
-      let child = svoNodeLoad(childIndex);
-      if (child.address.z != node.address.z + 1u) { return svoMiss(SVO_STATUS_INVALID_TOPOLOGY, visits); }
+      // See the continuation variant: the child record is not needed to bound or
+      // to order a child, and its level is a build-time invariant.
       if (overflowPending) { continue; }
       let childBounds = svoChildBounds(parentBounds, octant);
       let interval = svoRayAabbWithInverse(ray, inverseDirection, childBounds);
@@ -995,13 +993,16 @@ function parametricContinuationExpansion(aabbFallback: string): string {
     if (parametricSegments.valid == 0u) {
 ${aabbFallback}
     } else {
-      for (var validationOctant = 0u; validationOctant < 8u; validationOctant += 1u) {
-        if ((mask & (1u << validationOctant)) == 0u) { continue; }
-        let validationIndex = node.links.x + svoPopcountBefore(mask, validationOctant);
-        if (validationIndex >= mapping.nodeCount || svoNodeLoad(validationIndex).address.z != node.address.z + 1u) {
-          (*continuation).status = SVO_STATUS_INVALID_TOPOLOGY;
-          return svoMiss(SVO_STATUS_INVALID_TOPOLOGY, visits);
-        }
+      // Children are one contiguous run, so the whole sparse child range is
+      // bounds-checked by its last element and no child record is read at all.
+      // countOneBits(mask) equals node.links.y, already agreed above, and the
+      // lowest present octant addresses node.links.x itself, so this is the
+      // same acceptance set the per-octant loop had — without its up to eight
+      // dependent 32-byte loads, every one of which was discarded after
+      // asserting a level the node packer establishes once per world build.
+      if (node.links.x + countOneBits(mask) > mapping.nodeCount) {
+        (*continuation).status = SVO_STATUS_INVALID_TOPOLOGY;
+        return svoMiss(SVO_STATUS_INVALID_TOPOLOGY, visits);
       }
       var nearest = SvoCandidate(0u, 0u, 0.0, 0.0);
       var nearestSegment = 0u;
@@ -1054,12 +1055,9 @@ function parametricRestartExpansion(aabbFallback: string): string {
     if (parametricSegments.valid == 0u) {
 ${aabbFallback}
     } else {
-      for (var validationOctant = 0u; validationOctant < 8u; validationOctant += 1u) {
-        if ((mask & (1u << validationOctant)) == 0u) { continue; }
-        let validationIndex = node.links.x + svoPopcountBefore(mask, validationOctant);
-        if (validationIndex >= mapping.nodeCount || svoNodeLoad(validationIndex).address.z != node.address.z + 1u) {
-          return svoMiss(SVO_STATUS_INVALID_TOPOLOGY, visits);
-        }
+      // Same collapse as the continuation variant above.
+      if (node.links.x + countOneBits(mask) > mapping.nodeCount) {
+        return svoMiss(SVO_STATUS_INVALID_TOPOLOGY, visits);
       }
       var nearest = SvoCandidate(0u, 0u, 0.0, 0.0);
       var nearestSegment = 0u;

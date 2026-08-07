@@ -98,10 +98,11 @@ test("one uniform arena preserves exact published records without adding a stora
   assert.equal((svoDrySceneShader.match(/var<storage,\s*read>/g) ?? []).length,
     SVO_DRY_SCENE_BINDING_CONTRACT.filter(({ type }) => type === "read-only-storage").length,
     "every dry-pass storage binding must be declared in the shader and the contract");
-  // Five since the scene-geometry lane became the primary's shading-normal
-  // source; the comment above is why this literal is worth keeping anyway.
+  // Back to four: the scene-geometry lane was bound so the primary could
+  // central-difference it for a shading normal, and the normal is baked into the
+  // voxel now. The comment above is why this literal is worth keeping anyway.
   assert.equal(SVO_DRY_SCENE_BINDING_CONTRACT
-    .filter(({ type }) => type === "read-only-storage").length, 5);
+    .filter(({ type }) => type === "read-only-storage").length, 4);
 });
 
 test("directional, point, sphere, and rectangle lighting share bounded stable visibility work", () => {

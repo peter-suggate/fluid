@@ -22,6 +22,35 @@ export interface GPURigidBodyPick {
   orientation: Quaternion;
 }
 
+/** Where one body actually is, as opposed to where the host last told it to be. */
+export interface GPURigidBodyPose {
+  position_m: Vec3;
+  orientation: Quaternion;
+}
+
+/** A pose with the body it belongs to, as published from a drawn frame. */
+export interface DrawnRigidBodyPose extends GPURigidBodyPose {
+  id: string;
+}
+
+/** Decode `RenderBody` records into poses. Separated from WebGPU for tests. */
+export function decodeGPURigidBodyPoses(values: Float32Array, count: number): GPURigidBodyPose[] {
+  const poses: GPURigidBodyPose[] = [];
+  for (let index = 0; index < Math.min(count, GPU_RIGID_BODY_CAPACITY); index += 1) {
+    const offset = index * GPU_RIGID_RENDER_FLOATS;
+    const record = values.subarray(offset, offset + GPU_RIGID_RENDER_FLOATS);
+    // A partially published record is not a pose. Falling back to the host
+    // mirror is wrong in a different direction, but it is at least a pose the
+    // rest of the app already agrees on.
+    if (record.length < 12 || !Array.from(record.subarray(0, 12)).every(Number.isFinite)) return poses;
+    poses.push({
+      position_m: { x: record[0], y: record[1], z: record[2] },
+      orientation: { w: record[8], x: record[9], y: record[10], z: record[11] },
+    });
+  }
+  return poses;
+}
+
 export const gpuRigidBodyShader = /* wgsl */ `
 ${svoPrimitiveMotionWGSL}
 struct RigidBody {
@@ -378,6 +407,32 @@ export class WebGPURigidBodySystem {
     if (next === this.selectedIndex) return;
     const write = (bodyIndex: number, selected: number) => { if (bodyIndex < 0) return; this.device.queue.writeBuffer(this.stateBuffer, bodyIndex * GPU_RIGID_STATE_FLOATS * 4 + 31 * 4, new Float32Array([selected])); this.device.queue.writeBuffer(this.renderBuffer, bodyIndex * GPU_RIGID_RENDER_FLOATS * 4 + 15 * 4, new Float32Array([selected])); };
     write(this.selectedIndex,0);write(next,1);this.selectedIndex=next;
+  }
+
+  /**
+   * The poses the renderer is drawing this frame.
+   *
+   * `syncBodies` only ever writes *toward* the GPU: once a run starts, gravity,
+   * buoyancy and contacts all happen here, and the host roster keeps whatever
+   * pose the last explicit command left it with. Every gesture that has to line
+   * up with the image on screen — the grab that opens a drag, which needs the
+   * body's centre to hold its offset from the cursor — must read the poses back
+   * rather than trust that roster, or it starts the drag from a body that
+   * settled seconds ago.
+   *
+   * User-triggered and bounded, like `pick`: one 768-byte copy per gesture.
+   */
+  async readPoses(): Promise<GPURigidBodyPose[] | undefined> {
+    if (this.bodyCount === 0) return undefined;
+    const readback = this.device.createBuffer({ label: "GPU rigid-body pose readback", size: GPU_RIGID_RENDER_BYTES, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    const encoder = this.device.createCommandEncoder({ label: "Read GPU resident rigid-body poses" });
+    encoder.copyBufferToBuffer(this.renderBuffer, 0, readback, 0, GPU_RIGID_RENDER_BYTES);
+    this.device.queue.submit([encoder.finish()]);
+    try {
+      await readback.mapAsync(GPUMapMode.READ);
+      return decodeGPURigidBodyPoses(new Float32Array(readback.getMappedRange()), this.bodyCount);
+    } catch { return undefined; }
+    finally { if (readback.mapState === "mapped") readback.unmap(); readback.destroy(); }
   }
 
   /** A bounded, user-triggered readback used only to begin mouse interaction. */

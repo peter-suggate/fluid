@@ -11,6 +11,52 @@
  * it in here is why this file carries the identity palette rather than leaving
  * it to the owner lane.
  *
+ * ## The identity word splits, because its two halves are different populations
+ *
+ * The identity word used to be `(ownerId << 16) | materialId`, and its high half
+ * was a per-*object* handle. It is now `(oct8 normal << 16) | materialId`
+ * ({@link sparseBrickSceneIdentityWordCodecWGSL}), and the normal is per-*voxel*:
+ * the voxeliser evaluates the winning primitive's outward normal at every
+ * occupied voxel centre, deep interior included, so the two halves no longer vary
+ * on the same scale at all. Measured on `hero-garden-hose` at depth 0 — 12 724
+ * published leaves, 6.51 M voxels, censused off the device by replaying the dense
+ * identity lane the voxeliser wrote:
+ *
+ * | interned                     | mean a leaf | max | leaves at 1 | leaves > 16 |
+ * |------------------------------|------------:|----:|------------:|------------:|
+ * | whole word `normal\|material` |     29.05  | 474 |      12.3 % |      51.9 % |
+ * | normal half alone            |      29.04  | 474 |      12.3 % |      51.9 % |
+ * | **material half alone**      |     **1.026** |  28 |  **94.8 %** |   **0.5 %** |
+ *
+ * The first two rows are the same number twice, which is the finding: interning
+ * the whole word interns the *normal alphabet*, and the resulting per-voxel index
+ * is a normal store wearing a palette's clothes — an 8-bit one on half the leaves.
+ * The material half is what a palette is for, and it is a better palette than the
+ * owner id ever was (1.026 against the 1.457 SP21 measured).
+ *
+ * So the palette interns **materials**, and the normal gets its own lane: one
+ * `u16` per voxel, in a fixed 256-word lane at the head of the leaf's own blob.
+ * {@link SvoBandedLeaf.normals}.
+ *
+ * ### Why the normal is not stored beside the geometry records
+ *
+ * Records are the band dilated by the normal stencil — 6.63 % of hero voxels — so
+ * putting normals there would cost nothing per interior voxel. It is only legal if
+ * every voxel that can be a primary *first hit* is in the record set, and it is
+ * not, for a reason that is structural rather than statistical: **the stencil
+ * dilation clamps at the leaf boundary** (`encodeBandedLeaf` below, and the GPU
+ * encoder it mirrors), so an occupied voxel on a leaf face whose only band
+ * neighbour lies in the *adjacent* leaf gets no record. A ray entering that leaf
+ * through that face hits it first. The census counts **2 733 158 of 6 514 688
+ * voxels (42.0 %)** occupied, unrecorded and on a leaf face, plus 7 680 that are
+ * occupied, unrecorded and touch air *inside* their own leaf. The LOD tier
+ * compounds it: `dryLodCellStride > 1` samples every Nth cell, so its first solid
+ * sample is routinely a deep interior voxel.
+ *
+ * A wrong normal on a first hit is a visible artifact, so the normal lane spans
+ * every voxel. That costs 2 bytes where a record costs 4, and it is the largest
+ * single term in the layout — see {@link bandedLeafBytes}.
+ *
  * ## Two lanes, one structure
  *
  * Most voxels in a leaf are not surface. Measured on the two dry garden scenes
@@ -31,26 +77,26 @@
  * within one cell radius. Everything else is a constant: fraction 1 with an
  * owner, or fraction 0 with none.
  *
- * The owner lane, read off the device rather than replayed (`tmp/sp21/`),
- * describes the *same* leaves through the other lane: **83 % of hero leaves at
- * depth 0 hold exactly one non-air identity across all 512 voxels**, 68 % at
- * depth 1, with a mean of 1.457 distinct identities a leaf and a scene-wide
- * alphabet of only 415 words. Those are not two savings to multiply. They are
- * one fact — a leaf is usually one solid — seen twice, and a design that encoded
- * them separately would spend per-voxel owner bits inside the very records whose
- * whole leaf shares one owner.
+ * The material lane, read off the device rather than replayed, describes the
+ * *same* leaves through the other lane: **94.8 % of hero leaves at depth 0 hold
+ * exactly one material across all 512 voxels**, with a mean of 1.026 distinct
+ * materials a leaf. Those are not two savings to multiply. They are one fact — a
+ * leaf is usually one solid — seen twice, and a design that encoded them
+ * separately would spend per-voxel material bits inside the very records whose
+ * whole leaf shares one material.
  *
- * So the identity is *not* a field of a record. It is a per-leaf palette of
+ * So the material is *not* a field of a record. It is a per-leaf palette of
  * slots into a scene-global table, with an index array over the leaf's occupied
  * voxels whose width is chosen per leaf — **zero bits when the leaf has one
- * identity**, which is most of them. Records carry geometry only.
+ * material**, which is nineteen leaves in twenty. Records carry geometry only.
  *
  * ## What an interior voxel costs
  *
- * Two bits, both already inside the fixed masks: one occupancy bit, and one
- * record bit that is zero. In a single-identity leaf that is the whole cost — no
- * record, no index, no palette entry. In a multi-identity leaf it is those two
- * bits plus the leaf's index width, one to eight.
+ * Two bits and a normal: one occupancy bit and one zero record bit, both already
+ * inside the fixed masks, plus the 16-bit baked normal every occupied voxel
+ * carries. In a single-material leaf that is the whole cost — no record, no index,
+ * no palette entry. In a multi-material leaf it is those two bits plus the leaf's
+ * index width, one to eight, plus the same normal.
  *
  * ## What must still be stored, and why the band is not the record set
  *
@@ -86,27 +132,54 @@
  * ## What it delivers
  *
  * Bytes a leaf by {@link bandedLeafBytes}, with size-class rounding, leaf
- * palette, identity index and dense escapes all charged. Each geometry width is
- * quoted against its own matched dense baseline — a dense voxel is geometry plus
- * a four-byte owner word, so `f32x2` faces 12 bytes a voxel, `f16-unorm8` faces
- * 8 and `snorm8-unorm8` faces 6:
+ * palette, material index, normal lane and dense escapes all charged. Measured on
+ * `hero-garden-hose` at depth 0 (12 724 published leaves, 77.28 % occupancy,
+ * 6.63 % stencil records, 1.026 materials a leaf) against the shipped dense arm's
+ * 8 bytes a voxel — 4 of geometry at `f16-unorm8` plus a 4-byte identity word:
  *
- * | scene / depth              | `f32x2` | vs 12 B | `snorm8-unorm8` | vs 6 B | vs today |
- * |----------------------------|--------:|--------:|----------------:|-------:|---------:|
- * | `hero-garden-hose` d0      |     463 |  13.28x |             234 | 13.14x |   26.28x |
- * | `hero-garden-hose` d1      |     586 |  10.49x |             270 | 11.37x |   22.73x |
- * | `hero-garden-hose` d2      |     539 |  11.40x |             259 | 11.88x |   23.75x |
- * | `garden-svo-lighting` d0   |   1 188 |   5.17x |             421 |  7.30x |   14.61x |
- * | `garden-svo-lighting` d1   |   1 085 |   5.66x |             391 |  7.86x |   15.71x |
- * | `garden-svo-lighting` d2   |     859 |   7.15x |             333 |  9.23x |   18.45x |
+ * | term                     | bytes a leaf | share |
+ * |--------------------------|-------------:|------:|
+ * | occupancy mask           |           64 |  4.9% |
+ * | record mask              |           64 |  4.9% |
+ * | header (4 words)         |           16 |  1.2% |
+ * | material palette + index |          ~ 6 |  0.5% |
+ * | **normals**              |    **1 024** | 78.2% |
+ * | geometry records         |          136 | 10.4% |
+ * | **total**                |    **1 310** |       |
  *
- * Zero dense escapes at every depth on both scenes. On the hero the ratio barely
- * moves with record width, because the fixed 144 bytes dominate a scene whose
- * median leaf holds no records at all; on the lighting study it climbs steeply,
- * because records genuinely dominate there. Extrapolated to the hero at depth 3,
- * 1.40 GB becomes 122 MB at `f32x2` and ~59 MB at `snorm8-unorm8`, of which
- * 32.7 MB is the fixed part — so the masks, not the records, are what a further
- * cull would have to attack.
+ * 1 310 bytes against the dense arm's 4 096 is **3.13x**, and the shape of the
+ * table is the whole story: the normal lane is four fifths of it. The pre-cutover
+ * layout quoted 13x, and the difference is not a regression in this file — it is
+ * the price of the render path no longer reading any analytic object. A per-voxel
+ * normal is 16 bits of genuinely new information the old arena did not carry; what
+ * it bought was the deletion of the primitive-record fetch and field
+ * re-evaluation the renderer used to do per pixel.
+ *
+ * **Rank-compacting the normal lane is a real alternative and it is close.**
+ * Storing one `u16` per *occupied* voxel instead of per voxel is 792 bytes rather
+ * than 1 024 — **1 081 a leaf, 3.79x**, 17 % less arena — at the cost of a
+ * sixteen-word prefix popcount in front of every read. Both were measured the same
+ * way (interleaved rounds, `hero-garden-hose` depth 1, GPU pass timestamps):
+ * compacted **+4.10 %** against `dense`, voxel-indexed **+3.54 %**. So the
+ * compaction costs 0.56 pp of frame and buys 51 MB at depth 3. This file ships the
+ * voxel-indexed arm because it is also the simpler producer — 256 lanes store 256
+ * words with no rank and no reduction — but the trade is close enough that a
+ * memory-bound depth-3 lane could legitimately take the other one.
+ *
+ * **Neither arrangement is where the frame cost is.** `occupancy` — the mask
+ * predicate over the *flat* identity lane — measures **+0.64 %**, so the predicate
+ * move is free and the ~3 % is the indirection: a `banded` hit resolves from the
+ * leaf header, the blob's palette and the blob's normal lane where `dense` read one
+ * word. That is the term a further cull has to attack.
+ *
+ * **The named next cull is a per-leaf normal palette.** The census says a leaf
+ * holds 29.05 distinct normals of ~396 occupied voxels, so an 8-bit index over a
+ * 29-entry palette is 347 bytes a leaf against 1 024 — 1.3 B a voxel, half the
+ * whole arena — and it stays voxel-indexed, so it costs one extra dependent load
+ * rather than a popcount. It needs a raw escape for the 14 leaves in 12 724
+ * (0.11 %) that exceed 256 distinct normals, and that escape is exactly why it is
+ * not in this change: a clamped palette entry is a *wrong normal on a real
+ * surface*, which this layout is now free of by construction.
  *
  * The plan for landing it, and the sequencing behind SP20, is
  * `docs/svo-banded-leaf-payload-handoff.md`.
@@ -167,17 +240,18 @@ export const SVO_BANDED_LEAF_MASK_WORDS = SVO_BANDED_LEAF_VOXELS / 32;
 export const SVO_BANDED_LEAF_SATURATION_RADII = SPARSE_BRICK_SCENE_DISTANCE_BAND_RADII;
 
 /**
- * Distinct material-owner words a scene may hold.
+ * Distinct material ids a scene may hold.
  *
- * `2 + OCTREE_LIVE_SCENE_PRIMITIVE_CAPACITY`: every live primitive may own one
- * identity, plus the ownerless ground and the no-owner sentinel. 16 386 fits
- * fifteen bits, so a global slot is a `u16` with a bit to spare — and *that* is
- * the only place a 16-bit identity is legal. The lane word itself is a packed
- * pair `(ownerId << 16) | materialId` whose high half is read at five production
- * dry-path sites, including `dryLodCellSolid`, where the owner is the LOD tier's
- * only solidity test, and `traceLeafPayload`, where it becomes a primitive
- * index. The palette stores the pair whole and hands out an index; nothing in
- * this file ever truncates it.
+ * `2 + OCTREE_LIVE_SCENE_PRIMITIVE_CAPACITY`: every live primitive may publish
+ * one material, plus the ownerless ground and the air sentinel. 16 386 fits
+ * fifteen bits, so a global slot is a `u16` with a bit to spare — which is also
+ * the width of the material half of the lane word, so the palette is exact by
+ * construction rather than by fitting.
+ *
+ * Only the *material* half is interned. The high half of the lane word is a
+ * per-voxel baked oct8 normal and belongs to {@link SvoBandedLeaf.normals}; a
+ * palette over it would be a palette over 29.05 entries a leaf, which is a
+ * per-voxel store with an indirection in front of it. See the module comment.
  *
  * Not imported from `lib/webgpu-octree-sparse-bricks.ts` because that module
  * pulls the whole GPU world in behind it and this one is arithmetic. A test pins
@@ -185,34 +259,38 @@ export const SVO_BANDED_LEAF_SATURATION_RADII = SPARSE_BRICK_SCENE_DISTANCE_BAND
  */
 export const SVO_IDENTITY_PALETTE_CAPACITY = 2 + 16_384;
 
-/** The material-owner word the voxeliser writes where nothing is solid. */
+/** The identity word the voxeliser writes where nothing is solid. */
 export const SVO_BANDED_NO_MATERIAL_OWNER = 0xffff0000;
 
 /**
- * The scene-wide alphabet of `(ownerId << 16) | materialId` words.
+ * The scene-wide alphabet of material ids.
  *
- * Measured at 415 distinct words on `hero-garden-hose` and 9 on the lighting
- * study, against a capacity of 16 386 — so a global slot costs two bytes, and
- * would cost two bytes on any scene this world can express.
+ * A scene-global table exists so a leaf palette entry can be narrower than the
+ * value it names. With the normal split out that is no longer buying anything —
+ * a material id is already a `u16` — so the *device* stores the material inline
+ * in the leaf palette and never builds this table at all
+ * ({@link sparseBrickBandedLeafCodecWGSL}). It is retained here because the
+ * reference encoder is the layout's spec and the indirection is the shape a
+ * wider identity would need again.
  */
 export class SvoIdentityPalette {
   private readonly slots = new Map<number, number>();
   private readonly words: number[] = [];
 
-  /** Intern one lane word, returning its global slot. */
-  slotFor(materialOwner: number): number {
-    const existing = this.slots.get(materialOwner);
+  /** Intern one material id, returning its global slot. */
+  slotFor(materialId: number): number {
+    const existing = this.slots.get(materialId);
     if (existing !== undefined) return existing;
     if (this.words.length >= SVO_IDENTITY_PALETTE_CAPACITY) {
-      throw new RangeError(`Scene needs more than ${SVO_IDENTITY_PALETTE_CAPACITY} distinct material-owner words`);
+      throw new RangeError(`Scene needs more than ${SVO_IDENTITY_PALETTE_CAPACITY} distinct materials`);
     }
     const slot = this.words.length;
-    this.slots.set(materialOwner, slot);
-    this.words.push(materialOwner);
+    this.slots.set(materialId, slot);
+    this.words.push(materialId);
     return slot;
   }
 
-  /** The whole packed pair for one global slot. Never truncated. */
+  /** The material id one global slot names. */
   wordAt(slot: number): number {
     const word = this.words[slot];
     if (word === undefined) throw new RangeError(`Identity palette has no slot ${slot}`);
@@ -221,7 +299,7 @@ export class SvoIdentityPalette {
 
   get size(): number { return this.words.length; }
   /** Bytes the global table costs once, for the whole scene. */
-  get bytes(): number { return this.words.length * 4; }
+  get bytes(): number { return this.words.length * 2; }
 }
 
 /**
@@ -270,7 +348,14 @@ export interface SvoDenseVoxel {
   readonly distance_m: number;
   /** `solidFraction`, clamped to [0, 1]. */
   readonly fraction: number;
-  /** `materialOwner`, the packed pair `(ownerId << 16) | materialId`. */
+  /**
+   * The identity word, `(oct8 normal << 16) | materialId`.
+   *
+   * Named for the pair it used to be — `(ownerId << 16) | materialId` — because
+   * every producer and consumer still calls the channel `materialOwner`. The high
+   * half is opaque to this file: it is stored and returned verbatim, so nothing
+   * here depends on it being a normal rather than an owner.
+   */
   readonly materialOwner: number;
 }
 
@@ -278,9 +363,9 @@ export interface SvoDenseVoxel {
  * A leaf's payload in banded form.
  *
  * Against the 6 144 bytes a dense 12-byte leaf costs: two 64-byte masks and a
- * 16-byte header are unconditional, the leaf palette and its index array are
- * empty on a single-identity leaf, and the records are the variable part and
- * carry geometry only.
+ * 20-byte header are unconditional, the leaf palette and its index array are
+ * empty on a single-material leaf, the normal lane spans the occupied voxels,
+ * and the records are the variable part and carry geometry only.
  */
 export interface SvoBandedLeaf {
   /** One bit a voxel: is this voxel solid at all. The occupancy predicate. */
@@ -292,9 +377,9 @@ export interface SvoBandedLeaf {
   /** `fraction` for each record voxel, in record order. */
   readonly recordFraction: Float32Array;
   /**
-   * Global palette slots this leaf uses, in leaf-index order.
+   * Global palette slots this leaf's *materials* use, in leaf-index order.
    *
-   * One entry on 83 % of hero leaves at depth 0, in which case
+   * One entry on 94.8 % of hero leaves at depth 0, in which case
    * {@link SvoBandedLeaf.identityIndex} is empty and every occupied voxel
    * resolves to `leafPalette[0]`.
    */
@@ -310,6 +395,26 @@ export interface SvoBandedLeaf {
    * instruction against the occupancy mask.
    */
   readonly identityIndex: Uint8Array;
+  /**
+   * The baked oct8 normal per voxel, all 512 of them, indexed by voxel.
+   *
+   * The high half of the identity word, stored raw rather than interned. Every
+   * occupied voxel needs one, because the record set cannot bound the first-hit
+   * population — see the module comment.
+   *
+   * **Indexed by voxel, not by occupancy rank, and that is a measured choice — a
+   * close one.** Rank-compacting it saves `1 - occupancy` of the array (232 bytes
+   * a leaf on the hero garden, 17 % of the whole layout) and makes every read pay
+   * the sixteen-word prefix popcount that addresses it: **+4.10 %** against `dense`
+   * on the depth-1 frame, against **+3.54 %** laid out by voxel. 0.56 pp of frame
+   * for 51 MB at depth 3. Voxel-indexed ships because it is also the simpler
+   * producer — 256 lanes store 256 words with no rank and no reduction — not
+   * because the margin is decisive.
+   *
+   * An air voxel's slot holds whatever the producer wrote there and is never
+   * read: `bandedOccupied` gates every consumer.
+   */
+  readonly normals: Uint16Array;
   /** The saturated distance magnitude this leaf reconstructs with, metres. */
   readonly saturation_m: number;
 }
@@ -360,10 +465,9 @@ export function bandedLeafOccupied(leaf: SvoBandedLeaf, index: number): boolean 
   return readBit(leaf.occupancy, index);
 }
 
-/** The global palette slot one occupied voxel resolves to. */
-function leafIdentitySlot(leaf: SvoBandedLeaf, index: number): number {
+/** The global palette slot one occupied voxel's material resolves to. */
+function leafMaterialSlot(leaf: SvoBandedLeaf, rank: number): number {
   if (leaf.indexBits === 0) return leaf.leafPalette[0];
-  const rank = bandedLeafPrefixCount(leaf.occupancy, index);
   const bit = rank * leaf.indexBits;
   const entry = (leaf.identityIndex[bit >> 3] >>> (bit & 7)) & ((1 << leaf.indexBits) - 1);
   return leaf.leafPalette[entry];
@@ -374,10 +478,10 @@ function leafIdentitySlot(leaf: SvoBandedLeaf, index: number): number {
  *
  * Exact in `fraction` and `materialOwner` for every voxel by construction: a
  * voxel with no record is not in the band, so its fraction is exactly 0 or
- * exactly 1, and its identity is a palette slot resolved to the whole packed
- * pair. `distance_m` is exact for record voxels and saturated elsewhere — the
- * one lossy channel, and the reason this ships behind a lever with a frame hash
- * on both arms.
+ * exactly 1; its material is a palette slot and its normal is a raw `u16`, so the
+ * word reassembles bit for bit. `distance_m` is exact for record voxels and
+ * saturated elsewhere — the one lossy channel, and the reason this ships behind a
+ * lever with a frame hash on both arms.
  */
 export function bandedLeafVoxel(
   leaf: SvoBandedLeaf,
@@ -385,8 +489,11 @@ export function bandedLeafVoxel(
   palette: SvoIdentityPalette,
 ): SvoDenseVoxel {
   const occupied = bandedLeafOccupied(leaf, index);
+  // The normal is addressed by the voxel; only the material *index* needs a rank,
+  // and only on the one leaf in twenty that holds more than one material.
+  const rank = occupied && leaf.indexBits > 0 ? bandedLeafPrefixCount(leaf.occupancy, index) : 0;
   const materialOwner = occupied
-    ? palette.wordAt(leafIdentitySlot(leaf, index))
+    ? ((palette.wordAt(leafMaterialSlot(leaf, rank)) & 0xffff) | (leaf.normals[index] << 16)) >>> 0
     : SVO_BANDED_NO_MATERIAL_OWNER;
   if (readBit(leaf.records, index)) {
     const record = bandedLeafPrefixCount(leaf.records, index);
@@ -403,31 +510,32 @@ const STENCIL_OFFSETS: readonly (readonly [number, number, number])[] = Object.f
   [1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1],
 ]);
 
-/** Two masks and a header, before any record, palette or index. */
+/** Two masks and a four-word header, before any record, palette, index or normal. */
 export const SVO_BANDED_LEAF_FIXED_BYTES = 64 + 64 + 16;
 
-/** What a dense voxel costs today: 8 bytes of geometry plus a 4-byte owner word. */
+/** What a dense voxel costs today: 8 bytes of geometry plus a 4-byte identity word. */
 export const SVO_BANDED_DENSE_VOXEL_BYTES = 12;
 /** What a dense geometry record costs today, `f32x2`. */
 export const SVO_BANDED_DENSE_GEOMETRY_BYTES = 8;
 
 /**
- * What one banded leaf costs, size class, palette and index all included.
+ * What one banded leaf costs, size class, palette, index and normals included.
  *
  * `recordBytes` is the width of one *geometry* record under the world's scene
  * geometry format — 8 for `f32x2` and 4 for `f16-unorm8`, the only arms that
  * survive (the tables above also quote a since-removed 2-byte arm).
- * The owner is deliberately not part of it; it lives in the leaf palette, which
- * is why the width cull and this cull compose without counting the same bytes
- * twice.
+ * The identity word is deliberately not part of it; its material half lives in the
+ * leaf palette and its normal half in the normal lane, which is why the width cull
+ * and this cull compose without counting the same bytes twice.
  *
  * The scene-global palette table is not charged here because it is charged once
- * for the whole scene: 415 words is 1.7 kB against a gigabyte.
+ * for the whole scene: a hero garden's whole material alphabet is tens of bytes.
  */
 export function bandedLeafBytes(leaf: SvoBandedLeaf, recordBytes: number): number {
   return SVO_BANDED_LEAF_FIXED_BYTES
     + leaf.leafPalette.length * 2
     + leaf.identityIndex.length
+    + leaf.normals.length * 2
     + bandedLeafSizeClass(leaf.recordDistance.length) * recordBytes;
 }
 
@@ -498,9 +606,11 @@ export const SVO_BANDED_DEFAULT_RECORD_SET: SvoBandedRecordSet = "stencil";
  * leaf's own units.
  *
  * Returns `undefined` when the leaf cannot be banded, which is the dense escape:
- * a leaf needing more than 256 distinct identities, or one whose banded form
+ * a leaf needing more than 256 distinct *materials*, or one whose banded form
  * would cost more than the dense one. A layout that can only win is a layout
- * that has not been asked the awkward question.
+ * that has not been asked the awkward question. The escape is much rarer than it
+ * was when the palette interned whole identity words: the hero garden's widest
+ * leaf holds 28 materials against 474 distinct identities.
  */
 export function encodeBandedLeaf(
   voxels: readonly SvoDenseVoxel[],
@@ -550,19 +660,20 @@ export function encodeBandedLeaf(
       if (readBit(band, index) || Math.abs(voxels[index].distance_m) <= radius) writeBit(records, index);
     }
   }
-  // The leaf palette spans *every* occupied voxel, record and resident alike.
-  // Splitting it — an owner field inside records, a palette outside them — was
-  // the first shape tried and encodes one fact twice: 83 % of hero leaves hold a
-  // single identity across all 512 voxels, so a record's owner field would be a
-  // copy of the leaf's own in five leaves out of six.
+  // The leaf palette spans *every* occupied voxel, record and resident alike, and
+  // it interns the *material* half alone. Splitting it the other way — a material
+  // field inside records, a palette outside them — was the first shape tried and
+  // encodes one fact twice: 94.8 % of hero leaves hold a single material across
+  // all 512 voxels, so a record's material field would be a copy of the leaf's own
+  // in nineteen leaves out of twenty.
   const leafSlots = new Map<number, number>();
   const leafPaletteList: number[] = [];
   for (let index = 0; index < SVO_BANDED_LEAF_VOXELS; index += 1) {
     if (!readBit(occupancy, index)) continue;
-    const word = voxels[index].materialOwner;
-    if (leafSlots.has(word)) continue;
-    leafSlots.set(word, leafPaletteList.length);
-    leafPaletteList.push(palette.slotFor(word));
+    const material = voxels[index].materialOwner & 0xffff;
+    if (leafSlots.has(material)) continue;
+    leafSlots.set(material, leafPaletteList.length);
+    leafPaletteList.push(palette.slotFor(material));
   }
   const indexBits = bandedLeafIndexBits(leafPaletteList.length);
   if (!Number.isFinite(indexBits)) return undefined;
@@ -571,13 +682,19 @@ export function encodeBandedLeaf(
   const identityIndex = indexBits === 0
     ? new Uint8Array(0)
     : new Uint8Array(Math.ceil(occupied * indexBits / 8));
-  if (indexBits > 0) {
+  // The normal lane spans every voxel and is indexed by voxel; only the material
+  // index is rank-compacted, and only when the leaf holds more than one material.
+  const normals = new Uint16Array(SVO_BANDED_LEAF_VOXELS);
+  {
     let rank = 0;
     for (let index = 0; index < SVO_BANDED_LEAF_VOXELS; index += 1) {
+      normals[index] = (voxels[index].materialOwner >>> 16) & 0xffff;
       if (!readBit(occupancy, index)) continue;
-      const entry = leafSlots.get(voxels[index].materialOwner) ?? 0;
-      const bit = rank * indexBits;
-      identityIndex[bit >> 3] |= entry << (bit & 7);
+      if (indexBits > 0) {
+        const entry = leafSlots.get(voxels[index].materialOwner & 0xffff) ?? 0;
+        const bit = rank * indexBits;
+        identityIndex[bit >> 3] |= entry << (bit & 7);
+      }
       rank += 1;
     }
   }
@@ -597,6 +714,7 @@ export function encodeBandedLeaf(
     leafPalette: Uint16Array.from(leafPaletteList),
     indexBits,
     identityIndex,
+    normals,
     saturation_m: SVO_BANDED_LEAF_SATURATION_RADII * cellRadius_m,
   };
   const dense = SVO_BANDED_LEAF_VOXELS * SVO_BANDED_DENSE_VOXEL_BYTES;

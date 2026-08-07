@@ -108,8 +108,22 @@ export interface ShapeLabWorld {
   readonly buildMs: number;
 }
 
-/** Identity and placement keys the form hides: they are which one this is, not what shape it is. */
-const IDENTITY_KEYS = new Set(["kind", "id", "generator", "group", "tags", "vessel", "material", "materialModel"]);
+/**
+ * Keys the form hides.
+ *
+ * Two kinds, and the second is worth naming separately. Most are **identity**:
+ * which one this is rather than what shape it is. `orders` is not — it is the
+ * oak's branch table, four objects of eight fields, and it is hidden because the
+ * lab renders it faithfully as thirty-two controls behind four disclosure
+ * triangles. That is the right shape for a species *definition* and the wrong
+ * shape for something dragged while looking at a tree, so the table is edited in
+ * `oak-branching.ts` and the lab gets `branchDensity` and `branchFineness`,
+ * which scale it. Delete the entry to get the raw table back.
+ */
+const IDENTITY_KEYS = new Set([
+  "kind", "id", "generator", "group", "tags", "vessel", "material", "materialModel",
+  "orders",
+]);
 
 export function shapeLabHiddenKey(key: string): boolean {
   return IDENTITY_KEYS.has(key);
@@ -238,6 +252,80 @@ export function shapeLabRecords(world: ShapeLabWorld, nodeIds: readonly string[]
 /** The ground, baked once per document, as the renderer's own bilinear grid. */
 export function shapeLabGround(world: ShapeLabWorld): TerrainGrid | undefined {
   return terrainSampleGrid(world.scene.terrain);
+}
+
+/**
+ * Does this specimen's *geometry* move when the leaf does?
+ *
+ * The question the depth selector cannot answer on its own, and the one that
+ * makes it look broken when it is working. Two things move with the rung — the
+ * voxel a record is drawn into, and whatever the generator derived from the leaf
+ * — and for most of the hero set the second is nothing at all: the bonsai
+ * publishes the same 154 records at every rung, the hose the same 6, and only
+ * the rosettes change count. A depth control that looks dead on a specimen whose
+ * shape is genuinely leaf-independent is a control that will be mistrusted on
+ * the specimens where it is not.
+ *
+ * Compared with a relative tolerance rather than by identity, because a
+ * generator seats itself against a heightfield baked at a spacing that follows
+ * the leaf, so *every* record moves by a micron or two between rungs. That is
+ * the ground being resampled, not the shape being re-derived, and reporting it
+ * as a change would make the answer "yes" everywhere and mean nothing.
+ */
+const SHAPE_LAB_SAME_TOLERANCE = 1e-5;
+
+function sameNumber(a: number, b: number): boolean {
+  return Math.abs(a - b) <= SHAPE_LAB_SAME_TOLERANCE * Math.max(1, Math.abs(a), Math.abs(b));
+}
+
+function sameShape(a: unknown, b: unknown): boolean {
+  if (typeof a === "number" && typeof b === "number") return sameNumber(a, b);
+  if (Array.isArray(a) || Array.isArray(b)) {
+    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false;
+    return a.every((entry, index) => sameShape(entry, b[index]));
+  }
+  if (a && b && typeof a === "object" && typeof b === "object") {
+    const left = Object.keys(a as object), right = Object.keys(b as object);
+    if (left.length !== right.length) return false;
+    return left.every((key) => key in (b as object)
+      && sameShape((a as Record<string, unknown>)[key], (b as Record<string, unknown>)[key]));
+  }
+  return a === b;
+}
+
+export interface ShapeLabRung {
+  readonly depth: number;
+  readonly leaf_m: number;
+  readonly records: number;
+  /**
+   * Whether the records differ from the **previous** rung's by more than ground
+   * reseating.
+   *
+   * Against the previous rather than against the coarsest, because the useful
+   * question is *where does this specimen stop re-deriving itself*. Measured on
+   * the hero set: the bonsai moves from depth 0 to 2 — its canopy plates are
+   * floored at one leaf thick, so they thin until the authored flatten takes
+   * over — and then stops; the rosettes go on adding blades to depth 4; the hose
+   * never moves at all, because a swept tube derives nothing from the lattice.
+   */
+  readonly moved: boolean;
+}
+
+export function shapeLabDepthLadder(options: {
+  readonly specimenId: string;
+  readonly nodeOverrides?: Readonly<Record<string, SceneryNode>>;
+  readonly vessel?: PondVesselSpec;
+}): readonly ShapeLabRung[] {
+  let previous: SvoPrimitiveDescriptor[] = [];
+  return SHAPE_LAB_DEPTHS.map((depth, index) => {
+    const world = shapeLabWorld({ depth, ...options });
+    const specimen = world.specimens.find((entry) => entry.id === options.specimenId);
+    const descriptors = shapeLabRecords(world, specimen?.nodeIds ?? []).records
+      .map((record) => record.descriptor);
+    const moved = index > 0 && !sameShape(previous, descriptors);
+    previous = descriptors;
+    return { depth, leaf_m: world.leaf_m, records: descriptors.length, moved };
+  });
 }
 
 /** The container the lattice is anchored in, so the lab's voxels land where the scene's do. */

@@ -40,8 +40,10 @@ import {
   shapeLabGround,
   shapeLabHiddenKey,
   shapeLabLeaf_m,
+  shapeLabDepthLadder,
   shapeLabRecords,
   shapeLabWorld,
+  type ShapeLabRung,
   type ShapeLabSpecimen,
 } from "@/lib/shape-lab/specimens";
 import { shapeLabBounds, type ShapeLabCamera, type ShapeLabShading } from "@/lib/shape-lab/trace";
@@ -216,14 +218,127 @@ export function ShapeLab() {
   return mounted ? <ShapeLabWorkbench /> : null;
 }
 
+/**
+ * The selections that survive a refresh.
+ *
+ * Which specimen, at which rung, drawn how. Not the parameters — those are the
+ * override JSON and there is already a place to put them
+ * (`lib/hero-garden-overrides.ts`); a tuned form is a thing you paste somewhere
+ * deliberate, not a thing that rides along in an address bar. And not the
+ * camera, which changes on every pointer-move and would either churn the URL or
+ * need a debounce that fights the reset-on-specimen-change effect below.
+ *
+ * What is left is exactly the set you have to re-pick after every reload, which
+ * is what makes losing it annoying.
+ */
+interface ShapeLabSelection {
+  readonly specimenId: string;
+  readonly depth: number;
+  readonly mode: "voxel" | "exact";
+  readonly shading: ShapeLabShading;
+  readonly showGround: boolean;
+}
+
+const SHAPE_LAB_SHADINGS: readonly ShapeLabShading[] = ["clay", "material", "normal"];
+const SHAPE_LAB_MODES = ["voxel", "exact"] as const;
+
+/**
+ * Where the lab opens.
+ *
+ * `oak`, and it used to be `bonsai` — which stopped existing when the hero set's
+ * tree was cut over, and the failure was silent in the way a fallback usually
+ * is: `world.specimens.find(...) ?? world.specimens[0]` resolved to the *pond
+ * vessel*, so the lab opened on the ground rather than on a missing tree, and
+ * nothing said why.
+ */
+const SHAPE_LAB_DEFAULT_SELECTION: ShapeLabSelection = {
+  specimenId: "oak",
+  depth: 3,
+  mode: "voxel",
+  shading: "clay",
+  showGround: false,
+};
+
+/**
+ * The URL, read once at mount.
+ *
+ * `window.location` rather than `useSearchParams`, and the reason is the gate
+ * above: this component is client-only by construction, so there is no server
+ * render for a search-params hook to be suspended for, and reaching for the
+ * router would add a Suspense requirement to a tree that has no use for one.
+ *
+ * Every value is validated against what the lab can actually accept, because a
+ * URL is user input — a hand-edited `depth=9` must not build a document at a
+ * rung the pool has no tiles for.
+ */
+function readShapeLabSelection(): ShapeLabSelection {
+  if (typeof window === "undefined") return SHAPE_LAB_DEFAULT_SELECTION;
+  const query = new URLSearchParams(window.location.search);
+  const oneOf = <T extends string>(key: string, allowed: readonly T[], fallback: T): T => {
+    const value = query.get(key);
+    return value !== null && (allowed as readonly string[]).includes(value) ? (value as T) : fallback;
+  };
+  // `Number(null)` is 0 and 0 is a legal rung, so an absent parameter would read
+  // as "depth 0" rather than as "unset" and the lab would open at the coarsest
+  // leaf. Test the string, not the number.
+  const depthRaw = query.get("depth");
+  const depth = depthRaw === null ? NaN : Number(depthRaw);
+  return {
+    // Deliberately not validated against the specimen list: that list is a
+    // property of the document, the document is built from the depth, and the
+    // depth is being read here. An id naming nothing resolves to the first
+    // specimen where every other unknown id already does, and the effect below
+    // then writes the resolved one back, so a stale link heals itself.
+    specimenId: query.get("specimen") ?? SHAPE_LAB_DEFAULT_SELECTION.specimenId,
+    depth: SHAPE_LAB_DEPTHS.includes(depth) ? depth : SHAPE_LAB_DEFAULT_SELECTION.depth,
+    mode: oneOf("mode", SHAPE_LAB_MODES, SHAPE_LAB_DEFAULT_SELECTION.mode),
+    shading: oneOf("shading", SHAPE_LAB_SHADINGS, SHAPE_LAB_DEFAULT_SELECTION.shading),
+    showGround: query.get("ground") === "1",
+  };
+}
+
+/**
+ * Put the selection back on the URL, defaults omitted.
+ *
+ * `replaceState` rather than `pushState`: changing the shading is not a place
+ * you navigated to, and a lab session would otherwise leave forty entries for
+ * the back button to walk. Omitting values that equal the default keeps a link
+ * to "the oak at depth 3 in clay" as bare `/shape-lab`, so the URL only ever
+ * names what you actually changed.
+ *
+ * Any query parameter this file does not own is preserved, so an unrelated link
+ * decoration survives a click on the depth selector.
+ */
+function writeShapeLabSelection(selection: ShapeLabSelection): void {
+  if (typeof window === "undefined") return;
+  const query = new URLSearchParams(window.location.search);
+  const put = (key: string, value: string, fallback: string): void => {
+    if (value === fallback) query.delete(key); else query.set(key, value);
+  };
+  put("specimen", selection.specimenId, SHAPE_LAB_DEFAULT_SELECTION.specimenId);
+  put("depth", String(selection.depth), String(SHAPE_LAB_DEFAULT_SELECTION.depth));
+  put("mode", selection.mode, SHAPE_LAB_DEFAULT_SELECTION.mode);
+  put("shading", selection.shading, SHAPE_LAB_DEFAULT_SELECTION.shading);
+  put("ground", selection.showGround ? "1" : "0", "0");
+  const search = query.toString();
+  const next = `${window.location.pathname}${search ? `?${search}` : ""}${window.location.hash}`;
+  // Compared before writing, because `replaceState` is cheap but not free and
+  // this effect runs on every selection-shaped render.
+  if (next === `${window.location.pathname}${window.location.search}${window.location.hash}`) return;
+  window.history.replaceState(window.history.state, "", next);
+}
+
 function ShapeLabWorkbench() {
-  const [depth, setDepth] = useState(3);
-  const [specimenId, setSpecimenId] = useState("bonsai");
+  // Read once, lazily: the initializer runs on the first render only, which is
+  // already in the browser thanks to the mount gate above.
+  const [restored] = useState(readShapeLabSelection);
+  const [depth, setDepth] = useState(restored.depth);
+  const [specimenId, setSpecimenId] = useState(restored.specimenId);
   const [overrides, setOverrides] = useState<Readonly<Record<string, SceneryNode>>>({});
   const [vessel, setVessel] = useState<PondVesselSpec | undefined>(undefined);
-  const [mode, setMode] = useState<"voxel" | "exact">("voxel");
-  const [shading, setShading] = useState<ShapeLabShading>("clay");
-  const [showGround, setShowGround] = useState(false);
+  const [mode, setMode] = useState<"voxel" | "exact">(restored.mode);
+  const [shading, setShading] = useState<ShapeLabShading>(restored.shading);
+  const [showGround, setShowGround] = useState(restored.showGround);
   const [ground, setGround] = useState<TerrainGrid | undefined>(undefined);
   const [groundPending, setGroundPending] = useState(false);
   const [progress, setProgress] = useState<ShapeLabProgress | undefined>(undefined);
@@ -251,6 +366,17 @@ function ShapeLabWorkbench() {
     () => shapeLabRecords(world, specimen?.nodeIds ?? []),
     [world, specimen],
   );
+
+  // The selection, back onto the URL so a reload lands where you left off. The
+  // *resolved* specimen rather than the requested one, so a link naming a
+  // specimen this document does not have rewrites itself to the one actually on
+  // screen instead of quietly disagreeing with it.
+  useEffect(() => {
+    writeShapeLabSelection({
+      specimenId: specimen?.id ?? specimenId,
+      depth, mode, shading, showGround,
+    });
+  }, [specimen, specimenId, depth, mode, shading, showGround]);
 
   // The pristine document, for "what did I change" and for reset.
   const pristine = useMemo(() => shapeLabWorld({ depth }), [depth]);
@@ -300,6 +426,28 @@ function ShapeLabWorkbench() {
     setPan({ x: 0, y: 0, z: 0 });
     setOrbit((previous) => ({ ...previous, zoom: 1 }));
   }, [specimenId]);
+
+  // ---- what the depth actually does to this specimen ------------------------
+
+  /**
+   * The rung-by-rung census, built off the paint.
+   *
+   * Without it the depth selector looks broken on most of this set, and the
+   * reason it looks broken is worth knowing rather than hiding: the bonsai
+   * publishes 154 records at every rung and the hose 6, so on those two the leaf
+   * moves the voxels and nothing else. Only a control that says so can be
+   * trusted on the specimens where it moves a great deal.
+   */
+  const [ladder, setLadder] = useState<readonly ShapeLabRung[] | undefined>(undefined);
+  useEffect(() => {
+    setLadder(undefined);
+    const timer = setTimeout(() => setLadder(shapeLabDepthLadder({
+      specimenId: specimen?.id ?? "",
+      nodeOverrides: overrides,
+      ...(vessel ? { vessel } : {}),
+    })), 250);
+    return () => clearTimeout(timer);
+  }, [specimen, overrides, vessel]);
 
   // ---- the pool ------------------------------------------------------------
 
@@ -480,6 +628,17 @@ function ShapeLabWorkbench() {
   }, [expanded]);
 
   const leafMm = shapeLabLeaf_m(depth) * 1e3;
+  /**
+   * How big a voxel is on screen, which is the number that decides whether the
+   * depth control appears to do anything.
+   *
+   * A pixel spans `2 * reach / height` metres at the target, so a 0.78 mm leaf
+   * on a 400 px view of a 0.7 m tree is a third of a pixel: the terracing is
+   * there, it is simply below the sampling rate, and one sample per pixel turns
+   * it into the same speckle at every rung. Saying so is cheaper than
+   * supersampling and more honest than hiding it.
+   */
+  const leafPx = shapeLabLeaf_m(depth) / (2 * camera.reach_m / frame.height);
   const busy = progress !== undefined && !progress.complete;
 
   return <div className="sl-root">
@@ -511,18 +670,37 @@ function ShapeLabWorkbench() {
       <div className="sl-field">
         <span className="sl-legend">Refinement depth</span>
         <div className="sl-segments">
-          {SHAPE_LAB_DEPTHS.map((rung) => <button
-            key={rung}
-            type="button"
-            className={`sl-segment${rung === depth ? " sl-segment-on" : ""}`}
-            onClick={() => setDepth(rung)}
-            title={`${(shapeLabLeaf_m(rung) * 1e3).toFixed(3)} mm leaf`}
-          >{rung}</button>)}
+          {SHAPE_LAB_DEPTHS.map((rung) => {
+            const census = ladder?.find((entry) => entry.depth === rung);
+            return <button
+              key={rung}
+              type="button"
+              className={`sl-segment sl-depth${rung === depth ? " sl-segment-on" : ""}`}
+              onClick={() => setDepth(rung)}
+              title={census
+                ? `${(shapeLabLeaf_m(rung) * 1e3).toFixed(3)} mm leaf · ${census.records} records`
+                  + `${census.moved ? " · geometry re-derived at this rung" : rung === 0 ? "" : " · same geometry as the rung above"}`
+                : `${(shapeLabLeaf_m(rung) * 1e3).toFixed(3)} mm leaf`}
+            >
+              <span className="sl-depth-rung">{rung}</span>
+              <span className="sl-depth-census">{census ? `${census.records}${census.moved ? "≠" : ""}` : "·"}</span>
+            </button>;
+          })}
         </div>
         <p className="sl-note">
-          {leafMm.toFixed(3)} mm leaf. Production renders at 3. The depth rebuilds
-          the document: a generator&rsquo;s legibility floors are counted in leaves,
-          so this moves the shape as well as the voxels.
+          {leafMm.toFixed(3)} mm leaf — <strong>{leafPx < 0.9 ? `${leafPx.toFixed(2)}` : leafPx.toFixed(1)} px</strong> at this
+          zoom. Production renders at 3.
+        </p>
+        {leafPx < 1.2 && mode === "voxel" && <p className="sl-note sl-warn">
+          Voxels are smaller than a pixel here, so the terracing aliases into
+          noise and the rungs look alike. Wheel-zoom in, or compare at depth 0.
+        </p>}
+        <p className="sl-note">
+          The rung rebuilds the document, so it moves the shape as well as the
+          voxels — but only where a generator derives something from the leaf.
+          The count under each rung is this specimen&rsquo;s records;
+          {" "}<strong>&ne;</strong> means its geometry differs from the rung above.
+          {ladder && !ladder.some((entry) => entry.moved) && " This one is the same shape at every rung: only the voxel changes."}
         </p>
       </div>
 

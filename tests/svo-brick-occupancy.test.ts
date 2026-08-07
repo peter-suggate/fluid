@@ -167,7 +167,11 @@ test("GPU builder uses a compact indirect leaf worklist and reserves full scans 
     assert.equal(builder.incrementalAllocatedBytes, 0);
     const tree = {
       brickSize: 8, leafCapacity: 129, structure: buffer, control: buffer, topology: buffer, payload: buffer,
-      voxelCapacity: 129 * 512, sceneMaterialOwners: buffer, sceneMaterialOwnerOffsetBytes: 0,
+      voxelCapacity: 129 * 512,
+      scenePayloadLanes: {
+        mode: "dense", materialOwnerWords: 0,
+        occupancyWords: 0, recordMaskWords: 0, headerWords: 0, blobWords: 0, recordWords: 0,
+      },
     } as SparseBrickOctreeGPU;
     assert.equal(builder.encodeAllLeavesForInitialization(encoder, tree), "encoded");
     assert.equal(builder.encodeWorklist(encoder, tree, { buffer, kind: "dirty" }), "encoded");

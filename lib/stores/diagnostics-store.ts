@@ -3,6 +3,7 @@ import type { EffectiveRendererStatus, GPUStatus } from "../webgpu-renderer";
 import type { GPUEulerianInfo } from "../webgpu-eulerian";
 import type { EulerianDiagnostics, EulerianRenderState } from "../eulerian-solver";
 import type { RigidBodyState, RigidStepDiagnostics } from "../rigid-body";
+import type { GPURigidBodyPose } from "../webgpu-rigid-body";
 import type { CouplingDiagnostics } from "../fluid-rigid-coupling";
 import type { MetricSample } from "../model";
 import type { WaterSurfacePresentationDiagnostics } from "../webgpu-water-pipeline";
@@ -42,7 +43,24 @@ export const emptyCoupling: CouplingDiagnostics = {
  * complete lane traces; individual phases are never copied into flat fields.
  */
 interface DiagnosticsStore {
+  /**
+   * The rigid roster as *commanded*: authored poses, edits, and whatever the
+   * last drag left behind. This is what the solver is handed each frame, so it
+   * must never be written back from the run — see `bodyPoses` for where the
+   * bodies actually are.
+   */
   bodies: RigidBodyState[];
+  /**
+   * Where the drawn frame put each body, by body id.
+   *
+   * Once a run starts the solver owns rigid motion and never reports back, so a
+   * settled crate can be a metre from where `bodies` says it is. Everything the
+   * user points at or sees drawn around a body — the hover chip, the selection
+   * gizmo, the grab that opens a throw — reads through here so the editor and
+   * the image agree. Empty until the renderer publishes its first readback, and
+   * bodies absent from it fall back to the commanded pose.
+   */
+  bodyPoses: Readonly<Record<string, GPURigidBodyPose>>;
   rigidState: RigidStepDiagnostics | null;
   fluidState: EulerianDiagnostics | null;
   fluidRenderState: EulerianRenderState | null;
@@ -62,8 +80,35 @@ interface DiagnosticsStore {
   pushPerformanceReport: (report: PerformanceReport, sample?: MetricSample) => void;
 }
 
+/**
+ * The rigid roster as the last frame drew it.
+ *
+ * `bodies` is what the host has *told* the solver; `bodyPoses` is what the
+ * solver did with it. Anything answering a question about the picture — what is
+ * under the cursor, where a gizmo goes, where a grab starts — wants this. The
+ * frame itself still gets `bodies`, because that is the channel it commands
+ * through. On the CPU backend the two are the same object: nothing publishes
+ * poses there, and the host roster is already authoritative.
+ */
+export function drawnBodies(): RigidBodyState[] {
+  const state = useDiagnosticsStore.getState();
+  return mergeDrawnPoses(state.bodies, state.bodyPoses);
+}
+
+/** The same merge for React renders, which hold both halves already. */
+export function mergeDrawnPoses(
+  bodies: readonly RigidBodyState[],
+  bodyPoses: Readonly<Record<string, GPURigidBodyPose>>,
+): RigidBodyState[] {
+  return bodies.map((body) => {
+    const pose = bodyPoses[body.description.id];
+    return pose ? { ...body, position_m: pose.position_m, orientation: pose.orientation } : body;
+  });
+}
+
 export const useDiagnosticsStore = create<DiagnosticsStore>((set) => ({
   bodies: [],
+  bodyPoses: {},
   rigidState: null,
   fluidState: null,
   fluidRenderState: null,

@@ -1,9 +1,12 @@
 import {
   SPARSE_BRICK_GPU_LAYOUT,
+  sparseBrickBandedLeafCodecWGSL,
   type SparseBrickOctreeGPU,
   type SparseBrickPayloadProfileName,
+  type SparseBrickScenePayloadLanes,
 } from "./sparse-brick-octree";
 import { SVO_BRICK_LIFECYCLE, SVO_BRICK_OCCUPANCY } from "./svo-brick-occupancy";
+import { SVO_BRICK_CONTOUR } from "./svo-brick-contour";
 
 /** Externally owned fixed-capacity leaf worklist consumed by occupancy maintenance. */
 export const SVO_BRICK_OCCUPANCY_WORKLIST_LAYOUT = Object.freeze({
@@ -33,17 +36,39 @@ export interface SvoBrickOccupancyLeafWorklist {
  */
 export function webgpuSvoBrickOccupancyBuildWGSLFor(
   profile: SparseBrickPayloadProfileName = "full",
+  /**
+   * How this world stores scene identity. Defaults to the flat lane, which is
+   * the shape that shipped and the text this function has always emitted.
+   */
+  scenePayload?: SparseBrickScenePayloadLanes,
 ): string {
   // A dry world has no dynamic material lane. `structure[18]` is then the
   // absent-lane page and `+voxelOffset+localIndex` runs straight off it into
   // the scene geometry lane, so the union degenerates to the scene word alone.
   const fluidMaterial = profile === "dry" ? "0u" : "payload[payloadIndex]&0xffffu";
+  const banded = scenePayload?.mode === "banded";
+  // The occupancy summary asks one question — "does this voxel hold anything" —
+  // and under `banded` that question *is* the occupancy bit, so this reads the
+  // mask rather than decoding a palette entry it would immediately reduce to a
+  // boolean. `mode: "occupancy"` emits exactly `bandedOccupied` and nothing else,
+  // which is why this pass needs no scene-geometry codec in scope.
+  //
+  // It must move with the readers and not after them: this summary is what the
+  // primary's DDA clamps its span against, so a summary built from an absent lane
+  // is not a stale diagnostic, it is missing geometry in the frame.
+  const bandedCodec = banded ? sparseBrickBandedLeafCodecWGSL({
+    occupancyBase: `${scenePayload!.occupancyWords}u`, recordMaskBase: "0u",
+    headerBase: "0u", blobBase: "0u", recordsBase: "0u",
+    load: (index) => `payload[${index}]`, mode: "occupancy", records: false,
+  }) : "";
+  const sceneMaterial = banded
+    ? "select(0u,1u,bandedOccupied(voxelOffset+localIndex))"
+    : "sceneMaterialOwners[voxelOffset+localIndex]&0xffffu";
   return /* wgsl */ `
 @group(0) @binding(0) var<storage,read_write> structure:array<u32>;
 @group(0) @binding(2) var<storage,read> payload:array<u32>;
 @group(0) @binding(3) var<storage,read> leafWorklist:array<u32>;
-@group(0) @binding(4) var<storage,read> sceneMaterialOwners:array<u32>;
-
+${banded ? "" : "@group(0) @binding(4) var<storage,read> sceneMaterialOwners:array<u32>;\n"}${bandedCodec}
 const READY:u32=${SVO_BRICK_OCCUPANCY.readyBit}u;
 const OCCUPIED:u32=${SVO_BRICK_OCCUPANCY.occupiedBit}u;
 const ACTIVE:u32=${SVO_BRICK_LIFECYCLE.activeBit}u;
@@ -89,7 +114,7 @@ fn rebuildLeaf(leafIndex:u32){
     let payloadIndex=materialOffset+localIndex;
     if(payloadIndex>=arrayLength(&payload)){continue;}
     let fluidMaterial=${fluidMaterial};
-    let sceneMaterial=sceneMaterialOwners[voxelOffset+localIndex]&0xffffu;
+    let sceneMaterial=${sceneMaterial};
     if(fluidMaterial==0u&&sceneMaterial==0u){continue;}
     let local=vec3u(localIndex&7u,(localIndex>>3u)&7u,localIndex>>6u);
     minimum=min(minimum,local);
@@ -107,6 +132,15 @@ fn rebuildLeaf(leafIndex:u32){
   // Occupancy completion does not finalize lifecycle. The maintenance owner
   // clears DIRTY/QUEUED only after every payload and derived-data write lands.
   topologyWrite(flagsIndex,packed|lifecycle);
+  // This pass resummarises a leaf whose *fluid* content moved, and it cannot
+  // refit the brick's conservative slab: it binds no primitive buffer and its
+  // predicate is the material lane alone. A slab describing the previous
+  // occupancy would be unsound rather than merely stale — it would reject chords
+  // that now hold liquid — so the field is cleared. Bits 0..7 are the child mask
+  // and are the only part of this word anyone else reads.
+  // See lib/svo-brick-contour.ts.
+  let contourIndex=nodeIndex*8u+${SVO_BRICK_CONTOUR.nodeWord}u;
+  topologyWrite(contourIndex,topologyRead(contourIndex)&0xffu);
 }
 
 @compute @workgroup_size(64)
@@ -157,6 +191,13 @@ export class WebGpuSvoBrickOccupancyBuilder {
     private readonly device: GPUDevice,
     /** Must match the tree later handed to `bindings`; it decides which lanes exist. */
     private readonly payloadProfile: SparseBrickPayloadProfileName = "full",
+    /**
+     * Must also match that tree: the banded lane bases are baked into the module,
+     * because they are constants of one arena and the alternative is a uniform
+     * this pass does not otherwise need. `bindings` re-checks them against the
+     * tree it is handed rather than trusting the caller to pair them.
+     */
+    private readonly scenePayload?: SparseBrickScenePayloadLanes,
   ) {
   }
 
@@ -164,7 +205,7 @@ export class WebGpuSvoBrickOccupancyBuilder {
     if (this.allLeavesPipeline) return;
     this.module = this.device.createShaderModule({
       label: "SVO brick occupancy build shader",
-      code: webgpuSvoBrickOccupancyBuildWGSLFor(this.payloadProfile),
+      code: webgpuSvoBrickOccupancyBuildWGSLFor(this.payloadProfile, this.scenePayload),
     });
     this.allLeavesPipeline = await this.device.createComputePipelineAsync({
       label: "SVO brick occupancy initialization pipeline",
@@ -184,16 +225,29 @@ export class WebGpuSvoBrickOccupancyBuilder {
   }
 
   private bindings(tree: SparseBrickOctreeGPU, pipeline: GPUComputePipeline, worklist?: GPUBuffer): GPUBindGroup {
+    // A module compiled for one arena and bound to another would read a plausible
+    // address in the wrong lane, which is a summary with holes rather than a
+    // validation failure. Compare the whole block, not just the mode.
+    const configured = this.scenePayload ?? { mode: "dense" as const };
+    if (configured.mode !== tree.scenePayloadLanes.mode
+      || (configured.mode === "banded"
+        && configured.occupancyWords !== tree.scenePayloadLanes.occupancyWords)) {
+      throw new Error("SVO brick occupancy was compiled for a different payload arena than it was bound to");
+    }
+    const banded = tree.scenePayloadLanes.mode === "banded";
     const entries: GPUBindGroupEntry[] = [
       // Control and topology are byte ranges of the same structural arena. Bind
       // it once; WGSL accessors add TOPOLOGY_WORDS for topology addresses.
       { binding: 0, resource: { buffer: tree.structure } },
       { binding: 2, resource: { buffer: tree.payload } },
-      { binding: 4, resource: {
-        buffer: tree.sceneMaterialOwners,
-        offset: tree.sceneMaterialOwnerOffsetBytes,
+      // The banded arm reads its occupancy mask out of the payload arena binding
+      // 2 already carries, so the flat owner lane's slice is not declared and
+      // must not be supplied: `layout: "auto"` derives the group from the shader.
+      ...(banded ? [] : [{ binding: 4, resource: {
+        buffer: tree.payload,
+        offset: tree.scenePayloadLanes.materialOwnerWords * Uint32Array.BYTES_PER_ELEMENT,
         size: tree.voxelCapacity * Uint32Array.BYTES_PER_ELEMENT,
-      } },
+      } }]),
     ];
     if (worklist) entries.push({ binding: 3, resource: { buffer: worklist } });
     return this.device.createBindGroup({

@@ -1,3 +1,4 @@
+import type { SvoConeTracingMode } from "./svo-render-options";
 import type { SvoConeLightingScale } from "./webgpu-svo-dry-scene";
 
 /** Full-resolution reconstruction policy for reduced visibility and opaque radiance. */
@@ -43,14 +44,11 @@ export const SVO_ENVIRONMENT_REFINEMENT_DEPTH_MAXIMUM = 3;
 /**
  * The depth a dry document is authored at when nobody says otherwise.
  *
- * The ceiling, deliberately: the authored sets are exact analytic SDFs and the
- * scenery generators resolve their legibility floors against this leaf, so the
- * depth is what decides whether a feature is drawn or aliased. At the hero
- * garden's 6.25 mm lattice a stepping-stone tread is 74-108 mm — 12-17 voxels
- * at depth 0, which is what made them read as faceted plates — and 0.78 mm
- * leaves put them at 95-138.
+ * Depth one keeps one authored subdivision below the scene lattice by default.
+ * Deeper rungs remain available through the refinement control up to
+ * `SVO_ENVIRONMENT_REFINEMENT_DEPTH_MAXIMUM`.
  *
- * **The ceiling was measured before it was made the default**, on
+ * **The ceiling remains measured and available as an explicit choice**, on
  * `hero-garden-hose` through `tmp/sp18/census.ts`, because an older reading of
  * this ladder said depth 3 was unreachable (4.6M pages, a 9.99 GB staging
  * buffer at depth 2, a Node OOM at depth 3). That reading is stale — the
@@ -73,7 +71,7 @@ export const SVO_ENVIRONMENT_REFINEMENT_DEPTH_MAXIMUM = 3;
  * through `builtRefinementDepth`, which the renderer surfaces in its status
  * line. A scene that comes up coarser than this has said so.
  */
-export const SVO_ENVIRONMENT_REFINEMENT_DEPTH_DEFAULT = SVO_ENVIRONMENT_REFINEMENT_DEPTH_MAXIMUM;
+export const SVO_ENVIRONMENT_REFINEMENT_DEPTH_DEFAULT = 1;
 
 /**
  * The voxel a set is actually drawn into, given the lattice and the depth.
@@ -169,64 +167,6 @@ export const SVO_LOD_SCREEN_SPACE_PIXELS_MAXIMUM = 64;
 export const SVO_LOD_FIXED_LEVEL_MAXIMUM = 21;
 
 /**
- * What surface the primary shades, once a voxel has been hit.
- *
- * The voxel AABB is the traversal primitive under both arms; this only decides
- * what the hit *means* once the DDA has stopped on a solid cell.
- *
- * `voxel-face` is what shipped: the hit is the cell face the ray crossed and the
- * normal is one of six axis directions, read back off the cell bounds by
- * `dryVoxelFaceNormal`. Every surface therefore terraces at every lattice, and
- * the six-way quantisation is also what banded the interior of flat faces —
- * the G-buffer carries distinct geometric and shading normal slots and this arm
- * fills both with the same face.
- *
- * `trilinear` reconstructs the scene-geometry lane's signed distance across the
- * eight voxel centres surrounding the hit and takes the analytic gradient of
- * that reconstruction as the shading normal. The field is already stored, at the
- * voxel centre, in metres, and is differentiated exactly this way by the derived
- * builder's `safeNormal`; the only thing that was missing was a binding. The
- * stencil is clamped inside the leaf, matching `safeNormal`, so a dual cell that
- * straddles an 8-cell brick face falls back to a one-sided difference rather
- * than resolving the neighbouring leaf.
- *
- * `analytic` is the shipping arm, and it asks the surface rather than a stored
- * sample of it. A solid cell already carries the owner of the primitive that
- * filled it, that primitive's exact signed-distance function is already bound in
- * the same shader, and the ground's heightfield is already sampled there for the
- * marched path — so the exact outward normal at the hit point is one record
- * fetch away, with no lattice in it at all.
- *
- * ## Why the stored field could not answer this
- *
- * The scene-geometry lane is not a distance field, in two separate ways, and
- * both of them reach the frame as normals that are wrong in lattice-locked
- * patches — long straight bands on a flat surface, contour rings on a bowl:
- *
- *  - the ground writes `y - h(x,z)` (`webgpu-sparse-scene-proxies.ts:2066`), a
- *    *vertical* pseudo-distance. Its gradient is the correct normal on a gentle
- *    slope and collapses toward +Y on a steep one, which is measurable as
- *    vertical stripes down the pond coping's wall;
- *  - every other voxel gets the `min` over only the primitives binned into *its
- *    own brick*, so the field carries no guarantee of continuity across a brick
- *    face — while the stencil deliberately reads across brick faces, because a
- *    stencil clamped inside the leaf banded the surface a different way.
- *
- * Measured on `water-box-dam-break`, whose whole environment is six flat white
- * boxes: depth, owner and visibility are all exact, and `trilinear` alone turns
- * the room into a debris field of rectangular slabs. See
- * `SVO_SURFACE_ANALYTIC_EIKONAL_TOLERANCE` for what the fallback does about it.
- *
- * `trilinear` is retained as the arm that produced that evidence, and because it
- * is still the answer for a cell whose owner names nothing analytic.
- *
- * The geometric normal, the hit distance, and hit-versus-miss are identical
- * under all three arms — this changes shading only, which is what lets
- * `voxel-face` stand as the bit-exact reference the acceptance gates rest on.
- */
-export type SvoSurfaceReconstruction = "voxel-face" | "trilinear" | "analytic";
-
-/**
  * How far the reconstructed gradient's magnitude may sit from 1 before the
  * fallback declines it.
  *
@@ -287,8 +227,6 @@ export interface SvoRenderTuning {
   readonly coneRadianceReconstruction: SvoConeRadianceReconstruction;
   /** Reuse an exact primary G-buffer while an eligible camera and scene remain unchanged. */
   readonly stationaryPrimaryReuseEnabled: boolean;
-  /** What the primary shades once it has hit a voxel. See `SvoSurfaceReconstruction`. */
-  readonly surfaceReconstruction: SvoSurfaceReconstruction;
   /** Which predicate stops the descent. See `SvoLodMode`. */
   readonly lodMode: SvoLodMode;
   /**
@@ -387,12 +325,6 @@ export const DEFAULT_SVO_RENDER_TUNING: SvoRenderTuning = Object.freeze({
   coneLightingScale: 0.5,
   coneRadianceReconstruction: "full-res-relight",
   stationaryPrimaryReuseEnabled: false,
-  // The smooth surface is the shaded view's whole point, so it is the default and
-  // `voxel-face` is the reference arm rather than the other way round. This moves
-  // the frame hash and the hero fidelity baseline by construction; both are
-  // re-blessed against this default, and a lane that wants the pre-existing image
-  // asks for `voxel-face` and gets it bit-exactly.
-  surfaceReconstruction: "analytic",
   lodMode: "screen-space",
   // Off by default.
   //
@@ -404,10 +336,10 @@ export const DEFAULT_SVO_RENDER_TUNING: SvoRenderTuning = Object.freeze({
   //
   // Three pixels shipped, and the approximation it bought was not paying for
   // itself. A sub-threshold brick is drawn as one voxel, so far geometry
-  // arrives as axis-aligned facets — and once the primary started shading a
-  // smooth reconstructed normal (see `SvoSurfaceReconstruction`) that tier
-  // became the only part of the frame still terracing, which made it the most
-  // visible thing in the image rather than the least.
+  // arrives as axis-aligned facets — and once the primary started shading the
+  // voxel's baked normal that tier became the only part of the frame still
+  // terracing, which made it the most visible thing in the image rather than
+  // the least.
   //
   // Note that `fixed-level` is inert regardless: `packLodParams` writes the mode
   // and level through the u32 view of a vec4f lane, so `dryLodMode()` never
@@ -452,44 +384,109 @@ export const DEFAULT_SVO_RENDER_TUNING: SvoRenderTuning = Object.freeze({
   giConeCount: 4,
   coneNormalEscapeCells: 0.5,
   coneEmitterClearanceCells: 3,
-  // Off by default until the band's silhouette evidence is authored per scene:
-  // zero reproduces the historical analytic set exactly, so enabling the voxel
-  // primary underneath it (which only ever seeds a tighter depth) cannot be
-  // confused with the band's own image effect.
+  // Still off, and now for a measured reason rather than a pending one.
+  //
+  // The band was ranked as a ~20-25 ms lever at refinement depth 3. Differenced
+  // on the honest smoke lane (2026-08-06, hero-garden-hose, 800x460, depth 3,
+  // 873,700 occupied bricks) it is worth nothing: band 3 measured 428.1 ms and
+  // band 4096 — every record analytic, the band's own worst case — measured
+  // 403.7 ms, inside the lane's +/-13% spread and in the wrong direction. The
+  // analytic record set is simply not a cost at this lattice; the proxy raster
+  // over the *bricks* is (see the traversal-mode selection in
+  // `lib/webgpu-renderer.ts`). Zero keeps the exact historical analytic set, so
+  // enabling it would be an image change bought with nothing.
   nearFieldBandPixels: bandOverride("FLUID_SVO_BAND_PIXELS", 0),
   nearFieldBandHysteresis: bandOverride("FLUID_SVO_BAND_HYSTERESIS", 0.8),
   nearFieldBandBudget: bandOverride("FLUID_SVO_BAND_BUDGET", 256),
 });
 
+/**
+ * One rung of the quality ladder: how much work, and how visibility is answered.
+ *
+ * The mode belongs here rather than beside the sliders because the two halves
+ * are not independent. Under `cones` the visibility budgets are nearly inert —
+ * the cone march has its own step budget and the exact traversal is not reached
+ * — and under `exact` they are the whole cost of a shadow. A rung that raised
+ * one without the other would describe a frame nobody renders.
+ */
+export interface SvoRenderQualityRung {
+  readonly tuning: SvoRenderTuning;
+  readonly coneTracingMode: SvoConeTracingMode;
+}
+
+const performanceTuning: SvoRenderTuning = Object.freeze({
+  ...DEFAULT_SVO_RENDER_TUNING,
+  resolutionScale: 0.5,
+  coneLightingScale: 0.25 as const,
+  primaryLeafVisits: 24,
+  coneStepBudget: 20,
+  giConeCount: 3,
+  giBounceStrength: 1.35,
+  giOcclusionStrength: 0.6,
+  maximumShadedLights: 3,
+  stableAreaLightSamples: 1,
+  stableAoSamples: 2,
+  visibilityNodeVisits: 48,
+  visibilityLeafVisits: 12,
+  visibilityWorkItems: 320,
+});
+
+const qualityTuning: SvoRenderTuning = Object.freeze({
+  ...DEFAULT_SVO_RENDER_TUNING,
+  resolutionScale: 1,
+  coneLightingScale: 0.5 as const,
+  primaryLeafVisits: 128,
+  coneStepBudget: 48,
+  giConeCount: 4,
+  visibilityNodeVisits: 128,
+  visibilityLeafVisits: 32,
+  visibilityWorkItems: 1024,
+});
+
+/**
+ * The ladder, cheapest first, and what each rung costs.
+ *
+ * **Re-measured 2026-08-07** after the voxels-only cutover and the analytic
+ * purge, on `hero-garden-hose` at depth 0, canonical-parametric + split, brick
+ * occupancy `bounds`, each rung rendered at its own `resolutionScale` of a
+ * 800x460 request (`FLUID_SVO_DRY_SMOKE_PRESET`, median submit-to-fence over six
+ * serialized encodes). The previous rung costs were tuned before the 1.73x and
+ * are not comparable to these.
+ *
+ * | rung | pixels | median frame | image |
+ * |---|---|---|---|
+ * | `performance` | 400x230 | see docs/unified-voxel-render-handoff.md | 4x4 cone prepass |
+ * | `balanced` | 576x331 | " | 2x2 cone prepass |
+ * | `quality` | 800x460 | " | 2x2 cone prepass, full budgets |
+ * | `reference` | 800x460 | " | exact voxel shadow rays |
+ *
+ * `reference` is `quality`'s work with the cone tier switched off: one bounded
+ * hierarchy ray per shadow and AO sample, occluded by the same solid voxels the
+ * primary draws. It became a real rung on 2026-08-07 — before that the exact
+ * visibility walk resolved no voxel at all and took its occluders from the
+ * authored analytic records, so it was sharper *and* drawing a different scene.
+ */
+export const SVO_RENDER_QUALITY_PRESETS = Object.freeze({
+  performance: Object.freeze({ tuning: performanceTuning, coneTracingMode: "cones" as const }),
+  balanced: Object.freeze({ tuning: DEFAULT_SVO_RENDER_TUNING, coneTracingMode: "cones" as const }),
+  quality: Object.freeze({ tuning: qualityTuning, coneTracingMode: "cones" as const }),
+  reference: Object.freeze({ tuning: qualityTuning, coneTracingMode: "exact" as const }),
+} satisfies Record<string, SvoRenderQualityRung>);
+
+export type SvoRenderQualityPreset = keyof typeof SVO_RENDER_QUALITY_PRESETS;
+
+/**
+ * The tuning half of the ladder, for the consumers that only set sliders.
+ *
+ * Projected from {@link SVO_RENDER_QUALITY_PRESETS} rather than written twice:
+ * a rung that disagreed with itself about `primaryLeafVisits` would select one
+ * value through the profile strip and the other through a preset lookup.
+ */
 export const SVO_RENDER_TUNING_PRESETS = Object.freeze({
-  performance: Object.freeze({
-    ...DEFAULT_SVO_RENDER_TUNING,
-    resolutionScale: 0.5,
-    coneLightingScale: 0.25 as const,
-    primaryLeafVisits: 24,
-    coneStepBudget: 20,
-    giConeCount: 3,
-    giBounceStrength: 1.35,
-    giOcclusionStrength: 0.6,
-    maximumShadedLights: 3,
-    stableAreaLightSamples: 1,
-    stableAoSamples: 2,
-    visibilityNodeVisits: 48,
-    visibilityLeafVisits: 12,
-    visibilityWorkItems: 320,
-  }),
+  performance: performanceTuning,
   balanced: DEFAULT_SVO_RENDER_TUNING,
-  quality: Object.freeze({
-    ...DEFAULT_SVO_RENDER_TUNING,
-    resolutionScale: 1,
-    coneLightingScale: 0.5 as const,
-    primaryLeafVisits: 128,
-    coneStepBudget: 48,
-    giConeCount: 4,
-    visibilityNodeVisits: 128,
-    visibilityLeafVisits: 32,
-    visibilityWorkItems: 1024,
-  }),
+  quality: qualityTuning,
+  reference: qualityTuning,
 });
 
 export type SvoRenderTuningPreset = keyof typeof SVO_RENDER_TUNING_PRESETS;
@@ -519,12 +516,6 @@ export function normalizeSvoRenderTuning(value: SvoRenderTuning): SvoRenderTunin
     coneLightingScale,
     coneRadianceReconstruction,
     stationaryPrimaryReuseEnabled: Boolean(value.stationaryPrimaryReuseEnabled),
-    // Unknown normalises to the default rather than to the reference arm: a
-    // typo in a stored URL should give the shipping image, not silently pin the
-    // frame to the arm the gates keep for comparison.
-    surfaceReconstruction: value.surfaceReconstruction === "voxel-face"
-      || value.surfaceReconstruction === "trilinear" || value.surfaceReconstruction === "analytic"
-      ? value.surfaceReconstruction : DEFAULT_SVO_RENDER_TUNING.surfaceReconstruction,
     lodMode: value.lodMode === "fixed-level" ? "fixed-level" : "screen-space",
     // Not `integer`: the threshold is a continuous angular measure, and rounding
     // it would quantise the one control that sweeps the quality/cost curve.

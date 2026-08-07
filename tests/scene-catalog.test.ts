@@ -271,8 +271,8 @@ test("the hero set is a description of itself, and survives a save unchanged", (
   assert.ok(scenery);
   assert.deepEqual(
     scenery.nodes.filter((node) => node.kind === "generator").map((node) => node.generator),
-    ["swept-coping", "pond-stone-set", "bonsai", "rosette", "rosette", "rosette"],
-    "the rim, the stones, the tree and the plants are named rather than baked");
+    ["pond-stone-set", "oak", "rosette", "rosette", "rosette"],
+    "the stones, the tree and the plants are named rather than baked");
 
   // The property this phase exists for. Baked, the same set is 684 nodes and
   // 884 kB of ellipsoid centres — every one of which `cloneScene` copies on

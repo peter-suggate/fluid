@@ -133,8 +133,12 @@ test("the raster-primary fragment reuses the production leaf tracer and writes d
   // Constant clip-space z with w = view depth is the reversed-Z infinite-far projection.
   assert.match(shader, /position=vec4f\(dot\(relative,right\)\/\(aspect\*cameraTanHalfFov\(\)\),dot\(relative,up\)\/cameraTanHalfFov\(\),DRY_REVERSED_Z_NEAR_M,viewDepth\);/);
   assert.match(shader, /struct DryRasterPrimaryOut\{[^}]*@location\(2\) geometry:vec4f,[^}]*@location\(3\) opaqueIdentity:vec2u,/);
-  // Background and terrain only; the primary trace never runs full-screen here.
-  assert.match(shader, /let terrain=traceTerrain\(camera\[0\],rd\);/);
+  // Background only, and the background is now a clear: the ground it used to
+  // trace analytically is voxels, so the pass publishes an explicit miss and the
+  // primary trace still never runs full-screen here.
+  const background = shader.slice(shader.indexOf("@fragment fn dryRasterPrimaryBackgroundMain"));
+  assert.match(background.slice(0, background.indexOf("@vertex")), /dryRasterPrimaryReset\(\);\s*return dryRasterPrimaryMiss\(\);/);
+  assert.doesNotMatch(shader, /traceTerrain/);
 
   // Inline variants of the same module (the reduced cone prepass) legitimately
   // keep traversing, so they must omit the raster entries rather than fail.
@@ -161,7 +165,7 @@ test("conservative coverage moves expensive leaf tracing into one exact per-pixe
   assert.match(coverage, /svoBrickCoverageCandidates\[address\]=input\.instanceIndex;\}\s*discard;/,
     "ordinary conservative fragments stop after their cheap candidate write");
   assert.match(resolve, /return dryBrickCoverageResolve\(input\.position\.xy\)/);
-  assert.doesNotMatch(resolve, /discard|traceStaticSolidScene/,
+  assert.doesNotMatch(resolve, /discard|traceStatic\(/,
     "the normal exact resolve is one fragment per pixel and carries no canonical traversal stack");
   assert.match(shader, /let payload=traceLeafPayload\(ro,rd,leaf\)/,
     "candidate resolution must reuse the production exact leaf tracer");
@@ -170,7 +174,7 @@ test("conservative coverage moves expensive leaf tracing into one exact per-pixe
   assert.match(overflow, /atomicLoad\(&svoBrickCoverageCounts\[pixel\]\)<=[0-9]+u\)\{discard;\}/);
   assert.match(overflow, /let payload=traceLeafPayload\(ro,rd,leaf\)/,
     "overflow reuses the direct brick arithmetic, so capacity changes cost but never parity");
-  assert.doesNotMatch(overflow, /traceStaticSolidScene/,
+  assert.doesNotMatch(overflow, /traceStatic\(/,
     "canonical brick-boundary tie arithmetic must not leak into the raster control comparison");
 });
 

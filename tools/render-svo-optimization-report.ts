@@ -58,8 +58,11 @@ interface Benchmark {
     readonly maximumDepth?: number;
     readonly structuralCapacities?: { readonly nodes?: number; readonly leaves?: number; readonly voxels?: number };
     readonly structuralBytes?: { readonly topology?: number; readonly payload?: number };
-    readonly compactHierarchy?: { readonly residentBytes?: number; readonly canonicalNodeBytes?: number;
-      readonly hotNodeByteReductionPercent?: number };
+    // `built` is false on the arms that do not bind the structure, which is now
+    // every arm but compact/wide/hybrid. Absent in artifacts retained before
+    // that gate existed, where the structure was always built.
+    readonly compactHierarchy?: { readonly built?: boolean; readonly residentBytes?: number;
+      readonly canonicalNodeBytes?: number; readonly hotNodeByteReductionPercent?: number };
     readonly allocatedBytes?: number;
   };
   readonly fingerprint: Fingerprint;
@@ -271,6 +274,12 @@ const offHash = currentOff.fingerprint.imageHashFnv1a32;
 const boundsHash = bounds.fingerprint.imageHashFnv1a32;
 const boundsRepeatHash = boundsRepeat.fingerprint.imageHashFnv1a32;
 const compact = currentOff.scene.compactHierarchy;
+// The `currentOff` arm is a canonical-parametric one, which no longer builds
+// the compact hierarchy at all — so say that rather than print three em dashes
+// that read as a failed publication.
+const compactMemory = compact?.built === false
+  ? "Not built on this arm — only compact/wide/hybrid traversal binds it"
+  : `${mib(compact?.canonicalNodeBytes)} → ${mib(compact?.residentBytes)} hot nodes (${n(compact?.hotNodeByteReductionPercent, 0)}% smaller)`;
 const brick8 = bricks.arms.brick8;
 const brick4 = bricks.arms.brick4;
 const reportTitle = provisional ? "SVO render optimization report — provenance refresh pending" : "SVO render optimization report";
@@ -310,7 +319,7 @@ const lines = [
   `| Strict canonical cursor | xctrace ${n(baselineXc.frames.medianMs)} → ${n(canonicalXc.frames.medianMs)} ms (${percent(pct(baselineXc.frames.medianMs, canonicalXc.frames.medianMs))}); standalone ${n(canonical.timing.median_ms)} / ${n(canonical.timing.p95_ms)} ms | Superseded by the final matched cumulative capture | Removes hybrid wide/canonical cursor and runtime branch | **Keep** |`,
   `| Parametric child ordering | canonical ${n(canonical.timing.median_ms)} → ${n(parametric.timing.median_ms)} ms (${percent(pct(canonical.timing.median_ms, parametric.timing.median_ms))}); p95 ${n(parametric.timing.p95_ms)} ms contains an outlier | Image hash ${canonicalHash} → ${parametricHash}: ${canonicalHash === parametricHash ? "exact" : "different"} | Replaces eight child AABB tests/sort with midpoint crossings plus degeneracy fallback | **Keep** |`,
   `| Brick occupied bounds | off ${n(currentOff.timing.median_ms)} ms; bounds ${n(bounds.timing.median_ms)} / repeat ${n(boundsRepeat.timing.median_ms)} ms | ${offHash === boundsHash && offHash === boundsRepeatHash ? "Exact image hash" : "Different"} | Uses existing node flag word; no persistent allocation increase | **Off**: neutral/noisy |`,
-  `| Compact 16-byte hierarchy | No isolated hose timing artifact | Structural publication implemented | ${mib(compact?.canonicalNodeBytes)} → ${mib(compact?.residentBytes)} hot nodes (${n(compact?.hotNodeByteReductionPercent, 0)}% smaller) | **Not selected without timing** |`,
+  `| Compact 16-byte hierarchy | No isolated hose timing artifact | Structural publication implemented | ${compactMemory} | **Not selected without timing** |`,
   `| Split visibility/lighting, isolated hybrid test | ${n(inline.timing.median_ms)} → ${n(split.timing.median_ms)} ms (${percent(pct(inline.timing.median_ms, split.timing.median_ms))}) | ${splitChangedPixels.toLocaleString()} / ${splitTotalPixels.toLocaleString()} pixels (${n(splitChangedPercent, 4)}%) differ | +${n(split.splitShading?.extraMiBPerFrame, 3)} MiB/frame, ${n(split.splitShading?.extraGiBPerSecondAt60Fps, 3)} GiB/s at 60 fps | **Promising in isolation only** |`,
   `| Split visibility/lighting, cumulative parametric stack | ${n(cumulativeSplit.arms.inline.aggregateTiming.median_ms)} → ${n(cumulativeSplit.arms.split.aggregateTiming.median_ms)} ms (-${n(cumulativeSplitSpeedupPercent, 3)}%); p95 ${n(cumulativeSplit.arms.inline.aggregateTiming.p95_ms)} → ${n(cumulativeSplit.arms.split.aggregateTiming.p95_ms)} ms | ${cumulativeSplit.comparison.image.bitExact ? "Bit-exact configured frame" : `${n(cumulativeSplit.comparison.image.differingPixelPercent, 4)}% pixels differ`} | Historical pre-relight split; later register-lifetime split measured 36.5 → 25.9 ms | **Superseded; keep split relight** |`,
   `| Uniform brick 4 | brick 8 ${n(brick8.timing.median_ms)} / ${n(brick8.timing.p95_ms)} ms; brick 4 ${n(brick4.timing.median_ms)} / ${n(brick4.timing.p95_ms)} ms | Near, not exact: 72 pixels differ | Nodes ${brick8.scene.structuralCapacities?.nodes?.toLocaleString()} → ${brick4.scene.structuralCapacities?.nodes?.toLocaleString()}; allocation ${mib(brick8.scene.allocatedBytes)} → ${mib(brick4.scene.allocatedBytes)} | **Keep brick 8** |`,

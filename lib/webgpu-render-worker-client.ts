@@ -29,6 +29,9 @@ export interface WebGPURenderWorkerSnapshot {
   fluidCellTraceRevision: number;
   fluidCellTraceReady: boolean;
   fluidCellTraceFineBand: FluidLabRenderer["fluidCellTraceFineBand"];
+  /** Poses the drawn frame used, in roster order. See FluidLabRenderer. */
+  rigidBodyPoses: FluidLabRenderer["rigidBodyPoses"];
+  rigidBodyPoseRevision: number;
 }
 
 export type WebGPURenderWorkerRequest =
@@ -79,6 +82,8 @@ const EMPTY_SNAPSHOT: WebGPURenderWorkerSnapshot = {
   fluidCellTraceRevision: 0,
   fluidCellTraceReady: false,
   fluidCellTraceFineBand: undefined,
+  rigidBodyPoses: [],
+  rigidBodyPoseRevision: 0,
 };
 
 /**
@@ -149,6 +154,8 @@ export class WebGPURenderWorkerClient {
   get fluidCellTraceRevision() { return this.snapshot.fluidCellTraceRevision; }
   get fluidCellTraceReady() { return this.snapshot.fluidCellTraceReady; }
   get fluidCellTraceFineBand() { return this.snapshot.fluidCellTraceFineBand; }
+  get rigidBodyPoses() { return this.snapshot.rigidBodyPoses; }
+  get rigidBodyPoseRevision() { return this.snapshot.rigidBodyPoseRevision; }
 
   initialize(): Promise<void> {
     return this.request<void>({ type: "initialize", requestId: this.nextRequestId() });

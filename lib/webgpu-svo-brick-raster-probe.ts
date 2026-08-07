@@ -14,6 +14,11 @@ import {
   decodeSvoPixelTrace,
   type SvoPixelTrace,
 } from "./svo-pixel-trace";
+import {
+  sparseBrickBandedLeafCodecWGSL,
+  sparseBrickSceneIdentityCodecWGSL,
+  type SparseBrickScenePayloadLanes,
+} from "./sparse-brick-octree";
 import { cameraApertureShaderLibrary } from "./webgpu-camera";
 import { SVO_BRICK_RASTER_CONTRACT, svoBrickRasterSharedWGSL } from "./webgpu-svo-brick-raster";
 
@@ -46,15 +51,14 @@ export const SVO_BRICK_RASTER_PROBE_CONTRACT = Object.freeze({
    */
   recordCapacity: 192,
   workgroupSize: 64,
-  /** `SvoMapping` (48 B) plus `metadata` (16 B) of `DryParams`, bound directly. */
-  paramsBindingBytes: 64,
   entryPoint: "svoBrickRasterProbeMain" as const,
   bindings: Object.freeze({
     uniforms: 0,
     params: 1,
     request: 2,
     structure: 3,
-    materialOwners: 4,
+    /** The whole scene payload arena; identity is decoded through the shared codec. */
+    scenePayload: 4,
     scene: 5,
     rasterPublication: 6,
     records: 10,
@@ -83,7 +87,7 @@ export function svoBrickRasterProbeBindGroupLayoutEntries(): GPUBindGroupLayoutE
     { binding: bindings.params, visibility, buffer: { type: "uniform" } },
     { binding: bindings.request, visibility, buffer: { type: "uniform" } },
     { binding: bindings.structure, visibility, buffer: { type: "read-only-storage" } },
-    { binding: bindings.materialOwners, visibility, buffer: { type: "read-only-storage" } },
+    { binding: bindings.scenePayload, visibility, buffer: { type: "read-only-storage" } },
     { binding: bindings.scene, visibility, buffer: { type: "read-only-storage" } },
     { binding: bindings.rasterPublication, visibility, buffer: { type: "read-only-storage" } },
     { binding: bindings.records, visibility, storageTexture: { access: "write-only", format: "r32uint" } },
@@ -106,6 +110,21 @@ export interface SvoBrickRasterProbeOptions {
   readonly primitiveWordOffset?: number;
   readonly sortStateWordOffset?: number;
   readonly instanceWordOffset?: number;
+  /**
+   * `DryParams` in u32 words, and where scene identity's lane bases sit in it.
+   *
+   * The probe used to bind only the 64-byte `SvoMapping`+`metadata` prefix. It
+   * now needs the payload lane bases too, and they have to be *read* rather than
+   * baked: a module compiled against one arena's offsets and later bound to a
+   * world rebuilt at another capacity would resolve a plausible word in the wrong
+   * lane, which reads as a finding about the traversal rather than as the stale
+   * binding it is. Passed in rather than imported because the layout lives with
+   * the shader that owns the uniform, and that shader imports this module.
+   */
+  readonly paramsWordCount: number;
+  readonly payloadLaneWordOffset: number;
+  /** How this world stores scene identity; decides which decode is compiled. */
+  readonly scenePayload?: SparseBrickScenePayloadLanes;
 }
 
 /**
@@ -128,6 +147,27 @@ export function createSvoBrickRasterProbeWGSL(options: SvoBrickRasterProbeOption
   const sortStateWordOffset = options.sortStateWordOffset ?? 0;
   const instanceWordOffset = options.instanceWordOffset ?? 0;
   const { bindings, recordCapacity, workgroupSize, entryPoint } = SVO_BRICK_RASTER_PROBE_CONTRACT;
+  // `SvoMapping` (12 words) plus `metadata` (4). Everything between that and the
+  // payload lane bases is `DryParams` state this probe does not read, declared as
+  // one named span rather than field by field.
+  const PROBE_PARAMS_PREFIX_WORDS = 16;
+  const reservedVectors = (options.payloadLaneWordOffset - PROBE_PARAMS_PREFIX_WORDS) / 4;
+  if (!Number.isSafeInteger(reservedVectors) || reservedVectors < 0
+    || options.paramsWordCount < options.payloadLaneWordOffset + 8) {
+    throw new RangeError("Brick raster probe parameters must reach two whole vec4u lanes past the prefix");
+  }
+  const mode = options.scenePayload?.mode ?? "dense";
+  const sceneIdentityWGSL = /* wgsl */ `${mode === "dense" ? "" : sparseBrickBandedLeafCodecWGSL({
+    occupancyBase: "params.payloadLanes.x", recordMaskBase: "params.payloadLanes.y",
+    headerBase: "params.payloadLanes.z", blobBase: "params.payloadLanes.w",
+    recordsBase: "params.payloadLanes1.x",
+    load: (index) => `scenePayload[${index}]`, mode, records: false,
+  })}
+${sparseBrickSceneIdentityCodecWGSL({
+    mode, materialOwnerBase: "params.payloadLanes1.y",
+    load: (index) => `scenePayload[${index}]`,
+  })}
+fn dryVoxelCapacity()->u32{return params.payloadLanes1.z;}`;
   const header = SVO_PIXEL_TRACE_HEADER;
   const kinds = SVO_PIXEL_TRACE_KINDS;
   const flags = SVO_PIXEL_TRACE_FLAGS;
@@ -140,7 +180,8 @@ struct Uniforms{viewport:vec4f,cameraPosition:vec4f,cameraTarget:vec4f,container
 struct SvoNode{address:vec4u,links:vec4u}
 struct SvoLeaf{topology:vec4u}
 struct SvoMapping{worldOrigin:vec3f,brickSize:u32,cellSize:vec3f,maximumDepth:u32,nodeCount:u32,leafCount:u32,maxVisits:u32,_padding:u32}
-struct SvoProbeParams{mapping:SvoMapping,metadata:vec4u}
+// Reserved: the DryParams lanes between \`metadata\` and the payload lane bases.
+struct SvoProbeParams{mapping:SvoMapping,metadata:vec4u,reserved:array<vec4u,${reservedVectors}>,payloadLanes:vec4u,payloadLanes1:vec4u}
 struct SvoBrickSortStateRead{
   drawVertexCount:u32,
   drawInstanceCount:u32,
@@ -165,10 +206,11 @@ ${cameraApertureShaderLibrary()}
 // x,y requested pixel; z request token; w non-zero arms the probe.
 @group(0) @binding(${bindings.request}) var<uniform> probeRequest:vec4u;
 @group(0) @binding(${bindings.structure}) var<storage,read> svoProbeStructure:array<u32>;
-@group(0) @binding(${bindings.materialOwners}) var<storage,read> materialOwners:array<u32>;
+@group(0) @binding(${bindings.scenePayload}) var<storage,read> scenePayload:array<u32>;
 @group(0) @binding(${bindings.scene}) var<storage,read> svoProbeScene:array<u32>;
 @group(0) @binding(${bindings.rasterPublication}) var<storage,read> svoProbeRaster:array<u32>;
 @group(0) @binding(${bindings.records}) var probeRecords:texture_storage_2d<r32uint,write>;
+${sceneIdentityWGSL}
 
 fn svoProbeWords4(source:ptr<storage,array<u32>,read>,offset:u32)->vec4u{return vec4u((*source)[offset],(*source)[offset+1u],(*source)[offset+2u],(*source)[offset+3u]);}
 fn svoProbeControl(index:u32)->u32{return svoProbeStructure[index];}
@@ -323,6 +365,9 @@ fn svoProbeTraceBrick(ro:vec3f,rd:vec3f,bounds:mat2x3f,voxelOffset:u32,tEnter:f3
   let deltaT=select(vec3f(PROBE_MISS),abs(extent/rd),abs(rd)>vec3f(1e-9));
   let tolerance=length(extent)*1.05;
   var cells=0u;
+  // Hoisted exactly as the fragment's own walk hoists it, so the probe mirrors
+  // the loads the frame took rather than a second way of reaching the same word.
+  let identitySource=sceneIdentitySourceAt(voxelOffset);
   for(var iteration=0u;iteration<32u;iteration+=1u){
     if(any(cell<vec3i(0))||any(cell>=vec3i(i32(brickSize)))||entry>tExit){break;}
     cells+=1u;
@@ -332,25 +377,17 @@ fn svoProbeTraceBrick(ro:vec3f,rd:vec3f,bounds:mat2x3f,voxelOffset:u32,tEnter:f3
     var tagged=false;
     var found=false;
     var surface=PROBE_MISS;
-    if(payloadIndex<arrayLength(&materialOwners)){
-      let identity=materialOwners[payloadIndex];
-      let owner=identity>>16u;
-      // The primary probe binds no thick glass and ignores no owner, so the
-      // shipping suppression predicate reduces to the suppressed-owner slot.
-      if(owner>=params.metadata.y&&owner!=params.metadata.z){
-        let primitiveIndex=owner-params.metadata.y;
-        if(primitiveIndex<params.metadata.x){
-          tagged=true;
-          // This probe binds the primitive span alone, not the scene arena, so
-          // it cannot resolve an aggregate's packing. A cluster therefore
-          // reports RAY_INVALID here rather than a plausible hit — the probe is
-          // a diagnostic on the analytic kinds, and a silent miss would be read
-          // as evidence about the traversal it is measuring.
-          let exact=svoIntersectPrimitiveExact(svoProbePrimitive(primitiveIndex),ro,rd,
-            max(max(0.0,entry-tolerance),1e-4),cellExit+tolerance,svoInvalidClusterPacking());
-          found=exact.status==SVO_PRIMITIVE_RAY_HIT;
-          surface=select(PROBE_MISS,exact.t_m,found);
-        }
+    if(payloadIndex<dryVoxelCapacity()){
+      let identity=sceneIdentityOf(identitySource,payloadIndex);
+      // The probe used to resolve the cell's owner and march that record's exact
+      // surface, mirroring a primary that no longer does either. A voxel carries
+      // a baked normal in the high half of this word now, so the first solid cell
+      // *is* the surface and the exact test it was tagging has no counterpart to
+      // measure. Solidity is the low half, unchanged.
+      if((identity&0xffffu)!=0u){
+        tagged=true;
+        found=true;
+        surface=entry;
       }
     }
     // Recording is the winner's second pass only: the scanning lanes run

@@ -294,7 +294,14 @@ export function censusSparseBrickDryPayload(
   };
 }
 
-/** Convenience for readers that want the identity split rather than the word. */
-export function unpackSparseBrickDryIdentity(identity: number): { materialId: number; ownerId: number } {
-  return unpackMaterialOwner(identity);
+/**
+ * The material a scene identity word names.
+ *
+ * It used to return the owner half too. That half now carries the voxel's baked
+ * oct8 surface normal — see `sparseBrickSceneIdentityWordCodecWGSL` — so there is
+ * no owner to report, and returning the raw bits under that name would have been
+ * a number that looked plausible and meant nothing.
+ */
+export function unpackSparseBrickDryIdentity(identity: number): { materialId: number } {
+  return { materialId: identity & 0xffff };
 }

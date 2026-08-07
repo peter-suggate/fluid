@@ -71,7 +71,10 @@ test("raster rigid discovery removes bodies only from split primary visibility",
   );
   const split = createSvoDrySceneFragmentWGSL(0.5, "hybrid", "off", "split", 0, false, true, true);
   const visibility = split.slice(split.indexOf("@fragment fn dryVisibilityMain"), split.indexOf("@fragment fn dryLightingMain"));
-  assert.match(visibility, /let opaque=traceStaticSolidScene\(ro,rd\)/);
+  // `traceStatic` outright: the static scene used to be that plus an analytic
+  // terrain trace, and the wrapper that folded them together went with the
+  // second surface.
+  assert.match(visibility, /let opaque=traceStatic\(ro,rd\)/);
   assert.doesNotMatch(visibility, /let opaque=traceOpaqueScene\(ro,rd\)/,
     "fullscreen primary visibility must not retain the rigid loop");
   assert.match(split, /dryPrepassBoundaryMain[^]*traceOpaqueScene\(ray\[0\],ray\[1\]\)/,

@@ -1,7 +1,38 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { scenePresets } from "../lib/scenes";
-import { planOctreeCoarseSummary } from "../lib/webgpu-octree-coarse-summary";
+import {
+  planOctreeCoarseSummary,
+  planOctreeRedistanceSweeps,
+} from "../lib/webgpu-octree-coarse-summary";
+
+test("the redistance reach covers the widest distance the ladder asks about", () => {
+  // The sweep is min-only fast marching from a one-domain-extent seed, so its
+  // reach IS the sweep count: a cell farther than that still reports the seed.
+  // `pressureRefinementEvidence` reads phi as a distance out to
+  // bandCells + gradingLayers * maximumLeafSize, so anything less means the
+  // ladder decides how coarse the deep interior may get from a constant. Five
+  // sweeps against a width of twenty is what coarsened the dam-break front to
+  // the ceiling three cells from the free surface.
+  const dam = [24, 18, 16] as const;
+  assert.ok(planOctreeRedistanceSweeps(4 + 1 * 8, dam) >= 12,
+    "band 4 and grading 1 at an 8-cell ceiling need a 12-cell reach");
+  assert.equal(planOctreeRedistanceSweeps(4 + 1 * 8, dam) % 2, 1,
+    "the seed lands in the scratch bank, so an odd count finishes in the output");
+
+  // Every count is odd, at least the historical five, and never longer than the
+  // lattice -- no sweep can carry information past the domain.
+  for (const reach of [0, 1, 5, 6, 12, 20, 36, 4_096, Number.NaN]) {
+    for (const dims of [dam, [32, 32, 32] as const, [320, 96, 80] as const]) {
+      const sweeps = planOctreeRedistanceSweeps(reach, dims);
+      assert.equal(sweeps % 2, 1, `${reach} on ${dims.join("x")} must stay odd`);
+      assert.ok(sweeps >= 5, "the historical reach is the floor");
+      assert.ok(sweeps <= Math.max(...dims) + 1);
+    }
+  }
+  assert.equal(planOctreeRedistanceSweeps(undefined, dam), 5,
+    "a caller that declares no requirement keeps the historical reach");
+});
 
 test("factor-one coarse summary uses B4 nodes and bounded sparse entries", () => {
   const plan = planOctreeCoarseSummary([16, 16, 16], 4_096);

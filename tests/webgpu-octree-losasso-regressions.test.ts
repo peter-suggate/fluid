@@ -336,10 +336,17 @@ test("Losasso fused sub-L0 schedule is the resident-tier default", () => {
   assert.match(source,
     /subLevelRows\.every\(capacity=>capacity<=FUSED_SUB_L0_MAXIMUM_LEVEL_ROWS\)/,
     "every sub-L0 level must fit the resident tier before the fused form is chosen");
-  assert.match(source, /this\.useFusedSubL0\s*\?9:/,
-    "the accepted fused graph has nine encoded correction dispatches");
+  // The count is derived now that the smoothing sweeps are a live dial, so the
+  // nine is asserted where it is produced rather than as a source literal:
+  // `tests/octree-runtime-dials.test.ts` pins encodedCorrectionDispatchCount to
+  // nine at the authored counts and proves the dial cannot tax the default.
+  assert.match(source, /if\(this\.useFusedSubL0\)return clears\+3\+2\*this\.smoothingSweeps;/,
+    "the accepted fused graph is clears + copy-in/out, residual, the fused dispatch, and the level-0 smoothing");
+  // Ceil, because a span need not divide the domain any more: the leaf ceiling
+  // is the largest leaf the lattice can hold, not the coarsest exact tiling, so
+  // the far faces carry one partial parent per axis and those are rows too.
   assert.match(hierarchy,
-    /const levelRowCapacityAt = \(targetSpan: number\) => Math\.min\(rows,\s*\(nx \/ targetSpan\) \* \(ny \/ targetSpan\) \* \(nz \/ targetSpan\)\);/,
+    /const levelRowCapacityAt = \(targetSpan: number\) => Math\.min\(rows,\s*Math\.ceil\(nx \/ targetSpan\) \* Math\.ceil\(ny \/ targetSpan\) \* Math\.ceil\(nz \/ targetSpan\)\);/,
     "coarse vector bounds should come from the number of dyadic target cells");
   // A level below the row floor has no parallelism to relax with but still
   // carries tens of thousands of retained face patches. Measured 2026-08-06:

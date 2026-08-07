@@ -4,6 +4,7 @@ import {
   packMaterialOwner,
   sparseBrickDispatchDimensions,
   sparseBrickSceneGeometryCodecWGSL,
+  sparseBrickSceneIdentityWordCodecWGSL,
   sparseBrickBandedLeafCodecWGSL,
   type SparseBrickOctreeGPU,
   type SparseBrickPayloadProfileName,
@@ -11,6 +12,7 @@ import {
   type SparseBrickLeafPayloadMode,
 } from "./sparse-brick-octree";
 import { SVO_BRICK_LIFECYCLE, SVO_BRICK_OCCUPANCY } from "./svo-brick-occupancy";
+import { SVO_BRICK_CONTOUR, svoBrickContourFitWGSL, svoBrickContourWGSL } from "./svo-brick-contour";
 import type { EnvironmentProxyPrimitive } from "./voxel-environments";
 import {
   sampleSvoPrimitive,
@@ -19,6 +21,8 @@ import {
   type SvoPrimitiveDescriptor,
   type SvoSmoothUnionClusterPacking,
 } from "./svo-primitive-abi";
+import { SVO_PRIMITIVE_KIND_TABLE } from "./svo-primitive-kinds";
+import { SVO_GBUFFER_NORMAL_OCT8_WGSL } from "./svo-gbuffer";
 import { SVO_CLUSTER_ARENA_BLOCK, packSvoClusterArena, svoClusterArenaDecodeWGSL } from "./svo-cluster-arena";
 import {
   packSvoFieldProgramArena,
@@ -32,17 +36,17 @@ import type { SparseSceneTerrainField } from "./sparse-scene-terrain-field";
 import { VOXEL_MATERIAL_IDS } from "./voxel-scene";
 
 /**
- * The identity a ground voxel publishes: the shared terrain material and no
- * owner, exactly as the solver's own dense terrain bake does.
+ * The material a ground voxel publishes, the same one the solver's own dense
+ * terrain bake uses.
  *
- * No owner is the load-bearing half. `traceLeafPayload` upgrades a solid voxel
- * to its record's exact surface and rejects `SPARSE_BRICK_NO_OWNER`, so ground
- * voxels are invisible to primary visibility and the analytic marcher stays the
- * sole depth authority for the ground — the pyramid gains the ground without
- * the frame gaining a blocky one.
+ * It used to be a packed material/owner pair whose ownerless half was the
+ * load-bearing part: ground was invisible to primary visibility so the analytic
+ * marcher could stay the sole depth authority for it. The primary shades from
+ * voxels alone now and the identity word's high half carries a baked normal
+ * instead of an owner, so the ground is drawn by the same path as everything
+ * else and this is a material id and nothing more.
  */
-export const SPARSE_SCENE_TERRAIN_MATERIAL_OWNER =
-  packMaterialOwner(VOXEL_MATERIAL_IDS.terrain, SPARSE_BRICK_NO_OWNER);
+export const SPARSE_SCENE_TERRAIN_MATERIAL_ID = VOXEL_MATERIAL_IDS.terrain;
 
 export type SparseSceneVector3 = readonly [number, number, number];
 export type SparseSceneQuaternion = readonly [number, number, number, number];
@@ -1051,21 +1055,75 @@ export function packSparseSceneClusterArena(
 }
 
 /**
- * Slot each field program's tape will occupy in its own companion arena.
+ * Which arena block each record names, and the blocks themselves, in one pass.
  *
- * Numbered independently of the cluster slots above, because the two arenas are
- * separate and the shape in the record's type byte is what selects between them.
+ * Tapes are **shared**, not one per record. A record addresses a block by index,
+ * so nothing ever required the mapping to be injective — but it was, and that
+ * made the arena a ceiling on field-program *records* rather than on distinct
+ * shapes. The hero oak is the case that found it: its crown is 822 foliage
+ * records drawn from 16 quantised tapes (see `oakCanopyPadProgram`), so the
+ * injective numbering asked for 822 blocks of the 256 the arena holds and the
+ * publication threw before the octree could be planned.
+ *
+ * Keyed on the serialised tape, which is the whole of what a block holds, so two
+ * records share a block exactly when the shader would read identical words out
+ * of it. This is the same rule `svoScenePrimitivesFromEnvironmentCatalog` uses
+ * for the renderer's arena, and it has to be: a scene the renderer can draw must
+ * not fail to voxelize.
+ *
+ * Sharing is sound because a tape is evaluated in the record's own local frame —
+ * `scenePrimitiveAbiRecord` carries the centre and orientation, the block carries
+ * only the shape — so two records naming one block are the same shape placed
+ * twice, which is exactly what a crown of quantised masses is.
+ *
+ * Slots are numbered independently of the cluster slots above, because the two
+ * arenas are separate and the shape in the record's type byte is what selects
+ * between them.
  */
-export function sparseSceneFieldProgramSlots(primitives: readonly SparseScenePrimitive[]): readonly number[] {
-  let next = 0;
-  return primitives.map((primitive) => (primitive.kind === "field-program" ? next++ : -1));
+function sparseSceneFieldProgramAssignment(primitives: readonly SparseScenePrimitive[]): {
+  readonly slots: readonly number[];
+  readonly programs: readonly SvoFieldProgram[];
+} {
+  const slots: number[] = [];
+  const programs: SvoFieldProgram[] = [];
+  const slotByTape = new Map<string, number>();
+  for (const primitive of primitives) {
+    if (primitive.kind !== "field-program") {
+      slots.push(-1);
+      continue;
+    }
+    const tape = JSON.stringify(primitive.program);
+    const shared = slotByTape.get(tape);
+    if (shared !== undefined) {
+      slots.push(shared);
+      continue;
+    }
+    slotByTape.set(tape, programs.length);
+    slots.push(programs.length);
+    programs.push(primitive.program);
+  }
+  return { slots, programs };
 }
 
-/** Tapes of a publication, in the order `sparseSceneFieldProgramSlots` assigns. */
+/**
+ * Slot each field program's tape will occupy in its own companion arena.
+ *
+ * Records whose tapes serialise identically share one slot; see
+ * {@link sparseSceneFieldProgramAssignment}.
+ */
+export function sparseSceneFieldProgramSlots(primitives: readonly SparseScenePrimitive[]): readonly number[] {
+  return sparseSceneFieldProgramAssignment(primitives).slots;
+}
+
+/**
+ * Distinct tapes of a publication, in the order `sparseSceneFieldProgramSlots`
+ * assigns. One entry per *block*, so this is the number the arena's capacity is
+ * measured against — not the number of field-program records.
+ */
 export function sparseSceneFieldPrograms(
   primitives: readonly SparseScenePrimitive[],
 ): readonly SvoFieldProgram[] {
-  return primitives.flatMap((primitive) => (primitive.kind === "field-program" ? [primitive.program] : []));
+  return sparseSceneFieldProgramAssignment(primitives).programs;
 }
 
 /** The companion arena a publication's field programs are evaluated against. */
@@ -1275,7 +1333,17 @@ export function sparseSceneNeedsConservativeSampling(
   return sparseScenePrimitiveFeatureRadius(primitive) < Math.max(cellSize[0], cellSize[1], cellSize[2]);
 }
 
-/** Conservative cell-center occupancy mirror used by the GPU voxelization pass. */
+/**
+ * Conservative cell-center occupancy mirror used by the GPU voxelization pass.
+ *
+ * It mirrors distance, fraction and the *material* half of the identity word.
+ * The high half — the baked oct8 normal — has no mirror here, and that is a gap
+ * rather than a decision: the normal is evaluated through the render ABI's
+ * record, which this function's `SparseScenePrimitive` is a third the size of
+ * and does not carry a cluster packing or a field-program tape for. Nothing
+ * calls this today, so the divergence costs nothing; a caller that needs the
+ * normal must build the ABI descriptor and go through `sampleSvoPrimitive`.
+ */
 export function sampleSparseScenePrimitiveCell(
   primitives: readonly SparseScenePrimitive[],
   cellCenter: SparseSceneVector3,
@@ -1288,7 +1356,7 @@ export function sampleSparseScenePrimitiveCell(
   // distance anywhere. Coverage is what the extra samples are for.
   let distance = Number.POSITIVE_INFINITY;
   let coverage = Number.POSITIVE_INFINITY;
-  let identity = packMaterialOwner(0, SPARSE_BRICK_NO_OWNER);
+  let identity = 0;
   for (const primitive of primitives) {
     const centre = sparseScenePrimitiveSignedDistance(primitive, cellCenter);
     let nearest = centre;
@@ -1301,7 +1369,7 @@ export function sampleSparseScenePrimitiveCell(
     distance = Math.min(distance, centre);
     if (nearest < coverage) {
       coverage = nearest;
-      identity = packMaterialOwner(primitive.materialId, primitive.ownerId);
+      identity = primitive.materialId & 0xffff;
     }
   }
   if (primitives.length === 0) return { solidSignedDistance: distance, solidFraction: 0, materialOwner: identity };
@@ -1310,7 +1378,7 @@ export function sampleSparseScenePrimitiveCell(
   return {
     solidSignedDistance: distance,
     solidFraction: fraction,
-    materialOwner: fraction > 0 ? identity : packMaterialOwner(0, SPARSE_BRICK_NO_OWNER),
+    materialOwner: fraction > 0 ? identity : 0,
   };
 }
 
@@ -1434,7 +1502,11 @@ struct Params {
 @group(0) @binding(2) var<storage, read> primitives: array<ScenePrimitive>;
 @group(0) @binding(3) var<storage, read_write> maintenance: array<atomic<u32>>;
 @group(0) @binding(4) var<uniform> params: Params;
+${svoBrickContourWGSL}
+${svoBrickContourFitWGSL}
 ${sparseBrickSceneGeometryCodecWGSL(format)}
+${SVO_GBUFFER_NORMAL_OCT8_WGSL}
+${sparseBrickSceneIdentityWordCodecWGSL()}
 ${bandedCodec}
 ${bandedEncoder}
 
@@ -1792,6 +1864,77 @@ fn primitiveCellCoverageDistance(primitive: ScenePrimitive, world: vec3f, cell: 
   }
   return nearest;
 }
+/**
+ * This pass's own primitive tag as the render ABI's, or zero for a tag the ABI
+ * does not name.
+ *
+ * Generated from the two tables rather than written out, because the two
+ * numberings are genuinely different — this pass has no sphere and no
+ * heightfield, so every code above 2 is shifted — and a hand-written mapping
+ * would bake a normal from the wrong shape's law without failing anywhere.
+ */
+fn scenePrimitiveAbiKind(primitiveType: u32) -> u32 {
+${(Object.entries(SPARSE_SCENE_PRIMITIVE_TYPES) as [keyof typeof SPARSE_SCENE_PRIMITIVE_TYPES, number][])
+    .map(([name, code]) => `  if (primitiveType == ${code}u) { return ${SVO_PRIMITIVE_KIND_TABLE[name].code}u; } // ${name}`)
+    .join("\n")}
+  return 0u;
+}
+/**
+ * The outward surface normal of one primitive at a point, in world space.
+ *
+ * The same arithmetic the *renderer* used to run per shaded pixel, moved here
+ * and run once per voxel at init. It is the tail of \`svoEvaluatePrimitive\` with
+ * the discarded distance deleted: the normal only, because for a marched kind —
+ * the smooth-union clusters and field programs a canopy is made of — evaluating
+ * the distance beside it is a whole field evaluation thrown away unread.
+ *
+ * A zero vector means the field has no gradient at this point (a lattice lobe's
+ * exact centre, an ellipsoid's degenerate axis). \`packSceneIdentity\` turns that
+ * into the absent sentinel so the primary can fall back to the voxel face
+ * rather than shading from whatever direction a normalize of zero produced.
+ */
+fn primitiveSurfaceNormal(primitive: ScenePrimitive, world: vec3f) -> vec3f {
+  let kind = scenePrimitiveAbiKind(scenePrimitiveType(primitive));
+  if (kind == 0u) { return vec3f(0.0); }
+  let record = scenePrimitiveAbiRecord(primitive, kind);
+  var packing = svoInvalidClusterPacking();
+  if (kind == SVO_KIND_SMOOTH_UNION_CLUSTER) { packing = sceneClusterPacking(scenePrimitiveArenaSlot(primitive)); }
+  let local = svoPrimitiveLocalNormal(record, svoPrimitiveLocalPoint(record, world), packing);
+  let magnitude = length(local.xyz);
+  if (!(magnitude > 1e-8)) { return vec3f(0.0); }
+  return svoQuaternionRotate(record.orientation, local.xyz / magnitude);
+}
+/**
+ * The ground's normal, differentiated from the heightfield the writer sampled.
+ *
+ * \`(-dh/dx, 1, -dh/dz)\`, not the gradient of the \`y - h\` pseudo-distance stored
+ * in the geometry lane: that pseudo-distance's gradient is the surface normal on
+ * a gentle slope and collapses toward +Y on a steep one, which is what drew the
+ * pond coping's vertical wall as columns pointing at the sky.
+ *
+ * The one-sided differences are minmod-limited for the reason the per-pixel
+ * version was: a centred difference at an arris straddles the drop, so the flat
+ * top within a cell of the edge is handed a normal tilted out over the wall and
+ * every upper silhouette grows a dark serrated fringe. The limiter takes the
+ * smaller of the two slopes and zero where they disagree in sign, so it can only
+ * ever reduce a slope and never invent one.
+ *
+ * The window is the voxel's own column spacing rather than a tuned epsilon,
+ * because at bake time the sample lattice and the differencing lattice are the
+ * same lattice — which the per-pixel version could not assume.
+ */
+fn terrainColumnNormal(dimensions: vec2u, column: vec2u, scale: u32, columnExtent: vec2f) -> vec3f {
+  let step = max(scale, 1u);
+  let centre = terrainColumnHeight(dimensions, column);
+  let ahead = vec2f(
+    terrainColumnHeight(dimensions, column + vec2u(step, 0u)) - centre,
+    terrainColumnHeight(dimensions, column + vec2u(0u, step)) - centre) / columnExtent;
+  let behind = vec2f(
+    centre - terrainColumnHeight(dimensions, column - min(column, vec2u(step, 0u))),
+    centre - terrainColumnHeight(dimensions, column - min(column, vec2u(0u, step)))) / columnExtent;
+  let slope = select(vec2f(0.0), select(ahead, behind, abs(behind) < abs(ahead)), ahead * behind > vec2f(0.0));
+  return normalize(vec3f(-slope.x, 1.0, -slope.y));
+}
 fn linearIndex64(gid:vec3u,groups:vec3u)->u32{
   return gid.x+gid.y*groups.x*64u+gid.z*groups.x*groups.y*64u;
 }
@@ -2041,7 +2184,12 @@ fn rebuildDirtyBrickPayload(@builtin(global_invocation_id) gid:vec3u,@builtin(nu
   let cellRadius = 0.5 * length(cellExtent);
   var bestDistance = 1e20;
   var bestCoverage = 1e20;
-  var bestIdentity = NO_MATERIAL_OWNER;
+  var bestMaterial = 0u;
+  // The winner's normal, evaluated once after the reduction rather than at every
+  // improvement: a lead changes hands a few times in a crowded brick and a
+  // marched kind's normal is the most expensive thing in this loop.
+  var bestPrimitive = INVALID_INDEX;
+  var bestNormal = vec3f(0.0);
   // The ground, folded in before the candidates and on exactly the same terms.
   //
   // It is not a candidate and never occupies a slot: a heightfield covers the
@@ -2072,7 +2220,8 @@ fn rebuildDirtyBrickPayload(@builtin(global_invocation_id) gid:vec3u,@builtin(nu
     // Mirrors terrainCellSolidFraction in lib/terrain.ts.
     let fraction=clamp((tallest-(world.y-0.5*cellExtent.y))/cellExtent.y,0.0,1.0);
     bestCoverage=cellRadius*(1.0-2.0*fraction);
-    bestIdentity=${SPARSE_SCENE_TERRAIN_MATERIAL_OWNER}u;
+    bestMaterial=${SPARSE_SCENE_TERRAIN_MATERIAL_ID}u;
+    bestNormal=terrainColumnNormal(dimensions,centre,scale,cellExtent.xz);
   }
   let candidateCount=min(atomicLoad(&maintenance[record+1u]),candidatesPerBrick());
   for(var slot=0u;slot<candidateCount;slot+=1u){
@@ -2083,8 +2232,19 @@ fn rebuildDirtyBrickPayload(@builtin(global_invocation_id) gid:vec3u,@builtin(nu
     let coverage = primitiveCellCoverageDistance(primitive, world, cellExtent, candidate);
     if (coverage < bestCoverage) {
       bestCoverage = coverage;
-      bestIdentity = bitcast<u32>(primitive.extentIdentity.w);
+      bestMaterial = bitcast<u32>(primitive.extentIdentity.w) & 0xffffu;
+      bestPrimitive = primitiveIndex;
     }
+  }
+  // The normal is evaluated at the voxel *centre*, which is not where the
+  // surface is: the centre is up to a cell radius off it. That is the same
+  // half-cell the coverage fraction already carries and it is what the primary
+  // used to spend a record fetch and a field evaluation per pixel to avoid — but
+  // the error is in the sample position rather than in the law, so it varies
+  // smoothly across the surface and reads as a slightly softened feature rather
+  // than as the six-way quantisation the face normal produced.
+  if (bestPrimitive != INVALID_INDEX) {
+    bestNormal = primitiveSurfaceNormal(primitives[bestPrimitive], world);
   }
 
   let output = voxelOffset + localIndex;
@@ -2095,7 +2255,8 @@ fn rebuildDirtyBrickPayload(@builtin(global_invocation_id) gid:vec3u,@builtin(nu
   // terrain and rigid-body IDs below the scenery range—can update atomically.
 ${sceneGeometryStore}
 ${occupancyStore}
-  ${writePayload("materialOffset", "select(NO_MATERIAL_OWNER,bestIdentity,primitiveFraction>0.0)")}
+  ${writePayload("materialOffset",
+    "select(NO_MATERIAL_OWNER,packSceneIdentity(bestMaterial,bestNormal),primitiveFraction>0.0)")}
 }
 
 @compute @workgroup_size(64)
@@ -2122,12 +2283,20 @@ fn finalizeDirtyBricks(@builtin(global_invocation_id) gid:vec3u,@builtin(num_wor
     return;
   }
   var packed=0u;
+  // The conservative slab, fitted from the same cells and the same solidity
+  // predicate this loop already applies. See lib/svo-brick-contour.ts; the
+  // moments below are the only new work in the loop, and the second sweep is
+  // over a register mask rather than the payload.
+  var contour=0u;
   if(controlLoad(11u)==8u){
     let voxelOffset=topologyLoad(leafBase+1u);
     var macroMask=0u;
     var minimum=vec3u(7u);
     var maximum=vec3u(0u);
     var occupied=false;
+    var solid:array<u32,16>;
+    for(var word=0u;word<16u;word+=1u){solid[word]=0u;}
+    var count=0.0;var sum=vec3f(0.0);var square=vec3f(0.0);var mixed=vec3f(0.0);
     for(var localIndex=0u;localIndex<512u;localIndex+=1u){
       let sceneMaterial=${sceneOccupied};
       let fluidMaterial=${fluidMaterial};
@@ -2137,12 +2306,17 @@ fn finalizeDirtyBricks(@builtin(global_invocation_id) gid:vec3u,@builtin(num_wor
       let macroCoordinate=local>>vec3u(2u);
       macroMask|=1u<<(macroCoordinate.x|(macroCoordinate.y<<1u)|(macroCoordinate.z<<2u));
       occupied=true;
+      solid[localIndex>>5u]|=1u<<(localIndex&31u);
+      let centre=vec3f(local)+vec3f(0.5);
+      count+=1.0;sum+=centre;square+=centre*centre;
+      mixed+=vec3f(centre.x*centre.y,centre.x*centre.z,centre.y*centre.z);
     }
     packed=OCCUPANCY_READY|macroMask;
     if(occupied){
       packed|=OCCUPANCY_OCCUPIED;
       packed|=(minimum.x<<8u)|(minimum.y<<11u)|(minimum.z<<14u);
       packed|=(maximum.x<<17u)|(maximum.y<<20u)|(maximum.z<<23u);
+      contour=svoBrickContourFit(&solid,count,sum,square,mixed,maximum-minimum);
     }
   }
   // Occupancy and payload become current together. ACTIVE is retained while
@@ -2153,6 +2327,15 @@ fn finalizeDirtyBricks(@builtin(global_invocation_id) gid:vec3u,@builtin(num_wor
   // word describes what the brick now holds; withholding it left the payload
   // current and the summary stale, which is a worse state than either.
   topologyStore(nodeIndex*8u+7u,packed|(lifecycle&BRICK_ACTIVE));
+  // The contour rides in the 24 spare bits of the child-mask word, which is the
+  // record the in-brick DDA already loads. A terminal node's child mask is zero
+  // and every reader of that word in the tree masks it to eight bits, so the
+  // read-modify-write here preserves the only thing anyone else reads. Written
+  // in the same invocation that publishes occupancy, so the slab and the payload
+  // it describes always become current together.
+  topologyStore(nodeIndex*8u+${SVO_BRICK_CONTOUR.nodeWord}u,
+    (topologyLoad(nodeIndex*8u+${SVO_BRICK_CONTOUR.nodeWord}u)&0xffu)
+    |(contour<<${SVO_BRICK_CONTOUR.shift}u));
   if(chunkSlot==0u&&lastChunk&&(atomicLoad(&maintenance[stateOffset()+1u])&INCOMPLETE_OVERFLOW)==0u){
     atomicStore(&maintenance[stateOffset()+3u],sceneRevision());
   }
@@ -2176,9 +2359,10 @@ function bandedLeafEncoderWGSL(): string {
  * **One workgroup owns a whole leaf.** \`rebuildDirtyBrickPayload\` runs 512 voxels
  * across two workgroups, and no part of this encoding is expressible that way: the
  * band's stencil dilation, the leaf palette, the index ranks and the record ranks
- * are all whole-leaf reductions. Owning the leaf also removes every atomic from
- * the mask writes — 32 voxels share a mask word and all 32 are lanes of this
- * workgroup, so the word is assembled in workgroup storage and stored once.
+ * are all whole-leaf reductions. Owning the leaf also removes
+ * every atomic from the mask writes — 32 voxels share a mask word and all 32 are
+ * lanes of this workgroup, so the word is assembled in workgroup storage and
+ * stored once.
  *
  * **It reads the dense lanes back rather than re-voxelising.** The distance and
  * fraction it stores are then bit-identical to what the dense lane holds, which is
@@ -2207,11 +2391,14 @@ var<workgroup> ldsRec:array<atomic<u32>,16>;
 /** The dense geometry word per voxel, so the record write needs no second load. */
 var<workgroup> ldsGeometry:array<u32,512>;
 /**
- * The packed identity per voxel on the way in, and the leaf-palette *entry* on the
- * way out. Overwritten in place by the serial palette pass, which consumes index
- * \`i\` before it writes index \`i\` and never reads an index it has already written.
+ * The packed identity per voxel on the way in; on the way out its low half is the
+ * leaf-palette *entry* and its high half is still the baked normal, which is what
+ * lets the parallel normal store read it. Overwritten in place by the serial
+ * palette pass, which consumes index \`i\` before it writes index \`i\` and never
+ * reads an index it has already written.
  */
 var<workgroup> ldsIdentity:array<u32,512>;
+/** Leaf material palette, one \`u16\` an entry, packed two to a word only on store. */
 var<workgroup> ldsPalette:array<u32,256>;
 var<workgroup> ldsIndex:array<u32,128>;
 /** paletteCount, occupied, indexBits, recordCount, recordBase, blobBase, indexWords, abort. */
@@ -2315,10 +2502,17 @@ fn encodeBandedLeaves(
   }
   workgroupBarrier();
 
-  // The leaf palette, the identity entries and the allocation. Serial in one lane
-  // because interning is inherently sequential and a leaf holds 1.457 identities
-  // on average: the loop is ~800 comparisons on the hero, against a per-voxel
-  // primitive reduction that has already run.
+  // The leaf material palette, the index entries, the normal lane and the
+  // allocation. Serial in one lane because interning is inherently sequential and
+  // a leaf holds 1.026 *materials* on average: the loop is ~400 comparisons on the
+  // hero, against a per-voxel primitive reduction that has already run.
+  //
+  // Interning the *material half alone* is what keeps it that cheap. The high half
+  // of the identity word is a per-voxel baked normal now, and interning the whole
+  // word would intern the normal alphabet — 29.05 entries a leaf on the hero, so
+  // ~11 500 comparisons here and an 8-bit index on half the leaves. The normal
+  // never reaches this loop at all: it is written by every lane in parallel below,
+  // straight out of \`ldsIdentity\`'s preserved high half.
   if(lane==0u&&encoding){
     var paletteCount=0u;
     var occupied=0u;
@@ -2329,26 +2523,33 @@ fn encodeBandedLeaves(
       if(!ldsOccBit(i)){continue;}
       occupied+=1u;
       let word=ldsIdentity[i];
+      let material=word&0xffffu;
       var entry=BANDED_PALETTE_LIMIT;
       for(var p=0u;p<paletteCount;p+=1u){
-        if(ldsPalette[p]==word){entry=p;break;}
+        if(ldsPalette[p]==material){entry=p;break;}
       }
       if(entry==BANDED_PALETTE_LIMIT){
         if(paletteCount<BANDED_PALETTE_LIMIT){
-          ldsPalette[paletteCount]=word;entry=paletteCount;paletteCount+=1u;
+          ldsPalette[paletteCount]=material;entry=paletteCount;paletteCount+=1u;
         }else{
-          // A leaf past 256 identities is the dense escape the encoder models, and
+          // A leaf past 256 materials is the dense escape the encoder models, and
           // there is no dense lane to escape to here. Flagged, never silent: the
           // provenance probe throws on a non-zero flag word rather than reporting
-          // an arena that is quietly wrong.
+          // an arena that is quietly wrong. The hero garden's widest leaf holds 28.
           entry=BANDED_PALETTE_LIMIT-1u;flags|=BANDED_PALETTE_OVERFLOW;
         }
       }
-      ldsIdentity[i]=entry;
+      // The palette entry replaces the material half and leaves the normal half
+      // untouched, so the parallel normal store below still has it.
+      ldsIdentity[i]=(word&0xffff0000u)|entry;
     }
     let indexBits=bandedIndexBitsFor(paletteCount);
     let indexWords=(occupied*indexBits+31u)/32u;
-    let blobWords=paletteCount+indexWords;
+    // The blob is [normals][palette][index]. Normals are a fixed 256 words — one
+    // \`u16\` a voxel, air included — so both of the other two have a derivable
+    // start and the header needs no offset word for either.
+    let paletteWords=(paletteCount+1u)/2u;
+    let blobWords=BANDED_NORMAL_WORDS+paletteWords+indexWords;
     var recordBase=atomicAdd(&payload[bandedAllocRecordCursor()],recordCount);
     var blobBase=atomicAdd(&payload[bandedAllocBlobCursor()],blobWords);
     var abort=0u;
@@ -2372,8 +2573,9 @@ fn encodeBandedLeaves(
   let indexBits=ldsMeta[2];
   let recordBase=ldsMeta[4];
   let blobBase=ldsMeta[5];
+  let paletteWords=(paletteCount+1u)/2u;
 
-  // The identity index, packed in the same order the reader unpacks: rank by
+  // The material index, packed in the same order the reader unpacks: rank by
   // occupancy prefix popcount, entry at \`rank * bits\`. Serial for the same reason
   // the ranks are.
   if(lane==0u&&live&&indexBits>0u){
@@ -2381,7 +2583,7 @@ fn encodeBandedLeaves(
     for(var i=0u;i<BANDED_ENCODE_VOXELS;i+=1u){
       if(!ldsOccBit(i)){continue;}
       let bit=rank*indexBits;
-      ldsIndex[bit>>5u]|=ldsIdentity[i]<<(bit&31u);
+      ldsIndex[bit>>5u]|=(ldsIdentity[i]&0xffffu)<<(bit&31u);
       rank+=1u;
     }
   }
@@ -2404,8 +2606,21 @@ fn encodeBandedLeaves(
     atomicStore(&payload[header+3u],scale);
   }
   let blob=params.banded.w+BANDED_ALLOCATOR_WORDS+blobBase;
-  if(live&&lane<paletteCount){atomicStore(&payload[blob+lane],ldsPalette[lane]);}
-  if(live&&lane<ldsMeta[6]){atomicStore(&payload[blob+paletteCount+lane],ldsIndex[lane]);}
+  // The normal lane, first in the blob: one \`u16\` a voxel, two to a word, so 256
+  // words that 256 lanes store in one step with no rank and no reduction. Air
+  // voxels get whatever the producer wrote; \`bandedOccupied\` gates every reader.
+  if(live){
+    atomicStore(&payload[blob+lane],(ldsIdentity[lane*2u]>>16u)|(ldsIdentity[lane*2u+1u]&0xffff0000u));
+  }
+  let palette=blob+BANDED_NORMAL_WORDS;
+  // Two \`u16\` materials to a word. The odd tail's high half is zero rather than
+  // whatever \`ldsPalette\` held, so an arena read back off the device is
+  // deterministic in every byte it publishes.
+  if(live&&lane<paletteWords){
+    let high=select(0u,ldsPalette[lane*2u+1u],lane*2u+1u<paletteCount);
+    atomicStore(&payload[palette+lane],ldsPalette[lane*2u]|(high<<16u));
+  }
+  if(live&&lane<ldsMeta[6]){atomicStore(&payload[palette+paletteWords+lane],ldsIndex[lane]);}
   for(var half=0u;half<2u;half+=1u){
     if(!live){break;}
     let local=lane+half*256u;

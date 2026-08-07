@@ -21,6 +21,21 @@ import {
   svoBrickRasterProbeTextureRows,
   svoBrickRasterProbeWordCount,
 } from "../lib/webgpu-svo-brick-raster-probe";
+import { SVO_DRY_SCENE_PARAMS_LAYOUT } from "../lib/webgpu-svo-dry-scene";
+
+/**
+ * The probe under the parameter layout it is actually bound to.
+ *
+ * The two layout fields are required rather than defaulted on the generator: the
+ * probe declares a reserved span sized from them, so a wrong pair produces a
+ * struct that still compiles and reads the wrong words. Naming them once here is
+ * what keeps every case below describing the shipping binding.
+ */
+const probeWGSL = (options: { fragmentDepthWritten: boolean }) => createSvoBrickRasterProbeWGSL({
+  ...options,
+  paramsWordCount: SVO_DRY_SCENE_PARAMS_LAYOUT.sizeBytes / 4,
+  payloadLaneWordOffset: SVO_DRY_SCENE_PARAMS_LAYOUT.payloadLaneWordOffset,
+});
 
 /**
  * The raster-primary probe is a compute module the host never hand-writes WGSL
@@ -87,8 +102,8 @@ test("the probe declares one binding per resource it reads", () => {
 });
 
 test("the covering-proxy count is exact only while the fragment writes its own depth", () => {
-  const withDepth = createSvoBrickRasterProbeWGSL({ fragmentDepthWritten: true });
-  const withoutDepth = createSvoBrickRasterProbeWGSL({ fragmentDepthWritten: false });
+  const withDepth = probeWGSL({ fragmentDepthWritten: true });
+  const withoutDepth = probeWGSL({ fragmentDepthWritten: false });
   // A fragment that writes frag_depth cannot be rejected before it runs, so no
   // proxy is ever flagged as merely possibly-shaded. Match the guard itself
   // rather than the bare flag value, which also spells the sort-bucket count.
@@ -100,7 +115,7 @@ test("the covering-proxy count is exact only while the fragment writes its own d
 });
 
 test("a dropped record never inflates the count of bricks drawn at this pixel", () => {
-  const code = createSvoBrickRasterProbeWGSL({ fragmentDepthWritten: true });
+  const code = probeWGSL({ fragmentDepthWritten: true });
   // Overflowing the record buffer (a long DDA) and overflowing the proxy array
   // are different failures. Only the latter makes the covering count a floor;
   // adding record drops into it would report bricks the frame never drew.
@@ -121,7 +136,7 @@ test("a dropped record never inflates the count of bricks drawn at this pixel", 
 // uniform block, which is the only way its ray can stay the production ray
 // once the aperture became something a document authors.
 test("the probe takes its aperture from the camera uniform", () => {
-  const code = createSvoBrickRasterProbeWGSL({ fragmentDepthWritten: true });
+  const code = probeWGSL({ fragmentDepthWritten: true });
   assert.match(code, /fn cameraTanHalfFov\(\)->f32\{let authored=uniforms\.cameraPosition\.w;/);
   assert.match(code, /forward\+right\*ndc\.x\*viewport\.x\/viewport\.y\*cameraTanHalfFov\(\)\+up\*ndc\.y\*cameraTanHalfFov\(\)/);
   assert.doesNotMatch(code, /PROBE_TAN_HALF/);
@@ -130,7 +145,7 @@ test("the probe takes its aperture from the camera uniform", () => {
 test("the raster probe compiles and builds its compute pipeline", { skip }, async () => {
   const gpuDevice = await device();
   for (const fragmentDepthWritten of [true, false]) {
-    const code = createSvoBrickRasterProbeWGSL({ fragmentDepthWritten });
+    const code = probeWGSL({ fragmentDepthWritten });
     const module = gpuDevice.createShaderModule({ label: `raster probe (depth=${fragmentDepthWritten})`, code });
     const info = await module.getCompilationInfo();
     assert.deepEqual(
@@ -170,7 +185,7 @@ test("the probe's workgroup array fits the guaranteed minimum storage size", { s
   const gpuDevice = await device();
   const module = gpuDevice.createShaderModule({
     label: "raster probe (default limits)",
-    code: createSvoBrickRasterProbeWGSL({ fragmentDepthWritten: true }),
+    code: probeWGSL({ fragmentDepthWritten: true }),
   });
   const layout = gpuDevice.createBindGroupLayout({ entries: svoBrickRasterProbeBindGroupLayoutEntries() });
   // 16384 is the WebGPU-guaranteed minimum; Dawn reports the overrun against

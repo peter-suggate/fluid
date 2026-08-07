@@ -333,6 +333,7 @@ export function svoScenePrimitivesFromEnvironmentCatalog(
   const fieldPrograms: SvoFieldProgram[] = [];
   let openShellOwnerId: number | undefined;
 
+  const fieldProgramIndexByKey = new Map<string, number>();
   for (const primitive of primitives) {
     const primitiveIndex = descriptors.length;
     const { materialId, ownerId } = environmentIdentity(scene, primitive);
@@ -342,9 +343,29 @@ export function svoScenePrimitivesFromEnvironmentCatalog(
     if (openShell && openShellOwnerId !== undefined) throw new Error("Environment catalog contains multiple front/open shell owners");
     if (openShell) openShellOwnerId = ownerId;
 
-    const descriptor = descriptorForProxy(scene, primitive, clusterPackings.length, fieldPrograms.length);
+    // Field-program tapes are **shared**, not one per record.
+    //
+    // The arena holds `SVO_DRY_SCENE_FIELD_PROGRAM_CAPACITY` blocks and a record
+    // addresses one by index, so nothing ever required the mapping to be
+    // injective — but it was, and that made the arena a ceiling on *records*
+    // rather than on distinct shapes. The oak's crown is the case that found it:
+    // a canopy is a thousand masses drawn from a handful of tapes, and a species
+    // that quantises its tape inputs (see `oakCanopyPadProgram`) asks for eight
+    // distinct programs however many masses hang off them.
+    //
+    // Keyed on the serialised tape, which is the whole of what a block holds, so
+    // two records share a block exactly when the shader would read identical
+    // words out of it.
+    const programKey = primitive.kind === "field-program" ? JSON.stringify(primitive.program) : undefined;
+    const sharedIndex = programKey === undefined ? undefined : fieldProgramIndexByKey.get(programKey);
+    const descriptor = descriptorForProxy(
+      scene, primitive, clusterPackings.length, sharedIndex ?? fieldPrograms.length,
+    );
     if (descriptor.kind === "smooth-union-cluster" && descriptor.packing) clusterPackings.push(descriptor.packing);
-    if (descriptor.kind === "field-program" && descriptor.program) fieldPrograms.push(descriptor.program);
+    if (descriptor.kind === "field-program" && descriptor.program && sharedIndex === undefined) {
+      if (programKey !== undefined) fieldProgramIndexByKey.set(programKey, fieldPrograms.length);
+      fieldPrograms.push(descriptor.program);
+    }
     descriptors.push(descriptor);
     metadata.push({
       primitiveIndex,

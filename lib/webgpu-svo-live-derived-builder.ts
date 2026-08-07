@@ -2,7 +2,10 @@ import {
   SPARSE_BRICK_GPU_LAYOUT,
   SPARSE_BRICK_NO_OWNER,
   SPARSE_BRICK_SCENE_DISTANCE_BAND_RADII,
+  sparseBrickBandedLeafCodecWGSL,
   sparseBrickSceneGeometryCodecWGSL,
+  sparseBrickSceneIdentityCodecWGSL,
+  type SparseBrickLeafPayloadMode,
   type SparseBrickOctreeGPU,
   type SparseBrickPayloadProfileName,
   type SparseBrickPlan,
@@ -177,7 +180,14 @@ export interface WebGpuLiveSvoDerivedWorklistPlannerOptions {
   generationSource: LiveSvoDerivedGenerationSource;
   levelCount: number;
   finestLevel: number;
-  pageCapacityPerLevel: number;
+  /**
+   * Worklist depth each level may reach, as a vector or as one figure for all.
+   *
+   * A vector is what the address plan supplies (`pageCapacityByLevel`), and the
+   * arena lays its sections out by prefix sum over it. A scalar is the old
+   * uniform shape, kept because it is the natural thing for a fixture to say.
+   */
+  pageCapacityPerLevel: number | readonly number[];
   /** Finest level that owns a radiance page; its records carry a page coordinate. */
   radianceFloorLevel?: number;
   label?: string;
@@ -355,8 +365,19 @@ export function* liveSvoPlanBasePagesSteps(
   return [...unique.values()];
 }
 
+/**
+ * `Params` below: 3 vec4u, two 12-word tables, then 12 per-level capacities.
+ * Stated once so the host write and the struct cannot drift apart.
+ */
+export const LIVE_SVO_DERIVED_PLANNER_PARAMS_BYTES = (4 * 3 + 12 + 12 + 12) * 4;
+
 export const liveSvoDerivedWorklistWGSL = /* wgsl */ `
-struct Params{source:vec4u,domain:vec4u,limits:vec4u,zOffsets:array<u32,12>,sections:array<u32,12>}
+// \`capacities\` is per level, because the arena's sections are: a level holds at
+// most its own grid's pages, so laying every section out at the deepest level's
+// depth spent 48 B a record on capacity the coarse levels can never reach.
+// vec4u rather than array<u32,12> so the element alignment is unambiguously
+// legal in the uniform address space.
+struct Params{source:vec4u,domain:vec4u,limits:vec4u,zOffsets:array<u32,12>,sections:array<u32,12>,capacities:array<vec4u,3>}
 @group(0) @binding(0) var<storage,read> source:array<u32>;
 @group(0) @binding(1) var<storage,read> control:array<u32>;
 @group(0) @binding(2) var<storage,read> topology:array<u32>;
@@ -366,6 +387,7 @@ struct Params{source:vec4u,domain:vec4u,limits:vec4u,zOffsets:array<u32,12>,sect
 @group(0) @binding(6) var<uniform> params:Params;
 @group(0) @binding(7) var<storage,read> generationState:array<u32>;
 const INVALID:u32=0xffffffffu;const ACTIVE:u32=${SVO_BRICK_LIFECYCLE.activeBit}u;const RECORD_WORDS:u32=${LIVE_SVO_DERIVED_WORKLIST.recordWords}u;
+fn levelCapacity(level:u32)->u32{return params.capacities[level/4u][level%4u];}
 fn keyBit(lo:u32,hi:u32,bit:u32)->u32{if(bit>=32u){return(hi>>(bit-32u))&1u;}return(lo>>bit)&1u;}
 fn morton(lo:u32,hi:u32,level:u32)->vec3u{var p=vec3u(0u);for(var bit=0u;bit<level;bit+=1u){let s=1u<<bit;p+=vec3u(keyBit(lo,hi,3u*bit),keyBit(lo,hi,3u*bit+1u),keyBit(lo,hi,3u*bit+2u))*s;}return p;}
 fn tableSlot(level:u32,p:vec3u)->u32{if(level>=params.domain.y||p.x>=params.domain.z||p.y>=params.domain.w){return INVALID;}let dims=textureDimensions(directTable);let levelStart=params.zOffsets[level];var levelEnd=dims.z;if(level+1u<params.domain.y){levelEnd=params.zOffsets[level+1u];}if(p.z>=levelEnd-levelStart){return INVALID;}let z=levelStart+p.z;let value=textureLoad(directTable,vec3i(i32(p.x),i32(p.y),i32(z)),0).x;return select(INVALID,value-1u,value>0u);}
@@ -373,7 +395,7 @@ fn deepestLeaf(globalCell:vec3u)->u32{let brickSize=control[11];if(brickSize==0u
  for(var level=0u;level<=params.domain.x&&node<control[0];level+=1u){let nodeBase=node*8u;let leaf=topology[nodeBase+6u];if(leaf<control[1]&&(topology[nodeBase+7u]&ACTIVE)!=0u){selected=leaf;}if(level==params.domain.x){break;}let bit=params.domain.x-level-1u;let octant=((brick.x>>bit)&1u)|(((brick.y>>bit)&1u)<<1u)|(((brick.z>>bit)&1u)<<2u);let mask=topology[nodeBase+3u]&0xffu;if((mask&(1u<<octant))==0u){break;}node=topology[nodeBase+4u]+countOneBits(mask&((1u<<octant)-1u));}
  return selected;}
 fn emitPage(level:u32,page:vec3u,generation:u32){let slot=tableSlot(level,page);if(slot==INVALID||slot>=arrayLength(&claims)){return;}if(atomicExchange(&claims[slot],generation)==generation){return;}
- let section=params.sections[level];let recordIndex=atomicAdd(&output[section],1u);if(recordIndex>=params.limits.y){return;}let record=section+${LIVE_SVO_DERIVED_WORKLIST.headerWords}u+recordIndex*RECORD_WORDS;atomicStore(&output[record],slot);
+ let section=params.sections[level];let recordIndex=atomicAdd(&output[section],1u);if(recordIndex>=levelCapacity(level)){return;}let record=section+${LIVE_SVO_DERIVED_WORKLIST.headerWords}u+recordIndex*RECORD_WORDS;atomicStore(&output[record],slot);
  // One layout at every level now: slot, page coordinate, eight children.
  atomicStore(&output[record+1u],page.x);atomicStore(&output[record+2u],page.y);atomicStore(&output[record+3u],page.z);
  if(level==0u){for(var octant=0u;octant<8u;octant+=1u){let bit=vec3u(octant&1u,(octant>>1u)&1u,(octant>>2u)&1u);atomicStore(&output[record+4u+octant],deepestLeaf(page*${SVO_NODE_MIP_LAYOUT.interiorSize}u+bit*4u));}}
@@ -404,7 +426,7 @@ ${COARSE_LEAF_PAGES === "extent" ? /* wgsl */ ` let cellMaximum=(brickOrigin+vec
  var page=cellMinimum/(${SVO_NODE_MIP_LAYOUT.interiorSize}u<<seedLevel);
  for(var level=seedLevel;level<params.domain.y;level+=1u){emitPage(level,page,generation);page>>=vec3u(1u);}`}
 }
-@compute @workgroup_size(1) fn finalize(@builtin(global_invocation_id) gid:vec3u){let level=gid.x;if(level>=params.domain.y){return;}let section=params.sections[level];let count=min(atomicLoad(&output[section]),params.limits.y);atomicStore(&output[section+1u],generationState[params.source.y]);atomicStore(&output[section+2u],level);atomicStore(&output[section+3u],${LIVE_SVO_DERIVED_WORKLIST.headerWords}u);let groups=(count*${SVO_NODE_MIP_LAYOUT.physicalSize ** 3}u+255u)/256u;let x=min(groups,65535u);atomicStore(&output[section+4u],x);atomicStore(&output[section+5u],select(0u,(groups+x-1u)/x,x>0u));atomicStore(&output[section+6u],1u);}
+@compute @workgroup_size(1) fn finalize(@builtin(global_invocation_id) gid:vec3u){let level=gid.x;if(level>=params.domain.y){return;}let section=params.sections[level];let count=min(atomicLoad(&output[section]),levelCapacity(level));atomicStore(&output[section+1u],generationState[params.source.y]);atomicStore(&output[section+2u],level);atomicStore(&output[section+3u],${LIVE_SVO_DERIVED_WORKLIST.headerWords}u);let groups=(count*${SVO_NODE_MIP_LAYOUT.physicalSize ** 3}u+255u)/256u;let x=min(groups,65535u);atomicStore(&output[section+4u],x);atomicStore(&output[section+5u],select(0u,(groups+x-1u)/x,x>0u));atomicStore(&output[section+6u],1u);}
 `;
 
 /**
@@ -569,17 +591,33 @@ fn solidDistance(leafIndex:u32,local:vec3u)->f32{
 function derivedLaneAccess(
   profile: SparseBrickPayloadProfileName,
   sceneGeometryFormat: SparseBrickSceneGeometryFormat = "f32x2",
+  leafPayloadMode: SparseBrickLeafPayloadMode = "dense",
 ) {
   const dry = profile === "dry";
   const format = dry ? sceneGeometryFormat : "f32x2";
+  const mode = dry ? leafPayloadMode : "dense";
   const stride = dry ? "2u" : "4u";
   const scene = (channel: string) => `payload[params.laneOffsets.z+voxel*${stride}+${channel}]`;
   const packedWord = "payload[sceneGeometryWord(params.laneOffsets.z,voxel)]";
   const narrowedDistance = `sceneDistanceOf(${packedWord},voxel)`;
   const narrowedCoverage = `clamp(sceneFractionOf(${packedWord},voxel),0.,1.)`;
+  // Scene identity is not a lane under `banded`, so it is not an expression
+  // either: it comes from the shared codec, addressed by the same
+  // `bandedLanes` block the voxeliser is handed. The two geometry channels
+  // deliberately do *not* move with it — this builder still reads the dense
+  // `sceneGeometry` lane, which is the B2 cutover and a separate piece of work.
+  const identityCodec = mode === "dense" ? "" : /* wgsl */ `${sparseBrickBandedLeafCodecWGSL({
+    occupancyBase: "params.bandedLanes.x", recordMaskBase: "params.bandedLanes.y",
+    headerBase: "params.bandedLanes.z", blobBase: "params.bandedLanes.w",
+    recordsBase: "0u",
+    load: (index) => `payload[${index}]`, mode, records: false,
+  })}`;
   return {
-    /** Helper declarations the narrowed formats need in scope. Empty on `f32x2`. */
-    codec: sparseBrickSceneGeometryCodecWGSL(format),
+    /** Helper declarations the narrowed formats and the identity decode need in scope. */
+    codec: `${sparseBrickSceneGeometryCodecWGSL(format)}${identityCodec}
+${sparseBrickSceneIdentityCodecWGSL({
+      mode, materialOwnerBase: "params.laneOffsets.w", load: (index) => `payload[${index}]`,
+    })}`,
     /** The gradient of this is the only smooth normal the world can offer. */
     solidDistance: dry
       ? format === "f32x2" ? `bitcast<f32>(${scene("0u")})` : narrowedDistance
@@ -701,14 +739,16 @@ export function liveSvoDerivedBuildWGSLFor(
    * `undefined` — the default — emits the shipped `solidDistance` unchanged.
    */
   bandedReconstructionCellSize_m?: readonly [number, number, number],
+  /** How the world stores scene identity. Decides which identity decode compiles. */
+  leafPayloadMode: SparseBrickLeafPayloadMode = "dense",
 ): string {
-  const lane = derivedLaneAccess(profile, sceneGeometryFormat);
+  const lane = derivedLaneAccess(profile, sceneGeometryFormat, leafPayloadMode);
   const solidDistance = derivedSolidDistanceWGSL(lane, bandedReconstructionCellSize_m);
 
   const opacity = derivedOpacityLanes(opacityFormat);
   return /* wgsl */ `
 ${liveSvoDerivedPageValidityWGSL}
-struct Params{targetAtlasPages:vec4u,scratchAtlasPages:vec4u,limits:vec4u,laneOffsets:vec4u,${LIVE_SVO_RADIANCE_PARAMS_FIELDS}}
+struct Params{targetAtlasPages:vec4u,scratchAtlasPages:vec4u,limits:vec4u,laneOffsets:vec4u,${LIVE_SVO_RADIANCE_PARAMS_FIELDS},bandedLanes:vec4u}
 @group(0) @binding(0) var<storage,read> control:array<u32>;
 @group(0) @binding(1) var<storage,read> topology:array<u32>;
 @group(0) @binding(2) var<storage,read> payload:array<u32>;
@@ -779,7 +819,7 @@ fn safeNormal(leafIndex:u32,local:vec3u)->vec3f{
  */
 fn leafOpacityAt(leaf:u32,cell:vec3u)->vec4f{
   let sampleLocal=leafLocal(cell,leaf);let voxel=leafVoxel(leaf,sampleLocal);
-  let dynamicIdentity=${lane.dynamicIdentity};let sceneIdentity=payload[params.laneOffsets.w+voxel];
+  let dynamicIdentity=${lane.dynamicIdentity};let sceneIdentity=sceneIdentityAt(voxel);
   let dynamicCoverage=${lane.dynamicCoverage};let sceneCoverage=${lane.sceneCoverage};
   let dynamicSolid=select(dynamicCoverage,0.,(dynamicIdentity&0xffffu)==${VOXEL_MATERIAL_IDS.containerGlass}u);
   let sceneSolid=select(sceneCoverage,0.,(sceneIdentity&0xffffu)==${VOXEL_MATERIAL_IDS.containerGlass}u);
@@ -858,7 +898,7 @@ fn buildPages(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) 
   let level=worklist[2];let floorLevel=radianceFloorLevel();
   if(level==0u){
     if(all(physical==vec3u(0u))){scratchValidity[recordIndex]=worklist[1];}let page=vec3u(worklist[record+1u],worklist[record+2u],worklist[record+3u]);let octant=(local.x/4u)|((local.y/4u)<<1u)|((local.z/4u)<<2u);let leaf=worklist[record+${LIVE_SVO_DERIVED_WORKLIST.sourceLeafWord}u+octant];if(leaf>=control[1]){textureStore(opacityScratch,destination,vec4f(0.));if(floorLevel==0u){writeRadiance(radianceDestination,vec3f(0.),vec3f(0.),vec3f(0.),vec3f(0.));}return;}let sampleLocal=leafLocal(page*INTERIOR+local,leaf);
-    let voxel=leafVoxel(leaf,sampleLocal);let dynamicIdentity=${lane.dynamicIdentity};let sceneIdentity=payload[params.laneOffsets.w+voxel];
+    let voxel=leafVoxel(leaf,sampleLocal);let dynamicIdentity=${lane.dynamicIdentity};let sceneIdentity=sceneIdentityAt(voxel);
     let dynamicCoverage=${lane.dynamicCoverage};let sceneCoverage=${lane.sceneCoverage};
     // Container glass remains structural geometry, but it is not an opacity
     // source: otherwise the cone hierarchy turns the vessel into a projected
@@ -896,7 +936,7 @@ fn buildPages(@builtin(global_invocation_id) gid:vec3u,@builtin(num_workgroups) 
     var emitted=vec3f(0.);var sampleLocal=vec3u(0u);
     if(leaf<control[1]){
       sampleLocal=leafLocal(cell,leaf);
-      let material=payload[params.laneOffsets.w+leafVoxel(leaf,sampleLocal)]&0xffffu;
+      let material=sceneIdentityAt(leafVoxel(leaf,sampleLocal))&0xffffu;
       if(material<arrayLength(&emission)){emitted=max(emission[material].rgb,vec3f(0.));}}
     let normal=radianceBaseNormal(record,childBase,local,leaf,sampleLocal);
     r0=emitted*mean.x*max(0.,dot(normal,TETRA0));r1=emitted*mean.x*max(0.,dot(normal,TETRA1));
@@ -923,8 +963,10 @@ export function liveSvoRadianceFeedbackWGSLFor(
   bandedReconstructionCellSize_m?: readonly [number, number, number],
   solidMarchOffsetFix = false,
   solidDirectOcclusion = false,
+  /** How the world stores scene identity. Decides which identity decode compiles. */
+  leafPayloadMode: SparseBrickLeafPayloadMode = "dense",
 ): string {
-  const lane = derivedLaneAccess(profile, sceneGeometryFormat);
+  const lane = derivedLaneAccess(profile, sceneGeometryFormat, leafPayloadMode);
   // The offset rule and the direct-occlusion rule both read the fraction, so the
   // shared helpers must be in scope whenever either is on, not only when banding
   // is.
@@ -939,7 +981,7 @@ ${svoMaterialWGSL}
 ${svoEnvironmentLightingWGSL}
 ${svoLightWGSL}
 ${svoTetrahedralRadianceWGSL}
-struct Params{targetAtlasPages:vec4u,scratchAtlasPages:vec4u,limits:vec4u,laneOffsets:vec4u,direct:vec4u,zOffsets:array<u32,12>,mappingOrigin:vec4f,mappingCellSize:vec4f,${LIVE_SVO_RADIANCE_PARAMS_FIELDS}}
+struct Params{targetAtlasPages:vec4u,scratchAtlasPages:vec4u,limits:vec4u,laneOffsets:vec4u,direct:vec4u,zOffsets:array<u32,12>,mappingOrigin:vec4f,mappingCellSize:vec4f,${LIVE_SVO_RADIANCE_PARAMS_FIELDS},bandedLanes:vec4u}
 @group(0) @binding(0) var<storage,read> control:array<u32>;
 @group(0) @binding(1) var<storage,read> topology:array<u32>;
 @group(0) @binding(2) var<storage,read> payload:array<u32>;
@@ -1039,7 +1081,7 @@ fn pageGradientNormal(pageOrigin:vec3u,center:vec3u)->vec3f{
  var leaf=worklist[record+${LIVE_SVO_DERIVED_WORKLIST.sourceLeafWord}u+((local.x/4u)|((local.y/4u)<<1u)|((local.z/4u)<<2u))];
  if(level>0u){leaf=deepestLeaf(globalCell);}
  if(coverage<=0.0||leaf>=control[1]){writeRadiance(destination,vec3f(0.),vec3f(0.),vec3f(0.),vec3f(0.));return;}let sampleLocal=leafLocal(globalCell,leaf);
- let voxel=leafVoxel(leaf,sampleLocal);let dynamicIdentity=${lane.dynamicIdentity};let sceneIdentity=payload[params.laneOffsets.w+voxel];let dynamicCoverage=${lane.dynamicCoverage};let sceneCoverage=${lane.sceneCoverage};let materialIndex=select(dynamicIdentity&0xffffu,sceneIdentity&0xffffu,sceneCoverage>=dynamicCoverage&&sceneCoverage>0.);if(materialIndex>=arrayLength(&materials)){writeRadiance(destination,vec3f(0.),vec3f(0.),vec3f(0.),vec3f(0.));return;}let material=materials[materialIndex];let fineNormal=safeNormal(leaf,sampleLocal);let coarseNormal=pageGradientNormal(pageOrigin,center);let normal=select(fineNormal,coarseNormal,level>0u&&dot(coarseNormal,coarseNormal)>0.5);let originCells=vec3f(globalCell)+vec3f(.5)+normal*${marchOffsetCells};let transportAlbedo=clamp(material.baseColorOpacity.rgb*(1.0-clamp(material.surface.x,0.0,1.0)),vec3f(0.0),vec3f(${LIVE_SVO_RADIANCE_FEEDBACK.maximumTransportAlbedo}));var incident=vec3f(0.0);for(var direction=0u;direction<${LIVE_SVO_RADIANCE_FEEDBACK.directionCount}u;direction+=1u){incident+=incidentAlong(originCells,normal,direction)/f32(${LIVE_SVO_RADIANCE_FEEDBACK.directionCount});}let worldPosition=params.mappingOrigin.xyz+(vec3f(globalCell)+vec3f(.5))*params.mappingCellSize.xyz;incident+=directIncident(worldPosition,originCells,normal${directOcclusion.receiver});let outgoing=max(material.emissiveRoughness.rgb,vec3f(0.0))+transportAlbedo*incident;writeRadiance(destination,outgoing*coverage*max(0.,dot(normal,svoTetraDirection0())),outgoing*coverage*max(0.,dot(normal,svoTetraDirection1())),outgoing*coverage*max(0.,dot(normal,svoTetraDirection2())),outgoing*coverage*max(0.,dot(normal,svoTetraDirection3())));
+ let voxel=leafVoxel(leaf,sampleLocal);let dynamicIdentity=${lane.dynamicIdentity};let sceneIdentity=sceneIdentityAt(voxel);let dynamicCoverage=${lane.dynamicCoverage};let sceneCoverage=${lane.sceneCoverage};let materialIndex=select(dynamicIdentity&0xffffu,sceneIdentity&0xffffu,sceneCoverage>=dynamicCoverage&&sceneCoverage>0.);if(materialIndex>=arrayLength(&materials)){writeRadiance(destination,vec3f(0.),vec3f(0.),vec3f(0.),vec3f(0.));return;}let material=materials[materialIndex];let fineNormal=safeNormal(leaf,sampleLocal);let coarseNormal=pageGradientNormal(pageOrigin,center);let normal=select(fineNormal,coarseNormal,level>0u&&dot(coarseNormal,coarseNormal)>0.5);let originCells=vec3f(globalCell)+vec3f(.5)+normal*${marchOffsetCells};let transportAlbedo=clamp(material.baseColorOpacity.rgb*(1.0-clamp(material.surface.x,0.0,1.0)),vec3f(0.0),vec3f(${LIVE_SVO_RADIANCE_FEEDBACK.maximumTransportAlbedo}));var incident=vec3f(0.0);for(var direction=0u;direction<${LIVE_SVO_RADIANCE_FEEDBACK.directionCount}u;direction+=1u){incident+=incidentAlong(originCells,normal,direction)/f32(${LIVE_SVO_RADIANCE_FEEDBACK.directionCount});}let worldPosition=params.mappingOrigin.xyz+(vec3f(globalCell)+vec3f(.5))*params.mappingCellSize.xyz;incident+=directIncident(worldPosition,originCells,normal${directOcclusion.receiver});let outgoing=max(material.emissiveRoughness.rgb,vec3f(0.0))+transportAlbedo*incident;writeRadiance(destination,outgoing*coverage*max(0.,dot(normal,svoTetraDirection0())),outgoing*coverage*max(0.,dot(normal,svoTetraDirection1())),outgoing*coverage*max(0.,dot(normal,svoTetraDirection2())),outgoing*coverage*max(0.,dot(normal,svoTetraDirection3())));
 }`;
 }
 
@@ -1052,7 +1094,7 @@ export function liveSvoDerivedCopyWGSLFor(
 ): string {
   return /* wgsl */ `
 ${liveSvoDerivedPageValidityWGSL}
-struct Params{targetAtlasPages:vec4u,scratchAtlasPages:vec4u,limits:vec4u,laneOffsets:vec4u,${LIVE_SVO_RADIANCE_PARAMS_FIELDS}}
+struct Params{targetAtlasPages:vec4u,scratchAtlasPages:vec4u,limits:vec4u,laneOffsets:vec4u,${LIVE_SVO_RADIANCE_PARAMS_FIELDS},bandedLanes:vec4u}
 @group(0) @binding(0) var<storage,read> worklist:array<u32>;
 @group(0) @binding(1) var opacityScratch:texture_3d<f32>;
 @group(0) @binding(2) var opacityDestination:texture_storage_3d<${opacityFormat},write>;
@@ -1098,7 +1140,7 @@ export const liveSvoDerivedCopyWGSL = liveSvoDerivedCopyWGSLFor();
  */
 export const liveSvoDerivedEmptyInitializationWGSL = /* wgsl */ `
 ${liveSvoDerivedPageValidityWGSL}
-struct Params{targetAtlasPages:vec4u,scratchAtlasPages:vec4u,limits:vec4u,laneOffsets:vec4u,${LIVE_SVO_RADIANCE_PARAMS_FIELDS}}
+struct Params{targetAtlasPages:vec4u,scratchAtlasPages:vec4u,limits:vec4u,laneOffsets:vec4u,${LIVE_SVO_RADIANCE_PARAMS_FIELDS},bandedLanes:vec4u}
 @group(0) @binding(0) var opacityValidity:texture_storage_2d<r32uint,write>;
 @group(0) @binding(1) var radianceValidity:texture_storage_2d<r32uint,write>;
 @group(0) @binding(2) var<storage,read> generationState:array<u32>;
@@ -1221,30 +1263,35 @@ export class WebGpuLiveSvoDerivedBuilder {
       dimension: "3d", format: this.radianceFormat, usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING });
     this.scratchValidity = device.createBuffer({ label: `${label} scratch page validity`, size: scratchCapacity * 4,
       usage: GPUBufferUsage.STORAGE });
-    this.params = device.createBuffer({ label: `${label} parameters`, size: 96, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    // The banded lane bases ride at the end of both parameter blocks, so
+    // `configureRadianceSlotOffset`'s two hard-coded write offsets — and every
+    // other field's — stay exactly where they were.
+    const bandedLanes = options.tree.bandedLaneWordOffsets.slice(0, 4);
+    this.params = device.createBuffer({ label: `${label} parameters`, size: 112, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     device.queue.writeBuffer(this.params, 0, new Uint32Array([
       ...options.nodeMips.atlasPages, 0,
       ...this.scratchAtlasPages, options.finestLevel,
       options.nodeMips.pageCapacity, SVO_NODE_MIP_LAYOUT.physicalSize,
       options.generationSource.offsetBytes / 4, options.plannedPageCount,
       options.tree.velocityOffsetBytes / 4, options.tree.materialOwnerOffsetBytes / 4,
-      options.tree.sceneGeometryOffsetBytes / 4, options.tree.sceneMaterialOwnerOffsetBytes / 4,
+      options.tree.sceneGeometryOffsetBytes / 4, options.tree.scenePayloadLanes.materialOwnerWords,
       ...options.radiance.atlasPages, options.radiance.slotOffset ?? 0,
       ...this.radianceScratchAtlasPages, this.radianceFloorLevel,
+      ...bandedLanes,
     ]));
     if (this.radianceFeedbackEnabled) {
       this.feedbackSampler = device.createSampler({ label: `${label} radiance feedback sampler`,
         addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge", addressModeW: "clamp-to-edge",
         minFilter: "linear", magFilter: "linear", mipmapFilter: "nearest" });
-      this.feedbackParams = device.createBuffer({ label: `${label} radiance feedback parameters`, size: 192,
+      this.feedbackParams = device.createBuffer({ label: `${label} radiance feedback parameters`, size: 208,
         usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-      const feedbackData = new ArrayBuffer(192), feedbackWords = new Uint32Array(feedbackData), feedbackFloats = new Float32Array(feedbackData);
+      const feedbackData = new ArrayBuffer(208), feedbackWords = new Uint32Array(feedbackData), feedbackFloats = new Float32Array(feedbackData);
       feedbackWords.set([...options.nodeMips.atlasPages, 0], 0);
       feedbackWords.set([...this.scratchAtlasPages, options.finestLevel], 4);
       feedbackWords.set([options.nodeMips.pageCapacity, SVO_NODE_MIP_LAYOUT.physicalSize,
         options.generationSource.offsetBytes / 4, options.plannedPageCount], 8);
       feedbackWords.set([options.tree.velocityOffsetBytes / 4, options.tree.materialOwnerOffsetBytes / 4,
-        options.tree.sceneGeometryOffsetBytes / 4, options.tree.sceneMaterialOwnerOffsetBytes / 4], 12);
+        options.tree.sceneGeometryOffsetBytes / 4, options.tree.scenePayloadLanes.materialOwnerWords], 12);
       feedbackWords.set([options.worklists.length, options.nodeMips.directPageTableDimensions[0],
         options.nodeMips.directPageTableDimensions[1], options.lightCount ?? 0], 16);
       feedbackWords.set(options.nodeMips.directPageTableLevelZOffsets.slice(0, 12), 20);
@@ -1252,6 +1299,7 @@ export class WebGpuLiveSvoDerivedBuilder {
       feedbackFloats.set([...(options.cellSize_m ?? [1, 1, 1]), 0], 36);
       feedbackWords.set([...options.radiance.atlasPages, options.radiance.slotOffset ?? 0], 40);
       feedbackWords.set([...this.radianceScratchAtlasPages, this.radianceFloorLevel], 44);
+      feedbackWords.set(bandedLanes, 48);
       device.queue.writeBuffer(this.feedbackParams, 0, feedbackData);
     }
     const texelCount = scratchTexels[0] * scratchTexels[1] * scratchTexels[2];
@@ -1314,13 +1362,14 @@ export class WebGpuLiveSvoDerivedBuilder {
     const buildModule = device.createShaderModule({
       label: `${label} build shader`,
       code: liveSvoDerivedBuildWGSLFor(
-        profile, this.radianceFormat, this.opacityFormat, sceneGeometry, bandedCellSize),
+        profile, this.radianceFormat, this.opacityFormat, sceneGeometry, bandedCellSize,
+        options.tree.leafPayloadMode),
     });
     const feedbackModule = this.radianceFeedbackEnabled
       ? device.createShaderModule({ label: `${label} radiance feedback shader`,
         code: liveSvoRadianceFeedbackWGSLFor(
           profile, this.radianceFormat, sceneGeometry, bandedCellSize, solidMarchOffsetFix,
-          solidDirectOcclusion) })
+          solidDirectOcclusion, options.tree.leafPayloadMode) })
       : undefined;
     const copyModule = device.createShaderModule({ label: `${label} copy shader`,
       code: liveSvoDerivedCopyWGSLFor(this.radianceFormat, this.opacityFormat) });
@@ -1482,13 +1531,20 @@ export class WebGpuLiveSvoDerivedWorklistPlanner {
   private readonly initial: LiveSvoDerivedPlannerSourceAllocation;
   private readonly feedback: LiveSvoDerivedPlannerSourceAllocation;
   private readonly sectionOffsetsBytes: readonly number[];
+  private readonly pageCapacityByLevel: readonly number[];
   private pipelineState?: LiveSvoDerivedPlannerPipelineState;
   private pipelineInitialization?: Promise<void>;
   private destroyed = false;
 
   constructor(private readonly device: GPUDevice, private readonly options: WebGpuLiveSvoDerivedWorklistPlannerOptions) {
     if (!Number.isInteger(options.levelCount) || options.levelCount < 1 || options.levelCount > 12) throw new RangeError("Live derived level count must be in [1, 12]");
-    if (!Number.isInteger(options.pageCapacityPerLevel) || options.pageCapacityPerLevel < 1) throw new RangeError("Live derived per-level capacity must be positive");
+    const requestedCapacity = options.pageCapacityPerLevel;
+    const capacities = typeof requestedCapacity === "number"
+      ? Array.from({ length: options.levelCount }, () => requestedCapacity)
+      : [...requestedCapacity];
+    if (capacities.length !== options.levelCount) throw new RangeError("Live derived per-level capacities must name every level");
+    if (capacities.some((capacity) => !Number.isInteger(capacity) || capacity < 1)) throw new RangeError("Live derived per-level capacity must be positive");
+    this.pageCapacityByLevel = capacities;
     if (options.dirtyLeafSources.length < 1) throw new RangeError("At least one live dirty-leaf source is required");
     for (const source of options.dirtyLeafSources) {
       if (!Number.isInteger(source.recordStrideWords) || source.recordStrideWords < 1) throw new RangeError("Dirty leaf stride must be positive");
@@ -1500,17 +1556,25 @@ export class WebGpuLiveSvoDerivedWorklistPlanner {
     if (!Number.isInteger(options.generationSource.offsetBytes) || options.generationSource.offsetBytes < 0 || options.generationSource.offsetBytes % 4 !== 0) {
       throw new RangeError("Derived generation offset must be a nonnegative u32-aligned byte offset");
     }
-    const sectionBytes = align256((LIVE_SVO_DERIVED_WORKLIST.headerWords + options.pageCapacityPerLevel * LIVE_SVO_DERIVED_WORKLIST.recordWords) * 4);
-    this.sectionOffsetsBytes = Array.from({ length: options.levelCount }, (_, level) => level * sectionBytes);
+    // Sections are laid out by prefix sum over the per-level depths, each still
+    // 256-aligned so `bindingOffsetBytes` stays a legal storage-buffer offset.
+    // Only this line ever assumed a uniform stride; `sectionOffsetsBytes` was
+    // already an array and every consumer reads it by index.
+    const sectionBytes = capacities.map((capacity) =>
+      align256((LIVE_SVO_DERIVED_WORKLIST.headerWords + capacity * LIVE_SVO_DERIVED_WORKLIST.recordWords) * 4));
+    const sectionOffsetsBytes: number[] = [];
+    let arenaBytes = 0;
+    for (const bytes of sectionBytes) { sectionOffsetsBytes.push(arenaBytes); arenaBytes += bytes; }
+    this.sectionOffsetsBytes = sectionOffsetsBytes;
     const label = options.label ?? "Live SVO derived worklists";
-    this.arena = device.createBuffer({ label: `${label} arena`, size: sectionBytes * options.levelCount,
+    this.arena = device.createBuffer({ label: `${label} arena`, size: arenaBytes,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST });
     this.claims = device.createBuffer({ label: `${label} slot generation claims`, size: options.nodeMips.pageCapacity * 4,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
-    this.worklists = this.sectionOffsetsBytes.map((offset) => ({ buffer: this.arena, capacity: options.pageCapacityPerLevel,
-      bindingOffsetBytes: offset, bindingSizeBytes: sectionBytes, indirectOffsetBytes: offset + LIVE_SVO_DERIVED_WORKLIST.dispatchIndirectOffsetBytes }));
+    this.worklists = this.sectionOffsetsBytes.map((offset, level) => ({ buffer: this.arena, capacity: capacities[level],
+      bindingOffsetBytes: offset, bindingSizeBytes: sectionBytes[level], indirectOffsetBytes: offset + LIVE_SVO_DERIVED_WORKLIST.dispatchIndirectOffsetBytes }));
     const createSource = (source: LiveSvoDirtyLeafSource, suffix: string) => {
-      const params = device.createBuffer({ label: `${label} ${suffix} parameters`, size: 144, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+      const params = device.createBuffer({ label: `${label} ${suffix} parameters`, size: LIVE_SVO_DERIVED_PLANNER_PARAMS_BYTES, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
       return { source, capacity: source.capacity, params };
     };
     this.sources = options.dirtyLeafSources.map((source, index) => createSource(source, `source ${index}`));
@@ -1519,7 +1583,8 @@ export class WebGpuLiveSvoDerivedWorklistPlanner {
     this.initial = createSource(initialSource, "initial all-leaves");
     this.feedback = createSource(initialSource, "temporal feedback leaves");
     this.configurePlan(options.nodeMips, options.finestLevel, options.levelCount);
-    this.allocatedBytes = sectionBytes * options.levelCount + options.nodeMips.pageCapacity * 4 + 144 * (this.sources.length + 2);
+    this.allocatedBytes = arenaBytes + options.nodeMips.pageCapacity * 4
+      + LIVE_SVO_DERIVED_PLANNER_PARAMS_BYTES * (this.sources.length + 2);
   }
 
   async initializePipelines(): Promise<void> {
@@ -1576,17 +1641,20 @@ export class WebGpuLiveSvoDerivedWorklistPlanner {
       throw new RangeError("Configured live derived levels must fit the fixed planner allocation");
     }
     const write = (params: GPUBuffer, source: LiveSvoDirtyLeafSource, allLiveMode: 0 | 1 | 2, phase = 0, phaseCount = 1) => {
-      const words = new Uint32Array(36);
+      const words = new Uint32Array(LIVE_SVO_DERIVED_PLANNER_PARAMS_BYTES / 4);
       words.set([source.countOffsetBytes / 4, this.options.generationSource.offsetBytes / 4,
         allLiveMode === 2 ? phase : source.recordOffsetBytes / 4,
         allLiveMode === 2 ? phaseCount : source.recordStrideWords], 0);
       words.set([finestLevel, levelCount, target.directPageTableDimensions[0], target.directPageTableDimensions[1]], 4);
       // `limits.z` carried `target.pageCapacity`, which no entry point ever read;
       // it now names the radiance floor level, which `emitPage` does read.
-      words.set([source.capacity, this.options.pageCapacityPerLevel,
+      // `limits.y` is the deepest section's depth; the bound both entry points
+      // test against is `capacities[level]`, because the sections differ.
+      words.set([source.capacity, Math.max(...this.pageCapacityByLevel),
         this.options.radianceFloorLevel ?? 0, allLiveMode], 8);
       words.set(target.directPageTableLevelZOffsets.slice(0, 12), 12);
       words.set(this.sectionOffsetsBytes.map((offset) => offset / 4), 24);
+      words.set(this.pageCapacityByLevel, 36);
       this.device.queue.writeBuffer(params, 0, words);
     };
     this.options.dirtyLeafSources.forEach((source, index) => write(this.sources[index].params, source, 0));

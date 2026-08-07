@@ -6,7 +6,7 @@ import { validateScene } from "../lib/model";
 import { createPaperScenario, paperScenarios } from "../lib/paper-scenarios";
 import { advanceRigidBodies, initializeRigidBodies } from "../lib/rigid-body";
 import { createTallCellLayout } from "../lib/tall-cell-grid";
-import { octreeLosassoTopologyLeafSize } from "../lib/webgpu-octree";
+import { octreeEffectiveLeafSize, octreeLosassoTopologyLeafSize } from "../lib/webgpu-octree";
 
 test("paper-derived scenarios are valid, deterministic, and uniquely identified", () => {
   assert.deepEqual(paperScenarios.map((scenario) => scenario.paperFigure), ["Figure 3", "Figure 4", "Figure 6"]);
@@ -45,7 +45,12 @@ test("hose tank starts with a fixed full circular aperture", () => {
     scene.container.height_m / cell,
     scene.container.depth_m / cell,
   ], [64, 48, 40], "the tank lattice must retain dyadic Losasso coarsening");
+  // The exact tiling is the residency tile edge, not the leaf ceiling. Those
+  // used to be one number, which is what capped this tank's coarsest pressure
+  // cell at 8 cubed when the domain can hold 32.
   assert.equal(octreeLosassoTopologyLeafSize(32, { nx: 64, ny: 48, nz: 40 }), 8);
+  assert.equal(octreeEffectiveLeafSize(32, { nx: 64, ny: 48, nz: 40 }), 32,
+    "the leaf ceiling is the largest leaf the domain can hold");
   assert.equal(inflow.ramp_s, 0,
     "a time-varying source radius produces overlapping jets with different diameters");
   assert.equal(inflowStrength(inflow.start_s, inflow.start_s, inflow.end_s, inflow.ramp_s), 1);

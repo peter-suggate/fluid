@@ -108,7 +108,9 @@ test("the direct renderer exposes a source-aware replacement texture contract", 
   assert.match(drySceneSource,
     /rootIndex=0u;rootIndex<2u[^]*candidate=\(-b\+select\(-root,root,rootIndex!=0u\)\)\/a/,
     "capsule and cylinder side intersections must retain the positive exit root for inside rays");
-  for (const binding of ["structural.structure", "structural.sceneMaterialOwners", "this.sceneArenaBuffer"]) {
+  // `scenePayload`, not the owner lane's slice: identity is decoded out of the
+  // whole arena now, because the banded leaf payload has no such lane.
+  for (const binding of ["structural.structure", "structural.scenePayload", "this.sceneArenaBuffer"]) {
     assert.ok(drySceneSource.includes(binding), `direct rendering must bind ${binding}`);
   }
 });
@@ -151,8 +153,11 @@ test("every dry-shader group-zero declaration has one layout and bind-group entr
     "every declared/layout binding must have one production resource expression");
   assert.match(drySceneSource, /\.\.\.\(derivedTraversal \? \[\{ binding: 5, resource: derivedTraversal \}\] : \[\]\)/,
     "derived traversal is bound only for entrypoints that actually consume it");
-  assert.equal(SVO_DRY_SCENE_BINDING_CONTRACT.filter(({ type }) => type === "read-only-storage").length, 5,
-    "the dry pass has a hard five-storage-buffer ceiling");
+  // Four, not five. The scene-geometry lane was bound so the primary could
+  // central-difference the stored distance field for a smooth normal; the normal
+  // is baked into the voxel now and the render path reads no distance at all.
+  assert.equal(SVO_DRY_SCENE_BINDING_CONTRACT.filter(({ type }) => type === "read-only-storage").length, 4,
+    "the dry pass has a hard storage-buffer ceiling");
   assert.deepEqual(SVO_DRY_SCENE_BINDING_CONTRACT.filter(({ binding }) => binding === 11 || binding === 12), []);
   assert.deepEqual(SVO_DRY_SCENE_BINDING_CONTRACT.slice(-12).map(({ binding, type }) => [binding, type]), [
     [16, "texture-3d-float"], [17, "filtering-sampler"], [18, "texture-2d-uint"],

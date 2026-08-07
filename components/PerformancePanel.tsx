@@ -4,6 +4,7 @@ import { useMemo } from "react";
 import { VISUALIZATION_FIELDS } from "@/lib/visualization-catalog";
 import type { FieldVisualization } from "@/lib/visualization-registry";
 import { PerformanceActivityGrid } from "./PerformanceActivityGrid";
+import { PerformanceDials } from "./PerformanceDials";
 import {
   averagePerformanceTraces,
   performanceTraceIsExact,
@@ -253,6 +254,8 @@ export function PerformancePanel() {
         </div>
       </div>
     </header>
+
+    <PerformanceDials />
 
     {instrumentationEnabled ? <>
     <PerformanceActivityGrid

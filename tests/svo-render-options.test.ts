@@ -17,25 +17,21 @@ test("GLOBAL SVO exposes effects without retaining alternate render or lighting 
   }
 });
 
-test("visual controls expose one GLOBAL path with two surface arms", () => {
+test("visual controls expose one GLOBAL path with no surface arms", () => {
   const panel = readFileSync(new URL("../components/VisualPanel.tsx", import.meta.url), "utf8");
   assert.doesNotMatch(panel, /aria-label="Renderer"|>RASTER<\/button>|>DIRECT<\/button>|>BEAUTIFUL<\/button>/);
-  assert.match(panel, /GLOBAL SVO VIEW/);
-  // SHADED and RAW select what the primary does with a hit, not which renderer
-  // draws it. Both are the real SVO frame: SHADED shades the gradient of the
-  // trilinearly reconstructed distance field, RAW the cube face that shipped.
-  // Pinned as a pair because the pair is the point — RAW is the reference arm,
-  // and a build where it stopped being reachable would leave every smooth-normal
-  // regression with nothing to be compared against.
-  assert.match(panel, /selectSurface\("trilinear"\)[^]*>SHADED<\/button>/);
-  assert.match(panel, /selectSurface\("voxel-face"\)[^]*>RAW<\/button>/);
-  assert.match(panel, /setTuning\(\{ \.\.\.tuning, surfaceReconstruction \}\)/,
-    "the surface choice must reach the renderer as render tuning");
+  // EXACT / SHADED / RAW selected between three ways of reconstructing the
+  // shading normal per pixel. The voxeliser bakes the normal into the voxel now,
+  // so there is one arm and the strip is gone with it — a control with no
+  // second arm behind it is a lie about what the frame can be.
+  assert.doesNotMatch(panel, /selectSurface|surfaceReconstruction/,
+    "no control may still offer a surface-reconstruction arm");
   // LEVELS / SURFACE / BRICKS / CONTENT selected the expanded-record inspection
   // overlay — a second renderer, fed from its own 48-byte-per-voxel arenas
   // (~295 MB on the widened ocean scene), drawn additively over the real SVO
   // frame. It went with those arenas, and with it the store field the whole
-  // strip switched on, so the view strip is now exactly the two surface arms.
+  // strip switched on; the surface arms were the last thing in that strip, so
+  // there is no view strip left at all.
   assert.doesNotMatch(panel, /voxelRenderMode|selectRepresentation|setVoxelRenderMode/,
     "no control may still reach for the removed inspection representation");
   assert.doesNotMatch(panel, />LEVELS<\/button>|>SURFACE<\/button>|>BRICKS<\/button>|>CONTENT<\/button>/,
@@ -82,8 +78,14 @@ test("primary visibility is switchable between the raster and traced paths from 
   assert.match(swap, /this\.svoDryScenePipeline = undefined/,
     "the retired pipeline must be cleared so the next sweep rebuilds it");
   assert.match(swap, /retired\.destroy\(\)/, "the retired pipeline must release its GPU resources");
-  assert.match(renderer, /this\.applyPrimaryTraversalRequest\(svoLightingOptions\.primaryTraversal \?\? "raster"\);\s*\n\s*this\.ensureRequestedOptionalPipelines\(/,
+  // The request is resolved against the scene's scale on the way in — a scene
+  // that emits more brick proxies than the target has pixels takes the
+  // megakernel whatever the toggle says — so the call carries the structural
+  // terms too. It still has to precede the sweep.
+  assert.match(renderer, /this\.applyPrimaryTraversalRequest\(svoLightingOptions\.primaryTraversal \?\? "raster", \{[^]*?\}\);\s*\n\s*\}\s*\n\s*this\.ensureRequestedOptionalPipelines\(/,
     "the swap must run before the sweep so a toggle rebuilds in the same frame");
+  assert.match(swap, /resolveSvoPrimaryTraversal\(requested, scale\)/,
+    "the traversal a frame runs must be the shared rule's answer, not the raw toggle");
 });
 
 test("scene configuration exposes the unified voxel lattice instead of method-level columns", () => {

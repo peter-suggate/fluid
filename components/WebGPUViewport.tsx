@@ -37,7 +37,7 @@ import {
   closestPointOnAxis,
   GIZMO_AXIS_DIRECTIONS,
 } from "@/lib/editor-gizmo";
-import { CLICK_SLOP_PX, emptySpaceClickDeselects, type EditorSelection } from "@/lib/editor-tools";
+import { CLICK_SLOP_PX, emptySpaceClickDeselects, pointerStayedWithinClickSlop, type EditorSelection } from "@/lib/editor-tools";
 import { hoverSceneAt, restOnHover, type EditorHover } from "@/lib/editor-hover";
 import { sceneryHighlightRange } from "@/lib/editor-scenery";
 import { createInflowAt, INFLOW_SELECTION_ID } from "@/lib/editor-inflow";
@@ -66,7 +66,7 @@ import {
   type EditorEntityContext,
   type EditorHandle,
 } from "@/lib/editor-entity";
-import { editorEntityContext, entityAtRay, findEntity, surfacedEntities } from "@/lib/editor-entity-catalog";
+import { editorBodyPoses, editorEntityContext, entityAtRay, findEntity, surfacedEntities } from "@/lib/editor-entity-catalog";
 import {
   applyTerrainFeatureDrag,
   terrainFeatureAt,
@@ -79,7 +79,8 @@ import { SelectionFlyout } from "./SelectionFlyout";
 import { useSceneStore } from "@/lib/stores/scene-store";
 import { applySceneDraft, displaySceneSnapshot, useDisplayScene, useSceneDraftStore, type SceneDraftSubject } from "@/lib/stores/scene-draft-store";
 import { useMethodStore, resolvedMethodValues } from "@/lib/stores/method-store";
-import { useDiagnosticsStore } from "@/lib/stores/diagnostics-store";
+import { drawnBodies, mergeDrawnPoses, useDiagnosticsStore } from "@/lib/stores/diagnostics-store";
+import type { GPURigidBodyPose } from "@/lib/webgpu-rigid-body";
 import { useUIStore } from "@/lib/stores/ui-store";
 import { useRuntimeStore } from "@/lib/stores/runtime-store";
 import { SmoothedFrameRate } from "@/lib/frame-rate-meter";
@@ -124,6 +125,7 @@ interface GPUViewportRenderBinding {
     ui: ReturnType<typeof useUIStore.getState>,
   ) => FluidCellTraceConfig | undefined;
   readonly publishFluidCellTrace: (renderer: FluidLabRendererHandle) => void;
+  readonly publishBodyPoses: (renderer: FluidLabRendererHandle) => void;
 }
 
 type GPUViewportWindow = Window & {
@@ -186,6 +188,8 @@ export function WebGPUViewport() {
   const axisConstraint = useUIStore((state) => state.axisConstraint);
   const selection = useUIStore((state) => state.selection);
   const bodies = useDiagnosticsStore((state) => state.bodies);
+  // Subscribed, so a gizmo drawn around a body follows it while it moves.
+  const bodyPoses = useDiagnosticsStore((state) => state.bodyPoses);
   const [hover, setHover] = useState<EditorHover | null>(null);
   /** Handle under the pointer, so it can announce what it does before the press. */
   const [handleHover, setHandleHover] = useState<{
@@ -236,6 +240,8 @@ export function WebGPUViewport() {
   const cellTracePinnedRef = useRef<{ normalizedX: number; normalizedY: number } | null>(null);
   const cellTracePinRequestRef = useRef<{ normalizedX: number; normalizedY: number } | null>(null);
   const cellTraceRevisionRef = useRef(-1);
+  /** Last rigid-pose readback published to the editor; see publishBodyPoses. */
+  const bodyPoseRevisionRef = useRef(-1);
   const [fluidCellTrace, setFluidCellTraceValue] = useState<FluidCellTrace | undefined>(undefined);
   const [fluidCellTraceStatus, setFluidCellTraceStatus] = useState<FluidCellTraceStatusHint>("waiting");
   /**
@@ -432,6 +438,25 @@ export function WebGPUViewport() {
     };
   };
 
+  /**
+   * Hand the drawn frame's rigid poses to the editor.
+   *
+   * The renderer names each pose with the body it belongs to, so nothing here
+   * has to assume the roster is the same length it was when the frame was
+   * encoded. The revision guard keeps this to one store write per readback
+   * rather than one per animation frame.
+   */
+  const publishBodyPoses = (renderer: FluidLabRendererHandle) => {
+    const revision = renderer.rigidBodyPoseRevision;
+    if (revision === bodyPoseRevisionRef.current) return;
+    bodyPoseRevisionRef.current = revision;
+    const published: Record<string, GPURigidBodyPose> = {};
+    for (const { id, position_m, orientation } of renderer.rigidBodyPoses) {
+      published[id] = { position_m, orientation };
+    }
+    useDiagnosticsStore.getState().set({ bodyPoses: published });
+  };
+
   const publishPixelTrace = (renderer: FluidLabRendererHandle) => {
     const status = renderer.pixelTraceStatus;
     const pointerSeen = tracePointerRef.current !== null;
@@ -585,7 +610,11 @@ export function WebGPUViewport() {
     // was still in flight, so a fast click still resolves instead of being
     // dropped along with the gesture.
     | { id: number; x: number; y: number; downX: number; downY: number; action: "pick"; released?: boolean }
-    | { id: number; action: "body"; bodyId: string; planePoint: Vec3; planeNormal: Vec3; grabOffset: Vec3; lastPosition: Vec3; lastTime: number }
+    // A body grab is a throw until the release says otherwise, so it carries the
+    // press origin too: selecting on the press would drop a bounding box around
+    // everything the user only meant to fling, and only the release knows which
+    // gesture this was.
+    | { id: number; action: "body"; bodyId: string; downX: number; downY: number; planePoint: Vec3; planeNormal: Vec3; grabOffset: Vec3; lastPosition: Vec3; lastTime: number }
     | { id: number; action: "terrain-handle"; index: number; kind: TerrainHandleKind; anchor: Vec3 }
     | { id: number; action: "fluid-paint"; erase: boolean; lastBrickKey?: string }
     | { id: number; action: "fill-level" }
@@ -615,8 +644,8 @@ export function WebGPUViewport() {
   // scene write invalidates the solver's seed key — writing per pointer-move
   // asked the renderer to re-seed dozens of times a second, which is exactly the
   // hitch that made the gesture unusable. Preview here, simulate on release.
-  const entityContext: EditorEntityContext = { scene, pickingAvailable: pickingInteractive, bodies: bodies.map((body) => ({
-    id: body.description.id, position_m: body.position_m, orientation: body.orientation })) };
+  const entityContext: EditorEntityContext = { scene, pickingAvailable: pickingInteractive,
+    bodies: editorBodyPoses(mergeDrawnPoses(bodies, bodyPoses)) };
   const entities = surfacedEntities(entityContext, activeTool, selection);
   const heldEntity = entities[0];
   const entityGizmos = entities.map((entity) => ({
@@ -714,6 +743,7 @@ export function WebGPUViewport() {
       publishPixelTrace,
     fluidCellTraceDrawConfig,
     publishFluidCellTrace,
+    publishBodyPoses,
     };
     // React Fast Refresh deliberately cleans up and replays effects, including
     // effects with an empty dependency list. Vinext's RSC program reload can
@@ -934,6 +964,7 @@ export function WebGPUViewport() {
           void stopGPU(error instanceof Error ? `GPU runtime stopped: ${error.message}` : "GPU runtime stopped");
           return;
         }
+        activeBinding.publishBodyPoses(renderer);
         activeBinding.publishPixelTrace(renderer);
         activeBinding.publishFluidCellTrace(renderer);
         simulation.recordFrame(metrics, renderer.presentationResolution);
@@ -1064,11 +1095,21 @@ export function WebGPUViewport() {
     return inFootprint && (axis === "y" ? nearHorizontalEdge : nearTop) ? { axis, grabY: Math.min(point.y, c.height_m) } : undefined;
   };
 
-  const beginBodyDrag = (pointerId: number, timeStamp: number, ray: { origin: Vec3; direction: Vec3 }, body: RigidBodyState, position: Vec3, orientation?: RigidBodyState["orientation"], surfacePosition = position) => {
+  /**
+   * Open a throw on the body under the cursor.
+   *
+   * `position` must be the pose the user can *see* — the GPU owns rigid motion
+   * once a run starts, so the host mirror is only as fresh as the last command
+   * sent to it, and starting a drag from that stale centre teleports the body to
+   * wherever it was last commanded and holds it there for the whole gesture.
+   * The pick reads the live pose for exactly this reason.
+   *
+   * The selection is deliberately not moved here. See `pointerUp`.
+   */
+  const beginBodyDrag = (pointerId: number, timeStamp: number, downX: number, downY: number, ray: { origin: Vec3; direction: Vec3 }, body: RigidBodyState, position: Vec3, orientation?: RigidBodyState["orientation"], surfacePosition = position) => {
     const basis = cameraBasis(useUIStore.getState().camera);
     const dragPoint = planeHit(ray.origin, ray.direction, surfacePosition, basis.forward), grabOffset = sub(position, dragPoint);
-    pointerRef.current = { id: pointerId, action: "body", bodyId: body.description.id, planePoint: surfacePosition, planeNormal: basis.forward, grabOffset, lastPosition: position, lastTime: timeStamp };
-    useUIStore.getState().selectBody(body.description.id);
+    pointerRef.current = { id: pointerId, action: "body", bodyId: body.description.id, downX, downY, planePoint: surfacePosition, planeNormal: basis.forward, grabOffset, lastPosition: position, lastTime: timeStamp };
     simulation.dragBody(body.description.id, position, { x: 0, y: 0, z: 0 }, "start", orientation);
   };
 
@@ -1079,7 +1120,7 @@ export function WebGPUViewport() {
   const placeInflowAt = (ray: { origin: Vec3; direction: Vec3 }) => {
     const sceneStore = useSceneStore.getState();
     const scene = sceneStore.scene;
-    const hit = hoverSceneAt(scene, useDiagnosticsStore.getState().bodies, ray);
+    const hit = hoverSceneAt(scene, drawnBodies(), ray);
     if (!hit) return;
     simulation.beginEdit(scene.fluid.inflow ? "Moved the hose" : "Placed a hose");
     sceneStore.patchFluid({ inflow: createInflowAt(hit.position_m, hit.normal, scene) });
@@ -1275,7 +1316,7 @@ export function WebGPUViewport() {
    */
   const paintFluidAt = (ray: { origin: Vec3; direction: Vec3 }, erase: boolean, lastBrickKey?: string) => {
     const proposed = displaySceneSnapshot();
-    const hit = hoverSceneAt(proposed, useDiagnosticsStore.getState().bodies, ray);
+    const hit = hoverSceneAt(proposed, drawnBodies(), ray);
     // Paint onto whatever surface is under the cursor; with nothing there,
     // fall back to the fill-level plane so open air is still paintable.
     const point = hit?.position_m
@@ -1294,7 +1335,7 @@ export function WebGPUViewport() {
     const shape = ui.placementShape;
     const template = createBodyDescription(shape, 1, scene.container.height_m);
     const radius_m = boundingRadius(template);
-    const target = hoverSceneAt(scene, useDiagnosticsStore.getState().bodies, ray);
+    const target = hoverSceneAt(scene, drawnBodies(), ray);
     // Without a surface under the cursor, fall back to the camera-facing plane
     // through the container centre — the same target the tray drop uses.
     const position = target
@@ -1335,7 +1376,7 @@ export function WebGPUViewport() {
         // placement never orbits the camera instead.
         if (useUIStore.getState().activeTool === "body-place") { placeBodyAt(ray); return; }
         if (useUIStore.getState().activeTool === "prop-place") {
-          const target = hoverSceneAt(useSceneStore.getState().scene, useDiagnosticsStore.getState().bodies, ray);
+          const target = hoverSceneAt(useSceneStore.getState().scene, drawnBodies(), ray);
           if (target) simulation.addScenery(useUIStore.getState().propShape, target.position_m, target.normal);
           return;
         }
@@ -1356,7 +1397,7 @@ export function WebGPUViewport() {
       let selectOnClick: EditorSelection | undefined;
       if (pickingInteractive && useUIStore.getState().activeTool === "select") {
         const context = editorEntityContext();
-        const surface = hoverSceneAt(context.scene, useDiagnosticsStore.getState().bodies, ray);
+        const surface = hoverSceneAt(context.scene, drawnBodies(), ray);
         // Clicking the ground selects the terrain feature under the cursor, so
         // basins and mounds are addressable without a roster.
         if (surface?.kind === "terrain") {
@@ -1392,7 +1433,7 @@ export function WebGPUViewport() {
           // A pointer already released cannot be dragged, so a fast click on a
           // body selects it without opening a throw that never ends.
           if(active.released){pointerRef.current=null;useUIStore.getState().selectBody(body.description.id);return;}
-          beginBodyDrag(pointerId,timeStamp,ray,body,picked.position_m,picked.orientation,"surfacePosition_m" in picked?picked.surfacePosition_m:picked.position_m);return;
+          beginBodyDrag(pointerId,timeStamp,x,y,ray,body,picked.position_m,picked.orientation,"surfacePosition_m" in picked?picked.surfacePosition_m:picked.position_m);return;
         }
         // No body under the cursor: a released pointer was a click on whatever
         // the analytic pick found there — an entity, or the background — and a
@@ -1405,13 +1446,13 @@ export function WebGPUViewport() {
       // The analytic body pick is the non-WebGPU fallback for the block above
       // and answers to the same gate: an unpresented body must not be grabbable.
       let nearest: { body: RigidBodyState; t: number } | undefined;
-      for (const body of pickingInteractive ? useDiagnosticsStore.getState().bodies : []) {
+      for (const body of pickingInteractive ? drawnBodies() : []) {
         const oc = sub(ray.origin, body.position_m), radius = boundingRadius(body), b = dot(oc, ray.direction), c = dot(oc, oc) - radius * radius, discriminant = b * b - c;
         if (discriminant < 0) continue; const t = -b - Math.sqrt(discriminant);
         if (t > 0 && (!nearest || t < nearest.t)) nearest = { body, t };
       }
       if (nearest) {
-        beginBodyDrag(event.pointerId,event.timeStamp,ray,nearest.body,nearest.body.position_m,nearest.body.orientation);
+        beginBodyDrag(event.pointerId,event.timeStamp,event.clientX,event.clientY,ray,nearest.body,nearest.body.position_m,nearest.body.orientation);
         return;
       }
       pointerRef.current = { id: event.pointerId, x: event.clientX, y: event.clientY, downX: event.clientX, downY: event.clientY, action: "orbit", selectOnClick };
@@ -1461,7 +1502,7 @@ export function WebGPUViewport() {
       // Scenery is asked for only under the select tool — see EditorHoverOptions.
       const ray = pointerRay(event);
       const hovered = hoverSceneAt(
-        useSceneStore.getState().scene, useDiagnosticsStore.getState().bodies, ray,
+        useSceneStore.getState().scene, drawnBodies(), ray,
         { scenery: ui.activeTool === "select" }) ?? null;
       setHover(hovered);
       publishHoverHighlight(hovered);
@@ -1553,7 +1594,19 @@ export function WebGPUViewport() {
       }
     }
     pointerRef.current = null;
-    if (active.action === "body") { simulation.dragBody(active.bodyId, active.lastPosition, { x: 0, y: 0, z: 0 }, "end"); return; }
+    // A throw and a click on a body are the same press, and only the release can
+    // tell them apart. Selecting on the press put a bounding box and a set of
+    // handles around every fling; selecting here means the box appears when the
+    // user asked a question about the body, and never when they were playing
+    // with it. Same slop as the background click, so the two agree on what
+    // "moved" means.
+    if (active.action === "body") {
+      simulation.dragBody(active.bodyId, active.lastPosition, { x: 0, y: 0, z: 0 }, "end");
+      if (!cancelled && pointerStayedWithinClickSlop(event.clientX - active.downX, event.clientY - active.downY)) {
+        useUIStore.getState().selectBody(active.bodyId);
+      }
+      return;
+    }
     // Terrain reaches the solver only through a re-seed.
     if (active.action === "terrain-handle") {
       if (cancelled) { simulation.cancelDraft(); return; }

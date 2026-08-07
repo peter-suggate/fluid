@@ -115,9 +115,22 @@
  *   FLUID_SVO_DRY_SMOKE_REFINEMENT        extra octree levels under that lattice, which
  *                                         is what the *set* is voxelized at
  *   FLUID_SVO_DRY_SMOKE_WIDTH / _HEIGHT   render size (default 800 x 460)
+ *   FLUID_SVO_DRY_SMOKE_TRAVERSAL         raster-primary | canonical-parametric; pins the
+ *                                         primary arm. Default is production's own rule
+ *                                         (`resolveSvoPrimaryTraversal`) over this scene's
+ *                                         leaf-brick count and this render size
+ *   FLUID_SVO_PRIMARY_TRAVERSAL           raster | traced; forces that rule everywhere,
+ *                                         including inside `webgpu-renderer.ts`
  *   FLUID_SVO_DRY_SMOKE_FRAMES            timed frames after warmup (default 6)
  *   FLUID_SVO_DRY_SMOKE_WARMUPS           warmup frames (default 3)
+ *   FLUID_SVO_DRY_SMOKE_PRESET            performance | balanced | quality | reference;
+ *                                         a shipping quality rung, applied whole —
+ *                                         including its resolution scale. Unset keeps
+ *                                         balanced sliders at the requested size.
  *   FLUID_SVO_DRY_SMOKE_CONE_SCALE        1 | 0.5 | 0.25 | 0.125 (default 0.5)
+ *   FLUID_SVO_DRY_SMOKE_CONE_TRACING      cones | exact | off (default cones); `exact`
+ *                                         is the rung above cones — one hierarchy ray
+ *                                         per shadow and AO sample, occluded by voxels
  *   FLUID_SVO_SURFACE                     trilinear | voxel-face (default trilinear);
  *                                         the panel's SHADED/RAW arm, for a pixel A/B
  *                                         of the smooth normal against the cube face
@@ -146,8 +159,13 @@ import { defaultCamera, type CameraState, type SceneDescription } from "../lib/m
 import { createHeroGardenHoseSceneWithSet, getScenePreset } from "../lib/scenes";
 import { SVO_PRIMITIVE_RECORD_STRIDE_BYTES } from "../lib/svo-primitive-abi";
 import { SVO_PRIMITIVE_CANDIDATE_MAXIMUM_LEAVES } from "../lib/svo-primitive-candidates";
+import { SVO_BRICK_CONTOUR, decodeSvoBrickContour, fitSvoBrickContour } from "../lib/svo-brick-contour";
+import { decodeSvoBrickOccupancy } from "../lib/svo-brick-occupancy";
 import {
+  SPARSE_BRICK_BANDED_ALLOCATOR_WORDS, SPARSE_BRICK_BANDED_BLOB_BYTES_PER_LEAF,
+  SPARSE_BRICK_BANDED_HEADER_WORDS, SPARSE_BRICK_BANDED_OVERFLOW,
   SPARSE_BRICK_GPU_LAYOUT, resolveSparseBrickPayloadLayout, sparseBrickSceneFractionAt,
+  sparseBrickScenePayloadIdentityAt,
   type SparseBrickSize,
 } from "../lib/sparse-brick-octree";
 import {
@@ -166,10 +184,13 @@ import {
 import { liveSvoLeafPage } from "../lib/webgpu-svo-live-derived-builder";
 import { terrainSampleShape } from "../lib/terrain";
 import { VOXEL_MATERIAL_IDS } from "../lib/voxel-scene";
+import { resolveSvoPrimaryTraversal, type SvoConeTracingMode } from "../lib/svo-render-options";
 import {
   DEFAULT_SVO_RENDER_TUNING, SVO_LOD_FIXED_LEVEL_MAXIMUM, SVO_LOD_SCREEN_SPACE_PIXELS_MAXIMUM,
+  SVO_RENDER_QUALITY_PRESETS,
   svoSceneryDetailCellSize_m,
   type SvoLodMode,
+  type SvoRenderQualityPreset,
 } from "../lib/svo-render-tuning";
 import { WebGPULiveSvoScene } from "../lib/webgpu-live-svo-scene";
 import {
@@ -188,6 +209,7 @@ import {
   svoConePrepassSize,
   SVO_DRY_SCENE_CLUSTER_CAPACITY,
   type SvoConeLightingScale,
+  type SvoDryOptimizationExperiments,
 } from "../lib/webgpu-svo-dry-scene";
 import { SVO_GBUFFER_RENDER_TARGET_CONTRACT } from "../lib/webgpu-svo-gbuffer-targets";
 import { FLUID_RASTER_PRIMARY_COLOR_BYTES_PER_SAMPLE } from "../lib/webgpu-device-limits";
@@ -272,8 +294,26 @@ const SCENE_PRIMITIVE_HEADROOM: Readonly<Record<string, number>> = Object.freeze
 // Configuration
 // ---------------------------------------------------------------------------
 const scenePresetId = process.env.FLUID_SVO_DRY_SMOKE_SCENE ?? "hero-garden-hose";
-const width = Number(process.env.FLUID_SVO_DRY_SMOKE_WIDTH ?? 800);
-const height = Number(process.env.FLUID_SVO_DRY_SMOKE_HEIGHT ?? 460);
+/**
+ * A named rung of the shipping quality ladder, measured as it ships.
+ *
+ * Unset is the historical lane: balanced sliders at exactly the requested pixel
+ * count, which is what every recorded number here was taken at. Naming a rung
+ * additionally applies its `resolutionScale` to the request — `performance` is
+ * half-resolution *because* it is half-resolution, and a rung timed at another
+ * rung's pixel count is not a cost point for anything. Individual environment
+ * knobs still override whatever the rung sets.
+ */
+const qualityPresetName = process.env.FLUID_SVO_DRY_SMOKE_PRESET;
+if (qualityPresetName !== undefined && !(qualityPresetName in SVO_RENDER_QUALITY_PRESETS)) {
+  throw new RangeError(`FLUID_SVO_DRY_SMOKE_PRESET must be one of ${Object.keys(SVO_RENDER_QUALITY_PRESETS).join(", ")}`);
+}
+const qualityRung = qualityPresetName === undefined
+  ? undefined : SVO_RENDER_QUALITY_PRESETS[qualityPresetName as SvoRenderQualityPreset];
+const baseTuning = qualityRung?.tuning ?? DEFAULT_SVO_RENDER_TUNING;
+const presetResolutionScale = qualityRung?.tuning.resolutionScale ?? 1;
+const width = Math.max(1, Math.round(Number(process.env.FLUID_SVO_DRY_SMOKE_WIDTH ?? 800) * presetResolutionScale));
+const height = Math.max(1, Math.round(Number(process.env.FLUID_SVO_DRY_SMOKE_HEIGHT ?? 460) * presetResolutionScale));
 // Extra octree levels under the solver lattice for the authored environment.
 // 0 is the shipping default and leaves scenery at the scene's own cell size;
 // each level halves it, so the hero garden's 25 mm goes 12.5 / 6.25 / 3.125 mm
@@ -283,7 +323,7 @@ const height = Number(process.env.FLUID_SVO_DRY_SMOKE_HEIGHT ?? 460);
 const environmentRefinementDepth = Number(process.env.FLUID_SVO_DRY_SMOKE_REFINEMENT ?? 0);
 const timedFrames = Number(process.env.FLUID_SVO_DRY_SMOKE_FRAMES ?? 6);
 const warmups = Number(process.env.FLUID_SVO_DRY_SMOKE_WARMUPS ?? 3);
-const coneScaleRaw = Number(process.env.FLUID_SVO_DRY_SMOKE_CONE_SCALE ?? 0.5);
+const coneScaleRaw = Number(process.env.FLUID_SVO_DRY_SMOKE_CONE_SCALE ?? baseTuning.coneLightingScale);
 const primitiveHeadroom = Number(process.env.FLUID_SVO_DRY_SMOKE_PRIMITIVE_HEADROOM
   ?? SCENE_PRIMITIVE_HEADROOM[process.env.FLUID_SVO_DRY_SMOKE_SCENE ?? "hero-garden-hose"] ?? 0.9);
 const frameBudget_ms = process.env.FLUID_SVO_DRY_SMOKE_FRAME_BUDGET_MS === undefined
@@ -778,6 +818,60 @@ function decodeBrickMorton(low: number, high: number, level: number): [number, n
   return coordinate;
 }
 
+// ---------------------------------------------------------------------------
+// The banded arena's own allocator, read back.
+//
+// Without this the layout's two reservations —
+// `SPARSE_BRICK_BANDED_RECORD_CAPACITY_FRACTION` and
+// `SPARSE_BRICK_BANDED_BLOB_BYTES_PER_LEAF` — fail *silently*: a leaf whose
+// allocation is refused aborts, publishes no header and no mask, and reads back
+// as air. That is a hole in the world produced by a constant being too small,
+// and the only signal the encoder leaves is the flag word this reads. It is also
+// the only place the arena's *measured* occupancy can be quoted from, as opposed
+// to its reserved capacity, which is what every byte figure in
+// `lib/svo-banded-leaf-payload.ts` is derived against.
+// ---------------------------------------------------------------------------
+const bandedReport: Record<string, unknown> = { mode: source.structural.scenePayloadLanes.mode };
+if (source.structural.scenePayloadLanes.mode === "banded") {
+  const lanes = source.structural.scenePayloadLanes;
+  const payload = source.structural.scenePayload;
+  const allocator = await readGpuBuffer(payload.buffer,
+    (payload.offset ?? 0) + lanes.blobWords * 4, SPARSE_BRICK_BANDED_ALLOCATOR_WORDS * 4);
+  const [records, blobWords, flags, publishedLeaves] = allocator;
+  const overflows = Object.entries(SPARSE_BRICK_BANDED_OVERFLOW)
+    .filter(([, bit]) => (flags & bit) !== 0).map(([name]) => name);
+  // Every byte the arena actually holds, against the dense arm's own resolved
+  // total for the same voxel capacity. Both come from
+  // `resolveSparseBrickPayloadLayout` rather than from arithmetic here, so a lane
+  // that moves cannot make this lie.
+  const profile = octreeLiveSceneDryPayloadProfile();
+  const voxels = source.structural.capacities.voxels;
+  const geometryFormat = octreeLiveSceneSceneGeometryFormat();
+  const dense = resolveSparseBrickPayloadLayout(profile, voxels, geometryFormat);
+  const layout = resolveSparseBrickPayloadLayout(profile, voxels, geometryFormat,
+    { leafPayloadMode: "banded" });
+  const fixedBytes = publishedLeaves * (128 + SPARSE_BRICK_BANDED_HEADER_WORDS * 4);
+  const occupiedBytes = fixedBytes + blobWords * 4 + records * layout.lanes.sceneBandedRecords.strideBytes;
+  const denseBytes = publishedLeaves * 512 * dense.bytesPerVoxel;
+  Object.assign(bandedReport, {
+    publishedLeaves, records, blobWords, flags, overflows,
+    occupiedBytes, denseBytes,
+    bytesPerLeaf: publishedLeaves > 0 ? occupiedBytes / publishedLeaves : 0,
+    bytesPerVoxel: publishedLeaves > 0 ? occupiedBytes / (publishedLeaves * 512) : 0,
+    reservedBytesPerVoxel: layout.bytesPerVoxel,
+    ratioAgainstDense: occupiedBytes > 0 ? denseBytes / occupiedBytes : 0,
+  });
+  record("banded-arena-allocator", overflows.length === 0 && publishedLeaves > 0,
+    overflows.length > 0
+      ? `banded allocator overflowed (${overflows.join(", ")}); every refused leaf publishes as air`
+      : `${publishedLeaves} leaves encoded into ${(occupiedBytes / 1e6).toFixed(1)} MB`
+        + ` (${(occupiedBytes / Math.max(1, publishedLeaves)).toFixed(0)} B a leaf,`
+        + ` ${(occupiedBytes / Math.max(1, publishedLeaves * 512)).toFixed(2)} B a voxel)`
+        + ` against the dense arm's ${(denseBytes / 1e6).toFixed(1)} MB`
+        + ` — ${(denseBytes / Math.max(1, occupiedBytes)).toFixed(2)}x`,
+    bandedReport, { blobBytesPerLeaf: SPARSE_BRICK_BANDED_BLOB_BYTES_PER_LEAF });
+}
+
 const terrainVoxelsEnabled = octreeLiveSceneTerrainVoxelsEnabled();
 const terrainField = !terrainVoxelsEnabled ? undefined : planSparseSceneTerrainField(scene.terrain, {
   worldOrigin_m: structuralDomain.worldOrigin_m as [number, number, number],
@@ -801,9 +895,17 @@ if (!terrainField) {
     source.structural.leaves.offset ?? 0, capacities.leaves * SPARSE_BRICK_GPU_LAYOUT.leafStrideBytes);
   const nodes = await readGpuBuffer(source.structural.nodes.buffer,
     source.structural.nodes.offset ?? 0, capacities.nodes * SPARSE_BRICK_GPU_LAYOUT.nodeStrideBytes);
-  const sceneMaterials = await readGpuBuffer(source.structural.sceneMaterialOwners.buffer,
-    source.structural.sceneMaterialOwners.offset ?? 0,
-    capacities.voxels * SPARSE_BRICK_GPU_LAYOUT.materialOwnerStrideBytes);
+  // The whole payload arena, decoded through the same block the shaders address
+  // it by. Under the banded leaf payload there is no owner lane to slice: a voxel's
+  // identity is an occupancy bit, a per-leaf header and a palette entry, and this
+  // oracle must resolve it the way the frame did or it is auditing a different
+  // scene from the one that was drawn.
+  const scenePayload = source.structural.scenePayload;
+  const scenePayloadLanes = source.structural.scenePayloadLanes;
+  const sceneWords = await readGpuBuffer(scenePayload.buffer,
+    scenePayload.offset ?? 0, scenePayload.size ?? scenePayload.buffer.size);
+  const sceneIdentityAt = (voxel: number): number =>
+    sparseBrickScenePayloadIdentityAt(sceneWords, scenePayloadLanes, voxel);
   // The geometry lane's width is a property of the *profile*, not a constant:
   // `dry` prunes the two channels no scene writer touches, so a hardcoded
   // 16-byte stride over-copies past the end of the arena and a hardcoded
@@ -859,7 +961,7 @@ if (!terrainField) {
       const cell = local.map((value, axis) => (brick[axis] * brickSize + value) * scale);
       const voxel = voxelOffset + localIndex;
       if (voxel >= capacities.voxels) continue;
-      const material = sceneMaterials[voxel] & 0xffff;
+      const material = sceneIdentityAt(voxel) & 0xffff;
       if (material === VOXEL_MATERIAL_IDS.terrain) {
         terrainVoxels += 1;
         // A leaf owns exactly one page, at the level whose texels are its
@@ -977,11 +1079,20 @@ device.queue.writeBuffer(bodyBuffer, 0, bodies.data);
 // the primary rework), so every frame-time and scaling conclusion this lane
 // produced described a path production does not take.
 //
-// `FLUID_SVO_DRY_SMOKE_TRAVERSAL=canonical-parametric` keeps the old arm for
-// comparison. Raster primary needs a wider colour attachment than the parametric
-// path, so a device that cannot carry it falls back loudly rather than silently
-// re-testing the wrong configuration.
-const requestedTraversal = process.env.FLUID_SVO_DRY_SMOKE_TRAVERSAL ?? "raster-primary";
+// Production no longer ships one traversal for every scene, so neither does this
+// lane. `resolveSvoPrimaryTraversal` is the same rule `webgpu-renderer.ts` runs,
+// over the same two terms: the proxies the raster primary would emit
+// (`capacities.leaves` — the planned leaf set plus its mutation reserve) against
+// the pixels of this render target. See
+// `SVO_PRIMARY_RASTER_PROXIES_PER_PIXEL_CEILING` for the sweep that fixes it.
+//
+// `FLUID_SVO_DRY_SMOKE_TRAVERSAL` still pins either arm outright, which is how
+// the depths the rule has not been measured at get measured.
+const smokeLeafBricks = source.structural.capacities.leaves;
+const requestedTraversal = process.env.FLUID_SVO_DRY_SMOKE_TRAVERSAL
+  ?? (resolveSvoPrimaryTraversal("raster", {
+    leafBricks: smokeLeafBricks, targetPixels: width * height,
+  }) === "raster" ? "raster-primary" : "canonical-parametric");
 if (requestedTraversal !== "raster-primary" && requestedTraversal !== "canonical-parametric") {
   throw new RangeError(`FLUID_SVO_DRY_SMOKE_TRAVERSAL must be raster-primary or canonical-parametric, got ${requestedTraversal}`);
 }
@@ -994,18 +1105,27 @@ if (traversalMode !== requestedTraversal) {
     + ` below the ${FLUID_RASTER_PRIMARY_COLOR_BYTES_PER_SAMPLE} raster primary needs;`
     + " falling back to canonical-parametric — this lane is NOT testing what production ships");
 }
-// Raster primary is not a lone flag: the constructor requires split shading with
-// raster glass *and* rigid discovery together (`webgpu-svo-dry-scene.ts:5278`),
-// because those arms are how that traversal discovers the surfaces the megakernel
-// would otherwise have marched. Parametric wants them off.
+// Where glass and rigid bodies are discovered, which is a property of the
+// traversal and not a capability either one has or lacks.
+//
+// Raster-primary has no choice: its brick pass replaces the megakernel, so panes
+// and bodies can only reach the G-buffer through separate passes, and the
+// constructor requires both (`webgpu-svo-dry-scene.ts:6843`). The megakernel
+// resolves both inline — `traceOpaqueScene` folds the analytic body loop
+// (`:6049`) and the split visibility fragment traces panes, packing the winning
+// key into the opaque identity's spare bits (`:3765`) — so the raster arms there
+// would only duplicate work the primary already did, and `rasterRigidActive` is
+// what blocks stationary primary reuse (`:10469`). `webgpu-renderer.ts` derives
+// them the same way, so the lane and production compile the same graph.
 const rasterArms = traversalMode === "raster-primary";
-// Arms for the visibility candidate-BVH ordering. `bounded` ships; `unbounded`
-// is the control that reproduces the pre-reorder order; `probe-off` deletes the
-// term outright and is image-wrong, so it only ever bounds the prize.
-const visibilityArm = process.env.FLUID_SVO_DRY_SMOKE_VISIBILITY_ANALYTIC ?? "bounded";
-if (visibilityArm !== "bounded" && visibilityArm !== "unbounded" && visibilityArm !== "probe-off") {
+// The visibility candidate-BVH arms are gone with the walk they selected. The
+// lighting path reads voxels for its occluders now, so `bounded`, `unbounded`
+// and `probe-off` all name the same absent term. Refuse the variable rather than
+// ignore it: a lane pinned to an arm that no longer exists would report a
+// configuration nobody compiled.
+if (process.env.FLUID_SVO_DRY_SMOKE_VISIBILITY_ANALYTIC !== undefined) {
   throw new RangeError(
-    `FLUID_SVO_DRY_SMOKE_VISIBILITY_ANALYTIC must be bounded, unbounded or probe-off, got ${visibilityArm}`);
+    "FLUID_SVO_DRY_SMOKE_VISIBILITY_ANALYTIC is retired: visibility occluders are voxels, with no analytic tier to order against");
 }
 // Clay render: neutral albedo everywhere, so form rather than colour carries
 // the frame. Albedo competes with the thing under judgement — a colour
@@ -1017,27 +1137,73 @@ const neutralAlbedo = (process.env.FLUID_SVO_DRY_SMOKE_ALBEDO ?? "neutral") === 
 if (!["neutral", "authored"].includes(process.env.FLUID_SVO_DRY_SMOKE_ALBEDO ?? "neutral")) {
   throw new RangeError("FLUID_SVO_DRY_SMOKE_ALBEDO must be neutral or authored");
 }
+// The per-brick conservative slab, off the same node record the DDA already
+// loads. Unlike the occupancy arms this one is produced unconditionally — the
+// voxeliser always fits and stores it — so the two arms differ by a shader
+// define and nothing else, and the scene bytes under them are identical.
+// See lib/svo-brick-contour.ts.
+// `on` is the image-exact shape: reject the brick outright and shorten its exit.
+// `entry` additionally advances the DDA's start into the slab, which is worth
+// more and costs ~1 % of pixels one f16 ULP — see `brickContourEntryClamp`.
+// Defaults to `entry` because that is what the renderer now defaults to
+// (`brickContour` / `brickContourEntryClamp` in webgpu-svo-dry-scene.ts). An
+// acceptance lane whose default arm is not the shipping configuration reports a
+// frame nobody renders — this lane read 55.68 ms with both arms off against
+// 42.36 ms as shipped, and that gap is exactly the kind of stale number this
+// program has already been bitten by. Set the env var explicitly to A/B.
+const contourArm = process.env.FLUID_SVO_DRY_SMOKE_BRICK_CONTOUR ?? "entry";
+if (!["off", "on", "entry", "probe"].includes(contourArm)) {
+  throw new RangeError(`FLUID_SVO_DRY_SMOKE_BRICK_CONTOUR must be off, on, entry or probe, got ${contourArm}`);
+}
+// Which walk the slab may reject in. `both` ships; the single arms bisect an
+// image difference onto the primary or onto the bounded visibility twin.
+const contourScope = process.env.FLUID_SVO_DRY_SMOKE_CONTOUR_SCOPE ?? "both";
+const contourExitScope = (process.env.FLUID_SVO_DRY_SMOKE_CONTOUR_EXIT ?? "both") as "both" | "escape" | "cell-exit" | "cell-exit-inert";
+if (!["both", "escape", "cell-exit", "cell-exit-inert"].includes(contourExitScope)) {
+  throw new RangeError(`FLUID_SVO_DRY_SMOKE_CONTOUR_EXIT must be both, escape, cell-exit or cell-exit-inert, got ${contourExitScope}`);
+}
+if (!["both", "primary", "visibility"].includes(contourScope)) {
+  throw new RangeError(`FLUID_SVO_DRY_SMOKE_CONTOUR_SCOPE must be both, primary or visibility, got ${contourScope}`);
+}
 const experiments = {
-  unboundedAnalyticVisibility: visibilityArm === "unbounded",
-  visibilityAnalyticDisabledProbe: visibilityArm === "probe-off",
   neutralSurfaceAlbedo: neutralAlbedo,
+  brickContour: contourArm !== "off",
+  brickContourEntryClamp: contourArm === "entry",
+  brickContourInertProbe: contourArm === "probe",
+  brickContourExitScope: contourExitScope,
+  brickContourPrimaryOnly: contourScope === "primary",
+  brickContourVisibilityOnly: contourScope === "visibility",
 } as const;
+log(`Brick contour: ${contourArm}`);
 log(`Surface albedo: ${neutralAlbedo ? "neutral clay (0.8)" : "authored materials"}`);
-log(`Primary traversal ${traversalMode}${rasterArms ? " (production default), raster glass + rigid discovery on" : ""}`);
-log(`Visibility analytic order: ${visibilityArm}`);
+log(`Primary traversal ${traversalMode}`
+  + ` (${process.env.FLUID_SVO_DRY_SMOKE_TRAVERSAL ? "pinned by FLUID_SVO_DRY_SMOKE_TRAVERSAL" : "selected by the shared rule"}:`
+  + ` ${smokeLeafBricks} leaf bricks over ${width * height} pixels`
+  + ` = ${(smokeLeafBricks / (width * height)).toFixed(3)} proxies/pixel)`
+  + `${rasterArms ? ", raster glass + rigid discovery on" : ", glass + rigid resolved inline"}`);
+log("Visibility occluders: voxels (no analytic tier)");
 // In-brick empty-space skip. `off` ships today; `macro` rejects a 4^3 region on
 // one bit of the occupancy word the producer already publishes in the terminal
 // node's spare flags. Sound under voxels-only because that summary's own test is
 // `sceneMaterial != 0 || fluidMaterial != 0`, which is the walk's solidity test.
+//
+// `bounds` clamps the walk — both the ray interval and the cell range — to the
+// occupied sub-box the same word carries, and adds no per-step test at all. That
+// distinction is the measurement: `macro`'s per-step mask read was +33% at depth
+// 3 (docs/svo-depth3-exact-10x-handoff.md) because a surface brick is mostly
+// occupied along the ray, so the test costs more than the skipped cells save.
+// `bounds` only ever removes leading and trailing cells that hold nothing.
 //
 // `macro-hdda` is deliberately not offered. Its inner walk
 // (`traceLeafPayloadFineInterval`) still requires an in-range owner and resolves
 // through the analytic marcher, so under a voxels-only primary it would drop
 // every ownerless cell — ground by construction, and most of the hero's
 // scenery — and read as a speed-up that had deleted the scene.
-const occupancyArm = process.env.FLUID_SVO_DRY_SMOKE_BRICK_OCCUPANCY ?? "off";
-if (occupancyArm !== "off" && occupancyArm !== "macro") {
-  throw new RangeError(`FLUID_SVO_DRY_SMOKE_BRICK_OCCUPANCY must be off or macro, got ${occupancyArm}`);
+// Defaults to `bounds` to match the renderer default; see the contour arm above
+// for why an acceptance lane must not default to a configuration nobody ships.
+const occupancyArm = process.env.FLUID_SVO_DRY_SMOKE_BRICK_OCCUPANCY ?? "bounds";
+if (occupancyArm !== "off" && occupancyArm !== "bounds" && occupancyArm !== "macro") {
+  throw new RangeError(`FLUID_SVO_DRY_SMOKE_BRICK_OCCUPANCY must be off, bounds or macro, got ${occupancyArm}`);
 }
 log(`Brick occupancy: ${occupancyArm}`);
 const renderer = new SparseVoxelDrySceneRenderer(device, uniformBuffer, bodyBuffer, "rgba16float",
@@ -1059,8 +1225,8 @@ const lodMode = (process.env.FLUID_SVO_LOD_MODE ?? "screen-space") as SvoLodMode
 if (lodMode !== "screen-space" && lodMode !== "fixed-level") {
   throw new RangeError(`FLUID_SVO_LOD_MODE must be screen-space or fixed-level, got ${lodMode}`);
 }
-const lodPixels = Number(process.env.FLUID_SVO_LOD_PIXELS ?? DEFAULT_SVO_RENDER_TUNING.lodScreenSpacePixels);
-const lodLevel = Number(process.env.FLUID_SVO_LOD_LEVEL ?? DEFAULT_SVO_RENDER_TUNING.lodFixedLevel);
+const lodPixels = Number(process.env.FLUID_SVO_LOD_PIXELS ?? baseTuning.lodScreenSpacePixels);
+const lodLevel = Number(process.env.FLUID_SVO_LOD_LEVEL ?? baseTuning.lodFixedLevel);
 if (!Number.isFinite(lodPixels) || lodPixels < 0 || lodPixels > SVO_LOD_SCREEN_SPACE_PIXELS_MAXIMUM) {
   throw new RangeError(`FLUID_SVO_LOD_PIXELS must lie in [0, ${SVO_LOD_SCREEN_SPACE_PIXELS_MAXIMUM}], got ${lodPixels}`);
 }
@@ -1078,37 +1244,34 @@ log(`  levels: 0 = root box .. ${structuralDomain.maximumDepth} = leaf brick`
   + ` (${(structuralDomain.cellSize_m[1] * structuralDomain.brickSize * 1000).toFixed(1)} mm)`
   + ` .. ${finestLevel} = one cell (${(structuralDomain.cellSize_m[1] * 1000).toFixed(2)} mm, exact);`
   + ` anything at or above ${finestLevel} is exact`);
-// The panel's SHADED/RAW arm, on the lane whose pixel noise floor is zero.
-//
-// This is where the smooth-normal work is answerable: the two arms differ only
-// in the shaded direction of an identical hit, so a hash diff here is the
-// reconstruction and nothing else — no interleaving and no error bar needed.
-const surfaceReconstruction = process.env.FLUID_SVO_SURFACE
-  ?? DEFAULT_SVO_RENDER_TUNING.surfaceReconstruction;
-if (surfaceReconstruction !== "trilinear" && surfaceReconstruction !== "voxel-face"
-  && surfaceReconstruction !== "analytic") {
-  throw new RangeError(`FLUID_SVO_SURFACE must be analytic, trilinear or voxel-face, got ${surfaceReconstruction}`);
-}
-log(`Surface: ${surfaceReconstruction}`
-  + (surfaceReconstruction === "analytic"
-    ? " (the owning primitive's own normal; the ground's from the heightfield)"
-    : surfaceReconstruction === "trilinear"
-      ? " (gradient of the trilinearly reconstructed scene-geometry lane)"
-      : " (cube face — the reference arm)"));
+// The shaded normal has one arm now: the voxeliser bakes the winning
+// primitive's own outward normal into the identity word, and the primary
+// unpacks it. FLUID_SVO_SURFACE selected between three ways of guessing at that
+// answer per pixel and no longer exists.
 // Secondary-ray escape distances, in cells, overridable so the lattice-phase
 // self-occlusion banding can be A/B'd against the shipped values. The shaded
 // point is the DDA's cell face while the shaded normal is the trilinear
 // isosurface's, so how far a shadow/AO ray has to travel to leave the surface
 // it is standing on is a free parameter rather than an epsilon.
+// The secondary walk's bounded work, overridable because it is what any
+// empty-space rejection *frees*: a shadow ray that exhausted its budget fails
+// closed, and skipping the empty bricks it used to walk lets it complete. That
+// makes the budget the term to hold fixed when asking whether such a rejection
+// is image-exact, and the term to raise when asking how much of a difference it
+// explains. Shipped values unless a lane says otherwise.
+const visibilityWorkItems = Number(process.env.FLUID_SVO_VISIBILITY_WORK_ITEMS
+  ?? baseTuning.visibilityWorkItems);
+const visibilityLeafVisits = Number(process.env.FLUID_SVO_VISIBILITY_LEAF_VISITS
+  ?? baseTuning.visibilityLeafVisits);
 const shadowBiasCells = Number(process.env.FLUID_SVO_SHADOW_BIAS_CELLS
-  ?? DEFAULT_SVO_RENDER_TUNING.shadowBiasCells);
+  ?? baseTuning.shadowBiasCells);
 const coneNormalEscapeCells = Number(process.env.FLUID_SVO_CONE_ESCAPE_CELLS
-  ?? DEFAULT_SVO_RENDER_TUNING.coneNormalEscapeCells);
+  ?? baseTuning.coneNormalEscapeCells);
 log(`Secondary escape: shadow bias ${shadowBiasCells} cells, cone normal escape ${coneNormalEscapeCells} cells`);
 renderer.setRenderTuning({
-  ...DEFAULT_SVO_RENDER_TUNING, coneLightingScale: coneScale, surfaceReconstruction,
+  ...baseTuning, coneLightingScale: coneScale,
   lodMode, lodScreenSpacePixels: lodPixels, lodFixedLevel: lodLevel,
-  shadowBiasCells, coneNormalEscapeCells,
+  shadowBiasCells, coneNormalEscapeCells, visibilityWorkItems, visibilityLeafVisits,
 });
 // Which secondary term is on. Both default on, exactly as production; they are
 // switchable so a dark artifact can be attributed to direct visibility, to
@@ -1116,23 +1279,100 @@ renderer.setRenderTuning({
 const shadowsEnabled = process.env.FLUID_SVO_SHADOWS !== "0";
 const ambientOcclusionEnabled = process.env.FLUID_SVO_AO !== "0";
 log(`Secondary terms: shadows ${shadowsEnabled ? "on" : "off"}, ambient occlusion ${ambientOcclusionEnabled ? "on" : "off"}`);
+// How visibility is answered. `cones` ships and marches the node-mip pyramid;
+// `exact` casts one hierarchy ray per shadow and AO sample, and is the rung
+// above cones rather than a debug arm — a solid voxel is an occluder now, so the
+// exact tier finally draws the scene's own shadows instead of the authored
+// records'. `off` withholds both secondary terms and isolates the primary.
+const coneTracingMode = (process.env.FLUID_SVO_DRY_SMOKE_CONE_TRACING
+  ?? qualityRung?.coneTracingMode ?? "cones") as SvoConeTracingMode;
+if (!["cones", "exact", "off"].includes(coneTracingMode)) {
+  throw new RangeError(`FLUID_SVO_DRY_SMOKE_CONE_TRACING must be cones, exact or off, got ${coneTracingMode}`);
+}
+log(`Visibility mode: ${coneTracingMode}`);
 function applyLighting(scale: SvoConeLightingScale): void {
   renderer.setLightingOptions({
     shadowsEnabled,
     ambientOcclusionEnabled,
     silhouetteRefinementEnabled: false,
     coneLightingScale: scale,
-    coneTracingMode: "cones",
+    coneTracingMode,
   });
 }
 applyLighting(coneScale);
-if (coneScale !== 1) {
+// The reduced-rate prepass belongs to the cone tier. Under `exact` the renderer
+// pins the scale to 1 anyway, so asking for one would prepare a stage the frame
+// never reads.
+if (coneTracingMode === "cones" && coneScale !== 1) {
   await renderer.ensureConeLightingPrepass();
   log(`Cone-lighting prepass ready at scale ${coneScale} (${svoConePrepassSize(width, height, coneScale).join("x")})`);
 }
 renderer.setSource(source);
 renderer.publishScene(drySceneData);
 renderer.ensureSize(width, height);
+
+/**
+ * The paired arm, if one was asked for.
+ *
+ * A process boundary cannot be interleaved, and a block of A followed by a block
+ * of B attributes every thermal and allocator drift in the run to whichever arm
+ * went second. Both arms therefore live in one process over one scene build, one
+ * source publication and one target, and differ by exactly the named switch —
+ * which is a shader define, so it needs its own renderer rather than a uniform
+ * write. Everything else is set identically below, in the same order.
+ *
+ * `contour` flips the per-brick conservative slab. `bounds` flips the occupancy
+ * span clamp between `off` and `bounds`.
+ */
+const pairArm = process.env.FLUID_SVO_DRY_SMOKE_PAIR ?? "none";
+if (!["none", "contour", "contour-entry", "contour-probe", "bounds"].includes(pairArm)) {
+  throw new RangeError(`FLUID_SVO_DRY_SMOKE_PAIR must be none, contour, contour-entry, contour-probe or bounds, got ${pairArm}`);
+}
+const pairCycles = Number(process.env.FLUID_SVO_DRY_SMOKE_PAIR_CYCLES ?? 8);
+assert.ok(Number.isSafeInteger(pairCycles) && pairCycles > 0,
+  "FLUID_SVO_DRY_SMOKE_PAIR_CYCLES must be a positive integer");
+let pairRenderer: SparseVoxelDrySceneRenderer | undefined;
+let pairLabel = "";
+if (pairArm !== "none") {
+  const pairOccupancy = pairArm === "bounds"
+    ? (occupancyArm === "bounds" ? "off" : "bounds") as typeof occupancyArm
+    : occupancyArm;
+  const pairExperiments = pairArm === "contour"
+    ? { ...experiments, brickContour: !experiments.brickContour }
+    : pairArm === "contour-entry"
+      ? { ...experiments, brickContour: true, brickContourEntryClamp: true }
+      : pairArm === "contour-probe"
+        ? { ...experiments, brickContour: true, brickContourInertProbe: true }
+        : experiments;
+  pairLabel = pairArm === "bounds"
+    ? `occupancy ${pairOccupancy}`
+    : `contour ${pairExperiments.brickContour ? (pairExperiments.brickContourEntryClamp ? "entry" : "on") : "off"}`
+      + `${pairExperiments.brickContourInertProbe ? " [inert probe]" : ""}`
+      + `${pairExperiments.brickContour && contourScope !== "both" ? ` (${contourScope} only)` : ""}`;
+  log(`Paired arm: ${pairArm} — A is this run's configuration, B is ${pairLabel}`);
+  pairRenderer = new SparseVoxelDrySceneRenderer(device, uniformBuffer, bodyBuffer, "rgba16float",
+    traversalMode, pairOccupancy, "split",
+    rasterArms ? SVO_SCREEN_SPACE_TERMINATION_CONTRACT.defaultThresholdPixels : 0,
+    "off", rasterArms, rasterArms, true, pairExperiments);
+  await pairRenderer.initialize();
+  pairRenderer.setRigidBodyCount(bodies.count);
+  pairRenderer.setRenderTuning({
+    ...baseTuning, coneLightingScale: coneScale,
+    lodMode, lodScreenSpacePixels: lodPixels, lodFixedLevel: lodLevel,
+    shadowBiasCells, coneNormalEscapeCells, visibilityWorkItems, visibilityLeafVisits,
+  });
+  pairRenderer.setLightingOptions({
+    shadowsEnabled,
+    ambientOcclusionEnabled,
+    silhouetteRefinementEnabled: false,
+    coneLightingScale: coneScale,
+    coneTracingMode: "cones",
+  });
+  if (coneTracingMode === "cones" && coneScale !== 1) await pairRenderer.ensureConeLightingPrepass();
+  pairRenderer.setSource(source);
+  pairRenderer.publishScene(drySceneData);
+  pairRenderer.ensureSize(width, height);
+}
 
 const target = device.createTexture({
   label: "Smoke dry-scene radianceDepth target",
@@ -1142,10 +1382,11 @@ const target = device.createTexture({
 });
 
 let encodeDeclined = false;
-function encodeFrame(encoder: GPUCommandEncoder): void {
-  const result = renderer.encode(encoder, target, undefined);
+function encodeFrameWith(which: SparseVoxelDrySceneRenderer, encoder: GPUCommandEncoder): void {
+  const result = which.encode(encoder, target, undefined);
   if (!result || !result.encoded) encodeDeclined = true;
 }
+function encodeFrame(encoder: GPUCommandEncoder): void { encodeFrameWith(renderer, encoder); }
 
 // At least one, so `dry-scene-encode` below can never pass vacuously.
 for (let index = 0; index < Math.max(1, warmups); index += 1) {
@@ -1170,6 +1411,45 @@ for (let cycle = 0; cycle < timedFrames; cycle += 1) {
 }
 const medianFrame_ms = median(samples_ms);
 log(`Frame median ${medianFrame_ms.toFixed(2)} ms over ${timedFrames} serialized encodes`);
+
+// The interleaved pair. One sample of A then one of B, repeated: any drift the
+// run accumulates lands on both arms in the same proportion and cancels in the
+// median, which a block of each cannot claim.
+const pairSamples: { a: number[]; b: number[] } = { a: [], b: [] };
+if (pairRenderer) {
+  for (let index = 0; index < Math.max(1, warmups); index += 1) {
+    const encoder = device.createCommandEncoder({ label: `Smoke pair warmup ${index}` });
+    encodeFrameWith(pairRenderer, encoder);
+    device.queue.submit([encoder.finish()]);
+  }
+  await device.queue.onSubmittedWorkDone();
+  for (let cycle = 0; cycle < pairCycles; cycle += 1) {
+    for (const [arm, which] of [["a", renderer], ["b", pairRenderer]] as const) {
+      const encoder = device.createCommandEncoder({ label: `Smoke pair ${arm} ${cycle}` });
+      encodeFrameWith(which, encoder);
+      const started = performance.now();
+      device.queue.submit([encoder.finish()]);
+      await device.queue.onSubmittedWorkDone();
+      pairSamples[arm].push(performance.now() - started);
+    }
+  }
+  const describe = (values: number[]) => {
+    const sorted = [...values].sort((left, right) => left - right);
+    const low = sorted[0];
+    const high = sorted[sorted.length - 1];
+    return {
+      median: Number(median(values).toFixed(3)),
+      min: Number(low.toFixed(3)),
+      max: Number(high.toFixed(3)),
+      spread: Number((((high - low) / median(values)) * 100).toFixed(1)),
+    };
+  };
+  const armA = describe(pairSamples.a);
+  const armB = describe(pairSamples.b);
+  log(`Pair A (this run): median ${armA.median} ms, min ${armA.min}, max ${armA.max}, spread ${armA.spread}%`);
+  log(`Pair B (${pairLabel}): median ${armB.median} ms, min ${armB.min}, max ${armB.max}, spread ${armB.spread}%`);
+  log(`Pair delta B vs A: ${(((armB.median - armA.median) / armA.median) * 100).toFixed(2)}%`);
+}
 if (frameBudget_ms !== undefined) {
   record("frame-budget", medianFrame_ms <= frameBudget_ms,
     `${medianFrame_ms.toFixed(2)} ms median against a ${frameBudget_ms} ms budget`,
@@ -1179,12 +1459,17 @@ if (frameBudget_ms !== undefined) {
 // (1, again) The renderer's own production-facing answer. `lightingVisibilityStatus`
 // is what the UI reads; a withdrawal that reached the shader but not the source
 // object would still show up here.
+// The requested mode is what this asserts, not `cones` outright: `exact` is a
+// shipping rung now rather than only a fallback, and a lane that demanded cones
+// would fail the arm it was asked to measure. What stays a failure either way is
+// a *fallback* — arriving at exact because the cone hierarchy was unavailable is
+// a withdrawal, and it must not read as having chosen exact.
 const visibility = renderer.lightingVisibilityStatus;
-record("lighting-visibility-path", visibility.state === "cones" && visibility.fallback !== true,
-  visibility.state === "cones"
-    ? "renderer is tracing cone visibility"
+record("lighting-visibility-path", visibility.state === coneTracingMode && visibility.fallback !== true,
+  visibility.state === coneTracingMode && visibility.fallback !== true
+    ? `renderer is tracing ${visibility.state} visibility`
     : `renderer fell back to ${visibility.state} visibility: ${visibility.detail ?? "no detail"}`,
-  visibility.state, "cones");
+  visibility.state, coneTracingMode);
 
 // ---------------------------------------------------------------------------
 // Fingerprint. Captured the way the benchmark captures its reference frame —
@@ -1193,7 +1478,7 @@ record("lighting-visibility-path", visibility.state === "cones" && visibility.fa
 // ---------------------------------------------------------------------------
 const bytesPerPixel = 8; // rgba16float
 const bytesPerRow = Math.ceil(width * bytesPerPixel / 256) * 256;
-async function captureFrame(label: string): Promise<Uint32Array> {
+async function captureFrameWith(which: SparseVoxelDrySceneRenderer, label: string): Promise<Uint32Array> {
   // dawn-node intermittently faults on repeated mapAsync of one long-lived
   // MAP_READ buffer, so every capture owns a fresh readback buffer.
   const readback = device.createBuffer({
@@ -1202,7 +1487,7 @@ async function captureFrame(label: string): Promise<Uint32Array> {
     usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
   });
   const encoder = device.createCommandEncoder({ label });
-  encodeFrame(encoder);
+  encodeFrameWith(which, encoder);
   encoder.copyTextureToBuffer({ texture: target }, { buffer: readback, bytesPerRow, rowsPerImage: height }, [width, height]);
   device.queue.submit([encoder.finish()]);
   await device.queue.onSubmittedWorkDone();
@@ -1217,6 +1502,7 @@ async function captureFrame(label: string): Promise<Uint32Array> {
   readback.destroy();
   return packedRows;
 }
+const captureFrame = (label: string): Promise<Uint32Array> => captureFrameWith(renderer, label);
 
 renderer.setVoxelLightCacheEnabled(false);
 applyLighting(1);
@@ -1388,6 +1674,86 @@ record("frame-determinism", imageHash === repeatHash,
   `two consecutive settled frames hash ${hex32(imageHash)} / ${hex32(repeatHash)}`,
   hex32(repeatHash), hex32(imageHash));
 
+// The paired arm's own settled frame, captured through the same state the arm
+// above was captured through. Both arms are conservative empty-space rejections
+// over the same payload, so the only acceptable answer is the same hash; a
+// difference is a soundness bug in the rejection, never a tuning question.
+let pairImageHash: string | undefined;
+if (pairRenderer) {
+  pairRenderer.setVoxelLightCacheEnabled(false);
+  pairRenderer.setLightingOptions({
+    shadowsEnabled, ambientOcclusionEnabled, silhouetteRefinementEnabled: false,
+    coneLightingScale: 1, coneTracingMode: "cones",
+  });
+  for (let index = 0; index < Math.max(1, warmups); index += 1) {
+    const encoder = device.createCommandEncoder({ label: `Smoke pair fingerprint warmup ${index}` });
+    encodeFrameWith(pairRenderer, encoder);
+    device.queue.submit([encoder.finish()]);
+  }
+  await device.queue.onSubmittedWorkDone();
+  const pairRows = await captureFrameWith(pairRenderer, "Smoke pair fingerprint frame");
+  pairImageHash = hex32(fnv1a32(pairRows));
+  // A hash says "different"; it never says "how". The word count separates a
+  // handful of boundary pixels from a structural failure, and the first
+  // differing pixel's coordinate says where to point a camera.
+  let differingWords = 0;
+  let firstDifference = "";
+  // Both frames are rgba16float. Radiance is non-negative, so the distance
+  // between two half-floats in *representable steps* is the distance between
+  // their bit patterns — which is the number that separates "one ULP of
+  // rounding" from "a different surface was drawn".
+  const leftHalves = new Uint16Array(firstRows.buffer, firstRows.byteOffset, firstRows.length * 2);
+  const rightHalves = new Uint16Array(pairRows.buffer, pairRows.byteOffset, pairRows.length * 2);
+  let maximumUlpDistance = 0;
+  let differingHalves = 0;
+  for (let index = 0; index < firstRows.length; index += 1) {
+    if (firstRows[index] === pairRows[index]) continue;
+    differingWords += 1;
+    if (!firstDifference) {
+      const pixel = Math.floor(index / (bytesPerPixel / 4));
+      firstDifference = `first at pixel (${pixel % width}, ${Math.floor(pixel / width)})`
+        + ` 0x${firstRows[index].toString(16)} vs 0x${pairRows[index].toString(16)}`;
+    }
+    for (const half of [index * 2, index * 2 + 1]) {
+      if (leftHalves[half] === rightHalves[half]) continue;
+      differingHalves += 1;
+      maximumUlpDistance = Math.max(maximumUlpDistance, Math.abs(leftHalves[half] - rightHalves[half]));
+    }
+  }
+  const differingPixels = differingWords / (bytesPerPixel / 4);
+  // Where they cluster matters more than how many there are: a horizon band, a
+  // canopy, a pond rim and a silhouette are four different bugs. Written as the
+  // paired frame plus a mask so the two can be flipped between.
+  if (pngPath) {
+    const grade = resolveDisplayGrade(scene.lighting?.grade);
+    const pairPngPath = pngPath.replace(/\.png$/, "-pair.png");
+    writeFramePng(pairPngPath, { width, height, packedRows: pairRows, grade });
+    const maskRows = new Uint32Array(firstRows.length);
+    const wordsPerPixel = bytesPerPixel / 4;
+    for (let pixel = 0; pixel < width * height; pixel += 1) {
+      let differs = false;
+      for (let word = 0; word < wordsPerPixel; word += 1) {
+        if (firstRows[pixel * wordsPerPixel + word] !== pairRows[pixel * wordsPerPixel + word]) differs = true;
+      }
+      // 1.0 in both halves of every channel word, so a differing pixel is white
+      // under any grade and an identical one is black.
+      for (let word = 0; word < wordsPerPixel; word += 1) {
+        maskRows[pixel * wordsPerPixel + word] = differs ? 0x3c00_3c00 : 0;
+      }
+    }
+    const maskPath = pngPath.replace(/\.png$/, "-diff-mask.png");
+    writeFramePng(maskPath, { width, height, packedRows: maskRows, grade });
+    log(`Pair frame written to ${pairPngPath}; difference mask to ${maskPath}`);
+  }
+  record("pair-image-exact", pairImageHash === hex32(imageHash),
+    `paired arm (${pairLabel}) settled hash ${pairImageHash} against ${hex32(imageHash)};`
+    + ` ${differingWords} of ${firstRows.length} words differ`
+    + ` (~${((differingPixels / (width * height)) * 100).toFixed(3)}% of pixels),`
+    + ` ${differingHalves} half-float components, largest distance ${maximumUlpDistance} ULP`
+    + `${firstDifference ? `, ${firstDifference}` : ""}`,
+    pairImageHash, hex32(imageHash));
+}
+
 // "The frame still draws something": a uniform grid of samples must carry
 // radiance. An empty frame is what a rejected candidate arena, a lost source or
 // a dead camera all look like, and none of them raise a validation error.
@@ -1413,6 +1779,187 @@ if (pinnedImageHash !== undefined) {
     hex32(imageHash), pinnedImageHash);
 } else {
   log(`Settled-frame hash ${hex32(imageHash)} (unpinned; set FLUID_SVO_DRY_SMOKE_IMAGE_HASH to pin it here)`);
+}
+
+// ---------------------------------------------------------------------------
+// What the conservative slab actually buys, over the scene's own bricks.
+//
+// Off by default and read back after every timed frame, so it perturbs nothing.
+// The rejection rate here is over *uniformly distributed* chords rather than the
+// camera's, which is the honest thing a static readback can say: it measures the
+// contours this scene really produced, not a synthetic occupancy.
+// ---------------------------------------------------------------------------
+if (process.env.FLUID_SVO_DRY_SMOKE_CONTOUR_CENSUS === "1") {
+  const censusControl = await readGpuBuffer(source.structural.control.buffer,
+    source.structural.control.offset ?? 0, SPARSE_BRICK_GPU_LAYOUT.controlStrideBytes);
+  const censusLeafCount = Math.min(censusControl[1], source.structural.capacities.leaves);
+  const censusLeaves = await readGpuBuffer(source.structural.leaves.buffer,
+    source.structural.leaves.offset ?? 0,
+    source.structural.capacities.leaves * SPARSE_BRICK_GPU_LAYOUT.leafStrideBytes);
+  const censusNodes = await readGpuBuffer(source.structural.nodes.buffer,
+    source.structural.nodes.offset ?? 0,
+    source.structural.capacities.nodes * SPARSE_BRICK_GPU_LAYOUT.nodeStrideBytes);
+  const censusNodeWords = SPARSE_BRICK_GPU_LAYOUT.nodeStrideBytes / 4;
+  const censusLeafWords = SPARSE_BRICK_GPU_LAYOUT.leafStrideBytes / 4;
+  let valid = 0;
+  let thicknessTotal = 0;
+  let chords = 0;
+  let rejected = 0;
+  let clipped = 0;
+  const thicknessDeciles = new Array<number>(10).fill(0);
+  let censusSeed = 1;
+  const censusRandom = () => {
+    censusSeed = (censusSeed * 1664525 + 1013904223) >>> 0;
+    return censusSeed / 4294967296;
+  };
+  for (let leafIndex = 0; leafIndex < censusLeafCount; leafIndex += 1) {
+    const nodeIndex = censusLeaves[leafIndex * censusLeafWords];
+    if (nodeIndex >= source.structural.capacities.nodes) continue;
+    const contour = decodeSvoBrickContour(censusNodes[nodeIndex * censusNodeWords + SVO_BRICK_CONTOUR.nodeWord]);
+    if (!contour.valid) continue;
+    valid += 1;
+    thicknessTotal += contour.thickness;
+    thicknessDeciles[Math.min(9, Math.floor(contour.thickness * 10))] += 1;
+    for (let sample = 0; sample < 24; sample += 1) {
+      const direction = [censusRandom() * 2 - 1, censusRandom() * 2 - 1, censusRandom() * 2 - 1];
+      const length = Math.hypot(direction[0], direction[1], direction[2]);
+      if (!(length > 1e-6)) continue;
+      const unit = direction.map((value) => value / length);
+      const origin = [censusRandom() * 8, censusRandom() * 8, censusRandom() * 8]
+        .map((value, axis) => value - unit[axis] * 24);
+      let enter = -1e30;
+      let exit = 1e30;
+      let missed = false;
+      for (let axis = 0; axis < 3; axis += 1) {
+        if (Math.abs(unit[axis]) < 1e-9) {
+          if (origin[axis] < 0 || origin[axis] > 8) missed = true;
+          continue;
+        }
+        const near = (0 - origin[axis]) / unit[axis];
+        const far = (8 - origin[axis]) / unit[axis];
+        enter = Math.max(enter, Math.min(near, far));
+        exit = Math.min(exit, Math.max(near, far));
+      }
+      if (missed || enter > exit) continue;
+      chords += 1;
+      const offset = (origin[0] - 4) * contour.normal[0] + (origin[1] - 4) * contour.normal[1]
+        + (origin[2] - 4) * contour.normal[2];
+      const slope = unit[0] * contour.normal[0] + unit[1] * contour.normal[1] + unit[2] * contour.normal[2];
+      if (Math.abs(slope) < 1e-12) {
+        if (offset < contour.low || offset > contour.high) rejected += 1;
+        continue;
+      }
+      const first = (contour.low - offset) / slope;
+      const second = (contour.high - offset) / slope;
+      const clampedEnter = Math.max(enter, Math.min(first, second));
+      const clampedExit = Math.min(exit, Math.max(first, second));
+      if (clampedEnter > clampedExit) { rejected += 1; continue; }
+      clipped += (exit - enter) > 0 ? 1 - (clampedExit - clampedEnter) / (exit - enter) : 0;
+    }
+  }
+  // The stored word against the executable spec, recomputed from the very
+  // payload the walk reads. Two distinct failures are separable here: a stored
+  // slab that violates the fit's own minimum thickness (something other than the
+  // fit wrote it) and a stored slab that disagrees with a recomputation (the GPU
+  // and the spec do not agree on the same cells).
+  const censusPayload = await readGpuBuffer(source.structural.scenePayload.buffer,
+    source.structural.scenePayload.offset ?? 0,
+    source.structural.scenePayload.size ?? source.structural.scenePayload.buffer.size);
+  const censusLanes = source.structural.scenePayloadLanes;
+  const censusIdentityAt = (voxel: number): number =>
+    sparseBrickScenePayloadIdentityAt(censusPayload, censusLanes, voxel);
+  const cells = new Uint8Array(512);
+  let checked = 0;
+  let occupancyEscapes = 0;
+  let slabEscapes = 0;
+  let worstSlabOvershoot = 0;
+  const occupancyExamples: string[] = [];
+  const slabExamples: string[] = [];
+  let thinViolations = 0;
+  let refitMismatches = 0;
+  let refitTighter = 0;
+  const examples: string[] = [];
+  // Conservativeness is checked over *every* published leaf; only the CPU refit —
+  // which repeats the whole fit including an eigen solve — is capped, because it
+  // answers a different and much weaker question.
+  const refitLimit = Number(process.env.FLUID_SVO_DRY_SMOKE_CONTOUR_REFITS ?? 4000);
+  for (let leafIndex = 0; leafIndex < censusLeafCount; leafIndex += 1) {
+    const nodeIndex = censusLeaves[leafIndex * censusLeafWords];
+    if (nodeIndex >= source.structural.capacities.nodes) continue;
+    const word = censusNodes[nodeIndex * censusNodeWords + SVO_BRICK_CONTOUR.nodeWord];
+    const stored = ((word >>> SVO_BRICK_CONTOUR.shift) & 0xff_ffff) >>> 0;
+    const storedHigh = (stored >>> 18) & 0x3f;
+    if (storedHigh === 0) continue;
+    checked += 1;
+    const storedLow = (stored >>> 12) & 0x3f;
+    if (storedHigh - storedLow < 10) thinViolations += 1;
+    const voxelOffset = censusLeaves[leafIndex * censusLeafWords + 1];
+    for (let local = 0; local < 512; local += 1) {
+      const voxel = voxelOffset + local;
+      cells[local] = voxel < source.structural.capacities.voxels
+        && (censusIdentityAt(voxel) & 0xffff) !== 0 ? 1 : 0;
+    }
+    // The conservativeness question itself, asked of the *settled* payload and
+    // the *stored* summaries rather than of a recomputation. Both published
+    // regions claim to contain every cell this walk will call solid; a cell
+    // outside either one is a hit the clamp can delete, and is the only kind of
+    // difference that is a bug rather than a rounding.
+    const summary = decodeSvoBrickOccupancy(censusNodes[nodeIndex * censusNodeWords + 7]);
+    const slab = decodeSvoBrickContour(word);
+    for (let local = 0; local < 512; local += 1) {
+      if (!cells[local]) continue;
+      const coordinate = [local & 7, (local >>> 3) & 7, local >>> 6];
+      if (summary.ready && summary.occupied
+        && coordinate.some((value, axis) => value < summary.minInclusive[axis] || value > summary.maxInclusive[axis])) {
+        occupancyEscapes += 1;
+        if (occupancyExamples.length < 4) {
+          occupancyExamples.push(`leaf ${leafIndex} cell ${coordinate.join(",")} outside`
+            + ` [${summary.minInclusive.join(",")}]..[${summary.maxInclusive.join(",")}]`);
+        }
+      }
+      if (!slab.valid) continue;
+      const reach = Math.abs(slab.normal[0]) + Math.abs(slab.normal[1]) + Math.abs(slab.normal[2]);
+      const projection = (coordinate[0] + 0.5 - 4) * slab.normal[0]
+        + (coordinate[1] + 0.5 - 4) * slab.normal[1]
+        + (coordinate[2] + 0.5 - 4) * slab.normal[2];
+      const overshoot = Math.max(slab.low - (projection - 0.5 * reach), (projection + 0.5 * reach) - slab.high);
+      if (overshoot > 1e-4) {
+        slabEscapes += 1;
+        worstSlabOvershoot = Math.max(worstSlabOvershoot, overshoot);
+        if (slabExamples.length < 4) {
+          slabExamples.push(`leaf ${leafIndex} cell ${coordinate.join(",")} overshoots by`
+            + ` ${overshoot.toFixed(4)} cells (slab ${slab.low.toFixed(3)}..${slab.high.toFixed(3)})`);
+        }
+      }
+    }
+    if (checked > refitLimit) continue;
+    const expected = fitSvoBrickContour(cells);
+    if (expected !== stored) {
+      refitMismatches += 1;
+      const expectedHigh = (expected >>> 18) & 0x3f;
+      const expectedLow = (expected >>> 12) & 0x3f;
+      if (expected !== 0 && (storedLow > expectedLow || storedHigh < expectedHigh)) refitTighter += 1;
+      if (examples.length < 6) {
+        examples.push(`leaf ${leafIndex} node ${nodeIndex} word 0x${word.toString(16)}`
+          + ` stored[code ${stored & 0xfff} low ${storedLow} high ${storedHigh}]`
+          + ` expected[code ${expected & 0xfff} low ${expectedLow} high ${expectedHigh}]`);
+      }
+    }
+  }
+  log(`Conservativeness over ${checked} bricks against the settled payload:`
+    + ` occupancy sub-box escapes ${occupancyEscapes},`
+    + ` slab escapes ${slabEscapes} (worst ${worstSlabOvershoot.toFixed(4)} cells)`);
+  for (const example of occupancyExamples) log(`  occupancy: ${example}`);
+  for (const example of slabExamples) log(`  slab: ${example}`);
+  log(`Contour spec check over ${Math.min(checked, refitLimit)} slabs: ${thinViolations} below the fit's own minimum thickness,`
+    + ` ${refitMismatches} disagree with a CPU refit (${refitTighter} of those strictly tighter than the spec)`);
+  for (const example of examples) log(`  ${example}`);
+  log(`Contour census: ${valid}/${censusLeafCount} leaves carry a slab`
+    + ` (${((valid / Math.max(1, censusLeafCount)) * 100).toFixed(1)}%),`
+    + ` mean thickness ${(thicknessTotal / Math.max(1, valid)).toFixed(3)} of the brick,`
+    + ` uniform-chord rejection ${((rejected / Math.max(1, chords)) * 100).toFixed(1)}%,`
+    + ` mean chord shortening on the survivors ${((clipped / Math.max(1, chords - rejected)) * 100).toFixed(1)}%`);
+  log(`  thickness deciles ${JSON.stringify(thicknessDeciles)}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -1443,6 +1990,15 @@ const report = {
     medianSubmitToFence_ms: Number(medianFrame_ms.toFixed(3)),
     samples_ms: samples_ms.map((value) => Number(value.toFixed(3))),
     settledImageHashFnv1a32: hex32(imageHash),
+    pair: pairRenderer
+      ? {
+        arm: pairArm,
+        label: pairLabel,
+        a_ms: pairSamples.a.map((value) => Number(value.toFixed(3))),
+        b_ms: pairSamples.b.map((value) => Number(value.toFixed(3))),
+        settledImageHashFnv1a32: pairImageHash,
+      }
+      : undefined,
     litGridSamples: litSamples,
     gridSize,
   },
@@ -1473,6 +2029,7 @@ const report = {
     derivedLighting: derivedLighting ?? null,
     lightingVisibility: visibility,
     terrain: terrainReport,
+    bandedArena: bandedReport,
   },
   checks,
   warnings: capturedWarnings,

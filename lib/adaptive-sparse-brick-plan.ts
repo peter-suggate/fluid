@@ -337,6 +337,39 @@ export function* planAdaptiveSparseBrickOctreeSteps(
     }
   }
 
+  // The child-range invariant, established here and asserted here.
+  //
+  // Traversal descends by `firstChild + popcountBefore(mask, octant)` and never
+  // reads a child record to check it landed where it meant to. That is only
+  // sound because this pass guarantees three things at once: the node array is
+  // level-major (`levelOffsets`), a level-L node's children are looked up
+  // exclusively in the level-(L+1) map, and one parent's children occupy a
+  // contiguous run because a level is Morton-sorted and the eight child keys of
+  // a parent are a contiguous Morton range. So `[firstChild, firstChild +
+  // childCount)` lies inside level L+1 — every node in it therefore has level
+  // L+1 — and both ends share the parent's Morton prefix, which pins the run to
+  // this parent alone. Checking the two ends is sufficient: the level is sorted,
+  // so anything between two keys with the same 3-bit-shifted prefix shares it.
+  //
+  // The GPU topology mutator (`webgpu-sparse-brick-topology-mutation.ts`) keeps
+  // the same invariant by its own construction — `insertChild` writes level+1
+  // into every node it initializes and relocates a parent's children into one
+  // fresh contiguous run — and is not covered by this host-side check.
+  visited = 0;
+  for (let level = 0; level < maximumDepth; level += 1) {
+    for (let index = levelOffsets[level]; index < levelOffsets[level + 1]; index += 1) {
+      if ((visited += 1) % PLAN_YIELD_BATCH === 0) yield;
+      const node = nodes[index];
+      if (node.childMask === 0) continue;
+      const last = node.firstChild + node.childCount - 1;
+      if (node.firstChild < levelOffsets[level + 1] || last >= levelOffsets[level + 2]
+        || nodes[node.firstChild].morton >> 3n !== node.morton
+        || nodes[last].morton >> 3n !== node.morton) {
+        throw new RangeError("Adaptive sparse brick plan child range is not a contiguous run of this node's next-level children");
+      }
+    }
+  }
+
   const voxelsPerBrick = options.brickSize ** 3;
   const leaves: SparseBrickLeafPlan[] = [];
   visited = 0;

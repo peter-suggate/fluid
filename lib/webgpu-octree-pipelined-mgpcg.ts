@@ -7,6 +7,7 @@
  * the integrator. There is no CPU solve or legacy-solver fallback.
  */
 import type { OctreeFirstOrderSPDVCycle } from "./webgpu-octree-section43-contract";
+import type { OctreeLosassoSolveTuning } from "./octree-runtime-dials";
 import { PassBroker } from "./webgpu-pass-broker";
 import {
   FLUID_M1_MAX_REDUCTION_LANES,
@@ -688,6 +689,9 @@ export class WebGPUOctreePipelinedMGPCG {
   private readonly relativeTolerance: number;
   private readonly absoluteTolerance: number;
   private parameterIterationBudget: number;
+  /** Live dial overrides; both fall back to the planned/authored values. */
+  private tunedRelativeTolerance?: number;
+  private tunedIterationCeiling?: number;
   private destroyed = false;
 
   constructor(
@@ -909,6 +913,42 @@ export class WebGPUOctreePipelinedMGPCG {
     return this.encodedDispatchCountFor(this.plan.maximumIterations);
   }
 
+  /**
+   * Adopt runtime dials for every subsequent solve.
+   *
+   * The tolerance is a uniform word this executor already owns, so it is one
+   * queue write. The iteration ceiling is an ENCODE shape here — unlike the
+   * resident kernel, this executor unrolls the outer loop on the host — so it
+   * is remembered and applied by `encode`, and the GPU exhaustion gate is kept
+   * identical to the graph actually encoded by the same params word.
+   * `maximumIterations` is floored at the planner's minimum of four; a smaller
+   * request keeps four rather than encoding a graph the gate would reject.
+   */
+  setSolveTuning(tuning: OctreeLosassoSolveTuning): void {
+    this.assertLive();
+    const tolerance = tuning.relativeTolerance;
+    if (Number.isFinite(tolerance) && tolerance! > 0
+      && tolerance !== this.tunedRelativeTolerance) {
+      this.tunedRelativeTolerance = tolerance;
+      this.device.queue.writeBuffer(this.params, 4 * Float32Array.BYTES_PER_ELEMENT,
+        Float32Array.of(tolerance!));
+    } else if (!(Number.isFinite(tolerance) && tolerance! > 0)
+      && this.tunedRelativeTolerance !== undefined) {
+      this.tunedRelativeTolerance = undefined;
+      this.device.queue.writeBuffer(this.params, 4 * Float32Array.BYTES_PER_ELEMENT,
+        Float32Array.of(this.relativeTolerance));
+    }
+    const ceiling = tuning.maximumIterations;
+    this.tunedIterationCeiling = Number.isSafeInteger(ceiling) && ceiling! > 0
+      ? Math.max(4, Math.min(ceiling!, this.plan.maximumIterations))
+      : undefined;
+  }
+
+  /** The ceiling `encode` will use when the caller supplies none. */
+  get tunedEncodedIterationBudget(): number {
+    return this.tunedIterationCeiling ?? this.plan.maximumIterations;
+  }
+
   encodedDispatchCountFor(encodedIterationBudget: number): number {
     if (!Number.isSafeInteger(encodedIterationBudget)
       || encodedIterationBudget < 4
@@ -932,8 +972,10 @@ export class WebGPUOctreePipelinedMGPCG {
 
   encode(broker: PassBroker, solve: OctreePipelinedMGPCGSolve): void {
     this.assertLive();
-    const encodedIterationBudget =
-      solve.encodedIterationBudget ?? this.plan.maximumIterations;
+    const encodedIterationBudget = Math.min(
+      solve.encodedIterationBudget ?? this.plan.maximumIterations,
+      this.tunedEncodedIterationBudget,
+    );
     // Keep the GPU exhaustion gate identical to the graph actually encoded.
     // If a prediction ever lacks enough headroom, `finishMergedTotal` marks
     // the solve fatal and final publication retains pressureSeed.

@@ -29,6 +29,7 @@ import {
   type OctreeCoarseDynamicsConfiguration,
 } from "./octree-coarse-backend";
 import { WebGPUOctreeLosassoCoarseBackend } from "./webgpu-octree-losasso-backend";
+import { octreeLosassoResidentSolveEnabled } from "./webgpu-octree-losasso-resident-mgpcg";
 import { WebGPUOctreeLosassoReadyCommit } from "./webgpu-octree-losasso-ready-commit";
 import {
   makeOctreeLosassoCoarsePhiSampleWGSL,
@@ -99,6 +100,12 @@ import {
   planOctreeSolveTail,
   type OctreeSolveTailPolicy,
 } from "./octree-solve-tail-policy";
+import {
+  octreeDialledIterationCap,
+  octreeDialledRelativeTolerance,
+  octreeRuntimeDialsEqual,
+  type OctreeRuntimeDials,
+} from "./octree-runtime-dials";
 import {
   OctreeWorkAccounting,
 } from "./webgpu-octree-work-accounting";
@@ -261,15 +268,40 @@ const octreeDiagnosticPipelineCache = new WeakMap<GPUDevice, GPUComputePipeline>
  * Paper-compatible adaptive boundary policy.
  *
  * The default keeps interface/inflow/hysteresis protection unchanged, but
- * permits a boundary-crossing leaf to remain coarse until liquid approaches
- * within the authored interface band. The authored method option can retain
- * unconditional unit-cell wall and terrain refinement as a control.
+ * permits a boundary-crossing leaf to remain coarse while the liquid *surface*
+ * is farther than the authored interface band. The authored method option can
+ * retain unconditional unit-cell wall and terrain refinement as a control.
+ *
+ * The band is two-sided, and it is a band on the leaf's phi INTERVAL. The gate
+ * was written as `minimumPhi <= protectionWidth` on the signed minimum, which
+ * is a test for "is there any liquid here at all": a leaf ten cells under the
+ * free surface reads phi much less than zero and passed trivially, so every
+ * submerged leaf in the closed-wall strip was split to unit cells at any depth.
+ * On the 24x18x16 water box that strip is 81.5% of the lattice, which is why
+ * the deep interior never coarsened however far it sat from the interface.
+ *
+ * The minimum alone cannot be made two-sided. `abs(minimumPhi)` looks like the
+ * proximity test the docstring always claimed, but it rejects a leaf that runs
+ * from deep liquid up through the surface into air -- its minimum is deep, and
+ * it holds the interface anyway. That is not hypothetical: symmetric-expansion
+ * is a 32x16x32 tank tiled by exactly four size-16 leaves, each spanning the
+ * full height, and `abs` left all four coarse.
+ *
+ * So the predicate is interval-vs-band: refine when `[minimumPhi, maximumPhi]`
+ * meets `[-w, +w]`. `minimumPhi <= w` is the original dry-side half, unchanged.
+ * `maximumPhi >= -w` is the new deep-side half, and it may only be applied when
+ * the interval provably covers the whole candidate -- hence `bounded`. An
+ * unbounded interval keeps the old one-sided answer, which over-refines rather
+ * than under-refines.
  */
 /** CPU mirror of the shader's final boundary branch for unit tests/tooling. */
 export function octreeFluidGatedBoundaryWouldRefine(input: {
   readonly boundaryIntersects: boolean;
   readonly liquidProximityProtected: boolean;
   readonly minimumPhi: number;
+  readonly maximumPhi: number;
+  /** Whether the interval is proven to cover the whole candidate leaf. */
+  readonly boundedInterval: boolean;
   readonly protectionWidth: number;
   readonly fluidGated: boolean;
 }): boolean {
@@ -278,9 +310,14 @@ export function octreeFluidGatedBoundaryWouldRefine(input: {
       || input.protectionWidth < 0) {
     throw new RangeError("Boundary refinement phi and protection width must be finite");
   }
-  return input.liquidProximityProtected
-    || (input.boundaryIntersects
-      && (!input.fluidGated || input.minimumPhi <= input.protectionWidth));
+  if (input.minimumPhi > input.maximumPhi) {
+    throw new RangeError("Boundary refinement phi interval must be ordered");
+  }
+  if (input.liquidProximityProtected) return true;
+  if (!input.boundaryIntersects) return false;
+  if (!input.fluidGated) return true;
+  if (input.minimumPhi > input.protectionWidth) return false;
+  return !input.boundedInterval || input.maximumPhi >= -input.protectionWidth;
 }
 
 export interface OctreeProjectionOptions {
@@ -1429,11 +1466,26 @@ export function octreeEffectiveLeafSize(
 }
 
 /**
- * Losasso's geometric parent rows are complete dyadic cubes. Unlike the
- * boundary-clipped Power topology, every hierarchy span must therefore divide
- * all three finest-grid dimensions. Keep the authored maximum as a ceiling and
- * select the coarsest exact tiling; a unit-leaf result is the intentional
- * single-level hierarchy for domains with an odd axis.
+ * The coarsest span that tiles the domain exactly, which is the **tile ABI** --
+ * the residency/retention tile edge shared by the host plan and
+ * `topologyTileSize()` in WGSL. It is deliberately no longer the leaf ceiling.
+ *
+ * It used to be both, and that conflated two unrelated things. A leaf ceiling
+ * is a physics question ("how coarse may the deep interior get"); an exact
+ * tiling is an arithmetic property of the lattice. Binding them meant the
+ * coarsest pressure cell in a scene was the largest power of two dividing all
+ * three dimensions -- so `24x18x16` (the default water box) could never publish
+ * a leaf above 2 cubed because 18 is 2 mod 4, and `60x45x40` could never
+ * publish one above 1 cube at all, i.e. no octree. Neither cap had anything to
+ * do with where the liquid was.
+ *
+ * The leaf ceiling is `octreeLosassoLeafCeiling` instead: a leaf is dyadic and
+ * size-aligned, so the only real requirements are that one fits inside the
+ * domain and inside one residency tile. `resetTopologyAt` already seeds the
+ * largest *contained* aligned leaf per cell and halves where one does not fit,
+ * so a domain that no longer tiles exactly simply carries finer leaves against
+ * its far faces -- the same thing the boundary-clipped Power topology has
+ * always done.
  */
 export function octreeLosassoTopologyLeafSize(
   maximumLeafSize: 2 | 4 | 8 | 16 | 32,
@@ -1444,6 +1496,57 @@ export function octreeLosassoTopologyLeafSize(
     size >>= 1;
   }
   return size as OctreeOwnerLeafSize;
+}
+
+/** Residency/retention tile edge implied by a domain's exact tiling. */
+export function octreeLosassoTileEdgeCells(
+  exactTilingLeafSize: OctreeOwnerLeafSize,
+): number {
+  return Math.max(8, exactTilingLeafSize);
+}
+
+/**
+ * How coarse a Losasso pressure leaf may get: the largest leaf that fits in the
+ * domain AND inside one residency tile.
+ *
+ * The second clause is not a tuning choice, it is the ABI `topologyTileSize()`
+ * documents -- "a tile spans max(8, maximumLeaf) cells per axis so every dyadic
+ * pressure leaf lies inside exactly one tile". The delta refinement and grading
+ * passes are dispatched per ACTIVE TILE and evaluate the candidate whose origin
+ * is that tile's origin (`refineTopologyCoarseDelta`), so a leaf wider than a
+ * tile is only ever revisited from the one tile that holds its origin. On the
+ * 24x18x16 water box the exact tiling is 2, so tiles are 8 -- and a size-16
+ * leaf covers eight of them. Liquid arriving anywhere in the other seven marks
+ * those tiles active without ever reconsidering the leaf, so the dam-break
+ * front met a 16-cell pressure cell that no epoch could split, stalled
+ * mid-domain, and heaped into a standing ridge.
+ *
+ * MEASURED NEGATIVE RESULT, recorded so it is not retried: making the delta
+ * passes snap to the size-aligned origin, so every covering tile nominates the
+ * same block, does NOT substitute for the clamp. It is the obvious repair --
+ * the duplicate workgroups do agree by construction -- but on dam-break-ui with
+ * the ceiling left at 16 the standing ridge came straight back (front stalled
+ * at x=17 at t=0.4, hump 9.1 cells at t=0.6, no far-wall run-up at t=1.0, and
+ * the tank never settled by t=2.0). Reachability is not the only thing a leaf
+ * wider than a tile breaks; grading and retention are tile-scoped too.
+ *
+ * The clamp keeps everything this ceiling was raised for. It is the *tile*, not
+ * gcd(nx, ny, nz), that bounds it now: `24x18x16` publishes 8-cubed leaves
+ * where the gcd rule allowed 2, `60x45x40` publishes 8 where the gcd rule
+ * allowed 1 (no octree at all), and `symmetric-expansion` at 32x16x32 tiles
+ * exactly at 16 and so keeps its four full-height size-16 leaves unchanged.
+ * Growing the tile instead would widen the retention hysteresis that pins
+ * leaves fine, which is the coarsening this change exists to buy.
+ */
+export function octreeLosassoLeafCeiling(
+  maximumLeafSize: 2 | 4 | 8 | 16 | 32,
+  dims: { nx: number; ny: number; nz: number },
+  exactTilingLeafSize: OctreeOwnerLeafSize,
+): OctreeOwnerLeafSize {
+  return Math.min(
+    octreeEffectiveLeafSize(maximumLeafSize, dims),
+    octreeLosassoTileEdgeCells(exactTilingLeafSize),
+  ) as OctreeOwnerLeafSize;
 }
 
 export function octreeBalanceRounds(maximumLeafSize: OctreeOwnerLeafSize): number {
@@ -1755,8 +1858,14 @@ export class WebGPUOctreeProjection {
   private readonly maxLeafSize: 2 | 4 | 8 | 16 | 32;
   /** Backend-normalized maximum consumed by the structural topology. */
   private readonly topologyMaximumLeafSize: OctreeOwnerLeafSize;
+  /** Coarsest span that tiles the domain exactly; the residency tile edge only. */
+  private readonly losassoExactTilingLeafSize: OctreeOwnerLeafSize;
   private readonly coarseDynamics: OctreeCoarseDynamicsConfiguration;
   private topologyCadenceCursor = 0;
+  /** Live cadence dial; undefined defers to the construction-time policy. */
+  private topologyCadenceOverride?: number;
+  /** Last bag applied, so a per-frame call with an unchanged bag costs a compare. */
+  private appliedRuntimeDials?: OctreeRuntimeDials;
   private readonly fluidGatedBoundaryRefinement: boolean;
   private readonly topologyTileSize: number;
   private readonly adaptivity: number;
@@ -1849,8 +1958,13 @@ export class WebGPUOctreeProjection {
       globalFineLevelSetFactor: globalFineFactor,
     });
     this.maxLeafSize = octreeLeafSize(options.maximumLeafSize ?? 16);
+    // The exact tiling is retained, but only as the tile ABI -- see
+    // `octreeLosassoTopologyLeafSize`. Losasso's leaf ceiling is now the same
+    // "largest leaf the domain can hold" rule Power uses, so the deep interior
+    // coarsens by distance to the interface instead of by gcd(nx, ny, nz).
+    this.losassoExactTilingLeafSize = octreeLosassoTopologyLeafSize(this.maxLeafSize, dims);
     this.topologyMaximumLeafSize = this.coarseDynamics.backend === "losasso"
-      ? octreeLosassoTopologyLeafSize(this.maxLeafSize, dims)
+      ? octreeLosassoLeafCeiling(this.maxLeafSize, dims, this.losassoExactTilingLeafSize)
       : this.maxLeafSize;
     this.fluidGatedBoundaryRefinement = options.fluidGatedBoundaryRefinement ?? true;
     this.solveTailPolicy = planOctreeSolveTail({
@@ -1863,6 +1977,9 @@ export class WebGPUOctreeProjection {
       closedTop: scene.container.top === "closed",
       requestedRelativeTolerance: scene.numerics.pressureRelativeTolerance,
     });
+    // The refinement ladder must span exactly the sizes the topology may hold.
+    // A rung above the ceiling compiles and dispatches a level with no eligible
+    // candidate; a rung below it strands leaves the seed produced.
     this.effectiveLeafSize = this.coarseDynamics.backend === "losasso"
       ? this.topologyMaximumLeafSize
       : octreeEffectiveLeafSize(this.maxLeafSize, dims);
@@ -1993,13 +2110,28 @@ export class WebGPUOctreeProjection {
     // bootstrap bounds are healthy at tile 16 (4 active tiles, not 0) and
     // planOctreeCompactionAllocation is sane. The flag exists so the remaining
     // localization costs one run rather than a red tree.
-    // The Losasso hierarchy requires an exact domain tiling, so its normalized
-    // topology maximum is also the tile ABI consumed by the host residency
-    // plan and `topologyTileSize()` in WGSL. Power retains its frozen authored-
-    // leaf default and the existing diagnostic clamp experiment.
+    // The tile ABI is the exact tiling, NOT the leaf ceiling. Deriving it from
+    // the ceiling once the ceiling stopped being gcd-bound would have grown the
+    // retention tile with it -- a 24x18x16 domain would become a single 32-cell
+    // tile, so any evidence anywhere would pin the whole box fine for three
+    // generations and undo exactly the coarsening this change buys. Power
+    // retains its frozen authored-leaf default and the diagnostic clamp.
+    //
+    // The dependency runs the other way instead: `octreeLosassoLeafCeiling`
+    // clamps the leaf to this edge, because the delta refine/grading passes are
+    // dispatched per active tile and reach a coarse candidate only through the
+    // tile that holds its origin.
     this.topologyTileSize = Math.max(8, this.coarseDynamics.backend === "losasso"
-      ? this.topologyMaximumLeafSize
+      ? this.losassoExactTilingLeafSize
       : octreeTopologyTileClampEnabled() ? this.effectiveLeafSize : this.maxLeafSize);
+    if (this.coarseDynamics.backend === "losasso"
+      && this.topologyMaximumLeafSize > this.topologyTileSize) {
+      // The ABI `topologyTileSize()` states, asserted where it is established
+      // rather than trusted: a leaf wider than a tile is unreachable from every
+      // tile but one, and the symptom is a coarse cell no epoch can split.
+      throw new Error(`Losasso leaf ceiling ${this.topologyMaximumLeafSize}`
+        + ` exceeds the ${this.topologyTileSize}-cell residency tile`);
+    }
     const allocateSparseWorld = octreeSparseWorldRequired(sceneHasTerrain(scene), scene.rigidBodies.length);
     const sparseWorldBrickSize = scene.voxelDomain.brickSize_cells;
     if (allocateSparseWorld) this.sparseBrickWorld = new OctreeSparseBrickWorld(device, scene, [dims.nx, dims.ny, dims.nz], {
@@ -2658,6 +2790,12 @@ export class WebGPUOctreeProjection {
       freeSurfacePressureMode: this.coarseDynamics.losassoFreeSurfacePressure,
       velocityExtensionMode: this.coarseDynamics.losassoVelocityExtension,
       closedBoundaries: [true, true, true, closedTop, true, true],
+      // The ≤4K-row coarse-only tier runs the whole warm-started MGPCG loop —
+      // V-cycle, operator, exact reductions, convergence — in one resident
+      // dispatch, so it executes exactly the iterations the residual gate
+      // needs instead of launching the encoded envelope.
+      residentSolver: octreeLosassoResidentSolveEnabled()
+        && this.coarseOnlySurfaceTracking && rowCapacity <= 4_096,
       solver: {
         relativeTolerance: this.solveTailPolicy.relativeTolerance,
         // The <=4K-row factor-one production tier has a measured late-dam
@@ -2757,6 +2895,13 @@ export class WebGPUOctreeProjection {
         physicalCellSize: coarseCell.x,
         timestep_s: this.scene.numerics.maxDt_s,
         maximumLeafSize: this.maxLeafSize,
+        // Exactly `retainedProtectionWidth` at the coarsest candidate the
+        // topology may publish -- the widest distance the refinement ladder
+        // ever compares |phi| against. Anything less and the ladder decides how
+        // coarse the deep interior may get from the redistance seed rather than
+        // from a depth.
+        redistanceReachCells: this.interfaceRefinementBandCells
+          + this.surfaceRefinementGradingLayers * Math.max(2, this.topologyMaximumLeafSize),
         losassoVelocity: sampler,
         openTopBoundary: this.scene.container.top !== "closed",
       });
@@ -2948,6 +3093,7 @@ export class WebGPUOctreeProjection {
       topologyCandidateView: candidateTopology ? 1 : 0,
       fineSummaryFactor: this.coarseOnlySurfaceTracking
         ? 1 : this.globalFineLevelSet?.plan.fineFactor ?? 4,
+      topologyTileCells: this.topologyTileSize,
       gradingPageFill: octreeGradingPageFillEnabled() ? 1 : 0,
       gradingSplitHelpers: octreeGradingSplitHelpersEnabled() ? 1 : 0,
       gradingMembershipLoad: octreeGradingMembershipLoadEnabled() ? 1 : 0,
@@ -4625,8 +4771,48 @@ export class WebGPUOctreeProjection {
    * corresponding extra dilation rings. Power 2017 always takes the legacy
    * every-advance path.
    */
+  /**
+   * Adopt the live coarse-band accuracy/cost dials.
+   *
+   * Cheap and idempotent by construction: every branch below is either a
+   * queue write into an already-allocated buffer or a host field the next
+   * encode reads, so the renderer can call this every frame with the current
+   * parameter bag and only a changed dial does any work. Nothing here touches
+   * the lattice, the arenas, or the accepted topology epoch, which is what
+   * lets these keys stay out of the structural fingerprint.
+   *
+   * Power 2017 keeps its frozen reference behaviour: the dials describe
+   * Losasso machinery and there is no equivalent seam on that backend.
+   */
+  applyRuntimeDials(dials: OctreeRuntimeDials): void {
+    const backend = this.losassoBackend;
+    if (!backend || this.coarseDynamics.backend !== "losasso") return;
+    if (this.appliedRuntimeDials && octreeRuntimeDialsEqual(this.appliedRuntimeDials, dials)) {
+      return;
+    }
+    this.appliedRuntimeDials = dials;
+    backend.applySolveTuning({
+      relativeTolerance: octreeDialledRelativeTolerance(
+        this.solveTailPolicy.relativeTolerance, dials),
+      maximumIterations: octreeDialledIterationCap(
+        backend.solverIterationBudget ?? this.solveTailPolicy.hardOuterIterationCeiling,
+        dials),
+      bottomSweeps: dials.vcycleBottomSweeps,
+      smoothingSweeps: dials.vcycleSmoothingSweeps,
+    });
+    backend.setVelocityExtensionSweeps(dials.velocityExtensionSweeps);
+    // Zero keeps the construction-time cadence, whose value is also what sized
+    // the candidate's extra dilation rings. A larger runtime cadence is
+    // deliberately allowed to exceed that padding: it spends the canonical
+    // band's own slack, so the surface can outrun its refined region rather
+    // than the epoch failing to publish.
+    this.topologyCadenceOverride = dials.topologyRebuildCadence > 0
+      ? dials.topologyRebuildCadence : undefined;
+  }
+
   encodeInactiveTopologyCandidateIfDue(encoder: GPUCommandEncoder): boolean {
-    const cadence = this.coarseDynamics.topology.advancesPerEpoch;
+    const cadence = this.topologyCadenceOverride
+      ?? this.coarseDynamics.topology.advancesPerEpoch;
     if (this.coarseDynamics.backend === "power2017" || cadence === 1) {
       return this.encodeInactiveTopologyCandidate(encoder);
     }
@@ -7320,6 +7506,12 @@ override denseSolidField: bool = true;
 override fluidGatedBoundaryRefinement: bool = true;
 override topologyCandidateView: u32 = 0u;
 override fineSummaryFactor: u32 = 4u;
+// Residency/retention tile edge. Separate from params.dimsMax.w (the leaf
+// ceiling) because the two stopped being the same number: the ceiling is the
+// largest leaf the domain can hold, the tile is the coarsest span that tiles
+// the domain exactly. Growing the tile with the ceiling would widen the
+// pressure hysteresis that pins leaves fine.
+override topologyTileCells: u32 = 8u;
 override gradingPageFill: bool = false;
 override gradingSplitHelpers: bool = false;
 override gradingMembershipLoad: bool = false;
@@ -7864,7 +8056,7 @@ fn candidateScanScratchBase() -> u32 { return 15u + 3u * params.control.z; }
 // and word 5 the retired equivalents. A tile spans max(8, maximumLeaf) cells
 // per axis so every dyadic pressure leaf lies inside exactly one tile; each
 // tile decomposes into (tileSize/4)^3 of the existing 4^3 cell workgroups.
-fn topologyTileSize() -> u32 { return max(8u, params.dimsMax.w); }
+fn topologyTileSize() -> u32 { return max(8u, topologyTileCells); }
 fn deltaTopologyCell(workgroup: vec3u, local: vec3u) -> vec3u {
   let tileSize = topologyTileSize();
   let blocks = tileSize / 4u;
@@ -8642,8 +8834,6 @@ fn inflowProtectionIntersects(origin: vec3u, size: u32) -> bool {
 
 fn pressureRefinementEvidence(origin: vec3u, size: u32) -> bool {
   if (inflowProtectionIntersects(origin, size)) { return true; }
-  let summary = fineLeafSummary(origin, size);
-  if (!summary.found) { return false; }
   // Factor one has no finer surface lattice from which to recover outward
   // motion. Keep both wet and dry children of each represented B4 block at
   // unit pressure resolution; this is the coarse air-side support halo, not a
@@ -8668,6 +8858,8 @@ fn pressureRefinementEvidence(origin: vec3u, size: u32) -> bool {
     + gradingLayers * max(0.0, f32(size) - 2.0)) * cellWidth;
   let protectionWidth = select(compactProtectionWidth, retainedProtectionWidth,
     fineSummaryFactor == 1u);
+  let summary = fineLeafSummary(origin, size);
+  if (!summary.found) { return false; }
   let crossesInterface = summary.minimumPhi <= 0.0 && summary.maximumPhi >= 0.0;
   // A sign crossing is positive refinement evidence even when the narrow-band
   // publication does not fill the candidate leaf's entire volume. Requiring a
@@ -8687,7 +8879,25 @@ fn pressureRefinementEvidence(origin: vec3u, size: u32) -> bool {
   if (fineSummaryFactor != 1u && size <= 2u) {
     return false;
   }
-  if (summary.coarseAuthority) { return false; }
+  // Coarse authority is a completeness claim, not a "stay coarse" verdict, and
+  // it must not preempt the band test below.
+  //
+  // At factor 1 -- the product default -- the coarse-only summary publisher
+  // stamps COARSE_AUTHORITY on EVERY entry it writes, so this line returned
+  // false for every candidate that reached it and made protectionWidth
+  // unreachable. That is the whole authored interface reach: both
+  // interfaceRefinementBandCells and surfaceRefinementGradingLayers feed only
+  // that width, which is why sweeping band 4 -> 12 and grading 1 -> 3 on
+  // dam-break-ui produced byte-identical topologies. Refinement collapsed to a
+  // bare zero-crossing test, so a leaf one cell from the free surface could
+  // coarsen -- and a size-2 pressure row beside the surface is what rears the
+  // dam-break blob up the back wall.
+  //
+  // The next line's own factor-1 disjunct says factor 1 was always meant to
+  // arrive here: it exists precisely to accept a factor-1 entry whose fine
+  // samples are incomplete. Keep the early return for factor 4/8, where a
+  // pure-coarse entry genuinely carries no near-interface evidence.
+  if (summary.coarseAuthority && fineSummaryFactor != 1u) { return false; }
   let observedNearInterface = summary.minimumAbsolutePhi <= protectionWidth;
   // Factor 4/8 can use the merged corrected-coarse interval to prove complete
   // distance evidence. Factor 1 deliberately publishes a fine-only hierarchy
@@ -8731,6 +8941,65 @@ fn boundaryLiquidMinimumPhi(origin: vec3u, size: u32, bootstrapMinimum: f32) -> 
   return phi(vec3i(min(origin + vec3u(size / 2u), dims() - vec3u(1u))));
 }
 
+// The phi INTERVAL over a boundary candidate, and whether that interval is
+// proven to cover the whole candidate.
+//
+// A minimum alone cannot answer "is the surface near this leaf". It answers
+// "is there liquid in this leaf", which is why the signed gate refined every
+// submerged wall leaf at any depth. But its two-sided form, abs(minimum), is
+// WRONG in the other direction and far worse: a leaf spanning floor to
+// ceiling has a deep minimum and still contains the surface. On
+// symmetric-expansion, whose 32x16x32 lattice is tiled by exactly four
+// size-16 leaves that each run the full height, that rejected all four and
+// left the tank as four pressure cells with the centre surface pinned high.
+//
+// Only the interval decides it: refine when [minimum, maximum] meets the band
+// [-w, +w]. A leaf holding the surface has minimum <= 0 <= maximum and always
+// survives; a leaf wholly deeper than the band has maximum < -w and coarsens;
+// a dry leaf has minimum > w and coarsens exactly as it did before.
+//
+// The bounded flag is the honesty bit. The upper rejection may only fire on an
+// interval that provably covers the candidate -- the bootstrap cell scan, a
+// fine-summary hit, or a coarse row at least as large as the candidate. The
+// centre-sample fallbacks bound nothing, so they keep the old one-sided form,
+// which over-refines and never under-refines.
+struct BoundaryLiquidPhi { minimum: f32, maximum: f32, bounded: bool }
+
+fn boundaryLiquidPhiInterval(origin: vec3u, size: u32,
+    bootstrapMinimum: f32, bootstrapMaximum: f32) -> BoundaryLiquidPhi {
+  if (bootstrapPhiEnabled()) {
+    return BoundaryLiquidPhi(bootstrapMinimum, bootstrapMaximum, true);
+  }
+  let summary = fineLeafSummary(origin, size);
+  if (summary.found) {
+    return BoundaryLiquidPhi(summary.minimumPhi, summary.maximumPhi, true);
+  }
+  let centre = vec3f(origin) + vec3f(0.5 * f32(size));
+  let coarse = correctedCoarsePhi(centre);
+  if (coarse.authority) {
+    if (coarse.leafSize == 0u) {
+      return BoundaryLiquidPhi(3.402823e38, 3.402823e38, true);
+    }
+    // A coarse row is dyadic and aligned, so a row at least as large as this
+    // candidate contains it and its interval is a superset -- bounded. But the
+    // Losasso arena branch of correctedCoarsePhi returns ONE restricted row phi
+    // in all three fields, and a collapsed interval is a point sample wearing
+    // an interval's clothes. It may not reject: a row whose single value reads
+    // deep says nothing about whether a smaller candidate inside it holds the
+    // surface. Requiring a non-degenerate interval keeps the default backend on
+    // the conservative one-sided answer rather than guessing.
+    return BoundaryLiquidPhi(coarse.minimumPhi, coarse.maximumPhi,
+      coarse.leafSize >= size && coarse.maximumPhi > coarse.minimumPhi);
+  }
+  let sample = phi(vec3i(min(origin + vec3u(size / 2u), dims() - vec3u(1u))));
+  return BoundaryLiquidPhi(sample, sample, false);
+}
+
+fn boundaryLiquidWouldRefine(interval: BoundaryLiquidPhi, protection: f32) -> bool {
+  if (interval.minimum > protection) { return false; }
+  return !interval.bounded || interval.maximum >= -protection;
+}
+
 fn leafNeedsRefinement(origin: vec3u, size: u32) -> bool {
   // Current spatial pressure evidence always wins. Temporal retention is
   // considered only after classifying the candidate: it may preserve an
@@ -8747,7 +9016,7 @@ fn leafNeedsRefinement(origin: vec3u, size: u32) -> bool {
   // remaining expensive predicate is solid-only.
   if (!denseSolidField && !crossesClosedWall) { return pressureRetained; }
   var minimumSolid = 1.0; var maximumSolid = 0.0;
-  var minimumPhi = 3.402823e38;
+  var minimumPhi = 3.402823e38; var maximumPhi = -3.402823e38;
   for (var z = 0u; z < size; z += 1u) { for (var y = 0u; y < size; y += 1u) { for (var x = 0u; x < size; x += 1u) {
     let q = origin + vec3u(x,y,z);
     if (denseSolidField) {
@@ -8755,15 +9024,20 @@ fn leafNeedsRefinement(origin: vec3u, size: u32) -> bool {
       minimumSolid = min(minimumSolid, solid); maximumSolid = max(maximumSolid, solid);
     }
     if (fluidGatedBoundaryRefinement && bootstrapPhiEnabled()) {
-      minimumPhi = min(minimumPhi, phi(vec3i(q)));
+      let sample = phi(vec3i(q));
+      minimumPhi = min(minimumPhi, sample); maximumPhi = max(maximumPhi, sample);
     }
   } } }
   let crossesSolidBoundary = maximumSolid - minimumSolid > 1e-5 || (maximumSolid > 1e-5 && maximumSolid < 1.0 - 1e-5);
   let crossesBoundary = crossesClosedWall || (denseSolidField && crossesSolidBoundary);
   if (crossesBoundary) {
     if (!fluidGatedBoundaryRefinement) { return true; }
-    minimumPhi = boundaryLiquidMinimumPhi(origin, size, minimumPhi);
-    return minimumPhi <= params.solve.w * params.cellRelax.x;
+    // Two-sided over the leaf's phi INTERVAL: proximity to the surface, not
+    // presence of liquid, and not the minimum's absolute value -- see
+    // boundaryLiquidPhiInterval.
+    return boundaryLiquidWouldRefine(
+      boundaryLiquidPhiInterval(origin, size, minimumPhi, maximumPhi),
+      params.solve.w * params.cellRelax.x);
   }
   if (pressureRetained) { return true; }
   if (minimumSolid >= 1.0 - 1e-5) { return false; }
@@ -9058,7 +9332,9 @@ fn refineCoarseBlock(origin: vec3u, lid: u32) {
   workgroupBarrier();
   if (workgroupUniformLoad(&refineEligible) == 0u) { return; }
   let size = workgroupUniformLoad(&refineRuntimeSize);
-  var boundaryRange = vec4f(1.0, 0.0, 3.402823e38, 0.0);
+  // zw are the phi interval, not just its minimum: the gate below rejects on
+  // the leaf's MAXIMUM as well, so the fold has to carry both ends.
+  var boundaryRange = vec4f(1.0, 0.0, 3.402823e38, -3.402823e38);
   let crossesClosedWall = powerClosedWallStripIntersects(origin, size);
   if (denseSolidField
       || (fluidGatedBoundaryRefinement && bootstrapPhiEnabled() && crossesClosedWall)) {
@@ -9070,10 +9346,12 @@ fn refineCoarseBlock(origin: vec3u, lid: u32) {
         let solid = solidAt(vec3i(q)).fraction;
         boundaryRange = vec4f(
           min(boundaryRange.x, solid), max(boundaryRange.y, solid),
-          boundaryRange.z, 0.0);
+          boundaryRange.z, boundaryRange.w);
       }
       if (fluidGatedBoundaryRefinement && bootstrapPhiEnabled()) {
-        boundaryRange.z = min(boundaryRange.z, phi(vec3i(q)));
+        let sample = phi(vec3i(q));
+        boundaryRange.z = min(boundaryRange.z, sample);
+        boundaryRange.w = max(boundaryRange.w, sample);
       }
     }
   }
@@ -9086,7 +9364,7 @@ fn refineCoarseBlock(origin: vec3u, lid: u32) {
         min(refineBoundaryRange[lid].x, right.x),
         max(refineBoundaryRange[lid].y, right.y),
         min(refineBoundaryRange[lid].z, right.z),
-        0.0,
+        max(refineBoundaryRange[lid].w, right.w),
       );
     }
   }
@@ -9099,8 +9377,10 @@ fn refineCoarseBlock(origin: vec3u, lid: u32) {
     let crossesBoundary = crossesClosedWall || (denseSolidField && crossesSolid);
     var boundaryDecision = crossesBoundary;
     if (fluidGatedBoundaryRefinement && crossesBoundary) {
-      boundaryDecision = boundaryLiquidMinimumPhi(origin, size, range.z)
-        <= params.solve.w * params.cellRelax.x;
+      // Same interval band as the fine path in leafNeedsRefinement.
+      boundaryDecision = boundaryLiquidWouldRefine(
+        boundaryLiquidPhiInterval(origin, size, range.z, range.w),
+        params.solve.w * params.cellRelax.x);
     }
     let pressureEvidence = pressureRefinementEvidence(origin, size);
     let pressureRetained = pressureRetentionAt(origin) > 0u

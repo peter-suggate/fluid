@@ -140,6 +140,7 @@
     "profile:mini-dam-xctrace:fine-micro": "node --import tsx tools/profile-mini-dam-xctrace.ts --counters --counter-seconds=3 --steps=240 --isolate-pass-labels --gpu-report-only --discard-tables --discard-trace",
     "profile:mini-dam-xctrace:boundary-micro": "node --import tsx tools/profile-mini-dam-xctrace.ts --counters --counter-seconds=3 --steps=240 --isolate-pass-labels --gpu-report-only --discard-tables --discard-trace",
     "profile:svo-render-xctrace": "node --import tsx tools/profile-svo-render-xctrace.ts",
+    "profile:hero-garden-hose-xctrace": "node --import tsx tools/profile-svo-render-xctrace.ts --scene=hero-garden-hose --refinement=3 --traversal=canonical-parametric --shading=split --resolution=800x460 --counter-seconds=6 --construction-seconds=420 --variant=depth3 --out=artifacts/xctrace-hero-garden-hose-depth3",
     "render:xctrace-report": "node --import tsx tools/rerender-xctrace-report.ts",
     "compact:xctrace-counters": "node --import tsx tools/compact-xctrace-counters.ts",
     "cleanup:artifacts": "node --import tsx tools/cleanup-profile-artifacts.ts",

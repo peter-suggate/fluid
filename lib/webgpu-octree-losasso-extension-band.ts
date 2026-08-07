@@ -258,6 +258,10 @@ export class WebGPUOctreeLosassoExtensionBand {
       ...this.extension.initializationTasks];
   }
 
+  /** Section 5 Jacobi sweeps per advance, for both the published and predictor graphs. */
+  setVelocityExtensionSweeps(sweeps: number): void { this.extension.setSweeps(sweeps); }
+  get encodedVelocityExtensionSweeps(): number { return this.extension.encodedSweeps; }
+
   get dynamicsStagedVelocity(): GPUBuffer { return this.stagedNodalVelocityArena; }
   get predictorStagedVelocity(): GPUBuffer { return this.stagedNodalVelocityArena; }
 

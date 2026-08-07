@@ -1,4 +1,5 @@
 import { combineInitialBrickWet, damBreakBoxContains, initialFluidBrickContainsCell, sceneDamBreakBox, sceneDamBreakFractions } from "./initial-fluid";
+import { resolveOctreeRuntimeDials } from "./octree-runtime-dials";
 import {
   CPUPerformanceTrace,
   GPUQueueWallPerformanceTraceRecorder,
@@ -1526,6 +1527,7 @@ fn recordPhysicsPhaseBoundary(
   }; }
   setSelectedRigidBody(index: number) { this.rigidSystem.setSelectedIndex(index); }
   pickRigidBody(origin: RigidBodyState["position_m"], direction: RigidBodyState["position_m"]) { return this.rigidSystem.pick(origin,direction); }
+  readRigidBodyPoses() { return this.rigidSystem.readPoses(); }
   // Rendering contours the smooth resident level set when the quadtree
   // projection maintains one; the flux-form VOF field is near-binary and its
   // 0.5 contour is quantized to cell scale. Diagnostics keep reading the VOF
@@ -1605,7 +1607,18 @@ fn recordPhysicsPhaseBoundary(
   get gridCellTexture() { return this.octreeProjection?.topologyTexture; }
   get velocityTexture() { return this.octreeProjection ? undefined : this.velocityA; }
   get secondaryParticles() { return undefined; }
-  applyRuntimeValues(_values: Record<string, string | number | boolean>) {}
+  /**
+   * Adopt the live coarse-band accuracy/frame-time dials.
+   *
+   * The renderer calls this on every resolved frame with the method's current
+   * parameter bag, so it must stay cheap and idempotent: the octree resolves
+   * the bag to clamped dial values and every consumer below compares before it
+   * writes. Nothing here restarts, re-seeds, or re-allocates — that is the
+   * whole point of the keys being declared `update: "runtime"`.
+   */
+  applyRuntimeValues(values: Record<string, string | number | boolean>) {
+    this.octreeProjection?.applyRuntimeDials(resolveOctreeRuntimeDials(values));
+  }
   /**
    * Adopt scene inputs that no lattice, arena, or seed depends on. This solver
    * reads most of them from `this.scene` when it writes per-step params, so the
@@ -2128,7 +2141,12 @@ fn recordPhysicsPhaseBoundary(
           } : undefined;
         this.losassoStepSnapshotRing ??= new WebGPUOctreeLosassoStepSnapshotRing(
           this.device, structuredStepSnapshotSlotCount());
-        if (sources && this.losassoStepSnapshotRing.encode(
+        if (!this.losassoStepSnapshotRing.recordDue) {
+          // The previous record is still the freshest unread one. Encoding
+          // another would stage ~8 copies into host-visible memory that no
+          // consumer will ever look at. The stage is declared optional, so its
+          // absence is not a step-sequence deviation.
+        } else if (sources && this.losassoStepSnapshotRing.encode(
           encoder, sources, this.info.encodedSteps ?? 0, coarseOnly ? "coarse" : "fine")) {
           this.stepSequenceRecorder.record("step-snapshot");
         } else if (!this.stepSnapshotFaulted) {
@@ -2158,7 +2176,9 @@ fn recordPhysicsPhaseBoundary(
         // lights the segments up the moment those accessors land, and until
         // then the ring reports the segments absent rather than copying zeros
         // that a skip predicate could mistake for evidence.
-        if (this.stepSnapshotRing.encode(encoder, {
+        if (!this.stepSnapshotRing.recordDue) {
+          // See the Losasso branch above: the record is retained, not lost.
+        } else if (this.stepSnapshotRing.encode(encoder, {
           structuredVelocityControl: velocityControl,
           structuredBoundaryControl: boundaryControl,
           fineWorklist: surfaceHeader,

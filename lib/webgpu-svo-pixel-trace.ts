@@ -28,7 +28,7 @@ import {
  * stack discipline, the same brick DDA, and the same cone step law as the
  * shipping shader, and it calls the shipping shader's own helpers wherever a
  * helper exists (`primitiveHit`, `dryLightSample`, `dryBiasedVisibilityRayUnit`,
- * `dryNodeMipAt`, `traceTerrain`, `nearestBody`). What it adds is a record per
+ * `dryNodeMipAt`, `nearestBody`). What it adds is a record per
  * unit of work. Keeping it separate is what lets the production entry points
  * stay byte-identical, which the frame fingerprint depends on.
  *
@@ -104,8 +104,10 @@ export function createSvoPixelTraceProbeWGSL(options: SvoPixelTraceProbeOptions)
   const raster = options.primaryMode === "raster";
   // Stages this entry point can speak for. The primary is absent under raster
   // because the compute probe owns it there; claiming it here would let a
-  // missing companion look like a frame that drew no bricks.
-  const stages = SVO_PIXEL_TRACE_STAGES.terrain | SVO_PIXEL_TRACE_STAGES.rigid
+  // missing companion look like a frame that drew no bricks. `terrain` is absent
+  // for the same reason: the ground is voxels, so there is no terrain pass left
+  // to record and claiming one would report an empty stage as a stage that ran.
+  const stages = SVO_PIXEL_TRACE_STAGES.rigid
     | SVO_PIXEL_TRACE_STAGES.deferredLighting | (raster ? 0 : SVO_PIXEL_TRACE_STAGES.brickRaster);
   return /* wgsl */ `
 // ---------------------------------------------------------------------------
@@ -187,6 +189,9 @@ fn probeTraceLeafPayload(ro:vec3f,rd:vec3f,hit:SvoTraversalHit,bounds:mat2x3f)->
   var nextT=select(vec3f(DRY_MISS),(nextBoundary-ro)/rd,abs(rd)>vec3f(1e-9));
   let deltaT=select(vec3f(DRY_MISS),abs(extent/rd),abs(rd)>vec3f(1e-9));
   let tolerance=length(extent)*1.05;
+  // The mirror includes the hoist, because it has to: a probe that resolved
+  // identity a different way would be describing a walk the frame did not take.
+  let identitySource=sceneIdentitySourceAt(hit.voxelOffset);
   for(var iteration=0u;iteration<32u;iteration+=1u){
     if(any(cell<vec3i(0))||any(cell>=vec3i(i32(dry.mapping.brickSize)))||entry>hit.tExit){break;}
     probeVoxelWork+=1u;
@@ -195,16 +200,17 @@ fn probeTraceLeafPayload(ro:vec3f,rd:vec3f,hit:SvoTraversalHit,bounds:mat2x3f)->
     let payloadIndex=svoBrickVoxelIndex(hit.voxelOffset,vec3u(cell),dry.mapping.brickSize);
     var cellFlags=0u;
     var candidate=missHit();
-    if(payloadIndex<arrayLength(&materialOwners)){
-      let identity=materialOwners[payloadIndex];
-      let owner=identity>>16u;
-      if(owner>=dry.metadata.y&&!dryOpaqueOwnerSuppressed(owner)){
-        let primitiveIndex=owner-dry.metadata.y;
-        if(primitiveIndex<dry.metadata.x){
-          cellFlags|=${flags.tagged}u;
-          probeExactTests+=1u;
-          candidate=primitiveHit(dryPrimitive(primitiveIndex),ro,rd,max(0.0,entry-tolerance),cellExit+tolerance);
-        }
+    if(payloadIndex<dryVoxelCapacity()){
+      let identity=sceneIdentityOf(identitySource,payloadIndex);
+      // A solid cell is the surface. The owner-gated exact march this used to tag
+      // has no counterpart in the primary any more — the voxel carries its own
+      // baked normal — so the probe records solidity and the cell face.
+      if(sceneIdentitySolid(identity)){
+        cellFlags|=${flags.tagged}u;
+        candidate=missHit();
+        candidate.t=entry;
+        candidate.normal=dryVoxelFaceNormal(mat2x3f(cellMinimum,cellMinimum+extent),ro+rd*entry);
+        candidate.materialId=sceneIdentityMaterial(identity);
       }
     }
     probeRecord(${kinds.brickCell}u,hit.level,payloadIndex,cellFlags,cellMinimum,cellMinimum+extent,entry,cellExit);
@@ -477,9 +483,9 @@ fn probeLightVisibility(position:vec3f,geometricNormal:vec3f,ownerId:u32){
         // No cone pyramid: the shipping path walks the hierarchy exactly. Run
         // the real traversal so the reported shadow work is the real cost, even
         // though the individual boxes it opens are not recorded as geometry.
-        dryVisibilityIgnoredOwner=ownerId;
+        dryVisibilityIgnoredBody=ownerId;
         let exact=svoTraceVisibility(ray,SvoVisibilityBudget(dry.tuningCounts1.w,dry.tuningCounts2.x,dry.tuningCounts2.y,dry.tuningCounts2.z),true,0.001,max(ray.originBias_m,1e-6));
-        dryVisibilityIgnoredOwner=DRY_OWNER_NONE;
+        dryVisibilityIgnoredBody=DRY_OWNER_NONE;
         probeShadowNodeVisits+=exact.nodeVisits;
         probeShadowLeafVisits+=exact.leafVisits;
         probeShadowWork+=exact.workItems;
@@ -550,29 +556,6 @@ fn probeGlobalIllumination(position:vec3f,normal:vec3f){
   probeGiVisibility=mix(1.0,clamp(visibility,0.0,1.0),occlusionStrength);
 }
 
-// The interval the terrain secant march brackets before it searches, mirrored
-// from traceTerrain's own setup. Only the bracket is mirrored, not the search:
-// a step count would need a counter inside the shared heightfield sampler, and
-// that string is gated byte-for-byte by the frame fingerprint. Recording where
-// the march was allowed to look, and how it ended, needs neither.
-fn probeRecordTerrain(ro:vec3f,rd:vec3f,terrain:DryHit){
-  if(!terrainEnabled()){return;}
-  let sceneScale=max(max(uniforms.container.x,uniforms.container.y),uniforms.container.z);
-  let ceiling=terrainCeiling();
-  var t0=0.005;
-  if(ro.y>ceiling){
-    if(rd.y>=-0.0005){return;}
-    t0=(ceiling-ro.y)/rd.y;
-  }
-  var t1=t0+10.0*sceneScale;
-  if(rd.y<-0.0005){t1=min(t1,(-0.02-ro.y)/rd.y);}
-  else if(rd.y>0.0005){t1=min(t1,max(t0,(ceiling-ro.y)/rd.y));}
-  if(t1<=t0){return;}
-  let found=terrain.t<DRY_MISS;
-  probeRecord(${kinds.terrainStep}u,0u,0u,select(0u,${flags.hit}u,found),
-    ro+rd*t0,ro+rd*select(t1,terrain.t,found),t0,select(t1,terrain.t,found));
-}
-
 // Every body whose bounding sphere this ray pierces: the impostor pass's own
 // coverage test, which is the guard the dynamic-frame work added in front of the
 // per-body loop. A pierced sphere is a proxy that reached the analytic test;
@@ -602,7 +585,7 @@ fn probeRecordRigidProxies(ro:vec3f,rd:vec3f,rigid:DryHit){
   probeMaximumDepth=0u;probeShadowNodeVisits=0u;probeShadowLeafVisits=0u;probeShadowWork=0u;
   probeMipSteps=0u;probeFailure=0u;probeShadedLights=0u;
   probeGiState=0u;probeGiConeTaps=0u;probeGiConeCount=0u;probeGiVisibility=1.0;probeGiRadiance=vec3f(0.0);
-  dryVisibilityIgnoredOwner=DRY_OWNER_NONE;dryThickGlassEnabled=0u;dryThickGlassFailure=0u;
+  dryVisibilityIgnoredBody=DRY_OWNER_NONE;dryThickGlassEnabled=0u;dryThickGlassFailure=0u;
 
   // The record texture is write-only, so the request arrives in the uniform.
   if(probeRequest.w==0u){return vec4f(0.0);}
@@ -623,19 +606,16 @@ fn probeRecordRigidProxies(ro:vec3f,rd:vec3f,rigid:DryHit){
   // uninstrumented — the renderer's own claim is that the raster and traced
   // primaries are bit-identical, and the companion compute probe elects the
   // winner independently so the host can check that claim rather than assume it.
-  let staticHit=traceStaticSolidScene(ro,rd);`
+  let staticHit=traceStatic(ro,rd);`
     : `let staticHit=probeTraceStatic(ro,rd);`}
-  // Compose the authoritative hit from the static result plus the same terrain
-  // and rigid intersectors as traceDrySolidScene. Calling traceOpaqueScene here
-  // would traverse the complete live SVO a second time and makes Dawn
-  // specialize two independent primary traversers into this one pipeline.
+  // Compose the authoritative hit from the static result plus the same rigid
+  // intersector as traceDrySolidScene. Calling traceOpaqueScene here would
+  // traverse the complete live SVO a second time and makes Dawn specialize two
+  // independent primary traversers into this one pipeline.
   var opaque=staticHit;
-  let terrain=traceTerrain(ro,rd);if(terrain.t<opaque.t){opaque=terrain;}
   let rigid=nearestBody(ro,rd);if(rigid.t<opaque.t){opaque=rigid;}
-  // Both passes run for every pixel in the raster frame — terrain in the
-  // background draw, bodies in the impostor draw — so both are recorded whether
-  // or not they ended up owning the pixel.
-  probeRecordTerrain(ro,rd,terrain);
+  // The impostor draw runs for every pixel in the raster frame, so the bodies it
+  // tested are recorded whether or not one ended up owning the pixel.
   probeRecordRigidProxies(ro,rd,rigid);
   var status=${SVO_PIXEL_TRACE_STATUS.miss}u;
   if(opaque.t<DRY_MISS){

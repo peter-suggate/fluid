@@ -28,6 +28,7 @@ test("node-mip page ceiling requests the adapter value, not the WebGPU default",
     maxColorAttachmentBytesPerSample: 128,
     maxComputeInvocationsPerWorkgroup: 1024,
     maxComputeWorkgroupSizeX: 1024,
+    maxComputeWorkgroupStorageSize: 32768,
   };
   assert.equal(
     requiredFluidDeviceLimits({ ...base, maxTextureDimension2D: 16384 }).maxTextureDimension2D,
@@ -57,6 +58,7 @@ test("colour-attachment request never exceeds the adapter and never drops below 
     maxStorageTexturesPerShaderStage: 8,
     maxComputeInvocationsPerWorkgroup: 1024,
     maxComputeWorkgroupSizeX: 1024,
+    maxComputeWorkgroupStorageSize: 32768,
   };
   assert.equal(requiredFluidDeviceLimits({ ...base, maxColorAttachmentBytesPerSample: 32 })
     .maxColorAttachmentBytesPerSample, 32);
@@ -100,6 +102,7 @@ test("compute workgroup width requests the adapter value, not the WebGPU default
     maxSampledTexturesPerShaderStage: 16,
     maxStorageTexturesPerShaderStage: 8,
     maxColorAttachmentBytesPerSample: 128,
+    maxComputeWorkgroupStorageSize: 32768,
   };
   const granted = requiredFluidDeviceLimits({
     ...base, maxComputeInvocationsPerWorkgroup: 1024, maxComputeWorkgroupSizeX: 1024,

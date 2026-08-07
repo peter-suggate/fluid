@@ -28,6 +28,7 @@ import {
   FLUID_BRICK_WORKLIST_HEADER_WORDS,
   FLUID_BRICK_WORKLIST_WORDS,
 } from "./webgpu-fluid-brick-residency";
+import type { SparseBrickScenePayloadLanes } from "./sparse-brick-octree";
 
 export const SPARSE_VOXEL_FLUID_RESIDENCY_STATE_BITS = Object.freeze({
   resident: FLUID_BRICK_RESIDENT,
@@ -224,8 +225,17 @@ export interface SparseVoxelStructuralRenderSource {
   velocity: GPUBufferBinding;
   /** u32 packed as owner:u16 | material:u16. */
   materialOwners: GPUBufferBinding;
-  /** u32 scene owner/material identity, updated independently from physics. */
-  sceneMaterialOwners: GPUBufferBinding;
+  /**
+   * The whole payload arena, for consumers that read scene identity.
+   *
+   * Not the owner lane's slice, because under the banded leaf payload there is no
+   * owner lane: identity is an occupancy bit, a per-leaf header and a palette
+   * entry spread across four lanes of this buffer. Bind it once and address it
+   * through {@link scenePayloadLanes}.
+   */
+  scenePayload: GPUBufferBinding;
+  /** Word offsets and payload mode that turn a voxel index into an identity. */
+  scenePayloadLanes: SparseBrickScenePayloadLanes;
   /** Per-leaf residency flags; required when reading evolving fluid payload. */
   fluidLeafStates: GPUBufferBinding;
   /** Authoritative producer-owned brick residency; never inferred from payload values. */

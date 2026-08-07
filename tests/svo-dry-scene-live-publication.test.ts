@@ -55,9 +55,13 @@ test("the dry renderer's required fields are the shared ABI bits, not a hand-cop
   assert.equal(
     SVO_DRY_SCENE_REQUIRED_VALID_FIELDS,
     SPARSE_VOXEL_VALID_FIELDS.topology
-    | SPARSE_VOXEL_VALID_FIELDS.sceneGeometry
     | SPARSE_VOXEL_VALID_FIELDS.materialOwner,
   );
+  // The distance lane is deliberately *not* required. Nothing in the render path
+  // reads it — the marchers stopped reconstructing a surface from it when the
+  // primary became voxels-only — so demanding it would black out a frame that had
+  // the tree and the identities it actually consumes.
+  assert.equal(SVO_DRY_SCENE_REQUIRED_VALID_FIELDS & SPARSE_VOXEL_VALID_FIELDS.sceneGeometry, 0);
   assert.match(svoDrySceneShader, new RegExp(`const REQUIRED_FIELDS:u32 = ${SVO_DRY_SCENE_REQUIRED_VALID_FIELDS}u;`),
     "the shader mask must be generated from the exported constant so the two cannot drift");
 });

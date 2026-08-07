@@ -360,6 +360,29 @@ export function svoGBufferHardBoxFeatureNormal(localPosition_m: SvoVec3, halfExt
   return { normal, featureId: SVO_GBUFFER_FEATURES.boxFaceX + axis };
 }
 
+/**
+ * The oct8 normal codec, on its own so a *producer* outside the G-buffer can
+ * share the one definition.
+ *
+ * The scene voxeliser bakes a surface normal into every solid voxel and the
+ * primary unpacks it (`sparseBrickSceneIdentityCodecWGSL`), which makes this the
+ * second writer and third reader of the encoding. A second hand-written copy of
+ * a bit layout is how a producer and a consumer come to disagree silently, so
+ * there is one.
+ *
+ * `0x8080` is unreachable output — both bytes are `round(clamp(.,-1,1)*127)`, so
+ * -128 is never produced on either axis — which is what lets a consumer spell
+ * "no normal was baked here" without spending a bit on it.
+ */
+export const SVO_GBUFFER_NORMAL_OCT8_WGSL = /* wgsl */ `
+fn svoGBufferSignNotZero(value:f32)->f32{return select(1.0,-1.0,value<0.0);}
+fn svoGBufferOctCoordinates(normalIn:vec3f)->vec2f{let normal=normalize(normalIn);var result=normal.xy/(abs(normal.x)+abs(normal.y)+abs(normal.z));if(normal.z<0.0){let old=result;result=vec2f((1.0-abs(old.y))*svoGBufferSignNotZero(old.x),(1.0-abs(old.x))*svoGBufferSignNotZero(old.y));}return result;}
+fn svoGBufferPackNormalOct8(normal:vec3f)->u32{let encoded=svoGBufferOctCoordinates(normal);let x=i32(round(clamp(encoded.x,-1.0,1.0)*127.0));let y=i32(round(clamp(encoded.y,-1.0,1.0)*127.0));return ((u32(y)&0xffu)<<8u)|(u32(x)&0xffu);}
+fn svoGBufferUnpackNormalOct8(packed:u32)->vec3f{var result=vec3f(f32(i32(packed<<24u)>>24)/127.0,f32(i32(packed<<16u)>>24)/127.0,0.0);result.z=1.0-abs(result.x)-abs(result.y);if(result.z<0.0){let adjustment=-result.z;result.x+=select(-adjustment,adjustment,result.x<0.0);result.y+=select(-adjustment,adjustment,result.y<0.0);}return normalize(result);}`;
+
+/** The value {@link SVO_GBUFFER_NORMAL_OCT8_WGSL} can never emit, used as "absent". */
+export const SVO_GBUFFER_NORMAL_OCT8_ABSENT = 0x8080;
+
 /** Binding-free three-MRT fragment output and matching geometry helpers. */
 export const svoGBufferWGSL = /* wgsl */ `
 const SVO_GBUFFER_VALID_SURFACE:u32=1u;const SVO_GBUFFER_MISS:u32=2u;const SVO_GBUFFER_DEPTH_VALID:u32=4u;
@@ -373,10 +396,7 @@ fn svoGBufferProducerFlags(producer:u32)->u32{return (producer&${SVO_GBUFFER_PRO
 const SVO_GBUFFER_MAX_VELOCITY_M_S:f32=64.0;
 struct SvoGBufferTargets{@location(0) radianceDepth:vec4f,@location(1) packedSurface:vec4u,@location(2) identityMedia:vec4u}
 struct SvoGBufferFeatureNormal{normal:vec3f,featureId:u32}
-fn svoGBufferSignNotZero(value:f32)->f32{return select(1.0,-1.0,value<0.0);}
-fn svoGBufferOctCoordinates(normalIn:vec3f)->vec2f{let normal=normalize(normalIn);var result=normal.xy/(abs(normal.x)+abs(normal.y)+abs(normal.z));if(normal.z<0.0){let old=result;result=vec2f((1.0-abs(old.y))*svoGBufferSignNotZero(old.x),(1.0-abs(old.x))*svoGBufferSignNotZero(old.y));}return result;}
-fn svoGBufferPackNormalOct8(normal:vec3f)->u32{let encoded=svoGBufferOctCoordinates(normal);let x=i32(round(clamp(encoded.x,-1.0,1.0)*127.0));let y=i32(round(clamp(encoded.y,-1.0,1.0)*127.0));return ((u32(y)&0xffu)<<8u)|(u32(x)&0xffu);}
-fn svoGBufferUnpackNormalOct8(packed:u32)->vec3f{var result=vec3f(f32(i32(packed<<24u)>>24)/127.0,f32(i32(packed<<16u)>>24)/127.0,0.0);result.z=1.0-abs(result.x)-abs(result.y);if(result.z<0.0){let adjustment=-result.z;result.x+=select(-adjustment,adjustment,result.x<0.0);result.y+=select(-adjustment,adjustment,result.y<0.0);}return normalize(result);}
+${SVO_GBUFFER_NORMAL_OCT8_WGSL}
 fn svoGBufferPackVelocity(velocity_m_s:vec3f,motionKind:u32)->u32{let scaled=vec3i(round(clamp(velocity_m_s/SVO_GBUFFER_MAX_VELOCITY_M_S,vec3f(-1.0),vec3f(1.0))*511.0));return (u32(scaled.x)&0x3ffu)|((u32(scaled.y)&0x3ffu)<<10u)|((u32(scaled.z)&0x3ffu)<<20u)|((motionKind&3u)<<30u);}
 fn svoGBufferMetadata(fieldSource:u32,flags:u32,failure:u32,featureId:u32)->u32{return (fieldSource&15u)|((flags&0xffffu)<<4u)|((failure&255u)<<20u)|((featureId&15u)<<28u);}
 fn svoGBufferReconstructWorld(origin_m:vec3f,rayDirection:vec3f,linearDepth_m:f32)->vec3f{return origin_m+normalize(rayDirection)*linearDepth_m;}

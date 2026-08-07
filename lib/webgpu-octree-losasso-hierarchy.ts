@@ -125,9 +125,13 @@ export class WebGPUOctreeLosassoHierarchyPublisher {
     if ((maximumLeafSize & (maximumLeafSize - 1)) !== 0) {
       throw new RangeError("Losasso hierarchy needs a dyadic maximum leaf size");
     }
-    if (options.dimensions.some((value) => value % maximumLeafSize !== 0)) {
-      throw new RangeError("Losasso hierarchy dimensions must be divisible by maximum leaf size");
-    }
+    // No divisibility requirement. `parentCell` snaps a fine origin down to a
+    // multiple of the parent span and keys it through a hash directory, so a
+    // span that does not divide the domain simply produces one partial parent
+    // against each far face -- representable, and priced by the ceil-rounded
+    // capacity below. The guard that used to stand here was an allocation
+    // convenience, and enforcing it upstream capped the leaf ceiling at
+    // gcd(nx, ny, nz), which is what kept deep interiors uniformly fine.
     for (const [axis, size] of options.physicalCellSize.entries()) {
       if (!Number.isFinite(size) || size <= 0) {
         throw new RangeError(`Losasso hierarchy cell size ${axis} must be positive and finite`);
@@ -158,8 +162,12 @@ export class WebGPUOctreeLosassoHierarchyPublisher {
     // Stop where a level still has enough rows to relax in parallel. This keeps
     // the 128^3 hierarchy at depth 3, its measured optimum and a win against
     // the 453 ms this lane cost while the V-cycle was inert.
+    // Ceil, not exact division: a span that does not divide the domain leaves a
+    // partial parent against each far face, and that parent is a row like any
+    // other. Flooring it would under-reserve exactly the rows the relaxed
+    // ceiling introduces.
     const levelRowCapacityAt = (targetSpan: number) => Math.min(rows,
-      (nx / targetSpan) * (ny / targetSpan) * (nz / targetSpan));
+      Math.ceil(nx / targetSpan) * Math.ceil(ny / targetSpan) * Math.ceil(nz / targetSpan));
     let transitionCount = 0;
     for (let targetSpan = 2; targetSpan <= maximumLeafSize; targetSpan *= 2) {
       if (levelRowCapacityAt(targetSpan) < MINIMUM_COARSE_LEVEL_ROWS) break;

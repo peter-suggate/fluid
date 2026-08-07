@@ -105,6 +105,8 @@ function snapshot(runtime: FluidLabRenderer): WebGPURenderWorkerSnapshot {
     fluidCellTraceRevision: runtime.fluidCellTraceRevision,
     fluidCellTraceReady: runtime.fluidCellTraceReady,
     fluidCellTraceFineBand: runtime.fluidCellTraceFineBand,
+    rigidBodyPoses: runtime.rigidBodyPoses,
+    rigidBodyPoseRevision: runtime.rigidBodyPoseRevision,
   };
 }
 

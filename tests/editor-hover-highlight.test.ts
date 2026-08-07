@@ -87,17 +87,11 @@ test("scenery answers the cursor only where a click would select it", () => {
   assert.equal(hoverSceneAt(scene, [], ray, { scenery: false })?.kind, "terrain");
 });
 
-test("nothing hovered costs the shader two comparisons and changes no pixel", () => {
-  const rim = /fn dryHoverRim\(color:vec3f,hit:DryHit,viewDirection:vec3f\)->vec3f \{([\s\S]*?)\n\}/.exec(svoDrySceneShader);
-  assert.ok(rim, "the dry pass declares the rim");
-  assert.match(rim![1]!, /if\(!\(strength>0\.0\)\|\|!\(last>=first\)\)\{return color;\}/,
-    "the resting state returns the shaded colour untouched");
-  assert.match(rim![1]!, /return color\+pow\(facing,[\s\S]*?\)\*strength\*/,
-    "the rim is additive, so a white object does not saturate into a silhouette");
-  assert.match(svoDrySceneShader, /terrainFeatures:array<vec4f,16>, highlight:vec4f/,
-    "the range is appended past the terrain mirror so no other shader's view of the buffer moves");
-});
-
+// The shader-side rim is gone. It keyed off the voxel's owner id, and a voxel
+// no longer names the object it belongs to — the identity word's high half now
+// carries the baked surface normal. CPU-side hover resolution is untouched and
+// still tested above; only the pixel it used to tint has no way back to a scene
+// node. `uniforms.highlight` is written and read by nothing.
 test("an environment with no scenery hovered leaves the floor as the answer", () => {
   const scene = cloneScene(defaultScene);
   scene.environment = "default";

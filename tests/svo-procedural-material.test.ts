@@ -14,7 +14,6 @@ import {
   evaluateSvoProceduralMaterial,
   sampleSvoProceduralNoise,
   svoProceduralHashCell,
-  svoProceduralMaterialWGSL,
 } from "../lib/svo-procedural-material";
 import { buildEnvironmentProxyCatalog, environmentProxyPrimitives } from "../lib/voxel-environments";
 import {
@@ -131,24 +130,8 @@ test("CPU seeded noise is repeatable, bounded, and continuous across world-space
   assert.deepEqual(identity, { baseColorLinear: [0.2, 0.4, 0.6], roughness: 0.7, variationFlags: 0 });
 });
 
-test("WGSL is generated from the CPU policy table and stays binding-free", () => {
-  assert.doesNotMatch(svoProceduralMaterialWGSL, /@group|@binding|texture_/);
-  assert.match(svoProceduralMaterialWGSL, /fn svoProceduralHashCell/);
-  assert.match(svoProceduralMaterialWGSL, /linear\*linear\*\(vec3f\(3\.0\)-2\.0\*linear\)/,
-    "cubic interpolation, not primitive-local UVs, removes procedural seams");
-  for (const policy of SVO_PROCEDURAL_MATERIAL_POLICIES) {
-    assert.match(svoProceduralMaterialWGSL, new RegExp(`functionId==${policy.functionId}u`), policy.key);
-    assert.match(svoProceduralMaterialWGSL, new RegExp(`seed=${policy.seed}u`), policy.key);
-    assert.match(svoProceduralMaterialWGSL, new RegExp(`colorAmplitude=${policy.colorAmplitude.toFixed(8)}`), policy.key);
-    assert.match(svoProceduralMaterialWGSL, new RegExp(`roughnessAmplitude=${policy.roughnessAmplitude.toFixed(8)}`), policy.key);
-  }
-});
+// The WGSL policy table is deleted. It coloured a surface from its world
+// position, which the render path no longer asks for — colour comes from the
+// published PBR record by index. The CPU evaluator above is retained because the
+// authored records are still built from it.
 
-test("direct SVO PBR applies procedural base/roughness after identity validation and preserves emission", () => {
-  assert.match(svoDrySceneShader, /let procedural=svoProceduralMaterial\(material\.identity\.z,base,roughness,position\)/);
-  assert.match(svoDrySceneShader, /base=procedural\.baseColorLinear;roughness=procedural\.roughness;variationFlags=procedural\.variationFlags/);
-  assert.match(svoDrySceneShader, /material\.emissiveRoughness\.xyz\+selectedEmission/,
-    "procedural functions cannot amplify or replace authored emission");
-  assert.match(svoDrySceneShader, /if\(terrainPolicyValid\)[^]*else\{let procedural=/,
-    "the exact garden terrain policy remains authoritative and is never double-varied");
-});

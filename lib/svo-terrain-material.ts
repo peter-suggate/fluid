@@ -322,18 +322,13 @@ export function buildSvoTerrainMaterial(scene: Pick<SceneDescription, "terrain" 
   };
 }
 
-/** Binding-free GPU mirror of the raster garden terrain material. */
-export const svoTerrainMaterialWGSL = /* wgsl */ `
-const SVO_TERRAIN_REGION_POND_LINER_ROCK:u32=0u;const SVO_TERRAIN_REGION_POND_EDGE_SOIL:u32=1u;const SVO_TERRAIN_REGION_GRASS:u32=2u;
-const SVO_TERRAIN_VARIATION_PEBBLE:u32=1u;const SVO_TERRAIN_VARIATION_MOW_STRIPE:u32=2u;const SVO_TERRAIN_VARIATION_CLOVER:u32=4u;const SVO_TERRAIN_VARIATION_DAISY:u32=8u;
-struct SvoTerrainMaterialMetadata{baseHeight_m:f32,waterline_m:f32,materialId:u32,policyVersion:u32}
-struct SvoTerrainMaterialSample{colorLinear:vec3f,materialId:u32,unoccludedColorLinear:vec3f,regionId:u32,regionWeights:vec3f,variationFlags:u32,hollowOcclusion:f32,slope:f32,_padding:vec2f}
-fn svoTerrainHash21(p:vec2f)->f32{return fract(sin(dot(p,vec2f(127.1,311.7)))*43758.5453);}
-fn svoTerrainCategoricalRegion(metadata:SvoTerrainMaterialMetadata,y:f32)->u32{if(y>=metadata.baseHeight_m-.008){return SVO_TERRAIN_REGION_GRASS;}if(y>metadata.waterline_m-.02){return SVO_TERRAIN_REGION_POND_EDGE_SOIL;}return SVO_TERRAIN_REGION_POND_LINER_ROCK;}
-fn svoTerrainMaterial(metadata:SvoTerrainMaterialMetadata,p:vec3f,normalIn:vec3f)->SvoTerrainMaterialSample{
-  let cell=floor(p.xz*26.0);let jitter=vec2f(svoTerrainHash21(cell),svoTerrainHash21(cell+19.7))-.5;let pebbleDistance=length(fract(p.xz*26.0)-.5-jitter*.55);let pebbleTone=.55+.45*svoTerrainHash21(cell+7.3);let pebbleWeight=smoothstep(.44,.18,pebbleDistance);let liner=mix(vec3f(.135,.13,.125),vec3f(.44,.435,.42)*pebbleTone,pebbleWeight);
-  let soil=vec3f(.56,.55,.52)*(.9+.2*svoTerrainHash21(floor(p.xz*40.0)));let stripe=.5+.5*sin((p.x*.9+p.z*.35)*4.4);var grass=mix(vec3f(.46,.455,.435),vec3f(.66,.65,.62),.5*stripe+.5*svoTerrainHash21(floor(p.xz*90.0)));let clover=step(.962,svoTerrainHash21(floor(p.xz*14.0)));grass=mix(grass,vec3f(.58,.575,.55),clover*.55);let daisy=step(.986,svoTerrainHash21(floor(p.xz*24.0)+3.1));grass=mix(grass,vec3f(.95,.94,.90),daisy*.85);
-  let soilBlend=smoothstep(metadata.waterline_m-.02,metadata.waterline_m+.04,p.y);let lawnBlend=smoothstep(metadata.baseHeight_m-.05,metadata.baseHeight_m-.008,p.y);let underlay=mix(liner,soil,soilBlend);let unoccluded=mix(underlay,grass,lawnBlend);let hollow=smoothstep(0.0,max(metadata.baseHeight_m,1e-3),p.y);let occlusion=.38+.62*hollow*hollow;var flags=SVO_TERRAIN_VARIATION_MOW_STRIPE;if(pebbleWeight>=.5){flags|=SVO_TERRAIN_VARIATION_PEBBLE;}if(clover>0.0){flags|=SVO_TERRAIN_VARIATION_CLOVER;}if(daisy>0.0){flags|=SVO_TERRAIN_VARIATION_DAISY;}let normal=normalize(normalIn);let weights=vec3f((1.0-lawnBlend)*(1.0-soilBlend),(1.0-lawnBlend)*soilBlend,lawnBlend);
-  return SvoTerrainMaterialSample(unoccluded*occlusion,metadata.materialId,unoccluded,svoTerrainCategoricalRegion(metadata,p.y),weights,flags,occlusion,1.0-clamp(normal.y,0.0,1.0),vec2f(0.0));
-}
-`;
+/**
+ * The per-pixel WGSL colour policy that used to live here is deleted.
+ *
+ * It shaded the ground from its *world position* — the purest form of the
+ * analytic dependency the render path no longer has. Surface colour comes from
+ * the published PBR material record by index now. What survives is the CPU side:
+ * `sceneTerrainSurfaceModel` still decides which ground closure a scene has, and
+ * `buildSvoTerrainMaterial` still packs the metadata the uniform reserves space
+ * for.
+ */

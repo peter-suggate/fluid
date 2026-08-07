@@ -9,6 +9,9 @@ import {
   octreeGradingMembershipLoadEnabled,
   octreeGradingPageFillEnabled,
   octreeGradingSplitHelpersEnabled,
+  octreeLosassoLeafCeiling,
+  octreeLosassoTileEdgeCells,
+  octreeLosassoTopologyLeafSize,
   octreeProjectionPipelineRequired,
   octreeProjectionShader,
   octreeTopologyTileClampEnabled,
@@ -196,7 +199,8 @@ test("the refinement ladder stops at the largest leaf the domain can hold", () =
   // pipeline set must all derive from the same effective size, or a dispatched
   // size would have no compiled pipeline.
   assert.match(octreeSource,
-    /this\.effectiveLeafSize = octreeEffectiveLeafSize\(this\.maxLeafSize, dims\);/);
+    /this\.effectiveLeafSize = this\.coarseDynamics\.backend === "losasso"\s*\?\s*this\.topologyMaximumLeafSize\s*:\s*octreeEffectiveLeafSize\(this\.maxLeafSize, dims\);/,
+    "the ladder must span exactly the sizes the topology may publish");
   assert.match(octreeSource,
     /for \(let size = this\.effectiveLeafSize; size >= 2; size >>= 1\) sizes\.push\(size\);/);
   assert.match(octreeSource,
@@ -206,6 +210,43 @@ test("the refinement ladder stops at the largest leaf the domain can hold", () =
     "the coarse pipeline set must cover exactly the dispatched coarse sizes");
   assert.match(octreeSource, /effectiveLeafSize: this\.effectiveLeafSize,/,
     "the pipeline cache key must distinguish two domains that share an authored leaf");
+});
+
+test("no Losasso leaf may be wider than the residency tile that reaches it", () => {
+  // `refineTopologyCoarseDelta` and its grading twin are dispatched per ACTIVE
+  // TILE and evaluate the candidate at that tile's origin, so a leaf spanning
+  // several tiles is revisited only from the one tile holding its origin.
+  // Liquid arriving anywhere in the other tiles marks them active without ever
+  // reconsidering the leaf. On the 24x18x16 water box that produced a size-16
+  // pressure cell no epoch could split: the dam-break front stalled mid-domain
+  // and heaped into a standing ridge instead of reaching the far wall.
+  const ceilingFor = (dims: { nx: number; ny: number; nz: number }) =>
+    octreeLosassoLeafCeiling(32, dims, octreeLosassoTopologyLeafSize(32, dims));
+  const tileFor = (dims: { nx: number; ny: number; nz: number }) =>
+    octreeLosassoTileEdgeCells(octreeLosassoTopologyLeafSize(32, dims));
+
+  for (const dims of [{ nx: 24, ny: 18, nz: 16 }, { nx: 32, ny: 16, nz: 32 },
+    { nx: 60, ny: 45, nz: 40 }, { nx: 256, ny: 256, nz: 256 },
+    { nx: 320, ny: 96, nz: 80 }, { nx: 2, ny: 2, nz: 2 }]) {
+    assert.ok(ceilingFor(dims) <= tileFor(dims),
+      `${dims.nx}x${dims.ny}x${dims.nz} publishes a leaf wider than its tile`);
+    assert.ok(ceilingFor(dims) <= octreeEffectiveLeafSize(32, dims),
+      "a leaf must still fit inside the domain");
+  }
+
+  // The clamp is the tile, never gcd(nx, ny, nz) again: both scenes the gcd
+  // rule crippled keep their raised ceiling.
+  assert.equal(ceilingFor({ nx: 24, ny: 18, nz: 16 }), 8,
+    "the water box coarsens to 8 where the gcd rule capped it at 2");
+  assert.equal(ceilingFor({ nx: 60, ny: 45, nz: 40 }), 8,
+    "an odd-axis domain gets an octree at all, where the gcd rule gave it none");
+  assert.equal(ceilingFor({ nx: 32, ny: 16, nz: 32 }), 16,
+    "symmetric-expansion tiles exactly at 16 and keeps its full-height leaves");
+
+  // Construction states the invariant rather than trusting it: the symptom of
+  // a violation is a coarse cell that never splits, which reads as physics.
+  assert.match(octreeSource,
+    /throw new Error\(`Losasso leaf ceiling \$\{this\.topologyMaximumLeafSize\}`/);
 });
 
 test("a shallow domain gets a single-tile topology delta, and shrinking the tile is not the fix", () => {
@@ -237,7 +278,10 @@ test("a shallow domain gets a single-tile topology delta, and shrinking the tile
   assert.equal(octreeTopologyTileClampEnabled({}), false,
     "the clamp measured inert, so the authored leaf must still size the tile by default");
   assert.equal(octreeTopologyTileClampEnabled({ FLUID_OCTREE_TOPOLOGY_TILE_CLAMP: "1" }), true);
+  // Losasso now sizes the tile from the exact tiling instead; the clamp stays
+  // selectable on the branch it was measured on, so localization still costs
+  // one run rather than a rediscovery.
   assert.match(octreeSource,
-    /this\.topologyTileSize = Math\.max\(8, octreeTopologyTileClampEnabled\(\)\s*\?\s*this\.effectiveLeafSize : this\.maxLeafSize\);/,
+    /octreeTopologyTileClampEnabled\(\) \? this\.effectiveLeafSize : this\.maxLeafSize\);/,
     "the clamp must remain selectable so localization costs one run, not a rediscovery");
 });

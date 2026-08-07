@@ -3,6 +3,7 @@ import type { PassBroker } from "./webgpu-pass-broker";
 import type { LosassoFreeSurfacePressureMode, LosassoVelocityExtensionMode } from
   "./octree-coarse-backend";
 import type { OctreeFirstOrderSPDVCycle } from "./webgpu-octree-section43-contract";
+import type { OctreeLosassoSolveTuning } from "./octree-runtime-dials";
 import {
   WebGPUOctreeLosassoAuthority,
   type WebGPUOctreeLosassoAuthorityCapacities,
@@ -54,6 +55,8 @@ import {
   type OctreePipelinedMGPCGOptions,
   type OctreePipelinedMGPCGVectors,
 } from "./webgpu-octree-pipelined-mgpcg";
+import { WebGPUOctreeLosassoResidentMGPCG } from
+  "./webgpu-octree-losasso-resident-mgpcg";
 
 export interface LosassoInitializationTask {
   readonly label: string;
@@ -112,6 +115,8 @@ export interface WebGPUOctreeLosassoPressureSolver {
     readonly rightHandSide: GPUBuffer;
     readonly rowCount: GPUBuffer;
   }): void;
+  /** Adopt live accuracy/cost dials. Absent on solvers a harness substitutes. */
+  setSolveTuning?(tuning: OctreeLosassoSolveTuning): void;
   destroy(): void;
 }
 
@@ -145,6 +150,12 @@ export interface WebGPUOctreeLosassoBackendOptions {
     readonly operator: WebGPUOctreeLosassoOperator;
     readonly preconditioner: OctreeLosassoFirstOrderVCycle;
   }) => WebGPUOctreeLosassoPressureSolver;
+  /**
+   * Select the single-dispatch resident MGPCG executor for the ≤4K-row tier.
+   * Falls back to the wide pipelined solver when the hierarchy or device
+   * cannot host the resident kernel.
+   */
+  readonly residentSolver?: boolean;
   readonly solver?: Omit<OctreePipelinedMGPCGOptions, "rowCapacity">;
   /** Shared rigid exchange seam. Kept optional for standalone reduced backends. */
   readonly rigidPressureReaction?: Readonly<{
@@ -650,6 +661,10 @@ class WebGPUOctreeLosassoWideSolver implements WebGPUOctreeLosassoPressureSolver
       pressureOut: input.pressureOut });
   }
 
+  setSolveTuning(tuning: OctreeLosassoSolveTuning): void {
+    this.executor.setSolveTuning(tuning);
+  }
+
   destroy(): void {
     this.executor.destroy();
     for (const buffer of Object.values(this.vectors)) buffer.destroy();
@@ -679,6 +694,32 @@ export class WebGPUOctreeLosassoCoarseBackend {
   get solverControl(): GPUBuffer | undefined { return this.solver.control; }
   get solverIterationBudget(): number | undefined { return this.solver.iterationBudget; }
   get solverSymmetryStageAuditBuffers() { return this.solver.symmetryStageAuditBuffers; }
+
+  /**
+   * Adopt live coarse-band accuracy/cost dials.
+   *
+   * Everything here is a queue write into a buffer this backend already owns —
+   * no pipeline is recompiled, no allocation moves, and the accepted topology
+   * is untouched — so the caller may do this between advances while the
+   * simulation runs. The V-cycle sweep count reaches the preconditioner
+   * directly as well as the solver, because the resident executor inlines the
+   * cycle while the wide executor dispatches this object's kernels.
+   */
+  applySolveTuning(tuning: OctreeLosassoSolveTuning): void {
+    this.solver.setSolveTuning?.(tuning);
+    if (!(this.preconditioner instanceof WebGPUOctreeLosassoVCycle)) return;
+    if (tuning.bottomSweeps !== undefined) {
+      this.preconditioner.setBottomSweeps(tuning.bottomSweeps);
+    }
+    if (tuning.smoothingSweeps !== undefined) {
+      this.preconditioner.setSmoothingSweeps(tuning.smoothingSweeps);
+    }
+  }
+
+  /** Section 5 axis-face extension sweeps per advance. */
+  setVelocityExtensionSweeps(sweeps: number): void {
+    this.extensionBand.setVelocityExtensionSweeps(sweeps);
+  }
 
   private readonly publisher: WebGPUOctreeLosassoTopologyPublisher;
   private initialized = false;
@@ -716,17 +757,33 @@ export class WebGPUOctreeLosassoCoarseBackend {
     this.preconditioner = cycle;
     this.solver = options.createSolver
       ? options.createSolver({ operator: this.operator, preconditioner: cycle })
-      : new WebGPUOctreeLosassoWideSolver(options.device, {
-        rowCapacity: options.capacities.rows,
-        diagonal: this.publisher.authority.writable.diagonal,
-        rightHandSide: this.sources.rightHandSide,
-        control: this.publisher.authority.writable.control,
-        acceptedAuthority: this.publisher.authority.writable.solverAuthority,
-        rowDispatch: this.publisher.authority.writable.rowDispatch,
-        operator: this.operator,
-        preconditioner: cycle,
-        options: options.solver,
-      });
+      : options.residentSolver && WebGPUOctreeLosassoResidentMGPCG.supports(
+        options.device, this.sources.vcycle, options.capacities.rows)
+        ? new WebGPUOctreeLosassoResidentMGPCG(options.device, {
+          rowCapacity: options.capacities.rows,
+          diagonal: this.publisher.authority.writable.diagonal,
+          rightHandSide: this.sources.rightHandSide,
+          acceptedAuthority: this.publisher.authority.writable.solverAuthority,
+          hierarchy: this.sources.vcycle,
+        }, {
+          maximumIterations: options.solver?.hardIterationCeiling
+            ?? options.solver?.maximumIterations ?? 40,
+          ...(options.solver?.relativeTolerance === undefined
+            ? {} : { relativeTolerance: options.solver.relativeTolerance }),
+          ...(options.solver?.absoluteTolerance === undefined
+            ? {} : { absoluteTolerance: options.solver.absoluteTolerance }),
+        })
+        : new WebGPUOctreeLosassoWideSolver(options.device, {
+          rowCapacity: options.capacities.rows,
+          diagonal: this.publisher.authority.writable.diagonal,
+          rightHandSide: this.sources.rightHandSide,
+          control: this.publisher.authority.writable.control,
+          acceptedAuthority: this.publisher.authority.writable.solverAuthority,
+          rowDispatch: this.publisher.authority.writable.rowDispatch,
+          operator: this.operator,
+          preconditioner: cycle,
+          options: options.solver,
+        });
     this.dynamics = new WebGPUOctreeLosassoDynamics(options.device,
       this.sources.dynamics, {
         dimensions: options.topology.dimensions,

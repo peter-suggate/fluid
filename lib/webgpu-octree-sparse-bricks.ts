@@ -36,7 +36,8 @@ import {
   SparseBrickOctreeGPU,
   SPARSE_BRICK_GPU_LAYOUT,
   SPARSE_BRICK_SCENE_GEOMETRY_FORMATS,
-  SPARSE_BRICK_LEAF_PAYLOAD_MODES,
+  SPARSE_BRICK_BANDED_PRODUCER_DENSE_LANES,
+  octreeLiveSceneLeafPayloadMode,
   octreeLiveSceneSceneGeometryFormat,
   packSparseBrickPlan,
   type SparseBrickCoordinate,
@@ -197,6 +198,24 @@ export interface OctreeSparseBrickWorldOptions {
   fluidGatedBoundarySupport?: boolean;
   /** Lifetime budget of previously absent scene bricks that may be activated in-place. */
   sceneMutationBrickCapacity?: number;
+  /**
+   * Build the compact hierarchy and the wide-fanout snapshot.
+   *
+   * Off by default because nothing production runs binds either. Binding 5 —
+   * the only binding they reach — is populated only when the dry-scene
+   * renderer's `traversalMode` is `compact`, `wide` or `hybrid`, and the
+   * shipping primary pins the secondary to `canonical-parametric`, so on every
+   * production frame and every raster benchmark arm both structures cost a CPU
+   * plan, a GPU encode and resident memory for nothing. The wide-fanout
+   * micro-mip buffer alone is `maximumPages * 292 B` and is bound by no shader
+   * at all.
+   *
+   * The lane that measures one of those three traversals sets this; a lane that
+   * selects `compact` without it gets no bind group rather than a different
+   * shader (`webgpu-svo-dry-scene.ts`, the `compact.status !== "ready"` and
+   * `!derivedTraversal` guards).
+   */
+  derivedTraversalStructures?: boolean;
   /**
    * Called as each planning stage of the constructor begins.
    *
@@ -563,34 +582,14 @@ export { octreeLiveSceneSceneGeometryFormat };
 /**
  * How a dry world stores a leaf's 512-voxel payload.
  *
- * `FLUID_SVO_LEAF_PAYLOAD=dense|occupancy|banded`, **defaulting to `dense`**,
- * which is the arm that shipped. See {@link SparseBrickLeafPayloadMode} for what
- * each rung stores and `lib/svo-banded-leaf-payload.ts` for the layout's own
- * derivation and its executable encoder.
- *
- * Why the default is the shipped arm even though the prize is 11.6x: a lever that
- * defaults to an arm nobody has cleared is how one recorded "baseline" hash
- * became the `snorm8` arm under test, and it cost three agents time. The banded
- * arm is cleared for *fidelity* — mean 0.54/255, max 7/255, zero pixels over
- * 16/255, less visible than the `f16-unorm8` geometry lane already shipping at
- * 11/255 — and that is not the same thing as cleared for *storage*, which is what
- * this lever selects and what its own gate has to measure.
- *
- * `occupancy` is the bisection rung, not a product state: it costs 64 bytes a
- * leaf and saves nothing, and exists so that a hash which moves under `banded`
- * can be attributed to the storage rather than to the predicate move.
+ * Defined in `lib/sparse-brick-octree.ts` beside the mode it selects, for the
+ * same reason {@link octreeLiveSceneSceneGeometryFormat} is: the renderer resolves
+ * it too — the dry primary's identity decode is compiled from the very layout the
+ * voxeliser picked — and importing it from the module that owns the codec keeps
+ * the shader off this one. Re-exported here because that is where every existing
+ * caller imports it from.
  */
-export function octreeLiveSceneLeafPayloadMode(
-  environment: Record<string, string | undefined> | undefined
-    = typeof process !== "undefined" ? process.env : undefined,
-): SparseBrickLeafPayloadMode {
-  const raw = environment?.FLUID_SVO_LEAF_PAYLOAD;
-  if (raw === undefined || raw === "") return "dense";
-  if (!SPARSE_BRICK_LEAF_PAYLOAD_MODES.includes(raw as SparseBrickLeafPayloadMode)) {
-    throw new RangeError(`FLUID_SVO_LEAF_PAYLOAD must be one of ${SPARSE_BRICK_LEAF_PAYLOAD_MODES.join(", ")}`);
-  }
-  return raw as SparseBrickLeafPayloadMode;
-}
+export { octreeLiveSceneLeafPayloadMode };
 
 /**
  * Whether a dry world's primitive claim is the AABB or the solid inside it.
@@ -697,7 +696,7 @@ export const OCTREE_LIVE_SCENE_MUTATION_BRICK_CAPACITY = 4_096;
  * a loud throw in `publish`, not a silent envelope: an aggregate whose packing
  * did not arrive has no shape, and guessing one draws geometry nobody authored.
  */
-export const OCTREE_LIVE_SCENE_CLUSTER_CAPACITY = 1_024;
+export const OCTREE_LIVE_SCENE_CLUSTER_CAPACITY = 4_096;
 
 /**
  * Field-program tapes one live publication may carry.
@@ -1348,7 +1347,8 @@ export class OctreeSparseBrickWorld {
    * the plan call rather than a statement before it.
    *
    * What is still whole, measured: three sorts — one per plan — at 30 ms in the
-   * node-mip address plan, 34 ms in the wide-fanout plan and one per octree
+   * node-mip address plan, 34 ms in the wide-fanout plan (which only a lane that
+   * sets `derivedTraversalStructures` builds at all now) and one per octree
    * level; `packSparseBrickPlan` at 32 ms, which writes the payload lane
    * tables; the ground's own brick claim at 66 ms; and one
    * `bakeProceduralTerrain` at 282 ms on the first build of a procedural
@@ -1755,15 +1755,20 @@ export class OctreeSparseBrickWorld {
     this.tree = new SparseBrickOctreeGPU(device, {
       brickSize, nodeCapacity, leafCapacity, label: "Octree unified live sparse-brick world",
       payloadProfile, sceneGeometryFormat, leafPayloadMode,
-      // The banded readers are not cut over yet, so a banded world keeps the dense
-      // lanes and every consumer still reads them — which is also exactly what the
-      // cross-decode needs. `tree.payloadProductBytes` is the arena the same
-      // measured scene costs once they are, and it is the figure the cutover
-      // realises rather than a forecast of one.
-      retainDenseLanesForProvenance: leafPayloadMode === "banded",
+      // Every *reader* of scene identity is banded now. Both dense lanes stay
+      // anyway, and for reasons that have nothing to do with the renderer:
+      // `encodeBandedLeaves` is the consumer that keeps them alive, because it
+      // builds each leaf's palette and record set by reading back the dense
+      // identity and geometry words the rebuild pass has just written. Retiring
+      // them is a producer change, not a reader cutover — see
+      // `SPARSE_BRICK_BANDED_PRODUCER_DENSE_LANES`. `tree.payloadProductBytes`
+      // remains the arena the same measured scene costs once nothing retains one.
+      retainDenseLanes: leafPayloadMode === "banded"
+        ? SPARSE_BRICK_BANDED_PRODUCER_DENSE_LANES : undefined,
     });
     yield;
-    this.brickOccupancyBuilder = new WebGpuSvoBrickOccupancyBuilder(device, payloadProfile);
+    this.brickOccupancyBuilder = new WebGpuSvoBrickOccupancyBuilder(
+      device, payloadProfile, this.tree.scenePayloadLanes);
     yield;
     this.topologyMutator = new WebGpuSparseBrickTopologyMutator(device);
     yield;
@@ -1772,7 +1777,11 @@ export class OctreeSparseBrickWorld {
       size: (8 + this.topologyMutationCapacity * 4) * Uint32Array.BYTES_PER_ELEMENT,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
     });
-    this.compactHierarchy = plan.nodes.length === 0 ? undefined : new WebGpuSvoCompactHierarchy(device,
+    // Both of the next two are for binding 5 alone, which no shipping traversal
+    // populates — see `derivedTraversalStructures`. Skipped unless a lane that
+    // actually selects compact/wide/hybrid asks for them.
+    const derivedTraversalStructures = options.derivedTraversalStructures ?? false;
+    this.compactHierarchy = !derivedTraversalStructures || plan.nodes.length === 0 ? undefined : new WebGpuSvoCompactHierarchy(device,
       packSvoCompactHierarchy({ nodes: packed.nodes, leaves: packed.leaves,
         publishedNodeCount: plan.nodes.length, publishedLeafCount: plan.leaves.length }, 1));
     yield;
@@ -1780,7 +1789,7 @@ export class OctreeSparseBrickWorld {
     // set. A later topology revision rejects them by generation; they never own
     // structure and failure simply omits the capability.
     let wideFanout: WebGPUSvoWideFanout | undefined;
-    try {
+    if (derivedTraversalStructures) try {
       const widePlan = yield* planOctreeSvoWideFanoutSteps(plan);
       wideFanout = new WebGPUSvoWideFanout(device, {
         maximumPages: Math.max(1, widePlan.pages.length),
@@ -2114,7 +2123,9 @@ export class OctreeSparseBrickWorld {
           // own resident pages. Avoid sizing all worklists like the hierarchy.
           // Sized from the address plan rather than from today's occupancy,
           // because a grown plan has to fit the worklist it was allocated with.
-          pageCapacityPerLevel: addressPlan.pageCapacityPerLevel,
+          // Per level, not the maximum over them: a coarse level's grid is a
+          // fraction of the base's and its section is now sized to say so.
+          pageCapacityPerLevel: addressPlan.pageCapacityByLevel,
           // The floor level's records carry a page coordinate as well as their
           // children: it is the base of the radiance chain and a parent of the
           // opacity one at the same time.
@@ -2202,7 +2213,13 @@ export class OctreeSparseBrickWorld {
       sceneGeometry: { buffer: this.tree.sceneGeometry, offset: this.tree.sceneGeometryOffsetBytes, size: this.tree.sceneGeometryBytes },
       velocity: { buffer: this.tree.velocity, offset: this.tree.velocityOffsetBytes, size: this.tree.voxelCapacity * SPARSE_BRICK_GPU_LAYOUT.velocityStrideBytes },
       materialOwners: { buffer: this.tree.materialOwners, offset: this.tree.materialOwnerOffsetBytes, size: this.tree.voxelCapacity * SPARSE_BRICK_GPU_LAYOUT.materialOwnerStrideBytes },
-      sceneMaterialOwners: { buffer: this.tree.sceneMaterialOwners, offset: this.tree.sceneMaterialOwnerOffsetBytes, size: this.tree.voxelCapacity * SPARSE_BRICK_GPU_LAYOUT.materialOwnerStrideBytes },
+      // The whole payload arena, not the owner lane's slice. Under `banded` there
+      // *is* no owner lane: identity is an occupancy bit, a per-leaf header and a
+      // palette entry in four lanes of this one buffer, so a consumer binds the
+      // arena once and addresses it through `scenePayloadLanes` — the same shape
+      // `structureOffsetsWords` already uses for the structural arena.
+      scenePayload: { buffer: this.tree.payload, size: this.tree.payload.size },
+      scenePayloadLanes: this.tree.scenePayloadLanes,
       fluidLeafStates: { buffer: this.residency.leafStates, size: this.tree.leafCapacity * Uint32Array.BYTES_PER_ELEMENT },
       fluidResidency: {
         states: { buffer: this.residency.stateBuffer, size: this.residency.capacity * residencyLayout.stateStrideBytes },

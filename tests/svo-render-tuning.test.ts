@@ -11,10 +11,12 @@ import {
   SVO_LOD_FIXED_LEVEL_MAXIMUM,
   SVO_LOD_SCREEN_SPACE_PIXELS_MAXIMUM,
   SVO_PRIMARY_LEAF_VISIT_HARD_LIMIT,
+  SVO_RENDER_QUALITY_PRESETS,
   SVO_RENDER_TUNING_PRESETS,
   normalizeSvoRenderTuning,
   svoSceneryDetailCellSize_m,
   svoSceneryRefinementDepth,
+  type SvoRenderQualityPreset,
   type SvoRenderTuningPreset,
 } from "../lib/svo-render-tuning";
 import { SVO_SCREEN_SPACE_TERMINATION_CONTRACT } from "../lib/svo-screen-space-termination";
@@ -33,6 +35,29 @@ test("primary leaf tuning reaches the audited shader ceiling without recompilati
   }).primaryLeafVisits, SVO_PRIMARY_LEAF_VISIT_HARD_LIMIT);
   assert.match(svoDrySceneShader,
     new RegExp(`leafVisit<${SVO_PRIMARY_LEAF_VISIT_HARD_LIMIT}u&&leafVisit<leafBudget`));
+});
+
+test("the quality ladder is a ladder of pairs, and its rungs agree with the tuning projection", () => {
+  // Every rung names both halves, because they are not independent: under
+  // `cones` the visibility budgets are barely reached, and under `exact` they
+  // are the whole cost of a shadow.
+  const rungs = Object.keys(SVO_RENDER_QUALITY_PRESETS) as SvoRenderQualityPreset[];
+  assert.deepEqual(rungs, ["performance", "balanced", "quality", "reference"]);
+  for (const rung of rungs) {
+    assert.equal(SVO_RENDER_QUALITY_PRESETS[rung].tuning, SVO_RENDER_TUNING_PRESETS[rung],
+      `${rung} must project to the same tuning object, not a second copy that can drift`);
+  }
+  // `reference` is `quality`'s work with the cone tier switched off. Same
+  // sliders, so the difference in the frame is attributable to one thing.
+  assert.equal(SVO_RENDER_QUALITY_PRESETS.reference.tuning, SVO_RENDER_QUALITY_PRESETS.quality.tuning);
+  assert.equal(SVO_RENDER_QUALITY_PRESETS.reference.coneTracingMode, "exact");
+  for (const rung of ["performance", "balanced", "quality"] as const) {
+    assert.equal(SVO_RENDER_QUALITY_PRESETS[rung].coneTracingMode, "cones", rung);
+  }
+  // Exact visibility is what spends these, so the top rung must not ship the
+  // budgets that were tuned for a tier that never reached them.
+  assert.ok(SVO_RENDER_QUALITY_PRESETS.reference.tuning.visibilityLeafVisits
+    > SVO_RENDER_QUALITY_PRESETS.performance.tuning.visibilityLeafVisits);
 });
 
 test("level of detail defaults to the shipping screen-space policy in every preset", () => {
@@ -345,6 +370,8 @@ test("the document's depth and its detail cell are exact inverses", () => {
 });
 
 test("a dry document opens at the default refinement rung, through its own factory", async () => {
+  assert.equal(SVO_ENVIRONMENT_REFINEMENT_DEPTH_DEFAULT, 1,
+    "dry SVO scenes default to one refinement level");
   const { getScenePreset, findSceneDefinition } = await import("../lib/scenes");
   const { sceneDefinitionTakesLattice } = await import("../lib/scene-definition");
   const hero = getScenePreset("hero-garden-hose").create();

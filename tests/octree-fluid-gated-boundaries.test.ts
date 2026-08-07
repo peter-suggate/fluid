@@ -11,41 +11,56 @@ import {
 } from "../lib/webgpu-octree-owner-pages";
 
 test("fluid protection arrives before contact while dry boundaries may stay coarse", () => {
-  assert.equal(octreeFluidGatedBoundaryWouldRefine({
-    boundaryIntersects: true,
-    liquidProximityProtected: false,
-    minimumPhi: 2,
-    protectionWidth: 1,
-    fluidGated: true,
-  }), false, "a dry terrain crossing is the intended coarse case");
-  assert.equal(octreeFluidGatedBoundaryWouldRefine({
-    boundaryIntersects: true,
-    liquidProximityProtected: true,
-    minimumPhi: 2,
-    protectionWidth: 1,
-    fluidGated: true,
-  }), true, "the existing interface band must split before liquid contact");
-  assert.equal(octreeFluidGatedBoundaryWouldRefine({
-    boundaryIntersects: true,
-    liquidProximityProtected: false,
-    minimumPhi: 0.75,
-    protectionWidth: 1,
-    fluidGated: true,
-  }), true, "cold bootstrap must apply the same pre-contact protection width");
-  assert.equal(octreeFluidGatedBoundaryWouldRefine({
-    boundaryIntersects: true,
-    liquidProximityProtected: false,
-    minimumPhi: -0.25,
-    protectionWidth: 1,
-    fluidGated: true,
-  }), true, "a boundary leaf containing liquid remains refined");
-  assert.equal(octreeFluidGatedBoundaryWouldRefine({
-    boundaryIntersects: true,
-    liquidProximityProtected: false,
-    minimumPhi: 2,
-    protectionWidth: 1,
-    fluidGated: false,
-  }), true, "the control arm preserves unconditional boundary refinement");
+  const gate = (overrides: Partial<Parameters<typeof octreeFluidGatedBoundaryWouldRefine>[0]>) =>
+    octreeFluidGatedBoundaryWouldRefine({
+      boundaryIntersects: true,
+      liquidProximityProtected: false,
+      minimumPhi: 0,
+      maximumPhi: 0,
+      boundedInterval: true,
+      protectionWidth: 1,
+      fluidGated: true,
+      ...overrides,
+    });
+
+  assert.equal(gate({ minimumPhi: 2, maximumPhi: 3 }), false,
+    "a dry terrain crossing is the intended coarse case");
+  assert.equal(gate({ minimumPhi: 2, maximumPhi: 3, liquidProximityProtected: true }), true,
+    "the existing interface band must split before liquid contact");
+  assert.equal(gate({ minimumPhi: 0.75, maximumPhi: 1.5 }), true,
+    "cold bootstrap must apply the same pre-contact protection width");
+  assert.equal(gate({ minimumPhi: -0.25, maximumPhi: 0.5 }), true,
+    "a boundary leaf just under the surface remains refined");
+  assert.equal(gate({ minimumPhi: 2, maximumPhi: 3, fluidGated: false }), true,
+    "the control arm preserves unconditional boundary refinement");
+
+  // The band is a distance to the SURFACE, not a test for liquid. A leaf wholly
+  // below the free surface is as uninteresting as one wholly above it, and the
+  // signed form used to split every submerged wall leaf at any depth -- 81.5%
+  // of the 24x18x16 water box, which is why its interior never coarsened.
+  assert.equal(gate({ minimumPhi: -4, maximumPhi: -3 }), false,
+    "a leaf wholly deeper than the band may coarsen");
+  assert.equal(gate({ minimumPhi: -4, maximumPhi: -3, liquidProximityProtected: true }), true,
+    "interface protection still overrides depth");
+
+  // And the reason the deep half must read the MAXIMUM rather than abs(minimum):
+  // a leaf can run from deep liquid up through the surface into air. Its minimum
+  // is deep and it holds the interface anyway. symmetric-expansion's 32x16x32
+  // lattice is tiled by exactly four full-height size-16 leaves of this shape,
+  // and abs(minimum) left all four coarse -- four pressure cells for the tank.
+  assert.equal(gate({ minimumPhi: -4, maximumPhi: 4 }), true,
+    "a leaf spanning liquid, surface and air must stay refined however deep it reaches");
+
+  // An interval that is not proven to cover the candidate may not be used to
+  // reject: the centre-sample fallbacks bound nothing, so they keep the
+  // original one-sided answer.
+  assert.equal(gate({ minimumPhi: -4, maximumPhi: -3, boundedInterval: false }), true,
+    "an unbounded interval over-refines rather than under-refines");
+  assert.equal(gate({ minimumPhi: 2, maximumPhi: 3, boundedInterval: false }), false,
+    "the dry half never needed the interval and is unchanged");
+
+  assert.throws(() => gate({ minimumPhi: 1, maximumPhi: -1 }), RangeError,
+    "an inverted interval is a producer bug, not a coarsening decision");
 });
 
 test("both fine and cooperative coarse refinement use the same fluid gate", () => {
@@ -56,13 +71,13 @@ test("both fine and cooperative coarse refinement use the same fluid gate", () =
     octreeProjectionShader.indexOf("fn splitLeaf"),
   );
   assert.match(fine,
-    /crossesBoundary[\s\S]*if \(!fluidGatedBoundaryRefinement\) \{ return true; \}[\s\S]*boundaryLiquidMinimumPhi[\s\S]*minimumPhi <= params\.solve\.w \* params\.cellRelax\.x/);
+    /crossesBoundary[\s\S]*if \(!fluidGatedBoundaryRefinement\) \{ return true; \}[\s\S]*boundaryLiquidWouldRefine\([\s\S]*boundaryLiquidPhiInterval\(origin, size, minimumPhi, maximumPhi\)/);
   const coarse = octreeProjectionShader.slice(
     octreeProjectionShader.indexOf("fn refineCoarseBlock"),
     octreeProjectionShader.indexOf("fn ownerAtIsTooFine"),
   );
   assert.match(coarse,
-    /boundaryDecision = crossesBoundary[\s\S]*fluidGatedBoundaryRefinement && crossesBoundary[\s\S]*boundaryLiquidMinimumPhi[\s\S]*params\.solve\.w \* params\.cellRelax\.x/);
+    /boundaryDecision = crossesBoundary[\s\S]*fluidGatedBoundaryRefinement && crossesBoundary[\s\S]*boundaryLiquidWouldRefine\([\s\S]*boundaryLiquidPhiInterval\(origin, size, range\.z, range\.w\)/);
   assert.match(coarse,
     /pressureEvidence = pressureRefinementEvidence\(origin, size\)[\s\S]*pressureRetained = pressureRetentionAt\(origin\) > 0u[\s\S]*fineSummaryFactor == 1u[\s\S]*pressureRetained && \(!fluidGatedBoundaryRefinement \|\| !crossesBoundary\)[\s\S]*boundaryDecision/);
 });
@@ -83,7 +98,7 @@ test("fine boundary gating stays compact while factor one retains pressure suppo
     octreeProjectionShader.indexOf("fn splitLeaf"),
   );
   assert.match(fine,
-    /pressureRefinementEvidence\(origin, size\)[\s\S]*pressureRetained = pressureRetentionAt\(origin\) > 0u[\s\S]*fineSummaryFactor == 1u[\s\S]*if \(crossesBoundary\)[\s\S]*return minimumPhi <= params\.solve\.w \* params\.cellRelax\.x[\s\S]*if \(pressureRetained\)/,
+    /pressureRefinementEvidence\(origin, size\)[\s\S]*pressureRetained = pressureRetentionAt\(origin\) > 0u[\s\S]*fineSummaryFactor == 1u[\s\S]*if \(crossesBoundary\)[\s\S]*return boundaryLiquidWouldRefine\([\s\S]*if \(pressureRetained\)/,
     "current local evidence wins while factor-specific retention follows boundary rejection");
 });
 

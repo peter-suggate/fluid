@@ -178,6 +178,20 @@ export function selectedBodyIdOf(selection: EditorSelection | undefined): string
 export const CLICK_SLOP_PX = 4;
 
 /**
+ * Whether a press and its release were the same point — the one question that
+ * separates a click from a drag, asked identically wherever a gesture can be
+ * either.
+ *
+ * Every press in the viewport is provisional: a press on the background is a
+ * camera orbit until it turns out not to have moved, and a press on a body is a
+ * throw until the same. Both resolve here so a gesture cannot be a click for one
+ * of them and a drag for the other.
+ */
+export function pointerStayedWithinClickSlop(travelX_px: number, travelY_px: number): boolean {
+  return Math.hypot(travelX_px, travelY_px) <= CLICK_SLOP_PX;
+}
+
+/**
  * Whether releasing a viewport gesture on empty space should clear the
  * selection.
  *
@@ -193,5 +207,5 @@ export function emptySpaceClickDeselects(
   travelY_px: number,
 ): boolean {
   if (action !== "orbit") return false;
-  return Math.hypot(travelX_px, travelY_px) <= CLICK_SLOP_PX;
+  return pointerStayedWithinClickSlop(travelX_px, travelY_px);
 }

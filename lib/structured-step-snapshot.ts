@@ -103,6 +103,7 @@ export class StructuredStepSnapshotRing {
   private sequence = 0;
   private disposed = false;
   private skipped = 0;
+  private due = true;
 
   constructor(
     private readonly device: GPUDevice,
@@ -130,6 +131,13 @@ export class StructuredStepSnapshotRing {
    */
   get skippedRecords() { return this.skipped; }
 
+  /**
+   * Whether the next step should spend its tail copying a record. Arming
+   * follows the consumer: see `WebGPUOctreeLosassoStepSnapshotRing.recordDue`
+   * for why a per-step producer was serving a 250 ms consumer.
+   */
+  get recordDue() { return this.due; }
+
   /** Encode this step's record into the step's own command encoder. */
   encode(
     encoder: GPUCommandEncoder,
@@ -147,6 +155,7 @@ export class StructuredStepSnapshotRing {
     slot.stamp = stamp;
     slot.sequence = ++this.sequence;
     slot.state = "encoded";
+    this.due = false;
     return true;
   }
 
@@ -158,6 +167,9 @@ export class StructuredStepSnapshotRing {
       if (candidate.state !== "encoded") continue;
       if (!slot || candidate.sequence > slot.sequence) slot = candidate;
     }
+    // Re-arm on every consumer visit, including one that found nothing: a
+    // reader asking for a record is what makes the next step owe one.
+    this.due = true;
     if (!slot?.stamp) return undefined;
     slot.state = "mapping";
     try {

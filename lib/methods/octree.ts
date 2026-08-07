@@ -6,6 +6,34 @@ import {
   DEFAULT_OCTREE_COARSE_BACKEND,
   resolveOctreeCoarseDynamics,
 } from "../octree-coarse-backend";
+import {
+  OCTREE_RUNTIME_DIALS,
+  OCTREE_RUNTIME_DIAL_KEYS,
+} from "../octree-runtime-dials";
+
+/**
+ * The live accuracy/frame-time dials, as ordinary method parameters.
+ *
+ * They are declared from one schema (`lib/octree-runtime-dials.ts`) so the
+ * performance strip, the solver, and the URL state cannot disagree about a
+ * range or a default. `update: "runtime"` is what keeps a drag off the
+ * structural fingerprint: the controller applies the value to the attached
+ * solver instead of resetting to t=0.
+ */
+const runtimeDialParams: MethodParamSpec[] = OCTREE_RUNTIME_DIALS.map((dial) => ({
+  kind: "number",
+  key: dial.key,
+  label: dial.label,
+  unit: dial.unit,
+  min: dial.min,
+  max: dial.max,
+  step: dial.step,
+  digits: dial.digits,
+  default: dial.default,
+  tier: "fine",
+  update: "runtime",
+  hint: dial.hint,
+}));
 
 const params: MethodParamSpec[] = [
   { kind: "select", key: "coarseBackend", label: "Coarse dynamics", default: DEFAULT_OCTREE_COARSE_BACKEND, tier: "coarse", options: [{ value: "losasso", label: "Losasso 2004 · default" }, { value: "power2017", label: "Power 2017 · frozen reference" }], hint: "Construction-time backend choice. Each backend owns distinct pipelines, layouts, and velocity channels; the frozen Power path remains available for reference lanes." },
@@ -16,6 +44,7 @@ const params: MethodParamSpec[] = [
   { kind: "number", key: "interfaceRefinementBandCells", label: "Band reach", unit: "level", min: 0, max: 4, step: 1, digits: 0, default: 4, tier: "fine", hint: "One coupled reach level for pressure refinement and Section 5 surface tracking. Experimental level 0 uses one fine brick; level 1 retains the two-finest-cell moving-surface floor while still reducing pressure reach and recurring residency. Level 4 is the paper/default reach." },
   { kind: "number", key: "surfaceRefinementGradingLayers", label: "Surface grading", unit: "layers", min: 1, max: 4, step: 1, digits: 0, default: 1, tier: "fine", hint: "Intermediate pressure-cell layers retained per octree level around the surface. 1 is the existing sharp 2:1 transition; 3 is the progressive-refinement experiment." },
   { kind: "number", key: "topologyCadenceAdvances", label: "Topology cadence", unit: "advances", min: 1, max: 8, step: 1, digits: 0, default: 1, tier: "fine", hint: "Losasso candidate epochs may cover k accepted advances. Each skipped rebuild is represented spatially by an extra dilation ring; band 4 remains canonical." },
+  ...runtimeDialParams,
 ];
 
 const maximumLeafSize = (value: unknown): 2 | 4 | 8 | 16 | 32 => {
@@ -118,6 +147,7 @@ export const octreeMethod: SimulationMethod = {
   showQualityControl: false,
   params,
   pressureMapping: "Losasso uses the wide, warm-started V-cycle-preconditioned MGPCG authority. The frozen Power 2017 backend retains its persistent Section 4.3 solver; neither backend falls through to the other after construction.",
+  runtimeParamKeys: OCTREE_RUNTIME_DIAL_KEYS,
   presetFor: () => ({
     coarseBackend: DEFAULT_OCTREE_COARSE_BACKEND,
     losassoFreeSurfacePressure: "subcell-contact",

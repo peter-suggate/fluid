@@ -75,8 +75,11 @@ function fixture() {
   const radiance = { textures: radianceTextures, pageValidity: { texture: radianceValidity as unknown as GPUTexture,
     view: radianceValidity.createView(), format: "r32uint" as const, capacity: 4 }, atlasPages: [4, 1, 1] as const, pageCapacity: 4 };
   const tree = { control: treeBuffer, topology: treeBuffer, payload: treeBuffer,
-    leafCapacity: 2,
-    velocityOffsetBytes: 256, materialOwnerOffsetBytes: 512, sceneGeometryOffsetBytes: 768, sceneMaterialOwnerOffsetBytes: 1024,
+    leafCapacity: 2, leafPayloadMode: "dense" as const,
+    velocityOffsetBytes: 256, materialOwnerOffsetBytes: 512, sceneGeometryOffsetBytes: 768,
+    bandedLaneWordOffsets: [0, 0, 0, 0, 0] as const,
+    scenePayloadLanes: { mode: "dense" as const, materialOwnerWords: 256,
+      occupancyWords: 0, recordMaskWords: 0, headerWords: 0, blobWords: 0, recordWords: 0 },
   } as unknown as import("../lib/sparse-brick-octree").SparseBrickOctreeGPU;
   return { device, textures, buffers, bindGroups, pipelines, writes, nodeMips, radiance, tree, worklists, treeBuffer };
 }
@@ -395,7 +398,10 @@ test("GPU initial live-derived publication covers a compact non-power-of-two hie
   const tree = {
     control, topology, topologyOffsetBytes: 0, payload, leafCapacity: leafCount,
     velocityOffsetBytes: fluidOffset * 4, materialOwnerOffsetBytes: ownerOffset * 4,
-    sceneGeometryOffsetBytes: sceneOffset * 4, sceneMaterialOwnerOffsetBytes: sceneOwnerOffset * 4,
+    sceneGeometryOffsetBytes: sceneOffset * 4, leafPayloadMode: "dense" as const,
+    bandedLaneWordOffsets: [0, 0, 0, 0, 0] as const,
+    scenePayloadLanes: { mode: "dense" as const, materialOwnerWords: sceneOwnerOffset,
+      occupancyWords: 0, recordMaskWords: 0, headerWords: 0, blobWords: 0, recordWords: 0 },
   } as unknown as import("../lib/sparse-brick-octree").SparseBrickOctreeGPU;
   const nodeTarget = {
     texture: opacity, pageValidity: { texture: validity[0], view: validity[0].createView(), format: "r32uint" as const, capacity: plan.pages.length },

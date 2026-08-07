@@ -28,7 +28,7 @@ function structuralSource(
       structure: resource,
       structureOffsetsWords: { control: 0, publication: 64, nodes: 128, leaves: 640 },
       control: resource, nodes: resource, leaves: resource, geometry: resource,
-      sceneGeometry: resource, velocity: resource, materialOwners: resource, sceneMaterialOwners: resource, fluidLeafStates: resource,
+      sceneGeometry: resource, velocity: resource, materialOwners: resource, scenePayload: resource, scenePayloadLanes: { mode: "dense" as const, materialOwnerWords: 0, occupancyWords: 0, recordMaskWords: 0, headerWords: 0, blobWords: 0, recordWords: 0 }, fluidLeafStates: resource,
       publication: { state: resource, byteLength: 32 },
       domain: { worldOrigin_m: [-2, 0, -2], cellSize_m: [0.04, 0.04, 0.04], dimensionsCells: [64, 64, 64], brickSize: 16, maximumDepth: 4 },
       capacities: { nodes: 64, leaves: 32, geometryVoxels: 1024, velocityVoxels: 1024, materialOwnerVoxels: 1024, fluidLeafStates: 32 },
@@ -69,20 +69,24 @@ test("binding 4 consumes the fixed renderer-owned authored scene arena", () => {
 
 test("published count, revision, direct identity, flags, and material functions are enforced in WGSL", () => {
   assert.deepEqual(SVO_DRY_SCENE_PARAMS_LAYOUT, {
-    sizeBytes: 592, terrainWordOffset: 24, terrainMaterialWordOffset: 28, materialPublicationWordOffset: 32,
+    sizeBytes: 624, terrainWordOffset: 24, terrainMaterialWordOffset: 28, materialPublicationWordOffset: 32,
     nodeMipWordOffset: 36, nodeMipAtlasWordOffset: 40,
     wideFanoutWordOffset: 44, nodeMipLevelStartWordOffset: 48,
     nodeMipOriginWordOffset: 60, fluidCoverageWordOffset: 64, tuningWordOffset: 76,
     nodeMipDirectWordOffset: 96, nodeMipDirectLevelZWordOffset: 100, tetrahedralRadianceWordOffset: 112, nodeMipExtentWordOffset: 116,
     giLightingWordOffset: 120, giConesWordOffset: 124, rigidBoundsWordOffset: 128, primitiveCandidatesWordOffset: 132,
     structureOffsetsWordOffset: 136, derivedTraversalWordOffset: 140, lodWordOffset: 144,
+    payloadLaneWordOffset: 148, payloadLane1WordOffset: 152,
   });
   assert.match(dryRendererSource, /const visibilityFlags = \(!giReady && ambientOcclusionEnabled \? SVO_DRY_VISIBILITY_FLAGS\.exactContact \| SVO_DRY_VISIBILITY_FLAGS\.ambientOcclusion : 0\)[^]*SVO_DRY_VISIBILITY_FLAGS\.exactShadow[^]*SVO_DRY_VISIBILITY_FLAGS\.coneLightingRequested[^]*SVO_DRY_VISIBILITY_FLAGS\.globalIllumination/,
     "the visibility lane keeps ambient occlusion, shadows, and requested cone lighting independently switchable");
   assert.match(dryRendererSource, /words\.set\(\[materialCount, scene\.materialRevision, SVO_MATERIAL_RECORD_STRIDE_BYTES, visibilityFlags\]/);
   assert.match(svoDrySceneShader, /fn dryPublishedMaterialValid\(material:SvoMaterialRecord,index:u32\)->bool/);
   assert.match(svoDrySceneShader, /svoMaterialValid\(material,index\)&&material\.identity\.y==dry\.materialPublication\.y&&\(material\.identity\.w&SVO_MATERIAL_FLAG_OPAQUE\)!=0u/);
-  assert.match(svoDrySceneShader, /material\.identity\.z==SVO_MATERIAL_FUNCTION_GARDEN_TERRAIN/);
+  // The shader no longer branches on `material.identity.z` at all: the two
+  // world-position colour policies it selected between are deleted, and a
+  // surface's colour is the published record's own base colour.
+  assert.doesNotMatch(svoDrySceneShader, /material\.identity\.z==SVO_MATERIAL_FUNCTION_GARDEN_TERRAIN/);
   assert.match(svoDrySceneShader, /if\(surface\.valid==0u\)\{return vec3f\(0\.0\);\}/,
     "record-content failures must render fail-closed instead of sampling invalid fields");
 });

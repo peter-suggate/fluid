@@ -1401,7 +1401,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
   defineScene({
     id: "ocean-seiche",
     name: "Ocean · rolling wave",
-    blurb: "A broad 8 m tank of deep calm water; a raised slab along one wall releases a long wave that ripples across and reflects. Losasso starts with the compatible leaf-16 hierarchy so the deep interior coarsens without a non-divisible root.",
+    blurb: "A broad 8 m tank of deep calm water; a raised slab along one wall releases a long wave that ripples across and reflects. The deep interior coarsens to the full leaf-32 ladder while the moving surface stays fine.",
     audience: "explore",
     shelf: "Open water",
     environment: "research-station",

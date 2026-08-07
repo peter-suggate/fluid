@@ -292,9 +292,23 @@ test("global fine extraction has a bounded two-dimensional dispatch", () => {
   assert.doesNotMatch(globalFineSurfaceClassificationShader,
     /if\(slot==0u\)\{atomicMin\(&drawArgs\.vertexAllocator,0u\);\}/,
     "a merely published compact directory must not replace a visible mesh with an empty one");
+  // The reset is a GPU-to-GPU copy from a template written once, not a
+  // per-frame host `writeBuffer` into a buffer the GPU owns. Its byte-level
+  // guarantee is unchanged and is pinned in two halves: the encode copies
+  // exactly 24 bytes to offset 4 (so word 0 and the word-7 mesh generation
+  // survive), and the template carries the pattern those 24 bytes contain.
   assert.match(RasterWaterPipeline.prototype.encode.toString(),
-    /writeBuffer\(this\.indirectBuffer,4,new Uint32Array\(\[1,0,0,0,(?:0xffff_ffff|4294967295),0\]\)\)/,
+    /copyBufferToBuffer\(indirectReset,0,this\.indirectBuffer,4,24\)/,
     "global extraction must preserve the mesh generation while resetting firstInstance and the private authority latch");
+  const createTemplate = (RasterWaterPipeline.prototype as unknown as {
+    createIndirectResetTemplate: (...args: never[]) => void;
+  }).createIndirectResetTemplate;
+  assert.match(createTemplate.toString(),
+    /new Uint32Array\(\[\s*1,\s*0,\s*0,\s*0,\s*(?:0xffff_ffff|4294967295),\s*0,\s*0,\s*0,/,
+    "the compact reset template must clear firstInstance and the private authority latch");
+  assert.doesNotMatch(RasterWaterPipeline.prototype.encode.toString(),
+    /writeBuffer\(this\.indirectBuffer/,
+    "the per-frame indirect reset must not round-trip through host staging");
   const completeDiagnostics = RasterWaterPipeline.prototype.completeSurfaceDiagnostics.toString();
   assert.match(completeDiagnostics,
     /meshPublicationGeneration=\(surfaceGeometrySource==="global-fine-coarse"\|\|surfaceGeometrySource==="compact-coarse"\|\|surfaceGeometrySource==="retained-previous"\)&&words\[7\]!==(?:0xffffffff|4294967295)\?words\[7\]:(?:undefined|void 0)/,

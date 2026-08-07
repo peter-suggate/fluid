@@ -84,6 +84,43 @@ export interface OctreeCoarseSummaryPlan {
   readonly allocatedBytes: number;
 }
 
+/**
+ * Eikonal sweeps per advance, from the reach the refinement ladder needs.
+ *
+ * `seedDenseRedistance` writes one domain extent everywhere the interface does
+ * not cut, and `sweepDenseRedistance` only ever takes a `min`. That is textbook
+ * fast marching from +infinity and it is monotone: after k Jacobi sweeps every
+ * cell within k finest cells of the zero set carries its true distance, and
+ * every cell still reading the seed is provably farther than k. So the seed is
+ * an honest "deeper than k", NOT a fallback -- provided k covers every distance
+ * a consumer will ask about.
+ *
+ * It did not. Five sweeps were hard-coded while
+ * `pressureRefinementEvidence` reads |phi| as a distance out to
+ * `bandCells + gradingLayers * maximumLeafSize` cells. Everything past five
+ * cells reported the same constant, so the ladder coarsened on a number that
+ * carried no depth at all.
+ *
+ * Seeding from the ADVECTED magnitude instead is the tempting cheap fix and it
+ * is wrong: a min-only sweep can lower a value but never raise one, so an
+ * advected field that has been compressed can only decay further, and the
+ * interior coarsening bleeds away over the run rather than holding.
+ *
+ * The count is clamped to the longest axis -- no sweep can carry information
+ * farther than the lattice -- and kept odd so the last one lands in the output
+ * bank. The floor of five preserves the historical reach for any caller that
+ * declares no requirement.
+ */
+export function planOctreeRedistanceSweeps(
+  reachCells: number | undefined,
+  dimensions: readonly [number, number, number],
+): number {
+  const longestAxis = Math.max(dimensions[0], dimensions[1], dimensions[2]);
+  const requested = Number.isFinite(reachCells) ? Math.ceil(reachCells!) : 5;
+  const bounded = Math.max(5, Math.min(requested, longestAxis));
+  return bounded % 2 === 0 ? bounded + 1 : bounded;
+}
+
 export function planOctreeCoarseSummary(
   dimensions: readonly [number, number, number],
   rowCapacity: number,
@@ -121,6 +158,8 @@ export class WebGPUOctreeCoarseSummary {
   readonly plan: OctreeCoarseSummaryPlan;
   readonly directory: GPUBuffer;
   private readonly domainVolume: number;
+  /** Eikonal sweeps per advance; odd, so the last one lands in the output bank. */
+  private readonly redistanceSweeps: number;
   private readonly state: GPUBuffer;
   private readonly params: GPUBuffer;
   private readonly dispatchArgs: GPUBuffer;
@@ -149,7 +188,24 @@ export class WebGPUOctreeCoarseSummary {
       /** Largest authored octree leaf. The owner lookup probes dyadic
        * identities from here down to one, so a value below the real maximum
        * silently misses every coarser leaf. */
-      maximumLeafSize: number }>,
+      maximumLeafSize: number;
+      /**
+       * How far, in finest cells, the published phi must be a real distance.
+       *
+       * The sweep below is min-only fast marching from a seed one domain extent
+       * wide, so its reach IS the sweep count: after k sweeps a cell at true
+       * distance <= k has converged and every other cell still reports the
+       * seed. That is a correct algorithm and a correct sentinel -- as long as
+       * k covers every distance a consumer will ask about.
+       *
+       * `pressureRefinementEvidence` asks about distances out to its widest
+       * protection width, `bandCells + gradingLayers * maximumLeafSize`, so
+       * that is what the caller passes. Five sweeps against a width of twenty
+       * meant the refinement ladder read a CONSTANT wherever the surface was
+       * more than five cells away, and coarsened the dam-break front to the
+       * ceiling three cells from the free surface.
+       */
+      redistanceReachCells?: number }>,
     _deferPipelineCompilation = true) {
     if (!Number.isSafeInteger(air.maximumLeafSize) || air.maximumLeafSize < 1
       || (air.maximumLeafSize & (air.maximumLeafSize - 1)) !== 0) {
@@ -157,6 +213,8 @@ export class WebGPUOctreeCoarseSummary {
     }
     this.plan = planOctreeCoarseSummary(dimensions, coarse.rowCapacity);
     this.domainVolume = dimensions[0] * dimensions[1] * dimensions[2];
+    this.redistanceSweeps = planOctreeRedistanceSweeps(
+      air.redistanceReachCells, dimensions);
     const maximumBinding = Math.min(device.limits.maxStorageBufferBindingSize, device.limits.maxBufferSize);
     if (this.plan.directoryWords * 4 > maximumBinding) {
       throw new RangeError("Coarse-only summary hierarchy exceeds the device storage binding limit");
@@ -312,11 +370,13 @@ export class WebGPUOctreeCoarseSummary {
     }
     dispatch("predictSummaryCells", this.air.layout.ownerDirectoryCellCapacity, 0);
     dispatch("seedDenseRedistance", this.air.layout.ownerDirectoryCellCapacity, 0);
-    dispatch("redistanceScratchToOutput", this.air.layout.ownerDirectoryCellCapacity, 0);
-    dispatch("redistanceOutputToScratch", this.air.layout.ownerDirectoryCellCapacity, 0);
-    dispatch("redistanceScratchToOutput", this.air.layout.ownerDirectoryCellCapacity, 0);
-    dispatch("redistanceOutputToScratch", this.air.layout.ownerDirectoryCellCapacity, 0);
-    dispatch("redistanceScratchToOutput", this.air.layout.ownerDirectoryCellCapacity, 0);
+    // The seed lands in bank 2, so an ODD count finishes in the output bank.
+    // A Jacobi sweep advances the front exactly one cell, which is why the
+    // count is the reach and the reach is planned rather than literal.
+    for (let sweep = 0; sweep < this.redistanceSweeps; sweep += 1) {
+      dispatch(sweep % 2 === 0 ? "redistanceScratchToOutput" : "redistanceOutputToScratch",
+        this.air.layout.ownerDirectoryCellCapacity, 0);
+    }
     dispatch("summarizeDenseVolume", this.air.layout.ownerDirectoryCellCapacity, 0);
     dispatch("prepareVolumeCorrection", 1);
     dispatch("correctAndAggregateSummaryCells", this.air.layout.ownerDirectoryCellCapacity, 0);

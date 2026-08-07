@@ -3,6 +3,7 @@ import { cameraBasis, dot } from "./math";
 import { sceneLatticeDimensions } from "./scene-lattice";
 import { canonicalScene, sceneRevision, type CameraState, type SceneDescription } from "./model";
 import { boundingRadius, type RigidBodyState } from "./rigid-body";
+import { decodeGPURigidBodyPoses, GPU_RIGID_RENDER_BYTES, type DrawnRigidBodyPose } from "./webgpu-rigid-body";
 import type { EulerianRenderState } from "./eulerian-solver";
 import type { GPUEulerianInfo, GPURigidLoad, GPUQuality } from "./webgpu-eulerian";
 import { getMethod, type GPUSolverInstance, type MethodParamValues } from "./methods";
@@ -50,9 +51,11 @@ import { buildSvoSceneThickGlass } from "./svo-scene-thick-glass";
 import { buildSvoTerrainMaterial, sceneTerrainSurfaceModel } from "./svo-terrain-material";
 import {
   DEFAULT_SVO_LIGHTING_OPTIONS,
+  resolveSvoPrimaryTraversal,
   type SvoLightingOptions,
   type SvoLightingVisibilityStatus,
   type SvoPrimaryTraversalMode,
+  type SvoPrimaryTraversalScale,
   type SvoSilhouetteRefinementStatus,
 } from "./svo-render-options";
 import { DEFAULT_SVO_RENDER_DIAGNOSTICS, normalizeSvoRenderDiagnostics, type SvoRenderDiagnostics } from "./svo-render-diagnostics";
@@ -103,6 +106,25 @@ export const webGPUPlatformResourcePlugin: ResourcePluginDefinition = Object.fre
 export type SimulationBackend = "webgpu" | "cpu-reference";
 /** One item executing and one queued keeps the GPU busy without visible FIFO bursts. */
 export const BROWSER_GPU_THROUGHPUT_DEPTH = 2;
+
+/**
+ * Solver advances encoded per presented frame.
+ *
+ * `planGPUAdvance` clamps one `advanceTo` to a single `maxDt_s`, and the
+ * renderer called it once per draw — so the browser bought 8 ms of simulation
+ * per presented frame and paid the frame's whole fixed cost for it. Raising
+ * this is the A/B that attributes that cost:
+ *
+ *  - frame rate holds and the transport bar's `ACTUAL ×` doubles → the cost is
+ *    per PRESENTATION, and amortising it is the real-time-factor lever;
+ *  - frame rate halves and `ACTUAL ×` holds → the cost is per ADVANCE, the
+ *    solver's own GPU work, and amortising buys nothing.
+ *
+ * Set back to 1 to restore the previous cadence. Above 1, a presented frame
+ * shows a state that jumped this many steps, so interactivity granularity
+ * coarsens even when throughput improves.
+ */
+export const GPU_ADVANCES_PER_PRESENTATION = 1;
 export const SVO_CAMERA_CHANGING_FRAME = -2;
 
 /**
@@ -804,8 +826,14 @@ export class FluidLabRenderer {
   private readonly optionalPipelineFailures = new Map<OptionalRendererPipeline, string>();
   /**
    * Primary traversal is fixed when the dry-scene pipeline is built, so the
-   * user-facing toggle is recorded here and takes effect by retiring the
-   * pipeline: the next `ensureOptionalPipeline` sweep rebuilds against it.
+   * *resolved* mode is recorded here and takes effect by retiring the pipeline:
+   * the next `ensureOptionalPipeline` sweep rebuilds against it.
+   *
+   * Resolved, not requested: `resolveSvoPrimaryTraversal` upgrades the toggle's
+   * `raster` to `traced` once the scene emits more proxies than the target has
+   * pixels. The resolution is a pure function of the toggle and the scene's
+   * scale, so re-running it every frame is stable and only a scale change moves
+   * it.
    */
   private requestedPrimaryTraversal: SvoPrimaryTraversalMode =
     DEFAULT_SVO_LIGHTING_OPTIONS.primaryTraversal ?? "raster";
@@ -839,6 +867,19 @@ export class FluidLabRenderer {
   private lastEffectiveRendererStatus?: EffectiveRendererStatus;
   private svoPickingAvailable = false;
   private lastSvoPickingBodies: RigidBodyState[] = [];
+  /**
+   * Rigid poses on their way back to the host, and the two staging buffers they
+   * travel in.
+   *
+   * Two slots and no allocation per frame: the copy rides the presentation
+   * encoder that already copies these records into `bodyBuffer`, so publishing
+   * them costs the map, not a submit. When both slots are busy the frame simply
+   * does not publish — the host's copy is one frame older, which nothing here
+   * can tell apart from the frame it is already behind.
+   */
+  private rigidPoseStaging: { buffer: GPUBuffer; pending: boolean }[] = [];
+  private latestRigidBodyPoses: readonly DrawnRigidBodyPose[] = [];
+  private latestRigidBodyPoseRevision = 0;
   private svoSourceAvailable = false;
   private svoTerrainSupported = true;
   private svoGlassSupported = true;
@@ -937,10 +978,18 @@ export class FluidLabRenderer {
    * shows the compile progress it already shows on first attach. A sticky
    * earlier failure is cleared too, because the mode that failed is not the
    * mode being asked for now.
+   *
+   * The scale is resolved here rather than in the pipeline factory so there is
+   * one seam: the factory reads the settled mode, and a scene whose brick count
+   * crosses the ceiling retires through the same path the toggle uses.
    */
-  private applyPrimaryTraversalRequest(requested: SvoPrimaryTraversalMode): void {
-    if (requested === this.requestedPrimaryTraversal) return;
-    this.requestedPrimaryTraversal = requested;
+  private applyPrimaryTraversalRequest(
+    requested: SvoPrimaryTraversalMode,
+    scale: SvoPrimaryTraversalScale,
+  ): void {
+    const resolved = resolveSvoPrimaryTraversal(requested, scale);
+    if (resolved === this.requestedPrimaryTraversal) return;
+    this.requestedPrimaryTraversal = resolved;
     this.failedOptionalPipelines.delete("svo-dry-scene");
     this.optionalPipelineFailures.delete("svo-dry-scene");
     const retired = this.svoDryScenePipeline;
@@ -1122,6 +1171,11 @@ export class FluidLabRenderer {
       // 49.62 -> 29.01 ms. It needs four depth-tested colour planes; a request
       // that the device cannot honor fails through the optional-pipeline
       // diagnostic instead of silently selecting another traversal.
+      //
+      // Which of the two this frame gets is `resolveSvoPrimaryTraversal`'s
+      // answer, already settled into `requestedPrimaryTraversal`: the proxy
+      // raster is an area law and inverts against the megakernel once the scene
+      // emits more proxies than the target has pixels.
       (device) => {
         if (this.requestedPrimaryTraversal === "raster"
           && device.limits.maxColorAttachmentBytesPerSample < FLUID_RASTER_PRIMARY_COLOR_BYTES_PER_SAMPLE) {
@@ -1138,13 +1192,32 @@ export class FluidLabRenderer {
         // rigid impostor pass blocks the reuse anyway whenever the scene has
         // bodies. Asking for it there would only make a dead mode look live.
         const coherence = traversal === "raster-primary" ? "off" as const : "static-primary" as const;
+        // The raster glass and rigid arms follow the traversal rather than being
+        // pinned on, because they are not capabilities: they are *where* glass
+        // and bodies are discovered, and the two traversals answer differently.
+        //
+        // Raster-primary has no choice — its brick pass replaces the megakernel
+        // entirely, so panes and bodies can only come from separate passes, and
+        // the constructor requires both (`webgpu-svo-dry-scene.ts:6843`). The
+        // megakernel resolves both inline: `traceOpaqueScene` folds the analytic
+        // body loop (`:6049`), and the split visibility fragment traces panes
+        // and packs the winning key into the opaque identity's spare bits
+        // (`:3765`). Asking for the raster arms there adds two passes that
+        // duplicate work the primary already did, and one of them —
+        // `rasterRigidActive` — is what blocks stationary primary reuse
+        // (`:10469`). Off is also the arm the 59.6 ms depth-3 measurement was
+        // taken on; the lane and production must agree about that.
+        const rasterArms = traversal === "raster-primary";
         return new SparseVoxelDrySceneRenderer(device, this.uniformBuffer!, this.bodyBuffer!, "rgba16float",
           traversal, "off", "split",
           // Authored at the termination contract's reference viewport height;
           // the shader scales it to the actual render target, including DPR
-          // and resolutionScale, so LOD is stable across displays.
-          traversal === "raster-primary" ? SVO_SCREEN_SPACE_TERMINATION_CONTRACT.defaultThresholdPixels : 0,
-          coherence, true, true, true);
+          // and resolutionScale, so LOD is stable across displays. Zero for the
+          // megakernel is a constructor requirement, not a preference: screen-
+          // space termination is only compiled for canonical-inline or
+          // raster-primary-split (`webgpu-svo-dry-scene.ts:6829`).
+          rasterArms ? SVO_SCREEN_SPACE_TERMINATION_CONTRACT.defaultThresholdPixels : 0,
+          coherence, rasterArms, rasterArms, true);
       },
       (pipeline) => pipeline.initialize((label, completed, total) => this.reportSvoPipelineProgress(label, completed, total)),
       (pipeline) => {
@@ -1176,6 +1249,63 @@ export class FluidLabRenderer {
     );
   }
 
+  /**
+   * The poses the last published frame was drawn with, in roster order.
+   *
+   * The host roster the simulation hands to `draw` is a command channel: the
+   * solver owns rigid motion once a run starts and never writes back, so a body
+   * that has fallen, floated or been shoved by the water is *drawn* from GPU
+   * state while the host copy still says where it was last told to be. Anything
+   * the user points at — the hover chip, the selection's gizmo, the throw that a
+   * press opens — has to agree with the image, so it reads this instead.
+   */
+  get rigidBodyPoses(): readonly DrawnRigidBodyPose[] { return this.latestRigidBodyPoses; }
+  /** Bumped once per published readback, so consumers can skip unchanged frames. */
+  get rigidBodyPoseRevision(): number { return this.latestRigidBodyPoseRevision; }
+
+  /** Queue this frame's pose copy into a free staging slot, if there is one. */
+  private encodeRigidBodyPoseReadback(encoder: GPUCommandEncoder, source: GPUBuffer) {
+    if (this.rigidPoseStaging.length === 0 && this.device) {
+      this.rigidPoseStaging = [0, 1].map((index) => ({
+        buffer: this.device!.createBuffer({
+          label: `Rigid pose readback ${index + 1}/2`,
+          size: GPU_RIGID_RENDER_BYTES,
+          usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+        }),
+        pending: false,
+      }));
+    }
+    const slot = this.rigidPoseStaging.find((candidate) => !candidate.pending);
+    if (!slot) return undefined;
+    slot.pending = true;
+    encoder.copyBufferToBuffer(source, 0, slot.buffer, 0, GPU_RIGID_RENDER_BYTES);
+    return slot;
+  }
+
+  /**
+   * Publish the copy once the queue has run, named by the ids of the roster the
+   * frame was drawn with.
+   *
+   * Names, not slots: the readback lands a frame or two later, and by then a
+   * body may have been added or removed. Index `2` would then be a different
+   * object than the one whose pose was copied, which is a gizmo drawn around the
+   * wrong crate for as long as it takes the next readback to land.
+   */
+  private publishRigidBodyPoses(slot: { buffer: GPUBuffer; pending: boolean }, ids: readonly string[]) {
+    void slot.buffer.mapAsync(GPUMapMode.READ).then(() => {
+      const poses = decodeGPURigidBodyPoses(new Float32Array(slot.buffer.getMappedRange()), ids.length);
+      // A stale device's frame must not overwrite the live one's poses.
+      if (!this.disposed && !this.deviceLost) {
+        this.latestRigidBodyPoses = poses.map((pose, index) => ({ id: ids[index], ...pose }));
+        this.latestRigidBodyPoseRevision += 1;
+      }
+    }).catch(() => { /* Device loss or a destroyed buffer: the host keeps the last poses. */ })
+      .finally(() => {
+        try { if (slot.buffer.mapState === "mapped") slot.buffer.unmap(); } catch { /* Destroyed. */ }
+        slot.pending = false;
+      });
+  }
+
   /** Resolve a click against live GPU poses without restoring a CPU pose mirror. */
   async pickRigidBody(
     origin: RigidBodyState["position_m"],
@@ -1184,18 +1314,28 @@ export class FluidLabRenderer {
   ) {
     if (this.svoPickingAvailable && screen && this.svoDryScenePipeline) {
       const bodies = this.lastSvoPickingBodies, pipeline = this.svoDryScenePipeline;
-      const picked = await pipeline.pickGBuffer(
-        screen.normalizedX, screen.normalizedY,
-        [origin.x, origin.y, origin.z], [direction.x, direction.y, direction.z], bodies.length,
-      );
+      // The surface point comes from the drawn frame, so the centre it is
+      // measured against has to come from the same place. `bodies` is the host
+      // roster the frame was submitted with, and the solver has been moving
+      // those bodies on its own ever since — a settled crate is metres from
+      // where that roster says. Both readbacks are issued together so asking
+      // costs no extra latency on the press.
+      const [picked, poses] = await Promise.all([
+        pipeline.pickGBuffer(
+          screen.normalizedX, screen.normalizedY,
+          [origin.x, origin.y, origin.z], [direction.x, direction.y, direction.z], bodies.length,
+        ),
+        this.gpuFluid?.readRigidBodyPoses?.(),
+      ]);
       if (!this.svoPickingAvailable || this.svoDryScenePipeline !== pipeline || picked.status !== "hit") return undefined;
       const body = bodies[picked.bodyIndex];
       if (!body) return undefined;
+      const live = poses?.[picked.bodyIndex];
       return {
         bodyIndex: picked.bodyIndex,
         distance_m: picked.depth_m,
-        position_m: body.position_m,
-        orientation: body.orientation,
+        position_m: live?.position_m ?? body.position_m,
+        orientation: live?.orientation ?? body.orientation,
         surfacePosition_m: { x: picked.position_m[0], y: picked.position_m[1], z: picked.position_m[2] },
         materialId: picked.materialId,
         localTopologyGeneration: picked.localTopologyGeneration,
@@ -1567,6 +1707,9 @@ export class FluidLabRenderer {
     this.optionalPipelineTasks.clear(); this.failedOptionalPipelines.clear(); this.optionalPipelineFailures.clear(); this.svoDrySceneSource = undefined; this.svoSceneSidecar = undefined; this.svoDrySceneData = undefined; this.liveSceneAnimation = undefined; this.liveSceneAnimationFailure = undefined; this.renderSceneKey = ""; this.renderSceneStamp = 0; this.svoPipelineProgress = undefined; this.svoPipelineStartedAt_ms = undefined; this.pendingLiveSvoPresentation = undefined;
     this.svoPipelineAvailable = false; this.svoSourceAvailable = false; this.svoPublicationFailure = undefined; this.svoTerrainSupported = true; this.svoGlassSupported = true; this.svoMaterialsSupported = true; this.svoLightingSupported = true;
     this.uniformBuffer = undefined; this.bodyBuffer = undefined;
+    // The staging buffers belong to the device that is going away; the poses
+    // they carried stay, because the scene they describe has not changed.
+    this.rigidPoseStaging = [];
     this.presentationTexture = undefined; this.presentationTextureKey = "";
     this.fluidTexture = undefined; this.columnBaseTexture = undefined; this.gridCellTexture = undefined;
     this.velocityFallbackTexture = undefined; this.pressureSamplesFallbackTexture = undefined; this.scalarFallbackTexture = undefined;
@@ -2239,12 +2382,17 @@ export class FluidLabRenderer {
   private submitPreparedGPUFluid(fluid: GPUSolverInstance, time_s: number, bodies: RigidBodyState[], maximumPendingAdvances = 1) {
     const device = this.device;
     if (!device) return fluid.info;
-    // Admit at most the single advance paired with this draw. The following
-    // presentation is submitted immediately after it, so no later simulation
-    // work can overtake the frame that visualizes this state transition.
-    if (!canQueuePreparedGPUAdvance(this.gpuPendingBatches, maximumPendingAdvances)) return fluid.info;
-    const { previousSubmittedTime, submittedTime } = submitNextPreparedGPUAdvance(fluid, time_s, bodies);
-    if (submittedTime > previousSubmittedTime) {
+    // The presentation that follows carries whatever state these advances end
+    // on, so no later simulation work can overtake the frame that visualizes
+    // them. The queue-depth ceiling is expressed in FRAMES, so it scales with
+    // the advances a frame now carries; otherwise the second advance of every
+    // frame would be refused by a ceiling meant to bound presentation latency.
+    for (let advance = 0; advance < GPU_ADVANCES_PER_PRESENTATION; advance += 1) {
+      if (!canQueuePreparedGPUAdvance(this.gpuPendingBatches,
+        maximumPendingAdvances * GPU_ADVANCES_PER_PRESENTATION)) break;
+      const { previousSubmittedTime, submittedTime } = submitNextPreparedGPUAdvance(fluid, time_s, bodies);
+      // The target clock owed no further whole step; stop rather than spin.
+      if (submittedTime <= previousSubmittedTime) break;
       const generation = this.gpuFluidGeneration;
       this.gpuPendingBatches += 1;
       fluid.info.gpuPendingBatches = this.gpuPendingBatches;
@@ -2368,18 +2516,20 @@ export class FluidLabRenderer {
     }
     const sceneRuntime = planSceneRuntime(scene);
     const sparsePresentationRequired = presentationMode === "full-scene";
+    // Read off the document, never off the tuning. The set this tree voxelizes
+    // was expanded against `voxelDomain.detailCellSize_m`, so that is the only
+    // number entitled to say how many levels the tree may spend under it — see
+    // `svoSceneryRefinementDepth`. Hoisted because the primary-traversal
+    // decision needs it too, for the frames before the brick count exists.
+    const environmentRefinementDepth = svoSceneryRefinementDepth(scene.voxelDomain, {
+      fluid: sceneRuntime.fluidSolver,
+    });
     const sceneConfig: SimulationRunConfig = sparsePresentationRequired ? {
       ...config,
       values: {
         ...config.values,
         svoEnvironmentBrickRefinementLevels: activeSvoTuning.environmentBrickRefinementLevels,
-        // Read off the document, never off the tuning. The set this tree
-        // voxelizes was expanded against `voxelDomain.detailCellSize_m`, so
-        // that is the only number entitled to say how many levels the tree may
-        // spend under it — see `svoSceneryRefinementDepth`.
-        svoEnvironmentRefinementDepth: svoSceneryRefinementDepth(scene.voxelDomain, {
-          fluid: sceneRuntime.fluidSolver,
-        }),
+        svoEnvironmentRefinementDepth: environmentRefinementDepth,
         // Topology, so it belongs in the structural key alongside the depth:
         // toggling the exemption changes which nodes are leaves, and only a
         // rebuilt world can answer that.
@@ -2399,7 +2549,21 @@ export class FluidLabRenderer {
     const pixelTraceRequested = sparsePresentationRequired && Boolean(pixelTrace);
     // Ahead of the sweep, so a toggled traversal retires the old pipeline and is
     // rebuilt in the same frame rather than one frame later.
-    if (sparsePresentationRequired) this.applyPrimaryTraversalRequest(svoLightingOptions.primaryTraversal ?? "raster");
+    //
+    // `capacities.leaves` is the planned leaf set plus the bounded topology
+    // mutation reserve (`webgpu-octree-sparse-bricks.ts:1737`), so it is the
+    // proxy count the raster primary would emit, known on the CPU without a
+    // readback. The presentation texture is the primary's own target and is
+    // guaranteed non-undefined this far into the frame (see the early return
+    // above), so the ratio is the live term and the document's refinement depth
+    // only decides the frames before the world has published.
+    if (sparsePresentationRequired) {
+      this.applyPrimaryTraversalRequest(svoLightingOptions.primaryTraversal ?? "raster", {
+        leafBricks: this.svoDrySceneSource?.structural?.capacities.leaves,
+        targetPixels: this.presentationTexture.width * this.presentationTexture.height,
+        environmentRefinementDepth,
+      });
+    }
     this.ensureRequestedOptionalPipelines(optionalRendererPipelineRequests(
       gridOverlay, this.simulationRunning,
       Boolean((readyGPUFluid ?? this.gpuFluid)?.secondaryParticles),
@@ -2639,6 +2803,9 @@ export class FluidLabRenderer {
     const completeDetailedPresentationPhase = (phase: GPUTimestampPhase) =>
       detailedPresentationTrace?.completePhase(encoder, phase);
     if (residentRigidBuffer) encoder.copyBufferToBuffer(residentRigidBuffer, 0, this.bodyBuffer, 0, 12 * 16 * 4);
+    // The same records, on their way to the host. See `publishRigidBodyPoses`.
+    const poseStaging = residentRigidBuffer && bodies.length > 0
+      ? this.encodeRigidBodyPoseReadback(encoder, residentRigidBuffer) : undefined;
     if (sparsePresentationRequired) {
       this.svoDryScenePipeline?.setRigidMotionSource(backend === "webgpu" ? this.gpuFluid?.rigidMotionBuffer : undefined);
       this.svoDryScenePipeline?.setFluidCoverage(this.ensureFluidCoverage(readyGPUFluid, scene));
@@ -2846,6 +3013,7 @@ export class FluidLabRenderer {
       retirePresentation();
       if(!this.disposed&&!this.deviceLost&&this.device===completedPresentationDevice)this.completedPresentations+=1;
     }).catch(retirePresentation);
+    if (poseStaging) this.publishRigidBodyPoses(poseStaging, bodies.slice(0, 12).map((body) => body.description.id));
     if (pixelTraceProbing) this.pumpPixelTraceReadback();
     if (fluidCellTrace) this.pumpFluidCellTraceReadback();
     const presentationQueueTraceRead = presentationQueueTrace?.read(this.device.queue);
@@ -2918,9 +3086,10 @@ export class FluidLabRenderer {
     try { this.waterPipeline?.destroy(); } catch { /* Best-effort cleanup after device loss. */ }
     try { this.gridOverlayPipeline?.destroy(); } catch { /* Best-effort cleanup after device loss. */ }
     try { this.svoDryScenePipeline?.destroy(); } catch { /* Best-effort cleanup after device loss. */ }
-    for (const resource of [this.presentationTexture, this.fluidTexture, this.columnBaseTexture, this.gridCellTexture, this.velocityFallbackTexture, this.pressureSamplesFallbackTexture, this.scalarFallbackTexture, this.uniformBuffer, this.bodyBuffer]) {
+    for (const resource of [this.presentationTexture, this.fluidTexture, this.columnBaseTexture, this.gridCellTexture, this.velocityFallbackTexture, this.pressureSamplesFallbackTexture, this.scalarFallbackTexture, this.uniformBuffer, this.bodyBuffer, ...this.rigidPoseStaging.map((slot) => slot.buffer)]) {
       try { resource?.destroy(); } catch { /* Best-effort cleanup during hot reload. */ }
     }
+    this.rigidPoseStaging = [];
     if (this.device) invalidateGPUCompilationManager(this.device, "renderer destroyed");
     try { this.device?.destroy(); } catch { /* The device may already be lost. */ }
   }

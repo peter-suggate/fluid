@@ -19,13 +19,13 @@ import {
   SVO_LOD_FIXED_LEVEL_MAXIMUM,
   SVO_LOD_SCREEN_SPACE_PIXELS_MAXIMUM,
   SVO_PRIMARY_LEAF_VISIT_HARD_LIMIT,
+  SVO_RENDER_QUALITY_PRESETS,
   SVO_RENDER_TUNING_PRESETS,
   svoRenderTuningKey,
   svoSceneryDetailCellSize_m,
   svoSceneryRefinementDepth,
+  type SvoRenderQualityPreset,
   type SvoRenderTuning,
-  type SvoRenderTuningPreset,
-  type SvoSurfaceReconstruction,
 } from "@/lib/svo-render-tuning";
 import { findSceneDefinition } from "@/lib/scenes";
 import { sceneDefinitionTakesLattice } from "@/lib/scene-definition";
@@ -153,8 +153,12 @@ export function VisualPanel() {
 
   const selectedView = SVO_RENDER_STAGE_DEFINITIONS[svoStageView];
   const tuningKey = svoRenderTuningKey(tuning);
-  const activePreset = (Object.keys(SVO_RENDER_TUNING_PRESETS) as SvoRenderTuningPreset[])
-    .find((preset) => svoRenderTuningKey(SVO_RENDER_TUNING_PRESETS[preset]) === tuningKey);
+  // A rung is the pair, so the match is on the pair. `quality` and `reference`
+  // carry the same sliders and differ only in how visibility is answered; a
+  // lookup by tuning alone would report EXACT as QUALITY.
+  const activePreset = (Object.keys(SVO_RENDER_QUALITY_PRESETS) as SvoRenderQualityPreset[])
+    .find((preset) => svoRenderTuningKey(SVO_RENDER_QUALITY_PRESETS[preset].tuning) === tuningKey
+      && SVO_RENDER_QUALITY_PRESETS[preset].coneTracingMode === svoConeTracingMode);
   const silhouetteRefinementStatus = effectiveRendererStatus.silhouetteRefinement ?? {
     state: effectiveRendererStatus.state === "pending" ? "compiling" as const
       : effectiveRendererStatus.state === "failed" ? "failed" as const
@@ -179,25 +183,6 @@ export function VisualPanel() {
     const next = view === svoStageView && view !== "off" ? "off" : view;
     setSvoStageView(next);
   };
-  // SHADED and RAW are both the real SVO renderer; what separates them is what
-  // the primary does once it has hit a voxel.
-  //
-  // RAW used to select a separate inspection overlay — one cube per resolved
-  // leaf, drawn from a second 48-byte-per-voxel arena — which answered "what
-  // did the voxeliser store" rather than "what does the renderer draw". The
-  // question worth a top-level button is the second one, so RAW is the
-  // cube-face shading that shipped and SHADED is the trilinear reconstruction
-  // of the distance field. Same traversal, same hit, same depth: only the
-  // shaded normal differs, which is what makes the pair a usable A/B rather
-  // than two unrelated images. The overlay renderer, and the LEVELS / SURFACE /
-  // BRICKS / CONTENT buttons that were its only remaining entry points, are
-  // gone with their arenas.
-  const selectSurface = (surfaceReconstruction: SvoSurfaceReconstruction) => {
-    setSvoStageView("off");
-    setTuning({ ...tuning, surfaceReconstruction });
-  };
-  const surfaceIs = (surface: SvoSurfaceReconstruction) =>
-    tuning.surfaceReconstruction === surface;
 
   return <aside id="render-panel" className="right-panel panel-scroll performance-panel performance-v2 visual-panel"
     aria-label="Rendering diagnostics and scene visualizations" data-testid="visual-panel">
@@ -222,21 +207,15 @@ export function VisualPanel() {
         disclosures rather than inside one that can be closed over them. */}
     <div className="render-preset-strip" role="group" aria-label="Render performance profile">
       <span>PROFILE</span>
-      {(Object.keys(SVO_RENDER_TUNING_PRESETS) as SvoRenderTuningPreset[]).map((preset) =>
-        <button key={preset} className={activePreset === preset ? "active" : ""} onClick={() => setTuning(SVO_RENDER_TUNING_PRESETS[preset])}>{preset}</button>)}
+      {(Object.keys(SVO_RENDER_QUALITY_PRESETS) as SvoRenderQualityPreset[]).map((preset) =>
+        <button key={preset} className={activePreset === preset ? "active" : ""} onClick={() => {
+          // One click, both halves. The visibility mode has its own buttons under
+          // Lighting and stays reachable there; what this strip guarantees is that
+          // a named rung is never half-applied.
+          setTuning(SVO_RENDER_QUALITY_PRESETS[preset].tuning);
+          setSvoConeTracingMode(SVO_RENDER_QUALITY_PRESETS[preset].coneTracingMode);
+        }}>{preset}</button>)}
       {!activePreset && <output>CUSTOM</output>}
-    </div>
-
-    <div className="render-view-strip">
-      <span>GLOBAL SVO VIEW</span>
-      <div role="group" aria-label="Global SVO view">
-        <button className={surfaceIs("analytic") ? "active" : ""} onClick={() => selectSurface("analytic")}
-          title="Exact surface: the primary shades the owning primitive's own normal, and the ground's from the heightfield">EXACT</button>
-        <button className={surfaceIs("trilinear") ? "active" : ""} onClick={() => selectSurface("trilinear")}
-          title="Smooth surface: the primary shades the gradient of the trilinearly reconstructed distance field">SHADED</button>
-        <button className={surfaceIs("voxel-face") ? "active" : ""} onClick={() => selectSurface("voxel-face")}
-          title="The same hit shaded from its cube face, as it shipped — the bit-exact reference for the smooth arm">RAW</button>
-      </div>
     </div>
 
     <div className="render-groups">

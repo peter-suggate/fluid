@@ -69,7 +69,9 @@ import {
 } from "../lib/svo-node-mip-address-plan";
 import type { SvoNodeMipCoordinate } from "../lib/svo-node-mip-pyramid";
 import { SVO_SMOOTH_UNION_CLUSTER_ARENA_WORDS, type SvoSmoothUnionClusterPacking } from "../lib/svo-primitive-abi";
-import { SPARSE_BRICK_PAYLOAD_PROFILES, unpackMaterialOwner } from "../lib/sparse-brick-octree";
+import {
+  SPARSE_BRICK_PAYLOAD_PROFILES, sparseBrickScenePayloadIdentityAt, unpackMaterialOwner,
+} from "../lib/sparse-brick-octree";
 import { packSvoDrySceneClusters } from "../lib/webgpu-svo-dry-scene";
 import { WebGPULiveSvoScene } from "../lib/webgpu-live-svo-scene";
 import {
@@ -616,8 +618,12 @@ const structure = await readBuffer(structural.structure.buffer, 0, structural.st
 // as `topologyLoad` does in the voxelization shader; the flat readback is not.
 const topologyBase = structural.structureOffsetsWords.nodes;
 const topology = (word: number) => structure[topologyBase + word];
-const sceneMaterials = await readBuffer(structural.sceneMaterialOwners.buffer,
-  structural.sceneMaterialOwners.offset ?? 0, structural.sceneMaterialOwners.size!);
+// The whole payload arena, decoded through the block the shaders address it by:
+// the banded leaf payload has no owner lane to slice, and a census that read one
+// would be counting the absent-lane page rather than the scene.
+const scenePayload = await readBuffer(structural.scenePayload.buffer,
+  structural.scenePayload.offset ?? 0,
+  structural.scenePayload.size ?? structural.scenePayload.buffer.size);
 const sceneGeometry = await readBuffer(structural.sceneGeometry.buffer,
   structural.sceneGeometry.offset ?? 0, structural.sceneGeometry.size!);
 /**
@@ -702,7 +708,8 @@ for (let leaf = 0; leaf < leafCount; leaf += 1) {
     // envelope: air the blob claimed as solid.
     if (published_m > 0) airVoxels += 1;
     distanceDrift_m += Math.abs(published_m - envelope_m);
-    const { materialId, ownerId } = unpackMaterialOwner(sceneMaterials[voxelOffset + local]);
+    const { materialId, ownerId } = unpackMaterialOwner(
+      sparseBrickScenePayloadIdentityAt(scenePayload, structural.scenePayloadLanes, voxelOffset + local));
     if (materialId !== 0) solidVoxels += 1;
     if (materialId !== 0 && censusOwners.has(ownerId)) ownedVoxels += 1;
   }

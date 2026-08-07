@@ -124,8 +124,21 @@ export interface SvoNodeMipAddressPlan {
   domainPyramidPageCount: number;
   /** Slots held back for activations the first publication did not see. */
   reservePages: number;
-  /** Worklist depth one level may need, which bounds the builder's scratch. */
+  /** Worklist depth the deepest level may need, which bounds the builder's scratch. */
   pageCapacityPerLevel: number;
+  /**
+   * Worklist depth *each* level may need, which sizes the arena's sections.
+   *
+   * The scalar above is a maximum over levels, and the derived worklist arena
+   * used to lay every section out at it — so the coarsest level, which holds one
+   * page, got the base level's capacity at 48 B a record. A level's own bound is
+   * its own domain grid (`levelDimensions[level]`, which the planner's direct
+   * page table cannot address past) capped by what the reserve could still add
+   * to it, and both of those are exact rather than conservative: the plan's
+   * total headroom is `reservePages`, so a level holding `p` pages today can
+   * hold at most `p + reservePages` after any growth this plan admits.
+   */
+  pageCapacityByLevel: readonly number[];
   maximumReserveBytes: number;
   /**
    * Finest level that owns a radiance page. See `SVO_RADIANCE_LEVEL_FLOOR`.
@@ -362,10 +375,19 @@ export function* planSvoNodeMipAddressesSteps(
     opacityFloorLevel);
   const atlasPages = svoNodeMipAtlasPagesForCapacity(pageCapacity);
   const plan = yield* buildPlanSteps(basePages, levelCount, pageCapacity, atlasPages, generation);
-  const denseLevelMaximum = levelDimensions.reduce(
-    (maximum, dimensions, level) => (level < opacityFloorLevel
-      ? maximum : Math.max(maximum, dimensions[0] * dimensions[1] * dimensions[2])), 1);
-  const planLevelMaximum = Math.max(1, ...levelPageCounts(plan, levelCount));
+  // Pages a level's own grid can hold. Zero below the floor, where no page
+  // exists; the direct page table rejects every coordinate outside it, so this
+  // is a hard ceiling on that level and not an estimate.
+  const denseLevelCounts = levelDimensions.map((dimensions, level) => (level < opacityFloorLevel
+    ? 0 : dimensions[0] * dimensions[1] * dimensions[2]));
+  const denseLevelMaximum = Math.max(1, ...denseLevelCounts);
+  const planLevelCounts = levelPageCounts(plan, levelCount);
+  const planLevelMaximum = Math.max(1, ...planLevelCounts);
+  // Same policy per level as the scalar's, with each level's own two terms: a
+  // total plan is already the whole grid, and a partial one can grow by at most
+  // the shared `reservePages` — all of which could land on any single level.
+  const pageCapacityByLevel = denseLevelCounts.map((dense, level) => Math.max(1, Math.min(dense,
+    total ? dense : planLevelCounts[level] + reservePages)));
   const pageCapacityPerLevel = Math.max(1, Math.min(denseLevelMaximum,
     total ? denseLevelMaximum : planLevelMaximum + reservePages));
   // The radiance atlas is sized from the *domain* above the floor, never from
@@ -401,6 +423,7 @@ export function* planSvoNodeMipAddressesSteps(
     domainPyramidPageCount,
     reservePages,
     pageCapacityPerLevel,
+    pageCapacityByLevel,
     maximumReserveBytes,
     radianceFloorLevel,
     radianceSlotOffset: svoNodeMipRadianceSlotOffset(plan, radianceFloorLevel),
@@ -463,8 +486,11 @@ export function growSvoNodeMipAddressPlan(
   if (added.length === 0) return { plan: current, addedBasePages: [], rebuildRequired: false };
   const plan = buildPlan(seeds, current.levelCount, current.pageCapacity, current.atlasPages, current.plan.generation);
   if (!plan.complete) return undefined;
-  const levelMaximum = Math.max(1, ...levelPageCounts(plan, current.levelCount));
-  if (levelMaximum > current.pageCapacityPerLevel) return undefined;
+  // Per level, against the section that level was actually allocated. The
+  // arena's sections are sized independently now, so a growth that fits the
+  // deepest level says nothing about whether it fits the one it landed on.
+  const grownLevelCounts = levelPageCounts(plan, current.levelCount);
+  if (grownLevelCounts.some((count, level) => count > current.pageCapacityByLevel[level])) return undefined;
   return {
     plan: {
       ...current,

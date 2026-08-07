@@ -1310,6 +1310,17 @@ export class RasterWaterPipeline {
   private sampler?: GPUSampler;
   private vertexBuffer?: GPUBuffer;
   private indirectBuffer?: GPUBuffer;
+  /**
+   * GPU-resident source for the per-frame indirect-header reset.
+   *
+   * The reset used to be two `queue.writeBuffer` calls per frame into a buffer
+   * the GPU otherwise wholly owns — a host staging round trip for 24 bytes, and
+   * one applied at submit time rather than in encoder order, so any earlier
+   * pass in the same command buffer would have read the already-clobbered
+   * header. Both patterns live here instead and are copied buffer-to-buffer in
+   * the encoder, which is both free of host traffic and correctly ordered.
+   */
+  private indirectResetTemplate?: GPUBuffer;
   private activeCubeBuffer?: GPUBuffer;
   private globalCubeValues?: GPUBuffer;
   private globalCubeOffsets?: GPUBuffer;
@@ -1754,11 +1765,18 @@ export class RasterWaterPipeline {
    */
   get drySceneRadianceView(): GPUTextureView | undefined { return this.sceneTextureView; }
 
+  /**
+   * Full-rate surface receipts are a Dawn-session tool, not a UI mode.
+   *
+   * Opening the diagnostics or visual panel used to escalate this to every
+   * frame, and a full-rate receipt is not a cheap one: `completeSurfaceDiagnostics`
+   * awaits a QUEUE-WIDE `onSubmittedWorkDone` and then maps, so the browser's
+   * render path became fully synchronous — per frame — for a panel that reads
+   * the value at human rates. The 250 ms cadence now holds in the browser
+   * regardless of which panel is open; `FLUID_WATER_DIAGNOSTICS=1` still buys
+   * per-capture evidence where a harness genuinely needs it.
+   */
   private surfaceDiagnosticsFullRateRequested() {
-    if (typeof location !== "undefined") {
-      const query = new URLSearchParams(location.search);
-      if (query.get("panel") === "diagnostics" || query.get("panel") === "visual") return true;
-    }
     return typeof process !== "undefined" && process.env?.FLUID_WATER_DIAGNOSTICS === "1";
   }
 
@@ -1822,10 +1840,28 @@ export class RasterWaterPipeline {
     return completion;
   }
 
+  /**
+   * Word 0..7 is the compact-surface reset applied at byte 4; word 8..15 is
+   * the dense reset applied at byte 0. Written once, copied every frame.
+   *
+   * Created on demand rather than only alongside the geometry allocation: a
+   * reset template that can be missing would be a new way for `encode` to fail
+   * closed, and `encode` failing closed is indistinguishable from a solver that
+   * never published — it stalls the fenced t=0 raster handoff with no error.
+   */
+  private createIndirectResetTemplate(): GPUBuffer {
+    const template = this.device.createBuffer({ label: "Water indirect header reset patterns", size: 64, usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+    this.device.queue.writeBuffer(template, 0, new Uint32Array([
+      1, 0, 0, 0, 0xffff_ffff, 0, 0, 0,
+      0, 1, 0, 0, 0, 0, 0, 0xffff_ffff,
+    ]));
+    return template;
+  }
+
   private ensureGeometry(nx: number, ny: number, nz: number) {
     const key = `${nx}x${ny}x${nz}`;
     if (key === this.geometryKey) return;
-    this.vertexBuffer?.destroy(); this.indirectBuffer?.destroy(); this.activeCubeBuffer?.destroy(); this.globalCubeValues?.destroy(); this.globalCubeOffsets?.destroy();
+    this.vertexBuffer?.destroy(); this.indirectBuffer?.destroy(); this.indirectResetTemplate?.destroy(); this.activeCubeBuffer?.destroy(); this.globalCubeValues?.destroy(); this.globalCubeOffsets?.destroy();
     // Surface area, not volume, controls the normal case.  The generous factor
     // also covers breaking sheets and entrained blobs while imposing a hard
     // 64 MiB ceiling on adversarial checkerboard fields.
@@ -1837,6 +1873,7 @@ export class RasterWaterPipeline {
     // indirect-first-instance feature is enabled.
     this.indirectBuffer = this.device.createBuffer({ label: "Water indirect draw arguments and extraction counters", size: 32, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
     this.device.queue.writeBuffer(this.indirectBuffer, 28, new Uint32Array([0xffff_ffff]));
+    this.indirectResetTemplate = this.createIndirectResetTemplate();
     this.activeCubeBuffer = this.device.createBuffer({ label: "Water surface cube worklist", size: activeCubeCapacity(maxVertices) * 8, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
     this.globalCubeValues = this.device.createBuffer({ label: "Global fine classified cube values", size: activeCubeCapacity(maxVertices) * 32, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
     this.globalCubeOffsets = this.device.createBuffer({ label: "Global fine tetrahedron offsets", size: activeCubeCapacity(maxVertices) * 6 * 4, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
@@ -1964,15 +2001,16 @@ export class RasterWaterPipeline {
     // scene that authors zero caustic strength never encodes the pass at all.
     const updateCaustics = this.causticStrength > 0 && (updateSurface || !this.causticsValid);
     if (updateSurface) {
+      const indirectReset = this.indirectResetTemplate ??= this.createIndirectResetTemplate();
       if (compactSurface) {
         // Preserve the last published draw count while the GPU validates the
         // next A/B generation. Classification clears the sentinel only after
         // observing finite tagged fine data or a published compact-coarse
         // fallback; an invalid generation therefore retains the previous mesh
         // and its GPU-written publication generation in word 7.
-        this.device.queue.writeBuffer(this.indirectBuffer,4,new Uint32Array([1,0,0,0,0xffff_ffff,0]));
+        encoder.copyBufferToBuffer(indirectReset,0,this.indirectBuffer,4,24);
       } else {
-        this.device.queue.writeBuffer(this.indirectBuffer,0,new Uint32Array([0,1,0,0,0,0,0,0xffff_ffff]));
+        encoder.copyBufferToBuffer(indirectReset,32,this.indirectBuffer,0,32);
       }
       const plan = surfaceExtractionDispatchPlan(nx, ny, nz, this.volume.depthOrArrayLayers, restrictedTallCell, maximumNeighborDelta);
       // Classify appends surface-crossing cubes to the worklist, the prepare

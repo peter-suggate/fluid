@@ -5,7 +5,7 @@ import { rigidBodyEntity } from "./editor-rigid-body";
 import { tankEntity } from "./editor-tank";
 import type { EditorSelection, EditorTool } from "./editor-tools";
 import { resourceInteractionGates } from "./resource-readiness";
-import { useDiagnosticsStore } from "./stores/diagnostics-store";
+import { drawnBodies, useDiagnosticsStore } from "./stores/diagnostics-store";
 import { displaySceneSnapshot } from "./stores/scene-draft-store";
 import type {
   EditorEntity,
@@ -62,12 +62,25 @@ export function editorEntityContext(): EditorEntityContext {
     // the capability gate, not a second reading of the renderer's status enum.
     pickingAvailable: resourceInteractionGates(
       useDiagnosticsStore.getState().resourceReadiness, false).pickingInteractive,
-    bodies: useDiagnosticsStore.getState().bodies.map((body) => ({
-      id: body.description.id,
-      position_m: body.position_m,
-      orientation: body.orientation,
-    })),
+    bodies: editorBodyPoses(),
   };
+}
+
+/**
+ * Every body as the user sees it: the drawn pose where the renderer has
+ * published one, and the commanded pose until then.
+ *
+ * The two disagree by however far the solver has moved a body since the host
+ * last commanded it — a whole tank height for something that has fallen — so a
+ * gizmo, a hover chip or a grab resolved against the roster lands nowhere near
+ * the object it belongs to. See `bodyPoses` in the diagnostics store.
+ */
+export function editorBodyPoses(bodies = drawnBodies()): EditorEntityContext["bodies"] {
+  return bodies.map((body) => ({
+    id: body.description.id,
+    position_m: body.position_m,
+    orientation: body.orientation,
+  }));
 }
 
 /**

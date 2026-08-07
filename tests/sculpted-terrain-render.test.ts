@@ -392,26 +392,20 @@ test("a record and its arena region evaluate the same ground the terrain does", 
   assert.equal(svoDrySceneTerrainResolver(undefined)(SVO_DRY_SCENE_TERRAIN_REFERENCE), undefined);
 });
 
-test("the WGSL samples the arena heightfield with the exact form the CPU sampler uses", () => {
-  assert.match(svoDrySceneShader, /fn terrainGridHeightAt\(grid:DryTerrainGrid,x:f32,z:f32\)->f32\{/);
-  assert.match(svoDrySceneShader, /let fx=clamp\(\(x-grid\.origin\.x\)\/grid\.spacing,0\.0,f32\(grid\.size\.x-1\)\);/);
-  assert.match(svoDrySceneShader, /let fz=clamp\(\(z-grid\.origin\.y\)\/grid\.spacing,0\.0,f32\(grid\.size\.y-1\)\);/);
-  assert.match(svoDrySceneShader, /let x0=min\(grid\.size\.x-2,i32\(floor\(fx\)\)\);let z0=min\(grid\.size\.y-2,i32\(floor\(fz\)\)\);/);
-  assert.match(svoDrySceneShader, /return max\(0\.0,lower\*\(1\.0-tz\)\+upper\*tz\);/);
-  // The height query has to route through it, or the analytic form is still
-  // what every ray, normal and shadow in the frame is evaluating.
-  assert.match(svoDrySceneShader, /fn terrainHeightAt\(x:f32,z:f32\)->f32\{[^]*if\(terrainSculpted\(grid\)\)\{return terrainGridHeightAt\(grid,x,z\);\}/);
-  assert.match(svoDrySceneShader, /fn terrainCeiling\(\)->f32\{[^]*if\(terrainSculpted\(grid\)\)\{return grid\.maximum\+0\.05;\}/);
-  assert.match(svoDrySceneShader, /fn traceTerrain\(ro:vec3f,rd:vec3f\)->DryHit\{[^]*if\(terrainSculpted\(sculpted\)\)\{return traceTerrainHeightfield\(ro,rd,sculpted\);\}/);
-  // The march's safety property is the step, so pin the step.
-  assert.match(svoDrySceneShader, /let rate=max\(1e-4,abs\(rd\.y\)\+grid\.slopeBound\*length\(rd\.xz\)\);/);
-  assert.match(svoDrySceneShader, /t=t\+abs\(field\)\/rate;/);
-  assert.equal(svoDrySceneShader.includes(`const DRY_SCENE_TERRAIN_WORD_OFFSET:u32=${SVO_DRY_SCENE_ARENA_LAYOUT.terrainOffsetBytes / 4}u;`), true);
+test("the arena still publishes the sculpted grid the shader no longer samples", () => {
+  // The WGSL sampler this test used to pin is gone: the ground is voxels, and the
+  // decoder, the Lipschitz march and the height query that fed both went with the
+  // analytic surface. What survives is the *publication* — the region is still
+  // written, because the CPU intersector above reads the same authored grid for
+  // editor hover, and because every later arena region is placed after it.
+  for (const gone of ["fn terrainGridHeightAt", "fn terrainHeightAt", "fn terrainCeiling", "fn traceTerrainHeightfield"]) {
+    assert.ok(!svoDrySceneShader.includes(gone), `${gone} must not survive the voxels-only cutover`);
+  }
 
   const drySceneSource = readFileSync(new URL("../lib/webgpu-svo-dry-scene.ts", import.meta.url), "utf8");
   assert.match(drySceneSource, /writeBuffer\(\s*this\.sceneArenaBuffer,\s*SVO_DRY_SCENE_ARENA_LAYOUT\.terrainOffsetBytes,\s*scene\.terrainHeightfield \?\? new Uint32Array\(SVO_DRY_SCENE_TERRAIN_HEADER_WORDS\),/,
     "the header must be republished unconditionally so a flat scene cannot inherit the previous vessel");
   const rendererSource = readFileSync(new URL("../lib/webgpu-renderer.ts", import.meta.url), "utf8");
-  assert.match(rendererSource, /terrainHeightfield: packSvoDrySceneTerrainHeightfield\(scene\.terrain\?\.grid\)/,
-    "the sculpted grid must reach the presentation publication, which is the hop it was missing");
+  assert.match(rendererSource, /terrainHeightfield: packSvoDrySceneTerrainHeightfield\(terrainSampleGrid\(scene\.terrain\)\)/,
+    "the sculpted grid must reach the presentation publication, through the sampler that treats a described ground as a heightfield too");
 });

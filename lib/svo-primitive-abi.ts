@@ -1900,25 +1900,285 @@ function clusterDistance(point: Vec3, lobeRadii_m: Vec3, packing: SvoSmoothUnion
 }
 
 /**
- * Gradient by the four-tap tetrahedron rather than six-tap central differences.
+ * A field's value and its exact gradient — the CPU twin of `SvoClusterSample`.
  *
- * A cluster evaluation is roughly sixty sphere distances, and the normal is
- * wanted once per hit against a march that converges in about eight steps — so
- * the difference between four taps and six is a fifth of the whole trace.
+ * The WGSL beside this file carries the derivation; the short version is that
+ * every leaf of a cluster field is a sphere, an ellipsoid or the convex hull of
+ * two spheres, each with a closed-form normal, and both combinators above them
+ * pass a gradient through exactly. So one differentiated pass replaces the four
+ * whole evaluations a tetrahedral difference used to spend.
+ *
+ * The distance arithmetic in each `...Sample` below is character-for-character
+ * its distance-only twin's, because the two must not drift;
+ * `tests/svo-cluster-gradient.test.ts` holds them to it and to a central
+ * difference of the field itself.
+ */
+interface ClusterSample {
+  readonly distance_m: number;
+  readonly gradient: Vec3;
+}
+
+/**
+ * The gradient a polynomial smooth minimum implies, which is the plain blend.
+ *
+ * `f = b + (a-b)h - k·h(1-h)` with `h = 0.5 + (b-a)/2k`, so
+ * `∂f/∂a = h + (a-b)h' - k(1-2h)h'`; substituting `a-b = -(2h-1)k` and
+ * `h' = -1/2k` the last two terms are `(2h-1)/2` and `(1-2h)/2` and cancel
+ * identically. `∂f/∂a = h`, `∂f/∂b = 1-h`: the blend weight is the whole
+ * derivative, so this is exact and not a smoothed approximation of the seam.
+ */
+function smoothMinimumSample(a: ClusterSample, b: ClusterSample, k: number): ClusterSample {
+  if (!(k > 0)) return a.distance_m <= b.distance_m ? a : b;
+  const h = Math.min(1, Math.max(0, 0.5 + (0.5 * (b.distance_m - a.distance_m)) / k));
+  return {
+    distance_m: b.distance_m + (a.distance_m - b.distance_m) * h - k * h * (1 - h),
+    gradient: {
+      x: b.gradient.x + (a.gradient.x - b.gradient.x) * h,
+      y: b.gradient.y + (a.gradient.y - b.gradient.y) * h,
+      z: b.gradient.z + (a.gradient.z - b.gradient.z) * h,
+    },
+  };
+}
+
+/** A degenerate offset yields a zero gradient, never a guessed direction. */
+function unitGradient(offset: Vec3): Vec3 {
+  const length = Math.hypot(offset.x, offset.y, offset.z);
+  return length > NORMAL_EPSILON
+    ? { x: offset.x / length, y: offset.y / length, z: offset.z / length }
+    : { x: 0, y: 0, z: 0 };
+}
+
+function clusterSphereSample(
+  point: Vec3,
+  cellX: number,
+  cellY: number,
+  cellZ: number,
+  octave: ClusterLatticeOctave,
+): ClusterSample {
+  const period = octave.latticePeriod_m;
+  const jitter = clusterCellJitter(cellX, cellY, cellZ, octave.seed);
+  const offset = {
+    x: point.x - (cellX + 0.5 + octave.jitter * jitter.x) * period,
+    y: point.y - (cellY + 0.5 + octave.jitter * jitter.y) * period,
+    z: point.z - (cellZ + 0.5 + octave.jitter * jitter.z) * period,
+  };
+  return {
+    distance_m: Math.hypot(offset.x, offset.y, offset.z) - octave.latticeLobeRadius_m,
+    gradient: unitGradient(offset),
+  };
+}
+
+/** {@link clusterLatticeOctaveDistance}, differentiated in the same fold order. */
+function clusterLatticeOctaveSample(point: Vec3, octave: ClusterLatticeOctave): ClusterSample {
+  const period = octave.latticePeriod_m;
+  const span = SVO_SMOOTH_UNION_CLUSTER_NEIGHBOURHOOD;
+  const ring = span / 2 - 1;
+  const baseX = Math.floor(point.x / period - 0.5) - ring;
+  const baseY = Math.floor(point.y / period - 0.5) - ring;
+  const baseZ = Math.floor(point.z / period - 0.5) - ring;
+  let sample: ClusterSample = { distance_m: 0, gradient: { x: 0, y: 0, z: 0 } };
+  for (let corner = 0; corner < 8; corner += 1) {
+    const sphere = clusterSphereSample(
+      point, baseX + ring + (corner & 1), baseY + ring + ((corner >> 1) & 1), baseZ + ring + ((corner >> 2) & 1), octave,
+    );
+    sample = corner === 0 ? sphere : smoothMinimumSample(sample, sphere, octave.smoothRadius_m);
+  }
+  const reach = octave.jitter * period * Math.sqrt(3) + octave.latticeLobeRadius_m + octave.smoothRadius_m;
+  for (let index = 0; index < span * span * span; index += 1) {
+    const stepX = index % span;
+    const stepY = Math.floor(index / span) % span;
+    const stepZ = Math.floor(index / (span * span)) % span;
+    if (stepX >= ring && stepX <= ring + 1 && stepY >= ring && stepY <= ring + 1 && stepZ >= ring && stepZ <= ring + 1) continue;
+    const cellX = baseX + stepX, cellY = baseY + stepY, cellZ = baseZ + stepZ;
+    const nominal = Math.hypot(
+      point.x - (cellX + 0.5) * period,
+      point.y - (cellY + 0.5) * period,
+      point.z - (cellZ + 0.5) * period,
+    );
+    if (nominal - reach > sample.distance_m) continue;
+    sample = smoothMinimumSample(sample, clusterSphereSample(point, cellX, cellY, cellZ, octave), octave.smoothRadius_m);
+  }
+  return sample;
+}
+
+function clusterLatticeSample(point: Vec3, packing: SvoClusterLatticeField): ClusterSample {
+  const octaves = packing.octaves ?? 1;
+  let sample: ClusterSample = { distance_m: 0, gradient: { x: 0, y: 0, z: 0 } };
+  for (let octave = 0; octave < octaves; octave += 1) {
+    const scale = 2 ** -octave;
+    const smoothRadius_m = packing.smoothRadius_m * scale;
+    const octaveSample = clusterLatticeOctaveSample(point, {
+      latticeLobeRadius_m: packing.latticeLobeRadius_m * scale,
+      latticePeriod_m: packing.latticePeriod_m * scale,
+      jitter: packing.jitter,
+      smoothRadius_m,
+      seed: clusterOctaveSeed(packing.seed, octave),
+    });
+    sample = octave === 0 ? octaveSample : smoothMinimumSample(sample, octaveSample, smoothRadius_m);
+  }
+  return sample;
+}
+
+/**
+ * {@link clusterRoundConeDistance}, differentiated branch for branch.
+ *
+ * Two of the three branches are spheres wearing the segment's algebra:
+ * `P + b²A` is `A²|p - to|²` and `P + l²A` is `A²|p - from|²` identically, so
+ * those are `|p - c| - r` and their gradients are radial. The side branch has
+ * gradient magnitude `√((L + taper²)/A) = 1` by construction — the same
+ * identity that makes the distance Lipschitz-1.
+ */
+function clusterRoundConeSample(
+  point: Vec3,
+  from: Vec3,
+  to: Vec3,
+  fromRadius_m: number,
+  toRadius_m: number,
+): ClusterSample {
+  const axis = { x: to.x - from.x, y: to.y - from.y, z: to.z - from.z };
+  const axisSquared = axis.x ** 2 + axis.y ** 2 + axis.z ** 2;
+  const taper = fromRadius_m - toRadius_m;
+  const lateralSquared = axisSquared - taper * taper;
+  const inverseAxisSquared = 1 / axisSquared;
+  const offset = { x: point.x - from.x, y: point.y - from.y, z: point.z - from.z };
+  const along = offset.x * axis.x + offset.y * axis.y + offset.z * axis.z;
+  const beyond = along - axisSquared;
+  const perpendicular = {
+    x: offset.x * axisSquared - axis.x * along,
+    y: offset.y * axisSquared - axis.y * along,
+    z: offset.z * axisSquared - axis.z * along,
+  };
+  const perpendicularSquared = perpendicular.x ** 2 + perpendicular.y ** 2 + perpendicular.z ** 2;
+  const alongSquared = along * along * axisSquared;
+  const beyondSquared = beyond * beyond * axisSquared;
+  const split = Math.sign(taper) * taper * taper * perpendicularSquared;
+  if (Math.sign(beyond) * lateralSquared * beyondSquared > split) {
+    return {
+      distance_m: Math.sqrt(perpendicularSquared + beyondSquared) * inverseAxisSquared - toRadius_m,
+      gradient: unitGradient({ x: point.x - to.x, y: point.y - to.y, z: point.z - to.z }),
+    };
+  }
+  if (Math.sign(along) * lateralSquared * alongSquared < split) {
+    return {
+      distance_m: Math.sqrt(perpendicularSquared + alongSquared) * inverseAxisSquared - fromRadius_m,
+      gradient: unitGradient(offset),
+    };
+  }
+  const outward = unitGradient(perpendicular);
+  const lateral = Math.sqrt(Math.max(0, lateralSquared * inverseAxisSquared));
+  return {
+    distance_m: (Math.sqrt(perpendicularSquared * lateralSquared * inverseAxisSquared) + along * taper)
+      * inverseAxisSquared - fromRadius_m,
+    gradient: {
+      x: outward.x * lateral + axis.x * taper * inverseAxisSquared,
+      y: outward.y * lateral + axis.y * taper * inverseAxisSquared,
+      z: outward.z * lateral + axis.z * taper * inverseAxisSquared,
+    },
+  };
+}
+
+function clusterTaperedSweepSample(point: Vec3, packing: SvoClusterTaperedSweepField): ClusterSample {
+  let sample: ClusterSample = { distance_m: 0, gradient: { x: 0, y: 0, z: 0 } };
+  for (let index = 0; index + 1 < packing.points.length; index += 1) {
+    const from = packing.points[index];
+    const to = packing.points[index + 1];
+    const segment = clusterRoundConeSample(point, from.position_m, to.position_m, from.radius_m, to.radius_m);
+    sample = index === 0 ? segment : smoothMinimumSample(sample, segment, packing.smoothRadius_m);
+  }
+  return sample;
+}
+
+/**
+ * One seeded lobe, differentiated through the frames it is authored in.
+ *
+ * `scaled = |R⁻¹(p/r - c) / k|`, so the chain is the ellipsoid gradient in lobe
+ * space, rotated back by the lobe's orientation, then divided by the envelope
+ * radii the normalised space was built with.
+ */
+function clusterSeededLobesSample(
+  point: Vec3,
+  lobeRadii_m: Vec3,
+  packing: SvoClusterSeededLobesField,
+): ClusterSample {
+  const shortest_m = Math.min(lobeRadii_m.x, lobeRadii_m.y, lobeRadii_m.z);
+  const normalized = { x: point.x / lobeRadii_m.x, y: point.y / lobeRadii_m.y, z: point.z / lobeRadii_m.z };
+  let sample: ClusterSample = { distance_m: 0, gradient: { x: 0, y: 0, z: 0 } };
+  for (let index = 0; index < packing.lobeCount; index += 1) {
+    const lobe = clusterSeededLobe(index, lobeRadii_m, packing);
+    const local = inverseRotate(lobe.orientation, {
+      x: normalized.x - lobe.center.x,
+      y: normalized.y - lobe.center.y,
+      z: normalized.z - lobe.center.z,
+    });
+    const scaledVector = { x: local.x / lobe.halfAxes.x, y: local.y / lobe.halfAxes.y, z: local.z / lobe.halfAxes.z };
+    const scaled = Math.hypot(scaledVector.x, scaledVector.y, scaledVector.z);
+    const span = shortest_m * Math.min(lobe.halfAxes.x, lobe.halfAxes.y, lobe.halfAxes.z);
+    const localGradient = scaled > NORMAL_EPSILON
+      ? {
+        x: scaledVector.x / lobe.halfAxes.x / scaled,
+        y: scaledVector.y / lobe.halfAxes.y / scaled,
+        z: scaledVector.z / lobe.halfAxes.z / scaled,
+      }
+      : { x: 0, y: 0, z: 0 };
+    const world = rotate(lobe.orientation, localGradient);
+    const lobeSample: ClusterSample = {
+      distance_m: (scaled - 1) * span,
+      gradient: {
+        x: (world.x * span) / lobeRadii_m.x,
+        y: (world.y * span) / lobeRadii_m.y,
+        z: (world.z * span) / lobeRadii_m.z,
+      },
+    };
+    sample = index === 0 ? lobeSample : smoothMinimumSample(sample, lobeSample, packing.smoothRadius_m);
+  }
+  return sample;
+}
+
+/** The envelope every field is clipped to, and its gradient. */
+function clusterLobeSample(point: Vec3, lobeRadii_m: Vec3): ClusterSample {
+  const shortest_m = Math.min(lobeRadii_m.x, lobeRadii_m.y, lobeRadii_m.z);
+  const normalized = { x: point.x / lobeRadii_m.x, y: point.y / lobeRadii_m.y, z: point.z / lobeRadii_m.z };
+  const magnitude = Math.hypot(normalized.x, normalized.y, normalized.z);
+  const gradient = magnitude > NORMAL_EPSILON
+    ? {
+      x: (normalized.x / lobeRadii_m.x / magnitude) * shortest_m,
+      y: (normalized.y / lobeRadii_m.y / magnitude) * shortest_m,
+      z: (normalized.z / lobeRadii_m.z / magnitude) * shortest_m,
+    }
+    : { x: 0, y: 0, z: 0 };
+  return { distance_m: (magnitude - 1) * shortest_m, gradient };
+}
+
+function clusterFieldSample(point: Vec3, lobeRadii_m: Vec3, packing: SvoSmoothUnionClusterPacking): ClusterSample {
+  if (packing.field === "seeded-lobes") return clusterSeededLobesSample(point, lobeRadii_m, packing);
+  if (packing.field === "tapered-sweep") return clusterTaperedSweepSample(point, packing);
+  return clusterLatticeSample(point, packing);
+}
+
+/** {@link clusterDistance} and its gradient: a `max` passes the winner through. */
+function clusterSample(point: Vec3, lobeRadii_m: Vec3, packing: SvoSmoothUnionClusterPacking): ClusterSample {
+  const field = clusterFieldSample(point, lobeRadii_m, packing);
+  const envelope = clusterLobeSample(point, lobeRadii_m);
+  return field.distance_m >= envelope.distance_m ? field : envelope;
+}
+
+/**
+ * The cluster's shading normal — one differentiated pass, not four evaluations.
+ *
+ * This was a four-tap tetrahedral difference, and its own comment priced a tap
+ * at "roughly sixty sphere distances". That was the frame: on
+ * `hero-garden-hose` at refinement depth 3, deleting *only* the cluster
+ * gradients took the 800x460 frame from 42.7 ms to 19.1 ms — 55 % of the whole
+ * frame in this one function, against 4 % for the field-program tapes beside it
+ * and nothing measurable for the ground or the stencil fallback.
+ *
+ * Every leaf of the fold already knew its own normal. Carrying it through the
+ * blend costs one lerp per combination, deletes three quarters of the
+ * evaluations, and answers with the exact gradient rather than a difference
+ * over a step {@link svoClusterFeatureRadius_m} had to guess at.
  */
 function clusterLocalNormal(point: Vec3, lobeRadii_m: Vec3, packing: SvoSmoothUnionClusterPacking): Vec3 | null {
-  const step = 0.25 * svoClusterFeatureRadius_m(lobeRadii_m, packing);
-  const corners = [[1, -1, -1], [-1, -1, 1], [-1, 1, -1], [1, 1, 1]] as const;
-  let gradient = { x: 0, y: 0, z: 0 };
-  for (const [sx, sy, sz] of corners) {
-    const sample = clusterDistance(
-      { x: point.x + sx * step, y: point.y + sy * step, z: point.z + sz * step },
-      lobeRadii_m,
-      packing,
-    );
-    gradient = { x: gradient.x + sx * sample, y: gradient.y + sy * sample, z: gradient.z + sz * sample };
-  }
-  return normalize(gradient);
+  return normalize(clusterSample(point, lobeRadii_m, packing).gradient);
 }
 
 /** A cluster whose arena block has been resolved, which is the only form that can be evaluated. */
@@ -2871,19 +3131,217 @@ fn svoClusterDistance_m(point: vec3f, lobeRadii_m: vec3f, packing: SvoClusterPac
   return max(svoClusterFieldDistance_m(point, lobeRadii_m, packing), svoClusterLobeDistance_m(point, lobeRadii_m));
 }
 
-// Four taps, not six: an evaluation is roughly sixty sphere distances and the
-// march converges in about eight steps, so the two extra taps would be a fifth
-// of the whole trace.
+/**
+ * A field's value and its exact gradient at one point.
+ *
+ * Every leaf of a cluster field is a sphere, an ellipsoid or the convex hull of
+ * two spheres, and each of those has a closed-form outward normal. The two
+ * combinators above them — a polynomial smooth minimum and one hard \`max\`
+ * against the envelope — both carry a gradient forward exactly. So the whole
+ * field differentiates in one pass, and the sampled twin below each distance
+ * function is that pass.
+ */
+struct SvoClusterSample {
+  distance_m: f32,
+  gradient: vec3f,
+}
+
+/**
+ * The gradient a polynomial smooth minimum implies, which is the plain blend.
+ *
+ * \`f = b + (a-b)h - k·h(1-h)\` with \`h = 0.5 + (b-a)/2k\` in the interior, so
+ * \`∂f/∂a = h + (a-b)h' - k(1-2h)h'\`, and substituting \`a-b = -(2h-1)k\` and
+ * \`h' = -1/2k\` the last two terms are \`(2h-1)/2\` and \`(1-2h)/2\`. They cancel
+ * identically: \`∂f/∂a = h\`, \`∂f/∂b = 1-h\`. The blend weight is the *whole*
+ * derivative, which is what makes this exact rather than an approximation of
+ * the seam. Outside the interior \`h\` clamps and the winner's gradient passes
+ * through unchanged.
+ *
+ * The distance arithmetic is character-for-character {@link svoSmoothMinimum}'s
+ * so the two folds cannot drift; \`tests/svo-cluster-gradient.test.ts\` holds them
+ * to it.
+ */
+fn svoSmoothMinimumSample(a: SvoClusterSample, b: SvoClusterSample, k: f32) -> SvoClusterSample {
+  if (!(k > 0.0)) {
+    if (a.distance_m <= b.distance_m) { return a; }
+    return b;
+  }
+  let h = clamp(0.5 + 0.5 * (b.distance_m - a.distance_m) / k, 0.0, 1.0);
+  return SvoClusterSample(mix(b.distance_m, a.distance_m, h) - k * h * (1.0 - h),
+    mix(b.gradient, a.gradient, h));
+}
+
+/** A degenerate gradient is answered with a zero vector, never with a guess. */
+fn svoClusterUnitGradient(offset: vec3f) -> vec3f {
+  let magnitude = length(offset);
+  return select(vec3f(0.0), offset / magnitude, magnitude > 1e-12);
+}
+
+fn svoClusterSphereSample(point: vec3f, cell: vec3i, octave: SvoClusterLatticeOctave) -> SvoClusterSample {
+  let centre = (vec3f(cell) + vec3f(0.5) + octave.jitter * svoClusterCellJitter(cell, octave.seed)) * octave.latticePeriod_m;
+  let offset = point - centre;
+  return SvoClusterSample(length(offset) - octave.latticeLobeRadius_m, svoClusterUnitGradient(offset));
+}
+
+/** {@link svoClusterLatticeOctaveDistance_m}, differentiated in the same fold order. */
+fn svoClusterLatticeOctaveSample(point: vec3f, octave: SvoClusterLatticeOctave) -> SvoClusterSample {
+  const SPAN: i32 = ${SVO_SMOOTH_UNION_CLUSTER_NEIGHBOURHOOD};
+  const RING: i32 = SPAN / 2 - 1;
+  let base = vec3i(floor(point / octave.latticePeriod_m - vec3f(0.5))) - vec3i(RING);
+  var sample = SvoClusterSample(0.0, vec3f(0.0));
+  for (var corner = 0u; corner < 8u; corner += 1u) {
+    let cell = base + vec3i(RING) + vec3i(i32(corner & 1u), i32((corner >> 1u) & 1u), i32((corner >> 2u) & 1u));
+    let sphere = svoClusterSphereSample(point, cell, octave);
+    if (corner == 0u) { sample = sphere; } else { sample = svoSmoothMinimumSample(sample, sphere, octave.smoothRadius_m); }
+  }
+  let reach = octave.jitter * octave.latticePeriod_m * 1.7320508 + octave.latticeLobeRadius_m + octave.smoothRadius_m;
+  for (var index = 0; index < SPAN * SPAN * SPAN; index += 1) {
+    let step = vec3i(index % SPAN, (index / SPAN) % SPAN, (index / (SPAN * SPAN)) % SPAN);
+    if (all(step >= vec3i(RING)) && all(step <= vec3i(RING + 1))) { continue; }
+    let cell = base + step;
+    let nominal = length(point - (vec3f(cell) + vec3f(0.5)) * octave.latticePeriod_m);
+    if (nominal - reach > sample.distance_m) { continue; }
+    sample = svoSmoothMinimumSample(sample, svoClusterSphereSample(point, cell, octave), octave.smoothRadius_m);
+  }
+  return sample;
+}
+
+fn svoClusterLatticeSample(point: vec3f, packing: SvoClusterPacking) -> SvoClusterSample {
+  var sample = SvoClusterSample(0.0, vec3f(0.0));
+  for (var octave = 0u; octave < packing.count; octave += 1u) {
+    let scale = exp2(-f32(octave));
+    let smoothRadius_m = packing.smoothRadius_m * scale;
+    let octaveSample = svoClusterLatticeOctaveSample(point, SvoClusterLatticeOctave(
+      packing.latticeLobeRadius_m * scale, packing.latticePeriod_m * scale, packing.jitter,
+      smoothRadius_m, packing.seed ^ (octave * 0x9e3779b1u),
+    ));
+    if (octave == 0u) { sample = octaveSample; } else { sample = svoSmoothMinimumSample(sample, octaveSample, smoothRadius_m); }
+  }
+  return sample;
+}
+
+/**
+ * {@link svoClusterRoundConeDistance_m}, differentiated branch for branch.
+ *
+ * Two of its three branches are spheres wearing the segment's algebra:
+ * \`P + b²A\` is \`A²|p - finish|²\` and \`P + l²A\` is \`A²|p - start|²\` identically,
+ * so those branches are \`|p - c| - r\` and their gradients are the radial
+ * direction. The side branch is \`perpendicular·√(L/A) + along·taper/A\` in the
+ * unit frame, whose gradient has magnitude \`√((L + taper²)/A) = 1\` by
+ * construction — the same identity that makes the distance Lipschitz-1.
+ */
+fn svoClusterRoundConeSample(point: vec3f, start: vec4f, finish: vec4f) -> SvoClusterSample {
+  let axis = finish.xyz - start.xyz;
+  let axisSquared = dot(axis, axis);
+  let taper = start.w - finish.w;
+  let lateralSquared = axisSquared - taper * taper;
+  let inverseAxisSquared = 1.0 / axisSquared;
+  let offset = point - start.xyz;
+  let along = dot(offset, axis);
+  let beyond = along - axisSquared;
+  let perpendicular = offset * axisSquared - axis * along;
+  let perpendicularSquared = dot(perpendicular, perpendicular);
+  let alongSquared = along * along * axisSquared;
+  let beyondSquared = beyond * beyond * axisSquared;
+  let split = sign(taper) * taper * taper * perpendicularSquared;
+  if (sign(beyond) * lateralSquared * beyondSquared > split) {
+    let radial = point - finish.xyz;
+    return SvoClusterSample(sqrt(perpendicularSquared + beyondSquared) * inverseAxisSquared - finish.w,
+      svoClusterUnitGradient(radial));
+  }
+  if (sign(along) * lateralSquared * alongSquared < split) {
+    return SvoClusterSample(sqrt(perpendicularSquared + alongSquared) * inverseAxisSquared - start.w,
+      svoClusterUnitGradient(offset));
+  }
+  let side = (sqrt(perpendicularSquared * lateralSquared * inverseAxisSquared) + along * taper) * inverseAxisSquared - start.w;
+  let outward = svoClusterUnitGradient(perpendicular) * sqrt(max(0.0, lateralSquared * inverseAxisSquared))
+    + axis * (taper * inverseAxisSquared);
+  return SvoClusterSample(side, outward);
+}
+
+fn svoClusterTaperedSweepSample(point: vec3f, packing: SvoClusterPacking) -> SvoClusterSample {
+  var points = packing.points;
+  let count = min(packing.count, SVO_CLUSTER_SWEEP_MAXIMUM_POINTS);
+  var sample = SvoClusterSample(0.0, vec3f(0.0));
+  for (var index = 0u; index + 1u < count; index += 1u) {
+    let segment = svoClusterRoundConeSample(point, points[index], points[index + 1u]);
+    if (index == 0u) { sample = segment; } else { sample = svoSmoothMinimumSample(sample, segment, packing.smoothRadius_m); }
+  }
+  return sample;
+}
+
+/**
+ * One seeded lobe, differentiated through the frames it is authored in.
+ *
+ * \`scaled = |R⁻¹(p/r - c) / halfAxes|\`, so the chain is the ellipsoid gradient
+ * in lobe space, rotated back by the lobe's own orientation, then divided by the
+ * envelope radii the normalised space was made with.
+ */
+fn svoClusterSeededLobesSample(point: vec3f, lobeRadii_m: vec3f, packing: SvoClusterPacking) -> SvoClusterSample {
+  let shortest_m = min(lobeRadii_m.x, min(lobeRadii_m.y, lobeRadii_m.z));
+  let normalized = point / lobeRadii_m;
+  var sample = SvoClusterSample(0.0, vec3f(0.0));
+  for (var index = 0u; index < packing.count; index += 1u) {
+    let lobe = svoClusterSeededLobe(index, lobeRadii_m, packing);
+    let local = svoQuaternionRotate(vec4f(-lobe.orientation.xyz, lobe.orientation.w), normalized - lobe.center);
+    let scaledVector = local / lobe.halfAxes;
+    let scaled = length(scaledVector);
+    let span = shortest_m * min(lobe.halfAxes.x, min(lobe.halfAxes.y, lobe.halfAxes.z));
+    let localGradient = select(vec3f(0.0), (scaledVector / lobe.halfAxes) / scaled, scaled > 1e-12);
+    let lobeSample = SvoClusterSample((scaled - 1.0) * span,
+      svoQuaternionRotate(lobe.orientation, localGradient) * span / lobeRadii_m);
+    if (index == 0u) { sample = lobeSample; } else { sample = svoSmoothMinimumSample(sample, lobeSample, packing.smoothRadius_m); }
+  }
+  return sample;
+}
+
+/** The envelope every field is clipped to, and its gradient. */
+fn svoClusterLobeSample(point: vec3f, lobeRadii_m: vec3f) -> SvoClusterSample {
+  let shortest_m = min(lobeRadii_m.x, min(lobeRadii_m.y, lobeRadii_m.z));
+  let normalized = point / lobeRadii_m;
+  let magnitude = length(normalized);
+  let gradient = select(vec3f(0.0), (normalized / lobeRadii_m) / magnitude, magnitude > 1e-12);
+  return SvoClusterSample((magnitude - 1.0) * shortest_m, gradient * shortest_m);
+}
+
+fn svoClusterFieldSample(point: vec3f, lobeRadii_m: vec3f, packing: SvoClusterPacking) -> SvoClusterSample {
+  if (packing.field == SVO_CLUSTER_FIELD_SEEDED_LOBES) {
+    return svoClusterSeededLobesSample(point, lobeRadii_m, packing);
+  }
+  if (packing.field == SVO_CLUSTER_FIELD_TAPERED_SWEEP) { return svoClusterTaperedSweepSample(point, packing); }
+  return svoClusterLatticeSample(point, packing);
+}
+
+/** {@link svoClusterDistance_m} and its gradient: a \`max\` passes the winner through. */
+fn svoClusterSample(point: vec3f, lobeRadii_m: vec3f, packing: SvoClusterPacking) -> SvoClusterSample {
+  if (!svoClusterPackingValid(packing)) { return SvoClusterSample(SVO_PRIMITIVE_RAY_INFINITY, vec3f(0.0)); }
+  let field = svoClusterFieldSample(point, lobeRadii_m, packing);
+  let envelope = svoClusterLobeSample(point, lobeRadii_m);
+  if (field.distance_m >= envelope.distance_m) { return field; }
+  return envelope;
+}
+
+/**
+ * The cluster's shading normal — one differentiated pass, not four evaluations.
+ *
+ * This used to be a four-tap tetrahedral difference, and its own comment priced
+ * a tap at "roughly sixty sphere distances". That was the frame: on
+ * \`hero-garden-hose\` at refinement depth 3, deleting *only* the cluster
+ * gradients took the 800x460 frame from 42.7 ms to 19.1 ms — **55 % of the whole
+ * frame in this one function**, against 4 % for the field-program tapes beside
+ * it and nothing measurable for the ground or the stencil fallback. The scene
+ * publishes 631 cluster records against 145 tapes, and a lattice record folds
+ * sixty-four jittered spheres per octave, so the four taps were spending
+ * thousands of sphere distances per shaded pixel.
+ *
+ * Every leaf of the fold already knew its own normal. Carrying it through the
+ * blend costs one \`mix\` per combination and deletes three quarters of the
+ * evaluations — and the result is the exact gradient rather than a difference
+ * over a step \`svoClusterFeatureRadius_m\` had to guess at, so the finest
+ * features stop being smoothed by their own stencil.
+ */
 fn svoClusterLocalNormal(point: vec3f, lobeRadii_m: vec3f, packing: SvoClusterPacking) -> vec3f {
-  let step = 0.25 * svoClusterFeatureRadius_m(lobeRadii_m, packing);
-  let a = vec3f(1.0, -1.0, -1.0); let b = vec3f(-1.0, -1.0, 1.0);
-  let c = vec3f(-1.0, 1.0, -1.0); let d = vec3f(1.0, 1.0, 1.0);
-  let gradient = a * svoClusterDistance_m(point + a * step, lobeRadii_m, packing)
-    + b * svoClusterDistance_m(point + b * step, lobeRadii_m, packing)
-    + c * svoClusterDistance_m(point + c * step, lobeRadii_m, packing)
-    + d * svoClusterDistance_m(point + d * step, lobeRadii_m, packing);
-  let magnitude = length(gradient);
-  return select(vec3f(0.0), gradient / magnitude, magnitude > 1e-12);
+  return svoClusterUnitGradient(svoClusterSample(point, lobeRadii_m, packing).gradient);
 }
 
 fn svoPrimitiveLocalPoint(record: SvoPrimitiveRecord, worldPoint_m: vec3f) -> vec3f {

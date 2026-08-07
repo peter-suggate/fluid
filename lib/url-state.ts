@@ -385,14 +385,6 @@ export function parseQueryState(search: string): QueryState {
         environmentPlanarRefinementExemption: query.get("svoFlatExempt") === "1",
         lodScreenSpacePixels: numberParam(query, "svoLodPixels",
           initialUI.svoRenderTuning.lodScreenSpacePixels, 0, SVO_LOD_SCREEN_SPACE_PIXELS_MAXIMUM),
-        // The panel's SHADED/RAW choice. It rides here rather than staying
-        // session-local because the two arms are the same frame shaded two ways,
-        // so "look at this terracing" is a link, and because the reference arm
-        // has to be reproducible by whoever is asked to confirm a regression.
-        surfaceReconstruction: query.get("svoSurface") === "voxel-face" ? "voxel-face"
-          : query.get("svoSurface") === "trilinear" ? "trilinear"
-          : query.get("svoSurface") === "analytic" ? "analytic"
-          : initialUI.svoRenderTuning.surfaceReconstruction,
       }),
     }
   };
@@ -440,9 +432,6 @@ export function serializeQueryState(
   }
   if (uiState.svoRenderTuning.lodScreenSpacePixels !== DEFAULT_SVO_RENDER_TUNING.lodScreenSpacePixels) {
     query.set("svoLodPixels", String(uiState.svoRenderTuning.lodScreenSpacePixels));
-  }
-  if (uiState.svoRenderTuning.surfaceReconstruction !== DEFAULT_SVO_RENDER_TUNING.surfaceReconstruction) {
-    query.set("svoSurface", uiState.svoRenderTuning.surfaceReconstruction);
   }
   if (uiState.rightPanel) query.set("panel", uiState.rightPanel);
   if (uiState.rightPanelWidth !== DEFAULT_RIGHT_PANEL_WIDTH) query.set("panelWidth", String(uiState.rightPanelWidth));

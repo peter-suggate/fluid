@@ -337,6 +337,7 @@ test("pause drops queued running frames and returns the worker-owned submitted c
         pixelTraceStatus: "path-inactive", pixelTraceAnswersRequest: false, pixelTraceStale: false,
         latestFluidCellTrace: undefined, fluidCellTraceRevision: 0, fluidCellTraceReady: false,
         fluidCellTraceFineBand: undefined,
+        rigidBodyPoses: [], rigidBodyPoseRevision: 0,
       },
     });
     worker.emit({ type: "simulation-running-set", requestId: pauseRequest.requestId, submittedTime_s: 0.125 });

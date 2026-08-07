@@ -48,6 +48,11 @@
  *      static-primary requires split and reuses exact primary visibility),
  *      FLUID_SVO_DRY_FRAME_SCREEN_SPACE_PIXELS (0 disables; diagnostic canonical primary-ray proxy),
  *      FLUID_SVO_DRY_FRAME_SCENE (default garden-svo-lighting),
+ *      FLUID_SVO_DRY_FRAME_ENVIRONMENT_REFINEMENT (0..3; unset means the depth-0
+ *      tree every calibrated lane here is based on. Set, it re-runs the scene's
+ *      own factory at cell / 2^depth through `buildAt` and builds the tree at
+ *      the depth the rebuilt document authored — a finer tree over a coarsely
+ *      expanded set is not a deeper scene),
  *      FLUID_SVO_DRY_FRAME_RADIANCE_FEEDBACK (1 opts into the experimental
  *      in-place feedback path; production default is off),
  *      FLUID_SVO_DRY_FRAME_FEEDBACK_FRAMES (default 96; total live-radiance
@@ -99,9 +104,16 @@ import {
 } from "../lib/performance-trace";
 import { heroGardenCamera } from "../lib/hero-garden-scene";
 import { createHeroGardenHoseStressScene } from "../lib/hero-garden-stress-scene";
-import { getScenePreset } from "../lib/scenes";
+import { sceneDefinitionTakesLattice, sceneDocumentAtLattice } from "../lib/scene-definition";
+import { getSceneDefinition, getScenePreset } from "../lib/scenes";
 import type { SvoConeTracingMode } from "../lib/svo-render-options";
-import { DEFAULT_SVO_RENDER_TUNING, type SvoConeRadianceReconstruction } from "../lib/svo-render-tuning";
+import {
+  DEFAULT_SVO_RENDER_TUNING,
+  svoSceneryDetailCellSize_m,
+  svoSceneryRefinementDepth,
+  SVO_ENVIRONMENT_REFINEMENT_DEPTH_MAXIMUM,
+  type SvoConeRadianceReconstruction,
+} from "../lib/svo-render-tuning";
 import { effectiveSvoScreenSpaceThresholdPixels, SVO_SCREEN_SPACE_TERMINATION_CONTRACT } from "../lib/svo-screen-space-termination";
 import { WebGPULiveSvoScene } from "../lib/webgpu-live-svo-scene";
 import { LIVE_SVO_RADIANCE_FEEDBACK } from "../lib/webgpu-svo-live-derived-builder";
@@ -188,6 +200,38 @@ const silhouetteRefinementRaw = process.env.FLUID_SVO_DRY_FRAME_PRIMARY_SEAM_CLO
 const silhouetteRefinementEnabled = silhouetteRefinementRaw === "1";
 const coneTracingModeRaw = process.env.FLUID_SVO_DRY_FRAME_CONE_TRACING ?? "cones";
 const scenePresetId = process.env.FLUID_SVO_DRY_FRAME_SCENE ?? "garden-svo-lighting";
+/**
+ * Extra octree levels the authored environment is drawn at — as a *document*,
+ * not as a tree option.
+ *
+ * This env used to be handed straight to `WebGPULiveSvoScene.create` while the
+ * document came from `preset.create()` at whatever lattice the catalog opens it
+ * on, which is the two-numbers disagreement `svoSceneryRefinementDepth`
+ * documents: a finer tree over a set every generator already expanded at the
+ * coarse leaf. Smoother silhouettes, no new detail, and a profile labelled with
+ * a depth the frame never drew.
+ *
+ * So a requested depth re-runs the scene's own factory at `cell / 2^depth`
+ * through `buildAt` — the same call `SimulationController.rebuildSceneAtLattice`
+ * makes in the browser and `FLUID_SVO_DRY_SMOKE_REFINEMENT` makes in the smoke
+ * lane — and the depth the tree is then built at is read back *off the rebuilt
+ * document*, exactly as `webgpu-renderer.ts:2440` does.
+ *
+ * Unset stays depth 0 rather than becoming document-derived. Every existing
+ * lane here (`hero-floor-far`, `hero-floor-sky`, the record-scale pairs) is
+ * calibrated against the depth-0 tree, including authored `_BUDGET_MS`
+ * ceilings, and silently re-basing them is not a change this flag is entitled
+ * to make.
+ */
+const requestedRefinementDepth = process.env.FLUID_SVO_DRY_FRAME_ENVIRONMENT_REFINEMENT === undefined
+  ? undefined
+  : Number(process.env.FLUID_SVO_DRY_FRAME_ENVIRONMENT_REFINEMENT);
+if (requestedRefinementDepth !== undefined
+  && (!Number.isSafeInteger(requestedRefinementDepth) || requestedRefinementDepth < 0
+    || requestedRefinementDepth > SVO_ENVIRONMENT_REFINEMENT_DEPTH_MAXIMUM)) {
+  throw new RangeError("FLUID_SVO_DRY_FRAME_ENVIRONMENT_REFINEMENT must be an integer in"
+    + ` 0..${SVO_ENVIRONMENT_REFINEMENT_DEPTH_MAXIMUM}, got ${process.env.FLUID_SVO_DRY_FRAME_ENVIRONMENT_REFINEMENT}`);
+}
 const radianceFeedbackFrames = radianceFeedbackEnabled
   ? Number(process.env.FLUID_SVO_DRY_FRAME_FEEDBACK_FRAMES ?? LIVE_SVO_RADIANCE_FEEDBACK.settleFrameCount)
   : 1;
@@ -339,6 +383,12 @@ const coneScale = coneScaleRaw as SvoConeLightingScale;
 const coneTracingMode = coneTracingModeRaw as SvoConeTracingMode;
 const radianceReconstruction = radianceReconstructionRaw as SvoConeRadianceReconstruction;
 const traversalMode = traversalModeRaw as SvoDryTraversalMode;
+// The world builds the compact hierarchy and the wide-fanout snapshot only for
+// these three: they are the only traversals that populate binding 5, and every
+// other arm — including the shipping raster primary — was paying a CPU plan, a
+// GPU encode and resident memory for a structure no shader read.
+const derivedTraversalStructures =
+  traversalMode === "compact" || traversalMode === "wide" || traversalMode === "hybrid";
 const brickOccupancyMode = brickOccupancyModeRaw as SvoBrickOccupancyMode;
 const shadingPath = shadingPathRaw as SvoDryShadingPath;
 const rayCoherenceMode = rayCoherenceModeRaw as SvoDryRayCoherenceMode;
@@ -500,7 +550,8 @@ if (recordScaleMultipliers) {
     };
     const armEnvironment: EnvironmentId = (armScene.environment ?? "default") as EnvironmentId;
     const armSolver = await WebGPULiveSvoScene.create(device, armScene, "balanced",
-      ({ label, completed, total }) => log(`  [world x${multiplier}] ${label} (${completed}/${total})`));
+      ({ label, completed, total }) => log(`  [world x${multiplier}] ${label} (${completed}/${total})`),
+      undefined, { derivedTraversalStructures });
     const publication = device.createCommandEncoder({ label: `Record-scale x${multiplier} initial publication` });
     armSolver.encodeSceneMaintenance(publication);
     device.queue.submit([publication.finish()]);
@@ -818,7 +869,40 @@ if (sceneModule && typeof sceneModule.createScene !== "function") {
   throw new Error(`${sceneModulePath} must export createScene(): SceneDescription`);
 }
 const preset = getScenePreset(scenePresetId);
-const scene = sceneModule?.createScene ? sceneModule.createScene() : preset.create();
+/**
+ * The catalog document, at the rung this run asked for.
+ *
+ * The plain document is built first whatever happens, because the depth is
+ * expressed as levels *under a lattice* and only the factory knows which
+ * lattice it chose. That is the same two-build dance `sceneDocument` performs,
+ * and it costs 3-8 ms on the hero garden.
+ */
+const catalogScene = (): SceneDescription => {
+  const opened = preset.create();
+  if (requestedRefinementDepth === undefined) return opened;
+  const definition = getSceneDefinition(scenePresetId);
+  if (!sceneDefinitionTakesLattice(definition)) {
+    throw new Error("FLUID_SVO_DRY_FRAME_ENVIRONMENT_REFINEMENT needs a scene whose factory takes a"
+      + ` lattice; ${scenePresetId} does not. Writing a finer detail cell onto a finished document`
+      + " claims a leaf its terrain was never sampled for — see lib/scene-definition.ts.");
+  }
+  const cellSize_m = opened.voxelDomain.finestCellSize_m;
+  return sceneDocumentAtLattice(definition, {
+    cellSize_m,
+    detailCellSize_m: svoSceneryDetailCellSize_m(cellSize_m, {
+      environmentRefinementDepth: requestedRefinementDepth, fluid: false,
+    }),
+  }).scene;
+};
+const scene = sceneModule?.createScene ? sceneModule.createScene() : catalogScene();
+/**
+ * Read off the document, never off the request — `webgpu-renderer.ts:2440`.
+ * A factory that answered a depth request with a coarser set has said so in
+ * `voxelDomain.detailCellSize_m`, and the tree may spend only what it authored.
+ */
+const environmentRefinementDepth = requestedRefinementDepth === undefined
+  ? 0
+  : svoSceneryRefinementDepth(scene.voxelDomain, { fluid: scene.systems?.fluid === true });
 const presetCamera = sceneModule ? sceneModule.camera : preset.camera;
 const camera: CameraState = { ...defaultCamera, ...presetCamera, target_m: { ...(presetCamera?.target_m ?? defaultCamera.target_m) } };
 let activeCamera: CameraState = camera;
@@ -832,12 +916,23 @@ const solver = await WebGPULiveSvoScene.create(
   undefined,
   {
     ...(renderBrickSize === undefined ? {} : { renderBrickSize }),
-    // FLUID_SVO_DRY_FRAME_ENVIRONMENT_REFINEMENT: extra octree levels for dense
-    // environment regions on a dry scene. Zero is the historical plan.
-    environmentRefinementDepth: Number(process.env.FLUID_SVO_DRY_FRAME_ENVIRONMENT_REFINEMENT ?? 0),
+    environmentRefinementDepth,
     radianceFeedback: radianceFeedbackEnabled,
+    derivedTraversalStructures,
   },
 );
+// `WebGPULiveSvoScene.create` degrades to the finest depth that fits rather
+// than throwing, which is right for a tab and wrong for a measurement: a
+// profile labelled "depth 3" that allocated depth 2 attributes its milliseconds
+// to a rung the frame never drew. An explicit request is therefore checked.
+if (requestedRefinementDepth !== undefined) {
+  log(`Environment refinement depth ${environmentRefinementDepth}`
+    + ` — set drawn at ${(scene.voxelDomain.detailCellSize_m ?? scene.voxelDomain.finestCellSize_m) * 1000} mm`
+    + ` under a ${scene.voxelDomain.finestCellSize_m * 1000} mm lattice`);
+  assert.equal(solver.builtRefinementDepth, environmentRefinementDepth,
+    `requested refinement depth ${environmentRefinementDepth} degraded to ${solver.builtRefinementDepth}`
+    + " during allocation; the capture would be labelled with a rung it did not draw");
+}
 // Production encodes staged live-scene maintenance before any presentation
 // consumer in the frame. The benchmark must publish that initial generation
 // too; constructing arenas alone deliberately leaves completeGeneration at 0.
@@ -1123,6 +1218,8 @@ if (profileSeconds > 0) {
     resolution: { width, height },
     coneScale,
     coneTracingMode,
+    environmentRefinementDepth,
+    detailCellSize_mm: (scene.voxelDomain.detailCellSize_m ?? scene.voxelDomain.finestCellSize_m) * 1000,
   }));
   const profileStarted = performance.now();
   let frame = 0;
@@ -1167,6 +1264,8 @@ if (profileSeconds > 0) {
     coneScale,
     coneTracingMode,
     profileBatch,
+    environmentRefinementDepth,
+    detailCellSize_mm: (scene.voxelDomain.detailCellSize_m ?? scene.voxelDomain.finestCellSize_m) * 1000,
   };
   console.log(JSON.stringify(result));
   renderer.destroy();
@@ -2049,15 +2148,20 @@ const result = {
       pages: source.tetrahedralRadiance?.plan.pages.length ?? 0,
       blackPages: source.tetrahedralRadiance?.blackSlots.size ?? 0,
     },
-    wideFanout: Boolean(source.wideFanout),
+    // Both are built only on the arms that bind them. `built` separates "this
+    // arm never asked for the structure" from "the publication failed" — they
+    // used to report the same bare `false`, which reads as a measurement of an
+    // absent capability rather than an absent request.
+    wideFanout: { built: derivedTraversalStructures, ready: Boolean(source.wideFanout) },
     compactHierarchy: source.compactHierarchy ? {
+      built: true,
       ready: true,
       nodeCount: source.compactHierarchy.nodeCount,
       strideBytes: source.compactHierarchy.strideBytes,
       residentBytes: source.compactHierarchy.residentBytes,
       canonicalNodeBytes: source.compactHierarchy.nodeCount * 32,
       hotNodeByteReductionPercent: 100 * (1 - source.compactHierarchy.strideBytes / 32),
-    } : { ready: false },
+    } : { built: derivedTraversalStructures, ready: false },
     derivedRenderAllocationBytes: source.derivedRenderAllocationBytes,
     allocatedBytes: solver.info.allocatedBytes,
   },

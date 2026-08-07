@@ -9,6 +9,7 @@ type FluidAdapterLimits = Pick<GPUSupportedLimits,
   | "maxColorAttachmentBytesPerSample"
   | "maxComputeInvocationsPerWorkgroup"
   | "maxComputeWorkgroupSizeX"
+  | "maxComputeWorkgroupStorageSize"
 >;
 
 /**
@@ -72,6 +73,12 @@ export function requiredFluidDeviceLimits(limits: FluidAdapterLimits): Record<st
     // and a @workgroup_size the device cannot host is a pipeline-creation
     // failure rather than a silent clamp.
     maxComputeWorkgroupSizeX: limits.maxComputeWorkgroupSizeX,
+    // The resident Losasso solve holds its bottom-level smoother vectors in
+    // workgroup storage (24 KiB at the 2,048-row coarse capacity, plus the
+    // reduction scratch). The 16 KiB WebGPU default silently withdraws that
+    // path; consumers still gate on the GRANTED limit and fall back to the
+    // storage-fenced walk when the device cannot host it.
+    maxComputeWorkgroupStorageSize: limits.maxComputeWorkgroupStorageSize,
   };
 }
 

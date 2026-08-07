@@ -149,7 +149,12 @@ test("parametric WGSL is opt-in and retains an explicit degeneracy fallback", ()
   assert.notEqual(parametric, production);
   assert.match(parametric, /fn svoParametricSegments\(/);
   assert.match(parametric, /parametricSegments\.valid == 0u/);
-  assert.match(parametric, /validationOctant < 8u/);
+  // The sparse child range is still bounds-checked before the descent, but as
+  // one comparison over the contiguous run rather than a per-octant loop that
+  // loaded every child record only to discard it.
+  assert.match(parametric, /node\.links\.x \+ countOneBits\(mask\) > mapping\.nodeCount/);
+  assert.doesNotMatch(parametric, /validationOctant/);
+  assert.doesNotMatch(parametric, /let child = svoNodeLoad\(childIndex\)/);
   assert.match(parametric, /reverseSegment = segmentCount/);
   assert.match(parametric, /svoRayAabbWithInverse\(ray, \(\*continuation\)\.inverseDirection, childBounds\)/,
     "closed-AABB fallback must remain available for degeneracies");

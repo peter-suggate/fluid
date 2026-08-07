@@ -158,7 +158,7 @@ test("bounded hard-shadow visibility covers opaque sources and transmissive pane
   const adapter = svoDrySceneShader.slice(adapterStart, adapterEnd);
   assert.match(adapter, /let body=bodies\[bodyIndex\][^]*bodyHit\(ray\.origin_m,ray\.direction,body\)/,
     "dynamic rigid bodies must cast hard shadows");
-  assert.match(adapter, /bodyIndex==dryVisibilityIgnoredOwner[^]*continue/,
+  assert.match(adapter, /bodyIndex==dryVisibilityIgnoredBody[^]*continue/,
     "a convex dynamic receiver must not exact-test itself along its outward front-facing shadow ray");
   assert.match(adapter, /!bodyBoundingSphereVisible\(ray\.origin_m,ray\.direction,body,tMin_m,bestT\)[^]*continue/,
     "a conservative world-space sphere must reject distant bodies before quaternion transforms");
@@ -168,16 +168,27 @@ test("bounded hard-shadow visibility covers opaque sources and transmissive pane
     "every static shadow ray must traverse the SVO hierarchy and its brick payload");
   assert.doesNotMatch(adapter, /tracePrimitiveCandidates|onlyIgnoredReceiver/,
     "static shadow rays must not switch to a primitive-candidate path for small catalogs");
-  assert.match(svoDrySceneShader, /owner==dry\.metadata\.z\|\|owner==dryVisibilityIgnoredOwner/,
-    "SVO payload traversal must skip the exact receiver while retaining every other blocker");
+  // The receiver term is gone from record suppression, and its absence is the
+  // assertion: a *record* owner and a *body* index are different numbers, so
+  // comparing them suppressed an unrelated record whenever the two collided. The
+  // ray's own surface is excluded by the body loop above, in the one namespace
+  // where the comparison means something.
+  assert.match(svoDrySceneShader, /fn dryOpaqueOwnerSuppressed\(owner:u32\)->bool\{return owner==dry\.metadata\.z\|\|dryBoundThickGlassOwner\(owner\);\}/,
+    "record suppression must name only the editor preview and thick-glass takeover");
   assert.match(adapter, /payload\.status==SVO_VIS_STEP_HIT\)\{return dryVisibilityStep\(SVO_VIS_STEP_HIT/,
-    "any opaque SVO payload blocker must terminate before terrain and glass work");
+    "any opaque SVO payload blocker must terminate before glass work");
   assert.doesNotMatch(adapter, /for\(var primitiveIndex=0u;primitiveIndex<dry\.metadata\.x/,
     "static visibility must never return to a full exact-primitive shadow loop");
   assert.match(adapter, /traceLeafPayloadVisibility/,
     "all catalogs must use SVO payload shadow traversal");
-  assert.match(adapter, /traceTerrain\(ray\.origin_m,ray\.direction\)/,
-    "analytic terrain must cast hard shadows");
+  // Terrain casts shadows as voxels like everything else, so the visibility walk
+  // has no terrain tier and no analytic tier at all: the leaf DDA below resolves
+  // solidity itself, which is what made deleting the candidate BVH a deletion
+  // rather than an unshadowed frame.
+  assert.doesNotMatch(adapter, /traceTerrain|traceScenePrimitives/,
+    "visibility occluders are voxels; no analytic tier may reappear beside them");
+  assert.match(svoDrySceneShader, /fn traceLeafPayloadVisibility\([^]*sceneIdentitySolid[^]*return dryVisibilityStep\(SVO_VIS_STEP_HIT,0u,0u,workItems,entry\);/,
+    "the shadow leaf walk must test the same solidity the primary tests and report the cell it entered");
   assert.match(adapter, /traceGlass\(ray\.origin_m,ray\.direction,tMin_m,bestT,true\)/,
     "visibility must skip compositor-owned vessel panes while retaining authored scene glazing");
   assert.match(svoDrySceneShader, /fn dryGlassBoundingSphereVisible\([^]*record\.extentIorEpsilon\.xy[^]*record\.centerThickness\.w[^]*radius\*radius/,

@@ -2,7 +2,7 @@ import type { SceneDescription } from "../model";
 import type { GPUQuality } from "../tall-cell-grid";
 import type { GPUEulerianInfo, GPURigidLoad } from "../webgpu-eulerian";
 import type { RigidBodyState } from "../rigid-body";
-import type { GPURigidBodyPick } from "../webgpu-rigid-body";
+import type { GPURigidBodyPick, GPURigidBodyPose } from "../webgpu-rigid-body";
 import type { Vec3 } from "../model";
 import type { GPUSecondaryParticleSource } from "../webgpu-secondary-particles";
 import type { SparseVoxelSceneRenderSource } from "../webgpu-voxel-debug";
@@ -166,6 +166,13 @@ export interface GPUSolverInstance {
   encodeSceneMaintenance?(encoder: GPUCommandEncoder): void;
   /** User-triggered ray query against authoritative GPU rigid poses. */
   pickRigidBody?(origin: Vec3, direction: Vec3): Promise<GPURigidBodyPick | undefined>;
+  /**
+   * Authoritative poses for the bodies the solver owns, in roster order.
+   *
+   * The host roster is a command channel — it is never written back from the
+   * run — so anything that must agree with the drawn frame asks here.
+   */
+  readRigidBodyPoses?(): Promise<GPURigidBodyPose[] | undefined>;
   /** Adaptive pressure-DOF ownership used by the representation alarm. */
   readonly gridPressureSamplesTexture?: GPUTexture;
   /** Fine MLS pressure materialized by the latest adaptive solve. */

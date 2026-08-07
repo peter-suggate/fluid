@@ -1,6 +1,51 @@
 # Banded leaf payload — store the surface, reconstruct the rest
 
-**Status.** The prize is measured and large: **930 MB → 80.0 MB** at refinement
+> **2026-08-07 — the prize below is superseded, and the reason is the unified
+> voxel representation, not this layout.** The identity word's high half stopped
+> being a per-object owner id and became a **per-voxel baked oct8 normal**
+> (`sparseBrickSceneIdentityWordCodecWGSL`), so the "one leaf, one identity" fact
+> the palette rests on no longer holds for the whole word. Measured on
+> `hero-garden-hose` at depth 0, interning the whole word gives **29.05** entries
+> a leaf; interning the **material half alone** gives **1.026**, with 94.8 % of
+> leaves at exactly one — better than the 1.457 the owner id ever managed.
+>
+> The layout now splits accordingly: the palette interns materials, and the normal
+> is a raw `u16` per voxel in a fixed 256-word lane at the head of the leaf's blob.
+> It cannot ride the geometry records, because the stencil dilation clamps at the
+> leaf boundary — 42.0 % of hero voxels are occupied, unrecorded and on a leaf
+> face, and every one of them is a legal primary first hit.
+>
+> **Measured on device, not projected:** 12 724 published leaves encode into
+> **16.7 MB against the dense arm's 52.1 MB — 3.13x**, at 1 310 bytes a leaf and
+> **2.56 bytes a voxel**. The normal lane is 1 024 of those 1 310 bytes (78 %),
+> which is where the 11.64x below went: a per-voxel normal is 16 bits of new
+> information the old arena did not carry, bought in exchange for deleting the
+> renderer's per-pixel primitive fetch and field re-evaluation. All three payload
+> arms — `dense`, `occupancy`, `banded` — render `hero-garden-hose` to the
+> **identical frame hash `0x8553a29b`**.
+>
+> **Frame time, 8 interleaved rounds, `hero-garden-hose` depth 1 at 800x460,
+> canonical-parametric + split, GPU pass timestamps:** `dense` 10.18 ms,
+> `occupancy` 10.25 ms (**+0.64 %**), `banded` 10.54 ms (**+3.54 %**). So the
+> predicate move is free and the ~3 % is the identity *indirection* — a banded hit
+> resolves from the leaf header, the blob's palette and the blob's normal lane
+> where dense read one flat word. Two rearrangements were measured against it and
+> neither is the cost: resolving the leaf source lazily at the hit instead of
+> hoisting it per leaf is worth 0.17 pp, and rank-compacting the normal lane (one
+> `u16` per *occupied* voxel: 1 081 bytes a leaf, 3.79x, 17 % less arena) costs
+> 0.56 pp. That last one is a genuine open trade — 0.56 pp of frame against 51 MB
+> at depth 3 — and this change ships the voxel-indexed arm mainly because its
+> producer is simpler.
+>
+> The named next cull is a per-leaf *normal* palette: 29.05 distinct normals over
+> ~396 occupied voxels is 347 bytes a leaf against 1 024, worth **1.3 B a voxel**,
+> half the arena — and it stays voxel-indexed, so it costs one dependent load
+> rather than a popcount. It needs a raw escape for the 0.11 % of leaves past 256
+> distinct normals, because a clamped palette entry is a wrong normal on a real
+> surface.
+
+**Status (superseded, retained for the derivation).** The prize is measured and
+large: **930 MB → 80.0 MB** at refinement
 depth 3, an 11.64x cull on top of SP20's shipped f16 lane. SP21's material-palette
 work is merged in — the band record set and the identity palette are **one
 structure**, not two savings to multiply. Reference encoder/decoder landed

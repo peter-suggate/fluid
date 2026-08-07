@@ -17,13 +17,17 @@ import {
   SPARSE_BRICK_BANDED_ALLOCATOR_WORDS,
   SPARSE_BRICK_BANDED_BLOB_BYTES_PER_LEAF,
   SPARSE_BRICK_BANDED_HEADER_WORDS,
+  SPARSE_BRICK_BANDED_PRODUCER_DENSE_LANES,
   SPARSE_BRICK_BANDED_RECORD_CAPACITY_FRACTION,
   SPARSE_BRICK_LEAF_PAYLOAD_MODES,
   resolveSparseBrickPayloadLayout,
   sparseBrickBandedLeafCodecWGSL,
   sparseBrickLaneStrideBytes,
   sparseBrickLaneVoxelsPerWord,
+  sparseBrickSceneIdentityCodecWGSL,
+  type SparseBrickLeafPayloadMode,
 } from "../lib/sparse-brick-octree";
+import { createSvoDrySceneFragmentWGSL } from "../lib/webgpu-svo-dry-scene";
 import {
   SVO_BANDED_LEAF_FIXED_BYTES,
   SVO_BANDED_LEAF_INDEX_BITS,
@@ -102,6 +106,8 @@ test("the banded arm's fixed part is the layout's own 144 bytes a leaf", () => {
     + banded.lanes.sceneRecordMask.bytes
     + banded.lanes.sceneBandedHeader.bytes;
   assert.equal(fixed / LEAVES, SVO_BANDED_LEAF_FIXED_BYTES);
+  // Still 144. The normal lane needs no header offset because it is *first* in the
+  // blob at a fixed 256 words, which leaves the palette and the index derivable.
   assert.equal(fixed / LEAVES, 144);
   assert.equal(SPARSE_BRICK_BANDED_HEADER_WORDS * 4, 16);
   // The per-voxel owner word and the per-voxel geometry word are both *gone*, not
@@ -117,24 +123,41 @@ test("the banded arm's fixed part is the layout's own 144 bytes a leaf", () => {
   assert.equal(banded.lanes.sceneBandedRecords.bytes, banded.bandedRecordCapacity * 4);
   assert.equal(banded.bandedBlobWords,
     SPARSE_BRICK_BANDED_ALLOCATOR_WORDS + LEAVES * SPARSE_BRICK_BANDED_BLOB_BYTES_PER_LEAF / 4);
-  // 144 fixed + a quarter of 4 bytes of records + 96/512 of blob = 2.28 B a voxel
-  // against the dense arm's 8, before the allocator's real occupancy is counted.
-  assert.ok(banded.bytesPerVoxel < 2.5, `${banded.bytesPerVoxel} B/voxel`);
+  // 144 fixed + a quarter of 4 bytes of records + 1 152/512 of blob = 3.53 B a
+  // voxel of *reserved* capacity against the dense arm's 8. The measured occupancy
+  // is lower — 1 308 bytes a leaf, 2.55 B a voxel, on the hero at depth 0 — because
+  // the record arena reserves for the crowded lighting study, not for this scene.
+  assert.ok(banded.bytesPerVoxel < 3.6, `${banded.bytesPerVoxel} B/voxel`);
+  assert.ok(banded.bytesPerVoxel < 0.5 * 8, "reserved capacity must still halve the dense arm");
+  // The blob is where the normal lane lives, and it is the layout's largest term.
+  // The lane is a *fixed* 2 bytes a voxel, so a budget below that would raise
+  // `SPARSE_BRICK_BANDED_OVERFLOW.blob` on every leaf rather than on some of them.
+  assert.ok(SPARSE_BRICK_BANDED_BLOB_BYTES_PER_LEAF >= SVO_BANDED_LEAF_VOXELS * 2,
+    "the blob must hold a whole leaf's normal lane");
 });
 
-test("the provenance shape keeps both lanes and still reports the product arena", () => {
-  // The banded readers are not cut over, so a banded world keeps the dense lanes and
-  // every consumer reads them — which is also what the cross-decode needs. The
-  // figure that matters must therefore be reported separately, and it has to be the
-  // *same resolver's* answer rather than a subtraction of lane sizes.
+test("a retained dense lane is named, and the product arena is still reported", () => {
+  // Retention is per lane because the two lanes are held by different consumers:
+  // `sceneMaterialOwners` by the banded encoder itself (it interns each leaf's
+  // palette from the dense words the rebuild pass just wrote), `sceneGeometry` by
+  // the B2 readers. The figure that matters must therefore be reported separately,
+  // and it has to be the *same resolver's* answer rather than a subtraction.
   const product = resolveSparseBrickPayloadLayout("dry", VOXELS, "f16-unorm8",
     { leafPayloadMode: "banded" });
   const shadow = resolveSparseBrickPayloadLayout("dry", VOXELS, "f16-unorm8",
-    { leafPayloadMode: "banded", retainDenseLanesForProvenance: true });
+    { leafPayloadMode: "banded", retainDenseLanes: SPARSE_BRICK_BANDED_PRODUCER_DENSE_LANES });
   assert.equal(shadow.lanes.sceneMaterialOwners.present, true);
   assert.equal(shadow.lanes.sceneGeometry.present, true);
   assert.equal(shadow.productBytes, product.totalBytes);
   assert.ok(shadow.totalBytes > product.totalBytes * 3, "the shadow shape costs the whole saving");
+  // Naming one lane keeps one lane. That is the shape a partial reader cutover
+  // lands in, and a boolean could not express it.
+  const geometryOnly = resolveSparseBrickPayloadLayout("dry", VOXELS, "f16-unorm8",
+    { leafPayloadMode: "banded", retainDenseLanes: ["sceneGeometry"] });
+  assert.equal(geometryOnly.lanes.sceneGeometry.present, true);
+  assert.equal(geometryOnly.lanes.sceneMaterialOwners.present, false);
+  assert.equal(geometryOnly.productBytes, product.totalBytes);
+  assert.ok(geometryOnly.totalBytes < shadow.totalBytes);
 });
 
 test("only a dry world may band, and only at the record width the figure is quoted at", () => {
@@ -203,6 +226,66 @@ test("the codec addresses through functions, because the bases come from a unifo
   // Out of range reads as air rather than as a plausible identity, so an encoder bug
   // is a visible hole instead of the wrong material.
   assert.match(full, /if\(entry>=palette\)\{return BANDED_NO_MATERIAL_OWNER;\}/);
+  // The normal lane is first in the blob at a fixed width, which is what lets the
+  // header stay at four words: the palette and the index both have derivable
+  // starts, and the normal's start is the blob itself.
+  assert.match(full, /const BANDED_NORMAL_WORDS:u32=BANDED_VOXELS_PER_LEAF\/2u;/);
+  assert.equal((full.match(/fn bandedHalfWord\(/g) ?? []).length, 1);
+  assert.equal(SPARSE_BRICK_BANDED_HEADER_WORDS, 4);
+  assert.ok(!full.includes("bandedHeaderNormalBase"), "the normal lane needs no header offset");
+});
+
+test("the DDA's solidity question is one occupancy bit, not an identity word", () => {
+  // The point of the whole layout, and the thing a storage-only landing would
+  // miss. Under `dense` a marcher pays a strided 4-byte identity load for every
+  // cell it *rejects*; under the two mask arms it pays one bit of a word it shares
+  // with 31 neighbours, and resolves the identity only for the cell that answers
+  // yes — at most one per ray, because the walk returns on it.
+  const identityCodec = (mode: SparseBrickLeafPayloadMode) => sparseBrickSceneIdentityCodecWGSL({
+    mode, materialOwnerBase: "dry.payloadLanes1.y", load: (index) => `scenePayload[${index}]`,
+  });
+  assert.ok(!identityCodec("dense").includes("sceneIdentitySolidAt"),
+    "the dense arm has no mask to ask, so it must not offer the predicate");
+  for (const mode of ["occupancy", "banded"] as const) {
+    // It takes a voxel and *not* a `SceneIdentitySource`. That signature is the
+    // finding: a source hoisted out of the walk costs header loads on every leaf
+    // the ray crosses and saves nothing on the one cell that hits, which measured
+    // +4.3 % against `dense` before the predicate stopped needing it.
+    assert.match(identityCodec(mode),
+      /fn sceneIdentitySolidAt\(voxel:u32\)->bool\{return bandedOccupied\(voxel\);\}/, mode);
+  }
+  // And the primary actually calls it. `dense` keeps the shipped expression, so
+  // the arm every hash baseline was recorded against is untouched.
+  const shaderFor = (mode: SparseBrickLeafPayloadMode) => {
+    const previous = process.env.FLUID_SVO_LEAF_PAYLOAD;
+    process.env.FLUID_SVO_LEAF_PAYLOAD = mode;
+    try {
+      return createSvoDrySceneFragmentWGSL(1, "canonical");
+    } finally {
+      if (previous === undefined) delete process.env.FLUID_SVO_LEAF_PAYLOAD;
+      else process.env.FLUID_SVO_LEAF_PAYLOAD = previous;
+    }
+  };
+  const dense = shaderFor("dense");
+  assert.ok(dense.includes(
+    "let identity=sceneIdentityOf(identitySource,payloadIndex);"
+    + "if(sceneIdentitySolid(identity)){cellSolid=true;cellIdentity=identity;}"),
+  "the dense primary keeps the identity-word test it shipped with");
+  assert.ok(!dense.includes("sceneIdentitySolidAt"), "and never reaches for a mask it has not got");
+  for (const mode of ["occupancy", "banded"] as const) {
+    const shader = shaderFor(mode);
+    assert.ok(shader.includes(
+      "if(sceneIdentitySolidAt(payloadIndex)){let identity=sceneIdentityAt(payloadIndex);"
+      + "cellSolid=true;cellIdentity=identity;}"),
+    `the ${mode} primary must reject a cell without loading its identity`);
+    // And it must not hoist a source it no longer needs. `traceLeafPayload`'s body
+    // touching identity storage *outside* the gate is the +4.3 % regression this
+    // arrangement replaced.
+    const loop = shader.slice(shader.indexOf("fn traceLeafPayload("));
+    const body = loop.slice(0, loop.indexOf("\n}"));
+    assert.ok(!body.includes("sceneIdentitySourceAt("), `${mode} must not hoist an identity source`);
+    assert.equal((body.match(/sceneIdentityAt\(/g) ?? []).length, 1, mode);
+  }
 });
 
 test("the payload binding is atomic whenever any lane shares a word", () => {

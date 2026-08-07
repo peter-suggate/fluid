@@ -173,12 +173,22 @@ export const OCTREE_STEP_PROGRAM: PhysicsStepProgram = Object.freeze({
       ["fine-level-set", "projected-velocity"],
       [],
       ["render-world"]),
+    // Optional, and the only optional stage that is purely observational: it
+    // writes `step-snapshot-record`, which no other stage reads, and reads
+    // nothing it can perturb. The ring arms itself when a consumer takes a
+    // record, so a step whose predecessor's record is still unread encodes no
+    // copies and that earlier record stays the freshest one. Absence therefore
+    // costs diagnostics freshness and nothing else — which is why it is
+    // `optional` rather than conductor-conditional: a `condition` would owe a
+    // zero-work witness read from the step's own snapshot record, and the
+    // stage being skipped is precisely the one that would have produced it.
     stage("step-snapshot",
       "Copy the selected backend's accepted authority, solve, surface, extension/support, and transport receipts into its step-coherent snapshot ring (the only sanctioned diagnostics source)",
       "other",
       ["accepted-structured-velocity", "accepted-boundary-controls", "fine-generation", "solve-stats", "projection-energy-stats", "accepted-epoch", "candidate-epoch", "air-support", "fine-level-set"],
       [],
-      ["step-snapshot-record"]),
+      ["step-snapshot-record"],
+      true),
   ]),
 });
 

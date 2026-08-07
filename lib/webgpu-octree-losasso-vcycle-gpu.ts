@@ -5,6 +5,10 @@ import {
   type OctreeLosassoFirstOrderVCycle,
   type OctreeLosassoVCycleHierarchySource,
 } from "./webgpu-octree-losasso-vcycle";
+import {
+  OCTREE_RUNTIME_DIAL_BUILT_BOTTOM_SWEEPS,
+  OCTREE_RUNTIME_DIAL_BUILT_SMOOTHING_SWEEPS,
+} from "./octree-runtime-dials";
 
 /**
  * Largest sub-L0 level the single-workgroup fused cycle may own.
@@ -121,7 +125,10 @@ const FACES_OFFSET:u32=${layout.facesOffsetWords}u;
 const PARENTS_OFFSET:u32=${layout.parentsOffsetWords}u;
 const CHILD_OFFSETS_OFFSET:u32=${layout.childOffsetsOffsetWords}u;
 const CHILD_LIST_OFFSET:u32=${layout.childListOffsetWords}u;
-struct Params { damping:f32, reserved0:u32, reserved1:u32, reserved2:u32 }
+// The two sweep counts are UNIFORM words, which is what makes it legal to
+// bound the barrier-bearing loops below: a storage read would not be provably
+// uniform and the barriers inside relaxLevel would fail WGSL's analysis.
+struct Params { damping:f32, bottomSweeps:u32, smoothingSweeps:u32, reserved2:u32 }
 struct Face { negativeRow:u32,positiveRow:u32,axis:u32,reserved:u32,
  area:f32,inverseDistance:f32,openFraction:f32,normalVelocity:f32 }
 @group(0)@binding(0)var<uniform> p:Params;
@@ -178,7 +185,10 @@ fn restrictInto(coarseLevel:u32,lane:u32,enabled:bool){
    sum=addCompensatedF32(sum,residualVectors[vectorIndex(coarseLevel-1u,child)]);
   }
   rhsVectors[vectorIndex(coarseLevel,row)]=compensatedValue(sum);
+  // Both banks: an odd smoothing count starts the chain from xB so it still
+  // ends in xA. Value-neutral at even counts, where sweep one overwrites xB.
   xAVectors[vectorIndex(coarseLevel,row)]=0.;
+  xBVectors[vectorIndex(coarseLevel,row)]=0.;
  }
  synchronize();
 }
@@ -199,14 +209,24 @@ fn formResidual(level:u32,lane:u32,enabled:bool){
  }
  synchronize();
 }
-fn prolongInto(fineLevel:u32,lane:u32,enabled:bool){
+// The fine target is always xA -- pre-smoothing is arranged to end there --
+// but the coarse SOURCE is wherever that level's post-smoothing finished,
+// which is xB after an odd sweep count.
+fn prolongInto(fineLevel:u32,lane:u32,enabled:bool,coarseFromB:bool){
  let coarseLevel=fineLevel+1u;let base=transitionBase(coarseLevel);
  let coarseRows=levelControl(coarseLevel,1u);
  let fineRows=select(0u,hierarchy[base+CHILD_OFFSETS_OFFSET+coarseRows],enabled);
  for(var row=lane;row<fineRows;row+=256u){let parent=hierarchy[base+PARENTS_OFFSET+row];
-  if(parent<coarseRows){xAVectors[vectorIndex(fineLevel,row)]+=xAVectors[vectorIndex(coarseLevel,parent)];}
+  if(parent<coarseRows){
+   xAVectors[vectorIndex(fineLevel,row)]+=correctionValue(coarseFromB,coarseLevel,parent);
+  }
  }
  synchronize();
+}
+/** The sweeps count of relaxations at this level, arranged to finish in xA. */
+fn smoothToXA(level:u32,lane:u32,enabled:bool,sweeps:u32){
+ var fromB=(sweeps&1u)==1u;
+ for(var sweep=0u;sweep<sweeps;sweep+=1u){relaxLevel(level,fromB,lane,enabled);fromB=!fromB;}
 }
 @compute @workgroup_size(256)
 fn fusedSubL0(@builtin(local_invocation_index)lane:u32){
@@ -219,19 +239,27 @@ fn fusedSubL0(@builtin(local_invocation_index)lane:u32){
  if(!enabled){return;}
  restrictInto(1u,lane,enabled);
  for(var level=1u;level+1u<LEVEL_COUNT;level+=1u){
-  relaxLevel(level,false,lane,enabled);relaxLevel(level,true,lane,enabled);
+  smoothToXA(level,lane,enabled,p.smoothingSweeps);
   formResidual(level,lane,enabled);restrictInto(level+1u,lane,enabled);
  }
  let bottom=LEVEL_COUNT-1u;
- for(var sweep=0u;sweep<8u;sweep+=1u){
+ for(var sweep=0u;sweep<p.bottomSweeps;sweep+=1u){
   if((sweep&1u)==0u){relaxLevel(bottom,false,lane,enabled);}
   else{relaxLevel(bottom,true,lane,enabled);}
  }
+ // The bottom count is even, so it ends in xA. Above it, post-smoothing starts
+ // from the prolonged xA and finishes in xB whenever the count is odd, which
+ // is what the next prolongation down has to be told.
+ var coarseFromB=false;
  for(var level=bottom-1u;level>=1u;level-=1u){
-  prolongInto(level,lane,enabled);relaxLevel(level,false,lane,enabled);
-  relaxLevel(level,true,lane,enabled);
+  prolongInto(level,lane,enabled,coarseFromB);
+  var fromB=false;
+  for(var sweep=0u;sweep<p.smoothingSweeps;sweep+=1u){
+   relaxLevel(level,fromB,lane,enabled);fromB=!fromB;
+  }
+  coarseFromB=fromB;
  }
- prolongInto(0u,lane,enabled);
+ prolongInto(0u,lane,enabled,coarseFromB);
 }
 `;
 }
@@ -259,7 +287,6 @@ export class WebGPUOctreeLosassoVCycle implements OctreeLosassoFirstOrderVCycle 
   readonly convergenceTail = "gpu-zero-indirect" as const;
   readonly schedule = OCTREE_LOSASSO_VCYCLE_SCHEDULE;
   readonly encodedSetupDispatchCount = 0;
-  readonly encodedCorrectionDispatchCount: number;
   readonly allocatedBytes: number;
   readonly initializationTasks: readonly { label:string;run:()=>Promise<void> }[];
 
@@ -276,7 +303,66 @@ export class WebGPUOctreeLosassoVCycle implements OctreeLosassoFirstOrderVCycle 
     entries:readonly {binding:number;resource:GPUBufferBinding}[];group:GPUBindGroup;
   }[]>();
   private readonly useFusedSubL0:boolean;
+  private bottomSweeps=OCTREE_RUNTIME_DIAL_BUILT_BOTTOM_SWEEPS;
+  private smoothingSweeps=OCTREE_RUNTIME_DIAL_BUILT_SMOOTHING_SWEEPS;
   private destroyed=false;
+
+  /**
+   * Pre/post smoothing sweeps at level 0 and every intermediate level.
+   *
+   * Pre and post always take the same count, so the cycle stays symmetric and
+   * M stays SPD for CG. Odd counts are legal here — see `encodeCorrection` for
+   * how the starting ping-pong bank absorbs the parity.
+   */
+  setSmoothingSweeps(sweeps:number):void{
+    this.assertLive();
+    const clamped=Number.isSafeInteger(sweeps)&&sweeps>=1
+      ?Math.min(sweeps,16):OCTREE_RUNTIME_DIAL_BUILT_SMOOTHING_SWEEPS;
+    if(clamped===this.smoothingSweeps)return;
+    this.smoothingSweeps=clamped;
+    this.device.queue.writeBuffer(this.params,8,Uint32Array.of(clamped));
+  }
+
+  /**
+   * Bottom-level smoother sweeps per application.
+   *
+   * The fused kernel reads this from its uniform, so the fused schedule's
+   * dispatch count does not move; the per-level path encodes one dispatch per
+   * sweep, which is why `encodedCorrectionDispatchCount` below is derived
+   * rather than fixed. Odd counts are rejected: the smoother ping-pongs
+   * between xA and xB and the ascent reads xA.
+   */
+  setBottomSweeps(sweeps:number):void{
+    this.assertLive();
+    const snapped=Number.isSafeInteger(sweeps)&&sweeps>=2
+      ?Math.min(sweeps,64)&~1:OCTREE_RUNTIME_DIAL_BUILT_BOTTOM_SWEEPS;
+    if(snapped===this.bottomSweeps)return;
+    this.bottomSweeps=snapped;
+    this.device.queue.writeBuffer(this.params,4,Uint32Array.of(snapped));
+  }
+
+  /**
+   * Clear/copy + pre-smoothing + residual/restrict per descending level, the
+   * bottom sweeps, then prolong/post-smoothing per ascending level + final copy.
+   *
+   * Derived rather than fixed because the per-level path spends one dispatch
+   * per sweep and both counts are live dials. The fused form runs its sub-L0
+   * sweeps inside one workgroup, so only its level-0 smoothing shows up here.
+   */
+  get encodedCorrectionDispatchCount():number{
+    const levels=this.hierarchy.levels.length;
+    // The xB seed is encoded only for an odd count; see `encodeCorrection`.
+    const clears=2+(this.smoothingSweeps&1);
+    // Fused: clear(s) + copy-in + pre + residual + the fused dispatch + post
+    // + copy-out. Its sub-L0 sweeps run inside one workgroup, so the bottom
+    // dial cannot move this. Nine at the authored counts, as it always was.
+    if(this.useFusedSubL0)return clears+3+2*this.smoothingSweeps;
+
+    // Per level: the clears. Per level pair: pre-smoothing, residual, restrict
+    // on the way down; prolong and post-smoothing on the way back. Plus the
+    // copy in and out, and the bottom sweeps.
+    return clears*levels+(levels-1)*(2*this.smoothingSweeps+3)+2+this.bottomSweeps;
+  }
 
   constructor(private readonly device:GPUDevice,
     readonly hierarchy:OctreeLosassoVCycleHierarchySource) {
@@ -305,7 +391,11 @@ export class WebGPUOctreeLosassoVCycle implements OctreeLosassoFirstOrderVCycle 
     const storage=GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST|GPUBufferUsage.COPY_SRC;
     this.params=device.createBuffer({label:"Losasso V-cycle Jacobi constants",size:16,
       usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});
-    device.queue.writeBuffer(this.params,0,Float32Array.of(2/3,0,0,0));
+    const constants=new ArrayBuffer(16);
+    new Float32Array(constants)[0]=2/3;
+    new Uint32Array(constants)[1]=OCTREE_RUNTIME_DIAL_BUILT_BOTTOM_SWEEPS;
+    new Uint32Array(constants)[2]=OCTREE_RUNTIME_DIAL_BUILT_SMOOTHING_SWEEPS;
+    device.queue.writeBuffer(this.params,0,constants);
     for(const [level,source] of hierarchy.levels.entries()){
       if(!Number.isSafeInteger(source.rowCapacity)||source.rowCapacity<1)throw new RangeError(`Losasso V-cycle level ${level} capacity is invalid`);
     }
@@ -329,10 +419,6 @@ export class WebGPUOctreeLosassoVCycle implements OctreeLosassoFirstOrderVCycle 
         size:levelVectorCapacities[level]!*4}));
     }
     this.allocatedBytes=this.params.size+this.vectorArenas.reduce((sum,buffer)=>sum+buffer.size,0);
-    // clear/copy + two pre + residual/restrict per descending level, eight
-    // bottom sweeps, then prolong/two post per ascending level + final copy.
-    this.encodedCorrectionDispatchCount=this.useFusedSubL0
-      ?9:2*hierarchy.levels.length+7*(hierarchy.levels.length-1)+10;
     this.initializationTasks=[{label:"Compile plain Losasso first-order V-cycle",run:()=>this.initialize()}];
   }
 
@@ -401,18 +487,55 @@ export class WebGPUOctreeLosassoVCycle implements OctreeLosassoFirstOrderVCycle 
     const pass=broker.compute({label:"Losasso V-cycle - initialize levels"});
     const fused=this.fusedSubL0Pipeline&&this.hierarchy.fusedSubL0
       &&this.hierarchy.levels.length>1;
+    // `smoothing` sweeps ping-pong between xA and xB, so an ODD count would
+    // finish in the wrong bank for the residual, the restriction and the final
+    // copy. Rather than special-casing those, the chain picks its STARTING
+    // bank from the parity and always lands in xA; only the post-smoothing
+    // that a prolongation feeds can end in xB, and that one bank index is
+    // threaded to the next transfer. At the authored count of two this emits
+    // the identical dispatch sequence it always did.
+    const smoothing=this.smoothingSweeps;
+    /** Pre-smoothing: `smoothing` sweeps that end in xA. */
+    const smoothToXA=(level:number)=>{
+      const pipes=this.levelPipelines![level]!;
+      let fromB=(smoothing&1)===1;
+      for(let sweep=0;sweep<smoothing;sweep+=1){
+        const source=fromB?this.xB[level]!:this.xA[level]!;
+        const target=fromB?this.xA[level]!:this.xB[level]!;
+        dispatch(pass,level,pipes.jacobi,levelGroup(level,pipes.jacobi,this.rhs[level]!,source,target));
+        fromB=!fromB;
+      }
+    };
+    /** Post-smoothing from xA; returns the bank the result landed in. */
+    const smoothFromXA=(level:number)=>{
+      const pipes=this.levelPipelines![level]!;
+      let fromB=false;
+      for(let sweep=0;sweep<smoothing;sweep+=1){
+        const source=fromB?this.xB[level]!:this.xA[level]!;
+        const target=fromB?this.xA[level]!:this.xB[level]!;
+        dispatch(pass,level,pipes.jacobi,levelGroup(level,pipes.jacobi,this.rhs[level]!,source,target));
+        fromB=!fromB;
+      }
+      return fromB?this.xB[level]!:this.xA[level]!;
+    };
     for(let level=0;level<(fused?1:this.hierarchy.levels.length);level+=1){
       const pipes=this.levelPipelines[level]!;
       if(!fused)dispatch(pass,level,pipes.clear,
         levelGroup(level,pipes.clear,this.rhs[level]!,this.xA[level]!,this.rhs[level]!));
       dispatch(pass,level,pipes.clear,levelGroup(level,pipes.clear,this.rhs[level]!,this.xA[level]!,this.xA[level]!));
+      // Seeding xB matters ONLY when an odd count starts the chain there. At
+      // the authored even count the first sweep overwrites it, so encoding this
+      // unconditionally would tax every default V-cycle application with an
+      // extra dispatch on the very lane these dials exist to speed up.
+      if((smoothing&1)===1){
+        dispatch(pass,level,pipes.clear,levelGroup(level,pipes.clear,this.rhs[level]!,this.xA[level]!,this.xB[level]!));
+      }
     }
     const copy0=this.levelPipelines[0]!.copy;
     dispatch(pass,0,copy0,levelGroup(0,copy0,input.rhs,this.xA[0]!,this.rhs[0]!));
     if(fused){
       const pipes=this.levelPipelines[0]!;
-      dispatch(pass,0,pipes.jacobi,levelGroup(0,pipes.jacobi,this.rhs[0]!,this.xA[0]!,this.xB[0]!));
-      dispatch(pass,0,pipes.jacobi,levelGroup(0,pipes.jacobi,this.rhs[0]!,this.xB[0]!,this.xA[0]!));
+      smoothToXA(0);
       dispatch(pass,0,pipes.residual,levelGroup(0,pipes.residual,
         this.rhs[0]!,this.xA[0]!,this.residual[0]!));
       const fusedPipeline=this.fusedSubL0Pipeline!;
@@ -426,15 +549,13 @@ export class WebGPUOctreeLosassoVCycle implements OctreeLosassoFirstOrderVCycle 
         {binding:6,resource:{buffer:input.solverControl}},
       ]);
       pass.setPipeline(fusedPipeline);pass.setBindGroup(0,group);pass.dispatchWorkgroups(1);
-      dispatch(pass,0,pipes.jacobi,levelGroup(0,pipes.jacobi,this.rhs[0]!,this.xA[0]!,this.xB[0]!));
-      dispatch(pass,0,pipes.jacobi,levelGroup(0,pipes.jacobi,this.rhs[0]!,this.xB[0]!,this.xA[0]!));
-      dispatch(pass,0,copy0,levelGroup(0,copy0,this.xA[0]!,this.xA[0]!,input.correction));
+      const published=smoothFromXA(0);
+      dispatch(pass,0,copy0,levelGroup(0,copy0,published,published,input.correction));
       return;
     }
     for(let level=0;level<this.hierarchy.levels.length-1;level+=1){
       const pipes=this.levelPipelines[level]!;
-      dispatch(pass,level,pipes.jacobi,levelGroup(level,pipes.jacobi,this.rhs[level]!,this.xA[level]!,this.xB[level]!));
-      dispatch(pass,level,pipes.jacobi,levelGroup(level,pipes.jacobi,this.rhs[level]!,this.xB[level]!,this.xA[level]!));
+      smoothToXA(level);
       dispatch(pass,level,pipes.residual,levelGroup(level,pipes.residual,this.rhs[level]!,this.xA[level]!,this.residual[level]!));
       const transfer=this.hierarchy.transfers[level]!,transferPipelines=this.transferPipelines[level]!;
       const buffers=[this.hierarchy.levels[level]!.control,this.hierarchy.levels[level+1]!.control,
@@ -448,26 +569,28 @@ export class WebGPUOctreeLosassoVCycle implements OctreeLosassoFirstOrderVCycle 
       pass.dispatchWorkgroupsIndirect(this.hierarchy.levels[level+1]!.rowDispatch,0);
     }
     const bottom=this.hierarchy.levels.length-1,bottomPipes=this.levelPipelines[bottom]!;
-    for(let sweep=0;sweep<8;sweep+=1){
+    for(let sweep=0;sweep<this.bottomSweeps;sweep+=1){
       const source=(sweep&1)===0?this.xA[bottom]!:this.xB[bottom]!;
       const target=(sweep&1)===0?this.xB[bottom]!:this.xA[bottom]!;
       dispatch(pass,bottom,bottomPipes.jacobi,levelGroup(bottom,bottomPipes.jacobi,this.rhs[bottom]!,source,target));
     }
+    // The bottom count is even, so its result is in xA. Above it, each level's
+    // post-smoothing may finish in xB, and the prolongation below reads its
+    // coarse operand from wherever that was.
+    let coarse=this.xA[bottom]!;
     for(let level=bottom-1;level>=0;level-=1){
       const transfer=this.hierarchy.transfers[level]!,transferPipeline=this.transferPipelines[level]!.prolong;
       const buffers=[this.hierarchy.levels[level]!.control,this.hierarchy.levels[level+1]!.control,
-        transfer.fineParents,transfer.childOffsets,transfer.childList,this.xA[level+1]!,
+        transfer.fineParents,transfer.childOffsets,transfer.childList,coarse,
         this.xA[level]!,input.solverControl];
       const group=this.cachedBindGroup(transferPipeline,
         [0,1,2,5,6,7].map(binding=>({binding,resource:resource(buffers[binding]!)})));
       pass.setPipeline(transferPipeline);pass.setBindGroup(0,group);
       pass.dispatchWorkgroupsIndirect(transfer.fineRowDispatch,0);
-      const pipes=this.levelPipelines[level]!;
-      dispatch(pass,level,pipes.jacobi,levelGroup(level,pipes.jacobi,this.rhs[level]!,this.xA[level]!,this.xB[level]!));
-      dispatch(pass,level,pipes.jacobi,levelGroup(level,pipes.jacobi,this.rhs[level]!,this.xB[level]!,this.xA[level]!));
+      coarse=smoothFromXA(level);
     }
     const copyOut=this.levelPipelines[0]!.copy;
-    dispatch(pass,0,copyOut,levelGroup(0,copyOut,this.xA[0]!,this.xA[0]!,input.correction));
+    dispatch(pass,0,copyOut,levelGroup(0,copyOut,coarse,coarse,input.correction));
   }
 
   destroy():void{if(this.destroyed)return;this.destroyed=true;this.params.destroy();

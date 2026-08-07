@@ -424,6 +424,40 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 .performance-disabled-notice { display: grid; gap: 6px; padding: 16px 18px; border-bottom: 1px solid var(--amber-line); background: var(--amber-wash); }
 .performance-disabled-notice strong { color: var(--amber); font: 700 9px/1.2 var(--mono); letter-spacing: .04em; }
 .performance-disabled-notice span { max-width: 720px; color: var(--muted); font: 8px/1.5 var(--mono); }
+/* Live accuracy-for-frame-time dials. First thing in the observatory because
+   the loop is "move one, read the physics lane", not "read, then go hunting
+   through Method > Advanced for the knob".
+   Deliberately unboxed: these five are read and dragged constantly, so they
+   get whitespace and type contrast instead of the panel's usual hairline
+   cards. Nothing here goes below 11px — the 6-8px mono this sheet uses for
+   dense readouts is unreadable on a control you are meant to aim at. */
+.performance-dials { padding: 16px 18px 18px; border-bottom: 1px solid var(--line); }
+.performance-dials > header { display: flex; align-items: baseline; justify-content: space-between; gap: 14px; margin-bottom: 16px; }
+.performance-dials > header > div > span { color: var(--accent-strong); font: 700 11px/1 var(--mono); letter-spacing: .07em; }
+.performance-dials h3 { margin: 6px 0 0; color: var(--ink); font: 500 15px/1.2 var(--display); letter-spacing: -.01em; }
+.performance-dials-status { display: flex; align-items: baseline; gap: 14px; }
+.performance-dials-status > span { color: var(--accent-strong); font: 600 12px/1 var(--mono); letter-spacing: .04em; white-space: nowrap; }
+.performance-dials-status > button { padding: 0; border: 0; background: none; color: var(--amber-ink); font: 600 12px/1 var(--mono); letter-spacing: .04em; cursor: pointer; }
+.performance-dials-status > button:hover { color: var(--ink); }
+.performance-dials-inert { margin: 0 0 16px; max-width: 640px; color: var(--label); font: 12px/1.55 var(--sans); }
+.performance-dial-grid { display: grid; gap: 16px 24px; }
+@media (min-width: 900px) { .performance-dial-grid { grid-template-columns: repeat(2,minmax(0,1fr)); } }
+.performance-dial { min-width: 0; display: block; }
+.performance-dial-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: 8px; }
+.performance-dial-heading > span { color: var(--label); font: 600 12px/1.2 var(--sans); letter-spacing: .01em; }
+.performance-dial[data-modified="true"] .performance-dial-heading > span { color: var(--amber-ink); }
+.performance-dial-heading output { color: var(--ink); font: 600 13px/1.2 var(--mono); font-variant-numeric: tabular-nums; }
+.performance-dial-heading output[data-auto="true"] { color: var(--micro); font-weight: 500; }
+.performance-dial .reset-chip { font-size: 12px; }
+/* Two captions, not one: what the knob does, then what the cheap direction
+   costs. The second is the one that stops a dialled-down frame reading as a
+   bug, so it is set apart in the caution colour rather than run on. */
+.performance-dial small { display: block; font: 11px/1.45 var(--sans); }
+.performance-dial-does { margin-top: 8px; color: var(--label); }
+.performance-dial-cost { margin-top: 4px; color: var(--amber-ink); }
+.performance-dial input[type="range"] { height: 3px; }
+.performance-dial input[type="range"]::-webkit-slider-thumb { width: 13px; height: 13px; }
+.performance-dial input[type="range"]:disabled { cursor: not-allowed; opacity: .45; }
 .paper-observatory h3 { margin: 0 0 3px; font: 700 9px/1.2 var(--mono); letter-spacing: .06em; }
 .paper-observatory { padding: 16px 18px 24px; }
 .paper-observatory > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }

@@ -2,13 +2,18 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
 import { packMaterialOwner, unpackMaterialOwner } from "../lib/sparse-brick-octree";
+import { SVO_FIELD_PROGRAM_BLOCK_WORDS, type SvoFieldProgram } from "../lib/svo-field-program";
 import {
+  SPARSE_SCENE_FIELD_PROGRAM_CAPACITY,
   SPARSE_SCENE_MAINTENANCE_OVERFLOW,
   SPARSE_SCENE_PRIMITIVE_STRIDE_BYTES,
   SPARSE_SCENE_PRIMITIVE_TYPES,
   SparseSceneProxyVoxelizer,
   sparseSceneRevisionIncomplete,
+  packSparseSceneFieldProgramArena,
   packSparseScenePrimitives,
+  sparseSceneFieldProgramSlots,
+  sparseSceneFieldPrograms,
   sampleSparseScenePrimitiveCell,
   sparseScenePrimitiveBounds,
   sparseScenePrimitiveSignedDistance,
@@ -67,7 +72,10 @@ test("CPU mirrors evaluate boxes, oriented capped cylinders, and ellipsoids", ()
   close(sparseScenePrimitiveSignedDistance(ellipsoid, [2, 0, 0]), 0);
 });
 
-test("conservative cell occupancy catches surface intersections and selects the union identity", () => {
+// The identity this mirror reports is the material half alone. The GPU pass's
+// identity word carries a baked oct8 normal in its high half now, and this
+// oracle has no way to evaluate one — see `sampleSparseScenePrimitiveCell`.
+test("conservative cell occupancy catches surface intersections and selects the union material", () => {
   const primitives: SparseScenePrimitive[] = [
     { kind: "box", center: [0, 0, 0], halfExtents: [1, 1, 1], materialId: 20, ownerId: 3 },
     { kind: "ellipsoid", center: [4, 0, 0], radii: [1, 2, 1], materialId: 21, ownerId: 4 },
@@ -76,14 +84,14 @@ test("conservative cell occupancy catches surface intersections and selects the 
   close(surface.solidSignedDistance, 0.5);
   assert.ok(surface.solidFraction > 0 && surface.solidFraction < 0.5,
     "half-diagonal conservative support includes a cell whose volume crosses the surface");
-  assert.equal(surface.materialOwner, packMaterialOwner(20, 3));
+  assert.equal(surface.materialOwner, 20);
 
   const interior = sampleSparseScenePrimitiveCell(primitives, [4, 0, 0], [0.25, 0.25, 0.25]);
   assert.equal(interior.solidFraction, 1);
-  assert.equal(interior.materialOwner, packMaterialOwner(21, 4));
+  assert.equal(interior.materialOwner, 21);
   const far = sampleSparseScenePrimitiveCell(primitives, [40, 0, 0], [1, 1, 1]);
   assert.equal(far.solidFraction, 0);
-  assert.equal(far.materialOwner, packMaterialOwner(0));
+  assert.equal(far.materialOwner, 0);
   const empty = sampleSparseScenePrimitiveCell([], [0, 0, 0], [1, 1, 1]);
   assert.equal(empty.solidFraction, 0);
   assert.equal(empty.solidSignedDistance, Number.POSITIVE_INFINITY);
@@ -99,6 +107,50 @@ test("primitive input validation rejects lossy IDs and degenerate geometry", () 
   assert.throws(() => packSparseScenePrimitives([
     { kind: "ellipsoid", center: [0, 0, 0], radii: [1, 1, 1], materialId: 0 },
   ]), /nonzero uint16/);
+});
+
+test("field-program records share one arena block per distinct tape", () => {
+  // The oak's crown in miniature: many masses, each with its own centre, shade
+  // and envelope, drawn from a handful of quantised tapes. The arena's capacity
+  // is a ceiling on *shapes*, so a crown far past it must still pack.
+  const tape = (radius: number): SvoFieldProgram => ({
+    ops: [{ op: "ellipsoid", out: 1, point: 0, parameters: { a: radius, b: radius * 0.78, c: radius } }],
+    result: 1,
+  });
+  const distinct = 3;
+  const records = SPARSE_SCENE_FIELD_PROGRAM_CAPACITY * 4;
+  const primitives: SparseScenePrimitive[] = Array.from({ length: records }, (_, index) => ({
+    kind: "field-program",
+    center: [0.01 * index, 0.5, 0],
+    envelopeRadii: [0.05, 0.04, 0.05],
+    program: tape(0.02 + 0.01 * (index % distinct)),
+    materialId: 1 + index,
+    ownerId: 1 + index,
+  }));
+
+  const slots = sparseSceneFieldProgramSlots(primitives);
+  const programs = sparseSceneFieldPrograms(primitives);
+  assert.equal(programs.length, distinct, "one block per distinct tape, not one per record");
+  assert.deepEqual(slots.slice(0, 2 * distinct), [0, 1, 2, 0, 1, 2], "slots repeat with the tapes");
+  primitives.forEach((primitive, index) => {
+    assert.deepEqual(programs[slots[index]], (primitive as { program: SvoFieldProgram }).program,
+      `record ${index} must name the block holding its own tape`);
+  });
+
+  // The record packer and the arena packer derive the numbering the same way,
+  // so neither may throw and the slot in the type word must be the shared one.
+  const packed = packSparseScenePrimitives(primitives);
+  const words = packed.length / (SPARSE_SCENE_PRIMITIVE_STRIDE_BYTES / 4);
+  assert.equal(words, records);
+  for (let index = 0; index < 2 * distinct; index += 1) {
+    const type = packed[index * (SPARSE_SCENE_PRIMITIVE_STRIDE_BYTES / 4) + 3];
+    assert.equal(type & 0xff, SPARSE_SCENE_PRIMITIVE_TYPES["field-program"]);
+    assert.equal(type >>> 8, index % distinct);
+  }
+  assert.equal(
+    packSparseSceneFieldProgramArena(primitives).length,
+    SPARSE_SCENE_FIELD_PROGRAM_CAPACITY * SVO_FIELD_PROGRAM_BLOCK_WORDS,
+  );
 });
 
 test("primitive bounds conservatively rotate the complete authored shape", () => {

@@ -121,12 +121,11 @@ test("the record set covers the normal stencil of every band voxel", () => {
   }
 });
 
-test("the packed owner half survives the palette round trip", () => {
+test("the packed high half survives the palette round trip", () => {
   // SP21's finding, and the trap a u16 identity would have walked into: the lane
-  // word is `(ownerId << 16) | materialId`, and the owner half is read at five
-  // dry-path sites — `dryLodCellSolid` treats it as the LOD tier's only solidity
-  // test, and `traceLeafPayload` turns it into a primitive index. Truncating to
-  // the material half would silently discard every one of them.
+  // word is `(high << 16) | materialId`, and the high half is read at five
+  // dry-path sites — it was an owner id, it is now a baked oct8 normal, and either
+  // way truncating to the material half would silently discard every one of them.
   const palette = new SvoIdentityPalette();
   const owners = [0, 1, 2, 4095, 16_383, SPARSE_BRICK_NO_OWNER];
   const dense = leafFromField(buried, (x) => identity(owners[x % owners.length], 1 + (x % 3)));
@@ -135,7 +134,55 @@ test("the packed owner half survives the palette round trip", () => {
   for (let index = 0; index < SVO_BANDED_LEAF_VOXELS; index += 1) {
     const word: number = bandedLeafVoxel(leaf, index, palette).materialOwner;
     assert.equal(word, dense[index].materialOwner, `whole word at ${index}`);
-    assert.equal(word >>> 16, dense[index].materialOwner >>> 16, `owner half at ${index}`);
+    assert.equal(word >>> 16, dense[index].materialOwner >>> 16, `high half at ${index}`);
+  }
+});
+
+test("a distinct normal in every voxel costs a lane, not a palette", () => {
+  // The regression the unified-voxel cutover left behind, pinned. The identity
+  // word's high half is now a per-voxel baked normal, so interning whole words
+  // gave a leaf as many palette entries as it has occupied voxels — measured 29.05
+  // a leaf on the hero garden against 1.026 for the material half alone, with
+  // 0.11 % of leaves past the 256-entry limit entirely. This leaf is that case at
+  // its extreme: 512 distinct high halves, one material.
+  const palette = new SvoIdentityPalette();
+  const dense = leafFromField(buried, (x, y, z) => identity(1 + x + y * 8 + z * 64, 3));
+  const leaf = encodeBandedLeaf(dense, CELL_RADIUS_M, palette);
+  assert.ok(leaf, "a leaf with one material must band however many normals it holds");
+  assert.equal(leaf.leafPalette.length, 1, "the palette interns materials, not identities");
+  assert.equal(leaf.indexBits, 0);
+  assert.equal(leaf.identityIndex.length, 0);
+  // One u16 per *occupied* voxel, in occupancy-rank order.
+  assert.equal(leaf.normals.length, SVO_BANDED_LEAF_VOXELS);
+  for (let index = 0; index < SVO_BANDED_LEAF_VOXELS; index += 1) {
+    assert.equal(bandedLeafVoxel(leaf, index, palette).materialOwner, dense[index].materialOwner,
+      `whole word at ${index}`);
+  }
+});
+
+test("the normal lane is indexed by voxel, and rank-compacting it was a loss", () => {
+  // A half-empty leaf spends 2 bytes on every air voxel it holds, deliberately.
+  // Compacting by occupancy rank saves 22 % of the lane on the hero garden and
+  // puts a sixteen-word prefix popcount in front of every read; measured on
+  // device, that cost `banded` +4.1 % against `dense` on the depth-1 frame. The
+  // normal is read once per shaded pixel and written once per publication.
+  const palette = new SvoIdentityPalette();
+  const dense = leafFromField(slab, (x, y, z) => identity(1 + x + y * 8 + z * 64, 3));
+  const leaf = encodeBandedLeaf(dense, CELL_RADIUS_M, palette, "stencil");
+  assert.ok(leaf);
+  let occupied = 0;
+  for (let index = 0; index < SVO_BANDED_LEAF_VOXELS; index += 1) {
+    if (dense[index].fraction > 0) occupied += 1;
+  }
+  assert.ok(occupied > 0 && occupied < SVO_BANDED_LEAF_VOXELS, `slab must be partly solid, got ${occupied}`);
+  assert.equal(leaf.normals.length, SVO_BANDED_LEAF_VOXELS);
+  for (let index = 0; index < SVO_BANDED_LEAF_VOXELS; index += 1) {
+    const decoded = bandedLeafVoxel(leaf, index, palette);
+    if (dense[index].fraction > 0) {
+      assert.equal(decoded.materialOwner, dense[index].materialOwner, `word at ${index}`);
+    } else {
+      assert.equal(decoded.materialOwner, SVO_BANDED_NO_MATERIAL_OWNER, `air at ${index}`);
+    }
   }
 });
 
@@ -162,22 +209,24 @@ test("a leaf holding two solids indexes them at one bit a voxel", () => {
   }
 });
 
-test("the global palette interns across leaves and never truncates", () => {
+test("the global palette interns materials across leaves and never truncates", () => {
   const palette = new SvoIdentityPalette();
+  // Two leaves of material 2 and one of material 5, with *different* high halves
+  // throughout: the high half must not reach the global table at all now.
   encodeBandedLeaf(leafFromField(buried, () => identity(7, 2)), CELL_RADIUS_M, palette);
-  encodeBandedLeaf(leafFromField(buried, () => identity(7, 2)), CELL_RADIUS_M, palette);
+  encodeBandedLeaf(leafFromField(buried, (x) => identity(7 + x, 2)), CELL_RADIUS_M, palette);
   encodeBandedLeaf(leafFromField(buried, () => identity(9, 5)), CELL_RADIUS_M, palette);
-  assert.equal(palette.size, 2, "the same word in two leaves is one global slot");
-  assert.equal(palette.wordAt(0), identity(7, 2));
-  assert.equal(palette.wordAt(1), identity(9, 5));
+  assert.equal(palette.size, 2, "the same material in two leaves is one global slot");
+  assert.equal(palette.wordAt(0), 2);
+  assert.equal(palette.wordAt(1), 5);
   // The capacity is the scene alphabet SP21 bounded, not a width this file chose.
   assert.equal(SVO_IDENTITY_PALETTE_CAPACITY, 2 + OCTREE_LIVE_SCENE_PRIMITIVE_CAPACITY);
   assert.ok(SVO_IDENTITY_PALETTE_CAPACITY <= 2 ** 15, "a global slot must fit fifteen bits");
 });
 
-test("a leaf needing more identities than the index can address escapes to dense", () => {
+test("a leaf needing more materials than the index can address escapes to dense", () => {
   const palette = new SvoIdentityPalette();
-  const dense = leafFromField(buried, (x, y, z) => identity(1 + x + y * 8 + z * 64, 1));
+  const dense = leafFromField(buried, (x, y, z) => identity(1, 1 + x + y * 8 + z * 64));
   assert.equal(encodeBandedLeaf(dense, CELL_RADIUS_M, palette), undefined);
 });
 
@@ -263,14 +312,20 @@ test("index widths and size classes round up and never exceed the leaf", () => {
   assert.throws(() => bandedLeafSizeClass(513), RangeError);
 });
 
-test("a buried leaf costs the fixed part, one palette slot and nothing else", () => {
+test("a buried leaf costs the fixed part, one palette slot and its normals", () => {
   const palette = new SvoIdentityPalette();
   const leaf = encodeBandedLeaf(leafFromField(buried), CELL_RADIUS_M, palette);
   assert.ok(leaf);
-  assert.equal(bandedLeafBytes(leaf, SVO_BANDED_DENSE_GEOMETRY_BYTES), SVO_BANDED_LEAF_FIXED_BYTES + 2);
-  // 146 bytes against 6 144: the interior voxel costs two bits, both of them in
-  // the masks that were already there.
-  assert.ok(bandedLeafBytes(leaf, 2) * 42 < SVO_BANDED_LEAF_VOXELS * 12);
+  // No record, no index, one palette entry — and 512 normals, because every
+  // occupied voxel carries one and the record set cannot bound the first-hit
+  // population. That last term is 1 024 of the 1 174 bytes, which is the shape of
+  // the whole layout: see `bandedLeafBytes`.
+  assert.equal(bandedLeafBytes(leaf, SVO_BANDED_DENSE_GEOMETRY_BYTES),
+    SVO_BANDED_LEAF_FIXED_BYTES + 2 + SVO_BANDED_LEAF_VOXELS * 2);
+  assert.equal(leaf.normals.length, SVO_BANDED_LEAF_VOXELS);
+  // 1 174 bytes against 6 144 is still 5.2x on the leaf that stores least, and the
+  // geometry width no longer moves it at all — the normals dominate.
+  assert.ok(bandedLeafBytes(leaf, 2) * 5 < SVO_BANDED_LEAF_VOXELS * 12);
 });
 
 test("the radius record set stores everything the snorm8 lane would not saturate", () => {

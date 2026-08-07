@@ -15,6 +15,7 @@
  * Usage:
  *   node --import tsx tools/profile-svo-render-xctrace.ts
  *     [--scene=hose-tank] [--scene-module=tools/…-scene.ts] [--resolution=660x662]
+ *     [--refinement=0..3] [--construction-seconds=200]
  *     [--screen-space-pixels=3] [--cone-fanout=1]
  *     [--variant=baseline] [--traversal=hybrid|canonical|canonical-parametric|compact|wide|raster-primary]
  *     [--shading=inline|split]
@@ -117,6 +118,21 @@ if (!Number.isFinite(screenSpacePixels) || screenSpacePixels < 0) {
   throw new Error("--screen-space-pixels must be a non-negative finite number");
 }
 const coneFanout = (flag("cone-fanout") ?? "1") === "1";
+/**
+ * Authored-environment refinement depth, forwarded to the worker's
+ * `FLUID_SVO_DRY_FRAME_ENVIRONMENT_REFINEMENT`.
+ *
+ * Omitted keeps the worker's depth-0 tree, which is what every calibrated lane
+ * here is based on. A depth is a *document* rebuild there, not a tree option —
+ * the scene's own factory re-runs at `cell / 2^depth` — so this profiles the
+ * frame production draws at that rung rather than a finer tree over a coarse
+ * set. See `lib/svo-render-tuning.ts:SVO_ENVIRONMENT_REFINEMENT_DEPTH_DEFAULT`.
+ */
+const refinementRaw = flag("refinement");
+if (refinementRaw !== undefined && !/^[0-3]$/.test(refinementRaw)) {
+  throw new Error("--refinement must be an integer in 0..3");
+}
+const refinement = refinementRaw === undefined ? undefined : Number(refinementRaw);
 const keepTables = process.argv.includes("--keep-tables");
 const reuseTrace = process.argv.includes("--reuse-trace");
 const reuseTables = process.argv.includes("--reuse-tables");
@@ -130,8 +146,15 @@ const tracePath = resolve(outputDirectory, "svo-render.trace");
  * Measured at 100-120 s for `hero-garden-hose` at 1600x1240 — nearly all of it
  * Metal pipeline creation, which an attached capture never sees. The window has
  * to outlast it or the trace holds construction and nothing else.
+ *
+ * `--construction-seconds` raises it, which a refined scene needs: the CPU plan
+ * alone is ~28 s at depth 3 on the hero garden, before pipeline creation and the
+ * voxelization of a set expanded at a 0.78 mm leaf.
  */
-const CONSTRUCTION_ALLOWANCE_S = 200;
+const CONSTRUCTION_ALLOWANCE_S = Number(flag("construction-seconds") ?? 200);
+if (!Number.isFinite(CONSTRUCTION_ALLOWANCE_S) || CONSTRUCTION_ALLOWANCE_S < 1) {
+  throw new Error("--construction-seconds must be a positive number of seconds");
+}
 
 const TABLES: readonly {
   schema: string; file: string; columns: readonly string[];
@@ -176,6 +199,9 @@ interface RenderWorkerResult {
   readonly renderWall_ms: number;
   readonly medianFrame_ms: number;
   readonly p95Frame_ms: number;
+  /** The depth the tree was actually built at, which a degraded allocation lowers. */
+  readonly environmentRefinementDepth?: number;
+  readonly detailCellSize_mm?: number;
 }
 
 interface SourceProvenance {
@@ -366,6 +392,13 @@ const workerResultFromLog = (): RenderWorkerResult => {
     } catch { /* progress output */ }
   }
   if (!result) throw new Error(`render worker produced no result; see ${logPath}`);
+  // The worker degrades an unaffordable depth rather than throwing, so the rung
+  // it *built* is the one this profile is about. Its own assertion already fails
+  // the run; this keeps the report from ever being labelled with the request.
+  if (refinement !== undefined && result.environmentRefinementDepth !== refinement) {
+    throw new Error(`requested refinement depth ${refinement} but the worker built`
+      + ` ${result.environmentRefinementDepth ?? "an unreported depth"}; see ${logPath}`);
+  }
   return result;
 };
 
@@ -393,7 +426,8 @@ const writeReport = async (
     tables,
     lane: "svo-render",
     workUnit: "frame",
-    title: `Hose tank SVO rendering — ${variant} GPU frame profile`,
+    title: `${scene} SVO rendering — ${variant} GPU frame profile`
+      + `${refinement === undefined ? "" : ` at refinement depth ${refinement}`}`,
     frameStartLabels: ["Sparse voxel primary visibility", "Sparse voxel cone-lighting prepass",
       "Sparse voxel compact cone visibility", "Sparse voxel dry scene"],
     occupancyCounterName: "Fragment Occupancy",
@@ -408,6 +442,8 @@ const writeReport = async (
       FLUID_SVO_DRY_FRAME_CONE_SCALE: String(coneScale),
       FLUID_SVO_DRY_FRAME_CONE_TRACING: coneTracing,
       FLUID_SVO_DRY_FRAME_RADIANCE_RECONSTRUCTION: radianceReconstruction,
+      ...(refinement === undefined
+        ? {} : { FLUID_SVO_DRY_FRAME_ENVIRONMENT_REFINEMENT: String(refinement) }),
     },
     tracedPid,
     traced: { simulationWall_ms: result.renderWall_ms, steps: result.frames },
@@ -445,7 +481,7 @@ const main = async (): Promise<void> => {
     const tracedPid = await tracedPidFromEncoders(tables.encoders);
     const report = await writeReport(tables, extraction, result, tracedPid);
     await writeFile(capturePath, `${JSON.stringify({
-      variant, traversal, shading, coneScale, coneTracing, radianceReconstruction, warmups, scene, resolution: { width, height }, counterSeconds, counterReduction,
+      variant, traversal, shading, coneScale, coneTracing, radianceReconstruction, warmups, scene, refinement, resolution: { width, height }, counterSeconds, counterReduction,
       ...priorCapture,
       source: priorCapture?.source ?? source,
       worker: result, tracePath, rebuiltAt: new Date().toISOString(),
@@ -464,7 +500,7 @@ const main = async (): Promise<void> => {
     const tracedPid = await tracedPidFromEncoders(tables.encoders);
     const report = await writeReport(tables, policy, result, tracedPid);
     await writeFile(capturePath, `${JSON.stringify({
-      variant, traversal, shading, coneScale, coneTracing, radianceReconstruction, warmups, scene, resolution: { width, height }, counterSeconds, counterReduction,
+      variant, traversal, shading, coneScale, coneTracing, radianceReconstruction, warmups, scene, refinement, resolution: { width, height }, counterSeconds, counterReduction,
       ...priorCapture,
       source: priorCapture?.source ?? source,
       worker: result, tracePath, rebuiltAt: new Date().toISOString(),
@@ -485,7 +521,7 @@ const main = async (): Promise<void> => {
   // capture rather than accidentally claiming the source state at rebuild time.
   await writeFile(capturePath, `${JSON.stringify({
     state: "capturing", variant, traversal, shading, coneScale, coneTracing, radianceReconstruction, warmups, scene,
-    sceneModule, screenSpacePixels, coneFanout,
+    sceneModule, refinement, screenSpacePixels, coneFanout,
     resolution: { width, height }, counterSeconds, counterReduction, source,
     tracePath, startedAt: new Date().toISOString(),
   }, null, 2)}\n`);
@@ -525,7 +561,7 @@ cd ${JSON.stringify(root)}
 export WEBGPU_NODE_MODULE=${JSON.stringify(resolve(root, "node_modules/webgpu/index.js"))}
 export FLUID_WEBGPU_DAWN_FEATURES=skip_validation,use_user_defined_labels_in_backend
 export FLUID_SVO_DRY_FRAME_SCENE=${JSON.stringify(scene)}
-${sceneModule === undefined ? "" : `export FLUID_SVO_DRY_FRAME_SCENE_MODULE=${JSON.stringify(sceneModule)}\n`}export FLUID_SVO_DRY_FRAME_SCREEN_SPACE_PIXELS=${screenSpacePixels}
+${sceneModule === undefined ? "" : `export FLUID_SVO_DRY_FRAME_SCENE_MODULE=${JSON.stringify(sceneModule)}\n`}${refinement === undefined ? "" : `export FLUID_SVO_DRY_FRAME_ENVIRONMENT_REFINEMENT=${refinement}\n`}export FLUID_SVO_DRY_FRAME_SCREEN_SPACE_PIXELS=${screenSpacePixels}
 export FLUID_SVO_DRY_FRAME_CONE_FANOUT=${coneFanout ? 1 : 0}
 export FLUID_SVO_DRY_FRAME_WIDTH=${width}
 export FLUID_SVO_DRY_FRAME_HEIGHT=${height}
@@ -574,7 +610,7 @@ exec ${JSON.stringify(process.execPath)} --import tsx ${JSON.stringify(worker)} 
     const report = await writeReport(tables, policy, result, await tracedPidFromEncoders(tables.encoders));
     await writeFile(capturePath, `${JSON.stringify({
       state: "complete",
-      variant, traversal, shading, coneScale, coneTracing, radianceReconstruction, warmups, scene, resolution: { width, height }, counterSeconds, counterReduction,
+      variant, traversal, shading, coneScale, coneTracing, radianceReconstruction, warmups, scene, refinement, sceneModule, screenSpacePixels, coneFanout, resolution: { width, height }, counterSeconds, counterReduction,
       source,
       worker: result, tracePath, capturedAt: new Date().toISOString(),
     }, null, 2)}\n`);
