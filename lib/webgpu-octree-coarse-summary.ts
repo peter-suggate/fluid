@@ -70,6 +70,15 @@ function coarseSummaryDiagnosticsEnabled(
     || resolved?.FLUID_FIELD_STATS === "1";
 }
 
+/** Legacy whole-domain phi inflation, retained only as an attribution arm. */
+export function coarseSummaryGlobalVolumeCorrectionEnabled(
+  environment?: Readonly<Record<string, string | undefined>>,
+): boolean {
+  const resolved = environment
+    ?? (typeof process !== "undefined" ? process.env : undefined);
+  return resolved?.FLUID_COARSE_GLOBAL_VOLUME_CORRECTION === "1";
+}
+
 export interface OctreeCoarseSummaryPlan {
   readonly baseDimensions: readonly [number, number, number];
   readonly levelDimensions: readonly (readonly [number, number, number])[];
@@ -256,7 +265,10 @@ export class WebGPUOctreeCoarseSummary {
     // The prepare singleton reproduces the host's 2D dispatch split exactly.
     new Uint32Array(data, 96, 1)[0] = device.limits.maxComputeWorkgroupsPerDimension;
     new Float32Array(data, 100, 1)[0] = air.physicalCellSize;
-    new Uint32Array(data, 104, 1)[0] = coarseSummaryDiagnosticsEnabled() ? 1 : 0;
+    new Uint32Array(data, 104, 2).set([
+      coarseSummaryDiagnosticsEnabled() ? 1 : 0,
+      coarseSummaryGlobalVolumeCorrectionEnabled() ? 1 : 0,
+    ]);
     device.queue.writeBuffer(this.params, 0, data);
     if (air.initialPhi.length !== dimensions[0] * dimensions[1] * dimensions[2]) {
       throw new RangeError("Coarse-only tracker bootstrap must cover the complete coarse lattice");
@@ -392,7 +404,7 @@ export class WebGPUOctreeCoarseSummary {
   async readReceipt(): Promise<Readonly<{ advances: number; completions: number;
     predictedCells: number; domainVolume: number; published: boolean; error: number;
     predictedVolume: number; targetVolume: number; interfaceCells: number;
-    correction: number; bank: number;
+    correction: number; bank: number; frozenCells: number;
     interfaceVelocityQueries: number; interfaceVelocityValid: number;
     interfacePhiMoved: number; maximumInterfaceSpeed: number;
     airUnpublishedAdvances: number; airErrorWord: number; airValidWord: number;
@@ -429,7 +441,7 @@ export class WebGPUOctreeCoarseSummary {
         predictedVolume: words[12] / 4096, targetVolume: words[14] / 4096,
         interfaceCells: words[13],
         correction: new Float32Array(new Uint32Array([words[15]]).buffer)[0],
-        bank: words[17] & 1,
+        bank: words[17] & 1, frozenCells: words[31],
         interfaceVelocityQueries: words[27], interfaceVelocityValid: words[28],
         interfacePhiMoved: words[29],
         maximumInterfaceSpeed: new Float32Array(new Uint32Array([words[30]]).buffer)[0],
@@ -458,7 +470,7 @@ const PAGE_SIZE:u32=${PAGE_SIZE}u;const ENTRY_WORDS:u32=${ENTRY_WORDS}u;
 struct P{baseDims:vec3u,pad0:u32,dims:vec3u,maximumLeafSize:u32,keyCapacity:u32,topPages:u32,pageCapacity:u32,
  entryCapacity:u32,entryOffset:u32,maximumLevel:u32,rowCapacity:u32,directoryWords:u32,
  airControl:u32,airVectors:u32,airOwners:u32,domainVolume:u32,time:vec4f,maxWorkgroups:u32,physicalCellSize:f32,
- diagnostics:u32}
+ diagnostics:u32,globalVolumeCorrection:u32}
 struct CoarseEntry{cellPlusOne:u32,size:u32,phi:f32,minimumPhi:f32,maximumPhi:f32,flags:u32,row:u32,volume:f32}
 struct CoarseDirectory{state:u32,generation:u32,rowCount:u32,maximumLeafSize:u32,dimensions:vec3u,
  physicalCellSize:f32,entries:array<CoarseEntry>}
@@ -628,14 +640,14 @@ fn rankForKey(key:u32)->u32{let pagePlusOne=atomicLoad(&directory[topWord(key)])
  // advances that actually completed, so a single readback at the end of a run
  // reports how intermittent the tracker was. Only 18, the per-advance
  // prediction counter the completeness test reads, is cleared here.
- if(i<arrayLength(&state)&&(i<14u||i==15u||i==18u||(i>=27u&&i<=30u))){atomicStore(&state[i],0u);}}
+ if(i<arrayLength(&state)&&(i<14u||i==15u||i==18u||(i>=27u&&i<=31u))){atomicStore(&state[i],0u);}}
 @compute @workgroup_size(256)fn resetSummaryValues(@builtin(workgroup_id)w:vec3u,@builtin(num_workgroups)n:vec3u,
  @builtin(local_invocation_index)l:u32){let i=linear(w,n,l);
  if(i<16u){atomicStore(&directory[i],0u);}
  if(i<p.entryCapacity){let base=entryBase(i);atomicStore(&directory[base+1u],ordered(3.402823e38));
   atomicStore(&directory[base+2u],ordered(-3.402823e38));atomicStore(&directory[base+3u],bitcast<u32>(3.402823e38));
   for(var j=4u;j<ENTRY_WORDS;j+=1u){atomicStore(&directory[base+j],0u);}}
- if(i<arrayLength(&state)&&((i>=2u&&i<14u)||i==15u||i==18u||(i>=27u&&i<=30u))){atomicStore(&state[i],0u);}}
+ if(i<arrayLength(&state)&&((i>=2u&&i<14u)||i==15u||i==18u||(i>=27u&&i<=31u))){atomicStore(&state[i],0u);}}
 @compute @workgroup_size(256)fn ensureSummaryPages(@builtin(workgroup_id)w:vec3u,@builtin(num_workgroups)n:vec3u,
  @builtin(local_invocation_index)l:u32){let row=linear(w,n,l);if(coarse.state!=PUBLISHED||row>=coarse.rowCount||row>=p.rowCapacity){return;}
  let e=coarse.entries[row];let bl=rowBaseAndLevel(e);if(bl.x==INVALID||(e.flags&9u)!=9u){atomicOr(&state[2],1u);return;}
@@ -691,6 +703,7 @@ fn rankForKey(key:u32)->u32{let pagePlusOne=atomicLoad(&directory[topWord(key)])
  let nearInterface=p.diagnostics!=0u&&initialized&&abs(sample.x)<=2.0*h;if(nearInterface){atomicAdd(&state[27],1u);}
  let velocity=transportVelocityAt(point);if(nearInterface&&velocity.w>0.0){atomicAdd(&state[28],1u);
   atomicMax(&state[30],bitcast<u32>(length(velocity.xyz)));}
+ if(initialized&&velocity.w==0.0){atomicAdd(&state[31],1u);}
  if(initialized&&velocity.w>0.0){let midpoint=point-(0.5*p.time.x/h)*velocity.xyz;
   let middleVelocity=transportVelocityAt(midpoint);let traced=select(velocity,middleVelocity,middleVelocity.w>0.0);
   let departure=point-(p.time.x/h)*traced.xyz;let transported=densePhiAt(readBank,departure);if(transported.y!=0.0){
@@ -740,6 +753,7 @@ fn sweepDenseRedistance(sourceBank:u32,destinationBank:u32,item:u32){if(atomicLo
  atomicAdd(&state[12],u32(round(4096.0*occupancy)));if(abs(value)<p.physicalCellSize){atomicAdd(&state[13],1u);}}
 @compute @workgroup_size(1)fn prepareVolumeCorrection(){if(p.directoryWords>arrayLength(&directory)){atomicOr(&state[2],4u);return;}
  if(atomicLoad(&state[18])!=p.domainVolume){atomicStore(&state[15],bitcast<u32>(0.0));atomicOr(&state[2],4u);return;}
+ if(p.globalVolumeCorrection==0u){atomicStore(&state[15],bitcast<u32>(0.0));return;}
  let predictedVolume=atomicLoad(&state[12]);let targetVolume=atomicLoad(&state[14]);
  if(targetVolume==0u){atomicStore(&state[14],predictedVolume);atomicStore(&state[15],bitcast<u32>(0.0));}
  else{let interfaceCount=max(1u,atomicLoad(&state[13]));let error=f32(i32(predictedVolume)-i32(targetVolume))/4096.0;

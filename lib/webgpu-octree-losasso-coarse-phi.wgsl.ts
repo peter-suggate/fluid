@@ -134,7 +134,12 @@ fn publishLosassoCoarseOnlyGhosts(@builtin(global_invocation_id)gid:vec3u){let f
       let rowSize=headers[face.negativeRow].size;let dual=f32(rowSize)*p.velocityCellSize;distance=dual;
    if(solidFraction(vec3i(floor(point)))>=.999999){face.reserved|=FACE_SOLID_NEUMANN;flags=4u;}
      else if(liquid<0.&&(p.closed&2u)!=0u){theta=1.;distance=dual;face.inverseDistance=1./dual;flags=1u;}
-   else if(liquid<0.&&sampled.valid!=0u&&sampled.value>0.){airPhi=sampled.value;theta=clamp(-liquid/(airPhi-liquid),1e-4,1.);distance=theta*dual;face.inverseDistance=1./distance;face.openFraction=1.;flags=1u;}else{flags=4u;}}}
+   else if(liquid<0.&&sampled.valid!=0u&&sampled.value>0.){airPhi=sampled.value;theta=clamp(-liquid/(airPhi-liquid),1e-4,1.);distance=theta*dual;face.inverseDistance=1./distance;face.openFraction=1.;flags=1u;}
+   // No compact row is the atmospheric p=0 side staged by writeFace. Failure
+   // to recover an additional phi sample does not turn that air cell into a
+   // solid: retain the staged open fraction and dual distance. Genuine solid
+   // interiors and closed domain walls were classified in the branches above.
+   else{flags=4u;}}}
  faces[faceId]=face;ghosts[faceId]=vec4u(bitcast<u32>(distance),bitcast<u32>(theta),bitcast<u32>(airPhi),flags);}
 `;
 

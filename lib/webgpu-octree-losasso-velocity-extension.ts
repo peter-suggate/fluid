@@ -28,13 +28,9 @@ export interface WebGPUOctreeLosassoVelocityExtensionSource {
   readonly extendedVelocity: GPUBuffer;
 }
 
-/**
- * Fewest sweeps the ping-pong chain can express.
- *
- * One sweep would have to read and write the same buffer within a single bind
- * group on the predictor path, which is why the floor is two rather than one.
- */
-export const OCTREE_LOSASSO_MINIMUM_EXTENSION_SWEEPS = 2;
+/** Cover the full W=7 extension band, plus one settling sweep. */
+export const OCTREE_LOSASSO_MINIMUM_EXTENSION_SWEEPS =
+  OCTREE_LOSASSO_EXTENSION_WIDTH + 1;
 
 export interface OctreeLosassoVelocityExtensionPlan {
   readonly faceCapacity: number;
@@ -194,6 +190,9 @@ export class WebGPUOctreeLosassoVelocityExtension {
       this.sweeps = OCTREE_LOSASSO_EXTENSION_SWEEPS;
       return;
     }
+    // The published graph is W7. Leaving any of it stale makes the apparent
+    // transport reach depend on a performance dial, so the graph contract is
+    // width + one settling sweep, not an independently shrinkable K.
     this.sweeps = Math.min(OCTREE_LOSASSO_EXTENSION_SWEEPS,
       Math.max(OCTREE_LOSASSO_MINIMUM_EXTENSION_SWEEPS, sweeps));
   }

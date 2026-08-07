@@ -48,6 +48,12 @@
 
 export interface OctreeRuntimeDials {
   /**
+   * Target half-thickness, in finest cells, of the refined band the pressure
+   * ladder keeps on each side of the free surface. An upper bound on what the
+   * scene authored. Zero means AUTO: retain the authored pair.
+   */
+  readonly interfaceBandCells: number;
+  /**
    * Decades of slack added to the authored pressure residual tolerance.
    * 0 keeps `scene.numerics.pressureRelativeTolerance`; +3 solves to a
    * thousand times looser residual and stops that many CG iterations earlier.
@@ -123,6 +129,38 @@ export interface OctreeLosassoSolveTuning {
 }
 
 export const OCTREE_RUNTIME_DIALS: readonly OctreeRuntimeDialSpec[] = Object.freeze([
+  {
+    key: "interfaceBandCells",
+    label: "Surface band thickness",
+    short: "SURFACE BAND",
+    unit: "cells",
+    // AUTO is the paper/authored reach. Explicit values are experiments that
+    // may thin it, never the shipped default.
+    min: 0, max: 8, step: 1, digits: 0, default: 0, auto: 0,
+    does: "How far from the water surface the grid stays at its finest cells."
+      + " The readout is the resulting half-thickness in finest cells, which is"
+      + " what an octree slice actually shows.",
+    cost: "Thinner is the cheap direction, and it is the one dial here that"
+      + " makes the grid itself smaller rather than the work on it cheaper."
+      + " Too thin and the surface moves out of its own refined region between"
+      + " rebuilds: detail pops, thin sheets and spray lose their cells first,"
+      + " and a fast front simulates on cells coarser than the feature it"
+      + " carries.",
+    hint: "AUTO retains the authored band. An explicit value IS the half-thickness, in finest cells, and it"
+      + " drives BOTH terms of the protection width the ladder compares against"
+      + " -- interfaceRefinementBandCells and surfaceRefinementGradingLayers."
+      + " Dialling only the band cannot reach the thin end: the width is"
+      + " (band + grading x leafSize), the band term floors at one cell and the"
+      + " grading term floors at two, so a scene authored at grading 3 bottoms"
+      + " out at seven cells however far the band is wound down. Grading is"
+      + " taken to 1 first, which is the sharp 2:1 transition and the shipped"
+      + " default, and only then is the band trimmed. Both are clamped to what"
+      + " the scene authored, because the row capacity, the residency halo and"
+      + " the redistance reach were all sized from those values -- this dial"
+      + " thins the grid, it never widens it past what was allocated. Three is"
+      + " the floor the lattice itself imposes: one cell of band plus the"
+      + " two-finest-cell moving-surface floor.",
+  },
   {
     key: "pressureToleranceDecades",
     label: "Pressure residual tolerance",
@@ -208,13 +246,13 @@ export const OCTREE_RUNTIME_DIALS: readonly OctreeRuntimeDialSpec[] = Object.fre
     label: "Velocity extension sweeps",
     short: "EXTENSION K",
     unit: "sweeps",
-    min: 2, max: 8, step: 1, digits: 0, default: OCTREE_RUNTIME_DIAL_BUILT_EXTENSION_SWEEPS,
+    min: 8, max: 8, step: 1, digits: 0, default: OCTREE_RUNTIME_DIAL_BUILT_EXTENSION_SWEEPS,
     does: "How far the water's velocity is carried out into the empty air ahead"
       + " of the surface, so the next step has something to advect the surface"
       + " through. 8 covers the whole band the solver tracks.",
-    cost: "Below 7 the outer air cells keep the previous step's velocity, and"
-      + " the surface advects through a stale field: thin sheets and spray stall"
-      + " or drift sideways, and fast-moving fronts lag the bulk water.",
+    cost: "The W7 graph requires all 8 sweeps (seven propagation layers plus"
+      + " one settling sweep), so this reach is coupled and cannot be thinned"
+      + " independently without shrinking the published graph too.",
     hint: "Section 5 fixed-K Jacobi extension of the projected velocity into"
       + " the air band, for both the published field and the MacCormack"
       + " predictor. The default 8 covers the W7 adjacency graph plus one"
@@ -281,6 +319,93 @@ export function octreeRuntimeDialsEqual(
 /** True when every dial is at its construction-time meaning. */
 export function octreeRuntimeDialsAreDefault(dials: OctreeRuntimeDials): boolean {
   return octreeRuntimeDialsEqual(dials, OCTREE_RUNTIME_DIAL_DEFAULTS);
+}
+
+/**
+ * The half-thickness the ladder actually keeps refined, in finest cells.
+ *
+ * This mirrors `pressureRefinementEvidence`'s protection width, in the units an
+ * octree slice is read in, and it is what the panel shows -- because "band 4"
+ * is not a thickness. The two branches differ, so the factor is not optional.
+ * Factor one -- the product default, and the only configuration in which the
+ * coarse directory is the whole surface -- takes the RETAINED width, whose
+ * grading term is `grading * max(2, size)` and so is non-zero even at the
+ * finest merge candidate. Factors four and eight take the COMPACT width, whose
+ * grading term is `grading * max(0, size - 2)`: at size two it vanishes and the
+ * band alone is the thickness.
+ */
+export function octreeSurfaceProtectionWidthCells(
+  bandCells: number, gradingLayers: number, leafSizeCells: number,
+  fineLevelSetFactor: number,
+): number {
+  const grading = Math.max(1, gradingLayers);
+  const reach = fineLevelSetFactor === 1
+    ? grading * Math.max(2, leafSizeCells)
+    : grading * Math.max(0, leafSizeCells - 2);
+  return Math.max(1, bandCells) + reach;
+}
+
+/** The band and grading a dialled thickness resolves to, and what it achieves. */
+export interface OctreeSurfaceBandSelection {
+  readonly bandCells: number;
+  readonly gradingLayers: number;
+  /** Half-thickness actually achieved at the finest merge candidate, in cells. */
+  readonly widthCells: number;
+}
+
+/**
+ * Resolve a dialled half-thickness into the two authored terms that produce it.
+ *
+ * The protection width `pressureRefinementEvidence` compares against is
+ * `max(1, band) + grading * max(2, size)` at coarse band, so a dial that moved
+ * only the band could not reach the thin end: the band term floors at one cell
+ * and the grading term at two, which is why a scene authored at grading 3
+ * bottoms out at SEVEN cells however far the band is wound down. Both terms
+ * have to move.
+ *
+ * Grading is spent first, down to 1. That is not arbitrary: grading 1 is the
+ * sharp 2:1 transition and the shipped default, while 3 is the authored
+ * progressive-refinement experiment, so winding it back is a return to the
+ * ordinary ladder rather than a violation of it. Only once grading is at 1 does
+ * the band term take the remainder.
+ *
+ * Both are clamped to what the scene authored. `planOctreePressureCapacity`,
+ * the residency halo, the candidate dilation rings and
+ * `planOctreeRedistanceSweeps` were all sized from the authored pair, and every
+ * one of them is an upper bound that thinning stays inside.
+ */
+export function octreeDialledSurfaceBand(
+  authoredBandCells: number,
+  authoredGradingLayers: number,
+  fineLevelSetFactor: number,
+  dials: OctreeRuntimeDials,
+): OctreeSurfaceBandSelection {
+  if (!Number.isFinite(authoredBandCells) || authoredBandCells < 0) {
+    throw new RangeError("Authored interface band must be finite and non-negative");
+  }
+  if (!Number.isFinite(authoredGradingLayers) || authoredGradingLayers < 1) {
+    throw new RangeError("Authored grading layers must be finite and at least one");
+  }
+  const authoredBand = Math.max(1, Math.round(authoredBandCells));
+  const authoredGrading = Math.max(1, Math.round(authoredGradingLayers));
+  if (dials.interfaceBandCells === 0) {
+    return { bandCells: authoredBand, gradingLayers: authoredGrading,
+      widthCells: octreeSurfaceProtectionWidthCells(
+        authoredBand, authoredGrading, 2, fineLevelSetFactor) };
+  }
+  const target = Math.max(1, Math.round(dials.interfaceBandCells));
+  const width = (band: number, grading: number) =>
+    octreeSurfaceProtectionWidthCells(band, grading, 2, fineLevelSetFactor);
+  // Factor 4/8 takes the compact width, whose grading term vanishes at the
+  // finest candidate: there the band alone is the thickness and grading has
+  // nothing to contribute.
+  if (fineLevelSetFactor !== 1) {
+    const bandCells = Math.min(authoredBand, target);
+    return { bandCells, gradingLayers: authoredGrading, widthCells: width(bandCells, authoredGrading) };
+  }
+  const gradingLayers = Math.min(authoredGrading, Math.max(1, Math.floor((target - 1) / 2)));
+  const bandCells = Math.min(authoredBand, Math.max(1, target - 2 * gradingLayers));
+  return { bandCells, gradingLayers, widthCells: width(bandCells, gradingLayers) };
 }
 
 /**

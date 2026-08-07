@@ -101,11 +101,15 @@ import {
   type OctreeSolveTailPolicy,
 } from "./octree-solve-tail-policy";
 import {
+  octreeDialledSurfaceBand,
   octreeDialledIterationCap,
   octreeDialledRelativeTolerance,
   octreeRuntimeDialsEqual,
+  octreeSurfaceProtectionWidthCells,
   type OctreeRuntimeDials,
 } from "./octree-runtime-dials";
+import { OCTREE_LOSASSO_EXTENSION_WIDTH } from
+  "./webgpu-octree-losasso-velocity-extension";
 import {
   OctreeWorkAccounting,
 } from "./webgpu-octree-work-accounting";
@@ -1869,7 +1873,20 @@ export class WebGPUOctreeProjection {
   private readonly fluidGatedBoundaryRefinement: boolean;
   private readonly topologyTileSize: number;
   private readonly adaptivity: number;
+  /** Authored band. Sized the row capacity, the halo and the redistance reach. */
   private readonly interfaceRefinementBandCells: number;
+  /**
+   * The band the shader is currently running, which the live dial may thin.
+   * Only `writeParams` reads it: every other consumer of the authored band is
+   * an allocation that was made once and must keep describing itself.
+   */
+  private interfaceBandCellsEffective = 0;
+  /**
+   * The grading layers the shader is currently running, which the live dial may
+   * reduce toward the sharp 2:1 transition. The authored value stays put: it
+   * sized the redistance reach and describes what was allocated.
+   */
+  private surfaceGradingLayersEffective = 1;
   private readonly surfaceRefinementGradingLayers: number;
   private readonly fineLevelSetBandCells: number;
   /** Factor-one uses the compact octree phi as the sole moving surface;
@@ -1996,8 +2013,14 @@ export class WebGPUOctreeProjection {
     this.balanceRounds = octreeBalanceRounds(this.effectiveLeafSize);
     this.adaptivity = Math.max(0, Math.min(1, options.adaptivity ?? 1));
     this.interfaceRefinementBandCells = Math.max(0, Math.min(32, Math.round(options.interfaceRefinementBandCells ?? 4)));
+    if (this.coarseDynamics.backend === "losasso"
+      && OCTREE_LOSASSO_EXTENSION_WIDTH < Math.max(1, this.interfaceRefinementBandCells) + 3) {
+      throw new RangeError("Losasso velocity extension must cover interface band + backtrace + MAC stencil");
+    }
+    this.interfaceBandCellsEffective = this.interfaceRefinementBandCells;
     this.surfaceRefinementGradingLayers = Math.max(1, Math.min(4,
       Math.round(options.surfaceRefinementGradingLayers ?? 1)));
+    this.surfaceGradingLayersEffective = this.surfaceRefinementGradingLayers;
     // Product configurations couple Section 5 surface reach to pressure reach.
     // A distinct value is admitted only for diagnostic fault injection; unset
     // follows the master band exactly.
@@ -2900,8 +2923,9 @@ export class WebGPUOctreeProjection {
         // ever compares |phi| against. Anything less and the ladder decides how
         // coarse the deep interior may get from the redistance seed rather than
         // from a depth.
-        redistanceReachCells: this.interfaceRefinementBandCells
-          + this.surfaceRefinementGradingLayers * Math.max(2, this.topologyMaximumLeafSize),
+        redistanceReachCells: octreeSurfaceProtectionWidthCells(
+          this.interfaceRefinementBandCells, this.surfaceRefinementGradingLayers,
+          this.topologyMaximumLeafSize, 1),
         losassoVelocity: sampler,
         openTopBoundary: this.scene.container.top !== "closed",
       });
@@ -4112,7 +4136,10 @@ export class WebGPUOctreeProjection {
       0,
     ]);
     // Megakernel residual tolerance and compact pressure-solve controls.
-    new Float32Array(data, 48, 4).set([1e-8, 0.01, 2.2, this.interfaceRefinementBandCells]);
+    // solve.w is the ONLY live consumer of the band: the refinement protection
+    // width, the boundary gate and the closed-wall strip all read it here, so
+    // rewriting this uniform is the whole of applying the band dial.
+    new Float32Array(data, 48, 4).set([1e-8, 0.01, 2.2, this.interfaceBandCellsEffective]);
     // container.w is an exactly representable small bit mask shared with the
     // topology shader: terrain and closed ceiling. The projection has one
     // native power topology, so no authority-selector bit is retained.
@@ -4154,7 +4181,10 @@ export class WebGPUOctreeProjection {
       this.analyticSparseBootstrap
         ? (this.scene.fluid.initialCondition === "dam-break" ? 2 : 1)
         : 0,
-      this.surfaceRefinementGradingLayers,
+      // Live: the surface-band dial spends grading before it trims the band,
+      // because the grading term floors at two cells and is what puts a
+      // grading-3 scene's thinnest reachable band at seven.
+      this.surfaceGradingLayersEffective,
       1,
     ]);
     const dam = sceneDamBreakFractions(this.scene);
@@ -4791,6 +4821,22 @@ export class WebGPUOctreeProjection {
       return;
     }
     this.appliedRuntimeDials = dials;
+    // The band is the one dial that changes what the LATTICE is rather than how
+    // hard it is worked, and it reaches the GPU as a single uniform write --
+    // `writeParams` is otherwise only called at construction and on reseed, so
+    // there is no per-frame cost to pay for making it live. The topology is
+    // rebuilt from the new width on the next candidate epoch; nothing is
+    // reallocated and t=0 is not disturbed, which is what keeps this key out of
+    // the structural fingerprint.
+    const surface = octreeDialledSurfaceBand(
+      this.interfaceRefinementBandCells, this.surfaceRefinementGradingLayers,
+      this.coarseOnlySurfaceTracking ? 1 : 4, dials);
+    if (surface.bandCells !== this.interfaceBandCellsEffective
+      || surface.gradingLayers !== this.surfaceGradingLayersEffective) {
+      this.interfaceBandCellsEffective = surface.bandCells;
+      this.surfaceGradingLayersEffective = surface.gradingLayers;
+      this.writeParams();
+    }
     backend.applySolveTuning({
       relativeTolerance: octreeDialledRelativeTolerance(
         this.solveTailPolicy.relativeTolerance, dials),
@@ -9037,7 +9083,7 @@ fn leafNeedsRefinement(origin: vec3u, size: u32) -> bool {
     // boundaryLiquidPhiInterval.
     return boundaryLiquidWouldRefine(
       boundaryLiquidPhiInterval(origin, size, minimumPhi, maximumPhi),
-      params.solve.w * params.cellRelax.x);
+      max(3.0, params.solve.w) * params.cellRelax.x);
   }
   if (pressureRetained) { return true; }
   if (minimumSolid >= 1.0 - 1e-5) { return false; }
@@ -9380,7 +9426,7 @@ fn refineCoarseBlock(origin: vec3u, lid: u32) {
       // Same interval band as the fine path in leafNeedsRefinement.
       boundaryDecision = boundaryLiquidWouldRefine(
         boundaryLiquidPhiInterval(origin, size, range.z, range.w),
-        params.solve.w * params.cellRelax.x);
+        max(3.0, params.solve.w) * params.cellRelax.x);
     }
     let pressureEvidence = pressureRefinementEvidence(origin, size);
     let pressureRetained = pressureRetentionAt(origin) > 0u
@@ -9642,6 +9688,11 @@ fn currentPressureOwnerWet(owner: Owner) -> bool {
   if(bootstrapPhiEnabled()){return wet;}
   if(fine.found){
     if(fine.exactCellValid){wet=fine.exactCellNegative;}
+    // A pressure row owns volume, not merely its centre point. The factor-one
+    // dense tracker publishes a conservative min/max interval for every
+    // covering summary node, so any negative covered cell keeps the row wet;
+    // theta on its boundary faces resolves the sub-leaf free surface.
+    else if(owner.size>=2u&&fine.complete){wet=fine.minimumPhi<0.0;}
     else if(fine.centerValid){wet=fine.centerPhi<0.0;}
     // A coarse-only summary is the paper's separate octree level set, not a
     // license to reclassify the same cell through a second surface authority.

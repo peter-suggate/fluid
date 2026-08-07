@@ -125,13 +125,42 @@ fn containingCompact(axis:u32,q:vec3u)->u32{var span=1u;var logSpan=0u;loop{var 
 fn linearInvocation(group:vec3u,lane:u32)->u32{return 64u*(group.x+65535u*group.y)+lane;}
 
 const STAGED_INVALID:u32=0x7fc00000u;const STAGED_BOUNDARY_ZERO:u32=0x7fc00001u;
+// A finest-lattice MAC plane can lie strictly inside a coarse leaf. There is
+// deliberately no face record on that plane, but that is not missing velocity:
+// Losasso reconstructs a temporary coarsened value from the leaf's two real
+// bounding faces. Find the smallest dyadic bracket that owns the plane and
+// interpolate the two face values at this tangential sub-position. At a 2:1
+// transition containingCompact resolves each bounding sample to the fine or
+// coarse face that covers exactly this sub-area.
+fn stagedCoarsenedVelocity(axis:u32,q:vec3u)->u32{
+ var span=2u;
+ loop{
+  let low=(q[axis]/span)*span;let high=low+span;
+  if(q[axis]>low&&high<=p.velocityDimensions[axis]){
+   var lowQ=q;var highQ=q;lowQ[axis]=low;highQ[axis]=high;
+   let lowFace=containingCompact(axis,lowQ);let highFace=containingCompact(axis,highQ);
+   if(lowFace!=INVALID&&highFace!=INVALID&&lowFace<arrayLength(&seedVelocity)
+      &&highFace<arrayLength(&seedVelocity)){
+    let a=seedVelocity[lowFace];let b=seedVelocity[highFace];
+    if(finite(a)&&finite(b)){
+     let fraction=f32(q[axis]-low)/f32(span);
+     let value=mix(a,b,fraction);
+     if(finite(value)){return bitcast<u32>(value);}
+    }
+   }
+  }
+  if(span>=p.maximumLeafSize){break;}span*=2u;
+ }
+ return STAGED_INVALID;
+}
 fn stagedRawVelocity(axis:u32,q:vec3u)->u32{
  if(arrayLength(&control)<4u||atomicLoad(&control[3])!=VALID){return STAGED_INVALID;}
  let face=containingCompact(axis,q);if(face!=INVALID){let value=seedVelocity[face];
   if(finite(value)){return bitcast<u32>(value);}return STAGED_INVALID;}
  let lowWall=q[axis]==0u;let highWall=q[axis]==p.velocityDimensions[axis];
  let wallBit=2u*axis+select(1u,0u,lowWall);let closed=(p.closedBoundaries.x&(1u<<wallBit))!=0u;
- return select(STAGED_INVALID,STAGED_BOUNDARY_ZERO,(lowWall||highWall)&&closed);}
+ if((lowWall||highWall)&&closed){return STAGED_BOUNDARY_ZERO;}
+ return stagedCoarsenedVelocity(axis,q);}
 
 fn stagedMacCount()->u32{let d=p.velocityDimensions;
  return(d.x+1u)*d.y*d.z+d.x*(d.y+1u)*d.z+d.x*d.y*(d.z+1u);}

@@ -2,6 +2,7 @@
 
 import {
   OCTREE_RUNTIME_DIALS,
+  octreeDialledSurfaceBand,
   octreeDialledIterationCap,
   octreeDialledRelativeTolerance,
   resolveOctreeRuntimeDials,
@@ -15,7 +16,7 @@ import { useSceneStore } from "@/lib/stores/scene-store";
 /**
  * The live accuracy-for-frame-time strip.
  *
- * These are the five coarse-band Losasso knobs with the largest measured
+ * These are the coarse-band Losasso knobs with the largest measured
  * bearing on the physics lane, ordered by leverage (see
  * `lib/octree-runtime-dials.ts` for the capture that picked them). They sit at
  * the top of the observatory because the point is to move one and watch the
@@ -40,7 +41,7 @@ import { useSceneStore } from "@/lib/stores/scene-store";
 function effectiveLabel(
   spec: OctreeRuntimeDialSpec,
   value: number,
-  resolved: { tolerance: number; iterationCap: number },
+  resolved: { tolerance: number; iterationCap: number; bandWidthCells: number },
 ): { text: string; auto: boolean } {
   const auto = spec.auto !== undefined && value === spec.auto;
   switch (spec.key) {
@@ -48,6 +49,12 @@ function effectiveLabel(
       return { text: resolved.tolerance.toExponential(1), auto };
     case "pressureIterationCap":
       return { text: `${resolved.iterationCap}`, auto };
+    // The slider position is a band term; the thickness a slice shows is the
+    // whole protection width, and the two differ by the grading term. Showing
+    // the position would make a dial at 1 look like a one-cell band when the
+    // grid it produces is three cells thick on each side.
+    case "interfaceBandCells":
+      return { text: `${resolved.bandWidthCells}`, auto };
     default:
       return { text: `${value}`, auto };
   }
@@ -69,10 +76,21 @@ export function PerformanceDials() {
   // must show the clamp rather than the request. The envelope is telemetry, so
   // fall back to the paper ceiling until the first stats poll lands.
   const builtEnvelope = gpuInfo?.quadtreePressureIterationBudget ?? 40;
+  const authoredBandCells = Number(values.interfaceRefinementBandCells ?? 4);
+  const authoredGradingLayers = Number(values.surfaceRefinementGradingLayers ?? 1);
+  // Coarse band (factor one) and the 4x/8x fine band take different protection
+  // widths for the same authored band, so the readout has to know which.
+  const authoredFineFactor = Number(values.globalFineLevelSetFactor ?? 1);
   const resolved = {
     tolerance: octreeDialledRelativeTolerance(
       scene.numerics.pressureRelativeTolerance, dials),
     iterationCap: octreeDialledIterationCap(builtEnvelope, dials),
+    // The authored band and grading are ordinary method params, so the panel
+    // can resolve the same width the shader will compute. Leaf size 2 is the
+    // finest merge candidate, i.e. the width that governs the cells around the
+    // surface itself rather than the coarser rungs behind it.
+    bandWidthCells: octreeDialledSurfaceBand(
+      authoredBandCells, authoredGradingLayers, authoredFineFactor, dials).widthCells,
   };
   const executed = gpuInfo?.quadtreePressureIterationsUsed;
   const anyOverridden = OCTREE_RUNTIME_DIALS.some((spec) => spec.key in overrides);
