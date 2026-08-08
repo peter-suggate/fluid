@@ -46,6 +46,7 @@
  *   FLUID_SURFACE_PHI      1 to print phi in cells on that slice
  *   FLUID_SURFACE_ROWS     1 to print raw row-origin histograms
  *   FLUID_STAGED_OWNER_CENSUS  1 to count dense cells mapped to coarse pressure rows
+ *   FLUID_EXTENSION_BAND_CENSUS  1 to count compact velocity faces by extension layer
  */
 import assert from "node:assert/strict";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -535,6 +536,7 @@ try {
         maximumInterfaceSpeed?: number;
       } | undefined>;
       losassoExtensionControl?: GPUBuffer;
+      losassoBackend?: { extensionBand?: { source?: { faceMetrics?: GPUBuffer } } };
     };
   }).octreeProjection;
   const projectionRuntime = projection as unknown as {
@@ -615,14 +617,30 @@ try {
         extensionControlBytes.byteOffset, extensionControlBytes.byteLength / 4))
       : undefined;
     const extensionBandFaces = extensionBandControl?.[2];
+    let extensionBandLayers: number[] | undefined;
+    const extensionMetrics = projection?.losassoBackend?.extensionBand?.source?.faceMetrics;
+    if (process.env.FLUID_EXTENSION_BAND_CENSUS === "1"
+      && extensionMetrics && extensionBandFaces !== undefined) {
+      const bytes = await readBufferBinding(device, { buffer: extensionMetrics },
+        extensionMetrics.size);
+      const metrics = new Uint32Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 4);
+      extensionBandLayers = new Array<number>(8).fill(0);
+      for (let face = 0; face < Math.min(extensionBandFaces, metrics.length / 4); face += 1) {
+        const layer = metrics[4 * face + 3] ?? 0;
+        if (layer < extensionBandLayers.length) extensionBandLayers[layer]! += 1;
+      }
+    }
     let stagedOwnerCells: number | undefined;
+    let stagedOwnerRows: number | undefined;
     let stagedMacValid: number | undefined;
     let stagedRawMacValid: number | undefined;
     let stagedMacInvalid: number | undefined;
     let stagedRawBoundary: number | undefined;
     if (process.env.FLUID_STAGED_OWNER_CENSUS === "1" && stagedVelocity) {
-      const staged = new Uint32Array(await readBufferBinding(device, { buffer: stagedVelocity },
-        stagedVelocity.size));
+      const stagedBytes = await readBufferBinding(device, { buffer: stagedVelocity },
+        stagedVelocity.size);
+      const staged = new Uint32Array(stagedBytes.buffer, stagedBytes.byteOffset,
+        stagedBytes.byteLength / 4);
       const [nx, ny, nz] = dimensions;
       const mac = (nx + 1) * ny * nz + nx * (ny + 1) * nz + nx * ny * (nz + 1);
       const stagedFloats = new Float32Array(staged.buffer, staged.byteOffset, staged.length);
@@ -636,6 +654,8 @@ try {
         .reduce((count, value) => count + Number(value === 0x7fc0_0001), 0);
       stagedOwnerCells = staged.subarray(2 * mac, 2 * mac + nx * ny * nz)
         .reduce((count, encoded) => count + Number(encoded !== 0), 0);
+      stagedOwnerRows = new Set(staged.subarray(2 * mac, 2 * mac + nx * ny * nz)
+        .filter((encoded) => encoded !== 0)).size;
     }
     const stats = await solver.readStats() as unknown as Record<string, unknown>;
     samples.push({
@@ -658,7 +678,9 @@ try {
       coarseVolume,
       extensionBandControl,
       extensionBandFaces,
+      extensionBandLayers,
       stagedOwnerCells,
+      stagedOwnerRows,
       stagedMacValid,
       stagedMacInvalid,
       stagedRawMacValid,
