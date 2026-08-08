@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { scenePresets } from "../lib/scenes";
 import {
+  coarseSummaryWGSL,
   planOctreeCoarseSummary,
   planOctreeRedistanceSweeps,
 } from "../lib/webgpu-octree-coarse-summary";
@@ -43,6 +44,24 @@ test("factor-one coarse summary uses B4 nodes and bounded sparse entries", () =>
   assert.equal(plan.entryCapacity, 73);
   assert.ok(plan.directoryWords * 4 < 64 * 1_024,
     "the complete coarse lattice remains far smaller than the former 641 KiB fine band");
+});
+
+test("factor-one hierarchy publishes exact owner phase and centre evidence", () => {
+  assert.match(coarseSummaryWGSL,
+    /let nodeSize=4u<<level;let local=q%vec3u\(nodeSize\);let half=nodeSize\/2u;/,
+    "centre coordinates must be relative to the hierarchy node, not the B4 child");
+  assert.match(coarseSummaryWGSL,
+    /let centreSample=all\(local>=vec3u\(half-1u\)\)&&all\(local<=vec3u\(half\)\)/,
+    "the eight dense samples straddling the pressure-cell centre are authoritative");
+  assert.match(coarseSummaryWGSL,
+    /if\(centreSample\)\{atomicAdd\(&directory\[base\+7u\],bitcast<u32>\(i32\(round\(65536\.\*value\)\)\)\);\}/,
+    "B4 entries must retain a signed fixed-point centre sum alongside their masks");
+  assert.match(coarseSummaryWGSL,
+    /else\{atomicAdd\(&directory\[base\+8u\],1u\);if\(value<0\.0\)\{atomicAdd\(&directory\[base\+9u\],1u\);\}/,
+    "parent entries must retain exact valid and negative sample populations");
+  assert.match(coarseSummaryWGSL,
+    /atomicAdd\(&directory\[base\+10u\],1u\)/,
+    "a parent centre is valid only after all eight central samples publish");
 });
 
 test("coarse summary entry capacity is bounded by live-row ancestry", () => {

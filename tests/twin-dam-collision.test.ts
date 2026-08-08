@@ -3,6 +3,8 @@ import test from "node:test";
 import { createTwinDamCollisionScene, getSceneDefinition, getScenePreset } from "../lib/scenes";
 import { initialFluidBrickComponentBounds, initialFluidBrickContainsCell,
   initialFluidBrickUnionBounds } from "../lib/initial-fluid";
+import { fluidBodyEntity } from "../lib/editor-fluid-body";
+import { boxCenter } from "../lib/editor-entity";
 import { createTallCellLayout, tallCellSettings, type GPUQuality } from "../lib/tall-cell-grid";
 import { createSmokeScenario, isSmokeScenarioId } from "../tools/webgpu-smoke-scenarios";
 import { validateScene } from "../lib/model";
@@ -119,6 +121,29 @@ test("the disconnected reservoirs expose two exact analytic bootstrap boxes", ()
     { minimum: { x: -1.4, y: 0, z: -0.4 }, maximum: { x: -0.6, y: 0.4, z: 0 } },
     { minimum: { x: 0.6, y: 0, z: 0 }, maximum: { x: 1.4, y: 0.4, z: 0.4 } },
   ]);
+});
+
+test("the editor offers one gizmo per reservoir, on the water the solver actually seeds", () => {
+  const scene = createTwinDamCollisionScene();
+  const context = { scene, bodies: [] };
+  const entities = fluidBodyEntity.instances(context);
+  // Both reservoirs, and no third body. The gizmo used to describe the *base*
+  // dam-break condition — which these seeds replace, so it is never seeded —
+  // giving one 1.10 x 0.74 x 0.32 m box over two real 0.8 x 0.4 x 0.4 m slabs
+  // and no way to select the second reservoir at all.
+  assert.equal(entities.length, 2);
+  const solverBounds = initialFluidBrickComponentBounds(scene, DIMENSIONS)!;
+  entities.forEach((entity, index) => {
+    assert.deepEqual(entity.box, {
+      min: solverBounds[index]!.minimum,
+      max: solverBounds[index]!.maximum,
+    }, `${entity.label} must be drawn on the water the bootstrap seeds`);
+    // And each is reachable by a click, which is the other half of the report.
+    const centre = boxCenter(entity.box!);
+    const hit = fluidBodyEntity.pick!(context,
+      { origin: { x: centre.x, y: 5, z: centre.z }, direction: { x: 0, y: -1, z: 0 } });
+    assert.equal(hit?.selection.id, entity.selection.id);
+  });
 });
 
 test("the seeded reservoirs replace the analytic dam rather than adding to it", () => {

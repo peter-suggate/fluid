@@ -689,6 +689,22 @@ function selectedScenarios(): SmokeScenarioId[] {
 
 function applySceneOverrides(scene: SceneDescription, resolvedMaxDt_s = maxDtOverride): SceneDescription {
   if (resolvedMaxDt_s !== undefined) scene.numerics.maxDt_s = resolvedMaxDt_s;
+  const refinementFloor = Number(process.env.FLUID_REFINEMENT_REGION_FLOOR ?? 0);
+  if (refinementFloor > 0) {
+    if (!Number.isSafeInteger(refinementFloor)
+      || (refinementFloor & (refinementFloor - 1)) !== 0) {
+      throw new Error("FLUID_REFINEMENT_REGION_FLOOR must be a positive power of two");
+    }
+    scene.fluid.refinementRegions = [{
+      id: "smoke-full-domain-floor",
+      rule: "minimum-cell-size",
+      minimumCellSize_cells: refinementFloor,
+      min_m: { x: -0.5 * scene.container.width_m, y: 0,
+        z: -0.5 * scene.container.depth_m },
+      max_m: { x: 0.5 * scene.container.width_m, y: scene.container.height_m,
+        z: 0.5 * scene.container.depth_m },
+    }];
+  }
   return scene;
 }
 

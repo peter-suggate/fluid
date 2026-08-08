@@ -1,8 +1,9 @@
-import { damBreakFractions } from "./initial-fluid";
+import { damBreakFractions, initialFluidBrickComponents } from "./initial-fluid";
 import {
   boxCenter,
   boxHandles,
   boxResizeDrag,
+  boxSize,
   moveBoxWithinLimits,
   moveHandles,
   pickSolidBox,
@@ -17,7 +18,8 @@ import {
   type EditorEntityContext,
   type EditorEntityDefinition,
 } from "./editor-entity";
-import { sceneCellSizes_m } from "./scene-lattice";
+import { editorFluidLattice, fluidBrickCenter } from "./editor-fluid";
+import { sceneCellSizes_m, sceneLatticeDimensions } from "./scene-lattice";
 import type { SceneDescription, Vec3 } from "./model";
 
 /**
@@ -54,15 +56,33 @@ export function fluidBodyLimits(scene: SceneDescription): FluidBodyBox {
 }
 
 /**
- * The initial water body as a world-space box, or undefined when the scene has
- * no shapeable body — a fluid-less render scene, or an empty tank.
+ * Whether the base initial condition is water the scene actually has.
  *
- * Painted brick seeds are deliberately not folded in: they are a separate,
- * additive authoring surface with its own tool, and a box gizmo that silently
- * swallowed a painted blob into a rectangle would destroy work.
+ * Seeded bricks *replace* the dam or the tank fill unless the document asks for
+ * them to be added to it — that is `combineInitialBrickWet`, and it is the whole
+ * of how a scene like `twin-dam-collision` describes two reservoirs. Nothing in
+ * the editor used to ask, so a seed-authored scene drew a gizmo around a base
+ * body that is never seeded: on the twin dams, a 1.10 x 0.74 x 0.32 m box over
+ * two real 0.8 x 0.4 x 0.4 m slabs, sharing only a corner with one of them.
+ */
+export function fluidBaseBodyIsSeeded(scene: SceneDescription): boolean {
+  const seeds = scene.fluid.initialBrickSeeds_m;
+  return !seeds?.length || scene.fluid.initialBrickSeedsAdditive === true;
+}
+
+/**
+ * The base initial condition as a world-space box, or undefined when the scene
+ * has no shapeable base body — a fluid-less render scene, an empty tank, or a
+ * document whose brick seeds have replaced it.
+ *
+ * This is one body among possibly several; `fluidBodies` is what enumerates
+ * them. Seeded bricks are not folded into *this* box, because a box gizmo that
+ * silently swallowed a painted blob into a rectangle would destroy work — they
+ * get their own entities instead, each with the handles its shape can honour.
  */
 export function fluidBodyBox(scene: SceneDescription): FluidBodyBox | undefined {
   if (scene.systems?.fluid === false) return undefined;
+  if (!fluidBaseBodyIsSeeded(scene)) return undefined;
   const c = scene.container;
   const limits = fluidBodyLimits(scene);
   if (scene.fluid.initialCondition === "tank-fill") {
@@ -180,6 +200,22 @@ export function fluidBodyBoxVolume_m3(box: FluidBodyBox): number {
 }
 
 /**
+ * Every cubic metre of water the document describes, base and seeds together.
+ *
+ * Seeded bricks are counted as bricks rather than as their bounding boxes: a
+ * painted L holds the volume of its three bricks, and a readout that reported
+ * the box around them would be wrong by the corner that is not there.
+ */
+export function fluidWaterVolume_m3(scene: SceneDescription): number {
+  const base = fluidBodyBox(scene);
+  const lattice = editorFluidLattice(scene);
+  const brick_m3 = lattice.brickSize_m.x * lattice.brickSize_m.y * lattice.brickSize_m.z;
+  const bricks = fluidSeedBodies(scene)
+    .reduce((total, body) => total + body.brickCount, 0);
+  return (base ? fluidBodyBoxVolume_m3(base) : 0) + bricks * brick_m3;
+}
+
+/**
  * Author a box back into the document.
  *
  * The reservoir stays anchor-free only when it has to: a box still sitting in
@@ -225,7 +261,163 @@ export function fluidBodyBoxPatch(
   };
 }
 
+// ---- seeded bodies --------------------------------------------------------
+
+/**
+ * A body of water the seed list describes: one connected run of bricks.
+ *
+ * Identified by the index of its first seed rather than by its position, so a
+ * selection survives the body being moved. The write-back below keeps a
+ * component's seeds at the same place in the list for exactly that reason.
+ */
+export interface FluidSeedBody {
+  readonly id: string;
+  readonly box: FluidBodyBox;
+  /** Indices into `fluid.initialBrickSeeds_m`, ascending. */
+  readonly seedIndices: readonly number[];
+  /** Distinct bricks wetted — the body's volume, in bricks. */
+  readonly brickCount: number;
+  /**
+   * False for an L, a ring, or a hand-painted blob. Those can be moved — a
+   * translation preserves the shape exactly — but not resized, because the only
+   * box a resize could act on is the bounding box, and writing that back would
+   * replace the author's shape with a rectangle.
+   */
+  readonly resizable: boolean;
+}
+
+export const FLUID_SEED_BODY_PREFIX = "fluid-seed-";
+
+/** Every body the seed list describes, in document order. */
+export function fluidSeedBodies(scene: SceneDescription): readonly FluidSeedBody[] {
+  if (scene.systems?.fluid === false || !scene.fluid.initialBrickSeeds_m?.length) return [];
+  return initialFluidBrickComponents(scene, sceneLatticeDimensions(scene)).map((component) => ({
+    id: `${FLUID_SEED_BODY_PREFIX}${component.seedIndices[0]}`,
+    box: { min: component.bounds.minimum, max: component.bounds.maximum },
+    seedIndices: component.seedIndices,
+    brickCount: component.brickCount,
+    resizable: component.rectangular,
+  }));
+}
+
+/** How a seeded body reshapes: onto the brick lattice its seeds are quantized to. */
+export function fluidSeedBodyResizePolicy(scene: SceneDescription): BoxResizePolicy {
+  const brick = editorFluidLattice(scene).brickSize_m;
+  return {
+    snap_m: [brick.x, brick.y, brick.z],
+    limits: fluidBodyLimits(scene),
+    minimum_m: [brick.x, brick.y, brick.z],
+  };
+}
+
+/**
+ * Author a seeded body back into the document as one seed per brick it covers.
+ *
+ * `seeds` replaces exactly this body's entries, spliced in at the position its
+ * first seed held, so every other body keeps its indices and the selection
+ * survives the edit. An empty replacement removes the body; emptying the list
+ * entirely drops the field, because `validateScene` rejects `[]` — and, when the
+ * seeds were replacing the base condition, hands the scene back to its dam.
+ */
+export function fluidSeedBodyPatch(
+  scene: SceneDescription,
+  body: FluidSeedBody,
+  box: FluidBodyBox | undefined,
+): SceneDescription["fluid"] {
+  const lattice = editorFluidLattice(scene);
+  const replaced = new Set(body.seedIndices);
+  const existing = scene.fluid.initialBrickSeeds_m ?? [];
+  const seeds: Vec3[] = [];
+  const brickRange = (axis: "x" | "y" | "z", limit: number) => {
+    if (!box) return [] as number[];
+    const size = lattice.brickSize_m[axis];
+    const from = Math.max(0, Math.round((box.min[axis] - lattice.origin_m[axis]) / size));
+    const to = Math.min(limit, Math.round((box.max[axis] - lattice.origin_m[axis]) / size));
+    return Array.from({ length: Math.max(0, to - from) }, (_unused, step) => from + step);
+  };
+  const written: Vec3[] = [];
+  for (const z of brickRange("z", lattice.bricks.z))
+    for (const y of brickRange("y", lattice.bricks.y))
+      for (const x of brickRange("x", lattice.bricks.x))
+        written.push(fluidBrickCenter(lattice, { x, y, z }));
+  existing.forEach((seed, index) => {
+    if (!replaced.has(index)) { seeds.push(seed); return; }
+    // The whole replacement lands where the body's first seed was.
+    if (index === body.seedIndices[0]) seeds.push(...written);
+  });
+  const { initialBrickSeeds_m: _dropped, ...fluid } = scene.fluid;
+  return seeds.length === 0 ? fluid : { ...fluid, initialBrickSeeds_m: seeds };
+}
+
+/** Slide a seeded body by whole bricks, keeping whatever shape it has. */
+export function moveFluidSeedBody(
+  scene: SceneDescription,
+  body: FluidSeedBody,
+  centre_m: Vec3,
+): SceneDescription["fluid"] {
+  const lattice = editorFluidLattice(scene);
+  const moved = moveBoxWithinLimits(body.box, centre_m, fluidBodyLimits(scene));
+  const step = (axis: "x" | "y" | "z") =>
+    Math.round((moved.min[axis] - body.box.min[axis]) / lattice.brickSize_m[axis]) * lattice.brickSize_m[axis];
+  const delta = { x: step("x"), y: step("y"), z: step("z") };
+  if (delta.x === 0 && delta.y === 0 && delta.z === 0) return scene.fluid;
+  const replaced = new Set(body.seedIndices);
+  // Translated per seed rather than regenerated from the box: a blob is not a
+  // box, and a move must never be the edit that turns it into one.
+  const seeds = (scene.fluid.initialBrickSeeds_m ?? []).map((seed, index) => replaced.has(index)
+    ? { x: seed.x + delta.x, y: seed.y + delta.y, z: seed.z + delta.z }
+    : seed);
+  return { ...scene.fluid, initialBrickSeeds_m: seeds };
+}
+
 // ---- entity ---------------------------------------------------------------
+
+function fluidSeedBodyEntityFor(
+  context: EditorEntityContext,
+  body: FluidSeedBody,
+  ordinal: number,
+): EditorEntity {
+  const { scene } = context;
+  const size = boxSize(body.box);
+  const label = fluidBodyLabel(scene, ordinal);
+  const move = (centre_m: Vec3) => ({ fluid: moveFluidSeedBody(scene, body, centre_m) });
+  return {
+    selection: { kind: "fluid-body", id: body.id },
+    label,
+    tone: "fluid",
+    frame: WORLD_FRAME,
+    box: body.box,
+    sizeLabel: `${[size.x, size.y, size.z].map((value) => value.toFixed(2)).join(" × ")} m`,
+    handles: [
+      // A blob offers no resize handles at all, rather than handles that would
+      // rewrite it as its own bounding box.
+      ...(body.resizable
+        ? boxHandles(body.box, {
+          drag: boxResizeDrag(body.box, fluidSeedBodyResizePolicy(scene),
+            (next) => ({ fluid: fluidSeedBodyPatch(scene, body, next) })),
+        })
+        : []),
+      ...moveHandles(boxCenter(body.box), move),
+    ],
+    draftSubject: "fluid-body",
+    editLabel: (handle) => handle.space === "world" ? `Moved ${label}` : `Reshaped ${label}`,
+    fields: positionFields(boxCenter(body.box), move),
+    remove: () => ({ ...scene, fluid: fluidSeedBodyPatch(scene, body, undefined) }),
+  };
+}
+
+/**
+ * What to call one body when the scene has several.
+ *
+ * Numbered across all of them, base included, because from the viewport they are
+ * all just bodies of water: "WATER" beside "WATER 1" reads as two different
+ * kinds of thing when the only difference is which field of the document happens
+ * to describe them.
+ */
+function fluidBodyLabel(scene: SceneDescription, ordinal: number): string {
+  const total = (fluidBodyBox(scene) ? 1 : 0) + fluidSeedBodies(scene).length;
+  return total > 1 ? `WATER ${ordinal}` : "WATER";
+}
 
 function fluidBodyEntityFor(context: EditorEntityContext): EditorEntity | undefined {
   const scene = context.scene;
@@ -234,7 +426,7 @@ function fluidBodyEntityFor(context: EditorEntityContext): EditorEntity | undefi
   const size = [box.max.x - box.min.x, box.max.y - box.min.y, box.max.z - box.min.z];
   return {
     selection: { kind: "fluid-body", id: FLUID_BODY_SELECTION_ID },
-    label: "WATER",
+    label: fluidBodyLabel(scene, 1),
     tone: "fluid",
     frame: WORLD_FRAME,
     box,
@@ -270,19 +462,35 @@ export const fluidBodyEntity: EditorEntityDefinition = {
   kind: "fluid-body",
   surfacedBy: (tool) => tool === "select",
   instances: (context) => {
-    const entity = fluidBodyEntityFor(context);
-    return entity ? [entity] : [];
+    const base = fluidBodyEntityFor(context);
+    const offset = base ? 1 : 0;
+    return [
+      ...(base ? [base] : []),
+      ...fluidSeedBodies(context.scene)
+        .map((body, index) => fluidSeedBodyEntityFor(context, body, offset + index + 1)),
+    ];
   },
   find: (context, id) => {
-    if (id !== FLUID_BODY_SELECTION_ID) return undefined;
-    return fluidBodyEntityFor(context);
+    if (id === FLUID_BODY_SELECTION_ID) return fluidBodyEntityFor(context);
+    const bodies = fluidSeedBodies(context.scene);
+    const index = bodies.findIndex((body) => body.id === id);
+    if (index < 0) return undefined;
+    const offset = fluidBodyBox(context.scene) ? 1 : 0;
+    return fluidSeedBodyEntityFor(context, bodies[index]!, offset + index + 1);
   },
   pick: (context, ray) => {
-    const box = fluidBodyBox(context.scene);
-    if (!box) return undefined;
-    const distance_m = pickSolidBox(ray, box);
-    return distance_m === undefined
-      ? undefined
-      : { selection: { kind: "fluid-body", id: FLUID_BODY_SELECTION_ID }, distance_m };
+    let nearest: { id: string; distance_m: number } | undefined;
+    const consider = (id: string, box: FluidBodyBox | undefined) => {
+      const distance_m = box && pickSolidBox(ray, box);
+      if (distance_m !== undefined && (!nearest || distance_m < nearest.distance_m)) {
+        nearest = { id, distance_m };
+      }
+    };
+    consider(FLUID_BODY_SELECTION_ID, fluidBodyBox(context.scene));
+    for (const body of fluidSeedBodies(context.scene)) consider(body.id, body.box);
+    return nearest && {
+      selection: { kind: "fluid-body", id: nearest.id },
+      distance_m: nearest.distance_m,
+    };
   },
 };

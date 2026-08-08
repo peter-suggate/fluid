@@ -121,9 +121,9 @@ fn losassoStagedIndex(axis:u32,q:vec3u)->u32{let d=p.velocityDimensions;
  let countX=(d.x+1u)*d.y*d.z;if(axis==0u){return q.x+(d.x+1u)*(q.y+d.y*q.z);}
  let countY=d.x*(d.y+1u)*d.z;if(axis==1u){return countX+q.x+d.x*(q.y+(d.y+1u)*q.z);}
  return countX+countY+q.x+d.x*(q.y+d.y*q.z);}
-struct LosassoVelocitySample{value:vec3f,valid:u32}
+struct LosassoVelocitySample{value:vec3f,valid:u32,reason:u32}
 fn losassoVelocityAtGrid(grid:vec3f)->LosassoVelocitySample{
- if(arrayLength(&coarse)<4u||coarse[3]!=1u){return LosassoVelocitySample(vec3f(0),0u);}
+ if(arrayLength(&coarse)<4u||coarse[3]!=1u){return LosassoVelocitySample(vec3f(0),0u,1u);}
  var velocity=vec3f(0);
  for(var axis=0u;axis<3u;axis+=1u){var staggered=grid-vec3f(.5);staggered[axis]=grid[axis];
   let base=vec3i(floor(staggered));let fraction=fract(staggered);var exact:array<i32,36>;
@@ -133,14 +133,14 @@ fn losassoVelocityAtGrid(grid:vec3f)->LosassoVelocitySample{
    let weight=losassoSymmetricWeight(weights);if(weight==0.){continue;}var coordinate=base+offset;
    var upper=p.velocityDimensions-vec3u(1);upper[axis]=p.velocityDimensions[axis];
    for(var component=0u;component<3u;component+=1u){coordinate[component]=clamp(coordinate[component],0,i32(upper[component]));}
-   let at=losassoStagedIndex(axis,vec3u(coordinate));if(at>=arrayLength(&stagedVelocity)){return LosassoVelocitySample(vec3f(0),0u);}
-   let sample=stagedVelocity[at];if(sample==0x7fc00000u){return LosassoVelocitySample(vec3f(0),0u);}
-   let value=bitcast<f32>(sample);if(!finite(value)){return LosassoVelocitySample(vec3f(0),0u);}
+   let at=losassoStagedIndex(axis,vec3u(coordinate));if(at>=arrayLength(&stagedVelocity)){return LosassoVelocitySample(vec3f(0),0u,2u);}
+   let sample=stagedVelocity[at];if(sample==0x7fc00000u){return LosassoVelocitySample(vec3f(0),0u,3u);}
+   let value=bitcast<f32>(sample);if(!finite(value)){return LosassoVelocitySample(vec3f(0),0u,3u);}
    losassoExactAdd(&exact,weight*value);
   }
   velocity[axis]=losassoExactValue(&exact);
  }
- return LosassoVelocitySample(velocity,select(0u,1u,finite3(velocity)));
+ let valid=select(0u,1u,finite3(velocity));return LosassoVelocitySample(velocity,valid,select(4u,0u,valid!=0u));
 }
 fn losassoVelocityAt(position:vec3f)->LosassoVelocitySample{
  return losassoVelocityAtGrid((position-p.domainOrigin)/p.velocityCellSize);

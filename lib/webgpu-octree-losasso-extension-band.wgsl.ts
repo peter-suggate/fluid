@@ -122,23 +122,108 @@ fn tangentB(axis:u32)->vec3u{return select(vec3u(0,0,1),vec3u(0,1,0),axis==2u);}
 fn containingCompact(axis:u32,q:vec3u)->u32{var span=1u;var logSpan=0u;loop{var origin=q;
  for(var c=0u;c<3u;c+=1u){if(c!=axis){origin[c]=(q[c]/span)*span;}}let found=exactCompact(axis|(logSpan<<2u),origin);
  if(found!=INVALID){return found;}if(span>=p.maximumLeafSize){break;}span*=2u;logSpan+=1u;}return INVALID;}
+// Equal-size wet seed faces on both sides identify a real coarse leaf. Its
+// interior finest planes are reconstruction sites, not extension-band faces.
+fn insideWetCoarseLeaf(axis:u32,q:vec3u)->bool{var span=2u;var logSpan=1u;loop{
+ let low=(q[axis]/span)*span;let high=low+span;
+ if(q[axis]>low&&high<=p.velocityDimensions[axis]){var lowQ=q;var highQ=q;lowQ[axis]=low;highQ[axis]=high;
+  for(var tangent=0u;tangent<3u;tangent+=1u){if(tangent!=axis){
+   lowQ[tangent]=(q[tangent]/span)*span;highQ[tangent]=lowQ[tangent];}}
+  let packed=axis|(logSpan<<2u);let lowFace=exactCompact(packed,lowQ);let highFace=exactCompact(packed,highQ);
+  if(lowFace!=INVALID&&highFace!=INVALID&&(metrics[lowFace].y&SEED)!=0u&&(metrics[highFace].y&SEED)!=0u
+   &&(geometry[lowFace].x>>2u)==logSpan&&(geometry[highFace].x>>2u)==logSpan){return true;}}
+ if(span>=p.maximumLeafSize){break;}span*=2u;logSpan+=1u;}return false;}
 fn linearInvocation(group:vec3u,lane:u32)->u32{return 64u*(group.x+65535u*group.y)+lane;}
 
 const STAGED_INVALID:u32=0x7fc00000u;const STAGED_BOUNDARY_ZERO:u32=0x7fc00001u;
+fn stagedMacCount()->u32{let d=p.velocityDimensions;
+ return(d.x+1u)*d.y*d.z+d.x*(d.y+1u)*d.z+d.x*d.y*(d.z+1u);}
+fn stagedOwnerOffset()->u32{return 2u*stagedMacCount();}
+fn stagedCellIndex(q:vec3u)->u32{return q.x+p.velocityDimensions.x*(q.y+p.velocityDimensions.y*q.z);}
+fn stagedOwnerRow(q:vec3u)->u32{let at=stagedOwnerOffset()+stagedCellIndex(q);
+ if(at>=arrayLength(&stagedVelocityArena)){return INVALID;}let encoded=stagedVelocityArena[at];
+ return select(INVALID,encoded-1u,encoded!=0u);}
+// Span-1 air records may also shadow either endpoint of a coarse bracket. Walk
+// the same dyadic covering hierarchy as containingCompact, but ignore a record
+// whose extension remained starved so reconstruction can reach the real wet
+// face behind it.
+fn containingFiniteVelocity(axis:u32,q:vec3u)->u32{var span=1u;var logSpan=0u;loop{var origin=q;
+ for(var c=0u;c<3u;c+=1u){if(c!=axis){origin[c]=(q[c]/span)*span;}}
+ let found=exactCompact(axis|(logSpan<<2u),origin);
+ if(found!=INVALID&&found<arrayLength(&seedVelocity)&&finite(seedVelocity[found])){return found;}
+ if(span>=p.maximumLeafSize){break;}span*=2u;logSpan+=1u;}return INVALID;}
+// Resolve the wet pressure leaf adjacent to this MAC plane, preferring the
+// coarsest neighbor exactly as Losasso section 3 prescribes. Interpolation is
+// then between that leaf's own two normal faces, never an arbitrary dyadic
+// bracket that merely happens to exist around the query.
+fn stagedOwnerVelocity(owner:u32,axis:u32,q:vec3u)->u32{
+ if(owner==INVALID){return STAGED_INVALID;}let entry=8u+8u*owner;
+ if(entry+5u>=arrayLength(&coarsePhiDirectory)||(coarsePhiDirectory[entry+5u]&9u)!=9u){return STAGED_INVALID;}
+ let cellPlusOne=coarsePhiDirectory[entry];let ownerSize=coarsePhiDirectory[entry+1u];
+ if(cellPlusOne==0u||ownerSize==0u){return STAGED_INVALID;}
+ let cell=cellPlusOne-1u;let origin=vec3u(cell%p.velocityDimensions.x,
+  (cell/p.velocityDimensions.x)%p.velocityDimensions.y,cell/(p.velocityDimensions.x*p.velocityDimensions.y));
+ var lowQ=q;for(var component=0u;component<3u;component+=1u){if(component!=axis){
+  lowQ[component]=clamp(q[component],origin[component],min(p.velocityDimensions[component]-1u,
+   origin[component]+ownerSize-1u));}}
+ var highQ=lowQ;lowQ[axis]=origin[axis];highQ[axis]=origin[axis]+ownerSize;
+ let lowFace=containingFiniteVelocity(axis,lowQ);let highFace=containingFiniteVelocity(axis,highQ);
+ if(lowFace!=INVALID&&highFace!=INVALID){let normal=clamp(q[axis],origin[axis],origin[axis]+ownerSize);
+  let fraction=f32(normal-origin[axis])/f32(ownerSize);
+  let value=mix(seedVelocity[lowFace],seedVelocity[highFace],fraction);
+  if(finite(value)){return bitcast<u32>(value);}}
+ if(lowFace!=INVALID){return bitcast<u32>(seedVelocity[lowFace]);}
+ if(highFace!=INVALID){return bitcast<u32>(seedVelocity[highFace]);}
+ return STAGED_INVALID;}
+fn stagedOwningLeafVelocity(axis:u32,q:vec3u)->u32{
+ if(arrayLength(&coarsePhiDirectory)<8u||coarsePhiDirectory[0]!=0x80000000u){return STAGED_INVALID;}
+ var owner=INVALID;var ownerSize=0u;
+ for(var side=0u;side<2u;side+=1u){var cell=q;var inside=true;
+  if(side==0u){if(cell[axis]==0u){inside=false;}else{cell[axis]-=1u;}}
+  else if(cell[axis]>=p.velocityDimensions[axis]){inside=false;}
+  if(inside){let row=stagedOwnerRow(cell);if(row!=INVALID){let entry=8u+8u*row;
+   if(entry+5u<arrayLength(&coarsePhiDirectory)){let size=coarsePhiDirectory[entry+1u];
+    if(size>ownerSize&&(coarsePhiDirectory[entry+5u]&9u)==9u){owner=row;ownerSize=size;}}}}}
+ return stagedOwnerVelocity(owner,axis,q);}
+// The transport stencil straddles the air side of the interface. During a
+// topology handoff that site may precede W7 graph republication, but the wet
+// pressure leaves and their real bounding faces are already authoritative.
+// Blend the local 5x5x5 owner neighborhood so diagonal trilinear corners do
+// not inherit nearest-leaf/Voronoi discontinuities. Only zero-coverage sites
+// use longer 26-direction rays to preserve complete W7 reach.
+fn stagedNearbyOwningLeafVelocity(axis:u32,q:vec3u)->u32{
+ let d=p.velocityDimensions;let anchor=min(q,d-vec3u(1u));let fullReach=min(p.maximumLeafSize,p.band.w);
+ let reach=min(2u,fullReach);
+ var exact:array<i32,36>;var totalWeight=0u;
+ let signedReach=i32(reach);
+ for(var dz=-signedReach;dz<=signedReach;dz+=1){for(var dy=-signedReach;dy<=signedReach;dy+=1){
+  for(var dx=-signedReach;dx<=signedReach;dx+=1){let distance=u32(max(abs(dx),max(abs(dy),abs(dz))));
+   if(distance==0u){continue;}let weight=reach+1u-distance;let delta=vec3i(dx,dy,dz);
+   let signedCell=vec3i(anchor)+delta;let inside=all(signedCell>=vec3i(0))&&all(signedCell<vec3i(d));
+    if(inside){let cell=vec3u(signedCell);let value=stagedOwnerVelocity(stagedOwnerRow(cell),axis,q);
+    if(value!=STAGED_INVALID&&value!=STAGED_BOUNDARY_ZERO){exactAdd(&exact,f32(weight)*bitcast<f32>(value));totalWeight+=weight;}}}}}
+ if(totalWeight==0u){for(var distance=3u;distance<=fullReach;distance+=1u){let weight=fullReach+1u-distance;
+  for(var direction=0u;direction<27u;direction+=1u){if(direction==13u){continue;}
+   let delta=vec3i(i32(direction%3u)-1,i32((direction/3u)%3u)-1,i32(direction/9u)-1)*i32(distance);
+   let signedCell=vec3i(anchor)+delta;let inside=all(signedCell>=vec3i(0))&&all(signedCell<vec3i(d));
+   if(inside){let cell=vec3u(signedCell);let value=stagedOwnerVelocity(stagedOwnerRow(cell),axis,q);
+    if(value!=STAGED_INVALID&&value!=STAGED_BOUNDARY_ZERO){exactAdd(&exact,f32(weight)*bitcast<f32>(value));totalWeight+=weight;}}}}}
+ if(totalWeight>0u){let value=exactValue(&exact)/f32(totalWeight);if(finite(value)){return bitcast<u32>(value);}}
+ return STAGED_INVALID;}
 // A finest-lattice MAC plane can lie strictly inside a coarse leaf. There is
 // deliberately no face record on that plane, but that is not missing velocity:
 // Losasso reconstructs a temporary coarsened value from the leaf's two real
 // bounding faces. Find the smallest dyadic bracket that owns the plane and
 // interpolate the two face values at this tangential sub-position. At a 2:1
-// transition containingCompact resolves each bounding sample to the fine or
-// coarse face that covers exactly this sub-area.
+// transition containingFiniteVelocity resolves each bounding sample past any
+// starved shadow to the face that covers exactly this sub-area.
 fn stagedCoarsenedVelocity(axis:u32,q:vec3u)->u32{
  var span=2u;
  loop{
   let low=(q[axis]/span)*span;let high=low+span;
   if(q[axis]>low&&high<=p.velocityDimensions[axis]){
    var lowQ=q;var highQ=q;lowQ[axis]=low;highQ[axis]=high;
-   let lowFace=containingCompact(axis,lowQ);let highFace=containingCompact(axis,highQ);
+   let lowFace=containingFiniteVelocity(axis,lowQ);let highFace=containingFiniteVelocity(axis,highQ);
    if(lowFace!=INVALID&&highFace!=INVALID&&lowFace<arrayLength(&seedVelocity)
       &&highFace<arrayLength(&seedVelocity)){
     let a=seedVelocity[lowFace];let b=seedVelocity[highFace];
@@ -151,19 +236,36 @@ fn stagedCoarsenedVelocity(axis:u32,q:vec3u)->u32{
   }
   if(span>=p.maximumLeafSize){break;}span*=2u;
  }
+ // A 2:1 transition or a free-surface boundary can leave the aligned pair
+ // incomplete. Continue with the extension graph's own six-axis metric and
+ // average the nearest finite shell. Along the normal this is the usual
+ // one-sided constant extension; along a tangent it bridges a split face.
+ var upper=p.velocityDimensions-vec3u(1u);upper[axis]=p.velocityDimensions[axis];
+ let fallbackReach=min(p.maximumLeafSize,p.band.w);
+ for(var distance=1u;distance<=fallbackReach;distance+=1u){
+  var exact:array<i32,36>;var count=0u;
+  for(var direction=0u;direction<6u;direction+=1u){let component=direction>>1u;var candidate=q;var inside=true;
+   if((direction&1u)==0u){if(candidate[component]<distance){inside=false;}else{candidate[component]-=distance;}}
+   else{if(candidate[component]+distance>upper[component]){inside=false;}else{candidate[component]+=distance;}}
+   if(inside){let found=containingFiniteVelocity(axis,candidate);
+    if(found!=INVALID){exactAdd(&exact,seedVelocity[found]);count+=1u;}}}
+  if(count>0u){let value=exactValue(&exact)/f32(count);if(finite(value)){return bitcast<u32>(value);}}}
  return STAGED_INVALID;
 }
 fn stagedRawVelocity(axis:u32,q:vec3u)->u32{
  if(arrayLength(&control)<4u||atomicLoad(&control[3])!=VALID){return STAGED_INVALID;}
  let face=containingCompact(axis,q);if(face!=INVALID){let value=seedVelocity[face];
-  if(finite(value)){return bitcast<u32>(value);}return STAGED_INVALID;}
+  if(finite(value)){return bitcast<u32>(value);}}
+ let owningValue=stagedOwningLeafVelocity(axis,q);if(owningValue!=STAGED_INVALID){return owningValue;}
+ let coveringFace=containingFiniteVelocity(axis,q);if(coveringFace!=INVALID){
+  return bitcast<u32>(seedVelocity[coveringFace]);}
+ let nearbyOwningValue=stagedNearbyOwningLeafVelocity(axis,q);
+ if(nearbyOwningValue!=STAGED_INVALID){return nearbyOwningValue;}
  let lowWall=q[axis]==0u;let highWall=q[axis]==p.velocityDimensions[axis];
  let wallBit=2u*axis+select(1u,0u,lowWall);let closed=(p.closedBoundaries.x&(1u<<wallBit))!=0u;
  if((lowWall||highWall)&&closed){return STAGED_BOUNDARY_ZERO;}
  return stagedCoarsenedVelocity(axis,q);}
 
-fn stagedMacCount()->u32{let d=p.velocityDimensions;
- return(d.x+1u)*d.y*d.z+d.x*(d.y+1u)*d.z+d.x*d.y*(d.z+1u);}
 fn stagedMacIndex(axis:u32,q:vec3u)->u32{let d=p.velocityDimensions;
  let countX=(d.x+1u)*d.y*d.z;if(axis==0u){return q.x+(d.x+1u)*(q.y+d.y*q.z);}
  let countY=d.x*(d.y+1u)*d.z;if(axis==1u){return countX+q.x+d.x*(q.y+(d.y+1u)*q.z);}
@@ -239,6 +341,23 @@ fn beginLosassoExtensionBand(@builtin(workgroup_id)group:vec3u,@builtin(local_in
  if(id<p.band.x){metrics[id]=vec4u(0u);seedWetFace[id]=INVALID;seedVelocity[id]=0.;}}
 
 @compute @workgroup_size(64)
+fn clearLosassoStagedCoarseOwners(@builtin(workgroup_id)group:vec3u,@builtin(local_invocation_index)lane:u32){
+ let item=linearInvocation(group,lane);let volume=p.velocityDimensions.x*p.velocityDimensions.y*p.velocityDimensions.z;
+ let at=stagedOwnerOffset()+item;if(item<volume&&at<arrayLength(&stagedVelocityArena)){stagedVelocityArena[at]=0u;}}
+
+@compute @workgroup_size(64)
+fn publishLosassoStagedCoarseOwners(@builtin(workgroup_id)group:vec3u,@builtin(local_invocation_index)lane:u32){
+ let row=linearInvocation(group,lane);if(arrayLength(&coarsePhiDirectory)<8u||coarsePhiDirectory[0]!=0x80000000u
+  ||row>=coarsePhiDirectory[2]){return;}let entry=8u+8u*row;if(entry+5u>=arrayLength(&coarsePhiDirectory)){return;}
+ let cellPlusOne=coarsePhiDirectory[entry];let size=coarsePhiDirectory[entry+1u];let flags=coarsePhiDirectory[entry+5u];
+ if(cellPlusOne==0u||size==0u||(flags&9u)!=9u){return;}let cell=cellPlusOne-1u;
+ let origin=vec3u(cell%p.velocityDimensions.x,(cell/p.velocityDimensions.x)%p.velocityDimensions.y,
+  cell/(p.velocityDimensions.x*p.velocityDimensions.y));
+ for(var z=0u;z<size;z+=1u){for(var y=0u;y<size;y+=1u){for(var x=0u;x<size;x+=1u){let q=origin+vec3u(x,y,z);
+  if(any(q>=p.velocityDimensions)){continue;}let at=stagedOwnerOffset()+stagedCellIndex(q);
+  if(at<arrayLength(&stagedVelocityArena)){stagedVelocityArena[at]=row+1u;}}}}}
+
+@compute @workgroup_size(64)
 fn publishLosassoWetSeedFaces(@builtin(workgroup_id)group:vec3u,@builtin(local_invocation_index)lane:u32){let wet=linearInvocation(group,lane);
  if(arrayLength(&wetControl)<4u||wetControl[3]!=1u){if(wet==0u){atomicOr(&control[4],ERROR_WET_AUTHORITY);}return;}
  if(wet>=wetControl[2]||wet>=arrayLength(&wetGeometry)){return;}let record=wetGeometry[wet];appendWetFace(record,vec4u(record.x&3u,SEED|ACTIVE,0u,0u),wet);}
@@ -299,6 +418,7 @@ fn publishLosassoCoarseAirBandFaces(@builtin(workgroup_id)group:vec3u,@builtin(l
  if(code<countX){q.x=code%(d.x+1u);code/=d.x+1u;q.y=code%d.y;q.z=code/d.y;}
  else{code-=countX;axis=1u;if(code<countY){q.x=code%d.x;code/=d.x;q.y=code%(d.y+1u);q.z=code/(d.y+1u);}
   else{code-=countY;axis=2u;q.x=code%d.x;code/=d.x;q.y=code%d.y;q.z=code/d.y;}}
+ if(insideWetCoarseLeaf(axis,q)){return;}
  var centre=vec3f(q);for(var component=0u;component<3u;component+=1u){if(component!=axis){centre[component]+=.5;}}
  var lowPoint=centre;var highPoint=centre;lowPoint[axis]-=.25;highPoint[axis]+=.25;
  let low=coarsePhi(lowPoint);let high=coarsePhi(highPoint);

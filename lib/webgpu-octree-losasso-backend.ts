@@ -972,6 +972,11 @@ export class WebGPUOctreeLosassoCoarseBackend {
     return this.extensionBand.encodeOncePerAdvance(broker, advance, topologyEpoch);
   }
 
+  encodeTransportVelocityStaging(broker: PassBroker): void {
+    this.assertReady();
+    this.extensionBand.encodeTransportStaging(broker);
+  }
+
   get extensionBandPublished(): boolean { return this.extensionBand.hasPublishedGraph; }
 
   destroy(): void {

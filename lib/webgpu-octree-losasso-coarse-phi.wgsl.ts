@@ -89,14 +89,15 @@ fn advectLosassoCoarsePhi(@builtin(global_invocation_id)gid:vec3u){let row=gid.x
  let origin=cellOf(header.cell);let centre=vec3f(origin)+vec3f(.5*f32(header.size));let transported=trackerPhi(centre);
  if(transported.valid==0u){rowPhi[row]=vec4u(0);nextGradient[row]=vec4f(0);return;}
  var value=transported.value;let world=p.domainOrigin+centre*p.velocityCellSize;let sourceValue=inflowPhi(world);if(p.inflowVelocityStrength.w>0.&&finite(sourceValue)){value=min(value,max(sourceValue,-.5*p.velocityCellSize*clamp(p.inflowVelocityStrength.w,0.,1.)));}
- // Compact pressure rows are a restriction cache, not a second transported
- // affine surface.  Keep their centre value exact and derive the interface
- // bit from the dense coarse lattice's six neighbouring row-width samples;
- // renderer/topology consumers read the dense complement directly.
- let gradient=vec3f(0);let minimum=value;let maximum=value;var flags=VALID|FINITE;
- for(var axis=0u;axis<3u;axis+=1u){for(var side=0u;side<2u;side+=1u){var neighbor=centre;
-  neighbor[axis]+=select(-f32(header.size),f32(header.size),side!=0u);let sample=trackerValue(neighbor);
-  if(sample.valid!=0u&&((value<0.)!=(sample.value<0.))){flags|=INTERFACE;}}}
+ // Retain the dense sub-leaf interval and gradient. A partially wet S=8 row
+ // must not disappear merely because its geometric centre is dry.
+ let gradient=transported.gradient;var minimum=value;var maximum=value;var complete=true;
+ for(var z=0u;z<header.size;z+=1u){for(var y=0u;y<header.size;y+=1u){for(var x=0u;x<header.size;x+=1u){
+  let sample=trackerValue(vec3f(origin+vec3u(x,y,z))+vec3f(.5));
+  if(sample.valid==0u){complete=false;continue;}minimum=min(minimum,sample.value);maximum=max(maximum,sample.value);}}}
+ if(!complete){let extent=.5*f32(header.size)*p.velocityCellSize;
+  minimum=min(minimum,value-extent);maximum=max(maximum,value+extent);}
+ var flags=VALID|FINITE;if(minimum<=0.&&maximum>=0.){flags|=INTERFACE;}
  rowPhi[row]=vec4u(bitcast<u32>(value),bitcast<u32>(minimum),bitcast<u32>(maximum),flags);nextGradient[row]=vec4f(gradient,1);}
 @compute @workgroup_size(64)
 fn publishLosassoCoarseOnlyRows(@builtin(global_invocation_id)gid:vec3u){let row=gid.x;if(row>=rows()){return;}let header=headers[row];let value=rowPhi[row];let entry=20u+8u*row;
@@ -140,11 +141,9 @@ fn publishLosassoCoarseOnlyGhosts(@builtin(global_invocation_id)gid:vec3u){let f
    // rigid owner is displaced liquid, hence Neumann even on a tangent face.
    let carvedLiquid=solid.y>=0.&&underlying.valid!=0u&&underlying.value<0.;
    if(solid.x>=.999999||carvedLiquid){face.reserved|=FACE_SOLID_NEUMANN;face.openFraction=0.;flags=4u;}
-   else if(liquid<0.&&sampled.valid!=0u&&sampled.value>0.){airPhi=sampled.value;theta=clamp(-liquid/(airPhi-liquid),1e-4,1.);distance=theta*dual;face.inverseDistance=1./distance;face.openFraction=1.;flags=1u;}
-   // No compact row is the atmospheric p=0 side staged by writeFace. Failure
-   // to recover an additional phi sample does not turn that air cell into a
-   // solid: retain the staged open fraction and dual distance. Genuine solid
-   // interiors and closed domain walls were classified in the branches above.
+   else if(liquid<0.&&sampled.valid!=0u&&sampled.value>0.){airPhi=sampled.value;
+    theta=clamp(-liquid/(airPhi-liquid),1e-2,1.);distance=theta*dual;
+    face.inverseDistance=1./distance;face.openFraction=1.;flags=1u;}
    else{flags=4u;}}}
  faces[faceId]=face;ghosts[faceId]=vec4u(bitcast<u32>(distance),bitcast<u32>(theta),bitcast<u32>(airPhi),flags);}
 `;

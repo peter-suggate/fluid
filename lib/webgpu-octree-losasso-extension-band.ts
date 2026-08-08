@@ -81,10 +81,11 @@ export function planOctreeLosassoExtensionBand(
   let directoryCapacity = 1;
   while (directoryCapacity < 2 * faceCapacity) directoryCapacity *= 2;
   const adjacencyCapacity = OCTREE_LOSASSO_EXTENSION_ADJACENCIES * faceCapacity;
+  const domainVolume = nx * ny * nz;
   const stagedNodalVelocityNodes = (nx + 1) * (ny + 1) * (nz + 1);
   const allocatedBytes = 32 + 128 + 12 + faceCapacity * (16 + 16 + 4 + 4 + 4)
     + (faceCapacity + 1) * 4 + adjacencyCapacity * 4 + directoryCapacity * 12
-    + finestMacFaces * (4 + 4 + 4) + stagedNodalVelocityNodes * 32;
+    + finestMacFaces * (4 + 4 + 4) + domainVolume * 4 + stagedNodalVelocityNodes * 32;
   return Object.freeze({ dimensions: [dimensions[0], dimensions[1], dimensions[2]] as const,
     faceCapacity, directoryCapacity, stagedVelocityNodes: finestMacFaces,
     stagedNodalVelocityNodes, adjacencyCapacity, allocatedBytes });
@@ -95,6 +96,8 @@ const ENTRY_POINTS = [
   "publishLosassoWetSeedFaces",
   "publishLosassoAirBandFaces",
   "publishLosassoCoarseAirBandFaces",
+  "clearLosassoStagedCoarseOwners",
+  "publishLosassoStagedCoarseOwners",
   "prepareLosassoBandDispatch",
   "dilateLosassoAirBand2",
   "dilateLosassoAirBand3",
@@ -121,6 +124,8 @@ const BINDINGS: Readonly<Record<EntryPoint, readonly number[]>> = Object.freeze(
   publishLosassoWetSeedFaces: [0, 4, 5, 8, 9, 10, 13, 16, 17],
   publishLosassoAirBandFaces: [0, 1, 2, 3, 8, 9, 10, 13, 17],
   publishLosassoCoarseAirBandFaces: [0, 8, 9, 10, 13, 17, 20],
+  clearLosassoStagedCoarseOwners: [0, 21],
+  publishLosassoStagedCoarseOwners: [0, 20, 21],
   prepareLosassoBandDispatch: [0, 8, 19],
   dilateLosassoAirBand2: [0, 8, 9, 10, 13, 17],
   dilateLosassoAirBand3: [0, 8, 9, 10, 13, 17],
@@ -135,8 +140,8 @@ const BINDINGS: Readonly<Record<EntryPoint, readonly number[]>> = Object.freeze(
   remapLosassoWetSeedFaces: [0, 4, 8, 9, 10, 16, 18],
   gatherLosassoProjectedSeeds: [0, 7, 8, 10, 14, 16, 18],
   publishLosassoWetExtended: [4, 7, 15],
-  stageLosassoVelocityLattice: [0, 8, 10, 13, 14, 21],
-  stageLosassoPredictorVelocityLattice: [0, 8, 10, 13, 14, 21],
+  stageLosassoVelocityLattice: [0, 8, 10, 13, 14, 20, 21],
+  stageLosassoPredictorVelocityLattice: [0, 8, 10, 13, 14, 20, 21],
   stageLosassoNodalVelocityLattice: [0, 8, 21, 24],
   stageLosassoPredictorNodalVelocityLattice: [0, 8, 21, 24],
 });
@@ -177,6 +182,8 @@ export class WebGPUOctreeLosassoExtensionBand {
   private readonly stagedNodalVelocityArena: GPUBuffer;
   private readonly liveFaceDispatch: GPUBuffer;
   private readonly extension: WebGPUOctreeLosassoVelocityExtension;
+  private coarsePhiDirectory?: GPUBuffer;
+  private coarsePhiRowCapacity = 0;
   private readonly bindGroupCache = new Map<GPUComputePipeline,
     { entries: readonly { binding: number; buffer: GPUBuffer }[]; group: GPUBindGroup }[]>();
   private pipelines?: Readonly<Record<EntryPoint, GPUComputePipeline>>;
@@ -212,7 +219,7 @@ export class WebGPUOctreeLosassoExtensionBand {
     const maxStorage = device.limits.maxStorageBufferBindingSize;
     const sizes = [this.plan.faceCapacity * 16, this.plan.adjacencyCapacity * 4,
       this.plan.directoryCapacity * 8, this.plan.directoryCapacity * 4,
-      perLevel * 8, this.plan.stagedNodalVelocityNodes * 32];
+      perLevel * 8 + nx * ny * nz * 4, this.plan.stagedNodalVelocityNodes * 32];
     if (sizes.some((size) => size > maxStorage)) {
       throw new RangeError("Losasso extension band exceeds a WebGPU storage binding limit");
     }
@@ -233,7 +240,8 @@ export class WebGPUOctreeLosassoExtensionBand {
     this.geometricClaims = make("Losasso extension-band geometric key claims",
       this.plan.directoryCapacity * 4);
     this.denseWetFace = make("Losasso topology dense finest-face owners", perLevel * 4);
-    this.stagedVelocityArena = make("Losasso packed staged MAC velocity arena", perLevel * 8);
+    this.stagedVelocityArena = make("Losasso packed staged MAC velocity arena",
+      perLevel * 8 + nx * ny * nz * 4);
     this.stagedNodalVelocityArena = make("Losasso staged nodal velocity arena",
       this.plan.stagedNodalVelocityNodes * 32);
     this.liveFaceDispatch = device.createBuffer({ label: "Losasso extension-band live-face dispatch",
@@ -301,6 +309,7 @@ export class WebGPUOctreeLosassoExtensionBand {
   encodePublication(broker: PassBroker, fine: WebGPUFineLevelSetBrickSource): void {
     this.assertReady();
     const finePlan = fine.plan;
+    const [nx, ny, nz] = this.plan.dimensions;
     if (finePlan.finestCellDimensions.some((value, axis) => value !== this.plan.dimensions[axis])) {
       throw new RangeError("Losasso extension band and fine phi have different velocity domains");
     }
@@ -319,6 +328,8 @@ export class WebGPUOctreeLosassoExtensionBand {
     words[28] = (this.options.closedBoundaries ?? [true, true, true, true, true, true])
       .reduce((mask, closed, index) => mask | (closed ? 1 << index : 0), 0) >>> 0;
     this.device.queue.writeBuffer(this.params, 0, bytes);
+    this.coarsePhiDirectory = this.control;
+    this.coarsePhiRowCapacity = 0;
     const buffers = new Map<number, GPUBuffer>([
       [0, this.params], [1, fine.metadata], [2, fine.worklist], [3, fine.samples],
       [4, this.options.wet.control], [5, this.options.wet.faceGeometry],
@@ -329,6 +340,7 @@ export class WebGPUOctreeLosassoExtensionBand {
       [16, this.seedWetFace],
       [17, this.geometricClaims],
       [19, this.liveFaceDispatch],
+      [20, this.control], [21, this.stagedVelocityArena],
     ]);
     const run = (entryPoint: EntryPoint, groups: number) => {
       const pipeline = this.pipelines![entryPoint];
@@ -350,6 +362,7 @@ export class WebGPUOctreeLosassoExtensionBand {
     };
     run("beginLosassoExtensionBand", Math.ceil(Math.max(this.plan.faceCapacity,
       this.plan.directoryCapacity) / 64));
+    run("clearLosassoStagedCoarseOwners", Math.ceil(nx * ny * nz / 64));
     run("publishLosassoWetSeedFaces", Math.ceil(this.options.wetFaceCapacity / 64));
     run("publishLosassoAirBandFaces",
       Math.ceil(finePlan.maximumResidentBricks / 64));
@@ -396,6 +409,8 @@ export class WebGPUOctreeLosassoExtensionBand {
     floats[23] = this.options.cellSize;
     words.set([0, 0, 0, generation], 24);
     this.device.queue.writeBuffer(this.params, 0, bytes);
+    this.coarsePhiDirectory = coarsePhi.volumeDirectory;
+    this.coarsePhiRowCapacity = coarsePhi.rowCapacity;
     const buffers = new Map<number, GPUBuffer>([
       [0, this.params], [4, this.options.wet.control], [5, this.options.wet.faceGeometry],
       [8, this.control], [9, this.metrics], [10, this.geometry],
@@ -406,6 +421,7 @@ export class WebGPUOctreeLosassoExtensionBand {
       // Compact pressure rows are only a restriction cache and can omit the
       // air-side samples needed to classify a complete W7 graph.
       [20, coarsePhi.volumeDirectory],
+      [21, this.stagedVelocityArena],
     ]);
     const run = (entryPoint: EntryPoint, groups: number) => {
       const pipeline = this.pipelines![entryPoint];
@@ -429,6 +445,8 @@ export class WebGPUOctreeLosassoExtensionBand {
       this.plan.directoryCapacity) / 64));
     run("publishLosassoWetSeedFaces", Math.ceil(this.options.wetFaceCapacity / 64));
     const [nx, ny, nz] = this.plan.dimensions;
+    run("clearLosassoStagedCoarseOwners", Math.ceil(nx * ny * nz / 64));
+    run("publishLosassoStagedCoarseOwners", Math.ceil(coarsePhi.rowCapacity / 64));
     const finestMacFaces = (nx + 1) * ny * nz + nx * (ny + 1) * nz + nx * ny * (nz + 1);
     run("publishLosassoCoarseAirBandFaces", Math.ceil(finestMacFaces / 64));
     broker.fence("Losasso coarse-only extension-band seed faces published");
@@ -450,6 +468,9 @@ export class WebGPUOctreeLosassoExtensionBand {
     this.assertReady();
     if (this.publishedFineGeneration < 1) {
       throw new Error("Losasso extension band must be published before extension");
+    }
+    if (!this.coarsePhiDirectory) {
+      throw new Error("Losasso extension band has no staged coarse-cell authority");
     }
     const gather = this.pipelines!.gatherLosassoProjectedSeeds;
     let pass = broker.compute({ label: "Losasso extension band - gather projected seeds" });
@@ -484,6 +505,7 @@ export class WebGPUOctreeLosassoExtensionBand {
       { binding: 10, buffer: this.geometry },
       { binding: 13, buffer: this.directory },
       { binding: 14, buffer: this.extended },
+      { binding: 20, buffer: this.coarsePhiDirectory },
       { binding: 21, buffer: this.stagedVelocityArena },
     ]));
     const groups = Math.ceil(this.plan.stagedVelocityNodes / 64);
@@ -511,6 +533,51 @@ export class WebGPUOctreeLosassoExtensionBand {
     return true;
   }
 
+  /** Reconstruct the dense accepted MAC view at its factor-one transport
+   * consumption seam. Topology and compact phi publication can both replace
+   * pressure-row identities between projection and the next coarse transport;
+   * the retained W7 face values remain authoritative, but their temporary
+   * coarse-leaf interpolation must use the directory consumed by this step. */
+  encodeTransportStaging(broker: PassBroker): void {
+    this.assertReady();
+    if (!this.coarsePhiDirectory || this.coarsePhiRowCapacity < 1) {
+      throw new Error("Losasso transport staging requires compact coarse-phi rows");
+    }
+    const run = (entryPoint: EntryPoint, groups: number,
+      entries: readonly { binding: number; buffer: GPUBuffer }[]) => {
+      const pipeline = this.pipelines![entryPoint];
+      const pass = broker.compute({ label: `Losasso transport handoff - ${entryPoint}` });
+      pass.setPipeline(pipeline);
+      pass.setBindGroup(0, this.cachedBindGroup(pipeline, entries));
+      const groupsX = Math.min(groups, this.device.limits.maxComputeWorkgroupsPerDimension);
+      const groupsY = Math.ceil(groups / Math.max(1, groupsX));
+      if (groupsY > this.device.limits.maxComputeWorkgroupsPerDimension) {
+        throw new RangeError("Losasso transport staging exceeds 2D dispatch limits");
+      }
+      pass.dispatchWorkgroups(groupsX, groupsY);
+    };
+    const [nx, ny, nz] = this.plan.dimensions;
+    run("clearLosassoStagedCoarseOwners", Math.ceil(nx * ny * nz / 64), [
+      { binding: 0, buffer: this.params },
+      { binding: 21, buffer: this.stagedVelocityArena },
+    ]);
+    run("publishLosassoStagedCoarseOwners", Math.ceil(this.coarsePhiRowCapacity / 64), [
+      { binding: 0, buffer: this.params },
+      { binding: 20, buffer: this.coarsePhiDirectory },
+      { binding: 21, buffer: this.stagedVelocityArena },
+    ]);
+    broker.fence("Losasso transport coarse-leaf owners published");
+    run("stageLosassoVelocityLattice", Math.ceil(this.plan.stagedVelocityNodes / 64), [
+      { binding: 0, buffer: this.params },
+      { binding: 8, buffer: this.control },
+      { binding: 10, buffer: this.geometry },
+      { binding: 13, buffer: this.directory },
+      { binding: 14, buffer: this.extended },
+      { binding: 20, buffer: this.coarsePhiDirectory },
+      { binding: 21, buffer: this.stagedVelocityArena },
+    ]);
+  }
+
   /** Gather the wet forward predictor and extend it over the same D4 W7 graph. */
   encodePredictorExtension(broker: PassBroker, wetPredictor: GPUBuffer): boolean {
     this.assertReady();
@@ -536,6 +603,7 @@ export class WebGPUOctreeLosassoExtensionBand {
       { binding: 10, buffer: this.geometry },
       { binding: 13, buffer: this.directory },
       { binding: 14, buffer: this.projectedSeeds },
+      { binding: 20, buffer: this.coarsePhiDirectory! },
       { binding: 21, buffer: this.stagedVelocityArena },
     ]));
     const groups = Math.ceil(this.plan.stagedVelocityNodes / 64);

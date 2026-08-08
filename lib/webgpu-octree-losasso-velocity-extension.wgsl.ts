@@ -20,6 +20,7 @@ struct Params {
 // integer fold is exact and commutative, so rotating the geometric adjacency
 // cannot change a last bit merely by permuting x/y/z neighbor order.
 const LOCAL_LIMBS:u32=36u;
+fn finite(value:f32)->bool{return value==value&&abs(value)<=3.402823e38;}
 fn floorDiv256(value:i32)->vec2i{let carry=value>>8;return vec2i(carry,value-carry*256);}
 fn addLocalF32(limbs:ptr<function,array<i32,36>>,value:f32){let bits=bitcast<u32>(value);
  let magnitude=bits&0x7fffffffu;if(magnitude==0u){return;}let rawExponent=(magnitude>>23u)&0xffu;
@@ -75,15 +76,25 @@ fn jacobiLosassoAxisFaces(@builtin(workgroup_id) group:vec3u,
         || neighborMetric.w >= layer) {
       continue;
     }
-    addLocalF32(&exact,inputVelocity[neighbor]);
+    // A starved predecessor is not evidence for this layer. Other causal
+    // paths may still reach the face, so exclude the sentinel from both the
+    // exact sum and its divisor instead of propagating non-finite storage.
+    let neighborVelocity = inputVelocity[neighbor];
+    if (!finite(neighborVelocity)) { continue; }
+    addLocalF32(&exact,neighborVelocity);
     count += 1u;
   }
-  // An unreachable support face remains stationary instead of reading stale
-  // storage. The fixed-width publisher should normally classify it > width.
+  // Preserve the distinction between a physical zero and an unreachable band
+  // face. The sentinel is carried by later causal sweeps and consumed only as
+  // a request for coarse-face reconstruction by the staging pass.
   if (count > 0u) {
     outputVelocity[face] = localF32(exact) / f32(count);
   } else {
-    outputVelocity[face] = 0.0;
+    // WGSL rejects a NaN-valued module constant, so form the storage sentinel
+    // in this runtime branch. A non-finite value means "no extension path
+    // reached this face"; staging reconstructs it from the coarse bracket.
+    var starvedBits = 0x7fc00000u;
+    outputVelocity[face] = bitcast<f32>(starvedBits);
   }
 }
 `;

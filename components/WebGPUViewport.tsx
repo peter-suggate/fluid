@@ -37,7 +37,7 @@ import {
   closestPointOnAxis,
   GIZMO_AXIS_DIRECTIONS,
 } from "@/lib/editor-gizmo";
-import { CLICK_SLOP_PX, emptySpaceClickDeselects, pointerStayedWithinClickSlop, type EditorSelection } from "@/lib/editor-tools";
+import { CLICK_SLOP_PX, DEFAULT_EDITOR_TOOL, emptySpaceClickDeselects, pointerStayedWithinClickSlop, type EditorSelection } from "@/lib/editor-tools";
 import { hoverSceneAt, restOnHover, type EditorHover } from "@/lib/editor-hover";
 import { sceneryHighlightRange } from "@/lib/editor-scenery";
 import { createInflowAt, INFLOW_SELECTION_ID } from "@/lib/editor-inflow";
@@ -1743,9 +1743,17 @@ export function WebGPUViewport() {
     }
     // The new box becomes the selection, so its flyout — where the box says
     // what it means and how coarse it may go — is open the moment it exists.
+    //
+    // And the tool disarms itself. Unlike the brushes, drawing a region is a
+    // one-shot: what follows a release is always adjusting the box that was just
+    // made, and staying armed means the first drag on it draws a second box on
+    // top instead. Returning to SELECT is what puts the handles under the
+    // pointer. `setActiveTool` clears the axis lock, so the selection is set
+    // afterwards — it survives, the lock does not.
     if (active.action === "region-draw") {
       if (cancelled) { simulation.cancelDraft(); return; }
       simulation.commitDraft();
+      useUIStore.getState().setActiveTool(DEFAULT_EDITOR_TOOL);
       useUIStore.getState().select({
         kind: "refinement-region", id: refinementRegionSelectionId(active.regionId),
       });

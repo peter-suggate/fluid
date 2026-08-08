@@ -474,6 +474,8 @@ export class WebGPUOctreeCoarseSummary {
     airUnpublishedAdvances: number; airErrorWord: number; airValidWord: number;
     airLayoutWord: number; airArenaShort: number;
     airFirstErrorStage: number; airFirstErrorItem: number;
+    losassoUnpublishedSamples: number; losassoOutOfRangeSamples: number;
+    losassoInvalidStoredSamples: number;
     denseBanks: readonly Readonly<{ minimum: number; maximum: number; negative: number; zero: number }>[] }>> {
     const denseBytes = 3 * this.domainVolume * 4;
     const readback = this.device.createBuffer({ label: "coarse-only tracker receipt readback",
@@ -515,6 +517,8 @@ export class WebGPUOctreeCoarseSummary {
         airUnpublishedAdvances: words[21], airErrorWord: words[22],
         airValidWord: words[23], airLayoutWord: words[24], airArenaShort: words[25],
         airFirstErrorStage: words[26] >>> 24, airFirstErrorItem: words[26] & 0x00ff_ffff,
+        losassoUnpublishedSamples: words[37], losassoOutOfRangeSamples: words[38],
+        losassoInvalidStoredSamples: words[39],
         denseBanks };
     } finally {
       if (readback.mapState === "mapped") readback.unmap();
@@ -729,6 +733,7 @@ fn velocityAtCentered(point:vec3f)->vec4f{let ax=centeredAxisSample(point.x,p.di
 fn velocityAtPoint(point:vec3f)->vec4f{return velocityAtCentered(point-0.5*vec3f(p.dims));}
 ${coarseSummaryLosassoVelocitySamplingWGSL}
 fn transportVelocityAt(point:vec3f)->vec4f{if(losassoMode()){let sample=losassoVelocityAtGrid(point);
+  if(p.diagnostics!=0u&&sample.valid==0u&&sample.reason>0u){atomicAdd(&state[36u+min(sample.reason,3u)],1u);}
   return vec4f(sample.value,f32(sample.valid));}return velocityAtPoint(point);}
 fn supportBase(item:u32)->u32{if(item>=p.domainVolume){return INVALID;}
  let q=vec3u(item%p.dims.x,(item/p.dims.x)%p.dims.y,item/(p.dims.x*p.dims.y));
@@ -755,7 +760,7 @@ fn rankForKey(key:u32)->u32{let pagePlusOne=atomicLoad(&directory[topWord(key)])
  // advances that actually completed, so a single readback at the end of a run
  // reports how intermittent the tracker was. Only 18, the per-advance
  // prediction counter the completeness test reads, is cleared here.
- if(i<arrayLength(&state)&&(i<14u||i==15u||i==18u||(i>=27u&&i<=35u))){atomicStore(&state[i],0u);}}
+ if(i<arrayLength(&state)&&(i<14u||i==15u||i==18u||(i>=27u&&i<=35u)||i>=37u)){atomicStore(&state[i],0u);}}
 @compute @workgroup_size(256)fn resetSummaryValues(@builtin(workgroup_id)w:vec3u,@builtin(num_workgroups)n:vec3u,
  @builtin(local_invocation_index)l:u32){let i=linear(w,n,l);
  if(i<16u){atomicStore(&directory[i],0u);}
@@ -763,7 +768,7 @@ fn rankForKey(key:u32)->u32{let pagePlusOne=atomicLoad(&directory[topWord(key)])
  if(i<p.entryCapacity){let base=entryBase(i);atomicStore(&directory[base+1u],ordered(3.402823e38));
   atomicStore(&directory[base+2u],ordered(-3.402823e38));atomicStore(&directory[base+3u],bitcast<u32>(3.402823e38));
   for(var j=4u;j<ENTRY_WORDS;j+=1u){atomicStore(&directory[base+j],0u);}}
- if(i<arrayLength(&state)&&((i>=2u&&i<14u)||i==15u||i==18u||(i>=27u&&i<=35u))){atomicStore(&state[i],0u);}}
+ if(i<arrayLength(&state)&&((i>=2u&&i<14u)||i==15u||i==18u||(i>=27u&&i<=35u)||i>=37u)){atomicStore(&state[i],0u);}}
 @compute @workgroup_size(256)fn ensureSummaryPages(@builtin(workgroup_id)w:vec3u,@builtin(num_workgroups)n:vec3u,
  @builtin(local_invocation_index)l:u32){let row=linear(w,n,l);if(coarse.state!=PUBLISHED||row>=coarse.rowCount||row>=p.rowCapacity){return;}
  let e=coarse.entries[row];let bl=rowBaseAndLevel(e);if(bl.x==INVALID||(e.flags&9u)!=9u){atomicOr(&state[2],1u);return;}
@@ -945,8 +950,15 @@ fn sweepDenseRedistance(sourceBank:u32,destinationBank:u32,item:u32){if(atomicLo
  let baseKey=b.x+p.baseDims.x*(b.y+p.baseDims.y*b.z);for(var level=0u;level<=p.maximumLevel;level+=1u){
   let rank=rankForKey(hierarchyKey(baseKey,level));if(rank==INVALID){atomicOr(&state[2],2u);continue;}let base=entryBase(rank);
   atomicMin(&directory[base+1u],ordered(value));atomicMax(&directory[base+2u],ordered(value));atomicMin(&directory[base+3u],bitcast<u32>(magnitude));
-  if(level==0u){let bit=(q.x&3u)+4u*((q.y&3u)+4u*(q.z&3u));let word=bit>>5u;let mask=1u<<(bit&31u);
-   atomicOr(&directory[base+8u+word],mask);if(value<0.0){atomicOr(&directory[base+10u+word],mask);}atomicStore(&directory[base+4u],64u);atomicStore(&directory[base+5u],1u);}}}
+  let nodeSize=4u<<level;let local=q%vec3u(nodeSize);let half=nodeSize/2u;
+  let centreSample=all(local>=vec3u(half-1u))&&all(local<=vec3u(half));
+  if(level==0u){let bit=local.x+4u*(local.y+4u*local.z);let word=bit>>5u;let mask=1u<<(bit&31u);
+   atomicOr(&directory[base+8u+word],mask);if(value<0.0){atomicOr(&directory[base+10u+word],mask);}
+   atomicStore(&directory[base+4u],64u);atomicStore(&directory[base+5u],1u);
+   if(centreSample){atomicAdd(&directory[base+7u],bitcast<u32>(i32(round(65536.*value))));}}
+  else{atomicAdd(&directory[base+8u],1u);if(value<0.0){atomicAdd(&directory[base+9u],1u);}
+   if(centreSample){atomicAdd(&directory[base+7u],bitcast<u32>(i32(round(65536.*value))));
+    atomicAdd(&directory[base+10u],1u);}}}}
 @compute @workgroup_size(256)fn finalizeSummaryEntries(@builtin(workgroup_id)w:vec3u,@builtin(num_workgroups)n:vec3u,
  @builtin(local_invocation_index)l:u32){let rank=linear(w,n,l);let count=min(atomicLoad(&state[1]),p.entryCapacity);
  if(rank<count){let base=entryBase(rank);let lo=atomicLoad(&directory[base+1u]);let hi=atomicLoad(&directory[base+2u]);
@@ -998,8 +1010,16 @@ fn sweepDenseRedistance(sourceBank:u32,destinationBank:u32,item:u32){if(atomicLo
  let cell=e.cellPlusOne-1u;let origin=vec3u(cell%p.dims.x,(cell/p.dims.x)%p.dims.y,cell/(p.dims.x*p.dims.y));
  let point=vec3f(origin)+vec3f(0.5*f32(e.size));let sample=densePhiAt(atomicLoad(&state[17])&1u,point);if(sample.y==0.0){return;}
  let value=rigidCarvedPhiAtGrid(point,sample.x);
- coarse.entries[row].phi=value;coarse.entries[row].minimumPhi=value;coarse.entries[row].maximumPhi=value;
- coarse.entries[row].flags&=~PHI_INTERFACE;}
+ var minimum=value;var maximum=value;var complete=true;let bank=atomicLoad(&state[17])&1u;
+ for(var z=0u;z<e.size;z+=1u){for(var y=0u;y<e.size;y+=1u){for(var x=0u;x<e.size;x+=1u){
+  let q=origin+vec3u(x,y,z);if(any(q>=p.dims)){continue;}let cellPoint=vec3f(q)+vec3f(.5);
+  let covered=densePhiAt(bank,cellPoint);if(covered.y==0.){complete=false;continue;}
+  let phi=rigidCarvedPhiAtGrid(cellPoint,covered.x);if(!finite(phi)){complete=false;continue;}
+  minimum=min(minimum,phi);maximum=max(maximum,phi);}}}
+ if(!complete){let extent=.5*f32(e.size)*p.physicalCellSize;minimum=min(minimum,value-extent);maximum=max(maximum,value+extent);}
+ coarse.entries[row].phi=value;coarse.entries[row].minimumPhi=minimum;coarse.entries[row].maximumPhi=maximum;
+ coarse.entries[row].flags=select(coarse.entries[row].flags&~PHI_INTERFACE,
+  coarse.entries[row].flags|PHI_INTERFACE,minimum<=0.&&maximum>=0.);}
 // Same 2D split as the host launch: width=min(groups,limit), height=ceil.
 // Kernels index through num_workgroups, so equal triples mean equal items.
 fn publishDispatchRecord(slot:u32,groups:u32){let width=min(groups,p.maxWorkgroups);

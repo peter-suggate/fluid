@@ -4,7 +4,7 @@ import { simulation } from "@/lib/simulation/controller";
 import { useDisplayScene } from "@/lib/stores/scene-draft-store";
 import { useUIStore } from "@/lib/stores/ui-store";
 import { sceneScaleOption, sceneScaleSummary, type SceneScaleAxis, type SceneScaleFactor } from "@/lib/scene-scale";
-import { fluidBodyBox, fluidBodyBoxVolume_m3 } from "@/lib/editor-fluid-body";
+import { fluidBodyBox, fluidWaterVolume_m3 } from "@/lib/editor-fluid-body";
 
 /**
  * Scale and water-volume controls, over the scene rather than inside the
@@ -49,7 +49,13 @@ export function SceneScaleOverlay() {
   // is happening rather than jumping when it lands.
   const scene = useDisplayScene();
   const summary = sceneScaleSummary(scene);
+  // Two questions, and they stopped having the same answer once a scene could
+  // hold several bodies: the readout reports all the water in the document,
+  // while the buttons scale the reservoir — which a seed-authored scene like the
+  // twin dams simply does not have, so they disable rather than reshape a body
+  // that is not there. Each body's own handles still resize it in the scene.
   const body = fluidBodyBox(scene);
+  const water_m3 = fluidWaterVolume_m3(scene);
   const fluidEnabled = scene.systems?.fluid !== false;
   const [nx, ny, nz] = summary.dimensions;
   if (!shapeMode) return null;
@@ -95,7 +101,7 @@ export function SceneScaleOverlay() {
           title="Halve the water body"
           onClick={() => simulation.scaleFluidBody(0.5)}
         >÷2</button>
-        <output>{body ? `${(fluidBodyBoxVolume_m3(body) * 1000).toFixed(1)} L` : "none"}</output>
+        <output>{water_m3 > 0 ? `${(water_m3 * 1000).toFixed(1)} L` : "none"}</output>
         <button
           type="button"
           disabled={!body}

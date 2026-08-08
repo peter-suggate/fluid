@@ -38,11 +38,14 @@
  *   FLUID_OCTREE_INTERFACE_BAND  bisection handle on the band reach
  *   FLUID_SURFACE_BAND       live surface half-thickness (0=AUTO)
  *   FLUID_FINEST_SURFACE_CELL  live factor-one cut floor (1 or 2)
+ *   FLUID_REFINEMENT_REGION_FLOOR  floor for an aligned region over the far half
+ *   FLUID_REFINEMENT_REGION_SCOPE  `far-half` (default) or `full`
  *   FLUID_WALL_BAND          live closed-wall look-ahead (1 through 4)
  *   FLUID_SURFACE_ASCII    1 to print a height map per sample
  *   FLUID_SURFACE_SLICE    1 to print an (x, y) leaf-size slice
  *   FLUID_SURFACE_PHI      1 to print phi in cells on that slice
  *   FLUID_SURFACE_ROWS     1 to print raw row-origin histograms
+ *   FLUID_STAGED_OWNER_CENSUS  1 to count dense cells mapped to coarse pressure rows
  */
 import assert from "node:assert/strict";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -156,6 +159,12 @@ interface SurfaceShape {
   readonly cellWidth: number;
   readonly wettedColumns: number;
   readonly wetCells: number;
+  /** Dense liquid samples not covered by a live pressure row. */
+  readonly wetCellsWithoutPressureOwner: number;
+  /** Wetted columns whose surface sample lies outside every pressure row. */
+  readonly surfaceColumnsWithoutPressureOwner: number;
+  /** Dry columns enclosed by wet columns along x or z. */
+  readonly enclosedDryColumns: number;
   readonly medianHeightCells: number;
   readonly maximumHeightCells: number;
   readonly minimumHeightCells: number;
@@ -189,10 +198,11 @@ interface SurfaceShape {
 /**
  * Height field from a published directory.
  *
- * Rows carry one phi per leaf, so a size-n row paints an n^3 block; that is
- * exactly the piecewise-constant field the surface pass samples. The crossing
- * is placed by linear interpolation between the two straddling cell values so
- * a height is not quantised to whole cells.
+ * Factor-one Losasso appends the transported dense phi lattice after the
+ * compact pressure-row capacity and marks generation bit 30. Rendering uses
+ * that dense authority first; fall back to piecewise-constant rows for older
+ * or Power publications. The crossing is linearly interpolated between the
+ * two straddling cell values.
  */
 function surfaceShape(
   words: Uint32Array,
@@ -207,6 +217,7 @@ function surfaceShape(
    * surface rather than averaged over the domain. */
   const sizeField = new Uint8Array(nx * ny * nz);
   let rows = 0;
+  const densePublished = ((words[1] ?? 0) & 0x4000_0000) !== 0;
   for (let slot = 0; slot < rowCount; slot += 1) {
     const base = HEADER_WORDS + slot * ROW_WORDS;
     const cellPlusOne = words[base] ?? 0;
@@ -224,10 +235,26 @@ function surfaceShape(
     for (let z = oz; z < Math.min(oz + size, nz); z += 1) {
       for (let y = oy; y < Math.min(oy + size, ny); y += 1) {
         for (let x = ox; x < Math.min(ox + size, nx); x += 1) {
-          field[x + nx * (y + ny * z)] = phi;
+          if (!densePublished) field[x + nx * (y + ny * z)] = phi;
           sizeField[x + nx * (y + ny * z)] = size;
         }
       }
+    }
+  }
+  if (densePublished) {
+    const volume = nx * ny * nz;
+    const entryCapacity = Math.floor((words.length - HEADER_WORDS) / ROW_WORDS);
+    const denseStart = entryCapacity - volume;
+    assert.ok(denseStart >= 0, "Dense coarse level-set tail is truncated");
+    for (let cell = 0; cell < volume; cell += 1) {
+      const base = HEADER_WORDS + ROW_WORDS * (denseStart + cell);
+      const flags = words[base + 5] ?? 0;
+      const cellPlusOne = words[base] ?? 0;
+      const size = words[base + 1] ?? 0;
+      const phi = decodeFloat(words[base + 2] ?? 0);
+      if (cellPlusOne === cell + 1 && size === 1
+        && (flags & (FLAG_VALID | FLAG_FINITE)) === (FLAG_VALID | FLAG_FINITE)
+        && Number.isFinite(phi)) field[cell] = phi;
     }
   }
 
@@ -235,15 +262,22 @@ function surfaceShape(
   const surfaceRowSizes: number[] = [];
   const airRowSizes: number[] = [];
   let wetCells = 0;
+  let wetCellsWithoutPressureOwner = 0;
+  let surfaceColumnsWithoutPressureOwner = 0;
   for (let z = 0; z < nz; z += 1) {
     for (let x = 0; x < nx; x += 1) {
       let topWet = -1;
       for (let y = 0; y < ny; y += 1) {
         const value = field[x + nx * (y + ny * z)]!;
-        if (Number.isFinite(value) && value < 0) { topWet = y; wetCells += 1; }
+        if (Number.isFinite(value) && value < 0) {
+          topWet = y; wetCells += 1;
+          if (sizeField[x + nx * (y + ny * z)] === 0) wetCellsWithoutPressureOwner += 1;
+        }
       }
       if (topWet < 0) continue;
-      surfaceRowSizes.push(sizeField[x + nx * (topWet + ny * z)]!);
+      const surfaceRowSize = sizeField[x + nx * (topWet + ny * z)]!;
+      surfaceRowSizes.push(surfaceRowSize);
+      if (surfaceRowSize === 0) surfaceColumnsWithoutPressureOwner += 1;
       if (topWet + 1 < ny) {
         // The cell the front has to advance into. A coarse row here is a
         // coarse air cell in contact with the moving interface.
@@ -284,10 +318,20 @@ function surfaceShape(
     }
   }
   let maximumNeighborStep = 0;
+  let enclosedDryColumns = 0;
   for (let z = 0; z < nz; z += 1) {
     for (let x = 0; x < nx; x += 1) {
       const value = heights[x + nx * z]!;
-      if (!Number.isFinite(value)) continue;
+      if (!Number.isFinite(value)) {
+        const enclosedX = x > 0 && x + 1 < nx
+          && Number.isFinite(heights[x - 1 + nx * z])
+          && Number.isFinite(heights[x + 1 + nx * z]);
+        const enclosedZ = z > 0 && z + 1 < nz
+          && Number.isFinite(heights[x + nx * (z - 1)])
+          && Number.isFinite(heights[x + nx * (z + 1)]);
+        if (enclosedX || enclosedZ) enclosedDryColumns += 1;
+        continue;
+      }
       for (const [dx, dz] of [[1, 0], [0, 1]] as const) {
         const qx = x + dx, qz = z + dz;
         if (qx >= nx || qz >= nz) continue;
@@ -321,6 +365,8 @@ function surfaceShape(
   return {
     rows, cellWidth,
     wettedColumns: wetted.length, wetCells,
+    wetCellsWithoutPressureOwner, surfaceColumnsWithoutPressureOwner,
+    enclosedDryColumns,
     medianHeightCells: Number(median.toFixed(4)),
     maximumHeightCells: Number(maximum.toFixed(4)),
     minimumHeightCells: Number(minimum.toFixed(4)),
@@ -413,6 +459,37 @@ try {
   const scene = getScenePreset(sceneId).create();
   scene.numerics.fixedDt_s = dt;
   scene.numerics.maxDt_s = dt;
+  const refinementRegionFloor = Number(process.env.FLUID_REFINEMENT_REGION_FLOOR ?? 0);
+  if (refinementRegionFloor > 0) {
+    assert.ok(Number.isSafeInteger(refinementRegionFloor)
+      && (refinementRegionFloor & (refinementRegionFloor - 1)) === 0,
+      "FLUID_REFINEMENT_REGION_FLOOR must be a positive power of two");
+    const nx = Math.round(scene.container.width_m / scene.voxelDomain.finestCellSize_m);
+    const ny = Math.round(scene.container.height_m / scene.voxelDomain.finestCellSize_m);
+    const nz = Math.round(scene.container.depth_m / scene.voxelDomain.finestCellSize_m);
+    const refinementRegionScope = process.env.FLUID_REFINEMENT_REGION_SCOPE ?? "far-half";
+    assert.ok(refinementRegionScope === "far-half" || refinementRegionScope === "full",
+      "FLUID_REFINEMENT_REGION_SCOPE must be far-half or full");
+    const alignedMinX = refinementRegionScope === "full" ? 0
+      : Math.floor(nx / (2 * refinementRegionFloor)) * refinementRegionFloor;
+    const alignedMaxX = refinementRegionScope === "full" ? nx
+      : Math.floor(nx / refinementRegionFloor) * refinementRegionFloor;
+    const alignedMaxY = refinementRegionScope === "full" ? ny
+      : Math.floor(ny / refinementRegionFloor) * refinementRegionFloor;
+    const alignedMaxZ = refinementRegionScope === "full" ? nz
+      : Math.floor(nz / refinementRegionFloor) * refinementRegionFloor;
+    const h = scene.voxelDomain.finestCellSize_m;
+    scene.fluid.refinementRegions = [{
+      id: `dawn-${refinementRegionScope}`,
+      rule: "minimum-cell-size",
+      minimumCellSize_cells: refinementRegionFloor,
+      min_m: { x: -0.5 * scene.container.width_m + alignedMinX * h, y: 0,
+        z: -0.5 * scene.container.depth_m },
+      max_m: { x: -0.5 * scene.container.width_m + alignedMaxX * h,
+        y: alignedMaxY * h,
+        z: -0.5 * scene.container.depth_m + alignedMaxZ * h },
+    }];
+  }
   const solver = await octreeMethod.createSolverAsync!(device, scene, "balanced", {
     ...octreeMethod.presetFor("balanced"),
     globalFineLevelSetFactor: "1",
@@ -451,6 +528,11 @@ try {
         advancingInterfaceCells?: number;
         retreatingInterfaceCells?: number;
         correctedRegionCells?: number;
+        frozenCells?: number;
+        interfaceVelocityQueries?: number;
+        interfaceVelocityValid?: number;
+        interfacePhiMoved?: number;
+        maximumInterfaceSpeed?: number;
       } | undefined>;
     };
   }).octreeProjection;
@@ -460,6 +542,9 @@ try {
     finestSurfaceCellSizeEffective?: number;
     wallBandCellsEffective?: number;
   };
+  const stagedVelocity = (projection as unknown as {
+    losassoBackend?: { sources?: { velocitySampler?: { stagedVelocity?: GPUBuffer } } };
+  }).losassoBackend?.sources?.velocitySampler?.stagedVelocity;
   const runtimeTopologyDials = {
     surfaceBandCells: projectionRuntime.interfaceBandCellsEffective,
     surfaceGradingLayers: projectionRuntime.surfaceGradingLayersEffective,
@@ -520,6 +605,28 @@ try {
       ? phiDistanceFidelity(shape.field, dimensions, shape.cellWidth) : undefined;
     const census = await projection?.readTopologyLeafCensus();
     const coarseVolume = await projection?.readCoarseSurfaceTrackerReceipt();
+    let stagedOwnerCells: number | undefined;
+    let stagedMacValid: number | undefined;
+    let stagedRawMacValid: number | undefined;
+    let stagedMacInvalid: number | undefined;
+    let stagedRawBoundary: number | undefined;
+    if (process.env.FLUID_STAGED_OWNER_CENSUS === "1" && stagedVelocity) {
+      const staged = new Uint32Array(await readBufferBinding(device, { buffer: stagedVelocity },
+        stagedVelocity.size));
+      const [nx, ny, nz] = dimensions;
+      const mac = (nx + 1) * ny * nz + nx * (ny + 1) * nz + nx * ny * (nz + 1);
+      const stagedFloats = new Float32Array(staged.buffer, staged.byteOffset, staged.length);
+      stagedMacValid = stagedFloats.subarray(0, mac)
+        .reduce((count, value) => count + Number(Number.isFinite(value)), 0);
+      stagedMacInvalid = mac - stagedMacValid;
+      stagedRawMacValid = staged.subarray(mac, 2 * mac)
+        .reduce((count, value) => count + Number(value !== 0x7fc0_0000
+          && value !== 0x7fc0_0001), 0);
+      stagedRawBoundary = staged.subarray(mac, 2 * mac)
+        .reduce((count, value) => count + Number(value === 0x7fc0_0001), 0);
+      stagedOwnerCells = staged.subarray(2 * mac, 2 * mac + nx * ny * nz)
+        .reduce((count, encoded) => count + Number(encoded !== 0), 0);
+    }
     const stats = await solver.readStats() as unknown as Record<string, unknown>;
     samples.push({
       t_s: Number((step * dt).toFixed(6)), ...summary,
@@ -539,6 +646,11 @@ try {
       pressureRelativeResidual: stats.pressureRelativeResidual,
       quadtreePressureIterationsUsed: stats.quadtreePressureIterationsUsed,
       coarseVolume,
+      stagedOwnerCells,
+      stagedMacValid,
+      stagedMacInvalid,
+      stagedRawMacValid,
+      stagedRawBoundary,
       currentVolume: stats.currentVolume,
       referenceVolume: stats.referenceVolume,
       maximumDivergence: stats.maximumDivergence,
@@ -572,6 +684,7 @@ try {
   solver.destroy();
   console.log(JSON.stringify({
     phase: "dam-surface-shape", scene: sceneId, dt, dimensions, runtimeTopologyDials,
+    refinementRegionFloor: refinementRegionFloor || undefined,
     validationErrors, samples,
   }, null, 1));
   device.destroy();

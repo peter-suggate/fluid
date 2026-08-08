@@ -4,6 +4,8 @@ import { cloneScene, defaultScene, type SceneDescription } from "../lib/model";
 import { octreeMethod } from "../lib/methods/octree";
 import type { GPUSolverInstance } from "../lib/methods/types";
 import type { PaperPhaseId, PerformanceTrace } from "../lib/performance-trace";
+import { usePerformanceInstrumentationStore } from
+  "../lib/stores/performance-instrumentation-store";
 import { requiredFluidDeviceLimits } from "../lib/webgpu-device-limits";
 import {
   acquireWebGPUExclusiveLock,
@@ -12,6 +14,7 @@ import {
 
 await acquireWebGPUExclusiveLock("dawn-benchmark", "tools/benchmark-octree-leaf-sizes.ts");
 try {
+usePerformanceInstrumentationStore.getState().setEnabled(true);
 const modulePath = process.env.WEBGPU_NODE_MODULE
   ?? fileURLToPath(new URL("../node_modules/webgpu/index.js", import.meta.url));
 const { create, globals } = await import(pathToFileURL(modulePath).href) as {
@@ -24,7 +27,7 @@ Object.defineProperty(globalThis, "navigator", { configurable: true, value: { gp
 
 const adapter = await gpu.requestAdapter({ powerPreference: "high-performance" });
 assert.ok(adapter, "WebGPU did not expose an adapter");
-const requestedFeatures: GPUFeatureName[] = [];
+const requestedFeatures: GPUFeatureName[] = ["subgroups"];
 if (adapter.features.has("timestamp-query")) requestedFeatures.push("timestamp-query");
 const device = await adapter.requestDevice({
   requiredFeatures: requestedFeatures,
@@ -57,6 +60,20 @@ function calmDeepScene(): SceneDescription {
   delete scene.fluid.inflow;
   scene.voxelDomain.finestCellSize_m = 0.025;
   scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 0.005;
+  const refinementFloor = Number(process.env.FLUID_REFINEMENT_REGION_FLOOR ?? 0);
+  if (refinementFloor > 0) {
+    assert.ok(Number.isSafeInteger(refinementFloor)
+      && (refinementFloor & (refinementFloor - 1)) === 0);
+    scene.fluid.refinementRegions = [{
+      id: "benchmark-full-domain-floor",
+      rule: "minimum-cell-size",
+      minimumCellSize_cells: refinementFloor,
+      min_m: { x: -0.5 * scene.container.width_m, y: 0,
+        z: -0.5 * scene.container.depth_m },
+      max_m: { x: 0.5 * scene.container.width_m, y: scene.container.height_m,
+        z: 0.5 * scene.container.depth_m },
+    }];
+  }
   return scene;
 }
 
@@ -116,7 +133,8 @@ for (const [configIndex, maximumLeafSize] of leafSizes.entries()) {
     maximumLeafSize: String(maximumLeafSize),
     secondaryParticles: "off",
   };
-  const solver = octreeMethod.createSolver!(device, scene, "balanced", values) as GPUSolverInstance;
+  const solver = await octreeMethod.createSolverAsync!(
+    device, scene, "balanced", values, undefined, () => {}) as GPUSolverInstance;
   assert.deepEqual([solver.info.nx, solver.info.ny, solver.info.nz], [64 * tankScale, 96, 64 * tankScale]);
   const samples = Object.fromEntries(timingFields.map((field) => [field, [] as number[]])) as Record<typeof timingFields[number], number[]>;
   const rowSamples: number[] = [];
@@ -127,6 +145,11 @@ for (const [configIndex, maximumLeafSize] of leafSizes.entries()) {
     const startedAt = performance.now();
     while (!solver.advanceTo(step * scene.numerics.fixedDt_s!, [])) await new Promise((resolve) => setImmediate(resolve));
     await device.queue.onSubmittedWorkDone();
+    // The timestamp map resolves asynchronously after queue completion and
+    // publishes through a promise continuation. Give that continuation one
+    // host turn before sampling `solver.info`, otherwise this benchmark reads
+    // the cold trace whose only interval is the unclassified setup tail.
+    await new Promise((resolve) => setImmediate(resolve));
     const wall_ms = performance.now() - startedAt;
     const info = await solver.readStats();
     if (step <= warmupSteps) continue;
@@ -165,5 +188,6 @@ console.log(JSON.stringify({
 assert.deepEqual(validationErrors, [], `WebGPU validation errors: ${validationErrors.join("; ")}`);
 device.destroy();
 } finally {
+  usePerformanceInstrumentationStore.getState().setEnabled(false);
   await releaseWebGPUExclusiveLock();
 }

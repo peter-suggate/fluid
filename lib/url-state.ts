@@ -1,3 +1,4 @@
+import { refinementRegionsToQuery, withRefinementRegionsFromQuery } from "./editor-refinement-region";
 import { defaultMethodId, interactiveMethodId, simulationMethods, type MethodParamValue, type MethodParamValues } from "./methods";
 import { cloneScene, validateScene, type CameraState, type SceneDescription } from "./model";
 import { isOctreeTechniqueOverlayMode } from "./octree-technique-debug";
@@ -174,25 +175,55 @@ type SceneQueryEntry = readonly [key: string, value: string];
  * the address bar changes. This matters for generated scenes: constructing the
  * hero pond bakes a 289 x 193 heightfield before a single value can be compared.
  */
-const sceneQueryBaselineCache = new WeakMap<ScenePreset, readonly (string | undefined)[]>();
+interface SceneQueryBaseline {
+  /** One serialized value per entry of `sceneQueryPaths`, in order. */
+  readonly paths: readonly (string | undefined)[];
+  /** The preset's own refinement regions, already container-relative. */
+  readonly regions: string;
+}
 
-function sceneQueryBaseline(presetId: string): readonly (string | undefined)[] {
+const sceneQueryBaselineCache = new WeakMap<ScenePreset, SceneQueryBaseline>();
+
+function sceneQueryBaseline(presetId: string): SceneQueryBaseline {
   const preset = getScenePreset(presetId);
   const cached = sceneQueryBaselineCache.get(preset);
   if (cached) return cached;
   const baseScene = preset.create();
-  const serialized = sceneQueryPaths.map((path) => JSON.stringify(getAtPath(baseScene, path)));
-  sceneQueryBaselineCache.set(preset, serialized);
-  return serialized;
+  const baseline: SceneQueryBaseline = {
+    paths: sceneQueryPaths.map((path) => JSON.stringify(getAtPath(baseScene, path))),
+    regions: refinementRegionsToQuery(baseScene),
+  };
+  sceneQueryBaselineCache.set(preset, baseline);
+  return baseline;
 }
+
+/**
+ * Refinement regions ride their own key, not a `scene.*` path.
+ *
+ * Every other scene value in the query is the document's own number, which is
+ * right for a metre extent and wrong for a drawn box: a region is a question
+ * about a *part of the domain* ("what does it cost to stop resolving the back
+ * third"), and that question is worth carrying between scenes. So the key holds
+ * percentages of the container and is resolved against whatever container the
+ * link lands on. See `refinementRegionsToQuery`.
+ *
+ * Compared as encoded strings against the preset's own regions, which is the
+ * same container-relative comparison the value itself makes, so a preset that
+ * authors regions stays out of the URL until they are edited — and an emptied
+ * list still writes the key, as the empty string, or hydration would restore
+ * the preset's boxes over a deliberate removal.
+ */
+const REGIONS_QUERY_KEY = "regions";
 
 function sceneQueryEntries(sceneState: SerializableSceneState): readonly SceneQueryEntry[] {
   const baseline = sceneQueryBaseline(sceneState.presetId);
   const entries: SceneQueryEntry[] = [];
+  const regions = refinementRegionsToQuery(sceneState.scene);
+  if (regions !== baseline.regions) entries.push([REGIONS_QUERY_KEY, regions]);
   sceneQueryPaths.forEach((path, index) => {
     const current = getAtPath(sceneState.scene, path);
     const serialized = JSON.stringify(current);
-    if (serialized === baseline[index]) return;
+    if (serialized === baseline.paths[index]) return;
     // A sculpted grid is a scene-library document, not a URL value. The hero
     // pond carries 55,777 samples: serializing one edited height produces a
     // roughly 1.2 MB location that works until reload, when the server rejects
@@ -312,20 +343,28 @@ export function parseQueryState(search: string): QueryState {
       return plain;
     }
   })();
-  const scene = cloneScene(baseScene);
+  const patched = cloneScene(baseScene);
   for (const path of sceneQueryPaths) {
     const raw = query.get(`scene.${path}`);
     if (raw === null) continue;
     if (raw === deletedValue && path === "fluid.inflow") {
-      setAtPath(scene, path, undefined);
+      setAtPath(patched, path, undefined);
       continue;
     }
     try {
       const value = JSON.parse(raw);
-      if (compatibleSceneValue(getAtPath(baseScene, path), value)) setAtPath(scene, path, value);
+      if (compatibleSceneValue(getAtPath(baseScene, path), value)) setAtPath(patched, path, value);
     }
     catch { /* Malformed external values are ignored and canonicalized away. */ }
   }
+  // After the loop, never inside it: the regions are percentages of the
+  // container, and the container is one of the paths above. Resolving them
+  // first would measure them against the preset's tank rather than the one the
+  // link actually describes.
+  const regionsQuery = query.get(REGIONS_QUERY_KEY);
+  const scene = regionsQuery === null
+    ? patched
+    : withRefinementRegionsFromQuery(patched, regionsQuery);
   const initialUI = useUIStore.getInitialState();
   const presetCamera = cameraForPreset(preset);
   const grid = query.get("grid");
@@ -393,7 +432,7 @@ export function parseQueryState(search: string): QueryState {
 function isManagedKey(key: string) {
   return key === "method" || key === "scene" || key === "quality" || key === "view" || key === "diagnostics" || key === "waterdiag" || key === "panel" || key === "panelWidth"
     || key === "performance" || key === "validation" || key === "sceneConfig" || key === "grid" || key === "gridSlice" || key === "gridMode"
-    || key === "render" || key === "svoLighting" || key === "svoShadows" || key === "svoAO" || key === "svoSilhouetteRefinement" || key === "svoPrimarySeamClosure" || key === "svoCones" || key === "svoPrimary" || key === "svoFlatExempt" || key === "svoLodPixels" || key === "svoSurface" || key === "environment" || key === "fps" || key.startsWith("camera.") || key.startsWith("param.") || key.startsWith("scene.");
+    || key === REGIONS_QUERY_KEY || key === "render" || key === "svoLighting" || key === "svoShadows" || key === "svoAO" || key === "svoSilhouetteRefinement" || key === "svoPrimarySeamClosure" || key === "svoCones" || key === "svoPrimary" || key === "svoFlatExempt" || key === "svoLodPixels" || key === "svoSurface" || key === "environment" || key === "fps" || key.startsWith("camera.") || key.startsWith("param.") || key.startsWith("scene.");
 }
 
 /** Build a canonical query string from the stores, preserving unrelated keys. */

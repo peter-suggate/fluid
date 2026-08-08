@@ -97,6 +97,33 @@ export interface InitialFluidBrickUnionBounds {
   readonly maximum: Vec3;
 }
 
+/**
+ * Which brick each seed wets, in document order, deduplicated.
+ *
+ * Independent of the base initial condition, because "which bricks did the
+ * author seed" is a fact about the seed list alone. The *solver* entry points
+ * below add the additive gate — an additive scene has no exact analytic box,
+ * since the base fill is present too — but the editor needs the decomposition
+ * either way, so the gate lives with the callers that need it rather than here.
+ */
+function seedBrickCoordinates(
+  scene: SceneDescription,
+  dimensions: readonly [number, number, number],
+  brickSize: number,
+): Map<string, { readonly brick: [number, number, number]; readonly seedIndices: number[] }> {
+  const unique = new Map<string, { brick: [number, number, number]; seedIndices: number[] }>();
+  (scene.fluid.initialBrickSeeds_m ?? []).forEach((seed, index) => {
+    const cell = seedCell(scene, seed, dimensions);
+    const brick: [number, number, number] = [Math.floor(cell.x / brickSize),
+      Math.floor(cell.y / brickSize), Math.floor(cell.z / brickSize)];
+    const key = brick.join(",");
+    const existing = unique.get(key);
+    if (existing) existing.seedIndices.push(index);
+    else unique.set(key, { brick, seedIndices: [index] });
+  });
+  return unique;
+}
+
 function initialFluidBrickCoordinates(
   scene: SceneDescription,
   dimensions: readonly [number, number, number],
@@ -104,14 +131,7 @@ function initialFluidBrickCoordinates(
 ): readonly [number, number, number][] | undefined {
   const seeds = scene.fluid.initialBrickSeeds_m;
   if (!seeds?.length || scene.fluid.initialBrickSeedsAdditive) return undefined;
-  const unique = new Map<string, [number, number, number]>();
-  for (const seed of seeds) {
-    const cell = seedCell(scene, seed, dimensions);
-    const brick: [number, number, number] = [Math.floor(cell.x / brickSize),
-      Math.floor(cell.y / brickSize), Math.floor(cell.z / brickSize)];
-    unique.set(brick.join(","), brick);
-  }
-  return [...unique.values()];
+  return [...seedBrickCoordinates(scene, dimensions, brickSize).values()].map((entry) => entry.brick);
 }
 
 function brickBounds(
@@ -155,6 +175,72 @@ function filledBrickBox(coordinates: readonly [number, number, number][]): boole
   return true;
 }
 
+/**
+ * One connected body of seeded bricks: where it is, which seeds made it, and
+ * whether it is a box.
+ *
+ * A body rather than a bounding box, because the two questions downstream are
+ * different. The solver's analytic bootstrap may only use a component that
+ * *fills* its bounds — a bounding box around an L would invent liquid. The
+ * editor wants every component regardless, so a painted blob is still something
+ * you can point at and move; it just may not be something you can resize.
+ */
+export interface InitialFluidBrickComponent {
+  readonly bounds: InitialFluidBrickUnionBounds;
+  /** Indices into `fluid.initialBrickSeeds_m`, ascending. */
+  readonly seedIndices: readonly number[];
+  /**
+   * Distinct bricks the component wets — its volume, in bricks. Not the seed
+   * count: several seeds may land in one brick, and each wets it once.
+   */
+  readonly brickCount: number;
+  /** True when the component fills its own bounding box exactly. */
+  readonly rectangular: boolean;
+}
+
+/**
+ * Every connected component of the authored brick seeds, in document order.
+ *
+ * Unlike `initialFluidBrickComponentBounds` this answers for an additive scene
+ * too, and reports non-rectangular components rather than refusing the whole
+ * set: it describes what the author wrote, and each caller decides what it may
+ * do with a component that is not a box.
+ */
+export function initialFluidBrickComponents(
+  scene: SceneDescription,
+  dimensions: readonly [number, number, number],
+  brickSize = INITIAL_FLUID_BRICK_SIZE,
+): readonly InitialFluidBrickComponent[] {
+  const remaining = seedBrickCoordinates(scene, dimensions, brickSize);
+  const components: InitialFluidBrickComponent[] = [];
+  while (remaining.size > 0) {
+    const first = remaining.values().next().value!;
+    const bricks: [number, number, number][] = [];
+    const seedIndices: number[] = [];
+    const pending = [first];
+    remaining.delete(first.brick.join(","));
+    while (pending.length > 0) {
+      const entry = pending.pop()!;
+      bricks.push(entry.brick);
+      seedIndices.push(...entry.seedIndices);
+      for (let axis = 0; axis < 3; axis += 1) for (const direction of [-1, 1]) {
+        const neighbor = [...entry.brick] as [number, number, number];
+        neighbor[axis] += direction;
+        const key = neighbor.join(",");
+        const present = remaining.get(key);
+        if (present) { remaining.delete(key); pending.push(present); }
+      }
+    }
+    components.push({
+      bounds: brickBounds(scene, dimensions, brickSize, bricks),
+      seedIndices: seedIndices.sort((left, right) => left - right),
+      brickCount: bricks.length,
+      rectangular: filledBrickBox(bricks),
+    });
+  }
+  return components;
+}
+
 /** Exact bounds for disconnected rectangular components of authored brick
  * seeds. Components that are L-shaped or otherwise non-rectangular return
  * undefined: replacing them with bounding boxes would invent liquid. */
@@ -163,30 +249,10 @@ export function initialFluidBrickComponentBounds(
   dimensions: readonly [number, number, number],
   brickSize = INITIAL_FLUID_BRICK_SIZE,
 ): readonly InitialFluidBrickUnionBounds[] | undefined {
-  const coordinates = initialFluidBrickCoordinates(scene, dimensions, brickSize);
-  if (!coordinates) return undefined;
-  const remaining = new Map(coordinates.map((brick) => [brick.join(","), brick]));
-  const components: [number, number, number][][] = [];
-  while (remaining.size > 0) {
-    const first = remaining.values().next().value as [number, number, number];
-    const component: [number, number, number][] = [];
-    const pending = [first];
-    remaining.delete(first.join(","));
-    while (pending.length > 0) {
-      const brick = pending.pop()!;
-      component.push(brick);
-      for (let axis = 0; axis < 3; axis += 1) for (const direction of [-1, 1]) {
-        const neighbor = [...brick] as [number, number, number];
-        neighbor[axis] += direction;
-        const key = neighbor.join(",");
-        const present = remaining.get(key);
-        if (present) { remaining.delete(key); pending.push(present); }
-      }
-    }
-    if (!filledBrickBox(component)) return undefined;
-    components.push(component);
-  }
-  return components.map((component) => brickBounds(scene, dimensions, brickSize, component));
+  if (!initialFluidBrickCoordinates(scene, dimensions, brickSize)) return undefined;
+  const components = initialFluidBrickComponents(scene, dimensions, brickSize);
+  if (components.some((component) => !component.rectangular)) return undefined;
+  return components.map((component) => component.bounds);
 }
 
 /** Returns exact world-space bounds when the authored brick seeds form one

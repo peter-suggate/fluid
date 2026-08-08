@@ -5533,6 +5533,8 @@ export class WebGPUOctreeProjection {
         // advance it with, so encoding the tracker here records a false held
         // advance. Positive-time steps consume the preceding settled W7.
         if (dt_s > 0) {
+          backend.encodeTransportVelocityStaging(preparationBroker);
+          preparationBroker.fence("Losasso factor-one transport velocity handoff published");
           this.coarseOnlySummary?.encode(preparationBroker);
           preparationBroker.fence("Losasso coarse-only transported lattice published");
         }
@@ -7740,6 +7742,17 @@ fn refinementRegionFloor(origin: vec3u, size: u32) -> u32 {
 fn refinementRegionHoldsLeaf(origin: vec3u, size: u32) -> bool {
   return size <= refinementRegionFloor(origin, size);
 }
+// The split that first reaches an authored floor is a representation cutover,
+// not another look-ahead shell.  A floor-2 region still needs size-2 leaves
+// that actually contain the interface (or authored activity), but refining
+// every size-4 leaf merely within the ordinary surface/wall band makes the
+// floor contagious.  In a modest closed tank those two bands overlap nearly
+// everywhere, and strict grading then leaves the whole region at its finest
+// permitted tier even while most of it is quiescent bulk water or air.
+fn refinementRegionFloorCutover(origin: vec3u, size: u32) -> bool {
+  let floorSize = refinementRegionFloor(origin, size);
+  return floorSize > 1u && size == 2u * floorSize;
+}
 fn valid(p: vec3i) -> bool { return all(p >= vec3i(0)) && all(p < vec3i(dims())); }
 struct CorrectedCoarsePhi { authority:bool, phi:f32, minimumPhi:f32, maximumPhi:f32, leafSize:u32 }
 fn coarseWord(index:u32)->u32{return bulkWorklist[index];}
@@ -8833,6 +8846,8 @@ struct FineLeafSummary {
   minimumPhi: f32,
   maximumPhi: f32,
   minimumAbsolutePhi: f32,
+  ownerValidSamples: u32,
+  ownerNegativeSamples: u32,
 }
 fn fineSummaryFinite(value: f32) -> bool { return value == value && abs(value) < 3.402823e38; }
 fn fineSummaryOrderedFloat(value: u32) -> f32 {
@@ -8845,7 +8860,7 @@ fn fineSummaryLength() -> u32 { return arrayLength(&pressureIn); }
 fn fineSummaryWord(index: u32) -> u32 { return bitcast<u32>(pressureIn[index]); }
 fn fineLeafSummary(origin: vec3u, size: u32) -> FineLeafSummary {
   var result = FineLeafSummary(false, false, false, false, false, false, false, 0.0,
-    3.402823e38, -3.402823e38, 3.402823e38);
+    3.402823e38, -3.402823e38, 3.402823e38, 0u, 0u);
   if (fineSummaryLength() < 16u || fineSummaryWord(0u) != 0u
       || fineSummaryWord(9u) != 0x80000000u) { return result; }
   let baseDims = vec3u(fineSummaryWord(4u), fineSummaryWord(5u), fineSummaryWord(6u));
@@ -8939,19 +8954,48 @@ fn fineLeafSummary(origin: vec3u, size: u32) -> FineLeafSummary {
       && (!factorOne || fineComplete)
       && (entryFlags & 0x3fc00000u) == 0x3fc00000u
       && fineSummaryFinite(result.centerPhi);
+    // The factor-one coarse publisher has no fine-page centre flags.  It
+    // instead accumulates the eight dense samples straddling each size >= 4
+    // pressure-cell centre as exact signed 16.16 integers.  Decode that value
+    // only under COARSE_AUTHORITY; fine-backed entries retain their f32 ABI.
+    if (factorOne && result.coarseAuthority && size >= 4u) {
+      let centreSamples = select(fineSummaryWord(base + 10u), 8u, size == 4u);
+      if (centreSamples == 8u) {
+        result.centerPhi = f32(bitcast<i32>(fineSummaryWord(base + 7u))) / (8.0 * 65536.0);
+        result.centerValid = fineSummaryFinite(result.centerPhi);
+      }
+    }
     // Factor 1 packs the exact validity and phase of all 4^3 finest-cell
     // samples in its level-zero B4 entry. A unit pressure owner can therefore
     // consume its own advected phi sign without inventing a finer surface
     // hierarchy or falling back to the previous coarse frontier.
-    if (factorOne && size == 1u
+    let exactMasks = factorOne && size <= 4u
         && ((samplesPerBrick == 64u && fineSummaryWord(base + 5u) == 1u)
           || (result.coarseAuthority && fineSummaryWord(base + 4u) == 64u
-            && fineSummaryWord(base + 5u) == 1u))) {
-      let local = origin & vec3u(3u);
-      let bit = local.x + 4u * (local.y + 4u * local.z);
-      let word = bit >> 5u; let mask = 1u << (bit & 31u);
-      result.exactCellValid = (fineSummaryWord(base + 8u + word) & mask) != 0u;
-      result.exactCellNegative = (fineSummaryWord(base + 10u + word) & mask) != 0u;
+            && fineSummaryWord(base + 5u) == 1u));
+    if (exactMasks) {
+      let localOrigin = origin & vec3u(3u);
+      for (var z = 0u; z < size; z += 1u) {
+        for (var y = 0u; y < size; y += 1u) {
+          for (var x = 0u; x < size; x += 1u) {
+            let local = localOrigin + vec3u(x, y, z);
+            let bit = local.x + 4u * (local.y + 4u * local.z);
+            let word = bit >> 5u; let mask = 1u << (bit & 31u);
+            let valid = (fineSummaryWord(base + 8u + word) & mask) != 0u;
+            let negative = (fineSummaryWord(base + 10u + word) & mask) != 0u;
+            result.ownerValidSamples += select(0u, 1u, valid);
+            result.ownerNegativeSamples += select(0u, 1u, valid && negative);
+          }
+        }
+      }
+      if (size == 1u) {
+        result.exactCellValid = result.ownerValidSamples == 1u;
+        result.exactCellNegative = result.ownerNegativeSamples == 1u;
+      }
+    }
+    if (factorOne && size >= 8u && result.coarseAuthority) {
+      result.ownerValidSamples = fineSummaryWord(base + 8u);
+      result.ownerNegativeSamples = fineSummaryWord(base + 9u);
     }
     return result;
   }
@@ -9054,6 +9098,16 @@ fn pressureRefinementEvidence(origin: vec3u, size: u32) -> bool {
   // locally active feature can force the real pressure/velocity octree down
   // to unit cells instead of merely receiving a finer visual phi mesh.
   if (summary.sizingRefinement) { return true; }
+  // A region spends its finest permitted tier on represented activity and the
+  // immediately adjacent wet-side interface shell, not on the full authored
+  // accuracy halo. Coarser ancestors retain that wider band and therefore the
+  // balanced size-2/4/8 transition. The one-cell shell matters when the zero
+  // set lies exactly on a candidate face: neither neighbor then has an internal
+  // sign crossing. Retaining only the wet neighbor follows section 6's
+  // water-side emphasis and avoids paying for an equally deep air-side B4 slab.
+  if (refinementRegionFloorCutover(origin, size)) {
+    return summary.minimumPhi < 0.0 && summary.minimumAbsolutePhi <= cellWidth;
+  }
   // A size-two adaptive pressure row can represent the factor-4/8 free-surface
   // cut directly. Splitting every merely-near row to unit size inflated the
   // first recurring mini-dam frontier from 1,248 to 1,500 rows and exhausted
@@ -9201,6 +9255,14 @@ fn leafNeedsRefinement(origin: vec3u, size: u32) -> bool {
   let crossesSolidBoundary = maximumSolid - minimumSolid > 1e-5 || (maximumSolid > 1e-5 && maximumSolid < 1.0 - 1e-5);
   let crossesBoundary = crossesClosedWall || (denseSolidField && crossesSolidBoundary);
   if (crossesBoundary) {
+    // Closed-wall look-ahead has the same contagious last-rung failure as the
+    // free-surface band.  An actual free-surface crossing already returned
+    // through pressureRefinementEvidence above, while a resolved solid cut is
+    // still geometric evidence and must retain the requested floor.
+    if (refinementRegionFloorCutover(origin, size) && crossesClosedWall
+        && !(denseSolidField && crossesSolidBoundary)) {
+      return false;
+    }
     if (!fluidGatedBoundaryRefinement) { return true; }
     // The band-one factor-one mode above deliberately admits a size-two
     // free-surface cut. A closed wall does not revoke that representation:
@@ -9560,6 +9622,10 @@ fn refineCoarseBlock(origin: vec3u, lid: u32) {
         boundaryLiquidPhiInterval(origin, size, range.z, range.w),
         f32(wallBandCells()) * params.cellRelax.x);
     }
+    if (refinementRegionFloorCutover(origin, size) && crossesClosedWall
+        && !crossesSolid) {
+      boundaryDecision = false;
+    }
     let pressureEvidence = pressureRefinementEvidence(origin, size);
     // Same cap as the fine path in leafNeedsRefinement. The coarse path is the
     // one that matters most to a region: a floor of 16 or 32 is only ever
@@ -9817,12 +9883,21 @@ fn currentPressureOwnerWet(owner: Owner) -> bool {
   if(bootstrapPhiEnabled()){return wet;}
   if(fine.found){
     if(fine.exactCellValid){wet=fine.exactCellNegative;}
-    // A pressure row owns volume, not merely its centre point. The factor-one
-    // dense tracker publishes a conservative min/max interval for every
-    // covering summary node, so any negative covered cell keeps the row wet;
-    // theta on its boundary faces resolves the sub-leaf free surface.
-    else if(owner.size>=2u&&fine.complete){wet=fine.minimumPhi<0.0;}
     else if(fine.centerValid){wet=fine.centerPhi<0.0;}
+    // The factor-one B4 summary carries the exact phase of every dense sample.
+    // For a size-two owner, its eight samples straddle the pressure-cell centre;
+    // their majority is the available centre-sign reconstruction.  Using the
+    // conservative minimum here dilates one wet corner to all 2^3 pressure
+    // volumes, so the projection can enforce incompressibility over more than
+    // twice the liquid represented by phi.  Min/max remains refinement
+    // evidence above; pressure membership is a centre decision as in section 6.
+    else if(owner.size>=2u
+        && fine.ownerValidSamples==owner.size*owner.size*owner.size){
+      wet=2u*fine.ownerNegativeSamples>=fine.ownerValidSamples;
+    }
+    // Fail conservatively only when the exact owner mask/centre is unavailable.
+    // This preserves continuity through a transient summary-publication gap.
+    else if(owner.size>=2u&&fine.complete){wet=fine.minimumPhi<0.0;}
     // A coarse-only summary is the paper's separate octree level set, not a
     // license to reclassify the same cell through a second surface authority.
     // Keep liquidOwner's exact coarse-centre decision so frontier membership
