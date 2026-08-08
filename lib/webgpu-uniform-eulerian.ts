@@ -957,6 +957,11 @@ export class WebGPUUniformEulerianSolver {
         adaptivity: options.octree.adaptivity ?? 1,
         interfaceRefinementBandCells: options.octree.interfaceRefinementBandCells ?? 4,
         surfaceRefinementGradingLayers: options.octree.surfaceRefinementGradingLayers ?? 1,
+        // Runtime topology dials also seed the fenced t=0 candidate. Dropping
+        // this bag here made the panel values appear only after the user moved
+        // a slider post-construction, so URL/profile experiments silently ran
+        // the safe defaults for their first epoch.
+        initialRuntimeDials: options.octree.initialRuntimeDials,
         // Left undefined the projection falls back to the pressure band, which
         // is the width every lane was measured at before the two separated.
         fineLevelSetBandCells: options.octree.fineLevelSetBandCells,

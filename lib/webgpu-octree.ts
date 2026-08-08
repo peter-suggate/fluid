@@ -1889,6 +1889,10 @@ export class WebGPUOctreeProjection {
    * sized the redistance reach and describes what was allocated.
    */
   private surfaceGradingLayersEffective = 1;
+  /** Live closed-container look-ahead; three preserves the measured default. */
+  private wallBandCellsEffective = OCTREE_POWER_BOUNDARY_STRIP_MIN_CELLS;
+  /** Live factor-one cut floor. Two is the explicit coarse-cut experiment. */
+  private finestSurfaceCellSizeEffective = 1;
   private readonly surfaceRefinementGradingLayers: number;
   private readonly fineLevelSetBandCells: number;
   /** Factor-one uses the compact octree phi as the sole moving surface;
@@ -2033,6 +2037,10 @@ export class WebGPUOctreeProjection {
       ?? this.interfaceRefinementBandCells;
     this.surfaceGradingLayersEffective = initialSurface?.gradingLayers
       ?? this.surfaceRefinementGradingLayers;
+    this.wallBandCellsEffective = options.initialRuntimeDials?.wallBandCells
+      ?? OCTREE_POWER_BOUNDARY_STRIP_MIN_CELLS;
+    this.finestSurfaceCellSizeEffective = options.initialRuntimeDials?.finestSurfaceCellSize
+      ?? 1;
     // Product configurations couple Section 5 surface reach to pressure reach.
     // A distinct value is admitted only for diagnostic fault injection; unset
     // follows the master band exactly.
@@ -4183,8 +4191,14 @@ export class WebGPUOctreeProjection {
       this.scene.numerics.maxDt_s,
       analyticBootstrapSelector
     ]);
-    // pressureCapacity.z carries the surface grading width because the
-    // projection uniform ABI already reserves this otherwise-unused word.
+    // pressureCapacity.z carries three live topology experiments because the
+    // projection uniform ABI reserves this word. Bytes are respectively:
+    // grading layers, closed-wall band, and finest factor-one surface cell.
+    // Keep pressureCapacity.w untouched: it carries warm-start bit zero and a
+    // dynamically stamped corrected-coarse generation above bit one.
+    const topologyDials = (this.surfaceGradingLayersEffective & 0xff)
+      | ((this.wallBandCellsEffective & 0xff) << 8)
+      | ((this.finestSurfaceCellSizeEffective & 0xff) << 16);
     new Uint32Array(data, 128, 4).set([
       this.pressureCapacity.rowCapacity,
       this.analyticSparseBootstrap
@@ -4193,7 +4207,7 @@ export class WebGPUOctreeProjection {
       // Live: layer one is the mandatory sharp 2:1 transition supplied by the
       // balance closure. Only layers above one add progressive distance
       // padding, and the surface-band dial removes those before the band.
-      this.surfaceGradingLayersEffective,
+      topologyDials,
       1,
     ]);
     const dam = sceneDamBreakFractions(this.scene);
@@ -4830,8 +4844,8 @@ export class WebGPUOctreeProjection {
       return;
     }
     this.appliedRuntimeDials = dials;
-    // The band is the one dial that changes what the LATTICE is rather than how
-    // hard it is worked, and it reaches the GPU as a single uniform write --
+    // The three topology dials change what the next LATTICE epoch is rather
+    // than how hard it is worked, and reach the GPU as one uniform write --
     // `writeParams` is otherwise only called at construction and on reseed, so
     // there is no per-frame cost to pay for making it live. The topology is
     // rebuilt from the new width on the next candidate epoch; nothing is
@@ -4840,16 +4854,24 @@ export class WebGPUOctreeProjection {
     const surface = octreeDialledSurfaceBand(
       this.interfaceRefinementBandCells, this.surfaceRefinementGradingLayers,
       this.coarseOnlySurfaceTracking ? 1 : 4, dials);
-    if (surface.bandCells !== this.interfaceBandCellsEffective
-      || surface.gradingLayers !== this.surfaceGradingLayersEffective) {
+    const surfaceChanged = surface.bandCells !== this.interfaceBandCellsEffective
+      || surface.gradingLayers !== this.surfaceGradingLayersEffective;
+    const topologyDialsChanged = surfaceChanged
+      || dials.wallBandCells !== this.wallBandCellsEffective
+      || dials.finestSurfaceCellSize !== this.finestSurfaceCellSizeEffective;
+    if (topologyDialsChanged) {
       this.interfaceBandCellsEffective = surface.bandCells;
       this.surfaceGradingLayersEffective = surface.gradingLayers;
-      this.coarseOnlySummary?.setRedistanceReachCells(
-        octreeSurfaceProtectionWidthCells(
-          surface.bandCells, surface.gradingLayers,
-          this.topologyMaximumLeafSize, 1,
-        ),
-      );
+      this.wallBandCellsEffective = dials.wallBandCells;
+      this.finestSurfaceCellSizeEffective = dials.finestSurfaceCellSize;
+      if (surfaceChanged) {
+        this.coarseOnlySummary?.setRedistanceReachCells(
+          octreeSurfaceProtectionWidthCells(
+            surface.bandCells, surface.gradingLayers,
+            this.topologyMaximumLeafSize, 1,
+          ),
+        );
+      }
       this.writeParams();
     }
     backend.applySolveTuning({
@@ -7617,6 +7639,14 @@ struct SolidCell { fraction: f32, owner: i32 }
 fn dims() -> vec3u {
   return params.dimsMax.xyz;
 }
+fn topologyDialByte(shift: u32) -> u32 {
+  return (params.pressureCapacity.z >> shift) & 0xffu;
+}
+fn surfaceGradingLayers() -> u32 { return max(1u, topologyDialByte(0u)); }
+fn wallBandCells() -> u32 { return max(1u, topologyDialByte(8u)); }
+fn finestSurfaceCellSize() -> u32 {
+  return clamp(topologyDialByte(16u), 1u, 2u);
+}
 fn valid(p: vec3i) -> bool { return all(p >= vec3i(0)) && all(p < vec3i(dims())); }
 struct CorrectedCoarsePhi { authority:bool, phi:f32, minimumPhi:f32, maximumPhi:f32, leafSize:u32 }
 fn coarseWord(index:u32)->u32{return bulkWorklist[index];}
@@ -8837,8 +8867,7 @@ fn fineLeafSummary(origin: vec3u, size: u32) -> FineLeafSummary {
 
 fn powerClosedWallStripIntersects(origin: vec3u, size: u32) -> bool {
   let flags = u32(round(params.container.w));
-  let width = max(${OCTREE_POWER_BOUNDARY_STRIP_MIN_CELLS}u,
-    u32(ceil(max(0.0, params.solve.w))));
+  let width = wallBandCells();
   let high = origin + vec3u(size);
   let d = dims();
   // x+/-, z+/-, and the floor are closed for every container. The ceiling
@@ -8888,7 +8917,7 @@ fn pressureRefinementEvidence(origin: vec3u, size: u32) -> bool {
   // balance fixpoint below. Counting it as distance padding too creates a
   // redundant full-leaf halo at every level and can eliminate every coarse
   // leaf in a modest domain. Only layers beyond one are optional padding.
-  let extraGradingLayers = f32(max(1u, params.pressureCapacity.z) - 1u);
+  let extraGradingLayers = f32(surfaceGradingLayers() - 1u);
   let retainedProtectionWidth = (max(1.0, params.solve.w)
     + extraGradingLayers * max(2.0, f32(size))) * cellWidth;
   // The fine factor-4/8 gated path already owns sub-cell interface support.
@@ -8901,6 +8930,18 @@ fn pressureRefinementEvidence(origin: vec3u, size: u32) -> bool {
     fineSummaryFactor == 1u);
   let summary = fineLeafSummary(origin, size);
   if (!summary.found) { return false; }
+  // Band one exposes the explicit coarse-cut experiment. The factor-one
+  // tracker carries an exact sign mask for every finest sample in this B4
+  // block, while the Losasso operator, ghost publication, and topology
+  // migration all admit a size-two cut representation. Preserve unit
+  // refinement only for transported sizing evidence; an ordinary crossing is
+  // represented directly instead of manufacturing a one-cell shell. This is
+  // not a trajectory-equivalence claim: the UI labels the setting experimental.
+  if (fineSummaryFactor == 1u && size <= finestSurfaceCellSize()
+      && params.solve.w <= 1.0
+      && !summary.sizingRefinement) {
+    return false;
+  }
   let crossesInterface = summary.minimumPhi <= 0.0 && summary.maximumPhi >= 0.0;
   // A sign crossing is positive refinement evidence even when the narrow-band
   // publication does not fill the candidate leaf's entire volume. Requiring a
@@ -9056,12 +9097,21 @@ fn leafNeedsRefinement(origin: vec3u, size: u32) -> bool {
   let crossesBoundary = crossesClosedWall || (denseSolidField && crossesSolidBoundary);
   if (crossesBoundary) {
     if (!fluidGatedBoundaryRefinement) { return true; }
+    // The band-one factor-one mode above deliberately admits a size-two
+    // free-surface cut. A closed wall does not revoke that representation:
+    // Losasso's wall face is Neumann and the adjacent cut pressure row remains
+    // the same degree of freedom. The independently configured wall look-ahead
+    // still prepares larger leaves before contact.
+    if (fineSummaryFactor == 1u && size <= finestSurfaceCellSize()
+        && params.solve.w <= 1.0) {
+      return false;
+    }
     // Two-sided over the leaf's phi INTERVAL: proximity to the surface, not
     // presence of liquid, and not the minimum's absolute value -- see
     // boundaryLiquidPhiInterval.
     return boundaryLiquidWouldRefine(
       boundaryLiquidPhiInterval(origin, size, minimumPhi, maximumPhi),
-      max(3.0, params.solve.w) * params.cellRelax.x);
+      f32(wallBandCells()) * params.cellRelax.x);
   }
   if (minimumSolid >= 1.0 - 1e-5) { return false; }
   return false;
@@ -9403,7 +9453,7 @@ fn refineCoarseBlock(origin: vec3u, lid: u32) {
       // Same interval band as the fine path in leafNeedsRefinement.
       boundaryDecision = boundaryLiquidWouldRefine(
         boundaryLiquidPhiInterval(origin, size, range.z, range.w),
-        max(3.0, params.solve.w) * params.cellRelax.x);
+        f32(wallBandCells()) * params.cellRelax.x);
     }
     let pressureEvidence = pressureRefinementEvidence(origin, size);
     let decision = pressureEvidence || adaptivity <= 0.0 || boundaryDecision;
@@ -10853,10 +10903,12 @@ export const octreeProjectionShader = octreeGradingFixpointEnabled()
   : octreeProjectionShaderBase;
 
 /**
- * Losasso owns a distinct topology shader module. Its free-surface shell is
- * uniformly finest, so a size-two leaf with finite near-interface evidence is
- * allowed to fall through to the normal distance predicate and split. The
- * frozen Power module keeps the compact size-two surface rows verbatim.
+ * Losasso owns a distinct topology shader module. At band widths above one,
+ * its free-surface shell is uniformly finest, so a size-two leaf with finite
+ * near-interface evidence falls through to the distance predicate and splits.
+ * Explicit band one plus a finest-surface-cell value of two is handled in
+ * `pressureRefinementEvidence` as the coarse size-two cut mode. The frozen
+ * Power module keeps compact size-two rows at every band width.
  */
 export function octreeLosassoSurfaceGradingShader(source: string): string {
   const compactSurfaceRows = `  if (fineSummaryFactor != 1u && size <= 2u) {

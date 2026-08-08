@@ -101,6 +101,24 @@ test("fine boundary gating stays candidate-local", () => {
     "current local evidence wins before the boundary decision");
 });
 
+test("factor-one band one admits size-two interface and closed-wall cuts", () => {
+  assert.match(octreeProjectionShader,
+    /fineSummaryFactor == 1u && size <= finestSurfaceCellSize\(\)[\s\S]*params\.solve\.w <= 1\.0[\s\S]*!summary\.sizingRefinement[\s\S]*return false/,
+    "the live cut floor should keep ordinary factor-one crossings on size-two rows at band one");
+  const fine = octreeProjectionShader.slice(
+    octreeProjectionShader.indexOf("fn leafNeedsRefinement"),
+    octreeProjectionShader.indexOf("fn splitLeaf"),
+  );
+  assert.match(fine,
+    /crossesBoundary[\s\S]*fineSummaryFactor == 1u && size <= finestSurfaceCellSize\(\)[\s\S]*params\.solve\.w <= 1\.0[\s\S]*return false/,
+    "a closed wall must preserve the same supported size-two cut");
+  assert.match(octreeProjectionShader,
+    /fn wallBandCells\(\)[\s\S]*topologyDialByte\(8u\)[\s\S]*let width = wallBandCells\(\)/,
+    "the closed-wall strip must use its independent live UI control");
+  assert.doesNotMatch(octreeProjectionShader, /max\(3\.0, params\.solve\.w\)/,
+    "wall reach must no longer be silently hard-floored behind the UI");
+});
+
 test("topology census deduplicates one coarse leaf spanning owner pages", () => {
   const plan = planOctreeOwnerPages([16, 16, 16], { maximumPages: 8 });
   const arena = new Uint32Array(plan.allocatedWords);

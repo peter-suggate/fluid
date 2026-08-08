@@ -36,6 +36,9 @@
  *   FLUID_MAX_DT           fixed step (default 0.008)
  *   FLUID_MAXIMUM_LEAF_SIZE  bisection handle on the leaf ceiling
  *   FLUID_OCTREE_INTERFACE_BAND  bisection handle on the band reach
+ *   FLUID_SURFACE_BAND       live surface half-thickness (0=AUTO)
+ *   FLUID_FINEST_SURFACE_CELL  live factor-one cut floor (1 or 2)
+ *   FLUID_WALL_BAND          live closed-wall look-ahead (1 through 4)
  *   FLUID_SURFACE_ASCII    1 to print a height map per sample
  *   FLUID_SURFACE_SLICE    1 to print an (x, y) leaf-size slice
  *   FLUID_SURFACE_PHI      1 to print phi in cells on that slice
@@ -420,6 +423,12 @@ try {
       ? { maximumLeafSize: process.env.FLUID_MAXIMUM_LEAF_SIZE } : {}),
     ...(process.env.FLUID_OCTREE_INTERFACE_BAND
       ? { interfaceRefinementBandCells: Number(process.env.FLUID_OCTREE_INTERFACE_BAND) } : {}),
+    ...(process.env.FLUID_SURFACE_BAND
+      ? { interfaceBandCells: Number(process.env.FLUID_SURFACE_BAND) } : {}),
+    ...(process.env.FLUID_FINEST_SURFACE_CELL
+      ? { finestSurfaceCellSize: Number(process.env.FLUID_FINEST_SURFACE_CELL) } : {}),
+    ...(process.env.FLUID_WALL_BAND
+      ? { wallBandCells: Number(process.env.FLUID_WALL_BAND) } : {}),
   }, undefined, () => {}) as GPUSolverInstance;
   await device.queue.onSubmittedWorkDone();
   const dimensions = [solver.info.nx, solver.info.ny, solver.info.nz] as
@@ -435,6 +444,18 @@ try {
       }>;
     };
   }).octreeProjection;
+  const projectionRuntime = projection as unknown as {
+    interfaceBandCellsEffective?: number;
+    surfaceGradingLayersEffective?: number;
+    finestSurfaceCellSizeEffective?: number;
+    wallBandCellsEffective?: number;
+  };
+  const runtimeTopologyDials = {
+    surfaceBandCells: projectionRuntime.interfaceBandCellsEffective,
+    surfaceGradingLayers: projectionRuntime.surfaceGradingLayersEffective,
+    finestSurfaceCellSize: projectionRuntime.finestSurfaceCellSizeEffective,
+    wallBandCells: projectionRuntime.wallBandCellsEffective,
+  };
 
   const samples: Array<Record<string, unknown>> = [];
   let step = 0;
@@ -538,7 +559,8 @@ try {
   }
   solver.destroy();
   console.log(JSON.stringify({
-    phase: "dam-surface-shape", scene: sceneId, dt, dimensions, validationErrors, samples,
+    phase: "dam-surface-shape", scene: sceneId, dt, dimensions, runtimeTopologyDials,
+    validationErrors, samples,
   }, null, 1));
   device.destroy();
 } finally {

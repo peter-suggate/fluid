@@ -4,10 +4,11 @@
  * Every dial declared here is applied to a LIVE solver: no rebuild, no
  * re-seed, no change to the simulation clock. That is what makes them usable
  * as an experiment surface — you can sweep one while the water is moving and
- * watch the physics lane's measured time respond in the same session. None of
- * them changes what the lattice IS, which is why they are listed in the
- * method's `runtimeParamKeys` and therefore excluded from the structural
- * fingerprint that would otherwise reset t=0 on every drag.
+ * watch the physics lane's measured time respond in the same session. The
+ * topology dials change the next accepted lattice epoch inside allocations
+ * that construction already sized; they never reallocate or reset t=0. That
+ * is why every dial is listed in the method's `runtimeParamKeys` and excluded
+ * from the structural fingerprint that would otherwise reset on every drag.
  *
  * The table below is what picked these dials and set their order. It is ONE
  * capture — `docs/losasso-coarse-band-10x-handoff.md`, symmetric-expansion at
@@ -53,6 +54,14 @@ export interface OctreeRuntimeDials {
    * scene authored. Zero means AUTO: retain the authored pair.
    */
   readonly interfaceBandCells: number;
+  /**
+   * Smallest pressure-cell edge admitted at an ordinary factor-one surface
+   * cut. One preserves the uniformly-unit shell; two lets band one represent
+   * the cut directly on a size-two Losasso row. Sizing evidence still wins.
+   */
+  readonly finestSurfaceCellSize: number;
+  /** Closed-container look-ahead width, in finest cells. */
+  readonly wallBandCells: number;
   /**
    * Decades of slack added to the authored pressure residual tolerance.
    * 0 keeps `scene.numerics.pressureRelativeTolerance`; +3 solves to a
@@ -156,6 +165,47 @@ export const OCTREE_RUNTIME_DIALS: readonly OctreeRuntimeDialSpec[] = Object.fre
       + " the scene authored, because the row capacity, the residency halo and"
       + " the redistance reach were all sized from those values -- this dial"
       + " thins the grid, it never widens it past what was allocated.",
+  },
+  {
+    key: "finestSurfaceCellSize",
+    label: "Finest surface cell",
+    short: "SURFACE CELL",
+    unit: "cells",
+    min: 1, max: 2, step: 1, digits: 0, default: 1,
+    does: "The smallest pressure cell used where the free surface actually cuts"
+      + " the factor-one octree. Set Surface band to 1 and this to 2 to keep an"
+      + " ordinary cut on a 2×2×2 pressure cell.",
+    cost: "2 is much cheaper and removes the unit-cell skin visible on an"
+      + " octree slice, but it is an aggressive diagnostic setting: the compact"
+      + " dam-break A/B currently stalls when every initial cut is admitted at"
+      + " that size. Thin sheets and one-cell droplets also become vulnerable.",
+    hint: "Live factor-one experiment. At Surface band 1, value 2 stops the"
+      + " topology ladder from hard-splitting every size-two sign crossing to"
+      + " unit cells. The Losasso ghost pressure, topology migration and face"
+      + " operator admit that coarse representation, but trajectory parity is"
+      + " not implied: the compact dam-break currently exposes a stationary"
+      + " coarse-cut failure. Direct transported sizing evidence overrides the"
+      + " dial and retains unit cells. At wider surface bands the"
+      + " uniformly-fine shell remains authoritative, so this control has no"
+      + " effect.",
+  },
+  {
+    key: "wallBandCells",
+    label: "Wall refinement band",
+    short: "WALL BAND",
+    unit: "cells",
+    min: 1, max: 4, step: 1, digits: 0, default: 3,
+    does: "How many finest cells ahead of a closed container wall are checked"
+      + " for nearby liquid before boundary cells are split.",
+    cost: "Thinner is cheaper, especially on a plane against the tank wall. A"
+      + " fast front can reach a coarse wall row before the next topology epoch,"
+      + " shifting impact timing and reflected run-up.",
+    hint: "Live closed-wall look-ahead. The default three-cell strip preserves"
+      + " the measured dam-wall timing guard. Lower values deliberately allow"
+      + " coarser pressure cells nearer the floor and x/z container walls; use"
+      + " dam-break wall-contact time and reflected run-up as the A/B signals."
+      + " This does not change solid or free-surface evidence outside the wall"
+      + " policy.",
   },
   {
     key: "pressureToleranceDecades",

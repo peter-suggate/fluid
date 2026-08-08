@@ -68,6 +68,10 @@ test("dial values are clamped and snapped before they reach the GPU", () => {
   assert.equal(resolveOctreeRuntimeDials({ vcycleBottomSweeps: 99 }).vcycleBottomSweeps, 8);
   assert.equal(resolveOctreeRuntimeDials({ velocityExtensionSweeps: 1 }).velocityExtensionSweeps, 8);
   assert.equal(resolveOctreeRuntimeDials({ topologyRebuildCadence: 40 }).topologyRebuildCadence, 8);
+  assert.equal(resolveOctreeRuntimeDials({ finestSurfaceCellSize: 99 }).finestSurfaceCellSize, 2);
+  assert.equal(resolveOctreeRuntimeDials({ finestSurfaceCellSize: 0 }).finestSurfaceCellSize, 1);
+  assert.equal(resolveOctreeRuntimeDials({ wallBandCells: 99 }).wallBandCells, 4);
+  assert.equal(resolveOctreeRuntimeDials({ wallBandCells: 0 }).wallBandCells, 1);
   // Non-numeric or absent values fall back rather than producing NaN uniforms.
   assert.deepEqual(resolveOctreeRuntimeDials({
     pressureToleranceDecades: Number.NaN,
@@ -263,9 +267,12 @@ test("the band dial reaches the GPU as a uniform write, not a rebuild", () => {
     /new Float32Array\(data, 48, 4\)\.set\(\[1e-8, 0\.01, 2\.2, this\.interfaceBandCellsEffective\]\);/);
   assert.match(source, /const surface = octreeDialledSurfaceBand\(/);
   assert.match(source,
-    /new Uint32Array\(data, 128, 4\)\.set\(\[[\s\S]*?this\.surfaceGradingLayersEffective,/,
-    "grading is the other half of the thickness and must be live too");
+    /const topologyDials = \(this\.surfaceGradingLayersEffective & 0xff\)[\s\S]*?this\.wallBandCellsEffective[\s\S]*?this\.finestSurfaceCellSizeEffective/,
+    "all three topology experiments must share the live packed uniform");
   assert.match(source,
     /setRedistanceReachCells\([\s\S]*?surface\.bandCells, surface\.gradingLayers/,
     "the recurring redistance work must follow the live protection reach");
+  assert.match(source,
+    /dials\.wallBandCells !== this\.wallBandCellsEffective[\s\S]*?dials\.finestSurfaceCellSize !== this\.finestSurfaceCellSizeEffective[\s\S]*?this\.writeParams\(\)/,
+    "wall reach and the size-two cut lever must apply without a rebuild");
 });
