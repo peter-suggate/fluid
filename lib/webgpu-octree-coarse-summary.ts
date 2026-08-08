@@ -261,11 +261,11 @@ export class WebGPUOctreeCoarseSummary {
     const storage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST;
     this.directory = device.createBuffer({ label: "coarse-only direct summary hierarchy",
       size: this.plan.directoryWords * 4, usage: storage });
-    // 40 words. The receipt tallies live at 19/20, and a runtime-sized
+    // 42 words. The receipt tallies live at 19/20, and a runtime-sized
     // `array<atomic<u32>>` silently drops out-of-bounds atomics rather than
     // faulting, so an 80-byte buffer made `state[20]` a write into nowhere.
-    this.state = device.createBuffer({ label: "coarse-only summary build state", size: 160, usage: storage });
-    this.params = device.createBuffer({ label: "coarse-only summary parameters", size: 112,
+    this.state = device.createBuffer({ label: "coarse-only summary build state", size: 168, usage: storage });
+    this.params = device.createBuffer({ label: "coarse-only summary parameters", size: 128,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     // Records: 0 dense lattice, 1 live coarse rows, 2 live summary entries.
     this.dispatchArgs = device.createBuffer({ label: "coarse-only summary dispatch arguments",
@@ -286,7 +286,7 @@ export class WebGPUOctreeCoarseSummary {
       this.plan.directoryPageCapacity, this.plan.entryCapacity,
       this.plan.entryOffsetWords, this.plan.levelDimensions.length - 1,
       coarse.rowCapacity, this.plan.directoryWords], 8);
-    const data = new ArrayBuffer(112); new Uint32Array(data, 0, 16).set(words);
+    const data = new ArrayBuffer(128); new Uint32Array(data, 0, 16).set(words);
     const tail = new Uint32Array(data, 64, 4);
     // The last word is the dense coarse lattice's own cardinality. It used to
     // be spelled `ownerDirectoryCellCapacity` because the owner directory was
@@ -305,6 +305,7 @@ export class WebGPUOctreeCoarseSummary {
       coarseSummaryDiagnosticsEnabled() ? 1 : 0,
       coarseSummaryVolumeCorrectionMode(),
     ]);
+    new Uint32Array(data, 112, 1)[0] = this.redistanceSweeps;
     device.queue.writeBuffer(this.params, 0, data);
     if (air.initialPhi.length !== dimensions[0] * dimensions[1] * dimensions[2]) {
       throw new RangeError("Coarse-only tracker bootstrap must cover the complete coarse lattice");
@@ -315,7 +316,7 @@ export class WebGPUOctreeCoarseSummary {
     // and the directory must not observe a concurrently mutable source anyway.
     const initialPhi = new Float32Array(air.initialPhi);
     device.queue.writeBuffer(this.directory, this.plan.phiOffsetWords * 4, initialPhi);
-    const initialState = new Uint32Array(40);
+    const initialState = new Uint32Array(42);
     const referenceCells = air.initialPhi.reduce((sum, phi) =>
       sum + Math.max(0, Math.min(1, 0.5 - phi / air.physicalCellSize)), 0);
     initialState[14] = Math.round(4096 * referenceCells);
@@ -331,6 +332,8 @@ export class WebGPUOctreeCoarseSummary {
   setRedistanceReachCells(reachCells: number): void {
     this.redistanceSweeps = planOctreeRedistanceSweeps(
       reachCells, this.redistanceDimensions);
+    this.device.queue.writeBuffer(this.params, 112,
+      new Uint32Array([this.redistanceSweeps]));
   }
 
   private descriptor(entryPoint: string): GPUComputePipelineDescriptor {
@@ -476,21 +479,23 @@ export class WebGPUOctreeCoarseSummary {
     airFirstErrorStage: number; airFirstErrorItem: number;
     losassoUnpublishedSamples: number; losassoOutOfRangeSamples: number;
     losassoInvalidStoredSamples: number;
+    exteriorHeldCells: number;
+    redistanceExteriorCells: number;
     denseBanks: readonly Readonly<{ minimum: number; maximum: number; negative: number; zero: number }>[] }>> {
     const denseBytes = 3 * this.domainVolume * 4;
     const readback = this.device.createBuffer({ label: "coarse-only tracker receipt readback",
-      size: 224 + denseBytes, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+      size: 232 + denseBytes, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     const encoder = this.device.createCommandEncoder({ label: "Read coarse-only tracker receipt" });
-    encoder.copyBufferToBuffer(this.state, 0, readback, 0, 160);
-    encoder.copyBufferToBuffer(this.directory, 0, readback, 160, 64);
+    encoder.copyBufferToBuffer(this.state, 0, readback, 0, 168);
+    encoder.copyBufferToBuffer(this.directory, 0, readback, 168, 64);
     encoder.copyBufferToBuffer(this.directory, this.plan.phiOffsetWords * 4,
-      readback, 224, denseBytes);
+      readback, 232, denseBytes);
     this.device.queue.submit([encoder.finish()]);
     try {
       await readback.mapAsync(GPUMapMode.READ);
       const words = new Uint32Array(readback.getMappedRange().slice(0));
-      const header = 40;
-      const dense = new Float32Array(words.buffer, 224, 3 * this.domainVolume);
+      const header = 42;
+      const dense = new Float32Array(words.buffer, 232, 3 * this.domainVolume);
       const denseBanks = [0, 1, 2].map((bank) => {
         let minimum = Number.POSITIVE_INFINITY, maximum = Number.NEGATIVE_INFINITY;
         let negative = 0, zero = 0;
@@ -519,6 +524,8 @@ export class WebGPUOctreeCoarseSummary {
         airFirstErrorStage: words[26] >>> 24, airFirstErrorItem: words[26] & 0x00ff_ffff,
         losassoUnpublishedSamples: words[37], losassoOutOfRangeSamples: words[38],
         losassoInvalidStoredSamples: words[39],
+        exteriorHeldCells: words[40],
+        redistanceExteriorCells: words[41],
         denseBanks };
     } finally {
       if (readback.mapState === "mapped") readback.unmap();
@@ -541,7 +548,7 @@ const PAGE_SIZE:u32=${PAGE_SIZE}u;const ENTRY_WORDS:u32=${ENTRY_WORDS}u;
 struct P{baseDims:vec3u,bodyCount:u32,dims:vec3u,maximumLeafSize:u32,keyCapacity:u32,topPages:u32,pageCapacity:u32,
  entryCapacity:u32,entryOffset:u32,maximumLevel:u32,rowCapacity:u32,directoryWords:u32,
  airControl:u32,airVectors:u32,airOwners:u32,domainVolume:u32,time:vec4f,maxWorkgroups:u32,physicalCellSize:f32,
- diagnostics:u32,volumeCorrectionMode:u32}
+ diagnostics:u32,volumeCorrectionMode:u32,redistanceReachCells:u32}
 struct CoarseEntry{cellPlusOne:u32,size:u32,phi:f32,minimumPhi:f32,maximumPhi:f32,flags:u32,row:u32,volume:f32}
 struct CoarseDirectory{state:u32,generation:u32,rowCount:u32,maximumLeafSize:u32,dimensions:vec3u,
  physicalCellSize:f32,entries:array<CoarseEntry>}
@@ -821,17 +828,25 @@ fn rankForKey(key:u32)->u32{let pagePlusOne=atomicLoad(&directory[topWord(key)])
   if(currentAt<arrayLength(&directory)){let current=bitcast<f32>(atomicLoad(&directory[currentAt]));
    sample=vec2f(current,select(0.0,1.0,finite(current)));}}
  let h=p.physicalCellSize;
- let nearInterface=p.diagnostics!=0u&&initialized&&abs(sample.x)<=2.0*h;if(nearInterface){atomicAdd(&state[27],1u);}
- let velocity=transportVelocityAt(point);if(nearInterface&&velocity.w>0.0){atomicAdd(&state[28],1u);
-  atomicMax(&state[30],bitcast<u32>(length(velocity.xyz)));}
- if(initialized&&velocity.w==0.0){atomicAdd(&state[31],1u);}
- if(initialized&&velocity.w>0.0){let midpoint=point-(0.5*p.time.x/h)*velocity.xyz;
-  let middleVelocity=transportVelocityAt(midpoint);let traced=select(velocity,middleVelocity,middleVelocity.w>0.0);
-  let departure=point-(p.time.x/h)*traced.xyz;let transported=densePhiAt(readBank,departure);if(transported.y!=0.0){
-   let difference=transported.x-sample.x;let moved=abs(difference)>1e-6*h
-    &&(abs(transported.x)<=2.0*h||abs(sample.x)<=2.0*h);
-   if(moved){markTransportPhase(select(ADVANCING,RETREATING,difference>0.0),item);}
-   if(nearInterface&&moved){atomicAdd(&state[29],1u);}sample=transported;}}
+ // Fast marching replaces every value outside this reach with an honest
+ // signed "farther than the protected band" sentinel. Advecting that exterior
+ // cannot influence the zero set before a later sweep first peels it into the
+ // active band, so do not pay two velocity reconstructions and two trilinear
+ // phi reads there. This is the first outside-in reduction: the interface core
+ // and its complete protection reach remain byte-for-byte on the old path.
+ let exterior=initialized&&abs(sample.x)>f32(p.redistanceReachCells)*h;
+ if(exterior){if(p.diagnostics!=0u){atomicAdd(&state[40],1u);}}else{
+  let nearInterface=p.diagnostics!=0u&&initialized&&abs(sample.x)<=2.0*h;if(nearInterface){atomicAdd(&state[27],1u);}
+  let velocity=transportVelocityAt(point);if(nearInterface&&velocity.w>0.0){atomicAdd(&state[28],1u);
+   atomicMax(&state[30],bitcast<u32>(length(velocity.xyz)));}
+  if(initialized&&velocity.w==0.0){atomicAdd(&state[31],1u);}
+  if(initialized&&velocity.w>0.0){let midpoint=point-(0.5*p.time.x/h)*velocity.xyz;
+   let middleVelocity=transportVelocityAt(midpoint);let traced=select(velocity,middleVelocity,middleVelocity.w>0.0);
+   let departure=point-(p.time.x/h)*traced.xyz;let transported=densePhiAt(readBank,departure);if(transported.y!=0.0){
+    let difference=transported.x-sample.x;let moved=abs(difference)>1e-6*h
+     &&(abs(transported.x)<=2.0*h||abs(sample.x)<=2.0*h);
+    if(moved){markTransportPhase(select(ADVANCING,RETREATING,difference>0.0),item);}
+    if(nearInterface&&moved){atomicAdd(&state[29],1u);}sample=transported;}}}
  let predicted=quantizePhi(select(p.physicalCellSize,sample.x,sample.y!=0.0));let at=phiWord(writeBank,item);
  if(at>=arrayLength(&directory)||!finite(predicted)){atomicOr(&state[2],4u);return;}atomicStore(&directory[at],bitcast<u32>(predicted));
  atomicAdd(&state[18],1u);}
@@ -858,8 +873,16 @@ const AXIS_DIRECTIONS=array<vec3i,6>(vec3i(-1,0,0),vec3i(1,0,0),vec3i(0,-1,0),ve
 fn closedLidDirection(direction:u32)->bool{return direction==3u&&p.time.w==0.0;}
 @compute @workgroup_size(256)fn seedDenseRedistance(@builtin(workgroup_id)w:vec3u,@builtin(num_workgroups)n:vec3u,
  @builtin(local_invocation_index)l:u32){let item=linear(w,n,l);if(item>=p.domainVolume||atomicLoad(&state[18])!=p.domainVolume){return;}
- let source=denseRaw(outputBank(),item);if(!finite(source)){atomicOr(&state[2],4u);return;}let q=vec3i(i32(item%p.dims.x),i32((item/p.dims.x)%p.dims.y),i32(item/(p.dims.x*p.dims.y)));
+ let source=denseRaw(outputBank(),item);if(!finite(source)){atomicOr(&state[2],4u);return;}
  var magnitude=p.physicalCellSize*f32(max(p.dims.x,max(p.dims.y,p.dims.z)));if(source==0.0){magnitude=0.0;}
+ // The previous fast-march publication proves this sample is farther from the
+ // zero set than any consumer can ask. Transport retained it unchanged, so it
+ // cannot have acquired a new crossing; seed the same signed exterior without
+ // reading six neighbours. A later sweep peels it back in before it becomes
+ // eligible for transport.
+ if(abs(source)>f32(p.redistanceReachCells)*p.physicalCellSize){let value=select(magnitude,-magnitude,source<0.0);
+  atomicStore(&directory[phiWord(2u,item)],bitcast<u32>(value));if(p.diagnostics!=0u){atomicAdd(&state[41],1u);}return;}
+ let q=vec3i(i32(item%p.dims.x),i32((item/p.dims.x)%p.dims.y),i32(item/(p.dims.x*p.dims.y)));
  for(var axis=0u;axis<6u;axis+=1u){let otherQ=q+AXIS_DIRECTIONS[axis];var other=source;
   if(any(otherQ<vec3i(0))||any(otherQ>=vec3i(p.dims))){if(!closedLidDirection(axis)){continue;}other=source+p.physicalCellSize;}
   else{other=denseRaw(outputBank(),neighborItem(otherQ));}
@@ -879,9 +902,16 @@ fn sweepDenseRedistance(sourceBank:u32,destinationBank:u32,item:u32){if(atomicLo
  // sum_i(max(u-a_i,0)^2)=h^2 over the sorted axis minima. The old
  // min(a_i+h) recurrence is an L1 distance and systematically advances a
  // dam-break diagonal faster than its axes.
- let a0=min(nearest.x,min(nearest.y,nearest.z));let a2=max(nearest.x,max(nearest.y,nearest.z));
+ let a0=min(nearest.x,min(nearest.y,nearest.z));let h=p.physicalCellSize;
+ // No causal front has reached this sample in this sweep. The min-only update
+ // below would reproduce the source exactly, so retain it without the Eikonal
+ // sort, square roots, or discriminants. This condition retreats naturally as
+ // successive sweeps carry the interface outward.
+ if(a0>f32(p.redistanceReachCells)*h){let value=select(abs(source),-abs(source),source<0.0);
+  atomicStore(&directory[phiWord(destinationBank,item)],bitcast<u32>(value));if(p.diagnostics!=0u){atomicAdd(&state[41],1u);}return;}
+ let a2=max(nearest.x,max(nearest.y,nearest.z));
  let a1=max(min(nearest.x,nearest.y),max(min(nearest.x,nearest.z),min(nearest.y,nearest.z)));
- let h=p.physicalCellSize;var updated=a0+h;
+ var updated=a0+h;
  if(finite(a1)&&updated>a1){let discriminant=max(0.0,2.0*h*h-(a0-a1)*(a0-a1));updated=0.5*(a0+a1+sqrt(discriminant));}
  if(finite(a2)&&updated>a2){let sum=a0+a1+a2;let squares=a0*a0+a1*a1+a2*a2;
   let discriminant=max(0.0,sum*sum-3.0*(squares-h*h));updated=(sum+sqrt(discriminant))/3.0;}
