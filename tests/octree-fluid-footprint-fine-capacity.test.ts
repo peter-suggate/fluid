@@ -104,8 +104,8 @@ test("Losasso couples the 2017 fine band to a unilateral coarse wall active set"
     "a released wall face must not re-weld on a p approximately zero duty cycle");
   assert.match(projection, /face\.reserved \| FACE_SEPARATED/);
   assert.match(coarsePhi,
-    /let separated=contactEnabled&&\(face\.reserved&FACE_SEPARATED\)!=0u/);
-  assert.match(coarsePhi, /contactEnabled&&\(separated\|\|\(\(rowFlags&\(VALID\|FINITE\)\)/,
+    /let separated=\(face\.reserved&FACE_SEPARATED\)!=0u/);
+  assert.match(coarsePhi, /if\(separated\|\|\(\(rowFlags&\(VALID\|FINITE\)\)/,
     "either the active set or a resolved fine-phi air gap must open a p=0 ghost");
   assert.match(migration, /oldGeometry\[old\]\.x&FACE_SEPARATED/);
   assert.match(migration, /newFaces\[face\]\.reserved\|=FACE_SEPARATED/,

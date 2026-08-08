@@ -1,6 +1,5 @@
 import { OCTREE_LOSASSO_INVALID_ROW } from "./octree-losasso-operator";
 import type { PassBroker } from "./webgpu-pass-broker";
-import type { LosassoFreeSurfacePressureMode } from "./octree-coarse-backend";
 
 export const octreeLosassoProjectionWGSL = /* wgsl */ `
 const INVALID_ROW: u32 = ${OCTREE_LOSASSO_INVALID_ROW}u;
@@ -10,14 +9,14 @@ const FACE_CLOSED_BOUNDARY: u32 = 0x40000000u;
 const FACE_ROW_ON_POSITIVE_SIDE: u32 = 0x80000000u;
 struct Face { negativeRow: u32, positiveRow: u32, axis: u32, reserved: u32,
   area: f32, inverseDistance: f32, openFraction: f32, normalVelocity: f32 };
-struct Params { pressureScale: f32, contactPressure: f32, reserved0: u32, reserved1: u32,
-  gravity: vec4f };
+struct Params { pressureScale: f32, contactPressure: f32, gravity: vec4f };
 @group(0) @binding(0) var<uniform> params: Params;
 @group(0) @binding(1) var<storage, read> authority: array<u32>;
 @group(0) @binding(2) var<storage, read_write> faces: array<Face>;
 @group(0) @binding(3) var<storage, read> pressure: array<f32>;
 @group(0) @binding(4) var<storage, read> predictedVelocity: array<f32>;
 @group(0) @binding(5) var<storage, read_write> projectedVelocity: array<f32>;
+@group(0) @binding(6) var<storage, read> faceMetrics: array<vec4u>;
 @compute @workgroup_size(64)
 fn projectLosassoFaces(@builtin(global_invocation_id) invocation: vec3u) {
   let faceId = invocation.x;
@@ -32,14 +31,23 @@ fn projectLosassoFaces(@builtin(global_invocation_id) invocation: vec3u) {
     negativePressure = 0.0;
   }
   // A missing solid-interior row is Neumann, not atmospheric Dirichlet.
-  // Its only admissible normal velocity is the prescribed body velocity.
-  // The open liquid share has no pressure cell on the far side, so retaining
-  // the gravity-forced intermediate value here creates a one-sided jet.
   let solidNeumann = (face.reserved & FACE_SOLID_NEUMANN) != 0u;
-  var projected = select(predictedVelocity[faceId], face.normalVelocity, solidNeumann);
+  var projected = predictedVelocity[faceId];
   if (!solidNeumann) {
-    projected -= params.pressureScale * (positivePressure - negativePressure)
+    // Octree T-junction row centres can be vertically offset across an x/z
+    // face. Their hydrostatic pressure difference is tangential, not a normal
+    // gradient; removing it keeps gravity exactly balanced on graded rows.
+    let deltaYCells = bitcast<f32>(faceMetrics[faceId].z);
+    let hydrostaticTangential = params.gravity.w * params.gravity.y * deltaYCells;
+    projected -= params.pressureScale
+      * ((positivePressure - negativePressure) - hydrostaticTangential)
       * face.inverseDistance * face.openFraction;
+  } else {
+    // This face borders carved rigid interior, not atmospheric air. Enforce
+    // impermeability in both directions; allowing a separating component here
+    // lets gravity peel fully submerged liquid away from the lower hemisphere
+    // and creates a persistent recirculation around a stationary body.
+    projected = face.normalVelocity;
   }
   // Closed contact is unilateral. The fine band transports the separating
   // interface; this lagged active-set bit makes the next coarse operator use
@@ -47,7 +55,7 @@ fn projectLosassoFaces(@builtin(global_invocation_id) invocation: vec3u) {
   // wall may release under tension. A gravity-opposed ceiling gets the small
   // hydrostatic bias needed to release a stationary film before strict
   // negative pressure appears; other walls open only below ambient pressure.
-  if (params.reserved0 == 0u && (face.reserved & FACE_CLOSED_BOUNDARY) != 0u) {
+  if ((face.reserved & FACE_CLOSED_BOUNDARY) != 0u) {
     let weight = length(params.gravity.xyz);
     let outward = select(1.0, -1.0, rowOnPositiveSide);
     let overhead = weight > 1e-6 && outward * (-params.gravity[face.axis] / weight) > 0.5;
@@ -55,12 +63,17 @@ fn projectLosassoFaces(@builtin(global_invocation_id) invocation: vec3u) {
     let finitePressure = solved == solved && abs(solved) <= 3.402823e38;
     let wasSeparated = (face.reserved & FACE_SEPARATED) != 0u;
     // A separated face is an air-pressure contact, not an open boundary. The
-    // active-set bit is one solve behind, so reject a returning characteristic
-    // immediately instead of allowing one step of liquid flux into the wall.
-    if (wasSeparated) { projected = outward * max(0.0, outward * projected); }
+    // active-set bit is one solve behind, so close it immediately on approach;
+    // otherwise retain only motion away from the wall and back into the tank.
+    let approaching = overhead && outward * projected > 1e-6;
+    if (wasSeparated) {
+      projected = outward * select(max(0.0, outward * projected),
+        min(0.0, outward * projected), overhead);
+    }
     let releasePressure = select(0.0, params.contactPressure, overhead);
-    let renewalPressure = max(releasePressure, 1e-4 * params.contactPressure);
-    let opening = finitePressure && select(solved < releasePressure,
+    let renewalPressure = select(max(releasePressure, 1e-4 * params.contactPressure),
+      0.25 * params.contactPressure, overhead);
+    let opening = finitePressure && !approaching && select(solved < releasePressure,
       solved < renewalPressure, wasSeparated);
     face.reserved = select(face.reserved & ~FACE_SEPARATED,
       face.reserved | FACE_SEPARATED, opening);
@@ -79,11 +92,13 @@ export interface WebGPUOctreeLosassoProjectionSource {
   /** Axis-face velocity after advection, body force, and solid aperture. */
   readonly predictedVelocity: GPUBuffer;
   readonly projectedVelocity: GPUBuffer;
+  /** z is bitcast<f32>(positive-row centre y - negative-row centre y), in cells. */
+  readonly faceMetrics: GPUBuffer;
 }
 
-/** Six-binding axis-face projection; output is the extension seed field. */
+/** Seven-binding axis-face projection; output is the extension seed field. */
 export class WebGPUOctreeLosassoProjection {
-  readonly bindingCount = 6;
+  readonly bindingCount = 7;
   private readonly params: GPUBuffer;
   private readonly layout: GPUBindGroupLayout;
   private readonly pipelineLayout: GPUPipelineLayout;
@@ -95,8 +110,7 @@ export class WebGPUOctreeLosassoProjection {
 
   constructor(private readonly device: GPUDevice,
     readonly source: WebGPUOctreeLosassoProjectionSource,
-    private readonly physical: Readonly<{ density: number; physicalCellSize: number;
-      freeSurfacePressureMode?: LosassoFreeSurfacePressureMode }>,
+    private readonly physical: Readonly<{ density: number; physicalCellSize: number }>,
     pressureScale = 1) {
     if (!Number.isFinite(pressureScale) || pressureScale < 0) {
       throw new RangeError("Losasso projection scale must be non-negative and finite");
@@ -118,6 +132,7 @@ export class WebGPUOctreeLosassoProjection {
         { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: readOnly },
         { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: readOnly },
         { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+        { binding: 6, visibility: GPUShaderStage.COMPUTE, buffer: readOnly },
       ] });
     this.pipelineLayout = device.createPipelineLayout({ label: "Losasso axis-face projection pipeline layout",
       bindGroupLayouts: [this.layout] });
@@ -153,7 +168,7 @@ export class WebGPUOctreeLosassoProjection {
     if (!group) {
       group = this.device.createBindGroup({ label: "Losasso axis-face projection bindings", layout: this.layout,
         entries: [this.params, this.source.control, this.source.faces, pressure,
-          this.source.predictedVelocity, this.source.projectedVelocity]
+          this.source.predictedVelocity, this.source.projectedVelocity, this.source.faceMetrics]
           .map((buffer, binding) => ({ binding, resource: { buffer } })) });
       this.groups.set(pressure, group);
     }
@@ -164,10 +179,10 @@ export class WebGPUOctreeLosassoProjection {
   private uploadParams(pressureScale: number, contactPressure: number,
     gravity: readonly [number, number, number]): void {
     const bytes = new ArrayBuffer(32);
-    const floats = new Float32Array(bytes), words = new Uint32Array(bytes);
+    const floats = new Float32Array(bytes);
     floats[0] = pressureScale; floats[1] = contactPressure;
-    words[2] = this.physical.freeSurfacePressureMode === "cell-centered-air" ? 1 : 0;
     floats.set(gravity, 4);
+    floats[7] = this.physical.density * this.physical.physicalCellSize;
     this.device.queue.writeBuffer(this.params, 0, bytes);
   }
   destroy(): void { if (this.destroyed) return; this.destroyed = true; this.params.destroy(); this.pipeline = undefined; }

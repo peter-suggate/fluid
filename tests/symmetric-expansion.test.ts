@@ -53,7 +53,6 @@ test("symmetric expansion Dawn lane samples every accepted step and gates every 
   assert.equal(lane.collect.checkpointEvery_s, 0.004);
   assert.equal(lane.methods[0]?.overrides.globalFineLevelSetFactor, "4");
   assert.equal(lane.methods[0]?.overrides.interfaceRefinementBandCells, 4);
-  assert.equal(lane.methods[0]?.overrides.losassoFreeSurfacePressure, "cell-centered-air");
   assert.equal(lane.methods[0]?.overrides.losassoVelocityExtension, "causal-front");
   assert.equal(lane.collect.stabilityEnvelope, true);
   assert.equal(lane.collect.energyEverySteps, 10);

@@ -48,7 +48,8 @@ export type SceneDraftSubject =
   | "scenery"
   | "fill-level"
   | "inflow"
-  | "terrain";
+  | "terrain"
+  | "refinement-region";
 
 interface SceneDraftStore {
   draft?: SceneDraft;

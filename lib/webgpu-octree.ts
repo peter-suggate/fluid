@@ -1,4 +1,10 @@
 import type { SceneDescription } from "./model";
+import {
+  OCTREE_REFINEMENT_REGION_PARAMS_BYTES,
+  OCTREE_REFINEMENT_REGION_PARAMS_OFFSET,
+  packOctreeRefinementRegions,
+  sceneRefinementRegions,
+} from "./octree-refinement-regions";
 import { WebGPUOctreeFineSeedAdapter } from "./webgpu-octree-fine-seed-adapter";
 import {
   lookupOctreeOwnerPage,
@@ -2390,7 +2396,14 @@ export class WebGPUOctreeProjection {
       // once a rejection has already consumed them.
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_SRC,
     });
-    this.params = device.createBuffer({ label: "Octree projection parameters", size: 160, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.params = device.createBuffer({
+      label: "Octree projection parameters",
+      // The fixed 160-byte head, plus the authored refinement-region tail. The
+      // diagnostic shader declares only the head and binds the same buffer,
+      // which is legal: a uniform binding may be larger than the struct.
+      size: OCTREE_REFINEMENT_REGION_PARAMS_OFFSET + OCTREE_REFINEMENT_REGION_PARAMS_BYTES,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
     const projectionActivityProfile = performanceShaderVariant();
     this.projectionActivity = createGPULogicalActivityAdoptionContext({
       moduleId: OCTREE_PROJECTION_ACTIVITY_MODULE_ID,
@@ -2815,7 +2828,6 @@ export class WebGPUOctreeProjection {
     const closedTop = this.scene.container.top === "closed";
     this.losassoCoarsePhi = new WebGPUOctreeLosassoCoarsePhiExchange(
       this.device, rowCapacity, faceCapacity,
-      this.coarseDynamics.losassoFreeSurfacePressure,
       this.coarseOnlySurfaceTracking ? this.dims.nx * this.dims.ny * this.dims.nz : 0,
     );
     this.losassoBackend = new WebGPUOctreeLosassoCoarseBackend({
@@ -2830,7 +2842,6 @@ export class WebGPUOctreeProjection {
       },
       density: this.scene.fluid.density_kg_m3,
       extensionBandBrickCapacity,
-      freeSurfacePressureMode: this.coarseDynamics.losassoFreeSurfacePressure,
       velocityExtensionMode: this.coarseDynamics.losassoVelocityExtension,
       closedBoundaries: [true, true, true, closedTop, true, true],
       // The ≤4K-row coarse-only tier runs the whole warm-started MGPCG loop —
@@ -2856,6 +2867,7 @@ export class WebGPUOctreeProjection {
       rigidPressureReaction: {
         solidCells: this.solidCells,
         rigidBodies: this.resources.rigidBodies,
+        rigidImmersedVolumes: this.resources.rigidImmersedVolumes,
         rigidExchange: this.resources.rigidExchange,
         rigidWorldOrigin: [
           -0.5 * this.scene.container.width_m,
@@ -2945,6 +2957,11 @@ export class WebGPUOctreeProjection {
           this.topologyMaximumLeafSize, 1),
         losassoVelocity: sampler,
         openTopBoundary: this.scene.container.top !== "closed",
+        ...(this.scene.rigidBodies.length > 0 ? { rigid: {
+          rigidBodies: this.resources.rigidBodies,
+          immersedVolumes: this.resources.rigidImmersedVolumes,
+          bodyCount: this.scene.rigidBodies.length,
+        } } : {}),
       });
       // The initial Losasso group refresh precedes construction of this
       // factor-one-only object. Rebind refinement/topology decisions now so
@@ -3694,6 +3711,11 @@ export class WebGPUOctreeProjection {
           physicalCellSize: coarseCell.x,
           timestep_s: this.scene.numerics.maxDt_s,
           maximumLeafSize: this.maxLeafSize,
+          ...(this.scene.rigidBodies.length > 0 ? { rigid: {
+            rigidBodies: this.resources.rigidBodies,
+            immersedVolumes: this.resources.rigidImmersedVolumes,
+            bodyCount: this.scene.rigidBodies.length,
+          } } : {}),
         });
       this.info.allocatedBytes += this.coarseOnlySummary.plan.allocatedBytes;
       this.workAccounting.setAuthorityBytes("coarse-summary",
@@ -4133,8 +4155,38 @@ export class WebGPUOctreeProjection {
     return true;
   }
 
+  /**
+   * Publish the authored refinement regions.
+   *
+   * Split from `writeParams` because it is the one part of the uniform that a
+   * *scene edit* moves rather than construction: dragging a region's face
+   * rewrites 272 bytes on the running solver and nothing else happens. The
+   * regions live in cell coordinates, so the lattice — not the container
+   * extent — is what they are resolved against.
+   */
+  private writeRefinementRegionParams() {
+    this.device.queue.writeBuffer(this.params, OCTREE_REFINEMENT_REGION_PARAMS_OFFSET,
+      packOctreeRefinementRegions(
+        sceneRefinementRegions(this.scene),
+        {
+          dimensions: [this.dims.nx, this.dims.ny, this.dims.nz],
+          cellSize_m: [
+            this.scene.container.width_m / this.dims.nx,
+            this.scene.container.height_m / this.dims.ny,
+            this.scene.container.depth_m / this.dims.nz,
+          ],
+          origin_m: {
+            x: -0.5 * this.scene.container.width_m,
+            y: 0,
+            z: -0.5 * this.scene.container.depth_m,
+          },
+        },
+        this.topologyMaximumLeafSize,
+      ));
+  }
+
   private writeParams() {
-    const data = new ArrayBuffer(160);
+    const data = new ArrayBuffer(OCTREE_REFINEMENT_REGION_PARAMS_OFFSET);
     new Uint32Array(data, 0, 4).set([
       this.dims.nx, this.dims.ny, this.dims.nz, this.topologyMaximumLeafSize,
     ]);
@@ -4218,6 +4270,7 @@ export class WebGPUOctreeProjection {
       this.scene.container.fillFraction * this.dims.ny,
     ]);
     this.device.queue.writeBuffer(this.params, 0, data);
+    this.writeRefinementRegionParams();
   }
 
   setTimestep(dt_s: number) {
@@ -7599,7 +7652,12 @@ override gradingPageFill: bool = false;
 override gradingSplitHelpers: bool = false;
 override gradingMembershipLoad: bool = false;
 struct Owner { packedOrigin: u32, size: u32 }
-struct Params { dimsMax: vec4u, cellRelax: vec4f, control: vec4u, solve: vec4f, container: vec4f, inflowPositionRadius: vec4f, inflowDirectionLength: vec4f, physical: vec4f, pressureCapacity: vec4u, hydrostatic: vec4f }
+// The tail after \`hydrostatic\` is the authored refinement regions: a count, then
+// two vec4f per region — (min.xyz, floorCells) and (max.xyz, unused), both in
+// finest-cell coordinates. Packed by \`packOctreeRefinementRegions\`, which owns
+// the layout; the diagnostic shader binds the same buffer with a shorter Params
+// and never reads them.
+struct Params { dimsMax: vec4u, cellRelax: vec4f, control: vec4u, solve: vec4f, container: vec4f, inflowPositionRadius: vec4f, inflowDirectionLength: vec4f, physical: vec4f, pressureCapacity: vec4u, hydrostatic: vec4f, refinementRegionControl: vec4u, refinementRegions: array<vec4f, 16> }
 struct LeafHeader { cell: u32, entryStart: u32, entryCount: u32, size: u32, diagonal: f32, rhs: f32, pad0: u32, pad1: u32, gradient: vec4f }
 struct RigidBody { positionShape: vec4f, dimensions: vec4f, orientation: vec4f, linearVelocity: vec4f, angularVelocity: vec4f, inverseMassInertia: vec4f, angularMomentumRestitution: vec4f, material: vec4f }
 struct SolidCell { fraction: f32, owner: i32 }
@@ -7646,6 +7704,41 @@ fn surfaceGradingLayers() -> u32 { return max(1u, topologyDialByte(0u)); }
 fn wallBandCells() -> u32 { return max(1u, topologyDialByte(8u)); }
 fn finestSurfaceCellSize() -> u32 {
   return clamp(topologyDialByte(16u), 1u, 2u);
+}
+// The coarsest floor any authored region imposes on this candidate.
+//
+// Full containment, and the coarsest of the regions that contain it. Full
+// containment is what keeps a region from coarsening anything outside its own
+// box: a leaf straddling the edge is not held, so it refines on the ordinary
+// evidence. The coarsest wins because a box drawn over a box is a request for
+// LESS resolution -- taking the finer floor would make the second box inert.
+//
+// One means "no region has an opinion": a size-one leaf never splits anyway, so
+// a domain with no regions takes the same branch as one whose regions are all
+// elsewhere, and the whole mechanism is inert without a special case.
+fn refinementRegionFloor(origin: vec3u, size: u32) -> u32 {
+  let count = min(params.refinementRegionControl.x, 8u);
+  var floorSize = 1u;
+  let low = vec3f(origin);
+  let high = vec3f(origin + vec3u(size));
+  for (var index = 0u; index < count; index += 1u) {
+    let lo = params.refinementRegions[2u * index];
+    let hi = params.refinementRegions[2u * index + 1u];
+    if (all(low >= lo.xyz) && all(high <= hi.xyz)) {
+      floorSize = max(floorSize, u32(lo.w));
+    }
+  }
+  return floorSize;
+}
+// Whether an authored region forbids splitting this candidate any further.
+//
+// The one place regions enter the solver. It only ever turns a "refine" into a
+// "hold", so a scene with no regions is bit-identical and no region can invent
+// resolution the evidence did not ask for. Strict 2:1 grading is downstream of
+// this and still splits a held leaf whose neighbour is finer -- a region caps
+// refinement, it does not pin a cell size.
+fn refinementRegionHoldsLeaf(origin: vec3u, size: u32) -> bool {
+  return size <= refinementRegionFloor(origin, size);
 }
 fn valid(p: vec3i) -> bool { return all(p >= vec3i(0)) && all(p < vec3i(dims())); }
 struct CorrectedCoarsePhi { authority:bool, phi:f32, minimumPhi:f32, maximumPhi:f32, leafSize:u32 }
@@ -8900,6 +8993,13 @@ fn inflowProtectionIntersects(origin: vec3u, size: u32) -> bool {
 }
 
 fn pressureRefinementEvidence(origin: vec3u, size: u32) -> bool {
+  // Before every other test, including the inflow's. An authored region is a
+  // statement about this box that outranks the evidence found in it -- that is
+  // the whole instrument. Placing it here rather than only in
+  // \`leafNeedsRefinement\` also puts it in the retained tile signature, so
+  // drawing or retuning a region dirties exactly the tiles it covers and the
+  // delta topology path rebuilds them on the next epoch.
+  if (refinementRegionHoldsLeaf(origin, size)) { return false; }
   if (inflowProtectionIntersects(origin, size)) { return true; }
   // Factor one has no finer surface lattice from which to recover outward
   // motion. Keep both wet and dry children of each represented B4 block at
@@ -9072,6 +9172,11 @@ fn boundaryLiquidWouldRefine(interval: BoundaryLiquidPhi, protection: f32) -> bo
 }
 
 fn leafNeedsRefinement(origin: vec3u, size: u32) -> bool {
+  // A region caps everything the gate can conclude, not merely the interface
+  // evidence: the closed-wall strip and the adaptivity-zero override below both
+  // return true unconditionally, and a box the user drew over a wall meaning
+  // "stop resolving here" would otherwise do nothing there.
+  if (refinementRegionHoldsLeaf(origin, size)) { return false; }
   if (pressureRefinementEvidence(origin, size)) { return true; }
   let adaptivity = f32(params.control.x) / 1000.0;
   if (adaptivity <= 0.0) { return true; }
@@ -9456,7 +9561,11 @@ fn refineCoarseBlock(origin: vec3u, lid: u32) {
         f32(wallBandCells()) * params.cellRelax.x);
     }
     let pressureEvidence = pressureRefinementEvidence(origin, size);
-    let decision = pressureEvidence || adaptivity <= 0.0 || boundaryDecision;
+    // Same cap as the fine path in leafNeedsRefinement. The coarse path is the
+    // one that matters most to a region: a floor of 16 or 32 is only ever
+    // reached here, because the fine kernel never sees a leaf that large.
+    let decision = !refinementRegionHoldsLeaf(origin, size)
+      && (pressureEvidence || adaptivity <= 0.0 || boundaryDecision);
     atomicStore(&refineDecision, select(0u, 1u, decision));
   }
   workgroupBarrier();

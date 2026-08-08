@@ -1,6 +1,6 @@
 import type { OctreeOwnerPagePlan } from "./webgpu-octree-owner-pages";
 import type { PassBroker } from "./webgpu-pass-broker";
-import type { LosassoFreeSurfacePressureMode, LosassoVelocityExtensionMode } from
+import type { LosassoVelocityExtensionMode } from
   "./octree-coarse-backend";
 import type { OctreeFirstOrderSPDVCycle } from "./webgpu-octree-section43-contract";
 import type { OctreeLosassoSolveTuning } from "./octree-runtime-dials";
@@ -139,7 +139,6 @@ export interface WebGPUOctreeLosassoBackendOptions {
   readonly density: number;
   /** Compact air-face headroom: six velocity-cell faces per resident B4 page. */
   readonly extensionBandBrickCapacity: number;
-  readonly freeSurfacePressureMode?: LosassoFreeSurfacePressureMode;
   readonly velocityExtensionMode?: LosassoVelocityExtensionMode;
   readonly closedBoundaries?: readonly [boolean, boolean, boolean, boolean, boolean, boolean];
   /** Coarser levels use exactly the same first-order axis-face operator. */
@@ -161,6 +160,7 @@ export interface WebGPUOctreeLosassoBackendOptions {
   readonly rigidPressureReaction?: Readonly<{
     solidCells: GPUBuffer;
     rigidBodies: GPUBuffer;
+    rigidImmersedVolumes: GPUBuffer;
     rigidExchange: GPUBuffer;
     /** Finest-cell lattice origin in the centred rigid-body world. */
     rigidWorldOrigin: readonly [number, number, number];
@@ -807,7 +807,6 @@ export class WebGPUOctreeLosassoCoarseBackend {
       this.sources.projection, {
         density: options.density,
         physicalCellSize: options.topology.physicalCellSize[0],
-        freeSurfacePressureMode: options.freeSurfacePressureMode,
       });
     if (options.rigidPressureReaction) {
       this.rigidPressureReaction = new WebGPUOctreeLosassoRigidPressureReaction(options.device, {
@@ -818,6 +817,8 @@ export class WebGPUOctreeLosassoCoarseBackend {
         faceGeometry: published.dynamics.faceGeometry,
         solidCells: options.rigidPressureReaction.solidCells,
         rigidBodies: options.rigidPressureReaction.rigidBodies,
+        rigidImmersedVolumes: options.rigidPressureReaction.rigidImmersedVolumes,
+        projectedVelocity: this.sources.projection.projectedVelocity,
         rigidExchange: options.rigidPressureReaction.rigidExchange,
       }, {
         dimensions: options.topology.dimensions,

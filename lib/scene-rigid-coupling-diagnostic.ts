@@ -110,12 +110,14 @@ export function evaluateRigidCouplingDiagnostic(input: {
       message: "authority, candidate, refresh, and sealed-plug tripwires remained clear",
       actual: errors, expected: { accepted: 0, candidate: 0, refresh: 0, sealed: 0 } }));
 
-    const fineFrames = samples.filter(({ checkpoint }) =>
-      recordPath(checkpoint, "raster")?.surfaceGeometrySource === "global-fine-coarse").length;
+    const currentSurfaceFrames = samples.filter(({ checkpoint }) => {
+      const source = recordPath(checkpoint, "raster")?.surfaceGeometrySource;
+      return source === "global-fine-coarse" || source === "compact-coarse";
+    }).length;
     findings.push(hookFinding({ id: `${method}.surface-source`, method,
-      passed: fineFrames / samples.length >= 0.9,
-      message: `${fineFrames}/${samples.length} checkpoints rendered current global-fine geometry`,
-      actual: fineFrames / samples.length, expected: { minimum: 0.9 } }));
+      passed: currentSurfaceFrames / samples.length >= 0.9,
+      message: `${currentSurfaceFrames}/${samples.length} checkpoints rendered current production geometry`,
+      actual: currentSurfaceFrames / samples.length, expected: { minimum: 0.9 } }));
 
     const volumeErrors = samples.map(({ checkpoint, body }) => {
       const measured = (numberPath(checkpoint, "summary", "cellSum") ?? NaN) * cellVolume;

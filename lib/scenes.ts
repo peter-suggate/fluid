@@ -75,7 +75,6 @@ export const SYMMETRIC_EXPANSION_METHOD_PROFILE: MethodProfile = Object.freeze({
   quality: "balanced",
   overrides: Object.freeze({
     coarseBackend: "losasso",
-    losassoFreeSurfacePressure: "cell-centered-air",
     losassoVelocityExtension: "causal-front",
     // The visible D4 gate is 32x16x32, so 16 is its largest common dyadic leaf.
     maximumLeafSize: "16",

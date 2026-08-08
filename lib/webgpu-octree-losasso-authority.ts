@@ -140,7 +140,7 @@ export class WebGPUOctreeLosassoAuthority implements WebGPUOctreeLosassoCandidat
     this.sources = Object.freeze({
       operator: { rowCapacity: rows, control, rowFaceOffsets, rowFaces, faces: faceBuffer, rowDispatch },
       projection: { control, faces: faceBuffer, faceDispatch, predictedVelocity,
-        projectedVelocity },
+        projectedVelocity, faceMetrics },
       dynamics: {
         faceCapacity: faces, rowCapacity: rows, control, faces: faceBuffer,
         faceGeometry, axisFaceDirectory, faceDirectoryCapacity, extendedVelocity,

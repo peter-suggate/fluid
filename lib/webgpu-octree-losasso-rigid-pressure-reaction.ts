@@ -13,6 +13,8 @@ export interface WebGPUOctreeLosassoRigidPressureReactionSource {
   readonly faceGeometry: GPUBuffer;
   readonly solidCells: GPUBuffer;
   readonly rigidBodies: GPUBuffer;
+  readonly rigidImmersedVolumes: GPUBuffer;
+  readonly projectedVelocity: GPUBuffer;
   readonly rigidExchange: GPUBuffer;
 }
 
@@ -50,7 +52,9 @@ struct RigidBody{
 @group(0)@binding(3)var<storage,read>solidCells:array<u32>;
 @group(0)@binding(4)var<storage,read>rigidBodies:array<RigidBody>;
 @group(0)@binding(5)var<storage,read>pressure:array<f32>;
-@group(0)@binding(6)var<storage,read_write>rigidExchange:array<atomic<i32>>;
+@group(0)@binding(6)var<storage,read>projectedVelocity:array<f32>;
+@group(0)@binding(7)var<storage,read>rigidImmersedVolumes:array<f32>;
+@group(0)@binding(8)var<storage,read_write>rigidExchange:array<atomic<i32>>;
 
 fn finite(value:f32)->bool{return value==value&&abs(value)<3.402823e38;}
 fn finite3(value:vec3f)->bool{return finite(value.x)&&finite(value.y)&&finite(value.z);}
@@ -87,38 +91,28 @@ fn addExchange(body:u32,impulse:vec3f,torque:vec3f){
  atomicAdd(&rigidExchange[base+3u],i32(round(torque.x*FIXED_POINT_SCALE)));
  atomicAdd(&rigidExchange[base+4u],i32(round(torque.y*FIXED_POINT_SCALE)));
  atomicAdd(&rigidExchange[base+5u],i32(round(torque.z*FIXED_POINT_SCALE)));
- // Pressure already contains gravity, so its closed-share reaction carries
- // hydrostatic buoyancy.  Mark the exchange epoch to keep the resident rigid
- // integrator from adding a second analytic Archimedes force.
+ // This exchange combines the analytic hydrostatic term with the solved
+ // dynamic-pressure remainder. Mark it pressure-coupled so the resident
+ // integrator does not add a second Archimedes force.
  atomicMax(&rigidExchange[base+10u],1);
 }
-fn rigidVolume(body:RigidBody)->f32{let d=body.dimensions.xyz;let shape=i32(round(body.positionShape.w));
- if(shape==0){return 4.1887902047863905*d.x*d.x*d.x;}if(shape==1){return d.x*d.y*d.z;}
- if(shape==3){return 3.141592653589793*d.x*d.x*d.y;}
- return 3.141592653589793*d.x*d.x*d.y+4.1887902047863905*d.x*d.x*d.x;}
-fn immersedVolumeAtReference(body:RigidBody)->f32{
- let d=body.dimensions.xyz;let shape=i32(round(body.positionShape.w));
- let waterline=p.gravity.w;
- if(shape==0){
-  let radius=max(d.x,1e-9);
-  let cap=clamp(waterline-(body.positionShape.y-radius),0.,2.*radius);
-  return 3.141592653589793*cap*cap*(radius-cap/3.);
- }
- // The production coupling accepts all primitive kinds.  Spheres have the
- // exact cap formula used by the oracle; the other current primitives retain
- // a bounded vertical-prism estimate until their oriented cap integrals land.
- var halfHeight=.5*d.y;
- if(shape==2){halfHeight+=d.x;}
- let fraction=clamp((waterline-(body.positionShape.y-halfHeight))
-  /max(2.*halfHeight,1e-9),0.,1.);
- return rigidVolume(body)*fraction;
+fn addFluidVelocity(body:u32,axis:u32,velocity:f32,weight:f32){
+ let base=body*${RIGID_EXCHANGE_WORDS}u;
+ if(axis>2u||base+11u>=arrayLength(&rigidExchange)||!finite(velocity)||!finite(weight)
+  ||weight<=0.){return;}
+ // Slots 7..9 carry the weighted local fluid velocity at 1e-4 precision;
+ // slot 11 is its independent sample weight at 16.16 precision. Keeping the
+ // weight separate from displaced volume leaves buoyancy/added mass alone.
+ atomicAdd(&rigidExchange[base+7u+axis],i32(round(velocity*weight*1e4)));
+ atomicAdd(&rigidExchange[base+11u],i32(round(weight*65536.)));
 }
 @compute @workgroup_size(64)
 fn exchangeLosassoRigidBuoyancy(@builtin(global_invocation_id)invocation:vec3u){
  let bodyIndex=invocation.x;
  if(bodyIndex>=p.dimensionsBodyCount.w||bodyIndex>=p.capacities.z
-   ||bodyIndex>=arrayLength(&rigidBodies)){return;}
- let displaced=immersedVolumeAtReference(rigidBodies[bodyIndex]);
+   ||bodyIndex>=arrayLength(&rigidBodies)||bodyIndex>=arrayLength(&rigidImmersedVolumes)){return;}
+ let measured=rigidImmersedVolumes[bodyIndex];
+ let displaced=select(0.,measured,finite(measured)&&measured>0.);
  let impulse=-p.rigidWorldOriginDt.w*p.cellSize.w*displaced*p.gravity.xyz;
  addExchange(bodyIndex,impulse,vec3f(0.));
  let base=bodyIndex*${RIGID_EXCHANGE_WORDS}u;
@@ -132,8 +126,10 @@ fn exchangeLosassoRigidBuoyancy(@builtin(global_invocation_id)invocation:vec3u){
 fn exchangeLosassoRigidPressure(@builtin(global_invocation_id)invocation:vec3u){
  let faceId=invocation.x;
  if(p.rigidWorldOriginDt.w<=0.||p.dimensionsBodyCount.w==0u||faceId>=p.capacities.y
-   ||faceId>=arrayLength(&faces)||faceId>=arrayLength(&faceGeometry)){return;}
+   ||faceId>=arrayLength(&faces)||faceId>=arrayLength(&faceGeometry)
+   ||faceId>=arrayLength(&projectedVelocity)){return;}
  let face=faces[faceId];if(face.axis>2u){return;}
+ let fluidVelocity=projectedVelocity[faceId];
  let geometry=faceGeometry[faceId];let span=face.reserved&0xffffu;
  if(span==0u||span>2896u||geometry.x!=(face.axis|((31u-countLeadingZeros(span))<<2u))){return;}
  let negativeValid=face.negativeRow!=INVALID_ROW&&face.negativeRow<p.capacities.x
@@ -159,7 +155,7 @@ fn exchangeLosassoRigidPressure(@builtin(global_invocation_id)invocation:vec3u){
    // p grad(chi_s) is the conservative pressure reaction. Unlike summing
    // pressure times blocked coordinate faces, it is a closed discrete surface:
    // a linear hydrostatic pressure produces rho*g times rasterized volume.
-   let blocked=1.-face.openFraction;let solidGradient=positive.x-negative.x;
+   let solidGradient=positive.x-negative.x;
    let owner=i32(selected.y);
    if(owner<0||u32(owner)>=p.dimensionsBodyCount.w
      ||u32(owner)>=p.capacities.z||u32(owner)>=arrayLength(&rigidBodies)){continue;}
@@ -175,7 +171,9 @@ fn exchangeLosassoRigidPressure(@builtin(global_invocation_id)invocation:vec3u){
    let dynamicImpulse=p.rigidWorldOriginDt.w*(facePressure-hydrostaticPressure)
     *area*solidGradient*axisNormal;
    let torque=cross(world-rigidBodies[u32(owner)].positionShape.xyz,dynamicImpulse);
-   if(abs(solidGradient)>1e-8){addExchange(u32(owner),dynamicImpulse,torque);}
+   let couplingWeight=abs(solidGradient);
+   if(couplingWeight>1e-8){addExchange(u32(owner),dynamicImpulse,torque);
+    addFluidVelocity(u32(owner),axis,fluidVelocity,couplingWeight);}
   }}
 }
 `;
@@ -235,9 +233,9 @@ export class WebGPUOctreeLosassoRigidPressureReaction {
       label: "Losasso rigid pressure reaction reduced layout",
       entries: [
         { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "uniform" } },
-        ...[1, 2, 3, 4, 5].map((binding) =>
+        ...[1, 2, 3, 4, 5, 6, 7].map((binding) =>
           ({ binding, visibility: GPUShaderStage.COMPUTE, buffer: readOnly })),
-        { binding: 6, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+        { binding: 8, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
       ],
     });
     this.pipelineLayout = device.createPipelineLayout({
@@ -296,7 +294,9 @@ export class WebGPUOctreeLosassoRigidPressureReaction {
     let group = this.groups.get(pressure);
     if (!group) {
       const buffers = [this.params, this.source.faces, this.source.faceGeometry,
-        this.source.solidCells, this.source.rigidBodies, pressure, this.source.rigidExchange];
+        this.source.solidCells, this.source.rigidBodies, pressure,
+        this.source.projectedVelocity, this.source.rigidImmersedVolumes,
+        this.source.rigidExchange];
       group = this.device.createBindGroup({
         label: "Losasso rigid pressure reaction bindings", layout: this.layout,
         entries: buffers.map((buffer, binding) => ({ binding, resource: { buffer } })),

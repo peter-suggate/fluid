@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { NumberField } from "./controls";
+import { NumberField, Segmented } from "./controls";
 import { simulation } from "@/lib/simulation/controller";
 import type { EditorEntity } from "@/lib/editor-entity";
 
@@ -11,7 +11,12 @@ import type { EditorEntity } from "@/lib/editor-entity";
  * the user asks for precision.
  *
  * Driven entirely by what the entity declares, so a new editable thing arrives
- * here with its own fields and its own actions without this file changing.
+ * here with its own fields, its own choices and its own actions without this
+ * file changing.
+ *
+ * Choices come before fields because they are what the thing *is* — for a
+ * refinement region, "what does this box mean" is the first question, and the
+ * numbers underneath only make sense once it is answered.
  */
 export function SelectionFlyout({
   entity,
@@ -24,6 +29,7 @@ export function SelectionFlyout({
 }) {
   const [open, setOpen] = useState(false);
   const fields = entity.fields ?? [];
+  const choices = entity.choices ?? [];
 
   return (
     <div
@@ -39,6 +45,27 @@ export function SelectionFlyout({
           <small>{open ? "HIDE" : "EDIT"}</small>
         </button>
         {open && <div className="selection-precision">
+          {choices.map((group) => (
+            <div key={group.id} className="selection-choice">
+              <span>{group.label}</span>
+              <Segmented
+                ariaLabel={group.label}
+                value={group.value}
+                options={group.options.map((option) => ({
+                  value: option.id,
+                  label: option.label,
+                  title: option.hint,
+                  disabled: option.enabled === false,
+                }))}
+                onChange={(value) => {
+                  const option = group.options.find((candidate) => candidate.id === value);
+                  if (!option || option.enabled === false) return;
+                  simulation.beginEdit(`Set ${entity.label} ${group.label}`);
+                  simulation.commitEdit(option.apply(), { reseed: true });
+                }}
+              />
+            </div>
+          ))}
           {fields.map((field) => (
             <NumberField
               key={field.id}
@@ -54,6 +81,7 @@ export function SelectionFlyout({
               }}
             />
           ))}
+          {entity.summary && <p className="selection-summary">{entity.summary}</p>}
           {(entity.remove || entity.simulatedBodyId) && <div className="selection-actions">
             {entity.remove && <button
               type="button"

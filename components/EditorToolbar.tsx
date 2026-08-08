@@ -1,6 +1,6 @@
 "use client";
 
-import { DEFAULT_EDITOR_TOOL, EDITOR_TOOLS } from "@/lib/editor-tools";
+import { DEFAULT_EDITOR_TOOL, editorToolsPlacedAt } from "@/lib/editor-tools";
 import type { RigidShape } from "@/lib/model";
 import type { SceneryPropKind } from "@/lib/stores/ui-store";
 import { simulation } from "@/lib/simulation/controller";
@@ -50,7 +50,7 @@ export function EditorToolbar() {
   return (
     <div className="editor-toolbar" data-active-tool={activeTool}>
       <nav className="editor-tool-strip" aria-label="Editor tools">
-        {EDITOR_TOOLS.filter((tool) => tool.status === "active").map((tool) => (
+        {editorToolsPlacedAt("strip").map((tool) => (
           <button
             key={tool.id}
             type="button"

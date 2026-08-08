@@ -124,7 +124,7 @@ export interface EditorHandle {
 }
 
 /** Palette token, so every entity draws from one vocabulary. */
-export type EditorEntityTone = "fluid" | "tank" | "body" | "prop" | "inflow";
+export type EditorEntityTone = "fluid" | "tank" | "body" | "prop" | "inflow" | "region";
 
 export interface EditorEntity {
   readonly selection: EditorSelection;
@@ -162,6 +162,16 @@ export interface EditorEntity {
    */
   readonly fields?: readonly EditorField[];
   /**
+   * Enumerated settings, shown above the numeric fields because they are what
+   * the entity *is* rather than how big it is.
+   */
+  readonly choices?: readonly EditorChoiceGroup[];
+  /**
+   * A line under the controls stating what the current settings mean, in the
+   * scene's own units. Absent when the fields already say it.
+   */
+  readonly summary?: string;
+  /**
    * The scene without this entity, or absent when it cannot be removed.
    *
    * A whole scene rather than a patch, because removal is an absence and a
@@ -181,6 +191,38 @@ export interface EditorField {
   readonly max?: number;
   /** The scene this field's new value describes. */
   readonly apply: (value: number) => Partial<SceneDescription>;
+}
+
+/**
+ * One of a small set of things an entity can *be*, as opposed to a quantity it
+ * carries.
+ *
+ * A number field cannot express "what does this box mean" or "which of these
+ * six cell sizes", and rounding an enumeration through a spinner is how a
+ * control ends up silently accepting values its consumer does not implement.
+ * Declared with the same shape as `EditorField` — a value, and the scene the
+ * chosen value describes — so the flyout renders both from one list and a new
+ * entity gets choices without this file changing.
+ */
+export interface EditorChoice {
+  readonly id: string;
+  readonly label: string;
+  /** Shown as the option's tooltip; the place to say what it costs. */
+  readonly hint?: string;
+  /**
+   * False renders the option visible but unselectable, which is how a surface
+   * says "this is the shape of the thing" while only one case is implemented.
+   */
+  readonly enabled?: boolean;
+  readonly apply: () => Partial<SceneDescription>;
+}
+
+export interface EditorChoiceGroup {
+  readonly id: string;
+  readonly label: string;
+  /** The `EditorChoice.id` currently in force. */
+  readonly value: string;
+  readonly options: readonly EditorChoice[];
 }
 
 /** X, Y and Z of a position, as three fields that each move only their axis. */
@@ -328,6 +370,44 @@ export function boxSize(box: BoxExtent): Vec3 {
     y: Math.max(0, box.max.y - box.min.y),
     z: Math.max(0, box.max.z - box.min.z),
   };
+}
+
+/**
+ * The container interior as a world-space box.
+ *
+ * Every editable thing that lives *inside the tank* is limited by this same
+ * box — the water body, a refinement region, anything added later — so the
+ * corner convention (x and z centred, y from the floor) has one definition
+ * rather than one per entity that happens to need it.
+ */
+export function sceneContainerBox(scene: SceneDescription): BoxExtent {
+  const c = scene.container;
+  return {
+    min: { x: -0.5 * c.width_m, y: 0, z: -0.5 * c.depth_m },
+    max: { x: 0.5 * c.width_m, y: c.height_m, z: 0.5 * c.depth_m },
+  };
+}
+
+/**
+ * Slide a box to a new centre without reshaping it, held inside `limits`.
+ *
+ * A box already touching a wall stops there rather than being squashed against
+ * it: the gesture is a move, so it must never silently change the size. A box
+ * wider than the room it is being held in centres, because there is no
+ * translation that would put it inside.
+ */
+export function moveBoxWithinLimits(box: BoxExtent, centre_m: Vec3, limits: BoxExtent): BoxExtent {
+  const min = { ...box.min }, max = { ...box.max };
+  for (const axis of EDITOR_AXES) {
+    const half = 0.5 * (box.max[axis] - box.min[axis]);
+    const room = 0.5 * (limits.max[axis] - limits.min[axis]);
+    const centre = half >= room
+      ? 0.5 * (limits.min[axis] + limits.max[axis])
+      : Math.min(limits.max[axis] - half, Math.max(limits.min[axis] + half, centre_m[axis]));
+    min[axis] = centre - half;
+    max[axis] = centre + half;
+  }
+  return { min, max };
 }
 
 /** The eight corners, indexed so bit 0/1/2 selects the max side of x/y/z. */

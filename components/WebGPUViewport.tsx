@@ -62,11 +62,24 @@ import {
   handleWorldEnds,
   handleWorldPosition,
   BOX_EDGES,
+  boxCorners,
   type EditorEntity,
   type EditorEntityContext,
   type EditorHandle,
 } from "@/lib/editor-entity";
 import { editorBodyPoses, editorEntityContext, entityAtRay, findEntity, surfacedEntities } from "@/lib/editor-entity-catalog";
+import {
+  refinementRegionBox,
+  refinementRegionCapacityRemaining,
+  refinementRegionFromDrag,
+  refinementRegionSelectionId,
+  withRefinementRegion,
+} from "@/lib/editor-refinement-region";
+import {
+  nextRefinementRegionId,
+  OCTREE_REFINEMENT_REGION_CAPACITY,
+  sceneRefinementRegions,
+} from "@/lib/octree-refinement-regions";
 import {
   applyTerrainFeatureDrag,
   terrainFeatureAt,
@@ -76,6 +89,7 @@ import {
   type TerrainHandleKind,
 } from "@/lib/editor-terrain";
 import { SelectionFlyout } from "./SelectionFlyout";
+import { ToplineToolbar } from "./ToplineToolbar";
 import { useSceneStore } from "@/lib/stores/scene-store";
 import { applySceneDraft, displaySceneSnapshot, useDisplayScene, useSceneDraftStore, type SceneDraftSubject } from "@/lib/stores/scene-draft-store";
 import { useMethodStore, resolvedMethodValues } from "@/lib/stores/method-store";
@@ -617,6 +631,11 @@ export function WebGPUViewport() {
     | { id: number; action: "body"; bodyId: string; downX: number; downY: number; planePoint: Vec3; planeNormal: Vec3; grabOffset: Vec3; lastPosition: Vec3; lastTime: number }
     | { id: number; action: "terrain-handle"; index: number; kind: TerrainHandleKind; anchor: Vec3 }
     | { id: number; action: "fluid-paint"; erase: boolean; lastBrickKey?: string }
+    // A rubber band on a horizontal plane through the press. `anchor` is the
+    // corner the box is grown from, and `regionId` is claimed at the press so
+    // every sample of the drag revises the same region instead of appending one
+    // per pointer-move.
+    | { id: number; action: "region-draw"; anchor: Vec3; regionId: string }
     | { id: number; action: "fill-level" }
     // One arm for every editable thing. `entity` is the entity as it stood when
     // the gesture opened, resolved against the committed scene: re-resolving it
@@ -698,6 +717,24 @@ export function WebGPUViewport() {
       projection: projectToViewport(handle.position_m, camera, viewportSize.width, viewportSize.height),
     }))
     : undefined;
+  // Every region, drawn whenever regions are the subject.
+  //
+  // Nothing in the rendered frame *is* a region — they annotate the solve, not
+  // the set — so unless they are outlined here they are invisible and a scene
+  // silently carries boxes nobody can see. They are shown under their own tool
+  // and while one is selected, and hidden otherwise, on the same argument that
+  // keeps handles off unselected objects: a viewport permanently crosshatched
+  // with wireframes is worse than one where they appear when relevant. Read
+  // from the display scene, so the rubber band is the same code path.
+  const regionsVisible = activeTool === "refinement-region" || selection?.kind === "refinement-region";
+  const regionOutlines = regionsVisible
+    ? sceneRefinementRegions(scene).map((region) => ({
+      id: region.id,
+      selected: selection?.id === refinementRegionSelectionId(region.id),
+      corners: boxCorners(refinementRegionBox(region))
+        .map((corner) => projectToViewport(corner, camera, viewportSize.width, viewportSize.height)),
+    }))
+    : [];
   const hoverProjection = hover ? projectToViewport(hover.position_m, camera, viewportSize.width, viewportSize.height) : undefined;
   // Where the traced ray currently appears on screen. Projecting a point on the
   // ray rather than reusing the pointer is what keeps the marker on a pinned ray
@@ -1328,6 +1365,48 @@ export function WebGPUViewport() {
     return sample.brickKey;
   };
 
+  /**
+   * Revise the region being drawn, as a draft over the committed document.
+   *
+   * Regions are uniform-tier, so a per-move document write would be adopted by
+   * the live solver rather than re-seeding it — but it would still be one undo
+   * entry per pointer sample. Same commit-on-release contract as every other
+   * gesture: the draft previews, the release writes once.
+   */
+  const updateRegionDraft = (anchor: Vec3, drag: Vec3, regionId: string) => {
+    const committed = useSceneStore.getState().scene;
+    const region = refinementRegionFromDrag(committed, anchor, drag, { id: regionId });
+    useSceneDraftStore.getState().updateDraft({
+      fluid: withRefinementRegion(committed, regionId, region).fluid,
+    });
+  };
+
+  /**
+   * Open a region drag on the surface under the cursor.
+   *
+   * The anchor is whatever the ray meets — the water, the floor, a body — and
+   * the ground plane when it meets nothing, so a box can be drawn over open air
+   * as well as over a pool. The drag then resolves on the horizontal plane
+   * through that anchor, which is the one plane a single screen-space drag can
+   * resolve unambiguously.
+   */
+  const beginRegionDraw = (event: React.PointerEvent<HTMLCanvasElement>, ray: { origin: Vec3; direction: Vec3 }) => {
+    const scene = useSceneStore.getState().scene;
+    if (refinementRegionCapacityRemaining(scene) === 0) {
+      useRuntimeStore.getState().setNotice(
+        `At most ${OCTREE_REFINEMENT_REGION_CAPACITY} refinement regions — remove one first`);
+      return;
+    }
+    const hit = pickingInteractive ? hoverSceneAt(scene, drawnBodies(), ray) : undefined;
+    const anchor = hit?.position_m
+      ?? planeHit(ray.origin, ray.direction, { x: 0, y: 0, z: 0 }, { x: 0, y: 1, z: 0 });
+    if (!anchor || !Number.isFinite(anchor.x)) return;
+    const regionId = nextRefinementRegionId(scene);
+    simulation.beginDraft("refinement-region", "Drew a refinement region");
+    pointerRef.current = { id: event.pointerId, action: "region-draw", anchor, regionId };
+    updateRegionDraft(anchor, anchor, regionId);
+  };
+
   /** Drop the armed placement shape onto whatever the cursor is over. */
   const placeBodyAt = (ray: { origin: Vec3; direction: Vec3 }) => {
     const ui = useUIStore.getState();
@@ -1365,6 +1444,15 @@ export function WebGPUViewport() {
       // mid-rebuild — keeps working while the renderer replaces the image.
       if (beginEntityHandleDrag(event)) return;
       if (beginTerrainHandleDrag(event)) return;
+      // Not GPU-gated, unlike the placements below: a region is a box in the
+      // document, not something dropped onto a published surface, so it falls
+      // back to the ground plane and stays drawable while the renderer is
+      // rebuilding. Handles win over it, so dragging an existing region's face
+      // reshapes that region instead of starting a new one on top of it.
+      if (useUIStore.getState().activeTool === "refinement-region") {
+        beginRegionDraw(event, ray);
+        return;
+      }
       // Everything below drops something onto, or reads something out of, the
       // surface the ray meets, and only a complete published generation has
       // one. With no generation attached each of these falls through to the
@@ -1514,6 +1602,12 @@ export function WebGPUViewport() {
       pointerRef.current = { ...active, lastBrickKey: paintFluidAt(pointerRay(event), active.erase, active.lastBrickKey) };
       return;
     }
+    if (active.action === "region-draw") {
+      const ray = pointerRay(event);
+      updateRegionDraft(active.anchor,
+        planeHit(ray.origin, ray.direction, active.anchor, { x: 0, y: 1, z: 0 }), active.regionId);
+      return;
+    }
     if (active.action === "entity-handle") {
       const ray = pointerRay(event);
       pointerRef.current = { ...active, lastRay: ray };
@@ -1647,6 +1741,16 @@ export function WebGPUViewport() {
       simulation.commitDraft();
       return;
     }
+    // The new box becomes the selection, so its flyout — where the box says
+    // what it means and how coarse it may go — is open the moment it exists.
+    if (active.action === "region-draw") {
+      if (cancelled) { simulation.cancelDraft(); return; }
+      simulation.commitDraft();
+      useUIStore.getState().select({
+        kind: "refinement-region", id: refinementRegionSelectionId(active.regionId),
+      });
+      return;
+    }
     // Nothing claimed the press, so a click that never became a drag is the user
     // clicking through to whatever the scene has there — an entity, or, when the
     // ray left the tank entirely, the background. Either way the selection
@@ -1682,6 +1786,14 @@ export function WebGPUViewport() {
       onWheel={cameraInteractive ? (event) => { event.preventDefault(); setCamera((current) => zoom(current, event.deltaY)); } : undefined}
       onContextMenu={(event) => event.preventDefault()}
     />
+    {/* The top-right cluster: everything that rides the corner is laid out by
+        one flex row rather than by a column of hand-tuned `right:` offsets.
+        Three of them stacked on the same absolute corner is how the region tool
+        landed on top of the frame-rate readout, and the next thing added there
+        would have done it again. Order is left-to-right by how often it is
+        touched: a mode, a mode, then a readout. */}
+    <div className="viewport-topright">
+    <ToplineToolbar />
     {/* Pick mode, beside the frame rate rather than four scrolls into a
         collapsed panel section. It is a mode and not an action — it changes
         what a click on the scene means — so it reads as a pressed state with
@@ -1713,6 +1825,7 @@ export function WebGPUViewport() {
       aria-label="Presentation frame rate"
       title="WebGPU presentations per second · rolling mean of the latest 5 frame intervals"
     >— FPS</output>
+    </div>
     {fillHandle?.visible && <div
       className="editor-fill-handle"
       data-testid="editor-fill-handle"
@@ -1721,6 +1834,26 @@ export function WebGPUViewport() {
     >
       <i /><span>FILL {(scene.container.fillFraction * 100).toFixed(0)}%</span>
     </div>}
+    {regionOutlines.length > 0 && <svg
+      className="editor-gizmo editor-region-gizmo"
+      data-testid="editor-region-gizmo"
+      width={viewportSize.width}
+      height={viewportSize.height}
+      aria-hidden="true"
+    >
+      {regionOutlines.flatMap((region) => BOX_EDGES
+        .filter(([from, to]) => region.corners[from]!.depth_m > 1e-6 && region.corners[to]!.depth_m > 1e-6)
+        .map(([from, to]) => (
+          <line
+            key={`${region.id}-${from}-${to}`}
+            className={`region-outline${region.selected ? " selected" : ""}`}
+            x1={region.corners[from]!.leftFraction * viewportSize.width}
+            y1={region.corners[from]!.topFraction * viewportSize.height}
+            x2={region.corners[to]!.leftFraction * viewportSize.width}
+            y2={region.corners[to]!.topFraction * viewportSize.height}
+          />
+        )))}
+    </svg>}
     {entityGizmos.length > 0 && <svg
       className="editor-gizmo editor-entity-gizmo"
       data-testid="editor-entity-gizmo"

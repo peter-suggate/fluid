@@ -60,7 +60,7 @@ fn priorPhi(position:vec3f)->PhiSample{let q=vec3u(clamp(vec3i(floor(position)),
 fn seedPhi(row:u32,position:vec3f)->PhiSample{if(row>=arrayLength(&seedLeaves)){return PhiSample(0.,vec3f(0),0u);}let leaf=seedLeaves[row];let gradient=leaf.phiGradient.yzw;
  let centre=vec3f(vec3u(leaf.originX,leaf.originY,leaf.originZ))+vec3f(.5*f32(leaf.size));let value=leaf.phiGradient.x+dot(gradient,(position-centre)*p.velocityCellSize);
  return PhiSample(value,gradient,select(0u,1u,(leaf.flags&${OCTREE_FINE_SEED_STATE.live}u)!=0u&&leaf.size>0u&&finite(value)&&finite3(gradient)));}
-fn trackerValue(position:vec3f)->PhiSample{let volume=p.velocityDimensions.x*p.velocityDimensions.y*p.velocityDimensions.z;
+fn trackerStoredValue(position:vec3f,word:u32)->PhiSample{let volume=p.velocityDimensions.x*p.velocityDimensions.y*p.velocityDimensions.z;
  let capacity=(max(arrayLength(&coarseTracker),8u)-8u)/8u;
  if(arrayLength(&coarseTracker)<8u||coarseTracker[0]!=0x80000000u||(coarseTracker[1]&0x40000000u)==0u
   ||capacity<p.rowCapacity+volume||any(vec3u(coarseTracker[4],coarseTracker[5],coarseTracker[6])!=p.velocityDimensions)){
@@ -69,11 +69,13 @@ fn trackerValue(position:vec3f)->PhiSample{let volume=p.velocityDimensions.x*p.v
  let fraction=bounded-(vec3f(low)+vec3f(.5));var value=0.;var total=0.;
  for(var corner=0u;corner<8u;corner+=1u){let offset=vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));
   let q=vec3u(clamp(low+offset,vec3i(0),vec3i(p.velocityDimensions)-vec3i(1)));let cell=q.x+p.velocityDimensions.x*(q.y+p.velocityDimensions.y*q.z);
-  let base=8u+8u*(p.rowCapacity+cell);let sample=bitcast<f32>(coarseTracker[base+2u]);
+  let base=8u+8u*(p.rowCapacity+cell);let sample=bitcast<f32>(coarseTracker[base+word]);
   if((coarseTracker[base+5u]&9u)!=9u||!finite(sample)){return PhiSample(0.,vec3f(0),0u);}
   let weight=select(1.-fraction.x,fraction.x,(corner&1u)!=0u)*select(1.-fraction.y,fraction.y,(corner&2u)!=0u)
    *select(1.-fraction.z,fraction.z,(corner&4u)!=0u);value+=weight*sample;total+=weight;}
  return PhiSample(value/max(total,1e-12),vec3f(0),select(0u,1u,total>.999&&finite(value)));}
+fn trackerValue(position:vec3f)->PhiSample{return trackerStoredValue(position,2u);}
+fn trackerRawValue(position:vec3f)->PhiSample{return trackerStoredValue(position,7u);}
 fn trackerPhi(position:vec3f)->PhiSample{let centre=trackerValue(position);if(centre.valid==0u){return centre;}var gradient=vec3f(0);
  for(var axis=0u;axis<3u;axis+=1u){var low=position;var high=position;low[axis]-=1.;high[axis]+=1.;let a=trackerValue(low);let b=trackerValue(high);
   if(a.valid==0u||b.valid==0u){return PhiSample(0.,vec3f(0),0u);}gradient[axis]=.5*(b.value-a.value)/p.velocityCellSize;}
@@ -111,7 +113,7 @@ fn currentRowPhi(row:u32,position:vec3f)->PhiSample{
  let header=headers[row];let origin=cellOf(header.cell);let centre=vec3f(origin)+vec3f(.5*f32(header.size));
  let gradient=nextGradient[row].xyz;let value=bitcast<f32>(rowPhi[row].x)+dot(gradient,(position-centre)*p.velocityCellSize);
  return PhiSample(value,gradient,select(0u,1u,(rowPhi[row].w&(VALID|FINITE))==(VALID|FINITE)&&finite(value)&&finite3(gradient)));}
-fn solidFraction(cell:vec3i)->f32{if(any(cell<vec3i(0))||any(cell>=vec3i(p.velocityDimensions))){return 0.;}let q=vec3u(cell);let word=2u*(q.x+p.velocityDimensions.x*(q.y+p.velocityDimensions.y*q.z));if(word>=arrayLength(&solidCells)){return 0.;}let value=bitcast<f32>(solidCells[word]);return clamp(select(0.,value,value==value),0.,1.);}
+fn solidCell(cell:vec3i)->vec2f{if(any(cell<vec3i(0))||any(cell>=vec3i(p.velocityDimensions))){return vec2f(0.,-1.);}let q=vec3u(cell);let word=2u*(q.x+p.velocityDimensions.x*(q.y+p.velocityDimensions.y*q.z));if(word+1u>=arrayLength(&solidCells)){return vec2f(0.,-1.);}let value=bitcast<f32>(solidCells[word]);return vec2f(clamp(select(0.,value,value==value),0.,1.),f32(bitcast<i32>(solidCells[word+1u])));}
 @compute @workgroup_size(64)
 fn publishLosassoCoarseOnlyGhosts(@builtin(global_invocation_id)gid:vec3u){let faceId=gid.x;if(faceId>=faceCount()){return;}var face=faces[faceId];face.reserved&=~FACE_SOLID_NEUMANN;face.reserved&=~FACE_INTERFACE_NEARBY;
  let negativeNearby=face.negativeRow<rows()&&(rowPhi[face.negativeRow].w&INTERFACE)!=0u;
@@ -119,8 +121,8 @@ fn publishLosassoCoarseOnlyGhosts(@builtin(global_invocation_id)gid:vec3u){let f
  if(negativeNearby||positiveNearby){face.reserved|=FACE_INTERFACE_NEARBY;}
  var distance=0.;var theta=1.;var airPhi=0.;var flags=0u;if(face.positiveRow==INVALID){let geometry=faceGeometry[faceId];let axis=geometry.x&3u;let span=1u<<(geometry.x>>2u);let origin=geometry.yzw;let boundary=origin[axis]==0u||origin[axis]==p.velocityDimensions[axis];
      if(boundary&&(face.reserved&FACE_CLOSED_BOUNDARY)!=0u&&face.negativeRow<rows()){let liquid=bitcast<f32>(rowPhi[face.negativeRow].x);let towardAir=select(1.,-1.,(face.reserved&FACE_ROW_ON_POSITIVE_SIDE)!=0u);var point=vec3f(origin);for(var tangent=0u;tangent<3u;tangent+=1u){if(tangent!=axis){point[tangent]+=.5*f32(span);}}point[axis]-=towardAir*.5;var sampled=currentPhi(point);if(sampled.valid==0u){sampled=currentRowPhi(face.negativeRow,point);}face.openFraction=0.;flags=2u;
-   let contactEnabled=(p.closed&2u)==0u;let separated=contactEnabled&&(face.reserved&FACE_SEPARATED)!=0u;let sampledAir=liquid<0.&&sampled.valid!=0u&&sampled.value>0.;
-   if(contactEnabled&&(separated||sampledAir)){airPhi=sampled.value;let dual=max(.5,.5*f32(span)-.5)*p.velocityCellSize;theta=select(1.,clamp(-liquid/(airPhi-liquid),1e-2,1.),sampled.valid!=0u&&airPhi>0.&&liquid<0.);distance=theta*dual;face.inverseDistance=1./max(distance,1e-9);face.openFraction=1.;flags=3u;}}
+   let separated=(face.reserved&FACE_SEPARATED)!=0u;let sampledAir=liquid<0.&&sampled.valid!=0u&&sampled.value>0.;
+   if(separated||sampledAir){airPhi=sampled.value;let dual=max(.5,.5*f32(span)-.5)*p.velocityCellSize;theta=select(1.,clamp(-liquid/(airPhi-liquid),1e-2,1.),sampled.valid!=0u&&airPhi>0.&&liquid<0.);distance=theta*dual;face.inverseDistance=1./max(distance,1e-9);face.openFraction=1.;flags=3u;}}
   else if(boundary){distance=.5*p.velocityCellSize;face.inverseDistance=1./distance;face.openFraction=1.;flags=1u;}
      else if(face.negativeRow<rows()){let liquid=bitcast<f32>(rowPhi[face.negativeRow].x);
       let sign=select(1.,-1.,(face.reserved&FACE_ROW_ON_POSITIVE_SIDE)!=0u);var point=vec3f(origin);
@@ -132,8 +134,12 @@ fn publishLosassoCoarseOnlyGhosts(@builtin(global_invocation_id)gid:vec3u){let f
       // centre.  Match the factor-four ghost kernel and the staged topology
       // coefficient by using the accepted row width, not the subface span.
       let rowSize=headers[face.negativeRow].size;let dual=f32(rowSize)*p.velocityCellSize;distance=dual;
-   if(solidFraction(vec3i(floor(point)))>=.999999){face.reserved|=FACE_SOLID_NEUMANN;flags=4u;}
-     else if(liquid<0.&&(p.closed&2u)!=0u){theta=1.;distance=dual;face.inverseDistance=1./dual;flags=1u;}
+   let solid=solidCell(vec3i(floor(point)));let underlying=trackerRawValue(point);
+   // Published phi is positive both in air and inside a carved rigid. The
+   // retained transport value disambiguates them: negative underneath plus a
+   // rigid owner is displaced liquid, hence Neumann even on a tangent face.
+   let carvedLiquid=solid.y>=0.&&underlying.valid!=0u&&underlying.value<0.;
+   if(solid.x>=.999999||carvedLiquid){face.reserved|=FACE_SOLID_NEUMANN;face.openFraction=0.;flags=4u;}
    else if(liquid<0.&&sampled.valid!=0u&&sampled.value>0.){airPhi=sampled.value;theta=clamp(-liquid/(airPhi-liquid),1e-4,1.);distance=theta*dual;face.inverseDistance=1./distance;face.openFraction=1.;flags=1u;}
    // No compact row is the atmospheric p=0 side staged by writeFace. Failure
    // to recover an additional phi sample does not turn that air cell into a
@@ -331,8 +337,8 @@ fn publishLosassoGhostDistances(@builtin(global_invocation_id)invocation:vec3u){
    // the face remains exact zero-aperture Neumann.
    var wallSample=centroid;wallSample[axis]-=towardAir*.5*p.fineCellWidth/p.cellSize;
    let sampled=finePhi(wallSample);face.openFraction=0.;flags=2u;
-   let contactEnabled=p.schedule.w==0u;let separated=contactEnabled&&(face.reserved&FACE_SEPARATED)!=0u;
-   if(contactEnabled&&(separated||((rowFlags&(VALID|FINITE))==(VALID|FINITE)&&liquid<0.&&sampled.valid!=0u&&sampled.value>0.))){
+   let separated=(face.reserved&FACE_SEPARATED)!=0u;
+   if(separated||((rowFlags&(VALID|FINITE))==(VALID|FINITE)&&liquid<0.&&sampled.valid!=0u&&sampled.value>0.)){
     let dual=max(.5*p.fineCellWidth,.5*f32(rowSize)*p.cellSize-.5*p.fineCellWidth);
     if(sampled.valid!=0u&&sampled.value>0.&&liquid<0.){airPhi=sampled.value;
      // Match the established ghost-fluid robustness floor used by the Power
@@ -359,7 +365,7 @@ fn publishLosassoGhostDistances(@builtin(global_invocation_id)invocation:vec3u){
    // theta-conditioned write and is therefore not an admissible input.
    let dual=f32(rowSize)*p.cellSize;distance=dual;let faceToAir=.5*dual;
    var endpoint=centroid;endpoint[axis]+=sign*faceToAir/p.cellSize;
-   let sampled=finePhi(endpoint);let cellCenteredAir=p.schedule.w==1u;
+   let sampled=finePhi(endpoint);
    let endpointCell=vec3i(floor(endpoint));let solidFraction=denseSolidFraction(endpointCell);
    // Rigid carving can remove a pressure row before the cell becomes fully
    // occupied. On an analytically blocked, rigid-owned face that missing row
@@ -367,14 +373,10 @@ fn publishLosassoGhostDistances(@builtin(global_invocation_id)invocation:vec3u){
    let solidNeighbor=solidFraction>=.999999
     ||(denseRigidOwner(endpointCell)>=0&&face.openFraction<.999999);
    if(solidNeighbor){
-    // Carving makes a rigid interior positive in phi, but that is not air.
-    // The cut-face aperture owns the solid and this pressure face remains
-    // Neumann; only a genuine liquid/air neighbor may install p_air = 0.
-    face.reserved|=FACE_SOLID_NEUMANN;flags=4u;
-   }else if(cellCenteredAir&&(rowFlags&(VALID|FINITE))==(VALID|FINITE)&&liquid<0.){
-    // Losasso 2004 places the p_air=0 Dirichlet value at the neighboring air
-    // cell centre.  No subcell theta enters the pressure operator in this A/B.
-    theta=1.;distance=dual;face.inverseDistance=1./dual;faces[faceId]=face;flags=1u;
+   // Carving makes a rigid interior positive in phi, but that is not air.
+   // The cut-face aperture owns the solid and this pressure face remains
+   // Neumann; only a genuine liquid/air neighbor may install p_air = 0.
+    face.reserved|=FACE_SOLID_NEUMANN;face.openFraction=0.;flags=4u;
    }else if((rowFlags&(VALID|FINITE))==(VALID|FINITE)&&liquid<0.&&sampled.valid!=0u&&sampled.value>0.){airPhi=sampled.value;
     theta=clamp(-liquid/(airPhi-liquid),1e-4,1.);distance=theta*dual;face.inverseDistance=1./distance;faces[faceId]=face;flags=1u;}
    else{flags=4u;}}

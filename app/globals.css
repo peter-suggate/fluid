@@ -206,7 +206,12 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 /* Pick mode, in the scene's top-right strip beside the frame rate. Matches the
    FPS meter's height and treatment so the two read as one cluster; sits to its
    left and grows leftward, so a long frame-rate string can never collide. */
-.scene-pick-toggle { position: absolute; z-index: 6; top: 15px; right: 108px; height: 31px; padding: 0 10px; display: flex; align-items: center; gap: 7px; border: 1px solid var(--line); background: var(--overlay); color: var(--muted); font: 700 9px/1 var(--mono); letter-spacing: .06em; text-transform: uppercase; cursor: pointer; backdrop-filter: blur(14px); }
+/* One flex row owns the top-right corner. Every control that rides it — the
+   solve-annotation tools, pick mode, the frame rate — is laid out by this
+   container rather than by its own `right:` offset, so adding another cannot
+   land it on top of the one already there. */
+.viewport-topright { position: absolute; z-index: 6; top: 15px; right: 16px; display: flex; align-items: center; gap: 6px; }
+.scene-pick-toggle { height: 31px; padding: 0 10px; display: flex; align-items: center; gap: 7px; border: 1px solid var(--line); background: var(--overlay); color: var(--muted); font: 700 9px/1 var(--mono); letter-spacing: .06em; text-transform: uppercase; cursor: pointer; backdrop-filter: blur(14px); }
 .scene-pick-toggle:hover { border-color: var(--accent-line); color: var(--muted); }
 /* A reticle rather than a word: the control arms a pointer gesture, and the
    glyph is what makes that legible before the label is read. */
@@ -222,7 +227,7 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 .scene-pick-toggle[aria-pressed="true"][data-pinned="true"] { border-color: var(--amber-line); background: var(--amber-wash); color: var(--amber); }
 @media (max-width: 720px) { .scene-pick-toggle span, .scene-pick-toggle small { display: none; } .scene-pick-toggle { padding: 0 8px; } }
 
-.fps-meter { position: absolute; z-index: 5; top: 15px; right: 16px; min-width: 76px; height: 31px; padding: 0 10px; display: grid; place-items: center; border: 1px solid var(--accent-line); background: var(--overlay); color: var(--accent-strong); font: 700 10px/1 var(--mono); font-variant-numeric: tabular-nums; letter-spacing: .03em; pointer-events: none; backdrop-filter: blur(14px); }
+.fps-meter { min-width: 76px; height: 31px; padding: 0 10px; display: grid; place-items: center; border: 1px solid var(--accent-line); background: var(--overlay); color: var(--accent-strong); font: 700 10px/1 var(--mono); font-variant-numeric: tabular-nums; letter-spacing: .03em; pointer-events: none; backdrop-filter: blur(14px); }
 .viewport-topline { position: absolute; inset: 15px 16px auto; display: flex; align-items: start; justify-content: space-between; gap: 12px; pointer-events: none; }
 .viewport-topline > * { pointer-events: auto; }
 .gpu-badge { min-width: 230px; height: 31px; padding: 0 10px; display: flex; align-items: center; gap: 8px; border: 1px solid var(--line); background: var(--overlay); backdrop-filter: blur(14px); }
@@ -248,6 +253,17 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 /* Scene identity rides over the viewport instead of costing a sidebar column:
    the preset picker and the way into configuration, then runtime status. */
 .topline-left { min-width: 0; display: flex; flex-direction: column; align-items: start; gap: 8px; }
+/* Solve-annotation tools, opposite the scene overlay. Deliberately a different
+   shape from the authoring strip on the left edge: these do not build the set,
+   so they should not read as more of the same list. */
+.topline-toolbar { flex: none; display: flex; gap: 3px; }
+.topline-toolbar button { display: flex; align-items: center; gap: 6px; min-height: 27px; padding: 5px 9px; border: 1px solid var(--line); background: var(--overlay); color: var(--muted); cursor: pointer; backdrop-filter: blur(12px); }
+.topline-toolbar button strong { font: 700 8px/1.2 var(--mono); letter-spacing: .08em; }
+.topline-toolbar button small { color: var(--dim); font: 700 7px/1 var(--mono); }
+.topline-toolbar button:hover { color: var(--accent); border-color: var(--accent-line); }
+.topline-toolbar button.active { color: #08120a; border-color: #e9d66b; background: #e9d66b; }
+.topline-toolbar button.active small { color: rgba(8,18,10,.6); }
+.topline-tool-icon { width: 9px; height: 9px; flex: none; border: 1.5px solid currentColor; }
 .scene-overlay { min-width: 214px; max-width: min(480px, 42vw); height: 43px; padding: 4px; display: flex; align-items: center; gap: 7px; border: 1px solid var(--line-strong); background: var(--overlay); backdrop-filter: blur(16px); }
 .scene-overlay-preset { position: relative; min-width: 0; display: grid; }
 .scene-overlay-preset select { width: 100%; height: 22px; padding: 0 22px 0 8px; appearance: none; border: 0; background: transparent; color: var(--ink); font-size: 12px; font-weight: 550; letter-spacing: -.015em; cursor: pointer; }
@@ -890,6 +906,8 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 .editor-entity-gizmo .tone-prop.handle-corner { fill: #c6a8f0; stroke: #ece0ff; }
 .editor-entity-gizmo .tone-inflow { fill: rgba(240,150,110,.32); stroke: #f0966e; }
 .editor-entity-gizmo .tone-inflow.handle-corner { fill: #f0966e; stroke: #ffdfd0; }
+.editor-entity-gizmo .tone-region { fill: rgba(233,214,107,.30); stroke: #e9d66b; }
+.editor-entity-gizmo .tone-region.handle-corner { fill: #e9d66b; stroke: #fff6c9; }
 /* The centre is the one handle that is not part of the box, so it is drawn as
    the odd one out: filled solid and a size larger than any corner. */
 .editor-entity-gizmo .entity-handle.handle-center { stroke-width: 2; fill-opacity: .9; }
@@ -899,6 +917,15 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 .editor-entity-gizmo .entity-outline.tone-body { stroke: rgba(126,231,196,.9); }
 .editor-entity-gizmo .entity-outline.tone-prop { stroke: rgba(198,168,240,.9); }
 .editor-entity-gizmo .entity-outline.tone-inflow { stroke: rgba(240,150,110,.9); }
+.editor-entity-gizmo .entity-outline.tone-region { stroke: rgba(233,214,107,.9); }
+
+/* Refinement regions are outlined for as long as regions are the subject, not
+   only while one is dragged: nothing in the rendered frame is a region, so this
+   wireframe is the only thing that says a box is there at all. The unselected
+   ones are drawn faint and long-dashed so a scene carrying several does not
+   read as a cage. */
+.editor-region-gizmo .region-outline { fill: none; stroke: rgba(233,214,107,.4); stroke-width: 1.1; stroke-dasharray: 7 5; }
+.editor-region-gizmo .region-outline.selected { stroke: rgba(233,214,107,.95); stroke-width: 1.5; stroke-dasharray: 4 3; }
 
 .editor-entity-gizmo .entity-handle.hovered { stroke-width: 2; }
 .editor-entity-gizmo .tone-fluid.hovered { fill: #9dc6ff; stroke: #eaf3ff; }
@@ -906,6 +933,7 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 .editor-entity-gizmo .tone-body.hovered { fill: #7ee7c4; stroke: #eafff8; }
 .editor-entity-gizmo .tone-prop.hovered { fill: #c6a8f0; stroke: #f5eeff; }
 .editor-entity-gizmo .tone-inflow.hovered { fill: #f0966e; stroke: #ffeee6; }
+.editor-entity-gizmo .tone-region.hovered { fill: #e9d66b; stroke: #fffbe2; }
 /* Under an axis lock, a handle owning none of the locked axes can do nothing.
    Fading it says which handles are still live without removing them: the lock
    is a keystroke away from being released, and the box would jump if they went. */
@@ -934,6 +962,7 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 .tone-body strong, strong.tone-body { color: #7ee7c4; }
 .tone-prop strong, strong.tone-prop { color: #c6a8f0; }
 .tone-inflow strong, strong.tone-inflow { color: #f0966e; }
+.tone-region strong, strong.tone-region { color: #e9d66b; }
 
 .scene-scale-overlay { position: absolute; right: 17px; bottom: 17px; z-index: 11; display: grid; gap: 3px; padding: 5px; border: 1px solid var(--line); background: var(--overlay); backdrop-filter: blur(16px); }
 .scene-scale-row { display: grid; grid-template-columns: 44px 22px 1fr 22px; align-items: center; gap: 3px; }
@@ -975,6 +1004,13 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 .selection-chip strong { font: 600 9px/1 var(--sans); }
 .selection-chip small { color: var(--dim); font: 700 7px/1 var(--mono); letter-spacing: .06em; }
 .selection-precision { display: grid; gap: 7px; width: 178px; padding: 9px; border: 1px solid var(--accent-line); background: var(--overlay); backdrop-filter: blur(12px); }
+/* What the thing IS, above what size it is. The label sits over its own row
+   because an enumeration needs the full width for its options. */
+.selection-choice { display: grid; gap: 4px; }
+.selection-choice > span { color: var(--muted); font: 700 7px/1 var(--mono); letter-spacing: .07em; text-transform: uppercase; }
+.selection-choice .segmented { width: 100%; }
+.selection-choice .segmented button { flex: 1; min-width: 0; padding: 4px 2px; }
+.selection-summary { margin: 0; color: var(--dim); font: 8px/1.5 var(--mono); }
 .selection-actions { display: flex; gap: 4px; }
 .selection-actions button { flex: 1; min-height: 24px; border: 1px solid var(--line); background: transparent; color: var(--muted); font: 700 7px/1 var(--mono); letter-spacing: .06em; text-transform: uppercase; cursor: pointer; }
 .selection-actions button:hover { color: var(--accent); border-color: var(--accent-line); }

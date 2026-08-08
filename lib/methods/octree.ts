@@ -38,7 +38,6 @@ const runtimeDialParams: MethodParamSpec[] = OCTREE_RUNTIME_DIALS.map((dial) => 
 
 const params: MethodParamSpec[] = [
   { kind: "select", key: "coarseBackend", label: "Coarse dynamics", default: DEFAULT_OCTREE_COARSE_BACKEND, tier: "coarse", options: [{ value: "losasso", label: "Losasso 2004 · default" }, { value: "power2017", label: "Power 2017 · frozen reference" }], hint: "Construction-time backend choice. Each backend owns distinct pipelines, layouts, and velocity channels; the frozen Power path remains available for reference lanes." },
-  { kind: "select", key: "losassoFreeSurfacePressure", label: "Losasso air pressure", default: "subcell-contact", tier: "fine", options: [{ value: "subcell-contact", label: "Subcell ghost + contact · default" }, { value: "cell-centered-air", label: "Losasso 2004 cell-centred air" }], hint: "Construction-time A/B control. The paper mode uses a cell-centred p_air=0 neighbor and closed-wall Neumann faces; the production extension retains subcell theta and unilateral overhead separation." },
   { kind: "select", key: "losassoVelocityExtension", label: "Losasso extrapolation", default: "fixed-jacobi", tier: "fine", options: [{ value: "fixed-jacobi", label: "Fixed Jacobi · default" }, { value: "causal-front", label: "Causal layer front" }], hint: "Construction-time A/B control for Section 5 air velocity extension. Causal-front publishes one graph layer per sweep from already-valid inner layers." },
   { kind: "select", key: "globalFineLevelSetFactor", label: "Surface tracking", default: "1", tier: "coarse", options: [{ value: "1", label: "Coarse octree only · default" }, { value: "4", label: "4× fine band" }, { value: "8", label: "8× fine band · experimental" }], hint: "Factor 1 transports φ on the complete coarse lattice, restricts it onto adaptive octree rows, and allocates no fine-band pages. Factors 4/8 opt into the sparse higher-resolution interface band." },
   { kind: "select", key: "maximumLeafSize", label: "Largest pressure cell", default: "32", tier: "fine", options: [{ value: "2", label: "2³ finest cells" }, { value: "4", label: "4³ finest cells" }, { value: "8", label: "8³ finest cells" }, { value: "16", label: "16³ finest cells" }, { value: "32", label: "32³ finest cells · default" }], hint: "Largest dyadic octree cell away from interfaces. Scene profiles choose the largest compatible root while preserving strict 2:1 grading." },
@@ -68,7 +67,6 @@ export const octreeSolverOptions = (scene: SceneDescription, quality: GPUQuality
     globalFineLevelSetFactor: fineFactor,
     topologyCadenceAdvances: values.topologyCadenceAdvances,
     topologyDisplacementRingsPerAdvance: values.topologyDisplacementRingsPerAdvance,
-    losassoFreeSurfacePressure: values.losassoFreeSurfacePressure,
     losassoVelocityExtension: values.losassoVelocityExtension,
   });
   // Not a product control. Keep the fine-only override available to the Dawn
@@ -155,7 +153,6 @@ export const octreeMethod: SimulationMethod = {
   runtimeParamKeys: OCTREE_RUNTIME_DIAL_KEYS,
   presetFor: () => ({
     coarseBackend: DEFAULT_OCTREE_COARSE_BACKEND,
-    losassoFreeSurfacePressure: "subcell-contact",
     losassoVelocityExtension: "fixed-jacobi",
     maximumLeafSize: "32",
     interfaceRefinementBandCells: 4,

@@ -10,7 +10,7 @@ test("Losasso compact coarse-only ghost predicates are valid WGSL boolean expres
     source.indexOf("octreeLosassoCoarsePhiWGSL"));
   assert.match(coarseOnly, /let negativeNearby=.*&&.*;[\s\S]*let positiveNearby=.*&&.*;[\s\S]*if\(negativeNearby\|\|positiveNearby\)/,
     "Dawn must not have to parse mixed conjunction and disjunction operators in one expression");
-  assert.match(coarseOnly, /let contactEnabled=.*;let separated=.*;let sampledAir=.*&&.*;[\s\S]*if\(contactEnabled&&\(separated\|\|sampledAir\)\)/,
+  assert.match(coarseOnly, /let separated=.*;let sampledAir=.*&&.*;[\s\S]*if\(separated\|\|sampledAir\)/,
     "the separated-or-air classification should give each conjunction an explicit name");
   assert.match(coarseOnly, /vec3f\(vec3u\(leaf\.originX,leaf\.originY,leaf\.originZ\)\)/,
     "WGSL requires an explicit vector conversion from integer seed origins");
@@ -131,12 +131,6 @@ test("Losasso factor-one transport has no fine-page dependency", () => {
   assert.doesNotMatch(coarseOnly,
     /this\.coarseOnlyNextGradient, velocity\.faceGeometry, velocity\.extendedVelocity/,
     "W7 extension geometry is not ordered by pressure face id");
-  assert.match(read("../lib/webgpu-octree-losasso-coarse-phi.wgsl.ts"),
-    /else if\(liquid<0\.&&\(p\.closed&2u\)!=0u\)\{theta=1\.;distance=dual;face\.inverseDistance=1\.\/dual;flags=1u;\}/,
-    "paper mode must place p_air at every non-solid missing neighbour without a fine-sample proof");
-  assert.match(read("../lib/webgpu-octree-losasso-coarse-phi.wgsl.ts"),
-    /let rowSize=headers\[face\.negativeRow\]\.size;let dual=f32\(rowSize\)\*p\.velocityCellSize/,
-    "factor-one cell-centred air must use the accepted wet-row centre distance");
   assert.match(read("../lib/webgpu-octree-losasso-coarse-phi.wgsl.ts"),
     /previousGradient\[row\]\.w==1\.[\s\S]*nextGradient\[row\]=vec4f\(gradient,1\)/,
     "coarse-only transport must bootstrap an absent gradient and explicitly publish its validity");
@@ -533,17 +527,11 @@ test("Losasso coarse publication cannot resurrect an invalid retired row", () =>
     "a stale or zeroed seed must remain invisible rather than publish a phantom interface");
 });
 
-test("Losasso paper-fidelity pressure and extension remain construction-time A/B choices", () => {
-  const method = read("../lib/methods/octree.ts");
-  const coarse = read("../lib/webgpu-octree-losasso-coarse-phi.wgsl.ts");
+test("Losasso keeps one subcell-contact pressure path and an extension A/B", () => {
   const projection = read("../lib/webgpu-octree-losasso-projection.ts");
   const extension = read("../lib/webgpu-octree-losasso-velocity-extension.wgsl.ts");
-  assert.match(method, /losassoFreeSurfacePressure/);
   assert.match(method, /losassoVelocityExtension/);
-  assert.match(coarse, /let cellCenteredAir=p\.schedule\.w==1u/);
-  assert.match(coarse, /theta=1\.;distance=dual;face\.inverseDistance=1\.\/dual/);
-  assert.match(projection, /params\.reserved0 == 0u/,
-    "the cell-centered paper A/B must disable unilateral wall contact");
+  assert.match(projection, /if \(\(face\.reserved & FACE_CLOSED_BOUNDARY\) != 0u\)/);
   assert.match(extension, /if \(params\.causalFront != 0u\)/);
   assert.match(extension, /if \(layer < params\.sweep\)/);
   assert.match(extension, /if \(layer > params\.sweep\)/);

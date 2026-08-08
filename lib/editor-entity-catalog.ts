@@ -1,5 +1,6 @@
 import { fluidBodyEntity } from "./editor-fluid-body";
 import { inflowEntity } from "./editor-inflow";
+import { refinementRegionEntity } from "./editor-refinement-region";
 import { sceneryEntity } from "./editor-scenery";
 import { rigidBodyEntity } from "./editor-rigid-body";
 import { tankEntity } from "./editor-tank";
@@ -43,6 +44,10 @@ import type {
 export const EDITOR_ENTITIES: readonly EditorEntityDefinition[] = Object.freeze([
   rigidBodyEntity,
   inflowEntity,
+  // Before the water body and the tank, both of which enclose it: a region is
+  // drawn *over* the fluid, so a pointer within tolerance of both is over the
+  // region the user just placed.
+  refinementRegionEntity,
   sceneryEntity,
   fluidBodyEntity,
   tankEntity,

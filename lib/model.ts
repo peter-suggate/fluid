@@ -1,4 +1,5 @@
 import sharedDefaultScene from "./default-scene.json";
+import { validateRefinementRegions } from "./octree-refinement-regions";
 import { validateTerrain, type TerrainDescription } from "./terrain";
 import type { EnvironmentId } from "./environments";
 import { validateSceneryGraph, type SceneryGraph } from "./scenery-graph";
@@ -181,6 +182,17 @@ export interface SceneDescription {
      * inlined into WGSL, which is what makes it authorable at all.
      */
     optics?: WaterOpticsAuthoring;
+    /**
+     * Authored boxes that cap how finely the pressure octree may refine inside
+     * them. See `lib/octree-refinement-regions.ts`.
+     *
+     * Uniform-tier: the regions reach the GPU through the projection's params
+     * buffer, so drawing or retuning one is a buffer write on the running
+     * solver rather than a re-seed. That is what makes them an experiment
+     * surface — `gpuSceneUniformKey` carries them and `gpuSceneSeedKey`
+     * deliberately does not.
+     */
+    refinementRegions?: FluidRefinementRegion[];
   };
   nominalResolution: {
     length_m: number;
@@ -192,6 +204,26 @@ export interface SceneDescription {
     pressureMaxIterations: number;
   };
   rigidBodies: RigidBodyDescription[];
+}
+
+/**
+ * A drawn box that caps how finely the pressure octree refines inside it.
+ *
+ * Deliberately declarative about *meaning* rather than about machinery: `rule`
+ * names what the box is for, so the next thing worth declaring over a region —
+ * a viscosity, a solve budget, a visualization mask — arrives as another rule
+ * rather than as another parallel list of boxes. Today there is exactly one.
+ *
+ * See `lib/octree-refinement-regions.ts` for the containment contract and for
+ * why this is a uniform-tier input.
+ */
+export interface FluidRefinementRegion {
+  id: string;
+  min_m: Vec3;
+  max_m: Vec3;
+  rule: "minimum-cell-size";
+  /** Smallest pressure-cell edge allowed inside, in finest cells. Power of two. */
+  minimumCellSize_cells: number;
 }
 
 export interface FluidInflow {
@@ -435,6 +467,7 @@ export function validateScene(scene: SceneDescription): string[] {
       || inflow.center_m.y < 0 || inflow.center_m.y > c.height_m
       || inflow.center_m.z < -c.depth_m / 2 || inflow.center_m.z > c.depth_m / 2) errors.push("Inflow center must be inside the container");
   }
+  if (c) errors.push(...validateRefinementRegions(scene.fluid?.refinementRegions, c));
   if (scene.terrain && c) errors.push(...validateTerrain(scene.terrain, c));
   if (scene.scenery) errors.push(...validateSceneryGraph(scene.scenery));
   if (!scene.nominalResolution || !(scene.nominalResolution.length_m > 0)) errors.push("Nominal resolution must be positive");

@@ -78,8 +78,11 @@ test("both fine and cooperative coarse refinement use the same fluid gate", () =
   );
   assert.match(coarse,
     /boundaryDecision = crossesBoundary[\s\S]*fluidGatedBoundaryRefinement && crossesBoundary[\s\S]*boundaryLiquidWouldRefine\([\s\S]*boundaryLiquidPhiInterval\(origin, size, range\.z, range\.w\)/);
+  // The authored refinement regions cap both paths — see
+  // tests/octree-refinement-regions.test.ts — but they only ever turn a refine
+  // into a hold, so the gate the two paths share is unchanged beneath it.
   assert.match(coarse,
-    /pressureEvidence = pressureRefinementEvidence\(origin, size\)[\s\S]*decision = pressureEvidence \|\| adaptivity <= 0\.0 \|\| boundaryDecision/);
+    /pressureEvidence = pressureRefinementEvidence\(origin, size\)[\s\S]*decision = !refinementRegionHoldsLeaf\(origin, size\)\s*&& \(pressureEvidence \|\| adaptivity <= 0\.0 \|\| boundaryDecision\)/);
 });
 
 test("fine boundary gating stays candidate-local", () => {

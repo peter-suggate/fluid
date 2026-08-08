@@ -33,9 +33,18 @@ test("an unbound key is not a framing", () => {
 });
 
 test("the viewport frame carries no permanently disabled or duplicated controls", () => {
-  const toolbar = readFileSync(new URL("../components/EditorToolbar.tsx", import.meta.url), "utf8");
-  assert.match(toolbar, /EDITOR_TOOLS\.filter\(\(tool\) => tool\.status === "active"\)/,
+  // Which tools a surface offers is declared beside the tools themselves —
+  // placement and status both — so neither the strip nor the topline cluster
+  // decides by name what it is allowed to show.
+  const tools = readFileSync(new URL("../lib/editor-tools.ts", import.meta.url), "utf8");
+  assert.match(tools, /tool\.status === "active" && \(tool\.placement \?\? "strip"\) === placement/,
     "a tool that cannot be clicked must not occupy a row");
+  const toolbar = readFileSync(new URL("../components/EditorToolbar.tsx", import.meta.url), "utf8");
+  assert.match(toolbar, /editorToolsPlacedAt\("strip"\)/,
+    "the strip must take its list from that declaration, not filter one of its own");
+  const topline = readFileSync(new URL("../components/ToplineToolbar.tsx", import.meta.url), "utf8");
+  assert.match(topline, /editorToolsPlacedAt\("topline"\)/,
+    "and so must the corner cluster, or the two lists can disagree");
   assert.doesNotMatch(toolbar, /editor-tool-hint/,
     "the armed tool speaks in the viewport, not in a paragraph pinned under the strip");
 

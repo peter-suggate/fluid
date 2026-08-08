@@ -533,7 +533,25 @@ function inflowAimKey(inflow: SceneDescription["fluid"]["inflow"]): string {
  * the GPU as params rather than as geometry.
  */
 export function gpuSceneUniformKey(scene: SceneDescription): string {
-  return `${scene.fluid.density_kg_m3}:${scene.fluid.dynamicViscosity_Pa_s}:${scene.fluid.surfaceTension_N_m}:${scene.fluid.gravity_m_s2.y}:${inflowAimKey(scene.fluid.inflow)}:${rigidBodyRosterKey(scene.rigidBodies)}`;
+  return `${scene.fluid.density_kg_m3}:${scene.fluid.dynamicViscosity_Pa_s}:${scene.fluid.surfaceTension_N_m}:${scene.fluid.gravity_m_s2.y}:${inflowAimKey(scene.fluid.inflow)}:${rigidBodyRosterKey(scene.rigidBodies)}:${refinementRegionKey(scene)}`;
+}
+
+/**
+ * The authored refinement regions.
+ *
+ * Uniform tier by construction rather than by concession: a region only ever
+ * makes the topology gate refuse a split, and the topology is re-derived from
+ * the reset size every epoch, so a new box is adopted by the next candidate
+ * epoch of the running solver. Nothing it can say changes an allocation, a seed
+ * or the lattice — which is exactly what makes drawing one an experiment you
+ * can watch rather than a restart you wait for.
+ */
+function refinementRegionKey(scene: SceneDescription): string {
+  const regions = scene.fluid.refinementRegions;
+  if (!regions || regions.length === 0) return "none";
+  return regions
+    .map((region) => `${region.rule}@${region.minimumCellSize_cells}:${region.min_m.x},${region.min_m.y},${region.min_m.z}>${region.max_m.x},${region.max_m.y},${region.max_m.z}`)
+    .join("|");
 }
 
 /**

@@ -22,9 +22,21 @@ export type EditorTool =
   | "terrain-lower"
   | "fluid-paint"
   | "fluid-erase"
-  | "inflow";
+  | "inflow"
+  | "refinement-region";
 
 export type EditorToolStatus = "active" | "planned";
+
+/**
+ * Where a tool's button lives.
+ *
+ * The strip on the left is what a scene is *authored* with. A tool that
+ * annotates the solve rather than the set does not belong in that list — it is
+ * asked for while reading a frame, not while building a room — so it is
+ * declared here instead of being filtered out of the strip by name somewhere
+ * downstream.
+ */
+export type EditorToolPlacement = "strip" | "topline";
 
 export interface EditorToolSpec {
   readonly id: EditorTool;
@@ -35,6 +47,8 @@ export interface EditorToolSpec {
   /** Help line shown in the viewport while the tool is armed. */
   readonly hint: string;
   readonly status: EditorToolStatus;
+  /** Defaults to the left-edge strip. */
+  readonly placement?: EditorToolPlacement;
   /** Plan phase that lands the pointer behaviour. Only set while planned. */
   readonly phase?: string;
 }
@@ -113,7 +127,26 @@ export const EDITOR_TOOLS: readonly EditorToolSpec[] = Object.freeze([
     hint: "click a surface to aim the hose there · drag its arrow to set direction and speed",
     status: "active",
   },
+  // Not part of the set: a region annotates the *solve*, declaring how finely
+  // the octree may refine inside a box. It rides the topline rather than the
+  // authoring strip for that reason, and it is the one tool whose boxes are
+  // invisible in every other mode — there is nothing in the frame that is a
+  // region, so the tool that draws them is also the mode that shows them.
+  {
+    id: "refinement-region",
+    label: "REGION",
+    shortcut: "g",
+    hint: "drag a box over the water to cap how finely it is solved there · pick its meaning and its smallest cell in the flyout · drag its faces, edges and corners to reshape it",
+    status: "active",
+    placement: "topline",
+  },
 ] as const satisfies readonly EditorToolSpec[]);
+
+/** Tools rendered in the given place, in declaration order. */
+export function editorToolsPlacedAt(placement: EditorToolPlacement): readonly EditorToolSpec[] {
+  return EDITOR_TOOLS.filter((tool) =>
+    tool.status === "active" && (tool.placement ?? "strip") === placement);
+}
 
 const TOOLS_BY_ID = new Map(EDITOR_TOOLS.map((tool) => [tool.id, tool]));
 
@@ -150,7 +183,8 @@ export type EditorSelectionKind =
   | "inflow"
   | "scenery"
   | "tank"
-  | "fluid-body";
+  | "fluid-body"
+  | "refinement-region";
 
 /**
  * Generalization of the original `selectedBodyId`. Later phases add terrain

@@ -3,7 +3,6 @@ import type { PassBroker } from "./webgpu-pass-broker";
 import type { FineLevelSetVolumeCoarseSource } from "./webgpu-octree-fine-levelset-volume";
 import type { FineLevelSetSummaryCoarseSource } from "./webgpu-octree-fine-levelset-summary-direct";
 import type { OctreeFineSeedAdapterCoarsePhiSource } from "./webgpu-octree-fine-seed-adapter";
-import type { LosassoFreeSurfacePressureMode } from "./octree-coarse-backend";
 import type { SurfaceInflowState } from "./webgpu-quadtree-builder";
 import type { WebGPUOctreeLosassoVelocitySamplerSource } from
   "./webgpu-octree-losasso-velocity-sampler";
@@ -124,7 +123,6 @@ export class WebGPUOctreeLosassoCoarsePhiExchange {
 
   constructor(private readonly device: GPUDevice,
     rowCapacity: number, faceCapacity: number,
-    private readonly freeSurfacePressureMode: LosassoFreeSurfacePressureMode = "subcell-contact",
     denseComplementCells = 0) {
     this.plan = planOctreeLosassoCoarsePhi(rowCapacity, faceCapacity);
     const storage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST;
@@ -232,7 +230,7 @@ export class WebGPUOctreeLosassoCoarsePhiExchange {
     words.set([...velocity.dimensions, velocity.directoryCapacity], 0);
     floats.set([0, 0, 0, dt_s], 4);
     floats[8] = input.cellSize; words[9] = input.maximumLeafSize;
-    words[10] = 1 | (this.freeSurfacePressureMode === "cell-centered-air" ? 2 : 0);
+    words[10] = 1;
     words[11] = openTopBoundary ? 1 : 0;
     words.set([this.plan.rowCapacity, this.plan.faceCapacity,
       this.plan.directoryCapacity, this.coarseOnlyGeneration], 12);
@@ -389,7 +387,7 @@ export class WebGPUOctreeLosassoCoarsePhiExchange {
     words[22] = this.plan.rowCapacity; words[23] = this.plan.faceCapacity;
     words[24] = scheduleMode; words[25] = Math.ceil(this.plan.rowCapacity / 64);
     words[26] = Math.ceil(this.plan.arenaBytes / 4 / 64);
-    words[27] = this.freeSurfacePressureMode === "cell-centered-air" ? 1 : 0;
+    words[27] = 0;
     this.device.queue.writeBuffer(this.params, 0, bytes);
   }
 
@@ -412,7 +410,7 @@ export class WebGPUOctreeLosassoCoarsePhiExchange {
     words[22] = this.plan.rowCapacity; words[23] = this.plan.faceCapacity;
     words[24] = 2; words[25] = Math.ceil(this.plan.rowCapacity / 64);
     words[26] = Math.ceil(this.plan.arenaBytes / 4 / 64);
-    words[27] = this.freeSurfacePressureMode === "cell-centered-air" ? 1 : 0;
+    words[27] = 0;
     this.device.queue.writeBuffer(this.params, 0, bytes);
   }
 

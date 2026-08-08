@@ -3,10 +3,12 @@ import {
   boxCenter,
   boxHandles,
   boxResizeDrag,
+  moveBoxWithinLimits,
   moveHandles,
   pickSolidBox,
   positionFields,
   resizeBox,
+  sceneContainerBox,
   WORLD_FRAME,
   type BoxExtent,
   type BoxResizePolicy,
@@ -48,11 +50,7 @@ const AXES: readonly (keyof Vec3)[] = Object.freeze(["x", "y", "z"]);
 
 /** World-space bounds the body may occupy: the container interior. */
 export function fluidBodyLimits(scene: SceneDescription): FluidBodyBox {
-  const c = scene.container;
-  return {
-    min: { x: -0.5 * c.width_m, y: 0, z: -0.5 * c.depth_m },
-    max: { x: 0.5 * c.width_m, y: c.height_m, z: 0.5 * c.depth_m },
-  };
+  return sceneContainerBox(scene);
 }
 
 /**
@@ -159,18 +157,7 @@ export function moveFluidBodyBox(
   centre_m: Vec3,
   scene: SceneDescription,
 ): FluidBodyBox {
-  const limits = fluidBodyLimits(scene);
-  const min = { ...box.min }, max = { ...box.max };
-  for (const axis of AXES) {
-    const half = 0.5 * (box.max[axis] - box.min[axis]);
-    const room = 0.5 * (limits.max[axis] - limits.min[axis]);
-    const centre = half >= room
-      ? 0.5 * (limits.min[axis] + limits.max[axis])
-      : Math.min(limits.max[axis] - half, Math.max(limits.min[axis] + half, centre_m[axis]));
-    min[axis] = centre - half;
-    max[axis] = centre + half;
-  }
-  return { min, max };
+  return moveBoxWithinLimits(box, centre_m, fluidBodyLimits(scene));
 }
 
 /**

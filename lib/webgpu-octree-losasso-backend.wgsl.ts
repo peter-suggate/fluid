@@ -16,6 +16,7 @@ const ERROR_CAPACITY: u32 = 1u;
 const ERROR_HEADER: u32 = 2u;
 const ERROR_OWNER: u32 = 4u;
 const ERROR_NEIGHBOR_ROW: u32 = 8u;
+const FACE_SEPARATED: u32 = 0x20000000u;
 const FACE_CLOSED_BOUNDARY: u32 = 0x40000000u;
 const FACE_ROW_ON_POSITIVE_SIDE: u32 = 0x80000000u;
 
@@ -394,7 +395,14 @@ fn writeFace(faceId: u32, row: u32, neighbor: OctreeOwnerPageLookupResult, axis:
   faceGeometry[faceId] = vec4u(packedAxisSpan, geometry);
   // Staged extension publication: every geometric face remains a projection
   // seed until compact coarse-phi layers are added to this reduced seam.
-  faceMetrics[faceId] = vec4u(axis, 1u, bitcast<u32>(0.0), 0u);
+  var tangentialDeltaY=0.;if(neighborRow!=INVALID&&axis!=1u){
+    let rowHeader=leafHeaders[row];let neighborHeader=leafHeaders[neighborRow];
+    let rowOrigin=originOf(rowHeader);let neighborOrigin=originOf(neighborHeader);
+    tangentialDeltaY=(f32(neighborOrigin.y)+.5*f32(neighborHeader.size))
+      -(f32(rowOrigin.y)+.5*f32(rowHeader.size));}
+  // z stores the tangential centre-height offset in finest cells. Projection
+  // removes its hydrostatic pressure contribution on non-orthogonal T faces.
+  faceMetrics[faceId] = vec4u(axis, 1u, bitcast<u32>(tangentialDeltaY), 0u);
   atomicAdd(&scratch[incidenceCountBase() + row], 1u);
   if (neighborRow != INVALID) {
     atomicAdd(&scratch[incidenceCountBase() + neighborRow], 1u);
@@ -495,8 +503,14 @@ fn conditionLosassoFaces(@builtin(global_invocation_id) invocation:vec3u){
  let solidWeight=losassoExactValue(&exactSolidWeight);if(!valid||!losassoFinite(openSum)||!losassoFinite(solidVelocitySum)
    ||!losassoFinite(solidWeight)){fail(ERROR_HEADER);return;}
  let closedBoundary=(face.reserved&FACE_CLOSED_BOUNDARY)!=0u;
- face.openFraction=select(openSum/f32(span*span),0.,closedBoundary);
- face.normalVelocity=select(select(0.,solidVelocitySum/solidWeight,solidWeight>0.),0.,closedBoundary);
+ let separatedBoundary=closedBoundary&&(face.reserved&FACE_SEPARATED)!=0u
+  &&face.axis==1u&&(face.reserved&FACE_ROW_ON_POSITIVE_SIDE)==0u;
+ // A rigid-boundary refresh updates moving solid apertures, but it must not
+ // re-seal a lid contact that the preceding ghost/active-set pass opened.
+ // Factor one has no fine ghost refresh to repair that overwrite later.
+ face.openFraction=select(openSum/f32(span*span),select(0.,face.openFraction,separatedBoundary),closedBoundary);
+ face.normalVelocity=select(select(0.,solidVelocitySum/solidWeight,solidWeight>0.),
+  select(0.,face.normalVelocity,separatedBoundary),closedBoundary);
  // Candidate rows have no accepted-index phi. Keep the geometric dual
  // distance here; the accepted fine-to-coarse exchange conditions free-
  // surface faces and republishes the matching diagonal after ready commit.

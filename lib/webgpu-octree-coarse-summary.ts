@@ -178,8 +178,9 @@ export function planOctreeCoarseSummary(
     baseDimensions, levelDimensions, levelOffsets, hierarchyKeyCapacity,
     topLevelPageCount, directoryPageCapacity, entryCapacity, entryOffsetWords,
     phiOffsetWords, activityOffsetWords, activityWords, directoryWords,
-    // Directory + state + params + indirect dispatch + optional-binding sentinel.
-    allocatedBytes: directoryWords * 4 + 160 + 112 + 36 + 128,
+    // Directory + state + params + indirect dispatch + optional-binding
+    // sentinel + per-body fixed-point submerged-volume reduction.
+    allocatedBytes: directoryWords * 4 + 160 + 112 + 36 + 128 + 48,
   };
 }
 
@@ -197,6 +198,7 @@ export class WebGPUOctreeCoarseSummary {
   private readonly params: GPUBuffer;
   private readonly dispatchArgs: GPUBuffer;
   private readonly bindingSentinel: GPUBuffer;
+  private readonly rigidDisplacement: GPUBuffer;
   private readonly indirectDispatch = octreeCoarseSummaryIndirectDispatchEnabled();
   private readonly pipelines: Record<string, GPUComputePipeline> = {};
   private readonly bindGroups = new Map<GPUComputePipeline, GPUBindGroup>();
@@ -206,6 +208,7 @@ export class WebGPUOctreeCoarseSummary {
   private readonly entries = ["resetSummary", "resetSummaryValues", "ensureSummaryPages", "ensureSupportSummaryPages",
     "ensureSummaryRanks", "ensureSupportSummaryRanks", "predictSummaryCells",
     "seedDenseRedistance", "redistanceScratchToOutput", "redistanceOutputToScratch",
+    "resetRigidDisplacement", "measureRigidDisplacement", "publishRigidDisplacement",
     "summarizeDenseVolume", "prepareVolumeCorrection", "correctAndAggregateSummaryCells",
     "finalizeSummaryEntries", "publishSummary",
     "publishDenseComplement", "correctCoarseDirectory",
@@ -218,6 +221,7 @@ export class WebGPUOctreeCoarseSummary {
       rowVelocities: GPUBuffer; initialPhi: Float32Array; physicalCellSize: number; timestep_s: number;
       losassoVelocity?: WebGPUOctreeLosassoVelocitySamplerSource;
       openTopBoundary?: boolean;
+      rigid?: Readonly<{ rigidBodies: GPUBuffer; immersedVolumes: GPUBuffer; bodyCount: number }>;
       /** Largest authored octree leaf. The owner lookup probes dyadic
        * identities from here down to one, so a value below the real maximum
        * silently misses every coarser leaf. */
@@ -268,8 +272,14 @@ export class WebGPUOctreeCoarseSummary {
       size: 36, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT });
     this.bindingSentinel = device.createBuffer({ label: "coarse-only summary optional binding sentinel",
       size: 128, usage: GPUBufferUsage.STORAGE });
+    this.rigidDisplacement = device.createBuffer({
+      label: "coarse-only measured rigid displacement",
+      size: 12 * Uint32Array.BYTES_PER_ELEMENT,
+      usage: storage,
+    });
     const words = new Uint32Array(16);
     words.set(this.plan.baseDimensions, 0);
+    words[3] = Math.min(12, Math.max(0, air.rigid?.bodyCount ?? 0));
     words.set(dimensions, 4);
     words[7] = air.maximumLeafSize;
     words.set([this.plan.hierarchyKeyCapacity, this.plan.topLevelPageCount,
@@ -305,11 +315,15 @@ export class WebGPUOctreeCoarseSummary {
     // and the directory must not observe a concurrently mutable source anyway.
     const initialPhi = new Float32Array(air.initialPhi);
     device.queue.writeBuffer(this.directory, this.plan.phiOffsetWords * 4, initialPhi);
-    const initialState = new Uint32Array(20);
+    const initialState = new Uint32Array(40);
     const referenceCells = air.initialPhi.reduce((sum, phi) =>
       sum + Math.max(0, Math.min(1, 0.5 - phi / air.physicalCellSize)), 0);
     initialState[14] = Math.round(4096 * referenceCells);
     initialState[16] = 1;
+    // Word 36 is the immutable no-solid liquid reference. The transported
+    // field deliberately retains liquid beneath moving solids, so word 14
+    // remains that same target; carving happens only in published geometry.
+    initialState[36] = initialState[14]!;
     device.queue.writeBuffer(this.state, 0, initialState);
   }
 
@@ -350,6 +364,12 @@ export class WebGPUOctreeCoarseSummary {
         || entry === "prepareSummaryDispatch";
       const usesAir = entry === "predictSummaryCells" || entry === "prepareSummaryDispatch";
       const usesVelocity = entry === "predictSummaryCells";
+      const usesRigidReduction = entry === "resetRigidDisplacement"
+        || entry === "measureRigidDisplacement" || entry === "publishRigidDisplacement";
+      const usesRigidBodies = entry === "measureRigidDisplacement"
+        || entry === "correctAndAggregateSummaryCells"
+        || entry === "publishDenseComplement" || entry === "correctCoarseDirectory";
+      const usesImmersedVolumes = entry === "publishRigidDisplacement";
       const usesState = true;
       const usesLosassoControl = entry === "prepareSummaryDispatch";
       const pipeline = this.pipelines[entry]!;
@@ -373,6 +393,11 @@ export class WebGPUOctreeCoarseSummary {
               ?? this.bindingSentinel } },
           ] : []),
           ...(usesLosassoControl ? [{ binding: 7, resource: { buffer: this.air.losassoVelocity?.control
+            ?? this.bindingSentinel } }] : []),
+          ...(usesRigidBodies ? [{ binding: 12, resource: { buffer: this.air.rigid?.rigidBodies
+            ?? this.bindingSentinel } }] : []),
+          ...(usesRigidReduction ? [{ binding: 13, resource: { buffer: this.rigidDisplacement } }] : []),
+          ...(usesImmersedVolumes ? [{ binding: 14, resource: { buffer: this.air.rigid?.immersedVolumes
             ?? this.bindingSentinel } }] : []),
           ...(prepare ? [{ binding: 6, resource: { buffer: this.dispatchArgs } }] : []),
         ],
@@ -426,6 +451,9 @@ export class WebGPUOctreeCoarseSummary {
     dispatch("summarizeDenseVolume", this.air.layout.ownerDirectoryCellCapacity, 0);
     dispatch("prepareVolumeCorrection", 1);
     dispatch("correctAndAggregateSummaryCells", this.air.layout.ownerDirectoryCellCapacity, 0);
+    dispatch("resetRigidDisplacement", 12);
+    dispatch("measureRigidDisplacement", this.air.layout.ownerDirectoryCellCapacity, 0);
+    dispatch("publishRigidDisplacement", 12);
     dispatch("finalizeSummaryEntries", this.plan.entryCapacity, 2);
     dispatch("publishSummary", 1);
     dispatch("publishDenseComplement", this.air.layout.ownerDirectoryCellCapacity, 0);
@@ -498,7 +526,7 @@ export class WebGPUOctreeCoarseSummary {
     if (this.destroyed) return; this.destroyed = true;
     this.bindGroups.clear();
     this.directory.destroy(); this.state.destroy(); this.params.destroy();
-    this.dispatchArgs.destroy(); this.bindingSentinel.destroy();
+    this.dispatchArgs.destroy(); this.bindingSentinel.destroy(); this.rigidDisplacement.destroy();
   }
 }
 
@@ -506,7 +534,7 @@ export const coarseSummaryWGSL = /* wgsl */ `
 const INVALID:u32=0xffffffffu;const PUBLISHED:u32=0x80000000u;
 const COARSE_AUTHORITY:u32=0x80000000u;const PHI_INTERFACE:u32=4u;
 const PAGE_SIZE:u32=${PAGE_SIZE}u;const ENTRY_WORDS:u32=${ENTRY_WORDS}u;
-struct P{baseDims:vec3u,pad0:u32,dims:vec3u,maximumLeafSize:u32,keyCapacity:u32,topPages:u32,pageCapacity:u32,
+struct P{baseDims:vec3u,bodyCount:u32,dims:vec3u,maximumLeafSize:u32,keyCapacity:u32,topPages:u32,pageCapacity:u32,
  entryCapacity:u32,entryOffset:u32,maximumLevel:u32,rowCapacity:u32,directoryWords:u32,
  airControl:u32,airVectors:u32,airOwners:u32,domainVolume:u32,time:vec4f,maxWorkgroups:u32,physicalCellSize:f32,
  diagnostics:u32,volumeCorrectionMode:u32}
@@ -525,9 +553,36 @@ struct CoarseDirectory{state:u32,generation:u32,rowCount:u32,maximumLeafSize:u32
 @group(0)@binding(9)var<storage,read>losassoExtendedVelocity:array<f32>;
 @group(0)@binding(10)var<storage,read>losassoFaceDirectory:array<vec2u>;
 @group(0)@binding(11)var<storage,read>losassoStagedVelocity:array<u32>;
+struct RigidBody{positionShape:vec4f,dimensions:vec4f,orientation:vec4f,linearVelocity:vec4f,
+ angularVelocity:vec4f,inverseMassInertia:vec4f,angularMomentumRestitution:vec4f,material:vec4f}
+@group(0)@binding(12)var<storage,read>rigidBodies:array<RigidBody>;
+@group(0)@binding(13)var<storage,read_write>rigidDisplacement:array<atomic<u32>>;
+@group(0)@binding(14)var<storage,read_write>rigidImmersedVolumes:array<f32>;
 fn linear(w:vec3u,n:vec3u,l:u32)->u32{return (w.x+w.y*n.x)*256u+l;}
 fn finite(v:f32)->bool{return v==v&&abs(v)<3.402823e38;}
 fn finite3(v:vec3f)->bool{return all(v==v)&&all(abs(v)<vec3f(3.402823e38));}
+fn qRotate(q:vec4f,v:vec3f)->vec3f{let uv=cross(q.yzw,v);return v+2.*(q.x*uv+cross(q.yzw,uv));}
+fn qInverseRotate(q:vec4f,v:vec3f)->vec3f{return qRotate(vec4f(q.x,-q.yzw),v);}
+fn rigidSdf(body:RigidBody,world:vec3f)->f32{
+ let q=qInverseRotate(body.orientation,world-body.positionShape.xyz);let d=body.dimensions.xyz;
+ let shape=i32(round(body.positionShape.w));if(shape==0){return length(q)-d.x;}
+ if(shape==1){let b=abs(q)-.5*d;return length(max(b,vec3f(0)))+min(max(b.x,max(b.y,b.z)),0.);}
+ if(shape==2){let cy=clamp(q.y,-.5*d.y,.5*d.y);return length(vec3f(q.x,q.y-cy,q.z))-d.x;}
+ let radial=length(q.xz)-d.x;let axial=abs(q.y)-.5*d.y;
+ return length(max(vec2f(radial,axial),vec2f(0)))+min(max(radial,axial),0.);
+}
+struct RigidSample{sdf:f32,owner:i32}
+fn rigidSampleAtGrid(point:vec3f)->RigidSample{
+ let h=p.physicalCellSize;let world=h*point-vec3f(.5*f32(p.dims.x)*h,0.,.5*f32(p.dims.z)*h);
+ var result=RigidSample(3.402823e38,-1);let count=min(p.bodyCount,arrayLength(&rigidBodies));
+ for(var body=0u;body<count;body+=1u){let candidate=rigidSdf(rigidBodies[body],world);
+  if(candidate<result.sdf){result=RigidSample(candidate,i32(body));}}
+ return result;
+}
+fn rigidCarvedPhiAtGrid(point:vec3f,raw:f32)->f32{let solid=rigidSampleAtGrid(point);
+ return select(raw,max(raw,-solid.sdf),solid.owner>=0&&solid.sdf<0.);}
+fn cellPoint(item:u32)->vec3f{return vec3f(vec3u(item%p.dims.x,(item/p.dims.x)%p.dims.y,
+ item/(p.dims.x*p.dims.y)))+vec3f(.5);}
 fn canonicalSum8(values:ptr<function,array<f32,8>>)->f32{for(var i=1u;i<8u;i+=1u){let value=(*values)[i];var j=i;loop{if(j==0u||abs((*values)[j-1u])<=abs(value)){break;}(*values)[j]=(*values)[j-1u];j-=1u;}(*values)[j]=value;}var sum=0.;var i=0u;loop{if(i>=8u){break;}let magnitude=abs((*values)[i]);var balance=0;var j=i;loop{if(j>=8u||abs((*values)[j])!=magnitude){break;}if((*values)[j]>0.){balance+=1;}else if((*values)[j]<0.){balance-=1;}j+=1u;}sum+=f32(balance)*magnitude;i=j;}return sum;}
 fn canonicalWeight(a:f32,b:f32,c:f32)->f32{var low=a;var middle=b;var high=c;if(low>middle){let swap=low;low=middle;middle=swap;}if(middle>high){let swap=middle;middle=high;high=swap;}if(low>middle){let swap=low;low=middle;middle=swap;}return low*middle*high;}
 fn ordered(v:f32)->u32{let bits=bitcast<u32>(v);return select(bits^0x80000000u,~bits,(bits&0x80000000u)!=0u);}
@@ -586,7 +641,19 @@ fn densePhiAtCentered(bank:u32,point:vec3f)->vec2f{let ax=centeredAxisSample(poi
   let at=phiWord(bank,item);if(at>=arrayLength(&directory)){return vec2f(0.0);}let sample=bitcast<f32>(atomicLoad(&directory[at]));
   if(!finite(sample)){return vec2f(0.0);}let weight=canonicalWeight(select(ax.lowWeight,ax.highWeight,(corner&1u)!=0u),select(ay.lowWeight,ay.highWeight,(corner&2u)!=0u),select(az.lowWeight,az.highWeight,(corner&4u)!=0u));terms[corner]=weight*sample;}
  return vec2f(canonicalSum8(&terms),1.0);}
-fn densePhiAt(bank:u32,point:vec3f)->vec2f{return densePhiAtCentered(bank,point-0.5*vec3f(p.dims));}
+// A closed lid extends phi with unit outward slope, matching the fine-lane
+// wall sampler. Backtraces that leave through the ceiling therefore become
+// more air-like instead of repeatedly sampling a receding film's own phi.
+// Preserve the historical clamp on the support floor and lateral walls: the
+// horizontal expansion oracle relies on their exact D4 evolution.
+fn densePhiAt(bank:u32,point:vec3f)->vec2f{let lower=vec3f(.5);let upper=vec3f(p.dims)-vec3f(.5);
+ let interior=clamp(point,lower,upper);var exit=point-interior;
+ // Keep the support floor and lateral walls on their established extension;
+ // only a closed-lid departure receives the unit outward slope.
+ exit=vec3f(0.0,select(max(exit.y,0.0),0.0,p.time.w!=0.0),0.0);
+ let sampled=densePhiAtCentered(bank,interior-0.5*vec3f(p.dims));
+ let film=sampled.y!=0.0&&sampled.x>-p.physicalCellSize;
+ return select(sampled,vec2f(sampled.x+p.physicalCellSize*length(exit),sampled.y),film);}
 fn quantizePhi(value:f32)->f32{return round(value*65536.0)/65536.0;}
 // The version word is interpolated, never spelled. It was frozen at a literal
 // 2 while the air-support layout moved to 3, so this predicate answered false
@@ -688,7 +755,7 @@ fn rankForKey(key:u32)->u32{let pagePlusOne=atomicLoad(&directory[topWord(key)])
  // advances that actually completed, so a single readback at the end of a run
  // reports how intermittent the tracker was. Only 18, the per-advance
  // prediction counter the completeness test reads, is cleared here.
- if(i<arrayLength(&state)&&(i<14u||i==15u||i==18u||(i>=27u&&i<=34u))){atomicStore(&state[i],0u);}}
+ if(i<arrayLength(&state)&&(i<14u||i==15u||i==18u||(i>=27u&&i<=35u))){atomicStore(&state[i],0u);}}
 @compute @workgroup_size(256)fn resetSummaryValues(@builtin(workgroup_id)w:vec3u,@builtin(num_workgroups)n:vec3u,
  @builtin(local_invocation_index)l:u32){let i=linear(w,n,l);
  if(i<16u){atomicStore(&directory[i],0u);}
@@ -696,7 +763,7 @@ fn rankForKey(key:u32)->u32{let pagePlusOne=atomicLoad(&directory[topWord(key)])
  if(i<p.entryCapacity){let base=entryBase(i);atomicStore(&directory[base+1u],ordered(3.402823e38));
   atomicStore(&directory[base+2u],ordered(-3.402823e38));atomicStore(&directory[base+3u],bitcast<u32>(3.402823e38));
   for(var j=4u;j<ENTRY_WORDS;j+=1u){atomicStore(&directory[base+j],0u);}}
- if(i<arrayLength(&state)&&((i>=2u&&i<14u)||i==15u||i==18u||(i>=27u&&i<=34u))){atomicStore(&state[i],0u);}}
+ if(i<arrayLength(&state)&&((i>=2u&&i<14u)||i==15u||i==18u||(i>=27u&&i<=35u))){atomicStore(&state[i],0u);}}
 @compute @workgroup_size(256)fn ensureSummaryPages(@builtin(workgroup_id)w:vec3u,@builtin(num_workgroups)n:vec3u,
  @builtin(local_invocation_index)l:u32){let row=linear(w,n,l);if(coarse.state!=PUBLISHED||row>=coarse.rowCount||row>=p.rowCapacity){return;}
  let e=coarse.entries[row];let bl=rowBaseAndLevel(e);if(bl.x==INVALID||(e.flags&9u)!=9u){atomicOr(&state[2],1u);return;}
@@ -783,20 +850,26 @@ fn directionalInterfaceRegion(phase:u32,item:u32,current:f32)->bool{if(item>=p.d
  return false;}
 fn neighborItem(q:vec3i)->u32{return u32(q.x)+p.dims.x*(u32(q.y)+p.dims.y*u32(q.z));}
 const AXIS_DIRECTIONS=array<vec3i,6>(vec3i(-1,0,0),vec3i(1,0,0),vec3i(0,-1,0),vec3i(0,1,0),vec3i(0,0,-1),vec3i(0,0,1));
+fn closedLidDirection(direction:u32)->bool{return direction==3u&&p.time.w==0.0;}
 @compute @workgroup_size(256)fn seedDenseRedistance(@builtin(workgroup_id)w:vec3u,@builtin(num_workgroups)n:vec3u,
  @builtin(local_invocation_index)l:u32){let item=linear(w,n,l);if(item>=p.domainVolume||atomicLoad(&state[18])!=p.domainVolume){return;}
  let source=denseRaw(outputBank(),item);if(!finite(source)){atomicOr(&state[2],4u);return;}let q=vec3i(i32(item%p.dims.x),i32((item/p.dims.x)%p.dims.y),i32(item/(p.dims.x*p.dims.y)));
  var magnitude=p.physicalCellSize*f32(max(p.dims.x,max(p.dims.y,p.dims.z)));if(source==0.0){magnitude=0.0;}
- for(var axis=0u;axis<6u;axis+=1u){let otherQ=q+AXIS_DIRECTIONS[axis];if(any(otherQ<vec3i(0))||any(otherQ>=vec3i(p.dims))){continue;}
-  let other=denseRaw(outputBank(),neighborItem(otherQ));if(!finite(other)||!((source<0.0&&other>=0.0)||(source>=0.0&&other<0.0))){continue;}
+ for(var axis=0u;axis<6u;axis+=1u){let otherQ=q+AXIS_DIRECTIONS[axis];var other=source;
+  if(any(otherQ<vec3i(0))||any(otherQ>=vec3i(p.dims))){if(!closedLidDirection(axis)){continue;}other=source+p.physicalCellSize;}
+  else{other=denseRaw(outputBank(),neighborItem(otherQ));}
+  if(!finite(other)||!((source<0.0&&other>=0.0)||(source>=0.0&&other<0.0))){continue;}
   magnitude=min(magnitude,p.physicalCellSize*abs(source)/max(abs(source)+abs(other),1e-12));}
  let value=select(magnitude,-magnitude,source<0.0);atomicStore(&directory[phiWord(2u,item)],bitcast<u32>(value));}
 fn sweepDenseRedistance(sourceBank:u32,destinationBank:u32,item:u32){if(atomicLoad(&state[18])!=p.domainVolume){return;}
  let source=denseRaw(sourceBank,item);if(!finite(source)){atomicOr(&state[2],4u);return;}
  let q=vec3i(i32(item%p.dims.x),i32((item/p.dims.x)%p.dims.y),i32(item/(p.dims.x*p.dims.y)));var magnitude=abs(source);
  var nearest=vec3f(3.402823e38);for(var axis=0u;axis<3u;axis+=1u){for(var side=0u;side<2u;side+=1u){
-  let otherQ=q+AXIS_DIRECTIONS[2u*axis+side];if(any(otherQ<vec3i(0))||any(otherQ>=vec3i(p.dims))){continue;}
-  let other=denseRaw(sourceBank,neighborItem(otherQ));if(finite(other)){nearest[axis]=min(nearest[axis],abs(other));}}}
+  let direction=2u*axis+side;let otherQ=q+AXIS_DIRECTIONS[direction];var other=3.402823e38;
+  if(any(otherQ<vec3i(0))||any(otherQ>=vec3i(p.dims))){if(closedLidDirection(direction)){
+   let exterior=source+p.physicalCellSize;if((exterior<0.0)!=(source<0.0)){other=exterior;}}}
+  else{other=denseRaw(sourceBank,neighborItem(otherQ));}
+  if(finite(other)){nearest[axis]=min(nearest[axis],abs(other));}}}
  // Sethian's first-order upwind Eikonal update: solve
  // sum_i(max(u-a_i,0)^2)=h^2 over the sorted axis minima. The old
  // min(a_i+h) recurrence is an L1 distance and systematically advances a
@@ -813,6 +886,26 @@ fn sweepDenseRedistance(sourceBank:u32,destinationBank:u32,item:u32){if(atomicLo
  @builtin(local_invocation_index)l:u32){let item=linear(w,n,l);if(item<p.domainVolume){sweepDenseRedistance(2u,outputBank(),item);}}
 @compute @workgroup_size(256)fn redistanceOutputToScratch(@builtin(workgroup_id)w:vec3u,@builtin(num_workgroups)n:vec3u,
  @builtin(local_invocation_index)l:u32){let item=linear(w,n,l);if(item<p.domainVolume){sweepDenseRedistance(outputBank(),2u,item);}}
+@compute @workgroup_size(64)fn resetRigidDisplacement(@builtin(global_invocation_id)gid:vec3u){let body=gid.x;
+ if(p.directoryWords>arrayLength(&directory)||arrayLength(&state)<=36u){return;}
+ if(body==0u){atomicStore(&state[35],0u);}
+ if(body<arrayLength(&rigidDisplacement)){atomicStore(&rigidDisplacement[body],0u);}}
+@compute @workgroup_size(256)fn measureRigidDisplacement(@builtin(workgroup_id)w:vec3u,@builtin(num_workgroups)n:vec3u,
+ @builtin(local_invocation_index)l:u32){let item=linear(w,n,l);if(item>=p.domainVolume
+ ||atomicLoad(&state[18])!=p.domainVolume){return;}let solid=rigidSampleAtGrid(cellPoint(item));
+ if(solid.owner<0||solid.sdf>=0.||u32(solid.owner)>=arrayLength(&rigidDisplacement)){return;}
+ let at=phiWord(outputBank(),item);if(at>=arrayLength(&directory)){atomicOr(&state[2],4u);return;}
+ let raw=bitcast<f32>(atomicLoad(&directory[at]));if(!finite(raw)){atomicOr(&state[2],4u);return;}
+ let occupancy=clamp(.5-raw/p.physicalCellSize,0.,1.);
+ let carved=rigidCarvedPhiAtGrid(cellPoint(item),raw);
+ let displaced=max(0.,occupancy-clamp(.5-carved/p.physicalCellSize,0.,1.));
+ let displaced4096=u32(round(4096.*displaced));let displaced65536=u32(round(65536.*displaced));
+ atomicAdd(&state[35],displaced4096);atomicAdd(&rigidDisplacement[u32(solid.owner)],displaced65536);}
+@compute @workgroup_size(64)fn publishRigidDisplacement(@builtin(global_invocation_id)gid:vec3u){let body=gid.x;
+ if(p.directoryWords>arrayLength(&directory)||arrayLength(&state)<=36u){return;}
+ if(body>=p.bodyCount||body>=arrayLength(&rigidDisplacement)||body>=arrayLength(&rigidImmersedVolumes)){return;}
+ let cells=f32(atomicLoad(&rigidDisplacement[body]))/65536.;
+ rigidImmersedVolumes[body]=cells*p.physicalCellSize*p.physicalCellSize*p.physicalCellSize;}
 @compute @workgroup_size(256)fn summarizeDenseVolume(@builtin(workgroup_id)w:vec3u,@builtin(num_workgroups)n:vec3u,
  @builtin(local_invocation_index)l:u32){let item=linear(w,n,l);if(item>=p.domainVolume){return;}let value=denseRaw(outputBank(),item);
  if(atomicLoad(&state[18])!=p.domainVolume){return;}
@@ -826,7 +919,9 @@ fn sweepDenseRedistance(sourceBank:u32,destinationBank:u32,item:u32){if(atomicLo
  let predictedVolume=atomicLoad(&state[12]);let targetVolume=atomicLoad(&state[14]);
  if(targetVolume==0u){atomicStore(&state[14],predictedVolume);atomicStore(&state[15],bitcast<u32>(0.0));}
  else{let error=f32(i32(predictedVolume)-i32(targetVolume))/4096.0;
-  let directionalCount=select(atomicLoad(&state[32]),atomicLoad(&state[34]),error>0.0);
+  // Lost liquid (negative error) was created by a retreating interface and
+  // must be restored on that same footprint. Excess liquid is the converse.
+  let directionalCount=select(atomicLoad(&state[34]),atomicLoad(&state[32]),error>0.0);
   let interfaceCount=select(directionalCount,atomicLoad(&state[13]),p.volumeCorrectionMode==2u);
   if(interfaceCount==0u){atomicStore(&state[15],bitcast<u32>(0.0));return;}
   let correction=clamp(p.physicalCellSize*error/f32(interfaceCount),-0.5*p.physicalCellSize,0.5*p.physicalCellSize);
@@ -837,12 +932,15 @@ fn sweepDenseRedistance(sourceBank:u32,destinationBank:u32,item:u32){if(atomicLo
  let initialized=atomicLoad(&state[16])!=0u;let readBank=atomicLoad(&state[17])&1u;let writeBank=select(0u,1u-readBank,initialized);
  let at=phiWord(writeBank,item);if(at>=arrayLength(&directory)){atomicOr(&state[2],4u);return;}
  let raw=bitcast<f32>(atomicLoad(&directory[at]));let correction=bitcast<f32>(atomicLoad(&state[15]));
- let phase=select(ADVANCING,RETREATING,correction>0.0);
+ let phase=select(RETREATING,ADVANCING,correction>0.0);
  let regional=p.volumeCorrectionMode==1u&&directionalInterfaceRegion(phase,item,raw);
  let apply=p.volumeCorrectionMode==2u||regional;let delta=select(0.0,bitcast<f32>(atomicLoad(&state[15])),apply);
- let value=quantizePhi(raw+delta);if(!finite(value)){atomicOr(&state[2],4u);return;}
+ let transported=quantizePhi(raw+delta);let value=quantizePhi(rigidCarvedPhiAtGrid(cellPoint(item),transported));
+ if(!finite(transported)||!finite(value)){atomicOr(&state[2],4u);return;}
  if(apply&&delta!=0.0){atomicAdd(&state[33],1u);}
- atomicStore(&directory[at],bitcast<u32>(value));let magnitude=abs(value);
+ // Keep the transported liquid field intact beneath the body. Consumers see
+ // the analytic carve through the hierarchy and coarse publication below.
+ atomicStore(&directory[at],bitcast<u32>(transported));let magnitude=abs(value);
  let q=vec3u(item%p.dims.x,(item/p.dims.x)%p.dims.y,item/(p.dims.x*p.dims.y));let b=q/4u;
  let baseKey=b.x+p.baseDims.x*(b.y+p.baseDims.y*b.z);for(var level=0u;level<=p.maximumLevel;level+=1u){
   let rank=rankForKey(hierarchyKey(baseKey,level));if(rank==INVALID){atomicOr(&state[2],2u);continue;}let base=entryBase(rank);
@@ -881,9 +979,13 @@ fn sweepDenseRedistance(sourceBank:u32,destinationBank:u32,item:u32){if(atomicLo
  @builtin(local_invocation_index)l:u32){let item=linear(w,n,l);if(item>=p.domainVolume
  ||atomicLoad(&state[18])!=p.domainVolume){return;}let slot=p.rowCapacity+item;
  if(slot>=arrayLength(&coarse.entries)){atomicOr(&state[2],4u);return;}
- let value=bitcast<f32>(atomicLoad(&directory[phiWord(atomicLoad(&state[17])&1u,item)]));
+ let raw=bitcast<f32>(atomicLoad(&directory[phiWord(atomicLoad(&state[17])&1u,item)]));
+ let value=rigidCarvedPhiAtGrid(cellPoint(item),raw);
  if(!finite(value)){atomicOr(&state[2],4u);return;}
- coarse.entries[slot]=CoarseEntry(item+1u,1u,value,value,value,9u,INVALID,0.0);
+ // Phi is the carved production geometry. Preserve the transported value in
+ // the otherwise-unused volume slot so pressure ghosting can distinguish air
+ // from liquid hidden by a rigid without owning a second dense field.
+ coarse.entries[slot]=CoarseEntry(item+1u,1u,value,value,value,9u,INVALID,raw);
  // On the cold Losasso step this dense lattice is the source from which the
  // first compact row directory is restricted, so waiting for that directory
  // to publish creates a cycle.  Publish the backend-neutral header here; the
@@ -895,7 +997,8 @@ fn sweepDenseRedistance(sourceBank:u32,destinationBank:u32,item:u32){if(atomicLo
  ||row>=min(coarse.rowCount,p.rowCapacity)){return;}let e=coarse.entries[row];if(e.cellPlusOne==0u||e.size==0u){return;}
  let cell=e.cellPlusOne-1u;let origin=vec3u(cell%p.dims.x,(cell/p.dims.x)%p.dims.y,cell/(p.dims.x*p.dims.y));
  let point=vec3f(origin)+vec3f(0.5*f32(e.size));let sample=densePhiAt(atomicLoad(&state[17])&1u,point);if(sample.y==0.0){return;}
- coarse.entries[row].phi=sample.x;coarse.entries[row].minimumPhi=sample.x;coarse.entries[row].maximumPhi=sample.x;
+ let value=rigidCarvedPhiAtGrid(point,sample.x);
+ coarse.entries[row].phi=value;coarse.entries[row].minimumPhi=value;coarse.entries[row].maximumPhi=value;
  coarse.entries[row].flags&=~PHI_INTERFACE;}
 // Same 2D split as the host launch: width=min(groups,limit), height=ceil.
 // Kernels index through num_workgroups, so equal triples mean equal items.
