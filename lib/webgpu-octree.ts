@@ -2965,6 +2965,7 @@ export class WebGPUOctreeProjection {
           this.topologyMaximumLeafSize, 1),
         losassoControl: sampler.control,
         losassoNodalVelocity: this.losassoBackend.extensionBand.dynamicsStagedVelocity,
+        ownerPages: { arena: this.ownerPages.arena, plan: this.ownerPages.plan },
         openTopBoundary: this.scene.container.top !== "closed",
         ...(this.scene.rigidBodies.length > 0 ? { rigid: {
           rigidBodies: this.resources.rigidBodies,
@@ -3720,6 +3721,7 @@ export class WebGPUOctreeProjection {
           physicalCellSize: coarseCell.x,
           timestep_s: this.scene.numerics.maxDt_s,
           maximumLeafSize: this.maxLeafSize,
+          ownerPages: { arena: this.ownerPages.arena, plan: this.ownerPages.plan },
           ...(this.scene.rigidBodies.length > 0 ? { rigid: {
             rigidBodies: this.resources.rigidBodies,
             immersedVolumes: this.resources.rigidImmersedVolumes,
@@ -5985,6 +5987,10 @@ export class WebGPUOctreeProjection {
       throw new Error("Factor-one surface tracking was constructed without its dense coarse tracker");
     }
     return this.coarseOnlySummary?.readReceipt();
+  }
+  /** Diagnostic receipt for the GPU-authored unique shared-node worklist. */
+  async readAdaptiveNodeReceipt() {
+    return this.coarseOnlySummary?.readAdaptiveNodeReceipt();
   }
   /** Presentation-only texture identity. The sparse octree solver never samples it. */
   get levelSetTexture() { return this.surfaceState.texture; }

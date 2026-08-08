@@ -536,6 +536,14 @@ try {
         interfacePhiMoved?: number;
         maximumInterfaceSpeed?: number;
       } | undefined>;
+      readAdaptiveNodeReceipt(): Promise<{
+        count: number;
+        generation: number;
+        published: boolean;
+        errors: number;
+        capacity: number;
+        dispatch: readonly [number, number, number];
+      } | undefined>;
       losassoExtensionControl?: GPUBuffer;
       losassoBackend?: { extensionBand?: { source?: { faceMetrics?: GPUBuffer } } };
     };
@@ -609,6 +617,7 @@ try {
       ? phiDistanceFidelity(shape.field, dimensions, shape.cellWidth) : undefined;
     const census = await projection?.readTopologyLeafCensus();
     const coarseVolume = await projection?.readCoarseSurfaceTrackerReceipt();
+    const adaptiveNodes = await projection?.readAdaptiveNodeReceipt();
     const extensionControl = projection?.losassoExtensionControl;
     const extensionControlBytes = extensionControl
       ? await readBufferBinding(device, { buffer: extensionControl }, extensionControl.size)
@@ -665,6 +674,7 @@ try {
       leafCountsBySize: census?.leafCountsBySize,
       topologyLeaves: census?.topologyLeaves,
       topologyNodes: census?.topologyNodes,
+      adaptiveNodes,
       residentOwnerPages: census?.residentOwnerPages,
       maximumNeighborDelta: stats.maximumNeighborDelta,
       pressureRequiredRows: stats.pressureRequiredRows,
