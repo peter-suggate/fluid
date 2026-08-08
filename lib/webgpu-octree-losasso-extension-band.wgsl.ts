@@ -143,6 +143,14 @@ fn stagedCellIndex(q:vec3u)->u32{return q.x+p.velocityDimensions.x*(q.y+p.veloci
 fn stagedOwnerRow(q:vec3u)->u32{let at=stagedOwnerOffset()+stagedCellIndex(q);
  if(at>=arrayLength(&stagedVelocityArena)){return INVALID;}let encoded=stagedVelocityArena[at];
  return select(INVALID,encoded-1u,encoded!=0u);}
+fn stagedAdjacentOwnerSize(axis:u32,q:vec3u)->u32{var ownerSize=0u;
+ for(var side=0u;side<2u;side+=1u){var cell=q;var inside=true;
+  if(side==0u){if(cell[axis]==0u){inside=false;}else{cell[axis]-=1u;}}
+  else if(cell[axis]>=p.velocityDimensions[axis]){inside=false;}
+  if(inside){let row=stagedOwnerRow(cell);if(row!=INVALID){let entry=8u+8u*row;
+   if(entry+5u<arrayLength(&coarsePhiDirectory)&&(coarsePhiDirectory[entry+5u]&9u)==9u){
+    ownerSize=max(ownerSize,coarsePhiDirectory[entry+1u]);}}}}
+ return ownerSize;}
 // Span-1 air records may also shadow either endpoint of a coarse bracket. Walk
 // the same dyadic covering hierarchy as containingCompact, but ignore a record
 // whose extension remained starved so reconstruction can reach the real wet
@@ -439,6 +447,10 @@ fn dilateAirFace(id:u32,sourceLayer:u32,targetLayer:u32){let count=min(atomicLoa
  // After the preceding dispatch has settled, only the directory-visible
  // representative expands it, preventing duplicate layer-5 fanout at layer 6.
  if(exactCompact(record.x,q)!=id){return;}
+ // Coarse leaves already supply temporary MAC values through their two real
+ // bounding faces. Keep the local interface record, but do not grow a finest-
+ // lattice velocity shell through an adaptive owner that is larger than one.
+ if(stagedAdjacentOwnerSize(axis,q)>1u){return;}
  var upper=p.velocityDimensions-vec3u(1u);upper[axis]=p.velocityDimensions[axis];
  for(var direction=0u;direction<6u;direction+=1u){let c=direction>>1u;var neighbor=q;var inDomain=true;
   if((direction&1u)==0u){if(neighbor[c]==0u){inDomain=false;}else{neighbor[c]-=1u;}}

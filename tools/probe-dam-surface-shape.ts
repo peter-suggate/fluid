@@ -534,6 +534,7 @@ try {
         interfacePhiMoved?: number;
         maximumInterfaceSpeed?: number;
       } | undefined>;
+      losassoExtensionControl?: GPUBuffer;
     };
   }).octreeProjection;
   const projectionRuntime = projection as unknown as {
@@ -605,6 +606,15 @@ try {
       ? phiDistanceFidelity(shape.field, dimensions, shape.cellWidth) : undefined;
     const census = await projection?.readTopologyLeafCensus();
     const coarseVolume = await projection?.readCoarseSurfaceTrackerReceipt();
+    const extensionControl = projection?.losassoExtensionControl;
+    const extensionControlBytes = extensionControl
+      ? await readBufferBinding(device, { buffer: extensionControl }, extensionControl.size)
+      : undefined;
+    const extensionBandControl = extensionControlBytes
+      ? Array.from(new Uint32Array(extensionControlBytes.buffer,
+        extensionControlBytes.byteOffset, extensionControlBytes.byteLength / 4))
+      : undefined;
+    const extensionBandFaces = extensionBandControl?.[2];
     let stagedOwnerCells: number | undefined;
     let stagedMacValid: number | undefined;
     let stagedRawMacValid: number | undefined;
@@ -646,6 +656,8 @@ try {
       pressureRelativeResidual: stats.pressureRelativeResidual,
       quadtreePressureIterationsUsed: stats.quadtreePressureIterationsUsed,
       coarseVolume,
+      extensionBandControl,
+      extensionBandFaces,
       stagedOwnerCells,
       stagedMacValid,
       stagedMacInvalid,
