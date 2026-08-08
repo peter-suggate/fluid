@@ -518,6 +518,7 @@ try {
       readTopologyLeafCensus(): Promise<{
         leafCountsBySize: Readonly<Record<string, number>>;
         topologyLeaves: number;
+        topologyNodes: number;
         residentOwnerPages: number;
       }>;
       readCoarseSurfaceTrackerReceipt(): Promise<{
@@ -663,6 +664,7 @@ try {
       phiDistance: fidelity,
       leafCountsBySize: census?.leafCountsBySize,
       topologyLeaves: census?.topologyLeaves,
+      topologyNodes: census?.topologyNodes,
       residentOwnerPages: census?.residentOwnerPages,
       maximumNeighborDelta: stats.maximumNeighborDelta,
       pressureRequiredRows: stats.pressureRequiredRows,

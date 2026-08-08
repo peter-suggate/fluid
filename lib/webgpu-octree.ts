@@ -686,6 +686,7 @@ export interface OctreeTopologyLeafCensus {
   readonly generation: number;
   readonly residentOwnerPages: number;
   readonly topologyLeaves: number;
+  readonly topologyNodes: number;
   readonly representedCells: number;
   readonly leafCountsBySize: Readonly<Record<string, number>>;
   /** Coarse leaf origins per finest-grid Y layer; diagnostic spatial profile. */
@@ -717,6 +718,7 @@ export function censusOctreeTopologyLeaves(
     faceCounts.set(size, (faceCounts.get(size) ?? 0) + 1);
   };
   const identities = new Set<string>();
+  const nodes = new Set<string>();
   let representedCells = 0;
   for (let z = 0; z < plan.dimensions[2]; z += 1) {
     for (let y = 0; y < plan.dimensions[1]; y += 1) {
@@ -729,6 +731,11 @@ export function censusOctreeTopologyLeaves(
         const identity = `${owner.origin[0]},${owner.origin[1]},${owner.origin[2]},${owner.size}`;
         if (identities.has(identity)) continue;
         identities.add(identity);
+        for (let corner = 0; corner < 8; corner += 1) {
+          nodes.add(`${owner.origin[0] + ((corner & 1) ? owner.size : 0)},`
+            + `${owner.origin[1] + ((corner & 2) ? owner.size : 0)},`
+            + `${owner.origin[2] + ((corner & 4) ? owner.size : 0)}`);
+        }
         counts.set(owner.size, (counts.get(owner.size) ?? 0) + 1);
         if (owner.size > 1) coarseLeafCountsByOriginY[owner.origin[1]]! += 1;
         const high = owner.origin.map((coordinate) => coordinate + owner.size);
@@ -759,6 +766,7 @@ export function censusOctreeTopologyLeaves(
     generation: Number(ownerWords[7] ?? 0) >>> 0,
     residentOwnerPages: Number(ownerWords[1] ?? 0) >>> 0,
     topologyLeaves: identities.size,
+    topologyNodes: nodes.size,
     representedCells,
     leafCountsBySize: Object.freeze(leafCountsBySize),
     coarseLeafCountsByOriginY: Object.freeze(coarseLeafCountsByOriginY),
