@@ -2964,6 +2964,7 @@ export class WebGPUOctreeProjection {
           this.interfaceBandCellsEffective, this.surfaceGradingLayersEffective,
           this.topologyMaximumLeafSize, 1),
         losassoVelocity: sampler,
+        losassoNodalVelocity: this.losassoBackend.extensionBand.dynamicsStagedVelocity,
         openTopBoundary: this.scene.container.top !== "closed",
         ...(this.scene.rigidBodies.length > 0 ? { rigid: {
           rigidBodies: this.resources.rigidBodies,
@@ -5541,8 +5542,6 @@ export class WebGPUOctreeProjection {
         // advance it with, so encoding the tracker here records a false held
         // advance. Positive-time steps consume the preceding settled W7.
         if (dt_s > 0) {
-          backend.encodeTransportVelocityStaging(preparationBroker);
-          preparationBroker.fence("Losasso factor-one transport velocity handoff published");
           this.coarseOnlySummary?.encode(preparationBroker);
           preparationBroker.fence("Losasso coarse-only transported lattice published");
         }

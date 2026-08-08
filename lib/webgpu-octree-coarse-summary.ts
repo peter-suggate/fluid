@@ -220,6 +220,7 @@ export class WebGPUOctreeCoarseSummary {
     private readonly air: Readonly<{ arena: GPUBuffer; layout: OctreeAirVelocitySupportLayout;
       rowVelocities: GPUBuffer; initialPhi: Float32Array; physicalCellSize: number; timestep_s: number;
       losassoVelocity?: WebGPUOctreeLosassoVelocitySamplerSource;
+      losassoNodalVelocity?: GPUBuffer;
       openTopBoundary?: boolean;
       rigid?: Readonly<{ rigidBodies: GPUBuffer; immersedVolumes: GPUBuffer; bodyCount: number }>;
       /** Largest authored octree leaf. The owner lookup probes dyadic
@@ -392,7 +393,7 @@ export class WebGPUOctreeCoarseSummary {
             { binding: 5, resource: { buffer: this.air.rowVelocities } },
             { binding: 7, resource: { buffer: this.air.losassoVelocity?.control
               ?? this.bindingSentinel } },
-            { binding: 11, resource: { buffer: this.air.losassoVelocity?.stagedVelocity
+            { binding: 15, resource: { buffer: this.air.losassoNodalVelocity
               ?? this.bindingSentinel } },
           ] : []),
           ...(usesLosassoControl ? [{ binding: 7, resource: { buffer: this.air.losassoVelocity?.control
@@ -569,6 +570,7 @@ struct RigidBody{positionShape:vec4f,dimensions:vec4f,orientation:vec4f,linearVe
 @group(0)@binding(12)var<storage,read>rigidBodies:array<RigidBody>;
 @group(0)@binding(13)var<storage,read_write>rigidDisplacement:array<atomic<u32>>;
 @group(0)@binding(14)var<storage,read_write>rigidImmersedVolumes:array<f32>;
+@group(0)@binding(15)var<storage,read>losassoNodalVelocity:array<vec4u>;
 fn linear(w:vec3u,n:vec3u,l:u32)->u32{return (w.x+w.y*n.x)*256u+l;}
 fn finite(v:f32)->bool{return v==v&&abs(v)<3.402823e38;}
 fn finite3(v:vec3f)->bool{return all(v==v)&&all(abs(v)<vec3f(3.402823e38));}
@@ -739,9 +741,19 @@ fn velocityAtCentered(point:vec3f)->vec4f{let ax=centeredAxisSample(point.x,p.di
  return select(vec4f(0.0),vec4f(result/max(total,1e-12),1.0),total>=p.time.y);}
 fn velocityAtPoint(point:vec3f)->vec4f{return velocityAtCentered(point-0.5*vec3f(p.dims));}
 ${coarseSummaryLosassoVelocitySamplingWGSL}
-fn transportVelocityAt(point:vec3f)->vec4f{if(losassoMode()){let sample=losassoVelocityAtGrid(point);
-  if(p.diagnostics!=0u&&sample.valid==0u&&sample.reason>0u){atomicAdd(&state[36u+min(sample.reason,3u)],1u);}
-  return vec4f(sample.value,f32(sample.valid));}return velocityAtPoint(point);}
+fn losassoNodalVelocityAt(point:vec3f)->vec4f{let nd=p.dims+vec3u(1u);
+ let bounded=clamp(point,vec3f(0.0),vec3f(p.dims));let low=vec3u(floor(bounded));let fraction=fract(bounded);
+ var termsX:array<f32,8>;var termsY:array<f32,8>;var termsZ:array<f32,8>;var weights:array<f32,8>;
+ for(var corner=0u;corner<8u;corner+=1u){let offset=vec3u(corner&1u,(corner>>1u)&1u,(corner>>2u)&1u);
+  let q=min(low+offset,p.dims);let item=q.x+nd.x*(q.y+nd.y*q.z);if(item>=arrayLength(&losassoNodalVelocity)){return vec4f(0.0);}
+  let sample=losassoNodalVelocity[item];let weight=canonicalWeight(select(1.0-fraction.x,fraction.x,(corner&1u)!=0u),
+   select(1.0-fraction.y,fraction.y,(corner&2u)!=0u),select(1.0-fraction.z,fraction.z,(corner&4u)!=0u));
+  if(weight>0.0&&(sample.w&1u)==0u){return vec4f(0.0);}termsX[corner]=weight*bitcast<f32>(sample.x);
+  termsY[corner]=weight*bitcast<f32>(sample.y);termsZ[corner]=weight*bitcast<f32>(sample.z);weights[corner]=weight;}
+ let total=canonicalSum8(&weights);let value=vec3f(canonicalSum8(&termsX),canonicalSum8(&termsY),canonicalSum8(&termsZ));
+ return select(vec4f(0.0),vec4f(value/max(total,1e-12),1.0),total>0.999&&finite3(value));}
+fn transportVelocityAt(point:vec3f)->vec4f{if(losassoMode()){return losassoNodalVelocityAt(point);}
+ return velocityAtPoint(point);}
 fn supportBase(item:u32)->u32{if(item>=p.domainVolume){return INVALID;}
  let q=vec3u(item%p.dims.x,(item/p.dims.x)%p.dims.y,item/(p.dims.x*p.dims.y));
  let b=q/4u;return b.x+p.baseDims.x*(b.y+p.baseDims.y*b.z);}
