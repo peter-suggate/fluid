@@ -79,6 +79,22 @@ export function coarseSummaryGlobalVolumeCorrectionEnabled(
   return resolved?.FLUID_COARSE_GLOBAL_VOLUME_CORRECTION === "1";
 }
 
+/**
+ * Factor-one volume policy. The default mirrors the fine path's moving-page
+ * correction: measure the complete liquid, but move phi only in a one-cell
+ * halo around interface samples that actually transported this advance.
+ * Whole-domain inflation remains an explicit attribution arm, and correction
+ * can still be disabled for a raw-loss A/B.
+ */
+export function coarseSummaryVolumeCorrectionMode(
+  environment?: Readonly<Record<string, string | undefined>>,
+): 0 | 1 | 2 {
+  const resolved = environment
+    ?? (typeof process !== "undefined" ? process.env : undefined);
+  if (resolved?.FLUID_COARSE_VOLUME_CONTROL === "0") return 0;
+  return coarseSummaryGlobalVolumeCorrectionEnabled(resolved) ? 2 : 1;
+}
+
 export interface OctreeCoarseSummaryPlan {
   readonly baseDimensions: readonly [number, number, number];
   readonly levelDimensions: readonly (readonly [number, number, number])[];
@@ -89,6 +105,8 @@ export interface OctreeCoarseSummaryPlan {
   readonly entryCapacity: number;
   readonly entryOffsetWords: number;
   readonly phiOffsetWords: number;
+  readonly activityOffsetWords: number;
+  readonly activityWords: number;
   readonly directoryWords: number;
   readonly allocatedBytes: number;
 }
@@ -150,13 +168,18 @@ export function planOctreeCoarseSummary(
   const entryOffsetWords = 16 + topLevelPageCount + directoryPageCapacity * PAGE_SIZE;
   const phiOffsetWords = entryOffsetWords + Math.max(1, entryCapacity) * ENTRY_WORDS;
   const domainVolume = dimensions[0] * dimensions[1] * dimensions[2];
-  const directoryWords = phiOffsetWords + 3 * domainVolume;
+  const activityOffsetWords = phiOffsetWords + 3 * domainVolume;
+  const activityWords = Math.ceil(domainVolume / 32);
+  // Two compact transport masks distinguish interface advance from retreat.
+  // This lets volume control put missing liquid at the advancing front instead
+  // of inflating the retreating reservoir face and braking a dam break.
+  const directoryWords = activityOffsetWords + 2 * activityWords;
   return {
     baseDimensions, levelDimensions, levelOffsets, hierarchyKeyCapacity,
     topLevelPageCount, directoryPageCapacity, entryCapacity, entryOffsetWords,
-    phiOffsetWords, directoryWords,
+    phiOffsetWords, activityOffsetWords, activityWords, directoryWords,
     // Directory + state + params + indirect dispatch + optional-binding sentinel.
-    allocatedBytes: directoryWords * 4 + 128 + 112 + 36 + 128,
+    allocatedBytes: directoryWords * 4 + 160 + 112 + 36 + 128,
   };
 }
 
@@ -234,10 +257,10 @@ export class WebGPUOctreeCoarseSummary {
     const storage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST;
     this.directory = device.createBuffer({ label: "coarse-only direct summary hierarchy",
       size: this.plan.directoryWords * 4, usage: storage });
-    // 32 words. The receipt tallies live at 19/20, and a runtime-sized
+    // 40 words. The receipt tallies live at 19/20, and a runtime-sized
     // `array<atomic<u32>>` silently drops out-of-bounds atomics rather than
     // faulting, so an 80-byte buffer made `state[20]` a write into nowhere.
-    this.state = device.createBuffer({ label: "coarse-only summary build state", size: 128, usage: storage });
+    this.state = device.createBuffer({ label: "coarse-only summary build state", size: 160, usage: storage });
     this.params = device.createBuffer({ label: "coarse-only summary parameters", size: 112,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     // Records: 0 dense lattice, 1 live coarse rows, 2 live summary entries.
@@ -270,7 +293,7 @@ export class WebGPUOctreeCoarseSummary {
     new Float32Array(data, 100, 1)[0] = air.physicalCellSize;
     new Uint32Array(data, 104, 2).set([
       coarseSummaryDiagnosticsEnabled() ? 1 : 0,
-      coarseSummaryGlobalVolumeCorrectionEnabled() ? 1 : 0,
+      coarseSummaryVolumeCorrectionMode(),
     ]);
     device.queue.writeBuffer(this.params, 0, data);
     if (air.initialPhi.length !== dimensions[0] * dimensions[1] * dimensions[2]) {
@@ -368,7 +391,8 @@ export class WebGPUOctreeCoarseSummary {
       broker.fence("coarse-only summary indirect arguments published");
     }
     if (!this.hierarchyInitialized) {
-      dispatch("resetSummary", Math.max(this.plan.phiOffsetWords, this.plan.entryCapacity));
+      dispatch("resetSummary", Math.max(
+        this.plan.phiOffsetWords, this.plan.entryCapacity, 2 * this.plan.activityWords));
       // The dense tracker covers every B4 base block, so its hierarchy is the
       // complete [0,keyCapacity) key set. Build that set directly instead of
       // making all 64 cells in every block race to claim the same key.
@@ -379,7 +403,8 @@ export class WebGPUOctreeCoarseSummary {
       // Keys, pages and ranks are a construction-time function of the fixed
       // dense lattice. Retain that directory and reset only per-advance entry
       // payloads and counters.
-      dispatch("resetSummaryValues", Math.max(this.plan.entryCapacity, 32));
+      dispatch("resetSummaryValues", Math.max(
+        this.plan.entryCapacity, 2 * this.plan.activityWords, 32));
     }
     if (this.indirectDispatch) {
       // state[1] is final only after both rank stages; the entry record cannot
@@ -414,6 +439,8 @@ export class WebGPUOctreeCoarseSummary {
     predictedCells: number; domainVolume: number; published: boolean; error: number;
     predictedVolume: number; targetVolume: number; interfaceCells: number;
     correction: number; bank: number; frozenCells: number;
+    movingInterfaceCells: number; advancingInterfaceCells: number;
+    retreatingInterfaceCells: number; correctedRegionCells: number;
     interfaceVelocityQueries: number; interfaceVelocityValid: number;
     interfacePhiMoved: number; maximumInterfaceSpeed: number;
     airUnpublishedAdvances: number; airErrorWord: number; airValidWord: number;
@@ -422,18 +449,18 @@ export class WebGPUOctreeCoarseSummary {
     denseBanks: readonly Readonly<{ minimum: number; maximum: number; negative: number; zero: number }>[] }>> {
     const denseBytes = 3 * this.domainVolume * 4;
     const readback = this.device.createBuffer({ label: "coarse-only tracker receipt readback",
-      size: 192 + denseBytes, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+      size: 224 + denseBytes, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     const encoder = this.device.createCommandEncoder({ label: "Read coarse-only tracker receipt" });
-    encoder.copyBufferToBuffer(this.state, 0, readback, 0, 128);
-    encoder.copyBufferToBuffer(this.directory, 0, readback, 128, 64);
+    encoder.copyBufferToBuffer(this.state, 0, readback, 0, 160);
+    encoder.copyBufferToBuffer(this.directory, 0, readback, 160, 64);
     encoder.copyBufferToBuffer(this.directory, this.plan.phiOffsetWords * 4,
-      readback, 192, denseBytes);
+      readback, 224, denseBytes);
     this.device.queue.submit([encoder.finish()]);
     try {
       await readback.mapAsync(GPUMapMode.READ);
       const words = new Uint32Array(readback.getMappedRange().slice(0));
-      const header = 32;
-      const dense = new Float32Array(words.buffer, 192, 3 * this.domainVolume);
+      const header = 40;
+      const dense = new Float32Array(words.buffer, 224, 3 * this.domainVolume);
       const denseBanks = [0, 1, 2].map((bank) => {
         let minimum = Number.POSITIVE_INFINITY, maximum = Number.NEGATIVE_INFINITY;
         let negative = 0, zero = 0;
@@ -451,6 +478,9 @@ export class WebGPUOctreeCoarseSummary {
         interfaceCells: words[13],
         correction: new Float32Array(new Uint32Array([words[15]]).buffer)[0],
         bank: words[17] & 1, frozenCells: words[31],
+        movingInterfaceCells: words[32] + words[34],
+        advancingInterfaceCells: words[32], retreatingInterfaceCells: words[34],
+        correctedRegionCells: words[33],
         interfaceVelocityQueries: words[27], interfaceVelocityValid: words[28],
         interfacePhiMoved: words[29],
         maximumInterfaceSpeed: new Float32Array(new Uint32Array([words[30]]).buffer)[0],
@@ -479,7 +509,7 @@ const PAGE_SIZE:u32=${PAGE_SIZE}u;const ENTRY_WORDS:u32=${ENTRY_WORDS}u;
 struct P{baseDims:vec3u,pad0:u32,dims:vec3u,maximumLeafSize:u32,keyCapacity:u32,topPages:u32,pageCapacity:u32,
  entryCapacity:u32,entryOffset:u32,maximumLevel:u32,rowCapacity:u32,directoryWords:u32,
  airControl:u32,airVectors:u32,airOwners:u32,domainVolume:u32,time:vec4f,maxWorkgroups:u32,physicalCellSize:f32,
- diagnostics:u32,globalVolumeCorrection:u32}
+ diagnostics:u32,volumeCorrectionMode:u32}
 struct CoarseEntry{cellPlusOne:u32,size:u32,phi:f32,minimumPhi:f32,maximumPhi:f32,flags:u32,row:u32,volume:f32}
 struct CoarseDirectory{state:u32,generation:u32,rowCount:u32,maximumLeafSize:u32,dimensions:vec3u,
  physicalCellSize:f32,entries:array<CoarseEntry>}
@@ -507,6 +537,14 @@ fn pageWord(page:u32,key:u32)->u32{return poolOffset()+page*PAGE_SIZE+(key&(PAGE
 fn entryBase(rank:u32)->u32{return p.entryOffset+rank*ENTRY_WORDS;}
 fn phiOffset()->u32{return p.entryOffset+p.entryCapacity*ENTRY_WORDS;}
 fn phiWord(bank:u32,item:u32)->u32{return phiOffset()+bank*p.domainVolume+item;}
+fn activityOffset()->u32{return phiOffset()+3u*p.domainVolume;}
+fn activityWords()->u32{return (p.domainVolume+31u)/32u;}
+const ADVANCING=0u;
+const RETREATING=1u;
+fn activityWord(phase:u32,item:u32)->u32{return activityOffset()+phase*activityWords()+(item>>5u);}
+fn markTransportPhase(phase:u32,item:u32){if(item<p.domainVolume){atomicOr(&directory[activityWord(phase,item)],1u<<(item&31u));}}
+fn transportPhase(phase:u32,item:u32)->bool{return item<p.domainVolume
+ &&(atomicLoad(&directory[activityWord(phase,item)])&(1u<<(item&31u)))!=0u;}
 fn mortonPart(v:u32)->u32{var x=v&1023u;x=(x|(x<<16u))&0x030000ffu;x=(x|(x<<8u))&0x0300f00fu;
  x=(x|(x<<4u))&0x030c30c3u;x=(x|(x<<2u))&0x09249249u;return x;}
 fn morton(cell:u32)->u32{let q=vec3u(cell%p.dims.x,(cell/p.dims.x)%p.dims.y,cell/(p.dims.x*p.dims.y));
@@ -644,19 +682,21 @@ fn rankForKey(key:u32)->u32{let pagePlusOne=atomicLoad(&directory[topWord(key)])
  return select(INVALID,rankPlusOne-1u,rankPlusOne>0u&&rankPlusOne<=p.entryCapacity);}
 @compute @workgroup_size(256)fn resetSummary(@builtin(workgroup_id)w:vec3u,@builtin(num_workgroups)n:vec3u,
  @builtin(local_invocation_index)l:u32){let i=linear(w,n,l);if(i<phiOffset()){atomicStore(&directory[i],0u);}
+ if(i<2u*activityWords()){atomicStore(&directory[activityOffset()+i],0u);}
  // Target volume, transport initialization and active bank survive rebuilds.
  // So do the receipt tallies at 19/20: they count advances encoded against
  // advances that actually completed, so a single readback at the end of a run
  // reports how intermittent the tracker was. Only 18, the per-advance
  // prediction counter the completeness test reads, is cleared here.
- if(i<arrayLength(&state)&&(i<14u||i==15u||i==18u||(i>=27u&&i<=31u))){atomicStore(&state[i],0u);}}
+ if(i<arrayLength(&state)&&(i<14u||i==15u||i==18u||(i>=27u&&i<=34u))){atomicStore(&state[i],0u);}}
 @compute @workgroup_size(256)fn resetSummaryValues(@builtin(workgroup_id)w:vec3u,@builtin(num_workgroups)n:vec3u,
  @builtin(local_invocation_index)l:u32){let i=linear(w,n,l);
  if(i<16u){atomicStore(&directory[i],0u);}
+ if(i<2u*activityWords()){atomicStore(&directory[activityOffset()+i],0u);}
  if(i<p.entryCapacity){let base=entryBase(i);atomicStore(&directory[base+1u],ordered(3.402823e38));
   atomicStore(&directory[base+2u],ordered(-3.402823e38));atomicStore(&directory[base+3u],bitcast<u32>(3.402823e38));
   for(var j=4u;j<ENTRY_WORDS;j+=1u){atomicStore(&directory[base+j],0u);}}
- if(i<arrayLength(&state)&&((i>=2u&&i<14u)||i==15u||i==18u||(i>=27u&&i<=31u))){atomicStore(&state[i],0u);}}
+ if(i<arrayLength(&state)&&((i>=2u&&i<14u)||i==15u||i==18u||(i>=27u&&i<=34u))){atomicStore(&state[i],0u);}}
 @compute @workgroup_size(256)fn ensureSummaryPages(@builtin(workgroup_id)w:vec3u,@builtin(num_workgroups)n:vec3u,
  @builtin(local_invocation_index)l:u32){let row=linear(w,n,l);if(coarse.state!=PUBLISHED||row>=coarse.rowCount||row>=p.rowCapacity){return;}
  let e=coarse.entries[row];let bl=rowBaseAndLevel(e);if(bl.x==INVALID||(e.flags&9u)!=9u){atomicOr(&state[2],1u);return;}
@@ -716,13 +756,31 @@ fn rankForKey(key:u32)->u32{let pagePlusOne=atomicLoad(&directory[topWord(key)])
  if(initialized&&velocity.w>0.0){let midpoint=point-(0.5*p.time.x/h)*velocity.xyz;
   let middleVelocity=transportVelocityAt(midpoint);let traced=select(velocity,middleVelocity,middleVelocity.w>0.0);
   let departure=point-(p.time.x/h)*traced.xyz;let transported=densePhiAt(readBank,departure);if(transported.y!=0.0){
-   if(nearInterface&&abs(transported.x-sample.x)>1e-6*h){atomicAdd(&state[29],1u);}sample=transported;}}
+   let difference=transported.x-sample.x;let moved=abs(difference)>1e-6*h
+    &&(abs(transported.x)<=2.0*h||abs(sample.x)<=2.0*h);
+   if(moved){markTransportPhase(select(ADVANCING,RETREATING,difference>0.0),item);}
+   if(nearInterface&&moved){atomicAdd(&state[29],1u);}sample=transported;}}
  let predicted=quantizePhi(select(p.physicalCellSize,sample.x,sample.y!=0.0));let at=phiWord(writeBank,item);
  if(at>=arrayLength(&directory)||!finite(predicted)){atomicOr(&state[2],4u);return;}atomicStore(&directory[at],bitcast<u32>(predicted));
  atomicAdd(&state[18],1u);}
 fn outputBank()->u32{let initialized=atomicLoad(&state[16])!=0u;let readBank=atomicLoad(&state[17])&1u;return select(0u,1u-readBank,initialized);}
 fn denseRaw(bank:u32,item:u32)->f32{let at=phiWord(bank,item);if(at>=arrayLength(&directory)){return 3.402823e38;}
  return bitcast<f32>(atomicLoad(&directory[at]));}
+// Dense analogue of the factor-4/8 moving-page policy. A one-cell halo keeps
+// the correction continuous across the transported zero set, while the
+// signed movement predicate prevents missing liquid from being restored onto
+// a physically retreating face (and excess liquid from being removed at an
+// advancing face). This is the particle-level-set correction analogue: escaped
+// liquid is repaired where the interface actually travelled into air.
+fn directionalInterfaceRegion(phase:u32,item:u32,current:f32)->bool{if(item>=p.domainVolume||!finite(current)){return false;}
+ let previous=denseRaw(atomicLoad(&state[17])&1u,item);let h=p.physicalCellSize;
+ if(!finite(previous)||(abs(current)>2.0*h&&abs(previous)>2.0*h)){return false;}
+ if(transportPhase(phase,item)){return true;}
+ let q=vec3i(i32(item%p.dims.x),i32((item/p.dims.x)%p.dims.y),i32(item/(p.dims.x*p.dims.y)));
+ for(var axis=0u;axis<6u;axis+=1u){let other=q+AXIS_DIRECTIONS[axis];
+  if(any(other<vec3i(0))||any(other>=vec3i(p.dims))){continue;}let neighbor=neighborItem(other);
+  if(transportPhase(phase,neighbor)){return true;}}
+ return false;}
 fn neighborItem(q:vec3i)->u32{return u32(q.x)+p.dims.x*(u32(q.y)+p.dims.y*u32(q.z));}
 const AXIS_DIRECTIONS=array<vec3i,6>(vec3i(-1,0,0),vec3i(1,0,0),vec3i(0,-1,0),vec3i(0,1,0),vec3i(0,0,-1),vec3i(0,0,1));
 @compute @workgroup_size(256)fn seedDenseRedistance(@builtin(workgroup_id)w:vec3u,@builtin(num_workgroups)n:vec3u,
@@ -759,13 +817,18 @@ fn sweepDenseRedistance(sourceBank:u32,destinationBank:u32,item:u32){if(atomicLo
  @builtin(local_invocation_index)l:u32){let item=linear(w,n,l);if(item>=p.domainVolume){return;}let value=denseRaw(outputBank(),item);
  if(atomicLoad(&state[18])!=p.domainVolume){return;}
  if(!finite(value)){atomicOr(&state[2],4u);return;}let occupancy=clamp(0.5-value/p.physicalCellSize,0.0,1.0);
- atomicAdd(&state[12],u32(round(4096.0*occupancy)));if(abs(value)<p.physicalCellSize){atomicAdd(&state[13],1u);}}
+ atomicAdd(&state[12],u32(round(4096.0*occupancy)));if(abs(value)<p.physicalCellSize){atomicAdd(&state[13],1u);
+  if(directionalInterfaceRegion(ADVANCING,item,value)){atomicAdd(&state[32],1u);}
+  if(directionalInterfaceRegion(RETREATING,item,value)){atomicAdd(&state[34],1u);}}}
 @compute @workgroup_size(1)fn prepareVolumeCorrection(){if(p.directoryWords>arrayLength(&directory)){atomicOr(&state[2],4u);return;}
  if(atomicLoad(&state[18])!=p.domainVolume){atomicStore(&state[15],bitcast<u32>(0.0));atomicOr(&state[2],4u);return;}
- if(p.globalVolumeCorrection==0u){atomicStore(&state[15],bitcast<u32>(0.0));return;}
+ if(p.volumeCorrectionMode==0u){atomicStore(&state[15],bitcast<u32>(0.0));return;}
  let predictedVolume=atomicLoad(&state[12]);let targetVolume=atomicLoad(&state[14]);
  if(targetVolume==0u){atomicStore(&state[14],predictedVolume);atomicStore(&state[15],bitcast<u32>(0.0));}
- else{let interfaceCount=max(1u,atomicLoad(&state[13]));let error=f32(i32(predictedVolume)-i32(targetVolume))/4096.0;
+ else{let error=f32(i32(predictedVolume)-i32(targetVolume))/4096.0;
+  let directionalCount=select(atomicLoad(&state[32]),atomicLoad(&state[34]),error>0.0);
+  let interfaceCount=select(directionalCount,atomicLoad(&state[13]),p.volumeCorrectionMode==2u);
+  if(interfaceCount==0u){atomicStore(&state[15],bitcast<u32>(0.0));return;}
   let correction=clamp(p.physicalCellSize*error/f32(interfaceCount),-0.5*p.physicalCellSize,0.5*p.physicalCellSize);
   atomicStore(&state[15],bitcast<u32>(correction));}}
 @compute @workgroup_size(256)fn correctAndAggregateSummaryCells(@builtin(workgroup_id)w:vec3u,@builtin(num_workgroups)n:vec3u,
@@ -773,7 +836,12 @@ fn sweepDenseRedistance(sourceBank:u32,destinationBank:u32,item:u32){if(atomicLo
  if(atomicLoad(&state[18])!=p.domainVolume){return;}
  let initialized=atomicLoad(&state[16])!=0u;let readBank=atomicLoad(&state[17])&1u;let writeBank=select(0u,1u-readBank,initialized);
  let at=phiWord(writeBank,item);if(at>=arrayLength(&directory)){atomicOr(&state[2],4u);return;}
- let value=quantizePhi(bitcast<f32>(atomicLoad(&directory[at]))+bitcast<f32>(atomicLoad(&state[15])));if(!finite(value)){atomicOr(&state[2],4u);return;}
+ let raw=bitcast<f32>(atomicLoad(&directory[at]));let correction=bitcast<f32>(atomicLoad(&state[15]));
+ let phase=select(ADVANCING,RETREATING,correction>0.0);
+ let regional=p.volumeCorrectionMode==1u&&directionalInterfaceRegion(phase,item,raw);
+ let apply=p.volumeCorrectionMode==2u||regional;let delta=select(0.0,bitcast<f32>(atomicLoad(&state[15])),apply);
+ let value=quantizePhi(raw+delta);if(!finite(value)){atomicOr(&state[2],4u);return;}
+ if(apply&&delta!=0.0){atomicAdd(&state[33],1u);}
  atomicStore(&directory[at],bitcast<u32>(value));let magnitude=abs(value);
  let q=vec3u(item%p.dims.x,(item/p.dims.x)%p.dims.y,item/(p.dims.x*p.dims.y));let b=q/4u;
  let baseKey=b.x+p.baseDims.x*(b.y+p.baseDims.y*b.z);for(var level=0u;level<=p.maximumLevel;level+=1u){

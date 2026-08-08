@@ -442,6 +442,16 @@ try {
         topologyLeaves: number;
         residentOwnerPages: number;
       }>;
+      readCoarseSurfaceTrackerReceipt(): Promise<{
+        predictedVolume: number;
+        targetVolume: number;
+        interfaceCells: number;
+        correction: number;
+        movingInterfaceCells?: number;
+        advancingInterfaceCells?: number;
+        retreatingInterfaceCells?: number;
+        correctedRegionCells?: number;
+      } | undefined>;
     };
   }).octreeProjection;
   const projectionRuntime = projection as unknown as {
@@ -509,6 +519,7 @@ try {
     const fidelity = dimensions[0] * dimensions[1] * dimensions[2] <= 50_000
       ? phiDistanceFidelity(shape.field, dimensions, shape.cellWidth) : undefined;
     const census = await projection?.readTopologyLeafCensus();
+    const coarseVolume = await projection?.readCoarseSurfaceTrackerReceipt();
     const stats = await solver.readStats() as unknown as Record<string, unknown>;
     samples.push({
       t_s: Number((step * dt).toFixed(6)), ...summary,
@@ -527,6 +538,7 @@ try {
       pressureResidual: stats.pressureResidual,
       pressureRelativeResidual: stats.pressureRelativeResidual,
       quadtreePressureIterationsUsed: stats.quadtreePressureIterationsUsed,
+      coarseVolume,
       currentVolume: stats.currentVolume,
       referenceVolume: stats.referenceVolume,
       maximumDivergence: stats.maximumDivergence,
