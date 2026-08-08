@@ -136,6 +136,7 @@ export function planOctreeRedistanceSweeps(
 export function planOctreeCoarseSummary(
   dimensions: readonly [number, number, number],
   rowCapacity: number,
+  maximumLeafSize = 32,
 ): OctreeCoarseSummaryPlan {
   const baseDimensions = dimensions.map((value) => Math.ceil(value / 4)) as [number, number, number];
   const levelDimensions: Array<readonly [number, number, number]> = [];
@@ -161,6 +162,8 @@ export function planOctreeCoarseSummary(
   const directoryWords = activityOffsetWords + 2 * activityWords;
   const adaptiveNodeCapacity = (dimensions[0] + 1) * (dimensions[1] + 1)
     * (dimensions[2] + 1);
+  const adaptiveEdgeCapacity = Math.min(
+    3 * adaptiveNodeCapacity * (1 + Math.log2(maximumLeafSize)), 24 * rowCapacity);
   return {
     baseDimensions, levelDimensions, levelOffsets, hierarchyKeyCapacity,
     topLevelPageCount, directoryPageCapacity, entryCapacity, entryOffsetWords,
@@ -170,7 +173,7 @@ export function planOctreeCoarseSummary(
     // Adaptive node control + exact compact node list + owner lookup params
     // are owned by this factor-one surface authority as well.
     allocatedBytes: directoryWords * 4 + 160 + 112 + 36 + 128 + 48
-      + 48 + adaptiveNodeCapacity * 4 + 48,
+      + 80 + adaptiveNodeCapacity * 4 + adaptiveEdgeCapacity * 16 + 48 + 12,
   };
 }
 
@@ -242,9 +245,9 @@ export class WebGPUOctreeCoarseSummary {
       || (air.maximumLeafSize & (air.maximumLeafSize - 1)) !== 0) {
       throw new RangeError("Coarse-only tracker requires a power-of-two maximum leaf size");
     }
-    this.plan = planOctreeCoarseSummary(dimensions, coarse.rowCapacity);
+    this.plan = planOctreeCoarseSummary(dimensions, coarse.rowCapacity, air.maximumLeafSize);
     this.adaptiveNodes = new WebGPUOctreeAdaptiveNodes(
-      device, air.ownerPages.arena, air.ownerPages.plan, air.maximumLeafSize);
+      device, air.ownerPages.arena, air.ownerPages.plan, air.maximumLeafSize, coarse.rowCapacity);
     this.domainVolume = dimensions[0] * dimensions[1] * dimensions[2];
     this.redistanceDimensions = [dimensions[0], dimensions[1], dimensions[2]];
     this.redistanceSweeps = planOctreeRedistanceSweeps(
