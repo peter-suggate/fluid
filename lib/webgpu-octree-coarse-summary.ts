@@ -1,9 +1,5 @@
 import type { GPUInitializationTask } from "./gpu-initialization";
 import type { OctreePowerCoarseLevelSetSampleSource } from "./webgpu-octree-power-coarse-levelset";
-import type { WebGPUOctreeLosassoVelocitySamplerSource } from
-  "./webgpu-octree-losasso-velocity-sampler";
-import { octreeLosassoStagedVelocitySamplingWGSL } from
-  "./webgpu-octree-losasso-velocity-sampler.wgsl";
 import { OCTREE_AIR_SUPPORT_LAYOUT_VERSION, OCTREE_AIR_SUPPORT_OWNER_HASH,
   OCTREE_AIR_SUPPORT_TAG, OCTREE_AIR_SUPPORT_VALID, octreeAirSupportOwnerHashStartWGSL,
   type OctreeAirVelocitySupportLayout } from "./webgpu-octree-air-velocity-support";
@@ -11,19 +7,6 @@ import { PassBroker } from "./webgpu-pass-broker";
 
 const PAGE_SIZE = 32;
 const ENTRY_WORDS = 12;
-const coarseSummaryLosassoVelocitySamplingWGSL = octreeLosassoStagedVelocitySamplingWGSL
-  .replace(/\bcoarse\b/g, "losassoControl")
-  .replace(/\bfaceGeometry\b/g, "losassoFaceGeometry")
-  .replace(/\bextendedVelocity\b/g, "losassoExtendedVelocity")
-  .replace(/\bfaceDirectory\b/g, "losassoFaceDirectory")
-  .replace(/\bstagedVelocity\b/g, "losassoStagedVelocity")
-  .replace(/p\.velocityDimensions/g, "p.dims")
-  .replace(/p\.directoryCapacity/g, "u32(arrayLength(&losassoFaceDirectory))")
-  .replace(/p\.closed/g, "1u")
-  .replace(/p\.openTop/g, "u32(p.time.w)")
-  .replace(/p\.domainOrigin/g, "vec3f(0)")
-  .replace(/p\.velocityCellSize/g, "p.physicalCellSize");
-
 /**
  * Fraction of the coarse tracker's trilinear velocity stencil that must
  * resolve to a published air-support owner before the sample is usable.
@@ -219,7 +202,7 @@ export class WebGPUOctreeCoarseSummary {
     dimensions: readonly [number, number, number],
     private readonly air: Readonly<{ arena: GPUBuffer; layout: OctreeAirVelocitySupportLayout;
       rowVelocities: GPUBuffer; initialPhi: Float32Array; physicalCellSize: number; timestep_s: number;
-      losassoVelocity?: WebGPUOctreeLosassoVelocitySamplerSource;
+      losassoControl?: GPUBuffer;
       losassoNodalVelocity?: GPUBuffer;
       openTopBoundary?: boolean;
       rigid?: Readonly<{ rigidBodies: GPUBuffer; immersedVolumes: GPUBuffer; bodyCount: number }>;
@@ -297,7 +280,7 @@ export class WebGPUOctreeCoarseSummary {
     const time = new Float32Array(data, 80, 4);
     time[0] = air.timestep_s;
     time[1] = coarseSummaryVelocityStencilCoverage();
-    time[2] = air.losassoVelocity ? 1 : 0;
+    time[2] = air.losassoControl ? 1 : 0;
     time[3] = air.openTopBoundary ? 1 : 0;
     // The prepare singleton reproduces the host's 2D dispatch split exactly.
     new Uint32Array(data, 96, 1)[0] = device.limits.maxComputeWorkgroupsPerDimension;
@@ -391,12 +374,12 @@ export class WebGPUOctreeCoarseSummary {
           ] : []),
           ...(usesVelocity ? [
             { binding: 5, resource: { buffer: this.air.rowVelocities } },
-            { binding: 7, resource: { buffer: this.air.losassoVelocity?.control
+            { binding: 7, resource: { buffer: this.air.losassoControl
               ?? this.bindingSentinel } },
             { binding: 15, resource: { buffer: this.air.losassoNodalVelocity
               ?? this.bindingSentinel } },
           ] : []),
-          ...(usesLosassoControl ? [{ binding: 7, resource: { buffer: this.air.losassoVelocity?.control
+          ...(usesLosassoControl ? [{ binding: 7, resource: { buffer: this.air.losassoControl
             ?? this.bindingSentinel } }] : []),
           ...(usesRigidBodies ? [{ binding: 12, resource: { buffer: this.air.rigid?.rigidBodies
             ?? this.bindingSentinel } }] : []),
@@ -561,10 +544,6 @@ struct CoarseDirectory{state:u32,generation:u32,rowCount:u32,maximumLeafSize:u32
 @group(0)@binding(5)var<storage,read>rowVelocities:array<vec4f>;
 @group(0)@binding(6)var<storage,read_write>dispatchArgs:array<u32>;
 @group(0)@binding(7)var<storage,read>losassoControl:array<u32>;
-@group(0)@binding(8)var<storage,read>losassoFaceGeometry:array<vec4u>;
-@group(0)@binding(9)var<storage,read>losassoExtendedVelocity:array<f32>;
-@group(0)@binding(10)var<storage,read>losassoFaceDirectory:array<vec2u>;
-@group(0)@binding(11)var<storage,read>losassoStagedVelocity:array<u32>;
 struct RigidBody{positionShape:vec4f,dimensions:vec4f,orientation:vec4f,linearVelocity:vec4f,
  angularVelocity:vec4f,inverseMassInertia:vec4f,angularMomentumRestitution:vec4f,material:vec4f}
 @group(0)@binding(12)var<storage,read>rigidBodies:array<RigidBody>;
@@ -740,7 +719,6 @@ fn velocityAtCentered(point:vec3f)->vec4f{let ax=centeredAxisSample(point.x,p.di
  // physics change, not a launch shape, so it stays an authored A/B.
  return select(vec4f(0.0),vec4f(result/max(total,1e-12),1.0),total>=p.time.y);}
 fn velocityAtPoint(point:vec3f)->vec4f{return velocityAtCentered(point-0.5*vec3f(p.dims));}
-${coarseSummaryLosassoVelocitySamplingWGSL}
 fn losassoNodalVelocityAt(point:vec3f)->vec4f{let nd=p.dims+vec3u(1u);
  let bounded=clamp(point,vec3f(0.0),vec3f(p.dims));let low=vec3u(floor(bounded));let fraction=fract(bounded);
  var termsX:array<f32,8>;var termsY:array<f32,8>;var termsZ:array<f32,8>;var weights:array<f32,8>;

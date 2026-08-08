@@ -2963,7 +2963,7 @@ export class WebGPUOctreeProjection {
         redistanceReachCells: octreeSurfaceProtectionWidthCells(
           this.interfaceBandCellsEffective, this.surfaceGradingLayersEffective,
           this.topologyMaximumLeafSize, 1),
-        losassoVelocity: sampler,
+        losassoControl: sampler.control,
         losassoNodalVelocity: this.losassoBackend.extensionBand.dynamicsStagedVelocity,
         openTopBoundary: this.scene.container.top !== "closed",
         ...(this.scene.rigidBodies.length > 0 ? { rigid: {

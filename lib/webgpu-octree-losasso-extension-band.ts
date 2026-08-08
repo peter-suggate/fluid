@@ -183,7 +183,6 @@ export class WebGPUOctreeLosassoExtensionBand {
   private readonly liveFaceDispatch: GPUBuffer;
   private readonly extension: WebGPUOctreeLosassoVelocityExtension;
   private coarsePhiDirectory?: GPUBuffer;
-  private coarsePhiRowCapacity = 0;
   private readonly bindGroupCache = new Map<GPUComputePipeline,
     { entries: readonly { binding: number; buffer: GPUBuffer }[]; group: GPUBindGroup }[]>();
   private pipelines?: Readonly<Record<EntryPoint, GPUComputePipeline>>;
@@ -329,7 +328,6 @@ export class WebGPUOctreeLosassoExtensionBand {
       .reduce((mask, closed, index) => mask | (closed ? 1 << index : 0), 0) >>> 0;
     this.device.queue.writeBuffer(this.params, 0, bytes);
     this.coarsePhiDirectory = this.control;
-    this.coarsePhiRowCapacity = 0;
     const buffers = new Map<number, GPUBuffer>([
       [0, this.params], [1, fine.metadata], [2, fine.worklist], [3, fine.samples],
       [4, this.options.wet.control], [5, this.options.wet.faceGeometry],
@@ -410,7 +408,6 @@ export class WebGPUOctreeLosassoExtensionBand {
     words.set([0, 0, 0, generation], 24);
     this.device.queue.writeBuffer(this.params, 0, bytes);
     this.coarsePhiDirectory = coarsePhi.volumeDirectory;
-    this.coarsePhiRowCapacity = coarsePhi.rowCapacity;
     const buffers = new Map<number, GPUBuffer>([
       [0, this.params], [4, this.options.wet.control], [5, this.options.wet.faceGeometry],
       [8, this.control], [9, this.metrics], [10, this.geometry],
@@ -531,51 +528,6 @@ export class WebGPUOctreeLosassoExtensionBand {
     }
     pass.dispatchWorkgroups(nodalGroupsX, nodalGroupsY);
     return true;
-  }
-
-  /** Reconstruct the dense accepted MAC view at its factor-one transport
-   * consumption seam. Topology and compact phi publication can both replace
-   * pressure-row identities between projection and the next coarse transport;
-   * the retained W7 face values remain authoritative, but their temporary
-   * coarse-leaf interpolation must use the directory consumed by this step. */
-  encodeTransportStaging(broker: PassBroker): void {
-    this.assertReady();
-    if (!this.coarsePhiDirectory || this.coarsePhiRowCapacity < 1) {
-      throw new Error("Losasso transport staging requires compact coarse-phi rows");
-    }
-    const run = (entryPoint: EntryPoint, groups: number,
-      entries: readonly { binding: number; buffer: GPUBuffer }[]) => {
-      const pipeline = this.pipelines![entryPoint];
-      const pass = broker.compute({ label: `Losasso transport handoff - ${entryPoint}` });
-      pass.setPipeline(pipeline);
-      pass.setBindGroup(0, this.cachedBindGroup(pipeline, entries));
-      const groupsX = Math.min(groups, this.device.limits.maxComputeWorkgroupsPerDimension);
-      const groupsY = Math.ceil(groups / Math.max(1, groupsX));
-      if (groupsY > this.device.limits.maxComputeWorkgroupsPerDimension) {
-        throw new RangeError("Losasso transport staging exceeds 2D dispatch limits");
-      }
-      pass.dispatchWorkgroups(groupsX, groupsY);
-    };
-    const [nx, ny, nz] = this.plan.dimensions;
-    run("clearLosassoStagedCoarseOwners", Math.ceil(nx * ny * nz / 64), [
-      { binding: 0, buffer: this.params },
-      { binding: 21, buffer: this.stagedVelocityArena },
-    ]);
-    run("publishLosassoStagedCoarseOwners", Math.ceil(this.coarsePhiRowCapacity / 64), [
-      { binding: 0, buffer: this.params },
-      { binding: 20, buffer: this.coarsePhiDirectory },
-      { binding: 21, buffer: this.stagedVelocityArena },
-    ]);
-    broker.fence("Losasso transport coarse-leaf owners published");
-    run("stageLosassoVelocityLattice", Math.ceil(this.plan.stagedVelocityNodes / 64), [
-      { binding: 0, buffer: this.params },
-      { binding: 8, buffer: this.control },
-      { binding: 10, buffer: this.geometry },
-      { binding: 13, buffer: this.directory },
-      { binding: 14, buffer: this.extended },
-      { binding: 20, buffer: this.coarsePhiDirectory },
-      { binding: 21, buffer: this.stagedVelocityArena },
-    ]);
   }
 
   /** Gather the wet forward predictor and extend it over the same D4 W7 graph. */
