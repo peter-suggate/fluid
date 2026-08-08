@@ -49,10 +49,9 @@ function effectiveLabel(
       return { text: resolved.tolerance.toExponential(1), auto };
     case "pressureIterationCap":
       return { text: `${resolved.iterationCap}`, auto };
-    // The slider position is a band term; the thickness a slice shows is the
-    // whole protection width, and the two differ by the grading term. Showing
-    // the position would make a dial at 1 look like a one-cell band when the
-    // grid it produces is three cells thick on each side.
+    // The slider position is a requested thickness; show what the authored
+    // band/grading pair can actually express after clamping. Optional grading
+    // layers can make those two numbers differ.
     case "interfaceBandCells":
       return { text: `${resolved.bandWidthCells}`, auto };
     default:

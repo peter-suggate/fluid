@@ -9,6 +9,7 @@ import {
 import {
   OCTREE_RUNTIME_DIALS,
   OCTREE_RUNTIME_DIAL_KEYS,
+  resolveOctreeRuntimeDials,
 } from "../octree-runtime-dials";
 
 /**
@@ -96,6 +97,10 @@ export const octreeSolverOptions = (scene: SceneDescription, quality: GPUQuality
         : 1,
       interfaceRefinementBandCells: bandReachCells,
       surfaceRefinementGradingLayers: numberValue(values, params, "surfaceRefinementGradingLayers"),
+      // Seed t=0 with the live thickness too. Allocations still use the two
+      // authored fields above; this only prevents the fenced cold topology
+      // from displaying and solving the widest mesh until its first epoch.
+      initialRuntimeDials: resolveOctreeRuntimeDials(values),
       fineLevelSetBandCells: diagnosticFineBand,
       globalFineLevelSetFactor: fineFactor,
       // Hidden authored/harness override for scenes whose fluid footprint is

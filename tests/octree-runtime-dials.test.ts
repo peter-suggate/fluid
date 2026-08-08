@@ -66,7 +66,7 @@ test("dial values are clamped and snapped before they reach the GPU", () => {
   assert.equal(resolveOctreeRuntimeDials({ vcycleBottomSweeps: 3 }).vcycleBottomSweeps, 4);
   assert.equal(resolveOctreeRuntimeDials({ vcycleBottomSweeps: 0 }).vcycleBottomSweeps, 2);
   assert.equal(resolveOctreeRuntimeDials({ vcycleBottomSweeps: 99 }).vcycleBottomSweeps, 8);
-  assert.equal(resolveOctreeRuntimeDials({ velocityExtensionSweeps: 1 }).velocityExtensionSweeps, 2);
+  assert.equal(resolveOctreeRuntimeDials({ velocityExtensionSweeps: 1 }).velocityExtensionSweeps, 8);
   assert.equal(resolveOctreeRuntimeDials({ topologyRebuildCadence: 40 }).topologyRebuildCadence, 8);
   // Non-numeric or absent values fall back rather than producing NaN uniforms.
   assert.deepEqual(resolveOctreeRuntimeDials({
@@ -218,19 +218,17 @@ test("one number drives both terms of the surface band thickness", () => {
   const coarse = (band: number, grading: number, target: number) =>
     octreeDialledSurfaceBand(band, grading, 1, at(target));
 
-  // The defect this replaced: dialling only the band cannot reach the thin end.
-  // The width is (band + grading x leafSize), the band term floors at one cell
-  // and the grading term at two, so a scene authored at grading 3 bottomed out
-  // at SEVEN cells however far the band was wound down.
-  assert.equal(octreeSurfaceProtectionWidthCells(1, 3, 2, 1), 7);
-  assert.equal(coarse(4, 3, 3).widthCells, 3, "one number has to take grading down too");
+  // Layer one is the mandatory 2:1 balance supplied by the topology closure,
+  // not a second distance halo. Only the two optional layers in grading 3 add
+  // width here.
+  assert.equal(octreeSurfaceProtectionWidthCells(1, 3, 2, 1), 5);
+  assert.equal(coarse(4, 3, 3).widthCells, 3);
   assert.equal(coarse(4, 3, 3).gradingLayers, 1);
-  assert.equal(coarse(4, 3, 3).bandCells, 1);
+  assert.equal(coarse(4, 3, 3).bandCells, 3);
 
   // Monotone, and it hits the number it is asked for wherever the authored pair
-  // can express it. Grading is spent first: grading 1 is the sharp 2:1
-  // transition and the shipped default, so winding it back is a return to the
-  // ordinary ladder rather than a violation of it.
+  // can express it. Prefer direct band cells over optional grading because the
+  // latter are amplified at coarser candidates.
   for (const target of [3, 4, 5, 6, 7, 8]) {
     assert.equal(coarse(4, 3, target).widthCells, target, `target ${target}`);
   }
@@ -240,17 +238,14 @@ test("one number drives both terms of the surface band thickness", () => {
   // Both terms are clamped to what the scene authored -- the row capacity, the
   // residency halo, the dilation rings and the redistance reach were all sized
   // from that pair, and thinning stays inside every one of them.
-  assert.equal(coarse(4, 1, 8).widthCells, 6, "grading 1 cannot be widened to 3");
-  assert.equal(coarse(1, 1, 8).widthCells, 3, "a band-1 grading-1 scene is already thinnest");
+  assert.equal(coarse(4, 1, 8).widthCells, 4, "grading 1 adds only mandatory balance");
+  assert.equal(coarse(1, 1, 8).widthCells, 1, "a band-1 grading-1 scene is already thinnest");
   assert.ok(coarse(4, 3, 8).bandCells <= 4);
   assert.ok(coarse(4, 3, 8).gradingLayers <= 3);
 
-  // Three is the floor the lattice imposes, not a policy: one cell of band plus
-  // the two-finest-cell moving-surface floor.
-  assert.equal(coarse(4, 3, 1).widthCells, 3);
-  assert.equal(OCTREE_RUNTIME_DIAL_DEFAULTS.interfaceBandCells, 3);
-  assert.equal(OCTREE_RUNTIME_DIALS.find((d) => d.key === "interfaceBandCells")?.auto,
-    undefined, "an AUTO would put the THICKEST grid at the far left of the track");
+  assert.equal(coarse(4, 3, 1).widthCells, 1);
+  assert.equal(OCTREE_RUNTIME_DIAL_DEFAULTS.interfaceBandCells, 0);
+  assert.equal(OCTREE_RUNTIME_DIALS.find((d) => d.key === "interfaceBandCells")?.auto, 0);
 
   // Factor 4/8 takes the compact width, where the grading term vanishes at the
   // finest candidate and the band alone is the thickness.
@@ -262,15 +257,15 @@ test("one number drives both terms of the surface band thickness", () => {
 
 test("the band dial reaches the GPU as a uniform write, not a rebuild", () => {
   const source = readFileSync(new URL("../lib/webgpu-octree.ts", import.meta.url), "utf8");
-  // solve.w is the only live consumer of the band, so rewriting that uniform is
-  // the whole of applying this dial. The authored field must keep feeding the
-  // allocations, which describe what was actually reserved.
+  // The uniform changes the topology predicate. Redistance is recurring work
+  // and follows the live reach; allocations remain authored and unchanged.
   assert.match(source,
     /new Float32Array\(data, 48, 4\)\.set\(\[1e-8, 0\.01, 2\.2, this\.interfaceBandCellsEffective\]\);/);
   assert.match(source, /const surface = octreeDialledSurfaceBand\(/);
   assert.match(source,
     /new Uint32Array\(data, 128, 4\)\.set\(\[[\s\S]*?this\.surfaceGradingLayersEffective,/,
     "grading is the other half of the thickness and must be live too");
-  assert.match(source, /redistanceReachCells: this\.interfaceRefinementBandCells/,
-    "the redistance reach must stay sized by the AUTHORED band, which bounds the dial");
+  assert.match(source,
+    /setRedistanceReachCells\([\s\S]*?surface\.bandCells, surface\.gradingLayers/,
+    "the recurring redistance work must follow the live protection reach");
 });

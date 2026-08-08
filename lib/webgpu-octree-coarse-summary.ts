@@ -106,9 +106,9 @@ export interface OctreeCoarseSummaryPlan {
  *
  * It did not. Five sweeps were hard-coded while
  * `pressureRefinementEvidence` reads |phi| as a distance out to
- * `bandCells + gradingLayers * maximumLeafSize` cells. Everything past five
- * cells reported the same constant, so the ladder coarsened on a number that
- * carried no depth at all.
+ * `bandCells + max(0, gradingLayers - 1) * maximumLeafSize` cells. Everything
+ * past five cells reported the same constant, so the ladder coarsened on a
+ * number that carried no depth at all.
  *
  * Seeding from the ADVECTED magnitude instead is the tempting cheap fix and it
  * is wrong: a min-only sweep can lower a value but never raise one, so an
@@ -168,7 +168,8 @@ export class WebGPUOctreeCoarseSummary {
   readonly directory: GPUBuffer;
   private readonly domainVolume: number;
   /** Eikonal sweeps per advance; odd, so the last one lands in the output bank. */
-  private readonly redistanceSweeps: number;
+  private redistanceSweeps: number;
+  private readonly redistanceDimensions: readonly [number, number, number];
   private readonly state: GPUBuffer;
   private readonly params: GPUBuffer;
   private readonly dispatchArgs: GPUBuffer;
@@ -208,7 +209,8 @@ export class WebGPUOctreeCoarseSummary {
        * k covers every distance a consumer will ask about.
        *
        * `pressureRefinementEvidence` asks about distances out to its widest
-       * protection width, `bandCells + gradingLayers * maximumLeafSize`, so
+       * protection width,
+       * `bandCells + max(0, gradingLayers - 1) * maximumLeafSize`, so
        * that is what the caller passes. Five sweeps against a width of twenty
        * meant the refinement ladder read a CONSTANT wherever the surface was
        * more than five cells away, and coarsened the dam-break front to the
@@ -222,6 +224,7 @@ export class WebGPUOctreeCoarseSummary {
     }
     this.plan = planOctreeCoarseSummary(dimensions, coarse.rowCapacity);
     this.domainVolume = dimensions[0] * dimensions[1] * dimensions[2];
+    this.redistanceDimensions = [dimensions[0], dimensions[1], dimensions[2]];
     this.redistanceSweeps = planOctreeRedistanceSweeps(
       air.redistanceReachCells, dimensions);
     const maximumBinding = Math.min(device.limits.maxStorageBufferBindingSize, device.limits.maxBufferSize);
@@ -285,6 +288,12 @@ export class WebGPUOctreeCoarseSummary {
     initialState[14] = Math.round(4096 * referenceCells);
     initialState[16] = 1;
     device.queue.writeBuffer(this.state, 0, initialState);
+  }
+
+  /** Change recurring work, never allocation, to match the live protection reach. */
+  setRedistanceReachCells(reachCells: number): void {
+    this.redistanceSweeps = planOctreeRedistanceSweeps(
+      reachCells, this.redistanceDimensions);
   }
 
   private descriptor(entryPoint: string): GPUComputePipelineDescriptor {

@@ -149,17 +149,13 @@ export const OCTREE_RUNTIME_DIALS: readonly OctreeRuntimeDialSpec[] = Object.fre
     hint: "AUTO retains the authored band. An explicit value IS the half-thickness, in finest cells, and it"
       + " drives BOTH terms of the protection width the ladder compares against"
       + " -- interfaceRefinementBandCells and surfaceRefinementGradingLayers."
-      + " Dialling only the band cannot reach the thin end: the width is"
-      + " (band + grading x leafSize), the band term floors at one cell and the"
-      + " grading term floors at two, so a scene authored at grading 3 bottoms"
-      + " out at seven cells however far the band is wound down. Grading is"
-      + " taken to 1 first, which is the sharp 2:1 transition and the shipped"
-      + " default, and only then is the band trimmed. Both are clamped to what"
+      + " Grading layer 1 is the mandatory sharp 2:1 transition, enforced by"
+      + " the topology balance closure, so it adds no second refinement halo."
+      + " Layers above 1 are optional progressive padding and are removed"
+      + " before the direct interface band is trimmed. Both are clamped to what"
       + " the scene authored, because the row capacity, the residency halo and"
       + " the redistance reach were all sized from those values -- this dial"
-      + " thins the grid, it never widens it past what was allocated. Three is"
-      + " the floor the lattice itself imposes: one cell of band plus the"
-      + " two-finest-cell moving-surface floor.",
+      + " thins the grid, it never widens it past what was allocated.",
   },
   {
     key: "pressureToleranceDecades",
@@ -327,21 +323,21 @@ export function octreeRuntimeDialsAreDefault(dials: OctreeRuntimeDials): boolean
  * This mirrors `pressureRefinementEvidence`'s protection width, in the units an
  * octree slice is read in, and it is what the panel shows -- because "band 4"
  * is not a thickness. The two branches differ, so the factor is not optional.
- * Factor one -- the product default, and the only configuration in which the
- * coarse directory is the whole surface -- takes the RETAINED width, whose
- * grading term is `grading * max(2, size)` and so is non-zero even at the
- * finest merge candidate. Factors four and eight take the COMPACT width, whose
- * grading term is `grading * max(0, size - 2)`: at size two it vanishes and the
- * band alone is the thickness.
+ * Grading layer one names the mandatory sharp 2:1 transition. The independent
+ * topology balance closure supplies that transition, so charging it here too
+ * would create a second, leaf-width halo at every level. Only explicitly
+ * authored layers beyond one widen this distance predicate. Factor one takes
+ * the RETAINED width, `(grading - 1) * max(2, size)`; factors four and eight
+ * take the COMPACT width, `(grading - 1) * max(0, size - 2)`.
  */
 export function octreeSurfaceProtectionWidthCells(
   bandCells: number, gradingLayers: number, leafSizeCells: number,
   fineLevelSetFactor: number,
 ): number {
-  const grading = Math.max(1, gradingLayers);
+  const extraGrading = Math.max(0, gradingLayers - 1);
   const reach = fineLevelSetFactor === 1
-    ? grading * Math.max(2, leafSizeCells)
-    : grading * Math.max(0, leafSizeCells - 2);
+    ? extraGrading * Math.max(2, leafSizeCells)
+    : extraGrading * Math.max(0, leafSizeCells - 2);
   return Math.max(1, bandCells) + reach;
 }
 
@@ -357,17 +353,14 @@ export interface OctreeSurfaceBandSelection {
  * Resolve a dialled half-thickness into the two authored terms that produce it.
  *
  * The protection width `pressureRefinementEvidence` compares against is
- * `max(1, band) + grading * max(2, size)` at coarse band, so a dial that moved
- * only the band could not reach the thin end: the band term floors at one cell
- * and the grading term at two, which is why a scene authored at grading 3
- * bottoms out at SEVEN cells however far the band is wound down. Both terms
- * have to move.
+ * `max(1, band) + max(0, grading - 1) * max(2, size)` at coarse band. The first
+ * grading layer is not distance padding: it names the mandatory 2:1 balance
+ * that the separate topology closure already enforces. Only layers above one
+ * are an authored progressive-refinement experiment.
  *
- * Grading is spent first, down to 1. That is not arbitrary: grading 1 is the
- * sharp 2:1 transition and the shipped default, while 3 is the authored
- * progressive-refinement experiment, so winding it back is a return to the
- * ordinary ladder rather than a violation of it. Only once grading is at 1 does
- * the band term take the remainder.
+ * Prefer a direct interface band over optional grading when more than one pair
+ * reaches the requested finest-cell thickness. This minimizes the amplified
+ * reach at coarse candidates while preserving the exact dialled width.
  *
  * Both are clamped to what the scene authored. `planOctreePressureCapacity`,
  * the residency halo, the candidate dilation rings and
@@ -403,9 +396,18 @@ export function octreeDialledSurfaceBand(
     const bandCells = Math.min(authoredBand, target);
     return { bandCells, gradingLayers: authoredGrading, widthCells: width(bandCells, authoredGrading) };
   }
-  const gradingLayers = Math.min(authoredGrading, Math.max(1, Math.floor((target - 1) / 2)));
-  const bandCells = Math.min(authoredBand, Math.max(1, target - 2 * gradingLayers));
-  return { bandCells, gradingLayers, widthCells: width(bandCells, gradingLayers) };
+  let best = { bandCells: 1, gradingLayers: 1, widthCells: width(1, 1) };
+  for (let gradingLayers = 1; gradingLayers <= authoredGrading; gradingLayers += 1) {
+    for (let bandCells = 1; bandCells <= authoredBand; bandCells += 1) {
+      const widthCells = width(bandCells, gradingLayers);
+      if (widthCells > target) continue;
+      if (widthCells > best.widthCells
+        || (widthCells === best.widthCells && gradingLayers < best.gradingLayers)) {
+        best = { bandCells, gradingLayers, widthCells };
+      }
+    }
+  }
+  return best;
 }
 
 /**

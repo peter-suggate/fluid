@@ -79,27 +79,26 @@ test("both fine and cooperative coarse refinement use the same fluid gate", () =
   assert.match(coarse,
     /boundaryDecision = crossesBoundary[\s\S]*fluidGatedBoundaryRefinement && crossesBoundary[\s\S]*boundaryLiquidWouldRefine\([\s\S]*boundaryLiquidPhiInterval\(origin, size, range\.z, range\.w\)/);
   assert.match(coarse,
-    /pressureEvidence = pressureRefinementEvidence\(origin, size\)[\s\S]*pressureRetained = pressureRetentionAt\(origin\) > 0u[\s\S]*fineSummaryFactor == 1u[\s\S]*pressureRetained && \(!fluidGatedBoundaryRefinement \|\| !crossesBoundary\)[\s\S]*boundaryDecision/);
+    /pressureEvidence = pressureRefinementEvidence\(origin, size\)[\s\S]*decision = pressureEvidence \|\| adaptivity <= 0\.0 \|\| boundaryDecision/);
 });
 
-test("fine boundary gating stays compact while factor one retains pressure support", () => {
+test("fine boundary gating stays candidate-local", () => {
   const evidence = octreeProjectionShader.slice(
     octreeProjectionShader.indexOf("fn pressureRefinementEvidence"),
-    octreeProjectionShader.indexOf("fn pressureRetentionAt"),
+    octreeProjectionShader.indexOf("fn boundaryLiquidMinimumPhi"),
   );
   assert.match(evidence,
     /compactProtectionWidth[\s\S]*fineSummaryFactor == 1u/,
     "factor-4\/8 must keep compact pressure reach independently of boundary policy");
-  assert.match(octreeProjectionShader,
-    /retainPressureHysteresis = fineSummaryFactor == 1u[\s\S]*currentEvidence = retainPressureHysteresis/,
-    "fine factor-4\/8 runs must not publish tile-wide hysteresis");
+  assert.doesNotMatch(octreeProjectionShader, /pressureRetentionAt|PRESSURE_RETENTION_GENERATIONS/,
+    "one surface leaf must not force its entire topology tile to unit size");
   const fine = octreeProjectionShader.slice(
     octreeProjectionShader.indexOf("fn leafNeedsRefinement"),
     octreeProjectionShader.indexOf("fn splitLeaf"),
   );
   assert.match(fine,
-    /pressureRefinementEvidence\(origin, size\)[\s\S]*pressureRetained = pressureRetentionAt\(origin\) > 0u[\s\S]*fineSummaryFactor == 1u[\s\S]*if \(crossesBoundary\)[\s\S]*return boundaryLiquidWouldRefine\([\s\S]*if \(pressureRetained\)/,
-    "current local evidence wins while factor-specific retention follows boundary rejection");
+    /pressureRefinementEvidence\(origin, size\)[\s\S]*if \(crossesBoundary\)[\s\S]*return boundaryLiquidWouldRefine\(/,
+    "current local evidence wins before the boundary decision");
 });
 
 test("topology census deduplicates one coarse leaf spanning owner pages", () => {

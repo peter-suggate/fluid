@@ -10,10 +10,10 @@ test("the redistance reach covers the widest distance the ladder asks about", ()
   // The sweep is min-only fast marching from a one-domain-extent seed, so its
   // reach IS the sweep count: a cell farther than that still reports the seed.
   // `pressureRefinementEvidence` reads phi as a distance out to
-  // bandCells + gradingLayers * maximumLeafSize, so anything less means the
-  // ladder decides how coarse the deep interior may get from a constant. Five
-  // sweeps against a width of twenty is what coarsened the dam-break front to
-  // the ceiling three cells from the free surface.
+  // bandCells + max(0, gradingLayers - 1) * maximumLeafSize, so anything less
+  // means the ladder decides how coarse the deep interior may get from a
+  // constant. Five sweeps against a width of twenty is what coarsened the
+  // dam-break front to the ceiling three cells from the free surface.
   const dam = [24, 18, 16] as const;
   assert.ok(planOctreeRedistanceSweeps(4 + 1 * 8, dam) >= 12,
     "band 4 and grading 1 at an 8-cell ceiling need a 12-cell reach");
