@@ -38,11 +38,28 @@ test("GPU exact-row identity receipts are counted once per accepted epoch", () =
     "repeated diagnostics for one accepted epoch must not inflate the identity count");
 });
 
-test("same-topology surface advance pairs velocity and scalar clocks without graph work", () => {
+test("same-topology surface advance publishes a coherent two-bank scalar tuple", () => {
   const advance = compact(WebGPUOctreeLosassoCoarseBackend.prototype.encodeAdaptiveSurfaceAdvance);
+  const advection = compact(WebGPUOctreeLosassoCoarseBackend.prototype.encodeAdvection);
   assert.match(advance,
-    /adaptiveVelocity\.encodeAcceptedFields\(broker\);this\.adaptivePhi\.encodeAcceptedFieldClockSync\(broker\)/,
-    "phi control must adopt the completed nodal-velocity generation immediately");
+    /adaptiveVelocity\.encodeAcceptedFields\(broker\)[^]*adaptivePhi\.encodeAcceptedFieldClockSync\(broker\)/,
+    "every rho=.5 publication must expose complete velocity receipts and a coherent graph clock");
+  assert.doesNotMatch(advance, /dt_s===0|adaptiveVelocity\.encodeAcceptedField\(broker\)/,
+    "positive advances must not leave the accepted predictor bank temporarily stale");
+  assert.doesNotMatch(advance, /encodePredictorField/,
+    "the positive path must defer its predictor rebuild to S1a");
+  assert.match(advection,
+    /adaptiveVelocity\.encodePredictorField\(broker\)[^]*adaptivePhi[^]*encodeAcceptedFieldClockSync\(broker\)/,
+    "S1a predictor completion must publish the coherent two-bank scalar clock");
   assert.doesNotMatch(advance, /surfaceGraph\.encodeReadyCommit|encodeTopologyRemap/,
     "a same-topology advance must not copy the graph or remap topology worksets");
+});
+
+test("candidate closure compiles topology-only velocity stencils once", () => {
+  const candidate = compact(WebGPUOctreeLosassoCoarseBackend.prototype.encodeCandidatePublication);
+  assert.match(candidate,
+    /encodeCandidateStencils\(broker\)[^]*encodeCandidateFieldRound\(broker\)[^]*encodeCandidateVelocityNodalCompletion[^]*encodeCandidateFieldRound\(broker\)[^]*encodeCandidateVelocityNodalCompletion[^]*for\(let round=0;round<2;round\+=1\)[^]*encodeCandidateFieldRound\(broker\)/,
+    "four value-closure rounds must share the immutable topology/geometry lookup");
+  assert.doesNotMatch(candidate, /encodeCandidateFields\(broker\)/,
+    "the combined standalone encoder would recompile stencils inside every closure round");
 });

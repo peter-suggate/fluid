@@ -25,6 +25,7 @@ import { analyzeAdaptiveSurfaceFeatureGeometry, analyzeAdaptiveSurfacePublicatio
 import { getScenePreset, SYMMETRIC_EXPANSION_METHOD_PROFILE } from "../lib/scenes";
 import { requiredFluidDeviceLimits } from "../lib/webgpu-device-limits";
 import { initialOctreeNodalLevelSet } from "../lib/webgpu-octree";
+import { unpackAdaptiveMassReceipt } from "../lib/webgpu-octree-losasso-adaptive-mass";
 import { unpackAdaptivePhiReceipt } from "../lib/webgpu-octree-losasso-adaptive-phi";
 
 const steps = Number(process.env.FLUID_SURFACE_AUDIT_STEPS ?? 4);
@@ -86,9 +87,61 @@ const projection = (solver as unknown as {
         nodalVelocity: Uint32Array;
         redistanceDistanceA: Float32Array;
       } | undefined>;
+    readLosassoAuthorityDiagnostics(): Promise<Readonly<{
+      adaptiveGraph: readonly number[];
+      candidateAdaptiveGraph: readonly number[];
+      ownerCandidate: readonly number[];
+      frontierControl: readonly number[];
+      adaptivePhi: readonly number[];
+      adaptiveMassReceipts: readonly number[];
+    }> | undefined>;
+    readPowerFrontierFailure(): Promise<Record<string, number[]> | undefined>;
   };
 }).octreeProjection;
 assert.ok(projection, "octree solver did not expose its diagnostic projection");
+
+const readOwnerTopologyBanks = async () => {
+  const arena = (projection as unknown as { powerOwnerArena?: GPUBuffer }).powerOwnerArena;
+  if (!arena) return undefined;
+  const staging = device.createBuffer({ label: "Probe owner topology banks", size: arena.size,
+    usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+  const encoder = device.createCommandEncoder({ label: "Copy probe owner topology banks" });
+  encoder.copyBufferToBuffer(arena, 0, staging, 0, arena.size);
+  device.queue.submit([encoder.finish()]);
+  await staging.mapAsync(GPUMapMode.READ);
+  const words = new Uint32Array(staging.getMappedRange().slice(0));
+  staging.unmap(); staging.destroy();
+  if (words.length < 16 || words[15] !== 0x4f57_4e52) return undefined;
+  const capacity = words[3]!, logicalCount = words[4]!, payloadA = words[6]!;
+  const directoryA = 16 + 4 * capacity;
+  const activeTable = words[10]! >>> 31;
+  const summarize = (table: number) => {
+    const directory = directoryA + table * logicalCount;
+    const payload = payloadA + table * capacity * 512;
+    const seen = new Set<string>();
+    const counts: Record<string, number> = {};
+    let invalidCells = 0;
+    for (let z = 0; z < dimensions[2]; z += 1) for (let y = 0; y < dimensions[1]; y += 1) {
+      for (let x = 0; x < dimensions[0]; x += 1) {
+        const logical = (x >> 3) + Math.ceil(dimensions[0] / 8)
+          * ((y >> 3) + Math.ceil(dimensions[1] / 8) * (z >> 3));
+        const page = words[directory + logical]!;
+        const local = (x & 7) + 8 * (y & 7) + 64 * (z & 7);
+        const packed = page > 0 && page <= capacity ? words[payload + (page - 1) * 512 + local]! : 0;
+        if ((packed & 0x8000_0000) === 0) { invalidCells += 1; continue; }
+        const size = 1 << ((packed >>> 18) & 7);
+        const brick = [x & ~7, y & ~7, z & ~7];
+        const origin = [brick[0]! + (packed & 63) - 32,
+          brick[1]! + ((packed >>> 6) & 63) - 32,
+          brick[2]! + ((packed >>> 12) & 63) - 32];
+        const key = `${origin.join(",")}:${size}`;
+        if (!seen.has(key)) { seen.add(key); counts[String(size)] = (counts[String(size)] ?? 0) + 1; }
+      }
+    }
+    return { leafCountsBySize: counts, invalidCells };
+  };
+  return { activeTable, accepted: summarize(activeTable), candidate: summarize(1 - activeTable) };
+};
 
 // Probe-only stage capture. The normal cadence must remain enabled because a
 // candidate publication advances the graph/phi tuple clocks. Copy accepted
@@ -351,13 +404,20 @@ const capture = async (step: number) => {
   const acceptedStage = stageCapture && step > 0 ? await stageCapture.read() : undefined;
   const redistanceZeroSet = redistanceGeometryAudit && acceptedStage
     ? auditRedistanceZeroSet({ ...snapshot, ...acceptedStage }) : undefined;
-  const stats = await solver.readStats() as unknown as Record<string, unknown>;
+  const [stats, authority] = await Promise.all([
+    solver.readStats() as unknown as Promise<Record<string, unknown>>,
+    projection.readLosassoAuthorityDiagnostics(),
+  ]);
+  assert.ok(authority, "factor-one solver published no Losasso authority receipt");
+  const massReceipt = unpackAdaptiveMassReceipt(authority.adaptiveMassReceipts);
   samples.push({ step, time_s: step * dt, ...analysis, featureGeometry, phiReceipt,
     redistanceZeroSet,
     graphControl: snapshot.graphControl, phiControl: snapshot.phiControl, nodalD4, nodalSpeed,
     pressureRows: stats.pressureRequiredRows,
-    currentVolume: stats.currentVolume,
-    referenceVolume: stats.referenceVolume });
+    acceptedMass_m3: massReceipt.acceptedMass_m3,
+    transportedMass_m3: massReceipt.transportedMass_m3,
+    signedTransportDrift_m3: massReceipt.signedTransportDrift_m3,
+    massErrors: massReceipt.errors });
 };
 
 await capture(0);
@@ -367,6 +427,9 @@ for (let step = 1; step <= steps; step += 1) {
   }
   await capture(step);
 }
+const finalAuthority = await projection.readLosassoAuthorityDiagnostics();
+const finalFrontierFailure = await projection.readPowerFrontierFailure();
+const finalOwnerTopologies = await readOwnerTopologyBanks();
 
 solver.destroy();
 stageCapture?.destroy();
@@ -388,6 +451,8 @@ const reportedSamples = compact === "1" || compact === "2"
       leafCount: sample.leafCount, nodeCount: sample.nodeCount,
       interfaceLeafCountsBySize: sample.interfaceLeafCountsBySize,
       coarseInterfaceLeafCount: sample.coarseInterfaceLeafCount,
+      coarseStrictInterfaceLeafCount: sample.coarseStrictInterfaceLeafCount,
+      coarseTouchingInterfaceLeafCount: sample.coarseTouchingInterfaceLeafCount,
       activeCubeCount: geometry.activeCubeCount,
       zeroSetExtentsCells: geometry.zeroSetExtentsCells,
       maximumSharedNodeMismatch: geometry.maximumSharedNodeMismatch,
@@ -412,12 +477,37 @@ const reportedSamples = compact === "1" || compact === "2"
       volumeTransaction: receipt.volumeTransaction,
       acceptedAdvanceValid: receipt.acceptedAdvanceValid,
       pressureRows: sample.pressureRows,
-      currentVolume: sample.currentVolume,
-      referenceVolume: sample.referenceVolume };
+      acceptedMass_m3: sample.acceptedMass_m3,
+      transportedMass_m3: sample.transportedMass_m3,
+      signedTransportDrift_m3: sample.signedTransportDrift_m3,
+      massErrors: sample.massErrors };
   }) : samples;
 const gateSummary = compact === "3" ? (() => {
   const first = samples[0]!;
   const last = samples[samples.length - 1]!;
+  // By 0.26 s the symmetric-expansion front reaches the finite tank's side
+  // walls, so it is no longer a closed radial contour. Audit circularity at
+  // the last pre-contact checkpoint and retain the final sample for topology,
+  // mass, velocity, and extent invariants.
+  const circularityStep = Math.min(45, steps);
+  const circularitySample = samples.find((sample) => sample.step === circularityStep)!;
+  const visibleVolume = (sample: Record<string, unknown>) =>
+    (sample.phiReceipt as ReturnType<typeof unpackAdaptivePhiReceipt>).measuredVolume_m3;
+  const volumeJumps = samples.slice(1).map((sample, index) => {
+    const previous = samples[index]!;
+    return { step: sample.step as number, time_s: sample.time_s as number,
+      delta_m3: visibleVolume(sample) - visibleVolume(previous) };
+  });
+  const maximumVisibleVolumeIncrease = volumeJumps.reduce((maximum, jump) =>
+    jump.delta_m3 > maximum.delta_m3 ? jump : maximum,
+  { step: 0, time_s: 0, delta_m3: 0 });
+  const firstNearWall = samples.find((sample) => {
+    const extents = (sample.featureGeometry as ReturnType<
+      typeof analyzeAdaptiveSurfaceFeatureGeometry>).zeroSetExtentsCells;
+    return extents && (extents.minimum[0] <= 1 || extents.minimum[2] <= 1
+      || extents.maximum[0] >= dimensions[0] - 1
+      || extents.maximum[2] >= dimensions[2] - 1);
+  });
   const firstVolume = (first.phiReceipt as ReturnType<
     typeof unpackAdaptivePhiReceipt>).measuredVolume_m3;
   const finalVolume = (last.phiReceipt as ReturnType<
@@ -428,29 +518,96 @@ const gateSummary = compact === "3" ? (() => {
     initialVolume_m3: firstVolume,
     finalVolume_m3: finalVolume,
     relativeVolumeDrift: (finalVolume - firstVolume) / firstVolume,
+    maximumVisibleVolumeIncrease: {
+      ...maximumVisibleVolumeIncrease,
+      relativeToInitial: maximumVisibleVolumeIncrease.delta_m3 / firstVolume,
+    },
+    firstNearWall: firstNearWall ? {
+      step: firstNearWall.step,
+      time_s: firstNearWall.time_s,
+      visibleVolume_m3: visibleVolume(firstNearWall),
+      zeroSetExtentsCells: (firstNearWall.featureGeometry as ReturnType<
+        typeof analyzeAdaptiveSurfaceFeatureGeometry>).zeroSetExtentsCells,
+    } : undefined,
+    initialConservedVolume_m3: first.acceptedMass_m3 as number,
+    finalConservedVolume_m3: last.acceptedMass_m3 as number,
+    maximumAbsoluteTransportDrift_m3: Math.max(...samples.map((sample) =>
+      Math.abs(sample.signedTransportDrift_m3 as number))),
+    maximumMassErrors: Math.max(...samples.map((sample) => sample.massErrors as number)),
     initialActiveCubeCount: (first.featureGeometry as ReturnType<
       typeof analyzeAdaptiveSurfaceFeatureGeometry>).activeCubeCount,
     finalActiveCubeCount: (last.featureGeometry as ReturnType<
       typeof analyzeAdaptiveSurfaceFeatureGeometry>).activeCubeCount,
     finalZeroSetExtentsCells: (last.featureGeometry as ReturnType<
       typeof analyzeAdaptiveSurfaceFeatureGeometry>).zeroSetExtentsCells,
+    circularityCheckpointStep: circularitySample.step as number,
+    circularityCheckpointTime_s: circularitySample.time_s as number,
+    checkpointBottomFrontCircularity: (circularitySample.featureGeometry as ReturnType<
+      typeof analyzeAdaptiveSurfaceFeatureGeometry>).bottomFrontCircularity,
     maximumAcceptedSpeed_m_s: Math.max(...samples.map((sample) =>
       (sample.nodalSpeed as ReturnType<typeof auditVelocityMagnitude>).acceptedMaximum_m_s)),
     maximumD4Mismatches: Math.max(...samples.map((sample) =>
       (sample.nodalD4 as ReturnType<typeof auditNodalD4>).mismatches)),
+    maximumD4AbsoluteError_m: Math.max(...samples.map((sample) =>
+      (sample.nodalD4 as ReturnType<typeof auditNodalD4>).maximumAbsoluteError_m)),
     maximumSharedNodeMismatch: Math.max(...samples.map((sample) =>
       (sample.featureGeometry as ReturnType<
         typeof analyzeAdaptiveSurfaceFeatureGeometry>).maximumSharedNodeMismatch)),
     maximumCoarseInterfaceLeaves: Math.max(...samples.map((sample) =>
       sample.coarseInterfaceLeafCount as number)),
+    maximumCoarseStrictInterfaceLeaves: Math.max(...samples.map((sample) =>
+      sample.coarseStrictInterfaceLeafCount as number)),
+    maximumCoarseTouchingInterfaceLeaves: Math.max(...samples.map((sample) =>
+      sample.coarseTouchingInterfaceLeafCount as number)),
     totalDeparturePhiFailures: samples.reduce((total, sample) => total
       + (sample.phiReceipt as ReturnType<typeof unpackAdaptivePhiReceipt>).departurePhiFailures, 0),
     allAcceptedAdvancesValid: samples.every((sample) =>
       (sample.phiReceipt as ReturnType<typeof unpackAdaptivePhiReceipt>).acceptedAdvanceValid),
     allCandidatesConverged: samples.every((sample) =>
       (sample.phiReceipt as ReturnType<typeof unpackAdaptivePhiReceipt>).candidate.converged),
+    finalAuthority, finalFrontierFailure, finalOwnerTopologies,
   };
 })() : undefined;
+if (process.env.FLUID_SURFACE_AUDIT_ASSERT_PHYSICS === "1") {
+  assert.ok(gateSummary, "the physical gate requires FLUID_SURFACE_AUDIT_COMPACT=3");
+  assert.equal(gateSummary.maximumCoarseInterfaceLeaves, 0,
+    "every accepted leaf cut by the moving factor-one interface must remain size one");
+  const conservedDrift = (gateSummary.finalConservedVolume_m3
+    - gateSummary.initialConservedVolume_m3) / gateSummary.initialConservedVolume_m3;
+  assert.ok(Math.abs(conservedDrift) <= 1e-4,
+    `conserved liquid volume drifted by ${(100 * conservedDrift).toFixed(4)}%`);
+  assert.equal(gateSummary.maximumMassErrors, 0,
+    "adaptive conservative mass transport reported an invalid transaction");
+  assert.ok(gateSummary.maximumVisibleVolumeIncrease.relativeToInitial <= 0.01,
+    `visible volume jumped by ${
+      (100 * gateSummary.maximumVisibleVolumeIncrease.relativeToInitial).toFixed(3)}% in one step`);
+  const visibleMassFraction = gateSummary.finalVolume_m3
+    / gateSummary.finalConservedVolume_m3;
+  assert.ok(visibleMassFraction >= 0.75 && visibleMassFraction <= 1.05,
+    `the rho=.5 surface represents only ${(100 * visibleMassFraction).toFixed(2)}% of conserved mass`);
+  assert.ok(gateSummary.maximumAcceptedSpeed_m_s >= 0.25,
+    "gravity did not produce a physically moving dam front");
+  assert.ok(gateSummary.maximumAcceptedSpeed_m_s <= 3.5,
+    `accepted nodal speed ${gateSummary.maximumAcceptedSpeed_m_s} m/s exceeds the bounded dam scale`);
+  assert.ok(gateSummary.maximumSharedNodeMismatch <= 1e-6,
+    "the adaptive scalar field is discontinuous across shared leaf nodes");
+  assert.ok(gateSummary.maximumD4AbsoluteError_m <= 1e-6,
+    `the symmetric surface differs by ${gateSummary.maximumD4AbsoluteError_m} m under D4 transforms`);
+  assert.equal(gateSummary.totalDeparturePhiFailures, 0,
+    "surface transport sampled outside its valid characteristic support");
+  assert.equal(gateSummary.allAcceptedAdvancesValid, true,
+    "at least one transported scalar publication was rejected");
+  const extents = gateSummary.finalZeroSetExtentsCells;
+  assert.ok(extents && extents.minimum[0] <= 4 && extents.minimum[2] <= 4
+    && extents.maximum[0] >= 28 && extents.maximum[2] >= 28,
+  "the bottom dam front did not expand by at least four cells in every horizontal direction");
+  const circularity = gateSummary.checkpointBottomFrontCircularity;
+  assert.ok(circularity, "the bottom liquid slice has no closed front contour");
+  assert.ok(Math.abs(circularity.axisLead_cells) <= 1.25
+    && circularity.radialRmsDeviation_cells <= 0.5
+    && circularity.radialMaximumDeviation_cells <= 1,
+  `the bottom front is not circular: ${JSON.stringify(circularity)}`);
+}
 console.log(JSON.stringify({ phase: "symmetric-adaptive-surface", dimensions,
   dt, validationErrors, ...(gateSummary ? { gate: gateSummary } : { samples: reportedSamples })
 }, null, compact === "2" || compact === "3" ? undefined : 1));

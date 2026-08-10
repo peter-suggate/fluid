@@ -89,6 +89,7 @@ import {
   octreeLosassoAdaptiveVelocitySamplerWGSL,
   octreeLosassoAdaptiveVelocityWGSL,
 } from "../lib/webgpu-octree-losasso-adaptive-velocity.wgsl";
+import { octreeLosassoAdaptiveMassWGSL } from "../lib/webgpu-octree-losasso-adaptive-mass.wgsl";
 import { makeOctreeLosassoAdaptiveDynamicsWGSL } from "../lib/webgpu-octree-losasso-dynamics.wgsl";
 
 const naga = process.env.NAGA ?? "naga";
@@ -160,6 +161,7 @@ fn sampleCoarseOctreePhi(position:vec3f)->f32{return coarsePhi[u32(position.x)*0
   "octree-losasso-adaptive-phi-schedule": octreeLosassoAdaptivePhiScheduleWGSL,
   "octree-losasso-adaptive-phi-volume-evidence": octreeLosassoAdaptivePhiVolumeEvidenceWGSL,
   "octree-losasso-adaptive-velocity": octreeLosassoAdaptiveVelocityWGSL,
+  "octree-losasso-adaptive-mass": octreeLosassoAdaptiveMassWGSL,
   "octree-losasso-adaptive-dynamics": makeOctreeLosassoAdaptiveDynamicsWGSL(
     octreeLosassoAdaptiveVelocitySamplerWGSL()),
   "octree-coarse-level-set-bootstrap": octreeCoarsePhiBootstrapShader,

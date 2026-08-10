@@ -36,7 +36,7 @@ import {
 
 export const OCTREE_LOSASSO_ADAPTIVE_PHI_MAGIC = 0x4150_4849;
 export const OCTREE_LOSASSO_ADAPTIVE_PHI_CONTROL_WORDS = 20;
-export const OCTREE_LOSASSO_ADAPTIVE_PHI_RECEIPT_WORDS = 54;
+export const OCTREE_LOSASSO_ADAPTIVE_PHI_RECEIPT_WORDS = 55;
 export const OCTREE_LOSASSO_ADAPTIVE_PHI_RENDERER_HEADER_WORDS = 8;
 export const OCTREE_LOSASSO_ADAPTIVE_PHI_RENDERER_ROW_WORDS = 8;
 
@@ -188,6 +188,7 @@ export const adaptivePhiReceiptLayout = Object.freeze({
   candidateVolumeTotalAbsoluteLeafDriftBits: 50,
   candidateVolumeTransactionValid: 51,
   redistanceActiveIndependentNodes: 52, redistanceActiveConstrainedNodes: 53,
+  externalPublicationFailure: 54,
 });
 
 const receiptFloat = (word: number): number => {
@@ -216,6 +217,7 @@ export function unpackAdaptivePhiReceipt(words: ArrayLike<number>) {
       retainedConstrainedNodes: words[35]! >>> 0 }),
     redistanceBand: Object.freeze({ activeIndependentNodes: words[52]! >>> 0,
       activeConstrainedNodes: words[53]! >>> 0 }),
+    externalPublicationFailure: words[54]! >>> 0,
     volumeTransaction: Object.freeze({ epoch: words[36]! >>> 0,
       generation: words[37]! >>> 0, validatedNodes: words[38]! >>> 0,
       constrainedNodes: words[39]! >>> 0, coveredLeaves: words[40]! >>> 0,
@@ -306,8 +308,8 @@ type RedistancePipelineName = "prepareAcceptedRedistance" | "initializeRedistanc
   | "finishRedistance" | "finishAcceptedRedistanceIndependent"
   | "finishAcceptedRedistanceConstrained" | "resetRedistanceResidual"
   | "publishAcceptedRedistanceReceipt" | "publishCandidateRedistanceReceipt";
-type EvidencePipelineName = "prepareTopologyEvidence" | "publishTopologyEvidenceRows"
-  | "finishTopologyEvidence";
+type EvidencePipelineName = "prepareTopologyEvidenceEpoch" | "prepareTopologyEvidence"
+  | "publishTopologyEvidenceRows" | "finishTopologyEvidence";
 
 const positiveInteger = (label: string, value: number): number => {
   if (!Number.isSafeInteger(value) || value < 1) throw new RangeError(`${label} must be a positive integer`);
@@ -623,7 +625,7 @@ export class WebGPUOctreeLosassoAdaptivePhi {
     this.ghost = (await compile(ghostModule, ["deriveGhosts"] as const)).deriveGhosts;
     const evidenceModule = this.device.createShaderModule({ label: "Adaptive phi topology evidence", code: octreeLosassoAdaptivePhiEvidenceWGSL });
     this.evidence = await compile(evidenceModule,
-      ["prepareTopologyEvidence", "publishTopologyEvidenceRows",
+      ["prepareTopologyEvidenceEpoch", "prepareTopologyEvidence", "publishTopologyEvidenceRows",
         "finishTopologyEvidence"] as const);
     const scheduleModule = this.device.createShaderModule({ label: "Adaptive phi GPU candidate schedule", code: octreeLosassoAdaptivePhiScheduleWGSL });
     const schedule = await compile(scheduleModule, ["scheduleCandidateSource", "scheduleCandidateRepair"] as const);
@@ -1246,7 +1248,8 @@ export class WebGPUOctreeLosassoAdaptivePhi {
       stampCandidateRepair: [0, 1, 5, 6],
       stampAcceptedAdvance: [1, 5, 6],
       publishExternalAccepted: [1, 2, 5, 6],
-      prepareTopologyEvidence: [0, 1, 3, 4, 5, 7, 8],
+      prepareTopologyEvidenceEpoch: [0, 1, 3, 4, 5, 7, 8],
+      prepareTopologyEvidence: [0, 1, 4, 5],
       publishTopologyEvidenceRows: [0, 1, 2, 3, 4, 5, 6, 7, 9, 10],
       finishTopologyEvidence: [0, 1, 3, 4, 5, 7, 8],
       scheduleAcceptedWork: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
@@ -1279,6 +1282,7 @@ export class WebGPUOctreeLosassoAdaptivePhi {
     const buffers = [this.params, bank.control, bank.leaves, bank.leafDirectory,
       this.source.topologyEvidence, rendererDirectory, bank.phi,
       this.source.control, this.source.receipts, bank.constraints, bank.surfaceMass];
+    this.run(broker, this.evidence!.prepareTopologyEvidenceEpoch, buffers, 1);
     this.run(broker, this.evidence!.prepareTopologyEvidence, buffers,
       this.evidencePrepareWorkgroups);
     this.runBufferIndirect(broker, this.evidence!.publishTopologyEvidenceRows,

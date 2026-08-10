@@ -14,6 +14,10 @@ export interface AdaptiveSurfacePublicationAnalysis {
   readonly nodeCount: number;
   readonly interfaceLeafCountsBySize: Readonly<Record<string, number>>;
   readonly coarseInterfaceLeafCount: number;
+  /** Coarse leaves with both negative and positive constrained corner values. */
+  readonly coarseStrictInterfaceLeafCount: number;
+  /** Coarse leaves whose interval reaches zero only by an exact corner/face touch. */
+  readonly coarseTouchingInterfaceLeafCount: number;
   readonly constrainedNodeCount: number;
   readonly maximumStoredConstraintError: number;
   readonly rendererCornerCount: number;
@@ -36,6 +40,16 @@ export interface AdaptiveSurfaceFeatureGeometry {
   readonly zeroSetExtentsCells?: Readonly<{
     minimum: readonly [number, number, number];
     maximum: readonly [number, number, number];
+  }>;
+  /** Zero contour on the bottom nodal slice, sampled before wall contact. */
+  readonly bottomFrontCircularity?: Readonly<{
+    angularSampleCount: number;
+    meanRadius_cells: number;
+    radialRmsDeviation_cells: number;
+    radialMaximumDeviation_cells: number;
+    axisRadius_cells: number;
+    diagonalRadius_cells: number;
+    axisLead_cells: number;
   }>;
   readonly topFeatures: Readonly<Record<string, Readonly<{
     sampleCount: number;
@@ -122,6 +136,57 @@ export function analyzeAdaptiveSurfaceFeatureGeometry(
   let coveredNodalSamples = 0;
   for (const value of lattice) coveredNodalSamples += Number(Number.isFinite(value));
 
+  const bottomFrontCircularity = (() => {
+    const angularSampleCount = 64;
+    const cx = 0.5 * nx, cz = 0.5 * nz;
+    const sample = (x: number, z: number): number => {
+      if (x < 0 || x > nx || z < 0 || z > nz) return Number.NaN;
+      const x0 = Math.floor(x), z0 = Math.floor(z);
+      const x1 = Math.min(nx, x0 + 1), z1 = Math.min(nz, z0 + 1);
+      const tx = x - x0, tz = z - z0;
+      const a = lattice[index(x0, 0, z0)]!, b = lattice[index(x1, 0, z0)]!;
+      const c = lattice[index(x0, 0, z1)]!, d = lattice[index(x1, 0, z1)]!;
+      return (1 - tz) * ((1 - tx) * a + tx * b)
+        + tz * ((1 - tx) * c + tx * d);
+    };
+    if (!(sample(cx, cz) <= 0)) return undefined;
+    const radii = Array.from({ length: angularSampleCount }, (_, angle) => {
+      const theta = 2 * Math.PI * angle / angularSampleCount;
+      const dx = Math.cos(theta), dz = Math.sin(theta);
+      const bound = Math.min(
+        dx > 0 ? (nx - cx) / dx : dx < 0 ? cx / -dx : Infinity,
+        dz > 0 ? (nz - cz) / dz : dz < 0 ? cz / -dz : Infinity,
+      );
+      const step = 1 / 32;
+      let previousRadius = 0, previous = sample(cx, cz), crossing = Number.NaN;
+      for (let radius = step; radius <= bound + 1e-9; radius += step) {
+        const value = sample(cx + radius * dx, cz + radius * dz);
+        if (!Number.isFinite(value)) break;
+        if (previous <= 0 && value > 0) {
+          crossing = previousRadius + (-previous / (value - previous))
+            * (radius - previousRadius);
+          break;
+        }
+        previousRadius = radius; previous = value;
+      }
+      return crossing;
+    });
+    if (radii.some((radius) => !Number.isFinite(radius))) return undefined;
+    const meanRadius_cells = radii.reduce((sum, radius) => sum + radius, 0)
+      / angularSampleCount;
+    const deviations = radii.map((radius) => Math.abs(radius - meanRadius_cells));
+    const average = (indices: readonly number[]) => indices.reduce(
+      (sum, at) => sum + radii[at]!, 0) / indices.length;
+    const axisRadius_cells = average([0, 16, 32, 48]);
+    const diagonalRadius_cells = average([8, 24, 40, 56]);
+    return Object.freeze({ angularSampleCount, meanRadius_cells,
+      radialRmsDeviation_cells: Math.sqrt(deviations.reduce(
+        (sum, value) => sum + value * value, 0) / angularSampleCount),
+      radialMaximumDeviation_cells: Math.max(...deviations),
+      axisRadius_cells, diagonalRadius_cells,
+      axisLead_cells: axisRadius_cells - diagonalRadius_cells });
+  })();
+
   let activeCubeCount = 0;
   const minimum = [nx, ny, nz] as [number, number, number];
   const maximum = [0, 0, 0] as [number, number, number];
@@ -179,7 +244,8 @@ export function analyzeAdaptiveSurfaceFeatureGeometry(
     maximumSharedNodeMismatch, activeCubeCount,
     ...(activeCubeCount > 0 ? { zeroSetExtentsCells: Object.freeze({
       minimum: Object.freeze(minimum), maximum: Object.freeze(maximum),
-    }) } : {}), topFeatures: Object.freeze(topFeatures) });
+    }) } : {}), ...(bottomFrontCircularity ? { bottomFrontCircularity } : {}),
+    topFeatures: Object.freeze(topFeatures) });
 }
 
 /** CPU audit of the accepted factor-one graph and its one-way renderer view.
@@ -206,6 +272,8 @@ export function analyzeAdaptiveSurfacePublication(
   }
 
   const interfaceCounts = new Map<number, number>();
+  let coarseStrictInterfaceLeafCount = 0;
+  let coarseTouchingInterfaceLeafCount = 0;
   const analyticBySize = new Map<number, { count: number; maximum: number; squares: number }>();
   for (let leaf = 0; leaf < leafCount; leaf += 1) {
     const span = snapshot.leaves[16 * leaf + 3] ?? 0;
@@ -230,6 +298,10 @@ export function analyzeAdaptiveSurfacePublication(
     }
     if (minimum <= 0 && maximum >= 0) {
       interfaceCounts.set(span, (interfaceCounts.get(span) ?? 0) + 1);
+      if (span > 1) {
+        if (minimum < 0 && maximum > 0) coarseStrictInterfaceLeafCount += 1;
+        else coarseTouchingInterfaceLeafCount += 1;
+      }
     }
   }
 
@@ -260,6 +332,7 @@ export function analyzeAdaptiveSurfacePublication(
   return Object.freeze({ leafCount, nodeCount, interfaceLeafCountsBySize,
     coarseInterfaceLeafCount: [...interfaceCounts].reduce((sum, [size, count]) =>
       sum + (size > 1 ? count : 0), 0),
+    coarseStrictInterfaceLeafCount, coarseTouchingInterfaceLeafCount,
     constrainedNodeCount, maximumStoredConstraintError, rendererCornerCount,
     maximumRendererCornerError,
     ...(analyticNodeErrorsByLeafSize ? { analyticNodeErrorsByLeafSize } : {}) });

@@ -250,6 +250,7 @@ export function losassoStepSnapshotDiagnosticSummary(
     : `candidateAuthority=${candidateEpoch}/${candidateAuthority[3] ?? 0}/${candidateAuthority[4] ?? 0}`
       + ` mass=${mass[1] ?? 0}/${mass[7] ?? 0}/${mass[12] ?? 0}`
       + ` reconstruction=${massReceipts[16] ?? 0}/${massReceipts[17] ?? 0xffff_ffff}`
+      + ` handoffGraph=${massReceipts[18] ?? 0}`
       + ` migration=${migration[0] ?? 0}/${migration[1] ?? 0}/`
       + `${migration[2] ?? 0}+${migration[3] ?? 0}/${migration[4] ?? 0}/${migration[5] ?? 0}`
       + `/${migration[6] ?? 0}/${migration[7] ?? 0}`;
@@ -266,7 +267,7 @@ export function losassoStepSnapshotDiagnosticSummary(
     + `+${phiReceipts[34] ?? 0}+${phiReceipts[35] ?? 0},`
     + `velocityMiss=${phiReceipts[2] ?? 0}/${phiReceipts[3] ?? 0},`
     + `phiMiss=${phiReceipts[5] ?? 0},commit=${phiReceipts[20] ?? 0},`
-    + `repair=${phiReceipts[21] ?? 0}) · `
+    + `repair=${phiReceipts[21] ?? 0},external=${phiReceipts[54] ?? 0}) · `
     + `velocity accepted=${velocityReceipt(0)} predictor=${velocityReceipt(12)}`
     + ` candidate=${velocityReceipt(24)} · renderer=${renderer[1] ?? 0}/${renderer[2] ?? 0}`
     + ` · ${candidateTransactionSummary}`;

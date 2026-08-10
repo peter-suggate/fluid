@@ -206,10 +206,40 @@ test("cold topology splits exact authored top face, edge, and corner contacts to
     /coldAuthoredSurfaceInterval\(origin, size\)[\s\S]*size > finestSurfaceCellSize\(\)[\s\S]*crossesOrTouchesSurface/,
     "cold exact nodal evidence must be consulted before a missing sparse summary rejects the leaf");
   assert.ok(evidence.indexOf("coldAuthoredSurfaceInterval(origin, size)")
-    < evidence.indexOf("if (!summary.found) { return false; }"));
+    < evidence.indexOf("if (!summary.found) {"));
   assert.match(projection,
     /if \(!bootstrapPhiEnabled\(\) \|\| count == 0u\)/,
     "authored boxes must retire with cold bootstrap rather than become recurring fallback authority");
+});
+
+test("recurring factor-one topology resolves the sparse adaptive root before local refinement", () => {
+  const projection = readFileSync(new URL("../lib/webgpu-octree.ts", import.meta.url), "utf8");
+  const summary = projection.slice(projection.indexOf("fn adaptiveLosassoLeafSummary"),
+    projection.indexOf("fn fineLeafSummary"));
+  assert.match(summary,
+    /losassoArenaLookup\(ownerCell, ownerSize\)[\s\S]*losassoAdaptivePhi\(ownerRow, ownerOrigin, ownerSize/,
+    "candidate intervals must evaluate exact corners through the containing accepted owner");
+  assert.doesNotMatch(summary, /let inset =/,
+    "inset sampling must not erase a zero set on a candidate face");
+
+  const evidence = projection.slice(projection.indexOf("fn pressureRefinementEvidence"),
+    projection.indexOf("fn boundaryLiquidMinimumPhi"));
+  assert.match(evidence,
+    /if \(!summary\.found\)[\s\S]*adaptiveCoarseSurface != 0u[\s\S]*losassoCoarseArenaAuthority\(\)[\s\S]*fineSummaryFactor == 1u[\s\S]*size == topologyTileSize\(\)/,
+    "an unresolved sparse factor-one root must split once so descendants can query local surface evidence");
+  assert.doesNotMatch(projection, /TILE_SIGNATURE_REPAIR_REQUIRED|TILE_REPAIR_GENERATION_BIT/,
+    "root resolution must not depend on a perpetual dirty-tile repair marker");
+});
+
+test("Losasso density-disabled Dawn bindings do not alias the writable pressure RHS", () => {
+  const dynamics = readFileSync(new URL(
+    "../lib/webgpu-octree-losasso-dynamics.ts", import.meta.url), "utf8");
+  assert.match(dynamics,
+    /surfaceDensityRows \?\? this\.source\.control/,
+    "the disabled density input must use a read-only sentinel under WebGPU validation");
+  assert.doesNotMatch(dynamics,
+    /surfaceDensityRows \?\? this\.source\.rightHandSide/,
+    "one synchronization scope cannot bind the pressure RHS read-only and read-write");
 });
 
 test("procedural dam break publishes one exact nodal box and cold refinement authority", () => {
@@ -317,6 +347,14 @@ test("symmetric expansion has an isolated Dawn reproduction command", () => {
   assert.match(coarseOnlyCommand, /FLUID_OCTREE_GLOBAL_FINE_FACTOR=1/);
   assert.doesNotMatch(coarseOnlyCommand, /FLUID_GLOBAL_FINE_GENERATION_TRANSITION=1/,
     "coarse-only Dawn validation must not request a separate fine publication");
+
+  const surfacePhysicsCommand = packageJson.scripts[
+    "test:webgpu:symmetric-expansion:surface-physics"
+  ];
+  assert.ok(surfacePhysicsCommand);
+  assert.match(surfacePhysicsCommand, /FLUID_SURFACE_AUDIT_STEPS=65/);
+  assert.match(surfacePhysicsCommand, /FLUID_SURFACE_AUDIT_ASSERT_PHYSICS=1/);
+  assert.match(surfacePhysicsCommand, /probe-symmetric-adaptive-surface\.ts$/);
 
   const coarseOnlyLane = getSceneWebGPUSmokeLane("symmetric-expansion", "coarse-only");
   assert.equal(coarseOnlyLane.stop.exactSteps, 250);

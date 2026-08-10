@@ -25,7 +25,7 @@ fn losassoFaceHash(packedAxisSpan:u32,q:vec3u)->u32{
 }
 fn losassoDirectoryCapacity()->u32{
  let advertised=select(0u,coarse[6],arrayLength(&coarse)>=7u);
- let valid=advertised>=2u*coarse[2]&&advertised<=p.directoryCapacity
+ let valid=advertised>=4u*coarse[2]&&advertised<=p.directoryCapacity
   &&(advertised&(advertised-1u))==0u;
  return select(p.directoryCapacity,advertised,valid);
 }

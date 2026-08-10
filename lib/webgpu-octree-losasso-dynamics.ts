@@ -202,7 +202,12 @@ export class WebGPUOctreeLosassoDynamics {
       this.source.advectedVelocity, this.source.predictedVelocity,
       this.source.rowFaceOffsets, this.source.rowFaces, this.source.rightHandSide,
       this.source.projectedVelocity, ...samplerBuffers,
-      this.options.surfaceDensityRows ?? this.source.rightHandSide];
+      // The density branch is statically disabled when no rows are supplied,
+      // but Dawn still validates the declared binding usages. Binding the RHS
+      // here aliases its read_write binding 10 with read-only binding 16 in one
+      // synchronization scope. The already read-only authority control is a
+      // format-valid sentinel and cannot create that storage-usage conflict.
+      this.options.surfaceDensityRows ?? this.source.control];
     this.groups = Object.freeze(Object.fromEntries(ENTRY_POINTS.map((entryPoint) => [entryPoint,
       this.device.createBindGroup({
         label: `Losasso dynamics bindings - ${entryPoint}`,

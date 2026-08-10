@@ -33,6 +33,9 @@
  * Environment:
  *   FLUID_SCENE            scene definition id (default water-box-dam-break)
  *   FLUID_SAMPLE_TIMES_S   comma-separated sample times
+ *   FLUID_SAMPLE_EVERY_STEP_THROUGH_S  replace sample times with every dt through this time
+ *   FLUID_SURFACE_VOLUME_TELEMETRY_ONLY 1 emits only per-sample volume/wall telemetry
+ *   FLUID_SURFACE_VOLUME_SUMMARY_ONLY 1 emits jump extrema and key wall-impact samples
  *   FLUID_MAX_DT           fixed step (default 0.008)
  *   FLUID_MAXIMUM_LEAF_SIZE  bisection handle on the leaf ceiling
  *   FLUID_OCTREE_INTERFACE_BAND  bisection handle on the band reach
@@ -44,6 +47,8 @@
  *   FLUID_TOPOLOGY_CADENCE_ADVANCES  accepted advances per topology rebuild (1..8)
  *   FLUID_OCTREE_ADAPTIVITY  0 forces the finest topology; 1 is the production default
  *   FLUID_SURFACE_COMPACT  1 reports only the repeatable physics-gate metrics
+ *   FLUID_REQUIRE_CONNECTED_SURFACE  1 fails if authoritative leaf rho>.5 has
+ *     a face-disconnected liquid component at any requested sample
  *   FLUID_TOPOLOGY_TRANSITION_DIAGNOSTICS  1 adds compact accepted/candidate
  *     authority, graph, and mass handoff controls at each sample time
  *   FLUID_TRANSACTION_ONLY  1 skips surface decoding and audits only the
@@ -88,12 +93,19 @@ const FLAG_FINITE = 1 << 3;
 const sceneId = process.env.FLUID_SCENE === "dam-break-ui" || !process.env.FLUID_SCENE
   ? "water-box-dam-break" : process.env.FLUID_SCENE!;
 const dt = Number(process.env.FLUID_MAX_DT ?? 0.008);
-const sampleTimes = (process.env.FLUID_SAMPLE_TIMES_S ?? "0.2,0.4,0.6,0.8,1.0,1.2,1.6,2.0")
+const requestedSampleTimes = (process.env.FLUID_SAMPLE_TIMES_S ?? "0.2,0.4,0.6,0.8,1.0,1.2,1.6,2.0")
   .split(",").map((value) => Number(value.trim()))
   .filter((value) => Number.isFinite(value) && value >= 0)
   .sort((left, right) => left - right);
+const sampleEveryStepThrough = Number(process.env.FLUID_SAMPLE_EVERY_STEP_THROUGH_S ?? 0);
+const sampleTimes = sampleEveryStepThrough > 0
+  ? Array.from({ length: Math.round(sampleEveryStepThrough / dt) },
+    (_value, index) => (index + 1) * dt)
+  : requestedSampleTimes;
 const printAscii = process.env.FLUID_SURFACE_ASCII === "1";
 const compact = process.env.FLUID_SURFACE_COMPACT === "1";
+const volumeTelemetryOnly = process.env.FLUID_SURFACE_VOLUME_TELEMETRY_ONLY === "1";
+const volumeSummaryOnly = process.env.FLUID_SURFACE_VOLUME_SUMMARY_ONLY === "1";
 const topologyTransitionDiagnostics =
   process.env.FLUID_TOPOLOGY_TRANSITION_DIAGNOSTICS === "1";
 const transactionOnly = process.env.FLUID_TRANSACTION_ONLY === "1";
@@ -274,6 +286,20 @@ interface SurfaceShape {
   readonly airRowSizeHistogram: Readonly<Record<string, number>>;
   readonly field: Float32Array;
   readonly sizeField: Uint8Array;
+  /** Face-connected components of the published negative level set. */
+  readonly wetConnectivity: {
+    readonly componentCount: number;
+    readonly largestComponentCells: number;
+    readonly disconnectedCells: number;
+    readonly disconnectedCeilingCells: number;
+    readonly disconnectedComponents: readonly {
+      readonly cells: number;
+      readonly minimum: readonly [number, number, number];
+      readonly maximum: readonly [number, number, number];
+      readonly minimumPhi: number;
+      readonly maximumPhi: number;
+    }[];
+  };
   /**
    * Cells by which the profile rises again after its leftmost value.
    *
@@ -294,6 +320,146 @@ interface SurfaceShape {
     readonly centerOfMassCells: readonly [number, number, number];
     readonly frontCells: number;
   };
+}
+
+function wetConnectivity(
+  field: Float32Array,
+  dimensions: readonly [number, number, number],
+): SurfaceShape["wetConnectivity"] {
+  const [nx, ny, nz] = dimensions;
+  const visited = new Uint8Array(field.length);
+  const componentSizes: number[] = [];
+  const componentCeilingCells: number[] = [];
+  const componentDetails: Array<{
+    cells: number; minimum: [number, number, number]; maximum: [number, number, number];
+    minimumPhi: number; maximumPhi: number;
+  }> = [];
+  const offsets = [[-1, 0, 0], [1, 0, 0], [0, -1, 0], [0, 1, 0],
+    [0, 0, -1], [0, 0, 1]] as const;
+  for (let seed = 0; seed < field.length; seed += 1) {
+    if (visited[seed] || !(field[seed]! < 0)) continue;
+    visited[seed] = 1;
+    const queue = [seed];
+    let head = 0, cells = 0, ceilingCells = 0;
+    const minimum: [number, number, number] = [nx, ny, nz];
+    const maximum: [number, number, number] = [-1, -1, -1];
+    let minimumPhi = Infinity, maximumPhi = -Infinity;
+    while (head < queue.length) {
+      const cell = queue[head++]!;
+      const x = cell % nx;
+      const y = Math.floor(cell / nx) % ny;
+      const z = Math.floor(cell / (nx * ny));
+      cells += 1;
+      minimum[0] = Math.min(minimum[0], x); minimum[1] = Math.min(minimum[1], y);
+      minimum[2] = Math.min(minimum[2], z);
+      maximum[0] = Math.max(maximum[0], x); maximum[1] = Math.max(maximum[1], y);
+      maximum[2] = Math.max(maximum[2], z);
+      minimumPhi = Math.min(minimumPhi, field[cell]!);
+      maximumPhi = Math.max(maximumPhi, field[cell]!);
+      if (y === ny - 1) ceilingCells += 1;
+      for (const [dx, dy, dz] of offsets) {
+        const qx = x + dx, qy = y + dy, qz = z + dz;
+        if (qx < 0 || qy < 0 || qz < 0 || qx >= nx || qy >= ny || qz >= nz) continue;
+        const neighbor = qx + nx * (qy + ny * qz);
+        if (visited[neighbor] || !(field[neighbor]! < 0)) continue;
+        visited[neighbor] = 1;
+        queue.push(neighbor);
+      }
+    }
+    componentSizes.push(cells);
+    componentCeilingCells.push(ceilingCells);
+    componentDetails.push({ cells, minimum, maximum, minimumPhi, maximumPhi });
+  }
+  let largestIndex = -1;
+  for (let index = 0; index < componentSizes.length; index += 1) {
+    if (largestIndex < 0 || componentSizes[index]! > componentSizes[largestIndex]!) {
+      largestIndex = index;
+    }
+  }
+  return Object.freeze({
+    componentCount: componentSizes.length,
+    largestComponentCells: largestIndex < 0 ? 0 : componentSizes[largestIndex]!,
+    disconnectedCells: componentSizes.reduce((sum, value, index) =>
+      sum + (index === largestIndex ? 0 : value), 0),
+    disconnectedCeilingCells: componentCeilingCells.reduce((sum, value, index) =>
+      sum + (index === largestIndex ? 0 : value), 0),
+    disconnectedComponents: Object.freeze(componentDetails.filter((_value, index) =>
+      index !== largestIndex)),
+  });
+}
+
+interface WetTransitionAttribution {
+  readonly newWetCells: number;
+  readonly priorFaceReachedNewWetCells: number;
+  readonly persistentFaceBridgeNewWetCells: number;
+  readonly drainingFaceBridgeNewWetCells: number;
+  readonly newCeilingWetCells: number;
+  readonly persistentFaceBridgeNewCeilingWetCells: number;
+  readonly drainingFaceBridgeNewCeilingWetCells: number;
+  readonly priorContourSeedNewCeilingWetCells: number;
+  readonly priorContourFaceNewCeilingWetCells: number;
+  readonly newCeilingPriorSpanHistogram: Readonly<Record<string, number>>;
+}
+
+/** Attribute newly authoritative rho>.5 cells to the preceding face-CFL band.
+ * A prior-wet neighbour which becomes dry in the same step is not a persistent
+ * bridge: allowing that threshold swap can visibly nucleate a detached sheet. */
+function wetTransitionAttribution(previous: Float32Array, current: Float32Array,
+  dimensions: readonly [number, number, number],
+  previousSpans?: Uint8Array): WetTransitionAttribution {
+  const [nx, ny, nz] = dimensions;
+  const offsets = [[-1, 0, 0], [1, 0, 0], [0, -1, 0], [0, 1, 0],
+    [0, 0, -1], [0, 0, 1]] as const;
+  let newWetCells = 0, priorFaceReachedNewWetCells = 0;
+  let persistentFaceBridgeNewWetCells = 0, drainingFaceBridgeNewWetCells = 0;
+  let newCeilingWetCells = 0, persistentFaceBridgeNewCeilingWetCells = 0;
+  let drainingFaceBridgeNewCeilingWetCells = 0;
+  let priorContourSeedNewCeilingWetCells = 0;
+  let priorContourFaceNewCeilingWetCells = 0;
+  const newCeilingPriorSpanHistogram: Record<string, number> = {};
+  // One fixed-point finest-cell density unit; values this close to rho=.5
+  // distinguish equality/cap creep from a genuinely liquid predecessor.
+  const contourTolerance = 1 / 65_536;
+  for (let cell = 0; cell < current.length; cell += 1) {
+    if (!(current[cell]! < 0) || previous[cell]! < 0) continue;
+    newWetCells += 1;
+    const x = cell % nx, y = Math.floor(cell / nx) % ny;
+    const z = Math.floor(cell / (nx * ny));
+    const ceiling = y === ny - 1;
+    if (ceiling) {
+      newCeilingWetCells += 1;
+      if (Math.abs(previous[cell]!) <= contourTolerance) {
+        priorContourSeedNewCeilingWetCells += 1;
+      }
+      const priorSpan = previousSpans?.[cell] ?? 0;
+      newCeilingPriorSpanHistogram[String(priorSpan)] =
+        (newCeilingPriorSpanHistogram[String(priorSpan)] ?? 0) + 1;
+    }
+    let priorFace = false, persistentFace = false, drainingFace = false;
+    let priorContourFace = false;
+    for (const [dx, dy, dz] of offsets) {
+      const qx = x + dx, qy = y + dy, qz = z + dz;
+      if (qx < 0 || qy < 0 || qz < 0 || qx >= nx || qy >= ny || qz >= nz) continue;
+      const neighbor = qx + nx * (qy + ny * qz);
+      if (Math.abs(previous[neighbor]!) <= contourTolerance) priorContourFace = true;
+      if (!(previous[neighbor]! < 0)) continue;
+      priorFace = true;
+      if (current[neighbor]! < 0) persistentFace = true;
+      else drainingFace = true;
+    }
+    if (priorFace) priorFaceReachedNewWetCells += 1;
+    if (persistentFace) persistentFaceBridgeNewWetCells += 1;
+    if (drainingFace) drainingFaceBridgeNewWetCells += 1;
+    if (ceiling && persistentFace) persistentFaceBridgeNewCeilingWetCells += 1;
+    if (ceiling && drainingFace) drainingFaceBridgeNewCeilingWetCells += 1;
+    if (ceiling && priorContourFace) priorContourFaceNewCeilingWetCells += 1;
+  }
+  return Object.freeze({ newWetCells, priorFaceReachedNewWetCells,
+    persistentFaceBridgeNewWetCells, drainingFaceBridgeNewWetCells,
+    newCeilingWetCells, persistentFaceBridgeNewCeilingWetCells,
+    drainingFaceBridgeNewCeilingWetCells, priorContourSeedNewCeilingWetCells,
+    priorContourFaceNewCeilingWetCells,
+    newCeilingPriorSpanHistogram: Object.freeze(newCeilingPriorSpanHistogram) });
 }
 
 function zeroSetQuadrature(
@@ -535,6 +701,7 @@ function surfaceShape(
     surfaceRowSizeHistogram: histogram(surfaceRowSizes),
     airRowSizeHistogram: histogram(airRowSizes),
     field, sizeField,
+    wetConnectivity: wetConnectivity(field, dimensions),
     heights,
     zeroSetQuadrature: zeroSetQuadrature(field, dimensions),
   };
@@ -673,7 +840,8 @@ try {
     validationErrors.push(event.error.message);
   });
 
-  const scene = getScenePreset(sceneId).create();
+  const scenePreset = getScenePreset(sceneId);
+  const scene = scenePreset.create();
   scene.numerics.fixedDt_s = dt;
   scene.numerics.maxDt_s = dt;
   const refinementRegionFloor = Number(process.env.FLUID_REFINEMENT_REGION_FLOOR ?? 0);
@@ -707,9 +875,10 @@ try {
         z: -0.5 * scene.container.depth_m + alignedMaxZ * h },
     }];
   }
-  const solver = await octreeMethod.createSolverAsync!(device, scene, "balanced", {
-    ...octreeMethod.presetFor("balanced"),
-    globalFineLevelSetFactor: "1",
+  const solverQuality = scenePreset.methodProfile?.quality ?? "balanced";
+  const solverValues = {
+    ...octreeMethod.presetFor(solverQuality),
+    ...scenePreset.methodProfile?.overrides,
     secondaryParticles: "off",
     // Bisection handles only: the browser never sets these, and the untouched
     // probe is the shipped preset.
@@ -727,7 +896,10 @@ try {
       ? { topologyCadenceAdvances: Number(process.env.FLUID_TOPOLOGY_CADENCE_ADVANCES) } : {}),
     ...(process.env.FLUID_OCTREE_ADAPTIVITY
       ? { octreeAdaptivity: Number(process.env.FLUID_OCTREE_ADAPTIVITY) } : {}),
-  }, undefined, () => {}) as GPUSolverInstance;
+  };
+  const solver = await octreeMethod.createSolverAsync!(device, scene, solverQuality,
+    solverValues, undefined, () => {}) as GPUSolverInstance;
+  solver.applyRuntimeValues?.(solverValues);
   await device.queue.onSubmittedWorkDone();
   const dimensions = [solver.info.nx, solver.info.ny, solver.info.nz] as
     [number, number, number];
@@ -774,10 +946,14 @@ try {
         adaptiveMassReceipts: readonly number[];
         velocityMigration: readonly number[];
       }> | undefined>;
+      readPowerFrontierFailure(): Promise<Record<string, unknown>>;
+      powerLeafHeaders?: GPUBuffer;
+      powerCandidateLeafHeaders?: GPUBuffer;
       losassoExtensionControl?: GPUBuffer;
       losassoBackend?: {
         sources?: { operator?: { control: GPUBuffer } };
         candidateAuthorityControl?: GPUBuffer;
+        candidateTopologyCapacities?: Readonly<Record<string, number>>;
         adaptiveSurfaceGraphSources?: {
           accepted: { control: GPUBuffer; leaves: GPUBuffer; nodes: GPUBuffer;
             phi: GPUBuffer; surfaceMass: GPUBuffer };
@@ -786,7 +962,8 @@ try {
         };
         extensionBand?: { source?: { faceMetrics?: GPUBuffer } };
         adaptivePhiSource?: { receipts: GPUBuffer };
-        adaptiveMassSource?: { control: GPUBuffer; receipts: GPUBuffer };
+        adaptiveMassSource?: { control: GPUBuffer; receipts: GPUBuffer;
+          transferRecords: GPUBuffer; transportAdmission: GPUBuffer };
         adaptiveVelocity?: { candidateStencilControl: GPUBuffer };
       };
     };
@@ -809,12 +986,67 @@ try {
 
   const samples: Array<Record<string, unknown>> = [];
   let step = 0;
+  let previousMassVisibleVolumeCells: number | undefined;
+  let previousMassVisibleVolumeStep: number | undefined;
+  let previousReconstructedVisibleVolumeCells: number | undefined;
+  let previousReconstructedVisibleVolumeStep: number | undefined;
+  let previousAuthoritativeField: Float32Array | undefined;
+  let previousAuthoritativeFieldStep: number | undefined;
+  let previousAuthoritativeSpanField: Uint8Array | undefined;
   for (const target of sampleTimes) {
     const wanted = Math.round(target / dt);
     while (step < wanted) {
       step += 1;
-      while (!solver.advanceTo(step * dt, [])) {
-        await new Promise((resolve) => setImmediate(resolve));
+      try {
+        while (!solver.advanceTo(step * dt, [])) {
+          await new Promise((resolve) => setImmediate(resolve));
+        }
+      } catch (error) {
+        if (process.env.FLUID_CAPTURE_POWER_FRONTIER_FAILURE === "1" && projection) {
+          await device.queue.onSubmittedWorkDone();
+          const failure = await projection.readPowerFrontierFailure();
+          const frontier = Array.isArray(failure.frontier)
+            ? failure.frontier.map(Number) : [];
+          const active = frontier[2] ?? 0;
+          const inactive = frontier[7] ?? (1 - active);
+          const acceptedCount = frontier[active] ?? 0;
+          const candidateCount = frontier[inactive] ?? 0;
+          const leafSizeHistogram = async (buffer: GPUBuffer | undefined, count: number) => {
+            if (!buffer || count <= 0) return {};
+            const rows = Math.min(count, Math.floor(buffer.size / 48));
+            const bytes = await readBufferBinding(device, { buffer }, rows * 48);
+            const words = new Uint32Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 4);
+            const histogram: Record<string, number> = {};
+            for (let row = 0; row < rows; row += 1) {
+              const span = words[12 * row + 3] ?? 0;
+              histogram[String(span)] = (histogram[String(span)] ?? 0) + 1;
+            }
+            return histogram;
+          };
+          const [acceptedLeafSizes, inactiveLeafSizes, authority] = await Promise.all([
+            leafSizeHistogram(projection.powerLeafHeaders, acceptedCount),
+            leafSizeHistogram(projection.powerCandidateLeafHeaders, candidateCount),
+            projection.readLosassoAuthorityDiagnostics(),
+          ]);
+          console.error("[dam-frontier-failure]", JSON.stringify({
+            step, t_s: step * dt,
+            candidateAuthority: authority?.candidate,
+            candidateTopologyCapacities: projection.losassoBackend
+              ?.candidateTopologyCapacities,
+            candidateGraph: authority?.candidateAdaptiveGraph,
+            ownerCandidate: failure.ownerCandidate,
+            frontier,
+            frontierFailure: failure.frontierFailure,
+            frontierPublication: failure.frontierPublication,
+            dirtyAuthority: failure.dirtyAuthority,
+            dirtyAuthorityState: failure.dirtyAuthorityState,
+            rowDelta: failure.rowDelta,
+            candidateSchedules: failure.candidateSchedules,
+            controlSummary: failure.controlSummary,
+            acceptedCount, candidateCount, acceptedLeafSizes, inactiveLeafSizes,
+          }));
+        }
+        throw error;
       }
     }
     await device.queue.onSubmittedWorkDone();
@@ -939,7 +1171,20 @@ try {
     let adaptiveMassDensity: {
       dry: number; airSide: number; liquidSide: number; compressed: number;
       maximum: number; airSideMass_m3: number; compressedMass_m3: number;
+      compressionExcessMass_m3: number;
     } | undefined;
+    let massSurfaceConnectivity: SurfaceShape["wetConnectivity"] | undefined;
+    let massSurfaceQuadrature: SurfaceShape["zeroSetQuadrature"] | undefined;
+    let massSurfaceWallProximity: {
+      positiveXGapCells: number;
+      ceilingGapCellLayers: number;
+      wallWetCells: readonly [number, number, number, number, number, number];
+    } | undefined;
+    let massWetTransition: WetTransitionAttribution | undefined;
+    let currentAuthoritativeField: Float32Array | undefined;
+    let currentAuthoritativeSpanField: Uint8Array | undefined;
+    let ceilingWetLeaves: readonly Record<string, unknown>[] | undefined;
+    let ceilingTransferTrace: readonly Record<string, unknown>[] | undefined;
     let reconstructionMismatchNeighborhood: Record<string, unknown> | undefined;
     const acceptedMassGraph = projection?.losassoBackend
       ?.adaptiveSurfaceGraphSources?.accepted;
@@ -959,18 +1204,110 @@ try {
           massBytes.byteLength / 4);
         let dry = 0, airSide = 0, liquidSide = 0, compressed = 0;
         let maximum = 0, airSideMass_m3 = 0, compressedMass_m3 = 0;
+        let compressionExcessMass_m3 = 0;
+        let maximumWetY = -1;
+        const wetCeilingLeafRows: Array<Record<string, unknown>> = [];
+        const wallWetCells: [number, number, number, number, number, number] =
+          [0, 0, 0, 0, 0, 0];
+        const massPseudoPhi = new Float32Array(dimensions[0] * dimensions[1]
+          * dimensions[2]).fill(0.5);
+        const massSpanField = new Uint8Array(massPseudoPhi.length);
         for (let leaf = 0; leaf < leafCount; leaf += 1) {
+          const origin = [leaves[16 * leaf] ?? 0, leaves[16 * leaf + 1] ?? 0,
+            leaves[16 * leaf + 2] ?? 0] as const;
           const span = leaves[16 * leaf + 3] ?? 0;
           const volume = (span * shape.cellWidth) ** 3;
           const value = volume > 0 ? (mass[leaf] ?? 0) / volume : 0;
+          if (value > 0.5 && origin[1] + span >= dimensions[1]) {
+            wetCeilingLeafRows.push({ leaf, origin, span, rho: value,
+              mass_m3: mass[leaf] ?? 0 });
+          }
+          for (let z = origin[2]; z < Math.min(dimensions[2], origin[2] + span); z += 1) {
+            for (let y = origin[1]; y < Math.min(dimensions[1], origin[1] + span); y += 1) {
+              for (let x = origin[0]; x < Math.min(dimensions[0], origin[0] + span); x += 1) {
+                massPseudoPhi[x + dimensions[0] * (y + dimensions[1] * z)] = 0.5 - value;
+                massSpanField[x + dimensions[0] * (y + dimensions[1] * z)] = span;
+                if (value > 0.5) {
+                  maximumWetY = Math.max(maximumWetY, y);
+                  if (x === 0) wallWetCells[0]! += 1;
+                  if (x === dimensions[0] - 1) wallWetCells[1]! += 1;
+                  if (y === 0) wallWetCells[2]! += 1;
+                  if (y === dimensions[1] - 1) wallWetCells[3]! += 1;
+                  if (z === 0) wallWetCells[4]! += 1;
+                  if (z === dimensions[2] - 1) wallWetCells[5]! += 1;
+                }
+              }
+            }
+          }
           maximum = Math.max(maximum, value);
           if (value <= 1e-8) dry += 1;
           else if (value < 0.5) { airSide += 1; airSideMass_m3 += mass[leaf] ?? 0; }
           else if (value <= 1) liquidSide += 1;
-          else { compressed += 1; compressedMass_m3 += mass[leaf] ?? 0; }
+          else {
+            compressed += 1;
+            compressedMass_m3 += mass[leaf] ?? 0;
+            compressionExcessMass_m3 += Math.max(0, (mass[leaf] ?? 0) - volume);
+          }
         }
         adaptiveMassDensity = { dry, airSide, liquidSide, compressed, maximum,
-          airSideMass_m3, compressedMass_m3 };
+          airSideMass_m3, compressedMass_m3, compressionExcessMass_m3 };
+        massSurfaceConnectivity = wetConnectivity(massPseudoPhi, dimensions);
+        ceilingWetLeaves = Object.freeze(wetCeilingLeafRows);
+        currentAuthoritativeField = massPseudoPhi;
+        currentAuthoritativeSpanField = massSpanField;
+        if (previousAuthoritativeField
+          && previousAuthoritativeFieldStep !== undefined
+          && step - previousAuthoritativeFieldStep === 1) {
+          massWetTransition = wetTransitionAttribution(previousAuthoritativeField,
+            massPseudoPhi, dimensions, previousAuthoritativeSpanField);
+        }
+        massSurfaceQuadrature = zeroSetQuadrature(massPseudoPhi, dimensions);
+        massSurfaceWallProximity = {
+          positiveXGapCells: Math.max(0, dimensions[0] - massSurfaceQuadrature.frontCells),
+          ceilingGapCellLayers: maximumWetY < 0
+            ? dimensions[1] : dimensions[1] - 1 - maximumWetY,
+          wallWetCells: Object.freeze(wallWetCells),
+        };
+        if (process.env.FLUID_TRACE_CEILING_TRANSFERS === "1"
+          && wetCeilingLeafRows.length > 0) {
+          const adaptiveMassSource = projection?.losassoBackend?.adaptiveMassSource;
+          const massControl = await readControlWords(device, adaptiveMassSource?.control, 32);
+          const transferCount = Math.min(massControl?.[5] ?? 0,
+            Math.floor((adaptiveMassSource?.transferRecords.size ?? 0) / 16));
+          if (adaptiveMassSource && transferCount > 0) {
+            const [transferBytes, admissionBytes] = await Promise.all([
+              readBufferBinding(device, { buffer: adaptiveMassSource.transferRecords },
+                transferCount * 16),
+              readBufferBinding(device, { buffer: adaptiveMassSource.transportAdmission },
+                leafCount * 4),
+            ]);
+            const transferWords = new Uint32Array(transferBytes.buffer,
+              transferBytes.byteOffset, transferBytes.byteLength / 4);
+            const admissionWords = new Uint32Array(admissionBytes.buffer,
+              admissionBytes.byteOffset, admissionBytes.byteLength / 4);
+            const ceilingSlots = new Set(wetCeilingLeafRows.map((row) => Number(row.leaf)));
+            const traced: Array<Record<string, unknown>> = [];
+            for (let transfer = 0; transfer < transferCount; transfer += 1) {
+              const donor = transferWords[4 * transfer] ?? 0xffff_ffff;
+              const recipient = transferWords[4 * transfer + 1] ?? 0xffff_ffff;
+              const units = transferWords[4 * transfer + 2] ?? 0;
+              const flags = transferWords[4 * transfer + 3] ?? 0;
+              if (!ceilingSlots.has(recipient) || units === 0 || (flags & 1) === 0) continue;
+              const donorBase = 16 * donor;
+              traced.push({ transfer, donor, recipient, units, flags,
+                donorOrigin: donor < leafCount ? [leaves[donorBase] ?? 0,
+                  leaves[donorBase + 1] ?? 0, leaves[donorBase + 2] ?? 0] : undefined,
+                donorSpan: donor < leafCount ? leaves[donorBase + 3] : undefined });
+            }
+            for (const row of wetCeilingLeafRows) {
+              const leaf = Number(row.leaf);
+              const admission = admissionWords[leaf] ?? 0;
+              row.admissionReach = (admission & 0x8000_0000) !== 0;
+              row.admissionRemoteUnits = admission & 0x7fff_ffff;
+            }
+            ceilingTransferTrace = Object.freeze(traced);
+          }
+        }
       }
     }
     if (adaptiveMassReceipt
@@ -1022,6 +1359,17 @@ try {
       };
       reconstructionMismatchNeighborhood = { node,
         accepted: await inspect("accepted"), candidate: await inspect("candidate") };
+    }
+    if (process.env.FLUID_REQUIRE_CONNECTED_SURFACE === "1") {
+      assert.ok(massSurfaceConnectivity,
+        `t=${(step * dt).toFixed(3)}: authoritative surface-mass census is absent`);
+      assert.equal(massSurfaceConnectivity.componentCount, 1,
+        `t=${(step * dt).toFixed(3)}: expected exactly one rho>.5 component; `
+        + JSON.stringify(massSurfaceConnectivity.disconnectedComponents));
+      assert.equal(massSurfaceConnectivity.disconnectedCells, 0,
+        `t=${(step * dt).toFixed(3)}: authoritative rho>.5 liquid contains `
+        + `${massSurfaceConnectivity.disconnectedCells} cells outside its primary `
+        + `face-connected component`);
     }
     const fineTransportControl = await readControlWords(device,
       solver.globalFineTransportControl, 16);
@@ -1105,6 +1453,27 @@ try {
     // even though the surface directory below is current.
     await projection?.readSolveDiagnostics();
     const stats = await solver.readStats() as unknown as Record<string, unknown>;
+    const massVisibleVolumeCells = massSurfaceQuadrature?.volumeCells;
+    const massVisibleVolumeDeltaCells = massVisibleVolumeCells === undefined
+      || previousMassVisibleVolumeCells === undefined
+      ? undefined : massVisibleVolumeCells - previousMassVisibleVolumeCells;
+    const massVisibleVolumeJumpFraction = massVisibleVolumeDeltaCells === undefined
+      || previousMassVisibleVolumeCells === undefined || previousMassVisibleVolumeCells === 0
+      ? undefined : massVisibleVolumeDeltaCells / previousMassVisibleVolumeCells;
+    const massVisibleVolumeSampleInterval_s = previousMassVisibleVolumeStep === undefined
+      ? undefined : (step - previousMassVisibleVolumeStep) * dt;
+    const reconstructedVisibleVolumeCells = adaptiveMassReceipt
+      ? adaptiveMassReceipt.reconstructionMeasuredUnits / 65536 : undefined;
+    const reconstructedVisibleVolumeDeltaCells = reconstructedVisibleVolumeCells === undefined
+      || previousReconstructedVisibleVolumeCells === undefined
+      ? undefined : reconstructedVisibleVolumeCells - previousReconstructedVisibleVolumeCells;
+    const reconstructedVisibleVolumeJumpFraction = reconstructedVisibleVolumeDeltaCells === undefined
+      || previousReconstructedVisibleVolumeCells === undefined
+      || previousReconstructedVisibleVolumeCells === 0
+      ? undefined : reconstructedVisibleVolumeDeltaCells / previousReconstructedVisibleVolumeCells;
+    const reconstructedVisibleVolumeSampleInterval_s =
+      previousReconstructedVisibleVolumeStep === undefined
+        ? undefined : (step - previousReconstructedVisibleVolumeStep) * dt;
     samples.push({
       t_s: Number((step * dt).toFixed(6)), ...summary,
       phiDistance: fidelity,
@@ -1116,6 +1485,24 @@ try {
       adaptivePhiReceipt,
       adaptiveMassReceipt,
       adaptiveMassDensity,
+      massSurfaceConnectivity,
+      massSurfaceQuadrature,
+      massVisibleVolume_m3: massVisibleVolumeCells === undefined
+        ? undefined : massVisibleVolumeCells * shape.cellWidth ** 3,
+      massVisibleVolumeDelta_m3: massVisibleVolumeDeltaCells === undefined
+        ? undefined : massVisibleVolumeDeltaCells * shape.cellWidth ** 3,
+      massVisibleVolumeJumpFraction,
+      massVisibleVolumeSampleInterval_s,
+      massSurfaceWallProximity,
+      massWetTransition,
+      ceilingWetLeaves,
+      ceilingTransferTrace,
+      reconstructedVisibleVolume_m3: reconstructedVisibleVolumeCells === undefined
+        ? undefined : reconstructedVisibleVolumeCells * shape.cellWidth ** 3,
+      reconstructedVisibleVolumeDelta_m3: reconstructedVisibleVolumeDeltaCells === undefined
+        ? undefined : reconstructedVisibleVolumeDeltaCells * shape.cellWidth ** 3,
+      reconstructedVisibleVolumeJumpFraction,
+      reconstructedVisibleVolumeSampleInterval_s,
       reconstructionMismatchNeighborhood,
       fineTransportControl: fineTransportControl
         ? Array.from(fineTransportControl) : undefined,
@@ -1152,6 +1539,19 @@ try {
       maximumDivergence: stats.maximumDivergence,
       maximumSpeed: stats.maximumSpeed,
     });
+    if (massVisibleVolumeCells !== undefined) {
+      previousMassVisibleVolumeCells = massVisibleVolumeCells;
+      previousMassVisibleVolumeStep = step;
+    }
+    if (reconstructedVisibleVolumeCells !== undefined) {
+      previousReconstructedVisibleVolumeCells = reconstructedVisibleVolumeCells;
+      previousReconstructedVisibleVolumeStep = step;
+    }
+    if (currentAuthoritativeField) {
+      previousAuthoritativeField = currentAuthoritativeField;
+      previousAuthoritativeSpanField = currentAuthoritativeSpanField;
+      previousAuthoritativeFieldStep = step;
+    }
     if (printAscii) {
       console.error(`# t=${(step * dt).toFixed(3)} peak=${shape.peakCells} `
         + `columns=${shape.peakColumns} at=${shape.peakAt.join(",")}`);
@@ -1178,7 +1578,45 @@ try {
     }
   }
   solver.destroy();
-  const reportedSamples = transactionOnly ? samples : compact ? samples.map((sample) => {
+  const telemetrySamples = samples.map((sample) => ({
+      t_s: sample.t_s,
+      massVisibleVolume_m3: sample.massVisibleVolume_m3,
+      massVisibleVolumeDelta_m3: sample.massVisibleVolumeDelta_m3,
+      massVisibleVolumeJumpFraction: sample.massVisibleVolumeJumpFraction,
+      reconstructedVisibleVolume_m3: sample.reconstructedVisibleVolume_m3,
+      reconstructedVisibleVolumeDelta_m3: sample.reconstructedVisibleVolumeDelta_m3,
+      reconstructedVisibleVolumeJumpFraction: sample.reconstructedVisibleVolumeJumpFraction,
+      publishedVisibleVolume_m3: (sample.zeroSetQuadrature as
+        SurfaceShape["zeroSetQuadrature"]).volumeCells * dimensions.reduce(
+        (volume, _dimension) => volume * (sample.cellWidth as number), 1),
+      wallProximity: sample.massSurfaceWallProximity,
+      compressedExcessMass_m3: (sample.adaptiveMassDensity as
+        { compressionExcessMass_m3?: number } | undefined)?.compressionExcessMass_m3,
+      conservedMass_m3: (sample.adaptiveMassReceipt as ReturnType<
+        typeof unpackAdaptiveMassReceipt> | undefined)?.acceptedMass_m3,
+      connectivity: sample.massSurfaceConnectivity,
+      wetTransition: sample.massWetTransition,
+      ceilingWetLeaves: sample.ceilingWetLeaves,
+      ceilingTransferTrace: sample.ceilingTransferTrace,
+      massErrors: (sample.adaptiveMassReceipt as ReturnType<
+        typeof unpackAdaptiveMassReceipt> | undefined)?.errors,
+    }));
+  const maximumBy = (key: "massVisibleVolumeJumpFraction"
+    | "reconstructedVisibleVolumeJumpFraction") => telemetrySamples.reduce(
+    (maximum, sample) => Number(sample[key] ?? -Infinity)
+      > Number(maximum?.[key] ?? -Infinity) ? sample : maximum,
+    undefined as typeof telemetrySamples[number] | undefined);
+  const wallVolumeSummary = volumeSummaryOnly ? {
+    maximumMassVisibleJump: maximumBy("massVisibleVolumeJumpFraction"),
+    maximumReconstructedVisibleJump: maximumBy("reconstructedVisibleVolumeJumpFraction"),
+    firstPositiveXWallContact: telemetrySamples.find((sample) =>
+      ((sample.wallProximity as { positiveXGapCells?: number } | undefined)
+        ?.positiveXGapCells ?? Infinity) <= 0.125),
+    keySamples: [0.552, 0.736, 0.8].map((time) => telemetrySamples.find((sample) =>
+      Math.abs(Number(sample.t_s) - time) < dt / 2)),
+  } : undefined;
+  const reportedSamples = transactionOnly ? samples : volumeSummaryOnly ? []
+    : volumeTelemetryOnly ? telemetrySamples : compact ? samples.map((sample) => {
     const quadrature = sample.zeroSetQuadrature as SurfaceShape["zeroSetQuadrature"];
     const phiReceipt = sample.adaptivePhiReceipt as ReturnType<
       typeof unpackAdaptivePhiReceipt> | undefined;
@@ -1192,7 +1630,13 @@ try {
       centerOfMassCells: quadrature.centerOfMassCells,
       frontCells: quadrature.frontCells,
       medianHeightCells: sample.medianHeightCells,
+      maximumHeightCells: sample.maximumHeightCells,
       peakCells: sample.peakCells,
+      peakColumns: sample.peakColumns,
+      peakAt: sample.peakAt,
+      maximumNeighborStepCells: sample.maximumNeighborStepCells,
+      wetConnectivity: sample.wetConnectivity,
+      profileX: sample.profileX,
       interiorRidgeCells: sample.interiorRidgeCells,
       measuredVolume_m3: phiReceipt?.measuredVolume_m3,
       targetVolume_m3: phiReceipt?.targetVolume_m3,
@@ -1209,6 +1653,17 @@ try {
       reconstructionMeasuredUnits: massReceipt?.reconstructionMeasuredUnits,
       reconstructionSignMismatches: massReceipt?.reconstructionSignMismatches,
       adaptiveMassDensity: sample.adaptiveMassDensity,
+      massSurfaceConnectivity: sample.massSurfaceConnectivity,
+      massSurfaceQuadrature: sample.massSurfaceQuadrature,
+      massVisibleVolume_m3: sample.massVisibleVolume_m3,
+      massVisibleVolumeDelta_m3: sample.massVisibleVolumeDelta_m3,
+      massVisibleVolumeJumpFraction: sample.massVisibleVolumeJumpFraction,
+      massVisibleVolumeSampleInterval_s: sample.massVisibleVolumeSampleInterval_s,
+      massSurfaceWallProximity: sample.massSurfaceWallProximity,
+      reconstructedVisibleVolume_m3: sample.reconstructedVisibleVolume_m3,
+      reconstructedVisibleVolumeDelta_m3: sample.reconstructedVisibleVolumeDelta_m3,
+      reconstructedVisibleVolumeJumpFraction: sample.reconstructedVisibleVolumeJumpFraction,
+      reconstructedVisibleVolumeSampleInterval_s: sample.reconstructedVisibleVolumeSampleInterval_s,
       reconstructionMismatchNeighborhood: sample.reconstructionMismatchNeighborhood,
       firstReconstructionSignMismatchNode: massReceipt
         && massReceipt.firstReconstructionSignMismatchItem !== 0xffff_ffff
@@ -1242,7 +1697,7 @@ try {
   console.log(JSON.stringify({
     phase: "dam-surface-shape", scene: sceneId, dt, dimensions, runtimeTopologyDials,
     refinementRegionFloor: refinementRegionFloor || undefined,
-    validationErrors, samples: reportedSamples,
+    validationErrors, wallVolumeSummary, samples: reportedSamples,
   }, null, compact ? undefined : 1));
   device.destroy();
 } finally {

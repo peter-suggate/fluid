@@ -464,7 +464,15 @@ export class WebGPUOctreeLosassoAdaptiveVelocity {
   }
 
   encodeAcceptedFields(broker: PassBroker): void {
-    this.encodeField(broker, "accepted"); this.encodeField(broker, "predictor");
+    this.encodeAcceptedField(broker); this.encodePredictorField(broker);
+  }
+  /** Reconstruct only the carried/projected field consumed by forward traces. */
+  encodeAcceptedField(broker: PassBroker): void {
+    this.encodeField(broker, "accepted");
+  }
+  /** Reconstruct only the advected predictor consumed by the reverse trace. */
+  encodePredictorField(broker: PassBroker): void {
+    this.encodeField(broker, "predictor");
   }
   /**
    * Publish the construction/topology-boundary fields from the committed
@@ -480,11 +488,8 @@ export class WebGPUOctreeLosassoAdaptiveVelocity {
     this.encodeField(broker, "accepted", groups[0]);
     this.encodeField(broker, "predictor", groups[1]);
   }
-  encodeCandidateFields(broker: PassBroker): void {
-    this.encodeCandidateStencils(broker);
-    this.encodeField(broker, "candidate"); this.encodeField(broker, "candidatePredictor");
-  }
-  private encodeCandidateStencils(broker: PassBroker): void {
+  /** Compile topology/geometry-only candidate face lookups once per graph publication. */
+  encodeCandidateStencils(broker: PassBroker): void {
     const groups = this.stencilBuildGroups;
     if (!groups) throw new Error("Adaptive velocity stencil compiler is not initialized");
     const run = (entryPoint: EntryPoint, group: GPUBindGroup, indirect = false) => {
@@ -497,6 +502,15 @@ export class WebGPUOctreeLosassoAdaptiveVelocity {
     run("prepareAdaptiveVelocityStencils", groups.prepare);
     run("compileAdaptiveVelocityStencils", groups.compile, true);
     run("finishAdaptiveVelocityStencils", groups.finish);
+  }
+  /** Reconstruct both candidate banks against the already-compiled topology lookups. */
+  encodeCandidateFieldRound(broker: PassBroker): void {
+    this.encodeField(broker, "candidate"); this.encodeField(broker, "candidatePredictor");
+  }
+  /** Combined single-round entry point retained for standalone candidate construction. */
+  encodeCandidateFields(broker: PassBroker): void {
+    this.encodeCandidateStencils(broker);
+    this.encodeCandidateFieldRound(broker);
   }
   private encodeReadyStencilCommit(broker: PassBroker): void {
     const groups = this.stencilCommitGroups;

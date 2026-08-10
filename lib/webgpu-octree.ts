@@ -6193,6 +6193,8 @@ export class WebGPUOctreeProjection {
    * counter. GPU audit paths obtain it from the accepted structured control. */
   get powerPublicationGeneration(): number | undefined { return undefined; }
   get powerLeafHeaders() { return this.leafHeaders; }
+  /** QA-only inactive compact pressure headers for failed candidate diagnosis. */
+  get powerCandidateLeafHeaders() { return this.candidateLeafHeaders; }
   /** QA-only active compact pressure potential, indexed by leaf row. */
   get powerPressureBuffer() { return this.latestPressureInA ? this.pressureA : this.pressureB; }
   /** QA-only buffers for the cold-to-recurring sparse-topology acceptance gate. */
@@ -8996,7 +8998,9 @@ fn classifyTopologyTileSignature(
       let right = tileSignatureReduction[lid + stride];
       tileSignatureReduction[lid] = vec4u(
         tileSignatureReduction[lid].x ^ right.x,
-        tileSignatureReduction[lid].yzw + right.yzw,
+        tileSignatureReduction[lid].y + right.y,
+        tileSignatureReduction[lid].z + right.z,
+        tileSignatureReduction[lid].w + right.w,
       );
       let frontierRight = tileFrontierSignatureReduction[lid + stride];
       tileFrontierSignatureReduction[lid] = vec4u(
@@ -9306,7 +9310,9 @@ fn resetTopology(@builtin(global_invocation_id) gid: vec3u) { resetTopologyAt(gi
 
 @compute @workgroup_size(4,4,4)
 fn resetTopologyDelta(@builtin(workgroup_id) wid: vec3u, @builtin(local_invocation_id) lid: vec3u) {
-  resetTopologyAt(deltaTopologyCell(wid, lid));
+  let q = deltaTopologyCell(wid, lid);
+  if (any(q >= dims())) { return; }
+  resetTopologyAt(q);
 }
 
 struct FineLeafSummary {
@@ -9360,31 +9366,44 @@ fn adaptiveLosassoLeafSummary(origin: vec3u, size: u32) -> FineLeafSummary {
   result.centerValid = fineSummaryFinite(result.centerPhi);
   result.sizingRefinement = centre.densityDetail;
   // When one accepted owner contains this candidate, derive the child's own
-  // interval from eight inset corner samples of that owner's trilinear field.
-  // Reusing the owner's full interval here made every child inherit one remote
-  // crossing corner; topology refined an entire dry owner instead of the
-  // advancing sheet and the bounded candidate graph rejected the generation.
+  // interval from the candidate's exact eight corners in that owner's
+  // trilinear field. Reusing the owner's full interval here made every child
+  // inherit one remote crossing corner; topology refined an entire dry owner
+  // instead of the advancing sheet and the bounded candidate graph rejected
+  // the generation. Sampling inset corners is not equivalent, though: an
+  // exact zero on a candidate face then becomes two same-sign intervals. The
+  // factor-one branch deliberately has no metric distance padding, so that
+  // tiny displacement allowed a moving interface leaf to coarsen. Evaluate
+  // through the containing owner directly so a corner on the domain boundary
+  // is valid and an owner-boundary lookup cannot select its neighbour.
   // Canonical air remains an exact size-one fast path.
   if (centre.leafSize >= size || (size == 1u && centre.leafSize == 0u)) {
     if (centre.leafSize == 0u) {
       result.minimumPhi = farAir;
       result.maximumPhi = farAir;
     } else {
-      let inset = min(1.0e-4, 0.25 * f32(size));
-      let interiorSpan = max(0.0, f32(size) - 2.0 * inset);
+      let ownerSize = centre.leafSize;
+      let ownerOrigin = (vec3u(floor(centrePoint)) / vec3u(ownerSize))
+        * vec3u(ownerSize);
+      let ownerCell = index(ownerOrigin);
+      let ownerRow = losassoArenaLookup(ownerCell, ownerSize);
+      if (ownerRow == 0xffffffffu || ownerRow >= coarseWord(2u)) {
+        return FineLeafSummary(false, false, true, false, false, false, false, 0.0,
+          3.402823e38, -3.402823e38, 3.402823e38, 0u, 0u);
+      }
       for (var corner = 0u; corner < 8u; corner += 1u) {
-        let offset = vec3f(
-          select(inset, inset + interiorSpan, (corner & 1u) != 0u),
-          select(inset, inset + interiorSpan, (corner & 2u) != 0u),
-          select(inset, inset + interiorSpan, (corner & 4u) != 0u));
-        let sample = correctedCoarsePhi(vec3f(origin) + offset);
-        if (!sample.authority || sample.leafSize == 0u || !fineSummaryFinite(sample.phi)) {
+        let offset = f32(size) * vec3f(vec3u(
+          select(0u, 1u, (corner & 1u) != 0u),
+          select(0u, 1u, (corner & 2u) != 0u),
+          select(0u, 1u, (corner & 4u) != 0u)));
+        let value = losassoAdaptivePhi(ownerRow, ownerOrigin, ownerSize,
+          vec3f(origin) + offset, 3.402823e38);
+        if (!fineSummaryFinite(value)) {
           return FineLeafSummary(false, false, true, false, false, false, false, 0.0,
             3.402823e38, -3.402823e38, 3.402823e38, 0u, 0u);
         }
-        result.sizingRefinement = result.sizingRefinement || sample.densityDetail;
-        result.minimumPhi = min(result.minimumPhi, sample.phi);
-        result.maximumPhi = max(result.maximumPhi, sample.phi);
+        result.minimumPhi = min(result.minimumPhi, value);
+        result.maximumPhi = max(result.maximumPhi, value);
       }
     }
     result.minimumAbsolutePhi = select(
@@ -9738,7 +9757,19 @@ fn pressureRefinementEvidence(origin: vec3u, size: u32) -> bool {
     return true;
   }
   let summary = fineLeafSummary(origin, size);
-  if (!summary.found) { return false; }
+  if (!summary.found) {
+    // The accepted factor-one surface is a sparse leaf arena rather than a
+    // dense mip hierarchy. A tile-sized query can therefore be unresolved
+    // even though one of its descendants contains the transported contour.
+    // Rejecting that root leaves the candidate as a handful of maximum-sized
+    // cells, so no later pass can ask the smaller queries that the sparse
+    // arena can answer. Split an unresolved adaptive root once; size-8 and
+    // smaller candidates remain entirely evidence-driven. This is the
+    // conservative root step of the Ando--Batty rebuild, not a persistent
+    // interface halo.
+    return adaptiveCoarseSurface != 0u && losassoCoarseArenaAuthority()
+      && fineSummaryFactor == 1u && size == topologyTileSize();
+  }
   // Band one exposes the explicit coarse-cut experiment. The factor-one
   // tracker carries an exact sign mask for every finest sample in this B4
   // block, while the Losasso operator, ghost publication, and topology
@@ -9751,7 +9782,13 @@ fn pressureRefinementEvidence(origin: vec3u, size: u32) -> bool {
       && !summary.sizingRefinement) {
     return false;
   }
-  let crossesInterface = summary.minimumPhi <= 0.0 && summary.maximumPhi >= 0.0;
+  // A zero merely touching the closure of a cell is owned by the adjacent
+  // sign-changing cell. Treating both closed intervals as cut duplicates the
+  // refinement shell whenever the density-derived rho=.5 contour lands
+  // exactly on a node (a common, meaningful value in this representation).
+  // Cold authored boxes have their own closure-aware bootstrap rule above;
+  // recurring topology therefore uses a strict interior sign crossing.
+  let crossesInterface = summary.minimumPhi < 0.0 && summary.maximumPhi > 0.0;
   // A sign crossing is positive refinement evidence even when the narrow-band
   // publication does not fill the candidate leaf's entire volume. Requiring a
   // complete size-8/16 summary here strands factor-1 surface bricks inside the

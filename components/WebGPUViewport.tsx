@@ -911,7 +911,23 @@ export function WebGPUViewport() {
       if (publishStatus) diagnostics.set({ gpuStatus: { state: "stopping", label: "Stopping WebGPU; waiting for initialization and solver tasks to drain", resource: webGPUPlatformResourcePlugin } });
       const pendingLease = leaseAcquisition;
       const releasedLabel = label.includes("device released") ? label : `${label}; device released — safe to close this tab`;
-      const reproduction = dawnReproductionForGPUFailure(label);
+      const sceneState = useSceneStore.getState();
+      const methodState = useMethodStore.getState();
+      const failureScene = sceneState.scene;
+      const h = failureScene.voxelDomain.finestCellSize_m;
+      const reproduction = dawnReproductionForGPUFailure(label, {
+        sceneId: sceneState.presetId,
+        methodId: methodState.methodId,
+        quality: methodState.quality,
+        methodOverrides: methodState.overrides[methodState.methodId] ?? {},
+        grid: [
+          Math.round(failureScene.container.width_m / h),
+          Math.round(failureScene.container.height_m / h),
+          Math.round(failureScene.container.depth_m / h),
+        ],
+        fixedDt_s: failureScene.numerics.fixedDt_s,
+        maxDt_s: failureScene.numerics.maxDt_s,
+      });
       stopPromise = (async () => {
         await shutdownBrowserGPUSession(renderer, pendingLease, releaseGPULease);
         releaseGPULease = undefined;

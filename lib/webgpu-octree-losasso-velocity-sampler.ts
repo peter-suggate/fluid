@@ -37,7 +37,10 @@ export function planOctreeLosassoAxisFaceDirectory(
     throw new RangeError("Losasso sampler face capacity must be positive");
   }
   let directoryCapacity = 1;
-  while (directoryCapacity < 2 * faceCapacity) directoryCapacity *= 2;
+  // The shared publisher/sampler ABI deliberately bounds linear probing to
+  // 32 slots. Keep the table at or below one-quarter load so a valid compact
+  // face set does not fail publication merely from a long primary cluster.
+  while (directoryCapacity < 4 * faceCapacity) directoryCapacity *= 2;
   if (directoryCapacity > 0x4000_0000) throw new RangeError("Losasso face directory exceeds u32 addressing");
   return Object.freeze({ faceCapacity, directoryCapacity,
     loadFactor: faceCapacity / directoryCapacity,
@@ -70,7 +73,7 @@ export function buildOctreeLosassoAxisFaceDirectory(
     throw new RangeError("Losasso sampler dimensions must be positive integers");
   }
   const faceCount = faceGeometry.length / OCTREE_LOSASSO_AXIS_FACE_GEOMETRY_WORDS;
-  if (faceCount * 2 > directoryCapacity) throw new RangeError("Losasso face directory load exceeds 0.5");
+  if (faceCount * 4 > directoryCapacity) throw new RangeError("Losasso face directory load exceeds 0.25");
   const result = new Uint32Array(directoryCapacity * OCTREE_LOSASSO_AXIS_FACE_DIRECTORY_WORDS);
   const mask = directoryCapacity - 1;
   for (let face = 0; face < faceCount; face += 1) {

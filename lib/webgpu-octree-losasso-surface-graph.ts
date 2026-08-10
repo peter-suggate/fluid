@@ -223,7 +223,7 @@ const ENTRY_POINTS: readonly EntryPoint[] = [
 ];
 
 const BINDINGS: Readonly<Record<EntryPoint, readonly number[]>> = Object.freeze({
-  prepareSurfaceGraph: [0, 1, 3, 4, 8, 28, 30, 31, 35],
+  prepareSurfaceGraph: [0, 1, 3, 4, 8, 28, 29, 30, 31, 35],
   emitSurfaceGraphItems: [0, 5, 8, 29, 30],
   prepareSurfaceGraphLeaves: [0, 4, 6, 7, 8, 28],
   buildSurfaceGraphLeavesAndNodeItems: [0, 5, 6, 8, 9, 10, 29, 30],

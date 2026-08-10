@@ -149,6 +149,11 @@ export function collapseGPUFixedSteps(accumulator_s: number, dt_s: number) {
   return { steps, remainder_s: Math.max(0, accumulator_s - steps * dt_s) };
 }
 
+/** Scale the single rigid/fluid timeline without changing its fixed step. */
+export function scaledSimulationClockElapsed(elapsed_s: number, rate: number): number {
+  return Math.max(0, elapsed_s) * rate;
+}
+
 /**
  * Owns the mutable runtime the render loop needs at 60 Hz — rigid-body
  * states, the CPU oracle solver, accumulators, pending GPU impulse loads —
@@ -311,7 +316,10 @@ class SimulationController {
       this.rateWallClock = 0;
       return;
     }
-    this.accumulator += elapsed;
+    // Scale the target clock rather than the solver step. This makes a rate
+    // change take effect on the next animation frame while preserving the
+    // scene's fixed-step stability and validation contract.
+    this.accumulator += scaledSimulationClockElapsed(elapsed, runtime.targetSimRate);
     const dt = scene.numerics.fixedDt_s;
     let steps = 0;
     let diagnostics: RigidStepDiagnostics | undefined;

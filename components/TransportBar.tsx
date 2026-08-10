@@ -5,7 +5,11 @@ import { simulation } from "@/lib/simulation/controller";
 import { simulationRecording } from "@/lib/simulation/recording";
 import { useDiagnosticsStore } from "@/lib/stores/diagnostics-store";
 import { useRecordingStore } from "@/lib/stores/recording-store";
-import { useRuntimeStore } from "@/lib/stores/runtime-store";
+import {
+  MAX_TARGET_SIM_RATE,
+  MIN_TARGET_SIM_RATE,
+  useRuntimeStore,
+} from "@/lib/stores/runtime-store";
 import { useSceneStore } from "@/lib/stores/scene-store";
 import { useMethodStore } from "@/lib/stores/method-store";
 import { requestManualGPUStop } from "@/lib/gpu-startup";
@@ -20,6 +24,8 @@ export function TransportBar() {
   const simulationTime = useRuntimeStore((state) => state.simulationTime);
   const notice = useRuntimeStore((state) => state.notice);
   const noticeTone = useRuntimeStore((state) => state.noticeTone);
+  const targetSimRate = useRuntimeStore((state) => state.targetSimRate);
+  const setTargetSimRate = useRuntimeStore((state) => state.setTargetSimRate);
   const simRate = useRuntimeStore((state) => state.simRate);
   const maxDt = useSceneStore((state) => state.scene.numerics.maxDt_s);
   const fixedDt = useSceneStore((state) => state.scene.numerics.fixedDt_s);
@@ -85,6 +91,37 @@ export function TransportBar() {
       </div>
       <div className="time-readout">
         <span>t</span><strong>{simulationTime.toFixed(4)}</strong><small>s</small>
+        <div className="transport-timing">
+          <label title="Desired simulated seconds per wall-clock second">
+            <span>RATE</span>
+            <input
+              type="range"
+              min={MIN_TARGET_SIM_RATE}
+              max={MAX_TARGET_SIM_RATE}
+              step="0.1"
+              value={targetSimRate}
+              onChange={(event) => setTargetSimRate(event.currentTarget.valueAsNumber)}
+              aria-label="Simulation rate"
+            />
+            <div className="timing-entry">
+              <b>×</b>
+              <input
+                type="number"
+                min={MIN_TARGET_SIM_RATE}
+                max={MAX_TARGET_SIM_RATE}
+                step="0.1"
+                value={targetSimRate}
+                onChange={(event) => {
+                  if (Number.isFinite(event.currentTarget.valueAsNumber)) {
+                    setTargetSimRate(event.currentTarget.valueAsNumber);
+                  }
+                }}
+                aria-label="Simulation rate multiplier"
+              />
+            </div>
+            <small>TARGET</small>
+          </label>
+        </div>
         {simRate !== null && <small className="sim-rate" title={webgpu ? "Queue-confirmed simulated seconds completed per wall-clock second" : "Simulated seconds completed per wall-clock second"}>ACTUAL ×{simRate.toFixed(2)}</small>}
         {lagged && <small className="lag-chip" title="Simulation time currently admitted to the bounded GPU feed window.">GPU −{gpuLag.toFixed(1)} s</small>}
         {recordingStatus === "recording" && recordingStart !== null && <small className="recording-chip"><i />REC {(simulationTime - recordingStart).toFixed(2)} s</small>}

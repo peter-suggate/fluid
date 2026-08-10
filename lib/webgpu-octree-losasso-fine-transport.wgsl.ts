@@ -118,7 +118,7 @@ fn evaluatedSizingScore(grid:vec3f,centerPhi:f32)->f32{
 fn acceptedVelocity()->bool{return arrayLength(&coarse)>=7u&&coarse[3]==1u
  &&(p.expectedVelocityEpoch==0u||coarse[0]==p.expectedVelocityEpoch)
  &&coarse[2]<=arrayLength(&faceGeometry)&&coarse[2]<=arrayLength(&extendedVelocity)
- &&losassoDirectoryCapacity()>=2u*coarse[2]
+ &&losassoDirectoryCapacity()>=4u*coarse[2]
  &&losassoDirectoryCapacity()<=arrayLength(&faceDirectory);}
 fn acceptedStep()->bool{return atomicLoad(&control[6])==0u&&atomicLoad(&control[7])==0u
  &&atomicLoad(&control[1])==0u&&atomicLoad(&control[0])==0u;}

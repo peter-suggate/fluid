@@ -49,6 +49,11 @@ import {
 } from "../lib/webgpu-pass-broker";
 import { requiredFluidDeviceLimits } from "../lib/webgpu-device-limits";
 import { fluidExecutionDeviceFeatures } from "../lib/gpu-startup";
+import { initialRasterPresentationReadiness } from "../lib/gpu-t0-presentation";
+import { environmentIndex } from "../lib/environments";
+import { advancePresentationClock, frameInterval_ms } from "../lib/frame-pacing";
+import { createGlobalFineLevelSetConsumerSource } from "../lib/octree-consumer-sampling";
+import { RasterWaterPipeline } from "../lib/webgpu-water-pipeline";
 import { measureHorizontalFrontCircularity } from "../lib/fluid-symmetry-diagnostic";
 import {
   OCTREE_OWNER_ARENA_MAGIC,
@@ -139,6 +144,259 @@ import { sceneEvidenceCollectorRegistry } from "./scene-evidence-collector-imple
 // WindowServer/AGX watchdog failures. Native Dawn and browser WebGPU workloads
 // must remain mutually exclusive until that driver fault is localized.
 console.error("SAFETY: close every browser WebGPU tab before running Dawn. Never run this smoke and browser GPU validation concurrently.");
+
+/**
+ * Persistent, production-shaped presentation cadence for the mini32 UI
+ * reproductions.  The ordinary smoke raster helper intentionally fences,
+ * reconstructs its pipeline, and reads back every requested image; using it as
+ * a per-step renderer would turn the browser's depth-two FIFO into a serialized
+ * diagnostic workload.  This owner instead mirrors the live renderer's
+ * 60-Hz admission, one physics advance per admitted presentation, persistent
+ * water pipeline, depth-two presentation ceiling, 250-ms stats poll, and
+ * separately fenced t=0 raster publication.
+ *
+ * It is deliberately mini32-specific: that authored scene has no rigid bodies,
+ * terrain, or dry-scene SVO, so this can reproduce its production fluid-only
+ * path without growing the smoke executor into a second general renderer.
+ */
+class Mini32UIPresentationCadence {
+  private readonly pipeline: RasterWaterPipeline;
+  private readonly uniformBuffer: GPUBuffer;
+  private readonly bodyBuffer: GPUBuffer;
+  private readonly output: GPUTexture;
+  private readonly columnFallback: GPUTexture;
+  private readonly packedUniform = new Float32Array(100);
+  private readonly emptyBodies = new Float32Array(12 * 16);
+  private readonly presentations: { completion: Promise<void>; settled: boolean }[] = [];
+  private lastFrameAt_ms = Number.NEGATIVE_INFINITY;
+  private lastStatsPollAt_ms = Number.NEGATIVE_INFINITY;
+  private pendingPhysicsBatches = 0;
+
+  private constructor(
+    private readonly device: GPUDevice,
+    private readonly solver: GPUSolverInstance,
+    private readonly scene: SceneDescription,
+  ) {
+    const width = 640, height = 360;
+    this.uniformBuffer = device.createBuffer({
+      label: "Mini32 UI-parity presentation uniforms",
+      size: 400,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+    this.bodyBuffer = device.createBuffer({
+      label: "Mini32 UI-parity presentation bodies",
+      size: 12 * 64,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    this.output = device.createTexture({
+      label: "Mini32 UI-parity presentation output",
+      size: [width, height],
+      format: "rgba8unorm",
+      usage: GPUTextureUsage.RENDER_ATTACHMENT,
+    });
+    this.columnFallback = device.createTexture({
+      label: "Mini32 UI-parity non-column fallback",
+      size: [1, 1],
+      format: "r32float",
+      usage: GPUTextureUsage.TEXTURE_BINDING,
+    });
+    this.pipeline = new RasterWaterPipeline(
+      device, "rgba8unorm", this.uniformBuffer, this.bodyBuffer,
+    );
+  }
+
+  static async create(
+    device: GPUDevice,
+    solver: GPUSolverInstance,
+    scene: SceneDescription,
+  ): Promise<Mini32UIPresentationCadence> {
+    if (scene.sceneId !== "minimal-power-dam-break-32"
+      || scene.rigidBodies.length !== 0 || scene.terrain) {
+      throw new Error("Mini32 UI presentation parity requires the body-free, terrain-free authored mini32 scene");
+    }
+    const cadence = new Mini32UIPresentationCadence(device, solver, scene);
+    await cadence.pipeline.initialize();
+    cadence.pipeline.setSceneOptics({
+      optics: scene.fluid.optics,
+      directional: scene.lighting?.directional,
+      grade: scene.lighting?.grade,
+      container: { width_m: scene.container.width_m, depth_m: scene.container.depth_m },
+    });
+    cadence.pipeline.setVolume(
+      solver.surfaceFieldTexture ?? solver.volumeTexture,
+      solver.columnBaseTexture ?? cadence.columnFallback,
+    );
+    cadence.pipeline.ensureSize(640, 360);
+
+    // The browser polls once on the paused attachment frame, then proves that
+    // exact frame's raster publication through diagnostics and a queue fence
+    // before the controller is allowed to advance simulation time.
+    await cadence.awaitFrameAdmission();
+    cadence.pollStats();
+    const encoded = cadence.submitPresentation(true);
+    const diagnostics = await cadence.pipeline.completeSurfaceDiagnostics();
+    await cadence.drain();
+    const sourceAttached = Boolean(solver.globalFineLevelSetSource
+      || solver.coarseLevelSetSource);
+    const readiness = initialRasterPresentationReadiness({
+      solverAttached: true,
+      initialSparseAuthorityReady: solver.initialSparseAuthorityReady === true,
+      globalFineAttached: sourceAttached,
+      surfaceSourceAttached: sourceAttached,
+      surfaceExtractionSubmitted: encoded.surfaceUpdated
+        && encoded.surfaceDiagnosticsCaptured,
+      presentationFenceCompleted: true,
+      diagnosticsRequired: true,
+      diagnostics,
+    });
+    solver.info.initialRasterSurfaceReady = readiness.ready;
+    solver.info.initialRasterSurfaceState = readiness.state;
+    solver.info.initialRasterSurfaceDiagnostic = readiness.label;
+    if (!readiness.ready) {
+      cadence.destroy();
+      throw new Error(readiness.label);
+    }
+    // Readiness settles outside draw(); production cannot submit the first
+    // advancing frame from that callback and waits for the following RAF.
+    cadence.lastFrameAt_ms = performance.now();
+    return cadence;
+  }
+
+  /** Wait for the next nominal browser animation frame. Saturated frames are
+   * skipped exactly as in WebGPURenderer.draw; they never submit physics. */
+  async awaitFrameAdmission(): Promise<void> {
+    for (;;) {
+      const now_ms = performance.now();
+      const dueAt_ms = Number.isFinite(this.lastFrameAt_ms)
+        ? this.lastFrameAt_ms + frameInterval_ms() : now_ms;
+      const delay_ms = dueAt_ms - now_ms;
+      if (delay_ms > 0.5) {
+        await new Promise((resolve) => setTimeout(resolve, delay_ms));
+      }
+      const frameAt_ms = performance.now();
+      this.lastFrameAt_ms = advancePresentationClock(this.lastFrameAt_ms, frameAt_ms);
+      for (let index = this.presentations.length - 1; index >= 0; index -= 1) {
+        if (this.presentations[index]!.settled) this.presentations.splice(index, 1);
+      }
+      if (this.presentations.length < 2) return;
+    }
+  }
+
+  /** The renderer bounds physics independently from presentation. A frame can
+   * be admitted and rendered while both physics completion callbacks are still
+   * outstanding; that frame intentionally carries no additional advance. */
+  get physicsAdvanceAvailable(): boolean {
+    return this.pendingPhysicsBatches < 2;
+  }
+
+  /** Called after advanceTo has synchronously submitted the frame's one physics
+   * transaction, and before smoke-only audit submissions can overtake its
+   * presentation. */
+  submitAdmittedFrame(previousSubmittedTime_s: number): void {
+    const submittedTime_s = this.solver.info.submittedTime_s ?? previousSubmittedTime_s;
+    if (submittedTime_s > previousSubmittedTime_s) {
+      this.pendingPhysicsBatches += 1;
+      this.solver.info.gpuPendingBatches = this.pendingPhysicsBatches;
+      this.solver.info.gpuInFlightSimulation_s = Math.max(
+        0, submittedTime_s - (this.solver.info.completedTime_s ?? 0),
+      );
+      // Register before presentation submission, matching the renderer's
+      // physics completion boundary rather than its later presentation fence.
+      void this.device.queue.onSubmittedWorkDone().then(() => {
+        this.pendingPhysicsBatches = Math.max(0, this.pendingPhysicsBatches - 1);
+        this.solver.info.completedTime_s = Math.max(
+          this.solver.info.completedTime_s ?? 0, submittedTime_s,
+        );
+        this.solver.info.gpuPendingBatches = this.pendingPhysicsBatches;
+        this.solver.info.gpuInFlightSimulation_s = Math.max(
+          0, (this.solver.info.submittedTime_s ?? submittedTime_s)
+            - (this.solver.info.completedTime_s ?? 0),
+        );
+      }).catch(() => { /* Device loss is reported by the enclosing smoke. */ });
+    }
+    this.pollStats();
+    this.submitPresentation(false);
+    void this.pipeline.completeSurfaceDiagnostics();
+  }
+
+  private pollStats(): void {
+    const now_ms = performance.now();
+    if (now_ms - this.lastStatsPollAt_ms < 250) return;
+    this.lastStatsPollAt_ms = now_ms;
+    void this.solver.readStats().catch(() => {
+      /* Device loss is reported by the enclosing smoke. */
+    });
+  }
+
+  private submitPresentation(forceSurfaceDiagnostics: boolean) {
+    const width = 640, height = 360;
+    const span = Math.max(
+      this.scene.container.width_m,
+      this.scene.container.height_m,
+      this.scene.container.depth_m,
+    );
+    this.packedUniform.fill(0);
+    this.packedUniform.set([
+      width, height, this.solver.info.submittedTime_s ?? 0, 0,
+      1.55 * span, 1.12 * span, 1.72 * span, 0,
+      0, 0.38 * this.scene.container.height_m, 0, 0,
+      this.scene.container.width_m, this.scene.container.height_m,
+      this.scene.container.depth_m,
+      this.scene.container.height_m * this.scene.container.fillFraction,
+      0, this.scene.voxelDomain.finestCellSize_m, 0, 0,
+      this.solver.info.nx, this.solver.info.ny, this.solver.info.nz, 3,
+      0, 0.5, 0, 0,
+      environmentIndex(this.scene.environment ?? "default"),
+      this.solver.info.lastDt_s ?? 0, this.solver.info.maxSpeed_m_s ?? 0, 0,
+    ], 0);
+    // Production refreshes both buffers on every admitted presentation even
+    // when this authored scene's body roster is empty.
+    this.device.queue.writeBuffer(this.uniformBuffer, 0, this.packedUniform);
+    this.device.queue.writeBuffer(this.bodyBuffer, 0, this.emptyBodies);
+    this.pipeline.setGlobalFineLevelSet(this.solver.globalFineLevelSetSource
+      ? createGlobalFineLevelSetConsumerSource(this.solver.globalFineLevelSetSource)
+      : undefined);
+    this.pipeline.setCoarseLevelSet(this.solver.coarseLevelSetSource);
+    const encoder = this.device.createCommandEncoder({
+      label: forceSurfaceDiagnostics
+        ? "Mini32 UI-parity t=0 presentation"
+        : "Mini32 UI-parity presentation",
+    });
+    const encoded = this.pipeline.encode(
+      encoder, this.output,
+      this.solver.info.nx, this.solver.info.ny, this.solver.info.nz,
+      this.solver.info.gridKind === "restricted-tall-cell",
+      this.solver.info.maximumNeighborDelta ?? 0,
+      this.solver.info.encodedSteps ?? 0,
+      undefined, undefined, undefined, forceSurfaceDiagnostics, "clear",
+    );
+    if (!encoded) throw new Error("Mini32 UI-parity water presentation did not encode");
+    this.device.queue.submit([encoder.finish()]);
+    const record = { completion: Promise.resolve(), settled: false };
+    record.completion = this.device.queue.onSubmittedWorkDone().then(() => {
+      record.settled = true;
+    }, () => {
+      // Match the live renderer: retire the FIFO slot even on loss and leave
+      // the enclosing device-lost authority to report the terminal failure.
+      record.settled = true;
+    });
+    this.presentations.push(record);
+    return encoded;
+  }
+
+  async drain(): Promise<void> {
+    const pending = this.presentations.splice(0);
+    await Promise.all(pending.map((record) => record.completion));
+  }
+
+  destroy(): void {
+    this.pipeline.destroy();
+    this.output.destroy();
+    this.columnFallback.destroy();
+    this.uniformBuffer.destroy();
+    this.bodyBuffer.destroy();
+  }
+}
 
 const modulePath = process.env.WEBGPU_NODE_MODULE;
 const webgpuModule = modulePath ? await import(pathToFileURL(modulePath).href) : await import("webgpu");
@@ -2097,6 +2355,11 @@ async function runGPU(
   } finally {
     if (enableAuthoredStructuredEnergyProbe) delete process.env.FLUID_STRUCTURED_ENERGY_PROBE;
   }
+  // The browser applies live method values immediately after attaching the
+  // solver and again before each admitted frame. Construction seeds the
+  // structural options, but runtime solve/extension/cadence dials are adopted
+  // only through this call. Dawn must cross the same initial boundary.
+  solver.applyRuntimeValues?.(values);
   const construction_ms = performance.now() - constructionStarted;
   const actualGrid: [number, number, number] = [solver.info.nx, solver.info.ny, solver.info.nz];
   if (expectedGridOverride && actualGrid.some((value, axis) => value !== expectedGridOverride[axis])) {
@@ -2112,6 +2375,29 @@ async function runGPU(
   const awaitAdvanceCompletion = async () => {
     await device.queue.onSubmittedWorkDone();
   };
+  // The two mini32 failure reproductions are explicitly UI reproductions, not
+  // throughput microbenchmarks.  Keep parity on by default for every authored
+  // mini32 lane; an investigation that intentionally wants the old unrendered,
+  // freely queued Dawn cadence can opt out without changing the scene profile.
+  const mini32UIExecutionParity = method.id === "octree"
+    && scenarioId === "minimal-power-dam-break-32"
+    && process.env.FLUID_DAWN_UI_EXECUTION_PARITY !== "0";
+  const uiPresentationCadence = mini32UIExecutionParity
+    ? await Mini32UIPresentationCadence.create(
+      instrumentedDevice, solver, scene,
+    )
+    : undefined;
+  if (uiPresentationCadence) {
+    console.log(JSON.stringify({
+      scenario: scenarioId, method: resultMethod,
+      phase: "ui-execution-parity-ready",
+      presentationHz: 1000 / frameInterval_ms(),
+      presentationQueueDepth: 2,
+      advancesPerPresentation: 1,
+      statsPollInterval_ms: 250,
+      initialRasterSurfaceState: solver.info.initialRasterSurfaceState,
+    }));
+  }
   // The evolving-fluid residency header rides the always-resident structural
   // scene source, so this costs one 64-byte readback and allocates nothing.
   const sparseSource = (solver as GPUSolverInstance).sparseVoxelSceneSource;
@@ -2890,8 +3176,22 @@ async function runGPU(
       ? Math.min(scene.numerics.maxDt_s, regressionDtPattern[steps % regressionDtPattern.length])
       : scene.numerics.maxDt_s;
     const requestedTime = Math.min(target_s, (solver.info.submittedTime_s ?? 0) + stepDt);
+    const previousSubmittedTime_s = solver.info.submittedTime_s ?? 0;
+    if (uiPresentationCadence) {
+      await uiPresentationCadence.awaitFrameAdmission();
+      // The live method store is resolved and re-applied on every admitted
+      // browser draw, immediately before that frame's one solver advance.
+      solver.applyRuntimeValues?.(values);
+      if (!uiPresentationCadence.physicsAdvanceAvailable) {
+        uiPresentationCadence.submitAdmittedFrame(previousSubmittedTime_s);
+        continue;
+      }
+    }
     const accepted = solver.advanceTo(requestedTime, bodies);
     if (!accepted) {
+      // WebGPURenderer still presents an admitted frame when advanceTo declines
+      // to move its submitted clock; only saturated RAF callbacks skip render.
+      uiPresentationCadence?.submitAdmittedFrame(previousSubmittedTime_s);
       rejectedAdvanceAttempts += 1;
       consecutiveRejectedAdvances += 1;
       maximumConsecutiveRejectedAdvances = Math.max(maximumConsecutiveRejectedAdvances,
@@ -2924,6 +3224,10 @@ async function runGPU(
     }
     consecutiveRejectedAdvances = 0;
     steps += 1;
+    // Physics was submitted synchronously by advanceTo.  Submit its matching
+    // presentation now, before smoke-only tripwire/audit copies can appear
+    // between the production physics and raster transactions.
+    uiPresentationCadence?.submitAdmittedFrame(previousSubmittedTime_s);
     // The reject carry is already decoded onto `solver.info` by the solver's own
     // readStats path; reading the published field costs nothing. It latches, so
     // report only transitions and the step that first observed one.
@@ -3130,7 +3434,9 @@ async function runGPU(
       if (!collectStabilityEnvelope && !performanceProfileRequested) matched = await readCubicVolumeField(device, solver);
       samplingWall_ms += performance.now() - samplingStartedAt;
     }
-    if (steps % completionFenceEverySteps === 0) await awaitAdvanceCompletion();
+    if (!uiPresentationCadence && steps % completionFenceEverySteps === 0) {
+      await awaitAdvanceCompletion();
+    }
     const shouldReport = reportEvery > 0 && steps % reportEvery === 0;
     const shouldSampleEnergy = energyEverySteps > 0 && steps % energyEverySteps === 0;
     const shouldSampleDetailedFields = method.id === "octree"
@@ -3754,6 +4060,7 @@ async function runGPU(
     if (lost) throw new Error(`${method.id} device lost: ${lost.message || lost.reason}`);
   }
   dataFlowAudit?.stop();
+  await uiPresentationCadence?.drain();
   await awaitAdvanceCompletion();
   const simulationCompletedAt_ms = performance.now();
   const simulationWall_ms = queueCompleteSimulationWall_ms(
@@ -5480,6 +5787,7 @@ async function runGPU(
     energyTrace, checkpoints
   };
   reportResult(scenario, result);
+  uiPresentationCadence?.destroy();
   solver.destroy(); device.destroy();
   return result;
 }

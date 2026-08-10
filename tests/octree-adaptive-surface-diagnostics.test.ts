@@ -28,6 +28,8 @@ test("adaptive surface audit identifies coarse crossings and renderer/constraint
   });
   assert.deepEqual(result.interfaceLeafCountsBySize, { 2: 1 });
   assert.equal(result.coarseInterfaceLeafCount, 1);
+  assert.equal(result.coarseStrictInterfaceLeafCount, 1);
+  assert.equal(result.coarseTouchingInterfaceLeafCount, 0);
   assert.equal(result.maximumStoredConstraintError, 0);
   assert.equal(result.maximumRendererCornerError, 0);
 });

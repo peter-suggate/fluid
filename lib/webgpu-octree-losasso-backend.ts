@@ -250,9 +250,9 @@ function topologyParameterWords(plan: WebGPUOctreeLosassoTopologyPlan,
   words.set([...owner.brickDimensions, owner.logicalBrickCount], 4);
   words.set([owner.ownerDirectoryOffsetWords, owner.ownerPagesOffsetWords,
     owner.capacity, owner.pageVoxels], 8);
-  // The directory is power-of-two and at most half full by construction.
+  // The directory is power-of-two and at most one-quarter full by construction.
   let directoryCapacity = 1;
-  while (directoryCapacity < 2 * capacities.faces) directoryCapacity *= 2;
+  while (directoryCapacity < 4 * capacities.faces) directoryCapacity *= 2;
   words.set([capacities.rows, capacities.faces, capacities.incidences,
     directoryCapacity], 12);
   new Float32Array(words.buffer).set([...plan.physicalCellSize, 0], 16);
@@ -971,6 +971,8 @@ export class WebGPUOctreeLosassoCoarseBackend {
         leafCapacity: graph.sources.accepted.leafCapacity,
         nodeCapacity: graph.sources.accepted.nodeCapacity,
         pressureRowCapacity: graph.sources.accepted.pressureRowCapacity,
+        ownerArena: adaptive.candidateOwnerArena,
+        sharpeningEnabled: false,
       });
       const accepted = this.publisher.authority.writable;
       const candidate = this.publisher.authority.candidate;
@@ -1224,10 +1226,13 @@ export class WebGPUOctreeLosassoCoarseBackend {
     // new nodes. Newly introduced faces are subsequently averaged from that
     // complete nodal authority. A second reconstruction publishes the final
     // node/face-consistent tuple; neither phase may observe stale face storage.
-    this.adaptiveVelocity.encodeCandidateFields(broker);
+    // Face geometry and its directory remain immutable during all four
+    // node/face closure rounds, so compile their direct nodal lookups once.
+    this.adaptiveVelocity.encodeCandidateStencils(broker);
+    this.adaptiveVelocity.encodeCandidateFieldRound(broker);
     this.publisher.encodeCandidateVelocityNodalCompletion(
       broker, this.surfaceGraph.sources.candidate);
-    this.adaptiveVelocity.encodeCandidateFields(broker);
+    this.adaptiveVelocity.encodeCandidateFieldRound(broker);
     // Completing new faces may seed graph-node components that were absent in
     // the first reconstruction. Revisit nodal-derived faces from that
     // now-expanded authority and publish a fresh coverage verdict.
@@ -1237,7 +1242,7 @@ export class WebGPUOctreeLosassoCoarseBackend {
     // chains. Each completion resets and republishes its own strict coverage
     // verdict; only the final round reaches the joint-ready gate.
     for (let round = 0; round < 2; round += 1) {
-      this.adaptiveVelocity.encodeCandidateFields(broker);
+      this.adaptiveVelocity.encodeCandidateFieldRound(broker);
       this.publisher.encodeCandidateVelocityNodalCompletion(
         broker, this.surfaceGraph.sources.candidate);
     }
@@ -1348,6 +1353,11 @@ export class WebGPUOctreeLosassoCoarseBackend {
 
   /** Candidate authority used only by the ready validator. */
   get candidateAuthorityControl(): GPUBuffer { return this.publisher.authority.candidate.control; }
+  get candidateTopologyCapacities() {
+    const candidate = this.publisher.authority.candidate;
+    return Object.freeze({ ...candidate.capacities,
+      faceDirectory: candidate.faceDirectoryCapacity });
+  }
   /** Diagnostic receipt consumed by the adaptive joint-ready validator. */
   get candidateVelocityMigrationReceipt(): GPUBuffer {
     return this.publisher.candidateVelocityMigrationReceipt;
@@ -1416,7 +1426,15 @@ export class WebGPUOctreeLosassoCoarseBackend {
     this.assertReady();
     this.dynamics.encodeAdvection(broker, step, () => {
       if (this.adaptiveVelocity) {
-        this.adaptiveVelocity.encodeAcceptedFields(broker);
+        // S1a changes only the predictor face bank. Rebuilding the carried
+        // accepted field here used to repeat the complete 20-wave extension
+        // even though neither its face seed nor its scalar support changed.
+        this.adaptiveVelocity.encodePredictorField(broker);
+        // The scalar advance intentionally leaves the shared two-bank clock
+        // unpublished while only the accepted bank is refreshed. Predictor
+        // completion is the first point where both receipts describe the new
+        // scalar generation, so publish that coherent tuple here.
+        this.adaptivePhi!.encodeAcceptedFieldClockSync(broker);
         return true;
       }
       this.extensionBand!.encodePredictorExtension(
@@ -1445,25 +1463,20 @@ export class WebGPUOctreeLosassoCoarseBackend {
     this.adaptivePhi.encodeAcceptedExternalPhiPublication(
       broker, this.adaptiveMass.source.control);
     const source = this.adaptivePhi.encodeAcceptedDerivations(broker);
-    // Mass publication advances the scalar clock and may change which graph nodes
-    // lie inside the physical extension reach. Rebuild the carried field from
-    // the still-accepted projected faces before any dynamics sampler consumes
-    // the new surface generation; projection replaces it again at the tail.
+    // The rho=.5 publication advances the scalar clock and may change which
+    // graph nodes lie inside the extension reach. Publish both nodal velocity
+    // banks before exposing that new scalar generation; deferring the
+    // predictor bank leaves the accepted graph tuple temporarily incoherent.
     this.adaptiveVelocity.encodeAcceptedFields(broker);
-    // Velocity publication stamps accepted graph word 6 only after both nodal
-    // banks are complete. Pair that clock with phi control now. Rebuilding
-    // topology every step used to hide the missing stamp at the following
-    // ready commit; a cadence-k epoch must stay coherent on every skipped
-    // rebuild without copying or re-filtering the accepted graph.
     this.adaptivePhi.encodeAcceptedFieldClockSync(broker);
     return source;
   }
 
-  /** Reconstruct both accepted and MacCormack predictor nodal velocity banks. */
+  /** Reconstruct the accepted carried/projected nodal velocity bank. */
   encodeAdaptiveAcceptedVelocityFields(broker: PassBroker): boolean {
     this.assertReady();
     if (!this.adaptiveVelocity) return false;
-    this.adaptiveVelocity.encodeAcceptedFields(broker);
+    this.adaptiveVelocity.encodeAcceptedField(broker);
     return true;
   }
 
@@ -1532,7 +1545,10 @@ export class WebGPUOctreeLosassoCoarseBackend {
       // not a finest-grid materialization and never feeds adaptive sampling.
       broker.copyBufferToBuffer(accepted.projectedVelocity, 0,
         accepted.extendedVelocity, 0, accepted.projectedVelocity.size);
-      this.adaptiveVelocity.encodeAcceptedFields(broker);
+      // Projection changes only the accepted face seed. The predictor remains
+      // the completed S1a field for this scalar generation and is replaced by
+      // the next S1a before it is sampled again.
+      this.adaptiveVelocity.encodeAcceptedField(broker);
       return true;
     }
     return this.extensionBand!.encodeOncePerAdvance(broker, advance, topologyEpoch);
