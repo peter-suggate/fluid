@@ -7,7 +7,7 @@ export const OCTREE_LOSASSO_ADAPTIVE_MASS_MAGIC = 0x414d_4153;
 export const OCTREE_LOSASSO_ADAPTIVE_MASS_CONTROL_WORDS = 32;
 export const OCTREE_LOSASSO_ADAPTIVE_MASS_RECEIPT_WORDS = 32;
 const ADAPTIVE_MASS_UNITS_PER_FINEST_CELL = 65_536;
-const ADAPTIVE_MASS_TRANSFER_RECORDS_PER_LEAF = 20;
+const ADAPTIVE_MASS_MAX_ARCS_PER_LEAF = 20;
 
 export const adaptiveMassControlLayout = Object.freeze({
   magic: 0, topologyEpoch: 1, surfaceGeneration: 2, leafCount: 3,
@@ -66,12 +66,10 @@ export interface WebGPUOctreeLosassoAdaptiveMassOptions {
   readonly pressureRowCapacity?: number;
   /** Stable owner-page arena used by the graph's compiled cell-to-leaf locator. */
   readonly ownerArena: GPUBuffer;
-  /** Fixed sparse transfer capacity. Twenty records cover a strict-2:1 tensor fan. */
-  readonly transferCapacity?: number;
+  /** Dense arc arena capacity. Twenty is the strict-2:1 worst case, but only
+   * live nonzero arcs are emitted and traversed. */
+  readonly transportArcCapacity?: number;
   readonly massEpsilon?: number;
-  /** Disable the current air-side concentration pass while retaining exact
-   * conservative transport. The unsharpened path finalizes from nextMass. */
-  readonly sharpeningEnabled?: boolean;
 }
 
 export interface WebGPUOctreeLosassoAdaptiveMassSource {
@@ -88,38 +86,38 @@ export interface WebGPUOctreeLosassoAdaptiveMassSource {
   readonly rowRho: GPUBuffer;
   /** vec4u(bitcast(centre),bitcast(min),bitcast(max),flags), pressure-row indexed. */
   readonly rowPhi: GPUBuffer;
-  /** Diagnostic sparse donor/recipient transfer records. */
-  readonly transferRecords: GPUBuffer;
-  /** Fail-only QA view: high bit is face reach, low 31 bits remote tentative units. */
-  readonly transportAdmission: GPUBuffer;
 }
 
 export interface OctreeLosassoAdaptiveMassPlan {
   readonly leafCapacity: number;
   readonly nodeCapacity: number;
   readonly pressureRowCapacity: number;
-  readonly transferCapacity: number;
+  readonly transportArcCapacity: number;
   readonly leafWorkgroups: number;
   readonly nodeWorkgroups: number;
   readonly rowWorkgroups: number;
-  readonly transferWorkgroups: number;
+  readonly transportArcWorkgroups: number;
   readonly allocatedBytes: number;
   readonly physicsAllocationScalesWithGraph: true;
 }
 
 type PipelineName = "prepareBootstrap" | "bootstrapMassFromPhi" | "finishBootstrap"
-  | "prepareTransport" | "clearTransport" | "markTransportSurfaceReach"
-  | "buildTransfers" | "scatterPredictedCompression" | "scatterTransfers"
-  | "finalizeTransfers" | "returnTransferRemainders" | "clearTransportCompression"
-  | "scatterAcceptedCompression" | "finishTransportCompression"
-  | "validateTransportLeaves" | "clearSharpen" | "buildSharpenTransfers"
-  | "scatterSharpenTransfers" | "validateSharpenLeaves"
-  | "finishTransportLeaves" | "finishUnsharpenedTransportLeaves" | "finishTransport"
-  | "prepareHandoff" | "handoffMass"
+  | "prepareTransport" | "measureTransportBeforeBlocks" | "finishTransportBefore"
+  | "countDonorTransfers"
+  | "scanDonorTransferLeaves" | "scanDonorTransferBlocks" | "addDonorTransferBlockOffsets"
+  | "emitOutgoingTransfers" | "clearRecipientTransferCounts" | "countRecipientTransfers"
+  | "scanRecipientTransferLeaves" | "scanRecipientTransferBlocks" | "addRecipientTransferBlockOffsets"
+  | "prepareIncomingTransferScatter" | "scatterIncomingTransferIds"
+  | "gatherPredictedCompression" | "gatherTentativeTransport" | "markTransportSurfaceReach"
+  | "finalizeDestinationTransport" | "returnDonorRemainders"
+  | "gatherAcceptedCompression" | "finishTransportLeaves" | "finishTransport"
+  | "prepareSharpen" | "countSharpenTransfers" | "emitSharpenTransfers" | "gatherSharpenedMass"
+  | "measureTransportAfterBlocks" | "finishTransportAfter"
+  | "prepareHandoff" | "measureHandoffSources" | "countHandoffRelations" | "scanHandoffRelationLeaves"
+  | "scanHandoffRelationBlocks" | "addHandoffRelationBlockOffsets"
+  | "emitHandoffRelations" | "handoffMass"
   | "finishHandoffLeaves" | "finishHandoff" | "deriveLeafRhoPhi" | "deriveNodalPseudoPhi"
-  | "validateNodalPseudoPhi"
-  | "projectNodalPseudoPhi" | "prepareReconstruction" | "clearReconstructionMeasure"
-  | "measureReconstructionVolume" | "finishReconstructionIteration" | "deriveRows";
+  | "projectNodalPseudoPhi" | "publishDerivedOutputs" | "deriveRows";
 
 const positive = (value: number, label: string): number => {
   if (!Number.isSafeInteger(value) || value < 1) throw new RangeError(`${label} must be a positive integer`);
@@ -144,9 +142,20 @@ export class WebGPUOctreeLosassoAdaptiveMass {
   private readonly nextMass: GPUBuffer;
   private readonly nextCompressionMass: GPUBuffer;
   private readonly transportAdmission: GPUBuffer;
-  private readonly transferRemainders: GPUBuffer;
-  /** Eight atomic words; the fixed rho=.5 midpoint is a one-way phi-cache value. */
-  private readonly reconstruction: GPUBuffer;
+  private readonly outgoingTransfers: GPUBuffer;
+  private readonly acceptedTransferUnits: GPUBuffer;
+  private readonly donorTransferCounts: GPUBuffer;
+  private readonly donorTransferOffsets: GPUBuffer;
+  private readonly recipientTransferCounts: GPUBuffer;
+  private readonly recipientTransferOffsets: GPUBuffer;
+  private readonly transferScanBlocks: GPUBuffer;
+  private readonly incomingTransfers: GPUBuffer;
+  private readonly donorTransportStates: GPUBuffer;
+  /** Dense destination-owned overlay of accepted and candidate dyadic leaves. */
+  private readonly handoffRelationCounts: GPUBuffer;
+  private readonly handoffRelationOffsets: GPUBuffer;
+  private readonly handoffRelationBlocks: GPUBuffer;
+  private readonly handoffRelations: GPUBuffer;
   private readonly emptyVelocity: GPUBuffer;
   private pipelines?: Readonly<Record<PipelineName, GPUComputePipeline>>;
   private readonly bindGroups = new Map<string, GPUBindGroup>();
@@ -158,11 +167,11 @@ export class WebGPUOctreeLosassoAdaptiveMass {
     const nodeCapacity = positive(options.nodeCapacity, "adaptive mass node capacity");
     const pressureRowCapacity = positive(options.pressureRowCapacity
       ?? graph.accepted.pressureRowCapacity, "adaptive mass pressure row capacity");
-    const transferCapacity = positive(options.transferCapacity
-      ?? ADAPTIVE_MASS_TRANSFER_RECORDS_PER_LEAF * leafCapacity,
-      "adaptive mass transfer capacity");
-    if (transferCapacity < ADAPTIVE_MASS_TRANSFER_RECORDS_PER_LEAF * leafCapacity) {
-      throw new RangeError("adaptive mass transfer capacity must reserve twenty records per possible donor");
+    const transportArcCapacity = positive(options.transportArcCapacity
+      ?? ADAPTIVE_MASS_MAX_ARCS_PER_LEAF * leafCapacity,
+      "adaptive mass transport arc capacity");
+    if (transportArcCapacity < ADAPTIVE_MASS_MAX_ARCS_PER_LEAF * leafCapacity) {
+      throw new RangeError("adaptive mass arc capacity must cover the strict-2:1 worst case");
     }
     if (!(options.cellSize > 0) || !Number.isFinite(options.cellSize)) {
       throw new RangeError("adaptive mass cell size must be finite and positive");
@@ -195,12 +204,38 @@ export class WebGPUOctreeLosassoAdaptiveMass {
       size: 4 * leafCapacity, usage: storage });
     this.transportAdmission = device.createBuffer({ label: "Adaptive transport surface admission",
       size: 4 * leafCapacity, usage: storage });
-    this.reconstruction = device.createBuffer({ label: "Adaptive nodal reconstruction measurement",
-      size: 32, usage: storage });
-    const transferRecords = device.createBuffer({ label: "Adaptive conservative transfer records",
-      size: 16 * transferCapacity, usage: storage });
-    this.transferRemainders = device.createBuffer({ label: "Adaptive conservative transfer remainders",
-      size: 4 * transferCapacity, usage: storage });
+    // The common refinement of two dyadic leaf partitions contains at most
+    // acceptedLeaves + candidateLeaves - 1 records. Keep one dense relation
+    // arena rather than making every candidate scan the complete source bank.
+    const handoffRelationCapacity = 2 * leafCapacity;
+    const handoffBlockCapacity = Math.ceil(leafCapacity / 256);
+    this.handoffRelationCounts = device.createBuffer({ label: "Adaptive mass handoff relation counts",
+      size: 4 * leafCapacity, usage: storage });
+    this.handoffRelationOffsets = device.createBuffer({ label: "Adaptive mass handoff relation offsets",
+      size: 4 * (leafCapacity + 1), usage: storage });
+    this.handoffRelationBlocks = device.createBuffer({ label: "Adaptive mass handoff relation scan blocks",
+      size: 8 * Math.max(1, handoffBlockCapacity), usage: storage });
+    this.handoffRelations = device.createBuffer({ label: "Adaptive mass compact handoff relations",
+      size: 8 * handoffRelationCapacity, usage: storage });
+    const transferBlockCapacity = Math.ceil(leafCapacity / 256);
+    this.outgoingTransfers = device.createBuffer({ label: "Adaptive compact outgoing transport arcs",
+      size: 8 * transportArcCapacity, usage: storage });
+    this.acceptedTransferUnits = device.createBuffer({ label: "Adaptive accepted transport arc units",
+      size: 4 * transportArcCapacity, usage: storage });
+    this.donorTransferCounts = device.createBuffer({ label: "Adaptive donor transport arc counts",
+      size: 4 * leafCapacity, usage: storage });
+    this.donorTransferOffsets = device.createBuffer({ label: "Adaptive donor transport arc offsets",
+      size: 4 * (leafCapacity + 1), usage: storage });
+    this.recipientTransferCounts = device.createBuffer({ label: "Adaptive recipient transport arc counts",
+      size: 4 * leafCapacity, usage: storage });
+    this.recipientTransferOffsets = device.createBuffer({ label: "Adaptive recipient transport arc offsets",
+      size: 4 * (leafCapacity + 1), usage: storage });
+    this.transferScanBlocks = device.createBuffer({ label: "Adaptive transport scan blocks",
+      size: 8 * Math.max(1, transferBlockCapacity), usage: storage });
+    this.incomingTransfers = device.createBuffer({ label: "Adaptive destination-owned incoming arcs",
+      size: 8 * transportArcCapacity, usage: storage });
+    this.donorTransportStates = device.createBuffer({ label: "Adaptive compact donor transport states",
+      size: 16 * leafCapacity, usage: storage });
     const leafRhoPhi = device.createBuffer({ label: "Adaptive leaf rho and pseudo-phi",
       size: 16 * leafCapacity, usage: storage });
     const rowRho = device.createBuffer({ label: "Adaptive pressure-row surface density",
@@ -214,16 +249,21 @@ export class WebGPUOctreeLosassoAdaptiveMass {
       acceptedCompression: graph.accepted.surfaceCompression,
       candidateMass: graph.candidate.surfaceMass,
       candidateCompression: graph.candidate.surfaceCompression,
-      leafRhoPhi, rowRho, rowPhi, transferRecords,
-      transportAdmission: this.transportAdmission });
+      leafRhoPhi, rowRho, rowPhi });
     const dispatch = (n: number) => Math.min(Math.ceil(n / 64), device.limits.maxComputeWorkgroupsPerDimension);
-    this.plan = Object.freeze({ leafCapacity, nodeCapacity, pressureRowCapacity, transferCapacity,
+    this.plan = Object.freeze({ leafCapacity, nodeCapacity, pressureRowCapacity, transportArcCapacity,
       leafWorkgroups: dispatch(leafCapacity), nodeWorkgroups: dispatch(nodeCapacity),
-      rowWorkgroups: dispatch(pressureRowCapacity), transferWorkgroups: dispatch(transferCapacity),
+      rowWorkgroups: dispatch(pressureRowCapacity), transportArcWorkgroups: dispatch(transportArcCapacity),
       allocatedBytes: 320 + control.size + receipts.size + this.nextMass.size
         + this.nextCompressionMass.size + this.transportAdmission.size
-        + transferRecords.size + this.transferRemainders.size + leafRhoPhi.size
-        + rowRho.size + rowPhi.size + this.emptyVelocity.size + this.reconstruction.size,
+        + this.outgoingTransfers.size + this.acceptedTransferUnits.size
+        + this.donorTransferCounts.size + this.donorTransferOffsets.size
+        + this.recipientTransferCounts.size + this.recipientTransferOffsets.size
+        + this.transferScanBlocks.size + this.incomingTransfers.size
+        + this.donorTransportStates.size + leafRhoPhi.size
+        + rowRho.size + rowPhi.size + this.emptyVelocity.size
+        + this.handoffRelationCounts.size + this.handoffRelationOffsets.size
+        + this.handoffRelationBlocks.size + this.handoffRelations.size,
       physicsAllocationScalesWithGraph: true as const });
     this.writeParams(this.params, 0, 0, 0);
     this.writeParams(this.advanceParams, 0, 0, 0);
@@ -241,18 +281,25 @@ export class WebGPUOctreeLosassoAdaptiveMass {
     const shaderModule = compiler.createShaderModule({ label: "Adaptive surface-mass operators",
       code: octreeLosassoAdaptiveMassWGSL });
     const names: readonly PipelineName[] = ["prepareBootstrap", "bootstrapMassFromPhi", "finishBootstrap",
-      "prepareTransport", "clearTransport", "markTransportSurfaceReach", "buildTransfers",
-      "scatterPredictedCompression", "scatterTransfers", "finalizeTransfers", "returnTransferRemainders",
-      "clearTransportCompression", "scatterAcceptedCompression", "finishTransportCompression",
-      "validateTransportLeaves",
-      "clearSharpen", "buildSharpenTransfers", "scatterSharpenTransfers", "validateSharpenLeaves",
-      "finishTransportLeaves", "finishUnsharpenedTransportLeaves", "finishTransport",
-      "prepareHandoff", "handoffMass",
+      "prepareTransport", "measureTransportBeforeBlocks", "finishTransportBefore",
+      "countDonorTransfers",
+      "scanDonorTransferLeaves", "scanDonorTransferBlocks", "addDonorTransferBlockOffsets",
+      "emitOutgoingTransfers", "clearRecipientTransferCounts", "countRecipientTransfers",
+      "scanRecipientTransferLeaves", "scanRecipientTransferBlocks", "addRecipientTransferBlockOffsets",
+      "prepareIncomingTransferScatter", "scatterIncomingTransferIds",
+      "gatherPredictedCompression", "gatherTentativeTransport", "markTransportSurfaceReach",
+      "finalizeDestinationTransport", "returnDonorRemainders",
+      "gatherAcceptedCompression",
+      "prepareSharpen", "countSharpenTransfers", "emitSharpenTransfers", "gatherSharpenedMass",
+      "measureTransportAfterBlocks", "finishTransportAfter",
+      "finishTransportLeaves", "finishTransport",
+      "prepareHandoff", "measureHandoffSources", "countHandoffRelations", "scanHandoffRelationLeaves",
+      "scanHandoffRelationBlocks", "addHandoffRelationBlockOffsets",
+      "emitHandoffRelations", "handoffMass",
       "finishHandoffLeaves", "finishHandoff",
-      "deriveLeafRhoPhi", "prepareReconstruction", "clearReconstructionMeasure",
-      "deriveNodalPseudoPhi", "validateNodalPseudoPhi", "projectNodalPseudoPhi",
-      "measureReconstructionVolume",
-      "finishReconstructionIteration", "deriveRows"];
+      "deriveLeafRhoPhi",
+      "deriveNodalPseudoPhi", "projectNodalPseudoPhi",
+      "publishDerivedOutputs", "deriveRows"];
     const pipelines = {} as Record<PipelineName, GPUComputePipeline>;
     for (const name of names) {
       const descriptor: GPUComputePipelineDescriptor = {
@@ -282,46 +329,84 @@ export class WebGPUOctreeLosassoAdaptiveMass {
     if (!(dt >= 0) || !Number.isFinite(dt)) throw new RangeError("adaptive mass dt must be finite and non-negative");
     this.assertInitialized(); this.writeParams(this.advanceParams, dt, velocity.record ?? 0, 0);
     const bank = this.graph.accepted;
+    const scanWorkgroups = Math.max(1, Math.ceil(this.plan.leafCapacity / 256));
     this.run(broker, "prepareTransport", bank, bank, velocity.values, 1, this.advanceParams);
-    this.run(broker, "clearTransport", bank, bank, velocity.values, this.plan.leafWorkgroups, this.advanceParams);
-    this.run(broker, "buildTransfers", bank, bank, velocity.values, this.plan.leafWorkgroups, this.advanceParams);
-    this.run(broker, "scatterPredictedCompression", bank, bank, velocity.values,
-      this.plan.transferWorkgroups, this.advanceParams);
-    this.run(broker, "scatterTransfers", bank, bank, velocity.values, this.plan.transferWorkgroups, this.advanceParams);
+    this.run(broker, "measureTransportBeforeBlocks", bank, bank, velocity.values,
+      scanWorkgroups, this.advanceParams);
+    this.run(broker, "finishTransportBefore", bank, bank, velocity.values, 1,
+      this.advanceParams);
+    this.run(broker, "countDonorTransfers", bank, bank, velocity.values,
+      this.plan.leafWorkgroups, this.advanceParams);
+    this.run(broker, "scanDonorTransferLeaves", bank, bank, velocity.values,
+      scanWorkgroups, this.advanceParams);
+    this.run(broker, "scanDonorTransferBlocks", bank, bank, velocity.values, 1, this.advanceParams);
+    this.run(broker, "addDonorTransferBlockOffsets", bank, bank, velocity.values,
+      scanWorkgroups, this.advanceParams);
+    this.run(broker, "emitOutgoingTransfers", bank, bank, velocity.values,
+      this.plan.leafWorkgroups, this.advanceParams);
+    this.run(broker, "clearRecipientTransferCounts", bank, bank, velocity.values,
+      this.plan.leafWorkgroups, this.advanceParams);
+    this.run(broker, "countRecipientTransfers", bank, bank, velocity.values,
+      this.plan.transportArcWorkgroups, this.advanceParams);
+    this.run(broker, "scanRecipientTransferLeaves", bank, bank, velocity.values,
+      scanWorkgroups, this.advanceParams);
+    this.run(broker, "scanRecipientTransferBlocks", bank, bank, velocity.values, 1, this.advanceParams);
+    this.run(broker, "addRecipientTransferBlockOffsets", bank, bank, velocity.values,
+      scanWorkgroups, this.advanceParams);
+    this.run(broker, "prepareIncomingTransferScatter", bank, bank, velocity.values,
+      this.plan.leafWorkgroups, this.advanceParams);
+    this.run(broker, "scatterIncomingTransferIds", bank, bank, velocity.values,
+      this.plan.transportArcWorkgroups, this.advanceParams);
+    this.run(broker, "gatherPredictedCompression", bank, bank, velocity.values,
+      this.plan.leafWorkgroups, this.advanceParams);
+    this.run(broker, "gatherTentativeTransport", bank, bank, velocity.values,
+      this.plan.leafWorkgroups, this.advanceParams);
     this.run(broker, "markTransportSurfaceReach", bank, bank, velocity.values,
       this.plan.leafWorkgroups, this.advanceParams);
-    this.run(broker, "finalizeTransfers", bank, bank, velocity.values,
-      this.plan.transferWorkgroups, this.advanceParams);
-    this.run(broker, "returnTransferRemainders", bank, bank, velocity.values,
-      this.plan.transferWorkgroups, this.advanceParams);
-    this.run(broker, "clearTransportCompression", bank, bank, velocity.values,
+    this.run(broker, "finalizeDestinationTransport", bank, bank, velocity.values,
       this.plan.leafWorkgroups, this.advanceParams);
-    this.run(broker, "scatterAcceptedCompression", bank, bank, velocity.values,
-      this.plan.transferWorkgroups, this.advanceParams);
-    this.run(broker, "finishTransportCompression", bank, bank, velocity.values,
+    this.run(broker, "returnDonorRemainders", bank, bank, velocity.values,
       this.plan.leafWorkgroups, this.advanceParams);
-    this.run(broker, "validateTransportLeaves", bank, bank, velocity.values, this.plan.leafWorkgroups, this.advanceParams);
-    // Chentanez--Mueller sharpening removes density only on the air side of
-    // rho=.5 and scatters every removed fixed-point unit only where the local
-    // gradient trace reaches that existing contour (paper D=1.1h). The donor
-    // keeps all units when no contour is reached, preventing diffuse tails from
-    // sharpening themselves into remote liquid while remaining exactly local,
-    // conservative, and covariant under axis permutations.
-    if (this.options.sharpeningEnabled !== false) {
-      this.run(broker, "clearSharpen", bank, bank, velocity.values,
-        this.plan.leafWorkgroups, this.advanceParams);
-      this.run(broker, "buildSharpenTransfers", bank, bank, velocity.values,
-        this.plan.leafWorkgroups, this.advanceParams);
-      this.run(broker, "scatterSharpenTransfers", bank, bank, velocity.values,
-        this.plan.transferWorkgroups, this.advanceParams);
-      this.run(broker, "validateSharpenLeaves", bank, bank, velocity.values,
-        this.plan.leafWorkgroups, this.advanceParams);
-      this.run(broker, "finishTransportLeaves", bank, bank, velocity.values,
-        this.plan.leafWorkgroups, this.advanceParams);
-    } else {
-      this.run(broker, "finishUnsharpenedTransportLeaves", bank, bank, velocity.values,
-        this.plan.leafWorkgroups, this.advanceParams);
-    }
+    this.run(broker, "gatherAcceptedCompression", bank, bank, velocity.values,
+      this.plan.leafWorkgroups, this.advanceParams);
+    // Chentanez--Mueller Sec. 3.5: compact only the nonzero air-side
+    // concentration arcs, transpose them into the same destination CSR, then
+    // let one invocation own each destination sum. The transported mass stays
+    // immutable until every sharpening arc has been emitted.
+    this.run(broker, "prepareSharpen", bank, bank, velocity.values, 1,
+      this.advanceParams);
+    this.run(broker, "countSharpenTransfers", bank, bank, velocity.values,
+      this.plan.leafWorkgroups, this.advanceParams);
+    this.run(broker, "scanDonorTransferLeaves", bank, bank, velocity.values,
+      scanWorkgroups, this.advanceParams);
+    this.run(broker, "scanDonorTransferBlocks", bank, bank, velocity.values, 1,
+      this.advanceParams);
+    this.run(broker, "addDonorTransferBlockOffsets", bank, bank, velocity.values,
+      scanWorkgroups, this.advanceParams);
+    this.run(broker, "emitSharpenTransfers", bank, bank, velocity.values,
+      this.plan.leafWorkgroups, this.advanceParams);
+    this.run(broker, "clearRecipientTransferCounts", bank, bank, velocity.values,
+      this.plan.leafWorkgroups, this.advanceParams);
+    this.run(broker, "countRecipientTransfers", bank, bank, velocity.values,
+      this.plan.transportArcWorkgroups, this.advanceParams);
+    this.run(broker, "scanRecipientTransferLeaves", bank, bank, velocity.values,
+      scanWorkgroups, this.advanceParams);
+    this.run(broker, "scanRecipientTransferBlocks", bank, bank, velocity.values, 1,
+      this.advanceParams);
+    this.run(broker, "addRecipientTransferBlockOffsets", bank, bank, velocity.values,
+      scanWorkgroups, this.advanceParams);
+    this.run(broker, "prepareIncomingTransferScatter", bank, bank, velocity.values,
+      this.plan.leafWorkgroups, this.advanceParams);
+    this.run(broker, "scatterIncomingTransferIds", bank, bank, velocity.values,
+      this.plan.transportArcWorkgroups, this.advanceParams);
+    this.run(broker, "gatherSharpenedMass", bank, bank, velocity.values,
+      this.plan.leafWorkgroups, this.advanceParams);
+    this.run(broker, "measureTransportAfterBlocks", bank, bank, velocity.values,
+      scanWorkgroups, this.advanceParams);
+    this.run(broker, "finishTransportAfter", bank, bank, velocity.values, 1,
+      this.advanceParams);
+    this.run(broker, "finishTransportLeaves", bank, bank, velocity.values,
+      this.plan.leafWorkgroups, this.advanceParams);
     this.run(broker, "finishTransport", bank, bank, velocity.values, 1, this.advanceParams);
   }
 
@@ -330,7 +415,17 @@ export class WebGPUOctreeLosassoAdaptiveMass {
     this.assertInitialized(); this.writeParams(this.params, 0, 0, 0);
     const target = this.graph.candidate, source = this.graph.accepted;
     this.run(broker, "prepareHandoff", target, source, this.emptyVelocity, 1);
-    this.run(broker, "clearTransport", target, source, this.emptyVelocity, this.plan.leafWorkgroups);
+    this.run(broker, "measureHandoffSources", target, source, this.emptyVelocity,
+      this.plan.leafWorkgroups);
+    this.run(broker, "countHandoffRelations", target, source, this.emptyVelocity,
+      this.plan.leafWorkgroups);
+    this.run(broker, "scanHandoffRelationLeaves", target, source, this.emptyVelocity,
+      Math.max(1, Math.ceil(this.plan.leafCapacity / 256)));
+    this.run(broker, "scanHandoffRelationBlocks", target, source, this.emptyVelocity, 1);
+    this.run(broker, "addHandoffRelationBlockOffsets", target, source, this.emptyVelocity,
+      Math.max(1, Math.ceil(this.plan.leafCapacity / 256)));
+    this.run(broker, "emitHandoffRelations", target, source, this.emptyVelocity,
+      this.plan.leafWorkgroups);
     this.run(broker, "handoffMass", target, source, this.emptyVelocity, this.plan.leafWorkgroups);
     this.run(broker, "finishHandoffLeaves", target, source, this.emptyVelocity, this.plan.leafWorkgroups);
     this.run(broker, "finishHandoff", target, source, this.emptyVelocity, 1);
@@ -353,26 +448,17 @@ export class WebGPUOctreeLosassoAdaptiveMass {
     const source = bank === "candidate" ? this.graph.accepted : this.graph.candidate;
     this.run(broker, "deriveLeafRhoPhi", target, source, this.emptyVelocity,
       this.plan.leafWorkgroups, derivedParams);
-    // Reconstruction always uses the physical rho=.5 contour. A global
-    // volume-fit threshold is topology-dependent: changing only the leaf
-    // partition can move every surface node. Measure once for diagnostics,
-    // but never feed that measurement back into the iso-value.
-    this.run(broker, "prepareReconstruction", target, source, this.emptyVelocity, 1,
-      derivedParams);
     if (mode === "preserve-and-validate") {
-      this.run(broker, "validateNodalPseudoPhi", target, source, this.emptyVelocity,
-        this.plan.nodeWorkgroups, derivedParams);
+      // The candidate graph already retained its topology-invariant phi. The
+      // former all-node sign comparison was diagnostic-only: it could neither
+      // reject nor alter the authoritative mass/phi tuple.
     } else {
       this.run(broker, "deriveNodalPseudoPhi", target, source, this.emptyVelocity,
         this.plan.nodeWorkgroups, derivedParams);
       this.run(broker, "projectNodalPseudoPhi", target, source, this.emptyVelocity,
         this.plan.nodeWorkgroups, derivedParams);
     }
-    this.run(broker, "clearReconstructionMeasure", target, source,
-      this.emptyVelocity, 1, derivedParams);
-    this.run(broker, "measureReconstructionVolume", target, source,
-      this.emptyVelocity, this.plan.leafWorkgroups, derivedParams);
-    this.run(broker, "finishReconstructionIteration", target, source,
+    this.run(broker, "publishDerivedOutputs", target, source,
       this.emptyVelocity, 1, derivedParams);
     this.run(broker, "deriveRows", target, source, this.emptyVelocity,
       this.plan.rowWorkgroups, derivedParams);
@@ -382,11 +468,15 @@ export class WebGPUOctreeLosassoAdaptiveMass {
     if (this.destroyed) return; this.destroyed = true;
     this.params.destroy(); this.advanceParams.destroy(); this.acceptedDerivedParams.destroy();
     this.candidateDerivedParams.destroy(); this.nextMass.destroy(); this.nextCompressionMass.destroy();
-    this.transportAdmission.destroy(); this.transferRemainders.destroy();
-    this.reconstruction.destroy();
+    this.transportAdmission.destroy(); this.outgoingTransfers.destroy(); this.acceptedTransferUnits.destroy();
+    this.donorTransferCounts.destroy(); this.donorTransferOffsets.destroy();
+    this.recipientTransferCounts.destroy(); this.recipientTransferOffsets.destroy();
+    this.transferScanBlocks.destroy(); this.incomingTransfers.destroy(); this.donorTransportStates.destroy();
+    this.handoffRelationCounts.destroy(); this.handoffRelationOffsets.destroy();
+    this.handoffRelationBlocks.destroy(); this.handoffRelations.destroy();
     this.emptyVelocity.destroy();
     this.source.control.destroy(); this.source.receipts.destroy(); this.source.leafRhoPhi.destroy();
-    this.source.rowRho.destroy(); this.source.rowPhi.destroy(); this.source.transferRecords.destroy();
+    this.source.rowRho.destroy(); this.source.rowPhi.destroy();
     this.bindGroups.clear();
   }
 
@@ -396,9 +486,14 @@ export class WebGPUOctreeLosassoAdaptiveMass {
       target.constraints, target.incidentLeaves, target.pressureRowToGraphLeaf, target.phi, velocity,
       target.surfaceMass, target.surfaceCompression, source.control, source.leaves,
       source.surfaceMass, source.surfaceCompression, this.nextMass, this.nextCompressionMass,
-      this.source.transferRecords, this.source.control, this.source.receipts, this.source.leafRhoPhi,
-      this.source.rowRho, this.source.rowPhi, this.reconstruction, this.options.ownerArena,
-      target.leafLocator, this.transportAdmission, this.transferRemainders];
+      this.outgoingTransfers, this.source.control, this.source.receipts, this.source.leafRhoPhi,
+      this.source.rowRho, this.source.rowPhi, this.source.receipts, this.options.ownerArena,
+      target.leafLocator, this.transportAdmission, this.acceptedTransferUnits,
+      source.leafLocator, this.handoffRelationCounts, this.handoffRelationOffsets,
+      this.handoffRelationBlocks, this.handoffRelations,
+      this.donorTransferCounts, this.donorTransferOffsets,
+      this.recipientTransferCounts, this.recipientTransferOffsets,
+      this.transferScanBlocks, this.incomingTransfers, this.donorTransportStates];
   }
 
   private run(broker: PassBroker, name: PipelineName, target: LosassoSurfaceGraphBankSource,
@@ -427,35 +522,50 @@ export class WebGPUOctreeLosassoAdaptiveMass {
       prepareBootstrap: [19, 20],
       bootstrapMassFromPhi: [0, 1, 2, 8, 10, 11, 19],
       finishBootstrap: [0, 1, 2, 10, 19, 20],
-      prepareTransport: [0, 1, 2, 10, 19, 20], clearTransport: [0, 1, 2, 16, 17, 27],
+      prepareTransport: [0, 1, 2, 19, 20],
+      measureTransportBeforeBlocks: [0, 1, 2, 10, 19, 38],
+      finishTransportBefore: [0, 1, 2, 19, 20, 38],
+      countDonorTransfers: [0, 1, 2, 8, 9, 10, 19, 25, 26, 34, 40],
+      scanDonorTransferLeaves: [0, 1, 2, 34, 35, 38],
+      scanDonorTransferBlocks: [0, 1, 2, 38],
+      addDonorTransferBlockOffsets: [0, 1, 2, 18, 19, 35, 38],
+      emitOutgoingTransfers: [0, 1, 2, 18, 19, 25, 26, 34, 35, 40],
+      clearRecipientTransferCounts: [0, 1, 2, 36],
+      countRecipientTransfers: [0, 1, 2, 18, 19, 36],
+      scanRecipientTransferLeaves: [0, 1, 2, 36, 37, 38],
+      scanRecipientTransferBlocks: [0, 1, 2, 38],
+      addRecipientTransferBlockOffsets: [0, 1, 2, 19, 37, 38, 39],
+      prepareIncomingTransferScatter: [0, 1, 2, 36],
+      scatterIncomingTransferIds: [0, 1, 2, 18, 19, 35, 36, 37, 39],
+      gatherPredictedCompression: [0, 1, 2, 10, 11, 17, 18, 19, 37, 39],
+      gatherTentativeTransport: [0, 1, 2, 16, 17, 18, 19, 27, 28, 37, 39],
       markTransportSurfaceReach: [0, 1, 2, 10, 16, 25, 26, 27],
-      buildTransfers: [0, 1, 2, 8, 9, 10, 18, 19, 25, 26, 28],
-      scatterPredictedCompression: [0, 1, 2, 10, 11, 17, 18, 19],
-      scatterTransfers: [0, 1, 2, 16, 17, 18, 19, 27, 28],
-      finalizeTransfers: [2, 16, 18, 19, 27, 28],
-      returnTransferRemainders: [0, 1, 2, 16, 18, 19, 28],
-      clearTransportCompression: [0, 1, 2, 17],
-      scatterAcceptedCompression: [0, 1, 2, 10, 11, 17, 18, 19, 28],
-      finishTransportCompression: [0, 1, 2, 11, 17, 19],
-      validateTransportLeaves: [0, 1, 2, 16, 19],
-      clearSharpen: [0, 1, 2, 17],
-      buildSharpenTransfers: [0, 1, 2, 16, 18, 19, 25, 26],
-      scatterSharpenTransfers: [0, 1, 2, 17, 18, 19],
-      validateSharpenLeaves: [0, 1, 2, 17, 19],
-      finishTransportLeaves: [0, 1, 2, 10, 17, 19],
-      finishUnsharpenedTransportLeaves: [0, 1, 2, 10, 16, 19],
-      finishTransport: [0, 1, 2, 10, 19, 20], prepareHandoff: [19, 20],
-      handoffMass: [0, 1, 2, 12, 13, 14, 15, 16, 17, 19, 20],
-      finishHandoffLeaves: [0, 1, 2, 10, 11, 16, 17],
-      finishHandoff: [0, 1, 2, 12, 13, 14, 16, 19, 20],
+      finalizeDestinationTransport: [0, 1, 2, 16, 19, 27, 28, 37, 39],
+      returnDonorRemainders: [0, 1, 2, 10, 11, 16, 17, 18, 19, 28, 35],
+      gatherAcceptedCompression: [0, 1, 2, 10, 11, 17, 19, 28, 37, 39],
+      prepareSharpen: [19],
+      countSharpenTransfers: [0, 1, 2, 16, 19, 25, 26, 34],
+      emitSharpenTransfers: [0, 1, 2, 16, 18, 19, 25, 26, 35],
+      gatherSharpenedMass: [0, 1, 2, 16, 18, 19, 37, 39],
+      measureTransportAfterBlocks: [0, 1, 2, 16, 38],
+      finishTransportAfter: [0, 1, 2, 19, 20, 38],
+      finishTransportLeaves: [0, 1, 2, 10, 11, 16, 17, 19],
+      finishTransport: [19, 20], prepareHandoff: [19, 20],
+      measureHandoffSources: [0, 12, 13, 14, 19],
+      countHandoffRelations: [0, 1, 2, 12, 13, 19, 25, 29, 30, 31, 33],
+      scanHandoffRelationLeaves: [0, 1, 2, 30, 31, 32],
+      scanHandoffRelationBlocks: [0, 1, 2, 32],
+      addHandoffRelationBlockOffsets: [0, 1, 2, 19, 31, 32, 33],
+      emitHandoffRelations: [0, 1, 2, 12, 13, 19, 25, 29, 30, 31, 33],
+      handoffMass: [0, 1, 12, 13, 14, 15, 16, 17, 19, 31, 33],
+      finishHandoffLeaves: [0, 1, 2, 10, 11, 16, 17, 19],
+      // finishHandoff calls leafCount(), whose arrayLength guard makes the
+      // target leaf bank part of the statically inferred pipeline layout.
+      finishHandoff: [0, 1, 2, 12, 19, 20],
       deriveLeafRhoPhi: [0, 1, 2, 10, 11, 21],
-      prepareReconstruction: [0, 1, 2, 10, 19, 24],
-      clearReconstructionMeasure: [24],
-      deriveNodalPseudoPhi: [0, 1, 2, 5, 6, 8, 10, 19, 24],
-      validateNodalPseudoPhi: [0, 1, 2, 4, 5, 6, 8, 10, 19, 24],
+      deriveNodalPseudoPhi: [0, 1, 2, 5, 6, 8, 10, 19],
       projectNodalPseudoPhi: [0, 1, 5, 8, 19],
-      measureReconstructionVolume: [0, 1, 2, 8, 19, 24],
-      finishReconstructionIteration: [1, 19, 20, 24],
+      publishDerivedOutputs: [1, 19, 20],
       deriveRows: [0, 1, 2, 7, 10, 11, 19, 21, 22, 23],
     } satisfies Record<PipelineName, readonly number[]>)[name];
   }
@@ -466,7 +576,7 @@ export class WebGPUOctreeLosassoAdaptiveMass {
     u.set([...this.options.dimensions, this.options.maximumLeafSpan], 0);
     f.set([...(this.options.domainOrigin ?? [0, 0, 0]), this.options.cellSize], 4);
     u.set([this.plan.leafCapacity, this.plan.nodeCapacity, this.plan.pressureRowCapacity,
-      this.plan.transferCapacity], 8);
+      this.plan.transportArcCapacity], 8);
     const massQuantum = this.options.cellSize ** 3 / ADAPTIVE_MASS_UNITS_PER_FINEST_CELL;
     f.set([dt, this.options.massEpsilon ?? 1e-10, massQuantum, 1 / massQuantum], 12);
     u.set([phiSource, velocityRecord, phiTarget, topologyHandoff ? 1 : 0], 16);

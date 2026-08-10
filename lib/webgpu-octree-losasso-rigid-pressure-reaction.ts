@@ -199,7 +199,7 @@ export class WebGPUOctreeLosassoRigidPressureReaction {
   private readonly params: GPUBuffer;
   private readonly layout: GPUBindGroupLayout;
   private readonly pipelineLayout: GPUPipelineLayout;
-  private readonly groups = new WeakMap<GPUBuffer, GPUBindGroup>();
+  private readonly groups = new Map<GPUBuffer | GPUBufferBinding, GPUBindGroup>();
   private readonly bodyCapacity: number;
   private pressurePipeline?: GPUComputePipeline;
   private buoyancyPipeline?: GPUComputePipeline;
@@ -265,7 +265,7 @@ export class WebGPUOctreeLosassoRigidPressureReaction {
     ]);
   }
 
-  encode(broker: PassBroker, pressure: GPUBuffer, dt_s: number, bodyCount: number,
+  encode(broker: PassBroker, pressure: GPUBuffer | GPUBufferBinding, dt_s: number, bodyCount: number,
     gravity: readonly [number, number, number]): boolean {
     this.assertLive();
     if (!this.pressurePipeline || !this.buoyancyPipeline) {
@@ -280,7 +280,10 @@ export class WebGPUOctreeLosassoRigidPressureReaction {
     if (gravity.some((value) => !Number.isFinite(value))) {
       throw new RangeError("Losasso rigid reaction gravity must be finite");
     }
-    if (pressure.size < this.source.rowCapacity * 4) {
+    const pressureSize = "buffer" in pressure
+      ? pressure.size ?? pressure.buffer.size - (pressure.offset ?? 0)
+      : pressure.size;
+    if (pressureSize < this.source.rowCapacity * 4) {
       throw new RangeError("Losasso rigid pressure reaction pressure buffer is undersized");
     }
     if (dt_s === 0 || bodyCount === 0) return false;
@@ -293,13 +296,14 @@ export class WebGPUOctreeLosassoRigidPressureReaction {
     this.device.queue.writeBuffer(this.params, 0, words);
     let group = this.groups.get(pressure);
     if (!group) {
-      const buffers = [this.params, this.source.faces, this.source.faceGeometry,
+      const buffers: readonly (GPUBuffer | GPUBufferBinding)[] = [this.params, this.source.faces, this.source.faceGeometry,
         this.source.solidCells, this.source.rigidBodies, pressure,
         this.source.projectedVelocity, this.source.rigidImmersedVolumes,
         this.source.rigidExchange];
       group = this.device.createBindGroup({
         label: "Losasso rigid pressure reaction bindings", layout: this.layout,
-        entries: buffers.map((buffer, binding) => ({ binding, resource: { buffer } })),
+        entries: buffers.map((buffer, binding) => ({ binding, resource: "buffer" in buffer
+          ? buffer as GPUBufferBinding : { buffer: buffer as GPUBuffer } })),
       });
       this.groups.set(pressure, group);
     }

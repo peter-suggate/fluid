@@ -51,8 +51,6 @@ export function SceneConfigPopover() {
   const patchContainer = useSceneStore((state) => state.patchContainer);
   const patchFluid = useSceneStore((state) => state.patchFluid);
   const patchNumerics = useSceneStore((state) => state.patchNumerics);
-  const fixedRate_hz = 1 / scene.numerics.fixedDt_s;
-  const gpuStepRate_hz = 1 / scene.numerics.maxDt_s;
   const [section, setSection] = useState<SectionId>("scene");
   const [offset, setOffset] = useState({ x: 0, y: 0 });
   const dragRef = useRef<{ pointerId: number; startX: number; startY: number; baseX: number; baseY: number } | null>(null);
@@ -261,12 +259,11 @@ export function SceneConfigPopover() {
           {section === "numerics" && <section>
             <h3>Timing &amp; numerics</h3>
             <div className="field-grid">
-              <NumberField label="Rigid / oracle rate" unit="Hz" value={fixedRate_hz} step={0.01} min={1} onChange={(value) => { const dt = 1 / Math.max(1, value); patchNumerics({ fixedDt_s: dt, maxDt_s: Math.max(scene.numerics.maxDt_s, dt) }); }} />
-              <NumberField label="GPU step cap" unit="Hz" value={gpuStepRate_hz} step={0.01} min={1} max={fixedRate_hz} onChange={(value) => patchNumerics({ maxDt_s: Math.max(scene.numerics.fixedDt_s, 1 / Math.max(1, value)) })} />
+              <NumberField label="Shared simulation step" unit="ms" value={Math.round(scene.numerics.fixedDt_s * 1000)} step={1} min={1} max={50} onChange={(value) => simulation.setStepSize(value / 1000)} />
               <NumberField label="Oracle cell" unit="m" value={scene.nominalResolution.length_m} step={0.0025} min={0.0125} max={0.08} onChange={(value) => patchScene({ nominalResolution: { length_m: value } })} />
               <NumberField label="PCG budget" unit="iterations" value={scene.numerics.pressureMaxIterations} step={20} min={8} max={1000} onChange={(value) => patchNumerics({ pressureMaxIterations: Math.round(value) })} />
             </div>
-            <small className="control-hint">The desired simulation clock stays at ×1. Rigid bodies and the CPU oracle step at {fixedRate_hz.toFixed(1)} Hz ({(scene.numerics.fixedDt_s * 1000).toFixed(2)} ms). GPU advances densely fill a measured 16.67 ms queue window, with an outer-step cap of {gpuStepRate_hz.toFixed(1)} Hz ({(scene.numerics.maxDt_s * 1000).toFixed(2)} ms).</small>
+            <small className="control-hint">Rigid bodies and fluid advance on the same fixed step. Changes apply to the live simulation without resetting its clock.</small>
           </section>}
           {section === "library" && <SceneLibraryPanel />}
         </div>

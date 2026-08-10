@@ -6,15 +6,13 @@ import { createBodyDescription } from "../lib/rigid-body";
 import {
   matchingPhysicsCPUTrace,
   performanceReportCPUTrace,
-  scaledSimulationClockElapsed,
+  MAX_SHARED_STEP_S,
+  MIN_SHARED_STEP_S,
+  clampSharedStepSize,
+  sharedStepNumerics,
   simulation,
 } from "../lib/simulation/controller";
-import {
-  MAX_TARGET_SIM_RATE,
-  MIN_TARGET_SIM_RATE,
-  clampTargetSimRate,
-  useRuntimeStore,
-} from "../lib/stores/runtime-store";
+import { useRuntimeStore } from "../lib/stores/runtime-store";
 import { useSceneStore } from "../lib/stores/scene-store";
 import { useDiagnosticsStore } from "../lib/stores/diagnostics-store";
 import type { GPUEulerianInfo } from "../lib/webgpu-eulerian";
@@ -133,12 +131,14 @@ test("adding a rigid body does not pause a running simulation", () => {
   }
 });
 
-test("simulation rate is bounded and scales the shared rigid/fluid clock", () => {
-  assert.equal(clampTargetSimRate(Number.NaN), 1);
-  assert.equal(clampTargetSimRate(0), MIN_TARGET_SIM_RATE);
-  assert.equal(clampTargetSimRate(99), MAX_TARGET_SIM_RATE);
-  assert.equal(scaledSimulationClockElapsed(0.1, 0.5), 0.05);
-  assert.equal(scaledSimulationClockElapsed(0.1, 2), 0.2);
+test("one bounded step size drives both rigid and fluid numerics", () => {
+  assert.equal(clampSharedStepSize(Number.NaN), 0.004);
+  assert.equal(clampSharedStepSize(0), MIN_SHARED_STEP_S);
+  assert.equal(clampSharedStepSize(99), MAX_SHARED_STEP_S);
+  assert.equal(clampSharedStepSize(0.0064), 0.006);
+  const numerics = sharedStepNumerics(useSceneStore.getState().scene.numerics, 0.006);
+  assert.equal(numerics.fixedDt_s, 0.006);
+  assert.equal(numerics.maxDt_s, 0.006);
 });
 
 test("editing rigid-body properties preserves its current position", () => {

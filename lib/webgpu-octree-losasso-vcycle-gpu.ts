@@ -39,9 +39,8 @@ fn finite(value:f32)->bool{return value==value&&abs(value)<3.402823e38;}
 ${octreeCompensatedF32WGSL}
 fn image(row:u32)->vec2f{
  if(row+1u>=arrayLength(&offsets)){return vec2f(3.402823e38,-1.);}let begin=offsets[row];let end=offsets[row+1u];
- // Coarse hierarchy rows retain fine boundary patches and may have thousands
- // of incidences. CSR order is fixed at publication, so compensated f32 is
- // deterministic and only malformed bounds need to fail closed here.
+ // L0 still consumes the accepted geometric face operator. Every coarse level
+ // uses the separate algebraic-edge module below.
  if(begin>end||end>arrayLength(&rowFaces)){return vec2f(3.402823e38,-1.);}
  let centre=x[row];var imageSum=CompensatedF32(0.,0.);
  var diagonalSum=CompensatedF32(0.,0.);var valid=true;
@@ -69,6 +68,44 @@ fn image(row:u32)->vec2f{
 @compute @workgroup_size(64)fn residualLevel(@builtin(global_invocation_id)g:vec3u){
  let row=g.x;if(stopped()||row>=control[1]){return;}output[row]=b[row]-image(row).x;
 }
+`;
+
+// Coarse levels consume the epoch-compiled row-pair graph. Each CSR item now
+// loads sixteen bytes once and never revisits a geometric face patch or
+// recomputes openFraction*area*inverseDistance inside MGPCG.
+const algebraicVcycleWGSL = /* wgsl */ `
+const INVALID:u32=0xffffffffu;
+struct Params { damping:f32, reserved0:u32, reserved1:u32, reserved2:u32 }
+struct Edge { rowA:u32,rowB:u32,coefficient:f32,reserved:u32 }
+@group(0)@binding(0)var<uniform> p:Params;
+@group(0)@binding(1)var<storage,read> control:array<u32>;
+@group(0)@binding(2)var<storage,read> offsets:array<u32>;
+@group(0)@binding(3)var<storage,read> rowEdges:array<u32>;
+@group(0)@binding(4)var<storage,read> edges:array<Edge>;
+@group(0)@binding(5)var<storage,read_write> b:array<f32>;
+@group(0)@binding(6)var<storage,read_write> x:array<f32>;
+@group(0)@binding(7)var<storage,read_write> output:array<f32>;
+@group(0)@binding(8)var<storage,read> solve:array<u32>;
+fn stopped()->bool{return solve[0]!=0u||solve[1]!=0u||control[3]!=1u;}
+fn finite(value:f32)->bool{return value==value&&abs(value)<3.402823e38;}
+${octreeCompensatedF32WGSL}
+fn image(row:u32)->vec2f{if(row+1u>=arrayLength(&offsets)){return vec2f(3.402823e38,-1.);}
+ let begin=offsets[row];let end=offsets[row+1u];if(begin>end||end>arrayLength(&rowEdges)){return vec2f(3.402823e38,-1.);}
+ let centre=x[row];var imageSum=CompensatedF32(0.,0.);var diagonalSum=CompensatedF32(0.,0.);var valid=true;
+ for(var cursor=begin;cursor<end;cursor+=1u){let edgeId=rowEdges[cursor];if(edgeId>=arrayLength(&edges)){valid=false;continue;}
+  let edge=edges[edgeId];let coefficient=edge.coefficient;var difference=centre;
+  if(edge.rowA==row){if(edge.rowB!=INVALID){if(edge.rowB>=arrayLength(&x)){valid=false;continue;}difference-=x[edge.rowB];}}
+  else{if(edge.rowA>=arrayLength(&x)){valid=false;continue;}difference-=x[edge.rowA];}
+  let term=coefficient*difference;if(!finite(coefficient)||coefficient<0.||!finite(term)){valid=false;continue;}
+  diagonalSum=addCompensatedF32(diagonalSum,coefficient);imageSum=addCompensatedF32(imageSum,term);
+ }
+ let value=compensatedValue(imageSum);let diagonal=compensatedValue(diagonalSum);
+ return select(vec2f(3.402823e38,-1.),vec2f(value,diagonal),valid&&finite(value)&&finite(diagonal)&&diagonal>0.);
+}
+@compute @workgroup_size(64)fn clearLevel(@builtin(global_invocation_id)g:vec3u){let row=g.x;if(stopped()||row>=control[1]){return;}output[row]=0.;}
+@compute @workgroup_size(64)fn copyLevel(@builtin(global_invocation_id)g:vec3u){let row=g.x;if(stopped()||row>=control[1]){return;}output[row]=b[row];}
+@compute @workgroup_size(64)fn jacobiLevel(@builtin(global_invocation_id)g:vec3u){let row=g.x;if(stopped()||row>=control[1]){return;}let pair=image(row);output[row]=select(0.,x[row]+p.damping*(b[row]-pair.x)/pair.y,pair.y>0.);}
+@compute @workgroup_size(64)fn residualLevel(@builtin(global_invocation_id)g:vec3u){let row=g.x;if(stopped()||row>=control[1]){return;}output[row]=b[row]-image(row).x;}
 `;
 
 const transferWGSL = /* wgsl */ `
@@ -101,7 +138,7 @@ fn stopped()->bool{return solve[0]!=0u||solve[1]!=0u
 }
 `;
 
-function fusedSubL0WGSL(layout: NonNullable<
+export function fusedSubL0WGSL(layout: NonNullable<
   OctreeLosassoVCycleHierarchySource["fusedSubL0"]>, levelCount: number): string {
   const vectorCapacities = layout.levelRowCapacities;
   const vectorBases: number[] = [];
@@ -117,20 +154,26 @@ const VECTOR_CAPACITIES:array<u32,${levelCount}>=array<u32,${levelCount}>(
  ${vectorCapacities.map(value=>`${value}u`).join(",")});
 const VECTOR_BASES:array<u32,${levelCount}>=array<u32,${levelCount}>(
  ${vectorBases.map(value=>`${value}u`).join(",")});
-const TRANSITION_STRIDE:u32=${layout.transitionStrideWords}u;
-const CONTROL_OFFSET:u32=${layout.controlOffsetWords}u;
-const ROW_OFFSETS_OFFSET:u32=${layout.rowOffsetsOffsetWords}u;
-const ROW_FACES_OFFSET:u32=${layout.rowFacesOffsetWords}u;
-const FACES_OFFSET:u32=${layout.facesOffsetWords}u;
-const PARENTS_OFFSET:u32=${layout.parentsOffsetWords}u;
-const CHILD_OFFSETS_OFFSET:u32=${layout.childOffsetsOffsetWords}u;
-const CHILD_LIST_OFFSET:u32=${layout.childListOffsetWords}u;
+const LEVEL_BASES:array<u32,${levelCount}>=array<u32,${levelCount}>(
+ ${layout.levelLayouts.map(value=>`${value.baseWords}u`).join(",")});
+const CONTROL_OFFSETS:array<u32,${levelCount}>=array<u32,${levelCount}>(
+ ${layout.levelLayouts.map(value=>`${value.controlOffsetWords}u`).join(",")});
+const ROW_OFFSETS:array<u32,${levelCount}>=array<u32,${levelCount}>(
+ ${layout.levelLayouts.map(value=>`${value.rowOffsetsOffsetWords}u`).join(",")});
+const DIRECTED_EDGE_OFFSETS:array<u32,${levelCount}>=array<u32,${levelCount}>(
+ ${layout.levelLayouts.map(value=>`${value.directedEdgesOffsetWords}u`).join(",")});
+const PARENT_OFFSETS:array<u32,${levelCount}>=array<u32,${levelCount}>(
+ ${layout.levelLayouts.map(value=>`${value.parentsOffsetWords}u`).join(",")});
+const CHILD_OFFSETS:array<u32,${levelCount}>=array<u32,${levelCount}>(
+ ${layout.levelLayouts.map(value=>`${value.childOffsetsOffsetWords}u`).join(",")});
+const CHILD_LIST_OFFSETS:array<u32,${levelCount}>=array<u32,${levelCount}>(
+ ${layout.levelLayouts.map(value=>`${value.childListOffsetWords}u`).join(",")});
+const DIRECTED_EDGE_CAPACITIES:array<u32,${levelCount}>=array<u32,${levelCount}>(
+ ${layout.levelLayouts.map(value=>`${value.directedEdgeCapacity}u`).join(",")});
 // The two sweep counts are UNIFORM words, which is what makes it legal to
 // bound the barrier-bearing loops below: a storage read would not be provably
 // uniform and the barriers inside relaxLevel would fail WGSL's analysis.
 struct Params { damping:f32, bottomSweeps:u32, smoothingSweeps:u32, reserved2:u32 }
-struct Face { negativeRow:u32,positiveRow:u32,axis:u32,reserved:u32,
- area:f32,inverseDistance:f32,openFraction:f32,normalVelocity:f32 }
 @group(0)@binding(0)var<uniform> p:Params;
 @group(0)@binding(1)var<storage,read> hierarchy:array<u32>;
 @group(0)@binding(2)var<storage,read_write> rhsVectors:array<f32>;
@@ -140,34 +183,27 @@ struct Face { negativeRow:u32,positiveRow:u32,axis:u32,reserved:u32,
 @group(0)@binding(6)var<storage,read> solve:array<u32>;
 ${octreeCompensatedF32WGSL}
 fn finite(value:f32)->bool{return value==value&&abs(value)<3.402823e38;}
-fn transitionBase(level:u32)->u32{return (level-1u)*TRANSITION_STRIDE;}
+fn transitionBase(level:u32)->u32{return LEVEL_BASES[level];}
 fn levelControl(level:u32,word:u32)->u32{
- return hierarchy[transitionBase(level)+CONTROL_OFFSET+word];
+ return hierarchy[transitionBase(level)+CONTROL_OFFSETS[level]+word];
 }
 fn vectorIndex(level:u32,row:u32)->u32{return VECTOR_BASES[level]+row;}
 fn correctionValue(fromB:bool,level:u32,row:u32)->f32{
  if(fromB){return xBVectors[vectorIndex(level,row)];}
  return xAVectors[vectorIndex(level,row)];
 }
-fn loadFace(level:u32,faceId:u32)->Face{let base=transitionBase(level)+FACES_OFFSET+8u*faceId;
- return Face(hierarchy[base],hierarchy[base+1u],hierarchy[base+2u],hierarchy[base+3u],
-  bitcast<f32>(hierarchy[base+4u]),bitcast<f32>(hierarchy[base+5u]),
-  bitcast<f32>(hierarchy[base+6u]),bitcast<f32>(hierarchy[base+7u]));
-}
 fn image(level:u32,row:u32,fromB:bool)->vec2f{
- let base=transitionBase(level);let begin=hierarchy[base+ROW_OFFSETS_OFFSET+row];
- let end=hierarchy[base+ROW_OFFSETS_OFFSET+row+1u];
- let incidenceCapacity=2u*${layout.faceCapacity}u;
+ let base=transitionBase(level);let begin=hierarchy[base+ROW_OFFSETS[level]+row];
+ let end=hierarchy[base+ROW_OFFSETS[level]+row+1u];
+ let incidenceCapacity=DIRECTED_EDGE_CAPACITIES[level];
  if(begin>end||end>incidenceCapacity){return vec2f(3.402823e38,-1.);}
  let centre=correctionValue(fromB,level,row);
  var imageSum=CompensatedF32(0.,0.);var diagonalSum=CompensatedF32(0.,0.);var valid=true;
- for(var cursor=begin;cursor<end;cursor+=1u){let faceId=hierarchy[base+ROW_FACES_OFFSET+cursor];
-  if(faceId>=${layout.faceCapacity}u){valid=false;continue;}let face=loadFace(level,faceId);
-  let coefficient=(face.openFraction*face.area)*face.inverseDistance;var difference=centre;
-  if(face.negativeRow==row){if(face.positiveRow!=INVALID){if(face.positiveRow>=VECTOR_CAPACITIES[level]){valid=false;continue;}
-    difference-=correctionValue(fromB,level,face.positiveRow);}}
-  else{if(face.negativeRow>=VECTOR_CAPACITIES[level]){valid=false;continue;}
-   difference-=correctionValue(fromB,level,face.negativeRow);}
+ for(var cursor=begin;cursor<end;cursor+=1u){let edgeAt=base+DIRECTED_EDGE_OFFSETS[level]+2u*cursor;
+  let neighbour=hierarchy[edgeAt];let coefficient=bitcast<f32>(hierarchy[edgeAt+1u]);
+  var difference=centre;
+  if(neighbour!=INVALID){if(neighbour>=VECTOR_CAPACITIES[level]){valid=false;continue;}
+   difference-=correctionValue(fromB,level,neighbour);}
   let term=coefficient*difference;if(!finite(coefficient)||coefficient<0.||!finite(term)){valid=false;continue;}
   diagonalSum=addCompensatedF32(diagonalSum,coefficient);
   imageSum=addCompensatedF32(imageSum,term);
@@ -179,9 +215,9 @@ fn image(level:u32,row:u32,fromB:bool)->vec2f{
 fn synchronize(){storageBarrier();workgroupBarrier();}
 fn restrictInto(coarseLevel:u32,lane:u32,enabled:bool){
  let base=transitionBase(coarseLevel);let rows=select(0u,levelControl(coarseLevel,1u),enabled);
- for(var row=lane;row<rows;row+=256u){let begin=hierarchy[base+CHILD_OFFSETS_OFFSET+row];
-  let end=hierarchy[base+CHILD_OFFSETS_OFFSET+row+1u];var sum=CompensatedF32(0.,0.);
-  for(var cursor=begin;cursor<end;cursor+=1u){let child=hierarchy[base+CHILD_LIST_OFFSET+cursor];
+ for(var row=lane;row<rows;row+=256u){let begin=hierarchy[base+CHILD_OFFSETS[coarseLevel]+row];
+  let end=hierarchy[base+CHILD_OFFSETS[coarseLevel]+row+1u];var sum=CompensatedF32(0.,0.);
+  for(var cursor=begin;cursor<end;cursor+=1u){let child=hierarchy[base+CHILD_LIST_OFFSETS[coarseLevel]+cursor];
    sum=addCompensatedF32(sum,residualVectors[vectorIndex(coarseLevel-1u,child)]);
   }
   rhsVectors[vectorIndex(coarseLevel,row)]=compensatedValue(sum);
@@ -215,8 +251,8 @@ fn formResidual(level:u32,lane:u32,enabled:bool){
 fn prolongInto(fineLevel:u32,lane:u32,enabled:bool,coarseFromB:bool){
  let coarseLevel=fineLevel+1u;let base=transitionBase(coarseLevel);
  let coarseRows=levelControl(coarseLevel,1u);
- let fineRows=select(0u,hierarchy[base+CHILD_OFFSETS_OFFSET+coarseRows],enabled);
- for(var row=lane;row<fineRows;row+=256u){let parent=hierarchy[base+PARENTS_OFFSET+row];
+ let fineRows=select(0u,hierarchy[base+CHILD_OFFSETS[coarseLevel]+coarseRows],enabled);
+ for(var row=lane;row<fineRows;row+=256u){let parent=hierarchy[base+PARENT_OFFSETS[coarseLevel]+row];
   if(parent<coarseRows){
    xAVectors[vectorIndex(fineLevel,row)]+=correctionValue(coarseFromB,coarseLevel,parent);
   }
@@ -279,8 +315,8 @@ interface TransferPipelines {
 /** Plain Losasso first-order V-cycle. No alternate operator or boundary band exists. */
 export class WebGPUOctreeLosassoVCycle implements OctreeLosassoFirstOrderVCycle {
   readonly backend = "losasso" as const;
-  readonly operatorFamily = "closed-form-axis-face" as const;
-  readonly levelOperator = "same-first-order-operator" as const;
+  readonly operatorFamily = "epoch-compiled-algebraic-edge" as const;
+  readonly levelOperator = "galerkin-row-pair" as const;
   readonly boundaryBandSmoother = "absent" as const;
   readonly operatorOrder = 1 as const;
   readonly isSymmetricPositiveDefinite = true as const;
@@ -378,12 +414,6 @@ export class WebGPUOctreeLosassoVCycle implements OctreeLosassoFirstOrderVCycle 
     // hierarchy has ~30K rows at L1, which one workgroup walks ~120 deep per
     // sweep, per level, per iteration. Hand those to the per-level path, whose
     // dispatches are sized indirectly from each level's own row count.
-    //
-    // This gate was dead code until 2026-08-06: a coarse-face geometry defect
-    // unpublished L2 (128^3) and L4 (guide lane), the fused enable predicate
-    // then returned immediately on every scene, and nothing ever ran the
-    // one-workgroup walk at scale. See coarseBoundaryDistance in
-    // webgpu-octree-losasso-hierarchy.wgsl.ts.
     const subLevelRows=(hierarchy.fusedSubL0?.levelRowCapacities??[]).slice(1);
     this.useFusedSubL0=Boolean(hierarchy.fusedSubL0&&hierarchy.levels.length>1
       &&subLevelRows.length>0
@@ -424,8 +454,10 @@ export class WebGPUOctreeLosassoVCycle implements OctreeLosassoFirstOrderVCycle 
 
   async initialize():Promise<void>{
     this.assertLive();if(this.levelPipelines)return;
-    const levelModule=this.device.createShaderModule({label:"Losasso V-cycle level shader",code:vcycleWGSL});
     this.levelPipelines=await Promise.all(this.hierarchy.levels.map(async(_,level)=>{
+      const levelModule=this.device.createShaderModule({
+        label:`Losasso V-cycle L${level} ${level===0?"geometric":"algebraic-edge"} shader`,
+        code:level===0?vcycleWGSL:algebraicVcycleWGSL});
       const compile=(entryPoint:string)=>this.device.createComputePipelineAsync({
         label:`Losasso V-cycle L${level} ${entryPoint}`,layout:"auto",compute:{module:levelModule,entryPoint}});
       const [clear,copy,jacobi,residual]=await Promise.all(["clearLevel","copyLevel","jacobiLevel","residualLevel"].map(compile));
@@ -441,11 +473,11 @@ export class WebGPUOctreeLosassoVCycle implements OctreeLosassoFirstOrderVCycle 
       return {restrict,prolong};
     }));
     if(this.useFusedSubL0){
-      const module=this.device.createShaderModule({label:"Losasso fused sub-L0 V-cycle shader",
+      const fusedModule=this.device.createShaderModule({label:"Losasso fused sub-L0 V-cycle shader",
         code:fusedSubL0WGSL(this.hierarchy.fusedSubL0!,this.hierarchy.levels.length)});
       this.fusedSubL0Pipeline=await this.device.createComputePipelineAsync({
         label:"Losasso fused sub-L0 V-cycle",layout:"auto",
-        compute:{module,entryPoint:"fusedSubL0"}});
+        compute:{module:fusedModule,entryPoint:"fusedSubL0"}});
     }
   }
 

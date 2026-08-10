@@ -1,5 +1,5 @@
 /**
- * Resident single-dispatch MGPCG executor for the Losasso coarse tier.
+ * Resident-arena, GPU-staged MGPCG executor for the Losasso coarse tier.
  *
  * The pipelined path (`WebGPUOctreePipelinedMGPCG` + `WebGPUOctreeLosassoVCycle`
  * + `WebGPUOctreeLosassoOperator`) encodes ~15 barrier-separated dispatches per
@@ -10,16 +10,15 @@
  * signed radix-256 superaccumulator fold, the 2+2 first-order V-cycle with the
  * fused sub-L0 walk, the exact-fixed-point initial reduction, the compensated
  * one-workgroup drains, the CG recurrences and the fail-closed publication —
- * inside ONE dispatch of ONE 256-lane workgroup, with
- * `storageBarrier(); workgroupBarrier();` where dispatch boundaries used to be.
+ * inside one compute pass. L0 row stages run as 64-lane workgroups over the
+ * compact live-row dispatch; exact global reductions and the small algebraic
+ * bottom retain their authored single-workgroup association.
  *
  * Two structural consequences:
- *  - The loop executes exactly as many iterations as the residual gate needs
- *    (temporal coherence is perfect by construction: a warm steady advance
- *    converging in 4 iterations pays for 4, never for an encoded envelope).
- *  - The encoded command graph for the whole solve is one compute pass and a
- *    handful of staging-free bindings, so the per-advance encode cost stops
- *    scaling with the iteration ceiling.
+ *  - Expensive L0 gathers occupy many GPU partitions instead of pinning the
+ *    entire solve to one threadgroup.
+ *  - The command graph remains one compute pass and one submission. Kernels
+ *    past convergence read the common stop word and retire immediately.
  *
  * Numeric contract: every stage is a transcription of the corresponding
  * dispatched kernel body (see the per-function notes). Cross-row folds keep
@@ -37,6 +36,8 @@
 import { PassBroker } from "./webgpu-pass-broker";
 import { octreeCompensatedF32WGSL } from "./octree-compensated-f32.wgsl";
 import type { OctreeLosassoVCycleHierarchySource } from "./webgpu-octree-losasso-vcycle";
+import { octreeLosassoArenaView, type OctreeLosassoBufferView } from
+  "./webgpu-octree-losasso-frame-arena";
 import {
   OCTREE_RUNTIME_DIAL_BUILT_BOTTOM_SWEEPS,
   OCTREE_RUNTIME_DIAL_BUILT_SMOOTHING_SWEEPS,
@@ -48,17 +49,12 @@ export const OCTREE_LOSASSO_RESIDENT_SOLVE_ENVIRONMENT =
 /** Combined-drain / fused sub-L0 envelope; the resident tier shares it. */
 export const OCTREE_LOSASSO_RESIDENT_MAXIMUM_ROWS = 4_096;
 /**
- * Lanes in the single resident workgroup. The whole solve is one dispatch of
- * one workgroup, so this is the only occupancy lever WGSL can express. The
- * first-frame capture at 256 lanes measured the dispatch latency-starved
- * (compute occupancy 0.27, ALU 0.30), so the width runs at the M1 Max's
- * 1,024-thread threadgroup ceiling. Value-neutral by construction: row loops
- * are `for (row = lane; row < n; row += LANES)` strides whose per-row
- * arithmetic is independent, and every cross-row fold is pinned to its own
- * association (the 128-lane compensated tree and the integer superaccumulator)
- * regardless of this width.
+ * Lanes in the exact-reduction and fused-bottom workgroups. L0 row stages are
+ * independently fixed at 64 lanes to match the authority's indirect row
+ * dispatch. Every cross-row fold remains pinned to the existing 128-lane
+ * compensated tree or integer superaccumulator regardless of this width.
  */
-export const OCTREE_LOSASSO_RESIDENT_LANES = 1_024;
+export const OCTREE_LOSASSO_RESIDENT_LANES = 256;
 
 /**
  * Measurement override for the workgroup width. A wider group hides gather
@@ -71,43 +67,41 @@ export function octreeLosassoResidentLanes(
   const resolved = environment
     ?? (typeof process !== "undefined" ? process.env : undefined);
   const value = resolved?.FLUID_LOSASSO_RESIDENT_LANES;
-  if (value === undefined || value === "") return OCTREE_LOSASSO_RESIDENT_LANES as 1024;
+  if (value === undefined || value === "") return OCTREE_LOSASSO_RESIDENT_LANES;
   if (value === "256") return 256;
   if (value === "512") return 512;
   if (value === "1024") return 1024;
   throw new RangeError(`Resident Losasso lane count must be 256, 512 or 1024; received ${value}`);
 }
 const REDUCTION_LANES = 128;
+/** Merged scalar tree, exact limbs, and four scalar workgroup words. */
+const RESIDENT_BASE_WORKGROUP_BYTES = REDUCTION_LANES * 32 + 144 * 4 + 4 * 4;
 /**
- * Seven storage bindings: level-0 CSR (control/offsets/incidence/faces), the
- * fused sub-L0 hierarchy arena, one consolidated f32 solver arena, and the
- * atomic solve control. The Metal tier grants ten; everything else is staged
- * into the arena by encode-time copies, the persistent executor's pattern.
+ * Three shared storage bindings: immutable dense operator hierarchy, mutable
+ * frame/solver arena, and atomic solve/control arena.
  */
-const STORAGE_BINDING_COUNT = 7;
-/** 128-byte MGPCG control ABI plus the staged accepted-authority prefix. */
-const CONTROL_BYTES = 256;
+const STORAGE_BINDING_COUNT = 3;
+/** Clear only solve status/scalars; authority and dials occupy later pages. */
+const SOLVE_CLEAR_BYTES = 32 * 4;
 const AUTHORITY_STAGE_WORD = 32;
 /**
  * Staged runtime dials: `[iterationCap, bottomSweeps, relativeToleranceBits,
- * reserved]`, each zero-means-compiled. They live past the authority prefix in
- * the same control buffer so the kernel needs no eighth storage binding — the
- * device grants ten and seven are already spoken for.
+ * smoothingSweeps]`, each zero-means-compiled. They live past the authority
+ * prefix in the existing solve-control buffer rather than consuming another
+ * storage binding.
  */
-const TUNING_STAGE_WORD = 40;
 const TUNING_WORDS = 4;
 
 /** Phase selected by {@link octreeLosassoResidentPhaseRepeatProbe}. */
 export type OctreeLosassoResidentPhaseRepeatPhase = "l0-sweep" | "operator" | "bottom";
 
 /**
- * Timing instrument for the one-dispatch solve, following the persistent
- * executor's precedent: pass-label isolation cannot split a single dispatch,
- * so `FLUID_LOSASSO_RESIDENT_PHASE_REPEAT=operator:4` re-runs a pure phase
- * three extra times per occurrence. Each probed phase is an idempotent gather
- * (its inputs are unchanged between repeats and every item writes only its
- * own row), so the solve is value-neutral and the wall delta divided by the
- * extra repeats is that phase's marginal cost.
+ * Timing instrument retained for phase-isolated captures. For example,
+ * `FLUID_LOSASSO_RESIDENT_PHASE_REPEAT=operator:4` re-runs a pure phase three
+ * extra times per occurrence. Each probed phase is an idempotent gather (its
+ * inputs are unchanged between repeats and every item writes only its own
+ * row), so the solve is value-neutral and the wall delta divided by the extra
+ * repeats is that phase's marginal cost.
  */
 export function octreeLosassoResidentPhaseRepeatProbe(
   environment?: Readonly<Record<string, string | undefined>>,
@@ -177,31 +171,15 @@ function f32Literal(value: number): string {
 }
 
 /**
- * Word bases of the packed per-level vector arenas. Must match the layout
- * `WebGPUOctreeLosassoVCycle` derives from `fusedSubL0.levelRowCapacities`
- * (`Math.ceil(capacity * 4 / 256) * 64` words per level, finest first).
- */
-function vectorBases(levelRowCapacities: readonly number[]): number[] {
-  const bases: number[] = [];
-  let base = 0;
-  for (const capacity of levelRowCapacities) {
-    bases.push(base);
-    base += Math.ceil(capacity * 4 / 256) * 64;
-  }
-  return bases;
-}
-
-/**
  * Exported for the shader gates. The kernel is generated per hierarchy, so
  * there is no single module-level shader constant a parser test can read the
  * way the pipelined executor offers `octreePipelinedMGPCGShader`.
  */
 export function residentLosassoMGPCGWGSL(config: ResidentWGSLConfig): string {
   const capacities = config.fused.levelRowCapacities;
-  const bases = vectorBases(capacities);
-  const arenaWords = bases[bases.length - 1]!
-    + Math.ceil(capacities[capacities.length - 1]! * 4 / 256) * 64;
-  const cap = config.rowCapacity;
+  const bases = config.fused.arenaPlan.frame.vectorLevelBasesWords;
+  const arenaWords = config.fused.arenaPlan.frame.vectorArenaWords;
+  const frame = config.fused.arenaPlan.frame;
   return /* wgsl */ `
 ${octreeCompensatedF32WGSL}
 struct MergedScalars {
@@ -210,38 +188,37 @@ struct MergedScalars {
   rr: CompensatedF32,
   bb: CompensatedF32,
 }
-struct Face { negativeRow:u32,positiveRow:u32,axis:u32,reserved:u32,
-  area:f32,inverseDistance:f32,openFraction:f32,normalVelocity:f32 }
-
-@group(0) @binding(0) var<storage, read> levelZeroControl: array<u32>;
-@group(0) @binding(1) var<storage, read> levelZeroRowFaceOffsets: array<u32>;
-@group(0) @binding(2) var<storage, read> levelZeroRowFaces: array<u32>;
-@group(0) @binding(3) var<storage, read> levelZeroFaces: array<Face>;
-@group(0) @binding(4) var<storage, read> hierarchy: array<u32>;
-@group(0) @binding(5) var<storage, read_write> arena: array<f32>;
-@group(0) @binding(6) var<storage, read_write> control: array<atomic<u32>>;
+@group(0) @binding(0) var<storage, read> hierarchy: array<u32>;
+@group(0) @binding(1) var<storage, read_write> arena: array<f32>;
+@group(0) @binding(2) var<storage, read_write> control: array<atomic<u32>>;
 
 // Consolidated arena layout (words). Staged inputs are copied in by the
 // encoder before the dispatch; the published pressure is copied back out.
-const OUT_BASE = ${0 * cap}u;
-const SEED_BASE = ${1 * cap}u;
-const RHS_BASE = ${2 * cap}u;
-const DIAG_BASE = ${3 * cap}u;
-const P_BASE = ${4 * cap}u;
-const R_BASE = ${5 * cap}u;
-const Z_BASE = ${6 * cap}u;
-const ZIMG_BASE = ${7 * cap}u;
-const D_BASE = ${8 * cap}u;
-const DIMG_BASE = ${9 * cap}u;
-const V_RHS_BASE = ${10 * cap}u;
-const V_XA_BASE = ${10 * cap + arenaWords}u;
-const V_XB_BASE = ${10 * cap + 2 * arenaWords}u;
-const V_RES_BASE = ${10 * cap + 3 * arenaWords}u;
+const PRESSURE_A_BASE = ${frame.pressureA.wordOffset}u;
+const PRESSURE_B_BASE = ${frame.pressureB.wordOffset}u;
+override PRESSURE_INPUT_A: bool = true;
+fn pressureSeedBase() -> u32 {
+  return select(PRESSURE_B_BASE, PRESSURE_A_BASE, PRESSURE_INPUT_A);
+}
+fn pressureOutputBase() -> u32 {
+  return select(PRESSURE_A_BASE, PRESSURE_B_BASE, PRESSURE_INPUT_A);
+}
+const RHS_BASE = ${frame.rightHandSide.wordOffset}u;
+const DIAG_BASE = ${frame.diagonal.wordOffset}u;
+const R_BASE = ${frame.residual.wordOffset}u;
+const Z_BASE = ${frame.vcycle[0].wordOffset + bases[0]!}u;
+const ZIMG_BASE = ${frame.vcycle[3].wordOffset + bases[0]!}u;
+const D_BASE = ${frame.direction.wordOffset}u;
+const DIMG_BASE = ${frame.vcycle[1].wordOffset + bases[0]!}u;
+const V_RHS_BASE = ${frame.vcycle[0].wordOffset}u;
+const V_XA_BASE = ${frame.vcycle[1].wordOffset}u;
+const V_XB_BASE = ${frame.vcycle[2].wordOffset}u;
+const V_RES_BASE = ${frame.vcycle[3].wordOffset}u;
 const AUTHORITY_STAGE = ${AUTHORITY_STAGE_WORD}u;
 // Encode-time staged runtime dials, written by the host into a tiny persistent
 // buffer and copied in beside the authority. Zero means "use what was
 // compiled", so an untouched session reproduces the built constants exactly.
-const TUNING_STAGE = ${TUNING_STAGE_WORD}u;
+const TUNING_STAGE = ${config.fused.arenaPlan.control.tuningWordOffset}u;
 
 const ERROR_INVALID_AUTHORITY = 1u;
 const ERROR_INVALID_ROW = 2u;
@@ -270,15 +247,25 @@ const VECTOR_CAPACITIES: array<u32, ${config.levelCount}> = array<u32, ${config.
 const VECTOR_BASES: array<u32, ${config.levelCount}> = array<u32, ${config.levelCount}>(
   ${bases.map((value) => `${value}u`).join(",")});
 const VECTOR_ARENA_WORDS = ${arenaWords}u;
-const TRANSITION_STRIDE: u32 = ${config.fused.transitionStrideWords}u;
-const CONTROL_OFFSET: u32 = ${config.fused.controlOffsetWords}u;
-const ROW_OFFSETS_OFFSET: u32 = ${config.fused.rowOffsetsOffsetWords}u;
-const ROW_FACES_OFFSET: u32 = ${config.fused.rowFacesOffsetWords}u;
-const FACES_OFFSET: u32 = ${config.fused.facesOffsetWords}u;
-const PARENTS_OFFSET: u32 = ${config.fused.parentsOffsetWords}u;
-const CHILD_OFFSETS_OFFSET: u32 = ${config.fused.childOffsetsOffsetWords}u;
-const CHILD_LIST_OFFSET: u32 = ${config.fused.childListOffsetWords}u;
-const FUSED_FACE_CAPACITY: u32 = ${config.fused.faceCapacity}u;
+const OPERATOR_BANK_BASES = vec2u(${config.fused.acceptedBankWordOffset}u,
+  ${config.fused.candidateBankWordOffset}u);
+const LEVEL_RELATIVE_BASES: array<u32, ${config.levelCount}> = array<u32, ${config.levelCount}>(
+  ${config.fused.levelLayouts.map(value =>
+    `${value.baseWords - config.fused.acceptedBankWordOffset}u`).join(", ")});
+const CONTROL_OFFSETS: array<u32, ${config.levelCount}> = array<u32, ${config.levelCount}>(
+  ${config.fused.levelLayouts.map(value => `${value.controlOffsetWords}u`).join(", ")});
+const ROW_OFFSETS: array<u32, ${config.levelCount}> = array<u32, ${config.levelCount}>(
+  ${config.fused.levelLayouts.map(value => `${value.rowOffsetsOffsetWords}u`).join(", ")});
+const DIRECTED_EDGE_OFFSETS: array<u32, ${config.levelCount}> = array<u32, ${config.levelCount}>(
+  ${config.fused.levelLayouts.map(value => `${value.directedEdgesOffsetWords}u`).join(", ")});
+const DIRECTED_EDGE_CAPACITIES: array<u32, ${config.levelCount}> = array<u32, ${config.levelCount}>(
+  ${config.fused.levelLayouts.map(value => `${value.directedEdgeCapacity}u`).join(", ")});
+const PARENT_OFFSETS: array<u32, ${config.levelCount}> = array<u32, ${config.levelCount}>(
+  ${config.fused.levelLayouts.map(value => `${value.parentsOffsetWords}u`).join(", ")});
+const CHILD_OFFSETS: array<u32, ${config.levelCount}> = array<u32, ${config.levelCount}>(
+  ${config.fused.levelLayouts.map(value => `${value.childOffsetsOffsetWords}u`).join(", ")});
+const CHILD_LIST_OFFSETS: array<u32, ${config.levelCount}> = array<u32, ${config.levelCount}>(
+  ${config.fused.levelLayouts.map(value => `${value.childListOffsetWords}u`).join(", ")});
 
 fn finite(value: f32) -> bool { return value == value && abs(value) <= 3.402823e38; }
 // Encode-time staged copy of the seven-word accepted authority. The host
@@ -316,6 +303,9 @@ fn smoothingSweeps() -> u32 {
   return select(BUILT_SMOOTHING_SWEEPS, min(requested, 16u), requested >= 1u);
 }
 fn rows() -> u32 { return min(auth(2u), CAP); }
+fn operatorBankBase() -> u32 {
+  return select(OPERATOR_BANK_BASES.x, OPERATOR_BANK_BASES.y, auth(5u) == 1u);
+}
 fn failed() -> bool { return atomicLoad(&control[0]) != 0u; }
 fn stopped() -> bool { return failed() || atomicLoad(&control[1]) != 0u; }
 fn pairAt(word: u32) -> CompensatedF32 {
@@ -370,23 +360,17 @@ var<workgroup> wgFlag: u32;
 // control flow around every barrier, and a storage-buffer read is not provably
 // uniform, so the two counts are published once through workgroup memory and
 // threaded down as parameters rather than re-read at each use.
-var<workgroup> wgMaxIterations: u32;
 var<workgroup> wgBottomSweeps: u32;
 var<workgroup> wgSmoothingSweeps: u32;
+var<workgroup> wgOperatorBankBase: u32;
 
 fn publishUniformDials(lane: u32) {
   if (lane == 0u) {
-    wgMaxIterations = maxIterations();
     wgBottomSweeps = bottomSweeps();
     wgSmoothingSweeps = smoothingSweeps();
+    wgOperatorBankBase = operatorBankBase();
   }
   workgroupBarrier();
-}
-
-fn uniformStopped(lane: u32) -> bool {
-  if (lane == 0u) { wgFlag = select(0u, 1u, stopped()); }
-  workgroupBarrier();
-  return workgroupUniformLoad(&wgFlag) == 1u;
 }
 
 // ---- Transcription of validateAuthority / initializeControlAndDispatch ----
@@ -487,22 +471,22 @@ fn exactScalarValue(scalar: u32, lane: u32, partialCount: u32) -> f32 {
 }
 
 // ---- Transcription of initializeState (warm seed; diagonal stride 1, bank 0) ----
-fn initializeState(lane: u32) {
-  for (var row = lane; row < rows(); row += LANES) {
+fn initializeState(lane: u32, stride: u32) {
+  for (var row = lane; row < rows(); row += stride) {
     if (failed()) { continue; }
-    let seed = arena[SEED_BASE + row];
+    let seed = arena[pressureSeedBase() + row];
     let d = arena[DIAG_BASE + row];
     if (!finite(d) || d <= 0.0 || !finite(arena[RHS_BASE + row]) || !finite(seed)) {
       reportAt(ERROR_INVALID_ROW, 2u, row);
       continue;
     }
-    arena[P_BASE + row] = seed;
+    arena[pressureOutputBase() + row] = seed;
     arena[R_BASE + row] = 0.0;
   }
 }
 
-fn formInitialResidual(lane: u32) {
-  for (var row = lane; row < rows(); row += LANES) {
+fn formInitialResidual(lane: u32, stride: u32) {
+  for (var row = lane; row < rows(); row += stride) {
     if (failed()) { continue; }
     let value = -arena[RHS_BASE + row] - arena[DIMG_BASE + row];
     if (!finite(value)) { reportAt(ERROR_NONFINITE, 3u, row); }
@@ -544,32 +528,26 @@ fn opExactValue(source: ptr<function, array<i32,36>>) -> f32 {
   }
   return select(magnitude, -magnitude, negative);
 }
-fn applyOperator(lane: u32, inputBase: u32, outputBase: u32) {
-  let bound = levelZeroControl[1];
-  for (var row = lane; row < bound; row += LANES) {
-    if (levelZeroControl[3] != 1u || stopped()) { continue; }
+fn applyOperator(lane: u32, stride: u32, inputBase: u32, outputBase: u32) {
+  let levelBase = operatorBankBase() + LEVEL_RELATIVE_BASES[0];
+  let bound = hierarchy[levelBase + CONTROL_OFFSETS[0] + 1u];
+  for (var row = lane; row < bound; row += stride) {
+    if (hierarchy[levelBase + CONTROL_OFFSETS[0] + 3u] != 1u || stopped()) { continue; }
     let centre = arena[inputBase + row];
-    if (row + 1u >= arrayLength(&levelZeroRowFaceOffsets)) {
-      arena[outputBase + row] = 3.402823e38;
-      continue;
-    }
-    let begin = levelZeroRowFaceOffsets[row];
-    let end = levelZeroRowFaceOffsets[row + 1u];
-    if (begin > end || end > arrayLength(&levelZeroRowFaces) || end - begin > 24u) {
+    let begin = hierarchy[levelBase + ROW_OFFSETS[0] + row];
+    let end = hierarchy[levelBase + ROW_OFFSETS[0] + row + 1u];
+    if (begin > end || end > DIRECTED_EDGE_CAPACITIES[0] || end - begin > 24u) {
       arena[outputBase + row] = 3.402823e38;
       continue;
     }
     var limbs: array<i32,36>; var finiteTerms = true;
     for (var cursor = begin; cursor < end; cursor += 1u) {
-      let face = levelZeroFaces[levelZeroRowFaces[cursor]];
-      let coefficient = (face.openFraction * face.area) * face.inverseDistance;
+      let edgeAt = levelBase + DIRECTED_EDGE_OFFSETS[0] + 2u * cursor;
+      let neighbour = hierarchy[edgeAt];
+      let coefficient = bitcast<f32>(hierarchy[edgeAt + 1u]);
       var difference = centre;
-      if (face.negativeRow == row) {
-        if (face.positiveRow != INVALID) {
-          difference = centre - arena[inputBase + face.positiveRow];
-        }
-      } else {
-        difference = centre - arena[inputBase + face.negativeRow];
+      if (neighbour != INVALID) {
+        difference = centre - arena[inputBase + neighbour];
       }
       let term = coefficient * difference;
       if (term != term || abs(term) >= 3.402823e38) { finiteTerms = false; }
@@ -582,31 +560,29 @@ fn applyOperator(lane: u32, inputBase: u32, outputBase: u32) {
 // ---- Transcription of the Losasso V-cycle level-0 kernels ----
 const L0_SRC_XA = 0u;
 const L0_SRC_XB = 1u;
-fn vStopped() -> bool { return stopped() || levelZeroControl[3] != 1u; }
+fn vStopped() -> bool {
+  let levelBase = operatorBankBase() + LEVEL_RELATIVE_BASES[0];
+  return stopped() || hierarchy[levelBase + CONTROL_OFFSETS[0] + 3u] != 1u;
+}
 fn l0Value(source: u32, row: u32) -> f32 {
   if (source == L0_SRC_XB) { return arena[V_XB_BASE +row]; }
   return arena[V_XA_BASE +row];
 }
 fn l0Image(row: u32, source: u32) -> vec2f {
-  if (row + 1u >= arrayLength(&levelZeroRowFaceOffsets)) { return vec2f(3.402823e38, -1.); }
-  let begin = levelZeroRowFaceOffsets[row]; let end = levelZeroRowFaceOffsets[row + 1u];
-  if (begin > end || end > arrayLength(&levelZeroRowFaces)) { return vec2f(3.402823e38, -1.); }
+  let levelBase = operatorBankBase() + LEVEL_RELATIVE_BASES[0];
+  let begin = hierarchy[levelBase + ROW_OFFSETS[0] + row];
+  let end = hierarchy[levelBase + ROW_OFFSETS[0] + row + 1u];
+  if (begin > end || end > DIRECTED_EDGE_CAPACITIES[0]) { return vec2f(3.402823e38, -1.); }
   let centre = l0Value(source, row); var imageSum = CompensatedF32(0., 0.);
   var diagonalSum = CompensatedF32(0., 0.); var valid = true;
   for (var cursor = begin; cursor < end; cursor += 1u) {
-    let faceId = levelZeroRowFaces[cursor];
-    if (faceId >= arrayLength(&levelZeroFaces)) { valid = false; continue; }
-    let face = levelZeroFaces[faceId];
-    let coefficient = (face.openFraction * face.area) * face.inverseDistance;
+    let edgeAt = levelBase + DIRECTED_EDGE_OFFSETS[0] + 2u * cursor;
+    let neighbour = hierarchy[edgeAt];
+    let coefficient = bitcast<f32>(hierarchy[edgeAt + 1u]);
     var difference = centre;
-    if (face.negativeRow == row) {
-      if (face.positiveRow != INVALID) {
-        if (face.positiveRow >= VECTOR_CAPACITIES[0]) { valid = false; continue; }
-        difference -= l0Value(source, face.positiveRow);
-      }
-    } else {
-      if (face.negativeRow >= VECTOR_CAPACITIES[0]) { valid = false; continue; }
-      difference -= l0Value(source, face.negativeRow);
+    if (neighbour != INVALID) {
+      if (neighbour >= VECTOR_CAPACITIES[0]) { valid = false; continue; }
+      difference -= l0Value(source, neighbour);
     }
     let term = coefficient * difference;
     if (!finite(coefficient) || coefficient < 0. || !finite(term)) { valid = false; continue; }
@@ -617,9 +593,10 @@ fn l0Image(row: u32, source: u32) -> vec2f {
   return select(vec2f(3.402823e38, -1.), vec2f(value, diag),
     valid && finite(value) && finite(diag) && diag > 0.);
 }
-fn l0Jacobi(lane: u32, source: u32, publish: bool) {
-  let bound = levelZeroControl[1];
-  for (var row = lane; row < bound; row += LANES) {
+fn l0Jacobi(lane: u32, stride: u32, source: u32, publish: bool) {
+  let levelBase = operatorBankBase() + LEVEL_RELATIVE_BASES[0];
+  let bound = hierarchy[levelBase + CONTROL_OFFSETS[0] + 1u];
+  for (var row = lane; row < bound; row += stride) {
     if (vStopped()) { continue; }
     let pair = l0Image(row, source);
     let value = select(0., l0Value(source, row) + DAMPING * (arena[V_RHS_BASE +row] - pair.x) / pair.y, pair.y > 0.);
@@ -632,44 +609,38 @@ fn l0Jacobi(lane: u32, source: u32, publish: bool) {
   }
 }
 
-// ---- Transcription of the fused sub-L0 walk (single 256-lane workgroup) ----
-fn fusedTransitionBase(level: u32) -> u32 { return (level - 1u) * TRANSITION_STRIDE; }
+// ---- Transcription of the fused sub-L0 walk (single reduction-width workgroup) ----
+fn fusedTransitionBase(level: u32) -> u32 {
+  // publishUniformDials() executes a workgroup barrier before the fused walk.
+  // A plain workgroup read is therefore visible to every lane. Using
+  // workgroupUniformLoad here was invalid because callers may reach this
+  // helper from control flow whose condition depends on storage authority.
+  return wgOperatorBankBase + LEVEL_RELATIVE_BASES[level];
+}
 fn fusedLevelControl(level: u32, word: u32) -> u32 {
-  return hierarchy[fusedTransitionBase(level) + CONTROL_OFFSET + word];
+  return hierarchy[fusedTransitionBase(level) + CONTROL_OFFSETS[level] + word];
 }
 fn fusedVectorIndex(level: u32, row: u32) -> u32 { return VECTOR_BASES[level] + row; }
 fn fusedCorrectionValue(fromB: bool, level: u32, row: u32) -> f32 {
   if (fromB) { return arena[V_XB_BASE +fusedVectorIndex(level, row)]; }
   return arena[V_XA_BASE +fusedVectorIndex(level, row)];
 }
-fn fusedLoadFace(level: u32, faceId: u32) -> Face {
-  let base = fusedTransitionBase(level) + FACES_OFFSET + 8u * faceId;
-  return Face(hierarchy[base], hierarchy[base + 1u], hierarchy[base + 2u], hierarchy[base + 3u],
-    bitcast<f32>(hierarchy[base + 4u]), bitcast<f32>(hierarchy[base + 5u]),
-    bitcast<f32>(hierarchy[base + 6u]), bitcast<f32>(hierarchy[base + 7u]));
-}
 fn fusedImage(level: u32, row: u32, fromB: bool) -> vec2f {
   let base = fusedTransitionBase(level);
-  let begin = hierarchy[base + ROW_OFFSETS_OFFSET + row];
-  let end = hierarchy[base + ROW_OFFSETS_OFFSET + row + 1u];
-  let incidenceCapacity = 2u * FUSED_FACE_CAPACITY;
+  let begin = hierarchy[base + ROW_OFFSETS[level] + row];
+  let end = hierarchy[base + ROW_OFFSETS[level] + row + 1u];
+  let incidenceCapacity = DIRECTED_EDGE_CAPACITIES[level];
   if (begin > end || end > incidenceCapacity) { return vec2f(3.402823e38, -1.); }
   let centre = fusedCorrectionValue(fromB, level, row);
   var imageSum = CompensatedF32(0., 0.); var diagonalSum = CompensatedF32(0., 0.); var valid = true;
   for (var cursor = begin; cursor < end; cursor += 1u) {
-    let faceId = hierarchy[base + ROW_FACES_OFFSET + cursor];
-    if (faceId >= FUSED_FACE_CAPACITY) { valid = false; continue; }
-    let face = fusedLoadFace(level, faceId);
-    let coefficient = (face.openFraction * face.area) * face.inverseDistance;
+    let edgeAt = base + DIRECTED_EDGE_OFFSETS[level] + 2u * cursor;
+    let neighbour = hierarchy[edgeAt];
+    let coefficient = bitcast<f32>(hierarchy[edgeAt + 1u]);
     var difference = centre;
-    if (face.negativeRow == row) {
-      if (face.positiveRow != INVALID) {
-        if (face.positiveRow >= VECTOR_CAPACITIES[level]) { valid = false; continue; }
-        difference -= fusedCorrectionValue(fromB, level, face.positiveRow);
-      }
-    } else {
-      if (face.negativeRow >= VECTOR_CAPACITIES[level]) { valid = false; continue; }
-      difference -= fusedCorrectionValue(fromB, level, face.negativeRow);
+    if (neighbour != INVALID) {
+      if (neighbour >= VECTOR_CAPACITIES[level]) { valid = false; continue; }
+      difference -= fusedCorrectionValue(fromB, level, neighbour);
     }
     let term = coefficient * difference;
     if (!finite(coefficient) || coefficient < 0. || !finite(term)) { valid = false; continue; }
@@ -684,11 +655,11 @@ fn fusedRestrictInto(coarseLevel: u32, lane: u32, enabled: bool) {
   let base = fusedTransitionBase(coarseLevel);
   let rowCount = select(0u, fusedLevelControl(coarseLevel, 1u), enabled);
   for (var row = lane; row < rowCount; row += LANES) {
-    let begin = hierarchy[base + CHILD_OFFSETS_OFFSET + row];
-    let end = hierarchy[base + CHILD_OFFSETS_OFFSET + row + 1u];
+    let begin = hierarchy[base + CHILD_OFFSETS[coarseLevel] + row];
+    let end = hierarchy[base + CHILD_OFFSETS[coarseLevel] + row + 1u];
     var sum = CompensatedF32(0., 0.);
     for (var cursor = begin; cursor < end; cursor += 1u) {
-      let child = hierarchy[base + CHILD_LIST_OFFSET + cursor];
+      let child = hierarchy[base + CHILD_LIST_OFFSETS[coarseLevel] + cursor];
       sum = addCompensatedF32(sum, arena[V_RES_BASE +fusedVectorIndex(coarseLevel - 1u, child)]);
     }
     arena[V_RHS_BASE +fusedVectorIndex(coarseLevel, row)] = compensatedValue(sum);
@@ -729,9 +700,9 @@ fn fusedFormResidual(level: u32, lane: u32, enabled: bool) {
 fn fusedProlongInto(fineLevel: u32, lane: u32, enabled: bool, coarseFromB: bool) {
   let coarseLevel = fineLevel + 1u; let base = fusedTransitionBase(coarseLevel);
   let coarseRows = fusedLevelControl(coarseLevel, 1u);
-  let fineRows = select(0u, hierarchy[base + CHILD_OFFSETS_OFFSET + coarseRows], enabled);
+  let fineRows = select(0u, hierarchy[base + CHILD_OFFSETS[coarseLevel] + coarseRows], enabled);
   for (var row = lane; row < fineRows; row += LANES) {
-    let parent = hierarchy[base + PARENTS_OFFSET + row];
+    let parent = hierarchy[base + PARENT_OFFSETS[coarseLevel] + row];
     if (parent < coarseRows) {
       arena[V_XA_BASE +fusedVectorIndex(fineLevel, row)] +=
         fusedCorrectionValue(coarseFromB, coarseLevel, parent);
@@ -769,26 +740,20 @@ fn sharedBottomValue(fromB: bool, row: u32) -> f32 {
 }
 fn sharedBottomImage(row: u32, fromB: bool) -> vec2f {
   let base = fusedTransitionBase(1u);
-  let begin = hierarchy[base + ROW_OFFSETS_OFFSET + row];
-  let end = hierarchy[base + ROW_OFFSETS_OFFSET + row + 1u];
-  let incidenceCapacity = 2u * FUSED_FACE_CAPACITY;
+  let begin = hierarchy[base + ROW_OFFSETS[1] + row];
+  let end = hierarchy[base + ROW_OFFSETS[1] + row + 1u];
+  let incidenceCapacity = DIRECTED_EDGE_CAPACITIES[1];
   if (begin > end || end > incidenceCapacity) { return vec2f(3.402823e38, -1.); }
   let centre = sharedBottomValue(fromB, row);
   var imageSum = CompensatedF32(0., 0.); var diagonalSum = CompensatedF32(0., 0.); var valid = true;
   for (var cursor = begin; cursor < end; cursor += 1u) {
-    let faceId = hierarchy[base + ROW_FACES_OFFSET + cursor];
-    if (faceId >= FUSED_FACE_CAPACITY) { valid = false; continue; }
-    let face = fusedLoadFace(1u, faceId);
-    let coefficient = (face.openFraction * face.area) * face.inverseDistance;
+    let edgeAt = base + DIRECTED_EDGE_OFFSETS[1] + 2u * cursor;
+    let neighbour = hierarchy[edgeAt];
+    let coefficient = bitcast<f32>(hierarchy[edgeAt + 1u]);
     var difference = centre;
-    if (face.negativeRow == row) {
-      if (face.positiveRow != INVALID) {
-        if (face.positiveRow >= VECTOR_CAPACITIES[1]) { valid = false; continue; }
-        difference -= sharedBottomValue(fromB, face.positiveRow);
-      }
-    } else {
-      if (face.negativeRow >= VECTOR_CAPACITIES[1]) { valid = false; continue; }
-      difference -= sharedBottomValue(fromB, face.negativeRow);
+    if (neighbour != INVALID) {
+      if (neighbour >= VECTOR_CAPACITIES[1]) { valid = false; continue; }
+      difference -= sharedBottomValue(fromB, neighbour);
     }
     let term = coefficient * difference;
     if (!finite(coefficient) || coefficient < 0. || !finite(term)) { valid = false; continue; }
@@ -803,11 +768,11 @@ fn sharedRestrictIntoBottom(lane: u32) {
   let base = fusedTransitionBase(1u);
   let rowCount = fusedLevelControl(1u, 1u);
   for (var row = lane; row < rowCount; row += LANES) {
-    let begin = hierarchy[base + CHILD_OFFSETS_OFFSET + row];
-    let end = hierarchy[base + CHILD_OFFSETS_OFFSET + row + 1u];
+    let begin = hierarchy[base + CHILD_OFFSETS[1] + row];
+    let end = hierarchy[base + CHILD_OFFSETS[1] + row + 1u];
     var sum = CompensatedF32(0., 0.);
     for (var cursor = begin; cursor < end; cursor += 1u) {
-      let child = hierarchy[base + CHILD_LIST_OFFSET + cursor];
+      let child = hierarchy[base + CHILD_LIST_OFFSETS[1] + cursor];
       sum = addCompensatedF32(sum, arena[V_RES_BASE + child]);
     }
     sharedBottomVectors[SH_RHS + row] = compensatedValue(sum);
@@ -829,9 +794,9 @@ fn sharedBottomRelax(fromB: bool, lane: u32) {
 fn sharedProlongToLevelZero(lane: u32) {
   let base = fusedTransitionBase(1u);
   let coarseRows = fusedLevelControl(1u, 1u);
-  let fineRows = hierarchy[base + CHILD_OFFSETS_OFFSET + coarseRows];
+  let fineRows = hierarchy[base + CHILD_OFFSETS[1] + coarseRows];
   for (var row = lane; row < fineRows; row += LANES) {
-    let parent = hierarchy[base + PARENTS_OFFSET + row];
+    let parent = hierarchy[base + PARENT_OFFSETS[1] + row];
     if (parent < coarseRows) {
       arena[V_XA_BASE + row] += sharedBottomVectors[SH_XA + parent];
     }
@@ -902,9 +867,10 @@ fn fusedSubL0Walk(lane: u32, sweeps: u32, smoothing: u32) {
 // Prelude of WebGPUOctreeLosassoVCycle.encodeCorrection's fused branch:
 // clear xA0 and stage the CG residual as the L0 right-hand side. Both writes
 // are own-row, so they share one loop and one stage boundary.
-fn stageVCycleInputs(lane: u32) {
-  let bound = levelZeroControl[1];
-  for (var row = lane; row < bound; row += LANES) {
+fn stageVCycleInputs(lane: u32, stride: u32) {
+  let levelBase = operatorBankBase() + LEVEL_RELATIVE_BASES[0];
+  let bound = hierarchy[levelBase + CONTROL_OFFSETS[0] + 1u];
+  for (var row = lane; row < bound; row += stride) {
     if (vStopped()) { continue; }
     arena[V_XA_BASE + row] = 0.;
     // Both banks: an odd smoothing count starts the pre-chain from xB so it
@@ -913,58 +879,27 @@ fn stageVCycleInputs(lane: u32) {
     arena[V_RHS_BASE + row] = arena[R_BASE + row];
   }
 }
-// Per-iteration fusion of advancePCGState with that prelude. Every write and
-// the staged read of R touch only the thread's own row, so the advanced
-// residual is read by the same thread that wrote it and no boundary is
-// needed between the two halves.
-fn advanceAndStageVCycle(lane: u32) {
-  let l0Rows = levelZeroControl[1];
-  let bound = max(rows(), l0Rows);
-  for (var row = lane; row < bound; row += LANES) {
-    if (row < rows() && !stopped()) {
-      let alpha = compensatedValue(pairAt(16u));
-      let nextPressure = arena[P_BASE + row] + alpha * arena[D_BASE + row];
-      let nextResidual = arena[R_BASE + row] - alpha * arena[DIMG_BASE + row];
-      if (!finite(nextPressure) || !finite(nextResidual)) {
-        reportAt(ERROR_NONFINITE, 7u, row);
-      } else {
-        arena[P_BASE + row] = nextPressure;
-        arena[R_BASE + row] = nextResidual;
-      }
-    }
-    if (row < l0Rows && !vStopped()) {
-      arena[V_XA_BASE + row] = 0.;
-      arena[V_RHS_BASE + row] = arena[R_BASE + row];
+fn advancePCGState(lane: u32, stride: u32) {
+  for (var row = lane; row < rows(); row += stride) {
+    if (stopped()) { continue; }
+    let alpha = compensatedValue(pairAt(16u));
+    let nextPressure = arena[pressureOutputBase() + row] + alpha * arena[D_BASE + row];
+    let nextResidual = arena[R_BASE + row] - alpha * arena[DIMG_BASE + row];
+    if (!finite(nextPressure) || !finite(nextResidual)) {
+      reportAt(ERROR_NONFINITE, 7u, row);
+    } else {
+      arena[pressureOutputBase() + row] = nextPressure;
+      arena[R_BASE + row] = nextResidual;
     }
   }
 }
-// Body of the fused-branch correction: pre-smoothing, L0 residual, the fused
-// sub-L0 walk, post-smoothing, and the copy into the preconditioned vector.
-// Callers stage the inputs (and a boundary) first.
-//
-// The smoothing count is the pre AND post count; they must match or M stops being
-// symmetric and CG loses the property its recurrence is built on. Odd counts
-// work because the pre-chain picks its starting bank from the parity: it
-// always lands in xA, which is what the residual reads and what the walk's
-// final prolongation accumulates into.
-fn vcycleCorrection(lane: u32, sweeps: u32, smoothing: u32) {
-  let bound = levelZeroControl[1];
-  var source = select(L0_SRC_XA, L0_SRC_XB, (smoothing & 1u) == 1u);
-  for (var sweep = 0u; sweep < smoothing; sweep += 1u) {
-    for (var probe = 0u; probe < REPEAT_L0; probe += 1u) { l0Jacobi(lane, source, false); sync(); }
-    source = 1u - source;
-  }
-  for (var row = lane; row < bound; row += LANES) {
+
+fn formL0Residual(lane: u32, stride: u32) {
+  let levelBase = operatorBankBase() + LEVEL_RELATIVE_BASES[0];
+  let bound = hierarchy[levelBase + CONTROL_OFFSETS[0] + 1u];
+  for (var row = lane; row < bound; row += stride) {
     if (vStopped()) { continue; }
     arena[V_RES_BASE +row] = arena[V_RHS_BASE +row] - l0Image(row, L0_SRC_XA).x;
-  }
-  sync();
-  fusedSubL0Walk(lane, sweeps, smoothing);
-  var post = L0_SRC_XA;
-  for (var sweep = 0u; sweep < smoothing; sweep += 1u) {
-    let last = sweep + 1u == smoothing;
-    for (var probe = 0u; probe < REPEAT_L0; probe += 1u) { l0Jacobi(lane, post, last); sync(); }
-    post = 1u - post;
   }
 }
 
@@ -1168,16 +1103,16 @@ fn curvatureReduceAndFinish(lane: u32) {
   if (lane == 0u) { finishDirectionCurvatureTotal(merged[0]); }
 }
 
-fn initializeDirections(lane: u32) {
-  for (var row = lane; row < rows(); row += LANES) {
+fn initializeDirections(lane: u32, stride: u32) {
+  for (var row = lane; row < rows(); row += stride) {
     if (stopped()) { continue; }
     arena[D_BASE + row] = arena[Z_BASE + row];
     arena[DIMG_BASE + row] = arena[ZIMG_BASE + row];
   }
 }
 
-fn updateDirections(lane: u32) {
-  for (var row = lane; row < rows(); row += LANES) {
+fn updateDirections(lane: u32, stride: u32) {
+  for (var row = lane; row < rows(); row += stride) {
     if (stopped()) { continue; }
     let beta = compensatedValue(pairAt(18u));
     let nextDirection = arena[Z_BASE + row] + beta * arena[D_BASE + row];
@@ -1189,98 +1124,215 @@ fn updateDirections(lane: u32) {
   }
 }
 
-fn finalizeAndPublish(lane: u32) {
-  if (lane == 0u && !failed() && atomicLoad(&control[1]) == 0u) {
+fn finalizeControl() {
+  if (!failed() && atomicLoad(&control[1]) == 0u) {
     reportAt(ERROR_NONCONVERGENCE, 9u, INVALID);
   }
-  sync();
+  let fatal = (atomicLoad(&control[0]) & (ERROR_INVALID_AUTHORITY
+    | ERROR_INVALID_ROW | ERROR_NONFINITE)) != 0u;
+  let converged = atomicLoad(&control[1]) != 0u;
+  if (converged && !fatal) { atomicStore(&control[20], 1u); }
+}
+
+fn publishPressure(lane: u32, stride: u32) {
   let fatal = (atomicLoad(&control[0]) & (ERROR_INVALID_AUTHORITY
     | ERROR_INVALID_ROW | ERROR_NONFINITE)) != 0u;
   let converged = atomicLoad(&control[1]) != 0u;
   let advanced = atomicLoad(&control[2]) > 0u;
   let usable = !fatal && (converged || advanced);
-  for (var row = lane; row < rows(); row += LANES) {
-    let seed = select(0.0, arena[SEED_BASE + row], finite(arena[SEED_BASE + row]));
-    let candidate = arena[P_BASE + row];
-    arena[OUT_BASE + row] = select(seed, candidate, usable && finite(candidate));
+  for (var row = lane; row < rows(); row += stride) {
+    let seed = select(0.0, arena[pressureSeedBase() + row],
+      finite(arena[pressureSeedBase() + row]));
+    let candidate = arena[pressureOutputBase() + row];
+    arena[pressureOutputBase() + row] = select(seed, candidate, usable && finite(candidate));
   }
-  if (lane == 0u && converged && !fatal) { atomicStore(&control[20], 1u); }
+}
+
+const ROW_LANES = 64u;
+fn rowStride(groups: vec3u) -> u32 { return max(1u, groups.x * ROW_LANES); }
+
+@compute @workgroup_size(1)
+fn residentInitializeControl() { initializeControl(); }
+
+@compute @workgroup_size(64)
+fn residentInitializeState(@builtin(global_invocation_id) gid: vec3u,
+  @builtin(num_workgroups) groups: vec3u) {
+  initializeState(gid.x, rowStride(groups));
+}
+
+@compute @workgroup_size(64)
+fn residentInitialOperatorResidual(@builtin(global_invocation_id) gid: vec3u,
+  @builtin(num_workgroups) groups: vec3u) {
+  let stride = rowStride(groups);
+  for (var probe = 0u; probe < REPEAT_OP; probe += 1u) {
+    applyOperator(gid.x, stride, pressureOutputBase(), DIMG_BASE);
+  }
+  formInitialResidual(gid.x, stride);
+}
+
+@compute @workgroup_size(64)
+fn residentStageVCycle(@builtin(global_invocation_id) gid: vec3u,
+  @builtin(num_workgroups) groups: vec3u) {
+  stageVCycleInputs(gid.x, rowStride(groups));
+}
+
+@compute @workgroup_size(64)
+fn residentJacobiXAtoXB(@builtin(global_invocation_id) gid: vec3u,
+  @builtin(num_workgroups) groups: vec3u) {
+  let stride = rowStride(groups);
+  for (var probe = 0u; probe < REPEAT_L0; probe += 1u) {
+    l0Jacobi(gid.x, stride, L0_SRC_XA, false);
+  }
+}
+@compute @workgroup_size(64)
+fn residentJacobiXBtoXA(@builtin(global_invocation_id) gid: vec3u,
+  @builtin(num_workgroups) groups: vec3u) {
+  let stride = rowStride(groups);
+  for (var probe = 0u; probe < REPEAT_L0; probe += 1u) {
+    l0Jacobi(gid.x, stride, L0_SRC_XB, false);
+  }
+}
+@compute @workgroup_size(64)
+fn residentJacobiXAtoXBPublish(@builtin(global_invocation_id) gid: vec3u,
+  @builtin(num_workgroups) groups: vec3u) {
+  let stride = rowStride(groups);
+  for (var probe = 0u; probe < REPEAT_L0; probe += 1u) {
+    l0Jacobi(gid.x, stride, L0_SRC_XA, true);
+  }
+}
+@compute @workgroup_size(64)
+fn residentJacobiXBtoXAPublish(@builtin(global_invocation_id) gid: vec3u,
+  @builtin(num_workgroups) groups: vec3u) {
+  let stride = rowStride(groups);
+  for (var probe = 0u; probe < REPEAT_L0; probe += 1u) {
+    l0Jacobi(gid.x, stride, L0_SRC_XB, true);
+  }
+}
+
+@compute @workgroup_size(64)
+fn residentFormL0Residual(@builtin(global_invocation_id) gid: vec3u,
+  @builtin(num_workgroups) groups: vec3u) {
+  formL0Residual(gid.x, rowStride(groups));
 }
 
 @compute @workgroup_size(${config.lanes})
-fn residentLosassoMGPCG(@builtin(local_invocation_index) lane: u32) {
-  if (lane == 0u) { initializeControl(); }
-  sync();
+fn residentFusedBottom(@builtin(local_invocation_index) lane: u32) {
   publishUniformDials(lane);
-  let iterationCeiling = workgroupUniformLoad(&wgMaxIterations);
-  let sweeps = workgroupUniformLoad(&wgBottomSweeps);
-  let smoothing = workgroupUniformLoad(&wgSmoothingSweeps);
-  initializeState(lane);
-  sync();
-  for (var probe = 0u; probe < REPEAT_OP; probe += 1u) { applyOperator(lane, P_BASE, DIMG_BASE); sync(); }
-  formInitialResidual(lane);
-  sync();
-  stageVCycleInputs(lane);
-  sync();
-  vcycleCorrection(lane, sweeps, smoothing);
-  for (var probe = 0u; probe < REPEAT_OP; probe += 1u) { applyOperator(lane, Z_BASE, ZIMG_BASE); sync(); }
-  initialExactReduction(lane);
-  sync();
-  initializeDirections(lane);
-  sync();
-  for (var iteration = 0u; iteration < iterationCeiling; iteration += 1u) {
-    advanceAndStageVCycle(lane);
-    sync();
-    vcycleCorrection(lane, sweeps, smoothing);
-    mergedReduceAndFinish(lane);
-    sync();
-    if (uniformStopped(lane)) { break; }
-    updateDirections(lane);
-    sync();
-    for (var probe = 0u; probe < REPEAT_OP; probe += 1u) { applyOperator(lane, D_BASE, DIMG_BASE); sync(); }
-    curvatureReduceAndFinish(lane);
-    sync();
+  fusedSubL0Walk(lane, workgroupUniformLoad(&wgBottomSweeps),
+    workgroupUniformLoad(&wgSmoothingSweeps));
+}
+
+@compute @workgroup_size(64)
+fn residentApplyPreconditionedOperator(@builtin(global_invocation_id) gid: vec3u,
+  @builtin(num_workgroups) groups: vec3u) {
+  let stride = rowStride(groups);
+  for (var probe = 0u; probe < REPEAT_OP; probe += 1u) {
+    applyOperator(gid.x, stride, Z_BASE, ZIMG_BASE);
   }
-  finalizeAndPublish(lane);
+  initializeDirections(gid.x, stride);
+}
+
+@compute @workgroup_size(${config.lanes})
+fn residentInitialReduction(@builtin(local_invocation_index) lane: u32) {
+  initialExactReduction(lane);
+}
+
+@compute @workgroup_size(64)
+fn residentAdvanceState(@builtin(global_invocation_id) gid: vec3u,
+  @builtin(num_workgroups) groups: vec3u) {
+  advancePCGState(gid.x, rowStride(groups));
+}
+
+@compute @workgroup_size(${config.lanes})
+fn residentMergedReduction(@builtin(local_invocation_index) lane: u32) {
+  mergedReduceAndFinish(lane);
+}
+
+@compute @workgroup_size(64)
+fn residentUpdateDirection(@builtin(global_invocation_id) gid: vec3u,
+  @builtin(num_workgroups) groups: vec3u) {
+  updateDirections(gid.x, rowStride(groups));
+}
+
+@compute @workgroup_size(64)
+fn residentApplyDirectionOperator(@builtin(global_invocation_id) gid: vec3u,
+  @builtin(num_workgroups) groups: vec3u) {
+  let stride = rowStride(groups);
+  for (var probe = 0u; probe < REPEAT_OP; probe += 1u) {
+    applyOperator(gid.x, stride, D_BASE, DIMG_BASE);
+  }
+}
+
+@compute @workgroup_size(${config.lanes})
+fn residentCurvatureReduction(@builtin(local_invocation_index) lane: u32) {
+  curvatureReduceAndFinish(lane);
+}
+
+@compute @workgroup_size(1)
+fn residentFinalizeControl() { finalizeControl(); }
+
+@compute @workgroup_size(64)
+fn residentPublishPressure(@builtin(global_invocation_id) gid: vec3u,
+  @builtin(num_workgroups) groups: vec3u) {
+  publishPressure(gid.x, rowStride(groups));
 }
 `;
 }
 
 export interface WebGPUOctreeLosassoResidentMGPCGSource {
   readonly rowCapacity: number;
-  /** Reduced operator diagonal, one f32 per compact row (stride 1, bank 0). */
-  readonly diagonal: GPUBuffer;
-  /** Current divergence/RHS authority, one f32 per compact row. */
-  readonly rightHandSide: GPUBuffer;
-  /** Accepted `[flags, firstError, rows, slots, epoch, bank, published]`. */
-  readonly acceptedAuthority: GPUBuffer;
   readonly hierarchy: OctreeLosassoVCycleHierarchySource;
 }
 
 export interface WebGPUOctreeLosassoResidentMGPCGOptions {
-  /** Hard iteration envelope; the loop exits at convergence, so this is a
-   * ceiling and never a cost. */
+  /** Hard encoded iteration envelope. Post-convergence stages retire at their
+   * common stop-word guard, but still incur dispatch scheduling cost. */
   readonly maximumIterations: number;
   readonly relativeTolerance?: number;
   readonly absoluteTolerance?: number;
 }
 
-/** Single-dispatch whole-solve executor for the Losasso ≤4K-row coarse tier. */
+const RESIDENT_ENTRY_POINTS = [
+  "residentInitializeControl",
+  "residentInitializeState",
+  "residentInitialOperatorResidual",
+  "residentStageVCycle",
+  "residentJacobiXAtoXB",
+  "residentJacobiXBtoXA",
+  "residentJacobiXAtoXBPublish",
+  "residentJacobiXBtoXAPublish",
+  "residentFormL0Residual",
+  "residentFusedBottom",
+  "residentApplyPreconditionedOperator",
+  "residentInitialReduction",
+  "residentAdvanceState",
+  "residentMergedReduction",
+  "residentUpdateDirection",
+  "residentApplyDirectionOperator",
+  "residentCurvatureReduction",
+  "residentFinalizeControl",
+  "residentPublishPressure",
+] as const;
+type ResidentEntryPoint = typeof RESIDENT_ENTRY_POINTS[number];
+
+/** GPU-staged multi-workgroup executor for the Losasso ≤4K-row coarse tier. */
 export class WebGPUOctreeLosassoResidentMGPCG {
   readonly control: GPUBuffer;
   readonly iterationBudget: number;
   readonly allocatedBytes: number;
-  readonly encodedDispatchCount = 1 as const;
   readonly initializationTasks: readonly { label: string; run: () => Promise<void> }[];
 
   private readonly arena: GPUBuffer;
-  /** Host-owned staging for the runtime dials; copied into `control` per solve. */
-  private readonly tuning: GPUBuffer;
+  private readonly pressureViews: readonly [OctreeLosassoBufferView, OctreeLosassoBufferView];
   private readonly tuningWords = new Uint32Array(TUNING_WORDS);
-  private pipeline?: GPUComputePipeline;
+  private pipelines?: readonly [Readonly<Record<ResidentEntryPoint, GPUComputePipeline>>,
+    Readonly<Record<ResidentEntryPoint, GPUComputePipeline>>];
+  private layout?: GPUBindGroupLayout;
   private group?: GPUBindGroup;
   private readonly shaderCode: string;
   private readonly shaderLabel: string;
+  /** Bank containing the warm seed for the next encoded solve. */
+  private pressureInputA = true;
   private destroyed = false;
 
   static supports(
@@ -1299,8 +1351,10 @@ export class WebGPUOctreeLosassoResidentMGPCG {
     if (rowCapacity > OCTREE_LOSASSO_RESIDENT_MAXIMUM_ROWS) return false;
     const limits = device.limits;
     if (!limits) return true;
-    return OCTREE_LOSASSO_RESIDENT_LANES <= limits.maxComputeInvocationsPerWorkgroup
-      && OCTREE_LOSASSO_RESIDENT_LANES <= limits.maxComputeWorkgroupSizeX
+    const lanes = octreeLosassoResidentLanes();
+    return lanes <= limits.maxComputeInvocationsPerWorkgroup
+      && lanes <= limits.maxComputeWorkgroupSizeX
+      && RESIDENT_BASE_WORKGROUP_BYTES <= limits.maxComputeWorkgroupStorageSize
       && STORAGE_BINDING_COUNT <= limits.maxStorageBuffersPerShaderStage;
   }
 
@@ -1321,6 +1375,10 @@ export class WebGPUOctreeLosassoResidentMGPCG {
     if (!WebGPUOctreeLosassoResidentMGPCG.supports(device, source.hierarchy, rowCapacity)) {
       throw new Error("Resident Losasso MGPCG is unsupported for this hierarchy/device");
     }
+    this.pressureViews = Object.freeze([
+      octreeLosassoArenaView(fused.frameArena, fused.arenaPlan.frame.pressureA),
+      octreeLosassoArenaView(fused.frameArena, fused.arenaPlan.frame.pressureB),
+    ]);
     if (!Number.isSafeInteger(options.maximumIterations) || options.maximumIterations < 4) {
       throw new RangeError("Resident Losasso MGPCG iteration envelope must be at least four");
     }
@@ -1334,49 +1392,16 @@ export class WebGPUOctreeLosassoResidentMGPCG {
     if (fused.levelRowCapacities[0]! < rowCapacity) {
       throw new RangeError("Resident Losasso MGPCG finest vector capacity is below the row capacity");
     }
-    if (source.diagonal.size < rowCapacity * 4
-      || source.rightHandSide.size < rowCapacity * 4
-      || source.acceptedAuthority.size < 7 * 4) {
-      throw new RangeError("Resident Losasso MGPCG source capacity is too small");
-    }
     this.iterationBudget = options.maximumIterations;
-
-    for (const [label, buffer] of [
-      ["accepted authority", source.acceptedAuthority],
-      ["diagonal", source.diagonal],
-      ["divergence RHS", source.rightHandSide],
-    ] as const) {
-      if ((buffer.usage & GPUBufferUsage.COPY_SRC) === 0) {
-        throw new RangeError(`Resident Losasso MGPCG requires COPY_SRC on the ${label} buffer`);
-      }
-    }
-    const storage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC;
-    this.control = device.createBuffer({
-      label: "Resident Losasso MGPCG solve control",
-      size: CONTROL_BYTES,
-      usage: storage,
-    });
-    const bases = vectorBases(fused.levelRowCapacities);
-    const vectorArenaWords = bases[bases.length - 1]!
-      + Math.ceil(fused.levelRowCapacities[fused.levelRowCapacities.length - 1]! * 4 / 256) * 64;
-    // Staged out/seed/rhs/diagonal + six CG vectors + four V-cycle sections.
-    this.arena = device.createBuffer({
-      label: "Resident Losasso MGPCG consolidated solver arena",
-      size: (10 * rowCapacity + 4 * vectorArenaWords) * 4,
-      usage: storage,
-    });
-    this.tuning = device.createBuffer({
-      label: "Resident Losasso MGPCG staged runtime dials",
-      size: TUNING_WORDS * 4,
-      usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
-    });
-    device.queue.writeBuffer(this.tuning, 0, this.tuningWords);
-    this.allocatedBytes = this.control.size + this.arena.size + this.tuning.size;
+    this.control = fused.controlArena;
+    this.arena = fused.frameArena;
+    // Shared arenas are accounted by their hierarchy/authority owner.
+    this.allocatedBytes = 0;
 
     const phaseRepeat = octreeLosassoResidentPhaseRepeatProbe();
     const lanes = octreeLosassoResidentLanes();
-    // merged fold slots + exact-reduction limbs + the uniform flag word.
-    const workgroupOverheadBytes = REDUCTION_LANES * 32 + 144 * 4 + 4;
+    // Merged fold slots + exact-reduction limbs + flag, two dials and bank base.
+    const workgroupOverheadBytes = RESIDENT_BASE_WORKGROUP_BYTES;
     const sharedBottom = source.hierarchy.levels.length === 2
       && (device.limits === undefined
         || 3 * fused.levelRowCapacities[1]! * 4 + workgroupOverheadBytes
@@ -1392,8 +1417,8 @@ export class WebGPUOctreeLosassoResidentMGPCG {
       sharedBottom,
       ...(phaseRepeat === undefined ? {} : { phaseRepeat }),
     });
-    this.shaderLabel = "Resident Losasso MGPCG · whole solve in one workgroup"
-      + ` · ${lanes} lanes`
+    this.shaderLabel = "Resident Losasso MGPCG · staged multi-workgroup solve"
+      + ` · 64-lane L0 · ${lanes}-lane reductions`
       + (sharedBottom ? " · workgroup-resident bottom smoother" : "")
       + (phaseRepeat === undefined ? ""
         : ` · ${phaseRepeat.phase} x${phaseRepeat.repeats} repeat probe`);
@@ -1405,17 +1430,45 @@ export class WebGPUOctreeLosassoResidentMGPCG {
 
   async initialize(): Promise<void> {
     this.assertLive();
-    if (this.pipeline) return;
+    if (this.pipelines) return;
     const shaderModule = this.device.createShaderModule({
       label: this.shaderLabel,
       code: this.shaderCode,
     });
-    this.pipeline = await this.device.createComputePipelineAsync({
-      label: "Resident Losasso MGPCG · residentLosassoMGPCG",
-      layout: "auto",
-      compute: { module: shaderModule, entryPoint: "residentLosassoMGPCG" },
+    this.layout = this.device.createBindGroupLayout({
+      label: "Resident Losasso MGPCG staged bindings",
+      entries: Array.from({ length: STORAGE_BINDING_COUNT }, (_, binding) => ({
+        binding,
+        visibility: GPUShaderStage.COMPUTE,
+        buffer: { type: binding === 0 ? "read-only-storage" as const : "storage" as const },
+      })),
     });
+    const pipelineLayout = this.device.createPipelineLayout({
+      label: "Resident Losasso MGPCG staged pipeline layout",
+      bindGroupLayouts: [this.layout],
+    });
+    const makeBank = async (inputA: boolean) => Object.freeze(Object.fromEntries(
+      await Promise.all(RESIDENT_ENTRY_POINTS.map(async (entryPoint) => [entryPoint,
+        await this.device.createComputePipelineAsync({
+          label: `Resident Losasso MGPCG · ${entryPoint} · input ${inputA ? "A" : "B"}`,
+          layout: pipelineLayout,
+          compute: { module: shaderModule, entryPoint,
+            constants: { PRESSURE_INPUT_A: inputA ? 1 : 0 } },
+        })] as const)),
+    ) as Record<ResidentEntryPoint, GPUComputePipeline>);
+    this.pipelines = Object.freeze([await makeBank(true), await makeBank(false)]);
   }
+
+  get encodedDispatchCount(): number {
+    const smoothing = this.effectiveSmoothingSweeps();
+    return 10 + 2 * smoothing + this.effectiveIterationCeiling() * (8 + 2 * smoothing);
+  }
+
+  /** Current solved pressure authority in the shared frame arena. */
+  get pressureView(): OctreeLosassoBufferView {
+    return this.pressureViews[this.pressureInputA ? 0 : 1];
+  }
+  get pressureAuthorityIsA(): boolean { return this.pressureInputA; }
 
   /**
    * Adopt runtime dials for every subsequent solve.
@@ -1445,16 +1498,13 @@ export class WebGPUOctreeLosassoResidentMGPCG {
       ? Math.min(smoothing!, 16) : 0;
     if (next.every((word, index) => word === this.tuningWords[index])) return;
     this.tuningWords.set(next);
-    this.device.queue.writeBuffer(this.tuning, 0, this.tuningWords);
+    this.device.queue.writeBuffer(this.control,
+      this.source.hierarchy.fusedSubL0!.arenaPlan.control.tuningWordOffset * 4,
+      this.tuningWords);
   }
 
-  /**
-   * A control clear, five row-sized staging copies, one dispatch, and the
-   * published-pressure copy-back. The staged sources all carry this advance's
-   * final values at this call site: authority, diagonal and RHS publication
-   * precede the solve in the projection graph, exactly as the pipelined
-   * executor relies on when it binds them live.
-   */
+  /** Solve directly between the two persistent pressure regions. Producer row
+   * fields and authority words are already published into the shared arenas. */
   encodeSolve(broker: PassBroker, input: {
     readonly pressureSeed: GPUBuffer;
     readonly pressureOut: GPUBuffer;
@@ -1462,52 +1512,88 @@ export class WebGPUOctreeLosassoResidentMGPCG {
     readonly rowCount: GPUBuffer;
   }): void {
     this.assertLive();
-    if (!this.pipeline) throw new Error("Resident Losasso MGPCG pipeline is not initialized");
-    const rowBytes = this.source.rowCapacity * 4;
-    if (input.pressureSeed.size < rowBytes || input.pressureOut.size < rowBytes) {
-      throw new RangeError("Resident Losasso MGPCG solve buffers are smaller than the row capacity");
+    if (!this.pipelines) throw new Error("Resident Losasso MGPCG pipelines are not initialized");
+    void input;
+    broker.clearBuffer(this.control, 0, SOLVE_CLEAR_BYTES);
+    const pass = broker.compute({ label: "Resident Losasso MGPCG - staged multi-workgroup solve" });
+    const group = this.bindGroup();
+    const pipelines = this.pipelines[this.pressureInputA ? 0 : 1];
+    pass.setBindGroup(0, group);
+    const direct = (entryPoint: ResidentEntryPoint): void => {
+      pass.setPipeline(pipelines[entryPoint]);
+      pass.dispatchWorkgroups(1);
+    };
+    const rows = (entryPoint: ResidentEntryPoint): void => {
+      pass.setPipeline(pipelines[entryPoint]);
+      // `control` is writable storage throughout this pass, so WebGPU forbids
+      // also using it as an indirect-dispatch source in the same synchronization
+      // scope even when the byte ranges do not overlap. Capacity-sized direct
+      // launches preserve the row-parallel schedule; every kernel gates against
+      // the published authority row count and grid-strides from this extent.
+      pass.dispatchWorkgroups(Math.ceil(this.source.rowCapacity / 64));
+    };
+    const smoothing = this.effectiveSmoothingSweeps();
+    const encodeVCycle = (): void => {
+      rows("residentStageVCycle");
+      let sourceA = (smoothing & 1) === 0;
+      for (let sweep = 0; sweep < smoothing; sweep += 1) {
+        rows(sourceA ? "residentJacobiXAtoXB" : "residentJacobiXBtoXA");
+        sourceA = !sourceA;
+      }
+      rows("residentFormL0Residual");
+      direct("residentFusedBottom");
+      sourceA = true;
+      for (let sweep = 0; sweep < smoothing; sweep += 1) {
+        const last = sweep + 1 === smoothing;
+        rows(sourceA
+          ? last ? "residentJacobiXAtoXBPublish" : "residentJacobiXAtoXB"
+          : last ? "residentJacobiXBtoXAPublish" : "residentJacobiXBtoXA");
+        sourceA = !sourceA;
+      }
+    };
+
+    direct("residentInitializeControl");
+    rows("residentInitializeState");
+    rows("residentInitialOperatorResidual");
+    encodeVCycle();
+    rows("residentApplyPreconditionedOperator");
+    direct("residentInitialReduction");
+    for (let iteration = 0; iteration < this.effectiveIterationCeiling(); iteration += 1) {
+      rows("residentAdvanceState");
+      encodeVCycle();
+      direct("residentMergedReduction");
+      rows("residentUpdateDirection");
+      rows("residentApplyDirectionOperator");
+      direct("residentCurvatureReduction");
     }
-    if ((input.pressureSeed.usage & GPUBufferUsage.COPY_SRC) === 0
-      || (input.pressureOut.usage & GPUBufferUsage.COPY_SRC) === 0
-      || (input.pressureOut.usage & GPUBufferUsage.COPY_DST) === 0) {
-      throw new RangeError("Resident Losasso MGPCG requires copyable pressure banks");
-    }
-    broker.clearBuffer(this.control);
-    broker.copyBufferToBuffer(this.source.acceptedAuthority, 0,
-      this.control, AUTHORITY_STAGE_WORD * 4, 7 * 4);
-    broker.copyBufferToBuffer(this.tuning, 0,
-      this.control, TUNING_STAGE_WORD * 4, TUNING_WORDS * 4);
-    // Rows past the live count must retain their previous published values,
-    // so the copy-back below starts from the current bank content.
-    broker.copyBufferToBuffer(input.pressureOut, 0, this.arena, 0, rowBytes);
-    broker.copyBufferToBuffer(input.pressureSeed, 0, this.arena, rowBytes, rowBytes);
-    broker.copyBufferToBuffer(this.source.rightHandSide, 0, this.arena, 2 * rowBytes, rowBytes);
-    broker.copyBufferToBuffer(this.source.diagonal, 0, this.arena, 3 * rowBytes, rowBytes);
-    const pass = broker.compute({
-      label: "Resident Losasso MGPCG - whole solve in one workgroup",
-    });
-    pass.setPipeline(this.pipeline);
-    pass.setBindGroup(0, this.bindGroup());
-    pass.dispatchWorkgroups(1);
-    broker.copyBufferToBuffer(this.arena, 0, input.pressureOut, 0, rowBytes);
+    direct("residentFinalizeControl");
+    rows("residentPublishPressure");
+    this.pressureInputA = !this.pressureInputA;
     broker.fence("resident Losasso MGPCG pressure publication");
+  }
+
+  private effectiveIterationCeiling(): number {
+    const requested = this.tuningWords[0]!;
+    return requested === 0 ? this.iterationBudget : Math.min(requested, this.iterationBudget);
+  }
+
+  private effectiveSmoothingSweeps(): number {
+    const requested = this.tuningWords[3]!;
+    return requested === 0 ? OCTREE_RUNTIME_DIAL_BUILT_SMOOTHING_SWEEPS
+      : Math.min(requested, 16);
   }
 
   private bindGroup(): GPUBindGroup {
     if (this.group) return this.group;
-    const finest = this.source.hierarchy.levels[0]!;
+    if (!this.layout) throw new Error("Resident Losasso MGPCG layout is not initialized");
     const resources: readonly GPUBuffer[] = [
-      finest.control,
-      finest.rowFaceOffsets,
-      finest.rowFaces,
-      finest.faces,
       this.source.hierarchy.fusedSubL0!.arena,
       this.arena,
       this.control,
     ];
     this.group = this.device.createBindGroup({
       label: "Resident Losasso MGPCG bindings",
-      layout: this.pipeline!.getBindGroupLayout(0),
+      layout: this.layout,
       entries: resources.map((buffer, binding) => ({ binding, resource: { buffer } })),
     });
     return this.group;
@@ -1521,8 +1607,7 @@ export class WebGPUOctreeLosassoResidentMGPCG {
     if (this.destroyed) return;
     this.destroyed = true;
     this.group = undefined;
-    this.control.destroy();
-    this.arena.destroy();
-    this.tuning.destroy();
+    this.layout = undefined;
+    this.pipelines = undefined;
   }
 }

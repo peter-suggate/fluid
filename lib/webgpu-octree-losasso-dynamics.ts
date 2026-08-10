@@ -37,6 +37,8 @@ export interface WebGPUOctreeLosassoDynamicsOptions {
    * paper's bounded rho>1 divergence term returns locally compressed mass to
    * visible volume during projection. */
   readonly surfaceDensityRows?: GPUBuffer;
+  /** Production resident solve RHS authority inside the shared frame arena. */
+  readonly rightHandSideTarget?: GPUBufferBinding;
   /** x-, x+, y-, y+, z-, z+. Defaults to a closed box. */
   readonly closedBoundaries?: readonly [boolean, boolean, boolean, boolean, boolean, boolean];
 }
@@ -197,10 +199,11 @@ export class WebGPUOctreeLosassoDynamics {
         this.sampler.velocityArena]
       : [this.sampler.control, this.sampler.faceGeometry,
         this.sampler.axisFaceDirectory, this.sampler.stagedVelocity];
-    const buffers = [this.params, this.source.control, this.source.faces,
+    const buffers: readonly (GPUBuffer | GPUBufferBinding)[] = [this.params, this.source.control, this.source.faces,
       this.source.faceGeometry, this.source.axisFaceDirectory, this.source.extendedVelocity,
       this.source.advectedVelocity, this.source.predictedVelocity,
-      this.source.rowFaceOffsets, this.source.rowFaces, this.source.rightHandSide,
+      this.source.rowFaceOffsets, this.source.rowFaces,
+      this.options.rightHandSideTarget ?? this.source.rightHandSide,
       this.source.projectedVelocity, ...samplerBuffers,
       // The density branch is statically disabled when no rows are supplied,
       // but Dawn still validates the declared binding usages. Binding the RHS
@@ -216,7 +219,9 @@ export class WebGPUOctreeLosassoDynamics {
           || entryPoint === "reverseLosassoFaces" || entryPoint === "correctLosassoFaces")
           ? [...BINDINGS[entryPoint].filter((binding) => binding < 12), 12, 13, 14, 15]
           : BINDINGS[entryPoint]).map((binding) =>
-          ({ binding, resource: { buffer: buffers[binding]! } })),
+          ({ binding, resource: "buffer" in buffers[binding]!
+            ? buffers[binding]! as GPUBufferBinding
+            : { buffer: buffers[binding]! as GPUBuffer } })),
       })]))) as Readonly<Record<DynamicsEntryPoint, GPUBindGroup>>;
   }
 

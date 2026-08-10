@@ -535,7 +535,7 @@ function inflowAimKey(inflow: SceneDescription["fluid"]["inflow"]): string {
  * the GPU as params rather than as geometry.
  */
 export function gpuSceneUniformKey(scene: SceneDescription): string {
-  return `${scene.fluid.density_kg_m3}:${scene.fluid.dynamicViscosity_Pa_s}:${scene.fluid.surfaceTension_N_m}:${scene.fluid.gravity_m_s2.y}:${inflowAimKey(scene.fluid.inflow)}:${rigidBodyRosterKey(scene.rigidBodies)}:${refinementRegionKey(scene)}`;
+  return `${scene.fluid.density_kg_m3}:${scene.fluid.dynamicViscosity_Pa_s}:${scene.fluid.surfaceTension_N_m}:${scene.fluid.gravity_m_s2.y}:${scene.numerics.fixedDt_s}:${scene.numerics.maxDt_s}:${inflowAimKey(scene.fluid.inflow)}:${rigidBodyRosterKey(scene.rigidBodies)}:${refinementRegionKey(scene)}`;
 }
 
 /**
@@ -745,6 +745,12 @@ interface PendingInitialRasterPresentation {
   submitted: boolean;
 }
 
+interface PendingGPUAdvanceCompletion {
+  readonly solver: GPUSolverInstance;
+  readonly solverGeneration: number;
+  readonly submittedTime_s: number;
+}
+
 class PendingLiveSvoPresentation {
   private phase: "awaiting-attachment" | "attached" | "submitted" = "awaiting-attachment";
 
@@ -920,6 +926,8 @@ export class FluidLabRenderer {
   private hoverHighlight?: { readonly first: number; readonly last: number };
   private svoRenderDiagnosticsKey = "";
   private gpuPendingBatches = 0;
+  /** Advances retired by the single presentation fence that follows them. */
+  private pendingGPUAdvanceCompletions: PendingGPUAdvanceCompletion[] = [];
   private presentationsInFlight = 0;
   private completedPresentations = 0;
   private simulationRunning = true;
@@ -939,7 +947,6 @@ export class FluidLabRenderer {
   private pendingLiveSvoPresentation?: PendingLiveSvoPresentation;
   private svoPipelineProgress?: { label: string; completed: number; total: number };
   private svoPipelineStartedAt_ms?: number;
-  private lastGPUInfoPollAt_ms = -Infinity;
   private format?: GPUTextureFormat;
   private presentationContext = "";
   private cpuTraceSampleId = 0;
@@ -1840,7 +1847,7 @@ export class FluidLabRenderer {
       if(this.disposed||this.gpuFluid!==solver||this.gpuFluidGeneration!==generation
         ||this.gpuFluidRequestGeneration!==requestGeneration)return;
       if(!reseeded){this.beginGPUFluidInitialization(scene,config,key,presentationMode);return;}
-      this.gpuFluidKey=key;this.appliedSceneUniformKey=gpuSceneUniformKey(scene);this.resetGPUQueueTracking();this.lastGPUInfoPollAt_ms=-Infinity;
+      this.gpuFluidKey=key;this.appliedSceneUniformKey=gpuSceneUniformKey(scene);this.resetGPUQueueTracking();
       // reset() intentionally clears the diagnostics store. A warm re-seed
       // must therefore republish its authority just like a replacement attach,
       // then earn a fresh raster fence before transport unlocks. Merely moving
@@ -1869,6 +1876,7 @@ export class FluidLabRenderer {
 
   private resetGPUQueueTracking() {
     this.gpuPendingBatches = 0;
+    this.pendingGPUAdvanceCompletions.length = 0;
   }
 
   /** Begin a new controller timeline before any old GPU completion can commit. */
@@ -1887,8 +1895,19 @@ export class FluidLabRenderer {
 
   /** Change simulation admission while preserving already-submitted queue work. */
   setSimulationRunning(running: boolean): number | undefined {
-    if (running !== this.simulationRunning) this.resetPresentationTrace();
+    const changed = running !== this.simulationRunning;
+    if (changed) this.resetPresentationTrace();
     this.simulationRunning = running;
+    // Live frames never map solver state. A pause is the explicit ownership
+    // boundary where the UI may refresh its human-rate diagnostics.
+    if (changed && !running && this.gpuFluid) {
+      const fluid = this.gpuFluid;
+      void fluid.readStats().then((info) => {
+        if (!this.disposed && !this.deviceLost && this.gpuFluid === fluid && !this.simulationRunning) {
+          this.gpuInfoCallback?.({ ...info });
+        }
+      }).catch(() => { /* Device loss is reported by device.lost. */ });
+    }
     const submittedTime_s = this.gpuFluid?.info.submittedTime_s;
     return submittedTime_s;
   }
@@ -2047,7 +2066,7 @@ export class FluidLabRenderer {
       if(config.methodId==="octree"&&solver.initialSparseAuthorityReady!==true){solver.destroy();sidecar?.destroy();throw new Error("Octree solver returned before fenced sparse t=0 authority");}
       report({phase:"attach",taskId:"solver.attach",label:"Attach warmed solver",completed:reportedCompleted,total:reportedTotal+1});
       solver.applyRuntimeValues?.(config.values);
-      this.gpuFluid=solver;this.svoSceneSidecar=sidecar;this.gpuFluidKey=key;this.attachedPresentationMode=presentationMode;this.attachedStructuralKey=gpuSceneStructuralKey(scene,config);this.gpuFluidPendingKey="";this.resetGPUQueueTracking();this.gpuFluidGeneration+=1;this.lastGPUInfoPollAt_ms=-Infinity;this.globalFineWaterAttached=false;
+      this.gpuFluid=solver;this.svoSceneSidecar=sidecar;this.gpuFluidKey=key;this.attachedPresentationMode=presentationMode;this.attachedStructuralKey=gpuSceneStructuralKey(scene,config);this.gpuFluidPendingKey="";this.resetGPUQueueTracking();this.gpuFluidGeneration+=1;this.globalFineWaterAttached=false;
       const fencedInitialRaster=requiresFencedInitialRasterPresentation(config.methodId);
       if(rendererOnlyScene){solver.info.initialRasterSurfaceReady=true;solver.info.initialRasterSurfaceState="gpu-authoritative";solver.info.initialRasterSurfaceDiagnostic="Live scene source ready; fluid authority intentionally absent";this.pendingInitialRasterPresentation=undefined;}
       else if(fencedInitialRaster){solver.info.initialRasterSurfaceReady=false;solver.info.initialRasterSurfaceState="pending";solver.info.initialRasterSurfaceDiagnostic="Waiting for the first fenced t=0 raster publication";this.pendingInitialRasterPresentation={solver,solverGeneration:this.gpuFluidGeneration,requestGeneration:generation,submitted:false,resource:method.resource};}
@@ -2411,9 +2430,22 @@ export class FluidLabRenderer {
     this.onStatus({ state: "ready", label: "Live SVO renderer ready", adapter: this.adapterName, resource: svoPresentationResourcePlugin });
   }
 
+  private retireGPUAdvances(completions: readonly PendingGPUAdvanceCompletion[]) {
+    for (const completion of completions) {
+      const { solver: fluid, solverGeneration: generation, submittedTime_s: submittedTime } = completion;
+      if (this.disposed || this.deviceLost || this.gpuFluid !== fluid || this.gpuFluidGeneration !== generation) continue;
+      this.gpuPendingBatches = Math.max(0, this.gpuPendingBatches - 1);
+      fluid.info.completedTime_s = Math.max(fluid.info.completedTime_s ?? 0, submittedTime);
+      fluid.info.gpuPendingBatches = this.gpuPendingBatches;
+      fluid.info.gpuInFlightSimulation_s = Math.max(0,
+        (fluid.info.submittedTime_s ?? submittedTime) - fluid.info.completedTime_s);
+      this.gpuInfoCallback?.({ ...fluid.info });
+      this.gpuAdvanceCompletedCallback?.(submittedTime);
+    }
+  }
+
   private submitPreparedGPUFluid(fluid: GPUSolverInstance, time_s: number, bodies: RigidBodyState[], maximumPendingAdvances = 1) {
-    const device = this.device;
-    if (!device) return fluid.info;
+    if (!this.device) return fluid.info;
     // The presentation that follows carries whatever state these advances end
     // on, so no later simulation work can overtake the frame that visualizes
     // them. The queue-depth ceiling is expressed in FRAMES, so it scales with
@@ -2429,22 +2461,9 @@ export class FluidLabRenderer {
       this.gpuPendingBatches += 1;
       fluid.info.gpuPendingBatches = this.gpuPendingBatches;
       fluid.info.gpuInFlightSimulation_s = Math.max(0, submittedTime - (fluid.info.completedTime_s ?? 0));
-      void device.queue.onSubmittedWorkDone().then(() => {
-        if (this.disposed || this.deviceLost || this.gpuFluid !== fluid || this.gpuFluidGeneration !== generation) return;
-        this.gpuPendingBatches = Math.max(0, this.gpuPendingBatches - 1);
-        fluid.info.completedTime_s = Math.max(fluid.info.completedTime_s ?? 0, submittedTime);
-        fluid.info.gpuPendingBatches = this.gpuPendingBatches;
-        fluid.info.gpuInFlightSimulation_s = Math.max(0, (fluid.info.submittedTime_s ?? submittedTime) - fluid.info.completedTime_s);
-        this.gpuInfoCallback?.({ ...fluid.info });
-        this.gpuAdvanceCompletedCallback?.(submittedTime);
-      }).catch(() => { /* Device loss is reported by device.lost. */ });
-    }
-    // Functional diagnostics use a bounded cadence and remain independent of
-    // the generic performance trace sampled by the solver itself.
-    const now_ms=performance.now();if(now_ms-this.lastGPUInfoPollAt_ms>=250){
-      this.lastGPUInfoPollAt_ms=now_ms;
-      void fluid.readStats().then(info=>this.gpuInfoCallback?.({...info}))
-        .catch(()=>{ /* Device loss is reported by device.lost. */ });
+      this.pendingGPUAdvanceCompletions.push({
+        solver: fluid, solverGeneration: generation, submittedTime_s: submittedTime,
+      });
     }
     return fluid.info;
   }
@@ -2846,7 +2865,7 @@ export class FluidLabRenderer {
     };
     if (residentRigidBuffer) encoder.copyBufferToBuffer(residentRigidBuffer, 0, this.bodyBuffer, 0, 12 * 16 * 4);
     // The same records, on their way to the host. See `publishRigidBodyPoses`.
-    const poseStaging = residentRigidBuffer && bodies.length > 0
+    const poseStaging = !this.simulationRunning && residentRigidBuffer && bodies.length > 0
       ? this.encodeRigidBodyPoseReadback(encoder, residentRigidBuffer) : undefined;
     if (sparsePresentationRequired) {
       this.svoDryScenePipeline?.setRigidMotionSource(backend === "webgpu" ? this.gpuFluid?.rigidMotionBuffer : undefined);
@@ -2918,6 +2937,7 @@ export class FluidLabRenderer {
       detailedPresentationTrace ? completeDetailedPresentationPhase : undefined,
       surfaceDiagnosticsRequired && initialRasterSourceReady,
       sparsePresentationRequired ? "require-dry-scene" : "clear",
+      !this.simulationRunning || initialRasterSourceReady,
     );
     if (!rasterResult) throw new Error("Water optics pipeline is not ready");
     const initialRasterSubmission = pendingInitialRaster
@@ -3057,6 +3077,10 @@ export class FluidLabRenderer {
     const hardwarePresentationTraceResolved = hardwarePresentationTrace?.resolve(encoder) ?? false;
     if (!hardwarePresentationTraceResolved) presentationTrace?.destroy();
     presentationQueueTrace?.begin();
+    // Every admitted advance precedes this presentation in the same WebGPU
+    // queue. One end-of-presentation completion therefore retires both without
+    // an extra queue-wide promise between simulation and rendering.
+    const completedGPUAdvances = this.pendingGPUAdvanceCompletions.splice(0);
     this.device.queue.submit([encoder.finish()]);
     this.presentationsInFlight+=1;
     const completedPresentationDevice=this.device;
@@ -3066,9 +3090,13 @@ export class FluidLabRenderer {
       presentationRetired=true;
       this.presentationsInFlight=Math.max(0,this.presentationsInFlight-1);
     };
-    void completedPresentationDevice.queue.onSubmittedWorkDone().then(()=>{
+    const presentationCompletion = completedPresentationDevice.queue.onSubmittedWorkDone();
+    void presentationCompletion.then(()=>{
       retirePresentation();
-      if(!this.disposed&&!this.deviceLost&&this.device===completedPresentationDevice)this.completedPresentations+=1;
+      if(!this.disposed&&!this.deviceLost&&this.device===completedPresentationDevice){
+        this.completedPresentations+=1;
+        this.retireGPUAdvances(completedGPUAdvances);
+      }
     }).catch(retirePresentation);
     if (poseStaging) this.publishRigidBodyPoses(poseStaging, bodies.slice(0, 12).map((body) => body.description.id));
     if (pixelTraceProbing) this.pumpPixelTraceReadback();
@@ -3098,13 +3126,13 @@ export class FluidLabRenderer {
         this.presentationTracePending = false;
       });
     }
-    const surfaceDiagnosticsCompletion = this.waterPipeline.completeSurfaceDiagnostics();
+    const surfaceDiagnosticsCompletion = this.waterPipeline.completeSurfaceDiagnostics(presentationCompletion);
     // The ordinary completion callback only retires a throughput slot and feeds
     // FPS evidence. First-frame startup additionally needs proof that its exact
     // submission completed before publishing renderer authority.
     if(initialLiveSvoSubmission||initialRasterSubmission){
       const presentationDevice=this.device;
-      void this.device.queue.onSubmittedWorkDone().then(async()=>{
+      void presentationCompletion.then(async()=>{
         if(this.disposed||this.deviceLost||this.device!==presentationDevice)return;
         if(initialLiveSvoSubmission)this.settleLiveSvoPresentation(initialLiveSvoSubmission);
         if(initialRasterSubmission){

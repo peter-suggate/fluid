@@ -24,6 +24,8 @@ import {
 import { WebGPUOctreeLosassoVCycle } from "./webgpu-octree-losasso-vcycle-gpu";
 import { WebGPUOctreeLosassoHierarchyPublisher } from
   "./webgpu-octree-losasso-hierarchy";
+import type { OctreeLosassoBufferView } from
+  "./webgpu-octree-losasso-frame-arena";
 import {
   WebGPUOctreeLosassoOperator,
   type WebGPUOctreeLosassoOperatorSource,
@@ -273,6 +275,8 @@ function topologyParameterWords(plan: WebGPUOctreeLosassoTopologyPlan,
  * GPU-owned compact face publisher. Candidate construction is isolated from
  * the fixed accepted buffers consumed by the live solver and dynamics graph.
  */
+type LosassoBindingResource = GPUBuffer | GPUBufferBinding;
+
 class WebGPUOctreeLosassoTopologyPublisher implements WebGPUOctreeLosassoCandidatePublisher {
   readonly authority: WebGPUOctreeLosassoAuthority;
   readonly sources: WebGPUOctreeLosassoPublishedSources;
@@ -284,9 +288,14 @@ class WebGPUOctreeLosassoTopologyPublisher implements WebGPUOctreeLosassoCandida
   private readonly commitParams: GPUBuffer;
   private readonly scratch: GPUBuffer;
   private readonly hierarchyPublisher?: WebGPUOctreeLosassoHierarchyPublisher;
+  private readonly residentFrameViews?: Readonly<{
+    rightHandSide: OctreeLosassoBufferView; diagonal: OctreeLosassoBufferView;
+    pressureA: OctreeLosassoBufferView; pressureB: OctreeLosassoBufferView;
+  }>;
   private readonly velocityMigration: WebGPUOctreeLosassoVelocityMigration;
   private readonly bindGroupCache = new Map<GPUComputePipeline,
-    { bindings: readonly number[]; buffers: readonly GPUBuffer[]; group: GPUBindGroup }[]>();
+    { bindings: readonly number[]; buffers: readonly LosassoBindingResource[];
+      group: GPUBindGroup }[]>();
   /** Refresh-time validation lives here, never in the accepted authority. */
   private readonly acceptedRigidBoundaryControl: GPUBuffer;
   private acceptedRigidBoundaryGroup?: GPUBindGroup;
@@ -303,11 +312,12 @@ class WebGPUOctreeLosassoTopologyPublisher implements WebGPUOctreeLosassoCandida
   get candidateVelocityMigrationReceipt(): GPUBuffer {
     return this.velocityMigration.receipt;
   }
+  get pressureFrameViews() { return this.residentFrameViews; }
 
   constructor(private readonly device: GPUDevice,
     options: Pick<WebGPUOctreeLosassoBackendOptions,
       "capacities" | "topology" | "coarseLevels" | "transfers" | "closedBoundaries"
-      | "rigidPressureReaction">) {
+      | "rigidPressureReaction" | "residentSolver">) {
     // The geometric publisher has no non-seed extension graph yet. One valid
     // adjacency word keeps the reduced binding constructible without carrying
     // the old frontier arena.
@@ -330,6 +340,8 @@ class WebGPUOctreeLosassoTopologyPublisher implements WebGPUOctreeLosassoCandida
         finest: this.authority.sources.vcycle.levels[0]!,
       });
     }
+    this.residentFrameViews = options.residentSolver
+      ? this.hierarchyPublisher?.frameViews : undefined;
     this.velocityMigration = new WebGPUOctreeLosassoVelocityMigration(device, {
       dimensions: options.topology.dimensions,
       maximumLeafSize: options.topology.maximumLeafSize,
@@ -417,7 +429,7 @@ class WebGPUOctreeLosassoTopologyPublisher implements WebGPUOctreeLosassoCandida
   }
 
   private cachedBindGroup(pipeline: GPUComputePipeline, label: string,
-    bindings: readonly number[], buffers: readonly GPUBuffer[]): GPUBindGroup {
+    bindings: readonly number[], buffers: readonly LosassoBindingResource[]): GPUBindGroup {
     const variants = this.bindGroupCache.get(pipeline) ?? [];
     const cached = variants.find((variant) => variant.bindings.length === bindings.length
       && variant.bindings.every((binding, index) => binding === bindings[index]
@@ -427,7 +439,9 @@ class WebGPUOctreeLosassoTopologyPublisher implements WebGPUOctreeLosassoCandida
     const group = this.device.createBindGroup({ label,
       layout: pipeline.getBindGroupLayout(0),
       entries: stableBindings.map((binding, index) =>
-        ({ binding, resource: { buffer: stableBuffers[index]! } })),
+        ({ binding, resource: "buffer" in stableBuffers[index]!
+          ? stableBuffers[index]! as GPUBufferBinding
+          : { buffer: stableBuffers[index]! as GPUBuffer } })),
     });
     variants.push({ bindings: stableBindings, buffers: stableBuffers, group });
     this.bindGroupCache.set(pipeline, variants);
@@ -477,16 +491,18 @@ class WebGPUOctreeLosassoTopologyPublisher implements WebGPUOctreeLosassoCandida
     this.assertLive();
     if (!this.commitPipelines) throw new Error("Losasso authority commit is not initialized");
     const candidate = this.authority.candidate, accepted = this.authority.writable;
+    const frameViews = this.residentFrameViews;
     const buffers = [this.commitParams, candidate.control, input.ownerCandidateTransaction,
       input.frontier, candidate.rowFaceOffsets, accepted.rowFaceOffsets,
       candidate.rowFaces, accepted.rowFaces, candidate.faces, accepted.faces,
       candidate.rowDispatch, accepted.rowDispatch, candidate.faceDispatch,
-      accepted.faceDispatch, candidate.rightHandSide, accepted.rightHandSide,
+      accepted.faceDispatch, candidate.rightHandSide,
+      frameViews?.rightHandSide ?? accepted.rightHandSide,
       candidate.faceMetrics, accepted.faceMetrics, candidate.faceAdjacencyOffsets,
       accepted.faceAdjacencyOffsets, candidate.faceAdjacency, accepted.faceAdjacency,
       candidate.extendedVelocity, accepted.extendedVelocity, candidate.faceGeometry,
       accepted.faceGeometry, candidate.axisFaceDirectory, accepted.axisFaceDirectory,
-      candidate.diagonal, accepted.diagonal, candidate.solverAuthority,
+      candidate.diagonal, frameViews?.diagonal ?? accepted.diagonal, candidate.solverAuthority,
       accepted.solverAuthority, accepted.control];
     const bindings = [
       [0, 1, 2, 3, 4, 5, 14, 15, 28, 29, 32],
@@ -529,6 +545,8 @@ class WebGPUOctreeLosassoTopologyPublisher implements WebGPUOctreeLosassoCandida
     this.hierarchyPublisher.encodeCandidatePublication(broker, {
       leafHeaders: acceptedLeafHeaders,
       finestControl: this.authority.writable.control,
+      finestRowFaceOffsets: this.authority.writable.rowFaceOffsets,
+      finestRowFaces: this.authority.writable.rowFaces,
       finestFaces: this.authority.writable.faces,
     });
     return true;
@@ -540,7 +558,18 @@ class WebGPUOctreeLosassoTopologyPublisher implements WebGPUOctreeLosassoCandida
     if (!this.hierarchyPublisher) return false;
     this.hierarchyPublisher.encodeCoefficientRefresh(broker, {
       control: this.authority.writable.control,
+      rowFaceOffsets: this.authority.writable.rowFaceOffsets,
+      rowFaces: this.authority.writable.rowFaces,
       faces: this.authority.writable.faces,
+    });
+    return true;
+  }
+
+  encodePressureFramePublication(broker: PassBroker): boolean {
+    this.assertLive();
+    if (!this.hierarchyPublisher) return false;
+    this.hierarchyPublisher.encodePressureFramePublication(broker, {
+      acceptedAuthority: this.authority.writable.solverAuthority,
     });
     return true;
   }
@@ -877,6 +906,12 @@ export class WebGPUOctreeLosassoCoarseBackend {
   get solverControl(): GPUBuffer | undefined { return this.solver.control; }
   get solverIterationBudget(): number | undefined { return this.solver.iterationBudget; }
   get solverSymmetryStageAuditBuffers() { return this.solver.symmetryStageAuditBuffers; }
+  /** Stable producer/consumer views when the resident frame arena is authoritative. */
+  get pressureFrameViews() { return this.publisher.pressureFrameViews; }
+  get pressureAuthorityIsA(): boolean | undefined {
+    return this.solver instanceof WebGPUOctreeLosassoResidentMGPCG
+      ? this.solver.pressureAuthorityIsA : undefined;
+  }
 
   /**
    * Adopt live coarse-band accuracy/cost dials.
@@ -972,7 +1007,6 @@ export class WebGPUOctreeLosassoCoarseBackend {
         nodeCapacity: graph.sources.accepted.nodeCapacity,
         pressureRowCapacity: graph.sources.accepted.pressureRowCapacity,
         ownerArena: adaptive.candidateOwnerArena,
-        sharpeningEnabled: false,
       });
       const accepted = this.publisher.authority.writable;
       const candidate = this.publisher.authority.candidate;
@@ -1063,9 +1097,6 @@ export class WebGPUOctreeLosassoCoarseBackend {
         options.device, this.sources.vcycle, options.capacities.rows)
         ? new WebGPUOctreeLosassoResidentMGPCG(options.device, {
           rowCapacity: options.capacities.rows,
-          diagonal: this.publisher.authority.writable.diagonal,
-          rightHandSide: this.sources.rightHandSide,
-          acceptedAuthority: this.publisher.authority.writable.solverAuthority,
           hierarchy: this.sources.vcycle,
         }, {
           maximumIterations: options.solver?.hardIterationCeiling
@@ -1108,6 +1139,7 @@ export class WebGPUOctreeLosassoCoarseBackend {
         density: options.density,
         closedBoundaries: options.closedBoundaries,
         surfaceDensityRows: this.adaptiveMass?.source.rowRho,
+        rightHandSideTarget: this.publisher.pressureFrameViews?.rightHandSide,
       }, dynamicsSampler);
     this.projection = new WebGPUOctreeLosassoProjection(options.device,
       this.sources.projection, {
@@ -1418,6 +1450,10 @@ export class WebGPUOctreeLosassoCoarseBackend {
     readonly pressureOut: GPUBuffer;
   }): void {
     this.assertReady();
+    if (this.solver instanceof WebGPUOctreeLosassoResidentMGPCG
+      && !this.publisher.encodePressureFramePublication(broker)) {
+      throw new Error("Resident Losasso pressure needs the shared frame-arena publisher");
+    }
     this.solver.encodeSolve(broker, { ...input, rightHandSide: this.sources.rightHandSide,
       rowCount: this.sources.rowCount });
   }
@@ -1464,10 +1500,11 @@ export class WebGPUOctreeLosassoCoarseBackend {
       broker, this.adaptiveMass.source.control);
     const source = this.adaptivePhi.encodeAcceptedDerivations(broker);
     // The rho=.5 publication advances the scalar clock and may change which
-    // graph nodes lie inside the extension reach. Publish both nodal velocity
-    // banks before exposing that new scalar generation; deferring the
-    // predictor bank leaves the accepted graph tuple temporarily incoherent.
-    this.adaptiveVelocity.encodeAcceptedFields(broker);
+    // graph nodes lie inside the extension reach. Retain both coherent nodal
+    // banks and extend only newly demanded support. After a ready topology
+    // flip, projected/advected face arrays still carry the previous face-slot
+    // ordering; rebuilding from them here corrupts the tuple before S1a.
+    this.adaptiveVelocity.encodeAcceptedRetainedFields(broker);
     this.adaptivePhi.encodeAcceptedFieldClockSync(broker);
     return source;
   }
@@ -1513,10 +1550,12 @@ export class WebGPUOctreeLosassoCoarseBackend {
     dynamicCouplingBodyCount = 0,
   ): void {
     this.assertReady();
-    this.projection.encode(broker, pressure, step.dt_s / this.density,
+    const solvedPressure = this.solver instanceof WebGPUOctreeLosassoResidentMGPCG
+      ? this.solver.pressureView : pressure;
+    this.projection.encode(broker, solvedPressure, step.dt_s / this.density,
       step.gravity_m_s2);
     this.rigidPressureReaction?.encode(
-      broker, pressure, step.dt_s, dynamicCouplingBodyCount, step.gravity_m_s2,
+      broker, solvedPressure, step.dt_s, dynamicCouplingBodyCount, step.gravity_m_s2,
     );
     this.dynamics.encodeInflowConstraint(broker, step);
   }

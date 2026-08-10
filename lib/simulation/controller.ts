@@ -149,9 +149,21 @@ export function collapseGPUFixedSteps(accumulator_s: number, dt_s: number) {
   return { steps, remainder_s: Math.max(0, accumulator_s - steps * dt_s) };
 }
 
-/** Scale the single rigid/fluid timeline without changing its fixed step. */
-export function scaledSimulationClockElapsed(elapsed_s: number, rate: number): number {
-  return Math.max(0, elapsed_s) * rate;
+export const MIN_SHARED_STEP_S = 0.001;
+export const MAX_SHARED_STEP_S = 0.05;
+
+export function clampSharedStepSize(step_s: number): number {
+  if (!Number.isFinite(step_s)) return 0.004;
+  const wholeMilliseconds = Math.round(step_s * 1000) / 1000;
+  return Math.min(MAX_SHARED_STEP_S, Math.max(MIN_SHARED_STEP_S, wholeMilliseconds));
+}
+
+export function sharedStepNumerics(
+  numerics: SceneDescription["numerics"],
+  step_s: number,
+): SceneDescription["numerics"] {
+  const sharedStep_s = clampSharedStepSize(step_s);
+  return { ...numerics, fixedDt_s: sharedStep_s, maxDt_s: sharedStep_s };
 }
 
 /**
@@ -316,10 +328,7 @@ class SimulationController {
       this.rateWallClock = 0;
       return;
     }
-    // Scale the target clock rather than the solver step. This makes a rate
-    // change take effect on the next animation frame while preserving the
-    // scene's fixed-step stability and validation contract.
-    this.accumulator += scaledSimulationClockElapsed(elapsed, runtime.targetSimRate);
+    this.accumulator += elapsed;
     const dt = scene.numerics.fixedDt_s;
     let steps = 0;
     let diagnostics: RigidStepDiagnostics | undefined;
@@ -434,6 +443,18 @@ class SimulationController {
       this.publishBodies(diagnostics);
       useDiagnosticsStore.getState().set({ fluidState: fluidDiagnostics, fluidRenderState: this.cpuFluid(scene).getRenderState(), couplingState: couplingDiagnostics });
     }
+  }
+
+  /** Apply one shared fixed step to rigid and fluid work without resetting time. */
+  setStepSize(step_s: number) {
+    const sceneStore = useSceneStore.getState();
+    const numerics = sharedStepNumerics(sceneStore.scene.numerics, step_s);
+    if (numerics.fixedDt_s === sceneStore.scene.numerics.fixedDt_s
+      && numerics.maxDt_s === sceneStore.scene.numerics.maxDt_s) return;
+    sceneStore.patchNumerics(numerics);
+    this.fluidSolver?.applyNumerics(numerics);
+    this.accumulator = Math.min(this.accumulator, numerics.fixedDt_s);
+    useRuntimeStore.getState().setNotice(`Shared rigid + fluid step · ${(numerics.fixedDt_s * 1000).toFixed(2)} ms`);
   }
 
   reset(source?: SceneDescription, presetId?: string) {

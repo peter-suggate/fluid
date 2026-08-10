@@ -76,6 +76,7 @@ test("each authoring input reaches exactly the tiers that must answer it", () =>
     { label: "viscosity", tiers: ["uniform"], mutate: (scene) => { scene.fluid.dynamicViscosity_Pa_s += 0.01; } },
     { label: "surface tension", tiers: ["uniform"], mutate: (scene) => { scene.fluid.surfaceTension_N_m += 0.01; } },
     { label: "gravity", tiers: ["uniform"], mutate: (scene) => { scene.fluid.gravity_m_s2.y *= 0.5; } },
+    { label: "shared timestep", tiers: ["uniform"], mutate: (scene) => { scene.numerics.fixedDt_s = scene.numerics.maxDt_s = 0.006; } },
   ];
 
   for (const { label, tiers, mutate } of cases) {

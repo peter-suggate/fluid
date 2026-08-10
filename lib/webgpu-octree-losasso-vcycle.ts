@@ -1,5 +1,6 @@
 import type { PassBroker } from "./webgpu-pass-broker";
 import type { OctreeFirstOrderSPDVCycle } from "./webgpu-octree-section43-contract";
+import type { OctreeLosassoFrameArenaPlan } from "./webgpu-octree-losasso-frame-arena";
 
 /** Symmetric plain-cycle shape; the wrapped hierarchy retains its proven smoother. */
 export const OCTREE_LOSASSO_VCYCLE_SCHEDULE = Object.freeze({
@@ -11,8 +12,10 @@ export const OCTREE_LOSASSO_VCYCLE_SCHEDULE = Object.freeze({
 export interface OctreeLosassoVCycleLevelSource {
   readonly rowCapacity: number;
   readonly control: GPUBuffer;
+  /** CSR offsets; L0 incidences name geometric faces, L1+ incidences name algebraic edges. */
   readonly rowFaceOffsets: GPUBuffer;
   readonly rowFaces: GPUBuffer;
+  /** L0: 32-byte Face. L1+: 16-byte {rowA,rowB,coefficient,reserved}. */
   readonly faces: GPUBuffer;
   readonly rowDispatch: GPUBuffer;
 }
@@ -28,7 +31,7 @@ export interface OctreeLosassoVCycleTransferSource {
 }
 
 export interface OctreeLosassoVCycleHierarchySource {
-  /** Finest first; every level uses the same closed-form axis-face operator. */
+  /** Finest geometric operator first, followed by Galerkin row-pair levels. */
   readonly levels: readonly OctreeLosassoVCycleLevelSource[];
   readonly transfers: readonly OctreeLosassoVCycleTransferSource[];
   /**
@@ -37,17 +40,26 @@ export interface OctreeLosassoVCycleHierarchySource {
    * complete sub-L0 cycle without copying geometry on every MGPCG iteration.
    */
   readonly fusedSubL0?: {
+    /** Shared versioned operator arena. L0 and every coarse level use the same
+     * dense directed-edge CSR representation. */
     readonly arena: GPUBuffer;
+    readonly frameArena: GPUBuffer;
+    readonly controlArena: GPUBuffer;
+    readonly arenaPlan: OctreeLosassoFrameArenaPlan;
     readonly rowCapacity: number;
     readonly faceCapacity: number;
-    readonly transitionStrideWords: number;
-    readonly controlOffsetWords: number;
-    readonly rowOffsetsOffsetWords: number;
-    readonly rowFacesOffsetWords: number;
-    readonly facesOffsetWords: number;
-    readonly parentsOffsetWords: number;
-    readonly childOffsetsOffsetWords: number;
-    readonly childListOffsetWords: number;
+    readonly acceptedBankWordOffset: number;
+    readonly candidateBankWordOffset: number;
+    readonly levelLayouts: readonly {
+      readonly baseWords: number;
+      readonly controlOffsetWords: number;
+      readonly rowOffsetsOffsetWords: number;
+      readonly directedEdgesOffsetWords: number;
+      readonly parentsOffsetWords: number;
+      readonly childOffsetsOffsetWords: number;
+      readonly childListOffsetWords: number;
+      readonly directedEdgeCapacity: number;
+    }[];
     /** Safe per-level vector bounds derived from dyadic domain cell counts. */
     readonly levelRowCapacities: readonly number[];
   };
@@ -61,8 +73,8 @@ export interface OctreeLosassoVCycleHierarchySource {
  */
 export interface OctreeLosassoFirstOrderVCycle extends OctreeFirstOrderSPDVCycle {
   readonly backend: "losasso";
-  readonly operatorFamily: "closed-form-axis-face";
-  readonly levelOperator: "same-first-order-operator";
+  readonly operatorFamily: "epoch-compiled-algebraic-edge";
+  readonly levelOperator: "galerkin-row-pair";
   readonly boundaryBandSmoother: "absent";
   readonly schedule: typeof OCTREE_LOSASSO_VCYCLE_SCHEDULE;
   readonly hierarchy: OctreeLosassoVCycleHierarchySource;
@@ -108,8 +120,8 @@ export function assertOctreeLosassoVCycle(
   if (cycle.operatorOrder !== 1 || cycle.isSymmetricPositiveDefinite !== true
     || cycle.convergenceTail !== "gpu-zero-indirect"
     || candidate.backend !== "losasso"
-    || candidate.operatorFamily !== "closed-form-axis-face"
-    || candidate.levelOperator !== "same-first-order-operator"
+    || candidate.operatorFamily !== "epoch-compiled-algebraic-edge"
+    || candidate.levelOperator !== "galerkin-row-pair"
     || candidate.boundaryBandSmoother !== "absent"
     || candidate.schedule?.preRelaxations !== 2
     || candidate.schedule.postRelaxations !== 2
@@ -149,8 +161,8 @@ export function createOctreeLosassoVCycleContract(
     encodedPassTransitionCount: cycle.encodedPassTransitionCount,
     smootherContract: cycle.smootherContract,
     backend: "losasso",
-    operatorFamily: "closed-form-axis-face",
-    levelOperator: "same-first-order-operator",
+    operatorFamily: "epoch-compiled-algebraic-edge",
+    levelOperator: "galerkin-row-pair",
     boundaryBandSmoother: "absent",
     schedule: OCTREE_LOSASSO_VCYCLE_SCHEDULE,
     hierarchy,

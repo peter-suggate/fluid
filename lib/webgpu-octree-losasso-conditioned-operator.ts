@@ -6,8 +6,8 @@ export interface WebGPUOctreeLosassoConditionedOperatorInput {
   readonly rowFaces: GPUBuffer;
   /** Faces after coarse-phi ghost distances have updated inverseDistance. */
   readonly faces: GPUBuffer;
-  readonly diagonal: GPUBuffer;
-  readonly solverAuthority: GPUBuffer;
+  readonly diagonal: GPUBuffer | GPUBufferBinding;
+  readonly solverAuthority: GPUBuffer | GPUBufferBinding;
 }
 
 export const octreeLosassoConditionedOperatorWGSL = /* wgsl */ `
@@ -82,12 +82,14 @@ export class WebGPUOctreeLosassoConditionedOperator {
     const finalize = await make("finalizeLosassoConditionedOperator"); this.pipelines = Object.freeze({ prepare, rebuild, finalize }); }
   encodeAfterGhostDistances(broker: PassBroker): void { this.assertLive();
     if (!this.pipelines) throw new Error("Losasso conditioned-operator pipelines are not initialized");
-    const buffers = [this.params, this.input.authority, this.input.rowFaceOffsets, this.input.rowFaces,
+    const buffers: readonly (GPUBuffer | GPUBufferBinding)[] = [this.params, this.input.authority, this.input.rowFaceOffsets, this.input.rowFaces,
       this.input.faces, this.input.diagonal, this.input.solverAuthority];
     const run = (pipeline: GPUComputePipeline, bindings: readonly number[], groups: number) => {
       const pass = broker.compute({ label: pipeline.label }); pass.setPipeline(pipeline);
       const group = this.groups.get(pipeline) ?? this.device.createBindGroup({ layout: pipeline.getBindGroupLayout(0),
-        entries: bindings.map((binding) => ({ binding, resource: { buffer: buffers[binding]! } })) });
+        entries: bindings.map((binding) => ({ binding, resource: "buffer" in buffers[binding]!
+          ? buffers[binding]! as GPUBufferBinding
+          : { buffer: buffers[binding]! as GPUBuffer } })) });
       if (!this.groups.has(pipeline)) this.groups.set(pipeline, group);
       pass.setBindGroup(0, group);
       pass.dispatchWorkgroups(groups); };

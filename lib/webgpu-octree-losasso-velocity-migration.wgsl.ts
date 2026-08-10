@@ -53,6 +53,39 @@ fn coarsenedOld(axis:u32,q:vec3u)->OldSample{var span=2u;loop{
   }
  }
  if(span>=p.maximumLeafSize){break;}span*=2u;}return OldSample(0.,false,false);}
+// A newly wetted free-surface face can lie beyond the old face set even when
+// the carried extension is valid immediately to one side. Two-sided parent
+// interpolation above intentionally rejects that case. Prefer the nearest
+// parallel old face plane along the component normal. If that whole normal
+// column is new (a wet front entering along a wall), continue in the two
+// tangential directions on the same plane. Equidistant sides/directions are
+// reduced exactly so reflection and axis permutation cannot change the seed.
+fn nearestExtendedOld(axis:u32,q:vec3u)->OldSample{for(var distance=1u;
+ distance<=p.maximumLeafSize;distance+=1u){var exact:array<i32,36>;var count=0u;var separated=false;
+ if(q[axis]>=distance){var lowQ=q;lowQ[axis]-=distance;let low=containingOld(axis,lowQ);
+  if(low!=INVALID&&low<arrayLength(&oldVelocity)){let value=oldVelocity[low];if(finite(value)){
+   addExact(&exact,value);count+=1u;separated=separated
+    ||(low<arrayLength(&oldGeometry)&&(oldGeometry[low].x&FACE_SEPARATED)!=0u);}}}
+ if(q[axis]+distance<=p.dimensions[axis]){var highQ=q;highQ[axis]+=distance;
+  let high=containingOld(axis,highQ);if(high!=INVALID&&high<arrayLength(&oldVelocity)){
+   let value=oldVelocity[high];if(finite(value)){addExact(&exact,value);count+=1u;separated=separated
+    ||(high<arrayLength(&oldGeometry)&&(oldGeometry[high].x&FACE_SEPARATED)!=0u);}}}
+ if(count>0u){let value=exactValue(&exact)/f32(count);if(finite(value)){
+  return OldSample(value,true,separated);}}
+ }
+ for(var distance=1u;distance<=p.maximumLeafSize;distance+=1u){var exact:array<i32,36>;
+  var count=0u;var separated=false;let d=i32(distance);let ta=vec3i(tangentA(axis));
+  let tb=vec3i(tangentB(axis));for(var b=-d;b<=d;b+=1){for(var a=-d;a<=d;a+=1){
+   if(max(abs(a),abs(b))!=d){continue;}let sample=vec3i(q)+a*ta+b*tb;
+   if(any(sample<vec3i(0))||any(sample>vec3i(p.dimensions))){continue;}
+   let old=containingOld(axis,vec3u(sample));if(old!=INVALID&&old<arrayLength(&oldVelocity)){
+    let value=oldVelocity[old];if(finite(value)){addExact(&exact,value);count+=1u;
+     separated=separated||(old<arrayLength(&oldGeometry)
+      &&(oldGeometry[old].x&FACE_SEPARATED)!=0u);}}
+  }}
+  if(count>0u){let value=exactValue(&exact)/f32(count);if(finite(value)){
+   return OldSample(value,true,separated);}}
+ }return OldSample(0.,false,false);}
 fn floorDiv256(value:i32)->vec2i{let carry=value>>8;return vec2i(carry,value-carry*256);}
 fn addExact(limbs:ptr<function,array<i32,36>>,value:f32){let bits=bitcast<u32>(value);let magnitude=bits&0x7fffffffu;
  if(magnitude==0u){return;}let exponent=(magnitude>>23u)&0xffu;let fraction=magnitude&0x7fffffu;
@@ -110,7 +143,8 @@ fn migrateLosassoLaggedVelocity(@builtin(global_invocation_id)invocation:vec3u){
   let q=origin+tangentA(axis)*vec3u(a)+tangentB(axis)*vec3u(b);let old=containingOld(axis,q);
   if(old!=INVALID){
    if(old<arrayLength(&oldVelocity)){let value=oldVelocity[old];if(finite(value)){addExact(&exact,value);count+=1u;}}
-  }else{let reconstructed=coarsenedOld(axis,q);if(reconstructed.valid){addExact(&exact,reconstructed.value);count+=1u;
+  }else{var reconstructed=coarsenedOld(axis,q);if(!reconstructed.valid){reconstructed=nearestExtendedOld(axis,q);}
+   if(reconstructed.valid){addExact(&exact,reconstructed.value);count+=1u;
    }}
  }}if(count>0u){let value=exactValue(&exact)/f32(count);if(finite(value)){newVelocity[face]=value;
    atomicStore(&newStatus[face],1u);}}
@@ -125,7 +159,8 @@ fn migrateLosassoFaceSeparation(@builtin(global_invocation_id)invocation:vec3u){
  var separated=false;for(var b=0u;b<span;b+=1u){for(var a=0u;a<span;a+=1u){
   let q=origin+tangentA(axis)*vec3u(a)+tangentB(axis)*vec3u(b);let old=containingOld(axis,q);
   if(old!=INVALID&&old<arrayLength(&oldGeometry)){separated=separated||((oldGeometry[old].x&FACE_SEPARATED)!=0u);}
-  else{separated=separated||coarsenedOld(axis,q).separated;}
+  else{var reconstructed=coarsenedOld(axis,q);if(!reconstructed.valid){reconstructed=nearestExtendedOld(axis,q);}
+   separated=separated||reconstructed.separated;}
  }}if(separated){newFaces[face].reserved|=FACE_SEPARATED;}}
 
 fn exactCandidateNode(item:u32)->u32{if(arrayLength(&newGraphControl)<7u||newGraphControl[0u]==0u

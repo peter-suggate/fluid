@@ -107,7 +107,7 @@ export class WebGPUOctreeLosassoProjection {
   private readonly layout: GPUBindGroupLayout;
   private readonly pipelineLayout: GPUPipelineLayout;
   private pipeline?: GPUComputePipeline;
-  private readonly groups = new WeakMap<GPUBuffer, GPUBindGroup>();
+  private readonly groups = new Map<GPUBuffer | GPUBufferBinding, GPUBindGroup>();
   private pressureScale: number;
   private gravity: readonly [number, number, number] = [0, 0, 0];
   private destroyed = false;
@@ -151,7 +151,7 @@ export class WebGPUOctreeLosassoProjection {
     this.pipeline = await this.device.createComputePipelineAsync({ label: "Project Losasso axis faces",
       layout: this.pipelineLayout, compute: { module: shaderModule, entryPoint: "projectLosassoFaces" } });
   }
-  encode(broker: PassBroker, pressure: GPUBuffer, pressureScale = this.pressureScale,
+  encode(broker: PassBroker, pressure: GPUBuffer | GPUBufferBinding, pressureScale = this.pressureScale,
     gravity: readonly [number, number, number] = this.gravity): void {
     this.assertLive(); if (!this.pipeline) throw new Error("Losasso projection is not initialized");
     if (!Number.isFinite(pressureScale) || pressureScale < 0) {
@@ -173,7 +173,8 @@ export class WebGPUOctreeLosassoProjection {
       group = this.device.createBindGroup({ label: "Losasso axis-face projection bindings", layout: this.layout,
         entries: [this.params, this.source.control, this.source.faces, pressure,
           this.source.predictedVelocity, this.source.projectedVelocity, this.source.faceMetrics]
-          .map((buffer, binding) => ({ binding, resource: { buffer } })) });
+          .map((buffer, binding) => ({ binding, resource: "buffer" in buffer
+            ? buffer as GPUBufferBinding : { buffer: buffer as GPUBuffer } })) });
       this.groups.set(pressure, group);
     }
     const pass = broker.compute({ label: "Losasso pressure - axis-face projection" });

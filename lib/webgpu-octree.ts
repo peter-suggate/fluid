@@ -41,6 +41,8 @@ import {
   type OctreeCoarseDynamicsConfiguration,
 } from "./octree-coarse-backend";
 import { WebGPUOctreeLosassoCoarseBackend } from "./webgpu-octree-losasso-backend";
+import { LOSASSO_SURFACE_GRAPH_CONTROL_WORDS } from
+  "./webgpu-octree-losasso-surface-graph";
 import { OCTREE_LOSASSO_ADAPTIVE_PHI_RECEIPT_WORDS }
   from "./webgpu-octree-losasso-adaptive-phi";
 import { octreeLosassoResidentSolveEnabled } from "./webgpu-octree-losasso-resident-mgpcg";
@@ -2960,8 +2962,8 @@ export class WebGPUOctreeProjection {
       candidateLeafHeaders: this.candidateLeafHeaders,
       acceptedLeafHeaders: this.leafHeaders,
       candidatePressure: this.candidatePressure,
-      pressureA: this.pressureA,
-      pressureB: this.pressureB,
+      pressureA: this.losassoBackend.pressureFrameViews?.pressureA ?? this.pressureA,
+      pressureB: this.losassoBackend.pressureFrameViews?.pressureB ?? this.pressureB,
       acceptedRowCount: this.compaction,
     }, rowCapacity);
     const finest = this.losassoBackend.sources.operator;
@@ -2980,7 +2982,7 @@ export class WebGPUOctreeProjection {
       rowFaceOffsets: finest.rowFaceOffsets,
       rowFaces: finest.rowFaces,
       faces: finest.faces,
-      diagonal: wide.diagonal,
+      diagonal: this.losassoBackend.pressureFrameViews?.diagonal ?? wide.diagonal,
       solverAuthority: wide.acceptedAuthority,
     }, rowCapacity);
     if (this.scene.rigidBodies.length > 0) {
@@ -3122,10 +3124,13 @@ export class WebGPUOctreeProjection {
       ab: this.createProjectionGroup(this.pressureA, this.pressureB, directory),
       ba: this.createProjectionGroup(this.pressureB, this.pressureA, directory),
     };
+    const pressureViews = this.losassoBackend?.pressureFrameViews;
     this.candidateRowGroups = {
-      fromA: this.createProjectionGroup(this.pressureA, this.candidatePressure, directory,
+      fromA: this.createProjectionGroup(pressureViews?.pressureA ?? this.pressureA,
+        this.candidatePressure, directory,
         this.candidateLeafHeaders),
-      fromB: this.createProjectionGroup(this.pressureB, this.candidatePressure, directory,
+      fromB: this.createProjectionGroup(pressureViews?.pressureB ?? this.pressureB,
+        this.candidatePressure, directory,
         this.candidateLeafHeaders),
     };
     this.fineSummarySizingGroup = this.createProjectionGroup(summary, this.pressureB, directory);
@@ -3136,16 +3141,16 @@ export class WebGPUOctreeProjection {
   }
 
   private createProjectionGroup(
-    pressureIn: GPUBuffer,
-    pressureOut: GPUBuffer,
+    pressureIn: GPUBuffer | GPUBufferBinding,
+    pressureOut: GPUBuffer | GPUBufferBinding,
     binding15Override?: GPUBuffer,
     leafHeadersOverride: GPUBuffer = this.leafHeaders,
   ): GPUBindGroup {
     return this.device.createBindGroup({ layout: this.layout, entries: [
       { binding: 2, resource: { buffer: this.compaction } },
       { binding: 3, resource: { buffer: this.topology } },
-      { binding: 4, resource: { buffer: pressureIn } },
-      { binding: 5, resource: { buffer: pressureOut } },
+      { binding: 4, resource: "buffer" in pressureIn ? pressureIn : { buffer: pressureIn } },
+      { binding: 5, resource: "buffer" in pressureOut ? pressureOut : { buffer: pressureOut } },
       { binding: 6, resource: { buffer: this.params } },
       { binding: 8, resource: { buffer: leafHeadersOverride } },
       { binding: 10, resource: { buffer: this.resources.rigidBodies } },
@@ -3351,18 +3356,19 @@ export class WebGPUOctreeProjection {
     this.topologyDiagnosticTexture = this.device.createTexture({ label: "Octree overlay topology", size, dimension: "3d", format: "rg32uint", usage });
     this.pressureSamplesDiagnosticTexture = this.device.createTexture({ label: "Octree overlay pressure ownership", size, dimension: "3d", format: "rgba32uint", usage });
     this.pressureDiagnosticTexture = this.device.createTexture({ label: "Octree mapped leaf pressure", size, dimension: "3d", format: "r32float", usage });
-    const diagnosticGroup = (pressure: GPUBuffer) => this.device.createBindGroup({ layout: this.diagnosticLayout, entries: [
+    const diagnosticGroup = (pressure: GPUBuffer | GPUBufferBinding) => this.device.createBindGroup({ layout: this.diagnosticLayout, entries: [
       { binding: 0, resource: { buffer: this.topology } },
-      { binding: 1, resource: { buffer: pressure } },
+      { binding: 1, resource: "buffer" in pressure ? pressure : { buffer: pressure } },
       { binding: 4, resource: this.topologyDiagnosticTexture!.createView() },
       { binding: 5, resource: this.pressureSamplesDiagnosticTexture!.createView() },
       { binding: 6, resource: this.pressureDiagnosticTexture!.createView() },
       { binding: 8, resource: { buffer: this.params } },
       { binding: 11, resource: { buffer: this.leafFrontier } }
     ] });
+    const framePressure = this.losassoBackend?.pressureFrameViews;
     this.diagnosticGroups = {
-      pressureA: diagnosticGroup(this.pressureA),
-      pressureB: diagnosticGroup(this.pressureB)
+      pressureA: diagnosticGroup(framePressure?.pressureA ?? this.pressureA),
+      pressureB: diagnosticGroup(framePressure?.pressureB ?? this.pressureB)
     };
     this.info.allocatedBytes += this.dims.nx * this.dims.ny * this.dims.nz * 28;
     return true;
@@ -4737,7 +4743,8 @@ export class WebGPUOctreeProjection {
     this.encodeFrontierRows(
       encoder,
       "Inactive octree pressure-row candidate",
-      this.latestPressureInA ? this.candidateRowGroups.fromA : this.candidateRowGroups.fromB,
+      (this.losassoBackend?.pressureAuthorityIsA ?? this.latestPressureInA)
+        ? this.candidateRowGroups.fromA : this.candidateRowGroups.fromB,
     );
     this.encodeInactiveCoupledPowerCandidate(encoder);
     return true;
@@ -5342,7 +5349,9 @@ export class WebGPUOctreeProjection {
     const broker = new PassBroker(encoder);
     const materialize = broker.compute({ label: "Materialize octree overlay fields" });
     materialize.setPipeline(this.materializePipeline);
-    materialize.setBindGroup(0, pressureInA ? this.diagnosticGroups.pressureA : this.diagnosticGroups.pressureB);
+    const authorityInA = this.losassoBackend?.pressureAuthorityIsA ?? pressureInA;
+    materialize.setBindGroup(0, authorityInA
+      ? this.diagnosticGroups.pressureA : this.diagnosticGroups.pressureB);
     materialize.dispatchWorkgroupsIndirect(this.coldDispatch, 0);
     broker.fence("octree overlay fields materialized");
     return true;
@@ -6163,7 +6172,11 @@ export class WebGPUOctreeProjection {
           extensionReach_m: losassoAdaptiveVelocityReach,
         },
       } : {}),
-      pressure: { buffer: this.latestPressureInA ? this.pressureA : this.pressureB },
+      pressure: this.losassoBackend?.pressureFrameViews
+        ? (this.losassoBackend.pressureAuthorityIsA
+          ? this.losassoBackend.pressureFrameViews.pressureA
+          : this.losassoBackend.pressureFrameViews.pressureB)
+        : { buffer: this.latestPressureInA ? this.pressureA : this.pressureB },
       leafHeaders: { buffer: this.leafHeaders },
       // Optional: a scene can reach a publication before the power-coarse
       // level set has one, and the cell trace reads zero flags as "never
@@ -7329,7 +7342,7 @@ export class WebGPUOctreeProjection {
     const predictedFaceVelocity = backend.sources.dynamics.predictedVelocity;
     const advectedFaceVelocity = backend.sources.dynamics.advectedVelocity;
     const extendedFaceVelocity = backend.sources.dynamics.extendedVelocity;
-    const graphControlBytes = 128;
+    const graphControlBytes = LOSASSO_SURFACE_GRAPH_CONTROL_WORDS * 4;
     const phiControlBytes = 80;
     const authorityControlOffset = graphControlBytes + phiControlBytes;
     const faceGeometryOffset = authorityControlOffset + authorityControl.size;
@@ -7420,7 +7433,8 @@ export class WebGPUOctreeProjection {
     try {
       await readback.mapAsync(GPUMapMode.READ);
       const mapped = readback.getMappedRange();
-      const graphControl = Uint32Array.from(new Uint32Array(mapped, 0, 32));
+      const graphControl = Uint32Array.from(new Uint32Array(mapped, 0,
+        LOSASSO_SURFACE_GRAPH_CONTROL_WORDS));
       const phiControl = Uint32Array.from(new Uint32Array(mapped, graphControlBytes, 20));
       const authorityWords = authorityControl.size / 4;
       const authority = Uint32Array.from(new Uint32Array(mapped, authorityControlOffset,
@@ -7816,9 +7830,11 @@ export class WebGPUOctreeProjection {
       encoder.copyBufferToBuffer(level.control, 0, readback, index * bytes, bytes);
     });
     for (let transition = 0; transition < arenaRecords; transition += 1) {
+      const layout = fused!.levelLayouts[transition + 1]!;
       encoder.copyBufferToBuffer(
         fused!.arena,
-        (transition * fused!.transitionStrideWords + fused!.controlOffsetWords) * 4,
+        (fused!.acceptedBankWordOffset + layout.baseWords
+          + layout.controlOffsetWords) * 4,
         readback, (levels.length + transition) * bytes, bytes,
       );
     }

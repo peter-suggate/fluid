@@ -29,7 +29,7 @@ const functionBody = (name: string, next: string): string => {
 };
 
 test("adaptive velocity prices two fixed compiled face-stencil banks", () => {
-  assert.equal(OCTREE_LOSASSO_ADAPTIVE_VELOCITY_STENCIL_WORDS, 36);
+  assert.equal(OCTREE_LOSASSO_ADAPTIVE_VELOCITY_STENCIL_WORDS, 8);
   assert.equal(OCTREE_LOSASSO_ADAPTIVE_VELOCITY_STENCILS_PER_NODE, 3);
   assert.equal(OCTREE_LOSASSO_ADAPTIVE_VELOCITY_STENCIL_CONTROL_WORDS, 8);
   const plan = planOctreeLosassoAdaptiveVelocity({
@@ -39,7 +39,7 @@ test("adaptive velocity prices two fixed compiled face-stencil banks", () => {
     "the accurate causal solve is bounded to the two-cell interface shell");
   assert.equal(plan.extensionWaves, 14,
     "the sparse hierarchy still covers the complete seven-cell transport reach");
-  assert.equal(plan.stencilBytes, 10 * 3 * 36 * 4);
+  assert.equal(plan.stencilBytes, 10 * 3 * 8 * 4);
   assert.ok(plan.allocatedBytes >= 2 * plan.stencilBytes);
 });
 
@@ -53,13 +53,13 @@ test("candidate restriction uses known fine faces and exposes renormalization", 
   assert.doesNotMatch(accumulate,
     /reconstructFaceStatus\[slot\]==0u\)\)\{\(\*valid\)=false/,
     "one unknown fine face must not discard the other known restriction samples");
-  assert.match(component, /let complete=covered==s\.header\.y.*!complete.*receiptBase\+9u/s,
+  assert.match(component, /let complete=covered==expectedCovered.*!complete.*receiptBase\+9u/s,
     "partial known coverage must publish an explicit renormalization receipt");
   assert.match(component, /vec2f\(value,select\(2\.0,1\.0,complete\)\)/,
     "partial coverage may carry a provisional value but must not publish a valid seed");
   assert.match(component, /avExactValue\(&sum\)\/f32\(covered\)/,
     "known integer area weights must be renormalized by their actual coverage");
-  assert.match(component, /covered>s\.header\.y.*AV_ERROR_FACE/s,
+  assert.match(component, /covered>expectedCovered.*AV_ERROR_FACE/s,
     "impossible over-coverage remains fail-closed");
 });
 
@@ -78,7 +78,7 @@ test("candidate restriction renormalizes partial fine coverage on GPU", {
   const storage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST;
   const make = (size: number, usage = storage) => device.createBuffer({ size, usage });
   const params = make(64, GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
-  const graph = make(32), nodes = make(16), stencils = make(3 * 36 * 4);
+  const graph = make(32), nodes = make(16), stencils = make(3 * 8 * 4);
   const faces = make(8), velocity = make(32), status = make(4), receipt = make(52 * 4);
   const support = make(4), faceStatus = make(8), readback = make(32 + 52 * 4,
     GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ);
@@ -87,11 +87,15 @@ test("candidate restriction renormalizes partial fine coverage on GPU", {
   device.queue.writeBuffer(params, 0, paramWords);
   device.queue.writeBuffer(graph, 0, new Uint32Array([1, 0, 1, 1, 0, 1, 0, 0]));
   device.queue.writeBuffer(nodes, 0, new Uint32Array([0, 0, 0, 0xffff_ffff]));
-  const stencilWords = new Uint32Array(3 * 36);
-  stencilWords.set([2, 4, 1, 1, 0, 1, 0xffff_ffff, 0xffff_ffff], 0);
-  stencilWords.set([1, 3, 0, 0], 20);
-  stencilWords.set([0, 0, 1, 1], 36);
-  stencilWords.set([0, 0, 1, 1], 72);
+  const stencilWords = new Uint32Array(3 * 8);
+  const packedActiveMeta = 2 | (1 << 3) | (4 << 4) | (1 << 17);
+  const packedEmptyMeta = (1 << 3) | (1 << 17);
+  stencilWords.set([packedActiveMeta, 0, 1, 0xffff_ffff,
+    0xffff_ffff, 1 | (3 << 16), 0, 0], 0);
+  stencilWords.set([packedEmptyMeta, 0xffff_ffff, 0xffff_ffff, 0xffff_ffff,
+    0xffff_ffff, 0, 0, 0], 8);
+  stencilWords.set([packedEmptyMeta, 0xffff_ffff, 0xffff_ffff, 0xffff_ffff,
+    0xffff_ffff, 0, 0, 0], 16);
   device.queue.writeBuffer(stencils, 0, stencilWords);
   device.queue.writeBuffer(faces, 0, new Float32Array([2, 10]));
   const module = device.createShaderModule({ code: octreeLosassoAdaptiveVelocityWGSL });
@@ -149,15 +153,16 @@ test("adaptive extrapolation keeps an accurate two-cell shell and sparse outer c
   const source = readFileSync(new URL("../lib/webgpu-octree-losasso-adaptive-velocity.ts",
     import.meta.url), "utf8");
   assert.match(source,
-    /wave < this\.plan\.accurateExtensionWaves[\s\S]*extendAdaptiveVelocity[\s\S]*wave < this\.plan\.extensionWaves[\s\S]*closeAdaptiveVelocity/,
+    /wave < this\.plan\.accurateExtensionWaves[\s\S]*extendAdaptiveVelocity[\s\S]*wave < this\.plan\.extensionWaves[\s\S]*advanceAdaptiveVelocitySupport[\s\S]*closeAdaptiveVelocity[\s\S]*constrainAdaptiveVelocity/,
     "the causal shell must use its short schedule while sparse closure retains full reach");
+  assert.doesNotMatch(source, /copyAdaptiveVelocitySupport|dilateAdaptiveVelocitySupport/);
 });
 
 test("recurring nodal reconstruction consumes only fixed compiled stencil records", () => {
   const component = functionBody("avStencilComponent", "@compute @workgroup_size(64)fn reconstructAdaptiveVelocity");
   const reconstruct = functionBody("reconstructAdaptiveVelocity", "@group(0)@binding(111)");
   const accesses = component.match(/avAccumulateStencilFace\(/g) ?? [];
-  assert.equal(accesses.length, 16, "each component must use sixteen explicitly unrolled slots");
+  assert.equal(accesses.length, 4, "each component must use four explicitly unrolled slots");
   assert.doesNotMatch(component, /\b(?:for|while)\s*\(|\bloop\s*\{/);
   assert.doesNotMatch(reconstruct,
     /avStencilContainingFace|avStencilExactFace|FaceDirectory|\b(?:for|while)\s*\(|\bloop\s*\{/);
@@ -181,7 +186,7 @@ test("face directory searches are confined to the fail-closed topology compiler"
   const builder = functionBody("avStencilExactFace", "@group(0)@binding(101)");
   assert.match(builder, /stencilFaceDirectory/);
   assert.match(builder, /avStencilContainingFace/);
-  assert.match(builder, /if\(\(\*count\)>=16u\)\{return false;\}/);
+  assert.match(builder, /if\(\(\*count\)>=4u\)\{return false;\}/);
   assert.match(builder, /atomicOr\(&stencilControl\[4u\],AV_ERROR_CAPACITY\)/);
 });
 
@@ -201,7 +206,7 @@ test("adaptive point sampling uses a fixed sparse owner-page locator", () => {
   assert.equal(planLosassoSurfaceGraphLeafLocatorBytes(7), (16 + 7 * 512) * 4,
     "locator allocation must scale with resident page capacity, not domain volume");
   const sampler = octreeLosassoAdaptiveVelocitySamplerWGSL();
-  const lookupStart = sampler.indexOf("fn adaptiveLocatedLeaf");
+  const lookupStart = sampler.indexOf("fn adaptiveVelocityAuthorityValid");
   const lookupEnd = sampler.indexOf("fn adaptiveSampleProduct3", lookupStart);
   const sampleStart = sampler.indexOf("fn sampleAdaptiveVelocityGrid");
   const sampleEnd = sampler.indexOf("fn sampleAdaptiveVelocity(", sampleStart);
@@ -212,8 +217,8 @@ test("adaptive point sampling uses a fixed sparse owner-page locator", () => {
     /adaptiveExactLeaf|adaptiveContainingLeaf|LeafDirectory|hash|probe|\b(?:for|while)\s*\(|\bloop\s*\{/);
   assert.match(recurring, /adaptiveVelocityOwnerArena\[directory\]/);
   assert.match(recurring, /adaptiveVelocityLeafLocator\[at\]/);
-  assert.match(recurring, /adaptiveVelocityOwnerArena\[7u\]!=epoch/,
-    "owner and graph locator epochs must agree before any sample is accepted");
+  assert.match(recurring, /adaptiveVelocityLeafLocator\[6u\]==epoch/,
+    "the graph locator must publish the epoch before any sample is accepted");
 });
 
 test("surface graph compiles and transactionally commits only owner support cells", () => {

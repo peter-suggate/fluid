@@ -1811,11 +1811,11 @@ export class RasterWaterPipeline {
   }
 
   /** Called immediately after the frame submission that contains the copies. */
-  completeSurfaceDiagnostics(): Promise<WaterRenderDiagnostics | undefined> {
+  completeSurfaceDiagnostics(submissionCompletion?: Promise<void>): Promise<WaterRenderDiagnostics | undefined> {
     if (this.surfaceDiagnosticCompletion) return this.surfaceDiagnosticCompletion;
     const readback = this.surfaceDiagnosticReadback;
     if (!readback || !this.surfaceDiagnosticPending) return Promise.resolve(undefined);
-    const completion = this.device.queue.onSubmittedWorkDone().then(async () => {
+    const completion = (submissionCompletion ?? this.device.queue.onSubmittedWorkDone()).then(async () => {
       await readback.mapAsync(GPUMapMode.READ);
       const words = new Uint32Array(readback.getMappedRange());
       const globalFineAttached = this.pendingSurfaceDiagnosticGlobalFine;
@@ -2004,7 +2004,7 @@ export class RasterWaterPipeline {
     return bindGroup;
   }
 
-  encode(encoder: GPUCommandEncoder, output: GPUTexture | GPUTextureView, nx: number, ny: number, nz: number, restrictedTallCell: boolean, maximumNeighborDelta: number, revision: number, drySceneReplacement?: DrySceneReplacementEncoder, traceBoundary?: () => void, tracePhase?: RenderPathTracePhase, forceSurfaceDiagnostics = false, backgroundMode: RasterWaterBackgroundMode = "require-dry-scene"): RasterWaterEncodeResult | false {
+  encode(encoder: GPUCommandEncoder, output: GPUTexture | GPUTextureView, nx: number, ny: number, nz: number, restrictedTallCell: boolean, maximumNeighborDelta: number, revision: number, drySceneReplacement?: DrySceneReplacementEncoder, traceBoundary?: () => void, tracePhase?: RenderPathTracePhase, forceSurfaceDiagnostics = false, backgroundMode: RasterWaterBackgroundMode = "require-dry-scene", allowSurfaceDiagnostics = true): RasterWaterEncodeResult | false {
     // Count only frames whose source has a completed GPU receipt. The
     // diagnostics/visual panels request full-rate receipts, making this an
     // exact source-mode counter while it is being used to judge fidelity.
@@ -2091,7 +2091,7 @@ export class RasterWaterPipeline {
     // of surface extraction: the solver revision may remain unchanged forever
     // after a paused/manual step, while the most recent extraction still needs
     // to displace a throttled generation-transition receipt.
-    if (this.surfaceDiagnosticsDirty) {
+    if (allowSurfaceDiagnostics && this.surfaceDiagnosticsDirty) {
       surfaceDiagnosticsCaptured = this.encodeSurfaceDiagnostics(encoder, forceSurfaceDiagnostics);
       if (surfaceDiagnosticsCaptured) this.surfaceDiagnosticsDirty = false;
     }

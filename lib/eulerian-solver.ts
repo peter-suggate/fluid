@@ -72,7 +72,7 @@ export class EulerianFluidSolver {
   private inflowMarkerRemainder = 0;
   diagnostics: EulerianDiagnostics;
 
-  constructor(readonly scene: SceneDescription, maxCellsOrOptions: number | EulerianGridOptions = 1800) {
+  constructor(public scene: SceneDescription, maxCellsOrOptions: number | EulerianGridOptions = 1800) {
     const c = scene.container;
     const options = typeof maxCellsOrOptions === "number" ? { maxCells: maxCellsOrOptions } : maxCellsOrOptions;
     let nx: number, ny: number, nz: number;
@@ -121,6 +121,11 @@ export class EulerianFluidSolver {
     this.markerVolume_m3 = this.cellVolume / markerSamplesPerAxis ** 3;
     this.initialMarkerVolume_m3 = this.markerVolume_m3 * (this.markers.length / 3);
     this.diagnostics = this.collectDiagnostics(0, "fixed", Infinity, Infinity, 0, 0, 0, 0, true, 0);
+  }
+
+  /** Runtime-safe timing update; grid, fields, and simulation time stay intact. */
+  applyNumerics(numerics: SceneDescription["numerics"]) {
+    this.scene = { ...this.scene, numerics: { ...numerics } };
   }
 
   get cellVolume(): number { return this.hx * this.hy * this.hz; }

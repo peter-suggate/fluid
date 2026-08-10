@@ -42,8 +42,8 @@ test("same-topology surface advance publishes a coherent two-bank scalar tuple",
   const advance = compact(WebGPUOctreeLosassoCoarseBackend.prototype.encodeAdaptiveSurfaceAdvance);
   const advection = compact(WebGPUOctreeLosassoCoarseBackend.prototype.encodeAdvection);
   assert.match(advance,
-    /adaptiveVelocity\.encodeAcceptedFields\(broker\)[^]*adaptivePhi\.encodeAcceptedFieldClockSync\(broker\)/,
-    "every rho=.5 publication must expose complete velocity receipts and a coherent graph clock");
+    /adaptiveVelocity\.encodeAcceptedRetainedFields\(broker\)[^]*adaptivePhi\.encodeAcceptedFieldClockSync\(broker\)/,
+    "every rho=.5 publication must retain complete velocity receipts and a coherent graph clock");
   assert.doesNotMatch(advance, /dt_s===0|adaptiveVelocity\.encodeAcceptedField\(broker\)/,
     "positive advances must not leave the accepted predictor bank temporarily stale");
   assert.doesNotMatch(advance, /encodePredictorField/,

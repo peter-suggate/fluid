@@ -1,15 +1,15 @@
 "use client";
 
 import { useRef, useState } from "react";
-import { simulation } from "@/lib/simulation/controller";
+import {
+  MAX_SHARED_STEP_S,
+  MIN_SHARED_STEP_S,
+  simulation,
+} from "@/lib/simulation/controller";
 import { simulationRecording } from "@/lib/simulation/recording";
 import { useDiagnosticsStore } from "@/lib/stores/diagnostics-store";
 import { useRecordingStore } from "@/lib/stores/recording-store";
-import {
-  MAX_TARGET_SIM_RATE,
-  MIN_TARGET_SIM_RATE,
-  useRuntimeStore,
-} from "@/lib/stores/runtime-store";
+import { useRuntimeStore } from "@/lib/stores/runtime-store";
 import { useSceneStore } from "@/lib/stores/scene-store";
 import { useMethodStore } from "@/lib/stores/method-store";
 import { requestManualGPUStop } from "@/lib/gpu-startup";
@@ -24,8 +24,6 @@ export function TransportBar() {
   const simulationTime = useRuntimeStore((state) => state.simulationTime);
   const notice = useRuntimeStore((state) => state.notice);
   const noticeTone = useRuntimeStore((state) => state.noticeTone);
-  const targetSimRate = useRuntimeStore((state) => state.targetSimRate);
-  const setTargetSimRate = useRuntimeStore((state) => state.setTargetSimRate);
   const simRate = useRuntimeStore((state) => state.simRate);
   const maxDt = useSceneStore((state) => state.scene.numerics.maxDt_s);
   const fixedDt = useSceneStore((state) => state.scene.numerics.fixedDt_s);
@@ -92,34 +90,33 @@ export function TransportBar() {
       <div className="time-readout">
         <span>t</span><strong>{simulationTime.toFixed(4)}</strong><small>s</small>
         <div className="transport-timing">
-          <label title="Desired simulated seconds per wall-clock second">
-            <span>RATE</span>
+          <label title="One fixed step size shared by rigid bodies and fluid">
+            <span>STEP</span>
             <input
               type="range"
-              min={MIN_TARGET_SIM_RATE}
-              max={MAX_TARGET_SIM_RATE}
-              step="0.1"
-              value={targetSimRate}
-              onChange={(event) => setTargetSimRate(event.currentTarget.valueAsNumber)}
-              aria-label="Simulation rate"
+              min={MIN_SHARED_STEP_S * 1000}
+              max={MAX_SHARED_STEP_S * 1000}
+              step="1"
+              value={fixedDt * 1000}
+              onChange={(event) => simulation.setStepSize(event.currentTarget.valueAsNumber / 1000)}
+              aria-label="Shared simulation step size"
             />
             <div className="timing-entry">
-              <b>×</b>
               <input
                 type="number"
-                min={MIN_TARGET_SIM_RATE}
-                max={MAX_TARGET_SIM_RATE}
-                step="0.1"
-                value={targetSimRate}
+                min={MIN_SHARED_STEP_S * 1000}
+                max={MAX_SHARED_STEP_S * 1000}
+                step="1"
+                value={Math.round(fixedDt * 1000)}
                 onChange={(event) => {
                   if (Number.isFinite(event.currentTarget.valueAsNumber)) {
-                    setTargetSimRate(event.currentTarget.valueAsNumber);
+                    simulation.setStepSize(event.currentTarget.valueAsNumber / 1000);
                   }
                 }}
-                aria-label="Simulation rate multiplier"
+                aria-label="Shared simulation step size in milliseconds"
               />
+              <b>ms</b>
             </div>
-            <small>TARGET</small>
           </label>
         </div>
         {simRate !== null && <small className="sim-rate" title={webgpu ? "Queue-confirmed simulated seconds completed per wall-clock second" : "Simulated seconds completed per wall-clock second"}>ACTUAL ×{simRate.toFixed(2)}</small>}
@@ -128,7 +125,7 @@ export function TransportBar() {
         {rendererOnlyScene
           ? <span className="continuous-run" title="This preset runs the live sparse scene renderer without fluid physics.">LIVE SVO · FLUID SOLVER DISABLED</span>
           : webgpu
-          ? <span className="continuous-run" title={`Each admitted simulation advance is immediately followed by its presentation · double-buffered pairs · rigid step ${(fixedDt * 1000).toFixed(2)} ms · GPU step cap ${(maxDt * 1000).toFixed(2)} ms`}>SIM + RENDER LOCKSTEP · PRESENT ASAP</span>
+          ? <span className="continuous-run" title={`Each admitted simulation advance is immediately followed by its presentation · double-buffered pairs · shared rigid + fluid step ${(fixedDt * 1000).toFixed(2)} ms`}>SIM + RENDER LOCKSTEP · PRESENT ASAP</span>
           : <span className="continuous-run" title={`CPU reference simulation · present every browser animation frame · fixed step ${(fixedDt * 1000).toFixed(2)} ms`}>CPU REFERENCE · PRESENT ASAP</span>}
       </div>
       <div className="file-actions">

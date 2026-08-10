@@ -2,7 +2,7 @@ import { WebGPURadixSortU32 } from "./webgpu-radix-sort-u32";
 import { octreeLosassoSurfaceGraphWGSL } from "./webgpu-octree-losasso-surface-graph.wgsl";
 import type { PassBroker } from "./webgpu-pass-broker";
 
-export const LOSASSO_SURFACE_GRAPH_CONTROL_WORDS = 32;
+export const LOSASSO_SURFACE_GRAPH_CONTROL_WORDS = 36;
 export const LOSASSO_SURFACE_GRAPH_PUBLISHED = 0x8000_0000;
 export const LOSASSO_SURFACE_GRAPH_LEAF_WORDS = 16;
 export const LOSASSO_SURFACE_GRAPH_NODE_WORDS = 4;
@@ -40,6 +40,8 @@ export const LOSASSO_SURFACE_GRAPH_CONTROL = Object.freeze({
   reciprocalAdjacencyErrors: 25, leafClosureErrors: 26, capacityErrors: 27,
   pressureRowCount: 28, pressureRowMappingErrors: 29,
   ownerPageCount: 30, supportCellCount: 31,
+  /** One workgroup per 256 live nodes for dense topology packet compilation. */
+  topologyBlockDispatch: 32,
 } as const);
 
 export const LOSASSO_SURFACE_GRAPH_ERROR = Object.freeze({
@@ -163,6 +165,7 @@ export interface LosassoSurfaceGraphBankSource {
   readonly nodeCapacity: number;
   readonly leafDispatchOffsetBytes: number;
   readonly nodeDispatchOffsetBytes: number;
+  readonly topologyBlockDispatchOffsetBytes: number;
 }
 
 export interface LosassoSurfaceGraphSources {
@@ -193,6 +196,7 @@ export interface LosassoSurfaceGraphReceipt {
   readonly supportCellCount: number;
   readonly leafDispatch: readonly [number, number, number];
   readonly nodeDispatch: readonly [number, number, number];
+  readonly topologyBlockDispatch: readonly [number, number, number];
 }
 
 type EntryPoint = "prepareSurfaceGraph" | "emitSurfaceGraphItems"
@@ -287,6 +291,8 @@ function unpackReceipt(words: Uint32Array): LosassoSurfaceGraphReceipt {
       words[c.leafDispatch + 2]!] as const),
     nodeDispatch: Object.freeze([words[c.nodeDispatch]!, words[c.nodeDispatch + 1]!,
       words[c.nodeDispatch + 2]!] as const),
+    topologyBlockDispatch: Object.freeze([words[c.topologyBlockDispatch]!,
+      words[c.topologyBlockDispatch + 1]!, words[c.topologyBlockDispatch + 2]!] as const),
   });
 }
 
@@ -418,6 +424,8 @@ export class WebGPUOctreeLosassoSurfaceGraph {
         pressureRowCapacity: rows, leafCapacity: leaves, nodeCapacity: nodes,
         leafDispatchOffsetBytes: LOSASSO_SURFACE_GRAPH_CONTROL.leafDispatch * 4,
         nodeDispatchOffsetBytes: LOSASSO_SURFACE_GRAPH_CONTROL.nodeDispatch * 4,
+        topologyBlockDispatchOffsetBytes:
+          LOSASSO_SURFACE_GRAPH_CONTROL.topologyBlockDispatch * 4,
       });
     };
     const accepted = createBank("accepted");
@@ -448,6 +456,8 @@ export class WebGPUOctreeLosassoSurfaceGraph {
     initialControl[LOSASSO_SURFACE_GRAPH_CONTROL.leafDispatch + 2] = 1;
     initialControl[LOSASSO_SURFACE_GRAPH_CONTROL.nodeDispatch + 1] = 1;
     initialControl[LOSASSO_SURFACE_GRAPH_CONTROL.nodeDispatch + 2] = 1;
+    initialControl[LOSASSO_SURFACE_GRAPH_CONTROL.topologyBlockDispatch + 1] = 1;
+    initialControl[LOSASSO_SURFACE_GRAPH_CONTROL.topologyBlockDispatch + 2] = 1;
     device.queue.writeBuffer(accepted.control, 0, initialControl);
     device.queue.writeBuffer(candidate.control, 0, initialControl);
     const bankBuffers = (bank: LosassoSurfaceGraphBankSource) => [bank.control,

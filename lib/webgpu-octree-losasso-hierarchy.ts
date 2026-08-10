@@ -1,6 +1,10 @@
-import { OCTREE_LOSASSO_CONTROL_WORDS, OCTREE_LOSASSO_FACE_BYTES } from
+import { OCTREE_LOSASSO_CONTROL_WORDS } from
   "./octree-losasso-operator";
 import { octreeLosassoHierarchyWGSL } from "./webgpu-octree-losasso-hierarchy.wgsl";
+import { OCTREE_LOSASSO_FRAME_ARENA_MAGIC, OCTREE_LOSASSO_FRAME_ARENA_VERSION,
+  octreeLosassoArenaView, planOctreeLosassoFrameArenas,
+  type OctreeLosassoBufferView, type OctreeLosassoFrameArenaPlan } from
+  "./webgpu-octree-losasso-frame-arena";
 import type {
   OctreeLosassoVCycleHierarchySource,
   OctreeLosassoVCycleLevelSource,
@@ -20,12 +24,15 @@ export interface WebGPUOctreeLosassoHierarchyOptions {
 export interface WebGPUOctreeLosassoHierarchyCandidate {
   readonly leafHeaders: GPUBuffer;
   readonly finestControl: GPUBuffer;
+  readonly finestRowFaceOffsets: GPUBuffer;
+  readonly finestRowFaces: GPUBuffer;
   readonly finestFaces: GPUBuffer;
 }
 
 interface OwnedLevel extends OctreeLosassoVCycleLevelSource {
   readonly cells: GPUBuffer;
   readonly coarseFaceSources: GPUBuffer;
+  readonly coarseFaceSourceOffsets: GPUBuffer;
 }
 
 interface OwnedTransfer extends OctreeLosassoVCycleTransferSource {
@@ -33,22 +40,18 @@ interface OwnedTransfer extends OctreeLosassoVCycleTransferSource {
   readonly params: GPUBuffer;
 }
 
-/**
- * Smallest coarse level worth building.
- *
- * A level below this has too few rows to relax with any parallelism while still
- * carrying tens of thousands of retained face patches, so it costs far more
- * than the extra contraction it buys. See the depth sweep in the constructor.
- */
-export const MINIMUM_COARSE_LEVEL_ROWS = 1_024;
+/** Small dense algebraic bottom retained by the compact row-pair hierarchy. */
+export const MINIMUM_COARSE_LEVEL_ROWS = 8;
 
 const ENTRY_POINTS = [
   "extractLosassoFinestCells",
+  "publishLosassoFinestDirectedCSR",
   "buildLosassoParentRows",
   "buildLosassoParentRowsSmall",
   "buildLosassoCoarseFaces",
   "buildLosassoCoarseCSR",
   "buildLosassoCoarseCSRSmall",
+  "publishLosassoCoarseDirectedCSR",
   "refreshLosassoCoarseFaces",
   "refreshLosassoReusedCoarseFaces",
 ] as const;
@@ -67,45 +70,40 @@ function nextPowerOfTwo(value: number): number {
 }
 
 function parameterData(options: WebGPUOctreeLosassoHierarchyOptions,
-  targetSpan: number, directoryCapacity: number, fusedBaseWords: number): ArrayBuffer {
+  targetSpan: number, directoryCapacity: number, fusedBaseWords: number,
+  sourceIsAlgebraic: boolean, edgeDirectoryCapacity: number,
+  coarseRowCapacity = options.rowCapacity,
+  directedEdgeCapacity = 2 * options.faceCapacity,
+  fineRowCapacity = options.rowCapacity): ArrayBuffer {
   const words = new Uint32Array(16);
   words.set([...options.dimensions, targetSpan], 0);
-  words.set([options.rowCapacity, options.rowCapacity, options.faceCapacity,
+  words.set([fineRowCapacity, coarseRowCapacity, directedEdgeCapacity,
     directoryCapacity], 4);
   new Float32Array(words.buffer).set([...options.physicalCellSize, 0], 8);
   words[12] = fusedBaseWords;
+  words[13] = sourceIsAlgebraic ? 1 : 0;
+  words[14] = edgeDirectoryCapacity;
+  words[15] = options.faceCapacity;
   return words.buffer;
 }
 
-function fusedLayout(rowCapacity: number, faceCapacity: number) {
-  const controlOffsetWords = 0;
-  const rowOffsetsOffsetWords = controlOffsetWords + OCTREE_LOSASSO_CONTROL_WORDS;
-  const rowFacesOffsetWords = rowOffsetsOffsetWords + rowCapacity + 1;
-  const facesOffsetWords = rowFacesOffsetWords + 2 * faceCapacity;
-  const parentsOffsetWords = facesOffsetWords + 8 * faceCapacity;
-  const childOffsetsOffsetWords = parentsOffsetWords + rowCapacity;
-  const childListOffsetWords = childOffsetsOffsetWords + rowCapacity + 1;
-  const transitionStrideWords = childListOffsetWords + rowCapacity;
-  return Object.freeze({ rowCapacity, faceCapacity, transitionStrideWords,
-    controlOffsetWords, rowOffsetsOffsetWords, rowFacesOffsetWords,
-    facesOffsetWords, parentsOffsetWords, childOffsetsOffsetWords,
-    childListOffsetWords });
-}
-
-/**
- * GPU-owned geometric hierarchy built only from compact leaf rows and their
- * first-order axis faces. Each transition groups rows in the next dyadic cell,
- * drops faces internal to that aggregate, and recomputes parent-centre
- * distances while retaining cut/open area patches. No Power authority enters
- * this allocation or publication path.
- */
+/** GPU-owned Galerkin hierarchy of unique algebraic row-pair edges. */
 export class WebGPUOctreeLosassoHierarchyPublisher {
   readonly hierarchy: OctreeLosassoVCycleHierarchySource;
+  readonly arenaPlan: OctreeLosassoFrameArenaPlan;
   readonly initializationTasks: readonly { label: string; run: () => Promise<void> }[];
   readonly allocatedBytes: number;
 
   private readonly finestCells: GPUBuffer;
   private readonly fusedArena: GPUBuffer;
+  private readonly frameArena: GPUBuffer;
+  private readonly controlArena: GPUBuffer;
+  private readonly edgeScratch: GPUBuffer;
+  private readonly finestParams: GPUBuffer;
+  private frameViewCache?: Readonly<{
+    rightHandSide: OctreeLosassoBufferView; diagonal: OctreeLosassoBufferView;
+    pressureA: OctreeLosassoBufferView; pressureB: OctreeLosassoBufferView;
+  }>;
   private readonly ownedLevels: readonly OwnedLevel[];
   private readonly ownedTransfers: readonly OwnedTransfer[];
   private readonly bindGroupCache = new Map<GPUComputePipeline, {
@@ -114,6 +112,21 @@ export class WebGPUOctreeLosassoHierarchyPublisher {
   }[]>();
   private pipelines?: Readonly<Record<typeof ENTRY_POINTS[number], GPUComputePipeline>>;
   private destroyed = false;
+
+  get frameViews(): Readonly<{
+    rightHandSide: OctreeLosassoBufferView;
+    diagonal: OctreeLosassoBufferView;
+    pressureA: OctreeLosassoBufferView;
+    pressureB: OctreeLosassoBufferView;
+  }> {
+    const frame = this.arenaPlan.frame;
+    return this.frameViewCache ??= Object.freeze({
+      rightHandSide: octreeLosassoArenaView(this.frameArena, frame.rightHandSide),
+      diagonal: octreeLosassoArenaView(this.frameArena, frame.diagonal),
+      pressureA: octreeLosassoArenaView(this.frameArena, frame.pressureA),
+      pressureB: octreeLosassoArenaView(this.frameArena, frame.pressureB),
+    });
+  }
 
   constructor(private readonly device: GPUDevice,
     private readonly options: WebGPUOctreeLosassoHierarchyOptions) {
@@ -147,21 +160,12 @@ export class WebGPUOctreeLosassoHierarchyPublisher {
     const levels: OwnedLevel[] = [];
     const transfers: OwnedTransfer[] = [];
     const directoryCapacity = nextPowerOfTwo(2 * rows);
-    // Aggregation collapses rows eightfold per transition but only retains and
-    // re-parents face patches, so face count -- which is what the smoother
-    // actually walks -- decays far slower. Measured on the 128^3 lane
-    // (2026-08-06): rows 125,067 -> 30,315 -> 6,883 -> 1,311 -> 200 -> 36 while
-    // faces went 406,004 -> 243,572 -> 145,348 -> 78,132 -> 53,556 -> 42,585.
-    // The bottom two levels therefore carry 96,000 faces spread over 236 rows
-    // -- almost no parallelism and almost no coarsening -- and a depth sweep
-    // priced them at ~460 ms of the frame to buy 27 iterations down to 17:
-    //
-    //   depth 1: 72 iterations, 395 ms   depth 3: 27 iterations, 389 ms
-    //   depth 2: 44 iterations, 376 ms   depth 5: 17 iterations, 850 ms
-    //
-    // Stop where a level still has enough rows to relax in parallel. This keeps
-    // the 128^3 hierarchy at depth 3, its measured optimum and a win against
-    // the 453 ms this lane cost while the V-cycle was inert.
+    const edgeDirectoryCapacity = nextPowerOfTwo(2 * faces);
+    this.edgeScratch = make("algebraic edge compilation scratch",
+      (2 * edgeDirectoryCapacity + faces + Math.max(rows, faces) + 1) * 4);
+    // Algebraic reduction folds all fine patches connecting the same row pair,
+    // so deeper levels no longer retain tens of thousands of duplicate faces.
+    // Keep contracting until the bottom is genuinely small.
     // Ceil, not exact division: a span that does not divide the domain leaves a
     // partial parent against each far face, and that parent is a row like any
     // other. Flooring it would under-reserve exactly the rows the relaxed
@@ -173,31 +177,56 @@ export class WebGPUOctreeLosassoHierarchyPublisher {
       if (levelRowCapacityAt(targetSpan) < MINIMUM_COARSE_LEVEL_ROWS) break;
       transitionCount += 1;
     }
-    const packed = fusedLayout(rows, faces);
     const levelRowCapacities = [rows];
-    this.fusedArena = make("packed fused sub-L0 hierarchy",
-      Math.max(1, transitionCount) * packed.transitionStrideWords * 4);
+    for (let level = 1, targetSpan = 2; level <= transitionCount;
+      level += 1, targetSpan *= 2) {
+      levelRowCapacities.push(levelRowCapacityAt(targetSpan));
+    }
+    this.arenaPlan = planOctreeLosassoFrameArenas({ rowCapacity: rows,
+      faceCapacity: faces, levelRowCapacities });
+    const packed = this.arenaPlan.operator;
+    this.fusedArena = make("shared dense operator arena", packed.bufferBytes);
+    this.frameArena = make("shared mutable pressure frame arena", this.arenaPlan.frame.bufferBytes);
+    device.queue.writeBuffer(this.frameArena, this.arenaPlan.frame.header.byteOffset,
+      Uint32Array.of(OCTREE_LOSASSO_FRAME_ARENA_MAGIC,
+        OCTREE_LOSASSO_FRAME_ARENA_VERSION));
+    this.controlArena = make("shared pressure control and dispatch arena",
+      this.arenaPlan.control.bufferBytes, indirect);
+    device.queue.writeBuffer(this.controlArena, this.arenaPlan.control.header.byteOffset,
+      Uint32Array.of(OCTREE_LOSASSO_FRAME_ARENA_MAGIC,
+        OCTREE_LOSASSO_FRAME_ARENA_VERSION));
+    device.queue.writeBuffer(this.fusedArena, 0, Uint32Array.of(
+      OCTREE_LOSASSO_FRAME_ARENA_MAGIC, OCTREE_LOSASSO_FRAME_ARENA_VERSION,
+      packed.banks[0].wordOffset, packed.banks[1].wordOffset));
+    this.finestParams = make("L0 directed operator publication parameters", 64,
+      GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
+    device.queue.writeBuffer(this.finestParams, 0,
+      parameterData(options, 1, directoryCapacity, packed.levelBasesWords[0]!,
+        false, edgeDirectoryCapacity, packed.levels[0]!.rowCapacity,
+        packed.levels[0]!.directedEdgeCapacity, packed.levels[0]!.rowCapacity));
     let fineDispatch = options.finest.rowDispatch;
     for (let targetSpan = 2, level = 1; level <= transitionCount;
       targetSpan *= 2, level += 1) {
-      levelRowCapacities.push(levelRowCapacityAt(targetSpan));
       const control = make(`L${level} control`, OCTREE_LOSASSO_CONTROL_WORDS * 4);
       const rowDispatch = make(`L${level} row and face dispatch`, 24, indirect);
       const ownedLevel: OwnedLevel = Object.freeze({
         rowCapacity: rows,
         control,
-        rowFaceOffsets: make(`L${level} row offsets`, (rows + 1) * 4),
-        rowFaces: make(`L${level} row faces`, 2 * faces * 4),
-        faces: make(`L${level} axis faces`, faces * OCTREE_LOSASSO_FACE_BYTES),
+        rowFaceOffsets: make(`L${level} algebraic row offsets`, (rows + 1) * 4),
+        rowFaces: make(`L${level} row edge ids`, 2 * faces * 4),
+        faces: make(`L${level} algebraic row-pair edges`, faces * 16),
         rowDispatch,
         cells: make(`L${level} row geometry`, rows * 16),
         coarseFaceSources: make(`L${level} fine-face provenance`, faces * 4),
+        coarseFaceSourceOffsets: make(`L${level} edge-source offsets`, (faces + 1) * 4),
       });
       const params = make(`L${level} publication parameters`, 64,
         GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST);
       device.queue.writeBuffer(params, 0,
         parameterData(options, targetSpan, directoryCapacity,
-          (level - 1) * packed.transitionStrideWords));
+          packed.levelBasesWords[level]!, level > 1, edgeDirectoryCapacity,
+          packed.levels[level]!.rowCapacity, packed.levels[level]!.directedEdgeCapacity,
+          packed.levels[level - 1]!.rowCapacity));
       transfers.push(Object.freeze({
         fineParents: make(`L${level - 1} parent rows`, rows * 4),
         childOffsets: make(`L${level} child offsets`, (rows + 1) * 4),
@@ -214,13 +243,29 @@ export class WebGPUOctreeLosassoHierarchyPublisher {
     this.hierarchy = Object.freeze({
       levels: Object.freeze([options.finest, ...levels]),
       transfers: Object.freeze([...transfers]),
-      fusedSubL0: Object.freeze({ arena: this.fusedArena, ...packed,
+      fusedSubL0: Object.freeze({ arena: this.fusedArena,
+        frameArena: this.frameArena, controlArena: this.controlArena,
+        arenaPlan: this.arenaPlan,
+        rowCapacity: rows, faceCapacity: faces,
+        acceptedBankWordOffset: packed.banks[0].wordOffset,
+        candidateBankWordOffset: packed.banks[1].wordOffset,
+        levelLayouts: Object.freeze(packed.levels.map((layout, level) => Object.freeze({
+          baseWords: packed.levelBasesWords[level]!,
+          controlOffsetWords: layout.controlOffsetWords,
+          rowOffsetsOffsetWords: layout.rowOffsetsOffsetWords,
+          directedEdgesOffsetWords: layout.directedEdgesOffsetWords,
+          parentsOffsetWords: layout.parentsOffsetWords,
+          childOffsetsOffsetWords: layout.childOffsetsOffsetWords,
+          childListOffsetWords: layout.childListOffsetWords,
+          directedEdgeCapacity: layout.directedEdgeCapacity,
+        }))),
         levelRowCapacities: Object.freeze(levelRowCapacities) }),
     });
     this.allocatedBytes = this.finestCells.size + this.fusedArena.size
+      + this.frameArena.size + this.controlArena.size + this.edgeScratch.size + this.finestParams.size
       + [...levels.flatMap((level) => [level.control, level.rowFaceOffsets,
         level.rowFaces, level.faces, level.rowDispatch, level.cells,
-        level.coarseFaceSources]),
+        level.coarseFaceSources, level.coarseFaceSourceOffsets]),
       ...transfers.flatMap((transfer) => [transfer.fineParents, transfer.childOffsets,
         transfer.childList,
         transfer.directory, transfer.params])]
@@ -268,6 +313,16 @@ export class WebGPUOctreeLosassoHierarchyPublisher {
     candidate: WebGPUOctreeLosassoHierarchyCandidate): void {
     this.assertLive();
     if (!this.pipelines) throw new Error("Losasso hierarchy publisher is not initialized");
+    const publishFinest = this.pipelines.publishLosassoFinestDirectedCSR;
+    const publishFinestGroup = this.cachedBindGroup(publishFinest,
+      "Losasso hierarchy finest directed CSR bindings", [0, 2, 4, 17, 20, 21],
+      [this.finestParams, candidate.finestControl, candidate.finestFaces,
+        this.fusedArena, candidate.finestRowFaceOffsets, candidate.finestRowFaces]);
+    const publishPass = broker.compute({ label: "Losasso hierarchy - publish finest directed CSR" });
+    publishPass.setPipeline(publishFinest); publishPass.setBindGroup(0, publishFinestGroup);
+    publishPass.dispatchWorkgroups(Math.ceil((this.options.rowCapacity + 1) / 64));
+    broker.copyBufferToBuffer(this.options.finest.rowDispatch, 0, this.controlArena,
+      this.arenaPlan.control.rowDispatchByteOffset, 12);
     // The factor-1 lane is a useful compact diagnostic of the same reduced
     // operator. Its finest grid is already the complete one-level hierarchy,
     // so there is no transfer geometry to publish.
@@ -295,28 +350,57 @@ export class WebGPUOctreeLosassoHierarchyPublisher {
   /** Refresh face coefficients while retaining the topology built for this epoch. */
   encodeCoefficientRefresh(broker: PassBroker, finest: {
     readonly control: GPUBuffer;
+    readonly rowFaceOffsets: GPUBuffer;
+    readonly rowFaces: GPUBuffer;
     readonly faces: GPUBuffer;
   }): void {
     this.assertLive();
     if (!this.pipelines) throw new Error("Losasso hierarchy publisher is not initialized");
+    const publishFinest = this.pipelines.publishLosassoFinestDirectedCSR;
+    const publishFinestGroup = this.cachedBindGroup(publishFinest,
+      "Losasso hierarchy finest directed CSR refresh bindings", [0, 2, 4, 17, 20, 21],
+      [this.finestParams, finest.control, finest.faces, this.fusedArena,
+        finest.rowFaceOffsets, finest.rowFaces]);
+    const finestPass = broker.compute({ label: "Losasso hierarchy - refresh finest directed CSR" });
+    finestPass.setPipeline(publishFinest); finestPass.setBindGroup(0, publishFinestGroup);
+    finestPass.dispatchWorkgroups(Math.ceil((this.options.rowCapacity + 1) / 64));
+    broker.copyBufferToBuffer(this.options.finest.rowDispatch, 0, this.controlArena,
+      this.arenaPlan.control.rowDispatchByteOffset, 12);
     if (this.ownedLevels.length === 0) return;
     const pipeline = this.pipelines.refreshLosassoCoarseFaces;
     const pass = broker.compute({ label: "Losasso hierarchy - refresh face coefficients" });
     let fineControl = finest.control;
-    let fineCells = this.finestCells;
     let fineFaces = finest.faces;
     for (const [index, coarse] of this.ownedLevels.entries()) {
-      const bindings = [0, 2, 3, 4, 5, 6, 7, 16, 17];
+      const bindings = [0, 2, 4, 5, 7, 16, 17, 19];
       const group = this.cachedBindGroup(pipeline,
         "Losasso hierarchy coefficient refresh bindings", bindings,
-        [this.ownedTransfers[index]!.params, fineControl, fineCells, fineFaces,
-          coarse.control, coarse.cells, coarse.faces, coarse.coarseFaceSources, this.fusedArena]);
+        [this.ownedTransfers[index]!.params, fineControl, fineFaces,
+          coarse.control, coarse.faces, coarse.coarseFaceSources, this.fusedArena,
+          coarse.coarseFaceSourceOffsets]);
       pass.setPipeline(pipeline); pass.setBindGroup(0, group);
       pass.dispatchWorkgroupsIndirect(coarse.rowDispatch, 12);
+      const publish = this.pipelines.publishLosassoCoarseDirectedCSR;
+      const publishGroup = this.cachedBindGroup(publish,
+        "Losasso hierarchy coarse directed CSR refresh bindings",
+        [0, 5, 7, 8, 9, 17], [this.ownedTransfers[index]!.params,
+          coarse.control, coarse.faces, coarse.rowFaceOffsets, coarse.rowFaces,
+          this.fusedArena]);
+      pass.setPipeline(publish); pass.setBindGroup(0, publishGroup);
+      pass.dispatchWorkgroupsIndirect(coarse.rowDispatch, 0);
       fineControl = coarse.control;
-      fineCells = coarse.cells;
       fineFaces = coarse.faces;
     }
+  }
+
+  /** Snapshot the compact solver epoch into the shared control page. Row
+   * fields are already producer-owned frame-arena views and need no staging. */
+  encodePressureFramePublication(broker: PassBroker, input: {
+    readonly acceptedAuthority: GPUBuffer;
+  }): void {
+    this.assertLive();
+    broker.copyBufferToBuffer(input.acceptedAuthority, 0, this.controlArena,
+      32 * 4, 7 * 4);
   }
 
   private encodeTransition(broker: PassBroker, input: {
@@ -329,28 +413,30 @@ export class WebGPUOctreeLosassoHierarchyPublisher {
       input.coarse.rowFaceOffsets, input.coarse.rowFaces, input.coarse.rowDispatch,
       input.transfer.fineParents, input.transfer.childOffsets,
       input.transfer.childList, input.transfer.directory,
-      input.coarse.coarseFaceSources, this.fusedArena];
+      input.coarse.coarseFaceSources, this.fusedArena, this.edgeScratch,
+      input.coarse.coarseFaceSourceOffsets];
     const bindingBuffers = new Map<number, GPUBuffer>([
       [0, buffers[0]!], [2, buffers[1]!], [3, buffers[2]!], [4, buffers[3]!],
       [5, buffers[4]!], [6, buffers[5]!], [7, buffers[6]!], [8, buffers[7]!],
       [9, buffers[8]!], [10, buffers[9]!], [11, buffers[10]!], [12, buffers[11]!],
       [13, buffers[12]!], [14, buffers[13]!], [16, buffers[14]!],
-      [17, buffers[15]!],
+      [17, buffers[15]!], [18, buffers[16]!], [19, buffers[17]!],
     ]);
     const bindings: Readonly<Record<Exclude<typeof ENTRY_POINTS[number],
-      "extractLosassoFinestCells">, readonly number[]>> = {
+      "extractLosassoFinestCells" | "publishLosassoFinestDirectedCSR">, readonly number[]>> = {
         buildLosassoParentRows: [0, 2, 3, 5, 6, 10, 11, 12, 13, 14, 17],
         buildLosassoParentRowsSmall: [0, 2, 3, 5, 6, 10, 11, 12, 13, 14, 17],
-        buildLosassoCoarseFaces: [0, 2, 3, 4, 5, 6, 7, 11, 16, 17],
-        buildLosassoCoarseCSR: [0, 2, 5, 7, 8, 9, 10, 17],
-        buildLosassoCoarseCSRSmall: [0, 2, 5, 7, 8, 9, 10, 17],
-      refreshLosassoCoarseFaces: [0, 2, 3, 4, 5, 6, 7, 16, 17],
-      refreshLosassoReusedCoarseFaces: [0, 2, 3, 4, 5, 6, 7, 16, 17],
+        buildLosassoCoarseFaces: [0, 2, 4, 5, 7, 10, 11, 16, 18, 19],
+        buildLosassoCoarseCSR: [0, 2, 5, 7, 8, 9, 10, 17, 18],
+        buildLosassoCoarseCSRSmall: [0, 2, 5, 7, 8, 9, 10, 17, 18],
+      refreshLosassoCoarseFaces: [0, 2, 4, 5, 7, 16, 17, 19],
+      refreshLosassoReusedCoarseFaces: [0, 2, 4, 5, 7, 16, 17, 19],
+      publishLosassoCoarseDirectedCSR: [0, 5, 7, 8, 9, 17],
     };
     const transitionEntryPoints = [this.options.rowCapacity <= 4096
       ? "buildLosassoParentRowsSmall" : "buildLosassoParentRows", "buildLosassoCoarseFaces",
       this.options.rowCapacity <= 4096 ? "buildLosassoCoarseCSRSmall"
-        : "buildLosassoCoarseCSR"] as const;
+        : "buildLosassoCoarseCSR", "publishLosassoCoarseDirectedCSR"] as const;
     for (const entryPoint of transitionEntryPoints) {
       const pipeline = this.pipelines![entryPoint];
       const selected = bindings[entryPoint];
@@ -371,22 +457,31 @@ export class WebGPUOctreeLosassoHierarchyPublisher {
     const pipeline = this.pipelines!.refreshLosassoReusedCoarseFaces;
     const group = this.cachedBindGroup(pipeline,
       "Losasso hierarchy exact-reuse coefficient refresh bindings",
-      [0, 2, 3, 4, 5, 6, 7, 16, 17], [input.transfer.params, input.fineControl,
-        input.fineCells, input.fineFaces, input.coarse.control, input.coarse.cells,
-        input.coarse.faces, input.coarse.coarseFaceSources, this.fusedArena]);
+      [0, 2, 4, 5, 7, 16, 17, 19], [input.transfer.params, input.fineControl,
+        input.fineFaces, input.coarse.control, input.coarse.faces,
+        input.coarse.coarseFaceSources, this.fusedArena,
+        input.coarse.coarseFaceSourceOffsets]);
     const pass = broker.compute({ label:
       "Losasso hierarchy - refreshLosassoReusedCoarseFaces" });
     pass.setPipeline(pipeline); pass.setBindGroup(0, group);
     pass.dispatchWorkgroupsIndirect(input.coarse.rowDispatch, 12);
+    const publish = this.pipelines!.publishLosassoCoarseDirectedCSR;
+    const publishGroup = this.cachedBindGroup(publish,
+      "Losasso hierarchy exact-reuse directed CSR bindings", [0, 5, 7, 8, 9, 17],
+      [input.transfer.params, input.coarse.control, input.coarse.faces,
+        input.coarse.rowFaceOffsets, input.coarse.rowFaces, this.fusedArena]);
+    pass.setPipeline(publish); pass.setBindGroup(0, publishGroup);
+    pass.dispatchWorkgroupsIndirect(input.coarse.rowDispatch, 0);
   }
 
   destroy(): void {
     if (this.destroyed) return;
     this.destroyed = true;
-    const buffers = [this.finestCells, this.fusedArena,
+    const buffers = [this.finestCells, this.fusedArena, this.frameArena, this.controlArena,
+      this.edgeScratch, this.finestParams,
       ...this.ownedLevels.flatMap((level) => [level.control, level.rowFaceOffsets,
         level.rowFaces, level.faces, level.rowDispatch, level.cells,
-        level.coarseFaceSources]),
+        level.coarseFaceSources, level.coarseFaceSourceOffsets]),
       ...this.ownedTransfers.flatMap((transfer) => [transfer.fineParents,
         transfer.childOffsets, transfer.childList,
         transfer.directory, transfer.params])];

@@ -7,8 +7,8 @@ export interface WebGPUOctreeLosassoReadyCommitSource {
   readonly candidateLeafHeaders: GPUBuffer;
   readonly acceptedLeafHeaders: GPUBuffer;
   readonly candidatePressure: GPUBuffer;
-  readonly pressureA: GPUBuffer;
-  readonly pressureB: GPUBuffer;
+  readonly pressureA: GPUBuffer | GPUBufferBinding;
+  readonly pressureB: GPUBuffer | GPUBufferBinding;
   readonly acceptedRowCount: GPUBuffer;
 }
 
@@ -77,11 +77,13 @@ export class WebGPUOctreeLosassoReadyCommit {
     const shaderModule=this.device.createShaderModule({label:"Losasso reduced ready-commit shader",code:shader});
     [this.prepare,this.commit]=await Promise.all(["prepareLosassoReadyCommit","commitLosassoReadyRows"].map(entryPoint=>
       this.device.createComputePipelineAsync({layout:"auto",compute:{module:shaderModule,entryPoint}})));
-    const b=[this.params,this.source.candidateAuthority,this.source.ownerCandidateTransaction,this.source.frontier,
+    const b:readonly (GPUBuffer|GPUBufferBinding)[]=[this.params,this.source.candidateAuthority,this.source.ownerCandidateTransaction,this.source.frontier,
       this.dispatch,this.source.candidateLeafHeaders,this.source.acceptedLeafHeaders,this.source.candidatePressure,
       this.source.pressureA,this.source.pressureB,this.source.acceptedRowCount];
-    this.prepareGroup=this.device.createBindGroup({layout:this.prepare.getBindGroupLayout(0),entries:[0,1,2,3,4].map(binding=>({binding,resource:{buffer:b[binding]!}}))});
-    this.commitGroup=this.device.createBindGroup({layout:this.commit.getBindGroupLayout(0),entries:[0,1,5,6,7,8,9,10].map(binding=>({binding,resource:{buffer:b[binding]!}}))});
+    const resource=(value:GPUBuffer|GPUBufferBinding):GPUBufferBinding=>
+      "buffer" in value?value:{buffer:value};
+    this.prepareGroup=this.device.createBindGroup({layout:this.prepare.getBindGroupLayout(0),entries:[0,1,2,3,4].map(binding=>({binding,resource:resource(b[binding]!)}))});
+    this.commitGroup=this.device.createBindGroup({layout:this.commit.getBindGroupLayout(0),entries:[0,1,5,6,7,8,9,10].map(binding=>({binding,resource:resource(b[binding]!)}))});
   }
   encodeReadyCommit(broker:PassBroker){if(!this.prepare||!this.commit||!this.prepareGroup||!this.commitGroup)throw new Error("Losasso ready commit is not initialized");
     let pass=broker.compute({label:"Losasso - validate ready row commit"});pass.setPipeline(this.prepare);pass.setBindGroup(0,this.prepareGroup);pass.dispatchWorkgroups(1);

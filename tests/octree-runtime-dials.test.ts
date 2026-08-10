@@ -18,21 +18,35 @@ import {
 } from "../lib/octree-runtime-dials";
 import { octreeMethod } from "../lib/methods/octree";
 import { residentLosassoMGPCGWGSL } from "../lib/webgpu-octree-losasso-resident-mgpcg";
+import { planOctreeLosassoFrameArenas } from
+  "../lib/webgpu-octree-losasso-frame-arena";
 
 // Offsets and capacities only: the WGSL generator reads the layout, never the
 // arena buffer, so a parser/shape gate needs no GPU device.
-const fusedLayout = {
-  arena: undefined as unknown as GPUBuffer,
+const arenaPlan = planOctreeLosassoFrameArenas({
   rowCapacity: 1_152,
   faceCapacity: 4_096,
-  transitionStrideWords: 65_536,
-  controlOffsetWords: 0,
-  rowOffsetsOffsetWords: 16,
-  rowFacesOffsetWords: 4_096,
-  facesOffsetWords: 12_288,
-  parentsOffsetWords: 45_056,
-  childOffsetsOffsetWords: 49_152,
-  childListOffsetWords: 53_248,
+  levelRowCapacities: [1_152, 288],
+});
+const fusedLayout = {
+  arena: undefined as unknown as GPUBuffer,
+  frameArena: undefined as unknown as GPUBuffer,
+  controlArena: undefined as unknown as GPUBuffer,
+  arenaPlan,
+  rowCapacity: 1_152,
+  faceCapacity: 4_096,
+  acceptedBankWordOffset: arenaPlan.operator.banks[0].wordOffset,
+  candidateBankWordOffset: arenaPlan.operator.banks[1].wordOffset,
+  levelLayouts: arenaPlan.operator.levels.map((layout, level) => ({
+    baseWords: arenaPlan.operator.levelBasesWords[level]!,
+    controlOffsetWords: layout.controlOffsetWords,
+    rowOffsetsOffsetWords: layout.rowOffsetsOffsetWords,
+    directedEdgesOffsetWords: layout.directedEdgesOffsetWords,
+    parentsOffsetWords: layout.parentsOffsetWords,
+    childOffsetsOffsetWords: layout.childOffsetsOffsetWords,
+    childListOffsetWords: layout.childListOffsetWords,
+    directedEdgeCapacity: layout.directedEdgeCapacity,
+  })),
   levelRowCapacities: [1_152, 288],
 } as const;
 

@@ -26,7 +26,13 @@ export const OCTREE_LOSASSO_ADAPTIVE_VELOCITY_DIAGNOSTIC_BANK_WORDS =
 export const OCTREE_LOSASSO_ADAPTIVE_VELOCITY_RECEIPT_BASE = Object.freeze({
   accepted: 0, predictor: 12, candidate: 24, candidatePredictor: 36,
 } as const);
-export const OCTREE_LOSASSO_ADAPTIVE_VELOCITY_STENCIL_WORDS = 36;
+/**
+ * One topology-compiled component stencil is exactly two vec4u records:
+ * packed metadata + four face slots + four packed u16 area weights.  A node
+ * component samples the four incident tangential quadrants, so retaining the
+ * former sixteen-slot envelope only multiplied recurring bandwidth.
+ */
+export const OCTREE_LOSASSO_ADAPTIVE_VELOCITY_STENCIL_WORDS = 8;
 export const OCTREE_LOSASSO_ADAPTIVE_VELOCITY_STENCILS_PER_NODE = 3;
 export const OCTREE_LOSASSO_ADAPTIVE_VELOCITY_STENCIL_CONTROL_WORDS = 8;
 export const OCTREE_LOSASSO_ADAPTIVE_VELOCITY_STENCIL_CONTROL = Object.freeze({
@@ -128,7 +134,9 @@ export function planOctreeLosassoAdaptiveVelocity(input: {
   const reachEnvelope = Math.ceil(Math.sqrt(3) * extensionReach / minimumCellWidth) + 1;
   const required = reachEnvelope;
   const extensionWaves = Math.max(2, required + (required & 1));
-  const scratchBytes = 16 * nodeCapacity;
+  const frontierSlices = accurateExtensionWaves + extensionWaves + 2;
+  const scratchBytes = 4 * (16 + 3 * nodeCapacity
+    + frontierSlices * (2 + nodeCapacity));
   const receiptBytes = (4 * OCTREE_LOSASSO_ADAPTIVE_VELOCITY_RECEIPT_WORDS + 4) * 4;
   const stencilBytes = 4 * OCTREE_LOSASSO_ADAPTIVE_VELOCITY_STENCIL_WORDS
     * OCTREE_LOSASSO_ADAPTIVE_VELOCITY_STENCILS_PER_NODE * nodeCapacity;
@@ -139,40 +147,57 @@ export function planOctreeLosassoAdaptiveVelocity(input: {
       + 4 * 4 * OCTREE_LOSASSO_ADAPTIVE_VELOCITY_DIAGNOSTIC_BANK_WORDS });
 }
 
-type FieldName = "accepted" | "predictor" | "candidate" | "candidatePredictor";
-const FIELD_INDEX: Readonly<Record<FieldName, number>> = Object.freeze({
-  accepted: 0, predictor: 1, candidate: 2, candidatePredictor: 3,
-});
+type FieldName = "accepted" | "predictor" | "candidatePair" | "readyPair";
+
+/**
+ * Frontier waves consume GPU-authored compact lists.  Keep enough resident
+ * lanes to cover the machine while letting each lane stride the actual list;
+ * launching the node-capacity rectangle made every sparse wave pay for the
+ * maximum graph even when only a few packets were live.
+ */
+const ADAPTIVE_VELOCITY_FRONTIER_WORKGROUPS = 32;
 
 interface FieldBindings {
   readonly prepare: GPUBindGroup; readonly reconstruct: GPUBindGroup;
   readonly handoff?: GPUBindGroup;
-  readonly markSupport: GPUBindGroup;
-  readonly extendAB: GPUBindGroup; readonly extendBA: GPUBindGroup;
-  readonly copySupportAB: GPUBindGroup; readonly copySupportBA: GPUBindGroup;
-  readonly dilateSupportAB: GPUBindGroup; readonly dilateSupportBA: GPUBindGroup;
-  readonly closeAB: GPUBindGroup; readonly closeBA: GPUBindGroup;
-  readonly constrainA: GPUBindGroup; readonly constrainB: GPUBindGroup;
+  readonly seed: GPUBindGroup;
+  readonly waves: readonly { readonly group: GPUBindGroup; readonly inputSlice: number }[];
+  readonly constrainA: GPUBindGroup;
   readonly finalize: GPUBindGroup; readonly finish: GPUBindGroup;
+  readonly liveDispatch: GPUBuffer;
+  readonly liveDispatchOffsetBytes: number;
 }
 
 interface StencilBuildBindings {
   readonly prepare: GPUBindGroup;
   readonly compile: GPUBindGroup;
   readonly finish: GPUBindGroup;
+  readonly prepareTopology: GPUBindGroup;
+  readonly classifyTopology: GPUBindGroup;
+  readonly scanTopology: GPUBindGroup;
+  readonly indexTopology: GPUBindGroup;
+  readonly emitTopology: GPUBindGroup;
+  readonly leafTopology: GPUBindGroup;
+  readonly incidentTopology: GPUBindGroup;
+  readonly retainedTopology: GPUBindGroup;
+  readonly finishTopology: GPUBindGroup;
 }
 
 interface StencilCommitBindings {
   readonly commit: GPUBindGroup;
-  readonly finish: GPUBindGroup;
 }
 
 const ENTRY_POINTS = ["prepareAdaptiveVelocityStencils", "compileAdaptiveVelocityStencils",
-  "finishAdaptiveVelocityStencils", "commitAdaptiveVelocityStencils",
-  "finishAdaptiveVelocityStencilCommit",
-  "prepareAdaptiveVelocity", "reconstructAdaptiveVelocity", "handoffAdaptiveVelocity",
-  "markAdaptiveVelocitySupport", "extendAdaptiveVelocity", "closeAdaptiveVelocity",
-  "copyAdaptiveVelocitySupport", "dilateAdaptiveVelocitySupport",
+  "finishAdaptiveVelocityStencils", "prepareAdaptiveVelocityTopology",
+  "classifyAdaptiveVelocityTopologyBlocks", "scanAdaptiveVelocityTopologyBlocks",
+  "indexAdaptiveVelocityTopology", "emitAdaptiveVelocityTopology",
+  "emitAdaptiveVelocityTopologyLeaves", "emitAdaptiveVelocityTopologyIncidents",
+  "resolveAdaptiveVelocityRetained",
+  "finishAdaptiveVelocityTopology",
+  "commitAdaptiveVelocityTopology",
+  "prepareAdaptiveVelocity", "reconstructAcceptedAdaptiveVelocity",
+  "reconstructCandidateAdaptiveVelocity", "handoffAdaptiveVelocity",
+  "seedAdaptiveVelocityFrontier", "propagateAdaptiveVelocityFrontier",
   "constrainAdaptiveVelocity", "finalizeAdaptiveVelocity",
   "finishAdaptiveVelocity"] as const;
 type EntryPoint = typeof ENTRY_POINTS[number];
@@ -180,19 +205,25 @@ const BINDINGS: Readonly<Record<EntryPoint, readonly number[]>> = Object.freeze(
   prepareAdaptiveVelocityStencils: [0, 91, 93, 95, 96, 97],
   compileAdaptiveVelocityStencils: [0, 91, 92, 93, 94, 95, 96, 97],
   finishAdaptiveVelocityStencils: [97],
-  commitAdaptiveVelocityStencils: [101, 102, 103, 104, 106],
-  finishAdaptiveVelocityStencilCommit: [101, 103, 104, 105],
+  prepareAdaptiveVelocityTopology: [0, 101, 102, 103, 104, 105, 106, 107, 108],
+  classifyAdaptiveVelocityTopologyBlocks: [103, 108],
+  scanAdaptiveVelocityTopologyBlocks: [108],
+  indexAdaptiveVelocityTopology: [103, 108],
+  emitAdaptiveVelocityTopology: [102, 103, 104, 107, 108],
+  emitAdaptiveVelocityTopologyLeaves: [105, 108],
+  emitAdaptiveVelocityTopologyIncidents: [106, 108],
+  resolveAdaptiveVelocityRetained: [108],
+  finishAdaptiveVelocityTopology: [108, 110],
+  commitAdaptiveVelocityTopology: [108, 109],
   prepareAdaptiveVelocity: [0, 1, 2, 3, 4, 5],
-  reconstructAdaptiveVelocity: [0, 11, 12, 13, 14, 15, 16, 17, 18, 19],
-  handoffAdaptiveVelocity: [0, 111, 112, 113, 114, 115, 116, 117],
-  markAdaptiveVelocitySupport: [0, 61, 62, 63, 64, 65, 66, 67],
-  extendAdaptiveVelocity: [0, 21, 22, 23, 24, 25, 26, 27],
-  closeAdaptiveVelocity: [0, 21, 22, 23, 24, 25, 26, 27, 28],
-  copyAdaptiveVelocitySupport: [0, 81, 82, 83],
-  dilateAdaptiveVelocitySupport: [0, 71, 72, 73, 74, 75, 76, 77],
-  constrainAdaptiveVelocity: [0, 31, 32, 33, 34, 35, 36],
-  finalizeAdaptiveVelocity: [0, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50],
-  finishAdaptiveVelocity: [0, 51, 52, 53],
+  reconstructAcceptedAdaptiveVelocity: [0, 1, 2, 3, 4, 5, 6, 7],
+  reconstructCandidateAdaptiveVelocity: [0, 1, 2, 3, 4, 5, 6, 7, 8],
+  handoffAdaptiveVelocity: [0, 1, 2, 4, 6],
+  seedAdaptiveVelocityFrontier: [0, 1, 2, 3, 4],
+  propagateAdaptiveVelocityFrontier: [0, 1, 2, 3, 6, 7],
+  constrainAdaptiveVelocity: [0, 1, 2, 3, 6],
+  finalizeAdaptiveVelocity: [0, 1, 2, 3, 6, 7],
+  finishAdaptiveVelocity: [0, 3, 51, 52],
 });
 
 /**
@@ -210,33 +241,30 @@ export class WebGPUOctreeLosassoAdaptiveVelocity {
   readonly samplerSource: WebGPUOctreeLosassoAdaptiveVelocitySamplerSource;
   readonly plan: OctreeLosassoAdaptiveVelocityPlan;
   readonly allocatedBytes: number;
-  private readonly statusA: GPUBuffer;
-  private readonly statusB: GPUBuffer;
-  private readonly supportA: GPUBuffer;
-  private readonly supportB: GPUBuffer;
-  private readonly acceptedStencils: GPUBuffer;
+  private readonly mutableArena: GPUBuffer;
+  private readonly mutableSliceBaseWords: number;
+  private readonly mutableSliceStrideWords: number;
+  private readonly controlArena: GPUBuffer;
+  private readonly topologyArena: GPUBuffer;
   private readonly candidateStencils: GPUBuffer;
-  private readonly acceptedStencilControl: GPUBuffer;
   private readonly candidateStencilControl: GPUBuffer;
-  private readonly fieldParams: readonly GPUBuffer[];
-  private readonly readyFieldParams: readonly [GPUBuffer, GPUBuffer];
+  private readonly fieldParams = new Map<FieldName, GPUBuffer>();
+  private readonly fieldParamWords = new Map<FieldName, Uint32Array>();
+  private readonly waveParams: GPUBuffer[] = [];
   private readonly pipelines: Partial<Record<EntryPoint, GPUComputePipeline>> = {};
   private readonly fieldGroups = new Map<FieldName, FieldBindings>();
   private stencilBuildGroups?: StencilBuildBindings;
   private stencilCommitGroups?: StencilCommitBindings;
-  private readyAcceptedGroups?: readonly [FieldBindings, FieldBindings];
   private destroyed = false;
 
   /** Physical air-side reach used by this velocity extension instance. */
   get extensionReach_m(): number { return this.options.extensionReach; }
 
-  /** Diagnostic-only accepted reconstruction topology. These buffers remain
-   * owned here; callers may copy them but must never bind them for physics. */
+  /** Diagnostic-only view of the active/inactive compiled topology banks. */
   get acceptedStencilDiagnostics(): Readonly<{
     control: GPUBuffer; records: GPUBuffer;
   }> {
-    return Object.freeze({ control: this.acceptedStencilControl,
-      records: this.acceptedStencils });
+    return Object.freeze({ control: this.topologyArena, records: this.topologyArena });
   }
 
   constructor(private readonly device: GPUDevice,
@@ -247,11 +275,15 @@ export class WebGPUOctreeLosassoAdaptiveVelocity {
       throw new RangeError("Adaptive velocity capacity exceeds a surface-graph bank");
     }
     if (!Number.isSafeInteger(options.maximumLeafSize) || options.maximumLeafSize < 1
+      || options.maximumLeafSize > 32
       || (options.maximumLeafSize & (options.maximumLeafSize - 1)) !== 0) {
-      throw new RangeError("Adaptive velocity maximum leaf size must be positive and dyadic");
+      throw new RangeError("Adaptive velocity maximum leaf size must be dyadic and no larger than 32");
     }
     if (options.dimensions.some((value) => !Number.isSafeInteger(value) || value < 1)) {
       throw new RangeError("Adaptive velocity dimensions must be positive integers");
+    }
+    if (this.plan.nodeCapacity >= 0x01000000) {
+      throw new RangeError("Adaptive velocity compact frontier supports fewer than 2^24 nodes");
     }
     for (const source of [options.accepted, options.candidate]) {
       if (!Number.isSafeInteger(source.faces.faceCapacity) || source.faces.faceCapacity < 1
@@ -264,30 +296,57 @@ export class WebGPUOctreeLosassoAdaptiveVelocity {
     const storage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST;
     this.velocityArena = options.accepted.graph.nodalVelocity;
     this.candidateVelocityArena = options.candidate.graph.nodalVelocity;
-    this.statusA = device.createBuffer({ label: "Losasso adaptive velocity status A",
-      size: 4 * this.plan.nodeCapacity, usage: storage });
-    this.statusB = device.createBuffer({ label: "Losasso adaptive velocity status B",
-      size: 4 * this.plan.nodeCapacity, usage: storage });
-    this.supportA = device.createBuffer({ label: "Losasso adaptive velocity support A",
-      size: 4 * this.plan.nodeCapacity, usage: storage });
-    this.supportB = device.createBuffer({ label: "Losasso adaptive velocity support B",
-      size: 4 * this.plan.nodeCapacity, usage: storage });
-    this.acceptedStencils = device.createBuffer({
-      label: "Losasso accepted compiled nodal face stencils",
-      size: this.plan.stencilBytes, usage: storage,
-    });
     this.candidateStencils = device.createBuffer({
-      label: "Losasso candidate compiled nodal face stencils",
+      label: "Losasso candidate topology stencil staging",
       size: this.plan.stencilBytes, usage: storage,
-    });
-    this.acceptedStencilControl = device.createBuffer({
-      label: "Losasso accepted nodal face-stencil control",
-      size: 4 * OCTREE_LOSASSO_ADAPTIVE_VELOCITY_STENCIL_CONTROL_WORDS, usage: storage,
     });
     this.candidateStencilControl = device.createBuffer({
-      label: "Losasso candidate nodal face-stencil control",
+      label: "Losasso candidate topology stencil staging control",
       size: 4 * OCTREE_LOSASSO_ADAPTIVE_VELOCITY_STENCIL_CONTROL_WORDS, usage: storage,
     });
+    const packetWords = 38, spillWords = 11;
+    const leafCapacity = Math.max(options.accepted.graph.leafCapacity,
+      options.candidate.graph.leafCapacity);
+    const mapOffset = 32;
+    const packetOffset = mapOffset + this.plan.nodeCapacity;
+    const spillOffset = packetOffset + packetWords * this.plan.nodeCapacity;
+    const leafOffset = spillOffset + spillWords * this.plan.nodeCapacity;
+    const incidentOffset = leafOffset + 16 * leafCapacity;
+    const retainedOffset = incidentOffset + 8 * this.plan.nodeCapacity;
+    const topologyBlockCapacity = Math.ceil(this.plan.nodeCapacity / 256);
+    const packetBlockCountOffset = retainedOffset + this.plan.nodeCapacity;
+    const spillBlockCountOffset = packetBlockCountOffset + topologyBlockCapacity;
+    const packetBlockOffsetOffset = spillBlockCountOffset + topologyBlockCapacity;
+    const spillBlockOffsetOffset = packetBlockOffsetOffset + topologyBlockCapacity;
+    const topologyBankStrideWords = spillBlockOffsetOffset + topologyBlockCapacity;
+    this.topologyArena = device.createBuffer({
+      label: "Losasso double-bank compiled velocity topology arena",
+      size: 4 * (16 + 2 * topologyBankStrideWords),
+      usage: storage,
+    });
+    device.queue.writeBuffer(this.topologyArena, 0,
+      new Uint32Array([0x5654_4f50, topologyBankStrideWords, 0]));
+    for (let bank = 0; bank < 2; bank += 1) {
+      const header = new Uint32Array(32);
+      header.set([mapOffset, packetOffset, spillOffset, leafOffset,
+        incidentOffset, retainedOffset, packetWords, spillWords], 7);
+      header.set([packetBlockCountOffset, spillBlockCountOffset,
+        packetBlockOffsetOffset, spillBlockOffsetOffset, topologyBlockCapacity], 15);
+      device.queue.writeBuffer(this.topologyArena,
+        4 * (16 + bank * topologyBankStrideWords), header);
+    }
+    const frontierSlices = this.plan.accurateExtensionWaves + this.plan.extensionWaves + 2;
+    this.mutableSliceBaseWords = 16 + 3 * this.plan.nodeCapacity;
+    this.mutableSliceStrideWords = 2 + this.plan.nodeCapacity;
+    this.mutableArena = device.createBuffer({ label: "Losasso velocity mutable frontier arena",
+      size: 4 * (this.mutableSliceBaseWords + frontierSlices * this.mutableSliceStrideWords),
+      usage: storage });
+    device.queue.writeBuffer(this.mutableArena, 0, new Uint32Array([0, 16,
+      16 + 2 * this.plan.nodeCapacity, this.mutableSliceBaseWords,
+      this.mutableSliceStrideWords, frontierSlices]));
+    this.controlArena = device.createBuffer({ label: "Losasso velocity control arena",
+      size: 4 * (4 * OCTREE_LOSASSO_ADAPTIVE_VELOCITY_RECEIPT_WORDS + 4
+        + 4 * OCTREE_LOSASSO_ADAPTIVE_VELOCITY_DIAGNOSTIC_BANK_WORDS), usage: storage });
     this.receiptBuffer = device.createBuffer({ label: "Losasso adaptive velocity receipts",
       size: this.plan.receiptBytes, usage: storage });
     this.diagnosticBuffer = device.createBuffer({
@@ -295,45 +354,47 @@ export class WebGPUOctreeLosassoAdaptiveVelocity {
       size: 4 * 4 * OCTREE_LOSASSO_ADAPTIVE_VELOCITY_DIAGNOSTIC_BANK_WORDS,
       usage: storage,
     });
-    const createFieldParams = (name: FieldName, mode: 0 | 1 | 2): GPUBuffer => {
-      const index = FIELD_INDEX[name];
+    const createFieldParams = (name: FieldName, activeMask: 1 | 2 | 3,
+      receiptBase: number, predictorReceiptBase: number, mode: 0 | 1 | 2,
+      candidate: boolean): GPUBuffer => {
       const buffer = device.createBuffer({ label: `Losasso adaptive velocity ${name} parameters`,
         size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
       const words = new Uint32Array(16);
-      words.set([this.plan.nodeCapacity, index & 1,
-        index * OCTREE_LOSASSO_ADAPTIVE_VELOCITY_RECEIPT_WORDS,
-        this.plan.extensionWaves], 0);
+      words.set([this.plan.nodeCapacity, activeMask, receiptBase, predictorReceiptBase], 0);
       new Float32Array(words.buffer)[4] = options.extensionReach;
       words[5] = 2;
-      words[6] = (name.startsWith("candidate") ? options.candidate.phiComponent
-        : options.accepted.phiComponent) ?? 1;
+      words[6] = (candidate ? options.candidate.phiComponent : options.accepted.phiComponent) ?? 1;
       // 0 = normal accepted, 1 = candidate cold bootstrap, 2 = accepted
       // construction-ready bootstrap. Ready bootstrap has distinct immutable
       // params so a normal accepted rebuild can never silently seed zeros.
       words[7] = mode;
       words.set([...options.dimensions, options.maximumLeafSize], 8);
-      const faces = name.startsWith("candidate") ? options.candidate.faces : options.accepted.faces;
+      const faces = candidate ? options.candidate.faces : options.accepted.faces;
       words[12] = faces.faceCapacity;
       words[13] = faces.faceDirectoryCapacity;
-      words[14] = faces.migrationStatus ? 1 : 0;
+      const terminalWave = 1 + this.plan.accurateExtensionWaves + this.plan.extensionWaves;
+      const causalEndWave = 1 + this.plan.accurateExtensionWaves;
+      words[14] = (faces.migrationStatus ? 1 : 0) | (terminalWave << 8)
+        | (causalEndWave << 16);
       // Tall Cells 3.3: use the accurate causal solver only in a two-finest-cell
       // interface shell. The sparse harmonic hierarchy closes the remaining
       // transport support without allocating or sweeping a dense domain.
       new Float32Array(words.buffer)[15] = Math.min(options.extensionReach,
         2 * options.minimumCellWidth);
       device.queue.writeBuffer(buffer, 0, words);
+      this.fieldParams.set(name, buffer);
+      this.fieldParamWords.set(name, words);
       return buffer;
     };
-    this.fieldParams = (Object.keys(FIELD_INDEX) as FieldName[]).map((name) =>
-      createFieldParams(name, name.startsWith("candidate") ? 1 : 0));
-    this.readyFieldParams = [createFieldParams("accepted", 2),
-      createFieldParams("predictor", 2)];
-    this.allocatedBytes = this.statusA.size + this.statusB.size
-      + this.supportA.size + this.supportB.size
+    createFieldParams("accepted", 1, 0, 12, 0, false);
+    createFieldParams("predictor", 2, 0, 12, 0, false);
+    createFieldParams("candidatePair", 3, 24, 36, 1, true);
+    createFieldParams("readyPair", 3, 0, 12, 2, false);
+    this.allocatedBytes = this.mutableArena.size + this.controlArena.size
+      + this.topologyArena.size
       + this.receiptBuffer.size + this.diagnosticBuffer.size
-      + this.acceptedStencils.size + this.candidateStencils.size
-      + this.acceptedStencilControl.size + this.candidateStencilControl.size
-      + [...this.fieldParams, ...this.readyFieldParams]
+      + this.candidateStencils.size + this.candidateStencilControl.size
+      + [...this.fieldParams.values()]
         .reduce((sum, buffer) => sum + buffer.size, 0);
     this.samplerSource = Object.freeze({ leaves: options.accepted.graph.leaves,
       ownerArena: options.ownerArena, leafLocator: options.accepted.graph.leafLocator,
@@ -353,7 +414,7 @@ export class WebGPUOctreeLosassoAdaptiveVelocity {
       pipeline: await this.device.createComputePipelineAsync({ layout: "auto",
         compute: { module: shaderModule, entryPoint } }) })));
     for (const { entryPoint, pipeline } of compiled) this.pipelines[entryPoint] = pipeline;
-    const candidateParams = this.fieldParams[FIELD_INDEX.candidate]!;
+    const candidateParams = this.fieldParams.get("candidatePair")!;
     const candidate = this.options.candidate;
     this.stencilBuildGroups = {
       prepare: this.createGroup("prepareAdaptiveVelocityStencils", [candidateParams,
@@ -365,106 +426,103 @@ export class WebGPUOctreeLosassoAdaptiveVelocity {
         this.candidateStencils, this.candidateStencilControl]),
       finish: this.createGroup("finishAdaptiveVelocityStencils",
         [this.candidateStencilControl]),
+      prepareTopology: this.createGroup("prepareAdaptiveVelocityTopology", [candidateParams,
+        candidate.graph.control, candidate.graph.nodes, candidate.graph.constraints,
+        candidate.graph.adjacency, candidate.graph.leaves, candidate.graph.incidentLeaves,
+        this.candidateStencils, this.topologyArena]),
+      classifyTopology: this.createGroup("classifyAdaptiveVelocityTopologyBlocks",
+        [candidate.graph.constraints, this.topologyArena]),
+      scanTopology: this.createGroup("scanAdaptiveVelocityTopologyBlocks", [this.topologyArena]),
+      indexTopology: this.createGroup("indexAdaptiveVelocityTopology",
+        [candidate.graph.constraints, this.topologyArena]),
+      emitTopology: this.createGroup("emitAdaptiveVelocityTopology", [candidate.graph.nodes,
+        candidate.graph.constraints, candidate.graph.adjacency, this.candidateStencils,
+        this.topologyArena]),
+      leafTopology: this.createGroup("emitAdaptiveVelocityTopologyLeaves",
+        [candidate.graph.leaves, this.topologyArena]),
+      incidentTopology: this.createGroup("emitAdaptiveVelocityTopologyIncidents",
+        [candidate.graph.incidentLeaves, this.topologyArena]),
+      retainedTopology: this.createGroup("resolveAdaptiveVelocityRetained", [this.topologyArena]),
+      finishTopology: this.createGroup("finishAdaptiveVelocityTopology",
+        [this.topologyArena, this.candidateStencilControl]),
     };
     const accepted = this.options.accepted;
     this.stencilCommitGroups = {
-      commit: this.createGroup("commitAdaptiveVelocityStencils", [this.candidateStencilControl,
-        this.candidateStencils, accepted.graph.control, accepted.faces.control,
-        this.acceptedStencils]),
-      finish: this.createGroup("finishAdaptiveVelocityStencilCommit",
-        [this.candidateStencilControl, accepted.graph.control, accepted.faces.control,
-          this.acceptedStencilControl]),
+      commit: this.createGroup("commitAdaptiveVelocityTopology",
+        [this.topologyArena, accepted.graph.control]),
     };
-    for (const name of Object.keys(FIELD_INDEX) as FieldName[]) {
-      const source = name.startsWith("candidate") ? this.options.candidate : this.options.accepted;
-      const faceValues = name === "predictor" || name === "candidatePredictor"
-        ? source.faces.predictorValues
-        : name === "accepted" && source.faces.carriedValues
-          ? source.faces.carriedValues : source.faces.projectedValues;
-      this.fieldGroups.set(name, this.createFieldBindings(name, source, faceValues));
-    }
     const acceptedCarry = this.options.accepted.faces.carriedValues;
-    if (acceptedCarry) {
-      this.readyAcceptedGroups = [
-        this.createFieldBindings("accepted", this.options.accepted, acceptedCarry,
-          this.readyFieldParams[0]),
-        this.createFieldBindings("predictor", this.options.accepted, acceptedCarry,
-          this.readyFieldParams[1]),
-      ];
-    }
+    this.fieldGroups.set("accepted", this.createFieldBindings("accepted", this.options.accepted,
+      this.options.accepted.faces.projectedValues, this.options.accepted.faces.predictorValues));
+    this.fieldGroups.set("predictor", this.createFieldBindings("predictor", this.options.accepted,
+      this.options.accepted.faces.projectedValues, this.options.accepted.faces.predictorValues));
+    this.fieldGroups.set("candidatePair", this.createFieldBindings("candidatePair",
+      this.options.candidate, this.options.candidate.faces.projectedValues,
+      this.options.candidate.faces.predictorValues));
+    if (acceptedCarry) this.fieldGroups.set("readyPair", this.createFieldBindings("readyPair",
+      this.options.accepted, acceptedCarry, acceptedCarry));
   }
 
-  private createGroup(entryPoint: EntryPoint, buffers: readonly GPUBuffer[]): GPUBindGroup {
+  private createGroup(entryPoint: EntryPoint,
+    buffers: readonly (GPUBuffer | GPUBufferBinding)[]): GPUBindGroup {
     const pipeline = this.pipelines[entryPoint]; if (!pipeline) throw new Error("Adaptive velocity pipeline missing");
     if (buffers.length !== BINDINGS[entryPoint].length) {
       throw new Error(`Adaptive velocity ${entryPoint} binding count mismatch`);
     }
     return this.device.createBindGroup({ layout: pipeline.getBindGroupLayout(0),
       entries: buffers.map((buffer, index) => ({ binding: BINDINGS[entryPoint][index]!,
-        resource: { buffer } })) });
+        resource: "buffer" in buffer ? buffer : { buffer } })) });
+  }
+
+  private createWaveParams(name: FieldName, inputSlice: number): GPUBuffer {
+    const words = new Uint32Array(this.fieldParamWords.get(name)!);
+    words[7] = (words[7]! & 0xff) | (inputSlice << 8);
+    const buffer = this.device.createBuffer({
+      label: `Losasso adaptive velocity ${name} frontier ${inputSlice} parameters`,
+      size: 64, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+    this.device.queue.writeBuffer(buffer, 0, words); this.waveParams.push(buffer);
+    return buffer;
   }
 
   private createFieldBindings(name: FieldName, source: WebGPUOctreeLosassoAdaptiveVelocityBuildSource,
-    faceValues: GPUBuffer, params?: GPUBuffer): FieldBindings {
-    const p = params ?? this.fieldParams[FIELD_INDEX[name]]!;
+    faceValues0: GPUBuffer, faceValues1: GPUBuffer): FieldBindings {
+    const p = this.fieldParams.get(name)!;
     const candidate = name.startsWith("candidate");
-    const stencils = candidate ? this.candidateStencils : this.acceptedStencils;
-    const stencilControl = candidate
-      ? this.candidateStencilControl : this.acceptedStencilControl;
+    const topology = this.topologyArena;
+    const causalEnd = this.plan.accurateExtensionWaves + 1;
+    const terminal = causalEnd + this.plan.extensionWaves;
+    const waves: { group: GPUBindGroup; inputSlice: number }[] = [];
+    const makeWave = (inputSlice: number) => waves.push({ inputSlice,
+      group: this.createGroup("propagateAdaptiveVelocityFrontier",
+        [this.createWaveParams(name, inputSlice), topology, this.mutableArena,
+          this.controlArena, source.graph.nodalVelocity, source.graph.phi]) });
+    for (let input = 0; input < this.plan.accurateExtensionWaves; input += 1) makeWave(input);
+    for (let input = causalEnd; input < terminal; input += 1) makeWave(input);
+    const reconstructEntry = candidate
+      ? "reconstructCandidateAdaptiveVelocity" : "reconstructAcceptedAdaptiveVelocity";
     return {
-      prepare: this.createGroup("prepareAdaptiveVelocity",
-        [p, source.graph.control, candidate
-          ? this.options.accepted.graph.control : source.graph.control,
-        stencilControl, this.receiptBuffer, this.diagnosticBuffer]),
-      reconstruct: this.createGroup("reconstructAdaptiveVelocity", [p, source.graph.control,
-        source.graph.nodes, stencils, faceValues, source.graph.nodalVelocity, this.statusA,
-        this.receiptBuffer, this.supportA, source.faces.migrationStatus ?? faceValues]),
-      ...(candidate ? { handoff: this.createGroup("handoffAdaptiveVelocity", [p,
-        source.graph.control, source.graph.nodes, source.graph.nodalVelocity, this.statusA,
-        this.options.accepted.graph.control, this.options.accepted.graph.nodeDirectory,
-        this.options.accepted.graph.nodalVelocity]) } : {}),
-      markSupport: this.createGroup("markAdaptiveVelocitySupport", [p, source.graph.control,
-        source.transportBandMask, source.graph.constraints, this.supportA, this.diagnosticBuffer,
-        source.graph.leaves, source.graph.incidentLeaves]),
-      extendAB: this.createGroup("extendAdaptiveVelocity", [p, source.graph.control,
-        source.graph.adjacency, source.graph.phi, source.graph.nodalVelocity, this.statusA,
-        this.statusB, this.receiptBuffer]),
-      extendBA: this.createGroup("extendAdaptiveVelocity", [p, source.graph.control,
-        source.graph.adjacency, source.graph.phi, source.graph.nodalVelocity, this.statusB,
-        this.statusA, this.receiptBuffer]),
-      closeAB: this.createGroup("closeAdaptiveVelocity", [p, source.graph.control,
-        source.graph.adjacency, source.graph.phi, source.graph.nodalVelocity, this.statusA,
-        this.statusB, this.receiptBuffer, this.supportB]),
-      closeBA: this.createGroup("closeAdaptiveVelocity", [p, source.graph.control,
-        source.graph.adjacency, source.graph.phi, source.graph.nodalVelocity, this.statusB,
-        this.statusA, this.receiptBuffer, this.supportA]),
-      copySupportAB: this.createGroup("copyAdaptiveVelocitySupport", [p,
-        source.graph.control, this.supportA, this.supportB]),
-      copySupportBA: this.createGroup("copyAdaptiveVelocitySupport", [p,
-        source.graph.control, this.supportB, this.supportA]),
-      dilateSupportAB: this.createGroup("dilateAdaptiveVelocitySupport", [p,
-        source.graph.control, source.graph.adjacency, source.graph.constraints,
-        this.statusA, this.supportA, this.supportB, this.diagnosticBuffer]),
-      dilateSupportBA: this.createGroup("dilateAdaptiveVelocitySupport", [p,
-        source.graph.control, source.graph.adjacency, source.graph.constraints,
-        this.statusB, this.supportB, this.supportA, this.diagnosticBuffer]),
-      constrainA: this.createGroup("constrainAdaptiveVelocity", [p, source.graph.control,
-        source.graph.constraints, source.graph.constraints, source.graph.nodalVelocity,
-        this.statusA, this.receiptBuffer]),
-      constrainB: this.createGroup("constrainAdaptiveVelocity", [p, source.graph.control,
-        source.graph.constraints, source.graph.constraints, source.graph.nodalVelocity,
-        this.statusB, this.receiptBuffer]),
-      finalize: this.createGroup("finalizeAdaptiveVelocity", [p, source.graph.control,
-        source.graph.phi, source.graph.nodalVelocity, this.statusA, this.receiptBuffer,
-        source.graph.nodeValidity, this.supportA, source.graph.constraints,
-        source.graph.adjacency, this.diagnosticBuffer]),
-      finish: this.createGroup("finishAdaptiveVelocity", [p, this.receiptBuffer,
+      prepare: this.createGroup("prepareAdaptiveVelocity", [p, topology, this.mutableArena,
+        this.controlArena, source.graph.control, this.options.accepted.graph.control]),
+      reconstruct: this.createGroup(reconstructEntry, [p, topology, this.mutableArena,
+        this.controlArena, faceValues0, faceValues1, source.graph.nodalVelocity,
+        source.graph.phi,
+        ...(candidate ? [source.faces.migrationStatus ?? faceValues0] : [])]),
+      ...(candidate ? { handoff: this.createGroup("handoffAdaptiveVelocity", [p, topology,
+        this.mutableArena, this.options.accepted.graph.nodalVelocity,
+        source.graph.nodalVelocity]) } : {}),
+      seed: this.createGroup("seedAdaptiveVelocityFrontier", [p, topology, this.mutableArena,
+        this.controlArena, source.transportBandMask]),
+      waves,
+      constrainA: this.createGroup("constrainAdaptiveVelocity", [p, topology,
+        this.mutableArena, this.controlArena, source.graph.nodalVelocity]),
+      finalize: this.createGroup("finalizeAdaptiveVelocity", [p, topology, this.mutableArena,
+        this.controlArena, source.graph.nodalVelocity, source.graph.nodeValidity]),
+      finish: this.createGroup("finishAdaptiveVelocity", [p, this.controlArena,
         source.graph.control, source.graph.leafLocator]),
+      liveDispatch: source.graph.control,
+      liveDispatchOffsetBytes: source.graph.nodeDispatchOffsetBytes,
     };
-  }
-
-  encodeAcceptedFields(broker: PassBroker): void {
-    this.encodeAcceptedField(broker); this.encodePredictorField(broker);
   }
   /** Reconstruct only the carried/projected field consumed by forward traces. */
   encodeAcceptedField(broker: PassBroker): void {
@@ -483,29 +541,60 @@ export class WebGPUOctreeLosassoAdaptiveVelocity {
   encodeAcceptedReadyFields(broker: PassBroker): void {
     this.assertReady();
     this.encodeReadyStencilCommit(broker);
-    const groups = this.readyAcceptedGroups;
-    if (!groups) throw new Error("Adaptive velocity has no committed carried face field");
-    this.encodeField(broker, "accepted", groups[0]);
-    this.encodeField(broker, "predictor", groups[1]);
+    if (!this.fieldGroups.has("readyPair")) {
+      throw new Error("Adaptive velocity has no committed carried face field");
+    }
+    this.encodeField(broker, "readyPair");
+  }
+  /**
+   * Retain the coherent accepted nodal tuple while refreshing its phi-bound
+   * extension support. A ready authority commit publishes only the carried
+   * face bank; projected/predictor face arrays still use the previous face
+   * ordering and cannot seed reconstruction until S1a/S3 replace them.
+   */
+  encodeAcceptedRetainedFields(broker: PassBroker): void {
+    this.assertReady();
+    if (!this.fieldGroups.has("readyPair")) {
+      throw new Error("Adaptive velocity has no retained accepted field group");
+    }
+    this.encodeField(broker, "readyPair");
   }
   /** Compile topology/geometry-only candidate face lookups once per graph publication. */
   encodeCandidateStencils(broker: PassBroker): void {
     const groups = this.stencilBuildGroups;
     if (!groups) throw new Error("Adaptive velocity stencil compiler is not initialized");
-    const run = (entryPoint: EntryPoint, group: GPUBindGroup, indirect = false) => {
+    const run = (entryPoint: EntryPoint, group: GPUBindGroup, indirect = false,
+      workgroups = 1, indirectOffset = this.options.candidate.graph.nodeDispatchOffsetBytes) => {
       const pass = broker.compute({ label: `Losasso - ${entryPoint}` });
       pass.setPipeline(this.pipelines[entryPoint]!); pass.setBindGroup(0, group);
       if (indirect) pass.dispatchWorkgroupsIndirect(this.options.candidate.graph.control,
-        this.options.candidate.graph.nodeDispatchOffsetBytes);
-      else pass.dispatchWorkgroups(1);
+        indirectOffset);
+      else pass.dispatchWorkgroups(workgroups);
+    };
+    const runTopologyBlocks = (entryPoint: EntryPoint, group: GPUBindGroup) => {
+      const pass = broker.compute({ label: `Losasso - ${entryPoint}` });
+      pass.setPipeline(this.pipelines[entryPoint]!); pass.setBindGroup(0, group);
+      pass.dispatchWorkgroupsIndirect(this.options.candidate.graph.control,
+        this.options.candidate.graph.topologyBlockDispatchOffsetBytes);
     };
     run("prepareAdaptiveVelocityStencils", groups.prepare);
     run("compileAdaptiveVelocityStencils", groups.compile, true);
     run("finishAdaptiveVelocityStencils", groups.finish);
+    run("prepareAdaptiveVelocityTopology", groups.prepareTopology);
+    runTopologyBlocks("classifyAdaptiveVelocityTopologyBlocks", groups.classifyTopology);
+    run("scanAdaptiveVelocityTopologyBlocks", groups.scanTopology);
+    runTopologyBlocks("indexAdaptiveVelocityTopology", groups.indexTopology);
+    run("emitAdaptiveVelocityTopology", groups.emitTopology, true);
+    run("emitAdaptiveVelocityTopologyLeaves", groups.leafTopology, true, 1,
+      this.options.candidate.graph.leafDispatchOffsetBytes);
+    run("emitAdaptiveVelocityTopologyIncidents", groups.incidentTopology, true);
+    run("resolveAdaptiveVelocityRetained", groups.retainedTopology, true);
+    run("finishAdaptiveVelocityTopology", groups.finishTopology);
+    broker.fence("velocity topology packet publication");
   }
   /** Reconstruct both candidate banks against the already-compiled topology lookups. */
   encodeCandidateFieldRound(broker: PassBroker): void {
-    this.encodeField(broker, "candidate"); this.encodeField(broker, "candidatePredictor");
+    this.encodeField(broker, "candidatePair");
   }
   /** Combined single-round entry point retained for standalone candidate construction. */
   encodeCandidateFields(broker: PassBroker): void {
@@ -514,61 +603,61 @@ export class WebGPUOctreeLosassoAdaptiveVelocity {
   }
   private encodeReadyStencilCommit(broker: PassBroker): void {
     const groups = this.stencilCommitGroups;
-    if (!groups) throw new Error("Adaptive velocity stencil commit is not initialized");
-    const commit = broker.compute({ label: "Losasso - commit adaptive velocity stencils" });
-    commit.setPipeline(this.pipelines.commitAdaptiveVelocityStencils!);
+    if (!groups) throw new Error("Adaptive velocity topology commit is not initialized");
+    const commit = broker.compute({ label: "Losasso - commit adaptive velocity topology bank" });
+    commit.setPipeline(this.pipelines.commitAdaptiveVelocityTopology!);
     commit.setBindGroup(0, groups.commit);
-    commit.dispatchWorkgroupsIndirect(this.options.accepted.graph.control,
-      this.options.accepted.graph.nodeDispatchOffsetBytes);
-    const finish = broker.compute({ label: "Losasso - finish adaptive velocity stencil commit" });
-    finish.setPipeline(this.pipelines.finishAdaptiveVelocityStencilCommit!);
-    finish.setBindGroup(0, groups.finish); finish.dispatchWorkgroups(1);
+    commit.dispatchWorkgroups(1);
   }
-  private encodeField(broker: PassBroker, name: FieldName,
-    selectedGroups?: FieldBindings): void {
-    this.assertReady(); const groups = selectedGroups ?? this.fieldGroups.get(name)!;
-    const source = name.startsWith("candidate") ? this.options.candidate : this.options.accepted;
-    const run = (entryPoint: EntryPoint, group: GPUBindGroup, indirect = false) => {
+  private encodeField(broker: PassBroker, name: FieldName): void {
+    this.assertReady(); const groups = this.fieldGroups.get(name)!;
+    const run = (entryPoint: EntryPoint, group: GPUBindGroup, live = false) => {
       const pass = broker.compute({ label: `Losasso - adaptive velocity ${name} ${entryPoint}` });
       pass.setPipeline(this.pipelines[entryPoint]!); pass.setBindGroup(0, group);
-      if (indirect) pass.dispatchWorkgroupsIndirect(source.graph.control,
-        source.graph.nodeDispatchOffsetBytes);
+      if (live) pass.dispatchWorkgroupsIndirect(groups.liveDispatch,
+        groups.liveDispatchOffsetBytes);
       else pass.dispatchWorkgroups(1);
     };
     run("prepareAdaptiveVelocity", groups.prepare);
-    run("reconstructAdaptiveVelocity", groups.reconstruct, true);
+    run(name.startsWith("candidate") ? "reconstructCandidateAdaptiveVelocity"
+      : "reconstructAcceptedAdaptiveVelocity", groups.reconstruct, true);
     if (groups.handoff) run("handoffAdaptiveVelocity", groups.handoff, true);
-    run("constrainAdaptiveVelocity", groups.constrainA, true);
-    run("markAdaptiveVelocitySupport", groups.markSupport, true);
     for (let wave = 0; wave < this.plan.accurateExtensionWaves; wave += 1) {
-      const odd = (wave & 1) !== 0;
-      run("extendAdaptiveVelocity", odd ? groups.extendBA : groups.extendAB, true);
-      run("constrainAdaptiveVelocity", odd ? groups.constrainA : groups.constrainB, true);
+      const selected = groups.waves[wave]!;
+      const pass = broker.compute({ label: `Losasso - adaptive velocity ${name} causal frontier` });
+      pass.setPipeline(this.pipelines.propagateAdaptiveVelocityFrontier!);
+      pass.setBindGroup(0, selected.group);
+      pass.dispatchWorkgroups(ADAPTIVE_VELOCITY_FRONTIER_WORKGROUPS);
     }
-    // The causal pass deliberately rejects strictly farther |phi| donors. A
-    // second compact harmonic closure resolves only the discrete basins that
-    // therefore remain trial, while accepted causal values stay immutable.
+    run("seedAdaptiveVelocityFrontier", groups.seed, true);
     for (let wave = 0; wave < this.plan.extensionWaves; wave += 1) {
-      const odd = (wave & 1) !== 0;
-      run("copyAdaptiveVelocitySupport", odd ? groups.copySupportBA : groups.copySupportAB, true);
-      run("dilateAdaptiveVelocitySupport",
-        odd ? groups.dilateSupportBA : groups.dilateSupportAB, true);
-      run("closeAdaptiveVelocity", odd ? groups.closeBA : groups.closeAB, true);
-      run("constrainAdaptiveVelocity", odd ? groups.constrainA : groups.constrainB, true);
+      const selected = groups.waves[this.plan.accurateExtensionWaves + wave]!;
+      const pass = broker.compute({ label: `Losasso - adaptive velocity ${name} harmonic frontier` });
+      pass.setPipeline(this.pipelines.propagateAdaptiveVelocityFrontier!);
+      pass.setBindGroup(0, selected.group);
+      pass.dispatchWorkgroups(ADAPTIVE_VELOCITY_FRONTIER_WORKGROUPS);
     }
+    // Hanging nodes are immutable aliases throughout propagation.  Consumers
+    // resolve their independent masters directly; materialize the compact
+    // constraint set once into the final even ping-pong bank for publication.
     run("finalizeAdaptiveVelocity", groups.finalize, true);
+    run("constrainAdaptiveVelocity", groups.constrainA, true);
     run("finishAdaptiveVelocity", groups.finish);
+    broker.copyBufferToBuffer(this.controlArena, 0, this.receiptBuffer, 0,
+      this.receiptBuffer.size);
+    broker.copyBufferToBuffer(this.controlArena, this.plan.receiptBytes,
+      this.diagnosticBuffer, 0, this.diagnosticBuffer.size);
   }
 
   destroy(): void {
     if (this.destroyed) return; this.destroyed = true;
-    this.statusA.destroy(); this.statusB.destroy();
-    this.supportA.destroy(); this.supportB.destroy();
-    this.acceptedStencils.destroy(); this.candidateStencils.destroy();
-    this.acceptedStencilControl.destroy(); this.candidateStencilControl.destroy();
+    this.mutableArena.destroy(); this.controlArena.destroy();
+    this.topologyArena.destroy(); this.candidateStencils.destroy();
+    this.candidateStencilControl.destroy();
     this.receiptBuffer.destroy(); this.diagnosticBuffer.destroy();
-    for (const buffer of [...this.fieldParams, ...this.readyFieldParams]) buffer.destroy();
-    this.fieldGroups.clear(); this.readyAcceptedGroups = undefined;
+    for (const buffer of this.fieldParams.values()) buffer.destroy();
+    for (const buffer of this.waveParams) buffer.destroy();
+    this.fieldParams.clear(); this.fieldParamWords.clear(); this.fieldGroups.clear();
     this.stencilBuildGroups = undefined; this.stencilCommitGroups = undefined;
   }
   private assertLive(): void { if (this.destroyed) throw new Error("Adaptive velocity is destroyed"); }
