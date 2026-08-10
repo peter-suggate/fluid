@@ -5,6 +5,7 @@ import {
   combineMainThreadPerformanceTraces,
   CPUPerformanceTrace,
   decodeGPUTimestampPartition,
+  GPUPassTimestampRecorder,
   GPUQueueWallPerformanceTraceRecorder,
   GPUStageTimestampRecorder,
   averagePerformanceTraces,
@@ -122,6 +123,26 @@ test("CPU completed-phase seams label work discovered at the trailing boundary",
   assert.equal(performanceTraceClosureError_ms(trace), 0);
 });
 
+test("a presentation encoding partition closes at its last named stage", () => {
+  const times = [2, 5, 9];
+  const cpu = new CPUPerformanceTrace(
+    15,
+    "garden:quality",
+    { id: "other", label: "Presentation encoding" },
+    () => times.shift()!,
+    "presentation",
+  );
+  cpu.completePhase({ id: "svo-primary", label: "SVO primary visibility" });
+  cpu.completePhase({ id: "present", label: "Final upscale + present" });
+  const trace = cpu.finishCompletedPhases();
+  assert.deepEqual(trace.phases.map((phase) => [phase.label, phase.duration_ms]), [
+    ["SVO primary visibility", 3],
+    ["Final upscale + present", 4],
+  ]);
+  assert.equal(trace.total_ms, 7);
+  assert.equal(performanceTraceMatchesLane(trace, "cpu", "presentation"), true);
+});
+
 test("disjoint controller and renderer callbacks close one active CPU ledger", () => {
   const controller = partitionPerformanceTrace({
     sampleId: 7,
@@ -182,12 +203,15 @@ test("GPU queue-wall fallback publishes an exact sample when timestamps are unav
  * staging buffers, the marker pipeline, and a scripted resolved timestamp set. */
 function stageTimestampHarness(resolvedTimestamps_ns: readonly bigint[]) {
   const scope = globalThis as Record<string, unknown>;
-  scope.GPUBufferUsage ??= { QUERY_RESOLVE: 1, COPY_SRC: 2, COPY_DST: 4, MAP_READ: 8 };
+  scope.GPUBufferUsage ??= { QUERY_RESOLVE: 1, COPY_SRC: 2, COPY_DST: 4, MAP_READ: 8, STORAGE: 16 };
   scope.GPUMapMode ??= { READ: 1 };
-  const passes: Array<{ label?: string; timestampWrites?: { beginningOfPassWriteIndex?: number } }> = [];
+  const passes: Array<{ label?: string; timestampWrites?: {
+    beginningOfPassWriteIndex?: number;
+    endOfPassWriteIndex?: number;
+  } }> = [];
   const encoderBreaks: number[] = [];
   const resolves: Array<{ first: number; count: number }> = [];
-  const pass = { setPipeline() {}, dispatchWorkgroups() {}, end() {} };
+  const pass = { setPipeline() {}, setBindGroup() {}, dispatchWorkgroups() {}, end() {} };
   const buffer = () => ({
     destroy() {},
     mapState: "unmapped" as GPUBufferMapState,
@@ -200,7 +224,8 @@ function stageTimestampHarness(resolvedTimestamps_ns: readonly bigint[]) {
     createQuerySet: () => ({ destroy() {} }),
     createBuffer: buffer,
     createShaderModule: () => ({}),
-    createComputePipeline: () => ({}),
+    createComputePipelineAsync: async () => ({ getBindGroupLayout: () => ({}) }),
+    createBindGroup: () => ({}),
   } as unknown as GPUDevice;
   const encoder = {
     beginComputePass(descriptor?: GPUComputePassDescriptor) { passes.push({ ...descriptor }); return pass; },
@@ -215,6 +240,7 @@ function stageTimestampHarness(resolvedTimestamps_ns: readonly bigint[]) {
 
 test("stage boundaries ride the frame's own passes and add one marker in total", async () => {
   const harness = stageTimestampHarness([1_000_000n, 4_000_000n, 9_000_000n]);
+  await GPUStageTimestampRecorder.prepare(harness.device);
   const recorder = new GPUStageTimestampRecorder(harness.device, 14, "physics", "octree:balanced");
   const encoder = recorder.instrument(harness.encoder);
   recorder.begin();
@@ -229,7 +255,10 @@ test("stage boundaries ride the frame's own passes and add one marker in total",
   assert.deepEqual(harness.passes.map((entry) => entry.label),
     ["Structured advection", "MGPCG", "GPU stage trace close"],
     "only the closing boundary needs a pass of its own");
-  assert.deepEqual(harness.passes.map((entry) => entry.timestampWrites?.beginningOfPassWriteIndex), [0, 1, 2]);
+  assert.deepEqual(harness.passes.map((entry) => [
+    entry.timestampWrites?.beginningOfPassWriteIndex,
+    entry.timestampWrites?.endOfPassWriteIndex,
+  ]), [[0, undefined], [1, undefined], [undefined, 2]]);
   assert.deepEqual(harness.encoderBreaks, [4, 4, 4, 24],
     "one 4-byte blit forces each boundary's encoder break, then one staging copy of the resolved set");
   assert.deepEqual(harness.resolves, [{ first: 0, count: 3 }]);
@@ -245,8 +274,68 @@ test("stage boundaries ride the frame's own passes and add one marker in total",
   assert.equal(performanceTraceMatchesLane(trace, "gpu", "physics"), true);
 });
 
+test("the final render pass carries its own closing timestamp", async () => {
+  const harness = stageTimestampHarness([1_000_000n, 4_000_000n, 9_000_000n]);
+  await GPUStageTimestampRecorder.prepare(harness.device);
+  const recorder = new GPUStageTimestampRecorder(harness.device, 18, "presentation", "svo");
+  const encoder = recorder.instrument(harness.encoder);
+  recorder.begin();
+  encoder.beginComputePass({ label: "Dry scene" }).end();
+  recorder.completePhase(encoder, { id: "dry-scene", label: "Dry scene" });
+  recorder.completeFinalPhaseOnNextPass({ id: "present", label: "Final presentation" });
+  encoder.beginRenderPass({ label: "Upscale" } as GPURenderPassDescriptor).end();
+  recorder.resolve(encoder);
+
+  assert.deepEqual(harness.passes.map((entry) => entry.label), ["Dry scene", "Upscale"]);
+  assert.deepEqual([
+    harness.passes[1]?.timestampWrites?.beginningOfPassWriteIndex,
+    harness.passes[1]?.timestampWrites?.endOfPassWriteIndex,
+  ], [1, 2]);
+  const trace = await recorder.read();
+  assert.ok(trace);
+  assert.deepEqual(trace.phases.map((phase) => [phase.label, phase.duration_ms]), [
+    ["Dry scene", 3],
+    ["Final presentation", 5],
+  ]);
+});
+
+test("semantic stage traces publish compute costs and reject render tiler windows", async () => {
+  const harness = stageTimestampHarness([
+    1_000_000n, 3_000_000n,
+    4_000_000n, 10_000_000n,
+    11_000_000n, 14_000_000n,
+  ]);
+  const recorder = new GPUPassTimestampRecorder(harness.device, 12, "presentation passes");
+  const encoder = recorder.instrument(harness.encoder);
+  encoder.beginComputePass({ label: "primary compute" }).end();
+  recorder.completePhase({ id: "svo-primary", label: "SVO primary visibility" });
+  encoder.beginRenderPass({ label: "deferred draw", colorAttachments: [] }).end();
+  recorder.completePhase({ id: "optical-composite", label: "Optical composite" });
+  encoder.beginComputePass({ label: "cone visibility" }).end();
+  recorder.completePhase({ id: "svo-cone-lighting", label: "SVO cone lighting" });
+  assert.equal(recorder.resolve(encoder), true);
+
+  const trace = await recorder.readSemanticTrace({
+    sampleId: 19,
+    lane: "presentation",
+    context: "svo",
+  });
+  assert.ok(trace);
+  assert.equal(trace.measurementSource, "gpu-pass-timestamp");
+  assert.equal(trace.total_ms, 5);
+  assert.ok(trace.capturedAt_ms > trace.total_ms,
+    "synthetic pass-sum duration must not be mistaken for the host capture timestamp");
+  assert.deepEqual(trace.phases.map((phase) => [phase.label, phase.duration_ms]), [
+    ["SVO primary visibility", 2],
+    ["SVO cone lighting", 3],
+  ]);
+  assert.equal(trace.phases.some((phase) => phase.label === "Optical composite"), false,
+    "a Metal render-pass pair is a tiler window, so publishing it as stage cost would be false");
+});
+
 test("a pass that already carries timestamp writes is never displaced", async () => {
   const harness = stageTimestampHarness([2_000_000n, 5_000_000n]);
+  await GPUStageTimestampRecorder.prepare(harness.device);
   const recorder = new GPUStageTimestampRecorder(harness.device, 15, "presentation", "svo");
   const encoder = recorder.instrument(harness.encoder);
   recorder.begin();
@@ -263,6 +352,7 @@ test("a pass that already carries timestamp writes is never displaced", async ()
 
 test("an unusable hardware sample yields no trace instead of a wrong one", async () => {
   const harness = stageTimestampHarness([0n, 5_000_000n]);
+  await GPUStageTimestampRecorder.prepare(harness.device);
   const recorder = new GPUStageTimestampRecorder(harness.device, 16, "physics", "octree");
   const encoder = recorder.instrument(harness.encoder);
   recorder.begin();

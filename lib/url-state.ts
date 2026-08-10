@@ -8,6 +8,11 @@ import { useMethodStore } from "./stores/method-store";
 import { useSceneStore } from "./stores/scene-store";
 import { useShellStore, type ShellView } from "./stores/shell-store";
 import { DEFAULT_RIGHT_PANEL_WIDTH, MAX_RIGHT_PANEL_WIDTH, MIN_RIGHT_PANEL_WIDTH, useUIStore, type RightPanel } from "./stores/ui-store";
+import {
+  DEFAULT_SVO_RENDER_DIAGNOSTICS,
+  SVO_RENDER_STAGE_VIEWS,
+  type SvoRenderStageView,
+} from "./svo-render-diagnostics";
 import { DEFAULT_SVO_LIGHTING_OPTIONS, type SvoConeTracingMode, type SvoPrimaryTraversalMode } from "./svo-render-options";
 import {
   DEFAULT_SVO_RENDER_TUNING,
@@ -80,6 +85,7 @@ type UIQueryState = {
   silhouetteRefinementEnabled: boolean;
   svoConeTracingMode: SvoConeTracingMode;
   svoPrimaryTraversal: SvoPrimaryTraversalMode;
+  svoStageView: SvoRenderStageView;
   /**
    * The sparse-presentation tuning, of which exactly two fields round-trip.
    *
@@ -370,7 +376,7 @@ export function parseQueryState(search: string): QueryState {
   const grid = query.get("grid");
   const gridMode = query.get("gridMode");
   const requestedPanel = query.get("panel");
-  const rightPanel: RightPanel = requestedPanel === "visual" || requestedPanel === "bodies" || requestedPanel === "diagnostics" || requestedPanel === "performance"
+  const rightPanel: RightPanel = requestedPanel === "visual" || requestedPanel === "visuals" || requestedPanel === "bodies" || requestedPanel === "diagnostics" || requestedPanel === "performance"
     ? requestedPanel
     : initialUI.rightPanel;
 
@@ -408,14 +414,21 @@ export function parseQueryState(search: string): QueryState {
       svoShadowsEnabled: query.get("svoShadows") !== "0" ? DEFAULT_SVO_LIGHTING_OPTIONS.shadowsEnabled : false,
       svoAmbientOcclusionEnabled: query.get("svoAO") !== "0" ? DEFAULT_SVO_LIGHTING_OPTIONS.ambientOcclusionEnabled : false,
       silhouetteRefinementEnabled: query.get("svoPrimarySeamClosure") === "1",
-      svoConeTracingMode: query.get("svoCones") === "exact" || query.get("svoCones") === "off" ? query.get("svoCones") as SvoConeTracingMode : "cones",
-      svoPrimaryTraversal: query.get("svoPrimary") === "traced" ? "traced" : "raster",
+      svoConeTracingMode: query.get("svoCones") === "exact" || query.get("svoCones") === "off"
+        ? query.get("svoCones") as SvoConeTracingMode
+        : DEFAULT_SVO_LIGHTING_OPTIONS.coneTracingMode,
+      svoPrimaryTraversal: query.get("svoPrimary") === "traced" || query.get("svoPrimary") === "raster"
+        ? query.get("svoPrimary") as SvoPrimaryTraversalMode
+        : DEFAULT_SVO_LIGHTING_OPTIONS.primaryTraversal,
+      svoStageView: SVO_RENDER_STAGE_VIEWS.includes(query.get("svoStage") as SvoRenderStageView)
+        ? query.get("svoStage") as SvoRenderStageView
+        : DEFAULT_SVO_RENDER_DIAGNOSTICS.stageView,
       // Normalized rather than trusted: these are the tuning fields a link can
       // carry, and the numbers are clamped by the same function the store
       // applies, so an out-of-range external value lands on the ceiling instead
       // of reaching the octree as an unbounded depth request.
       svoRenderTuning: normalizeSvoRenderTuning({
-        ...initialUI.svoRenderTuning,
+        ...DEFAULT_SVO_RENDER_TUNING,
         // The refinement depth is deliberately absent. It is not a tuning value
         // any more — it is `scene.voxelDomain.detailCellSize_m`, which
         // `sceneQueryPaths` already round-trips as `scene.voxelDomain`. A second
@@ -432,7 +445,7 @@ export function parseQueryState(search: string): QueryState {
 function isManagedKey(key: string) {
   return key === "method" || key === "scene" || key === "quality" || key === "view" || key === "diagnostics" || key === "waterdiag" || key === "panel" || key === "panelWidth"
     || key === "performance" || key === "validation" || key === "sceneConfig" || key === "grid" || key === "gridSlice" || key === "gridMode"
-    || key === REGIONS_QUERY_KEY || key === "render" || key === "svoLighting" || key === "svoShadows" || key === "svoAO" || key === "svoSilhouetteRefinement" || key === "svoPrimarySeamClosure" || key === "svoCones" || key === "svoPrimary" || key === "svoFlatExempt" || key === "svoLodPixels" || key === "svoSurface" || key === "environment" || key === "fps" || key.startsWith("camera.") || key.startsWith("param.") || key.startsWith("scene.");
+    || key === REGIONS_QUERY_KEY || key === "render" || key === "svoLighting" || key === "svoShadows" || key === "svoAO" || key === "svoSilhouetteRefinement" || key === "svoPrimarySeamClosure" || key === "svoCones" || key === "svoPrimary" || key === "svoStage" || key === "svoFlatExempt" || key === "svoLodPixels" || key === "svoSurface" || key === "environment" || key === "fps" || key.startsWith("camera.") || key.startsWith("param.") || key.startsWith("scene.");
 }
 
 /** Build a canonical query string from the stores, preserving unrelated keys. */
@@ -447,9 +460,16 @@ export function serializeQueryState(
   const query = new URLSearchParams(search);
   for (const key of [...query.keys()]) if (isManagedKey(key)) query.delete(key);
 
-  query.set("method", methodState.methodId);
   query.set("scene", sceneState.presetId);
-  query.set("quality", methodState.quality);
+  const preset = getScenePreset(sceneState.presetId);
+  const profile = preset.methodProfile;
+  const baselineMethodId = profile?.methodId ?? defaultMethodId;
+  const baselineQuality = profile?.quality ?? "balanced";
+  // A catalog scene's authored runtime contract is implied by its identity.
+  // Writing it beside the scene made every clean card navigation look like a
+  // hand-tuned override and allowed the URL to drift if that contract changed.
+  if (methodState.methodId !== baselineMethodId) query.set("method", methodState.methodId);
+  if (methodState.quality !== baselineQuality) query.set("quality", methodState.quality);
   // The studio is the absence of the layer, not a second value: a link to a
   // scene should not also have to say that it is not the shelf it came from.
   if (shellState.view === "library") query.set("view", "library");
@@ -459,7 +479,12 @@ export function serializeQueryState(
     query.set("svoPrimarySeamClosure", uiState.silhouetteRefinementEnabled ? "1" : "0");
   }
   if (uiState.svoConeTracingMode !== "cones") query.set("svoCones", uiState.svoConeTracingMode);
-  if (uiState.svoPrimaryTraversal !== "raster") query.set("svoPrimary", uiState.svoPrimaryTraversal);
+  if (uiState.svoPrimaryTraversal !== DEFAULT_SVO_LIGHTING_OPTIONS.primaryTraversal) {
+    query.set("svoPrimary", uiState.svoPrimaryTraversal);
+  }
+  if (uiState.svoStageView !== DEFAULT_SVO_RENDER_DIAGNOSTICS.stageView) {
+    query.set("svoStage", uiState.svoStageView);
+  }
   // A fine-leaf experiment is two values, and a link that carries only one of
   // them reproduces the wrong frame: at the shipped threshold a 0.78 mm leaf is
   // never descended into, so the depth alone would read as having done nothing.
@@ -494,9 +519,12 @@ export function serializeQueryState(
 
   for (const method of simulationMethods) {
     const values = methodState.overrides[method.id] ?? {};
+    const baselineValues = method.id === profile?.methodId ? profile.overrides : {};
     for (const spec of method.params) {
       const value = values[spec.key];
-      if (value !== undefined) query.set(`param.${method.id}.${spec.key}`, String(value));
+      if (value !== undefined && value !== baselineValues[spec.key]) {
+        query.set(`param.${method.id}.${spec.key}`, String(value));
+      }
     }
   }
   return query.toString();

@@ -1,6 +1,5 @@
 import type { SceneryGeneratorId, SceneryMaterial, SceneryNode } from "./scenery-graph";
 import { bonsaiNodes, type BonsaiForm } from "./voxel-scenery/bonsai";
-import { oakNodes, type OakForm } from "./voxel-scenery/oak";
 import { pondVesselPlanCurve, type PondVesselSpec } from "./voxel-scenery/pond-vessel";
 import { rosetteNodes, type RosetteForm } from "./voxel-scenery/rosette";
 import {
@@ -67,7 +66,7 @@ import { sweptCopingNodes, type SweptCopingForm } from "./voxel-scenery/swept-co
  * is then an ordinary edit to one number, which is the property the whole
  * exercise is for.
  *
- * ## The six, and the one that is missing
+ * ## The five, and the one that is missing
  *
  * `capped-boulder`, `stepping-path`, `bonsai`, `rosette` and `swept-coping` are
  * the species; `pond-stone-set` is the arrangement — four boulders, two beds and
@@ -216,23 +215,6 @@ export interface BonsaiGeneratorParams extends BonsaiForm {
   readonly lean: readonly [number, number];
 }
 
-/**
- * One oak, standing where it stands and leaning where it leans.
- *
- * Deliberately without a leaf size, exactly as the bonsai's is: `OakSpec.leafSize_m`
- * is placement rather than form and arrives from
- * `SceneryGeneratorRequest.detailCellSize_m`. It matters more here than anywhere
- * else in the catalog, because this species resolves both its branch-order
- * admission and its foliage lattice count against that number — a document that
- * pinned it would be a bake of today's lattice and the tree would stop refining.
- */
-export interface OakGeneratorParams extends OakForm {
-  /** Where the bole meets the ground, in world metres on the plan. */
-  readonly at_m: readonly [number, number];
-  /** Direction the crown leans toward, in XZ. Need not be normalized. */
-  readonly lean: readonly [number, number];
-}
-
 /** One air plant or grass tuft, wedged into whatever it stands in. */
 export interface RosetteGeneratorParams extends RosetteForm {
   readonly at_m: readonly [number, number];
@@ -284,7 +266,6 @@ export interface SceneryGeneratorParamsByKind {
   readonly "swept-coping": SweptCopingGeneratorParams;
   readonly "pond-stone-set": PondStoneSetGeneratorParams;
   readonly bonsai: BonsaiGeneratorParams;
-  readonly oak: OakGeneratorParams;
   readonly rosette: RosetteGeneratorParams;
   readonly "capped-boulder": CappedBoulderGeneratorParams;
   readonly "stepping-path": SteppingPathGeneratorParams;
@@ -342,23 +323,6 @@ export const SCENERY_GENERATORS: Readonly<{
       // plate's own proportion at 4.8 leaves across. Nothing is re-authored
       // between those — the ladder was always a derivation, it was simply never
       // handed the number it derives from.
-      leafSize_m: request.detailCellSize_m,
-      seed: request.seed,
-    }),
-  },
-  oak: {
-    id: "oak",
-    needsVessel: false,
-    grow: ({ at_m, lean, ...form }, request) => oakNodes({
-      ...form,
-      key: request.key,
-      at_m,
-      lean,
-      groundHeightAt: request.groundHeightAt,
-      // The scene's own lattice. This species reads it twice — once to decide
-      // how many branch orders clear the three-leaf floor, and once to decide
-      // how many foliage lattices the canopy tape carries — so it is the single
-      // number that makes the specimen refine rather than alias.
       leafSize_m: request.detailCellSize_m,
       seed: request.seed,
     }),

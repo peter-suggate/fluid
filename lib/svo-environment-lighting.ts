@@ -32,6 +32,9 @@ export interface SvoEnvironmentLightingBuild {
 export interface SvoEnvironmentLightingOptions {
   diffuseScale?: number;
   specularScale?: number;
+  lowerRadianceLinear?: LinearRgb;
+  upperRadianceLinear?: LinearRgb;
+  accentRadianceLinear?: LinearRgb;
 }
 
 interface EnvironmentPalette {
@@ -116,11 +119,11 @@ export function svoEnvironmentLightingRecord(
   return canonicalSvoEnvironmentLightingRecord({
     environmentId,
     revision,
-    lowerRadianceLinear: palette.lower,
+    lowerRadianceLinear: options.lowerRadianceLinear ?? palette.lower,
     diffuseScale: options.diffuseScale ?? 1,
-    upperRadianceLinear: palette.upper,
+    upperRadianceLinear: options.upperRadianceLinear ?? palette.upper,
     specularScale: options.specularScale ?? 1,
-    accentRadianceLinear: palette.accent,
+    accentRadianceLinear: options.accentRadianceLinear ?? palette.accent,
     accentPower: 3,
     keyLightColorLinear: palette.keyColor,
     sunIntensity: 2.5,

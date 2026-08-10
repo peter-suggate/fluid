@@ -52,8 +52,9 @@ import {
   rasterizeStructuredCellVelocities,
   type CompactVelocityRaster,
 } from "./webgpu-smoke-velocity-parity";
-import { rasterMeshSymmetryMetrics, sharpPatchRasterMetrics,
-  type RasterMeshSymmetryMetrics, type SharpPatchRasterMetrics } from "./raster-mesh-symmetry";
+import { rasterCubeSymmetryMetrics, rasterMeshSymmetryMetrics, sharpPatchRasterMetrics,
+  type RasterCubeSymmetryMetrics, type RasterMeshSymmetryMetrics,
+  type SharpPatchRasterMetrics } from "./raster-mesh-symmetry";
 
 function exactWordFingerprint(values: ArrayLike<number>, integer = false): Readonly<{
   length: number; hashA: string; hashB: string;
@@ -251,6 +252,8 @@ export interface HybridPresentationSmokeStats {
   rendererUncapturedErrorCount: number;
   surfaceGeometrySource?: WaterSurfaceGeometrySource;
   globalFineAuthorityLatch?: number;
+  /** Generation stamped by the scalar source whose cubes produced this mesh. */
+  meshPublicationGeneration?: number;
   globalFineCrossingPublished?: boolean;
   presentationFallbackActive?: boolean;
   vertexCount?: number;
@@ -260,6 +263,8 @@ export interface HybridPresentationSmokeStats {
   activeCubeCapacity?: number;
   /** Exact unordered D4 audit of emitted position+normal records. */
   surfaceMeshSymmetry?: RasterMeshSymmetryMetrics;
+  /** Exact D4 audit of classified cube origins and spans before polygonization. */
+  activeCubeSymmetry?: RasterCubeSymmetryMetrics;
   /** Production classified-cube/offset/vertex audit for explicit sharp rectangles. */
   sharpPatchRaster?: SharpPatchRasterMetrics;
   /** Exact D4 audit of every valid sparse fine-phi sample feeding extraction. */
@@ -269,6 +274,8 @@ export interface HybridPresentationSmokeStats {
     front: EnclosedSurfaceHoleMetrics;
     back: EnclosedSurfaceHoleMetrics;
   };
+  /** Holes remaining when front- and back-facing triangle coverage is united. */
+  unionSurfaceHoles?: EnclosedSurfaceHoleMetrics;
   surfaceSteps: {
     front: SurfaceStepMetrics;
     back: SurfaceStepMetrics;
@@ -297,6 +304,7 @@ export interface HybridPresentationSmokeStats {
       front: EnclosedSurfaceHoleMetrics;
       back: EnclosedSurfaceHoleMetrics;
     };
+    unionSurfaceHoles?: EnclosedSurfaceHoleMetrics;
     surfaceSteps: {
       front: SurfaceStepMetrics;
       back: SurfaceStepMetrics;
@@ -905,7 +913,9 @@ export async function smokeRenderHybridPresentation(
     const globalFineLevelSet = solver.globalFineLevelSetSource
       ? createGlobalFineLevelSetConsumerSource(solver.globalFineLevelSetSource)
       : undefined;
-    const finePhiSymmetry = process.env.FLUID_RASTER_MESH_SYMMETRY === "1"
+    const meshAuditRequested = process.env.FLUID_RASTER_MESH_SYMMETRY === "1"
+      || process.env.FLUID_RASTER_MESH_AUDIT === "1";
+    const finePhiSymmetry = meshAuditRequested
       ? await readFinePhiSymmetry(device, solver)
       : undefined;
     if (verifyGlobalFineAuthorityTransition && !globalFineLevelSet) {
@@ -926,13 +936,60 @@ export async function smokeRenderHybridPresentation(
     pipeline.setGlobalFineLevelSet(globalFineLevelSet);
     pipeline.setCoarseLevelSet(solver.coarseLevelSetSource);
     pipeline.ensureSize(width, height);
+    // Browser/manual stepping keeps one water pipeline alive while the compact
+    // source advances on stable buffers. Reproduce the receipt lifecycle that
+    // exposed the UI bug: a receipt is captured, another extraction completes
+    // while telemetry is throttled, and an unchanged later frame must still
+    // publish the new receipt without rebuilding the mesh.
+    const verifyCoarseReceiptRecovery = process.env.FLUID_COARSE_SURFACE_RECEIPT_RECOVERY === "1";
+    if (verifyCoarseReceiptRecovery) {
+      const coarse = solver.coarseLevelSetSource;
+      if (!coarse || coarse.generation < 2) {
+        throw new Error("Compact-coarse receipt recovery requires a generation-2 source");
+      }
+      const encodeReceipt = async (label: string, revision: number, force: boolean) => {
+        const encoder = device.createCommandEncoder({ label });
+        const encoded = pipeline.encode(
+          encoder, output.createView(), solver.info.nx, solver.info.ny, solver.info.nz,
+          solver.info.gridKind === "restricted-tall-cell", solver.info.maximumNeighborDelta ?? 0,
+          revision, undefined, undefined, undefined, force,
+        );
+        if (!encoded) throw new Error(`${label} did not encode`);
+        device.queue.submit([encoder.finish()]);
+        const diagnostics = encoded.surfaceDiagnosticsCaptured
+          ? await pipeline.completeSurfaceDiagnostics() : undefined;
+        await device.queue.onSubmittedWorkDone();
+        return { encoded, diagnostics };
+      };
+      const baseline = await encodeReceipt("Baseline compact-coarse receipt", 100, true);
+      if (baseline.diagnostics?.surfaceGeometrySource !== "compact-coarse"
+        || baseline.diagnostics.meshPublicationGeneration !== coarse.generation) {
+        throw new Error(`Baseline compact-coarse generation was not published: ${JSON.stringify(baseline.diagnostics)}`);
+      }
+      const immediate = await encodeReceipt("Throttled compact-coarse recovery", 101, false);
+      if (!immediate.encoded.surfaceUpdated || immediate.encoded.surfaceDiagnosticsCaptured) {
+        throw new Error("Compact-coarse recovery did not exercise the throttled persistent-pipeline handoff");
+      }
+      await new Promise((resolve) => setTimeout(resolve, 260));
+      const recovered = await encodeReceipt("Deferred compact-coarse recovery receipt", 101, false);
+      if (recovered.encoded.surfaceUpdated
+        || recovered.diagnostics?.surfaceGeometrySource !== "compact-coarse"
+        || recovered.diagnostics.meshPublicationGeneration !== coarse.generation
+        || (recovered.diagnostics.vertexCount ?? 0) === 0) {
+        throw new Error(`Deferred compact-coarse receipt did not recover: ${JSON.stringify(recovered)}`);
+      }
+      console.info(JSON.stringify({ phase: "compact-coarse-receipt-recovery",
+        generation: coarse.generation, vertexCount: recovered.diagnostics.vertexCount,
+        activeCubeCount: recovered.diagnostics.activeCubeCount }));
+    }
     const capture = async (label: string, revision: number) => {
       const frameStarted = performance.now();
       const encoder = device.createCommandEncoder({ label });
       const encoded = pipeline.encode(
         encoder, output.createView(), solver.info.nx, solver.info.ny, solver.info.nz,
         solver.info.gridKind === "restricted-tall-cell", solver.info.maximumNeighborDelta ?? 0,
-        revision, undefined, undefined, undefined, verifyGlobalFineAuthorityTransition,
+        revision, undefined, undefined, undefined,
+        verifyGlobalFineAuthorityTransition || verifyCoarseReceiptRecovery,
       );
       if (!encoded) throw new Error("Hybrid presentation pipeline did not encode a frame");
       const interfaceCapture = pipeline.diagnosticCaptureTexture("interface-positions");
@@ -949,8 +1006,9 @@ export async function smokeRenderHybridPresentation(
         const presentationDiagnostics = await pipeline.completeSurfaceDiagnostics();
         await device.queue.onSubmittedWorkDone();
         let surfaceMeshSymmetry: RasterMeshSymmetryMetrics | undefined;
+        let activeCubeSymmetry: RasterCubeSymmetryMetrics | undefined;
         let sharpPatchRaster: SharpPatchRasterMetrics | undefined;
-        if (process.env.FLUID_RASTER_MESH_SYMMETRY === "1" && presentationDiagnostics?.vertexCount) {
+        if (meshAuditRequested && presentationDiagnostics?.vertexCount) {
           const source = pipeline.diagnosticSurfaceVertexSource();
           if (!source) throw new Error("Raster mesh symmetry requested without an emitted vertex source");
           const vertexBytes = presentationDiagnostics.vertexCount * source.strideBytes;
@@ -971,7 +1029,16 @@ export async function smokeRenderHybridPresentation(
             const cubes = new Uint32Array(mapped, vertexBytes, presentationDiagnostics.activeCubeCount * 2);
             const offsets = new Uint32Array(mapped, vertexBytes + cubeBytes,
               presentationDiagnostics.activeCubeCount * 6);
-            surfaceMeshSymmetry = rasterMeshSymmetryMetrics(vertices, presentationDiagnostics.vertexCount);
+            surfaceMeshSymmetry = rasterMeshSymmetryMetrics(vertices, presentationDiagnostics.vertexCount, {
+              minimum: [-0.5 * scene.container.width_m, 0, -0.5 * scene.container.depth_m],
+              maximum: [0.5 * scene.container.width_m, scene.container.height_m,
+                0.5 * scene.container.depth_m],
+              tolerance: Math.max(1e-6, 1e-4 * scene.voxelDomain.finestCellSize_m),
+            }, { cubes, offsets, cubeCount: presentationDiagnostics.activeCubeCount });
+            activeCubeSymmetry = rasterCubeSymmetryMetrics(cubes,
+              presentationDiagnostics.activeCubeCount,
+              globalFineLevelSet?.sampleDimensions
+                ?? [solver.info.nx, solver.info.ny, solver.info.nz]);
             sharpPatchRaster = sharpPatchRasterMetrics(vertices, presentationDiagnostics.vertexCount,
               cubes, offsets, presentationDiagnostics.activeCubeCount);
             meshReadback.unmap();
@@ -1090,6 +1157,11 @@ export async function smokeRenderHybridPresentation(
           front: enclosedSurfaceHoleMetrics(frontMask, width, height),
           back: enclosedSurfaceHoleMetrics(backMask, width, height),
         };
+        const unionMask = new Uint8Array(frontMask.length);
+        for (let index = 0; index < unionMask.length; index += 1) {
+          unionMask[index] = Number(frontMask[index] !== 0 || backMask[index] !== 0);
+        }
+        const unionSurfaceHoles = enclosedSurfaceHoleMetrics(unionMask, width, height);
         const surfaceSteps = {
           front: surfaceStepMetrics(frontMask, frontPositions, width, height, fineCellWidth),
           back: surfaceStepMetrics(backMask, backPositions, width, height, fineCellWidth),
@@ -1102,8 +1174,10 @@ export async function smokeRenderHybridPresentation(
           frontInterfaceHash, backInterfaceHash,
           narrowVerticalSlits,
           enclosedSurfaceHoles,
+          unionSurfaceHoles,
           surfaceSteps,
           ...(surfaceMeshSymmetry ? { surfaceMeshSymmetry } : {}),
+          ...(activeCubeSymmetry ? { activeCubeSymmetry } : {}),
           ...(sharpPatchRaster ? { sharpPatchRaster } : {}),
           ceilingContactPixels: { front: frontCeilingContactPixels, back: backCeilingContactPixels },
           wallCornerCapPixels,
@@ -1112,6 +1186,7 @@ export async function smokeRenderHybridPresentation(
           ...(presentationDiagnostics ? {
             surfaceGeometrySource: presentationDiagnostics.surfaceGeometrySource,
             globalFineAuthorityLatch: presentationDiagnostics.globalFineAuthorityLatch,
+            meshPublicationGeneration: presentationDiagnostics.meshPublicationGeneration,
             globalFineCrossingPublished: presentationDiagnostics.globalFineCrossingPublished,
             presentationFallbackActive: presentationDiagnostics.presentationFallbackActive,
             vertexCount: presentationDiagnostics.vertexCount,
@@ -1178,6 +1253,7 @@ export async function smokeRenderHybridPresentation(
       backInterfaceHash: reverse.backInterfaceHash,
       narrowVerticalSlits: reverse.narrowVerticalSlits,
       enclosedSurfaceHoles: reverse.enclosedSurfaceHoles,
+      unionSurfaceHoles: reverse.unionSurfaceHoles,
       surfaceSteps: reverse.surfaceSteps,
       ceilingContactPixels: reverse.ceilingContactPixels,
       wallCornerCapPixels: reverse.wallCornerCapPixels,
@@ -2819,15 +2895,24 @@ export async function readCubicVolumeField(
         phi: exactWordFingerprint(phiWords, true),
         records: exactWordFingerprint(entries, true) }));
     }
+    const controlWords = new Uint32Array(controlBytes.buffer,
+      controlBytes.byteOffset, controlBytes.byteLength / 4);
     if (directoryWords[0] !== 0x8000_0000) {
-      const controlWords = new Uint32Array(controlBytes.buffer,
-        controlBytes.byteOffset, controlBytes.byteLength / 4);
       throw new Error(`Coarse-only octree QA publication rejected: directory=${JSON.stringify(
         Array.from(directoryWords.slice(0, 8)))}, control=${JSON.stringify(Array.from(controlWords))}`);
     }
+    // Adaptive phi advances its surface generation on the GPU before the
+    // asynchronous host receipt is adopted. The renderer directory and phi
+    // control are copied after that same submission, so compare their paired
+    // GPU clocks instead of a legally one-step-old host observation. Legacy
+    // coarse publications continue to use their host-published generation.
+    const adaptiveRenderer = directoryWords.length >= 14
+      && (directoryWords[13]! & 0x1000_0000) !== 0;
+    const expectedGeneration = adaptiveRenderer && controlWords[0] === 0x4150_4849
+      ? controlWords[2]! : coarseOnly.generation;
     const reconstructed = reconstructCoarseOnlyOctreeOccupancyField(
       directoryWords,
-      coarseOnly.generation,
+      expectedGeneration,
       [nx, ny, nz],
       gradientBytes ? new Float32Array(gradientBytes.buffer,
         gradientBytes.byteOffset, gradientBytes.byteLength / 4) : undefined,

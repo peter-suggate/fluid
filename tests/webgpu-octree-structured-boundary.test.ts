@@ -166,13 +166,14 @@ test("candidate-ready and recurring accepted controls have disjoint setup semant
     "a setup entry point must not infer authority by accepting both layouts");
 });
 
-test("boundary classification uses authored SDF only for bootstrap and missing coarse publication", () => {
+test("boundary classification uses authored SDF only for bootstrap", () => {
   assert.match(structuredBoundaryCoefficientWGSL,
     /if\(p\.pad\.z!=0u\)\{return vec2f\(analyticInitialPhi\(point\),1\.\);\}/,
     "the selected cold bootstrap must own its sample");
   assert.match(structuredBoundaryCoefficientWGSL,
-    /return select\(vec2f\(1\.,0\.\),vec2f\(analyticInitialPhi\(point\),1\.\),authoredAnalyticPhiAvailable\(\)\);/,
-    "an authored analytic scene must bridge a missing recurring coarse-directory publication");
+    /return vec2f\(1\.,0\.\);/,
+    "a missing recurring coarse generation must fail closed instead of reviving authored t0 phi");
+  assert.doesNotMatch(structuredBoundaryCoefficientWGSL, /authoredAnalyticPhiAvailable/);
   assert.match(structuredBoundaryCoefficientWGSL,
     /powerCoarseSamples\.generation&0x3fffffffu;let expected=control\.epoch&0x3fffffffu/,
     "recurring boundary publication must require the matching coarse generation");
@@ -190,7 +191,8 @@ test("every structured boundary entry point fits the hard ten-storage-buffer con
       `${entryPoint} reaches ${bindings.length} storage buffers: ${bindings.join(", ")}`);
   }
   assert.deepEqual(reachableStorageBindings("resolveStructuredBoundarySlots"),
-    [2, 3, 4, 6, 7, 8, 9, 11, 16, 25]);
+    [2, 3, 4, 6, 7, 8, 11, 16, 25],
+    "recurring boundary classification must not retain the authored-phi binding");
   assert.deepEqual(reachableStorageBindings("resolveStructuredSolidSlots"),
     [2, 3, 10, 11, 16, 19, 21]);
   assert.deepEqual(reachableStorageBindings("countStructuredRowClasses"),

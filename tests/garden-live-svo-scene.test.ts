@@ -7,6 +7,7 @@ import { planSceneRuntime } from "../lib/scene-runtime";
 import { planSparseSceneDomain } from "../lib/sparse-scene-domain";
 import { planAdaptiveSparseBrickOctree } from "../lib/adaptive-sparse-brick-plan";
 import { buildSvoSceneLights } from "../lib/svo-light-abi";
+import { DEFAULT_SVO_DRY_SCENE_LIGHTING, svoSceneLighting } from "../lib/svo-dry-scene-lighting";
 import { planSvoNodeMipPyramid } from "../lib/svo-node-mip-pyramid";
 import { createTallCellLayout } from "../lib/tall-cell-grid";
 import { buildEnvironmentProxyCatalog, environmentProxyPrimitives } from "../lib/voxel-environments";
@@ -49,6 +50,17 @@ test("garden SVO lighting preset is a valid fluid-free fluid-free scene", () => 
   assert.ok(scene.rigidBodies.length >= 3);
   assert.ok(scene.rigidBodies.every(({ motion }) => motion === "static"));
   assert.deepEqual(validateScene(scene), []);
+  assert.equal(scene.lighting, undefined,
+    "a dry SVO scene must not carry a private lighting override");
+  assert.equal(svoSceneLighting(scene), DEFAULT_SVO_DRY_SCENE_LIGHTING);
+  assert.equal(
+    svoSceneLighting(getScenePreset("hero-garden-hose").create()),
+    DEFAULT_SVO_DRY_SCENE_LIGHTING,
+    "garden and hero resolve the exact same renderer-owned defaults");
+  assert.equal(
+    svoSceneLighting({ ...scene, systems: { ...scene.systems, fluid: true }, lighting: { directional: { intensity: 99 } } }),
+    DEFAULT_SVO_DRY_SCENE_LIGHTING,
+    "fluid physics and authored lighting cannot override the dry-SVO presentation rig");
 
   const roundTrip = parseScene(serializeScene(scene));
   assert.equal(roundTrip.systems?.fluid, false);
@@ -60,7 +72,7 @@ test("garden SVO lighting preset is a valid fluid-free fluid-free scene", () => 
   assert.ok(validateScene(roundTrip).includes("Scene environment diffuse scale must be non-negative and finite"));
 });
 
-test("garden lighting study authors a bounded warm point light on visible lamppost geometry", () => {
+test("garden lighting study keeps its bounded warm fixture under the shared dry-SVO rig", () => {
   const scene = getScenePreset("garden-svo-lighting").create();
   const catalog = buildEnvironmentProxyCatalog(scene, "garden");
   const lantern = catalog.primitives.find(({ key }) => key === "garden/lamppost/lantern");
@@ -81,14 +93,12 @@ test("garden lighting study authors a bounded warm point light on visible lamppo
   assert.deepEqual(point.colorLinear, [1, 0.48, 0.19]);
   assert.equal(point.intensity, 11);
   assert.equal(directional.kind, "directional");
-  assert.equal(directional.intensity, 0.09);
-  const luminance = (color: readonly [number, number, number]) => .2126 * color[0] + .7152 * color[1] + .0722 * color[2];
-  assert.ok(point.intensity * luminance(point.colorLinear) > 60 * directional.intensity * luminance(directional.colorLinear),
-    "the local warm fixture, not the residual directional fill, must carry the composition");
+  assert.equal(directional.intensity, DEFAULT_SVO_DRY_SCENE_LIGHTING.directional.intensity);
+  assert.deepEqual(directional.colorLinear, [...DEFAULT_SVO_DRY_SCENE_LIGHTING.directional.colorLinear]);
 
   const environment = buildOctreeSvoEnvironmentLightingPublication(scene);
-  assert.equal(environment.record.diffuseScale, 0.12);
-  assert.equal(environment.record.specularScale, 0.25);
+  assert.equal(environment.record.diffuseScale, DEFAULT_SVO_DRY_SCENE_LIGHTING.environment.diffuseScale);
+  assert.equal(environment.record.specularScale, DEFAULT_SVO_DRY_SCENE_LIGHTING.environment.specularScale);
 
   const ordinaryGarden = buildEnvironmentProxyCatalog(getScenePreset("garden-pond").create(), "garden");
   assert.equal(ordinaryGarden.primitives.some(({ key }) => key.includes("/lamppost/")), false,
@@ -296,9 +306,12 @@ test("GPU scene rebuild identity includes captured container and owner-layout in
     "rigid roster changes environment owner offsets and must rebuild the dry-scene source");
 
   const changedBodies = gpuSceneSolverKey(scene, config);
-  scene.lighting = { ...scene.lighting, environment: { ...scene.lighting?.environment, diffuseScale: 0.25 } };
+  scene.lighting = { environment: { diffuseScale: 0.25 } };
   assert.equal(gpuSceneSolverKey(scene, config), changedBodies,
-    "authored lighting is hot-published and must not rebuild the shared SVO arenas");
+    "a dry scene's ignored private lighting must not rebuild the shared SVO arenas");
+  assert.equal(buildOctreeSvoEnvironmentLightingPublication(scene).record.diffuseScale,
+    DEFAULT_SVO_DRY_SCENE_LIGHTING.environment.diffuseScale,
+    "dry-scene lighting overrides are ignored rather than becoming another default");
 });
 
 /**

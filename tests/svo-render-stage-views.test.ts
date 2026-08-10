@@ -41,9 +41,9 @@ if (typeof globalThis.GPUShaderStage === "undefined") {
   });
 }
 
-test("stage-view controls are bounded and retain a composited-frame default", () => {
+test("stage-view controls are bounded and retain the raw fidelity default", () => {
   assert.deepEqual(DEFAULT_SVO_RENDER_DIAGNOSTICS, {
-    stageView: "off", lightSlot: 0, maximumTraversalDepth: 21, maximumNodeVisits: 256,
+    stageView: "dry-radiance", lightSlot: 0, maximumTraversalDepth: 21, maximumNodeVisits: 256,
   });
   assert.equal(svoRenderStageCode("off"), 0);
   assert.equal(svoRenderStageCode("pass-claimant"), 1);
@@ -155,6 +155,9 @@ test("the overlay reads published planes and never writes one", () => {
     if (entry.buffer) assert.equal(entry.buffer.type, "uniform");
   }
   assert.doesNotMatch(overlayShader, /textureStore/, "the overlay is strictly a reader");
+  assert.match(overlayShader,
+    /color=pow\(clamp\(textureLoad\(stageSceneRadiance,coordinate,0\)\.rgb,vec3f\(0\.0\),vec3f\(1\.0\)\),vec3f\(1\.0\/2\.2\)\)/,
+    "raw dry radiance must use the same clamp-plus-gamma transfer as fidelity PNGs");
   for (const stageView of SVO_RENDER_STAGE_VIEWS) {
     if (stageView === "off") continue;
     assert.match(overlayShader, new RegExp(`mode==${svoRenderStageCode(stageView)}u`),
@@ -178,15 +181,40 @@ test("the renderer encodes the overlay after the composite and only on request",
   assert.doesNotMatch(rendererSource, /svoCostOverlayCode/);
 });
 
-test("render panel and viewport present stage views with an in-scene legend", () => {
-  assert.match(panelSource, /Render pipeline stages/);
-  assert.match(panelSource, /WHAT EACH PASS ACTUALLY WROTE/);
-  assert.match(panelSource, /SVO_RENDER_STAGE_DEFINITIONS\[candidate\]/);
-  assert.match(panelSource, /view === svoStageView && view !== "off" \? "off" : view/);
+test("every published plane is reachable from the node that wrote it", () => {
+  // The flat eighteen-button grid is gone, but not one plane went with it. Each
+  // view belongs to exactly one pipeline node — `SvoRenderStageDefinition.group`
+  // already named the producing pass — so the diagram is the picker, and a plane
+  // that no pass claims is a plane nothing can present.
+  const graph = readFileSync(new URL("../lib/render-pipeline-graph.ts", import.meta.url), "utf8");
+  // Read the `taps` arrays specifically. Scanning every quoted string in the
+  // module also catches `"off"` out of the cone-mode predicates, which would
+  // make this assertion pass for a reason that has nothing to do with taps.
+  const claimed = [...graph.matchAll(/taps: \[([^\]]*)\]/g)]
+    .flatMap(([, body]) => [...body.matchAll(/"([a-z][a-z-]*)"/g)].map(([, view]) => view));
+  for (const view of SVO_RENDER_STAGE_VIEWS) {
+    if (view === "off") continue;
+    assert.ok(claimed.includes(view), `${view} must be tappable from the node that publishes it`);
+  }
+  assert.ok(!claimed.includes("off"), "the composite is the absence of a tap, not a tap");
+  assert.equal(new Set(claimed).size, claimed.length,
+    "a plane belongs to exactly one node, or two nodes claim to have written it");
+
+  assert.match(panelSource, /<RenderPipeline\b/);
+  const pipeline = readFileSync(new URL("../components/RenderPipeline.tsx", import.meta.url), "utf8");
+  assert.match(pipeline, /SVO_RENDER_STAGE_DEFINITIONS\[view\]/,
+    "a plane button must name itself from the stage catalogue rather than a second copy");
+  assert.match(pipeline, /onTap\(stageView === view \? "off" : view\)/,
+    "tapping the presented plane again returns to the composite");
+  // The panel still owns the two diagnostic budgets and the cached light slot.
   assert.match(panelSource, /Maximum traversal depth/);
   assert.match(panelSource, /Maximum node visits/);
+  assert.match(panelSource, /svoStageLightSlot/);
+
   assert.match(viewportSource, /data-testid="svo-stage-legend"/);
   assert.match(viewportSource, /SVO_RENDER_STAGE_DEFINITIONS\[svoStageView\]/);
+  assert.match(viewportSource, /!stageViewIsDefaultPresentation/,
+    "the default presentation plane must stay clean instead of wearing a diagnostic legend");
   assert.match(viewportSource, /stageView: ui\.svoStageView/);
   assert.match(viewportSource, /lightSlot: ui\.svoStageLightSlot/);
 });

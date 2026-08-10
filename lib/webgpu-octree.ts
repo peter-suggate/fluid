@@ -5,6 +5,11 @@ import {
   packOctreeRefinementRegions,
   sceneRefinementRegions,
 } from "./octree-refinement-regions";
+import {
+  OCTREE_COLD_AUTHORED_SURFACE_PARAMS_BYTES,
+  octreeColdAuthoredSurfaceBoxes,
+  packOctreeColdAuthoredSurfaceBoxes,
+} from "./octree-cold-authored-surface";
 import { WebGPUOctreeFineSeedAdapter } from "./webgpu-octree-fine-seed-adapter";
 import {
   lookupOctreeOwnerPage,
@@ -19,9 +24,10 @@ import { OCTREE_LOSASSO_CONTROL_WORDS } from "./octree-losasso-operator";
 import { planOctreeSurfaceStateAllocation } from "./octree-surface-allocation";
 import { planOctreeAnalyticBootstrapBounds } from "./octree-analytic-bootstrap";
 import { WebGPUOctreeAnalyticBootstrapWorklist } from "./webgpu-octree-analytic-bootstrap";
-import { combineInitialBrickWet, damBreakBoxContains, initialFluidBrickComponentBounds,
+import { combineInitialBrickWet, damBreakBoxContains, damBreakSignedDistanceAtNode, initialFluidBrickComponentBounds,
   initialFluidBrickContainsCell,
-  initialFluidBrickSignedDistanceAtCell, initialFluidBrickUnionBounds,
+  initialFluidBrickSignedDistanceAtCell, initialFluidBrickSignedDistanceAtNode,
+  initialFluidBrickUnionBounds,
   sceneDamBreakBox, sceneDamBreakFractions, sceneDamBreakIsOffsetFromCorner } from "./initial-fluid";
 import { integratedInflowVolume } from "./inflow-boundary";
 import { signedDistanceFromVolume } from "./volume-signed-distance";
@@ -35,6 +41,8 @@ import {
   type OctreeCoarseDynamicsConfiguration,
 } from "./octree-coarse-backend";
 import { WebGPUOctreeLosassoCoarseBackend } from "./webgpu-octree-losasso-backend";
+import { OCTREE_LOSASSO_ADAPTIVE_PHI_RECEIPT_WORDS }
+  from "./webgpu-octree-losasso-adaptive-phi";
 import { octreeLosassoResidentSolveEnabled } from "./webgpu-octree-losasso-resident-mgpcg";
 import { WebGPUOctreeLosassoReadyCommit } from "./webgpu-octree-losasso-ready-commit";
 import {
@@ -133,7 +141,6 @@ import {
   WebGPUFineLevelSetRedistance,
 } from "./webgpu-octree-fine-levelset-redistance";
 import {
-  planFineLevelSetGPUTransportPasses,
   WebGPUFineLevelSetTransport,
 } from "./webgpu-octree-fine-levelset-transport";
 import { WebGPUFineLevelSetVolumeCorrection } from "./webgpu-octree-fine-levelset-volume";
@@ -1569,12 +1576,17 @@ export function octreeLosassoLeafCeiling(
   ) as OctreeOwnerLeafSize;
 }
 
-export function octreeBalanceRounds(maximumLeafSize: OctreeOwnerLeafSize): number {
+export function octreeBalanceRounds(
+  maximumLeafSize: OctreeOwnerLeafSize,
+  exclusivePaperMixedRing = true,
+): number {
   if (maximumLeafSize <= 2) return 0;
-  // Ordinary 2:1 balance needs at most one propagation per tree level. The
-  // paper's stronger mixed-ring rule can renew an ordinary imbalance, so
-  // budget both halves of that fixed-point iteration.
-  return 2 * Math.ceil(Math.log2(maximumLeafSize));
+  const ordinaryClosureRounds = Math.ceil(Math.log2(maximumLeafSize));
+  // Power's stronger mixed-ring rule can renew an ordinary imbalance, so its
+  // exclusive Delaunay catalog budgets both halves of that fixed point.
+  // Losasso's generalized face graph needs only ordinary strict-2:1
+  // propagation; the second half would be guaranteed no-op work.
+  return exclusivePaperMixedRing ? 2 * ordinaryClosureRounds : ordinaryClosureRounds;
 }
 
 type OctreeFirstOrderVCycleImplementation = OctreeFirstOrderSPDVCycle & {
@@ -1693,6 +1705,12 @@ export class WebGPUOctreeProjection {
     topologyReadbackBytes: number;
     topologyReused: boolean;
     topologyReuseCount: number;
+    /** Host-scheduled cadence skips. These omit the entire candidate graph. */
+    topologyCadenceSkipCount: number;
+    /** Distinct GPU epochs whose row-identity receipt reported exact reuse.
+     * This currently observes, but does not yet elide, the cadence-one graph
+     * candidate construction. */
+    topologyExactIdentityCount: number;
     powerDiagramReady: boolean;
     powerDiagramAuthoritative: boolean;
     powerDiagramAllocatedBytes: number;
@@ -1779,6 +1797,10 @@ export class WebGPUOctreeProjection {
   private powerTimestep_s = 0;
   private surfaceInflow?: SurfaceInflowState;
   private pendingSurfaceReferenceVolume_m3 = 0;
+  /** Host-side generation admitted for the factor-one renderer adapter.
+   * Only a coherent step receipt updates this mirror; rejected GPU work never
+   * becomes a current render publication merely because it was encoded. */
+  private adaptiveSurfaceGeneration = 0;
   /** Bodies that integrate this step; zero keeps the adjoint off the graph. */
   private dynamicCouplingBodyCount = 0;
   private powerAdvancingPressureSteps = 0;
@@ -1882,6 +1904,13 @@ export class WebGPUOctreeProjection {
   private readonly losassoExactTilingLeafSize: OctreeOwnerLeafSize;
   private readonly coarseDynamics: OctreeCoarseDynamicsConfiguration;
   private topologyCadenceCursor = 0;
+  /** A tail deliberately omitted its candidate because the accepted topology
+   * remains authoritative for another cadence advance. Distinct from an
+   * accidental missing candidate. */
+  private topologyReusePending = false;
+  /** Last accepted epoch counted from authority word 5's exact row-identity
+   * receipt. Diagnostics can sample one epoch more than once. */
+  private lastObservedExactTopologyReuseEpoch = 0;
   /** Live cadence dial; undefined defers to the construction-time policy. */
   private topologyCadenceOverride?: number;
   /** Last bag applied, so a per-frame call with an unchanged bag costs a compare. */
@@ -1904,7 +1933,7 @@ export class WebGPUOctreeProjection {
    */
   private surfaceGradingLayersEffective = 1;
   /** Live closed-container look-ahead; three preserves the measured default. */
-  private wallBandCellsEffective = OCTREE_POWER_BOUNDARY_STRIP_MIN_CELLS;
+  private wallBandCellsEffective = 1;
   /** Live factor-one cut floor. Two is the explicit coarse-cut experiment. */
   private finestSurfaceCellSizeEffective = 1;
   private readonly surfaceRefinementGradingLayers: number;
@@ -2030,7 +2059,10 @@ export class WebGPUOctreeProjection {
     );
     // One propagation per tree LEVEL, and the tree has no level above the
     // largest leaf the domain can hold.
-    this.balanceRounds = octreeBalanceRounds(this.effectiveLeafSize);
+    this.balanceRounds = octreeBalanceRounds(
+      this.effectiveLeafSize,
+      this.coarseDynamics.backend === "power2017",
+    );
     this.adaptivity = Math.max(0, Math.min(1, options.adaptivity ?? 1));
     this.interfaceRefinementBandCells = Math.max(0, Math.min(32, Math.round(options.interfaceRefinementBandCells ?? 4)));
     if (this.coarseDynamics.backend === "losasso"
@@ -2052,7 +2084,7 @@ export class WebGPUOctreeProjection {
     this.surfaceGradingLayersEffective = initialSurface?.gradingLayers
       ?? this.surfaceRefinementGradingLayers;
     this.wallBandCellsEffective = options.initialRuntimeDials?.wallBandCells
-      ?? OCTREE_POWER_BOUNDARY_STRIP_MIN_CELLS;
+      ?? 1;
     this.finestSurfaceCellSizeEffective = options.initialRuntimeDials?.finestSurfaceCellSize
       ?? 1;
     // Product configurations couple Section 5 surface reach to pressure reach.
@@ -2060,9 +2092,12 @@ export class WebGPUOctreeProjection {
     // follows the master band exactly.
     this.fineLevelSetBandCells = Math.max(0, Math.min(32,
       Math.round(options.fineLevelSetBandCells ?? this.interfaceRefinementBandCells)));
-    // Factor one is represented only by compact octree rows. Enforce this at
-    // the allocation boundary so no caller or authored scene can accidentally
-    // pay for a redundant same-resolution fine grid.
+    // Ando--Batty remeshes the octree itself, keeps every free-surface cut at
+    // its finest pressure/level-set tier, and assigns the old fields onto the
+    // new tree. Factor one therefore uses the graph-owned adaptive mass/phi
+    // authority: a crossing leaf may never coarsen, while pure wet/air leaves
+    // grade rapidly away under the ordinary 2:1 closure. Factors 4/8 remain a
+    // distinct sparse subcell-interface experiment.
     this.coarseOnlySurfaceTracking = globalFineFactor === 1;
     // Analytic dam/tank scenes can construct compact topology and first fine seeds
     // phi without allocating or uploading a box-sized bootstrap texture.
@@ -2409,7 +2444,8 @@ export class WebGPUOctreeProjection {
       // The fixed 160-byte head, plus the authored refinement-region tail. The
       // diagnostic shader declares only the head and binds the same buffer,
       // which is legal: a uniform binding may be larger than the struct.
-      size: OCTREE_REFINEMENT_REGION_PARAMS_OFFSET + OCTREE_REFINEMENT_REGION_PARAMS_BYTES,
+      size: OCTREE_REFINEMENT_REGION_PARAMS_OFFSET + OCTREE_REFINEMENT_REGION_PARAMS_BYTES
+        + OCTREE_COLD_AUTHORED_SURFACE_PARAMS_BYTES,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
     const projectionActivityProfile = performanceShaderVariant();
@@ -2561,6 +2597,7 @@ export class WebGPUOctreeProjection {
       multigridCoarsestDofs: 1,
       topologyReadbackBytes: 0,
       topologyReused: false, topologyReuseCount: 0,
+      topologyCadenceSkipCount: 0, topologyExactIdentityCount: 0,
       powerDiagramReady: false,
       powerDiagramAuthoritative: false,
       powerDiagramAllocatedBytes: 0,
@@ -2834,10 +2871,23 @@ export class WebGPUOctreeProjection {
     }
     const cellSize = this.scene.container.width_m / this.dims.nx;
     const closedTop = this.scene.container.top === "closed";
-    this.losassoCoarsePhi = new WebGPUOctreeLosassoCoarsePhiExchange(
-      this.device, rowCapacity, faceCapacity,
-      this.coarseOnlySurfaceTracking ? this.dims.nx * this.dims.ny * this.dims.nz : 0,
-    );
+    // Factor one owns phi on the compact shared-node graph. The legacy coarse
+    // exchange remains only as the factor-4/8 restriction bridge from sparse
+    // fine phi; constructing it here would reintroduce a dense recurring bank.
+    if (!this.coarseOnlySurfaceTracking) {
+      this.losassoCoarsePhi = new WebGPUOctreeLosassoCoarsePhiExchange(
+        this.device, rowCapacity, faceCapacity, 0,
+      );
+    }
+    const adaptiveInitialNodalPhi = this.coarseOnlySurfaceTracking
+      ? initialOctreeNodalLevelSet(this.scene, this.dims) : undefined;
+    const adaptiveInitialPhi = this.coarseOnlySurfaceTracking
+      ? adaptiveInitialNodalPhi ?? initialOctreeLevelSet(this.scene, this.dims, {
+        x: this.scene.container.width_m / this.dims.nx,
+        y: this.scene.container.height_m / this.dims.ny,
+        z: this.scene.container.depth_m / this.dims.nz,
+      })
+      : undefined;
     this.losassoBackend = new WebGPUOctreeLosassoCoarseBackend({
       device: this.device,
       capacities: { rows: rowCapacity, faces: faceCapacity, incidences: 2 * faceCapacity },
@@ -2852,6 +2902,21 @@ export class WebGPUOctreeProjection {
       extensionBandBrickCapacity,
       velocityExtensionMode: this.coarseDynamics.losassoVelocityExtension,
       closedBoundaries: [true, true, true, closedTop, true, true],
+      ...(this.coarseOnlySurfaceTracking ? {
+        adaptiveSurface: {
+          candidateLeafHeaders: this.candidateLeafHeaders,
+          candidateOwnerArena: this.ownerPages.arena,
+          candidateOwnerTransaction: this.ownerPages.candidateTransaction,
+          frontier: this.leafFrontier,
+          initialPhi: adaptiveInitialPhi!,
+          initialPhiLayout: adaptiveInitialNodalPhi ? "nodal-lattice" : "cell-centred",
+          redistanceBandWorld: cellSize * octreeSurfaceProtectionWidthCells(
+            this.interfaceBandCellsEffective, this.surfaceGradingLayersEffective,
+            this.topologyMaximumLeafSize, 1,
+          ),
+          openTop: !closedTop,
+        },
+      } : {}),
       // The ≤4K-row coarse-only tier runs the whole warm-started MGPCG loop —
       // V-cycle, operator, exact reductions, convergence — in one resident
       // dispatch, so it executes exactly the iterations the residual gate
@@ -2926,59 +2991,25 @@ export class WebGPUOctreeProjection {
         dimensions: [this.dims.nx, this.dims.ny, this.dims.nz],
       }, rowCapacity);
     }
-    this.fineSeedAdapter?.setCoarsePhiSource(
-      this.losassoCoarsePhi.fineSeedCoarsePhiSource());
+    const adaptivePhi = this.losassoBackend.adaptivePhiSource;
+    const acceptedAdaptiveGraph = this.losassoBackend.adaptiveSurfaceGraphSources?.accepted;
+    if (this.coarseOnlySurfaceTracking) {
+      if (!adaptivePhi || !acceptedAdaptiveGraph) {
+        throw new Error("Losasso factor-one adaptive scalar graph was not constructed");
+      }
+      this.fineSeedAdapter?.setCoarsePhiSource({
+        values: adaptivePhi.rowPhi,
+        gradients: adaptivePhi.rowGradient,
+        control: acceptedAdaptiveGraph.control,
+      });
+    } else {
+      this.fineSeedAdapter?.setCoarsePhiSource(
+        this.losassoCoarsePhi!.fineSeedCoarsePhiSource());
+    }
     this.refreshLosassoProjectionGroups();
 
     const fineA = this.globalFineSourceA, fineB = this.globalFineSourceB;
     const sampler = this.losassoBackend.sources.velocitySampler;
-    if (this.coarseOnlySurfaceTracking) {
-      if (!sampler) throw new Error("Losasso factor-one transport requires its velocity sampler");
-      const volume = this.dims.nx * this.dims.ny * this.dims.nz;
-      const trackerLayout = planOctreeAirVelocitySupport(
-        rowCapacity, rowCapacity, this.device.limits.minStorageBufferOffsetAlignment,
-        volume, octreeAirSupportFootprintCapacity(rowCapacity, volume),
-      );
-      const coarseCell = {
-        x: this.scene.container.width_m / this.dims.nx,
-        y: this.scene.container.height_m / this.dims.ny,
-        z: this.scene.container.depth_m / this.dims.nz,
-      };
-      this.coarseOnlySummary = new WebGPUOctreeCoarseSummary(this.device, {
-        directory: this.losassoCoarsePhi.source.volumeDirectory,
-        rowCapacity: this.losassoCoarsePhi.source.rowCapacity,
-      }, [this.dims.nx, this.dims.ny, this.dims.nz], {
-        // These two bindings are Power-only. Reuse published Losasso storage
-        // buffers as inert sentinels so factor one does not allocate the
-        // legacy structured/air-support graph merely to satisfy bind layouts.
-        arena: sampler.control,
-        rowVelocities: sampler.extendedVelocity,
-        layout: trackerLayout,
-        initialPhi: initialOctreeLevelSet(this.scene, this.dims, coarseCell),
-        physicalCellSize: coarseCell.x,
-        timestep_s: this.scene.numerics.maxDt_s,
-        maximumLeafSize: this.maxLeafSize,
-        // Redistance is recurring work, not allocation. Seed it from the live
-        // t=0 reach; a later dial change updates the odd sweep count in place.
-        redistanceReachCells: octreeSurfaceProtectionWidthCells(
-          this.interfaceBandCellsEffective, this.surfaceGradingLayersEffective,
-          this.topologyMaximumLeafSize, 1),
-        losassoControl: sampler.control,
-        losassoNodalVelocity: this.losassoBackend.extensionBand.dynamicsStagedVelocity,
-        ownerPages: { arena: this.ownerPages.arena, plan: this.ownerPages.plan },
-        openTopBoundary: this.scene.container.top !== "closed",
-        ...(this.scene.rigidBodies.length > 0 ? { rigid: {
-          rigidBodies: this.resources.rigidBodies,
-          immersedVolumes: this.resources.rigidImmersedVolumes,
-          bodyCount: this.scene.rigidBodies.length,
-        } } : {}),
-      });
-      // The initial Losasso group refresh precedes construction of this
-      // factor-one-only object. Rebind refinement/topology decisions now so
-      // the cold pass consumes the tracker instead of the unpublished
-      // sentinel summary.
-      this.refreshLosassoProjectionGroups();
-    }
     if (fineA && fineB) {
       if (!sampler) throw new Error("Losasso factor-4 transport requires its reduced velocity sampler");
       const coarseWGSL = makeOctreeLosassoCoarsePhiSampleWGSL(9);
@@ -3022,7 +3053,7 @@ export class WebGPUOctreeProjection {
           this.device, fineB, this.resources.rigidBodies, carveOptions);
       }
       const coarseInput = this.losassoCoarsePhiInput();
-      const coarseVolume = this.losassoCoarsePhi.volumeCoarseSource(coarseInput);
+      const coarseVolume = this.losassoCoarsePhi!.volumeCoarseSource(coarseInput);
       const rigidVolumeTarget = this.scene.rigidBodies.length > 0 ? {
         immersedVolumes: this.resources.rigidImmersedVolumes,
         bodyCount: this.scene.rigidBodies.length,
@@ -3037,7 +3068,7 @@ export class WebGPUOctreeProjection {
       );
     }
     const coarseAllocated = this.losassoBackend.allocatedBytes
-      + this.losassoReadyCommit.allocatedBytes + this.losassoCoarsePhi.plan.allocatedBytes
+      + this.losassoReadyCommit.allocatedBytes + (this.losassoCoarsePhi?.plan.allocatedBytes ?? 0)
       + this.losassoConditionedOperator.allocatedBytes + this.losassoRowMotion.plan.allocatedBytes
       + (this.coarseOnlySummary?.plan.allocatedBytes ?? 0)
       + (this.rigidCouplingDiagnostics?.allocatedBytes ?? 0);
@@ -3079,7 +3110,9 @@ export class WebGPUOctreeProjection {
   }
 
   private refreshLosassoProjectionGroups(): void {
-    const directory = this.losassoCoarsePhi?.source.arena;
+    const directory = this.coarseOnlySurfaceTracking
+      ? this.losassoBackend?.adaptivePhiSource?.topologyEvidence
+      : this.losassoCoarsePhi?.source.arena;
     if (!directory) return;
     const summary = this.globalFineSummaries?.directory
       ?? this.coarseOnlySummary?.directory ?? this.unpublishedFineSummaryDirectory;
@@ -3161,6 +3194,7 @@ export class WebGPUOctreeProjection {
       topologyCandidateView: candidateTopology ? 1 : 0,
       fineSummaryFactor: this.coarseOnlySurfaceTracking
         ? 1 : this.globalFineLevelSet?.plan.fineFactor ?? 4,
+      adaptiveCoarseSurface: this.coarseOnlySurfaceTracking ? 1 : 0,
       topologyTileCells: this.topologyTileSize,
       gradingPageFill: octreeGradingPageFillEnabled() ? 1 : 0,
       gradingSplitHelpers: octreeGradingSplitHelpersEnabled() ? 1 : 0,
@@ -4196,6 +4230,19 @@ export class WebGPUOctreeProjection {
       ));
   }
 
+  private writeColdAuthoredSurfaceParams() {
+    const boxes = octreeColdAuthoredSurfaceBoxes(
+      this.scene,
+      [this.dims.nx, this.dims.ny, this.dims.nz],
+      this.scene.voxelDomain.brickSize_cells,
+    );
+    this.device.queue.writeBuffer(
+      this.params,
+      OCTREE_REFINEMENT_REGION_PARAMS_OFFSET + OCTREE_REFINEMENT_REGION_PARAMS_BYTES,
+      packOctreeColdAuthoredSurfaceBoxes(boxes),
+    );
+  }
+
   private writeParams() {
     const data = new ArrayBuffer(OCTREE_REFINEMENT_REGION_PARAMS_OFFSET);
     new Uint32Array(data, 0, 4).set([
@@ -4282,6 +4329,7 @@ export class WebGPUOctreeProjection {
     ]);
     this.device.queue.writeBuffer(this.params, 0, data);
     this.writeRefinementRegionParams();
+    this.writeColdAuthoredSurfaceParams();
   }
 
   setTimestep(dt_s: number) {
@@ -4430,6 +4478,7 @@ export class WebGPUOctreeProjection {
     analyticColdBootstrap = false,
     coldFullRebuild = false,
   ) {
+    this.topologyReusePending = false;
     this.powerAttemptGeneration = ((this.powerAttemptGeneration + 1) >>> 0) || 1;
     this.candidatePowerGeneration = this.powerAttemptGeneration;
     // Stamp the attempt in GPU command order. Multiple substeps may be
@@ -4772,8 +4821,12 @@ export class WebGPUOctreeProjection {
 
   encodeReadyTopologyFlip(encoder: GPUCommandEncoder): void {
     if (this.coarseDynamics.backend === "losasso") {
-      if (this.candidatePowerGeneration === 0
-        && this.coarseDynamics.topology.advancesPerEpoch > 1) {
+      if (this.candidatePowerGeneration === 0 && this.topologyReusePending) {
+        // Retain the accepted graph, phi banks, face authority and hierarchy.
+        // The adaptive advance has already paired scalar/velocity clocks, so
+        // this boundary needs no graph copy, filter, hierarchy refresh or
+        // extension-topology remap.
+        this.topologyReusePending = false;
         this.info.topologyReused = true;
         return;
       }
@@ -4802,30 +4855,17 @@ export class WebGPUOctreeProjection {
         this.losassoCoarsePhi.encode(broker, currentFine,
           this.losassoCoarsePhiInput());
         this.losassoConditionedOperator?.encodeAfterGhostDistances(broker);
-      } else if (this.coarseOnlySurfaceTracking && this.losassoCoarsePhi
-        && this.fineSeedAdapter && this.losassoBackend.sources.velocitySampler) {
-        // The ready commit above replaces every accepted face record, including
-        // the cell-centred p_air distances installed by encodeSurface. Factor
-        // four already re-restricts its retained fine field here. Factor one
-        // must do the same from its retained dense coarse lattice; dt=0 holds
-        // that transported field while remapping it to the newly accepted row
-        // identities and reconditioning their missing-neighbour faces.
-        this.losassoCoarsePhi.encodeCoarseOnly(
-          broker,
-          this.losassoCoarsePhiInput(),
-          this.fineSeedAdapter.leaves,
-          this.losassoBackend.sources.velocitySampler,
-          0,
-          this.surfaceInflow,
-          this.scene.container.top !== "closed",
-        );
+      } else if (this.coarseOnlySurfaceTracking) {
+        // The backend commit has already re-derived row evidence and face
+        // ghosts after the matching accepted face bank. A topology handoff
+        // must not transport, redistance, correct, or flip phi a second time.
+        if (!this.losassoBackend.adaptivePhiSource) {
+          throw new Error("Ready factor-one topology requires adaptive phi");
+        }
+        // The GPU ready gate may still reject this candidate. Do not predict
+        // its scalar clock on the host: the step-coherent adaptive receipt is
+        // the sole authority that admits a renderer generation.
         this.losassoConditionedOperator?.encodeAfterGhostDistances(broker);
-        // encodeReadyCommit already remapped the retained W7 graph to the new
-        // wet-face ids.  Rebuilding the graph here happened after S3e had
-        // published this advance's projected seeds, replacing that live
-        // extension with an unextended zero-seed graph.  Factor four retains
-        // and remaps the graph across this same topology flip; factor one must
-        // do likewise because dt=0 does not change interface membership.
       }
       this.losassoBackend.encodeHierarchyRefresh(broker, this.leafHeaders);
       this.refreshLosassoProjectionGroups();
@@ -4965,8 +5005,13 @@ export class WebGPUOctreeProjection {
     }
     this.topologyCadenceCursor += 1;
     if (this.topologyCadenceCursor < cadence) {
+      if (this.candidatePowerGeneration !== 0) {
+        throw new Error("Topology cadence cannot reuse while an inactive candidate is pending");
+      }
+      this.topologyReusePending = true;
       this.info.topologyReused = true;
       this.info.topologyReuseCount += 1;
+      this.info.topologyCadenceSkipCount += 1;
       return false;
     }
     this.topologyCadenceCursor = 0;
@@ -5266,22 +5311,15 @@ export class WebGPUOctreeProjection {
     backend.encodeProjection(broker, pressureOut, step,
       Math.min(12, this.scene.rigidBodies.length));
     broker.fence("Losasso projected wet axis faces published");
-    if (this.coarseOnlySurfaceTracking && backend.extensionBandPublished) {
-      // Factor four settles its transported fine generation below and builds
-      // S3e there. Factor one has no pending fine transaction, so publish the
-      // same post-projection extension explicitly. Doing this in encodeSurface
-      // consumed the once-per-advance serial with the preceding (cold on step
-      // one) projected field and left the next transport with an all-zero W7.
+    if (this.coarseOnlySurfaceTracking) {
+      // Projection is the accepted face seed for the next characteristic
+      // trace. Reconstruct the graph-owned accepted/predictor node fields now;
+      // the backend also retains the compact face seed for topology migration.
       const advanceSerial = this.powerTimestep_s > 0
         ? this.powerAdvancingPressureSteps + 1 : 0;
-      const coarsePhi = this.losassoCoarsePhi;
-      if (!coarsePhi) throw new Error("Factor-one S3e requires compact coarse phi");
-      backend.encodeCoarseExtensionBandPublication(
-        broker, coarsePhi.source, coarsePhi.coarseOnlyPublishedGeneration,
-      );
       backend.encodeExtension(broker, advanceSerial, this.activePowerGeneration);
       this.losassoRowMotion?.encode(broker);
-      broker.fence("Losasso coarse-only post-projection W7 velocity published");
+      broker.fence("Losasso adaptive post-projection nodal velocity published");
     }
     if (scope === "power-operator-only") return encoder;
     if (options?.productionBoundary) {
@@ -5396,13 +5434,10 @@ export class WebGPUOctreeProjection {
       this.refreshLosassoProjectionGroups();
     }
     if (pending.volume) {
-      // Losasso uses a regional correction restricted to pages whose main
-      // surface actually moved. This preserves semi-Lagrangian liquid volume
-      // without regrowing sleeping wall films and detached fragments. The env
-      // switch retains a measure-only Dawn A/B for drift attribution.
-      const measureOnlyLosasso = this.coarseDynamics.backend === "losasso"
-        && typeof process !== "undefined" && process.env.FLUID_VOLUME_CONTROL === "0";
-      if (measureOnlyLosasso) {
+      // The adaptive Losasso lane treats phi as geometric signed-distance
+      // authority. Volume loss is measured here but never repaired by a
+      // post-step scalar offset; non-Losasso backends retain their own policy.
+      if (this.coarseDynamics.backend === "losasso") {
         pending.volume.encodeMeasurement(redistanceBroker);
       } else {
         pending.volume.encode(redistanceBroker);
@@ -5533,51 +5568,24 @@ export class WebGPUOctreeProjection {
         }
       }
       if (this.coarseOnlySurfaceTracking && this.coarseDynamics.backend === "losasso") {
-        const coarsePhi = this.losassoCoarsePhi;
         const backend = this.losassoBackend;
-        const sampler = backend?.sources.velocitySampler;
-        if (!coarsePhi || !backend || !sampler) {
-          throw new Error("Losasso coarse-only surface authority is unavailable");
+        if (this.pendingSurfaceReferenceVolume_m3 > 0) {
+          if (!backend?.addAdaptiveSurfaceReferenceVolume(
+            this.pendingSurfaceReferenceVolume_m3)) {
+            throw new Error("Losasso factor-one adaptive volume authority is unavailable");
+          }
+          this.pendingSurfaceReferenceVolume_m3 = 0;
         }
-        // Cold topology already published the complete analytic dense bank.
-        // Before the t=0 graph exists there is no velocity publication to
-        // advance it with, so encoding the tracker here records a false held
-        // advance. Positive-time steps consume the preceding settled W7.
-        if (dt_s > 0) {
-          this.coarseOnlySummary?.encode(preparationBroker);
-          preparationBroker.fence("Losasso coarse-only transported lattice published");
+        if (!backend?.encodeAdaptiveSurfaceAdvance(preparationBroker, dt_s, inflow)) {
+          throw new Error("Losasso factor-one adaptive surface authority is unavailable");
         }
-        coarsePhi.encodeCoarseOnly(
-          preparationBroker,
-          this.losassoCoarsePhiInput(),
-          this.fineSeedAdapter.leaves,
-          sampler,
-          dt_s,
-          inflow,
-          this.scene.container.top !== "closed",
-        );
+        // The GPU transaction may retain its prior scalar bank. Do not predict
+        // its generation on the host: the coherent step receipt advances this
+        // mirror only after graph, phi, velocity and renderer all commit.
         this.losassoConditionedOperator?.encodeAfterGhostDistances(preparationBroker);
         backend.encodeHierarchyCoefficientRefresh(preparationBroker);
         this.refreshLosassoProjectionGroups();
-        preparationBroker.fence("Losasso compact coarse-only phi published");
-        // S1 above consumed the preceding advance's settled W7 velocity. The
-        // retained graph must remain intact through wet-velocity advection.
-        // encodeLosasso rebuilds it from this transported phi only after this
-        // substep's projection. At t=0 the explicit structured-authority
-        // checkpoint has already projected, so bootstrap can publish now.
-        if (dt_s === 0) {
-          backend.encodeCoarseExtensionBandPublication(
-            preparationBroker,
-            coarsePhi.source,
-            coarsePhi.coarseOnlyPublishedGeneration,
-          );
-          backend.encodeExtension(preparationBroker, 0, this.activePowerGeneration);
-          this.losassoRowMotion?.encode(preparationBroker);
-        }
-        preparationBroker.fence(dt_s === 0
-          ? "Losasso coarse-only cold W7 graph published"
-          : "Losasso coarse-only phi published with retained lagged W7 graph");
-        this.refreshLosassoProjectionGroups();
+        preparationBroker.fence("Losasso adaptive nodal phi and pressure ghosts published");
         encoder = preparationBroker.commandEncoder();
         if (productionBoundary) {
           encoder = productionBoundary("structuredProjectionTail", encoder);
@@ -5917,6 +5925,13 @@ export class WebGPUOctreeProjection {
    * ordered by the physics submission instead of adding a telemetry submit. */
   applyLosassoStepDiagnostics(authority: Uint32Array, solver: Uint32Array): void {
     if (this.coarseBackend !== "losasso") return;
+    const epoch = authority[0] ?? 0;
+    const exactIdentity = authority[5] === 1 && epoch !== 0;
+    this.info.topologyReused = exactIdentity || this.topologyReusePending;
+    if (exactIdentity && epoch !== this.lastObservedExactTopologyReuseEpoch) {
+      this.lastObservedExactTopologyReuseEpoch = epoch;
+      this.info.topologyExactIdentityCount += 1;
+    }
     const rows = authority[1] ?? 0;
     const valid = authority[3] === 1 && authority[4] === 0;
     this.info.pressureCapacityOverflow = !valid;
@@ -5978,19 +5993,46 @@ export class WebGPUOctreeProjection {
   async readSurfaceDiagnostics() {
     return this.surfaceState.readVolumeDiagnostics();
   }
-  /** Diagnostic-only. Undefined unless the factor-one coarse tracker is the
-   * surface authority. `completions < advances` means the raster consumed a
-   * held surface on the difference, which is what intermittent publication
-   * looks like from outside. */
+  /** Diagnostic-only receipt for the factor-one surface authority. */
   async readCoarseSurfaceTrackerReceipt() {
-    if (this.coarseOnlySurfaceTracking && !this.coarseOnlySummary) {
-      throw new Error("Factor-one surface tracking was constructed without its dense coarse tracker");
+    if (this.coarseOnlySurfaceTracking && this.coarseDynamics.backend === "losasso") {
+      return this.losassoBackend?.readAdaptiveSurfaceGraphReceipt("accepted");
     }
     return this.coarseOnlySummary?.readReceipt();
   }
+  /** Diagnostic-only receipt for a rejected adaptive candidate transaction. */
+  readAdaptiveCandidateGraphReceipt() {
+    return this.losassoBackend?.readAdaptiveSurfaceGraphReceipt("candidate");
+  }
+  readAdaptiveVelocityReceipts() {
+    return this.losassoBackend?.readAdaptiveVelocityReceipts();
+  }
+  readAdaptiveVelocityDiagnostics() {
+    return this.losassoBackend?.readAdaptiveVelocityDiagnostics();
+  }
   /** Diagnostic receipt for the GPU-authored unique shared-node worklist. */
   async readAdaptiveNodeReceipt() {
-    return this.coarseOnlySummary?.readAdaptiveNodeReceipt();
+    const graph = await this.losassoBackend?.readAdaptiveSurfaceGraphReceipt("accepted");
+    const source = this.losassoBackend?.adaptiveSurfaceGraphSources?.accepted;
+    if (graph && source) {
+      return Object.freeze({
+        count: graph.nodeCount,
+        generation: graph.epoch,
+        published: graph.published,
+        errors: graph.errors,
+        capacity: source.nodeCapacity,
+        dispatch: graph.nodeDispatch,
+        leafCount: graph.leafCount,
+        independentNodes: graph.independentNodeCount,
+        constrainedNodes: graph.edgeHangingNodeCount + graph.faceHangingNodeCount,
+        edgeHangingNodes: graph.edgeHangingNodeCount,
+        faceHangingNodes: graph.faceHangingNodeCount,
+        missingLookups: graph.missingLookupCount,
+        coverageErrors: graph.coverageErrors,
+        adjacencyErrors: graph.reciprocalAdjacencyErrors,
+      });
+    }
+    return undefined;
   }
   /** Presentation-only texture identity. The sparse octree solver never samples it. */
   get levelSetTexture() { return this.surfaceState.texture; }
@@ -6067,6 +6109,10 @@ export class WebGPUOctreeProjection {
     const tetrahedronHeaders = topology?.catalogTetrahedronHeaders;
     const tetrahedra = topology?.catalogTetrahedra;
     const tetrahedronVertices = topology?.catalogTetrahedronVertices;
+    const losassoBackend = this.losassoBackend;
+    const losassoAdaptiveVelocity = losassoBackend?.adaptiveSurfaceGraphSources?.accepted;
+    const losassoAdaptivePhi = losassoBackend?.adaptivePhiSource;
+    const losassoAdaptiveVelocityReach = losassoBackend?.adaptiveVelocityExtensionReach_m;
     if (!surface || !topology || !structured || !tetrahedronHeaders || !tetrahedra || !tetrahedronVertices) return undefined;
     const fine = this.globalFineBootstrapped
       ? (this.globalFinePublishedIsA ? this.globalFineSourceA : this.globalFineSourceB)
@@ -6105,6 +6151,18 @@ export class WebGPUOctreeProjection {
       structuredRowGeometry: { buffer: structured.rowGeometry },
       structuredRowVelocities: { buffer: structured.rowVelocities },
       structuredControl: { buffer: structured.control },
+      ...(losassoAdaptiveVelocity && losassoAdaptivePhi
+        && losassoAdaptiveVelocityReach !== undefined
+        && Number.isFinite(losassoAdaptiveVelocityReach) ? {
+        losassoAdaptiveVelocity: {
+          control: { buffer: losassoAdaptiveVelocity.control },
+          leaves: { buffer: losassoAdaptiveVelocity.leaves },
+          nodalVelocity: { buffer: losassoAdaptiveVelocity.nodalVelocity },
+          phiControl: { buffer: losassoAdaptivePhi.control },
+          rowPhi: { buffer: losassoAdaptivePhi.rowPhi },
+          extensionReach_m: losassoAdaptiveVelocityReach,
+        },
+      } : {}),
       pressure: { buffer: this.latestPressureInA ? this.pressureA : this.pressureB },
       leafHeaders: { buffer: this.leafHeaders },
       // Optional: a scene can reach a publication before the power-coarse
@@ -6524,10 +6582,42 @@ export class WebGPUOctreeProjection {
     return this.losassoBackend?.sources.operator.control;
   }
   get losassoCoarsePhiControl(): GPUBuffer | undefined {
-    return this.losassoCoarsePhi?.source.arena;
+    return this.losassoBackend?.adaptivePhiSource?.topologyEvidence
+      ?? this.losassoCoarsePhi?.source.arena;
   }
   get losassoExtensionControl(): GPUBuffer | undefined {
-    return this.losassoBackend?.extensionBand.source.control;
+    return this.losassoBackend?.adaptiveVelocityReceiptSource
+      ?? this.losassoBackend?.extensionBand?.source.control;
+  }
+  get losassoAdaptiveAcceptedGraphControl(): GPUBuffer | undefined {
+    return this.losassoBackend?.adaptiveSurfaceGraphSources?.accepted.control;
+  }
+  get losassoAdaptiveCandidateGraphControl(): GPUBuffer | undefined {
+    return this.losassoBackend?.adaptiveSurfaceGraphSources?.candidate.control;
+  }
+  get losassoAdaptivePhiControl(): GPUBuffer | undefined {
+    return this.losassoBackend?.adaptivePhiSource?.control;
+  }
+  get losassoAdaptivePhiReceipts(): GPUBuffer | undefined {
+    return this.losassoBackend?.adaptivePhiSource?.receipts;
+  }
+  get losassoAdaptiveVelocityReceipts(): GPUBuffer | undefined {
+    return this.losassoBackend?.adaptiveVelocityReceiptSource;
+  }
+  get losassoAdaptiveRendererDirectory(): GPUBuffer | undefined {
+    return this.losassoBackend?.adaptivePhiSource?.rendererDirectory;
+  }
+  get losassoCandidateAuthorityControl(): GPUBuffer | undefined {
+    return this.losassoBackend?.candidateAuthorityControl;
+  }
+  get losassoAdaptiveMassControl(): GPUBuffer | undefined {
+    return this.losassoBackend?.adaptiveMassSource?.control;
+  }
+  get losassoAdaptiveMassReceipts(): GPUBuffer | undefined {
+    return this.losassoBackend?.adaptiveMassSource?.receipts;
+  }
+  get losassoCandidateVelocityMigrationReceipt(): GPUBuffer | undefined {
+    return this.losassoBackend?.candidateVelocityMigrationReceipt;
   }
   /** End-of-step diagnostic source for the fine generation whose publication
    * was just encoded. `globalFinePublishedIsA` advances only after submission,
@@ -6538,11 +6628,30 @@ export class WebGPUOctreeProjection {
     return (this.globalFineCurrentIsA
       ? this.globalFineSourceA : this.globalFineSourceB)?.worklist;
   }
+  /** End-of-step verdict for the same fine slot returned above. Unlike the
+   * public diagnostic getter, this follows the encoder-time current slot so
+   * the snapshot cannot pair generation N's worklist with generation N-1's
+   * topology transaction. */
+  get globalFineCurrentTopologyControl(): GPUBuffer | undefined {
+    if (!this.globalFineBootstrapped) return undefined;
+    return (this.globalFineCurrentIsA
+      ? this.globalFineTopologyBA : this.globalFineTopologyAB)?.control;
+  }
+  get globalFineCurrentRedistanceControl(): GPUBuffer | undefined {
+    if (!this.globalFineBootstrapped) return undefined;
+    return (this.globalFineCurrentIsA
+      ? this.globalFineRedistanceA : this.globalFineRedistanceB)?.control;
+  }
+  get globalFineCurrentVolumeControl(): GPUBuffer | undefined {
+    if (!this.globalFineBootstrapped) return undefined;
+    // Both physical helpers intentionally share this transaction control.
+    return this.globalFineVolumeA?.control;
+  }
   get losassoVelocityDebug() {
     const source = this.losassoBackend?.sources.velocitySampler;
-    const extension = this.losassoBackend?.extensionBand.source;
+    const extension = this.losassoBackend?.extensionBand?.source;
     const wet = this.losassoBackend?.sources;
-    return source ? {
+    if (source) return {
       control: source.control,
       faceGeometry: source.faceGeometry,
       projectedVelocity: extension!.projectedVelocity,
@@ -6555,7 +6664,24 @@ export class WebGPUOctreeProjection {
       wetExtendedVelocity: wet!.extension.extendedVelocity,
       dimensions: source.dimensions,
       maximumLeafSize: source.maximumLeafSize,
-    } : undefined;
+    };
+    // QA reconstructs a cubic field one-way from the accepted compact faces.
+    // Adaptive physics itself samples the graph-owned nodal velocity arena.
+    if (this.losassoBackend?.adaptiveVelocitySamplerSource && wet) return {
+      control: wet.operator.control,
+      faceGeometry: wet.dynamics.faceGeometry,
+      projectedVelocity: wet.projection.projectedVelocity,
+      extendedVelocity: wet.extension.extendedVelocity,
+      wetControl: wet.operator.control,
+      wetFaceGeometry: wet.dynamics.faceGeometry,
+      wetAdvectedVelocity: wet.dynamics.advectedVelocity,
+      wetPredictedVelocity: wet.dynamics.predictedVelocity,
+      wetProjectedVelocity: wet.projection.projectedVelocity,
+      wetExtendedVelocity: wet.extension.extendedVelocity,
+      dimensions: [this.dims.nx, this.dims.ny, this.dims.nz] as const,
+      maximumLeafSize: this.topologyMaximumLeafSize,
+    };
+    return undefined;
   }
   /** Frontier/dirty-tile forensics: the leaf-frontier header plus the shared
    * compaction scratch header. Read-only diagnostic surface. */
@@ -6568,7 +6694,8 @@ export class WebGPUOctreeProjection {
   get losassoPressureDebug() {
     const source = this.losassoBackend?.sources;
     const wide = source?.wideSolver;
-    const coarsePhi = this.losassoCoarsePhi?.source;
+    const coarsePhi = this.losassoBackend?.adaptivePhiSource
+      ?? this.losassoCoarsePhi?.source;
     return source && wide && coarsePhi ? {
       control: source.operator.control,
       rightHandSide: source.rightHandSide,
@@ -6581,7 +6708,8 @@ export class WebGPUOctreeProjection {
     } : undefined;
   }
   get losassoCoarsePhiDebug() {
-    const source = this.losassoCoarsePhi?.source;
+    const source = this.losassoBackend?.adaptivePhiSource
+      ?? this.losassoCoarsePhi?.source;
     const control = this.losassoBackend?.sources.operator.control;
     return source && control ? {
       control, rowPhi: source.rowPhi, leafHeaders: this.leafHeaders,
@@ -6772,22 +6900,42 @@ export class WebGPUOctreeProjection {
     }
     const power = this.coarseDynamics.backend === "power2017"
       ? this.powerCoarseLevelSetSchedule?.sampleSource : undefined;
-    const losasso = this.losassoCoarsePhi;
-    const coarse = power ?? (losasso ? {
-      directory: losasso.source.volumeDirectory,
-      control: losasso.source.volumePublication,
-      rowCapacity: losasso.source.rowCapacity,
+    const legacyLosasso = this.losassoCoarsePhi;
+    const adaptive = this.coarseDynamics.backend === "losasso"
+      ? this.losassoBackend?.adaptivePhiSource : undefined;
+    // Factor-one physics and rendering must select the same scalar authority.
+    // The legacy coarse-phi object remains allocated during the cutover, so
+    // testing it first silently paired the adaptive generation below with the
+    // retired row directory. The raster gate correctly rejected that mixed
+    // tuple and the browser showed an empty tank after the first step.
+    const coarse = power ?? (this.coarseOnlySurfaceTracking ? adaptive ? {
+      // Output-only compatibility publication. Physics consumes nodal phi and
+      // topologyEvidence; this Power-directory ABI is rebuilt one-way solely
+      // for renderer/view consumers and never feeds an adaptive solve.
+      directory: adaptive.rendererDirectory,
+      control: adaptive.control,
+      rowCapacity: adaptive.topologyEvidenceRowCapacity,
+    } : undefined : legacyLosasso ? {
+      directory: legacyLosasso.source.volumeDirectory,
+      control: legacyLosasso.source.volumePublication,
+      rowCapacity: legacyLosasso.source.rowCapacity,
     } : undefined);
     const generation = power
       ? (this.powerCoarseLevelSetGeneration & 0x3fff_ffff)
-      : (losasso?.coarseOnlyPublishedGeneration ?? 0);
+      : this.coarseOnlySurfaceTracking ? adaptive ? this.adaptiveSurfaceGeneration : 0
+        : legacyLosasso?.coarseOnlyPublishedGeneration ?? this.activePowerGeneration;
+    // The adaptive renderer directory is graph-leaf indexed and carries its
+    // own eight-corner nodal records. `rowGradient` is pressure-row indexed;
+    // advertising it beside a larger owner-support directory gives view/QA
+    // consumers two incompatible cardinalities and can overrun the buffer.
+    const gradients = adaptive ? undefined : legacyLosasso?.source.rowGradient;
     if (!coarse || generation < 1
       || (power ? !this.powerCoarseLevelSetBootstrapped : false)) return undefined;
     return {
       kind: "coarse-levelset-sampling" as const,
       directory: { buffer: coarse.directory },
       control: { buffer: coarse.control },
-      ...(power || !losasso ? {} : { gradients: { buffer: losasso.source.rowGradient } }),
+      ...(gradients ? { gradients: { buffer: gradients } } : {}),
       rowCapacity: coarse.rowCapacity,
       sampleDimensions: [this.dims.nx, this.dims.ny, this.dims.nz] as const,
       physicalCellSize: this.scene.container.width_m / this.dims.nx,
@@ -7029,6 +7177,14 @@ export class WebGPUOctreeProjection {
   }
   /** Diagnostic-only raw sparse summary header; topology consumes this GPU-side. */
   get globalFineSummaryDirectory(): GPUBuffer | undefined { return this.globalFineSummaries?.directory; }
+  /** Admit the scalar generation proven by a coherent adaptive step receipt. */
+  applyAdaptiveSurfaceGenerationReceipt(generation: number): void {
+    if (!this.coarseOnlySurfaceTracking || this.coarseDynamics.backend !== "losasso"
+      || !Number.isSafeInteger(generation) || generation < 1 || generation > 0xffff_ffff) {
+      throw new RangeError("Adaptive surface generation receipt is invalid for this projection");
+    }
+    this.adaptiveSurfaceGeneration = generation;
+  }
   /** Rejection-only producer state for an unpublished fine summary. */
   get globalFineSummaryDebug() {
     const summaries = this.globalFineSummaries;
@@ -7060,12 +7216,33 @@ export class WebGPUOctreeProjection {
     candidateHeader: readonly number[];
     solver: readonly number[];
     coarsePhi: readonly number[];
+    adaptiveGraph: readonly number[];
+    adaptivePhiControl: readonly number[];
+    adaptivePhi: readonly number[];
+    adaptiveRenderer: readonly number[];
+    candidateAdaptiveGraph: readonly number[];
+    ownerCandidate: readonly number[];
+    frontierControl: readonly number[];
+    adaptiveMassControl: readonly number[];
+    adaptiveMassReceipts: readonly number[];
+    velocityMigration: readonly number[];
   }> | undefined> {
-    const backend = this.losassoBackend, coarse = this.losassoCoarsePhi;
-    if (!backend || !coarse) return undefined;
+    const backend = this.losassoBackend;
+    const coarseControl = backend?.adaptivePhiSource?.topologyEvidence
+      ?? this.losassoCoarsePhi?.source.arena;
+    if (!backend || !coarseControl) return undefined;
+    const adaptivePhiReceiptBytes = 4 * OCTREE_LOSASSO_ADAPTIVE_PHI_RECEIPT_WORDS;
+    const adaptiveRendererOffset = 352 + adaptivePhiReceiptBytes;
+    const adaptivePhiControlOffset = adaptiveRendererOffset + 32;
+    const candidateAdaptiveGraphOffset = adaptivePhiControlOffset + 80;
+    const ownerCandidateOffset = candidateAdaptiveGraphOffset + 128;
+    const frontierControlOffset = ownerCandidateOffset + 128;
+    const adaptiveMassControlOffset = frontierControlOffset + 64;
+    const adaptiveMassReceiptsOffset = adaptiveMassControlOffset + 128;
+    const velocityMigrationOffset = adaptiveMassReceiptsOffset + 128;
     const readback = this.device.createBuffer({
       label: "Read Losasso reduced authority",
-      size: 32 + 32 + 48 + 32 + 80,
+      size: velocityMigrationOffset + 32,
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
     });
     const encoder = this.device.createCommandEncoder({ label: "Read Losasso authority controls" });
@@ -7074,7 +7251,32 @@ export class WebGPUOctreeProjection {
     encoder.copyBufferToBuffer(this.candidateLeafHeaders, 0, readback, 64, 48);
     const solver = backend.solverControl ?? backend.sources.rowCount;
     encoder.copyBufferToBuffer(solver, 0, readback, 112, Math.min(32, solver.size));
-    encoder.copyBufferToBuffer(coarse.source.arena, 0, readback, 144, 80);
+    encoder.copyBufferToBuffer(coarseControl, 0, readback, 144, 80);
+    const adaptiveGraph = backend.adaptiveSurfaceGraphSources?.accepted.control;
+    const candidateAdaptiveGraph = backend.adaptiveSurfaceGraphSources?.candidate.control;
+    const adaptivePhiControl = backend.adaptivePhiSource?.control;
+    const adaptivePhi = backend.adaptivePhiSource?.receipts;
+    const adaptiveRenderer = backend.adaptivePhiSource?.rendererDirectory;
+    const adaptiveMassControl = backend.adaptiveMassSource?.control;
+    const adaptiveMassReceipts = backend.adaptiveMassSource?.receipts;
+    if (adaptiveGraph) encoder.copyBufferToBuffer(adaptiveGraph, 0, readback, 224, 128);
+    if (adaptivePhi) encoder.copyBufferToBuffer(adaptivePhi, 0, readback, 352,
+      adaptivePhiReceiptBytes);
+    if (adaptiveRenderer) encoder.copyBufferToBuffer(adaptiveRenderer, 0, readback,
+      adaptiveRendererOffset, 32);
+    if (adaptivePhiControl) encoder.copyBufferToBuffer(adaptivePhiControl, 0, readback,
+      adaptivePhiControlOffset, 80);
+    if (candidateAdaptiveGraph) encoder.copyBufferToBuffer(candidateAdaptiveGraph, 0,
+      readback, candidateAdaptiveGraphOffset, 128);
+    encoder.copyBufferToBuffer(this.ownerPages.candidateTransaction, 0, readback,
+      ownerCandidateOffset, 128);
+    encoder.copyBufferToBuffer(this.leafFrontier, 0, readback, frontierControlOffset, 64);
+    if (adaptiveMassControl) encoder.copyBufferToBuffer(adaptiveMassControl, 0, readback,
+      adaptiveMassControlOffset, Math.min(128, adaptiveMassControl.size));
+    if (adaptiveMassReceipts) encoder.copyBufferToBuffer(adaptiveMassReceipts, 0, readback,
+      adaptiveMassReceiptsOffset, Math.min(128, adaptiveMassReceipts.size));
+    encoder.copyBufferToBuffer(backend.candidateVelocityMigrationReceipt, 0, readback,
+      velocityMigrationOffset, 32);
     this.device.queue.submit([encoder.finish()]);
     try {
       await readback.mapAsync(GPUMapMode.READ);
@@ -7085,7 +7287,209 @@ export class WebGPUOctreeProjection {
         candidateHeader: Array.from(words.slice(16, 28)),
         solver: Array.from(words.slice(28, 36)),
         coarsePhi: Array.from(words.slice(36, 56)),
+        adaptiveGraph: Array.from(words.slice(56, 88)),
+        adaptivePhiControl: Array.from(words.slice(adaptivePhiControlOffset / 4,
+          adaptivePhiControlOffset / 4 + 20)),
+        adaptivePhi: Array.from(words.slice(88,
+          88 + OCTREE_LOSASSO_ADAPTIVE_PHI_RECEIPT_WORDS)),
+        adaptiveRenderer: Array.from(words.slice(adaptiveRendererOffset / 4,
+          adaptiveRendererOffset / 4 + 8)),
+        candidateAdaptiveGraph: Array.from(words.slice(candidateAdaptiveGraphOffset / 4,
+          candidateAdaptiveGraphOffset / 4 + 32)),
+        ownerCandidate: Array.from(words.slice(ownerCandidateOffset / 4,
+          ownerCandidateOffset / 4 + 32)),
+        frontierControl: Array.from(words.slice(frontierControlOffset / 4,
+          frontierControlOffset / 4 + 16)),
+        adaptiveMassControl: Array.from(words.slice(adaptiveMassControlOffset / 4,
+          adaptiveMassControlOffset / 4 + 32)),
+        adaptiveMassReceipts: Array.from(words.slice(adaptiveMassReceiptsOffset / 4,
+          adaptiveMassReceiptsOffset / 4 + 32)),
+        velocityMigration: Array.from(words.slice(velocityMigrationOffset / 4,
+          velocityMigrationOffset / 4 + 8)),
       });
+    } finally {
+      if (readback.mapState === "mapped") readback.unmap();
+      readback.destroy();
+    }
+  }
+  /** Diagnostic-only factor-one graph/scalar/renderer snapshot. The returned
+   * arrays are trimmed to live GPU counts, excluding capacity padding. */
+  async readAdaptiveSurfacePublicationDiagnostics() {
+    const backend = this.losassoBackend;
+    const graph = backend?.adaptiveSurfaceGraphSources?.accepted;
+    const phi = backend?.adaptivePhiSource;
+    const stencil = backend?.adaptiveVelocityStencilDiagnosticSources;
+    const candidate = backend?.adaptiveVelocityCandidateDiagnosticSources;
+    if (!graph || !phi || !stencil || !candidate) return undefined;
+    const authorityControl = backend.sources.operator.control;
+    const faceGeometry = backend.sources.dynamics.faceGeometry;
+    const projectedFaceVelocity = backend.sources.dynamics.projectedVelocity;
+    const predictedFaceVelocity = backend.sources.dynamics.predictedVelocity;
+    const advectedFaceVelocity = backend.sources.dynamics.advectedVelocity;
+    const extendedFaceVelocity = backend.sources.dynamics.extendedVelocity;
+    const graphControlBytes = 128;
+    const phiControlBytes = 80;
+    const authorityControlOffset = graphControlBytes + phiControlBytes;
+    const faceGeometryOffset = authorityControlOffset + authorityControl.size;
+    const projectedFaceVelocityOffset = faceGeometryOffset + faceGeometry.size;
+    const predictedFaceVelocityOffset = projectedFaceVelocityOffset
+      + projectedFaceVelocity.size;
+    const advectedFaceVelocityOffset = predictedFaceVelocityOffset
+      + predictedFaceVelocity.size;
+    const extendedFaceVelocityOffset = advectedFaceVelocityOffset
+      + advectedFaceVelocity.size;
+    const stencilControlOffset = extendedFaceVelocityOffset + extendedFaceVelocity.size;
+    const stencilOffset = stencilControlOffset + stencil.control.size;
+    const candidateAuthorityControlOffset = stencilOffset + stencil.records.size;
+    const candidateFaceGeometryOffset = candidateAuthorityControlOffset
+      + candidate.authorityControl.size;
+    const candidateExtendedFaceVelocityOffset = candidateFaceGeometryOffset
+      + candidate.faceGeometry.size;
+    const candidateNodalVelocityOffset = candidateExtendedFaceVelocityOffset
+      + candidate.extendedVelocity.size;
+    const leavesOffset = candidateNodalVelocityOffset + candidate.nodalVelocity.size;
+    const nodalPhiOffset = leavesOffset + graph.leaves.size;
+    const nodesOffset = nodalPhiOffset + graph.phi.size;
+    const constraintsOffset = nodesOffset + graph.nodes.size;
+    const adjacencyOffset = constraintsOffset + graph.constraints.size;
+    const nodalVelocityOffset = adjacencyOffset + graph.adjacency.size;
+    const nodeValidityOffset = nodalVelocityOffset + graph.nodalVelocity.size;
+    const rendererOffset = nodeValidityOffset + graph.nodeValidity.size;
+    const transportBandMaskOffset = rendererOffset + phi.rendererDirectory.size;
+    const redistanceDistanceAOffset = transportBandMaskOffset + phi.transportBandMask.size;
+    const redistanceDistanceBOffset = redistanceDistanceAOffset + phi.redistanceDistanceA.size;
+    const phiReceiptsOffset = redistanceDistanceBOffset + phi.redistanceDistanceB.size;
+    const readback = this.device.createBuffer({
+      label: "Read adaptive surface publication",
+      size: phiReceiptsOffset + phi.receipts.size,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+    const encoder = this.device.createCommandEncoder({
+      label: "Read adaptive graph scalar and renderer publication",
+    });
+    encoder.copyBufferToBuffer(graph.control, 0, readback, 0, graphControlBytes);
+    encoder.copyBufferToBuffer(phi.control, 0, readback, graphControlBytes, phiControlBytes);
+    encoder.copyBufferToBuffer(authorityControl, 0, readback, authorityControlOffset,
+      authorityControl.size);
+    encoder.copyBufferToBuffer(faceGeometry, 0, readback, faceGeometryOffset,
+      faceGeometry.size);
+    encoder.copyBufferToBuffer(projectedFaceVelocity, 0, readback,
+      projectedFaceVelocityOffset, projectedFaceVelocity.size);
+    encoder.copyBufferToBuffer(predictedFaceVelocity, 0, readback,
+      predictedFaceVelocityOffset, predictedFaceVelocity.size);
+    encoder.copyBufferToBuffer(advectedFaceVelocity, 0, readback,
+      advectedFaceVelocityOffset, advectedFaceVelocity.size);
+    encoder.copyBufferToBuffer(extendedFaceVelocity, 0, readback,
+      extendedFaceVelocityOffset, extendedFaceVelocity.size);
+    encoder.copyBufferToBuffer(stencil.control, 0, readback, stencilControlOffset,
+      stencil.control.size);
+    encoder.copyBufferToBuffer(stencil.records, 0, readback, stencilOffset,
+      stencil.records.size);
+    encoder.copyBufferToBuffer(candidate.authorityControl, 0, readback,
+      candidateAuthorityControlOffset, candidate.authorityControl.size);
+    encoder.copyBufferToBuffer(candidate.faceGeometry, 0, readback,
+      candidateFaceGeometryOffset, candidate.faceGeometry.size);
+    encoder.copyBufferToBuffer(candidate.extendedVelocity, 0, readback,
+      candidateExtendedFaceVelocityOffset, candidate.extendedVelocity.size);
+    encoder.copyBufferToBuffer(candidate.nodalVelocity, 0, readback,
+      candidateNodalVelocityOffset, candidate.nodalVelocity.size);
+    encoder.copyBufferToBuffer(graph.leaves, 0, readback, leavesOffset, graph.leaves.size);
+    encoder.copyBufferToBuffer(graph.phi, 0, readback, nodalPhiOffset, graph.phi.size);
+    encoder.copyBufferToBuffer(graph.nodes, 0, readback, nodesOffset, graph.nodes.size);
+    encoder.copyBufferToBuffer(graph.constraints, 0, readback, constraintsOffset,
+      graph.constraints.size);
+    encoder.copyBufferToBuffer(graph.adjacency, 0, readback, adjacencyOffset,
+      graph.adjacency.size);
+    encoder.copyBufferToBuffer(graph.nodalVelocity, 0, readback, nodalVelocityOffset,
+      graph.nodalVelocity.size);
+    encoder.copyBufferToBuffer(graph.nodeValidity, 0, readback, nodeValidityOffset,
+      graph.nodeValidity.size);
+    encoder.copyBufferToBuffer(phi.rendererDirectory, 0, readback, rendererOffset,
+      phi.rendererDirectory.size);
+    encoder.copyBufferToBuffer(phi.transportBandMask, 0, readback, transportBandMaskOffset,
+      phi.transportBandMask.size);
+    encoder.copyBufferToBuffer(phi.redistanceDistanceA, 0, readback,
+      redistanceDistanceAOffset, phi.redistanceDistanceA.size);
+    encoder.copyBufferToBuffer(phi.redistanceDistanceB, 0, readback,
+      redistanceDistanceBOffset, phi.redistanceDistanceB.size);
+    encoder.copyBufferToBuffer(phi.receipts, 0, readback,
+      phiReceiptsOffset, phi.receipts.size);
+    this.device.queue.submit([encoder.finish()]);
+    try {
+      await readback.mapAsync(GPUMapMode.READ);
+      const mapped = readback.getMappedRange();
+      const graphControl = Uint32Array.from(new Uint32Array(mapped, 0, 32));
+      const phiControl = Uint32Array.from(new Uint32Array(mapped, graphControlBytes, 20));
+      const authorityWords = authorityControl.size / 4;
+      const authority = Uint32Array.from(new Uint32Array(mapped, authorityControlOffset,
+        authorityWords));
+      const faceCount = Math.min(authority[2] ?? 0, faceGeometry.size / 16,
+        projectedFaceVelocity.size / 4, predictedFaceVelocity.size / 4,
+        advectedFaceVelocity.size / 4,
+        extendedFaceVelocity.size / 4);
+      const acceptedStencilControl = Uint32Array.from(new Uint32Array(mapped,
+        stencilControlOffset, stencil.control.size / 4));
+      const candidateAuthority = Uint32Array.from(new Uint32Array(mapped,
+        candidateAuthorityControlOffset, candidate.authorityControl.size / 4));
+      const leafCount = Math.min(graphControl[1] ?? 0, graph.leafCapacity);
+      const nodeCount = Math.min(graphControl[2] ?? 0, graph.nodeCapacity);
+      const stencilWords = Math.min(stencil.records.size / 4, 3 * 36 * nodeCount);
+      const acceptedFaceGeometry = Uint32Array.from(new Uint32Array(mapped,
+        faceGeometryOffset, 4 * faceCount));
+      const projectedFaces = Uint32Array.from(new Uint32Array(mapped,
+        projectedFaceVelocityOffset, faceCount));
+      const predictedFaces = Uint32Array.from(new Uint32Array(mapped,
+        predictedFaceVelocityOffset, faceCount));
+      const advectedFaces = Uint32Array.from(new Uint32Array(mapped,
+        advectedFaceVelocityOffset, faceCount));
+      const extendedFaces = Uint32Array.from(new Uint32Array(mapped,
+        extendedFaceVelocityOffset, faceCount));
+      const acceptedStencils = Uint32Array.from(new Uint32Array(mapped,
+        stencilOffset, stencilWords));
+      const candidateFaceCount = Math.min(candidateAuthority[2] ?? 0,
+        candidate.faceGeometry.size / 16, candidate.extendedVelocity.size / 4);
+      const candidateGeometry = Uint32Array.from(new Uint32Array(mapped,
+        candidateFaceGeometryOffset, 4 * candidateFaceCount));
+      const candidateExtended = Uint32Array.from(new Uint32Array(mapped,
+        candidateExtendedFaceVelocityOffset, candidateFaceCount));
+      const candidateVelocity = Uint32Array.from(new Uint32Array(mapped,
+        candidateNodalVelocityOffset, 8 * nodeCount));
+      const leaves = Uint32Array.from(new Uint32Array(mapped, leavesOffset, 16 * leafCount));
+      const nodalPhi = Uint32Array.from(new Uint32Array(mapped, nodalPhiOffset, 2 * nodeCount));
+      const nodes = Uint32Array.from(new Uint32Array(mapped, nodesOffset, 4 * nodeCount));
+      const constraints = Uint32Array.from(new Uint32Array(mapped, constraintsOffset,
+        12 * nodeCount));
+      const adjacency = Uint32Array.from(new Uint32Array(mapped, adjacencyOffset,
+        12 * nodeCount));
+      const nodalVelocity = Uint32Array.from(new Uint32Array(mapped, nodalVelocityOffset,
+        8 * nodeCount));
+      const nodeValidity = Uint32Array.from(new Uint32Array(mapped, nodeValidityOffset,
+        nodeCount));
+      const renderer = Uint32Array.from(new Uint32Array(mapped, rendererOffset,
+        phi.rendererDirectory.size / 4));
+      const transportBandMask = Uint32Array.from(new Uint32Array(mapped,
+        transportBandMaskOffset, nodeCount));
+      const redistanceDistanceA = Float32Array.from(new Float32Array(mapped,
+        redistanceDistanceAOffset, nodeCount));
+      const redistanceDistanceB = Float32Array.from(new Float32Array(mapped,
+        redistanceDistanceBOffset, nodeCount));
+      const phiReceipts = Uint32Array.from(new Uint32Array(mapped,
+        phiReceiptsOffset, phi.receipts.size / 4));
+      return Object.freeze({ authorityControl: authority,
+        faceGeometry: acceptedFaceGeometry,
+        projectedFaceVelocity: projectedFaces,
+        predictedFaceVelocity: predictedFaces,
+        advectedFaceVelocity: advectedFaces,
+        extendedFaceVelocity: extendedFaces,
+        stencilControl: acceptedStencilControl, stencils: acceptedStencils,
+        candidateAuthorityControl: candidateAuthority,
+        candidateFaceGeometry: candidateGeometry,
+        candidateExtendedFaceVelocity: candidateExtended,
+        candidateNodalVelocity: candidateVelocity,
+        graphControl, phiControl, leaves, nodalPhi, nodes, constraints,
+        adjacency, nodalVelocity, nodeValidity, renderer, transportBandMask,
+        redistanceDistanceA, redistanceDistanceB, phiReceipts,
+        dimensions: [this.dims.nx, this.dims.ny, this.dims.nz] as const });
     } finally {
       if (readback.mapState === "mapped") readback.unmap();
       readback.destroy();
@@ -7479,8 +7883,12 @@ export class WebGPUOctreeProjection {
   readFluidBrickResidencyStats() { return this.topologyResidency.readStats(); }
   readFluidBulkBrickResidencyStats() { return this.sparseBrickWorld?.readBulkResidencyStats(); }
   encodeSparseBrickWorld(encoder: GPUCommandEncoder, _dt_s = 0) {
+    void _dt_s;
+    const adaptiveSurface = this.coarseOnlySurfaceTracking
+      && this.coarseDynamics.backend === "losasso"
+      && this.losassoBackend?.adaptivePhiSource !== undefined;
     if ((!this.globalFineBootstrapped && !this.powerCoarseLevelSetBootstrapped
-      && (this.losassoCoarsePhi?.coarseOnlyPublishedGeneration ?? 0) < 1)
+      && !adaptiveSurface)
       || !this.fineSeedAdapter) {
       throw new Error("Sparse render publication requires a settled surface authority and compact seeds");
     }
@@ -7649,6 +8057,34 @@ export function initialOctreeLevelSet(
   return signedDistanceFromVolume(alpha, nx, ny, nz, cell);
 }
 
+/** One-time node-lattice bootstrap for an exact, non-additive brick union.
+ *
+ * Returns undefined for fields that do not have this analytic representation;
+ * those retain the existing cell-centred bootstrap.  The `(n + 1)^3` array is
+ * construction-only and is released after the first adaptive graph commit.
+ * No recurring physics or renderer work is dense-domain sized. */
+export function initialOctreeNodalLevelSet(
+  scene: SceneDescription,
+  dims: { nx: number; ny: number; nz: number },
+): Float32Array | undefined {
+  const seeded = (scene.fluid.initialBrickSeeds_m?.length ?? 0) > 0;
+  const proceduralDam = !seeded && scene.fluid.initialCondition === "dam-break";
+  if ((!seeded && !proceduralDam) || sceneHasTerrain(scene)
+      || scene.fluid.initialBrickSeedsAdditive) return undefined;
+  const { nx, ny, nz } = dims;
+  const values = new Float32Array((nx + 1) * (ny + 1) * (nz + 1));
+  for (let z = 0; z <= nz; z += 1) {
+    for (let y = 0; y <= ny; y += 1) {
+      for (let x = 0; x <= nx; x += 1) {
+        values[x + (nx + 1) * (y + (ny + 1) * z)] = seeded
+          ? initialFluidBrickSignedDistanceAtNode(scene, x, y, z, [nx, ny, nz])!
+          : damBreakSignedDistanceAtNode(scene, x, y, z, [nx, ny, nz])!;
+      }
+    }
+  }
+  return values;
+}
+
 const octreeProjectionShaderBase = /* wgsl */ `
 override targetRefinementSize: u32 = 0u;
 override rowIndexedPressure: bool = true;
@@ -7657,6 +8093,7 @@ override denseSolidField: bool = true;
 override fluidGatedBoundaryRefinement: bool = true;
 override topologyCandidateView: u32 = 0u;
 override fineSummaryFactor: u32 = 4u;
+override adaptiveCoarseSurface: u32 = 0u;
 // Residency/retention tile edge. Separate from params.dimsMax.w (the leaf
 // ceiling) because the two stopped being the same number: the ceiling is the
 // largest leaf the domain can hold, the tile is the coarsest span that tiles
@@ -7672,7 +8109,7 @@ struct Owner { packedOrigin: u32, size: u32 }
 // finest-cell coordinates. Packed by \`packOctreeRefinementRegions\`, which owns
 // the layout; the diagnostic shader binds the same buffer with a shorter Params
 // and never reads them.
-struct Params { dimsMax: vec4u, cellRelax: vec4f, control: vec4u, solve: vec4f, container: vec4f, inflowPositionRadius: vec4f, inflowDirectionLength: vec4f, physical: vec4f, pressureCapacity: vec4u, hydrostatic: vec4f, refinementRegionControl: vec4u, refinementRegions: array<vec4f, 16> }
+struct Params { dimsMax: vec4u, cellRelax: vec4f, control: vec4u, solve: vec4f, container: vec4f, inflowPositionRadius: vec4f, inflowDirectionLength: vec4f, physical: vec4f, pressureCapacity: vec4u, hydrostatic: vec4f, refinementRegionControl: vec4u, refinementRegions: array<vec4f, 16>, coldAuthoredSurfaceControl: vec4u, coldAuthoredSurfaceBoxes: array<vec4f, 16> }
 struct LeafHeader { cell: u32, entryStart: u32, entryCount: u32, size: u32, diagonal: f32, rhs: f32, pad0: u32, pad1: u32, gradient: vec4f }
 struct RigidBody { positionShape: vec4f, dimensions: vec4f, orientation: vec4f, linearVelocity: vec4f, angularVelocity: vec4f, inverseMassInertia: vec4f, angularMomentumRestitution: vec4f, material: vec4f }
 struct SolidCell { fraction: f32, owner: i32 }
@@ -7767,7 +8204,7 @@ fn refinementRegionFloorCutover(origin: vec3u, size: u32) -> bool {
   return floorSize > 1u && size == 2u * floorSize;
 }
 fn valid(p: vec3i) -> bool { return all(p >= vec3i(0)) && all(p < vec3i(dims())); }
-struct CorrectedCoarsePhi { authority:bool, phi:f32, minimumPhi:f32, maximumPhi:f32, leafSize:u32 }
+struct CorrectedCoarsePhi { authority:bool, phi:f32, minimumPhi:f32, maximumPhi:f32, leafSize:u32, densityDetail:bool }
 fn coarseWord(index:u32)->u32{return bulkWorklist[index];}
 fn coarseFinite(value:f32)->bool{return value==value&&abs(value)<3.402823e38;}
 fn coarseDirectoryAuthority()->bool{
@@ -7808,11 +8245,41 @@ fn losassoArenaLookup(cell:u32,size:u32)->u32{
    if(key==cell+1u&&coarseWord(at+1u)==size&&coarseWord(at+3u)==hash){return coarseWord(at+2u)-1u;}}
   return 0xffffffffu;
 }
+fn coarseOrderedSum8(input:array<f32,8>)->f32{
+  var terms=input;
+  for(var x=0u;x<8u;x+=1u){for(var y=x+1u;y<8u;y+=1u){
+    if(terms[y]<terms[x]||(terms[y]==terms[x]
+        &&bitcast<u32>(terms[y])<bitcast<u32>(terms[x]))){
+      let swap=terms[x];terms[x]=terms[y];terms[y]=swap;
+    }
+  }}
+  return ((terms[0]+terms[1])+(terms[2]+terms[3]))
+    +((terms[4]+terms[5])+(terms[6]+terms[7]));
+}
+// Adaptive topology evidence appends the accepted owner's eight nodal values.
+// Interpolate those at the queried point instead of returning the row-wide
+// centre for every child. A single crossing corner must refine only the local
+// dry-side sheet, not all descendants of the containing coarse owner.
+fn losassoAdaptivePhi(row:u32,origin:vec3u,size:u32,point:vec3f,fallback:f32)->f32{
+  let cornerBase=coarseWord(18u)+8u*row;
+  if(coarseWord(18u)==0u||cornerBase+7u>=arrayLength(&bulkWorklist)){return fallback;}
+  let t=clamp((point-vec3f(origin))/max(f32(size),1.0),vec3f(0.0),vec3f(1.0));
+  var terms:array<f32,8>;
+  for(var corner=0u;corner<8u;corner+=1u){
+    let value=bitcast<f32>(coarseWord(cornerBase+corner));
+    if(!coarseFinite(value)){return fallback;}
+    let weight=select(1.0-t.x,t.x,(corner&1u)!=0u)
+      *select(1.0-t.y,t.y,(corner&2u)!=0u)
+      *select(1.0-t.z,t.z,(corner&4u)!=0u);
+    terms[corner]=weight*value;
+  }
+  return coarseOrderedSum8(terms);
+}
 fn coarseMortonPart(value:u32)->u32{var x=value&1023u;x=(x|(x<<16u))&0x030000ffu;x=(x|(x<<8u))&0x0300f00fu;x=(x|(x<<4u))&0x030c30c3u;x=(x|(x<<2u))&0x09249249u;return x;}
 fn coarseMorton(cell:u32)->u32{let d=dims();let q=vec3u(cell%d.x,(cell/d.x)%d.y,cell/(d.x*d.y));return coarseMortonPart(q.x)|(coarseMortonPart(q.y)<<1u)|(coarseMortonPart(q.z)<<2u);}
 fn coarseLookup(cell:u32,size:u32)->u32{let count=min(coarseWord(2u),(arrayLength(&bulkWorklist)-8u)/8u);let wantedLevel=31u-countLeadingZeros(size);let wantedMorton=coarseMorton(cell);var low=0u;var high=count;while(low<high){let middle=low+(high-low)/2u;let base=8u+middle*8u;let entryLevel=31u-countLeadingZeros(coarseWord(base+1u));let entryMorton=coarseMorton(coarseWord(base)-1u);if(entryLevel<wantedLevel||(entryLevel==wantedLevel&&entryMorton<wantedMorton)){low=middle+1u;}else{high=middle;}}if(low<count){let base=8u+low*8u;if(coarseWord(base)==cell+1u&&coarseWord(base+1u)==size){return base;}}return 0xffffffffu;}
 fn correctedCoarsePhi(point:vec3f)->CorrectedCoarsePhi{
-  if(any(point<vec3f(0.0))||any(point>=vec3f(dims()))){return CorrectedCoarsePhi(false,0.0,0.0,0.0,0u);}
+  if(any(point<vec3f(0.0))||any(point>=vec3f(dims()))){return CorrectedCoarsePhi(false,0.0,0.0,0.0,0u,false);}
   // Losasso branch: classify from the live arena's restricted row phi. This is
   // the coarse backstop that keeps wet rows carried through a one-generation
   // fine-summary gap; without it every unsummarized cell reads dry, a single
@@ -7824,33 +8291,40 @@ fn correctedCoarsePhi(point:vec3f)->CorrectedCoarsePhi{
      let cell=origin.x+dims().x*(origin.y+dims().y*origin.z);
      let row=losassoArenaLookup(cell,size);
      if(row!=0xffffffffu&&row<coarseWord(2u)){let entry=coarseWord(9u)+8u*row;
-      let flags=coarseWord(entry+5u);let value=bitcast<f32>(coarseWord(entry+2u));
-      if((flags&3u)==3u&&coarseFinite(value)){return CorrectedCoarsePhi(true,value,value,value,size);}
-      return CorrectedCoarsePhi(false,0.0,0.0,0.0,0u);}
+      let flags=coarseWord(entry+5u);let storedValue=bitcast<f32>(coarseWord(entry+2u));
+      let minimum=bitcast<f32>(coarseWord(entry+3u));let maximum=bitcast<f32>(coarseWord(entry+4u));
+      let value=select(storedValue,losassoAdaptivePhi(row,origin,size,point,storedValue),
+        (flags&0x10000000u)!=0u);
+      let crossing=minimum<=0.0&&maximum>=0.0;let crossingFlag=(flags&4u)!=0u;
+      if((flags&3u)==3u&&coarseFinite(value)&&coarseFinite(minimum)&&coarseFinite(maximum)
+          &&minimum<=value&&value<=maximum&&crossing==crossingFlag){
+        return CorrectedCoarsePhi(true,value,minimum,maximum,size,(flags&0x20000000u)!=0u);
+      }
+      return CorrectedCoarsePhi(false,0.0,0.0,0.0,0u,false);}
      if(size>=maximumLeaf){break;}size*=2u;}
     // A valid sparse arena defines every directory miss as coarse air, matching
     // sampleCoarseOctreePhi's half-width convention.
     let air=0.5*bitcast<f32>(coarseWord(8u));
-    return CorrectedCoarsePhi(true,air,air,air,0u);
+    return CorrectedCoarsePhi(true,air,air,air,0u,false);
   }
-  if(!coarseDirectoryAuthority()){return CorrectedCoarsePhi(false,0.0,0.0,0.0,0u);}
+  if(!coarseDirectoryAuthority()){return CorrectedCoarsePhi(false,0.0,0.0,0.0,0u,false);}
   let q=vec3u(floor(point));let denseCell=q.x+dims().x*(q.y+dims().y*q.z);
   let volume=dims().x*dims().y*dims().z;let actualCapacity=(arrayLength(&bulkWorklist)-8u)/8u;
   if((coarseWord(1u)&0x40000000u)!=0u&&actualCapacity>=volume){let denseBase=8u+(actualCapacity-volume+denseCell)*8u;
     let value=bitcast<f32>(coarseWord(denseBase+2u));let flags=coarseWord(denseBase+5u);
     if(coarseWord(denseBase)==denseCell+1u&&coarseWord(denseBase+1u)==1u&&(flags&9u)==9u&&coarseFinite(value)){
-      return CorrectedCoarsePhi(true,value,value,value,1u);}}
+      return CorrectedCoarsePhi(true,value,value,value,1u,false);}}
   var size=1u;let maximumLeaf=coarseWord(3u);
   loop{let origin=(q/vec3u(size))*vec3u(size);let cell=origin.x+dims().x*(origin.y+dims().y*origin.z);let base=coarseLookup(cell,size);
     if(base!=0xffffffffu){let value=bitcast<f32>(coarseWord(base+2u));let minimum=bitcast<f32>(coarseWord(base+3u));let maximum=bitcast<f32>(coarseWord(base+4u));let flags=coarseWord(base+5u);
-      if((flags&9u)!=9u||!coarseFinite(value)||!coarseFinite(minimum)||!coarseFinite(maximum)||minimum>maximum||value<minimum||value>maximum){return CorrectedCoarsePhi(false,0.0,0.0,0.0,0u);}
-      return CorrectedCoarsePhi(true,value,minimum,maximum,size);}
+      if((flags&9u)!=9u||!coarseFinite(value)||!coarseFinite(minimum)||!coarseFinite(maximum)||minimum>maximum||value<minimum||value>maximum){return CorrectedCoarsePhi(false,0.0,0.0,0.0,0u,false);}
+      return CorrectedCoarsePhi(true,value,minimum,maximum,size,false);}
     if(size>=maximumLeaf){break;}size*=2u;
   }
   // Fine-backed modes have no dense complement. Their valid sparse directory
   // still defines every miss as positive air.
   let air=0.5*bitcast<f32>(coarseWord(7u));
-  return CorrectedCoarsePhi(true,air,air,air,0u);
+  return CorrectedCoarsePhi(true,air,air,air,0u,false);
 }
 fn coarseClassificationPhi(sample:CorrectedCoarsePhi)->f32{
   return select(sample.phi,min(sample.phi,sample.minimumPhi),sample.minimumPhi<0.0&&sample.maximumPhi>=0.0);
@@ -8029,7 +8503,6 @@ fn requireLeafOwnerPages(origin: vec3u, size: u32, lane: u32, lanes: u32) {
 // (terrain, rigid bodies, explicitly seeded bricks) answers from the dense
 // SDF the host already rasterized and uploaded for topology residency.
 fn bootstrapPhiEnabled() -> bool { return params.physical.w < 0.0; }
-fn authoredAnalyticPhiAvailable() -> bool { return params.pressureCapacity.y != 0u; }
 fn analyticInitialPhiEnabled() -> bool {
   return params.physical.w < 0.0 && params.physical.w > -25.0;
 }
@@ -8068,13 +8541,6 @@ fn phi(p: vec3i) -> f32 {
   if(bootstrapTexturePhiEnabled()){return bootstrapTexturePhi(p);}
   let coarse=correctedCoarsePhi(vec3f(p)+vec3f(0.5));
   if(coarse.authority){return coarseClassificationPhi(coarse);}
-  // A corrected coarse directory is GPU-published after transported fine phi.
-  // During the one-generation handoff window, retain the exact authored SDF
-  // instead of turning every unresolved sample into air. The fallback is
-  // unreachable as soon as the moving coarse authority validates.
-  if(authoredAnalyticPhiAvailable()){
-    return analyticInitialPhi(vec3f(p)+vec3f(0.5));
-  }
   return 3.402823e38;
 }
 fn samplePhiPoint(point:vec3f)->f32{
@@ -8105,8 +8571,7 @@ fn liquidAuthorityAvailable()->bool{
   // rejected on availability, the rejection retries forever, and the frozen
   // t=0 wet-row set holds the collapse front statically at the authored dam
   // boundary while the projected field recirculates inside it.
-  return coarseDirectoryAuthority()||losassoCoarseArenaAuthority()
-    ||authoredAnalyticPhiAvailable();
+  return coarseDirectoryAuthority()||losassoCoarseArenaAuthority();
 }
 fn liquidOwner(owner: Owner) -> bool {
   if (!ownerValid(owner)) { return false; }
@@ -8120,9 +8585,6 @@ fn liquidOwner(owner: Owner) -> bool {
   if(coarse.authority&&coarse.leafSize==0u){return false;}
   if(coarse.authority&&coarse.maximumPhi<0.0){return true;}
   if(coarse.authority&&coarse.minimumPhi>=0.0){return false;}
-  if(!coarse.authority&&authoredAnalyticPhiAvailable()){
-    return analyticInitialPhi(centre)<0.0;
-  }
   return false;
 }
 fn isOrigin(id: vec3u, owner: Owner) -> bool {
@@ -8871,9 +9333,107 @@ fn fineSummaryOrderedFloat(value: u32) -> f32 {
 // summary directory. Other entry points retain the normal pressure buffer.
 fn fineSummaryLength() -> u32 { return arrayLength(&pressureIn); }
 fn fineSummaryWord(index: u32) -> u32 { return bitcast<u32>(pressureIn[index]); }
+// Factor-one Losasso retires the dense coarse tracker after bootstrap.  Its
+// accepted adaptive arena at binding 15 is the only current scalar authority;
+// continuing to classify topology from the binding-4 bootstrap summary pins
+// the refinement band to the authored t=0 surface even while phi advances.
+//
+// An exact/current owner is the common path and costs one sparse lookup.  A
+// dirty tile is rebuilt coarse-to-fine, however, so a candidate may contain
+// several accepted adaptive owners.  Aggregate their conservative nodal
+// intervals over the candidate's finest cells in that uncommon path.  Sparse
+// arena misses are authoritative air, but deliberately contribute a far-air
+// distance rather than the arena's half-cell classification sentinel: the
+// latter is not measured distance evidence and would refine empty tiles.
+fn adaptiveLosassoLeafSummary(origin: vec3u, size: u32) -> FineLeafSummary {
+  var result = FineLeafSummary(false, false, true, false, false, false, false, 0.0,
+    3.402823e38, -3.402823e38, 3.402823e38, 0u, 0u);
+  if (adaptiveCoarseSurface == 0u || fineSummaryFactor != 1u
+      || !losassoCoarseArenaAuthority()) { return result; }
+  let centrePoint = vec3f(origin) + vec3f(0.5 * f32(size));
+  let centre = correctedCoarsePhi(centrePoint);
+  if (!centre.authority) { return result; }
+  let farAir = 1.0e30;
+  result.found = true;
+  result.complete = true;
+  result.centerPhi = select(centre.phi, farAir, centre.leafSize == 0u);
+  result.centerValid = fineSummaryFinite(result.centerPhi);
+  result.sizingRefinement = centre.densityDetail;
+  // When one accepted owner contains this candidate, derive the child's own
+  // interval from eight inset corner samples of that owner's trilinear field.
+  // Reusing the owner's full interval here made every child inherit one remote
+  // crossing corner; topology refined an entire dry owner instead of the
+  // advancing sheet and the bounded candidate graph rejected the generation.
+  // Canonical air remains an exact size-one fast path.
+  if (centre.leafSize >= size || (size == 1u && centre.leafSize == 0u)) {
+    if (centre.leafSize == 0u) {
+      result.minimumPhi = farAir;
+      result.maximumPhi = farAir;
+    } else {
+      let inset = min(1.0e-4, 0.25 * f32(size));
+      let interiorSpan = max(0.0, f32(size) - 2.0 * inset);
+      for (var corner = 0u; corner < 8u; corner += 1u) {
+        let offset = vec3f(
+          select(inset, inset + interiorSpan, (corner & 1u) != 0u),
+          select(inset, inset + interiorSpan, (corner & 2u) != 0u),
+          select(inset, inset + interiorSpan, (corner & 4u) != 0u));
+        let sample = correctedCoarsePhi(vec3f(origin) + offset);
+        if (!sample.authority || sample.leafSize == 0u || !fineSummaryFinite(sample.phi)) {
+          return FineLeafSummary(false, false, true, false, false, false, false, 0.0,
+            3.402823e38, -3.402823e38, 3.402823e38, 0u, 0u);
+        }
+        result.sizingRefinement = result.sizingRefinement || sample.densityDetail;
+        result.minimumPhi = min(result.minimumPhi, sample.phi);
+        result.maximumPhi = max(result.maximumPhi, sample.phi);
+      }
+    }
+    result.minimumAbsolutePhi = select(
+      min(abs(result.minimumPhi), abs(result.maximumPhi)),
+      0.0, result.minimumPhi <= 0.0 && result.maximumPhi >= 0.0);
+    result.ownerValidSamples = size * size * size;
+    result.ownerNegativeSamples = select(0u, result.ownerValidSamples,
+      result.centerPhi < 0.0);
+    if (size == 1u) {
+      result.exactCellValid = true;
+      result.exactCellNegative = result.centerPhi < 0.0;
+    }
+    return result;
+  }
+  var minimumAbsolute = 3.402823e38;
+  for (var z = 0u; z < size; z += 1u) {
+    for (var y = 0u; y < size; y += 1u) {
+      for (var x = 0u; x < size; x += 1u) {
+        let sample = correctedCoarsePhi(vec3f(origin + vec3u(x, y, z)) + vec3f(0.5));
+        if (!sample.authority) {
+          return FineLeafSummary(false, false, true, false, false, false, false, 0.0,
+            3.402823e38, -3.402823e38, 3.402823e38, 0u, 0u);
+        }
+        let sampleMinimum = select(sample.minimumPhi, farAir, sample.leafSize == 0u);
+        let sampleMaximum = select(sample.maximumPhi, farAir, sample.leafSize == 0u);
+        result.sizingRefinement = result.sizingRefinement || sample.densityDetail;
+        result.minimumPhi = min(result.minimumPhi, sampleMinimum);
+        result.maximumPhi = max(result.maximumPhi, sampleMaximum);
+        minimumAbsolute = min(minimumAbsolute,
+          select(min(abs(sampleMinimum), abs(sampleMaximum)), 0.0,
+            sampleMinimum <= 0.0 && sampleMaximum >= 0.0));
+        result.ownerValidSamples += 1u;
+        result.ownerNegativeSamples += select(0u, 1u,
+          sample.leafSize != 0u && sample.phi < 0.0);
+      }
+    }
+  }
+  result.minimumAbsolutePhi = minimumAbsolute;
+  return result;
+}
 fn fineLeafSummary(origin: vec3u, size: u32) -> FineLeafSummary {
+  let adaptive = adaptiveLosassoLeafSummary(origin, size);
+  if (adaptive.found) { return adaptive; }
   var result = FineLeafSummary(false, false, false, false, false, false, false, 0.0,
     3.402823e38, -3.402823e38, 3.402823e38, 0u, 0u);
+  // Once factor-one adaptive authority is live, absence is fail-closed. The
+  // legacy hierarchy remains available only to factor-4/8 lanes; it must not
+  // become a recurring scalar/topology fallback for the adaptive lane.
+  if (adaptiveCoarseSurface != 0u) { return result; }
   if (fineSummaryLength() < 16u || fineSummaryWord(0u) != 0u
       || fineSummaryWord(9u) != 0x80000000u) { return result; }
   let baseDims = vec3u(fineSummaryWord(4u), fineSummaryWord(5u), fineSummaryWord(6u));
@@ -9049,6 +9609,65 @@ fn inflowProtectionIntersects(origin: vec3u, size: u32) -> bool {
     && length(radial) <= params.inflowPositionRadius.w + radialRadius;
 }
 
+struct ColdAuthoredSurfaceInterval {
+  available: bool,
+  minimumPhi: f32,
+  maximumPhi: f32,
+  crossesOrTouchesSurface: bool,
+}
+
+fn coldAuthoredSurfaceNodePhi(point: vec3f) -> f32 {
+  var result = 3.402823e38;
+  let count = min(params.coldAuthoredSurfaceControl.x, 8u);
+  for (var boxIndex = 0u; boxIndex < count; boxIndex += 1u) {
+    let minimum = params.coldAuthoredSurfaceBoxes[2u * boxIndex].xyz;
+    let maximum = params.coldAuthoredSurfaceBoxes[2u * boxIndex + 1u].xyz;
+    let center = 0.5 * (minimum + maximum);
+    let halfExtent = 0.5 * (maximum - minimum);
+    let q = (abs(point - center) - halfExtent) * params.cellRelax.xyz;
+    let distance = length(max(q, vec3f(0.0))) + min(max(q.x, max(q.y, q.z)), 0.0);
+    result = min(result, distance);
+  }
+  return result;
+}
+
+// Exact construction-time interval for the rectangular components that also
+// author the direct nodal phi lattice. Corner values retain the authored zero
+// at a face, edge, or corner. The overlap predicate additionally catches a
+// component wholly enclosed by a coarser candidate, whose eight corners may
+// all be dry even though its interior contains the surface.
+fn coldAuthoredSurfaceInterval(origin: vec3u, size: u32) -> ColdAuthoredSurfaceInterval {
+  let count = min(params.coldAuthoredSurfaceControl.x, 8u);
+  if (!bootstrapPhiEnabled() || count == 0u) {
+    return ColdAuthoredSurfaceInterval(false, 0.0, 0.0, false);
+  }
+  var minimumPhi = 3.402823e38;
+  var maximumPhi = -3.402823e38;
+  for (var corner = 0u; corner < 8u; corner += 1u) {
+    let cornerOffset = vec3f(vec3u(
+      corner & 1u, (corner >> 1u) & 1u, (corner >> 2u) & 1u));
+    let point = vec3f(origin) + f32(size) * cornerOffset;
+    let value = coldAuthoredSurfaceNodePhi(point);
+    minimumPhi = min(minimumPhi, value);
+    maximumPhi = max(maximumPhi, value);
+  }
+  let candidateMinimum = vec3f(origin);
+  let candidateMaximum = candidateMinimum + vec3f(f32(size));
+  var crossesOrTouches = false;
+  for (var boxIndex = 0u; boxIndex < count; boxIndex += 1u) {
+    let minimum = params.coldAuthoredSurfaceBoxes[2u * boxIndex].xyz;
+    let maximum = params.coldAuthoredSurfaceBoxes[2u * boxIndex + 1u].xyz;
+    let overlapsClosure = all(candidateMaximum >= minimum) && all(candidateMinimum <= maximum);
+    let strictlyInside = all(candidateMinimum > minimum) && all(candidateMaximum < maximum);
+    crossesOrTouches = crossesOrTouches || (overlapsClosure && !strictlyInside);
+  }
+  if (crossesOrTouches) {
+    minimumPhi = min(minimumPhi, 0.0);
+    maximumPhi = max(maximumPhi, 0.0);
+  }
+  return ColdAuthoredSurfaceInterval(true, minimumPhi, maximumPhi, crossesOrTouches);
+}
+
 fn pressureRefinementEvidence(origin: vec3u, size: u32) -> bool {
   // Before every other test, including the inflow's. An authored region is a
   // statement about this box that outranks the evidence found in it -- that is
@@ -9083,8 +9702,41 @@ fn pressureRefinementEvidence(origin: vec3u, size: u32) -> bool {
   // shell used by its sole coarse surface tracker.
   let compactProtectionWidth = (max(1.0, params.solve.w)
     + extraGradingLayers * max(0.0, f32(size) - 2.0)) * cellWidth;
-  let protectionWidth = select(compactProtectionWidth, retainedProtectionWidth,
+  var protectionWidth = select(compactProtectionWidth, retainedProtectionWidth,
     fineSummaryFactor == 1u);
+  // Ando--Batty builds a new pressure octree from the transported level set
+  // and subdivides a cell when its interface distance is below that cell's
+  // own edge length. This yields the intended ladder automatically: size-8
+  // cells look ahead eight finest cells, their size-4 children look ahead
+  // four, and only the size-2 children within two cells split to the finest
+  // tier. The sparse surface band remains finest-resolution independently;
+  // a fixed four-cell pressure padding would instead make the entire band
+  // unit-sized and erase the coarse grading the adaptive method is for.
+  if (adaptiveCoarseSurface == 0u && fineSummaryFactor == 1u) {
+    protectionWidth = f32(size) * cellWidth;
+  }
+  // Factor-one mass tracking publishes a density residual, not a distance:
+  // pure air is +threshold*h and therefore lies within any positive h-wide
+  // "distance" band. Applying the old semi-Lagrangian phi support shell to
+  // that cache marks every represented dry owner for refinement, overflows the
+  // bounded candidate, and leaves the accepted graph frozen at its prior
+  // epoch. Conserved mass can enter a coarse air recipient directly; the next
+  // candidate refines it when its local rho reconstruction actually crosses.
+  // Keep recurring factor-one refinement crossing/sizing driven and never
+  // interpret the compatibility cache's magnitude as metric reach.
+  if (adaptiveCoarseSurface != 0u && losassoCoarseArenaAuthority()) {
+    protectionWidth = 0.0;
+  }
+  // Explicit brick bodies take the imported dense bootstrap path, whose
+  // cell-centred sparse summary has no entry on the dry side of an exact
+  // node-aligned surface. Consult the exact authored nodal interval before
+  // that absence can reject refinement. This descriptor is construction-only:
+  // bootstrap retirement disables it before recurring topology publication.
+  let coldAuthored = coldAuthoredSurfaceInterval(origin, size);
+  if (coldAuthored.available && size > finestSurfaceCellSize()
+      && coldAuthored.crossesOrTouchesSurface) {
+    return true;
+  }
   let summary = fineLeafSummary(origin, size);
   if (!summary.found) { return false; }
   // Band one exposes the explicit coarse-cut experiment. The factor-one
@@ -9219,13 +9871,11 @@ fn boundaryLiquidPhiInterval(origin: vec3u, size: u32,
       return BoundaryLiquidPhi(3.402823e38, 3.402823e38, true);
     }
     // A coarse row is dyadic and aligned, so a row at least as large as this
-    // candidate contains it and its interval is a superset -- bounded. But the
-    // Losasso arena branch of correctedCoarsePhi returns ONE restricted row phi
-    // in all three fields, and a collapsed interval is a point sample wearing
-    // an interval's clothes. It may not reject: a row whose single value reads
-    // deep says nothing about whether a smaller candidate inside it holds the
-    // surface. Requiring a non-degenerate interval keeps the default backend on
-    // the conservative one-sided answer rather than guessing.
+    // candidate contains it and its published corner interval is a superset --
+    // bounded. A degenerate interval remains a point sample and may not reject:
+    // a row whose single value reads deep says nothing about whether a smaller
+    // candidate inside it holds the surface. Requiring a non-degenerate
+    // interval keeps the fallback conservative rather than guessing.
     return BoundaryLiquidPhi(coarse.minimumPhi, coarse.maximumPhi,
       coarse.leafSize >= size && coarse.maximumPhi > coarse.minimumPhi);
   }
@@ -9289,9 +9939,20 @@ fn leafNeedsRefinement(origin: vec3u, size: u32) -> bool {
     // Two-sided over the leaf's phi INTERVAL: proximity to the surface, not
     // presence of liquid, and not the minimum's absolute value -- see
     // boundaryLiquidPhiInterval.
+    //
+    // The recurring factor-one mass cache is a bounded density residual, not
+    // metric distance.  Its magnitude is at most O(h), so comparing it with
+    // the authored three-cell wall look-ahead makes every represented wall
+    // owner look close to the surface.  On the 24x18x16 dam this refined all
+    // 6,912 cells after the first recurring topology and strict 2:1 balance
+    // propagated the false wall band through the interior.  Keep exact
+    // interval crossings as wall refinement evidence; ordinary balance then
+    // supplies the size-1/2/4 shells without inventing distance from rho.
+    let wallProtection = select(f32(wallBandCells()) * params.cellRelax.x, 0.0,
+      adaptiveCoarseSurface != 0u && losassoCoarseArenaAuthority());
     return boundaryLiquidWouldRefine(
       boundaryLiquidPhiInterval(origin, size, minimumPhi, maximumPhi),
-      f32(wallBandCells()) * params.cellRelax.x);
+      wallProtection);
   }
   if (minimumSolid >= 1.0 - 1e-5) { return false; }
   return false;
@@ -9631,9 +10292,11 @@ fn refineCoarseBlock(origin: vec3u, lid: u32) {
     var boundaryDecision = crossesBoundary;
     if (fluidGatedBoundaryRefinement && crossesBoundary) {
       // Same interval band as the fine path in leafNeedsRefinement.
+      let wallProtection = select(f32(wallBandCells()) * params.cellRelax.x, 0.0,
+        adaptiveCoarseSurface != 0u && losassoCoarseArenaAuthority());
       boundaryDecision = boundaryLiquidWouldRefine(
         boundaryLiquidPhiInterval(origin, size, range.z, range.w),
-        f32(wallBandCells()) * params.cellRelax.x);
+        wallProtection);
     }
     if (refinementRegionFloorCutover(origin, size) && crossesClosedWall
         && !crossesSolid) {
@@ -11104,8 +11767,12 @@ export const octreeProjectionShader = octreeGradingFixpointEnabled()
  * its free-surface shell is uniformly finest, so a size-two leaf with finite
  * near-interface evidence falls through to the distance predicate and splits.
  * Explicit band one plus a finest-surface-cell value of two is handled in
- * `pressureRefinementEvidence` as the coarse size-two cut mode. The frozen
- * Power module keeps compact size-two rows at every band width.
+ * `pressureRefinementEvidence` as the coarse size-two cut mode.
+ *
+ * Power additionally needs an exclusive Delaunay case around each 18-neighbor
+ * ring. Losasso assembles a generalized axis-face graph instead, so its legal
+ * topology contract is strict 2:1 and no stronger. The backend transform keeps
+ * these two independent differences out of the shared source.
  */
 export function octreeLosassoSurfaceGradingShader(source: string): string {
   const compactSurfaceRows = `  if (fineSummaryFactor != 1u && size <= 2u) {
@@ -11114,8 +11781,18 @@ export function octreeLosassoSurfaceGradingShader(source: string): string {
   if (!source.includes(compactSurfaceRows)) {
     throw new Error("Losasso grading transform could not locate the Power surface-row clause");
   }
-  return source.replace(compactSurfaceRows,
-    `  // Losasso: size-two rows inside the two-fine-cell shell split to unit rows.`);
+  const paperMixedRing =
+    `  if (owner.size >= 2u && owner.size <= 16u && isOrigin(gid, owner)) { repairPaperMixedNeighbors(gid, owner.size); }`;
+  if (!source.includes(paperMixedRing)) {
+    throw new Error("Losasso grading transform could not locate the Power mixed-ring clause");
+  }
+  return source
+    .replace(compactSurfaceRows,
+      `  // Losasso: size-two rows inside the two-fine-cell shell split to unit rows.`)
+    .replace(paperMixedRing,
+      `  // Losasso's native face graph represents every strict 2:1 transition.
+  // The stronger Power/Delaunay mixed-ring repair would split legal coarse
+  // neighbours and manufacture an unnecessary intermediate-resolution shell.`);
 }
 
 function projectionWGSLClosingDelimiter(

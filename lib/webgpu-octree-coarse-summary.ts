@@ -1,5 +1,4 @@
 import type { GPUInitializationTask } from "./gpu-initialization";
-import { WebGPUOctreeAdaptiveNodes } from "./webgpu-octree-adaptive-nodes";
 import type { OctreeOwnerPagePlan } from "./webgpu-octree-owner-pages";
 import type { OctreePowerCoarseLevelSetSampleSource } from "./webgpu-octree-power-coarse-levelset";
 import { OCTREE_AIR_SUPPORT_LAYOUT_VERSION, OCTREE_AIR_SUPPORT_OWNER_HASH,
@@ -138,6 +137,7 @@ export function planOctreeCoarseSummary(
   rowCapacity: number,
   maximumLeafSize = 32,
 ): OctreeCoarseSummaryPlan {
+  void maximumLeafSize;
   const baseDimensions = dimensions.map((value) => Math.ceil(value / 4)) as [number, number, number];
   const levelDimensions: Array<readonly [number, number, number]> = [];
   const levelOffsets: number[] = [];
@@ -160,20 +160,13 @@ export function planOctreeCoarseSummary(
   // This lets volume control put missing liquid at the advancing front instead
   // of inflating the retreating reservoir face and braking a dam break.
   const directoryWords = activityOffsetWords + 2 * activityWords;
-  const adaptiveNodeCapacity = (dimensions[0] + 1) * (dimensions[1] + 1)
-    * (dimensions[2] + 1);
-  const adaptiveEdgeCapacity = Math.min(
-    3 * adaptiveNodeCapacity * (1 + Math.log2(maximumLeafSize)), 24 * rowCapacity);
   return {
     baseDimensions, levelDimensions, levelOffsets, hierarchyKeyCapacity,
     topLevelPageCount, directoryPageCapacity, entryCapacity, entryOffsetWords,
     phiOffsetWords, activityOffsetWords, activityWords, directoryWords,
     // Directory + state + params + indirect dispatch + optional-binding
     // sentinel + per-body fixed-point submerged-volume reduction.
-    // Adaptive node control + exact compact node list + owner lookup params
-    // are owned by this factor-one surface authority as well.
-    allocatedBytes: directoryWords * 4 + 160 + 112 + 36 + 128 + 48
-      + 80 + adaptiveNodeCapacity * 4 + adaptiveEdgeCapacity * 16 + 48 + 12,
+    allocatedBytes: directoryWords * 4 + 160 + 112 + 36 + 128 + 48,
   };
 }
 
@@ -192,7 +185,6 @@ export class WebGPUOctreeCoarseSummary {
   private readonly dispatchArgs: GPUBuffer;
   private readonly bindingSentinel: GPUBuffer;
   private readonly rigidDisplacement: GPUBuffer;
-  private readonly adaptiveNodes: WebGPUOctreeAdaptiveNodes;
   private readonly indirectDispatch = octreeCoarseSummaryIndirectDispatchEnabled();
   private readonly pipelines: Record<string, GPUComputePipeline> = {};
   private readonly bindGroups = new Map<GPUComputePipeline, GPUBindGroup>();
@@ -241,13 +233,12 @@ export class WebGPUOctreeCoarseSummary {
        */
       redistanceReachCells?: number }>,
     _deferPipelineCompilation = true) {
+    void _deferPipelineCompilation;
     if (!Number.isSafeInteger(air.maximumLeafSize) || air.maximumLeafSize < 1
       || (air.maximumLeafSize & (air.maximumLeafSize - 1)) !== 0) {
       throw new RangeError("Coarse-only tracker requires a power-of-two maximum leaf size");
     }
     this.plan = planOctreeCoarseSummary(dimensions, coarse.rowCapacity, air.maximumLeafSize);
-    this.adaptiveNodes = new WebGPUOctreeAdaptiveNodes(
-      device, air.ownerPages.arena, air.ownerPages.plan, air.maximumLeafSize, coarse.rowCapacity);
     this.domainVolume = dimensions[0] * dimensions[1] * dimensions[2];
     this.redistanceDimensions = [dimensions[0], dimensions[1], dimensions[2]];
     this.redistanceSweeps = planOctreeRedistanceSweeps(
@@ -348,12 +339,11 @@ export class WebGPUOctreeCoarseSummary {
       run: async () => { this.pipelines[entryPoint] =
         await this.device.createComputePipelineAsync(this.descriptor(entryPoint)); },
     }));
-    return [...own, ...this.adaptiveNodes.initializationTasks()];
+    return own;
   }
 
   encode(broker: PassBroker): void {
     if (this.destroyed) throw new Error("Coarse-only summary hierarchy is destroyed");
-    this.adaptiveNodes.encode(broker);
     const dispatch = (entry: typeof this.entries[number], items: number, record?: 0 | 1 | 2) => {
       const groups = Math.ceil(Math.max(1, items) / 256);
       const width = Math.min(groups, this.device.limits.maxComputeWorkgroupsPerDimension);
@@ -532,15 +522,11 @@ export class WebGPUOctreeCoarseSummary {
     }
   }
 
-  /** Exact accepted-topology node authority, published beside this tracker. */
-  readAdaptiveNodeReceipt() { return this.adaptiveNodes.readReceipt(); }
-
   destroy(): void {
     if (this.destroyed) return; this.destroyed = true;
     this.bindGroups.clear();
     this.directory.destroy(); this.state.destroy(); this.params.destroy();
     this.dispatchArgs.destroy(); this.bindingSentinel.destroy(); this.rigidDisplacement.destroy();
-    this.adaptiveNodes.destroy();
   }
 }
 

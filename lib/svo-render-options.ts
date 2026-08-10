@@ -1,4 +1,7 @@
 /** User-facing visibility effects layered over cone-traced global illumination. */
+
+import type { RenderStageSwitchId } from "./render-stage-switches";
+
 /**
  * How lighting visibility (shadows, AO, GI) is resolved.
  * - `cones`: hierarchical cone marches plus every stage that feeds them — the
@@ -174,15 +177,38 @@ export type SvoLightingOptions = Readonly<{
   silhouetteRefinementEnabled?: boolean;
   /** Omitted means `cones`. */
   coneTracingMode?: SvoConeTracingMode;
+  /**
+   * Whether gathered indirect radiance is computed at all. Omitted means yes.
+   *
+   * Distinct from `giBounceStrength`, which is an exposure on a gather that has
+   * already happened and therefore costs the same at zero. This withholds the
+   * `globalIllumination` flags outright, so the cone gather and the persistent
+   * world-GI cache pass are never encoded and the frame gets the time back.
+   * Cone shadows and AO are unaffected — that is the whole point of having it
+   * separate from the CONES/EXACT/OFF switch.
+   */
+  globalIlluminationEnabled?: boolean;
   /** Omitted means `raster`. Switching it rebuilds the dry-scene pipeline. */
   primaryTraversal?: SvoPrimaryTraversalMode;
+  /**
+   * Frame-graph stages to withhold from this frame's encode.
+   *
+   * Ablation, not quality: see {@link RenderStageSwitchId}. Carried on the
+   * lighting options because that is the channel already threaded from the
+   * store to every presentation pipeline, but it is *not* part of the lighting
+   * contract — `setLightingOptions` ignores it and each pipeline takes the set
+   * through its own `setDisabledStages`, so switching a stage never invalidates
+   * a shader or triggers a pipeline rebuild.
+   */
+  disabledStages?: readonly RenderStageSwitchId[];
 }>;
 
 /** The presentation preset aims for the finished image; each effect remains independently switchable. */
-export const DEFAULT_SVO_LIGHTING_OPTIONS: SvoLightingOptions = Object.freeze({
+export const DEFAULT_SVO_LIGHTING_OPTIONS = Object.freeze({
   shadowsEnabled: true,
   ambientOcclusionEnabled: true,
   silhouetteRefinementEnabled: false,
   coneTracingMode: "cones",
-  primaryTraversal: "raster",
-});
+  globalIlluminationEnabled: true,
+  primaryTraversal: "traced",
+} satisfies SvoLightingOptions);

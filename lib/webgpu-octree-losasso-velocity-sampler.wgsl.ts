@@ -47,6 +47,56 @@ fn losassoFace(axis:u32,q:vec3u)->u32{
  }
  return INVALID;
 }
+// A finest air record can exist geometrically but remain unreachable from the
+// projected interface after the fixed causal extension. Such a non-finite
+// record is not a zero and must not shadow a coarser, finite covering face.
+fn losassoFiniteFace(axis:u32,q:vec3u)->u32{
+ let directoryCapacity=losassoDirectoryCapacity();
+ if(directoryCapacity==0u||directoryCapacity>p.directoryCapacity
+  ||(directoryCapacity&(directoryCapacity-1u))!=0u){return INVALID;}
+ let mask=directoryCapacity-1u;var span=1u;var logSpan=0u;
+ loop{
+  var origin=q;for(var tangent=0u;tangent<3u;tangent+=1u){if(tangent!=axis){origin[tangent]=(q[tangent]/span)*span;}}
+  let packed=axis|(logSpan<<2u);let hash=losassoFaceHash(packed,origin);
+  for(var probe=0u;probe<${OCTREE_LOSASSO_AXIS_FACE_MAXIMUM_PROBES}u;probe+=1u){
+   let record=faceDirectory[(hash+probe)&mask];if(record.x==0u){break;}
+   let face=record.x-1u;
+   if(record.y==hash&&face<coarse[2]&&face<arrayLength(&faceGeometry)
+     &&face<arrayLength(&extendedVelocity)&&all(faceGeometry[face]==vec4u(packed,origin))){
+    if(finite(extendedVelocity[face])){return face;}break;
+   }
+  }
+  if(span>=p.maximumLeafSize){break;}span*=2u;logSpan+=1u;
+ }
+ return INVALID;
+}
+struct LosassoFaceValue{value:f32,valid:u32}
+// Losasso section 3 stores velocity on the real faces of adaptive cells. A
+// finest-lattice interpolation point can lie strictly inside a coarse leaf,
+// where no face record should exist. Reconstruct that temporary MAC sample
+// from the leaf's two dyadic bounding faces instead of requiring a dense
+// finest-face materialization. The first complete bracket is the smallest
+// adaptive cell that owns the queried plane; each endpoint still resolves
+// through losassoFace, so split 2:1 faces retain their covering subface.
+fn losassoCoarsenedFaceValue(axis:u32,q:vec3u)->LosassoFaceValue{
+ var span=2u;
+ loop{
+  let low=(q[axis]/span)*span;let high=low+span;
+  if(q[axis]>low&&high<=p.velocityDimensions[axis]){
+   var lowQ=q;var highQ=q;lowQ[axis]=low;highQ[axis]=high;
+   let lowFace=losassoFiniteFace(axis,lowQ);let highFace=losassoFiniteFace(axis,highQ);
+   if(lowFace!=INVALID&&highFace!=INVALID){
+    let a=extendedVelocity[lowFace];let b=extendedVelocity[highFace];
+    if(finite(a)&&finite(b)){
+     let value=mix(a,b,f32(q[axis]-low)/f32(span));
+     if(finite(value)){return LosassoFaceValue(value,1u);}
+    }
+   }
+  }
+  if(span>=p.maximumLeafSize){break;}span*=2u;
+ }
+ return LosassoFaceValue(0.,0u);
+}
 struct LosassoVelocitySample{value:vec3f,valid:u32}
 fn losassoVelocityAtGrid(grid:vec3f)->LosassoVelocitySample{
  if(arrayLength(&coarse)<4u||coarse[3]!=1u||coarse[2]>arrayLength(&faceGeometry)
@@ -71,10 +121,13 @@ fn losassoVelocityAtGrid(grid:vec3f)->LosassoVelocitySample{
     if(coordinate[component]>i32(upper[component])){if(p.closed==0u){return LosassoVelocitySample(vec3f(0),0u);}
      coordinate[component]=i32(upper[component]);}}
    let q=vec3u(coordinate);
-   let face=losassoFace(axis,q);var value=0.;
+   let face=losassoFiniteFace(axis,q);var value=0.;
    if(face==INVALID){let onWall=q[axis]==0u||q[axis]==p.velocityDimensions[axis];
     let openTop=axis==1u&&q.y==p.velocityDimensions.y&&p.openTop!=0u;
-    if(p.closed==0u||!onWall||openTop){return LosassoVelocitySample(vec3f(0),0u);}
+    if(onWall&&!openTop&&p.closed!=0u){value=0.;}
+    else{let reconstructed=losassoCoarsenedFaceValue(axis,q);
+     if(reconstructed.valid==0u){return LosassoVelocitySample(vec3f(0),0u);}
+     value=reconstructed.value;}
    }else{value=extendedVelocity[face];if(!finite(value)){return LosassoVelocitySample(vec3f(0),0u);}}
    // The pressure face is zero while liquid still contacts a closed wall, but
    // level-set kinematics must permit unilateral separation. Extend the first
@@ -85,9 +138,13 @@ fn losassoVelocityAtGrid(grid:vec3f)->LosassoVelocitySample{
    let openTop=axis==1u&&highWall&&p.openTop!=0u;
    if(p.closed!=0u&&(lowWall||highWall)&&!openTop){var interiorQ=q;
     interiorQ[axis]=select(p.velocityDimensions[axis]-1u,1u,lowWall);
-    let interiorFace=losassoFace(axis,interiorQ);
+    let interiorFace=losassoFiniteFace(axis,interiorQ);
+    var interiorSample=LosassoFaceValue(0.,0u);
     if(interiorFace!=INVALID&&interiorFace<arrayLength(&extendedVelocity)){
      let interior=extendedVelocity[interiorFace];if(!finite(interior)){return LosassoVelocitySample(vec3f(0),0u);}
+     interiorSample=LosassoFaceValue(interior,1u);
+    }else{interiorSample=losassoCoarsenedFaceValue(axis,interiorQ);}
+    if(interiorSample.valid!=0u){let interior=interiorSample.value;
      let away=select((interior<0.),(interior>0.),lowWall);if(away){value=interior;}}}
    losassoExactAdd(&exact,weight*value);
   }

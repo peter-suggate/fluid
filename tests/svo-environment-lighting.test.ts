@@ -47,6 +47,20 @@ test("fallback palettes retain the existing raster environment values", () => {
   assert.match(environmentShaderLibrary, /vec3f\(\.52,\.60,\.72\)/);
 });
 
+test("a scene can own a warm image-free backdrop without mutating its environment preset", () => {
+  const warm = svoEnvironmentLightingRecord("garden", 1, {
+    lowerRadianceLinear: [0.70, 0.54, 0.36],
+    upperRadianceLinear: [0.76, 0.59, 0.40],
+    accentRadianceLinear: [0.64, 0.48, 0.30],
+  });
+  assert.deepEqual(warm.lowerRadianceLinear, [0.70, 0.54, 0.36]);
+  assert.deepEqual(warm.upperRadianceLinear, [0.76, 0.59, 0.40]);
+  assert.deepEqual(warm.accentRadianceLinear, [0.64, 0.48, 0.30]);
+  assert.deepEqual(svoEnvironmentLightingRecord("garden").upperRadianceLinear, [0.52, 0.60, 0.72]);
+  assert.notEqual(buildSvoEnvironmentLighting("garden", 1).cacheKey,
+    buildSvoEnvironmentLighting("garden", 1, warm).cacheKey);
+});
+
 test("diffuse irradiance remains finite linear HDR and distinguishes authored looks", () => {
   const normal = [0.2, 0.96, -0.1] as const;
   const lab = evaluateSvoEnvironmentDiffuseIrradiance(svoEnvironmentLightingRecord("night-lab"), normal);

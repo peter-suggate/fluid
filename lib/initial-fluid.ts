@@ -310,6 +310,52 @@ function boxSignedDistance(point: Vec3, minimum: Vec3, maximum: Vec3): number {
   return Math.hypot(Math.max(qx, 0), Math.max(qy, 0), Math.max(qz, 0)) + Math.min(Math.max(qx, qy, qz), 0);
 }
 
+/** Exact signed distance to the procedural dam reservoir at an integer
+ * finest-lattice node. This is construction-only source data for adaptive
+ * nodal phi; it does not add a recurring analytic simulation path. */
+export function damBreakSignedDistanceAtNode(
+  scene: SceneDescription,
+  x: number,
+  y: number,
+  z: number,
+  dimensions: readonly [number, number, number],
+): number | undefined {
+  if (scene.fluid.initialCondition !== "dam-break") return undefined;
+  const dam = sceneDamBreakBox(scene), c = scene.container;
+  const minimum = { x: -0.5 * c.width_m + dam.min.x * c.width_m,
+    y: dam.min.y * c.height_m,
+    z: -0.5 * c.depth_m + dam.min.z * c.depth_m };
+  const maximum = { x: -0.5 * c.width_m + dam.max.x * c.width_m,
+    y: dam.max.y * c.height_m,
+    z: -0.5 * c.depth_m + dam.max.z * c.depth_m };
+  const point = { x: -0.5 * c.width_m + x * c.width_m / dimensions[0],
+    y: y * c.height_m / dimensions[1],
+    z: -0.5 * c.depth_m + z * c.depth_m / dimensions[2] };
+
+  // A tank-contact face is solid, not a liquid-air interface. Continue the
+  // liquid through closed walls when constructing phi so the smoothed rho
+  // bootstrap does not lose half of its interface kernel outside the domain.
+  // Offset reservoir faces remain exposed, as does a reservoir touching an
+  // open top. This is the host-nodal equivalent of analyticInitialPhi's
+  // exposed-maximum formulation for the default corner-anchored dam.
+  const domainMinimum = { x: -0.5 * c.width_m, y: 0, z: -0.5 * c.depth_m };
+  const domainMaximum = { x: 0.5 * c.width_m, y: c.height_m, z: 0.5 * c.depth_m };
+  const axes = ["x", "y", "z"] as const;
+  const constraints: number[] = [];
+  for (const axis of axes) {
+    const scale = Math.max(1, Math.abs(domainMaximum[axis] - domainMinimum[axis]));
+    const tolerance = 1e-9 * scale;
+    const lowerIsClosedWall = minimum[axis] <= domainMinimum[axis] + tolerance;
+    const upperIsClosedWall = maximum[axis] >= domainMaximum[axis] - tolerance
+      && (axis !== "y" || c.top === "closed");
+    if (!lowerIsClosedWall) constraints.push(minimum[axis] - point[axis]);
+    if (!upperIsClosedWall) constraints.push(point[axis] - maximum[axis]);
+  }
+  if (constraints.length === 0) return -Math.max(c.width_m, c.height_m, c.depth_m);
+  return Math.hypot(...constraints.map((value) => Math.max(value, 0)))
+    + Math.min(Math.max(...constraints), 0);
+}
+
 /** Signed distance to the union of explicitly seeded initial bricks. */
 export function initialFluidBrickSignedDistance(
   scene: SceneDescription,
@@ -366,6 +412,35 @@ export function initialFluidBrickSignedDistanceAtCell(
     result = Math.min(result,
       Math.hypot(Math.max(qx, 0), Math.max(qy, 0), Math.max(qz, 0))
         + Math.min(Math.max(qx, qy, qz), 0));
+  }
+  return result;
+}
+
+/** Signed distance to seeded bricks at an integer finest-lattice node.
+ *
+ * Adaptive LoSasso stores phi on these nodes.  Evaluating the authored box
+ * there directly avoids the cell-centre -> node -> renderer double
+ * interpolation that rounds an exact brick edge or corner before the first
+ * advance.  Integer coordinates also retain the reflection-bit identity used
+ * by the symmetric-expansion oracle. */
+export function initialFluidBrickSignedDistanceAtNode(
+  scene: SceneDescription,
+  x: number,
+  y: number,
+  z: number,
+  dimensions: readonly [number, number, number],
+  brickSize = INITIAL_FLUID_BRICK_SIZE,
+): number | undefined {
+  const components = initialFluidBrickComponentBounds(scene, dimensions, brickSize);
+  if (!components) return undefined;
+  const c = scene.container;
+  const point = { x: -0.5 * c.width_m + x * c.width_m / dimensions[0],
+    y: y * c.height_m / dimensions[1],
+    z: -0.5 * c.depth_m + z * c.depth_m / dimensions[2] };
+  let result = Number.POSITIVE_INFINITY;
+  for (const component of components) {
+    result = Math.min(result, boxSignedDistance(point,
+      component.minimum, component.maximum));
   }
   return result;
 }

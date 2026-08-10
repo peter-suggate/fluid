@@ -65,10 +65,14 @@ fn projectLosassoFaces(@builtin(global_invocation_id) invocation: vec3u) {
     // A separated face is an air-pressure contact, not an open boundary. The
     // active-set bit is one solve behind, so close it immediately on approach;
     // otherwise retain only motion away from the wall and back into the tank.
-    let approaching = overhead && outward * projected > 1e-6;
+    let approaching = outward * projected > 1e-6;
     if (wasSeparated) {
-      projected = outward * select(max(0.0, outward * projected),
-        min(0.0, outward * projected), overhead);
+      // outward points out of the tank.  A separated contact may carry only
+      // the opposite component, which moves the liquid surface away from the
+      // wall and back into the tank.  Retaining max(0, outward*u) on side and
+      // floor faces pulled liquid onto those walls during characteristic
+      // backtraces as a dam front approached.
+      projected = outward * min(0.0, outward * projected);
     }
     let releasePressure = select(0.0, params.contactPressure, overhead);
     let renewalPressure = select(max(releasePressure, 1e-4 * params.contactPressure),

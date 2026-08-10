@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { rasterMeshSymmetryMetrics, sharpPatchRasterMetrics } from "../tools/raster-mesh-symmetry";
+import { rasterCubeSymmetryMetrics, rasterMeshSymmetryMetrics,
+  sharpPatchRasterMetrics } from "../tools/raster-mesh-symmetry";
 
 function vertex(position: readonly [number, number, number], normal: readonly [number, number, number]) {
   return [...position, 1, ...normal, 0];
@@ -27,6 +28,42 @@ test("raster mesh audit detects one-sided geometry and non-finite normals", () =
   assert.ok(result.exactMismatchCount > 0);
   assert.ok(result.exactPositionMismatchCount > 0);
   assert.equal(result.nonFiniteCount, 1);
+});
+
+test("raster cube audit reflects the optical ghost lattice about D+1", () => {
+  const dimensions = [4, 2, 4] as const;
+  const orbit = (seed: readonly [number, number, number, number]) => {
+    const records = new Map<string, [number, number, number, number]>([[seed.join(":"), [...seed]]]);
+    for (let changed = true; changed;) {
+      changed = false;
+      for (const [x, y, z, span] of [...records.values()]) for (const record of [
+        [dimensions[0] + 1 - x - span, y, z, span],
+        [x, y, dimensions[2] + 1 - z - span, span],
+        [z, y, x, span],
+      ] as [number, number, number, number][]) if (!records.has(record.join(":"))) {
+        records.set(record.join(":"), record); changed = true;
+      }
+    }
+    return [...records.values()];
+  };
+  const records = [...orbit([0, 0, 1, 1]), ...orbit([0, 1, 1, 2])];
+  const cubes = new Uint32Array(records.flatMap(([x, y, z, span]) => [
+    x | z << 16, y | span << 16,
+  ]));
+  const result = rasterCubeSymmetryMetrics(cubes, records.length, dimensions);
+  assert.equal(result.transforms["reflect-x"].exactIdentityMismatchCount, 0);
+  assert.equal(result.transforms["reflect-z"].exactIdentityMismatchCount, 0);
+  assert.equal(result.transforms["swap-xz"].exactIdentityMismatchCount, 0);
+});
+
+test("raster cube audit reflects zero-span adaptive descriptors about native D", () => {
+  const dimensions = [4, 2, 4] as const;
+  const bases = [0, 1, 2, 3].flatMap(x => [0, 1, 2, 3].map(z => [x, z] as const));
+  const cubes = new Uint32Array(bases.flatMap(([x, z]) => [x | z << 16, 0]));
+  const result = rasterCubeSymmetryMetrics(cubes, bases.length, dimensions);
+  assert.equal(result.transforms["reflect-x"].exactIdentityMismatchCount, 0);
+  assert.equal(result.transforms["reflect-z"].exactIdentityMismatchCount, 0);
+  assert.equal(result.transforms["swap-xz"].exactIdentityMismatchCount, 0);
 });
 
 test("raster mesh audit distinguishes a closed triangle complex from a missing face", () => {

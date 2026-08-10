@@ -1,6 +1,9 @@
 import type { PassBroker } from "./webgpu-pass-broker";
 import type { SurfaceInflowState } from "./webgpu-quadtree-builder";
-import { octreeLosassoDynamicsWGSL } from "./webgpu-octree-losasso-dynamics.wgsl";
+import {
+  makeOctreeLosassoAdaptiveDynamicsWGSL,
+  octreeLosassoDynamicsWGSL,
+} from "./webgpu-octree-losasso-dynamics.wgsl";
 
 export interface WebGPUOctreeLosassoDynamicsSource {
   readonly faceCapacity: number;
@@ -30,6 +33,10 @@ export interface WebGPUOctreeLosassoDynamicsOptions {
   readonly physicalCellSize: readonly [number, number, number];
   readonly domainOrigin?: readonly [number, number, number];
   readonly density: number;
+  /** Row-indexed vec4f(rho,mass,leafVolume,compression). When present, the
+   * paper's bounded rho>1 divergence term returns locally compressed mass to
+   * visible volume during projection. */
+  readonly surfaceDensityRows?: GPUBuffer;
   /** x-, x+, y-, y+, z-, z+. Defaults to a closed box. */
   readonly closedBoundaries?: readonly [boolean, boolean, boolean, boolean, boolean, boolean];
 }
@@ -42,6 +49,7 @@ export interface WebGPUOctreeLosassoDynamicsStep {
 }
 
 export interface WebGPUOctreeLosassoDynamicsSamplerSource {
+  readonly kind?: "legacy";
   readonly control: GPUBuffer;
   readonly faceGeometry: GPUBuffer;
   readonly axisFaceDirectory: GPUBuffer;
@@ -54,6 +62,20 @@ export interface WebGPUOctreeLosassoDynamicsSamplerSource {
   readonly faceCapacity: number;
   readonly directoryCapacity: number;
 }
+
+/** Compact graph-owned sampler used by the fully adaptive factor-one lane. */
+export interface WebGPUOctreeLosassoAdaptiveDynamicsSamplerSource {
+  readonly kind: "adaptive";
+  readonly leaves: GPUBuffer;
+  readonly ownerArena: GPUBuffer;
+  readonly leafLocator: GPUBuffer;
+  readonly velocityArena: GPUBuffer;
+  readonly wgsl: string;
+}
+
+export type WebGPUOctreeLosassoAnyDynamicsSamplerSource =
+  | WebGPUOctreeLosassoDynamicsSamplerSource
+  | WebGPUOctreeLosassoAdaptiveDynamicsSamplerSource;
 
 const ENTRY_POINTS = [
   "advectLosassoFaces",
@@ -70,7 +92,7 @@ const BINDINGS = Object.freeze({
   reverseLosassoFaces: [0, 1, 2, 3, 7, 12, 15],
   correctLosassoFaces: [0, 1, 2, 3, 6, 7, 12, 15],
   forceLosassoFaces: [0, 1, 2, 3, 6, 7],
-  divergenceLosassoRows: [0, 1, 2, 7, 8, 9, 10],
+  divergenceLosassoRows: [0, 1, 2, 7, 8, 9, 10, 16],
   constrainLosassoInflowFaces: [0, 1, 3, 11],
 } as const);
 
@@ -97,7 +119,7 @@ export class WebGPUOctreeLosassoDynamics {
     private readonly device: GPUDevice,
     readonly source: WebGPUOctreeLosassoDynamicsSource,
     private readonly options: WebGPUOctreeLosassoDynamicsOptions,
-    private readonly sampler: WebGPUOctreeLosassoDynamicsSamplerSource,
+    private readonly sampler: WebGPUOctreeLosassoAnyDynamicsSamplerSource,
   ) {
     positiveInteger(source.faceCapacity, "face capacity");
     positiveInteger(source.rowCapacity, "row capacity");
@@ -139,7 +161,9 @@ export class WebGPUOctreeLosassoDynamics {
     floats.set([0, 0, 0, 0], 16);
     floats.set([0, 0, 0, 0], 20);
     floats.set([0, 0, 0, 0], 24);
-    words.set([sampler.faceCapacity, sampler.directoryCapacity, 0, 0], 28);
+    words.set(sampler.kind === "adaptive"
+      ? [0, 0, 1, options.surfaceDensityRows ? 1 : 0]
+      : [sampler.faceCapacity, sampler.directoryCapacity, 0, 0], 28);
     device.queue.writeBuffer(this.params, 0, words);
     this.predictedVelocity = source.predictedVelocity;
     this.rightHandSide = source.rightHandSide;
@@ -153,9 +177,12 @@ export class WebGPUOctreeLosassoDynamics {
   async initialize(): Promise<void> {
     this.assertLive();
     if (this.pipelines) return;
+    const adaptive = this.sampler.kind === "adaptive";
     const shaderModule = this.device.createShaderModule({
       label: "Losasso reduced axis-face dynamics shader",
-      code: octreeLosassoDynamicsWGSL,
+      code: adaptive
+        ? makeOctreeLosassoAdaptiveDynamicsWGSL(this.sampler.wgsl)
+        : octreeLosassoDynamicsWGSL,
     });
     const pairs = await Promise.all(ENTRY_POINTS.map(async (entryPoint) => [entryPoint,
       await this.device.createComputePipelineAsync({
@@ -165,18 +192,25 @@ export class WebGPUOctreeLosassoDynamics {
       })] as const));
     this.pipelines = Object.freeze(Object.fromEntries(pairs)) as
       Readonly<Record<DynamicsEntryPoint, GPUComputePipeline>>;
+    const samplerBuffers = adaptive
+      ? [this.sampler.leaves, this.sampler.ownerArena, this.sampler.leafLocator,
+        this.sampler.velocityArena]
+      : [this.sampler.control, this.sampler.faceGeometry,
+        this.sampler.axisFaceDirectory, this.sampler.stagedVelocity];
     const buffers = [this.params, this.source.control, this.source.faces,
       this.source.faceGeometry, this.source.axisFaceDirectory, this.source.extendedVelocity,
       this.source.advectedVelocity, this.source.predictedVelocity,
       this.source.rowFaceOffsets, this.source.rowFaces, this.source.rightHandSide,
-      this.source.projectedVelocity, this.sampler.control, this.sampler.faceGeometry,
-      this.sampler.axisFaceDirectory, this.sampler.stagedVelocity,
-      this.sampler.predictorStagedVelocity];
+      this.source.projectedVelocity, ...samplerBuffers,
+      this.options.surfaceDensityRows ?? this.source.rightHandSide];
     this.groups = Object.freeze(Object.fromEntries(ENTRY_POINTS.map((entryPoint) => [entryPoint,
       this.device.createBindGroup({
         label: `Losasso dynamics bindings - ${entryPoint}`,
         layout: this.pipelines![entryPoint].getBindGroupLayout(0),
-        entries: BINDINGS[entryPoint].map((binding) =>
+        entries: (adaptive && (entryPoint === "advectLosassoFaces"
+          || entryPoint === "reverseLosassoFaces" || entryPoint === "correctLosassoFaces")
+          ? [...BINDINGS[entryPoint].filter((binding) => binding < 12), 12, 13, 14, 15]
+          : BINDINGS[entryPoint]).map((binding) =>
           ({ binding, resource: { buffer: buffers[binding]! } })),
       })]))) as Readonly<Record<DynamicsEntryPoint, GPUBindGroup>>;
   }

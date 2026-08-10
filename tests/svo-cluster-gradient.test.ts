@@ -72,10 +72,23 @@ const SEEDED = Object.freeze({
   anisotropy: 2.2,
 });
 
+const NOISE_FOLIAGE = Object.freeze({
+  field: "noise-foliage" as const,
+  smoothRadius_m: 0,
+  seed: 0x51a9,
+  clusterPeriod_m: 0.075,
+  detailPeriod_m: 0.018,
+  threshold: 0.55,
+  clusterWeight: 0.62,
+  detailWeight: 0.38,
+  interiorBias: 0.20,
+});
+
 const FIELDS: readonly { name: string; packing: SvoSmoothUnionClusterPacking }[] = [
   { name: "lattice", packing: { field: "lattice", ...LATTICE } as SvoSmoothUnionClusterPacking },
   { name: "tapered-sweep", packing: SWEEP as unknown as SvoSmoothUnionClusterPacking },
   { name: "seeded-lobes", packing: SEEDED as unknown as SvoSmoothUnionClusterPacking },
+  { name: "noise-foliage", packing: NOISE_FOLIAGE },
 ];
 
 function clusterAt(packing: SvoSmoothUnionClusterPacking): SvoSmoothUnionClusterPrimitive {

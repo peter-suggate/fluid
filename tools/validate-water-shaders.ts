@@ -54,6 +54,42 @@ import { fineLevelSetSummaryWGSL } from "../lib/webgpu-octree-fine-levelset-summ
 import { makeFineLevelSetTopologyWGSL } from "../lib/webgpu-octree-fine-levelset-topology";
 import { globalFineSurfaceClassificationShader } from "../lib/webgpu-water-global-fine-classify";
 import { octreeAirVelocitySupportPublicationWGSL } from "../lib/webgpu-octree-air-velocity-support-gpu";
+import { octreeLosassoSurfaceGraphWGSL } from "../lib/webgpu-octree-losasso-surface-graph.wgsl";
+import {
+  octreeLosassoAdaptivePhiAcceptedScheduleWGSL,
+  octreeLosassoAdaptivePhiBacktraceWGSL,
+  octreeLosassoAdaptivePhiCorrectionWGSL,
+  octreeLosassoAdaptivePhiCommitWGSL,
+  octreeLosassoAdaptivePhiEvidenceWGSL,
+  octreeLosassoAdaptivePhiGhostWGSL,
+  octreeLosassoAdaptivePhiHandoffWGSL,
+  octreeLosassoAdaptivePhiRedistanceAtoBWGSL,
+  octreeLosassoAdaptivePhiRedistanceBtoAWGSL,
+  octreeLosassoAdaptivePhiRedistanceFinishWGSL,
+  octreeLosassoAdaptivePhiRedistanceInitializeWGSL,
+  octreeLosassoAdaptivePhiRedistanceProjectAWGSL,
+  octreeLosassoAdaptivePhiRedistanceProjectBWGSL,
+  octreeLosassoAdaptivePhiPredictorSnapshotWGSL,
+  octreeLosassoAdaptivePhiReverseBacktraceWGSL,
+  octreeLosassoAdaptivePhiScheduleWGSL,
+  octreeLosassoAdaptivePhiTransportWGSL,
+  octreeLosassoAdaptivePhiVolumeEvidenceWGSL,
+  octreeLosassoAdaptivePhiWorklistConstrainedWGSL,
+  octreeLosassoAdaptivePhiWorklistConstraintMarkWGSL,
+  octreeLosassoAdaptivePhiWorklistFinalizeWGSL,
+  octreeLosassoAdaptivePhiWorklistIndependentWGSL,
+  octreeLosassoAdaptivePhiWorklistInflowWGSL,
+  octreeLosassoAdaptivePhiWorklistPrepareWGSL,
+  octreeLosassoAdaptivePhiWorklistProjectWGSL,
+  octreeLosassoAdaptivePhiWorklistReachWGSL,
+  octreeLosassoAdaptivePhiWorklistReceiptWGSL,
+  octreeLosassoAdaptivePhiWGSL,
+} from "../lib/webgpu-octree-losasso-adaptive-phi.wgsl";
+import {
+  octreeLosassoAdaptiveVelocitySamplerWGSL,
+  octreeLosassoAdaptiveVelocityWGSL,
+} from "../lib/webgpu-octree-losasso-adaptive-velocity.wgsl";
+import { makeOctreeLosassoAdaptiveDynamicsWGSL } from "../lib/webgpu-octree-losasso-dynamics.wgsl";
 
 const naga = process.env.NAGA ?? "naga";
 const shaders = {
@@ -93,6 +129,39 @@ fn sampleCoarseOctreePhi(position:vec3f)->f32{return coarsePhi[u32(position.x)*0
   "octree-structured-boundary": structuredBoundaryCoefficientWGSL,
   "octree-structured-dynamics": structuredVelocityDynamicsWGSL,
   "octree-air-velocity-support": octreeAirVelocitySupportPublicationWGSL,
+  "octree-losasso-surface-graph": octreeLosassoSurfaceGraphWGSL,
+  "octree-losasso-adaptive-phi": octreeLosassoAdaptivePhiWGSL,
+  "octree-losasso-adaptive-phi-worklist-prepare": octreeLosassoAdaptivePhiWorklistPrepareWGSL,
+  "octree-losasso-adaptive-phi-worklist-reach": octreeLosassoAdaptivePhiWorklistReachWGSL,
+  "octree-losasso-adaptive-phi-worklist-inflow": octreeLosassoAdaptivePhiWorklistInflowWGSL,
+  "octree-losasso-adaptive-phi-worklist-independent": octreeLosassoAdaptivePhiWorklistIndependentWGSL,
+  "octree-losasso-adaptive-phi-worklist-constrained": octreeLosassoAdaptivePhiWorklistConstrainedWGSL,
+  "octree-losasso-adaptive-phi-worklist-constraint-mark": octreeLosassoAdaptivePhiWorklistConstraintMarkWGSL,
+  "octree-losasso-adaptive-phi-worklist-finalize": octreeLosassoAdaptivePhiWorklistFinalizeWGSL,
+  "octree-losasso-adaptive-phi-worklist-receipt": octreeLosassoAdaptivePhiWorklistReceiptWGSL,
+  "octree-losasso-adaptive-phi-worklist-project": octreeLosassoAdaptivePhiWorklistProjectWGSL,
+  "octree-losasso-adaptive-phi-redistance-initialize": octreeLosassoAdaptivePhiRedistanceInitializeWGSL,
+  "octree-losasso-adaptive-phi-redistance-a-to-b": octreeLosassoAdaptivePhiRedistanceAtoBWGSL,
+  "octree-losasso-adaptive-phi-redistance-b-to-a": octreeLosassoAdaptivePhiRedistanceBtoAWGSL,
+  "octree-losasso-adaptive-phi-redistance-project-a": octreeLosassoAdaptivePhiRedistanceProjectAWGSL,
+  "octree-losasso-adaptive-phi-redistance-project-b": octreeLosassoAdaptivePhiRedistanceProjectBWGSL,
+  "octree-losasso-adaptive-phi-redistance-finish": octreeLosassoAdaptivePhiRedistanceFinishWGSL,
+  "octree-losasso-adaptive-phi-backtrace": octreeLosassoAdaptivePhiBacktraceWGSL,
+  "octree-losasso-adaptive-phi-reverse-backtrace": octreeLosassoAdaptivePhiReverseBacktraceWGSL,
+  "octree-losasso-adaptive-phi-transport": octreeLosassoAdaptivePhiTransportWGSL,
+  "octree-losasso-adaptive-phi-predictor-snapshot": octreeLosassoAdaptivePhiPredictorSnapshotWGSL,
+  "octree-losasso-adaptive-phi-correction": octreeLosassoAdaptivePhiCorrectionWGSL,
+  "octree-losasso-adaptive-phi-handoff": octreeLosassoAdaptivePhiHandoffWGSL,
+  "octree-losasso-adaptive-phi-commit": octreeLosassoAdaptivePhiCommitWGSL,
+  "octree-losasso-adaptive-phi-ghost": octreeLosassoAdaptivePhiGhostWGSL,
+  "octree-losasso-adaptive-phi-evidence": octreeLosassoAdaptivePhiEvidenceWGSL,
+  "octree-losasso-adaptive-phi-accepted-schedule":
+    octreeLosassoAdaptivePhiAcceptedScheduleWGSL,
+  "octree-losasso-adaptive-phi-schedule": octreeLosassoAdaptivePhiScheduleWGSL,
+  "octree-losasso-adaptive-phi-volume-evidence": octreeLosassoAdaptivePhiVolumeEvidenceWGSL,
+  "octree-losasso-adaptive-velocity": octreeLosassoAdaptiveVelocityWGSL,
+  "octree-losasso-adaptive-dynamics": makeOctreeLosassoAdaptiveDynamicsWGSL(
+    octreeLosassoAdaptiveVelocitySamplerWGSL()),
   "octree-coarse-level-set-bootstrap": octreeCoarsePhiBootstrapShader,
   "octree-power-coarse-level-set": octreePowerCoarseLevelSetShader,
   "octree-power-descriptor": octreePowerDescriptorShader,

@@ -34,7 +34,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { environmentIndex, type EnvironmentId } from "../lib/environments";
 import { cameraPosition } from "../lib/math";
-import type { CameraState, SceneDescription } from "../lib/model";
+import { sceneUsesFlatVoxelNormals, type CameraState, type SceneDescription } from "../lib/model";
 import { cameraTanHalfFov } from "../lib/webgpu-camera";
 import { boundingRadius, initializeRigidBodies } from "../lib/rigid-body";
 import {
@@ -328,6 +328,10 @@ export function buildSvoDrySceneAssembly(
     primaryCompositeOwnedGlassPaneIdBase: compositorOwnedGlass[0]?.paneId,
     primaryCompositeOwnedGlassPaneCount: compositorOwnedGlass.length,
     ...lightingMirrors,
+    // Presentation policy is scene data too. Omitting this made every headless
+    // fidelity frame silently exercise the default baked analytic normals even
+    // when the product document requested voxel-flat surfaces.
+    flatVoxelNormals: sceneUsesFlatVoxelNormals(scene),
   };
   return { drySceneData, scenePrimitives, sceneGlass, sceneThickGlass, terrainSurface };
 }

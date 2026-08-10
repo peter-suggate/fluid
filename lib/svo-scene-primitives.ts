@@ -348,9 +348,9 @@ export function svoScenePrimitivesFromEnvironmentCatalog(
     // The arena holds `SVO_DRY_SCENE_FIELD_PROGRAM_CAPACITY` blocks and a record
     // addresses one by index, so nothing ever required the mapping to be
     // injective — but it was, and that made the arena a ceiling on *records*
-    // rather than on distinct shapes. The oak's crown is the case that found it:
-    // a canopy is a thousand masses drawn from a handful of tapes, and a species
-    // that quantises its tape inputs (see `oakCanopyPadProgram`) asks for eight
+    // rather than on distinct shapes. A dense crown is the case that found it:
+    // a canopy can be a thousand masses drawn from a handful of tapes, and a
+    // quantised shape family can ask for eight
     // distinct programs however many masses hang off them.
     //
     // Keyed on the serialised tape, which is the whole of what a block holds, so

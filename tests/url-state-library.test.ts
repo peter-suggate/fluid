@@ -101,7 +101,7 @@ test("the scene and preset keys are untouched by the view", () => {
   const params = new URLSearchParams(query);
   assert.equal(params.get("scene"), "dam-break-boxes");
   assert.equal(params.get("method"), "tall-cell");
-  assert.equal(params.get("quality"), "balanced");
+  assert.equal(params.has("quality"), false, "the global balanced quality is implicit");
   assert.equal(params.get("scene.container.width_m"), "1.75");
   assert.equal(params.get("view"), "library");
 

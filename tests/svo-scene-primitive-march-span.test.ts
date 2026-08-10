@@ -85,7 +85,7 @@ test("every exact hit on the hero set lies inside its primitive's march span", (
   const descriptors = buildSvoScenePrimitives(scene)
     .descriptors.filter((candidate): candidate is SvoFinitePrimitiveDescriptor =>
       candidate.kind !== "terrain-heightfield");
-  assert.ok(descriptors.length > 500, "the hero set should publish its full primitive census");
+  assert.ok(descriptors.length > 250, "the hero set should publish its full primitive census after foliage aggregation");
 
   // Deterministic ray fan: one seeded LCG, no Math.random, so a failure is
   // reproducible from the descriptor index and ray index alone.

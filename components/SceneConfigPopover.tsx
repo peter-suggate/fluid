@@ -10,7 +10,7 @@ import { useUIStore } from "@/lib/stores/ui-store";
 import { HERO_GARDEN_SOLVER_CELL_M } from "@/lib/hero-garden-scene";
 import { findSceneDefinition } from "@/lib/scenes";
 import { sceneDefinitionTakesLattice } from "@/lib/scene-definition";
-import { SVO_ENVIRONMENT_REFINEMENT_DEPTH_MAXIMUM } from "@/lib/svo-render-tuning";
+import { svoSceneryRefinementDepth, SVO_ENVIRONMENT_REFINEMENT_DEPTH_MAXIMUM, SVO_ENVIRONMENT_REFINEMENT_DEPTH_MINIMUM } from "@/lib/svo-render-tuning";
 import { terrainSampleShape } from "@/lib/terrain";
 import type { FluidInflow } from "@/lib/model";
 
@@ -67,7 +67,8 @@ export function SceneConfigPopover() {
   const definition = findSceneDefinition(presetId);
   const rebuildable = definition !== undefined && sceneDefinitionTakesLattice(definition);
   const detailCell_m = (voxelDomain.detailCellSize_m ?? voxelDomain.finestCellSize_m);
-  const authoredDepth = Math.round(Math.log2(voxelDomain.finestCellSize_m / detailCell_m));
+  const authoredDepth = svoSceneryRefinementDepth(voxelDomain, { fluid: fluidEnabled });
+  const zeroRungCell_m = voxelDomain.environmentRefinementBaseCellSize_m ?? voxelDomain.finestCellSize_m;
   const voxelDimensions = [scene.container.width_m, scene.container.height_m, scene.container.depth_m]
     .map((extent) => Math.max(8, Math.round(extent / voxelDomain.finestCellSize_m)));
   const patchVoxelDomain = (patch: Partial<typeof voxelDomain>) => patchScene({ voxelDomain: { ...voxelDomain, ...patch } });
@@ -169,23 +170,26 @@ export function SceneConfigPopover() {
               <h3>Re-author at a lattice</h3>
               <Segmented
                 ariaLabel="Set detail lattice"
-                value={String(Math.min(SVO_ENVIRONMENT_REFINEMENT_DEPTH_MAXIMUM, Math.max(0, authoredDepth)))}
-                options={Array.from({ length: SVO_ENVIRONMENT_REFINEMENT_DEPTH_MAXIMUM + 1 }, (_unused, depth) => ({
+                value={String(Math.min(SVO_ENVIRONMENT_REFINEMENT_DEPTH_MAXIMUM, Math.max(SVO_ENVIRONMENT_REFINEMENT_DEPTH_MINIMUM, authoredDepth)))}
+                options={Array.from({ length: SVO_ENVIRONMENT_REFINEMENT_DEPTH_MAXIMUM - SVO_ENVIRONMENT_REFINEMENT_DEPTH_MINIMUM + 1 }, (_unused, index) => {
+                  const depth = index + SVO_ENVIRONMENT_REFINEMENT_DEPTH_MINIMUM;
+                  return {
                   value: String(depth),
-                  label: depth === 0 ? "Cell" : `÷${2 ** depth}`,
+                  label: depth < 0 ? `×${2 ** -depth}` : depth === 0 ? "Cell" : `÷${2 ** depth}`,
                   disabled: fluidEnabled,
                   title: fluidEnabled
-                    ? "A solver brick pins its node, so a wet document has no finer rung. Turn water off first."
-                    : `Rebuild with the set drawn at ${(voxelDomain.finestCellSize_m * 1000) / 2 ** depth} mm`,
-                }))}
+                    ? "A solver brick pins its node, so a wet document cannot move on this environment-only ladder. Turn water off first."
+                    : `Rebuild with the set drawn at ${(zeroRungCell_m * 1000) / 2 ** depth} mm`,
+                  };
+                })}
                 onChange={(value) => simulation.rebuildSceneAtLattice({ environmentRefinementDepth: Number(value) })}
               />
               <div className="field-grid">
                 <button
                   className="quiet-button"
                   disabled={fluidEnabled}
-                  onClick={() => simulation.rebuildSceneAtLattice({ cellSize_m: voxelDomain.finestCellSize_m })}
-                >Rebuild at {(voxelDomain.finestCellSize_m * 1000).toFixed(4).replace(/\.?0+$/, "")} mm</button>
+                  onClick={() => simulation.rebuildSceneAtLattice({ cellSize_m: zeroRungCell_m })}
+                >Rebuild at {(zeroRungCell_m * 1000).toFixed(4).replace(/\.?0+$/, "")} mm</button>
               </div>
               <small className="control-hint">
                 Regenerates {definition.name} through its own factory with these sizes as inputs, so the heightfield is

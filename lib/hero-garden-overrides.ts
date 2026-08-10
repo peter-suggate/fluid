@@ -58,9 +58,17 @@ export const HERO_GARDEN_OVERRIDES: HeroGardenOverrides = {
   version: 1,
 };
 
-/** Swap in any node the overrides name, leaving order and everything else alone. */
+/** Swap in any node the overrides name, at any depth, preserving document order. */
 export function applyHeroGardenNodeOverrides(nodes: readonly SceneryNode[]): readonly SceneryNode[] {
   const overrides = HERO_GARDEN_OVERRIDES.nodes;
   if (!overrides) return nodes;
-  return nodes.map((node) => overrides[node.id] ?? node);
+  const replace = (authored: SceneryNode): SceneryNode => {
+    const node = overrides[authored.id] ?? authored;
+    if (node.kind === "group") return { ...node, children: node.children.map(replace) };
+    if (node.kind === "recursive-shape" && node.children?.length) {
+      return { ...node, children: node.children.map((child) => replace(child) as typeof child) };
+    }
+    return node;
+  };
+  return nodes.map(replace);
 }

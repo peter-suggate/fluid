@@ -99,7 +99,11 @@ import { useUIStore } from "@/lib/stores/ui-store";
 import { useRuntimeStore } from "@/lib/stores/runtime-store";
 import { SmoothedFrameRate } from "@/lib/frame-rate-meter";
 import { getScenePreset } from "@/lib/scenes";
-import { SVO_RENDER_STAGE_DEFINITIONS, svoRenderStageUsesLightSlot } from "@/lib/svo-render-diagnostics";
+import {
+  DEFAULT_SVO_RENDER_DIAGNOSTICS,
+  SVO_RENDER_STAGE_DEFINITIONS,
+  svoRenderStageUsesLightSlot,
+} from "@/lib/svo-render-diagnostics";
 import { projectViewportFailure, viewportFailureIndicator } from "@/lib/viewport-failure-diagnostics";
 import { dawnReproductionForGPUFailure } from "@/lib/webgpu-failure-reproduction";
 import {
@@ -196,6 +200,9 @@ export function WebGPUViewport() {
   const svoStageView = useUIStore((state) => state.svoStageView);
   const svoStageLightSlot = useUIStore((state) => state.svoStageLightSlot);
   const svoStageDefinition = SVO_RENDER_STAGE_DEFINITIONS[svoStageView];
+  // The global default plane is the clean presentation, not an investigation,
+  // so the diagnostic legend must not sit on top of every scene's artwork.
+  const stageViewIsDefaultPresentation = DEFAULT_SVO_RENDER_DIAGNOSTICS.stageView === svoStageView;
   const svoStageRamp = `linear-gradient(90deg,${svoStageDefinition.legend
     .map((stop) => `${stop.color} ${Math.round(stop.at * 100)}%`).join(",")})`;
   const activeTool = useUIStore((state) => state.activeTool);
@@ -985,7 +992,9 @@ export function WebGPUViewport() {
               ambientOcclusionEnabled: ui.svoAmbientOcclusionEnabled,
               silhouetteRefinementEnabled: ui.silhouetteRefinementEnabled,
               coneTracingMode: ui.svoConeTracingMode,
+              globalIlluminationEnabled: ui.svoGlobalIlluminationEnabled,
               primaryTraversal: ui.svoPrimaryTraversal,
+              disabledStages: ui.disabledRenderStages,
             },
             {
               stageView: ui.svoStageView,
@@ -2038,7 +2047,7 @@ export function WebGPUViewport() {
     >
       <i /><span>{failure.locationLabel ?? "first recorded failure"}</span>
     </div>}
-    {svoStageView !== "off" && <div className="svo-cost-legend" data-testid="svo-stage-legend">
+    {svoStageView !== "off" && !stageViewIsDefaultPresentation && <div className="svo-cost-legend" data-testid="svo-stage-legend">
       <header>
         <span>STAGE · {svoStageDefinition.label}</span>
         <span>{svoRenderStageUsesLightSlot(svoStageView) ? `slot ${svoStageLightSlot} · ` : ""}{svoStageDefinition.plane}</span>

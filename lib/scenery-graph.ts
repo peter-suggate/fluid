@@ -294,6 +294,30 @@ export interface SceneryLatticeClusterNode extends SceneryClusterNodeBase {
 }
 
 /**
+ * A thresholded two-scale density field for foliage.
+ *
+ * The coarse noise does not draw geometry by itself; it changes the local
+ * probability that the finer noise is occupied, producing dense clumps with
+ * genuine voids between them. The field is clipped to `lobe`, like every
+ * cluster, but unlike a lattice it contains no repeated spheres.
+ */
+export interface SceneryNoiseFoliageClusterNode extends SceneryClusterNodeBase {
+  readonly field: "noise-foliage";
+  /** Period of the density clusters, in authored units. */
+  readonly clusterPeriod: number;
+  /** Period of the terminal foliage breakup, in authored units. */
+  readonly detailPeriod: number;
+  /** Density iso-value in [0, 1]. */
+  readonly threshold: number;
+  /** Contribution of the cluster noise, in [0, 1]. */
+  readonly clusterWeight: number;
+  /** Contribution of the detail noise, in [0, 1]. */
+  readonly detailWeight: number;
+  /** Extra density at the centre of the pad, in [0, 1]. */
+  readonly interiorBias: number;
+}
+
+/**
  * A set of oriented anisotropic lobes, placed from the seed and fused.
  *
  * A general irregular solid whose silhouette has as many distinct curvatures as
@@ -348,6 +372,7 @@ export interface SceneryTaperedSweepClusterNode extends SceneryClusterNodeBase {
 
 export type SceneryClusterNode =
   | SceneryLatticeClusterNode
+  | SceneryNoiseFoliageClusterNode
   | ScenerySeededLobesClusterNode
   | SceneryTaperedSweepClusterNode;
 
@@ -404,6 +429,69 @@ export interface SceneryGroupNode extends SceneryNodeBase {
   readonly children: readonly SceneryNode[];
 }
 
+/** The two-scale density field an active foliage pad publishes. */
+export interface FoliageDensityForm {
+  /** Low-frequency cluster spacing, in metres. */
+  readonly clusterPeriod_m: number;
+  /** Distance between fine foliage noise features inside this pad, in metres. */
+  readonly dotSpacing_m: number;
+  /** Density iso-value: raising it removes foliage. */
+  readonly threshold: number;
+  /** Contribution of the contrast-shaped cluster octave, in [0, 1]. */
+  readonly clusterWeight: number;
+  /** Contribution of the fine detail octave, in [0, 1]. */
+  readonly detailWeight: number;
+  /** Density added throughout the interior, in [0, 1]. */
+  readonly interiorBias: number;
+}
+
+/** One art-directable mass on the active frontier of a recursive crown. */
+export interface FoliagePadForm {
+  /** Unflattened half-axes, in metres. */
+  readonly radii_m: readonly [number, number, number];
+  /** Multiplier on the vertical half-axis, in (0, 1]. */
+  readonly flatten: number;
+  /** Distinct perimeter lobes compiled into this one bounded record. */
+  readonly edgeLobes: number;
+  /** Perimeter displacement, from compact (0) to strongly lobed (1). */
+  readonly lobeDepth: number;
+  /** Bias used by child placement to keep the crown full on top. */
+  readonly topBias: number;
+  /** Bias used by child placement to open the crown underside. */
+  readonly undersideCut: number;
+  /** Seeded variation within the pad, in [0, 1]. */
+  readonly blockJitter: number;
+  /** The exact density controls exposed by Shape Lab and sent to the renderer. */
+  readonly density: FoliageDensityForm;
+}
+
+/** The deterministic proposal Shape Lab materializes when a pad is refined. */
+export interface FoliageSplitRule {
+  readonly pattern: "fan" | "ring" | "cap";
+  readonly childCount: number;
+  readonly childScale: number;
+  readonly spread: number;
+  readonly overlap: number;
+  readonly verticalBias: number;
+  readonly flattening: number;
+  readonly jitter: number;
+}
+
+/**
+ * A recursive shape whose saved children, not a hidden generator, are the
+ * geometry authority. A leaf emits one bounded foliage record. A refined node
+ * emits only its children, making collapse an exact removal of `children`.
+ */
+export interface SceneryRecursiveShapeNode extends SceneryNodeBase {
+  readonly kind: "recursive-shape";
+  readonly family: "foliage-pad";
+  readonly seed: number;
+  readonly form: FoliagePadForm;
+  readonly split: FoliageSplitRule;
+  readonly material: SceneryMaterial;
+  readonly children?: readonly SceneryRecursiveShapeNode[];
+}
+
 /**
  * The first generator, and still its own node kind.
  *
@@ -437,7 +525,7 @@ export interface SceneryTreeNode extends SceneryNodeBase {
  *
  * Declared here rather than derived from `SCENERY_GENERATORS` for one reason:
  * `lib/model.ts` validates every parsed scene against this module, and the
- * schema should not have to load six geometry modules — a bonsai's canopy
+ * schema should not have to load five geometry modules — a bonsai's canopy
  * planner among them — in order to decide whether a name is legal. The catalog
  * is annotated total over this list, so an id with no entry and an entry with
  * no id are both compile errors, and the split cannot drift. It is the same
@@ -447,7 +535,6 @@ export const SCENERY_GENERATOR_IDS = Object.freeze([
   "swept-coping",
   "pond-stone-set",
   "bonsai",
-  "oak",
   "rosette",
   "capped-boulder",
   "stepping-path",
@@ -583,6 +670,7 @@ export type SceneryNode =
   | SceneryPrimitiveNode
   | SceneryGlazingNode
   | SceneryGroupNode
+  | SceneryRecursiveShapeNode
   | SceneryTreeNode
   | SceneryGeneratorNode
   | SceneryShellNode;
@@ -627,7 +715,9 @@ export function* walkSceneryNodes(
   ): Generator<{ node: SceneryNode; path: readonly string[] }> {
     for (const node of list) {
       yield { node, path };
-      if (node.kind === "group") yield* visit(node.children, [...path, node.id]);
+      if (node.kind === "group" || node.kind === "recursive-shape") {
+        yield* visit(node.children ?? [], [...path, node.id]);
+      }
     }
   };
   yield* visit(nodes, []);
@@ -668,6 +758,63 @@ export function validateSceneryGraph(graph: SceneryGraph): string[] {
     if (isSceneryPrimitiveNode(node) && node.material.surface !== undefined
       && !scenerySurfaces.has(node.material.surface)) {
       errors.push(`Scenery node ${node.id} names unknown surface ${node.material.surface}`);
+    }
+    if (node.kind === "recursive-shape") {
+      if (node.family !== "foliage-pad") errors.push(`Scenery node ${node.id} names unknown recursive shape family ${String(node.family)}`);
+      if (!Number.isFinite(node.seed)) errors.push(`Scenery node ${node.id} needs a finite recursive-shape seed`);
+      const radii = node.form?.radii_m;
+      if (!Array.isArray(radii) || radii.length !== 3 || !radii.every((value) => Number.isFinite(value) && value > 0)) {
+        errors.push(`Scenery recursive shape ${node.id} radii must be three positive finite metres`);
+      }
+      const unit = (label: string, value: number, open = false): void => {
+        if (!Number.isFinite(value) || value < 0 || value > 1 || (open && value === 0)) {
+          errors.push(`Scenery recursive shape ${node.id} ${label} must be ${open ? "in (0, 1]" : "in [0, 1]"}`);
+        }
+      };
+      unit("flatten", node.form?.flatten, true);
+      unit("lobeDepth", node.form?.lobeDepth);
+      unit("topBias", node.form?.topBias);
+      unit("undersideCut", node.form?.undersideCut);
+      unit("blockJitter", node.form?.blockJitter);
+      const density = node.form?.density;
+      if (!density) {
+        errors.push(`Scenery recursive shape ${node.id} needs density controls`);
+      } else {
+        if (!(density.clusterPeriod_m > 0) || !Number.isFinite(density.clusterPeriod_m)) {
+          errors.push(`Scenery recursive shape ${node.id} density clusterPeriod_m must be positive and finite`);
+        }
+        if (!(density.dotSpacing_m > 0) || !Number.isFinite(density.dotSpacing_m)) {
+          errors.push(`Scenery recursive shape ${node.id} density dotSpacing_m must be positive and finite`);
+        }
+        unit("density threshold", density.threshold);
+        unit("density clusterWeight", density.clusterWeight);
+        unit("density detailWeight", density.detailWeight);
+        unit("density interiorBias", density.interiorBias);
+        if (!(density.clusterWeight + density.detailWeight > 0)) {
+          errors.push(`Scenery recursive shape ${node.id} density needs a positive noise weight`);
+        }
+      }
+      if (!Number.isInteger(node.form?.edgeLobes) || node.form.edgeLobes < 4 || node.form.edgeLobes > 12) {
+        errors.push(`Scenery recursive shape ${node.id} edgeLobes must be an integer from 4 to 12`);
+      }
+      if (!Number.isInteger(node.split?.childCount) || node.split.childCount < 3 || node.split.childCount > 5) {
+        errors.push(`Scenery recursive shape ${node.id} childCount must be an integer from 3 to 5`);
+      }
+      unit("childScale", node.split?.childScale, true);
+      unit("spread", node.split?.spread);
+      unit("overlap", node.split?.overlap);
+      unit("verticalBias", node.split?.verticalBias);
+      unit("flattening", node.split?.flattening);
+      unit("jitter", node.split?.jitter);
+      if (node.children !== undefined && node.children.length === 0) {
+        errors.push(`Scenery recursive shape ${node.id} children must be omitted rather than empty`);
+      }
+      if ("palette" in node.material && graph.palettes[node.material.palette] === undefined) {
+        errors.push(`Scenery node ${node.id} names unknown palette ${node.material.palette}`);
+      }
+      if (node.material.surface !== undefined && !scenerySurfaces.has(node.material.surface)) {
+        errors.push(`Scenery node ${node.id} names unknown surface ${node.material.surface}`);
+      }
     }
     if (node.kind === "generator") {
       // A parsed document is `JSON.parse` output cast to the schema, so the id

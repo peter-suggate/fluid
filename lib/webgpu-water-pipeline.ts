@@ -32,6 +32,11 @@ import {
 import { globalFineClassifiedEmitShader, globalFineClassifiedIndirectScanShader } from "./webgpu-water-global-fine-tetra";
 import { globalFineSurfaceClassificationShader } from "./webgpu-water-global-fine-classify";
 import type { GPUTimestampPhase } from "./performance-trace";
+import {
+  disabledRenderStagesEqual,
+  NO_DISABLED_RENDER_STAGES,
+  type DisabledRenderStages,
+} from "./render-stage-switches";
 
 /**
  * Rasterized water presentation for the WebGPU renderer.
@@ -1367,6 +1372,7 @@ export class RasterWaterPipeline {
   private causticsValid = false;
   private sceneHasFluid = true;
   private dryInterfaceClearsEncoded = false;
+  private disabledStages: DisabledRenderStages = NO_DISABLED_RENDER_STAGES;
   private secondaryParticles?: SecondaryParticleRenderPipeline;
   private globalFineLevelSet?: GlobalFineLevelSetConsumerSource;
   private coarseLevelSet?: CoarseLevelSetConsumerSource;
@@ -1381,6 +1387,11 @@ export class RasterWaterPipeline {
   private surfaceDiagnosticCompletion?: Promise<WaterRenderDiagnostics | undefined>;
   private lastSurfaceDiagnostics?: WaterRenderDiagnostics;
   private lastSurfaceDiagnosticEncodeAt_ms = -Infinity;
+  // An extraction can land while the bounded diagnostics readback is still
+  // throttled (or an older receipt is in flight). Keep the replacement receipt
+  // armed after the mesh revision stops changing so a paused UI cannot retain
+  // an obsolete "empty" result beside newly published geometry.
+  private surfaceDiagnosticsDirty = false;
   private pendingSurfaceDiagnosticGlobalFine = false;
   private pendingSurfaceDiagnosticCoarse = false;
   private pendingSurfaceDiagnosticGlobalFineGeneration?: number;
@@ -1906,6 +1917,23 @@ export class RasterWaterPipeline {
     this.dryInterfaceClearsEncoded = false;
   }
 
+  /**
+   * Frame-graph stages this pipeline must not encode. See
+   * `render-stage-switches`; only `water-interfaces`, `caustics` and
+   * `optical-composite` are its to honour.
+   *
+   * Re-enabling has to re-run the once-only clears and re-project the caustic
+   * map: both are retained precisely because nothing invalidated them, and a
+   * withheld frame is an invalidation.
+   */
+  setDisabledStages(disabled: DisabledRenderStages) {
+    if (disabledRenderStagesEqual(this.disabledStages, disabled)) return;
+    this.disabledStages = new Set(disabled);
+    this.dryInterfaceClearsEncoded = false;
+    this.causticsValid = false;
+    this.clearBackgroundEncoded = false;
+  }
+
   private rebuildBindGroups() {
     this.compositeBindGroups = new WeakMap();
     const globalFine = this.globalFineLevelSet;
@@ -1999,7 +2027,8 @@ export class RasterWaterPipeline {
     // The map follows the mesh: a retained surface deposits the same bundles,
     // so re-projecting it would spend a full pass to write the same texels. A
     // scene that authors zero caustic strength never encodes the pass at all.
-    const updateCaustics = this.causticStrength > 0 && (updateSurface || !this.causticsValid);
+    const updateCaustics = this.causticStrength > 0 && !this.disabledStages.has("caustics")
+      && (updateSurface || !this.causticsValid);
     if (updateSurface) {
       const indirectReset = this.indirectResetTemplate ??= this.createIndirectResetTemplate();
       if (compactSurface) {
@@ -2054,9 +2083,17 @@ export class RasterWaterPipeline {
         prepareAndPolygonise(this.polygonisePipeline,this.extractBindGroup);
         compute.end();
       }
-      surfaceDiagnosticsCaptured = this.encodeSurfaceDiagnostics(encoder, forceSurfaceDiagnostics);
+      this.surfaceDiagnosticsDirty = true;
       this.extractedRevision = revision; this.lastExtractionAt_ms = advancePresentationClock(this.lastExtractionAt_ms, now_ms);
       tracePhase?.({ id: "surface-extraction", label: "Water surface extraction" });
+    }
+    // Diagnostics have their own bounded cadence. Retry the copy independently
+    // of surface extraction: the solver revision may remain unchanged forever
+    // after a paused/manual step, while the most recent extraction still needs
+    // to displace a throttled generation-transition receipt.
+    if (this.surfaceDiagnosticsDirty) {
+      surfaceDiagnosticsCaptured = this.encodeSurfaceDiagnostics(encoder, forceSurfaceDiagnostics);
+      if (surfaceDiagnosticsCaptured) this.surfaceDiagnosticsDirty = false;
     }
     if (updateCaustics) {
       const caustic=encoder.beginRenderPass({label:"Water caustics",colorAttachments:[{view:this.causticTexture.createView(),clearValue:{r:0,g:0,b:0,a:0},loadOp:"clear",storeOp:"store"}]});caustic.setPipeline(this.causticPipeline);caustic.setBindGroup(0,this.causticBindGroup);caustic.drawIndirect(this.indirectBuffer,0);caustic.end();
@@ -2094,7 +2131,12 @@ export class RasterWaterPipeline {
     // Encode both draws in one pass per side so spray does not force two extra
     // full-resolution attachment load/store cycles.
     const interfacePass=(label:string,pipeline:GPURenderPipeline,position:GPUTexture,normal:GPUTexture,depth:GPUTexture,side:"front"|"back",particles=true,peel=false)=>{const pass=encoder.beginRenderPass({label,colorAttachments:[{view:position.createView(),clearValue:{r:0,g:0,b:0,a:0},loadOp:"clear",storeOp:"store"},{view:normal.createView(),clearValue:{r:0,g:0,b:0,a:0},loadOp:"clear",storeOp:"store"}],depthStencilAttachment:{view:depth.createView(),depthClearValue:1,depthLoadOp:"clear",depthStoreOp:"store"}});pass.setPipeline(pipeline);pass.setBindGroup(0,this.surfaceBindGroup!);pass.setBindGroup(1,peel?this.surfacePeelBindGroup!:this.surfaceUnpeeledBindGroup!);pass.drawIndirect(this.indirectBuffer!,0);if(particles){this.secondaryParticles?.encodeOpticalInterface(pass,side);}pass.end();};
-    if (this.sceneHasFluid) {
+    // Withheld, a fluid scene takes the same once-only clears a dry one does:
+    // the compositor reads these attachments unconditionally, so leaving them
+    // holding the last drawn interface would keep compositing water that this
+    // frame did not extract.
+    const interfacesWithheld = this.disabledStages.has("water-interfaces");
+    if (this.sceneHasFluid && !interfacesWithheld) {
       interfacePass("Water + spray front interfaces",this.surfaceFrontPipeline,this.frontPosition,this.frontNormal,this.frontDepth,"front");
       tracePhase?.({ id: "water-front-interface", label: "Water + spray front interface" });
       interfacePass("Water + spray back interfaces",this.surfaceBackPipeline,this.backPosition,this.backNormal,this.backDepth,"back");
@@ -2116,7 +2158,14 @@ export class RasterWaterPipeline {
     traceBoundary?.();
     const compositeBindGroup = sparseSceneResult ? this.compositeBindGroupFor(sparseSceneResult.sampledTargetView) : this.compositeBindGroup;
     if (!compositeBindGroup) return false;
-    const outputView="createView" in output?output.createView():output;const composite=encoder.beginRenderPass({label:"Layered water optical composite",colorAttachments:[{view:outputView,clearValue:{r:.01,g:.025,b:.024,a:1},loadOp:"clear",storeOp:"store"}]});composite.setPipeline(this.compositePipeline);composite.setBindGroup(0,compositeBindGroup);composite.draw(3);composite.end();tracePhase?.({ id: "optical-composite", label: "Layered optical composite" });traceBoundary?.();return { surfaceUpdated: updateSurface, surfaceDiagnosticsCaptured };
+    const outputView="createView" in output?output.createView():output;const composite=encoder.beginRenderPass({label:"Layered water optical composite",colorAttachments:[{view:outputView,clearValue:{r:.01,g:.025,b:.024,a:1},loadOp:"clear",storeOp:"store"}]});
+    // The single final transform every render path shares: withholding it keeps
+    // the clear so the presentation target is the background colour rather than
+    // a stale composite that would look like the pass still ran.
+    if (!this.disabledStages.has("optical-composite")) {
+      composite.setPipeline(this.compositePipeline);composite.setBindGroup(0,compositeBindGroup);composite.draw(3);
+    }
+    composite.end();tracePhase?.({ id: "optical-composite", label: "Layered optical composite" });traceBoundary?.();return { surfaceUpdated: updateSurface, surfaceDiagnosticsCaptured };
   }
 
   destroy() {

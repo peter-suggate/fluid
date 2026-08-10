@@ -5,7 +5,7 @@
  * A leaf brick exists because it holds *at least one* solid cell, so the
  * in-brick DDA routinely enters a legitimately occupied brick, walks the ray's
  * whole chord, finds nothing, and moves on. Grazing terrain, the pond surface
- * and the sparse oak canopy all produce that. The only pre-test today is the
+ * and a sparse recursive canopy all produce that. The only pre-test today is the
  * ray/brick interval, which every such chord passes.
  *
  * The contour is a plane normal `n` and two offsets `d0 <= d1` along it that

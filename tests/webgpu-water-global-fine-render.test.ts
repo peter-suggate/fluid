@@ -18,8 +18,8 @@ import {
   WATER_INTERFACE_CULL_MODES,
   waterSurfaceGeometrySource,
 } from "../lib/webgpu-water-pipeline";
-import { globalFineClassifiedEmitShader, globalFineClassifiedEmitShaders,
-  globalFineClassifiedScanShader } from "../lib/webgpu-water-global-fine-tetra";
+import { cubeContourEdgeLoops, cubeContourEdgePoint, globalFineClassifiedEmitShader, globalFineClassifiedEmitShaders,
+  globalFineClassifiedScanShader, wallFaceContourTriangles } from "../lib/webgpu-water-global-fine-tetra";
 import {
   GLOBAL_FINE_SHARP_CORNER_HALF_CELL_EPSILON,
   globalFineSurfaceClassificationShader,
@@ -50,6 +50,255 @@ test("hard-clipped sharp box features require exact half-cell zero crossings", (
     "all corner and edge axes must match the polygonizer's hardcoded half-cube clips");
   assert.doesNotMatch(classifier, /letsymmetric=/,
     "a broad signed-value tolerance must not admit visibly off-center moving corners");
+});
+
+test("native exact-zero box planes have one D4-equivariant face owner", () => {
+  const dimensions = [8, 8, 8] as const;
+  const corners = cubeCorners.map((corner) => corner.map(Number) as [number, number, number]);
+  const phi = (x: number, y: number, z: number) => Math.max(2 - x, x - 6, -y, y - 4, 2 - z, z - 6);
+  const owners: Array<readonly [number, number, number, number, number]> = [];
+  let lowerDimensionalTouches = 0;
+  for (let z = 0; z < dimensions[2]; z += 1) for (let y = 0; y < dimensions[1]; y += 1) {
+    for (let x = 0; x < dimensions[0]; x += 1) {
+      const raw = corners.map(([ox, oy, oz]) => phi(x + ox, y + oy, z + oz));
+      if (Math.min(...raw) !== 0 || Math.max(...raw) <= 0) continue;
+      let owner: readonly [number, number] | undefined;
+      for (let axis = 0; axis < 3; axis += 1) for (let side = 0; side < 2; side += 1) {
+        if (corners.every((corner, index) => corner[axis] !== side || raw[index] === 0)) {
+          owner ??= [axis, side];
+        }
+      }
+      if (owner) owners.push([x, y, z, owner[0], owner[1]]);
+      else lowerDimensionalTouches += 1;
+    }
+  }
+  assert.equal(owners.length, 80, "five exposed 4x4 faces must each own one patch per cell");
+  assert.ok(lowerDimensionalTouches > 0, "the oracle must exercise discarded edge/corner-only zero touches");
+  const geometry = new Set(owners.map(([x, y, z, axis, side]) => {
+    const plane = [x, y, z]; plane[axis] += side;
+    return `${axis}:${plane.join(":")}`;
+  }));
+  const transformed = new Set(owners.map(([x, y, z, axis, side]) => {
+    const reflectedX = dimensions[0] - x - 1;
+    const reflectedSide = axis === 0 ? 1 - side : side;
+    const plane = [reflectedX, y, z]; plane[axis] += reflectedSide;
+    return `${axis}:${plane.join(":")}`;
+  }));
+  assert.deepEqual(transformed, geometry);
+  const compact = globalFineSurfaceClassificationShader.replace(/\s+/g, "");
+  assert.match(compact,
+    /if\(minimumSigned==0\.0&&maximumSigned>0\.0\)[\s\S]*if\(face\)[\s\S]*emitClassifiedCubeTagged/,
+    "planar zero touches must publish once while lower-dimensional touches return without a cube");
+  assert.match(compact, /emitClassifiedCubeTagged\([^;]+\);return;\}\}\}return;\}if\(minimumSigned>=0\.0/,
+    "the first exact plane must be the unique owner and a lower-dimensional zero touch must emit nothing");
+});
+
+test("native adaptive SDF crossings remain fractional through vertex interpolation", () => {
+  // phi=x-0.3, mapped by adaptiveContourValue to 0.5-phi/band with band=1.
+  const values = [.8, -.2, -.2, .8, .8, -.2, -.2, .8];
+  const point = cubeContourEdgePoint(0, values);
+  assert.ok(Math.abs(point[0] - .3) <= 1 / 65_536);
+  assert.notEqual(point[0], 0);
+  assert.notEqual(point[0], .5);
+  assert.notEqual(point[0], 1);
+  assert.match(globalFineSurfaceClassificationShader,
+    /v\[i\]=adaptiveContourValue\(signed\)[\s\S]*emitClassifiedCubeTagged\(base,0/,
+    "classifier must preserve signed nodal samples and select native emission");
+  assert.match(globalFineClassifiedEmitShader,
+    /contourPoint\([\s\S]*\.5\+centred[\s\S]*base\+scale\*q\+select\(vec3f\(0\),vec3f\(\.5\),nodal\)/,
+    "emission must interpolate the zero crossing before applying the native half-cell frame");
+  assert.match(globalFineClassifiedEmitShader,
+    /if\(p\.table\.y==6u\)[\s\S]*sampleAdaptiveCoarseOctreePhiAtGrid\(vec3f\(q\)\)/,
+    "native filtered normals must sample the accepted nodal SDF, not the legacy cell-centred frame");
+  assert.match(globalFineClassifiedEmitShader,
+    /let x=lattice-select\(vec3f\(1\.0\),vec3f\(0\.5\),p\.table\.y==6u\)/,
+    "native filtered normals must remove only the half-cell render adapter");
+  assert.doesNotMatch(globalFineClassifiedEmitShader, /filterEnabled=code!=0u/,
+    "native adaptive cubes must not be forced onto one flat normal per cell");
+});
+
+test("native adaptive closed walls clip fractional marching-squares contact polygons", () => {
+  const area = (triangle: ReturnType<typeof wallFaceContourTriangles>[number]) => {
+    const [a, b, c] = triangle;
+    return 0.5 * ((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]));
+  };
+  const partial = wallFaceContourTriangles([.75, .25, .25, .25]);
+  assert.equal(partial.length, 1);
+  assert.ok(partial.flat().some(point => point[0] === .5 || point[1] === .5),
+    "the contact line must retain fractional scalar crossings");
+  assert.ok(Math.abs(area(partial[0]!) - .125) < 1e-12);
+  const full = wallFaceContourTriangles([.75, .75, .75, .75]);
+  assert.equal(full.length, 2); assert.equal(full.reduce((sum, triangle) => sum + area(triangle), 0), 1);
+  const disconnected = wallFaceContourTriangles([.55, .1, .55, .1]);
+  assert.equal(disconnected.length, 2, "an air-centred diagonal case keeps two liquid components");
+  const connected = wallFaceContourTriangles([.9, .45, .9, .45]);
+  assert.equal(connected.length, 6, "a liquid-centred diagonal case closes around the shared centre");
+  for (const triangle of [...partial, ...full, ...disconnected, ...connected]) {
+    assert.ok(area(triangle) > 0, "wall polygons must have stable nondegenerate cyclic winding");
+  }
+  const compact = globalFineSurfaceClassificationShader.replace(/\s+/g, "");
+  assert.match(compact, /fnemitAdaptiveWallFace[\s\S]*i32\(252u\+side\)/,
+    "wall records must use a reserved scalar-clipped descriptor ABI, not collide with factor 4/8 scale codes");
+  assert.match(compact,
+    /if\(base\.x==0\)[\s\S]*opaquefloor[\s\S]*if\(base\.z==0\)/,
+    "native closure must cover x/z walls while leaving the opaque floor and open top unoverlapped");
+});
+
+test("Cartesian-edge contour loops and quantized centroids are structurally exact under D4", () => {
+  const edgeA = [0, 1, 3, 0, 4, 5, 7, 4, 0, 1, 2, 3] as const;
+  const edgeB = [1, 2, 2, 3, 5, 6, 6, 7, 4, 5, 6, 7] as const;
+  const roundEven = (value: number) => {
+    const low = Math.floor(value), fraction = value - low;
+    return fraction < 0.5 ? low : fraction > 0.5 ? low + 1 : (low & 1) === 0 ? low : low + 1;
+  };
+  const quantize = (value: number) => Math.fround(roundEven(Math.fround(value * 65_536)) / 65_536);
+  const point = (edge: number, values: readonly number[]) => {
+    const a = cubeCorners[edgeA[edge]!]!, b = cubeCorners[edgeB[edge]!]!;
+    const sa = Math.fround(values[edgeA[edge]!]! - 0.5), sb = Math.fround(values[edgeB[edge]!]! - 0.5);
+    const centred = quantize(Math.fround(Math.fround(0.5 * Math.fround(Math.abs(sa) - Math.abs(sb)))
+      / Math.fround(Math.abs(sa) + Math.abs(sb))));
+    return a.map((coordinate, axis) => Math.fround(coordinate
+      + Math.fround((b[axis]! - coordinate) * Math.fround(0.5 + centred)))) as unknown as V3;
+  };
+  const geometry = (values: readonly number[]) => {
+    const loops = cubeContourEdgeLoops(values);
+    const crossing = edgeA.map((_, edge) => edge).filter(edge => (values[edgeA[edge]!]! >= 0.5)
+      !== (values[edgeB[edge]!]! >= 0.5));
+    assert.equal(loops.flat().length, crossing.length, "every crossing edge must occur in one closed loop");
+    assert.equal(new Set(loops.flat()).size, crossing.length, "loops must not duplicate a shared-face crossing");
+    assert.ok(loops.every(loop => loop.length >= 3), "each component must be a polygon, not an open segment");
+    return loops.flatMap(loop => {
+      const points = loop.map(edge => point(edge, values));
+      const sum = points.reduce((result, q) => result.map((lane, axis) => Math.fround(lane
+        + quantize(Math.fround(q[axis]! - 0.5)))) as unknown as V3, [0, 0, 0] as V3);
+      const centre = sum.map(lane => Math.round(quantize(Math.fround(lane / loop.length)) * 65_536));
+      return [...points.map(q => q.map(lane => Math.round((lane - 0.5) * 65_536)).join(",")),
+        `c:${centre.join(",")}`];
+    }).sort();
+  };
+  const transform = (q: V3, code: number): V3 => {
+    let [x, y, z] = q; const rotation = code & 3;
+    if (rotation === 1) [x, z] = [1 - z, x];
+    else if (rotation === 2) [x, z] = [1 - x, 1 - z];
+    else if (rotation === 3) [x, z] = [z, 1 - x];
+    if ((code & 4) !== 0) x = 1 - x;
+    return [x, y, z];
+  };
+  const transformKey = (key: string, code: number) => {
+    const centroid = key.startsWith("c:");
+    const lanes = (centroid ? key.slice(2) : key).split(",").map(Number);
+    let [x, y, z] = lanes; const rotation = code & 3;
+    if (rotation === 1) [x, z] = [-z, x];
+    else if (rotation === 2) [x, z] = [-x, -z];
+    else if (rotation === 3) [x, z] = [z, -x];
+    if ((code & 4) !== 0) x = -x;
+    return `${centroid ? "c:" : ""}${x},${y},${z}`;
+  };
+  const cornerIndex = new Map(cubeCorners.map((corner, index) => [corner.join(","), index]));
+  // Unequal binary fractions exercise edge traversal order changes and make
+  // the centroid reduction sensitive to any non-canonical floating sum.
+  for (let mask = 1; mask < 255; mask += 1) {
+    const values = cubeCorners.map((_, corner) => 0.5
+      + ((mask >>> corner) & 1 ? 1 : -1) * (3 + 2 * corner) / 65_536);
+    const original = geometry(values);
+    for (let code = 0; code < 8; code += 1) {
+      const transformed = Array<number>(8);
+      cubeCorners.forEach((corner, index) => { transformed[cornerIndex.get(transform(corner, code).join(","))!] = values[index]!; });
+      assert.deepEqual(geometry(transformed), original.map(key => transformKey(key, code)).sort(),
+        `case ${mask} must preserve edge positions and centroid bits under D4 transform ${code}`);
+    }
+  }
+  const polygonPoints = (values: readonly number[]) => cubeContourEdgeLoops(values)
+    .map(loop => {
+      const result: V3[] = [];
+      for (const edge of loop) {
+        const q = point(edge, values);
+        if (result.length === 0 || q.some((lane, axis) => lane !== result.at(-1)![axis])) result.push(q);
+      }
+      if (result.length > 1 && result[0]!.every((lane, axis) => lane === result.at(-1)![axis])) result.pop();
+      return result;
+    }).filter(points => points.length >= 3);
+  let mixedDegenerateAndValid = 0;
+  for (let encoded = 0; encoded < 3 ** 8; encoded += 1) {
+    let cursor = encoded;
+    const values = cubeCorners.map(() => {
+      const digit = cursor % 3; cursor = Math.floor(cursor / 3);
+      return [0.25, 0.5, 0.75][digit]!;
+    });
+    const raw = cubeContourEdgeLoops(values).map(loop => loop.map(edge => point(edge, values)))
+      .map(points => points.filter((q, index) => index === 0
+        || q.some((lane, axis) => lane !== points[index - 1]![axis])));
+    const valid = polygonPoints(values);
+    if (valid.length > 0 && raw.some(points => points.length < 3)) mixedDegenerateAndValid += 1;
+    for (const points of valid) {
+      const centre = points.reduce((sum, q) => sum.map((lane, axis) => Math.fround(lane
+        + quantize(Math.fround(q[axis]! - 0.5)))) as unknown as V3, [0, 0, 0] as V3)
+        .map(lane => Math.fround(0.5 + quantize(Math.fround(lane / points.length)))) as unknown as V3;
+      const radial = new Map<string, number>();
+      const key = (a: V3, b: V3) => [a, b].map(q => q.map(lane => Math.round(lane * 65_536)).join(","))
+        .sort().join("|");
+      for (let index = 0; index < points.length; index += 1) {
+        const a = points[index]!, b = points[(index + 1) % points.length]!;
+        for (const edge of [key(a, centre), key(b, centre)]) radial.set(edge, (radial.get(edge) ?? 0) + 1);
+      }
+      assert.ok([...radial.values()].every(count => count === 2),
+        `zero-valued case ${encoded} must pair every centroid-fan radial edge`);
+    }
+  }
+  assert.ok(mixedDegenerateAndValid > 0,
+    "zero-valued cubes must exercise a collapsed component beside a valid contour");
+  const faceSegments = (values: readonly number[], axis: number, side: number) => {
+    const segments: string[] = [];
+    for (const points of polygonPoints(values)) for (let index = 0; index < points.length; index += 1) {
+      const a = points[index]!, b = points[(index + 1) % points.length]!;
+      if (a[axis] !== side || b[axis] !== side) continue;
+      const tangents = [0, 1, 2].filter(lane => lane !== axis);
+      if (tangents.some(lane => a[lane] === b[lane] && (a[lane] === 0 || a[lane] === 1))) continue;
+      const key = [a, b].map(q => q.filter((_, lane) => lane !== axis)
+        .map(lane => Math.round(lane * 65_536)).join(",")).sort().join("|");
+      segments.push(key);
+    }
+    return segments.sort();
+  };
+  for (let axis = 0; axis < 3; axis += 1) for (let faceCode = 0; faceCode < 81; faceCode += 1) {
+    let faceCursor = faceCode;
+    const shared = Array.from({ length: 4 }, () => {
+      const value = [0.25, 0.5, 0.75][faceCursor % 3]!; faceCursor = Math.floor(faceCursor / 3); return value;
+    });
+    if (shared.every(value => value === 0.5)) continue;
+    for (let outsideCode = 0; outsideCode < 81; outsideCode += 1) {
+      const tangents = [0, 1, 2].filter(lane => lane !== axis);
+      let outsideCursor = outsideCode;
+      const a = Array<number>(8), b = Array<number>(8);
+      for (let corner = 0; corner < 8; corner += 1) if (cubeCorners[corner]![axis] === 1) {
+        a[corner] = shared[cubeCorners[corner]![tangents[0]!]!
+          + 2 * cubeCorners[corner]![tangents[1]!]!]!;
+      } else {
+        const value = [0.25, 0.5, 0.75][outsideCursor % 3]!;
+        outsideCursor = Math.floor(outsideCursor / 3); a[corner] = value;
+      }
+      outsideCursor = 80 - outsideCode;
+      for (let corner = 0; corner < 8; corner += 1) if (cubeCorners[corner]![axis] === 0) {
+        b[corner] = shared[cubeCorners[corner]![tangents[0]!]!
+          + 2 * cubeCorners[corner]![tangents[1]!]!]!;
+      } else {
+        const value = [0.25, 0.5, 0.75][outsideCursor % 3]!;
+        outsideCursor = Math.floor(outsideCursor / 3); b[corner] = value;
+      }
+      assert.deepEqual(faceSegments(a, axis, 1), faceSegments(b, axis, 0),
+        `axis ${axis} shared-face ternary case ${faceCode}/${outsideCode} must emit identical segments`);
+    }
+  }
+  const compact = globalFineClassifiedEmitShader.replace(/\s+/g, "");
+  assert.match(compact, /fncontourPoint[\s\S]*contourSnap\(\.5\*\(abs\(sa\)-abs\(sb\)\)\/denominator\)/,
+    "edge fractions must use an antisymmetric common quantizer");
+  assert.match(compact, /centredSum\+=q-vec3f\(\.5\)[\s\S]*contourSnap\(centredSum\.x\/f32\(loopCount\)\)/,
+    "loop centroids must sum quantized centred coordinates before their common rounding");
+  assert.match(globalFineClassifiedScanShader.replace(/\s+/g, ""),
+    /if\(uniqueCount<3u\)\{continue;\}total\+=uniqueCount/,
+    "scan must skip only a collapsed exact-zero component, not suppress another valid loop");
+  assert.match(compact, /if\(loopCount<3u\)\{continue;\}letcentre/,
+    "emission must make the same component-local exact-zero decision as scan");
 });
 
 function initializedBuffer(device: GPUDevice, data: ArrayBufferView, usage: GPUBufferUsageFlags): GPUBuffer {
@@ -109,7 +358,7 @@ function tetraSurface(points: readonly V3[], values: readonly number[], normal: 
 test("global fine planar surfaces publish outward CCW triangles for front-face culling", () => {
   const sources = [...globalFineClassifiedEmitShaders, globalFineClassifiedEmitShader];
   for (const source of sources) {
-    assert.match(source, /n=-normalize\(gradient\)/,
+    assert.match(source, /let raw=-gradient\/magnitude/,
       "negative-inside phi must turn the decreasing occupancy gradient into an outward normal");
     assert.match(source,
       /if\(dot\(cross\(y\.position\.xyz-x\.position\.xyz,z\.position\.xyz-x\.position\.xyz\),n\)>=0\.\)\{out\[first\+1u\]=y;out\[first\+2u\]=z;\}else\{out\[first\+1u\]=z;out\[first\+2u\]=y;\}/,
@@ -180,15 +429,15 @@ test("sharp box face owners are explicit nondegenerate rectangles", () => {
     /if\(clipMask!=0u\)\{localTotal\+=6u;\}/,
     "a sharp face must allocate exactly two triangles instead of six squeezed tetrahedra");
   assert.match(compactScan,
-    /if\(clipMask!=0u\)\{offsets\[i\*6u\]=cursor;cursor\+=6u;/,
-    "only the first emission lane may own the two-triangle rectangle");
+    /vartriangleCount=select\(contourTriangleCount\(samples\),2u,clipMask!=0u\);[\s\S]*if\(wallFace\)[\s\S]*else\{cursor\+=3u\*min\(2u,triangleCount-min\(triangleCount,2u\*lane\)\)/,
+    "the direct rectangle and contour fan must share exact per-lane offset accounting");
   const compactEmit = globalFineClassifiedEmitShader.replace(/\s+/g, "");
   assert.match(compactEmit,
     /fndirectPatch\([\s\S]*tri\(cursor,a,b,c,n,false\);tri\(cursor,a,c,d,n,false\);/,
     "the sharp owner must emit one complete rectangle with a shared diagonal");
   assert.match(compactEmit,
-    /if\(clipMask!=0u\)\{if\(tetrahedron==0u\)\{directPatch/,
-    "the combined production shader must bypass tetrahedral clipping for sharp rectangles");
+    /if\(clipMask!=0u\)\{if\(lane==0u\)\{directPatch/,
+    "the combined production shader must bypass contouring for sharp rectangles");
 
   const patch = (axis: 0 | 1 | 2, mask: number, highBits: number) => {
     const lo = [0, 0, 0], hi = [1, 1, 1];
@@ -263,6 +512,9 @@ test("global fine extraction has a bounded two-dimensional dispatch", () => {
   assert.match(globalFineClassifiedEmitShader,
     /fn directPatch[\s\S]*mask=\(descriptor>>8u\)&7u[\s\S]*axis=\(descriptor>>14u\)&3u[\s\S]*tri\(cursor,a,b,c,n,false\);tri\(cursor,a,c,d,n,false\)/,
     "separate box-face owners must be complete rectangles terminating on shared half-cell edges");
+  assert.match(globalFineClassifiedEmitShader,
+    /let center=\.5\*\(dims\+vec3f\(1\)\);let horizontal=clamp\(\(q-center\)\/dims,vec3f\(-\.5\),vec3f\(\.5\)\)/,
+    "horizontal world coordinates must be evaluated about the exact D+1 ghost-lattice centre");
   assert.match(globalFineSurfaceClassificationShader,
     /if\(p\.x<=0\|\|p\.x>=dims\.x\+1\)\{[\s\S]*wallMode!=2u[\s\S]*if\(p\.z<=0\|\|p\.z>=dims\.z\+1\)\{[\s\S]*wallMode!=1u/,
     "each edge cap must mirror only through its tangential wall and retain air across its owned normal wall");
@@ -270,16 +522,34 @@ test("global fine extraction has a bounded two-dimensional dispatch", () => {
     /@builtin\(workgroup_id\)group:vec3u,@builtin\(local_invocation_index\)local:u32[\s\S]*for\(var index=local;index<total;index\+=256u\)/,
     "one workgroup must cooperatively subdivide a coarse leaf instead of risking a scalar scale-cubed loop");
   assert.match(globalFineSurfaceClassificationShader,
-    /if\(params\.table\.y==6u\)[\s\S]*cubeDims=params\.sampleDimensions\+vec3u\(1u\)[\s\S]*classifyScaled\(vec3i\(i32\(x\),i32\(y\),i32\(z\)\),1\)/,
-    "factor-1 compact coarse rendering must classify every dense-complement cube exactly once");
+    /if\(adaptiveNodalPublication\(\)\)[\s\S]*cubeDims=params\.sampleDimensions[\s\S]*classifyAdaptiveNodal[\s\S]*cubeDims=params\.sampleDimensions\+vec3u\(1u\)[\s\S]*classifyScaled/,
+    "adaptive factor-1 rendering must use native nodal cubes while legacy compact data retains its optical ghost lattice");
+  assert.match(globalFineSurfaceClassificationShader,
+    /sampleAdaptiveCoarseOctreePhiAtGrid\(vec3f\(base\+o\[i\]\)\)[\s\S]*emitClassifiedCubeTagged\(base,0/,
+    "adaptive cube corners must sample the published nodal scalar at integer coordinates and tag native emission");
+  assert.match(globalFineSurfaceClassificationShader,
+    /fn adaptiveContourValue\(value:f32\)->f32\{[\s\S]*return 0\.5-value\/band;\}[\s\S]*v\[i\]=adaptiveContourValue\(signed\)/,
+    "adaptive contour interpolation must preserve signed phi instead of clamping endpoints by sample spacing");
+  assert.match(globalFineSurfaceClassificationShader,
+    /\(entry\.flags&0x10000001u\)!=0x10000001u/,
+    "adaptive nodal sampling must require the low valid bit plus the adaptive tag, not confuse the directory-state high bit for row validity");
+  assert.match(globalFineClassifiedEmitShader,
+    /let nodal=\(descriptor&255u\)==0u;var r=base\+scale\*q\+select\(vec3f\(0\),vec3f\(\.5\),nodal\)/,
+    "native nodal cubes must share the established optical world transform without a half-cell scalar shift");
+  assert.match(globalFineClassifiedEmitShader,
+    /mix\(x,y,clamp\(\(\.5-a\)\/\(b-a\),0\.,1\.\)\)/,
+    "exact nodal zeroes must remain on their authored node instead of being moved two percent into every cell");
   assert.match(RasterWaterPipeline.prototype.encode.toString(),
     /else if\(coarse\)[\s\S]*compactCoarseSurfaceDispatch\(coarse\.sampleDimensions\)/,
     "compact coarse rendering must dispatch the dense lattice instead of wet rows only");
   assert.match(globalFineClassifiedScanShader, /let published=atomicLoad\(&args\.vertexAllocator\)!=0xffffffffu/,
     "an unpublished A/B generation must retain the previous surface draw count");
   assert.match(globalFineClassifiedScanShader,
-    /if\(published\)\{[\s\S]*atomicStore\(&args\.vertexCount[\s\S]*atomicStore\(&args\.meshPublicationGeneration,p\.table\.w\)/,
-    "the GPU scan that publishes the mesh must commit its exact fine-source generation in the same branch");
+    /if\(published\)\{[\s\S]*atomicStore\(&args\.vertexCount[\s\S]*if\(p\.table\.y!=6u\)\{atomicStore\(&args\.meshPublicationGeneration,p\.table\.w\)/,
+    "the GPU scan must commit the fine-source generation without overwriting a GPU-stamped compact-coarse generation");
+  assert.match(globalFineSurfaceClassificationShader,
+    /if\(params\.table\.y==6u\)\{atomicStore\(&drawArgs\.meshPublicationGeneration,powerCoarseSamples\.generation&0x3fffffffu\)/,
+    "compact-coarse rendering must stamp the generation read from the GPU publication itself");
   assert.match(globalFineClassifiedScanShader,
     /var<workgroup>laneOffsets:array<u32,256>[\s\S]*@workgroup_size\(256\)[\s\S]*let begin=lid\*base\+min\(lid,extra\)[\s\S]*workgroupBarrier\(\)[\s\S]*offsets\[i\*6u\+/,
     "global-fine mesh allocation must use a deterministic cooperative prefix scan, not one invocation over every cube");

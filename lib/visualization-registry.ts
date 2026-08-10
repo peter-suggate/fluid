@@ -143,9 +143,9 @@ export interface FieldVisualization extends VisualizationCommon {
   /** Paper figure this view reproduces, when it reproduces one. */
   readonly figure?: string;
   /**
-   * Declared for the shader harness but not offered as a card. These are modes
-   * the overlay can render that no picker currently exposes; declaring them
-   * keeps the harness complete without silently adding views to the UI.
+   * Omitted from generic catalog-driven pickers. A focused panel may still
+   * select one explicitly; declaring it hidden prevents unrelated catalog
+   * additions from silently expanding that panel or the Performance picker.
    */
   readonly hidden?: boolean;
 }

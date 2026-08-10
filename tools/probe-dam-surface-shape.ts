@@ -1,12 +1,12 @@
 /**
  * Dawn probe for the shape of the published free surface.
  *
- * The `dam-break-ui` water box at `globalFineLevelSetFactor` 1 publishes its
- * whole surface through the coarse level-set directory, so the geometry the
- * browser draws is recoverable on the host without a renderer: fill each
- * published row's size^3 cells with its phi, then read the topmost sign change
- * per (x, z) column. What comes back is the height field the marching-cubes
- * pass sees, in finest-cell units.
+ * The `dam-break-ui` water box publishes an Ando-style sparse finest-cell
+ * level-set band independently of the pressure octree. The geometry the
+ * browser draws is recoverable on the host without a renderer: paint the
+ * coarse fallback from the pressure-row directory, overlay every valid sparse
+ * fine sample, then read the topmost sign change per (x, z) column. What comes
+ * back is the height field the marching-cubes pass sees, in finest-cell units.
  *
  * The number this exists to produce is `interiorRidgeCells`. A closed-box dam
  * break collapsing in +x has a height profile that only falls, until the front
@@ -41,6 +41,13 @@
  *   FLUID_REFINEMENT_REGION_FLOOR  floor for an aligned region over the far half
  *   FLUID_REFINEMENT_REGION_SCOPE  `far-half` (default) or `full`
  *   FLUID_WALL_BAND          live closed-wall look-ahead (1 through 4)
+ *   FLUID_TOPOLOGY_CADENCE_ADVANCES  accepted advances per topology rebuild (1..8)
+ *   FLUID_OCTREE_ADAPTIVITY  0 forces the finest topology; 1 is the production default
+ *   FLUID_SURFACE_COMPACT  1 reports only the repeatable physics-gate metrics
+ *   FLUID_TOPOLOGY_TRANSITION_DIAGNOSTICS  1 adds compact accepted/candidate
+ *     authority, graph, and mass handoff controls at each sample time
+ *   FLUID_TRANSACTION_ONLY  1 skips surface decoding and audits only the
+ *     fail-closed candidate authority/graph/mass/velocity transaction
  *   FLUID_SURFACE_ASCII    1 to print a height map per sample
  *   FLUID_SURFACE_SLICE    1 to print an (x, y) leaf-size slice
  *   FLUID_SURFACE_PHI      1 to print phi in cells on that slice
@@ -53,7 +60,18 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { octreeMethod } from "../lib/methods/octree";
 import type { GPUSolverInstance } from "../lib/methods/types";
+import {
+  unpackFineLevelSetPackedFlags,
+  unpackFineLevelSetPackedPhi,
+} from "../lib/fine-levelset-packed-sample";
 import { getScenePreset } from "../lib/scenes";
+import type { WebGPUFineLevelSetBrickSource } from
+  "../lib/webgpu-octree-fine-levelset-bricks";
+import { unpackAdaptivePhiReceipt } from "../lib/webgpu-octree-losasso-adaptive-phi";
+import { adaptiveMassControlLayout, unpackAdaptiveMassReceipt } from
+  "../lib/webgpu-octree-losasso-adaptive-mass";
+import { LOSASSO_SURFACE_GRAPH_CONTROL } from
+  "../lib/webgpu-octree-losasso-surface-graph";
 import { requiredFluidDeviceLimits } from "../lib/webgpu-device-limits";
 import { readBufferBinding } from "./webgpu-smoke-readbacks";
 import {
@@ -75,7 +93,28 @@ const sampleTimes = (process.env.FLUID_SAMPLE_TIMES_S ?? "0.2,0.4,0.6,0.8,1.0,1.
   .filter((value) => Number.isFinite(value) && value >= 0)
   .sort((left, right) => left - right);
 const printAscii = process.env.FLUID_SURFACE_ASCII === "1";
+const compact = process.env.FLUID_SURFACE_COMPACT === "1";
+const topologyTransitionDiagnostics =
+  process.env.FLUID_TOPOLOGY_TRANSITION_DIAGNOSTICS === "1";
+const transactionOnly = process.env.FLUID_TRANSACTION_ONLY === "1";
 assert.ok(dt > 0 && sampleTimes.length > 0, "Need a positive step and a sample time");
+
+function assertCandidateVelocityMigration(candidateDiagnostics: {
+  candidate: readonly number[];
+  velocityMigration: readonly number[];
+}, time: number): void {
+  const candidate = candidateDiagnostics.candidate;
+  const migration = candidateDiagnostics.velocityMigration;
+  assert.equal(migration[0], candidate[0], `t=${time}: velocity migration epoch`);
+  assert.equal(migration[1], candidate[2], `t=${time}: velocity migration faces`);
+  assert.equal((migration[2] ?? 0) + (migration[3] ?? 0), migration[1],
+    `t=${time}: velocity migration coverage`);
+  assert.equal(migration[4], 0, `t=${time}: velocity migration errors`);
+  assert.equal(migration[5], candidate[0], `t=${time}: velocity migration publication`);
+  assert.ok((migration[6] ?? 0) >= 2, `t=${time}: velocity migration completion sweeps`);
+  assert.ok((migration[7] ?? Infinity) <= (migration[3] ?? 0),
+    `t=${time}: bounded fallback-corner face publication`);
+}
 
 /**
  * How far the published phi overstates the true distance to the zero set.
@@ -155,6 +194,57 @@ function decodeFloat(word: number): number {
   return new Float32Array(new Uint32Array([word >>> 0]).buffer)[0]!;
 }
 
+const authorityControlSummary = (words: Uint32Array | undefined) => words
+  ? Object.freeze({
+    epoch: words[0] ?? 0, rows: words[1] ?? 0, faces: words[2] ?? 0,
+    ready: words[3] ?? 0, errors: words[4] ?? 0,
+    topologyReused: words[5] ?? 0, faceDirectoryCapacity: words[6] ?? 0,
+    reserved: words[7] ?? 0,
+  }) : undefined;
+
+const graphControlSummary = (words: Uint32Array | undefined) => words
+  ? Object.freeze({
+    epoch: words[LOSASSO_SURFACE_GRAPH_CONTROL.epoch] ?? 0,
+    leaves: words[LOSASSO_SURFACE_GRAPH_CONTROL.leafCount] ?? 0,
+    nodes: words[LOSASSO_SURFACE_GRAPH_CONTROL.nodeCount] ?? 0,
+    published: words[LOSASSO_SURFACE_GRAPH_CONTROL.published] ?? 0,
+    errors: words[LOSASSO_SURFACE_GRAPH_CONTROL.errors] ?? 0,
+    surfaceGeneration: words[LOSASSO_SURFACE_GRAPH_CONTROL.surfaceGeneration] ?? 0,
+    velocityGeneration: words[LOSASSO_SURFACE_GRAPH_CONTROL.velocityGeneration] ?? 0,
+    constraints: words[LOSASSO_SURFACE_GRAPH_CONTROL.constraintCount] ?? 0,
+    missingLookups: words[LOSASSO_SURFACE_GRAPH_CONTROL.missingLookupCount] ?? 0,
+    coverageErrors: words[LOSASSO_SURFACE_GRAPH_CONTROL.coverageErrors] ?? 0,
+    reciprocalAdjacencyErrors:
+      words[LOSASSO_SURFACE_GRAPH_CONTROL.reciprocalAdjacencyErrors] ?? 0,
+    leafClosureErrors: words[LOSASSO_SURFACE_GRAPH_CONTROL.leafClosureErrors] ?? 0,
+    capacityErrors: words[LOSASSO_SURFACE_GRAPH_CONTROL.capacityErrors] ?? 0,
+    pressureRows: words[LOSASSO_SURFACE_GRAPH_CONTROL.pressureRowCount] ?? 0,
+    pressureRowMappingErrors:
+      words[LOSASSO_SURFACE_GRAPH_CONTROL.pressureRowMappingErrors] ?? 0,
+  }) : undefined;
+
+const massControlSummary = (words: Uint32Array | undefined) => words
+  ? Object.freeze({
+    magic: words[adaptiveMassControlLayout.magic] ?? 0,
+    topologyEpoch: words[adaptiveMassControlLayout.topologyEpoch] ?? 0,
+    surfaceGeneration: words[adaptiveMassControlLayout.surfaceGeneration] ?? 0,
+    leaves: words[adaptiveMassControlLayout.leafCount] ?? 0,
+    donors: words[adaptiveMassControlLayout.donorCount] ?? 0,
+    transfers: words[adaptiveMassControlLayout.transferCount] ?? 0,
+    missingRecipients: words[adaptiveMassControlLayout.missingRecipients] ?? 0,
+    valid: words[adaptiveMassControlLayout.valid] ?? 0,
+    errors: words[adaptiveMassControlLayout.errorBits] ?? 0,
+  }) : undefined;
+
+async function readControlWords(device: GPUDevice, buffer: GPUBuffer | undefined,
+  wordCount: number): Promise<Uint32Array | undefined> {
+  if (!buffer) return undefined;
+  const byteLength = Math.min(buffer.size, 4 * wordCount);
+  const bytes = await readBufferBinding(device, { buffer }, byteLength);
+  return Uint32Array.from(new Uint32Array(bytes.buffer, bytes.byteOffset,
+    bytes.byteLength / 4));
+}
+
 interface SurfaceShape {
   readonly rows: number;
   readonly cellWidth: number;
@@ -194,6 +284,65 @@ interface SurfaceShape {
   readonly interiorRidgeCells: number;
   readonly interiorRidgeAtX: number;
   readonly heights: readonly number[];
+  /** Representation-neutral quadrature over the dense cell-centred scalar.
+   * Every backend is sampled by the same trilinear reconstruction and fixed
+   * 4^3 subcell lattice, so this is suitable for HEAD/adaptive A/B even when
+   * their native level-set storage differs. */
+  readonly zeroSetQuadrature: {
+    readonly subdivisions: number;
+    readonly volumeCells: number;
+    readonly centerOfMassCells: readonly [number, number, number];
+    readonly frontCells: number;
+  };
+}
+
+function zeroSetQuadrature(
+  field: Float32Array,
+  dimensions: readonly [number, number, number],
+  subdivisions = 4,
+): SurfaceShape["zeroSetQuadrature"] {
+  const [nx, ny, nz] = dimensions;
+  const at = (x: number, y: number, z: number) =>
+    field[Math.min(nx - 1, Math.max(0, x))
+      + nx * (Math.min(ny - 1, Math.max(0, y))
+        + ny * Math.min(nz - 1, Math.max(0, z)))]!;
+  const sample = (px: number, py: number, pz: number) => {
+    const qx = Math.min(nx - 1, Math.max(0, px - 0.5));
+    const qy = Math.min(ny - 1, Math.max(0, py - 0.5));
+    const qz = Math.min(nz - 1, Math.max(0, pz - 0.5));
+    const x0 = Math.floor(qx), y0 = Math.floor(qy), z0 = Math.floor(qz);
+    const x1 = Math.min(nx - 1, x0 + 1), y1 = Math.min(ny - 1, y0 + 1);
+    const z1 = Math.min(nz - 1, z0 + 1);
+    const tx = qx - x0, ty = qy - y0, tz = qz - z0;
+    let value = 0;
+    for (let dz = 0; dz < 2; dz += 1) for (let dy = 0; dy < 2; dy += 1) {
+      for (let dx = 0; dx < 2; dx += 1) {
+        const corner = at(dx === 0 ? x0 : x1, dy === 0 ? y0 : y1,
+          dz === 0 ? z0 : z1);
+        if (!Number.isFinite(corner)) return Number.NaN;
+        value += corner * (dx === 0 ? 1 - tx : tx) * (dy === 0 ? 1 - ty : ty)
+          * (dz === 0 ? 1 - tz : tz);
+      }
+    }
+    return value;
+  };
+  let wet = 0, sx = 0, sy = 0, sz = 0, front = 0;
+  for (let z = 0; z < nz * subdivisions; z += 1) {
+    const pz = (z + 0.5) / subdivisions;
+    for (let y = 0; y < ny * subdivisions; y += 1) {
+      const py = (y + 0.5) / subdivisions;
+      for (let x = 0; x < nx * subdivisions; x += 1) {
+        const px = (x + 0.5) / subdivisions;
+        if (!(sample(px, py, pz) < 0)) continue;
+        wet += 1; sx += px; sy += py; sz += pz; front = Math.max(front, px);
+      }
+    }
+  }
+  const scale = subdivisions ** 3;
+  return Object.freeze({ subdivisions, volumeCells: wet / scale,
+    centerOfMassCells: Object.freeze(wet > 0
+      ? [sx / wet, sy / wet, sz / wet] as const : [0, 0, 0] as const),
+    frontCells: front });
 }
 
 /**
@@ -208,6 +357,7 @@ interface SurfaceShape {
 function surfaceShape(
   words: Uint32Array,
   dimensions: readonly [number, number, number],
+  fineField?: Float32Array,
 ): SurfaceShape {
   const [nx, ny, nz] = dimensions;
   const rowCount = words[2] ?? 0;
@@ -256,6 +406,13 @@ function surfaceShape(
       if (cellPlusOne === cell + 1 && size === 1
         && (flags & (FLAG_VALID | FLAG_FINITE)) === (FLAG_VALID | FLAG_FINITE)
         && Number.isFinite(phi)) field[cell] = phi;
+    }
+  }
+  if (fineField) {
+    assert.equal(fineField.length, field.length, "Fine surface field dimensions disagree");
+    for (let cell = 0; cell < field.length; cell += 1) {
+      const value = fineField[cell]!;
+      if (Number.isFinite(value)) field[cell] = value;
     }
   }
 
@@ -379,7 +536,66 @@ function surfaceShape(
     airRowSizeHistogram: histogram(airRowSizes),
     field, sizeField,
     heights,
+    zeroSetQuadrature: zeroSetQuadrature(field, dimensions),
   };
+}
+
+/** Decode the topology-independent factor-one surface pages into their dense
+ * logical coordinates. Missing samples deliberately remain NaN: only the
+ * coarse directory may classify points outside the authored narrow band. */
+async function readFactorOneFineField(
+  device: GPUDevice,
+  source: WebGPUFineLevelSetBrickSource,
+  dimensions: readonly [number, number, number],
+): Promise<Float32Array> {
+  const { plan } = source;
+  assert.equal(plan.fineFactor, 1, "Dam surface-shape probe expects factor-one fine pages");
+  assert.deepEqual(plan.sampleDimensions, dimensions,
+    "Factor-one fine surface dimensions disagree with the pressure lattice");
+  const capacity = plan.maximumResidentBricks;
+  const [worklistBytes, metadataBytes, sampleBytes] = await Promise.all([
+    readBufferBinding(device, { buffer: source.worklist }, (7 + capacity) * 4),
+    readBufferBinding(device, { buffer: source.metadata }, capacity * 16),
+    readBufferBinding(device, { buffer: source.samples },
+      capacity * plan.samplesPerBrick * 4),
+  ]);
+  const worklist = new Uint32Array(worklistBytes.buffer, worklistBytes.byteOffset,
+    worklistBytes.byteLength / 4);
+  const metadata = new Uint32Array(metadataBytes.buffer, metadataBytes.byteOffset,
+    metadataBytes.byteLength / 4);
+  const samples = new Uint32Array(sampleBytes.buffer, sampleBytes.byteOffset,
+    sampleBytes.byteLength / 4);
+  assert.equal(worklist[0], source.generation, "Fine worklist generation is stale");
+  assert.ok((worklist[3]! & 3) === 3, "Fine worklist is not initialized and published");
+  assert.ok(worklist[1]! <= capacity, "Fine worklist exceeds its page capacity");
+  const [nx, ny, nz] = dimensions;
+  const [bxCount, byCount] = plan.brickDimensions;
+  const r = plan.brickResolution;
+  const field = new Float32Array(nx * ny * nz).fill(Number.NaN);
+  for (let work = 0; work < worklist[1]!; work += 1) {
+    const id = worklist[7 + work] ?? 0xffff_ffff;
+    assert.ok(id < capacity, `Fine worklist physical page ${id} exceeds capacity`);
+    const base = 4 * id;
+    assert.equal(metadata[base], id, "Fine metadata physical identity is malformed");
+    assert.equal(metadata[base + 2], source.generation, "Fine metadata generation is stale");
+    const key = metadata[base + 1]!;
+    assert.ok(key < plan.logicalBrickCount, "Fine metadata logical key is outside the domain");
+    const bz = Math.floor(key / (bxCount * byCount));
+    const remainder = key - bz * bxCount * byCount;
+    const by = Math.floor(remainder / bxCount), bx = remainder - by * bxCount;
+    for (let local = 0; local < plan.samplesPerBrick; local += 1) {
+      const qx = bx * r + local % r;
+      const qy = by * r + Math.floor(local / r) % r;
+      const qz = bz * r + Math.floor(local / (r * r));
+      if (qx >= nx || qy >= ny || qz >= nz) continue;
+      const packed = samples[id * plan.samplesPerBrick + local]!;
+      if ((unpackFineLevelSetPackedFlags(packed) & FLAG_VALID) === 0) continue;
+      const value = unpackFineLevelSetPackedPhi(packed);
+      assert.ok(Number.isFinite(value), `Fine phi is non-finite at ${qx},${qy},${qz}`);
+      field[qx + nx * (qy + ny * qz)] = value;
+    }
+  }
+  return field;
 }
 
 /**
@@ -507,6 +723,10 @@ try {
       ? { finestSurfaceCellSize: Number(process.env.FLUID_FINEST_SURFACE_CELL) } : {}),
     ...(process.env.FLUID_WALL_BAND
       ? { wallBandCells: Number(process.env.FLUID_WALL_BAND) } : {}),
+    ...(process.env.FLUID_TOPOLOGY_CADENCE_ADVANCES
+      ? { topologyCadenceAdvances: Number(process.env.FLUID_TOPOLOGY_CADENCE_ADVANCES) } : {}),
+    ...(process.env.FLUID_OCTREE_ADAPTIVITY
+      ? { octreeAdaptivity: Number(process.env.FLUID_OCTREE_ADAPTIVITY) } : {}),
   }, undefined, () => {}) as GPUSolverInstance;
   await device.queue.onSubmittedWorkDone();
   const dimensions = [solver.info.nx, solver.info.ny, solver.info.nz] as
@@ -544,8 +764,31 @@ try {
         capacity: number;
         dispatch: readonly [number, number, number];
       } | undefined>;
+      readAdaptiveVelocityReceipts(): Promise<readonly number[] | undefined>;
+      readLosassoAuthorityDiagnostics(): Promise<Readonly<{
+        candidate: readonly number[];
+        candidateAdaptiveGraph: readonly number[];
+        ownerCandidate: readonly number[];
+        frontierControl: readonly number[];
+        adaptiveMassControl: readonly number[];
+        adaptiveMassReceipts: readonly number[];
+        velocityMigration: readonly number[];
+      }> | undefined>;
       losassoExtensionControl?: GPUBuffer;
-      losassoBackend?: { extensionBand?: { source?: { faceMetrics?: GPUBuffer } } };
+      losassoBackend?: {
+        sources?: { operator?: { control: GPUBuffer } };
+        candidateAuthorityControl?: GPUBuffer;
+        adaptiveSurfaceGraphSources?: {
+          accepted: { control: GPUBuffer; leaves: GPUBuffer; nodes: GPUBuffer;
+            phi: GPUBuffer; surfaceMass: GPUBuffer };
+          candidate: { control: GPUBuffer; leaves: GPUBuffer; nodes: GPUBuffer;
+            phi: GPUBuffer; surfaceMass: GPUBuffer };
+        };
+        extensionBand?: { source?: { faceMetrics?: GPUBuffer } };
+        adaptivePhiSource?: { receipts: GPUBuffer };
+        adaptiveMassSource?: { control: GPUBuffer; receipts: GPUBuffer };
+        adaptiveVelocity?: { candidateStencilControl: GPUBuffer };
+      };
     };
   }).octreeProjection;
   const projectionRuntime = projection as unknown as {
@@ -575,12 +818,63 @@ try {
       }
     }
     await device.queue.onSubmittedWorkDone();
-    const source = solver.coarseLevelSetSource;
-    assert.ok(source, "factor-1 octree published no coarse level set");
-    const bytes = await readBufferBinding(device, source.directory,
-      source.directory.size ?? source.directory.buffer.size - (source.directory.offset ?? 0));
+    if (transactionOnly) {
+      // Consume/re-arm the same LosassoStepSnapshot ring used by the UI
+      // fail-stop path. Sampling authority buffers alone would miss a rejected
+      // intermediate candidate that a later topology attempt overwrote.
+      await projection?.readSolveDiagnostics();
+      const candidateDiagnostics = await projection?.readLosassoAuthorityDiagnostics();
+      assert.ok(candidateDiagnostics, `t=${step * dt}: candidate diagnostics absent`);
+      const candidate = candidateDiagnostics.candidate;
+      const graph = candidateDiagnostics.candidateAdaptiveGraph;
+      const mass = candidateDiagnostics.adaptiveMassControl;
+      if (candidate[0] === 0) {
+        // Epoch zero is an intentional cadence-reuse step. Graph, mass, and
+        // migration receipts retain the preceding candidate and therefore do
+        // not form a tuple with this empty authority bank. The UI-equivalent
+        // step snapshot above remains responsible for rejecting any latched
+        // authority error before this diagnostic branch runs.
+        assert.deepEqual(candidate.slice(3, 5), [0, 0],
+          `t=${step * dt}: absent candidate carried a fatal verdict`);
+        samples.push({ t_s: step * dt,
+          candidateAuthority: candidate,
+          candidateGraph: graph,
+          massControl: mass,
+          velocityMigration: candidateDiagnostics.velocityMigration });
+        continue;
+      }
+      assertCandidateVelocityMigration(candidateDiagnostics, step * dt);
+      assert.equal(candidate[3], 1, `t=${step * dt}: candidate authority publication `
+        + `candidate=${candidate.join("/")} graph=${graph.slice(0, 7).join("/")}`);
+      assert.equal(candidate[4], 0, `t=${step * dt}: candidate authority errors`);
+      assert.equal(graph[0], candidate[0], `t=${step * dt}: candidate graph epoch`);
+      assert.equal(graph[3], graph[0], `t=${step * dt}: candidate graph publication`);
+      assert.equal(graph[4], 0, `t=${step * dt}: candidate graph errors`);
+      assert.equal(graph[6], graph[5], `t=${step * dt}: candidate graph velocity`);
+      assert.equal(mass[1], candidate[0], `t=${step * dt}: candidate mass epoch`);
+      assert.equal(mass[7], 1, `t=${step * dt}: candidate mass publication`);
+      assert.equal(mass[12], 0, `t=${step * dt}: candidate mass errors`);
+      samples.push({ t_s: step * dt,
+        candidateAuthority: candidate,
+        candidateGraph: graph,
+        massControl: mass,
+        velocityMigration: candidateDiagnostics.velocityMigration });
+      continue;
+    }
+    const fineSource = solver.globalFineLevelSetSource;
+    const coarseSource = solver.coarseLevelSetSource;
+    const directory = fineSource?.coarsePhiDirectory
+      ? { buffer: fineSource.coarsePhiDirectory }
+      : coarseSource?.directory;
+    assert.ok(directory, "factor-one octree published no coarse fallback directory");
+    const directoryBytes = fineSource?.coarsePhiDirectory
+      ? 32 + (fineSource.coarsePhiRowCapacity ?? 0) * ROW_WORDS * 4
+      : directory.size ?? directory.buffer.size - (directory.offset ?? 0);
+    const bytes = await readBufferBinding(device, directory, directoryBytes);
     const words = new Uint32Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 4);
-    const shape = surfaceShape(words, dimensions);
+    const fineField = fineSource
+      ? await readFactorOneFineField(device, fineSource, dimensions) : undefined;
+    const shape = surfaceShape(words, dimensions, fineField);
     const { heights: _heights, field: _field, sizeField: _sizeField, ...summary } = shape;
     if (process.env.FLUID_SURFACE_ROWS === "1") {
       const [nx, ny, nz] = dimensions;
@@ -618,6 +912,145 @@ try {
     const census = await projection?.readTopologyLeafCensus();
     const coarseVolume = await projection?.readCoarseSurfaceTrackerReceipt();
     const adaptiveNodes = await projection?.readAdaptiveNodeReceipt();
+    const adaptiveVelocityReceipts = await projection?.readAdaptiveVelocityReceipts();
+    const candidateDiagnostics = await projection?.readLosassoAuthorityDiagnostics();
+    // The ordinary grading probe may sample immediately after a candidate was
+    // committed and its authority bank cleared; only the transaction-only
+    // lane promises a live candidate tuple at every requested checkpoint.
+    if (transactionOnly && candidateDiagnostics) {
+      assertCandidateVelocityMigration(candidateDiagnostics, step * dt);
+    }
+    const adaptivePhiReceipts = projection?.losassoBackend?.adaptivePhiSource?.receipts;
+    const adaptivePhiReceiptBytes = adaptivePhiReceipts
+      ? await readBufferBinding(device, { buffer: adaptivePhiReceipts }, adaptivePhiReceipts.size)
+      : undefined;
+    const adaptivePhiReceipt = adaptivePhiReceiptBytes
+      ? unpackAdaptivePhiReceipt(new Uint32Array(adaptivePhiReceiptBytes.buffer,
+        adaptivePhiReceiptBytes.byteOffset, adaptivePhiReceiptBytes.byteLength / 4))
+      : undefined;
+    const adaptiveMassReceipts = projection?.losassoBackend?.adaptiveMassSource?.receipts;
+    const adaptiveMassReceiptBytes = adaptiveMassReceipts
+      ? await readBufferBinding(device, { buffer: adaptiveMassReceipts }, adaptiveMassReceipts.size)
+      : undefined;
+    const adaptiveMassReceipt = adaptiveMassReceiptBytes
+      ? unpackAdaptiveMassReceipt(new Uint32Array(adaptiveMassReceiptBytes.buffer,
+        adaptiveMassReceiptBytes.byteOffset, adaptiveMassReceiptBytes.byteLength / 4))
+      : undefined;
+    let adaptiveMassDensity: {
+      dry: number; airSide: number; liquidSide: number; compressed: number;
+      maximum: number; airSideMass_m3: number; compressedMass_m3: number;
+    } | undefined;
+    let reconstructionMismatchNeighborhood: Record<string, unknown> | undefined;
+    const acceptedMassGraph = projection?.losassoBackend
+      ?.adaptiveSurfaceGraphSources?.accepted;
+    if (acceptedMassGraph) {
+      const graphControl = await readControlWords(device, acceptedMassGraph.control, 32);
+      const leafCount = Math.min(graphControl?.[1] ?? 0,
+        Math.floor(acceptedMassGraph.leaves.size / 64),
+        Math.floor(acceptedMassGraph.surfaceMass.size / 4));
+      if (leafCount > 0) {
+        const [leafBytes, massBytes] = await Promise.all([
+          readBufferBinding(device, { buffer: acceptedMassGraph.leaves }, leafCount * 64),
+          readBufferBinding(device, { buffer: acceptedMassGraph.surfaceMass }, leafCount * 4),
+        ]);
+        const leaves = new Uint32Array(leafBytes.buffer, leafBytes.byteOffset,
+          leafBytes.byteLength / 4);
+        const mass = new Float32Array(massBytes.buffer, massBytes.byteOffset,
+          massBytes.byteLength / 4);
+        let dry = 0, airSide = 0, liquidSide = 0, compressed = 0;
+        let maximum = 0, airSideMass_m3 = 0, compressedMass_m3 = 0;
+        for (let leaf = 0; leaf < leafCount; leaf += 1) {
+          const span = leaves[16 * leaf + 3] ?? 0;
+          const volume = (span * shape.cellWidth) ** 3;
+          const value = volume > 0 ? (mass[leaf] ?? 0) / volume : 0;
+          maximum = Math.max(maximum, value);
+          if (value <= 1e-8) dry += 1;
+          else if (value < 0.5) { airSide += 1; airSideMass_m3 += mass[leaf] ?? 0; }
+          else if (value <= 1) liquidSide += 1;
+          else { compressed += 1; compressedMass_m3 += mass[leaf] ?? 0; }
+        }
+        adaptiveMassDensity = { dry, airSide, liquidSide, compressed, maximum,
+          airSideMass_m3, compressedMass_m3 };
+      }
+    }
+    if (adaptiveMassReceipt
+      && adaptiveMassReceipt.firstReconstructionSignMismatchItem !== 0xffff_ffff
+      && projection?.losassoBackend?.adaptiveSurfaceGraphSources) {
+      const cell = adaptiveMassReceipt.firstReconstructionSignMismatchItem;
+      const nodeDimensions = [dimensions[0] + 1, dimensions[1] + 1,
+        dimensions[2] + 1] as const;
+      const node = [cell % nodeDimensions[0],
+        Math.floor(cell / nodeDimensions[0]) % nodeDimensions[1],
+        Math.floor(cell / (nodeDimensions[0] * nodeDimensions[1]))] as const;
+      const inspect = async (bank: "accepted" | "candidate") => {
+        const graph = projection.losassoBackend!.adaptiveSurfaceGraphSources![bank];
+        const control = await readControlWords(device, graph.control, 32);
+        const count = Math.min(control?.[1] ?? 0, Math.floor(graph.leaves.size / 64));
+        const nodeCount = Math.min(control?.[2] ?? 0, Math.floor(graph.nodes.size / 16),
+          Math.floor(graph.phi.size / 8));
+        const [leafBytes, massBytes, nodeBytes, phiBytes] = await Promise.all([
+          readBufferBinding(device, { buffer: graph.leaves }, count * 64),
+          readBufferBinding(device, { buffer: graph.surfaceMass }, count * 4),
+          readBufferBinding(device, { buffer: graph.nodes }, nodeCount * 16),
+          readBufferBinding(device, { buffer: graph.phi }, nodeCount * 8),
+        ]);
+        const leaves = new Uint32Array(leafBytes.buffer, leafBytes.byteOffset,
+          leafBytes.byteLength / 4);
+        const mass = new Float32Array(massBytes.buffer, massBytes.byteOffset,
+          massBytes.byteLength / 4);
+        const nodes = new Uint32Array(nodeBytes.buffer, nodeBytes.byteOffset,
+          nodeBytes.byteLength / 4);
+        const phi = new Float32Array(phiBytes.buffer, phiBytes.byteOffset,
+          phiBytes.byteLength / 4);
+        const incident: Array<Record<string, unknown>> = [];
+        for (let leaf = 0; leaf < count; leaf += 1) {
+          const base = 16 * leaf, span = leaves[base + 3] ?? 0;
+          const origin = [leaves[base] ?? 0, leaves[base + 1] ?? 0,
+            leaves[base + 2] ?? 0] as const;
+          if (!origin.every((value, axis) => value <= node[axis]
+            && node[axis] <= value + span)) continue;
+          const volume = (span * shape.cellWidth) ** 3;
+          incident.push({ leaf, origin, span, rho: volume > 0 ? (mass[leaf] ?? 0) / volume : 0 });
+        }
+        const slot = Array.from({ length: nodeCount }, (_, index) => index)
+          .find((index) => nodes[4 * index] === cell);
+        const rho = incident.reduce((sum, entry) => sum + Number(entry.rho), 0)
+          / Math.max(incident.length, 1);
+        return { rho, expectedPhi: (0.5 - rho) * shape.cellWidth,
+          phi: slot === undefined ? undefined : [phi[2 * slot], phi[2 * slot + 1]],
+          incident };
+      };
+      reconstructionMismatchNeighborhood = { node,
+        accepted: await inspect("accepted"), candidate: await inspect("candidate") };
+    }
+    const fineTransportControl = await readControlWords(device,
+      solver.globalFineTransportControl, 16);
+    const fineTopologyControl = await readControlWords(device,
+      fineSource?.topologyControl, 16);
+    const fineRedistanceControl = await readControlWords(device,
+      solver.globalFineRedistanceControl, 24);
+    const transitionSources = projection?.losassoBackend;
+    const topologyTransition = topologyTransitionDiagnostics ? {
+      acceptedAuthority: authorityControlSummary(await readControlWords(device,
+        transitionSources?.sources?.operator?.control, 8)),
+      candidateAuthority: authorityControlSummary(await readControlWords(device,
+        transitionSources?.candidateAuthorityControl, 8)),
+      acceptedGraph: graphControlSummary(await readControlWords(device,
+        transitionSources?.adaptiveSurfaceGraphSources?.accepted.control, 32)),
+      candidateGraph: graphControlSummary(await readControlWords(device,
+        transitionSources?.adaptiveSurfaceGraphSources?.candidate.control, 32)),
+      mass: massControlSummary(await readControlWords(device,
+        transitionSources?.adaptiveMassSource?.control, 32)),
+      candidateVelocityStencil: await readControlWords(device,
+        transitionSources?.adaptiveVelocity?.candidateStencilControl, 8),
+      handoff: adaptiveMassReceipt ? {
+        sourceMass_m3: adaptiveMassReceipt.handoffSourceMass_m3,
+        targetMass_m3: adaptiveMassReceipt.handoffTargetMass_m3,
+        signedDrift_m3: adaptiveMassReceipt.signedHandoffDrift_m3,
+        leaves: adaptiveMassReceipt.handoffLeafCount,
+        errors: adaptiveMassReceipt.errors,
+      } : undefined,
+    } : undefined;
     const extensionControl = projection?.losassoExtensionControl;
     const extensionControlBytes = extensionControl
       ? await readBufferBinding(device, { buffer: extensionControl }, extensionControl.size)
@@ -667,6 +1100,10 @@ try {
       stagedOwnerRows = new Set(staged.subarray(2 * mac, 2 * mac + nx * ny * nz)
         .filter((encoded) => encoded !== 0)).size;
     }
+    // Refresh the projection receipt at this exact accepted time. Without this
+    // readback, readStats() can expose the last checkpoint's cached residual
+    // even though the surface directory below is current.
+    await projection?.readSolveDiagnostics();
     const stats = await solver.readStats() as unknown as Record<string, unknown>;
     samples.push({
       t_s: Number((step * dt).toFixed(6)), ...summary,
@@ -675,6 +1112,19 @@ try {
       topologyLeaves: census?.topologyLeaves,
       topologyNodes: census?.topologyNodes,
       adaptiveNodes,
+      adaptiveVelocityReceipts,
+      adaptivePhiReceipt,
+      adaptiveMassReceipt,
+      adaptiveMassDensity,
+      reconstructionMismatchNeighborhood,
+      fineTransportControl: fineTransportControl
+        ? Array.from(fineTransportControl) : undefined,
+      fineTopologyControl: fineTopologyControl
+        ? Array.from(fineTopologyControl) : undefined,
+      fineRedistanceControl: fineRedistanceControl
+        ? Array.from(fineRedistanceControl) : undefined,
+      topologyTransition,
+      candidateDiagnostics,
       residentOwnerPages: census?.residentOwnerPages,
       maximumNeighborDelta: stats.maximumNeighborDelta,
       pressureRequiredRows: stats.pressureRequiredRows,
@@ -728,11 +1178,72 @@ try {
     }
   }
   solver.destroy();
+  const reportedSamples = transactionOnly ? samples : compact ? samples.map((sample) => {
+    const quadrature = sample.zeroSetQuadrature as SurfaceShape["zeroSetQuadrature"];
+    const phiReceipt = sample.adaptivePhiReceipt as ReturnType<
+      typeof unpackAdaptivePhiReceipt> | undefined;
+    const massReceipt = sample.adaptiveMassReceipt as ReturnType<
+      typeof unpackAdaptiveMassReceipt> | undefined;
+    return {
+      t_s: sample.t_s,
+      wetCells: sample.wetCells,
+      wettedColumns: sample.wettedColumns,
+      volumeCells: quadrature.volumeCells,
+      centerOfMassCells: quadrature.centerOfMassCells,
+      frontCells: quadrature.frontCells,
+      medianHeightCells: sample.medianHeightCells,
+      peakCells: sample.peakCells,
+      interiorRidgeCells: sample.interiorRidgeCells,
+      measuredVolume_m3: phiReceipt?.measuredVolume_m3,
+      targetVolume_m3: phiReceipt?.targetVolume_m3,
+      acceptedAdvanceValid: phiReceipt?.acceptedAdvanceValid,
+      conservedMass_m3: massReceipt?.acceptedMass_m3,
+      transportDrift_m3: massReceipt?.signedTransportDrift_m3,
+      massDonors: massReceipt?.donors,
+      massTransfers: massReceipt?.transfers,
+      missingMassRecipients: massReceipt?.missingRecipients,
+      handoffDrift_m3: massReceipt?.signedHandoffDrift_m3,
+      massErrors: massReceipt?.errors,
+      reconstructionThreshold: massReceipt?.reconstructionThreshold,
+      reconstructionTargetUnits: massReceipt?.reconstructionTargetUnits,
+      reconstructionMeasuredUnits: massReceipt?.reconstructionMeasuredUnits,
+      reconstructionSignMismatches: massReceipt?.reconstructionSignMismatches,
+      adaptiveMassDensity: sample.adaptiveMassDensity,
+      reconstructionMismatchNeighborhood: sample.reconstructionMismatchNeighborhood,
+      firstReconstructionSignMismatchNode: massReceipt
+        && massReceipt.firstReconstructionSignMismatchItem !== 0xffff_ffff
+        ? [massReceipt.firstReconstructionSignMismatchItem % (dimensions[0] + 1),
+          Math.floor(massReceipt.firstReconstructionSignMismatchItem / (dimensions[0] + 1))
+            % (dimensions[1] + 1),
+          Math.floor(massReceipt.firstReconstructionSignMismatchItem
+            / ((dimensions[0] + 1) * (dimensions[1] + 1)))]
+        : undefined,
+      leafCountsBySize: sample.leafCountsBySize,
+      surfaceRowSizeHistogram: sample.surfaceRowSizeHistogram,
+      airRowSizeHistogram: sample.airRowSizeHistogram,
+      topologyLeaves: sample.topologyLeaves,
+      residentOwnerPages: sample.residentOwnerPages,
+      adaptiveVelocityReceipts: sample.adaptiveVelocityReceipts,
+      topologyTransition: sample.topologyTransition,
+      fineTransportControl: sample.fineTransportControl,
+      fineTopologyControl: sample.fineTopologyControl,
+      fineRedistanceControl: sample.fineRedistanceControl,
+      candidateAuthority: sample.candidateDiagnostics?.candidate,
+      candidateGraph: sample.candidateDiagnostics?.candidateAdaptiveGraph,
+      ownerCandidate: sample.candidateDiagnostics?.ownerCandidate,
+      frontierControl: sample.candidateDiagnostics?.frontierControl,
+      massControl: sample.candidateDiagnostics?.adaptiveMassControl,
+      velocityMigration: sample.candidateDiagnostics?.velocityMigration,
+      maximumSpeed: sample.maximumSpeed,
+      pressureResidual: sample.pressureResidual,
+      pressureRelativeResidual: sample.pressureRelativeResidual,
+    };
+  }) : samples;
   console.log(JSON.stringify({
     phase: "dam-surface-shape", scene: sceneId, dt, dimensions, runtimeTopologyDials,
     refinementRegionFloor: refinementRegionFloor || undefined,
-    validationErrors, samples,
-  }, null, 1));
+    validationErrors, samples: reportedSamples,
+  }, null, compact ? undefined : 1));
   device.destroy();
 } finally {
   await releaseWebGPUExclusiveLock();

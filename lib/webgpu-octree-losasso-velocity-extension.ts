@@ -4,8 +4,11 @@ import { octreeLosassoVelocityExtensionWGSL } from "./webgpu-octree-losasso-velo
 
 /** Production D4 support: four-cell band + two-cell backtrace + one MAC stencil cell. */
 export const OCTREE_LOSASSO_EXTENSION_WIDTH = 7;
-/** One extra synchronous relaxation beyond the graph radius. */
-export const OCTREE_LOSASSO_EXTENSION_SWEEPS = 8;
+/** The W7 radius is Euclidean while the compact graph has six-neighbour
+ * (Manhattan) edges. A point inside the physical band can therefore be
+ * ceil(sqrt(3) * 7) graph edges from a seed. One final settling sweep makes
+ * every published W7 value available to the following characteristic. */
+export const OCTREE_LOSASSO_EXTENSION_SWEEPS = 14;
 export const OCTREE_LOSASSO_FACE_METRIC_WORDS = 4;
 export const OCTREE_LOSASSO_EXTENSION_BINDINGS = 7;
 
@@ -28,9 +31,9 @@ export interface WebGPUOctreeLosassoVelocityExtensionSource {
   readonly extendedVelocity: GPUBuffer;
 }
 
-/** Cover the full W=7 extension band, plus one settling sweep. */
+/** Cover the full 3-D W=7 extension band, plus one settling sweep. */
 export const OCTREE_LOSASSO_MINIMUM_EXTENSION_SWEEPS =
-  OCTREE_LOSASSO_EXTENSION_WIDTH + 1;
+  OCTREE_LOSASSO_EXTENSION_SWEEPS;
 
 export interface OctreeLosassoVelocityExtensionPlan {
   readonly faceCapacity: number;
@@ -147,12 +150,16 @@ export class WebGPUOctreeLosassoVelocityExtension {
       label: "Losasso fixed-K axis-face Jacobi sweep", layout: this.pipelineLayout,
       compute: { module: shaderModule, entryPoint: "jacobiLosassoAxisFaces" },
     });
-    const velocities = [this.source.projectedVelocity, this.scratchA, this.scratchB,
-      this.scratchA, this.scratchB, this.scratchA, this.scratchB, this.scratchA,
-      this.source.extendedVelocity] as const;
-    const predictorVelocities = [this.source.projectedVelocity, this.scratchA, this.scratchB,
-      this.scratchA, this.scratchB, this.scratchA, this.scratchB, this.scratchA,
-      this.source.projectedVelocity] as const;
+    const sweepFields = (destination: GPUBuffer): readonly GPUBuffer[] => {
+      const fields: GPUBuffer[] = [this.source.projectedVelocity];
+      for (let sweep = 1; sweep < OCTREE_LOSASSO_EXTENSION_SWEEPS; sweep += 1) {
+        fields.push((sweep & 1) !== 0 ? this.scratchA : this.scratchB);
+      }
+      fields.push(destination);
+      return Object.freeze(fields);
+    };
+    const velocities = sweepFields(this.source.extendedVelocity);
+    const predictorVelocities = sweepFields(this.source.projectedVelocity);
     const group = (label: string, read: GPUBuffer, write: GPUBuffer) =>
       this.device.createBindGroup({ label, layout: this.layout, entries: [
         { binding: 0, resource: { buffer: this.params, size: 16 } },
@@ -178,7 +185,7 @@ export class WebGPUOctreeLosassoVelocityExtension {
 
   /**
    * Jacobi sweeps per extension, for both the published field and the
-   * predictor. The default 8 covers the W7 adjacency graph plus one settling
+   * predictor. The default 14 covers the 3-D W7 adjacency graph plus one settling
    * sweep; a shorter chain leaves the outermost air faces holding whatever the
    * previous advance published, which the next semi-Lagrangian backtrace then
    * samples. The terminal sweep always writes the destination field, so the

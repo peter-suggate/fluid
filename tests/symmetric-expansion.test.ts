@@ -3,10 +3,14 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { validateScene } from "../lib/model";
 import { initialFluidBrickUnionBounds } from "../lib/initial-fluid";
+import {
+  octreeColdAuthoredSurfaceBoxes,
+  octreeColdAuthoredSurfaceWouldRefine,
+} from "../lib/octree-cold-authored-surface";
 import { getSceneWebGPUSmokeLane } from "../lib/scene-webgpu-smoke-catalog";
 import { sceneCustomHookImplementations } from "../lib/scene-custom-diagnostic-implementations";
 import { createSymmetricExpansionScene, getScenePreset } from "../lib/scenes";
-import { initialOctreeLevelSet } from "../lib/webgpu-octree";
+import { initialOctreeLevelSet, initialOctreeNodalLevelSet } from "../lib/webgpu-octree";
 
 test("symmetric expansion is the minimum dyadic four-brick horizontal oracle", () => {
   const scene = createSymmetricExpansionScene();
@@ -41,8 +45,10 @@ test("symmetric expansion is the minimum dyadic four-brick horizontal oracle", (
 
   const preset = getScenePreset("symmetric-expansion");
   assert.equal(preset.create().sceneId, scene.sceneId);
+  assert.equal(preset.presentationMode, "fluid-only",
+    "the validation body must not be hidden by an unrelated dry-scene floor");
   assert.equal(preset.methodProfile?.methodId, "octree");
-  assert.equal(preset.methodProfile?.overrides.globalFineLevelSetFactor, "4");
+  assert.equal(preset.methodProfile?.overrides.globalFineLevelSetFactor, "1");
   assert.equal(preset.methodProfile?.overrides.interfaceRefinementBandCells, 4);
 });
 
@@ -51,7 +57,7 @@ test("symmetric expansion Dawn lane samples every accepted step and gates every 
   assert.equal(lane.stop.exactSteps, 250);
   assert.equal(lane.stop.maxDt_s, 0.004);
   assert.equal(lane.collect.checkpointEvery_s, 0.004);
-  assert.equal(lane.methods[0]?.overrides.globalFineLevelSetFactor, "4");
+  assert.equal(lane.methods[0]?.overrides.globalFineLevelSetFactor, "1");
   assert.equal(lane.methods[0]?.overrides.interfaceRefinementBandCells, 4);
   assert.equal(lane.methods[0]?.overrides.losassoVelocityExtension, "causal-front");
   assert.equal(lane.collect.stabilityEnvelope, true);
@@ -62,11 +68,11 @@ test("symmetric expansion Dawn lane samples every accepted step and gates every 
   const hook = lane.hooks.find(({ id }) => id === "fluid-symmetry");
   assert.ok(hook);
   assert.deepEqual(hook.parameters, {
-    maximumVolumeAbsoluteError: 0,
-    maximumVelocityAbsoluteError_m_s: 1e-6,
-    maximumPressureAbsoluteError: 0.03125,
+    maximumVolumeAbsoluteError: 1e-3,
+    maximumVelocityAbsoluteError_m_s: 1e-4,
+    maximumPressureAbsoluteError: 0.25,
     maximumRhsAbsoluteError: 0.015625,
-    maximumDiagonalAbsoluteError: 0,
+    maximumDiagonalAbsoluteError: 1e-3,
     requireExactTopology: true,
     requireAllWallsReached: true,
     minimumCheckpointCount: 250,
@@ -97,13 +103,13 @@ test("symmetric expansion Dawn lane samples every accepted step and gates every 
     "the raster regression must isolate construction from the known post-step field asymmetry");
   const oneStep = getSceneWebGPUSmokeLane("symmetric-expansion", "one-step");
   assert.equal(oneStep.stop.exactSteps, 1);
-  assert.equal(oneStep.methods[0]?.overrides.globalFineLevelSetFactor, "4");
+  assert.equal(oneStep.methods[0]?.overrides.globalFineLevelSetFactor, "1");
   assert.deepEqual(oneStep.hooks[0]?.parameters, {
-    maximumVolumeAbsoluteError: 0,
-    maximumVelocityAbsoluteError_m_s: 1e-6,
-    maximumPressureAbsoluteError: 0.03125,
+    maximumVolumeAbsoluteError: 1e-3,
+    maximumVelocityAbsoluteError_m_s: 1e-4,
+    maximumPressureAbsoluteError: 0.25,
     maximumRhsAbsoluteError: 0.015625,
-    maximumDiagonalAbsoluteError: 0,
+    maximumDiagonalAbsoluteError: 1e-3,
     requirePressureStageAudit: true,
     requireExactTopology: true,
     requireAllWallsReached: false,
@@ -117,6 +123,15 @@ test("symmetric expansion Dawn lane samples every accepted step and gates every 
   assert.equal(twoStep.hooks[0]?.parameters?.requirePressureStageAudit, undefined,
     "multi-step gates keep the diagnostic readback surface bounded");
   assert.equal(twoStep.hooks[0]?.parameters?.minimumCheckpointCount, 2);
+  const twentyStep = getSceneWebGPUSmokeLane("symmetric-expansion", "twenty-step");
+  assert.equal(twentyStep.stop.exactSteps, 20,
+    "the development gate must catch symmetry regressions before the 250-step release lane");
+  assert.equal(twentyStep.stop.maxDt_s, 0.004);
+  assert.equal(twentyStep.collect.checkpointEvery_s, 0.004);
+  assert.equal(twentyStep.methods[0]?.overrides.globalFineLevelSetFactor, "1");
+  assert.equal(twentyStep.hooks[0]?.parameters?.requireExactTopology, true);
+  assert.equal(twentyStep.hooks[0]?.parameters?.minimumCheckpointCount, 20);
+  assert.equal(twentyStep.hooks[0]?.parameters?.requireAllWallsReached, false);
   assert.equal(fine.hooks[0]?.parameters?.requireAllWallsReached, false);
 });
 
@@ -132,6 +147,118 @@ test("brick-authored octree bootstrap preserves the exact analytic box SDF and D
   }
   assert.ok(at(7, 0, 7) > at(7, 0, 8), "an exterior box corner retains Euclidean distance rather than a voxel plateau");
   assert.ok(at(8, 7, 8) < 0 && at(8, 8, 8) > 0, "the top face crosses exactly halfway between cell centres");
+});
+
+test("symmetric expansion has an exact direct nodal SDF before adaptive rasterisation", () => {
+  const scene = createSymmetricExpansionScene();
+  const [nx, ny, nz] = [32, 16, 32] as const;
+  const phi = initialOctreeNodalLevelSet(scene, { nx, ny, nz });
+  assert.ok(phi);
+  const at = (x: number, y: number, z: number) =>
+    phi[x + (nx + 1) * (y + (ny + 1) * z)];
+  for (let z = 0; z <= nz; z += 1) {
+    for (let y = 0; y <= ny; y += 1) {
+      for (let x = 0; x <= nx; x += 1) {
+        assert.ok(Object.is(at(x, y, z), at(nx - x, y, z)),
+          `nodal reflect-x at ${x},${y},${z}`);
+        assert.ok(Object.is(at(x, y, z), at(x, y, nz - z)),
+          `nodal reflect-z at ${x},${y},${z}`);
+        assert.ok(Object.is(at(x, y, z), at(z, y, x)),
+          `nodal swap-xz at ${x},${y},${z}`);
+      }
+    }
+  }
+  // The authored 16 x 8 x 16 body is [8,24] x [0,8] x [8,24].  Its exact
+  // face, edge and corner nodes all lie on phi=0.  A cell-centred bootstrap
+  // reconstructed onto these nodes cannot preserve the edge/corner equalities.
+  assert.equal(at(16, 8, 16), 0, "top-face interior node");
+  assert.equal(at(8, 8, 16), 0, "top edge node");
+  assert.equal(at(8, 8, 8), 0, "top corner node");
+  assert.ok(at(16, 4, 16) < 0,
+    "touching authored bricks must form one liquid interior, not internal zero sheets");
+  assert.equal(at(7, 8, 8), Math.fround(0.05), "one-cell exterior edge distance");
+  assert.equal(at(7, 8, 7), Math.fround(Math.hypot(0.05, 0.05)),
+    "one-cell exterior corner distance");
+});
+
+test("cold topology splits exact authored top face, edge, and corner contacts to size one", () => {
+  const scene = createSymmetricExpansionScene();
+  const boxes = octreeColdAuthoredSurfaceBoxes(scene, [32, 16, 32], 8);
+  assert.deepEqual(boxes, [{ minimum: [8, 0, 8], maximum: [24, 8, 24] }]);
+  const refine = (origin: readonly [number, number, number]) =>
+    octreeColdAuthoredSurfaceWouldRefine(boxes, origin, 2, [0.05, 0.05, 0.05], 1);
+  assert.equal(refine([14, 8, 14]), true, "top face contact");
+  assert.equal(refine([6, 8, 14]), true, "top edge contact from the dry side");
+  assert.equal(refine([6, 8, 6]), true, "top corner contact from the dry side");
+  assert.equal(octreeColdAuthoredSurfaceWouldRefine(
+    boxes, [14, 2, 14], 2, [0.05, 0.05, 0.05], 1,
+  ), false, "liquid deeper than the requested band remains eligible to coarsen");
+  assert.equal(octreeColdAuthoredSurfaceWouldRefine(
+    boxes, [14, 8, 14], 1, [0.05, 0.05, 0.05], 1,
+  ), false, "the authored classifier stops at the configured finest size");
+
+  const projection = readFileSync(new URL("../lib/webgpu-octree.ts", import.meta.url), "utf8");
+  const evidence = projection.slice(
+    projection.indexOf("fn pressureRefinementEvidence"),
+    projection.indexOf("fn boundaryLiquidMinimumPhi"),
+  );
+  assert.match(evidence,
+    /coldAuthoredSurfaceInterval\(origin, size\)[\s\S]*size > finestSurfaceCellSize\(\)[\s\S]*crossesOrTouchesSurface/,
+    "cold exact nodal evidence must be consulted before a missing sparse summary rejects the leaf");
+  assert.ok(evidence.indexOf("coldAuthoredSurfaceInterval(origin, size)")
+    < evidence.indexOf("if (!summary.found) { return false; }"));
+  assert.match(projection,
+    /if \(!bootstrapPhiEnabled\(\) \|\| count == 0u\)/,
+    "authored boxes must retire with cold bootstrap rather than become recurring fallback authority");
+});
+
+test("procedural dam break publishes one exact nodal box and cold refinement authority", () => {
+  const scene = getScenePreset("water-box-dam-break").create();
+  const dimensions = [24, 18, 16] as const;
+  const phi = initialOctreeNodalLevelSet(scene, { nx: 24, ny: 18, nz: 16 });
+  assert.ok(phi, "the procedural dam must not pass through cell-centred distance reconstruction");
+  const boxes = octreeColdAuthoredSurfaceBoxes(scene, dimensions, 8);
+  assert.equal(boxes.length, 1);
+  const box = boxes[0]!;
+  assert.equal(box.minimum[0], 0); assert.equal(box.minimum[1], 0); assert.equal(box.minimum[2], 0);
+  assert.ok(box.maximum[0] > 11 && box.maximum[0] < 12);
+  assert.ok(box.maximum[1] > 16 && box.maximum[1] < 17);
+  assert.ok(box.maximum[2] > 7 && box.maximum[2] < 8);
+  const at = (x: number, y: number, z: number) =>
+    phi[x + 25 * (y + 19 * z)];
+  const dx = scene.container.width_m / dimensions[0];
+  assert.ok(Math.abs((at(12, 8, 4) - at(11, 8, 4)) - dx) < 2e-8,
+    "the vertical dam plane must remain affine on the direct node lattice");
+  assert.equal(octreeColdAuthoredSurfaceWouldRefine(boxes, [10, 8, 4], 2,
+    [dx, scene.container.height_m / 18, scene.container.depth_m / 16], 1), true,
+  "a size-two leaf touching the procedural dam front must split to unit leaves");
+
+  const additive = getScenePreset("water-box-dam-break").create();
+  additive.fluid.initialBrickSeedsAdditive = true;
+  assert.equal(initialOctreeNodalLevelSet(additive, { nx: 24, ny: 18, nz: 16 }), undefined);
+  assert.deepEqual(octreeColdAuthoredSurfaceBoxes(additive, dimensions, 8), [],
+    "additive initial conditions must retain the composed bootstrap authority");
+
+  const terrain = getScenePreset("water-box-dam-break").create();
+  terrain.terrain = { baseHeight_m: 0.05, features: [] };
+  assert.equal(initialOctreeNodalLevelSet(terrain, { nx: 24, ny: 18, nz: 16 }), undefined);
+  assert.deepEqual(octreeColdAuthoredSurfaceBoxes(terrain, dimensions, 8), [],
+    "terrain-clipped liquid must retain the terrain-aware bootstrap authority");
+});
+
+test("factor-one construction retains the nodal layout through cold GPU retries", () => {
+  const projection = readFileSync(new URL("../lib/webgpu-octree.ts", import.meta.url), "utf8");
+  assert.match(projection,
+    /adaptiveInitialNodalPhi[\s\S]*initialOctreeNodalLevelSet\(this\.scene, this\.dims\)[\s\S]*adaptiveInitialNodalPhi \? "nodal-lattice" : "cell-centred"/,
+    "the projection must choose the direct node lattice only when its analytic source exists");
+  const backend = readFileSync(new URL(
+    "../lib/webgpu-octree-losasso-backend.ts", import.meta.url), "utf8");
+  assert.match(backend,
+    /adaptiveBootstrapPhiLayout = initialPhiLayout[\s\S]*this\.adaptiveBootstrapPhiLayout === "nodal-lattice"[\s\S]*"nodal-lattice-cpu"/,
+    "the retained cold candidate retry must not reinterpret nodal samples as cell centres");
+  assert.match(backend,
+    /initialPhiLayout === "nodal-lattice" \? value \+ 1 : value/,
+    "constructor validation must size the complete boundary-inclusive node lattice");
 });
 
 test("symmetric expansion rejects a stationary front even when every field remains D4 symmetric", () => {

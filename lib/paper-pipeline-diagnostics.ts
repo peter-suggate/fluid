@@ -144,8 +144,10 @@ export function paperPipelineStages(
   const persistentSection43 = isOctreePersistentMGPCGSolverLabel(info.pressureSolver);
   const pressureSection = persistentSection43 ? "§4.3" : "pressure";
   const residual = info.pressureRelativeResidual;
-  const losassoPressureHealthy = coarseHealthy && (info.encodedSteps ?? 0) === 0
-    || coarseHealthy && info.quadtreePressureConverged === true;
+  const adaptiveTupleRejected = info.quadtreePressureRejectionSummary !== undefined;
+  const losassoPressureHealthy = !adaptiveTupleRejected
+    && (coarseHealthy && (info.encodedSteps ?? 0) === 0
+      || coarseHealthy && info.quadtreePressureConverged === true);
   stages.push(losasso && losassoPressureHealthy
     ? (info.encodedSteps ?? 0) === 0
       ? { id: "pressure", section: pressureSection, label: "Pressure projection", state: "PREPARED", tone: "healthy", generation: generation(fineGeneration), detail: `${info.pressureSolver} · wide exact-reduction MGPCG and first-order V-cycle are ready.` }
@@ -155,7 +157,7 @@ export function paperPipelineStages(
       ? { id: "pressure", section: pressureSection, label: "Pressure projection", state: "PREPARED", tone: "healthy", generation: generation(powerGeneration), detail: `${info.pressureSolver} · selected operator and fenced t=0 solve are ready; dynamic-step convergence appears after stepping.` }
       : { id: "pressure", section: pressureSection, label: "Pressure projection", state: residual !== undefined && residual <= 1e-4 ? "CONVERGED" : "CHECK", tone: residual !== undefined && residual <= 1e-4 ? "healthy" : "warning", generation: generation(powerGeneration), detail: residual === undefined ? `${info.pressureSolver} · latest solve residual is unavailable` : `${info.pressureSolver} · relative L2 residual ${residual.toExponential(2)} (target 1e-4)` }
     : t0Ready
-      ? { id: "pressure", section: pressureSection, label: "Pressure projection", state: "REJECTED", tone: "rejected", generation: generation(powerGeneration), detail: info.pressureSolver ?? "Selected pressure authority is unavailable." }
+      ? { id: "pressure", section: pressureSection, label: "Pressure projection", state: "REJECTED", tone: "rejected", generation: generation(powerGeneration), detail: info.quadtreePressureRejectionSummary ?? info.pressureSolver ?? "Selected pressure authority is unavailable." }
       : pending("pressure", pressureSection, "Pressure projection", `Waiting for the selected authoritative ${losasso ? "Losasso" : "power"} pressure path.`));
 
   const rasterGenerationCurrent = water?.globalFineAttachedGeneration !== undefined

@@ -194,18 +194,18 @@ export const OCTREE_RUNTIME_DIALS: readonly OctreeRuntimeDialSpec[] = Object.fre
     label: "Wall refinement band",
     short: "WALL BAND",
     unit: "cells",
-    min: 1, max: 4, step: 1, digits: 0, default: 3,
+    min: 1, max: 4, step: 1, digits: 0, default: 1,
     does: "How many finest cells ahead of a closed container wall are checked"
       + " for nearby liquid before boundary cells are split.",
     cost: "Thinner is cheaper, especially on a plane against the tank wall. A"
       + " fast front can reach a coarse wall row before the next topology epoch,"
       + " shifting impact timing and reflected run-up.",
-    hint: "Live closed-wall look-ahead. The default three-cell strip preserves"
-      + " the measured dam-wall timing guard. Lower values deliberately allow"
-      + " coarser pressure cells nearer the floor and x/z container walls; use"
-      + " dam-break wall-contact time and reflected run-up as the A/B signals."
-      + " This does not change solid or free-surface evidence outside the wall"
-      + " policy.",
+    hint: "Live closed-wall look-ahead. The Ando-style default keeps one finest"
+      + " cell beside a wet closed wall; the free surface and ordinary 2:1"
+      + " balance, rather than a domain-wide wall slab, drive all additional"
+      + " refinement. Larger values are conservative wall-impact experiments"
+      + " and must be justified by contact-time and reflected-run-up evidence."
+      + " This does not weaken solid cuts or free-surface crossings.",
   },
   {
     key: "pressureToleranceDecades",

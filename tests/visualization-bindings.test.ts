@@ -19,6 +19,7 @@ import {
   type OctreeTechniqueOverlayMode,
 } from "../lib/octree-technique-debug";
 import {
+  octreeTechniqueAdaptiveVelocityShader,
   octreeTechniqueFaceShader,
   octreeTechniqueFineLifecycleShader,
   octreeTechniqueLifecycleShader,
@@ -51,7 +52,7 @@ test("the budget counts storage buffers apart from uniforms and textures", () =>
 });
 
 test("an eleventh storage buffer is a build failure, not a driver error", () => {
-  // The whole reason the technique overlay is five programs rather than one.
+  // The whole reason the technique overlay is split into programs rather than one.
   const atCap = program(Array.from(
     { length: VISUALIZATION_STORAGE_BUFFERS_PER_STAGE }, (_, index) => storage(`slot${index}`)));
   assert.deepEqual(visualizationProgramProblems(atCap), []);
@@ -165,6 +166,7 @@ test("each overlay shader embeds exactly the preamble its program declares", () 
     ["topology", octreeTechniqueTopologyShader],
     ["face", octreeTechniqueFaceShader],
     ["structured", octreeTechniqueStructuredShader],
+    ["adaptiveVelocity", octreeTechniqueAdaptiveVelocityShader],
     ["lifecycle", octreeTechniqueLifecycleShader],
     ["fine", octreeTechniqueFineLifecycleShader],
   ];

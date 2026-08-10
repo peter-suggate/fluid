@@ -129,8 +129,11 @@ test("interface rasterization depth-peels fluid hidden behind a foreground sheet
 test("missing dry-scene publication does not suppress authoritative water", () => {
   const source = readFileSync(new URL("../lib/webgpu-water-pipeline.ts", import.meta.url), "utf8")
     .replace(/\s+/g, "");
+  // The second condition is the render panel's ablation switch, which is the
+  // one thing allowed to withhold these passes — and it takes the fluid-less
+  // clears when it does, so nothing composites geometry this frame never drew.
   assert.match(source,
-    /if\(this\.sceneHasFluid\)\{interfacePass\("Water\+sprayfrontinterfaces"/,
+    /if\(this\.sceneHasFluid&&!interfacesWithheld\)\{interfacePass\("Water\+sprayfrontinterfaces"/,
     "fluid interface passes must depend on fluid authority, not dry-scene publication");
   assert.doesNotMatch(source, /if\(sparseSceneResult&&this\.sceneHasFluid\)/,
     "the visible fail-closed background must not clear otherwise valid water geometry");
@@ -146,7 +149,7 @@ test("fluid-only presentation retains one clear background behind unchanged rast
   assert.match(source, /if\(!this\.clearBackgroundEncoded\)\{/,
     "the empty background must clear once rather than write every pixel every frame");
   assert.match(source, /label:"Fluid-onlyclearbackground"/);
-  assert.match(source, /this\.sceneHasFluid\)\{interfacePass\("Water\+sprayfrontinterfaces"/,
+  assert.match(source, /this\.sceneHasFluid&&!interfacesWithheld\)\{interfacePass\("Water\+sprayfrontinterfaces"/,
     "fluid-only mode must retain the exact raster interface passes");
   assert.match(source, /composite\.setPipeline\(this\.compositePipeline\);composite\.setBindGroup/,
     "fluid-only mode must retain the pretty optical composite");

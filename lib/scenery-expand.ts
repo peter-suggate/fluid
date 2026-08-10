@@ -12,6 +12,7 @@ import {
   type SceneryNode,
   type SceneryPlacement,
   type SceneryPrimitiveNode,
+  type SceneryRecursiveShapeNode,
   type SceneryRoomShellNode,
   type SceneryShellNode,
   type SceneryUnits,
@@ -27,6 +28,7 @@ import {
   type ProxyBuilder,
 } from "./voxel-scenery";
 import { emitProceduralTree, planProceduralTree } from "./voxel-scenery/procedural-tree";
+import { foliagePadClusterNode } from "./voxel-scenery/recursive-foliage";
 import { terrainHeightAt } from "./terrain";
 
 /**
@@ -155,7 +157,7 @@ function childFrame(
       ? quaternionMultiply(parent.orientation ?? { w: 1, x: 0, y: 0, z: 0 }, place.orientation)
       : parent.orientation,
     units,
-    group: node.group ?? (node.kind === "group" ? node.id : parent.group),
+    group: node.group ?? (node.kind === "group" || node.kind === "recursive-shape" ? node.id : parent.group),
   };
 }
 
@@ -204,6 +206,15 @@ function emitPrimitive(
   emitPrimitiveGeometry(builder, node, frame, graph);
 }
 
+function emitRecursiveShape(
+  builder: ProxyBuilder,
+  node: SceneryRecursiveShapeNode,
+  frame: SceneryFrame,
+  graph: SceneryGraph,
+): void {
+  emitPrimitive(builder, foliagePadClusterNode(node), frame, graph);
+}
+
 /**
  * The render ABI's packing for one aggregate node, in metres.
  *
@@ -221,7 +232,18 @@ function emitPrimitive(
  */
 function clusterPacking(node: SceneryClusterNode, frame: SceneryFrame, envelope_m: Vec3): SvoSmoothUnionClusterPacking {
   const shared = { smoothRadius_m: metres(frame, node.smoothRadius), seed: node.seed };
-  const packing: SvoSmoothUnionClusterPacking = node.field === "seeded-lobes"
+  const packing: SvoSmoothUnionClusterPacking = node.field === "noise-foliage"
+    ? {
+      ...shared,
+      field: "noise-foliage",
+      clusterPeriod_m: metres(frame, node.clusterPeriod),
+      detailPeriod_m: metres(frame, node.detailPeriod),
+      threshold: node.threshold,
+      clusterWeight: node.clusterWeight,
+      detailWeight: node.detailWeight,
+      interiorBias: node.interiorBias,
+    }
+    : node.field === "seeded-lobes"
     ? {
       ...shared,
       field: "seeded-lobes",
@@ -551,6 +573,11 @@ export function expandSceneryGraph(
       if (isSceneryShellNode(node)) continue;
       const frame = childFrame(parent, node, context);
       if (node.kind === "group") { visit(node.children, frame); continue; }
+      if (node.kind === "recursive-shape") {
+        if (node.children?.length) visit(node.children, frame);
+        else emitRecursiveShape(builder, node, frame, graph);
+        continue;
+      }
       if (node.kind === "generator") { visit(growGenerator(node, context, graph), frame); continue; }
       if (node.kind === "tree") { emitTree(builder, node, frame, context, graph); continue; }
       if (node.kind === "glazing") {

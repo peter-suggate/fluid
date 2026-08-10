@@ -1,5 +1,7 @@
 import type { OctreeOwnerPagePlan } from "./webgpu-octree-owner-pages";
 import type { PassBroker } from "./webgpu-pass-broker";
+import { gpuCompilationManagerFor } from "./gpu-compilation-manager";
+import type { SurfaceInflowState } from "./webgpu-quadtree-builder";
 import type { LosassoVelocityExtensionMode } from
   "./octree-coarse-backend";
 import type { OctreeFirstOrderSPDVCycle } from "./webgpu-octree-section43-contract";
@@ -57,6 +59,23 @@ import {
 } from "./webgpu-octree-pipelined-mgpcg";
 import { WebGPUOctreeLosassoResidentMGPCG } from
   "./webgpu-octree-losasso-resident-mgpcg";
+import {
+  WebGPUOctreeLosassoSurfaceGraph,
+  type LosassoSurfaceGraphBankSource,
+  type LosassoSurfaceGraphSources,
+} from "./webgpu-octree-losasso-surface-graph";
+import {
+  WebGPUOctreeLosassoAdaptivePhi,
+  type WebGPUOctreeLosassoAdaptivePhiSource,
+} from "./webgpu-octree-losasso-adaptive-phi";
+import {
+  WebGPUOctreeLosassoAdaptiveMass,
+  type WebGPUOctreeLosassoAdaptiveMassSource,
+} from "./webgpu-octree-losasso-adaptive-mass";
+import {
+  WebGPUOctreeLosassoAdaptiveVelocity,
+  type WebGPUOctreeLosassoAdaptiveVelocitySamplerSource,
+} from "./webgpu-octree-losasso-adaptive-velocity";
 
 export interface LosassoInitializationTask {
   readonly label: string;
@@ -141,6 +160,25 @@ export interface WebGPUOctreeLosassoBackendOptions {
   readonly extensionBandBrickCapacity: number;
   readonly velocityExtensionMode?: LosassoVelocityExtensionMode;
   readonly closedBoundaries?: readonly [boolean, boolean, boolean, boolean, boolean, boolean];
+  /** Factor-one nodal surface authority. Omitted by the factor-4/8 detail lanes. */
+  readonly adaptiveSurface?: Readonly<{
+    readonly candidateLeafHeaders: GPUBuffer;
+    readonly candidateOwnerArena: GPUBuffer;
+    readonly candidateOwnerTransaction: GPUBuffer;
+    /** Coupled topology frontier whose ready word admits the owner-page flip. */
+    readonly frontier: GPUBuffer;
+    /** One-time dense bootstrap. It is never a recurring input. */
+    readonly initialPhi: Float32Array;
+    /** Direct node lattice preserves authored analytic edges; cell-centred is
+     * retained for fields without an exact nodal representation. */
+    readonly initialPhiLayout?: "cell-centred" | "nodal-lattice";
+    /** Physical extension reach. Defaults to seven finest-cell widths. */
+    readonly velocityExtensionReach?: number;
+    readonly redistanceIterations?: number;
+    readonly redistanceBandWorld?: number;
+    readonly openTop?: boolean;
+    readonly exteriorAirPhi?: number;
+  }>;
   /** Coarser levels use exactly the same first-order axis-face operator. */
   readonly coarseLevels?: readonly OctreeLosassoVCycleLevelSource[];
   readonly transfers?: readonly OctreeLosassoVCycleTransferSource[];
@@ -258,6 +296,12 @@ class WebGPUOctreeLosassoTopologyPublisher implements WebGPUOctreeLosassoCandida
 
   get acceptedRigidBoundaryDiagnostics(): GPUBuffer {
     return this.acceptedRigidBoundaryControl;
+  }
+  get candidateVelocityMigrationStatus(): GPUBuffer {
+    return this.velocityMigration.candidateStatus;
+  }
+  get candidateVelocityMigrationReceipt(): GPUBuffer {
+    return this.velocityMigration.receipt;
   }
 
   constructor(private readonly device: GPUDevice,
@@ -580,6 +624,19 @@ class WebGPUOctreeLosassoTopologyPublisher implements WebGPUOctreeLosassoCandida
     });
   }
 
+  encodeCandidateVelocityNodalCompletion(broker: PassBroker,
+    graph: LosassoSurfaceGraphBankSource): void {
+    const candidate = this.authority.candidate;
+    this.velocityMigration.encodeNodalCompletion(broker, {
+      control: candidate.control,
+      faceDispatch: candidate.faceDispatch,
+      faces: candidate.faces,
+      faceGeometry: candidate.faceGeometry,
+      axisFaceDirectory: candidate.axisFaceDirectory,
+      extendedVelocity: candidate.extendedVelocity,
+    }, graph);
+  }
+
   destroy(): void {
     if (this.destroyed) return;
     this.destroyed = true;
@@ -672,6 +729,120 @@ class WebGPUOctreeLosassoWideSolver implements WebGPUOctreeLosassoPressureSolver
 }
 
 /**
+ * Couples the compact field transaction back into the pressure-topology
+ * publication. A failed graph/phi/velocity candidate clears the topology's
+ * ready word, so neither half of the tuple can advance independently.
+ */
+class WebGPUOctreeLosassoAdaptiveReadyGate {
+  readonly allocatedBytes = 0;
+  readonly initializationTasks: readonly LosassoInitializationTask[];
+  private pipeline?: GPUComputePipeline;
+  private group?: GPUBindGroup;
+  private destroyed = false;
+
+  constructor(private readonly device: GPUDevice,
+    private readonly candidateAuthority: GPUBuffer,
+    private readonly candidateGraph: GPUBuffer,
+    private readonly frontier: GPUBuffer,
+    private readonly velocityMigrationReceipt: GPUBuffer,
+    private readonly candidateMassControl: GPUBuffer) {
+    this.initializationTasks = [{ label: "Compile Losasso adaptive joint-ready gate",
+      run: () => this.initialize() }];
+  }
+
+  private async initialize(): Promise<void> {
+    this.assertLive();
+    if (this.pipeline) return;
+    const compiler = gpuCompilationManagerFor(this.device);
+    const shaderModule = compiler.createShaderModule({
+      label: "Losasso adaptive joint-ready gate",
+      code: /* wgsl */ `
+@group(0) @binding(0) var<storage, read_write> authority: array<atomic<u32>>;
+@group(0) @binding(1) var<storage, read> graph: array<u32>;
+@group(0) @binding(2) var<storage, read_write> frontier: array<atomic<u32>>;
+@group(0) @binding(3) var<storage, read> velocityMigration: array<u32>;
+@group(0) @binding(4) var<storage, read> mass: array<u32>;
+@compute @workgroup_size(1)
+fn gateLosassoAdaptiveCandidate() {
+  let epoch = atomicLoad(&authority[0]);
+  // Cadence reuse deliberately publishes no candidate transaction. An empty
+  // epoch is not a failed remesh: accepted graph/phi/velocity authority stays
+  // live and the next topology attempt starts from clean candidate controls.
+  if (epoch == 0u) {
+    atomicStore(&authority[3], 0u);
+    atomicStore(&authority[4], 0u);
+    atomicStore(&frontier[6], 0u);
+    return;
+  }
+  let ready = epoch != 0u && atomicLoad(&authority[3]) == 1u
+    && atomicLoad(&authority[4]) == 0u && graph[0] == epoch
+    && graph[3] == epoch && graph[4] == 0u
+    && graph[5] != 0u && graph[6] == graph[5]
+    && velocityMigration[0] == epoch && velocityMigration[1] == atomicLoad(&authority[2])
+    && velocityMigration[4] == 0u && velocityMigration[5] == epoch
+    // Mass publication owns its own clock for now. Candidate epoch/validity is
+    // the fail-closed requirement; graph surface-generation coupling lands at
+    // accepted external-phi publication below.
+    && mass[0] == 0x414d4153u && mass[1] == epoch
+    && mass[7] == 1u && mass[12] == 0u;
+  if (!ready) {
+    atomicStore(&authority[3], 0u);
+    // A joint publication failure is a transaction error, not an invitation
+    // to keep retrying an incoherent topology invisibly. Preserve the detailed
+    // subsystem receipt (for example mass[12] == 32 for a rho/phi sign
+    // disagreement) and latch a hard authority verdict for UI/audit readers.
+    atomicOr(&authority[4], 0x80000000u);
+    // Owner-page publication gates on frontier[6], not on the reduced
+    // authority control above. Revoke the shared ready word as part of the
+    // same joint verdict so a rejected graph cannot advance owner topology
+    // while pressure/graph/scalar authority remains on the preceding epoch.
+    atomicStore(&frontier[6], 0u);
+  }
+}
+`,
+    });
+    this.pipeline = await compiler.compileComputePipeline({
+      label: "Losasso adaptive joint-ready gate",
+      layout: "auto",
+      compute: { module: shaderModule, entryPoint: "gateLosassoAdaptiveCandidate" },
+    }, { priority: "critical" });
+    this.group = this.device.createBindGroup({
+      label: "Losasso adaptive joint-ready bindings",
+      layout: this.pipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: this.candidateAuthority } },
+        { binding: 1, resource: { buffer: this.candidateGraph } },
+        { binding: 2, resource: { buffer: this.frontier } },
+        { binding: 3, resource: { buffer: this.velocityMigrationReceipt } },
+        { binding: 4, resource: { buffer: this.candidateMassControl } },
+      ],
+    });
+  }
+
+  encode(broker: PassBroker): void {
+    this.assertLive();
+    if (!this.pipeline || !this.group) {
+      throw new Error("Losasso adaptive joint-ready gate is not initialized");
+    }
+    const pass = broker.compute({ label: "Losasso adaptive candidate - joint ready" });
+    pass.setPipeline(this.pipeline);
+    pass.setBindGroup(0, this.group);
+    pass.dispatchWorkgroups(1);
+  }
+
+  destroy(): void {
+    if (this.destroyed) return;
+    this.destroyed = true;
+    this.pipeline = undefined;
+    this.group = undefined;
+  }
+
+  private assertLive(): void {
+    if (this.destroyed) throw new Error("Losasso adaptive joint-ready gate is destroyed");
+  }
+}
+
+/**
  * Constructible pipeline seam for the Losasso coarse side. It owns the
  * reduced face authority and topology publisher, then exposes the operator,
  * V-cycle, pressure solver, axis-face projection, and fixed-K extension as one
@@ -685,12 +856,24 @@ export class WebGPUOctreeLosassoCoarseBackend {
   readonly solver: WebGPUOctreeLosassoPressureSolver;
   readonly dynamics: WebGPUOctreeLosassoDynamics;
   readonly projection: WebGPUOctreeLosassoProjection;
-  readonly extensionBand: WebGPUOctreeLosassoExtensionBand;
+  /** Present only on the factor-4/8 legacy detail lanes. */
+  readonly extensionBand?: WebGPUOctreeLosassoExtensionBand;
+  readonly surfaceGraph?: WebGPUOctreeLosassoSurfaceGraph;
+  readonly adaptivePhi?: WebGPUOctreeLosassoAdaptivePhi;
+  readonly adaptiveMass?: WebGPUOctreeLosassoAdaptiveMass;
+  readonly adaptiveVelocity?: WebGPUOctreeLosassoAdaptiveVelocity;
+  readonly adaptiveSurfaceAllocatedBytes?: Readonly<{
+    graph: number; phi: number; mass: number; velocity: number; total: number;
+  }>;
+  readonly adaptiveVelocitySampler?: WebGPUOctreeLosassoAdaptiveVelocitySamplerSource;
   readonly rigidPressureReaction?: WebGPUOctreeLosassoRigidPressureReaction;
   readonly sources: WebGPUOctreeLosassoPublishedSources;
   readonly allocatedBytes: number;
   readonly authorityPublication = "staged-fail-closed" as const;
-  readonly extensionPublication = "W7-finest-air-face-band" as const;
+  private readonly device: GPUDevice;
+  get extensionPublication(): "adaptive-node-graph" | "W7-finest-air-face-band" {
+    return this.adaptiveVelocity ? "adaptive-node-graph" : "W7-finest-air-face-band";
+  }
   get solverControl(): GPUBuffer | undefined { return this.solver.control; }
   get solverIterationBudget(): number | undefined { return this.solver.iterationBudget; }
   get solverSymmetryStageAuditBuffers() { return this.solver.symmetryStageAuditBuffers; }
@@ -718,37 +901,154 @@ export class WebGPUOctreeLosassoCoarseBackend {
 
   /** Section 5 axis-face extension sweeps per advance. */
   setVelocityExtensionSweeps(sweeps: number): void {
-    this.extensionBand.setVelocityExtensionSweeps(sweeps);
+    this.extensionBand?.setVelocityExtensionSweeps(sweeps);
   }
 
   private readonly publisher: WebGPUOctreeLosassoTopologyPublisher;
+  private readonly adaptiveReadyGate?: WebGPUOctreeLosassoAdaptiveReadyGate;
+  private readonly density: number;
+  private readonly rigidPressureReactionOptions?:
+    WebGPUOctreeLosassoBackendOptions["rigidPressureReaction"];
+  private adaptiveBootstrapPhi?: Float32Array;
+  private adaptiveBootstrapPhiLayout?: "cell-centred" | "nodal-lattice";
+  /** Flips only at ready commit, so rejected candidate retries stay on cold bootstrap. */
+  private adaptiveMassHasAcceptedState = false;
   private initialized = false;
   private destroyed = false;
 
-  constructor(private readonly options: WebGPUOctreeLosassoBackendOptions) {
+  constructor(options: WebGPUOctreeLosassoBackendOptions) {
+    this.device = options.device;
+    this.density = options.density;
+    this.rigidPressureReactionOptions = options.rigidPressureReaction;
     this.publisher = new WebGPUOctreeLosassoTopologyPublisher(options.device, options);
     const published = this.publisher.sources;
-    this.extensionBand = new WebGPUOctreeLosassoExtensionBand(options.device, {
-      dimensions: options.topology.dimensions,
-      maximumLeafSize: options.topology.maximumLeafSize,
-      cellSize: options.topology.physicalCellSize[0],
-      domainOrigin: options.topology.domainOrigin,
-      wetFaceCapacity: options.capacities.faces,
-      maximumResidentFineBricks: options.extensionBandBrickCapacity,
-      velocityExtensionMode: options.velocityExtensionMode,
-      closedBoundaries: options.closedBoundaries,
-      wet: {
-        control: published.operator.control,
-        faceDispatch: published.dynamics.faceDispatch,
-        faceGeometry: published.dynamics.faceGeometry,
-        axisFaceDirectory: published.dynamics.axisFaceDirectory,
-        directoryCapacity: published.dynamics.faceDirectoryCapacity,
-        projectedVelocity: published.projection.projectedVelocity,
-        extendedVelocity: published.extension.extendedVelocity,
-      },
-    });
-    this.sources = Object.freeze({ ...published,
-      velocitySampler: this.extensionBand.samplerSource });
+    const adaptive = options.adaptiveSurface;
+    if (adaptive) {
+      const initialPhiLayout = adaptive.initialPhiLayout ?? "cell-centred";
+      const denseSampleCount = options.topology.dimensions.reduce((product, value) =>
+        product * (initialPhiLayout === "nodal-lattice" ? value + 1 : value), 1);
+      if (adaptive.initialPhi.length !== denseSampleCount) {
+        throw new RangeError(`Losasso adaptive ${initialPhiLayout} initial phi needs ${denseSampleCount} samples`);
+      }
+      const graph = new WebGPUOctreeLosassoSurfaceGraph(options.device, {
+        rowCapacity: options.capacities.rows,
+        ownerPages: options.topology.ownerPages,
+        dimensions: options.topology.dimensions,
+        maximumLeafSize: options.topology.maximumLeafSize,
+        physicalCellSize: options.topology.physicalCellSize,
+      }, {
+        candidateLeafHeaders: adaptive.candidateLeafHeaders,
+        candidateTopologyControl: this.publisher.authority.candidate.control,
+        candidateOwnerArena: adaptive.candidateOwnerArena,
+        candidateOwnerTransaction: adaptive.candidateOwnerTransaction,
+        // The graph commits only after the publisher has validated owner-page
+        // and frontier readiness and exposed the same epoch as accepted.
+        readyControl: this.publisher.authority.writable.control,
+      });
+      this.surfaceGraph = graph;
+      this.adaptivePhi = new WebGPUOctreeLosassoAdaptivePhi(options.device, graph.sources, {
+        nodeCapacity: graph.sources.accepted.nodeCapacity,
+        leafCapacity: graph.sources.accepted.leafCapacity,
+        faceCapacity: options.capacities.faces,
+        dimensions: options.topology.dimensions,
+        maximumLeafSpan: options.topology.maximumLeafSize,
+        cellSize: options.topology.physicalCellSize[0],
+        domainOrigin: options.topology.domainOrigin,
+        redistanceIterations: adaptive.redistanceIterations,
+        redistanceBandWorld: adaptive.redistanceBandWorld,
+        openTop: adaptive.openTop ?? options.closedBoundaries?.[3] === false,
+        exteriorAirPhi: adaptive.exteriorAirPhi,
+        faces: {
+          control: this.publisher.authority.writable.control,
+          faces: this.publisher.authority.writable.faces,
+        },
+      });
+      this.adaptiveMass = new WebGPUOctreeLosassoAdaptiveMass(options.device, graph.sources, {
+        dimensions: options.topology.dimensions,
+        maximumLeafSpan: options.topology.maximumLeafSize,
+        cellSize: options.topology.physicalCellSize[0],
+        domainOrigin: options.topology.domainOrigin,
+        leafCapacity: graph.sources.accepted.leafCapacity,
+        nodeCapacity: graph.sources.accepted.nodeCapacity,
+        pressureRowCapacity: graph.sources.accepted.pressureRowCapacity,
+      });
+      const accepted = this.publisher.authority.writable;
+      const candidate = this.publisher.authority.candidate;
+      this.adaptiveVelocity = new WebGPUOctreeLosassoAdaptiveVelocity(options.device, {
+        nodeCapacity: graph.sources.accepted.nodeCapacity,
+        extensionReach: adaptive.velocityExtensionReach
+          ?? 7 * Math.min(...options.topology.physicalCellSize),
+        minimumCellWidth: Math.min(...options.topology.physicalCellSize),
+        dimensions: options.topology.dimensions,
+        maximumLeafSize: options.topology.maximumLeafSize,
+        ownerArena: adaptive.candidateOwnerArena,
+        accepted: {
+          graph: graph.sources.accepted,
+          transportBandMask: this.adaptivePhi.source.transportBandMask,
+          faces: {
+            control: accepted.control,
+            faceCapacity: accepted.capacities.faces,
+            faceGeometry: accepted.faceGeometry,
+            axisFaceDirectory: accepted.axisFaceDirectory,
+            faceDirectoryCapacity: accepted.faceDirectoryCapacity,
+            carriedValues: accepted.extendedVelocity,
+            projectedValues: accepted.projectedVelocity,
+            predictorValues: accepted.advectedVelocity,
+          },
+        },
+        candidate: {
+          graph: graph.sources.candidate,
+          transportBandMask: this.adaptivePhi.source.transportBandMask,
+          faces: {
+            control: candidate.control,
+            faceCapacity: candidate.capacities.faces,
+            faceGeometry: candidate.faceGeometry,
+            axisFaceDirectory: candidate.axisFaceDirectory,
+            faceDirectoryCapacity: candidate.faceDirectoryCapacity,
+            projectedValues: candidate.extendedVelocity,
+            predictorValues: candidate.extendedVelocity,
+            migrationStatus: this.publisher.candidateVelocityMigrationStatus,
+          },
+        },
+      });
+      this.adaptiveSurfaceAllocatedBytes = Object.freeze({
+        graph: graph.allocatedBytes,
+        phi: this.adaptivePhi.plan.allocatedBytes,
+        mass: this.adaptiveMass.plan.allocatedBytes,
+        velocity: this.adaptiveVelocity.allocatedBytes,
+        total: graph.allocatedBytes + this.adaptivePhi.plan.allocatedBytes
+          + this.adaptiveMass.plan.allocatedBytes + this.adaptiveVelocity.allocatedBytes,
+      });
+      this.adaptiveVelocitySampler = this.adaptiveVelocity.samplerSource;
+      this.adaptiveReadyGate = new WebGPUOctreeLosassoAdaptiveReadyGate(options.device,
+        candidate.control, graph.sources.candidate.control, adaptive.frontier,
+        this.publisher.candidateVelocityMigrationReceipt, this.adaptiveMass.source.control);
+      this.adaptiveBootstrapPhi = adaptive.initialPhi;
+      this.adaptiveBootstrapPhiLayout = initialPhiLayout;
+      this.sources = Object.freeze({ ...published, velocitySampler: undefined });
+    } else {
+      this.extensionBand = new WebGPUOctreeLosassoExtensionBand(options.device, {
+        dimensions: options.topology.dimensions,
+        maximumLeafSize: options.topology.maximumLeafSize,
+        cellSize: options.topology.physicalCellSize[0],
+        domainOrigin: options.topology.domainOrigin,
+        wetFaceCapacity: options.capacities.faces,
+        maximumResidentFineBricks: options.extensionBandBrickCapacity,
+        velocityExtensionMode: options.velocityExtensionMode,
+        closedBoundaries: options.closedBoundaries,
+        wet: {
+          control: published.operator.control,
+          faceDispatch: published.dynamics.faceDispatch,
+          faceGeometry: published.dynamics.faceGeometry,
+          axisFaceDirectory: published.dynamics.axisFaceDirectory,
+          directoryCapacity: published.dynamics.faceDirectoryCapacity,
+          projectedVelocity: published.projection.projectedVelocity,
+          extendedVelocity: published.extension.extendedVelocity,
+        },
+      });
+      this.sources = Object.freeze({ ...published,
+        velocitySampler: this.extensionBand.samplerSource });
+    }
     this.operator = new WebGPUOctreeLosassoOperator(options.device, this.sources.operator);
     const cycle = options.createVCycle
       ? options.createVCycle(this.sources.vcycle)
@@ -784,6 +1084,19 @@ export class WebGPUOctreeLosassoCoarseBackend {
           preconditioner: cycle,
           options: options.solver,
         });
+    const dynamicsSampler = this.adaptiveVelocity
+      ? { kind: "adaptive" as const, ...this.adaptiveVelocity.samplerSource }
+      : {
+        control: this.extensionBand!.source.control,
+        faceGeometry: this.extensionBand!.samplerSource.faceGeometry,
+        axisFaceDirectory: this.extensionBand!.samplerSource.axisFaceDirectory,
+        extendedVelocity: this.extensionBand!.source.extendedVelocity,
+        predictorExtendedVelocity: this.extensionBand!.predictorVelocity,
+        stagedVelocity: this.extensionBand!.dynamicsStagedVelocity,
+        predictorStagedVelocity: this.extensionBand!.predictorStagedVelocity,
+        faceCapacity: this.extensionBand!.plan.faceCapacity,
+        directoryCapacity: this.extensionBand!.plan.directoryCapacity,
+      };
     this.dynamics = new WebGPUOctreeLosassoDynamics(options.device,
       this.sources.dynamics, {
         dimensions: options.topology.dimensions,
@@ -792,17 +1105,8 @@ export class WebGPUOctreeLosassoCoarseBackend {
         domainOrigin: options.topology.domainOrigin,
         density: options.density,
         closedBoundaries: options.closedBoundaries,
-      }, {
-        control: this.extensionBand.source.control,
-        faceGeometry: this.extensionBand.samplerSource.faceGeometry,
-        axisFaceDirectory: this.extensionBand.samplerSource.axisFaceDirectory,
-        extendedVelocity: this.extensionBand.source.extendedVelocity,
-        predictorExtendedVelocity: this.extensionBand.predictorVelocity,
-        stagedVelocity: this.extensionBand.dynamicsStagedVelocity,
-        predictorStagedVelocity: this.extensionBand.predictorStagedVelocity,
-        faceCapacity: this.extensionBand.plan.faceCapacity,
-        directoryCapacity: this.extensionBand.plan.directoryCapacity,
-      });
+        surfaceDensityRows: this.adaptiveMass?.source.rowRho,
+      }, dynamicsSampler);
     this.projection = new WebGPUOctreeLosassoProjection(options.device,
       this.sources.projection, {
         density: options.density,
@@ -835,7 +1139,11 @@ export class WebGPUOctreeLosassoCoarseBackend {
     const preconditionerBytes = (cycle as OctreeLosassoFirstOrderVCycle &
       { allocatedBytes?: number }).allocatedBytes ?? 0;
     this.allocatedBytes = this.publisher.allocatedBytes + this.dynamics.allocatedBytes
-      + this.extensionBand.allocatedBytes
+      + (this.extensionBand?.allocatedBytes ?? 0)
+      + (this.surfaceGraph?.allocatedBytes ?? 0)
+      + (this.adaptivePhi?.plan.allocatedBytes ?? 0)
+      + (this.adaptiveMass?.plan.allocatedBytes ?? 0)
+      + (this.adaptiveVelocity?.allocatedBytes ?? 0)
       + (this.rigidPressureReaction?.allocatedBytes ?? 0)
       + 16 + (this.solver.allocatedBytes ?? 0) + preconditionerBytes;
   }
@@ -843,6 +1151,14 @@ export class WebGPUOctreeLosassoCoarseBackend {
   get initializationTasks(): readonly LosassoInitializationTask[] {
     return [
       ...this.publisher.initializationTasks,
+      ...(this.surfaceGraph?.initializationTasks ?? []),
+      ...(this.adaptivePhi?.initializationTasks ?? []),
+      ...(this.adaptiveMass?.initializationTasks ?? []),
+      ...(this.adaptiveVelocity?.initializationTasks.map((task) => ({
+        label: task.label,
+        run: async () => { await task.run(new AbortController().signal); },
+      })) ?? []),
+      ...(this.adaptiveReadyGate?.initializationTasks ?? []),
       ...this.operator.initializationTasks,
       ...(this.preconditioner as OctreeLosassoFirstOrderVCycle & {
         initializationTasks?: readonly LosassoInitializationTask[];
@@ -851,7 +1167,7 @@ export class WebGPUOctreeLosassoCoarseBackend {
       ...this.dynamics.initializationTasks,
       ...this.projection.initializationTasks,
       ...(this.rigidPressureReaction?.initializationTasks ?? []),
-      ...this.extensionBand.initializationTasks,
+      ...(this.extensionBand?.initializationTasks ?? []),
     ];
   }
 
@@ -867,10 +1183,175 @@ export class WebGPUOctreeLosassoCoarseBackend {
     input: WebGPUOctreeLosassoCandidateInput): void {
     this.assertReady();
     this.publisher.encodeCandidatePublication(broker, input);
+    if (!this.surfaceGraph || !this.adaptivePhi || !this.adaptiveMass
+      || !this.adaptiveVelocity) return;
+    this.surfaceGraph.encodeCandidate(broker);
+    const initialPhi = this.adaptiveBootstrapPhi;
+    this.adaptivePhi.encodeCandidateSelected(broker, initialPhi
+      ? { kind: this.adaptiveBootstrapPhiLayout === "nodal-lattice"
+        ? "nodal-lattice-cpu" : "cell-centred-cpu", values: initialPhi }
+      : undefined);
+    // Capture the cold authored field before candidate repair/redistance.  The
+    // repair is a compatibility cache operation and must never become the
+    // initial conserved-mass authority (a rejected repair can be much smaller
+    // than the authored dam volume).
+    if (!this.adaptiveMassHasAcceptedState) {
+      this.adaptiveMass.encodeBootstrap(broker, "candidate");
+    }
+    if (initialPhi) {
+      // The adaptive authority retains the GPU upload for fail-closed cold
+      // retries; the backend no longer needs to retain the host array.
+      this.adaptiveBootstrapPhi = undefined;
+      this.adaptiveBootstrapPhiLayout = undefined;
+    }
+    // A rejected cold candidate must remain a bootstrap retry: only the ready
+    // commit below flips the host lifecycle to accepted-to-candidate handoff.
+    if (this.adaptiveMassHasAcceptedState) {
+      this.adaptiveMass.encodeCandidateHandoff(broker);
+    }
+    // Mass is authoritative; both graph phi components are compatibility
+    // caches so no consumer can observe the pre-mass candidate component.
+    this.adaptiveMass.encodeDerivedOutputs(
+      broker, "candidate", "both", "preserve-and-validate");
+    // Publish the mass-derived cache before velocity reconstruction. The old
+    // phi redistance receipt is neither authoritative nor usable here: making
+    // it gate graph[5] left a valid mass/graph candidate at generation zero,
+    // while the joint-ready gate waited for velocity generation to match it.
+    this.adaptivePhi.encodeJointCommitGate(
+      broker, this.adaptiveMass.source.control);
+    // First reconstruct the candidate nodes from every geometrically covered
+    // face, then preserve exact coincident accepted nodes and extend genuinely
+    // new nodes. Newly introduced faces are subsequently averaged from that
+    // complete nodal authority. A second reconstruction publishes the final
+    // node/face-consistent tuple; neither phase may observe stale face storage.
+    this.adaptiveVelocity.encodeCandidateFields(broker);
+    this.publisher.encodeCandidateVelocityNodalCompletion(
+      broker, this.surfaceGraph.sources.candidate);
+    this.adaptiveVelocity.encodeCandidateFields(broker);
+    // Completing new faces may seed graph-node components that were absent in
+    // the first reconstruction. Revisit nodal-derived faces from that
+    // now-expanded authority and publish a fresh coverage verdict.
+    this.publisher.encodeCandidateVelocityNodalCompletion(
+      broker, this.surfaceGraph.sources.candidate);
+    // Two additional topology-local rounds close multi-face/hanging-node
+    // chains. Each completion resets and republishes its own strict coverage
+    // verdict; only the final round reaches the joint-ready gate.
+    for (let round = 0; round < 2; round += 1) {
+      this.adaptiveVelocity.encodeCandidateFields(broker);
+      this.publisher.encodeCandidateVelocityNodalCompletion(
+        broker, this.surfaceGraph.sources.candidate);
+    }
+    this.adaptiveReadyGate!.encode(broker);
+  }
+
+  get adaptiveSurfaceGraphSources(): LosassoSurfaceGraphSources | undefined {
+    return this.surfaceGraph?.sources;
+  }
+
+  /** GPU-copyable adaptive field receipts for the runtime step ring. */
+  get adaptiveVelocityReceiptSource(): GPUBuffer | undefined {
+    return this.adaptiveVelocity?.receiptBuffer;
+  }
+
+  /** Failure-only unresolved-node records, split into four field banks. */
+  get adaptiveVelocityDiagnosticSource(): GPUBuffer | undefined {
+    return this.adaptiveVelocity?.diagnosticBuffer;
+  }
+
+  /** Observational copy sources for auditing accepted face reconstruction. */
+  get adaptiveVelocityStencilDiagnosticSources(): Readonly<{
+    control: GPUBuffer; records: GPUBuffer;
+  }> | undefined {
+    return this.adaptiveVelocity?.acceptedStencilDiagnostics;
+  }
+
+  /** Retired candidate payloads retained for post-commit migration audits. */
+  get adaptiveVelocityCandidateDiagnosticSources(): Readonly<{
+    authorityControl: GPUBuffer; faceGeometry: GPUBuffer; extendedVelocity: GPUBuffer;
+    nodalVelocity: GPUBuffer;
+  }> | undefined {
+    const graph = this.surfaceGraph?.sources.candidate;
+    if (!graph) return undefined;
+    const candidate = this.publisher.authority.candidate;
+    return Object.freeze({ authorityControl: candidate.control,
+      faceGeometry: candidate.faceGeometry, extendedVelocity: candidate.extendedVelocity,
+      nodalVelocity: graph.nodalVelocity });
+  }
+
+  /** Exact physical reach used to extrapolate accepted liquid velocity into air. */
+  get adaptiveVelocityExtensionReach_m(): number | undefined {
+    return this.adaptiveVelocity?.extensionReach_m;
+  }
+
+  readAdaptiveSurfaceGraphReceipt(bank: "accepted" | "candidate" = "accepted") {
+    return this.surfaceGraph?.readReceipt(bank);
+  }
+
+  /** Diagnostic-only field receipts for accepted/predictor/candidate banks. */
+  async readAdaptiveVelocityReceipts(): Promise<readonly number[] | undefined> {
+    const source = this.adaptiveVelocity?.receiptBuffer;
+    if (!source) return undefined;
+    const readback = this.device.createBuffer({
+      label: "Read adaptive Losasso velocity receipts",
+      size: source.size,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+    const encoder = this.device.createCommandEncoder({
+      label: "Copy adaptive Losasso velocity receipts",
+    });
+    encoder.copyBufferToBuffer(source, 0, readback, 0, source.size);
+    this.device.queue.submit([encoder.finish()]);
+    try {
+      await readback.mapAsync(GPUMapMode.READ);
+      return Array.from(new Uint32Array(readback.getMappedRange()));
+    } finally {
+      if (readback.mapState === "mapped") readback.unmap();
+      readback.destroy();
+    }
+  }
+
+  /** Diagnostic-only unresolved cause headers and first-record payloads. */
+  async readAdaptiveVelocityDiagnostics(): Promise<readonly number[] | undefined> {
+    const source = this.adaptiveVelocity?.diagnosticBuffer;
+    if (!source) return undefined;
+    const readback = this.device.createBuffer({
+      label: "Read adaptive Losasso velocity unresolved diagnostics",
+      size: source.size,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+    const encoder = this.device.createCommandEncoder({
+      label: "Copy adaptive Losasso velocity unresolved diagnostics",
+    });
+    encoder.copyBufferToBuffer(source, 0, readback, 0, source.size);
+    this.device.queue.submit([encoder.finish()]);
+    try {
+      await readback.mapAsync(GPUMapMode.READ);
+      return Array.from(new Uint32Array(readback.getMappedRange()));
+    } finally {
+      if (readback.mapState === "mapped") readback.unmap();
+      readback.destroy();
+    }
+  }
+
+  get adaptivePhiSource(): WebGPUOctreeLosassoAdaptivePhiSource | undefined {
+    return this.adaptivePhi?.source;
+  }
+
+  get adaptiveMassSource(): WebGPUOctreeLosassoAdaptiveMassSource | undefined {
+    return this.adaptiveMass?.source;
+  }
+
+  get adaptiveVelocitySamplerSource():
+  WebGPUOctreeLosassoAdaptiveVelocitySamplerSource | undefined {
+    return this.adaptiveVelocitySampler;
   }
 
   /** Candidate authority used only by the ready validator. */
   get candidateAuthorityControl(): GPUBuffer { return this.publisher.authority.candidate.control; }
+  /** Diagnostic receipt consumed by the adaptive joint-ready validator. */
+  get candidateVelocityMigrationReceipt(): GPUBuffer {
+    return this.publisher.candidateVelocityMigrationReceipt;
+  }
   /** Refresh-only validation control; never aliases accepted authority. */
   get rigidBoundaryRefreshDiagnostics(): GPUBuffer {
     return this.publisher.acceptedRigidBoundaryDiagnostics;
@@ -882,10 +1363,31 @@ export class WebGPUOctreeLosassoCoarseBackend {
   }): void {
     this.assertReady();
     this.publisher.encodeReadyCommit(broker, input);
+    if (this.surfaceGraph) {
+      this.surfaceGraph.encodeReadyCommit(broker);
+      this.adaptivePhi!.encodeAcceptedCommitSync(broker);
+      this.adaptiveMass!.encodeDerivedOutputs(
+        broker, "accepted", "both", "preserve-and-validate");
+      this.adaptivePhi!.encodeAcceptedExternalPhiPublication(
+        broker, this.adaptiveMass!.source.control);
+      this.adaptiveMassHasAcceptedState = true;
+    }
+    // Accepted row/volume/ghost views must be derived only after the matching
+    // face authority has committed. This path deliberately performs no
+    // transport, redistance, correction, or phi-bank flip.
+    this.adaptivePhi?.encodeAcceptedDerivations(broker);
+    // Ready commit publishes the graph-owned scalar before any accepted
+    // characteristic may sample it. Reconstruct both nodal velocity fields
+    // here as part of that publication boundary: construction has no earlier
+    // accepted projection tail, and retaining velocityGeneration == 0 would
+    // make the first dt=0 scalar finalize observe an incoherent tuple. The
+    // velocity publisher stamps control[6] only after both fields pass their
+    // exact-reach receipts, so missing face coverage remains fail-closed.
+    this.adaptiveVelocity?.encodeAcceptedReadyFields(broker);
     // The W7 graph spans topology epochs, but its cached wet ids do not. Refresh
     // them through the dense finest-face owner map at the topology boundary so
     // both projected and MacCormack gathers stay direct in the advance path.
-    this.extensionBand.encodeTopologyRemap(broker);
+    this.extensionBand?.encodeTopologyRemap(broker);
   }
 
   /** Call immediately after accepted ghost conditioning changes L0 coefficients. */
@@ -912,15 +1414,70 @@ export class WebGPUOctreeLosassoCoarseBackend {
 
   encodeAdvection(broker: PassBroker, step: WebGPUOctreeLosassoDynamicsStep): void {
     this.assertReady();
-    this.dynamics.encodeAdvection(broker, step, () =>
-      this.extensionBand.encodePredictorExtension(
-        broker, this.sources.dynamics.advectedVelocity,
-      ));
+    this.dynamics.encodeAdvection(broker, step, () => {
+      if (this.adaptiveVelocity) {
+        this.adaptiveVelocity.encodeAcceptedFields(broker);
+        return true;
+      }
+      this.extensionBand!.encodePredictorExtension(
+        broker, this.sources.dynamics.advectedVelocity);
+      return true;
+    });
+  }
+
+  /** Advance the accepted nodal scalar without materializing a finest lattice. */
+  encodeAdaptiveSurfaceAdvance(
+    broker: PassBroker,
+    dt_s: number,
+    inflow?: SurfaceInflowState,
+  ): WebGPUOctreeLosassoAdaptivePhiSource | undefined {
+    this.assertReady();
+    if (!this.adaptivePhi || !this.adaptiveMass || !this.surfaceGraph
+      || !this.adaptiveVelocity) return undefined;
+    const accepted = this.surfaceGraph.sources.accepted;
+    // Authored inflow mass needs a conservative boundary source; until that
+    // path lands, do not fold it into the retired phi reference correction.
+    void inflow;
+    this.adaptiveMass.encodeAcceptedAdvance(broker, dt_s, {
+      values: accepted.nodalVelocity,
+    });
+    this.adaptiveMass.encodeDerivedOutputs(broker, "accepted", "both");
+    this.adaptivePhi.encodeAcceptedExternalPhiPublication(
+      broker, this.adaptiveMass.source.control);
+    const source = this.adaptivePhi.encodeAcceptedDerivations(broker);
+    // Mass publication advances the scalar clock and may change which graph nodes
+    // lie inside the physical extension reach. Rebuild the carried field from
+    // the still-accepted projected faces before any dynamics sampler consumes
+    // the new surface generation; projection replaces it again at the tail.
+    this.adaptiveVelocity.encodeAcceptedFields(broker);
+    // Velocity publication stamps accepted graph word 6 only after both nodal
+    // banks are complete. Pair that clock with phi control now. Rebuilding
+    // topology every step used to hide the missing stamp at the following
+    // ready commit; a cadence-k epoch must stay coherent on every skipped
+    // rebuild without copying or re-filtering the accepted graph.
+    this.adaptivePhi.encodeAcceptedFieldClockSync(broker);
+    return source;
+  }
+
+  /** Reconstruct both accepted and MacCormack predictor nodal velocity banks. */
+  encodeAdaptiveAcceptedVelocityFields(broker: PassBroker): boolean {
+    this.assertReady();
+    if (!this.adaptiveVelocity) return false;
+    this.adaptiveVelocity.encodeAcceptedFields(broker);
+    return true;
+  }
+
+  /** Add authored inflow volume to the next adaptive scalar correction target. */
+  addAdaptiveSurfaceReferenceVolume(volume_m3: number): boolean {
+    this.assertLive();
+    if (!this.adaptivePhi) return false;
+    this.adaptivePhi.addReferenceVolume(volume_m3);
+    return true;
   }
 
   encodeRigidBoundaryRefresh(broker: PassBroker): boolean {
     this.assertReady();
-    const rigid = this.options.rigidPressureReaction;
+    const rigid = this.rigidPressureReactionOptions;
     if (!rigid) return false;
     this.publisher.encodeAcceptedRigidBoundaryRefresh(
       broker, rigid.solidCells, rigid.rigidBodies,
@@ -943,7 +1500,7 @@ export class WebGPUOctreeLosassoCoarseBackend {
     dynamicCouplingBodyCount = 0,
   ): void {
     this.assertReady();
-    this.projection.encode(broker, pressure, step.dt_s / this.options.density,
+    this.projection.encode(broker, pressure, step.dt_s / this.density,
       step.gravity_m_s2);
     this.rigidPressureReaction?.encode(
       broker, pressure, step.dt_s, dynamicCouplingBodyCount, step.gravity_m_s2,
@@ -955,7 +1512,7 @@ export class WebGPUOctreeLosassoCoarseBackend {
   encodeExtensionBandPublication(broker: PassBroker,
     fine: WebGPUFineLevelSetBrickSource): void {
     this.assertReady();
-    this.extensionBand.encodePublication(broker, fine);
+    this.extensionBand?.encodePublication(broker, fine);
   }
 
   encodeCoarseExtensionBandPublication(
@@ -964,15 +1521,27 @@ export class WebGPUOctreeLosassoCoarseBackend {
     generation: number,
   ): void {
     this.assertReady();
-    this.extensionBand.encodeCoarsePublication(broker, coarsePhi, generation);
+    this.extensionBand?.encodeCoarsePublication(broker, coarsePhi, generation);
   }
 
   encodeExtension(broker: PassBroker, advance: number, topologyEpoch: number): boolean {
     this.assertReady();
-    return this.extensionBand.encodeOncePerAdvance(broker, advance, topologyEpoch);
+    if (this.adaptiveVelocity) {
+      const accepted = this.publisher.authority.writable;
+      // This compact face copy preserves the topology-migration seed. It is
+      // not a finest-grid materialization and never feeds adaptive sampling.
+      broker.copyBufferToBuffer(accepted.projectedVelocity, 0,
+        accepted.extendedVelocity, 0, accepted.projectedVelocity.size);
+      this.adaptiveVelocity.encodeAcceptedFields(broker);
+      return true;
+    }
+    return this.extensionBand!.encodeOncePerAdvance(broker, advance, topologyEpoch);
   }
 
-  get extensionBandPublished(): boolean { return this.extensionBand.hasPublishedGraph; }
+  get extensionBandPublished(): boolean {
+    return this.adaptiveVelocity ? this.initialized
+      : this.extensionBand!.hasPublishedGraph;
+  }
 
   destroy(): void {
     if (this.destroyed) return;
@@ -985,7 +1554,12 @@ export class WebGPUOctreeLosassoCoarseBackend {
     this.dynamics.destroy();
     this.projection.destroy();
     this.rigidPressureReaction?.destroy();
-    this.extensionBand.destroy();
+    this.extensionBand?.destroy();
+    this.adaptiveReadyGate?.destroy();
+    this.adaptiveVelocity?.destroy();
+    this.adaptivePhi?.destroy();
+    this.adaptiveMass?.destroy();
+    this.surfaceGraph?.destroy();
     this.publisher.destroy();
   }
 

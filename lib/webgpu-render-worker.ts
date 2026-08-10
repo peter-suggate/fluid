@@ -2,6 +2,7 @@
 
 import { FluidLabRenderer } from "./webgpu-renderer";
 import { markSceneRevision, type SceneDescription } from "./model";
+import { usePerformanceInstrumentationStore } from "./stores/performance-instrumentation-store";
 import type {
   WebGPURenderWorkerRequest,
   WebGPURenderWorkerResponse,
@@ -150,6 +151,10 @@ scope.addEventListener("message", (event: MessageEvent<WebGPURenderWorkerRequest
       if (!renderScene || renderScene.revision !== message.sceneRevision) {
         throw new Error(`Render scene revision ${message.sceneRevision} has not been published`);
       }
+      // The renderer and its instrumentation store live in this worker. The
+      // control lives in the window, so synchronize it before draw() decides
+      // whether to allocate a timestamp recorder for this frame.
+      usePerformanceInstrumentationStore.getState().setMode(message.instrumentationMode);
       runtime.setViewportSize(message.viewport.width, message.viewport.height, message.viewport.devicePixelRatio);
       const [time_s, ...args] = message.args;
       const metrics = runtime.draw(time_s, renderScene.document, ...args);

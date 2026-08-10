@@ -31,7 +31,7 @@ test("paper-technique modes have unique stable uniform codes", () => {
     "octree-lifecycle", "fine-band-lifecycle", "operator-diagonal", "operator-rhs",
     "operator-reciprocity", "operator-open-fraction", "tetra-validity",
     "global-fine-phi", "band-residency", "evaluated-velocity", "projection-update",
-    "divergence-closure", "structured-velocity"] as const) {
+    "divergence-closure", "structured-velocity", "adaptive-velocity-arrows"] as const) {
     assert.equal(isOctreeTechniqueOverlayMode(mode), true, mode);
     assert.ok(OCTREE_TECHNIQUE_OVERLAY_CODES[mode] >= 12, mode);
   }
@@ -144,6 +144,33 @@ test("technique overlay composes directly from compact topology and fine publica
     assert.equal(OCTREE_TECHNIQUE_PROGRAM_FOR_MODE[mode], "structured",
       "compact velocity, projection, and divergence fields must route to structured authority");
   }
+  assert.equal(OCTREE_TECHNIQUE_PROGRAM_FOR_MODE["adaptive-velocity-arrows"],
+    "adaptiveVelocity",
+    "adaptive arrows must read the accepted Losasso graph rather than structured velocity");
+  for (const resource of ["losassoAdaptiveVelocityControl",
+    "losassoAdaptiveVelocityLeaves", "losassoAdaptiveNodalVelocity",
+    "losassoAdaptivePhiControl", "losassoAdaptiveRowPhi",
+    "adaptiveVelocityViewConfig"]) {
+    assert.ok(
+      OCTREE_TECHNIQUE_PROGRAMS.adaptiveVelocity.bindings.some(
+        (binding) => binding.resource === resource),
+      `the adaptive velocity program must bind ${resource}`);
+  }
+  assert.match(overlaySource, /let logMagnitude=log2\(1\.0\+15\.0\*magnitude\)\/4\.0/,
+    "arrow length must use a logarithmic speed scale");
+  assert.match(overlaySource, /value\+=0\.125\*node/,
+    "each cell-centred vector must reconstruct all eight adaptive corner nodes");
+  assert.match(overlaySource,
+    /let interfaceLeaf=.*minimum<=0\.0&&maximum>=0\.0.*let air=.*minimum>0\.0/,
+    "straddling cells must remain interface-styled while pure positive-phi cells are air");
+  assert.match(overlaySource,
+    /centre<=max\(adaptiveVelocityView\.extensionReach_m,0\.0\)/,
+    "air arrows must stop at the solver's physical velocity-extension reach");
+  assert.match(overlaySource,
+    /adaptivePhiControl\[1u\]!=adaptiveControl\[0u\].*adaptivePhiControl\[2u\]!=adaptiveControl\[5u\].*adaptivePhiControl\[3u\]!=adaptiveControl\[6u\]/,
+    "phi classification must fail closed when topology or field generations are stale");
+  assert.match(overlaySource, /let phaseAlpha=select\(1\.0,0\.36,phase\.air!=0u\)/,
+    "air-side extrapolated arrows must be visually distinct from liquid arrows");
   assert.match(overlaySource, /if\(mode==30\)\{let direction=/,
     "structured velocity must show vector direction instead of duplicating evaluated speed");
   assert.ok(

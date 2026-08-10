@@ -9,12 +9,12 @@ test("cone-traced SVO presentation records every encoded render-path item", () =
   const water = source("../lib/webgpu-water-pipeline.ts");
   const dry = source("../lib/webgpu-svo-dry-scene.ts");
 
-  assert.match(renderer, /const traceDetailedSvoRenderPath = true/);
+  assert.match(renderer, /const traceDetailedSvoRenderPath = sparsePresentationRequired/);
   assert.doesNotMatch(renderer, /svoRenderMode|svoLightingMode/);
-  assert.match(renderer, /new GPUStageTimestampRecorder\(/);
+  assert.match(renderer, /new GPUPassTimestampRecorder\(/);
   assert.match(renderer, /const detailedPresentationTrace = traceDetailedSvoRenderPath \? presentationTrace : undefined/);
   assert.match(renderer, /completeDetailedPresentationPhase\(\{ id: "inspection-overlay"/);
-  assert.match(renderer, /completeDetailedPresentationPhase\(\{ id: "present"/);
+  assert.match(renderer, /detailedPresentationTrace\?\.completePhase\(finalPresentationPhase\)/);
 
   for (const phase of [
     "surface-extraction",

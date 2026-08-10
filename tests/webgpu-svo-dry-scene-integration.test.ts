@@ -30,7 +30,7 @@ function expectSource(source: string, pattern: RegExp, message: string): void {
 test("GLOBAL SVO is the sole production presentation", () => {
   assert.deepEqual(DEFAULT_SVO_LIGHTING_OPTIONS,
     { shadowsEnabled: true, ambientOcclusionEnabled: true, silhouetteRefinementEnabled: false,
-      coneTracingMode: "cones", primaryTraversal: "raster" });
+      coneTracingMode: "cones", globalIlluminationEnabled: true, primaryTraversal: "raster" });
   assert.doesNotMatch(rendererSource, /svoRenderMode|svoLightingMode|SvoRenderMode|SvoLightingMode/);
   expectSource(rendererSource, /type SvoLightingOptions[^]*from "\.\/svo-render-options"/,
     "renderer must retain only GLOBAL visibility effects");
@@ -61,7 +61,7 @@ test("missing live SVO publication fails closed behind authoritative fluid inter
   expectSource(failure, /SVO dry-scene unavailable · fail closed/,
     "performance diagnostics must name the rejection rather than a fallback");
   assert.doesNotMatch(rendererSource, /setPendingSvoBackground|svoPresentationExpected/);
-  expectSource(waterSource, /if \(this\.sceneHasFluid\) \{[^]*interfacePass\("Water \+ spray front interfaces"/,
+  expectSource(waterSource, /if \(this\.sceneHasFluid && !interfacesWithheld\) \{[^]*interfacePass\("Water \+ spray front interfaces"/,
     "actual fluid interfaces remain available after the dry scene fails closed");
   assert.doesNotMatch(waterSource, /if \(sparseSceneResult && this\.sceneHasFluid\)/,
     "dry-scene publication does not own the independently generated fluid surface");

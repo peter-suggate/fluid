@@ -39,10 +39,15 @@ struct Face {
 @group(0) @binding(8) var<storage, read> rowFaceOffsets: array<u32>;
 @group(0) @binding(9) var<storage, read> rowFaces: array<u32>;
 @group(0) @binding(10) var<storage, read_write> rightHandSide: array<f32>;
+// Optional adaptive surface-density rows: (rho, integral mass, leaf volume,
+// compression). params.band.w is the explicit ABI-presence bit.
+@group(0) @binding(16) var<storage, read> surfaceDensityRows: array<vec4f>;
+// <legacy-velocity-bindings>
 @group(0) @binding(12) var<storage, read> bandControl: array<u32>;
 @group(0) @binding(13) var<storage, read> bandGeometry: array<vec4u>;
 @group(0) @binding(14) var<storage, read> bandDirectory: array<vec2u>;
 @group(0) @binding(15) var<storage, read> bandVelocityArena: array<vec4u>;
+// </legacy-velocity-bindings>
 
 fn finite(value: f32) -> bool {
   return value == value && abs(value) <= 3.402823e38;
@@ -68,6 +73,7 @@ fn liveRows() -> u32 {
   if (arrayLength(&authority) < 4u || authority[3] != 1u) { return 0u; }
   return min(authority[1], params.capacities.y);
 }
+// <legacy-face-lookup>
 fn faceHash(packedAxisSpan: u32, coordinate: vec3u) -> u32 {
   var value = (packedAxisSpan + 1u) * 0x9e3779b1u;
   value = (value ^ coordinate.x) * 0x85ebca6bu;
@@ -113,6 +119,7 @@ fn containingFace(axis: u32, coordinate: vec3u) -> u32 {
   }
   return INVALID_FACE;
 }
+// </legacy-face-lookup>
 
 struct VelocitySample {
   value: vec3f,
@@ -146,6 +153,7 @@ fn closedDomainFace(axis: u32, coordinate: vec3u) -> bool {
   return onBoundary && (params.capacities.w & (1u << side)) != 0u;
 }
 
+// <legacy-velocity-sampler>
 fn stagedNodeIndex(node: vec3u) -> u32 {
   let dimensions = params.dimensionsMaximumLeaf.xyz + vec3u(1u);
   return node.x + dimensions.x * (node.y + dimensions.y * node.z);
@@ -205,6 +213,7 @@ fn velocityAtGrid(gridValue: vec3f, field: u32) -> VelocitySample {
   let result = vec3f(exactValue(&exactX), exactValue(&exactY), exactValue(&exactZ));
   return VelocitySample(result, stencilLower, stencilUpper, true, boundary);
 }
+// </legacy-velocity-sampler>
 
 struct VelocityTrace {
   point: vec3f,
@@ -435,7 +444,50 @@ fn divergenceLosassoRows(@builtin(global_invocation_id) invocation: vec3u) {
   // A uses integrated area/distance coefficients and projection applies dt/rho,
   // so the matching pressure RHS is rho/dt times integrated outward flux.
   let scale = params.cellWidthDensity.w / max(params.domainOriginDt.w, 1e-12);
-  let value = exactValue(&exactFlux) * scale;
+  var targetExpansionFlux = 0.0;
+  if (params.band.w != 0u) {
+    if (row >= arrayLength(&surfaceDensityRows)) {
+      validTerms = false;
+    } else {
+      let density = surfaceDensityRows[row];
+      // Chentanez--Mueller section 3.7: excess conserved surface density is
+      // made visible through a bounded local divergence target instead of a
+      // global rho/phi offset. lambda=.5 and eta=1 are the paper values.
+      let width = pow(max(density.z, 1e-30), 1.0 / 3.0);
+      let excess = max(density.x - 1.0, 0.0);
+      let targetDivergence = min(0.5 * excess, 1.0) / max(width, 1e-12);
+      targetExpansionFlux = targetDivergence * density.z;
+      validTerms = validTerms && finite(density.x) && finite(density.z)
+        && density.x >= 0.0 && density.z > 0.0 && finite(targetExpansionFlux);
+    }
+  }
+  let value = (exactValue(&exactFlux) - targetExpansionFlux) * scale;
   rightHandSide[row] = select(3.402823e38, value, validTerms && finite(value));
 }
 `;
+
+const replaceMarkedWGSL = (source: string, marker: string, replacement: string): string => {
+  const startToken = `// <${marker}>`;
+  const endToken = `// </${marker}>`;
+  const start = source.indexOf(startToken);
+  const end = source.indexOf(endToken, start);
+  if (start < 0 || end < 0) throw new Error(`Missing Losasso dynamics WGSL marker ${marker}`);
+  return source.slice(0, start) + replacement + source.slice(end + endToken.length);
+};
+
+/** Build the dynamics shader against the compact adaptive nodal sampler. */
+export function makeOctreeLosassoAdaptiveDynamicsWGSL(adaptiveSamplerWGSL: string): string {
+  let source = replaceMarkedWGSL(octreeLosassoDynamicsWGSL,
+    "legacy-velocity-bindings", "");
+  source = replaceMarkedWGSL(source, "legacy-face-lookup", "");
+  return replaceMarkedWGSL(source, "legacy-velocity-sampler", `${adaptiveSamplerWGSL}\n
+fn velocityAtGrid(gridValue: vec3f, field: u32) -> VelocitySample {
+  let clamped = clamp(gridValue, vec3f(0.0),
+    vec3f(params.dimensionsMaximumLeaf.xyz));
+  let sample = sampleAdaptiveVelocityGrid(clamped, field);
+  if (!sample.valid) { return invalidVelocitySample(); }
+  return VelocitySample(sample.value, sample.lower, sample.upper, true,
+    any(clamped != gridValue));
+}
+`);
+}

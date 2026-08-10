@@ -120,4 +120,6 @@ test("renderer publishes ready only after first raster submission completion and
     "the reset receipt must bypass the ordinary bounded telemetry cadence");
   assert.match(water, /surfaceDiagnosticPending \|\| !this\.indirectBuffer\) return false/,
     "a reset must wait rather than overwrite a diagnostic receipt still in flight");
+  assert.match(water, /this\.surfaceDiagnosticsDirty = true[\s\S]*if \(this\.surfaceDiagnosticsDirty\)[\s\S]*this\.encodeSurfaceDiagnostics/,
+    "a throttled extraction receipt must remain armed after the mesh revision stops changing");
 });

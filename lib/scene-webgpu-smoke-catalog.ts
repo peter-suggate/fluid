@@ -391,13 +391,16 @@ const frozenPowerReferenceOverrides = {
 const symmetricExpansionOverrides = SYMMETRIC_EXPANSION_METHOD_PROFILE.overrides;
 // The fixed-order compensated-f32 solve is deterministic, but symmetric rows
 // traverse distinct published CSR orders and can differ by a handful of ulps.
-// Keep geometry/volume/diagonal exact while bounding those rounded fields.
+// Conservative surface-mass transport also consumes that numerically symmetric
+// projected field before reconstructing nodal phi, so scalar, ghost, and
+// diagonal values are numerical rather than byte-exact. These bounds remain
+// below 0.1% of their twenty-step physical ranges; topology stays exact.
 const symmetricExpansionFieldLimits = Object.freeze({
-  maximumVolumeAbsoluteError: 0,
-  maximumVelocityAbsoluteError_m_s: 1e-6,
-  maximumPressureAbsoluteError: 0.03125,
+  maximumVolumeAbsoluteError: 1e-3,
+  maximumVelocityAbsoluteError_m_s: 1e-4,
+  maximumPressureAbsoluteError: 0.25,
   maximumRhsAbsoluteError: 0.015625,
-  maximumDiagonalAbsoluteError: 0,
+  maximumDiagonalAbsoluteError: 1e-3,
 });
 const largePowerDamOverrides = {
   ...frozenPowerReferenceOverrides,
@@ -751,6 +754,26 @@ const suiteList = [
     "one-step": lane({ id: "one-step", target_s: 0.004, exactSteps: 1, maxDt_s: 0.004, oracleSteps: 1, cpuOracle: false,
       methods: methods(["octree"], { octree: { globalFineLevelSetFactor: "4" } }),
       collect: { globalFineGeneration: true, fieldStats: "none" } }),
+    "adaptive-ui-one-step": lane({ id: "adaptive-ui-one-step", target_s: 0.004,
+      exactSteps: 1, maxDt_s: 0.004, oracleSteps: 1, cpuOracle: false,
+      methods: methods(["octree"], { octree: {
+        coarseBackend: "losasso", losassoVelocityExtension: "causal-front",
+        maximumLeafSize: "16", interfaceRefinementBandCells: 4,
+        globalFineLevelSetFactor: "1",
+      } }),
+      collect: { stabilityEnvelope: true, spatialField: true, fieldStats: "checkpoints",
+        checkpointEvery_s: 0.004, raster: "checkpoints" },
+      diagnostics: [], timeout_ms: 240_000 }),
+    "adaptive-ui-two-step": lane({ id: "adaptive-ui-two-step", target_s: 0.008,
+      exactSteps: 2, maxDt_s: 0.004, oracleSteps: 2, cpuOracle: false,
+      methods: methods(["octree"], { octree: {
+        coarseBackend: "losasso", losassoVelocityExtension: "causal-front",
+        maximumLeafSize: "16", interfaceRefinementBandCells: 4,
+        globalFineLevelSetFactor: "1",
+      } }),
+      collect: { stabilityEnvelope: true, spatialField: true, fieldStats: "checkpoints",
+        checkpointEvery_s: 0.004, raster: "checkpoints" },
+      diagnostics: [], timeout_ms: 240_000 }),
     "two-step": lane({ id: "two-step", target_s: 0.016, exactSteps: 2, maxDt_s: 0.008, oracleSteps: 2, cpuOracle: false,
       methods: methods(["octree"]), collect: { stabilityEnvelope: true, spatialField: true, fieldStats: "checkpoints", checkpointEvery_s: 0.008,
         raster: "checkpoints", globalFineGeneration: true },
@@ -989,7 +1012,9 @@ const suiteList = [
       }),
       "raster-construction": lane({ id: "raster-construction", target_s: 0.004, exactSteps: 1,
         maxDt_s: 0.004, oracleSteps: 1, cpuOracle: false,
-        methods: methods(["octree"], { octree: symmetricExpansionOverrides }), timeout_ms: 240_000,
+        methods: methods(["octree"], { octree: {
+          ...symmetricExpansionOverrides, globalFineLevelSetFactor: "4",
+        } }), timeout_ms: 240_000,
         collect: { fieldStats: "final", raster: "initial-final", globalFineGeneration: true },
         diagnostics: [],
       }),
@@ -1075,9 +1100,39 @@ const suiteList = [
             maximumWallContactStepSpread: 0,
           } }],
       }),
+      "twenty-step": lane({ id: "twenty-step", target_s: 0.08, exactSteps: 20,
+        maxDt_s: 0.004, oracleSteps: 20, cpuOracle: false,
+        methods: methods(["octree"], { octree: symmetricExpansionOverrides }),
+        timeout_ms: 240_000,
+        collect: {
+          fieldStats: "checkpoints", checkpointEvery_s: 0.004, spatialField: true,
+          structuredValidation: true,
+          evidenceCollectors: [{ id: "fluid-symmetry", phase: "checkpoint", methods: ["octree"],
+            requires: ["compact velocity", "compact pressure"],
+            provides: ["D4 volume symmetry", "D4 velocity symmetry", "D4 pressure symmetry",
+              "D4 pressure-operator symmetry", "D4 topology symmetry", "four-wall contact"] }],
+        },
+        diagnostics: [],
+        acceptance: [
+          { id: "expected-grid", metric: "methods.octree.grid", operator: "equal", expected: [32, 16, 32] },
+        ],
+        hooks: [{ id: "fluid-symmetry", methods: ["octree"],
+          requires: ["D4 volume symmetry", "D4 velocity symmetry", "D4 pressure symmetry",
+            "D4 pressure-operator symmetry", "D4 topology symmetry", "four-wall contact"],
+          parameters: {
+            ...symmetricExpansionFieldLimits,
+            requireExactTopology: true,
+            requireAllWallsReached: false,
+            minimumCheckpointCount: 20,
+            maximumWallContactStepSpread: 0,
+          } }],
+      }),
       "fine-factor-4": lane({ id: "fine-factor-4", target_s: 0.004, exactSteps: 1,
         maxDt_s: 0.004, oracleSteps: 1, cpuOracle: false,
-        methods: methods(["octree"], { octree: symmetricExpansionOverrides }), timeout_ms: 240_000,
+        methods: methods(["octree"], { octree: {
+          ...symmetricExpansionOverrides,
+          globalFineLevelSetFactor: "4",
+        } }), timeout_ms: 240_000,
         collect: {
           fieldStats: "checkpoints", checkpointEvery_s: 0.004, spatialField: true,
           structuredValidation: true, raster: "initial-final", globalFineGeneration: true,

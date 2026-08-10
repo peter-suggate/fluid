@@ -16,6 +16,7 @@ import { SceneScaleOverlay } from "./SceneScaleOverlay";
 import { SceneConfigPopover } from "./SceneConfigPopover";
 import { RigidBodyPanel } from "./RigidBodyTray";
 import { VisualPanel } from "./VisualPanel";
+import { VisualsPanel } from "./VisualsPanel";
 import { DiagnosticsPanel } from "./DiagnosticsPanel";
 import { PerformancePanel } from "./PerformancePanel";
 import { TransportBar } from "./TransportBar";
@@ -175,6 +176,7 @@ export function FluidLab() {
         <div className="axis-widget"><span className="axis-y">Y</span><span className="axis-x">X</span><span className="axis-z">Z</span></div>
         <nav className="utility-panel-tabs" aria-label="Viewport panels">
           <button className={rightPanel === "visual" ? "active" : ""} onClick={() => setRightPanel(rightPanel === "visual" ? null : "visual")} aria-expanded={rightPanel === "visual"} title="Render and debug controls">RENDER</button>
+          <button className={rightPanel === "visuals" ? "active" : ""} onClick={() => setRightPanel(rightPanel === "visuals" ? null : "visuals")} aria-expanded={rightPanel === "visuals"} aria-controls="visuals-panel" title="Scientific field visualizations">VISUALS</button>
           <button className={rightPanel === "bodies" ? "active" : ""} onClick={() => setRightPanel(rightPanel === "bodies" ? null : "bodies")} aria-expanded={rightPanel === "bodies"} title="Rigid body controls">BODIES</button>
           <button className={diagnosticsOpen ? "active" : ""} onClick={() => setDiagnosticsOpen(!diagnosticsOpen)} aria-expanded={diagnosticsOpen} title="Live diagnostics">DIAGNOSTICS</button>
           <button className={rightPanel === "performance" ? "active" : ""} onClick={() => setRightPanel(rightPanel === "performance" ? null : "performance")} aria-expanded={rightPanel === "performance"} aria-controls="performance-panel" title="Measured work and paper fields">PERFORMANCE</button>
@@ -210,6 +212,7 @@ export function FluidLab() {
 
       {rightPanel && <RightPanelResizer />}
       {rightPanel === "visual" && <VisualPanel />}
+      {rightPanel === "visuals" && <VisualsPanel />}
       {rightPanel === "bodies" && <RigidBodyPanel />}
       {diagnosticsOpen && <DiagnosticsPanel />}
       {rightPanel === "performance" && <PerformancePanel />}

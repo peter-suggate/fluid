@@ -22,6 +22,7 @@ export interface PerformanceReport {
   cpu?: PerformanceTrace;
   physics?: PerformanceTrace;
   presentation?: PerformanceTrace;
+  presentationStages?: PerformanceTrace;
 }
 
 export const emptyPerformanceReport: PerformanceReport = {

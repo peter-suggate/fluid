@@ -25,6 +25,11 @@ import {
   type SvoFieldProgram,
 } from "./svo-field-program";
 import type { ResourcePluginDefinition } from "./resource-readiness";
+import {
+  disabledRenderStagesEqual,
+  NO_DISABLED_RENDER_STAGES,
+  type DisabledRenderStages,
+} from "./render-stage-switches";
 
 /** Lifecycle metadata lives with the sparse presentation programs it describes. */
 export const svoPresentationResourcePlugin: ResourcePluginDefinition = Object.freeze({
@@ -82,6 +87,7 @@ import {
   svoLightWGSL,
 } from "./svo-light-abi";
 import type { SceneDescription } from "./model";
+import { svoSceneLighting } from "./svo-dry-scene-lighting";
 import { svoMaterialWGSL, SVO_MATERIAL_RECORD_STRIDE_BYTES } from "./svo-material-abi";
 import { SVO_SCENE_GLASS_MAXIMUM_PANES } from "./svo-scene-glass";
 import { SVO_SCENE_THICK_GLASS_MAXIMUM_VOLUMES } from "./svo-scene-thick-glass";
@@ -300,6 +306,8 @@ export interface SparseVoxelDrySceneData {
   contactVisibilityEnabled?: boolean;
   /** Scene capability gate for shadow visibility; omission keeps shadows available. */
   shadowVisibilityEnabled?: boolean;
+  /** Use the entered voxel face instead of the baked analytic normal. */
+  flatVoxelNormals?: boolean;
   lightDirection?: readonly [number, number, number];
   lightColor?: readonly [number, number, number];
 }
@@ -798,6 +806,16 @@ export function packSvoDrySceneClusters(
     words[base + CLUSTER_BLOCK_FIELD_WORD] = SVO_CLUSTER_FIELD_TABLE[field].code;
     words[base + CLUSTER_BLOCK_SEED_WORD] = packing.seed >>> 0;
     floats[base + CLUSTER_BLOCK_SMOOTH_RADIUS_WORD] = packing.smoothRadius_m;
+    if (packing.field === "noise-foliage") {
+      words[base + CLUSTER_BLOCK_COUNT_WORD] = 2;
+      floats[base + CLUSTER_BLOCK_LATTICE_LOBE_RADIUS_WORD] = packing.detailPeriod_m;
+      floats[base + CLUSTER_BLOCK_LATTICE_PERIOD_WORD] = packing.clusterPeriod_m;
+      floats[base + CLUSTER_BLOCK_JITTER_WORD] = packing.threshold;
+      floats[base + CLUSTER_BLOCK_ANISOTROPY_WORD] = packing.clusterWeight;
+      floats[base + CLUSTER_BLOCK_LOBE_SPAN_WORD] = packing.detailWeight;
+      floats[base + CLUSTER_BLOCK_LOBE_SPAN_SPREAD_WORD] = packing.interiorBias;
+      return;
+    }
     if (packing.field === "seeded-lobes") {
       words[base + CLUSTER_BLOCK_COUNT_WORD] = packing.lobeCount >>> 0;
       floats[base + CLUSTER_BLOCK_ANISOTROPY_WORD] = packing.anisotropy;
@@ -889,6 +907,18 @@ export function svoDrySceneClusterResolver(packed: Uint32Array | undefined): Svo
     const seed = packed[offset + CLUSTER_BLOCK_SEED_WORD] >>> 0;
     const count = packed[offset + CLUSTER_BLOCK_COUNT_WORD];
     const smoothRadius_m = floats[offset + CLUSTER_BLOCK_SMOOTH_RADIUS_WORD];
+    if (entry.name === "noise-foliage") {
+      const detailPeriod_m = floats[offset + CLUSTER_BLOCK_LATTICE_LOBE_RADIUS_WORD];
+      const clusterPeriod_m = floats[offset + CLUSTER_BLOCK_LATTICE_PERIOD_WORD];
+      const clusterWeight = floats[offset + CLUSTER_BLOCK_ANISOTROPY_WORD];
+      const detailWeight = floats[offset + CLUSTER_BLOCK_LOBE_SPAN_WORD];
+      if (!(detailPeriod_m > 0) || !(clusterPeriod_m > 0) || !(clusterWeight + detailWeight > 0)) return undefined;
+      return {
+        field: "noise-foliage", seed, smoothRadius_m, detailPeriod_m, clusterPeriod_m,
+        threshold: floats[offset + CLUSTER_BLOCK_JITTER_WORD], clusterWeight, detailWeight,
+        interiorBias: floats[offset + CLUSTER_BLOCK_LOBE_SPAN_SPREAD_WORD],
+      };
+    }
     if (entry.name === "seeded-lobes") {
       const anisotropy = floats[offset + CLUSTER_BLOCK_ANISOTROPY_WORD];
       const lobeSpan = floats[offset + CLUSTER_BLOCK_LOBE_SPAN_WORD];
@@ -1070,6 +1100,7 @@ export const SVO_DRY_VISIBILITY_FLAGS = Object.freeze({
   globalIlluminationOcclusion: 1 << 5,
   globalIlluminationRequested: 1 << 6,
   silhouetteRefinement: 1 << 7,
+  flatVoxelNormals: 1 << 8,
 } as const);
 
 /** How the stable node-mip address plan proves that an atlas sample is current. */
@@ -1526,7 +1557,8 @@ export function buildSparseVoxelDrySceneLightingMirrors(
   if (!Number.isSafeInteger(revision) || revision < 1 || revision > 0xffff_ffff) return undefined;
   try {
     const sceneLights = buildSvoSceneLights(scene, { revision, maximumRecords: SVO_LIGHT_MAXIMUM_RECORDS });
-    const environmentLighting = buildSvoEnvironmentLighting(scene.environment ?? "default", revision, scene.lighting?.environment);
+    const environmentLighting = buildSvoEnvironmentLighting(
+      scene.environment ?? "default", revision, svoSceneLighting(scene)?.environment);
     return {
       lightRecords: sceneLights.packedRecords,
       lightRevision: sceneLights.revision,
@@ -2645,6 +2677,64 @@ fn dryLeafCurrent(hit:SvoTraversalHit)->bool{return svoBrickLifecycleCurrent(svo
   const surfaceReconstructionWGSL = /* wgsl */ `
 struct DryShadingNormal{normal:vec3f,featureId:u32}
 /**
+ * Presentation-wide six-face classification.
+ *
+ * Most authored scenery reaches the frame through the payload DDA and already
+ * owns an exact entered-cell face.  Solver rigid bodies are the exception: they
+ * remain analytic so fluid can collide with them, and their curved normal could
+ * win the primary depth test over the matching voxel scenery.  In voxel-flat
+ * mode that leaked a smooth circular patch into an otherwise faceted object.
+ * Classifying every final opaque normal to its dominant signed axis makes the
+ * scene contract independent of which primary producer happened to win.
+ */
+fn dryVoxelFaceAxis(normalIn:vec3f)->vec3f{
+  let normal=normalize(normalIn);let magnitude=abs(normal);var face=vec3f(0.0);
+  if(magnitude.x>=magnitude.y&&magnitude.x>=magnitude.z){face.x=select(-1.0,1.0,normal.x>=0.0);}
+  else if(magnitude.y>=magnitude.z){face.y=select(-1.0,1.0,normal.y>=0.0);}
+  else{face.z=select(-1.0,1.0,normal.z>=0.0);}
+  return face;
+}
+fn dryPresentationNormal(normal:vec3f)->vec3f{
+  if((dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.flatVoxelNormals}u)!=0u){return dryVoxelFaceAxis(normal);}
+  return normalize(normal);
+}
+fn dryPresentationHit(hitIn:DryHit)->DryHit{
+  var hit=hitIn;
+  if(hit.t<DRY_MISS){hit.normal=dryPresentationNormal(hit.normal);}
+  return hit;
+}
+/**
+ * A connected occupancy field has no internal boundary between two adjacent
+ * cells, so face normals alone turn every coplanar run into one unbroken slab.
+ * The references treat each occupied cell as an individually articulated cube.
+ * Preserve the exact six-axis geometric normal, but add a narrow, antialiased
+ * contact seam on the two in-plane lattice coordinates of the visible face.
+ *
+ * The analytic pixel footprint keeps the seam near one screen pixel and fades
+ * it once a cell becomes sub-pixel. The lattice remains the actual finest-cell lattice; this does not
+ * coarsen occupancy, alter silhouettes, or reopen the coping gaps caused by a
+ * coarse geometry bake.
+ */
+fn dryVoxelFaceEdgeFactor(position:vec3f,faceNormal:vec3f,depth_m:f32)->f32{
+  if((dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.flatVoxelNormals}u)==0u){return 1.0;}
+  let cellCoordinate=(position-dry.nodeMipOrigin.xyz)/max(dry.mapping.cellSize,vec3f(1e-6));
+  let phase=abs(fract(cellCoordinate)-vec3f(.5));
+  let edgeDistance=vec3f(.5)-phase;
+  let worldPixel=max(2.0*depth_m*cameraTanHalfFov()/max(uniforms.viewport.y,1.0),1e-6);
+  let footprint=max(vec3f(worldPixel)/max(dry.mapping.cellSize,vec3f(1e-6)),vec3f(1e-4));
+  let tangentMask=vec3f(1.0)-abs(faceNormal);
+  var edge=1.0;var maximumFootprint=0.0;
+  for(var axis=0u;axis<3u;axis+=1u){
+    if(tangentMask[axis]>.5){
+      let width=max(.075,.55*footprint[axis]);
+      edge=min(edge,smoothstep(0.0,width,edgeDistance[axis]));
+      maximumFootprint=max(maximumFootprint,footprint[axis]);
+    }
+  }
+  let resolved=1.0-smoothstep(.70,1.20,maximumFootprint);
+  return mix(1.0,mix(.78,1.0,edge),resolved);
+}
+/**
  * The baked normal, or the entered face where none was baked.
  *
  * The right-angle test is retained from the analytic arm and for the same
@@ -2660,6 +2750,9 @@ struct DryShadingNormal{normal:vec3f,featureId:u32}
  * cells against 0.05.
  */
 fn dryShadingNormal(identity:u32,faceNormal:vec3f)->DryShadingNormal{
+  if((dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.flatVoxelNormals}u)!=0u){
+    return DryShadingNormal(faceNormal,SVO_FEATURE_SMOOTH);
+  }
   if(sceneIdentityHasNormal(identity)){
     let baked=sceneIdentityNormal(identity);
     if(dot(baked,faceNormal)>0.0){return DryShadingNormal(baked,SVO_FEATURE_SMOOTH);}
@@ -5577,7 +5670,7 @@ fn dryLightSample(light:SvoLightRecord,sampleIndex:u32,position:vec3f)->DryLight
 // twice" outlives its own meaning quietly.
 fn traceDrySolidScene(ro:vec3f,rd:vec3f)->DryHit {
   var hit=traceStatic(ro,rd);let rigid=nearestBody(ro,rd);if(rigid.t<hit.t){hit=rigid;}
-  return hit;
+  return dryPresentationHit(hit);
 }
 fn traceOpaqueScene(ro:vec3f,rd:vec3f)->DryHit {
   return traceDrySolidScene(ro,rd);
@@ -5640,6 +5733,7 @@ fn shadeDryOpaque(hit:DryHit,ro:vec3f,rd:vec3f)->vec3f {
   }
   let viewDirection=normalize(-rd);let reflected=reflect(rd,hit.normal);let diffuseColor=surface.baseColor*(1.0-surface.metallic);let f0=mix(surface.specularF0*surface.specularWeight,surface.baseColor,surface.metallic);let environmentBrdf=unifiedEnvironmentBrdf(max(dot(hit.normal,viewDirection),0.0),surface.roughness,f0);let diffuseEnergy=max(vec3f(0.0),vec3f(1.0)-environmentBrdf);let contactVisibility=dryContactVisibility(position,hit.normal,hit.featureId,hit.ownerId);let ignoredBodyOwner=select(DRY_OWNER_NONE,hit.ownerId,hit.motionKind==DRY_GBUFFER_MOTION_RIGID);let gi=dryGlobalIllumination(position,hit.normal,ignoredBodyOwner);let diffuseVisibility=dryDiffuseMultiBounceVisibility(gi.visibility,diffuseColor);let diffuseEnvironmentScale=select(1.0,dry.giLighting.z,globalIllumination);let directScale=dry.giLighting.w;let diffuseEnvironment=diffuseColor*diffuseEnergy*svoEnvironmentDiffuseIrradiance(dryLighting.environment,hit.normal)*contactVisibility*diffuseVisibility*diffuseEnvironmentScale/UNIFIED_PI;let specularEnvironment=dryEnvironment(reflected,surface.roughness)*environmentBrdf;let indirectDiffuse=diffuseColor*gi.radiance;
   var shaded=max(surface.emissive+diffuseEnvironment+specularEnvironment+direct*directScale+indirectDiffuse,vec3f(0.0));
+  shaded*=dryVoxelFaceEdgeFactor(position,hit.normal,hit.t);
   return shaded;
 }
 struct DryGlassSurface{color:vec3f,depth:f32,materialId:u32,ownerId:u32,paneId:u32,_padding:u32}
@@ -6043,6 +6137,8 @@ export class SparseVoxelDrySceneRenderer {
   private worldGiCacheBuffer?: GPUBuffer;
   private worldGiFrameBuffer?: GPUBuffer;
   private worldGiCacheDirty = true;
+  /** Frame-graph stages this frame must not encode. See `render-stage-switches`. */
+  private disabledStages: DisabledRenderStages = NO_DISABLED_RENDER_STAGES;
   private voxelLightDemandPipeline?: GPUComputePipeline;
   private voxelLightPopulatePipeline?: GPUComputePipeline;
   private voxelLightConsumerLayout?: GPUBindGroupLayout;
@@ -9088,6 +9184,28 @@ export class SparseVoxelDrySceneRenderer {
   }
 
   /** Enable finished-image visibility effects without rebuilding scene-owned resources. */
+  /**
+   * Which stages this pipeline must not encode.
+   *
+   * Deliberately not folded into `setLightingOptions`: nothing here changes a
+   * shader, a bind group or a bundle, so it must not reach the code that
+   * rebuilds them. It does invalidate every cached frame — a reused G-buffer
+   * was traced under the previous set and would silently answer for it.
+   */
+  setDisabledStages(disabled: DisabledRenderStages): void {
+    if (disabledRenderStagesEqual(this.disabledStages, disabled)) return;
+    // The world-GI cache is persistent and world-keyed, so entries survive
+    // everything except an explicit clear. Withholding the pass that fills it,
+    // or the primary that decides which keys get queried, leaves entries that
+    // describe a frame this pipeline is no longer drawing.
+    const staleWorldGi = this.disabledStages.has("world-gi-cache") !== disabled.has("world-gi-cache")
+      || this.disabledStages.has("primary-traversal") !== disabled.has("primary-traversal");
+    this.disabledStages = new Set(disabled);
+    this.clearReusableFrame();
+    this.primaryVisibilityCacheKey = undefined;
+    if (staleWorldGi) this.worldGiCacheDirty = true;
+  }
+
   setLightingOptions(options: SparseVoxelDrySceneLightingOptions): void {
     const coneTracingMode = options.coneTracingMode ?? "cones";
     // Leaving `cones` collapses to the full-resolution inline/split path: with
@@ -9096,16 +9214,20 @@ export class SparseVoxelDrySceneRenderer {
     // passes, and writeParams withholds every cone-dependent flag.
     const coneLightingScale = coneTracingMode === "cones" ? (options.coneLightingScale ?? 1) : 1;
     const silhouetteRefinementEnabled = options.silhouetteRefinementEnabled === true;
+    const globalIlluminationEnabled = options.globalIlluminationEnabled !== false;
     const previousConeTracingMode = this.lightingOptions.coneTracingMode ?? "cones";
+    const previousGlobalIllumination = this.lightingOptions.globalIlluminationEnabled !== false;
     if (options.shadowsEnabled === this.lightingOptions.shadowsEnabled
       && options.ambientOcclusionEnabled === this.lightingOptions.ambientOcclusionEnabled
       && silhouetteRefinementEnabled === this.silhouetteRefinementEnabled
       && coneTracingMode === previousConeTracingMode
+      && globalIlluminationEnabled === previousGlobalIllumination
       && coneLightingScale === this.coneScale) return;
     const invalidateWorldGi = options.ambientOcclusionEnabled !== this.lightingOptions.ambientOcclusionEnabled
-      || coneTracingMode !== previousConeTracingMode;
+      || coneTracingMode !== previousConeTracingMode
+      || globalIlluminationEnabled !== previousGlobalIllumination;
     this.lightingOptions = { shadowsEnabled: options.shadowsEnabled, ambientOcclusionEnabled: options.ambientOcclusionEnabled,
-      silhouetteRefinementEnabled, coneTracingMode };
+      silhouetteRefinementEnabled, coneTracingMode, globalIlluminationEnabled };
     this.silhouetteRefinementEnabled = silhouetteRefinementEnabled;
     this.coneScale = coneLightingScale;
     this.requestedBundleFailure = undefined;
@@ -9228,12 +9350,15 @@ export class SparseVoxelDrySceneRenderer {
     const shadowsEnabled = coneTracingMode !== "off" && this.lightingOptions.shadowsEnabled && scene.shadowVisibilityEnabled !== false;
     const ambientOcclusionEnabled = coneTracingMode !== "off" && this.lightingOptions.ambientOcclusionEnabled && scene.contactVisibilityEnabled !== false;
     const coneTracingEnabled = coneTracingMode === "cones" && this.derivedLightingReady();
+    // Withheld, not scaled to zero: a gather that runs and is then multiplied by
+    // nothing costs exactly what it cost before.
+    const globalIlluminationEnabled = this.lightingOptions.globalIlluminationEnabled !== false;
     const nodeMip = source.nodeMipPyramid;
     const nodeMipUsesPageValidity = Boolean((nodeMip as typeof nodeMip & {
       pageValidity?: { view: GPUTextureView };
     } | undefined)?.pageValidity?.view);
     const tetrahedralRadiance = source.tetrahedralRadiance;
-    const giReady = coneTracingEnabled && Boolean(nodeMip && tetrahedralRadiance
+    const giReady = coneTracingEnabled && globalIlluminationEnabled && Boolean(nodeMip && tetrahedralRadiance
       && nodeMip.generation === tetrahedralRadiance.generation
       && nodeMip.plan.complete && tetrahedralRadiance.plan.complete);
     const silhouetteRefinementActive = this.silhouetteRefinementEnabled && this.shadingPath === "split";
@@ -9242,8 +9367,9 @@ export class SparseVoxelDrySceneRenderer {
       | (coneTracingEnabled && (shadowsEnabled || ambientOcclusionEnabled || giReady) ? SVO_DRY_VISIBILITY_FLAGS.coneLightingRequested : 0)
       | (giReady ? SVO_DRY_VISIBILITY_FLAGS.globalIllumination : 0)
       | (giReady && ambientOcclusionEnabled ? SVO_DRY_VISIBILITY_FLAGS.globalIlluminationOcclusion : 0)
-      | (coneTracingEnabled ? SVO_DRY_VISIBILITY_FLAGS.globalIlluminationRequested : 0)
-      | (silhouetteRefinementActive ? SVO_DRY_VISIBILITY_FLAGS.silhouetteRefinement : 0);
+      | (coneTracingEnabled && globalIlluminationEnabled ? SVO_DRY_VISIBILITY_FLAGS.globalIlluminationRequested : 0)
+      | (silhouetteRefinementActive ? SVO_DRY_VISIBILITY_FLAGS.silhouetteRefinement : 0)
+      | (scene.flatVoxelNormals ? SVO_DRY_VISIBILITY_FLAGS.flatVoxelNormals : 0);
     words.set([materialCount, scene.materialRevision, SVO_MATERIAL_RECORD_STRIDE_BYTES, visibilityFlags], SVO_DRY_SCENE_PARAMS_LAYOUT.materialPublicationWordOffset);
     const tuning = this.renderTuning;
     words.set([
@@ -10019,17 +10145,38 @@ export class SparseVoxelDrySceneRenderer {
           { view: this.conePrepassRadianceView!, clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" },
         ],
       });
-      shade.setPipeline(this.conePrepassShadePipeline!);
-      shade.setBindGroup(0, this.bindGroup);
-      shade.setBindGroup(1, this.conePrepassShadeBindGroup!);
-      shade.draw(3);
+      if (!this.disabledStages.has("reduced-shade")) {
+        shade.setPipeline(this.conePrepassShadePipeline!);
+        shade.setBindGroup(0, this.bindGroup);
+        shade.setBindGroup(1, this.conePrepassShadeBindGroup!);
+        shade.draw(3);
+      }
       shade.end();
       tracePhase?.({ id: "svo-cone-lighting", label: "SVO cone-lighting prepass" });
     }
     if (useSplit) {
       const splitGroup = usePrepass ? 2 : 1;
       if (!reusePrimaryVisibility) {
-        if (this.rasterPrimary) {
+        // A withheld primary still clears. The G-buffer has to be a defined
+        // miss everywhere so the frame resolves to sky and the delta is exactly
+        // what the traversal was worth; presenting whatever the last traced
+        // frame left in the attachment would measure nothing and look right.
+        const primaryWithheld = this.disabledStages.has("primary-traversal");
+        if (primaryWithheld) {
+          encoder.beginRenderPass({
+            label: "Sparse voxel primary visibility · withheld",
+            colorAttachments: [
+              { view: gBufferViews.packedSurface, clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" },
+              { view: gBufferViews.identityMedia, clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" },
+            ],
+            depthStencilAttachment: {
+              view: gBufferViews.hardwareDepth,
+              depthClearValue: SVO_GBUFFER_RENDER_TARGET_CONTRACT.depthClearValue,
+              depthLoadOp: "clear",
+              depthStoreOp: "store",
+            },
+          }).end();
+        } else if (this.rasterPrimary) {
           this.encodeRasterPrimary(encoder, gBufferViews, usePrepass, splitGroup, tracePhase);
         } else {
           const visibility = encoder.beginRenderPass({
@@ -10053,10 +10200,10 @@ export class SparseVoxelDrySceneRenderer {
           visibility.end();
         }
         tracePhase?.({ id: "svo-primary", label: "SVO primary visibility" });
-        if (this.rasterPrimary) {
+        if (this.rasterPrimary && !primaryWithheld && !this.disabledStages.has("scene-primitive")) {
           this.encodeScenePrimitivePrimary(encoder, gBufferViews, usePrepass, splitGroup, tracePhase);
         }
-        if (this.rasterRigidActive) {
+        if (this.rasterRigidActive && !primaryWithheld && !this.disabledStages.has("rigid-impostor")) {
           const rigid = encoder.beginRenderPass({
             label: "Sparse voxel analytic rigid primary discovery",
             colorAttachments: [
@@ -10088,7 +10235,8 @@ export class SparseVoxelDrySceneRenderer {
           bridge.end();
           tracePhase?.({ id: "svo-rigid", label: "SVO analytic rigid discovery" });
         }
-        if (this.rasterGlassDiscovery && this.rasterGlassPaneCount > 0) {
+        if (this.rasterGlassDiscovery && this.rasterGlassPaneCount > 0
+          && !primaryWithheld && !this.disabledStages.has("thin-glass")) {
           const glass = encoder.beginRenderPass({
             label: "Sparse voxel raster thin-glass discovery",
             colorAttachments: [
@@ -10108,7 +10256,10 @@ export class SparseVoxelDrySceneRenderer {
           glass.end();
           tracePhase?.({ id: "svo-glass", label: "SVO raster thin-glass discovery" });
         }
-        if (this.silhouetteRefinementEnabled) {
+        // Nothing to close a seam around once the primary is withheld, and the
+        // pass would otherwise charge the seam node for reading an empty
+        // G-buffer.
+        if (this.silhouetteRefinementEnabled && !primaryWithheld) {
           const seam = encoder.beginRenderPass({
             label: "Sparse voxel primary seam closure",
             colorAttachments: [
@@ -10135,7 +10286,8 @@ export class SparseVoxelDrySceneRenderer {
           : undefined;
       }
 
-      if (this.voxelLightActive && this.voxelLightDemandPipeline && this.voxelLightPopulatePipeline
+      if (this.voxelLightActive && !this.disabledStages.has("voxel-light-cache")
+        && this.voxelLightDemandPipeline && this.voxelLightPopulatePipeline
         && this.voxelLightDemandBindGroup && this.voxelLightPopulateBindGroup
         && this.voxelLightRequestBuffer && this.voxelLightQueueBuffer) {
         encoder.clearBuffer(this.voxelLightRequestBuffer);
@@ -10157,6 +10309,10 @@ export class SparseVoxelDrySceneRenderer {
         populate.setBindGroup(cacheGroup, this.voxelLightPopulateBindGroup);
         populate.dispatchWorkgroups(Math.ceil(SVO_DRY_VOXEL_LIGHT_CACHE_CONTRACT.populationBudget / 64));
         populate.end();
+        // Its own boundary: both dispatches used to fall inside whichever phase
+        // closed next, which priced a bounded per-frame drain as part of the
+        // cone stage and left the cache node with nothing to report.
+        tracePhase?.({ id: "svo-voxel-light", label: "SVO voxel light cache" });
       }
 
       if (usePrepass && !this.voxelLightExclusive) {
@@ -10187,6 +10343,10 @@ export class SparseVoxelDrySceneRenderer {
           this.coneBoundaryCountSnapshot!, 0, Uint32Array.BYTES_PER_ELEMENT);
         encoder.copyBufferToBuffer(this.conePrepassBoundaryQueue!, Uint32Array.BYTES_PER_ELEMENT,
           this.coneDerivedFailureSnapshot!, 0, 2 * Uint32Array.BYTES_PER_ELEMENT);
+        // Closed before the optional fan-out so the compact march is priced on
+        // its own; the fan-out then reports as itself below rather than being
+        // folded into a phase named for a pass it is not part of.
+        tracePhase?.({ id: "svo-cone-lighting", label: "SVO compacted cone lighting" });
         if (this.coneFanout) {
           const fanout = encoder.beginComputePass({ label: "Sparse voxel cone sample fan-out" });
           fanout.setPipeline(this.coneFanoutWorkerPipeline!);
@@ -10206,10 +10366,11 @@ export class SparseVoxelDrySceneRenderer {
             Math.ceil(this.conePrepassHeight / SVO_CONE_FANOUT_CONTRACT.workgroupSize[1]),
           );
           reduce.end();
+          tracePhase?.({ id: "svo-cone-lighting", label: "SVO cone sample fan-out" });
         }
-        tracePhase?.({ id: "svo-cone-lighting", label: "SVO compacted cone lighting" });
 
-        if (!reconstructReducedRadiance) {
+        if (!reconstructReducedRadiance && this.lightingOptions.globalIlluminationEnabled !== false
+          && !this.disabledStages.has("world-gi-cache")) {
           // The cache is world-space and source-owned: camera motion changes
           // which keys are queried but never invalidates entries. Only source,
           // authored-scene, or lighting-contract changes clear it. Its output is
@@ -10253,10 +10414,14 @@ export class SparseVoxelDrySceneRenderer {
             storeOp: "store",
           }],
         });
-        shade.setPipeline(this.conePrepassShadePipeline!);
-        shade.setBindGroup(0, this.bindGroup);
-        shade.setBindGroup(1, this.conePrepassShadeBindGroup!);
-        shade.draw(3);
+        // Withholding the draw keeps the clear, so the reconstruction below
+        // guides off a defined (empty) reduced result instead of last frame's.
+        if (!this.disabledStages.has("reduced-shade")) {
+          shade.setPipeline(this.conePrepassShadePipeline!);
+          shade.setBindGroup(0, this.bindGroup);
+          shade.setBindGroup(1, this.conePrepassShadeBindGroup!);
+          shade.draw(3);
+        }
         shade.end();
         tracePhase?.({ id: "svo-cone-lighting", label: "SVO reduced-rate opaque shading" });
       }
@@ -10269,21 +10434,26 @@ export class SparseVoxelDrySceneRenderer {
         // costs a tile load and no store.
         depthStencilAttachment: { view: gBufferViews.hardwareDepth, depthReadOnly: true },
       });
-      lighting.setBindGroup(0, this.bindGroup);
-      if (usePrepass) lighting.setBindGroup(1, this.conePrepassBindGroup!);
-      lighting.setBindGroup(splitGroup, this.splitLightingBindGroup!);
-      if (voxelLightBindingsRequired) lighting.setBindGroup(splitGroup + 1, this.voxelLightConsumerBindGroup!);
-      // Two complementary depth tests partition the frame: the sky shader takes
-      // the miss pixels and the full deferred shader takes the rest. Sky first
-      // so the expensive draw is the one still in flight when the pass ends.
-      lighting.setPipeline(this.splitSkyLightingPipeline!);
-      lighting.draw(3);
-      if (usePrepass && reconstructReducedRadiance) {
-        lighting.setPipeline(this.splitReconstructedLightingPipeline!);
+      // Withheld, this is the pass's clear and nothing else: the frame goes
+      // black rather than keeping the previous composite, so the delta is the
+      // whole cost of sky plus deferred shading and the image says so.
+      if (!this.disabledStages.has("deferred-lighting")) {
+        lighting.setBindGroup(0, this.bindGroup);
+        if (usePrepass) lighting.setBindGroup(1, this.conePrepassBindGroup!);
+        lighting.setBindGroup(splitGroup, this.splitLightingBindGroup!);
+        if (voxelLightBindingsRequired) lighting.setBindGroup(splitGroup + 1, this.voxelLightConsumerBindGroup!);
+        // Two complementary depth tests partition the frame: the sky shader takes
+        // the miss pixels and the full deferred shader takes the rest. Sky first
+        // so the expensive draw is the one still in flight when the pass ends.
+        lighting.setPipeline(this.splitSkyLightingPipeline!);
+        lighting.draw(3);
+        if (usePrepass && reconstructReducedRadiance) {
+          lighting.setPipeline(this.splitReconstructedLightingPipeline!);
+          lighting.draw(3);
+        }
+        lighting.setPipeline(this.splitLightingPipeline!);
         lighting.draw(3);
       }
-      lighting.setPipeline(this.splitLightingPipeline!);
-      lighting.draw(3);
       lighting.end();
       tracePhase?.({ id: "dry-scene", label: "SVO deferred dry lighting" });
     } else {
@@ -10301,10 +10471,16 @@ export class SparseVoxelDrySceneRenderer {
           depthStoreOp: "store",
         },
       });
-      pass.setPipeline(usePrepass ? this.coneReducedPipeline! : this.pipeline);
-      pass.setBindGroup(0, this.bindGroup);
-      if (usePrepass) pass.setBindGroup(1, this.conePrepassBindGroup!);
-      pass.draw(3); pass.end();
+      // The inline arm marches and shades in one draw, so it is the primary and
+      // the deferred lighting at once; either switch withholds the whole thing,
+      // and its row is priced as the pair it actually is.
+      if (!this.disabledStages.has("primary-traversal") && !this.disabledStages.has("deferred-lighting")) {
+        pass.setPipeline(usePrepass ? this.coneReducedPipeline! : this.pipeline);
+        pass.setBindGroup(0, this.bindGroup);
+        if (usePrepass) pass.setBindGroup(1, this.conePrepassBindGroup!);
+        pass.draw(3);
+      }
+      pass.end();
       tracePhase?.({ id: "svo-primary", label: "SVO traversal + dry shading" });
     }
     this.lastPickingTarget = targetTexture;

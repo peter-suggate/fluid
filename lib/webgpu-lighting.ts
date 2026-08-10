@@ -121,16 +121,10 @@ export function resolveWaterOptics(authored?: WaterOpticsAuthoring): ResolvedWat
 /**
  * The directional key as the water sees it.
  *
- * The dry scene resolves its key from `scene.lighting.directional` (see
- * `buildSvoSceneLights`), while the water composite has always taken its
- * highlight direction from `environmentLightDirection()` — the environment
- * preset's own sun. On a scene that authors neither, the two agree by
- * construction: both fall back to `[-0.45, 0.86, 0.28]`. On a scene that
- * authors a key they disagree, and the hero garden is exactly such a scene: its
- * sun is derived from the camera azimuth and sits over the camera's right
- * shoulder, while the garden environment's is over its left. `authored` is what
- * lets the water follow the document where there is one and leave every
- * un-authored scene's highlight where it was.
+ * The renderer hands this the same key `buildSvoSceneLights` resolves through
+ * `svoSceneLighting`, so dry geometry, water highlights, and caustics cannot
+ * disagree about the rig. `authored` distinguishes that resolved packet from
+ * the legacy fallback retained for callers which pass no scene lighting.
  */
 export interface ResolvedWaterKeyLight {
   readonly direction: [number, number, number];

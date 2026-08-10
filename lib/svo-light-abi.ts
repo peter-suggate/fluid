@@ -1,5 +1,6 @@
 import type { EnvironmentId } from "./environments";
 import type { SceneDescription } from "./model";
+import { svoSceneLighting } from "./svo-dry-scene-lighting";
 import {
   cachedSvoPublication,
   hashSvoPublication,
@@ -225,12 +226,13 @@ export function buildSvoSceneLights(scene: SceneDescription, options: BuildSvoSc
   if (!Number.isSafeInteger(maximumRecords) || maximumRecords < 1 || maximumRecords > SVO_LIGHT_MAXIMUM_RECORDS) {
     throw new RangeError(`SVO light capacity must be from 1 to ${SVO_LIGHT_MAXIMUM_RECORDS}`);
   }
+  const sceneLighting = svoSceneLighting(scene);
   const directional = canonicalSvoLightRecord({
     lightId: 1, ownerId: 0xffff_ffff, revision, kind: "directional",
     position_m: [0, 0, 0], range_m: 0,
-    direction: options.directionalDirection ?? scene.lighting?.directional?.direction ?? [-0.45, 0.86, 0.28],
-    colorLinear: options.directionalColor ?? scene.lighting?.directional?.colorLinear ?? [1.04, 1, 0.91],
-    intensity: options.directionalIntensity ?? scene.lighting?.directional?.intensity ?? 1,
+    direction: options.directionalDirection ?? sceneLighting?.directional?.direction ?? [-0.45, 0.86, 0.28],
+    colorLinear: options.directionalColor ?? sceneLighting?.directional?.colorLinear ?? [1.04, 1, 0.91],
+    intensity: options.directionalIntensity ?? sceneLighting?.directional?.intensity ?? 1,
     axisU: [1, 0, 0], halfWidth_m: 0, axisV: [0, 0, 1], halfHeight_m: 0, radius_m: 0,
     sourceKey: "authored/directional",
   });

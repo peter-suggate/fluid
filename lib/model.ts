@@ -47,6 +47,8 @@ export interface SceneDescription {
   };
   /** Visible environment is part of the unified scene representation, not merely a backdrop. */
   environment?: EnvironmentId;
+  /** How occupied SVO cells present their surface orientation. Omitted defaults to voxel-flat. */
+  surfaceStyle?: "smooth" | "voxel-flat";
   /** Optional image-free lighting grade consumed by the SVO renderer. */
   lighting?: {
     /** Scene-linear directional key. Omitted fields retain the environment defaults. */
@@ -59,6 +61,10 @@ export interface SceneDescription {
     environment?: {
       diffuseScale?: number;
       specularScale?: number;
+      /** Optional scene-owned image-free backdrop/fill palette. */
+      lowerRadianceLinear?: readonly [number, number, number];
+      upperRadianceLinear?: readonly [number, number, number];
+      accentRadianceLinear?: readonly [number, number, number];
     };
     /**
      * How the finished radiance becomes pixels: an exposure and a named tone
@@ -126,6 +132,14 @@ export interface SceneDescription {
      * scene says.
      */
     detailCellSize_m?: number;
+    /**
+     * Zero-rung cell retained while a dry environment is authored coarser.
+     *
+     * At negative refinement depths `finestCellSize_m` is the enlarged, actual
+     * octree cell. This optional origin makes that signed rung reversible and
+     * survives scene links; it is absent at zero and finer depths.
+     */
+    environmentRefinementBaseCellSize_m?: number;
     /** Optional minimum address-space bounds. Authored proxies may extend the sparse domain beyond them. */
     bounds_m?: {
       min: Vec3;
@@ -302,6 +316,19 @@ export function cloneScene(scene: SceneDescription): SceneDescription {
   return JSON.parse(JSON.stringify(scene)) as SceneDescription;
 }
 
+/**
+ * The renderer-wide SVO surface policy.
+ *
+ * Voxel faces are the default for every scene, including documents authored
+ * before `surfaceStyle` existed. `smooth` remains an explicit opt-out; no scene
+ * needs to opt in merely to receive the product default.
+ */
+export function sceneUsesFlatVoxelNormals(
+  scene: Pick<SceneDescription, "surfaceStyle">,
+): boolean {
+  return scene.surfaceStyle !== "smooth";
+}
+
 export function canonicalScene(scene: SceneDescription): string {
   const stable = (value: unknown): unknown => {
     if (Array.isArray(value)) return value.map(stable);
@@ -354,6 +381,9 @@ export function parseScene(input: string): SceneDescription {
 
 export function validateScene(scene: SceneDescription): string[] {
   const errors: string[] = [];
+  if (scene.surfaceStyle !== undefined && scene.surfaceStyle !== "smooth" && scene.surfaceStyle !== "voxel-flat") {
+    errors.push(`Unknown scene surface style ${String(scene.surfaceStyle)}`);
+  }
   if (scene.schemaVersion !== "1.0.0") errors.push("Unsupported schema version");
   if (!scene.sceneId?.trim()) errors.push("Scene ID is required");
   if (scene.systems?.fluid !== undefined && typeof scene.systems.fluid !== "boolean") errors.push("Scene fluid-system flag must be boolean");
@@ -375,6 +405,16 @@ export function validateScene(scene: SceneDescription): string[] {
   }
   for (const [value, label] of [[lighting?.environment?.diffuseScale, "diffuse"], [lighting?.environment?.specularScale, "specular"]] as const) {
     if (value !== undefined && (!Number.isFinite(value) || value < 0)) errors.push(`Scene environment ${label} scale must be non-negative and finite`);
+  }
+  for (const [color, label] of [
+    [lighting?.environment?.lowerRadianceLinear, "lower"],
+    [lighting?.environment?.upperRadianceLinear, "upper"],
+    [lighting?.environment?.accentRadianceLinear, "accent"],
+  ] as const) {
+    if (color !== undefined && (color.length !== 3
+      || !color.every((value) => Number.isFinite(value) && value >= 0))) {
+      errors.push(`Scene environment ${label} radiance must contain three non-negative finite channels`);
+    }
   }
   if (!Number.isInteger(scene.randomSeed) || scene.randomSeed < 0) errors.push("Random seed must be a non-negative integer");
   if (!(scene.duration_s > 0)) errors.push("Duration must be positive");
@@ -398,6 +438,12 @@ export function validateScene(scene: SceneDescription): string[] {
     && (!(voxelDomain.detailCellSize_m > 0) || !Number.isFinite(voxelDomain.detailCellSize_m)
       || voxelDomain.detailCellSize_m > voxelDomain.finestCellSize_m + 1e-12)) {
     errors.push("Voxel detail cell size must be positive, finite and no coarser than the finest cell size");
+  }
+  if (voxelDomain?.environmentRefinementBaseCellSize_m !== undefined
+    && (!(voxelDomain.environmentRefinementBaseCellSize_m > 0)
+      || !Number.isFinite(voxelDomain.environmentRefinementBaseCellSize_m)
+      || voxelDomain.environmentRefinementBaseCellSize_m > voxelDomain.finestCellSize_m + 1e-12)) {
+    errors.push("Voxel environment refinement base cell must be positive, finite and no coarser than the active lattice");
   }
   if (voxelDomain?.bounds_m) {
     const { min, max } = voxelDomain.bounds_m;

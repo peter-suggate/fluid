@@ -57,13 +57,11 @@ fn jacobiLosassoAxisFaces(@builtin(workgroup_id) group:vec3u,
   // Bit one is the explicit band-membership flag. Seed-only legacy sources
   // remain active because bit zero takes the early path above.
   if ((flags & 2u) == 0u) { outputVelocity[face] = 0.0; return; }
-  // Paper A/B: advance exactly one graph layer from values that were already
-  // valid at the start of this dispatch. Earlier layers are carried verbatim;
-  // later layers cannot observe zeros or partially propagated values.
-  if (params.causalFront != 0u) {
-    if (layer < params.sweep) { outputVelocity[face] = inputVelocity[face]; return; }
-    if (layer > params.sweep) { outputVelocity[face] = 0.0; return; }
-  }
+  // Fixed-K constant extension. Input invalidity is explicit, so every sweep
+  // advances the finite front by at most one same-axis graph edge. Do not use
+  // ceil(|phi|/h) as a causal rank: equal-distance plateaus are ordinary on a
+  // Cartesian lattice and a strict lower-rank predicate disconnects diagonal
+  // W7 support even when the graph itself is complete.
   var exact:array<i32,36>;
   var count = 0u;
   let begin = adjacencyOffsets[face];
@@ -72,8 +70,7 @@ fn jacobiLosassoAxisFaces(@builtin(workgroup_id) group:vec3u,
     let neighbor = adjacencyFaces[cursor];
     if (neighbor == 0xffffffffu || neighbor >= authority[2]) { continue; }
     let neighborMetric = faceMetrics[neighbor];
-    if (neighborMetric.x != metric.x || (neighborMetric.y & 3u) == 0u
-        || neighborMetric.w >= layer) {
+    if (neighborMetric.x != metric.x || (neighborMetric.y & 3u) == 0u) {
       continue;
     }
     // A starved predecessor is not evidence for this layer. Other causal

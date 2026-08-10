@@ -20,18 +20,18 @@ test("renderer presentation source reaches the diagnostics store and panel with 
   assert.match(controller, /waterSurfacePresentation:\s*metrics\.waterSurfacePresentation\s*\?\?\s*null/);
   assert.doesNotMatch(pipeline, /surfaceDiagnosticsReadbackEnabled|performanceReadbacksEnabled|setPerformanceReadbacksEnabled/,
     "functional presentation evidence must not be controlled by retired performance instrumentation");
-  assert.match(pipeline, /if \(this\.surfaceDiagnosticPending \|\| !this\.indirectBuffer\) return;/,
+  assert.match(pipeline, /if \(this\.surfaceDiagnosticPending \|\| !this\.indirectBuffer\) return false;/,
     "bounded presentation evidence remains available independently of performance traces");
   assert.match(pipeline, /lastSurfaceDiagnosticEncodeAt_ms < 250/,
     "the ordinary presentation proof must use the same bounded cadence as solver telemetry");
   assert.match(pipeline, /surfaceDiagnosticsFullRateRequested/,
     "explicit diagnostics and Dawn captures may request per-capture presentation evidence");
-  assert.match(pipeline, /query\.get\("panel"\) === "diagnostics"/,
-    "the diagnostics panel is the browser authority for full-rate presentation evidence");
-  assert.doesNotMatch(pipeline, /query\.get\("(?:waterdiag|diagnostics)"\)/,
-    "retired browser switches must not retain renderer behavior");
+  assert.doesNotMatch(pipeline, /query\.get\("(?:panel|waterdiag|diagnostics)"\)/,
+    "browser panels and retired switches must not escalate receipt readbacks to full rate");
   assert.match(panel, /testId="water-surface-presentation-source"/);
   assert.match(panel, /GLOBAL FINE \/ COARSE/);
+  assert.match(panel, /COMPACT COARSE/);
+  assert.match(panel, /current factor-one compact-coarse crossing/);
   assert.match(panel, /VOLUME FIELD/);
   assert.doesNotMatch(panel, /ADAPTIVE FALLBACK/);
   assert.match(panel, /RETAINED PREVIOUS MESH/);

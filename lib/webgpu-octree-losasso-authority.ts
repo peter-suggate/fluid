@@ -148,6 +148,7 @@ export class WebGPUOctreeLosassoAuthority implements WebGPUOctreeLosassoCandidat
         rightHandSide, faceDispatch, rowDispatch,
       } satisfies WebGPUOctreeLosassoDynamicsSource,
       extension: { faceCapacity: faces, control, faceMetrics,
+        faceDispatch,
         adjacencyOffsets: faceAdjacencyOffsets, adjacencyFaces: faceAdjacency,
         projectedVelocity, extendedVelocity },
       vcycle: { levels, transfers }, rightHandSide, rowCount: control,

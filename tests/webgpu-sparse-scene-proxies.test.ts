@@ -97,6 +97,55 @@ test("conservative cell occupancy catches surface intersections and selects the 
   assert.equal(empty.solidSignedDistance, Number.POSITIVE_INFINITY);
 });
 
+test("noise foliage voxel occupancy follows the density threshold without SDF dilation", () => {
+  const foliage: SparseScenePrimitive = {
+    kind: "smooth-union-cluster",
+    center: [0, 0, 0],
+    lobeRadii: [0.18, 0.11, 0.15],
+    packing: {
+      field: "noise-foliage",
+      smoothRadius_m: 0,
+      seed: 0x51a9,
+      clusterPeriod_m: 0.075,
+      detailPeriod_m: 0.018,
+      threshold: 0.55,
+      clusterWeight: 0.62,
+      detailWeight: 0.38,
+      interiorBias: 0.20,
+    },
+    materialId: 22,
+  };
+  const cellSize = [0.004, 0.004, 0.004] as const;
+  const cellRadius = 0.5 * Math.hypot(...cellSize);
+  let justOutside: readonly [number, number, number] | undefined;
+  let inside: readonly [number, number, number] | undefined;
+  for (let z = -0.14; z <= 0.14 && (!justOutside || !inside); z += 0.01) {
+    for (let y = -0.10; y <= 0.10 && (!justOutside || !inside); y += 0.01) {
+      for (let x = -0.17; x <= 0.17 && (!justOutside || !inside); x += 0.01) {
+        const point = [x, y, z] as const;
+        const residual = sparseScenePrimitiveSignedDistance(foliage, point);
+        if (residual < 0) inside ??= point;
+        // This is the regression case: the residual is outside by sign but so
+        // small after its conservative gradient scaling that the generic planar
+        // SDF law would publish a partially solid voxel.
+        if (residual > 0 && residual < cellRadius) justOutside ??= point;
+      }
+    }
+  }
+  assert.ok(justOutside, "fixture must include an outside residual inside one planar coverage radius");
+  assert.ok(inside, "fixture must include occupied density");
+
+  const outsideSample = sampleSparseScenePrimitiveCell([foliage], justOutside, cellSize);
+  assert.ok(outsideSample.solidSignedDistance > 0);
+  assert.equal(outsideSample.solidFraction, 0, "positive density residual must remain an empty voxel");
+  assert.equal(outsideSample.materialOwner, 0);
+
+  const insideSample = sampleSparseScenePrimitiveCell([foliage], inside, cellSize);
+  assert.ok(insideSample.solidSignedDistance < 0);
+  assert.equal(insideSample.solidFraction, 1, "negative density residual defines a solid voxel");
+  assert.equal(insideSample.materialOwner, foliage.materialId);
+});
+
 test("primitive input validation rejects lossy IDs and degenerate geometry", () => {
   assert.throws(() => packSparseScenePrimitives([
     { kind: "box", center: [0, 0, 0], halfExtents: [1, 0, 1], materialId: 1 },
@@ -110,7 +159,7 @@ test("primitive input validation rejects lossy IDs and degenerate geometry", () 
 });
 
 test("field-program records share one arena block per distinct tape", () => {
-  // The oak's crown in miniature: many masses, each with its own centre, shade
+  // A recursive crown in miniature: many masses, each with its own centre, shade
   // and envelope, drawn from a handful of quantised tapes. The arena's capacity
   // is a ceiling on *shapes*, so a crown far past it must still pack.
   const tape = (radius: number): SvoFieldProgram => ({
@@ -184,6 +233,9 @@ test("GPU maintenance invalidates before rebuild, bins brick candidates, clears 
   assert.match(sparseSceneProxyVoxelizationShader, /topologyStore\(nodeIndex\*8u\+7u,packed\|\(lifecycle&BRICK_ACTIVE\)\)/);
   assert.match(sparseSceneProxyVoxelizationShader, /fn cylinderDistance/);
   assert.match(sparseSceneProxyVoxelizationShader, /fn ellipsoidDistance/);
+  assert.match(sparseSceneProxyVoxelizationShader, /fn primitiveUsesThresholdOccupancy/);
+  assert.match(sparseSceneProxyVoxelizationShader,
+    /select\(cellRadius, -cellRadius, candidate < 0\.0\),\s*primitiveUsesThresholdOccupancy\(primitive\)/);
   assert.equal((sparseSceneProxyVoxelizationShader.match(/var<storage,/g) ?? []).length, 4,
     "proxy voxelization respects the four-storage-buffer design ceiling");
   assert.doesNotMatch(sparseSceneProxyVoxelizationShader, /texture_|mapAsync|getMappedRange/);

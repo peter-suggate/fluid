@@ -136,6 +136,7 @@ fn insideWetCoarseLeaf(axis:u32,q:vec3u)->bool{var span=2u;var logSpan=1u;loop{
 fn linearInvocation(group:vec3u,lane:u32)->u32{return 64u*(group.x+65535u*group.y)+lane;}
 
 const STAGED_INVALID:u32=0x7fc00000u;const STAGED_BOUNDARY_ZERO:u32=0x7fc00001u;
+fn stagedInvalidVelocity()->f32{var bits=STAGED_INVALID;return bitcast<f32>(bits);}
 fn stagedMacCount()->u32{let d=p.velocityDimensions;
  return(d.x+1u)*d.y*d.z+d.x*(d.y+1u)*d.z+d.x*d.y*(d.z+1u);}
 fn stagedOwnerOffset()->u32{return 2u*stagedMacCount();}
@@ -510,14 +511,14 @@ fn remapLosassoWetSeedFaces(@builtin(workgroup_id)group:vec3u,@builtin(local_inv
 
 @compute @workgroup_size(64)
 fn gatherLosassoProjectedSeeds(@builtin(workgroup_id)group:vec3u,@builtin(local_invocation_index)lane:u32){let id=linearInvocation(group,lane);if(id>=min(atomicLoad(&control[2]),p.band.x)){return;}
- let wet=seedWetFace[id];if(atomicLoad(&control[3])!=1u||wet==INVALID){seedVelocity[id]=0.;return;}
+ let wet=seedWetFace[id];if(atomicLoad(&control[3])!=1u||wet==INVALID){seedVelocity[id]=stagedInvalidVelocity();return;}
  if(wet==MULTI_OWNER){let record=geometry[id];let axis=record.x&3u;let span=1u<<(record.x>>2u);var exact:array<i32,36>;var count=0.;
   for(var b=0u;b<span;b+=1u){for(var a=0u;a<span;a+=1u){let q=record.yzw+tangentA(axis)*vec3u(a)+tangentB(axis)*vec3u(b);let key=geometricKey(vec4u(axis,q));
    if(key<arrayLength(&denseWetFace)){let encoded=atomicLoad(&denseWetFace[key]);if(encoded!=INVALID){let mapped=(encoded&0x07ffffffu)-1u;
     if(mapped<arrayLength(&wetProjected)){let value=wetProjected[mapped];if(finite(value)){exactAdd(&exact,value);count+=1.;}}}}}}
-  seedVelocity[id]=select(0.,exactValue(&exact)/max(1.,count),count>0.);return;}
- if(wet>=arrayLength(&wetProjected)){seedVelocity[id]=0.;return;}
- let value=wetProjected[wet];seedVelocity[id]=select(0.,value,finite(value));}
+  seedVelocity[id]=select(stagedInvalidVelocity(),exactValue(&exact)/max(1.,count),count>0.);return;}
+ if(wet>=arrayLength(&wetProjected)){seedVelocity[id]=stagedInvalidVelocity();return;}
+ let value=wetProjected[wet];seedVelocity[id]=select(stagedInvalidVelocity(),value,finite(value));}
 
 @compute @workgroup_size(64)
 fn publishLosassoWetExtended(@builtin(global_invocation_id)invocation:vec3u){let face=invocation.x;

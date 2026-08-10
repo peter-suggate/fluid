@@ -76,9 +76,12 @@ fn trackerStoredValue(position:vec3f,word:u32)->PhiSample{let volume=p.velocityD
  return PhiSample(value/max(total,1e-12),vec3f(0),select(0u,1u,total>.999&&finite(value)));}
 fn trackerValue(position:vec3f)->PhiSample{return trackerStoredValue(position,2u);}
 fn trackerRawValue(position:vec3f)->PhiSample{return trackerStoredValue(position,7u);}
-fn trackerPhi(position:vec3f)->PhiSample{let centre=trackerValue(position);if(centre.valid==0u){return centre;}var gradient=vec3f(0);
- for(var axis=0u;axis<3u;axis+=1u){var low=position;var high=position;low[axis]-=1.;high[axis]+=1.;let a=trackerValue(low);let b=trackerValue(high);
-  if(a.valid==0u||b.valid==0u){return PhiSample(0.,vec3f(0),0u);}gradient[axis]=.5*(b.value-a.value)/p.velocityCellSize;}
+fn trackerPhi(position:vec3f,span:u32)->PhiSample{let centre=trackerValue(position);if(centre.valid==0u){return centre;}
+ var gradient=vec3f(0);let radius=f32(max(1u,span));
+ for(var axis=0u;axis<3u;axis+=1u){var low=position;var high=position;low[axis]-=radius;high[axis]+=radius;
+  let a=trackerValue(low);let b=trackerValue(high);
+  if(a.valid==0u||b.valid==0u){return PhiSample(0.,vec3f(0),0u);}
+  gradient[axis]=.5*(b.value-a.value)/(radius*p.velocityCellSize);}
  return PhiSample(centre.value,gradient,select(0u,1u,finite3(gradient)));}
 fn quantize(v:vec3f)->vec3f{return round(v*65536.)/65536.;}
 fn inflowPhi(world:vec3f)->f32{let velocity=p.inflowVelocityStrength.xyz;let speed=length(velocity);if(speed<=1e-6||p.inflowPositionRadius.w<=0.){return 3.402823e38;}
@@ -86,7 +89,7 @@ fn inflowPhi(world:vec3f)->f32{let velocity=p.inflowVelocityStrength.xyz;let spe
  let relative=world-centre;let axial=dot(relative,direction);let radial=length(relative-axial*direction);return max(radial-p.inflowPositionRadius.w,max(-axial,axial-2.*p.velocityCellSize));}
 @compute @workgroup_size(64)
 fn advectLosassoCoarsePhi(@builtin(global_invocation_id)gid:vec3u){let row=gid.x;if(row>=p.rowCapacity||row>=arrayLength(&headers)){return;}let header=headers[row];if(header.size==0u||header.size>p.maximumLeafSize){rowPhi[row]=vec4u(0);nextGradient[row]=vec4f(0);return;}
- let origin=cellOf(header.cell);let centre=vec3f(origin)+vec3f(.5*f32(header.size));let transported=trackerPhi(centre);
+ let origin=cellOf(header.cell);let centre=vec3f(origin)+vec3f(.5*f32(header.size));let transported=trackerPhi(centre,header.size);
  if(transported.valid==0u){rowPhi[row]=vec4u(0);nextGradient[row]=vec4f(0);return;}
  var value=transported.value;let world=p.domainOrigin+centre*p.velocityCellSize;let sourceValue=inflowPhi(world);if(p.inflowVelocityStrength.w>0.&&finite(sourceValue)){value=min(value,max(sourceValue,-.5*p.velocityCellSize*clamp(p.inflowVelocityStrength.w,0.,1.)));}
  // Retain the dense sub-leaf interval and gradient. A partially wet S=8 row

@@ -1060,9 +1060,9 @@ export function packSparseSceneClusterArena(
  * Tapes are **shared**, not one per record. A record addresses a block by index,
  * so nothing ever required the mapping to be injective — but it was, and that
  * made the arena a ceiling on field-program *records* rather than on distinct
- * shapes. The hero oak is the case that found it: its crown is 822 foliage
- * records drawn from 16 quantised tapes (see `oakCanopyPadProgram`), so the
- * injective numbering asked for 822 blocks of the 256 the arena holds and the
+ * shapes. A dense recursive crown is the case this protects: hundreds of foliage
+ * records may be drawn from a small set of quantised tapes, so an injective
+ * numbering can ask for more blocks than the 256 the arena holds and the
  * publication threw before the octree could be planned.
  *
  * Keyed on the serialised tape, which is the whole of what a block holds, so two
@@ -1334,6 +1334,18 @@ export function sparseSceneNeedsConservativeSampling(
 }
 
 /**
+ * Noise foliage is authored as a density threshold, not as a distance surface.
+ * Its ABI value is divided by a conservative global gradient bound so the sign
+ * is exact but the magnitude is intentionally compressed. Feeding that
+ * magnitude to the planar SDF coverage law would therefore dilate the density
+ * set by as much as a voxel radius and refill its ellipsoidal acceleration
+ * envelope. Sample the threshold directly instead.
+ */
+function sparseSceneUsesThresholdOccupancy(primitive: SparseScenePrimitive): boolean {
+  return primitive.kind === "smooth-union-cluster" && primitive.packing.field === "noise-foliage";
+}
+
+/**
  * Conservative cell-center occupancy mirror used by the GPU voxelization pass.
  *
  * It mirrors distance, fraction and the *material* half of the identity word.
@@ -1357,10 +1369,16 @@ export function sampleSparseScenePrimitiveCell(
   let distance = Number.POSITIVE_INFINITY;
   let coverage = Number.POSITIVE_INFINITY;
   let identity = 0;
+  const cellRadius = 0.5 * Math.hypot(...cellSize);
   for (const primitive of primitives) {
     const centre = sparseScenePrimitiveSignedDistance(primitive, cellCenter);
     let nearest = centre;
-    if (sparseSceneNeedsConservativeSampling(primitive, cellSize)) {
+    if (sparseSceneUsesThresholdOccupancy(primitive)) {
+      // Preserve only the exact threshold sign. Mapping it to the two endpoints
+      // of the shared coverage law gives a binary voxel without a second output
+      // path and mirrors the WGSL publication pass below.
+      nearest = centre < 0 ? -cellRadius : cellRadius;
+    } else if (sparseSceneNeedsConservativeSampling(primitive, cellSize)) {
       for (const offset of SPARSE_SCENE_CONSERVATIVE_OFFSETS) {
         const point = cellCenter.map((value, axis) => value + 0.5 * offset[axis] * cellSize[axis]) as unknown as SparseSceneVector3;
         nearest = Math.min(nearest, sparseScenePrimitiveSignedDistance(primitive, point));
@@ -1373,7 +1391,6 @@ export function sampleSparseScenePrimitiveCell(
     }
   }
   if (primitives.length === 0) return { solidSignedDistance: distance, solidFraction: 0, materialOwner: identity };
-  const cellRadius = 0.5 * Math.hypot(...cellSize);
   const fraction = Math.max(0, Math.min(1, 0.5 - coverage / (2 * cellRadius)));
   return {
     solidSignedDistance: distance,
@@ -1851,6 +1868,16 @@ fn primitiveFeatureRadius(primitive: ScenePrimitive) -> f32 {
     sceneClusterPacking(scenePrimitiveArenaSlot(primitive)));
 }
 /**
+ * A noise-foliage record's distance magnitude is a conservative, globally
+ * Lipschitz-scaled density residual. Its sign is the authored threshold exactly,
+ * but its magnitude is not a physical surface distance and must not be expanded
+ * by the planar cell-coverage law.
+ */
+fn primitiveUsesThresholdOccupancy(primitive: ScenePrimitive) -> bool {
+  if (scenePrimitiveType(primitive) != ${SPARSE_SCENE_PRIMITIVE_TYPES["smooth-union-cluster"]}u) { return false; }
+  return sceneClusterPacking(scenePrimitiveArenaSlot(primitive)).field == SVO_CLUSTER_FIELD_NOISE_FOLIAGE;
+}
+/**
  * Nearest solid this primitive puts anywhere in the cell, not just at its
  * centre. See \`SPARSE_SCENE_CONSERVATIVE_OFFSETS\` for why a field finer than
  * the cell needs its corners sampled and a plain convex shape does not.
@@ -2229,7 +2256,15 @@ fn rebuildDirtyBrickPayload(@builtin(global_invocation_id) gid:vec3u,@builtin(nu
     let primitive = primitives[primitiveIndex];
     let candidate = primitiveDistance(primitive, world);
     bestDistance = min(bestDistance, candidate);
-    let coverage = primitiveCellCoverageDistance(primitive, world, cellExtent, candidate);
+    // Density foliage follows its authored rule literally: the voxel exists
+    // when the density residual at its sample point is negative. Convert that
+    // binary result to the endpoints of the shared planar coverage law. Using
+    // the residual magnitude here would inflate the threshold set until its
+    // ellipsoidal acceleration envelope looked solid.
+    let coverage = select(
+      primitiveCellCoverageDistance(primitive, world, cellExtent, candidate),
+      select(cellRadius, -cellRadius, candidate < 0.0),
+      primitiveUsesThresholdOccupancy(primitive));
     if (coverage < bestCoverage) {
       bestCoverage = coverage;
       bestMaterial = bitcast<u32>(primitive.extentIdentity.w) & 0xffffu;

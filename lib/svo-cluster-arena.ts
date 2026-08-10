@@ -60,6 +60,16 @@ export function packSvoClusterArena(
     words[base + block.fieldWord] = SVO_CLUSTER_FIELD_TABLE[svoClusterFieldName(packing)].code;
     words[base + block.seedWord] = packing.seed >>> 0;
     floats[base + block.smoothRadiusWord] = packing.smoothRadius_m;
+    if (packing.field === "noise-foliage") {
+      words[base + block.countWord] = 2;
+      floats[base + block.latticeLobeRadiusWord] = packing.detailPeriod_m;
+      floats[base + block.latticePeriodWord] = packing.clusterPeriod_m;
+      floats[base + block.jitterWord] = packing.threshold;
+      floats[base + block.anisotropyWord] = packing.clusterWeight;
+      floats[base + block.lobeSpanWord] = packing.detailWeight;
+      floats[base + block.lobeSpanSpreadWord] = packing.interiorBias;
+      return;
+    }
     if (packing.field === "seeded-lobes") {
       words[base + block.countWord] = packing.lobeCount >>> 0;
       floats[base + block.anisotropyWord] = packing.anisotropy;

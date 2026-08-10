@@ -270,6 +270,9 @@ export interface GPUEulerianInfo {
   quadtreePressureIterationBudget?: number;
   quadtreePressureIterationHardBudget?: number;
   quadtreePressureConverged?: boolean;
+  /** Step-coherent graph/phi/velocity/pressure receipt summary for a rejected
+   * Losasso update. Undefined again after a fully admitted tuple. */
+  quadtreePressureRejectionSummary?: string;
   quadtreeFactorLevelCount?: number;
   quadtreeMultigridLevelCount?: number;
   quadtreeMultigridCoarsestDofs?: number;

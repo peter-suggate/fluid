@@ -1,7 +1,8 @@
 import { WebGpuSvoFluidCoverage } from "./webgpu-svo-fluid-coverage";
 import { cameraBasis, dot } from "./math";
 import { sceneLatticeDimensions } from "./scene-lattice";
-import { canonicalScene, sceneRevision, type CameraState, type SceneDescription } from "./model";
+import { canonicalScene, sceneRevision, sceneUsesFlatVoxelNormals, type CameraState, type SceneDescription } from "./model";
+import { svoSceneLighting } from "./svo-dry-scene-lighting";
 import { boundingRadius, type RigidBodyState } from "./rigid-body";
 import { decodeGPURigidBodyPoses, GPU_RIGID_RENDER_BYTES, type DrawnRigidBodyPose } from "./webgpu-rigid-body";
 import type { EulerianRenderState } from "./eulerian-solver";
@@ -58,9 +59,10 @@ import {
   type SvoPrimaryTraversalScale,
   type SvoSilhouetteRefinementStatus,
 } from "./svo-render-options";
+import { disabledRenderStagesFrom, disabledRenderStagesKey } from "./render-stage-switches";
 import { DEFAULT_SVO_RENDER_DIAGNOSTICS, normalizeSvoRenderDiagnostics, type SvoRenderDiagnostics } from "./svo-render-diagnostics";
 import { SparseVoxelRenderStageOverlay } from "./webgpu-svo-stage-overlay";
-import { DEFAULT_SVO_RENDER_TUNING, normalizeSvoRenderTuning, svoRenderTuningKey, svoSceneryRefinementDepth, type SvoRenderTuning } from "./svo-render-tuning";
+import { DEFAULT_SVO_RENDER_TUNING, normalizeSvoRenderTuning, svoEnvironmentTreeRefinementDepth, svoRenderTuningKey, type SvoRenderTuning } from "./svo-render-tuning";
 import { SVO_SCREEN_SPACE_TERMINATION_CONTRACT } from "./svo-screen-space-termination";
 import { isGPUInitializationAbort } from "./gpu-initialization";
 import { createGlobalFineLevelSetConsumerSource } from "./octree-consumer-sampling";
@@ -77,8 +79,8 @@ import { planSceneRuntime } from "./scene-runtime";
 import type { GPUFailureReproduction } from "./webgpu-failure-reproduction";
 import {
   CPUPerformanceTrace,
+  GPUPassTimestampRecorder,
   GPUQueueWallPerformanceTraceRecorder,
-  GPUStageTimestampRecorder,
   type GPUTimestampPhase,
   type PerformanceTrace,
 } from "./performance-trace";
@@ -716,6 +718,8 @@ export function resolveEffectiveRendererStatus(
 export interface RendererFrameMetrics {
   cpu?: PerformanceTrace;
   presentation?: PerformanceTrace;
+  /** Trustworthy per-stage GPU pass costs; its total is a pass sum, not frame time. */
+  presentationStages?: PerformanceTrace;
   context: string;
   methodId: string;
   /** True only when this draw encoded and submitted a presentation command buffer. */
@@ -940,12 +944,10 @@ export class FluidLabRenderer {
   private presentationContext = "";
   private cpuTraceSampleId = 0;
   private presentationTraceSampleId = 0;
-  private lastPresentationTraceAt_ms = -Infinity;
   private presentationTracePending = false;
-  /** One unusable hardware sample retires the stage recorder for this device;
-   * the non-invasive queue-wall observation takes over. */
-  private hardwarePresentationTraceInvalid = false;
+  private reportedMissingPresentationTimestamps = false;
   private latestPresentationTrace?: PerformanceTrace;
+  private latestPresentationStageTrace?: PerformanceTrace;
   /** Polled by the paused viewport; each successful transactional source attach requests one repaint. */
   private pausedPresentationRevision = 0;
   private deviceRecoveryAttempts = 0;
@@ -1732,7 +1734,7 @@ export class FluidLabRenderer {
     this.fluidTexture = undefined; this.columnBaseTexture = undefined; this.gridCellTexture = undefined;
     this.velocityFallbackTexture = undefined; this.pressureSamplesFallbackTexture = undefined; this.scalarFallbackTexture = undefined;
     this.fluidTextureKey = ""; this.fluidRevision = -1;
-    this.presentationTracePending = false; this.latestPresentationTrace = undefined;
+    this.presentationTracePending = false; this.latestPresentationTrace = undefined; this.latestPresentationStageTrace = undefined;
     this.retiredGPUFluids.clear();
     this.deviceLost = false;
     try {
@@ -1894,10 +1896,15 @@ export class FluidLabRenderer {
   /** Clear presentation samples whenever their semantic identity changes. */
   private resetPresentationTrace() {
     this.latestPresentationTrace = undefined;
-    this.lastPresentationTraceAt_ms = -Infinity;
+    this.latestPresentationStageTrace = undefined;
   }
 
-  private currentFrameMetrics(methodId: string, context: string, presentationSubmitted: boolean, cpu?: PerformanceTrace): RendererFrameMetrics {
+  private currentFrameMetrics(
+    methodId: string,
+    context: string,
+    presentationSubmitted: boolean,
+    cpu?: PerformanceTrace,
+  ): RendererFrameMetrics {
     const water = this.waterPipeline?.surfaceRenderDiagnostics;
     const instrumentation = usePerformanceInstrumentationStore.getState();
     const presentation = instrumentation.enabled
@@ -1905,9 +1912,15 @@ export class FluidLabRenderer {
       && this.latestPresentationTrace.capturedAt_ms >= instrumentation.enabledAt_ms
       ? this.latestPresentationTrace
       : undefined;
+    const presentationStages = instrumentation.enabled
+      && this.latestPresentationStageTrace
+      && this.latestPresentationStageTrace.capturedAt_ms >= instrumentation.enabledAt_ms
+      ? this.latestPresentationStageTrace
+      : undefined;
     return {
       cpu,
       presentation,
+      presentationStages,
       context,
       methodId,
       presentationSubmitted,
@@ -2192,6 +2205,7 @@ export class FluidLabRenderer {
       primaryCompositeOwnedGlassPaneIdBase: compositorOwnedGlass[0]?.paneId,
       primaryCompositeOwnedGlassPaneCount: compositorOwnedGlass.length,
       ...lightingMirrors,
+      flatVoxelNormals: sceneUsesFlatVoxelNormals(scene),
     };
     const thickGlassBound = resolveSparseVoxelThickGlassBinderStatus(publication) === "bound";
     const replacedPaneKeys = new Set(sceneThickGlass.metadata.flatMap(({ replacesThinPaneKey }) => replacesThinPaneKey ? [replacesThinPaneKey] : []));
@@ -2517,7 +2531,12 @@ export class FluidLabRenderer {
       this.svoRenderDiagnosticsKey = diagnosticsKey;
       this.resetPresentationTrace();
     }
-    const presentationContext = `${config.methodId}:${config.quality}:${presentationMode}:shadow-${svoLightingOptions.shadowsEnabled ? "on" : "off"}:ao-${svoLightingOptions.ambientOcclusionEnabled ? "on" : "off"}:cones-${svoLightingOptions.coneTracingMode ?? "cones"}:primary-${svoLightingOptions.primaryTraversal ?? "raster"}:tuning-${tuningKey}:${this.simulationRunning ? "running" : "paused"}`;
+    // Ablation belongs in the trace context, not just in the encode. Averaging
+    // is per context, so without it the frames before and after a stage was
+    // withheld would pool into one mean and the panel would report the cost of
+    // neither pipeline.
+    const disabledStages = disabledRenderStagesFrom(svoLightingOptions.disabledStages);
+    const presentationContext = `${config.methodId}:${config.quality}:${presentationMode}:shadow-${svoLightingOptions.shadowsEnabled ? "on" : "off"}:ao-${svoLightingOptions.ambientOcclusionEnabled ? "on" : "off"}:cones-${svoLightingOptions.coneTracingMode ?? "cones"}:primary-${svoLightingOptions.primaryTraversal ?? "raster"}:tuning-${tuningKey}:without-${disabledRenderStagesKey(disabledStages) || "nothing"}:${this.simulationRunning ? "running" : "paused"}`;
     if (presentationContext !== this.presentationContext) {
       this.presentationContext = presentationContext;
       this.resetPresentationTrace();
@@ -2539,7 +2558,7 @@ export class FluidLabRenderer {
     // number entitled to say how many levels the tree may spend under it — see
     // `svoSceneryRefinementDepth`. Hoisted because the primary-traversal
     // decision needs it too, for the frames before the brick count exists.
-    const environmentRefinementDepth = svoSceneryRefinementDepth(scene.voxelDomain, {
+    const environmentRefinementDepth = svoEnvironmentTreeRefinementDepth(scene.voxelDomain, {
       fluid: sceneRuntime.fluidSolver,
     });
     const sceneConfig: SimulationRunConfig = sparsePresentationRequired ? {
@@ -2773,26 +2792,26 @@ export class FluidLabRenderer {
       this.svoDryScenePipeline?.setLightingOptions({ ...svoLightingOptions, coneLightingScale: activeSvoTuning.coneLightingScale });
       this.svoDryScenePipeline?.setRenderTuning(activeSvoTuning);
     }
+    // Its own channel, taken every frame: a withheld stage is an encode-time
+    // decision and must never reach the code that rebuilds shaders or bundles.
+    this.svoDryScenePipeline?.setDisabledStages(disabledStages);
+    this.waterPipeline.setDisabledStages(disabledStages);
     cpuTrace?.transition({ id: "command-encoding", label: "Presentation command encoding" });
     const traceRequestedAt_ms = measurementInstrumentationEnabled ? performance.now() : 0;
     const shouldTracePresentation = measurementInstrumentationEnabled
-      && !this.presentationTracePending
-      && traceRequestedAt_ms - this.lastPresentationTraceAt_ms >= 250;
+      && !this.presentationTracePending;
     const presentationTraceSampleId = shouldTracePresentation
       ? ++this.presentationTraceSampleId
       : 0;
     const traceDetailedSvoRenderPath = sparsePresentationRequired;
     const presentationTrace = shouldTracePresentation
-      && !this.hardwarePresentationTraceInvalid
-      && GPUStageTimestampRecorder.supported(this.device)
-      ? new GPUStageTimestampRecorder(
-        this.device,
-        presentationTraceSampleId,
-        "presentation",
-        presentationContext,
-        64,
-      )
+      && GPUPassTimestampRecorder.supported(this.device)
+      ? new GPUPassTimestampRecorder(this.device, 512, "presentation pass timestamps")
       : undefined;
+    if (shouldTracePresentation && !presentationTrace && !this.reportedMissingPresentationTimestamps) {
+      this.reportedMissingPresentationTimestamps = true;
+      console.warn("GPU stage timestamps are unavailable: device lacks timestamp-query");
+    }
     const presentationQueueTrace = shouldTracePresentation
       ? new GPUQueueWallPerformanceTraceRecorder(
         presentationTraceSampleId,
@@ -2804,22 +2823,27 @@ export class FluidLabRenderer {
     // the untraced frame submit the same command graph.
     const rawEncoder = this.device.createCommandEncoder({ label: "Fluid Lab frame" });
     const encoder = presentationTrace?.instrument(rawEncoder) ?? rawEncoder;
-    presentationTrace?.begin();
-    if (sparsePresentationRequired) {
+    const detailedPresentationTrace = traceDetailedSvoRenderPath ? presentationTrace : undefined;
+    // Incremental voxelization: the only work in the frame that changes the
+    // structure everything below marches. Withholding it freezes the world at
+    // whatever was already built rather than emptying it, which is why this is
+    // the one ablation whose image stays correct for a stationary scene.
+    if (sparsePresentationRequired && !disabledStages.has("sparse-world-build")) {
       fluidSource?.encodeSceneMaintenance?.(encoder);
       if (sparseSceneProducer !== fluidSource) sparseSceneProducer?.encodeSceneMaintenance?.(encoder);
+      detailedPresentationTrace?.completePhase({ id: "scene-upload", label: "Sparse world maintenance" });
     }
-    const detailedPresentationTrace = traceDetailedSvoRenderPath ? presentationTrace : undefined;
     // The SVO cone path names its own stages; every other path walks the fixed
     // presentation partition in encode order.
     let fixedPresentationPhase = 0;
     const closeFixedPresentationPhase = () => {
       const phase = PRESENTATION_TRACE_PHASES[fixedPresentationPhase];
       fixedPresentationPhase += 1;
-      if (phase && !traceDetailedSvoRenderPath) presentationTrace?.completePhase(encoder, phase);
+      if (phase && !traceDetailedSvoRenderPath) presentationTrace?.completePhase(phase);
     };
-    const completeDetailedPresentationPhase = (phase: GPUTimestampPhase) =>
-      detailedPresentationTrace?.completePhase(encoder, phase);
+    const completeDetailedPresentationPhase = (phase: GPUTimestampPhase) => {
+      detailedPresentationTrace?.completePhase(phase);
+    };
     if (residentRigidBuffer) encoder.copyBufferToBuffer(residentRigidBuffer, 0, this.bodyBuffer, 0, 12 * 16 * 4);
     // The same records, on their way to the host. See `publishRigidBodyPoses`.
     const poseStaging = residentRigidBuffer && bodies.length > 0
@@ -2861,10 +2885,14 @@ export class FluidLabRenderer {
     // composite used to have inlined into its WGSL at build time. The pipeline
     // ignores a call that changes nothing, so this stays a per-frame statement
     // of what the scene is rather than a per-frame upload.
+    // The shared rig belongs to the full-scene SVO presentation path, whether
+    // or not fluid physics is also running. A fluid-only raster presentation
+    // remains entitled to its authored lighting.
+    const sceneLighting = sparsePresentationRequired ? svoSceneLighting(scene) : scene.lighting;
     this.waterPipeline.setSceneOptics({
       optics: scene.fluid.optics,
-      directional: scene.lighting?.directional,
-      grade: scene.lighting?.grade,
+      directional: sceneLighting?.directional,
+      grade: sceneLighting?.grade,
       terrain: scene.terrain,
       terrainContentStamp: this.renderSceneTerrainContentStamp,
       container: { width_m: scene.container.width_m, depth_m: scene.container.depth_m },
@@ -2946,7 +2974,8 @@ export class FluidLabRenderer {
     // an earlier pass published. Encoded first among the inspection overlays so
     // structural overlays and the ray-trace decoration still draw over it, and
     // strictly read-only, so the frame it explains is the frame that shipped.
-    if (activeSvoDiagnostics.stageView !== "off" && this.svoStageOverlay?.ready && svoEncoded) {
+    const inspectionWithheld = disabledStages.has("inspection-overlays");
+    if (activeSvoDiagnostics.stageView !== "off" && !inspectionWithheld && this.svoStageOverlay?.ready && svoEncoded) {
       const sceneExtent = Math.hypot(scene.container.width_m, scene.container.height_m, scene.container.depth_m);
       inspectionOverlayEncoded = this.svoStageOverlay.encode(
         encoder, this.presentationTexture.createView(),
@@ -2971,7 +3000,7 @@ export class FluidLabRenderer {
         this.gpuFluid?.gridPressureSamplesTexture ?? this.pressureSamplesFallbackTexture);
       this.fluidCellTracePipeline?.encode(encoder);
     }
-    if (gridOverlay && gridOverlay.axis !== "off") {
+    if (gridOverlay && gridOverlay.axis !== "off" && !inspectionWithheld) {
       const overlayView=this.presentationTexture.createView();
       // Generic texture fields and compact paper publications each own both
       // their slice and ray-integrated volume presentation.
@@ -3000,12 +3029,22 @@ export class FluidLabRenderer {
       }
     }
     // One assembled draw for every decoration any pass contributed this frame.
-    this.encodeDecorationOverlay(
-      encoder, basis, cameraTanHalfFov(camera), scene, pixelTraceRequested ? pixelTrace : undefined, fluidCellTrace);
+    if (!inspectionWithheld) {
+      this.encodeDecorationOverlay(
+        encoder, basis, cameraTanHalfFov(camera), scene, pixelTraceRequested ? pixelTrace : undefined, fluidCellTrace);
+    }
     closeFixedPresentationPhase();
+    // The swap-chain texture is acquired and cleared either way: a frame that
+    // never wrote it would leave the compositor showing an older one, so a
+    // withheld blit would read as "free" while the image stopped updating for a
+    // reason nothing on screen could explain.
+    const finalPresentationPhase = { id: "present", label: "Final upscale + present" } as const;
     const upscalePass=encoder.beginRenderPass({colorAttachments:[{view:this.context.getCurrentTexture().createView(),clearValue:{r:0.01,g:0.025,b:0.024,a:1},loadOp:"clear",storeOp:"store"}]});
-    upscalePass.setPipeline(this.upscalePipeline);upscalePass.setBindGroup(0,this.upscaleBindGroup);upscalePass.draw(3);upscalePass.end();
-    completeDetailedPresentationPhase({ id: "present", label: "Final upscale + present" });
+    if (!disabledStages.has("present")) {
+      upscalePass.setPipeline(this.upscalePipeline);upscalePass.setBindGroup(0,this.upscaleBindGroup);upscalePass.draw(3);
+    }
+    upscalePass.end();
+    detailedPresentationTrace?.completePhase(finalPresentationPhase);
     closeFixedPresentationPhase();
     // A frame that skipped part of the raster path would leave the remaining
     // stages named by position rather than by the work they contain. Drop that
@@ -3015,8 +3054,8 @@ export class FluidLabRenderer {
       || fixedPresentationPhase === PRESENTATION_TRACE_PHASES.length
       ? presentationTrace
       : undefined;
-    if (hardwarePresentationTrace) hardwarePresentationTrace.resolve(encoder);
-    else presentationTrace?.destroy();
+    const hardwarePresentationTraceResolved = hardwarePresentationTrace?.resolve(encoder) ?? false;
+    if (!hardwarePresentationTraceResolved) presentationTrace?.destroy();
     presentationQueueTrace?.begin();
     this.device.queue.submit([encoder.finish()]);
     this.presentationsInFlight+=1;
@@ -3035,29 +3074,26 @@ export class FluidLabRenderer {
     if (pixelTraceProbing) this.pumpPixelTraceReadback();
     if (fluidCellTrace) this.pumpFluidCellTraceReadback();
     const presentationQueueTraceRead = presentationQueueTrace?.read(this.device.queue);
-    const presentationTraceRead = hardwarePresentationTrace
-      ? hardwarePresentationTrace.read()
-        .then((trace) => {
-          this.hardwarePresentationTraceInvalid = !trace;
-          return trace ?? presentationQueueTraceRead;
-        })
-        .catch(() => {
-          this.hardwarePresentationTraceInvalid = true;
-          return presentationQueueTraceRead;
-        })
-      : presentationQueueTraceRead;
-    if (presentationTraceRead) {
-      this.lastPresentationTraceAt_ms = traceRequestedAt_ms;
+    const presentationStageTraceRead = hardwarePresentationTraceResolved && hardwarePresentationTrace
+      ? hardwarePresentationTrace.readSemanticTrace({
+        sampleId: presentationTraceSampleId,
+        lane: "presentation",
+        context: presentationContext,
+        capturedAt_ms: traceRequestedAt_ms,
+      }).catch(() => undefined)
+      : undefined;
+    if (presentationQueueTraceRead) {
       this.presentationTracePending = true;
       const sampledContext = presentationContext;
-      void presentationTraceRead.then((trace) => {
+      void Promise.all([presentationQueueTraceRead, presentationStageTraceRead]).then(([trace, stages]) => {
         const instrumentation = usePerformanceInstrumentationStore.getState();
         if (!trace || this.disposed || this.deviceLost || this.presentationContext !== sampledContext
           || !instrumentation.enabled || instrumentation.enabledAt_ms > traceRequestedAt_ms) return;
         this.latestPresentationTrace = trace;
+        this.latestPresentationStageTrace = stages;
         if (!this.simulationRunning) this.pausedPresentationRevision += 1;
       }).catch(() => {
-        hardwarePresentationTrace?.destroy();
+        presentationTrace?.destroy();
       }).finally(() => {
         this.presentationTracePending = false;
       });
@@ -3077,7 +3113,12 @@ export class FluidLabRenderer {
         }
       }).catch(()=>{ /* Device loss is reported by device.lost. */ });
     }
-    return this.currentFrameMetrics(config.methodId, presentationContext, true, cpuTrace?.finish());
+    return this.currentFrameMetrics(
+      config.methodId,
+      presentationContext,
+      true,
+      cpuTrace?.finish(),
+    );
   }
 
   destroy(): void {

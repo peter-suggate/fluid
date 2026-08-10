@@ -10,6 +10,7 @@ import {
   octreeGradingPageFillEnabled,
   octreeGradingSplitHelpersEnabled,
   octreeLosassoLeafCeiling,
+  octreeLosassoSurfaceGradingShader,
   octreeLosassoTileEdgeCells,
   octreeLosassoTopologyLeafSize,
   octreeProjectionPipelineRequired,
@@ -47,6 +48,10 @@ test("balance-round planning elides only the maximum-leaf-size-two domain", () =
   assert.equal(octreeBalanceRounds(8), 6);
   assert.equal(octreeBalanceRounds(16), 8);
   assert.equal(octreeBalanceRounds(32), 10);
+  assert.equal(octreeBalanceRounds(4, false), 2);
+  assert.equal(octreeBalanceRounds(8, false), 3);
+  assert.equal(octreeBalanceRounds(16, false), 4);
+  assert.equal(octreeBalanceRounds(32, false), 5);
 
   assert.equal(octreeBalancePredicatesWouldSplit(1, [4]), true,
     "the ordinary ratio predicate remains reachable above maximum size two");
@@ -56,11 +61,27 @@ test("balance-round planning elides only the maximum-leaf-size-two domain", () =
     "the face-neighbor predicate remains reachable above maximum size two");
 });
 
+test("Losasso keeps strict 2:1 grading without Power's exclusive mixed-ring shell", () => {
+  const losasso = octreeLosassoSurfaceGradingShader(octreeProjectionShader);
+  assert.match(octreeProjectionShader,
+    /repairPaperRatioNeighbors\(gid, owner\.size\);/,
+    "the shared topology keeps the strict 2:1 ratio repair");
+  assert.match(octreeProjectionShader,
+    /repairPaperMixedNeighbors\(gid, owner\.size\);/,
+    "Power keeps its exclusive Delaunay mixed-ring repair");
+  assert.match(losasso,
+    /repairPaperRatioNeighbors\(gid, owner\.size\);/,
+    "Losasso must still repair ratios above 2:1");
+  assert.doesNotMatch(losasso,
+    /repairPaperMixedNeighbors\(gid, owner\.size\);/,
+    "Losasso's generalized face graph must not widen a legal 1\/2\/4 transition");
+});
+
 test("host scheduling guards recurring setup and cold/recurring grading dispatches", () => {
   assert.match(
     octreeSource,
-    /this\.balanceRounds = octreeBalanceRounds\(this\.effectiveLeafSize\);/,
-    "the largest leaf the domain can hold must determine the common cold/recurring round count",
+    /this\.balanceRounds = octreeBalanceRounds\([\s\S]{0,100}?this\.coarseDynamics\.backend === "power2017"/,
+    "the largest live leaf and backend grading contract determine the common cold/recurring round count",
   );
   assert.match(
     octreeSource,
@@ -204,7 +225,7 @@ test("the refinement ladder stops at the largest leaf the domain can hold", () =
   assert.match(octreeSource,
     /for \(let size = this\.effectiveLeafSize; size >= 2; size >>= 1\) sizes\.push\(size\);/);
   assert.match(octreeSource,
-    /this\.balanceRounds = octreeBalanceRounds\(this\.effectiveLeafSize\);/);
+    /this\.balanceRounds = octreeBalanceRounds\([\s\S]{0,100}?this\.coarseDynamics\.backend === "power2017"/);
   assert.match(octreeSource,
     /for \(let size = this\.effectiveLeafSize; size >= 16; size >>= 1\) \{/,
     "the coarse pipeline set must cover exactly the dispatched coarse sizes");

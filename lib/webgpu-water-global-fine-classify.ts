@@ -44,7 +44,7 @@ fn validCurrentPublication()->bool{
   // State 6 is coarse-1: the compact octree publication is the complete
   // moving surface. It deliberately has no fine worklist, pages or topology
   // transaction, so validation must finish before inspecting those sentinels.
-  if(params.table.y==6u){return coarsePublished&&coarseGeneration==generation;}
+  if(params.table.y==6u){return coarsePublished;}
   if(arrayLength(&fineTopologyControl)<8u||arrayLength(&fineWorklist)<7u){return false;}
   let topologyFlags=fineTopologyControl[0];let topologyReason=fineTopologyControl[7];
   let clean=topologyFlags==0u&&fineTopologyControl[4]==1u&&fineTopologyControl[5]==0u&&topologyReason==0u;
@@ -71,6 +71,7 @@ fn pageLookup(key:u32)->u32{
     &&metadata[base]==id&&metadata[base+1u]==key&&metadata[base+2u]==params.table.w);
 }
 fn coarsePhi(q:vec3i)->f32{return sampleCoarseOctreePhi(params.settings.xyz+(vec3f(q)+vec3f(0.5))*params.settings.w);}
+fn adaptiveNodalPublication()->bool{let count=min(powerCoarseSamples.rowCount,arrayLength(&powerCoarseSamples.entries));return count>0u&&(powerCoarseSamples.entries[0].flags&0x10000000u)!=0u;}
 fn finite(value:f32)->bool{return value==value&&abs(value)<3.402823e38;}
 fn phi(qi:vec3i)->f32{
   if(any(qi<vec3i(0))||any(qi>=vec3i(params.sampleDimensions))){return coarsePhi(qi);}
@@ -85,6 +86,13 @@ fn phi(qi:vec3i)->f32{
 fn fineValid(q:vec3u)->bool{if(any(q>=params.sampleDimensions)){return false;}let r=max(1u,params.brickResolution);let brick=q/r;if(any(brick>=params.brickDimensions)){return false;}let local=q-brick*r;let key=brick.x+params.brickDimensions.x*(brick.y+params.brickDimensions.y*brick.z);let id=pageLookup(key);if(id==INVALID){return false;}let index=id*params.samplesPerBrick+local.x+r*(local.y+r*local.z);return index<arrayLength(&fineSamples)&&(finePackedFlags(index)&1u)!=0u&&finite(finePackedPhi(index));}
 fn fineOwnsCube(base:vec3i)->bool{let q=max(base-vec3i(1),vec3i(0));return all(q<vec3i(params.sampleDimensions))&&fineValid(vec3u(q));}
 fn occupancy(value:f32)->f32{let band=4.0*u.container.y/max(f32(params.sampleDimensions.y),1.0);return clamp(0.5-value/band,0.0,1.0);}
+// Adaptive nodal phi is a signed-distance scalar, not optical occupancy.
+// Preserve its affine map through edge interpolation: clamping the two edge
+// endpoints before solving the 0.5 crossing moves the zero set by an amount
+// that grows with leaf/sample spacing (and makes the same plane look different
+// beside span-1, span-2 and span-4 leaves). Values outside [0,1] are valid here;
+// only their relation to 0.5 and their linear interpolation are consumed.
+fn adaptiveContourValue(value:f32)->f32{let band=4.0*u.container.y/max(f32(params.sampleDimensions.y),1.0);return 0.5-value/band;}
 // The ordinary halo represents one closed tank wall with an exterior air
 // sample. At an x/z tank edge a single Cartesian-product halo cube cannot
 // represent both perpendicular wall caps: marching tetrahedra turns the two
@@ -110,6 +118,47 @@ fn emitClassifiedCubeTagged(base:vec3i,scale:i32,lo:f32,hi:f32,a:vec4f,b:vec4f,t
 }
 fn emitClassifiedCube(base:vec3i,scale:i32,lo:f32,hi:f32,a:vec4f,b:vec4f){
   emitClassifiedCubeTagged(base,scale,lo,hi,a,b,0u);
+}
+// Native adaptive cubes do not scan the optical ghost halo. Close the tank
+// with explicit scalar-owned face records instead: reserved codes 252/253 select the low
+// or high wall plane, while bits 14..15 select its normal axis. The four live
+// face samples remain in the ordinary cube payload so emission can clip a
+// fractional marching-squares contact polygon rather than invent a wet quad.
+fn emitAdaptiveWallFace(base:vec3i,values:array<f32,8>,axis:u32,side:u32){
+  var corners=vec4u(0u,1u,2u,3u);
+  if(axis==0u){corners=select(vec4u(0u,3u,7u,4u),vec4u(1u,2u,6u,5u),side!=0u);}
+  else if(axis==1u){corners=vec4u(0u,1u,5u,4u);}
+  else{corners=select(vec4u(0u,1u,2u,3u),vec4u(4u,5u,6u,7u),side!=0u);}
+  // An all-exact-zero face already has one native exact-plane owner below.
+  // Require strict liquid evidence here so the wall path cannot duplicate it.
+  var ownsLiquid=false;for(var i=0u;i<4u;i+=1u){ownsLiquid=ownsLiquid||values[corners[i]]>.5;}
+  if(!ownsLiquid){return;}
+  let tag=(1u<<(8u+axis))|(axis<<14u);
+  emitClassifiedCubeTagged(base,i32(252u+side),0.,1.,vec4f(values[0],values[1],values[2],values[3]),vec4f(values[4],values[5],values[6],values[7]),tag);
+}
+fn classifyAdaptiveNodal(base:vec3i){
+  if(any(base<vec3i(0))||any(base>=vec3i(params.sampleDimensions))){return;}
+  let o=array<vec3i,8>(vec3i(0,0,0),vec3i(1,0,0),vec3i(1,1,0),vec3i(0,1,0),vec3i(0,0,1),vec3i(1,0,1),vec3i(1,1,1),vec3i(0,1,1));
+  var raw=array<f32,8>();var v=array<f32,8>();var lo=1.0;var hi=0.0;var minimumSigned=3.402823e38;var maximumSigned=-3.402823e38;
+  for(var i=0;i<8;i+=1){let signed=sampleAdaptiveCoarseOctreePhiAtGrid(vec3f(base+o[i]));if(!finite(signed)){return;}raw[i]=signed;minimumSigned=min(minimumSigned,signed);maximumSigned=max(maximumSigned,signed);v[i]=adaptiveContourValue(signed);lo=min(lo,v[i]);hi=max(hi,v[i]);}
+  let dims=vec3i(params.sampleDimensions);
+  if(base.x==0){emitAdaptiveWallFace(base,v,0u,0u);}if(base.x==dims.x-1){emitAdaptiveWallFace(base,v,0u,1u);}
+  // The opaque floor is intentionally not a liquid-interface owner: a
+  // coplanar floor cap corrupts the renderer's front/back layering. The x/z
+  // owners below close their lower Cartesian edges without that overlap.
+  if(base.z==0){emitAdaptiveWallFace(base,v,2u,0u);}if(base.z==dims.z-1){emitAdaptiveWallFace(base,v,2u,1u);}
+  // Exact-zero geometry is owned only by the air-side cube. A whole zero
+  // face gets one six-vertex Cartesian patch; an edge/corner-only touch has
+  // zero area and publishes nothing. This removes the collapsed tetrahedra
+  // that otherwise make an authored nodal plane cell-size dependent.
+  if(minimumSigned==0.0&&maximumSigned>0.0){
+    for(var axis=0u;axis<3u;axis+=1u){for(var side=0u;side<2u;side+=1u){var face=true;for(var corner=0u;corner<8u;corner+=1u){let coordinate=u32(o[corner][axis]);if(coordinate==side){face=face&&raw[corner]==0.0;}}if(face){let code=2u+side;let tag=(1u<<(8u+axis))|(axis<<14u);emitClassifiedCubeTagged(base,i32(code),lo,hi,vec4f(v[0],v[1],v[2],v[3]),vec4f(v[4],v[5],v[6],v[7]),tag);return;}}}
+    return;
+  }
+  if(minimumSigned>=0.0||maximumSigned<0.0){return;}
+  // A zero low-byte descriptor distinguishes the native nodal lattice from
+  // the legacy optical ghost lattice. Emission still uses a unit span.
+  emitClassifiedCubeTagged(base,0,lo,hi,vec4f(v[0],v[1],v[2],v[3]),vec4f(v[4],v[5],v[6],v[7]),0u);
 }
 fn classifyScaledForWall(base:vec3i,scale:i32,wallMode:u32){
   if(any(base<vec3i(0))||any(base>=vec3i(params.sampleDimensions+vec3u(1u)))){return;}
@@ -178,7 +227,7 @@ fn extractGlobalCoarseMain(@builtin(workgroup_id)group:vec3u,@builtin(local_invo
   // misses every face whose lower sample lies in the dry complement (the two
   // low-side vertical faces of a box). Scan the small factor-1 lattice once so
   // every cube has exactly one Cartesian lower-anchor owner.
-  if(params.table.y==6u){let stream=(group.x+group.y*65535u)*256u+local;let cubeDims=params.sampleDimensions+vec3u(1u);let total=cubeDims.x*cubeDims.y*cubeDims.z;if(stream>=total){return;}let z=stream/(cubeDims.x*cubeDims.y);let remainder=stream-z*cubeDims.x*cubeDims.y;let y=remainder/cubeDims.x;let x=remainder-y*cubeDims.x;classifyScaled(vec3i(i32(x),i32(y),i32(z)),1);return;}
+  if(params.table.y==6u){atomicStore(&drawArgs.meshPublicationGeneration,powerCoarseSamples.generation&0x3fffffffu);let stream=(group.x+group.y*65535u)*256u+local;if(adaptiveNodalPublication()){let cubeDims=params.sampleDimensions;let total=cubeDims.x*cubeDims.y*cubeDims.z;if(stream>=total){return;}let z=stream/(cubeDims.x*cubeDims.y);let remainder=stream-z*cubeDims.x*cubeDims.y;let y=remainder/cubeDims.x;let x=remainder-y*cubeDims.x;classifyAdaptiveNodal(vec3i(i32(x),i32(y),i32(z)));return;}let cubeDims=params.sampleDimensions+vec3u(1u);let total=cubeDims.x*cubeDims.y*cubeDims.z;if(stream>=total){return;}let z=stream/(cubeDims.x*cubeDims.y);let remainder=stream-z*cubeDims.x*cubeDims.y;let y=remainder/cubeDims.x;let x=remainder-y*cubeDims.x;classifyScaled(vec3i(i32(x),i32(y),i32(z)),1);return;}
   let slot=group.x+group.y*65535u;if(slot>=min(powerCoarseSamples.rowCount,arrayLength(&powerCoarseSamples.entries))){return;}let entry=powerCoarseSamples.entries[slot];if(entry.cellPlusOne==0u||(entry.flags&1u)==0u||entry.size==0u){return;}let d=powerCoarseSamples.dimensions;let cell=entry.cellPlusOne-1u;let origin=vec3u(cell%d.x,(cell/d.x)%d.y,cell/(d.x*d.y));let factor=max(1u,u32(round(params.cellAndDt.x)));let scale=entry.size*factor;let base=vec3i(origin*factor+vec3u(1u));
   // Coarse fallback is sampled on the same unit fine lattice as the narrow
   // band. Emitting one scaled tetrahedral cube beside unit fine cubes creates

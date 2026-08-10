@@ -26,6 +26,14 @@ struct P{capacity:u32,pad:vec3u}
 @group(0)@binding(9)var<storage,read_write>pressureB:array<f32>;
 @group(0)@binding(10)var<storage,read_write>acceptedRows:array<u32>;
 @compute @workgroup_size(1)fn prepareLosassoReadyCommit(){
+ // Candidate epoch zero is the explicit cadence-reuse state. The adaptive
+ // joint-ready gate has already revoked frontier readiness for this step; do
+ // not reinterpret the intentionally absent tuple as a malformed candidate.
+ // A nonzero candidate still takes the complete fail-closed validation below.
+ if(authority[0u]==0u){
+  dispatch[0]=0u;dispatch[1]=1u;dispatch[2]=1u;
+  authority[3u]=0u;authority[4u]=0u;return;
+ }
  let generation=select(0u,ownerCandidate[24u],arrayLength(&ownerCandidate)>28u);
  let selector=select(2u,frontier[7u],arrayLength(&frontier)>9u);var count=p.capacity+1u;
  if(selector<=1u){count=frontier[selector];}

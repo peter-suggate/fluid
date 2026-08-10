@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { getMethod, resolveMethodValues } from "../lib/methods";
 import { cloneScene } from "../lib/model";
-import { getScenePreset } from "../lib/scenes";
+import { getSceneDefinition, getScenePreset, scenePresets } from "../lib/scenes";
+import { sceneDocumentAtLattice } from "../lib/scene-definition";
+import { svoSceneryRefinementDepth } from "../lib/svo-render-tuning";
 import { useUIStore } from "../lib/stores/ui-store";
 import { createSceneQueryLayerCache, parseQueryState, serializeQueryState } from "../lib/url-state";
 
@@ -24,6 +26,13 @@ test("camera URL writes reuse the scene-derived query layer until the document c
 
 test("an edited sculpted terrain stays out of the URL while analytic terrain remains shareable", () => {
   const sculpted = cloneScene(getScenePreset("hero-garden-hose").create());
+  sculpted.terrain!.grid = {
+    kind: "grid",
+    origin_m: { x: -0.1, z: -0.1 },
+    spacing_m: 0.1,
+    size: { nx: 2, nz: 2 },
+    heights_m: [0.1, 0.1, 0.1, 0.1],
+  };
   sculpted.terrain!.grid!.heights_m[0] += 0.001;
   const method = { methodId: "octree" as const, quality: "balanced" as const, overrides: {} };
   const sculptedQuery = serializeQueryState("", {
@@ -42,6 +51,42 @@ test("an edited sculpted terrain stays out of the URL while analytic terrain rem
   }, method);
   assert.ok(new URLSearchParams(analyticQuery).has("scene.terrain"),
     "small analytic terrain edits should still survive a shared-link round trip");
+});
+
+test("every scene opens directly on the global fidelity defaults", () => {
+  for (const sceneId of ["hero-garden-hose", "garden-svo-lighting", "water-box-dam-break"]) {
+    const parsed = parseQueryState(`?scene=${sceneId}`);
+    assert.equal(parsed.ui.svoRenderTuning.resolutionScale, 1, sceneId);
+    assert.equal(parsed.ui.svoRenderTuning.coneLightingScale, 0.5, sceneId);
+    assert.equal(parsed.ui.svoRenderTuning.coneRadianceReconstruction, "full-res-relight", sceneId);
+    assert.equal(parsed.ui.svoPrimaryTraversal, "traced", sceneId);
+    assert.equal(parsed.ui.svoStageView, "dry-radiance", sceneId);
+  }
+
+  const parsed = parseQueryState("?scene=hero-garden-hose");
+  assert.equal(parsed.scene.voxelDomain.detailCellSize_m, undefined, "capture uses the authored 6.25 mm lattice");
+
+  const method = { methodId: "octree" as const, quality: "balanced" as const, overrides: {} };
+  const off = { ...parsed.ui, svoPrimaryTraversal: "raster" as const, svoStageView: "off" as const };
+  const query = serializeQueryState("", { presetId: parsed.presetId, scene: parsed.scene }, method, off);
+  const rehydrated = parseQueryState(query);
+  assert.equal(rehydrated.ui.svoPrimaryTraversal, "raster", "an explicit departure from the global default survives reload");
+  assert.equal(rehydrated.ui.svoStageView, "off", "presentation can still be restored deliberately");
+});
+
+test("every catalog scene has a minimal canonical URL with no authored defaults", () => {
+  for (const preset of scenePresets) {
+    const parsed = parseQueryState(`?scene=${preset.id}`);
+    const query = serializeQueryState("", {
+      presetId: parsed.presetId,
+      scene: parsed.scene,
+    }, {
+      methodId: parsed.methodId,
+      quality: parsed.quality,
+      overrides: parsed.overrides,
+    }, parsed.ui);
+    assert.equal(query, `scene=${preset.id}`, preset.id);
+  }
 });
 
 /**
@@ -89,6 +134,23 @@ test("query state round-trips the unified scene voxel domain atomically", () => 
     methodId: parsed.methodId, quality: parsed.quality, overrides: parsed.overrides,
   }, parsed.ui);
   assert.deepEqual(JSON.parse(new URLSearchParams(serialized).get("scene.voxelDomain")!), parsed.scene.voxelDomain);
+});
+
+test("a coarser environment refinement rung survives a shared-link round trip", () => {
+  const definition = getSceneDefinition("hero-garden-hose");
+  const base = getScenePreset("hero-garden-hose").create().voxelDomain.finestCellSize_m;
+  const coarse = sceneDocumentAtLattice(definition, {
+    cellSize_m: base * 8,
+    detailCellSize_m: base * 8,
+  }).scene;
+  coarse.voxelDomain.environmentRefinementBaseCellSize_m = base;
+  const query = serializeQueryState("", { presetId: definition.id, scene: coarse }, {
+    methodId: "octree", quality: "balanced", overrides: {},
+  });
+  const restored = parseQueryState(query);
+  assert.equal(restored.scene.voxelDomain.finestCellSize_m, base * 8);
+  assert.equal(restored.scene.voxelDomain.environmentRefinementBaseCellSize_m, base);
+  assert.equal(svoSceneryRefinementDepth(restored.scene.voxelDomain, { fluid: false }), -3);
 });
 
 test("query state persists an edited rigid-body roster atomically", () => {
@@ -185,14 +247,36 @@ test("invalid external query values fall back to validated defaults", () => {
   assert.equal(parsed.methodId, "octree");
   assert.equal(parsed.presetId, "water-box-dam-break");
   assert.equal(parsed.quality, "balanced");
-  assert.deepEqual(parsed.overrides, {});
+  assert.deepEqual(parsed.overrides.octree,
+    getScenePreset("water-box-dam-break").methodProfile?.overrides);
   assert.equal(parsed.scene.container.width_m, defaultScene.container.width_m);
   assert.equal(parsed.scene.fluid.gravity_m_s2.y, defaultScene.fluid.gravity_m_s2.y);
   assert.equal(parsed.ui.diagnosticsOpen, false);
   assert.equal(parsed.ui.rightPanel, null);
   const values = resolveMethodValues(getMethod(parsed.methodId), parsed.quality, parsed.overrides[parsed.methodId] ?? {});
   assert.equal(parsed.scene.voxelDomain.finestCellSize_m, 0.05);
-  assert.equal(values.globalFineLevelSetFactor, "4");
+  assert.equal(values.coarseBackend, "losasso");
+  assert.equal(values.losassoVelocityExtension, "causal-front");
+  assert.equal(values.maximumLeafSize, "16");
+  assert.equal(values.interfaceRefinementBandCells, 4);
+  assert.equal(values.globalFineLevelSetFactor, "1");
+});
+
+test("a bare dam-break UI link resolves to the Dawn-proven adaptive LoSasso profile", () => {
+  const preset = getScenePreset("water-box-dam-break");
+  const profile = preset.methodProfile;
+  assert.ok(profile);
+  const parsed = parseQueryState("?scene=water-box-dam-break");
+  assert.equal(parsed.methodId, "octree");
+  assert.equal(parsed.quality, "balanced");
+  assert.deepEqual(parsed.overrides.octree, profile.overrides);
+  const values = resolveMethodValues(getMethod(parsed.methodId), parsed.quality,
+    parsed.overrides[parsed.methodId] ?? {});
+  assert.equal(values.coarseBackend, "losasso");
+  assert.equal(values.losassoVelocityExtension, "causal-front");
+  assert.equal(values.maximumLeafSize, "16");
+  assert.equal(values.interfaceRefinementBandCells, 4);
+  assert.equal(values.globalFineLevelSetFactor, "1");
 });
 
 /**
@@ -217,7 +301,7 @@ test("a bare link to a profiled preset resolves to that preset's authored method
   assert.equal(values.coarseBackend, "losasso");
   assert.equal(values.maximumLeafSize, "16");
   assert.equal(values.interfaceRefinementBandCells, 3);
-  assert.equal(values.globalFineLevelSetFactor, "4");
+  assert.equal(values.globalFineLevelSetFactor, "1");
 
   // The resolved profile must survive the round trip the app performs on every
   // store write, so a reload cannot silently drop back to the method defaults.
@@ -237,7 +321,7 @@ test("a bare ceiling-drop link hydrates the dedicated band-1 UI profile", () => 
   assert.equal(values.coarseBackend, "losasso");
   assert.equal(values.maximumLeafSize, "8");
   assert.equal(values.interfaceRefinementBandCells, 1);
-  assert.equal(values.globalFineLevelSetFactor, "4");
+  assert.equal(values.globalFineLevelSetFactor, "1");
   assert.deepEqual(parsed.overrides[profile.methodId], { ...profile.overrides });
 });
 
@@ -249,7 +333,7 @@ test("an explicit param key overrides one value of a profiled preset", () => {
   assert.equal(values.interfaceRefinementBandCells, 0);
   // Every other authored setting is still the profile's.
   assert.equal(values.maximumLeafSize, "16");
-  assert.equal(values.globalFineLevelSetFactor, "4");
+  assert.equal(values.globalFineLevelSetFactor, "1");
 });
 
 test("an explicit scene link can still select a non-default maximum leaf size", () => {
@@ -267,7 +351,8 @@ test("retired octree authority switches cannot re-enter through shared links", (
     + "&param.octree.leafSolver=jacobi"
     + "&param.octree.globalFineLevelSetFactor=off"
   );
-  assert.equal(parsed.overrides.octree, undefined);
+  assert.deepEqual(parsed.overrides.octree,
+    getScenePreset("water-box-dam-break").methodProfile?.overrides);
 
   const query = serializeQueryState(
     "?param.octree.faceVelocityTransport=off"
@@ -401,6 +486,17 @@ test("viewport utility panels round-trip through one mutually exclusive query st
   assert.equal(params.get("panel"), "visual");
   assert.equal(params.has("diagnostics"), false);
   assert.equal(parseQueryState(query).ui.rightPanel, "visual");
+
+  const visualsQuery = serializeQueryState(query, {
+    presetId: "water-box-dam-break",
+    scene: getScenePreset("water-box-dam-break").create()
+  }, {
+    methodId: "tall-cell",
+    quality: "balanced",
+    overrides: {}
+  }, { ...initialUI, rightPanel: "visuals", diagnosticsOpen: false });
+  assert.equal(new URLSearchParams(visualsQuery).get("panel"), "visuals");
+  assert.equal(parseQueryState(visualsQuery).ui.rightPanel, "visuals");
 });
 
 test("diagnostics uses the same sole panel query authority as every other sidebar", () => {
@@ -467,15 +563,17 @@ test("query state carries the primary traversal so a comparison survives reload"
   assert.equal(traced.ui.svoPrimaryTraversal, "traced");
   assert.equal(new URLSearchParams(
     serializeQueryState("", { presetId: "garden-svo-lighting", scene }, method, traced.ui),
-  ).get("svoPrimary"), "traced");
+  ).get("svoPrimary"), null);
 
   // The default stays out of the URL, and an unreadable value resolves to it
   // rather than leaving the renderer holding a mode it cannot build.
-  const raster = parseQueryState("?svoPrimary=nonsense");
+  const fallback = parseQueryState("?svoPrimary=nonsense");
+  assert.equal(fallback.ui.svoPrimaryTraversal, "traced");
+  const raster = parseQueryState("?svoPrimary=raster");
   assert.equal(raster.ui.svoPrimaryTraversal, "raster");
   assert.equal(new URLSearchParams(
     serializeQueryState("", { presetId: "garden-svo-lighting", scene }, method, raster.ui),
-  ).get("svoPrimary"), null);
+  ).get("svoPrimary"), "raster");
 });
 
 test("query state carries the opt-in primary-seam-closure choice", () => {

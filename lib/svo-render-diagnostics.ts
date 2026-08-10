@@ -81,7 +81,7 @@ export interface SvoRenderStageDefinition {
 }
 
 export const DEFAULT_SVO_RENDER_DIAGNOSTICS: SvoRenderDiagnostics = Object.freeze({
-  stageView: "off",
+  stageView: "dry-radiance",
   lightSlot: 0,
   maximumTraversalDepth: 21,
   maximumNodeVisits: 256,
@@ -252,8 +252,8 @@ const definitions = [
     palette: "sequential", legend: depth,
   },
   {
-    view: "dry-radiance", label: "Dry radiance", group: "Lighting", plane: "dry scene HDR",
-    description: "What deferred lighting produced before any water was composited over it, tonemapped for display.",
+    view: "dry-radiance", label: "Raw dry radiance", group: "Lighting", plane: "dry scene HDR",
+    description: "The exact pre-composite dry target used by fidelity captures, clamped and gamma-encoded without the scene grade.",
     palette: "sequential", legend: radiance,
   },
   {

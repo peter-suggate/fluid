@@ -9,7 +9,12 @@ test("GLOBAL SVO exposes effects without retaining alternate render or lighting 
     ambientOcclusionEnabled: true,
     silhouetteRefinementEnabled: false,
     coneTracingMode: "cones",
-    primaryTraversal: "raster",
+    // On by default, and a real switch rather than an exposure: withheld, the
+    // cone gather and the world-GI cache pass are never encoded, so the frame
+    // gets that time back. `giBounceStrength: 0` costs exactly what it cost
+    // before, which is why the two are separate controls.
+    globalIlluminationEnabled: true,
+    primaryTraversal: "traced",
   });
   const options = readFileSync(new URL("../lib/svo-render-options.ts", import.meta.url), "utf8");
   for (const retired of ["SVO_RENDER_MODES", "SVO_LIGHTING_MODES", "SvoRenderMode", "SvoLightingMode"]) {
@@ -36,13 +41,22 @@ test("visual controls expose one GLOBAL path with no surface arms", () => {
     "no control may still reach for the removed inspection representation");
   assert.doesNotMatch(panel, />LEVELS<\/button>|>SURFACE<\/button>|>BRICKS<\/button>|>CONTENT<\/button>/,
     "the inspection representation buttons are gone with their renderer");
-  assert.match(panel, /aria-label="SVO lighting effects"[^]*<Toggle label="Shadows"[^]*onChange=\{setSvoShadowsEnabled\}[^]*<Toggle label="AO"[^]*onChange=\{setSvoAmbientOcclusionEnabled\}/);
-  assert.match(panel, /<Toggle label="Close primary seams"[^]*checked=\{silhouetteRefinementEnabled\}[^]*onChange=\{setSilhouetteRefinementEnabled\}/,
-    "primary seam closure must be an explicit render control");
+  assert.match(panel, /aria-label="SVO lighting effects"[^]*<PipeToggle label="Shadows"[^]*onChange=\{setSvoShadowsEnabled\}[^]*<PipeToggle label="AO"[^]*onChange=\{setSvoAmbientOcclusionEnabled\}/);
   assert.match(panel, /data-testid="silhouette-refinement-status"[^]*silhouetteRefinementStatus\.state\.toUpperCase\(\)/,
     "the requested pass lifecycle must be visible rather than silently substituted");
-  assert.match(panel, /aria-label="SVO primary tracing optimizations"[^]*<Toggle label="Reuse stationary visibility"[^]*stationaryPrimaryReuseEnabled/,
-    "the default-off primary coherence optimization must be exposed in the SVO controls");
+  // Seam closure and stationary reuse are pipeline nodes now, so their switch is
+  // the node lamp rather than a free-standing toggle. What has to survive the
+  // move is that both stay reachable and that each still moves the one field the
+  // frame actually reads.
+  const graph = readFileSync(new URL("../lib/render-pipeline-graph.ts", import.meta.url), "utf8");
+  for (const node of ["seam-closure", "stationary-reuse"]) {
+    assert.match(graph, new RegExp(`id: "${node}"[^]*?toggleable: true`),
+      `${node} must present as a switchable node`);
+  }
+  assert.match(panel, /id === "seam-closure"\) setSilhouetteRefinementEnabled\(!silhouetteRefinementEnabled\)/,
+    "the seam-closure lamp must move the silhouette-refinement request");
+  assert.match(panel, /id === "stationary-reuse"\) updateTuning\("stationaryPrimaryReuseEnabled"/,
+    "the reuse lamp must move the primary coherence tuning");
 
   const renderer = readFileSync(new URL("../lib/webgpu-renderer.ts", import.meta.url), "utf8");
   assert.match(renderer, /requested\.push\("svo-dry-scene"\)/,
@@ -52,18 +66,24 @@ test("visual controls expose one GLOBAL path with no surface arms", () => {
   assert.doesNotMatch(renderer, /failureReason: "inspection-mode"/);
 });
 
-test("primary visibility is switchable between the raster and traced paths from the render panel", () => {
+test("the render panel offers no primary-traversal control, because the frame has no choice", () => {
+  // `resolveSvoPrimaryTraversal` answers `traced` unconditionally, so a
+  // RASTER/TRACED strip selected an arm that never ran — and the store defaulted
+  // to `raster`, so the panel lit the arm the renderer never takes while the
+  // megakernel drew every frame. Worse, that dead selection was the `disabled`
+  // predicate on stationary reuse, which is live on exactly the path that does
+  // run. The raster arm stays compiled and stays reachable through the
+  // environment override; what it does not get is a control claiming to switch
+  // the frame.
   const panel = readFileSync(new URL("../components/VisualPanel.tsx", import.meta.url), "utf8");
-  assert.match(panel, /<span>Primary visibility<\/span>[^]*mode: "raster"[^]*mode: "traced"[^]*setSvoPrimaryTraversal\(mode\)/,
-    "both primary traversals must be selectable side by side");
-  // Reuse caches the traced primary and cannot engage against the rastered one,
-  // so the control that offers it has to go quiet rather than read as available.
-  assert.match(panel, /<Toggle label="Reuse stationary visibility"[^]*disabled=\{svoPrimaryTraversal === "raster"\}/,
-    "stationary reuse must present as unavailable while the raster primary is selected");
+  assert.doesNotMatch(panel, /Primary visibility|setSvoPrimaryTraversal|svoPrimaryTraversal/,
+    "the panel must not offer a traversal the resolver ignores");
+
+  const options = readFileSync(new URL("../lib/svo-render-options.ts", import.meta.url), "utf8");
+  assert.match(options, /FLUID_SVO_PRIMARY_TRAVERSAL/,
+    "the raster arm must remain reachable for the paired-worktree measurement");
 
   const viewport = readFileSync(new URL("../components/WebGPUViewport.tsx", import.meta.url), "utf8");
-  assert.match(viewport, /primaryTraversal: ui\.svoPrimaryTraversal/,
-    "the selection must reach the renderer with the rest of the lighting options");
   assert.match(viewport, /silhouetteRefinementEnabled: ui\.silhouetteRefinementEnabled/,
     "the silhouette-refinement request must reach the renderer with the shared lighting options");
 
@@ -78,12 +98,6 @@ test("primary visibility is switchable between the raster and traced paths from 
   assert.match(swap, /this\.svoDryScenePipeline = undefined/,
     "the retired pipeline must be cleared so the next sweep rebuilds it");
   assert.match(swap, /retired\.destroy\(\)/, "the retired pipeline must release its GPU resources");
-  // The request is resolved against the scene's scale on the way in — a scene
-  // that emits more brick proxies than the target has pixels takes the
-  // megakernel whatever the toggle says — so the call carries the structural
-  // terms too. It still has to precede the sweep.
-  assert.match(renderer, /this\.applyPrimaryTraversalRequest\(svoLightingOptions\.primaryTraversal \?\? "raster", \{[^]*?\}\);\s*\n\s*\}\s*\n\s*this\.ensureRequestedOptionalPipelines\(/,
-    "the swap must run before the sweep so a toggle rebuilds in the same frame");
   assert.match(swap, /resolveSvoPrimaryTraversal\(requested, scale\)/,
     "the traversal a frame runs must be the shared rule's answer, not the raw toggle");
 });
@@ -96,4 +110,40 @@ test("scene configuration exposes the unified voxel lattice instead of method-le
   assert.match(scenePanel, /ariaLabel="Sparse voxel brick size"/);
   assert.match(scenePanel, /disabled: fluidEnabled/);
   assert.doesNotMatch(method, /key: "surfaceColumns"/);
+});
+
+test("global illumination is a switch that withholds work, not an exposure that scales it", () => {
+  // `giBounceStrength: 0` multiplies a gather that has already run, so it costs
+  // exactly what it cost before. This is the control that buys the time back:
+  // the `globalIllumination` flags are withheld outright and the persistent
+  // world-GI cache pass is never encoded. Cone shadows and AO are untouched,
+  // which is what makes it worth having beside CONES/EXACT/OFF.
+  const renderer = readFileSync(new URL("../lib/webgpu-svo-dry-scene.ts", import.meta.url), "utf8");
+  assert.match(renderer, /const globalIlluminationEnabled = this\.lightingOptions\.globalIlluminationEnabled !== false;/,
+    "the renderer must read the switch when it writes its visibility flags");
+  assert.match(renderer, /const giReady = coneTracingEnabled && globalIlluminationEnabled &&/,
+    "a withheld gather must not report itself ready");
+  assert.match(renderer, /coneTracingEnabled && globalIlluminationEnabled \? SVO_DRY_VISIBILITY_FLAGS\.globalIlluminationRequested : 0/,
+    "the request flag must be withheld too, or the shader still marches the cones");
+  // Three conditions guard the cache now: the reconstruction family, this
+  // switch, and the stage ablation. Match only the middle one — the others have
+  // their own tests, and pinning the whole expression here would make this test
+  // fail for reasons that have nothing to do with the gather.
+  assert.match(renderer, /if \(!reconstructReducedRadiance && this\.lightingOptions\.globalIlluminationEnabled !== false/,
+    "the world-GI cache pass must not be encoded when the gather is off");
+  // A changed switch has to reach the flags, and the cache it filled under the
+  // old setting has to go with it.
+  assert.match(renderer, /\|\| globalIlluminationEnabled !== previousGlobalIllumination;/,
+    "toggling the gather must invalidate the world-GI cache");
+
+  const viewport = readFileSync(new URL("../components/WebGPUViewport.tsx", import.meta.url), "utf8");
+  assert.match(viewport, /globalIlluminationEnabled: ui\.svoGlobalIlluminationEnabled/,
+    "the switch must reach the renderer with the rest of the lighting options");
+
+  const graph = readFileSync(new URL("../lib/render-pipeline-graph.ts", import.meta.url), "utf8");
+  assert.match(graph, /id: "gi-composition"[^]*?toggleable: true/,
+    "the GI node's lamp must be a control rather than a readout");
+  const panel = readFileSync(new URL("../components/VisualPanel.tsx", import.meta.url), "utf8");
+  assert.match(panel, /id === "gi-composition"\) setSvoGlobalIlluminationEnabled\(!svoGlobalIlluminationEnabled\)/,
+    "the GI lamp must move the switch");
 });

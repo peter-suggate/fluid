@@ -39,6 +39,16 @@ export type PaperPhaseId =
   | "water-caustics"
   | "svo-cone-lighting"
   | "svo-environment-gi"
+  /**
+   * The persistent level-0 voxel visibility cache: its demand pass and the
+   * bounded population drain that follows.
+   *
+   * Split out of `svo-cone-lighting` so the cache is priced as itself. Both
+   * dispatches used to fall inside whichever phase closed next, which charged a
+   * bounded per-frame drain to the cone stage and left the cache with no cost
+   * of its own to report.
+   */
+  | "svo-voxel-light"
   | "svo-primary"
   /**
    * The authored SDF set's own visibility passes (coverage → resolve →
@@ -213,6 +223,7 @@ export class CPUPerformanceTrace {
     private readonly context: string,
     initial: Pick<PerformancePhaseSample, "id" | "label">,
     now: () => number = () => performance.now(),
+    private readonly lane: PerformanceLane = "main-thread",
   ) {
     this.clock = now;
     this.startedAt_ms = now();
@@ -256,11 +267,31 @@ export class CPUPerformanceTrace {
     return partitionPerformanceTrace({
       sampleId: this.sampleId,
       domain: "cpu",
-      lane: "main-thread",
+      lane: this.lane,
       context: this.context,
       capturedAt_ms: completedAt_ms,
       start_ms: this.startedAt_ms,
       end_ms: completedAt_ms,
+      intervals: this.intervals,
+    });
+  }
+
+  /**
+   * Close a trailing-boundary trace without inventing another phase.
+   *
+   * Command encoders name work at the seam after it was encoded. Once the last
+   * seam has been recorded by `completePhase`, the partition is already closed;
+   * adding `current` again would charge trace bookkeeping to an arbitrary stage.
+   */
+  finishCompletedPhases(): PerformanceTrace {
+    return partitionPerformanceTrace({
+      sampleId: this.sampleId,
+      domain: "cpu",
+      lane: this.lane,
+      context: this.context,
+      capturedAt_ms: this.phaseStartedAt_ms,
+      start_ms: this.startedAt_ms,
+      end_ms: this.phaseStartedAt_ms,
       intervals: this.intervals,
     });
   }
@@ -421,7 +452,7 @@ export class GPUPerformanceTraceRecorder {
   private readonly readBuffer: GPUBuffer;
   private readonly encoderBreakSource: GPUBuffer;
   private readonly encoderBreakTarget: GPUBuffer;
-  private markerPipeline?: GPUComputePipeline;
+  private markerResources?: DynamicTraceMarkerResources;
   private boundaryCount = 0;
   private disposed = false;
 
@@ -458,7 +489,10 @@ export class GPUPerformanceTraceRecorder {
       size: 4,
       usage: GPUBufferUsage.COPY_DST,
     });
-    void dynamicTraceMarkerPipeline(device).then((pipeline) => { this.markerPipeline = pipeline; });
+    this.markerResources = preparedDynamicTraceMarkers.get(device);
+    if (!this.markerResources) {
+      void dynamicTraceMarkerResources(device).then((resources) => { this.markerResources = resources; });
+    }
   }
 
   boundary(encoder: GPUCommandEncoder, label: string): void {
@@ -474,8 +508,9 @@ export class GPUPerformanceTraceRecorder {
         beginningOfPassWriteIndex: this.boundaryCount,
       },
     });
-    if (this.markerPipeline) {
-      marker.setPipeline(this.markerPipeline);
+    if (this.markerResources) {
+      marker.setPipeline(this.markerResources.pipeline);
+      marker.setBindGroup(0, this.markerResources.bindGroup);
       marker.dispatchWorkgroups(1);
     }
     marker.end();
@@ -520,24 +555,51 @@ export class GPUPerformanceTraceRecorder {
   }
 }
 
-const dynamicTraceMarkerPipelines = new WeakMap<GPUDevice, Promise<GPUComputePipeline>>();
-async function dynamicTraceMarkerPipeline(device: GPUDevice): Promise<GPUComputePipeline> {
-  const cached = dynamicTraceMarkerPipelines.get(device);
+interface DynamicTraceMarkerResources {
+  readonly pipeline: GPUComputePipeline;
+  readonly bindGroup: GPUBindGroup;
+}
+
+const dynamicTraceMarkers = new WeakMap<GPUDevice, Promise<DynamicTraceMarkerResources>>();
+const preparedDynamicTraceMarkers = new WeakMap<GPUDevice, DynamicTraceMarkerResources>();
+async function dynamicTraceMarkerResources(device: GPUDevice): Promise<DynamicTraceMarkerResources> {
+  const cached = dynamicTraceMarkers.get(device);
   if (cached) return cached;
   // Callers may request instrumentation while constructing a frame recorder;
   // never let that constructor execute WGSL work on its own stack.
   await Promise.resolve();
   const shaderModule = device.createShaderModule({
     label: "dynamic trace marker",
-    code: "@compute @workgroup_size(1) fn mark() {}",
+    // An empty dispatch is dead-code eliminated by Metal/Dawn and its timestamp
+    // may resolve to zero. The atomic write is the smallest observable GPU side
+    // effect we can give the closing boundary.
+    code: `
+      struct Marker { value: atomic<u32> }
+      @group(0) @binding(0) var<storage, read_write> marker: Marker;
+      @compute @workgroup_size(1) fn mark() { atomicAdd(&marker.value, 1u); }
+    `,
   });
-  const pipeline = device.createComputePipelineAsync({
+  const promise = device.createComputePipelineAsync({
     label: "dynamic trace marker",
     layout: "auto",
     compute: { module: shaderModule, entryPoint: "mark" },
+  }).then((pipeline) => {
+    const buffer = device.createBuffer({
+      label: "dynamic trace marker storage",
+      size: 4,
+      usage: GPUBufferUsage.STORAGE,
+    });
+    const bindGroup = device.createBindGroup({
+      label: "dynamic trace marker",
+      layout: pipeline.getBindGroupLayout(0),
+      entries: [{ binding: 0, resource: { buffer } }],
+    });
+    const resources = { pipeline, bindGroup };
+    preparedDynamicTraceMarkers.set(device, resources);
+    return resources;
   });
-  dynamicTraceMarkerPipelines.set(device, pipeline);
-  return pipeline;
+  dynamicTraceMarkers.set(device, promise);
+  return promise;
 }
 
 /**
@@ -559,7 +621,7 @@ export class DynamicGPUPerformanceTraceRecorder {
   /** Apple GPUs sample timestamp counters at stage boundaries; a marker pass
    * with no dispatch can resolve zero. One empty-workgroup dispatch gives the
    * pass a stage to sample. */
-  private readonly markerPipeline: GPUComputePipeline;
+  private readonly markerResources: DynamicTraceMarkerResources;
   private readonly phases: GPUTimestampPhase[] = [];
   private boundaryCount = 0;
   private disposed = false;
@@ -570,7 +632,7 @@ export class DynamicGPUPerformanceTraceRecorder {
     private readonly lane: "physics" | "presentation",
     private readonly context: string,
     private readonly capacity = 128,
-    markerPipeline: GPUComputePipeline,
+    markerResources: DynamicTraceMarkerResources,
   ) {
     this.querySet = device.createQuerySet({ type: "timestamp", count: capacity });
     this.resolveBuffer = device.createBuffer({
@@ -593,7 +655,7 @@ export class DynamicGPUPerformanceTraceRecorder {
       size: 4,
       usage: GPUBufferUsage.COPY_DST,
     });
-    this.markerPipeline = markerPipeline;
+    this.markerResources = markerResources;
   }
 
   static async create(
@@ -604,7 +666,7 @@ export class DynamicGPUPerformanceTraceRecorder {
     capacity = 128,
   ): Promise<DynamicGPUPerformanceTraceRecorder> {
     return new DynamicGPUPerformanceTraceRecorder(
-      device, sampleId, lane, context, capacity, await dynamicTraceMarkerPipeline(device));
+      device, sampleId, lane, context, capacity, await dynamicTraceMarkerResources(device));
   }
 
   begin(encoder: GPUCommandEncoder): void {
@@ -630,7 +692,8 @@ export class DynamicGPUPerformanceTraceRecorder {
         beginningOfPassWriteIndex: this.boundaryCount,
       },
     });
-    marker.setPipeline(this.markerPipeline);
+    marker.setPipeline(this.markerResources.pipeline);
+    marker.setBindGroup(0, this.markerResources.bindGroup);
     marker.dispatchWorkgroups(1);
     marker.end();
     this.boundaryCount += 1;
@@ -709,12 +772,13 @@ export class GPUStageTimestampRecorder {
    * sample observable. It is the only command this recorder adds per stage. */
   private readonly encoderBreakSource: GPUBuffer;
   private readonly encoderBreakTarget: GPUBuffer;
-  private markerPipeline?: GPUComputePipeline;
+  private markerResources?: DynamicTraceMarkerResources;
   private readonly phases: GPUTimestampPhase[] = [];
   /** Query slot each boundary landed on; repeats mark an empty stage. */
   private readonly boundarySlots: number[] = [];
   private armedBoundaries = 0;
   private queryCount = 0;
+  private finalPhaseClosesOnNextPass = false;
   private started = false;
   private resolved = false;
   private overflowed = false;
@@ -722,6 +786,12 @@ export class GPUStageTimestampRecorder {
 
   static supported(device: GPUDevice): boolean {
     return device.features.has("timestamp-query");
+  }
+
+  /** Compile the observable closing marker before any synchronous frame asks for it. */
+  static async prepare(device: GPUDevice): Promise<void> {
+    if (!this.supported(device)) return;
+    await dynamicTraceMarkerResources(device);
   }
 
   constructor(
@@ -752,7 +822,10 @@ export class GPUStageTimestampRecorder {
       size: 4,
       usage: GPUBufferUsage.COPY_DST,
     });
-    void dynamicTraceMarkerPipeline(device).then((pipeline) => { this.markerPipeline = pipeline; });
+    this.markerResources = preparedDynamicTraceMarkers.get(device);
+    if (!this.markerResources) {
+      void dynamicTraceMarkerResources(device).then((resources) => { this.markerResources = resources; });
+    }
   }
 
   /**
@@ -803,21 +876,46 @@ export class GPUStageTimestampRecorder {
   }
 
   /**
+   * Name the final phase before its pass begins so that pass can carry both its
+   * opening and closing timestamp. Metal render and compute stage clocks are
+   * not reliably comparable, so a synthetic compute marker after the final
+   * render pass cannot close a valid monotonic chain.
+   */
+  completeFinalPhaseOnNextPass(phase: GPUTimestampPhase): void {
+    if (!this.started) throw new Error("GPU stage trace has not started");
+    if (this.finalPhaseClosesOnNextPass) throw new Error("GPU stage trace final phase is already armed");
+    if (this.phases.length + 1 >= this.capacity) { this.overflowed = true; return; }
+    this.phases.push(phase);
+    this.finalPhaseClosesOnNextPass = true;
+  }
+
+  /**
    * Assign every armed boundary to the pass about to begin. A descriptor that
    * already carries timestamp writes belongs to another recorder and is never
    * displaced; its boundaries stay armed for the pass after it.
    */
   private claimBoundary(encoder: GPUCommandEncoder, occupied: boolean) {
     if (this.armedBoundaries === 0 || this.disposed || this.overflowed || occupied) return undefined;
-    if (this.queryCount >= this.capacity) { this.overflowed = true; return undefined; }
+    const querySlots = this.finalPhaseClosesOnNextPass ? 2 : 1;
+    if (this.queryCount + querySlots > this.capacity) { this.overflowed = true; return undefined; }
     const beginningOfPassWriteIndex = this.queryCount;
-    this.queryCount += 1;
+    this.queryCount += querySlots;
     for (let boundary = 0; boundary < this.armedBoundaries; boundary += 1) {
       this.boundarySlots.push(beginningOfPassWriteIndex);
     }
     this.armedBoundaries = 0;
+    const endOfPassWriteIndex = this.finalPhaseClosesOnNextPass
+      ? beginningOfPassWriteIndex + 1 : undefined;
+    if (endOfPassWriteIndex !== undefined) {
+      this.boundarySlots.push(endOfPassWriteIndex);
+      this.finalPhaseClosesOnNextPass = false;
+    }
     encoder.copyBufferToBuffer(this.encoderBreakSource, 0, this.encoderBreakTarget, 0, 4);
-    return { querySet: this.querySet, beginningOfPassWriteIndex };
+    return {
+      querySet: this.querySet,
+      beginningOfPassWriteIndex,
+      ...(endOfPassWriteIndex === undefined ? {} : { endOfPassWriteIndex }),
+    };
   }
 
   /**
@@ -828,15 +926,29 @@ export class GPUStageTimestampRecorder {
   resolve(encoder: GPUCommandEncoder): void {
     if (!this.started || this.resolved) throw new Error("GPU stage trace is not open");
     this.resolved = true;
+    if (this.finalPhaseClosesOnNextPass) { this.overflowed = true; return; }
     if (this.phases.length === 0) { this.overflowed = true; return; }
     // The last completed stage already armed the closing boundary. It has no
     // following work to ride, so this is the one pass the recorder encodes.
+    // Metal/Dawn can resolve a final pass's *beginning* timestamp to zero even
+    // when the pass performs an observable atomic write. Its end timestamp is
+    // reliable, so the closing boundary owns an end-of-pass query directly.
     if (this.armedBoundaries > 0) {
-      const closing = this.claimBoundary(encoder, false);
-      if (!closing) { this.overflowed = true; return; }
-      const marker = encoder.beginComputePass({ label: "GPU stage trace close", timestampWrites: closing });
-      if (this.markerPipeline) {
-        marker.setPipeline(this.markerPipeline);
+      if (this.queryCount >= this.capacity) { this.overflowed = true; return; }
+      const endOfPassWriteIndex = this.queryCount;
+      this.queryCount += 1;
+      for (let boundary = 0; boundary < this.armedBoundaries; boundary += 1) {
+        this.boundarySlots.push(endOfPassWriteIndex);
+      }
+      this.armedBoundaries = 0;
+      encoder.copyBufferToBuffer(this.encoderBreakSource, 0, this.encoderBreakTarget, 0, 4);
+      const marker = encoder.beginComputePass({
+        label: "GPU stage trace close",
+        timestampWrites: { querySet: this.querySet, endOfPassWriteIndex },
+      });
+      if (this.markerResources) {
+        marker.setPipeline(this.markerResources.pipeline);
+        marker.setBindGroup(0, this.markerResources.bindGroup);
         marker.dispatchWorkgroups(1);
       }
       marker.end();
@@ -1004,6 +1116,12 @@ export class GPUPassTimestampRecorder {
   private readonly encoderBreakSource: GPUBuffer;
   private readonly encoderBreakTarget: GPUBuffer;
   private readonly labels: { label: string; kind: "compute" | "render" }[] = [];
+  private readonly semanticPhases: Array<{
+    phase: GPUTimestampPhase;
+    firstPass: number;
+    endPass: number;
+  }> = [];
+  private semanticPhaseStart = 0;
   private resolved = false;
   private disposed = false;
 
@@ -1068,6 +1186,16 @@ export class GPUPassTimestampRecorder {
         return typeof value === "function" ? value.bind(target) : value;
       },
     }) as GPUCommandEncoder;
+  }
+
+  /** Close one semantic stage over the passes encoded since the prior seam. */
+  completePhase(phase: GPUTimestampPhase): void {
+    this.semanticPhases.push({
+      phase,
+      firstPass: this.semanticPhaseStart,
+      endPass: this.labels.length,
+    });
+    this.semanticPhaseStart = this.labels.length;
   }
 
   /** False when the instrumented encoder opened no pass at all. */
@@ -1151,6 +1279,45 @@ export class GPUPassTimestampRecorder {
     }
   }
 
+  /**
+   * Aggregate trustworthy pass pairs under the semantic stages that owned them.
+   * Render-pass pairs are tiler windows on Apple GPUs, not costs, so a stage
+   * containing one is omitted instead of published as a false number.
+   */
+  async readSemanticTrace(input: {
+    sampleId: number;
+    lane: "physics" | "presentation";
+    context: string;
+    capturedAt_ms?: number;
+  }): Promise<PerformanceTrace | undefined> {
+    const phases = this.semanticPhases.map((group) => ({ ...group }));
+    const reading = await this.read();
+    if (!reading) return undefined;
+    const trustedPasses: GPUPassTimestampSample[] = [];
+    for (const group of phases) {
+      const passes = reading.passes.slice(group.firstPass, group.endPass);
+      if (passes.length === 0 || passes.some((pass) => !pass.sampled || !pass.trusted)) continue;
+      trustedPasses.push(...passes.map((pass) => ({ ...pass, label: group.phase.label })));
+    }
+    if (trustedPasses.length === 0) return undefined;
+    const trustedSum_ms = trustedPasses.reduce((sum, pass) => sum + pass.duration_ms, 0);
+    return passTimestampPerformanceTrace({
+      reading: {
+        passes: trustedPasses,
+        span_ms: reading.span_ms,
+        sum_ms: trustedSum_ms,
+        trustedSum_ms,
+        overlap: reading.span_ms > 0 ? trustedSum_ms / reading.span_ms : 0,
+        sampledPassCount: trustedPasses.length,
+        untrustedPassCount: 0,
+      },
+      sampleId: input.sampleId,
+      lane: input.lane,
+      context: input.context,
+      capturedAt_ms: input.capturedAt_ms,
+    });
+  }
+
   destroy(): void {
     if (this.disposed) return;
     this.disposed = true;
@@ -1201,7 +1368,9 @@ export function passTimestampPerformanceTrace(input: {
     lane: input.lane,
     context: `${input.context}:compute-pass-sum`,
     measurementSource: "gpu-pass-timestamp",
-    capturedAt_ms: input.capturedAt_ms,
+    // A pass-sum trace starts at synthetic zero; using its end as the default
+    // capture time makes freshness checks discard every otherwise valid sample.
+    capturedAt_ms: input.capturedAt_ms ?? performance.now(),
     start_ms: 0,
     end_ms: cursor,
     intervals,

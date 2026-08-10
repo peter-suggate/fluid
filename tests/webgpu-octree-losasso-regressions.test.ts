@@ -201,6 +201,33 @@ test("Losasso frontier cannot accept a live-to-empty topology transition", () =>
     "a one-generation wetness gap must reject instead of entering the absorbing zero-row state");
 });
 
+test("adaptive Losasso rejection revokes the coupled owner-frontier flip", () => {
+  const backend = read("../lib/webgpu-octree-losasso-backend.ts");
+  const gate = backend.slice(backend.indexOf("class WebGPUOctreeLosassoAdaptiveReadyGate"),
+    backend.indexOf("export class WebGPUOctreeLosassoCoarseBackend"));
+  assert.match(gate,
+    /@group\(0\) @binding\(2\) var<storage, read_write> frontier: array<atomic<u32>>/,
+    "the adaptive verdict must share the frontier authority consumed by owner-page commit");
+  assert.match(gate,
+    /if \(!ready\) \{[\s\S]*atomicStore\(&authority\[3\], 0u\)[\s\S]*atomicStore\(&frontier\[6\], 0u\)/,
+    "one failed graph/phi/velocity candidate must reject both reduced authority and owner topology");
+});
+
+test("factor-one topology classification prefers current adaptive phi over bootstrap summary", () => {
+  const source = read("../lib/webgpu-octree.ts");
+  assert.match(source,
+    /fn adaptiveLosassoLeafSummary[\s\S]*losassoCoarseArenaAuthority\(\)[\s\S]*correctedCoarsePhi/,
+    "live factor-one refinement evidence must come from the accepted adaptive arena");
+  assert.match(source,
+    /fn fineLeafSummary[^{]*\{\s*let adaptive = adaptiveLosassoLeafSummary\(origin, size\);\s*if \(adaptive\.found\) \{ return adaptive; \}/,
+    "live factor-one topology must query adaptive authority first");
+  assert.match(source,
+    /if \(fineSummaryFactor == 1u\) \{ return result; \}/,
+    "a missing adaptive factor-one summary must fail closed rather than revive initialization phi");
+  assert.doesNotMatch(source, /authoredAnalyticPhiAvailable/,
+    "authored t0 geometry must not remain a recurring factor-one fallback");
+});
+
 test("Losasso V-cycle transfers preserve aggregate constants", () => {
   const source = read("../lib/webgpu-octree-losasso-vcycle-gpu.ts");
   const transfers = source.slice(source.indexOf("const transferWGSL"));
@@ -261,6 +288,16 @@ test("Losasso recurring migration and CG drains stay inside the compute stream",
   assert.match(projection,
     /factorOneCombinedReductionDrains:\s*this\.coarseOnlySurfaceTracking && rowCapacity <= 4_096/,
     "factor-4 UI scenes and large factor-1 arenas must retain the scalable reduction schedule");
+});
+
+test("adaptive accepted velocity uses topology-migrated face ids", () => {
+  const velocity = read("../lib/webgpu-octree-losasso-adaptive-velocity.ts");
+  assert.match(velocity,
+    /name === "accepted" && source\.faces\.carriedValues[\s\S]*source\.faces\.carriedValues : source\.faces\.projectedValues/,
+    "accepted bank zero must not reinterpret an old projected face-id array after topology commit");
+  assert.match(velocity,
+    /name === "predictor" \|\| name === "candidatePredictor"[\s\S]*source\.faces\.predictorValues/,
+    "the predictor bank remains sourced from the newly advected face field");
 });
 
 test("Losasso cold row publication is not suppressed by dry owner probes", () => {
@@ -501,7 +538,7 @@ test("Losasso velocity advection uses a bounded MacCormack correction", () => {
     "the existing Jacobi scratch pair should extend the predictor in place");
 });
 
-test("Losasso wall release uses regional volume control without porous contacts", () => {
+test("Losasso wall release measures volume without post-step phi correction", () => {
   const projection = read("../lib/webgpu-octree-losasso-projection.ts");
   const host = read("../lib/webgpu-octree.ts");
   assert.match(projection, /let releasePressure = select\(0\.0, params\.contactPressure, overhead\)/,
@@ -511,8 +548,8 @@ test("Losasso wall release uses regional volume control without porous contacts"
   assert.match(projection, /projected = outward \* max\(0\.0, outward \* projected\)/,
     "a released contact must reject velocity returning into the wall");
   assert.match(host,
-    /measureOnlyLosasso[\s\S]*pending\.volume\.encodeMeasurement\(redistanceBroker\)[\s\S]*pending\.volume\.encode\(redistanceBroker\)/,
-    "Losasso should apply regional correction by default while retaining a measure-only Dawn A\/B");
+    /coarseDynamics\.backend === "losasso"[\s\S]*pending\.volume\.encodeMeasurement\(redistanceBroker\)[\s\S]*pending\.volume\.encode\(redistanceBroker\)/,
+    "Losasso must measure drift without post-step scalar correction");
   assert.match(host, /"moving-pages"/,
     "Losasso volume replacement must exclude sleeping wall films and fragments");
 });

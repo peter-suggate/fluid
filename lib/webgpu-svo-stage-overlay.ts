@@ -362,7 +362,11 @@ fn svoStageMedia(coordinate:vec2i)->vec3f{
         vec3f(.031,.035,.055),geometry.x<=0.0||identity==0xffffffffu);
     }
   }else if(mode==${view("dry-radiance")}){
-    color=unifiedDisplayTransfer(textureLoad(stageSceneRadiance,coordinate,0).rgb);
+    // Fidelity PNGs are written from this same HDR plane with clamp + gamma,
+    // before the optical compositor applies its scene-owned ACES grade. Keep a
+    // UI view of that exact contract so a progress capture is reproducible
+    // rather than a look that exists only in a headless tool.
+    color=pow(clamp(textureLoad(stageSceneRadiance,coordinate,0).rgb,vec3f(0.0),vec3f(1.0)),vec3f(1.0/2.2));
   }else if(mode==${view("water-depth")}){
     color=svoStageDistanceRamp(textureLoad(stageSceneRadiance,coordinate,0).a);
   }else if(mode==${view("lighting-partition")}){

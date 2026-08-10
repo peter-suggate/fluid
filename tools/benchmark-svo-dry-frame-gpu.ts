@@ -109,8 +109,8 @@ import { getSceneDefinition, getScenePreset } from "../lib/scenes";
 import type { SvoConeTracingMode } from "../lib/svo-render-options";
 import {
   DEFAULT_SVO_RENDER_TUNING,
+  svoEnvironmentTreeRefinementDepth,
   svoSceneryDetailCellSize_m,
-  svoSceneryRefinementDepth,
   SVO_ENVIRONMENT_REFINEMENT_DEPTH_MAXIMUM,
   type SvoConeRadianceReconstruction,
 } from "../lib/svo-render-tuning";
@@ -902,7 +902,7 @@ const scene = sceneModule?.createScene ? sceneModule.createScene() : catalogScen
  */
 const environmentRefinementDepth = requestedRefinementDepth === undefined
   ? 0
-  : svoSceneryRefinementDepth(scene.voxelDomain, { fluid: scene.systems?.fluid === true });
+  : svoEnvironmentTreeRefinementDepth(scene.voxelDomain, { fluid: scene.systems?.fluid === true });
 const presetCamera = sceneModule ? sceneModule.camera : preset.camera;
 const camera: CameraState = { ...defaultCamera, ...presetCamera, target_m: { ...(presetCamera?.target_m ?? defaultCamera.target_m) } };
 let activeCamera: CameraState = camera;

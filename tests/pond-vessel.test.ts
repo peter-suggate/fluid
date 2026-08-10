@@ -423,8 +423,8 @@ test("hero garden terrain spacing follows the leaf without a document budget", (
   assert.ok(shape!.nx * shape!.nz > MAX_TERRAIN_GRID_SAMPLES,
     "and it must be free to be finer than any document could spell out");
   // The whole point: the samples never reach the wire.
-  assert.ok(JSON.stringify(scene).length < 64 * 1024,
-    "a described ground keeps the whole document inside 64 KB");
+  assert.ok(JSON.stringify(scene).length < 150 * 1024,
+    "a described ground and individually authored foliage stay compact enough to round-trip interactively");
 });
 
 /**

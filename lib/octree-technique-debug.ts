@@ -21,6 +21,25 @@ export interface OctreeTechniqueDebugSource {
   readonly structuredRowGeometry: GPUBufferBinding;
   readonly structuredRowVelocities: GPUBufferBinding;
   readonly structuredControl: GPUBufferBinding;
+  /**
+   * Accepted Losasso adaptive leaf graph and its nodal velocity field.
+   *
+   * The velocity-arrow overlay deliberately reads this graph directly: each
+   * 64-byte leaf record names its eight corner nodes, and bank zero of the
+   * nodal arena is the accepted velocity publication. Keeping the source
+   * optional makes the view fail closed while the factor-one adaptive path is
+   * not active instead of falling back to the legacy structured field.
+   */
+  readonly losassoAdaptiveVelocity?: {
+    readonly control: GPUBufferBinding;
+    readonly leaves: GPUBufferBinding;
+    readonly nodalVelocity: GPUBufferBinding;
+    /** Current accepted per-leaf `{centre,min,max,flags}` signed distance. */
+    readonly phiControl: GPUBufferBinding;
+    readonly rowPhi: GPUBufferBinding;
+    /** The air-side reach used by the velocity extension itself, in metres. */
+    readonly extensionReach_m: number;
+  };
   /** Current compact pressure potential, selected from the live ping-pong bank. */
   readonly pressure: GPUBufferBinding;
   /** Published pressure rows; diagonal and RHS stay live entirely on GPU. */
@@ -126,6 +145,7 @@ export const OCTREE_TECHNIQUE_OVERLAY_MODES = [
   "blast-radius",
   "row-cost",
   "stencil-locality",
+  "adaptive-velocity-arrows",
 ] as const;
 
 export type OctreeTechniqueOverlayMode = typeof OCTREE_TECHNIQUE_OVERLAY_MODES[number];
@@ -157,6 +177,7 @@ export const OCTREE_TECHNIQUE_OVERLAY_CODES: Readonly<Record<OctreeTechniqueOver
   "blast-radius": 32,
   "row-cost": 33,
   "stencil-locality": 34,
+  "adaptive-velocity-arrows": 35,
 };
 
 /* ------------------------------------------------------------------------- */
@@ -319,6 +340,23 @@ export const octreeFieldVisualizations: readonly Visualization[] = Object.freeze
     ],
   }),
   fieldVisualization({
+    kind: "field", id: "velocity/adaptive-arrows", pass: "Velocity",
+    figure: "§5", label: "Adaptive velocity arrows",
+    description: "One cell-centred arrow per liquid/interface Losasso adaptive leaf, plus translucent air-side arrows showing the liquid velocity extrapolation only within its solver band. Direction follows the reconstructed vector, arrow length is logarithmic in speed, and colour is scaled by linear speed.",
+    source: "Accepted Losasso adaptive leaves, eight-corner nodal velocity, per-leaf signed distance, and velocity-extension reach",
+    mode: "adaptive-velocity-arrows",
+    modeCode: OCTREE_TECHNIQUE_OVERLAY_CODES["adaptive-velocity-arrows"], axis: "volume",
+    // The generic Performance picker intentionally omits this field. It is the
+    // first, and currently only, entry in the dedicated Visuals panel.
+    hidden: true,
+    legend: [
+      { swatch: "linear-gradient(90deg,#0a33b3,#10c78d,#ff1406)", label: "solid arrows · liquid / interface · zero → live maximum speed", mark: "arrow" },
+      { swatch: "linear-gradient(90deg,rgba(10,51,179,.32),rgba(16,199,141,.32),rgba(255,20,6,.32))", label: "translucent arrows · extrapolated liquid velocity in the air band", mark: "arrow" },
+      { swatch: "#7d8ba8", label: "arrow length uses log₂ magnitude", mark: "arrow" },
+      { swatch: "#ff1738", label: "invalid adaptive publication" },
+    ],
+  }),
+  fieldVisualization({
     kind: "field", id: "pressure-solve/projection", pass: "Pressure solve",
     figure: "§4.1", label: "Pressure update Δu",
     description: "Largest pressure-potential velocity update across the generalized faces incident on each live row.",
@@ -408,10 +446,10 @@ export const octreeFieldVisualizations: readonly Visualization[] = Object.freeze
 /* ------------------------------------------------------------------------- */
 
 /**
- * The five fragment programs the field views are rendered by, and exactly what
+ * The six fragment programs the field views are rendered by, and exactly what
  * each one binds.
  *
- * There are five rather than one because of the storage ceiling, not because
+ * There are six rather than one because of the storage ceiling, not because
  * the views are unrelated: a fragment stage on the hardware this targets may
  * hold ten storage buffers, and the publication bundle above is larger than
  * that. A field belongs to whichever program already binds what it reads, and
@@ -424,7 +462,7 @@ export const octreeFieldVisualizations: readonly Visualization[] = Object.freeze
  * different buffer than the frame bound.
  */
 export const OCTREE_TECHNIQUE_PROGRAMS: Readonly<Record<
-  "topology" | "face" | "structured" | "lifecycle" | "fine", VisualizationProgram
+  "topology" | "face" | "structured" | "adaptiveVelocity" | "lifecycle" | "fine", VisualizationProgram
 >> = Object.freeze({
   topology: {
     id: "topology", label: "Octree topology technique overlay",
@@ -461,6 +499,19 @@ export const OCTREE_TECHNIQUE_PROGRAMS: Readonly<Record<
       { name: "structured", kind: "uniform", type: "StructuredParams", resource: "structuredParams" },
       { name: "authority", kind: "read-only-storage", type: "array<u32>", resource: "structuredAuthority" },
       { name: "pressure", kind: "read-only-storage", type: "array<f32>", resource: "pressure" },
+    ],
+  },
+  adaptiveVelocity: {
+    id: "adaptiveVelocity", label: "Losasso adaptive velocity-arrow overlay",
+    bindings: [
+      { name: "u", kind: "uniform", type: "Uniforms", resource: "uniforms" },
+      { name: "ownerRows", kind: "texture-3d-uint", resource: "ownerRows" },
+      { name: "adaptiveControl", kind: "read-only-storage", type: "array<u32>", resource: "losassoAdaptiveVelocityControl" },
+      { name: "adaptiveLeaves", kind: "read-only-storage", type: "array<AdaptiveLeaf>", resource: "losassoAdaptiveVelocityLeaves" },
+      { name: "adaptiveVelocity", kind: "read-only-storage", type: "array<vec4u>", resource: "losassoAdaptiveNodalVelocity" },
+      { name: "adaptivePhiControl", kind: "read-only-storage", type: "array<u32>", resource: "losassoAdaptivePhiControl" },
+      { name: "adaptiveRowPhi", kind: "read-only-storage", type: "array<vec4u>", resource: "losassoAdaptiveRowPhi" },
+      { name: "adaptiveVelocityView", kind: "uniform", type: "AdaptiveVelocityViewConfig", resource: "adaptiveVelocityViewConfig" },
     ],
   },
   lifecycle: {
@@ -518,6 +569,7 @@ export const OCTREE_TECHNIQUE_PROGRAM_FOR_MODE: Readonly<
   // assembled row width from the headers and the owner map around each leaf.
   "row-cost": "structured",
   "stencil-locality": "structured",
+  "adaptive-velocity-arrows": "adaptiveVelocity",
   // Operator diagnostics and tetra validity have no shader branch of their own
   // yet; they fall through to the same programs that hold their publications.
   "operator-diagonal": "face",

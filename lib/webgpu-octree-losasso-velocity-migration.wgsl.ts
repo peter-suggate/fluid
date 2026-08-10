@@ -15,6 +15,11 @@ struct Face{negativeRow:u32,positiveRow:u32,axis:u32,reserved:u32,area:f32,inver
 @group(0)@binding(9)var<storage,read_write>newVelocity:array<f32>;
 @group(0)@binding(10)var<storage,read>newDirectory:array<vec2u>;
 @group(0)@binding(11)var<storage,read>sourceVelocity:array<f32>;
+@group(0)@binding(12)var<storage,read_write>newStatus:array<atomic<u32>>;
+@group(0)@binding(13)var<storage,read_write>migrationReceipt:array<atomic<u32>>;
+@group(0)@binding(14)var<storage,read>newGraphControl:array<u32>;
+@group(0)@binding(15)var<storage,read>newNodeDirectory:array<vec2u>;
+@group(0)@binding(16)var<storage,read>newNodalVelocity:array<vec4u>;
 fn finite(v:f32)->bool{return v==v&&abs(v)<=3.402823e38;}
 fn hashFace(packed:u32,q:vec3u)->u32{var value=(packed+1u)*0x9e3779b1u;
  value=(value^q.x)*0x85ebca6bu;value=(value^q.y)*0xc2b2ae35u;return(value^q.z)*0x27d4eb2du;}
@@ -65,6 +70,22 @@ fn exactValue(input:ptr<function,array<i32,36>>)->f32{for(var limb=0u;limb+1u<LI
 fn tangentA(axis:u32)->vec3u{return select(vec3u(1,0,0),vec3u(0,1,0),axis==0u);}
 fn tangentB(axis:u32)->vec3u{return select(vec3u(0,0,1),vec3u(0,1,0),axis==2u);}
 @compute @workgroup_size(64)
+fn prepareLosassoLaggedVelocityMigration(@builtin(global_invocation_id)invocation:vec3u){let face=invocation.x;
+ if(face==0u){for(var word=0u;word<8u;word+=1u){atomicStore(&migrationReceipt[word],0u);}
+  if(arrayLength(&newControl)>=5u){atomicStore(&migrationReceipt[0u],newControl[0u]);atomicStore(&migrationReceipt[1u],newControl[2u]);}}
+ if(face<p.faceCapacity&&face<arrayLength(&newVelocity)&&face<arrayLength(&newStatus)){
+  newVelocity[face]=0.;atomicStore(&newStatus[face],0u);}}
+// Nodal completion is a fixed-point handoff: completing newly introduced
+// faces can seed additional graph-node components, which can in turn complete
+// the remaining faces on the next sweep. Preserve face status/value authority
+// while rebuilding the coverage verdict for each sweep.
+@compute @workgroup_size(1)
+fn prepareLosassoVelocityMigrationCoverage(){
+ atomicStore(&migrationReceipt[2u],0u);atomicStore(&migrationReceipt[3u],0u);
+ atomicStore(&migrationReceipt[4u],0u);atomicStore(&migrationReceipt[5u],0u);
+ atomicAdd(&migrationReceipt[6u],1u);atomicStore(&migrationReceipt[7u],0u);
+}
+@compute @workgroup_size(64)
 fn snapshotLosassoFaceState(@builtin(global_invocation_id)invocation:vec3u){let face=invocation.x;
  if(face<min(8u,min(arrayLength(&oldControl),arrayLength(&newControl)))){oldControl[face]=newControl[face];}
  if(face>=newControl[2]||face>=arrayLength(&oldGeometry)||face>=arrayLength(&newGeometry)
@@ -79,18 +100,107 @@ fn snapshotLosassoFaceLookup(@builtin(global_invocation_id)invocation:vec3u){let
   oldVelocity[item]=sourceVelocity[item];}}
 @compute @workgroup_size(64)
 fn migrateLosassoLaggedVelocity(@builtin(global_invocation_id)invocation:vec3u){let face=invocation.x;
- if(face>=p.faceCapacity||face>=newControl[2]||face>=arrayLength(&newVelocity)){return;}
- // A rejected/absent old publication must not erase the target bank. Its last
- // complete value is a safer carry than creating a whole epoch at zero.
+ if(face>=p.faceCapacity||face>=newControl[2]||face>=arrayLength(&newVelocity)||face>=arrayLength(&newStatus)){return;}
+ // The prepare pass cleared every target slot. An absent old publication is
+ // represented by status zero and must be reconstructed from the candidate
+ // nodal authority below; stale storage is never a velocity source.
  if(arrayLength(&oldControl)<4u||oldControl[3]!=1u){return;}
  let record=newGeometry[face];let axis=record.x&3u;let span=1u<<(record.x>>2u);let origin=record.yzw;
- var exact:array<i32,36>;var count=0u;var separated=false;for(var b=0u;b<span;b+=1u){for(var a=0u;a<span;a+=1u){
+ var exact:array<i32,36>;var count=0u;for(var b=0u;b<span;b+=1u){for(var a=0u;a<span;a+=1u){
   let q=origin+tangentA(axis)*vec3u(a)+tangentB(axis)*vec3u(b);let old=containingOld(axis,q);
   if(old!=INVALID){
    if(old<arrayLength(&oldVelocity)){let value=oldVelocity[old];if(finite(value)){addExact(&exact,value);count+=1u;}}
-   if(old<arrayLength(&oldGeometry)&&(oldGeometry[old].x&FACE_SEPARATED)!=0u){separated=true;}
   }else{let reconstructed=coarsenedOld(axis,q);if(reconstructed.valid){addExact(&exact,reconstructed.value);count+=1u;
-    separated=separated||reconstructed.separated;}}
- }}if(count>0u){newVelocity[face]=exactValue(&exact)/f32(count);}
- if(face<arrayLength(&newFaces)&&separated){newFaces[face].reserved|=FACE_SEPARATED;}}
+   }}
+ }}if(count>0u){let value=exactValue(&exact)/f32(count);if(finite(value)){newVelocity[face]=value;
+   atomicStore(&newStatus[face],1u);}}
+}
+// Wall-separation metadata is migrated independently so the value pass keeps
+// the portable eight-storage-buffer ceiling after adding explicit coverage.
+@compute @workgroup_size(64)
+fn migrateLosassoFaceSeparation(@builtin(global_invocation_id)invocation:vec3u){let face=invocation.x;
+ if(face>=p.faceCapacity||face>=newControl[2u]||face>=arrayLength(&newGeometry)
+  ||face>=arrayLength(&newFaces)||arrayLength(&oldControl)<4u||oldControl[3u]!=1u){return;}
+ let record=newGeometry[face];let axis=record.x&3u;let span=1u<<(record.x>>2u);let origin=record.yzw;
+ var separated=false;for(var b=0u;b<span;b+=1u){for(var a=0u;a<span;a+=1u){
+  let q=origin+tangentA(axis)*vec3u(a)+tangentB(axis)*vec3u(b);let old=containingOld(axis,q);
+  if(old!=INVALID&&old<arrayLength(&oldGeometry)){separated=separated||((oldGeometry[old].x&FACE_SEPARATED)!=0u);}
+  else{separated=separated||coarsenedOld(axis,q).separated;}
+ }}if(separated){newFaces[face].reserved|=FACE_SEPARATED;}}
+
+fn exactCandidateNode(item:u32)->u32{if(arrayLength(&newGraphControl)<7u||newGraphControl[0u]==0u
+ ||newGraphControl[3u]!=newGraphControl[0u]||newGraphControl[4u]!=0u){return INVALID;}
+ let live=min(newGraphControl[2u],u32(arrayLength(&newNodeDirectory)));var low=0u;var high=live;
+ while(low<high){let middle=low+(high-low)/2u;let record=newNodeDirectory[middle];
+  if(record.x<item){low=middle+1u;}else{high=middle;}}
+ if(low>=live){return INVALID;}let found=newNodeDirectory[low];
+ return select(INVALID,found.y,found.x==item&&found.y<newGraphControl[2u]);}
+@group(0)@binding(17)var<storage,read>newConstraints:array<u32>;
+fn candidateComponent(item:u32,axis:u32)->vec2f{let node=exactCandidateNode(item);
+ if(node==INVALID){return vec2f(0.);}let at=2u*node;if(at>=arrayLength(&newNodalVelocity)){return vec2f(0.);}
+ // A face average consumes only its normal component. Air-side corner nodes
+ // may legitimately leave an unrelated tangential component outside the
+ // compact extension support; requiring the whole vector here rejects an
+ // otherwise complete normal reconstruction.
+ let packed=newNodalVelocity[at];let bit=1u<<axis;
+ if((packed.w&bit)==0u){
+  let base=12u*node;if(base+11u>=arrayLength(&newConstraints)){return vec2f(0.);}
+  let count=newConstraints[base+1u];let denominator=newConstraints[base+2u];
+  if((count!=2u&&count!=4u)||denominator==0u){return vec2f(0.);}var constrained=0.;
+  for(var i=0u;i<count;i+=1u){let master=newConstraints[base+4u+i];let masterAt=2u*master;
+   if(masterAt>=arrayLength(&newNodalVelocity)){return vec2f(0.);}let source=newNodalVelocity[masterAt];
+   if((source.w&bit)==0u){return vec2f(0.);}let sourceBits=select(select(source.x,source.z,axis==2u),source.y,axis==1u);
+   let sourceValue=bitcast<f32>(sourceBits);if(!finite(sourceValue)){return vec2f(0.);}
+   constrained+=f32(newConstraints[base+8u+i])*sourceValue/f32(denominator);}
+  return vec2f(constrained,select(0.,1.,finite(constrained)));}
+ let bits=select(select(packed.x,packed.z,axis==2u),packed.y,axis==1u);let value=bitcast<f32>(bits);
+ return vec2f(value,select(0.,1.,finite(value)));}
+// Losasso et al. reconstruct newly introduced face velocities from the
+// complete nodal field and average those values at the face center. This pass
+// runs only at topology publication, after exact-node handoff and causal
+// extension. Covered/coarsened faces retain the geometric migration above.
+@compute @workgroup_size(64)
+fn completeLosassoLaggedVelocityFromNodes(@builtin(global_invocation_id)invocation:vec3u){let face=invocation.x;
+ if(face>=p.faceCapacity||face>=newControl[2u]||face>=arrayLength(&newGeometry)
+  ||face>=arrayLength(&newVelocity)||face>=arrayLength(&newStatus)
+  ||atomicLoad(&newStatus[face])==1u){return;}
+ let record=newGeometry[face];let axis=record.x&3u;let span=1u<<(record.x>>2u);let origin=record.yzw;
+ if(axis>2u||span==0u){atomicOr(&migrationReceipt[4u],2u);return;}
+ let nd=p.dimensions+vec3u(1u);let ta=tangentA(axis)*vec3u(span);let tb=tangentB(axis)*vec3u(span);
+ let q0=origin;let q1=origin+ta;let q2=origin+tb;let q3=origin+ta+tb;
+ let a=candidateComponent(q0.x+nd.x*(q0.y+nd.y*q0.z),axis);
+ let b=candidateComponent(q1.x+nd.x*(q1.y+nd.y*q1.z),axis);
+ let c=candidateComponent(q2.x+nd.x*(q2.y+nd.y*q2.z),axis);
+ let d=candidateComponent(q3.x+nd.x*(q3.y+nd.y*q3.z),axis);
+ let samples=u32(a.y)+u32(b.y)+u32(c.y)+u32(d.y);
+ let finalSweep=atomicLoad(&migrationReceipt[6u])>=4u;var closure=0.;
+ if(samples<4u){if(samples==0u){atomicOr(&migrationReceipt[4u],4u);return;}
+  atomicAdd(&migrationReceipt[7u],1u);
+  if(finalSweep){closure=newVelocity[face];if(!finite(closure)){atomicOr(&migrationReceipt[4u],1u);return;}}
+ }
+ // Topology refinement can create a short dependency cycle: an air-side
+ // corner receives its normal component from this new face, while this face
+ // is reconstructed from its corners. Use the same known-only restriction as
+ // adaptive nodal stencils for the first sweep. A later nodal reconstruction
+ // and completion sweep revisits status-2 faces with the expanded authority.
+ var exact:array<i32,36>;if(a.y!=0.){addExact(&exact,a.x);}if(b.y!=0.){addExact(&exact,b.x);}
+ if(c.y!=0.){addExact(&exact,c.x);}if(d.y!=0.){addExact(&exact,d.x);}
+ if(finalSweep){for(var missing=samples;missing<4u;missing+=1u){addExact(&exact,closure);}}
+ let value=exactValue(&exact)/f32(select(samples,4u,finalSweep));
+ if(!finite(value)){atomicOr(&migrationReceipt[4u],1u);return;}
+ newVelocity[face]=value;atomicStore(&newStatus[face],2u);
+}
+@compute @workgroup_size(64)
+fn countLosassoVelocityMigrationCoverage(@builtin(global_invocation_id)invocation:vec3u){let face=invocation.x;
+ if(face>=p.faceCapacity||face>=newControl[2u]||face>=arrayLength(&newStatus)){return;}
+ let status=atomicLoad(&newStatus[face]);if(status==1u){atomicAdd(&migrationReceipt[2u],1u);}
+ else if(status==2u){atomicAdd(&migrationReceipt[3u],1u);}else{atomicOr(&migrationReceipt[4u],4u);}}
+@compute @workgroup_size(1)
+fn finishLosassoLaggedVelocityMigration(){let generation=atomicLoad(&migrationReceipt[0u]);
+ let faces=atomicLoad(&migrationReceipt[1u]);let completed=atomicLoad(&migrationReceipt[2u])
+  +atomicLoad(&migrationReceipt[3u]);var errors=atomicLoad(&migrationReceipt[4u]);
+ if(generation==0u||arrayLength(&newControl)<5u||newControl[0u]!=generation
+  ||newControl[2u]!=faces||completed!=faces||newControl[4u]!=0u){errors|=8u;}
+ atomicStore(&migrationReceipt[4u],errors);atomicStore(&migrationReceipt[5u],select(0u,generation,errors==0u));
+}
 `;

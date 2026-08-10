@@ -1113,7 +1113,7 @@ export function heroGardenLayoutPlacements(input: HeroGardenLayoutInput): readon
     // same bed is the failure this file exists to remove, and until the stone
     // generator reads its rows from here, planting is chosen against what the
     // scene really publishes rather than against what the table describes.
-    rosetteRow("plant/air-1", [0.800, -0.160], 0.028, 0.30, 0x51_a101),
+    rosetteRow("plant/air-1", [0.780, 0.420], 0.028, 0.30, 0x51_a101),
     rosetteRow("plant/air-2", [0.380, -0.540], 0.026, -1.20, 0x51_a202),
     rosetteRow("plant/air-3", [-0.560, -0.460], 0.030, -0.55, 0x51_a303),
     rosetteRow("plant/air-4", [0.320, 0.520], 0.020, 0.90, 0x51_a404),

@@ -132,7 +132,8 @@ export function DiagnosticsPanel() {
             testId="water-surface-presentation-source"
             label="Rendered water geometry"
             value={waterSurfacePresentation.surfaceGeometrySource === "global-fine-coarse" ? `GLOBAL FINE / COARSE${waterRasterGenerationCurrent ? "" : " · STALE GEN"}`
-              : waterSurfacePresentation.surfaceGeometrySource === "retained-previous" ? "RETAINED PREVIOUS MESH"
+              : waterSurfacePresentation.surfaceGeometrySource === "compact-coarse" ? "COMPACT COARSE"
+                : waterSurfacePresentation.surfaceGeometrySource === "retained-previous" ? "RETAINED PREVIOUS MESH"
                 : waterSurfacePresentation.surfaceGeometrySource === "volume" ? "VOLUME FIELD" : "EMPTY"}
             unit={waterSurfacePresentation.globalFineCrossingPublished
               ? `${waterRasterGenerationCurrent ? "current" : "unproven/current mismatch"} fine/coarse crossing · attached gen ${waterSurfacePresentation.globalFineAttachedGeneration ?? "?"} · mesh gen ${waterSurfacePresentation.meshPublicationGeneration ?? "?"} · sampled gen ${gpuInfo?.globalFineGeneration ?? "?"}${waterSurfacePresentation.sourceFrameCounts ? ` · frames fine ${waterSurfacePresentation.sourceFrameCounts["global-fine-coarse"]} / retained ${waterSurfacePresentation.sourceFrameCounts["retained-previous"]} / compact ${waterSurfacePresentation.sourceFrameCounts["compact-coarse"]}` : ""}`
@@ -140,6 +141,8 @@ export function DiagnosticsPanel() {
                 ? `presentation fallback only · solver authority unchanged${waterSurfacePresentation.sourceFrameCounts ? ` · frames fine ${waterSurfacePresentation.sourceFrameCounts["global-fine-coarse"]} / retained ${waterSurfacePresentation.sourceFrameCounts["retained-previous"]} / compact ${waterSurfacePresentation.sourceFrameCounts["compact-coarse"]}` : ""}`
                 : waterSurfacePresentation.globalFineAttached
                   ? "no current crossing · no fallback geometry"
+                  : waterSurfacePresentation.surfaceGeometrySource === "compact-coarse"
+                    ? `current factor-one compact-coarse crossing · mesh gen ${waterSurfacePresentation.meshPublicationGeneration ?? "?"}${waterSurfacePresentation.sourceFrameCounts ? ` · compact frames ${waterSurfacePresentation.sourceFrameCounts["compact-coarse"]}` : ""}`
                   : "volume presentation source"}
             tone={(waterSurfacePresentation.surfaceGeometrySource === "global-fine-coarse" && !waterRasterGenerationCurrent)
               || waterSurfacePresentation.presentationFallbackActive || waterSurfacePresentation.surfaceGeometrySource === "empty"

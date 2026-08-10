@@ -90,8 +90,17 @@ import {
   structuredStepWorkObservation,
   type StructuredStepSnapshotRecord,
 } from "./structured-step-snapshot";
-import { losassoStepSnapshotFailures, WebGPUOctreeLosassoStepSnapshotRing }
+import { losassoStepSnapshotDiagnosticSummary, losassoStepSnapshotFailures,
+  WebGPUOctreeLosassoStepSnapshotRing }
   from "./webgpu-octree-losasso-step-snapshot";
+import { OCTREE_LOSASSO_COARSE_PHI_MAGIC }
+  from "./webgpu-octree-losasso-coarse-phi.wgsl";
+import {
+  OCTREE_LOSASSO_ADAPTIVE_VELOCITY_DIAGNOSTIC_BANK_WORDS,
+  OCTREE_LOSASSO_ADAPTIVE_VELOCITY_DIAGNOSTIC_HEADER_WORDS,
+  OCTREE_LOSASSO_ADAPTIVE_VELOCITY_DIAGNOSTIC_RECORDS,
+  OCTREE_LOSASSO_ADAPTIVE_VELOCITY_DIAGNOSTIC_WORDS,
+} from "./webgpu-octree-losasso-adaptive-velocity";
 import {
   OCTREE_STEP_PROGRAM,
   PhysicsStepPredictionLedger,
@@ -118,7 +127,20 @@ interface PendingStepSnapshotSources {
   readonly losassoAuthorityControl?: GPUBuffer;
   readonly losassoCoarsePhiControl?: GPUBuffer;
   readonly losassoExtensionControl?: GPUBuffer;
+  readonly losassoAdaptiveAcceptedGraphControl?: GPUBuffer;
+  readonly losassoAdaptiveCandidateGraphControl?: GPUBuffer;
+  readonly losassoAdaptivePhiControl?: GPUBuffer;
+  readonly losassoAdaptivePhiReceipts?: GPUBuffer;
+  readonly losassoAdaptiveVelocityReceipts?: GPUBuffer;
+  readonly losassoAdaptiveRendererDirectory?: GPUBuffer;
+  readonly losassoCandidateAuthorityControl?: GPUBuffer;
+  readonly losassoAdaptiveMassControl?: GPUBuffer;
+  readonly losassoAdaptiveMassReceipts?: GPUBuffer;
+  readonly losassoCandidateVelocityMigrationReceipt?: GPUBuffer;
   readonly globalFineCurrentWorklist?: GPUBuffer;
+  readonly globalFineCurrentTopologyControl?: GPUBuffer;
+  readonly globalFineCurrentRedistanceControl?: GPUBuffer;
+  readonly globalFineCurrentVolumeControl?: GPUBuffer;
   readonly fluidBrickResidencyWorklist?: GPUBuffer;
   readonly fluidBulkBrickResidencyWorklist?: GPUBuffer;
 }
@@ -726,6 +748,66 @@ export function sparseSurfaceVolumeCells(
   };
 }
 
+function summarizeAdaptiveVelocityFailureDiagnostics(words: readonly number[] | undefined,
+  dimensions: readonly [number, number, number]) {
+  if (!words) return undefined;
+  const bits = new Uint32Array(1);
+  const float = (word: number) => {
+    bits[0] = word >>> 0;
+    return new Float32Array(bits.buffer)[0]!;
+  };
+  const position = (item: number) => {
+    if (item === 0xffff_ffff) return undefined;
+    const dx = dimensions[0] + 1, dy = dimensions[1] + 1;
+    return [item % dx, Math.floor(item / dx) % dy,
+      Math.floor(item / (dx * dy))] as const;
+  };
+  const names = ["accepted", "predictor", "candidate", "candidatePredictor"] as const;
+  return names.map((name, bank) => {
+    const base = bank * OCTREE_LOSASSO_ADAPTIVE_VELOCITY_DIAGNOSTIC_BANK_WORDS;
+    const captured = Math.min(words[base + 6] ?? 0,
+      OCTREE_LOSASSO_ADAPTIVE_VELOCITY_DIAGNOSTIC_RECORDS);
+    const records = Array.from({ length: Math.min(captured, 12) }, (_unused, record) => {
+      const at = base + OCTREE_LOSASSO_ADAPTIVE_VELOCITY_DIAGNOSTIC_HEADER_WORDS
+        + record * OCTREE_LOSASSO_ADAPTIVE_VELOCITY_DIAGNOSTIC_WORDS;
+      const causeBits = words[at + 5] ?? 0;
+      const item = words[at + 1] ?? 0xffff_ffff;
+      return { node: words[at] ?? 0xffff_ffff, position: position(item),
+        missingComponents: words[at + 2] ?? 0,
+        constraintCount: words[at + 3] ?? 0xffff_ffff,
+        phi: float(words[at + 4] ?? 0), causeBits,
+        causes: [...(causeBits & 1 ? ["no-adjacency"] : []),
+          ...(causeBits & 2 ? ["no-nonfar-adjacency"] : []),
+          ...(causeBits & 4 ? ["nonfar-neighbors-miss-components"] : []),
+          ...(causeBits & 8 ? ["constrained"] : []),
+          ...(causeBits & 16 ? ["invalid-masters"] : [])],
+        neighbors: Array.from({ length: 6 }, (_none, direction) => ({ direction,
+          slot: words[at + 6 + direction] ?? 0xffff_ffff,
+          phi: (words[at + 12 + direction] ?? 0xffff_ffff) === 0xffff_ffff
+            ? undefined : float(words[at + 12 + direction]!),
+          mask: (words[at + 18 + direction] ?? 0) & 7,
+        })),
+      };
+    });
+    const invalidOutsideReach = words[base + 9] ?? 0;
+    const invalidOutsideIndependent = words[base + 12] ?? 0;
+    return { name, header: { unresolved: words[base] ?? 0,
+      noAdjacency: words[base + 1] ?? 0,
+      noNonfarAdjacency: words[base + 2] ?? 0,
+      nonfarNeighborsMissComponents: words[base + 3] ?? 0,
+      constrained: words[base + 4] ?? 0,
+      invalidMasters: words[base + 5] ?? 0, captured,
+      demandedMasters: words[base + 7] ?? 0,
+      dilatedSupport: words[base + 8] ?? 0,
+      invalidOutsideReach,
+      minimumInvalidOutsideAbsPhi: (words[base + 10] ?? 0xffff_ffff) === 0xffff_ffff
+        ? undefined : float(words[base + 10]!),
+      maximumInvalidOutsideAbsPhi: float(words[base + 11] ?? 0),
+      invalidOutsideIndependent,
+      invalidOutsideConstrained: invalidOutsideReach - invalidOutsideIndependent }, records };
+  });
+}
+
 /** Octree simulation host. Dense fields remain only as bootstrap resources. */
 export class WebGPUUniformEulerianSolver {
   readonly info: GPUEulerianInfo;
@@ -774,6 +856,8 @@ export class WebGPUUniformEulerianSolver {
   private losassoStepSnapshotRing?: WebGPUOctreeLosassoStepSnapshotRing;
   private readonly stepSequenceRecorder = new StepSequenceRecorder();
   private stepSequenceFaulted = false;
+  /** Latched from a step-coherent GPU receipt. The next submission throws. */
+  private fatalPhysicsError?: string;
   /**
    * P0.5 lag-k audit: what each step's encode predicted, resolved when that
    * step's own snapshot maps. Sized past the maximum pipeline depth so a
@@ -1428,18 +1512,69 @@ fn recordPhysicsPhaseBoundary(
       const candidateHeader = reduced?.candidateHeader ?? [];
       const solver = reduced?.solver ?? [];
       const coarsePhi = reduced?.coarsePhi ?? [];
+      const adaptiveGraph = reduced?.adaptiveGraph ?? [];
+      const adaptivePhiControl = reduced?.adaptivePhiControl ?? [];
+      const adaptiveRenderer = reduced?.adaptiveRenderer ?? [];
       const ready = authority.length >= 5 && authority[0] !== 0
         && authority[1] > 0 && authority[2] > 0
         && authority[3] === 1 && authority[4] === 0;
       const solverReady = solver.length >= 3 && solver[0] === 0 && solver[1] !== 0;
       if (!ready || !solverReady) {
-        const owner = await projection.readOwnerPageControl();
+        const [owner, adaptiveCandidate, adaptiveVelocity] = await Promise.all([
+          projection.readOwnerPageControl(),
+          projection.readAdaptiveCandidateGraphReceipt(),
+          projection.readAdaptiveVelocityReceipts(),
+        ]);
         throw new Error("Paused t=0 Losasso authority rejected: authority="
           + JSON.stringify(authority) + "; candidate=" + JSON.stringify(candidate)
           + "; candidateHeader=" + JSON.stringify(candidateHeader)
           + "; solver=" + JSON.stringify(solver)
           + "; coarsePhi=" + JSON.stringify(coarsePhi)
-          + "; owner=" + JSON.stringify(owner));
+          + "; owner=" + JSON.stringify(owner)
+          + "; adaptiveCandidate=" + JSON.stringify(adaptiveCandidate)
+          + "; adaptiveVelocity=" + JSON.stringify(adaptiveVelocity));
+      }
+      if ((adaptiveGraph[0] ?? 0) !== 0) {
+        const adaptiveReady = adaptiveGraph.length >= 32
+          && adaptivePhiControl.length >= 20 && adaptiveRenderer.length >= 8
+          && adaptiveGraph[0] === authority[0] && adaptiveGraph[1] > 0
+          && adaptiveGraph[2] > 0 && adaptiveGraph[3] === adaptiveGraph[0]
+          && adaptiveGraph[4] === 0 && adaptiveGraph[5] !== 0
+          && adaptiveGraph[6] === adaptiveGraph[5]
+          && adaptiveGraph[28] === authority[1] && adaptiveGraph[29] === 0
+          && adaptivePhiControl[0] === 0x4150_4849
+          && adaptivePhiControl[1] === adaptiveGraph[0]
+          && adaptivePhiControl[2] === adaptiveGraph[5]
+          && adaptivePhiControl[4] === adaptiveGraph[2]
+          && adaptivePhiControl[5] === adaptiveGraph[1]
+          && adaptivePhiControl[7] === 1 && adaptivePhiControl[12] === 0
+          && adaptiveRenderer[0] === 0x8000_0000
+          && adaptiveRenderer[1] === adaptiveGraph[5]
+          && adaptiveRenderer[2] === adaptiveGraph[1]
+          && coarsePhi[0] === OCTREE_LOSASSO_COARSE_PHI_MAGIC
+          && coarsePhi[1] === adaptiveGraph[0] && coarsePhi[2] === adaptiveGraph[1]
+          && coarsePhi[12] === adaptiveGraph[5] && coarsePhi[13] === 0
+          && coarsePhi[14] === adaptiveGraph[5];
+        if (!adaptiveReady) {
+          const [adaptiveVelocity, adaptiveVelocityDiagnostics] = await Promise.all([
+            projection.readAdaptiveVelocityReceipts(),
+            projection.readAdaptiveVelocityDiagnostics(),
+          ]);
+          const adaptiveVelocityFailures = summarizeAdaptiveVelocityFailureDiagnostics(
+            adaptiveVelocityDiagnostics, [this.info.nx, this.info.ny, this.info.nz]);
+          throw new Error("Paused t=0 adaptive surface publication rejected: graph="
+            + JSON.stringify(adaptiveGraph) + "; phiControl="
+            + JSON.stringify(adaptivePhiControl) + "; renderer="
+            + JSON.stringify(adaptiveRenderer) + "; coarsePhi="
+            + JSON.stringify(coarsePhi) + "; velocity="
+            + JSON.stringify(adaptiveVelocity) + "; velocityFailures="
+            + JSON.stringify(adaptiveVelocityFailures));
+        }
+        // This is a post-queue-fence adoption of the current GPU tuple, not a
+        // predicted host generation. It breaks the startup dependency cycle:
+        // the renderer view may now attach before the first recurring step.
+        projection.applyAdaptiveSurfaceGenerationReceipt(adaptiveGraph[5]!);
+        this.applyOctreeInfo(projection);
       }
       this.info.quadtreePressureConverged = solverReady;
       this.info.quadtreePressureIterationsUsed = solver[2] ?? 0;
@@ -1864,6 +1999,7 @@ fn recordPhysicsPhaseBoundary(
 
   advanceTo(time_s: number, bodies: RigidBodyState[] = []) {
     if (this.disposed) return false;
+    if (this.fatalPhysicsError) throw new Error(this.fatalPhysicsError);
     const advance = planGPUAdvance(time_s, this.lastTime, this.scene.numerics.maxDt_s); if (!advance) return false;
     const delta = advance.dt_s; if (delta < 1e-6) { this.info.simulatedTime_s = this.lastTime; this.info.simulationLag_s = advance.lag_s; return true; }
     this.lastTime = advance.nextTime_s; this.info.submittedTime_s = this.lastTime; this.info.simulatedTime_s = this.lastTime; this.info.simulationLag_s = advance.lag_s;
@@ -2125,9 +2261,27 @@ fn recordPhysicsPhaseBoundary(
       const coarse = this.coarseLevelSetSource;
       const surfaceHeader = fine?.worklist ?? coarse?.directory.buffer;
       if (losasso) {
-        const coarseOnly = !fine && coarse !== undefined;
+        // Factor-one may intentionally withhold `coarseLevelSetSource` until
+        // this very snapshot admits the first coherent GPU generation. Detect
+        // the authority from the configured tracking factor, not from the
+        // renderer view, or construction rejection creates a receipt deadlock.
+        const coarseOnly = !fine && this.octreeProjection.surfaceTrackingFactor === 1;
+        const adaptive = coarseOnly
+          && pending.losassoAdaptiveAcceptedGraphControl !== undefined
+          && pending.losassoAdaptiveCandidateGraphControl !== undefined
+          && pending.losassoAdaptivePhiControl !== undefined
+          && pending.losassoAdaptivePhiReceipts !== undefined
+          && pending.losassoAdaptiveVelocityReceipts !== undefined
+          && pending.losassoAdaptiveRendererDirectory !== undefined
+          && pending.losassoCandidateAuthorityControl !== undefined
+          && pending.losassoAdaptiveMassControl !== undefined
+          && pending.losassoAdaptiveMassReceipts !== undefined
+          && pending.losassoCandidateVelocityMigrationReceipt !== undefined;
         const nativeSurfaceSources = coarseOnly
           || (pending.globalFineCurrentWorklist !== undefined
+            && pending.globalFineCurrentTopologyControl !== undefined
+            && pending.globalFineCurrentRedistanceControl !== undefined
+            && pending.globalFineCurrentVolumeControl !== undefined
             && this.globalFineTransportControl !== undefined);
         const sources = pending.losassoAuthorityControl && pending.losassoCoarsePhiControl
           && pending.losassoExtensionControl && this.mgpcgControl && nativeSurfaceSources ? {
@@ -2137,12 +2291,30 @@ fn recordPhysicsPhaseBoundary(
               ? { fineWorklist: pending.globalFineCurrentWorklist } : {}),
             coarsePhi: pending.losassoCoarsePhiControl,
             extension: pending.losassoExtensionControl,
+            ...(adaptive ? { adaptive: {
+              candidateAuthority: pending.losassoCandidateAuthorityControl!,
+              acceptedGraph: pending.losassoAdaptiveAcceptedGraphControl!,
+              candidateGraph: pending.losassoAdaptiveCandidateGraphControl!,
+              phiControl: pending.losassoAdaptivePhiControl!,
+              phiReceipts: pending.losassoAdaptivePhiReceipts!,
+              velocityReceipts: pending.losassoAdaptiveVelocityReceipts!,
+              rendererDirectory: pending.losassoAdaptiveRendererDirectory!,
+              massControl: pending.losassoAdaptiveMassControl!,
+              massReceipts: pending.losassoAdaptiveMassReceipts!,
+              velocityMigration: pending.losassoCandidateVelocityMigrationReceipt!,
+            } } : {}),
             ...(pending.fluidBrickResidencyWorklist
               ? { fluidResidency: pending.fluidBrickResidencyWorklist } : {}),
             ...(pending.fluidBulkBrickResidencyWorklist
               ? { fluidBulkResidency: pending.fluidBulkBrickResidencyWorklist } : {}),
             ...(this.globalFineTransportControl
               ? { fineTransport: this.globalFineTransportControl } : {}),
+            ...(pending.globalFineCurrentTopologyControl
+              ? { fineTopology: pending.globalFineCurrentTopologyControl } : {}),
+            ...(pending.globalFineCurrentRedistanceControl
+              ? { fineRedistance: pending.globalFineCurrentRedistanceControl } : {}),
+            ...(pending.globalFineCurrentVolumeControl
+              ? { fineVolume: pending.globalFineCurrentVolumeControl } : {}),
           } : undefined;
         this.losassoStepSnapshotRing ??= new WebGPUOctreeLosassoStepSnapshotRing(
           this.device, structuredStepSnapshotSlotCount());
@@ -2152,7 +2324,8 @@ fn recordPhysicsPhaseBoundary(
           // consumer will ever look at. The stage is declared optional, so its
           // absence is not a step-sequence deviation.
         } else if (sources && this.losassoStepSnapshotRing.encode(
-          encoder, sources, this.info.encodedSteps ?? 0, coarseOnly ? "coarse" : "fine")) {
+          encoder, sources, this.info.encodedSteps ?? 0,
+          adaptive ? "adaptive" : coarseOnly ? "coarse" : "fine")) {
           this.stepSequenceRecorder.record("step-snapshot");
         } else if (!this.stepSnapshotFaulted) {
           this.stepSnapshotFaulted = true;
@@ -2458,7 +2631,7 @@ fn recordPhysicsPhaseBoundary(
     const mapPromise = buffer?.mapAsync(GPUMapMode.READ) ?? Promise.resolve();
     const compactFineExpected = Boolean(this.octreeProjection?.globalFineLevelSetSource);
     const losassoSnapshotExpected = this.octreeProjection?.coarseBackend === "losasso"
-      && this.losassoStepSnapshotRing !== undefined;
+      && this.losassoStepSnapshotRing?.hasUnreadRecord === true;
     const solveDiagnostics = losassoSnapshotExpected
       ? undefined : this.octreeProjection?.readSolveDiagnostics();
     // Once compact global-fine volume is authoritative, the adaptive surface
@@ -2506,6 +2679,9 @@ fn recordPhysicsPhaseBoundary(
       const failures = losassoStepSnapshotFailures(losassoStepRecord);
       if (failures.length > 0) {
         this.stepSequenceFaulted = true;
+        const summary = losassoStepSnapshotDiagnosticSummary(losassoStepRecord, failures);
+        this.info.quadtreePressureRejectionSummary = summary;
+        this.fatalPhysicsError ??= `Losasso physics receipt rejected; simulation stopped fail-closed: ${summary}`;
         this.info.stepSequenceDeviations = failures.map((failure) =>
           `Losasso step ${losassoStepRecord.step} receipt: ${failure}`);
         console.error("[losasso-step-receipt]", JSON.stringify({
@@ -2516,8 +2692,27 @@ fn recordPhysicsPhaseBoundary(
           coarsePhi: Array.from(losassoStepRecord.coarsePhi),
           extension: Array.from(losassoStepRecord.extension),
           fineTransport: Array.from(losassoStepRecord.fineTransport),
+          fineTopology: Array.from(losassoStepRecord.fineTopology),
+          fineRedistance: Array.from(losassoStepRecord.fineRedistance),
+          fineVolume: Array.from(losassoStepRecord.fineVolume),
+          adaptive: losassoStepRecord.adaptive ? {
+            acceptedGraph: Array.from(losassoStepRecord.adaptive.acceptedGraph),
+            candidateGraph: Array.from(losassoStepRecord.adaptive.candidateGraph),
+            phiControl: Array.from(losassoStepRecord.adaptive.phiControl),
+            phiReceipts: Array.from(losassoStepRecord.adaptive.phiReceipts),
+            velocityReceipts: Array.from(losassoStepRecord.adaptive.velocityReceipts),
+            renderer: Array.from(losassoStepRecord.adaptive.renderer),
+            velocityMigration: Array.from(losassoStepRecord.adaptive.velocityMigration),
+          } : undefined,
           failures,
         }));
+      } else {
+        if (losassoStepRecord.surfaceKind === "adaptive" && losassoStepRecord.adaptive) {
+          this.octreeProjection?.applyAdaptiveSurfaceGenerationReceipt(
+            losassoStepRecord.adaptive.acceptedGraph[5]!,
+          );
+        }
+        this.info.quadtreePressureRejectionSummary = undefined;
       }
     }
     if(globalFineDiagnostics)this.applyGlobalFineDiagnostics(globalFineDiagnostics);
@@ -2735,14 +2930,15 @@ fn recordPhysicsPhaseBoundary(
       this.info.quadtreeLiquidDofCount = this.octreeProjection.info.liquidDofCount;
       this.info.quadtreePressureIterationsUsed = this.octreeProjection.info.pressureIterationsUsed;
       this.info.quadtreePressureIterationBudget = this.octreeProjection.info.pressureIterationBudget;
-          this.info.quadtreePressureIterationHardBudget = this.octreeProjection.info.pressureIterationHardBudget;
-          this.info.pressureRowCapacity = this.octreeProjection.info.pressureRowCapacity;
-          this.info.pressureRequiredRows = this.octreeProjection.info.pressureRequiredRows;
-          this.info.pressureCapacityOverflow = this.octreeProjection.info.pressureCapacityOverflow;
-          this.info.frontierListCapacity = this.octreeProjection.info.frontierListCapacity;
-          this.info.frontierRequiredLeaves = this.octreeProjection.info.frontierRequiredLeaves;
-          this.info.frontierCapacityOverflow = this.octreeProjection.info.frontierCapacityOverflow;
-          this.info.pressureSolver = this.octreeProjection.pressureSolverLabel;
+      this.info.quadtreePressureIterationHardBudget = this.octreeProjection.info.pressureIterationHardBudget;
+      this.info.quadtreePressureConverged = this.octreeProjection.info.pressureConverged;
+      this.info.pressureRowCapacity = this.octreeProjection.info.pressureRowCapacity;
+      this.info.pressureRequiredRows = this.octreeProjection.info.pressureRequiredRows;
+      this.info.pressureCapacityOverflow = this.octreeProjection.info.pressureCapacityOverflow;
+      this.info.frontierListCapacity = this.octreeProjection.info.frontierListCapacity;
+      this.info.frontierRequiredLeaves = this.octreeProjection.info.frontierRequiredLeaves;
+      this.info.frontierCapacityOverflow = this.octreeProjection.info.frontierCapacityOverflow;
+      this.info.pressureSolver = this.octreeProjection.pressureSolverLabel;
     }
       return this.info;
     } finally {

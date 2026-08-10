@@ -212,6 +212,21 @@ const FIELD_CASES: readonly FieldCase[] = [
       ],
     },
   },
+  {
+    name: "noise foliage",
+    lobeRadii_m: { x: 0.18, y: 0.11, z: 0.15 },
+    packing: {
+      field: "noise-foliage",
+      smoothRadius_m: 0,
+      seed: 0x51a9,
+      clusterPeriod_m: 0.075,
+      detailPeriod_m: 0.018,
+      threshold: 0.55,
+      clusterWeight: 0.62,
+      detailWeight: 0.38,
+      interiorBias: 0.20,
+    },
+  },
 ];
 
 test("every field of the family steps by at most the distance it moved", () => {

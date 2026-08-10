@@ -70,6 +70,7 @@ const SVO_CONE_PRESENTATION_PHASE_LAYOUT: readonly [PaperPhaseId, string][] = [
   ["water-caustics", "Water caustic map"],
   ["svo-cone-lighting", "SVO cone-lighting prepass"],
   ["svo-environment-gi", "SVO environmental GI"],
+  ["svo-voxel-light", "SVO voxel light cache"],
   ["svo-primary", "SVO primary visibility"],
   ["svo-rigid", "SVO rigid discovery"],
   ["svo-glass", "SVO thin-glass discovery"],

@@ -12,6 +12,19 @@ export interface RasterMeshSymmetryMetrics {
   readonly nonFiniteCount: number;
   readonly degenerateTriangleCount: number;
   readonly openEdgeCount: number;
+  readonly boundaryOpenEdgeCount?: number;
+  readonly interiorOpenEdgeCount?: number;
+  readonly firstInteriorOpenEdge?: string;
+  readonly interiorOpenEdges?: readonly Readonly<{
+    endpoints: readonly [readonly [number, number, number], readonly [number, number, number]];
+    triangle: number;
+    cube?: number;
+    cubeOriginSpan?: readonly [number, number, number, number];
+    descriptor?: number;
+    lane?: number;
+    offset?: number;
+  }>[];
+  readonly boundaryOpenEdgesByPlane?: Readonly<Record<string, number>>;
   readonly nonManifoldEdgeCount: number;
   readonly firstOpenEdge?: string;
   readonly transforms: Readonly<Record<HorizontalMeshSymmetryTransform, {
@@ -22,10 +35,30 @@ export interface RasterMeshSymmetryMetrics {
   }>>;
 }
 
+export interface RasterMeshBoundaryAudit {
+  readonly minimum: readonly [number, number, number];
+  readonly maximum: readonly [number, number, number];
+  readonly tolerance: number;
+}
+
+export interface RasterMeshOwnershipAudit {
+  readonly cubes: Uint32Array;
+  readonly offsets: Uint32Array;
+  readonly cubeCount: number;
+}
+
 export interface SharpPatchRasterMetrics {
   readonly patchCount: number;
   readonly invalidPatchCount: number;
   readonly firstInvalidPatch?: { readonly cube: number; readonly reason: string };
+}
+
+export interface RasterCubeSymmetryMetrics {
+  readonly cubeCount: number;
+  readonly transforms: Readonly<Record<HorizontalMeshSymmetryTransform, {
+    readonly exactIdentityMismatchCount: number;
+    readonly firstMissingIdentity?: string;
+  }>>;
 }
 
 const TRANSFORMS = {
@@ -75,7 +108,8 @@ function edgeKey(a: string, b: string) {
 /** Exact D4 audit of the emitted geometric vertex set. Triangle-local duplicate
  * multiplicity is deliberately ignored: reflecting a planar quad may select
  * its other diagonal without changing the rasterized surface. */
-export function rasterMeshSymmetryMetrics(vertices: Float32Array, vertexCount: number): RasterMeshSymmetryMetrics {
+export function rasterMeshSymmetryMetrics(vertices: Float32Array, vertexCount: number,
+  boundary?: RasterMeshBoundaryAudit, ownership?: RasterMeshOwnershipAudit): RasterMeshSymmetryMetrics {
   if (!Number.isSafeInteger(vertexCount) || vertexCount < 0 || vertices.length < vertexCount * 8) {
     throw new RangeError("Raster mesh symmetry requires complete eight-float vertex records");
   }
@@ -89,6 +123,8 @@ export function rasterMeshSymmetryMetrics(vertices: Float32Array, vertexCount: n
   }
   const triangleCount = Math.floor(vertexCount / 3);
   const edgeCounts = new Map<string, number>();
+  const edgePoints = new Map<string, readonly [readonly number[], readonly number[]]>();
+  const edgeTriangles = new Map<string, number>();
   let degenerateTriangleCount = vertexCount % 3 === 0 ? 0 : 1;
   for (let triangle = 0; triangle < triangleCount; triangle += 1) {
     const ids = [triangle * 3, triangle * 3 + 1, triangle * 3 + 2] as const;
@@ -109,13 +145,72 @@ export function rasterMeshSymmetryMetrics(vertices: Float32Array, vertexCount: n
     for (const [a, b] of [[0, 1], [1, 2], [2, 0]] as const) {
       const key = edgeKey(keys[a], keys[b]);
       edgeCounts.set(key, (edgeCounts.get(key) ?? 0) + 1);
+      edgePoints.set(key, [points[a], points[b]]);
+      edgeTriangles.set(key, triangle);
     }
   }
   let openEdgeCount = 0, nonManifoldEdgeCount = 0, firstOpenEdge: string | undefined;
+  let boundaryOpenEdgeCount = 0, interiorOpenEdgeCount = 0, firstInteriorOpenEdge: string | undefined;
+  const boundaryOpenEdgesByPlane: Record<string, number> = {};
+  const interiorOpenEdges: {
+    endpoints: [[number, number, number], [number, number, number]];
+    triangle: number; cube?: number; cubeOriginSpan?: [number, number, number, number];
+    descriptor?: number; lane?: number; offset?: number;
+  }[] = [];
+  const cubeForVertex = (vertex: number) => {
+    if (!ownership) return undefined;
+    let lo = 0, hi = ownership.cubeCount;
+    while (lo < hi) {
+      const mid = lo + Math.floor((hi - lo) / 2);
+      if ((ownership.offsets[6 * mid] ?? vertexCount) <= vertex) lo = mid + 1;
+      else hi = mid;
+    }
+    return Math.max(0, lo - 1);
+  };
   for (const [key, count] of edgeCounts) {
     if (count === 1) {
       openEdgeCount += 1;
       firstOpenEdge ??= key;
+      if (boundary) {
+        const points = edgePoints.get(key)!;
+        let plane: string | undefined;
+        for (let axis = 0; axis < 3 && plane === undefined; axis += 1) {
+          for (const side of ["minimum", "maximum"] as const) {
+            const value = boundary[side][axis];
+            if (points.every(point => Math.abs(point[axis]! - value) <= boundary.tolerance)) {
+              plane = `${side}-${"xyz"[axis]}`; break;
+            }
+          }
+        }
+        if (plane) {
+          boundaryOpenEdgeCount += 1;
+          boundaryOpenEdgesByPlane[plane] = (boundaryOpenEdgesByPlane[plane] ?? 0) + 1;
+        } else {
+          interiorOpenEdgeCount += 1; firstInteriorOpenEdge ??= key;
+          const triangle = edgeTriangles.get(key)!;
+          const cube = cubeForVertex(3 * triangle);
+          const points = edgePoints.get(key)!;
+          const record: (typeof interiorOpenEdges)[number] = {
+            endpoints: [points[0].slice(0, 3) as [number, number, number],
+              points[1].slice(0, 3) as [number, number, number]], triangle,
+          };
+          if (cube !== undefined && ownership) {
+            const packed = ownership.cubes[2 * cube]!, word = ownership.cubes[2 * cube + 1]!;
+            const descriptor = word >>> 16, code = descriptor & 0xff;
+            record.cube = cube; record.descriptor = descriptor;
+            record.cubeOriginSpan = [packed & 0xffff, word & 0xffff, packed >>> 16,
+              code === 0 || code === 2 || code === 3 ? 1 : code];
+            record.offset = ownership.offsets[6 * cube];
+            for (let lane = 0; lane < 6; lane += 1) {
+              const start = ownership.offsets[6 * cube + lane] ?? vertexCount;
+              const end = lane === 5 ? (ownership.offsets[6 * (cube + 1)] ?? vertexCount)
+                : (ownership.offsets[6 * cube + lane + 1] ?? vertexCount);
+              if (3 * triangle >= start && 3 * triangle < end) { record.lane = lane; break; }
+            }
+          }
+          interiorOpenEdges.push(record);
+        }
+      }
     } else if (count !== 2) nonManifoldEdgeCount += 1;
   }
   const positionReference = new Set<string>();
@@ -157,7 +252,65 @@ export function rasterMeshSymmetryMetrics(vertices: Float32Array, vertexCount: n
   return { vertexCount, triangleCount, uniqueVertexCount: reference.size, comparedVertices: reference.size * 3,
     exactMismatchCount, exactPositionMismatchCount, nonFiniteCount,
     degenerateTriangleCount, openEdgeCount, nonManifoldEdgeCount,
+    ...(boundary ? { boundaryOpenEdgeCount, interiorOpenEdgeCount,
+      boundaryOpenEdgesByPlane,
+      interiorOpenEdges,
+      ...(firstInteriorOpenEdge ? { firstInteriorOpenEdge } : {}) } : {}),
     ...(firstOpenEdge ? { firstOpenEdge } : {}), transforms: results };
+}
+
+/** Exact D4 audit of the classified geometric cube set. Descriptor clipping
+ * flags are deliberately excluded: cube origin and span alone determine the
+ * scalar samples and emitted geometric support. */
+export function rasterCubeSymmetryMetrics(cubes: Uint32Array, cubeCount: number,
+  dimensions: readonly [number, number, number]): RasterCubeSymmetryMetrics {
+  if (!Number.isSafeInteger(cubeCount) || cubeCount < 0 || cubes.length < 2 * cubeCount) {
+    throw new RangeError("Raster cube symmetry requires complete two-word cube records");
+  }
+  const identity = (x: number, y: number, z: number, span: number, nodal: number) =>
+    `${x}:${y}:${z}:${span}:${nodal}`;
+  const reference = new Set<string>();
+  const records: [number, number, number, number, number][] = [];
+  for (let cube = 0; cube < cubeCount; cube += 1) {
+    const packed = cubes[2 * cube]!, descriptor = cubes[2 * cube + 1]!;
+    const packedDescriptor = descriptor >>> 16;
+    const encodedSpan = packedDescriptor & 0xff;
+    const nativeFace = (encodedSpan === 2 || encodedSpan === 3)
+      && ((packedDescriptor >>> 8) & 7) !== 0;
+    const record: [number, number, number, number, number] = [
+      packed & 0xffff, descriptor & 0xffff, packed >>> 16,
+      nativeFace ? 1 : Math.max(1, encodedSpan), Number(encodedSpan === 0 || nativeFace),
+    ];
+    records.push(record); reference.add(identity(...record));
+  }
+  const transforms = {} as Record<HorizontalMeshSymmetryTransform, {
+    exactIdentityMismatchCount: number; firstMissingIdentity?: string;
+  }>;
+  for (const name of Object.keys(TRANSFORMS) as HorizontalMeshSymmetryTransform[]) {
+    const transformed = new Set<string>();
+    for (const [x, y, z, span, nodal] of records) {
+      // Global-fine cube bases live on the optical ghost lattice 0..D.  Its
+      // sample nodes are 0..D+1, so reflecting a lower anchor uses D+1, not D.
+      // Adaptive publications instead tag a native D-cell nodal lattice with
+      // a zero encoded span; that lattice reflects about D.
+      const xExtent = dimensions[0] + 1 - nodal;
+      const zExtent = dimensions[2] + 1 - nodal;
+      const target = name === "reflect-x"
+        ? [xExtent - x - span, y, z, span, nodal] as const
+        : name === "reflect-z"
+          ? [x, y, zExtent - z - span, span, nodal] as const
+          : [z, y, x, span, nodal] as const;
+      transformed.add(identity(...target));
+    }
+    const keys = new Set([...reference, ...transformed]);
+    let difference = 0, firstMissingIdentity: string | undefined;
+    for (const key of keys) if (reference.has(key) !== transformed.has(key)) {
+      difference += 1; firstMissingIdentity ??= key;
+    }
+    transforms[name] = { exactIdentityMismatchCount: difference / 2,
+      ...(firstMissingIdentity ? { firstMissingIdentity } : {}) };
+  }
+  return Object.freeze({ cubeCount, transforms: Object.freeze(transforms) });
 }
 
 /** Validates the exact classified-cube ABI used by the sharp box path. A

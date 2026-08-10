@@ -32,8 +32,9 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { TerrainGrid } from "@/lib/terrain";
-import type { SceneryNode } from "@/lib/scenery-graph";
+import type { SceneryNode, SceneryRecursiveShapeNode } from "@/lib/scenery-graph";
 import type { PondVesselSpec } from "@/lib/voxel-scenery/pond-vessel";
+import { refineFoliageShape } from "@/lib/voxel-scenery/recursive-foliage";
 import {
   SHAPE_LAB_DEPTHS,
   SHAPE_LAB_VESSEL_ID,
@@ -56,15 +57,6 @@ type Json = number | string | boolean | null | Json[] | { [key: string]: Json };
 // Immutable path edits over the plain JSON a node is
 // ---------------------------------------------------------------------------
 
-function valueAt(root: Json, path: readonly (string | number)[]): Json {
-  let cursor: Json = root;
-  for (const step of path) {
-    if (cursor === null || typeof cursor !== "object") return null;
-    cursor = (cursor as Record<string | number, Json>)[step];
-  }
-  return cursor;
-}
-
 function withValueAt(root: Json, path: readonly (string | number)[], next: Json): Json {
   if (path.length === 0) return next;
   const [head, ...rest] = path;
@@ -80,6 +72,14 @@ function withValueAt(root: Json, path: readonly (string | number)[], next: Json)
 
 /** Slider bounds from the pristine value, so the handle does not re-scale under the drag. */
 function sliderRange(pristine: number, key: string): { min: number; max: number; step: number } {
+  if (/threshold|weight|bias/i.test(key)) return { min: 0, max: 1, step: 0.005 };
+  if (/period_m$|spacing_m$/i.test(key)) {
+    return {
+      min: Math.max(0.001, pristine * 0.1),
+      max: Math.max(0.01, pristine * 4),
+      step: Math.max(0.0001, pristine / 100),
+    };
+  }
   const magnitude = Math.abs(pristine) > 1e-9 ? Math.abs(pristine) : 1;
   // Counts, lobes and sample budgets are integers and reading 4.37 lobes helps
   // nobody; everything else gets two hundred stops across its own range.
@@ -95,12 +95,6 @@ const prettyLabel = (key: string): string => key
   .replace(/_s$/, " (s)")
   .replace(/([a-z])([A-Z])/g, "$1 $2")
   .toLowerCase();
-
-const formatValue = (value: number): string => {
-  if (!Number.isFinite(value)) return String(value);
-  if (Number.isInteger(value) && Math.abs(value) < 1e6) return String(value);
-  return Math.abs(value) < 0.01 ? value.toExponential(3) : value.toFixed(Math.abs(value) < 1 ? 4 : 3);
-};
 
 // ---------------------------------------------------------------------------
 // The auto-generated form
@@ -245,14 +239,12 @@ const SHAPE_LAB_MODES = ["voxel", "exact"] as const;
 /**
  * Where the lab opens.
  *
- * `oak`, and it used to be `bonsai` — which stopped existing when the hero set's
- * tree was cut over, and the failure was silent in the way a fallback usually
- * is: `world.specimens.find(...) ?? world.specimens[0]` resolved to the *pond
- * vessel*, so the lab opened on the ground rather than on a missing tree, and
- * nothing said why.
+ * `stone` is a stable hero-scene specimen while the replacement tree is being
+ * built. Keeping the default on a document-owned id prevents a removed species
+ * from silently falling back to the pond vessel.
  */
 const SHAPE_LAB_DEFAULT_SELECTION: ShapeLabSelection = {
-  specimenId: "oak",
+  specimenId: "stone",
   depth: 3,
   mode: "voxel",
   shading: "clay",
@@ -303,7 +295,7 @@ function readShapeLabSelection(): ShapeLabSelection {
  * `replaceState` rather than `pushState`: changing the shading is not a place
  * you navigated to, and a lab session would otherwise leave forty entries for
  * the back button to walk. Omitting values that equal the default keeps a link
- * to "the oak at depth 3 in clay" as bare `/shape-lab`, so the URL only ever
+ * to "the default specimen at depth 3 in clay" as bare `/shape-lab`, so the URL only ever
  * names what you actually changed.
  *
  * Any query parameter this file does not own is preserved, so an unrelated link
@@ -339,6 +331,7 @@ function ShapeLabWorkbench() {
   const [mode, setMode] = useState<"voxel" | "exact">(restored.mode);
   const [shading, setShading] = useState<ShapeLabShading>(restored.shading);
   const [showGround, setShowGround] = useState(restored.showGround);
+  const [contextMode, setContextMode] = useState<"isolated" | "parent" | "assembled">("isolated");
   const [ground, setGround] = useState<TerrainGrid | undefined>(undefined);
   const [groundPending, setGroundPending] = useState(false);
   const [progress, setProgress] = useState<ShapeLabProgress | undefined>(undefined);
@@ -362,9 +355,17 @@ function ShapeLabWorkbench() {
     [world, specimenId],
   );
   const isVessel = specimen?.id === SHAPE_LAB_VESSEL_ID;
+  const contextSpecimen = useMemo(() => {
+    if (!specimen || isVessel || contextMode === "isolated") return specimen;
+    if (contextMode === "parent") {
+      return world.specimens.find((entry) => entry.id === specimen.parentId) ?? specimen;
+    }
+    const rootId = specimen.nodePath[0];
+    return world.specimens.find((entry) => entry.id === rootId) ?? specimen;
+  }, [contextMode, isVessel, specimen, world.specimens]);
   const expanded = useMemo(
-    () => shapeLabRecords(world, specimen?.nodeIds ?? []),
-    [world, specimen],
+    () => shapeLabRecords(world, contextSpecimen?.nodeIds ?? []),
+    [world, contextSpecimen],
   );
 
   // The selection, back onto the URL so a reload lands where you left off. The
@@ -558,21 +559,84 @@ function ShapeLabWorkbench() {
   // ---- editing -------------------------------------------------------------
 
   const editableNodes = useMemo(
-    () => (specimen?.nodeIds ?? []).map((id) => world.nodes.find((node) => node.id === id)).filter(Boolean) as SceneryNode[],
+    () => (specimen?.nodeIds ?? []).map((id) => world.allNodes.find((node) => node.id === id)).filter(Boolean) as SceneryNode[],
     [specimen, world],
   );
   const pristineNodes = useMemo(
-    () => new Map(pristine.nodes.map((node) => [node.id, node])),
+    () => new Map(pristine.allNodes.map((node) => [node.id, node])),
     [pristine],
   );
 
   const editNode = useCallback((nodeId: string, path: readonly (string | number)[], next: Json) => {
     setOverrides((previous) => {
-      const current = previous[nodeId] ?? world.nodes.find((node) => node.id === nodeId);
+      const current = previous[nodeId] ?? world.allNodes.find((node) => node.id === nodeId);
       if (!current) return previous;
       return { ...previous, [nodeId]: withValueAt(current as unknown as Json, path, next) as unknown as SceneryNode };
     });
   }, [world]);
+
+  const replaceSelectedNode = useCallback((next: SceneryNode) => {
+    setOverrides((previous) => ({ ...previous, [next.id]: next }));
+  }, []);
+
+  const recursiveNode = editableNodes.length === 1 && editableNodes[0].kind === "recursive-shape"
+    ? editableNodes[0] as SceneryRecursiveShapeNode
+    : undefined;
+
+  const refineSelected = useCallback(() => {
+    if (!recursiveNode || recursiveNode.children?.length) return;
+    replaceSelectedNode(refineFoliageShape(recursiveNode));
+  }, [recursiveNode, replaceSelectedNode]);
+
+  const collapseSelected = useCallback(() => {
+    if (!recursiveNode?.children?.length) return;
+    const { children: _children, ...leaf } = recursiveNode;
+    void _children;
+    replaceSelectedNode(leaf);
+  }, [recursiveNode, replaceSelectedNode]);
+
+  const regenerateSelected = useCallback(() => {
+    if (!recursiveNode) return;
+    const { children: _children, ...leaf } = recursiveNode;
+    void _children;
+    replaceSelectedNode(refineFoliageShape(leaf));
+  }, [recursiveNode, replaceSelectedNode]);
+
+  const deleteSelected = useCallback(() => {
+    if (!specimen?.parentId) return;
+    const parent = world.allNodes.find((node) => node.id === specimen.parentId);
+    if (!parent || (parent.kind !== "group" && parent.kind !== "recursive-shape")) return;
+    const children = parent.children?.filter((child) => child.id !== specimen.id);
+    if (!children?.length && parent.kind === "recursive-shape") {
+      const { children: _children, ...leaf } = parent;
+      void _children;
+      replaceSelectedNode(leaf);
+    } else if (children) {
+      replaceSelectedNode({ ...parent, children } as SceneryNode);
+    }
+    setSpecimenId(parent.id);
+  }, [replaceSelectedNode, specimen, world.allNodes]);
+
+  const duplicateSelected = useCallback(() => {
+    if (!specimen?.parentId || editableNodes.length !== 1) return;
+    const parent = world.allNodes.find((node) => node.id === specimen.parentId);
+    if (!parent || (parent.kind !== "group" && parent.kind !== "recursive-shape") || !parent.children) return;
+    const occupied = new Set(world.allNodes.map(({ id }) => id));
+    let copyId = `${editableNodes[0].id}-copy`;
+    let suffix = 2;
+    while (occupied.has(copyId)) copyId = `${editableNodes[0].id}-copy-${suffix++}`;
+    const rekey = (node: SceneryNode, from: string, to: string): SceneryNode => {
+      const next = { ...node, id: node.id === from ? to : `${to}${node.id.slice(from.length)}` } as SceneryNode;
+      if (next.kind === "group") return { ...next, children: next.children.map((child) => rekey(child, from, to)) };
+      if (next.kind === "recursive-shape" && next.children?.length) {
+        return { ...next, children: next.children.map((child) => rekey(child, from, to) as SceneryRecursiveShapeNode) };
+      }
+      return next;
+    };
+    const copy = rekey(editableNodes[0], editableNodes[0].id, copyId);
+    replaceSelectedNode({ ...parent, children: [...parent.children, copy] } as SceneryNode);
+    setSpecimenId(copyId);
+  }, [editableNodes, replaceSelectedNode, specimen, world.allNodes]);
 
   const editVessel = useCallback((path: readonly (string | number)[], next: Json) => {
     setVessel((previous) => withValueAt((previous ?? world.vessel) as unknown as Json, path, next) as unknown as PondVesselSpec);
@@ -660,12 +724,25 @@ function ShapeLabWorkbench() {
             type="button"
             className={`sl-item${entry.id === specimen?.id ? " sl-item-on" : ""}`}
             onClick={() => setSpecimenId(entry.id)}
+            style={{ paddingLeft: `${10 + entry.depth * 14}px` }}
           >
             <span className="sl-item-name">{entry.label}</span>
             <span className="sl-item-detail">{entry.detail}</span>
           </button>)}
         </div>
       </div>
+
+      {specimen && specimen.depth > 0 && <div className="sl-field">
+        <span className="sl-legend">Context</span>
+        <div className="sl-segments">
+          {(["isolated", "parent", "assembled"] as const).map((option) => <button
+            key={option}
+            type="button"
+            className={`sl-segment${contextMode === option ? " sl-segment-on" : ""}`}
+            onClick={() => setContextMode(option)}
+          >{option}</button>)}
+        </div>
+      </div>}
 
       <div className="sl-field">
         <span className="sl-legend">Refinement depth</span>
@@ -764,6 +841,13 @@ function ShapeLabWorkbench() {
           <button type="button" onClick={reset} disabled={!edited}>reset</button>
         </div>
       </div>
+      {!isVessel && specimen?.depth !== 0 && <div className="sl-actions" style={{ padding: "0 14px 10px", flexWrap: "wrap" }}>
+        {recursiveNode && !recursiveNode.children?.length && <button type="button" onClick={refineSelected}>refine</button>}
+        {recursiveNode?.children?.length && <button type="button" onClick={collapseSelected}>collapse</button>}
+        {recursiveNode && <button type="button" onClick={regenerateSelected}>regenerate children</button>}
+        <button type="button" onClick={duplicateSelected}>duplicate</button>
+        <button type="button" onClick={deleteSelected}>delete</button>
+      </div>}
       {anyEdit && <p className="sl-export">
         <code>copy JSON</code> gives the whole session as <code>HeroGardenOverrides</code>.
         Paste it over <code>HERO_GARDEN_OVERRIDES</code> in

@@ -113,7 +113,7 @@ export interface OctreeFineSeedAdapterCoarsePhiSource {
   readonly values: GPUBuffer;
   /** One `{gradient.xyz, valid}` affine reconstruction per compact row. */
   readonly gradients?: GPUBuffer;
-  /** Power-coarse publication control; words 2/11 are row count/valid. */
+  /** Power-coarse control or accepted adaptive graph control. */
   readonly control: GPUBuffer;
 }
 
@@ -558,9 +558,14 @@ fn analyticInitialPhi(point:vec3f)->f32{
   let heightFraction=max(0.92,fill);let footprintFraction=sqrt(fill/max(heightFraction,1e-9));let extent=params.cellHalo.xyz*vec3f(dims());let fallback=vec3f(footprintFraction*extent.x,heightFraction*extent.y,footprintFraction*extent.z);let authored=any(params.damDimensions.xyz>vec3f(0.0));let damDimensions=select(fallback,params.damDimensions.xyz,authored);let exposedMaximum=vec3f(-0.5*extent.x+damDimensions.x,damDimensions.y,-0.5*extent.z+damDimensions.z);let q=world-exposedMaximum;return length(max(q,vec3f(0)))+min(max(q.x,max(q.y,q.z)),0.0);
 }
 fn finite(value:f32)->bool{return value==value&&abs(value)<3.402823e38;}
-fn coarsePublicationValid()->bool{return arrayLength(&coarseControl)>=12u&&coarseControl[0]==0u
-  &&coarseControl[2]>0u&&coarseControl[11]==0x80000000u;}
-fn coarseRowValid(row:u32)->bool{return coarsePublicationValid()&&row<coarseControl[2]
+fn adaptiveCoarsePublication()->bool{return arrayLength(&coarseControl)>=29u&&coarseControl[0]!=0u
+  &&coarseControl[1]>0u&&coarseControl[28]>0u&&coarseControl[3]==coarseControl[0]&&coarseControl[4]==0u
+  &&coarseControl[5]!=0u;}
+fn coarsePublicationValid()->bool{return adaptiveCoarsePublication()
+  ||(arrayLength(&coarseControl)>=12u&&coarseControl[0]==0u
+    &&coarseControl[2]>0u&&coarseControl[11]==0x80000000u);}
+fn coarseRows()->u32{return select(coarseControl[2],coarseControl[28],adaptiveCoarsePublication());}
+fn coarseRowValid(row:u32)->bool{return coarsePublicationValid()&&row<coarseRows()
   &&row<arrayLength(&coarsePhi)&&(coarsePhi[row].flags&(COARSE_VALID|COARSE_FINITE))==(COARSE_VALID|COARSE_FINITE)
   &&finite(coarsePhi[row].phi)&&finite(coarsePhi[row].minimumPhi)&&finite(coarsePhi[row].maximumPhi);}
 fn coarseGradientAt(row:u32)->vec3f{

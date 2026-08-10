@@ -67,10 +67,10 @@ export const POWER_VALIDATION_METHOD_PROFILE: MethodProfile = Object.freeze({
   }),
 });
 
-/** Canonical coarse-band configuration for the horizontal D4 oracle.
- * Performance, Dawn regression, and the interactive preset exercise the same
- * factor-1 surface and level-4 coupled reach. */
-export const SYMMETRIC_EXPANSION_METHOD_PROFILE: MethodProfile = Object.freeze({
+/** Canonical factor-one adaptive LoSasso profile for interactive water.
+ * This exact tuple is exercised by Dawn raster lanes before it is offered by
+ * the dam-break or symmetry presets. */
+export const ADAPTIVE_LOSASSO_UI_METHOD_PROFILE: MethodProfile = Object.freeze({
   methodId: "octree",
   quality: "balanced",
   overrides: Object.freeze({
@@ -82,6 +82,9 @@ export const SYMMETRIC_EXPANSION_METHOD_PROFILE: MethodProfile = Object.freeze({
     globalFineLevelSetFactor: "1",
   }),
 });
+
+/** Historical oracle name retained for focused symmetry callers. */
+export const SYMMETRIC_EXPANSION_METHOD_PROFILE = ADAPTIVE_LOSASSO_UI_METHOD_PROFILE;
 
 /**
  * Shared coarse-only dam experiment. The surface field and pressure octree use
@@ -1224,13 +1227,8 @@ export function createGardenSvoLightingScene(): SceneDescription {
   scene.systems = { ...scene.systems, fluid: false };
   scene.container.fillFraction = 0;
   scene.voxelDomain = { finestCellSize_m: 0.025, brickSize_cells: 8 };
-  // A low dusk grade lets the warm lamppost fixture carry the composition.
-  // The sky remains bright enough to preserve foliage detail and readable
-  // shadow fill instead of collapsing unlit surfaces to black.
-  scene.lighting = {
-    directional: { intensity: 0.09 },
-    environment: { diffuseScale: 0.12, specularScale: 0.25 },
-  };
+  // The lamppost remains authored emissive geometry. Key, environment balance,
+  // and display grade are the shared dry-SVO defaults, never a scene override.
   delete scene.fluid.initialBrickSeeds_m;
   delete scene.fluid.initialBrickSeedsAdditive;
   delete scene.fluid.inflow;
@@ -1336,6 +1334,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     shelf: "Tanks",
     environment: "default",
     presentationMode: "fluid-only",
+    methodProfile: ADAPTIVE_LOSASSO_UI_METHOD_PROFILE,
     build: () => {
       const scene = cloneScene(defaultScene);
       scene.rigidBodies = [];
@@ -1774,6 +1773,10 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     audience: "validation",
     shelf: "Symmetry",
     environment: "default",
+    // This oracle has no authored dry scenery. The default sparse room floor
+    // shares y=0 with its centred seeded bricks and can win the depth test,
+    // making a healthy water publication look like an empty scene in the UI.
+    presentationMode: "fluid-only",
     methodProfile: SYMMETRIC_EXPANSION_METHOD_PROFILE,
     build: createSymmetricExpansionScene,
     camera: { distance_m: 2.5, target_m: { x: 0, y: 0.25, z: 0 } },

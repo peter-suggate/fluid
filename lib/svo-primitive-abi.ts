@@ -11,6 +11,7 @@ import {
   svoPrimitiveKindConstantsWGSL,
   type SvoPrimitiveKindName,
 } from "./svo-primitive-kinds";
+import { sampleSvoProceduralNoise } from "./svo-procedural-material";
 import { terrainHeightAt, terrainNormalAt, type TerrainDescription } from "./terrain";
 import { materialIdForRigidShape } from "./voxel-scene";
 
@@ -79,19 +80,18 @@ export const SVO_PRIMITIVE_FLAGS = SVO_PRIMITIVE_KIND_FLAGS;
  *    formula, the voxelizer and the node-mip oracle keep treating this kind as
  *    an ordinary ellipsoid without knowing any field exists.
  * 2. **It is a Lipschitz-1 lower bound.** The march steps by `|d|`, so a field
- *    that ever oversteps walks through its own surface. Each field is built as
- *    a smooth minimum of analytic lobes whose individual distances are already
- *    unit-Lipschitz lower bounds; a polynomial smooth minimum of such bounds is
- *    one too — its gradient is the convex combination `h·∇a + (1-h)·∇b`. The
- *    construction this family deliberately does *not* use is noise displacement
- *    of an envelope, measured at L = 60 and 58.9 % of rays tunnelling in
- *    `docs/HERO_GARDEN_AGGREGATE_SDF_ASSESSMENT.md` §3.
+ *    that ever oversteps walks through its own surface. The geometric fields
+ *    are smooth minima of analytic unit-Lipschitz lobes. The density field is
+ *    different: it divides its threshold function by the complete gradient
+ *    bound of both noise scales and its radial bias. Raw noise displacement is
+ *    still forbidden; measured unbounded it reached L = 60 and tunneled on
+ *    58.9 % of rays in `docs/HERO_GARDEN_AGGREGATE_SDF_ASSESSMENT.md` §3.
  *
  * Codes are stable: they are packed into the arena blocks of published scenes.
  * `lattice` is zero so that a scene authored before this family existed — and a
  * block that was never filled — reads as the field it always was.
  */
-export const SVO_CLUSTER_FIELD_NAMES = Object.freeze(["lattice", "seeded-lobes", "tapered-sweep"] as const);
+export const SVO_CLUSTER_FIELD_NAMES = Object.freeze(["lattice", "seeded-lobes", "tapered-sweep", "noise-foliage"] as const);
 
 export type SvoClusterFieldName = typeof SVO_CLUSTER_FIELD_NAMES[number];
 
@@ -117,6 +117,7 @@ export const SVO_CLUSTER_FIELD_TABLE = Object.freeze({
   lattice: { name: "lattice", code: 0, wgslConstant: "SVO_CLUSTER_FIELD_LATTICE", arenaWords: 16 },
   "seeded-lobes": { name: "seeded-lobes", code: 1, wgslConstant: "SVO_CLUSTER_FIELD_SEEDED_LOBES", arenaWords: 16 },
   "tapered-sweep": { name: "tapered-sweep", code: 2, wgslConstant: "SVO_CLUSTER_FIELD_TAPERED_SWEEP", arenaWords: 48 },
+  "noise-foliage": { name: "noise-foliage", code: 3, wgslConstant: "SVO_CLUSTER_FIELD_NOISE_FOLIAGE", arenaWords: 16 },
 } as const satisfies Record<SvoClusterFieldName, SvoClusterFieldEntry>);
 
 const clusterFieldByCode = new Map<number, SvoClusterFieldEntry>(
@@ -573,6 +574,24 @@ export interface SvoClusterTaperedSweepField extends SvoClusterFieldBase {
 }
 
 /**
+ * Field 3: thresholded two-scale value-noise density.
+ *
+ * The cluster noise modulates the probability that the detail noise exceeds
+ * the iso-value, so occupied voxels gather into broad masses rather than
+ * becoming uniform static. `interiorBias` raises density toward the centre of
+ * the envelope without closing the voids at its edge.
+ */
+export interface SvoClusterNoiseFoliageField extends SvoClusterFieldBase {
+  readonly field: "noise-foliage";
+  readonly clusterPeriod_m: number;
+  readonly detailPeriod_m: number;
+  readonly threshold: number;
+  readonly clusterWeight: number;
+  readonly detailWeight: number;
+  readonly interiorBias: number;
+}
+
+/**
  * The packing a cluster's arena block holds: one of the family's fields.
  *
  * Discriminated on `field`, whose absence is the lattice — see
@@ -581,7 +600,8 @@ export interface SvoClusterTaperedSweepField extends SvoClusterFieldBase {
 export type SvoSmoothUnionClusterPacking =
   | SvoClusterLatticeField
   | SvoClusterSeededLobesField
-  | SvoClusterTaperedSweepField;
+  | SvoClusterTaperedSweepField
+  | SvoClusterNoiseFoliageField;
 
 /** The field a packing names, with the lattice standing in for an absent discriminant. */
 export function svoClusterFieldName(packing: SvoSmoothUnionClusterPacking): SvoClusterFieldName {
@@ -944,6 +964,23 @@ export function validateSvoClusterPacking(packing: SvoSmoothUnionClusterPacking,
   nonNegative(packing.smoothRadius_m, "Cluster smooth-minimum radius");
   uint32(packing.seed, "Cluster seed");
   const shortestEnvelope_m = Math.min(lobeRadii_m.x, lobeRadii_m.y, lobeRadii_m.z);
+  if (packing.field === "noise-foliage") {
+    positive(packing.clusterPeriod_m, "Noise-foliage cluster period");
+    positive(packing.detailPeriod_m, "Noise-foliage detail period");
+    const unit = (value: number, label: string): void => {
+      if (!Number.isFinite(value) || value < 0 || value > 1) {
+        throw new RangeError(`${label} must be in 0..1`);
+      }
+    };
+    unit(packing.threshold, "Noise-foliage threshold");
+    unit(packing.clusterWeight, "Noise-foliage cluster weight");
+    unit(packing.detailWeight, "Noise-foliage detail weight");
+    unit(packing.interiorBias, "Noise-foliage interior bias");
+    if (!(packing.clusterWeight + packing.detailWeight > 0)) {
+      throw new RangeError("Noise-foliage density needs a positive noise weight");
+    }
+    return;
+  }
   if (packing.field === "seeded-lobes") {
     if (!Number.isInteger(packing.lobeCount)
       || packing.lobeCount < SVO_CLUSTER_LOBE_MINIMUM_COUNT || packing.lobeCount > SVO_CLUSTER_LOBE_MAXIMUM_COUNT) {
@@ -1841,8 +1878,69 @@ function clusterTaperedSweepDistance(point: Vec3, packing: SvoClusterTaperedSwee
   return distance;
 }
 
+const NOISE_FOLIAGE_CLUSTER_SALT = 0x68bc_21eb;
+const NOISE_FOLIAGE_DETAIL_SALT = 0x02e5_be93;
+/** Gradient bound of smoothstep-trilinear value noise in a unit domain. */
+const NOISE_FOLIAGE_VALUE_GRADIENT_BOUND = 1.5 * Math.sqrt(3);
+/** Share of the envelope radius reserved for a density fade, not geometry. */
+const NOISE_FOLIAGE_EDGE_FADE = 0.38;
+
+/**
+ * Density above zero is occupied. Dividing its negation by the complete
+ * gradient bound turns the iso-field into a Lipschitz-1 distance lower bound,
+ * which is what lets the existing sphere tracer march it without tunnelling.
+ */
+function clusterNoiseFoliageDistance(
+  point: Vec3,
+  lobeRadii_m: Vec3,
+  packing: SvoClusterNoiseFoliageField,
+): number {
+  const clusterFrequency = 1 / packing.clusterPeriod_m;
+  const detailFrequency = 1 / packing.detailPeriod_m;
+  const cluster = sampleSvoProceduralNoise(
+    point, [clusterFrequency, clusterFrequency, clusterFrequency],
+    (packing.seed ^ NOISE_FOLIAGE_CLUSTER_SALT) >>> 0,
+  );
+  const detail = sampleSvoProceduralNoise(
+    point, [detailFrequency, detailFrequency, detailFrequency],
+    (packing.seed ^ NOISE_FOLIAGE_DETAIL_SALT) >>> 0,
+  );
+  // Smoothstep the low-frequency octave into broad density islands. This is
+  // the cluster-of-increased-density layer: values around the middle separate
+  // more decisively while extrema stay smooth, so the canopy builds cauliflower
+  // masses instead of merely embossing an ellipsoid with gentle noise.
+  const clustered = cluster * cluster * (3 - 2 * cluster);
+  const normalizedRadius = Math.hypot(
+    point.x / lobeRadii_m.x,
+    point.y / lobeRadii_m.y,
+    point.z / lobeRadii_m.z,
+  );
+  const interior = Math.max(0, 1 - normalizedRadius);
+  const fadeLinear = Math.max(0, Math.min(1, interior / NOISE_FOLIAGE_EDGE_FADE));
+  const fade = fadeLinear * fadeLinear * (3 - 2 * fadeLinear);
+  const rawDensity = packing.clusterWeight * clustered
+    + packing.detailWeight * detail
+    + packing.interiorBias;
+  // Fade density to zero before the acceleration envelope. The hard ellipsoid
+  // clip below is still the conservative bound every raster and octree path
+  // expects, but it is now strictly outside the zero surface and can never be
+  // the rounded surface the user sees.
+  const density = fade * rawDensity - packing.threshold;
+  const shortest_m = Math.min(lobeRadii_m.x, lobeRadii_m.y, lobeRadii_m.z);
+  const noiseGradient_mInv = NOISE_FOLIAGE_VALUE_GRADIENT_BOUND * (
+    1.5 * packing.clusterWeight * clusterFrequency + packing.detailWeight * detailFrequency
+  );
+  // smoothstep's derivative peaks at 1.5. `rawDensity` is at most the sum of
+  // its weights, so this includes the product rule for `fade * rawDensity`.
+  const fadeGradient_mInv = 1.5 / (NOISE_FOLIAGE_EDGE_FADE * shortest_m);
+  const lipschitz_mInv = noiseGradient_mInv
+    + (packing.clusterWeight + packing.detailWeight + packing.interiorBias) * fadeGradient_mInv;
+  return -density / lipschitz_mInv;
+}
+
 /** The field a packing names, before the envelope clip. */
 function clusterFieldDistance(point: Vec3, lobeRadii_m: Vec3, packing: SvoSmoothUnionClusterPacking): number {
+  if (packing.field === "noise-foliage") return clusterNoiseFoliageDistance(point, lobeRadii_m, packing);
   if (packing.field === "seeded-lobes") return clusterSeededLobesDistance(point, lobeRadii_m, packing);
   if (packing.field === "tapered-sweep") return clusterTaperedSweepDistance(point, packing);
   return clusterLatticeDistance(point, packing);
@@ -1858,6 +1956,7 @@ function clusterFieldDistance(point: Vec3, lobeRadii_m: Vec3, packing: SvoSmooth
  * normal.
  */
 export function svoClusterFeatureRadius_m(lobeRadii_m: Vec3, packing: SvoSmoothUnionClusterPacking): number {
+  if (packing.field === "noise-foliage") return 0.5 * packing.detailPeriod_m;
   if (packing.field === "seeded-lobes") {
     const shortest_m = Math.min(lobeRadii_m.x, lobeRadii_m.y, lobeRadii_m.z);
     // A lobe set with no blend still has a smallest feature: the thinnest a
@@ -1900,13 +1999,14 @@ function clusterDistance(point: Vec3, lobeRadii_m: Vec3, packing: SvoSmoothUnion
 }
 
 /**
- * A field's value and its exact gradient — the CPU twin of `SvoClusterSample`.
+ * A field's value and gradient — the CPU twin of `SvoClusterSample`.
  *
  * The WGSL beside this file carries the derivation; the short version is that
  * every leaf of a cluster field is a sphere, an ellipsoid or the convex hull of
  * two spheres, each with a closed-form normal, and both combinators above them
- * pass a gradient through exactly. So one differentiated pass replaces the four
- * whole evaluations a tetrahedral difference used to spend.
+ * pass a gradient through exactly. Noise foliage differentiates its density
+ * numerically at the terminal detail scale; all other fields use one analytic
+ * pass instead of the four whole evaluations a tetrahedral difference spent.
  *
  * The distance arithmetic in each `...Sample` below is character-for-character
  * its distance-only twin's, because the two must not drift;
@@ -2149,7 +2249,28 @@ function clusterLobeSample(point: Vec3, lobeRadii_m: Vec3): ClusterSample {
   return { distance_m: (magnitude - 1) * shortest_m, gradient };
 }
 
+/** Density fields do not have analytic lobe normals; differentiate the same
+ * bounded distance used by the march over a fraction of the detail period. */
+function clusterNoiseFoliageSample(
+  point: Vec3,
+  lobeRadii_m: Vec3,
+  packing: SvoClusterNoiseFoliageField,
+): ClusterSample {
+  const distance_m = clusterNoiseFoliageDistance(point, lobeRadii_m, packing);
+  const h = Math.max(1e-6, packing.detailPeriod_m * 0.001);
+  const at = (x: number, y: number, z: number): number => clusterNoiseFoliageDistance({ x, y, z }, lobeRadii_m, packing);
+  return {
+    distance_m,
+    gradient: {
+      x: (at(point.x + h, point.y, point.z) - at(point.x - h, point.y, point.z)) / (2 * h),
+      y: (at(point.x, point.y + h, point.z) - at(point.x, point.y - h, point.z)) / (2 * h),
+      z: (at(point.x, point.y, point.z + h) - at(point.x, point.y, point.z - h)) / (2 * h),
+    },
+  };
+}
+
 function clusterFieldSample(point: Vec3, lobeRadii_m: Vec3, packing: SvoSmoothUnionClusterPacking): ClusterSample {
+  if (packing.field === "noise-foliage") return clusterNoiseFoliageSample(point, lobeRadii_m, packing);
   if (packing.field === "seeded-lobes") return clusterSeededLobesSample(point, lobeRadii_m, packing);
   if (packing.field === "tapered-sweep") return clusterTaperedSweepSample(point, packing);
   return clusterLatticeSample(point, packing);
@@ -2174,8 +2295,8 @@ function clusterSample(point: Vec3, lobeRadii_m: Vec3, packing: SvoSmoothUnionCl
  *
  * Every leaf of the fold already knew its own normal. Carrying it through the
  * blend costs one lerp per combination, deletes three quarters of the
- * evaluations, and answers with the exact gradient rather than a difference
- * over a step {@link svoClusterFeatureRadius_m} had to guess at.
+ * evaluations. Noise foliage alone takes a local central difference because its
+ * trilinear density has no lobe normal to carry through the fold.
  */
 function clusterLocalNormal(point: Vec3, lobeRadii_m: Vec3, packing: SvoSmoothUnionClusterPacking): Vec3 | null {
   return normalize(clusterSample(point, lobeRadii_m, packing).gradient);
@@ -2858,6 +2979,10 @@ fn svoClusterPackingValid(packing: SvoClusterPacking) -> bool {
   if (packing.field == SVO_CLUSTER_FIELD_TAPERED_SWEEP) {
     return packing.count >= 2u && packing.count <= SVO_CLUSTER_SWEEP_MAXIMUM_POINTS && packing.points[0].w > 0.0;
   }
+  if (packing.field == SVO_CLUSTER_FIELD_NOISE_FOLIAGE) {
+    return packing.latticeLobeRadius_m > 0.0 && packing.latticePeriod_m > 0.0
+      && packing.anisotropy + packing.lobeSpan > 0.0;
+  }
   return false;
 }
 
@@ -3096,7 +3221,38 @@ fn svoClusterTaperedSweepDistance_m(point: vec3f, packing: SvoClusterPacking) ->
   return distance_m;
 }
 
+// noise-foliage aliases the generic scalar slots as follows:
+//   latticePeriod = cluster period, latticeLobeRadius = detail period,
+//   jitter = threshold, anisotropy = cluster weight, lobeSpan = detail weight,
+//   lobeSpanSpread = interior bias.
+// Density above zero is occupied. The division is the complete gradient bound
+// of both smoothstep-trilinear noises plus the radial interior term, producing
+// a Lipschitz-1 lower bound safe for the shared sphere trace.
+fn svoClusterNoiseFoliageDistance_m(point: vec3f, lobeRadii_m: vec3f, packing: SvoClusterPacking) -> f32 {
+  let clusterFrequency = 1.0 / packing.latticePeriod_m;
+  let detailFrequency = 1.0 / packing.latticeLobeRadius_m;
+  let cluster = svoProceduralNoise(point, vec3f(clusterFrequency), packing.seed ^ 0x68bc21ebu);
+  let detail = svoProceduralNoise(point, vec3f(detailFrequency), packing.seed ^ 0x02e5be93u);
+  let clustered = cluster * cluster * (3.0 - 2.0 * cluster);
+  let normalizedRadius = length(point / lobeRadii_m);
+  let interior = max(0.0, 1.0 - normalizedRadius);
+  let fadeLinear = clamp(interior / ${NOISE_FOLIAGE_EDGE_FADE.toFixed(8)}, 0.0, 1.0);
+  let fade = fadeLinear * fadeLinear * (3.0 - 2.0 * fadeLinear);
+  let rawDensity = packing.anisotropy * clustered + packing.lobeSpan * detail + packing.lobeSpanSpread;
+  let density = fade * rawDensity - packing.jitter;
+  let shortest_m = min(lobeRadii_m.x, min(lobeRadii_m.y, lobeRadii_m.z));
+  let noiseGradient_mInv = ${NOISE_FOLIAGE_VALUE_GRADIENT_BOUND.toFixed(8)}
+    * (1.5 * packing.anisotropy * clusterFrequency + packing.lobeSpan * detailFrequency);
+  let fadeGradient_mInv = 1.5 / (${NOISE_FOLIAGE_EDGE_FADE.toFixed(8)} * shortest_m);
+  let lipschitz_mInv = noiseGradient_mInv
+    + (packing.anisotropy + packing.lobeSpan + packing.lobeSpanSpread) * fadeGradient_mInv;
+  return -density / lipschitz_mInv;
+}
+
 fn svoClusterFieldDistance_m(point: vec3f, lobeRadii_m: vec3f, packing: SvoClusterPacking) -> f32 {
+  if (packing.field == SVO_CLUSTER_FIELD_NOISE_FOLIAGE) {
+    return svoClusterNoiseFoliageDistance_m(point, lobeRadii_m, packing);
+  }
   if (packing.field == SVO_CLUSTER_FIELD_SEEDED_LOBES) {
     return svoClusterSeededLobesDistance_m(point, lobeRadii_m, packing);
   }
@@ -3109,6 +3265,7 @@ fn svoClusterFieldDistance_m(point: vec3f, lobeRadii_m: vec3f, packing: SvoClust
 // fraction of the envelope would step across several features at once and hand
 // back the envelope's own.
 fn svoClusterFeatureRadius_m(lobeRadii_m: vec3f, packing: SvoClusterPacking) -> f32 {
+  if (packing.field == SVO_CLUSTER_FIELD_NOISE_FOLIAGE) { return 0.5 * packing.latticeLobeRadius_m; }
   if (packing.field == SVO_CLUSTER_FIELD_SEEDED_LOBES) {
     let shortest_m = min(lobeRadii_m.x, min(lobeRadii_m.y, lobeRadii_m.z));
     return max(packing.smoothRadius_m, packing.lobeSpan * shortest_m / max(packing.anisotropy, 1.0));
@@ -3132,14 +3289,12 @@ fn svoClusterDistance_m(point: vec3f, lobeRadii_m: vec3f, packing: SvoClusterPac
 }
 
 /**
- * A field's value and its exact gradient at one point.
+ * A field's value and gradient at one point.
  *
- * Every leaf of a cluster field is a sphere, an ellipsoid or the convex hull of
- * two spheres, and each of those has a closed-form outward normal. The two
- * combinators above them — a polynomial smooth minimum and one hard \`max\`
- * against the envelope — both carry a gradient forward exactly. So the whole
- * field differentiates in one pass, and the sampled twin below each distance
- * function is that pass.
+ * Geometric fields have closed-form outward normals carried through their
+ * combinators. Noise foliage differentiates the thresholded density locally at
+ * a fraction of its detail period, then the shared hard max still chooses
+ * between that result and the envelope exactly.
  */
 struct SvoClusterSample {
   distance_m: f32,
@@ -3304,7 +3459,22 @@ fn svoClusterLobeSample(point: vec3f, lobeRadii_m: vec3f) -> SvoClusterSample {
   return SvoClusterSample((magnitude - 1.0) * shortest_m, gradient * shortest_m);
 }
 
+fn svoClusterNoiseFoliageSample(point: vec3f, lobeRadii_m: vec3f, packing: SvoClusterPacking) -> SvoClusterSample {
+  let distance_m = svoClusterNoiseFoliageDistance_m(point, lobeRadii_m, packing);
+  let h = max(1e-6, packing.latticeLobeRadius_m * 0.001);
+  let dx = svoClusterNoiseFoliageDistance_m(point + vec3f(h, 0.0, 0.0), lobeRadii_m, packing)
+    - svoClusterNoiseFoliageDistance_m(point - vec3f(h, 0.0, 0.0), lobeRadii_m, packing);
+  let dy = svoClusterNoiseFoliageDistance_m(point + vec3f(0.0, h, 0.0), lobeRadii_m, packing)
+    - svoClusterNoiseFoliageDistance_m(point - vec3f(0.0, h, 0.0), lobeRadii_m, packing);
+  let dz = svoClusterNoiseFoliageDistance_m(point + vec3f(0.0, 0.0, h), lobeRadii_m, packing)
+    - svoClusterNoiseFoliageDistance_m(point - vec3f(0.0, 0.0, h), lobeRadii_m, packing);
+  return SvoClusterSample(distance_m, vec3f(dx, dy, dz) / (2.0 * h));
+}
+
 fn svoClusterFieldSample(point: vec3f, lobeRadii_m: vec3f, packing: SvoClusterPacking) -> SvoClusterSample {
+  if (packing.field == SVO_CLUSTER_FIELD_NOISE_FOLIAGE) {
+    return svoClusterNoiseFoliageSample(point, lobeRadii_m, packing);
+  }
   if (packing.field == SVO_CLUSTER_FIELD_SEEDED_LOBES) {
     return svoClusterSeededLobesSample(point, lobeRadii_m, packing);
   }
@@ -3336,9 +3506,9 @@ fn svoClusterSample(point: vec3f, lobeRadii_m: vec3f, packing: SvoClusterPacking
  *
  * Every leaf of the fold already knew its own normal. Carrying it through the
  * blend costs one \`mix\` per combination and deletes three quarters of the
- * evaluations — and the result is the exact gradient rather than a difference
- * over a step \`svoClusterFeatureRadius_m\` had to guess at, so the finest
- * features stop being smoothed by their own stencil.
+ * evaluations for geometric fields. Noise foliage is the deliberate exception:
+ * it takes six nearby density samples because there is no analytic lobe normal
+ * to reuse, and its step is tied to the authored detail period.
  */
 fn svoClusterLocalNormal(point: vec3f, lobeRadii_m: vec3f, packing: SvoClusterPacking) -> vec3f {
   return svoClusterUnitGradient(svoClusterSample(point, lobeRadii_m, packing).gradient);

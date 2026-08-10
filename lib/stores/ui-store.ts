@@ -16,13 +16,14 @@ import {
   type SvoConeTracingMode,
   type SvoPrimaryTraversalMode,
 } from "../svo-render-options";
+import { RENDER_STAGE_SWITCH_IDS, type RenderStageSwitchId } from "../render-stage-switches";
 import { DEFAULT_SVO_RENDER_DIAGNOSTICS, normalizeSvoRenderDiagnostics, type SvoRenderStageView } from "../svo-render-diagnostics";
 import { DEFAULT_SVO_RENDER_TUNING, normalizeSvoRenderTuning, type SvoRenderTuning } from "../svo-render-tuning";
 import { SVO_PIXEL_TRACE_LAYERS, type SvoPixelTraceLayer } from "../svo-pixel-trace";
 import { FLUID_CELL_TRACE_LAYERS, type FluidCellTraceLayer } from "../fluid-cell-trace";
 import type { GridOverlayConfig, GridOverlayMode } from "../webgpu-renderer";
 
-export type RightPanel = "visual" | "bodies" | "diagnostics" | "performance" | null;
+export type RightPanel = "visual" | "visuals" | "bodies" | "diagnostics" | "performance" | null;
 
 export const DEFAULT_RIGHT_PANEL_WIDTH = 620;
 export const MIN_RIGHT_PANEL_WIDTH = 300;
@@ -76,8 +77,15 @@ interface UIStore {
   silhouetteRefinementEnabled: boolean;
   /** Lighting visibility source: cone marches, exact SVO rays, or none at all. */
   svoConeTracingMode: SvoConeTracingMode;
+  /** Whether the indirect gather runs at all. Off withholds the work, not just its exposure. */
+  svoGlobalIlluminationEnabled: boolean;
   /** How primary visibility is resolved: rasterized brick proxies, or the traversal megakernel. */
   svoPrimaryTraversal: SvoPrimaryTraversalMode;
+  /**
+   * Frame-graph stages withheld from the encode, so the frame total moves by
+   * what each was worth. Ablation, not quality: see `render-stage-switches`.
+   */
+  disabledRenderStages: readonly RenderStageSwitchId[];
   /** Which published render-stage plane replaces the composited image. */
   svoStageView: SvoRenderStageView;
   /** Cached light slot the per-light cone visibility view decodes. */
@@ -155,6 +163,8 @@ interface UIStore {
   setSvoAmbientOcclusionEnabled: (enabled: boolean) => void;
   setSilhouetteRefinementEnabled: (enabled: boolean) => void;
   setSvoConeTracingMode: (mode: SvoConeTracingMode) => void;
+  setSvoGlobalIlluminationEnabled: (enabled: boolean) => void;
+  setRenderStageDisabled: (stage: RenderStageSwitchId, disabled: boolean) => void;
   setSvoPrimaryTraversal: (mode: SvoPrimaryTraversalMode) => void;
   setSvoStageView: (view: SvoRenderStageView) => void;
   setSvoStageLightSlot: (slot: number) => void;
@@ -203,7 +213,9 @@ export const useUIStore = create<UIStore>((set) => ({
   svoAmbientOcclusionEnabled: DEFAULT_SVO_LIGHTING_OPTIONS.ambientOcclusionEnabled,
   silhouetteRefinementEnabled: DEFAULT_SVO_LIGHTING_OPTIONS.silhouetteRefinementEnabled ?? false,
   svoConeTracingMode: DEFAULT_SVO_LIGHTING_OPTIONS.coneTracingMode ?? "cones",
+  svoGlobalIlluminationEnabled: DEFAULT_SVO_LIGHTING_OPTIONS.globalIlluminationEnabled ?? true,
   svoPrimaryTraversal: DEFAULT_SVO_LIGHTING_OPTIONS.primaryTraversal ?? "raster",
+  disabledRenderStages: [],
   svoStageView: DEFAULT_SVO_RENDER_DIAGNOSTICS.stageView,
   svoStageLightSlot: DEFAULT_SVO_RENDER_DIAGNOSTICS.lightSlot,
   svoMaximumTraversalDepth: DEFAULT_SVO_RENDER_DIAGNOSTICS.maximumTraversalDepth,
@@ -245,6 +257,18 @@ export const useUIStore = create<UIStore>((set) => ({
   setSvoAmbientOcclusionEnabled: (svoAmbientOcclusionEnabled) => set({ svoAmbientOcclusionEnabled }),
   setSilhouetteRefinementEnabled: (silhouetteRefinementEnabled) => set({ silhouetteRefinementEnabled }),
   setSvoConeTracingMode: (svoConeTracingMode) => set({ svoConeTracingMode }),
+  setSvoGlobalIlluminationEnabled: (svoGlobalIlluminationEnabled) => set({ svoGlobalIlluminationEnabled }),
+  // Kept in the canonical stage order rather than click order, so the set has
+  // one spelling: it is the identity the renderer keys frame reuse and the
+  // trace context by, and two orders would be two pipelines to the averager.
+  setRenderStageDisabled: (stage, disabled) => set((state) => {
+    const already = state.disabledRenderStages.includes(stage);
+    if (already === disabled) return state;
+    const next = disabled
+      ? RENDER_STAGE_SWITCH_IDS.filter((id) => id === stage || state.disabledRenderStages.includes(id))
+      : state.disabledRenderStages.filter((id) => id !== stage);
+    return { disabledRenderStages: next };
+  }),
   setSvoPrimaryTraversal: (svoPrimaryTraversal) => set({ svoPrimaryTraversal }),
   setSvoStageView: (svoStageView) => set({ svoStageView }),
   setSvoStageLightSlot: (svoStageLightSlot) => set((state) => ({

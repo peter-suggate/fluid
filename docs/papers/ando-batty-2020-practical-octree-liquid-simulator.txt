@@ -1,0 +1,1071 @@
+A Practical Octree Liquid Simulator with Adaptive Surface Resolution
+RYOICHI ANDO, National Institute of Informatics, Tokyo
+CHRISTOPHER BATTY, University of Waterloo, Canada
+
+
+
+
+Fig. 1. Top: a seaplane (wingspan: 11m; height: 4.3m) takes off from a lake (30m depth) at high speed. Effective resolution: 1024 × 1024 × 512. Compute time:
+2.85 minutes per video frame. Bottom: the background octree cells, exhibiting a wide range of resolutions.
+
+We propose a new adaptive liquid simulation framework that achieves highly                      complexity greatly increases the difficulty of implementation and main-
+detailed behavior with reduced implementation complexity. Prior work has                        tainability, potentially making it infeasible for practitioners. We therefore
+shown that spatially adaptive grids are efficient for simulating large-scale                    present new algorithms for adaptive simulation that are comparatively easy
+liquid scenarios, but in order to enable adaptivity along the liquid surface                    to implement yet efficiently yield high quality results. First, we develop a
+these methods require either expensive boundary-conforming (re-)meshing                         novel staggered octree Poisson discretization for free surfaces that is sec-
+or elaborate treatments for second order accurate interface conditions. This                    ond order in pressure and gives smooth surface motions even across octree
+                                                                                                T-junctions, without a power/Voronoi diagram construction. We augment
+Authors’ addresses: Ryoichi Ando, National Institute of Informatics, Tokyo, rand@nii.ac.        this discretization with an adaptivity-compatible surface tension force that
+jp; Christopher Batty, University of Waterloo, Canada, christopher.batty@uwaterloo.ca.
+                                                                                                likewise supports T-junctions. Second, we propose a moving least squares
+                                                                                                strategy for level set and velocity interpolation that requires minimal knowl-
+Permission to make digital or hard copies of all or part of this work for personal or
+classroom use is granted without fee provided that copies are not made or distributed           edge of the local tree structure while blending near-seamlessly with standard
+for profit or commercial advantage and that copies bear this notice and the full citation       trilinear interpolation in uniform regions. Finally, to maximally exploit the
+on the first page. Copyrights for components of this work owned by others than the              flexibility of our new surface-adaptive solver, we propose several novel
+author(s) must be honored. Abstracting with credit is permitted. To copy otherwise, or          extensions to sizing function design that enhance its effectiveness and flexi-
+republish, to post on servers or to redistribute to lists, requires prior specific permission
+and/or a fee. Request permissions from permissions@acm.org.                                     bility. We perform a range of rigorous numerical experiments to evaluate
+© 2020 Copyright held by the owner/author(s). Publication rights licensed to ACM.               the reliability and limitations of our method, as well as demonstrating it on
+0730-0301/2020/7-ART32 $15.00                                                                   several complex high-resolution liquid animation scenarios.
+https://doi.org/10.1145/3386569.3392460
+
+
+                                                                                                          ACM Trans. Graph., Vol. 39, No. 4, Article 32. Publication date: July 2020.
+32:2 • Ryoichi Ando and Christopher Batty
+
+
+CCS Concepts: • Computing methodologies → Physical simulation.                Positive Definite (SPD) matrix is desired, in order to access the nu-
+                                                                              merical benefits of Preconditioned Conjugate Gradients (PCG), we
+Additional Key Words and Phrases: fluid simulation, liquid, octrees
+                                                                              offer a slight modification in certain geometric configurations that
+ACM Reference Format:                                                         nevertheless provides qualitatively indistinguishable results.
+Ryoichi Ando and Christopher Batty. 2020. A Practical Octree Liquid Simu-        With this foundation for surface-adaptive liquid simulation in
+lator with Adaptive Surface Resolution. ACM Trans. Graph. 39, 4, Article 32   place, we present several additional enhancements to its expressive-
+(July 2020), 17 pages. https://doi.org/10.1145/3386569.3392460                ness, quality, and convenience. To support surface-tension effects in
+                                                                              the presence of adaptivity, we propose a new T-junction compatible
+1    INTRODUCTION                                                             approach based on a reinterpretation of the uniform grid method
+Simulation practitioners deciding whether to adopt a given method             of Enright et al. [2003]. To simplify interpolation while minimizing
+must consider how best to realize their ultimate objectives with lim-         additional dissipation, we adopt a Moving Least Squares (MLS) strat-
+ited time and resources, both human and computational. The imple-             egy that has much less dependence on the intricate local structure of
+mentation complexity and expected benefits of a method are there-             the octree, while yielding the same result as trilinear interpolation
+fore critical factors. For example, staggered grids, FLuid-Implicit-          in uniform regions. To take full advantage of the surface-adaptivity
+Particle (FLIP) [Zhu and Bridson 2005], and Affine-Particle-in-Cell           offered by our method, an effective dynamic octree sizing function is
+(APIC) [Jiang et al. 2015] have been widely incorporated into the             also critical; we therefore propose several extensions to prior sizing
+film production toolkit due to their relative ease of implementation,         function methods to better track moving details, improve temporal
+proven reliability, and clearly demonstrated advantages. On the               coherence, offer user-controllability, and reduce octree initialization
+other hand, spatially adaptive fluid simulation has seen compara-             and adaptation costs.
+tively slow adoption in visual effects [Nielsen and Bridson 2016],               In summary, the main novel contributions of this paper are:
+despite a long history of work on this topic. We believe there are
+primarily two reasons for this: significant implementation costs,                 • A surface-adaptive octree liquid simulation framework with
+due to algorithmic complexity, and difficulties in achieving perfor-                reduced implementation complexity.
+mance gains on actual simulations, as compared to highly optimized                • A new pair of pressure discretizations for octree T-junctions
+regular grid codes.                                                                 near liquid surfaces that offer smooth surface motion and
+   All adaptive schemes inevitably exhibit greater complex than                     qualitatively indistinguishable results, and exhibit either sym-
+regular grids, but this is especially the case for methods that al-                 metric positive definiteness or strict second order accuracy.
+low adaptivity along the surface itself. For example, tetrahedral                 • A compatible octree surface tension force that supports vary-
+schemes [Ando et al. 2013; Clausen et al. 2013; Misztal et al. 2012]                ing surface resolution by generalizing the method of Enright
+require comparatively elaborate mesh generation and traversal. The                  et al. [2003].
+overset grids of English et al. [2013] generate unstructured Voronoi              • An approach to easily interpolate velocity and level set val-
+cells at grid-grid boundaries, similar to pure Voronoi and power                    ues near T-junctions based on Moving Least Squares, which
+diagram schemes [Brochu et al. 2010; de Goes et al. 2015; Zhai                      transitions seamlessly to trilinear interpolation on regular
+et al. 2018]. Aanjaneya et al. [2017] uses an implicit power diagram                cells.
+layered on top of an octree for efficiency, but the connectivity is               • Several enhancements to sizing function design that together
+nevertheless complex to precompute and manipulate (e.g., requiring                  provide artist control and more effective grid adaptation ac-
+extra diagonal neighbors and large precomputed lookup tables).                      cording to key features of the motion and geometry.
+   Therefore, the aim of this paper is to simplify the algorithms nec-
+essary to achieve surface-adaptive octree liquid simulation without              Along the way, we suggest a set of complementary algorithms
+compromising the quality of the resulting visual details. We provide          to round out our high-quality liquid simulation pipeline. This in-
+an extensive variety of numerical tests and practical evaluations of          cludes: Extended Narrow Band FLIP (EXNBFLIP) [Sato et al. 2018]
+our method, along with comparisons against the uniform staggered              to enrich the detail of splashes, an octree grid construction that does
+grid method, so that practitioners can evaluate the benefits and              not require explicit balancing, and a cell-based adaptation of dual
+expected performance gains that our method makes possible.                    contouring [Ju et al. 2002] for reconstructing adaptive surfaces from
+   At the heart of our method is a novel adaptive grid Laplace oper-          cell-centered octree level set data.
+ator that supports free surface and solid boundary conditions in the
+presence of level transitions. For each cell, its stencil involves only
+the neighboring cells with which it shares a face in the octree. That         2   PREVIOUS WORK
+is, compared to the prior hybrid octree/power diagram method of               Spatial adaptivity for fluid simulation has a long history in computer
+Aanjaneya et al. [2017], our method works directly on the basic oc-           graphics, as well as computational fluid dynamics. We primarily
+tree and requires neither additional diagonal neighbor connectivity           focus our review on the former for brevity.
+nor elaborate precomputation.                                                   Octree discretizations of fluid dynamics were first considered in
+   Our Laplace discretization comes in two flavors. If strict sec-            computational physics by Popinet [2003] with a non-symmetric
+ond order accuracy is desired at the free surface, our approach               scheme. Subsequently, Shi and Yu [2004] developed the first octree-
+yields a non-symmetric Poisson system which can, for example, be              based adaptive method to animate smoke and Losasso et al. [2004]
+efficiently solved with preconditioned BiCGStab. If a Symmetric               proposed the first octree-based liquid solver on non-graded trees.
+
+ACM Trans. Graph., Vol. 39, No. 4, Article 32. Publication date: July 2020.
+                                                                   A Practical Octree Liquid Simulator with Adaptive Surface Resolution •                         32:3
+
+
+
+
+Fig. 2. A pair of liquid bunnies in zero gravity collapse due to surface tension and eventually merge (top), simulated with varying octree resolution (middle),
+including adaptive surface detail (bottom). Effective resolution: 2563 . Compute time: 1.6 minutes per video frame.
+
+
+The latter method was improved to second order accuracy in pres-                  smoke animation, with Chentanez et al. [2007] extending these
+sure [Losasso et al. 2006] with a minor modification, thereby elim-               ideas to liquid animation. Support for embedded/sub-grid bound-
+inating problematic motion artifacts. These methods can be used                   aries in adaptive Delaunay tetrahedral meshes (with a Voronoi dual
+with standard cut-cell and/or ghost-fluid methods to support sec-                 mesh) was proposed by Batty et al. [2010], which is made possible
+ond order accuracy with irregular solid [Batty et al. 2007; Ng et al.             by the absence of T-junctions; Ando et al. [2013] similarly showed
+2009] and free surface [Enright et al. 2003] boundary conditions,                 a finite element-like ghost fluid discretization on tetrahedra that
+respectively. However, doing so requires the entire boundary to be                offers varying resolution along the liquid surface, supported by a
+uniformly refined so that it does not interact with T-junctions (grid             novel surface-adaptive sizing function. Voronoi meshes can likewise
+level transitions); this may be tremendously wasteful depending                   incorporate embedded boundaries and support adaptivity as illus-
+on the scenario under consideration. Ferstl et al. [2014] proposed a              trated by Brochu et al. [2010], including surface tension, building
+finite element-based cut-cell discretization for octree-based fluids              on the earlier point-based Voronoi liquid solver of Sin et al. [2009].
+with free surfaces, but again assumed a uniformly refined interface.              A closely related alternative is power diagrams [de Goes et al. 2015;
+Nielsen and Bridson [2016] similarly proposed a finite element-based              Zhai et al. 2018] which possess a primal-dual mesh orthogonality
+approach on (generalized) octrees used within the Bifrost simulator,              that Voronoi diagrams also share. Aanjaneya et al. [2017] observed
+using mass-lumping to achieve a sparser Laplace stencil. While the                that a graded octree could be conceptually overlaid with a power di-
+details are not described in their paper, the framework currently                 agram to effectively eliminate T-junctions from the pressure solver,
+supports adaptivity along solid boundaries, but not at free surfaces              and thereby recover accurate support for irregular embedded bound-
+(R. Bridson, personal communication, April 27, 2020). Setaluri et al.             aries that cross grid levels. However, compared to our work, this
+[2014] presented a new data structure to efficiently support octrees              entails either explicit power diagram meshing or complex precom-
+using a pyramid of sparsely allocated grids.                                      putation of geometric cases, and gives a somewhat denser structure
+   Unstructured or semi-structured tetrahedral and/or polyhedral                  in the Poisson matrix. Many of the preceding schemes adopt special-
+meshes are an attractive alternative for adaptivity, since they do not            ized mesh-dependent interpolation schemes for velocity or level set
+generally exhibit T-junction configurations. Klingner et al. [2006]               values; an exception is the (conceptually meshless) Moving Least
+was the first to exploit spatially adaptive tetrahedral meshes for                Squares [Nealen 2004] approach used for tetrahedral meshes by
+
+
+                                                                                             ACM Trans. Graph., Vol. 39, No. 4, Article 32. Publication date: July 2020.
+32:4 • Ryoichi Ando and Christopher Batty
+
+
+Feldman et al. [2005]. We propose a related scheme that is tailored                                Table 1. List of symbols used in the paper.
+to the octree setting to avoid dissipation and ensure continuity with
+uniform (trilinear) regions. MLS has also been used by Sousa et al.                                      Sections from 4.1 to 4.5
+[2019] inside the Poisson solve to construct ghost data for non-                     Sym       Type     Location/Dim Description
+graded octree discretizations that yield second order gradients (in                    u       Vector   Continuous Incompressible velocity
+the absence of complex boundaries), and by Guittet et al. [2015] for                  {u}      Vector   Face centers Discretized velocity above
+more costly quadratic interpolation, using inverse distance weights                   u∗       Vector   Continuous Advected velocity
+rather than our trilinear kernel. MLS has seen many more applica-                    {u ∗ }    Vector   Face centers Discretized advected velocity
+tions in animation, including recent improvements to the material                      p       Scalar   Continuous Pressure
+point method [Hu et al. 2018].                                                        {p}      Vector   Cell centers Discretized pressure on cells
+   A large variety of additional adaptivity strategies have been pre-                  k       Integer  Per face       Reference number of a face
+sented in the literature, which we survey briefly below. The use of                    ∇       Operator R → R3         Gradient operator
+overset uniform grids in axis-aligned (Adaptive Mesh Refinement or                     ∇·      Operator R3 → R         Divergence operator
+AMR) or more general configurations is traditional in computational                   [∇]      Matrix   Faces × Cells Discretized gradient operator
+fluid dynamics [Berger and Oliger 1984]. The latter case is some-                    [∇]k      Matrix   1 × Cells      kth row of the above matrix
+times referred to as a Chimera grid as considered, for example, by                   [∇]T      Matrix   Cells × Faces Discretized −∇· operator
+English et al. [2013] who used a Voronoi diagram to stitch different                  ek       Vector   Per face       Face normal (unit vector)
+regular grids together. Localized regions of tall cells were considered               [A]      Matrix   Faces × Faces Area fraction (diagonal)
+by Irving et al. [2006] and Chentanez and Müller [2011] to avoid                      [F ]     Matrix   Faces × Faces Inverse of fluid fraction (diag)
+the cost of simulating deep liquid regions that have little impact on                 [V ]     Matrix   Faces × Faces Face volume (diag)
+the surface. Zhu et al. [2013] suggested using more general axially                    ϕ       Scalar   Continuous Level set of liquid
+stretched regular grids for adaptivity in multiple directions. Oth-                   {ϕ}      Vector   Cell centers Discretized level set
+ers have considered warped [Ibayashi et al. 2018] and curvilinear                      n       Vector   Continuous Liquid surface normal
+[Azevedo and Oliveira 2013] grids, which maintain the connectiv-                      Qk∗      Set      Per face       All the cells referenced in [∇]k
+ity of a uniform grid but significantly deform to locally increase                    Qk       Set      Per face       Cells inside liquid in Qk∗
+resolution or match object boundaries. Lastly, adaptive Lagrangian                    Wk       Scalar   Per face       Scalar coefficient per face
+schemes for conforming tetrahedral meshes have also been explored                                         Sections from 4.5 to 7
+(e.g., [Clausen et al. 2013; Misztal et al. 2012]), and while these can              {u ⋆ }    Vector   Continuous Pre-modified u ∗
+support surface-adaptivity including surface tension, they suffer                    ϕ solid   Scalar   Continuous Level set of solid
+from significant remeshing costs.                                                    N (·)     Function R3 → R         Trilinear shape function
+                                                                                     S(·)      Function R3 → R         Sizing function
+3 METHOD OVERVIEW                                                                     {S }     Scalar   Cell centers Sizing value
+3.1 Notation                                                                           κ       Constant N/A            Surface tension parameter
+For clarity, hereafter [·] denotes a matrix (or discrete linear operator)            {κH }     Scalar   Cell centers Scaled mean curvature
+and {·} denotes a discretized variable expressed in vector form.                       x       Vector   Per cell/face  Discretized sample position
+Symbols without [] or {} express continuous variables/operators                        p       Vector   Arbitrary      Query position
+or a single-valued scalar/vector field. For a vector variable qi the
+subscript denotes the ith scalar element of the vector. A single
+                                                                                    integrate time. For interface tracking we use the level set method
+subscript i on a matrix variable denotes the ith row of the matrix.
+                                                                                    [Osher et al. 2004] and enforce second order accurate boundary
+We use qT to express the transpose of a matrix/vector. A list of                    conditions both on free surfaces [Enright et al. 2003] and solids
+symbols is available in Table 1. While our derivation is non-trivial,               [Batty et al. 2007; Ng et al. 2009]. We later describe an (optional)
+the resultings equations are relatively straightforward; we indicate                extension to incorporate extended narrow band FLIP [Sato et al.
+equations that are important for the final implementation using a                   2018] for enriched splash details.
+gray background. Throughout, we use the notation <vids/xxx.mp4>                        We use basic semi-Lagrangian advection for both the velocity and
+to indicate specific supplemental video materials.                                  the level set due to its ease of use. MacCormack advection is also
+                                                                                    possible, but as Selle et al. [2008] discuss, first order semi-Lagrangian
+3.2    Overview                                                                     advection is recommended for velocity near liquid surfaces anyway.
+We simulate liquid by solving the incompressible Euler equations,                   We did not observe significant improvement in animation quality
+              ∂u             1                                                      using MacCormack, and therefore we did not prefer it, given its
+                 + u · ∇u = − ∇p + д,                ∇ · u = 0,               (1)   added storage and computational cost. This is illustrated in our
+              ∂t             ρ
+                                                                                    supplemental material in <vids/maccormack.mp4>. The added cost
+where u, t, ρ, p and д denote velocity, time, density, pressure and                 of MacCormack may be worth paying in smoke simulation contexts.
+gravity, respectively. For convenience, we set ρ = 1 for liquid, and                   Similar to previous methods, we start with construction of the
+treat air as a vacuum with ρ = 0. For regular cells, we use a stan-                 octree grid. Next, we advect the level set and velocity values from the
+dard staggered grid layout and operator-splitting [Bridson 2015] to                 previous step’s octree grid and simultaneously assign the resulting
+
+ACM Trans. Graph., Vol. 39, No. 4, Article 32. Publication date: July 2020.
+                                                                   A Practical Octree Liquid Simulator with Adaptive Surface Resolution •                       32:5
+
+
+values to the new octree grid (as first demonstrated for tetrahedra by
+Klingner et al. [2006]). Optionally, we seed extended FLIP particles
+and advect/delete existing ones. We then enforce incompressibility
+through Chorin’s projection [Chorin 1968]. Finally, we redistance
+the level set and extrapolate velocity outwards.
+
+4 OCTREE PRESSURE DISCRETIZATION
+4.1 Pressure projection overview
+Since the central component of our method is the pressure pro-
+jection, we begin with a brief review of this step. Let {u ∗ } be the
+                                                                                Fig. 4. 2D discrete gradient (left) and the volume (right) on a T-junction
+divergent velocity field after advection has been performed. The                face. c k 1 ,c k 2 ,c k 3 denote coefficients of [∇]k : the gradient of the kth face
+projection starts with solving a linear system,                                 in the face normal direction.
+            − [∇]T [V ][A][F ][∇]{p} = −[∇]T [V ][A]{u ∗ },             (2)
+or, more simply,                                                               the center of the large cell. Finally, a finite difference estimate of the
+                 [∇]T [V A][F ∇]{p} = [∇]T [V A]{u ∗ },                 (3)    gradient at the face is constructed using the difference of the average
+                                                                               pressure value and that of large cell divided by L. The analogous
+where [V ], −[∇]T , [∇], [A], and [F ] denote, respectively, the volume        procedure is employed for the 3D case (that is, the coefficients for
+of a face (not the volume of a cell), a discrete divergence operator, a        smaller cells will be 1/(4L) in 3D while L remains the same). Note
+discrete gradient operator, a diagonal matrix of fluid area fractions          that in this way the differentiation direction is aligned with the face
+(second order accurate Neumann boundary conditions for solids                  normal, and as such overall second order accuracy in pressure is
+[Ng et al. 2009]) and the inverse of a diagonal liquid fraction matrix         preserved (in the absence of boundary conditions for now) [Batty
+(second order accurate Dirichlet boundary conditions for liquid                et al. 2010; Losasso et al. 2006]. Note that this is not the case for
+[Enright et al. 2003]). If we assume that grid cells are all uniform, [V ]     some adaptive methods [Chentanez et al. 2007; Feldman et al. 2005;
+can simply be an identity matrix. Next, the solution for the pressure          Losasso et al. 2004]. Gradients on faces of regular cells are computed
+{p} is used to update the divergent velocity {u ∗ } to complete the            with standard centered finite differences. To summarize, let [∇]k be
+projection:                                                                    the kth row of [∇] where k denotes an (integer) reference to a face.
+                        {u} = {u ∗ } − [F ][∇]{p}.                     (4)     Then [∇]k is given in 2D by
+To form (3) the key question is how to discretize [∇], [F ∇] and [V A],
+                                                                                           [∇]k2D = sgn(face) −1 1/2 1/2 /(1.5∆x),                     (5)
+                                                                                                                                  
+which we detail in the next subsections.
+
+4.2   Discretizing spatial variables                                           where the leftmost entry corresponds to a large cell, and the re-
+                                                                               maining entries to small cells. The expression sgn(face) ∈ {−1, 1}
+We discretize spatial variables
+                                                                               indicates the sign of the face direction relative to the large cell,
+according to the method of
+                                                                               which is 1 for Figure 4, for example. The symbol ∆x is the grid cell
+[Losasso et al. 2006]. Consistent
+                                                                               size of the smaller side. Similarly, [∇]k in 3D is given by
+with staggered regular grids, we
+sample pressure and level set val-                                                  [∇]k3D = sgn(face) −1 1/4 1/4 1/4 1/4 /(1.5∆x).
+                                                                                                                                    
+ues at the center of cells and ve-
+locity components on faces. At                                                                                                                                    (6)
+T-junction faces, we sample ve-                                                 For faces incident on two regular cells,
+locity only at the center of the
+                                          Fig. 3. Locations of pressure                                [∇]k = −1 1 /∆x,                                           (7)
+                                                                                                                      
+large (parent) face; the incident
+                                          (yellow circle) and velocity (blue
+small (child) faces effectively in-
+                                          and red arrows).                     for both 2D and 3D (a sign flip is not needed). Therefore, for faces
+herit this velocity. We always as-
+sume a 2:1 graded tree for sim-                                                whose incident cell centers are all inside the liquid, either (5), (6) or
+plicity, as did Aanjaneya et al. [2017]). This is illustrated in Figure 3.     (7) is plugged into (3) as [F ∇]k .
+
+4.3   Discretizing the gradient operator                                        4.4    Assembling the diagonal matrix
+This subsection describes the computation of [∇] in (3). Once [∇]              This subsection describes the computation of [V A] in (3). For con-
+is available, we can compute −[∇]T (in practice, this is done by               venience, we use the same terminology "volume" when referring to
+a local matrix transpose), noting that [∇]T = −[∇·]. Figure 4 left             face (edge) area in 2D and face volume in 3D. Figure 4 right illustrates
+illustrates a 2D example of the discrete gradient along the horizontal         a 2D example of the face volume on a T-junction. As in our gradient
+direction on a T-junction. We first compute the average pressure               expressions, the same length L is used to measure the distance be-
+value and average position between the two smaller cells’ centers.             tween incident cell centers. The remaining dimensions are straight-
+Next, we measure the distance L between this average position and               forward to compute, leading to the expressions V2D = 3∆x 2 for
+
+                                                                                           ACM Trans. Graph., Vol. 39, No. 4, Article 32. Publication date: July 2020.
+32:6 • Ryoichi Ando and Christopher Batty
+
+
+volume in 2D, and V3D = 6∆x 3 for volume in 3D. When a face                         Wojtan [2013].) Plugging the expressions (10) in for p and ϕ in (11)
+                                                                                    and simplifying gives:
+crosses a solid boundary, we compute the area fraction 0 < A < 1
+which encodes the non-solid volume fraction of the face, i.e., one                                                             . Õ
+minus the face’s solid fraction [Ng et al. 2009]. The product V A is                            ∇p     =
+                                                                                                            ©Õ
+                                                                                                            ­      θ i {p}i ® n ­
+                                                                                                                            ª   ©
+                                                                                                                                        θ i {ϕ}i ®
+                                                                                                                                                 ª
+                                                                                                                                                             (12)
+inserted as the diagonal entry of [V A] in (3) for that face.                                               «i ∈Qk          ¬   «i ∈Qk           ¬
+4.5    Second order accuracy on T-junctions near surfaces                                                      Õ               . Õ
+                                                                                                       =           w i {p}i ® n ­        w i {ϕ}i ® .        (13)
+                                                                                                            ©                ª   ©                 ª
+                                                                                                            ­
+The preceding sections are suf-
+                                                                                                            «i ∈Qk               «i ∈Qk
+ficient to achieve a second or-
+                                                                                                                             ¬                     ¬
+der accurate pressure projection                                                    Notice that in (13) the θ parameters completely vanish and we are
+on simple domains and the liq-                                                      only left with the choice of w without constraints (except when the
+uid interior, and is consistent                                                     w i are all zeros). Hence, the w i need not necessarily sum to 1.
+with the method of Losasso et al.                                                      Now, let [∇] be a discrete gradient operator (matrix) on a set of
+[2006]. However, careful treat-                                                     values {q}i , where {q}i denotes arbitrary quantities sampled on
+ment of non-axis-aligned surface                                                    the cell centers, including cells outside the liquid. Up to this point
+configurations is known to be es-                                                   [∇] has no dependence whatsoever on the free surface boundary; it
+sential for ensuring smooth mo-                                                     is simply a discrete operator used to approximate ∇q. Recall that,
+tion [Enright et al. 2003]. This                                                    given [∇], a discrete divergence operator is conveniently given
+subsection therefore describes                                                      as −[∇]T and the Laplace operator ∇ · ∇ in the absence of free
+the computation of [F ∇] in (3) on                                                  surfaces is approximated as −[∇]T [∇]. Since this is the product of
+T-junction faces crossing an ir-                                                    a matrix and its transpose, the resulting linear system is positive
+regular liquid surface. Once [F ∇]                                                  semidefinite by construction, and with at least one free surface
+is available, we can form and                                                       (Dirichlet boundary value) it becomes SPD. Naturally we wish to
+                                        Fig. 5. Second order accurate
+solve (3). Consider three cells                                                     impose that our resulting linear system near surfaces is also SPD.
+                                        free surface boundary condi-
+incident on a T-junction that           tions on a T-junction.                         Our next task is to determine the component of the pressure
+crosses the interface (Figure 5).                                                   gradient in the face-normal direction, ek · ∇p, where ek denotes the
+Cell centers inside the liquid are                                                  normal of the kth face, i.e., an axis-aligned unit vector. Let c k j be
+colored yellow and the outside center is colored red. In the discus-                the jth element of a single-row matrix [∇]k (that is, c k j = [∇]k j ).
+sion below, we assume that all the spatial variables are linear within              In this setting, we have
+the T-junction cells, and any quadratic or higher order changes are                                                            Õ
+ignored (which was also implicitly assumed in earlier derivations).                                    ek · n = [∇]k {ϕ} =             c k j {ϕ}j ,          (14)
+Under these conditions, pressure p and level set value ϕ along the                                                            j ∈Qk∗
+line p1 and p2 are given by
+                                                                                    In the above we have used the relation n = ∇ϕ, which holds since
+                   p = θ 1p 1 + θ 2p 2 ,     ϕ = θ 1ϕ 1 + θ 2ϕ 2,             (8)   ϕ is a signed distance field. The symbol Qk∗ denotes the set of all
+            θ 1 = w 1 /(w 1 + w 2 ),       θ 2 = w 2 /(w 1 + w 2 ),           (9)   cells referenced in [∇]k , including cells outside the liquid. Using
+where w 1 and w 2 are arbitrary numbers that can be freely chosen                   (14) with our pressure gradient approximations in (11) and (13), the
+for convenience. Notice that the constraint θ 1 + θ 2 = 1 is imposed                pressure gradient component in the face normal direction is
+by construction. Hence, the equations above describe either an                                         pn            p
+                                                                                      ek · ∇p = ek ·      = (ek · n) ϕ                                       (15)
+interpolation or an extrapolation based on the two data points.                                         ϕ
+More generally, a linear combination of an arbitrary number of data
+points is given by                                                                               ©Õ                   ª© Õ              .
+                                                                                                                                       ª ©Õ
+                                                                                              = ­­        c k j {ϕ}j ®® ­     w i {p}i ® ­      w i {ϕ}i ® . (16)
+                                                                                                                                                         ª
+       Õ                   Õ                        . Õ
+  p=        θ i {p}i , ϕ =     θ i {ϕ}i , θ i = w i       wj ,   (10)                              j ∈Q
+                                                                                                 « k
+                                                                                                        ∗                i ∈Q
+                                                                                                                      ¬« k             ¬ «i ∈Qk          ¬
+        i ∈ Qk                   i ∈ Qk                          j ∈ Qk
+                                                                                    Since this statement holds independent of the choice of w, we can
+where Qk denotes a set of indices in [∇]k for which {ϕ}i < 0, indi-                 specifically choose w j = c k j . By doing so, we get the following
+cating that cell center i resides in the liquid. The θ values again form            equations:
+a partition of unity. Since the gradient of a function is perpendicular
+to its isosurfaces, and our boundary conditions assume the pressure                                                                     .
+on the surface (and outside) is p = 0, the interior pressure gradient
+                                                                                                ©Õ                   ª© Õ              ª ©Õ
+                                                                                     ek · ∇p = ­­        c k j {ϕ}j ®® ­     c ki {p}i ® ­      c ki {ϕ}i ® . (17)
+                                                                                                                                                          ª
+near the surface can be approximated as                                                           j ∈Q ∗                i ∈Q           ¬ «i ∈Qk
+                                                                                                « k                  ¬« k                                 ¬
+                                 p−0          pn
+                                      
+                         ∇p =            n=       ,                  (11)           Recalling that we impose pi = 0 outside the liquid, we have
+                                   ϕ           ϕ                                                  Õ                Õ
+where n is the liquid surface normal in the vicinity of the T-junction                                 c ki {p}i =   c k j {p}j = [∇]k {p}.                  (18)
+cells. (A similar approximation was used by Bojsen-Hansen and                                     i ∈Qk              j ∈Qk∗
+
+
+ACM Trans. Graph., Vol. 39, No. 4, Article 32. Publication date: July 2020.
+                                                                         A Practical Octree Liquid Simulator with Adaptive Surface Resolution •                     32:7
+
+
+                                                                                     the SPD property ensures that PCG can be used and, moreover, we
+                                                                                     have in practice observed no resulting visual artifacts across a wide
+                                                                                     variety of simulation scenarios. A set of comparisons is provided
+                                                                                     in Figure 13. Note that clamping to zero does not necessarily imply
+                                                                                     zero diagonal terms in the resulting linear system: the contributions
+                                                                                     from other non-degenerate faces will still make the diagonal terms
+                                                                                     positive, except for the extreme case in which all the adjacent faces
+                                                                                     are degenerate (or solid). In our examples, we handle this by using
+Fig. 6. Left: example of a degenerate zone in 2D with the liquid surface
+                                                                                     a very small positive number (Wk = 10−2 ) rather than 0 for faces
+normal pointing upward. When the liquid surface lies within the red range,
+                                                                                     adjacent to a cell for which at least one adjacent cell’s face contains
+Wk < 0 and special care is needed. Right: the correct (face) normal
+direction (blue arrow) vs. the flipped normal direction (red arrow). Leaving         a solid fraction. Finally, the above expressions give [F ∇] as either
+Wk < 0 corresponds to non-physically flipping the normal direction of the
+                                                                                                                 [∇] {ϕ} 
+pressure gradient, leading to "kink" artifacts.                                                         [F ∇]k = Õk        1                   1 ,                   (24)
+                                                                                                                                                
+                                                                                                                                        ···
+                                                                                                                     {ϕ}i
+                                                                                                                     i ∈Qk
+Substituting (18) into (17) yields
+                                                                                      for the fully second order case and
+             ©Õ                   ª© Õ                    ª.© Õ
+  ek · ∇p = ­­        c k j {ϕ}j ®® ­­        c k j {p}j ®® ­     c ki {ϕ}i ® (19)
+                                                                            ª
+                                                                                                             [F ∇]k = max(Wk , 0) [∇]k ,                             (25)
+               j ∈Q ∗                  j ∈Q ∗                i ∈Q
+             « k                  ¬« k                    ¬ « k             ¬
+          = Wk [∇]k {p},                                                      (20)    for the SPD case (in practice, albeit not unconditionally). See (21) for
+                                                                                      the computation of Wk . As described above, one may (infrequently)
+where
+                                                                                      need to swap zero for a very small positive number if positive
+                                                                                      definiteness should be unconditionally guaranteed. When forming
+                                                                                      the above equations only the actual degrees of freedom of pressure
+                     ©Õ                   ª.© Õ
+               Wk = ­­        c k j {ϕ}j ®® ­     c ki {ϕ}i ® .              (21)
+                                                            ª
+                       j ∈ Q∗                i ∈Q                                     must be considered. Hence, entries not in the actual degrees of
+                     « k                  ¬ « k             ¬
+                                                                                      freedom will be dropped. Our extension to support the presence of
+Therefore, this choice for w j gives                                                  surface tension forces is described in Section 4.6. Interestingly, for
+                           ∇p = diag(W )[∇]{p}.                              (22)     regular faces our second order accurate approach produces exactly
+                                                                                      the same formula as the familiar ghost fluid method [Enright et al.
+Applying the discrete divergence operator −[∇]T to (22) yields our                    2003]. This can be seen by observing
+discrete approximation of the Laplacian accounting for free surfaces:
+                                                                                              ϕG      pG − p L   ϕG − ϕ L      [∇]k [ϕG ϕ L ]T
+                     ∇ · ∇p ≈ −[∇]T diag(W )[∇]{p}.                          (23)      pG =      pL ,          =          pL =                 pL ,                  (26)
+                                                                                              ϕL        ∆x        ϕ L ∆x             ϕL
+The resulting linear system is only assuredly SPD if Wk > 0
+(e.g., by Theorem 4.2.1 of Golub and Van Loan [2012]), but it is                     where pG , p L , ϕG , ϕ L denote ghost pressure, pressure in the liquid
+not uncommon to encounter geometric configurations for which                         cell, level set on the ghost cell, level set on the liquid cell. Notice
+Wk < 0. For example, such a case occurs when the interface lies                      that (26) is exactly the same as both (24) and (25). Our technique can
+entirely within the red region in Figure 6, left. In the worst case this             alternatively be seen as an adaptation of the warped grid method of
+results in negative diagonal terms in the resulting linear system.                   Ibayashi et al. [2018] to a variant of finite volume methods (their
+   When we encounter a case where Wk < 0, we can circumvent                          method is based on a finite element method); however, we also
+it either by setting w i = 1 or clamping Wk = 0. Note that it is                     provide a more rigorous evaluation and a fully second order accurate
+possible to leave W without any modification at all; however, we                     non-symmetric alternative in the case of degenerate situations.
+very occasionally observed small kinks on the surface when liquids
+nearly settle using this indefinite form. Physically, this is because                 4.6   Surface tension forces
+Wk < 0 corresponds to a flip in the normal direction of the pressure                 We develop a new surface tension formulation to complement our
+gradient with respect to the liquid surface, as illustrated in Figure 6,             surface-adaptive pressure projection. We do so by generalizing the
+right, which should not be allowed in practice.                                      approach of Enright et al. [2003] to an arbitrary Chorin-style pro-
+   The choice of setting w i = 1 retains full second order accuracy,                 jection method [Chorin 1968]. Using H and κ to denote the mean
+but the resulting linear system is asymmetric and therefore PCG                      curvature (of the form avoiding factors of two) and surface tension
+cannot be used to solve it. We find that preconditioned BiCGStab can                 coefficient, respectively, we revisit (11) and replace the zero surface
+efficiently solve the system, although it lacks some of the favorable                pressure with κH motivated by the Young-Laplace law:
+numerical and convergence properties of PCG.                                                                         
+                                                                                                                       p − κH
+                                                                                                                                
+   The choice of clamping Wk = 0 instead sacrifices strict second                                               ∇p =              n.                    (27)
+                                                                                                                          ϕ
+order accuracy in exchange for recovering symmetric positive defi-
+niteness. Interestingly, this is also equivalent to assuming a solid face            We compute H via level set differentiation [Bridson 2015], though a
+in that position, which is of course somewhat nonphysical. However,                  mesh-based evaluation could be used instead [Brochu et al. 2010;
+
+                                                                                               ACM Trans. Graph., Vol. 39, No. 4, Article 32. Publication date: July 2020.
+32:8 • Ryoichi Ando and Christopher Batty
+
+
+                                                                                     5 OCTREE INTERPOLATION
+                                                                                     5.1 Moving Least Squares Approach
+                                                                                     We adapt a Moving Least Squares (MLS) approach for velocity and
+                                                                                     level set interpolations near T-junctions (for a concise summary of
+                                                                                     MLS, we recommend the review by Nealen [2004]). Regions where
+                                                                                     MLS is applied are shown in light blue, dark blue and green in the
+                                                                                     first row of Figure 9. However, our MLS interpolation scheme im-
+                                                                                     plicitly categorizes the colored regions shown in this figure without
+                                                                                     explicit knowledge of the grid structure. This conveniently allows
+Fig. 7. Curvature/surface tension force computation on an octree grid. Red           us to interpolate arbitrarily positioned variables using the same
+cells are air and blue cells are liquid. The dashed line indicates the liquid        routine. For example, when we interpolate an arbitrary discrete
+interface. Yellow circles represent active (i.e., interior) pressure samples and     variable {q} (e.g., a level set or velocity value) at a query point
+blue circles represent mean curvature evaluation points. Red and blue arrows         p = [px , py , pz ], we first collect a set of nearby samples. We discuss
+represent the surface tension forces computed by applying [F ∇]{κH } on              our sample collection strategy in Section 5.2. Let ∆x be a vector of
+the incident faces.                                                                  which the ith element represents the size of the ith cell/face, and let
+                                                                                     x i = [x i , yi , zi ] be the position of the ith sample. The interpolated
+                                                                                     value q(p) using MLS is given by
+Thürey et al. 2010]. Equation 27 is equivalent to
+                          p−0          κH − 0
+                                           
+                                                                                                                                                  {q}1 
+                  ∇p =           n−             n,                            (28)
+                           ϕ             ϕ                                                                   py pz 1 (Z DZ ) Z D  ...  ,
+                                                                                                                                                          
+                                                                                                                                 T       −1 T
+                                                                                             q(p) = px                                                           (33)
+                                                                                                                                                        
+which can in turn be conveniently rewritten using our discrete
+                                                                                                                                                          
+                                                                                                                                                 {q} 
+                                                                                                                                                  n
+gradient operator as
+                                                                                           x 1    y1    z 1 1                   N (p − x 1, ∆x 1 ) 
+                             ∇p = [F ∇] {p − κH } .                           (29)         .       ..    ..                               ..
+                                                                                                                              ©                       ª
+                                                                                       Z =  ..                  ,  D  =  diag                           ® ,    (34)
+                                                                                                                                                        ®
+                                                                                                     .     .                                .
+                                                                                                                              ­  
+The gradient operator [F ∇] is independent of the discretization                                                             ­                        
+                                                                                           x      yn    zn 1
+                                                                                            n                                 « N (p − x n , ∆x n ) ¬
+                                                                                                                                                       
+choice, and henceforth [F ∇] can be either (24) or (25). This is made
+                                                                                                                                3
+possible by our generalization from (27) to (29). (Our same final                                                             Ö                 ||r j ||
+                                                                                                                   N (r, h) =       max(1 −              , ε),   (35)
+discrete equations could also be developed in the manner of Losasso                                                                                h
+                                                                                                                               j=1
+et al. [2006], but the derivations would depend explicitly on which
+of our two gradient operators was adopted.)                                          where n denotes the number of points. The length h is the cell size
+   Notice that in (29) we store mean curvature at the same position                  of the grid level corresponding to a given sample point. The safety
+as the pressure samples, as illustrated in Figure 7, but the mean                    constant ε is used to avoid zero weights; this can occur if sample
+curvature itself is nevertheless still computed on the exact liquid                  points are outside the trilinear kernel distance, as illustrated in dark
+surface position. In this way, a cell may have multiple mean cur-                    blue in Figure 9. We set ε = 10−2 for all our tests, and solved the
+vature values; the appropriate value is selected depending on the                    normal equations linear system directly with a Cholesky solver.
+relevant face in the gradient computation. On T-junction cells, we                      We use trilinear interpolation for regular cells (red regions in Fig-
+compute mean curvature per T-junction, hence the same mean cur-                      ure 9), except where the shape function of a larger grid resolution
+vature is assigned to multiple liquid cells. Next, we substitute (29)                overlaps (green regions in Figure 9). Because our MLS gives the ex-
+into (3) to get a new linear system,                                                 act same formula as trilinear interpolation when applied on regular
+       [∇]T [V A][F ∇]{p} = [∇]T [V A] {u ∗ } + [F ∇]{κH } .
+                                                          
+                                                                  (30)               cells, our interpolation scheme is C 0 continuous, with the exception
+                                                                                     of the boundary of the dark blue region where ε has an effect. This
+The new velocity is then given as                                                    equivalence is only true because we chose (35) for computing D,
+                    {u} = {u ∗ } + [F ∇]{κH } − [F ∇]{p}.                     (31)   and will not be the case if we choose different shape functions (e.g.,
+                                                                                     constant). We provide a sketch of a proof aided by a computer alge-
+In practice, it is convenient to instead simply pre-modify {u ∗ } as
+                                                                                     bra package in the supplemental material (interpolation.maxima).
+                          {u ⋆ } = {u ∗ } + [F ∇]{κH },                       (32)   This property also holds for 2D (bilinear interpolation).
+                                                                                        If desired, a fully C 0 continuous interpolant can be constructed
+and perform the standard projection on {u ⋆ } without considering                    by inserting a set of ghost samples with anisotropic (axially scaled)
+surface tension. This pre-modification of {u ∗ } interpretation was                  trilinear kernels, as shown in the second row of Figure 9. However,
+also employed by Ando et al. [2015] in a different context. Our                      this requires more explicit knowledge of the local grid structure,
+approach is therefore a decoupled, explicit, and sharp interface                     making the interpolation problem-specific (face centers vs. cell cen-
+application of the surface tension force which can be used with                      ters); it therefore comes with additional implementation complexity
+any gradient discretization, but remains mathematically equivalent                   and effort. In practice, we find that the above (mildly discontinuous)
+to the use of a boundary condition on the usual Poisson system                       interpolation scheme does not differ noticeably from the truly con-
+[Enright et al. 2003].                                                               tinuous interpolation scheme on actual simulations. A comparison
+
+ACM Trans. Graph., Vol. 39, No. 4, Article 32. Publication date: July 2020.
+                                                               A Practical Octree Liquid Simulator with Adaptive Surface Resolution •                      32:9
+
+
+(both face and cell interpolations) is provided in the supplemen-
+tal material (mildly discontinuous <vids/noncont_MLS.mp4>, C 0
+continuous <vids/c0_MLS.mp4>). We also provide a number of nu-
+merical tests to clarify the discontinuity error and the quality of the
+above modified C 0 continuous interpolation scheme in Figure 17.
+   Special care is needed near boundaries of the simulation domain
+because there may be insufficiently many nearby points. In such
+cases, we mirror points across the boundary, as illustrated in Figure 8,
+and     count       them       as     additional     ghost      values.
+
+   Note that mirrored ghost
+particles are generated only
+at the exterior (axis-aligned)
+domain boundary — we do
+not generate ghost particles
+within solids. As in our uni-
+form MAC solver, we ex-
+trapolate level set and veloc-
+ity values into solids, and
+use them during interpola-
+tion. Very thin solids may          Fig. 8. Mirrored values. Samples ad-
+cause “cross-talk” artifacts,       jacent to domain boundaries are mir-    Fig. 9. Top row: Our partially discontinuous MLS interpolation scheme,
+                                                                            applied to cell-centered data (left) and face-centered data (right). Trilinear
+which could potentially be          rored across the boundary to prevent
+                                    degenerate cases when performing        interpolation is performed in the red region, while MLS interpolation is
+addressed by adapting a one-
+                                    MLS interpolation.                      performed in the green, blue, and dark blue regions. Dark blue indicates
+sided interpolation strategy                                                the region where ε has an effect; the value across its boundary is not neces-
+(e.g., [Azevedo et al. 2016;                                                sarily continuous. Bottom row: A fully continuous MLS interpolation. The
+Guendelman et al. 2005]).                                                   discontinuity above is resolved by inserting ghost samples, shown as green
+   Notably, we do not perform any (temporary) nodal/element-                circles. The red rectangular boxes illustrate the boundaries of the anisotropic
+center velocity conversions [Aanjaneya et al. 2017; Batty et al. 2010;      trilinear shape functions, shown with half of their true widths and heights
+Brochu et al. 2010; Klingner et al. 2006; Losasso et al. 2004], which       for the sake of visual clarity. The blue lines and white circles represent the
+may require special care to prevent additional numerical diffusion.         interpolation points for constructing those ghost samples. In actual visual
+In our method, velocity is always separated into u,v,w components           simulations, the former discontinuous interpolation suffices.
+on faces, and our MLS interpolation scheme is applied indepen-
+dently to each. Hence, this potential source of numerical diffusion
+                                                                           p, and additionally incorporate all the "one-ring" neighbors of that
+is avoided.
+                                                                           sample; these are (implicitly) assigned a weight of ε by 35.
+
+5.2   Sample point collection                                               6   OCTREE SIZING FUNCTION AND CONSTRUCTION
+An initial set of nearby samples from an arbitrary position p is           A vital component of a spatially adaptive simulator is the design of a
+determined by the condition N (p − x, ∆x) > ε where x denotes a            scalar sizing function S : R3 → R to determine the required level of
+sample position and ∆x its cell (or face) size. A brute-force approach     local adaptivity. Much of the previous work primarily employed the
+could loop over all the samples and check if N (p − x, ∆x) > ε. This       distance to some geometry of interest (e.g., liquid surfaces or solid
+is a standard neighbor searching problem, for which a variety of           obstacles) [Aanjaneya et al. 2017; Chentanez et al. 2007; Ferstl et al.
+methods exists (e.g., [Arya et al. 1998; Li et al. 2012]). However, for    2014; Losasso et al. 2004]. Such distance-based criteria may suffice
+efficiency we exploit the local tree structure.                            when surfaces are uniformly resolved with the highest resolution
+   We first gather the trilinear interpolation weights corresponding       cells; however, surface adaptivity requires us to distinguish the
+to each active sample on every layer of the octree at p. Since a           relative importance of different regions of the surface itself.
+graded octree guarantees that all the nearby sample points lie in             To the best of our knowledge, in the graphics literature, the
+levels L and L + 1 (supposing that the level transition is smooth          only sizing function that adapts to surface detail is that of Ando et
+enough; if a sharp transition is present such that a cell contains both    al. [2013], which also considers velocity derivatives and curvature
+larger and smaller cell neighbors, one may also include the level          metrics. Our contribution is to improve these metrics even further
+L − 1), where L denotes a layer level, we can avoid looping over all       with the following four novel extensions:
+the layers in practice.                                                         • A temporal adaptivity mechanism for the sizing function
+   In most regions, the above sample collection scheme finds enough               (§6.1).
+points, except for the dark blue region in the Figure. When p falls             • A surface propagation method to precisely capture sharp
+within such a region, we first find the nearest active sample from                surface details during refinement (§6.2).
+
+                                                                                      ACM Trans. Graph., Vol. 39, No. 4, Article 32. Publication date: July 2020.
+32:10 •       Ryoichi Ando and Christopher Batty
+
+
+
+
+                                   <vids/s100.mp4>                                                                       <vids/s40.mp4>
+
+Fig. 10. Comparison of variable sizing strength. α = 1.0 (left) and α = 0.4 (right). Notice that cells inside the red circles have smaller sizes on the right. More
+simulations with alpha ranging from 0.0 to 1.0 with 0.2 intervals are provided in <vids/waterdrop_sizing/s00-100.mp4> (e.g., α = 0.4 corresponds to s40.mp4).
+
+
+      • A progressive refinement scheme to avoid accessing all the                   6.2    Propagating values outwards
+        high-resolution cells at the initial time step (§6.4).                       For simplicity, when performing an octree grid remeshing, we adopt
+      • An additional user parameter to control the degree of adap-                  a coarse-to-fine strategy. In doing so, we would hope that all the fine
+        tivity and conveniently blend the uniform and adaptive grid                  details are eventually captured by the refinement process. Unfortu-
+        structures (§6.5).                                                           nately, if we naively evaluate a sizing function only at the center of
+                                                                                     each coarse cell to decide if it should be subdivided, we would often
+6.1    Temporal adaptivity                                                           fail to refine where needed and thereby overlook fine details. To
+Sato et al. [2018] assigned a (metaphorical) heat variable to FLIP par-              ensure that all the interesting details are captured in the remeshing,
+ticles in the context of their extended narrow-band FLIP method. The                 we propose what we call a propagation method.
+heat dissipates as time progresses and its value is used in blending                    First, we assume that all relevant interesting details are concen-
+between the level set and the particle-based surfaces. The motivat-                  trated near liquid surfaces. At this point, we have two octrees: one
+ing principle is that any interesting detail or motion that emerges                  from the current time step and one for the next time step. Next,
+should not be immediately deleted in the next time step, but is in-                  we compute sizing values only on the cells adjacent to liquid in-
+stead likely to be carried with the flow for a period of time. We                    terfaces on the current step’s octree. These sizing values are then
+can apply an analogous idea to the design of our sizing function.                    propagated inwards/outwards into the liquid/air, similar to velocity
+Unlike Sato et al. [2018] though, we will not depend on FLIP parti-                  extrapolation. One iteration of our propagation rule is given by
+cles to carry heat, because we do not seed particles on coarse cells
+(Section 7.2).                                                                                                       m vm max({S }i jk , {S }Nm )
+                                                                                                                     Í
+                                                                                                     new
+                                                                                                {S         }i jk =                                  ,         (37)
+   First, assume that we already have sizing values {S t −∆t } stored on                                                        m vm
+                                                                                                                              Í
+the octree from the previous time step. We advect the sizing values
+in the same manner as the level set, denoting the result by {S t∗ }.                                  3 denotes cell volume and {S }
+                                                                                     where vm = ∆xm                                  Nm denotes the sizing
+(Because the octree structure at the previous and new steps will
+                                                                                     values on cell neighbors which share the same face, similar to a PDE-
+typically differ, we perform the semi-Lagrangian trace-back using
+                                                                                     based level set redistancing algorithm. As such, a cell is updated
+the old octree’s velocity, starting from the desired sizing function
+                                                                                     multiple times during the propagation, which may introduce exces-
+sample position on the new octree [Klingner et al. 2006]). Next,
+                                                                                     sive diffusion. To prevent such diffusion, we perform this update
+we evaluate the proposed sizing values for the next time step as
+                                                                                     rule up to five times per cell.
+{S t }. Finally, our new sizing value is computed for each point as
+max R(∆t){S t∗ }, {S t } , where
+                                                                                     6.3    Octree subdivision and smoothing adaptivity
+                                             (∆t /T2 )                               With the above propagated sizing values, we perform subdivision
+                                R(∆t) = T1               ,                    (36)
+                                                                                     on the next time step’s octree by the following procedures:
+
+andT1 andT2 are constants that control the rate at which the effect of                  (1) Locate the center of an octree cell p, and denote its cell size
+the old sizing value diminishes. This indicates that a variable q would                     as ∆x.
+be reduced to T1q after a specified period of time of T2 . We use T1 =                  (2) Evaluate the distance from the liquid surface, |ϕ |, using the
+0.9 and T2 = 0.01 seconds in our examples. An example of Figure 14                          level set values at that position.
+without this extension is shown in <vids/notemporal_cylinder.mp4>.                      (3) Interpolate the (propagated) sizing value at p as S(p).
+In addition to better tracking the motion of salient details, our                       (4) Subdivide if |ϕ | < ∆x and S(p) > 1/∆x.
+temporal modification also improves temporal coherence in the                           (5) Move on to the subdivided cells and recursively apply the
+refinement pattern (i.e., avoids flicker).                                                  above procedures.
+
+ACM Trans. Graph., Vol. 39, No. 4, Article 32. Publication date: July 2020.
+                                                                     A Practical Octree Liquid Simulator with Adaptive Surface Resolution • 32:11
+
+
+
+
+                                                                                    Unbalanced Configuration          One Dilaion                 Three Dilations
+
+
+Fig. 11. Our progressive remeshing, applied at the initial time step, correctly   Fig. 12. Adaptivity smoothing. Left: An unbalanced octree configuration.
+captures the high curvature at the edge of the hemisphere. Iterations proceed     Middle: Our "adaptivity smoothing" applied with one pass of dilation. Right:
+from left to right and top to bottom. Our top-down iterative remeshing            Two dilation passes. Our adaptivity smoothing operation not only eliminates
+avoids looping over all the finest level cells only to find where the octree      sharp transitions but also smooths out the transitions, in a user-controllable
+should be subdivided.                                                             fashion.
+
+
+                                                                                  subdivision is achieved. In our examples, three iterations was suffi-
+The above algorithm can be naively parallelized for each cell. It                 cient. An example of our initial progressive remeshing is shown in
+should be noted that this subdivision strategy does not yet guaran-               Figure 11.
+tee that the tree is graded; i.e., that each cell differs from its neighbor          We note that our progressive refinement may still overlook sharp
+by at most one level. Allowing more than one level of change would                sizing values since the coarse grid may not be resolved enough
+increase the algorithmic difficulty and potentially introduce unex-               to capture the value (this will not be the case after the first step
+pected visual artifacts (e.g., grid-aligned reflections due to steep              except for analytically represented geometries, such as sharp solids
+resolution changes [Söderström et al. 2010]). Explicit octree bal-                or ballistic FLIP particles) . When locations of such sharp sizing
+ancing [Isaac et al. 2012] could be used to eliminate such sharp                  values are known explicitly, we directly process the sizing field in a
+level transitions, but this entails additional implementation effort              local way to capture it (e.g., this is similar to how Boyd and Bridson
+and computational cost. Other tree-balancing methods have been                    [2012] (Figure 7) post-process their level set field to capture sub-grid
+based specifically on the distance to the surface, rather than the tree           particles).
+structure alone (e.g., [Cecil et al. 2006; Strain 1999]). However, such
+approaches are incompatible with our aim of surface-adaptivity.                   6.5    Controlling adaptivity strength
+   Instead, we propose "adaptivity smoothing", as follows:                        Oftentimes, we wish to control the strength of adaptivity, such
+   (1) Starting from the highest resolution (finest) level L, dilate              as blending uniform grids and a sharp adaptive pattern, because
+       active cells 3 times.                                                      uniform grids provide superior quality in animation (albeit at sig-
+   (2) Upsample the locations of cells on the coarse level L + 1, and             nificantly greater computational cost). Including a new blending
+       mark (coarse) cells as active at these locations.                          parameter α into a sizing function would fail since our subdivision
+   (3) If a coarse cell contains at least one fine cell but not all eight         algorithm also depends on the distance to the liquid surface. Instead
+       cells, mark the eight child cells as active.                               of modifying the sizing function, we achieve this by introducing a
+   (4) Move to one level coarser level. Recursively apply the same                pseudo cell size ∆x ∗ as
+       procedures for the remaining levels.                                                              ∆x ∗ = 2ln(∆x /∆x 0 )/ln(1+α ) ∆x 0,                       (38)
+The above simple refinement method not only removes very sharp                    where ∆x 0 denotes a cell size at the highest resolution layer, and
+transitions, but also naturally smooths out the spatial rate of refine-           0 < α < 1 denotes a blending coefficient. Setting α = 0 indi-
+ment as illustrated in Figure 12. The dilation count may be increased             cates a uniform grid and α = 1 dictates strong adaptivity. Note that
+to control the transition smoothness.                                             substituting α = 0 results in division by zero, and fully uniform
+                                                                                  grids should directly be used in this case. The pseudo cell size ∆x ∗ is
+6.4   Progressive refinement                                                      then used instead of ∆x to check if a subdivision criterion is met. A
+In the above algorithms, we assumed that we have an auxiliary                     comparison with different α is shown in Figure 10 and in the supple-
+octree from the previous step, which we use to perform value prop-                mental videos (α = 1.0: <vids/s100.mp4>, α = 0.4:<vids/s40.mp4>).
+agation. Unfortunately, neither an octree nor prior values are avail-             We leave the choice of α up to a practitioner’s discretion since
+able at the initial time step, so the aforementioned algorithm is not             it provides a balance between the desired visual quality and the
+applicable. Accessing every cell at the highest resolution is often               availability of computational time/resources.
+not a feasible solution for very large-scale scenarios.
+   We solve this problem by an iterative remeshing approach. We                   6.6    Sizing function
+start from a comparatively low resolution octree, and assign sizing               Up to this point we have not stated a specific sizing function, as we
+values on it. We then use the above algorithms to propagate values                believe any reasonable generic sizing function would be compatible
+and subdivide the octree. This iteration is repeated until sufficient             with the extensions described above. However, the specific sizing
+
+                                                                                             ACM Trans. Graph., Vol. 39, No. 4, Article 32. Publication date: July 2020.
+32:12 •       Ryoichi Ando and Christopher Batty
+
+
+
+
+                 <vids/naive_1st.mp4>                                         <vids/spd.mp4>                                <vids/2nd_order.mp4>
+
+
+Fig. 13. Comparison of different boundary conditions on free surfaces. Left: A naive first order accurate method. Center: Our SPD method of (25) . Right: Our
+truly second-order accurate method of (24). Notice that the naive first order accurate method results in a clear artifact in the region marked with a red circle
+while the SPD method in the middle produces indistinguishable results from the second order solution on the right. Note that we used a fixed sizing function
+field to keep the horizontal position of T-junctions in place on the free surfaces, to eliminate the chance that dynamically changing surface adaptivity could
+hide such artifacts.
+
+
+function we use is                                                                       resolution layer of the octree, both for simplicity and because our
+                                                                                         sizing function already suggests that these are the regions with the
+                                                        Õ  ∂ui  2
+                                                       v
+                                                       t
+            S(p) = γϕ |∇ · ∇ (ϕ + ϕ solid )| + γu                        ,    (39)       greatest need for fine details (although EXNBFLIP still uses its own
+                                                            i
+                                                                 ∂x i                    internal seeding strategy). This extension to EXNBFLIP is optional,
+                                                                                         and an example without it is shown in <vids/levelset.mp4>.
+where ϕ solid denotes a solid level set. The coefficients γϕ and γu
+denote weights, which we set to γϕ = 4 and γu = 3 except in Figure 1                     8     RESULTS
+for which we use γu = 0.032 because the Laplacian term of (39)
+is independent of spatial scale, but the velocity is dependent on                                      Table 2. Timing breakdowns of our examples.
+the expected maximal velocity. Note that S(p) has units of 1/m (as
+implied by Section 6.3, item (4)) so γϕ is unitless, and γu has units                                                 Timings (Seconds)
+of s/m.                                                                                              Description             Fig. 1   Fig. 2 Fig. 14       Fig. 15
+    We chose the velocity term in (39) because it conveniently re-                                  Time per step            21.96      9.27  20.16         16.12
+sponds to any non-translation motion and is easy to evaluate on                                 Time per video frame         171.01   96.26  140.42         98.01
+staggered grids (by contrast, the Jacobian of velocity is somewhat                               Level set advection          2.85      0.90   2.17         1.58
+complicated to evaluate on staggered grids). Although (39) tech-                                 Velocity advection           5.20      1.97   3.12         2.30
+nically also responds to rigid rotations, this can be regarded as a                                 Extrapolation             1.06      0.51   1.51         1.24
+source of vorticity, which is also an important feature. Note that we                                 Projection              1.21      0.35   1.63         0.95
+only evaluate the sizing function near liquid surfaces, and propagate                            Octree construction          1.14      0.62   1.29         0.96
+it inwards/outwards as in Section 6.2.                                                         Sizing value evaluation        4.22      1.90   2.46         1.94
+                                                                                                  Mesh generation             0.81      0.45   1.27         1.21
+7 IMPLEMENTATION                                                                                EXNBFLIP operations           4.74     N/A     6.38         5.95
+7.1 Surface mesh extraction and extrapolation                                                            Numbers / Ratio / Measured Video Frames
+We apply (a cell-centered variant of) Dual Contouring [Ju et al.                                    FLIP particles            632K     N/A   1288K        1167K
+2002] on the cell-centered signed distance (level set) field to extract                               Total cells             716K    201K   1319K        1042K
+liquid surfaces. For velocity extrapolation, we use a simple iterated                              Active fluid cells         332K      90K   647K         460K
+averaging technique. Since we coarsen grid resolution rapidly away                             Degenerate T-junctions       33.43% 11.13% 19.59%          28.43%
+from the surface on the air side, extrapolation can be quickly per-                          Corresponding video frames        216       0     194          353
+formed over the entire domain. Similarly, we redistance the level
+set throughout the entire domain (i.e., not just near the surfaces)                         We ran our simulations on an Intel(R) Core(TM) i9-9900K (Linux)
+using a variant of serial Fast Marching [Sethian 1996] on the set of                     except for Figure 2 which was run on an Intel(R) Core(TM) i7-6900K
+neighboring cells.                                                                       CPU 3.20GHz (Linux). Timing breakdowns are summarized in Ta-
+                                                                                         ble 2. Since the timings significantly fluctuate depending on the
+7.2    Adding extended narrow band FLIP                                                  complexity of the scene, we chose representative challenging mo-
+We incorporated extended narrow-band FLIP (EXNBFLIP) [Sato                               ments and averaged 100 time steps (10 frames for video) around
+et al. 2018] into our pipeline because it enriches our results both                      those moments. The mesh generation is not included in "Time per
+in advection (lessened dissipation near liquid surfaces) and visual                      step" since it is performed only when exporting a video frame. The
+expression (particulate splashes) without any special modification                       corresponding video frame number is shown in the last row of the
+to the original EXNBFLIP. EXNBFLIP is used only on the highest                           table. Unless noted, all of our simulations were run with our (mildly
+
+ACM Trans. Graph., Vol. 39, No. 4, Article 32. Publication date: July 2020.
+                                                                A Practical Octree Liquid Simulator with Adaptive Surface Resolution • 32:13
+
+
+
+
+                Fig. 14. A moving cylinder stirs a tank. Effective resolution: 512 × 256 × 512. Compute time: 2.34 minutes per video frame.
+
+
+
+
+    Fig. 15. Swimming fish jumping over a shallow rocky waterfall. Effective resolution: 320 × 160 × 640. Compute time: 1.64 minutes per video frame.
+
+
+discontinuous) MLS interpolation and the conditionally second-                   dynamic octree adaptivity might act to hide such artifacts. We do,
+order accurate (i.e., SPD) boundary conditions on pressure at free               however, observe error on an extreme numerical experiment (Fig-
+surfaces using (25). A range of experiments demonstrating the nu-                ure 16). A more rigorous analysis of this finding is left for future
+merical convergence orders of our Laplace discretizations, including             work.
+second order for the non-symmetric scheme, are provided in the                      For all simulations including uniform grids, we used the Algebraic
+supplemental material.                                                           Multigrid code of Demidov [2019] to precondition the BiCGSTAB
+   Before reviewing our main results, we highlight the fact that our             and CG solvers, with a relative residual tolerance of 10−4 . We
+(technically first order accurate) pressure boundary conditions of               also used a variant of global/regional volume correction schemes
+(25) do not introduce any noticeable visual differences from the                 (e.g.,[Kim et al. 2007; Thürey et al. 2010]) to compensate long-term
+truly second-order accurate (non-symmetric) solutions on any of                  accumulated volume loss/gain of liquid.
+our tests. We found this a surprising result, given that for many
+of examples a significant fraction of the T-junctions exhibited the
+"degenerate" configurations that require clamping, as shown in the
+                                                                                 8.1   Moving cylinder
+second row from the bottom in Table 2.                                           Figure 14 demonstrates the ability of our method to effectively
+   We emphasize that a naive first order pressure treatment (i.e., set-          handle general liquid simulation scenarios. Notice that our auto-
+ting p = 0 without a proper gradient scaling) near T-junctions, even             matic sizing function and octree construction capture the detailed
+while using proper ghost fluid on regular cells, clearly manifests               motion without creating artifacts or seams near level transitions.
+objectionable artifacts as shown in Figure 13. As such, our novel free           The simulation had a resolution of 512 × 256 × 512, and took 2.34
+surface treatment does effectively eliminate these artifacts despite             minutes per video frame. To give a rough sense of the expected
+technically being only first order accurate in grid refinement tests.            storage and time savings on this scene, we have conducted two
+Figure 13 also used a fixed adaptivity pattern to keep T-junctions               simulations: one with our method and another with the uniform
+in the same (horizontal) locations, eliminating the possibility that             grid method <vids/cylinder_mac.mp4> [Bridson 2015]. Both were
+                                                                                 run on an Intel(R) Core(TM) i9-9980XE CPU 3.00GHz (Linux). The
+
+                                                                                           ACM Trans. Graph., Vol. 39, No. 4, Article 32. Publication date: July 2020.
+32:14 •       Ryoichi Ando and Christopher Batty
+
+
+average liquid cell count for the uniform method was 33.3 million,               A few apparently axis-aligned splash structures may be noted in
+while our method was 0.29 million, i.e., 114.8× fewer cells, thus             Figure 1 (bottom). We attribute this to the horizontally fast-moving
+requiring significantly less memory. Regarding the simulation time,           liquid, in combination with the usual (grid-dependent) manner in
+the uniform method took 26 minutes per video frame while ours                 which level sets unintentionally lose thinning sheets. Nevertheless,
+took 63.77 seconds. This is suggestive of a 24.4× speed-up.                   we did not perceive the underlying motion to be objectionable in the
+   We also ran the same setup using the truly second-order accurate           corresponding video sequence, nor did we observe grid-dependency
+method (24) with a BiCGSTAB solver, and found that the average                in our other simulations.
+time for the projection was 1.33× slower, indicating that this is also           To approximately evaluate the speed-up achieved, we simulated
+a practical choice. A comparison of the same scene using (24) with            the same scenario using the uniform method but with the water
+a BiCGSTAB solver is shown in <vids/2nd_cylinder.mp4>.                        depth reduced to 2.3m <vids/seaplane_mac.mp4>. The average time
+                                                                              per video frame for the first 3 simulation seconds was 38.46 minutes
+8.2    Fish jumping over a rocky waterfall                                    (suggestive of a 13.49× speed-up).
+Figure 15 demonstrates that our method can provide highly detailed
+interactions of streaming water through rocks, while the calm bulk
+regions of the liquid are cheaply simulated with coarse cells. This           9 DISCUSSION AND LIMITATIONS
+simulation had a resolution of 320 × 160 × 640 resolutions, and a cost        9.1 Discussion
+of 1.64 minutes per video frame. Later in the simulation, a small             9.1.1 Sparse grid and linear system solve. For of ease of implemen-
+school of fish enters the domain and jumps over the rocks. In those           tation and maintainability, our octree used a naive tile-based sparse
+moments, our dynamic sizing function subdivides coarse cells and              grid with each tile having a resolution of 163 ; however, our method
+allows the simulator to capture the ensuing fine, detailed splashes.          could potentially be sped up even further by switching our sparse
+                                                                              grid engine to the heavily optimized OpenVDB [Museth 2013]
+8.3    Merging bunnies                                                        or SPGrid [Setaluri et al. 2014]. We used an Algebraic Multigrid
+Figure 2 shows two liquid bunny shapes deforming due to surface               method [Demidov 2019], but we expect that a dedicated geometric
+tension under zero gravity and eventually merging. The simula-                multigrid solver [Aanjaneya et al. 2017; Setaluri et al. 2014] and fast
+tion resolution was 256 × 256 × 256, with a compute time of 1.27              Laplacian streaming without explicit topology encoding [Setaluri
+minutes per video frame. Notice that our dynamic sizing function              et al. 2014] could provide further speed-ups.
+indicates the relative importance of different surface regions, pro-
+ducing varying grid resolution across the bunny. Nonetheless, we
+did not observe any visual artifacts near grid level transition thanks        9.1.2 MLS interpolation. We designed a new MLS-based interpo-
+to our novel treatment of surface tension for T-junctions. Unfor-             lation which connects in a nearly continuous way with trilinear
+tunately, for this single example our method did not outperform               interpolation on regular cells. While in general MLS interpolants
+the uniform grid method (for example, at the first time step the              can suffer from instability when too few samples are used, since
+MAC method took 5 seconds while our method took 9.27 seconds),                the set of possible (local) octree configurations is highly restricted,
+because the overhead added to our algorithms (e.g., sizing func-              we did not encounter such situations. Our use of MLS interpolation
+tion evaluation, MLS interpolation, octree construction) exceeds the          could be naturally extended to other simulation contexts (e.g., over-
+performance benefit of using our adaptive strategy.                           set grids [English et al. 2013]) without loss of generality because it
+   One may be tempted to increase the grid resolution; however,               handles interpolation using points and trilinear kernels alone, in
+explicit surface tension forces come with a severe stability restriction      grid-oblivious fashion. However, specific to octree grids, the im-
+(e.g., ∆t must be O(∆x 3/2 ) [Sussman and Ohta 2009]), and naively            proved node-based interpolation proposed by Setaluri et al. [2014]
+increasing grid resolution drastically slows down the simulation.             may be a practical alternative to our method, although it involves
+One possible direction to circumvent this issue would be to develop           more explicit dependence on the local octree structure.
+an implicit approximation for surface tension [Zheng et al. 2006] or             Some examples in Figure 17 exhibit kinks because our interpo-
+an approach based on volume-preserving mean curvature [Sussman                lation is C 0 , not C 1 ; this is consistent with standard (multi-)linear
+and Ohta 2009], which we leave for future work.                               interpolation. Increasing the MLS polynomial degree could increase
+                                                                              accuracy and smoothness (e.g., Guittet et al. [2015] considered a
+                                                                              quadratic basis on octrees), although this comes with potential
+8.4    Seaplane taking off from a lake
+                                                                              for instabilities (overshooting) and significantly increased costs for
+Finally, Figure 1 highlights an ideal case for our method with a              neighbor finding and matrix inversion.
+very large-scale scenario where the standard uniform grid method
+would fail. In this example, a seaplane (wingspan: 11m; height: 4.3m)
+takes off from a lake (30m depth) at high speed, leaving complicated          9.1.3 Choice of pressure discretization at free surfaces. In the above
+splashes and waves in its wake. Such visually impactful features              examples, we mainly chose the SPD form (25) because of CG’s
+are also impossible to fully express with a pure level set method at          efficiency; however, as also mentioned in Section 8.1, the non-
+this resolution, thereby also illustrating the benefit of coupling our        symmetric system of (24) also works without numerical difficul-
+method with EXNBFLIP. This scene has an effective resolution of               ties. Hence, the choice of (24) or (25) is left up to the practitioner’s
+1024 × 1024 × 512, simulated at 2.85 minutes per video frame.                 preference.
+
+ACM Trans. Graph., Vol. 39, No. 4, Article 32. Publication date: July 2020.
+                                                                    A Practical Octree Liquid Simulator with Adaptive Surface Resolution • 32:15
+
+
+
+
+                 <vids/1st_tilted.mp4>                                   <vids/spd_tilted.mp4>                                           <vids/2nd_tilted.mp4>
+
+
+
+
+              <vids/1st_horizontal.mp4>                               <vids/spd_horizontal.mp4>                                       <vids/2nd_horizontal.mp4>
+
+
+Fig. 16. Error visualization of free surface boundary conditions (as in Figure 11 in the work of Batty et al. [2010]). A strong uniform gravity is added in surface’s
+normal direction. Yellow arrows visualize the error of the pressure gradient. Left: A naive first-order accurate method. Middle: Our method with an SPD system
+using (25). Right: Our truly second order accurate method (24). The first order accurate method produces error both on tilted (top) and horizontal (bottom)
+configurations. Our method with (25) also produces (smaller) error on the top but no error on the bottom. Our method with (24) is error-free in both cases.
+
+
+
+
+                  <vids/noncont_linear_cell.mp4>                           <vids/noncont_trig_cell.mp4>                                    <vids/noncont_trig_face.mp4>
+
+
+
+
+                  <vids/cont_linear_cell.mp4>                                 <vids/cont_trig_cell.mp4>                                     <vids/cont_trig_face.mp4>
+
+
+
+Fig. 17. Error visualization of our MLS interpolation schemes on different test cases. Top: our mildly discontinuous interpolation. Bottom: Fully C 0 continuous
+interpolation. Left pair: Cell-centered interpolation of a linear mode. Middle pair: Cell-centered interpolation of a trigonometric function. Right pair: Face-
+centered interpolation of a trigonometric function. Notice that both interpolation exactly schemes recover the linear modes (except for boundaries) while
+exhibiting some slight discontinuity for trigonometric functions in the top row.
+
+
+9.2   Limitations                                                                      CFL number. Although semi-Lagrangian advection and FLIP are
+9.2.1 Temporal adaptivity. We were able to significantly speed up                      unconditionally stable, using large CFL numbers introduces exces-
+the runtime over uniform grids using spatial, but not temporal,                        sive diffusion [Lentine et al. 2012]. While the method of Lentine et
+adaptivity. Therefore, doubling the effective resolution implies that                  al. enables simulation with large steps, it may still overlook some
+the time step size must be reduced by half to satisfy a reasonable                     visually interesting motions that would otherwise develop during
+
+
+                                                                                                    ACM Trans. Graph., Vol. 39, No. 4, Article 32. Publication date: July 2020.
+32:16 •       Ryoichi Ando and Christopher Batty
+
+
+large time steps. Incorporating temporal adaptivity (e.g., [Fang et al.       designed with ease of implementation in mind without sacrificing
+2018; Reinhardt et al. 2017]) is a promising research direction.              computational efficiencies or visual quality. The effectiveness of
+                                                                              these components is numerically verified through a range of tests
+9.2.2 Compromised accuracy. For many practical scenes (but not                and practical scenes. As a result, our method offers remarkably
+all) our method outperforms its uniform grid counterpart, though              detailed liquid simulations with surface adaptivity, at modest com-
+this comes at the cost of somewhat damped visual details. As has              putational cost, while being more accessible to many practitioners.
+previously been observed, we find that a uniform grid tends to better
+retain kinetic energy during simulations (e.g., motion remains lively
+                                                                              ACKNOWLEDGMENTS
+for longer durations) while our method damps out motion notice-
+ably faster (e.g., see an example using the uniform MAC method                This research was supported by the JSPS Grant-in-Aid for Young
+<vids/mac.mp4>). There are primarily two sources of this damp-                Scientists (18K18060) and the Natural Sciences and Engineering
+ing: a lack of resolution and excessive diffusion on coarse cells. A          Research Council of Canada (Grant RGPIN-04360-2014).
+lack of resolution means that the pressure solver cannot capture
+high-frequency details, such as small localized regions of vorticity.         REFERENCES
+Excessive diffusion means that the local CFL number may be too                Mridul Aanjaneya, Ming Gao, Haixiang Liu, Christopher Batty, and Eftychios Sifakis.
+                                                                                 2017. Power Diagrams and Sparse Paged Grids for High Resolution Adaptive
+small for the coarse cells because the time step is determined by                Liquids. ACM Trans. Graph. 36, 4, Article 140 (2017), 12 pages. https://doi.org/10.
+the highest resolution cells. Therefore the cell’s velocity diffuses             1145/3072959.3073625
+rapidly over a short time period due to semi-Lagrangian advection.            Ryoichi Ando, Nils Thürey, and Chris Wojtan. 2013. Highly Adaptive Liquid Simulations
+                                                                                 on Tetrahedral Meshes. ACM Trans. Graph. 32, 4, Article 103 (2013), 10 pages.
+The latter issue could be alleviated by the use of a bi-directional              https://doi.org/10.1145/2461912.2461982
+advection scheme [Qu et al. 2019] or high-order schemes [Heo and              Ryoichi Ando, Nils Thürey, and Chris Wojtan. 2015. A Dimension-Reduced Pressure
+                                                                                 Solver for Liquid Simulations. Comput. Graph. Forum 34, 2 (2015), 473–480. https:
+Ko 2010; Narain et al. 2019].                                                    //doi.org/10.1111/cgf.12576
+   We observed second order accuracy on free surfaces, but we could           Sunil Arya, David M. Mount, Nathan S. Netanyahu, Ruth Silverman, and Angela Y. Wu.
+not obtain empirical second order accuracy on Neumann boundaries                 1998. An Optimal Algorithm for Approximate Nearest Neighbor Searching Fixed
+                                                                                 Dimensions. J. ACM 45, 6 (1998), 891–923. https://doi.org/10.1145/293347.293348
+(solids) crossing T-junctions, as detailed in the supplemental mate-          Vinicius C Azevedo, Christopher Batty, and Manuel M Oliveira. 2016. Preserving
+rial. Although the accuracy of pressure on solid faces does not play             geometry and topology for fluid flows with thin obstacles and narrow gaps. ACM
+a major role in our examples, this inaccuracy might cause artifacts              Transactions on Graphics (TOG) 35, 4 (2016), 1–12.
+                                                                              Vinicius C Azevedo and Manuel M Oliveira. 2013. Efficient smoke simulation on
+in some scenarios (e.g., a liquid bead sliding down a slope).                    curvilinear grids. In Computer Graphics Forum, Vol. 32. 235–244.
+                                                                              Christopher Batty, Florence Bertails, and Robert Bridson. 2007. A fast variational
+9.2.3 Extended narrow band FLIP. We believe that EXNBFLIP is                     framework for accurate solid-fluid coupling. In ACM Transactions on Graphics (TOG),
+an effective extension to our pipeline, but we do observe some                   Vol. 26. ACM, 100.
+                                                                              Christopher Batty, Stefan Xenos, and Ben Houston. 2010. Tetrahedral embedded
+surface noise arising from the particle-based surface construction on            boundary methods for accurate and flexible adaptive fluids. In Computer Graphics
+calm surfaces. This noise eventually dissipates as the heat variable             Forum, Vol. 29. 695–704.
+                                                                              Marsha J Berger and Joseph Oliger. 1984. Adaptive mesh refinement for hyperbolic
+assigned on FLIP particles cools down; this noticeable artifact could            partial differential equations. Journal of computational Physics 53, 3 (1984), 484–512.
+be improved by designing another sizing function to prevent seeding           Morten Bojsen-Hansen and Chris Wojtan. 2013. Liquid surface tracking with error
+FLIP particles on calm regions or performing surface smoothing as                compensation. ACM Transactions on Graphics (TOG) 32, 4 (2013), 68.
+                                                                              Landon Boyd and Robert Bridson. 2012. MultiFLIP for Energetic Two-Phase Fluid
+a post-process (which we did not).                                               Simulation. ACM Trans. Graph. 31, 2, Article 16 (2012), 12 pages. https://doi.org/10.
+                                                                                 1145/2159516.2159522
+9.2.4 Conservation. Since semi-Lagrangian advection is not con-               Robert Bridson. 2015. Fluid simulation for computer graphics. AK Peters/CRC Press.
+servative [Lentine et al. 2011], our method does not exactly preserve         Tyson Brochu, Christopher Batty, and Robert Bridson. 2010. Matching fluid simulation
+                                                                                 elements to surface geometry and topology. ACM Trans. Graph. 29, 4 (2010), 1–9.
+momentum/mass during advection. This may result in noticeable                    https://doi.org/10.1145/1778765.1778784
+artifacts such as drifting center of mass, e.g., Figure 2. A momen-           Thomas C. Cecil, Stanley J. Osher, and Jianliang Qian. 2006. Simplex free adaptive tree
+                                                                                 fast sweeping and evolution methods for solving level set equations in arbitrary
+tum/mass conserving advection scheme [Chentanez and Müller                       dimension. J. Comput. Phys. 213, 2 (2006), 458 – 473. https://doi.org/10.1016/j.jcp.
+2012; Lentine et al. 2011] might help with this.                                 2005.08.020
+                                                                              Nuttapong Chentanez, Bryan E. Feldman, François Labelle, James F. O’Brien, James F.
+9.2.5 Surface adaptivity. Lastly, our method works particularly well             O’Brien, and Jonathan R. Shewchuk. 2007. Liquid Simulation on Lattice-based Tetra-
+                                                                                 hedral Meshes. In Proceedings of the 2007 ACM SIGGRAPH/Eurographics Symposium
+for scenes where both calm and vibrant motions are present. When                 on Computer Animation (SCA ’07). 219–228. http://dl.acm.org/citation.cfm?id=
+the entire liquid surface is chaotic (e.g., stormy ocean waves) sur-             1272690.1272720
+face adaptivity may not be beneficial because the sizing function             Nuttapong Chentanez and Matthias Müller. 2011. Real-time Eulerian water simulation
+                                                                                 using a restricted tall cell grid. In ACM Transactions on Graphics (TOG), Vol. 30.
+would simply set all cells to the highest resolution. For such sce-              ACM, 82.
+narios, adding subgrid models such as FFT-based waves as a post-              Nuttapong Chentanez and Matthias Müller. 2012. Mass-Conserving Eulerian Liquid Sim-
+process [English et al. 2013] might be effective.                                ulation. In Proceedings of the ACM SIGGRAPH/Eurographics Symposium on Computer
+                                                                                 Animation (SCA ’12). 245–254.
+                                                                              Alexandre Joel Chorin. 1968. Numerical Solution of the Navier-Stokes Equations. Math.
+10    CONCLUSIONS                                                                Comp. 22, 104 (1968), 745–762. http://www.jstor.org/stable/2004575
+                                                                              Pascal Clausen, Martin Wicke, Jonathan R. Shewchuk, and James F. O’Brien. 2013.
+We have proposed a set of new methods for octree-based liquid                    Simulating Liquids and Solid-Liquid Interactions with Lagrangian Meshes. ACM
+simulation with a strong emphasis on practical cost-effectiveness.               Transactions on Graphics 32, 2 (2013), 17:1–15. https://doi.org/0.1145/2451236.
+                                                                                 2451243
+Each of our core algorithms (accurate free surface octree Laplacian,          Fernando de Goes, Corentin Wallez, Jin Huang, Dmitry Pavlov, and Mathieu Desbrun.
+MLS interpolation strategy, and sizing function computation) are                 2015. Power Particles: An Incompressible Fluid Solver Based on Power Diagrams.
+
+
+ACM Trans. Graph., Vol. 39, No. 4, Article 32. Publication date: July 2020.
+                                                                             A Practical Octree Liquid Simulator with Adaptive Surface Resolution • 32:17
+
+
+    ACM Trans. Graph. 34, 4, Article 50 (2015), 11 pages. https://doi.org/10.1145/2766901      Symposium on Computer Animation (SCA ’12). 97–106.
+D. Demidov. 2019. AMGCL: An Efficient, Flexible, and Extensible Algebraic Multigrid         Ken Museth. 2013. VDB: High-Resolution Sparse Volumes with Dynamic Topology.
+    Implementation. Lobachevskii Journal of Mathematics 40, 5 (2019), 535–546. https:          ACM Trans. Graph. 32, 3, Article 27 (2013), 22 pages. https://doi.org/10.1145/2487228.
+    //doi.org/10.1134/S1995080219050056                                                        2487235
+R. Elliot English, Linhai Qiu, Yue Yu, and Ronald Fedkiw. 2013. Chimera Grids for Water     Rahul Narain, Jonas Zehnder, and Bernhard Thomaszewski. 2019. A Second-Order
+    Simulation. In Proceedings of the 12th ACM SIGGRAPH/Eurographics Symposium                 Advection-Reflection Solver. Proc. ACM Comput. Graph. Interact. Tech. 2, 2, Article
+    on Computer Animation (SCA ’13). ACM, 85–94. https://doi.org/10.1145/2485895.              16 (2019), 14 pages. https://doi.org/10.1145/3340257
+    2485897                                                                                 Andrew Nealen. 2004.             An as-short-as-possible introduction to the least
+Doug Enright, Duc Nguyen, Frederic Gibou, and Ron Fedkiw. 2003. Using the particle             squares, weighted least squares and moving least squares methods for
+    level set method and a second order accurate pressure boundary condition for free          scattered data approximation and interpolation.             Technical Report. URL:
+    surface flows. In ASME/JSME 2003 4th Joint Fluids Summer Engineering Conference.           http://www.nealen.com/projects/mls/asapmls.pdf.
+    American Society of Mechanical Engineers Digital Collection, 337–342.                   Yen Ting Ng, Chohong Min, and Frédéric Gibou. 2009. An efficient fluid–solid coupling
+Yu Fang, Yuanming Hu, Shi-Min Hu, and Chenfanfu Jiang. 2018. A Tempo-                          algorithm for single-phase flows. J. Comput. Phys. 228, 23 (2009), 8807–8829.
+    rally Adaptive Material Point Method with Regional Time Stepping. Com-                  Michael B. Nielsen and Robert Bridson. 2016. Spatially Adaptive FLIP Fluid Simulations
+    puter Graphics Forum 37, 8 (2018), 195–204. https://doi.org/10.1111/cgf.13524              in Bifrost. In ACM SIGGRAPH 2016 Talks (SIGGRAPH ’16). ACM, Article 41, 2 pages.
+    arXiv:https://onlinelibrary.wiley.com/doi/pdf/10.1111/cgf.13524                            https://doi.org/10.1145/2897839.2927399
+Bryan E Feldman, James F O’brien, and Bryan M Klingner. 2005. Animating gases with          Stanley Osher, Ronald Fedkiw, and K Piechor. 2004. Level set methods and dynamic
+    hybrid meshes. In ACM Transactions on Graphics (TOG), Vol. 24. Citeseer, 904–909.          implicit surfaces. Appl. Mech. Rev. 57, 3 (2004), B15–B15.
+F. Ferstl, R. Westermann, and C. Dick. 2014. Large-Scale Liquid Simulation on Adaptive      Stéphane Popinet. 2003. Gerris: A Tree-Based Adaptive Solver for the Incompressible
+    Hexahedral Grids. IEEE Transactions on Visualization and Computer Graphics 20, 10          Euler Equations in Complex Geometries. J. Comput. Phys. 190, 2 (2003), 572–600.
+    (2014), 1405–1417. https://doi.org/10.1109/TVCG.2014.2307873                               https://doi.org/10.1016/S0021-9991(03)00298-5
+Gene H Golub and Charles F Van Loan. 2012. Matrix computations. Vol. 3. JHU press.          Ziyin Qu, Xinxin Zhang, Ming Gao, Chenfanfu Jiang, and Baoquan Chen. 2019. Efficient
+Eran Guendelman, Andrew Selle, Frank Losasso, and Ronald Fedkiw. 2005. Coupling                and Conservative Fluids Using Bidirectional Mapping. ACM Trans. Graph. 38, 4,
+    water and smoke to thin deformable and rigid shells. ACM Transactions on Graphics          Article 128 (2019), 12 pages. https://doi.org/10.1145/3306346.3322945
+    (TOG) 24, 3 (2005), 973–981.                                                            Stefan Reinhardt, Markus Huber, Bernhard Eberhardt, and Daniel Weiskopf. 2017. Fully
+Arthur Guittet, Maxime Theillard, and Frédéric Gibou. 2015. A stable projection                Asynchronous SPH Simulation. In Proceedings of the ACM SIGGRAPH / Eurographics
+    method for the incompressible Navier–Stokes equations on arbitrary geometries              Symposium on Computer Animation (SCA ’17). ACM, Article 2, 10 pages. https:
+    and adaptive Quad/Octrees. J. Comput. Phys. 292 (2015), 215–238.                           //doi.org/10.1145/3099564.3099571
+Nambin Heo and Hyeong-Seok Ko. 2010. Detail-Preserving Fully-Eulerian Interface             Takahiro Sato, Christopher Wojtan, Nils Thuerey, Takeo Igarashi, and Ryoichi Ando.
+    Tracking Framework. In ACM SIGGRAPH Asia 2010 Papers. ACM, Article 176, 8 pages.           2018. Extended Narrow Band FLIP for Liquid Simulations. In Computer Graphics
+    https://doi.org/10.1145/1866158.1866198                                                    Forum, Vol. 37. 169–177.
+Yuanming Hu, Yu Fang, Ziheng Ge, Ziyin Qu, Yixin Zhu, Andre Pradhana, and Chen-             Andrew Selle, Ronald Fedkiw, Byungmoon Kim, Yingjie Liu, and Jarek Rossignac. 2008.
+    fanfu Jiang. 2018. A moving least squares material point method with displacement          An unconditionally stable MacCormack method. Journal of Scientific Computing 35,
+    discontinuity and two-way rigid body coupling. ACM Transactions on Graphics                2-3 (2008), 350–371.
+    (TOG) 37, 4 (2018), 1–14.                                                               Rajsekhar Setaluri, Mridul Aanjaneya, Sean Bauer, and Eftychios Sifakis. 2014. SPGrid:
+Hikaru Ibayashi, Chris Wojtan, Nils Thuerey, Takeo Igarashi, and Ryoichi Ando. 2018.           A Sparse Paged Grid Structure Applied to Adaptive Smoke Simulation. ACM Trans.
+    Simulating Liquids on Dynamically Warping Grids. IEEE transactions on visualization        Graph. 33, 6, Article 205 (2014), 12 pages. https://doi.org/10.1145/2661229.2661269
+    and computer graphics (2018).                                                           J A Sethian. 1996. A fast marching level set method for monotonically advancing fronts.
+Geoffrey Irving, Eran Guendelman, Frank Losasso, and Ronald Fedkiw. 2006. Effi-                Proceedings of the National Academy of Sciences 93, 4 (1996), 1591–1595. https://doi.
+    cient simulation of large bodies of water by coupling two and three dimensional            org/10.1073/pnas.93.4.1591 arXiv:https://www.pnas.org/content/93/4/1591.full.pdf
+    techniques. In ACM Transactions on Graphics (TOG), Vol. 25. ACM, 805–811.               Lin Shi and Yizhou Yu. 2004. Visual smoke simulation with adaptive octree refinement.
+T. Isaac, C. Burstedde, and O. Ghattas. 2012. Low-Cost Parallel Algorithms for 2:1             In Computer Graphics and Imaging. 13–19.
+    Octree Balance. In 2012 IEEE 26th International Parallel and Distributed Processing     Funshing Sin, Adam W Bargteil, and Jessica K Hodgins. 2009. A point-based
+    Symposium. 426–437. https://doi.org/10.1109/IPDPS.2012.47                                  method for animating incompressible flow. In Proceedings of the 2009 ACM SIG-
+Chenfanfu Jiang, Craig Schroeder, Andrew Selle, Joseph Teran, and Alexey Stomakhin.            GRAPH/Eurographics Symposium on Computer Animation. ACM, 247–255.
+    2015. The affine particle-in-cell method. ACM Transactions on Graphics (TOG) 34, 4      Andreas Söderström, Matts Karlsson, and Ken Museth. 2010. A PML-Based Nonreflective
+    (2015), 51.                                                                                Boundary for Free Surface Fluid Animation. ACM Trans. Graph. 29, 5, Article 136
+Tao Ju, Frank Losasso, Scott Schaefer, and Joe Warren. 2002. Dual Contouring of                (2010), 17 pages. https://doi.org/10.1145/1857907.1857912
+    Hermite Data. ACM Trans. Graph. 21, 3 (2002), 339–346. https://doi.org/10.1145/         Fabricio Simeoni de Sousa, CF Lages, Jonas Laerte Ansoni, A Castelo, and A Simao.
+    566654.566586                                                                              2019. A finite difference method with meshless interpolation for incompressible
+Byungmoon Kim, Yingjie Liu, Ignacio Llamas, Xiangmin Jiao, and Jarek Rossignac.                flows in non-graded tree-based grids. J. Comput. Phys. 396 (2019), 848–866.
+    2007. Simulation of Bubbles in Foam with the Volume Control Method. ACM Trans.          John Strain. 1999. Tree methods for moving interfaces. J. Comput. Phys. 151, 2 (1999),
+    Graph. 26, 3 (2007), 98–es. https://doi.org/10.1145/1276377.1276500                        616–648.
+Bryan M. Klingner, Bryan E. Feldman, Nuttapong Chentanez, and James F. O’Brien.             Mark Sussman and Mitsuhiro Ohta. 2009. A Stable and Efficient Method for Treating
+    2006. Fluid Animation with Dynamic Meshes. In Proceedings of ACM SIGGRAPH                  Surface Tension in Incompressible Two-Phase Flow. SIAM J. Sci. Comput. 31, 4
+    2006. 820–825. http://graphics.cs.berkeley.edu/papers/Klingner-FAD-2006-08/                (2009), 2447–2471. https://doi.org/10.1137/080732122
+Michael Lentine, Mridul Aanjaneya, and Ronald Fedkiw. 2011. Mass and Momen-                 Nils Thürey, Chris Wojtan, Markus Gross, and Greg Turk. 2010. A Multiscale Approach
+    tum Conservation for Fluid Simulation. In Proceedings of the 2011 ACM SIG-                 to Mesh-Based Surface Tension Flows. ACM Trans. Graph. 29, 4, Article 48 (2010),
+    GRAPH/Eurographics Symposium on Computer Animation (SCA ’11). ACM, 91–100.                 10 pages. https://doi.org/10.1145/1778765.1778785
+    https://doi.org/10.1145/2019406.2019419                                                 X. Zhai, F. Hou, H. Qin, and A. Hao. 2018. Fluid Simulation with Adaptive Staggered
+Michael Lentine, Matthew Cong, Saket Patkar, and Ronald Fedkiw. 2012. Simulating               Power Particles on GPUs. IEEE Transactions on Visualization and Computer Graphics
+    Free Surface Flow with Very Large Time Steps. In Proceedings of the ACM SIG-               (2018), 1–1. https://doi.org/10.1109/TVCG.2018.2886322
+    GRAPH/Eurographics Symposium on Computer Animation (SCA ’12). 107–116.                  Wen Zheng, Jun-Hai Yong, and Jean-Claude Paul. 2006. Simulation of Bubbles. In
+Shengren Li, Lance Simons, Jagadeesh Bhaskar Pakaravoor, Fatemeh Abbasinejad,                  Proceedings of the 2006 ACM SIGGRAPH/Eurographics Symposium on Computer
+    John D. Owens, and Nina Amenta. 2012. KANN on the GPU with Shifted Sorting.                Animation (SCA ’06). 325–333.
+    In Proceedings of the Fourth ACM SIGGRAPH / Eurographics Conference on High-            Bo Zhu, Wenlong Lu, Matthew Cong, Byungmoon Kim, and Ronald Fedkiw. 2013. A
+    Performance Graphics (EGGH-HPG’12). 39–47.                                                 New Grid Structure for Domain Extension. ACM Trans. Graph. 32, 4, Article 63
+Frank Losasso, Ronald Fedkiw, and Stanley Osher. 2006. Spatially adaptive techniques           (2013), 12 pages. https://doi.org/10.1145/2461912.2461999
+    for level set methods and incompressible flow. Computers & Fluids 35, 10 (2006), 995    Yongning Zhu and Robert Bridson. 2005. Animating sand as a fluid. ACM Transactions
+    – 1010. https://doi.org/10.1016/j.compfluid.2005.01.006                                    on Graphics (TOG) 24, 3 (2005), 965–972.
+Frank Losasso, Frédéric Gibou, and Ron Fedkiw. 2004. Simulating Water and Smoke
+    with an Octree Data Structure. ACM Trans. Graph. 23, 3 (2004), 457–462. https:
+    //doi.org/10.1145/1015706.1015745
+M. K. Misztal, K. Erleben, A. Bargteil, J. Fursund, B. Bunch Christensen, J. A. Bun-
+    definedrentzen, and R. Bridson. 2012. Multiphase Flow of Immiscible Fluids on
+    Unstructured Moving Meshes. In Proceedings of the ACM SIGGRAPH/Eurographics
+
+
+
+                                                                                                        ACM Trans. Graph., Vol. 39, No. 4, Article 32. Publication date: July 2020.
+

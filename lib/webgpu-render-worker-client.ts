@@ -7,6 +7,7 @@ import type {
   GPUStatus,
   RendererFrameMetrics,
 } from "./webgpu-renderer";
+import { usePerformanceInstrumentationStore, type PerformanceInstrumentationMode } from "./stores/performance-instrumentation-store";
 
 type DrawArguments = Parameters<FluidLabRenderer["draw"]>;
 type DrawArgumentsWithoutScene = DrawArguments extends [infer Time, unknown, ...infer Rest]
@@ -38,7 +39,7 @@ export type WebGPURenderWorkerRequest =
   | { type: "attach"; canvas: OffscreenCanvas }
   | { type: "initialize"; requestId: number }
   | { type: "set-render-scene"; revision: number; scene: SceneDescription; terrainContentStamp: string }
-  | { type: "draw"; frameId: number; sceneRevision: number; args: DrawArgumentsWithoutScene; viewport: { width: number; height: number; devicePixelRatio: number } }
+  | { type: "draw"; frameId: number; sceneRevision: number; args: DrawArgumentsWithoutScene; viewport: { width: number; height: number; devicePixelRatio: number }; instrumentationMode: PerformanceInstrumentationMode }
   | { type: "set-simulation-scene"; scene: DrawArguments[1] | undefined }
   | { type: "set-hover-highlight"; range: { first: number; last: number } | undefined }
   | { type: "set-simulation-running"; requestId: number; running: boolean }
@@ -176,6 +177,10 @@ export class WebGPURenderWorkerClient {
       frameId: ++this.frameId,
       sceneRevision,
       args: [time_s, ...remainingArgs] as DrawArgumentsWithoutScene,
+      // Zustand stores are realm-local. The render panel changes the window's
+      // store, while FluidLabRenderer reads the worker's copy; carrying the
+      // mode on every latest-wins frame keeps those two copies one contract.
+      instrumentationMode: usePerformanceInstrumentationStore.getState().mode,
       viewport: {
         width: Math.max(1, rect.width),
         height: Math.max(1, rect.height),

@@ -83,7 +83,7 @@ export function planOctreeLosassoExtensionBand(
   const adjacencyCapacity = OCTREE_LOSASSO_EXTENSION_ADJACENCIES * faceCapacity;
   const domainVolume = nx * ny * nz;
   const stagedNodalVelocityNodes = (nx + 1) * (ny + 1) * (nz + 1);
-  const allocatedBytes = 32 + 128 + 12 + faceCapacity * (16 + 16 + 4 + 4 + 4)
+  const allocatedBytes = 32 + 32 + 128 + 12 + faceCapacity * (16 + 16 + 4 + 4 + 4)
     + (faceCapacity + 1) * 4 + adjacencyCapacity * 4 + directoryCapacity * 12
     + finestMacFaces * (4 + 4 + 4) + domainVolume * 4 + stagedNodalVelocityNodes * 32;
   return Object.freeze({ dimensions: [dimensions[0], dimensions[1], dimensions[2]] as const,
@@ -166,6 +166,10 @@ export class WebGPUOctreeLosassoExtensionBand {
 
   private readonly params: GPUBuffer;
   private readonly control: GPUBuffer;
+  /** Read-only null coarse authority for factor-4 publication. Keeping this
+   * separate from control avoids aliasing one buffer as writable and read-only
+   * in the same Dawn synchronization scope. */
+  private readonly emptyCoarsePhiDirectory: GPUBuffer;
   private readonly metrics: GPUBuffer;
   private readonly geometry: GPUBuffer;
   private readonly adjacencyOffsets: GPUBuffer;
@@ -227,6 +231,7 @@ export class WebGPUOctreeLosassoExtensionBand {
     this.params = device.createBuffer({ label: "Losasso extension-band parameters", size: 128,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.control = make("Losasso extension-band authority", 32);
+    this.emptyCoarsePhiDirectory = make("Losasso empty coarse-phi directory", 32);
     this.metrics = make("Losasso extension-band metrics", this.plan.faceCapacity * 16);
     this.geometry = make("Losasso extension-band finest face geometry", this.plan.faceCapacity * 16);
     this.adjacencyOffsets = make("Losasso extension-band adjacency offsets", (this.plan.faceCapacity + 1) * 4);
@@ -327,7 +332,7 @@ export class WebGPUOctreeLosassoExtensionBand {
     words[28] = (this.options.closedBoundaries ?? [true, true, true, true, true, true])
       .reduce((mask, closed, index) => mask | (closed ? 1 << index : 0), 0) >>> 0;
     this.device.queue.writeBuffer(this.params, 0, bytes);
-    this.coarsePhiDirectory = this.control;
+    this.coarsePhiDirectory = this.emptyCoarsePhiDirectory;
     const buffers = new Map<number, GPUBuffer>([
       [0, this.params], [1, fine.metadata], [2, fine.worklist], [3, fine.samples],
       [4, this.options.wet.control], [5, this.options.wet.faceGeometry],
@@ -338,7 +343,7 @@ export class WebGPUOctreeLosassoExtensionBand {
       [16, this.seedWetFace],
       [17, this.geometricClaims],
       [19, this.liveFaceDispatch],
-      [20, this.control], [21, this.stagedVelocityArena],
+      [20, this.emptyCoarsePhiDirectory], [21, this.stagedVelocityArena],
     ]);
     const run = (entryPoint: EntryPoint, groups: number) => {
       const pipeline = this.pipelines![entryPoint];
@@ -622,7 +627,8 @@ export class WebGPUOctreeLosassoExtensionBand {
     if (this.destroyed) return;
     this.destroyed = true;
     this.extension.destroy();
-    for (const buffer of [this.params, this.control, this.metrics, this.geometry,
+    for (const buffer of [this.params, this.control, this.emptyCoarsePhiDirectory,
+      this.metrics, this.geometry,
       this.adjacencyOffsets, this.adjacency, this.directory, this.projectedSeeds,
       this.extended, this.seedWetFace, this.geometricClaims, this.denseWetFace,
       this.stagedVelocityArena, this.stagedNodalVelocityArena,

@@ -271,8 +271,8 @@ test("the hero set is a description of itself, and survives a save unchanged", (
   assert.ok(scenery);
   assert.deepEqual(
     scenery.nodes.filter((node) => node.kind === "generator").map((node) => node.generator),
-    ["pond-stone-set", "oak", "rosette", "rosette", "rosette"],
-    "the stones, the tree and the plants are named rather than baked");
+    ["pond-stone-set", "rosette", "rosette", "rosette"],
+    "the stones and plants are named rather than baked while the tree slot is empty");
 
   // The property this phase exists for. Baked, the same set is 684 nodes and
   // 884 kB of ellipsoid centres — every one of which `cloneScene` copies on
@@ -280,33 +280,20 @@ test("the hero set is a description of itself, and survives a save unchanged", (
   // factory re-run that discards whatever the user changed. Described, it is
   // three nodes and a vessel. The ceiling is deliberately loose: it catches a
   // regression to baking, not an extra prop.
-  assert.ok(JSON.stringify(scenery).length < 20_000,
+  // Recursive foliage is intentionally materialized as individually editable
+  // document shapes. That makes the graph larger than an opaque generator but
+  // still an order of magnitude smaller than a primitive bake, and every byte
+  // remains high-level form, split and placement data.
+  assert.ok(JSON.stringify(scenery).length < 150_000,
     `the hero scenery graph must stay a description, not a bake (${JSON.stringify(scenery).length} bytes)`);
 
   const before = environmentProxyPrimitives(buildEnvironmentProxyCatalog(scene, entry.environment));
-  // A real set, and one that fits. It used to publish 2 227 of the 4 096
-  // records the scene-wide candidate index holds — 90 % of it in the bonsai and
-  // the coping — which is not a slope but a cliff: past the ceiling the BVH is
-  // never built and the whole set stops drawing. With the crown and the boulder
-  // caps moved onto aggregates it is comfortably under, and the two bounds here
-  // are what keep it that way in both directions: below, a generator that
-  // quietly stopped growing; above, a re-tune that spent the headroom back.
-  //
-  // The floor came down from 900 when the bonsai's trunk stopped being a chain
-  // of cones and became a dozen swept records, and its crown four aggregates
-  // instead of thirty-six: that specimen alone went from 219 records to 62 and
-  // it is the *same object*, drawn better. A floor is a guard against a
-  // generator that stopped growing, so it has to move when a generator starts
-  // spelling the same shape in fewer records.
-  //
-  // It came down again, from 600, for the same reason and on the same kind of
-  // change: the coping's chain of 336 round cones became 64 marched sweeps
-  // carrying the identical solid — measured, the surface does not move — which
-  // took the set from 735 records to 487 and the scene's busiest 200 mm brick
-  // from 110 to 67 against the 64-primitive contract. Two of these in a month is
-  // the shape of the phase rather than a coincidence, and the floor is worth
-  // keeping only as long as it is understood to track the *emitters*.
-  assert.ok(before.length > 400, `the generators publish a stub: ${before.length} primitives`);
+  // A real set, and one that fits. The tree slot is intentionally empty while
+  // the recursive replacement is authored, so this floor covers the remaining
+  // stone arrangement, hose and plants. It catches a generator that quietly
+  // stopped growing without preserving a record budget for a deleted species.
+  // Re-baseline both bounds from the accepted frame when the new tree lands.
+  assert.ok(before.length > 200, `the generators publish a stub: ${before.length} primitives`);
   assert.ok(before.length < 0.6 * SVO_PRIMITIVE_CANDIDATE_MAXIMUM_LEAVES,
     `the hero set publishes ${before.length} of ${SVO_PRIMITIVE_CANDIDATE_MAXIMUM_LEAVES} records`);
   // Through the real save path, because that is what a generator node has to

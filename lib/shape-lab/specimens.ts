@@ -42,7 +42,7 @@
 import { HERO_GARDEN_CELL_M, HERO_GARDEN_CONTAINER } from "../hero-garden-scene";
 import type { SceneDescription } from "../model";
 import { createHeroGardenHoseSceneWithSet } from "../scenes";
-import type { SceneryGraph, SceneryNode } from "../scenery-graph";
+import { walkSceneryNodes, type SceneryGraph, type SceneryNode } from "../scenery-graph";
 import { svoDescriptorForEnvironmentProxy } from "../svo-scene-primitives";
 import type { SvoPrimitiveDescriptor } from "../svo-primitive-abi";
 import { terrainSampleGrid, type TerrainGrid } from "../terrain";
@@ -92,6 +92,12 @@ export interface ShapeLabSpecimen {
   /** What kind of thing this is, for the list: `generator · bonsai`, `cluster`. */
   readonly detail: string;
   readonly nodeIds: readonly string[];
+  /** Nearest document parent; absent for a top-level specimen. */
+  readonly parentId?: string;
+  /** Ancestor ids from the top-level node to the direct parent. */
+  readonly nodePath: readonly string[];
+  readonly depth: number;
+  readonly recursive: boolean;
 }
 
 /** The pond itself, which is a heightfield rather than any record. */
@@ -102,6 +108,8 @@ export interface ShapeLabWorld {
   readonly graph: SceneryGraph;
   /** Top-level scenery nodes, shell excluded, in document order. */
   readonly nodes: readonly SceneryNode[];
+  /** Every document-owned node, depth first, including nested shapes. */
+  readonly allNodes: readonly SceneryNode[];
   readonly specimens: readonly ShapeLabSpecimen[];
   readonly vessel: PondVesselSpec;
   readonly leaf_m: number;
@@ -109,20 +117,13 @@ export interface ShapeLabWorld {
 }
 
 /**
- * Keys the form hides.
- *
- * Two kinds, and the second is worth naming separately. Most are **identity**:
- * which one this is rather than what shape it is. `orders` is not — it is the
- * oak's branch table, four objects of eight fields, and it is hidden because the
- * lab renders it faithfully as thirty-two controls behind four disclosure
- * triangles. That is the right shape for a species *definition* and the wrong
- * shape for something dragged while looking at a tree, so the table is edited in
- * `oak-branching.ts` and the lab gets `branchDensity` and `branchFineness`,
- * which scale it. Delete the entry to get the raw table back.
+ * Identity keys the form hides: which object this is, rather than what shape it
+ * has. Structural arrays are deliberately visible so recursive shape children
+ * can be inspected instead of disappearing behind species-specific controls.
  */
 const IDENTITY_KEYS = new Set([
   "kind", "id", "generator", "group", "tags", "vessel", "material", "materialModel",
-  "orders",
+  "children",
 ]);
 
 export function shapeLabHiddenKey(key: string): boolean {
@@ -185,9 +186,23 @@ export function shapeLabWorld(options: {
       : authoredTerrain,
   };
   const overrides = options.nodeOverrides ?? {};
+  const replace = (authored: SceneryNode): SceneryNode => {
+    const node = overrides[authored.id] ?? authored;
+    if (node.kind === "group") return { ...node, children: node.children.map(replace) };
+    if (node.kind === "recursive-shape" && node.children?.length) {
+      return { ...node, children: node.children.map((child) => replace(child) as typeof child) };
+    }
+    return node;
+  };
   const nodes = graph.nodes
     .filter((node) => node.kind !== "terrain-shell" && node.kind !== "room-shell")
-    .map((node) => overrides[node.id] ?? node);
+    .map(replace);
+  const effectiveGraph: SceneryGraph = {
+    ...graph,
+    nodes: graph.nodes.map((node) => node.kind === "terrain-shell" || node.kind === "room-shell" ? node : replace(node)),
+  };
+  scene.scenery = effectiveGraph;
+  const allNodes = [...walkSceneryNodes(nodes)].map(({ node }) => node);
   const groups = new Map<string, SceneryNode[]>();
   for (const node of nodes) {
     const key = specimenGroupOf(node.id);
@@ -200,15 +215,45 @@ export function shapeLabWorld(options: {
       label: "Pond vessel",
       detail: "heightfield · ground, walls, basin",
       nodeIds: [],
+      nodePath: [], depth: 0, recursive: false,
     },
     ...[...groups].map(([key, members]) => ({
       id: key,
       label: key,
       detail: specimenDetail(members),
       nodeIds: members.map((node) => node.id),
+      nodePath: [], depth: 0, recursive: false,
     })),
+    ...[...walkSceneryNodes(nodes)]
+      .filter(({ path }) => path.length > 0)
+      .map(({ node, path }) => ({
+        id: node.id,
+        label: node.id.slice(node.id.lastIndexOf("/") + 1),
+        detail: node.kind === "recursive-shape"
+          ? `${node.children?.length ? "refined" : "active leaf"} · recursive foliage`
+          : specimenDetail([node]),
+        nodeIds: [node.id],
+        parentId: path[path.length - 1],
+        nodePath: path,
+        depth: path.length,
+        recursive: node.kind === "recursive-shape",
+      })),
   ];
-  return { scene, graph, nodes, specimens, vessel, leaf_m, buildMs: Date.now() - started };
+  return { scene, graph: effectiveGraph, nodes, allNodes, specimens, vessel, leaf_m, buildMs: Date.now() - started };
+}
+
+function prunedToIds(node: SceneryNode, wanted: ReadonlySet<string>): SceneryNode | undefined {
+  if (wanted.has(node.id)) return node;
+  if (node.kind === "group") {
+    const children = node.children.map((child) => prunedToIds(child, wanted)).filter(Boolean) as SceneryNode[];
+    return children.length ? { ...node, children } : undefined;
+  }
+  if (node.kind === "recursive-shape" && node.children?.length) {
+    const children = node.children.map((child) => prunedToIds(child, wanted))
+      .filter(Boolean) as typeof node.children;
+    return children.length ? { ...node, children } : undefined;
+  }
+  return undefined;
 }
 
 /**
@@ -227,13 +272,15 @@ export function shapeLabRecords(world: ShapeLabWorld, nodeIds: readonly string[]
   const started = Date.now();
   const wanted = new Set(nodeIds);
   const shell = world.graph.nodes.find((node) => node.kind === "terrain-shell" || node.kind === "room-shell");
+  const selectedRoots = world.nodes.map((node) => prunedToIds(node, wanted)).filter(Boolean) as SceneryNode[];
   const nodes = [
     ...(shell ? [shell] : []),
-    ...world.nodes.filter((node) => wanted.has(node.id)),
+    ...selectedRoots,
   ];
   const scene: SceneDescription = { ...world.scene, scenery: { ...world.graph, nodes } };
   const catalog = buildEnvironmentProxyCatalog(scene, "garden");
-  const spans = catalog.spans.filter((span) => wanted.has(span.nodeId));
+  const rootIds = new Set(selectedRoots.map(({ id }) => id));
+  const spans = catalog.spans.filter((span) => rootIds.has(span.nodeId));
   const records: ShapeLabRecord[] = [];
   for (const span of spans) {
     for (let index = span.from; index < span.to; index += 1) {

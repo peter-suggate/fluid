@@ -1,4 +1,5 @@
 import type { RigidBodyDescription, SceneDescription } from "./model";
+import { svoSceneLighting } from "./svo-dry-scene-lighting";
 import {
   cachedSvoPublication,
   hashSvoPublication,
@@ -1097,10 +1098,11 @@ export interface OctreeSvoEnvironmentLightingPublicationData {
 
 /** Build the selected environment's single image-free lighting record. */
 export function buildOctreeSvoEnvironmentLightingPublication(
-  scene: Pick<SceneDescription, "environment" | "lighting">,
+  scene: Pick<SceneDescription, "environment" | "systems" | "lighting">,
   revision = OCTREE_SVO_ENVIRONMENT_LIGHTING_REVISION,
 ): OctreeSvoEnvironmentLightingPublicationData {
-  const lighting = buildSvoEnvironmentLighting(scene.environment ?? "default", revision, scene.lighting?.environment);
+  const lighting = buildSvoEnvironmentLighting(
+    scene.environment ?? "default", revision, svoSceneLighting(scene)?.environment);
   return {
     record: lighting.record,
     packedRecords: lighting.packedRecord,

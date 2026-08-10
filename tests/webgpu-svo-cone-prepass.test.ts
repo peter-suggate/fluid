@@ -164,8 +164,14 @@ test("reduced scales use declared receiver and full-rate edge tiers without hidi
     "GLOBAL must not retain a selectable lighting backend");
   assert.match(rendererSource, /label: "Sparse voxel persistent world GI cache"[^]*gi\.setPipeline\(this\.worldGiFramePipeline!\)[^]*gi\.setPipeline\(this\.worldGiCachePipeline!\)/,
     "split GLOBAL must produce the reduced GI target through the persistent world-space cache");
-  assert.match(rendererSource, /if \(!reconstructReducedRadiance\)[^]*label: "Sparse voxel persistent world GI cache"/,
-    "GI-only cache output must be restricted to full-rate relight modes");
+  // Two conditions now, and both matter. The reconstruction family decides
+  // whether the cache's {indirect radiance, visibility} closure is even the
+  // right thing to store — using it as final radiance made directly lit terrain
+  // nearly black — and the GI switch decides whether the gather happens at all.
+  assert.match(rendererSource, /if \(!reconstructReducedRadiance && this\.lightingOptions\.globalIlluminationEnabled !== false[^]*label: "Sparse voxel persistent world GI cache"/,
+    "GI-only cache output must be restricted to full-rate relight modes, and withheld when the gather is off");
+  assert.match(rendererSource, /globalIlluminationEnabled !== false\s*\n\s*&& !this\.disabledStages\.has\("world-gi-cache"\)/,
+    "the cache must also answer to its own ablation switch, independently of the gather");
   assert.match(rendererSource, /if \(usePrepass && reconstructReducedRadiance[^]*label: "Sparse voxel reduced-rate opaque shading"/,
     "radiance reconstruction modes must execute the complete reduced-rate material pass");
   assert.match(rendererSource, /entryPoint: "dryReconstructedLightingMain"[^]*if \(usePrepass && reconstructReducedRadiance\)[^]*splitReconstructedLightingPipeline[^]*splitLightingPipeline/,
@@ -245,7 +251,10 @@ test("primary seam closure patches the G-buffer before sky and deferred lighting
     "the optional coverage patch must run after all primary producers and before the sky/surface partition");
   assert.match(rendererSource, /label: `Sparse voxel primary seam closure x\$\{scale\}`[^]*entryPoint: "dryPrimarySeamMain"[^]*depthWriteEnabled: true[^]*depthCompare: SVO_GBUFFER_RENDER_TARGET_CONTRACT\.depthCompare/,
     "the pass updates authoritative reversed-Z depth rather than painting over the final color");
-  assert.match(rendererSource, /if \(this\.silhouetteRefinementEnabled\)[^]*gBufferViews\.packedSurface[^]*gBufferViews\.identityMedia[^]*gBufferViews\.hardwareDepth[^]*seam\.draw\(3\)/,
+  // The second condition is not a second toggle: with the primary withheld
+  // there is no silhouette to close, and running the pass would charge the seam
+  // node for reading an empty G-buffer.
+  assert.match(rendererSource, /if \(this\.silhouetteRefinementEnabled && !primaryWithheld\)[^]*gBufferViews\.packedSurface[^]*gBufferViews\.identityMedia[^]*gBufferViews\.hardwareDepth[^]*seam\.draw\(3\)/,
     "the explicit toggle controls one full-screen G-buffer seam pass");
   assert.doesNotMatch(rendererSource, /beginComputePass\(\{ label: "Sparse voxel silhouette refinement/,
     "the retired lighting-visibility worklist must not execute");

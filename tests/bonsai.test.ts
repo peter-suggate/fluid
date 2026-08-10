@@ -791,9 +791,9 @@ test("the floret's span in leaves is the constraint, and is reported", () => {
  * returns.
  */
 test("the hero document's specimen draws at the scene's own leaf", () => {
-  // Built here rather than read off the hero document, because the hero set's
-  // tree is a procedural oak since the cutover and this species no longer stands
-  // in it. What the test is actually about is unchanged and is nothing to do
+  // Built here rather than read off the hero document, because the hero tree
+  // slot is intentionally empty while its recursive replacement is designed.
+  // What the test is actually about is unchanged and is nothing to do
   // with that scene: a specimen resolves its canopy ladder against the leaf it
   // is handed. Reading the node out of the garden only ever supplied params.
   const node = {

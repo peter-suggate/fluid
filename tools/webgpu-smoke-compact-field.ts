@@ -390,13 +390,17 @@ function coarsePhiAt(snapshot: Pick<CompactOctreeFieldSnapshot, "coarseDirectory
   for (let size = 1; size <= maximumLeafSize; size *= 2) {
     const origin = q.map((value) => Math.floor(value / size) * size);
     const cell = origin[0] + dimensions[0] * (origin[1] + dimensions[1] * origin[2]);
+    const adaptive = rowCount > 0 && (words[8 + 5] & 0x1000_0000) !== 0;
     const wantedLevel = 31 - Math.clz32(size), wantedMorton = coarseMorton(cell, dimensions);
     let low = 0, high = rowCount;
     while (low < high) {
       const middle = low + Math.floor((high - low) / 2), base = 8 + middle * 8;
-      const entryLevel = 31 - Math.clz32(words[base + 1]);
-      const entryMorton = coarseMorton(words[base] - 1, dimensions);
-      if (entryLevel < wantedLevel || (entryLevel === wantedLevel && entryMorton < wantedMorton)) low = middle + 1;
+      const entryCell = words[base] - 1, entrySize = words[base + 1];
+      const entryLevel = 31 - Math.clz32(entrySize);
+      const entryMorton = coarseMorton(entryCell, dimensions);
+      if (adaptive
+        ? entryCell < cell || (entryCell === cell && entrySize < size)
+        : entryLevel < wantedLevel || (entryLevel === wantedLevel && entryMorton < wantedMorton)) low = middle + 1;
       else high = middle;
     }
     if (low < rowCount) {
@@ -407,14 +411,45 @@ function coarsePhiAt(snapshot: Pick<CompactOctreeFieldSnapshot, "coarseDirectory
           throw new Error("Compact octree QA encountered an invalid containing coarse leaf");
         }
         const row = words[base + 6];
+        if ((words[base + 5] & 0x1000_0000) !== 0) {
+          const auxiliary = rowCount + row;
+          if (row >= rowCount || auxiliary >= actualCapacity) {
+            throw new Error("Compact octree QA adaptive row has no nodal auxiliary record");
+          }
+          const grid = position.map((coordinate) => coordinate / physicalCellSize);
+          const fraction = grid.map((coordinate, axis) =>
+            Math.min(1, Math.max(0, (coordinate - origin[axis]!) / size)));
+          const auxiliaryBase = 8 + 8 * auxiliary;
+          const terms = Array.from({ length: 8 }, (_unused, corner) => {
+            const cornerValue = finiteFloat(words, auxiliaryBase + corner);
+            const wx = (corner & 1) !== 0 ? fraction[0]! : 1 - fraction[0]!;
+            const wy = (corner & 2) !== 0 ? fraction[1]! : 1 - fraction[1]!;
+            const wz = (corner & 4) !== 0 ? fraction[2]! : 1 - fraction[2]!;
+            return (wx * wz) * wy * cornerValue;
+          }).sort((left, right) => left - right);
+          let result = 0;
+          for (const term of terms) result += term;
+          if (!Number.isFinite(result)) {
+            throw new Error("Compact octree QA adaptive nodal sample is non-finite");
+          }
+          return { phi: result, positiveAir: false };
+        }
         const gradients = snapshot.coarseGradients;
         if (gradients && 4 * row + 3 < gradients.length) {
           const gx = gradients[4 * row]!, gy = gradients[4 * row + 1]!, gz = gradients[4 * row + 2]!;
           const valid = gradients[4 * row + 3] === 1;
           if (valid && Number.isFinite(gx) && Number.isFinite(gy) && Number.isFinite(gz)) {
             const centre = origin.map((coordinate) => (coordinate + 0.5 * size) * physicalCellSize);
-            const affine = value + gx * (position[0] - centre[0]!)
-              + gy * (position[1] - centre[1]!) + gz * (position[2] - centre[2]!);
+            // Axis permutations must produce the same diagnostic bit pattern.
+            // Sorting the four affine terms gives every permutation the same
+            // reduction tree instead of inheriting JavaScript's x/y/z order.
+            const terms = [
+              value,
+              gx * (position[0] - centre[0]!),
+              gy * (position[1] - centre[1]!),
+              gz * (position[2] - centre[2]!),
+            ].sort((a, b) => a - b);
+            const affine = (terms[0]! + terms[1]!) + (terms[2]! + terms[3]!);
             if (Number.isFinite(affine)) return { phi: affine, positiveAir: false };
           }
         }
@@ -441,7 +476,8 @@ export function reconstructCoarseOnlyOctreeOccupancyField(
     throw new Error(`Coarse-only octree QA publication is not valid: state=${coarseDirectory[0] ?? "missing"}, generation=${coarseDirectory[1] ?? "missing"}, rows=${coarseDirectory[2] ?? "missing"}`);
   }
   if ((coarseDirectory[1] & 0x3fff_ffff) !== (generation & 0x3fff_ffff)) {
-    throw new Error("Coarse-only octree QA generation is stale");
+    throw new Error(`Coarse-only octree QA generation is stale: expected=${generation},`
+      + ` header=${JSON.stringify(Array.from(coarseDirectory.slice(0, 8)))}`);
   }
   const rowCount = coarseDirectory[2];
   const rowCapacity = (coarseDirectory.length - 8) / 8;
@@ -453,7 +489,8 @@ export function reconstructCoarseOnlyOctreeOccupancyField(
   }
   const h = finiteFloat(coarseDirectory, 7);
   if (!(h > 0)) throw new Error("Coarse-only octree QA cell width is invalid");
-  let priorLevel = -1, priorMorton = -1;
+  const adaptive = rowCount > 0 && (coarseDirectory[8 + 5] & 0x1000_0000) !== 0;
+  let priorCell = -1, priorSize = -1, priorLevel = -1, priorMorton = -1;
   for (let slot = 0; slot < rowCount; slot += 1) {
     const base = 8 + slot * 8, cellPlusOne = coarseDirectory[base], size = coarseDirectory[base + 1];
     const value = finiteFloat(coarseDirectory, base + 2);
@@ -469,11 +506,14 @@ export function reconstructCoarseOnlyOctreeOccupancyField(
         flags: coarseDirectory[base + 5], row: coarseDirectory[base + 6],
       })}`);
     }
-    const level = 31 - Math.clz32(size), morton = coarseMorton(cellPlusOne - 1, dimensions);
-    if (level < priorLevel || (level === priorLevel && morton <= priorMorton)) {
+    const cell = cellPlusOne - 1;
+    const level = 31 - Math.clz32(size), morton = coarseMorton(cell, dimensions);
+    if (adaptive
+      ? cell < priorCell || (cell === priorCell && size <= priorSize)
+      : level < priorLevel || (level === priorLevel && morton <= priorMorton)) {
       throw new Error("Coarse-only octree QA directory is not strictly sorted");
     }
-    priorLevel = level; priorMorton = morton;
+    priorCell = cell; priorSize = size; priorLevel = level; priorMorton = morton;
   }
   const field = new Float32Array(dimensions[0] * dimensions[1] * dimensions[2]);
   let positiveAirSamples = 0;

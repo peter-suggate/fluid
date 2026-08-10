@@ -4,7 +4,11 @@ import type { EnvironmentId } from "./environments";
 import { environmentIds } from "./environments";
 import type { MethodProfile } from "./methods";
 import { sceneWithEnvironment } from "./scenery-presets";
-import { svoSceneryDetailCellSize_m, SVO_ENVIRONMENT_REFINEMENT_DEPTH_DEFAULT } from "./svo-render-tuning";
+import {
+  svoSceneryDetailCellSize_m,
+  SVO_ENVIRONMENT_REFINEMENT_DEPTH_DEFAULT,
+  SVO_ENVIRONMENT_REFINEMENT_DEPTH_MINIMUM,
+} from "./svo-render-tuning";
 
 /**
  * What a scene *is*, as data.
@@ -216,8 +220,19 @@ export function sceneDocument(definition: SceneDefinition, variantId?: string): 
   const plain = finishSceneDocument(definition, definition.build(), variantId);
   if (!definition.buildAt || plain.systems?.fluid !== false) return plain;
   const cellSize_m = plain.voxelDomain.finestCellSize_m;
+  const requestedDepth = Math.max(SVO_ENVIRONMENT_REFINEMENT_DEPTH_MINIMUM,
+    Math.trunc(SVO_ENVIRONMENT_REFINEMENT_DEPTH_DEFAULT));
+  if (requestedDepth < 0) {
+    const coarseCellSize_m = cellSize_m * 2 ** -requestedDepth;
+    const coarse = finishSceneDocument(definition, definition.buildAt({
+      cellSize_m: coarseCellSize_m,
+      detailCellSize_m: coarseCellSize_m,
+    }), variantId);
+    coarse.voxelDomain.environmentRefinementBaseCellSize_m = cellSize_m;
+    return coarse;
+  }
   const detailCellSize_m = svoSceneryDetailCellSize_m(cellSize_m, {
-    environmentRefinementDepth: SVO_ENVIRONMENT_REFINEMENT_DEPTH_DEFAULT,
+    environmentRefinementDepth: requestedDepth,
     fluid: false,
   });
   // A factory that already authored a finer set has said something this policy

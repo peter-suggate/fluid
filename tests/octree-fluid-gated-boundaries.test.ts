@@ -85,6 +85,22 @@ test("both fine and cooperative coarse refinement use the same fluid gate", () =
     /pressureEvidence = pressureRefinementEvidence\(origin, size\)[\s\S]*decision = !refinementRegionHoldsLeaf\(origin, size\)\s*&& \(pressureEvidence \|\| adaptivity <= 0\.0 \|\| boundaryDecision\)/);
 });
 
+test("adaptive Losasso topology consumes the published leaf interval", () => {
+  const corrected = octreeProjectionShader.slice(
+    octreeProjectionShader.indexOf("fn correctedCoarsePhi"),
+    octreeProjectionShader.indexOf("fn coarseClassificationPhi"),
+  );
+  assert.match(corrected,
+    /let minimum=bitcast<f32>\(coarseWord\(entry\+3u\)\);let maximum=bitcast<f32>\(coarseWord\(entry\+4u\)\)/,
+    "topology must read the graph publisher's corner minimum and maximum");
+  assert.match(corrected,
+    /crossing=minimum<=0\.0&&maximum>=0\.0[\s\S]*crossingFlag=\(flags&4u\)!=0u[\s\S]*CorrectedCoarsePhi\(true,value,minimum,maximum,size\)/,
+    "a positive centre with a corner zero crossing must retain interface evidence");
+  assert.doesNotMatch(corrected,
+    /CorrectedCoarsePhi\(true,value,value,value,size\)/,
+    "adaptive interval evidence must not collapse back to the centre sample");
+});
+
 test("fine boundary gating stays candidate-local", () => {
   const evidence = octreeProjectionShader.slice(
     octreeProjectionShader.indexOf("fn pressureRefinementEvidence"),

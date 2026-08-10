@@ -41,6 +41,9 @@ export const SVO_ENVIRONMENT_BRICK_REFINEMENT_MAXIMUM = 1;
  */
 export const SVO_ENVIRONMENT_REFINEMENT_DEPTH_MAXIMUM = 3;
 
+/** Coarsest authored-environment rung exposed by the refinement control. */
+export const SVO_ENVIRONMENT_REFINEMENT_DEPTH_MINIMUM = -3;
+
 /**
  * The depth a dry document is authored at when nobody says otherwise.
  *
@@ -71,7 +74,7 @@ export const SVO_ENVIRONMENT_REFINEMENT_DEPTH_MAXIMUM = 3;
  * through `builtRefinementDepth`, which the renderer surfaces in its status
  * line. A scene that comes up coarser than this has said so.
  */
-export const SVO_ENVIRONMENT_REFINEMENT_DEPTH_DEFAULT = 1;
+export const SVO_ENVIRONMENT_REFINEMENT_DEPTH_DEFAULT = 0;
 
 /**
  * The voxel a set is actually drawn into, given the lattice and the depth.
@@ -99,7 +102,8 @@ export function svoSceneryDetailCellSize_m(
   }
   const depth = options.fluid === false
     ? Math.min(SVO_ENVIRONMENT_REFINEMENT_DEPTH_MAXIMUM,
-      Math.max(0, Math.trunc(options.environmentRefinementDepth ?? 0)))
+      Math.max(SVO_ENVIRONMENT_REFINEMENT_DEPTH_MINIMUM,
+        Math.trunc(options.environmentRefinementDepth ?? 0)))
     : 0;
   return finestCellSize_m / 2 ** depth;
 }
@@ -129,13 +133,37 @@ export function svoSceneryDetailCellSize_m(
  * nowhere to descend and no finer document to be authored at.
  */
 export function svoSceneryRefinementDepth(
+  domain: {
+    readonly finestCellSize_m: number;
+    readonly detailCellSize_m?: number;
+    readonly environmentRefinementBaseCellSize_m?: number;
+  },
+  options: { readonly fluid?: boolean } = {},
+): number {
+  const finest = domain.finestCellSize_m;
+  const detail = domain.detailCellSize_m ?? finest;
+  // Negative rungs enlarge the octree's actual finest cell. Retaining the
+  // zero-rung cell in the document is what makes the signed control reversible:
+  // without it a 50 mm document cannot tell whether it is authored at zero or
+  // is the 8x-coarser form of a 6.25 mm document.
+  const base = domain.environmentRefinementBaseCellSize_m ?? finest;
+  if (options.fluid !== false) return 0;
+  if (!(finest > 0) || !Number.isFinite(finest) || !(detail > 0) || !Number.isFinite(detail)
+    || !(base > 0) || !Number.isFinite(base)) return 0;
+  return Math.min(SVO_ENVIRONMENT_REFINEMENT_DEPTH_MAXIMUM,
+    Math.max(SVO_ENVIRONMENT_REFINEMENT_DEPTH_MINIMUM,
+      Math.round(Math.log2(base / detail))));
+}
+
+/** Extra levels the octree descends below its active finest lattice. */
+export function svoEnvironmentTreeRefinementDepth(
   domain: { readonly finestCellSize_m: number; readonly detailCellSize_m?: number },
   options: { readonly fluid?: boolean } = {},
 ): number {
   const finest = domain.finestCellSize_m;
   const detail = domain.detailCellSize_m ?? finest;
-  if (options.fluid !== false) return 0;
-  if (!(finest > 0) || !Number.isFinite(finest) || !(detail > 0) || !Number.isFinite(detail)) return 0;
+  if (options.fluid !== false || !(finest > 0) || !Number.isFinite(finest)
+    || !(detail > 0) || !Number.isFinite(detail)) return 0;
   return Math.min(SVO_ENVIRONMENT_REFINEMENT_DEPTH_MAXIMUM,
     Math.max(0, Math.round(Math.log2(finest / detail))));
 }
@@ -312,7 +340,7 @@ const bandOverride = (name: string, fallback: number): number => {
   return value;
 };
 
-export const DEFAULT_SVO_RENDER_TUNING: SvoRenderTuning = Object.freeze({
+const balancedTuning: SvoRenderTuning = Object.freeze({
   resolutionScale: 0.72,
   environmentBrickRefinementLevels: 1,
   // Off: the levels it declines to spend are the low-curvature ones, and a
@@ -415,7 +443,7 @@ export interface SvoRenderQualityRung {
 }
 
 const performanceTuning: SvoRenderTuning = Object.freeze({
-  ...DEFAULT_SVO_RENDER_TUNING,
+  ...balancedTuning,
   resolutionScale: 0.5,
   coneLightingScale: 0.25 as const,
   primaryLeafVisits: 24,
@@ -432,7 +460,7 @@ const performanceTuning: SvoRenderTuning = Object.freeze({
 });
 
 const qualityTuning: SvoRenderTuning = Object.freeze({
-  ...DEFAULT_SVO_RENDER_TUNING,
+  ...balancedTuning,
   resolutionScale: 1,
   coneLightingScale: 0.5 as const,
   primaryLeafVisits: 128,
@@ -442,6 +470,9 @@ const qualityTuning: SvoRenderTuning = Object.freeze({
   visibilityLeafVisits: 32,
   visibilityWorkItems: 1024,
 });
+
+/** The renderer's no-override contract is the full-fidelity quality rung. */
+export const DEFAULT_SVO_RENDER_TUNING: SvoRenderTuning = qualityTuning;
 
 /**
  * The ladder, cheapest first, and what each rung costs.
@@ -468,8 +499,8 @@ const qualityTuning: SvoRenderTuning = Object.freeze({
  */
 export const SVO_RENDER_QUALITY_PRESETS = Object.freeze({
   performance: Object.freeze({ tuning: performanceTuning, coneTracingMode: "cones" as const }),
-  balanced: Object.freeze({ tuning: DEFAULT_SVO_RENDER_TUNING, coneTracingMode: "cones" as const }),
-  quality: Object.freeze({ tuning: qualityTuning, coneTracingMode: "cones" as const }),
+  balanced: Object.freeze({ tuning: balancedTuning, coneTracingMode: "cones" as const }),
+  quality: Object.freeze({ tuning: DEFAULT_SVO_RENDER_TUNING, coneTracingMode: "cones" as const }),
   reference: Object.freeze({ tuning: qualityTuning, coneTracingMode: "exact" as const }),
 } satisfies Record<string, SvoRenderQualityRung>);
 
@@ -484,8 +515,8 @@ export type SvoRenderQualityPreset = keyof typeof SVO_RENDER_QUALITY_PRESETS;
  */
 export const SVO_RENDER_TUNING_PRESETS = Object.freeze({
   performance: performanceTuning,
-  balanced: DEFAULT_SVO_RENDER_TUNING,
-  quality: qualityTuning,
+  balanced: balancedTuning,
+  quality: DEFAULT_SVO_RENDER_TUNING,
   reference: qualityTuning,
 });
 

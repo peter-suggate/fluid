@@ -155,6 +155,66 @@ fn structuredVolume(uv:vec2f,mode:i32)->vec4f{let ray=cameraRay(uv);let minimum=
 @fragment fn fragmentMain(input:VertexOutput)->@location(0) vec4f{let mode=i32(round(u.debug.w));if(i32(round(u.debug.x))==4){return structuredVolume(input.uv,mode);}let hit=sliceRay(input.uv);if(hit.w<=0.0){discard;}let minimum=vec3f(-0.5*u.container.x,0.0,-0.5*u.container.z);if(any(hit.xyz<minimum)||any(hit.xyz>minimum+u.container.xyz)){discard;}let row=rowAt(hit.xyz);if(row==INVALID){discard;}if(!rowValid(row,worldToFine(hit.xyz))){return vec4f(displayColor(vec3f(1.0,0.01,0.10)),0.94);}let sample=rowSample(row,mode,false);return vec4f(displayColor(sample.rgb),sample.a);}
 `;
 
+/**
+ * One three-dimensional velocity glyph per accepted Losasso adaptive leaf.
+ *
+ * The leaf record is the authority for both the glyph extent and the eight
+ * corner-node slots. Averaging those accepted nodal records at the cell centre
+ * is the same trilinear reconstruction evaluated at (1/2, 1/2, 1/2), so the
+ * overlay never substitutes a dense velocity texture for the adaptive field it
+ * is meant to explain.
+ */
+export const octreeTechniqueAdaptiveVelocityShader = /* wgsl */ `
+${octreeTechniqueSharedWGSL}
+struct AdaptiveLeaf { originSpan:vec4u, metadata:vec4u, lowerSlots:vec4u, upperSlots:vec4u }
+struct AdaptiveCellVelocity { value:vec3f, valid:u32 }
+struct AdaptivePhiClass { air:u32, visible:u32, valid:u32, pad0:u32 }
+struct AdaptiveVelocityViewConfig { extensionReach_m:f32, pad0:f32, pad1:f32, pad2:f32 }
+${visualizationBindingPreambleWGSL(OCTREE_TECHNIQUE_PROGRAMS.adaptiveVelocity)}
+const INVALID:u32=0xffffffffu;
+fn heat(value:f32)->vec3f{let t=clamp(value,0.0,1.0);return select(mix(vec3f(0.04,0.20,0.70),vec3f(0.06,0.78,0.55),t*2.0),mix(vec3f(0.06,0.78,0.55),vec3f(1.0,0.08,0.025),(t-0.5)*2.0),t>=0.5);}
+fn finite1(value:f32)->bool{return value==value&&abs(value)<=3.402823e38;}
+fn finite3(value:vec3f)->bool{return all(value==value)&&all(abs(value)<=vec3f(3.402823e38));}
+fn publicationValid()->bool{return arrayLength(&adaptiveControl)>=16u&&adaptiveControl[0]!=0u&&adaptiveControl[3]==adaptiveControl[0]&&adaptiveControl[4]==0u&&adaptiveControl[6]==adaptiveControl[0];}
+fn rowAt(point:vec3f)->u32{return textureLoad(ownerRows,vec3i(clamp(floor(worldToFine(point)),vec3f(0.0),u.gridInfo.xyz-vec3f(1.0))),0).x;}
+fn leafAt(row:u32,pointFine:vec3f)->bool{if(row>=arrayLength(&adaptiveLeaves)||row>=adaptiveControl[1]){return false;}let leaf=adaptiveLeaves[row];return leaf.metadata.x!=0u&&leaf.originSpan.w>0u&&all(pointFine>=vec3f(leaf.originSpan.xyz))&&all(pointFine<vec3f(leaf.originSpan.xyz+vec3u(leaf.originSpan.w)));}
+fn classifyPhi(row:u32)->AdaptivePhiClass{
+  if(arrayLength(&adaptivePhiControl)<20u||adaptivePhiControl[7u]!=1u||adaptivePhiControl[1u]!=adaptiveControl[0u]||adaptivePhiControl[2u]!=adaptiveControl[5u]||adaptivePhiControl[3u]!=adaptiveControl[6u]||row>=adaptivePhiControl[5u]||row>=arrayLength(&adaptiveRowPhi)){return AdaptivePhiClass(0u,1u,0u,0u);}let packed=adaptiveRowPhi[row];let centre=bitcast<f32>(packed.x);let minimum=bitcast<f32>(packed.y);let maximum=bitcast<f32>(packed.z);
+  if((packed.w&3u)!=3u||!finite1(centre)||!finite1(minimum)||!finite1(maximum)){return AdaptivePhiClass(0u,1u,0u,0u);}
+  // A straddling leaf is styled as interface even when its centre lies on the
+  // air side. Only a wholly air-side leaf is translucent, and its centre must
+  // lie inside the same physical reach used by velocity extension.
+  let interfaceLeaf=(packed.w&4u)!=0u||(minimum<=0.0&&maximum>=0.0);let air=select(0u,1u,!interfaceLeaf&&minimum>0.0);let visible=select(1u,select(0u,1u,centre<=max(adaptiveVelocityView.extensionReach_m,0.0)),air!=0u);return AdaptivePhiClass(air,visible,1u,0u);
+}
+fn cellVelocity(row:u32)->AdaptiveCellVelocity{
+  if(!publicationValid()||row>=arrayLength(&adaptiveLeaves)||row>=adaptiveControl[1]){return AdaptiveCellVelocity(vec3f(0.0),0u);}let leaf=adaptiveLeaves[row];let nodeCapacity=adaptiveControl[15];var value=vec3f(0.0);
+  for(var corner=0u;corner<8u;corner+=1u){let slots=select(leaf.lowerSlots,leaf.upperSlots,corner>=4u);let slot=slots[corner&3u];let record=2u*slot;if(slot>=nodeCapacity||record>=arrayLength(&adaptiveVelocity)){return AdaptiveCellVelocity(vec3f(0.0),0u);}let packed=adaptiveVelocity[record];if((packed.w&7u)!=7u){return AdaptiveCellVelocity(vec3f(0.0),0u);}let node=vec3f(bitcast<f32>(packed.x),bitcast<f32>(packed.y),bitcast<f32>(packed.z));if(!finite3(node)){return AdaptiveCellVelocity(vec3f(0.0),0u);}value+=0.125*node;}
+  return AdaptiveCellVelocity(value,1u);
+}
+fn pointInk(ray:CameraRay,point:vec3f,width:f32)->f32{return 1.0-smoothstep(width,2.25*width,raySegmentDistance(ray,point,point+vec3f(0.0,1e-8,0.0)).x);}
+fn arrowSample(row:u32,ray:CameraRay,depth:f32,volume:bool)->vec4f{
+  if(row==INVALID||row>=arrayLength(&adaptiveLeaves)||arrayLength(&adaptiveControl)<16u){return vec4f(0.0);}let leaf=adaptiveLeaves[row];let origin=vec3f(leaf.originSpan.xyz);let span=f32(leaf.originSpan.w);let center=fineToWorld(origin+vec3f(0.5*span));let low=fineToWorld(origin);let high=fineToWorld(origin+vec3f(span));let cellWidth=max(min(min(high.x-low.x,high.y-low.y),high.z-low.z),1e-6);let width=max(depth*1.44/max(u.viewport.y,1.0),0.018*cellWidth);let phase=classifyPhi(row);
+  if(phase.valid==0u){let ink=pointInk(ray,center,2.2*width);return vec4f(vec3f(1.0,0.01,0.10),select(0.96,0.72,volume)*ink);}if(phase.visible==0u){return vec4f(0.0);}let sampled=cellVelocity(row);let phaseAlpha=select(1.0,0.36,phase.air!=0u);
+  if(sampled.valid==0u){let ink=pointInk(ray,center,2.2*width);return vec4f(vec3f(1.0,0.01,0.10),select(0.96,0.72,volume)*ink);}
+  let speed=length(sampled.value);let maximum=max(u.environment.z,1e-4);let magnitude=clamp(speed/maximum,0.0,1.0);let color=heat(magnitude);
+  if(speed<=1e-7){let ink=pointInk(ray,center,1.8*width);return vec4f(color,select(0.88,0.58,volume)*phaseAlpha*ink);}
+  // The colour remains linear in speed while only the glyph length is
+  // logarithmic. Sixteen bins make slow motion legible without letting a fast
+  // leaf's arrow escape its own cell.
+  let logMagnitude=log2(1.0+15.0*magnitude)/4.0;let arrowLength=cellWidth*(0.10+0.72*logMagnitude);let direction=sampled.value/speed;let tail=center-0.5*arrowLength*direction;let head=center+0.5*arrowLength*direction;
+  let towardCamera=normalize(u.cameraPosition.xyz-head);var side=cross(direction,towardCamera);if(length(side)<1e-5){side=cross(direction,select(vec3f(0.0,1.0,0.0),vec3f(1.0,0.0,0.0),abs(direction.y)>0.8));}side=normalize(side);
+  let headLength=min(0.30*arrowLength,0.22*cellWidth);let wingWidth=min(0.22*arrowLength,0.16*cellWidth);let headBase=head-direction*headLength;let wingA=headBase+side*wingWidth;let wingB=headBase-side*wingWidth;
+  var distance=raySegmentDistance(ray,tail,head).x;distance=min(distance,raySegmentDistance(ray,head,wingA).x);distance=min(distance,raySegmentDistance(ray,head,wingB).x);let ink=1.0-smoothstep(width,2.25*width,distance);return vec4f(color,select(0.96,0.72,volume)*phaseAlpha*ink);
+}
+fn adaptiveVelocityVolume(uv:vec2f)->vec4f{
+  let ray=cameraRay(uv);let minimum=vec3f(-0.5*u.container.x,0.0,-0.5*u.container.z);let interval=boxInterval(ray,minimum,minimum+u.container.xyz);if(interval.y<=interval.x){discard;}let steps=traversalSteps(ray,interval);let dt=(interval.y-interval.x)/f32(steps);var accum=vec4f(0.0);var previous=INVALID;
+  for(var sample=0u;sample<512u;sample+=1u){if(sample>=steps||accum.a>0.985){break;}let depth=interval.x+(f32(sample)+0.5)*dt;let point=ray.origin+ray.direction*depth;let row=rowAt(point);if(row==previous){continue;}previous=row;if(row==INVALID||!leafAt(row,worldToFine(point))){continue;}let arrow=arrowSample(row,ray,depth,true);if(arrow.a>0.001){accum=compositeDisplay(accum,arrow.rgb,arrow.a*volumeOpacity());}}
+  return finishDisplayVolume(accum);
+}
+@fragment fn fragmentMain(input:VertexOutput)->@location(0) vec4f{
+  if(i32(round(u.debug.x))==4){return adaptiveVelocityVolume(input.uv);}let hit=sliceRay(input.uv);if(hit.w<=0.0){discard;}let minimum=vec3f(-0.5*u.container.x,0.0,-0.5*u.container.z);if(any(hit.xyz<minimum)||any(hit.xyz>minimum+u.container.xyz)){discard;}let row=rowAt(hit.xyz);if(row==INVALID||!leafAt(row,worldToFine(hit.xyz))){discard;}let arrow=arrowSample(row,cameraRay(input.uv),hit.w,false);if(arrow.a<=0.001){discard;}return vec4f(displayColor(arrow.rgb),arrow.a);
+}`;
+
 const octreeLifecycleMembershipShader = /* wgsl */ `
 struct Config { dimensions:vec3u,tileSize:u32,capacity:u32,pad0:u32,pad1:u32,pad2:u32 }
 ${visualizationBindingPreambleWGSL(OCTREE_LIFECYCLE_MEMBERSHIP_PROGRAM)}
@@ -423,6 +483,7 @@ export class OctreeTechniqueOverlayPipeline {
   /** Bind groups for those programs plus the lifecycle membership compute pass. */
   private readonly groups = new Map<string, GPUBindGroup>();
   private bandConfig?: GPUBuffer;
+  private adaptiveVelocityViewConfig?: GPUBuffer;
   private lifecycleMembershipPipeline?: GPUComputePipeline;
   private source?: OctreeTechniqueDebugSource;
   private ownerRows?: GPUTexture;
@@ -458,6 +519,7 @@ export class OctreeTechniqueOverlayPipeline {
       ["topology", octreeTechniqueTopologyShader],
       ["face", octreeTechniqueFaceShader],
       ["structured", octreeTechniqueStructuredShader],
+      ["adaptiveVelocity", octreeTechniqueAdaptiveVelocityShader],
       ["lifecycle", octreeTechniqueLifecycleShader],
       ["fine", octreeTechniqueFineLifecycleShader],
     ];
@@ -501,6 +563,8 @@ export class OctreeTechniqueOverlayPipeline {
     if (key === "lifecycleConfig") return this.lifecycleConfig && { buffer: this.lifecycleConfig };
     if (key === "lifecycleWorklist") return source?.topologyLifecycle?.tileWorklist;
     if (key === "bandConfig") return this.bandConfig && { buffer: this.bandConfig };
+    if (key === "adaptiveVelocityViewConfig") return this.adaptiveVelocityViewConfig
+      && { buffer: this.adaptiveVelocityViewConfig };
     if (!source) return undefined;
     const fine = source.fineBandLifecycle;
     const fineResources: Readonly<Record<string, GPUBindingResource | undefined>> = {
@@ -509,6 +573,15 @@ export class OctreeTechniqueOverlayPipeline {
       fineRedistanceControl: fine?.redistanceControl, finePhi: fine?.samples, fineSeeds: fine?.seeds,
     };
     if (key in fineResources) return fineResources[key];
+    const adaptive = source.losassoAdaptiveVelocity;
+    const adaptiveResources: Readonly<Record<string, GPUBindingResource | undefined>> = {
+      losassoAdaptiveVelocityControl: adaptive?.control,
+      losassoAdaptiveVelocityLeaves: adaptive?.leaves,
+      losassoAdaptiveNodalVelocity: adaptive?.nodalVelocity,
+      losassoAdaptivePhiControl: adaptive?.phiControl,
+      losassoAdaptiveRowPhi: adaptive?.rowPhi,
+    };
+    if (key in adaptiveResources) return adaptiveResources[key];
     const bundle = source as unknown as Record<string, GPUBindingResource | undefined>;
     return typeof bundle[key] === "object" ? bundle[key] : undefined;
   }
@@ -567,6 +640,17 @@ export class OctreeTechniqueOverlayPipeline {
         bandWords.set(prefixReach, OCTREE_TECHNIQUE_BAND_PREFIX_WORD_OFFSET);
       }
       this.device.queue.writeBuffer(this.bandConfig, 0, bandWords);
+    }
+    const adaptive = source.losassoAdaptiveVelocity;
+    if (adaptive) {
+      if (!this.adaptiveVelocityViewConfig) {
+        this.adaptiveVelocityViewConfig = this.device.createBuffer({
+          label: "Losasso adaptive velocity overlay config", size: 16,
+          usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+        });
+      }
+      this.device.queue.writeBuffer(this.adaptiveVelocityViewConfig, 0,
+        new Float32Array([adaptive.extensionReach_m, 0, 0, 0]));
     }
     for (const [id, program] of Object.entries(OCTREE_TECHNIQUE_PROGRAMS)) {
       const group = this.buildGroup(program, this.pipelines.get(id as OctreeTechniqueProgramId));

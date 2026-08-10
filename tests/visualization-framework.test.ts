@@ -151,9 +151,9 @@ test("the observatory's card set is the visible fields, in catalog order", () =>
   }
 });
 
-test("hidden fields are declared for the harness but offered no card", () => {
+test("hidden fields stay out of the generic catalog-driven card set", () => {
   const hidden = VISUALIZATION_FIELDS.filter((field) => field.hidden);
-  assert.equal(hidden.length, 7);
+  assert.equal(hidden.length, 8);
   for (const field of hidden) assert.equal(field.modeCode !== undefined, true);
 });
 

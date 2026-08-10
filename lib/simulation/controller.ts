@@ -15,7 +15,7 @@ import {
   sceneDocumentAtLattice,
   type SceneCard,
 } from "../scene-definition";
-import { svoSceneryDetailCellSize_m, svoSceneryRefinementDepth, SVO_ENVIRONMENT_REFINEMENT_DEPTH_MAXIMUM } from "../svo-render-tuning";
+import { svoSceneryDetailCellSize_m, svoSceneryRefinementDepth, SVO_ENVIRONMENT_REFINEMENT_DEPTH_MAXIMUM, SVO_ENVIRONMENT_REFINEMENT_DEPTH_MINIMUM } from "../svo-render-tuning";
 import { terrainSampleShape } from "../terrain";
 import { savedSceneCard } from "../scene-cards";
 import { SCENE_STARTERS } from "../empty-scene";
@@ -496,11 +496,21 @@ class SimulationController {
       return false;
     }
     this.recordHistory(`open ${card.name}`);
+    // A card is a clean scene entry, not a continuation of whichever hidden
+    // studio state happened to be retained behind the library. Reset both
+    // serializable stores before applying the scene's authored contracts so a
+    // prior panel, diagnostic arm, quality experiment, or method override can
+    // never leak into another scene or its URL.
+    const previousCamera = useUIStore.getState().camera;
+    useMethodStore.setState(useMethodStore.getInitialState());
     if (opening.methodProfile) useMethodStore.getState().applyProfile(opening.methodProfile);
     this.reset(opening.scene, opening.presetId);
-    // Absent only for a saved document whose origin scene this build no longer
-    // has; there the camera the reader already had is the better answer.
-    if (opening.camera) useUIStore.getState().setCamera(opening.camera);
+    useUIStore.setState({
+      ...useUIStore.getInitialState(),
+      // Absent only for a saved document whose origin scene this build no
+      // longer has; there the camera the reader already had is the better answer.
+      camera: opening.camera ?? previousCamera,
+    });
     const runtimePlan = planSceneRuntime(opening.scene);
     useRuntimeStore.getState().setNotice(!runtimePlan.fluidSolver
       ? `${card.name} opened · no fluid solver, so nothing waits on one`
@@ -612,29 +622,42 @@ class SimulationController {
       return false;
     }
     if (scene.systems?.fluid !== false) {
-      runtime.setNotice("Turn water off to re-author this scene at a finer lattice"
-        + " · a solver brick pins its node, so a wet document has no finer rung", "warn");
+      runtime.setNotice("Turn water off to re-author this scene at another environment lattice"
+        + " · a solver brick pins its node, so a wet document cannot move on this ladder", "warn");
       return false;
     }
-    const cellSize_m = request.cellSize_m ?? scene.voxelDomain.finestCellSize_m;
-    if (!(cellSize_m > 0) || !Number.isFinite(cellSize_m)) return false;
+    const currentDepth = svoSceneryRefinementDepth(scene.voxelDomain, { fluid: false });
+    const zeroCellSize_m = request.cellSize_m
+      ?? scene.voxelDomain.environmentRefinementBaseCellSize_m
+      ?? scene.voxelDomain.finestCellSize_m;
+    if (!(zeroCellSize_m > 0) || !Number.isFinite(zeroCellSize_m)) return false;
     // The document's own depth is the fallback, because the document is where
     // the depth lives. A request that names only a cell size keeps the rung the
     // set was last expanded at rather than silently flattening it to zero.
-    const depth = Math.min(SVO_ENVIRONMENT_REFINEMENT_DEPTH_MAXIMUM, Math.max(0, Math.trunc(
-      request.environmentRefinementDepth ?? svoSceneryRefinementDepth(scene.voxelDomain, { fluid: false }))));
-    const detailCellSize_m = svoSceneryDetailCellSize_m(cellSize_m, {
+    const depth = Math.min(SVO_ENVIRONMENT_REFINEMENT_DEPTH_MAXIMUM,
+      Math.max(SVO_ENVIRONMENT_REFINEMENT_DEPTH_MINIMUM, Math.trunc(
+        request.environmentRefinementDepth ?? currentDepth)));
+    // A negative rung is a coarser *tree*, not just a coarser authoring hint.
+    // Enlarge the actual scene lattice and leave its internal refinement at
+    // zero; positive rungs keep the zero cell and descend beneath it as before.
+    const cellSize_m = depth < 0 ? zeroCellSize_m * 2 ** -depth : zeroCellSize_m;
+    const detailCellSize_m = depth < 0 ? cellSize_m : svoSceneryDetailCellSize_m(zeroCellSize_m, {
       environmentRefinementDepth: depth,
       fluid: false,
     });
     const already = scene.voxelDomain.finestCellSize_m === cellSize_m
-      && (scene.voxelDomain.detailCellSize_m ?? scene.voxelDomain.finestCellSize_m) === detailCellSize_m;
+      && (scene.voxelDomain.detailCellSize_m ?? scene.voxelDomain.finestCellSize_m) === detailCellSize_m
+      && (scene.voxelDomain.environmentRefinementBaseCellSize_m ?? cellSize_m)
+        === (depth < 0 ? zeroCellSize_m : cellSize_m);
     if (already) return false;
     const label = `Re-author at ${(cellSize_m * 1000).toFixed(4).replace(/\.?0+$/, "")} mm`
       + (depth > 0 ? ` / ${(detailCellSize_m * 1000).toFixed(5).replace(/\.?0+$/, "")} mm set` : "");
     let rebuilt;
     try {
       rebuilt = sceneDocumentAtLattice(definition, { cellSize_m, detailCellSize_m });
+      if (depth < 0) {
+        rebuilt.scene.voxelDomain.environmentRefinementBaseCellSize_m = zeroCellSize_m;
+      }
     } catch (error) {
       runtime.setNotice(error instanceof Error ? error.message : `${definition.name} refused that lattice`, "warn");
       return false;
@@ -685,18 +708,21 @@ class SimulationController {
     const sceneStore = useSceneStore.getState();
     const { scene, presetId } = sceneStore;
     if (scene.systems?.fluid !== false) {
-      runtime.setNotice("Turn water off to spend refinement depth"
-        + " · a solver brick pins its node, so a wet scene has no finer rung", "warn");
+      runtime.setNotice("Turn water off to change environment refinement depth"
+        + " · a solver brick pins its node, so a wet scene cannot move on this ladder", "warn");
       return false;
     }
-    const requested = Math.min(SVO_ENVIRONMENT_REFINEMENT_DEPTH_MAXIMUM, Math.max(0, Math.trunc(depth)));
+    const requested = Math.min(SVO_ENVIRONMENT_REFINEMENT_DEPTH_MAXIMUM,
+      Math.max(SVO_ENVIRONMENT_REFINEMENT_DEPTH_MINIMUM, Math.trunc(depth)));
     if (requested === svoSceneryRefinementDepth(scene.voxelDomain, { fluid: false })) return false;
     const definition = findSceneDefinition(presetId);
     if (definition && sceneDefinitionTakesLattice(definition)) {
       return this.rebuildSceneAtLattice({ environmentRefinementDepth: requested });
     }
-    const finestCellSize_m = scene.voxelDomain.finestCellSize_m;
-    const detailCellSize_m = svoSceneryDetailCellSize_m(finestCellSize_m, {
+    const zeroCellSize_m = scene.voxelDomain.environmentRefinementBaseCellSize_m
+      ?? scene.voxelDomain.finestCellSize_m;
+    const finestCellSize_m = requested < 0 ? zeroCellSize_m * 2 ** -requested : zeroCellSize_m;
+    const detailCellSize_m = requested < 0 ? finestCellSize_m : svoSceneryDetailCellSize_m(zeroCellSize_m, {
       environmentRefinementDepth: requested, fluid: false,
     });
     const label = `Draw the set at ${(detailCellSize_m * 1000).toFixed(5).replace(/\.?0+$/, "")} mm`;
@@ -705,10 +731,14 @@ class SimulationController {
     sceneStore.patchScene({
       voxelDomain: {
         ...scene.voxelDomain,
+        finestCellSize_m,
         // Omitted rather than equal, so an unrefined document keeps saying
         // nothing about its detail cell and `svoSceneryRefinementDepth` reads
         // the same zero from either spelling.
         ...(detailCellSize_m < finestCellSize_m ? { detailCellSize_m } : { detailCellSize_m: undefined }),
+        ...(requested < 0
+          ? { environmentRefinementBaseCellSize_m: zeroCellSize_m }
+          : { environmentRefinementBaseCellSize_m: undefined }),
       },
     });
     runtime.setNotice(`Set drawn at ${(detailCellSize_m * 1000).toFixed(5).replace(/\.?0+$/, "")} mm`
@@ -1074,6 +1104,10 @@ class SimulationController {
       physics,
       presentation: metrics.presentation && metrics.presentation.capturedAt_ms >= instrumentation.enabledAt_ms
         && performanceTraceMatchesLane(metrics.presentation, "gpu", "presentation") ? metrics.presentation : undefined,
+      presentationStages: metrics.presentationStages
+        && metrics.presentationStages.capturedAt_ms >= instrumentation.enabledAt_ms
+        && performanceTraceMatchesLane(metrics.presentationStages, "gpu", "presentation")
+        ? metrics.presentationStages : undefined,
     };
     diagnostics.pushPerformanceReport(report);
     const activityStore = usePerformanceActivityStore.getState();

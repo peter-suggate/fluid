@@ -1,11 +1,11 @@
 import { cloneScene, defaultScene, DEFAULT_FINEST_CELL_SIZE_M, type CameraState, type SceneDescription } from "./model";
+import { heroGardenCloudTree } from "./hero-garden-tree";
 import { applyHeroGardenNodeOverrides, HERO_GARDEN_OVERRIDES } from "./hero-garden-overrides";
 import type { SceneryGraph, SceneryNode } from "./scenery-graph";
 import {
   pondVesselWaterline,
   type PondVesselSpec,
 } from "./voxel-scenery/pond-vessel";
-import { OAK_HERO_SPREADING } from "./voxel-scenery/oak";
 import { stoneSetBoulderStations, stoneSetSteppingBodies } from "./voxel-scenery/stone-set";
 import { ROSETTE_AIR_PLANT, ROSETTE_GRASS_TUFT, type RosetteForm } from "./voxel-scenery/rosette";
 import { sweptTubeNodes } from "./voxel-scenery/swept-tube";
@@ -69,9 +69,9 @@ import { tanHalfFovFor35mmFocalLength } from "./webgpu-camera";
  * solver's own grid is stated here.
  *
  * ---------------------------------------------------------------------------
- * 1.2 m, raised from 0.6, for the tree that is coming
+ * 1.2 m, raised from 0.6, for replacement-tree headroom
  * ---------------------------------------------------------------------------
- * The set is about to lose its bonsai to a procedural oak of roughly 0.80 m
+ * The replacement tree is expected to be roughly 0.80 m
  * standing on the same terrace, whose foot is at about y = 0.21 — so it reaches
  * **y ~= 1.01 m**, nearly twice the old lid. What that has to clear:
  *
@@ -86,7 +86,7 @@ import { tanHalfFovFor35mmFocalLength } from "./webgpu-camera";
  *    bonsai's crown at y = 0.7035 — already 103 mm *over* a 0.6 m lid — and the
  *    planned domain came out 15 bricks tall (0.75 m) purely because that is where
  *    the crown ended. The extent of the tree was therefore a property of whatever
- *    prop happened to be tallest, and swapping the bonsai for an oak re-shaped it
+ *    prop happened to be tallest, and replacing that prop could re-shape it
  *    silently. At 1.2 m the container is the taller of the two and says so.
  *
  * What the added volume costs is **nothing**, and the reason is that all of it
@@ -118,19 +118,18 @@ import { tanHalfFovFor35mmFocalLength } from "./webgpu-camera";
  * ---------------------------------------------------------------------------
  * The correction: this lid does not clip geometry, and it never did
  * ---------------------------------------------------------------------------
- * `docs/oak-tree-species-plan.md` concern 7 reads "two fifths of the tree would
- * be outside the domain — that geometry is not cut by the frame, it is not
- * voxelized at all". That is not what the planner does. `planSparseSceneDomain`
+ * An earlier tree plan assumed geometry beyond the container would be clipped.
+ * That is not what the planner does. `planSparseSceneDomain`
  * seeds its lattice at the container and then takes the **union** with every
  * proxy AABB, brick-aligned, so a prop that overhangs the box *extends* the
  * domain. Measured directly: adding one synthetic proxy reaching y = 1.01 to
  * the 0.6 m document takes the domain from 15 to 21 bricks on y (0.75 -> 1.05 m)
  * with the container untouched. So the raise is for the two reasons above, and
- * a 0.80 m oak under the old lid would have rendered — just into a domain whose
+ * a 0.80 m tree under the old lid would have rendered — just into a domain whose
  * shape no one had authored.
  *
  * ---------------------------------------------------------------------------
- * Why 1.2 and not the 1.1 the oak actually needs
+ * Why 1.2 and not the 1.1 the replacement tree is expected to need
  * ---------------------------------------------------------------------------
  * The ladder of cell sizes at which every container dimension is a whole number
  * of 8-cell bricks is 25, 12.5, 6.25, 3.125 and 1.5625 mm, and the header above
@@ -149,7 +148,7 @@ import { tanHalfFovFor35mmFocalLength } from "./webgpu-camera";
  * rung of the ladder no longer works.
  */
 export const HERO_GARDEN_CONTAINER = { width_m: 1.8, height_m: 1.2, depth_m: 1.2 } as const;
-/** The global lattice. This scene has no reason to name its own. */
+/** The global lattice; the product's dry refinement presents it at 6.25 mm. */
 export const HERO_GARDEN_CELL_M = DEFAULT_FINEST_CELL_SIZE_M;
 export const HERO_GARDEN_BRICK_CELLS = 8 as const;
 
@@ -402,57 +401,10 @@ const HERO_GARDEN_VESSEL_AUTHORED = Object.freeze({
   sectionWidthVariation: 0.22,
   relief_m: 0.0025,
   seed: 0x9a7de11,
-  /**
-   * The raised beds, and both are walls now rather than mounds.
-   *
-   * The reference's garden is *built*: the tree stands on a raised bed with a
-   * flat top and a short formed face, and the boulder group stands on a lower
-   * one of the same construction. What the frame had instead was two swellings
-   * of the plaster whose only visible edge was the steepest patch of a
-   * smoothstep — a fault line across the far bank, which is what a soft terrace
-   * looks like once it is voxelized. See `PondVesselTerrace.faceRun_m`.
-   *
-   * Each carries a `wall` profile rather than a face run, and the difference is
-   * not a refinement — a `faceRun_m` only narrowed the smoothstep, which has no
-   * flat top and no crest at any width. See `PondVesselTerrace.wall`.
-   *
-   * The radii are **small**, and the first pass had them three times larger on
-   * the reasoning that a casting has no zero-radius arris. True, and beside the
-   * point: a 12 mm crest roll and a 10 mm foot fillet on a 75 mm rise spend
-   * 25 % of the *rise* turning over and 73 % of the plan run, which is a rolled
-   * lip — a tube — however steep its steepest point happens to be. At 4 and 3 mm
-   * the arcs take 8 % of the rise and the transition averages 80 degrees, which
-   * is a wall with a formed edge on it. `tools/shape-lab.ts wall` reports both
-   * numbers now; it used to report the slope across the *middle* 70 % of the
-   * rise, which is a statistic that excludes the arcs and therefore could never
-   * have shown this.
-   *
-   * The floor is the lattice rather than taste: at the depth-2 leaf the app runs,
-   * a 4 mm radius is 2.6 voxels, and under about two it stops being a roll and
-   * starts being an aliased corner.
-   *
-   * `radius_m` is now the wall's **crest line**, not its outer footprint — the
-   * profile reaches about 30 mm further out than that — which is the same
-   * convention the coping's rail uses.
-   */
-  terraces: [
-    // The plateau the bonsai stands on, at the back right.
-    {
-      center_m: [0.62, 0.30] as const, radius_m: [0.43, 0.33] as const,
-      height_m: 0.075, rotation_rad: -0.35,
-      wobble: 0.05, lobes: 5,
-      wall: { crestRadius_m: 0.004, footRadius_m: 0.003, batter_rad: 0.09 },
-    },
-    // A lower step at the near left, where the boulder group beds in. A tighter
-    // crest on the lower wall, so the two read as the same casting at two
-    // heights rather than as one detail scaled.
-    {
-      center_m: [-0.64, -0.20] as const, radius_m: [0.35, 0.29] as const,
-      height_m: 0.042, rotation_rad: 0.25,
-      wobble: 0.06, lobes: 4,
-      wall: { crestRadius_m: 0.0028, footRadius_m: 0.0022, batter_rad: 0.10 },
-    },
-  ],
+  // The references place every prop on one uninterrupted exterior plane. The
+  // pond profile still owns its wall, lip and beach; beyond the rim foot there
+  // are no raised beds, mounds or hidden composition terraces.
+  terraces: [],
 });
 
 export const HERO_GARDEN_VESSEL: PondVesselSpec = Object.freeze(
@@ -578,60 +530,11 @@ const HERO_GARDEN_TAN_HALF_FOV = tanHalfFovFor35mmFocalLength(50);
  */
 export const heroGardenCamera: Partial<CameraState> = {
   azimuth_rad: HERO_GARDEN_AZIMUTH_RAD,
-  elevation_rad: 0.40,
-  distance_m: 1.40,
+  elevation_rad: 0.44,
+  distance_m: 1.90,
   tanHalfFov: HERO_GARDEN_TAN_HALF_FOV,
-  target_m: { x: -0.04, y: 0.35, z: 0.0 },
+  target_m: { x: -0.04, y: 0.55, z: 0.0 },
 };
-
-/**
- * The sun, as a bearing in the camera's frame rather than in the world's.
- *
- * Three quarters of screen right, lifted to `y = 0.62` — about forty degrees —
- * is a sun over the camera's right shoulder, which is where the reference's is.
- * Deriving it from the same azimuth the camera uses means re-aiming the camera
- * re-aims the light with it, and the set cannot be relit into silhouettes by a
- * framing change alone.
- *
- * The default key is `[-0.45, 0.86, 0.28]`: nearly overhead, and from the left
- * of this camera. That is the one arrangement that flattens a set of round pale
- * objects into silhouettes, which is most of why the early frames read as grey.
- */
-/**
- * How far the sun swings toward the camera from screen right, and how high.
- *
- * The previous rig put the key at **exactly** screen right — its depth
- * component, `-(x sin az + z cos az)`, worked out to 0.0000 — which is a pure
- * side light. On this set that is close to the worst available choice, and the
- * frame said so long before any metric did: the bonsai stands at the back of
- * the pond and a side key rakes its canopy's shadow **across the entire bowl
- * and most of the ground**. The plate has nothing of the kind. It is bright and
- * airy, with a small soft shadow tucked under the tree and contact shadows
- * beside the stones.
- *
- * Measured rather than reasoned: `FLUID_SVO_DRY_SMOKE_LIGHT_SWEEP` renders a
- * grid of bearings and elevations from one world build, and the eight-frame
- * sweep across `theta = 0, -0.3, -0.6, -0.9` at `y = 1.2, 1.9` is unambiguous.
- * At theta 0 the bowl is a shadow. By -0.6 the shadow has retreated to beneath
- * the canopy, the coping carries form along its whole length, and the bowl is
- * open — which is the plate's read. Past -0.9 the set starts to flatten,
- * because a light that is nearly frontal stops modelling anything.
- *
- * `y = 1.9` against the previous 0.62 is a sun at 68 degrees rather than 40.
- * The plate's is high: its stones have short shadows that stay under them.
- *
- * Still derived from `HERO_GARDEN_AZIMUTH_RAD`, so re-aiming the camera still
- * re-aims the light and the set cannot be relit into silhouettes by a framing
- * change alone. Only the bearing offset and the elevation are new.
- */
-const HERO_GARDEN_KEY_BEARING_OFFSET_RAD = -0.6;
-const HERO_GARDEN_KEY_ELEVATION = 1.9;
-const HERO_GARDEN_KEY_BEARING_RAD = HERO_GARDEN_AZIMUTH_RAD + HERO_GARDEN_KEY_BEARING_OFFSET_RAD;
-const HERO_GARDEN_KEY_DIRECTION: readonly [number, number, number] = [
-  0.75 * Math.cos(HERO_GARDEN_KEY_BEARING_RAD),
-  HERO_GARDEN_KEY_ELEVATION,
-  -0.75 * Math.sin(HERO_GARDEN_KEY_BEARING_RAD),
-];
 
 /**
  * Where the water leaves the hose, and how fast.
@@ -784,37 +687,6 @@ function hoseNodes(): SceneryNode[] {
 export const HERO_GARDEN_SET_SEED = 0x5701_e5;
 
 /**
- * Where the tree stands, and which way it leans.
- *
- * On the far-right bank, and leaning back toward the pond's centre so the
- * crown overhangs the water the way the reference's does. The lean is the
- * negated stand position for exactly that reason — the tree is told to reach
- * for the middle, not given a bearing that has to be kept in agreement with one.
- *
- * Unchanged across the bonsai-to-oak cutover: the terrace it stands on and the
- * water it reaches over are the same, and moving the stand at the same time as
- * the species would have made a composition change and a geometry change
- * indistinguishable in the frame.
- */
-const HERO_TREE_AT_M = [0.55, -0.15] as const;
-
-/**
- * The hero specimen, which is the species with nothing overridden — for now.
- *
- * The bonsai this replaces carried a two-parameter override here (a flatter,
- * narrower crown than the catalogue specimen's, because the catalogue is looked
- * at from a wider frame where a plate that thin reads as a disc). The oak has no
- * such divergence yet, and an override with nothing in it is better spelled as
- * the species itself than as a spread that looks like it is doing something.
- *
- * When the shape lab produces one — and it will, for the same reason the bonsai
- * had one — it goes here, beside the argument for it, rather than in
- * `lib/hero-garden-overrides.ts`, which is a staging area and not a second
- * authority. See `OAK_HERO_SPREADING` for what this specimen is.
- */
-const HERO_OAK_FORM = OAK_HERO_SPREADING;
-
-/**
  * The set, as a description of itself.
  *
  * This used to be a *composition step*: a function that took a ground query,
@@ -952,15 +824,7 @@ function heroGardenAuthoredScenery(waterline_m: number): SceneryGraph {
         seed: HERO_GARDEN_SET_SEED,
         params: { waterline_m },
       },
-      // The tree. A procedural oak since the cutover; `bonsai` is still a
-      // species and still has its catalogue forms, it simply no longer stands
-      // here. See `docs/oak-tree-species-plan.md` for why an oak is a third
-      // generator rather than a re-tune of either of the first two.
-      {
-        kind: "generator", id: "oak", generator: "oak",
-        seed: HERO_GARDEN_SET_SEED ^ 0x0a_c0_de,
-        params: { ...HERO_OAK_FORM, at_m: HERO_TREE_AT_M, lean: [-HERO_TREE_AT_M[0], -HERO_TREE_AT_M[1]] },
-      },
+      heroGardenCloudTree(),
       // The plants. Built and tested for this scene and then never called by
       // it, which is the failure mode a generator catalog exists to make
       // visible: a species with no node in any document is a species nobody can
@@ -1023,8 +887,8 @@ export interface HeroGardenHoseOptions {
    * so a dry lane may go far below it and a wet one may not.
    *
    * Every container dimension has to stay a whole number of 8-cell bricks, and
-   * the ladder that does is 25, 12.5, 6.25, 3.125 and 1.5625 mm. Raising the
-   * container for the oak put that invariant at risk — at 1.1 m the 25 mm rung
+   * the ladder that does is 25, 12.5, 6.25, 3.125 and 1.5625 mm. Reserving
+   * replacement-tree headroom put that invariant at risk — at 1.1 m the 25 mm rung
    * is 44 cells, which is 5.5 bricks, and 25 mm is what
    * `HERO_GARDEN_SOLVER_CELL_M` pins a wet document to — so the height went to
    * 1.2 m instead, which is exactly 6 bricks there and whole at every finer
@@ -1180,145 +1044,9 @@ export function createHeroGardenHoseScene(options: HeroGardenHoseOptions = {}): 
     waterline_m,
     seed: HERO_GARDEN_SET_SEED,
   });
-  /**
-   * The light, aimed at the frame rather than at the world.
-   *
-   * The reference is one hard warm sun from the upper right with a very bright
-   * bounce under it — the shadows have direction and softness but almost no
-   * depth, because everything they fall on is white and throws the light back.
-   * The default key sits at [-0.45, 0.86, 0.28]: nearly overhead, and from the
-   * *left* of this camera, which is the one arrangement that flattens a set of
-   * round pale objects into silhouettes.
-   *
-   * So the direction is derived from the camera's own basis instead of authored
-   * as three numbers. Screen right at azimuth `az` is `(sin az, 0, -cos az)`;
-   * this is that vector at three-quarters strength, lifted to about 40 degrees.
-   * The sun therefore rakes across the set from the upper right of frame, which
-   * is what puts a lit edge on the near side of every boulder and a soft shadow
-   * running to the left of it.
-   */
-  scene.lighting = {
-    ...scene.lighting,
-    directional: {
-      /**
-       * Warm daylight. An eighth of a stop of blue out of the red is what turns
-       * a neutral lamp into a sun, and on a set with no hue of its own it is the
-       * only thing separating the lit side of a stone from its shaded side by
-       * *colour* rather than only by value — the sky fill below is cool, so the
-       * two halves of every boulder land on opposite sides of neutral. That
-       * split is most of what reads as daylight in the reference.
-       */
-      colorLinear: [1, 0.955, 0.875],
-      /**
-       * Three and a bit, and the number is a Lambert denominator rather than an
-       * exposure in disguise.
-       *
-       * A diffuse surface returns `albedo · I · cos / π`, so porcelain at 0.90
-       * albedo facing this sun square-on comes back at `0.275 · I`. Unit
-       * intensity therefore puts a fully lit white surface at 0.28 radiance,
-       * which ACES places on 0.68 display: a mid grey, which is exactly what the
-       * frame looked like. `I = 3.2` is where that same surface returns roughly
-       * unit radiance and lands at 0.95 — near white with the curve's shoulder
-       * still under it, so the coping's crest and its flank are different whites
-       * rather than the same clipped one.
-       *
-       * It is also where the key stops being a rounding error against the fill.
-       * At 1.05 the sun carried under a quarter of a lit surface's radiance and
-       * the set had no light direction at all; here it carries about 40 %, which
-       * is a lit side and a shaded side that differ by roughly two thirds of a
-       * stop — soft, directional, and nowhere near the silhouettes a hard key
-       * would cut into a set of round pale objects.
-       */
-      intensity: 3.2,
-      direction: HERO_GARDEN_KEY_DIRECTION,
-    },
-    /**
-     * The sky, which on this set is doing two jobs and therefore needs its own
-     * balance rather than inheriting the environment preset unchanged.
-     *
-     * `diffuseScale` is the fill *and* the bounce: the analytic environment
-     * irradiance is the sky a surface sees, and the derived GI gathers radiance
-     * from surfaces that are themselves lit by it, so raising it raises the
-     * light coming back off the ground as well as the light coming down. That
-     * compounding is the reference's whole shadow character — its shadow
-     * interiors sit a little over half a stop below its highlights because
-     * everything they fall on is white and throws the light straight back up.
-     * At 1.05 the shaded flanks remain open without whitening away the contact
-     * shadows. The key can then carry the highlights and direction instead of
-     * the whole set converging on the same display white.
-     *
-     * The garden palette's sky is cool (0.52, 0.60, 0.72 at the zenith) against
-     * the warm key above it, so scaling it does not merely brighten the shadows,
-     * it keeps them blue.
-     *
-     * `specularScale` is the same sky seen as a mirror, and it is also the
-     * *background*: a primary ray that misses returns the prefiltered
-     * environment at roughness zero. 0.75 keeps the backdrop bright but below
-     * the sunlit porcelain. Surface reflection also passes
-     * through the roughness-aware integrated environment BRDF, so the same
-     * scale produces a broad porcelain sheen without outlining every matte
-     * coping and boulder with the mirror-bright background.
-     */
-    environment: { diffuseScale: 1.05, specularScale: 0.75 },
-    /**
-     * The grade, which is where the high-key look belongs.
-     *
-     * ACES rather than Reinhard because the reference has a shoulder: its
-     * plaster runs to within a few percent of white across a whole coping and
-     * still has form in it, and `x / (x + 1)` cannot do that without the scene
-     * pushing radiance far enough up that the shadows go with it.
-     *
-     * -----------------------------------------------------------------------
-     * Exposure and balance are solved, not chosen
-     * -----------------------------------------------------------------------
-     * Exposure used to be 1, on the reasoning that "the set is lit correctly in
-     * physical terms". The set *is* lit correctly; the frame was still nothing
-     * like the plate, and H1 of `docs/hero-fidelity-1000x-handoff.md` is where
-     * that got measured rather than argued. Per-region mean CIELAB, frame
-     * against plate at the registered camera:
-     *
-     *     region     L* frame   L* plate    b* frame   b* plate
-     *     coping        86.8       60.5         1.1        5.2
-     *     ground        86.9       58.6         1.0        6.0
-     *
-     * Twenty-seven L\* too bright, and neutral where the plate is warm. Neither
-     * is a lighting fault. A photograph of a white set in sun is exposed so the
-     * white does not blow, which puts porcelain at a mid tone and *not* at 87 —
-     * so the frame was not over-lit, it was over-exposed, and the distinction
-     * matters because dropping the key instead would have changed the
-     * lit-to-shadow ratio, which is a physical fact about the set.
-     *
-     * **Re-solved after the key moved.** Opening the canopy's shadow off the
-     * bowl brightened the set, so the previous exposure (0.2952, solved under
-     * the side key) was stale by a third of a stop. Light first, then grade —
-     * the other order solves the grade against a lighting fault and then has to
-     * undo it.
-     *
-     * `tools/solve-hero-grade.ts` searches both against the plate over the
-     * neutral regions — coping, ground and stones, deliberately excluding the
-     * pond (teal water this frame does not have yet, gap #1) and the canopy (a
-     * different material, warm for its own reasons). It lands here, and moves
-     * ΔE₀₀ 20.05 -> 3.30 on the coping and 21.88 -> 2.43 on the ground against
-     * H1's gate of halving them.
-     *
-     * The balance is authored as raw channel gains; `resolveDisplayGrade`
-     * normalises them for luminance, so this knob is pure chromaticity and
-     * cannot double as a second exposure.
-     *
-     * **What this does not fix, and what it exposed.** In the frame the canopy
-     * is *darker* than the coping (L\* 74.6 against 86.8); in the plate it is
-     * *brighter* (66.2 against 60.5). That is a ratio inverted, and no global
-     * exposure can turn it around — the canopy is under-lit relative to the set
-     * around it, which is a fill-and-bounce problem and belongs to the rest of
-     * H1, not to the grade. It is why the canopy region's ΔE₀₀ goes *up* under
-     * this solve, and that regression is real rather than a rounding.
-     */
-    grade: {
-      toneCurve: "aces",
-      exposure: 0.2200,
-      whiteBalance: [1.1006, 1.0, 0.9506],
-    },
-  };
+  // Lighting is not scene data on the fluid-free SVO path. Every dry scene
+  // resolves the same defaults at the renderer boundary; see
+  // `svo-dry-scene-lighting.ts`.
   // The set is seated on the grid that was just baked, not on the generator that
   // produced it: the two agree at every grid node by construction and differ
   // between them by the bilinear fetch, and the ground a root meets should be
