@@ -1341,7 +1341,7 @@ export function createHeroGardenHoseSceneWithSet(
  * analytic oracles beside the three paper figures, and a `<select>` showed them
  * all to whoever arrived — a third of the product's first impression was
  * ceiling-drop adhesion tests. They are how the physics is trusted and they
- * stay; they are disclosed rather than offered.
+ * stay; they are simply the last section the page reads, not the first.
  */
 export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
   defineScene({

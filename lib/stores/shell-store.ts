@@ -1,5 +1,4 @@
 import { create } from "zustand";
-import type { SceneSectionId } from "../scene-cards";
 
 /**
  * Session metadata shared by the library page and the scene page.
@@ -23,12 +22,9 @@ interface ShellStore {
    */
   studioEntered: boolean;
   librarySearch: string;
-  /** Sections the reader has opened past their default disclosure. */
-  expandedSections: readonly SceneSectionId[];
   openLibrary: () => void;
   enterStudio: () => void;
   setLibrarySearch: (query: string) => void;
-  toggleSection: (id: SceneSectionId) => void;
 }
 
 export const useShellStore = create<ShellStore>((set) => ({
@@ -36,13 +32,7 @@ export const useShellStore = create<ShellStore>((set) => ({
   view: "library",
   studioEntered: false,
   librarySearch: "",
-  expandedSections: [],
   openLibrary: () => set({ view: "library" }),
   enterStudio: () => set({ view: "studio", studioEntered: true, librarySearch: "" }),
   setLibrarySearch: (librarySearch) => set({ librarySearch }),
-  toggleSection: (id) => set((state) => ({
-    expandedSections: state.expandedSections.includes(id)
-      ? state.expandedSections.filter((entry) => entry !== id)
-      : [...state.expandedSections, id],
-  })),
 }));

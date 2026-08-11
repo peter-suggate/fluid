@@ -109,14 +109,12 @@ test("every scene declares a known audience, and the oracles stay in validation"
     // A guard rather than taste: an analytic oracle that lands on the Explore
     // shelf is thirteen ceiling-drop tests back in the product's front door.
     if (entry.name.startsWith("Octree · ")) {
-      assert.equal(entry.audience, "validation", `${entry.id} is an oracle and belongs behind the disclosure`);
+      assert.equal(entry.audience, "validation", `${entry.id} is an oracle and belongs in the last section`);
     }
   }
   assert.ok(SCENE_CATALOG.some((entry) => entry.audience === "explore"));
   assert.ok(SCENE_CATALOG.some((entry) => entry.audience === "study"));
   assert.ok(SCENE_CATALOG.some((entry) => entry.audience === "validation"));
-  assert.equal(SCENE_AUDIENCES.find(({ id }) => id === "validation")?.disclosed, true,
-    "validation scenes are disclosed, never removed");
 });
 
 test("a numerical scene carries the solver profile it requires", () => {

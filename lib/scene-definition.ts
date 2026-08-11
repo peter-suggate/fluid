@@ -44,8 +44,10 @@ import {
  *
  * `group` used to be a shelf label written for us — "Comparisons" held fourteen
  * numerical oracles, and they were a third of the first thing a visitor saw. A
- * scene's audience decides whether it is offered or disclosed; its `shelf`
- * decides where it sits once offered.
+ * scene's audience decides where its section sits in the reading order; its
+ * `shelf` decides where it sits within the section. The oracles used to be
+ * collapsed behind a disclosure as well, but the map down the page's side now
+ * names every shelf, and a shelf the map points into must be on the page.
  */
 export type SceneAudience = "explore" | "study" | "validation";
 
@@ -53,12 +55,10 @@ export const SCENE_AUDIENCES: ReadonlyArray<{
   readonly id: SceneAudience;
   readonly label: string;
   readonly blurb: string;
-  /** Validation scenes are real work, not clutter — disclosed, never removed. */
-  readonly disclosed: boolean;
 }> = Object.freeze([
-  { id: "explore", label: "Explore", blurb: "Scenes to watch, poke and edit.", disclosed: false },
-  { id: "study", label: "Study", blurb: "Published figures and method comparisons.", disclosed: false },
-  { id: "validation", label: "Research & validation", blurb: "Analytic oracles with known answers.", disclosed: true },
+  { id: "explore", label: "Explore", blurb: "Scenes to watch, poke and edit." },
+  { id: "study", label: "Study", blurb: "Published figures and method comparisons." },
+  { id: "validation", label: "Research & validation", blurb: "Analytic oracles with known answers." },
 ]);
 
 /**

@@ -31,8 +31,6 @@ export interface SceneSection {
   readonly id: SceneSectionId;
   readonly label: string;
   readonly blurb: string;
-  /** Collapsed by default: present and findable, not part of the first impression. */
-  readonly disclosed: boolean;
   readonly shelves: readonly SceneShelf[];
 }
 
@@ -111,7 +109,7 @@ export function sceneSections(saved: readonly SceneLibraryEntry[]): readonly Sce
     if (!entry) return undefined;
     const cards = sceneCatalogCards.filter((card) => card.audience === id);
     if (cards.length === 0) return undefined;
-    return { id, label: entry.label, blurb: entry.blurb, disclosed: entry.disclosed, shelves: sceneShelves(cards) };
+    return { id, label: entry.label, blurb: entry.blurb, shelves: sceneShelves(cards) };
   };
   const sections: (SceneSection | undefined)[] = [
     audience("explore"),
@@ -120,7 +118,6 @@ export function sceneSections(saved: readonly SceneLibraryEntry[]): readonly Sce
       id: "mine",
       label: "My scenes",
       blurb: "Saved in this browser. They export as the same JSON as the file download.",
-      disclosed: false,
       shelves: sceneShelves(mine),
     },
     audience("validation"),

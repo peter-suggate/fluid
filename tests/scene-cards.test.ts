@@ -30,12 +30,8 @@ function entry(patch: Partial<SceneLibraryEntry> = {}): SceneLibraryEntry {
 
 test("the sections read in the order the page is read", () => {
   const sections = sceneSections([]);
+  // The oracles are how the physics is trusted; they stay — last, not first.
   assert.deepEqual(sections.map(({ id }) => id), ["explore", "study", "validation"]);
-  // The oracles are how the physics is trusted; they stay, disclosed.
-  assert.equal(sections.find(({ id }) => id === "validation")?.disclosed, true);
-  for (const section of sections.filter(({ id }) => id !== "validation")) {
-    assert.equal(section.disclosed, false, `${section.id} is offered, not disclosed`);
-  }
 });
 
 test("starters are a hero, not a shelf, and are still cards", () => {
@@ -128,11 +124,11 @@ test("card identities never collide across sources", () => {
   assert.equal(new Set(ids).size, ids.length);
 });
 
-test("search reaches every shelf, including the disclosed one", () => {
+test("search reaches every shelf, including the last one", () => {
   const cards = allSceneCards([entry()]);
   assert.equal(matchSceneCards(cards, "   ").length, cards.length, "an empty query is not a filter");
   assert.ok(matchSceneCards(cards, "ceiling drop").some(({ id }) => id === "ceiling-slab-drop"),
-    "an oracle must be findable by name even while its section is collapsed");
+    "an oracle must be findable by name from the top of the page");
   // Matching the blurb is what makes a search for a thing you remember seeing
   // work without a tag vocabulary nobody would maintain.
   assert.ok(matchSceneCards(cards, "mushrooms").some(({ id }) => id === "garden-pond"));
