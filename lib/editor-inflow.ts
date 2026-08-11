@@ -7,6 +7,7 @@ import {
   pickSolidBox,
   positionFields,
   resizeBox,
+  pickExcluded,
   type BoxExtent,
   type EditorEntity,
   type EditorEntityContext,
@@ -236,7 +237,8 @@ export const inflowEntity: EditorEntityDefinition = {
     return entity ? [entity] : [];
   },
   find: (context, id) => id === INFLOW_SELECTION_ID ? inflowEntityFor(context) : undefined,
-  pick: (context, ray) => {
+  pick: (context, ray, exclude) => {
+    if (pickExcluded(exclude, "inflow", INFLOW_SELECTION_ID)) return undefined;
     const entity = inflowEntityFor(context);
     if (!entity?.box) return undefined;
     // Against the channel's own bounds, in its own frame — the same transform

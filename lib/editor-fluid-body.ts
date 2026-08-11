@@ -11,6 +11,7 @@ import {
   resizeBox,
   sceneContainerBox,
   WORLD_FRAME,
+  pickExcluded,
   type BoxExtent,
   type BoxResizePolicy,
   type BoxSides,
@@ -478,9 +479,10 @@ export const fluidBodyEntity: EditorEntityDefinition = {
     const offset = fluidBodyBox(context.scene) ? 1 : 0;
     return fluidSeedBodyEntityFor(context, bodies[index]!, offset + index + 1);
   },
-  pick: (context, ray) => {
+  pick: (context, ray, exclude) => {
     let nearest: { id: string; distance_m: number } | undefined;
     const consider = (id: string, box: FluidBodyBox | undefined) => {
+      if (pickExcluded(exclude, "fluid-body", id)) return;
       const distance_m = box && pickSolidBox(ray, box);
       if (distance_m !== undefined && (!nearest || distance_m < nearest.distance_m)) {
         nearest = { id, distance_m };

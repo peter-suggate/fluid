@@ -1567,8 +1567,12 @@ export function WebGPUViewport() {
         }
         // Everything else clickable answers here. A rigid body in front of it is
         // left to the GPU pick below, which is exact where this is a bounding
-        // sphere and which also opens the throw gesture.
-        const hit = entityAtRay(context, ray);
+        // sphere and which also opens the throw gesture. The current selection
+        // is transparent to the pick: the tank and the water enclose everything
+        // else, so clicking *through* the selected one is the only way the
+        // things inside are reachable at all. With nothing behind, the click
+        // falls to the background and deselects, same as it always did.
+        const hit = entityAtRay(context, ray, useUIStore.getState().selection);
         if (hit && !(surface?.kind === "body" && surface.distance_m <= hit.distance_m)) {
           selectOnClick = hit.selection;
         }

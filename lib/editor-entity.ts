@@ -269,11 +269,23 @@ export interface EditorEntityDefinition {
    * entities. Analytic and synchronous: a click has to resolve now, and every
    * entity here is a box or a sphere.
    *
+   * `exclude` is the selection a click passes *through*: the already-selected
+   * entity is transparent to picking, which is what makes anything behind the
+   * tank or the water reachable at all — select the big thing, click again,
+   * reach the thing it enclosed. Skipping happens here rather than in the
+   * caller because a definition owning several instances would otherwise
+   * report its excluded instance as its one nearest hit and hide the sibling
+   * behind it.
+   *
    * Omitted by entities that cannot be clicked because they have no visible
    * surface of their own. Nothing else may be: an entity whose handles appear
    * only once it is selected, and which no click can select, is unreachable.
    */
-  readonly pick?: (context: EditorEntityContext, ray: EditorRay) => EntityRayHit | undefined;
+  readonly pick?: (
+    context: EditorEntityContext,
+    ray: EditorRay,
+    exclude?: EditorSelection,
+  ) => EntityRayHit | undefined;
 }
 
 export interface EditorRay {
@@ -285,6 +297,13 @@ export interface EntityRayHit {
   readonly selection: EditorSelection;
   readonly distance_m: number;
 }
+
+/** True when `exclude` names exactly this instance — see `EditorEntityDefinition.pick`. */
+export const pickExcluded = (
+  exclude: EditorSelection | undefined,
+  kind: EditorSelectionKind,
+  id: string,
+): boolean => exclude !== undefined && exclude.kind === kind && exclude.id === id;
 
 /**
  * Where a ray meets an axis-aligned box, as the near and far slab crossings.

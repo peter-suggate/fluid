@@ -6,6 +6,7 @@ import {
   boxSize,
   moveHandles,
   positionFields,
+  pickExcluded,
   type BoxExtent,
   type EditorEntity,
   type EditorEntityContext,
@@ -335,9 +336,10 @@ export const sceneryEntity: EditorEntityDefinition = {
     const node = nodeId === undefined ? undefined : findSceneryNode(context.scene, nodeId);
     return node && entityForNode(context, node);
   },
-  pick: (context, ray) => {
+  pick: (context, ray, exclude) => {
     let nearest: { nodeId: string; distance_m: number } | undefined;
     for (const target of pickTargets(context.scene)) {
+      if (pickExcluded(exclude, "scenery", scenerySelectionId(target.nodeId))) continue;
       if (!raySpansAabb(target.aabb_m, ray)) continue;
       const hit = intersectSvoPrimitive(target.descriptor, { origin_m: ray.origin, direction: ray.direction });
       if (hit && (!nearest || hit.t_m < nearest.distance_m)) nearest = { nodeId: target.nodeId, distance_m: hit.t_m };

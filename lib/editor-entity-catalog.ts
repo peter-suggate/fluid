@@ -124,11 +124,12 @@ export function surfacedEntities(
 export function entityAtRay(
   context: EditorEntityContext,
   ray: EditorRay,
+  exclude?: EditorSelection,
 ): EntityRayHit | undefined {
   if (context.pickingAvailable === false) return undefined;
   let nearest: EntityRayHit | undefined;
   for (const definition of EDITOR_ENTITIES) {
-    const hit = definition.pick?.(context, ray);
+    const hit = definition.pick?.(context, ray, exclude);
     if (hit && (!nearest || hit.distance_m < nearest.distance_m)) nearest = hit;
   }
   return nearest;

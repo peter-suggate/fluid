@@ -9,6 +9,7 @@ import {
   positionFields,
   sceneContainerBox,
   WORLD_FRAME,
+  pickExcluded,
   type BoxExtent,
   type BoxResizePolicy,
   type EditorChoiceGroup,
@@ -488,9 +489,10 @@ export const refinementRegionEntity: EditorEntityDefinition = {
       : sceneRefinementRegions(context.scene).find((candidate) => candidate.id === regionId);
     return region && refinementRegionEntityFor(context, region);
   },
-  pick: (context, ray) => {
+  pick: (context, ray, exclude) => {
     let nearest: { id: string; distance_m: number } | undefined;
     for (const region of sceneRefinementRegions(context.scene)) {
+      if (pickExcluded(exclude, "refinement-region", refinementRegionSelectionId(region.id))) continue;
       const distance_m = pickSolidBox(ray, refinementRegionBox(region));
       if (distance_m !== undefined && (!nearest || distance_m < nearest.distance_m)) {
         nearest = { id: region.id, distance_m };

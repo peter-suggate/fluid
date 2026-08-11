@@ -7,6 +7,7 @@ import {
   moveHandles,
   pickSolidBox,
   positionFields,
+  pickExcluded,
   type BoxExtent,
   type BoxResizePolicy,
   type EditorEntity,
@@ -214,9 +215,10 @@ export const rigidBodyEntity: EditorEntityDefinition = {
     const description = context.scene.rigidBodies.find((body) => body.id === id);
     return description && rigidBodyEntityFor(context, description);
   },
-  pick: (context, ray) => {
+  pick: (context, ray, exclude) => {
     let nearest: { id: string; distance_m: number } | undefined;
     for (const description of context.scene.rigidBodies) {
+      if (pickExcluded(exclude, "body", description.id)) continue;
       const pose = context.bodies.find((body) => body.id === description.id);
       const centre = pose?.position_m ?? description.position_m;
       const radius = boundingRadius(description);

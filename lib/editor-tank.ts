@@ -5,6 +5,7 @@ import {
   boxHandles,
   pickRoomInterior,
   WORLD_FRAME,
+  pickExcluded,
   type BoxSides,
   type EditorEntity,
   type EditorEntityContext,
@@ -185,7 +186,8 @@ export const tankEntity: EditorEntityDefinition = {
   surfacedBy: (tool) => tool === "select",
   instances: (context) => [tankEntityFor(context)],
   find: (context, id) => id === TANK_SELECTION_ID ? tankEntityFor(context) : undefined,
-  pick: (context, ray) => {
+  pick: (context, ray, exclude) => {
+    if (pickExcluded(exclude, "tank", TANK_SELECTION_ID)) return undefined;
     const distance_m = pickRoomInterior(ray, tankBox(context.scene));
     return distance_m === undefined
       ? undefined
