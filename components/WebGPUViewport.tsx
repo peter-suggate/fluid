@@ -39,7 +39,9 @@ import {
 } from "@/lib/editor-gizmo";
 import { CLICK_SLOP_PX, DEFAULT_EDITOR_TOOL, emptySpaceClickDeselects, pointerStayedWithinClickSlop, type EditorSelection } from "@/lib/editor-tools";
 import { hoverSceneAt, restOnHover, type EditorHover } from "@/lib/editor-hover";
-import { sceneryHighlightRange } from "@/lib/editor-scenery";
+import { sceneryHighlightRange, sceneryIdFromSelection } from "@/lib/editor-scenery";
+import { sceneStoneNode } from "@/lib/stone-look-controls";
+import { sceneCanopyPads } from "@/lib/tree-canopy-controls";
 import { createInflowAt, INFLOW_SELECTION_ID } from "@/lib/editor-inflow";
 import {
   fillFractionForHeight,
@@ -61,6 +63,7 @@ import {
   handleIsInert,
   handleWorldEnds,
   handleWorldPosition,
+  sceneContainerBox,
   BOX_EDGES,
   boxCorners,
   type EditorEntity,
@@ -88,6 +91,9 @@ import {
   terrainFeatureSelectionId,
   type TerrainHandleKind,
 } from "@/lib/editor-terrain";
+import { FluidFieldFlyout } from "./FluidFieldFlyout";
+import { StoneLookFlyout } from "./StoneLookFlyout";
+import { TreeCanopyFlyout } from "./TreeCanopyFlyout";
 import { SelectionFlyout } from "./SelectionFlyout";
 import { ToplineToolbar } from "./ToplineToolbar";
 import { useSceneStore } from "@/lib/stores/scene-store";
@@ -743,6 +749,45 @@ export function WebGPUViewport() {
     }))
     : [];
   const hoverProjection = hover ? projectToViewport(hover.position_m, camera, viewportSize.width, viewportSize.height) : undefined;
+  // The field-overlay picker rides just outside the container's top corner, and
+  // only while the tank or the water body is selected — the same argument that
+  // gates the scale overlay: inspecting the fluid is part of the "edit the
+  // world" decision, not a fourth permanent cluster of viewport chrome. The
+  // rightmost visible top corner keeps the menu off the water it is describing.
+  const fieldFlyoutAnchor = (selection?.kind === "tank" || selection?.kind === "fluid-body") && !sceneDraft
+    ? boxCorners(sceneContainerBox(scene))
+      .filter((_, index) => (index & 2) !== 0)
+      .map((corner) => projectToViewport(corner, camera, viewportSize.width, viewportSize.height))
+      .filter((projection) => projection.visible)
+      .reduce<ReturnType<typeof projectToViewport> | undefined>((best, projection) =>
+        best === undefined || projection.leftFraction > best.leftFraction ? projection : best, undefined)
+    : undefined;
+  // The canopy dials ride the selected tree's own crown corner, on the same
+  // argument as the field picker on the tank: sculpting the foliage is part of
+  // the "look at the tree" gesture, not a trip to a panel. Gated on the node
+  // actually holding active foliage pads, so a lantern never grows leaf dials.
+  const selectedSceneryId = selection?.kind === "scenery" ? sceneryIdFromSelection(selection.id) : undefined;
+  const canopyFlyoutAnchor = selectedSceneryId !== undefined && heldEntity && !sceneDraft
+    && sceneCanopyPads(scene, selectedSceneryId).length > 0
+    ? entityOutline(heldEntity)
+      ?.filter((_, index) => (index & 2) !== 0)
+      .map((corner) => projectToViewport(corner, camera, viewportSize.width, viewportSize.height))
+      .filter((projection) => projection.visible)
+      .reduce<ReturnType<typeof projectToViewport> | undefined>((best, projection) =>
+        best === undefined || projection.leftFraction > best.leftFraction ? projection : best, undefined)
+    : undefined;
+  // The stone dials ride a selected boulder the same way. Gated on the node
+  // being a capped-boulder generator, so the beds and the path — which stay
+  // single entities on purpose — never grow stone dials.
+  const stoneFlyoutAnchor = selectedSceneryId !== undefined && heldEntity && !sceneDraft
+    && sceneStoneNode(scene, selectedSceneryId) !== undefined
+    ? entityOutline(heldEntity)
+      ?.filter((_, index) => (index & 2) !== 0)
+      .map((corner) => projectToViewport(corner, camera, viewportSize.width, viewportSize.height))
+      .filter((projection) => projection.visible)
+      .reduce<ReturnType<typeof projectToViewport> | undefined>((best, projection) =>
+        best === undefined || projection.leftFraction > best.leftFraction ? projection : best, undefined)
+    : undefined;
   // Where the traced ray currently appears on screen. Projecting a point on the
   // ray rather than reusing the pointer is what keeps the marker on a pinned ray
   // while the camera orbits away from the pixel that produced it.
@@ -1994,6 +2039,20 @@ export function WebGPUViewport() {
       entity={heldEntity}
       leftFraction={entityAnchor.leftFraction}
       topFraction={entityAnchor.topFraction}
+    />}
+    {fieldFlyoutAnchor && <FluidFieldFlyout
+      leftFraction={fieldFlyoutAnchor.leftFraction}
+      topFraction={fieldFlyoutAnchor.topFraction}
+    />}
+    {selectedSceneryId !== undefined && canopyFlyoutAnchor && <TreeCanopyFlyout
+      nodeId={selectedSceneryId}
+      leftFraction={canopyFlyoutAnchor.leftFraction}
+      topFraction={canopyFlyoutAnchor.topFraction}
+    />}
+    {selectedSceneryId !== undefined && stoneFlyoutAnchor && <StoneLookFlyout
+      nodeId={selectedSceneryId}
+      leftFraction={stoneFlyoutAnchor.leftFraction}
+      topFraction={stoneFlyoutAnchor.topFraction}
     />}
     {hover && hoverProjection?.visible && !pointerRef.current && <div
       className={`editor-hover-chip kind-${hover.kind}`}

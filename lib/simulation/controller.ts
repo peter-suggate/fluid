@@ -17,6 +17,8 @@ import {
 } from "../scene-definition";
 import { svoSceneryDetailCellSize_m, svoSceneryRefinementDepth, SVO_ENVIRONMENT_REFINEMENT_DEPTH_MAXIMUM, SVO_ENVIRONMENT_REFINEMENT_DEPTH_MINIMUM } from "../svo-render-tuning";
 import { terrainSampleShape } from "../terrain";
+import { sceneStoneQuery, withSceneStoneQuery } from "../stone-look-controls";
+import { sceneCanopyQuery, withSceneCanopyQuery } from "../tree-canopy-controls";
 import { savedSceneCard } from "../scene-cards";
 import { SCENE_STARTERS } from "../empty-scene";
 import { useShellStore } from "../stores/shell-store";
@@ -691,11 +693,24 @@ class SimulationController {
       runtime.setNotice(error instanceof Error ? error.message : `${definition.name} refused that lattice`, "warn");
       return false;
     }
+    // A rebuild is a reload, but the canopy dials and stone looks are the
+    // user's art direction, not the factory's: carry them onto the re-authored
+    // document, the same values the URL round-trips, so changing the
+    // environment lattice does not silently regrow the tree the user just
+    // thinned or reshape a boulder they just squashed.
+    const canopy = sceneCanopyQuery(scene);
+    const withCanopy = canopy === sceneCanopyQuery(rebuilt.scene)
+      ? rebuilt.scene
+      : withSceneCanopyQuery(rebuilt.scene, canopy);
+    const stones = sceneStoneQuery(scene);
+    const rebuiltScene = stones === sceneStoneQuery(withCanopy)
+      ? withCanopy
+      : withSceneStoneQuery(withCanopy, stones);
     this.announceGPURebuild(label);
     this.recordHistory(label.toLowerCase());
     // Nothing to synchronize: the rebuilt document carries the depth, and the
     // renderer reads it from there. That is the whole point of there being one.
-    this.reset(rebuilt.scene, presetId);
+    this.reset(rebuiltScene, presetId);
     useUIStore.getState().setCamera(sceneDefinitionCamera(definition));
     useRuntimeStore.getState().setRunState("paused");
     useRuntimeStore.getState().setNotice(`${definition.name} re-authored`

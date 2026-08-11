@@ -6,6 +6,9 @@ import {
   cappedBoulderNodes,
   steppingStoneNodes,
   stoneSet,
+  stoneSetBoulderNodes,
+  stoneSetPebbleNodes,
+  stoneSetSteppingNodes,
   type CappedBoulderForm,
   type PlanOutline,
   type SteppingStoneForm,
@@ -192,6 +195,13 @@ export interface SweptCopingGeneratorParams extends SweptCopingForm {
   readonly material: SceneryMaterial;
 }
 
+/**
+ * The three things a pond stone set is made of, as the split a document may
+ * author them along. `boulders` is the capped-boulder family, `beds` the cobble
+ * heaps and shingle, `path` the wading stepping stones.
+ */
+export type PondStoneSetFamily = "boulders" | "beds" | "path";
+
 /** A pond's whole stone arrangement, laid against the vessel the node names. */
 export interface PondStoneSetGeneratorParams {
   /**
@@ -199,6 +209,17 @@ export interface PondStoneSetGeneratorParams {
    * holds its freeboard over it, so this is what decides where the shore is.
    */
   readonly waterline_m: number;
+  /**
+   * Which of the set's families this node emits. Absent is all three.
+   *
+   * This is what lets a scene split the arrangement into selectable pieces:
+   * author each boulder as its own `capped-boulder` node (positions and seeds
+   * from `stoneSetBoulderPlan`), keep the beds on one node and the path on
+   * another. Emission order is always boulders → beds → path regardless of the
+   * order given here, so a split document publishes in the unsplit order and
+   * owner indices never move.
+   */
+  readonly families?: readonly PondStoneSetFamily[];
 }
 
 /**
@@ -299,13 +320,21 @@ export const SCENERY_GENERATORS: Readonly<{
     // here — want the surface that was designed rather than the one that was
     // sampled. Where a stone finally *sits* is still the terrain anchor's, and
     // therefore still the baked grid's.
-    grow: (params, request) => stoneSet({
-      vessel: request.vessel(),
-      waterline_m: params.waterline_m,
-      seed: request.seed,
-      key: request.key,
-      leafSize_m: request.detailCellSize_m,
-    }),
+    grow: (params, request) => {
+      const spec = {
+        vessel: request.vessel(),
+        waterline_m: params.waterline_m,
+        seed: request.seed,
+        key: request.key,
+        leafSize_m: request.detailCellSize_m,
+      };
+      if (params.families === undefined) return stoneSet(spec);
+      const nodes: SceneryNode[] = [];
+      if (params.families.includes("boulders")) nodes.push(...stoneSetBoulderNodes(spec));
+      if (params.families.includes("beds")) nodes.push(...stoneSetPebbleNodes(spec));
+      if (params.families.includes("path")) nodes.push(...stoneSetSteppingNodes(spec));
+      return nodes;
+    },
   },
   bonsai: {
     id: "bonsai",

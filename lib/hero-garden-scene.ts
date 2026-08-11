@@ -6,7 +6,11 @@ import {
   pondVesselWaterline,
   type PondVesselSpec,
 } from "./voxel-scenery/pond-vessel";
-import { stoneSetBoulderStations, stoneSetSteppingBodies } from "./voxel-scenery/stone-set";
+import {
+  stoneSetBoulderPlan,
+  stoneSetBoulderStations,
+  stoneSetSteppingBodies,
+} from "./voxel-scenery/stone-set";
 import { ROSETTE_AIR_PLANT, ROSETTE_GRASS_TUFT, type RosetteForm } from "./voxel-scenery/rosette";
 import { sweptTubeNodes } from "./voxel-scenery/swept-tube";
 import { tanHalfFovFor35mmFocalLength } from "./webgpu-camera";
@@ -815,14 +819,39 @@ function heroGardenAuthoredScenery(waterline_m: number): SceneryGraph {
       // No coping node. The rim is the vessel's own `crest: "wall"` section
       // now — a flat top with rolled edges, which a swept chain of round cones
       // cannot express at any setting of its width.
-      // Boulders, beds and the wading path, all placed in the vessel's own
-      // coordinates — a fraction of a turn round the plan curve and a plan
-      // distance either side of it — rather than in world metres that could
-      // drift from the coping they hug.
+      // Boulders, beds and the wading path. The set is split so each boulder is
+      // its own selectable, editable node: positions and seeds come from
+      // `stoneSetBoulderPlan` — the set's own layout, resolved once — so the
+      // split publishes byte-for-byte what the whole set would have, in the same
+      // order (boulders → beds → path), and owner indices never move. The cost
+      // of the split is that a boulder's `at_m` is now authored here in world
+      // metres: reshaping the pond re-lays the beds and the path but leaves the
+      // boulders standing where they stand.
+      ...stoneSetBoulderPlan({
+        vessel: HERO_GARDEN_VESSEL, waterline_m, seed: HERO_GARDEN_SET_SEED,
+      }).map((plan): SceneryNode => ({
+        kind: "generator", id: `stone/boulder-${plan.index}`, generator: "capped-boulder",
+        seed: plan.seed,
+        params: { ...plan.form, capRadius_m: plan.capRadius_m, at_m: plan.at_m },
+      })),
+      // The beds keep the set's own node id so their emitted keys — and with
+      // them the material owner order — are exactly the unsplit set's. They stay
+      // one node on purpose: the cobble heaps and shingle are laid as fields
+      // against the vessel (function-valued band widths, per-drift grading), and
+      // per-pebble nodes would be the 684-node bake this catalog exists to
+      // prevent.
       {
         kind: "generator", id: "stone", generator: "pond-stone-set", vessel: "pond",
         seed: HERO_GARDEN_SET_SEED,
-        params: { waterline_m },
+        params: { waterline_m, families: ["beds"] },
+      },
+      // The wading path stays one entity too: its polyline is solved against the
+      // vessel every rebuild, and its treads are mirrored as the rigid bodies
+      // the water parts around — see `stoneSetSteppingBodies` below.
+      {
+        kind: "generator", id: "stone-path", generator: "pond-stone-set", vessel: "pond",
+        seed: HERO_GARDEN_SET_SEED,
+        params: { waterline_m, families: ["path"] },
       },
       heroGardenCloudTree(),
       // The plants. Built and tested for this scene and then never called by

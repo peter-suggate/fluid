@@ -2602,25 +2602,59 @@ function shorelineRun(
   return 0.5 * (low + high);
 }
 
-/** The four boulders, dropped wherever the bank they want is under water. */
-export function stoneSetBoulderNodes(spec: StoneSetSpec): SceneryNode[] {
-  const key = spec.key ?? "stone";
+/**
+ * One boulder the set would emit, resolved to world terms.
+ *
+ * Everything a `capped-boulder` node needs to stand alone: the rail turn and
+ * offset are already solved to a plan position, the family form is already
+ * paired with its per-stone cap radius, and the seed is the set's own formula.
+ * This is the seam a document splits the set along — author these as individual
+ * generator nodes and the emitted keys, seeds and geometry are exactly what the
+ * whole set would have published, so the split is invisible to owner indices.
+ */
+export interface StoneSetBoulderPlan {
+  /** Position in the authored family, and the seed formula's own input. */
+  readonly index: number;
+  /** Where the stone stands, in world metres on the plan. */
+  readonly at_m: readonly [number, number];
+  /** Cap semi-axis on its long horizontal direction: the boulder's scale. */
+  readonly capRadius_m: number;
+  /** Which stone this is. */
+  readonly form: CappedBoulderForm;
+  /** `spec.seed + 0x51_00 + 977 * index`, precomputed so callers never restate it. */
+  readonly seed: number;
+}
+
+/** The boulders the set would emit — the placements whose bank is dry. */
+export function stoneSetBoulderPlan(spec: StoneSetSpec): StoneSetBoulderPlan[] {
   const rail = planRail(pondVesselPlanCurve(spec.vessel));
   const groundHeightAt = vesselGround(spec);
-  const nodes: SceneryNode[] = [];
+  const plans: StoneSetBoulderPlan[] = [];
   for (const [index, placement] of HERO_BOULDERS.entries()) {
     const at = railTurnAt(rail, placement.turn, placement.offset_m);
     if (groundHeightAt(at.x, at.z) <= spec.waterline_m) continue;
-    nodes.push(...cappedBoulderNodes({
-      ...placement.form,
-      capRadius_m: placement.capRadius_m,
-      key: `${key}/boulder-${index}`,
+    plans.push({
+      index,
       at_m: [at.x, at.z],
+      capRadius_m: placement.capRadius_m,
+      form: placement.form,
       seed: spec.seed + 0x51_00 + 977 * index,
-      leafSize_m: spec.leafSize_m,
-    }));
+    });
   }
-  return nodes;
+  return plans;
+}
+
+/** The four boulders, dropped wherever the bank they want is under water. */
+export function stoneSetBoulderNodes(spec: StoneSetSpec): SceneryNode[] {
+  const key = spec.key ?? "stone";
+  return stoneSetBoulderPlan(spec).flatMap((plan) => cappedBoulderNodes({
+    ...plan.form,
+    capRadius_m: plan.capRadius_m,
+    key: `${key}/boulder-${plan.index}`,
+    at_m: plan.at_m,
+    seed: plan.seed,
+    leafSize_m: spec.leafSize_m,
+  }));
 }
 
 /** Plan footprint a boulder claims, so the beds can be laid around it. */

@@ -21,6 +21,8 @@ import {
   type SvoRenderTuning,
 } from "./svo-render-tuning";
 import type { GPUQuality } from "./tall-cell-grid";
+import { sceneStoneQuery, withSceneStoneQuery } from "./stone-look-controls";
+import { sceneCanopyQuery, withSceneCanopyQuery } from "./tree-canopy-controls";
 import type { GridOverlayConfig, GridOverlayMode } from "./webgpu-renderer";
 
 const qualities: ReadonlyArray<GPUQuality> = ["balanced", "high", "ultra"];
@@ -186,6 +188,10 @@ interface SceneQueryBaseline {
   readonly paths: readonly (string | undefined)[];
   /** The preset's own refinement regions, already container-relative. */
   readonly regions: string;
+  /** The preset's authored canopy dials, in the same form the key carries. */
+  readonly canopy: string;
+  /** The preset's authored stone looks, in the same form the key carries. */
+  readonly stones: string;
 }
 
 const sceneQueryBaselineCache = new WeakMap<ScenePreset, SceneQueryBaseline>();
@@ -198,6 +204,8 @@ function sceneQueryBaseline(presetId: string): SceneQueryBaseline {
   const baseline: SceneQueryBaseline = {
     paths: sceneQueryPaths.map((path) => JSON.stringify(getAtPath(baseScene, path))),
     regions: refinementRegionsToQuery(baseScene),
+    canopy: sceneCanopyQuery(baseScene),
+    stones: sceneStoneQuery(baseScene),
   };
   sceneQueryBaselineCache.set(preset, baseline);
   return baseline;
@@ -221,11 +229,28 @@ function sceneQueryBaseline(presetId: string): SceneQueryBaseline {
  */
 const REGIONS_QUERY_KEY = "regions";
 
+/**
+ * Canopy dials ride their own key for the same reason regions do: the scenery
+ * graph is atomic and far too large for a URL, but the three dials a tree is
+ * art-directed by are exactly the kind of edit a shared link — and a lattice
+ * re-author, which rebuilds the document from the preset factory — must not
+ * lose. Compared against the preset's own dials, so an untouched tree stays
+ * out of the URL.
+ */
+const CANOPY_QUERY_KEY = "canopy";
+
+/** Stone-look dials and seeds, on the same contract as `canopy`. */
+const STONES_QUERY_KEY = "stones";
+
 function sceneQueryEntries(sceneState: SerializableSceneState): readonly SceneQueryEntry[] {
   const baseline = sceneQueryBaseline(sceneState.presetId);
   const entries: SceneQueryEntry[] = [];
   const regions = refinementRegionsToQuery(sceneState.scene);
   if (regions !== baseline.regions) entries.push([REGIONS_QUERY_KEY, regions]);
+  const canopy = sceneCanopyQuery(sceneState.scene);
+  if (canopy !== baseline.canopy) entries.push([CANOPY_QUERY_KEY, canopy]);
+  const stones = sceneStoneQuery(sceneState.scene);
+  if (stones !== baseline.stones) entries.push([STONES_QUERY_KEY, stones]);
   sceneQueryPaths.forEach((path, index) => {
     const current = getAtPath(sceneState.scene, path);
     const serialized = JSON.stringify(current);
@@ -368,15 +393,26 @@ export function parseQueryState(search: string): QueryState {
   // first would measure them against the preset's tank rather than the one the
   // link actually describes.
   const regionsQuery = query.get(REGIONS_QUERY_KEY);
-  const scene = regionsQuery === null
+  const withRegions = regionsQuery === null
     ? patched
     : withRefinementRegionsFromQuery(patched, regionsQuery);
+  // After the lattice re-author above, deliberately: the dials are applied to
+  // whatever document the link's lattice actually built, which is what lets an
+  // environment-level change and a tree edit travel in the same URL.
+  const canopyQuery = query.get(CANOPY_QUERY_KEY);
+  const withCanopy = canopyQuery === null
+    ? withRegions
+    : withSceneCanopyQuery(withRegions, canopyQuery);
+  const stonesQuery = query.get(STONES_QUERY_KEY);
+  const scene = stonesQuery === null
+    ? withCanopy
+    : withSceneStoneQuery(withCanopy, stonesQuery);
   const initialUI = useUIStore.getInitialState();
   const presetCamera = cameraForPreset(preset);
   const grid = query.get("grid");
   const gridMode = query.get("gridMode");
   const requestedPanel = query.get("panel");
-  const rightPanel: RightPanel = requestedPanel === "visual" || requestedPanel === "visuals" || requestedPanel === "bodies" || requestedPanel === "diagnostics" || requestedPanel === "performance"
+  const rightPanel: RightPanel = requestedPanel === "visual" || requestedPanel === "visuals" || requestedPanel === "simulation" || requestedPanel === "bodies" || requestedPanel === "diagnostics" || requestedPanel === "performance"
     ? requestedPanel
     : initialUI.rightPanel;
 
@@ -445,7 +481,7 @@ export function parseQueryState(search: string): QueryState {
 function isManagedKey(key: string) {
   return key === "method" || key === "scene" || key === "quality" || key === "view" || key === "diagnostics" || key === "waterdiag" || key === "panel" || key === "panelWidth"
     || key === "performance" || key === "validation" || key === "sceneConfig" || key === "grid" || key === "gridSlice" || key === "gridMode"
-    || key === REGIONS_QUERY_KEY || key === "render" || key === "svoLighting" || key === "svoShadows" || key === "svoAO" || key === "svoSilhouetteRefinement" || key === "svoPrimarySeamClosure" || key === "svoCones" || key === "svoPrimary" || key === "svoStage" || key === "svoFlatExempt" || key === "svoLodPixels" || key === "svoSurface" || key === "environment" || key === "fps" || key.startsWith("camera.") || key.startsWith("param.") || key.startsWith("scene.");
+    || key === REGIONS_QUERY_KEY || key === CANOPY_QUERY_KEY || key === STONES_QUERY_KEY || key === "render" || key === "svoLighting" || key === "svoShadows" || key === "svoAO" || key === "svoSilhouetteRefinement" || key === "svoPrimarySeamClosure" || key === "svoCones" || key === "svoPrimary" || key === "svoStage" || key === "svoFlatExempt" || key === "svoLodPixels" || key === "svoSurface" || key === "environment" || key === "fps" || key.startsWith("camera.") || key.startsWith("param.") || key.startsWith("scene.");
 }
 
 /** Build a canonical query string from the stores, preserving unrelated keys. */

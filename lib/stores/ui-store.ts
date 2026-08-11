@@ -23,7 +23,7 @@ import { SVO_PIXEL_TRACE_LAYERS, type SvoPixelTraceLayer } from "../svo-pixel-tr
 import { FLUID_CELL_TRACE_LAYERS, type FluidCellTraceLayer } from "../fluid-cell-trace";
 import type { GridOverlayConfig, GridOverlayMode } from "../webgpu-renderer";
 
-export type RightPanel = "visual" | "visuals" | "bodies" | "diagnostics" | "performance" | null;
+export type RightPanel = "visual" | "visuals" | "simulation" | "bodies" | "diagnostics" | "performance" | null;
 
 export const DEFAULT_RIGHT_PANEL_WIDTH = 620;
 export const MIN_RIGHT_PANEL_WIDTH = 300;
