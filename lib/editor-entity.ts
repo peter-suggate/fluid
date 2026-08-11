@@ -172,6 +172,16 @@ export interface EditorEntity {
    */
   readonly summary?: string;
   /**
+   * True when this entity is the natural place to choose the fluid solver.
+   *
+   * A flag rather than an `EditorChoiceGroup` because the method is simulation
+   * state, not a scene-document field: an entity builder only sees the scene,
+   * and a choice's `apply` can only describe one. The flyout — which already
+   * speaks to the simulation controller — owns the control and its current
+   * value; the entity only declares that it is the thing being solved.
+   */
+  readonly offersFluidMethod?: boolean;
+  /**
    * The scene without this entity, or absent when it cannot be removed.
    *
    * A whole scene rather than a patch, because removal is an absence and a

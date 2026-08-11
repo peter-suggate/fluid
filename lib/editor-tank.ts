@@ -148,6 +148,11 @@ function tankEntityFor(context: EditorEntityContext): EditorEntity {
     draftSubject: "tank",
     editLabel: () => "Resized the tank",
     announceRebuild: "Resize the tank",
+    // The tank is the thing being solved, so it is where the solver is chosen:
+    // selecting the vessel and switching methods is one gesture instead of a
+    // trip through the configuration popover. Dry scenes have no solve to
+    // choose, so the flag follows the water switch.
+    offersFluidMethod: scene.systems?.fluid !== false,
     // Extents rather than a position: the container is centred on x and z and
     // rests on y = 0, so there is nothing else about it to type.
     fields: (["width_m", "height_m", "depth_m"] as const).map((key, axis) => ({

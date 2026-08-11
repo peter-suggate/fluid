@@ -3,7 +3,37 @@
 import { useState } from "react";
 import { NumberField, Segmented } from "./controls";
 import { simulation } from "@/lib/simulation/controller";
+import { getMethod, interactiveSimulationMethods } from "@/lib/methods";
+import { useMethodStore } from "@/lib/stores/method-store";
 import type { EditorEntity } from "@/lib/editor-entity";
+
+/**
+ * The solver switch, for the entity that declares it is the thing being solved
+ * (the tank). The method is simulation state rather than a scene field, so it
+ * cannot ride the declarative `choices` path: its value lives in the method
+ * store and committing it is `simulation.setMethod`, which rebuilds the GPU
+ * solver rather than patching the document.
+ */
+function FluidMethodChoice() {
+  const methodId = useMethodStore((state) => state.methodId);
+  const method = getMethod(methodId);
+  return (
+    <div className="selection-choice">
+      <span>Solver</span>
+      <Segmented
+        ariaLabel="Fluid solver method"
+        value={methodId}
+        options={interactiveSimulationMethods.map((candidate) => ({
+          value: candidate.id,
+          label: candidate.shortLabel,
+          title: candidate.description,
+        }))}
+        onChange={(value) => simulation.setMethod(value)}
+      />
+      <p className="selection-summary">{method.description}</p>
+    </div>
+  );
+}
 
 /**
  * Progressive disclosure for the current selection: the gizmo is the primary
@@ -45,6 +75,7 @@ export function SelectionFlyout({
           <small>{open ? "HIDE" : "EDIT"}</small>
         </button>
         {open && <div className="selection-precision">
+          {entity.offersFluidMethod && <FluidMethodChoice />}
           {choices.map((group) => (
             <div key={group.id} className="selection-choice">
               <span>{group.label}</span>
