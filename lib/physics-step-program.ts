@@ -109,8 +109,9 @@ const stage = (
 });
 
 /**
- * The octree structured lane's advance: what `WebGPUUniformEulerianSimulation
- * .advanceTo` encodes, in order, into ONE command buffer submitted by ONE
+ * The octree structured lane's advance: what
+ * `WebGPUOctreeEulerianSolver.advanceTo` encodes, in order, into ONE command
+ * buffer submitted by ONE
  * `queue.submit`. Resource names are logical values, not buffer identities.
  */
 export const OCTREE_STEP_PROGRAM: PhysicsStepProgram = Object.freeze({

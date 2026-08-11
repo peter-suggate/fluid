@@ -10,7 +10,6 @@ import type {
 import {
   octreeLosassoAdaptivePhiAcceptedScheduleWGSL,
   octreeLosassoAdaptivePhiBacktraceWGSL,
-  octreeLosassoAdaptivePhiCorrectionWGSL,
   octreeLosassoAdaptivePhiCommitWGSL,
   octreeLosassoAdaptivePhiEvidenceWGSL,
   octreeLosassoAdaptivePhiGhostWGSL,
@@ -21,8 +20,6 @@ import {
   octreeLosassoAdaptivePhiRedistanceInitializeWGSL,
   octreeLosassoAdaptivePhiRedistanceProjectAWGSL,
   octreeLosassoAdaptivePhiRedistanceProjectBWGSL,
-  octreeLosassoAdaptivePhiPredictorSnapshotWGSL,
-  octreeLosassoAdaptivePhiReverseBacktraceWGSL,
   octreeLosassoAdaptivePhiScheduleWGSL,
   octreeLosassoAdaptivePhiTransportWGSL,
   octreeLosassoAdaptivePhiVolumeEvidenceWGSL,
@@ -59,11 +56,7 @@ type DiagnosticPhi = {
   readonly transportBandMask: GPUBuffer;
   readonly transportDepartures: GPUBuffer;
   readonly backtrace: GPUComputePipeline;
-  readonly reverseBacktrace: GPUComputePipeline;
-  readonly predictorSnapshot: GPUComputePipeline;
-  readonly distanceA: GPUBuffer;
   readonly transport: GPUComputePipeline;
-  readonly correction: GPUComputePipeline;
   readonly worklist: Readonly<Record<"prepareTransportBand" | "markTransportReach" | "markTransportInflow"
     | "publishTransportIndependent" | "markTransportConstrained" | "publishTransportConstrained"
     | "finalizeTransportDispatch" | "publishTransportPartition"
@@ -132,10 +125,7 @@ test("volume evidence entry points have exact transitive host binding sets", () 
     [octreeLosassoAdaptivePhiVolumeEvidenceWGSL, "validateVolumeEvidence"],
     [octreeLosassoAdaptivePhiVolumeEvidenceWGSL, "finalizeVolumeEvidence"],
     [octreeLosassoAdaptivePhiBacktraceWGSL, "backtraceIndependent"],
-    [octreeLosassoAdaptivePhiReverseBacktraceWGSL, "reverseBacktraceIndependent"],
     [octreeLosassoAdaptivePhiTransportWGSL, "transportIndependent"],
-    [octreeLosassoAdaptivePhiPredictorSnapshotWGSL, "snapshotProjectedPredictor"],
-    [octreeLosassoAdaptivePhiCorrectionWGSL, "correctTransportIndependent"],
   ] as const;
   for (const [shader, entry] of cases) {
     assert.deepEqual([...bindingSet.call({}, `Adaptive phi - ${entry}`)].sort((a, b) => a - b),
@@ -147,7 +137,6 @@ test("standalone volume-evidence shader modules declare every symbolic constant"
   for (const [label, shader] of [
     ["main", octreeLosassoAdaptivePhiWGSL],
     ["volume evidence", octreeLosassoAdaptivePhiVolumeEvidenceWGSL],
-    ["transport correction", octreeLosassoAdaptivePhiCorrectionWGSL],
   ] as const) {
     const declared = new Set([...shader.matchAll(/\bconst\s+([A-Z][A-Z0-9_]*)\s*:/g)]
       .map((match) => match[1]!));
@@ -245,14 +234,8 @@ test(`adaptive accepted compact band stage ${stage} encodes and submits`, {
         names: ["finishRedistance"] },
       { label: "backtrace", code: octreeLosassoAdaptivePhiBacktraceWGSL,
         names: ["backtraceIndependent"] },
-      { label: "reverse-backtrace", code: octreeLosassoAdaptivePhiReverseBacktraceWGSL,
-        names: ["reverseBacktraceIndependent"] },
       { label: "transport", code: octreeLosassoAdaptivePhiTransportWGSL,
         names: ["transportIndependent"] },
-      { label: "predictor-snapshot", code: octreeLosassoAdaptivePhiPredictorSnapshotWGSL,
-        names: ["snapshotProjectedPredictor"] },
-      { label: "correction", code: octreeLosassoAdaptivePhiCorrectionWGSL,
-        names: ["correctTransportIndependent"] },
       { label: "handoff", code: octreeLosassoAdaptivePhiHandoffWGSL,
         names: ["prepareCandidateHandoff", "handoffCandidate", "projectCandidate",
           "finalizeCandidateHandoff"] },
@@ -483,23 +466,6 @@ test(`adaptive accepted compact band stage ${stage} encodes and submits`, {
     mark("transport-indirect-encoded", { offset: 20 });
   }
   if (stage === "C") {
-    internal.runBufferIndirect(broker, internal.worklist.projectTransportedBand,
-      [internal.advanceParams, graph.accepted.control, graph.accepted.constraints,
-        phi.source.control, graph.accepted.phi, internal.transportControl,
-        internal.transportWorklist], internal.transportDispatch, 12);
-    internal.runBufferIndirect(broker, internal.predictorSnapshot, [internal.advanceParams,
-      graph.accepted.control, phi.source.control, graph.accepted.phi, internal.distanceA],
-    phi.source.nodeDispatch, 0);
-    internal.runBufferIndirect(broker, internal.reverseBacktrace, [internal.advanceParams,
-      graph.accepted.control, graph.accepted.leaves, graph.accepted.nodes,
-      graph.accepted.incidentLeaves, phi.source.control, graph.accepted.nodalVelocity,
-      internal.transportControl, internal.transportWorklist, internal.transportDepartures],
-    internal.transportDispatch, 0);
-    internal.runBufferIndirect(broker, internal.correction, [internal.advanceParams,
-      graph.accepted.control, graph.accepted.leaves, graph.accepted.nodes,
-      graph.accepted.constraints, phi.source.control, graph.accepted.phi,
-      internal.transportControl, internal.transportWorklist, internal.transportDepartures,
-      internal.distanceA], internal.transportDispatch, 0);
     internal.runBufferIndirect(broker, internal.worklist.projectTransportedBand,
       [internal.advanceParams, graph.accepted.control, graph.accepted.constraints,
         phi.source.control, graph.accepted.phi, internal.transportControl,

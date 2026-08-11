@@ -1,4 +1,5 @@
 import { octreeMethod } from "./octree";
+import { uniformMethod } from "./uniform";
 import { cpuReferenceMethod } from "./cpu-reference";
 import type { SimulationMethod } from "./types";
 
@@ -8,6 +9,7 @@ export * from "../octree-coarse-backend";
 /** Complete registry used by runtime lookup and offline comparison tooling. */
 export const simulationMethods: ReadonlyArray<SimulationMethod> = [
   octreeMethod,
+  uniformMethod,
   cpuReferenceMethod
 ];
 
@@ -16,7 +18,8 @@ export const defaultMethodId = octreeMethod.id;
 /** Methods supported as interactive production/experimental choices. The
  * broader registry remains available to offline comparison tooling. */
 export const interactiveSimulationMethods: ReadonlyArray<SimulationMethod> = [
-  octreeMethod
+  octreeMethod,
+  uniformMethod
 ];
 
 export function interactiveMethodId(id: string): string {

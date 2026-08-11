@@ -86,6 +86,8 @@ const projection = (solver as unknown as {
         phiReceipts: Uint32Array;
         nodalVelocity: Uint32Array;
         redistanceDistanceA: Float32Array;
+        acceptedMass: Float32Array;
+        leafRhoPhi: Float32Array;
       } | undefined>;
     readLosassoAuthorityDiagnostics(): Promise<Readonly<{
       adaptiveGraph: readonly number[];
@@ -99,6 +101,81 @@ const projection = (solver as unknown as {
   };
 }).octreeProjection;
 assert.ok(projection, "octree solver did not expose its diagnostic projection");
+
+const auditSurfaceDensity = (snapshot: Awaited<ReturnType<
+  NonNullable<typeof projection>["readAdaptiveSurfacePublicationDiagnostics"]>>) => {
+  assert.ok(snapshot, "adaptive density audit requires a publication");
+  const cellSize_m = solver.info.cellSize_m;
+  const bins = { empty: 0, airSide: 0, liquidSide: 0, full: 0, overfull: 0 };
+  let airSideMass_m3 = 0;
+  let liquidSideMass_m3 = 0;
+  let thresholdLeafVolume_m3 = 0;
+  let partialLeafVolume_m3 = 0;
+  let minimumRho = Number.POSITIVE_INFINITY;
+  let maximumRho = Number.NEGATIVE_INFINITY;
+  let floorWetCells = 0;
+  let floorRhoCellSum = 0;
+  let floorSubgridCells = 0;
+  const wallMaximumWetHeight_cells = {
+    negativeX: 0, positiveX: 0, negativeZ: 0, positiveZ: 0,
+  };
+  const wallMaximumRho = {
+    negativeX: 0, positiveX: 0, negativeZ: 0, positiveZ: 0,
+  };
+  for (let leaf = 0; leaf < snapshot.graphControl[1]!; leaf += 1) {
+    const mass_m3 = snapshot.acceptedMass[leaf]!;
+    const span = snapshot.leaves[16 * leaf + 3]!;
+    const volume_m3 = Math.pow(span * cellSize_m, 3);
+    // leafRhoPhi is a shared derived-output scratch and may contain the most
+    // recently materialized candidate bank. Reconstruct accepted rho from the
+    // accepted graph-owned integral mass and its exact dyadic leaf volume.
+    const rho = mass_m3 / volume_m3;
+    minimumRho = Math.min(minimumRho, rho);
+    maximumRho = Math.max(maximumRho, rho);
+    if (rho <= 1e-5) bins.empty += 1;
+    else if (rho < 0.5) bins.airSide += 1;
+    else if (rho < 1 - 1e-5) bins.liquidSide += 1;
+    else if (rho <= 1 + 1e-5) bins.full += 1;
+    else bins.overfull += 1;
+    if (rho < 0.5) airSideMass_m3 += mass_m3;
+    else {
+      liquidSideMass_m3 += mass_m3;
+      thresholdLeafVolume_m3 += volume_m3;
+    }
+    if (rho > 1e-5 && rho < 1 - 1e-5) partialLeafVolume_m3 += volume_m3;
+    const originX = snapshot.leaves[16 * leaf]!, originY = snapshot.leaves[16 * leaf + 1]!,
+      originZ = snapshot.leaves[16 * leaf + 2]!;
+    if (originY === 0) {
+      const floorCells = span * span;
+      floorRhoCellSum += rho * floorCells;
+      if (rho >= 0.5) floorWetCells += floorCells;
+      else if (rho > 1e-5) floorSubgridCells += floorCells;
+    }
+    if (rho >= 0.5) {
+      const top = originY + span;
+      if (originX === 0) wallMaximumWetHeight_cells.negativeX = Math.max(
+        wallMaximumWetHeight_cells.negativeX, top);
+      if (originX + span === dimensions[0]) wallMaximumWetHeight_cells.positiveX = Math.max(
+        wallMaximumWetHeight_cells.positiveX, top);
+      if (originZ === 0) wallMaximumWetHeight_cells.negativeZ = Math.max(
+        wallMaximumWetHeight_cells.negativeZ, top);
+      if (originZ + span === dimensions[2]) wallMaximumWetHeight_cells.positiveZ = Math.max(
+        wallMaximumWetHeight_cells.positiveZ, top);
+    }
+    if (originX === 0) wallMaximumRho.negativeX = Math.max(wallMaximumRho.negativeX, rho);
+    if (originX + span === dimensions[0]) wallMaximumRho.positiveX = Math.max(
+      wallMaximumRho.positiveX, rho);
+    if (originZ === 0) wallMaximumRho.negativeZ = Math.max(wallMaximumRho.negativeZ, rho);
+    if (originZ + span === dimensions[2]) wallMaximumRho.positiveZ = Math.max(
+      wallMaximumRho.positiveZ, rho);
+  }
+  const floorCellCount = dimensions[0] * dimensions[2];
+  return Object.freeze({ bins, minimumRho, maximumRho, airSideMass_m3,
+    liquidSideMass_m3, thresholdLeafVolume_m3, partialLeafVolume_m3,
+    floorWetCells, floorWetFraction: floorWetCells / floorCellCount,
+    floorSubgridCells, floorMeanRho: floorRhoCellSum / floorCellCount,
+    wallMaximumWetHeight_cells, wallMaximumRho });
+};
 
 const readOwnerTopologyBanks = async () => {
   const arena = (projection as unknown as { powerOwnerArena?: GPUBuffer }).powerOwnerArena;
@@ -119,6 +196,7 @@ const readOwnerTopologyBanks = async () => {
     const directory = directoryA + table * logicalCount;
     const payload = payloadA + table * capacity * 512;
     const seen = new Set<string>();
+    const identities: Array<readonly [number, number, number, number]> = [];
     const counts: Record<string, number> = {};
     let invalidCells = 0;
     for (let z = 0; z < dimensions[2]; z += 1) for (let y = 0; y < dimensions[1]; y += 1) {
@@ -135,10 +213,33 @@ const readOwnerTopologyBanks = async () => {
           brick[1]! + ((packed >>> 6) & 63) - 32,
           brick[2]! + ((packed >>> 12) & 63) - 32];
         const key = `${origin.join(",")}:${size}`;
-        if (!seen.has(key)) { seen.add(key); counts[String(size)] = (counts[String(size)] ?? 0) + 1; }
+        if (!seen.has(key)) {
+          seen.add(key);
+          identities.push([origin[0]!, origin[1]!, origin[2]!, size]);
+          counts[String(size)] = (counts[String(size)] ?? 0) + 1;
+        }
       }
     }
-    return { leafCountsBySize: counts, invalidCells };
+    const transforms = [
+      ([x, y, z, size]: readonly number[]) => [dimensions[0] - x - size, y, z, size],
+      ([x, y, z, size]: readonly number[]) => [x, y, dimensions[2] - z - size, size],
+      ([x, y, z, size]: readonly number[]) => [z, y, x, size],
+    ] as const;
+    const identityKey = ([x, y, z, size]: readonly number[]) => `${x},${y},${z}:${size}`;
+    let firstMismatch: Readonly<{ transformIndex: number;
+      source: readonly number[]; target: readonly number[] }> | undefined;
+    const mismatchCounts = transforms.map((transform, transformIndex) =>
+      identities.reduce((count, identity) => {
+        const target = transform(identity);
+        if (seen.has(identityKey(target))) return count;
+        firstMismatch ??= Object.freeze({ transformIndex, source: identity, target });
+        return count + 1;
+      }, 0));
+    return { leafCountsBySize: counts, invalidCells,
+      d4: { mismatches: mismatchCounts.reduce((sum, count) => sum + count, 0),
+        reflectXMismatches: mismatchCounts[0], reflectZMismatches: mismatchCounts[1],
+        swapXZMismatches: mismatchCounts[2],
+        ...(firstMismatch ? { firstMismatch } : {}) } };
   };
   return { activeTable, accepted: summarize(activeTable), candidate: summarize(1 - activeTable) };
 };
@@ -361,6 +462,7 @@ const auditNodalD4 = (snapshot: NonNullable<Awaited<ReturnType<
   ];
   const mismatchCounts = [0, 0, 0];
   let firstMismatch: Readonly<Record<string, unknown>> | undefined;
+  let maximumMismatch: Readonly<Record<string, unknown>> | undefined;
   let mismatches = 0, maximumAbsoluteError_m = 0;
   for (let slot = 0; slot < nodeCount; slot += 1) {
     const item = snapshot.nodes[4 * slot] ?? 0;
@@ -382,13 +484,287 @@ const auditNodalD4 = (snapshot: NonNullable<Awaited<ReturnType<
       firstMismatch ??= Object.freeze({ transformIndex, source: [x, y, z],
         target: [tx, ty, tz], sourceValue_m: bitFloat(sourceBits),
         targetValue_m: bitFloat(targetBits) });
-      maximumAbsoluteError_m = Math.max(maximumAbsoluteError_m,
-        Math.abs(bitFloat(sourceBits) - bitFloat(targetBits)));
+      const absoluteError_m = Math.abs(bitFloat(sourceBits) - bitFloat(targetBits));
+      if (absoluteError_m > maximumAbsoluteError_m) {
+        maximumAbsoluteError_m = absoluteError_m;
+        maximumMismatch = Object.freeze({ transformIndex, source: [x, y, z],
+          target: [tx, ty, tz], sourceValue_m: bitFloat(sourceBits),
+          targetValue_m: bitFloat(targetBits) });
+      }
     }
   }
   return Object.freeze({ mismatches, maximumAbsoluteError_m,
     reflectXMismatches: mismatchCounts[0], reflectZMismatches: mismatchCounts[1],
-    swapXZMismatches: mismatchCounts[2], ...(firstMismatch ? { firstMismatch } : {}) });
+    swapXZMismatches: mismatchCounts[2], ...(firstMismatch ? { firstMismatch } : {}),
+    ...(maximumMismatch ? { maximumMismatch } : {}) });
+};
+const auditNodalPhiRange = (snapshot: NonNullable<Awaited<ReturnType<
+  NonNullable<typeof projection>["readAdaptiveSurfacePublicationDiagnostics"]>>>) => {
+  const nodeCount = Math.min(snapshot.graphControl[2] ?? 0,
+    Math.floor(snapshot.nodalPhi.length / 2));
+  const bank = (snapshot.phiControl[6] ?? 0) & 1;
+  let minimum_m = Number.POSITIVE_INFINITY, maximum_m = Number.NEGATIVE_INFINITY;
+  let exactZeroNodes = 0, withinTwoCellsNodes = 0;
+  for (let slot = 0; slot < nodeCount; slot += 1) {
+    const value = bitFloat(snapshot.nodalPhi[2 * slot + bank] ?? 0);
+    minimum_m = Math.min(minimum_m, value);
+    maximum_m = Math.max(maximum_m, value);
+    if (value === 0) exactZeroNodes += 1;
+    if (Math.abs(value) < 0.1) withinTwoCellsNodes += 1;
+  }
+  return Object.freeze({ minimum_m, maximum_m, exactZeroNodes, withinTwoCellsNodes });
+};
+const auditAdjacencyD4 = (snapshot: NonNullable<Awaited<ReturnType<
+  NonNullable<typeof projection>["readAdaptiveSurfacePublicationDiagnostics"]>>>) => {
+  const [nx, ny, nz] = snapshot.dimensions;
+  const dx = nx + 1, dy = ny + 1;
+  const nodeCount = Math.min(snapshot.graphControl[2] ?? 0,
+    Math.floor(snapshot.nodes.length / 4), Math.floor(snapshot.adjacency.length / 12));
+  const byItem = new Map<number, number>();
+  const position = (item: number) => {
+    const z = Math.floor(item / (dx * dy));
+    const remainder = item - z * dx * dy;
+    const y = Math.floor(remainder / dx);
+    return [remainder - y * dx, y, z] as const;
+  };
+  const item = (x: number, y: number, z: number) => x + dx * (y + dy * z);
+  for (let slot = 0; slot < nodeCount; slot += 1) {
+    byItem.set(snapshot.nodes[4 * slot] ?? 0xffff_ffff, slot);
+  }
+  const transforms = [
+    (x: number, y: number, z: number) => [nx - x, y, z] as const,
+    (x: number, y: number, z: number) => [x, y, nz - z] as const,
+    (x: number, y: number, z: number) => [z, y, x] as const,
+  ];
+  const directionMaps = [
+    [3, 1, 2, 0, 4, 5],
+    [0, 1, 5, 3, 4, 2],
+    [2, 1, 0, 5, 4, 3],
+  ] as const;
+  const mismatchCounts = [0, 0, 0];
+  let mismatches = 0;
+  let firstMismatch: Readonly<Record<string, unknown>> | undefined;
+  for (let slot = 0; slot < nodeCount; slot += 1) {
+    const sourceItem = snapshot.nodes[4 * slot] ?? 0;
+    const [x, y, z] = position(sourceItem);
+    for (let transformIndex = 0; transformIndex < transforms.length; transformIndex += 1) {
+      const [tx, ty, tz] = transforms[transformIndex]!(x, y, z);
+      const target = byItem.get(item(tx, ty, tz));
+      if (target === undefined) continue;
+      for (let direction = 0; direction < 6; direction += 1) {
+        const targetDirection = directionMaps[transformIndex]![direction]!;
+        const sourceNeighbor = snapshot.adjacency[12 * slot + direction] ?? 0xffff_ffff;
+        const targetNeighbor = snapshot.adjacency[12 * target + targetDirection]
+          ?? 0xffff_ffff;
+        let expectedNeighbor = 0xffff_ffff;
+        if (sourceNeighbor !== 0xffff_ffff && sourceNeighbor < nodeCount) {
+          const [sx, sy, sz] = position(snapshot.nodes[4 * sourceNeighbor] ?? 0);
+          const [ex, ey, ez] = transforms[transformIndex]!(sx, sy, sz);
+          expectedNeighbor = byItem.get(item(ex, ey, ez)) ?? 0xffff_ffff;
+        }
+        const sourceSpan = snapshot.adjacency[12 * slot + 6 + direction]
+          ?? 0xffff_ffff;
+        const targetSpan = snapshot.adjacency[12 * target + 6 + targetDirection]
+          ?? 0xffff_ffff;
+        if (expectedNeighbor === targetNeighbor && sourceSpan === targetSpan) continue;
+        mismatches += 1;
+        mismatchCounts[transformIndex]! += 1;
+        firstMismatch ??= Object.freeze({ transformIndex, source: [x, y, z],
+          target: [tx, ty, tz], direction, targetDirection, sourceNeighbor,
+          expectedNeighbor, targetNeighbor, sourceSpan, targetSpan });
+      }
+    }
+  }
+  return Object.freeze({ mismatches, reflectXMismatches: mismatchCounts[0],
+    reflectZMismatches: mismatchCounts[1], swapXZMismatches: mismatchCounts[2],
+    ...(firstMismatch ? { firstMismatch } : {}) });
+};
+const auditConstraintsD4 = (snapshot: NonNullable<Awaited<ReturnType<
+  NonNullable<typeof projection>["readAdaptiveSurfacePublicationDiagnostics"]>>>) => {
+  const [nx, ny, nz] = snapshot.dimensions;
+  const dx = nx + 1, dy = ny + 1;
+  const nodeCount = Math.min(snapshot.graphControl[2] ?? 0,
+    Math.floor(snapshot.nodes.length / 4), Math.floor(snapshot.constraints.length / 12));
+  const byItem = new Map<number, number>();
+  const position = (nodeItem: number) => {
+    const z = Math.floor(nodeItem / (dx * dy));
+    const remainder = nodeItem - z * dx * dy;
+    const y = Math.floor(remainder / dx);
+    return [remainder - y * dx, y, z] as const;
+  };
+  const item = (x: number, y: number, z: number) => x + dx * (y + dy * z);
+  for (let slot = 0; slot < nodeCount; slot += 1) {
+    byItem.set(snapshot.nodes[4 * slot] ?? 0xffff_ffff, slot);
+  }
+  const transforms = [
+    (x: number, y: number, z: number) => [nx - x, y, z] as const,
+    (x: number, y: number, z: number) => [x, y, nz - z] as const,
+    (x: number, y: number, z: number) => [z, y, x] as const,
+  ];
+  const mismatchCounts = [0, 0, 0];
+  let mismatches = 0;
+  let firstMismatch: Readonly<Record<string, unknown>> | undefined;
+  for (let slot = 0; slot < nodeCount; slot += 1) {
+    const sourceItem = snapshot.nodes[4 * slot] ?? 0;
+    const [x, y, z] = position(sourceItem);
+    for (let transformIndex = 0; transformIndex < transforms.length; transformIndex += 1) {
+      const transform = transforms[transformIndex]!;
+      const [tx, ty, tz] = transform(x, y, z);
+      const target = byItem.get(item(tx, ty, tz));
+      if (target === undefined) continue;
+      const sourceHeader = Array.from(snapshot.constraints.slice(12 * slot, 12 * slot + 4));
+      const targetHeader = Array.from(snapshot.constraints.slice(12 * target, 12 * target + 4));
+      const sourceCount = Math.min(sourceHeader[1] ?? 0, 4);
+      const targetCount = Math.min(targetHeader[1] ?? 0, 4);
+      const sourceTerms: string[] = [];
+      for (let term = 0; term < sourceCount; term += 1) {
+        const master = snapshot.constraints[12 * slot + 4 + term] ?? 0xffff_ffff;
+        const weight = snapshot.constraints[12 * slot + 8 + term] ?? 0;
+        if (master >= nodeCount) {
+          sourceTerms.push(String(master) + ":" + String(weight));
+          continue;
+        }
+        const [mx, my, mz] = position(snapshot.nodes[4 * master] ?? 0);
+        const [emx, emy, emz] = transform(mx, my, mz);
+        const expected = byItem.get(item(emx, emy, emz)) ?? 0xffff_ffff;
+        sourceTerms.push(String(expected) + ":" + String(weight));
+      }
+      const targetTerms: string[] = [];
+      for (let term = 0; term < targetCount; term += 1) {
+        const master = snapshot.constraints[12 * target + 4 + term] ?? 0xffff_ffff;
+        const weight = snapshot.constraints[12 * target + 8 + term] ?? 0;
+        targetTerms.push(String(master) + ":" + String(weight));
+      }
+      sourceTerms.sort(); targetTerms.sort();
+      const matches = sourceHeader.join(",") === targetHeader.join(",")
+        && sourceTerms.join(",") === targetTerms.join(",");
+      if (matches) continue;
+      mismatches += 1;
+      mismatchCounts[transformIndex]! += 1;
+      firstMismatch ??= Object.freeze({ transformIndex, source: [x, y, z],
+        target: [tx, ty, tz], sourceHeader, targetHeader, sourceTerms, targetTerms });
+    }
+  }
+  return Object.freeze({ mismatches, reflectXMismatches: mismatchCounts[0],
+    reflectZMismatches: mismatchCounts[1], swapXZMismatches: mismatchCounts[2],
+    ...(firstMismatch ? { firstMismatch } : {}) });
+};
+const auditNodalVelocityD4 = (graphControl: Uint32Array, nodes: Uint32Array,
+  nodalVelocity: Uint32Array) => {
+  const [nx, ny, nz] = dimensions;
+  const dx = nx + 1, dy = ny + 1;
+  const nodeCount = Math.min(graphControl[2] ?? 0, Math.floor(nodes.length / 4),
+    Math.floor(nodalVelocity.length / 8));
+  const position = (node: number) => {
+    const item = nodes[4 * node] ?? 0;
+    return [item % dx, Math.floor(item / dx) % dy,
+      Math.floor(item / (dx * dy))] as const;
+  };
+  const byPosition = new Map<string, number>();
+  for (let node = 0; node < nodeCount; node += 1) {
+    byPosition.set(position(node).join(":"), node);
+  }
+  const transforms = [
+    { position: ([x, y, z]: readonly number[]) => [nx - x, y, z] as const,
+      value: ([x, y, z]: readonly number[]) => [-x, y, z] as const },
+    { position: ([x, y, z]: readonly number[]) => [x, y, nz - z] as const,
+      value: ([x, y, z]: readonly number[]) => [x, y, -z] as const },
+    { position: ([x, y, z]: readonly number[]) => [z, y, x] as const,
+      value: ([x, y, z]: readonly number[]) => [z, y, x] as const },
+  ] as const;
+  let missingNodes = 0, maskMismatches = 0, valueMismatches = 0;
+  let maximumAbsoluteError_m_s = 0;
+  let firstMissing: Readonly<{ bank: number; source: readonly number[];
+    target: readonly number[] }> | undefined;
+  for (let bank = 0; bank < 2; bank += 1) for (const transform of transforms) {
+    for (let node = 0; node < nodeCount; node += 1) {
+      const sourcePosition = position(node);
+      const targetPosition = transform.position(sourcePosition);
+      const target = byPosition.get(targetPosition.join(":"));
+      if (target === undefined) {
+        missingNodes += 1;
+        firstMissing ??= Object.freeze({ bank, source: sourcePosition, target: targetPosition });
+        continue;
+      }
+      const sourceAt = 8 * node + 4 * bank, targetAt = 8 * target + 4 * bank;
+      maskMismatches += Number((nodalVelocity[sourceAt + 3]! & 7)
+        !== (nodalVelocity[targetAt + 3]! & 7));
+      const expected = transform.value([bitFloat(nodalVelocity[sourceAt]!),
+        bitFloat(nodalVelocity[sourceAt + 1]!), bitFloat(nodalVelocity[sourceAt + 2]!)]);
+      for (let component = 0; component < 3; component += 1) {
+        const actual = bitFloat(nodalVelocity[targetAt + component]!);
+        if (Object.is(expected[component], actual)) continue;
+        valueMismatches += 1;
+        maximumAbsoluteError_m_s = Math.max(maximumAbsoluteError_m_s,
+          Math.abs(expected[component]! - actual));
+      }
+    }
+  }
+  return Object.freeze({ missingNodes, maskMismatches, valueMismatches,
+    maximumAbsoluteError_m_s, ...(firstMissing ? { firstMissing } : {}) });
+};
+const auditFaceVelocityD4 = (control: Uint32Array, faceGeometry: Uint32Array,
+  values: Uint32Array) => {
+  const count = Math.min(control[2] ?? 0, Math.floor(faceGeometry.length / 4), values.length);
+  const geometry = (face: number) => {
+    const packed = faceGeometry[4 * face] ?? 0;
+    return { axis: packed & 3, span: 1 << (packed >>> 2),
+      q: [faceGeometry[4 * face + 1] ?? 0, faceGeometry[4 * face + 2] ?? 0,
+        faceGeometry[4 * face + 3] ?? 0] as const };
+  };
+  const key = (g: ReturnType<typeof geometry>) => `${g.axis}:${g.span}:${g.q.join(":")}`;
+  const byGeometry = new Map<string, number>();
+  for (let face = 0; face < count; face += 1) byGeometry.set(key(geometry(face)), face);
+  const transforms = [
+    { geometry: (g: ReturnType<typeof geometry>) => ({ ...g,
+      q: [dimensions[0] - g.q[0] - (g.axis === 0 ? 0 : g.span), g.q[1], g.q[2]] as const }),
+      sign: (axis: number) => axis === 0 ? -1 : 1 },
+    { geometry: (g: ReturnType<typeof geometry>) => ({ ...g,
+      q: [g.q[0], g.q[1], dimensions[2] - g.q[2] - (g.axis === 2 ? 0 : g.span)] as const }),
+      sign: (axis: number) => axis === 2 ? -1 : 1 },
+    { geometry: (g: ReturnType<typeof geometry>) => ({ axis: g.axis === 0 ? 2
+      : g.axis === 2 ? 0 : 1, span: g.span, q: [g.q[2], g.q[1], g.q[0]] as const }),
+      sign: () => 1 },
+  ] as const;
+  let missingFaces = 0, mismatches = 0, maximumAbsoluteError_m_s = 0;
+  for (let face = 0; face < count; face += 1) for (const transform of transforms) {
+    const sourceGeometry = geometry(face);
+    const target = byGeometry.get(key(transform.geometry(sourceGeometry)));
+    if (target === undefined) { missingFaces += 1; continue; }
+    const expected = transform.sign(sourceGeometry.axis) * bitFloat(values[face]!);
+    const actual = bitFloat(values[target]!);
+    if (Object.is(expected, actual)) continue;
+    mismatches += 1;
+    maximumAbsoluteError_m_s = Math.max(maximumAbsoluteError_m_s, Math.abs(expected - actual));
+  }
+  return Object.freeze({ count, missingFaces, mismatches, maximumAbsoluteError_m_s });
+};
+const auditRefinementPair = (snapshot: NonNullable<Awaited<ReturnType<
+  NonNullable<typeof projection>["readAdaptiveSurfacePublicationDiagnostics"]>>>) => {
+  const bank = (snapshot.phiControl[6] ?? 0) & 1;
+  const count = Math.min(snapshot.graphControl[1] ?? 0, Math.floor(snapshot.leaves.length / 16));
+  const leaf = (row: number) => ({
+    origin: [snapshot.leaves[16 * row]!, snapshot.leaves[16 * row + 1]!,
+      snapshot.leaves[16 * row + 2]!] as const,
+    span: snapshot.leaves[16 * row + 3]!,
+    corners: Array.from({ length: 8 }, (_, corner) =>
+      bitFloat(snapshot.nodalPhi[2 * snapshot.leaves[16 * row + 8 + corner]! + bank]!)),
+  });
+  const containing = (q: readonly number[]) => {
+    for (let row = 0; row < count; row += 1) {
+      const record = leaf(row);
+      if (q.every((value, axis) => value >= record.origin[axis]!
+        && value < record.origin[axis]! + record.span)) return { row, ...record };
+    }
+    return undefined;
+  };
+  return [[12, 4, 2], [18, 4, 2]].map((origin) => {
+    const record = containing(origin.map((value) => value + 1));
+    if (!record) return { origin, missing: true };
+    return { origin, ownerOrigin: record.origin, ownerSpan: record.span,
+      minimumPhi_m: Math.min(...record.corners), maximumPhi_m: Math.max(...record.corners),
+      corners_m: record.corners };
+  });
 };
 const capture = async (step: number) => {
   await device.queue.onSubmittedWorkDone();
@@ -400,7 +776,32 @@ const capture = async (step: number) => {
     snapshot, 8, topFeatureGroups);
   const phiReceipt = unpackAdaptivePhiReceipt(snapshot.phiReceipts);
   const nodalD4 = auditNodalD4(snapshot);
+  const nodalPhiRange = auditNodalPhiRange(snapshot);
+  const adjacencyD4 = auditAdjacencyD4(snapshot);
+  const constraintsD4 = auditConstraintsD4(snapshot);
+  const candidateNodalD4 = auditNodalD4({ ...snapshot,
+    graphControl: snapshot.candidateGraphControl,
+    nodes: snapshot.candidateNodes,
+    nodalPhi: snapshot.candidateNodalPhi,
+    phiControl: new Uint32Array(20),
+  });
   const nodalSpeed = auditVelocityMagnitude(snapshot);
+  const acceptedVelocityD4 = auditNodalVelocityD4(snapshot.graphControl,
+    snapshot.nodes, snapshot.nodalVelocity);
+  const candidateVelocityD4 = auditNodalVelocityD4(snapshot.candidateGraphControl,
+    snapshot.candidateNodes, snapshot.candidateNodalVelocity);
+  const faceVelocityD4 = Object.freeze({
+    advected: auditFaceVelocityD4(snapshot.authorityControl, snapshot.faceGeometry,
+      snapshot.advectedFaceVelocity),
+    predicted: auditFaceVelocityD4(snapshot.authorityControl, snapshot.faceGeometry,
+      snapshot.predictedFaceVelocity),
+    projected: auditFaceVelocityD4(snapshot.authorityControl, snapshot.faceGeometry,
+      snapshot.projectedFaceVelocity),
+    extended: auditFaceVelocityD4(snapshot.authorityControl, snapshot.faceGeometry,
+      snapshot.extendedFaceVelocity),
+    candidateExtended: auditFaceVelocityD4(snapshot.candidateAuthorityControl,
+      snapshot.candidateFaceGeometry, snapshot.candidateExtendedFaceVelocity),
+  });
   const acceptedStage = stageCapture && step > 0 ? await stageCapture.read() : undefined;
   const redistanceZeroSet = redistanceGeometryAudit && acceptedStage
     ? auditRedistanceZeroSet({ ...snapshot, ...acceptedStage }) : undefined;
@@ -410,9 +811,15 @@ const capture = async (step: number) => {
   ]);
   assert.ok(authority, "factor-one solver published no Losasso authority receipt");
   const massReceipt = unpackAdaptiveMassReceipt(authority.adaptiveMassReceipts);
+  const surfaceDensity = auditSurfaceDensity(snapshot);
   samples.push({ step, time_s: step * dt, ...analysis, featureGeometry, phiReceipt,
     redistanceZeroSet,
-    graphControl: snapshot.graphControl, phiControl: snapshot.phiControl, nodalD4, nodalSpeed,
+    graphControl: snapshot.graphControl, phiControl: snapshot.phiControl,
+    nodalD4, nodalPhiRange, adjacencyD4, constraintsD4, candidateNodalD4, nodalSpeed,
+    acceptedVelocityD4,
+    candidateVelocityD4, surfaceDensity,
+    ...(step >= 82 ? { refinementPair: auditRefinementPair(snapshot) } : {}),
+    faceVelocityD4,
     pressureRows: stats.pressureRequiredRows,
     acceptedMass_m3: massReceipt.acceptedMass_m3,
     transportedMass_m3: massReceipt.transportedMass_m3,
@@ -457,7 +864,16 @@ const reportedSamples = compact === "1" || compact === "2"
       zeroSetExtentsCells: geometry.zeroSetExtentsCells,
       maximumSharedNodeMismatch: geometry.maximumSharedNodeMismatch,
       nodalD4: sample.nodalD4,
+      nodalPhiRange: sample.nodalPhiRange,
+      adjacencyD4: sample.adjacencyD4,
+      constraintsD4: sample.constraintsD4,
+      candidateNodalD4: sample.candidateNodalD4,
+      acceptedVelocityD4: sample.acceptedVelocityD4,
+      candidateVelocityD4: sample.candidateVelocityD4,
+      ...(sample.refinementPair ? { refinementPair: sample.refinementPair } : {}),
+      faceVelocityD4: sample.faceVelocityD4,
       nodalSpeed: sample.nodalSpeed,
+      surfaceDensity: sample.surfaceDensity,
       ...(sample.redistanceZeroSet ? { redistanceZeroSet: sample.redistanceZeroSet } : {}),
       ...(compact === "1" ? { topFeatures: geometry.topFeatures } : {}),
       dt_s: receipt.dt_s,
@@ -531,6 +947,7 @@ const gateSummary = compact === "3" ? (() => {
     } : undefined,
     initialConservedVolume_m3: first.acceptedMass_m3 as number,
     finalConservedVolume_m3: last.acceptedMass_m3 as number,
+    finalSurfaceDensity: last.surfaceDensity,
     maximumAbsoluteTransportDrift_m3: Math.max(...samples.map((sample) =>
       Math.abs(sample.signedTransportDrift_m3 as number))),
     maximumMassErrors: Math.max(...samples.map((sample) => sample.massErrors as number)),
@@ -550,6 +967,21 @@ const gateSummary = compact === "3" ? (() => {
       (sample.nodalD4 as ReturnType<typeof auditNodalD4>).mismatches)),
     maximumD4AbsoluteError_m: Math.max(...samples.map((sample) =>
       (sample.nodalD4 as ReturnType<typeof auditNodalD4>).maximumAbsoluteError_m)),
+    finalNodalD4: last.nodalD4,
+    finalNodalPhiRange: last.nodalPhiRange,
+    finalAdjacencyD4: last.adjacencyD4,
+    finalConstraintsD4: last.constraintsD4,
+    maximumCandidateD4Mismatches: Math.max(...samples.map((sample) =>
+      (sample.candidateNodalD4 as ReturnType<typeof auditNodalD4>).mismatches)),
+    maximumCandidateD4AbsoluteError_m: Math.max(...samples.map((sample) =>
+      (sample.candidateNodalD4 as ReturnType<typeof auditNodalD4>).maximumAbsoluteError_m)),
+    maximumAcceptedVelocityD4AbsoluteError_m_s: Math.max(...samples.map((sample) =>
+      (sample.acceptedVelocityD4 as ReturnType<typeof auditNodalVelocityD4>)
+        .maximumAbsoluteError_m_s)),
+    maximumCandidateVelocityD4AbsoluteError_m_s: Math.max(...samples.map((sample) =>
+      (sample.candidateVelocityD4 as ReturnType<typeof auditNodalVelocityD4>)
+        .maximumAbsoluteError_m_s)),
+    finalFaceVelocityD4: last.faceVelocityD4,
     maximumSharedNodeMismatch: Math.max(...samples.map((sample) =>
       (sample.featureGeometry as ReturnType<
         typeof analyzeAdaptiveSurfaceFeatureGeometry>).maximumSharedNodeMismatch)),

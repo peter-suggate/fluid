@@ -80,7 +80,9 @@ test("symmetric expansion Dawn lane samples every accepted step and gates every 
     circularityEvaluationStart_s: 0.168,
     circularityEvaluationEnd_s: 0.2,
     frontAdvanceEvaluationEnd_s: 0.2,
-    minimumMeanFrontAdvance_cells: 1,
+    minimumMeanFrontAdvance_cells: 3.7,
+    wallClimbEvaluationStart_s: 0.24,
+    minimumPeakWallClimb_cells: 9,
     maximumAxisDiagonalFrontDifference_cells: 1,
     maximumRadialRmsDeviation_cells: 0.5,
     maximumRadialDeviation_cells: 1,
@@ -322,6 +324,31 @@ test("symmetric expansion rejects a stationary front even when every field remai
   assert.equal(evaluate(9.1).find(({ id }) => id === "octree.front-advance")?.passed, true);
 });
 
+test("symmetric expansion wall-climb gate must exceed the historical control", () => {
+  const metric = { maximumAbsoluteError: 0, nonFiniteCount: 0 };
+  const evaluate = (height: number) => sceneCustomHookImplementations["fluid-symmetry"].evaluate({
+    parameters: {
+      maximumVolumeAbsoluteError: 0, maximumVelocityAbsoluteError_m_s: 0,
+      maximumPressureAbsoluteError: 0, maximumRhsAbsoluteError: 0,
+      maximumDiagonalAbsoluteError: 0, minimumCheckpointCount: 1,
+      maximumWallContactStepSpread: 0, requireExactTopology: true,
+      requireAllWallsReached: true, wallClimbEvaluationStart_s: 0.24,
+      minimumPeakWallClimb_cells: 9,
+    },
+    selectedMethods: ["octree"],
+    getMethod: () => ({ available: [], diagnostics: { field: { checkpoints: [{
+      time_s: 1, evidence: { "fluid-symmetry": {
+        volume: metric, velocity: metric, pressure: metric, rhs: metric, diagonal: metric,
+        topology: { ...metric, exactMismatchCount: 0 },
+        walls: Object.fromEntries(["negativeX", "positiveX", "negativeZ", "positiveZ"]
+          .map((wall) => [wall, { touched: true, maximumWetHeight_cells: height }])),
+      } },
+    }] } } }),
+  } as never);
+  assert.equal(evaluate(8).find(({ id }) => id === "octree.wall-climb")?.passed, false);
+  assert.equal(evaluate(9).find(({ id }) => id === "octree.wall-climb")?.passed, true);
+});
+
 test("symmetric expansion has an isolated Dawn reproduction command", () => {
   const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {
     scripts: Record<string, string>;
@@ -366,7 +393,9 @@ test("symmetric expansion has an isolated Dawn reproduction command", () => {
   assert.equal(coarseOnlyLane.hooks[0]?.parameters?.maximumWallContactStepSpread, 0);
   assert.equal(coarseOnlyLane.collect.raster, "initial-final");
   assert.equal(coarseOnlyLane.hooks[0]?.parameters?.frontAdvanceEvaluationEnd_s, 0.2);
-  assert.equal(coarseOnlyLane.hooks[0]?.parameters?.minimumMeanFrontAdvance_cells, 1);
+  assert.equal(coarseOnlyLane.hooks[0]?.parameters?.minimumMeanFrontAdvance_cells, 3.7);
+  assert.equal(coarseOnlyLane.hooks[0]?.parameters?.wallClimbEvaluationStart_s, 0.24);
+  assert.equal(coarseOnlyLane.hooks[0]?.parameters?.minimumPeakWallClimb_cells, 9);
   assert.equal(coarseOnlyLane.hooks[0]?.parameters?.circularityEvaluationStart_s, 0.168,
     "factor one must pass the same physical front window as the factor-4 baseline");
 

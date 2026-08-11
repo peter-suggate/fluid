@@ -83,6 +83,24 @@ export const ADAPTIVE_LOSASSO_UI_METHOD_PROFILE: MethodProfile = Object.freeze({
   }),
 });
 
+/** Reproducible Aanjaneya et al. 2017 comparison tuple.
+ *
+ * Section 5 keeps a separate uniformly high-resolution sparse level set,
+ * typically 4× or 8× the background octree. Factor four is the canonical
+ * benchmark here; band reach four is the existing symmetric-expansion oracle.
+ */
+export const POWER2017_FACTOR4_BENCHMARK_METHOD_PROFILE: MethodProfile = Object.freeze({
+  methodId: "octree",
+  quality: "balanced",
+  overrides: Object.freeze({
+    coarseBackend: "power2017",
+    maximumLeafSize: "32",
+    interfaceRefinementBandCells: 4,
+    globalFineLevelSetFactor: "4",
+    topologyCadenceAdvances: 1,
+  }),
+});
+
 /** Historical oracle name retained for focused symmetry callers. */
 export const SYMMETRIC_EXPANSION_METHOD_PROFILE = ADAPTIVE_LOSASSO_UI_METHOD_PROFILE;
 

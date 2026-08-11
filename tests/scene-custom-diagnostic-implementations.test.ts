@@ -236,6 +236,39 @@ test("minimal dam motion uses only normalized stability, raster, and energy evid
   assert.equal(failed.find(({ id }) => id === "octree.lateral-spread")?.passed, false);
 });
 
+test("minimal dam motion rejects discontinuous energy and occupancy steps", () => {
+  const scene = cloneScene(defaultScene);
+  const diagnostics = {
+    run: { simulatedTime_s: 0.044 },
+    stability: { peakLiquidSpeed_m_s: 0.65 },
+    raster: {
+      initial: { frontInterfaceBounds_m: [[-0.4, 0, -0.4], [0, 0.4, 0]] },
+      final: { frontInterfaceBounds_m: [[-0.4, 0, -0.4], [0.1, 0.4, 0.1]] },
+    },
+    compactMechanicalEnergyCheckpoints: [
+      { gravitationalPotentialEnergyProxy: 0.66, reconstructedKineticEnergyProxy: 0.004,
+        maximumLiquidComponentSpeed_m_s: 0.64, liquidCellCount: 17_000,
+        finiteLiquidVolumeCellSum: 16_000 },
+      { gravitationalPotentialEnergyProxy: 0.666, reconstructedKineticEnergyProxy: 0.001,
+        maximumLiquidComponentSpeed_m_s: 0.38, liquidCellCount: 31_000,
+        finiteLiquidVolumeCellSum: 8_000 },
+    ],
+  };
+  const findings = evaluateMinimalDamMotionDiagnostic({
+    scene, evidence: evidence({ octree: diagnostics }), methods: ["octree"],
+    parameters: { minimumPeakSpeed_m_s: 0.4, minimumFinalSpeed_m_s: 0.4,
+      minimumLiquidVolumeRetentionRatio: 0.85,
+      minimumLateralSpread_m: 0, maximumStepPotentialEnergyIncreaseFraction: 0.005,
+      maximumStepKineticEnergyDropFraction: 0.6, maximumStepLiquidCellGrowthRatio: 1.5,
+      energyEvaluationAfter_s: 0 },
+  });
+  assert.equal(findings.find(({ id }) => id === "octree.final-speed")?.passed, false);
+  assert.equal(findings.find(({ id }) => id === "octree.visible-volume-retention")?.passed, false);
+  assert.equal(findings.find(({ id }) => id === "octree.step-potential-energy-increase")?.passed, false);
+  assert.equal(findings.find(({ id }) => id === "octree.step-kinetic-energy-drop")?.passed, false);
+  assert.equal(findings.find(({ id }) => id === "octree.step-liquid-cell-growth")?.passed, false);
+});
+
 test("settling gates are parameter-driven and retain dam-break oscillation checks", () => {
   const scene = cloneScene(defaultScene);
   scene.fluid.initialCondition = "dam-break";

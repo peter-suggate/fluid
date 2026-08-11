@@ -3,6 +3,7 @@ import {
   OCTREE_REFINEMENT_REGION_PARAMS_BYTES,
   OCTREE_REFINEMENT_REGION_PARAMS_OFFSET,
   packOctreeRefinementRegions,
+  sceneHasUniformFinestCellCeiling,
   sceneRefinementRegions,
 } from "./octree-refinement-regions";
 import {
@@ -100,6 +101,7 @@ import {
   type OctreeFirstOrderSPDVCycle,
 } from "./webgpu-octree-section43-contract";
 import {
+  OCTREE_PIPELINED_PCG_MAXIMUM_HARD_ITERATION_CEILING,
   WebGPUOctreePipelinedMGPCG,
   type OctreePipelinedMGPCGVectors,
   type OctreePipelinedWorksetLinearOperator,
@@ -1005,6 +1007,14 @@ export interface GlobalFineNarrowBandCapacityPlan {
   readonly surfaceGrowthHeadroomBricks: number;
   readonly maximumResidentBricks: number;
 }
+
+/**
+ * Power's restored factor-4 surface grid uses the shared candidate-local
+ * publisher. Two-times interface-area headroom is the smallest round policy
+ * that admits the complete legal band in the compact symmetric-expansion
+ * domain; the capacity planner still clamps at the logical brick count.
+ */
+export const POWER2017_FINE_BAND_SURFACE_GROWTH_SAFETY = 2;
 
 export interface OctreeFluidFootprintBudget {
   readonly initialLiquidCells: number;
@@ -2587,7 +2597,7 @@ export class WebGPUOctreeProjection {
         + (this.analyticBootstrapWorklist?.allocatedBytes ?? 0),
       pressureIterationsUsed: 0,
       pressureIterationBudget: this.solveTailPolicy.encodedOuterIterations,
-      pressureIterationHardBudget: this.solveTailPolicy.hardOuterIterationCeiling,
+      pressureIterationHardBudget: this.pressureHardIterationCeiling(),
       pressureConverged: undefined,
       pressureRowCapacity: pressureSlots,
       pressureCapacityOverflow: false,
@@ -2724,8 +2734,15 @@ export class WebGPUOctreeProjection {
           // entire short axis; a fractional area reserve merely rejects one
           // dilation round later. Permit the physical plan to reach the full
           // logical lattice (the capacity planner still clamps there). Keep
-          // the frozen Power reference's historical 1.5x reserve unchanged.
-          const surfaceGrowthSafety = this.coarseDynamics.backend === "losasso" ? 2 : 1.5;
+          // Power historically used 1.5x. The shared candidate-local topology
+          // can publish a larger legal interface shell than the old
+          // tile-retention topology: on symmetric expansion it grows through
+          // 14,400 pages as additional dilation rounds become representable.
+          // The same 2x physical-area reserve already used by LoSasso admits
+          // that complete shell. Large domains remain sparse because this is
+          // an area-times-band-width estimate, clamped only on compact grids.
+          const surfaceGrowthSafety = this.coarseDynamics.backend === "losasso"
+            ? 2 : POWER2017_FINE_BAND_SURFACE_GROWTH_SAFETY;
           const defaultCapacity = planFluidFootprintFineNarrowBandBrickCapacity(
             brickDimensions, footprintBrickDimensions, capacityDilationBrickRings,
             inflowFineBricks, surfaceGrowthSafety,
@@ -2852,6 +2869,14 @@ export class WebGPUOctreeProjection {
   /** Construct the reduced Losasso graph synchronously so initialization can
    * enumerate only its own shader tasks. No Power catalogue or structured
    * authority is reachable from this construction branch. */
+  private pressureHardIterationCeiling(): number {
+    return this.coarseDynamics.backend === "losasso"
+      && this.coarseOnlySurfaceTracking
+      && sceneHasUniformFinestCellCeiling(this.scene)
+      ? OCTREE_PIPELINED_PCG_MAXIMUM_HARD_ITERATION_CEILING
+      : this.solveTailPolicy.hardOuterIterationCeiling;
+  }
+
   private initializeLosassoAuthority(): void {
     if (this.losassoBackend || this.powerLifecycleDisposed) return;
     const rowCapacity = this.pressureCapacity.rowCapacity;
@@ -2890,6 +2915,16 @@ export class WebGPUOctreeProjection {
         z: this.scene.container.depth_m / this.dims.nz,
       })
       : undefined;
+    // A full-fine authored ceiling removes the coarse levels that make the
+    // ordinary adaptive dam system cheap to precondition. The 24x18x16 water
+    // box first exceeds the legacy 40-iteration envelope during the advancing
+    // front transient (not during construction), so compiling only that tail
+    // makes a valid uniform-grid experiment fail closed at step 41. Keep the
+    // same residual target and MGPCG algorithm; widen only its fail-safe tail.
+    // The resident solver exits as soon as the same-step residual converges, so
+    // ordinary steps and scenes without an authored unit ceiling pay no extra
+    // iterations.
+    const pressureHardIterationCeiling = this.pressureHardIterationCeiling();
     this.losassoBackend = new WebGPUOctreeLosassoCoarseBackend({
       device: this.device,
       capacities: { rows: rowCapacity, faces: faceCapacity, incidences: 2 * faceCapacity },
@@ -2916,6 +2951,12 @@ export class WebGPUOctreeProjection {
             this.interfaceBandCellsEffective, this.surfaceGradingLayersEffective,
             this.topologyMaximumLeafSize, 1,
           ),
+          // The uniform-fine experiment has no coarse jump to shorten the
+          // compact Jacobi propagation path. Its three-cell redistance shell
+          // needs a wider fixed envelope during the highly folded dam front;
+          // the residual gate remains the acceptance authority.
+          ...(sceneHasUniformFinestCellCeiling(this.scene)
+            ? { redistanceIterations: 128, fullGraphRedistance: true } : {}),
           openTop: !closedTop,
         },
       } : {}),
@@ -2932,7 +2973,7 @@ export class WebGPUOctreeProjection {
         // preserving the wider hard ceiling as the fallback contract.
         maximumIterations: this.coarseOnlySurfaceTracking && rowCapacity <= 4_096
           ? 33 : this.solveTailPolicy.hardOuterIterationCeiling,
-        hardIterationCeiling: this.solveTailPolicy.hardOuterIterationCeiling,
+        hardIterationCeiling: pressureHardIterationCeiling,
         // The cooperative drain is bounded by the compact coarse row arena,
         // not by the independent fine level-set factor. Keep larger coarse
         // problems on the ordinary partial-plus-finish schedule.
@@ -5181,7 +5222,7 @@ export class WebGPUOctreeProjection {
       ?? this.solveTailPolicy.encodedOuterIterations;
     this.workAccounting.beginSubstep();
     this.info.pressureIterationBudget = solveBudget;
-    this.info.pressureIterationHardBudget = this.solveTailPolicy.hardOuterIterationCeiling;
+    this.info.pressureIterationHardBudget = this.pressureHardIterationCeiling();
     const fineEngineSplits = octreeFineEngineSplitsEnabled();
     const splitProductionPhase = (
       enginePhase: OctreeEnginePhase | undefined,
@@ -5273,7 +5314,7 @@ export class WebGPUOctreeProjection {
       ?? this.solveTailPolicy.encodedOuterIterations;
     this.workAccounting.beginSubstep();
     this.info.pressureIterationBudget = solveBudget;
-    this.info.pressureIterationHardBudget = this.solveTailPolicy.hardOuterIterationCeiling;
+    this.info.pressureIterationHardBudget = this.pressureHardIterationCeiling();
     const step = {
       dt_s: this.powerTimestep_s,
       gravity_m_s2: [
@@ -7332,10 +7373,14 @@ export class WebGPUOctreeProjection {
   async readAdaptiveSurfacePublicationDiagnostics() {
     const backend = this.losassoBackend;
     const graph = backend?.adaptiveSurfaceGraphSources?.accepted;
+    const candidateGraph = backend?.adaptiveSurfaceGraphSources?.candidate;
     const phi = backend?.adaptivePhiSource;
+    const mass = backend?.adaptiveMassSource;
     const stencil = backend?.adaptiveVelocityStencilDiagnosticSources;
-    const candidate = backend?.adaptiveVelocityCandidateDiagnosticSources;
-    if (!graph || !phi || !stencil || !candidate) return undefined;
+    const candidateVelocity = backend?.adaptiveVelocityCandidateDiagnosticSources;
+    if (!graph || !candidateGraph || !phi || !mass || !stencil || !candidateVelocity) {
+      return undefined;
+    }
     const authorityControl = backend.sources.operator.control;
     const faceGeometry = backend.sources.dynamics.faceGeometry;
     const projectedFaceVelocity = backend.sources.dynamics.projectedVelocity;
@@ -7357,12 +7402,12 @@ export class WebGPUOctreeProjection {
     const stencilOffset = stencilControlOffset + stencil.control.size;
     const candidateAuthorityControlOffset = stencilOffset + stencil.records.size;
     const candidateFaceGeometryOffset = candidateAuthorityControlOffset
-      + candidate.authorityControl.size;
+      + candidateVelocity.authorityControl.size;
     const candidateExtendedFaceVelocityOffset = candidateFaceGeometryOffset
-      + candidate.faceGeometry.size;
+      + candidateVelocity.faceGeometry.size;
     const candidateNodalVelocityOffset = candidateExtendedFaceVelocityOffset
-      + candidate.extendedVelocity.size;
-    const leavesOffset = candidateNodalVelocityOffset + candidate.nodalVelocity.size;
+      + candidateVelocity.extendedVelocity.size;
+    const leavesOffset = candidateNodalVelocityOffset + candidateVelocity.nodalVelocity.size;
     const nodalPhiOffset = leavesOffset + graph.leaves.size;
     const nodesOffset = nodalPhiOffset + graph.phi.size;
     const constraintsOffset = nodesOffset + graph.nodes.size;
@@ -7374,9 +7419,14 @@ export class WebGPUOctreeProjection {
     const redistanceDistanceAOffset = transportBandMaskOffset + phi.transportBandMask.size;
     const redistanceDistanceBOffset = redistanceDistanceAOffset + phi.redistanceDistanceA.size;
     const phiReceiptsOffset = redistanceDistanceBOffset + phi.redistanceDistanceB.size;
+    const candidateGraphControlOffset = phiReceiptsOffset + phi.receipts.size;
+    const candidateNodesOffset = candidateGraphControlOffset + candidateGraph.control.size;
+    const candidateNodalPhiOffset = candidateNodesOffset + candidateGraph.nodes.size;
+    const acceptedMassOffset = candidateNodalPhiOffset + candidateGraph.phi.size;
+    const leafRhoPhiOffset = acceptedMassOffset + mass.acceptedMass.size;
     const readback = this.device.createBuffer({
       label: "Read adaptive surface publication",
-      size: phiReceiptsOffset + phi.receipts.size,
+      size: leafRhoPhiOffset + mass.leafRhoPhi.size,
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
     });
     const encoder = this.device.createCommandEncoder({
@@ -7400,14 +7450,14 @@ export class WebGPUOctreeProjection {
       stencil.control.size);
     encoder.copyBufferToBuffer(stencil.records, 0, readback, stencilOffset,
       stencil.records.size);
-    encoder.copyBufferToBuffer(candidate.authorityControl, 0, readback,
-      candidateAuthorityControlOffset, candidate.authorityControl.size);
-    encoder.copyBufferToBuffer(candidate.faceGeometry, 0, readback,
-      candidateFaceGeometryOffset, candidate.faceGeometry.size);
-    encoder.copyBufferToBuffer(candidate.extendedVelocity, 0, readback,
-      candidateExtendedFaceVelocityOffset, candidate.extendedVelocity.size);
-    encoder.copyBufferToBuffer(candidate.nodalVelocity, 0, readback,
-      candidateNodalVelocityOffset, candidate.nodalVelocity.size);
+    encoder.copyBufferToBuffer(candidateVelocity.authorityControl, 0, readback,
+      candidateAuthorityControlOffset, candidateVelocity.authorityControl.size);
+    encoder.copyBufferToBuffer(candidateVelocity.faceGeometry, 0, readback,
+      candidateFaceGeometryOffset, candidateVelocity.faceGeometry.size);
+    encoder.copyBufferToBuffer(candidateVelocity.extendedVelocity, 0, readback,
+      candidateExtendedFaceVelocityOffset, candidateVelocity.extendedVelocity.size);
+    encoder.copyBufferToBuffer(candidateVelocity.nodalVelocity, 0, readback,
+      candidateNodalVelocityOffset, candidateVelocity.nodalVelocity.size);
     encoder.copyBufferToBuffer(graph.leaves, 0, readback, leavesOffset, graph.leaves.size);
     encoder.copyBufferToBuffer(graph.phi, 0, readback, nodalPhiOffset, graph.phi.size);
     encoder.copyBufferToBuffer(graph.nodes, 0, readback, nodesOffset, graph.nodes.size);
@@ -7429,6 +7479,16 @@ export class WebGPUOctreeProjection {
       redistanceDistanceBOffset, phi.redistanceDistanceB.size);
     encoder.copyBufferToBuffer(phi.receipts, 0, readback,
       phiReceiptsOffset, phi.receipts.size);
+    encoder.copyBufferToBuffer(candidateGraph.control, 0, readback,
+      candidateGraphControlOffset, candidateGraph.control.size);
+    encoder.copyBufferToBuffer(candidateGraph.nodes, 0, readback,
+      candidateNodesOffset, candidateGraph.nodes.size);
+    encoder.copyBufferToBuffer(candidateGraph.phi, 0, readback,
+      candidateNodalPhiOffset, candidateGraph.phi.size);
+    encoder.copyBufferToBuffer(mass.acceptedMass, 0, readback,
+      acceptedMassOffset, mass.acceptedMass.size);
+    encoder.copyBufferToBuffer(mass.leafRhoPhi, 0, readback,
+      leafRhoPhiOffset, mass.leafRhoPhi.size);
     this.device.queue.submit([encoder.finish()]);
     try {
       await readback.mapAsync(GPUMapMode.READ);
@@ -7446,7 +7506,7 @@ export class WebGPUOctreeProjection {
       const acceptedStencilControl = Uint32Array.from(new Uint32Array(mapped,
         stencilControlOffset, stencil.control.size / 4));
       const candidateAuthority = Uint32Array.from(new Uint32Array(mapped,
-        candidateAuthorityControlOffset, candidate.authorityControl.size / 4));
+        candidateAuthorityControlOffset, candidateVelocity.authorityControl.size / 4));
       const leafCount = Math.min(graphControl[1] ?? 0, graph.leafCapacity);
       const nodeCount = Math.min(graphControl[2] ?? 0, graph.nodeCapacity);
       const stencilWords = Math.min(stencil.records.size / 4, 3 * 36 * nodeCount);
@@ -7463,13 +7523,25 @@ export class WebGPUOctreeProjection {
       const acceptedStencils = Uint32Array.from(new Uint32Array(mapped,
         stencilOffset, stencilWords));
       const candidateFaceCount = Math.min(candidateAuthority[2] ?? 0,
-        candidate.faceGeometry.size / 16, candidate.extendedVelocity.size / 4);
+        candidateVelocity.faceGeometry.size / 16, candidateVelocity.extendedVelocity.size / 4);
       const candidateGeometry = Uint32Array.from(new Uint32Array(mapped,
         candidateFaceGeometryOffset, 4 * candidateFaceCount));
       const candidateExtended = Uint32Array.from(new Uint32Array(mapped,
         candidateExtendedFaceVelocityOffset, candidateFaceCount));
-      const candidateVelocity = Uint32Array.from(new Uint32Array(mapped,
-        candidateNodalVelocityOffset, 8 * nodeCount));
+      const candidateGraphControl = Uint32Array.from(new Uint32Array(mapped,
+        candidateGraphControlOffset, LOSASSO_SURFACE_GRAPH_CONTROL_WORDS));
+      const candidateNodeCount = Math.min(candidateGraphControl[2] ?? 0,
+        candidateGraph.nodeCapacity);
+      const candidateNodalVelocity = Uint32Array.from(new Uint32Array(mapped,
+        candidateNodalVelocityOffset, 8 * candidateNodeCount));
+      const candidateNodes = Uint32Array.from(new Uint32Array(mapped,
+        candidateNodesOffset, 4 * candidateNodeCount));
+      const candidateNodalPhi = Uint32Array.from(new Uint32Array(mapped,
+        candidateNodalPhiOffset, 2 * candidateNodeCount));
+      const acceptedMass = Float32Array.from(new Float32Array(mapped,
+        acceptedMassOffset, leafCount));
+      const leafRhoPhi = Float32Array.from(new Float32Array(mapped,
+        leafRhoPhiOffset, 4 * leafCount));
       const leaves = Uint32Array.from(new Uint32Array(mapped, leavesOffset, 16 * leafCount));
       const nodalPhi = Uint32Array.from(new Uint32Array(mapped, nodalPhiOffset, 2 * nodeCount));
       const nodes = Uint32Array.from(new Uint32Array(mapped, nodesOffset, 4 * nodeCount));
@@ -7501,7 +7573,9 @@ export class WebGPUOctreeProjection {
         candidateAuthorityControl: candidateAuthority,
         candidateFaceGeometry: candidateGeometry,
         candidateExtendedFaceVelocity: candidateExtended,
-        candidateNodalVelocity: candidateVelocity,
+        candidateNodalVelocity,
+        candidateGraphControl, candidateNodes, candidateNodalPhi,
+        acceptedMass, leafRhoPhi,
         graphControl, phiControl, leaves, nodalPhi, nodes, constraints,
         adjacency, nodalVelocity, nodeValidity, renderer, transportBandMask,
         redistanceDistanceA, redistanceDistanceB, phiReceipts,
@@ -8200,13 +8274,38 @@ fn refinementRegionFloor(origin: vec3u, size: u32) -> u32 {
   }
   return floorSize;
 }
-// Whether an authored region forbids splitting this candidate any further.
+// The finest authored ceiling that contains this candidate. Zero means no
+// region constrains how coarse it may remain. Overlapping ceilings choose the
+// finest value because every containing box must be satisfied.
+fn refinementRegionCeiling(origin: vec3u, size: u32) -> u32 {
+  let count = min(params.refinementRegionControl.x, 8u);
+  var ceilingSize = 0u;
+  let low = vec3f(origin);
+  let high = vec3f(origin + vec3u(size));
+  for (var index = 0u; index < count; index += 1u) {
+    let lo = params.refinementRegions[2u * index];
+    let hi = params.refinementRegions[2u * index + 1u];
+    let authored = u32(hi.w);
+    if (authored > 0u && all(low >= lo.xyz) && all(high <= hi.xyz)) {
+      if (ceilingSize == 0u) {
+        ceilingSize = authored;
+      } else {
+        ceilingSize = min(ceilingSize, authored);
+      }
+    }
+  }
+  return ceilingSize;
+}
+// Whether an authored largest-cell bound requires this candidate to split.
+fn refinementRegionForcesSplit(origin: vec3u, size: u32) -> bool {
+  let ceilingSize = refinementRegionCeiling(origin, size);
+  return ceilingSize > 0u && size > ceilingSize;
+}
+// Whether an authored smallest-cell bound forbids splitting this candidate.
 //
-// The one place regions enter the solver. It only ever turns a "refine" into a
-// "hold", so a scene with no regions is bit-identical and no region can invent
-// resolution the evidence did not ask for. Strict 2:1 grading is downstream of
-// this and still splits a held leaf whose neighbour is finer -- a region caps
-// refinement, it does not pin a cell size.
+// Strict 2:1 grading is downstream of this and still splits a held leaf whose
+// neighbour is finer. The optional ceiling above deliberately does invent
+// refinement: equal bounds pin fully-contained leaves to one dyadic tier.
 fn refinementRegionHoldsLeaf(origin: vec3u, size: u32) -> bool {
   return size <= refinementRegionFloor(origin, size);
 }
@@ -8262,6 +8361,74 @@ fn losassoArenaLookup(cell:u32,size:u32)->u32{
    if(key==0u){return 0xffffffffu;}
    if(key==cell+1u&&coarseWord(at+1u)==size&&coarseWord(at+3u)==hash){return coarseWord(at+2u)-1u;}}
   return 0xffffffffu;
+}
+const LOSASSO_MASS_EVIDENCE:u32=0x40000000u;
+struct LosassoMassLeaf{status:u32,originSpan:vec4u,units:u32}
+fn losassoMassEvidenceAuthority()->bool{
+  if(!losassoCoarseArenaAuthority()||coarseWord(3u)!=0u
+      ||coarseWord(12u)==0u||coarseWord(12u)!=coarseWord(14u)){return false;}
+  let first=coarseWord(9u);
+  return first+7u<arrayLength(&bulkWorklist)
+    &&(coarseWord(first+5u)&LOSASSO_MASS_EVIDENCE)!=0u;
+}
+fn losassoMassLeafAt(q:vec3u)->LosassoMassLeaf{
+  var span=1u;let maximumLeaf=coarseWord(4u);
+  loop{
+    let origin=(q/vec3u(span))*vec3u(span);
+    let cell=origin.x+dims().x*(origin.y+dims().y*origin.z);
+    let row=losassoArenaLookup(cell,span);
+    if(row!=0xffffffffu&&row<coarseWord(2u)){
+      let entry=coarseWord(9u)+8u*row;
+      let flags=coarseWord(entry+5u);
+      let validEntry=entry+7u<arrayLength(&bulkWorklist)
+        &&coarseWord(entry)==cell+1u&&coarseWord(entry+1u)==span
+        &&(flags&3u)==3u;
+      if(validEntry){return LosassoMassLeaf(1u,vec4u(origin,span),coarseWord(entry+7u));}
+      return LosassoMassLeaf(2u,vec4u(0u),0u);
+    }
+    if(span>=maximumLeaf){break;}span*=2u;
+  }
+  // A live sparse arena defines an absent owner as exact zero-mass air.
+  return LosassoMassLeaf(0u,vec4u(0u),0u);
+}
+// Evaluate the mass that the existing fixed-point overlap handoff will assign
+// to this candidate owner. The DFS order is canonical, all accumulation is
+// integer, and the strict half-volume comparison is therefore D4-stable.
+fn losassoPressureMassWet(origin:vec3u,size:u32)->bool{
+  if(!losassoMassEvidenceAuthority()||size==0u){return false;}
+  let candidateCells=size*size*size;
+  // The surface-mass u32 ABI supports every production factor-one leaf (<=32).
+  if(candidateCells==0u||candidateCells>32768u){return false;}
+  let threshold=candidateCells*32768u;var total=0u;
+  var stack:array<vec4u,80>;var top=1u;stack[0]=vec4u(origin,size);
+  loop{
+    if(top==0u){break;}top-=1u;let region=stack[top];
+    let source=losassoMassLeafAt(region.xyz);
+    if(source.status==0u){continue;}
+    if(source.status!=1u){return false;}
+    let regionEnd=region.xyz+vec3u(region.w);
+    let sourceEnd=source.originSpan.xyz+vec3u(source.originSpan.w);
+    if(all(region.xyz>=source.originSpan.xyz)&&all(regionEnd<=sourceEnd)){
+      let sourceSpan=source.originSpan.w;
+      let sourceCells=sourceSpan*sourceSpan*sourceSpan;
+      let regionCells=region.w*region.w*region.w;
+      let quotient=source.units/sourceCells;let remainder=source.units%sourceCells;
+      let contribution=quotient*regionCells
+        +(remainder*regionCells+sourceCells/2u)/sourceCells;
+      if(contribution>threshold-total){return true;}total+=contribution;continue;
+    }
+    // The accepted owner at this origin is finer than the candidate region.
+    // Split in the same child order and with the same bounded stack as mass
+    // handoff; malformed/non-dyadic coverage fails closed.
+    if(source.originSpan.w>=region.w||region.w<2u||(region.w&1u)!=0u||top+8u>80u){return false;}
+    let half=region.w/2u;
+    for(var child=0u;child<8u;child+=1u){
+      stack[top+child]=vec4u(region.xyz+half*vec3u(child&1u,
+        (child>>1u)&1u,(child>>2u)&1u),half);
+    }
+    top+=8u;
+  }
+  return total>threshold;
 }
 fn coarseOrderedSum8(input:array<f32,8>)->f32{
   var terms=input;
@@ -9260,7 +9427,15 @@ fn buildDirtyFrontierDelta() {
     // decision fingerprints. A membership-only shortcut is not sound here:
     // free-surface fractions and Section 4 coefficients can change while row
     // identity remains stable.
-    let wet = (changed & TILE_SIGNATURE_FRONTIER_CHANGED) != 0u;
+    // Factor-one adaptive phi is a field over the complete accepted graph,
+    // while the pressure frontier is only its currently-wet subset. Revisit
+    // every resident tile when publishing that subset: its ghost-fluid face
+    // fractions change continuously as phi moves, even before an owner-centre
+    // sign changes. The binary wet signature cannot prove those coefficients
+    // unchanged, and carrying their old publication pins the advancing front.
+    // Structural refinement still retains its exact bounded delta above.
+    let wet = (changed & TILE_SIGNATURE_FRONTIER_CHANGED) != 0u
+      || (adaptiveCoarseSurface != 0u && fineSummaryFactor == 1u);
     if (structural || wet) {
       if (dirtyCount >= capacity) {
         rejectDirtyAuthority(DIRTY_FAILURE_FRONTIER_OVERFLOW, 2u, slot, tileIndex,
@@ -9704,14 +9879,24 @@ fn coldAuthoredSurfaceInterval(origin: vec3u, size: u32) -> ColdAuthoredSurfaceI
 }
 
 fn pressureRefinementEvidence(origin: vec3u, size: u32) -> bool {
-  // Before every other test, including the inflow's. An authored region is a
-  // statement about this box that outranks the evidence found in it -- that is
-  // the whole instrument. Placing it here rather than only in
+  // Before every other test, including the inflow's. Authored bounds are a
+  // statement about this box that outranks the evidence found in it. The
+  // largest-cell bound wins if overlapping boxes state conflicting bounds;
+  // requiring resolution is the conservative outcome. Placing these here and
+  // not only in
   // \`leafNeedsRefinement\` also puts it in the retained tile signature, so
   // drawing or retuning a region dirties exactly the tiles it covers and the
   // delta topology path rebuilds them on the next epoch.
+  if (refinementRegionForcesSplit(origin, size)) { return true; }
   if (refinementRegionHoldsLeaf(origin, size)) { return false; }
   if (inflowProtectionIntersects(origin, size)) { return true; }
+  // Ando--Batty Sec. 5 mirrors exterior-domain samples so interpolation next
+  // to a tank wall remains the regular trilinear case. Keep the authored wall
+  // strip regular at factor one: allowing a rho threshold to choose different
+  // T-junctions on opposing walls turns sub-ulp surface noise into a different
+  // pressure graph precisely when the first wall climb begins.
+  if (adaptiveCoarseSurface != 0u && fineSummaryFactor == 1u && size > 1u
+      && powerClosedWallStripIntersects(origin, size)) { return true; }
   // Factor one has no finer surface lattice from which to recover outward
   // motion. Keep both wet and dry children of each represented B4 block at
   // unit pressure resolution; this is the coarse air-side support halo, not a
@@ -9942,10 +10127,9 @@ fn boundaryLiquidWouldRefine(interval: BoundaryLiquidPhi, protection: f32) -> bo
 }
 
 fn leafNeedsRefinement(origin: vec3u, size: u32) -> bool {
-  // A region caps everything the gate can conclude, not merely the interface
-  // evidence: the closed-wall strip and the adaptivity-zero override below both
-  // return true unconditionally, and a box the user drew over a wall meaning
-  // "stop resolving here" would otherwise do nothing there.
+  // Region bounds outrank every other conclusion of the gate. Force is checked
+  // first so the conservative, finer request wins across overlapping regions.
+  if (refinementRegionForcesSplit(origin, size)) { return true; }
   if (refinementRegionHoldsLeaf(origin, size)) { return false; }
   if (pressureRefinementEvidence(origin, size)) { return true; }
   let adaptivity = f32(params.control.x) / 1000.0;
@@ -10356,11 +10540,12 @@ fn refineCoarseBlock(origin: vec3u, lid: u32) {
       boundaryDecision = false;
     }
     let pressureEvidence = pressureRefinementEvidence(origin, size);
-    // Same cap as the fine path in leafNeedsRefinement. The coarse path is the
-    // one that matters most to a region: a floor of 16 or 32 is only ever
-    // reached here, because the fine kernel never sees a leaf that large.
-    let decision = !refinementRegionHoldsLeaf(origin, size)
-      && (pressureEvidence || adaptivity <= 0.0 || boundaryDecision);
+    // Same bounds as the fine path in leafNeedsRefinement. The coarse path is
+    // the one that matters most to a region: large floors and every forced
+    // split above the fine-kernel cutoff are reached here.
+    let forcedByRegion = refinementRegionForcesSplit(origin, size);
+    let decision = forcedByRegion || (!refinementRegionHoldsLeaf(origin, size)
+      && (pressureEvidence || adaptivity <= 0.0 || boundaryDecision));
     atomicStore(&refineDecision, select(0u, 1u, decision));
   }
   workgroupBarrier();
@@ -10610,7 +10795,13 @@ fn currentPressureOwnerWet(owner: Owner) -> bool {
   // Neither bootstrap authority may be second-guessed by a fine summary that
   // does not exist yet at t=0.
   if(bootstrapPhiEnabled()){return wet;}
-  if(fine.found){
+  // After bootstrap, factor-one frontier membership comes from the accepted
+  // conservative-mass generation. Candidate mass does not exist until after
+  // frontier emission, so aggregate the accepted arena with the exact overlap
+  // rule used by the subsequent handoff.
+  if(adaptiveCoarseSurface!=0u&&fineSummaryFactor==1u&&losassoMassEvidenceAuthority()){
+    wet=losassoPressureMassWet(origin,owner.size);
+  }else if(fine.found){
     if(fine.exactCellValid){wet=fine.exactCellNegative;}
     else if(fine.centerValid){wet=fine.centerPhi<0.0;}
     // The factor-one B4 summary carries the exact phase of every dense sample.

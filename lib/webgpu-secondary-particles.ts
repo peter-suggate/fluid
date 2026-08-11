@@ -533,20 +533,16 @@ fn ellipsoidInterface(input: EllipsoidVertex, back: bool) -> InterfaceFragment {
  * absorption without the compositor being able to tell it apart. The simulation
  * half — this class — is never instantiated by anything, and the shipped
  * solver's `secondaryParticles` accessor returns `undefined`
- * (`lib/webgpu-uniform-eulerian.ts`). Giving it an owner is not a wiring job,
+ * (`lib/webgpu-octree-eulerian.ts`). Giving it an owner is not a wiring job,
  * and the reason is worth writing down rather than rediscovering.
  *
  * **The blocker is the sampling contract, not the ownership.**
  * `SecondaryParticleSamplingSource` asks for three *dense* lattice textures:
- * phi, MAC velocity, and column bases. The only interactive GPU method is
- * `octree` (`lib/methods/index.ts`), it always passes an `octree` option, and
- * `WebGPUUniformEulerianSolver`'s constructor reads
- *
- *     this.hostAllocation = options.octree ? undefined : planUniformHostAllocation(...)
- *
- * so on every shipped scene the dense velocity textures, the dense volume
- * textures and the column-base textures are *never allocated*. `velocityTexture`
- * and `columnBaseTexture` correspondingly return `undefined`. The one dense
+ * phi, MAC velocity, and column bases. The adaptive host deliberately owns no
+ * dense compatibility graph; `velocityTexture` and `columnBaseTexture` return
+ * `undefined`. The standalone uniform reference does own dense fields, but it
+ * is an isolated comparison method and does not opt into secondary particles.
+ * The one dense
  * field that survives is `levelSetTexture`, which the octree itself documents as
  * "presentation-only ... the sparse octree solver never samples it" and which
  * `releaseDenseBootstrapPhi` frees outright once the compact path is

@@ -12,7 +12,7 @@ import {
   physicsLogicalActivityCaptureCapacity,
   physicsPhaseBoundaryTimeProjection,
   validateGPUPhysicsLogicalActivityCapture,
-} from "../lib/webgpu-uniform-eulerian";
+} from "../lib/webgpu-octree-eulerian";
 import { stableGPULogicalActivityId } from "../lib/gpu-logical-activity-adoption";
 import type { GPULogicalActivityEvent } from "../lib/gpu-logical-activity";
 import type { PerformanceTrace } from "../lib/performance-trace";
@@ -272,7 +272,7 @@ test("whole-frame validation requires ordered sentinels, no overflow, registered
 });
 
 test("sampled physics owns one submission bracketed by logical frame sentinels and readback", () => {
-  const source = readFileSync(new URL("../lib/webgpu-uniform-eulerian.ts", import.meta.url), "utf8");
+  const source = readFileSync(new URL("../lib/webgpu-octree-eulerian.ts", import.meta.url), "utf8");
   const advanceStart = source.indexOf("  advanceTo(time_s: number");
   const advanceEnd = source.indexOf("\n  async readStats()", advanceStart);
   assert.ok(advanceStart >= 0 && advanceEnd > advanceStart);

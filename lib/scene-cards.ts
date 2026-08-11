@@ -51,10 +51,9 @@ export function starterSceneCards(): readonly SceneCard[] {
 /**
  * One stored entry as a card.
  *
- * A saved document records the scene it was authored from but not a camera, so
- * the framing and the solver profile come from that definition when this build
- * still has it. Dropping the profile is how a saved validation scene used to
- * end up running under whatever method happened to be selected.
+ * A saved document records the active solver profile and the scene it was
+ * authored from but not a camera. Older entries fall back to the originating
+ * definition's solver profile when this build still has it.
  *
  * Separate from the list below because the autosaved working document is a
  * stored entry that the shelf must not offer and *Continue* must still open.
@@ -72,7 +71,7 @@ export function savedSceneCard(entry: SceneLibraryEntry): SceneCard {
       scene: loadSceneFromLibrary(entry),
       presetId: entry.presetId,
       camera: origin ? sceneDefinitionCamera(origin) : undefined,
-      methodProfile: origin?.methodProfile,
+      methodProfile: entry.methodProfile ?? origin?.methodProfile,
     }),
   };
 }

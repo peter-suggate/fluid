@@ -2,6 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { WebGPUOctreeLosassoCoarseBackend } from "../lib/webgpu-octree-losasso-backend";
+import {
+  octreeLosassoAdaptivePhiRedistanceInitializeWGSL,
+  octreeLosassoAdaptivePhiWorklistReachWGSL,
+} from "../lib/webgpu-octree-losasso-adaptive-phi.wgsl";
+import { octreeLosassoAdaptiveVelocityWGSL }
+  from "../lib/webgpu-octree-losasso-adaptive-velocity.wgsl";
 import { WebGPUOctreeProjection } from "../lib/webgpu-octree";
 
 const compact = (value: { toString(): string }): string =>
@@ -38,13 +44,23 @@ test("GPU exact-row identity receipts are counted once per accepted epoch", () =
     "repeated diagnostics for one accepted epoch must not inflate the identity count");
 });
 
-test("same-topology surface advance publishes a coherent two-bank scalar tuple", () => {
+test("same-topology surface advance transports phi and publishes a coherent two-bank tuple", () => {
   const advance = compact(WebGPUOctreeLosassoCoarseBackend.prototype.encodeAdaptiveSurfaceAdvance);
   const advection = compact(WebGPUOctreeLosassoCoarseBackend.prototype.encodeAdvection);
   assert.match(advance,
     /adaptiveVelocity\.encodeAcceptedRetainedFields\(broker\)[^]*adaptivePhi\.encodeAcceptedFieldClockSync\(broker\)/,
-    "every rho=.5 publication must retain complete velocity receipts and a coherent graph clock");
-  assert.doesNotMatch(advance, /dt_s===0|adaptiveVelocity\.encodeAcceptedField\(broker\)/,
+    "every transported-phi publication must retain complete velocity receipts and a coherent graph clock");
+  assert.match(advance,
+    /adaptivePhi\.encodeAcceptedAdvance\([^]*adaptiveVelocity\.transportSource\)[^]*adaptivePhi\.encodeAcceptedFinalize\(broker\)/,
+    "accepted phi must follow the paper's characteristic transport and redistance path");
+  assert.match(advance,
+    /adaptiveMass\.encodeDerivedOutputs\([^]*"preserve-and-validate"\)/,
+    "conservative mass outputs must not reconstruct sub-cell phi from one coarse-leaf scalar");
+  assert.doesNotMatch(advance, /encodeAcceptedExternalPhiPublication/,
+    "mass-derived pseudo-phi must not replace transported accepted phi");
+  assert.match(advance, /dt_s===0[^]*encodeAcceptedDerivations\(broker\)/,
+    "the paused construction frame must retain its already-redistanced bootstrap tuple");
+  assert.doesNotMatch(advance, /adaptiveVelocity\.encodeAcceptedField\(broker\)/,
     "positive advances must not leave the accepted predictor bank temporarily stale");
   assert.doesNotMatch(advance, /encodePredictorField/,
     "the positive path must defer its predictor rebuild to S1a");
@@ -62,4 +78,26 @@ test("candidate closure compiles topology-only velocity stencils once", () => {
     "four value-closure rounds must share the immutable topology/geometry lookup");
   assert.doesNotMatch(candidate, /encodeCandidateFields\(broker\)/,
     "the combined standalone encoder would recompile stencils inside every closure round");
+});
+
+test("adaptive phi accepts geometric-only AMR incidences but requires a real corner membership", () => {
+  for (const shader of [octreeLosassoAdaptivePhiWorklistReachWGSL,
+    octreeLosassoAdaptivePhiRedistanceInitializeWGSL]) {
+    assert.match(shader, /if\(localCorner==INVALID\)\{continue;\}/,
+      "a nonconforming coarse leaf may geometrically contain a fine or hanging node without using it as a corner");
+    assert.match(shader, /if\(memberships==0u\)\{atomicOr\(&control\[12\],ERR_GRAPH\);\}/,
+      "a node absent from every incident leaf corner remains a hard graph error");
+  }
+});
+
+test("Losasso velocity extrapolation keeps adjacency in graph-slot space", () => {
+  assert.match(octreeLosassoAdaptiveVelocityWGSL,
+    /if\(neighbor<nodes\)\{direct=neighbor;\}/,
+    "compiled adjacency must remain a graph slot for phi lookup and constrained-node resolution");
+  assert.match(octreeLosassoAdaptiveVelocityWGSL,
+    /avSeedAppendGraph\(avAdjacency\(packet,d\)\)/,
+    "frontier seeding must map each graph-slot neighbour exactly once");
+  assert.doesNotMatch(octreeLosassoAdaptiveVelocityWGSL,
+    /direct=avTopologyLoad\(map\+neighbor\)/,
+    "storing packet ids would make propagation map neighbours twice and violate Losasso section 6 extrapolation");
 });

@@ -42,6 +42,7 @@
  *   FLUID_SURFACE_BAND       live surface half-thickness (0=AUTO)
  *   FLUID_FINEST_SURFACE_CELL  live factor-one cut floor (1 or 2)
  *   FLUID_REFINEMENT_REGION_FLOOR  floor for an aligned region over the far half
+ *   FLUID_REFINEMENT_REGION_CEILING optional largest cell for that region
  *   FLUID_REFINEMENT_REGION_SCOPE  `far-half` (default) or `full`
  *   FLUID_WALL_BAND          live closed-wall look-ahead (1 through 4)
  *   FLUID_TOPOLOGY_CADENCE_ADVANCES  accepted advances per topology rebuild (1..8)
@@ -676,12 +677,15 @@ function surfaceShape(
   }
   let interiorRidgeCells = 0;
   let interiorRidgeAtX = -1;
-  const leftmost = profileX.find((value) => Number.isFinite(value)) ?? 0;
-  for (let x = 0; x < nx; x += 1) {
+  let runningTrough = Number.POSITIVE_INFINITY;
+  // The last x column is the impact wall. A rise there is the desired splash,
+  // not a standing interior curtain; wall climb has its own physics gate.
+  for (let x = 0; x < nx - 1; x += 1) {
     const value = profileX[x]!;
     if (!Number.isFinite(value)) continue;
-    if (value - leftmost > interiorRidgeCells) {
-      interiorRidgeCells = Number((value - leftmost).toFixed(4));
+    runningTrough = Math.min(runningTrough, value);
+    if (value - runningTrough > interiorRidgeCells) {
+      interiorRidgeCells = Number((value - runningTrough).toFixed(4));
       interiorRidgeAtX = x;
     }
   }
@@ -845,10 +849,15 @@ try {
   scene.numerics.fixedDt_s = dt;
   scene.numerics.maxDt_s = dt;
   const refinementRegionFloor = Number(process.env.FLUID_REFINEMENT_REGION_FLOOR ?? 0);
+  const refinementRegionCeiling = Number(process.env.FLUID_REFINEMENT_REGION_CEILING ?? 0);
   if (refinementRegionFloor > 0) {
     assert.ok(Number.isSafeInteger(refinementRegionFloor)
       && (refinementRegionFloor & (refinementRegionFloor - 1)) === 0,
       "FLUID_REFINEMENT_REGION_FLOOR must be a positive power of two");
+    assert.ok(refinementRegionCeiling === 0 || (Number.isSafeInteger(refinementRegionCeiling)
+      && (refinementRegionCeiling & (refinementRegionCeiling - 1)) === 0
+      && refinementRegionCeiling >= refinementRegionFloor),
+    "FLUID_REFINEMENT_REGION_CEILING must be a power of two no smaller than the floor");
     const nx = Math.round(scene.container.width_m / scene.voxelDomain.finestCellSize_m);
     const ny = Math.round(scene.container.height_m / scene.voxelDomain.finestCellSize_m);
     const nz = Math.round(scene.container.depth_m / scene.voxelDomain.finestCellSize_m);
@@ -868,6 +877,8 @@ try {
       id: `dawn-${refinementRegionScope}`,
       rule: "minimum-cell-size",
       minimumCellSize_cells: refinementRegionFloor,
+      ...(refinementRegionCeiling > 0
+        ? { maximumCellSize_cells: refinementRegionCeiling } : {}),
       min_m: { x: -0.5 * scene.container.width_m + alignedMinX * h, y: 0,
         z: -0.5 * scene.container.depth_m },
       max_m: { x: -0.5 * scene.container.width_m + alignedMaxX * h,
@@ -956,9 +967,9 @@ try {
         candidateTopologyCapacities?: Readonly<Record<string, number>>;
         adaptiveSurfaceGraphSources?: {
           accepted: { control: GPUBuffer; leaves: GPUBuffer; nodes: GPUBuffer;
-            phi: GPUBuffer; surfaceMass: GPUBuffer };
+            phi: GPUBuffer; surfaceMass: GPUBuffer; nodalVelocity: GPUBuffer };
           candidate: { control: GPUBuffer; leaves: GPUBuffer; nodes: GPUBuffer;
-            phi: GPUBuffer; surfaceMass: GPUBuffer };
+            phi: GPUBuffer; surfaceMass: GPUBuffer; nodalVelocity: GPUBuffer };
         };
         extensionBand?: { source?: { faceMetrics?: GPUBuffer } };
         adaptivePhiSource?: { receipts: GPUBuffer };
@@ -1186,6 +1197,7 @@ try {
     let ceilingWetLeaves: readonly Record<string, unknown>[] | undefined;
     let ceilingTransferTrace: readonly Record<string, unknown>[] | undefined;
     let reconstructionMismatchNeighborhood: Record<string, unknown> | undefined;
+    let adaptiveVelocityProfile: readonly Record<string, number>[] | undefined;
     const acceptedMassGraph = projection?.losassoBackend
       ?.adaptiveSurfaceGraphSources?.accepted;
     if (acceptedMassGraph) {
@@ -1309,6 +1321,46 @@ try {
           }
         }
       }
+    }
+    if (process.env.FLUID_VELOCITY_PROFILE === "1" && acceptedMassGraph) {
+      const control = await readControlWords(device, acceptedMassGraph.control, 32);
+      const nodeCount = Math.min(control?.[2] ?? 0,
+        Math.floor(acceptedMassGraph.nodes.size / 16),
+        Math.floor(acceptedMassGraph.phi.size / 8),
+        Math.floor(acceptedMassGraph.nodalVelocity.size / 32));
+      const [nodeBytes, phiBytes, velocityBytes] = await Promise.all([
+        readBufferBinding(device, { buffer: acceptedMassGraph.nodes }, nodeCount * 16),
+        readBufferBinding(device, { buffer: acceptedMassGraph.phi }, nodeCount * 8),
+        readBufferBinding(device, { buffer: acceptedMassGraph.nodalVelocity }, nodeCount * 32),
+      ]);
+      const nodes = new Uint32Array(nodeBytes.buffer, nodeBytes.byteOffset,
+        nodeBytes.byteLength / 4);
+      const phi = new Float32Array(phiBytes.buffer, phiBytes.byteOffset,
+        phiBytes.byteLength / 4);
+      const velocityWords = new Uint32Array(velocityBytes.buffer, velocityBytes.byteOffset,
+        velocityBytes.byteLength / 4);
+      const velocity = new Float32Array(velocityBytes.buffer, velocityBytes.byteOffset,
+        velocityBytes.byteLength / 4);
+      const bins = Array.from({ length: dimensions[0] + 1 }, () => ({
+        count: 0, sumX: 0, minimumX: Infinity, maximumX: -Infinity,
+      }));
+      for (let node = 0; node < nodeCount; node += 1) {
+        if (Math.min(Math.abs(phi[2 * node] ?? Infinity),
+          Math.abs(phi[2 * node + 1] ?? Infinity)) > 2 * shape.cellWidth) continue;
+        const mask = velocityWords[8 * node + 3] ?? 0;
+        const vx = velocity[8 * node] ?? Number.NaN;
+        if ((mask & 7) !== 7 || !Number.isFinite(vx)) continue;
+        const lattice = nodes[4 * node] ?? 0;
+        const x = lattice % (dimensions[0] + 1);
+        const bin = bins[x]!;
+        bin.count += 1; bin.sumX += vx;
+        bin.minimumX = Math.min(bin.minimumX, vx);
+        bin.maximumX = Math.max(bin.maximumX, vx);
+      }
+      adaptiveVelocityProfile = bins.map((bin, x) => ({ x, count: bin.count,
+        meanX: bin.count ? Number((bin.sumX / bin.count).toFixed(5)) : Number.NaN,
+        minimumX: bin.count ? Number(bin.minimumX.toFixed(5)) : Number.NaN,
+        maximumX: bin.count ? Number(bin.maximumX.toFixed(5)) : Number.NaN }));
     }
     if (adaptiveMassReceipt
       && adaptiveMassReceipt.firstReconstructionSignMismatchItem !== 0xffff_ffff
@@ -1485,6 +1537,7 @@ try {
       adaptivePhiReceipt,
       adaptiveMassReceipt,
       adaptiveMassDensity,
+      adaptiveVelocityProfile,
       massSurfaceConnectivity,
       massSurfaceQuadrature,
       massVisibleVolume_m3: massVisibleVolumeCells === undefined
@@ -1586,9 +1639,11 @@ try {
       reconstructedVisibleVolume_m3: sample.reconstructedVisibleVolume_m3,
       reconstructedVisibleVolumeDelta_m3: sample.reconstructedVisibleVolumeDelta_m3,
       reconstructedVisibleVolumeJumpFraction: sample.reconstructedVisibleVolumeJumpFraction,
-      publishedVisibleVolume_m3: (sample.zeroSetQuadrature as
-        SurfaceShape["zeroSetQuadrature"]).volumeCells * dimensions.reduce(
-        (volume, _dimension) => volume * (sample.cellWidth as number), 1),
+      publishedVisibleVolume_m3: sample.zeroSetQuadrature === undefined
+        ? undefined
+        : (sample.zeroSetQuadrature as SurfaceShape["zeroSetQuadrature"]).volumeCells
+          * dimensions.reduce(
+            (volume, _dimension) => volume * (sample.cellWidth as number), 1),
       wallProximity: sample.massSurfaceWallProximity,
       compressedExcessMass_m3: (sample.adaptiveMassDensity as
         { compressionExcessMass_m3?: number } | undefined)?.compressionExcessMass_m3,
@@ -1638,6 +1693,7 @@ try {
       wetConnectivity: sample.wetConnectivity,
       profileX: sample.profileX,
       interiorRidgeCells: sample.interiorRidgeCells,
+      interiorRidgeAtX: sample.interiorRidgeAtX,
       measuredVolume_m3: phiReceipt?.measuredVolume_m3,
       targetVolume_m3: phiReceipt?.targetVolume_m3,
       acceptedAdvanceValid: phiReceipt?.acceptedAdvanceValid,
@@ -1653,6 +1709,7 @@ try {
       reconstructionMeasuredUnits: massReceipt?.reconstructionMeasuredUnits,
       reconstructionSignMismatches: massReceipt?.reconstructionSignMismatches,
       adaptiveMassDensity: sample.adaptiveMassDensity,
+      adaptiveVelocityProfile: sample.adaptiveVelocityProfile,
       massSurfaceConnectivity: sample.massSurfaceConnectivity,
       massSurfaceQuadrature: sample.massSurfaceQuadrature,
       massVisibleVolume_m3: sample.massVisibleVolume_m3,
@@ -1697,6 +1754,7 @@ try {
   console.log(JSON.stringify({
     phase: "dam-surface-shape", scene: sceneId, dt, dimensions, runtimeTopologyDials,
     refinementRegionFloor: refinementRegionFloor || undefined,
+    refinementRegionCeiling: refinementRegionCeiling || undefined,
     validationErrors, wallVolumeSummary, samples: reportedSamples,
   }, null, compact ? undefined : 1));
   device.destroy();

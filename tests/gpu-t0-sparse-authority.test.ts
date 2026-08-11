@@ -4,7 +4,7 @@ import {
   initialGlobalFineAuthorityReadiness,
   initialPowerPressureReadiness,
   type InitialGlobalFineAuthorityDiagnostics,
-} from "../lib/webgpu-uniform-eulerian";
+} from "../lib/webgpu-octree-eulerian";
 import { OCTREE_POWER_COARSE_LEVELSET_VALID } from "../lib/webgpu-octree-power-coarse-levelset";
 
 const VALID = 0x8000_0000;

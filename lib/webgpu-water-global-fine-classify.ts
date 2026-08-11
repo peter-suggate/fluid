@@ -71,7 +71,7 @@ fn pageLookup(key:u32)->u32{
     &&metadata[base]==id&&metadata[base+1u]==key&&metadata[base+2u]==params.table.w);
 }
 fn coarsePhi(q:vec3i)->f32{return sampleCoarseOctreePhi(params.settings.xyz+(vec3f(q)+vec3f(0.5))*params.settings.w);}
-fn adaptiveNodalPublication()->bool{let count=min(powerCoarseSamples.rowCount,arrayLength(&powerCoarseSamples.entries));return count>0u&&(powerCoarseSamples.entries[0].flags&0x10000000u)!=0u;}
+fn adaptiveNodalPublication()->bool{let count=min(powerCoarseSamples.rowCount,arrayLength(&powerCoarseSamples.entries));return count>0u&&(powerCoarseSamples.entries[0].flags&0x18000000u)==0x10000000u;}
 fn finite(value:f32)->bool{return value==value&&abs(value)<3.402823e38;}
 fn phi(qi:vec3i)->f32{
   if(any(qi<vec3i(0))||any(qi>=vec3i(params.sampleDimensions))){return coarsePhi(qi);}

@@ -11,7 +11,11 @@ import {
 } from "../lib/scene-cards";
 import { sceneDefinitionCamera } from "../lib/scene-definition";
 import type { SceneLibraryEntry } from "../lib/scene-library";
-import { getSceneDefinition, getScenePreset } from "../lib/scenes";
+import {
+  getSceneDefinition,
+  getScenePreset,
+  POWER2017_FACTOR4_BENCHMARK_METHOD_PROFILE,
+} from "../lib/scenes";
 
 function entry(patch: Partial<SceneLibraryEntry> = {}): SceneLibraryEntry {
   return {
@@ -85,6 +89,14 @@ test("a saved scene reopens with the framing and the profile it was authored und
   assert.deepEqual(opening.methodProfile, validation.methodProfile);
   assert.deepEqual(opening.camera, sceneDefinitionCamera(validation));
   assert.equal(opening.presetId, validation.id);
+});
+
+test("a saved scene's selected method profile overrides its origin profile", () => {
+  const [card] = savedSceneCards([entry({
+    presetId: "symmetric-expansion",
+    methodProfile: POWER2017_FACTOR4_BENCHMARK_METHOD_PROFILE,
+  })]);
+  assert.deepEqual(card.open().methodProfile, POWER2017_FACTOR4_BENCHMARK_METHOD_PROFILE);
 });
 
 test("a saved scene from a scene this build no longer has keeps the camera it has", () => {

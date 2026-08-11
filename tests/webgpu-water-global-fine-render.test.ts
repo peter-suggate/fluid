@@ -525,6 +525,9 @@ test("global fine extraction has a bounded two-dimensional dispatch", () => {
     /if\(adaptiveNodalPublication\(\)\)[\s\S]*cubeDims=params\.sampleDimensions[\s\S]*classifyAdaptiveNodal[\s\S]*cubeDims=params\.sampleDimensions\+vec3u\(1u\)[\s\S]*classifyScaled/,
     "adaptive factor-1 rendering must use native nodal cubes while legacy compact data retains its optical ghost lattice");
   assert.match(globalFineSurfaceClassificationShader,
+    /entries\[0\]\.flags&0x18000000u\)==0x10000000u/,
+    "the classifier must select one coherent lattice from the publication encoding");
+  assert.match(globalFineSurfaceClassificationShader,
     /sampleAdaptiveCoarseOctreePhiAtGrid\(vec3f\(base\+o\[i\]\)\)[\s\S]*emitClassifiedCubeTagged\(base,0/,
     "adaptive cube corners must sample the published nodal scalar at integer coordinates and tag native emission");
   assert.match(globalFineSurfaceClassificationShader,

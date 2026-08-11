@@ -46,7 +46,7 @@ test("Losasso rigid faces refresh only rigid scenes and republish ghost conditio
   assert.match(host, /encodeRigidBoundaryRefresh\(broker\)[\s\S]*encodeGhostRefresh\(broker[\s\S]*encodeAfterGhostDistances\(broker\)[\s\S]*encodeHierarchyCoefficientRefresh\(broker\)[\s\S]*encodeAdvection\(broker, step\)/);
   assert.match(read("../lib/webgpu-octree-losasso-backend.ts"),
     /Refresh-time validation lives here, never in the accepted authority[\s\S]*acceptedRigidBoundaryControl/);
-  const integrator = read("../lib/webgpu-uniform-eulerian.ts");
+  const integrator = read("../lib/webgpu-octree-eulerian.ts");
   assert.match(integrator, /this\.rigidSystem\.encode\(encoder, dt, cellVolume, 1/);
 });
 

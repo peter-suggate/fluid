@@ -242,6 +242,13 @@ export interface SimulationMethod {
    * merged via resolveMethodValues before reaching createSolver.
    */
   presetFor(quality: GPUQuality): MethodParamValues;
+  /**
+   * Resolve method-owned invariants after defaults, the quality preset, and
+   * sparse user overrides have been merged. This is the right seam for a
+   * compound scientific choice whose dependent controls must survive URL
+   * hydration and scene-profile application as one valid configuration.
+   */
+  normalizeValues?(values: MethodParamValues): MethodParamValues;
   /** Keys omitted from the structural solver fingerprint and applied directly
    * to the active/candidate solver instead. */
   runtimeParamKeys?: readonly string[];
@@ -278,7 +285,8 @@ export type GPUInitializationReporter = (progress: GPUInitializationProgress) =>
 
 export function resolveMethodValues(method: SimulationMethod, quality: GPUQuality, overrides: MethodParamValues): MethodParamValues {
   const defaults = Object.fromEntries(method.params.map((spec) => [spec.key, spec.default]));
-  return { ...defaults, ...method.presetFor(quality), ...overrides };
+  const merged = { ...defaults, ...method.presetFor(quality), ...overrides };
+  return method.normalizeValues?.(merged) ?? merged;
 }
 
 export function numberValue(values: MethodParamValues, spec: ReadonlyArray<MethodParamSpec>, key: string): number {

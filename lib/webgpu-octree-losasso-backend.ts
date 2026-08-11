@@ -178,6 +178,7 @@ export interface WebGPUOctreeLosassoBackendOptions {
     readonly velocityExtensionReach?: number;
     readonly redistanceIterations?: number;
     readonly redistanceBandWorld?: number;
+    readonly fullGraphRedistance?: boolean;
     readonly openTop?: boolean;
     readonly exteriorAirPhi?: number;
   }>;
@@ -991,6 +992,7 @@ export class WebGPUOctreeLosassoCoarseBackend {
         domainOrigin: options.topology.domainOrigin,
         redistanceIterations: adaptive.redistanceIterations,
         redistanceBandWorld: adaptive.redistanceBandWorld,
+        fullGraphRedistance: adaptive.fullGraphRedistance,
         openTop: adaptive.openTop ?? options.closedBoundaries?.[3] === false,
         exteriorAirPhi: adaptive.exteriorAirPhi,
         faces: {
@@ -1410,8 +1412,7 @@ export class WebGPUOctreeLosassoCoarseBackend {
       this.adaptivePhi!.encodeAcceptedCommitSync(broker);
       this.adaptiveMass!.encodeDerivedOutputs(
         broker, "accepted", "both", "preserve-and-validate");
-      this.adaptivePhi!.encodeAcceptedExternalPhiPublication(
-        broker, this.adaptiveMass!.source.control);
+      this.adaptivePhi!.encodeAcceptedTopologyHandoffPublication(broker);
       this.adaptiveMassHasAcceptedState = true;
     }
     // Accepted row/volume/ghost views must be derived only after the matching
@@ -1428,7 +1429,9 @@ export class WebGPUOctreeLosassoCoarseBackend {
     this.adaptiveVelocity?.encodeAcceptedReadyFields(broker);
     // The W7 graph spans topology epochs, but its cached wet ids do not. Refresh
     // them through the dense finest-face owner map at the topology boundary so
-    // both projected and MacCormack gathers stay direct in the advance path.
+    // both projected and bounded-correction gathers stay direct in the advance
+    // path. The correction is the documented substitute for the absent
+    // Losasso section 6 particle-level-set stage.
     this.extensionBand?.encodeTopologyRemap(broker);
   }
 
@@ -1460,23 +1463,7 @@ export class WebGPUOctreeLosassoCoarseBackend {
 
   encodeAdvection(broker: PassBroker, step: WebGPUOctreeLosassoDynamicsStep): void {
     this.assertReady();
-    this.dynamics.encodeAdvection(broker, step, () => {
-      if (this.adaptiveVelocity) {
-        // S1a changes only the predictor face bank. Rebuilding the carried
-        // accepted field here used to repeat the complete 20-wave extension
-        // even though neither its face seed nor its scalar support changed.
-        this.adaptiveVelocity.encodePredictorField(broker);
-        // The scalar advance intentionally leaves the shared two-bank clock
-        // unpublished while only the accepted bank is refreshed. Predictor
-        // completion is the first point where both receipts describe the new
-        // scalar generation, so publish that coherent tuple here.
-        this.adaptivePhi!.encodeAcceptedFieldClockSync(broker);
-        return true;
-      }
-      this.extensionBand!.encodePredictorExtension(
-        broker, this.sources.dynamics.advectedVelocity);
-      return true;
-    });
+    this.dynamics.encodeAdvection(broker, step);
   }
 
   /** Advance the accepted nodal scalar without materializing a finest lattice. */
@@ -1492,14 +1479,30 @@ export class WebGPUOctreeLosassoCoarseBackend {
     // Authored inflow mass needs a conservative boundary source; until that
     // path lands, do not fold it into the retired phi reference correction.
     void inflow;
+    // The paused construction frame already owns a committed, redistanced phi
+    // and a matching two-bank velocity tuple. Re-running redistance at dt=0
+    // can only perturb that bootstrap and shrink the extension seed mask.
+    if (dt_s === 0) return this.adaptivePhi.encodeAcceptedDerivations(broker);
     this.adaptiveMass.encodeAcceptedAdvance(broker, dt_s, {
       values: accepted.nodalVelocity,
     });
-    this.adaptiveMass.encodeDerivedOutputs(broker, "accepted", "both");
-    this.adaptivePhi.encodeAcceptedExternalPhiPublication(
-      broker, this.adaptiveMass.source.control);
-    const source = this.adaptivePhi.encodeAcceptedDerivations(broker);
-    // The rho=.5 publication advances the scalar clock and may change which
+    // Chentanez--Mueller section 3.4 makes conservatively advected rho and its
+    // 0.5 isosurface the surface authority. Materialize that interface before
+    // Ando--Batty redistance so extension and pressure never observe a
+    // post-finalize scalar overwrite.
+    this.adaptiveMass.encodeDerivedOutputs(
+      broker, "accepted", "both", "reconstruct");
+    // The density field already advanced by dt_s. A zero-displacement
+    // semi-Lagrangian pass canonicalizes the reconstructed samples and restores
+    // signed distance over the accepted octree without advecting twice.
+    this.adaptivePhi.encodeAcceptedAdvance(
+      broker, 0, this.adaptiveVelocity.transportSource);
+    const source = this.adaptivePhi.encodeAcceptedFinalize(broker);
+    // Keep conservative mass/rho rows current without overwriting the freshly
+    // redistanced compatibility level set.
+    this.adaptiveMass.encodeDerivedOutputs(
+      broker, "accepted", "both", "preserve-and-validate");
+    // The transported publication advances the scalar clock and may change which
     // graph nodes lie inside the extension reach. Retain both coherent nodal
     // banks and extend only newly demanded support. After a ready topology
     // flip, projected/advected face arrays still carry the previous face-slot

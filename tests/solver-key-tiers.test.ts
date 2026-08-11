@@ -181,7 +181,7 @@ test("a solver that adopts a moved nozzle rederives the boundary it derived from
   // would move the arrow the user is dragging and leave the water coming out of
   // where it used to be — which reads as the aim being ignored, not as a stale
   // derivation.
-  const solver = readFileSync(new URL("../lib/webgpu-uniform-eulerian.ts", import.meta.url), "utf8");
+  const solver = readFileSync(new URL("../lib/webgpu-octree-eulerian.ts", import.meta.url), "utf8");
   const adopt = solver.slice(solver.indexOf("applySceneUniforms(scene: SceneDescription)"));
   assert.match(adopt.slice(0, 600), /this\.inflowBoundary = scene\.fluid\.inflow/);
 });
@@ -242,7 +242,7 @@ test("the generated power catalog is decoded once per module, and a failure is n
 
 test("a seed-tier change re-seeds the live solver instead of rebuilding it", () => {
   const renderer = readFileSync(new URL("../lib/webgpu-renderer.ts", import.meta.url), "utf8");
-  const solver = readFileSync(new URL("../lib/webgpu-uniform-eulerian.ts", import.meta.url), "utf8");
+  const solver = readFileSync(new URL("../lib/webgpu-octree-eulerian.ts", import.meta.url), "utf8");
   const projection = readFileSync(new URL("../lib/webgpu-octree.ts", import.meta.url), "utf8");
   const surface = readFileSync(new URL("../lib/webgpu-quadtree-builder.ts", import.meta.url), "utf8");
 

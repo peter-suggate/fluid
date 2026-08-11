@@ -7,7 +7,7 @@ export const OCTREE_LOSASSO_ADAPTIVE_MASS_MAGIC = 0x414d_4153;
 export const OCTREE_LOSASSO_ADAPTIVE_MASS_CONTROL_WORDS = 32;
 export const OCTREE_LOSASSO_ADAPTIVE_MASS_RECEIPT_WORDS = 32;
 const ADAPTIVE_MASS_UNITS_PER_FINEST_CELL = 65_536;
-const ADAPTIVE_MASS_MAX_ARCS_PER_LEAF = 20;
+const ADAPTIVE_MASS_MAX_ARCS_PER_LEAF = 25;
 
 export const adaptiveMassControlLayout = Object.freeze({
   magic: 0, topologyEpoch: 1, surfaceGeneration: 2, leafCount: 3,
@@ -460,8 +460,14 @@ export class WebGPUOctreeLosassoAdaptiveMass {
     }
     this.run(broker, "publishDerivedOutputs", target, source,
       this.emptyVelocity, 1, derivedParams);
-    this.run(broker, "deriveRows", target, source, this.emptyVelocity,
-      this.plan.rowWorkgroups, derivedParams);
+    // rowRho/rowPhi are the live pressure operator's accepted-row cache. An
+    // inactive topology candidate has its own graph row map but must not
+    // overwrite that cache: Chentanez--Mueller Sec. 3.7 consumes accepted rho
+    // when it adds the bounded rho>1 divergence correction.
+    if (bank === "accepted") {
+      this.run(broker, "deriveRows", target, source, this.emptyVelocity,
+        this.plan.rowWorkgroups, derivedParams);
+    }
   }
 
   destroy(): void {

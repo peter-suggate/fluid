@@ -11,8 +11,8 @@ import {
 } from "../lib/webgpu-octree-fine-levelset-topology";
 import {
   applyGlobalFineTransportDiagnostics,
-  WebGPUUniformEulerianSolver,
-} from "../lib/webgpu-uniform-eulerian";
+  WebGPUOctreeEulerianSolver,
+} from "../lib/webgpu-octree-eulerian";
 import type { GPUEulerianInfo } from "../lib/webgpu-eulerian";
 
 const octreeSource = readFileSync(new URL("../lib/webgpu-octree.ts", import.meta.url), "utf8");
@@ -114,7 +114,7 @@ test("production surface recurrence transports before forces and settles after p
 });
 
 test("production substep consumes one immutable epoch and builds the next candidate at its tail", () => {
-  const advance = compact(WebGPUUniformEulerianSolver.prototype.advanceTo);
+  const advance = compact(WebGPUOctreeEulerianSolver.prototype.advanceTo);
   const flip = advance.indexOf("this.octreeProjection?.encodeReadyTopologyFlip(encoder)");
   const surface = advance.indexOf("this.octreeProjection.encodeSurface(encoder");
   const projection = advance.indexOf("this.octreeProjection.encode(encoder", surface);

@@ -36,6 +36,8 @@ test("D4 diagnostic accepts exact scalar, vector, topology, and wall symmetry", 
     assert.equal(metrics.nonFiniteCount, 0);
   }
   assert.deepEqual(Object.values(observation.walls).map(({ touched }) => touched), [true, true, true, true]);
+  assert.deepEqual(Object.values(observation.walls).map(({ maximumWetHeight_cells }) =>
+    maximumWetHeight_cells), [3, 3, 3, 3]);
 });
 
 test("D4 diagnostic locates the first scalar and signed-vector discrepancy", () => {

@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { planFluidFootprintFineBandBrickFloor } from "../lib/webgpu-octree";
+import {
+  planFluidFootprintFineBandBrickFloor,
+  planFluidFootprintFineNarrowBandBrickCapacity,
+  POWER2017_FINE_BAND_SURFACE_GROWTH_SAFETY,
+} from "../lib/webgpu-octree";
 import { planFineLevelSetBandFineCells } from "../lib/webgpu-octree-fine-levelset-topology";
 
 test("fine-band capacity includes compact-footprint edge and corner dilation", () => {
@@ -23,6 +27,21 @@ test("fine-band capacity subtracts the footprint interior beyond the band", () =
   assert.throws(() => planFluidFootprintFineBandBrickFloor(
     [24, 16, 24], [8, 8, 8], [25, 16, 16], 6,
   ), /bounds are invalid/);
+});
+
+test("Power factor-4 reserve admits the complete compact symmetric-expansion band", () => {
+  const compact = planFluidFootprintFineNarrowBandBrickCapacity(
+    [32, 16, 32], [16, 8, 16], 8, 0,
+    POWER2017_FINE_BAND_SURFACE_GROWTH_SAFETY,
+  );
+  assert.equal(compact.maximumResidentBricks, 16_384);
+
+  const large = planFluidFootprintFineNarrowBandBrickCapacity(
+    [256, 128, 256], [128, 64, 128], 8, 0,
+    POWER2017_FINE_BAND_SURFACE_GROWTH_SAFETY,
+  );
+  assert.ok(large.maximumResidentBricks < large.logicalBrickCount,
+    "the factor-4 reference must retain sparse area scaling on production-sized domains");
 });
 
 test("the hybrid LoSasso lane uses the shared donor contract for its single trace", () => {

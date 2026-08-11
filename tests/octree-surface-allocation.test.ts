@@ -73,7 +73,7 @@ test("format-only phi placeholder remains live until solver destruction", async 
 
 test("solver retires bootstrap phi only after compact cutover and exposes no fallback authority", () => {
   const octree = readFileSync(new URL("../lib/webgpu-octree.ts", import.meta.url), "utf8");
-  const uniform = readFileSync(new URL("../lib/webgpu-uniform-eulerian.ts", import.meta.url), "utf8");
+  const uniform = readFileSync(new URL("../lib/webgpu-octree-eulerian.ts", import.meta.url), "utf8");
   assert.match(uniform, /queue\.submit\(\[encoder\.finish\(\)\]\);[\s\S]*?releaseDenseBootstrapPhi\(\)/,
     "the dense bootstrap texture must remain alive through submission");
   assert.match(octree, /get levelSetTexture\(\) \{ return this\.surfaceState\.texture; \}/);

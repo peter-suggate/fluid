@@ -197,8 +197,8 @@ export interface SceneDescription {
      */
     optics?: WaterOpticsAuthoring;
     /**
-     * Authored boxes that cap how finely the pressure octree may refine inside
-     * them. See `lib/octree-refinement-regions.ts`.
+     * Authored boxes that bound the pressure-octree cell sizes inside them.
+     * See `lib/octree-refinement-regions.ts`.
      *
      * Uniform-tier: the regions reach the GPU through the projection's params
      * buffer, so drawing or retuning one is a buffer write on the running
@@ -221,7 +221,8 @@ export interface SceneDescription {
 }
 
 /**
- * A drawn box that caps how finely the pressure octree refines inside it.
+ * A drawn box that bounds how finely or coarsely the pressure octree resolves
+ * its fully contained leaves.
  *
  * Deliberately declarative about *meaning* rather than about machinery: `rule`
  * names what the box is for, so the next thing worth declaring over a region —
@@ -238,6 +239,9 @@ export interface FluidRefinementRegion {
   rule: "minimum-cell-size";
   /** Smallest pressure-cell edge allowed inside, in finest cells. Power of two. */
   minimumCellSize_cells: number;
+  /** Optional largest pressure-cell edge allowed inside, in finest cells.
+   * Power of two. Omitted leaves coarsening entirely evidence-driven. */
+  maximumCellSize_cells?: number;
 }
 
 export interface FluidInflow {

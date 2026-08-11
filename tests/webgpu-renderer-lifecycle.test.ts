@@ -145,7 +145,7 @@ test("timeline reset drains and destroys the previous solver before replacement 
 
 test("reset replacement attaches only after complete t=0 sparse authority is resident", () => {
   const renderer = readFileSync(new URL("../lib/webgpu-renderer.ts", import.meta.url), "utf8");
-  const uniform = readFileSync(new URL("../lib/webgpu-uniform-eulerian.ts", import.meta.url), "utf8");
+  const uniform = readFileSync(new URL("../lib/webgpu-octree-eulerian.ts", import.meta.url), "utf8");
   const octree = readFileSync(new URL("../lib/webgpu-octree.ts", import.meta.url), "utf8");
 
   const createAsync = uniform.slice(

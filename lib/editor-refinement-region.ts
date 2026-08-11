@@ -38,12 +38,12 @@ import {
  * lattice its sides land on, and the meaning it carries — and that is all this
  * file contains.
  *
- * The one thing worth knowing: the resize snap is the region's own floor, not
- * the finest cell. A dyadic leaf of edge S is aligned to multiples of S in cell
- * space, so a box on that lattice contains whole leaves of that size and the
- * region holds exactly the cells it covers. Snapping to the finest cell instead
- * would lose a shell of cells all the way around every region, which reads as
- * the floor not being respected.
+ * The one thing worth knowing: the resize snap is the region's own smallest
+ * allowed cell, not always the finest cell. A dyadic leaf of edge S is aligned
+ * to multiples of S in cell space, so a box on that lattice contains whole
+ * leaves of that size and the region holds exactly the cells it covers.
+ * Snapping to the finest cell instead would lose a shell of cells all the way
+ * around every region, which reads as the lower bound not being respected.
  */
 
 export const REFINEMENT_REGION_SELECTION_PREFIX = "refinement-region-";
@@ -165,10 +165,16 @@ export function refinementRegionFromDrag(
   scene: SceneDescription,
   anchor_m: Vec3,
   drag_m: Vec3,
-  options: { readonly id?: string; readonly minimumCellSize_cells?: number } = {},
+  options: {
+    readonly id?: string;
+    readonly minimumCellSize_cells?: number;
+    readonly maximumCellSize_cells?: number;
+  } = {},
 ): FluidRefinementRegion {
   const cells = clampRefinementRegionCellSize(
     options.minimumCellSize_cells ?? DEFAULT_REFINEMENT_REGION_CELL_SIZE);
+  const maximumCells = options.maximumCellSize_cells === undefined ? undefined
+    : Math.max(cells, clampRefinementRegionCellSize(options.maximumCellSize_cells));
   const limits = sceneContainerBox(scene);
   const footprint = {
     x: Math.abs(drag_m.x - anchor_m.x),
@@ -193,6 +199,7 @@ export function refinementRegionFromDrag(
     id: options.id ?? nextRefinementRegionId(scene),
     rule: "minimum-cell-size",
     minimumCellSize_cells: cells,
+    ...(maximumCells === undefined ? {} : { maximumCellSize_cells: maximumCells }),
     min_m: box.min,
     max_m: box.max,
   };
@@ -215,18 +222,19 @@ export function refinementRegionCapacityRemaining(scene: SceneDescription): numb
  * form that survives the world-scale controls, which move every extent and the
  * cell size together and would otherwise strand every box.
  *
- * The floor is NOT a percentage. It is a count of finest cells, and it means
- * the same thing on any lattice — the number of solver cells you are willing to
- * merge. Scaling it with the container would silently change the experiment.
+ * The cell bounds are NOT percentages. They are counts of finest cells, and
+ * mean the same thing on any lattice. Scaling either with the container would
+ * silently change the experiment.
  *
  * Format, chosen so the value survives `URLSearchParams` unescaped (the
  * urlencoded serializer keeps alphanumerics and `*-._`, and turns the obvious
  * `,` into `%2C`):
  *
- *     regions=<minX>_<minY>_<minZ>_<maxX>_<maxY>_<maxZ>_<cells>[_<rule>]*<next>
+ *     regions=<minX>_<minY>_<minZ>_<maxX>_<maxY>_<maxZ>_<minCells>[_<maxCells>][_<rule>]*<next>
  *
- * The rule is omitted while it is the only one; a reader accepts it so links
- * written today keep working when a second kind of region lands.
+ * The optional largest cell follows the smallest one. The rule is omitted
+ * while it is the only one. The reader also accepts the old seven-field form
+ * and the old eight-field form whose last field is a rule.
  */
 const REGION_FIELD_SEPARATOR = "_";
 const REGION_RECORD_SEPARATOR = "*";
@@ -247,6 +255,8 @@ export function refinementRegionsToQuery(scene: SceneDescription): string {
       ...percent(region.min_m),
       ...percent(region.max_m),
       String(clampRefinementRegionCellSize(region.minimumCellSize_cells)),
+      ...(region.maximumCellSize_cells === undefined ? []
+        : [String(clampRefinementRegionCellSize(region.maximumCellSize_cells))]),
       ...(region.rule === DEFAULT_REGION_RULE ? [] : [region.rule]),
     ].join(REGION_FIELD_SEPARATOR))
     .join(REGION_RECORD_SEPARATOR);
@@ -279,23 +289,32 @@ export function refinementRegionsFromQuery(
   for (const record of raw.split(REGION_RECORD_SEPARATOR)) {
     if (regions.length >= OCTREE_REFINEMENT_REGION_CAPACITY) break;
     const fields = record.split(REGION_FIELD_SEPARATOR);
-    if (fields.length !== 7 && fields.length !== 8) continue;
+    if (fields.length < 7 || fields.length > 9) continue;
     const numbers = fields.slice(0, 7).map(Number);
     if (!numbers.every(Number.isFinite)) continue;
-    const rule = fields[7] ?? DEFAULT_REGION_RULE;
+    const eighth = fields[7];
+    const eighthNumber = eighth === undefined || eighth === "" ? undefined : Number(eighth);
+    const hasMaximum = eighthNumber !== undefined && Number.isFinite(eighthNumber);
+    const rule = hasMaximum ? (fields[8] ?? DEFAULT_REGION_RULE)
+      : (eighth ?? DEFAULT_REGION_RULE);
     if (rule !== DEFAULT_REGION_RULE) continue;
+    if (fields.length === 9 && !hasMaximum) continue;
     const metres = (offset: number): Vec3 => ({
       x: limits.min.x + (Math.max(0, Math.min(100, numbers[offset]!)) / 100) * span.x,
       y: limits.min.y + (Math.max(0, Math.min(100, numbers[offset + 1]!)) / 100) * span.y,
       z: limits.min.z + (Math.max(0, Math.min(100, numbers[offset + 2]!)) / 100) * span.z,
     });
     const cells = clampRefinementRegionCellSize(numbers[6]!);
+    const maximumCells = hasMaximum
+      ? Math.max(cells, clampRefinementRegionCellSize(eighthNumber))
+      : undefined;
     const box = snapRefinementRegionBox(scene, { min: metres(0), max: metres(3) }, cells);
     if (!(box.max.x > box.min.x) || !(box.max.y > box.min.y) || !(box.max.z > box.min.z)) continue;
     regions.push({
       id: `region-${regions.length + 1}`,
       rule: DEFAULT_REGION_RULE,
       minimumCellSize_cells: cells,
+      ...(maximumCells === undefined ? {} : { maximumCellSize_cells: maximumCells }),
       min_m: box.min,
       max_m: box.max,
     });
@@ -325,6 +344,9 @@ function refinementRegionChoices(
   const write = (next: Partial<FluidRefinementRegion>) =>
     withRefinementRegion(scene, region.id, { ...region, ...next });
   const cellSize_m = refinementRegionLattice(scene).cellSize_m;
+  const minimumCells = clampRefinementRegionCellSize(region.minimumCellSize_cells);
+  const maximumCells = region.maximumCellSize_cells === undefined ? undefined
+    : clampRefinementRegionCellSize(region.maximumCellSize_cells);
   return [
     {
       id: "rule",
@@ -341,7 +363,7 @@ function refinementRegionChoices(
     {
       id: "minimumCellSize",
       label: "Smallest cell",
-      value: String(clampRefinementRegionCellSize(region.minimumCellSize_cells)),
+      value: String(minimumCells),
       options: OCTREE_REFINEMENT_REGION_CELL_SIZES.map((cells) => ({
         id: String(cells),
         label: `${cells}³`,
@@ -351,9 +373,49 @@ function refinementRegionChoices(
         // and an unaligned box loses a shell of cells to partial containment.
         apply: () => {
           const box = snapRefinementRegionBox(scene, refinementRegionBox(region), cells);
-          return write({ minimumCellSize_cells: cells, min_m: box.min, max_m: box.max });
+          return write({
+            minimumCellSize_cells: cells,
+            ...(maximumCells !== undefined && maximumCells < cells
+              ? { maximumCellSize_cells: cells } : {}),
+            min_m: box.min,
+            max_m: box.max,
+          });
         },
       })),
+    },
+    {
+      id: "maximumCellSize",
+      label: "Largest cell",
+      value: maximumCells === undefined ? "auto" : String(maximumCells),
+      options: [
+        {
+          id: "auto",
+          label: "AUTO",
+          hint: "Evidence decides how far quiet fluid may coarsen",
+          enabled: true,
+          apply: () => write({ maximumCellSize_cells: undefined }),
+        },
+        ...OCTREE_REFINEMENT_REGION_CELL_SIZES.map((cells) => ({
+          id: String(cells),
+          label: `${cells}³`,
+          hint: `No cell larger than ${cells}³ finest cells · ${(cells * cellSize_m[0]! * 1000).toFixed(0)} mm edge`,
+          enabled: true,
+          apply: () => {
+            // A ceiling below the current floor means the user wants the whole
+            // interval to move down. Keep the bounds valid and re-snap to the
+            // newly selected smallest cell in the same edit.
+            const nextMinimum = Math.min(minimumCells, cells);
+            const box = snapRefinementRegionBox(
+              scene, refinementRegionBox(region), nextMinimum);
+            return write({
+              minimumCellSize_cells: nextMinimum,
+              maximumCellSize_cells: cells,
+              min_m: box.min,
+              max_m: box.max,
+            });
+          },
+        })),
+      ],
     },
   ];
 }
@@ -366,6 +428,8 @@ function refinementRegionEntityFor(
   const box = refinementRegionBox(region);
   const size = boxSize(box);
   const cells = clampRefinementRegionCellSize(region.minimumCellSize_cells);
+  const maximumCells = region.maximumCellSize_cells === undefined ? undefined
+    : Math.max(cells, clampRefinementRegionCellSize(region.maximumCellSize_cells));
   const cellSize_m = refinementRegionLattice(scene).cellSize_m;
   const write = (next: Partial<FluidRefinementRegion>) =>
     withRefinementRegion(scene, region.id, { ...region, ...next });
@@ -380,7 +444,9 @@ function refinementRegionEntityFor(
     tone: "region",
     frame: WORLD_FRAME,
     box,
-    sizeLabel: `${[size.x, size.y, size.z].map((value) => value.toFixed(2)).join(" × ")} m · ≥ ${cells}³ cells`,
+    sizeLabel: `${[size.x, size.y, size.z].map((value) => value.toFixed(2)).join(" × ")} m · ${maximumCells === undefined
+      ? `≥ ${cells}³ cells`
+      : cells === maximumCells ? `${cells}³ cells` : `${cells}³–${maximumCells}³ cells`}`,
     handles: [
       ...boxHandles(box, {
         drag: boxResizeDrag(box, refinementRegionResizePolicy(scene, region),
@@ -393,7 +459,11 @@ function refinementRegionEntityFor(
       ? `Moved ${region.id}` : `Resized ${region.id}`,
     choices: refinementRegionChoices(scene, region),
     fields: positionFields(boxCenter(box), move),
-    summary: `No pressure cell smaller than ${(cells * cellSize_m[0]! * 1000).toFixed(0)} mm inside this box. Grading still splits leaves on its boundary.`,
+    summary: maximumCells === undefined
+      ? `No pressure cell smaller than ${(cells * cellSize_m[0]! * 1000).toFixed(0)} mm inside this box. Grading still splits leaves on its boundary.`
+      : cells === maximumCells
+        ? `Fully contained pressure cells are held at ${(cells * cellSize_m[0]! * 1000).toFixed(0)} mm inside this box.`
+        : `Fully contained pressure cells stay between ${(cells * cellSize_m[0]! * 1000).toFixed(0)} and ${(maximumCells * cellSize_m[0]! * 1000).toFixed(0)} mm inside this box.`,
     remove: () => withRefinementRegion(scene, region.id, undefined),
   };
 }

@@ -23,6 +23,8 @@ export interface SymmetryFieldMetrics {
 export interface SymmetryWallState {
   readonly maximumVolume: number;
   readonly wetCellCount: number;
+  /** Top face of the highest threshold-wet wall cell, in finest-cell units. */
+  readonly maximumWetHeight_cells: number;
   readonly touched: boolean;
 }
 
@@ -294,13 +296,21 @@ function compareVelocityField(
   return result;
 }
 
-function wallState(values: readonly number[], threshold: number): SymmetryWallState {
+function wallState(values: readonly number[], threshold: number,
+  horizontalCellCount: number): SymmetryWallState {
   let maximumVolume = Number.NEGATIVE_INFINITY, wetCellCount = 0;
-  for (const value of values) {
+  let maximumWetHeight_cells = 0;
+  for (let index = 0; index < values.length; index += 1) {
+    const value = values[index]!;
     if (Number.isFinite(value)) maximumVolume = Math.max(maximumVolume, value);
-    if (value >= threshold) wetCellCount += 1;
+    if (value >= threshold) {
+      wetCellCount += 1;
+      maximumWetHeight_cells = Math.max(maximumWetHeight_cells,
+        Math.floor(index / horizontalCellCount) + 1);
+    }
   }
-  return { maximumVolume, wetCellCount, touched: wetCellCount > 0 };
+  return { maximumVolume, wetCellCount, maximumWetHeight_cells,
+    touched: wetCellCount > 0 };
 }
 
 /**
@@ -388,10 +398,10 @@ export function measureFluidSymmetry(state: FluidSymmetryState): FluidSymmetryOb
     topology: compareScalarField(state.topology, state.grid),
     frontCircularity: measureHorizontalFrontCircularity(state.volume, state.grid),
     walls: {
-      negativeX: wallState(negativeX, state.wallLiquidThreshold),
-      positiveX: wallState(positiveX, state.wallLiquidThreshold),
-      negativeZ: wallState(negativeZ, state.wallLiquidThreshold),
-      positiveZ: wallState(positiveZ, state.wallLiquidThreshold),
+      negativeX: wallState(negativeX, state.wallLiquidThreshold, nx),
+      positiveX: wallState(positiveX, state.wallLiquidThreshold, nx),
+      negativeZ: wallState(negativeZ, state.wallLiquidThreshold, nx),
+      positiveZ: wallState(positiveZ, state.wallLiquidThreshold, nx),
     },
   };
 }

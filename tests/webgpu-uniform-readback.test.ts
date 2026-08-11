@@ -1,19 +1,34 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { publishedGlobalFineVolumeCells, sparseSurfaceVolumeCells } from "../lib/webgpu-uniform-eulerian";
+import { mayReadLiveOctreeDiagnostics, publishedGlobalFineVolumeCells,
+  sparseSurfaceVolumeCells } from "../lib/webgpu-octree-eulerian";
 
-const source = readFileSync(new URL("../lib/webgpu-uniform-eulerian.ts", import.meta.url), "utf8");
+const source = readFileSync(new URL("../lib/webgpu-octree-eulerian.ts", import.meta.url), "utf8");
+
+test("Losasso diagnostics retain the last coherent receipt between snapshot polls", () => {
+  assert.equal(mayReadLiveOctreeDiagnostics("losasso", true), false,
+    "an active Losasso snapshot ring makes mutable live controls off-limits");
+  assert.equal(mayReadLiveOctreeDiagnostics("losasso", false), true,
+    "startup may inspect live controls before the first snapshot ring exists");
+  assert.equal(mayReadLiveOctreeDiagnostics("power2017", true), true,
+    "the policy does not change the separate Power diagnostics path");
+
+  const stats = source.slice(source.indexOf("async readStats()"), source.indexOf("\n  destroy()"));
+  assert.match(stats, /losassoSnapshotRingActive[\s\S]*mayReadLiveOctreeDiagnostics/);
+  assert.doesNotMatch(stats,
+    /const solveDiagnostics = losassoSnapshotExpected\s*\?\s*undefined/,
+    "temporary lack of an unread record must not reopen the racing live-buffer path");
+});
 
 test("compact octree never constructs or dispatches dense velocity telemetry", () => {
   const stats = source.slice(source.indexOf("async readStats()"), source.indexOf("\n  destroy()"));
   const advance = source.slice(source.indexOf("advanceTo(time_s"), source.indexOf("async readStats()"));
-  assert.match(advance, /if \(this\.hostAllocation\) \{[\s\S]*this\.reductionPipeline/,
-    "only a real dense host may dispatch the dense reduction");
-  assert.match(stats,
-    /this\.info\.maxSpeed_m_s = this\.octreeProjection\s*\?\s*undefined\s*:/,
-    "cleared dense scratch must not masquerade as octree velocity telemetry");
-  assert.doesNotMatch(`${advance}\n${stats}`, /adaptiveFaceVelocityCutover/);
+  assert.doesNotMatch(source,
+    /hostAllocation|reductionPipeline|reductionBuffer|velocityA|uniformReferenceComputeShader/,
+    "the adaptive host must not contain the retired dense compatibility graph");
+  assert.match(stats, /this\.info\.maxSpeed_m_s = undefined/);
+  assert.doesNotMatch(`${advance}\n${stats}`, /adaptiveFaceVelocityCutover|Uniform diagnostics/);
 });
 
 test("compact octree volume telemetry accepts only the current committed publication", () => {
@@ -76,8 +91,9 @@ test("compact octree readback never reports the cleared dense volume reduction",
   assert.doesNotMatch(stats, /as unknown as GlobalFineVolumePublicationDiagnostics/,
     "a type assertion cannot synthesize the publication fields at runtime");
   assert.match(stats, /this\.info\.volumeCellSum=compactVolume\?\.volumeCells/);
-  assert.match(stats, /if\(!this\.octreeProjection\)\{this\.info\.front_m/,
-    "compact transport must not publish the cleared dense front reduction");
+  assert.match(stats, /this\.info\.front_m=undefined/,
+    "compact transport must not publish a dense front reduction");
+  assert.doesNotMatch(stats, /dense-volume|conservativeVolumeCells/);
 });
 
 test("power generation telemetry comes from the accepted GPU epoch receipt", () => {

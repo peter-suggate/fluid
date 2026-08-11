@@ -93,6 +93,16 @@ export interface WebGPUOctreeLosassoAdaptiveVelocitySamplerSource {
   readonly wgsl: string;
 }
 
+/** Coherent accepted nodal tuple consumed by adaptive scalar transport. */
+export interface WebGPUOctreeLosassoAdaptiveVelocityTransportSource {
+  /** Accepted graph publication control: epoch/count/generation validity tuple. */
+  readonly control: GPUBuffer;
+  /** Interleaved accepted/predictor vec4 records on graph nodes. */
+  readonly values: GPUBuffer;
+  /** Stable accepted-field receipt, including physical reach and readiness. */
+  readonly receipt: GPUBuffer;
+}
+
 export interface OctreeLosassoAdaptiveVelocityPlan {
   readonly nodeCapacity: number;
   /** Jeong-style accurate extrapolation is confined to Tall Cells' two-cell shell. */
@@ -239,6 +249,7 @@ export class WebGPUOctreeLosassoAdaptiveVelocity {
   /** Four fixed diagnostic banks; first 64 unresolved records per field. */
   readonly diagnosticBuffer: GPUBuffer;
   readonly samplerSource: WebGPUOctreeLosassoAdaptiveVelocitySamplerSource;
+  readonly transportSource: WebGPUOctreeLosassoAdaptiveVelocityTransportSource;
   readonly plan: OctreeLosassoAdaptiveVelocityPlan;
   readonly allocatedBytes: number;
   private readonly mutableArena: GPUBuffer;
@@ -401,6 +412,8 @@ export class WebGPUOctreeLosassoAdaptiveVelocity {
       velocityArena: this.velocityArena, nodeStrideRecords: 2, acceptedFieldRecord: 0,
       predictorFieldRecord: 1, recordStrideWords: 4,
       leafRecordStrideWords: 16, wgsl: octreeLosassoAdaptiveVelocitySamplerWGSL() });
+    this.transportSource = Object.freeze({ control: options.accepted.graph.control,
+      values: this.velocityArena, receipt: this.receiptBuffer });
     this.initializationTasks = [{ id: "losasso.adaptive-velocity.pipelines",
       phase: "solver-pipelines", label: "Compile adaptive Losasso nodal velocity",
       run: () => this.initialize() }];

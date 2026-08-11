@@ -4,7 +4,7 @@ import test from "node:test";
 import { OCTREE_INITIAL_SPARSE_AUTHORITY_PHASES } from "../lib/webgpu-octree";
 
 const rendererSource = readFileSync(new URL("../lib/webgpu-renderer.ts", import.meta.url), "utf8");
-const uniformEulerianSource = readFileSync(new URL("../lib/webgpu-uniform-eulerian.ts", import.meta.url), "utf8");
+const uniformEulerianSource = readFileSync(new URL("../lib/webgpu-octree-eulerian.ts", import.meta.url), "utf8");
 const octreeProjectionSource = readFileSync(new URL("../lib/webgpu-octree.ts", import.meta.url), "utf8");
 const waterPipelineSource = readFileSync(new URL("../lib/webgpu-water-pipeline.ts", import.meta.url), "utf8");
 

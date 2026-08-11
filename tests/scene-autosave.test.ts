@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
+import { getMethod, resolveMethodValues } from "../lib/methods";
 import { canonicalScene, cloneScene, serializeScene, validateScene, type SceneDescription } from "../lib/model";
 import { allSceneCards, sceneCardPreview, sceneSections } from "../lib/scene-cards";
 import {
@@ -21,9 +22,10 @@ import {
   SCENE_LIBRARY_STORAGE_KEY,
   type SceneLibraryStorage,
 } from "../lib/scene-library";
-import { getScenePreset } from "../lib/scenes";
+import { getScenePreset, POWER2017_FACTOR4_BENCHMARK_METHOD_PROFILE } from "../lib/scenes";
 import { useSceneStore } from "../lib/stores/scene-store";
 import { useShellStore } from "../lib/stores/shell-store";
+import { useMethodStore } from "../lib/stores/method-store";
 
 /** In-memory storage that counts writes, so a debounce is observable. */
 function memoryStorage(initial?: string): SceneLibraryStorage & { writes: number } {
@@ -137,6 +139,20 @@ test("Continue resolves to where the reader was, not to their newest save", () =
   assert.equal(sceneResume([]), undefined);
 });
 
+test("Continue restores a selected Power 2017 factor-4 method profile", () => {
+  const storage = memoryStorage();
+  writeSceneAutosave(storage, {
+    scene: cloneScene(getScenePreset("symmetric-expansion").create()),
+    presetId: "symmetric-expansion",
+    methodProfile: POWER2017_FACTOR4_BENCHMARK_METHOD_PROFILE,
+  }, 1_000);
+
+  const opening = sceneResume(readSceneLibrary(storage))!.card.open();
+  assert.deepEqual(opening.methodProfile, POWER2017_FACTOR4_BENCHMARK_METHOD_PROFILE);
+  assert.equal(opening.methodProfile?.overrides.coarseBackend, "power2017");
+  assert.equal(opening.methodProfile?.overrides.globalFineLevelSetFactor, "4");
+});
+
 test("an explicit save is never written over by the autosave", () => {
   const storage = memoryStorage();
   // The names collide on purpose: both are "Garden pond" from the same origin.
@@ -176,6 +192,7 @@ test("a corrupt autosave loses Continue rather than the library", () => {
 test("nothing is autosaved until a scene has actually been opened", async () => {
   const storage = memoryStorage();
   useShellStore.setState({ view: "library", studioEntered: false });
+  useMethodStore.setState(useMethodStore.getInitialState());
   const stop = startSceneAutosave({ storage, delay_ms: 5 });
 
   useSceneStore.getState().setScene(pond({ randomSeed: 1 }), "garden-pond");
@@ -188,6 +205,18 @@ test("nothing is autosaved until a scene has actually been opened", async () => 
   await delay(40);
   assert.equal(storage.writes, 1);
   assert.equal(loadSceneFromLibrary(readSceneAutosave(readSceneLibrary(storage))!).randomSeed, 1);
+
+  useMethodStore.getState().setParam("octree", "coarseBackend", "power2017");
+  await delay(40);
+  assert.equal(
+    readSceneAutosave(readSceneLibrary(storage))?.methodProfile?.overrides.coarseBackend,
+    "power2017",
+    "method selection itself must update the resumable working document",
+  );
+  const resumedProfile = sceneResume(readSceneLibrary(storage))!.card.open().methodProfile!;
+  const resumedValues = resolveMethodValues(getMethod(resumedProfile.methodId),
+    resumedProfile.quality, resumedProfile.overrides);
+  assert.equal(resumedValues.globalFineLevelSetFactor, "4");
 
   useSceneStore.getState().setScene(pond({ randomSeed: 2 }), "garden-pond");
   await delay(40);

@@ -13,10 +13,16 @@ function ParamControl({ spec, methodId }: { spec: MethodParamSpec; methodId: str
   const values = resolvedMethodValues(methodState);
   const overridden = spec.key in (methodState.overrides[methodId] ?? {});
   if (spec.kind === "select") {
+    const fixedPowerFineBand = methodId === "octree"
+      && spec.key === "globalFineLevelSetFactor"
+      && values.coarseBackend === "power2017";
     return (
-      <label className="select-control" title={spec.hint}>
+      <label className="select-control" title={fixedPowerFineBand
+        ? "Power 2017 benchmark: separate factor-4 narrow-band level set (paper Section 5)."
+        : spec.hint}>
         <span>{spec.label}</span>
-        <select value={String(values[spec.key])} onChange={(event) => simulation.setMethodParam(methodId, spec.key, event.target.value)}>
+        <select value={String(values[spec.key])} disabled={fixedPowerFineBand}
+          onChange={(event) => simulation.setMethodParam(methodId, spec.key, event.target.value)}>
           {spec.options.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
         </select>
       </label>

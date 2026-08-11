@@ -541,18 +541,18 @@ export function gpuSceneUniformKey(scene: SceneDescription): string {
 /**
  * The authored refinement regions.
  *
- * Uniform tier by construction rather than by concession: a region only ever
- * makes the topology gate refuse a split, and the topology is re-derived from
- * the reset size every epoch, so a new box is adopted by the next candidate
- * epoch of the running solver. Nothing it can say changes an allocation, a seed
- * or the lattice — which is exactly what makes drawing one an experiment you
- * can watch rather than a restart you wait for.
+ * Uniform tier by construction rather than by concession: a region only changes
+ * the topology gate's split decision, and the topology is re-derived from the
+ * reset size every epoch, so a new box is adopted by the next candidate epoch
+ * of the running solver. Nothing it can say changes an allocation, a seed or
+ * the lattice — which is exactly what makes drawing one an experiment you can
+ * watch rather than a restart you wait for.
  */
 function refinementRegionKey(scene: SceneDescription): string {
   const regions = scene.fluid.refinementRegions;
   if (!regions || regions.length === 0) return "none";
   return regions
-    .map((region) => `${region.rule}@${region.minimumCellSize_cells}:${region.min_m.x},${region.min_m.y},${region.min_m.z}>${region.max_m.x},${region.max_m.y},${region.max_m.z}`)
+    .map((region) => `${region.rule}@${region.minimumCellSize_cells}-${region.maximumCellSize_cells ?? "auto"}:${region.min_m.x},${region.min_m.y},${region.min_m.z}>${region.max_m.x},${region.max_m.y},${region.max_m.z}`)
     .join("|");
 }
 

@@ -46,3 +46,14 @@ test("missing expensive evidence is not advertised", () => {
   assert.equal(evidence.methods.uniform.available.includes("front/back raster"), false);
   assert.equal(evidence.methods.uniform.available.includes("performance authority"), false);
 });
+
+test("compact mechanical-energy checkpoints advertise mechanical-energy evidence", () => {
+  const evidence = normalizeWebGPUSmokeEvidence([{
+    method: "octree", info: {}, steps: 1, grid: [1, 1, 1],
+    matchedField: new Float32Array(1), matchedSummary: {}, energyTrace: [],
+    checkpoints: [{ time_s: 0.004, compactMechanicalEnergy: {
+      maximumLiquidComponentSpeed_m_s: 0.1,
+    } }],
+  }]);
+  assert.equal(evidence.methods.octree.available.includes("mechanical energy"), true);
+});

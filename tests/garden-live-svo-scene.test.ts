@@ -267,7 +267,7 @@ test("live SVO startup bypasses the simulation solver and t=0 raster gate", () =
     "ready must be published only after the first sparse garden frame completes");
   assert.match(renderer, /state: "ready", label: "Live SVO renderer ready", adapter: this\.adapterName, resource: svoPresentationResourcePlugin/,
     "the first sparse frame must explicitly close the presentation resource activity");
-  assert.doesNotMatch(liveSource, /WebGPUUniformEulerianSolver/);
+  assert.doesNotMatch(liveSource, /WebGPUOctreeEulerianSolver/);
   assert.match(liveSource, /fluid authority intentionally absent/);
   // The sparse world is still what a live scene is made of; it is now built
   // through the interruptible factory rather than the constructor, so the

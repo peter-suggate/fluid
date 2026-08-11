@@ -2,7 +2,7 @@ import type { FluidRefinementRegion, SceneDescription, Vec3 } from "./model";
 import { sceneCellSizes_m, sceneLatticeDimensions } from "./scene-lattice";
 
 /**
- * Authored boxes that cap how finely the pressure octree refines inside them.
+ * Authored boxes that bound the pressure-octree cell sizes inside them.
  *
  * The octree's refinement is entirely evidence-driven: a leaf splits because
  * the free surface, a solid, a wall band or an inflow is near it. That is the
@@ -12,24 +12,23 @@ import { sceneCellSizes_m, sceneLatticeDimensions } from "./scene-lattice";
  *
  * Three properties make this a cheap experiment rather than a solver change:
  *
- *  - **It only ever refuses a split.** `leafNeedsRefinement` is the one gate
- *    every topology pass asks, and a region turns a `true` into a `false`
- *    inside its own box. Nothing invents refinement, nothing changes an
+ *  - **Each bound changes only the matching decision.** The minimum may refuse
+ *    a split; the optional maximum may require one. Nothing changes an
  *    operator, and a scene with no regions is bit-identical.
  *  - **It is uniform-tier.** The regions ride the projection's params buffer,
  *    so drawing one, moving it, or retuning its floor is a `writeBuffer` on the
  *    running solver — no re-seed, no rebuild, no t=0. See `gpuSceneUniformKey`.
- *  - **It is not a guarantee.** Strict 2:1 grading still splits a leaf whose
- *    neighbour is finer, so the boundary of a region grades into its
- *    surroundings the way every other size transition does. A region says
- *    "stop refining here", not "these cells are exactly this size".
+ *  - **The minimum is not a guarantee.** Strict 2:1 grading can still split a
+ *    leaf whose neighbour is finer. The maximum is a hard upper bound for
+ *    fully contained leaves because grading only ever adds refinement.
  *
- * Containment is *full* containment: a candidate leaf is held at the region's
- * floor only when the whole leaf lies inside the box. A leaf straddling the
- * edge refines normally, so a region can never coarsen anything outside itself.
+ * Containment is *full* containment: a candidate leaf is bounded only when the
+ * whole leaf lies inside the box. A leaf straddling the edge keeps its ordinary
+ * refinement behaviour, so a region cannot affect anything outside itself.
  * Because dyadic leaves of edge S are aligned to multiples of S in cell space,
- * a box whose bounds are multiples of its own floor holds exactly the cells it
- * covers — which is why the editor snaps a region's handles to that lattice.
+ * a box whose bounds are multiples of its own smallest-cell bound contains
+ * exactly the leaves it covers — which is why the editor snaps its handles to
+ * that lattice.
  */
 
 /**
@@ -43,7 +42,7 @@ import { sceneCellSizes_m, sceneLatticeDimensions } from "./scene-lattice";
  */
 export const OCTREE_REFINEMENT_REGION_CAPACITY = 8;
 
-/** Words per packed region: two `vec4f` — `(min.xyz, floor)` and `(max.xyz, 0)`. */
+/** Words per packed region: `(min.xyz, floor)` and `(max.xyz, optional ceiling)`. */
 export const OCTREE_REFINEMENT_REGION_WORDS = 8;
 
 /** Byte offset of the region tail inside the projection params buffer. */
@@ -54,7 +53,7 @@ export const OCTREE_REFINEMENT_REGION_PARAMS_BYTES =
   16 + 4 * OCTREE_REFINEMENT_REGION_WORDS * OCTREE_REFINEMENT_REGION_CAPACITY;
 
 /**
- * Floors a region may name, as an edge length in finest cells.
+ * Cell-size bounds a region may name, as an edge length in finest cells.
  *
  * Powers of two, because a leaf edge is a power of two: an octree has no cell
  * of edge 3, so offering one would be a control that silently rounds. The list
@@ -70,14 +69,14 @@ export const DEFAULT_REFINEMENT_REGION_CELL_SIZE = 8;
 export const REFINEMENT_REGION_RULES = Object.freeze([
   {
     id: "minimum-cell-size" as const,
-    label: "Minimum cell size",
-    hint: "The pressure octree stops refining inside this box once its cells reach the chosen edge length. Grading still splits leaves on the boundary.",
+    label: "Cell size bounds",
+    hint: "Choose the smallest allowed pressure cell and, optionally, the largest. Equal bounds hold fully contained leaves at one tier.",
   },
 ]);
 
 export type RefinementRegionRule = (typeof REFINEMENT_REGION_RULES)[number]["id"];
 
-/** Round a requested floor down onto the dyadic ladder above. */
+/** Round a requested cell-size bound down onto the dyadic ladder above. */
 export function clampRefinementRegionCellSize(requested: number): number {
   if (!Number.isFinite(requested)) return DEFAULT_REFINEMENT_REGION_CELL_SIZE;
   let chosen = OCTREE_REFINEMENT_REGION_CELL_SIZES[0]!;
@@ -129,6 +128,24 @@ export function refinementRegionLattice(scene: SceneDescription): RefinementRegi
   };
 }
 
+/** Whether one authored box caps the entire pressure domain at finest cells.
+ * Such a scene has exactly one possible octree topology: rebuilding an
+ * identical candidate cannot add refinement evidence and only introduces a
+ * needless field-migration boundary. */
+export function sceneHasUniformFinestCellCeiling(scene: SceneDescription): boolean {
+  const lattice = refinementRegionLattice(scene);
+  const epsilon = 1e-4;
+  return sceneRefinementRegions(scene).some((region) => {
+    if (region.rule !== "minimum-cell-size" || region.maximumCellSize_cells !== 1) {
+      return false;
+    }
+    const bounds = refinementRegionCellBounds(region, lattice);
+    return bounds.min.every((value) => value <= epsilon)
+      && bounds.max.every((value, axis) =>
+        value >= lattice.dimensions[axis]! - epsilon);
+  });
+}
+
 /** A region's world box in cell coordinates, clamped to the lattice. */
 export function refinementRegionCellBounds(
   region: FluidRefinementRegion,
@@ -172,9 +189,12 @@ export function packOctreeRefinementRegions(
       || !(bounds.max[2]! > bounds.min[2]!)) continue;
     const floor = Math.min(Math.max(1, maximumLeafSize),
       clampRefinementRegionCellSize(region.minimumCellSize_cells));
+    const ceiling = region.maximumCellSize_cells === undefined ? 0
+      : Math.min(Math.max(1, maximumLeafSize),
+        clampRefinementRegionCellSize(region.maximumCellSize_cells));
     const base = written * OCTREE_REFINEMENT_REGION_WORDS;
     boxes.set([bounds.min[0]!, bounds.min[1]!, bounds.min[2]!, floor], base);
-    boxes.set([bounds.max[0]!, bounds.max[1]!, bounds.max[2]!, 0], base + 4);
+    boxes.set([bounds.max[0]!, bounds.max[1]!, bounds.max[2]!, ceiling], base + 4);
     written += 1;
   }
   control[0] = written;
@@ -212,6 +232,43 @@ export function refinementRegionFloorForLeaf(
     if (contained) floor = Math.max(floor, boxes[base + 3]!);
   }
   return floor;
+}
+
+/** The finest authored ceiling that contains this leaf; zero means no cap. */
+export function refinementRegionCeilingForLeaf(
+  packed: ArrayBuffer,
+  origin: readonly [number, number, number],
+  size: number,
+): number {
+  const count = Math.min(new Uint32Array(packed, 0, 4)[0]!, OCTREE_REFINEMENT_REGION_CAPACITY);
+  const boxes = new Float32Array(packed, 16,
+    OCTREE_REFINEMENT_REGION_WORDS * OCTREE_REFINEMENT_REGION_CAPACITY);
+  let ceiling = 0;
+  for (let index = 0; index < count; index += 1) {
+    const base = index * OCTREE_REFINEMENT_REGION_WORDS;
+    let contained = true;
+    for (let axis = 0; axis < 3; axis += 1) {
+      if (origin[axis]! < boxes[base + axis]!
+        || origin[axis]! + size > boxes[base + 4 + axis]!) {
+        contained = false;
+        break;
+      }
+    }
+    const authored = boxes[base + 7]!;
+    if (contained && authored > 0) ceiling = ceiling === 0
+      ? authored : Math.min(ceiling, authored);
+  }
+  return ceiling;
+}
+
+/** Whether an optional largest-cell bound requires this candidate to split. */
+export function refinementRegionForcesSplit(
+  packed: ArrayBuffer,
+  origin: readonly [number, number, number],
+  size: number,
+): boolean {
+  const ceiling = refinementRegionCeilingForLeaf(packed, origin, size);
+  return ceiling > 0 && size > ceiling;
 }
 
 /** Whether a region holds this candidate at its floor, blocking the split. */
@@ -253,6 +310,13 @@ export function validateRefinementRegions(
     }
     if (!OCTREE_REFINEMENT_REGION_CELL_SIZES.includes(region?.minimumCellSize_cells)) {
       errors.push(`${where} minimum cell size must be one of ${OCTREE_REFINEMENT_REGION_CELL_SIZES.join(", ")} cells`);
+    }
+    if (region?.maximumCellSize_cells !== undefined
+      && !OCTREE_REFINEMENT_REGION_CELL_SIZES.includes(region.maximumCellSize_cells)) {
+      errors.push(`${where} maximum cell size must be one of ${OCTREE_REFINEMENT_REGION_CELL_SIZES.join(", ")} cells`);
+    } else if (region?.maximumCellSize_cells !== undefined
+      && region.maximumCellSize_cells < region.minimumCellSize_cells) {
+      errors.push(`${where} maximum cell size must not be smaller than its minimum cell size`);
     }
   }
   return errors;

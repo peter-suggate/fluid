@@ -439,7 +439,7 @@ test("smoke stability envelope consumes only explicit structured energy pairs", 
 
 test("pooled stats readback decodes the exact 32-byte pair and clears rejected samples", () => {
   const projection = readFileSync(new URL("../lib/webgpu-octree.ts", import.meta.url), "utf8");
-  const uniform = readFileSync(new URL("../lib/webgpu-uniform-eulerian.ts", import.meta.url), "utf8");
+  const uniform = readFileSync(new URL("../lib/webgpu-octree-eulerian.ts", import.meta.url), "utf8");
   assert.match(projection,
     /get structuredProjectionEnergyStats\(\): GPUBuffer \| undefined \{[\s\S]*this\.structuredDynamics\?\.projectionEnergyStats/);
   assert.match(uniform,
@@ -452,7 +452,7 @@ test("pooled stats readback decodes the exact 32-byte pair and clears rejected s
 });
 
 test("uniform telemetry reads the exact paired projection report and clears blockers", () => {
-  const uniform = readFileSync(new URL("../lib/webgpu-uniform-eulerian.ts", import.meta.url), "utf8");
+  const uniform = readFileSync(new URL("../lib/webgpu-octree-eulerian.ts", import.meta.url), "utf8");
   const readStats = uniform.slice(uniform.indexOf("async readStats()"), uniform.indexOf("\n  destroy()"));
   assert.match(uniform, /size: 16 \+ STRUCTURED_PROJECTION_ENERGY_WORDS \* 4/,
     "the pooled readback reserves exactly one eight-word energy report");

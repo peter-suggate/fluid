@@ -10,7 +10,7 @@ import {
   type OctreeOwnerLeafSize,
   type OctreeOwnerPagePlan,
 } from "../lib/webgpu-octree-owner-pages";
-import { WebGPUUniformEulerianSolver } from "../lib/webgpu-uniform-eulerian";
+import { WebGPUOctreeEulerianSolver } from "../lib/webgpu-octree-eulerian";
 
 const modulePath = process.env.WEBGPU_NODE_MODULE;
 
@@ -183,8 +183,7 @@ test("compact frontier overflow fails closed with bounded lists and a dense orig
   const { device, validationErrors } = await createDevice();
   try {
     const scene = calmDeepScene();
-    const solver = new WebGPUUniformEulerianSolver(device, scene, "balanced", undefined, {
-      secondaryParticles: false,
+    const solver = new WebGPUOctreeEulerianSolver(device, scene, "balanced", undefined, {
       octree: {
         maximumLeafSize: 32,
         adaptivity: 1,

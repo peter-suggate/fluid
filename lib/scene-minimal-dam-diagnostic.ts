@@ -21,8 +21,13 @@ export interface DiagnosticLimitScheduleEntry {
 export interface MinimalDamMotionDiagnosticParameters {
   minimumPeakSpeed_m_s: number;
   minimumLateralSpread_m: number;
+  minimumFinalSpeed_m_s?: number;
+  minimumLiquidVolumeRetentionRatio?: number;
   maximumMechanicalEnergyRetention?: number;
   maximumRitterCelerityRatio?: number;
+  maximumStepPotentialEnergyIncreaseFraction?: number;
+  maximumStepKineticEnergyDropFraction?: number;
+  maximumStepLiquidCellGrowthRatio?: number;
   energyEvaluationAfter_s?: number;
 }
 
@@ -136,6 +141,36 @@ export function evaluateMinimalDamMotionDiagnostic(input: {
     const energySamples = arrayPath(diagnostics, "energy", "checkpoints")
       ?? (Array.isArray(diagnostics.compactMechanicalEnergyCheckpoints)
         ? diagnostics.compactMechanicalEnergyCheckpoints : []);
+    const finalSpeed = numberPath(energySamples.at(-1), "maximumLiquidComponentSpeed_m_s");
+    if (input.parameters.minimumFinalSpeed_m_s !== undefined) {
+      findings.push(hookFinding({
+        id: `${method}.final-speed`, method,
+        passed: finalSpeed !== undefined && finalSpeed >= input.parameters.minimumFinalSpeed_m_s,
+        message: finalSpeed !== undefined && finalSpeed >= input.parameters.minimumFinalSpeed_m_s
+          ? `minimal dam retained ${finalSpeed} m/s at the final checkpoint`
+          : `minimal dam final motion ${finalSpeed ?? "unknown"} m/s is below ${input.parameters.minimumFinalSpeed_m_s} m/s`,
+        expected: { minimum_m_s: input.parameters.minimumFinalSpeed_m_s }, actual: finalSpeed,
+      }));
+    }
+    if (input.parameters.minimumLiquidVolumeRetentionRatio !== undefined) {
+      const liquidVolume = (sample: unknown) =>
+        numberPath(sample, "finiteLiquidVolumeCellSum")
+        ?? numberPath(sample, "liquidVolumeCellSum");
+      const initialVolume = liquidVolume(energySamples[0]);
+      const finalVolume = liquidVolume(energySamples.at(-1));
+      const retention = initialVolume !== undefined && initialVolume > 0
+        && finalVolume !== undefined ? finalVolume / initialVolume : undefined;
+      findings.push(hookFinding({
+        id: `${method}.visible-volume-retention`, method,
+        passed: retention !== undefined
+          && retention >= input.parameters.minimumLiquidVolumeRetentionRatio,
+        message: retention !== undefined
+          && retention >= input.parameters.minimumLiquidVolumeRetentionRatio
+          ? `minimal dam retained ${retention} of reconstructed liquid volume`
+          : `minimal dam reconstructed liquid-volume retention ${retention ?? "unknown"} is below ${input.parameters.minimumLiquidVolumeRetentionRatio}`,
+        expected: { minimum: input.parameters.minimumLiquidVolumeRetentionRatio }, actual: retention,
+      }));
+    }
     if (input.parameters.maximumMechanicalEnergyRetention !== undefined) {
       const retentions = energySamples.flatMap((sample) => {
         const value = numberPath(sample, "mechanicalEnergyRetentionRatio");
@@ -170,6 +205,66 @@ export function evaluateMinimalDamMotionDiagnostic(input: {
           ? `motion liquid peak ${peak} m/s stayed within its Ritter celerity envelope`
           : `motion liquid reached ${peak ?? "unknown"} m/s; the declared ${input.parameters.maximumRitterCelerityRatio}x Ritter celerity bound is ${maximum} m/s`,
         expected: { maximum_m_s: maximum }, actual: peak,
+      }));
+    }
+    const consecutiveMaximum = (metric: (prior: unknown, current: unknown) => number | undefined) => {
+      const values: number[] = [];
+      for (let index = 1; index < energySamples.length; index += 1) {
+        const value = metric(energySamples[index - 1], energySamples[index]);
+        if (value !== undefined && Number.isFinite(value)) values.push(value);
+      }
+      return values.length > 0 ? Math.max(...values) : undefined;
+    };
+    if (input.parameters.maximumStepPotentialEnergyIncreaseFraction !== undefined) {
+      const initial = numberPath(energySamples[0], "gravitationalPotentialEnergyProxy");
+      const worst = initial !== undefined && Math.abs(initial) > 0
+        ? consecutiveMaximum((prior, current) => {
+          const a = numberPath(prior, "gravitationalPotentialEnergyProxy");
+          const b = numberPath(current, "gravitationalPotentialEnergyProxy");
+          return a === undefined || b === undefined ? undefined : Math.max(0, b - a) / Math.abs(initial);
+        }) : undefined;
+      findings.push(hookFinding({
+        id: `${method}.step-potential-energy-increase`, method,
+        passed: worst !== undefined
+          && worst <= input.parameters.maximumStepPotentialEnergyIncreaseFraction,
+        message: worst !== undefined
+          && worst <= input.parameters.maximumStepPotentialEnergyIncreaseFraction
+          ? `largest one-step potential-energy increase fraction ${worst} stayed continuous`
+          : `one-step potential-energy increase fraction ${worst ?? "unknown"} exceeds ${input.parameters.maximumStepPotentialEnergyIncreaseFraction}`,
+        expected: { maximum: input.parameters.maximumStepPotentialEnergyIncreaseFraction }, actual: worst,
+      }));
+    }
+    if (input.parameters.maximumStepKineticEnergyDropFraction !== undefined) {
+      const initialPotential = numberPath(energySamples[0], "gravitationalPotentialEnergyProxy") ?? 0;
+      const minimumResolved = Math.abs(initialPotential) * 1e-6;
+      const worst = consecutiveMaximum((prior, current) => {
+        const a = numberPath(prior, "reconstructedKineticEnergyProxy");
+        const b = numberPath(current, "reconstructedKineticEnergyProxy");
+        return a === undefined || b === undefined || a <= minimumResolved
+          ? undefined : Math.max(0, a - b) / a;
+      });
+      findings.push(hookFinding({
+        id: `${method}.step-kinetic-energy-drop`, method,
+        passed: worst !== undefined && worst <= input.parameters.maximumStepKineticEnergyDropFraction,
+        message: worst !== undefined && worst <= input.parameters.maximumStepKineticEnergyDropFraction
+          ? `largest one-step kinetic-energy drop fraction ${worst} stayed continuous`
+          : `one-step kinetic-energy drop fraction ${worst ?? "unknown"} exceeds ${input.parameters.maximumStepKineticEnergyDropFraction}`,
+        expected: { maximum: input.parameters.maximumStepKineticEnergyDropFraction }, actual: worst,
+      }));
+    }
+    if (input.parameters.maximumStepLiquidCellGrowthRatio !== undefined) {
+      const worst = consecutiveMaximum((prior, current) => {
+        const a = numberPath(prior, "liquidCellCount");
+        const b = numberPath(current, "liquidCellCount");
+        return a === undefined || b === undefined || a <= 0 ? undefined : b / a;
+      });
+      findings.push(hookFinding({
+        id: `${method}.step-liquid-cell-growth`, method,
+        passed: worst !== undefined && worst <= input.parameters.maximumStepLiquidCellGrowthRatio,
+        message: worst !== undefined && worst <= input.parameters.maximumStepLiquidCellGrowthRatio
+          ? `largest one-step liquid-cell growth ratio ${worst} stayed continuous`
+          : `one-step liquid-cell growth ratio ${worst ?? "unknown"} exceeds ${input.parameters.maximumStepLiquidCellGrowthRatio}`,
+        expected: { maximum: input.parameters.maximumStepLiquidCellGrowthRatio }, actual: worst,
       }));
     }
   }

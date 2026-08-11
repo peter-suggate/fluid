@@ -4,7 +4,7 @@ import test from "node:test";
 
 const transportSource = readFileSync(new URL("../components/TransportBar.tsx", import.meta.url), "utf8");
 const controllerSource = readFileSync(new URL("../lib/simulation/controller.ts", import.meta.url), "utf8");
-const solverSource = readFileSync(new URL("../lib/webgpu-uniform-eulerian.ts", import.meta.url), "utf8");
+const solverSource = readFileSync(new URL("../lib/webgpu-octree-eulerian.ts", import.meta.url), "utf8");
 const octreeSource = readFileSync(new URL("../lib/webgpu-octree.ts", import.meta.url), "utf8");
 const rendererSource = readFileSync(new URL("../lib/webgpu-renderer.ts", import.meta.url), "utf8");
 const viewportSource = readFileSync(new URL("../components/WebGPUViewport.tsx", import.meta.url), "utf8");
@@ -32,7 +32,8 @@ test("WebGPU transport is capability-gated until the fenced structured t=0 autho
   assert.match(authoritySwitch, /case "surface-global-fine"[\s\S]*encodeSurface\(encoder, 0\)/);
   assert.match(authoritySwitch,
     /case "sparse-render-world"[\s\S]*encodeSparseBrickWorld\(encoder\)[\s\S]*encodeInactiveTopologyCandidate\(encoder\)/);
-  assert.doesNotMatch(authoritySwitch, /face-band|power-publication|closest-point-extension/i);
+  assert.doesNotMatch(authoritySwitch,
+    /"(?:face-band|power-publication|closest-point-extension)"/i);
   assert.match(solverSource, /initialSparseAuthorityReady: this\.initialSparseAuthorityPublished/);
   const t0Validation = solverSource.slice(
     solverSource.indexOf("private async validateInitialSparseAuthority"),

@@ -368,7 +368,7 @@ test("PassBroker cutover has no raw-encoder adapter or proxy facade", () => {
   const spgridSource = readFileSync(
     new URL("../lib/webgpu-octree-spgrid-vcycle.ts", import.meta.url), "utf8");
   const octreeSource = readFileSync(new URL("../lib/webgpu-octree.ts", import.meta.url), "utf8");
-  const advanceSource = readFileSync(new URL("../lib/webgpu-uniform-eulerian.ts", import.meta.url), "utf8");
+  const advanceSource = readFileSync(new URL("../lib/webgpu-octree-eulerian.ts", import.meta.url), "utf8");
 
   for (const legacyName of ["PassBrokerSource", "withPassBroker", "commandEncoderFacade", "PASS_BROKER_OWNER",
     "legacy encoder boundary"]) {

@@ -335,6 +335,20 @@ test("Losasso recurring topology publication reuses exact bind variants", () => 
     "authority-bank copy kernels must consume the complete 2-D dispatch grid");
 });
 
+test("factor-one adaptive phi republishes continuous wet-frontier coefficients", () => {
+  const projection = read("../lib/webgpu-octree.ts");
+  const dirtyFrontier = projection.slice(
+    projection.indexOf("fn buildDirtyFrontierDelta()"),
+    projection.indexOf("fn currentPressureOwnerWet"),
+  );
+  assert.match(dirtyFrontier,
+    /let wet = \(changed & TILE_SIGNATURE_FRONTIER_CHANGED\) != 0u[\s\S]*adaptiveCoarseSurface != 0u && fineSummaryFactor == 1u/,
+    "a binary wet signature cannot retain continuously changing ghost-fluid face fractions");
+  assert.doesNotMatch(projection,
+    /sceneHasUniformFinestCellCeiling\(this\.scene\)[\s\S]*Uniform-fine topology cannot retain an inactive candidate/,
+    "a fixed structural graph must still republish its moving pressure frontier");
+});
+
 test("Losasso exact row reuse carries the accepted topology bank on the GPU", () => {
   const backendWGSL = read("../lib/webgpu-octree-losasso-backend.wgsl.ts");
   const authorityCommitWGSL = read("../lib/webgpu-octree-losasso-authority-commit.wgsl.ts");
@@ -416,7 +430,7 @@ test("Losasso face publication masks T-junction quadrants and stages walls close
 });
 
 test("Losasso diagnostics and tripwires are no longer backend-gated", () => {
-  const uniform = read("../lib/webgpu-uniform-eulerian.ts");
+  const uniform = read("../lib/webgpu-octree-eulerian.ts");
   const stats = uniform.slice(uniform.indexOf("async readStats()"), uniform.indexOf("\n  destroy()"));
   assert.match(stats,
     /globalFineDiagnosticsPromise = compactFineExpected[\s\S]*readGlobalFineLevelSetDiagnostics/);
@@ -433,15 +447,40 @@ test("Losasso diagnostics and tripwires are no longer backend-gated", () => {
     /losassoCutoverLane\s*\? \["topology", "mgpcg", "fineWorklist"\]/);
 });
 
-test("Losasso consumes the shared residual-gated hard iteration ceiling", () => {
+test("Losasso consumes the residual-gated ceiling selected for the authored topology", () => {
   const source = read("../lib/webgpu-octree.ts");
   const construction = source.slice(source.indexOf("this.losassoBackend ="),
     source.indexOf("this.pressureSolverControl", source.indexOf("this.losassoBackend =")));
   assert.match(construction,
-    /maximumIterations: this\.solveTailPolicy\.hardOuterIterationCeiling/);
+    /maximumIterations:[\s\S]{0,160}this\.solveTailPolicy\.hardOuterIterationCeiling/);
   assert.match(construction,
-    /hardIterationCeiling: this\.solveTailPolicy\.hardOuterIterationCeiling/);
+    /hardIterationCeiling: pressureHardIterationCeiling/);
+  assert.match(source,
+    /sceneHasUniformFinestCellCeiling\(this\.scene\)[\s\S]*OCTREE_PIPELINED_PCG_MAXIMUM_HARD_ITERATION_CEILING/,
+    "a uniformly fine authored experiment retains the same residual target with a wider fail-safe tail");
   assert.doesNotMatch(construction, /maximumIterations: 32|hardIterationCeiling: 32/);
+});
+
+test("uniform-fine adaptive phi redistances one connected graph", () => {
+  const host = read("../lib/webgpu-octree-losasso-adaptive-phi.ts");
+  const shader = read("../lib/webgpu-octree-losasso-adaptive-phi.wgsl.ts");
+  assert.match(host, /this\.options\.fullGraphRedistance \? 1 : 0/);
+  assert.match(shader, /\(redistance&&p\.policy\.y!=0u\)\|\|abs\(centre\)<reach/,
+    "the uniform-fine experiment cannot strand redistance nodes in disconnected compact masks");
+});
+
+test("accepted adaptive velocity refreshes the air-side shell every frame", () => {
+  const shader = read("../lib/webgpu-octree-losasso-adaptive-velocity.wgsl.ts");
+  assert.match(shader, /const AV_REFRESH:u32=255u/);
+  assert.match(shader,
+    /fn avRefreshAdvancingAirNode[\s\S]*phi>0\.[\s\S]*phi<=accurateReach/,
+    "only the outward air-side shell is marked for fresh extrapolation");
+  assert.match(shader,
+    /fn avReconstructAccepted[\s\S]*avPriorReady\(value\.w,avRefreshAdvancingAirNode\(graphNode\)\)/);
+  assert.match(shader, /ready==0u\|\|ready==AV_REFRESH\|\|ready>wave/,
+    "a stale air value cannot seed the next extrapolation wave");
+  assert.match(shader, /ownState!=0u&&ownState!=AV_REFRESH/,
+    "the refresh marker remains writable by the current frame's wave");
 });
 
 test("Losasso resolves ambiguous redistance seeds without changing Power", () => {
@@ -476,66 +515,19 @@ test("Losasso coarse advection reconstructs nodes and trilinearly samples them",
     "characteristics should use a midpoint carrier rather than forward Euler");
 });
 
-test("Losasso velocity advection uses a bounded MacCormack correction", () => {
+test("Losasso velocity advection uses one basic semi-Lagrangian pass", () => {
   const shader = read("../lib/webgpu-octree-losasso-dynamics.wgsl.ts");
   const host = read("../lib/webgpu-octree-losasso-dynamics.ts");
   const backend = read("../lib/webgpu-octree-losasso-backend.ts");
-  const band = read("../lib/webgpu-octree-losasso-extension-band.ts");
-  const bandShader = read("../lib/webgpu-octree-losasso-extension-band.wgsl.ts");
-  const extension = read("../lib/webgpu-octree-losasso-velocity-extension.ts");
-  assert.match(shader, /fn reverseLosassoFaces/);
-  assert.match(shader, /traceVelocity\(centre, -params\.domainOriginDt\.w, ADVECTED_FIELD\)/);
-  assert.match(shader,
-    /let corrected = prediction \+ 0\.5 \* \(original\.value\[axis\] - reversed\)/);
-  assert.match(shader,
-    /advectedVelocity\[faceId\] = clamp\(corrected,[\s\S]*sourceStencil\.lower\[axis\],[\s\S]*sourceStencil\.upper\[axis\]\)/,
-    "the error correction must stay inside the forward source stencil");
-  assert.match(shader, /predictedVelocity\[faceId\] = INVALID_VELOCITY/,
-    "missing sparse reverse support must disable rather than extrapolate a correction");
-  assert.match(shader,
-    /if \(original\.boundary \|\| departure\.boundary \|\| sourceStencil\.boundary[\s\S]*FACE_INTERFACE_NEARBY\) != 0u\) \{ return; \}/,
-    "MacCormack must fall back to first order at closed walls and the liquid interface");
-  assert.match(shader,
-    /if \(arrival\.valid && !arrival\.boundary[\s\S]*FACE_INTERFACE_NEARBY\) == 0u\)/,
-    "the reverse characteristic must not re-enable correction across a wall or surface");
-  const coarsePhi = read("../lib/webgpu-octree-losasso-coarse-phi.wgsl.ts");
-  assert.match(coarsePhi,
-    /face\.reserved&=~FACE_INTERFACE_NEARBY;[\s\S]*targetLoad\(rowBase\+8u\*face\.negativeRow\+5u,reuse\)&INTERFACE/,
-    "coarse publication must stamp interface adjacency onto the existing face ABI");
+  assert.match(shader, /fn advectLosassoFaces/);
+  assert.match(shader, /traceVelocityFromFirst\([\s\S]*params\.domainOriginDt\.w, BAND_FIELD, prior\)/);
+  assert.doesNotMatch(shader, /fn reverseLosassoFaces|fn correctLosassoFaces|MacCormack/);
   const advection = host.slice(host.indexOf("encodeAdvection("),
     host.indexOf("encodeForcesAndDivergence("));
-  assert.ok(advection.indexOf("advectLosassoFaces") < advection.indexOf("reverseLosassoFaces"));
-  assert.ok(advection.indexOf("reverseLosassoFaces") < advection.indexOf("correctLosassoFaces"));
-  assert.match(shader, /predictedVelocity is scratch here/,
-    "MacCormack should reuse the force output field rather than allocate another face array");
-  assert.match(backend, /encodePredictorExtension\([\s\S]*advectedVelocity/,
-    "the reverse pass must sample a complete predictor on the published W7 graph");
-  assert.match(band, /this\.predictorVelocity = this\.projectedSeeds/,
-    "the band predictor should reuse the projected-seed arena");
-  const gather = bandShader.slice(bandShader.indexOf("fn gatherLosassoProjectedSeeds"));
-  assert.match(gather, /let wet=seedWetFace\[id\]/,
-    "advance-time seed gathering must remain one direct mapped read");
-  assert.doesNotMatch(gather, /containingWet|wetDirectory/,
-    "topology lookup must not leak into the advection-time gather");
-  assert.match(band, /encodeTopologyRemap\(broker: PassBroker\)/,
-    "topology changes should refresh direct seed ids once at the epoch boundary");
-  const remap = bandShader.slice(bandShader.indexOf("fn clearLosassoDenseWetFaces"),
-    bandShader.indexOf("fn gatherLosassoProjectedSeeds"));
-  assert.match(remap, /atomicMin\(&denseWetFace\[key\],encoded\)/,
-    "topology remapping should scatter into a bounded dense finest-face map");
-  assert.doesNotMatch(remap, /wetDirectory|exactWet|containingWet|for\(var probe/,
-    "topology remapping must not chase the wet hash directory");
-  assert.match(remap, /MULTI_OWNER/,
-    "a retired coarse seed spanning refined owners must remain a live averaged seed");
-  const multiGather = bandShader.slice(bandShader.indexOf("fn gatherLosassoProjectedSeeds"));
-  assert.match(multiGather, /wet==MULTI_OWNER[\s\S]*exactAdd\(&exact,value\)[\s\S]*exactValue\(exact\)\/max\(1\.,count\)/,
-    "multi-owner seeds must area-average the finest projected faces instead of becoming zero");
-  assert.match(backend,
-    /publisher\.encodeReadyCommit\(broker, input\);[\s\S]*extensionBand\.encodeTopologyRemap\(broker\)/,
-    "the seed remap must observe the newly accepted wet authority");
-  assert.match(extension,
-    /predictorVelocities = \[this\.source\.projectedVelocity,[\s\S]*this\.source\.projectedVelocity\]/,
-    "the existing Jacobi scratch pair should extend the predictor in place");
+  assert.match(advection, /advectLosassoFaces/);
+  assert.doesNotMatch(advection, /reverseLosassoFaces|correctLosassoFaces/);
+  assert.match(backend, /this\.dynamics\.encodeAdvection\(broker, step\)/);
+  assert.doesNotMatch(backend, /encodePredictorExtension\([\s\S]*advectedVelocity/);
 });
 
 test("Losasso wall release measures volume without post-step phi correction", () => {
@@ -623,7 +615,7 @@ test("Losasso cold fine bootstrap retains the analytic liquid SDF around solids"
 });
 
 test("Losasso diagnostics do not interpret absent Power controls as failures", () => {
-  const source = read("../lib/webgpu-uniform-eulerian.ts");
+  const source = read("../lib/webgpu-octree-eulerian.ts");
   assert.match(source,
     /const powerStructuredAuthority = this\.octreeProjection\?\.coarseBackend === "power2017"/);
   assert.match(source,

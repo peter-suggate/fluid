@@ -267,7 +267,7 @@ export function losassoStepSnapshotDiagnosticSummary(
     + `+${phiReceipts[34] ?? 0}+${phiReceipts[35] ?? 0},`
     + `velocityMiss=${phiReceipts[2] ?? 0}/${phiReceipts[3] ?? 0},`
     + `phiMiss=${phiReceipts[5] ?? 0},commit=${phiReceipts[20] ?? 0},`
-    + `repair=${phiReceipts[21] ?? 0},external=${phiReceipts[54] ?? 0}) · `
+    + `repair=${phiReceipts[21] ?? 0},failure=${phiReceipts[54] ?? 0}) · `
     + `velocity accepted=${velocityReceipt(0)} predictor=${velocityReceipt(12)}`
     + ` candidate=${velocityReceipt(24)} · renderer=${renderer[1] ?? 0}/${renderer[2] ?? 0}`
     + ` · ${candidateTransactionSummary}`;

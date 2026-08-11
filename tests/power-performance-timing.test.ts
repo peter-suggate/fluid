@@ -4,7 +4,7 @@ import test from "node:test";
 
 const source = (path: string) => readFileSync(new URL(path, import.meta.url), "utf8");
 const octree = source("../lib/webgpu-octree.ts");
-const solver = source("../lib/webgpu-uniform-eulerian.ts");
+const solver = source("../lib/webgpu-octree-eulerian.ts");
 const panel = source("../components/PerformancePanel.tsx");
 const activityGrid = source("../components/PerformanceActivityGrid.tsx");
 const renderer = source("../lib/webgpu-renderer.ts");

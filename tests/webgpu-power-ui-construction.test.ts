@@ -2,11 +2,13 @@ import assert from "node:assert/strict";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
+import { resolveMethodValues } from "../lib/methods";
 import { octreeMethod, octreeSolverOptions } from "../lib/methods/octree";
+import { POWER2017_FACTOR4_BENCHMARK_METHOD_PROFILE } from "../lib/scenes";
 import { fluidExecutionDeviceFeatures } from "../lib/gpu-startup";
 import { requiredFluidDeviceLimits } from "../lib/webgpu-device-limits";
 import { managedGPUDevice } from "../lib/gpu-compilation-manager";
-import { WebGPUUniformEulerianSolver } from "../lib/webgpu-uniform-eulerian";
+import { WebGPUOctreeEulerianSolver } from "../lib/webgpu-octree-eulerian";
 import { OCTREE_INITIAL_SPARSE_AUTHORITY_PHASES } from "../lib/webgpu-octree";
 import { WEBGPU_EXCLUSIVE_LOCK } from "../tools/webgpu-smoke-isolation";
 import { createSmokeScenario } from "../tools/webgpu-smoke-scenarios";
@@ -19,7 +21,7 @@ const PORTABLE_STORAGE_BUFFER_LIMIT = 10;
 const retainedNativeGPUs: GPU[] = [];
 const retainedDevices: GPUDevice[] = [];
 
-test("Dawn constructs the exact production power UI graph at the portable storage limit", {
+test("Dawn constructs the selectable Power 2017 factor-4 graph at the portable storage limit", {
   skip: !process.env.WEBGPU_NODE_MODULE
     && "set WEBGPU_NODE_MODULE for the production UI construction gate",
   timeout: 120_000,
@@ -131,14 +133,15 @@ test("Dawn constructs the exact production power UI graph at the portable storag
   });
   device.pushErrorScope("validation");
 
-  let solver: WebGPUUniformEulerianSolver | undefined;
+  let solver: WebGPUOctreeEulerianSolver | undefined;
   let scopeOpen = true;
   try {
-    const scenario = createSmokeScenario("dam-break-ui");
-    const values = octreeMethod.presetFor("balanced");
+    const scenario = createSmokeScenario("symmetric-expansion", "power2017-factor-4");
+    const values = resolveMethodValues(octreeMethod, "balanced",
+      POWER2017_FACTOR4_BENCHMARK_METHOD_PROFILE.overrides);
     constructingSolver = true;
     try {
-      solver = new WebGPUUniformEulerianSolver(solverDevice, scenario.scene, "balanced", undefined, {
+      solver = new WebGPUOctreeEulerianSolver(solverDevice, scenario.scene, "balanced", undefined, {
         ...octreeSolverOptions(scenario.scene, "balanced", values),
         deferPipelineCompilation: true,
       });
@@ -186,8 +189,8 @@ test("Dawn constructs the exact production power UI graph at the portable storag
     assert.deepEqual(uncaptured, []);
     assert.deepEqual(
       [solver.info.nx, solver.info.ny, solver.info.nz],
-      [24, 18, 16],
-      "the construction gate must retain the exact browser dam-break lattice",
+      [32, 16, 32],
+      "the construction gate must retain the exact symmetric-expansion lattice",
     );
     assert.ok(solver.structuredVelocityControl,
       "production structured velocity authority was not constructed");

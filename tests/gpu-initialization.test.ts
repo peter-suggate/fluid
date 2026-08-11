@@ -127,7 +127,7 @@ test("power-octree method values are structural after unsupported spray is remov
 
 test("octree initialization has no hand-maintained pipeline totals and fences warm-up", () => {
   const runner = readFileSync(new URL("../lib/gpu-initialization.ts", import.meta.url), "utf8");
-  const uniform = readFileSync(new URL("../lib/webgpu-uniform-eulerian.ts", import.meta.url), "utf8");
+  const uniform = readFileSync(new URL("../lib/webgpu-octree-eulerian.ts", import.meta.url), "utf8");
   const octree = readFileSync(new URL("../lib/webgpu-octree.ts", import.meta.url), "utf8");
   const spgrid = readFileSync(new URL("../lib/webgpu-octree-spgrid-vcycle.ts", import.meta.url), "utf8");
   const renderer = readFileSync(new URL("../lib/webgpu-renderer.ts", import.meta.url), "utf8");
@@ -143,9 +143,9 @@ test("octree initialization has no hand-maintained pipeline totals and fences wa
   assert.match(octree, /OCTREE_ALLOCATION_STAGES[\s\S]*Plan octree domain and capacity[\s\S]*Finalize octree resource graph/,
     "octree allocation progress must be colocated with its resource constructor");
   assert.match(uniform, /initializationTasks\(\)/);
-  assert.match(uniform, /uniformPipelineCache/, "structural rebuilds must reuse immutable programs");
   assert.match(octree, /initializationTasks\(\): GPUInitializationTask\[\]/);
-  assert.match(octree, /octreePipelineCache/);
+  assert.match(octree, /octreePipelineCache/,
+    "structural rebuilds must reuse immutable adaptive programs");
   for (const family of ["spgrid", "fine-topology", "fine-redistance", "air-support", "structured-dynamics"]) {
     assert.match(octree, new RegExp(`id: "octree\\.power-pipelines\\.${family}"`),
       `${family} must compile after buffer-only power-authority allocation`);

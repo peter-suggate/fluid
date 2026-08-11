@@ -7,6 +7,8 @@ import {
   OCTREE_SECTION43_SHELL_DEPTH_ENVIRONMENT,
   OCTREE_FACTOR1_PREDICTED_SOLVE_TAIL_ENVIRONMENT,
   OCTREE_SOLVE_TAIL_RELATIVE_TOLERANCE,
+  OCTREE_SOLVE_TAIL_HARD_OUTER_ITERATION_CEILING,
+  OCTREE_SOLVE_TAIL_LARGE_HARD_OUTER_ITERATION_CEILING,
   OCTREE_VCYCLE_MINIMUM_PARALLEL_LEVELS,
   OCTREE_VCYCLE_TAIL_WORKGROUP_CELLS,
   countOctreePressureCommands,
@@ -161,11 +163,16 @@ test("solve-tail policy encodes the paper upper envelope and keeps scene score a
   assert.equal(planOctreeSolveTail(PROFILES.ceilingDrop).boundarySmoothingIterations,
     OCTREE_SECTION43_PRODUCTION_SHELL_DEPTH,
     "the 24x16x24 ceiling shares the production k=8 shell at leaf 32");
-  for (const policy of [quiescent, river, planOctreeSolveTail(PROFILES.uiDam),
-    planOctreeSolveTail(PROFILES.largerTwoLevel), planOctreeSolveTail(PROFILES.ocean)]) {
+  for (const [policy, expectedHardCeiling] of [
+    [quiescent, OCTREE_SOLVE_TAIL_HARD_OUTER_ITERATION_CEILING],
+    [river, OCTREE_SOLVE_TAIL_HARD_OUTER_ITERATION_CEILING],
+    [planOctreeSolveTail(PROFILES.uiDam), OCTREE_SOLVE_TAIL_HARD_OUTER_ITERATION_CEILING],
+    [planOctreeSolveTail(PROFILES.largerTwoLevel), OCTREE_SOLVE_TAIL_HARD_OUTER_ITERATION_CEILING],
+    [planOctreeSolveTail(PROFILES.ocean), OCTREE_SOLVE_TAIL_LARGE_HARD_OUTER_ITERATION_CEILING],
+  ] as const) {
     assert.ok(policy.encodedOuterIterations >= 4
       && policy.encodedOuterIterations <= 10);
-    assert.equal(policy.hardOuterIterationCeiling, 40);
+    assert.equal(policy.hardOuterIterationCeiling, expectedHardCeiling);
     assert.equal(policy.boundarySmoothingIterations,
       OCTREE_SECTION43_PRODUCTION_SHELL_DEPTH);
     assert.ok(policy.relativeTolerance >= OCTREE_SOLVE_TAIL_RELATIVE_TOLERANCE);

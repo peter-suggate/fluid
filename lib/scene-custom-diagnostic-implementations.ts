@@ -170,6 +170,17 @@ const minimalDamMotion = defineSceneHookImplementation({
         : { maximumMechanicalEnergyRetention: numeric(context.parameters, "maximumMechanicalEnergyRetention") }),
       ...(numeric(context.parameters, "maximumRitterCelerityRatio") === undefined ? {}
         : { maximumRitterCelerityRatio: numeric(context.parameters, "maximumRitterCelerityRatio") }),
+      ...(numeric(context.parameters, "minimumFinalSpeed_m_s") === undefined ? {}
+        : { minimumFinalSpeed_m_s: numeric(context.parameters, "minimumFinalSpeed_m_s") }),
+      ...(numeric(context.parameters, "minimumLiquidVolumeRetentionRatio") === undefined ? {}
+        : { minimumLiquidVolumeRetentionRatio:
+          numeric(context.parameters, "minimumLiquidVolumeRetentionRatio") }),
+      ...(numeric(context.parameters, "maximumStepPotentialEnergyIncreaseFraction") === undefined ? {}
+        : { maximumStepPotentialEnergyIncreaseFraction: numeric(context.parameters, "maximumStepPotentialEnergyIncreaseFraction") }),
+      ...(numeric(context.parameters, "maximumStepKineticEnergyDropFraction") === undefined ? {}
+        : { maximumStepKineticEnergyDropFraction: numeric(context.parameters, "maximumStepKineticEnergyDropFraction") }),
+      ...(numeric(context.parameters, "maximumStepLiquidCellGrowthRatio") === undefined ? {}
+        : { maximumStepLiquidCellGrowthRatio: numeric(context.parameters, "maximumStepLiquidCellGrowthRatio") }),
       ...(numeric(context.parameters, "energyEvaluationAfter_s") === undefined ? {}
         : { energyEvaluationAfter_s: numeric(context.parameters, "energyEvaluationAfter_s") }),
     };
@@ -460,10 +471,15 @@ const fluidSymmetry = defineSceneHookImplementation({
       context.parameters, "frontAdvanceEvaluationEnd_s");
     const minimumMeanFrontAdvance_cells = numeric(
       context.parameters, "minimumMeanFrontAdvance_cells");
+    const wallClimbEvaluationStart_s = numeric(
+      context.parameters, "wallClimbEvaluationStart_s");
+    const minimumPeakWallClimb_cells = numeric(
+      context.parameters, "minimumPeakWallClimb_cells");
     const circularityValues = [circularityEvaluationStart_s, circularityEvaluationEnd_s,
       maximumAxisDiagonalFrontDifference_cells, maximumRadialRmsDeviation_cells,
       maximumRadialDeviation_cells, minimumCircularityAngularSamples];
     const advanceValues = [frontAdvanceEvaluationEnd_s, minimumMeanFrontAdvance_cells];
+    const wallClimbValues = [wallClimbEvaluationStart_s, minimumPeakWallClimb_cells];
     if (!limits || requireExactTopology === undefined || requireAllWallsReached === undefined) {
       return parameterFailure("fluid-symmetry", [...keys, "requireExactTopology", "requireAllWallsReached"]);
     }
@@ -486,6 +502,12 @@ const fluidSymmetry = defineSceneHookImplementation({
         || minimumMeanFrontAdvance_cells! <= 0)) {
       return parameterFailure("fluid-symmetry", ["frontAdvanceEvaluationEnd_s",
         "minimumMeanFrontAdvance_cells"]);
+    }
+    if (wallClimbValues.some((value) => value !== undefined)
+      && (wallClimbValues.some((value) => value === undefined)
+        || wallClimbEvaluationStart_s! < 0 || minimumPeakWallClimb_cells! <= 0)) {
+      return parameterFailure("fluid-symmetry", ["wallClimbEvaluationStart_s",
+        "minimumPeakWallClimb_cells"]);
     }
     return context.selectedMethods.flatMap((method) => {
       const diagnostics = recordValue(context.getMethod(method)?.diagnostics);
@@ -673,6 +695,27 @@ const fluidSymmetry = defineSceneHookImplementation({
           maximumStepSpread: limits.maximumWallContactStepSpread },
         actual: { contactSteps, stepSpread: spread },
       }));
+      if (wallClimbEvaluationStart_s !== undefined
+        && minimumPeakWallClimb_cells !== undefined) {
+        const peakByWall = Object.fromEntries(wallNames.map((wall) => {
+          const peak = observations.filter(({ time_s }) =>
+            time_s >= wallClimbEvaluationStart_s).reduce((maximum, { observation }) =>
+              Math.max(maximum, numberPath(recordPath(observation, "walls", wall),
+                "maximumWetHeight_cells") ?? 0), 0);
+          return [wall, peak];
+        })) as Record<typeof wallNames[number], number>;
+        const minimumPeak = Math.min(...Object.values(peakByWall));
+        const passed = minimumPeak >= minimumPeakWallClimb_cells;
+        findings.push(hookFinding({
+          id: `${method}.wall-climb`, method, passed,
+          message: passed
+            ? "the impact sheet climbed every wall to the required height"
+            : "the back-wall splash remained below the required height",
+          expected: { evaluationStart_s: wallClimbEvaluationStart_s,
+            minimumPeakWallClimb_cells },
+          actual: { peakByWall, minimumPeakWallClimb_cells: minimumPeak },
+        }));
+      }
       return findings;
     });
   },

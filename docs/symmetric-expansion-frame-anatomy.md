@@ -123,7 +123,7 @@ advances, 0 tripwires.
 
 The advance is one fixed sequence declared in
 `lib/physics-step-program.ts:OCTREE_STEP_PROGRAM` and encoded by
-`WebGPUUniformEulerianSimulation.advanceTo` (`lib/webgpu-uniform-eulerian.ts:1791`).
+`WebGPUOctreeEulerianSolver.advanceTo` (`lib/webgpu-octree-eulerian.ts`).
 Measured on the representative advance:
 
 | Band | Passes | t (ms) | GPU ms | % |

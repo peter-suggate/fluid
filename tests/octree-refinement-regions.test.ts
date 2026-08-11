@@ -5,11 +5,16 @@ import {
   OCTREE_REFINEMENT_REGION_CAPACITY,
   packOctreeRefinementRegions,
   refinementRegionBlocksSplit,
+  refinementRegionCeilingForLeaf,
   refinementRegionFloorForLeaf,
+  refinementRegionForcesSplit,
   refinementRegionLattice,
+  sceneHasUniformFinestCellCeiling,
 } from "../lib/octree-refinement-regions";
 import {
+  refinementRegionEntity,
   refinementRegionFromDrag,
+  refinementRegionSelectionId,
   refinementRegionsFromQuery,
   refinementRegionsToQuery,
   withRefinementRegion,
@@ -55,6 +60,25 @@ const UNIT_LATTICE = {
 function packed(regions: readonly FluidRefinementRegion[], maximumLeafSize = 32) {
   return packOctreeRefinementRegions(regions, UNIT_LATTICE, maximumLeafSize);
 }
+
+test("only a full-domain 1^3 ceiling makes the pressure topology immutable", () => {
+  const scene = getScenePreset("water-box-dam-break").create();
+  const full = region({
+    minimumCellSize_cells: 1,
+    maximumCellSize_cells: 1,
+    min_m: { x: -0.5 * scene.container.width_m, y: 0,
+      z: -0.5 * scene.container.depth_m },
+    max_m: { x: 0.5 * scene.container.width_m, y: scene.container.height_m,
+      z: 0.5 * scene.container.depth_m },
+  });
+  scene.fluid.refinementRegions = [full];
+  assert.equal(sceneHasUniformFinestCellCeiling(scene), true);
+  scene.fluid.refinementRegions = [{ ...full,
+    max_m: { ...full.max_m, x: 0 } }];
+  assert.equal(sceneHasUniformFinestCellCeiling(scene), false);
+  scene.fluid.refinementRegions = [{ ...full, maximumCellSize_cells: 2 }];
+  assert.equal(sceneHasUniformFinestCellCeiling(scene), false);
+});
 
 /**
  * Every bound is on the region's own floor lattice, or at the container wall.
@@ -111,6 +135,39 @@ test("a region holds only the leaves it fully contains, at the coarsest floor ov
   assert.equal(refinementRegionFloorForLeaf(stacked, [0, 0, 0], 16), 16);
 });
 
+test("an optional largest cell forces fully contained leaves to its finest overlapping ceiling", () => {
+  const bounded = packed([region({
+    minimumCellSize_cells: 1,
+    maximumCellSize_cells: 4,
+    min_m: { x: 8, y: 8, z: 8 },
+    max_m: { x: 40, y: 40, z: 40 },
+  })]);
+  assert.equal(new Float32Array(bounded, 16)[7], 4,
+    "the spare hi.w word carries the optional ceiling");
+  assert.equal(refinementRegionCeilingForLeaf(bounded, [8, 8, 8], 8), 4);
+  assert.equal(refinementRegionForcesSplit(bounded, [8, 8, 8], 8), true);
+  assert.equal(refinementRegionForcesSplit(bounded, [8, 8, 8], 4), false);
+  assert.equal(refinementRegionForcesSplit(bounded, [4, 8, 8], 8), false,
+    "a boundary-straddling leaf remains outside the region's authority");
+
+  const stacked = packed([
+    region({ id: "coarse", minimumCellSize_cells: 1, maximumCellSize_cells: 8,
+      min_m: { x: 0, y: 0, z: 0 }, max_m: { x: 32, y: 32, z: 32 } }),
+    region({ id: "fine", minimumCellSize_cells: 1, maximumCellSize_cells: 2,
+      min_m: { x: 0, y: 0, z: 0 }, max_m: { x: 32, y: 32, z: 32 } }),
+  ]);
+  assert.equal(refinementRegionCeilingForLeaf(stacked, [0, 0, 0], 16), 2,
+    "every overlapping ceiling is satisfied by choosing the finest one");
+  assert.equal(refinementRegionCeilingForLeaf(packed([region()]), [0, 0, 0], 8), 0,
+    "an omitted largest cell preserves the old evidence-driven coarsening");
+
+  const scene = cloneScene(defaultScene);
+  assert.match(validateScene(withRefinementRegion(scene, "region-1", region({
+    minimumCellSize_cells: 8,
+    maximumCellSize_cells: 4,
+  }))).join("\n"), /maximum cell size must not be smaller/);
+});
+
 test("a scene with no usable regions is inert rather than special-cased", () => {
   // Floor one has to read as "no opinion" — a size-one leaf never splits anyway
   // — or every domain without regions would stop refining.
@@ -146,12 +203,36 @@ test("a drawn region lands on its own floor lattice", () => {
   assert.deepEqual(validateScene(withRefinementRegion(scene, drawn.id, drawn)), []);
 });
 
-// ---- the address bar ------------------------------------------------------
-
-test("a region round-trips through the query as percentages, without creeping", () => {
+test("the editor offers AUTO or a dyadic largest cell and keeps both bounds valid", () => {
   const scene = cloneScene(defaultScene);
   const drawn = refinementRegionFromDrag(scene,
-    { x: -0.3, y: 0.1, z: -0.3 }, { x: 0.3, y: 0.1, z: 0.3 }, { minimumCellSize_cells: 8 });
+    { x: -0.3, y: 0, z: -0.3 }, { x: 0.3, y: 0, z: 0.3 },
+    { minimumCellSize_cells: 8 });
+  const authored = withRefinementRegion(scene, drawn.id, drawn);
+  const entity = refinementRegionEntity.find(
+    { scene: authored, bodies: [] }, refinementRegionSelectionId(drawn.id));
+  assert.ok(entity);
+  const largest = entity.choices?.find((choice) => choice.id === "maximumCellSize");
+  assert.ok(largest);
+  assert.equal(largest.label, "Largest cell");
+  assert.equal(largest.value, "auto");
+  assert.equal(largest.options[0]?.label, "AUTO");
+
+  const fineOnly = largest.options.find((option) => option.id === "1")?.apply();
+  assert.ok(fineOnly?.fluid?.refinementRegions);
+  assert.equal(fineOnly.fluid.refinementRegions[0]?.minimumCellSize_cells, 1,
+    "lowering the ceiling also lowers an incompatible existing floor");
+  assert.equal(fineOnly.fluid.refinementRegions[0]?.maximumCellSize_cells, 1);
+  assert.deepEqual(validateScene(fineOnly as ReturnType<typeof cloneScene>), []);
+});
+
+// ---- the address bar ------------------------------------------------------
+
+test("a bounded region round-trips through the query as percentages, without creeping", () => {
+  const scene = cloneScene(defaultScene);
+  const drawn = refinementRegionFromDrag(scene,
+    { x: -0.3, y: 0.1, z: -0.3 }, { x: 0.3, y: 0.1, z: 0.3 },
+    { minimumCellSize_cells: 8, maximumCellSize_cells: 16 });
   const authored = withRefinementRegion(scene, drawn.id, drawn);
   const query = refinementRegionsToQuery(authored);
 
@@ -163,6 +244,7 @@ test("a region round-trips through the query as percentages, without creeping", 
   const region = restored.fluid.refinementRegions?.[0];
   assert.ok(region);
   assert.equal(region.minimumCellSize_cells, drawn.minimumCellSize_cells);
+  assert.equal(region.maximumCellSize_cells, drawn.maximumCellSize_cells);
   for (const axis of ["x", "y", "z"] as const) {
     assert.ok(Math.abs(region.min_m[axis] - drawn.min_m[axis]) < 1e-9, `min.${axis}`);
     assert.ok(Math.abs(region.max_m[axis] - drawn.max_m[axis]) < 1e-9, `max.${axis}`);
@@ -176,6 +258,8 @@ test("a region round-trips through the query as percentages, without creeping", 
   // being the floor.
   const hand = refinementRegionsFromQuery(scene, "13.7_4.1_22.9_61.3_48.8_77.2_8")[0];
   assert.ok(hand);
+  assert.equal(hand.maximumCellSize_cells, undefined,
+    "old seven-field links retain evidence-driven coarsening");
   assertOnFloorLattice(scene, { min: hand.min_m, max: hand.max_m }, 8);
 });
 
@@ -250,6 +334,12 @@ test("drawing a region is a uniform write, not a re-seed", () => {
   assert.equal(sceneEditRequiresReset(before, after), false);
   assert.equal(sceneEditRequiresReset(after,
     withRefinementRegion(after, "region-1", region({ minimumCellSize_cells: 16 }))), false);
+  const fineOnly = withRefinementRegion(after, "region-1", region({
+    minimumCellSize_cells: 1,
+    maximumCellSize_cells: 1,
+  }));
+  assert.notEqual(gpuSceneUniformKey(after), gpuSceneUniformKey(fineOnly));
+  assert.equal(sceneEditRequiresReset(after, fineOnly), false);
 });
 
 test("every refinement decision consults the authored regions", () => {
@@ -259,11 +349,11 @@ test("every refinement decision consults the authored regions", () => {
   // without the last, drawing a region would not dirty the tiles it covers and
   // the delta topology path would never rebuild them.
   assert.match(octreeProjectionShader,
-    /fn leafNeedsRefinement\(origin: vec3u, size: u32\) -> bool \{[\s\S]{0,400}?refinementRegionHoldsLeaf\(origin, size\)[\s\S]{0,80}?return false/);
+    /fn leafNeedsRefinement\(origin: vec3u, size: u32\) -> bool \{[\s\S]{0,400}?refinementRegionForcesSplit\(origin, size\)[\s\S]{0,80}?return true[\s\S]{0,160}?refinementRegionHoldsLeaf\(origin, size\)[\s\S]{0,80}?return false/);
   assert.match(octreeProjectionShader,
-    /fn pressureRefinementEvidence\(origin: vec3u, size: u32\) -> bool \{[\s\S]{0,600}?refinementRegionHoldsLeaf\(origin, size\)[\s\S]{0,80}?return false/);
+    /fn pressureRefinementEvidence\(origin: vec3u, size: u32\) -> bool \{[\s\S]{0,800}?refinementRegionForcesSplit\(origin, size\)[\s\S]{0,80}?return true[\s\S]{0,160}?refinementRegionHoldsLeaf\(origin, size\)[\s\S]{0,80}?return false/);
   assert.match(octreeProjectionShader,
-    /let decision = !refinementRegionHoldsLeaf\(origin, size\)\s*&& \(pressureEvidence/);
+    /let forcedByRegion = refinementRegionForcesSplit\(origin, size\)[\s\S]{0,100}?let decision = forcedByRegion \|\| \(!refinementRegionHoldsLeaf\(origin, size\)/);
 });
 
 test("the final split to a regional floor retains only a one-cell interface shell", () => {

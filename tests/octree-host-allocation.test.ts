@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { planUniformHostAllocation } from "../lib/octree-host-allocation";
+import { planUniformHostAllocation } from "../lib/uniform-host-allocation";
 
-const uniformSource = readFileSync(new URL("../lib/webgpu-uniform-eulerian.ts", import.meta.url), "utf8");
-const allocationSource = readFileSync(new URL("../lib/octree-host-allocation.ts", import.meta.url), "utf8");
+const octreeHostSource = readFileSync(new URL("../lib/webgpu-octree-eulerian.ts", import.meta.url), "utf8");
+const uniformSource = readFileSync(new URL("../lib/webgpu-uniform-reference.ts", import.meta.url), "utf8");
+const allocationSource = readFileSync(new URL("../lib/uniform-host-allocation.ts", import.meta.url), "utf8");
 const octreeSource = readFileSync(new URL("../lib/webgpu-octree.ts", import.meta.url), "utf8");
 
 test("uniform host allocation reports only the fields it actually owns", () => {
@@ -15,7 +16,7 @@ test("uniform host allocation reports only the fields it actually owns", () => {
   assert.deepEqual(plan.pressureExtent, [7, 5, 3]);
   assert.deepEqual(plan.volumeExtent, [7, 5, 3]);
   assert.equal(plan.velocityBytes, 7 * 5 * 3 * (2 * 16 + 8) + 9 * 7 * 5 * 8);
-  assert.equal(plan.scalarBytes, 7 * 5 * 3 * 4 * 4);
+  assert.equal(plan.scalarBytes, 7 * 5 * 3 * 6 * 4);
   assert.equal(plan.conditioningBytes, 7 * 5 * 3 * 4);
   assert.equal(plan.allocatedBytes,
     plan.velocityBytes + plan.scalarBytes + plan.conditioningBytes);
@@ -32,7 +33,7 @@ test("uniform host allocation rejects invalid simulation extents", () => {
   assert.throws(() => planUniformHostAllocation(0, 4, 4, "maccormack"), RangeError);
 });
 
-test("octree has no dense allocation switch, compatibility telemetry, or shared shader graph", () => {
+test("adaptive and uniform methods own separate solver graphs", () => {
   for (const retired of [
     "adaptiveFaceVelocityCutover",
     "planOctreeHostAllocation",
@@ -42,35 +43,23 @@ test("octree has no dense allocation switch, compatibility telemetry, or shared 
     "velocitySavedBytes",
     "scalarSavedBytes",
   ]) {
-    assert.doesNotMatch(`${uniformSource}\n${allocationSource}`, new RegExp(retired));
+    assert.doesNotMatch(`${octreeHostSource}\n${allocationSource}`, new RegExp(retired));
   }
-  assert.match(uniformSource,
-    /this\.hostAllocation = options\.octree\s*\?\s*undefined\s*:\s*planUniformHostAllocation/);
-  assert.match(uniformSource,
-    /if \(this\.hostAllocation\) \{\s*this\.shaderModule = device\.createShaderModule/);
-  assert.match(uniformSource,
-    /if \(this\.hostAllocation\) \{\s*const surfaceAuthority/);
-  assert.match(uniformSource,
-    /if \(this\.hostAllocation\) \{\s*this\.reductionBuffer = device\.createBuffer/,
-    "the dense diagnostic reduction is allocated only for a dense host");
-  assert.doesNotMatch(uniformSource,
-    /this\.reductionBuffer = device\.createBuffer[\s\S]{0,200}\n\s*if \(this\.hostAllocation\)/,
-    "octree construction must not allocate a dense diagnostic placeholder");
-  assert.doesNotMatch(uniformSource,
-    /octreeHostAllocation|compatibility VOF texture|compact-face host scalars/);
-  assert.doesNotMatch(uniformSource,
-    /velocityExtent\s*=\s*this\.hostAllocation\?\.velocityExtent\s*\?\?|\[1,\s*1,\s*1\].*rgba32float|Octree renderer column binding/,
-    "compact octree construction must not allocate format-only velocity or column textures");
-  const octreeConstruction = uniformSource.slice(
-    uniformSource.indexOf("new WebGPUOctreeProjection"),
-    uniformSource.indexOf("this.applyOctreeInfo"),
-  );
-  assert.doesNotMatch(octreeConstruction, /velocityIn|velocityOut|columnBase/);
+  assert.doesNotMatch(octreeHostSource,
+    /planUniformHostAllocation|uniformReferenceComputeShader|hostAllocation|velocityA|pressureA|volumeA/,
+    "the octree host must not retain the retired dense compatibility solver");
+  assert.match(octreeHostSource, /class WebGPUOctreeEulerianSolver/);
+  assert.match(octreeHostSource, /new WebGPUOctreeProjection/);
+  assert.match(uniformSource, /class WebGPUUniformReferenceSolver/);
+  assert.match(uniformSource, /planUniformHostAllocation/);
+  assert.match(uniformSource, /uniformReferenceComputeShader/);
+  assert.doesNotMatch(uniformSource, /WebGPUOctreeProjection|options\.octree|coarseDynamics/,
+    "the uniform reference must not expose an adaptive compatibility seam");
   const octreeResources = octreeSource.slice(
     octreeSource.indexOf("interface OctreeProjectionResources"),
     octreeSource.indexOf("function octreeLeafSize"),
   );
-  assert.doesNotMatch(`${octreeResources}\n${octreeSource}`,
+  assert.doesNotMatch(`${octreeHostSource}\n${octreeResources}\n${octreeSource}`,
     /velocityIn|velocityOut|@binding\(0\) var velocityIn|@binding\(1\) var velocityOut|constrainedFaceVelocity/,
     "the octree projection graph must expose only native compact velocity authority");
 });

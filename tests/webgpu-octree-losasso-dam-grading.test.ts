@@ -12,6 +12,15 @@ interface ControlSummary {
 interface DamSample {
   t_s: number;
   frontCells: number;
+  interiorRidgeCells: number;
+  interiorRidgeAtX: number;
+  profileX: number[];
+  maximumHeightCells: number;
+  centerOfMassCells: [number, number, number];
+  acceptedAdvanceValid: boolean;
+  massErrors: number;
+  pressureRelativeResidual: number;
+  adaptiveVelocityReceipts: number[];
   topologyLeaves: number;
   leafCountsBySize: Record<string, number>;
   surfaceRowSizeHistogram: Record<string, number>;
@@ -30,6 +39,77 @@ interface DamSample {
   massControl?: number[];
   velocityMigration?: number[];
 }
+
+test("Dawn full-fine ceiling reaches and climbs the wall without freezing", {
+  skip: !process.env.WEBGPU_NODE_MODULE
+    && "set WEBGPU_NODE_MODULE for the focused full-fine dam-front gate",
+  timeout: 180_000,
+}, () => {
+  const cleanEnvironment = Object.fromEntries(
+    Object.entries(process.env).filter(([key]) => !key.startsWith("FLUID_")),
+  );
+  const root = fileURLToPath(new URL("..", import.meta.url));
+  const child = spawnSync(process.execPath,
+    ["--import", "tsx", "tools/probe-dam-surface-shape.ts"], {
+      cwd: root,
+      encoding: "utf8",
+      timeout: 150_000,
+      killSignal: "SIGKILL",
+      maxBuffer: 32 * 1024 * 1024,
+      env: {
+        ...cleanEnvironment,
+        NODE_ENV: process.env.NODE_ENV ?? "test",
+        FLUID_WEBGPU_BACKEND: process.env.FLUID_WEBGPU_BACKEND ?? "metal",
+        ...(process.env.FLUID_WEBGPU_ADAPTER
+          ? { FLUID_WEBGPU_ADAPTER: process.env.FLUID_WEBGPU_ADAPTER } : {}),
+        FLUID_SAMPLE_TIMES_S: "0.304,0.408,0.600,0.800",
+        FLUID_MAX_DT: "0.008",
+        FLUID_SURFACE_COMPACT: "1",
+        FLUID_REFINEMENT_REGION_FLOOR: "1",
+        FLUID_REFINEMENT_REGION_CEILING: "1",
+        FLUID_REFINEMENT_REGION_SCOPE: "full",
+      },
+    });
+  assert.equal(child.status, 0,
+    `full-fine dam probe failed\nstdout:\n${child.stdout}\nstderr:\n${child.stderr}`);
+  const result = probeResult(child.stdout);
+  assert.ok(result, `full-fine dam probe emitted no result record\n${child.stdout}`);
+  assert.deepEqual(result.validationErrors, []);
+  assert.equal(result.samples.length, 4);
+
+  const [preImpact, wallImpact, wallClimb, lateWallClimb] = result.samples;
+  assert.ok(preImpact && wallImpact && wallClimb && lateWallClimb);
+  for (const sample of result.samples) {
+    assert.deepEqual(sample.leafCountsBySize, { "1": 6_912 },
+      `t=${sample.t_s}: authored largest-cell 1³ did not remain uniformly fine`);
+    assert.equal(sample.topologyLeaves, 6_912);
+    assert.ok(Number.isFinite(sample.pressureRelativeResidual)
+      && sample.pressureRelativeResidual < 1e-6,
+    `t=${sample.t_s}: full-fine pressure solve did not converge`);
+    assert.equal(sample.acceptedAdvanceValid, true,
+      `t=${sample.t_s}: the UI would freeze on a rejected scalar advance`);
+    assert.equal(sample.massErrors, 0,
+      `t=${sample.t_s}: conservative mass transport rejected the step`);
+    for (const base of [0, 12]) {
+      assert.equal(sample.adaptiveVelocityReceipts[base + 2], 0,
+        `t=${sample.t_s}: accepted velocity extrapolation bank ${base / 12}`);
+      assert.equal(sample.adaptiveVelocityReceipts[base + 7], 1,
+        `t=${sample.t_s}: accepted velocity publication bank ${base / 12}`);
+    }
+  }
+  assert.ok(preImpact.frontCells >= 22,
+    `full-fine dam front lost energy before wall impact: ${preImpact.frontCells}`);
+  assert.ok(wallImpact.frontCells >= 23.75,
+    `full-fine dam front never reached the x=24 wall: ${wallImpact.frontCells}`);
+  assert.ok(wallClimb.maximumHeightCells >= 10,
+    `full-fine wall impact did not produce a climbing splash: ${wallClimb.maximumHeightCells}`);
+  assert.ok(lateWallClimb.maximumHeightCells >= 10,
+    `full-fine wall splash dissipated prematurely: ${lateWallClimb.maximumHeightCells}`);
+  assert.ok(wallImpact.centerOfMassCells[0] >= preImpact.centerOfMassCells[0] + 1,
+    "full-fine liquid centre of mass did not advance with its thin front");
+  assert.ok(preImpact.interiorRidgeCells <= 0.75,
+    `full-fine front formed a ${preImpact.interiorRidgeCells}-cell standing interior curtain at x=${preImpact.interiorRidgeAtX}: ${preImpact.profileX}`);
+});
 
 interface DamProbeResult {
   phase: "dam-surface-shape";
@@ -195,9 +275,9 @@ test("Dawn consumes every default dam step snapshot through 0.080 s", {
   assert.deepEqual(result.validationErrors, []);
   assert.equal(result.samples.length, 20);
   assert.equal(result.samples.at(-1)?.t_s, 0.08);
-  assert.ok(result.samples.some((sample) =>
-    sample.topologyTransition.candidateAuthority.epoch === 0),
-  "the cadence did not exercise a dormant candidate snapshot");
+  assert.ok(result.samples.every((sample) =>
+    sample.topologyTransition.candidateAuthority.epoch !== 0),
+  "factor-one phi skipped a moving wet-frontier publication");
 });
 
 test("Dawn keeps the full-tank leaf-8 candidate transaction coherent through 0.240 s", {

@@ -586,7 +586,7 @@ const POWER_DAM_COMPUTE_PASS_OWNERSHIP: readonly PowerDamComputePassOwnershipRul
   // per-family advect/commit/force/project/RHS/reconstruct labels.
   { stage: "Structured velocity dynamics", label: /(?:structured dynamics|structured family class|structured divergence RHS class|Reconstruct projected structured rows|Transfer accepted velocity to changed topology faces)/i },
   // Emitted only while a trace is active: one single-dispatch marker pass per
-  // physics phase (lib/webgpu-uniform-eulerian.ts). Owned so a --profile capture
+  // physics phase (lib/webgpu-octree-eulerian.ts). Owned so a --profile capture
   // does not report them as unattributed work.
   { stage: "Profiler phase boundaries", label: /^Physics activity (?:boundary \d+|frame (?:begin|end))$/i },
   // C2 widened the single-workgroup cubic band scatter into an indirect

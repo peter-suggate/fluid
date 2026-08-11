@@ -866,9 +866,11 @@ Current ranked evidence is:
    roughly 15--20 quadrature cells while accepted redistance and candidate
    handoff receipts are nearly neutral. Disabling bounded MacCormack in favour
    of simple semi-Lagrangian phi transport makes the dam substantially worse,
-   so the production default remains bounded MacCormack. Losasso 2004's simple
-   phi transport depends on particle-level-set corrections that this
-   implementation does not have.
+   so the production default remains bounded MacCormack. This is an explicit
+   stopgap for Losasso section 6's missing particle-level-set correction, not a
+   claim that the paper specifies MacCormack; Ando--Batty section 3.2 likewise
+   prefers first-order transport near liquid surfaces. The first-order arm
+   remains executable evidence until the missing correction stage is present.
    A corrected true-time trace at `0.112--0.136 s` further separates the slow
    front from this loss: every crossing leaf and every front departure donor is
    span one, while adaptive front nodal x velocity is only
@@ -973,6 +975,33 @@ from `0.127--0.138 m/s` to `0.129--0.153 m/s`; this is encouraging but still
 well below HEAD's `0.305--0.403 m/s`. About 22 percent of front stencil weight
 still lands on exact-zero faces, so a compact face-space owner/covering-face
 support construction remains the next fidelity task.
+
+The 32-cubed mini-dam robustness pass exposed a separate Section 6 extension
+gap. Compiled independent-node packets stored each neighbour as a compact
+packet id, but the propagation kernels consumed that word as a graph-node id
+for phi lookup, T-junction constraint resolution, and frontier expansion. The
+second lookup silently mapped an unrelated node. This violated Losasso's
+nodal outward-extrapolation stage and Ando--Batty section 3.2's requirement
+that velocity be extrapolated after redistancing. Compiled adjacency now keeps
+the authoritative graph-node identity and maps to an independent packet only
+at the execution boundary. At the eleven-step `0.044 s` Dawn checkpoint both
+accepted and predictor fields changed from 42 unresolved nodes inside the 7h
+characteristic reach to zero. The lane accepts with no rejected advances or
+raster holes, reaches `0.813793 m/s`, keeps the largest one-step potential
+energy increase at `0.00442221`, kinetic-energy drop at `0.0719548`, and
+liquid-cell growth ratio at `1`. The 69-step `0.276 s` lane also accepts with
+`0.264771 m` lateral spread, `3.35117 m/s` final speed, and `0.887423` retained
+reconstructed liquid volume. The latter is now a required physics gate, so a
+moving but rapidly disappearing level set cannot pass on speed alone.
+
+The same A/B also sharpens the particle-correction gap. With the bounded
+correction disabled, first-order semi-Lagrangian transport produced four tiny
+enclosed raster cavities even after velocity reach became complete. Losasso
+section 6 couples that simple transport to a particle level set; this lane does
+not yet implement that correction. Production therefore retains bounded
+MacCormack as an explicit stopgap, while `FLUID_ADAPTIVE_PHI_MACCORMACK=0`
+remains the executable paper-comparison arm. This exception must disappear or
+be re-evaluated when particle/local feature correction is implemented.
 
 Immediate acceptance order is therefore: keep the twenty-step D4 gate green;
 retain and continuously assert the existing unit-sized crossing shell; keep

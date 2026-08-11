@@ -2,10 +2,7 @@
 export const octreeLosassoDynamicsWGSL = /* wgsl */ `
 const INVALID_FACE: u32 = 0xffffffffu;
 const INVALID_ROW: u32 = 0xffffffffu;
-const INVALID_VELOCITY: f32 = 3.402823e38;
 const BAND_FIELD: u32 = 0u;
-const ADVECTED_FIELD: u32 = 1u;
-const FACE_INTERFACE_NEARBY: u32 = 0x10000000u;
 
 struct Params {
   dimensionsMaximumLeaf: vec4u,
@@ -221,8 +218,8 @@ struct VelocityTrace {
   boundary: bool,
 };
 
-// A signed midpoint characteristic. Positive dt backtraces the forward
-// predictor; negative dt traces the predictor forward for MacCormack reversal.
+// Midpoint characteristic tracing for the paper's basic first-order
+// semi-Lagrangian velocity transport.
 fn traceVelocityFromFirst(
   origin: vec3f, dt: f32, field: u32, first: VelocitySample,
 ) -> VelocityTrace {
@@ -233,10 +230,6 @@ fn traceVelocityFromFirst(
   let carrier = select(first.value, midpoint.value, midpoint.valid);
   return VelocityTrace(origin + quantizeTraceOffset(-gridDt * carrier), true,
     first.boundary || (midpoint.valid && midpoint.boundary));
-}
-
-fn traceVelocity(origin: vec3f, dt: f32, field: u32) -> VelocityTrace {
-  return traceVelocityFromFirst(origin, dt, field, velocityAtGrid(origin, field));
 }
 
 fn faceCenterGrid(faceId: u32) -> vec3f {
@@ -322,57 +315,6 @@ fn advectLosassoFaces(@builtin(global_invocation_id) invocation: vec3u) {
     if (sample.valid) { value = sample.value[faces[faceId].axis]; }
   }
   advectedVelocity[faceId] = select(0.0, value, finite(value));
-}
-
-// predictedVelocity is scratch here; the force pass overwrites it after the
-// correction. An invalid reversal explicitly disables correction if the
-// published W7 predictor support cannot provide a complete nodal stencil.
-@compute @workgroup_size(64)
-fn reverseLosassoFaces(@builtin(global_invocation_id) invocation: vec3u) {
-  let faceId = invocation.x;
-  if (faceId >= liveFaces() || faceId >= arrayLength(&predictedVelocity)) { return; }
-  let centre = faceCenterGrid(faceId);
-  let arrival = traceVelocity(centre, -params.domainOriginDt.w, ADVECTED_FIELD);
-  if (arrival.valid && !arrival.boundary
-      && (faces[faceId].span & FACE_INTERFACE_NEARBY) == 0u) {
-    let reversed = velocityAtGrid(arrival.point, ADVECTED_FIELD);
-    if (reversed.valid && !reversed.boundary) {
-      predictedVelocity[faceId] = reversed.value[faces[faceId].axis];
-      return;
-    }
-  }
-  predictedVelocity[faceId] = INVALID_VELOCITY;
-}
-
-@compute @workgroup_size(64)
-fn correctLosassoFaces(@builtin(global_invocation_id) invocation: vec3u) {
-  let faceId = invocation.x;
-  if (faceId >= liveFaces() || faceId >= arrayLength(&advectedVelocity)
-      || faceId >= arrayLength(&predictedVelocity)
-      || params.domainOriginDt.w == 0.0) { return; }
-  let prediction = advectedVelocity[faceId];
-  let reversed = predictedVelocity[faceId];
-  if (!finite(prediction) || !finite(reversed) || reversed == INVALID_VELOCITY) { return; }
-  let centre = faceCenterGrid(faceId);
-  let original = velocityAtGrid(centre, BAND_FIELD);
-  let departure = traceVelocityFromFirst(
-    centre, params.domainOriginDt.w, BAND_FIELD, original);
-  if (!original.valid || !departure.valid) { return; }
-  let sourceStencil = velocityAtGrid(departure.point, BAND_FIELD);
-  if (!sourceStencil.valid) { return; }
-  // Selle-style fallback: keep the first-order S1a prediction anywhere the
-  // forward or reverse characteristic touched a solid/domain clamp or the
-  // one-cell interface seed layer. MacCormack remains enabled in the bulk.
-  if (original.boundary || departure.boundary || sourceStencil.boundary
-      || (faces[faceId].span & FACE_INTERFACE_NEARBY) != 0u) { return; }
-  let axis = faces[faceId].axis;
-  let corrected = prediction + 0.5 * (original.value[axis] - reversed);
-  if (!finite(corrected)) { return; }
-  // Bounded MacCormack: the correction may restore transported extrema but
-  // cannot create values outside the eight reconstructed source nodes that
-  // contributed to this face's forward prediction.
-  advectedVelocity[faceId] = clamp(corrected,
-    sourceStencil.lower[axis], sourceStencil.upper[axis]);
 }
 
 @compute @workgroup_size(64)
@@ -480,10 +422,9 @@ export function makeOctreeLosassoAdaptiveDynamicsWGSL(adaptiveSamplerWGSL: strin
   let source = replaceMarkedWGSL(octreeLosassoDynamicsWGSL,
     "legacy-velocity-bindings", "");
   source = replaceMarkedWGSL(source, "legacy-face-lookup", "");
-  return replaceMarkedWGSL(source, "legacy-velocity-sampler", `${adaptiveSamplerWGSL}\n
+  return replaceMarkedWGSL(source, "legacy-velocity-sampler", `${adaptiveSamplerWGSL}
 fn velocityAtGrid(gridValue: vec3f, field: u32) -> VelocitySample {
-  let clamped = clamp(gridValue, vec3f(0.0),
-    vec3f(params.dimensionsMaximumLeaf.xyz));
+  let clamped = clamp(gridValue, vec3f(0.0), vec3f(params.dimensionsMaximumLeaf.xyz));
   let sample = sampleAdaptiveVelocityGrid(clamped, field);
   if (!sample.valid) { return invalidVelocitySample(); }
   return VelocitySample(sample.value, sample.lower, sample.upper, true,

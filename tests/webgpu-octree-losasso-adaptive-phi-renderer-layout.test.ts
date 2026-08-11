@@ -10,14 +10,11 @@ import {
 import {
   octreeLosassoAdaptivePhiEvidenceWGSL,
   octreeLosassoAdaptivePhiBacktraceWGSL,
-  octreeLosassoAdaptivePhiCorrectionWGSL,
   octreeLosassoAdaptivePhiHandoffWGSL,
   octreeLosassoAdaptivePhiRedistanceFinishWGSL,
   octreeLosassoAdaptivePhiRedistanceInitializeWGSL,
   octreeLosassoAdaptivePhiRedistanceProjectAWGSL,
   octreeLosassoAdaptivePhiRedistanceProjectBWGSL,
-  octreeLosassoAdaptivePhiPredictorSnapshotWGSL,
-  octreeLosassoAdaptivePhiReverseBacktraceWGSL,
   octreeLosassoAdaptivePhiScheduleWGSL,
   octreeLosassoAdaptivePhiTransportWGSL,
   octreeLosassoAdaptivePhiWorklistConstraintMarkWGSL,
@@ -93,6 +90,36 @@ test("adaptive phi publisher parallelizes live rows and clears the renderer capa
   assert.match(shader,
     /fncanonicalPublishedZero\(v:f32\)->f32\{letbits=bitcast<u32>\(v\);returnbitcast<f32>\(select\(bits,0u,\(bits&0x7fffffffu\)==0u\)\);\}[\s\S]*letcentre=canonicalPublishedZero\(rawCentre\);mn=canonicalPublishedZero\(mn\);mx=canonicalPublishedZero\(mx\)/,
     "derived primary rows must publish one canonical zero bit while authoritative nodal corners retain their exact values");
+});
+
+test("factor-one renderer combines mass topology with supported nodal sheets", () => {
+  const shader = compact(octreeLosassoAdaptivePhiEvidenceWGSL);
+  assert.doesNotMatch(shader, /rendererFeatureRho|blurredGamma/,
+    "renderer density dilation would turn energetic sheets into rounded blobs");
+  assert.match(shader,
+    /letsdfPhi=bitcast<f32>\(renderer\[aux\+corner\]\)/,
+    "interior and floor geometry must retain the earlier redistanced nodal SDF");
+  assert.match(shader,
+    /fnrendererNodeEvidence\(node:vec3u\).*occupied\+=select\(0u,1u,rho>1e-5\);liquid\+=select\(0u,1u,rho>=\.5\).*supportedSheet=!atSideWall&&massPhi>0\.&&sdfPhi<0\.&&evidence\.occupiedOctants>=4u&&evidence\.liquidOctants==0u/s,
+    "only wholly sub-grid four-octant sheets may retain nodal phi; ordinary bulk fronts and isolated tendrils may not");
+  assert.match(shader,
+    /letsignsAgree=.*letvalue=canonicalPublishedZero\(select\(massPhi,sdfPhi,signsAgree\|\|supportedSheet\)\)/s,
+    "mass must repair SDF sign holes without replacing agreeing metric curvature");
+  assert.doesNotMatch(shader, /node\.y==0u|node\.y==p\.dims\.y/,
+    "the no-stick gate must exclude the floor so thin floor sheets remain visible");
+  assert.match(shader,
+    /renderer\[rb\+5u\]=9u\|ADAPTIVE_CORNERS/,
+    "the publication must use one coherent nodal lattice instead of mixing row encodings");
+  assert.doesNotMatch(shader,
+    /renderer\[rb\+5u\]=[^;]*RENDERER_CELL_CENTERED/,
+    "the classifier chooses its lattice publication-wide, so a row-local cell-centred tag is invalid");
+
+  const sample = compact(makeOctreePowerCoarseLevelSetSampleWGSL());
+  assert.match(sample,
+    /entry\.flags&POWER_COARSE_CELL_CENTERED.*returnentry\.phi/s,
+    "legacy cell-centred publications must retain their direct sample path");
+  assert.doesNotMatch(sample, /fnpowerCoarseCellSample/,
+    "the sampler must not reintroduce cross-leaf cell-centre interpolation");
 });
 
 test("adaptive renderer evaluates one continuous nodal field in leaf coordinates", () => {
@@ -215,21 +242,9 @@ test("accepted transport publishes a compact physical-reach band", () => {
   assert.match(backtrace,
     /fnbacktraceIndependent\(.*v0=packedVelocity\(i\).*sampleVelocity\(boundedMid,incidentLeaves\[8u\*i\+midpointOctant\].*incidentLeaves\[8u\*i\+departureOctant\].*departures\[2u\*i\]=vec4f/s,
     "required characteristics must use compiled incident leaves for midpoint and departure support");
-  const reverseBacktrace = compact(octreeLosassoAdaptivePhiReverseBacktraceWGSL);
-  assert.match(reverseBacktrace,
-    /fnreverseBacktraceIndependent\(.*mid=q\+snapDisplacement.*reverse=q\+snapDisplacement.*departures\[2u\*i\+1u\]=vec4f/s);
   const transport = compact(octreeLosassoAdaptivePhiTransportWGSL);
   assert.match(transport, /fntransportIndependent\(.*i=worklist\[work\].*departures\[2u\*i\].*samplePhi/s);
-  const predictorSnapshot = compact(octreeLosassoAdaptivePhiPredictorSnapshotWGSL);
-  assert.match(predictorSnapshot,
-    /fnsnapshotProjectedPredictor\(.*value=phi\[i\]\[1u-\(atomicLoad\(&control\[6\]\)&1u\)\].*predictorScratch\[i\]=value/s);
-  const correction = compact(octreeLosassoAdaptivePhiCorrectionWGSL);
-  assert.match(correction, /fndonorBounds\(leaf:u32,b:u32\)->vec3f\{if\(leaf>=leafCount\(\)\)\{returnvec3f\(0\);\}/,
-    "an invalid backward donor leaf must fail closed before storage access");
-  assert.match(correction,
-    /fncorrectTransportIndependent\(.*backward=departures\[2u\*i\].*reverse=departures\[2u\*i\+1u\].*reversed=samplePredictor\(reverse\.xyz,bitcast<u32>\(reverse\.w\)\).*clamp\(predictor\+\.5\*\(prior-reversed\.value\),bounds\.x,bounds\.y\).*quantizePhi\(corrected\)/s);
-  for (const atomicSource of [reach, backtrace, reverseBacktrace, transport,
-    predictorSnapshot, correction]) {
+  for (const atomicSource of [reach, backtrace, transport]) {
     assert.doesNotMatch(atomicSource, /var<storage,read>[^;]*array<atomic</,
       "WebGPU atomic storage declarations must be read_write even when kernels only load them");
   }

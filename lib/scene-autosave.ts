@@ -1,4 +1,5 @@
 import { canonicalScene, type SceneDescription } from "./model";
+import type { MethodProfile } from "./methods";
 import { savedSceneCard } from "./scene-cards";
 import type { SceneCard } from "./scene-definition";
 import {
@@ -11,6 +12,7 @@ import {
 } from "./scene-library";
 import { findSceneDefinition } from "./scenes";
 import { useSceneStore } from "./stores/scene-store";
+import { useMethodStore } from "./stores/method-store";
 import { useShellStore } from "./stores/shell-store";
 
 /**
@@ -36,6 +38,7 @@ export const SCENE_AUTOSAVE_NAME = "Untitled scene";
 export interface SceneAutosaveDocument {
   readonly scene: SceneDescription;
   readonly presetId: string;
+  readonly methodProfile?: MethodProfile;
 }
 
 /**
@@ -65,6 +68,7 @@ export function writeSceneAutosave(
   return saveSceneToLibrary(storage, sceneAutosaveName(working.presetId), working.scene, working.presetId, {
     savedAt_ms,
     replaceId: SCENE_AUTOSAVE_ENTRY_ID,
+    methodProfile: working.methodProfile,
   }).entry;
 }
 
@@ -140,7 +144,8 @@ export function createSceneAutosave(options: SceneAutosaveOptions = {}): SceneAu
     if (!working) return;
     // Selection, panels and the shell all touch stores that reach this; a
     // document that has not actually changed is not worth a write.
-    const identity = `${working.presetId}\n${canonicalScene(working.scene)}`;
+    const identity = `${working.presetId}\n${canonicalScene(working.scene)}\n`
+      + JSON.stringify(working.methodProfile ?? null);
     if (identity === written) return;
     written = identity;
     writeSceneAutosave(options.storage, working, now());
@@ -180,18 +185,23 @@ export function startSceneAutosave(options: SceneAutosaveOptions = {}): () => vo
   const schedule = () => {
     if (!useShellStore.getState().studioEntered) return;
     const { scene, presetId } = useSceneStore.getState();
-    autosave.request({ scene, presetId });
+    const { methodId, quality, overrides } = useMethodStore.getState();
+    autosave.request({ scene, presetId, methodProfile: {
+      methodId, quality, overrides: { ...(overrides[methodId] ?? {}) },
+    } });
   };
   // A closing tab is exactly the case this exists for, and it never runs an
   // unmount; `visibilitychange` is the last callback a browser reliably gives.
   const onHidden = () => { if (document.visibilityState === "hidden") autosave.flush(); };
   const stopScene = useSceneStore.subscribe(schedule);
+  const stopMethod = useMethodStore.subscribe(schedule);
   const stopShell = useShellStore.subscribe(schedule);
   if (typeof document !== "undefined") document.addEventListener("visibilitychange", onHidden);
   schedule();
 
   return () => {
     stopScene();
+    stopMethod();
     stopShell();
     if (typeof document !== "undefined") document.removeEventListener("visibilitychange", onHidden);
     autosave.flush();

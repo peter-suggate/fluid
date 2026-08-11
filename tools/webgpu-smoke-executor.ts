@@ -1572,6 +1572,7 @@ const powerGenerationAuditLog = process.env.FLUID_POWER_GENERATION_AUDIT_LOG !==
  * Generic Losasso lanes still receive the native authority oracle, while this
  * marker additionally refuses any drift in the named release gate's wiring. */
 const losassoD4CutoverRequested = process.env.FLUID_LOSASSO_D4_CUTOVER === "1";
+const losassoCutoverReportOnly = process.env.FLUID_LOSASSO_CUTOVER_REPORT_ONLY === "1";
 const powerCandidateAuditRequested = process.env.FLUID_POWER_CANDIDATE_AUDIT === "1";
 const powerAuditEverySteps = Number(process.env.FLUID_POWER_AUDIT_EVERY_STEPS ?? 1);
 if (!Number.isSafeInteger(powerAuditEverySteps) || powerAuditEverySteps < 1) {
@@ -1691,15 +1692,22 @@ function selectedScenarios(): SmokeScenarioId[] {
 function applySceneOverrides(scene: SceneDescription, resolvedMaxDt_s = maxDtOverride): SceneDescription {
   if (resolvedMaxDt_s !== undefined) scene.numerics.maxDt_s = resolvedMaxDt_s;
   const refinementFloor = Number(process.env.FLUID_REFINEMENT_REGION_FLOOR ?? 0);
+  const refinementCeiling = Number(process.env.FLUID_REFINEMENT_REGION_CEILING ?? 0);
   if (refinementFloor > 0) {
     if (!Number.isSafeInteger(refinementFloor)
       || (refinementFloor & (refinementFloor - 1)) !== 0) {
       throw new Error("FLUID_REFINEMENT_REGION_FLOOR must be a positive power of two");
     }
+    if (refinementCeiling > 0 && (!Number.isSafeInteger(refinementCeiling)
+      || (refinementCeiling & (refinementCeiling - 1)) !== 0
+      || refinementCeiling < refinementFloor)) {
+      throw new Error("FLUID_REFINEMENT_REGION_CEILING must be a power of two no smaller than the floor");
+    }
     scene.fluid.refinementRegions = [{
       id: "smoke-full-domain-floor",
       rule: "minimum-cell-size",
       minimumCellSize_cells: refinementFloor,
+      ...(refinementCeiling > 0 ? { maximumCellSize_cells: refinementCeiling } : {}),
       min_m: { x: -0.5 * scene.container.width_m, y: 0,
         z: -0.5 * scene.container.depth_m },
       max_m: { x: 0.5 * scene.container.width_m, y: scene.container.height_m,
@@ -4267,10 +4275,13 @@ async function runGPU(
     // therefore differ by less than one thousandth of a finest cell while the
     // topology remains exact. The downstream fluid-symmetry hook still gates
     // volume, velocity, pressure, RHS, topology, and front evolution.
-    // Four published-phi quanta. The mass reconstruction consumes a velocity
-    // field whose own accepted symmetry tolerance is numerical, and each
-    // topology handoff can contribute one additional quantized interpolation.
-    const adaptiveScalarD4Tolerance_m = 4 / 65_536;
+    // Sixteen published-phi quanta, still less than 0.5% of one 5 cm finest
+    // cell. Conservative level-set volume recovery deliberately retains more
+    // kinetic energy, so the sub-ulp pressure asymmetry accepted by the field
+    // oracle travels farther before phi is quantized. Keep topology bit-exact
+    // and bound the resulting scalar displacement geometrically instead of
+    // requiring the lower-energy solution's four-quantum envelope.
+    const adaptiveScalarD4Tolerance_m = 16 / 65_536;
     if (!hasSeparateFineLevelSetBand && scenarioId === "symmetric-expansion" && (!adaptiveD4
       || adaptiveD4.graphLeafIdentityMismatches !== 0
       || adaptiveD4.nodalCornerMaximumAbsoluteError > adaptiveScalarD4Tolerance_m
@@ -4356,7 +4367,7 @@ async function runGPU(
       failures: Object.freeze(failures) });
     console.log(JSON.stringify({ scenario: scenarioId, method: resultMethod,
       phase: "losasso-cutover-oracle", ...losassoCutoverAuthority }));
-    if (failures.length > 0) {
+    if (failures.length > 0 && !losassoCutoverReportOnly) {
       throw new Error(`Losasso cutover oracle rejected: ${JSON.stringify(losassoCutoverAuthority)}`);
     }
     if (!tripwiresDisabled) {

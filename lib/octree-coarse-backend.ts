@@ -51,7 +51,10 @@ const POWER2017_POLICY: OctreeCoarseBackendPolicy = Object.freeze({
   backend: "power2017",
   frozen: true,
   grading: "power2017-graded",
-  requiresSeparateFineLevelSet: false,
+  // Section 5 evolves a uniformly higher-resolution SPGrid narrow band in
+  // addition to the coarse octree phi. The factor-4 benchmark is therefore
+  // not a valid coarse-only configuration.
+  requiresSeparateFineLevelSet: true,
   surfaceShellFineCells: 0,
   velocityChannels: "power-face-channels",
   pressureExecutor: "persistent-power-mgpcg",

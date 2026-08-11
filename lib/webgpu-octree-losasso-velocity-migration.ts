@@ -179,7 +179,6 @@ export class WebGPUOctreeLosassoVelocityMigration {
         { binding: 1, resource: { buffer: this.oldControl } },
         { binding: 2, resource: { buffer: this.oldGeometry } },
         { binding: 4, resource: { buffer: this.oldDirectory } },
-        { binding: 5, resource: { buffer: this.oldVelocity } },
         { binding: 6, resource: { buffer: target.control } },
         { binding: 7, resource: { buffer: target.faceGeometry } },
         { binding: 8, resource: { buffer: target.faces } },

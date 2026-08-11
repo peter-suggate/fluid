@@ -66,6 +66,27 @@ test("pipeline inspector rejects a non-M1 pressure authority", () => {
   assert.equal(pressure?.section, "pressure");
 });
 
+test("Losasso pressure remains pending until a step-coherent verdict arrives", () => {
+  const base = info({
+    initialSparseAuthorityReady: true, encodedSteps: 1,
+    coarseDynamicsBackend: "losasso", pressureCapacityOverflow: false,
+    pressureSolver: "Octree Losasso MGPCG · exact-reduction wide solve · plain first-order V-cycle · up to 40 iterations",
+  });
+  const awaiting = paperPipelineStages(base, undefined)
+    .find((stage) => stage.id === "pressure");
+  assert.equal(awaiting?.state, "WAITING");
+  assert.equal(awaiting?.tone, "pending");
+  assert.match(awaiting?.detail ?? "", /step-coherent pressure receipt/);
+
+  const rejected = paperPipelineStages({ ...base, quadtreePressureConverged: false }, undefined)
+    .find((stage) => stage.id === "pressure");
+  assert.equal(rejected?.state, "REJECTED");
+
+  const accepted = paperPipelineStages({ ...base, quadtreePressureConverged: true }, undefined)
+    .find((stage) => stage.id === "pressure");
+  assert.equal(accepted?.state, "CONVERGED");
+});
+
 test("always-visible health flags expose rejected fine publication", () => {
   const flags = paperPipelineHealthFlags(info({
     initialSparseAuthorityReady: true, powerDiagramAuthoritative: true,

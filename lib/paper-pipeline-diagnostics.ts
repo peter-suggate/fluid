@@ -145,20 +145,33 @@ export function paperPipelineStages(
   const pressureSection = persistentSection43 ? "§4.3" : "pressure";
   const residual = info.pressureRelativeResidual;
   const adaptiveTupleRejected = info.quadtreePressureRejectionSummary !== undefined;
-  const losassoPressureHealthy = !adaptiveTupleRejected
-    && (coarseHealthy && (info.encodedSteps ?? 0) === 0
-      || coarseHealthy && info.quadtreePressureConverged === true);
-  stages.push(losasso && losassoPressureHealthy
-    ? (info.encodedSteps ?? 0) === 0
-      ? { id: "pressure", section: pressureSection, label: "Pressure projection", state: "PREPARED", tone: "healthy", generation: generation(fineGeneration), detail: `${info.pressureSolver} · wide exact-reduction MGPCG and first-order V-cycle are ready.` }
-      : { id: "pressure", section: pressureSection, label: "Pressure projection", state: "CONVERGED", tone: "healthy", generation: generation(fineGeneration), detail: `${info.pressureSolver} · accepted converged solve.` }
-    : !losasso && powerHealthy && persistentSection43
-    ? (info.encodedSteps ?? 0) === 0
-      ? { id: "pressure", section: pressureSection, label: "Pressure projection", state: "PREPARED", tone: "healthy", generation: generation(powerGeneration), detail: `${info.pressureSolver} · selected operator and fenced t=0 solve are ready; dynamic-step convergence appears after stepping.` }
-      : { id: "pressure", section: pressureSection, label: "Pressure projection", state: residual !== undefined && residual <= 1e-4 ? "CONVERGED" : "CHECK", tone: residual !== undefined && residual <= 1e-4 ? "healthy" : "warning", generation: generation(powerGeneration), detail: residual === undefined ? `${info.pressureSolver} · latest solve residual is unavailable` : `${info.pressureSolver} · relative L2 residual ${residual.toExponential(2)} (target 1e-4)` }
-    : t0Ready
-      ? { id: "pressure", section: pressureSection, label: "Pressure projection", state: "REJECTED", tone: "rejected", generation: generation(powerGeneration), detail: info.quadtreePressureRejectionSummary ?? info.pressureSolver ?? "Selected pressure authority is unavailable." }
-      : pending("pressure", pressureSection, "Pressure projection", `Waiting for the selected authoritative ${losasso ? "Losasso" : "power"} pressure path.`));
+  if (losasso) {
+    const pressureGeneration = generation(fineGeneration);
+    if (!coarseHealthy) {
+      stages.push(t0Ready
+        ? { id: "pressure", section: pressureSection, label: "Pressure projection", state: "REJECTED", tone: "rejected", generation: pressureGeneration, detail: info.quadtreePressureRejectionSummary ?? info.pressureSolver ?? "Selected pressure authority is unavailable." }
+        : pending("pressure", pressureSection, "Pressure projection", "Waiting for the selected authoritative Losasso pressure path."));
+    } else if ((info.encodedSteps ?? 0) === 0) {
+      stages.push({ id: "pressure", section: pressureSection, label: "Pressure projection", state: "PREPARED", tone: "healthy", generation: pressureGeneration, detail: `${info.pressureSolver} · wide exact-reduction MGPCG and first-order V-cycle are ready.` });
+    } else if (adaptiveTupleRejected || info.quadtreePressureConverged === false) {
+      stages.push({ id: "pressure", section: pressureSection, label: "Pressure projection", state: "REJECTED", tone: "rejected", generation: pressureGeneration, detail: info.quadtreePressureRejectionSummary ?? info.pressureSolver ?? "The step-coherent pressure receipt rejected the solve." });
+    } else if (info.quadtreePressureConverged === true) {
+      stages.push({ id: "pressure", section: pressureSection, label: "Pressure projection", state: "CONVERGED", tone: "healthy", generation: pressureGeneration, detail: `${info.pressureSolver} · accepted converged solve.` });
+    } else {
+      // encodedSteps advances when work is submitted, before its fenced
+      // snapshot is necessarily available to the slower UI stats poll.  An
+      // absent verdict is therefore in flight, not a solver rejection.
+      stages.push(pending("pressure", pressureSection, "Pressure projection", "Waiting for the first step-coherent pressure receipt; in-flight solver scratch is not an authority verdict."));
+    }
+  } else {
+    stages.push(powerHealthy && persistentSection43
+      ? (info.encodedSteps ?? 0) === 0
+        ? { id: "pressure", section: pressureSection, label: "Pressure projection", state: "PREPARED", tone: "healthy", generation: generation(powerGeneration), detail: `${info.pressureSolver} · selected operator and fenced t=0 solve are ready; dynamic-step convergence appears after stepping.` }
+        : { id: "pressure", section: pressureSection, label: "Pressure projection", state: residual !== undefined && residual <= 1e-4 ? "CONVERGED" : "CHECK", tone: residual !== undefined && residual <= 1e-4 ? "healthy" : "warning", generation: generation(powerGeneration), detail: residual === undefined ? `${info.pressureSolver} · latest solve residual is unavailable` : `${info.pressureSolver} · relative L2 residual ${residual.toExponential(2)} (target 1e-4)` }
+      : t0Ready
+        ? { id: "pressure", section: pressureSection, label: "Pressure projection", state: "REJECTED", tone: "rejected", generation: generation(powerGeneration), detail: info.pressureSolver ?? "Selected pressure authority is unavailable." }
+        : pending("pressure", pressureSection, "Pressure projection", "Waiting for the selected authoritative power pressure path."));
+  }
 
   const rasterGenerationCurrent = water?.globalFineAttachedGeneration !== undefined
     && water.meshPublicationGeneration !== undefined

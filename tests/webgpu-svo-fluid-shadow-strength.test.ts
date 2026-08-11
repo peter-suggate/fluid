@@ -7,7 +7,7 @@ import { octreeMethod, octreeSolverOptions } from "../lib/methods/octree";
 import { svoFluidCoverageFromSignedDistance } from "../lib/svo-fluid-coverage";
 import { WATER_OPTICS } from "../lib/webgpu-lighting";
 import { requiredFluidDeviceLimits } from "../lib/webgpu-device-limits";
-import { WebGPUUniformEulerianSolver } from "../lib/webgpu-uniform-eulerian";
+import { WebGPUOctreeEulerianSolver } from "../lib/webgpu-octree-eulerian";
 import { WebGpuSvoFluidCoverage } from "../lib/webgpu-svo-fluid-coverage";
 import { readFloatTexture3D } from "../tools/webgpu-smoke-readbacks";
 import { createSmokeScenario } from "../tools/webgpu-smoke-scenarios";
@@ -52,7 +52,7 @@ test("water thick enough to see produces a shadow a viewer can see", {
 
   const scenario = createSmokeScenario("dam-break-ui");
   const values = octreeMethod.presetFor("balanced");
-  const solver = await WebGPUUniformEulerianSolver.createAsync(
+  const solver = await WebGPUOctreeEulerianSolver.createAsync(
     device, scenario.scene, "balanced", undefined,
     octreeSolverOptions(scenario.scene, "balanced", values),
     () => { /* construction progress is not what this gate measures */ },

@@ -1,4 +1,5 @@
 import { cloneScene, parseScene, serializeScene, type SceneDescription } from "./model";
+import type { MethodProfile } from "./methods";
 
 /**
  * Named local scene storage.
@@ -34,6 +35,8 @@ export interface SceneLibraryEntry {
   readonly presetId: string;
   /** Serialized `SceneDescription`, byte-identical to the file export. */
   readonly scene: string;
+  /** Active solver choice at save time. Absent in pre-benchmark entries. */
+  readonly methodProfile?: MethodProfile;
 }
 
 export interface SceneLibraryStorage {
@@ -62,12 +65,24 @@ function sceneEntryId(name: string, savedAt_ms: number): string {
   return `${slug || "scene"}-${savedAt_ms.toString(36)}`;
 }
 
+function isMethodProfile(value: unknown): value is MethodProfile {
+  if (!value || typeof value !== "object") return false;
+  const profile = value as Partial<MethodProfile>;
+  if (typeof profile.methodId !== "string"
+    || !["balanced", "high", "ultra"].includes(String(profile.quality))
+    || !profile.overrides || typeof profile.overrides !== "object"
+    || Array.isArray(profile.overrides)) return false;
+  return Object.values(profile.overrides).every((entry) =>
+    typeof entry === "string" || typeof entry === "number" || typeof entry === "boolean");
+}
+
 function isEntry(value: unknown): value is SceneLibraryEntry {
   if (!value || typeof value !== "object") return false;
   const entry = value as Partial<SceneLibraryEntry>;
   return typeof entry.id === "string" && typeof entry.name === "string"
     && typeof entry.savedAt_ms === "number" && Number.isFinite(entry.savedAt_ms)
-    && typeof entry.presetId === "string" && typeof entry.scene === "string";
+    && typeof entry.presetId === "string" && typeof entry.scene === "string"
+    && (entry.methodProfile === undefined || isMethodProfile(entry.methodProfile));
 }
 
 export function isSceneAutosaveEntry(entry: SceneLibraryEntry): boolean {
@@ -108,6 +123,8 @@ export interface SaveSceneOptions {
   readonly savedAt_ms: number;
   /** Overwrite this entry instead of adding one, for "save over". */
   readonly replaceId?: string;
+  /** Active method state, so Continue resumes the selected solver contract. */
+  readonly methodProfile?: MethodProfile;
 }
 
 /**
@@ -131,6 +148,7 @@ export function saveSceneToLibrary(
     savedAt_ms: options.savedAt_ms,
     presetId,
     scene: serializeScene(cloneScene(scene)),
+    ...(options.methodProfile === undefined ? {} : { methodProfile: options.methodProfile }),
   };
   const entries = writeSceneLibrary(storage, [entry, ...existing.filter((candidate) => candidate.id !== entry.id)]);
   return { entries, entry };

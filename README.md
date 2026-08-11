@@ -95,8 +95,10 @@ Use `npm test` for the deterministic shell contract and production build.
 
 ## Current numerical boundary
 
-The CPU MAC/PCG path remains the pressure-validation oracle. The GPU path uses
-an f32 sparse octree with a Power-diagram pressure operator, persistent MGPCG,
-a structured fine level-set band, and GPU-resident topology publication. The
-renderer consumes the octree's SVO and global-fine surface publications; there
-is no dense-uniform or tall-cell runtime fallback.
+The CPU MAC/PCG path remains the pressure-validation oracle. The adaptive GPU
+path uses an f32 sparse octree with selectable Losasso and Power coarse
+dynamics, persistent MGPCG, a structured fine level-set band, and GPU-resident
+topology publication. A separate dense uniform WebGPU method is retained as a
+matched-lattice reference; it is never an adaptive runtime fallback. The
+renderer consumes either the octree's sparse surface publications or the
+uniform method's direct dense field.

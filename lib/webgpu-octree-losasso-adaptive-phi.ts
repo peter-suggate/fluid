@@ -3,7 +3,6 @@ import type { LosassoSurfaceGraphBankSource } from "./webgpu-octree-losasso-surf
 import {
   octreeLosassoAdaptivePhiAcceptedScheduleWGSL,
   octreeLosassoAdaptivePhiBacktraceWGSL,
-  octreeLosassoAdaptivePhiCorrectionWGSL,
   octreeLosassoAdaptivePhiCommitWGSL,
   octreeLosassoAdaptivePhiEvidenceWGSL,
   octreeLosassoAdaptivePhiGhostWGSL,
@@ -17,8 +16,6 @@ import {
   octreeLosassoAdaptivePhiRedistancePublishAcceptedWGSL,
   octreeLosassoAdaptivePhiRedistancePublishCandidateWGSL,
   octreeLosassoAdaptivePhiRedistanceResetWGSL,
-  octreeLosassoAdaptivePhiPredictorSnapshotWGSL,
-  octreeLosassoAdaptivePhiReverseBacktraceWGSL,
   octreeLosassoAdaptivePhiScheduleWGSL,
   octreeLosassoAdaptivePhiTransportWGSL,
   octreeLosassoAdaptivePhiVolumeEvidenceWGSL,
@@ -188,7 +185,9 @@ export const adaptivePhiReceiptLayout = Object.freeze({
   candidateVolumeTotalAbsoluteLeafDriftBits: 50,
   candidateVolumeTransactionValid: 51,
   redistanceActiveIndependentNodes: 52, redistanceActiveConstrainedNodes: 53,
-  externalPublicationFailure: 54,
+  /** Fail-closed phase/predicate code. High phase bits distinguish transport
+   * (0x10000), volume preparation (0x20000), and volume validation (0x30000). */
+  publicationFailureCode: 54,
 });
 
 const receiptFloat = (word: number): number => {
@@ -217,7 +216,7 @@ export function unpackAdaptivePhiReceipt(words: ArrayLike<number>) {
       retainedConstrainedNodes: words[35]! >>> 0 }),
     redistanceBand: Object.freeze({ activeIndependentNodes: words[52]! >>> 0,
       activeConstrainedNodes: words[53]! >>> 0 }),
-    externalPublicationFailure: words[54]! >>> 0,
+    publicationFailureCode: words[54]! >>> 0,
     volumeTransaction: Object.freeze({ epoch: words[36]! >>> 0,
       generation: words[37]! >>> 0, validatedNodes: words[38]! >>> 0,
       constrainedNodes: words[39]! >>> 0, coveredLeaves: words[40]! >>> 0,
@@ -249,23 +248,14 @@ export interface WebGPUOctreeLosassoAdaptivePhiOptions {
   /** Full A→B→A fast-iterative phases. */
   readonly redistanceIterations?: number;
   readonly redistanceBandWorld?: number;
-  /** Diagnostic/implementation arm. Tall-cells uses simple SL for phi because
-   * its modified MacCormack path produced noisier surfaces. */
-  readonly transportCorrection?: boolean;
+  /** Uniform-fine diagnostic lane: redistance the connected resident graph
+   * instead of deriving a compact mask that cannot save any topology work. */
+  readonly fullGraphRedistance?: boolean;
   readonly convergenceTolerance?: number;
   readonly constraintTolerance?: number;
   readonly openTop?: boolean;
   readonly exteriorAirPhi?: number;
   readonly faces?: WebGPUOctreeLosassoAdaptivePhiFaceSource;
-}
-
-/** Explicit diagnostic arm for comparing the production monotone correction
- * with first-order semi-Lagrangian phi transport. Defaults to production-on. */
-export function octreeLosassoAdaptivePhiTransportCorrectionEnabled(
-  environment: Readonly<Record<string, string | undefined>> | undefined =
-    typeof process === "undefined" ? undefined : process.env,
-): boolean {
-  return environment?.FLUID_ADAPTIVE_PHI_MACCORMACK !== "0";
 }
 
 export interface OctreeLosassoAdaptivePhiPlan {
@@ -353,7 +343,7 @@ export class WebGPUOctreeLosassoAdaptivePhi {
   private syncAccepted?: GPUComputePipeline;
   private stampRepair?: GPUComputePipeline;
   private stampAdvance?: GPUComputePipeline;
-  private stampExternal?: GPUComputePipeline;
+  private stampTopologyHandoff?: GPUComputePipeline;
   private ghost?: GPUComputePipeline;
   private evidence?: Readonly<Record<EvidencePipelineName, GPUComputePipeline>>;
   private readonly evidencePrepareWorkgroups: number;
@@ -369,10 +359,7 @@ export class WebGPUOctreeLosassoAdaptivePhi {
   private worklist?: Readonly<Record<WorklistPipelineName, GPUComputePipeline>>;
   private redistance?: Readonly<Record<RedistancePipelineName, GPUComputePipeline>>;
   private backtrace?: GPUComputePipeline;
-  private reverseBacktrace?: GPUComputePipeline;
-  private predictorSnapshot?: GPUComputePipeline;
   private transport?: GPUComputePipeline;
-  private correction?: GPUComputePipeline;
   private volumeEvidence?: Readonly<Record<VolumeEvidencePipelineName, GPUComputePipeline>>;
   private retainedBootstrap?: {
     readonly kind: "nodal" | "nodal-lattice" | "cell-centred";
@@ -381,15 +368,12 @@ export class WebGPUOctreeLosassoAdaptivePhi {
   private pendingReferenceDelta = 0;
   private bootstrapUpload?: GPUBuffer;
   private destroyed = false;
-  private readonly transportCorrectionEnabled: boolean;
 
   constructor(
     private readonly device: GPUDevice,
     readonly graph: WebGPUOctreeLosassoAdaptivePhiGraphSource,
     readonly options: WebGPUOctreeLosassoAdaptivePhiOptions,
   ) {
-    this.transportCorrectionEnabled = options.transportCorrection
-      ?? octreeLosassoAdaptivePhiTransportCorrectionEnabled();
     const nodeCapacity = positiveInteger("adaptive phi node capacity", options.nodeCapacity);
     const leafCapacity = positiveInteger("adaptive phi leaf capacity", options.leafCapacity);
     const pressureRowCapacity = positiveInteger("adaptive phi pressure row capacity",
@@ -592,35 +576,17 @@ export class WebGPUOctreeLosassoAdaptivePhi {
     const backtraceModule = this.device.createShaderModule({ label: "Adaptive phi compact backtrace", code: octreeLosassoAdaptivePhiBacktraceWGSL });
     this.backtrace = (await compile(backtraceModule,
       ["backtraceIndependent"] as const)).backtraceIndependent;
-    const reverseBacktraceModule = this.device.createShaderModule({
-      label: "Adaptive phi compact reverse backtrace",
-      code: octreeLosassoAdaptivePhiReverseBacktraceWGSL,
-    });
-    this.reverseBacktrace = (await compile(reverseBacktraceModule,
-      ["reverseBacktraceIndependent"] as const)).reverseBacktraceIndependent;
     const transportModule = this.device.createShaderModule({ label: "Adaptive phi compact scalar transport", code: octreeLosassoAdaptivePhiTransportWGSL });
     this.transport = (await compile(transportModule, ["transportIndependent"] as const)).transportIndependent;
-    const predictorSnapshotModule = this.device.createShaderModule({
-      label: "Adaptive phi projected predictor snapshot",
-      code: octreeLosassoAdaptivePhiPredictorSnapshotWGSL,
-    });
-    this.predictorSnapshot = (await compile(predictorSnapshotModule,
-      ["snapshotProjectedPredictor"] as const)).snapshotProjectedPredictor;
-    const correctionModule = this.device.createShaderModule({
-      label: "Adaptive phi compact monotone MacCormack correction",
-      code: octreeLosassoAdaptivePhiCorrectionWGSL,
-    });
-    this.correction = (await compile(correctionModule,
-      ["correctTransportIndependent"] as const)).correctTransportIndependent;
     const handoffModule = this.device.createShaderModule({ label: "Adaptive nodal phi topology handoff", code: octreeLosassoAdaptivePhiHandoffWGSL });
     this.handoff = await compile(handoffModule, ["prepareCandidateHandoff", "handoffCandidate", "projectCandidate", "finalizeCandidateHandoff"] as const);
     const commitModule = this.device.createShaderModule({ label: "Adaptive nodal phi joint commit", code: octreeLosassoAdaptivePhiCommitWGSL });
-    const commitPipelines = await compile(commitModule, ["commitCandidate", "stampCandidateBootstrap", "syncAcceptedCommit", "stampCandidateRepair", "stampAcceptedAdvance", "publishExternalAccepted"] as const);
+    const commitPipelines = await compile(commitModule, ["commitCandidate", "stampCandidateBootstrap", "syncAcceptedCommit", "stampCandidateRepair", "stampAcceptedAdvance", "publishTopologyHandoff"] as const);
     this.commit = commitPipelines.commitCandidate; this.stampCandidate = commitPipelines.stampCandidateBootstrap;
     this.syncAccepted = commitPipelines.syncAcceptedCommit;
     this.stampRepair = commitPipelines.stampCandidateRepair;
     this.stampAdvance = commitPipelines.stampAcceptedAdvance;
-    this.stampExternal = commitPipelines.publishExternalAccepted;
+    this.stampTopologyHandoff = commitPipelines.publishTopologyHandoff;
     const ghostModule = this.device.createShaderModule({ label: "Adaptive nodal phi pressure ghosts", code: octreeLosassoAdaptivePhiGhostWGSL });
     this.ghost = (await compile(ghostModule, ["deriveGhosts"] as const)).deriveGhosts;
     const evidenceModule = this.device.createShaderModule({ label: "Adaptive phi topology evidence", code: octreeLosassoAdaptivePhiEvidenceWGSL });
@@ -812,7 +778,8 @@ export class WebGPUOctreeLosassoAdaptivePhi {
     this.encodeAcceptedLiveSchedule(broker);
     const publishBuffers = [this.advanceParams, this.graph.accepted.control,
       this.graph.accepted.constraints, this.source.control, this.graph.accepted.phi,
-      this.transportControl, this.transportWorklist, this.transportBandMask];
+      this.transportControl, this.transportWorklist, this.transportBandMask,
+      this.graph.accepted.leaves, this.graph.accepted.incidentLeaves, velocity.values];
     this.run(broker, this.worklist!.prepareTransportBand,
       [this.transportControl, velocity.receipt], 1);
     this.runBufferIndirect(broker, this.worklist!.markTransportReach,
@@ -851,36 +818,11 @@ export class WebGPUOctreeLosassoAdaptivePhi {
       [this.advanceParams, this.graph.accepted.control, this.graph.accepted.constraints,
         this.source.control, this.graph.accepted.phi, this.transportControl,
       this.transportWorklist], this.transportDispatch, 12);
-    if (this.transportCorrectionEnabled) {
-      // The projected predictor is immutable in distanceA until correction.
-      // Redistance starts later and overwrites the same graph-sized scratch.
-      this.runBufferIndirect(broker, this.predictorSnapshot!, [this.advanceParams,
-        this.graph.accepted.control, this.source.control, this.graph.accepted.phi,
-        this.distanceA], this.source.nodeDispatch, 0);
-      this.runBufferIndirect(broker, this.reverseBacktrace!, [this.advanceParams,
-        this.graph.accepted.control, this.graph.accepted.leaves, this.graph.accepted.nodes,
-        this.graph.accepted.incidentLeaves, this.source.control, velocity.values,
-        this.transportControl, this.transportWorklist, this.transportDepartures],
-        this.transportDispatch, 0);
-      this.runBufferIndirect(broker, this.correction!, [this.advanceParams,
-        this.graph.accepted.control, this.graph.accepted.leaves, this.graph.accepted.nodes,
-        this.graph.accepted.constraints, this.source.control, this.graph.accepted.phi,
-        this.transportControl, this.transportWorklist, this.transportDepartures, this.distanceA],
-        this.transportDispatch, 0);
-    }
     // The transport receipt counts the scheduled independent nodes and the
-    // first constrained projection exactly once.  The second projection below
-    // restores corrected hanging-node values, but must not count the same
-    // constrained work twice.
+    // constrained projection exactly once.
     this.runMain(broker, "captureTransportReceipt", buffers, 1);
-    if (this.transportCorrectionEnabled) {
-      this.runBufferIndirect(broker, this.worklist!.projectTransportedBand,
-        [this.advanceParams, this.graph.accepted.control, this.graph.accepted.constraints,
-          this.source.control, this.graph.accepted.phi, this.transportControl,
-          this.transportWorklist], this.transportDispatch, 12);
-    }
     this.runMainBufferIndirect(broker, "capturePreRedistanceVolumes", buffers,
-      this.source.leafDispatch, 0);
+      this.graph.accepted.control, this.graph.accepted.leafDispatchOffsetBytes);
     // Rebuild the same compact arena against the transported target bank.  A
     // two-finest-cell core plus one immutable incident-leaf ring is sufficient
     // for accurate redistance; transport's wider 7h characteristic support is
@@ -935,16 +877,17 @@ export class WebGPUOctreeLosassoAdaptivePhi {
       redistanceBuffers.publish, 1);
   }
 
-  /** Localized volume correction, constraints, row/gradient/volume and ghosts. */
+  /** Finalize accepted constraints and derived views without changing volume globally. */
   encodeAcceptedFinalize(broker: PassBroker): WebGPUOctreeLosassoAdaptivePhiSource {
-    this.assertInitialized(); const buffers = this.mainBuffers(this.graph.accepted, undefined, undefined, this.advanceParams);
+    this.assertInitialized(); const buffers = this.mainBuffers(
+      this.graph.accepted, undefined, undefined, this.advanceParams);
     this.flushReferenceVolumeDelta();
     this.runMain(broker, "applyReferenceVolumeDelta", buffers, 1);
     this.encodeAcceptedLiveSchedule(broker);
     this.run(broker, this.volumeEvidence!.prepareVolumeEvidence,
       this.volumeEvidenceBuffers(this.graph.accepted, this.advanceParams), 1);
     this.runMainBufferIndirect(broker, "derivePostRedistanceVolumes", buffers,
-      this.source.leafDispatch, 0);
+      this.graph.accepted.control, this.graph.accepted.leafDispatchOffsetBytes);
     this.run(broker, this.volumeEvidence!.validateVolumeEvidence,
       this.volumeEvidenceBuffers(this.graph.accepted, this.advanceParams), 1);
     this.run(broker, this.volumeEvidence!.finalizeVolumeEvidence,
@@ -966,7 +909,8 @@ export class WebGPUOctreeLosassoAdaptivePhi {
         this.graph.accepted.control, this.graph.accepted.leaves,
         this.source.rowPhi, f.control, f.faces, this.source.ghostDistances,
         this.graph.accepted.pressureRowToGraphLeaf, this.graph.accepted.leafDirectory,
-        this.graph.accepted.phi, this.source.control], this.source.faceDispatch, 0);
+        this.graph.accepted.phi, this.source.control,
+        this.graph.accepted.surfaceMass], this.source.faceDispatch, 0);
     }
     this.encodeVolumePublication(broker);
     this.encodeTopologyEvidence(broker, this.graph.accepted);
@@ -1011,11 +955,11 @@ export class WebGPUOctreeLosassoAdaptivePhi {
       this.source.control, this.source.receipts], 1);
   }
 
-  /** Publish phi that was materialized one-way from conserved accepted mass. */
-  encodeAcceptedExternalPhiPublication(broker: PassBroker, massControl: GPUBuffer): void {
+  /** Publish the retained/prolongated phi adopted by a ready topology commit. */
+  encodeAcceptedTopologyHandoffPublication(broker: PassBroker): void {
     this.assertInitialized();
-    this.run(broker, this.stampExternal!, [this.params, this.graph.accepted.control,
-      massControl, this.source.receipts, this.source.receipts, this.source.control,
+    this.run(broker, this.stampTopologyHandoff!, [this.params, this.graph.accepted.control,
+      this.source.control, this.source.receipts, this.source.receipts, this.source.control,
       this.source.receipts], 1);
   }
 
@@ -1032,7 +976,8 @@ export class WebGPUOctreeLosassoAdaptivePhi {
       this.runBufferIndirect(broker, this.ghost!, [this.params, this.graph.accepted.control,
         this.graph.accepted.leaves, this.source.rowPhi, f.control, f.faces,
         this.source.ghostDistances, this.graph.accepted.pressureRowToGraphLeaf,
-        this.graph.accepted.leafDirectory, this.graph.accepted.phi, this.source.control],
+        this.graph.accepted.leafDirectory, this.graph.accepted.phi, this.source.control,
+        this.graph.accepted.surfaceMass],
       this.source.faceDispatch, 0);
     }
     this.encodeVolumePublication(broker); this.encodeTopologyEvidence(broker, this.graph.accepted);
@@ -1063,7 +1008,7 @@ export class WebGPUOctreeLosassoAdaptivePhi {
       if (name !== "acceptedPhiBanks" && name !== "candidatePhi"
         && typeof buffer === "object" && "destroy" in buffer) (buffer as GPUBuffer).destroy();
     }
-    this.main = undefined; this.handoff = undefined; this.commit = undefined; this.stampCandidate = undefined; this.syncAccepted = undefined; this.stampRepair = undefined; this.stampAdvance = undefined; this.stampExternal = undefined; this.ghost = undefined; this.evidence = undefined; this.scheduleSource = undefined; this.scheduleRepair = undefined; this.scheduleAccepted = undefined; this.worklist = undefined; this.redistance = undefined; this.backtrace = undefined; this.reverseBacktrace = undefined; this.predictorSnapshot = undefined; this.transport = undefined; this.correction = undefined; this.volumeEvidence = undefined;
+    this.main = undefined; this.handoff = undefined; this.commit = undefined; this.stampCandidate = undefined; this.syncAccepted = undefined; this.stampRepair = undefined; this.stampAdvance = undefined; this.stampTopologyHandoff = undefined; this.ghost = undefined; this.evidence = undefined; this.scheduleSource = undefined; this.scheduleRepair = undefined; this.scheduleAccepted = undefined; this.worklist = undefined; this.redistance = undefined; this.backtrace = undefined; this.transport = undefined; this.volumeEvidence = undefined;
     this.bindGroupCache.clear();
   }
 
@@ -1204,7 +1149,7 @@ export class WebGPUOctreeLosassoAdaptivePhi {
       prepareRedistanceBand: [0, 2],
       markTransportReach: [0, 1, 2, 3, 4, 5, 6, 7],
       markTransportInflow: [0, 1, 2, 3],
-      publishTransportIndependent: [0, 1, 2, 3, 4, 5, 6, 7],
+      publishTransportIndependent: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
       markTransportConstraintMasters: [0, 1, 2, 3],
       markTransportConstrained: [0, 1, 2, 3],
       publishTransportConstrained: [0, 1, 2, 3, 4, 5, 6, 7],
@@ -1212,10 +1157,7 @@ export class WebGPUOctreeLosassoAdaptivePhi {
       publishTransportPartition: [0, 1],
       projectTransportedBand: [0, 1, 2, 3, 4, 5, 6],
       backtraceIndependent: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
-      reverseBacktraceIndependent: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
-      snapshotProjectedPredictor: [0, 1, 2, 3, 4],
       transportIndependent: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
-      correctTransportIndependent: [0, 1, 2, 3, 5, 6, 7, 8, 9, 10],
       prepareAcceptedRedistance: [0],
       initializeRedistance: [0, 1, 2, 3, 4, 5, 6, 7, 8],
       initializeAcceptedRedistanceIndependent: [0, 1, 2, 3, 4, 5, 6, 7, 9, 10],
@@ -1242,12 +1184,12 @@ export class WebGPUOctreeLosassoAdaptivePhi {
       finalizeAccepted: [0, 9, 10], finalizeCandidateRepair: [0, 9, 10],
       prepareCandidateHandoff: [0, 2, 7, 11], handoffCandidate: [0, 3, 4, 5, 6, 8, 10, 11],
       projectCandidate: [0, 7, 9, 10, 11], finalizeCandidateHandoff: [7, 11, 17],
-      commitCandidate: [1, 2, 5, 6], deriveGhosts: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+      commitCandidate: [1, 2, 5, 6], deriveGhosts: [0, 1, 2, 3, 4, 5, 6, 7, 8, 11],
       stampCandidateBootstrap: [1, 5, 6],
       syncAcceptedCommit: [1, 5, 6],
       stampCandidateRepair: [0, 1, 5, 6],
       stampAcceptedAdvance: [1, 5, 6],
-      publishExternalAccepted: [1, 2, 5, 6],
+      publishTopologyHandoff: [1, 5, 6],
       prepareTopologyEvidenceEpoch: [0, 1, 3, 4, 5, 7, 8],
       prepareTopologyEvidence: [0, 1, 4, 5],
       publishTopologyEvidenceRows: [0, 1, 2, 3, 4, 5, 6, 7, 9, 10],
@@ -1302,7 +1244,8 @@ export class WebGPUOctreeLosassoAdaptivePhi {
       this.options.convergenceTolerance ?? 1e-4 * this.options.cellSize,
       this.options.exteriorAirPhi ?? .5 * this.options.cellSize], 12);
     let evidenceCapacity = 1; while (evidenceCapacity < 2 * this.plan.leafCapacity) evidenceCapacity *= 2;
-    u.set([this.options.openTop ? 1 : 0, 0, this.plan.faceCapacity, evidenceCapacity], 16);
+    u.set([this.options.openTop ? 1 : 0, this.options.fullGraphRedistance ? 1 : 0,
+      this.plan.faceCapacity, evidenceCapacity], 16);
     f.set([0, this.options.constraintTolerance ?? 1e-5, candidateDiagnostics ? 1 : 0,
       candidateDiagnostics ? 0 : 1], 20);
     if (inflow) {
@@ -1333,6 +1276,6 @@ export class WebGPUOctreeLosassoAdaptivePhi {
     this.pendingReferenceDelta = 0;
   }
 
-  private assertInitialized(): void { this.assertLive(); if (!this.main || !this.handoff || !this.commit || !this.stampCandidate || !this.syncAccepted || !this.stampRepair || !this.stampAdvance || !this.stampExternal || !this.ghost || !this.evidence || !this.scheduleSource || !this.scheduleRepair || !this.scheduleAccepted || !this.worklist || !this.redistance || !this.backtrace || !this.reverseBacktrace || !this.predictorSnapshot || !this.transport || !this.correction || !this.volumeEvidence) throw new Error("Adaptive phi pipelines are not initialized"); }
+  private assertInitialized(): void { this.assertLive(); if (!this.main || !this.handoff || !this.commit || !this.stampCandidate || !this.syncAccepted || !this.stampRepair || !this.stampAdvance || !this.stampTopologyHandoff || !this.ghost || !this.evidence || !this.scheduleSource || !this.scheduleRepair || !this.scheduleAccepted || !this.worklist || !this.redistance || !this.backtrace || !this.transport || !this.volumeEvidence) throw new Error("Adaptive phi pipelines are not initialized"); }
   private assertLive(): void { if (this.destroyed) throw new Error("Adaptive phi authority is destroyed"); }
 }

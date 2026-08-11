@@ -143,7 +143,7 @@ fn migrateLosassoLaggedVelocity(@builtin(global_invocation_id)invocation:vec3u){
   let q=origin+tangentA(axis)*vec3u(a)+tangentB(axis)*vec3u(b);let old=containingOld(axis,q);
   if(old!=INVALID){
    if(old<arrayLength(&oldVelocity)){let value=oldVelocity[old];if(finite(value)){addExact(&exact,value);count+=1u;}}
-  }else{var reconstructed=coarsenedOld(axis,q);if(!reconstructed.valid){reconstructed=nearestExtendedOld(axis,q);}
+  }else{let reconstructed=coarsenedOld(axis,q);
    if(reconstructed.valid){addExact(&exact,reconstructed.value);count+=1u;
    }}
  }}if(count>0u){let value=exactValue(&exact)/f32(count);if(finite(value)){newVelocity[face]=value;
@@ -159,8 +159,6 @@ fn migrateLosassoFaceSeparation(@builtin(global_invocation_id)invocation:vec3u){
  var separated=false;for(var b=0u;b<span;b+=1u){for(var a=0u;a<span;a+=1u){
   let q=origin+tangentA(axis)*vec3u(a)+tangentB(axis)*vec3u(b);let old=containingOld(axis,q);
   if(old!=INVALID&&old<arrayLength(&oldGeometry)){separated=separated||((oldGeometry[old].x&FACE_SEPARATED)!=0u);}
-  else{var reconstructed=coarsenedOld(axis,q);if(!reconstructed.valid){reconstructed=nearestExtendedOld(axis,q);}
-   separated=separated||reconstructed.separated;}
  }}if(separated){newFaces[face].reserved|=FACE_SEPARATED;}}
 
 fn exactCandidateNode(item:u32)->u32{if(arrayLength(&newGraphControl)<7u||newGraphControl[0u]==0u

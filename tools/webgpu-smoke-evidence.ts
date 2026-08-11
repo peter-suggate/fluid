@@ -23,6 +23,8 @@ function availability(result: UnknownRecord): string[] {
     return typeof field?.length === "number" && field.length > 0;
   });
   const hasCheckpointRaster = checkpoints.some((value) => record(value)?.raster !== undefined);
+  const hasMechanicalEnergy = nonemptyArray(result.energyTrace)
+    || checkpoints.some((value) => record(record(value)?.compactMechanicalEnergy) !== undefined);
   const values: Array<[string, boolean]> = [
     ["run", true],
     ["solver", result.info !== undefined],
@@ -37,7 +39,7 @@ function availability(result: UnknownRecord): string[] {
       && result.finalTallVolumeGaps !== undefined],
     ["octree authority", result.octreePowerTopologyDiagnostics !== undefined],
     ["power generation audit", typeof result.powerGenerationAuditedSteps === "number"],
-    ["mechanical energy", nonemptyArray(result.energyTrace)],
+    ["mechanical energy", hasMechanicalEnergy],
     ["global fine generation", result.initialGlobalFineGeneration !== undefined
       && result.finalGlobalFineGeneration !== undefined],
     ["front/back raster", hasCheckpointRaster || result.finalGlobalFineRaster !== undefined],

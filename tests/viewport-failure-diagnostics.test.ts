@@ -112,6 +112,26 @@ test("missing structured telemetry at t=0 does not masquerade as a water update 
   assert.equal(dynamic?.title, "WATER UPDATE REJECTED");
 });
 
+test("an in-flight Losasso solve does not masquerade as a pressure rejection", () => {
+  const current: WaterSurfacePresentationDiagnostics = {
+    surfaceGeometrySource: "global-fine-coarse", globalFineAttached: true,
+    globalFineAttachedGeneration: 9, meshPublicationGeneration: 9,
+    globalFineCrossingPublished: true, presentationFallbackActive: false,
+  };
+  const inFlight = healthyInfo({
+    coarseDynamicsBackend: "losasso",
+    pressureSolver: "Octree Losasso MGPCG · exact-reduction wide solve · plain first-order V-cycle · up to 40 iterations",
+    quadtreePressureConverged: undefined,
+  });
+  assert.equal(viewportFailureIndicator(inFlight, current, scene), undefined);
+
+  const rejected = viewportFailureIndicator({
+    ...inFlight, quadtreePressureConverged: false,
+  }, current, scene);
+  assert.equal(rejected?.id, "pipeline-pressure");
+  assert.equal(rejected?.title, "WATER UPDATE REJECTED");
+});
+
 test("the exact transport witness maps from solver-local metres into world space", () => {
   const result = viewportFailureLocation(healthyInfo({
     globalFineTransportFirstInvalidVelocityLocalIndex: 73,

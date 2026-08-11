@@ -81,8 +81,6 @@ export type WebGPUOctreeLosassoAnyDynamicsSamplerSource =
 
 const ENTRY_POINTS = [
   "advectLosassoFaces",
-  "reverseLosassoFaces",
-  "correctLosassoFaces",
   "forceLosassoFaces",
   "divergenceLosassoRows",
   "constrainLosassoInflowFaces",
@@ -91,8 +89,6 @@ type DynamicsEntryPoint = typeof ENTRY_POINTS[number];
 
 const BINDINGS = Object.freeze({
   advectLosassoFaces: [0, 1, 2, 3, 6, 12, 15],
-  reverseLosassoFaces: [0, 1, 2, 3, 7, 12, 15],
-  correctLosassoFaces: [0, 1, 2, 3, 6, 7, 12, 15],
   forceLosassoFaces: [0, 1, 2, 3, 6, 7],
   divergenceLosassoRows: [0, 1, 2, 7, 8, 9, 10, 16],
   constrainLosassoInflowFaces: [0, 1, 3, 11],
@@ -215,8 +211,7 @@ export class WebGPUOctreeLosassoDynamics {
       this.device.createBindGroup({
         label: `Losasso dynamics bindings - ${entryPoint}`,
         layout: this.pipelines![entryPoint].getBindGroupLayout(0),
-        entries: (adaptive && (entryPoint === "advectLosassoFaces"
-          || entryPoint === "reverseLosassoFaces" || entryPoint === "correctLosassoFaces")
+        entries: (adaptive && entryPoint === "advectLosassoFaces"
           ? [...BINDINGS[entryPoint].filter((binding) => binding < 12), 12, 13, 14, 15]
           : BINDINGS[entryPoint]).map((binding) =>
           ({ binding, resource: "buffer" in buffers[binding]!
@@ -228,7 +223,6 @@ export class WebGPUOctreeLosassoDynamics {
   encodeAdvection(
     broker: PassBroker,
     step: WebGPUOctreeLosassoDynamicsStep,
-    extendPredictor: () => boolean,
   ): void {
     this.assertReady();
     this.writeStep(step);
@@ -236,15 +230,6 @@ export class WebGPUOctreeLosassoDynamics {
     predict.setPipeline(this.pipelines!.advectLosassoFaces);
     predict.setBindGroup(0, this.groups!.advectLosassoFaces);
     predict.dispatchWorkgroupsIndirect(this.source.faceDispatch, 0);
-    if (!extendPredictor()) return;
-    const reverse = broker.compute({ label: "Losasso S1b - reverse velocity advection" });
-    reverse.setPipeline(this.pipelines!.reverseLosassoFaces);
-    reverse.setBindGroup(0, this.groups!.reverseLosassoFaces);
-    reverse.dispatchWorkgroupsIndirect(this.source.faceDispatch, 0);
-    const correct = broker.compute({ label: "Losasso S1c - bounded MacCormack correction" });
-    correct.setPipeline(this.pipelines!.correctLosassoFaces);
-    correct.setBindGroup(0, this.groups!.correctLosassoFaces);
-    correct.dispatchWorkgroupsIndirect(this.source.faceDispatch, 0);
   }
 
   encodeForcesAndDivergence(

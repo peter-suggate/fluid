@@ -704,7 +704,7 @@ test("repository audit discovers new production octree sources instead of scanni
   mkdirSync(library);
   const clean = join(library, "webgpu-octree-clean.ts");
   const bad = join(library, "webgpu-octree-new-hot-loop.ts");
-  const unrelated = join(library, "webgpu-uniform-eulerian.ts");
+  const unrelated = join(library, "webgpu-uniform-reference.ts");
   writeFileSync(clean, "pass.dispatchWorkgroupsIndirect(workset, 0);\n");
   writeFileSync(bad, "pass.dispatchWorkgroups(Math.ceil(rowCapacity / 64));\n");
   writeFileSync(unrelated, "while (true) {}\n");

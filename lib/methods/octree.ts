@@ -1,9 +1,10 @@
-import { WebGPUUniformEulerianSolver } from "../webgpu-uniform-eulerian";
+import { WebGPUOctreeEulerianSolver } from "../webgpu-octree-eulerian";
 import { numberValue, type MethodParamSpec, type MethodParamValues, type SimulationMethod } from "./types";
 import type { GPUQuality } from "../tall-cell-grid";
 import type { SceneDescription } from "../model";
 import {
   DEFAULT_OCTREE_COARSE_BACKEND,
+  octreeCoarseBackend,
   resolveOctreeCoarseDynamics,
 } from "../octree-coarse-backend";
 import {
@@ -37,7 +38,7 @@ const runtimeDialParams: MethodParamSpec[] = OCTREE_RUNTIME_DIALS.map((dial) => 
 }));
 
 const params: MethodParamSpec[] = [
-  { kind: "select", key: "coarseBackend", label: "Coarse dynamics", default: DEFAULT_OCTREE_COARSE_BACKEND, tier: "coarse", options: [{ value: "losasso", label: "Losasso 2004 · default" }, { value: "power2017", label: "Power 2017 · frozen reference" }], hint: "Construction-time backend choice. Each backend owns distinct pipelines, layouts, and velocity channels; the frozen Power path remains available for reference lanes." },
+  { kind: "select", key: "coarseBackend", label: "Coarse dynamics", default: DEFAULT_OCTREE_COARSE_BACKEND, tier: "coarse", options: [{ value: "losasso", label: "Losasso 2004 · default" }, { value: "power2017", label: "Power 2017 · factor-4 benchmark" }], hint: "Construction-time backend choice. Each backend owns distinct pipelines, layouts, and velocity channels. Power selects the paper's separate 4× narrow-band level set and rebuilds topology every advance." },
   { kind: "select", key: "losassoVelocityExtension", label: "Losasso extrapolation", default: "fixed-jacobi", tier: "fine", options: [{ value: "fixed-jacobi", label: "Fixed Jacobi · default" }, { value: "causal-front", label: "Causal layer front" }], hint: "Construction-time A/B control for Section 5 air velocity extension. Causal-front publishes one graph layer per sweep from already-valid inner layers." },
   { kind: "select", key: "globalFineLevelSetFactor", label: "Surface tracking", default: "1", tier: "coarse", options: [{ value: "1", label: "Adaptive finest surface · default" }, { value: "4", label: "4× subcell surface" }, { value: "8", label: "8× subcell surface · experimental" }], hint: "Ando-style factor 1 remeshes the octree itself: every leaf cut by the moving interface stays at the finest pressure/level-set tier, while pure liquid and air grade rapidly to coarse cells away from it. Fixed-point mass is handed conservatively between old and new leaves. Factors 4/8 instead opt into a separate sparse subcell interface band." },
   { kind: "select", key: "maximumLeafSize", label: "Largest pressure cell", default: "32", tier: "fine", options: [{ value: "2", label: "2³ finest cells" }, { value: "4", label: "4³ finest cells" }, { value: "8", label: "8³ finest cells" }, { value: "16", label: "16³ finest cells" }, { value: "32", label: "32³ finest cells · default" }], hint: "Largest dyadic octree cell away from interfaces. Scene profiles choose the largest compatible root while preserving strict 2:1 grading." },
@@ -58,63 +59,81 @@ const globalFineLevelSetFactor = (value: unknown): 1 | 4 | 8 => {
   return numeric === 1 ? 1 : numeric >= 8 ? 8 : 4;
 };
 
+/**
+ * Power 2017 is exposed as one reproducible benchmark, not as a partially
+ * compatible collection of old switches. The paper evolves a separate fine
+ * SPGrid level set, typically at 4× or 8× the octree resolution; factor four
+ * is this product's canonical reference lane. Normalizing here means the same
+ * tuple is restored by the picker, a shared URL, and an authored scene profile.
+ */
+export function normalizeOctreeMethodValues(values: MethodParamValues): MethodParamValues {
+  if (octreeCoarseBackend(values.coarseBackend) !== "power2017") return values;
+  return {
+    ...values,
+    globalFineLevelSetFactor: "4",
+    topologyCadenceAdvances: 1,
+  };
+}
+
 /** Canonical browser/native construction options for the power-octree method. */
 export const octreeSolverOptions = (scene: SceneDescription, quality: GPUQuality, values: MethodParamValues) => {
-  const bandReachCells = numberValue(values, params, "interfaceRefinementBandCells");
-  const fineFactor = globalFineLevelSetFactor(values.globalFineLevelSetFactor);
+  // Factories are public to browser and Dawn callers, so uphold the compound
+  // backend invariant here as well as in generic method-value resolution.
+  const normalizedValues = normalizeOctreeMethodValues(values);
+  const bandReachCells = numberValue(normalizedValues, params, "interfaceRefinementBandCells");
+  const fineFactor = globalFineLevelSetFactor(normalizedValues.globalFineLevelSetFactor);
   const coarseDynamics = resolveOctreeCoarseDynamics({
-    backend: values.coarseBackend,
+    backend: normalizedValues.coarseBackend,
     globalFineLevelSetFactor: fineFactor,
-    topologyCadenceAdvances: values.topologyCadenceAdvances,
-    topologyDisplacementRingsPerAdvance: values.topologyDisplacementRingsPerAdvance,
-    losassoVelocityExtension: values.losassoVelocityExtension,
+    topologyCadenceAdvances: normalizedValues.topologyCadenceAdvances,
+    topologyDisplacementRingsPerAdvance: normalizedValues.topologyDisplacementRingsPerAdvance,
+    losassoVelocityExtension: normalizedValues.losassoVelocityExtension,
   });
   // Not a product control. Keep the fine-only override available to the Dawn
   // harness for fault injection and planner isolation without letting normal
   // configurations drift into the restriction-starvation pairing.
-  const diagnosticFineBand = typeof values.fineLevelSetBandCells === "number"
-    && Number.isFinite(values.fineLevelSetBandCells)
-    ? Math.max(0, Math.min(32, Math.round(values.fineLevelSetBandCells)))
+  const diagnosticFineBand = typeof normalizedValues.fineLevelSetBandCells === "number"
+    && Number.isFinite(normalizedValues.fineLevelSetBandCells)
+    ? Math.max(0, Math.min(32, Math.round(normalizedValues.fineLevelSetBandCells)))
     : bandReachCells;
   return {
     coarseDynamics,
-    densitySharpening: false,
-    velocityTransport: "maccormack" as const,
     octree: {
-      maximumLeafSize: maximumLeafSize(values.maximumLeafSize ?? 32),
+      maximumLeafSize: maximumLeafSize(normalizedValues.maximumLeafSize ?? 32),
       // Dry boundary adaptivity is the production pressure policy at every
       // surface resolution. False remains the exact Dawn control.
-      fluidGatedBoundaryRefinement: values.fluidGatedBoundaryRefinement !== false,
-      environmentBrickRefinementLevels: typeof values.svoEnvironmentBrickRefinementLevels === "number"
-        ? values.svoEnvironmentBrickRefinementLevels : undefined,
+      fluidGatedBoundaryRefinement: normalizedValues.fluidGatedBoundaryRefinement !== false,
+      environmentBrickRefinementLevels: typeof normalizedValues.svoEnvironmentBrickRefinementLevels === "number"
+        ? normalizedValues.svoEnvironmentBrickRefinementLevels : undefined,
       // Pressure topology is a method setting, not a solver setting. Keep the
       // same adaptive octree when comparing the two pressure implementations.
-      adaptivity: typeof values.octreeAdaptivity === "number"
-        && Number.isFinite(values.octreeAdaptivity)
-        ? Math.max(0, Math.min(1, values.octreeAdaptivity))
+      adaptivity: typeof normalizedValues.octreeAdaptivity === "number"
+        && Number.isFinite(normalizedValues.octreeAdaptivity)
+        ? Math.max(0, Math.min(1, normalizedValues.octreeAdaptivity))
         : 1,
       interfaceRefinementBandCells: bandReachCells,
-      surfaceRefinementGradingLayers: numberValue(values, params, "surfaceRefinementGradingLayers"),
+      surfaceRefinementGradingLayers: numberValue(normalizedValues, params, "surfaceRefinementGradingLayers"),
       // Seed t=0 with the live thickness too. Allocations still use the two
       // authored fields above; this only prevents the fenced cold topology
       // from displaying and solving the widest mesh until its first epoch.
-      initialRuntimeDials: resolveOctreeRuntimeDials(values),
+      initialRuntimeDials: resolveOctreeRuntimeDials(normalizedValues),
       fineLevelSetBandCells: diagnosticFineBand,
       globalFineLevelSetFactor: fineFactor,
       // Hidden authored/harness override for scenes whose fluid footprint is
       // intentionally much smaller than the container. The generic fallback
       // remains the conservative domain-cross-section estimate.
       globalFineLevelSetMaximumBricks:
-        typeof values.globalFineLevelSetMaximumBricks === "number"
-          && Number.isSafeInteger(values.globalFineLevelSetMaximumBricks)
-          && values.globalFineLevelSetMaximumBricks > 0
-          ? values.globalFineLevelSetMaximumBricks : undefined,
+        typeof normalizedValues.globalFineLevelSetMaximumBricks === "number"
+          && Number.isSafeInteger(normalizedValues.globalFineLevelSetMaximumBricks)
+          && normalizedValues.globalFineLevelSetMaximumBricks > 0
+          ? normalizedValues.globalFineLevelSetMaximumBricks : undefined,
       // Diagnostic-only capacity override. Not an authored UI parameter: the
       // production capacity comes from `planOctreePressureCapacity`, and this
       // exists so a harness can bisect the arena demand of a large domain
       // against the on-GPU overflow report.
-      pressureRowCapacity: typeof values.pressureRowCapacity === "number" && values.pressureRowCapacity > 0
-        ? values.pressureRowCapacity : undefined,
+      pressureRowCapacity: typeof normalizedValues.pressureRowCapacity === "number"
+        && normalizedValues.pressureRowCapacity > 0
+        ? normalizedValues.pressureRowCapacity : undefined,
     }
   };
 };
@@ -160,8 +179,9 @@ export const octreeMethod: SimulationMethod = {
     globalFineLevelSetFactor: "1",
     topologyCadenceAdvances: 1,
   }),
-  createSolver: (device, scene, quality, values, onRigidLoads) => new WebGPUUniformEulerianSolver(device, scene, quality, onRigidLoads, octreeSolverOptions(scene, quality, values)),
-  createSolverAsync: (device, scene, quality, values, onRigidLoads, onProgress, signal) => WebGPUUniformEulerianSolver.createAsync(
+  normalizeValues: normalizeOctreeMethodValues,
+  createSolver: (device, scene, quality, values, onRigidLoads) => new WebGPUOctreeEulerianSolver(device, scene, quality, onRigidLoads, octreeSolverOptions(scene, quality, values)),
+  createSolverAsync: (device, scene, quality, values, onRigidLoads, onProgress, signal) => WebGPUOctreeEulerianSolver.createAsync(
     device, scene, quality, onRigidLoads, octreeSolverOptions(scene, quality, values),
     (label, completed, total, phase, taskId) => onProgress({ phase: phase === "planning" || phase === "adaptive-topology" || phase === "secondary-particles" || phase === "allocation" || phase === "warmup" ? phase : "solver-pipelines", taskId, label, completed, total }),
     signal,

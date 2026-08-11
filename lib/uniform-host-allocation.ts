@@ -1,11 +1,6 @@
 import type { GPUVelocityTransport } from "./webgpu-eulerian";
 
-/**
- * Dense host fields retained by the uniform and quadtree methods.
- *
- * The Power-liquid octree does not have a mode in this plan: its compact
- * velocity, pressure, and level-set owners allocate themselves.
- */
+/** Dense textures and buffers owned exclusively by the uniform reference. */
 export interface UniformHostAllocationPlan {
   readonly velocityExtent: readonly [number, number, number];
   readonly transportExtent: readonly [number, number, number];
@@ -34,7 +29,9 @@ export function planUniformHostAllocation(
   const velocityBytes = nx * ny * nz * velocityCopies * 16
     + (nx + 2) * (ny + 2) * (nz + 2) * transportCopies * 8
     + nx * ny * nz * 8;
-  const scalarBytes = nx * ny * nz * 4 * 4;
+  // Two pressure, two conservative VOF, and two render-only smoothed surface
+  // textures. Presentation smoothing must never feed back into transport.
+  const scalarBytes = nx * ny * nz * 6 * 4;
   const conditioningBytes = nx * ny * nz * 4;
   return {
     velocityExtent: [nx, ny, nz],

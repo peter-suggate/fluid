@@ -1332,8 +1332,12 @@ class SimulationController {
   /** Save the live document under a name, replacing an entry of the same name. */
   saveNamedScene(name: string) {
     const sceneStore = useSceneStore.getState();
+    const { methodId, quality, overrides } = useMethodStore.getState();
     const { entries, entry } = saveSceneToLibrary(
-      browserSceneLibraryStorage(), name, sceneStore.scene, sceneStore.presetId, { savedAt_ms: Date.now() },
+      browserSceneLibraryStorage(), name, sceneStore.scene, sceneStore.presetId, {
+        savedAt_ms: Date.now(),
+        methodProfile: { methodId, quality, overrides: { ...(overrides[methodId] ?? {}) } },
+      },
     );
     useRuntimeStore.getState().setNotice(`Saved “${entry.name}”`);
     return entries;
