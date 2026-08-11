@@ -1137,6 +1137,10 @@ class SimulationController {
         && metrics.presentationStages.capturedAt_ms >= instrumentation.enabledAt_ms
         && performanceTraceMatchesLane(metrics.presentationStages, "gpu", "presentation")
         ? metrics.presentationStages : undefined,
+      presentationBands: metrics.presentationBands
+        && metrics.presentationBands.capturedAt_ms >= instrumentation.enabledAt_ms
+        && performanceTraceMatchesLane(metrics.presentationBands, "gpu", "presentation")
+        ? metrics.presentationBands : undefined,
     };
     diagnostics.pushPerformanceReport(report);
     const activityStore = usePerformanceActivityStore.getState();

@@ -81,6 +81,14 @@ export interface PerformancePhaseSample {
   id: PaperPhaseId;
   label: string;
   duration_ms: number;
+  /**
+   * In an averaged trace: the fraction of observations that contained this
+   * phase. An intermittent stage (caustics on mesh-move frames, world
+   * maintenance on edit frames) reports its cost per frame that *encoded* it,
+   * and this is the k/n that lets a consumer say so instead of silently
+   * diluting the figure toward zero the rarer the stage ran.
+   */
+  encodedFraction?: number;
 }
 
 export interface PerformanceTrace {
@@ -91,6 +99,14 @@ export interface PerformanceTrace {
   capturedAt_ms: number;
   measurementSource?: PerformanceMeasurementSource;
   total_ms: number;
+  /**
+   * For a pass-timestamp trace: the wall interval from the earliest sampled
+   * pass begin to the latest sampled pass end — how long the GPU was busy with
+   * the traced passes, overlap collapsed. `total_ms` on such a trace is the
+   * end-to-end pass *sum*, which double-counts overlapped passes; shares of the
+   * frame should be shares of the span.
+   */
+  span_ms?: number;
   phases: PerformancePhaseSample[];
 }
 
@@ -176,7 +192,12 @@ export function partitionPerformanceTrace(input: {
 }
 
 export function performanceTraceAccounted_ms(trace: PerformanceTrace): number {
-  return trace.phases.reduce((sum, phase) => sum + phase.duration_ms, 0);
+  // Phases carry per-encode durations; a phase encoded in only k of n averaged
+  // observations contributes duration * (k/n) to the frame's accounted time.
+  return trace.phases.reduce(
+    (sum, phase) => sum + phase.duration_ms * (phase.encodedFraction ?? 1),
+    0,
+  );
 }
 
 export function performanceTraceClosureError_ms(trace: PerformanceTrace, tolerance_ms = 1e-9): number {
@@ -374,12 +395,20 @@ export function averagePerformanceTraces(traces: readonly PerformanceTrace[]): P
       } else totals.set(key, { ...phase, count: 1 });
     }
   }
+  // Per encode, not per observation: a phase present in k of n samples is a
+  // stage that ran k times, and dividing by n diluted it toward zero the rarer
+  // it ran. The fraction is kept so a consumer can annotate intermittent rows;
+  // duration × fraction reconstructs the per-observation mean.
   const phases = [...totals.values()].map(({ count, ...phase }) => ({
     ...phase,
-    duration_ms: phase.duration_ms / observations.length,
+    duration_ms: phase.duration_ms / count,
+    encodedFraction: count / observations.length,
   }));
   const total_ms = observations.reduce((sum, trace) => sum + trace.total_ms, 0) / observations.length;
-  const accounted_ms = phases.reduce((sum, phase) => sum + phase.duration_ms, 0);
+  const span_ms = observations.some((trace) => trace.span_ms !== undefined)
+    ? observations.reduce((sum, trace) => sum + (trace.span_ms ?? trace.total_ms), 0) / observations.length
+    : undefined;
+  const accounted_ms = phases.reduce((sum, phase) => sum + phase.duration_ms * phase.encodedFraction, 0);
   const delta_ms = total_ms - accounted_ms;
   // Averaging independently accumulated IEEE-754 values can leave a
   // sub-nanosecond negative residual. Do not turn that harmless dust into a
@@ -387,14 +416,14 @@ export function averagePerformanceTraces(traces: readonly PerformanceTrace[]): P
   if (Math.abs(delta_ms) > 1e-9) {
     const other = phases.find((phase) => phase.id === "other");
     if (other && other.duration_ms + delta_ms >= 0) other.duration_ms += delta_ms;
-    else if (delta_ms > 0) phases.push({ id: "other", label: "Other measured work", duration_ms: delta_ms });
+    else if (delta_ms > 0) phases.push({ id: "other", label: "Other measured work", duration_ms: delta_ms, encodedFraction: 1 });
     else {
       const largest = phases.reduce((candidate, phase) =>
         phase.duration_ms > candidate.duration_ms ? phase : candidate, phases[0]);
       if (largest && largest.duration_ms + delta_ms >= 0) largest.duration_ms += delta_ms;
     }
   }
-  return { ...latest, total_ms, phases };
+  return { ...latest, total_ms, span_ms, phases };
 }
 
 /**
@@ -1362,7 +1391,7 @@ export function passTimestampPerformanceTrace(input: {
       end_ms: cursor,
     };
   });
-  return partitionPerformanceTrace({
+  const trace = partitionPerformanceTrace({
     sampleId: input.sampleId,
     domain: "gpu",
     lane: input.lane,
@@ -1375,6 +1404,11 @@ export function passTimestampPerformanceTrace(input: {
     end_ms: cursor,
     intervals,
   });
+  // The span rides along: it is the honest "how long was the GPU busy" answer
+  // (earliest sampled begin to latest sampled end, across every sampled pass,
+  // untrusted render passes included), where the total above is a sum that
+  // double-counts overlap. Shares of the frame should be shares of this.
+  return { ...trace, span_ms: input.reading.span_ms };
 }
 
 /**

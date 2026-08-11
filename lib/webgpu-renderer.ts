@@ -85,6 +85,7 @@ import {
   type PerformanceTrace,
 } from "./performance-trace";
 import { usePerformanceInstrumentationStore } from "./stores/performance-instrumentation-store";
+import { FencePartitionedFrameSampler } from "./webgpu-frame-band-sampler";
 import type { ResourcePluginDefinition } from "./resource-readiness";
 import {
   invalidateGPUCompilationManager,
@@ -720,6 +721,14 @@ export interface RendererFrameMetrics {
   presentation?: PerformanceTrace;
   /** Trustworthy per-stage GPU pass costs; its total is a pass sum, not frame time. */
   presentationStages?: PerformanceTrace;
+  /**
+   * Fence-partitioned band walls from the most recent sampling frame: real
+   * queue-wall cost per encode band, including the render passes the
+   * hardware timestamps cannot price. Sampled one frame in sixteen while
+   * instrumentation is on; that frame publishes no queue-wall frame trace, so
+   * the rolling frame mean never contains a partitioned frame.
+   */
+  presentationBands?: PerformanceTrace;
   context: string;
   methodId: string;
   /** True only when this draw encoded and submitted a presentation command buffer. */
@@ -955,6 +964,10 @@ export class FluidLabRenderer {
   private reportedMissingPresentationTimestamps = false;
   private latestPresentationTrace?: PerformanceTrace;
   private latestPresentationStageTrace?: PerformanceTrace;
+  /** Fence-partitioned band walls from the last sampling frame (WP3.1). */
+  private latestPresentationBandTrace?: PerformanceTrace;
+  private presentationBandSamplePending = false;
+  private presentationBandFrameCounter = 0;
   /** Polled by the paused viewport; each successful transactional source attach requests one repaint. */
   private pausedPresentationRevision = 0;
   private deviceRecoveryAttempts = 0;
@@ -1507,9 +1520,9 @@ export class FluidLabRenderer {
     scene: SceneDescription,
     pixelTrace: PixelTraceConfig | undefined,
     fluidCellTrace: FluidCellTraceConfig | undefined,
-  ): void {
+  ): boolean {
     const overlay = this.decorationOverlayPipeline;
-    if (!overlay?.ready || !this.presentationTexture) return;
+    if (!overlay?.ready || !this.presentationTexture) return false;
     const cellTrace = fluidCellTrace ? this.latestFluidCellTraceValue : undefined;
     const subjects: unknown[] = [];
     if (pixelTrace && this.latestPixelTraceValue) subjects.push(this.latestPixelTraceValue);
@@ -1523,7 +1536,7 @@ export class FluidLabRenderer {
     }
     if (subjects.length === 0) {
       if (this.decorationGeometryKey !== "") { overlay.clear(); this.decorationGeometryKey = ""; }
-      return;
+      return false;
     }
     const dimensions = cellTrace?.dimensions
       ?? (this.gpuFluid?.octreeTechniqueDebugSource?.pressureRows.dimensions);
@@ -1566,6 +1579,7 @@ export class FluidLabRenderer {
       occludedAlpha: pixelTrace?.occludedAlpha,
       depthNear_m: SVO_DRY_SCENE_REVERSED_Z_NEAR_M,
     });
+    return true;
   }
 
   /** Stable views: a fresh view object every frame would rebuild bind groups. */
@@ -1742,6 +1756,7 @@ export class FluidLabRenderer {
     this.velocityFallbackTexture = undefined; this.pressureSamplesFallbackTexture = undefined; this.scalarFallbackTexture = undefined;
     this.fluidTextureKey = ""; this.fluidRevision = -1;
     this.presentationTracePending = false; this.latestPresentationTrace = undefined; this.latestPresentationStageTrace = undefined;
+    this.presentationBandSamplePending = false; this.latestPresentationBandTrace = undefined;
     this.retiredGPUFluids.clear();
     this.deviceLost = false;
     try {
@@ -1916,6 +1931,7 @@ export class FluidLabRenderer {
   private resetPresentationTrace() {
     this.latestPresentationTrace = undefined;
     this.latestPresentationStageTrace = undefined;
+    this.latestPresentationBandTrace = undefined;
   }
 
   private currentFrameMetrics(
@@ -1936,10 +1952,16 @@ export class FluidLabRenderer {
       && this.latestPresentationStageTrace.capturedAt_ms >= instrumentation.enabledAt_ms
       ? this.latestPresentationStageTrace
       : undefined;
+    const presentationBands = instrumentation.enabled
+      && this.latestPresentationBandTrace
+      && this.latestPresentationBandTrace.capturedAt_ms >= instrumentation.enabledAt_ms
+      ? this.latestPresentationBandTrace
+      : undefined;
     return {
       cpu,
       presentation,
       presentationStages,
+      presentationBands,
       context,
       methodId,
       presentationSubmitted,
@@ -2817,8 +2839,19 @@ export class FluidLabRenderer {
     this.waterPipeline.setDisabledStages(disabledStages);
     cpuTrace?.transition({ id: "command-encoding", label: "Presentation command encoding" });
     const traceRequestedAt_ms = measurementInstrumentationEnabled ? performance.now() : 0;
+    // One frame in sixteen while instrumentation is on, the encode is split at
+    // band boundaries into fence-partitioned submits (WP3.1). That frame runs
+    // neither the pass-timestamp recorder (its proxy would span dead encoders)
+    // nor the queue-wall recorder — a partitioned frame prices its bands, not
+    // the frame, and publishing its wall would fold submit-boundary overhead
+    // into the rolling frame mean.
+    const bandSamplingFrame = measurementInstrumentationEnabled
+      && sparsePresentationRequired
+      && !this.presentationBandSamplePending
+      && ++this.presentationBandFrameCounter % 16 === 0;
     const shouldTracePresentation = measurementInstrumentationEnabled
-      && !this.presentationTracePending;
+      && !this.presentationTracePending
+      && !bandSamplingFrame;
     const presentationTraceSampleId = shouldTracePresentation
       ? ++this.presentationTraceSampleId
       : 0;
@@ -2841,7 +2874,11 @@ export class FluidLabRenderer {
     // Boundaries ride the presentation's own passes, so the traced frame and
     // the untraced frame submit the same command graph.
     const rawEncoder = this.device.createCommandEncoder({ label: "Fluid Lab frame" });
-    const encoder = presentationTrace?.instrument(rawEncoder) ?? rawEncoder;
+    let encoder = presentationTrace?.instrument(rawEncoder) ?? rawEncoder;
+    const bandSampler = bandSamplingFrame
+      ? new FencePartitionedFrameSampler(this.device, encoder, ++this.presentationTraceSampleId, `${presentationContext}:band-wall`)
+      : undefined;
+    if (bandSampler) this.presentationBandSamplePending = true;
     const detailedPresentationTrace = traceDetailedSvoRenderPath ? presentationTrace : undefined;
     // Incremental voxelization: the only work in the frame that changes the
     // structure everything below marches. Withholding it freezes the world at
@@ -2889,7 +2926,7 @@ export class FluidLabRenderer {
         && (!sceneRuntime.fluidSolver || !this.simulationRunning)
         ? `${presentationCoherenceKey}|viewport=${this.presentationTexture!.width}x${this.presentationTexture!.height}|scene=${this.svoDryScenePipeline?.sceneEpoch ?? 0}`
         : undefined;
-      const replacementResult = this.svoDryScenePipeline?.encode(replacementEncoder, target, primaryCoherenceKey, tracePhase) ?? false;
+      const replacementResult = this.svoDryScenePipeline?.encode(replacementEncoder, target, primaryCoherenceKey, tracePhase, bandSampler) ?? false;
       svoEncoded = Boolean(replacementResult);
       requestedBundleStatus = this.svoDryScenePipeline?.presentationBundleStatus;
       if (requestedBundleStatus?.state === "failed") {
@@ -2917,8 +2954,14 @@ export class FluidLabRenderer {
       container: { width_m: scene.container.width_m, depth_m: scene.container.depth_m },
     });
     // Before the dry pass samples it, and outside the water pipeline's own
-    // passes so the volume is complete for the whole frame.
-    this.svoFluidCoverage?.encode(encoder);
+    // passes so the volume is complete for the whole frame. Withheld, the
+    // volume freezes at its last fill — consumers keep reading the retained
+    // texture — so the delta is the fill + mip chain and nothing downstream.
+    const fluidCoverageEncoded = !disabledStages.has("fluid-coverage")
+      && (this.svoFluidCoverage?.encode(encoder) ?? false);
+    if (fluidCoverageEncoded) {
+      detailedPresentationTrace?.completePhase({ id: "scene-upload", label: "SVO fluid coverage" });
+    }
     const pendingInitialRaster = this.pendingInitialRasterPresentation;
     const initialRasterSourceReady = Boolean(pendingInitialRaster
       && !pendingInitialRaster.submitted
@@ -2927,6 +2970,9 @@ export class FluidLabRenderer {
       && (readyGPUFluid.globalFineLevelSetSource || readyGPUFluid.coarseLevelSetSource)
       && this.globalFineWaterAttached);
     const surfaceDiagnosticsRequired = true;
+    // Everything encoded so far — world maintenance, rigid copies, coverage —
+    // is the source band; the water/SVO pipelines cross their own boundaries.
+    if (bandSampler) encoder = bandSampler.boundary("source");
     const rasterResult = this.waterPipeline.encode(
       encoder, this.presentationTexture,
       gpuInfo?.nx ?? fluid?.nx ?? 1, gpuInfo?.ny ?? fluid?.ny ?? 1, gpuInfo?.nz ?? fluid?.nz ?? 1,
@@ -2938,7 +2984,11 @@ export class FluidLabRenderer {
       surfaceDiagnosticsRequired && initialRasterSourceReady,
       sparsePresentationRequired ? "require-dry-scene" : "clear",
       !this.simulationRunning || initialRasterSourceReady,
+      bandSampler,
     );
+    // The pipelines may have crossed submit boundaries; everything below —
+    // overlays, upscale, the final submit — must ride the live encoder.
+    if (bandSampler) encoder = bandSampler.current;
     if (!rasterResult) throw new Error("Water optics pipeline is not ready");
     const initialRasterSubmission = pendingInitialRaster
       && initialRasterSourceReady
@@ -3006,19 +3056,21 @@ export class FluidLabRenderer {
       ) || inspectionOverlayEncoded;
     }
     // The gather is a compute pass over published topology, so it is encoded
-    // whether or not any overlay drew this frame.
+    // whether or not any overlay drew this frame — but it is inspection work,
+    // and the inspection switch withholds it with the rest so the frame being
+    // measured is not paying for its own measurement.
     // The readback is pumped after the submit, not here: `mapAsync` puts the
     // buffer into a pending map state immediately, and a buffer with a map
     // pending may not appear in a submit — including the very submit that
     // carries this copy. Mapping before submitting rejects the whole command
     // buffer, so the frame that was gathering the cell also fails to present.
-    if (fluidCellTrace) {
+    if (fluidCellTrace && !inspectionWithheld) {
       // Lazy allocation means the owner map may have arrived after the last
       // source refresh; `setSource` is a no-op once it stops changing.
       this.fluidCellTracePipeline?.setSource(
         this.gpuFluid?.octreeTechniqueDebugSource,
         this.gpuFluid?.gridPressureSamplesTexture ?? this.pressureSamplesFallbackTexture);
-      this.fluidCellTracePipeline?.encode(encoder);
+      inspectionOverlayEncoded = (this.fluidCellTracePipeline?.encode(encoder) ?? false) || inspectionOverlayEncoded;
     }
     if (gridOverlay && gridOverlay.axis !== "off" && !inspectionWithheld) {
       const overlayView=this.presentationTexture.createView();
@@ -3031,10 +3083,7 @@ export class FluidLabRenderer {
       }
       inspectionOverlayEncoded = true;
     }
-    if (inspectionOverlayEncoded) {
-      completeDetailedPresentationPhase({ id: "inspection-overlay", label: "Inspection overlays" });
-    }
-    if (pixelTraceRequested && pixelTrace) {
+    if (pixelTraceRequested && pixelTrace && !inspectionWithheld) {
       // The probe re-traces the requested pixel against the topology this frame
       // just drew from, and the overlay draws the trace decoded from the last
       // readback. One frame of latency, no stall.
@@ -3046,12 +3095,20 @@ export class FluidLabRenderer {
       // one exception, and only the caller can tell that it is the same ray.
       if (pixelTraceProbing && this.svoDryScenePipeline?.encodePixelTrace(encoder)) {
         this.pixelTraceEncodedSceneRevision = this.pixelTraceSceneRevisionValue;
+        inspectionOverlayEncoded = true;
       }
     }
     // One assembled draw for every decoration any pass contributed this frame.
     if (!inspectionWithheld) {
-      this.encodeDecorationOverlay(
-        encoder, basis, cameraTanHalfFov(camera), scene, pixelTraceRequested ? pixelTrace : undefined, fluidCellTrace);
+      inspectionOverlayEncoded = this.encodeDecorationOverlay(
+        encoder, basis, cameraTanHalfFov(camera), scene, pixelTraceRequested ? pixelTrace : undefined, fluidCellTrace)
+        || inspectionOverlayEncoded;
+    }
+    // Closed after the probes and the decoration draw, not before them: the
+    // seam is what attributes their passes, and closing early charged every
+    // probe to the upscale row.
+    if (inspectionOverlayEncoded) {
+      completeDetailedPresentationPhase({ id: "inspection-overlay", label: "Inspection overlays" });
     }
     closeFixedPresentationPhase();
     // The swap-chain texture is acquired and cleared either way: a frame that
@@ -3101,6 +3158,17 @@ export class FluidLabRenderer {
     if (poseStaging) this.publishRigidBodyPoses(poseStaging, bodies.slice(0, 12).map((body) => body.description.id));
     if (pixelTraceProbing) this.pumpPixelTraceReadback();
     if (fluidCellTrace) this.pumpFluidCellTraceReadback();
+    if (bandSampler) {
+      const sampledContext = presentationContext;
+      void bandSampler.finish("composite-present", presentationCompletion).then((bandTrace) => {
+        if (bandTrace && !this.disposed && !this.deviceLost
+          && this.device === completedPresentationDevice && this.presentationContext === sampledContext) {
+          this.latestPresentationBandTrace = bandTrace;
+        }
+      }).finally(() => {
+        this.presentationBandSamplePending = false;
+      });
+    }
     const presentationQueueTraceRead = presentationQueueTrace?.read(this.device.queue);
     const presentationStageTraceRead = hardwarePresentationTraceResolved && hardwarePresentationTrace
       ? hardwarePresentationTrace.readSemanticTrace({

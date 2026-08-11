@@ -32,6 +32,7 @@ import {
 import { globalFineClassifiedEmitShader, globalFineClassifiedIndirectScanShader } from "./webgpu-water-global-fine-tetra";
 import { globalFineSurfaceClassificationShader } from "./webgpu-water-global-fine-classify";
 import type { GPUTimestampPhase } from "./performance-trace";
+import type { FrameBandPartitioner } from "./webgpu-frame-band-sampler";
 import {
   disabledRenderStagesEqual,
   NO_DISABLED_RENDER_STAGES,
@@ -1919,8 +1920,8 @@ export class RasterWaterPipeline {
 
   /**
    * Frame-graph stages this pipeline must not encode. See
-   * `render-stage-switches`; only `water-interfaces`, `caustics` and
-   * `optical-composite` are its to honour.
+   * `render-stage-switches`; only `surface-extraction`, `water-interfaces`,
+   * `caustics` and `optical-composite` are its to honour.
    *
    * Re-enabling has to re-run the once-only clears and re-project the caustic
    * map: both are retained precisely because nothing invalidated them, and a
@@ -2004,7 +2005,7 @@ export class RasterWaterPipeline {
     return bindGroup;
   }
 
-  encode(encoder: GPUCommandEncoder, output: GPUTexture | GPUTextureView, nx: number, ny: number, nz: number, restrictedTallCell: boolean, maximumNeighborDelta: number, revision: number, drySceneReplacement?: DrySceneReplacementEncoder, traceBoundary?: () => void, tracePhase?: RenderPathTracePhase, forceSurfaceDiagnostics = false, backgroundMode: RasterWaterBackgroundMode = "require-dry-scene", allowSurfaceDiagnostics = true): RasterWaterEncodeResult | false {
+  encode(encoder: GPUCommandEncoder, output: GPUTexture | GPUTextureView, nx: number, ny: number, nz: number, restrictedTallCell: boolean, maximumNeighborDelta: number, revision: number, drySceneReplacement?: DrySceneReplacementEncoder, traceBoundary?: () => void, tracePhase?: RenderPathTracePhase, forceSurfaceDiagnostics = false, backgroundMode: RasterWaterBackgroundMode = "require-dry-scene", allowSurfaceDiagnostics = true, bandPartitioner?: FrameBandPartitioner): RasterWaterEncodeResult | false {
     // Count only frames whose source has a completed GPU receipt. The
     // diagnostics/visual panels request full-rate receipts, making this an
     // exact source-mode counter while it is being used to judge fidelity.
@@ -2021,8 +2022,16 @@ export class RasterWaterPipeline {
     // Retry extraction until its own diagnostic copy is admitted. This also
     // bypasses the ordinary 250 ms telemetry throttle, but never overwrites a
     // readback still owned by an earlier submission.
+    // The extraction chain has its own switch: it is the largest compute block
+    // in a wet frame and interface drawing is a separate question. Withheld,
+    // the retained mesh keeps drawing (the interfaces read the last extraction)
+    // so the delta is classify + scan + emit and nothing downstream. The t=0
+    // handoff's forced capture overrides the withhold — a startup gate that can
+    // never satisfy its own admission condition would stall the presentation
+    // forever behind a diagnostic switch.
     const updateSurface = forceSurfaceDiagnostics
-      || shouldUpdateWaterSurface(this.extractedRevision, revision, this.lastExtractionAt_ms, now_ms);
+      || (!this.disabledStages.has("surface-extraction")
+        && shouldUpdateWaterSurface(this.extractedRevision, revision, this.lastExtractionAt_ms, now_ms));
     let surfaceDiagnosticsCaptured = false;
     // The map follows the mesh: a retained surface deposits the same bundles,
     // so re-projecting it would spend a full pass to write the same texels. A
@@ -2101,7 +2110,12 @@ export class RasterWaterPipeline {
       tracePhase?.({ id: "water-caustics", label: "Water caustic map" });
     }
     traceBoundary?.();
+    // Everything above — extraction, diagnostics, caustics — is the
+    // water-surface band; the dry-scene replacement crosses its own internal
+    // boundaries, so this scope's encoder must resynchronize afterwards.
+    if (bandPartitioner) encoder = bandPartitioner.boundary("water-surface");
     const sparseSceneResult = drySceneReplacement?.(encoder, this.sceneTexture, tracePhase) ?? false;
+    if (bandPartitioner) encoder = bandPartitioner.current;
     if (sparseSceneResult) {
       // A later switch to fluid-only must clear imagery left by this frame.
       this.clearBackgroundEncoded = false;
@@ -2143,6 +2157,9 @@ export class RasterWaterPipeline {
       tracePhase?.({ id: "water-back-interface", label: "Water + spray back interface" });
       interfacePass("Water rear front interfaces",this.surfaceRearFrontPipeline,this.rearFrontPosition,this.rearFrontNormal,this.rearFrontDepth,"front",false,true);
       interfacePass("Water rear back interfaces",this.surfaceRearBackPipeline,this.rearBackPosition,this.rearBackNormal,this.rearBackDepth,"back",false,true);
+      // Their own seam: without it these two peeled passes were charged to the
+      // optical composite, the next label to close.
+      tracePhase?.({ id: "water-interfaces", label: "Water rear interfaces" });
     } else if (!this.dryInterfaceClearsEncoded) {
       // A fluid-less scene draws no interface geometry. Clear once so the
       // compositor's no-interface input cannot retain a preceding fluid scene.
@@ -2153,6 +2170,7 @@ export class RasterWaterPipeline {
       tracePhase?.({ id: "water-back-interface", label: "Fluid-less scene back interface clear" });
       clearPass("Fluid-less scene rear front interface clear",this.rearFrontPosition,this.rearFrontNormal,this.rearFrontDepth);
       clearPass("Fluid-less scene rear back interface clear",this.rearBackPosition,this.rearBackNormal,this.rearBackDepth);
+      tracePhase?.({ id: "water-interfaces", label: "Fluid-less scene rear interface clears" });
       this.dryInterfaceClearsEncoded = true;
     }
     traceBoundary?.();

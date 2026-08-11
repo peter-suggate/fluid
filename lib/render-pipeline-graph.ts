@@ -132,6 +132,13 @@ export interface RenderPipelineNode {
   readonly taps: readonly SvoRenderStageView[];
   /** True when the node's lamp is a user control rather than a readout. */
   readonly toggleable: boolean;
+  /**
+   * Rows sharing a group render as one collapsed row while every member is
+   * `unavailable` — a run of dashed placeholders is diagram space spent on a
+   * path the frame cannot take. The group expands back into its member rows
+   * the moment any member becomes reachable.
+   */
+  readonly collapseGroup?: RenderPipelineCollapseGroupId;
   readonly tip: RenderPipelineTip;
   readonly state: (context: RenderPipelineContext) => RenderPipelineNodeState;
   /** The short factual chip under the label. Never a description. */
@@ -169,6 +176,23 @@ const rasterTierState = (context: RenderPipelineContext, stage: RenderStageSwitc
 const rasterTierChip = (context: RenderPipelineContext, label: string) =>
   (!context.rasterPrimaryActive ? label : "withheld · not encoded");
 
+export type RenderPipelineCollapseGroupId = "raster-arm";
+
+export interface RenderPipelineCollapseGroupDefinition {
+  readonly label: string;
+  readonly chip: string;
+  readonly summary: string;
+}
+
+/** What a collapsed run of rows reads as while its arm is unreachable. */
+export const RENDER_PIPELINE_COLLAPSE_GROUPS: Readonly<Record<RenderPipelineCollapseGroupId, RenderPipelineCollapseGroupDefinition>> = Object.freeze({
+  "raster-arm": {
+    label: "RASTER ARM",
+    chip: "3 tiers · not reachable",
+    summary: "The rasterized brick-proxy primary's own visibility tiers — thin-glass discovery, the scene-primitive tier, and rigid impostors. The megakernel primary resolves all three inline, so none of these passes can encode; the arm expands into its rows only under FLUID_SVO_PRIMARY_TRAVERSAL=raster.",
+  },
+});
+
 // Declared before freezing so every `state`/`chip` closure is contextually
 // typed by `RenderPipelineNode`; `Object.freeze` on a bare literal widens the
 // array and takes the parameter types with it.
@@ -193,6 +217,26 @@ const NODES: readonly RenderPipelineNode[] = [
       : context.rendererActive ? "on" : "unavailable"),
     chip: (context) => (context.disabledStages.has("sparse-world-build") ? "frozen · no maintenance"
       : `depth ${context.refinementDepth} · leaf ${context.leafVoxel_mm.toFixed(3).replace(/\.?0+$/, "")} mm`),
+  },
+  {
+    id: "fluid-coverage",
+    band: "source",
+    side: "right",
+    label: "FLUID COVERAGE",
+    phaseLabels: ["SVO fluid coverage"],
+    stage: "fluid-coverage",
+    taps: [],
+    toggleable: true,
+    tip: {
+      summary: "Fills the fluid-coverage volume and reduces it down its mip chain, one compute pass per level, so the dry passes know where water occludes the scene. Off freezes the volume at its last fill — consumers keep reading the retained texture — so the delta is the fill plus the whole mip chain and nothing downstream.",
+      writes: "fluid coverage volume · one mip per level",
+      feeds: "primary traversal · deferred lighting",
+      gate: "a scene with fluid, under the sparse presentation",
+    },
+    state: (context) => (context.disabledStages.has("fluid-coverage") ? "off"
+      : context.sceneHasFluid && context.rendererActive ? "on" : "unavailable"),
+    chip: (context) => (context.disabledStages.has("fluid-coverage") ? "withheld · volume frozen"
+      : context.sceneHasFluid ? "fill + mip chain" : "dry scene"),
   },
   {
     id: "stationary-reuse",
@@ -244,6 +288,7 @@ const NODES: readonly RenderPipelineNode[] = [
     stage: "thin-glass",
     taps: ["glass-discovery"],
     toggleable: true,
+    collapseGroup: "raster-arm",
     tip: {
       summary: "Records the nearest glass pane per pixel. The megakernel resolves panes inline and packs the winning key into the opaque identity's spare bits, so the separate raster pass only runs on the raster primary.",
       writes: "splitGlassKey",
@@ -261,6 +306,7 @@ const NODES: readonly RenderPipelineNode[] = [
     stage: "scene-primitive",
     taps: [],
     toggleable: true,
+    collapseGroup: "raster-arm",
     tip: {
       summary: "Draws authored analytic records as their own visibility tier, ahead of the voxels. The megakernel returns at the first voxel instead, which is the whole of the bounded 0.087%-of-pixels difference between the two primary arms.",
       gate: "raster primary only",
@@ -277,6 +323,7 @@ const NODES: readonly RenderPipelineNode[] = [
     stage: "rigid-impostor",
     taps: ["rigid-impostor"],
     toggleable: true,
+    collapseGroup: "raster-arm",
     tip: {
       summary: "Rasterizes solver rigid bodies as analytic impostors, then bridges their certificate into primary geometry. The megakernel folds the analytic body loop into traceOpaqueScene instead.",
       gate: "raster primary only",
@@ -334,12 +381,17 @@ const NODES: readonly RenderPipelineNode[] = [
     tip: {
       summary: "Persistent level-0 voxel visibility for directional light slot zero, drained over several frames by a bounded queue. Off withholds the demand and population dispatches; the consumers keep their bindings and read whatever the cache last held, so this measures the drain and not the lookup.",
       writes: "rg32uint voxel visibility cache",
-      gate: "split shading, and a device exposing at least seventeen sampled textures per stage",
+      gate: "cones with shadows on a dry scene, split shading, and a device exposing at least seventeen sampled textures per stage",
     },
+    // Mirrors the encoder's own gate: fluid coverage displaces the cache, and
+    // it only drains under cones with shadows enabled. Reporting `on` for a wet
+    // scene lit the lamp over dispatches the frame never encoded.
     state: (context) => (context.disabledStages.has("voxel-light-cache") ? "off"
-      : context.coneTracingMode === "off" ? "off" : "on"),
-    chip: (context) => (context.disabledStages.has("voxel-light-cache")
-      ? "withheld · drain stopped" : "slot 0 · 16 384 voxels/frame"),
+      : context.coneTracingMode !== "cones" || !context.shadowsEnabled || context.sceneHasFluid ? "off" : "on"),
+    chip: (context) => (context.disabledStages.has("voxel-light-cache") ? "withheld · drain stopped"
+      : context.sceneHasFluid ? "fluid coverage · cache idle"
+      : context.coneTracingMode !== "cones" || !context.shadowsEnabled ? "needs cones + shadows"
+      : "slot 0 · 16 384 voxels/frame"),
   },
   {
     id: "world-gi-cache",
@@ -372,16 +424,39 @@ const NODES: readonly RenderPipelineNode[] = [
     taps: [],
     toggleable: true,
     tip: {
-      summary: "Evaluates the full material at the reduced cone rate so the deferred pass has something to reconstruct from. Under relight this stores a GI closure; under upsampling it stores final radiance, because using the closure as radiance made directly lit terrain nearly black. Off keeps the clear and drops the draw, so reconstruction guides off an empty result and the image loses its reduced-rate colour.",
+      summary: "Evaluates the full material at the reduced cone rate so the deferred pass has something to reconstruct from. Encoded only under a reconstruction mode: the relight modes evaluate the material at full rate inside deferred lighting instead, and this pass never runs there. Off keeps the clear and drops the draw, so reconstruction guides off an empty result and the image loses its reduced-rate colour.",
       reads: "conePrepassVisibility · conePrepassGeometry",
       writes: "conePrepassRadiance",
-      gate: "a reduced cone rate",
+      gate: "a reduced cone rate, under a reconstruction (non-relight) mode",
     },
-    state: (context) => (context.disabledStages.has("reduced-shade") ? "off" : reduced(context) ? "on" : "off"),
+    // On only when the encoder actually emits the pass: a relight reconstruction
+    // never encodes it, and reporting `on` there left the lamp lit over a row
+    // that could only ever read idle.
+    state: (context) => (context.disabledStages.has("reduced-shade") ? "off"
+      : reduced(context) && !isRelightReconstruction(context.tuning.coneRadianceReconstruction) ? "on" : "off"),
     chip: (context) => (context.disabledStages.has("reduced-shade") ? "withheld · clear only"
       : reduced(context)
-        ? isRelightReconstruction(context.tuning.coneRadianceReconstruction) ? "relight" : "upsample"
+        ? isRelightReconstruction(context.tuning.coneRadianceReconstruction) ? "relight · not encoded" : "upsample"
         : "full rate · not encoded"),
+  },
+  {
+    id: "sky-lighting",
+    band: "shading",
+    side: "right",
+    label: "SKY LIGHTING",
+    phaseLabels: ["SVO deferred sky lighting"],
+    stage: "sky-lighting",
+    taps: [],
+    toggleable: true,
+    tip: {
+      summary: "The miss half of the depth partition: its own pass resolves sky and thin glass over open sky at every pixel primary visibility left empty. Off keeps the pass and its clear, so the miss pixels go black and the delta is exactly what the sky resolve was worth.",
+      reads: "primary depth · environment · thin-glass key plane",
+      writes: "dry scene HDR (miss pixels)",
+      feeds: "deferred lighting · optical composite",
+    },
+    state: (context) => (context.disabledStages.has("sky-lighting") ? "off" : "on"),
+    chip: (context) => (context.disabledStages.has("sky-lighting")
+      ? "withheld · clear only" : "miss pixels · own pass"),
   },
   {
     id: "deferred-lighting",
@@ -398,14 +473,14 @@ const NODES: readonly RenderPipelineNode[] = [
     taps: ["dry-radiance", "lighting-partition"],
     toggleable: true,
     tip: {
-      summary: "One render pass, partitioned by two complementary depth tests: the sky shader takes the miss pixels and the full deferred shader takes the rest. Sky is drawn first so the expensive draw is the one still in flight when the pass ends. The two draws cannot be timed apart — they share a pass, so they share a row. Off keeps the pass and drops all three draws, so the dry scene goes black and the delta is sky plus deferred shading together.",
+      summary: "The surface half of the depth partition, in its own pass since the sky split out: the full deferred shader (and the reconstruction draw at reduced cone rates) shades every pixel the depth buffer resolved to a surface. Off keeps the pass, which loads the sky pass's result, so geometry goes black while the sky stays and the delta is the whole cost of deferred shading.",
       reads: "primary G-buffer · cone visibility · GI cache",
       writes: "dry scene HDR",
       feeds: "optical composite",
     },
     state: (context) => (context.disabledStages.has("deferred-lighting") ? "off" : "on"),
     chip: (context) => (context.disabledStages.has("deferred-lighting")
-      ? "withheld · clear only" : "sky ▏shaded · one pass"),
+      ? "withheld · sky retained" : "surface pixels · own pass"),
   },
   {
     id: "gi-composition",
@@ -434,25 +509,48 @@ const NODES: readonly RenderPipelineNode[] = [
         : "withheld · gather not encoded"),
   },
   {
+    id: "surface-extraction",
+    band: "output",
+    side: "left",
+    label: "SURFACE EXTRACTION",
+    phaseLabels: [
+      "Water surface extraction",
+      "Surface extraction + caustics",
+    ],
+    stage: "surface-extraction",
+    taps: [],
+    toggleable: true,
+    tip: {
+      summary: "Classifies the level set, sizes the indirect dispatch and emits the water isosurface triangles — the largest compute block in a wet frame, throttled to the solver revision. Off freezes the mesh at its last extraction: the interfaces keep drawing the retained surface, so the delta is classify + scan + emit and nothing downstream. The t=0 startup capture overrides the withhold so a fresh scene can still admit its first frame.",
+      writes: "surface vertex buffer · indirect draw args",
+      feeds: "water interfaces · caustic map",
+      gate: "a scene with fluid, on solver revision change under a 250 ms throttle",
+    },
+    state: (context) => (context.disabledStages.has("surface-extraction") ? "off"
+      : context.sceneHasFluid ? "on" : "unavailable"),
+    chip: (context) => (context.disabledStages.has("surface-extraction") ? "withheld · mesh frozen"
+      : context.sceneHasFluid ? "classify · scan · emit" : "dry scene"),
+  },
+  {
     id: "water-interfaces",
     band: "output",
     side: "right",
     label: "WATER + SPRAY INTERFACES",
     phaseLabels: [
-      "Water surface extraction",
       "Water + spray front interface",
       "Water + spray back interface",
-      "Surface extraction + caustics",
+      "Water rear interfaces",
       "Front/back water interfaces",
-      "Water interfaces",
       "Fluid-less scene front interface clear",
       "Fluid-less scene back interface clear",
+      "Fluid-less scene rear interface clears",
     ],
     stage: "water-interfaces",
     taps: ["water-depth"],
     toggleable: true,
     tip: {
-      summary: "Extracts the isosurface and draws four depth-peeled interface layers for water and spray. A dry scene clears the attachments once and never draws them again. Off takes those same once-only clears on a wet scene, so the composite sees no interfaces rather than compositing the last ones drawn.",
+      summary: "Draws four depth-peeled interface layers for water and spray from the extracted surface. A dry scene clears the attachments once and never draws them again. Off takes those same once-only clears on a wet scene, so the composite sees no interfaces rather than compositing the last ones drawn.",
+      reads: "surface vertex buffer",
       writes: "front/back position · normal · depth",
       feeds: "optical composite",
       gate: "a scene with fluid",
@@ -577,8 +675,11 @@ export function renderPipelinePhaseDurations(trace: PerformanceTrace | undefined
  * - `idle`       the detailed partition arrived, but this gated pass did not run.
  * - `structural` a gate or a decision that never spends frame time either way.
  * - `unmeasured` no trace yet, or a partition too coarse to name this node.
+ * - `wall` derived from the band's fence-partitioned wall: this row is the
+ *   band's only pass without a trusted per-pass timestamp, so the band wall
+ *   minus the band's measured compute lands at its junction.
  */
-export type RenderPipelineCostKind = "measured" | "withheld" | "shared" | "idle" | "structural" | "unmeasured";
+export type RenderPipelineCostKind = "measured" | "withheld" | "shared" | "idle" | "structural" | "unmeasured" | "wall";
 
 export interface RenderPipelineMeasurement {
   readonly kind: RenderPipelineCostKind;

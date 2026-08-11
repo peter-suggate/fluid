@@ -40,8 +40,13 @@ test("fallback instrumentation retains the compact fixed trace helper", () => {
 test("presentation boundaries ride the frame's passes and add no measurement fence", () => {
   const renderer = source("../lib/webgpu-renderer.ts");
 
-  assert.match(renderer, /const encoder = presentationTrace\?\.instrument\(rawEncoder\) \?\? rawEncoder/,
+  // `let`, not `const`: a fence-partitioned band sampling frame replaces the
+  // encoder at each band boundary. Those frames never instrument — the two
+  // measurement modes are mutually exclusive by construction.
+  assert.match(renderer, /let encoder = presentationTrace\?\.instrument\(rawEncoder\) \?\? rawEncoder/,
     "the presentation encoder must be the instrumented one so boundaries can attach to real passes");
+  assert.match(renderer, /&& !bandSamplingFrame/,
+    "a band sampling frame must not also run the pass-timestamp recorder: its proxy would span submitted encoders");
   assert.doesNotMatch(renderer, /presentationTrace\?\.boundary\(/,
     "marker passes are no longer how a presentation boundary is recorded");
 });

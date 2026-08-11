@@ -606,6 +606,10 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 .rp-collar-cost::after { content: ""; flex: 1; height: 1px; background: var(--line); }
 .rp-collar-cost output { color: var(--label); font: 700 10px/1 var(--mono); }
 .rp-collar-cost small { color: var(--micro); font: 700 9px/1 var(--mono); }
+/* The fence-measured wall for the whole band, beside the Σcompute figure the
+   rows add up to. Tagged so the two measurement bases cannot be read as one. */
+.rp-collar-wall { display: inline-flex; align-items: baseline; gap: 2px; }
+.rp-collar-wall small { color: var(--micro); font: 700 8px/1 var(--mono); letter-spacing: .08em; }
 
 .rp-row-node > .rp-node { margin: 0 0 4px; }
 .rp-node { min-width: 0; padding: 4px 7px 6px; border: 1px solid var(--line); background: var(--render-control-bg); }
@@ -628,8 +632,12 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
    measured zero and reads like one; the em dash is kept for a measurement that
    is genuinely missing, so the two can never be confused for each other. */
 .rp-trunk-cost { fill: var(--ink); font: 700 9px/1 var(--mono); }
-.rp-trunk-cost.is-withheld, .rp-trunk-cost.is-structural, .rp-trunk-cost.is-unmeasured { fill: var(--micro); }
+.rp-trunk-cost.is-withheld, .rp-trunk-cost.is-structural, .rp-trunk-cost.is-unmeasured, .rp-trunk-cost.is-idle { fill: var(--micro); }
 .rp-trunk-cost.is-shared { fill: var(--dim); }
+/* A fence-derived wall figure at a junction: full-strength like a measured
+   cost — it is one — but tagged, because its basis includes render passes the
+   compute column around it cannot see. */
+.rp-trunk-wall-tag { fill: var(--micro); font: 700 7px/1 var(--mono); letter-spacing: .08em; }
 /* What the switch was worth: the frame total differenced across it. Cheaper
    under the current setting reads as a saving, dearer as a charge. */
 .rp-node-delta { padding: 0 3px; border: 1px solid var(--line); color: var(--dim); font: 700 9px/13px var(--mono); white-space: nowrap; }

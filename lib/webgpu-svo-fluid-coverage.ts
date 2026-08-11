@@ -212,10 +212,11 @@ export class WebGpuSvoFluidCoverage {
     });
   }
 
-  encode(encoder: GPUCommandEncoder): void {
-    if (this.destroyed) return;
+  /** True when the fill and reduce passes were actually encoded this frame. */
+  encode(encoder: GPUCommandEncoder): boolean {
+    if (this.destroyed) return false;
     this.allocate();
-    if (!this.fillPipeline || !this.reducePipeline || !this.fillBindGroup || !this.texture) return;
+    if (!this.fillPipeline || !this.reducePipeline || !this.fillBindGroup || !this.texture) return false;
     const fillPass = encoder.beginComputePass({ label: "Fill SVO fluid coverage volume" });
     fillPass.setPipeline(this.fillPipeline);
     fillPass.setBindGroup(0, this.fillBindGroup);
@@ -236,6 +237,7 @@ export class WebGpuSvoFluidCoverage {
       pass.end();
     }
     this.generation += 1;
+    return true;
   }
 
   destroy(): void {

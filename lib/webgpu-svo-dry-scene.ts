@@ -30,6 +30,7 @@ import {
   NO_DISABLED_RENDER_STAGES,
   type DisabledRenderStages,
 } from "./render-stage-switches";
+import type { FrameBandPartitioner } from "./webgpu-frame-band-sampler";
 
 /** Lifecycle metadata lives with the sparse presentation programs it describes. */
 export const svoPresentationResourcePlugin: ResourcePluginDefinition = Object.freeze({
@@ -2120,6 +2121,17 @@ export interface SvoDryOptimizationExperiments {
    * scaled with scene size.
    */
   readonly analyticConeBoundaries?: boolean;
+  /**
+   * Compile the deferred kernel with the indirect gather ABSENT rather than
+   * uniform-gated. `dryGlobalIllumination` becomes the exact value the
+   * flag-off path returns — radiance 0, visibility 1, valid — so the image is
+   * unchanged while the cone gather, its page caches and the tetra sampling
+   * become dead code Dawn eliminates. This is the feature-specialised variant
+   * the split-bundle cache keys on when global illumination is disabled; a
+   * GI-capable kernel with the uniform off still pays for the never-taken
+   * branch (see the unified-voxel purge: 13.25 → 8.96 ms, byte-identical).
+   */
+  readonly globalIlluminationAbsent?: boolean;
   /**
    * Run the analytic candidate-BVH walk of `traceStatic` first and unbounded,
    * as it historically did, instead of seeding it with the voxel-resolved hit.
@@ -5070,7 +5082,13 @@ fn svoTetraRadianceConeLoad(query:SvoTetraRadianceConeQuery)->SvoTetraRadianceCo
 }
 struct DryGlobalIllumination{radiance:vec3f,visibility:f32,valid:u32}
 ${worldGiCacheHelpersWGSL}
-fn dryGlobalIllumination(position:vec3f,normal:vec3f,ignoredBodyOwner:u32)->DryGlobalIllumination{
+fn dryGlobalIllumination(position:vec3f,normal:vec3f,ignoredBodyOwner:u32)->DryGlobalIllumination{${experiments.globalIlluminationAbsent
+    // The GI-absent variant: the stub is the exact value the uniform flag-off
+    // path returns, so the image is unchanged and the whole gather below is
+    // dead code the compiler removes from the deferred kernel.
+    ? /* wgsl */ `
+  return DryGlobalIllumination(vec3f(0.0),1.0,1u);`
+    : /* wgsl */ `
   if((dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.globalIllumination}u)==0u){return DryGlobalIllumination(vec3f(0.0),1.0,1u);}
   if((dryDerivedPageFailure&${SVO_DRY_DERIVED_FAILURE.reducedReconstruction}u)!=0u){dryDerivedPageFailure|=${SVO_DRY_DERIVED_FAILURE.globalIlluminationPage}u;return DryGlobalIllumination(vec3f(0.0),1.0,0u);}
   if(!dryTetraRadianceReady()){dryDerivedPageFailure|=${SVO_DRY_DERIVED_FAILURE.globalIlluminationPage}u;return DryGlobalIllumination(vec3f(0.0),1.0,0u);}
@@ -5105,7 +5123,7 @@ fn dryGlobalIllumination(position:vec3f,normal:vec3f,ignoredBodyOwner:u32)->DryG
     visibility+=select(visibleThroughStatic,0.0,rigidBlocked)*weight;
   }
   let occlusionStrength=select(0.0,dry.giLighting.y,(dry.materialPublication.w&${SVO_DRY_VISIBILITY_FLAGS.globalIlluminationOcclusion}u)!=0u);
-  return DryGlobalIllumination(max(indirect,vec3f(0.0))*dry.giLighting.x,mix(1.0,clamp(visibility,0.0,1.0),occlusionStrength),1u);
+  return DryGlobalIllumination(max(indirect,vec3f(0.0))*dry.giLighting.x,mix(1.0,clamp(visibility,0.0,1.0),occlusionStrength),1u);`}
 }
 fn dryDiffuseMultiBounceVisibility(visibilityIn:f32,albedoIn:vec3f)->vec3f{
   let visibility=clamp(visibilityIn,0.0,1.0);let albedo=clamp(albedoIn,vec3f(0.0),vec3f(1.0));
@@ -6173,8 +6191,14 @@ export class SparseVoxelDrySceneRenderer {
   private coneFanoutFrameBuffer?: GPUBuffer;
   private coneFanoutLightCount: number = SVO_CONE_FANOUT_CONTRACT.maximumLights;
   private splitPipelineScale?: SvoConeLightingScale;
-  private readonly splitPipelineBundles = new Map<SvoConeLightingScale, SvoDrySplitPipelineBundle>();
-  private readonly splitPipelineCompiles = new Map<SvoConeLightingScale, Promise<SvoDrySplitPipelineBundle>>();
+  /**
+   * Keyed by scale AND global-illumination capability: the GI-off kernel is a
+   * feature-specialised variant with the gather compiled out, not a uniform
+   * branch. A GI flip keeps rendering the stale-but-correct variant until the
+   * specialised one activates, exactly like a scale change keeps its bundle.
+   */
+  private readonly splitPipelineBundles = new Map<string, SvoDrySplitPipelineBundle>();
+  private readonly splitPipelineCompiles = new Map<string, Promise<SvoDrySplitPipelineBundle>>();
   private splitVisibilityLayout?: GPUBindGroupLayout;
   private splitLightingLayout?: GPUBindGroupLayout;
   private rasterGlassLayout?: GPUBindGroupLayout;
@@ -7829,15 +7853,22 @@ export class SparseVoxelDrySceneRenderer {
 
   private async ensureSplitPipelines(scale: SvoConeLightingScale): Promise<void> {
     if (this.shadingPath === "inline" || !this.layout || !this.vertexModule) return;
-    const cached = this.splitPipelineBundles.get(scale);
+    // The variant this call is for, captured now: lighting options can flip
+    // while the compile is in flight, and a bundle must only activate if it is
+    // still the variant the frame wants.
+    const globalIlluminationCapable = this.lightingOptions.globalIlluminationEnabled !== false;
+    const variantKey = this.splitVariantKey(scale, globalIlluminationCapable);
+    const variantCurrent = () => scale === this.coneScale
+      && globalIlluminationCapable === (this.lightingOptions.globalIlluminationEnabled !== false);
+    const cached = this.splitPipelineBundles.get(variantKey);
     if (cached) {
-      if (scale === this.coneScale) this.activateSplitPipelineBundle(scale, cached);
+      if (variantCurrent()) this.activateSplitPipelineBundle(scale, cached);
       return;
     }
-    const pending = this.splitPipelineCompiles.get(scale);
+    const pending = this.splitPipelineCompiles.get(variantKey);
     if (pending) {
       const bundle = await pending;
-      if (scale === this.coneScale) this.activateSplitPipelineBundle(scale, bundle);
+      if (variantCurrent()) this.activateSplitPipelineBundle(scale, bundle);
       return;
     }
     if (scale !== 1 && !this.conePrepassLayout) return;
@@ -7939,9 +7970,14 @@ export class SparseVoxelDrySceneRenderer {
     const shaderExperimentsBase = scale === 1 && this.experiments.halfPrecisionLighting
       ? { ...this.experiments, halfPrecisionLighting: false }
       : this.experiments;
-    const shaderExperiments = voxelLightCacheEnabled
+    const shaderExperimentsPruned = voxelLightCacheEnabled
       ? shaderExperimentsBase
       : { ...shaderExperimentsBase, voxelLightCache: false };
+    // The variant this bundle IS: GI disabled compiles the gather out rather
+    // than leaving a never-taken branch priced into every deferred pixel.
+    const shaderExperiments = globalIlluminationCapable
+      ? shaderExperimentsPruned
+      : { ...shaderExperimentsPruned, globalIlluminationAbsent: true };
     const compile = (async (): Promise<SvoDrySplitPipelineBundle> => {
       const [module, rasterRigidModule] = await Promise.all([
         checkedModule(this.device, `Sparse voxel dry scene split x${scale} (${this.traversalMode}, brick-${this.brickOccupancyMode})`,
@@ -8301,19 +8337,28 @@ export class SparseVoxelDrySceneRenderer {
         brickCoverageOverflow, scenePrimitiveRaster,
         scenePrimitiveCoverage, scenePrimitiveLodResolve, scenePrimitiveComputeArgs, scenePrimitiveComputeResolve, scenePrimitiveDepthBridge,
         scenePrimitiveCoverageResolve, scenePrimitiveCoverageOverflow };
-      this.splitPipelineBundles.set(scale, bundle);
+      this.splitPipelineBundles.set(variantKey, bundle);
       return bundle;
     })();
-    this.splitPipelineCompiles.set(scale, compile);
+    this.splitPipelineCompiles.set(variantKey, compile);
     try {
       const bundle = await compile;
-      if (scale === this.coneScale) {
+      if (variantCurrent()) {
         this.activateSplitPipelineBundle(scale, bundle);
         this.clearReusableFrame();
       }
     } finally {
-      if (this.splitPipelineCompiles.get(scale) === compile) this.splitPipelineCompiles.delete(scale);
+      if (this.splitPipelineCompiles.get(variantKey) === compile) this.splitPipelineCompiles.delete(variantKey);
     }
+  }
+
+  /** The split-bundle cache key: cone scale plus the GI capability the kernel was compiled with. */
+  private splitVariantKey(scale: SvoConeLightingScale, globalIlluminationCapable: boolean): string {
+    return `${scale}|${globalIlluminationCapable ? "gi" : "no-gi"}`;
+  }
+
+  private currentSplitVariantKey(scale: SvoConeLightingScale): string {
+    return this.splitVariantKey(scale, this.lightingOptions.globalIlluminationEnabled !== false);
   }
 
   private ensureSplitTargets(): void {
@@ -9237,7 +9282,7 @@ export class SparseVoxelDrySceneRenderer {
     if (coneLightingScale !== 1) {
       const coneBundle = this.conePipelineBundles.get(coneLightingScale);
       if (coneBundle) this.activateConePipelineBundle(coneLightingScale, coneBundle);
-      const splitBundle = this.splitPipelineBundles.get(coneLightingScale);
+      const splitBundle = this.splitPipelineBundles.get(this.currentSplitVariantKey(coneLightingScale));
       if (splitBundle) this.activateSplitPipelineBundle(coneLightingScale, splitBundle);
     }
     this.clearReusableFrame();
@@ -9252,6 +9297,9 @@ export class SparseVoxelDrySceneRenderer {
         detail: `Requested SVO presentation bundle at scale ${coneLightingScale} failed: ${reason}`,
       };
     };
+    // Both arms also re-request the split bundle, which is keyed by scale AND
+    // GI capability: a GI flip compiles the specialised variant while the
+    // stale-but-correct bundle keeps rendering until it activates.
     if (coneLightingScale !== 1) void this.ensureConeLightingPrepass().catch(retainFailure);
     else if (this.shadingPath === "split") void this.ensureSplitPipelines(1).catch(retainFailure);
   }
@@ -9263,7 +9311,7 @@ export class SparseVoxelDrySceneRenderer {
     if (!this.silhouetteRefinementEnabled) return { state: "disabled" };
     if (this.requestedBundleFailure?.scale === this.coneScale) return { state: "failed", detail: this.requestedBundleFailure.detail };
     if (this.requestedBundleResourceFailure) return { state: "failed", detail: this.requestedBundleResourceFailure };
-    if (this.splitPipelineCompiles.has(this.coneScale) || this.splitPipelineScale !== this.coneScale) {
+    if (this.splitPipelineCompiles.has(this.currentSplitVariantKey(this.coneScale)) || this.splitPipelineScale !== this.coneScale) {
       return { state: "compiling", detail: `Preparing split presentation bundle at scale ${this.coneScale}` };
     }
     if (!this.primarySeamClosurePipeline) {
@@ -10029,7 +10077,7 @@ export class SparseVoxelDrySceneRenderer {
     }
   }
 
-  encode(encoder: GPUCommandEncoder, target: GPUTexture | GPUTextureView, reuseKey?: string, tracePhase?: RenderPathTracePhase): DrySceneReplacementResult | false {
+  encode(encoder: GPUCommandEncoder, target: GPUTexture | GPUTextureView, reuseKey?: string, tracePhase?: RenderPathTracePhase, bandPartitioner?: FrameBandPartitioner): DrySceneReplacementResult | false {
     if (!this.pipeline || !this.bindGroup) return false;
     // The coverage volume allocates lazily and only reports itself once a fill
     // has been encoded, so its validity flips mid-session. Refresh the frame
@@ -10051,7 +10099,11 @@ export class SparseVoxelDrySceneRenderer {
     // cannot observe the reduced pass from inside its own full-rate composition.
     this.probeEncodedConePrepass = usePrepass;
     const splitRequested = this.shadingPath === "split";
-    const activeSplitVisibilityPipeline = this.rasterRigidActive
+    // A withheld rigid tier must also withdraw the rigid-reading visibility
+    // variant: the dearer shader would otherwise keep running against a plane
+    // this frame never wrote, pricing the "off" arm with stale-data work.
+    const rasterRigidEncoded = this.rasterRigidActive && !this.disabledStages.has("rigid-impostor");
+    const activeSplitVisibilityPipeline = rasterRigidEncoded
       ? this.splitRasterRigidVisibilityPipeline
       : this.splitVisibilityPipeline;
     const brickRasterReady = Boolean(this.brickBackgroundPipeline && this.brickRasterPipeline
@@ -10203,7 +10255,7 @@ export class SparseVoxelDrySceneRenderer {
         if (this.rasterPrimary && !primaryWithheld && !this.disabledStages.has("scene-primitive")) {
           this.encodeScenePrimitivePrimary(encoder, gBufferViews, usePrepass, splitGroup, tracePhase);
         }
-        if (this.rasterRigidActive && !primaryWithheld && !this.disabledStages.has("rigid-impostor")) {
+        if (rasterRigidEncoded && !primaryWithheld) {
           const rigid = encoder.beginRenderPass({
             label: "Sparse voxel analytic rigid primary discovery",
             colorAttachments: [
@@ -10235,8 +10287,7 @@ export class SparseVoxelDrySceneRenderer {
           bridge.end();
           tracePhase?.({ id: "svo-rigid", label: "SVO analytic rigid discovery" });
         }
-        if (this.rasterGlassDiscovery && this.rasterGlassPaneCount > 0
-          && !primaryWithheld && !this.disabledStages.has("thin-glass")) {
+        if (this.rasterGlassDiscovery && this.rasterGlassPaneCount > 0 && !primaryWithheld) {
           const glass = encoder.beginRenderPass({
             label: "Sparse voxel raster thin-glass discovery",
             colorAttachments: [
@@ -10249,10 +10300,15 @@ export class SparseVoxelDrySceneRenderer {
               depthStoreOp: "store",
             },
           });
-          glass.setPipeline(this.rasterGlassPipeline!);
-          glass.setBindGroup(0, this.bindGroup);
-          glass.setBindGroup(1, this.rasterGlassBindGroup!);
-          glass.draw(6, this.rasterGlassRecordCount, 0, this.rasterGlassFirstRecord);
+          // Withheld keeps the clears — the lighting pass samples the glass key
+          // plane unconditionally, and a skipped clear left it replaying last
+          // frame's panes, the one deviation from the keep-clears contract.
+          if (!this.disabledStages.has("thin-glass")) {
+            glass.setPipeline(this.rasterGlassPipeline!);
+            glass.setBindGroup(0, this.bindGroup);
+            glass.setBindGroup(1, this.rasterGlassBindGroup!);
+            glass.draw(6, this.rasterGlassRecordCount, 0, this.rasterGlassFirstRecord);
+          }
           glass.end();
           tracePhase?.({ id: "svo-glass", label: "SVO raster thin-glass discovery" });
         }
@@ -10285,6 +10341,11 @@ export class SparseVoxelDrySceneRenderer {
           ? primaryFrameKey
           : undefined;
       }
+      // Band seam on fence-partitioned sampling frames: everything above is
+      // primary visibility, everything until the next seam is lighting
+      // visibility. The reassignment is load-bearing — the old encoder was
+      // submitted by the boundary and must not be encoded into again.
+      if (bandPartitioner) encoder = bandPartitioner.boundary("svo-primary");
 
       if (this.voxelLightActive && !this.disabledStages.has("voxel-light-cache")
         && this.voxelLightDemandPipeline && this.voxelLightPopulatePipeline
@@ -10397,6 +10458,9 @@ export class SparseVoxelDrySceneRenderer {
           tracePhase?.({ id: "svo-environment-gi", label: "SVO persistent world-space environmental GI" });
         }
       }
+      // Band seam: lighting visibility (voxel light cache, cone stage, world
+      // GI) ends here; the reduced-rate and deferred shading follow.
+      if (bandPartitioner) encoder = bandPartitioner.boundary("svo-lighting");
 
       if (usePrepass && reconstructReducedRadiance && !this.voxelLightExclusive) {
         // Reconstruction modes interpolate a complete reduced-rate material
@@ -10426,27 +10490,47 @@ export class SparseVoxelDrySceneRenderer {
         tracePhase?.({ id: "svo-cone-lighting", label: "SVO reduced-rate opaque shading" });
       }
 
-      const lighting = encoder.beginRenderPass({
-        label: "Sparse voxel deferred dry lighting",
+      // Two passes over complementary depth tests: sky takes the miss pixels
+      // and the deferred shader takes the rest, so together they write every
+      // pixel exactly once. Splitting them costs one extra load/store cycle of
+      // the HDR attachment and buys each half its own label, seam, and switch —
+      // sky was a known ~0.85 ms the panel could never show.
+      const sky = encoder.beginRenderPass({
+        label: "Sparse voxel deferred sky lighting",
         colorAttachments: [{ view: targetView, clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" }],
         // Read-only: the pass classifies pixels by the depth primary visibility
         // already established and never contributes to it, so the attachment
         // costs a tile load and no store.
         depthStencilAttachment: { view: gBufferViews.hardwareDepth, depthReadOnly: true },
       });
-      // Withheld, this is the pass's clear and nothing else: the frame goes
-      // black rather than keeping the previous composite, so the delta is the
-      // whole cost of sky plus deferred shading and the image says so.
+      // Withheld, this is the pass's clear and nothing else: the miss pixels go
+      // black rather than keeping the previous sky, and the delta is exactly
+      // what the sky resolve was worth.
+      if (!this.disabledStages.has("sky-lighting")) {
+        sky.setBindGroup(0, this.bindGroup);
+        if (usePrepass) sky.setBindGroup(1, this.conePrepassBindGroup!);
+        sky.setBindGroup(splitGroup, this.splitLightingBindGroup!);
+        if (voxelLightBindingsRequired) sky.setBindGroup(splitGroup + 1, this.voxelLightConsumerBindGroup!);
+        sky.setPipeline(this.splitSkyLightingPipeline!);
+        sky.draw(3);
+      }
+      sky.end();
+      tracePhase?.({ id: "dry-scene", label: "SVO deferred sky lighting" });
+      const lighting = encoder.beginRenderPass({
+        label: "Sparse voxel deferred dry lighting",
+        // Load, not clear: the sky pass owns the miss pixels and already wrote
+        // them; this pass shades only where the depth buffer holds a surface.
+        colorAttachments: [{ view: targetView, loadOp: "load", storeOp: "store" }],
+        depthStencilAttachment: { view: gBufferViews.hardwareDepth, depthReadOnly: true },
+      });
+      // Withheld, the surface pixels keep the sky pass's clear — the frame's
+      // geometry goes black while the sky stays, so the delta is the whole
+      // cost of deferred shading and the image says which half is missing.
       if (!this.disabledStages.has("deferred-lighting")) {
         lighting.setBindGroup(0, this.bindGroup);
         if (usePrepass) lighting.setBindGroup(1, this.conePrepassBindGroup!);
         lighting.setBindGroup(splitGroup, this.splitLightingBindGroup!);
         if (voxelLightBindingsRequired) lighting.setBindGroup(splitGroup + 1, this.voxelLightConsumerBindGroup!);
-        // Two complementary depth tests partition the frame: the sky shader takes
-        // the miss pixels and the full deferred shader takes the rest. Sky first
-        // so the expensive draw is the one still in flight when the pass ends.
-        lighting.setPipeline(this.splitSkyLightingPipeline!);
-        lighting.draw(3);
         if (usePrepass && reconstructReducedRadiance) {
           lighting.setPipeline(this.splitReconstructedLightingPipeline!);
           lighting.draw(3);
@@ -10456,6 +10540,9 @@ export class SparseVoxelDrySceneRenderer {
       }
       lighting.end();
       tracePhase?.({ id: "dry-scene", label: "SVO deferred dry lighting" });
+      // Band seam: deferred shading ends here; interfaces, composite, overlays
+      // and present accumulate on the fresh encoder as the final band.
+      if (bandPartitioner) encoder = bandPartitioner.boundary("svo-shading");
     } else {
       const pass = encoder.beginRenderPass({
         label: "Sparse voxel dry scene",
@@ -10482,6 +10569,10 @@ export class SparseVoxelDrySceneRenderer {
       }
       pass.end();
       tracePhase?.({ id: "svo-primary", label: "SVO traversal + dry shading" });
+      // The inline arm marches and shades in one draw, and the panel already
+      // prices it as that pair under the primary row; the band seam follows
+      // the same attribution so the megakernel never hides in the composite.
+      if (bandPartitioner) encoder = bandPartitioner.boundary("svo-primary");
     }
     this.lastPickingTarget = targetTexture;
     const result = { encoded: true, sampledTargetView: targetView } as const;

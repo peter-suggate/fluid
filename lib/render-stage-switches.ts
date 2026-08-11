@@ -24,6 +24,7 @@
 
 export type RenderStageSwitchId =
   | "sparse-world-build"
+  | "fluid-coverage"
   | "primary-traversal"
   | "thin-glass"
   | "scene-primitive"
@@ -31,7 +32,9 @@ export type RenderStageSwitchId =
   | "voxel-light-cache"
   | "world-gi-cache"
   | "reduced-shade"
+  | "sky-lighting"
   | "deferred-lighting"
+  | "surface-extraction"
   | "water-interfaces"
   | "caustics"
   | "optical-composite"
@@ -40,6 +43,7 @@ export type RenderStageSwitchId =
 
 export const RENDER_STAGE_SWITCH_IDS: readonly RenderStageSwitchId[] = Object.freeze([
   "sparse-world-build",
+  "fluid-coverage",
   "primary-traversal",
   "thin-glass",
   "scene-primitive",
@@ -47,7 +51,9 @@ export const RENDER_STAGE_SWITCH_IDS: readonly RenderStageSwitchId[] = Object.fr
   "voxel-light-cache",
   "world-gi-cache",
   "reduced-shade",
+  "sky-lighting",
   "deferred-lighting",
+  "surface-extraction",
   "water-interfaces",
   "caustics",
   "optical-composite",

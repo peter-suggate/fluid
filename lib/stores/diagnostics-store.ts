@@ -23,6 +23,8 @@ export interface PerformanceReport {
   physics?: PerformanceTrace;
   presentation?: PerformanceTrace;
   presentationStages?: PerformanceTrace;
+  /** Fence-partitioned band walls from a 1-in-16 sampling frame; queue-wall grain per encode band. */
+  presentationBands?: PerformanceTrace;
 }
 
 export const emptyPerformanceReport: PerformanceReport = {

@@ -97,7 +97,10 @@ const stabilizePhaseLayout = (trace: PerformanceTrace | undefined) => {
   }
   const durations = new Map<PaperPhaseId, number>();
   for (const phase of trace.phases) {
-    durations.set(phase.id, (durations.get(phase.id) ?? 0) + phase.duration_ms);
+    // Averaged phases carry per-encode durations plus the fraction of frames
+    // that encoded them; the fixed layout wants the expected per-frame cost.
+    const expected_ms = phase.duration_ms * (phase.encodedFraction ?? 1);
+    durations.set(phase.id, (durations.get(phase.id) ?? 0) + expected_ms);
   }
   const layout = isSvoConePresentationTrace(trace)
     ? SVO_CONE_PRESENTATION_PHASE_LAYOUT

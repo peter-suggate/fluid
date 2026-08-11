@@ -69,6 +69,7 @@ test("every stage switch is honoured at an encode site", () => {
   // report a saving the frame never made.
   const sites: Record<RenderStageSwitchId, string> = {
     "sparse-world-build": rendererSource,
+    "fluid-coverage": rendererSource,
     "primary-traversal": drySceneSource,
     "thin-glass": drySceneSource,
     "scene-primitive": drySceneSource,
@@ -76,7 +77,9 @@ test("every stage switch is honoured at an encode site", () => {
     "voxel-light-cache": drySceneSource,
     "world-gi-cache": drySceneSource,
     "reduced-shade": drySceneSource,
+    "sky-lighting": drySceneSource,
     "deferred-lighting": drySceneSource,
+    "surface-extraction": waterSource,
     "water-interfaces": waterSource,
     caustics: waterSource,
     "optical-composite": waterSource,
@@ -212,8 +215,8 @@ test("the render panel's timing mode reaches the worker-owned renderer", () => {
     /new GPUPassTimestampRecorder\([\s\S]{0,100}presentation pass timestamps/,
     "each real pass must carry its own beginning/end timestamp pair");
   assert.match(rendererSource,
-    /const shouldTracePresentation = measurementInstrumentationEnabled\s*&& !this\.presentationTracePending;/,
-    "the next frame must be sampled as soon as the one in-flight readback completes");
+    /const shouldTracePresentation = measurementInstrumentationEnabled\s*&& !this\.presentationTracePending\s*&& !bandSamplingFrame;/,
+    "the next frame must be sampled as soon as the one in-flight readback completes, except on a fence-partitioned band sampling frame");
   assert.doesNotMatch(rendererSource, /lastPresentationTraceAt_ms/,
     "the old quarter-second presentation timing throttle must not leave dead timer state");
   assert.doesNotMatch(rendererSource, /presentationEncodingTrace/,
@@ -232,16 +235,80 @@ test("the cost reads on the trunk, at the junction the node taps", () => {
 });
 
 test("switching a node changes its state, and only its state", () => {
+  // A context under which each node's pass is genuinely encoded. Two states are
+  // truthful to encoder gates the default context does not satisfy: the voxel
+  // light cache is displaced by fluid coverage on a wet scene, and reduced-rate
+  // shading only encodes under a reconstruction (non-relight) mode — the
+  // production default is `full-res-relight`.
+  const liveContextFor = (id: string): RenderPipelineContext => {
+    if (id === "voxel-light-cache") return { ...context(), sceneHasFluid: false };
+    if (id === "reduced-shade") return {
+      ...context(),
+      tuning: { ...DEFAULT_SVO_RENDER_TUNING, coneRadianceReconstruction: "joint-bilateral" },
+    };
+    return context();
+  };
   for (const node of RENDER_PIPELINE_NODES) {
     if (!node.stage) continue;
-    assert.equal(node.state(context()), node.id === "inspection-overlays" ? "armed" : "on",
-      `${node.id} must read as live on a default pipeline`);
-    assert.equal(node.state(context([node.stage])), "off", `${node.stage} must move its own node`);
+    const live = liveContextFor(node.id);
+    const withheld = { ...live, disabledStages: disabledRenderStagesFrom([node.stage]) };
+    assert.equal(node.state(live), node.id === "inspection-overlays" ? "armed" : "on",
+      `${node.id} must read as live under a context that encodes it`);
+    assert.equal(node.state(withheld), "off", `${node.stage} must move its own node`);
     for (const other of RENDER_PIPELINE_NODES) {
       if (other.id === node.id) continue;
-      assert.equal(other.state(context([node.stage])), other.state(context()),
+      assert.equal(other.state(withheld), other.state(live),
         `withholding ${node.stage} must not restate ${other.id}`);
     }
+  }
+});
+
+test("node states mirror the encoder's own gates, not just the switch", () => {
+  // The lamp must never claim a pass the frame demonstrably does not encode.
+  const reducedShade = RENDER_PIPELINE_NODES.find((node) => node.id === "reduced-shade")!;
+  assert.equal(reducedShade.state(context()), "off",
+    "under the production relight default the reduced-rate shade pass is never encoded");
+  const voxelLight = RENDER_PIPELINE_NODES.find((node) => node.id === "voxel-light-cache")!;
+  assert.equal(voxelLight.state(context()), "off",
+    "fluid coverage displaces the voxel light cache, so a wet scene must not light the lamp");
+  assert.equal(voxelLight.state({ ...context(), sceneHasFluid: false }), "on");
+});
+
+test("every emitted pass is attributed to the row that owns it", () => {
+  // Seams close a phase over every pass since the previous seam, so untraced
+  // work is silently charged to whatever label closes next. Each of these was
+  // a real misattribution: coverage billed to extraction, the peeled rear
+  // interfaces billed to the composite, and every probe billed to present.
+  assert.match(rendererSource, /svoFluidCoverage\?\.encode\(encoder\)[\s\S]{0,200}SVO fluid coverage/,
+    "the coverage fill + mip chain must close its own phase");
+  assert.match(waterSource, /Water rear back interfaces[\s\S]{0,300}label: "Water rear interfaces"/,
+    "the peeled rear interfaces must not be charged to the optical composite");
+  assert.match(waterSource, /rear back interface clear[\s\S]{0,300}Fluid-less scene rear interface clears/);
+  // The probes are inspection work: withheld with the switch, and closed under
+  // the inspection seam rather than after it.
+  assert.match(rendererSource, /if \(fluidCellTrace && !inspectionWithheld\)/,
+    "the cell-trace gather must honour the inspection switch");
+  assert.match(rendererSource, /if \(pixelTraceRequested && pixelTrace && !inspectionWithheld\)/,
+    "the pixel-trace probe must honour the inspection switch");
+  const inspectionSeam = rendererSource.indexOf('label: "Inspection overlays" });');
+  const decorationDraw = rendererSource.indexOf("this.encodeDecorationOverlay(\n");
+  const probeEncode = rendererSource.indexOf("encodePixelTrace(encoder)");
+  assert.ok(decorationDraw > 0 && probeEncode > 0 && inspectionSeam > Math.max(decorationDraw, probeEncode),
+    "the inspection seam must close after the probes and the decoration draw, or their passes bill to present");
+  // The extraction chain is its own switch and its own row; the interfaces node
+  // must not claim a cost its switch does not withhold.
+  assert.match(waterSource, /!this\.disabledStages\.has\("surface-extraction"\)\s*&& shouldUpdateWaterSurface/,
+    "surface extraction must be withholdable");
+  const interfaces = RENDER_PIPELINE_NODES.find((node) => node.id === "water-interfaces")!;
+  assert.ok(!interfaces.phaseLabels.includes("Water surface extraction"),
+    "an off interfaces node must not report extraction's live cost");
+  const extraction = RENDER_PIPELINE_NODES.find((node) => node.id === "surface-extraction")!;
+  assert.ok(extraction.phaseLabels.includes("Water surface extraction"));
+  // The one label no encoder emits — a PerformancePanel display name that had
+  // drifted into the graph as if it were a trace label.
+  for (const node of RENDER_PIPELINE_NODES) {
+    assert.ok(!node.phaseLabels.includes("Water interfaces"),
+      `${node.id} claims a label no encoder emits`);
   }
 });
 

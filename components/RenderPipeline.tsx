@@ -5,6 +5,7 @@ import {
   measureRenderPipelineBand,
   measureRenderPipelineNode,
   RENDER_PIPELINE_BANDS,
+  RENDER_PIPELINE_COLLAPSE_GROUPS,
   RENDER_PIPELINE_NODES,
   renderPipelineTipText,
   type RenderPipelineContext,
@@ -70,6 +71,10 @@ function Trunk({ side, state, cap, cost, costTitle }: {
         textAnchor={side === "left" ? "start" : "end"} dominantBaseline="central">
         {costTitle && <title>{costTitle}</title>}
         {trunkCostText(cost)}
+        {/* A wall figure is a different basis than the compute column around
+            it — the tag keeps a fence-derived number from being scanned as a
+            per-pass timestamp. */}
+        {cost.kind === "wall" && <tspan className="rp-trunk-wall-tag" dx={3}>wall</tspan>}
       </text>}
     </svg>
   </div>;
@@ -109,6 +114,8 @@ function costExplanation(cost: RenderPipelineMeasurement, exhaustive: boolean): 
       return "0 ms — the detailed GPU partition arrived, and this gated pass did not encode in the sampled frame.";
     case "structural":
       return "A gate, not a pass. It spends no frame time either way — its worth shows up as the row it lets the frame skip going to zero.";
+    case "wall":
+      return `${formatDuration(cost.duration_ms ?? 0)} wall-clock, derived: this is the band's only row without a trusted per-pass timestamp, so the band's fence-partitioned wall minus its measured compute lands here. Render passes included; a different basis than the compute figures around it.`;
     case "unmeasured":
       return exhaustive
         ? "No phase in this frame's partition names this node: either no trace has arrived yet, or this stage encoded no pass."
@@ -196,10 +203,17 @@ export interface RenderPipelineProps {
   controls: Readonly<Record<string, ReactNode>>;
   /** Per node: frame milliseconds saved by its current setting, when both have been seen. */
   deltas: ReadonlyMap<string, number>;
+  /**
+   * Per band: real wall-clock cost from fence-partitioned sampling frames.
+   * The collar shows it beside the Σcompute figure, tagged as wall — it is the
+   * only measurement that prices this band's render passes, and the two bases
+   * never share a denominator.
+   */
+  bandWalls?: ReadonlyMap<string, number>;
 }
 
 export function RenderPipeline({
-  context, durations, total_ms, measured, exhaustive, stageView, onToggle, onTap, controls, deltas,
+  context, durations, total_ms, measured, exhaustive, stageView, onToggle, onTap, controls, deltas, bandWalls,
 }: RenderPipelineProps) {
   return <div className="rp-graph" data-testid="render-pipeline">
     <div className="rp-row rp-row-cap">
@@ -207,24 +221,72 @@ export function RenderPipeline({
     </div>
     {RENDER_PIPELINE_BANDS.map((band) => {
       const bandCost = measureRenderPipelineBand(band.id, durations, total_ms, exhaustive);
+      const bandWall_ms = bandWalls?.get(band.id);
       const nodes = RENDER_PIPELINE_NODES.filter((node) => node.band === band.id);
+      // The wall reads at a row's junction, not on the collar, whenever it can
+      // be attributed: when exactly one reachable row in the band has no
+      // trusted per-pass cost, that row IS what the wall measured beyond the
+      // band's compute, so the junction that would read "—" carries the real
+      // number. The collar keeps the wall only when the band has several
+      // unmeasured rows and the split is unknowable.
+      const entries = nodes.map((node) => {
+        const state = node.state(context);
+        const cost: RenderPipelineMeasurement = measured
+          ? measureRenderPipelineNode(node, durations, total_ms, state, exhaustive)
+          : { kind: "unmeasured", share: 0 };
+        return { node, state, cost };
+      });
+      const unmeasuredRows = entries.filter((entry) => entry.cost.kind === "unmeasured" && entry.state !== "unavailable");
+      const wallRow = bandWall_ms !== undefined && unmeasuredRows.length === 1 ? unmeasuredRows[0] : undefined;
+      if (wallRow && bandWall_ms !== undefined) {
+        const compute_ms = entries.reduce((sum, entry) =>
+          sum + (entry.cost.kind === "measured" ? entry.cost.duration_ms ?? 0 : 0), 0);
+        wallRow.cost = { kind: "wall", duration_ms: Math.max(0, bandWall_ms - compute_ms), share: 0 };
+      }
       return <div key={band.id} className="rp-band" role="group" aria-label={band.label}>
         <div className="rp-row rp-row-collar">
           <div className="rp-slot rp-collar-name"><h3>{band.label}</h3></div>
           <Trunk />
           <div className="rp-slot rp-collar-cost">
+            {/* Two figures, two bases, one junction. The wall is the band's
+                real cost from a fence-partitioned sampling frame — the only
+                measurement that includes this band's render passes — and the
+                Σcompute figure is what the rows below it add up to. They are
+                labelled apart and never share a denominator. */}
+            {bandWall_ms !== undefined && !wallRow && <output className="rp-collar-wall" title={
+              `${formatDuration(bandWall_ms)} wall-clock for this band's whole encode segment, render passes included.\n\nMeasured by splitting one frame in sixteen at band boundaries into separate submits and timing each queue fence. Sampling frames are excluded from the frame mean.`
+            }>{formatDuration(bandWall_ms)}<small>wall</small></output>}
             <output>{measured && bandCost.duration_ms !== undefined
               ? formatDuration(bandCost.duration_ms) : "—"}</output>
             {measured && total_ms > 0 && bandCost.duration_ms !== undefined
               && <small>{(bandCost.share * 100).toFixed(1)}%</small>}
           </div>
         </div>
-        {nodes.map((node) => {
-          const state = node.state(context);
+        {entries.map(({ node, state, cost }) => {
+          // A run of rows on an unreachable arm reads as one collapsed row:
+          // repeating `unavailable` per tier is diagram space spent on a path
+          // the frame cannot take. The first member renders the placeholder;
+          // the rest render nothing while every member is unreachable.
+          if (node.collapseGroup) {
+            const members = nodes.filter((other) => other.collapseGroup === node.collapseGroup);
+            if (members.every((member) => member.state(context) === "unavailable")) {
+              if (members.indexOf(node) !== 0) return undefined;
+              const group = RENDER_PIPELINE_COLLAPSE_GROUPS[node.collapseGroup];
+              const tip = `${group.label} · ${group.chip}\n\n${group.summary}`;
+              return <div key={node.collapseGroup} className="rp-row rp-row-node is-left">
+                <div className="rp-node is-unavailable" data-node={node.collapseGroup}>
+                  <div className="rp-node-head">
+                    <button type="button" className="rp-lamp" role="switch" aria-checked
+                      aria-label={group.label} disabled title={tip} />
+                    <strong title={tip}>{group.label}</strong>
+                  </div>
+                </div>
+                <Trunk side="left" state="unavailable" />
+                <div className="rp-slot" />
+              </div>;
+            }
+          }
           const chip = node.chip(context);
-          const cost = measured
-            ? measureRenderPipelineNode(node, durations, total_ms, state, exhaustive)
-            : { kind: "unmeasured" as const, share: 0 };
           const card = <NodeCard
             node={node} state={state} chip={chip}
             delta_ms={measured ? deltas.get(node.id) : undefined}

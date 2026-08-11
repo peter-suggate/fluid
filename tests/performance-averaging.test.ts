@@ -24,7 +24,7 @@ test("generic trace averaging preserves exact additive accounting", () => {
   assert.equal(performanceTraceIsExact(averaged), true);
 });
 
-test("phases absent from part of the window contribute zero to that sample", () => {
+test("intermittent phases keep per-encode durations with an encoded fraction", () => {
   const first = trace(1, 2, 4);
   const second: PerformanceTrace = {
     ...trace(2, 4, 0),
@@ -33,7 +33,10 @@ test("phases absent from part of the window contribute zero to that sample", () 
   const averaged = averagePerformanceTraces([first, second]);
   assert.ok(averaged);
   assert.equal(averaged.total_ms, 5);
-  assert.deepEqual(averaged.phases.map((phase) => phase.duration_ms), [3, 2]);
+  // Per-encode cost, not diluted over frames that never ran the phase: the
+  // solve ran once at 4 ms, so it reads 4 ms at fraction 0.5 — not 2 ms.
+  assert.deepEqual(averaged.phases.map((phase) => phase.duration_ms), [3, 4]);
+  assert.deepEqual(averaged.phases.map((phase) => phase.encodedFraction), [1, 0.5]);
   assert.equal(performanceTraceIsExact(averaged), true);
 });
 
