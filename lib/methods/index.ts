@@ -13,7 +13,10 @@ export const simulationMethods: ReadonlyArray<SimulationMethod> = [
   cpuReferenceMethod
 ];
 
-export const defaultMethodId = octreeMethod.id;
+// Uniform is the default for any scene that does not author its own method
+// profile. Profiled presets (the shipped catalog's octree scenes among them)
+// are untouched: `profile?.methodId` wins over this everywhere it is read.
+export const defaultMethodId = uniformMethod.id;
 
 /** Methods supported as interactive production/experimental choices. The
  * broader registry remains available to offline comparison tooling. */

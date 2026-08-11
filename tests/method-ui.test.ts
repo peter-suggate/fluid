@@ -14,7 +14,7 @@ test("interactive method picker exposes adaptive and uniform GPU runtimes", () =
 });
 
 test("UI hydration restores supported methods and rejects offline-only methods", () => {
-  assert.equal(interactiveMethodId("tall-cell"), "octree");
+  assert.equal(interactiveMethodId("tall-cell"), "uniform");
   assert.equal(interactiveMethodId("octree"), "octree");
   assert.equal(interactiveMethodId("uniform"), "uniform");
   assert.match(urlStateSource, /methodId: interactiveMethodId\(state\.methodId\)/);
