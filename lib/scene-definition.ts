@@ -109,6 +109,13 @@ export interface SceneLattice {
  * instead of constructing or drawing the sparse dry world. It is definition
  * data rather than a dam-break special case so future simulation-focused scenes
  * can select the same path without changing the renderer.
+ *
+ * It is also the *default*, because most of the catalog is a container of water
+ * in the bare studio environment, and for those the dry world is a floor and
+ * four walls that cost a construction and a draw to show. `full-scene` is the
+ * opt-in a scene with an authored set makes — a garden, a room, a heightfield
+ * vessel — and any scene that opens dry (`systems.fluid === false`) must make
+ * it, since fluid-only leaves such a scene with nothing to present.
  */
 export type ScenePresentationMode = "full-scene" | "fluid-only";
 
@@ -123,7 +130,7 @@ export interface SceneDefinition {
   readonly shelf: string;
   /** Art-directed environment; part of this scene's presentation. */
   readonly environment: EnvironmentId;
-  /** Defaults to the authored dry world plus raster water. */
+  /** Defaults to `fluid-only`; see {@link ScenePresentationMode}. */
   readonly presentationMode?: ScenePresentationMode;
   readonly camera?: Partial<CameraState>;
   /** Exact solver profile a numerical comparison requires. */

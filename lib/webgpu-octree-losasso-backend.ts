@@ -174,6 +174,10 @@ export interface WebGPUOctreeLosassoBackendOptions {
     /** Direct node lattice preserves authored analytic edges; cell-centred is
      * retained for fields without an exact nodal representation. */
     readonly initialPhiLayout?: "cell-centred" | "nodal-lattice";
+    /** Optional exact finest-cell volume fractions for conservative cold mass.
+     * Phi remains the topology/presentation bootstrap and is never integrated
+     * back into this authority. */
+    readonly initialCellFractions?: Float32Array;
     /** Physical extension reach. Defaults to seven finest-cell widths. */
     readonly velocityExtensionReach?: number;
     readonly redistanceIterations?: number;
@@ -1009,6 +1013,8 @@ export class WebGPUOctreeLosassoCoarseBackend {
         nodeCapacity: graph.sources.accepted.nodeCapacity,
         pressureRowCapacity: graph.sources.accepted.pressureRowCapacity,
         ownerArena: adaptive.candidateOwnerArena,
+        ...(adaptive.initialCellFractions
+          ? { initialCellFractions: adaptive.initialCellFractions } : {}),
       });
       const accepted = this.publisher.authority.writable;
       const candidate = this.publisher.authority.candidate;

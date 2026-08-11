@@ -13,6 +13,7 @@ import {
 } from "@/lib/performance-trace";
 import { performanceActivityFrameHasSettledEvidence } from "@/lib/performance-activity";
 import { emptyPerformanceReport, useDiagnosticsStore } from "@/lib/stores/diagnostics-store";
+import { getMethod } from "@/lib/methods";
 import { simulation } from "@/lib/simulation/controller";
 import { usePerformanceActivityStore } from "@/lib/stores/performance-activity-store";
 import { useMethodStore } from "@/lib/stores/method-store";
@@ -201,7 +202,11 @@ export function PerformancePanel() {
       if (view.axis === "volume") setOverlaySlice(0.42);
     }
   };
-  const selectedView = PAPER_VIEWS.find((view) => view.mode === overlayMode);
+  // Only the views the active method registered: a card offering a publication
+  // the solver never produces is a button that draws nothing.
+  const supportedModes = new Set(getMethod(methodId).supportedFieldModes ?? []);
+  const methodViews = PAPER_VIEWS.filter((view) => supportedModes.has(view.mode));
+  const selectedView = methodViews.find((view) => view.mode === overlayMode);
   const volumeCapable = methodId === "octree";
   const traces = [cpu, physics, presentation].filter((trace): trace is PerformanceTrace => trace !== undefined);
   const allExact = traces.length === 3 && traces.every(performanceTraceIsExact);
@@ -295,7 +300,7 @@ export function PerformancePanel() {
     <section className="paper-observatory">
       <header><div><h3>Paper field observatory</h3><small>LIVE GPU PUBLICATIONS · NO FIELD READBACK</small></div><span>{methodId === "octree" ? "OCTREE AUTHORITY" : "SELECT OCTREE FOR FULL SET"}</span></header>
       <div className="paper-view-grid">
-        {PAPER_VIEWS.map((view) => {
+        {methodViews.map((view) => {
           const active = overlayAxis !== "off" && overlayMode === view.mode;
           return <button key={view.id} className={active ? "active" : ""} onClick={() => selectView(view)} aria-pressed={active}>
             <span>{view.figure ?? "§"}</span><strong>{view.label}</strong><small>{view.description}</small>

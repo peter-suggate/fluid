@@ -1,27 +1,28 @@
 import {
+  uniformDensityPostProcessingEnabled,
   WebGPUUniformReferenceSolver,
   type WebGPUUniformReferenceOptions,
 } from "../webgpu-uniform-reference";
 import {
-  numberValue,
   type MethodParamSpec,
   type MethodParamValues,
   type SimulationMethod,
 } from "./types";
+import type { SceneDescription } from "../model";
 
 const params: MethodParamSpec[] = [
   {
-    kind: "number",
-    key: "pressureIterations",
-    label: "Pressure sweeps",
-    unit: "iterations",
-    min: 16,
-    max: 400,
-    step: 8,
-    digits: 0,
-    default: 64,
-    tier: "coarse",
-    hint: "Weighted-Jacobi sweeps per step. This is the reference method's only algorithmic control.",
+    kind: "select",
+    key: "densityPostProcessing",
+    label: "Sub-grid rendering",
+    default: "scene",
+    tier: "fine",
+    options: [
+      { value: "scene", label: "Scene · Sec. 3.8 for symmetry" },
+      { value: "off", label: "Off · raw paper density" },
+      { value: "on", label: "On · Sec. 3.8 reconstruction" },
+    ],
+    hint: "Render-only: symmetric expansion uses Section 3.8 to expose sub-grid mass; other scenes retain the paper Results default (off). It never feeds simulation physics.",
   },
 ];
 
@@ -35,9 +36,13 @@ const params: MethodParamSpec[] = [
  */
 export function uniformReferenceSolverOptions(
   values: MethodParamValues,
+  scene?: Pick<SceneDescription, "sceneId">,
 ): WebGPUUniformReferenceOptions {
   return {
-    pressureIterations: numberValue(values, params, "pressureIterations"),
+    densityPostProcessing: uniformDensityPostProcessingEnabled(
+      values.densityPostProcessing,
+      scene?.sceneId,
+    ),
   };
 }
 
@@ -47,7 +52,7 @@ export const uniformMethod: SimulationMethod = {
   shortLabel: "Uniform",
   badge: "UNIFORM GPU",
   description: "Dense matched-lattice WebGPU baseline with no adaptive topology.",
-  detail: "A full-depth uniform grid with bounded MacCormack velocity transport, conservative VOF, and weighted-Jacobi pressure projection. It exists as a transparent reference for Losasso and Power comparisons.",
+  detail: "A full-depth implementation of Chentanez-Müller's mass-conserving surface-density method with persistent gamma transport, local sharpening, hierarchical velocity extension, and the CM11a separating-boundary LCP multigrid projection. It is the dense reference for Losasso and Power comparisons.",
   backend: "webgpu",
   resource: {
     id: "fluid.uniform-reference",
@@ -64,23 +69,17 @@ export const uniformMethod: SimulationMethod = {
     },
   },
   qualityLabels: {
-    balanced: "64 pressure sweeps",
-    high: "80 pressure sweeps",
-    ultra: "96 pressure sweeps",
+    balanced: "CM11a fixed cycles",
+    high: "CM11a fixed cycles",
+    ultra: "CM11a fixed cycles",
   },
+  // The dense reference publishes occupancy, velocity, and a density-derived
+  // surface, so only the generic dense-grid views can draw honest data; the
+  // octree technique overlays would read a compact source it never produces.
+  supportedFieldModes: ["structure", "cfl", "speed", "phi"],
   params,
-  pressureMapping: "The quality preset selects a weighted-Jacobi sweep budget; the pressure-sweeps control overrides it directly.",
-  presetFor: (quality) => ({
-    pressureIterations: quality === "balanced" ? 64 : quality === "high" ? 80 : 96,
-  }),
-  createSolver: (device, scene, quality, values, onRigidLoads) =>
-    new WebGPUUniformReferenceSolver(
-      device,
-      scene,
-      quality,
-      onRigidLoads,
-      uniformReferenceSolverOptions(values),
-    ),
+  pressureMapping: "CM11a fixes 3 Full-Cycles, 4 V-Cycles, and four pre/post PRBGS sweeps.",
+  presetFor: () => ({}),
   createSolverAsync: (
     device,
     scene,
@@ -94,7 +93,7 @@ export const uniformMethod: SimulationMethod = {
     scene,
     quality,
     onRigidLoads,
-    uniformReferenceSolverOptions(values),
+    uniformReferenceSolverOptions(values, scene),
     onProgress,
     signal,
   ),

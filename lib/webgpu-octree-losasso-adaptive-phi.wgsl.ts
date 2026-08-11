@@ -505,7 +505,10 @@ fn publishTopologyEvidenceRows(@builtin(global_invocation_id)gid:vec3u){
  if(rendererRho<0.){atomicOr(&arena[13],32u);return;}
  var rendererTerms:array<f32,8>;var rendererMinimum=3.402823e38;var rendererMaximum=-3.402823e38;
  for(var corner=0u;corner<8u;corner+=1u){let highX=(corner&1u)!=0u;let highZ=(corner&4u)!=0u;let node=leaf.originSpan.xyz+vec3u(select(0u,entry.span,highX),select(0u,entry.span,(corner&2u)!=0u),select(0u,entry.span,highZ));let evidence=rendererNodeEvidence(node);if(evidence.rho<0.){atomicOr(&arena[13],32u);return;}let atSideWall=(!highX&&node.x==0u)||(highX&&node.x==p.dims.x)||(!highZ&&node.z==0u)||(highZ&&node.z==p.dims.z);let massPhi=canonicalPublishedZero((.5-evidence.rho)*p.originCell.w);let sdfPhi=bitcast<f32>(renderer[aux+corner]);let signsAgree=(massPhi<=0.&&sdfPhi<=0.)||(massPhi>=0.&&sdfPhi>=0.);let supportedSheet=!atSideWall&&massPhi>0.&&sdfPhi<0.&&evidence.occupiedOctants>=4u&&evidence.liquidOctants==0u;let value=canonicalPublishedZero(select(massPhi,sdfPhi,signsAgree||supportedSheet));rendererTerms[corner]=value;rendererMinimum=min(rendererMinimum,value);rendererMaximum=max(rendererMaximum,value);renderer[aux+corner]=bitcast<u32>(value);}
- let rendererCentre=canonicalPublishedZero(.125*(((rendererTerms[0]+rendererTerms[1])+(rendererTerms[2]+rendererTerms[3]))+((rendererTerms[4]+rendererTerms[5])+(rendererTerms[6]+rendererTerms[7]))));
+ // A trilinear centre is bounded by its corners. Clamp the final f32 result
+ // before serialization so backend contraction cannot publish a one-ULP
+ // overshoot outside the extrema produced from those same corner payloads.
+ let rendererCentre=canonicalPublishedZero(clamp(.125*(((rendererTerms[0]+rendererTerms[1])+(rendererTerms[2]+rendererTerms[3]))+((rendererTerms[4]+rendererTerms[5])+(rendererTerms[6]+rendererTerms[7]))),rendererMinimum,rendererMaximum));
  renderer[rb+2u]=bitcast<u32>(rendererCentre);
  renderer[rb+3u]=bitcast<u32>(canonicalPublishedZero(rendererMinimum));
  renderer[rb+4u]=bitcast<u32>(canonicalPublishedZero(rendererMaximum));

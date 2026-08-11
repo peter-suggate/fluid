@@ -12,6 +12,9 @@ export const cpuReferenceMethod: SimulationMethod = {
   description: "Double-precision MAC validation oracle with PCG projection. Slow but exact.",
   detail: "staggered MAC, RK2 semi-Lagrangian advection, explicit viscosity, marker free surface, closed-wall flux enforcement, and matrix-free Jacobi-PCG projection",
   backend: "cpu",
+  // The field overlays are GPU slice/volume passes over solver textures; a
+  // CPU-resident solve publishes none of them.
+  supportedFieldModes: [],
   qualityLabels: { balanced: "~110k cells · 0.02 m", high: "~215k cells · 0.016 m", ultra: "~450k cells · 0.0125 m" },
   params,
   pressureMapping: "Uses the scene numerics directly: PCG runs to the relative tolerance, capped by the iteration budget.",

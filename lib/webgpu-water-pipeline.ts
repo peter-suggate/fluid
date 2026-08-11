@@ -31,6 +31,7 @@ import {
 } from "./octree-consumer-sampling";
 import { globalFineClassifiedEmitShader, globalFineClassifiedIndirectScanShader } from "./webgpu-water-global-fine-tetra";
 import { globalFineSurfaceClassificationShader } from "./webgpu-water-global-fine-classify";
+import { marchingCubesLookupWGSL } from "./marching-cubes-lookup.wgsl";
 import type { GPUTimestampPhase } from "./performance-trace";
 import type { FrameBandPartitioner } from "./webgpu-frame-band-sampler";
 import {
@@ -235,11 +236,10 @@ export const EXTRACTION_POLYGONISE_WORKGROUP = 64;
 
 /** Vertex capacity from grid surface area (32 bytes per vertex, 64 MiB cap).
  *
- * Marching tetrahedra emits more vertices per crossing cube than marching
- * cubes, and a ratio-two transported surface can retain transient sheets whose
- * area is several times the tank footprint. 80 vertices per lattice-area unit
- * covers the mini dam-break's folded front through its two-second acceptance
- * window while the byte ceiling remains absolute.
+ * A ratio-two transported surface can retain transient sheets whose area is
+ * several times the tank footprint. 80 vertices per lattice-area unit covers
+ * the mini dam-break's folded front through its two-second acceptance window
+ * while the byte ceiling remains absolute.
  */
 export function surfaceVertexCapacity(nx: number, ny: number, nz: number) {
   const area = nx * ny + nx * nz + ny * nz;
@@ -340,6 +340,7 @@ struct SparseParams {
 @group(0) @binding(12) var<storage, read> sparseStates: array<u32>;
 override countOnly = false;
 override sparseField = false;
+${marchingCubesLookupWGSL}
 
 const SPARSE_INVALID: u32 = 0xffffffffu;
 const SPARSE_CORE: u32 = 2u;
@@ -454,13 +455,13 @@ fn surfaceNormal(lattice: vec3f, cubeBase: vec3f, cubeScale: f32, value: ptr<fun
   return vec3f(0.0, 1.0, 0.0);
 }
 
-// The cube's corner values travel by pointer: WGSL passes arrays by value, and
-// the former copies at up to 24 crossings per cube dominated this kernel's
-// stack footprint.
+// The cube's corner values travel by pointer because WGSL passes arrays by
+// value. Lorensen--Cline interpolation is the unmodified linear 0.5 crossing;
+// in particular, crossings at cube corners must not be displaced inward.
 fn crossing(a: vec3f, b: vec3f, va: f32, vb: f32, cubeBase: vec3f, cubeScale: f32, cubeValue: ptr<function, array<f32, 8>>, dims:vec3f) -> SurfaceVertex {
   let denominator = vb - va;
   var t = 0.5;
-  if (abs(denominator) > 1e-6) { t = clamp((0.5 - va) / denominator, 0.02, 0.98); }
+  if (abs(denominator) > 1e-20) { t = clamp((0.5 - va) / denominator, 0.0, 1.0); }
   let lattice = mix(a, b, t);
   return SurfaceVertex(vec4f(latticeWorld(lattice,dims), 1.0), vec4f(surfaceNormal(lattice, cubeBase, cubeScale, cubeValue,dims), 0.0));
 }
@@ -486,28 +487,18 @@ fn emitTriangle(a: SurfaceVertex, b: SurfaceVertex, c: SurfaceVertex) {
   }
 }
 
-fn polygoniseTetra(p: array<vec3f, 4>, v: array<f32, 4>, cubeBase: vec3f, cubeScale: f32, cubeValue: ptr<function, array<f32, 8>>, dims:vec3f) {
-  var inside = array<i32, 4>();
-  var outside = array<i32, 4>();
-  var ni = 0; var no = 0;
-  for (var i = 0; i < 4; i += 1) {
-    if (v[i] >= 0.5) { inside[ni] = i; ni += 1; }
-    else { outside[no] = i; no += 1; }
-  }
-  if (ni == 0 || ni == 4) { return; }
-  if (ni == 1) {
-    let a = inside[0];
-    emitTriangle(crossing(p[a], p[outside[0]], v[a], v[outside[0]], cubeBase, cubeScale, cubeValue,dims), crossing(p[a], p[outside[1]], v[a], v[outside[1]], cubeBase, cubeScale, cubeValue,dims), crossing(p[a], p[outside[2]], v[a], v[outside[2]], cubeBase, cubeScale, cubeValue,dims));
-  } else if (ni == 3) {
-    let a = outside[0];
-    emitTriangle(crossing(p[a], p[inside[0]], v[a], v[inside[0]], cubeBase, cubeScale, cubeValue,dims), crossing(p[a], p[inside[2]], v[a], v[inside[2]], cubeBase, cubeScale, cubeValue,dims), crossing(p[a], p[inside[1]], v[a], v[inside[1]], cubeBase, cubeScale, cubeValue,dims));
-  } else {
-    let i0 = inside[0]; let i1 = inside[1]; let o0 = outside[0]; let o1 = outside[1];
-    let p00 = crossing(p[i0], p[o0], v[i0], v[o0], cubeBase, cubeScale, cubeValue,dims);
-    let p01 = crossing(p[i0], p[o1], v[i0], v[o1], cubeBase, cubeScale, cubeValue,dims);
-    let p10 = crossing(p[i1], p[o0], v[i1], v[o0], cubeBase, cubeScale, cubeValue,dims);
-    let p11 = crossing(p[i1], p[o1], v[i1], v[o1], cubeBase, cubeScale, cubeValue,dims);
-    emitTriangle(p00, p10, p11); emitTriangle(p00, p11, p01);
+fn cubeEdgeVertex(edgeId:u32,p:ptr<function,array<vec3f,8>>,value:ptr<function,array<f32,8>>,cubeBase:vec3f,cubeScale:f32,dims:vec3f)->SurfaceVertex{
+  let a=MC_EDGE_A[edgeId];let b=MC_EDGE_B[edgeId];
+  return crossing((*p)[a],(*p)[b],(*value)[a],(*value)[b],cubeBase,cubeScale,value,dims);
+}
+
+fn polygoniseCube(p:ptr<function,array<vec3f,8>>,value:ptr<function,array<f32,8>>,cubeBase:vec3f,cubeScale:f32,dims:vec3f){
+  let cubeCase=mcCase(value);let indexCount=mcIndexCount(cubeCase);
+  for(var index=0u;index<indexCount;index+=3u){
+    emitTriangle(
+      cubeEdgeVertex(mcEdge(cubeCase,index),p,value,cubeBase,cubeScale,dims),
+      cubeEdgeVertex(mcEdge(cubeCase,index+1u),p,value,cubeBase,cubeScale,dims),
+      cubeEdgeVertex(mcEdge(cubeCase,index+2u),p,value,cubeBase,cubeScale,dims));
   }
 }
 
@@ -522,28 +513,11 @@ fn loadCubeCornersScaled(base: vec3i, scale: i32) -> array<f32, 8> {
 }
 fn loadCubeCorners(base: vec3i) -> array<f32, 8> { return loadCubeCornersScaled(base, 1); }
 
-// Must classify vertices exactly as polygoniseTetra does: the polygonise pass
+// Must classify vertices exactly as polygoniseCube does: the polygonise pass
 // writes into per-thread blocks sized by this count, so a mismatch corrupts a
 // neighbouring thread's triangles.
-fn tetraTriangleCount(v0: f32, v1: f32, v2: f32, v3: f32) -> u32 {
-  var inside = 0u;
-  if (v0 >= 0.5) { inside += 1u; }
-  if (v1 >= 0.5) { inside += 1u; }
-  if (v2 >= 0.5) { inside += 1u; }
-  if (v3 >= 0.5) { inside += 1u; }
-  if (inside == 0u || inside == 4u) { return 0u; }
-  if (inside == 2u) { return 2u; }
-  return 1u;
-}
-
 fn cubeTriangleCount(value: ptr<function, array<f32, 8>>) -> u32 {
-  let tetra = array<vec4i, 6>(vec4i(0,1,2,6), vec4i(0,2,3,6), vec4i(0,3,7,6), vec4i(0,7,4,6), vec4i(0,4,5,6), vec4i(0,5,1,6));
-  var triangles = 0u;
-  for (var t = 0; t < 6; t += 1) {
-    let ids = tetra[t];
-    triangles += tetraTriangleCount((*value)[ids.x], (*value)[ids.y], (*value)[ids.z], (*value)[ids.w]);
-  }
-  return triangles;
+  return mcIndexCount(mcCase(value))/3u;
 }
 
 // The sweep kernels stop here: eight corner loads, a min/max test, and one
@@ -624,13 +598,9 @@ fn polygoniseMain(@builtin(global_invocation_id) gid: vec3u, @builtin(local_invo
   );
   var p = array<vec3f, 8>();
   for (var i = 0; i < 8; i += 1) { p[i] = vec3f(base + offsets[i] * i32(cubeScale)); }
-  // Six tetrahedra sharing cube diagonal 0-6.  Unlike a lookup-table
-  // marching-cubes implementation this has no ambiguous saddle cases.
-  let tetra = array<vec4i, 6>(vec4i(0,1,2,6), vec4i(0,2,3,6), vec4i(0,3,7,6), vec4i(0,7,4,6), vec4i(0,4,5,6), vec4i(0,5,1,6));
-  for (var t = 0; t < 6; t += 1) {
-    let ids = tetra[t];
-    polygoniseTetra(array<vec3f,4>(p[ids.x],p[ids.y],p[ids.z],p[ids.w]), array<f32,4>(value[ids.x],value[ids.y],value[ids.z],value[ids.w]), vec3f(base), f32(cubeScale), &value,fieldDimensions);
-  }
+  // Section 3.8: the rendered surface is the classic marching-cubes mesh of
+  // the density field's 0.5 isocontour.
+  polygoniseCube(&p,&value,vec3f(base),f32(cubeScale),fieldDimensions);
 }
 
 @compute @workgroup_size(4, 4, 4)

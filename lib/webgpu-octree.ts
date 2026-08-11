@@ -2915,6 +2915,28 @@ export class WebGPUOctreeProjection {
         z: this.scene.container.depth_m / this.dims.nz,
       })
       : undefined;
+    // A non-additive brick scene authors an exact union of finest-grid cells.
+    // Its conservative density must therefore start from those cell volumes,
+    // not from a smoothed Heaviside reconstruction of the presentation phi.
+    // Other adaptive scene representations retain their existing bootstrap
+    // until they expose an equally exact authored volume-fraction source.
+    const adaptiveInitialCellFractions = this.coarseOnlySurfaceTracking
+      && (this.scene.fluid.initialBrickSeeds_m?.length ?? 0) > 0
+      && !this.scene.fluid.initialBrickSeedsAdditive
+      ? (() => {
+        const values = new Float32Array(this.dims.nx * this.dims.ny * this.dims.nz);
+        for (let z = 0; z < this.dims.nz; z += 1) {
+          for (let y = 0; y < this.dims.ny; y += 1) {
+            for (let x = 0; x < this.dims.nx; x += 1) {
+              values[x + this.dims.nx * (y + this.dims.ny * z)] =
+                initialFluidBrickContainsCell(this.scene, x, y, z,
+                  [this.dims.nx, this.dims.ny, this.dims.nz]) ? 1 : 0;
+            }
+          }
+        }
+        return values;
+      })()
+      : undefined;
     // A full-fine authored ceiling removes the coarse levels that make the
     // ordinary adaptive dam system cheap to precondition. The 24x18x16 water
     // box first exceeds the legacy 40-iteration envelope during the advancing
@@ -2947,6 +2969,8 @@ export class WebGPUOctreeProjection {
           frontier: this.leafFrontier,
           initialPhi: adaptiveInitialPhi!,
           initialPhiLayout: adaptiveInitialNodalPhi ? "nodal-lattice" : "cell-centred",
+          ...(adaptiveInitialCellFractions
+            ? { initialCellFractions: adaptiveInitialCellFractions } : {}),
           redistanceBandWorld: cellSize * octreeSurfaceProtectionWidthCells(
             this.interfaceBandCellsEffective, this.surfaceGradingLayersEffective,
             this.topologyMaximumLeafSize, 1,

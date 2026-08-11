@@ -584,6 +584,15 @@ const fluidSymmetry = defineSceneHookImplementation({
         } : undefined,
       }));
 
+      const wallNames = ["negativeX", "positiveX", "negativeZ", "positiveZ"] as const;
+      const contactSteps = Object.fromEntries(wallNames.map((wall) => {
+        const contact = observations.find(({ observation }) =>
+          recordPath(observation, "walls", wall)?.touched === true);
+        return [wall, contact?.step];
+      })) as Record<typeof wallNames[number], number | undefined>;
+      const firstSideWallContact = observations.find(({ observation }) =>
+        wallNames.some((wall) => recordPath(observation, "walls", wall)?.touched === true));
+
       if (frontAdvanceEvaluationEnd_s !== undefined
         && minimumMeanFrontAdvance_cells !== undefined) {
         const initial = observations[0];
@@ -623,8 +632,10 @@ const fluidSymmetry = defineSceneHookImplementation({
         // the freely propagating front only after the initial rarefaction has
         // rounded it and before axis rays contact the walls; after contact a
         // circular contour is geometrically impossible inside this domain.
-        const circularity = observations.filter(({ time_s }) =>
-          time_s >= circularityEvaluationStart_s && time_s <= circularityEvaluationEnd_s);
+        const circularity = observations.filter(({ step, time_s }) =>
+          time_s >= circularityEvaluationStart_s
+          && time_s <= circularityEvaluationEnd_s
+          && (firstSideWallContact === undefined || step < firstSideWallContact.step));
         const firstFailure = circularity.find(({ observation }) => {
           const metric = recordValue(observation.frontCircularity);
           const difference = numberPath(metric, "axisLead_cells");
@@ -653,16 +664,21 @@ const fluidSymmetry = defineSceneHookImplementation({
           };
         }, { axisLead_cells: 0, radialRmsDeviation_cells: 0,
           radialMaximumDeviation_cells: 0 });
-        const passed = circularity.length > 0 && !firstFailure;
+        const clippedBeforeWindow = firstSideWallContact !== undefined
+          && firstSideWallContact.time_s <= circularityEvaluationStart_s;
+        const passed = (circularity.length > 0 && !firstFailure) || clippedBeforeWindow;
         findings.push(hookFinding({
           id: `${method}.front-circularity`, method, passed,
-          message: passed
+          message: clippedBeforeWindow
+            ? `the circularity gate retired at side-wall contact on step ${firstSideWallContact.step}`
+            : passed
             ? "the freely propagating dam front remained circular"
             : firstFailure
               ? `the axis and diagonal fronts first diverged at step ${firstFailure.step}, t=${firstFailure.time_s.toFixed(3)} s`
-              : "no dam-front circularity checkpoint was collected in the declared window",
+              : "no pre-contact dam-front circularity checkpoint was collected in the declared window",
           expected: { evaluationStart_s: circularityEvaluationStart_s,
             evaluationEnd_s: circularityEvaluationEnd_s,
+            evaluationRegime: "strictly before first side-wall contact",
             minimumAngularSamples: minimumCircularityAngularSamples,
             maximumAbsoluteAxisLead_cells: maximumAxisDiagonalFrontDifference_cells,
             maximumRadialRmsDeviation_cells,
@@ -670,16 +686,35 @@ const fluidSymmetry = defineSceneHookImplementation({
           actual: firstFailure ? {
             step: firstFailure.step, time_s: firstFailure.time_s,
             metrics: firstFailure.observation.frontCircularity, maximumObserved,
-          } : { checkpoints: circularity.length, maximumObserved },
+            firstSideWallContactStep: firstSideWallContact?.step,
+            firstSideWallContactTime_s: firstSideWallContact?.time_s,
+          } : { checkpoints: circularity.length, maximumObserved,
+            firstSideWallContactStep: firstSideWallContact?.step,
+            firstSideWallContactTime_s: firstSideWallContact?.time_s,
+            clippedBeforeWindow },
+        }));
+
+        const postContact = firstSideWallContact === undefined ? []
+          : observations.filter(({ step }) => step >= firstSideWallContact.step);
+        findings.push(hookFinding({
+          id: `${method}.front-clipping`, method, passed: true,
+          message: firstSideWallContact
+            ? "side-wall contact is reported as tank clipping, not circular-front error"
+            : "the observed front has not reached a side wall",
+          expected: { circularityEvaluation: "pre-contact only",
+            postContactEvaluation: "tank-clipping telemetry" },
+          actual: {
+            firstSideWallContactStep: firstSideWallContact?.step,
+            firstSideWallContactTime_s: firstSideWallContact?.time_s,
+            contactSteps,
+            postContactCheckpoints: postContact.map(({ step, time_s, observation }) => ({
+              step, time_s, walls: observation.walls,
+              clippedFrontShape: observation.frontCircularity,
+            })),
+          },
         }));
       }
 
-      const wallNames = ["negativeX", "positiveX", "negativeZ", "positiveZ"] as const;
-      const contactSteps = Object.fromEntries(wallNames.map((wall) => {
-        const contact = observations.find(({ observation }) =>
-          recordPath(observation, "walls", wall)?.touched === true);
-        return [wall, contact?.step];
-      })) as Record<typeof wallNames[number], number | undefined>;
       const reachedSteps = Object.values(contactSteps).filter((value): value is number => value !== undefined);
       const spread = reachedSteps.length === 4 ? Math.max(...reachedSteps) - Math.min(...reachedSteps) : Infinity;
       const wallsPassed = requireAllWallsReached

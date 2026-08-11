@@ -225,6 +225,15 @@ export interface SimulationMethod {
    * scientific trade-offs directly. */
   showQualityControl?: boolean;
   /**
+   * Field-visualization modes (`GridOverlayMode` strings) whose data this
+   * method's solver actually publishes. Pickers narrow the visualization
+   * catalog to these, so a method never offers a view of a publication it
+   * does not produce — the uniform reference has no power topology, and the
+   * CPU reference has no GPU fields at all. Declared as strings because the
+   * modes belong to the catalog entries, not to the method module.
+   */
+  supportedFieldModes?: readonly string[];
+  /**
    * Method-specific parameters. Common parameters (resolution, time step,
    * pressure solve effort) live in the scene numerics and are declared once
    * in the common schema, not here.

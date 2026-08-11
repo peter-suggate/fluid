@@ -17,6 +17,7 @@ import { SceneConfigPopover } from "./SceneConfigPopover";
 import { RigidBodyPanel } from "./RigidBodyTray";
 import { VisualPanel } from "./VisualPanel";
 import { VisualsPanel } from "./VisualsPanel";
+import { FluidPipelinePanel } from "./FluidPipelinePanel";
 import { DiagnosticsPanel } from "./DiagnosticsPanel";
 import { PerformancePanel } from "./PerformancePanel";
 import { TransportBar } from "./TransportBar";
@@ -177,6 +178,7 @@ export function FluidLab() {
         <nav className="utility-panel-tabs" aria-label="Viewport panels">
           <button className={rightPanel === "visual" ? "active" : ""} onClick={() => setRightPanel(rightPanel === "visual" ? null : "visual")} aria-expanded={rightPanel === "visual"} title="Render and debug controls">RENDER</button>
           <button className={rightPanel === "visuals" ? "active" : ""} onClick={() => setRightPanel(rightPanel === "visuals" ? null : "visuals")} aria-expanded={rightPanel === "visuals"} aria-controls="visuals-panel" title="Scientific field visualizations">VISUALS</button>
+          <button className={rightPanel === "simulation" ? "active" : ""} onClick={() => setRightPanel(rightPanel === "simulation" ? null : "simulation")} aria-expanded={rightPanel === "simulation"} aria-controls="simulation-panel" title="The selected method's advance pipeline with per-stage GPU timings">SIM</button>
           <button className={rightPanel === "bodies" ? "active" : ""} onClick={() => setRightPanel(rightPanel === "bodies" ? null : "bodies")} aria-expanded={rightPanel === "bodies"} title="Rigid body controls">BODIES</button>
           <button className={diagnosticsOpen ? "active" : ""} onClick={() => setDiagnosticsOpen(!diagnosticsOpen)} aria-expanded={diagnosticsOpen} title="Live diagnostics">DIAGNOSTICS</button>
           <button className={rightPanel === "performance" ? "active" : ""} onClick={() => setRightPanel(rightPanel === "performance" ? null : "performance")} aria-expanded={rightPanel === "performance"} aria-controls="performance-panel" title="Measured work and paper fields">PERFORMANCE</button>
@@ -213,6 +215,7 @@ export function FluidLab() {
       {rightPanel && <RightPanelResizer />}
       {rightPanel === "visual" && <VisualPanel />}
       {rightPanel === "visuals" && <VisualsPanel />}
+      {rightPanel === "simulation" && <FluidPipelinePanel />}
       {rightPanel === "bodies" && <RigidBodyPanel />}
       {diagnosticsOpen && <DiagnosticsPanel />}
       {rightPanel === "performance" && <PerformancePanel />}

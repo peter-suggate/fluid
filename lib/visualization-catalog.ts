@@ -16,6 +16,7 @@ import { blastRadiusVisualizations } from "./fluid-blast-radius";
 import { fineBandCellVisualizations } from "./fine-band-cell-visualizations";
 import { fineFloodVisualizations } from "./fine-flood-provenance";
 import { fluidCellVisualizations } from "./fluid-cell-visualizations";
+import { gridOverlayVisualizations } from "./grid-overlay-visualizations";
 import { octreeFieldVisualizations } from "./octree-technique-debug";
 import { svoPixelTraceVisualizations } from "./svo-pixel-trace";
 import {
@@ -36,6 +37,10 @@ export const VISUALIZATION_CATALOG: readonly Visualization[] = Object.freeze([
   ...fineFloodVisualizations,
   ...blastRadiusVisualizations,
   ...svoPixelTraceVisualizations,
+  // Generic dense-grid views first: they are the fields every method can
+  // publish, so a picker narrowed by method lists the universal set before
+  // the octree-only publications.
+  ...gridOverlayVisualizations,
   ...octreeFieldVisualizations,
 ]);
 

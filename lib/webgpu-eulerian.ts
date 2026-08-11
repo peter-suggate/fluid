@@ -163,7 +163,8 @@ export interface GPUEulerianInfo {
   representedVolumeCellSum?: number;
   representedVolumeDrift?: number;
   /** GPU field which supplied the displayed physical volume. */
-  volumeTelemetrySource?: "global-fine" | "adaptive-pages" | "dense-volume" | "initial-condition" | "unavailable";
+  volumeTelemetrySource?: "global-fine" | "adaptive-conservative-mass" | "adaptive-pages"
+    | "dense-volume" | "initial-condition" | "unavailable";
   front_m?: number;
   /** GPU field which supplied the displayed dam-front location. */
   frontTelemetrySource?: "dense-volume" | "initial-condition" | "unavailable";
@@ -294,6 +295,20 @@ export interface GPUEulerianInfo {
   hostSimulationSizedWorkItems?: number;
   /** Must remain false for authoritative octree scheduling. */
   hostSchedulingUsesReadback?: boolean;
+  /**
+   * Static per-advance pass structure published by the uniform reference
+   * solver once its programs are built, so the fluid pipeline panel's chips
+   * state the counts the instance actually encodes rather than re-deriving
+   * them from grid maths that could drift from the plan.
+   */
+  uniformPipelineFacts?: {
+    readonly extrapolationFrontSweeps: number;
+    readonly extrapolationHierarchyLevels: number;
+    readonly extrapolationPassesPerInvocation: number;
+    readonly multigridLevels: number;
+    readonly multigridPasses: Readonly<Record<"setup" | "full-cycle" | "v-cycle" | "finish", number>>;
+    readonly multigridPassesTotal: number;
+  };
   /** Latest exhaustive, exclusive GPU physics partition. */
   physicsTrace?: PerformanceTrace;
   /** Main-thread command-encoding partition captured under the exact same

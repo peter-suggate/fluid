@@ -46,9 +46,16 @@ test("the observatory exposes paper fields with exact axis, slice, and legend co
     "stencil-locality",
   ]) assert.ok(modes.has(mode), mode);
 
-  assert.equal(cards.length, 17);
-  assert.ok(cards.every((field) => field.axis === "volume"),
-    "every observatory card defaults to its volume presentation");
+  assert.equal(cards.length, 21);
+  // Octree publications default to the ray-integrated volume; the dense-grid
+  // views are authored as slices because the methods that register them — the
+  // uniform reference — have no volume rendering at all.
+  assert.ok(cards.filter((field) => field.pass !== "Dense grid")
+    .every((field) => field.axis === "volume"),
+    "every octree observatory card defaults to its volume presentation");
+  assert.ok(cards.filter((field) => field.pass === "Dense grid")
+    .every((field) => field.axis !== "volume"),
+    "dense-grid cards default to a slice the uniform reference can draw");
   assert.ok(cards.every((field) => (field.legend?.length ?? 0) > 0),
     "every card carries the legend its colours are read with");
   assert.match(panel, /if \(overlayAxis === "off"\) \{[\s\S]*setOverlayAxis\(view\.axis\)/,

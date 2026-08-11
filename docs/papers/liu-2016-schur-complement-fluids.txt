@@ -1,0 +1,936 @@
+A scalable Schur-complement fluids solver for heterogeneous compute platforms
+                             Haixiang Liu            Nathan Mitchell     Mridul Aanjaneya                 Eftychios Sifakis
+                                                         University of Wisconsin-Madison
+
+
+
+
+Figure 1: Left: Smoke injected into a model of the bronchi. Color illustrates vorticity magnitude. Simulation contains 1.8 billion active cells,
+sparsely occupying a 81922 ×4096 background grid. Right: Smoke injected from the bottom of a cylinder, and forced through a metal gasket
+(rendered semi-transparent) with a twisted bundle of cylindrical holes. Total of 1.2 billion active cells, in a 10242 ×2048 background grid.
+
+
+Abstract                                                                          Keywords: heterogeneous computing, fluid simulation, pressure
+                                                                                  projection, domain decomposition, GPU, multigrid, preconditioner
+We present a scalable parallel solver for the pressure Poisson equa-
+tion in fluids simulation which can accommodate complex irregular                 Concepts: •Computing methodologies → Physical simulation;
+domains in the order of a billion degrees of freedom, using a sin-
+gle server or workstation fitted with GPU or Many-Core accelera-                  1    Introduction
+tors. The design of our numerical technique is attuned to the sub-
+tleties of heterogeneous computing, and allows us to benefit from
+                                                                                  For many years, simulation-based animation of fluids has been an
+the high memory and compute bandwidth of GPU accelerators even
+                                                                                  indispensable component of visual effects pipelines [Geiger et al.
+for problems that are too large to fit entirely on GPU memory. This
+                                                                                  2006; Froemling et al. 2007; Van Opstal et al. 2014]. Although
+is achieved via algebraic formulations that adequately increase the
+                                                                                  the ever growing demands of production environments for higher
+density of the GPU-hosted computation as to hide the overhead of
+                                                                                  detail and resolution have prompted some practitioners to use com-
+offloading from the CPU, in exchange for accelerated convergence.
+                                                                                  puter clusters for parallel solvers [Irving et al. 2006; Bailey et al.
+Our solver follows the principles of Domain Decomposition tech-
+                                                                                  2015], a number of innovations both in hardware as well as algo-
+niques, and is based on the Schur complement method for elliptic
+                                                                                  rithmic foundations have made it possible to scale up the quality
+partial differential equations. A large uniform grid is partitioned in
+                                                                                  and resolution of fluid simulations that can be hosted on standalone
+non-overlapping subdomains, and bandwidth-optimized (GPU or
+                                                                                  servers and workstations. This has encouraged researchers to ex-
+Many-Core) accelerator cards are used to efficiently and concur-
+                                                                                  plore novel data structures [Museth 2013], careful modeling sim-
+rently solve independent Poisson problems on each resulting subdo-
+                                                                                  plifications [Rasmussen et al. 2003], intricate use of GPUs [Hor-
+main. Our novel contributions are centered on the careful steps nec-
+                                                                                  vath and Geiger 2009; Macklin et al. 2014], accelerated numerical
+essary to assemble an accurate global solver from these constituent
+                                                                                  techniques [McAdams et al. 2010; Zhang and Bridson 2014], and
+blocks, while avoiding excessive communication or dense linear al-
+                                                                                  strategic use of adaptivity [Losasso et al. 2004; Ando et al. 2013].
+gebra. We ultimately produce a highly effective Conjugate Gradi-
+ents preconditioner, and demonstrate scalable and accurate perfor-                In this paper, we seek to boost the scale and complexity of fluid sim-
+mance on high-resolution simulations of water and smoke flow.                     ulations that can be effectively accommodated on single-computer
+                                                                                  platforms. In particular, we target the pressure Poisson equation
+Permission to make digital or hard copies of all or part of this work for
+personal or classroom use is granted without fee provided that copies are not
+                                                                                  which is almost invariably the computational bottleneck at large
+made or distributed for profit or commercial advantage and that copies bear       scales, and develop a solver that can support intricately shaped do-
+this notice and the full citation on the first page. Copyrights for components    mains (see Fig.1) with more than one billion active degrees of free-
+of this work owned by others than ACM must be honored. Abstracting with           dom on a well-equipped (albeit, not exotic) graphics workstation.
+credit is permitted. To copy otherwise, or republish, to post on servers or to    We will aggressively use any number of GPU or Many-Core accel-
+redistribute to lists, requires prior specific permission and/or a fee. Request   erator cards, installed in our target platform, to facilitate this goal.
+permissions from permissions@acm.org. c 2016 ACM.                                 However, the scale of the problems we target will present a unique
+SA ’16 Technical Papers, December 05-08, 2016, Macao                              challenge: many of them will be too large to fit in GPU memory,
+ISBN: 978-1-4503-4514-9/16/12                                                     and although the same problem would fit in the host system mem-
+DOI: http://dx.doi.org/10.1145/2980179.2982430                                    ory, it would be unattractively slow to execute purely on the CPU.
+    a                     b                         c                      d                           e                         f
+
+
+Figure 2: Illustration of the core concept of our method: (b) We split the computational grid into subdomains, and independently solve them
+on the GPU(s), using zero Dirichlet conditions on subdomain boundaries. (c) Fluxes of the subdomain solutions are computed and sent to the
+CPU. (d) A specially formulated system is solved on the interface, using the CPU. This produces the exact value of the interface variables. (e)
+Those values are sent to the subdomains, and set as Dirichlet conditions. (e) A final subdomain solve on the GPU yields the global solution.
+
+Our technique leverages Domain Decomposition theory and, more                  Why target heterogeneity? Heterogeneous platforms, i.e. servers
+specifically, is rooted in the principles of Schur Complement Meth-            or workstations equipped with one or more bandwidth-optimized
+ods [Quarteroni and Valli 1999] for the solution of elliptic Partial           accelerator cards, are presently the most price-efficient way to pack
+Differential Equations. Intuitively, our solver is designed according          aggregate computational power into a single computer system. To-
+to a divide-and-conquer paradigm. Using independent solvers for                day, it is very realistic for a simulation workstation (aided by a main
+small, artificially decoupled partitions of our domain as algorith-            CPU and multiple GPU cards) to combine an aggregate memory
+mic building blocks, we seek to produce an accurate solver for the             bandwidth of 1.1 TB/sec, peak compute throughput of 23 TFLOPS
+aggregate, fully coupled domain. The fundamental theory, which                 and memory capacity of 512 GB (plus any GPU memory) at a
+we review in Section 4, explains that this composition is perfectly            price point below $10K1 . However, these aggregate capabilities are
+possible from a purely algebraic standpoint. Furthermore, if the               markedly not uniformly available across the platform. Each GPU
+independent partitions of our domain are adequately sized, each                card enjoys high bandwidth for internal computation, but needs
+decoupled Poisson problem can be dispatched to a separate GPU                  to communicate through the PCIe bus to reach data stored in a
+accelerator, and fully solved with an efficient numerical technique            different accelerator’s internal memory, or in the memory of the
+that optimally exploits its bandwidth and compute capability. How-             host CPU. The CPU itself can host large workloads in its memory,
+ever, direct application of this basic principle is utterly impractical,       and leverage task-level parallelism even in combinatorial workloads
+as the algebraic operations necessary to fuse together the indepen-            that lack the regularity that GPUs thrive on, but is limited in mem-
+dent partition solvers into an accurate global scheme (the “and-               ory bandwidth and peak computational throughput. We note that
+conquer” part of our paradigm) have an absolutely prohibitive cost.            this non-uniformity of bandwidth and compute capability is not a
+Our core contribution is a novel synergy of CPU-hosted numerical               temporary aberration, but rather a persistent trait across generations
+algorithms that drastically reduces the complexity of re-combining             of hardware designs. This has manifested in the design of NUMA
+the independent solvers into a global one, facilitating the design of          (Non-Uniform Memory Access) multi-socket systems, is evident
+a highly efficient heterogeneous global solver. The price we pay for           in GPU-accelerated platforms, and remains fully relevant in the
+this dramatic complexity improvement, is that our overall scheme is            emerging generation of accelerators that leverage high-bandwidth
+no longer an exact solver; nevertheless, we show that it can be used           stacked memory (in addition to slower, but larger DDR memory).
+as an excellent preconditioner for Conjugate Gradients, achieving              We believe that investigating numerical techniques that are deeply
+rapid convergence in very few iterations even for very large, billion          cognizant of this heterogeneity is timely and worthwhile, even if
+degree-of-freedom domains. Figure 2 provides a visual summary                  they are more complex than heterogeneity-agnostic alternatives.
+of our pipeline, which we elaborate on in later sections.
+                                                                               When does offloading become a liability? For memory-bound
+Our technical contributions are summarized as follows:                         numerical workloads, the core benefit of a GPU port primarily
+    • We show a preconditioner design based on Schur Comple-                   stems from the additional bandwidth available, internally, to each
+      ment methods. Although the algebraic principles have prece-              GPU card, which is often 6x-8x the bandwidth available to each
+      dent in scientific computing literature, we believe this is the          CPU socket. This capability is optimally exploited when the entire
+      first direct application of this theory to a graphics application.       problem fits in GPU memory, in which case a GPU-homogeneous
+                                                                               solver can be used for it. However, problems that are too large to
+    • We present an original numerical technique for the combi-                fit in GPU memory have to be split into smaller partitions, each
+      nation of independent solvers into a coherent global scheme.             of which needs to dispatch (“offload”) its data to the GPU, carry
+      This new methodology is hosted on the CPU, has very attrac-              out an operation, and then transfer the results back to the CPU to
+      tive complexity, and relies on the synergy of multigrid, adap-           make room for the next partition. This round-trip data transfer takes
+      tivity, and assembly-free relaxation methods.                            place over the PCIe bus, which offers bandwidth two orders of mag-
+    • We analyze the efficacy of our technique in the context of               nitude less than what is internally available on the GPU. Thus, in
+      large-scale smoke and water simulations, providing conver-               order to justify this offloading overhead, it is crucial that the data re-
+      gence and runtime comparisons with alternative solvers. Our              mains on the GPU while carrying out useful computations for long
+      tests are conducted on heterogeneous systems accelerated by              enough to hide the PCIe transfer cost. Unfortunately, some of the
+      multiple GPUs or Many-Core accelerator cards.                            best performing solvers (in terms of convergence efficiency) such
+                                                                               as multigrid do not offer this opportunity. The building blocks of
+                                                                               a multigrid solver, namely the smoothing routine and transfer op-
+2       Background, challenges and scope                                       erators, require global synchronization after their execution while
+                                                                               carrying out only a very modest amount of useful computation in
+Before we venture into the discussion of prior work that inspired              between synchronization points. In particular, a Jacobi or Gauss-
+our approach, and the details of our scheme, it is important to pro-           Seidel style smoother requires no more than two passes over the
+vide some insight into the technological factors that motivated this
+work. We further offer some comments on the challenges that our                   1 Sample platform: SuperMicro 7048A-T, Dual Intel Xeon E5-2650 v4
+
+technique must address, and delineate the scope of our method.                 processors, 512GB DDR4 RAM, 2×NVidia Titan X cards.
+Figure 3: Free-surface simulation of water poured in a container with multiple interior walls causing the flow to meander around them. The
+frame shown in the right-most illustration corresponds to 114 million active cells, in a 1024×1024×1024 background grid.
+
+data in memory, which completes at a fraction of the time needed          3   Related Work
+to move its data from/to the GPU. Of course, one could take the op-
+portunity to carry out several smoothing iterations per offload op-       Fluid simulation has been an active area of research within com-
+eration; however, without synchronization at partition boundaries         puter graphics since the early work of [Stam 1999; Foster and
+this extra effort will hardly translate to worthwhile gains in conver-    Fedkiw 2001]. Since the memory overhead associated with uni-
+gence. As a result, the benefit of the GPU offload is negated, and        form grids quickly escalates in three spatial dimensions, several
+such large problems are better off being solved homogeneously on          adaptive techniques have been proposed, including adaptive Carte-
+the CPU. Although there might be room for implementation refine-          sian grids [Losasso et al. 2004; Zhu et al. 2013; Ferstl et al.
+ments and adaptation of multigrid paradigms to curb this overhead,        2014; Setaluri et al. 2014], adaptive tetrahedral meshes [Klingner
+we are not aware of prior work that has demonstrated viability of         et al. 2006; Chentanez et al. 2007; Ando et al. 2013], RLE-based
+a GPU-offload paradigm for multigrid solvers, when the problem            schemes [Houston et al. 2006; Irving et al. 2006; Chentanez and
+size exceeds the memory capacity of the GPU card(s), compare to           Müller 2011], adaptive mesh refinement (AMR) and chimera grid
+a well-optimized CPU implementation. Our proposed approach di-            schemes [Dobashi et al. 2008; Tan et al. 2008; Cohen et al. 2010;
+rectly addresses this challenge: instead of executing just a few iter-    English et al. 2013]. Lagrangian methods present an interesting al-
+ations of a smoother routine, we run an entire solver routine on the      ternative because they avoid many of the numerical dissipation is-
+GPU for each independent subdomain we offload to it. In our case,         sues characteristic of Eulerian methods. Several methods have been
+that extra effort does translate to accelerated convergence, and the      proposed, including smoothed particle hydrodynamics (SPH) [So-
+GPU computation is long enough to absorb the cost of offloading.          lenthaler and Gross 2011; Ihmsen et al. 2014; Bender and Koschier
+                                                                          2015], particle-based schemes [Adams et al. 2007; de Goes et al.
+Divide-and-conquer with “nearly” accurate pieces The classi-              2015], position-based fluids [Macklin and Müller 2013], triangle
+cal divide-and-conquer paradigm encountered in combinatorial al-          meshes [Wojtan et al. 2010; Thürey et al. 2010; Da et al. 2015] and
+gorithms often presumes building blocks that accurately solve sub-        simplicial complexes [Zhu et al. 2014]. However, due to their un-
+sets of the overall problem. In our numerical context, one of the         structured nature, these methods are unable to leverage the regular-
+key opportunities we will exploit is the option to design what is not     ity and parallelism potential of uniform grids. To circumvent this is-
+an exact solver, but an excellent approximation of one, and subse-        sue to some extent, hybrid methods have also been proposed [Foster
+quently use it as a preconditioner. In this context, we will adopt        and Metaxas 1996; Zhu and Bridson 2005; Losasso et al. 2008; Zhu
+a slightly different standard which we will design our “inaccurate”       et al. 2010; Raveendran et al. 2011; Jiang et al. 2015; Chen et al.
+divide-and-conquer scheme to satisfy. Our building block will be an       2015]. Authors have also investigated the use of Fast Fourier trans-
+inexact solver for the Poisson equation on independent partitions of      forms [Stam 2002], which was later extended to handle slip bound-
+our domain, which is however of good enough quality to be used as         ary conditions [Long and Reinhard 2009], model reduction [Liu
+an excellent Conjugate Gradients preconditioner (i.e. it would lead       et al. 2015], and regression forests [Ladický et al. 2015].
+to convergence in a small number of iterations, that does not signif-
+icantly increase as the subdomain size grows larger). Subsequently,       The pressure projection step is widely accepted to be the computa-
+our objective would be to combine such “nearly accurate” building         tionally dominating step in fluid simulations, and researchers have
+blocks into a global approximate solver that meets the same bench-        investigated the design of fast solvers using coarse grids [Lentine
+mark, i.e. it can be an effective preconditioner that allows CG to        et al. 2010], multigrid methods on either uniform grids [McAdams
+converge in a comparably small number of iterations as its individ-       et al. 2010; Dick et al. 2016] or adaptive grids [Chentanez and
+ual constituents. Short of this standard, using divide-and-conquer        Müller 2011; Ferstl et al. 2014; Setaluri et al. 2014], iterated or-
+with inexact components can easily result in degraded performance.        thogonal projection [Molemaker et al. 2008], dimension reduc-
+                                                                          tion [Ando et al. 2015b], fast summation methods [Zhang and Brid-
+Scope Our primary objective is to demonstrate an effective, and           son 2014], and stream functions [Ando et al. 2015a]. Fast matrix
+hopefully inspiring adaptation to fluids simulation of a class of nu-     factorization updates were explored [Hecht et al. 2012] by exploit-
+merical techniques that has received much more exposure in sci-           ing sparsity patterns in the Cholesky algorithm in ways analogous
+entific computing than graphics research. We note, however, that          to our method, albeit in the context of elasticity simulations. An in-
+Schur Complement methods provide a general framework, and not             creasing number of researchers have also adopted the use of GPUs
+just a singular algorithm; in fact, similar to multigrid methods, care-   for better computational performance since efficient solvers such as
+ful variations from the general algebraic theme make all the dif-         multigrid tend to be memory-bound [Ament et al. 2010; Dick et al.
+ference between a given scheme being highly effective or under-           2011; Zhang and Bridson 2014; Chen et al. 2015; Wu et al. 2016].
+whelming for a specific application. In this vein, we consciously
+restricted the scope of our investigation to just uniform discretiza-     Unlike previous approaches where the goal was to increase perfor-
+tions of fluids, specifically targeted the Poisson equation (although     mance on homogeneous platforms, we use domain decomposition
+our formulations should readily extend to elasticity, or other ellip-     techniques to develop an efficient Krylov preconditioner whose de-
+tic problems), and did not emphasize the implications of heteroge-        sign is tailored towards maximizing performance on heterogeneous
+neous computing to other parts of the fluid simulation pipeline.          computing platforms. One earlier investigation that does address
+Figure 4: Smoke flow in a network of interconnected vessels simulated using a 10242 × 512 background grid and 42 million active cells.
+The computational domain was divided into four subdomains. The proper flux is observed both in the inlet and the outlet of the flow.
+
+heterogeneity is [Jung et al. 2013], which proposed a wavelet-based      to write the following factorization of the inverse matrix A−1 :
+method that used GPUs for increasing the performance of a multi-                                    -1                                         
+grid solver hosted on the CPU. While researchers have proposed                   I         -A-1
+                                                                                             11 A1Γ A11                  I
+methods classified as domain decomposition [Golas et al. 2012;           A-1 =       I -A-1 22 A2Γ
+                                                                                                     A-1  22
+                                                                                                                                  I               
+                                                                                                                            -1        -1
+Edwards and Bridson 2015], these are quite different from ours                                 I               Σ-1 -AΓ1 A11 -AΓ2 A22           I
+because we work specifically in the context of Schur complement
+methods [Smith et al. 1996]. Methods based on Schur comple-                               U                 D                    UT
+                                                                         where
+ments have been used for virtual surgery simulations [Bro-nielsen
+                                                                                      Σ = AΓΓ − AΓ1 A-1            -1
+                                                                                                     11 A1Γ − AΓ2 A22 A2Γ
+and Cotin 1996], skinning [Gao et al. 2014], subspace deformable
+body simulations [Teng et al. 2015; Wu et al. 2015], or fluid con-       is the Schur complement of the block AΓΓ in equation (2). The
+trol [Raveendran et al. 2012].                                           validity of this factorization can be verified via a direct substitution
+                                                                         into the identity A·A−1 = I. Finally, since A (and its inverse) is a
+4     The classic Schur complement method                                symmetric positive definite (SPD) matrix, this factorization implies
+                                                                         that the Schur complement is also SPD (the matrix D is equal to
+We introduce the basic principles of the Schur complement method         the symmetric conjugation of the SPD matrix A−1 with the matrix
+[Quarteroni and Valli 1999] by explaining how an aggregate solver        U −1 ; hence its diagonal sub-block Σ−1 is symmetric definite, too).
+for the pressure Poisson equation can be assembled using as subrou-
+tines two independent solvers for two non-overlapping partitions of      4.2     The multiple subdomain solver
+the entire computational domain. After covering the basic theory
+we will detail how this construction extends to multiple partitions,     This formulation extends naturally to an arbitrary number of k sub-
+and derive a preconditioner based on this concept in later sections.     domain partitions Ω1 , . . . , Ωk separated by an interface set Γ (fig-
+                                                                         ure 2 depicts such a partitioning into four subdomains, with the
+4.1   The two-subdomain case                                             interface Γ highlighted as the magenta-colored separator surface).
+                                                                         The corresponding factorization of A−1 in this case is given in
+Consider a domain Ω that has been par-                                   equation (3). In order to translate this algebraic expression into
+titioned into two subdomains Ω1 and Ω2                                   a solver algorithm, we first re-factor this into the five-matrix prod-
+through an interface region Γ. Let us as-                  Ω2            uct of equation (4), which has every subdomain inverse A-1   ii appear
+
+sume we have a finite-difference discretiza-                             only twice (as opposed to three inversions per subdomain, in equa-
+tion of the pressure Poisson equation on Ω,                              tion 3). The last algebraic manipulation, as given in equation (5)
+                                                  Ω1                     further avoids the appearance of the subdomain Laplacian Aii , re-
+and that the interfacial region Γ is thick                     Γ
+enough to shield any stencil in Ω1 from including a point in Ω2          quiring only the inverses of such matrices. In this expression we
+(and vice-versa). In practice, when using the standard 7-point sten-     have also substituted the symbol M † ≈ M −1 for approximate in-
+cil in a Cartesian discretization, the interface layer Γ can simply      verses of Aii and Σ. If the exact inverse of these matrices was used,
+be one-node thick as long as it cleanly decouples Ω into two dis-        equation (5) becomes identically equal to the five-factor expression
+tinct subdomains (although Γ could also be made wider, if desired).      of equation (4). We will later engage in such approximations; for
+For simplicity of notation we will write the Poisson equation as         now, we may assume that all these inverses are exact.
+Ax = b, with the understanding that the vector x contains the un-        The Schur complement method effectively solves the equation
+known pressure values and b contains the respective divergence val-      Ax = b by multiplying the right hand side b with the factorized
+ues of the velocity field. We then reorder degrees of freedom as:        equivalent of A−1 from equation (5). The key observation is that
+                                                                     we can apply this multiplication indirectly, without explicitly con-
+                         x1               b1
+                                                                         structing the matrix in this factorization. We do this as follows:
+                 x =  x2  ,       b =  b2                    (1)
+                         xΓ               bΓ                               1. Solve k subproblems: A11 x̂1 = b1 , . . . , Akk x̂k = bk .
+                                                                           2. Solve ΣxΓ = bΓ − AΓ1 x̂1 − AΓ2 x̂2 − . . . − AΓk x̂k .
+where xi , bi correspond to values in Ωi , for i ∈ {1, 2} (and sim-
+ilarly xΓ , bΓ correspond to degrees of freedom in Γ). Under this          3. Solve the k new subproblems
+reordering, the matrix A assumes the following block form:                    A11 δx1 = −A1Γ xΓ , . . . , Akk δxk = −AkΓ xΓ .
+                                                                         4. Update x1 ← x̂1 + δx1 , . . . , xk ← x̂k + δxk .
+                         A11          A1Γ
+                  A=          A22 A2Γ                          (2)     Observe that steps (1) and (3) require the solution of fully de-
+                         AΓ1 AΓ2 AΓΓ                                     coupled systems for each subdomain Ωi , and this can easily be
+                                                                         performed in parallel, without any communication. Step (2) re-
+Note that due to symmetry of A, we have ATΓ1=A1Γ and ATΓ2=A2Γ            quires the solution of a symmetric and positive definite system (with
+for the off-diagonal blocks. Using this block form of A it is possible   the Schur complement Σ as the coefficient matrix). Traditionally,
+                                                  -1
+                                  -A-1
+                                                                                                                 
+                 I                    11 A1Γ       A11                               I
+                    ..                  ..              ..                                ..                   
+    A-1   =
+                
+                       .                 .      
+                                                              .              
+                                                                                                  .               
+                                                                                                                                                         (3)
+                                     -1
+                               I -Akk AkΓ                          A-1
+                                                                      kk
+                                                                                                        I         
+                                                                                      -1
+                                        I                                   Σ-1 -AΓ1 A11        . . . -AΓk A-1 kk     I
+                 -1
+                 A11
+                                              
+                                                 I
+                                                                           
+                                                                    -A1Γ A11
+                                                                                                      
+                                                                                                            I               A-1                 
+                                                                                                                                11
+                         ..                      ..                ..         ..                          ..               ..            
+          =
+                
+                            .                
+                                                     .               .           .                
+                                                                                                                   .       
+                                                                                                                                       .          (4)
+                                                                                                                                                  
+                                   -1                                                     Akk                                               -1
+                                 Akk                       I        -AkΓ                                                I                  Akk
+                                                                                                                                         
+                                                                                                    -1
+                                            I                         I                          Σ        -AΓ1 . . . -AΓk I                     I
+                 †
+                                                                                                                              A†11
+                                                                                                                                             
+                 A11                             I                  -A1Γ  I                   
+                                                                                               
+                                                                                                                                                   
+                                                                                                                                                    
+                         . ..
+                                                  ..                 ..  . .
+                                                                                              
+                                                                                                                                   . .
+                                                                                                                                                   
+                                                                                                                                                    
+          ≈
+                
+                
+                                              
+                                                     .                . 
+                                                                                .             I +
+                                                                                                                           
+                                                                                                                                       .          (5)
+                                                                                                                                                   
+                                 A†kk                      I        -AkΓ                I                                                  A†kk
+                                                                                                                                            
+                                                                                                                                                   
+                                                                      I                    Σ†
+                                                                                               
+                                                                                                          -AΓ1 . . . -AΓk I                        
+                                                                                                                                                    
+                                            I                                                                                                    I
+solvers based on this method attempt to solve this interface system                      From an implementation standpoint, we map the application of this
+using a preconditioned Krylov subspace method such as Conjugate                          preconditioner to a heterogeneous platform by assigning the inte-
+Gradients. We will deviate from this practice, and use equation (5)                      rior degrees of freedom of each subdomain Ωi to a single GPU or
+instead, to design a preconditioner for the global (coupled) system.                     Many-Core accelerator card, while the interface degrees of freedom
+                                                                                         (Γ) will be the maintained on the CPU. We design the approximate
+Let us examine the structure of Σ and assess the computational cost
+                                                                                         subdomain inverses A†ii so that they can be multiplied with respec-
+of solving the system in step (2) directly. For a volumetric domain
+                                                                                         tive vectors exclusively on the GPU, local to the accelerator that
+Ω with√N total degrees of freedom, the dimensionality of Γ would
+                                                                                         owns the subdomain Ωi . Multiplication with the matrix blocks AΓi
+be O( N ) in 2D, and O(N 2/3 ) in 3D. Note, however, that in con-                        will coincide with data transfer from the card that owns Ωi to the
+trast to the sparse Laplace matrix A, the Schur complement is a                          CPU, while multiplication with the transpose AiΓ will relay data
+dense matrix, thus having O(N 4/3 ) entries and requiring at least as                    from the CPU to the respective accelerator in the opposite direction.
+much computation to solve. Asymptotically, this would make step                          Multiplication with the approximate inverse of the Schur comple-
+(2) above by far the bottleneck of the solver, if Σ was to be explic-                    ment, i.e. Σ† , will be handled fully on the CPU. The application of
+itly constructed. Furthermore, the construction of the matrix alone                      this preconditioner is formalized in pseudocode in Algorithm 1.
+would likely require even more computation, as it would need to ac-
+count for computing the subdomain inverses A-1     ii . Using Conjugate
+Gradients as the solver in step (2) opens up an interesting possibil-                    Algorithm 1 Preconditioner application z = A† r, from eqn. (5)
+ity: the CG algorithm does not need an explicitly constructed ma-                         1: parallel for i = 1 . . . k do                         . on GPU
+trix Σ, as long as we have a way to compute matrix-vector products                        2:    Get ri ← CPU
+ΣxΓ . In turn, this would require computing products of the form                          3:    Solve qi ← A†ii ri
+AΓi A-1ii AiΓ xΓ as efficiently as possible. Although the factors AΓi ,                                       (i)
+                                                                                          4:    Compute sΓ ← −AΓi qi
+AiΓ are sparse enough to allow efficient multiplication, multiply-                                      (i)
+ing with A-1 ii (i.e. solving a subdomain Poisson problem) requires
+                                                                                          5:    Send sΓ → CPU
+at least linear cost relative to the size of the subdomain (assuming                      6:    Send qi → CPU
+a linear-complexity solver, like an extremely well built multigrid                        7: end parallel for
+                                                                                                                       (1)   (k)
+scheme, iterated to full convergence). There would be opportunity                         8: Compute fΓ = rΓ + sΓ + . . . + sΓ                     . on CPU
+for parallelization across subdomains, but we would be still con-                                           †
+                                                                                          9: Solve zΓ ← Σ fΓ
+fronted with a linear complexity cost for each CG iteration, and we                      10: parallel for i = 1 . . . k do                         . on GPU
+would have to rely on constructing an extremely efficient precondi-                      11:    Get qi ← CPU
+tioner to ensure that only a small finite number of iterations would                     12:    Get zΓ ← CPU
+suffice, independent of resolution. This is, in fact, what is done by                    13:    Compute fi ← −AiΓ zΓ
+many variants of the Schur complement method (often referred to                          14:    Solve zi ← A†ii fi
+as iterative substructuring; see Quarteroni and Valli [1999]).                           15:    Add zi + = qi
+                                                                                         16:    Send zi → CPU
+5    A Schur-complement preconditioner                                                   17: end parallel for
+
+In light of these challenges we propose certain strategic simplifi-
+cations that would make the Schur complement method yield an                             5.1   Multigrid subdomain solver
+approximate solver of the Poisson equation, rather than a strictly
+accurate one. Our intent would be to use this approximation as a                         For approximating A†ii in the formulation described above, we use a
+preconditioner for the Conjugate Gradients method, applied to the                        simple, voxel-accurate multigrid solver in the spirit of prior works
+full-scale Poisson problem. Our last transformation of the factor-                       [McAdams et al. 2010; Molemaker et al. 2008], with some em-
+ized form for A−1 , captured in equation (5) was precisely intended                      bellishments to support sparse domains as discussed in section 7.
+to facilitate this process. We can easily show that any nonsingular                      The multigrid hierarchy is constructed by classifying every grid cell
+approximation A†ii ≈ A−1    ii of the subdomain inverses, combined                       as “interior”, “exterior” (to the active domain) or “Dirichlet”, and
+with a symmetric positive definite (SPD) approximation Σ† ≈ Σ−1                          coarsening this classification to voxels of lower resolution grids.
+will produce, after substitution in equation (5), an SPD matrix ap-                      Trilinear transfer operators and a damped Jacobi smoother are em-
+proximation to A−1 . Thus multiplication with this expression can                        ployed, with an additional smoothing effort in a narrow band around
+be used as a preconditioner for the Conjugate Gradients method.                          the boundary (3-7 iterations) for each interior smoothing pass.
+                                                                            then the solution can be shown to satisfy xΓ = Σ-1 bΓ . Let us
+                                                                            further assume that our smoother routine was designed such that
+                                                                            it completely eliminated any residual of equations interior to the
+                                                                            subdomains, leaving nonzero residuals only on interface degrees of
+                                                                            freedom. We can then interpret our proposed multigrid procedure,
+                                                                            which operates solely on the interface, as algebraically equivalent
+                                                                            to a full-domain multigrid scheme used with a right hand side that is
+                                                                            zero anywhere outside the boundary, as in equation (6), combined
+                                                                            with a smoother that annihilates residuals on subdomain interiors.
+                                                                            The terms ki=1 AΓi A-1
+                                                                                         P
+                                                                                                     ii AiΓ in the formula of Σ correspond di-
+                                                                            rectly to this concept of subdomain-interior equations being solved
+                                                                            exactly, and used to eliminate those degrees of freedom from the
+                                                                            dimensionality of Σ. A smoother that can operate on Σ directly,
+                                                                            implicitly ensures that all equations in the interior of each subdo-
+                                                                            main are satisfied at all times. Finally, the restriction and prolon-
+                                                                            gation operators for the interface-based multigrid solver can be in-
+                                                                            ferred from the transfer operators of the global problem. Note that,
+Figure 5: Smoke injected from the bottom of a cylinder, and forced          for the purposes of this section we depart from the cell-centered
+through a twisted bundle of cylindrical holes. Color corresponds to         perspective of grid values, as employed for example in the hierar-
+vorticity magnitude. Total 1.2B active cells, in a 10242×2048 grid.         chy construction by McAdams et al [2010], and switch to viewing
+                                                                            unknowns as stored in the nodes of the dual of the typical MAC
+6     The interface Schur-complement system                                 grid used for the Navier-Stokes discretization (i.e. pressure values
+                                                                            stored on nodes of this new grid). We then coarsen the cells in the
+                                                                            typical 8-to-1 fashion, using trilinear interpolation. This ensures
+The last remaining piece for generating our preconditioner is the
+                                                                            that interface degrees of freedom remain fully aligned across levels
+design of the approximation Σ† and the application of its effec-
+                                                                            of the multigrid hierarchy, and that trilinear prolongation of a finer
+tive numerical solution which is hosted exclusively on the CPU.
+                                                                            level’s interface variables will only need coarse interface variables
+As previously stated, our objective is to arrive at an algorithm
+                                                                            as input. Although restriction into coarse interface values techni-
+that is sublinear in complexity relative to the size of the over-
+                                                                            cally touches interior values as well, the residuals of all such in-
+all boundary and yields a good approximation to the exact matrix
+                                                                            terior equations will be zero (since the Schur complement operator
+Σ = AΓΓ − ki=1 AΓi A-1                                               †
+             P
+                          ii AiΓ . The approximations incurred in Σ         assumes those equations fully satisfied). Thus the transfer operators
+are twofold: (a) instead of solving ΣxΓ = bΓ exactly, we will sub-          we ultimately use in our cycle are bilinear interpolation along the
+stitute a number of V-cycles of an appropriately designed multigrid         aligned 2D interface surfaces at each level of the hierarchy.
+scheme, and (b) we modestly modify the matrix used in this multi-
+grid scheme, using adaptivity, to reduce the cost of direct algebra.
+                                                                            6.2   Smoothing the Schur-complement system
+6.1   Multigrid solver for the interface                                    As previously shown, Σ is a symmetric and positive definite matrix.
+                                                                            Thus, in principle, damped Jacobi or Gauss-Seidel would have been
+The Schur complement matrix Σ is not only symmetric and positive            convergent smoothers. However, since we do not have access to
+definite, but it can further be shown that it is an elliptic operator, as   the explicit matrix form of Σ, operations that would be required
+it is a discretization of the continuous and elliptic Steklov-Poincaré     (for example, the diagonal elements of Σ) are not readily available.
+operator for the Poisson equation [Smith et al. 1996]. This suggests        Thus, we take a different approach of designing a smoother that can
+that a multigrid solver (on the interface variables; separate from the      be iterated without an explicit construction of the matrix. Using the
+multigrid cycles used to approximate the subdomain inverses) could          definition of Σ, the system ΣxΓ = bΓ can be rewritten as:
+be applicable. The simplest technique for building the multigrid hi-
+                                                                                                           k
+erarchy is to use Galerkin coarsening to construct the operator at                                         X
+each resolution level. However, this would require explicitly com-                       AΓΓ xΓ = bΓ +           AΓi A-1
+                                                                                                                      ii AiΓ xΓ                (7)
+puting the matrix Σ at the finest level, which is a computationally                                        i=1
+
+expensive proposition. We propose a different hierarchy construc-           We can use equation (7) to design a fixed-point iteration as follows:
+tion, and design a smoother that avoids explicit matrix assembly.
+                                                                                                              k
+                                                                                                              X
+                                                                                             (n+1)                                (n)
+We construct the coarser level operators in the following fashion,
+                Pk                                                                    AΓΓ xΓ         = bΓ +         AΓi A-1
+                                                                                                                         ii AiΓ xΓ             (8)
+Σ2h = A2h  ΓΓ −
+                        2h    2h -1 2h
+                   i=1 AΓi (Aii ) AiΓ , where the entire matrix A
+                                                                  h
+                                                                                                              i=1
+
+has first been coarsened down to A2h using trilinear interpolation,         One may recognize the similarity of equation (8) with the analogous
+and then the individual building blocks are harvested and reassem-                           (n+1)                      (n)
+                                                                            matrix form DxΓ         = bΓ + (L + U )xΓ of the Jacobi iteration
+bled for computing Σ2h . While this may appear a plausible choice
+                                                                            based on the decomposition Σ = D−L−U , should that have been
+for the multigrid hierarchy, and indeed our experiments show that
+                                                                            explicitly available. Instead of isolating just the diagonal part of Σ,
+this gives good convergence, the intuition behind it comes from the
+                                                                            our decomposition employs the entire AΓΓ term. In Appendix A
+following observation. Suppose we constructed a multigrid hierar-
+                                                                            we provide a proof that this iterative scheme will always converge.
+chy for the full problem Ax = b, where the right hand side b has
+non-zero entries only on the interface Γ, i.e., we are solving the          The iterative scheme in equation (8) requires two basic blocks.
+following equation via multigrid:                                           First, given an already computed right hand side, solving for xΓ
+                                                                      requires solving a sparse symmetric and positive definite system.
+                A11           A1Γ     x1       0                            Since the matrix AΓΓ is very sparse and structured, we use a
+                     A22     A2Γ   x2  =  0                    (6)    sparse Cholesky factorization using the Intel MKL PARDISO li-
+                AΓ1   AΓ2     AΓΓ    xΓ       bΓ                            brary, which we have found to be very well-performing especially
+                                                                        Based on this interpretation, we observe that the harmonic inter-
+                                                                        polant x̂ii in this process could be very well approximated by an
+                                                                        adaptive tessellation of the subdomain interior, as shown in figure
+                                                                        6. Starting from the uniform grid spanning each subdomain (fig-
+                                                                        ure 6a), we aggressively coarsen as we transition to regions farther
+                                                                        towards the subdomain interior (figure 6b). All our experiments
+                                                                        have indicated that the quality of this approximation is excellent;
+                                                                        remember that even if small errors might be observed in the actual
+                                                                        interpolants, deep inside the subdomains, only the Laplacian of the
+                                                                        resulting interpolant on the interface is ultimately relevant.
+                                                                        The performance implications of this approximation are substantial.
+               (a)                             (b)                      When adaptively approximated using our aggressive coarsening in
+Figure 6: Comparison of (a) a uniform discretization of a subdo-        figure 6, the actual degrees of freedom of the (octree-type) adaptive
+main interior and (b) our adaptive approximation in Section 6.3.        subdomain discretization enumerate in the same order of magnitude
+                                                                        as the interface variables in Γ ∩ Ωi . In practical terms, this adaptive
+due to the fact that the interface is highly structured and admits a
+                                                                        subdomain approximation translates to matrices AiΓ , Aii , AΓi in
+very effective nested bisection for reordering its degrees of free-
+                                                                        Algorithm 2 being replaced by lower dimensionality, adaptive vari-
+dom to maximize sparsity. Second, the right hand side requires
+                                                                        ants A∗iΓ , A∗ii , and A∗Γi . Matrix A∗iΓ will is simply constructed from
+the inverse operator A-1
+                       ii for each subdomain. Again, our approach       AiΓ by removing rows that correspond to interior nodes that have
+would be to use a Cholesky factorization of Aii (with appropriate
+                                                                        been coarsened away (or have become T-junctions); all such rows
+reordering) to solve the inversion problem using forward/backward
+                                                                        would have been full of zeros in AiΓ , since our coarsening scheme
+substitution. Pseudocode for the smoother routine is given below:
+                                                                        preserves the layer of nodes immediately adjacent to the interface at
+                                                                        full resolution (and those are the only interior nodes touched by the
+                                                            (n)
+Algorithm 2 Application of smoother routine. Input: bΓ , xΓ             stencils of interface equations). Likewise for the transposes AΓi ,
+                                                                        A∗Γi of those matrices. Combined, all adapted interior matrices A∗ii
+ 1: for i = 1 . . . k do
+ 2:     Compute yi ← AiΓ xΓ
+                                 (t)
+                                                       . sparse; fast   have O(N 2/3 ) nonzero entries, and we observed that with proper
+                                                                        reordering their Cholesky factors remain clearly sublinear in their
+ 3:     Solve zi ← A-1      y
+                          ii i                          . PARDISO       aggregate size, allowing us to run step 3 of Algorithm 2 (and the en-
+                      (i)
+ 4:     Compute wΓ ← AΓi zi                            . sparse; fast   tire smoother) with asymptotic cost safely below the O(N ) mark.
+ 5: end for
+                               (1)   (k)
+ 6: Compute fΓ = bΓ + wΓ + . . . + wΓ
+            (n+1)                                                       7    Implementation details
+ 7: Solve xΓ        ← A-1
+                       ΓΓ fΓ                            . PARDISO
+                                                                        Construction of adaptive operators We construct the adaptively
+The matrix AΓΓ in step 7 has O(N 2/3 ) nonzero entries, and we          coarsened discretization of section 6.3 based on a Galerkin process.
+observed that with appropriate reordering (using PARDISO) the           Let us consider the example of the finest level of the multigrid hi-
+nonzero entries in the Cholesky factors remain asymptotically well      erarchy. We define an interpolation operator Ph∗ that “prolongates”
+below O(N ). The subdomain matrices Aii , however (step 3) con-         the adaptive degrees of freedom x∗ into their trilinearly interpolated
+tain on the aggregate O(N ) nonzero entries, which will yield a         uniform counterparts x = Ph∗ x∗ (this interpolation is conscious of
+strictly superlinear number of nonzero entries in their Cholesky fac-   any T-junctions). Thus, the adaptive discretization of the Lapla-
+tors, even with excellent reordering. We thus proceed to make one       cian is simply computed as A∗h = (Ph∗ )T Ah Ph∗ . In fact, we never
+last approximation, in the interest of reducing the dimensionality of   explicitly build the uniform matrix Ah , but rewrite this equation as
+these factors, as explained in the following section.                                                  X
+                                                                                                A∗h =       aij pi pTj
+                                                                                                        aij 6=0
+6.3   Adaptive approximation of subdomains
+                                                                        where aij = [Ah ]ij , and pTk denotes the k-th row of Ph∗ . This for-
+Another opportunity for a dimensionality-saving approximation
+                                                                        mulation allows us to construct the adaptive discretization directly
+can be exposed by analyzing the action of the operator AΓi A-1ii AiΓ
+                                                                        (by iterating over the uniform grid, and processing every spoke aij
+on a vector xΓ (as used in equation 8). This matrix-vector multipli-
+                                                                        of any stencil we encounter), without ever building the uniform
+cation can be equivalently interpreted as the following process:
+                                                                        matrix. Since our smoother (Algorithm 2) never needs to use the
+  1. The value xΓ is used as a Dirichlet boundary condition in a        uniform subdomain discretization, we construct the adaptive dis-
+     Laplace problem Aii x̂ii = AiΓ xΓ , that computes a harmonic       cretizations of coarser levels of the hierarchy A∗h , A∗2h , A∗4h , etc.
+     interpolant x̂ii of xΓ in the interior of Ωi (moving Dirichlet     by selective (Galerkin) coarsening of the immediately finer adap-
+     conditions to the right-hand side yields the product AiΓ xΓ ).     tive discretization, rather than coarsening the corresponding uni-
+  2. A global scalar field x̂ is assembled by combining the values      form discretization at that level into an octree.
+     xΓ on the interface, with the harmonic interpolants x̂ii from      Avoiding nullspace issues Global nullspace components (pockets
+     each subdomain.                                                    of fluid with purely Neumann boundary conditions) are handled
+  3. The Laplacian y = Ax̂ of this interpolated result is computed.     at the top-level PCG algorithm via projection, as usual. In our
+     Naturally y will be zero in the interior of each subdomain,        smoother subroutine, we generally have the guarantee that the left-
+     as x̂ was built as a harmonic interpolant in those locations.      hand-side matrix AΓΓ will be positive definite (it is always symmet-
+     Nonzero values will result along the interface, however. It can    ric), if the global matrix A is definite too. However, it is possible for
+     be shown that the restriction yΓ of y on the interface degrees     nullspace components to appear in the coarsened version of this ma-
+     of freedom is exactly what the Schur complement operator           trix A2h      4h
+                                                                                ΓΓ , AΓΓ , as a result of the Galerkin procedure, in the vicinity
+     yΓ = ΣxΓ computes. The contribution of each subdomain              of Neumann domain boundaries. To avoid this, we slightly shift the
+     Ωi to this result is exactly equal to −AΓi x̂ii .                  eigenvalues of every coarsened discretization, say A∗2h by adding a
+minute multiple of the identity. The shifted matrix A∗2h +I is prac-
+tically spectrally equivalent to the original, and fully appropriate as
+a substitute in a multigrid hierarchy. Since we use direct solvers
+to invert AΓΓ in the smoother, conditioning is not an issue. Effec-
+tively, this eigenvalue shift will penalize solution components that
+lie in the nullspace to be effectively equal to zero.
+Boosting accuracy We use a high-order defect correction technique
+[Trottenberg et al. 2001] to allow our approximate inverse of a first-
+order discretization to be used as a CG preconditioner for a higher
+order scheme. We structure our top-level PCG solver to implement
+matrix-vector multiply operations in accordance with a second or-
+der accurate discretization of the Laplace operator [Enright et al.
+2003]. Upon invocation of the preconditioner, however, we per-
+form the following steps: (i) We execute a few iterations of a Jacobi
+smoother, using the 2nd order operator, (ii) we then compute the
+residual, and multiply this with our first-order preconditioner, and
+finally (iii) we again compute the residual r, write the error equa-
+tion Ae = −r using the second order operator, which we solve
+using the same number of Jacobi iterations. We finally add the cor-
+rection back to the result returned by the preconditioner. This oper-                         Subdomain Scalability                         Interface Scalability
+                                                                                     50
+ation, as described, preserves the symmetry and definiteness of the                                                                 5            Serial Code Parallel Code
+preconditioner, and allows the first order method to be used as an                   40
+effective preconditioner for the second-order problem (at the com-                                                                  4
+
+
+
+                                                                          Speed Up
+parably minimal expense of some additional smoothing effort near
+                                                                                                                          Time(s)
+                                                                                     30                                             3
+the high-order interface).
+                                                                                     20                                             2
+Sparse grid storage We use the SPGrid data structure [Setaluri
+et al. 2014] to store grid data, for all our examples which utilized                 10                                             1
+highly irregular, sparsely populated grids. SPGrid partitions a vir-
+                                                                                     0                                              0
+tual background grid into rectangular blocks (83 voxels each, in our                      1    2   4   8   16   32   56                 1    2      4     8     16    20
+examples), and performs streaming operations and stencil applica-                              Number of Threads                              Number of Threads
+tions by iterating over the sparse collection of active blocks. We
+                                                                          Figure 7: (Top) convergence profiles for ICPCG, MCPCG and
+used SPGrid directly on CPU and Xeon Phi while on the GPU (that
+                                                                          DDPCG (our method) from the water simulation of Figure 3. The
+does not offer a virtual memory subsystem as utilized by SPGrid)
+                                                                          numbers (B-I-B) indicate multigrid smoothers that perform B
+we translated this representation into a linearized array with explicit
+                                                                          boundary sweeps, then I interior sweeps, and B more boundary
+pointers to the 26 neighbors of each rectangular block.
+                                                                          sweeps at the end. V-Cycle counts in DDPCG reflect the number of
+                                                                          cycles used in the approximate solution of each subdomain. (Bot-
+8    Incompressible free surface flow                                     tom) Scaling of subdomain solvers (left; on Xeon Phi) and interface
+                                                                          solver (right; on CPU) relative to the active cores/threads utilized.
+We solve the incompressible Euler equations
+                              ∇p                                          9           Examples and performance benchmarks
+          ~     u · ∇)~
+          ut + (~     u+         = f~,           ∇·~
+                                                   u=0
+                              ρ
+                                                                          We demonstrate the effectiveness of our preconditioner through
+using the splitting scheme as described in [Stam 1999]. Here,             several examples. Figure 1 illustrates two smoke simulations with
+~
+u = (u, v, w) is the velocity field vector, ρ is the fluid density,       more than one billion of active degrees of freedom, each. Fig-
+p is the scalar pressure field, and f~ denotes external forces (such as   ure 4 shows a network of interconnected vessels where smoke en-
+gravity). We discretize these equations on a MAC grid, where we           ters from the lower left corner and exists from the upper right cor-
+first explicitly update the advection terms                               ner. Our solver is able to capture the correct incompressible be-
+                                                                          havior in relatively few iterations with four subdomains. Figure 8
+                     u? − ~
+                     ~     un
+                                        u = f~
+                                  u · ∇)~
+                               + (~                                       shows an example where water is poured in a pool with multiple
+                        ∆t                                                immersed objects, creating complex Neumann interfaces. Figure 3
+using a semi-Lagrangian scheme [Selle et al. 2008] and then solve         shows an example where water flows in a channel with multiple in-
+for the pressure via a Poisson equation                                   terior walls, which cause the flow to meander around them. Figure 9
+                                                                          provides a breakdown of individual kernels of our Schur Comple-
+                              ∇p     u?
+                                   ∇·~                                    ment solver for all these examples, along with timings for alter-
+                         ∇·      =
+                              ρ     ∆t                                    native solvers, detailed in the following section. We note that no
+                                                                          vorticity confinement was used in our smoke examples. Finally, in
+in order to update the intermediate velocity as follows
+                                                                          the interest of efficiency we used as high of a CFL number as our
+                      un+1 − ~
+                      ~      u?   ∇p                                      examples could tolerate – sometimes leading to minor loss of detail.
+                                +    =0
+                         ∆t       ρ
+For tracking the free surface, we generally follow [Enright et al.        10              Discussion
+2002] using the level set advection of [Enright et al. 2005], the
+reinitialization scheme of [Losasso et al. 2005], velocity extrapo-       Evaluation of convergence and scaling     In our benchmarks, we
+lation method of [Adalsteinsson and Sethian 1999], and a second           compared the convergence behavior of our Schur-Complement Do-
+order accurate pressure discretization of [Enright et al. 2003].          main Decomposition preconditioned CG (“DDPCG”) with a stan-
+Figure 8: Water poured in a pool with multiple immersed objects. Second figure from the right shows 70M active cells, in a 10242 ×512 grid.
+
+dard Incomplete Cholesky preconditioner (“ICPCG”) [Foster and             ture. The smaller two of our examples (Figures 4, 8) were compact
+Fedkiw 2001], and a standard Multigrid-Preconditioned CG algo-            enough to fit on just a single GPU card, where a single iteration of
+rithm (“MGPCG”) [McAdams et al. 2010]. For the multigrid op-              MGPCG was between 5x-8x times faster than a DDPCG iteration.
+tion, specifically, we note that although we did not experiment with      Thus, in spite of the moderately slower convergence of MGPCG,
+improved CPU-based versions of MGPCG that take extra steps to             its faster per-iteration cost on the homogeneous, single-GPU im-
+better capture the topology of the domain on coarser levels of the        plementation makes it preferable to DDPCG by a factor of 3x-5x.
+multigrid hierarchy [Ferstl et al. 2014], we invested a significant ef-   Incidentally, the geometry of the smoke example in Figure 4 led
+fort to optimize the stock MGPCG to the absolute best of our capac-       to another interesting observation: Although the narrow cylindrical
+ity, both on the CPU as well as on the accelerator cards (using stan-     connectors between the glass spheres allowed for a small interface
+dard domain partitioning practices and CUDA, on the GPU). We              between subdomains used in our solver (and a reduction in CPU
+produced two, heavily optimized MGPCG implementations: One                computation cost), the same geometry traits increased the approxi-
+designed to run exclusively on the CPU, and one designed to run           mation error induced by our adaptive coarsening of the subdomain
+homogeneously on just a single GPU, for problems that are small           interiors, increasing the required iterations for PCG convergence.
+enough to fit entirely in GPU memory. There is only one algorith-
+mic difference between the two implementations: The pure-CPU              The situation is dramatically different for our larger simulation ex-
+MGPCG was set up to solve the coarsest level of the multigrid hi-         amples, which cannot be solved with MGPCG on a single acceler-
+erarchy using ICPCG – this was done to improve the convergence            ator card. For those examples, the only practical alternative was to
+behavior at the bottom of the multigrid cycle, which was crucial in       run MGPCG homogeneously on the CPU. In this context, we ob-
+obtaining acceptable performance at our examples with more than           served that each iteration of our DDPCG method was within 20% of
+a billion degrees of freedom (without requiring an extremely deep,        the cost of a CPU-only MGPCG iteration. However, for the large-
+and occasionally inaccurate V-cycle). The GPU-native implemen-            scale examples, dominated by Neumann boundary conditions, we
+tation of MGPCG used a large number of smoother applications              observed MGPCG requiring up to 5x more iterations for conver-
+at the bottom of the V-cycle (which was effective for its smaller         gence, leading to a 3.5x-4.5x performance benefit of DDPCG ver-
+problem size), to avoid using Incomplete Cholesky on the GPU.             sus the CPU-only MGPCG. We conclude that for small problem
+We benchmarked the pure-CPU MGPCG solver on the faster (dual              sizes, in the order of 100M degrees of freedom or less, a homo-
+socket) of our two test platforms.                                        geneous GPU implementation of MGPCG is the preferred solver,
+                                                                          provided that the problem can fully fit in GPU memory. For prob-
+In all our examples, the ICPCG solver exhibited dramatically              lem sizes that do not fit completely in GPU memory, DDPCG ap-
+slower convergence performance than both MGPCG, and our pro-              pears to be consistently superior to CPU-based MGPCG, with the
+posed DDPCG method, often needing more than an order of magni-            performance gap becoming larger as the resolution increases.
+tude of iterations higher than DDPCG to reach comparable perfor-
+mance. We were unable to use ICPCG for our largest of examples
+with billions of cells, as the footprint of the explicitly constructed    Limitations and future work         The most fundamental limitation
+matrices would cause it to run out of memory. For our smallest ex-        of our proposed method is that, in order for its scaling benefits to
+amples, even each iteration of our heterogeneous DDPCG actually           take effect, it needs to be applied to a problem of adequately large
+required less time than one CPU-based ICPCG iteration. As a con-          size. In designing our (GPU-hosted) multigrid cycle for the solution
+sequence, we did not find ICPCG to be a competitive alternative.          of the subdomain problems, we made a conscious choice to keep the
+                                                                          design of this solver as simple as possible, approximating the do-
+On the other hand, the convergence behavior of MGPCG remained             main at voxel-accuracy at every level, and not enacting any reme-
+competitive in several of our smaller-size examples. We should            dies for topological inconsistencies, such as regions merging or
+point out that the behavior of DDPCG is tunable; investing more V-        small Neumann gaps disappearing after coarsening. This was done
+cycles in the independent subdomain solves, or additional multigrid       in the interest of simplicity, to facilitate low-level optimizations of
+iterations in the interface solve can boost its convergence efficiency.   the solver components. It is quite likely that topology-conscious
+We found MGPCG to be most competitive with our DDPCG tech-                coarsening schemes [Ferstl et al. 2014] could further improve the
+nique in the context of our smaller examples, especially the free-        convergence properties of this component, and the balance between
+surface water simulations. This is attributed to the prominence of        enacting such improvements and retaining opportunities for aggres-
+Dirichlet boundary conditions in those scenarios, which dramati-          sive optimization certainly merits investigation. Finally, one should
+cally improves the efficacy of smoothing boundary regions, which          not discount the software engineering challenges that are still asso-
+is essential for multigrid to behave favorably as a preconditioner        ciated with developing numerical software that is as inherently het-
+[McAdams et al. 2010]. On average, across the various frames              erogeneous as our solver. The established programming paradigms
+of the water simulations (Figures 3,8) MGPCG would converge               that are available for homogeneous thread-based parallel develop-
+in no more than 1.5x-3x the number of iterations required by our          ment (e.g. OpenMP) are arguably much more accessible to the non-
+tuned DDPCG, while in the smoke simulation of Figure 4, MGPCG             expert developer. Given the precedent of CUDA, and the growing
+required approximately 2x-2.5x more iterations than DDPCG. In             presence of heterogeneity in modern systems, we hope that pro-
+terms of run time, however, the findings paint a quite different pic-     gramming abstractions for these platforms will continue to evolve.
+The scope of our work was specifically restricted to the design         BAILEY, D., B IDDLE , H., AVRAMOUSSIS , N., AND WARNER , M.
+and optimization of the pressure Poisson solver on a heterogeneous        2015. Distributing liquids using OpenVDB. In ACM SIGGRAPH
+computer. We also specifically targeted fluid simulation on uni-          2015 Talks, SIGGRAPH ’15.
+form grids in the development of our solver. Although extending
+the concepts of our solver to an adaptive discretization is certainly   B ENDER , J., AND KOSCHIER , D. 2015. Divergence-free smoothed
+possible from an algebraic perspective, we feel that a careful in-         particle hydrodynamics. SCA ’15, 147–155.
+vestigation is warranted to make sure that the complexity of work
+                                                                        B RO - NIELSEN , M., AND C OTIN , S. 1996. Real-time volumetric
+that needs to happen on the interface region remains comparatively
+                                                                           deformable models for surgery simulation using finite elements
+lower. This aspect, as well as practices for efficient dynamic parti-
+                                                                           and condensation. In Computer Graphics Forum, 57–66.
+tioning of temporally changing adaptive grids would be an exciting
+topic for continued investigation.                                      C HEN , Z., K IM , B., I TO , D., AND WANG , H. 2015. Wetbrush:
+                                                                           Gpu-based 3d painting simulation at the bristle level. ACM
+A very interesting venue for future work might focus on extend-
+                                                                           Trans. Graph. 34, 6, 200:1–200:11.
+ing our technique to deeper hierarchies of heterogeneous plat-
+forms, using for example clusters of network-interconnected GPU-        C HENTANEZ , N., AND M ÜLLER , M. 2011. Real-time Eulerian
+accelerated nodes. The same way that we used a multigrid cycle             water simulation using a restricted tall cell grid. SIGGRAPH
+to approximate a subdomain solver, one could envision using our            ’11, 82:1–82:10.
+entire preconditioner as the approximate solver for a subdomain as-
+signed to each cluster node, which is internally subdivided to use      C HENTANEZ , N., F ELDMAN , B. E., L ABELLE , F., O’B RIEN ,
+GPU accelerations as we currently do. Although bandwidths of               J. F., AND S HEWCHUK , J. R. 2007. Liquid simulation on
+network interconnects would be even slower than that of PCIe, due          lattice-based tetrahedral meshes. SCA ’07, 219–228.
+to economy of scale the relevant asymptotics (relative size of in-
+terfaces vs. entire grid) could remain favorable. Finally, emerging     C OHEN , J., TARIQ , S., AND G REEN , S. 2010. Interactive fluid-
+GPU architectures and technologies (stacked memory, integration            particle simulation using translating Eulerian grids. In ACM SIG-
+of CPU and GPU) might facilitate programming in a homogeneous              GRAPH Symp. on Interactive 3D Graphics and Games, 15–22.
+model (using capabilities such as unified memory spaces), but non-      DA , F., BATTY, C., W OJTAN , C., AND G RINSPUN , E. 2015. Dou-
+homogeneity in memory bandwidth is almost certain to persist in           ble bubbles sans toil and trouble: Discrete circulation-preserving
+some form (cores having significantly higher bandwidth to their           vortex sheets for soap films and foams. ACM Trans. Graph. 34,
+“local” region of memory). We feel that the adaptation of solver          4, 149:1–149:9.
+concepts to such architectural traits is an exciting research thread.
+                                                                        DE G OES , F., WALLEZ , C., H UANG , J., PAVLOV, D., AND D ES -
+                                                                          BRUN , M. 2015. Power particles: An incompressible fluid solver
+Acknowledgments
+                                                                          based on power diagrams. ACM Trans. Graph. 34, 4, 50:1–
+                                                                          50:11.
+The authors are grateful to Mark Hill, David Wood and Michael
+Swift for many insightful early discussions, and Tim Czerwonka for      D ICK , C., G EORGII , J., AND W ESTERMANN , R. 2011. A real-
+systems setup and support. This work was supported in part by NSF          time multigrid finite hexahedra method for elasticity simulation
+grants IIS-1253598, CCF-1533885, CCF-1423064, IIS-1407282.                 using CUDA. Simulation Modelling Practice and Theory 19, 2,
+The bronchi model was sourced via sketchfab.com (published by              801 – 816.
+user thuntu and distributed under the Creative Commons license).
+                                                                        D ICK , C., ROGOWSKY, M., AND W ESTERMANN , R. 2016. Solv-
+                                                                           ing the fluid pressure poisson equation using multigrid – evalua-
+References                                                                 tion and improvements. IEEE Trans. Visualization & Computer
+                                                                           Graphics (to appear).
+A DALSTEINSSON , D., AND S ETHIAN , J. 1999. The fast con-
+   struction of extension velocities in level set methods. Journal of   D OBASHI , Y., M ATSUDA , Y., YAMAMOTO , T., AND N ISHITA , T.
+   Computational Physics 148, 1, 2 – 22.                                   2008. A fast simulation method using overlapping grids for in-
+                                                                           teractions between smoke and rigid objects. Computer Graphics
+A DAMS , B., PAULY, M., K EISER , R., AND G UIBAS , L. J. 2007.            Forum 27, 2, 477–486.
+   Adaptively sampled particle fluids. In ACM SIGGRAPH 2007
+   Papers, ACM, New York, NY, USA, SIGGRAPH ’07.                        E DWARDS , E., AND B RIDSON , R. 2015. The discretely-
+                                                                           discontinuous Galerkin coarse grid for domain decomposition.
+A MENT, M., K NITTEL , G., W EISKOPF, D., AND S TRASSER , W.               CoRR abs/1504.00907.
+  2010. A parallel preconditioned conjugate gradient solver for
+  the poisson problem on a multi-gpu platform. In Proceedings           E NGLISH , R. E., Q IU , L., Y U , Y., AND F EDKIW, R. 2013.
+  of the 18th Euromicro Conference on Parallel, Distributed and            Chimera grids for water simulation. SCA ’13, 85–94.
+  Network-based Processing, 583–592.
+                                                                        E NRIGHT, D., M ARSCHNER , S., AND F EDKIW, R. 2002. Ani-
+A NDO , R., T H ÜREY, N., AND W OJTAN , C. 2013. Highly adaptive          mation and rendering of complex water surfaces. ACM Trans.
+   liquid simulations on tetrahedral meshes. ACM Trans. Graph.             Graph. 21, 3, 736–744.
+   32, 4 (July), 103:1–103:10.
+                                                                        E NRIGHT, D., N GUYEN , D., G IBOU , F., AND F EDKIW, R. 2003.
+A NDO , R., T HUEREY, N., AND W OJTAN , C. 2015. A stream                  Using the particle level set method and a second order accurate
+   function solver for liquid simulations. ACM Trans. Graph. 34, 4,        pressure boundary condition for free surface flows. In Proc. 4th
+   53:1–53:9.                                                              ASME-JSME Joint Fluids Eng. Conf.
+A NDO , R., T H ÜREY, N., AND W OJTAN , C. 2015. A dimension-          E NRIGHT, D., L OSASSO , F., AND F EDKIW, R. 2005. A fast
+   reduced pressure solver for liquid simulations. EUROGRAPH-              and accurate semi-Lagrangian particle level set method. Com-
+   ICS 2015.                                                               put. Struct. 83, 6-7, 479–490.
+                                                                                                                      Smoke            Smoke
+                                            Water (Fig. 3)          Water (Fig. 9)           Smoke (Fig. 4)        (Fig. 1; right)   (Fig. 1; left)
+                                          Active DOFs: 114M       Active DOFs: 70M         Active DOFs: 42M         1.2G DOFs        1.8G DOFs
+                                           GPU            Phi     GPU             Phi       GPU           Phi          GPU                Phi
+     Number of subdomains                           16                     16                        4                   16               40
+     Subdomain resolution                  128 x 128 x 768         128 x 128 x 768          512 x 512 x 512       512 x 512 x 512 1536 x 1536 x 1920
+     DDPCG total solve time               51.894         44.532   61.446         42.882    38.472        25.704      1790.11           4247.98
+     DDPCG iteration cost                  5.766         4.948    4.389          3.063      1.603        1.071        100.49           193.09
+     Preconditioner Application            4.291         4.314    3.657          2.769      0.999        0.843       88.9341            183.9
+         Subdomain Solve (3 V-cycles)      1.362         1.249    1.046          0.865      0.457        0.351       26.4284           152.79
+              Each MG V-cycle              0.378         0.311    0.311          0.218      0.115        0.079         2.68             21.83
+              Data transfer from/to CPU    0.158         0.309    0.084          0.169      0.103        0.105        7.6252           16.002
+         Interface Solve (1 V-cycle)       1.392         1.539    1.214          1.096      0.029        0.032        33.042           14.3918
+              Smoothing (Top-Level)        0.413         0.349    0.314          0.215      0.006        0.003         7.864            3.741
+              Restriction/Prolongation     0.008         0.012    0.008          0.007     0.00013       0.0002        0.145            0.094
+     ICPCG iteration cost (CPU only)                      4.16                    2.82                    1.32          N/A              N/A
+     MGPCG iteration cost (GPU only)       0.424                  0.316                    0.1736                       N/A              N/A
+     MGPCG solve time (GPU only)          10.1838                 17.679                    7.983                       N/A              N/A
+     MGPCG iteration cost (CPU only)                      5.55                   3.135                   4.489         67.28            175.4
+     MGPCG solve time (CPU only)                         127.65                 153.5933                 218.64     3902.8062           16742
+
+Figure 9: Timing information for four examples. All run times cited are in seconds. Our “GPU” platform is an Intel Xeon E5-1650v3 CPU
+equipped with two NVidia GTX Titan X GPUs and 128GB RAM, while our “Phi” platform is an Intel Xeon E5-2650v3 CPU equipped with
+six Intel Xeon Phi 31S1P cards. The row labeled Preconditioner Application reflects the preconditioning cost for a single PCG iteration.
+
+F ERSTL , F., W ESTERMANN , R., AND D ICK , C. 2014. Large-scale                 I RVING , G., G UENDELMAN , E., L OSASSO , F., AND F EDKIW, R.
+   liquid simulation on adaptive hexahedral grids. IEEE Trans. Vi-                  2006. Efficient simulation of large bodies of water by coupling
+   sualization & Computer Graphics 20, 10 (Oct), 1405–1417.                         two and three dimensional techniques. SIGGRAPH ’06, 805–
+                                                                                    811.
+F OSTER , N., AND F EDKIW, R. 2001. Practical animation of liq-
+   uids. In Proc. of ACM SIGGRAPH 2001, 23–30.                                   J IANG , C., S CHROEDER , C., S ELLE , A., T ERAN , J., AND S TOM -
+                                                                                     AKHIN , A. 2015. The affine particle-in-cell method. ACM Trans.
+F OSTER , N., AND M ETAXAS , D. 1996. Realistic animation of                         Graph. 34, 4, 51:1–51:10.
+   liquids. Graph. Models Image Process. 58, 5, 471–483.
+                                                                                 J UNG , H.-R., K IM , S.-T., N OH , J., AND H ONG , J.-M. 2013. A
+F ROEMLING , E., G OKTEKIN , T., AND P EACHEY, D. 2007. Sim-                        heterogeneous CPU-GPU parallel approach to a multigrid pois-
+   ulating whitewater rapids in Ratatouille. In ACM SIGGRAPH                        son solver for incompressible fluid simulation. Computer Ani-
+   2007 Sketches, SIGGRAPH ’07.                                                     mation and Virtual Worlds 24, 3-4, 185–193.
+G AO , M., M ITCHELL , N., AND S IFAKIS , E. 2014. Steklov-
+                                                                                 K LINGNER , B., F ELDMAN , B., C HENTANEZ , N., AND O’B RIEN ,
+   poincaré skinning. SCA ’14, 139–148.
+                                                                                    J. 2006. Fluid animation with dynamic meshes. SIGGRAPH
+G EIGER , W., L EO , M., R ASMUSSEN , N., L OSASSO , F., AND                        ’06, 820–825.
+   F EDKIW, R. 2006. So real it’ll make you wet. In ACM SIG-
+   GRAPH 2006 Sketches, SIGGRAPH ’06.                                            L ADICK Ý , L., J EONG , S., S OLENTHALER , B., P OLLEFEYS , M.,
+                                                                                    AND G ROSS , M. 2015. Data-driven fluid simulations using
+G OLAS , A., NARAIN , R., S EWALL , J., K RAJCEVSKI , P., D UBEY,                   regression forests. ACM Trans. Graph. 34, 6, 199:1–199:9.
+   P., AND L IN , M. 2012. Large-scale fluid simulation using
+   velocity-vorticity domain decomposition. ACM Trans. Graph.                    L ENTINE , M., Z HENG , W., AND F EDKIW, R. 2010. A novel
+   31, 6, 148:1–148:9.                                                              algorithm for incompressible flow using only a coarse grid pro-
+                                                                                    jection. ACM Trans. Graph. 29, 4, 114:1–114:9.
+H ECHT, F., L EE , Y. J., S HEWCHUK , J. R., AND O’B RIEN , J. F.
+   2012. Updated sparse cholesky factors for corotational elastody-              L IU , B., M ASON , G., H ODGSON , J., T ONG , Y., AND D ESBRUN ,
+   namics. ACM Trans. Graph. 31, 5, 123:1–123:13.                                   M. 2015. Model-reduced variational fluid simulation. ACM
+                                                                                    Trans. Graph. 34, 6, 244:1–244:12.
+H ORVATH , C., AND G EIGER , W. 2009. Directable, high-resolution
+   simulation of fire on the gpu. In ACM SIGGRAPH 2009 Papers,                   L ONG , B., AND R EINHARD , E. 2009. Real-time fluid simulation
+   ACM, New York, NY, USA, SIGGRAPH ’09, 41:1–41:8.                                 using discrete sine/cosine transforms. In Proceedings of the 2009
+                                                                                    Symposium on Interactive 3D Graphics and Games, I3D ’09,
+H OUSTON , B., N IELSEN , M. B., BATTY, C., N ILSSON , O., AND                      99–106.
+   M USETH , K. 2006. Hierarchical RLE level set: A compact and
+   versatile deformable surface representation. ACM Trans. Graph.                L OSASSO , F., G IBOU , F., AND F EDKIW, R. 2004. Simulating
+   25, 1, 151–175.                                                                  water and smoke with an octree data structure. SIGGRAPH ’04,
+                                                                                    457–462.
+I HMSEN , M., C ORNELIS , J., S OLENTHALER , B., H ORVATH , C.,
+   AND T ESCHNER , M. 2014. Implicit incompressible SPH. IEEE                    L OSASSO , F., F EDKIW, R., AND O SHER , S. 2005. Spatially adap-
+   Transactions on Visualization and Computer Graphics 20, 3,                       tive techniques for level set methods and incompressible flow.
+   426–435.                                                                         Computers and Fluids 35, 2006.
+L OSASSO , F., TALTON , J., K WATRA , N., AND F EDKIW, R. 2008.        VAN O PSTAL , B., JANIN , L., M USETH , K., AND A LD ÉN , M.
+   Two-way coupled SPH and particle level set fluid simulation.          2014. Large scale simulation and surfacing of water and ice ef-
+   IEEE Transactions on Visualization and Computer Graphics 14,          fects in Dragons 2. In ACM SIGGRAPH 2014 Talks, SIGGRAPH
+   4, 797–804.                                                           ’14.
+M ACKLIN , M., AND M ÜLLER , M. 2013. Position based fluids.          W OJTAN , C., T H ÜREY, N., G ROSS , M., AND T URK , G. 2010.
+  ACM Trans. Graph. 32, 4, 104:1–104:12.                                 Physics-inspired topology changes for thin fluid features. ACM
+                                                                         Trans. Graph. 29, 4, 1–8.
+M ACKLIN , M., M ÜLLER , M., C HENTANEZ , N., AND K IM , T.-Y.
+  2014. Unified particle physics for real-time applications. ACM       W U , X., M UKHERJEE , R., AND WANG , H. 2015. A unified ap-
+  Trans. Graph. 33, 4, 153:1–153:12.                                     proach for subspace simulation of deformable bodies in multiple
+                                                                         domains. ACM Trans. Graph. 34, 6, 241:1–241:9.
+M C A DAMS , A., S IFAKIS , E., AND T ERAN , J. 2010. A paral-
+  lel multigrid poisson solver for fluids simulation on large grids.   W U , J., D ICK , C., AND W ESTERMANN , R. 2016. A system for
+  SCA ’10, 65–74.                                                        high-resolution topology optimization. IEEE Transactions on
+                                                                         Visualization and Computer Graphics 22, 3, 1195–1208.
+M OLEMAKER , J., C OHEN , J. M., PATEL , S., AND N OH , J.
+                                                                       Z HANG , X., AND B RIDSON , R. 2014. A PPPM fast summation
+  2008. Low viscosity flow simulations for animation. In Proceed-
+                                                                          method for fluids and beyond. ACM Trans. Graph. 33, 6, 206:1–
+  ings of the 2008 ACM SIGGRAPH/Eurographics Symposium on
+                                                                          206:11.
+  Computer Animation, Eurographics Association, Aire-la-Ville,
+  Switzerland, SCA ’08, 9–18.                                          Z HU , Y., AND B RIDSON , R. 2005. Animating sand as a fluid.
+                                                                          SIGGRAPH ’05, 965–972.
+M USETH , K. 2013. VDB: High-resolution sparse volumes with
+  dynamic topology. ACM Trans. Graph. 32, 3 (July), 27:1–27:22.        Z HU , B., YANG , X., AND FAN , Y. 2010. Creating and Preserving
+                                                                          Vortical Details in SPH Fluid. Computer Graphics Forum.
+Q UARTERONI , A., AND VALLI , A. 1999. Domain decomposition
+   methods for partial differential equations, vol. 10. Clarendon      Z HU , B., L U , W., C ONG , M., K IM , B., AND F EDKIW, R. 2013.
+   Press.                                                                 A new grid structure for domain extension. ACM Trans. Graph.
+                                                                          32, 4, 63:1–63:12.
+R ASMUSSEN , N., N GUYEN , D. Q., G EIGER , W., AND F EDKIW,
+   R. 2003. Smoke simulation for large scale phenomena. ACM            Z HU , B., Q UIGLEY, E., C ONG , M., S OLOMON , J., AND F EDKIW,
+   Trans. Graph. 22, 3, 703–707.                                          R. 2014. Codimensional surface tension flow on simplicial com-
+                                                                          plexes. ACM Trans. Graph. 33, 4, 111:1–111:11.
+R AVEENDRAN , K., W OJTAN , C., AND T URK , G. 2011. Hybrid
+   smoothed particle hydrodynamics. SCA ’11, 33–42.                    A    Appendix: Proof of smoother convergence
+R AVEENDRAN , K., T HUEREY, N., W OJTAN , C., AND T URK , G.
+   2012. Controlling liquids using meshes. SCA ’12, 255–264.           Consider the fixed-point iteration
+                                                                                        (n+1)                          (n)
+                                                                                              = bΓ + ki=1 AΓi A-1
+                                                                                                        P
+S ELLE , A., F EDKIW, R., K IM , B., L IU , Y., AND ROSSIGNAC , J.                AΓΓ xΓ                       ii AiΓ xΓ
+                                                                                                                                              (9)
+   2008. An unconditionally stable MacCormack method. J. Sci.                             ⇒ S1 xΓ
+                                                                                                     (n+1)               (n)
+                                                                                                             = b Γ + S 2 xΓ
+   Comput. 35, 2-3 (June), 350–371.
+                                                                       where S1 = AΓΓ and S2 = ki=1 AΓi A-1
+                                                                                                     P
+S ETALURI , R., A ANJANEYA , M., BAUER , S., AND S IFAKIS , E.                                                     ii AiΓ . Let x? be the exact
+
+   2014. SPGrid: A sparse paged grid structure applied to adaptive     solution of this iterative scheme, i.e., x? satisfies the equation
+   smoke simulation. ACM Trans. Graph. 33, 6, 205:1–205:12.                                    S 1 x? = b Γ + S 2 x?                         (10)
+S MITH , B. F., B JØRSTAD , P. E., AND G ROPP, W. D. 1996. Do-         Subtracting equation (10) from equation (9) gives
+   main Decomposition: Parallel Multilevel Methods for Elliptic
+   Partial Differential Equations. Cambridge University Press.                    S1 e(n+1) = S2 e(n) ⇒ e(n+1) = S1-1 S2 e(n)
+S OLENTHALER , B., AND G ROSS , M. 2011. Two-scale particle                             (n)
+                                                                       where e(n) = xΓ −x? is the error in the n-th iteration. In order to
+   simulation. SIGGRAPH ’11, 81:1–81:8.                                show convergence of the iterative scheme in equation (9), we need
+                                                                       to show that the spectral radius of S1-1 S2 is less than 1. Now,
+S TAM , J. 1999. Stable fluids. SIGGRAPH ’99, 121–128.
+                                                                                         Σ = S1 − S2 ⇒ S1 = Σ + S2
+S TAM , J. 2002. A simple fluid solver based on the FFT. J. Graph.
+   Tools 6, 2, 43–52.                                                                                                              1/2
+                                                                       Since S2 is symmetric and positive definite (SPD), S2 is well-
+                                                                                                                            1/2      1/2
+TAN , J., YANG , X., Z HAO , X., AND YANG , Z. 2008. Fluid ani-        defined. Noting that the two matrices S1-1 S2 and S2 S1-1 S2 are
+                                                                                                                1/2
+  mation with multi-layer grids. In SCA ’08 Posters.                   related by a similarity transform (via S2 ), it follows that
+                                                                                                              h                  i
+T ENG , Y., M EYER , M., D E ROSE , T., AND K IM , T. 2015. Sub-                           1/2      1/2           -1/2
+                                                                         ρ(S1-1 S2 ) = ρ(S2 S1-1 S2 ) = ρ (S2 S1 S2 )-1
+                                                                                                                          -1/2
+   space condensation: Full space adaptivity for subspace deforma-              h                          i      h                      i
+                                                                                     -1/2            -1/2                 -1/2    -1/2
+   tions. ACM Trans. Graph. 34, 4, 76:1–76:9.                               = ρ (S2 (Σ + S2 )S2 )-1 = ρ (I + S2 ΣS2 )-1
+T H ÜREY, N., W OJTAN , C., G ROSS , M., AND T URK , G. 2010. A           =           1           =        1           
+                                                                                       -1/2   -1/2             -1/2   -1/2
+                                                                               λmin I+S2    ΣS2        1+λmin S2    ΣS2
+   multiscale approach to mesh-based surface tension flows. ACM
+   Trans. Graph. 29, 4, 48:1–48:10.                                                           -1/2                              -1/2     -1/2
+                                                                       Since Σ is SPD
+                                                                                     and S2         issymmetric, the matrix S2       ΣS2      is
+T ROTTENBERG , U., O OSTERLEE , C. W., AND S CHULLER , A.              SPD, so λmin
+                                                                                        -1/2
+                                                                                       S2 ΣS2
+                                                                                             -1/2
+                                                                                                         > 0. Thus, ρ(S1-1 S2 ) < 1.
+   2001. Multigrid. Academic Press.
+

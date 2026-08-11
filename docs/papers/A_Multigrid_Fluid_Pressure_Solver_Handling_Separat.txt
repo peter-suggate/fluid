@@ -1,0 +1,450 @@
+Eurographics/ ACM SIGGRAPH Symposium on Computer Animation (2011)
+A. Bargteil and M. van de Panne (Editors)
+
+
+
+
+                       A Multigrid Fluid Pressure Solver
+                 Handling Separating Solid Boundary Conditions
+
+                                            Nuttapong Chentanez and Matthias Müller
+
+                                                      NVIDIA PhysX Research
+
+
+
+
+        Abstract
+
+        We present a multigrid method for solving the linear complementarity problem (LCP) resulting from discretizing
+        the Poisson equation subject to separating solid boundary conditions in an Eulerian liquid simulation’s pressure
+        projection step. The method requires only a few small changes to a multigrid solver for linear systems. Our
+        generalized solver is fast enough to handle 3D liquid simulations with separating boundary conditions in practical
+        domain sizes. Previous methods could only handle relatively small 2D domains in reasonable time because they
+        used expensive quadratic programming (QP) solvers. We demonstrate our technique in several practical scenarios
+        in which the omission of separating boundary conditions results in disturbing artifacts of liquid sticking to walls.
+        d
+        Categories and Subject Descriptors (according to ACM CCS): Computer Graphics [I.3.5]: Computational Geometry
+        and Object Modeling, Physically Based Modeling—Computer Graphics [I.3.7]: Three-Dimensional Graphics and
+        Realism, Animation—Simulation and Modeling [I.6.8]: Type of Simulation, Animation—
+        Keywords: natural phenomena, physically based animation, multigrid
+
+
+
+
+1. Introduction                                                      locity to be greater than or equal to zero instead of zero only,
+                                                                     at the solid boundary as described in [BBB07]. In this paper
+For many years grid based liquid simulation has been suc-            we use the terms sticky (solid) boundary conditions and sep-
+cessfully used in the computer graphics community to gen-            arating (solid) boundary conditions for the enforcement of
+erate visual effects. One of the artifacts that researchers and      the normal velocity to be exactly zero and greater than or
+practitioners encounter is that of liquid artificially crawling      equal to zero at the solid boundary, respectively. The main
+on walls and sticking to the ceiling [BBB07]. This liquid            reason that researchers in computer graphics have tolerated
+behavior is caused by the fact that standard linear solvers re-      the artifacts associated with sticky boundary conditions is
+strict the normal velocity of the liquid at the solid boundary       that the introduction of inequality constraints turns the lin-
+to be zero. More precisely, in what follows we abbreviate            ear system of the discretized Poisson equation into a Linear
+with the term normal velocity the component of the relative          Complementarity Problem (LCP) which is much more ex-
+liquid velocity in the direction normal to the solid surface         pensive to solve.
+away from the solid at the solid boundary. In nature, the
+phenomenon of liquids having zero normal velocity at solid           The only paper we found in the computer graphics literature
+boundaries is indeed observed in which case they form a thin         that addresses this problem is Batty et al. [BBB07]. They
+film on walls and ceilings. However, in grid based simula-           use a PATH solver [FM98] which is based on Quadratic Pro-
+tions, the thickness of the region influenced by the zero nor-       gramming (QP). The computational complexity of the PATH
+mal velocity at boundaries is of the order of the grid spacing.      solver, however, limits the problem size to be only a small
+This yields visual artifacts because the grid spacing used in        2D domain. We propose to solve the LCP with a multigrid
+practical scenarios is usually much larger than the thickness        method, which allows the simulation of substantially larger
+of the thin liquid film found in nature.                             problem sizes in 3D.
+
+A more accurate boundary condition restricts the normal ve-          In summary, the main contributions of this work are:
+
+c The Eurographics Association 2011.
+       Nuttapong Chentanez & Matthias Müller / A Multigrid Fluid Pressure Solver Handling Separating Solid Boundary Conditions
+
+
+
+
+Figure 1: Left: Initial condition of water in a sphere. Middle: With standard solid boundary conditions, the liquid tends to
+unnaturally stick to the spherical boundary. Right: Considering separating boundary conditions lets the liquid to peel off the
+boundary easily.
+
+1. A multigrid method for solving the Poisson equation               LCP which they solve with an efficient Conjugate Gradient-
+   resulting from the variational framework introduced in            like QP solver presented in [DS05]. Our work attempts to
+   [BBB07] and [BB08].                                               solve the LCP of Batty et al. [BBB07] more quickly using a
+                                                                     modified multigrid solver.
+2. A modification to allow the solution of the LCP result-
+   ing from enforcing separating solid boundary conditions,          The multigrid method [McC87] has been used in various
+   which previously required an expensive QP solver.                 fields in computer graphics. Shi et al. [SYBF06] solved the
+                                                                     Poisson equation for a deformation field with a multigrid
+                                                                     approach to simulate deformable objects. Other examples
+2. Related Work
+                                                                     in solid simulation are Zhu et al. [ZSTB10] who solved
+Foster and Metaxas [FM96] were the first in computer                 the elasticity equations with a multigrid solver and Müller
+graphics to simulate fluids by solving the Navier-Stokes             [Mue08] who introduced hierarchical position based dynam-
+equations on a staggered grid [HW65]. They voxelized the             ics.
+solids and enforced the proper boundary conditions between
+fluid and solid cells. Later, Foster and Fedkiw [FF01] sim-          In fluid simulation, Chentanez et al. [CFL∗ 07] used the al-
+ulated liquids by tracking the surface with the Level Set            gebraic multigrid method to solve for the pressure field on a
+method. Numerical errors were reduced by the introduction            tetrahedral mesh. Molemaker et al. [MCPN08] handled ob-
+of Lagrangian particles. They handled solid coupling by ex-          stacles with a multigrid solver using velocity projection. To
+plicitly setting normal velocities to zero at solid boundaries       speed up the pressure solver Lentine et al. [LZF10] proposed
+and modified the pressure solver to not change these veloc-          a simplified multigrid approach. They execute pressure pro-
+ities. The method for handling solid boundaries was further          jection on a coarse grid and multiple independent fine grids.
+improved by Houston et al. [HBW03]. They proposed to                 Aleka et al. [MST10] used a multigrid solver as a Conju-
+constrain the velocity extrapolated into the solid. Ramussen         gate Gradient preconditioner. More recently, Chentanez and
+et al. [REN∗ 04] extended this method to properly handle the         Müller [CM11] showed how to use the multigrid method di-
+Level Set advection step. These methods work well when               rectly for free-surface liquid simulations. It is their method
+solid boundaries have the restriction that they are aligned          that we extend in this paper to handle separating solid bound-
+with the grid faces. However, they fail in more general cases,       ary conditions.
+e.g. in the scenario of a liquid settling in a non-axis aligned
+container. The reason is that the pressure solver only "sees"
+the voxelized solid and therefore, cannot cancel out the grav-       3. Methods
+ity force modified by these approaches. Batty et al. [BBB07]         We simulate liquids by solving the inviscid Euler Equations,
+introduced a variational framework to properly handle solid-
+fluid coupling. They considered separating solid boundary                            ∂u              f ∇p
+                                                                                        = −(u · ∇)u + −                                 (1)
+conditions with the result that liquids correctly peel off solid                     ∂t              ρ  ρ
+walls in their simulations but at the price of requiring an ex-      with Dirichlet and Neumann boundary conditions, subject to
+pensive LCP solver. Narain et al. [NGL10] simulated gran-            the incompressibility constraint
+ular materials using an Eulerian grid. Their formulation of
+the pressure equation inside the material also results in an                                   ∇ · u = 0,                               (2)
+
+                                                                                                         c The Eurographics Association 2011.
+        Nuttapong Chentanez & Matthias Müller / A Multigrid Fluid Pressure Solver Handling Separating Solid Boundary Conditions
+
+where u is the fluid velocity field, p the pressure, t time,                       The other terms d y (u)i, j,k and d z (u)i, j,k are defined simi-
+ρ the fluid density and f the external forces. We solve these                      larly. This formulation incorporates the ghost fluid method
+equations in the region where the Level Set φ is non-positive.                     [EF02] to enforce p = 0 at the liquid surface instead of the
+φ is evolved by                                                                    cell center and the variational framework of [BBB07] to
+                                                                                   achieve sub-grid accuracy. φ must be extrapolated to solid
+                             ∂φ
+                                = −u · ∇φ.                                  (3)    cells that are one cell away from liquid cells so that they
+                             ∂t
+                                                                                   are included as unknowns in the linear system. Moreover,
+We discretize the simulation domain using a regular stag-                          the solid velocity us also needs to be extrapolated to nearby
+gered grid and the variational framework presented in                              liquid faces.
+[BBB07] and [BB08] to allow for curved solid boundaries.
+The x, y and z components of fluid velocity u = (u, v, w)                          The system is then subjected to the separating complemen-
+are stored at the center of the faces perpendicular to the                         tarity condition
+x, y and z axis respectively. The scalar pressure p and the                                                  0 ≤ p ⊥ (u − vsolid ) · n̂ ≥ 0.                                            (11)
+Level Set function φ are stored at the cell center. We use
+us = (us , vs , ws ) for the solid velocity and Vi, j,k for the frac-
+                                                                                   This condition states that either both p ≥ 0 and (u − vsolid ) ·
+tion of non-solid matter, i.e. fluid and air in cell (i, j, k). The
+                                                                                   n̂ = 0 are true or both p = 0 and (u − vsolid ) · n̂ ≥ 0 are
+scalars Vi+ 1 , j,k , Vi, j+ 1 ,k , and Vi, j,k+ 1 represent the fraction
+             2               2                   2                                 true. After p is determined it is used to make u divergence
+of non-solid matter in the overlapping cells along the x, y and                    free. Since the variational approach [BBB07] satisfies the
+z axes respectively. While we follow Batty et al. [BBB07]                          KarushŰKuhnŰTucker (KKT) conditions, we only need to
+for time integration, we deviate from their approach by us-                        ensure p >= 0 to satisfy the complementariy conditions.
+ing our novel multigrid method for pressure projection.                            In [BBB07], a PATH solver [FM98] based on Quadratic
+                                                                                   Programming (QP) is used to solve this problem at a high
+                                                                                   computational cost which limits the method to be applied to
+3.1. Enforcing Incompressibility
+                                                                                   small 2D domains only.
+We denote the velocity field before enforcing the divergence
+                                                                                   We propose to solve the system efficiently with a novel
+free condition as u∗ . Following the variational framework
+                                                                                   multigrid method. To show why a multigrid approach is
+in [BBB07], the pressure p that enforces the divergence free
+                                                                                   well suited for solving the linear complementarity problem
+constraint can be found by minimizing the kinematic energy
+                                                                                   above, let us first write (4) in general matrix form without
+integrated over the liquid domain. We discretize the integra-
+                                                                                   the complementarity condition. For each cell we have
+tion and set the derivative of the energy to zero, which yields
+a linear system of p                                                                 i, j,k                 i+1, j,k                         i−1, j,k
+                                                                                   Ai, j,k pi, j,k + Ai, j,k             pi+1, j,k + Ai, j,k
+                                                                                                                            pi−1, j,k + . . . = bi, j,k ,
+                                            ∗
+                       L(p)i, j,k = D(u )i, j,k                             (4)                                                                  (12)
+                                                                                   where the Ai, j,k ’s are the matrix coefficients involving cell
+for all cells where φi+1,y,k < 0. The left hand side term                          (i, j, k). Solving for the unknown pressure at this cell yields
+L(p)i, j,k is composed of the six components                                                      1                        i+1, j,k                    i+1, j,k
+                                                                                    pi, j,k =     i, j,k
+                                                                                                           (bi, j,k − Ai, j,k         pi+1, j,k − Ai, j,k         pi+1, j,k − . . .). (13)
+     li+, j,k + li−, j,k + li, j+,k + li, j−,k + li, j,k+ + li, j,k− ,      (5)                 Ai, j,k
+
+                                                                                    Such a linear system can be solved efficiently by global
+where
+                                                                                   methods like PCG. However, considering the complemen-
+               li+, j,k = Vi+ 1 , j,k (pi, j,k − pi+, j,k ).                (6)    tarity condition (11) turns the simple equation (13) in each
+                                2                                                  boundary cell into
+The pressure values are                                                                                       1                       i+1, j,k                    i+1, j,k
+                                                                                   pi, j,k = max(0,           i, j,k
+                                                                                                                       (bi, j,k −Ai, j,k         pi+1, j,k −Ai, j,k          pi+1, j,k −. . .)).
+                                                                                                           Ai, j,k
+                    (        φ
+                      pi, j,k φi+1,y,k       if φi+1,y,k ≥ 0
+         pi+, j,k =             i, j,k
+                                                                            (7)                                                                                                          (14)
+                      pi+1, j,k              otherwise.                              While the max operator prevents the system from being
+The values li−, j,k , li, j+,k , li, j−,k , li, j,k+ and li, j,k− are defined      solved by PCG, it can easily be solved with a Projected
+similarly.                                                                         Gauss-Seidel method by applying (14) iteratively. However,
+                                                                                   projected Gauss-Seidel converges much more slowly than
+The right hand side is                                                             global methods. Fortunately, there is a way to speed it up by
+                                                                                   using it as the building block of a multigrid solver. The basic
+         D(u)i, j,k = d x (u)i, j,k + d y (u)i, j,k + d z (u)i, j,k ,       (8)
+                                                                                   idea behind our approach is therefore to replace the tradi-
+where the term d x (u)i, j,k is given by                                           tional Red-Black Gauss-Seidel (RGBS) iteration used in the
+                                                                                   smoothing step of a multigrid solver with the Projected Red-
+              1
+             ∆x (Vi+ 12 , j,k ui+ 12 , j,k −Vi− 12 , j,k ui− 12 , j,k ) +    (9)   Black Gauss-Seidel (PRGBS) iteration.
+                               s                                         s
+    (Vi+ 1 , j,k −Vi, j,k )ui+ 1 , j,k − (Vi− 1 , j,k −Vi, j,k )ui− 1 , j,k(.10)   Strictly speaking, the complementarity condition must be
+         2                       2                2                        2
+
+
+c The Eurographics Association 2011.
+       Nuttapong Chentanez & Matthias Müller / A Multigrid Fluid Pressure Solver Handling Separating Solid Boundary Conditions
+
+enforced precisely at the solid-liquid interface that, in gen-       of the form Am pm = bm has to be solved. To down sample
+eral, is not aligned with the cell boundary. To handle this          V m+1 to V m we use 8-to-1 average:
+more general case correctly all the pressure values pi, j,k                            1
+                                                                            m                m+1         m+1            m+1            m+1
+                                                                           Vi, j,k =       (V2i,2 j,2k + V2i+1,2 j,2k + V2i,2 j+1,2k + V2i+1,2 j+1,2k +      (15)
+around the interface have to be modified simultaneously to                             8
+satisfy the condition. To enforce this non-aligned comple-                              m+1            m+1              m+1              m+1
+                                                                                       V2i,2 j,2k+1 + V2i+1,2 j,2k+1 + V2i,2 j+1,2k+1 + V2i+1,2 j+1,2k+1 ,   (16)
+mentarity condition we iterate through all edges that cross
+the solid-liquid interface and check if the pressure at the in-       where i, j, k can be half indices for faces. If a required value
+terface is less than zero. In that case, we adjust the end point     lies outside the simulation grid, the border value is used in-
+pressures to enforce zero pressure at the interface. The pres-       stead.
+sure modifications are not unique so we choose the ones that         To down sample φm+1 to φm we distinguish the following
+minimize the sum of the squared magnitude of the changes.            two cases as in [CM11]:
+In practice, we found that the simpler method of enforcing           1. If the 8 φ-values all have the same sign or m < M −C we
+p ≥ 0 at the center of solid cells next to liquid cells produces        use the 8-to-1 average,
+results that are hardly distinguishable from results generated
+with the more complicated method described above. Figure             2. otherwise we use the average of the positive φ-values.
+2 and sequences in our accompanying videos show compar-
+                                                                     The key idea is to ensure that air bubbles persist in the C
+isons of the two methods. As the results show, the simpler
+                                                                     finest levels. We set C = 2 in our simulations. Given all nec-
+method yields convincing wall separation behavior even in
+                                                                     essary quantities, we then use Equation 4 to compute the
+the presence of curved boundaries. Therefore, we will use
+                                                                     coefficients of the Am for each level.
+the simple approach in the remainder of our paper because it
+simplifies the multigrid implementation considerably.                For smoothing, we use the PRBGS method. We solve the
+                                                                     system in two parallel passes followed by a projection step to
+3.1.1. Multigrid Overview                                            enforce separating solid boundary conditions. The projection
+                                                                     step ensures that the pressure of each cell is greater than or
+The number of levels of the grid hierarchy we use is deter-
+                                                                     equal to
+mined by M = log2 min(Bx , By , Bz ), where Bx , By , and Bz are
+                                                                                         (
+the number of cells along x, y, and z axes respectively. The                              0      if i, j, k is inside a solid
+                                                                             M
+finest level of the grid corresponds to the simulation grid                 pmini, j,k =                                       (17)
+                                                                                          −∞ otherwise.
+with ∆xM = ∆x.
+Algorithm 1 summarizes our multigrid pressure solver. We             We use tri-linear interpolation for both the restriction and the
+modified the solver presented in [CM11] to handle the dis-           prolongation operators.
+cretization used in [BBB07] and introduced our new method
+to handle separating solid boundary conditions.                      Algorithm 2 V_Cycle(m)
+                                                                      1: if m == 1 then
+Algorithm 1 Multigrid                                                 2:    Solve the linear system, A1 p1 = b1
+ 1: for m = M − 1 down to 1 do                                        3: else
+ 2:   Down sample φm+1 → φm and V m+1 → V m                           4:    for i = 1 to num_Pre_Sweep do
+ 3: end for                                                           5:       Smooth(pm ) and enforce pm min (PRBGS)
+ 4: for m = M down to 1 do                                            6:    end for
+ 5:   Extrapolate φm to solid cells that are one cell away            7:    rm = bl − Apm
+      from liquid                                                     8:    bm−1 = Restrict(rm )
+ 6:   Compute matrix Am for level m using Equation 4                  9:    pm−1 = 0
+ 7: end for                                                          10:    if m > M − S then
+ 8: bM = D(u)                                                        11:       pm−1                            m
+                                                                                 min = DownsampleSubtract(pmin , p )
+                                                                                                                    m
+
+ 9: pM = 0                                                           12:    else
+10: Compute pM                                                       13:       pmmin = −∞
+                min
+11: for i = 1 to num_Full_Cycles do                                  14:    end if
+12:   Full_Cycle()                                                   15:    V_Cycle(m − 1)
+13: end for                                                          16:    pm = pm + Prolong(pm−1 )
+14: for i = 1 to num_V_Cycles do                                     17:    for i = 1 to num_Post_Sweep do
+15:   V_Cycle(M)                                                     18:       Smooth (pm ) and enforce pm min (PRBGS)
+16: end for                                                          19:    end for
+                                                                     20: end if
+
+Each coarse grid is derived from the previous finer grid by
+collapsing eight cells into one. At each level, a linear system      The algorithms above are similar to the standard multigrid
+
+                                                                                                                            c The Eurographics Association 2011.
+        Nuttapong Chentanez & Matthias Müller / A Multigrid Fluid Pressure Solver Handling Separating Solid Boundary Conditions
+
+Algorithm 3 Full_Cycle()                                               normal relative velocity. Only with this modification does
+      tmp
+ 1: p = p       M                                                      the liquid peel-off freely from solids.
+ 2: Compute pM
+             min                                                        Case                   Res      No LCP         LCP        % Diff
+ 3: pM
+     min − = p
+              M
+                                                                        BallBox                643        19.00       21.26        11.89
+ 4: rM = bM − ApM
+                                                                        DambreakBox            643        18.89       21.17        12.07
+ 5: for m = M − 1 down to 1 do
+                                                                        RotatedBox             1283      109.78      122.97        12.01
+ 6:   rm = Restrict(rm+1 )
+ 7:   if m ≥ M − S then                                                 DambreakSphere         1283      109.67      122.58        11.77
+ 8:      pm                             m+1
+           min = DownsampleSubtract(pmin , 0)                          Table 1: Average computation time for the multigrid solvers
+ 9:   else                                                             in millisecond for various examples, running on an NVIDIA
+10:      pmmin = −∞                                                    GTX480. The solvers use 3 Full-Cycles followed by 4 V-
+11:   end if                                                           Cycles with num_Pre_Sweep = num_Post_Sweep = 4. The
+12: end for                                                            column labeled with "Res" contains the grid resolutions
+13: b1 = r1                                                            whereas columns "No LCP" and "LCP" show the timings
+14: Solve the linear system, A1 p1 = b1                                for the cases of sticky and separating solid boundary con-
+15: for m = 2 to M do                                                  ditions respectively. The relative difference between the run-
+16:    pm = Prolong(pm−1 )                                             ning times are listed in the last column.
+17:   bm = rm
+18:   V_Cycle(m)
+19: end for                                                            4. Results
+20: pM = ptmp + pM                                                     We first performed a 2D test to compare the results between
+                                                                       1) not enforcing separating solid boundary conditions, 2) en-
+                                                                       forcing the conditions at node level and 3) enforcing them at
+algorithms with the newly added steps involving the min-               the edge level. Figure 2 shows the same frame for each case.
+imum pressure pM min . The first modifications are made in
+                                                                       As can be seen in image b), enforcing standard boundary
+lines 5 and 18 of Algorithm 2. While smoothing, i.e. exe-              conditions produces artifacts of liquid sticking to the sur-
+cuting Gauss-Seidel iterations, we enforce pm
+                                            min . More pre-
+                                                                       rounding sphere. The node based and the edge based ap-
+cisely, we set                                                         proaches do not show these artifacts and the visual results
+                                                                       are similar.
+                    pm             m         m
+                     i, j,k = max(pi, j,k , pmin i, j,k ).   (18)
+                                                                       We also implemented a GPU accelerated 3D version of our
+This statement enforces the separating solid boundary condi-           multigrid algorithm using CUDA and performed several fur-
+tion. The second modifications are made on lines 11 and 8 in           ther tests: a dam break scene in a spherical container, in a
+Algorithms 2 and 3 respectively, where the function Down-              box rotated by 45 degree and in an axis aligned box. These
+sampleSubtract is defined as                                           examples are shown in Figures 1, 3 and 4 respectively. Fig-
+                                                   m
+                  DownsampleSubtract(pm    min , p )i, j,k= (19)
+                                                                       ure 5 shows a fourth scene in which a ball of liquid splashes
+                                          m                            against the wall of a rectangular tank. In all tests we compare
+       max       (pm
+                   min 2i+a,2 j+b,2k+c − p2i+a,2 j+b,2k+c ). (20)
+   a,b,c∈{0,1}                                                         the results between enforcing sticky and separating solid
+                                                                       boundary conditions at nodes. The artifact of water stick-
+This essential step transfers the separating boundary con-
+                                                                       ing to the walls when using the sticky boundary conditions
+strains from fine to coarser grids taking the current pressure
+                                                                       is clearly visible in all cases.
+estimate into account. The function is only executed on the
+S finest levels because the separating boundary condition is           To test the efficiency of our approach we compare the per-
+not meaningful in coarse levels. We use S = 3 in all of our            formance of the LCP multigrid solver against a traditional
+examples.                                                              multigrid solver. For our tests we used an NVIDIA GTX480.
+                                                                       All timings are shown in Table 1. We found in all cases,
+                                                                       that the LCP solver is only about 12% slower than a stan-
+3.2. Surface Tracking
+                                                                       dard solver. We did not directly compare the performance
+For our 3D examples, we track the liquid surface using the             of our solver with the performance of the PATH solver used
+particle based approach presented in [ZB05]. However, if a             in [BBB07]. However, we expect our solver to be several
+grid based approach is used, φ must be carefully extrapolated          orders of magnitude faster. The reason is that our solver is
+into solids for the method to work properly. For a solid cell          comparable in speed with the multigrid solver of [CM11],
+next to a liquid cell whose pressure is zero, φ should be set          which was reported to be up to 14 times faster than the pre-
+to the positive distance to the solid surface, not the negative        conditioned Conjugate Gradients (PCG) method. PCG was
+value extrapolated from the liquid. This is similar to what is         the solver Batty et al. [BBB07] used for their 3D examples
+proposed in [REN∗ 04] where the condition is based on the              and pointed out that the PATH solver was too slow to be
+
+c The Eurographics Association 2011.
+        Nuttapong Chentanez & Matthias Müller / A Multigrid Fluid Pressure Solver Handling Separating Solid Boundary Conditions
+
+practical for 3D domains. Dostal et al. [DS05] proposed a             [LZF10] L ENTINE M., Z HENG W., F EDKIW R.: A novel algo-
+QP solver based on PCG. Due to the speedup we measured                  rithm for incompressible flow using only a coarse grid projection.
+against PCG, we expect our multigrid solver to be signifi-              In Proc. SIGGRAPH (July 2010), pp. 114:1–114:9. 2
+cantly faster in this case as well especially for high resolu-        [McC87]     M C C ORMICK S. F.: Multigrid methods. 2
+tion grids.                                                           [MCPN08] M OLEMAKER J., C OHEN J. M., PATEL S., N OH
+                                                                        J.: Low viscosity flow simulations for animation. In ACM
+                                                                        SIGGRAPH/Eurographics Symposium on Computer Animation
+5. Conclusion and Future Work                                           (2008), pp. 9–18. 2
+                                                                      [MST10] M C A DAMS A., S IFAKIS E., T ERAN J.: A parallel
+In conclusion, we presented a novel multigrid method for                multigrid Poisson solver for fluids simulation on large grids. In
+pressure projection handing separating solid boundary con-              Proc. ACM SIGGRAPH/Eurographics Symposium on Computer
+ditions. We demonstrated the effectiveness of the algorithm             Animation (2010). 2
+at eliminating the artifacts of water sticking to walls in sev-       [Mue08] M UELLER M.: Hierarchical position based dynamics.
+eral practical scenarios. The main limitation of our method is          Proceedings of Virtual Reality Interactions and Physical Simula-
+                                                                        tions (2008). 2
+that it only supports one-way solid to fluid coupling. Extend-
+ing it to work with two-way solid and fluid coupling, such as         [NGL10] NARAIN R., G OLAS A., L IN M. C.: Free-flowing
+                                                                        granular materials with two-way solid coupling. ACM Trans.
+by solving the linear system presented in [RMSG∗ 08] with
+                                                                        Graph. 29 (December 2010), 173:1–173:10. 2
+multigrid, might be challenging and is an interesting prob-
+                                                                      [REN∗ 04] R ASMUSSEN N., E NRIGHT D., N GUYEN D.,
+lem for future research.
+                                                                        M ARINO S., S UMNER N., G EIGER W., H OON S., F EDKIW
+                                                                        R.: Directable photorealistic liquids. In Proc. ACM SIG-
+                                                                        GRAPH/Eurographics Symposium on Computer Animation (July
+References                                                              2004), pp. 193–202. 2, 5
+[BB08] BATTY C., B RIDSON R.: Accurate viscous free surfaces          [RMSG∗ 08] ROBINSON -M OSHER A., S HINAR T., G RETARS -
+  for buckling, coiling, and rotating liquids. In Proceedings of        SON J., S U J., F EDKIW R.: Two-way coupling of fluids to rigid
+  the 2008 ACM/Eurographics Symposium on Computer Anima-                and deformable solids and shells. In ACM SIGGRAPH 2008
+  tion (July 2008), pp. 219–228. 2, 3                                   papers (New York, NY, USA, 2008), SIGGRAPH ’08, ACM,
+                                                                        pp. 46:1–46:9. 6
+[BBB07] BATTY C., B ERTAILS F., B RIDSON R.: A fast varia-
+  tional framework for accurate solid-fluid coupling. In Proc. SIG-   [SYBF06] S HI L., Y U Y., B ELL N., F ENG W.-W.: A fast multi-
+  GRAPH (2007), p. 100. 1, 2, 3, 4, 5                                   grid algorithm for mesh deformation. In ACM SIGGRAPH 2006
+                                                                        Papers (New York, NY, USA, 2006), SIGGRAPH ’06, ACM,
+[CFL∗ 07] C HENTANEZ N., F ELDMAN B. E., L ABELLE F.,                   pp. 1108–1117. 2
+  O’B RIEN J. F., S HEWCHUK J. R.:        Liquid simulation
+  on lattice-based tetrahedral meshes. In Proc. ACM SIG-              [ZB05] Z HU Y., B RIDSON R.: Animating sand as a fluid. In Proc.
+  GRAPH/Eurographics Symposium on Computer Animation                    SIGGRAPH (2005), pp. 965–972. 5
+  (2007), pp. 219–228. 2                                              [ZSTB10] Z HU Y., S IFAKIS E., T ERAN J., B RANDT A.: An
+[CM11] C HENTANEZ N., M ÜLLER M.: Real-time Eulerian water              efficient multigrid method for the simulation of high-resolution
+  simulation using a restricted tall cell grid. In Proc. SIGGRAPH       elastic solids. ACM Trans. Graph. 29 (April 2010), 16:1–16:18.
+  (2011). 2, 4, 5                                                       2
+[DS05] D OSTÁL Z., S CHÖBERL J.: Minimizing quadratic func-
+  tions subject to bound constraints with the rate of convergence
+  and finite termination. Comput. Optim. Appl. 30 (January 2005),
+  23–43. 2, 6
+[EF02] E NRIGHT D., F EDKIW R.: Robust treatment of interfaces
+  for fluid flows and computer graphics. In Computer GraphicsŤ,
+  9th Int. Conf. on Hyperbolic Problems Theory, Numerics, Appli-
+  cations (2002). 3
+[FF01] F OSTER N., F EDKIW R.: Practical animation of liquids.
+  In Proc. SIGGRAPH (Aug. 2001), pp. 23–30. 2
+[FM96] F OSTER N., M ETAXAS D.: Realistic animation of liq-
+  uids. Graph. Models Image Process. 58, 5 (1996), 471–483. 2
+[FM98] F ERRIS M. C., M UNSON T. S.: Complementarity prob-
+  lems in gams and the path solver. Journal of Economic Dynamics
+  and Control 24 (1998), 2000. 1, 3
+[HBW03] H OUSTON B., B OND C., W IEBE M.: A unified ap-
+  proach for modeling complex occlusions in fluid simulations. In
+  ACM SIGGRAPH 2003 Sketches & Applications (New York, NY,
+  USA, 2003), SIGGRAPH ’03, ACM, pp. 1–1. 2
+[HW65] H ARLOW F., W ELCH J.: Numerical calculation of time-
+  dependent viscous incompressible flow of fluid with a free sur-
+  face. The Physics of Fluids 8 (1965), 2182–2189. 2
+
+                                                                                                            c The Eurographics Association 2011.
+        Nuttapong Chentanez & Matthias Müller / A Multigrid Fluid Pressure Solver Handling Separating Solid Boundary Conditions
+
+
+
+
+Figure 2: a) Initial condition of a ball of water in a circle moving diagonally to right and upwards. b) Sticky solid boundary
+conditions. c) Separating solid boundary conditions enforced at the nodes. d) Separating solid boundary condition enforced on
+the edges. Methods c) and d) produce similar visual results.
+
+
+
+
+Figure 3: Left: Initial condition of water in a box rotated by 45 degrees. Middle: Sticky solid boundary conditions. Right:
+Separating solid boundary conditions.
+
+
+
+
+Figure 4: Left: Initial condition of water in a box. Middle: Sticky solid boundary condition. Right: Separating solid boundary
+condition.
+
+
+
+
+Figure 5: Left: Initial condition of a sphere of water in a box. The sphere is moving to the left. Middle: Sticky solid boundary
+condition. Right: Separating solid boundary condition.
+
+
+c The Eurographics Association 2011.
+

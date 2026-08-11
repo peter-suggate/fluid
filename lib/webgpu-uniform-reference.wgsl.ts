@@ -1,5 +1,8 @@
 import { inflowBoundaryWGSL } from "./inflow-boundary";
 
+const uniformMacCormackAuditEnabled = typeof process !== "undefined"
+  && process.env.FLUID_UNIFORM_SYMMETRY_STAGE_AUDIT === "1";
+
 /**
  * Dense uniform-grid reference kernels.
  *
@@ -8,6 +11,7 @@ import { inflowBoundaryWGSL } from "./inflow-boundary";
  * comparisons without octree topology, sparse residency, or backend cutovers.
  */
 export const uniformReferenceComputeShader = /* wgsl */ `
+const MACCORMACK_AUDIT_ENABLED: bool = ${uniformMacCormackAuditEnabled};
 struct Params {
   dimsDt: vec4f,
   cellGravity: vec4f,
@@ -48,9 +52,6 @@ struct RigidBody {
 // trilinear sampling reproduces the zero wall-face boundary condition.
 @group(0) @binding(14) var transportIn: texture_3d<f32>;
 @group(0) @binding(15) var transportSampler: sampler;
-@group(0) @binding(16) var transportOut: texture_storage_3d<rgba16float, write>;
-@group(0) @binding(17) var fluxScalesIn: texture_3d<f32>;
-@group(0) @binding(18) var fluxScalesOut: texture_storage_3d<rg32float, write>;
 @group(0) @binding(19) var<storage,read_write> sharpenDeposits:array<atomic<i32>>;
 // The adaptive method binds its resident signed-distance field here. Uniform
 // reference solvers bind volumeIn instead, preserving their VOF formulation.
@@ -58,6 +59,16 @@ struct RigidBody {
 // Per-column terrain heights in cell units; params.container.w enables it so
 // terrain-free scenes never pay the extra load. Static for the whole run.
 @group(0) @binding(21) var terrainIn: texture_2d<f32>;
+@group(0) @binding(24) var gammaIn: texture_3d<f32>;
+@group(0) @binding(25) var gammaOut: texture_storage_3d<r32float, write>;
+// The physical rgba velocity texture owns positive MAC faces. The separate
+// field owns the three negative domain faces so the CM11a pressure halo has
+// persistent velocity DOFs on both sides of every closed wall.
+@group(0) @binding(26) var<storage,read> boundaryVelocityIn:array<vec4f>;
+@group(0) @binding(27) var<storage,read_write> boundaryVelocityOut:array<vec4f>;
+// Eight vec4s per (cell, component), populated only in the opt-in Dawn stage
+// audit shader variant. Production compiles the constant-false branch away.
+@group(0) @binding(28) var<storage,read_write> macCormackAudit:array<vec4f>;
 fn dims() -> vec3i { return vec3i(textureDimensions(volumeIn)); }
 fn inflowGridDims()->vec3i{return dims();}
 fn valid(p: vec3i) -> bool { let d=dims(); return all(p >= vec3i(0)) && all(p < d); }
@@ -71,7 +82,6 @@ fn cellInsideTerrain(p:vec3i)->bool{if(!hasTerrain()){return false;}return f32(p
 fn cellTerrainFraction(p:vec3i)->f32{if(!hasTerrain()){return 0.0;}return clamp(terrainHeightCells(p.x,p.z)-f32(p.y),0.0,1.0);}
 ${inflowBoundaryWGSL}
 fn volume(p: vec3i) -> f32 { if (!valid(p)) { return 0.0; } return textureLoad(volumeIn,p,0).x; }
-fn transportConservativeVolume() -> bool { return params.physical.z > 0.5; }
 fn levelSetAuthority() -> bool { return params.physical.w > 0.5; }
 fn surfaceValue(p: vec3i) -> f32 {
   if (!valid(p)) { return select(0.0, 5.0 * min(params.cellGravity.x, min(params.cellGravity.y, params.cellGravity.z)), levelSetAuthority()); }
@@ -85,37 +95,89 @@ fn surfaceOccupancy(p: vec3i) -> f32 {
 fn surfaceLiquid(p: vec3i) -> bool { return valid(p) && select(surfaceValue(p) >= 0.5, surfaceValue(p) < 0.0, levelSetAuthority()); }
 fn velocity(p: vec3i) -> vec3f { return textureLoad(velocityIn,clampCell(p),0).xyz; }
 fn faceVelocity(p:vec3i)->vec3f{if(!valid(p)){return vec3f(0.0);}return textureLoad(velocityIn,p,0).xyz;}
+fn boundaryLinearIndex(p:vec3i)->u32{let d=dims();return u32(p.x+d.x*(p.y+d.y*p.z));}
+fn boundaryVelocity(p:vec3i)->vec3f{if(!valid(p)){return vec3f(0.0);}return boundaryVelocityIn[boundaryLinearIndex(p)].xyz;}
+fn storeBoundaryVelocity(id:vec3i,value:vec3f){boundaryVelocityOut[boundaryLinearIndex(id)]=vec4f(value,0.0);}
+fn carryBoundaryVelocity(id:vec3i){storeBoundaryVelocity(id,boundaryVelocity(id));}
 fn liquid(p:vec3i)->bool{return surfaceLiquid(p);}
-fn pressureValue(p:vec3i)->f32{return textureLoad(pressureIn,clampCell(p),0).x;}
-fn transportVelocity(id:vec3i)->vec3f{
-  var v=velocity(id);if(surfaceOccupancy(id)>=0.01){return v;}var sum=vec3f(0.0);var weight=0.0;
-  let px=surfaceOccupancy(id+vec3i(1,0,0));let nx=surfaceOccupancy(id-vec3i(1,0,0));let py=surfaceOccupancy(id+vec3i(0,1,0));let ny=surfaceOccupancy(id-vec3i(0,1,0));let pz=surfaceOccupancy(id+vec3i(0,0,1));let nz=surfaceOccupancy(id-vec3i(0,0,1));
-  sum+=velocity(id+vec3i(1,0,0))*px+velocity(id-vec3i(1,0,0))*nx+velocity(id+vec3i(0,1,0))*py+velocity(id-vec3i(0,1,0))*ny+velocity(id+vec3i(0,0,1))*pz+velocity(id-vec3i(0,0,1))*nz;weight=px+nx+py+ny+pz+nz;if(weight>0.001){v=sum/weight;}return v;
+fn pressureValue(p:vec3i)->f32{
+  return textureLoad(pressureIn,clampCell(p),0).x;
+}
+// Projection alone binds the CM11a finest level, whose physical cells are
+// enclosed by a one-cell solid/domain halo. Keep this addressing explicit:
+// other main-shader pressure scratch remains an unpadded simulation texture.
+fn projectPressureValue(p:vec3i)->f32{
+  let pressureDims=vec3i(textureDimensions(pressureIn));
+  return textureLoad(pressureIn,clamp(p+vec3i(1),vec3i(0),pressureDims-vec3i(1)),0).x;
+}
+fn cellOpenFraction(p:vec3i)->f32{
+  if(!valid(p)){return 0.0;}
+  return clamp((1.0-cellSolidFraction(p))*(1.0-cellTerrainFraction(p)),0.0,1.0);
+}
+// Chentanez--Mueller Sec. 3.7, Eq. 20.  Surface density represents mass in
+// the non-solid part of a cut cell, so pressure classification and the ghost
+// fluid distance must use rho'=rho/V rather than raw rho.
+fn pressureDensityOpen(p:vec3i)->f32{
+  let open=cellOpenFraction(p);
+  if(open<=1e-5){return 0.0;}
+  return volume(p)/open;
+}
+fn pressureDensity(p:vec3i)->f32{
+  if(!valid(p)){return 0.0;}
+  let open=cellOpenFraction(p);
+  if(open>1e-5){return pressureDensityOpen(p);}
+  // Eq. 20 is extrapolated from V>0 into adjacent V=0 cells.  Although fully
+  // solid cells are not pressure unknowns, this continuation keeps the free
+  // surface distance well-defined at a cut boundary.
+  let offsets=array<vec3i,6>(vec3i(-1,0,0),vec3i(1,0,0),vec3i(0,-1,0),vec3i(0,1,0),vec3i(0,0,-1),vec3i(0,0,1));
+  // A phase-diluting average can turn an adjacent solid continuation back
+  // into air when any of the other neighbors are dry. The max continuation
+  // guarantees that every V=0 cell adjacent to liquid is retained as the
+  // pressure unknown required by Sec. 3.7.
+  var continued=0.0;
+  for(var index=0;index<6;index+=1){let q=p+offsets[index];if(cellOpenFraction(q)>1e-5){continued=max(continued,pressureDensityOpen(q));}}
+  return continued;
+}
+fn pressurePhi(p:vec3i)->f32{
+  let dx=min(params.cellGravity.x,min(params.cellGravity.y,params.cellGravity.z));
+  return -(pressureDensity(p)-0.5)*dx;
+}
+// Sec. 3.7 explicitly extrapolates rho' into adjacent V=0 cells so those
+// cells participate in the pressure system. Do not filter them back out by V.
+fn pressureLiquid(p:vec3i)->bool{return valid(p)&&pressureDensity(p)>0.5;}
+fn ghostFluidFraction(liquidCell:vec3i,airCell:vec3i)->f32{
+  let liquidPhi=pressurePhi(liquidCell);let airPhi=pressurePhi(airCell);
+  return clamp(abs(liquidPhi)/max(abs(liquidPhi)+abs(airPhi),1e-6),0.05,1.0);
 }
 fn sampledFaceVelocity(p:vec3i,component:u32)->f32{
   let d=dims();if(p[component]<0||p[component]>=d[component]){return 0.0;}
   return textureLoad(transportIn,clampCell(p)+vec3i(1),0)[component];
 }
 fn transportCoordinate(q:vec3f)->vec3f{return (q+vec3f(1.5))/vec3f(dims()+vec3i(2));}
-fn interfaceFraction(a:f32,b:f32)->f32{
-  // Distance from the liquid cell centre to alpha=0.5 along a grid edge.
-  return clamp((a-0.5)/max(abs(a-b),1e-6),0.05,1.0);
-}
 fn sampleVolume(p:vec3f)->f32{
-  let q=clamp(p-vec3f(0.5),vec3f(0.0),vec3f(dims()-vec3i(1)));let b=vec3i(floor(q));let f=fract(q);let c000=volume(b);let c100=volume(b+vec3i(1,0,0));let c010=volume(b+vec3i(0,1,0));let c110=volume(b+vec3i(1,1,0));let c001=volume(b+vec3i(0,0,1));let c101=volume(b+vec3i(1,0,1));let c011=volume(b+vec3i(0,1,1));let c111=volume(b+vec3i(1,1,1));return mix(mix(mix(c000,c100,f.x),mix(c010,c110,f.x),f.y),mix(mix(c001,c101,f.x),mix(c011,c111,f.x),f.y),f.z);
+  let q=p-vec3f(0.5);let base=vec3i(floor(q));let f=fract(q);var result=0.0;
+  for(var corner=0u;corner<8u;corner+=1u){
+    let offset=vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));let donor=base+offset;
+    let weight=select(1.0-f.x,f.x,offset.x==1)*select(1.0-f.y,f.y,offset.y==1)*select(1.0-f.z,f.z,offset.z==1);
+    if(valid(donor)&&!cellInsideSolid(donor)){result+=weight*volume(donor);}
+  }
+  return result;
 }
 fn sampleVelocityComponent(p:vec3f,component:u32)->f32{
   var offset=vec3f(0.5);offset[component]=1.0;var lower=vec3f(0.0);lower[component]=-1.0;let q=clamp(p-offset,lower,vec3f(dims()-vec3i(1)));
-  return textureSampleLevel(transportIn,transportSampler,transportCoordinate(q),0.0)[component];
+  let base=vec3i(floor(q));let fraction=fract(q);var result=0.0;
+  for(var corner=0u;corner<8u;corner+=1u){
+    let o=vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));
+    let weights=select(vec3f(1.0)-fraction,fraction,vec3f(o)>vec3f(0.5));
+    result+=weights.x*weights.y*weights.z*textureLoad(transportIn,base+o+vec3i(1),0)[component];
+  }
+  return result;
 }
 fn sampleVelocity(p:vec3f)->vec3f{return vec3f(sampleVelocityComponent(p,0u),sampleVelocityComponent(p,1u),sampleVelocityComponent(p,2u));}
-// One collocated vector fetch per RK2 stage; the half-texel stagger error only
-// perturbs where the trace samples, not the sampled face values themselves.
-fn transportVectorEstimate(p:vec3f)->vec3f{
-  let q=clamp(p-vec3f(0.75),vec3f(-1.0),vec3f(dims()-vec3i(1)));
-  return textureSampleLevel(transportIn,transportSampler,transportCoordinate(q),0.0).xyz;
-}
-fn departurePoint(position:vec3f,dt:f32,h:vec3f)->vec3f{let first=transportVectorEstimate(position);let midpoint=position-0.5*first*dt/h;return position-transportVectorEstimate(midpoint)*dt/h;}
+// Reconstruct every RK2 stage at the actual MAC component offsets.  Sampling
+// a collocated rgba vector here introduced a +1/4-cell directional shift and
+// was the first dynamically accumulated D4 error in symmetric expansion.
+fn departurePoint(position:vec3f,dt:f32,h:vec3f)->vec3f{let first=sampleVelocity(position);let midpoint=position-0.5*first*dt/h;return position-sampleVelocity(midpoint)*dt/h;}
 fn advectVelocityComponent(position:vec3f,component:u32,dt:f32,h:vec3f)->f32{
   return sampleVelocityComponent(departurePoint(position,dt,h),component);
 }
@@ -127,6 +189,14 @@ fn insideRigid(body:RigidBody,world:vec3f)->bool{
   if(shape==1){return all(abs(p)<=0.5*d);}
   if(shape==2){let cy=clamp(p.y,-0.5*d.y,0.5*d.y);return length(vec3f(p.x,p.y-cy,p.z))<=d.x;}
   return p.x*p.x+p.z*p.z<=d.x*d.x&&abs(p.y)<=0.5*d.y;
+}
+fn rigidSignedDistance(body:RigidBody,world:vec3f)->f32{
+  let p=quaternionInverseRotate(body.orientation,world-body.positionShape.xyz);let d=body.dimensions.xyz;let shape=i32(round(body.positionShape.w));
+  if(shape==0){return length(p)-d.x;}
+  if(shape==1){let q=abs(p)-0.5*d;return length(max(q,vec3f(0.0)))+min(max(q.x,max(q.y,q.z)),0.0);}
+  if(shape==2){let cy=clamp(p.y,-0.5*d.y,0.5*d.y);return length(vec3f(p.x,p.y-cy,p.z))-d.x;}
+  let q=vec2f(length(p.xz)-d.x,abs(p.y)-0.5*d.y);
+  return length(max(q,vec2f(0.0)))+min(max(q.x,q.y),0.0);
 }
 fn rigidBodyIndexAt(world:vec3f)->i32{
   let bodyCount=u32(round(params.boundary.z));
@@ -175,6 +245,90 @@ fn cellSolidFraction(p:vec3i)->f32{
   for(var bodyIndex=0u;bodyIndex<12u;bodyIndex+=1u){if(bodyIndex>=bodyCount){break;}fraction=max(fraction,bodySolidFraction(rigidBodies[bodyIndex],p));}
   return fraction;
 }
+fn worldInsideTerrain(world:vec3f)->bool{
+  if(!hasTerrain()){return false;}
+  let h=params.cellGravity.xyz;
+  let x=clamp(i32(floor((world.x+0.5*params.container.x)/h.x)),0,dims().x-1);
+  let z=clamp(i32(floor((world.z+0.5*params.container.z)/h.z)),0,dims().z-1);
+  return world.y<terrainHeightCells(x,z)*h.y;
+}
+fn solidVelocityAtWorld(world:vec3f)->vec4f{
+  if(worldInsideTerrain(world)){return vec4f(0.0,0.0,0.0,1.0);}
+  let body=rigidBodyIndexAt(world);
+  if(body>=0){return vec4f(rigidVelocityAt(body,world),1.0);}
+  return vec4f(0.0);
+}
+// Four transverse quadrature points approximate the non-solid area V^f of a
+// MAC face.  Sampling the oriented primitives in world space makes this the
+// same fractional variational boundary for static, translating, rotating,
+// and non-axis-aligned solids.
+fn faceSolidData(id:vec3i,axis:u32)->vec4f{
+  let world=faceWorld(id,axis);let h=params.cellGravity.xyz;
+  var tangentA=(axis+1u)%3u;var tangentB=(axis+2u)%3u;
+  var solid=0.0;var solidVelocity=vec3f(0.0);
+  for(var sampleIndex=0u;sampleIndex<4u;sampleIndex+=1u){
+    var sampleWorld=world;
+    sampleWorld[tangentA]+=select(-0.35,0.35,(sampleIndex&1u)!=0u)*h[tangentA];
+    sampleWorld[tangentB]+=select(-0.35,0.35,(sampleIndex&2u)!=0u)*h[tangentB];
+    let sample=solidVelocityAtWorld(sampleWorld);solid+=sample.w;solidVelocity+=sample.w*sample.xyz;
+  }
+  return vec4f(select(vec3f(0.0),solidVelocity/max(solid,1e-6),solid>0.0),solid*0.25);
+}
+fn faceOpenFraction(id:vec3i,axis:u32)->f32{
+  var neighbor=id;neighbor[axis]+=1;
+  if(!valid(id)||!valid(neighbor)){
+    // The authored open top is exterior air, not a solid face. Every other
+    // domain boundary remains a static, fully covered wall.
+    if(axis==1u&&valid(id)&&id.y==dims().y-1&&neighbor.y==dims().y&&params.boundary.w>0.5){return 1.0;}
+    return 0.0;
+  }
+  return 1.0-faceSolidData(id,axis).w;
+}
+fn extrapolatedRigidVelocityAtFace(world:vec3f)->vec3f{
+  let bodyCount=u32(round(params.boundary.z));let radius=max(params.cellGravity.x,max(params.cellGravity.y,params.cellGravity.z));
+  var nearest=radius;var result=vec3f(0.0);
+  for(var bodyIndex=0u;bodyIndex<12u;bodyIndex+=1u){
+    if(bodyIndex>=bodyCount){break;}let distance=abs(rigidSignedDistance(rigidBodies[bodyIndex],world));
+    if(distance<=nearest){nearest=distance;result=rigidVelocityAt(i32(bodyIndex),world);}
+  }
+  return result;
+}
+// CM11a's V_{i+1/2} is not the Sec. 3.6 face aperture above. It is the
+// non-solid fraction of the face-centred overlapping (dual) cell. Eight
+// volume samples construct that geometric quantity for embedded solids.
+// At a grid-aligned closed domain wall, half of the dual cell lies in the
+// authored solid exterior, so its inferred geometric fraction is 1/2.
+fn pressureFaceData(id:vec3i,axis:u32)->vec4f{
+  var neighbor=id;neighbor[axis]+=1;
+  if(!valid(id)||!valid(neighbor)){
+    if(axis==1u&&valid(id)&&id.y==dims().y-1&&neighbor.y==dims().y&&params.boundary.w>0.5){return vec4f(0.0,0.0,0.0,1.0);}
+    if(valid(id)!=valid(neighbor)){return vec4f(0.0,0.0,0.0,0.5);}
+    return vec4f(0.0);
+  }
+  let world=faceWorld(id,axis);let h=params.cellGravity.xyz;var solid=0.0;var solidVelocity=vec3f(0.0);
+  for(var sampleIndex=0u;sampleIndex<8u;sampleIndex+=1u){
+    let sampleWorld=world+vec3f(select(-0.4,0.4,(sampleIndex&1u)!=0u)*h.x,select(-0.4,0.4,(sampleIndex&2u)!=0u)*h.y,select(-0.4,0.4,(sampleIndex&4u)!=0u)*h.z);
+    let sample=solidVelocityAtWorld(sampleWorld);solid+=sample.w;solidVelocity+=sample.w*sample.xyz;
+  }
+  // CM11a explicitly requires us on nearby liquid faces. For analytic rigid
+  // bodies, the nearest body within one cell supplies its rigid velocity at
+  // the face centre when the dual-cell samples themselves contain no solid.
+  // Terrain and tank walls are static and therefore extrapolate zero.
+  let extrapolated=extrapolatedRigidVelocityAtFace(world);
+  return vec4f(select(extrapolated,solidVelocity/max(solid,1e-6),solid>0.0),1.0-solid/8.0);
+}
+fn pressureFaceVolumeFraction(id:vec3i,axis:u32)->f32{return pressureFaceData(id,axis).w;}
+// Secs. 3.3 and 3.7 share one interface authority. The extrapolator consumes
+// rho'=rho/V (including Eq. 20's adjacent-solid continuation) and the exact
+// positive-MAC face fractions used by projection; it never reclassifies raw
+// surface density or approximates a second solid boundary.
+@compute @workgroup_size(4,4,4)
+fn buildExtrapolationAuthority(@builtin(global_invocation_id) gid:vec3u){
+  let id=vec3i(gid);if(!valid(id)){return;}
+  textureStore(volumeOut,id,vec4f(pressureDensity(id)));
+  textureStore(velocityOut,id,vec4f(
+    faceOpenFraction(id,0u),faceOpenFraction(id,1u),faceOpenFraction(id,2u),0.0));
+}
 // Projection enforces body velocity on interior faces, so that value cannot be
 // used as the undisturbed fluid velocity for form drag. Sample six wet, open
 // points just beyond the body's bounding sphere instead.
@@ -208,58 +362,154 @@ fn interfaceNormal(id:vec3i)->vec3f{
 // The diagnostic/emergency VOF still sharpens along its own density gradient;
 // this field does not classify the adaptive pressure or velocity solve.
 fn normalVolume(id:vec3i)->f32{
-  if(valid(id)){return volume(id);}
-  if(id.y>=dims().y&&params.boundary.w>0.5){return 0.0;}
-  return textureLoad(volumeIn,clampCell(id),0).x;
+  // Sec. 3.6 guarantees rho=0 inside solid. Closed-domain exterior, embedded
+  // solids, and authored open-top air therefore share the same zero-density
+  // extension for sharpening gradients; none copies a boundary-cell value.
+  if(!valid(id)||cellInsideSolid(id)){return 0.0;}
+  return volume(id);
 }
 fn volumeGradient(id:vec3i)->vec3f{
   let h=params.cellGravity.xyz;
   return vec3f(normalVolume(id+vec3i(1,0,0))-normalVolume(id-vec3i(1,0,0)),normalVolume(id+vec3i(0,1,0))-normalVolume(id-vec3i(0,1,0)),normalVolume(id+vec3i(0,0,1))-normalVolume(id-vec3i(0,0,1)))/(2.0*h);
 }
-fn rawVolumeFlux(id:vec3i,axis:u32,dt:f32)->f32{
-  if(!valid(id)){return 0.0;}
-  let neighbor=id+select(select(vec3i(0,0,1),vec3i(0,1,0),axis==1u),vec3i(1,0,0),axis==0u);
-  let speed=faceVelocity(id)[axis];
-  return dt/params.cellGravity.xyz[axis]*upwind(speed,volume(id),volume(neighbor));
+// --- Conservative surface-density transport (paper Sec. 3.4, modified
+// three-scatter scheme). beta, rho deficits, and gamma deficits occupy three
+// consecutive fixed-point arrays in conditioningScratch/sharpenDeposits.
+const TRANSPORT_FIXED:f32=1048576.0;
+fn linearIndex(id:vec3i)->u32{let d=dims();return u32(id.x+d.x*(id.y+d.y*id.z));}
+fn cellCount()->u32{let d=dims();return u32(d.x*d.y*d.z);}
+fn betaValue(id:vec3i)->f32{
+  if(!valid(id)){return 1.0;}
+  return f32(atomicLoad(&sharpenDeposits[linearIndex(id)]))/TRANSPORT_FIXED;
 }
-fn outwardFlux(id:vec3i,dt:f32)->f32{
-  if(!valid(id)){return 0.0;}
-  let ex=vec3i(1,0,0);let ey=vec3i(0,1,0);let ez=vec3i(0,0,1);
-  return max(rawVolumeFlux(id,0u,dt),0.0)+max(-rawVolumeFlux(id-ex,0u,dt),0.0)
-       + max(rawVolumeFlux(id,1u,dt),0.0)+max(-rawVolumeFlux(id-ey,1u,dt),0.0)
-       + max(rawVolumeFlux(id,2u,dt),0.0)+max(-rawVolumeFlux(id-ez,2u,dt),0.0);
+// Build scalar stencils from local traced displacement. Subtracting a small
+// displacement from an absolute cell coordinate loses different low bits at
+// reflected cells; local offsets preserve the paper's mirrored trilinear
+// weights before the fixed-point beta/deposit scatters quantize them.
+fn backwardTraceOffset(id:vec3i,dt:f32,h:vec3f)->vec3f{
+  let position=vec3f(id)+vec3f(0.5);let first=sampleVelocity(position);let midpoint=position-0.5*first*dt/h;
+  return -sampleVelocity(midpoint)*dt/h;
 }
-fn inwardFlux(id:vec3i,dt:f32)->f32{
-  if(!valid(id)){return 0.0;}
-  let ex=vec3i(1,0,0);let ey=vec3i(0,1,0);let ez=vec3i(0,0,1);
-  return max(-rawVolumeFlux(id,0u,dt),0.0)+max(rawVolumeFlux(id-ex,0u,dt),0.0)
-       + max(-rawVolumeFlux(id,1u,dt),0.0)+max(rawVolumeFlux(id-ey,1u,dt),0.0)
-       + max(-rawVolumeFlux(id,2u,dt),0.0)+max(rawVolumeFlux(id-ez,2u,dt),0.0);
+fn forwardTraceOffset(id:vec3i,dt:f32,h:vec3f)->vec3f{
+  let position=vec3f(id)+vec3f(0.5);let first=sampleVelocity(position);let midpoint=position+0.5*first*dt/h;
+  return sampleVelocity(midpoint)*dt/h;
 }
-fn donorScale(id:vec3i,dt:f32)->f32{return min(1.0,volume(id)/max(outwardFlux(id,dt),1e-9));}
-fn receiverScale(id:vec3i,dt:f32)->f32{return min(1.0,max(0.0,1.0-volume(id))/max(inwardFlux(id,dt),1e-9));}
-// Scales are precomputed once per cell by buildFluxScales; invalid neighbors
-// keep the historical donor 0 / receiver 1 limits.
-fn cellFluxScales(id:vec3i)->vec2f{if(!valid(id)){return vec2f(0.0,1.0);}return textureLoad(fluxScalesIn,id,0).xy;}
-fn limitedVolumeFlux(id:vec3i,axis:u32,dt:f32)->f32{
-  let offset=select(select(vec3i(0,0,1),vec3i(0,1,0),axis==1u),vec3i(1,0,0),axis==0u);
-  let neighbor=id+offset;let flux=rawVolumeFlux(id,axis,dt);
-  let donor=cellFluxScales(id);let receiver=cellFluxScales(neighbor);
-  if(flux>=0.0){return flux*min(donor.x,receiver.y);}
-  return flux*min(receiver.x,donor.y);
+fn densityTransportDestination(p:vec3i)->bool{return valid(p)&&!cellInsideSolid(p);}
+fn transportStencilWeight(base:vec3i,f:vec3f,corner:u32)->f32{
+  let offset=vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));
+  if(!densityTransportDestination(base+offset)){return 0.0;}
+  return select(1.0-f.x,f.x,offset.x==1)*select(1.0-f.y,f.y,offset.y==1)*select(1.0-f.z,f.z,offset.z==1);
 }
-fn advectedVolume(id:vec3i,dt:f32)->f32{
-  let centre=volume(id);
-  let ex=vec3i(1,0,0);let ey=vec3i(0,1,0);let ez=vec3i(0,0,1);
-  let fxp=limitedVolumeFlux(id,0u,dt);let fxm=limitedVolumeFlux(id-ex,0u,dt);
-  let fyp=limitedVolumeFlux(id,1u,dt);let fym=limitedVolumeFlux(id-ey,1u,dt);
-  let fzp=limitedVolumeFlux(id,2u,dt);let fzm=limitedVolumeFlux(id-ez,2u,dt);
-  // No upper clamp on the transported value: a clamp here would destroy
-  // sharpening deposits above one, which drain through the correction
-  // divergence instead. The inflow source alone is bounded by the cell's
-  // remaining capacity, as the old clamp did implicitly.
-  let bounded=max(centre-(fxp-fxm+fyp-fym+fzp-fzm),0.0);
-  return bounded+min(inflowReceiverSource(id,dt),max(0.0,1.0-bounded));
+fn sampleGammaStencil(base:vec3i,f:vec3f)->f32{
+  var result=0.0;
+  // Invalid or solid corners are the zero Dirichlet extension of gamma. Do
+  // not renormalize this backward gather: the paper permits deficient gamma.
+  for(var corner=0u;corner<8u;corner+=1u){let offset=vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));let donor=base+offset;let weight=transportStencilWeight(base,f,corner);if(weight>0.0){result+=weight*textureLoad(gammaIn,donor,0).x;}}
+  return result;
+}
+// Steps 1-3: backward-advect persistent gamma, initialize beta on the host,
+// and scatter gamma_i w^-_li to each donor l.
+@compute @workgroup_size(4,4,4)
+fn traceGammaAndBeta(@builtin(global_invocation_id) gid:vec3u){
+  let id=vec3i(gid);if(!valid(id)){return;}
+  if(cellInsideSolid(id)){textureStore(gammaOut,id,vec4f(0.0));return;}
+  let traced=backwardTraceOffset(id,params.dimsDt.w,params.cellGravity.xyz);let base=id+vec3i(floor(traced));let f=fract(traced);
+  let advectedGamma=sampleGammaStencil(base,f);
+  textureStore(gammaOut,id,vec4f(advectedGamma));
+  var total=0.0;
+  for(var corner=0u;corner<8u;corner+=1u){total+=transportStencilWeight(base,f,corner);}
+  if(total<=1e-9){
+    if(advectedGamma>0.0){atomicAdd(&sharpenDeposits[linearIndex(id)],i32(round(advectedGamma*TRANSPORT_FIXED)));}
+    return;
+  }
+  for(var corner=0u;corner<8u;corner+=1u){
+    let offset=vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));let donor=base+offset;let weight=transportStencilWeight(base,f,corner)/total;
+    if(weight>0.0){atomicAdd(&sharpenDeposits[linearIndex(donor)],i32(round(advectedGamma*weight*TRANSPORT_FIXED)));}
+  }
+}
+
+// Steps 6-7: sources whose beta is below one forward-scatter the missing
+// column weight. gammaIn is the pre-advection gamma^n prescribed by step 7;
+// the rho and gamma corrections are accumulated separately.
+@compute @workgroup_size(4,4,4)
+fn scatterDensityDeficit(@builtin(global_invocation_id) gid:vec3u){
+  let id=vec3i(gid);if(!densityTransportDestination(id)){return;}
+  let deficit=max(0.0,1.0-betaValue(id));if(deficit<=1.0/TRANSPORT_FIXED){return;}
+  let traced=forwardTraceOffset(id,params.dimsDt.w,params.cellGravity.xyz);let base=id+vec3i(floor(traced));let f=fract(traced);let count=cellCount();
+  var total=0.0;
+  for(var corner=0u;corner<8u;corner+=1u){total+=transportStencilWeight(base,f,corner);}
+  if(total<=1e-9){
+    let index=linearIndex(id);
+    atomicAdd(&sharpenDeposits[count+index],i32(round(volume(id)*deficit*TRANSPORT_FIXED)));
+    atomicAdd(&sharpenDeposits[2u*count+index],i32(round(textureLoad(gammaIn,id,0).x*deficit*TRANSPORT_FIXED)));
+    return;
+  }
+  for(var corner=0u;corner<8u;corner+=1u){
+    let offset=vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));let receiver=base+offset;let weight=transportStencilWeight(base,f,corner)/total;
+    if(weight<=0.0){continue;}let index=linearIndex(receiver);
+    atomicAdd(&sharpenDeposits[count+index],i32(round(volume(id)*deficit*weight*TRANSPORT_FIXED)));
+    atomicAdd(&sharpenDeposits[2u*count+index],i32(round(textureLoad(gammaIn,id,0).x*deficit*weight*TRANSPORT_FIXED)));
+  }
+}
+
+// Steps 4-5 plus resolve of 6-7. gammaIn is the backward-advected gamma from
+// step 1. Scaling each donor by max(1,beta_l) performs the paper's clamp
+// without materializing A.
+@compute @workgroup_size(4,4,4)
+fn gatherConservativeDensity(@builtin(global_invocation_id) gid:vec3u){
+  let id=vec3i(gid);if(!valid(id)){return;}
+  if(cellInsideSolid(id)){textureStore(volumeOut,id,vec4f(0.0));textureStore(gammaOut,id,vec4f(0.0));return;}
+  let traced=backwardTraceOffset(id,params.dimsDt.w,params.cellGravity.xyz);let base=id+vec3i(floor(traced));let f=fract(traced);
+  let advectedGamma=textureLoad(gammaIn,id,0).x;var rhoNext=0.0;var gammaNext=0.0;
+  var total=0.0;
+  for(var corner=0u;corner<8u;corner+=1u){total+=transportStencilWeight(base,f,corner);}
+  for(var corner=0u;corner<8u;corner+=1u){
+    let offset=vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));let donor=base+offset;
+    if(total<=1e-9){break;}
+    let weight=transportStencilWeight(base,f,corner)/total;if(weight<=0.0){continue;}
+    let scaled=advectedGamma*weight/max(1.0,betaValue(donor));rhoNext+=scaled*volume(donor);gammaNext+=scaled;
+  }
+  let count=cellCount();let index=linearIndex(id);
+  rhoNext+=f32(atomicLoad(&sharpenDeposits[count+index]))/TRANSPORT_FIXED;
+  gammaNext+=f32(atomicLoad(&sharpenDeposits[2u*count+index]))/TRANSPORT_FIXED;
+  // The prescribed inflow is a mass source external to the conservative
+  // operator. It is bounded only by this cell's remaining surface density.
+  rhoNext+=min(inflowReceiverSource(id,params.dimsDt.w),max(0.0,1.0-rhoNext));
+  textureStore(volumeOut,id,vec4f(max(rhoNext,0.0)));
+  textureStore(gammaOut,id,vec4f(max(gammaNext,0.0)));
+}
+
+// Paper diffusion: for each red/black neighbor pair, equalize gamma and move
+// the corresponding fraction of rho from the higher-gamma cell to the lower.
+// Each invocation writes only its own cell, so paired cells need no atomics.
+fn diffuseDensityGamma(id:vec3i,axis:u32,parity:i32)->vec2f{
+  let coordinate=id[axis];let lower=coordinate-((coordinate-parity)&1);var partner=id;
+  partner[axis]=select(lower,lower+1,coordinate==lower);
+  let ownRho=volume(id);let ownGamma=textureLoad(gammaIn,id,0).x;
+  if(!valid(partner)){return vec2f(ownRho,ownGamma);}
+  let otherRho=volume(partner);let otherGamma=textureLoad(gammaIn,partner,0).x;let average=0.5*(ownGamma+otherGamma);
+  var nextRho=ownRho;
+  if(ownGamma>otherGamma){nextRho-=ownRho*(ownGamma-otherGamma)/max(2.0*ownGamma,1e-9);}
+  else if(ownGamma<otherGamma){nextRho+=otherRho*(otherGamma-ownGamma)/max(2.0*otherGamma,1e-9);}
+  return vec2f(max(nextRho,0.0),average);
+}
+fn storeDensityGamma(id:vec3i,value:vec2f){textureStore(volumeOut,id,vec4f(value.x));textureStore(gammaOut,id,vec4f(value.y));}
+@compute @workgroup_size(4,4,4) fn diffuseGammaX0(@builtin(global_invocation_id) gid:vec3u){let id=vec3i(gid);if(valid(id)){storeDensityGamma(id,diffuseDensityGamma(id,0u,0));}}
+@compute @workgroup_size(4,4,4) fn diffuseGammaX1(@builtin(global_invocation_id) gid:vec3u){let id=vec3i(gid);if(valid(id)){storeDensityGamma(id,diffuseDensityGamma(id,0u,1));}}
+@compute @workgroup_size(4,4,4) fn diffuseGammaY0(@builtin(global_invocation_id) gid:vec3u){let id=vec3i(gid);if(valid(id)){storeDensityGamma(id,diffuseDensityGamma(id,1u,0));}}
+@compute @workgroup_size(4,4,4) fn diffuseGammaY1(@builtin(global_invocation_id) gid:vec3u){let id=vec3i(gid);if(valid(id)){storeDensityGamma(id,diffuseDensityGamma(id,1u,1));}}
+@compute @workgroup_size(4,4,4) fn diffuseGammaZ0(@builtin(global_invocation_id) gid:vec3u){let id=vec3i(gid);if(valid(id)){storeDensityGamma(id,diffuseDensityGamma(id,2u,0));}}
+@compute @workgroup_size(4,4,4) fn diffuseGammaZ1(@builtin(global_invocation_id) gid:vec3u){let id=vec3i(gid);if(valid(id)){storeDensityGamma(id,diffuseDensityGamma(id,2u,1));}}
+// The paper does not choose an axis permutation. volumeIn/gammaIn contain the
+// x-y-z sweep and surfaceIn/pressureIn the z-y-x sweep. Their equal average is
+// invariant when a horizontal D4 transform exchanges those two valid orders.
+@compute @workgroup_size(4,4,4)
+fn averageGammaDiffusion(@builtin(global_invocation_id) gid:vec3u){
+  let id=vec3i(gid);if(!valid(id)){return;}
+  let rho=0.5*(volume(id)+textureLoad(surfaceIn,id,0).x);
+  let gamma=0.5*(textureLoad(gammaIn,id,0).x+textureLoad(pressureIn,id,0).x);
+  textureStore(volumeOut,id,vec4f(max(rho,0.0)));
+  textureStore(gammaOut,id,vec4f(max(gamma,0.0)));
 }
 
 fn diffusionVelocity(p:vec3i)->vec3f{let v=textureLoad(velocityIn,clampCell(p),0).xyz;if(params.boundary.y>0.5&&!valid(p)){return -v;}return v;}
@@ -300,61 +550,27 @@ fn applyVelocityForces(id:vec3i,inputVelocity:vec3f,dt:f32,h:vec3f)->vec3f{
       if(dz!=0.0){v.z+=dt*sigmaOverRho*0.5*(centreCurvature+curvatureAt(qz))*dz/h.z;}
     }
   }
-  v=applyInflowVelocity(id,v);let d=dims();if(id.x==d.x-1){v.x=0.0;}if(id.y==d.y-1){v.y=0.0;}if(id.z==d.z-1){v.z=0.0;}return v;
+  return applyInflowVelocity(id,v);
 }
 
 @compute @workgroup_size(4,4,4)
-fn buildTransport(@builtin(global_invocation_id) gid:vec3u){
-  let padded=vec3i(gid);let d=dims();let id=padded-vec3i(1);
-  if(any(padded>=d+vec3i(2))){return;}
-  if(!valid(id)){textureStore(transportOut,padded,vec4f(0.0));return;}
-  textureStore(transportOut,padded,vec4f(transportVelocity(id),0.0));
-}
-@compute @workgroup_size(4,4,4)
-fn buildFluxScales(@builtin(global_invocation_id) gid:vec3u){
-  let id=vec3i(gid);
-  if(!valid(id)){return;}let dt=params.dimsDt.w;
-  textureStore(fluxScalesOut,id,vec4f(donorScale(id,dt),receiverScale(id,dt),0.0,0.0));
-}
-// Highest cell supported by the authoritative surface in each column;
-// advection skips cells well above it after projection zeroes their faces.
-@compute @workgroup_size(8,8,1)
-fn buildOccupancy(@builtin(global_invocation_id) gid:vec3u){
-  let d=dims();if(gid.x>=u32(d.x)||gid.y>=u32(d.z)){return;}
-  var highest=-1.0;
-  for(var y:i32=d.y-1;y>=0;y-=1){if(surfaceOccupancy(vec3i(i32(gid.x),y,i32(gid.y)))>0.0001){highest=f32(y);break;}}
-  textureStore(heightOut,vec2i(gid.xy),vec4f(highest,-1.0,0.0,0.0));
-}
-fn nearInflow(id:vec3i)->bool{
-  if(inflowStrength()<=0.0){return false;}
-  let axis=inflowAxis();let face=inflowFaceIndex(axis);
-  return id[axis]>=face-1&&id[axis]<=face+2&&inflowApertureFraction(id)>0.0;
-}
-fn aboveOccupancy(id:vec3i)->bool{
-  let d=dims();var occupancy=-1.0;
-  for(var dz:i32=-1;dz<=1;dz+=1){for(var dx:i32=-1;dx<=1;dx+=1){
-    occupancy=max(occupancy,textureLoad(heightIn,vec2i(clamp(id.x+dx,0,d.x-1),clamp(id.z+dz,0,d.z-1)),0).x);
-  }}
-  return f32(id.y)>occupancy+4.0&&!nearInflow(id);
-}
-@compute @workgroup_size(4,4,4)
 fn semiLagrangianAdvection(@builtin(global_invocation_id) gid:vec3u){
   let id=vec3i(gid);if(!valid(id)){return;}let dt=params.dimsDt.w;let h=params.cellGravity.xyz;let cell=vec3f(id);
-  if(aboveOccupancy(id)){textureStore(velocityOut,id,vec4f(0.0));textureStore(volumeOut,id,vec4f(volume(id),0.0,0.0,0.0));textureStore(pressureOut,id,vec4f(0.0));return;}
   var v=vec3f(advectVelocityComponent(cell+vec3f(1.0,0.5,0.5),0u,dt,h),advectVelocityComponent(cell+vec3f(0.5,1.0,0.5),1u,dt,h),advectVelocityComponent(cell+vec3f(0.5,0.5,1.0),2u,dt,h));v=applyVelocityForces(id,v,dt,h);
-  var advected=volume(id);if(transportConservativeVolume()){advected=advectedVolume(id,dt);}textureStore(velocityOut,id,vec4f(v,0.0));textureStore(volumeOut,id,vec4f(advected,0.0,0.0,0.0));textureStore(pressureOut,id,vec4f(0.0));
+  // Surface density is advanced by the dedicated Sec. 3.4 gamma/beta passes.
+  textureStore(velocityOut,id,vec4f(v,0.0));textureStore(volumeOut,id,vec4f(volume(id),0.0,0.0,0.0));textureStore(pressureOut,id,vec4f(0.0));
 }
 
 @compute @workgroup_size(4,4,4)
 fn advect(@builtin(global_invocation_id) gid: vec3u) {
   let id=vec3i(gid); if (!valid(id)) { return; }
-  if(aboveOccupancy(id)){textureStore(velocityOut,id,vec4f(0.0));textureStore(volumeOut,id,vec4f(volume(id),0.0,0.0,0.0));textureStore(pressureOut,id,vec4f(0.0));return;}
+  carryBoundaryVelocity(id);
   let dt=params.dimsDt.w; let h=params.cellGravity.xyz;
   let cell=vec3f(id);var v=vec3f(advectVelocityComponent(cell+vec3f(1.0,0.5,0.5),0u,dt,h),advectVelocityComponent(cell+vec3f(0.5,1.0,0.5),1u,dt,h),advectVelocityComponent(cell+vec3f(0.5,0.5,1.0),2u,dt,h));
-  var advected=volume(id);if(transportConservativeVolume()){advected=advectedVolume(id,dt);}let d=dims();
-  if (id.x==d.x-1) { v.x=0.0; }
-  if (id.y==d.y-1) { v.y=0.0; }
-  if (id.z==d.z-1) { v.z=0.0; }
+  let advected=volume(id);let d=dims();
+  if (id.x==d.x-1) { v.x=faceVelocity(id).x; }
+  if (id.y==d.y-1&&params.boundary.w<=0.5) { v.y=faceVelocity(id).y; }
+  if (id.z==d.z-1) { v.z=faceVelocity(id).z; }
   textureStore(velocityOut,id,vec4f(v,0.0));
   textureStore(volumeOut,id,vec4f(advected,0.0,0.0,0.0));
   textureStore(pressureOut,id,vec4f(0.0));
@@ -363,28 +579,49 @@ fn advect(@builtin(global_invocation_id) gid: vec3u) {
 @compute @workgroup_size(4,4,4)
 fn reverseAdvection(@builtin(global_invocation_id) gid:vec3u){
   let id=vec3i(gid);if(!valid(id)){return;}
-  if(aboveOccupancy(id)){textureStore(velocityOut,id,vec4f(0.0));return;}
+  carryBoundaryVelocity(id);
   let dt=params.dimsDt.w;let h=params.cellGravity.xyz;let cell=vec3f(id);
   var v=vec3f(advectVelocityComponent(cell+vec3f(1.0,0.5,0.5),0u,-dt,h),advectVelocityComponent(cell+vec3f(0.5,1.0,0.5),1u,-dt,h),advectVelocityComponent(cell+vec3f(0.5,0.5,1.0),2u,-dt,h));let d=dims();
-  if(id.x==d.x-1){v.x=0.0;}if(id.y==d.y-1){v.y=0.0;}if(id.z==d.z-1){v.z=0.0;}textureStore(velocityOut,id,vec4f(v,0.0));
+  if(id.x==d.x-1){v.x=faceVelocity(id).x;}if(id.y==d.y-1&&params.boundary.w<=0.5){v.y=faceVelocity(id).y;}if(id.z==d.z-1){v.z=faceVelocity(id).z;}textureStore(velocityOut,id,vec4f(v,0.0));
 }
 
 fn boundedMacCormack(id:vec3i,position:vec3f,component:u32,dt:f32,h:vec3f,predicted:f32,original:f32,reversed:f32)->f32{
   var offset=vec3f(0.5);offset[component]=1.0;var lowerCoordinate=vec3f(0.0);lowerCoordinate[component]=-1.0;
-  let q=clamp(departurePoint(position,dt,h)-offset,lowerCoordinate,vec3f(dims()-vec3i(1)));let b=vec3i(floor(q));
-  var lower=sampledFaceVelocity(b,component);var upper=lower;
-  for(var corner:u32=1u;corner<8u;corner+=1u){let cornerOffset=vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));let value=sampledFaceVelocity(b+cornerOffset,component);lower=min(lower,value);upper=max(upper,value);}
+  let q=clamp(departurePoint(position,dt,h)-offset,lowerCoordinate,vec3f(dims()-vec3i(1)));let b=vec3i(floor(q));let fraction=fract(q);
+  var donorWeights=array<f32,8>();var donorValues=array<f32,8>();
+  donorValues[0]=sampledFaceVelocity(b,component);var lower=1e30;var upper=-1e30;
+  donorWeights[0]=(1.0-fraction.x)*(1.0-fraction.y)*(1.0-fraction.z);
+  if(donorWeights[0]>0.0){lower=donorValues[0];upper=donorValues[0];}
+  for(var corner:u32=1u;corner<8u;corner+=1u){
+    let cornerOffset=vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));let value=sampledFaceVelocity(b+cornerOffset,component);
+    let weights=select(vec3f(1.0)-fraction,fraction,vec3f(cornerOffset)>vec3f(0.5));
+    donorWeights[corner]=weights.x*weights.y*weights.z;donorValues[corner]=value;
+    if(donorWeights[corner]>0.0){lower=min(lower,value);upper=max(upper,value);}
+  }
   let corrected=predicted+0.5*(original-reversed);
-  return select(corrected,predicted,corrected<lower||corrected>upper);
+  let revert=corrected<lower||corrected>upper;
+  if(MACCORMACK_AUDIT_ENABLED){
+    let record=(linearIndex(id)*3u+component)*8u;
+    macCormackAudit[record]=vec4f(q,f32(b.x));
+    macCormackAudit[record+1u]=vec4f(f32(b.y),f32(b.z),fraction.x,fraction.y);
+    macCormackAudit[record+2u]=vec4f(fraction.z,predicted,original,reversed);
+    macCormackAudit[record+3u]=vec4f(corrected,lower,upper,select(0.0,1.0,revert));
+    macCormackAudit[record+4u]=vec4f(donorWeights[0],donorWeights[1],donorWeights[2],donorWeights[3]);
+    macCormackAudit[record+5u]=vec4f(donorWeights[4],donorWeights[5],donorWeights[6],donorWeights[7]);
+    macCormackAudit[record+6u]=vec4f(donorValues[0],donorValues[1],donorValues[2],donorValues[3]);
+    macCormackAudit[record+7u]=vec4f(donorValues[4],donorValues[5],donorValues[6],donorValues[7]);
+  }
+  return select(corrected,predicted,revert);
 }
 
 @compute @workgroup_size(4,4,4)
 fn correctAdvection(@builtin(global_invocation_id) gid:vec3u){
   let id=vec3i(gid);if(!valid(id)){return;}
-  if(aboveOccupancy(id)){textureStore(velocityOut,id,vec4f(0.0));return;}
+  carryBoundaryVelocity(id);
   let dt=params.dimsDt.w;let h=params.cellGravity.xyz;let cell=vec3f(id);
   let predicted=textureLoad(predictedVelocityIn,id,0).xyz;let original=textureLoad(velocityIn,id,0).xyz;let reversed=textureLoad(reversedVelocityIn,id,0).xyz;
-  var v=vec3f(boundedMacCormack(id,cell+vec3f(1.0,0.5,0.5),0u,dt,h,predicted.x,original.x,reversed.x),boundedMacCormack(id,cell+vec3f(0.5,1.0,0.5),1u,dt,h,predicted.y,original.y,reversed.y),boundedMacCormack(id,cell+vec3f(0.5,0.5,1.0),2u,dt,h,predicted.z,original.z,reversed.z));v=applyVelocityForces(id,v,dt,h);
+  var v=vec3f(boundedMacCormack(id,cell+vec3f(1.0,0.5,0.5),0u,dt,h,predicted.x,original.x,reversed.x),boundedMacCormack(id,cell+vec3f(0.5,1.0,0.5),1u,dt,h,predicted.y,original.y,reversed.y),boundedMacCormack(id,cell+vec3f(0.5,0.5,1.0),2u,dt,h,predicted.z,original.z,reversed.z));v=applyVelocityForces(id,v,dt,h);let d=dims();
+  if(id.x==d.x-1){v.x=original.x;}if(id.y==d.y-1&&params.boundary.w<=0.5){v.y=original.y;}if(id.z==d.z-1){v.z=original.z;}
   textureStore(velocityOut,id,vec4f(v,0.0));
 }
 
@@ -394,34 +631,40 @@ fn buildHeight(@builtin(global_invocation_id) gid:vec3u){let d=dims();if(gid.x>=
 fn faceWorld(id:vec3i,axis:u32)->vec3f{
   var world=worldCell(id);world[axis]+=0.5*params.cellGravity.xyz[axis];return world;
 }
-// Positive-side face velocity with the paper's VOS constraint (Sec 3.9.1): a
-// face touching a rigid-solid cell carries the solid velocity, which is what
-// makes a moving body sweep water out of its path instead of ignoring it.
-fn constrainedFaceVelocity(id:vec3i,axis:u32,checkSolid:bool)->f32{
+fn domainFaceFluidVelocity(id:vec3i,axis:u32)->f32{
   var neighbor=id;neighbor[axis]+=1;
-  // The terrain heightfield is a static solid: a face touching it carries the
-  // ground's zero velocity in the divergence, exactly like a wall.
-  if(cellInsideTerrain(id)||cellInsideTerrain(neighbor)){return 0.0;}
-  if(checkSolid){
-    let body=max(cellRigidBody(id),cellRigidBody(neighbor));
-    if(body>=0){return rigidVelocityAt(body,faceWorld(id,axis))[axis];}
-  }
-  return faceVelocity(id)[axis];
+  if(valid(id)){return faceVelocity(id)[axis];}
+  if(valid(neighbor)&&id[axis]==-1){return boundaryVelocity(neighbor)[axis];}
+  return 0.0;
+}
+fn domainFaceSolidVelocity(id:vec3i,axis:u32,checkSolid:bool)->f32{
+  var neighbor=id;neighbor[axis]+=1;
+  if(!valid(id)||!valid(neighbor)||(!checkSolid&&!hasTerrain())){return 0.0;}
+  return pressureFaceData(id,axis)[axis];
 }
 fn divergenceAt(id: vec3i, checkSolid: bool) -> f32 {
-  let h=params.cellGravity.xyz;
-  return (constrainedFaceVelocity(id,0u,checkSolid)-constrainedFaceVelocity(id-vec3i(1,0,0),0u,checkSolid))/h.x
-       + (constrainedFaceVelocity(id,1u,checkSolid)-constrainedFaceVelocity(id-vec3i(0,1,0),1u,checkSolid))/h.y
-       + (constrainedFaceVelocity(id,2u,checkSolid)-constrainedFaceVelocity(id-vec3i(0,0,1),2u,checkSolid))/h.z;
+  // CM11a Eqs. 8-10. Vi is the non-solid cell fraction; V+/- are the
+  // corresponding face fractions. This is not the common blended-flux
+  // shortcut V u + (1-V) us, whose solid terms are algebraically different.
+  let h=params.cellGravity.xyz;let vi=cellOpenFraction(id);var result=0.0;
+  for(var axis=0u;axis<3u;axis+=1u){
+    var minus=id;minus[axis]-=1;
+    let vp=pressureFaceVolumeFraction(id,axis);let vm=pressureFaceVolumeFraction(minus,axis);
+    let up=domainFaceFluidVelocity(id,axis);let um=domainFaceFluidVelocity(minus,axis);
+    let usp=domainFaceSolidVelocity(id,axis,checkSolid);let usm=domainFaceSolidVelocity(minus,axis,checkSolid);
+    result+=(vp*up-vm*um)/h[axis]+(vp-vi)*usp-(vm-vi)*usm;
+  }
+  return result;
 }
 // Mass-Conserving Eulerian Liquid Simulation Sec 3.7: cells holding more
 // density than they represent add min(lambda (rho'-1), eta) artificial
-// divergence (lambda = 0.5, eta = 1 per the paper, expressed as a rate
-// against its 1/30 s step) so the pressure solve pushes the excess out.
+// divergence (lambda = 0.5, eta = 1 per the paper), divided by dx, so the
+// pressure solve pushes the excess out.
 fn volumeCorrectionDivergence(id: vec3i) -> f32 {
-  let excess=max(0.0,volume(id)-1.0);
+  let excess=max(0.0,pressureDensity(id)-1.0);
   if(excess<=0.0){return 0.0;}
-  return min(0.5*excess,1.0)*30.0;
+  let dx=min(params.cellGravity.x,min(params.cellGravity.y,params.cellGravity.z));
+  return min(0.5*excess,1.0)/dx;
 }
 
 fn curvatureAt(id:vec3i)->f32{
@@ -429,80 +672,58 @@ fn curvatureAt(id:vec3i)->f32{
   return -((interfaceNormal(id+vec3i(1,0,0)).x-interfaceNormal(id-vec3i(1,0,0)).x)/(2.0*h.x)+(interfaceNormal(id+vec3i(0,1,0)).y-interfaceNormal(id-vec3i(0,1,0)).y)/(2.0*h.y)+(interfaceNormal(id+vec3i(0,0,1)).z-interfaceNormal(id-vec3i(0,0,1)).z)/(2.0*h.z));
 }
 
-fn stencilCoefficient(id:vec3i,neighbor:vec3i,axis:u32,checkSolid:bool)->f32{
-  if(!valid(neighbor)){return 0.0;}
-  // A rigid-solid or terrain neighbor is a Neumann boundary exactly like a
-  // wall; its motion enters through the divergence, not the stencil.
-  if(cellInsideTerrain(neighbor)){return 0.0;}
-  if(checkSolid&&cellRigidBody(neighbor)>=0){return 0.0;}
-  let h=params.cellGravity.xyz[axis];
-  if(liquid(neighbor)){return 1.0/(h*h);}
-  return 1.0/(interfaceFraction(volume(id),volume(neighbor))*h*h);
-}
-
-fn stencilPressure(id:vec3i,neighbor:vec3i,axis:u32,checkSolid:bool)->f32{
-  if(!valid(neighbor)||!liquid(neighbor)){return 0.0;}
-  return stencilCoefficient(id,neighbor,axis,checkSolid)*pressureValue(neighbor);
-}
-
-@compute @workgroup_size(4,4,4)
-fn jacobi(@builtin(global_invocation_id) gid: vec3u) {
-  let id=vec3i(gid); if (!valid(id)) { return; }
-  if (!liquid(id)) { textureStore(pressureOut,id,vec4f(0.0)); return; }
-  // Ground cells are solid, not pressure unknowns, like body interiors below.
-  if(cellInsideTerrain(id)){textureStore(pressureOut,id,vec4f(0.0));return;}
-  let checkSolid=nearAnyBody(worldCell(id));
-  // Paper Sec 3.9.1: cells occupied by a rigid body are solid, not pressure
-  // unknowns. Without this the sphere interior stays "water" and the solve
-  // never displaces it.
-  if(checkSolid&&cellRigidBody(id)>=0){textureStore(pressureOut,id,vec4f(0.0));return;}
-  let old=textureLoad(pressureIn,id,0).x;let ex=vec3i(1,0,0);let ey=vec3i(0,1,0);let ez=vec3i(0,0,1);
-  let diagonal=stencilCoefficient(id,id-ex,0u,checkSolid)+stencilCoefficient(id,id+ex,0u,checkSolid)+stencilCoefficient(id,id-ey,1u,checkSolid)+stencilCoefficient(id,id+ey,1u,checkSolid)+stencilCoefficient(id,id-ez,2u,checkSolid)+stencilCoefficient(id,id+ez,2u,checkSolid);
-  let sum=stencilPressure(id,id-ex,0u,checkSolid)+stencilPressure(id,id+ex,0u,checkSolid)+stencilPressure(id,id-ey,1u,checkSolid)+stencilPressure(id,id+ey,1u,checkSolid)+stencilPressure(id,id-ez,2u,checkSolid)+stencilPressure(id,id+ez,2u,checkSolid);
-  // Subtracted so the projection leaves div_new = +c at overfull cells (an
-  // outward drain); added it would leave div_new = -c and feed the excess.
-  let rhs=params.physical.x*(divergenceAt(id,checkSolid)-volumeCorrectionDivergence(id))/params.dimsDt.w;
-  // A liquid cell sealed on all six sides (tight body/wall gap) has no
-  // stencil; leave it unconstrained instead of dividing by epsilon.
-  if(diagonal<=0.0){textureStore(pressureOut,id,vec4f(0.0));return;}
-  let next=(sum-rhs)/max(diagonal,1e-9);
-  textureStore(pressureOut,id,vec4f(mix(old,next,0.8),0.0,0.0,0.0));
-}
-
 @compute @workgroup_size(4,4,4)
 fn project(@builtin(global_invocation_id) gid: vec3u) {
   let id=vec3i(gid); if (!valid(id)) { return; }
-  let h=params.cellGravity.xyz;let scale=params.dimsDt.w/params.physical.x;var v=velocity(id);let d=dims();
-  let p0=select(0.0,pressureValue(id),liquid(id));
+  let h=params.cellGravity.xyz;let scale=params.dimsDt.w/params.physical.x;var v=velocity(id);var boundaryV=boundaryVelocity(id);let d=dims();
   let ex=id+vec3i(1,0,0);let ey=id+vec3i(0,1,0);let ez=id+vec3i(0,0,1);
-  if(id.x==d.x-1){v.x=0.0;}else if(liquid(id)||liquid(ex)){let p1=select(0.0,pressureValue(ex),liquid(ex));let theta=select(interfaceFraction(volume(ex),volume(id)),interfaceFraction(volume(id),volume(ex)),liquid(id));v.x-=scale*(p1-p0)/(h.x*select(theta,1.0,liquid(id)&&liquid(ex)));}else{v.x=0.0;}
-  if(id.y==d.y-1){v.y=0.0;}else if(liquid(id)||liquid(ey)){let p1=select(0.0,pressureValue(ey),liquid(ey));let theta=select(interfaceFraction(volume(ey),volume(id)),interfaceFraction(volume(id),volume(ey)),liquid(id));v.y-=scale*(p1-p0)/(h.y*select(theta,1.0,liquid(id)&&liquid(ey)));}else{v.y=0.0;}
-  if(id.z==d.z-1){v.z=0.0;}else if(liquid(id)||liquid(ez)){let p1=select(0.0,pressureValue(ez),liquid(ez));let theta=select(interfaceFraction(volume(ez),volume(id)),interfaceFraction(volume(id),volume(ez)),liquid(id));v.z-=scale*(p1-p0)/(h.z*select(theta,1.0,liquid(id)&&liquid(ez)));}else{v.z=0.0;}
-  // Faces the terrain heightfield covers are no-flux ground, like the floor.
-  if(hasTerrain()){
-    if(cellInsideTerrain(id)||cellInsideTerrain(ex)){v.x=0.0;}
-    if(cellInsideTerrain(id)||cellInsideTerrain(ey)){v.y=0.0;}
-    if(cellInsideTerrain(id)||cellInsideTerrain(ez)){v.z=0.0;}
+  let p0=select(0.0,projectPressureValue(id),pressureLiquid(id));
+  let neighbors=array<vec3i,3>(ex,ey,ez);
+  for(var axis=0u;axis<3u;axis+=1u){
+    let neighbor=neighbors[axis];
+    if(id[axis]==0){
+      var halo=id;halo[axis]-=1;
+      let boundaryOpen=pressureFaceVolumeFraction(halo,axis);
+      if(boundaryOpen>1e-5&&pressureLiquid(id)){boundaryV[axis]-=scale*(p0-projectPressureValue(halo))/h[axis];}
+      else{boundaryV[axis]=0.0;}
+    }
+    if(id[axis]==d[axis]-1){
+      if(axis==1u&&params.boundary.w>0.5){
+        if(pressureLiquid(id)){
+          let theta=ghostFluidFraction(id,neighbor);
+          v.y-=scale*(0.0-p0)/(h.y*theta);
+        }else{v.y=0.0;}
+      }else if(pressureLiquid(id)){
+        let boundaryOpen=pressureFaceVolumeFraction(id,axis);
+        if(boundaryOpen>1e-5){
+          // A partially open solid face couples to the CM11a p_min=0 halo.
+          v[axis]-=scale*(projectPressureValue(neighbor)-p0)/h[axis];
+        }else{v[axis]=domainFaceSolidVelocity(id,axis,true);}
+      }else{v[axis]=0.0;}
+      continue;
+    }
+    let pressureFace=pressureFaceData(id,axis);let open=select(1.0,pressureFace.w,hasTerrain()||nearAnyBody(faceWorld(id,axis)));
+    if(open<=1e-5){v[axis]=pressureFace[axis];continue;}
+    let centreLiquid=pressureLiquid(id);let neighborLiquid=pressureLiquid(neighbor);
+    if(centreLiquid||neighborLiquid){
+      let p1=select(0.0,projectPressureValue(neighbor),neighborLiquid);
+      var theta=1.0;
+      if(centreLiquid&&!neighborLiquid){theta=ghostFluidFraction(id,neighbor);}
+      if(!centreLiquid&&neighborLiquid){theta=ghostFluidFraction(neighbor,id);}
+      v[axis]-=scale*(p1-p0)/(h[axis]*theta);
+    }else{v[axis]=0.0;}
   }
-  // Faces covered by a rigid body move with the body (paper Sec 3.9.1); the
-  // VOF fluxes then transport volume out of the body's path. Domain-edge
-  // faces stay walls.
-  if(nearAnyBody(worldCell(id))){
-    let bodyX=max(cellRigidBody(id),cellRigidBody(ex));
-    let bodyY=max(cellRigidBody(id),cellRigidBody(ey));
-    let bodyZ=max(cellRigidBody(id),cellRigidBody(ez));
-    if(bodyX>=0&&id.x<d.x-1){v.x=rigidVelocityAt(bodyX,faceWorld(id,0u)).x;}
-    if(bodyY>=0&&id.y<d.y-1){v.y=rigidVelocityAt(bodyY,faceWorld(id,1u)).y;}
-    if(bodyZ>=0&&id.z<d.z-1){v.z=rigidVelocityAt(bodyZ,faceWorld(id,2u)).z;}
-  }
-  v=applyInflowVelocity(id,v);textureStore(velocityOut,id,vec4f(v,0.0)); textureStore(volumeOut,id,vec4f(textureLoad(volumeIn,id,0).x));
+  v=applyInflowVelocity(id,v);textureStore(velocityOut,id,vec4f(v,0.0));storeBoundaryVelocity(id,boundaryV); textureStore(volumeOut,id,vec4f(textureLoad(volumeIn,id,0).x));
 }
 
-// Brinkman-style immersed boundary: drive wet cells inside each moving primitive
-// toward the local solid velocity and accumulate the exact opposite impulse.
+// Moving-solid bookkeeping after the variational projection.  The old
+// Brinkman velocity blend changed face velocities after incompressibility and
+// reintroduced divergence; solid motion is now imposed inside the projection,
+// so this pass only records the diagnostic/reaction load.  Sec. 3.6 already
+// performs the conservative covered-density redistribution before projection.
 @compute @workgroup_size(4,4,4)
 fn coupleRigid(@builtin(global_invocation_id) gid:vec3u){
-  let id=vec3i(gid);if(!valid(id)){return;}let phi=volume(id);let wetFraction=surfaceOccupancy(id);var v=velocity(id);let h=params.cellGravity.xyz;
+  let id=vec3i(gid);if(!valid(id)){return;}carryBoundaryVelocity(id);let phi=volume(id);let wetFraction=surfaceOccupancy(id);var v=velocity(id);let h=params.cellGravity.xyz;
   let world=vec3f(-0.5*params.container.x+(f32(id.x)+0.5)*h.x,(f32(id.y)+0.5)*h.y,-0.5*params.container.z+(f32(id.z)+0.5)*h.z);
   let bodyCount=u32(round(params.boundary.z));let cellMass=params.physical.x*h.x*h.y*h.z*wetFraction;let blend=clamp(45.0*params.dimsDt.w,0.0,1.0);var coupledBody=12u;var solidFraction=0.0;
   // Match the adaptive voxelizer's overlap rule: the body with the greatest
@@ -511,7 +732,7 @@ fn coupleRigid(@builtin(global_invocation_id) gid:vec3u){
   for(var bodyIndex:u32=0u;bodyIndex<12u;bodyIndex+=1u){if(bodyIndex>=bodyCount){break;}let candidate=bodySolidFraction(rigidBodies[bodyIndex],id);if(candidate>solidFraction){solidFraction=candidate;coupledBody=bodyIndex;}}
   if(coupledBody<12u){
     let bodyIndex=coupledBody;let body=rigidBodies[bodyIndex];
-    let arm=world-body.positionShape.xyz;let solidVelocity=body.linearVelocity.xyz+cross(body.angularVelocity.xyz,arm);let fluidVelocity=v;let ambientVelocity=ambientFluidVelocity(body,id,fluidVelocity);let fluidImpulse=cellMass*solidFraction*(solidVelocity-fluidVelocity)*blend;v+=fluidImpulse/max(cellMass,1e-9);
+    let arm=world-body.positionShape.xyz;let solidVelocity=body.linearVelocity.xyz+cross(body.angularVelocity.xyz,arm);let fluidVelocity=v;let ambientVelocity=ambientFluidVelocity(body,id,fluidVelocity);let fluidImpulse=cellMass*solidFraction*(solidVelocity-fluidVelocity)*blend;
     let reaction=-fluidImpulse;let torque=cross(arm,reaction);let base=bodyIndex*12u;
     atomicAdd(&rigidExchange[base],i32(round(reaction.x*1000000.0)));atomicAdd(&rigidExchange[base+1u],i32(round(reaction.y*1000000.0)));atomicAdd(&rigidExchange[base+2u],i32(round(reaction.z*1000000.0)));
     atomicAdd(&rigidExchange[base+3u],i32(round(torque.x*1000000.0)));atomicAdd(&rigidExchange[base+4u],i32(round(torque.y*1000000.0)));atomicAdd(&rigidExchange[base+5u],i32(round(torque.z*1000000.0)));
@@ -519,40 +740,10 @@ fn coupleRigid(@builtin(global_invocation_id) gid:vec3u){
     atomicAdd(&rigidExchange[base+6u],i32(round(displacedWeight*65536.0)));
     atomicAdd(&rigidExchange[base+7u],i32(round(displacedWeight*ambientVelocity.x*10000.0)));atomicAdd(&rigidExchange[base+8u],i32(round(displacedWeight*ambientVelocity.y*10000.0)));atomicAdd(&rigidExchange[base+9u],i32(round(displacedWeight*ambientVelocity.z*10000.0)));
   }
-  // Paper Sec 3.9.1 phi-s: inside a body the advected field is meaningless, so
-  // blend it toward the (1-s)-weighted neighbor average. This is what lets the
-  // body displace its water column instead of sealing a phantom plug of
-  // liquid inside and carrying it around.
-  var phiNext=phi;
-  if(nearAnyBody(world)){
-    let s=cellSolidFraction(id);
-    if(s>0.0){
-      var open=0.0;var openSum=0.0;var total=0.0;
-      let offsets=array<vec3i,6>(vec3i(-1,0,0),vec3i(1,0,0),vec3i(0,-1,0),vec3i(0,1,0),vec3i(0,0,-1),vec3i(0,0,1));
-      for(var index=0;index<6;index+=1){
-        let np=clampCell(id+offsets[index]);
-        let neighborVolume=volume(np);let neighborOpen=(1.0-cellSolidFraction(np))*(1.0-cellTerrainFraction(np));total+=neighborVolume;
-        open+=neighborOpen;openSum+=neighborOpen*neighborVolume;
-      }
-      // A one-cell stencil diffuses a carried interior plug over several body
-      // radii. Direct lateral open samples preserve the same local phi-s target
-      // while making it follow a fast body through the interface in one step.
-      if(coupledBody<12u&&i32(round(rigidBodies[coupledBody].positionShape.w))==0&&length(rigidBodies[coupledBody].linearVelocity.xyz)>0.25){
-        let radius=max(rigidBodies[coupledBody].dimensions.w,0.0);let reach=vec3i(ceil(vec3f(2.0*radius)/h))+vec3i(2);
-        let far=array<vec3i,4>(vec3i(-reach.x,0,0),vec3i(reach.x,0,0),vec3i(0,0,-reach.z),vec3i(0,0,reach.z));
-        for(var index=0;index<4;index+=1){let np=id+far[index];if(valid(np)){let neighborOpen=(1.0-cellSolidFraction(np))*(1.0-cellTerrainFraction(np));open+=neighborOpen;openSum+=neighborOpen*volume(np);}}
-      }
-      let relaxTarget=select(total/6.0,openSum/max(open,1.0),open>0.0);
-      // This is a physical-time relaxation, not a per-dispatch blend. Using s
-      // directly made the same simulated second displace far more VOF when it
-      // was divided into smaller steps (the visible volume-loss symptom).
-      phiNext=mix(phi,relaxTarget,s*blend);
-    }
-  }
   // The nozzle mouth is an open boundary. Coupling the visual nozzle body
   // must not replace the prescribed reservoir velocity at that opening.
   v=applyInflowVelocity(id,v);
-  textureStore(velocityOut,id,vec4f(v,0.0));textureStore(volumeOut,id,vec4f(phiNext));
+  textureStore(velocityOut,id,vec4f(v,0.0));textureStore(volumeOut,id,vec4f(phi));
 }
 
 // Paper Sec 3.9.1 phi-s for the resident adaptive level set. While an adaptive
@@ -600,6 +791,10 @@ fn relaxSolidPhi(@builtin(global_invocation_id) gid:vec3u){
 // tracing along the density gradient to the 0.5 iso-contour and depositing
 // fixed-point trilinear weights; pass 3 folds the deposits back in.
 fn cellInsideSolid(p:vec3i)->bool{
+  // TraceAlongField must stop at a closed domain wall just as it stops at an
+  // embedded solid. The only non-solid invalid coordinate is above an open
+  // top, where the exterior is deliberately air.
+  if(!valid(p)){return !(p.y>=dims().y&&params.boundary.w>0.5);}
   if(cellInsideTerrain(p)){return true;}
   let bodyCount=u32(round(params.boundary.z));if(bodyCount==0u){return false;}
   let world=worldCell(p);
@@ -610,9 +805,15 @@ fn sharpenDeltaRho(q:vec3i)->f32{
   let rho=volume(q);
   if(cellInsideSolid(q)){return 0.0;}
   let h=params.cellGravity.xyz;let deltaT=3.0*params.dimsDt.w;let tau=0.4;
-  let sxp=-(rho-volume(q-vec3i(1,0,0)))*deltaT/h.x;let sxm=-(volume(q+vec3i(1,0,0))-rho)*deltaT/h.x;
-  let syp=-(rho-volume(q-vec3i(0,1,0)))*deltaT/h.y;let sym=-(volume(q+vec3i(0,1,0))-rho)*deltaT/h.y;
-  let szp=-(rho-volume(q-vec3i(0,0,1)))*deltaT/h.z;let szm=-(volume(q+vec3i(0,0,1))-rho)*deltaT/h.z;
+  let ex=vec3i(1,0,0);let ey=vec3i(0,1,0);let ez=vec3i(0,0,1);
+  // Sec. 3.6 Eqs. 18-19 use non-solid face aperture area V^f. This is
+  // deliberately distinct from CM11a's face-centred overlapping dual volume.
+  let openXp=faceOpenFraction(q,0u);let openXm=faceOpenFraction(q-ex,0u);
+  let openYp=faceOpenFraction(q,1u);let openYm=faceOpenFraction(q-ey,1u);
+  let openZp=faceOpenFraction(q,2u);let openZm=faceOpenFraction(q-ez,2u);
+  let sxp=-(rho*max(openXp,0.0)-volume(q-ex)*max(openXm,0.0))*deltaT/h.x;let sxm=-(volume(q+ex)*max(openXp,0.0)-rho*max(openXm,0.0))*deltaT/h.x;
+  let syp=-(rho*max(openYp,0.0)-volume(q-ey)*max(openYm,0.0))*deltaT/h.y;let sym=-(volume(q+ey)*max(openYp,0.0)-rho*max(openYm,0.0))*deltaT/h.y;
+  let szp=-(rho*max(openZp,0.0)-volume(q-ez)*max(openZm,0.0))*deltaT/h.z;let szm=-(volume(q+ez)*max(openZp,0.0)-rho*max(openZm,0.0))*deltaT/h.z;
   let gradPlus=sqrt(max(max(sxp,0.0)*max(sxp,0.0),min(sxm,0.0)*min(sxm,0.0))+max(max(syp,0.0)*max(syp,0.0),min(sym,0.0)*min(sym,0.0))+max(max(szp,0.0)*max(szp,0.0),min(szm,0.0)*min(szm,0.0)));
   let gradMinus=sqrt(max(min(sxp,0.0)*min(sxp,0.0),max(sxm,0.0)*max(sxm,0.0))+max(min(syp,0.0)*min(syp,0.0),max(sym,0.0)*max(sym,0.0))+max(min(szp,0.0)*min(szp,0.0),max(szm,0.0)*max(szm,0.0)));
   var maximumDifference=0.0;
@@ -640,18 +841,11 @@ fn sharpenScatter(@builtin(global_invocation_id) gid:vec3u){
     if(sampleVolume(p)>=0.5||travelled>=maximumDistance){break;}
     let g=volumeGradient(vec3i(floor(p)));let magnitude=length(g);
     if(magnitude<1e-6){break;}
-    let candidate=p+g/magnitude*stepLength;
+    let distance=min(stepLength,maximumDistance-travelled);
+    let candidate=p+g/magnitude*distance;
     if(cellInsideSolid(vec3i(floor(candidate)))){break;}
-    p=candidate;travelled+=stepLength;
-  }
-  // The paper assumes the 0.5 iso-contour lies within D cells of every
-  // sharpened cell. In diffused low-density regions no contour exists
-  // nearby, and depositing at the trace end concentrates fog at its local
-  // maxima until free-floating droplets nucleate above the water. When the
-  // trace fails to reach liquid, return the mass to its own cell instead.
-  if(sampleVolume(p)<0.5){
-    let dd=dims();let ownIndex=id.x+dd.x*(id.y+dd.y*id.z);
-    atomicAdd(&sharpenDeposits[u32(ownIndex)],i32(round(-deltaRho*1048576.0)));return;
+    p=candidate;travelled+=distance;
+    if(sampleVolume(p)>=0.5){break;}
   }
   let anchor=p-vec3f(0.5);let cell=vec3i(floor(anchor));let f=fract(anchor);
   var weights=array<f32,8>();var indices=array<i32,8>();var total=0.0;
@@ -662,10 +856,6 @@ fn sharpenScatter(@builtin(global_invocation_id) gid:vec3u){
     var w=select(1.0-f.x,f.x,offset.x==1)*select(1.0-f.y,f.y,offset.y==1)*select(1.0-f.z,f.z,offset.z==1);
     var index=-1;
     if(valid(destination)&&!cellInsideSolid(destination)){index=destination.x+d.x*(destination.y+d.y*destination.z);}else{w=0.0;}
-    // Corners without remaining capacity are skipped so deposits cannot push
-    // a cell past one, where the advection clamp would destroy the excess;
-    // any residual overshoot drains through the correction divergence below.
-    if(w>0.0&&volume(destination)>=1.0){w=0.0;}
     weights[corner]=w;indices[corner]=index;total+=w;
   }
   if(total<=1e-8){
@@ -685,77 +875,88 @@ fn sharpenResolve(@builtin(global_invocation_id) gid:vec3u){
   textureStore(volumeOut,id,vec4f(textureLoad(volumeIn,id,0).x+deposit));
 }
 
-// A cell belongs to the correction band when it is fractional or shares a
-// face with the opposite phase. Including the adjacent full/empty cell makes
-// the controller useful even when the initial VOF is perfectly binary.
-fn volumeCorrectionBand(id:vec3i)->bool{
-  if(!valid(id)||cellInsideSolid(id)){return false;}
-  let alpha=clamp(volume(id),0.0,1.0);
-  if(alpha>0.001&&alpha<0.999){return true;}
-  let phase=alpha>=0.5;
-  let offsets=array<vec3i,6>(vec3i(-1,0,0),vec3i(1,0,0),vec3i(0,-1,0),vec3i(0,1,0),vec3i(0,0,-1),vec3i(0,0,1));
-  for(var index=0;index<6;index+=1){
-    let neighbor=id+offsets[index];
-    if(valid(neighbor)&&!cellInsideSolid(neighbor)&&(clamp(volume(neighbor),0.0,1.0)>=0.5)!=phase){return true;}
+// Sec. 3.6: when rho exceeds V, trace the excess for S*dx along the gradient
+// of the solid signed-distance field (positive away from the union of solids).
+fn solidSignedDistance(world:vec3f)->f32{
+  var distance=1e20;
+  if(hasTerrain()){
+    let h=params.cellGravity.xyz;
+    let x=i32(floor((world.x+0.5*params.container.x)/h.x));
+    let z=i32(floor((world.z+0.5*params.container.z)/h.z));
+    distance=min(distance,world.y-terrainHeightCells(x,z)*h.y);
   }
-  return false;
-}
-
-@compute @workgroup_size(4,4,4)
-fn measureVolumeCorrection(@builtin(global_invocation_id) gid:vec3u){
-  let id=vec3i(gid);if(!valid(id)){return;}
-  let alpha=clamp(volume(id),0.0,1.0);
-  atomicAdd(&reductions[4],u32(alpha*2048.0+0.5));
-  if(volumeCorrectionBand(id)){
-    atomicAdd(&reductions[5],u32((1.0-alpha)*2048.0+0.5));
-    atomicAdd(&reductions[6],u32(alpha*2048.0+0.5));
+  let bodyCount=u32(round(params.boundary.z));
+  for(var bodyIndex=0u;bodyIndex<12u;bodyIndex+=1u){
+    if(bodyIndex>=bodyCount){break;}
+    distance=min(distance,rigidSignedDistance(rigidBodies[bodyIndex],world));
   }
+  return distance;
+}
+fn solidSignedDistanceGradient(world:vec3f)->vec3f{
+  let h=params.cellGravity.xyz;
+  return vec3f(
+    (solidSignedDistance(world+vec3f(h.x,0.0,0.0))-solidSignedDistance(world-vec3f(h.x,0.0,0.0)))/(2.0*h.x),
+    (solidSignedDistance(world+vec3f(0.0,h.y,0.0))-solidSignedDistance(world-vec3f(0.0,h.y,0.0)))/(2.0*h.y),
+    (solidSignedDistance(world+vec3f(0.0,0.0,h.z))-solidSignedDistance(world-vec3f(0.0,0.0,h.z)))/(2.0*h.z));
+}
+@compute @workgroup_size(4,4,4)
+fn scatterSolidExcess(@builtin(global_invocation_id) gid:vec3u){
+  let id=vec3i(gid);if(!valid(id)){return;}
+  let rho=volume(id);let open=cellOpenFraction(id);
+  if(open>=1.0-1e-6){textureStore(volumeOut,id,vec4f(rho));return;}
+  let excess=max(0.0,rho-open);
+  textureStore(volumeOut,id,vec4f(rho-excess));if(excess<=0.0){return;}
+  let h=params.cellGravity.xyz;let dx=min(h.x,min(h.y,h.z));
+  let gradient=solidSignedDistanceGradient(worldCell(id));var p=vec3f(id)+vec3f(0.5);
+  if(length(gradient)>1e-6){p+=normalize(gradient)*dx/h;}
+  let anchor=p-vec3f(0.5);let cell=vec3i(floor(anchor));let f=fract(anchor);
+  var weights=array<f32,8>();var indices=array<u32,8>();var total=0.0;
+  for(var corner=0u;corner<8u;corner+=1u){
+    let offset=vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));let destination=cell+offset;
+    var weight=select(1.0-f.x,f.x,offset.x==1)*select(1.0-f.y,f.y,offset.y==1)*select(1.0-f.z,f.z,offset.z==1);
+    if(!valid(destination)||cellInsideSolid(destination)){weight=0.0;}else{indices[corner]=linearIndex(destination);}
+    weights[corner]=weight;total+=weight;
+  }
+  // The donor was already reduced to V. Returning an unplaceable deposit to
+  // a V=0 donor would violate the paper's rho=0-inside-solid guarantee.
+  if(total<=1e-9){
+    // No source-supported placement exists. Keep rho=0 in the solid and
+    // expose the unplaceable conservative mass instead of silently losing it.
+    atomicAdd(&reductions[4],u32(round(excess*2048.0)));
+    return;
+  }
+  for(var corner=0u;corner<8u;corner+=1u){if(weights[corner]>0.0){atomicAdd(&sharpenDeposits[indices[corner]],i32(round(excess*weights[corner]/total*TRANSPORT_FIXED)));}}
+}
+@compute @workgroup_size(4,4,4)
+fn resolveSolidExcess(@builtin(global_invocation_id) gid:vec3u){
+  let id=vec3i(gid);if(!valid(id)){return;}
+  let deposit=f32(atomicLoad(&sharpenDeposits[linearIndex(id)]))/TRANSPORT_FIXED;
+  textureStore(volumeOut,id,vec4f(volume(id)+deposit));
 }
 
+// Render-only Sec. 3.8 reconstruction. Blur g=2 min(rho,.5) with a separable
+// Gaussian (sigma=2 cells), then expose sub-grid mass through
+// rho''=rho/min(max(g,theta),1), theta=.01. None of these outputs are rebound
+// into transport or projection.
+fn blurPostprocessAxis(id:vec3i,axis:u32,seedDensity:bool)->f32{
+  var weighted=0.0;var total=0.0;
+  for(var offset=-6;offset<=6;offset+=1){
+    var q=id;q[axis]+=offset;if(!valid(q)){continue;}
+    let weight=exp(-f32(offset*offset)/8.0);let sample=textureLoad(volumeIn,q,0).x;
+    weighted+=weight*select(sample,2.0*min(sample,0.5),seedDensity);total+=weight;
+  }
+  return weighted/max(total,1e-9);
+}
+fn storePostprocessBlur(id:vec3i,axis:u32,seedDensity:bool){textureStore(volumeOut,id,vec4f(blurPostprocessAxis(id,axis,seedDensity)));}
+@compute @workgroup_size(4,4,4) fn postprocessBlurX(@builtin(global_invocation_id) gid:vec3u){let id=vec3i(gid);if(valid(id)){storePostprocessBlur(id,0u,true);}}
+@compute @workgroup_size(4,4,4) fn postprocessBlurY(@builtin(global_invocation_id) gid:vec3u){let id=vec3i(gid);if(valid(id)){storePostprocessBlur(id,1u,false);}}
+@compute @workgroup_size(4,4,4) fn postprocessBlurZ(@builtin(global_invocation_id) gid:vec3u){let id=vec3i(gid);if(valid(id)){storePostprocessBlur(id,2u,false);}}
 @compute @workgroup_size(4,4,4)
-fn applyVolumeCorrection(@builtin(global_invocation_id) gid:vec3u){
+fn postprocessResolve(@builtin(global_invocation_id) gid:vec3u){
   let id=vec3i(gid);if(!valid(id)){return;}
-  let stored=textureLoad(volumeIn,id,0).x;
-  if(!volumeCorrectionBand(id)){textureStore(volumeOut,id,vec4f(stored));return;}
-  let alpha=clamp(stored,0.0,1.0);
-  let current=f32(atomicLoad(&reductions[4]))/2048.0;
-  let error=params.inflowTiming.y-current;
-  let capacityWord=select(atomicLoad(&reductions[6]),atomicLoad(&reductions[5]),error>=0.0);
-  let capacity=f32(capacityWord)/2048.0;
-  if(capacity<=1e-6||abs(error)<=1.0/2048.0){textureStore(volumeOut,id,vec4f(stored));return;}
-  // Exponential response is invariant to subdivision of simulated time. The
-  // second bound limits motion of this one-cell interface band to two cells/s
-  // (and never more than a quarter cell in one dispatch).
-  let response=1.0-exp(-params.inflowTiming.w*params.dimsDt.w);
-  let maximumFraction=min(0.25,2.0*params.dimsDt.w);
-  let fraction=min(abs(error)*response/capacity,maximumFraction);
-  let localCapacity=select(alpha,1.0-alpha,error>=0.0);
-  let corrected=clamp(alpha+select(-1.0,1.0,error>=0.0)*fraction*localCapacity,0.0,1.0);
-  textureStore(volumeOut,id,vec4f(corrected));
-}
-
-// Render-only reconstruction. A separable [1 2 1]^3 kernel converts the
-// cell-centred binary VOF into a continuous fractional field. Retaining one
-// quarter of the original conservative value keeps a one-cell sheet above the
-// renderer's 0.5 contour: two unguided passes would reduce its peak to 0.375.
-// The host never binds this result back into transport or projection.
-fn presentationSample(id:vec3i)->vec2f{
-  if(!valid(id)){return vec2f(0.0);}
-  return vec2f(clamp(volume(id),0.0,1.0),1.0);
+  let rho=textureLoad(volumeIn,id,0).x;let blurredGamma=textureLoad(surfaceIn,id,0).x;
+  textureStore(volumeOut,id,vec4f(rho/min(max(blurredGamma,0.01),1.0)));
 }
 @compute @workgroup_size(4,4,4)
-fn smoothSurface(@builtin(global_invocation_id) gid:vec3u){
-  let id=vec3i(gid);if(!valid(id)){return;}
-  var weighted=0.0;var weights=0.0;
-  for(var z=-1;z<=1;z+=1){for(var y=-1;y<=1;y+=1){for(var x=-1;x<=1;x+=1){
-    let sample=presentationSample(id+vec3i(x,y,z));
-    let weight=select(1.0,2.0,x==0)*select(1.0,2.0,y==0)*select(1.0,2.0,z==0);
-    weighted+=weight*sample.x;weights+=weight*sample.y;
-  }}}
-  let filtered=weighted/max(weights,1.0);
-  let conservative=clamp(textureLoad(surfaceIn,id,0).x,0.0,1.0);
-  textureStore(volumeOut,id,vec4f(mix(filtered,conservative,0.25)));
-}
-@compute @workgroup_size(4,4,4)
-fn reduceDiagnostics(@builtin(global_invocation_id) gid:vec3u){let id=vec3i(gid);if(!valid(id)){return;}let open=(1.0-cellSolidFraction(id))*(1.0-cellTerrainFraction(id));let represented=surfaceOccupancy(id)*open;let conservative=volume(id)*open;atomicAdd(&reductions[0],u32(represented*2048.0+0.5));if(surfaceLiquid(id)){atomicMax(&reductions[1],u32(id.x+1));}let speed=length(faceVelocity(id));atomicMax(&reductions[2],bitcast<u32>(speed));atomicAdd(&reductions[3],u32(clamp(conservative,0.0,8.0)*2048.0+0.5));}
+fn reduceDiagnostics(@builtin(global_invocation_id) gid:vec3u){let id=vec3i(gid);if(!valid(id)){return;}let represented=surfaceOccupancy(id);let conservative=volume(id);atomicAdd(&reductions[0],u32(represented*2048.0+0.5));if(surfaceLiquid(id)){atomicMax(&reductions[1],u32(id.x+1));}let speed=length(faceVelocity(id));atomicMax(&reductions[2],bitcast<u32>(speed));atomicAdd(&reductions[3],u32(clamp(conservative,0.0,8.0)*2048.0+0.5));}
 `;

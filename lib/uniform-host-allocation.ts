@@ -4,6 +4,7 @@ import type { GPUVelocityTransport } from "./webgpu-eulerian";
 export interface UniformHostAllocationPlan {
   readonly velocityExtent: readonly [number, number, number];
   readonly transportExtent: readonly [number, number, number];
+  /** Legacy extent retained for allocation-report consumers; no flux texture is allocated. */
   readonly fluxExtent: readonly [number, number, number];
   readonly pressureExtent: readonly [number, number, number];
   readonly volumeExtent: readonly [number, number, number];
@@ -27,12 +28,21 @@ export function planUniformHostAllocation(
   const velocityCopies = transport === "maccormack" ? 4 : 2;
   const transportCopies = transport === "maccormack" ? 2 : 1;
   const velocityBytes = nx * ny * nz * velocityCopies * 16
-    + (nx + 2) * (ny + 2) * (nz + 2) * transportCopies * 8
-    + nx * ny * nz * 8;
-  // Two pressure, two conservative VOF, and two render-only smoothed surface
-  // textures. Presentation smoothing must never feed back into transport.
-  const scalarBytes = nx * ny * nz * 6 * 4;
-  const conditioningBytes = nx * ny * nz * 4;
+    // Four persistent ping-pong fields own the negative x/y/z MAC boundary
+    // faces, which cannot be represented by the positive-face cell packing.
+    + nx * ny * nz * 4 * 16
+    + (nx + 2) * (ny + 2) * (nz + 2) * transportCopies * 16
+    // Sec. 3.3 owns six rgba32 scratch fields: value and Eikonal-distance
+    // ping-pong pairs plus canonical resolved value/distance fields. These
+    // replace, rather than supplement, the removed JFA coordinate fields.
+    + (nx + 2) * (ny + 2) * (nz + 2) * 6 * 16;
+  // Two pressure, two surface-density, two persistent gamma, and two
+  // render-only post-processing textures. Presentation reconstruction must
+  // never feed back into transport.
+  const scalarBytes = nx * ny * nz * 8 * 4;
+  // Sec. 3.4 uses three fixed-point scatter fields: beta, rho deficits, and
+  // gamma deficits. Sec. 3.5 reuses the first field for sharpening deposits.
+  const conditioningBytes = nx * ny * nz * 3 * 4;
   return {
     velocityExtent: [nx, ny, nz],
     transportExtent: [nx + 2, ny + 2, nz + 2],

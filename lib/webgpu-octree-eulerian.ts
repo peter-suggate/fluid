@@ -91,6 +91,8 @@ import {
 import { losassoStepSnapshotDiagnosticSummary, losassoStepSnapshotFailures,
   WebGPUOctreeLosassoStepSnapshotRing }
   from "./webgpu-octree-losasso-step-snapshot";
+import { OCTREE_LOSASSO_ADAPTIVE_MASS_MAGIC, unpackAdaptiveMassReceipt }
+  from "./webgpu-octree-losasso-adaptive-mass";
 import { OCTREE_LOSASSO_COARSE_PHI_MAGIC }
   from "./webgpu-octree-losasso-coarse-phi.wgsl";
 import {
@@ -2625,6 +2627,24 @@ fn recordPhysicsPhaseBoundary(
         generation:globalFineDiagnostics.configuredFineGeneration,
         volumeControl:globalFineDiagnostics.fineVolumeControl,
       },baseCellVolume_m3) : undefined;
+    const adaptiveMassControl=losassoStepRecord?.surfaceKind==="adaptive"
+      ? losassoStepRecord.adaptive?.massControl:undefined;
+    const adaptiveMassReceipt=adaptiveMassControl
+      && adaptiveMassControl[0]===OCTREE_LOSASSO_ADAPTIVE_MASS_MAGIC
+      && adaptiveMassControl[7]===1&&adaptiveMassControl[12]===0
+      && losassoStepRecord?.adaptive?.massReceipts
+      ? unpackAdaptiveMassReceipt(losassoStepRecord.adaptive.massReceipts):undefined;
+    const adaptiveMassCells=adaptiveMassReceipt&&adaptiveMassReceipt.errors===0
+      && Number.isFinite(adaptiveMassReceipt.acceptedMass_m3)
+      ? adaptiveMassReceipt.acceptedMass_m3/baseCellVolume_m3:undefined;
+    const authoredInitialMassCells=this.info.initialVolumeCellSum;
+    // Exact authored volume fractions make the adaptive mass receipt the
+    // conservative authority. Retain the legacy phi-page estimator for scenes
+    // whose cold mass deliberately came from a different reconstruction.
+    const adaptiveMassMatchesAuthored=adaptiveMassCells!==undefined
+      && authoredInitialMassCells!==undefined&&authoredInitialMassCells>0
+      && Math.abs(adaptiveMassCells-authoredInitialMassCells)
+        <=Math.max(1e-4,1e-6*authoredInitialMassCells);
     if(compactVolume){
       this.info.referenceLiquidVolume_cells=compactVolume?.referenceVolumeCells;
       this.info.volumeCellSum=compactVolume?.volumeCells;
@@ -2633,6 +2653,7 @@ fn recordPhysicsPhaseBoundary(
       this.info.representedVolumeDrift=compactVolume?.drift;
       this.info.volumeTelemetrySource="global-fine";
     }
+    else if(adaptiveMassMatchesAuthored){const reference=authoredInitialMassCells!;this.info.referenceLiquidVolume_cells=reference;this.info.volumeCellSum=adaptiveMassCells;this.info.representedVolumeCellSum=adaptiveMassCells;this.info.volumeDrift=(adaptiveMassCells-reference)/reference;this.info.representedVolumeDrift=this.info.volumeDrift;this.info.volumeTelemetrySource="adaptive-conservative-mass";if(surfaceDiagnostics){this.info.phiInterfaceCellCount=surfaceDiagnostics.interfaceCells;this.info.volumeCorrectionNormalSpeed_cells_s=surfaceDiagnostics.correctionSpeed;this.info.volumeControlAgreeWeight=surfaceDiagnostics.volumeControlAgreeWeight;this.info.quadtreeCulledDebrisCells=surfaceDiagnostics.culledDebrisCells;this.info.quadtreeLevelSetMismatchFraction=surfaceDiagnostics.mismatchFraction;this.info.quadtreeVofReconciliationActive=surfaceDiagnostics.reconciliationActive;}}
     else if(surfaceDiagnostics&&!compactFineExpected){const resolved=sparseSurfaceVolumeCells(surfaceDiagnostics,this.info.initialVolumeCellSum??0),reference=Math.max(1,resolved.referenceVolumeCells);this.info.referenceLiquidVolume_cells=resolved.referenceVolumeCells;this.info.volumeCellSum=resolved.volumeCells;this.info.representedVolumeCellSum=resolved.volumeCells;this.info.volumeDrift=(resolved.volumeCells-reference)/reference;this.info.representedVolumeDrift=this.info.volumeDrift;this.info.volumeTelemetrySource="adaptive-pages";this.info.phiInterfaceCellCount=surfaceDiagnostics.interfaceCells;this.info.volumeCorrectionNormalSpeed_cells_s=surfaceDiagnostics.correctionSpeed;this.info.volumeControlAgreeWeight=surfaceDiagnostics.volumeControlAgreeWeight;this.info.quadtreeCulledDebrisCells=surfaceDiagnostics.culledDebrisCells;this.info.quadtreeLevelSetMismatchFraction=surfaceDiagnostics.mismatchFraction;this.info.quadtreeVofReconciliationActive=surfaceDiagnostics.reconciliationActive;}
     else{this.info.referenceLiquidVolume_cells=undefined;this.info.volumeCellSum=undefined;this.info.representedVolumeCellSum=undefined;this.info.volumeDrift=undefined;this.info.representedVolumeDrift=undefined;this.info.volumeTelemetrySource="unavailable";}
     this.info.front_m=undefined;

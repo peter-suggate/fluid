@@ -66,6 +66,10 @@ export interface WebGPUOctreeLosassoAdaptiveMassOptions {
   readonly pressureRowCapacity?: number;
   /** Stable owner-page arena used by the graph's compiled cell-to-leaf locator. */
   readonly ownerArena: GPUBuffer;
+  /** Construction-only finest-cell volume fractions. When present, cold mass
+   * is integrated exactly over each adaptive leaf instead of reconstructed
+   * from the nodal phi cache. */
+  readonly initialCellFractions?: Float32Array;
   /** Dense arc arena capacity. Twenty is the strict-2:1 worst case, but only
    * live nonzero arcs are emitted and traversed. */
   readonly transportArcCapacity?: number;
@@ -98,7 +102,7 @@ export interface OctreeLosassoAdaptiveMassPlan {
   readonly rowWorkgroups: number;
   readonly transportArcWorkgroups: number;
   readonly allocatedBytes: number;
-  readonly physicsAllocationScalesWithGraph: true;
+  readonly physicsAllocationScalesWithGraph: boolean;
 }
 
 type PipelineName = "prepareBootstrap" | "bootstrapMassFromPhi" | "finishBootstrap"
@@ -136,6 +140,10 @@ export class WebGPUOctreeLosassoAdaptiveMass {
   readonly plan: OctreeLosassoAdaptiveMassPlan;
   readonly source: WebGPUOctreeLosassoAdaptiveMassSource;
   private readonly params: GPUBuffer;
+  /** Immutable cold-bootstrap parameters. Candidate handoff may be encoded in
+   * the same command buffer and must not overwrite its cell-fraction selector
+   * through a later queue.writeBuffer on the recurring parameter bank. */
+  private readonly bootstrapParams: GPUBuffer;
   private readonly advanceParams: GPUBuffer;
   private readonly acceptedDerivedParams: GPUBuffer;
   private readonly candidateDerivedParams: GPUBuffer;
@@ -157,6 +165,8 @@ export class WebGPUOctreeLosassoAdaptiveMass {
   private readonly handoffRelationBlocks: GPUBuffer;
   private readonly handoffRelations: GPUBuffer;
   private readonly emptyVelocity: GPUBuffer;
+  private readonly bootstrapCellFractions: GPUBuffer;
+  private readonly hasBootstrapCellFractions: boolean;
   private pipelines?: Readonly<Record<PipelineName, GPUComputePipeline>>;
   private readonly bindGroups = new Map<string, GPUBindGroup>();
   private destroyed = false;
@@ -179,6 +189,15 @@ export class WebGPUOctreeLosassoAdaptiveMass {
     positive(options.maximumLeafSpan, "adaptive mass maximum leaf span");
     options.dimensions.forEach((value, axis) => positive(value, `adaptive mass dimension ${axis}`));
     const finestCellCount = options.dimensions.reduce((product, value) => product * value, 1);
+    if (options.initialCellFractions
+      && options.initialCellFractions.length !== finestCellCount) {
+      throw new RangeError(`adaptive initial cell fractions require ${finestCellCount} values`);
+    }
+    if (options.initialCellFractions
+      && options.initialCellFractions.some((value) => !Number.isFinite(value)
+        || value < 0 || value > 1)) {
+      throw new RangeError("adaptive initial cell fractions must be finite values in [0, 1]");
+    }
     const fullDomainMassUnits = finestCellCount * ADAPTIVE_MASS_UNITS_PER_FINEST_CELL;
     if (!Number.isSafeInteger(fullDomainMassUnits) || fullDomainMassUnits > 0xffff_ffff) {
       throw new RangeError("adaptive mass fixed-point domain capacity exceeds u32");
@@ -186,6 +205,10 @@ export class WebGPUOctreeLosassoAdaptiveMass {
     const storage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST;
     this.params = device.createBuffer({ label: "Adaptive surface-mass parameters", size: 80,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.bootstrapParams = device.createBuffer({
+      label: "Adaptive surface-mass cold-bootstrap parameters", size: 80,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
     this.advanceParams = device.createBuffer({ label: "Adaptive surface-mass advance parameters", size: 80,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.acceptedDerivedParams = device.createBuffer({
@@ -244,6 +267,16 @@ export class WebGPUOctreeLosassoAdaptiveMass {
       size: 16 * pressureRowCapacity, usage: storage });
     this.emptyVelocity = device.createBuffer({ label: "Adaptive mass inert velocity",
       size: Math.max(16, 32 * nodeCapacity), usage: storage });
+    this.hasBootstrapCellFractions = options.initialCellFractions !== undefined;
+    this.bootstrapCellFractions = device.createBuffer({
+      label: "One-time adaptive mass cell-fraction bootstrap",
+      size: Math.max(4, options.initialCellFractions?.byteLength ?? 0),
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    if (options.initialCellFractions) {
+      device.queue.writeBuffer(this.bootstrapCellFractions, 0,
+        options.initialCellFractions.slice().buffer);
+    }
     this.source = Object.freeze({ control, receipts,
       acceptedMass: graph.accepted.surfaceMass,
       acceptedCompression: graph.accepted.surfaceCompression,
@@ -254,7 +287,7 @@ export class WebGPUOctreeLosassoAdaptiveMass {
     this.plan = Object.freeze({ leafCapacity, nodeCapacity, pressureRowCapacity, transportArcCapacity,
       leafWorkgroups: dispatch(leafCapacity), nodeWorkgroups: dispatch(nodeCapacity),
       rowWorkgroups: dispatch(pressureRowCapacity), transportArcWorkgroups: dispatch(transportArcCapacity),
-      allocatedBytes: 320 + control.size + receipts.size + this.nextMass.size
+      allocatedBytes: 400 + control.size + receipts.size + this.nextMass.size
         + this.nextCompressionMass.size + this.transportAdmission.size
         + this.outgoingTransfers.size + this.acceptedTransferUnits.size
         + this.donorTransferCounts.size + this.donorTransferOffsets.size
@@ -263,9 +296,12 @@ export class WebGPUOctreeLosassoAdaptiveMass {
         + this.donorTransportStates.size + leafRhoPhi.size
         + rowRho.size + rowPhi.size + this.emptyVelocity.size
         + this.handoffRelationCounts.size + this.handoffRelationOffsets.size
-        + this.handoffRelationBlocks.size + this.handoffRelations.size,
-      physicsAllocationScalesWithGraph: true as const });
+        + this.handoffRelationBlocks.size + this.handoffRelations.size
+        + this.bootstrapCellFractions.size,
+      physicsAllocationScalesWithGraph: !this.hasBootstrapCellFractions });
     this.writeParams(this.params, 0, 0, 0);
+    this.writeParams(this.bootstrapParams, 0, 0, 0, 0,
+      this.hasBootstrapCellFractions);
     this.writeParams(this.advanceParams, 0, 0, 0);
     this.writeParams(this.acceptedDerivedParams, 0, 0, 0, 2, false);
     this.writeParams(this.candidateDerivedParams, 0, 0, 0, 2, true);
@@ -314,12 +350,15 @@ export class WebGPUOctreeLosassoAdaptiveMass {
 
   /** Bootstrap a graph-owned mass bank from one component of its nodal phi cache. */
   encodeBootstrap(broker: PassBroker, bank: "accepted" | "candidate", phiComponent: 0 | 1 = 0): void {
-    this.assertInitialized(); this.writeParams(this.params, 0, 0, phiComponent);
+    this.assertInitialized(); this.writeParams(this.bootstrapParams, 0, 0, phiComponent,
+      phiComponent, this.hasBootstrapCellFractions);
     const target = this.graph[bank];
-    this.run(broker, "prepareBootstrap", target, this.graph.accepted, this.emptyVelocity, 1);
+    this.run(broker, "prepareBootstrap", target, this.graph.accepted, this.emptyVelocity, 1,
+      this.bootstrapParams);
     this.run(broker, "bootstrapMassFromPhi", target, this.graph.accepted, this.emptyVelocity,
-      this.plan.leafWorkgroups);
-    this.run(broker, "finishBootstrap", target, this.graph.accepted, this.emptyVelocity, 1);
+      this.plan.leafWorkgroups, this.bootstrapParams);
+    this.run(broker, "finishBootstrap", target, this.graph.accepted, this.emptyVelocity, 1,
+      this.bootstrapParams);
     this.encodeDerivedOutputs(broker, bank, phiComponent);
   }
 
@@ -472,7 +511,8 @@ export class WebGPUOctreeLosassoAdaptiveMass {
 
   destroy(): void {
     if (this.destroyed) return; this.destroyed = true;
-    this.params.destroy(); this.advanceParams.destroy(); this.acceptedDerivedParams.destroy();
+    this.params.destroy(); this.bootstrapParams.destroy(); this.advanceParams.destroy();
+    this.acceptedDerivedParams.destroy();
     this.candidateDerivedParams.destroy(); this.nextMass.destroy(); this.nextCompressionMass.destroy();
     this.transportAdmission.destroy(); this.outgoingTransfers.destroy(); this.acceptedTransferUnits.destroy();
     this.donorTransferCounts.destroy(); this.donorTransferOffsets.destroy();
@@ -480,7 +520,7 @@ export class WebGPUOctreeLosassoAdaptiveMass {
     this.transferScanBlocks.destroy(); this.incomingTransfers.destroy(); this.donorTransportStates.destroy();
     this.handoffRelationCounts.destroy(); this.handoffRelationOffsets.destroy();
     this.handoffRelationBlocks.destroy(); this.handoffRelations.destroy();
-    this.emptyVelocity.destroy();
+    this.emptyVelocity.destroy(); this.bootstrapCellFractions.destroy();
     this.source.control.destroy(); this.source.receipts.destroy(); this.source.leafRhoPhi.destroy();
     this.source.rowRho.destroy(); this.source.rowPhi.destroy();
     this.bindGroups.clear();
@@ -493,7 +533,7 @@ export class WebGPUOctreeLosassoAdaptiveMass {
       target.surfaceMass, target.surfaceCompression, source.control, source.leaves,
       source.surfaceMass, source.surfaceCompression, this.nextMass, this.nextCompressionMass,
       this.outgoingTransfers, this.source.control, this.source.receipts, this.source.leafRhoPhi,
-      this.source.rowRho, this.source.rowPhi, this.source.receipts, this.options.ownerArena,
+      this.source.rowRho, this.source.rowPhi, this.bootstrapCellFractions, this.options.ownerArena,
       target.leafLocator, this.transportAdmission, this.acceptedTransferUnits,
       source.leafLocator, this.handoffRelationCounts, this.handoffRelationOffsets,
       this.handoffRelationBlocks, this.handoffRelations,
@@ -506,7 +546,8 @@ export class WebGPUOctreeLosassoAdaptiveMass {
     source: LosassoSurfaceGraphBankSource, velocity: GPUBuffer, workgroups: number,
     params: GPUBuffer = this.params): void {
     const pipeline = this.pipelines![name];
-    const parameterBank = params === this.advanceParams ? "d"
+    const parameterBank = params === this.bootstrapParams ? "b"
+      : params === this.advanceParams ? "d"
       : params === this.acceptedDerivedParams ? "a"
         : params === this.candidateDerivedParams ? "c" : "p";
     const key = `${name}:${target === this.graph.candidate ? "c" : "a"}:${source === this.graph.candidate ? "c" : "a"}:${velocity === this.emptyVelocity ? "e" : "v"}:${parameterBank}`;
@@ -526,7 +567,7 @@ export class WebGPUOctreeLosassoAdaptiveMass {
   private bindingSet(name: PipelineName): readonly number[] {
     return ({
       prepareBootstrap: [19, 20],
-      bootstrapMassFromPhi: [0, 1, 2, 8, 10, 11, 19],
+      bootstrapMassFromPhi: [0, 1, 2, 8, 10, 11, 19, 24],
       finishBootstrap: [0, 1, 2, 10, 19, 20],
       prepareTransport: [0, 1, 2, 19, 20],
       measureTransportBeforeBlocks: [0, 1, 2, 10, 19, 38],

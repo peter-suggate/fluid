@@ -136,10 +136,40 @@ test("the preset projection agrees with the catalog", () => {
     assert.equal(preset.group, entry.shelf);
     assert.equal(preset.description, entry.blurb);
     assert.equal(preset.background, entry.environment);
-    assert.equal(preset.presentationMode, entry.presentationMode ?? "full-scene");
+    assert.equal(preset.presentationMode, entry.presentationMode ?? "fluid-only");
     assert.deepEqual(preset.methodProfile, entry.methodProfile);
     assert.equal(canonicalScene(preset.create()), canonicalScene(sceneDocument(entry)),
       `${entry.id} must be one document however it is reached`);
+  }
+});
+
+/**
+ * The default is `fluid-only`, so an authored set is now something a definition
+ * has to ask for. Two classes of scene cannot survive the default and are
+ * checked here rather than by looking at a frame:
+ *
+ *  - A dry scene (`systems.fluid === false`) has no water to present at all, so
+ *    fluid-only leaves it an empty background.
+ *  - A scene carrying a large authored set has said, by authoring it, that the
+ *    set is part of what it is for. The threshold is the measured cliff in the
+ *    catalog: the studio scenes publish a single prop beside the room shell,
+ *    the paper rooms and gardens publish 89-3,382.
+ */
+test("a scene that needs its dry world presented asks for it", () => {
+  const SET_PROPS_MINIMUM = 64;
+  for (const entry of SCENE_CATALOG) {
+    const scene = sceneDocument(entry);
+    const mode = entry.presentationMode ?? "fluid-only";
+    if (scene.systems?.fluid === false) {
+      assert.equal(mode, "full-scene",
+        `${entry.id} opens dry, so fluid-only would present nothing`);
+    }
+    const props = environmentProxyPrimitives(
+      buildEnvironmentProxyCatalog(scene, entry.environment), false).length;
+    if (props >= SET_PROPS_MINIMUM) {
+      assert.equal(mode, "full-scene",
+        `${entry.id} authors ${props} props and must present them`);
+    }
   }
 });
 

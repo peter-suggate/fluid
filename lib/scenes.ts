@@ -1439,6 +1439,10 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     audience: "explore",
     shelf: "Garden",
     environment: "garden",
+    // The set *is* the scene here — a generated heightfield vessel, its coping,
+    // its beds and its props — and it opens dry, so the default fluid-only path
+    // would present an empty frame.
+    presentationMode: "full-scene",
     // Dry by default. The set is what is ready to be looked at; the water is
     // still in bring-up, and a scene that opens is worth more than a scene that
     // opens correctly. `systems.fluid` is the switch, and nothing else differs.
@@ -1482,6 +1486,8 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     audience: "validation",
     shelf: "Garden",
     environment: "garden",
+    // The dry world is the measurement, so it has to be constructed and drawn.
+    presentationMode: "full-scene",
     // `heroGardenCamera`, unchanged and deliberately so — W3's gate is stated
     // against an *unchanged camera*, and a stress scene that reframed itself
     // could not discharge it. The factory composes the blocking layout itself,
@@ -1502,6 +1508,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     audience: "explore",
     shelf: "Garden",
     environment: "garden",
+    presentationMode: "full-scene",
     build: createGardenPondScene,
     camera: gardenCamera,
     variants: {
@@ -1523,6 +1530,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     audience: "explore",
     shelf: "Garden",
     environment: "garden",
+    presentationMode: "full-scene",
     build: () => {
       const scene = applyGardenPool(createPaperScenario("dam-break-boxes"), { fillFraction: 0.16 });
       scene.sceneId = "garden-pond-dam-break";
@@ -1549,6 +1557,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     audience: "explore",
     shelf: "Garden",
     environment: "garden",
+    presentationMode: "full-scene",
     build: () => {
       const scene = applyGardenPool(createPaperScenario("hose-tank"), { fillFraction: 0.08 });
       scene.sceneId = "garden-pond-hose-fill";
@@ -1564,6 +1573,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     audience: "study",
     shelf: "Paper figures",
     environment: "conservatory",
+    presentationMode: "full-scene",
     build: () => createPaperScenario("hose-tank"),
     camera: paperCamera,
   }),
@@ -1584,6 +1594,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     audience: "study",
     shelf: "Paper figures",
     environment: "night-lab",
+    presentationMode: "full-scene",
     build: () => createPaperScenario("sphere-jet"),
     camera: paperCamera,
   }),
@@ -1623,6 +1634,8 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     audience: "study",
     shelf: "Rendering",
     environment: "garden",
+    // Fluid-free by construction: without the dry world there is nothing to light.
+    presentationMode: "full-scene",
     build: createGardenSvoLightingScene,
     camera: gardenCamera,
   }),
@@ -1906,7 +1919,7 @@ export const scenePresets: ReadonlyArray<ScenePreset> = SCENE_CATALOG.map((defin
   group: definition.shelf,
   description: definition.blurb,
   background: definition.environment,
-  presentationMode: definition.presentationMode ?? "full-scene",
+  presentationMode: definition.presentationMode ?? "fluid-only",
   camera: definition.camera,
   methodProfile: definition.methodProfile,
   create: () => sceneDocument(definition),

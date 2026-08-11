@@ -2,6 +2,7 @@ import { pathToFileURL } from "node:url";
 import { EulerianFluidSolver } from "../lib/eulerian-solver";
 import type { GPUSolverInstance, SimulationMethod } from "../lib/methods/types";
 import { octreeMethod } from "../lib/methods/octree";
+import { uniformMethod } from "../lib/methods/uniform";
 import { initializeRigidBodies } from "../lib/rigid-body";
 import type { SceneDescription } from "../lib/model";
 import { createSingleTallCellProbeControlLayout, createSingleTallCellProbeLayout, type SingleTallCellProbeOptions } from "../lib/tall-cell-grid";
@@ -91,12 +92,14 @@ import {
   readCubicVolumeField as readCubicVolumeFieldSnapshot,
   readFloatTexture2D,
   readFloatTexture3D,
+  readRgbaTexture3D,
   readFineUpperSurfaceField,
   readFinePhiSymmetrySource,
   readFluidBrickSnapshot,
   readGlobalFineGenerationDiagnostics,
   readTallVelocityField3D,
   readTallVelocityTexture3D,
+  readVelocityField3D,
   readVelocityTexture3D,
   smokeRenderHybridPresentation,
   type FluidBrickSnapshot,
@@ -1286,10 +1289,10 @@ fn sentinel() { output[0] = 0x4f435452u; }
   }
 }
 
-const availableMethods = [octreeMethod];
+const availableMethods = [octreeMethod, uniformMethod];
 const methodFilter = process.env.FLUID_METHOD?.split(",").map((value) => value.trim()).filter(Boolean);
 const methods = availableMethods.filter((method) => !methodFilter || methodFilter.includes(method.id));
-if (methods.length === 0 || (methodFilter && methodFilter.length !== methods.length)) throw new Error(`Unknown FLUID_METHOD=${process.env.FLUID_METHOD}; expected octree`);
+if (methods.length === 0 || (methodFilter && methodFilter.length !== methods.length)) throw new Error(`Unknown FLUID_METHOD=${process.env.FLUID_METHOD}; expected octree or uniform`);
 
 function methodsForScenario(scenario: SmokeScenario): SimulationMethod[] {
   if (methodFilter) return methods;
@@ -1369,6 +1372,8 @@ if (exactStepCount !== undefined && (!Number.isInteger(exactStepCount) || exactS
 if (exactStepCount !== undefined && maxDtOverride === undefined) throw new Error("FLUID_EXPECT_EXACT_STEPS requires FLUID_MAX_DT so submitted/completed time is unambiguous");
 const reportEvery = Number(process.env.FLUID_REPORT_EVERY ?? 0);
 const includeFinalFieldStats = process.env.FLUID_FIELD_STATS !== "0";
+/** Opt-in readbacks for the dedicated uniform-vs-Losasso integration benchmark. */
+const comparisonMetricsRequested = process.env.FLUID_COMPARISON_METRICS === "1";
 /** Timing-only mode keeps solver/control/timestamp readbacks while omitting
  * compact cubic reconstruction and scene quality gates. The reconstruction
  * is not part of simulationWall_ms and can independently reject a measurable
@@ -1643,6 +1648,8 @@ const quadtreeVofReconciliationOverride = process.env.FLUID_QUADTREE_VOF_RECONCI
 const polynomialDegreeOverride = process.env.FLUID_POLYNOMIAL_DEGREE === undefined ? undefined : Number(process.env.FLUID_POLYNOMIAL_DEGREE);
 const velocityTransportOverride = process.env.FLUID_VELOCITY_TRANSPORT;
 const sharpeningOverride = process.env.FLUID_SHARPENING === undefined ? undefined : process.env.FLUID_SHARPENING !== "0";
+const uniformDensityPostProcessingOverride = process.env.FLUID_UNIFORM_DENSITY_POSTPROCESSING === undefined
+  ? undefined : process.env.FLUID_UNIFORM_DENSITY_POSTPROCESSING !== "0";
 const volumeControlOverride = process.env.FLUID_VOLUME_CONTROL === undefined ? undefined : process.env.FLUID_VOLUME_CONTROL !== "0";
 const referenceVolumeScaleOverride = process.env.FLUID_REFERENCE_VOLUME_SCALE === undefined ? undefined : Number(process.env.FLUID_REFERENCE_VOLUME_SCALE);
 const hierarchyOverride = process.env.FLUID_HIERARCHY === undefined ? undefined : process.env.FLUID_HIERARCHY !== "0";
@@ -1873,6 +1880,722 @@ function energyTraceSummary(samples: MechanicalEnergySample[]) {
     normalizedLateMechanicalEnergySlopePerSecond: slope / Math.max(initial, 1e-30),
     ...driftOscillation
   };
+}
+
+/**
+ * Backend-neutral part of the symmetric-expansion oracle used by the dedicated
+ * dense-vs-adaptive Dawn benchmark. Pressure and topology stay with the
+ * adaptive scene hook; volume and collocated velocity are available from both
+ * production methods and can therefore be compared without inventing a dense
+ * pressure-debug ABI solely for the benchmark.
+ */
+function comparisonKinematicSymmetry(
+  volume: ArrayLike<number>,
+  velocity: ArrayLike<number>,
+  grid: readonly [number, number, number],
+) {
+  const [nx, ny, nz] = grid;
+  const scalar = { comparedValues: 0, exactMismatchCount: 0, nonFiniteCount: 0,
+    maximumAbsoluteError: 0 };
+  const vector = { comparedValues: 0, exactMismatchCount: 0, nonFiniteCount: 0,
+    maximumAbsoluteError: 0 };
+  let scalarWorst: Readonly<Record<string, unknown>> | undefined;
+  let vectorWorst: Readonly<Record<string, unknown>> | undefined;
+  const transforms = ["reflect-x", "reflect-z", "swap-xz"] as const;
+  const target = (transform: typeof transforms[number], x: number, y: number, z: number) =>
+    transform === "reflect-x" ? [nx - 1 - x, y, z]
+      : transform === "reflect-z" ? [x, y, nz - 1 - z] : [z, y, x];
+  const expected = (transform: typeof transforms[number], axis: number, value: number) => {
+    if (transform === "reflect-x") return axis === 0 ? -value : value;
+    if (transform === "reflect-z") return axis === 2 ? -value : value;
+    return value;
+  };
+  const targetAxis = (transform: typeof transforms[number], axis: number) =>
+    transform === "swap-xz" ? axis === 0 ? 2 : axis === 2 ? 0 : 1 : axis;
+  let volumeNonFiniteCount = 0, velocityNonFiniteCount = 0;
+  for (let z = 0; z < nz; z += 1) for (let y = 0; y < ny; y += 1) {
+    for (let x = 0; x < nx; x += 1) {
+      const sourceCell = x + nx * (y + ny * z);
+      if (!Number.isFinite(Number(volume[sourceCell]))) volumeNonFiniteCount += 1;
+      for (let axis = 0; axis < 3; axis += 1) {
+        if (!Number.isFinite(Number(velocity[3 * sourceCell + axis]))) velocityNonFiniteCount += 1;
+      }
+      for (const transform of transforms) {
+        const [tx, ty, tz] = target(transform, x, y, z);
+        const targetCell = tx + nx * (ty + ny * tz);
+        const sourceVolume = Number(volume[sourceCell]);
+        const targetVolume = Number(volume[targetCell]);
+        scalar.comparedValues += 1;
+        if (!Number.isFinite(sourceVolume) || !Number.isFinite(targetVolume)) {
+          scalar.nonFiniteCount += 1;
+        } else {
+          const error = Math.abs(targetVolume - sourceVolume);
+          if (!Object.is(targetVolume, sourceVolume)) scalar.exactMismatchCount += 1;
+          if (error > scalar.maximumAbsoluteError) {
+            scalar.maximumAbsoluteError = error;
+            scalarWorst = { transform, source: [x, y, z], target: [tx, ty, tz],
+              sourceValue: sourceVolume, targetValue: targetVolume, absoluteError: error };
+          }
+        }
+        for (let axis = 0; axis < 3; axis += 1) {
+          const sourceVelocity = Number(velocity[3 * sourceCell + axis]);
+          const observed = Number(velocity[3 * targetCell + targetAxis(transform, axis)]);
+          const wanted = expected(transform, axis, sourceVelocity);
+          vector.comparedValues += 1;
+          if (!Number.isFinite(wanted) || !Number.isFinite(observed)) {
+            vector.nonFiniteCount += 1;
+          } else {
+            const error = Math.abs(observed - wanted);
+            if (!Object.is(observed, wanted)) vector.exactMismatchCount += 1;
+            if (error > vector.maximumAbsoluteError) {
+              vector.maximumAbsoluteError = error;
+              vectorWorst = { transform, source: [x, y, z], target: [tx, ty, tz], axis,
+                targetAxis: targetAxis(transform, axis), sourceValue: sourceVelocity,
+                expectedValue: wanted, targetValue: observed, absoluteError: error };
+            }
+          }
+        }
+      }
+    }
+  }
+  return Object.freeze({ volume: Object.freeze({ ...scalar, worst: scalarWorst }),
+    velocity: Object.freeze({ ...vector, worst: vectorWorst }),
+    volumeNonFiniteCount, velocityNonFiniteCount,
+    frontCircularity: measureHorizontalFrontCircularity(volume, grid) });
+}
+
+function scalarFieldD4(
+  field: ArrayLike<number>, grid: readonly [number, number, number],
+) {
+  const [nx, ny, nz] = grid;
+  const transforms = ["reflect-x", "reflect-z", "swap-xz"] as const;
+  let comparedValues = 0, exactMismatchCount = 0, nonFiniteCount = 0;
+  let maximumAbsoluteError = 0;
+  let worst: Readonly<Record<string, unknown>> | undefined;
+  for (let z = 0; z < nz; z += 1) for (let y = 0; y < ny; y += 1) for (let x = 0; x < nx; x += 1) {
+    const sourceCell = x + nx * (y + ny * z), source = Number(field[sourceCell]);
+    for (const transform of transforms) {
+      const tx = transform === "reflect-x" ? nx - 1 - x : transform === "swap-xz" ? z : x;
+      const tz = transform === "reflect-z" ? nz - 1 - z : transform === "swap-xz" ? x : z;
+      const targetCell = tx + nx * (y + ny * tz), target = Number(field[targetCell]);
+      comparedValues += 1;
+      if (!Number.isFinite(source) || !Number.isFinite(target)) {
+        nonFiniteCount += 1;
+        continue;
+      }
+      const error = Math.abs(target - source);
+      if (!Object.is(target, source)) exactMismatchCount += 1;
+      if (error > maximumAbsoluteError) {
+        maximumAbsoluteError = error;
+        worst = Object.freeze({ transform, source: [x, y, z], target: [tx, y, tz],
+          sourceValue: source, targetValue: target, absoluteError: error });
+      }
+    }
+  }
+  return Object.freeze({ comparedValues, exactMismatchCount, nonFiniteCount,
+    maximumAbsoluteError, worst });
+}
+
+function scalarFieldSummary(field: ArrayLike<number>) {
+  let finiteCount = 0, nonFiniteCount = 0, minimum = Infinity, maximum = -Infinity, sum = 0;
+  for (let index = 0; index < field.length; index += 1) {
+    const value = Number(field[index]);
+    if (!Number.isFinite(value)) { nonFiniteCount += 1; continue; }
+    finiteCount += 1; sum += value;
+    minimum = Math.min(minimum, value); maximum = Math.max(maximum, value);
+  }
+  return Object.freeze({ finiteCount, nonFiniteCount,
+    minimum: finiteCount === 0 ? undefined : minimum,
+    maximum: finiteCount === 0 ? undefined : maximum,
+    sum_cells: sum });
+}
+
+function stageMassLedger(stages: readonly { readonly name: string; readonly field: ArrayLike<number> }[]) {
+  const summaries = Object.freeze(Object.fromEntries(stages.map((stage) =>
+    [stage.name, scalarFieldSummary(stage.field)])));
+  const transitions = Object.freeze(stages.slice(1).map((stage, index) => {
+    const previous = stages[index]!;
+    const from = summaries[previous.name]!, to = summaries[stage.name]!;
+    const absoluteDelta_cells = to.sum_cells - from.sum_cells;
+    return Object.freeze({ from: previous.name, to: stage.name, absoluteDelta_cells,
+      absoluteMagnitude_cells: Math.abs(absoluteDelta_cells),
+      relativeDelta: absoluteDelta_cells / Math.max(1, Math.abs(from.sum_cells)) });
+  }));
+  return Object.freeze({ stages: summaries, transitions,
+    maximumAbsoluteTransitionDelta_cells: Math.max(0,
+      ...transitions.map((transition) => transition.absoluteMagnitude_cells)) });
+}
+
+function regionalVelocitySymmetry(
+  volume: ArrayLike<number>, velocity: ArrayLike<number>, grid: readonly [number, number, number],
+) {
+  const [nx, ny, nz] = grid;
+  const transforms = ["reflect-x", "reflect-z", "swap-xz"] as const;
+  const target = (transform: typeof transforms[number], x: number, y: number, z: number) =>
+    transform === "reflect-x" ? [nx - 1 - x, y, z]
+      : transform === "reflect-z" ? [x, y, nz - 1 - z] : [z, y, x];
+  const nearLiquid = (x: number, y: number, z: number) => {
+    for (let dz = -1; dz <= 1; dz += 1) for (let dy = -1; dy <= 1; dy += 1) {
+      for (let dx = -1; dx <= 1; dx += 1) {
+        const qx = x + dx, qy = y + dy, qz = z + dz;
+        if (qx >= 0 && qx < nx && qy >= 0 && qy < ny && qz >= 0 && qz < nz
+          && Number(volume[qx + nx * (qy + ny * qz)]) > 1e-5) return true;
+      }
+    }
+    return false;
+  };
+  const result = {
+    liquidOrInterface: { comparedValues: 0, maximumAbsoluteError: 0 },
+    farAir: { comparedValues: 0, maximumAbsoluteError: 0 },
+  };
+  for (let z = 0; z < nz; z += 1) for (let y = 0; y < ny; y += 1) for (let x = 0; x < nx; x += 1) {
+    const sourceCell = x + nx * (y + ny * z);
+    for (const transform of transforms) {
+      const [tx, ty, tz] = target(transform, x, y, z);
+      const targetCell = tx + nx * (ty + ny * tz);
+      const region = nearLiquid(x, y, z) || nearLiquid(tx, ty, tz)
+        ? result.liquidOrInterface : result.farAir;
+      for (let axis = 0; axis < 3; axis += 1) {
+        const targetAxis = transform === "swap-xz" ? axis === 0 ? 2 : axis === 2 ? 0 : 1 : axis;
+        const source = Number(velocity[3 * sourceCell + axis]);
+        const observed = Number(velocity[3 * targetCell + targetAxis]);
+        const expected = transform === "reflect-x" && axis === 0
+          || transform === "reflect-z" && axis === 2 ? -source : source;
+        region.comparedValues += 1;
+        if (Number.isFinite(expected) && Number.isFinite(observed)) {
+          region.maximumAbsoluteError = Math.max(region.maximumAbsoluteError, Math.abs(observed - expected));
+        }
+      }
+    }
+  }
+  return Object.freeze({ liquidOrInterface: Object.freeze(result.liquidOrInterface),
+    farAir: Object.freeze(result.farAir) });
+}
+
+function positiveFaceKnownSymmetry(
+  knownMasks: ArrayLike<number>, openMasks: ArrayLike<number>, grid: readonly [number, number, number],
+) {
+  const [nx, ny, nz] = grid;
+  const byComponent = Array.from({ length: 3 }, () => ({ openFaces: 0, unknownFaces: 0,
+    comparedFaces: 0, knownMismatchCount: 0, openMismatchCount: 0 }));
+  const at = (masks: ArrayLike<number>, x: number, y: number, z: number, axis: number) =>
+    (Number(masks[x + nx * (y + ny * z)]) & (1 << axis)) !== 0;
+  const transforms = ["reflect-x", "reflect-z", "swap-xz"] as const;
+  for (let z = 0; z < nz; z += 1) for (let y = 0; y < ny; y += 1) for (let x = 0; x < nx; x += 1) {
+    for (let axis = 0; axis < 3; axis += 1) {
+      const component = byComponent[axis]!;
+      if (at(openMasks, x, y, z, axis)) {
+        component.openFaces += 1;
+        if (!at(knownMasks, x, y, z, axis)) component.unknownFaces += 1;
+      }
+      for (const transform of transforms) {
+        let tx = x, tz = z, targetAxis = axis;
+        if (transform === "reflect-x") tx = axis === 0 ? nx - 2 - x : nx - 1 - x;
+        else if (transform === "reflect-z") tz = axis === 2 ? nz - 2 - z : nz - 1 - z;
+        else { tx = z; tz = x; targetAxis = axis === 0 ? 2 : axis === 2 ? 0 : 1; }
+        if (tx < 0 || tx >= nx || tz < 0 || tz >= nz) continue;
+        const sourceOpen = at(openMasks, x, y, z, axis);
+        const targetOpen = at(openMasks, tx, y, tz, targetAxis);
+        component.comparedFaces += 1;
+        if (sourceOpen !== targetOpen) component.openMismatchCount += 1;
+        else if (sourceOpen && at(knownMasks, x, y, z, axis) !== at(knownMasks, tx, y, tz, targetAxis)) {
+          component.knownMismatchCount += 1;
+        }
+      }
+    }
+  }
+  return Object.freeze({ byComponent: Object.freeze(byComponent.map(Object.freeze)) });
+}
+
+/** Common-grid residue/contact census for the symmetric A/B benchmark. The
+ * threshold is deliberately shared by both methods; component mass itself is
+ * accumulated from the unthresholded occupancy values of classified cells. */
+function comparisonLiquidResidue(
+  volume: ArrayLike<number>,
+  grid: readonly [number, number, number],
+  occupancyThreshold = 0.01,
+  interfaceFaceCount?: number,
+) {
+  const [nx, ny, nz] = grid, cells = nx * ny * nz;
+  const visited = new Uint8Array(cells), stack = new Int32Array(cells);
+  const components: Array<{ mass_cells: number; cells: number; touchesFloor: boolean }> = [];
+  let totalMass_cells = 0, classifiedMass_cells = 0;
+  const densityBands = {
+    belowClassification: { cells: 0, mass_cells: 0 },
+    classifiedBelowIsovalue: { cells: 0, mass_cells: 0 },
+    atOrAboveIsovalue: { cells: 0, mass_cells: 0 },
+  };
+  const paperDensityBands = {
+    positiveBelowEpsilon: { cells: 0, mass_cells: 0 },
+    epsilonToHalf: { cells: 0, mass_cells: 0 },
+    halfToPoint95: { cells: 0, mass_cells: 0 },
+    atOrAbovePoint95: { cells: 0, mass_cells: 0 },
+  };
+  let ceilingLayerMass_cells = 0, sideWallLayerMass_cells = 0;
+  let ceilingContactCells = 0, sideWallContactCells = 0;
+  const index = (x: number, y: number, z: number) => x + nx * (y + ny * z);
+  for (let z = 0; z < nz; z += 1) for (let y = 0; y < ny; y += 1) {
+    for (let x = 0; x < nx; x += 1) {
+      const value = Number(volume[index(x, y, z)]);
+      if (!Number.isFinite(value)) continue;
+      const occupancy = Math.min(1, Math.max(0, value));
+      totalMass_cells += occupancy;
+      const band = value < occupancyThreshold ? densityBands.belowClassification
+        : value < 0.5 ? densityBands.classifiedBelowIsovalue : densityBands.atOrAboveIsovalue;
+      if (occupancy > 0) {
+        band.cells += 1;
+        band.mass_cells += occupancy;
+        const paperBand = value < occupancyThreshold ? paperDensityBands.positiveBelowEpsilon
+          : value < 0.5 ? paperDensityBands.epsilonToHalf
+            : value < 0.95 ? paperDensityBands.halfToPoint95
+              : paperDensityBands.atOrAbovePoint95;
+        paperBand.cells += 1;
+        // Paper-band mass is raw transported rho, not the connectivity
+        // census's [0,1]-clamped occupancy proxy.
+        paperBand.mass_cells += value;
+      }
+      if (y === ny - 1) {
+        ceilingLayerMass_cells += occupancy;
+        if (occupancy >= occupancyThreshold) ceilingContactCells += 1;
+      }
+      if (x === 0 || x === nx - 1 || z === 0 || z === nz - 1) {
+        sideWallLayerMass_cells += occupancy;
+        if (occupancy >= occupancyThreshold) sideWallContactCells += 1;
+      }
+    }
+  }
+  for (let seed = 0; seed < cells; seed += 1) {
+    const seedValue = Number(volume[seed]);
+    if (visited[seed] !== 0 || !Number.isFinite(seedValue) || seedValue < occupancyThreshold) continue;
+    let head = 0, tail = 0, mass_cells = 0, componentCells = 0, touchesFloor = false;
+    visited[seed] = 1; stack[tail++] = seed;
+    while (head < tail) {
+      const cell = stack[head++]!, x = cell % nx;
+      const yz = Math.floor(cell / nx), y = yz % ny, z = Math.floor(yz / ny);
+      const occupancy = Math.min(1, Math.max(0, Number(volume[cell])));
+      mass_cells += occupancy; componentCells += 1; touchesFloor ||= y === 0;
+      const visit = (neighbor: number) => {
+        const value = Number(volume[neighbor]);
+        if (visited[neighbor] === 0 && Number.isFinite(value) && value >= occupancyThreshold) {
+          visited[neighbor] = 1; stack[tail++] = neighbor;
+        }
+      };
+      if (x > 0) visit(cell - 1); if (x + 1 < nx) visit(cell + 1);
+      if (y > 0) visit(cell - nx); if (y + 1 < ny) visit(cell + nx);
+      if (z > 0) visit(cell - nx * ny); if (z + 1 < nz) visit(cell + nx * ny);
+    }
+    classifiedMass_cells += mass_cells;
+    components.push({ mass_cells, cells: componentCells, touchesFloor });
+  }
+  let main = -1;
+  for (let component = 0; component < components.length; component += 1) {
+    if (main < 0 || components[component]!.mass_cells > components[main]!.mass_cells) main = component;
+  }
+  const sum = (predicate: (component: typeof components[number], index: number) => boolean) =>
+    components.reduce((total, component, componentIndex) =>
+      total + (predicate(component, componentIndex) ? component.mass_cells : 0), 0);
+  const count = (predicate: (component: typeof components[number], index: number) => boolean) =>
+    components.filter(predicate).length;
+  const normalizedPaperBands = Object.fromEntries(Object.entries(paperDensityBands).map(([name, band]) =>
+    [name, Object.freeze({ ...band, ...(interfaceFaceCount !== undefined && interfaceFaceCount > 0 ? {
+      cellsPerInterfaceFace: band.cells / interfaceFaceCount,
+      massPerInterfaceFace: band.mass_cells / interfaceFaceCount,
+    } : {}) })]));
+  return Object.freeze({ occupancyThreshold, totalMass_cells, classifiedMass_cells,
+    diffuseMassBelowThreshold_cells: Math.max(0, totalMass_cells - classifiedMass_cells),
+    densityBands: Object.freeze({
+      belowClassification: Object.freeze(densityBands.belowClassification),
+      classifiedBelowIsovalue: Object.freeze(densityBands.classifiedBelowIsovalue),
+      atOrAboveIsovalue: Object.freeze(densityBands.atOrAboveIsovalue),
+      paperBands: Object.freeze(normalizedPaperBands),
+      paperBandEpsilon: occupancyThreshold,
+      interfaceFaceCount,
+    }),
+    boundaryContact: Object.freeze({ ceilingLayerMass_cells, ceilingContactCells,
+      sideWallLayerMass_cells, sideWallContactCells }),
+    connectivity: Object.freeze({ componentCount: components.length,
+      mainComponentMass_cells: main < 0 ? 0 : components[main]!.mass_cells,
+      nonMainComponentCount: count((_component, componentIndex) => componentIndex !== main),
+      nonMainMass_cells: sum((_component, componentIndex) => componentIndex !== main),
+      nonFloorComponentCount: count((component) => !component.touchesFloor),
+      nonFloorMass_cells: sum((component) => !component.touchesFloor),
+      suspendedDisconnectedComponentCount: count((component, componentIndex) =>
+        componentIndex !== main && !component.touchesFloor),
+      suspendedDisconnectedMass_cells: sum((component, componentIndex) =>
+        componentIndex !== main && !component.touchesFloor) }) });
+}
+
+/** Convert the dense solver's positive-face MAC texture to the same
+ * cell-centred xyz field reconstructed from Losasso faces. Domain-exterior
+ * negative faces carry the closed-wall zero value used by the solver. */
+function collocatePositiveFaceVelocity(
+  positiveFaces: ArrayLike<number>,
+  grid: readonly [number, number, number],
+): Float32Array {
+  const [nx, ny, nz] = grid;
+  const result = new Float32Array(3 * nx * ny * nz);
+  for (let z = 0; z < nz; z += 1) for (let y = 0; y < ny; y += 1) {
+    for (let x = 0; x < nx; x += 1) {
+      const cell = x + nx * (y + ny * z);
+      for (let axis = 0; axis < 3; axis += 1) {
+        const coordinate = axis === 0 ? x : axis === 1 ? y : z;
+        const lowerCell = axis === 0 ? cell - 1 : axis === 1 ? cell - nx : cell - nx * ny;
+        const upper = Number(positiveFaces[3 * cell + axis]);
+        const lower = coordinate > 0 ? Number(positiveFaces[3 * lowerCell + axis]) : 0;
+        result[3 * cell + axis] = 0.5 * (lower + upper);
+      }
+    }
+  }
+  return result;
+}
+
+function positiveFaceReflectionError(values: ArrayLike<number>, grid: readonly [number, number, number]) {
+  const [nx, ny, nz] = grid; let maximumAbsoluteError = 0;
+  let worst: Readonly<Record<string, unknown>> | undefined;
+  const at = (x: number, y: number, z: number, axis: number) => Number(values[3 * (x + nx * (y + ny * z)) + axis]);
+  const record = (error: number, transform: string, source: readonly number[], target: readonly number[],
+    axis: number, sourceValue: number, targetValue: number, expectedValue: number) => {
+    if (error > maximumAbsoluteError) {
+      maximumAbsoluteError = error;
+      worst = { transform, source, target, axis, sourceValue, targetValue, expectedValue, absoluteError: error };
+    }
+  };
+  for (let z = 0; z < nz; z += 1) for (let y = 0; y < ny; y += 1) for (let x = 0; x < nx; x += 1) {
+    if (x < nx - 1) {
+      const source = at(x, y, z, 0), target = at(nx - 2 - x, y, z, 0);
+      record(Math.abs(target + source), "reflect-x", [x, y, z], [nx - 2 - x, y, z], 0,
+        source, target, -source);
+    }
+    for (const axis of [1, 2]) {
+      const source = at(x, y, z, axis), target = at(nx - 1 - x, y, z, axis);
+      record(Math.abs(target - source), "reflect-x", [x, y, z], [nx - 1 - x, y, z], axis,
+        source, target, source);
+    }
+    if (z < nz - 1) {
+      const source = at(x, y, z, 2), target = at(x, y, nz - 2 - z, 2);
+      record(Math.abs(target + source), "reflect-z", [x, y, z], [x, y, nz - 2 - z], 2,
+        source, target, -source);
+    }
+    for (const axis of [0, 1]) {
+      const source = at(x, y, z, axis), target = at(x, y, nz - 1 - z, axis);
+      record(Math.abs(target - source), "reflect-z", [x, y, z], [x, y, nz - 1 - z], axis,
+        source, target, source);
+    }
+    if (nx === nz) for (let axis = 0; axis < 3; axis += 1) {
+      const targetAxis = axis === 0 ? 2 : axis === 2 ? 0 : 1;
+      const source = at(x, y, z, axis), target = at(z, y, x, targetAxis);
+      record(Math.abs(target - source), "swap-xz", [x, y, z], [z, y, x], axis,
+        source, target, source);
+    }
+  }
+  return { maximumAbsoluteError, worst };
+}
+
+/** Decompose projected-face D4 without changing the strict all-face metric.
+ * A positive MAC face participates in the pressure solve when either adjacent
+ * rho-prime cell is liquid. The symmetric-expansion benchmark has no cut
+ * solids, so its sharpened density is rho-prime exactly. Reflections normal to
+ * a face reverse the lower/upper density classification before comparison. */
+function projectedPhysicalFaceD4(
+  values: ArrayLike<number>, rhoPrime: ArrayLike<number>,
+  grid: readonly [number, number, number],
+) {
+  const [nx, ny, nz] = grid, threshold = 0.5;
+  let comparedFacePairs = 0, likeForLikePhysicalFacePairs = 0;
+  let exactPhysicalValueMismatchCount = 0, physicalValueNonFiniteCount = 0;
+  let maximumPhysicalFaceAbsoluteError = 0;
+  let classificationMismatchCount = 0, densityNonFiniteCount = 0;
+  let maximumDensityMargin = 0, maximumReflectedDensityDifference = 0;
+  let undefinedAirVsPhysicalFaceMismatchCount = 0;
+  let worstPhysicalFaceMismatch: Readonly<Record<string, unknown>> | undefined;
+  let firstClassificationMismatch: Readonly<Record<string, unknown>> | undefined;
+  let worstClassificationMismatch: Readonly<Record<string, unknown>> | undefined;
+  const cell = (x: number, y: number, z: number) =>
+    x < 0 || x >= nx || y < 0 || y >= ny || z < 0 || z >= nz
+      ? 0 : Number(rhoPrime[x + nx * (y + ny * z)]);
+  const faceDensity = (x: number, y: number, z: number, axis: number) => {
+    const upper = axis === 0 ? [x + 1, y, z]
+      : axis === 1 ? [x, y + 1, z] : [x, y, z + 1];
+    return [cell(x, y, z), cell(upper[0]!, upper[1]!, upper[2]!)] as const;
+  };
+  const faceValue = (x: number, y: number, z: number, axis: number) =>
+    Number(values[3 * (x + nx * (y + ny * z)) + axis]);
+  const mask = (density: readonly [number, number]) =>
+    (density[0] > threshold ? 1 : 0) | (density[1] > threshold ? 2 : 0);
+  const compare = (transform: "reflect-x" | "reflect-z" | "swap-xz",
+    source: readonly [number, number, number], target: readonly [number, number, number],
+    axis: number, targetAxis: number, sign: -1 | 1, reverseDensity: boolean) => {
+    comparedFacePairs += 1;
+    const sourceDensity = faceDensity(...source, axis);
+    const rawTargetDensity = faceDensity(...target, targetAxis);
+    const targetDensity = reverseDensity
+      ? [rawTargetDensity[1], rawTargetDensity[0]] as const : rawTargetDensity;
+    if (![...sourceDensity, ...targetDensity].every(Number.isFinite)) {
+      densityNonFiniteCount += 1;
+      return;
+    }
+    const sourceMask = mask(sourceDensity), targetMask = mask(targetDensity);
+    const sourcePhysical = sourceMask !== 0, targetPhysical = targetMask !== 0;
+    if (sourceMask !== targetMask) {
+      classificationMismatchCount += 1;
+      const densityMargin = Math.max(
+        Math.abs(sourceDensity[0] - threshold), Math.abs(sourceDensity[1] - threshold),
+        Math.abs(targetDensity[0] - threshold), Math.abs(targetDensity[1] - threshold));
+      const reflectedDensityDifference = Math.max(
+        Math.abs(targetDensity[0] - sourceDensity[0]),
+        Math.abs(targetDensity[1] - sourceDensity[1]));
+      maximumDensityMargin = Math.max(maximumDensityMargin, densityMargin);
+      maximumReflectedDensityDifference = Math.max(
+        maximumReflectedDensityDifference, reflectedDensityDifference);
+      const detail = { transform, source, target, axis, targetAxis,
+        sourceDensity, targetDensity, sourceMask, targetMask,
+        sourcePhysical, targetPhysical, densityMargin, reflectedDensityDifference };
+      firstClassificationMismatch ??= detail;
+      if (!worstClassificationMismatch
+        || reflectedDensityDifference
+          > Number(worstClassificationMismatch.reflectedDensityDifference)) {
+        worstClassificationMismatch = detail;
+      }
+    }
+    if (sourcePhysical !== targetPhysical) {
+      undefinedAirVsPhysicalFaceMismatchCount += 1;
+    }
+    if (!sourcePhysical || !targetPhysical) return;
+    likeForLikePhysicalFacePairs += 1;
+    const sourceValue = faceValue(...source, axis);
+    const targetValue = faceValue(...target, targetAxis);
+    const expectedValue = sign * sourceValue;
+    if (!Number.isFinite(expectedValue) || !Number.isFinite(targetValue)) {
+      physicalValueNonFiniteCount += 1;
+      return;
+    }
+    const absoluteError = Math.abs(targetValue - expectedValue);
+    if (!Object.is(targetValue, expectedValue)) exactPhysicalValueMismatchCount += 1;
+    if (absoluteError > maximumPhysicalFaceAbsoluteError) {
+      maximumPhysicalFaceAbsoluteError = absoluteError;
+      worstPhysicalFaceMismatch = { transform, source, target, axis, targetAxis,
+        sourceValue, expectedValue, targetValue, absoluteError,
+        sourceDensity, targetDensity };
+    }
+  };
+  for (let z = 0; z < nz; z += 1) for (let y = 0; y < ny; y += 1) {
+    for (let x = 0; x < nx; x += 1) {
+      if (x < nx - 1) compare("reflect-x", [x, y, z], [nx - 2 - x, y, z],
+        0, 0, -1, true);
+      for (const axis of [1, 2]) compare("reflect-x", [x, y, z], [nx - 1 - x, y, z],
+        axis, axis, 1, false);
+      if (z < nz - 1) compare("reflect-z", [x, y, z], [x, y, nz - 2 - z],
+        2, 2, -1, true);
+      for (const axis of [0, 1]) compare("reflect-z", [x, y, z], [x, y, nz - 1 - z],
+        axis, axis, 1, false);
+      if (nx === nz) for (let axis = 0; axis < 3; axis += 1) {
+        const targetAxis = axis === 0 ? 2 : axis === 2 ? 0 : 1;
+        compare("swap-xz", [x, y, z], [z, y, x], axis, targetAxis, 1, false);
+      }
+    }
+  }
+  return Object.freeze({ classificationThreshold: threshold, comparedFacePairs,
+    likeForLikePhysicalFaceD4: Object.freeze({
+      comparedFacePairs: likeForLikePhysicalFacePairs,
+      exactValueMismatchCount: exactPhysicalValueMismatchCount,
+      nonFiniteCount: physicalValueNonFiniteCount,
+      maximumAbsoluteError: maximumPhysicalFaceAbsoluteError,
+      worst: worstPhysicalFaceMismatch,
+    }),
+    classificationMismatchCount, densityNonFiniteCount,
+    maximumDensityMargin, maximumReflectedDensityDifference,
+    densityMarginDefinition: "maximum |rhoPrime - 0.5| among classification-mismatched pairs",
+    undefinedAirVsPhysicalFaceMismatchCount,
+    firstClassificationMismatch, worstClassificationMismatch });
+}
+
+function summarizeMacCormackLimiterAudit(
+  bytes: Uint8Array,
+  correctedReflection: ReturnType<typeof positiveFaceReflectionError>,
+  grid: readonly [number, number, number],
+) {
+  const values = new Float32Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 4);
+  const recordLength = 32;
+  const recordAt = (x: number, y: number, z: number, component: number) => {
+    const offset = recordLength * (3 * (x + grid[0] * (y + grid[1] * z)) + component);
+    const donorWeights = Array.from(values.slice(offset + 16, offset + 24));
+    const donorValues = Array.from(values.slice(offset + 24, offset + 32));
+    const corrected = Number(values[offset + 12]);
+    const lower = Number(values[offset + 13]), upper = Number(values[offset + 14]);
+    return Object.freeze({
+      departureQ: [values[offset], values[offset + 1], values[offset + 2]],
+      base: [values[offset + 3], values[offset + 4], values[offset + 5]],
+      fraction: [values[offset + 6], values[offset + 7], values[offset + 8]],
+      predicted: Number(values[offset + 9]),
+      original: Number(values[offset + 10]),
+      reversed: Number(values[offset + 11]),
+      corrected,
+      lower,
+      upper,
+      lowerMargin: corrected - lower,
+      upperMargin: upper - corrected,
+      reverted: Number(values[offset + 15]) > 0.5,
+      donorWeights: Object.freeze(donorWeights),
+      donorValues: Object.freeze(donorValues),
+    });
+  };
+  let revertedFaceComponents = 0, zeroWeightBoundContaminationCount = 0;
+  let zeroWeightDecisionInfluenceCount = 0;
+  for (let record = 0; record < values.length / recordLength; record += 1) {
+    const offset = record * recordLength;
+    const corrected = Number(values[offset + 12]);
+    const lower = Number(values[offset + 13]), upper = Number(values[offset + 14]);
+    const reverted = Number(values[offset + 15]) > 0.5;
+    if (reverted) revertedFaceComponents += 1;
+    let usedLower = Infinity, usedUpper = -Infinity;
+    for (let donor = 0; donor < 8; donor += 1) {
+      if (!(Number(values[offset + 16 + donor]) > 0)) continue;
+      const value = Number(values[offset + 24 + donor]);
+      usedLower = Math.min(usedLower, value); usedUpper = Math.max(usedUpper, value);
+    }
+    if (!Number.isFinite(usedLower) || !Number.isFinite(usedUpper)) continue;
+    if (usedLower !== lower || usedUpper !== upper) zeroWeightBoundContaminationCount += 1;
+    if ((corrected < usedLower || corrected > usedUpper) !== reverted) zeroWeightDecisionInfluenceCount += 1;
+  }
+  const rawReverted = (x: number, y: number, z: number, component: number) =>
+    Number(values[recordLength * (3 * (x + grid[0] * (y + grid[1] * z)) + component) + 15]) > 0.5;
+  const rawBranchDelta = (x: number, y: number, z: number, component: number) => {
+    const offset = recordLength * (3 * (x + grid[0] * (y + grid[1] * z)) + component);
+    return Math.abs(Number(values[offset + 12]) - Number(values[offset + 9]));
+  };
+  let reflectedDecisionMismatchCount = 0, worstDecisionImpact = 0;
+  let worstDecisionPair: { transform: "reflect-x" | "reflect-z" | "swap-xz";
+    source: readonly [number, number, number]; target: readonly [number, number, number];
+    component: number; targetComponent: number } | undefined;
+  const compareDecision = (transform: NonNullable<typeof worstDecisionPair>["transform"],
+    source: readonly [number, number, number], target: readonly [number, number, number],
+    component: number, targetComponent: number) => {
+    if (rawReverted(...source, component) === rawReverted(...target, targetComponent)) return;
+    reflectedDecisionMismatchCount += 1;
+    const impact = Math.max(rawBranchDelta(...source, component), rawBranchDelta(...target, targetComponent));
+    if (impact <= worstDecisionImpact) return;
+    worstDecisionImpact = impact;
+    worstDecisionPair = { transform, source, target, component, targetComponent };
+  };
+  for (let z = 0; z < grid[2]; z += 1) for (let y = 0; y < grid[1]; y += 1) {
+    for (let x = 0; x < grid[0]; x += 1) for (let component = 0; component < 3; component += 1) {
+      const reflectX = component === 0 ? grid[0] - 2 - x : grid[0] - 1 - x;
+      if (reflectX >= 0 && reflectX < grid[0]) compareDecision(
+        "reflect-x", [x, y, z], [reflectX, y, z], component, component);
+      const reflectZ = component === 2 ? grid[2] - 2 - z : grid[2] - 1 - z;
+      if (reflectZ >= 0 && reflectZ < grid[2]) compareDecision(
+        "reflect-z", [x, y, z], [x, y, reflectZ], component, component);
+      if (grid[0] === grid[2]) compareDecision(
+        "swap-xz", [x, y, z], [z, y, x], component,
+        component === 0 ? 2 : component === 2 ? 0 : 1);
+    }
+  }
+  const worstDecisionMismatch = worstDecisionPair && Object.freeze({
+    ...worstDecisionPair,
+    sourceDecision: recordAt(...worstDecisionPair.source, worstDecisionPair.component),
+    targetDecision: recordAt(...worstDecisionPair.target, worstDecisionPair.targetComponent),
+  });
+  const worst = correctedReflection.worst;
+  if (!worst) return Object.freeze({ revertedFaceComponents, zeroWeightBoundContaminationCount,
+    zeroWeightDecisionInfluenceCount, reflectedDecisionMismatchCount, worstDecisionMismatch });
+  const source = worst.source as readonly number[], target = worst.target as readonly number[];
+  const component = Number(worst.axis);
+  const targetComponent = worst.transform === "swap-xz"
+    ? component === 0 ? 2 : component === 2 ? 0 : 1 : component;
+  const sourceDecision = recordAt(source[0]!, source[1]!, source[2]!, component);
+  const targetDecision = recordAt(target[0]!, target[1]!, target[2]!, targetComponent);
+  return Object.freeze({
+    revertedFaceComponents,
+    zeroWeightBoundContaminationCount,
+    zeroWeightDecisionInfluenceCount,
+    reflectedDecisionMismatchCount,
+    worstDecisionMismatch,
+    worstCorrectedReflection: Object.freeze({
+      transform: worst.transform,
+      source: Object.freeze([...source]), target: Object.freeze([...target]),
+      component, targetComponent,
+      decisionMismatch: sourceDecision.reverted !== targetDecision.reverted,
+      sourceDecision, targetDecision,
+    }),
+  });
+}
+
+function domainNormalFaceReflectionError(
+  positiveFaces: ArrayLike<number>, negativeBoundary: ArrayLike<number>,
+  grid: readonly [number, number, number],
+) {
+  const [nx, ny, nz] = grid;
+  const positive = (x: number, y: number, z: number, axis: number) =>
+    Number(positiveFaces[3 * (x + nx * (y + ny * z)) + axis]);
+  const negative = (x: number, y: number, z: number, axis: number) =>
+    Number(negativeBoundary[4 * (x + nx * (y + ny * z)) + axis]);
+  let maximumAbsoluteError = 0, maximumBoundaryMagnitude = 0;
+  let worst: Readonly<Record<string, unknown>> | undefined;
+  const record = (source: number, target: number, transform: string,
+    sourceFace: readonly number[], targetFace: readonly number[]) => {
+    const error = Math.abs(target + source);
+    maximumBoundaryMagnitude = Math.max(maximumBoundaryMagnitude, Math.abs(source), Math.abs(target));
+    if (error > maximumAbsoluteError) {
+      maximumAbsoluteError = error;
+      worst = { transform, sourceFace, targetFace, sourceValue: source,
+        targetValue: target, expectedValue: -source, absoluteError: error };
+    }
+  };
+  for (let y = 0; y < ny; y += 1) for (let z = 0; z < nz; z += 1) {
+    record(negative(0, y, z, 0), positive(nx - 1, y, z, 0), "reflect-x",
+      [0, y, z, 0], [nx, y, z, 0]);
+  }
+  for (let y = 0; y < ny; y += 1) for (let x = 0; x < nx; x += 1) {
+    record(negative(x, y, 0, 2), positive(x, y, nz - 1, 2), "reflect-z",
+      [x, y, 0, 2], [x, y, nz, 2]);
+  }
+  return { maximumAbsoluteError, maximumBoundaryMagnitude, worst };
+}
+
+function unresolvedOpenFaceCoverage(
+  knownMasks: ArrayLike<number>, openMasks: ArrayLike<number>, inputFaces: ArrayLike<number>,
+  grid: readonly [number, number, number],
+) {
+  const [nx, ny, nz] = grid;
+  const byComponent = Array.from({ length: 3 }, (_unused, component) => ({
+    component, count: 0, boundaryAdjacentCount: 0, nonzeroInputCount: 0,
+    maximumInputMagnitude: 0, minimum: [nx, ny, nz] as [number, number, number],
+    maximum: [-1, -1, -1] as [number, number, number],
+    yHistogram: Array.from({ length: ny }, () => 0),
+    first: [] as Array<readonly [number, number, number]>,
+    worstInput: undefined as Readonly<Record<string, unknown>> | undefined,
+  }));
+  for (let z = 0; z < nz; z += 1) for (let y = 0; y < ny; y += 1) {
+    for (let x = 0; x < nx; x += 1) {
+      const cell = x + nx * (y + ny * z);
+      for (let component = 0; component < 3; component += 1) {
+        const bit = 1 << component;
+        if ((Number(openMasks[cell]) & bit) === 0 || (Number(knownMasks[cell]) & bit) !== 0) continue;
+        const result = byComponent[component]!;
+        result.count += 1;
+        result.yHistogram[y]! += 1;
+        result.minimum[0] = Math.min(result.minimum[0], x);
+        result.minimum[1] = Math.min(result.minimum[1], y);
+        result.minimum[2] = Math.min(result.minimum[2], z);
+        result.maximum[0] = Math.max(result.maximum[0], x);
+        result.maximum[1] = Math.max(result.maximum[1], y);
+        result.maximum[2] = Math.max(result.maximum[2], z);
+        const coordinate = component === 0 ? x : component === 1 ? y : z;
+        const extent = component === 0 ? nx : component === 1 ? ny : nz;
+        if (coordinate === 0 || coordinate === extent - 2) result.boundaryAdjacentCount += 1;
+        if (result.first.length < 12) result.first.push([x, y, z]);
+        const input = Number(inputFaces[3 * cell + component]);
+        const magnitude = Math.abs(input);
+        if (magnitude > 1e-7) result.nonzeroInputCount += 1;
+        if (magnitude > result.maximumInputMagnitude) {
+          result.maximumInputMagnitude = magnitude;
+          result.worstInput = { location: [x, y, z], value: input, magnitude };
+        }
+      }
+    }
+  }
+  return Object.freeze({ sampleableUnknownCount: byComponent.reduce((sum, value) => sum + value.count, 0),
+    byComponent: Object.freeze(byComponent.map(Object.freeze)) });
 }
 
 interface StabilityEnvelope {
@@ -2329,6 +3052,9 @@ async function runGPU(
   if (method.id === "tall-cell" && maximumTallHeightOverride !== undefined) values.maximumTallHeight = maximumTallHeightOverride;
   if ((method.id === "tall-cell" || method.id === "uniform") && velocityTransportOverride !== undefined) values.velocityTransport = velocityTransportOverride;
   if ((method.id === "tall-cell" || method.id === "uniform") && sharpeningOverride !== undefined) values.densitySharpening = sharpeningOverride ? "on" : "off";
+  if (method.id === "uniform" && uniformDensityPostProcessingOverride !== undefined) {
+    values.densityPostProcessing = uniformDensityPostProcessingOverride ? "on" : "off";
+  }
   if (method.id === "tall-cell" && volumeControlOverride !== undefined) values.volumeControl = volumeControlOverride ? "on" : "off";
   if (method.id === "tall-cell" && referenceVolumeScaleOverride !== undefined) values.referenceVolumeScale = referenceVolumeScaleOverride;
   if (method.id === "tall-cell" && hierarchyOverride !== undefined) values.hierarchicalExtrapolation = hierarchyOverride ? "on" : "off";
@@ -2350,11 +3076,11 @@ async function runGPU(
   if (enableAuthoredStructuredEnergyProbe) process.env.FLUID_STRUCTURED_ENERGY_PROBE = "1";
   let solver: GPUSolverInstance;
   try {
-    solver = method.id === "octree" && method.createSolverAsync
-        // The power catalog and fenced t=0 sparse authority are initialization
-        // tasks in the production browser path. Dawn must use the same async
-        // constructor even when authority came from an authored UI profile
-        // instead of a command-line override.
+    solver = method.createSolverAsync
+        // Dawn must exercise the same staged production constructor as the
+        // browser. For octree this includes the power catalog and fenced sparse
+        // t=0 authority; for uniform it includes the complete async pipeline
+        // task graph rather than relying on synchronous invalid-pipeline shells.
         ? await method.createSolverAsync(instrumentedDevice, scene, solverQuality, values, undefined, (progress) => {
           console.log(JSON.stringify({ scenario: scenarioId, method: resultMethod,
             record: "solver-initialization", ...progress }));
@@ -2368,6 +3094,13 @@ async function runGPU(
   // structural options, but runtime solve/extension/cadence dials are adopted
   // only through this call. Dawn must cross the same initial boundary.
   solver.applyRuntimeValues?.(values);
+  const cm11aCaptureOwner = solver as GPUSolverInstance & {
+    enableCM11aCoarsestCapture?: () => void;
+    readCM11aCoarsestCapture?: () => Promise<unknown>;
+  };
+  const cm11aCoarsestCaptureRequested = process.env.FLUID_CM11A_COARSE_CAPTURE === "1";
+  if (cm11aCoarsestCaptureRequested) cm11aCaptureOwner.enableCM11aCoarsestCapture?.();
+  let cm11aCoarsestCapturePublished = false;
   const construction_ms = performance.now() - constructionStarted;
   const actualGrid: [number, number, number] = [solver.info.nx, solver.info.ny, solver.info.nz];
   if (expectedGridOverride && actualGrid.some((value, axis) => value !== expectedGridOverride[axis])) {
@@ -2625,10 +3358,12 @@ async function runGPU(
   // volumes. Compare this estimator with its own accepted reset-time field;
   // mixing the two baselines manufactures drift even when both are stable.
   const initialExact = (!performanceProfileRequested || regressionArtifactRequested)
-    && method.id === "octree"
-    && (collectStabilityEnvelope || energyEverySteps > 0 || checkpointEvery_s > 0)
+    && ((method.id === "octree"
+      && (collectStabilityEnvelope || energyEverySteps > 0 || checkpointEvery_s > 0))
+      || comparisonMetricsRequested)
     ? await readCubicVolumeField(device, solver) : undefined;
   const spatialExactReference = initialExact?.summary.cellSum;
+  const authoredVolumeReference_cells = referenceVolumeCells(solver.info);
   const initialPotentialEnergyProxy = initialExact ? gravitationalPotentialEnergyProxy(initialExact.field,
     solver.info.nx, solver.info.ny, solver.info.nz, {
       x: scene.container.width_m / solver.info.nx,
@@ -3455,6 +4190,13 @@ async function runGPU(
       const samplingStartedAt = performance.now();
       solver.info.simulatedTime_s = solver.info.submittedTime_s;
       const sample = await solver.readStats();
+      if (cm11aCoarsestCaptureRequested && !cm11aCoarsestCapturePublished
+        && (sample as typeof sample & { uniformCM11aCapFailure?: boolean }).uniformCM11aCapFailure) {
+        const capture = await cm11aCaptureOwner.readCM11aCoarsestCapture?.();
+        console.log(JSON.stringify({ scenario: scenarioId, method: resultMethod,
+          phase: "uniform-cm11a-coarsest-capture", steps, capture }));
+        cm11aCoarsestCapturePublished = true;
+      }
       if (sample.structuredStartKineticEnergyProxy !== undefined) {
         console.log(JSON.stringify({ scenario: scenarioId, method: resultMethod,
           phase: "structured-stage-energy", steps,
@@ -3802,6 +4544,23 @@ async function runGPU(
       }
       let compactMechanicalEnergy: GPUSmokeResult["checkpoints"][number]["compactMechanicalEnergy"];
       let compactVelocityField: Float32Array | undefined;
+      let extrapolatedVelocitySymmetry: ReturnType<typeof comparisonKinematicSymmetry>["velocity"] | undefined;
+      let extrapolatedPositiveFaceReflection: ReturnType<typeof positiveFaceReflectionError> | undefined;
+      let extrapolatedVelocityRegions: ReturnType<typeof regionalVelocitySymmetry> | undefined;
+      let extrapolatedKnownFaceSymmetry: ReturnType<typeof positiveFaceKnownSymmetry> | undefined;
+      let uniformProjectedPhysicalFaceD4: ReturnType<typeof projectedPhysicalFaceD4> | undefined;
+      let currentExtrapolatedFaces: Float32Array | undefined;
+      let currentExtrapolatedKnownMasks: Uint8Array | undefined;
+      let currentExtrapolatedOpenMasks: Uint8Array | undefined;
+      let uniformSymmetryStageAudit: Readonly<Record<string, unknown>> | undefined;
+      let uniformPaperInvariants: Readonly<Record<string, unknown>> | undefined;
+      let extrapolationConformance: {
+        activeFaceCount: number;
+        openFaceCount: number;
+        knownOpenFaceCount: number;
+        unknownOpenFaceCount: number;
+        activeFrontPassCeiling: number;
+      } | undefined;
       if (method.id === "octree" && initialPotentialEnergyProxy !== undefined) {
         const compact = await readCompactOctreeVelocityField3D(device, solver,
           [solver.info.nx, solver.info.ny, solver.info.nz]);
@@ -3882,6 +4641,291 @@ async function runGPU(
             );
             stabilityEnvelope.nonFiniteVelocityCount += velocity.nonFiniteLiquidComponentCount;
           }
+        }
+      } else if (comparisonMetricsRequested) {
+        const staged = solver as GPUSolverInstance & {
+          velocityTexture?: GPUTexture;
+          extrapolatedVelocityTexture?: GPUTexture;
+          extrapolationActiveStateTexture?: GPUTexture;
+          extrapolationActiveFrontPassCeiling?: number;
+          symmetryStageAuditTextures?: Readonly<{
+            preExtrapolationVelocity: GPUTexture;
+            previousRawDensity: GPUTexture;
+            extrapolationDensityAuthority: GPUTexture;
+            densityAdvection: GPUTexture;
+            densityDiffusion: GPUTexture;
+            densitySharpening: GPUTexture;
+            gammaPostAdvection: GPUTexture;
+            gammaPostDiffusion: GPUTexture;
+            velocityPrediction: GPUTexture;
+            predictedExtrapolation: GPUTexture;
+            reverseAdvection: GPUTexture;
+            velocityAdvection: GPUTexture;
+            pressureProjection: GPUTexture;
+          }>;
+          symmetryStageAuditNegativeBoundaryVelocity?: GPUBuffer;
+          symmetryStageAuditMacCormackBuffer?: GPUBuffer;
+          symmetryStageAuditBetaBuffer?: GPUBuffer;
+        };
+        const texture = staged.velocityTexture;
+        if (!texture) throw new Error(`${method.id} comparison metrics require a collocated velocity texture`);
+        const positiveFaces = await readVelocityField3D(
+          device, texture, solver.info.nx, solver.info.ny, solver.info.nz,
+        );
+        if (method.id === "uniform") {
+          uniformProjectedPhysicalFaceD4 = projectedPhysicalFaceD4(positiveFaces, cubic.field,
+            [solver.info.nx, solver.info.ny, solver.info.nz]);
+        }
+        compactVelocityField = collocatePositiveFaceVelocity(positiveFaces,
+          [solver.info.nx, solver.info.ny, solver.info.nz]);
+        if (method.id === "uniform" && staged.extrapolatedVelocityTexture) {
+          const padded = await readRgbaTexture3D(device, staged.extrapolatedVelocityTexture,
+            solver.info.nx + 2, solver.info.ny + 2, solver.info.nz + 2);
+          const extrapolatedFaces = new Float32Array(3 * solver.info.nx * solver.info.ny * solver.info.nz);
+          const extrapolatedKnownMasks = new Uint8Array(solver.info.nx * solver.info.ny * solver.info.nz);
+          const extrapolatedOpenMasks = new Uint8Array(solver.info.nx * solver.info.ny * solver.info.nz);
+          currentExtrapolatedFaces = extrapolatedFaces;
+          currentExtrapolatedKnownMasks = extrapolatedKnownMasks;
+          currentExtrapolatedOpenMasks = extrapolatedOpenMasks;
+          let openFaceCount = 0, knownOpenFaceCount = 0;
+          for (let z = 0; z < solver.info.nz; z += 1) for (let y = 0; y < solver.info.ny; y += 1) {
+            for (let x = 0; x < solver.info.nx; x += 1) {
+              const cell = x + solver.info.nx * (y + solver.info.ny * z);
+              const paddedCell = (x + 1) + (solver.info.nx + 2) * ((y + 1) + (solver.info.ny + 2) * (z + 1));
+              const masks = Math.round(padded[4 * paddedCell + 3]!);
+              const knownMask = masks & 7, openMask = (masks >> 3) & 7;
+              extrapolatedKnownMasks[cell] = knownMask;
+              extrapolatedOpenMasks[cell] = openMask;
+              for (let axis = 0; axis < 3; axis += 1) extrapolatedFaces[3 * cell + axis] = padded[4 * paddedCell + axis]!;
+              for (let axis = 0; axis < 3; axis += 1) {
+                const bit = 1 << axis;
+                if ((openMask & bit) !== 0) openFaceCount += 1;
+                if ((openMask & knownMask & bit) !== 0) knownOpenFaceCount += 1;
+              }
+            }
+          }
+          const extrapolated = collocatePositiveFaceVelocity(extrapolatedFaces,
+            [solver.info.nx, solver.info.ny, solver.info.nz]);
+          extrapolatedPositiveFaceReflection = positiveFaceReflectionError(extrapolatedFaces,
+            [solver.info.nx, solver.info.ny, solver.info.nz]);
+          extrapolatedVelocitySymmetry = comparisonKinematicSymmetry(cubic.field, extrapolated,
+            [solver.info.nx, solver.info.ny, solver.info.nz]).velocity;
+          extrapolatedVelocityRegions = regionalVelocitySymmetry(cubic.field, extrapolated,
+            [solver.info.nx, solver.info.ny, solver.info.nz]);
+          extrapolatedKnownFaceSymmetry = positiveFaceKnownSymmetry(
+            extrapolatedKnownMasks, extrapolatedOpenMasks,
+            [solver.info.nx, solver.info.ny, solver.info.nz],
+          );
+          if (staged.extrapolationActiveStateTexture) {
+            const active = await readRgbaTexture3D(device, staged.extrapolationActiveStateTexture,
+              solver.info.nx + 2, solver.info.ny + 2, solver.info.nz + 2);
+            let activeFaceCount = 0;
+            for (let z = 0; z < solver.info.nz; z += 1) for (let y = 0; y < solver.info.ny; y += 1) {
+              for (let x = 0; x < solver.info.nx; x += 1) {
+                const cell = x + (solver.info.nx + 2) * (y + (solver.info.ny + 2) * z);
+                let mask = Math.round(active[4 * cell + 3]!) & 7;
+                while (mask !== 0) { activeFaceCount += mask & 1; mask >>= 1; }
+              }
+            }
+            extrapolationConformance = {
+              activeFaceCount,
+              openFaceCount,
+              knownOpenFaceCount,
+              unknownOpenFaceCount: openFaceCount - knownOpenFaceCount,
+              activeFrontPassCeiling: staged.extrapolationActiveFrontPassCeiling ?? 0,
+            };
+          }
+        }
+        if (method.id === "uniform" && staged.symmetryStageAuditTextures) {
+          const grid = [solver.info.nx, solver.info.ny, solver.info.nz] as const;
+          const audit = staged.symmetryStageAuditTextures;
+          const [preExtrapolationFaces, previousRawDensity, extrapolationDensityAuthority,
+            densityAdvection, densityDiffusion, densitySharpening,
+            gammaPostAdvection, gammaPostDiffusion,
+            velocityPredictionFaces, predictedExtrapolationPadded, reverseAdvectionFaces,
+            velocityAdvectionFaces, pressureProjectionFaces, negativeBoundaryBytes,
+            macCormackAuditBytes, betaBytes] = await Promise.all([
+            readVelocityField3D(device, audit.preExtrapolationVelocity, ...grid),
+            readFloatTexture3D(device, audit.previousRawDensity, ...grid),
+            readFloatTexture3D(device, audit.extrapolationDensityAuthority, ...grid),
+            readFloatTexture3D(device, audit.densityAdvection, ...grid),
+            readFloatTexture3D(device, audit.densityDiffusion, ...grid),
+            readFloatTexture3D(device, audit.densitySharpening, ...grid),
+            readFloatTexture3D(device, audit.gammaPostAdvection, ...grid),
+            readFloatTexture3D(device, audit.gammaPostDiffusion, ...grid),
+            readVelocityField3D(device, audit.velocityPrediction, ...grid),
+            readRgbaTexture3D(device, audit.predictedExtrapolation,
+              solver.info.nx + 2, solver.info.ny + 2, solver.info.nz + 2),
+            readVelocityField3D(device, audit.reverseAdvection, ...grid),
+            readVelocityField3D(device, audit.velocityAdvection, ...grid),
+            readVelocityField3D(device, audit.pressureProjection, ...grid),
+            staged.symmetryStageAuditNegativeBoundaryVelocity
+              ? readBufferBinding(device, { buffer: staged.symmetryStageAuditNegativeBoundaryVelocity },
+                solver.info.nx * solver.info.ny * solver.info.nz * 16)
+              : Promise.resolve(undefined),
+            staged.symmetryStageAuditMacCormackBuffer
+              ? readBufferBinding(device, { buffer: staged.symmetryStageAuditMacCormackBuffer },
+                solver.info.nx * solver.info.ny * solver.info.nz * 3 * 8 * 16)
+              : Promise.resolve(undefined),
+            staged.symmetryStageAuditBetaBuffer
+              ? readBufferBinding(device, { buffer: staged.symmetryStageAuditBetaBuffer },
+                solver.info.nx * solver.info.ny * solver.info.nz * 4)
+              : Promise.resolve(undefined),
+          ]);
+          const predictedExtrapolationFaces = new Float32Array(3 * solver.info.nx * solver.info.ny * solver.info.nz);
+          for (let z = 0; z < solver.info.nz; z += 1) for (let y = 0; y < solver.info.ny; y += 1) {
+            for (let x = 0; x < solver.info.nx; x += 1) {
+              const cell = x + solver.info.nx * (y + solver.info.ny * z);
+              const paddedCell = (x + 1) + (solver.info.nx + 2) * ((y + 1) + (solver.info.ny + 2) * (z + 1));
+              for (let axis = 0; axis < 3; axis += 1) {
+                predictedExtrapolationFaces[3 * cell + axis] = predictedExtrapolationPadded[4 * paddedCell + axis]!;
+              }
+            }
+          }
+          const velocityPrediction = collocatePositiveFaceVelocity(velocityPredictionFaces, grid);
+          const predictedExtrapolation = collocatePositiveFaceVelocity(predictedExtrapolationFaces, grid);
+          const reverseAdvection = collocatePositiveFaceVelocity(reverseAdvectionFaces, grid);
+          const velocityAdvection = collocatePositiveFaceVelocity(velocityAdvectionFaces, grid);
+          const pressureProjection = collocatePositiveFaceVelocity(pressureProjectionFaces, grid);
+          const preExtrapolation = collocatePositiveFaceVelocity(preExtrapolationFaces, grid);
+          const velocityAdvectionFaceReflection = positiveFaceReflectionError(
+            velocityAdvectionFaces, grid);
+          const sourceMasks = currentExtrapolatedOpenMasks ? new Uint8Array(grid[0] * grid[1] * grid[2]) : undefined;
+          if (sourceMasks && currentExtrapolatedOpenMasks) {
+            const [nx, ny, nz] = grid;
+            for (let z = 0; z < nz; z += 1) for (let y = 0; y < ny; y += 1) {
+              for (let x = 0; x < nx; x += 1) {
+                const cell = x + nx * (y + ny * z);
+                for (let axis = 0; axis < 3; axis += 1) {
+                  const bit = 1 << axis;
+                  if ((currentExtrapolatedOpenMasks[cell]! & bit) === 0) continue;
+                  const qx = x + (axis === 0 ? 1 : 0);
+                  const qy = y + (axis === 1 ? 1 : 0);
+                  const qz = z + (axis === 2 ? 1 : 0);
+                  const neighbor = qx < nx && qy < ny && qz < nz
+                    ? qx + nx * (qy + ny * qz) : -1;
+                  if (extrapolationDensityAuthority[cell]! > 0.5
+                    || neighbor >= 0 && extrapolationDensityAuthority[neighbor]! > 0.5) {
+                    sourceMasks[cell]! |= bit;
+                  }
+                }
+              }
+            }
+          }
+          const negativeBoundary = negativeBoundaryBytes
+            ? new Float32Array(negativeBoundaryBytes.buffer, negativeBoundaryBytes.byteOffset,
+              negativeBoundaryBytes.byteLength / 4)
+            : undefined;
+          const sharpeningDelta = Float32Array.from(densitySharpening,
+            (value, index) => value - densityDiffusion[index]!);
+          const massLedger = stageMassLedger([
+            { name: "previousRawRho", field: previousRawDensity },
+            { name: "densityAdvection", field: densityAdvection },
+            { name: "densityDiffusion", field: densityDiffusion },
+            { name: "densitySharpening", field: densitySharpening },
+            { name: "finalRawRho", field: cubic.field },
+          ]);
+          const rhoPrimeSummary = scalarFieldSummary(extrapolationDensityAuthority);
+          let rhoPrimeExcess_cells = 0, maximumRhoPrimeMinusRawRho = 0;
+          for (let cell = 0; cell < extrapolationDensityAuthority.length; cell += 1) {
+            const rhoPrime = Number(extrapolationDensityAuthority[cell]);
+            const rho = Number(previousRawDensity[cell]);
+            if (Number.isFinite(rhoPrime)) rhoPrimeExcess_cells += Math.max(rhoPrime - 1, 0);
+            if (Number.isFinite(rhoPrime) && Number.isFinite(rho)) {
+              maximumRhoPrimeMinusRawRho = Math.max(maximumRhoPrimeMinusRawRho,
+                Math.abs(rhoPrime - rho));
+            }
+          }
+          let beta: Readonly<Record<string, unknown>> | undefined;
+          if (betaBytes) {
+            const words = new Int32Array(betaBytes.buffer, betaBytes.byteOffset,
+              Math.floor(betaBytes.byteLength / 4));
+            let minimum = Infinity, maximum = -Infinity, maximumAbsoluteDeviationFromOne = 0;
+            for (const word of words) {
+              const value = word / 1_048_576;
+              minimum = Math.min(minimum, value); maximum = Math.max(maximum, value);
+              maximumAbsoluteDeviationFromOne = Math.max(maximumAbsoluteDeviationFromOne,
+                Math.abs(value - 1));
+            }
+            beta = Object.freeze({ fixedPointScale: 1_048_576, samples: words.length,
+              minimum, maximum, maximumAbsoluteDeviationFromOne });
+          }
+          uniformPaperInvariants = Object.freeze({
+            authority: "raw transported rho; in symmetric-expansion rho-prime equals rho because the scene has no solids",
+            stageMassLedger: massLedger,
+            gamma: Object.freeze({
+              postAdvection: scalarFieldSummary(gammaPostAdvection),
+              postDiffusion: scalarFieldSummary(gammaPostDiffusion),
+              d4: Object.freeze({
+                postAdvection: scalarFieldD4(gammaPostAdvection, grid),
+                postDiffusion: scalarFieldD4(gammaPostDiffusion, grid),
+              }),
+            }),
+            ...(beta ? { betaPostAdvection: beta } : {}),
+            d4: Object.freeze({
+              previousRawRho: scalarFieldD4(previousRawDensity, grid),
+              densityAdvection: scalarFieldD4(densityAdvection, grid),
+              densityDiffusion: scalarFieldD4(densityDiffusion, grid),
+              densitySharpening: scalarFieldD4(densitySharpening, grid),
+              sharpeningDelta: scalarFieldD4(sharpeningDelta, grid),
+              finalRawRho: scalarFieldD4(cubic.field, grid),
+            }),
+            rhoPrime: Object.freeze({
+              solidInvariantApplicable: false,
+              solidInvariantReason: "symmetric-expansion contains no embedded or terrain solids",
+              maximum: rhoPrimeSummary.maximum,
+              sumExcessAboveOne_cells: rhoPrimeExcess_cells,
+              maximumAbsoluteDifferenceFromRawRho: maximumRhoPrimeMinusRawRho,
+              solidCellRho: undefined,
+              rhoLessThanOrEqualOpenFractionViolationCount: undefined,
+            }),
+          });
+          uniformSymmetryStageAudit = Object.freeze({
+            preExtrapolationVelocity: comparisonKinematicSymmetry(
+              extrapolationDensityAuthority, preExtrapolation, grid).velocity,
+            preExtrapolationPositiveFaceReflection: positiveFaceReflectionError(preExtrapolationFaces, grid),
+            ...(negativeBoundary ? { preExtrapolationDomainBoundaryReflection:
+              domainNormalFaceReflectionError(preExtrapolationFaces, negativeBoundary, grid) } : {}),
+            extrapolationDensityAuthority: comparisonKinematicSymmetry(
+              extrapolationDensityAuthority, preExtrapolation, grid).volume,
+            ...(sourceMasks && currentExtrapolatedOpenMasks ? {
+              currentExtrapolationSourceFaceSymmetry: positiveFaceKnownSymmetry(
+                sourceMasks, currentExtrapolatedOpenMasks, grid),
+            } : {}),
+            ...(currentExtrapolatedFaces ? { currentExtrapolationPositiveFaceReflection:
+              positiveFaceReflectionError(currentExtrapolatedFaces, grid) } : {}),
+            ...(currentExtrapolatedKnownMasks && currentExtrapolatedOpenMasks ? {
+              currentExtrapolationKnownFaceSymmetry: positiveFaceKnownSymmetry(
+                currentExtrapolatedKnownMasks, currentExtrapolatedOpenMasks, grid),
+              currentExtrapolationUnresolvedCoverage: unresolvedOpenFaceCoverage(
+                currentExtrapolatedKnownMasks, currentExtrapolatedOpenMasks,
+                preExtrapolationFaces, grid),
+            } : {}),
+            densityAdvection: comparisonKinematicSymmetry(densityAdvection, velocityAdvection, grid).volume,
+            densityDiffusion: comparisonKinematicSymmetry(densityDiffusion, velocityAdvection, grid).volume,
+            densitySharpening: comparisonKinematicSymmetry(densitySharpening, velocityAdvection, grid).volume,
+            velocityPrediction: comparisonKinematicSymmetry(densitySharpening, velocityPrediction, grid).velocity,
+            velocityPredictionPositiveFaceReflection: positiveFaceReflectionError(velocityPredictionFaces, grid),
+            velocityPredictionRegions: regionalVelocitySymmetry(densitySharpening, velocityPrediction, grid),
+            predictedExtrapolation: comparisonKinematicSymmetry(densitySharpening, predictedExtrapolation, grid).velocity,
+            predictedExtrapolationRegions: regionalVelocitySymmetry(densitySharpening, predictedExtrapolation, grid),
+            reverseAdvection: comparisonKinematicSymmetry(densitySharpening, reverseAdvection, grid).velocity,
+            reverseAdvectionPositiveFaceReflection: positiveFaceReflectionError(reverseAdvectionFaces, grid),
+            reverseAdvectionRegions: regionalVelocitySymmetry(densitySharpening, reverseAdvection, grid),
+            velocityAdvection: comparisonKinematicSymmetry(densitySharpening, velocityAdvection, grid).velocity,
+            velocityAdvectionPositiveFaceReflection: velocityAdvectionFaceReflection,
+            velocityAdvectionRegions: regionalVelocitySymmetry(densitySharpening, velocityAdvection, grid),
+            ...(macCormackAuditBytes ? { macCormackLimiter: summarizeMacCormackLimiterAudit(
+              new Uint8Array(macCormackAuditBytes.buffer, macCormackAuditBytes.byteOffset,
+                macCormackAuditBytes.byteLength),
+              velocityAdvectionFaceReflection, grid,
+            ) } : {}),
+            pressureProjection: comparisonKinematicSymmetry(densitySharpening, pressureProjection, grid).velocity,
+            pressureProjectionPositiveFaceReflection: positiveFaceReflectionError(pressureProjectionFaces, grid),
+            pressureProjectionPhysicalFaceD4: projectedPhysicalFaceD4(
+              pressureProjectionFaces, densitySharpening, grid),
+            pressureProjectionRegions: regionalVelocitySymmetry(densitySharpening, pressureProjection, grid),
+          });
         }
       }
       const compactPressureState = checkpointSources.has("compact pressure") && method.id === "octree"
@@ -4039,6 +5083,165 @@ async function runGPU(
         } : {}),
       });
       for (const capability of collected.available) collectedEvidence.add(capability);
+      if (comparisonMetricsRequested) {
+        if (!compactVelocityField) {
+          throw new Error(`${method.id} comparison checkpoint has no collocated velocity field`);
+        }
+        const symmetry = comparisonKinematicSymmetry(cubic.field, compactVelocityField,
+          [solver.info.nx, solver.info.ny, solver.info.nz]);
+        const liquidResidue = comparisonLiquidResidue(cubic.field,
+          [solver.info.nx, solver.info.ny, solver.info.nz], 0.01,
+          cubic.summary.interfaceFaceCount);
+        const sec38Field = method.id === "uniform" && values.densityPostProcessing === "on"
+          ? await readFloatTexture3D(device, solver.surfaceFieldTexture ?? solver.volumeTexture,
+            solver.info.nx, solver.info.ny, solver.info.nz)
+          : undefined;
+        const sec38Summary = sec38Field
+          ? summarizeScalarField(sec38Field, solver.info.nx, solver.info.ny, solver.info.nz)
+          : undefined;
+        const reconstructedReference = spatialExactReference ?? initialExact?.summary.cellSum;
+        const reconstructedRelativeVolumeDrift = reconstructedReference === undefined
+          ? undefined
+          : (cubic.summary.cellSum - reconstructedReference)
+            / Math.max(1, Math.abs(reconstructedReference));
+        const representedRelativeVolumeDrift = Number.isFinite(solver.info.representedVolumeDrift ?? NaN)
+          ? solver.info.representedVolumeDrift
+          : undefined;
+        const representedVolumeCellSum = Number.isFinite(solver.info.representedVolumeCellSum ?? NaN)
+          ? solver.info.representedVolumeCellSum
+          : undefined;
+        const representedVolumeReference_cells = representedVolumeCellSum !== undefined
+          && representedRelativeVolumeDrift !== undefined
+          && Math.abs(1 + representedRelativeVolumeDrift) > 1e-12
+          ? representedVolumeCellSum / (1 + representedRelativeVolumeDrift)
+          : undefined;
+        const initialMassRelativeError = representedVolumeReference_cells === undefined
+          ? undefined
+          : (representedVolumeReference_cells - authoredVolumeReference_cells)
+            / Math.max(1, Math.abs(authoredVolumeReference_cells));
+        const conservativeVolumeGain_cells = representedVolumeCellSum === undefined
+          || representedVolumeReference_cells === undefined ? undefined
+          : Math.max(0, representedVolumeCellSum - representedVolumeReference_cells);
+        const renderedVolumeGain_cells = reconstructedReference === undefined
+          ? undefined : Math.max(0, cubic.summary.cellSum - reconstructedReference);
+        const comparisonSpacing = {
+          x: scene.container.width_m / solver.info.nx,
+          y: scene.container.height_m / solver.info.ny,
+          z: scene.container.depth_m / solver.info.nz,
+        };
+        const comparisonVelocity = compactLiquidVelocityDiagnostic(
+          compactVelocityField, cubic.field,
+          comparisonSpacing.x * comparisonSpacing.y * comparisonSpacing.z,
+          [comparisonSpacing.x, comparisonSpacing.y, comparisonSpacing.z], stepDt,
+        );
+        const comparisonPotential = gravitationalPotentialEnergyProxy(
+          cubic.field, solver.info.nx, solver.info.ny, solver.info.nz,
+          comparisonSpacing, scene.fluid.gravity_m_s2,
+        );
+        const comparisonMechanical = comparisonPotential + comparisonVelocity.kineticEnergyProxy;
+        const uniformDiagnostics = solver.info as typeof solver.info & {
+          uniformCM11aResidualInfinity?: number;
+          uniformCM11aConverged?: boolean;
+          uniformCM11aCoarseIterations?: number;
+          uniformCM11aCapFailure?: boolean;
+          uniformCM11aFailingCoarseInvocation?: number;
+          uniformCM11aCoarseMaxAbsRhs?: number;
+          uniformCM11aCoarseMaxDiagonalPressure?: number;
+          uniformCM11aCoarseMaxAbsPressure?: number;
+          uniformCM11aCoarseProjectedGapPressure?: number;
+          uniformCM11aCoarseNormalizedProjectedResidual?: number;
+          uniformCM11aFineResidualInfinity?: number;
+          uniformCM11aFineProjectedGapPressure?: number;
+          uniformCM11aCoarseActiveRows?: number;
+          uniformCM11aCoarseFreeRows?: number;
+          uniformCM11aCoarseWorstRow?: number;
+          uniformCM11aCoarseWorstRowActive?: boolean;
+          uniformCM11aCoarseWorstRowHalo?: boolean;
+          uniformUnplaceableSolidExcess_cells?: number;
+        };
+        const pressureMultigrid = resultMethod === "uniform" ? {
+          residualInfinity: uniformDiagnostics.uniformCM11aResidualInfinity,
+          converged: uniformDiagnostics.uniformCM11aConverged,
+          coarseIterations: uniformDiagnostics.uniformCM11aCoarseIterations,
+          capFailure: uniformDiagnostics.uniformCM11aCapFailure,
+          failingCoarseInvocation: uniformDiagnostics.uniformCM11aFailingCoarseInvocation,
+          coarseMaxAbsRhs: uniformDiagnostics.uniformCM11aCoarseMaxAbsRhs,
+          coarseMaxDiagonalPressure: uniformDiagnostics.uniformCM11aCoarseMaxDiagonalPressure,
+          coarseMaxAbsPressure: uniformDiagnostics.uniformCM11aCoarseMaxAbsPressure,
+          coarseProjectedGapPressure: uniformDiagnostics.uniformCM11aCoarseProjectedGapPressure,
+          coarseNormalizedProjectedResidual: uniformDiagnostics.uniformCM11aCoarseNormalizedProjectedResidual,
+          fineResidualInfinity: uniformDiagnostics.uniformCM11aFineResidualInfinity,
+          fineProjectedGapPressure: uniformDiagnostics.uniformCM11aFineProjectedGapPressure,
+          coarseActiveRows: uniformDiagnostics.uniformCM11aCoarseActiveRows,
+          coarseFreeRows: uniformDiagnostics.uniformCM11aCoarseFreeRows,
+          coarseWorstRow: uniformDiagnostics.uniformCM11aCoarseWorstRow,
+          coarseWorstRowActive: uniformDiagnostics.uniformCM11aCoarseWorstRowActive,
+          coarseWorstRowHalo: uniformDiagnostics.uniformCM11aCoarseWorstRowHalo,
+          unplaceableSolidExcess_cells: uniformDiagnostics.uniformUnplaceableSolidExcess_cells,
+        } : undefined;
+        console.log(JSON.stringify({ scenario: scenarioId, method: resultMethod,
+          phase: "comparison-observation", step: steps,
+          time_s: solver.info.submittedTime_s ?? 0,
+          volumeCellSum: cubic.summary.cellSum,
+          reconstructedVolumeCellSum: cubic.summary.cellSum,
+          reconstructedRelativeVolumeDrift,
+          authoredVolumeReference_cells,
+          representedVolumeReference_cells,
+          representedVolumeCellSum,
+          representedRelativeVolumeDrift,
+          initialMassRelativeError,
+          // The mass gate uses the solver's conservative receipt when it is
+          // available. Cubic phi reconstruction is a presentation estimator,
+          // retained separately above so a first-refresh offset cannot pose as
+          // physical mass loss.
+          relativeVolumeDrift: representedRelativeVolumeDrift ?? reconstructedRelativeVolumeDrift,
+          volumeDriftSource: representedRelativeVolumeDrift === undefined
+            ? "cubic-reconstruction" : "conservative-receipt",
+          volumeGain: {
+            conservative_cells: conservativeVolumeGain_cells,
+            conservativeRelative: Math.max(0, representedRelativeVolumeDrift ?? 0),
+            rendered_cells: renderedVolumeGain_cells,
+            renderedRelative: Math.max(0, reconstructedRelativeVolumeDrift ?? 0),
+          },
+          boundaryContact: liquidResidue.boundaryContact,
+          connectivity: liquidResidue.connectivity,
+          classifiedLiquidMass_cells: liquidResidue.classifiedMass_cells,
+          diffuseLiquidMassBelowThreshold_cells: liquidResidue.diffuseMassBelowThreshold_cells,
+          occupancyClassificationThreshold: liquidResidue.occupancyThreshold,
+          densityBands: liquidResidue.densityBands,
+          ...(sec38Summary ? { sec38Presentation: {
+            componentCount: sec38Summary.componentCount,
+            dominantComponentFraction: sec38Summary.wetCells > 0
+              ? sec38Summary.largestComponent / sec38Summary.wetCells : 1,
+            wetCells: sec38Summary.wetCells,
+            interfaceFaceCount: sec38Summary.interfaceFaceCount,
+            enclosedAirComponentCount: sec38Summary.enclosedAirComponentCount,
+            enclosedAirCells: sec38Summary.enclosedAirCells,
+            fieldMinimum: sec38Summary.minimum,
+            fieldMaximum: sec38Summary.maximum,
+          } } : {}),
+          fieldMinimum: cubic.summary.minimum, fieldMaximum: cubic.summary.maximum,
+          componentCount: cubic.summary.componentCount,
+          dominantComponentFraction: cubic.summary.wetCells > 0
+            ? cubic.summary.largestComponent / cubic.summary.wetCells : 1,
+          mechanicalEnergy: {
+            gravitationalPotentialEnergyProxy: comparisonPotential,
+            kineticEnergyProxy: comparisonVelocity.kineticEnergyProxy,
+            mechanicalEnergyProxy: comparisonMechanical,
+            retentionRatio: initialPotentialEnergyProxy === undefined ? undefined
+              : comparisonMechanical / Math.max(initialPotentialEnergyProxy, 1e-30),
+          },
+          ...(extrapolatedVelocitySymmetry ? { extrapolatedVelocitySymmetry } : {}),
+          ...(extrapolatedPositiveFaceReflection ? { extrapolatedPositiveFaceReflection } : {}),
+          ...(extrapolatedVelocityRegions ? { extrapolatedVelocityRegions } : {}),
+          ...(extrapolatedKnownFaceSymmetry ? { extrapolatedKnownFaceSymmetry } : {}),
+          ...(extrapolationConformance ? { extrapolationConformance } : {}),
+          ...(uniformProjectedPhysicalFaceD4 ? { uniformProjectedPhysicalFaceD4 } : {}),
+          ...(uniformSymmetryStageAudit ? { uniformSymmetryStageAudit } : {}),
+          ...(uniformPaperInvariants ? { uniformPaperInvariants } : {}),
+          ...(pressureMultigrid ? { pressureMultigrid } : {}),
+          ...symmetry }));
+      }
       checkpoints.push({ time_s: solver.info.submittedTime_s ?? 0, field: cubic.field, summary: cubic.summary,
         raster, globalFineGeneration, preProjectionVelocity, postProjectionVelocity, compactMechanicalEnergy,
         ...(Object.keys(collected.values).length > 0 ? { evidence: collected.values } : {}) });
@@ -5850,9 +7053,27 @@ try {
       ...result,
       energyTraceSummary: energyTraceSummary(result.energyTrace),
     })));
+    // Environment overrides are an authored smoke execution control, not a
+    // request to evaluate the shortened run against the lane's original stop.
+    // Keep diagnostics and the exact-step execution contract on the same
+    // effective duration (the dedicated comparison runner uses this for its
+    // one-/twenty-step wiring sprints before the canonical 250-step run).
+    const diagnosticLane = runOptions.exactSteps === scenario.lane.stop.exactSteps
+      && runOptions.maxDt_s === scenario.lane.stop.maxDt_s
+      && target_s === scenario.lane.stop.simulatedTime_s
+      ? scenario.lane : {
+        ...scenario.lane,
+        stop: {
+          ...scenario.lane.stop,
+          simulatedTime_s: target_s,
+          ...(runOptions.exactSteps === undefined ? {} : { exactSteps: runOptions.exactSteps }),
+          ...(runOptions.maxDt_s === undefined ? {} : { maxDt_s: runOptions.maxDt_s }),
+        },
+        oracle: { ...scenario.lane.oracle, matchedSteps: oracleSteps },
+      };
     const diagnosticEvaluation = evaluateSceneDiagnosticLane(sceneDiagnosticRuntimeRegistry, {
       scene: applySceneOverrides(scenario.scene, runOptions.maxDt_s),
-      lane: scenario.lane,
+      lane: diagnosticLane,
       evidence: diagnosticEvidence,
     });
     console.log(JSON.stringify({

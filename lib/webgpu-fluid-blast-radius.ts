@@ -199,7 +199,7 @@ fn blastVolume(uv:vec2f)->vec4f {
   if(any(hit.xyz<minimum)||any(hit.xyz>maximum)){discard;}
   let sample=blastSample(hit.xyz);
   if(sample.a<=0.001){discard;}
-  return vec4f(displayColor(sample.rgb),sample.a);
+  return sliceDisplay(sample.rgb,sample.a);
 }
 `;
 

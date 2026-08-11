@@ -1320,6 +1320,24 @@ export async function readRgbaTexture3D(device: GPUDevice, texture: GPUTexture, 
   return output;
 }
 
+/** Read an rgba16float 3D texture without format conversion. */
+export async function readRgba16Texture3D(device: GPUDevice, texture: GPUTexture, width: number, height: number, depth: number) {
+  const bytesPerRow = Math.ceil(width * 8 / 256) * 256;
+  const buffer = device.createBuffer({ size: bytesPerRow * height * depth, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+  const encoder = device.createCommandEncoder();
+  encoder.copyTextureToBuffer({ texture }, { buffer, bytesPerRow, rowsPerImage: height }, { width, height, depthOrArrayLayers: depth });
+  device.queue.submit([encoder.finish()]); await buffer.mapAsync(GPUMapMode.READ);
+  const bytes = new Uint8Array(buffer.getMappedRange());
+  const output = new Float32Array(width * height * depth * 4);
+  for (let z = 0; z < depth; z += 1) for (let y = 0; y < height; y += 1) {
+    const row = new Uint16Array(bytes.buffer, bytes.byteOffset + bytesPerRow * (y + height * z), width * 4);
+    const outputOffset = width * 4 * (y + height * z);
+    for (let index = 0; index < row.length; index += 1) output[outputOffset + index] = decodeFloat16(row[index]!);
+  }
+  buffer.unmap(); buffer.destroy();
+  return output;
+}
+
 export function summarizeVelocityField(
   velocity: Float32Array,
   width: number,

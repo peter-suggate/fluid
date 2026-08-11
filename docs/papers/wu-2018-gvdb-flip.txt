@@ -1,0 +1,742 @@
+EUROGRAPHICS 2018 / D. Gutierrez and A. Sheffer                                                                                     Volume 37 (2018), Number 2
+(Guest Editors)
+
+
+
+
+                Fast Fluid Simulations with Sparse Volumes on the GPU
+
+                                                   Kui Wu 1 Nghia Truong 1 Cem Yuksel 1 and Rama Hoetzlein 2
+
+                                                                 1 University of Utah   2 NVIDIA Corporation
+
+
+
+
+Figure 1: City scene simulated with 29 million particles on a 512 × 256 × 512 grid with our spatially sparse, matrix-free FLIP solver on a
+Quadro GP100 GPU at an average 1.8 seconds/frame.
+
+        Abstract
+
+        We introduce efficient, large scale fluid simulation on GPU hardware using the fluid-implicit particle (FLIP) method over a
+        sparse hierarchy of grids represented in NVIDIA R GVDB Voxels. Our approach handles tens of millions of particles within
+        a virtually unbounded simulation domain. We describe novel techniques for parallel sparse grid hierarchy construction and
+        fast incremental updates on the GPU for moving particles. In addition, our FLIP technique introduces sparse, work efficient
+        parallel data gathering from particle to voxel, and a matrix-free GPU-based conjugate gradient solver optimized for sparse
+        grids. Our results show that our method can achieve up to an order of magnitude faster simulations on the GPU as compared
+        to FLIP simulations running on the CPU.
+        CCS Concepts
+        •Computing methodologies → Physical simulation; Massively parallel and high-performance simulations;
+
+
+
+1. Introduction                                                                              We make use of the GVDB sparse voxel data structure [Hoe16],
+                                                                                          a GPU-friendly implementation of the VDB sparse grid hierar-
+                                                                                          chy [Mus13]. Computation with sparse grids provides several ad-
+The Fluid-Implicit-Particle (FLIP) method [ZB05] has been pop-                            vantages for fluid simulation. First, it reduces the storage of empty
+ular for simulating various types of fluid phenomena in computer                          space not occupied by fluid. As we consider simulations entirely
+graphics due to its simplicity and low dissipation. As a hybrid tech-                     in GPU memory this is a crucial factor in running large-scale sim-
+nique, high-quality FLIP simulations require both large numbers of                        ulations. Furthermore, with GVDB Voxels the grid size does not
+particles and high resolution grids. Our method addresses these is-                       have to be pre-defined. As the fluid moves in space new voxels
+sues by reducing memory requirements, dynamically tracking the                            can be allocated automatically as needed. Moreover, voxel data is
+domain, and making use of parallel GPU-based computation resid-                           stored in 3D textures as a collection of dense voxel groups (i.e.
+ing on a sparse volume representation.
+
+ c 2018 The Author(s)
+Computer Graphics Forum c 2018 The Eurographics Association and John
+Wiley & Sons Ltd. Published by John Wiley & Sons Ltd.
+                         K. Wu & N. Truong & C. Yuksel & R. Hoetzlein / Fast Fluid Simulations with Sparse Volumes on the GPU
+
+bricks), which allows fast data retrieval during computation and              and later to solving the internal pressure and frictional stresses
+hardware-accelerated trilinear filtering. Finally, neighbor lookups           in granular materials [NGL10]. PIC/FLIP is also used for han-
+are achieved with apron voxels to accelerate stencil operations on            dling hair collisions with itself and other objects [MSW∗ 09]. More
+the GPU.                                                                      recently, the Material Point Method (MPM), which generalizes
+                                                                              PIC/FLIP using a continuum formulation, was shown to effec-
+   Fluid simulation on sparse grids involves a number of challenges
+                                                                              tively handle simulations of various kinds of materials such as
+that we address here. First of all, the sparse structure must be rebuilt
+                                                                              snow [SSC∗ 13], sand [DBD16,KGP∗ 16], viscoelastic fluids, foams
+at every frame from a large number (tens of millions in our tests)
+                                                                              and sponges [RGJ∗ 15, YSB∗ 15], and anisotropic elastoplasticity
+of particles. We solve this by introducing an efficient algorithm
+                                                                              materials [JGT17].
+for rebuilding and updating the tree topology. Second, particle-to-
+grid rasterization presents performance challenges which we ad-                  There is also an extensive amount of prior work on accelerat-
+dress by introducing a parallel gathering method that efficiently             ing the PIC/FLIP method. The pressure solve on the grid, which
+utilizes GPU thread blocks and data coherence while keeping all               involves solving the Poisson equation as a sparse linear system, is
+computation on the GPU. Finally, we introduce a matrix-free con-              often the bottleneck of the PIC/FLIP approach. Decomposing and
+jugate gradient solver for sparse voxel grids to efficiently handle           solving the pressure in parallel over sub-domains has received some
+the pressure solver step of FLIP. Together the sparse grids and the           attention [NSCL08,WST09,GNS∗ 12]. Other approaches use a low-
+matrix-free solver allow us to support much larger volumes than               resolution grid [PTC∗ 10, LZF10, EB14, ATW15] or a multigrid cy-
+previously achieved in GPU memory as well as reaching up to two               cle as a preconditioner for a conjugate gradient solver [MST10].
+orders of magnitude speedup compared to similar dense, multi-core             Instead of using uniform grids, tetrahedral discretization [ATW13],
+CPU implementations.                                                          far-field grids [ZLC∗ 13], and sparse uniform grids [AGL∗ 17]
+                                                                              are used for aggressive adaptivity. Sparse volumetric structures
+   Our primary contributions consist of fast dynamic hierarchical
+                                                                              were also used for reducing storage requirements [SABS14]. Re-
+topology with incremental update, an efficient GPU-friendly sparse
+                                                                              cently, Azevedo at el. [ABO16] introduce a topologically cor-
+spatial division by subcells, and a fast FLIP simulation with accel-
+                                                                              rect, boundary-conforming cut-cell mesh to simulate liquid on very
+erated particle-to-grid rasterization and a matrix-free conjugate gra-
+                                                                              coarse grids, while Liu et al. [LMAS16] and Chu et al. [CZY17]
+dient solver directly on sparse volumes. Each of these contributions
+                                                                              present a Schur-complement for solving the Poisson equation on a
+are discussed in detail.
+                                                                              decomposed domain in parallel. Bailey et al. [BBAW15] also em-
+                                                                              ploy sparse volumetric structures on distributed systems for large
+2. Background                                                                 liquid simulations.
+There is a large body of work on fluid simulation in computer                    In addition to pressure solve, other methods are introduced
+graphics. Our discussions focus on prior work that is closely re-             to improve performance of the PIC/FLIP method. Lentine et
+lated to FLIP and fluid simulations on the GPU. We provide a brief            al. [LCPF12] proposed computing an accurate level set represen-
+description of the GVDB Voxels structure used for simulation.                 tation in order to take large time steps. Rather than using eight par-
+                                                                              ticles per voxel as typically in FLIP, Batty and Bridson [BB08] pro-
+2.1. Related Work                                                             pose using only one particle per voxel with a larger particle radius
+                                                                              to transfer particle velocities to the grid using a wider SPH-like ker-
+Fluid simulation using FLIP [BR86] has been a popular approach                nel. Ferstl et al. [FAW∗ 16] introduce a narrow band FLIP method to
+since it was introduced to computer graphics [ZB05], along with               only maintain particles within a narrow band of the liquid surface.
+the particle-in-cell (PIC) method [Har64].
+                                                                                  The computational power of GPUs have made them an attractive
+   Both PIC and FLIP use particles for advection with the                     hardware solution for fluid simulation in general. Harris [Har05]
+pressure solve performed on the grid. FLIP addresses the nu-                  implements Eulerian fluid simulation on the GPU with the it-
+merical diffusion of PIC, but not numerical energy dissipa-                   erative Jacobi method. Molemaker et al. [MCPN08] introduced
+tion [MCP∗ 09]. Thus, back and forth error compensation and cor-              Iterated Orthogonal Projections (IOP) as an iterative multigrid-
+rection (BFECC) [KLLR07] and the derivative particles [SKK07]                 based Poisson solver on the GPU. Horvath and Geiger [HG09]
+methods can be used for reducing numerical dissipation when                   divided pre-simulated fire data on a coarse grid into 2D slices
+transferring data between particles and voxels. Researchers later             and performed secondary Eulerian Navier-Stokes solvers in par-
+improved the PIC/FLIP method by providing amplified splashing                 allel across many separate GPUs. Chentanez and Müller devel-
+effects [KCC∗ 06, GB13], accurate solid-fluid coupling [BBB07],               oped a specialized multigrid method for pressure projection on the
+and proper air-liquid interfaces [BB12]. Recently, Affine Particle-           GPU [CM11a, CM11b] and introduced a GPU-friendly sharpening
+In-Cell (APIC) [JSS∗ 15] were introduced to stably remove the dis-            filter that conserves mass locally and globally [CM12]. Recently,
+sipation problems of PIC, providing exact conservation of angular             Chen et al. [CKIW15] introduced a GPU-based fixed-point method
+momentum during particle-to-grid transfers. The Integrated Vortic-            for accelerating Jacobi iterations for real-time painting simulations.
+ity of Convective Kinematics (IVOCK) [ZBG15] method was in-
+troduced for approximately restoring the dissipated vorticity during
+advection, independent of the advection method.                               2.2. The GVDB Data Structure
+   The PIC/FLIP method is not limited to simulating fluids, as                GVDB Voxels is a framework for efficiently representing voxels on
+it’s first use in computer graphics was in sand simulation [ZB05]             a sparse hierarchy of grids [Hoe16] based on the work of [Mus13].
+
+                                                                                                                                                  c 2018 The Author(s)
+                                                                                 Computer Graphics Forum c 2018 The Eurographics Association and John Wiley & Sons Ltd.
+                              K. Wu & N. Truong & C. Yuksel & R. Hoetzlein / Fast Fluid Simulations with Sparse Volumes on the GPU
+
+                                                                                         3. GVDB Voxels for Simulation
+                                                                                         The original GVDB data structure was designed to mimic the VDB
+                                                                                         approach, where bitmasks are used to compact child lists. In prac-
+                                                                                         tice, storage of the topology is small (<1 MB) compared to the
+                                                                                         voxel atlas, and bitmask compaction complicates dynamic inser-
+                                                                                         tion and removal of nodes. We modify GVDB Voxels to use ex-
+                                                                                         plicit child lists for each node. Sparseness is still achieved since
+                                                                                         these lists only occur in occupied nodes. The new implementation
+                                                                                         removes the bitmask table and uses a null value in P1 to indicate an
+                                                                                         inactive child node. Dynamic insertion and removal of children are
+                                                                                         now O(1).
+                                                                                            Neighbor calculations are accelerated with apron voxels that are
+                                                                                         maintained as an extra voxel border around each brick, and dupli-
+                                                                                         cate the values across brick boundaries. Updating apron voxels is
+                                                                                         non-trivial since the correct values are voxel neighbors in world
+                                                                                         space (see Figures 2a and 2d). Since apron update is called repeat-
+                                                                                         edly to maintain data consistency, and is used during the inner loop
+                                                                                         of our CG solver, performance is critical. The previous technique
+                                                                                         launches one kernel along each axis, where each thread resolves
+                                                                                         one apron voxel in atlas space by traversing the GVDB topology to
+Figure 2: The GVDB Data Structure represents sparse voxels cov-
+                                                                                         identify its world-space neighbor. We launch a single kernel cover-
+ering a spatial domain (a), as a tree of 3D grids (b) whose leaf
+                                                                                         ing all six sides of a brick, including edges and corners, with one
+nodes point to voxel data in bricks. The GVDB data structure makes
+                                                                                         thread per apron voxel performing the traversal. Performance is im-
+use of two memory pools (c) to efficiently store basic node attributes
+                                                                                         proved by 5× over the original three-kernel method.
+in pool 0 and child lists in pool 1. Leaf nodes reference actual voxel
+data as bricks, which are dense 3D sub-volumes pooled inside a 3D
+voxel atlas (d) and surrounded by an extra border of apron voxels                        4. Simulation Algorithm Overview
+for later neighbor calculations.
+                                                                                         Our fluid simulation technique is presented in Algorithm 1, and
+                                                                                         follows the Fluid-Implicit Particle (FLIP) method with additions to
+                                                                                         account for sparse volumes and to enable computation on the GPU.
+The GVDB data structure sparsely covers a spatial domain with                            First, the GVDB topology changes dynamically per frame, so we
+voxels using a hierarchy of 3D grids as shown in Figure 2a. A con-                       begin with full or incremental rebuild of the tree (Sections 5.1 and
+figuration vector identifies the resolution of each grid level as a vec-                 5.2). Previous volume data is cleared on each frame. Second, to ac-
+tor of log2 dimensions. For instance, the h2, 3, 4i configuration indi-                  celerate point-to-voxel rasterization on GPU, including level sets
+cates a tree with three levels, having a root node L2 with (22 )3 = 64
+children, intermediate nodes at level L1 with (23 )3 = 512 children,
+and leaf nodes at level L0 referring to dense bricks of (24 )3 = 4, 096                  Algorithm 1 Sparse FLIP simulation
+voxels. This configuration can address a volumetric domain of                             1: procedure SparseFLIP( )
+(22+3+4 )3 ≈ 134 million voxels. GVDB Voxels allows for up to                             2:    P ← initial points
+                                                                                          3:    V ← GVDB structure
+five level trees by default, giving a very large address space. Levels
+                                                                                          4:    for each f rame do
+are numbered from zero (leaf nodes) to L (root node) to conve-                            5:        if first frame then
+niently allow the tree height to change, as in Figure 2b.                                 6:             Vtopo ← full rebuild (P)                . Section 5.1
+                                                                                          7:        else
+   For efficient GPU memory management, GVDB Voxels stores
+                                                                                          8:             Vtopo ← incremental build (P)           . Section 5.2
+the tree hierarchy with two pools of nodes, shown in Figure 2c.
+                                                                                          9:        end if
+Each node N(i)l at a given level l is stored in memory pool group                        10:        V ← resize and clear (Vtopo )
+P0l and consists of a world space position, parent index and a child                     11:        S ← insert points in subcells (V, P)          . Section 6
+list stored in a separate pool P1l . For interior nodes, each child in                   12:        V (vel) ← particles-to-voxels (S, P)          . Section 7
+the list is a reference to a node in P0l−1 at the next lowest level.                     13:        V ← update apron (ρ, vel, marker)
+Leaf nodes at level 0 have no children and instead maintain a refer-                     14:        V (velold ) ← V(vel)
+ence to a brick of voxels stored in a 3D texture atlas.                                  15:        V (div) ← divergence (V (vel))
+                                                                                         16:        V (ρ) ← CG pressure solve (V, div)            . Section 8
+  Whereas the node pools store the GVDB topology, the voxel                              17:        V (vel) ← pressure-to-velocity (V (ρ))
+data is represented in dense n3 bricks allocated from a pool of sub-                     18:        V ← update apron (V (vel))
+volumes in a voxel atlas, shown in Figure 2d. The atlas is imple-                        19:        P ← advance (V (vel),V (velold ))
+mented as a 3D hardware texture to enable trilinear interpolation                        20:    end for
+and GPU texture cache. Channels, or voxel attributes, are supported                      21: end procedure
+with multiple atlases.
+
+ c 2018 The Author(s)
+Computer Graphics Forum c 2018 The Eurographics Association and John Wiley & Sons Ltd.
+                        K. Wu & N. Truong & C. Yuksel & R. Hoetzlein / Fast Fluid Simulations with Sparse Volumes on the GPU
+
+
+
+
+Figure 3: Full Topology Rebuild in 2D: Given input points a, b, c, d, e, and f the goal is to build a containing tree. The index positions of
+GVDB nodes are at the top-left of the node. After converting points to a list of keys h`, x, y, zi, called the level-index list, we using a radix sort
+to sort all levels simultaneously. Then, each value of the sorted list is checked with the previous one. If they are the same, set a 0 value in the
+marker list, otherwise set a value of 1. From the marker list, we compute the prefix sum to provide absolute positions for the output compact
+list. The sorted list value is written to the compact list at the prefix location only if the marker value is 1. The resulting list can be used to
+directly populate the multi-level tree topology shown at right. Note that empty boxes in the child lists are null values.
+
+for rendering, we insert points into subcells described in Section 6.         bounding box. The set of covering nodes is determined by generat-
+Third, we handle sparse brick boundaries with apron updates. Fi-              ing nodes at all levels in parallel and removing duplicates. Finally,
+nally, our matrix-free conjugate gradient solver for sparse voxel             nodes are reallocated and parent-child lists are updated. The details
+grids is used to efficiently handle the pressure solver step of FLIP          of these steps are as follows:
+(Section 8). All other steps follow a typical FLIP implementation
+with GPU acceleration, including divergence, pressure-to-velocity,            Step 1. Determine the number of tree levels L. We begin by
+and advection using old and new grid velocities.                                computing the bounding box that contains all particles, which
+                                                                                determines the level L of the root node required to contain all
+5. Dynamic Topology Construction                                                particles. Thus, only nodes from levels 0 to L − 1 are identified
+                                                                                in the following steps. The bounding box is computed by a par-
+During simulation each particle must be covered by a sparse voxel               allel GPU reduction algorithm [Har07].
+brick to contain it. However, each GVDB brick may contain thou-               Step 2. Generate the level-index list. We define a level-index list
+sands of particles. If we traverse the tree for each particle, even             to consist of the indices of tree nodes that contain each particle at
+in parallel, there will be a large number of write conflicts and du-            every level of the hierarchy. Let n be the number of particles. The
+plicate nodes. Fortunately each GVDB node has a unique absolute                 total size of this list is nL and it is generated with a single pass
+spatial index which can be used to classify particles belonging to              over all particles. The three indices x, y, and z of a node that con-
+it. Thus our solution is to sort particles based on the spatial index           tains a particle at level ` is determined from the particle position.
+at all levels simultaneously, and then remove duplicates. The re-               For each level `, where 0 ≤ ` ≤ L − 1, a single concatenated in-
+maining set is the list of unique nodes that will cover all particles.          teger value level-index, h`, x, y, zi, is written to the list. Thus all
+Consequently, all GVDB nodes are identified in parallel and real-               indexed positions at multiple levels can be sorted together, re-
+located once. We consider both full and incremental rebuild of the              ducing the number of GPU kernel launches.
+GVDB tree hierarchy using this method, with incremental update                Step 3. Compact the level-index list. The level-index list gener-
+of moving particles an order of magnitude faster than full rebuild.             ated in the previous step contains many duplicated values since
+                                                                                each node may contain many particles. We first compact this
+5.1. Full Topology Rebuild                                                      list using a radix sort to group duplicates values. We then mark
+                                                                                each element with 1 if it differs from the preceding element, or
+The goal of topology rebuild is to efficiently construct the set of
+                                                                                0 otherwise, to construct a marker list. A parallel prefix sum
+interior and leaf nodes of a GVDB tree covering a set of particles.
+                                                                                (scan) [HSO07] over the marker list provides offsets for the fi-
+This is performed in two passes to assign voxels up to the particle
+                                                                                nal compacted list. Note that the level-index list, marker list, and
+radius.
+                                                                                prefix sum have the same length. The output compacted list is
+                                                                                constructed by finding each unique level-index node using the
+5.1.1. First Pass at Particle Centers
+                                                                                prefix sum for position and only if its marker list value is 1. Each
+The first pass determines the set of tree nodes that cover par-                 value in the compacted list corresponds to a unique tree node
+ticle centers. As the fluid domain is virtual unbounded the tree                that must be added to the topology to cover all particles. Fig-
+depth may vary, and is recomputed on each frame from the particle               ure 3 demonstrates construction of the compacted list in 2D.
+
+                                                                                                                                                  c 2018 The Author(s)
+                                                                                 Computer Graphics Forum c 2018 The Eurographics Association and John Wiley & Sons Ltd.
+                              K. Wu & N. Truong & C. Yuksel & R. Hoetzlein / Fast Fluid Simulations with Sparse Volumes on the GPU
+
+Step 4. Allocate and initialize nodes. We allocate the two mem-                          already exists a node at that level. If so, mark the node; otherwise,
+  ory pools of GVDB based on the size of the compacted level-                            h`, x, y, zi is added to the new node list.
+  index lists. Then, we initialize the node data by assigning the
+                                                                                            Steps 3 through 5 operate similarly. If an existing node is un-
+  level and position values of each node. All child-node indices
+                                                                                         marked during Step 2, the node is no longer needed and can be
+  are initialized to a null value.
+                                                                                         safely removed from the tree. We remove these nodes with an addi-
+Step 5. Set child node lists. Finally, we set the child node indices
+                                                                                         tional step, using multiple passes in a bottom-up order. We remove
+  in multiple passes. Each pass launches a kernel per level, de-
+                                                                                         the unmarked nodes by setting the corresponding child node indices
+  scending from LN−1 to L0 . For each node N(i)l , its parent is
+                                                                                         of parent nodes to a null value. Removed nodes and their bricks are
+  found by traversing the tree from the root. The corresponding
+                                                                                         dereferenced but not deleted from memory pools, allowing them to
+  child node index of the parent node is set at the same time. By
+                                                                                         be reused for new bricks which are relinked on each frame.
+  induction the top-down order guarantees that each parent has
+  been added to the topology before processing lower levels. Upon
+  completion the GVDB structure contains correct parent and child                        6. Subcell Division
+  lists for every node.
+                                                                                         We introduce subcells, as shown in Figure 4, which spatially di-
+                                                                                         vide each voxel storage brick into multiple, small sub-volumes or-
+5.1.2. Second Pass for Influencing Box
+                                                                                         ganized for GPU hardware. Then, we create particle position and
+The second pass guarantees that voxels exist to cover up to a unit                       velocity lists to store all particles belonging to, or overlapping, each
+edge distance for particle-to-grid velocity transfers, or two times                      subcell.
+the radius to generate level sets (for rendering). We call this bound-
+                                                                                            The optimal size of a voxel brick depends on the applica-
+ing box per particle the influence box, shown in Figure 4. The first
+                                                                                         tion, with tradeoffs between performance and occupancy [Hoe16].
+pass generates GVDB nodes which cover particle centers. While
+                                                                                         Whereas large bricks are ideally suited for disk IO and raytrac-
+it is possible to modify the first pass to extend the level-index list
+                                                                                         ing, the number of voxels-per-brick typically exceeds a GPU thread
+to cover the influence box, this naïve modification would produce
+                                                                                         block, making local computation inefficient. Therefore we retain
+a level-index list eight times larger or more. The second pass is
+                                                                                         GVDB Voxel bricks for storage, and introduce subcells to create
+used to quickly generate neighboring bricks touched by influenc-
+                                                                                         a logical grouping for thread blocks, shown in Figure 4. Subcells
+ing boxes.
+                                                                                         organize a given geometry (e.g. points, polygons) for computation
+   The goal of this second pass is to generate the relatively few                        with respect to a set of voxels.
+voxel bricks that do not yet exist in the tree, do not contain parti-
+                                                                                             The total memory consumed is the union of particles in every
+cle centers, but are required due to the influencing box of the par-
+                                                                                         subcell including duplicates that overlap other subcells. At one ex-
+ticles. For this pass, we modify Step 2 of the first pass to check
+                                                                                         treme, if a subcell is only one voxel (13 ), each subcell will be ex-
+whether each corner of a particle’s influencing box already exists
+                                                                                         actly the ideal list of particles impacting that voxel. However, the
+as a GVDB node. If corner nodes are not found, we add these to the
+                                                                                         total list length will be much longer than the original particle list.
+list.
+                                                                                         With larger subcells, more unnecessary particles are checked per
+   Since only missing nodes are added to the list using atomic in-                       subcell, but the total list length will be shorter. We use 43 = 64 vox-
+dices, a much shorter list is generated in comparison to the first                       els per subcell as an even multiple of CUDA warps (32× threads)
+pass. As duplicate nodes may still be included, we perform Step 3                        and to balance search length with memory consumption while also
+again to compact the list. Step 4 and 5 are identical to the first pass.                 fitting into a single GPU thread block (512× threads). To improve
+                                                                                         hardware coherence, instead of storing particle indices, the posi-
+                                                                                         tions and velocities are copied into each subcell.
+5.2. Incremental Rebuild
+                                                                                           Due to duplication in the lists caused by overlaps, the subcell list
+We observe that the tree topology for two consecutive time steps of
+                                                                                         occupies the most memory during simulation. To further reduce
+a FLIP simulation will be very similar even with large time steps
+                                                                                         memory usage, we encode position and velocity as 16-bit ushort
+since most particles will be moving within the same node, while
+                                                                                         values dividing by their range. Encoded data only occupy half as
+others may cross nodes. Therefore, we perform incremental up-
+                                                                                         much memory overall.
+dates rather than rebuilding the topology from scratch. Typically,
+at each step, we only need to allocate a relatively small number of
+new nodes and voxels and just a small portion of existing nodes                          7. Particle-to-Grid Rasterization
+are no longer needed. As a result, incremental updates can be per-
+                                                                                         A key aspect of a FLIP simulation is to transfer particle veloci-
+formed much more efficiently than complete reconstruction of the
+                                                                                         ties to the voxel grid. The weighted sum of nearest particles con-
+topology.
+                                                                                         tribute to any given voxel. Two common approaches are to per-
+   Our incremental rebuild is very similar to the full topology con-                     form this as either a scatter or a gather. Scatter introduces texture
+struction algorithm. The main difference is in Step 2 that generates                     write conflicts as multiple particles write to the same location. It
+the level-index list. Note that the desired incremental list is the sub-                 also requires atomic texture ops and produces unbalanced thread
+set of the full node list which only contains new nodes not already                      workloads. Gathering offers several benefits on the GPU, as found
+in the existing GVDB tree. Thus, for each particle, we check each                        by [KBT∗ 17]. GPU occupancy is improved as each voxel collects
+corner of the particle’s influencing box to determine whether there                      values from a fixed shared list of nearby particles, without the need
+
+ c 2018 The Author(s)
+Computer Graphics Forum c 2018 The Eurographics Association and John Wiley & Sons Ltd.
+                        K. Wu & N. Truong & C. Yuksel & R. Hoetzlein / Fast Fluid Simulations with Sparse Volumes on the GPU
+
+
+
+
+Figure 4: Subcell Division: Subcells are a logical sub-division of voxel bricks into computation units. While bricks organize the sparse
+domain, and are sized for global performance of raytracing and I/O, they contain too many voxels for efficient GPU compute. Subcells are
+64 voxels, sized to fit into a GPU thread block and an even multiple of CUDA warps (32 threads). Every voxel in a subcell shares the same
+subcell particle list. Notice this requires duplication as, for example, particle d exists in subcells 0,0 and 1,0, but reduces the search length
+per voxel. During construction, the covered subcells of a particle are determined by rasterizing the particle’s influence box (orange).
+
+
+
+                                                                             8. Matrix-Free Conjugate Gradient Solver on GPU
+                                                                             The pressure solve is the most important component of an incom-
+                                                                             pressible fluid simulation. Its goal is to solve a linear system Ax = b,
+                                                                             where x is the unknown pressure values, b is divergence, and A is
+                                                                             a sparse matrix that only depends on voxels properties, which can
+                                                                             be solid, fluid, or empty. The matrix A is the seven-point Laplacian
+                                                                             matrix. Since matrix A is symmetric positive definite, the Conjugate
+                                                                             Gradient (CG) algorithm is one of the most commonly used tech-
+                                                                             niques. We introduce a parallel, matrix-free CG solver for FLIP
+                                                                             simulation on sparse voxel grids residing directly on a sparse tree
+                                                                             hierarchy.
+                                                                                Algorithm 2 provides the pseudo-code for our matrix-free CG
+                                                                             solver. Each CG iteration requires one SpMV (Line 10), two inner
+Figure 5: Inner Product by 3D Reduction of a volume: To com-                 products (Line 11 and 15), and three vector additions (Line 12, 13,
+pute inner products for our CG solver, global voxel data from two            and 17). Vector r, b, q, d, and x are stored as channels in sepa-
+channels are multiplied into shared memory. Then a 3D reduction              rate 3D GVDB textures. Note that apron voxels in vector d has to
+by powers-of-two is applied to 43 voxels in shared memory to write           be updated before being used in SpMV(Line 10), which will ac-
+one value per subcell to a 1D array. Finally, a 1D reduction on the          cesses neighbor voxels. The solver termination criteria is checked
+subcell results is performed to return the single output value.              using the residual norm, read back to the CPU every ten iterations
+                                                                             to reduce pipeline stalls (Line 20). Final particle advection is a
+                                                                             straight forward sampling of the voxel data at particle locations.
+                                                                             Corresponding to the FLIP technique, the old and new grid veloc-
+for atomics. A naïve technique would check the distance of each              ities are sampled and subtracted to give the new particle velocity.
+voxel to every particle, whereas the subcell division described ear-         Hardware interpolation is supported by GVDB Voxels to retrieve
+lier is the ideal shared list of particles for localized, fixed-radius       velocity values at arbitrary positions.
+gathering.
+                                                                                The most expensive operation in the CG solver is sparse matrix-
+   A kernel is launched for every active voxel, with each subcell            vector multiplication (SpMV). The matrix A is a 2D dimensional
+as a GPU grid block. A typical gather accesses each particle once            matrix of size N × N, where N is the total number of active
+to perform a sum of some attribute. We implement several raster-             fluid voxels, thus growing rapidly with grid resolution. Even with
+ization kernels to gather velocity and density to generate level set         sparse matrix libraries, the matrix would quickly consume GPU
+values for rendering. Additionally, many gather operations, such as          memory for large systems. Therefore, following a matrix-free ap-
+velocity and fluid-air markers, are combined in a single kernel.             proach [MGSS13], we avoid storing the matrix A by constructing
+
+                                                                                                                                                 c 2018 The Author(s)
+                                                                                Computer Graphics Forum c 2018 The Eurographics Association and John Wiley & Sons Ltd.
+                              K. Wu & N. Truong & C. Yuksel & R. Hoetzlein / Fast Fluid Simulations with Sparse Volumes on the GPU
+
+
+
+
+Figure 6: Column scene with 29 million particles and grid size of 450 × 300 × 300. Simulation takes 2.4 seconds per frame with 1e−4 CG
+solver epsilon on a Quadro GP100. Rendered with NVIDIA R GVDB Voxels and OptiX at twice the grid resolution.
+
+matrix values from voxels directly as needed on-the-fly. Each row                        Algorithm 2 Matrix-free Conjugate Gradient Solver
+of matrix A corresponds to one pressure equation, in which only                           1: . Given the inputs divergence b, starting value x, maximum of iterations
+seven entries are non-zero at maximum. The diagonal value corre-                             imax , and error tolerance ε
+sponds to the number of non-solid neighboring voxels and the other                        2: procedure MatrixFreeConjugateGradientSolver(b, x, imax , ε)
+six values depend on the six neighboring voxel properties. Due to                         3:     i=0
+apron voxels co-located with bricks, immediate neighbors can be                           4:     r = b − SpMV(x)
+                                                                                          5:     d=r
+accessed as direct texture fetches without tree traversal.
+                                                                                          6:     δnew = InnerProduct(r, r)
+    To compute SpMV, one thread per voxel is launched and six                             7:     δ0 = δnew
+neighboring voxel values are checked to compute the inner prod-                           8:     while i < imax do
+uct between the input vector and the row of matrix A. The result is                       9:          UpdateApron(d)
+written to the output vector directly. For instance, to compute the                      10:          q = SpMV(d)
+                                                                                         11:          α = δnew /InnerProduct(d, q)
+matrix-vector multiplication of A with vector b at row i, we exam-
+                                                                                         12:          x = x + αd
+ine the six neighbors of voxel i (x, y, z) to retrieve scalars s0 , s1 ,                 13:          r = b − αq
+s2 , s3 , s4 , and s5 on voxels (x ± 1, y, z), (x, y ± 1, z), (x, y, z ± 1).             14:          δold = δnew
+Note that due to GVDB apron voxels, neighbors are already avail-                         15:          δnew = InnerProduct(r, r)
+able in GPU texture cache co-located in the same brick as voxel i.                       16:          β = δnew /δold
+For the result vector c, we compute ci = bi ∑50 sn − ∑50 bn sn . While                   17:          d = r + βd
+mapping between world space and atlas space can be performed in                          18:          i = i+1
+constant time with GVDB helper functions, since CG solver oper-                          19:          if i mod 10 == 0 then
+ations only require neighbor locality these kernels can be launched                      20:               if δnew > ε2 δ0 then       . Read back to CPU for check
+directly in atlas space. Result values are written directly to another                   21:                   Stop solver and return
+                                                                                         22:               end if
+output channel.
+                                                                                         23:          end if
+   Vector addition is straightforward using a GVDB compute ker-                          24:     end while
+nel over two channels, but the inner product of two vectors, used for                    25: end procedure
+computing the residual in the CG solver, is a complicated operation.
+For the inner product we perform a three dimensional parallel re-
+duction. Given vector a and b in one subcell, each thread multiplies
+                                                                                         Intel Core i7 6700K 4.0GHz with 32 GB memory and GPU per-
+ai with bi and writes to 43 shared memory. Then, a 3D reduction is
+                                                                                         formance is measured on an NVIDIA Quadro GP100 with 16 GB
+performed in shared memory as shown in Figure 5. Each sub-group
+                                                                                         GPU memory.
+of eight voxels will be reduced to one value on each iteration. The
+3D reduction step ends with one accumulated value written to a
+global 2D array. The final step performs a similar 1D array reduc-                       9.1. Topology Construction
+tion on the results of each subcell to get the final product value.
+                                                                                         We measure the performance of the topology construction using
+                                                                                         4M, 8M, 16M, 32M, and 64M particles with the dam break exam-
+9. Results                                                                               ple, Figure 8. The performances of full CPU, full GPU, and incre-
+                                                                                         mental GPU rebuilds are shown in Table 1. Full topology rebuild
+Our results show greatly improved simulation times compared to
+                                                                                         on GPU is 7–20× faster than CPU rebuild, and incremental rebuild
+CPU implementations of FLIP. We perform tests on a variety of
+                                                                                         is from 80–180× faster than the original CPU rebuild.
+scenes at different scales. Performance is measured for topology re-
+build, simulation experiments on both GPU and CPU, and memory                               More importantly, incremental topology update requires less
+usage. The CPU performance is measured on a 4-core (8 threads)                           than 2% memory usage as compared to full topology build on the
+
+ c 2018 The Author(s)
+Computer Graphics Forum c 2018 The Eurographics Association and John Wiley & Sons Ltd.
+                         K. Wu & N. Truong & C. Yuksel & R. Hoetzlein / Fast Fluid Simulations with Sparse Volumes on the GPU
+
+GPU, since the update lists are much smaller. Therefore, in our sim-
+ulations, a full GPU topology build is only used in the first frame,
+then the memory is released and made available for later operations,
+allowing for larger simulations.
+
+Table 1: Performance of our dynamic topology for full build on
+CPU, full build on GPU, and incremental on GPU for one frame
+(in milliseconds). Data is measured with the dam break example.
+        Particles #   CPU Full     GPU Full     GPU Incremental
+               4M         384     56    (7×)     4.8     (80×)
+               8M         807     96    (8×)     5.6    (144×)
+              16M        1598    204    (8×)     9.6    (167×)
+              32M        3249    313   (10×)    18.7    (174×)
+              65M        6368    366   (17×)    35.5    (179×)
+
+
+
+9.2. Simulation Performance
+We compare the performance of our GPU simulations to three dif-
+ferent multi-threaded CPU implementations. The first two use a
+dense grid with and without an incomplete Cholesky precondi-
+tioner for improved performance (Dense CPU CG/PCG). The third
+comparison is to a CG solver on CPU which achieves sparseness
+by aggregating active voxels (Sparse CPU CG). Although different
+from brick-based storage in GVDB, we use this to investigate CG
+solver performance as the systems will be of similar size.
+   These three solvers are tested on two relatively simple scenes,
+see Figures 8 and 9, using different grid sizes and particle counts.
+As shown in Table 2, our projection step is up to an order of magni-
+tude faster than the CPU-based sparse CG solver. Note that we use             Figure 7: Teapot scene: Simulation of an expanding, sparse do-
+1e-4 as the CG tolerance for all tests. Compared with Dense CPU               main with 2 million particles. The domain reaches up to 3360 ×
+PCG, which requires one third the iterations, our method is still             160 × 2272, with the fluid fully simulated in the sparse bricks indi-
+10× to 28× faster. Compared with the Sparse CPU CG solver, the                cated in blue. Each brick is (25 )3 = 32768 voxels. Simulation takes
+performance of which highly depends of the sparsity of grid struc-            1 second per frame on a Quadro GP100, a lower efficiency than
+ture, our GPU solver still achieves a 6× to 10× speedup. In the               typical for 2M particles due to a higher ratio of unused voxels per
+future we seek to investigate preconditioners suitable for parallel           brick.
+hardware, further improving performance.
+   Table 3 demonstrates the timing for each step of our simulation.           data. All voxel data is stored in thirteen GVDB channels: density,
+By using our incremental method, the time for topology construc-              fluid markers, new and old velocity components at x, y, and z direc-
+tion is less than 3% of the total time. The CG solver is still the            tion, divergence, pressure, and two extra channels for vectors used
+most expensive part, requiring kernel launches for SpMV, two in-              by the CG solver. Although a single channel is relatively small,
+ner products, three vector additions, and update apron for each iter-         around 200 MB for a 20 million particle scene, all 13 channels will
+ation. With hardware trilinear interpolation, the final advection step        take nearly half of the simulation memory. Channel data is stored
+takes around 1% of the total time. We found that performance de-              in 3D textures that dynamically resize to assign bricks covering the
+pends highly on the distribution of particles in space. When water            fluid.
+splashes and scatters more bricks are required, increasing the ratio
+of unused (air) to occupied (fluid) voxels. As long as there is one              Full topology build requires a long level-index list for sorting, as
+fluid voxel inside a brick, all voxels in the brick need to be pro-           well as another list of the same length to store the sorting result,
+cessed. This can be alleviated somewhat by reducing the GVDB                  marker list, and prefix sum list. However, the temporary memory
+brick size at the expense of increased topology rebuild and update            can be released after full topology build and used for other purposes
+time.                                                                         such as GVDB channel data. We resize the sorted level-index list,
+                                                                              marker list, and prefix sum lists as needed, but do not currently
+                                                                              resize the level-index list since it would require an additional pass
+9.3. Memory Usage
+                                                                              to compute list length, lowering performance, while it is not the
+We measure the peak memory usage for the simulation, which de-                primary memory bottleneck. Note that full topology build requires
+termines the size of simulations that can be handled on the GPU. As           2× more memory than incremental topology update in Table 4, but
+described in Section 6, subcell lists occupy the most memory dur-             the actually usage of incremental topology update is less than 2%
+ing simulation. The next largest usage of memory is voxel channel             of full rebuild.
+
+                                                                                                                                                  c 2018 The Author(s)
+                                                                                 Computer Graphics Forum c 2018 The Eurographics Association and John Wiley & Sons Ltd.
+                              K. Wu & N. Truong & C. Yuksel & R. Hoetzlein / Fast Fluid Simulations with Sparse Volumes on the GPU
+
+         Table 2: Average time per frame for Matrix-Free Conjugate Gradient solver on CPU, CPU with preconditioner, and on GPU.
+                                                         Dense CPU CG                           Dense CPU PCG               Sparse CPU CG            Sparse GPU CG (GVDB)
+                     Particles #     Domain       Iter. # Iter. Time   Total             Iter. #  Iter. Time  Total       Iter. Time   Total      Iter. Time Total Speedup
+                                                                (ms)   (ms)                             (ms)  (ms)              (ms)   (ms)             (ms)  (ms)
+     Dam Break               8M          2563        229         100  22900                  49          120  5870                8.3  1901               0.9  206      9×
+                            27M          3843        367         334 122578                  77          370 28551               27.1  9946               3.1 1138      9×
+                            65M          5123        511         792 404712                 105          841 88959               69.7 35617               6.8 3475     10×
+    Water Drop               4M          1283        243          14   3402                  64           21  1392                3.4   826               0.6  146      6×
+                          13.5M          1923        350          50  17500                  92           80  7444               12.0  4200               1.7  595      7×
+                            32M          2563        456         110  50160                 111          163 18240               29.1 13270               3.5 1596      8×
+
+
+Table 3: Average time per frame for each step in simulation. All times in milliseconds. Our GPU solution sparsely occupies the domain grid,
+whereas the two CPU solutions cover the domain with voxels. Thus part of our performance gain is due to less work from sparseness. For
+teapot and flow scene, the domain size is the maximum extent of an unbounded simulation. Each brick is 323 .
+                                                                               CPU Total                       GPU time per frame (ms)                  GPU Total
+                     Particles #          Domain                # Bricks         w/ PCG             Topo.   Particle- CG Solve Advect          Others    per frame   Speedup
+                                          Extents              Ave / Peak                          Update   to-Voxel                                          (ms)
+     Dam Break               8M            2563                128 / 207             6892               6         34        206         4          8           258      27×
+                            27M            3843                                     32050              16        120       1138        14         11          1299      25×
+                            65M            5123                                    101131              36        298       3475        34         18          3861      26×
+    Water Drop               4M            1283                                      1858               5         18        146         2          8           179      10×
+                            14M            1923                                      9067              12         56        595         7         10           680      13×
+                            32M            2563                 265 / 512           22080              19        144       1596        17         11          1787      12×
+      Column                29M       450 × 300 × 300          551 / 1006              −               23        138       2260        10         12          2443
+       City                 22M       512 × 256 × 512          468 / 1033              −               17        112       1721         7         11          1868
+      Teapot                 2M      3360 × 360 × 2272         800 / 2976              −               20           8       983         2         70          1083
+       Flow                 74M      1056 × 288 × 768           665 / 812              −               68        270       3377        35         40          3790
+
+
+
+9.4. Rendering
+Raytracing was performed on a Quadro GP100 using NVIDIA R
+OptiX with GVDB Voxels integration at twice the grid resolution of
+the simulation. We render each scene with one primary, one reflec-
+tion, two refraction, and one shadow ray using Monte-Carlo ray-
+tracing. These five rays constitute one sample with each frame ren-
+dered at 128 samples per pixel.
+   Simulated water is raytraced directly as a sparse volume with                                     Figure 8: Dam break: Test scene simulated with 8, 27 and 65 mil-
+GVDB Voxels without conversion to polygons, while collision ob-                                      lion particles at 2563 , 3843 and 5123 . Simulation at 2563 shown.
+jects are raytraced as polygonal models. Both use OptiX for hybrid
+polygon-volume scattering and shading. The particles are gathered
+as a narrow-band level set for raytracing, which requires extending
+the influencing box to cover values outside the particle radius. A
+typical frame is rendered in between 10 to 30 seconds at 1920×1080
+resolution with 128 samples/pixel.
+
+10. Conclusions and Future Work
+We have presented a sparse, efficient, GPU-based FLIP simula-                                        Figure 9: Water drop: Test scene simulated with 4, 14 and 32 mil-
+tion for fluids on virtually unbounded domains. Our method builds                                    lion particles at 1283 , 1923 and 2563 . Simulation at 2563 shown.
+a sparse tree topology, incrementally updates the tree, efficiently
+sorts particles into subcells, and performs the FLIP simulation steps
+with a fast, matrix-free Conjugate Gradient solver over millions of
+particles. Overall we can achieve simulation times that are up to an                                 much larger simulations in GPU memory. Accelerated solver oper-
+order of magnitude faster than similar CPU-based solutions.                                          ations include fast 3D reduction for inner products, efficient apron
+                                                                                                     updates for neighbors, and hardware interpolated particle advec-
+   We describe a matrix-free CG solver operating on sparsely
+                                                                                                     tion. Our system can simulate up to 74 million particles with a few
+placed bricks and optimized for GPU hardware. Rather than stor-
+                                                                                                     seconds per frame on modern GPU hardware.
+ing the sparse matrix A, voxel values are examined directly as
+needed on-the-fly, greatly reducing memory usage and enabling                                          Although the performance of our method is already significantly
+
+ c 2018 The Author(s)
+Computer Graphics Forum c 2018 The Eurographics Association and John Wiley & Sons Ltd.
+                          K. Wu & N. Truong & C. Yuksel & R. Hoetzlein / Fast Fluid Simulations with Sparse Volumes on the GPU
+
+                    Table 4: Peak Memory Usage in megabytes (MB). Object refers to voxel grid for collision geometry.
+                            Particles #   GVDB Topology    GVDB Channels     Topology Build      Subcell Lists      Particle Data     Object       Total
+                                                  (MB)             (MB)               (MB)              (MB)                (MB)       (MB)       (MB)
+             Dam Break             8M              0.06              592                120               305                 180         −        1233
+                                  27M                               1999                445              1120                 664         −        4283
+                                  65M                               4664                992              2530                1488         −        9708
+             Water Drop            4M                                592                 60               148                  88         −         900
+                                  14M                                592                206               520                 308         −        1640
+                                  32M               0.08            1111                498              1258                 746         −        3636
+              Column              29M               0.09            2221                441              1120                 662        56        4583
+               City               22M               0.11            1851                346               876                 518        46        3762
+              Teapot               2M               0.78            2591                 43                70                  43        50        3231
+               Flow               74M               0.14            2517               1127              2818                1691         −        8931
+
+
+higher than CPU-based solvers, we foresee several potential fu-
+ture improvements. It is possible to introduce a GPU-friendly pre-
+conditioner such as a multi-grid technique similar to McAdams et
+al. [MST10], but implemented on the sparse domain. Another pos-
+sible improvement would be to implement narrow band FLIP to
+reduce the number of particles [FAW∗ 16], as particle insertion and
+sorting into subcells is currently our highest performance cost. Fi-
+nally, the GVDB topology is naturally suited to an out-of-core ap-
+proach as the space can be divided along tree boundaries.
+   Several limitations may be overcome in future work. Collisions
+are currently handled by voxelization of polygonal obstacle mod-
+els into a separate GVDB object, which is sampled on a differ-
+ent sparse grid to identify solid boundary voxels. We have plans to            Figure 10: Flow: Simulation of 74M particles in domain
+support moving rigid objects by updating the transformation ma-                1056 × 288 × 768
+trix (local reference frame) of this collision grid without needing to
+revoxelize, and by introducing level sets for boundary conditions.
+   Regarding rendering, we found surface polygonization and                    [AGL∗ 17] A ANJANEYA M., G AO M., L IU H., BATTY C., S IFAKIS E.:
+smoothing to reduce quality, and use direct volumetric level set                 Power diagrams and sparse paged grids for high resolution adaptive liq-
+                                                                                 uids. ACM Trans. Graph. 36, 4 (July 2017), 140:1–140:12. 2
+raytracing to preserve fine details. In the future we seek to iden-
+tify and render isolated particles, which are not currently visible.           [ATW13] A NDO R., T HÜREY N., W OJTAN C.: Highly adaptive liquid
+                                                                                 simulations on tetrahedral meshes. ACM Trans. Graph. 32, 4 (July 2013),
+Whereas raytracing uses trilinear gradients for smoothness, stair-               103:1–103:10. 2
+stepping artifacts may be visible (see Figure 10) as we do not en-
+                                                                               [ATW15] A NDO R., T HÜREY N., W OJTAN C.: A dimension-reduced
+force the free surface Dirichlet boundary condition up to second                 pressure solver for liquid simulations. Comput. Graph. Forum 34, 2
+order accuracy [GFCK02].                                                         (May 2015), 473–480. 2
+   To our knowledge we have introduced the first spatially sparse,             [BB08] BATTY C., B RIDSON R.: Accurate viscous free surfaces for
+                                                                                 buckling, coiling, and rotating liquids. In Proceedings of SCA (2008),
+complete FLIP solver running entirely on the GPU. Every part of                  SCA ’08, Eurographics Association, pp. 219–228. 2
+the FLIP simulation pipeline has been optimized for parallel exe-
+                                                                               [BB12] B OYD L., B RIDSON R.: Multiflip for energetic two-phase fluid
+cution on GPU hardware using GVDB Voxels for storage, compute                    simulation. ACM Trans. Graph. 31, 2 (Apr. 2012), 16:1–16:12. 2
+and rendering, with significant increases in performance while re-
+                                                                               [BBAW15] BAILEY D., B IDDLE H., AVRAMOUSSIS N., WARNER M.:
+ducing memory to handle larger simulations.                                      Distributing liquids using openvdb. In ACM SIGGRAPH 2015 Talks
+                                                                                 (New York, NY, USA, 2015), SIGGRAPH ’15, ACM, pp. 44:1–44:1.
+                                                                                 2
+Acknowledgements                                                               [BBB07] BATTY C., B ERTAILS F., B RIDSON R.: A fast variational
+                                                                                 framework for accurate solid-fluid coupling. ACM Trans. Graph. 26,
+The authors would like to specially thank Ken Museth (Weta Dig-
+                                                                                 3 (July 2007). 2
+ital), Gergely Klar (Dreamworks Animation), and Tristan Lorach
+                                                                               [BR86] B RACKBILL J. U., RUPPEL H. M.: Flip: A method for adap-
+(NVIDIA) for their support and guidance. This work was supported                 tively zoned, particle-in-cell calculations of fluid flows in two dimen-
+in part by NSF grant #1538593.                                                   sions. J. Comput. Phys. 65, 2 (Aug. 1986), 314–343. 2
+                                                                               [CKIW15] C HEN Z., K IM B., I TO D., WANG H.: Wetbrush: GPU-based
+                                                                                 3d painting simulation at the bristle level. ACM Trans. Graph. 34, 6 (Oct.
+References                                                                       2015), 200:1–200:11. 2
+[ABO16] A ZEVEDO V. C., BATTY C., O LIVEIRA M. M.: Preserving                  [CM11a] C HENTANEZ N., M ÜLLER M.: A multigrid fluid pressure
+  geometry and topology for fluid flows with thin obstacles and narrow           solver handling separating solid boundary conditions. In Proceedings
+  gaps. ACM Trans. Graph. 35, 4 (July 2016), 97:1–97:12. 2                       of SCA (2011), SCA ’11, ACM, pp. 83–90. 2
+
+
+                                                                                                                                                   c 2018 The Author(s)
+                                                                                  Computer Graphics Forum c 2018 The Eurographics Association and John Wiley & Sons Ltd.
+                              K. Wu & N. Truong & C. Yuksel & R. Hoetzlein / Fast Fluid Simulations with Sparse Volumes on the GPU
+
+[CM11b] C HENTANEZ N., M ÜLLER M.: Real-time eulerian water sim-                         [LCPF12] L ENTINE M., C ONG M., PATKAR S., F EDKIW R.: Simulat-
+  ulation using a restricted tall cell grid. ACM Trans. Graph. 30, 4 (July                 ing free surface flow with very large time steps. In Proceedings of SCA
+  2011), 82:1–82:10. 2                                                                     (2012), SCA ’12, Eurographics Association, pp. 107–116. 2
+[CM12] C HENTANEZ N., M ÜLLER M.: Mass-conserving eulerian liq-                          [LMAS16] L IU H., M ITCHELL N., A ANJANEYA M., S IFAKIS E.: A
+  uid simulation. In Proceedings of SCA (2012), SCA ’12, Eurographics                      scalable schur-complement fluids solver for heterogeneous compute
+  Association, pp. 245–254. 2                                                              platforms. ACM Trans. Graph. 35, 6 (Nov. 2016), 201:1–201:12. 2
+[CZY17] C HU J., Z AFAR N. B., YANG X.: A schur complement precon-                       [LZF10] L ENTINE M., Z HENG W., F EDKIW R.: A novel algorithm for
+  ditioner for scalable parallel fluid simulation. ACM Trans. Graph. 36, 5                 incompressible flow using only a coarse grid projection. ACM Trans.
+  (July 2017), 163:1–163:11. 2                                                             Graph. 29, 4 (July 2010), 114:1–114:9. 2
+[DBD16] DAVIET G., B ERTAILS -D ESCOUBES F.: A semi-implicit ma-                         [MCP∗ 09] M ULLEN P., C RANE K., PAVLOV D., T ONG Y., D ESBRUN
+  terial point method for the continuum simulation of granular materials.                  M.: Energy-preserving integrators for fluid animation. ACM Trans.
+  ACM Trans. Graph. 35, 4 (July 2016), 102:1–102:13. 2                                     Graph. 28, 3 (July 2009), 38:1–38:8. 2
+[EB14] E DWARDS E., B RIDSON R.: Detailed water with coarse grids:                       [MCPN08] M OLEMAKER J., C OHEN J. M., PATEL S., N OH J.: Low
+  Combining surface meshes and adaptive discontinuous galerkin. ACM                        viscosity flow simulations for animation. In Proceedings of SCA (2008),
+  Trans. Graph. 33, 4 (July 2014), 136:1–136:9. 2                                          SCA ’08, Eurographics Association, pp. 9–18. 2
+[FAW∗ 16] F ERSTL F., A NDO R., W OJTAN C., W ESTERMANN R.,                              [MGSS13] M ÜLLER E., G UO X., S CHEICHL R., S HI S.: Matrix-free
+   T HUEREY N.: Narrow band FLIP for liquid simulations. Computer                          gpu implementation of a preconditioned conjugate gradient solver for
+   Graphics Forum (Proc. Eurographics) 35, 2 (2016), 225–232. 2, 10                        anisotropic elliptic pdes. Comput. Vis. Sci. 16, 2 (Apr. 2013), 41–58. 6
+[GB13] G ERSZEWSKI D., BARGTEIL A. W.: Physics-based animation                           [MST10] M C A DAMS A., S IFAKIS E., T ERAN J.: A parallel multigrid
+  of large-scale splashing liquids. ACM Trans. Graph. 32, 6 (Nov. 2013),                   poisson solver for fluids simulation on large grids. In Proceedings of
+  185:1–185:6. 2                                                                           SCA (2010), SCA ’10, Eurographics Association, pp. 65–74. 2, 10
+[GFCK02] G IBOU F., F EDKIW R. P., C HENG L.-T., K ANG M.: A                             [MSW∗ 09] M C A DAMS A., S ELLE A., WARD K., S IFAKIS E., T ERAN
+  second-order-accurate symmetric discretization of the poisson equation                   J.: Detail preserving continuum simulation of straight hair. ACM Trans.
+  on irregular domains. J. Comput. Phys. 176, 1 (Feb. 2002), 205–227. 10                   Graph. 28, 3 (July 2009), 62:1–62:6. 2
+[GNS∗ 12] G OLAS A., NARAIN R., S EWALL J., K RAJCEVSKI P.,                              [Mus13] M USETH K.: VDB: High-resolution sparse volumes with dy-
+  D UBEY P., L IN M.: Large-scale fluid simulation using velocity-vorticity                namic topology. ACM Trans. Graph. 32, 3 (July 2013), 27:1–27:22. 1,
+  domain decomposition. ACM Trans. Graph. 31, 6 (Nov. 2012), 148:1–                        2
+  148:9. 2
+                                                                                         [NGL10] NARAIN R., G OLAS A., L IN M. C.: Free-flowing granular
+[Har64] H ARLOW F. H.: The particle-in-cell computing methods for
+                                                                                           materials with two-way solid coupling. ACM Trans. Graph. 29, 6 (Dec.
+  fluid dynamics. Methods in Computational Physics 3 (1964), 319–343.
+                                                                                           2010), 173:1–173:10. 2
+  2
+                                                                                         [NSCL08] NARAIN R., S EWALL J., C ARLSON M., L IN M. C.: Fast
+[Har05] H ARRIS M.: Fast fluid dynamics simulation on the GPU. In
+                                                                                           animation of turbulence using energy transport and procedural synthesis.
+  ACM SIGGRAPH 2005 Courses (New York, NY, USA, 2005), SIG-
+                                                                                           ACM Trans. Graph. 27, 5 (Dec. 2008), 166:1–166:8. 2
+  GRAPH ’05, ACM. 2
+                                                                                         [PTC∗ 10] P FAFF T., T HUEREY N., C OHEN J., TARIQ S., G ROSS M.:
+[Har07] H ARRIS M.: Optimizing parallel reduction in cuda. Presentation
+                                                                                           Scalable fluid simulation using anisotropic turbulence particles. ACM
+  Packaged with CUDA Toolkit (2007). 4
+                                                                                           Trans. Graph. 29, 6 (Dec. 2010), 174:1–174:8. 2
+[HG09] H ORVATH C., G EIGER W.: Directable, high-resolution simula-
+  tion of fire on the GPU. ACM Trans. Graph. 28, 3 (July 2009), 41:1–41:8.               [RGJ∗ 15]R AM D., G AST T. F., J IANG C., S CHROEDER C., S TOM -
+                                                                                           AKHIN A., T ERAN J., K AVEHPOUR P.: A material point method for
+  2
+                                                                                           viscoelastic fluids, foams and sponges. In Symposium on Computer An-
+[Hoe16] H OETZLEIN R. K.: GVDB: Raytracing sparse voxel database                           imation (2015), ACM, pp. 157–163. 2
+  structures on the GPU. In Proceedings of High Performance Graphics
+  (2016), HPG ’16, Eurographics Association, pp. 109–117. 1, 2, 5                        [SABS14] S ETALURI R., A ANJANEYA M., BAUER S., S IFAKIS E.: Sp-
+                                                                                           grid: A sparse paged grid structure applied to adaptive smoke simulation.
+[HSO07] H ARRIS M., S ENGUPTA S., OWENS J. D.: Parallel Prefix Sum                         ACM Trans. Graph. 33, 6 (Nov. 2014), 205:1–205:12. 2
+  (Scan) with CUDA. In GPU Gems 3, Nguyen H., (Ed.). Addison Wesley,
+  August 2007, ch. 39, pp. 851–876. 4                                                    [SKK07] S ONG O.- Y., K IM D., KO H.-S.: Derivative particles for simu-
+                                                                                           lating detailed movements of fluids. IEEE Transactions on Visualization
+[JGT17] J IANG C., G AST T., T ERAN J.: Anisotropic elastoplasticity for                   and Computer Graphics 13, 4 (July 2007), 711–719. 2
+   cloth, knit and hair frictional contact. ACM Trans. Graph. 36, 4 (July
+   2017), 152:1–152:14. 2                                                                [SSC∗ 13] S TOMAKHIN A., S CHROEDER C., C HAI L., T ERAN J.,
+                                                                                            S ELLE A.: A material point method for snow simulation. ACM Trans.
+[JSS∗ 15] J IANG C., S CHROEDER C., S ELLE A., T ERAN J., S TOM -                          Graph. 32, 4 (July 2013), 102:1–102:10. 2
+   AKHIN A.: The affine particle-in-cell method. ACM Trans. Graph. 34, 4
+   (July 2015), 51:1–51:10. 2                                                            [WST09] W ICKE M., S TANTON M., T REUILLE A.: Modular bases for
+                                                                                           fluid dynamics. ACM Trans. Graph. 28, 3 (July 2009), 39:1–39:8. 2
+[KBT∗ 17] K LÁR G., B UDSBERG J., T ITUS M., J ONES S., M USETH
+  K.: Production ready mpm simulations. In ACM SIGGRAPH 2017 Talks                       [YSB∗ 15] Y UE Y., S MITH B., BATTY C., Z HENG C., G RINSPUN E.:
+  (New York, NY, USA, 2017), SIGGRAPH ’17, ACM, pp. 42:1–42:2. 5                           Continuum foam: A material point method for shear-dependent flows.
+                                                                                           ACM Trans. Graph. 34, 5 (Nov. 2015), 160:1–160:20. 2
+[KCC∗ 06] K IM J., C HA D., C HANG B., KOO B., I HM I.: Practical
+  animation of turbulent splashing water. In Proceedings of SCA (2006),                  [ZB05] Z HU Y., B RIDSON R.: Animating sand as a fluid. ACM Trans.
+  SCA ’06, Eurographics Association, pp. 335–344. 2                                        Graph. 24, 3 (July 2005), 965–972. 1, 2
+[KGP∗ 16] K LÁR G., G AST T., P RADHANA A., F U C., S CHROEDER                           [ZBG15] Z HANG X., B RIDSON R., G REIF C.: Restoring the missing
+  C., J IANG C., T ERAN J.: Drucker-prager elastoplasticity for sand ani-                  vorticity in advection-projection fluid solvers. ACM Trans. Graph. 34, 4
+  mation. ACM Trans. Graph. 35, 4 (July 2016), 103:1–103:12. 2                             (July 2015), 52:1–52:8. 2
+[KLLR07] K IM B., L IU Y., L LAMAS I., ROSSIGNAC J.: Advections                          [ZLC∗ 13] Z HU B., L U W., C ONG M., K IM B., F EDKIW R.: A new grid
+  with significantly reduced dissipation and diffusion. IEEE Transactions                  structure for domain extension. ACM Trans. Graph. 32, 4 (July 2013),
+  on Visualization and Computer Graphics 13, 1 (Jan. 2007), 135–144. 2                     63:1–63:12. 2
+
+ c 2018 The Author(s)
+Computer Graphics Forum c 2018 The Eurographics Association and John Wiley & Sons Ltd.
+

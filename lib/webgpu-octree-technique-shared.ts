@@ -74,6 +74,11 @@ fn segmentDistance3(point:vec3f,a:vec3f,b:vec3f)->f32 { let edge=b-a;let t=clamp
 fn leafOrigin(leaf:Leaf)->vec3u{return vec3u(leaf.originX,leaf.originY,leaf.originZ);}
 fn leafContains(leaf:Leaf,pointFine:vec3f)->bool { let origin=vec3f(leafOrigin(leaf)); return leaf.size>0u&&all(pointFine>=origin)&&all(pointFine<origin+vec3f(f32(leaf.size))); }
 fn displayColor(linear:vec3f)->vec3f { let mapped=linear/(linear+vec3f(1.0));return pow(max(mapped,vec3f(0.0)),vec3f(1.0/2.2)); }
+// Slice planes sit between the camera and the water they describe, so they are
+// uniformly thinned; volume views keep full authored alpha because their
+// opacity is already the user's slider.
+const SLICE_OPACITY:f32=0.6;
+fn sliceDisplay(linearColor:vec3f,alpha:f32)->vec4f{return vec4f(displayColor(linearColor),alpha*SLICE_OPACITY);}
 fn compositeDisplay(accum:vec4f,linearColor:vec3f,alpha:f32)->vec4f{return composite(accum,displayColor(linearColor),alpha);}
 fn finishDisplayVolume(accum:vec4f)->vec4f{if(accum.a<=0.001){discard;}return vec4f(accum.rgb/max(accum.a,1e-6),accum.a);}
 `;

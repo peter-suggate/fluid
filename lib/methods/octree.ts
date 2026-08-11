@@ -1,4 +1,5 @@
 import { WebGPUOctreeEulerianSolver } from "../webgpu-octree-eulerian";
+import { VISUALIZATION_FIELDS } from "../visualization-catalog";
 import { numberValue, type MethodParamSpec, type MethodParamValues, type SimulationMethod } from "./types";
 import type { GPUQuality } from "../tall-cell-grid";
 import type { SceneDescription } from "../model";
@@ -167,6 +168,10 @@ export const octreeMethod: SimulationMethod = {
   },
   qualityLabels: { balanced: "paper defaults", high: "paper defaults", ultra: "paper defaults" },
   showQualityControl: false,
+  // The octree publishes every catalog field: the technique overlays read its
+  // compact debug source, and the generic dense-grid views read the diagnostic
+  // textures it materializes on demand.
+  supportedFieldModes: VISUALIZATION_FIELDS.map((field) => field.mode),
   params,
   pressureMapping: "Losasso uses the wide, warm-started V-cycle-preconditioned MGPCG authority. The frozen Power 2017 backend retains its persistent Section 4.3 solver; neither backend falls through to the other after construction.",
   runtimeParamKeys: OCTREE_RUNTIME_DIAL_KEYS,

@@ -825,8 +825,9 @@ export class WebGPUFluidCellTrace {
     ];
   }
 
-  encode(encoder: GPUCommandEncoder): void {
-    if (this.destroyed || !this.pipelines || !this.groups || !this.source) return;
+  /** True when the gather passes were actually encoded this frame. */
+  encode(encoder: GPUCommandEncoder): boolean {
+    if (this.destroyed || !this.pipelines || !this.groups || !this.source) return false;
     const { dimensions, rowCapacity } = this.source.pressureRows;
     const words = new Uint32Array(this.configWords);
     const floats = new Float32Array(this.configWords);
@@ -853,10 +854,11 @@ export class WebGPUFluidCellTrace {
     // The gather itself is cheap and idempotent, so a frame with both slots in
     // flight still refreshes `output` and simply forgoes this frame's copy.
     const slot = this.staging.find((candidate) => !candidate.pending);
-    if (!slot) return;
+    if (!slot) return true;
     slot.pending = true;
     this.pendingSlot = slot;
     encoder.copyBufferToBuffer(this.output, 0, slot.buffer, 0, slot.buffer.size);
+    return true;
   }
 
   /** Resolve the most recently encoded readback, or nothing if none is waiting. */

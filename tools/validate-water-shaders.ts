@@ -11,8 +11,11 @@ import {
 } from "../lib/webgpu-water-pipeline";
 import { gridOverlayShader } from "../lib/webgpu-grid-overlay";
 import {
+  octreeTechniqueAdaptiveVelocityShader,
+  octreeTechniqueFaceShader,
   octreeTechniqueFineLifecycleShader,
   octreeTechniqueLifecycleShader,
+  octreeTechniqueStructuredShader,
   octreeTechniqueTopologyShader,
 } from "../lib/webgpu-octree-technique-overlay";
 import { octreeTechniqueTetraValidityShader } from "../lib/webgpu-octree-technique-audit-overlay";
@@ -110,6 +113,9 @@ fn sampleCoarseOctreePhi(position:vec3f)->f32{return coarsePhi[u32(position.x)*0
   composite: compositeShader,
   "grid-overlay": gridOverlayShader,
   "octree-technique-topology-overlay": octreeTechniqueTopologyShader,
+  "octree-technique-face-overlay": octreeTechniqueFaceShader,
+  "octree-technique-structured-overlay": octreeTechniqueStructuredShader,
+  "octree-technique-adaptive-velocity-overlay": octreeTechniqueAdaptiveVelocityShader,
   "octree-technique-lifecycle-overlay": octreeTechniqueLifecycleShader,
   "octree-technique-fine-lifecycle-overlay": octreeTechniqueFineLifecycleShader,
   "octree-technique-tetra-validity-overlay": octreeTechniqueTetraValidityShader,

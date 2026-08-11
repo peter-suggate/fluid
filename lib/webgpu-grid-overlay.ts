@@ -501,6 +501,8 @@ fn displayColor(linear: vec3f) -> vec3f {
   return pow(max(mapped, vec3f(0.0)), vec3f(1.0 / 2.2));
 }
 
+const SLICE_OPACITY: f32 = 0.6;
+
 fn volumeComposite(accumulated:vec4f,color:vec3f,alpha:f32)->vec4f {
   let contribution=(1.0-accumulated.a)*clamp(alpha,0.0,1.0);
   return vec4f(accumulated.rgb+color*contribution,accumulated.a+contribution);
@@ -590,7 +592,10 @@ fn volumeField(uv:vec2f)->vec4f {
   let grip = select(clamp(1.0 - (boundsMax.y - point.y) / (0.03 * size.y), 0.0, 1.0), clamp(1.0 - horizontalEdgeDistance / (0.035 * min(size.x, size.z)), 0.0, 1.0), axis == 3) * 0.8;
   overlay.color = mix(overlay.color, vec3f(0.51, 0.95, 0.82), grip);
   overlay.alpha = max(overlay.alpha, grip);
-  return vec4f(displayColor(overlay.color), overlay.alpha);
+  // Slice planes sit between the camera and the water they describe, so they
+  // are uniformly thinned; the volume path keeps full authored alpha because
+  // its opacity is already the user's slider.
+  return vec4f(displayColor(overlay.color), overlay.alpha * SLICE_OPACITY);
 }
 `;
 
