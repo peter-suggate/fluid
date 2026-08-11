@@ -4,6 +4,7 @@ import { refinementRegionEntity } from "./editor-refinement-region";
 import { sceneryEntity } from "./editor-scenery";
 import { rigidBodyEntity } from "./editor-rigid-body";
 import { tankEntity } from "./editor-tank";
+import { vesselRimEntity } from "./editor-vessel-rim";
 import type { EditorSelection, EditorTool } from "./editor-tools";
 import { resourceInteractionGates } from "./resource-readiness";
 import { drawnBodies, useDiagnosticsStore } from "./stores/diagnostics-store";
@@ -49,6 +50,10 @@ export const EDITOR_ENTITIES: readonly EditorEntityDefinition[] = Object.freeze(
   // region the user just placed.
   refinementRegionEntity,
   sceneryEntity,
+  // After the scenery: the stones stand on the coping band, so a click within
+  // pixels of both should reach the stone. Before the water and the tank, both
+  // of which enclose the rim.
+  vesselRimEntity,
   fluidBodyEntity,
   tankEntity,
 ]);

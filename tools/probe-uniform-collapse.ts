@@ -1,0 +1,167 @@
+/**
+ * Dawn diagnostic probe for the uniform (Chentanez-Mueller 2012) column
+ * collapse on symmetric-expansion. Reads back rho, gamma, and the MAC
+ * velocity every few steps and prints height profiles so a frozen free
+ * surface can be attributed to transport, sharpening, or projection.
+ *
+ * Usage:
+ *   WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js \
+ *     node --import tsx tools/run-webgpu-exclusive.ts \
+ *     --import tsx tools/probe-uniform-collapse.ts
+ *
+ * Environment:
+ *   FLUID_UNIFORM_COLLAPSE_STEPS       steps to advance (default 250)
+ *   FLUID_UNIFORM_COLLAPSE_CHECKPOINT  checkpoint cadence (default 10)
+ */
+import assert from "node:assert/strict";
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+import { uniformMethod } from "../lib/methods/uniform";
+import type { GPUSolverInstance } from "../lib/methods/types";
+import { getScenePreset } from "../lib/scenes";
+import { requiredFluidDeviceLimits } from "../lib/webgpu-device-limits";
+
+const steps = Number(process.env.FLUID_UNIFORM_COLLAPSE_STEPS ?? 250);
+const checkpoint = Number(process.env.FLUID_UNIFORM_COLLAPSE_CHECKPOINT ?? 10);
+assert.ok(Number.isSafeInteger(steps) && steps >= 1);
+assert.ok(Number.isSafeInteger(checkpoint) && checkpoint >= 1);
+
+const modulePath = process.env.WEBGPU_NODE_MODULE
+  ?? fileURLToPath(new URL("../node_modules/webgpu/index.js", import.meta.url));
+const { create, globals } = await import(pathToFileURL(modulePath).href) as {
+  create(options: string[]): GPU;
+  globals: Record<string, unknown>;
+};
+Object.assign(globalThis, globals);
+const gpu = create([
+  `backend=${process.env.FLUID_WEBGPU_BACKEND ?? "metal"}`,
+  ...(process.env.FLUID_WEBGPU_ADAPTER
+    ? [`adapter=${process.env.FLUID_WEBGPU_ADAPTER}`] : []),
+]);
+Object.defineProperty(globalThis, "navigator", { configurable: true, value: { gpu } });
+const adapter = await gpu.requestAdapter({ powerPreference: "high-performance" });
+assert.ok(adapter, "WebGPU did not expose an adapter");
+const requiredFeatures: GPUFeatureName[] = ["subgroups"];
+if (adapter.features.has("timestamp-query")) requiredFeatures.push("timestamp-query");
+const device = await adapter.requestDevice({
+  requiredFeatures,
+  requiredLimits: requiredFluidDeviceLimits(adapter.limits),
+});
+const validationErrors: string[] = [];
+device.addEventListener("uncapturederror", (event) => {
+  validationErrors.push(event.error.message);
+});
+
+const scene = getScenePreset("symmetric-expansion").create();
+const dt = Number(process.env.FLUID_UNIFORM_COLLAPSE_DT ?? 0.004);
+scene.numerics.fixedDt_s = dt;
+scene.numerics.maxDt_s = dt;
+const solver = await uniformMethod.createSolverAsync!(device, scene, "balanced",
+  { densityPostProcessing: "off", timeStep: "scene" }, undefined, () => {}) as GPUSolverInstance;
+const nx = solver.info.nx, ny = solver.info.ny, nz = solver.info.nz;
+console.log(`grid ${nx}x${ny}x${nz} dt=${dt}`);
+
+const internal = solver as unknown as {
+  volumeA: GPUTexture; velocityA: GPUTexture; gammaA: GPUTexture;
+  symmetryStageAuditTextures?: {
+    previousRawDensity: GPUTexture;
+    densityAdvection: GPUTexture;
+    densityDiffusion: GPUTexture;
+    densitySharpening: GPUTexture;
+  };
+};
+
+async function readTexture(texture: GPUTexture, components: number): Promise<Float32Array> {
+  const rowBytes = nx * 4 * components;
+  const padded = Math.ceil(rowBytes / 256) * 256;
+  const staging = device.createBuffer({
+    label: "probe readback", size: padded * ny * nz,
+    usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+  });
+  const encoder = device.createCommandEncoder();
+  encoder.copyTextureToBuffer({ texture },
+    { buffer: staging, bytesPerRow: padded, rowsPerImage: ny },
+    { width: nx, height: ny, depthOrArrayLayers: nz });
+  device.queue.submit([encoder.finish()]);
+  await staging.mapAsync(GPUMapMode.READ);
+  const raw = new Uint8Array(staging.getMappedRange());
+  const values = new Float32Array(nx * ny * nz * components);
+  for (let z = 0; z < nz; z += 1) for (let y = 0; y < ny; y += 1) {
+    const row = new Float32Array(raw.buffer, raw.byteOffset + padded * (y + ny * z), nx * components);
+    values.set(row, nx * components * (y + ny * z));
+  }
+  staging.unmap(); staging.destroy();
+  return values;
+}
+
+const at = (field: Float32Array, x: number, y: number, z: number, components = 1, component = 0) =>
+  field[components * (x + nx * (y + ny * z)) + component]!;
+
+const format = (value: number) => value.toFixed(2).padStart(6);
+
+const capture = async (step: number) => {
+  await device.queue.onSubmittedWorkDone();
+  const [rho, velocity, gamma] = await Promise.all([
+    readTexture(internal.volumeA, 1),
+    readTexture(internal.velocityA, 4),
+    readTexture(internal.gammaA, 1),
+  ]);
+  let mass = 0, maxRho = 0, over1 = 0, wet = 0, maxWetY = -1;
+  const layerMass: number[] = Array.from({ length: ny }, () => 0);
+  const layerWet: number[] = Array.from({ length: ny }, () => 0);
+  for (let z = 0; z < nz; z += 1) for (let y = 0; y < ny; y += 1) for (let x = 0; x < nx; x += 1) {
+    const value = at(rho, x, y, z);
+    mass += value; layerMass[y]! += value;
+    maxRho = Math.max(maxRho, value);
+    if (value > 1 + 1e-4) over1 += 1;
+    if (value >= 0.5) { wet += 1; layerWet[y]! += 1; maxWetY = Math.max(maxWetY, y); }
+  }
+  const cx = nx >> 1, cz = nz >> 1;
+  const centerRho = Array.from({ length: ny }, (_, y) => at(rho, cx, y, cz));
+  const centerVy = Array.from({ length: ny }, (_, y) => at(velocity, cx, y, cz, 4, 1));
+  const centerGamma = Array.from({ length: ny }, (_, y) => at(gamma, cx, y, cz));
+  console.log(`step ${String(step).padStart(3)} t=${(step * dt).toFixed(3)}s`
+    + ` mass=${mass.toFixed(1)} wet=${wet} maxRho=${maxRho.toFixed(3)} over1=${over1}`
+    + ` maxWetY=${maxWetY}`);
+  console.log(`  layerMass ${layerMass.map((value) => value.toFixed(0).padStart(5)).join("")}`);
+  console.log(`  layerWet  ${layerWet.map((value) => String(value).padStart(5)).join("")}`);
+  console.log(`  ctrRho    ${centerRho.map(format).join("")}`);
+  console.log(`  ctrVy     ${centerVy.map(format).join("")}`);
+  console.log(`  ctrGamma  ${centerGamma.map(format).join("")}`);
+  const audit = internal.symmetryStageAuditTextures;
+  if (audit) {
+    const stageSummary = async (label: string, texture: GPUTexture) => {
+      const field = await readTexture(texture, 1);
+      let maximum = 0, sum = 0, halo = 0, partialLiquid = 0, full = 0;
+      for (const value of field) {
+        maximum = Math.max(maximum, value); sum += value;
+        if (value > 0.01 && value < 0.5) halo += 1;
+        else if (value >= 0.5 && value < 0.95) partialLiquid += 1;
+        else if (value >= 0.95) full += 1;
+      }
+      console.log(`    ${label.padEnd(10)} max=${maximum.toFixed(3)}`
+        + ` sum=${sum.toFixed(1)} halo(0.01-0.5)=${halo}`
+        + ` part(0.5-0.95)=${partialLiquid} full(>=0.95)=${full}`);
+    };
+    await stageSummary("preStep", audit.previousRawDensity);
+    await stageSummary("advected", audit.densityAdvection);
+    await stageSummary("diffused", audit.densityDiffusion);
+    await stageSummary("sharpened", audit.densitySharpening);
+  }
+};
+
+await capture(0);
+for (let step = 1; step <= steps; step += 1) {
+  while (!solver.advanceTo(step * dt, [])) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  if (step % checkpoint === 0 || step === steps) await capture(step);
+}
+if (validationErrors.length > 0) {
+  console.error(`validation errors: ${validationErrors.join(" | ")}`);
+  process.exitCode = 1;
+}
+solver.destroy();
+await device.queue.onSubmittedWorkDone();
+device.destroy();
+console.log("probe complete");

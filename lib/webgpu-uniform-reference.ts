@@ -35,7 +35,6 @@ import {
   CPUPerformanceTrace,
   GPUQueueWallPerformanceTraceRecorder,
   GPUStageTimestampRecorder,
-  lastStageTraceDebug,
   type GPUTimestampPhase,
 } from "./performance-trace";
 import { usePerformanceInstrumentationStore } from "./stores/performance-instrumentation-store";
@@ -49,8 +48,20 @@ import type {
 export interface WebGPUUniformReferenceOptions {
   /** Paper Sec. 3.8 render reconstruction; Results states it is normally off. */
   densityPostProcessing?: boolean;
+  /**
+   * "paper" advances at the paper's simulation step (1/30 s, the value used
+   * by every example in Sec. 4); "scene" honors the scene-authored maxDt.
+   * The method's advection/sharpening balance is only calibrated at the
+   * paper's step regime: far below it, per-resample transport diffusion
+   * outruns Sec. 3.5 sharpening and the interface dilutes below the 0.5
+   * isovalue, leaving dynamically inert mass hanging in mid-air.
+   */
+  timeStep?: "paper" | "scene";
   deferPipelineCompilation?: boolean;
 }
+
+/** The simulation time step used by every example in the paper (Sec. 4). */
+export const UNIFORM_PAPER_DT_S = 1 / 30;
 
 interface UniformReferencePipelines {
   advect: GPUComputePipeline;
@@ -261,6 +272,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private lastTime = 0;
   private referenceVolumeCells = 0;
   private readonly densityPostProcessing: boolean;
+  private readonly paperTimeStep: boolean;
   private disposed = false;
   private physicsTraceSampleId = 0;
   private physicsTracePending = false;
@@ -277,6 +289,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     options: WebGPUUniformReferenceOptions = {},
   ) {
     this.densityPostProcessing = options.densityPostProcessing === true;
+    this.paperTimeStep = options.timeStep !== "scene";
     // The stage trace's closing marker pass must dispatch observable work, or
     // Metal skips its end-of-pass timestamp and the first sample retires
     // hardware tracing for this solver. Compile it long before the panel asks.
@@ -702,7 +715,11 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
 
   advanceTo(time_s: number, bodies: RigidBodyState[] = []): boolean {
     if (this.disposed) return false;
-    const advance = planGPUAdvance(time_s, this.lastTime, this.scene.numerics.maxDt_s);
+    // The paper's method is calibrated for its own large-step regime (dt=1/30
+    // in every Sec. 4 example): sharpening opposes per-resample transport
+    // blur, so far smaller scene steps structurally out-diffuse it.
+    const advance = planGPUAdvance(time_s, this.lastTime,
+      this.paperTimeStep ? UNIFORM_PAPER_DT_S : this.scene.numerics.maxDt_s);
     if (!advance) return false;
     if (!this.pipelines) throw new Error("Uniform reference pipelines are not initialized");
     const dt = advance.dt_s;
@@ -761,11 +778,6 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     const physicsQueueTrace = shouldTracePhysics
       ? new GPUQueueWallPerformanceTraceRecorder(physicsTraceSampleId, "physics", physicsTraceContext)
       : undefined;
-    // TEMP DEBUG (remove): surface the hardware-trace decision across the worker boundary.
-    if (shouldTracePhysics && !physicsTrace) {
-      (this.info as unknown as Record<string, unknown>).physicsTraceDebug ??=
-        `no recorder: latched=${this.hardwarePhysicsTraceInvalid} supported=${GPUStageTimestampRecorder.supported(this.device)}`;
-    }
     const rawEncoder = this.device.createCommandEncoder({ label: "Uniform reference step" });
     const encoder = physicsTrace ? physicsTrace.instrument(rawEncoder) : rawEncoder;
     physicsTrace?.begin();
@@ -929,20 +941,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     const hardwarePhysicsTraceRead = physicsTrace?.read();
     const physicsTraceRead = hardwarePhysicsTraceRead
       ? hardwarePhysicsTraceRead
-        .then((trace) => {
-          this.hardwarePhysicsTraceInvalid = !trace;
-          // TEMP DEBUG (remove)
-          if (!trace) (this.info as unknown as Record<string, unknown>).physicsTraceDebug =
-            `hardware read undefined: ${lastStageTraceDebug ?? "no reason recorded"}`;
-          return trace ?? physicsQueueTraceRead;
-        })
-        .catch((error) => {
-          this.hardwarePhysicsTraceInvalid = true;
-          // TEMP DEBUG (remove)
-          (this.info as unknown as Record<string, unknown>).physicsTraceDebug =
-            `hardware read threw: ${error instanceof Error ? error.message : String(error)}`;
-          return physicsQueueTraceRead;
-        })
+        .then((trace) => { this.hardwarePhysicsTraceInvalid = !trace; return trace ?? physicsQueueTraceRead; })
+        .catch(() => { this.hardwarePhysicsTraceInvalid = true; return physicsQueueTraceRead; })
       : physicsQueueTraceRead;
     if (physicsTraceRead) {
       this.lastPhysicsTraceAt_ms = traceRequestedAt_ms;

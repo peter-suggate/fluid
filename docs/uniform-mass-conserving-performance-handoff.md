@@ -251,12 +251,32 @@ Each WP states its exactness contract: **BIT-IDENTICAL** (must produce identical
 fields; verifiable with the stage audit), or **RE-BLESS** (numerics change;
 benchmark gates must be consciously re-accepted).
 
-### WP0 — Measure the per-phase split (no code change)
+### WP0 — Measure the per-phase split (no code change) — **DONE 2026-08-11**
 
-Run the uniform benchmark arm with `FLUID_GPU_FINE_TIMESTAMPS=1`; archive
-`gpuPassTimestamps` per `UNIFORM_ADVANCE_PHASE` seam. Deliverable: a table
-attributing the 62–88 ms across extension / transport / sharpening / pressure
-(setup, full-cycles, V-cycles, finish) / projection. Re-rank WP1–WP8 with it.
+Measured on the benchmark scene (100 steps, comparison-uniform lane, stage
+audit on, fresh process). Control wall: 59.2 ms/step. Per-pass attribution
+(`FLUID_GPU_PASS_TIMESTAMPS=1`, one sampled advance, 1,024 passes, 63.8 ms GPU
+sum — archived in the WP0 scratch captures and reproduced below):
+
+| Pass | total ms/advance | invocations | mean |
+| --- | --- | --- | --- |
+| `mgSolveCoarsest` | **51.05 (80%)** | 15 | 3,403 µs |
+| `mgSmoothColour` | 6.78 | 455 | 14.9 µs |
+| `mgProjectMinimum` | 1.36 | 228 | 6.0 µs |
+| FIM front (all passes, both invocations) | ~1.6 | ~50 | 70–590 µs |
+| `mgResidual` + restrict/prolongate/clears | ~1.4 | ~180 | 5–15 µs |
+| transport + sharpening + diffusion + projection | ~1.0 | ~30 | — |
+
+Verdicts settled: F1's ESTIMATED cost is **80% of the frame** — the 4,096-spin
+coarse solve dominated everything. F5/F6 (analytic solids, manual
+interpolation) are confirmed ~irrelevant on this scene: the whole MacCormack +
+transport block is ~1 ms. The remaining post-WP1 frame is launch-depth bound
+(455 × 15 µs smooth passes), which is F2/WP3 territory.
+
+**Caveat:** the seam-level `FLUID_GPU_FINE_TIMESTAMPS` recorder misattributes
+on this lane (it charged ~35 ms to extension phases that per-pass data shows
+are sub-ms, and its per-advance sum exceeded the measured wall). Use
+`FLUID_GPU_PASS_TIMESTAMPS=1` for attribution here.
 
 ### WP1 — Coarsest solve: break on convergence. BIT-IDENTICAL
 

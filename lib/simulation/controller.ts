@@ -19,6 +19,7 @@ import { svoSceneryDetailCellSize_m, svoSceneryRefinementDepth, SVO_ENVIRONMENT_
 import { terrainSampleShape } from "../terrain";
 import { sceneStoneQuery, withSceneStoneQuery } from "../stone-look-controls";
 import { sceneCanopyQuery, withSceneCanopyQuery } from "../tree-canopy-controls";
+import { sceneRimQuery, withSceneRimQuery } from "../vessel-rim-controls";
 import { savedSceneCard } from "../scene-cards";
 import { SCENE_STARTERS } from "../empty-scene";
 import { useShellStore } from "../stores/shell-store";
@@ -703,9 +704,13 @@ class SimulationController {
       ? rebuilt.scene
       : withSceneCanopyQuery(rebuilt.scene, canopy);
     const stones = sceneStoneQuery(scene);
-    const rebuiltScene = stones === sceneStoneQuery(withCanopy)
+    const withStones = stones === sceneStoneQuery(withCanopy)
       ? withCanopy
       : withSceneStoneQuery(withCanopy, stones);
+    const rim = sceneRimQuery(scene);
+    const rebuiltScene = rim === sceneRimQuery(withStones)
+      ? withStones
+      : withSceneRimQuery(withStones, rim);
     this.announceGPURebuild(label);
     this.recordHistory(label.toLowerCase());
     // Nothing to synchronize: the rebuilt document carries the depth, and the

@@ -42,6 +42,7 @@ import { hoverSceneAt, restOnHover, type EditorHover } from "@/lib/editor-hover"
 import { sceneryHighlightRange, sceneryIdFromSelection } from "@/lib/editor-scenery";
 import { sceneStoneNode } from "@/lib/stone-look-controls";
 import { sceneCanopyPads } from "@/lib/tree-canopy-controls";
+import { vesselNameFromSelection } from "@/lib/editor-vessel-rim";
 import { createInflowAt, INFLOW_SELECTION_ID } from "@/lib/editor-inflow";
 import {
   fillFractionForHeight,
@@ -94,6 +95,7 @@ import {
 import { FluidFieldFlyout } from "./FluidFieldFlyout";
 import { StoneLookFlyout } from "./StoneLookFlyout";
 import { TreeCanopyFlyout } from "./TreeCanopyFlyout";
+import { VesselRimFlyout } from "./VesselRimFlyout";
 import { SelectionFlyout } from "./SelectionFlyout";
 import { ToplineToolbar } from "./ToplineToolbar";
 import { useSceneStore } from "@/lib/stores/scene-store";
@@ -769,6 +771,16 @@ export function WebGPUViewport() {
   const selectedSceneryId = selection?.kind === "scenery" ? sceneryIdFromSelection(selection.id) : undefined;
   const canopyFlyoutAnchor = selectedSceneryId !== undefined && heldEntity && !sceneDraft
     && sceneCanopyPads(scene, selectedSceneryId).length > 0
+    ? entityOutline(heldEntity)
+      ?.filter((_, index) => (index & 2) !== 0)
+      .map((corner) => projectToViewport(corner, camera, viewportSize.width, viewportSize.height))
+      .filter((projection) => projection.visible)
+      .reduce<ReturnType<typeof projectToViewport> | undefined>((best, projection) =>
+        best === undefined || projection.leftFraction > best.leftFraction ? projection : best, undefined)
+    : undefined;
+  // The rim dials ride the selected coping band the same way.
+  const selectedVesselName = selection?.kind === "vessel-rim" ? vesselNameFromSelection(selection.id) : undefined;
+  const rimFlyoutAnchor = selectedVesselName !== undefined && heldEntity && !sceneDraft
     ? entityOutline(heldEntity)
       ?.filter((_, index) => (index & 2) !== 0)
       .map((corner) => projectToViewport(corner, camera, viewportSize.width, viewportSize.height))
@@ -2057,6 +2069,11 @@ export function WebGPUViewport() {
       nodeId={selectedSceneryId}
       leftFraction={stoneFlyoutAnchor.leftFraction}
       topFraction={stoneFlyoutAnchor.topFraction}
+    />}
+    {selectedVesselName !== undefined && rimFlyoutAnchor && <VesselRimFlyout
+      vesselName={selectedVesselName}
+      leftFraction={rimFlyoutAnchor.leftFraction}
+      topFraction={rimFlyoutAnchor.topFraction}
     />}
     {hover && hoverProjection?.visible && !pointerRef.current && <div
       className={`editor-hover-chip kind-${hover.kind}`}

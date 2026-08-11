@@ -13,6 +13,18 @@ import type { SceneDescription } from "../model";
 const params: MethodParamSpec[] = [
   {
     kind: "select",
+    key: "timeStep",
+    label: "Time step",
+    default: "paper",
+    tier: "coarse",
+    options: [
+      { value: "paper", label: "Paper · 1/30 s large steps" },
+      { value: "scene", label: "Scene · authored maxDt" },
+    ],
+    hint: "Chentanez-Müller run dt=1/30 s (CFL 8-25) in every example; Sec. 3.5 sharpening only balances transport diffusion at that per-step dose. Scene-step mode exists for matched-dt comparison lanes and dilutes the interface at small dt.",
+  },
+  {
+    kind: "select",
     key: "densityPostProcessing",
     label: "Sub-grid rendering",
     default: "scene",
@@ -43,6 +55,7 @@ export function uniformReferenceSolverOptions(
       values.densityPostProcessing,
       scene?.sceneId,
     ),
+    timeStep: values.timeStep === "scene" ? "scene" : "paper",
   };
 }
 

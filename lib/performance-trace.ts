@@ -323,11 +323,6 @@ export interface GPUTimestampPhase {
   label: string;
 }
 
-// TEMP DEBUG (remove): worker-side console is invisible to the page reader, so
-// rejection reasons are stashed here for the solver to forward through gpuInfo.
-export let lastStageTraceDebug: string | undefined;
-export function setLastStageTraceDebug(reason: string): void { lastStageTraceDebug = reason; }
-
 /**
  * Decode one ordered chain of GPU timestamp boundaries. Boundary i and i+1
  * define phase i, so the phase sum is mathematically identical to the root
@@ -341,23 +336,17 @@ export function decodeGPUTimestampPartition(input: {
   timestamps: ArrayLike<bigint>;
   phases: readonly GPUTimestampPhase[];
 }): PerformanceTrace | undefined {
-  // TEMP DEBUG (remove): name the exact reason a chain is rejected.
-  const debugReject = (reason: string) => {
-    setLastStageTraceDebug(`decode sample ${input.sampleId} rejected: ${reason}`);
-    console.warn(`[stage-trace-decode] ${input.lane} sample ${input.sampleId} rejected: ${reason}`);
-    return undefined;
-  };
   if (input.timestamps.length !== input.phases.length + 1 || input.phases.length === 0) {
-    return debugReject(`length ${input.timestamps.length} vs phases ${input.phases.length}`);
+    return undefined;
   }
   const origin = input.timestamps[0];
-  if (origin === undefined || origin === 0n) return debugReject("origin unsampled (0)");
+  if (origin === undefined || origin === 0n) return undefined;
   const intervals: PerformanceInterval[] = [];
   let previous = origin;
   for (let index = 0; index < input.phases.length; index += 1) {
     const next = input.timestamps[index + 1];
     if (next === undefined || next === 0n || next < previous) {
-      return debugReject(`slot ${index + 1} (${input.phases[index]?.label}) ${next === 0n ? "unsampled" : "non-monotonic"}`);
+      return undefined;
     }
     intervals.push({
       ...input.phases[index],
@@ -367,9 +356,7 @@ export function decodeGPUTimestampPartition(input: {
     previous = next;
   }
   const total_ms = Number(previous - origin) / 1e6;
-  if (!Number.isFinite(total_ms) || total_ms <= 0 || total_ms >= 10_000) {
-    return debugReject(`total_ms out of range: ${total_ms}`);
-  }
+  if (!Number.isFinite(total_ms) || total_ms <= 0 || total_ms >= 10_000) return undefined;
   return partitionPerformanceTrace({
     sampleId: input.sampleId,
     domain: "gpu",
@@ -1019,12 +1006,7 @@ export class GPUStageTimestampRecorder {
 
   async read(): Promise<PerformanceTrace | undefined> {
     try {
-      // TEMP DEBUG (remove): name the pre-map rejection.
-      if (!this.resolved || this.overflowed) {
-        setLastStageTraceDebug(`read sample ${this.sampleId}: resolved=${this.resolved} overflowed=${this.overflowed} phases=${this.phases.length} slots=${this.boundarySlots.length} queries=${this.queryCount}`);
-        console.warn(`[stage-trace-read] ${this.lane} sample ${this.sampleId}: resolved=${this.resolved} overflowed=${this.overflowed} phases=${this.phases.length} slots=${this.boundarySlots.length} queries=${this.queryCount}`);
-        return undefined;
-      }
+      if (!this.resolved || this.overflowed) return undefined;
       const bytes = this.queryCount * 8;
       await this.readBuffer.mapAsync(GPUMapMode.READ, 0, bytes);
       const resolved = new BigUint64Array(this.readBuffer.getMappedRange(0, bytes).slice(0));

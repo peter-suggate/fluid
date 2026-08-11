@@ -262,6 +262,10 @@ async function runArm(id: ArmCapture["id"], method: ArmCapture["method"],
     FLUID_POWER_GENERATION_AUDIT: "0",
     FLUID_COMPARISON_METRICS: "1",
     ...(method === "uniform" ? { FLUID_UNIFORM_SYMMETRY_STAGE_AUDIT: "1" } : {}),
+    // This harness pins its own matched dt for both arms; the uniform method
+    // otherwise defaults to the paper's 1/30 s operating step, which would
+    // break the exact-step and matched-lattice-time contracts here.
+    ...(method === "uniform" ? { FLUID_UNIFORM_TIME_STEP: "scene" } : {}),
     // The authority comparison contours and integrates raw transported rho.
     // Section 3.8 is a render-only reconstruction and is exercised by the
     // production scene profile, never by this physics receipt.

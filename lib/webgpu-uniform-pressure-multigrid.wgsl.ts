@@ -237,15 +237,18 @@ fn mgDownsampleMinimum(@builtin(global_invocation_id) gid:vec3u){
 fn mgSmoothColour(@builtin(global_invocation_id) gid:vec3u){
   let id=vec3i(gid);if(!mgValid(id,mg.levelDims.xyz)){return;}
   let old=mgP(id);let coarseDone=(mg.control.w&2u)!=0u&&atomicLoad(&mgConvergence[1])!=0u;
+  // Pass-through cells carry the CM11a Eq. 18 projection with them. Nothing
+  // reads a wrong-colour or non-liquid cell between the two colour passes
+  // (neighbour sums are mgLiquid-gated and an update never reads its own old
+  // value), so projecting here leaves every sweep-exit value identical to the
+  // former trailing mgProjectMinimum pass while deleting that pass outright.
   if(coarseDone||!mgLiquid(id)||u32((id.x+id.y+id.z)&1)!=mg.control.z){textureStore(mgPressureOut,id,vec4f(old));return;}
   let e=array<vec3i,6>(vec3i(-1,0,0),vec3i(1,0,0),vec3i(0,-1,0),vec3i(0,1,0),vec3i(0,0,-1),vec3i(0,0,1));
   var diagonal=0.0;var sum=0.0;
   for(var n=0;n<6;n+=1){let q=id+e[n];let a=mgCoefficient(id,q,u32(n/2));diagonal+=a;if(mgLiquid(q)){sum+=a*mgP(q);}}
   let p=select(0.0,(sum+textureLoad(mgRhsIn,id,0).x)/diagonal,diagonal>0.0);
   // CM11a Eq. 18 says that p_min is enforced while smoothing. Project the
-  // newly updated colour before the opposite colour consumes it. The separate
-  // post-pair projection is retained below as the overview also summarizes
-  // PRBGS as two parallel passes followed by a projection step.
+  // newly updated colour before the opposite colour consumes it.
   textureStore(mgPressureOut,id,vec4f(max(p,textureLoad(mgMinimumIn,id,0).x)));
 }
 
@@ -272,6 +275,7 @@ var<workgroup> mgCoarseFreeRows:atomic<u32>;
 var<workgroup> mgCoarseWorstLane:atomic<u32>;
 var<workgroup> mgCoarseRowResidual:array<f32,256>;
 var<workgroup> mgCoarseRowState:array<u32,256>;
+var<workgroup> mgCoarseConvergedFlag:u32;
 
 fn mgTwoSum(a:f32,b:f32)->vec2f{
   let s=a+b;let bb=s-a;return vec2f(s,(a-(s-bb))+(b-bb));
@@ -356,7 +360,15 @@ fn mgSolveCoarsest(@builtin(local_invocation_index) lane:u32){
         atomicMax(&mgCoarseMaxGapBits,bitcast<u32>(lcpResidual/diagonal));}
     }
     workgroupBarrier();if(!converged&&live&&bitcast<u32>(mgCoarseRowResidual[lane])==atomicLoad(&mgCoarseResidualBits)){atomicMin(&mgCoarseWorstLane,lane);}workgroupBarrier();
-    if(!converged){converged=bitcast<f32>(atomicLoad(&mgCoarseResidualBits))<=${UNIFORM_CM11A_COARSE_RESIDUAL_TOLERANCE};}workgroupBarrier();
+    // The residual maximum is a workgroup atomic every lane reads after a
+    // barrier, but WGSL's uniformity analysis cannot see that, so route the
+    // verdict through workgroupUniformLoad (itself a barrier) to make the
+    // break formally uniform. Post-convergence iterations computed nothing
+    // (every phase above is gated on !converged), so leaving the loop early
+    // is bit-identical; it just stops paying ~8 barrier waves per remaining
+    // capped iteration on this one 256-lane workgroup.
+    if(lane==0u){mgCoarseConvergedFlag=select(0u,1u,bitcast<f32>(atomicLoad(&mgCoarseResidualBits))<=${UNIFORM_CM11A_COARSE_RESIDUAL_TOLERANCE});}
+    if(workgroupUniformLoad(&mgCoarseConvergedFlag)==1u){converged=true;break;}
   }
   if(live){textureStore(mgPressureOut,id,vec4f(mgCoarseP[lane]+mgCoarsePLow[lane]));}
   if(lane==0u){atomicMax(&mgConvergence[0],atomicLoad(&mgCoarseResidualBits));atomicStore(&mgConvergence[1],select(0u,1u,converged));atomicMax(&mgConvergence[2],iterations);atomicMax(&mgConvergence[3],select(1u,0u,converged));

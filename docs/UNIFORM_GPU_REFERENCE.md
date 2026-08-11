@@ -58,9 +58,24 @@ level-set hierarchy.
   as the convergence threshold. Comparison readback reports the terminal
   active count and every authoritative open face that remains unknown; both
   must be zero.
+- The method advances at the paper's own simulation step by default: every
+  example in Section 4 runs `dt = 1/30 s` (CFL 8-25), and the
+  advection/sharpening balance only holds in that large-step regime. At a far
+  smaller step the per-resample transport diffusion accumulates a
+  sub-`0.5` density halo that Section 3.5 cannot re-sharpen, and that halo is
+  dynamically inert (no gravity force, projection zeroes non-liquid faces), so
+  free surfaces visibly freeze. The `timeStep` method parameter (`paper`,
+  default, versus `scene`) exists so matched-dt comparison harnesses can pin
+  the scene-authored step explicitly; the symmetric-expansion benchmark passes
+  `FLUID_UNIFORM_TIME_STEP=scene`.
 - Section 3.5 sharpening uses the paper's fictitious-time correction and
   returns removed air-side density by tracing along `grad(rho)` to the nearby
-  interface. Solid destination weights are removed and renormalized.
+  interface. Solid destination weights are removed and renormalized. The
+  fictitious step is realized grid-relatively as a two-cell unit-velocity
+  displacement (`deltaT/dx = 2`): the stated `3 dt` evaluates to exactly that
+  on every published example (`dt = 1/30 s`, `dx = 0.05 m`), while a literal
+  `3 dt` at a small scene step under-doses the operator against per-step
+  resample blur.
 - Partial-solid cells use `rho' = rho / V`, fractional open-face aperture
   areas for density, and oriented/moving solid face velocities. Pressure uses
   the distinct CM11a face-centred overlapping-cell volume; a closed aligned

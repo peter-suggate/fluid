@@ -1650,6 +1650,8 @@ const velocityTransportOverride = process.env.FLUID_VELOCITY_TRANSPORT;
 const sharpeningOverride = process.env.FLUID_SHARPENING === undefined ? undefined : process.env.FLUID_SHARPENING !== "0";
 const uniformDensityPostProcessingOverride = process.env.FLUID_UNIFORM_DENSITY_POSTPROCESSING === undefined
   ? undefined : process.env.FLUID_UNIFORM_DENSITY_POSTPROCESSING !== "0";
+const uniformTimeStepOverride = process.env.FLUID_UNIFORM_TIME_STEP;
+if (uniformTimeStepOverride !== undefined && !["paper", "scene"].includes(uniformTimeStepOverride)) throw new Error("FLUID_UNIFORM_TIME_STEP must be paper or scene");
 const volumeControlOverride = process.env.FLUID_VOLUME_CONTROL === undefined ? undefined : process.env.FLUID_VOLUME_CONTROL !== "0";
 const referenceVolumeScaleOverride = process.env.FLUID_REFERENCE_VOLUME_SCALE === undefined ? undefined : Number(process.env.FLUID_REFERENCE_VOLUME_SCALE);
 const hierarchyOverride = process.env.FLUID_HIERARCHY === undefined ? undefined : process.env.FLUID_HIERARCHY !== "0";
@@ -3054,6 +3056,9 @@ async function runGPU(
   if ((method.id === "tall-cell" || method.id === "uniform") && sharpeningOverride !== undefined) values.densitySharpening = sharpeningOverride ? "on" : "off";
   if (method.id === "uniform" && uniformDensityPostProcessingOverride !== undefined) {
     values.densityPostProcessing = uniformDensityPostProcessingOverride ? "on" : "off";
+  }
+  if (method.id === "uniform" && uniformTimeStepOverride !== undefined) {
+    values.timeStep = uniformTimeStepOverride;
   }
   if (method.id === "tall-cell" && volumeControlOverride !== undefined) values.volumeControl = volumeControlOverride ? "on" : "off";
   if (method.id === "tall-cell" && referenceVolumeScaleOverride !== undefined) values.referenceVolumeScale = referenceVolumeScaleOverride;

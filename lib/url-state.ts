@@ -22,6 +22,7 @@ import {
 } from "./svo-render-tuning";
 import type { GPUQuality } from "./tall-cell-grid";
 import { sceneStoneQuery, withSceneStoneQuery } from "./stone-look-controls";
+import { sceneRimQuery, withSceneRimQuery } from "./vessel-rim-controls";
 import { sceneCanopyQuery, withSceneCanopyQuery } from "./tree-canopy-controls";
 import type { GridOverlayConfig, GridOverlayMode } from "./webgpu-renderer";
 
@@ -192,6 +193,8 @@ interface SceneQueryBaseline {
   readonly canopy: string;
   /** The preset's authored stone looks, in the same form the key carries. */
   readonly stones: string;
+  /** The preset's authored coping rims, in the same form the key carries. */
+  readonly rim: string;
 }
 
 const sceneQueryBaselineCache = new WeakMap<ScenePreset, SceneQueryBaseline>();
@@ -206,6 +209,7 @@ function sceneQueryBaseline(presetId: string): SceneQueryBaseline {
     regions: refinementRegionsToQuery(baseScene),
     canopy: sceneCanopyQuery(baseScene),
     stones: sceneStoneQuery(baseScene),
+    rim: sceneRimQuery(baseScene),
   };
   sceneQueryBaselineCache.set(preset, baseline);
   return baseline;
@@ -242,6 +246,9 @@ const CANOPY_QUERY_KEY = "canopy";
 /** Stone-look dials and seeds, on the same contract as `canopy`. */
 const STONES_QUERY_KEY = "stones";
 
+/** Coping-rim dials, on the same contract as `canopy`. */
+const RIM_QUERY_KEY = "rim";
+
 function sceneQueryEntries(sceneState: SerializableSceneState): readonly SceneQueryEntry[] {
   const baseline = sceneQueryBaseline(sceneState.presetId);
   const entries: SceneQueryEntry[] = [];
@@ -251,6 +258,8 @@ function sceneQueryEntries(sceneState: SerializableSceneState): readonly SceneQu
   if (canopy !== baseline.canopy) entries.push([CANOPY_QUERY_KEY, canopy]);
   const stones = sceneStoneQuery(sceneState.scene);
   if (stones !== baseline.stones) entries.push([STONES_QUERY_KEY, stones]);
+  const rim = sceneRimQuery(sceneState.scene);
+  if (rim !== baseline.rim) entries.push([RIM_QUERY_KEY, rim]);
   sceneQueryPaths.forEach((path, index) => {
     const current = getAtPath(sceneState.scene, path);
     const serialized = JSON.stringify(current);
@@ -404,9 +413,13 @@ export function parseQueryState(search: string): QueryState {
     ? withRegions
     : withSceneCanopyQuery(withRegions, canopyQuery);
   const stonesQuery = query.get(STONES_QUERY_KEY);
-  const scene = stonesQuery === null
+  const withStones = stonesQuery === null
     ? withCanopy
     : withSceneStoneQuery(withCanopy, stonesQuery);
+  const rimQuery = query.get(RIM_QUERY_KEY);
+  const scene = rimQuery === null
+    ? withStones
+    : withSceneRimQuery(withStones, rimQuery);
   const initialUI = useUIStore.getInitialState();
   const presetCamera = cameraForPreset(preset);
   const grid = query.get("grid");
@@ -481,7 +494,7 @@ export function parseQueryState(search: string): QueryState {
 function isManagedKey(key: string) {
   return key === "method" || key === "scene" || key === "quality" || key === "view" || key === "diagnostics" || key === "waterdiag" || key === "panel" || key === "panelWidth"
     || key === "performance" || key === "validation" || key === "sceneConfig" || key === "grid" || key === "gridSlice" || key === "gridMode"
-    || key === REGIONS_QUERY_KEY || key === CANOPY_QUERY_KEY || key === STONES_QUERY_KEY || key === "render" || key === "svoLighting" || key === "svoShadows" || key === "svoAO" || key === "svoSilhouetteRefinement" || key === "svoPrimarySeamClosure" || key === "svoCones" || key === "svoPrimary" || key === "svoStage" || key === "svoFlatExempt" || key === "svoLodPixels" || key === "svoSurface" || key === "environment" || key === "fps" || key.startsWith("camera.") || key.startsWith("param.") || key.startsWith("scene.");
+    || key === REGIONS_QUERY_KEY || key === CANOPY_QUERY_KEY || key === STONES_QUERY_KEY || key === RIM_QUERY_KEY || key === "render" || key === "svoLighting" || key === "svoShadows" || key === "svoAO" || key === "svoSilhouetteRefinement" || key === "svoPrimarySeamClosure" || key === "svoCones" || key === "svoPrimary" || key === "svoStage" || key === "svoFlatExempt" || key === "svoLodPixels" || key === "svoSurface" || key === "environment" || key === "fps" || key.startsWith("camera.") || key.startsWith("param.") || key.startsWith("scene.");
 }
 
 /** Build a canonical query string from the stores, preserving unrelated keys. */

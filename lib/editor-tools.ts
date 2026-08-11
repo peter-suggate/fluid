@@ -184,6 +184,7 @@ export type EditorSelectionKind =
   | "scenery"
   | "tank"
   | "fluid-body"
+  | "vessel-rim"
   | "refinement-region";
 
 /**

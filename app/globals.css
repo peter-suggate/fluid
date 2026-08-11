@@ -1124,16 +1124,16 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 .fluid-field-solver button:hover { color: var(--accent); border-color: var(--accent-line); }
 .fluid-field-solver button.active { border-color: var(--accent-line); background: var(--accent-wash); color: var(--accent-strong); }
 
-.tree-canopy-flyout, .stone-look-flyout { position: absolute; z-index: 12; display: grid; gap: 5px; width: 172px; padding: 5px; border: 1px solid var(--line); background: var(--overlay); backdrop-filter: blur(16px); transform: translate(12px, -60%); border-radius: var(--radius-s); }
-.tree-canopy-flyout header, .stone-look-flyout header { display: flex; align-items: center; gap: 5px; padding: 1px 2px; }
-.tree-canopy-flyout header span, .stone-look-flyout header span { color: var(--dim); font: 700 7px/1 var(--mono); letter-spacing: .08em; }
-.tree-canopy-flyout header strong, .stone-look-flyout header strong { flex: 1; overflow: hidden; color: var(--accent); font: 600 9px/1.2 var(--sans); text-overflow: ellipsis; white-space: nowrap; }
+.tree-canopy-flyout, .stone-look-flyout, .vessel-rim-flyout { position: absolute; z-index: 12; display: grid; gap: 5px; width: 172px; padding: 5px; border: 1px solid var(--line); background: var(--overlay); backdrop-filter: blur(16px); transform: translate(12px, -60%); border-radius: var(--radius-s); }
+.tree-canopy-flyout header, .stone-look-flyout header, .vessel-rim-flyout header { display: flex; align-items: center; gap: 5px; padding: 1px 2px; }
+.tree-canopy-flyout header span, .stone-look-flyout header span, .vessel-rim-flyout header span { color: var(--dim); font: 700 7px/1 var(--mono); letter-spacing: .08em; }
+.tree-canopy-flyout header strong, .stone-look-flyout header strong, .vessel-rim-flyout header strong { flex: 1; overflow: hidden; color: var(--accent); font: 600 9px/1.2 var(--sans); text-overflow: ellipsis; white-space: nowrap; }
 .stone-look-flyout header button { flex: none; padding: 2px 5px; border: 1px solid var(--line); background: none; color: var(--muted); font: 700 7px/1 var(--mono); letter-spacing: .06em; border-radius: var(--radius-s); cursor: pointer; }
 .stone-look-flyout header button:hover { color: var(--accent); border-color: var(--accent); }
-.tree-canopy-dial, .stone-look-dial { display: grid; grid-template-columns: 44px minmax(0, 1fr) 27px; align-items: center; gap: 5px; padding: 0 2px; }
-.tree-canopy-dial > span, .stone-look-dial > span { color: var(--muted); font: 700 7px/1 var(--mono); letter-spacing: .06em; }
-.tree-canopy-dial input, .stone-look-dial input { min-width: 0; margin: 0; }
-.tree-canopy-dial output, .stone-look-dial output { color: var(--ink); font: 600 8px/1 var(--mono); font-variant-numeric: tabular-nums; text-align: right; }
+.tree-canopy-dial, .stone-look-dial, .vessel-rim-dial { display: grid; grid-template-columns: 44px minmax(0, 1fr) 27px; align-items: center; gap: 5px; padding: 0 2px; }
+.tree-canopy-dial > span, .stone-look-dial > span, .vessel-rim-dial > span { color: var(--muted); font: 700 7px/1 var(--mono); letter-spacing: .06em; }
+.tree-canopy-dial input, .stone-look-dial input, .vessel-rim-dial input { min-width: 0; margin: 0; }
+.tree-canopy-dial output, .stone-look-dial output, .vessel-rim-dial output { color: var(--ink); font: 600 8px/1 var(--mono); font-variant-numeric: tabular-nums; text-align: right; }
 
 .selection-flyout { position: absolute; z-index: 12; width: 0; height: 0; }
 .selection-flyout-body { position: absolute; left: 16px; top: -14px; display: grid; gap: 4px; justify-items: start; }
