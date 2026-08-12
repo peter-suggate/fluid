@@ -11,17 +11,27 @@ const tallCells = readFileSync(new URL("../docs/papers/tallCells.txt", import.me
 const separatingBoundaries = readFileSync(
   new URL("../docs/papers/A_Multigrid_Fluid_Pressure_Solver_Handling_Separat.txt", import.meta.url), "utf8");
 
-test("uniform velocity evolution follows CM11b bounded MacCormack transport", () => {
+test("uniform velocity evolution selects semi-Lagrangian or bounded MacCormack transport", () => {
   assert.match(tallCells, /To advect u we use the modified MacCormack scheme/);
   assert.match(tallCells, /revert to simple Semi-Lagrangian advection/);
+  assert.match(host, /\["semiLagrangian", "Semi-Lagrangian velocity advection and body forces"/);
   assert.match(host, /\["advect", "Bounded MacCormack velocity prediction"/);
   assert.match(host, /\["reverse", "Bounded MacCormack reverse advection"/);
   assert.match(host, /\["correct", "Bounded MacCormack correction and body forces"/);
   assert.match(host, /encodeVelocityExtrapolation\(encoder, true\)/);
+  assert.match(host, /this\.velocityTransport === "maccormack"/);
+  assert.match(host, /this\.pipelines\.semiLagrangian, this\.semiLagrangianGroup/);
   assert.match(host, /this\.pipelines\.advect, this\.advectGroup/);
   assert.match(host, /this\.pipelines\.reverse, this\.reverseGroup/);
   assert.match(host, /this\.pipelines\.correct, this\.correctGroup/);
   assert.match(extrapolator, /predicted \? this\.packPredictedGroup : this\.packCurrentGroup/);
+});
+
+test("semi-Lagrangian velocity transport applies forces in its single pass", () => {
+  const start = shader.indexOf("fn semiLagrangianAdvection");
+  const body = shader.slice(start, shader.indexOf("@compute", start));
+  assert.match(body, /advectVelocityComponent/);
+  assert.match(body, /applyVelocityForces\(id,v,dt,h\)/);
 });
 
 test("bounded correction falls back outside donor bounds and applies forces once", () => {

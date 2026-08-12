@@ -1097,7 +1097,7 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 .editor-hover-chip span { color: var(--muted); font: 700 7px/1 var(--mono); letter-spacing: .05em; text-transform: uppercase; }
 .editor-hover-chip small { color: var(--dim); font: 7px/1 var(--mono); }
 
-.fluid-field-flyout { position: absolute; z-index: 12; display: grid; gap: 4px; width: 172px; padding: 5px; border: 1px solid var(--line); background: var(--overlay); backdrop-filter: blur(16px); transform: translate(12px, -60%); border-radius: var(--radius-s); }
+.fluid-field-flyout { position: absolute; z-index: 12; display: grid; gap: 4px; width: 172px; padding: 5px; border: 1px solid var(--line); background: var(--overlay); backdrop-filter: blur(16px); transform: translate(12px, -60%); border-radius: var(--radius-s); --control-height: 22px; --control-font-size: 9px; --control-inline-padding: 6px; }
 .fluid-field-flyout header { display: flex; align-items: center; gap: 5px; padding: 1px 2px; }
 .fluid-field-flyout header span { color: var(--dim); font: 700 7px/1 var(--mono); letter-spacing: .08em; }
 .fluid-field-flyout header strong { flex: 1; overflow: hidden; color: var(--accent); font: 600 9px/1.2 var(--sans); text-overflow: ellipsis; white-space: nowrap; }
@@ -1123,6 +1123,11 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 .fluid-field-solver button { height: 18px; border: 1px solid var(--line); background: transparent; color: var(--muted); font: 700 8px/1 var(--mono); cursor: pointer; }
 .fluid-field-solver button:hover { color: var(--accent); border-color: var(--accent-line); }
 .fluid-field-solver button.active { border-color: var(--accent-line); background: var(--accent-wash); color: var(--accent-strong); }
+.fluid-field-settings { display: grid; gap: 3px; padding-top: 2px; }
+.fluid-field-settings .select-control { display: grid; grid-template-columns: 58px minmax(0, 1fr); gap: 4px; align-items: center; margin: 0; }
+.fluid-field-settings label > span { overflow: hidden; padding-left: 2px; color: var(--dim); font: 700 7px/1.1 var(--mono); letter-spacing: .04em; text-overflow: ellipsis; white-space: nowrap; }
+.fluid-field-settings select { width: 100%; min-width: 0; }
+.fluid-field-settings select:disabled { opacity: .45; }
 
 .tree-canopy-flyout, .stone-look-flyout, .vessel-rim-flyout { position: absolute; z-index: 12; display: grid; gap: 5px; width: 172px; padding: 5px; border: 1px solid var(--line); background: var(--overlay); backdrop-filter: blur(16px); transform: translate(12px, -60%); border-radius: var(--radius-s); }
 .tree-canopy-flyout header, .stone-look-flyout header, .vessel-rim-flyout header { display: flex; align-items: center; gap: 5px; padding: 1px 2px; }

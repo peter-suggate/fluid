@@ -16,6 +16,7 @@ import {
   GPU_RIGID_EXCHANGE_BYTES,
   type GPUEulerianInfo,
   type GPURigidLoad,
+  type GPUVelocityTransport,
 } from "./webgpu-eulerian";
 import { GPUInitializationTaskRunner, type GPUInitializationTask } from "./gpu-initialization";
 import type { GPUSolverInstance, GPUInitializationReporter } from "./methods/types";
@@ -49,6 +50,8 @@ import { UNIFORM_PAPER_DT_S, uniformPaperAdvanceReady } from "./uniform-paper";
 export { UNIFORM_PAPER_DT_S } from "./uniform-paper";
 
 export interface WebGPUUniformReferenceOptions {
+  /** Velocity transport used by Algorithm 1 step 3. */
+  velocityTransport?: GPUVelocityTransport;
   /** Diagnostic-only switch; the authored paper method always enables Sec. 3.5. */
   densitySharpening?: boolean;
   /** Paper Sec. 3.8 render reconstruction; Results states it is normally off. */
@@ -72,6 +75,7 @@ export interface WebGPUUniformReferenceOptions {
 export const UNIFORM_GAMMA_DIFFUSION_ITERATIONS = 7;
 
 interface UniformReferencePipelines {
+  semiLagrangian: GPUComputePipeline;
   advect: GPUComputePipeline;
   reverse: GPUComputePipeline;
   correct: GPUComputePipeline;
@@ -100,6 +104,7 @@ interface UniformReferencePipelines {
 }
 
 const PIPELINES = [
+  ["semiLagrangian", "Semi-Lagrangian velocity advection and body forces", "semiLagrangianAdvection", false],
   ["advect", "Bounded MacCormack velocity prediction", "advect", false],
   ["reverse", "Bounded MacCormack reverse advection", "reverseAdvection", false],
   ["correct", "Bounded MacCormack correction and body forces", "correctAdvection", false],
@@ -150,7 +155,7 @@ export const UNIFORM_ADVANCE_PHASE = Object.freeze({
   gammaDiffusion: { id: "fine-sdf-advection", label: "Sec. 3.4 ordered pair gamma diffusion" },
   interfaceSharpening: { id: "fine-sdf-redistance", label: "Sec. 3.5 interface sharpening" },
   solidExcess: { id: "fine-sdf-redistance", label: "Sec. 3.6 partial-solid excess" },
-  advectionCorrection: { id: "velocity-advection", label: "Bounded MacCormack advection + body forces" },
+  advectionCorrection: { id: "velocity-advection", label: "Velocity advection + body forces" },
   pressureSetup: { id: "pressure-system", label: "CM11a topology + RHS pyramid" },
   pressureFullCycles: { id: "pressure-solve", label: `CM11a Full-Cycles ×${UNIFORM_CM11A_FULL_CYCLES}` },
   pressureVCycles: { id: "pressure-solve", label: `CM11a V-Cycles ×${UNIFORM_CM11A_V_CYCLES}` },
@@ -248,6 +253,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private readonly mainLayout: GPUBindGroupLayout;
   private readonly mainPipelineLayout: GPUPipelineLayout;
   private readonly extrapolationAuthorityGroup: GPUBindGroup;
+  private readonly semiLagrangianGroup: GPUBindGroup;
   private readonly advectGroup: GPUBindGroup;
   private readonly reverseGroup: GPUBindGroup;
   private readonly correctGroup: GPUBindGroup;
@@ -277,6 +283,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private readonly densityPostProcessing: boolean;
   private readonly densitySharpening: boolean;
   private readonly paperTimeStep: boolean;
+  private readonly velocityTransport: GPUVelocityTransport;
   private disposed = false;
   private physicsTraceSampleId = 0;
   private physicsTracePending = false;
@@ -295,6 +302,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.densityPostProcessing = options.densityPostProcessing === true;
     this.densitySharpening = options.densitySharpening !== false;
     this.paperTimeStep = options.timeStep !== "scene";
+    this.velocityTransport = options.velocityTransport === "maccormack"
+      ? "maccormack" : "semi-lagrangian";
     // The stage trace's closing marker pass must dispatch observable work, or
     // Metal skips its end-of-pass timestamp and the first sample retires
     // hardware tracing for this solver. Compile it long before the panel asks.
@@ -337,7 +346,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.heightB = device.createTexture({ label: "Uniform reference column occupancy", size: [nx, nz], format: "rg32float", usage });
     this.terrainTexture = device.createTexture({ label: "Uniform reference terrain", size: [nx, nz], format: "r32float", usage });
     const transportUsage = GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING
-      | GPUTextureUsage.COPY_SRC;
+      | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST;
     this.transportA = device.createTexture({ label: "Uniform reference transport A", size: allocation.transportExtent, dimension: "3d", format: "rgba32float", usage: transportUsage });
     this.transportB = device.createTexture({ label: "Uniform reference transport B", size: allocation.transportExtent, dimension: "3d", format: "rgba32float", usage: transportUsage });
     if (typeof process !== "undefined" && process.env.FLUID_UNIFORM_SYMMETRY_STAGE_AUDIT === "1") {
@@ -353,7 +362,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
         velocityPrediction: velocity("Uniform audit velocity after forward prediction"),
         predictedExtrapolation: this.transportB,
         reverseAdvection: this.velocityD,
-        velocityAdvection: velocity("Uniform audit velocity after MacCormack advection"),
+        velocityAdvection: velocity("Uniform audit velocity after configured advection"),
         pressureProjection: velocity("Uniform audit velocity after pressure projection"),
       });
     }
@@ -377,7 +386,9 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
         usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
       });
     }
-    if (typeof process !== "undefined" && process.env.FLUID_UNIFORM_SYMMETRY_STAGE_AUDIT === "1") {
+    if (this.velocityTransport === "maccormack"
+      && typeof process !== "undefined"
+      && process.env.FLUID_UNIFORM_SYMMETRY_STAGE_AUDIT === "1") {
       this.symmetryStageAuditMacCormackBuffer = device.createBuffer({
         label: "Uniform audit bounded MacCormack decisions",
         size: nx * ny * nz * 3 * 8 * 16,
@@ -456,6 +467,12 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.extrapolationAuthorityGroup = group(
       this.velocityA, this.velocityD, this.pressureA, this.pressureB,
       this.volumeA, this.surfaceA, this.heightB, this.heightA,
+    );
+    this.semiLagrangianGroup = group(
+      this.velocityA, this.velocityB, this.pressureA, this.pressureB,
+      this.volumeB, this.volumeA, this.heightB, this.heightA,
+      this.velocityA, this.velocityA, this.transportA, this.volumeB,
+      this.gammaA, this.gammaB, this.boundaryVelocityA, this.boundaryVelocityB,
     );
     this.advectGroup = group(this.velocityA, this.velocityC, this.pressureA, this.pressureB,
       this.volumeA, this.volumeB, this.heightB, this.heightA,
@@ -875,22 +892,45 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     encoder.copyTextureToTexture({ texture: this.volumeB }, { texture: this.volumeA }, [this.info.nx, this.info.ny, this.info.nz]);
     // Algorithm 1 steps 3-4: advect/force velocity after the surface-density
     // update, then enforce incompressibility.
-    // CM11b Sec. 3.5, which the mass-conserving paper delegates velocity
-    // transport to: modified MacCormack with local-extrema fallback. Extend
-    // the forward prediction before the reverse trace so every lookup has a
-    // defined velocity; body forces are applied exactly once in correction.
-    this.run(encoder, "Uniform bounded MacCormack velocity prediction",
-      this.pipelines.advect, this.advectGroup);
-    if (this.symmetryStageAuditTextures) encoder.copyTextureToTexture(
-      { texture: this.velocityC }, { texture: this.symmetryStageAuditTextures.velocityPrediction },
-      [this.info.nx, this.info.ny, this.info.nz],
-    );
-    this.encodeVelocityExtrapolation(encoder, true);
-    this.run(encoder, "Uniform bounded MacCormack reverse advection",
-      this.pipelines.reverse, this.reverseGroup);
-    // velocityD is also the opt-in reverse-advection audit texture.
-    this.run(encoder, "Uniform bounded MacCormack correction and body forces",
-      this.pipelines.correct, this.correctGroup);
+    if (this.velocityTransport === "maccormack") {
+      // CM11b Sec. 3.5 modified MacCormack with local-extrema fallback. Extend
+      // the forward prediction before the reverse trace so every lookup has a
+      // defined velocity; body forces are applied exactly once in correction.
+      this.run(encoder, "Uniform bounded MacCormack velocity prediction",
+        this.pipelines.advect, this.advectGroup);
+      if (this.symmetryStageAuditTextures) encoder.copyTextureToTexture(
+        { texture: this.velocityC }, { texture: this.symmetryStageAuditTextures.velocityPrediction },
+        [this.info.nx, this.info.ny, this.info.nz],
+      );
+      this.encodeVelocityExtrapolation(encoder, true);
+      this.run(encoder, "Uniform bounded MacCormack reverse advection",
+        this.pipelines.reverse, this.reverseGroup);
+      // velocityD is also the opt-in reverse-advection audit texture.
+      this.run(encoder, "Uniform bounded MacCormack correction and body forces",
+        this.pipelines.correct, this.correctGroup);
+    } else {
+      // The original one-pass path already performs the midpoint backward
+      // trace and applies body forces exactly once to the advected field.
+      this.run(encoder, "Uniform semi-Lagrangian velocity advection and body forces",
+        this.pipelines.semiLagrangian, this.semiLagrangianGroup);
+      if (this.symmetryStageAuditTextures) encoder.copyTextureToTexture(
+        { texture: this.velocityB }, { texture: this.symmetryStageAuditTextures.velocityPrediction },
+        [this.info.nx, this.info.ny, this.info.nz],
+      );
+      // The audit schema predates the selectable transport. Publish identity
+      // placeholders for its MacCormack-only intermediate stages so a
+      // semi-Lagrangian run never exposes stale texture contents as evidence.
+      if (this.symmetryStageAuditTextures) {
+        encoder.copyTextureToTexture(
+          { texture: this.velocityB }, { texture: this.velocityD },
+          [this.info.nx, this.info.ny, this.info.nz],
+        );
+        encoder.copyTextureToTexture(
+          { texture: this.transportA }, { texture: this.transportB },
+          [this.info.nx + 2, this.info.ny + 2, this.info.nz + 2],
+        );
+      }
+    }
     if (this.symmetryStageAuditTextures) encoder.copyTextureToTexture(
       { texture: this.velocityB }, { texture: this.symmetryStageAuditTextures.velocityAdvection },
       [this.info.nx, this.info.ny, this.info.nz],
@@ -1195,16 +1235,28 @@ const UNIFORM_FLUID_STAGES: readonly FluidPipelineStage[] = [
     id: "velocity-advection",
     band: "momentum",
     side: "left",
-    label: "Bounded MacCormack velocity advection",
+    label: "Velocity advection",
     phaseLabels: [UNIFORM_ADVANCE_PHASE.advectionCorrection.label],
     tip: {
-      summary: "Algorithm 1 step 3 and CM11b Sec. 3.5: bounded modified MacCormack velocity transport with semi-Lagrangian fallback, followed by gravity, viscosity, and surface tension.",
-      reads: "current and predicted extended MAC velocity",
+      summary: "Algorithm 1 step 3: configurable semi-Lagrangian or CM11b bounded MacCormack velocity transport, followed by gravity, viscosity, and surface tension.",
+      reads: "extended MAC velocity; predicted and reverse fields in MacCormack mode",
       writes: "advected MAC velocity",
       feeds: "pressure solve",
     },
+    controls: [{
+      kind: "param-choice",
+      param: "velocityTransport",
+      label: "Transport",
+      hint: "Choose the one-pass semi-Lagrangian update or the higher-order bounded MacCormack sequence.",
+      options: [
+        { value: "semi-lagrangian", label: "Semi-Lagrangian" },
+        { value: "maccormack", label: "Bounded MacCormack" },
+      ],
+    }],
     state: () => "on",
-    chip: () => "forward + reverse + bounded correction",
+    chip: (context) => context.values.velocityTransport === "maccormack"
+      ? "forward + reverse + bounded correction"
+      : "one backward-trace pass",
   },
   {
     id: "pressure-system",

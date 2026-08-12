@@ -22,8 +22,9 @@ test("uniform is a first-class WebGPU reference method", () => {
   assert.match(uniformMethod.description, /Dense matched-lattice WebGPU baseline/);
 });
 
-test("uniform reference fixes its solver work and exposes only presentation/time-step choices", () => {
-  assert.deepEqual(uniformMethod.params.map(({ key }) => key), ["timeStep", "densityPostProcessing"]);
+test("uniform reference exposes velocity transport, presentation, and time-step choices", () => {
+  assert.deepEqual(uniformMethod.params.map(({ key }) => key), ["velocityTransport", "timeStep", "densityPostProcessing"]);
+  assert.equal(resolveMethodValues(uniformMethod, "balanced", {}).velocityTransport, "semi-lagrangian");
   assert.equal(resolveMethodValues(uniformMethod, "balanced", {}).timeStep, "paper");
   assert.equal(resolveMethodValues(uniformMethod, "high", {}).densityPostProcessing, "scene");
 
@@ -32,7 +33,14 @@ test("uniform reference fixes its solver work and exposes only presentation/time
     densitySharpening: true,
     densityPostProcessing: false,
     timeStep: "paper",
+    velocityTransport: "semi-lagrangian",
   });
+
+  assert.equal(uniformReferenceSolverOptions({
+    velocityTransport: "maccormack",
+    timeStep: "paper",
+    densityPostProcessing: "off",
+  }).velocityTransport, "maccormack");
 });
 
 test("scene-aware Sec. 3.8 rendering exposes mini-dam thin sheets without changing physics", () => {

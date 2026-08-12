@@ -1,10 +1,14 @@
 "use client";
 
-import { getMethod, interactiveSimulationMethods } from "@/lib/methods";
+import {
+  getMethod,
+  interactiveSimulationMethods,
+  type SelectParamSpec,
+} from "@/lib/methods";
 import { VISUALIZATION_FIELDS } from "@/lib/visualization-catalog";
 import type { FieldVisualization } from "@/lib/visualization-registry";
 import { simulation } from "@/lib/simulation/controller";
-import { useMethodStore } from "@/lib/stores/method-store";
+import { resolvedMethodValues, useMethodStore } from "@/lib/stores/method-store";
 import { useUIStore } from "@/lib/stores/ui-store";
 import type { GridOverlayMode } from "@/lib/webgpu-renderer";
 
@@ -36,7 +40,8 @@ export function FluidFieldFlyout({
   leftFraction: number;
   topFraction: number;
 }) {
-  const methodId = useMethodStore((state) => state.methodId);
+  const methodState = useMethodStore();
+  const methodId = methodState.methodId;
   const overlayMode = useUIStore((state) => state.gridOverlayMode);
   const overlayAxis = useUIStore((state) => state.gridOverlayAxis);
   const overlaySlice = useUIStore((state) => state.gridOverlaySlice);
@@ -46,7 +51,11 @@ export function FluidFieldFlyout({
   const volumeCapable = methodId === "octree";
   // Only the views this method registered: a picker offering a publication the
   // solver never produces is a button that draws nothing.
-  const supported = new Set(getMethod(methodId).supportedFieldModes ?? []);
+  const method = getMethod(methodId);
+  const methodValues = resolvedMethodValues(methodState);
+  const importantOptions = method.params.filter((spec): spec is SelectParamSpec =>
+    spec.tier === "coarse" && spec.kind === "select");
+  const supported = new Set(method.supportedFieldModes ?? []);
   const views = FIELD_VIEWS.filter((view) => supported.has(view.mode));
   const active = overlayAxis !== "off"
     ? views.find((view) => view.mode === overlayMode)
@@ -136,8 +145,8 @@ export function FluidFieldFlyout({
     </div>}
     {/* The solver behind these fields. It lives on the same widget because
         switching methods is part of the same watch-the-water loop as choosing
-        a view — but at the foot, under a rule, because it rebuilds the solver
-        rather than swapping a publication. */}
+        a view. The high-value construction choices follow it so the common
+        watch-adjust-repeat loop does not require opening the full method panel. */}
     <div className="fluid-field-solver" role="group" aria-label="Fluid solver method">
       <span>SOLVER</span>
       {interactiveSimulationMethods.map((candidate) => <button
@@ -149,5 +158,31 @@ export function FluidFieldFlyout({
         onClick={() => { if (candidate.id !== methodId) simulation.setMethod(candidate.id); }}
       >{candidate.shortLabel}</button>)}
     </div>
+    {importantOptions.length > 0 && <div
+      className="fluid-field-settings"
+      role="group"
+      aria-label="Important fluid solver options"
+    >
+      {importantOptions.map((spec) => {
+        const fixedPowerFineBand = methodId === "octree"
+          && spec.key === "globalFineLevelSetFactor"
+          && methodValues.coarseBackend === "power2017";
+        return <label className="select-control" key={spec.key} title={fixedPowerFineBand
+          ? "Power 2017 fixes the separate narrow-band level set at factor four."
+          : spec.hint}>
+          <span>{spec.label}</span>
+          <select
+            value={String(methodValues[spec.key])}
+            disabled={fixedPowerFineBand}
+            onChange={(event) => simulation.setMethodParam(
+              methodId, spec.key, event.currentTarget.value)}
+          >
+            {spec.options.map((option) => <option key={option.value} value={option.value}>
+              {option.label}
+            </option>)}
+          </select>
+        </label>;
+      })}
+    </div>}
   </div>;
 }

@@ -32,7 +32,8 @@ The tall-cell, adaptive, and uniform GPU paths use the same donor/receiver
 limited conservative VOF face flux. Tall columns integrate the shared deep
 face with bounded stratified quadrature and expand only the `D`-bounded
 tall/regular mismatch, so opposing control volumes use the same flux without a
-global volume correction. Velocity uses bounded MacCormack advection
+global volume correction. Uniform velocity transport is configurable between
+one-pass semi-Lagrangian advection (the default) and bounded MacCormack
 on packed samples, ghost-fluid free-surface pressure, a restricted full-cycle
 multigrid solve, physical molecular viscosity, and compact reductions. The tall-cell paper omits capillarity, so the tall method's
 paper-core path uses `sigma=0`; the retained uniform path continues to support

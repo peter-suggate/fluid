@@ -13,6 +13,18 @@ import type { SceneDescription } from "../model";
 const params: MethodParamSpec[] = [
   {
     kind: "select",
+    key: "velocityTransport",
+    label: "Velocity advection",
+    default: "semi-lagrangian",
+    tier: "coarse",
+    options: [
+      { value: "semi-lagrangian", label: "Semi-Lagrangian · one pass" },
+      { value: "maccormack", label: "Bounded MacCormack · three passes" },
+    ],
+    hint: "Semi-Lagrangian uses the original single backward-trace update. Bounded MacCormack adds a forward prediction, predicted-field extension, reverse trace, and local-extrema-limited correction.",
+  },
+  {
+    kind: "select",
     key: "timeStep",
     label: "Time step",
     default: "paper",
@@ -57,6 +69,8 @@ export function uniformReferenceSolverOptions(
       scene?.sceneId,
     ),
     timeStep: values.timeStep === "scene" ? "scene" : "paper",
+    velocityTransport: values.velocityTransport === "maccormack"
+      ? "maccormack" : "semi-lagrangian",
   };
 }
 
