@@ -29,6 +29,7 @@ import {
   UNIFORM_CM11A_PRE_SWEEPS,
   UNIFORM_CM11A_V_CYCLES,
   WebGPUUniformPressureMultigrid,
+  type UniformCM11aSchedule,
 } from "./webgpu-uniform-pressure-multigrid";
 import type { UniformCM11aCoarsestCapture, UniformCM11aPlanStage } from "./webgpu-uniform-pressure-multigrid";
 import { gpuCompilationManagerFor } from "./gpu-compilation-manager";
@@ -54,6 +55,20 @@ export interface WebGPUUniformReferenceOptions {
   velocityTransport?: GPUVelocityTransport;
   /** Diagnostic-only switch; the authored paper method always enables Sec. 3.5. */
   densitySharpening?: boolean;
+  /** Return the density removed by Sec. 3.5 through local Algorithm 2 scatter. */
+  sharpeningMassCorrection?: boolean;
+  /** Ordered six-pass Sec. 3.4 iterations; zero cleanly bypasses the stage. */
+  gammaDiffusionIterations?: number;
+  /** Multiplier over the paper's 3dt sharpening pseudo-time. */
+  sharpeningStrength?: number;
+  /** Algorithm 2 maximum gradient-trace distance, in cells. */
+  sharpeningDistance?: number;
+  /** Sec. 3.6 cut-cell excess redistribution. */
+  solidExcessCorrection?: boolean;
+  /** Two-way fluid/body exchange and rigid integration. */
+  rigidCoupling?: boolean;
+  /** CM11a cycle and smoothing schedule. */
+  pressureSchedule?: UniformCM11aSchedule;
   /** Paper Sec. 3.8 render reconstruction; Results states it is normally off. */
   densityPostProcessing?: boolean;
   /**
@@ -92,6 +107,7 @@ interface UniformReferencePipelines {
   diffuseGammaY1: GPUComputePipeline;
   diffuseGammaZ0: GPUComputePipeline;
   diffuseGammaZ1: GPUComputePipeline;
+  averageGammaDiffusion: GPUComputePipeline;
   postprocessBlurX: GPUComputePipeline;
   postprocessBlurY: GPUComputePipeline;
   postprocessBlurZ: GPUComputePipeline;
@@ -121,6 +137,7 @@ const PIPELINES = [
   ["diffuseGammaY1", "Diffuse gamma along y (odd pairs)", "diffuseGammaY1", false],
   ["diffuseGammaZ0", "Diffuse gamma along z (even pairs)", "diffuseGammaZ0", false],
   ["diffuseGammaZ1", "Diffuse gamma along z (odd pairs)", "diffuseGammaZ1", false],
+  ["averageGammaDiffusion", "Average mirrored gamma diffusion sweeps", "averageGammaDiffusion", false],
   ["postprocessBlurX", "Post-process gamma blur x", "postprocessBlurX", false],
   ["postprocessBlurY", "Post-process gamma blur y", "postprocessBlurY", false],
   ["postprocessBlurZ", "Post-process gamma blur z", "postprocessBlurZ", false],
@@ -153,12 +170,13 @@ export const UNIFORM_ADVANCE_PHASE = Object.freeze({
   extensionHierarchy: { id: "velocity-extrapolation", label: "Sec. 3.3 hierarchy fill + transport shell" },
   densityAdvection: { id: "fine-sdf-advection", label: "Sec. 3.4 conservative density advection" },
   gammaDiffusion: { id: "fine-sdf-advection", label: "Sec. 3.4 ordered pair gamma diffusion" },
-  interfaceSharpening: { id: "fine-sdf-redistance", label: "Sec. 3.5 interface sharpening" },
+  interfaceSharpening: { id: "fine-sdf-redistance", label: "Sec. 3.5 interface density correction" },
+  sharpeningMassCorrection: { id: "fine-sdf-redistance", label: "Sec. 3.5 local mass return" },
   solidExcess: { id: "fine-sdf-redistance", label: "Sec. 3.6 partial-solid excess" },
   advectionCorrection: { id: "velocity-advection", label: "Velocity advection + body forces" },
   pressureSetup: { id: "pressure-system", label: "CM11a topology + RHS pyramid" },
-  pressureFullCycles: { id: "pressure-solve", label: `CM11a Full-Cycles ×${UNIFORM_CM11A_FULL_CYCLES}` },
-  pressureVCycles: { id: "pressure-solve", label: `CM11a V-Cycles ×${UNIFORM_CM11A_V_CYCLES}` },
+  pressureFullCycles: { id: "pressure-solve", label: "CM11a Full-Cycles" },
+  pressureVCycles: { id: "pressure-solve", label: "CM11a V-Cycles" },
   pressureFinish: { id: "pressure-solve", label: "CM11a parity copy + fine residual" },
   pressureProjection: { id: "velocity-projection", label: "Pressure projection" },
   rigidCoupling: { id: "other", label: "Rigid two-way coupling + integration" },
@@ -264,7 +282,9 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private readonly densityTraceGroup: GPUBindGroup;
   private readonly densityScatterGroup: GPUBindGroup;
   private readonly densityGatherGroup: GPUBindGroup;
-  private readonly gammaDiffusionGroups: readonly [GPUBindGroup, GPUBindGroup];
+  private readonly gammaDiffusionForwardGroups: readonly [GPUBindGroup, GPUBindGroup];
+  private readonly gammaDiffusionReverseGroups: readonly [GPUBindGroup, GPUBindGroup];
+  private readonly gammaDiffusionAverageGroup: GPUBindGroup;
   private readonly postprocessBlurXGroup: GPUBindGroup;
   private readonly postprocessBlurYGroup: GPUBindGroup;
   private readonly postprocessBlurZGroup: GPUBindGroup;
@@ -282,6 +302,13 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private referenceVolumeCells = 0;
   private readonly densityPostProcessing: boolean;
   private readonly densitySharpening: boolean;
+  private readonly sharpeningMassCorrection: boolean;
+  private readonly gammaDiffusionIterations: number;
+  private readonly sharpeningStrength: number;
+  private readonly sharpeningDistance: number;
+  private readonly solidExcessCorrection: boolean;
+  private readonly rigidCoupling: boolean;
+  private readonly pressureSchedule: UniformCM11aSchedule;
   private readonly paperTimeStep: boolean;
   private readonly velocityTransport: GPUVelocityTransport;
   private disposed = false;
@@ -301,6 +328,19 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   ) {
     this.densityPostProcessing = options.densityPostProcessing === true;
     this.densitySharpening = options.densitySharpening !== false;
+    this.sharpeningMassCorrection = options.sharpeningMassCorrection !== false;
+    this.gammaDiffusionIterations = Math.round(Math.min(UNIFORM_GAMMA_DIFFUSION_ITERATIONS,
+      Math.max(0, options.gammaDiffusionIterations ?? UNIFORM_GAMMA_DIFFUSION_ITERATIONS)));
+    this.sharpeningStrength = Math.min(2, Math.max(0.25, options.sharpeningStrength ?? 1));
+    this.sharpeningDistance = Math.min(3.1, Math.max(1.1, options.sharpeningDistance ?? 2.1));
+    this.solidExcessCorrection = options.solidExcessCorrection !== false;
+    this.rigidCoupling = options.rigidCoupling !== false;
+    this.pressureSchedule = options.pressureSchedule ?? {
+      fullCycles: UNIFORM_CM11A_FULL_CYCLES,
+      vCycles: UNIFORM_CM11A_V_CYCLES,
+      preSweeps: UNIFORM_CM11A_PRE_SWEEPS,
+      postSweeps: UNIFORM_CM11A_POST_SWEEPS,
+    };
     this.paperTimeStep = options.timeStep !== "scene";
     this.velocityTransport = options.velocityTransport === "maccormack"
       ? "maccormack" : "semi-lagrangian";
@@ -366,7 +406,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
         pressureProjection: velocity("Uniform audit velocity after pressure projection"),
       });
     }
-    this.params = device.createBuffer({ label: "Uniform reference parameters", size: 128, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.params = device.createBuffer({ label: "Uniform reference parameters", size: 144, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.velocityExtrapolator = new WebGPUUniformVelocityExtrapolator(
       device, [nx, ny, nz], [
         scene.container.width_m / nx,
@@ -439,7 +479,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       scene.container.width_m / nx,
       scene.container.height_m / ny,
       scene.container.depth_m / nz,
-    ]);
+    ], this.pressureSchedule);
     this.mainPipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [this.mainLayout] });
     const sampler = device.createSampler({ minFilter: "linear", magFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge", addressModeW: "clamp-to-edge" });
     const group = (velocityIn: GPUTexture, velocityOut: GPUTexture, pressureIn: GPUTexture,
@@ -497,7 +537,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       this.velocityA, this.velocityA, this.transportA, this.volumeA, this.gammaA, this.gammaB);
     this.densityGatherGroup = group(this.velocityA, this.velocityB, this.pressureA, this.pressureB, this.volumeA, this.volumeB, this.heightB, this.heightA,
       this.velocityA, this.velocityA, this.transportA, this.volumeA, this.gammaB, this.gammaA);
-    this.gammaDiffusionGroups = [
+    this.gammaDiffusionForwardGroups = [
       group(this.velocityA, this.velocityB, this.pressureA, this.pressureB,
         this.volumeB, this.volumeA, this.heightB, this.heightA,
         this.velocityA, this.velocityA, this.transportA, this.volumeB,
@@ -507,6 +547,22 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
         this.velocityA, this.velocityA, this.transportA, this.volumeA,
         this.gammaB, this.gammaA),
     ];
+    this.gammaDiffusionReverseGroups = [
+      group(this.velocityA, this.velocityB, this.pressureA, this.pressureB,
+        this.surfaceA, this.volumeA, this.heightB, this.heightA,
+        this.velocityA, this.velocityA, this.transportA, this.surfaceA,
+        this.surfaceB, this.gammaB),
+      group(this.velocityA, this.velocityB, this.pressureA, this.pressureB,
+        this.volumeA, this.surfaceA, this.heightB, this.heightA,
+        this.velocityA, this.velocityA, this.transportA, this.volumeA,
+        this.gammaB, this.surfaceB),
+    ];
+    this.gammaDiffusionAverageGroup = group(
+      this.velocityA, this.velocityB, this.surfaceB, this.pressureB,
+      this.volumeB, this.volumeA, this.heightB, this.heightA,
+      this.velocityA, this.velocityA, this.transportA, this.surfaceA,
+      this.gammaA, this.gammaB,
+    );
     this.sharpenComputeGroup = group(this.velocityA, this.velocityB, this.pressureA, this.pressureB, this.volumeB, this.volumeA, this.heightB, this.heightA);
     this.sharpenScatterGroup = group(this.velocityA, this.velocityB, this.pressureB, this.pressureA, this.volumeA, this.volumeB, this.heightB, this.heightA);
     this.sharpenResolveGroup = group(this.velocityA, this.velocityB, this.pressureA, this.pressureB, this.volumeA, this.volumeB, this.heightB, this.heightA);
@@ -523,11 +579,12 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       compressionRatio: 1, activeCompressionRatio: 1, activeSampleCount: count,
       regularLayers: ny, maximumNeighborDelta: 0, gridKind: "uniform",
       cellSize_m: Math.min(scene.container.width_m / nx, scene.container.height_m / ny, scene.container.depth_m / nz),
-      pressureIterations: 0, pressureSolver: "CM11a dense LCP multigrid (3 Full-Cycles + 4 V-Cycles, 4 pre/post PRBGS)",
+      pressureIterations: 0, pressureSolver: `CM11a dense LCP multigrid (${this.pressureSchedule.fullCycles} Full-Cycles + ${this.pressureSchedule.vCycles} V-Cycles, ${this.pressureSchedule.preSweeps}/${this.pressureSchedule.postSweeps} pre/post PRBGS)`,
       allocatedBytes: allocation.allocatedBytes + this.pressureMultigrid.allocatedBytes
         + (this.symmetryStageAuditMacCormackBuffer ? 0 : 16), quality,
       submittedTime_s: 0, simulatedTime_s: 0, completedTime_s: 0,
       simulationLag_s: 0, encodedSteps: 0, maximumTallCellHeight: 0,
+      volumeControl: true,
       hostFluidAuthority: "gpu-resident", hostSimulationSizedWorkItems: 0,
       hostSchedulingUsesReadback: false,
     };
@@ -728,6 +785,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       multigridLevels: this.pressureMultigrid.levelCount,
       multigridPasses,
       multigridPassesTotal: Object.values(multigridPasses).reduce((sum, count) => sum + count, 0),
+      pressureSchedule: this.pressureSchedule,
     };
   }
 
@@ -775,6 +833,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       outlet?.x ?? 0, outlet?.y ?? 0, outlet?.z ?? 0, inflow?.radius_m ?? 0,
       inflow?.velocity_m_s.x ?? 0, inflow?.velocity_m_s.y ?? 0, inflow?.velocity_m_s.z ?? 0, this.inflowBoundary?.apertureScale ?? 0,
       strength, this.referenceVolumeCells, c.fillFraction * this.info.ny, 4,
+      this.sharpeningStrength, this.sharpeningDistance, 0, 0,
     ]));
     // The advance-pipeline trace: a hardware-timestamp boundary chain over the
     // whole step, sampled on a cadence while the instrumentation store asks for
@@ -848,20 +907,42 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       [this.info.nx, this.info.ny, this.info.nz],
     );
     seam?.(UNIFORM_ADVANCE_PHASE.densityAdvection);
-    // Sec. 3.4 step 8: visit neighbouring pairs dimension-by-dimension and
-    // half-equalize gamma while moving the matching donor density. Two
-    // disjoint parity passes cover every edge without atomics; six passes are
-    // one complete paper diffusion iteration. Use all seven iterations
-    // permitted by the paper so high-CFL compression is actually diffused.
-    const diffusionPasses = [
+    // Sec. 3.4 step 8 prescribes dimension-by-dimension neighbouring-pair
+    // equalization but does not prescribe an axis order. A lone xyz sweep is
+    // therefore a hidden anisotropic choice: under horizontal D4, swapping x
+    // and z produces the distinct zyx operator. Evaluate both paper-valid
+    // orders from the same snapshot and average them. This makes the
+    // unspecified choice neutral while retaining the paper's pair formula.
+    // The two parity passes for each of three dimensions mean six passes are
+    // one complete paper diffusion iteration in either mirrored branch.
+    const forwardDiffusionPasses = [
       ["x even", this.pipelines.diffuseGammaX0], ["x odd", this.pipelines.diffuseGammaX1],
       ["y even", this.pipelines.diffuseGammaY0], ["y odd", this.pipelines.diffuseGammaY1],
       ["z even", this.pipelines.diffuseGammaZ0], ["z odd", this.pipelines.diffuseGammaZ1],
     ] as const;
-    for (let iteration = 0; iteration < UNIFORM_GAMMA_DIFFUSION_ITERATIONS; iteration += 1) {
-      diffusionPasses.forEach(([label, pipeline], index) => this.run(encoder,
-        `Uniform gamma diffusion iteration ${iteration + 1}/${UNIFORM_GAMMA_DIFFUSION_ITERATIONS} ${label}`,
-        pipeline, this.gammaDiffusionGroups[index & 1]!));
+    const reverseDiffusionPasses = [
+      ["z even", this.pipelines.diffuseGammaZ0], ["z odd", this.pipelines.diffuseGammaZ1],
+      ["y even", this.pipelines.diffuseGammaY0], ["y odd", this.pipelines.diffuseGammaY1],
+      ["x even", this.pipelines.diffuseGammaX0], ["x odd", this.pipelines.diffuseGammaX1],
+    ] as const;
+    for (let iteration = 0; iteration < this.gammaDiffusionIterations; iteration += 1) {
+      encoder.copyTextureToTexture({ texture: this.volumeB }, { texture: this.surfaceA },
+        [this.info.nx, this.info.ny, this.info.nz]);
+      encoder.copyTextureToTexture({ texture: this.gammaA }, { texture: this.surfaceB },
+        [this.info.nx, this.info.ny, this.info.nz]);
+      forwardDiffusionPasses.forEach(([label, pipeline], index) => this.run(encoder,
+        `Uniform gamma diffusion iteration ${iteration + 1}/${this.gammaDiffusionIterations} xyz ${label}`,
+        pipeline, this.gammaDiffusionForwardGroups[index & 1]!));
+      reverseDiffusionPasses.forEach(([label, pipeline], index) => this.run(encoder,
+        `Uniform gamma diffusion iteration ${iteration + 1}/${this.gammaDiffusionIterations} zyx ${label}`,
+        pipeline, this.gammaDiffusionReverseGroups[index & 1]!));
+      this.run(encoder,
+        `Uniform gamma diffusion iteration ${iteration + 1}/${this.gammaDiffusionIterations} average mirrored orders`,
+        this.pipelines.averageGammaDiffusion, this.gammaDiffusionAverageGroup);
+      encoder.copyTextureToTexture({ texture: this.volumeA }, { texture: this.volumeB },
+        [this.info.nx, this.info.ny, this.info.nz]);
+      encoder.copyTextureToTexture({ texture: this.gammaB }, { texture: this.gammaA },
+        [this.info.nx, this.info.ny, this.info.nz]);
     }
     if (this.symmetryStageAuditTextures) encoder.copyTextureToTexture(
       { texture: this.volumeB }, { texture: this.symmetryStageAuditTextures.densityDiffusion },
@@ -871,19 +952,31 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       { texture: this.gammaA }, { texture: this.symmetryStageAuditTextures.gammaPostDiffusion },
       [this.info.nx, this.info.ny, this.info.nz],
     );
-    seam?.(UNIFORM_ADVANCE_PHASE.gammaDiffusion);
+    if (this.gammaDiffusionIterations > 0) seam?.(UNIFORM_ADVANCE_PHASE.gammaDiffusion);
     if (this.densitySharpening) {
       encoder.clearBuffer(this.conditioningScratch);
       this.run(encoder, "Uniform interface sharpening", this.pipelines.sharpenCompute, this.sharpenComputeGroup);
-      this.run(encoder, "Uniform conserved sharpening scatter", this.pipelines.sharpenScatter, this.sharpenScatterGroup);
-      this.run(encoder, "Uniform conserved sharpening resolve", this.pipelines.sharpenResolve, this.sharpenResolveGroup);
+      if (this.sharpeningMassCorrection) {
+        seam?.(UNIFORM_ADVANCE_PHASE.interfaceSharpening);
+        this.run(encoder, "Uniform conserved sharpening scatter", this.pipelines.sharpenScatter, this.sharpenScatterGroup);
+        this.run(encoder, "Uniform conserved sharpening resolve", this.pipelines.sharpenResolve, this.sharpenResolveGroup);
+        seam?.(UNIFORM_ADVANCE_PHASE.sharpeningMassCorrection);
+      } else {
+        // sharpenCompute writes volumeA while every downstream surface stage
+        // reads volumeB. Preserve that ABI even for the deliberately
+        // non-conservative one-pass ablation.
+        encoder.copyTextureToTexture(
+          { texture: this.volumeA }, { texture: this.volumeB },
+          [this.info.nx, this.info.ny, this.info.nz],
+        );
+        seam?.(UNIFORM_ADVANCE_PHASE.interfaceSharpening);
+      }
     }
     if (this.symmetryStageAuditTextures) encoder.copyTextureToTexture(
       { texture: this.volumeB }, { texture: this.symmetryStageAuditTextures.densitySharpening },
       [this.info.nx, this.info.ny, this.info.nz],
     );
-    seam?.(UNIFORM_ADVANCE_PHASE.interfaceSharpening);
-    if (activeBodies.length > 0 || sceneHasTerrain(this.scene)) {
+    if (this.solidExcessCorrection && (activeBodies.length > 0 || sceneHasTerrain(this.scene))) {
       encoder.clearBuffer(this.conditioningScratch);
       this.run(encoder, "Uniform partial-solid excess scatter", this.pipelines.scatterSolidExcess, this.solidExcessScatterGroup);
       this.run(encoder, "Uniform partial-solid excess resolve", this.pipelines.resolveSolidExcess, this.solidExcessResolveGroup);
@@ -944,7 +1037,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       [this.info.nx, this.info.ny, this.info.nz],
     );
     seam?.(UNIFORM_ADVANCE_PHASE.pressureProjection);
-    if (activeBodies.length > 0) {
+    if (this.rigidCoupling && activeBodies.length > 0) {
       this.run(encoder, "Uniform rigid-body coupling", this.pipelines.coupleRigid, this.rigidGroup);
       encoder.copyTextureToTexture({ texture: this.volumeB }, { texture: this.volumeA }, [this.info.nx, this.info.ny, this.info.nz]);
       encoder.copyTextureToTexture({ texture: this.velocityB }, { texture: this.velocityA }, [this.info.nx, this.info.ny, this.info.nz]);
@@ -1128,7 +1221,12 @@ export function uniformDensityPostProcessingEnabled(
   densityPostProcessing: unknown,
   sceneId: string | undefined,
 ): boolean {
-  return densityPostProcessing === "on";
+  if (densityPostProcessing === "on") return true;
+  if (densityPostProcessing !== "scene") return false;
+  return sceneId === "symmetric-expansion"
+    || sceneId === "minimal-power-dam-break"
+    || sceneId === "minimal-power-dam-break-32"
+    || sceneId === "minimal-power-dam-break-64";
 }
 
 const uniformExtensionChip = (context: FluidPipelineContext): string => {
@@ -1196,23 +1294,88 @@ const UNIFORM_FLUID_STAGES: readonly FluidPipelineStage[] = [
       writes: "surface density, gamma",
       feeds: "interface sharpening",
     },
-    state: () => "on",
-    chip: () => "6 passes · 1 paper iteration",
+    toggle: {
+      param: "gammaDiffusion", on: "on", off: "off",
+      hint: "Toggle Sec. 3.4 ordered-pair gamma diffusion. Density transport remains complete when it is off.",
+    },
+    controls: [{
+      kind: "param-range",
+      param: "gammaDiffusionIterations",
+      label: "Iterations",
+      min: 1, max: 7, step: 1,
+      hint: "One iteration is six even/odd axis passes; the paper permits one through seven.",
+      enabled: (context) => context.values.gammaDiffusion !== "off",
+    }],
+    state: (context) => context.values.gammaDiffusion === "off" ? "off" : "on",
+    chip: (context) => context.values.gammaDiffusion === "off"
+      ? "off · identity handoff"
+      : `${6 * Number(context.values.gammaDiffusionIterations ?? UNIFORM_GAMMA_DIFFUSION_ITERATIONS)} passes · ${context.values.gammaDiffusionIterations ?? UNIFORM_GAMMA_DIFFUSION_ITERATIONS} iterations`,
   },
   {
     id: "interface-sharpening",
     band: "surface",
     side: "left",
-    label: "Interface sharpening",
+    label: "Density correction",
     phaseLabels: [UNIFORM_ADVANCE_PHASE.interfaceSharpening.label],
     tip: {
-      summary: "Sec. 3.5: steepens the smeared liquid-air interface by moving mass toward the surface through a conserved compute / scatter / resolve triple; what diffusion smeared, sharpening re-concentrates without changing the total.",
+      summary: "Sec. 3.5: computes and applies the local density correction that steepens the smeared liquid-air interface. Its strength scales the paper's pseudo-time dose; local mass return is exposed as the following stage.",
       reads: "surface density, gamma",
       writes: "surface density",
-      feeds: "velocity prediction (as the liquid mask)",
+      feeds: "local mass return, then velocity prediction as the liquid mask",
     },
-    state: () => "on",
-    chip: () => "3 passes · conserved scatter",
+    toggle: {
+      param: "densitySharpening", on: "on", off: "off",
+      hint: "Toggle the Sec. 3.5 interface-sharpening correction and its dependent mass-return stage.",
+    },
+    controls: [{
+      kind: "param-range",
+      param: "sharpeningStrength",
+      label: "Strength",
+      unit: "×",
+      min: 0.25, max: 2, step: 0.05, digits: 2,
+      hint: "Multiplier over the paper's 3dt sharpening pseudo-time dose.",
+      enabled: (context) => context.values.densitySharpening !== "off",
+    }],
+    state: (context) => context.values.densitySharpening === "off" ? "off" : "on",
+    chip: (context) => context.values.densitySharpening === "off"
+      ? "off · advected density"
+      : `1 pass · ${Number(context.values.sharpeningStrength ?? 1).toFixed(2)}× dose`,
+  },
+  {
+    id: "sharpening-mass-correction",
+    band: "surface",
+    side: "right",
+    label: "Local mass return",
+    phaseLabels: [UNIFORM_ADVANCE_PHASE.sharpeningMassCorrection.label],
+    tip: {
+      summary: "Sec. 3.5 Algorithm 2: traces each removed density parcel toward the 0.5 iso-contour, scatters it locally, and resolves the deposits. Disabling it intentionally exposes the raw, non-conservative density correction while preserving a valid downstream field.",
+      reads: "corrected density, per-cell removed mass",
+      writes: "mass-returned surface density",
+      feeds: "partial-solid excess and pressure classification",
+      gate: "interface sharpening and local mass return are both on",
+    },
+    toggle: {
+      param: "sharpeningMassCorrection", on: "on", off: "off",
+      hint: "Toggle only Algorithm 2's local conservation step; density correction remains active.",
+    },
+    controls: [{
+      kind: "param-range",
+      param: "sharpeningDistance",
+      label: "Trace distance",
+      unit: "cells",
+      min: 1.1, max: 3.1, step: 0.1, digits: 1,
+      hint: "Maximum gradient-trace distance D; the paper explores 1.1–3.1 cells.",
+      enabled: (context) => context.values.densitySharpening !== "off"
+        && context.values.sharpeningMassCorrection !== "off",
+    }],
+    state: (context) => context.values.densitySharpening === "off"
+      ? "unavailable"
+      : context.values.sharpeningMassCorrection === "off" ? "off" : "on",
+    chip: (context) => context.values.densitySharpening === "off"
+      ? "requires density correction"
+      : context.values.sharpeningMassCorrection === "off"
+        ? "off · non-conservative ablation"
+        : `2 passes · D ${Number(context.values.sharpeningDistance ?? 2.1).toFixed(1)} cells`,
   },
   {
     id: "solid-excess",
@@ -1226,9 +1389,15 @@ const UNIFORM_FLUID_STAGES: readonly FluidPipelineStage[] = [
       writes: "surface density",
       gate: "the scene has rigid bodies or terrain",
     },
-    state: (context) => context.bodyCount > 0 || context.hasTerrain ? "on" : "unavailable",
+    toggle: {
+      param: "solidExcessCorrection", on: "on", off: "off",
+      hint: "Toggle Sec. 3.6 cut-cell excess redistribution in scenes that contain solids.",
+    },
+    state: (context) => context.bodyCount > 0 || context.hasTerrain
+      ? context.values.solidExcessCorrection === "off" ? "off" : "on"
+      : "unavailable",
     chip: (context) => context.bodyCount > 0 || context.hasTerrain
-      ? "2 passes · conserved"
+      ? context.values.solidExcessCorrection === "off" ? "off · excess retained" : "2 passes · conserved"
       : "no solids in scene",
   },
   {
@@ -1293,23 +1462,51 @@ const UNIFORM_FLUID_STAGES: readonly FluidPipelineStage[] = [
       writes: "pressure",
       feeds: "parity copy + fine residual",
     },
-    controls: [{
-      kind: "readout",
-      label: "Residual ∞-norm",
-      hint: "Fine-level residual after the last cycle, from the diagnostics readback. The schedule is fixed; this reads convergence, it does not steer it.",
-      value: (context) => {
-        const residual = (context.info as unknown as {
-          uniformCM11aFineResidualInfinity?: number;
-        } | null)?.uniformCM11aFineResidualInfinity;
-        return residual === undefined || !Number.isFinite(residual)
-          ? "—"
-          : residual.toExponential(2);
+    controls: [
+      {
+        kind: "param-range",
+        param: "pressureFullCycles",
+        label: "Full-Cycles",
+        min: 0, max: 5, step: 1,
+        hint: "Coarsest-up CM11a Full-Cycles; the paper schedule uses three.",
       },
-    }],
+      {
+        kind: "param-range",
+        param: "pressureVCycles",
+        label: "V-Cycles",
+        min: 0, max: 8, step: 1,
+        hint: "Refinement V-Cycles after the Full-Cycles; the paper schedule uses four.",
+      },
+      {
+        kind: "param-range",
+        param: "pressureSweeps",
+        label: "Pre/post sweeps",
+        min: 1, max: 8, step: 1,
+        hint: "Projected red-black Gauss-Seidel sweeps before and after each coarse correction.",
+      },
+      {
+        kind: "readout",
+        label: "Residual ∞-norm",
+        hint: "Fine-level residual after the configured schedule, from diagnostics readback.",
+        value: (context) => {
+          const residual = (context.info as unknown as {
+            uniformCM11aFineResidualInfinity?: number;
+          } | null)?.uniformCM11aFineResidualInfinity;
+          return residual === undefined || !Number.isFinite(residual)
+            ? "—"
+            : residual.toExponential(2);
+        },
+      },
+    ],
     state: () => "on",
     chip: (context) => {
       const facts = uniformFacts(context);
-      const schedule = `${UNIFORM_CM11A_FULL_CYCLES} full + ${UNIFORM_CM11A_V_CYCLES} V · ${UNIFORM_CM11A_PRE_SWEEPS}+${UNIFORM_CM11A_POST_SWEEPS} sweeps`;
+      const configured = facts?.pressureSchedule;
+      const fullCycles = configured?.fullCycles ?? Number(context.values.pressureFullCycles ?? UNIFORM_CM11A_FULL_CYCLES);
+      const vCycles = configured?.vCycles ?? Number(context.values.pressureVCycles ?? UNIFORM_CM11A_V_CYCLES);
+      const preSweeps = configured?.preSweeps ?? Number(context.values.pressureSweeps ?? UNIFORM_CM11A_PRE_SWEEPS);
+      const postSweeps = configured?.postSweeps ?? Number(context.values.pressureSweeps ?? UNIFORM_CM11A_POST_SWEEPS);
+      const schedule = `${fullCycles} full + ${vCycles} V · ${preSweeps}+${postSweeps} sweeps`;
       return facts
         ? `${facts.multigridPasses["full-cycle"] + facts.multigridPasses["v-cycle"]} passes · ${schedule}`
         : schedule;
@@ -1360,9 +1557,17 @@ const UNIFORM_FLUID_STAGES: readonly FluidPipelineStage[] = [
       writes: "MAC velocity, body poses + momenta",
       gate: "the scene has rigid bodies",
     },
-    state: (context) => context.bodyCount > 0 ? "on" : "unavailable",
+    toggle: {
+      param: "rigidCoupling", on: "on", off: "off",
+      hint: "Toggle two-way fluid/body momentum exchange and rigid integration; bodies remain solid pressure boundaries.",
+    },
+    state: (context) => context.bodyCount > 0
+      ? context.values.rigidCoupling === "off" ? "off" : "on"
+      : "unavailable",
     chip: (context) => context.bodyCount > 0
-      ? `${context.bodyCount} ${context.bodyCount === 1 ? "body" : "bodies"}`
+      ? context.values.rigidCoupling === "off"
+        ? `off · ${context.bodyCount} ${context.bodyCount === 1 ? "body" : "bodies"} held`
+        : `${context.bodyCount} ${context.bodyCount === 1 ? "body" : "bodies"}`
       : "no rigid bodies",
   },
   {
@@ -1388,6 +1593,10 @@ const UNIFORM_FLUID_STAGES: readonly FluidPipelineStage[] = [
         { value: "on", label: "On", hint: "Blur + sub-grid resolve, 4 extra passes." },
       ],
     }],
+    toggle: {
+      param: "densityPostProcessing", on: "on", off: "off",
+      hint: "Toggle the render-only Sec. 3.8 density reconstruction without changing simulation physics.",
+    },
     state: (context) => uniformDensityPostProcessingEnabled(
       context.values.densityPostProcessing, context.sceneId) ? "on" : "off",
     chip: (context) => uniformDensityPostProcessingEnabled(

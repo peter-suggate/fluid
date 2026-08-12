@@ -616,11 +616,12 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 .rp-node.is-off { opacity: .7; }
 .rp-node.is-unavailable { border-style: dashed; opacity: .5; }
 .rp-node-head { min-height: 17px; display: grid; grid-template-columns: 10px minmax(0,1fr) auto auto; align-items: center; gap: 6px; }
-/* The lamp is the node's switch, so it is a control and not a bullet: a status
-   readout gets the same dot with `disabled`, which is what tells the two apart
-   before anything is clicked. */
+/* Toggleable lamps keep their full-size switch silhouette. Fixed simulation
+   stages use a smaller neutral ring, so only controls can read as green/on. */
 .rp-lamp { width: 9px; height: 9px; padding: 0; border: 1.5px solid var(--line-strong); border-radius: 50%; background: transparent; cursor: pointer; }
 .rp-node.is-on .rp-lamp { border-color: var(--accent); background: var(--accent); box-shadow: 0 0 7px var(--accent-line); }
+.rp-lamp.is-fixed,
+.rp-node.is-on .rp-lamp.is-fixed { border-color: var(--dim); background: transparent; box-shadow: none; transform: scale(.72); }
 .rp-node.is-armed .rp-lamp { border-color: var(--accent); background: linear-gradient(90deg,var(--accent) 50%,transparent 50%); }
 .rp-node.is-unavailable .rp-lamp { border-style: dashed; }
 .rp-lamp:disabled { cursor: default; }

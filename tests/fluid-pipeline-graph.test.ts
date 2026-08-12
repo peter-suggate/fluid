@@ -118,6 +118,34 @@ test("gated stages read their context", () => {
     stageById.get("density-post-process")?.state(context({ values: { densityPostProcessing: "on" } })), "on");
 });
 
+test("uniform ablation lamps map to method parameters and dependent gates", () => {
+  const stageById = new Map(UNIFORM_FLUID_PIPELINE.stages.map((stage) => [stage.id, stage]));
+  assert.equal(stageById.get("gamma-diffusion")?.toggle?.param, "gammaDiffusion");
+  assert.equal(stageById.get("interface-sharpening")?.toggle?.param, "densitySharpening");
+  assert.equal(stageById.get("sharpening-mass-correction")?.toggle?.param, "sharpeningMassCorrection");
+  assert.equal(stageById.get("solid-excess")?.toggle?.param, "solidExcessCorrection");
+  assert.equal(stageById.get("rigid-coupling")?.toggle?.param, "rigidCoupling");
+  assert.equal(stageById.get("density-post-process")?.toggle?.param, "densityPostProcessing");
+
+  const ablated = context({
+    bodyCount: 1,
+    hasTerrain: true,
+    values: {
+      gammaDiffusion: "off",
+      densitySharpening: "off",
+      sharpeningMassCorrection: "on",
+      solidExcessCorrection: "off",
+      rigidCoupling: "off",
+      densityPostProcessing: "off",
+    },
+  });
+  assert.equal(stageById.get("gamma-diffusion")?.state(ablated), "off");
+  assert.equal(stageById.get("interface-sharpening")?.state(ablated), "off");
+  assert.equal(stageById.get("sharpening-mass-correction")?.state(ablated), "unavailable");
+  assert.equal(stageById.get("solid-excess")?.state(ablated), "off");
+  assert.equal(stageById.get("rigid-coupling")?.state(ablated), "off");
+});
+
 /** A synthetic averaged hardware partition carrying a chosen subset of phases. */
 const syntheticTrace = (
   phases: ReadonlyArray<{ label: string; duration_ms: number; encodedFraction?: number }>,

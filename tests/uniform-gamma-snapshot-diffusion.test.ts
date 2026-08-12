@@ -13,7 +13,9 @@ test("gamma diffusion executes the paper's ordered dimension and pair-parity pas
   }
   assert.match(host, /six passes are\n\s*\/\/ one complete paper diffusion iteration/);
   assert.match(host, /UNIFORM_GAMMA_DIFFUSION_ITERATIONS = 7/);
-  assert.match(host, /iteration < UNIFORM_GAMMA_DIFFUSION_ITERATIONS/);
+  assert.match(host, /iteration < this\.gammaDiffusionIterations/);
+  assert.match(host, /if \(this\.gammaDiffusionIterations > 0\) seam/,
+    "a zero-iteration ablation must not publish a stage seam");
 });
 
 test("each pair half-equalizes gamma and transfers the corresponding donor density", () => {

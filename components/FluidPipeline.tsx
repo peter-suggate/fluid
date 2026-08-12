@@ -98,23 +98,33 @@ function costExplanation(cost: FluidPipelineMeasurement): string {
   }
 }
 
-function StageCard({ stage, state, chip, tip, controls }: {
+function StageCard({ stage, state, chip, tip, controls, onToggle }: {
   stage: FluidPipelineStage;
   state: FluidPipelineStageState;
   chip: string;
   tip: string;
   controls?: ReactNode;
+  onToggle?: (checked: boolean) => void;
 }) {
+  const toggleable = Boolean(stage.toggle);
+  const statusLabel = toggleable
+    ? state === "on" ? "encoding" : state === "off" ? "configured off" : "not applicable to this scene"
+    : "always encoded";
+  const lampTitle = toggleable
+    ? stage.toggle?.hint ? `${stage.toggle.hint}\n\n${tip}` : tip
+    : `Always encoded · fixed pipeline stage\n\n${tip}`;
+
   return <div className={`rp-node is-${state}`} data-node={stage.id}>
-    {/* Same head grammar as the render panel, minus everything a solver stage
-        cannot honestly offer: the lamp is a readout of what the advance
-        encodes (nothing here is optional, so it takes no click), and there is
-        no tap and no ablation delta. The chip is the one visible fact row —
-        pass counts and schedule, never prose. Prose lives in the hover tip. */}
+    {/* Optional stages expose the same compact lamp switch as the render
+        pipeline; fixed stages use a smaller, neutral status marker. */}
     <div className="rp-node-head">
-      <button type="button" className="rp-lamp" disabled
-        aria-label={`${stage.label}: ${state === "on" ? "encoding" : state === "off" ? "configured off" : "not applicable to this scene"}`}
-        title={tip} />
+      <button type="button" className={`rp-lamp ${toggleable ? "is-toggleable" : "is-fixed"}`}
+        disabled={!toggleable || state === "unavailable"}
+        role={toggleable ? "switch" : undefined}
+        aria-checked={toggleable ? state === "on" : undefined}
+        onClick={toggleable ? () => onToggle?.(state !== "on") : undefined}
+        aria-label={`${stage.label}: ${statusLabel}`}
+        title={lampTitle} />
       <strong title={tip}>{stage.label}</strong>
     </div>
     {chip && <small className="rp-node-chip" title={tip}>{chip}</small>}
@@ -131,9 +141,10 @@ export interface FluidPipelineProps {
   measured: boolean;
   /** Declarative stage controls, rendered by the panel and slotted by stage id. */
   controls: Readonly<Record<string, ReactNode>>;
+  onToggleStage?: (stageId: string, checked: boolean) => void;
 }
 
-export function FluidPipeline({ graph, context, costs, total_ms, measured, controls }: FluidPipelineProps) {
+export function FluidPipeline({ graph, context, costs, total_ms, measured, controls, onToggleStage }: FluidPipelineProps) {
   return <div className="rp-graph" data-testid="fluid-pipeline">
     <div className="rp-row rp-row-cap">
       <div className="rp-slot" /><Trunk cap="start" /><div className="rp-slot" />
@@ -162,6 +173,7 @@ export function FluidPipeline({ graph, context, costs, total_ms, measured, contr
             stage={stage} state={state} chip={chip}
             tip={fluidPipelineTipText(stage, chip)}
             controls={controls[stage.id]}
+            onToggle={(checked) => onToggleStage?.(stage.id, checked)}
           />;
           return <div key={stage.id} className={`rp-row rp-row-node is-${stage.side}`}>
             {stage.side === "left" ? card : <div className="rp-slot" />}

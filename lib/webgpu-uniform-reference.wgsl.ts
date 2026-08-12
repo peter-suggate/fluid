@@ -22,6 +22,7 @@ struct Params {
   inflowPositionRadius: vec4f,
   inflowVelocityLength: vec4f,
   inflowTiming: vec4f,
+  tuning: vec4f,
 }
 @group(0) @binding(0) var velocityIn: texture_3d<f32>;
 @group(0) @binding(1) var velocityOut: texture_storage_3d<rgba32float, write>;
@@ -592,6 +593,18 @@ fn diffuseGammaPair(id:vec3i,axis:u32,parity:i32){
 @compute @workgroup_size(4,4,4) fn diffuseGammaY1(@builtin(global_invocation_id) gid:vec3u){diffuseGammaPair(vec3i(gid),1u,1);}
 @compute @workgroup_size(4,4,4) fn diffuseGammaZ0(@builtin(global_invocation_id) gid:vec3u){diffuseGammaPair(vec3i(gid),2u,0);}
 @compute @workgroup_size(4,4,4) fn diffuseGammaZ1(@builtin(global_invocation_id) gid:vec3u){diffuseGammaPair(vec3i(gid),2u,1);}
+// The paper leaves the dimension traversal order unspecified. volumeIn and
+// gammaIn are the xyz result; surfaceIn and pressureIn are the zyx result.
+// Their equal average is invariant under the horizontal x/z exchange that
+// maps one valid paper order to the other.
+@compute @workgroup_size(4,4,4)
+fn averageGammaDiffusion(@builtin(global_invocation_id) gid:vec3u){
+  let id=vec3i(gid);if(!valid(id)){return;}
+  let rho=0.5*(volume(id)+textureLoad(surfaceIn,id,0).x);
+  let gamma=0.5*(textureLoad(gammaIn,id,0).x+textureLoad(pressureIn,id,0).x);
+  textureStore(volumeOut,id,vec4f(max(rho,0.0)));
+  textureStore(gammaOut,id,vec4f(max(gamma,0.0)));
+}
 
 fn diffusionVelocity(p:vec3i)->vec3f{let v=textureLoad(velocityIn,clampCell(p),0).xyz;if(params.boundary.y>0.5&&!valid(p)){return -v;}return v;}
 fn strainMagnitude(id:vec3i)->f32{
@@ -901,7 +914,7 @@ fn sharpenDeltaRho(q:vec3i)->f32{
   let rho=volume(q);
   if(cellInsideSolid(q)){return 0.0;}
   let h=params.cellGravity.xyz;
-  let deltaT=3.0*params.dimsDt.w;let tau=0.4;
+  let deltaT=3.0*params.dimsDt.w*params.tuning.x;let tau=0.4;
   let ex=vec3i(1,0,0);let ey=vec3i(0,1,0);let ez=vec3i(0,0,1);
   // Sec. 3.6 Eqs. 18-19 use non-solid face aperture area V^f. This is
   // deliberately distinct from CM11a's face-centred overlapping dual volume.
@@ -933,8 +946,8 @@ fn sharpenCompute(@builtin(global_invocation_id) gid:vec3u){
 fn sharpenScatter(@builtin(global_invocation_id) gid:vec3u){
   let id=vec3i(gid);if(!valid(id)){return;}
   let deltaRho=textureLoad(pressureIn,id,0).x;if(deltaRho>=0.0){return;}
-  var p=vec3f(id)+vec3f(0.5);let maximumDistance=2.1;var travelled=0.0;let stepLength=0.5;
-  for(var stepIndex=0;stepIndex<5;stepIndex+=1){
+  var p=vec3f(id)+vec3f(0.5);let maximumDistance=params.tuning.y;var travelled=0.0;let stepLength=0.5;
+  for(var stepIndex=0;stepIndex<7;stepIndex+=1){
     if(sampleVolume(p)>=0.5||travelled>=maximumDistance){break;}
     let g=volumeGradient(vec3i(floor(p)));let magnitude=length(g);
     if(magnitude<1e-6){break;}

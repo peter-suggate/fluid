@@ -16,6 +16,7 @@ import {
 } from "@/lib/fluid-pipeline";
 import { loadFluidPipeline } from "@/lib/fluid-pipelines";
 import { getMethod } from "@/lib/methods";
+import { simulation } from "@/lib/simulation/controller";
 import { sceneHasTerrain } from "@/lib/terrain";
 import { FluidPipeline } from "./FluidPipeline";
 import { PipeChoice, PipeRange, PipeToggle } from "./PipeControls";
@@ -62,7 +63,6 @@ export function FluidPipelinePanel() {
   const methodId = useMethodStore((state) => state.methodId);
   const quality = useMethodStore((state) => state.quality);
   const overrides = useMethodStore((state) => state.overrides);
-  const setParam = useMethodStore((state) => state.setParam);
   const info = useDiagnosticsStore((state) => state.gpuInfo);
   const bodyCount = useDiagnosticsStore((state) => state.bodies.length);
   const scene = useSceneStore((state) => state.scene);
@@ -131,13 +131,14 @@ export function FluidPipelinePanel() {
           return <PipeChoice key={key} label={control.label}
             value={String(values[control.param] ?? "")}
             options={control.options.map((option) => ({ ...option }))}
-            onChange={(value) => setParam(methodId, control.param, value)} />;
+            onChange={(value) => simulation.setMethodParam(methodId, control.param, value)} />;
         case "param-range":
           return <PipeRange key={key} label={control.label} unit={control.unit}
             value={Number(values[control.param] ?? control.min)}
             min={control.min} max={control.max} step={control.step} digits={control.digits ?? 0}
             hint={control.hint}
-            onChange={(value) => setParam(methodId, control.param, value)} />;
+            disabled={control.enabled ? !control.enabled(context) : false}
+            onChange={(value) => simulation.setMethodParam(methodId, control.param, value)} />;
         case "readout":
           return <label key={key} className="pipe-field" title={control.hint}>
             <span>{control.label}</span>
@@ -152,7 +153,14 @@ export function FluidPipelinePanel() {
       </div>;
     }
     return rendered;
-  }, [graph, values, context, methodId, setParam]);
+  }, [graph, values, context, methodId]);
+
+  const toggleStage = (stageId: string, checked: boolean) => {
+    const stage = graph?.stages.find((candidate) => candidate.id === stageId);
+    if (!stage?.toggle) return;
+    simulation.setMethodParam(methodId, stage.toggle.param,
+      checked ? stage.toggle.on : stage.toggle.off);
+  };
 
   const grid = info ? `${info.nx}×${info.ny}×${info.nz}` : "—";
   const advanceLabel = totalTrace
@@ -186,7 +194,8 @@ export function FluidPipelinePanel() {
 
     {graph
       ? <FluidPipeline graph={graph} context={context} costs={costs}
-        total_ms={total_ms} measured={measured} controls={controls} />
+        total_ms={total_ms} measured={measured} controls={controls}
+        onToggleStage={toggleStage} />
       : <p className="render-inline-warning">
         The {method.label} method has not declared an advance pipeline yet. Select the uniform
         reference method to see its stage graph.

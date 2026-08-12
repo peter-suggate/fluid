@@ -14,6 +14,20 @@ export const UNIFORM_CM11A_PHI_PRESERVATION_LEVELS = 2;
 export { UNIFORM_CM11A_COARSE_RESIDUAL_TOLERANCE };
 export const UNIFORM_CM11A_COARSE_SWEEP_CAP = 4096;
 
+export interface UniformCM11aSchedule {
+  readonly fullCycles: number;
+  readonly vCycles: number;
+  readonly preSweeps: number;
+  readonly postSweeps: number;
+}
+
+export const DEFAULT_UNIFORM_CM11A_SCHEDULE: UniformCM11aSchedule = Object.freeze({
+  fullCycles: UNIFORM_CM11A_FULL_CYCLES,
+  vCycles: UNIFORM_CM11A_V_CYCLES,
+  preSweeps: UNIFORM_CM11A_PRE_SWEEPS,
+  postSweeps: UNIFORM_CM11A_POST_SWEEPS,
+});
+
 const ENTRY_POINTS = [
   "mgBuildFinestTopology", "mgBuildFinestRhs", "mgDownsampleTopology", "mgExtrapolatePhiOneCell",
   "mgBakeCoefficients",
@@ -126,7 +140,8 @@ export class WebGPUUniformPressureMultigrid {
 
   constructor(private readonly device: GPUDevice,
     dimensions: readonly [number, number, number],
-    spacing: readonly [number, number, number]) {
+    spacing: readonly [number, number, number],
+    private readonly schedule: UniformCM11aSchedule = DEFAULT_UNIFORM_CM11A_SCHEDULE) {
     const minimum = Math.min(...dimensions);
     if (!dimensions.every((value) => Number.isSafeInteger(value) && value >= 2)
       || (minimum & (minimum - 1)) !== 0) {
@@ -397,7 +412,7 @@ export class WebGPUUniformPressureMultigrid {
     };
     const vCycle = (level: number, rhs: GPUTexture): void => {
       if (level === this.levels.length - 1) { coarseSolve(rhs); return; }
-      for (let i = 0; i < UNIFORM_CM11A_PRE_SWEEPS; i += 1) sweep(level, rhs);
+      for (let i = 0; i < this.schedule.preSweeps; i += 1) sweep(level, rhs);
       const residualOut = rhs === this.levels[level]!.residual[0]
         ? this.levels[level]!.rhs[1] : this.levels[level]!.residual[0];
       emit("mgResidual", level, level, { rhsIn: rhs, residualOut });
@@ -408,7 +423,7 @@ export class WebGPUUniformPressureMultigrid {
       } else { emit("mgClearMinimum", level + 1); flipMinimum(level + 1); }
       vCycle(level + 1, this.levels[level + 1]!.rhs[0]);
       emit("mgProlongateAdd", level + 1, level, { residualIn: this.levels[level]!.pressure[p[level]] }); flipPressure(level);
-      for (let i = 0; i < UNIFORM_CM11A_POST_SWEEPS; i += 1) sweep(level, rhs);
+      for (let i = 0; i < this.schedule.postSweeps; i += 1) sweep(level, rhs);
     };
     const fullCycle = () => {
       // Algorithm 3 requires p_tmp to survive every nested V-cycle. Both
@@ -436,9 +451,9 @@ export class WebGPUUniformPressureMultigrid {
       min[0] = 0;
     };
     planStage = "full-cycle";
-    for (let cycle = 0; cycle < UNIFORM_CM11A_FULL_CYCLES; cycle += 1) fullCycle();
+    for (let cycle = 0; cycle < this.schedule.fullCycles; cycle += 1) fullCycle();
     planStage = "v-cycle";
-    for (let cycle = 0; cycle < UNIFORM_CM11A_V_CYCLES; cycle += 1) vCycle(0, originalRhs);
+    for (let cycle = 0; cycle < this.schedule.vCycles; cycle += 1) vCycle(0, originalRhs);
     planStage = "finish";
     if (p[0] !== 0) { emit("mgCopyPressure", 0, 0, { pressureOut: this.levels[0]!.pressure[0] }); p[0] = 0; }
     emit("mgMeasureFineResidual", 0, 0, {

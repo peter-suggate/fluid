@@ -14,10 +14,10 @@ import type { PerformanceTrace } from "./performance-trace";
  * structurally hard, a method's graph is declared in the same file as the
  * encoder that emits the seams, built from the same phase-map constants.
  *
- * Unlike the render graph there are no ablation switches: a solver stage is
- * not optional — withholding the pressure solve corrupts state rather than
- * degrading an image — so lamps here are readouts of what the advance encodes,
- * and the only controls are the method parameters a stage declares for itself.
+ * Only stages that declare a `toggle` are ablatable. The solver owns the
+ * corresponding identity/fallback handoff, so closing one of those gates can
+ * never leave a downstream texture stale. Structural stages keep read-only
+ * lamps.
  */
 
 export interface FluidPipelineBand {
@@ -82,6 +82,9 @@ export type FluidStageControl =
     readonly step: number;
     readonly digits?: number;
     readonly hint?: string;
+    /** Hide the input semantics (while retaining its readout) when a parent
+     * stage gate makes the value irrelevant. */
+    readonly enabled?: (context: FluidPipelineContext) => boolean;
   }
   | {
     readonly kind: "readout";
@@ -107,6 +110,14 @@ export interface FluidPipelineStage {
   readonly tip: FluidPipelineTip;
   /** Controls this stage owns, rendered under its head. */
   readonly controls?: readonly FluidStageControl[];
+  /** Optional user gate. Values are method parameters and therefore follow
+   * the same rebuild/runtime contract as every other stage control. */
+  readonly toggle?: {
+    readonly param: string;
+    readonly on: string | number | boolean;
+    readonly off: string | number | boolean;
+    readonly hint?: string;
+  };
   readonly state: (context: FluidPipelineContext) => FluidPipelineStageState;
   /** The short factual chip under the label. Never a description. */
   readonly chip: (context: FluidPipelineContext) => string;

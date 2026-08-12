@@ -22,8 +22,14 @@ test("uniform is a first-class WebGPU reference method", () => {
   assert.match(uniformMethod.description, /Dense matched-lattice WebGPU baseline/);
 });
 
-test("uniform reference exposes velocity transport, presentation, and time-step choices", () => {
-  assert.deepEqual(uniformMethod.params.map(({ key }) => key), ["velocityTransport", "timeStep", "densityPostProcessing"]);
+test("uniform reference exposes stage gates, pass schedules, and transport choices", () => {
+  assert.deepEqual(uniformMethod.params.map(({ key }) => key), [
+    "gammaDiffusion", "gammaDiffusionIterations", "densitySharpening",
+    "sharpeningMassCorrection", "sharpeningStrength", "sharpeningDistance",
+    "solidExcessCorrection", "rigidCoupling", "pressureFullCycles",
+    "pressureVCycles", "pressureSweeps", "velocityTransport", "timeStep",
+    "densityPostProcessing",
+  ]);
   assert.equal(resolveMethodValues(uniformMethod, "balanced", {}).velocityTransport, "semi-lagrangian");
   assert.equal(resolveMethodValues(uniformMethod, "balanced", {}).timeStep, "paper");
   assert.equal(resolveMethodValues(uniformMethod, "high", {}).densityPostProcessing, "scene");
@@ -31,6 +37,18 @@ test("uniform reference exposes velocity transport, presentation, and time-step 
   const options = uniformReferenceSolverOptions({ timeStep: "paper", densityPostProcessing: "off" });
   assert.deepEqual(options, {
     densitySharpening: true,
+    sharpeningMassCorrection: true,
+    gammaDiffusionIterations: 7,
+    sharpeningStrength: 1,
+    sharpeningDistance: 2.1,
+    solidExcessCorrection: true,
+    rigidCoupling: true,
+    pressureSchedule: {
+      fullCycles: 3,
+      vCycles: 4,
+      preSweeps: 4,
+      postSweeps: 4,
+    },
     densityPostProcessing: false,
     timeStep: "paper",
     velocityTransport: "semi-lagrangian",
@@ -41,6 +59,23 @@ test("uniform reference exposes velocity transport, presentation, and time-step 
     timeStep: "paper",
     densityPostProcessing: "off",
   }).velocityTransport, "maccormack");
+
+  const ablated = uniformReferenceSolverOptions({
+    gammaDiffusion: "off",
+    densitySharpening: "on",
+    sharpeningMassCorrection: "off",
+    solidExcessCorrection: "off",
+    rigidCoupling: "off",
+    pressureFullCycles: 1,
+    pressureVCycles: 2,
+    pressureSweeps: 3,
+  });
+  assert.equal(ablated.gammaDiffusionIterations, 0);
+  assert.equal(ablated.sharpeningMassCorrection, false);
+  assert.equal(ablated.solidExcessCorrection, false);
+  assert.equal(ablated.rigidCoupling, false);
+  assert.deepEqual(ablated.pressureSchedule,
+    { fullCycles: 1, vCycles: 2, preSweeps: 3, postSweeps: 3 });
 });
 
 test("scene-aware Sec. 3.8 rendering exposes mini-dam thin sheets without changing physics", () => {
@@ -98,7 +133,10 @@ test("uniform reference compiles and advances one step on WebGPU", {
   const gpu = dawn.create([`backend=${process.env.WEBGPU_BACKEND ?? "metal"}`]);
   const adapter = await gpu.requestAdapter({ powerPreference: "high-performance" });
   assert.ok(adapter);
-  const device = await adapter.requestDevice();
+  const device = await adapter.requestDevice({ requiredLimits: {
+    maxStorageTexturesPerShaderStage: Math.min(
+      8, adapter.limits.maxStorageTexturesPerShaderStage),
+  } });
   const validationErrors: string[] = [];
   device.addEventListener("uncapturederror", (event) => {
     validationErrors.push(event.error.message);
@@ -123,7 +161,7 @@ test("uniform reference compiles and advances one step on WebGPU", {
       "presentation smoothing must not feed back into the conservative VOF");
     assert.equal(solver.globalFineLevelSetSource, undefined);
     assert.equal(solver.coarseLevelSetSource, undefined);
-    assert.equal(solver.advanceTo(scene.numerics.maxDt_s, []), true);
+    assert.equal(solver.advanceTo(1 / 30, []), true);
     await device.queue.onSubmittedWorkDone();
     const stats = await solver.readStats();
     assert.equal(stats.encodedSteps, 1);
@@ -131,6 +169,33 @@ test("uniform reference compiles and advances one step on WebGPU", {
     assert.ok(Number.isFinite(stats.maxSpeed_m_s));
     assert.equal(stats.uniformFIMConverged, true);
     assert.equal(stats.uniformFIMTerminalActiveFaces, 0);
+
+    solver.destroy();
+    solver = await uniformMethod.createSolverAsync!(
+      device,
+      scene,
+      "balanced",
+      resolveMethodValues(uniformMethod, "balanced", {
+        gammaDiffusion: "off",
+        densitySharpening: "on",
+        sharpeningMassCorrection: "off",
+        solidExcessCorrection: "off",
+        rigidCoupling: "off",
+        pressureFullCycles: 0,
+        pressureVCycles: 0,
+        pressureSweeps: 1,
+        densityPostProcessing: "off",
+      }),
+      undefined,
+      () => {},
+    );
+    assert.equal(solver.advanceTo(1 / 30, []), true,
+      "the fully ablated optional schedule must still publish valid downstream state");
+    await device.queue.onSubmittedWorkDone();
+    const ablatedStats = await solver.readStats();
+    assert.equal(ablatedStats.encodedSteps, 1);
+    assert.ok(Number.isFinite(ablatedStats.volumeCellSum));
+    assert.ok(Number.isFinite(ablatedStats.maxSpeed_m_s));
     assert.deepEqual(validationErrors, []);
   } finally {
     solver?.destroy();

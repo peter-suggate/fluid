@@ -336,6 +336,12 @@ export interface GPUEulerianInfo {
     readonly multigridLevels: number;
     readonly multigridPasses: Readonly<Record<"setup" | "full-cycle" | "v-cycle" | "finish", number>>;
     readonly multigridPassesTotal: number;
+    readonly pressureSchedule: Readonly<{
+      fullCycles: number;
+      vCycles: number;
+      preSweeps: number;
+      postSweeps: number;
+    }>;
   };
   /** Latest exhaustive, exclusive GPU physics partition. */
   physicsTrace?: PerformanceTrace;
