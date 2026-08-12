@@ -1,6 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
+import { SceneOverridesChip } from "./SceneOverridesChip";
 import { findSceneDefinition } from "@/lib/scenes";
 import { useSceneStore } from "@/lib/stores/scene-store";
 import { useUIStore } from "@/lib/stores/ui-store";
@@ -40,6 +41,10 @@ export function SceneOverlay() {
         <strong>{definition?.name ?? scene.sceneId}</strong>
         <small>{scene.sceneId} · {runtime}</small>
       </button>
+      {/* Between the name and CONFIGURE deliberately: it qualifies the scene
+          you are looking at, and it is the reason you would open the panel it
+          sits next to. Renders nothing at all when the link is clean. */}
+      <SceneOverridesChip />
       <button
         className={`scene-overlay-configure${sceneModalOpen ? " active" : ""}`}
         onClick={() => setSceneModalOpen(!sceneModalOpen)}

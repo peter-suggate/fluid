@@ -21,6 +21,7 @@ import { sceneStoneQuery, withSceneStoneQuery } from "../stone-look-controls";
 import { sceneCanopyQuery, withSceneCanopyQuery } from "../tree-canopy-controls";
 import { sceneRimQuery, withSceneRimQuery } from "../vessel-rim-controls";
 import { savedSceneCard } from "../scene-cards";
+import { sceneOverrideClearPlan } from "../scene-overrides";
 import { SCENE_STARTERS } from "../empty-scene";
 import { useShellStore } from "../stores/shell-store";
 import { useSceneStore } from "../stores/scene-store";
@@ -1392,6 +1393,53 @@ class SimulationController {
 
   applyAndResetFluid() {
     this.reset(cloneScene(useSceneStore.getState().scene));
+  }
+
+  /**
+   * Put the named URL overrides back to what this scene was authored with.
+   *
+   * The one way a reader gets out of a link someone else tuned. Each key is
+   * restored individually — see `sceneOverrideClearPlan` for why this is not a
+   * re-parse of the reduced query — and the whole set is one undo entry, so
+   * clearing a scene by accident costs a single Ctrl-Z.
+   *
+   * Startup flags come back as `plan.reload`: `gpu=off` was consumed before any
+   * store existed, so the only honest way to retire it is to leave the address
+   * without it and load the page again. That is a navigation, and it is the
+   * caller's to perform — this reports the keys it could not clear.
+   */
+  clearOverrides(keys: readonly string[]): { readonly reload: readonly string[] } {
+    const sceneStore = useSceneStore.getState();
+    const plan = sceneOverrideClearPlan(keys, { scene: sceneStore.scene, presetId: sceneStore.presetId });
+    const label = keys.length === 1 ? `clear ${keys[0]}` : `clear ${keys.length} overrides`;
+
+    if (plan.scene) {
+      // Through the editor gesture rather than `reset`, so that clearing an
+      // override the running solver can already adopt — a density, the hose —
+      // does not throw away the simulation being watched to apply it.
+      this.beginEdit(label);
+      sceneStore.setScene(plan.scene);
+      this.commitEdit(undefined, { reseed: true });
+    }
+    const ui = useUIStore.getState();
+    if (Object.keys(plan.ui).length > 0) useUIStore.setState(plan.ui);
+    if (Object.keys(plan.svoRenderTuning).length > 0) {
+      ui.setSvoRenderTuning({ ...ui.svoRenderTuning, ...plan.svoRenderTuning });
+    }
+    // Parameters before the method, so a restored value lands on the method it
+    // belongs to rather than triggering a rebuild of the one being left.
+    for (const param of plan.methodParams) {
+      if (param.value === undefined) this.resetMethodParam(param.methodId, param.key);
+      else this.setMethodParam(param.methodId, param.key, param.value);
+    }
+    if (plan.quality) this.setQuality(plan.quality);
+    if (plan.methodId) this.setMethod(plan.methodId);
+
+    if (!plan.scene && plan.reload.length === keys.length) return { reload: plan.reload };
+    useRuntimeStore.getState().setNotice(keys.length === 1
+      ? `Restored ${keys[0]} to the authored scene`
+      : `Restored ${keys.length - plan.reload.length} overrides to the authored scene`);
+    return { reload: plan.reload };
   }
 }
 

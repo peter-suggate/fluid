@@ -176,6 +176,22 @@ function setAtPath(value: object, path: string, next: unknown) {
   else current[leaf] = next;
 }
 
+/**
+ * Address one `scene.*` query path in a document.
+ *
+ * Exported for the override inspector, which restores a single overridden path
+ * to its preset value and has to reach it by exactly the road the query key
+ * took — including the atomic-object semantics `sceneQueryPaths` documents.
+ */
+export const sceneQueryPathValue = getAtPath;
+
+/** The same path, written onto a copy; the document itself stays immutable. */
+export function withSceneQueryPathValue(scene: SceneDescription, path: string, value: unknown): SceneDescription {
+  const next = cloneScene(scene);
+  setAtPath(next, path, value);
+  return next;
+}
+
 type SceneQueryEntry = readonly [key: string, value: string];
 
 /**
