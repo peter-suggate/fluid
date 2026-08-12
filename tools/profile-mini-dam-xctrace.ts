@@ -30,6 +30,11 @@
  *   --losasso-d4-first-frame         one-command production-cutover preset:
  *                                    symmetric-expansion, Losasso, factor/band
  *                                    4, one complete post-construction advance
+ *   --uniform-mini-64                dense uniform method on the 64-cubed mini
+ *                                    dam; captures two adjacent advances by
+ *                                    default with every Uniform pass isolated
+ *   --frames=N                       adjacent representative advances retained
+ *                                    in the report (default 1, uniform preset 2)
  *   --counter-start-gate             gate before advance 1 only until the
  *                                    counter recorder is live, then reduce a
  *                                    representative recurring advance
@@ -118,6 +123,13 @@ const flag = (name: string): string | undefined => process.argv
   .find((argument) => argument.startsWith(`--${name}=`))?.slice(name.length + 3);
 
 const losassoD4FirstFrame = process.argv.includes("--losasso-d4-first-frame");
+const uniformMini64 = process.argv.includes("--uniform-mini-64");
+if (uniformMini64 && losassoD4FirstFrame) {
+  throw new Error("--uniform-mini-64 and --losasso-d4-first-frame are mutually exclusive");
+}
+if (uniformMini64 && flag("lane") !== undefined) {
+  throw new Error("--uniform-mini-64 owns its scene lane and cannot be combined with --lane");
+}
 if (losassoD4FirstFrame && flag("lane") !== undefined
   && flag("lane") !== "symmetric-expansion") {
   throw new Error("--losasso-d4-first-frame is locked to --lane=symmetric-expansion");
@@ -146,14 +158,21 @@ if (maximumLeafSize !== undefined
 }
 const coarseBackend = flag("coarse-backend");
 const steps = flag("steps") === undefined
-  ? losassoD4FirstFrame ? 1 : undefined : Number(flag("steps"));
+  ? losassoD4FirstFrame ? 1 : uniformMini64 ? 8 : undefined : Number(flag("steps"));
+const retainedFrames = Number(flag("frames") ?? (uniformMini64 ? 2 : 1));
+if (!Number.isInteger(retainedFrames) || retainedFrames < 1) {
+  throw new Error("--frames must be a positive integer");
+}
 const firstFrame = losassoD4FirstFrame || process.argv.includes("--first-frame");
+if (firstFrame && retainedFrames !== 1) {
+  throw new Error("--first-frame captures exactly one advance; use --frames=1");
+}
 // Counter attach takes ~2.7 s, while the isolated Metal-encoder metadata
 // stream can fill its bounded trace buffer in ~4 s. A normal warmup therefore
 // cannot make labels and counters overlap reliably. This gate starts the
 // recorder before recurring work without changing representative-frame
 // selection (unlike --first-frame, which intentionally selects bootstrap).
-const counterStartGate = process.argv.includes("--counter-start-gate");
+const counterStartGate = uniformMini64 || process.argv.includes("--counter-start-gate");
 const profileGate = firstFrame || counterStartGate;
 const counters = true;
 const counterSeconds = Number(flag("counter-seconds") ?? (losassoD4FirstFrame ? 5 : 3));
@@ -193,7 +212,8 @@ const discardTrace = process.argv.includes("--discard-trace");
 const reuseTables = process.argv.includes("--reuse-tables");
 const outputDirectory = resolve(root, flag("out")
   ?? (losassoD4FirstFrame
-    ? "artifacts/xctrace-losasso-d4-frame" : "artifacts/xctrace-mini-dam"));
+    ? "artifacts/xctrace-losasso-d4-frame"
+    : uniformMini64 ? "artifacts/xctrace-uniform-mini-dam-64" : "artifacts/xctrace-mini-dam"));
 
 /** Stage timings and labels come from Metal interval tables and are never
  * downsampled. These are the only counter series consumed by the report; LLC
@@ -386,7 +406,7 @@ const requestedSteps = steps ?? Number(POWER_DAM_LANE_ENVIRONMENT[lane].FLUID_OR
  * use the assumed pace. Placement is re-planned against the measured pace once
  * the baseline has run.
  */
-const sizingPlan = counters && !firstFrame ? planCounterWindow({
+const sizingPlan = counters && !firstFrame && !uniformMini64 ? planCounterWindow({
   requestedSteps,
   perAdvanceMs: ASSUMED_MS_PER_ADVANCE,
   counterSeconds,
@@ -398,7 +418,17 @@ const laneSteps = sizingPlan?.steps ?? steps;
  * The clean measurement regime. Every in-process probe is off: those probes
  * are what distort the frame, and Instruments replaces them from outside.
  */
-const laneEnvironment = laneSteps === undefined
+const laneEnvironment = uniformMini64 ? {
+  FLUID_SCENE: "minimal-power-dam-break-64",
+  FLUID_LANE: "uniform-one-step",
+  FLUID_TARGET_S: String(requestedSteps * 0.004),
+  FLUID_MAX_DT: "0.004",
+  FLUID_ORACLE_STEPS: String(requestedSteps),
+  FLUID_EXPECT_EXACT_STEPS: String(requestedSteps),
+  FLUID_EXPECT_GRID: "64,64,64",
+  FLUID_UNIFORM_TIME_STEP: "scene",
+  FLUID_UNIFORM_DENSITY_POSTPROCESSING: "0",
+} : laneSteps === undefined
   ? POWER_DAM_LANE_ENVIRONMENT[lane] : powerDamLaneWithSteps(lane, laneSteps);
 
 const profileEnvironment: Record<string, string> = {
@@ -408,7 +438,7 @@ const profileEnvironment: Record<string, string> = {
   // `use_user_defined_labels_in_backend` is what makes GPU intervals
   // attributable to the repo's own pass names. Measured cost: none.
   FLUID_WEBGPU_DAWN_FEATURES: "skip_validation,use_user_defined_labels_in_backend",
-  FLUID_METHOD: "octree",
+  FLUID_METHOD: uniformMini64 ? "uniform" : "octree",
   FLUID_QUALITY: "balanced",
   FLUID_PERFORMANCE_PROFILE: "1",
   FLUID_PERFORMANCE_TRACES: "0",
@@ -426,9 +456,14 @@ const profileEnvironment: Record<string, string> = {
   // several distinct WebGPU passes into one encoder. Combined with label
   // isolation, this makes one micro-stage equal one counter attribution unit.
   FLUID_GPU_ISOLATE_PASS_ENCODERS: isolatePassLabels ? "1" : "0",
-  FLUID_GPU_PASS_TIMESTAMP_COMMAND_BUFFERS: "1",
+  FLUID_GPU_PASS_TIMESTAMP_COMMAND_BUFFERS: String(retainedFrames),
+  // A 64^3 CM11a advance exceeds the historical 1,024-pass query-pair ceiling.
+  // 4,096 timestamps is Metal's 32 KiB counter-sample-buffer maximum and keeps
+  // up to 2,048 labelled passes instead of silently dropping the late solve.
+  FLUID_GPU_PASS_TIMESTAMP_QUERY_CAPACITY: uniformMini64 ? "4096" : "2048",
   FLUID_GPU_PASS_TIMESTAMP_LABEL_PREFIXES:
-    isolateLabelPrefix ?? "Fine JFA -,SPGrid accurate A2 -,SPGrid Section 6.3 -",
+    isolateLabelPrefix ?? (uniformMini64
+      ? "Uniform" : "Fine JFA -,SPGrid accurate A2 -,SPGrid Section 6.3 -"),
   FLUID_ALGORITHM_DIAGNOSTICS: "0",
   FLUID_GPU_COMMAND_AUDIT: "1",
   // Match benchmark-power-dam's shipping graph. Scene catalog defaults enable
@@ -482,8 +517,10 @@ const writeCaptureManifest = async (
     schemaVersion: 1,
     status,
     generatedAt: new Date().toISOString(),
-    preset: losassoD4FirstFrame ? "losasso-d4-first-frame" : undefined,
-    reproduce: losassoD4FirstFrame ? "npm run profile:losasso-d4-xctrace" : undefined,
+    preset: losassoD4FirstFrame ? "losasso-d4-first-frame"
+      : uniformMini64 ? "uniform-mini-dam-64" : undefined,
+    reproduce: losassoD4FirstFrame ? "npm run profile:losasso-d4-xctrace"
+      : uniformMini64 ? "npm run profile:uniform-mini-dam-64-xctrace" : undefined,
     argv: process.argv.slice(2),
     git: {
       revision: commandVersion("git", ["rev-parse", "HEAD"]),
@@ -495,14 +532,15 @@ const writeCaptureManifest = async (
       xctrace: commandVersion("xcrun", ["xctrace", "version"]),
     },
     configuration: {
-      lane, scene: profileEnvironment.FLUID_SCENE, method: profileEnvironment.FLUID_METHOD,
+      lane: uniformMini64 ? "uniform-mini-64" : lane,
+      scene: profileEnvironment.FLUID_SCENE, method: profileEnvironment.FLUID_METHOD,
       backend: profileEnvironment.FLUID_COARSE_BACKEND,
       grid: profileEnvironment.FLUID_EXPECT_GRID,
       maximumLeafSize: profileEnvironment.FLUID_MAXIMUM_LEAF_SIZE,
       interfaceBand: profileEnvironment.FLUID_OCTREE_INTERFACE_BAND,
       fineFactor: profileEnvironment.FLUID_OCTREE_GLOBAL_FINE_FACTOR,
       steps: profileEnvironment.FLUID_ORACLE_STEPS,
-      counterSeconds, counterGateWarmupMs, counterReduction,
+      counterSeconds, counterGateWarmupMs, counterReduction, retainedFrames,
       retainedCounters: [...RETAINED_GPU_COUNTERS],
       fullLabelIsolation: isolatePassLabels,
       environment: profileEnvironment,
@@ -562,9 +600,13 @@ export interface SmokeResultRecord {
 export const assertCompleteOccupancyReport = (report: Pick<
   import("./xctrace-frame-report").FrameReport,
   "attribution" | "counters" | "passes" | "frames" | "timeline"
->, options?: { readonly maximumFrameOriginLead_us?: number }): void => {
+>, options?: {
+  readonly maximumFrameOriginLead_us?: number;
+  readonly expectedFrameCount?: number;
+}): void => {
   const failures: string[] = [];
   const maximumFrameOriginLead_us = options?.maximumFrameOriginLead_us ?? 5_000;
+  const expectedFrameCount = options?.expectedFrameCount ?? 1;
   if (report.attribution.mode !== "full" || report.attribution.compositeBuckets !== 0) {
     failures.push(`label isolation is ${report.attribution.mode}`
       + ` with ${report.attribution.compositeBuckets} composite buckets`);
@@ -578,10 +620,12 @@ export const assertCompleteOccupancyReport = (report: Pick<
     && pass.occupancy !== undefined)) {
     failures.push("no labelled GPU task received occupancy samples");
   }
-  if (report.frames.count !== 1 || report.frames.samples.length !== 1
-    || report.frames.captures.length !== 1) {
+  if (report.frames.count !== expectedFrameCount
+    || report.frames.samples.length !== expectedFrameCount
+    || report.frames.captures.length !== expectedFrameCount) {
+    const expected = expectedFrameCount === 1 ? "one" : String(expectedFrameCount);
     failures.push(`report contains ${report.frames.count} analysed advances and`
-      + ` ${report.frames.captures.length} captured advances instead of exactly one`);
+      + ` ${report.frames.captures.length} captured advances instead of exactly ${expected}`);
   }
   const encoderIds = report.timeline.intervals
     .map((interval) => interval.encoderId).filter((id): id is string => id !== undefined);
@@ -857,7 +901,7 @@ const requireExclusiveGPU = async (): Promise<void> => {
 const main = async (): Promise<void> => {
   mkdirSync(outputDirectory, { recursive: true });
   await writeCaptureManifest("prepared");
-  const tracePath = `${outputDirectory}/mini-dam.trace`;
+  const tracePath = `${outputDirectory}/${uniformMini64 ? "uniform-mini-dam-64" : "mini-dam"}.trace`;
   const scratchBefore = instrumentsScratchSnapshot();
   const observedScratch = new Map(scratchBefore);
   const observeCaptureScratch = (): void => {
@@ -886,9 +930,10 @@ const main = async (): Promise<void> => {
   rmSync(`${outputDirectory}/report.html`, { force: true });
   const nodeBinary = process.execPath;
 
-  console.log(`lane ${lane}: ${profileEnvironment.FLUID_ORACLE_STEPS} advances`
+  console.log(`lane ${uniformMini64 ? "uniform-mini-64" : lane}: ${profileEnvironment.FLUID_ORACLE_STEPS} advances`
     + ` of ${profileEnvironment.FLUID_SCENE} at grid ${profileEnvironment.FLUID_EXPECT_GRID}`
-    + `, interface band ${profileEnvironment.FLUID_OCTREE_INTERFACE_BAND ?? "scene default"}`);
+    + (uniformMini64 ? `, retaining ${retainedFrames} adjacent detailed frames`
+      : `, interface band ${profileEnvironment.FLUID_OCTREE_INTERFACE_BAND ?? "scene default"}`));
   console.log(fullDiagnostics
     ? "  capture instruments: full Metal System Trace + GPU counters"
     : "  capture instruments: Metal Application + GPU + GPU counters (stage diagnostics only)");
@@ -941,16 +986,19 @@ const main = async (): Promise<void> => {
     };
     const report = await buildFrameReport({
       tables,
-      lane,
+      lane: uniformMini64 ? "uniform-mini-64" : lane,
       environment: profileEnvironment,
       traced: resultFromLog("traced"),
       baseline: resultFromLog("baseline"),
-      singleFrame: !firstFrame,
+      singleFrame: retainedFrames === 1 && !firstFrame,
+      frameLimit: retainedFrames,
       firstFrame,
       counterExtraction: extraction,
     });
-    assertCompleteOccupancyReport(report,
-      firstFrame ? { maximumFrameOriginLead_us: 20_000 } : undefined);
+    assertCompleteOccupancyReport(report, {
+      ...(firstFrame ? { maximumFrameOriginLead_us: 20_000 } : {}),
+      expectedFrameCount: retainedFrames,
+    });
     await writeFile(`${outputDirectory}/summary.json`, `${JSON.stringify(report, null, 2)}\n`);
     await writeFile(`${outputDirectory}/report.html`, renderFrameReportHtml(report));
     await writeCaptureManifest("complete", report);
@@ -1229,12 +1277,13 @@ const main = async (): Promise<void> => {
   console.log("reducing to a frame report...");
   const report = await buildFrameReport({
     tables,
-    lane,
+    lane: uniformMini64 ? "uniform-mini-64" : lane,
     environment: profileEnvironment,
     traced,
     baseline,
     tracedPid,
-    singleFrame: !firstFrame,
+    singleFrame: retainedFrames === 1 && !firstFrame,
+    frameLimit: retainedFrames,
     firstFrame,
     counterExtraction: counterPolicy === undefined ? undefined : {
       sourceCounterCount: counterPolicy.sourceCounterCount,
@@ -1242,8 +1291,10 @@ const main = async (): Promise<void> => {
       timestampStride: counterPolicy.timestampStride,
     },
   });
-  assertCompleteOccupancyReport(report,
-    firstFrame ? { maximumFrameOriginLead_us: 20_000 } : undefined);
+  assertCompleteOccupancyReport(report, {
+    ...(firstFrame ? { maximumFrameOriginLead_us: 20_000 } : {}),
+    expectedFrameCount: retainedFrames,
+  });
   await writeFile(`${outputDirectory}/summary.json`, `${JSON.stringify(report, null, 2)}\n`);
   await writeFile(`${outputDirectory}/report.html`, renderFrameReportHtml(report));
   await writeCaptureManifest("complete", report);

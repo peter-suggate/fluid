@@ -30,11 +30,11 @@ const params: MethodParamSpec[] = [
     default: "scene",
     tier: "fine",
     options: [
-      { value: "scene", label: "Scene · Sec. 3.8 for symmetry" },
+      { value: "scene", label: "Scene · Sec. 3.8 where needed" },
       { value: "off", label: "Off · raw paper density" },
       { value: "on", label: "On · Sec. 3.8 reconstruction" },
     ],
-    hint: "Render-only: symmetric expansion uses Section 3.8 to expose sub-grid mass; other scenes retain the paper Results default (off). It never feeds simulation physics.",
+    hint: "Render-only: symmetry and mini-dam scenes use Section 3.8 to expose sub-grid mass; other scenes retain the paper Results default (off). It never feeds simulation physics.",
   },
 ];
 

@@ -322,11 +322,15 @@ const findSpan = (spans: readonly { start: number; end: number }[], time: number
 
 // ---- Frame segmentation ----------------------------------------------------
 
-/** Existing, real work that is contractually first in every recurring octree
- * substep. Prefer it over a statistically tighter interior loop label so a
+/** Existing, real work that is contractually first in every recurring solver
+ * advance. Prefer it over a statistically tighter interior loop label so a
  * frame timeline starts at the frame's work rather than merely having the
  * correct period. */
 export const GPU_FRAME_START_LABELS = [
+  // The dense reference clears its step telemetry, then this is its first
+  // compute pass. It fires once for the current-velocity extension and the
+  // predicted extension uses a distinct "Uniform predicted" prefix.
+  "Uniform Sec. 3.3 rho-prime and face authority",
   // Losasso has its own reduced ready-commit path and therefore never emits
   // the shared Power topology gate below. This validation is the first real
   // recurring dispatch in that backend's command buffer.
@@ -385,7 +389,11 @@ export const detectFrames = (
       (sum, value) => sum + (value - mean) ** 2, 0,
     ) / cadenceDeltas.length;
     const cv = Math.sqrt(variance) / mean;
-    if (cv > 0.35) continue;
+    // A semantic marker can legitimately occur in two distinct phases of one
+    // advance (legacy uniform current/predicted extension labelling), making
+    // the unsplit inter-arrival series alternate between a short and long
+    // delta. Keep preferred markers long enough to phase-split them below.
+    if (cv > 0.35 && !preferredLabels.includes(label)) continue;
     candidates.push({ label, count: starts.length, cv, starts });
   }
   if (candidates.length === 0) return { boundaries: [], anchor: "(no repeating pass found)" };
@@ -400,8 +408,23 @@ export const detectFrames = (
   // from the statistical mode by one; clipping the first/last boundaries
   // below is explicitly designed for that edge condition.
   const anchor = preferredLabels
-    .map((label) => candidates.find((candidate) => candidate.label === label
-      && Math.abs(candidate.count - frameCount) <= 1))
+    .map((label) => {
+      const candidate = candidates.find((value) => value.label === label);
+      if (candidate === undefined) return undefined;
+      if (Math.abs(candidate.count - frameCount) <= 1) return candidate;
+      // Older uniform traces used the same authority label for the current and
+      // predicted velocity-extension invocations. It is still the first work
+      // in an advance, but occurs exactly twice per advance. Recover the first
+      // phase of that repeated marker instead of falling back to an arbitrary
+      // (and usually interior) once-per-frame kernel. New captures give the
+      // predicted invocation its own prefix, but retained traces must remain
+      // reducible.
+      const repeats = Math.round(candidate.count / frameCount);
+      if (repeats < 2 || repeats > 4
+        || Math.abs(candidate.count - repeats * frameCount) > 1) return undefined;
+      return { ...candidate, count: Math.ceil(candidate.count / repeats),
+        starts: candidate.starts.filter((_start, index) => index % repeats === 0) };
+    })
     .find((candidate) => candidate !== undefined)
     ?? atModalCount.sort((left, right) => left.cv - right.cv)[0];
   return { boundaries: anchor.starts, anchor: anchor.label };
@@ -495,6 +518,10 @@ export interface BuildFrameReportInput {
    * advance. The recorder still needs a multi-second window for Metal encoder
    * metadata and hardware counters to warm up. */
   readonly singleFrame?: boolean;
+  /** Retain this many adjacent representative advances. Supersedes
+   * `singleFrame`; useful when comparing frame-to-frame stage stability rather
+   * than only the median-shaped advance. */
+  readonly frameLimit?: number;
   /** Select advance 1, bounded by the semantic start of advance 2. Unlike
    * `singleFrame`, this is a literal cold-frame capture, not a representative
    * steady-state sample. */
@@ -645,7 +672,7 @@ export const buildFrameReport = async (input: BuildFrameReportInput): Promise<Fr
     }
     starts.sort((left, right) => left - right);
     if (starts.length >= 2) {
-      return { boundaries: starts.slice(0, 2), anchor: preferredLabel };
+      return { boundaries: starts.slice(0, 2), anchor: preferredLabel! };
     }
     if (starts.length === 1 && input.tables["command-buffer-submissions"]
       && input.tables["command-buffer-completed"]) {
@@ -671,7 +698,7 @@ export const buildFrameReport = async (input: BuildFrameReportInput): Promise<Fr
       if (frameCommandBuffer && frameCommandBuffer.encoders > 1) {
         literalFrameUsesCommandBufferCompletion = true;
         return { boundaries: [starts[0], frameCommandBuffer.end],
-          anchor: preferredLabel };
+          anchor: preferredLabel! };
       }
     }
     throw new Error(`literal first-frame capture found ${starts.length} semantic frame starts and`
@@ -727,8 +754,22 @@ export const buildFrameReport = async (input: BuildFrameReportInput): Promise<Fr
       || left.middleDistance - right.middleDistance)[0].index;
   };
   const selectedBoundary = input.firstFrame ? 0 : representativeBoundary();
-  const usable = (input.singleFrame || input.firstFrame) && completeBoundaries.length >= 2
-    ? completeBoundaries.slice(selectedBoundary, selectedBoundary + 2)
+  const requestedFrames = input.firstFrame ? 1
+    : input.frameLimit !== undefined
+      ? Math.max(1, Math.floor(input.frameLimit))
+      : input.singleFrame ? 1 : undefined;
+  const usable = requestedFrames !== undefined && completeBoundaries.length >= 2
+    ? (() => {
+      const availableFrames = completeBoundaries.length - 1;
+      const retainedFrames = Math.min(requestedFrames, availableFrames);
+      // Keep the representative inside the requested window, biased one frame
+      // earlier for an even-sized window so a two-frame report shows the lead-in
+      // and the representative rather than the representative and an arbitrary
+      // tail neighbour.
+      const wantedStart = selectedBoundary - Math.floor(retainedFrames / 2);
+      const start = Math.max(0, Math.min(wantedStart, availableFrames - retainedFrames));
+      return completeBoundaries.slice(start, start + retainedFrames + 1);
+    })()
     : completeBoundaries;
   const windowStart = usable[0] ?? ours[0].start;
   const windowEnd = usable[usable.length - 1]

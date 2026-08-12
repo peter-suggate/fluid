@@ -105,8 +105,10 @@ level-set hierarchy.
 - Rendering can opt into the Section 3.8 detail reconstruction: Gaussian-blur
   `g = 2 min(rho, 0.5)` with `sigma = 2 dx`, then contour
   `rho / min(max(g, 0.01), 1)`. This field is presentation-only and never feeds
-  transport or projection. It is off by default because the paper's Results
-  states that density post-processing was disabled unless otherwise noted.
+  transport or projection. The scene-aware default enables it for symmetry
+  and mini-dam presentations, where thin sheets otherwise fall below the raw
+  `0.5` contour; other scenes retain the paper Results default (off), and the
+  method control can explicitly disable it for raw-density diagnostics.
 
 The pressure schedule is fixed by CM11a and is not a quality control. Spatial
 resolution remains scene-authored, so changing quality cannot hide a grid-size

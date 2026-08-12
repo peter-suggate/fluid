@@ -131,6 +131,41 @@ test("one representative frame coalesces resumed encoder slices without losing t
     "both 0.2 ms execution slices contribute to stage GPU time");
 });
 
+test("a bounded report retains two adjacent representative advances in full", async () => {
+  const report = await buildFrameReport({
+    tables: writeTrace({ frames: 12, frameUs: 50_000 }),
+    lane: "uniform-mini-64",
+    environment: { FLUID_GPU_ISOLATE_PASS_LABELS: "1" },
+    tracedPid: 4242,
+    traced: { steps: 12, simulationWall_ms: 600 },
+    frameLimit: 2,
+  });
+  assert.equal(report.frames.count, 2);
+  assert.equal(report.frames.samples.length, 2);
+  assert.equal(report.frames.captures.length, 2);
+  assert.deepEqual(report.frames.captures.map((capture) => capture.index), [0, 1]);
+  assert.ok(report.frames.samples.every((frame) => frame.encoders === TASKS.length));
+});
+
+test("a legacy uniform authority marker repeated twice per advance remains the frame anchor", async () => {
+  const authority = "Uniform Sec. 3.3 rho-prime and face authority";
+  const report = await buildFrameReport({
+    tables: writeTrace({
+      frames: 12,
+      frameUs: 50_000,
+      tasks: [authority, "Current extension", authority, "Predicted extension", "Pressure"],
+    }),
+    lane: "uniform-mini-64",
+    environment: { FLUID_GPU_ISOLATE_PASS_LABELS: "1" },
+    tracedPid: 4242,
+    traced: { steps: 12, simulationWall_ms: 600 },
+    frameLimit: 2,
+  });
+  assert.equal(report.frames.anchor, authority);
+  assert.equal(report.frames.count, 2);
+  assert.ok(report.frames.samples.every((frame) => frame.passes === 5));
+});
+
 test("literal first-frame mode selects advance 1 and uses advance 2 as its exact boundary", async () => {
   const report = await build(writeTrace({ frames: 2, frameUs: 50_000,
     tasks: ["Open coupled topology ready-commit gate", "Advect", "Solve pressure"] }), 2,

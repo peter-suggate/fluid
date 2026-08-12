@@ -16,6 +16,12 @@ const report = (overrides: Record<string, unknown> = {}) => ({
 
 test("xctrace publication requires full labels and task-attributed occupancy", () => {
   assert.doesNotThrow(() => assertCompleteOccupancyReport(report()));
+  assert.doesNotThrow(() => assertCompleteOccupancyReport(report({
+    frames: { count: 2, samples: [{}, {}], captures: [{}, {}],
+      anchor: "Uniform Sec. 3.3 rho-prime and face authority" },
+    timeline: { intervals: [{ encoderId: "0x1", start: 0,
+      label: "Uniform Sec. 3.3 rho-prime and face authority" }] },
+  }), { expectedFrameCount: 2 }));
   assert.throws(() => assertCompleteOccupancyReport(report({
     attribution: { mode: "scoped", compositeBuckets: 8 },
   })), /label isolation is scoped/);

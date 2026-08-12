@@ -1,8 +1,8 @@
 /**
- * Dawn diagnostic probe for the uniform (Chentanez-Mueller 2012) column
- * collapse on symmetric-expansion. Reads back rho, gamma, and the MAC
- * velocity every few steps and prints height profiles so a frozen free
- * surface can be attributed to transport, sharpening, or projection.
+ * Dawn diagnostic probe for uniform (Chentanez-Mueller 2012) surface
+ * transport. Reads back raw/render density, gamma, and the MAC velocity every
+ * few steps and prints height profiles so a frozen or disappearing surface
+ * can be attributed to transport, sharpening, projection, or presentation.
  *
  * Usage:
  *   WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js \
@@ -10,6 +10,11 @@
  *     --import tsx tools/probe-uniform-collapse.ts
  *
  * Environment:
+ *   FLUID_UNIFORM_COLLAPSE_SCENE       scene preset (default symmetric-expansion)
+ *   FLUID_UNIFORM_COLLAPSE_DT          exact time step (default 0.004)
+ *   FLUID_UNIFORM_COLLAPSE_WORLD_SCALE world scale (default 1)
+ *   FLUID_UNIFORM_COLLAPSE_SHARPENING  on/off (default on)
+ *   FLUID_UNIFORM_COLLAPSE_POSTPROCESS  on/off (default off)
  *   FLUID_UNIFORM_COLLAPSE_STEPS       steps to advance (default 250)
  *   FLUID_UNIFORM_COLLAPSE_CHECKPOINT  checkpoint cadence (default 10)
  */
@@ -18,6 +23,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { uniformMethod } from "../lib/methods/uniform";
 import type { GPUSolverInstance } from "../lib/methods/types";
+import { scaleScene } from "../lib/scene-scale";
 import { getScenePreset } from "../lib/scenes";
 import { requiredFluidDeviceLimits } from "../lib/webgpu-device-limits";
 
@@ -52,17 +58,29 @@ device.addEventListener("uncapturederror", (event) => {
   validationErrors.push(event.error.message);
 });
 
-const scene = getScenePreset("symmetric-expansion").create();
+const sceneId = process.env.FLUID_UNIFORM_COLLAPSE_SCENE ?? "symmetric-expansion";
+const worldScale = Number(process.env.FLUID_UNIFORM_COLLAPSE_WORLD_SCALE ?? 1);
+let scene = getScenePreset(sceneId).create();
+for (let scale = 1; scale < worldScale; scale *= 2) {
+  const scaled = scaleScene(scene, "world", 2);
+  assert.ok(scaled, `scene ${sceneId} cannot be world-scaled to ${2 * scale}x`);
+  scene = scaled;
+}
 const dt = Number(process.env.FLUID_UNIFORM_COLLAPSE_DT ?? 0.004);
+const sharpening = process.env.FLUID_UNIFORM_COLLAPSE_SHARPENING !== "off";
+const postprocess = process.env.FLUID_UNIFORM_COLLAPSE_POSTPROCESS === "on";
 scene.numerics.fixedDt_s = dt;
 scene.numerics.maxDt_s = dt;
 const solver = await uniformMethod.createSolverAsync!(device, scene, "balanced",
-  { densityPostProcessing: "off", timeStep: "scene" }, undefined, () => {}) as GPUSolverInstance;
+  { densityPostProcessing: postprocess ? "on" : "off",
+    densitySharpening: sharpening ? "on" : "off", timeStep: "scene" },
+  undefined, () => {}) as GPUSolverInstance;
 const nx = solver.info.nx, ny = solver.info.ny, nz = solver.info.nz;
-console.log(`grid ${nx}x${ny}x${nz} dt=${dt}`);
+console.log(`scene ${sceneId} worldScale=${worldScale} grid ${nx}x${ny}x${nz} dt=${dt}`
+  + ` sharpening=${sharpening ? "on" : "off"} postprocess=${postprocess ? "on" : "off"}`);
 
 const internal = solver as unknown as {
-  volumeA: GPUTexture; velocityA: GPUTexture; gammaA: GPUTexture;
+  volumeA: GPUTexture; velocityA: GPUTexture; gammaA: GPUTexture; surfaceFieldTexture: GPUTexture;
   symmetryStageAuditTextures?: {
     previousRawDensity: GPUTexture;
     densityAdvection: GPUTexture;
@@ -101,20 +119,49 @@ const format = (value: number) => value.toFixed(2).padStart(6);
 
 const capture = async (step: number) => {
   await device.queue.onSubmittedWorkDone();
-  const [rho, velocity, gamma] = await Promise.all([
+  const [rho, velocity, gamma, renderDensity] = await Promise.all([
     readTexture(internal.volumeA, 1),
     readTexture(internal.velocityA, 4),
     readTexture(internal.gammaA, 1),
+    readTexture(internal.surfaceFieldTexture, 1),
   ]);
   let mass = 0, maxRho = 0, over1 = 0, wet = 0, maxWetY = -1;
+  let topMass = 0, topWet = 0, topVerticalMomentum = 0, topTangentialMomentum = 0;
+  let lidLayerMass = 0, lidFaceMomentum = 0, lidLowerFaceMomentum = 0;
+  let renderWet = 0, renderCeilingWet = 0;
+  let minGamma = Infinity, maxGamma = -Infinity;
   const layerMass: number[] = Array.from({ length: ny }, () => 0);
   const layerWet: number[] = Array.from({ length: ny }, () => 0);
+  const layerGamma: number[] = Array.from({ length: ny }, () => 0);
   for (let z = 0; z < nz; z += 1) for (let y = 0; y < ny; y += 1) for (let x = 0; x < nx; x += 1) {
     const value = at(rho, x, y, z);
+    const renderValue = at(renderDensity, x, y, z);
+    const gammaValue = at(gamma, x, y, z);
     mass += value; layerMass[y]! += value;
+    layerGamma[y]! += gammaValue;
+    minGamma = Math.min(minGamma, gammaValue); maxGamma = Math.max(maxGamma, gammaValue);
     maxRho = Math.max(maxRho, value);
     if (value > 1 + 1e-4) over1 += 1;
     if (value >= 0.5) { wet += 1; layerWet[y]! += 1; maxWetY = Math.max(maxWetY, y); }
+    if (renderValue >= 0.5) {
+      renderWet += 1;
+      if (y >= ny - 4) renderCeilingWet += 1;
+    }
+    if (y >= ny - 4) {
+      const vyBelow = y > 0 ? at(velocity, x, y - 1, z, 4, 1) : 0;
+      const vyAbove = at(velocity, x, y, z, 4, 1);
+      const vx = at(velocity, x, y, z, 4, 0);
+      const vz = at(velocity, x, y, z, 4, 2);
+      topMass += value;
+      if (value >= 0.5) topWet += 1;
+      topVerticalMomentum += value * 0.5 * (vyBelow + vyAbove);
+      topTangentialMomentum += value * Math.hypot(vx, vz);
+    }
+    if (y === ny - 1) {
+      lidLayerMass += value;
+      lidFaceMomentum += value * at(velocity, x, y, z, 4, 1);
+      lidLowerFaceMomentum += value * at(velocity, x, y - 1, z, 4, 1);
+    }
   }
   const cx = nx >> 1, cz = nz >> 1;
   const centerRho = Array.from({ length: ny }, (_, y) => at(rho, cx, y, cz));
@@ -122,9 +169,17 @@ const capture = async (step: number) => {
   const centerGamma = Array.from({ length: ny }, (_, y) => at(gamma, cx, y, cz));
   console.log(`step ${String(step).padStart(3)} t=${(step * dt).toFixed(3)}s`
     + ` mass=${mass.toFixed(1)} wet=${wet} maxRho=${maxRho.toFixed(3)} over1=${over1}`
-    + ` maxWetY=${maxWetY}`);
+    + ` gamma=[${minGamma.toFixed(3)},${maxGamma.toFixed(3)}] maxWetY=${maxWetY}`);
+  console.log(`  ceiling4 mass=${topMass.toFixed(1)} wet=${topWet}`
+    + ` meanVy=${(topVerticalMomentum / Math.max(topMass, 1e-9)).toFixed(3)}`
+    + ` meanVxz=${(topTangentialMomentum / Math.max(topMass, 1e-9)).toFixed(3)}`
+    + ` lidMass=${lidLayerMass.toFixed(1)}`
+    + ` lidV=[${(lidLowerFaceMomentum / Math.max(lidLayerMass, 1e-9)).toFixed(3)},`
+    + `${(lidFaceMomentum / Math.max(lidLayerMass, 1e-9)).toFixed(3)}]`);
+  console.log(`  render    wet=${renderWet} ceiling4Wet=${renderCeilingWet}`);
   console.log(`  layerMass ${layerMass.map((value) => value.toFixed(0).padStart(5)).join("")}`);
   console.log(`  layerWet  ${layerWet.map((value) => String(value).padStart(5)).join("")}`);
+  console.log(`  layerGam  ${layerGamma.map((value) => value.toFixed(0).padStart(5)).join("")}`);
   console.log(`  ctrRho    ${centerRho.map(format).join("")}`);
   console.log(`  ctrVy     ${centerVy.map(format).join("")}`);
   console.log(`  ctrGamma  ${centerGamma.map(format).join("")}`);

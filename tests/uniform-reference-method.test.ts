@@ -11,6 +11,7 @@ import {
   uniformReferenceSolverOptions,
 } from "../lib/methods/uniform";
 import { uniformReferenceComputeShader } from "../lib/webgpu-uniform-reference.wgsl";
+import { uniformDensityPostProcessingEnabled } from "../lib/webgpu-uniform-reference";
 import { createSmokeScenario } from "../tools/webgpu-smoke-scenarios";
 
 test("uniform is a first-class WebGPU reference method", () => {
@@ -32,6 +33,18 @@ test("uniform reference fixes its solver work and exposes only presentation/time
     densityPostProcessing: false,
     timeStep: "paper",
   });
+});
+
+test("scene-aware Sec. 3.8 rendering exposes mini-dam thin sheets without changing physics", () => {
+  for (const sceneId of [
+    "symmetric-expansion",
+    "minimal-power-dam-break",
+    "minimal-power-dam-break-32",
+    "minimal-power-dam-break-64",
+  ]) assert.equal(uniformDensityPostProcessingEnabled("scene", sceneId), true);
+  assert.equal(uniformDensityPostProcessingEnabled("scene", "mass-conserving-figure-9-dam-break"), false);
+  assert.equal(uniformDensityPostProcessingEnabled("off", "minimal-power-dam-break-64"), false);
+  assert.equal(uniformDensityPostProcessingEnabled("on", "mass-conserving-figure-9-dam-break"), true);
 });
 
 test("uniform reference owns the complete dense GPU program", () => {

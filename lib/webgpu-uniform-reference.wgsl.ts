@@ -399,9 +399,10 @@ fn betaValue(id:vec3i)->f32{
   if(!valid(id)){return 1.0;}
   return f32(atomicLoad(&sharpenDeposits[linearIndex(id)]))/TRANSPORT_FIXED;
 }
-// Characteristics of the projected field satisfy u.n=0 at closed walls, so a
-// true trace never leaves the domain -- it slides tangentially along the
-// boundary. A single straight RK2 step over the paper time step spans
+// Characteristics at contacting closed-wall faces satisfy u.n=0, so a true
+// trace stays in the domain and slides tangentially along the boundary. (A
+// CM11a-released face is handled separately below.) A single straight RK2
+// step over the paper time step spans
 // u*dt/h cells (10+ at the 64-cubed dam front), punches through the wall,
 // and any fold-back (mirror or clamp) then maps distinct departure cells
 // onto the same near-wall band: the advection operator turns locally
@@ -421,6 +422,20 @@ fn clampTraceToDomain(p:vec3f)->vec3f{
   if(params.boundary.w<=0.5){q.y=min(q.y,d.y-0.5);}
   return q;
 }
+// CM11a can release a closed solid face: at a released face the forward
+// velocity points into the domain, so a backward characteristic legitimately
+// enters the solid. Clamping that departure back onto the last cell centre
+// makes the conservative sampler repeatedly read the wall film itself.
+fn backwardTraceExitsReleasedFace(p:vec3f)->bool{
+  let d=dims();let q=clamp(vec3i(floor(p)),vec3i(0),d-vec3i(1));
+  if(p.x<0.5){return boundaryVelocity(vec3i(0,q.y,q.z)).x>1e-6;}
+  if(p.x>f32(d.x)-0.5){return faceVelocity(vec3i(d.x-1,q.y,q.z)).x< -1e-6;}
+  if(p.y<0.5){return boundaryVelocity(vec3i(q.x,0,q.z)).y>1e-6;}
+  if(p.y>f32(d.y)-0.5){return faceVelocity(vec3i(q.x,d.y-1,q.z)).y< -1e-6;}
+  if(p.z<0.5){return boundaryVelocity(vec3i(q.x,q.y,0)).z>1e-6;}
+  if(p.z>f32(d.z)-0.5){return faceVelocity(vec3i(q.x,q.y,d.z-1)).z< -1e-6;}
+  return false;
+}
 fn integrateTraceOffset(id:vec3i,dt:f32,h:vec3f,direction:f32)->vec3f{
   let position=vec3f(id)+vec3f(0.5);
   let hMin=min(h.x,min(h.y,h.z));
@@ -429,7 +444,9 @@ fn integrateTraceOffset(id:vec3i,dt:f32,h:vec3f,direction:f32)->vec3f{
   var p=position;
   for(var s=0;s<substeps;s+=1){
     let midpoint=clampTraceToDomain(p+direction*0.5*sampleVelocity(p)*sdt/h);
-    let next=clampTraceToDomain(p+direction*sampleVelocity(midpoint)*sdt/h);
+    let candidate=p+direction*sampleVelocity(midpoint)*sdt/h;
+    if(direction<0.0&&backwardTraceExitsReleasedFace(candidate)){p=candidate;break;}
+    let next=clampTraceToDomain(candidate);
     // Stop at embedded solids: the paper's trace "stops if it crosses a
     // solid boundary" rather than passing mass through the obstacle.
     if(cellInsideSolid(vec3i(floor(next)))){break;}
@@ -685,8 +702,12 @@ fn correctAdvection(@builtin(global_invocation_id) gid:vec3u){
   carryBoundaryVelocity(id);
   let dt=params.dimsDt.w;let h=params.cellGravity.xyz;let cell=vec3f(id);
   let predicted=textureLoad(predictedVelocityIn,id,0).xyz;let original=textureLoad(velocityIn,id,0).xyz;let reversed=textureLoad(reversedVelocityIn,id,0).xyz;
-  var v=vec3f(boundedMacCormack(id,cell+vec3f(1.0,0.5,0.5),0u,dt,h,predicted.x,original.x,reversed.x),boundedMacCormack(id,cell+vec3f(0.5,1.0,0.5),1u,dt,h,predicted.y,original.y,reversed.y),boundedMacCormack(id,cell+vec3f(0.5,0.5,1.0),2u,dt,h,predicted.z,original.z,reversed.z));v=applyVelocityForces(id,v,dt,h);let d=dims();
-  if(id.x==d.x-1){v.x=original.x;}if(id.y==d.y-1&&params.boundary.w<=0.5){v.y=original.y;}if(id.z==d.z-1){v.z=original.z;}
+  // Apply body forces to closed-wall faces as well as interior faces. CM11a's
+  // separating boundary is an inequality enforced by the following pressure
+  // projection, not a permanent zero-normal velocity. Restoring the original
+  // here discarded gravity at a released ceiling face, so a detached film
+  // lost its downward acceleration and numerically stuck to the lid.
+  var v=vec3f(boundedMacCormack(id,cell+vec3f(1.0,0.5,0.5),0u,dt,h,predicted.x,original.x,reversed.x),boundedMacCormack(id,cell+vec3f(0.5,1.0,0.5),1u,dt,h,predicted.y,original.y,reversed.y),boundedMacCormack(id,cell+vec3f(0.5,0.5,1.0),2u,dt,h,predicted.z,original.z,reversed.z));v=applyVelocityForces(id,v,dt,h);
   textureStore(velocityOut,id,vec4f(v,0.0));
 }
 

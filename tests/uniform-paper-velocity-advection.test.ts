@@ -8,6 +8,8 @@ const extrapolator = readFileSync(new URL("../lib/webgpu-uniform-velocity-extrap
 const extrapolationShader = readFileSync(
   new URL("../lib/webgpu-uniform-velocity-extrapolation.wgsl.ts", import.meta.url), "utf8");
 const tallCells = readFileSync(new URL("../docs/papers/tallCells.txt", import.meta.url), "utf8");
+const separatingBoundaries = readFileSync(
+  new URL("../docs/papers/A_Multigrid_Fluid_Pressure_Solver_Handling_Separat.txt", import.meta.url), "utf8");
 
 test("uniform velocity evolution follows CM11b bounded MacCormack transport", () => {
   assert.match(tallCells, /To advect u we use the modified MacCormack scheme/);
@@ -30,9 +32,20 @@ test("bounded correction falls back outside donor bounds and applies forces once
   const correctStart = shader.indexOf("fn correctAdvection");
   const correct = shader.slice(correctStart, shader.indexOf("@compute", correctStart));
   assert.match(correct, /applyVelocityForces\(id,v,dt,h\)/);
+  assert.doesNotMatch(correct, /v\.[xyz]=original\.[xyz]/,
+    "a released wall face must retain body forces until the LCP projection");
   const predictStart = shader.indexOf("fn advect(@builtin");
   const predict = shader.slice(predictStart, shader.indexOf("@compute", predictStart));
   assert.doesNotMatch(predict, /applyVelocityForces/);
+});
+
+test("released CM11a wall faces let backward density traces vacate the wall", () => {
+  assert.match(separatingBoundaries, /liquid artificially crawling[\s\S]*sticking to the ceiling/);
+  assert.match(separatingBoundaries, /normal velocity to be exactly zero and greater than or[\s\S]*zero at the solid boundary/);
+  assert.match(shader, /fn backwardTraceExitsReleasedFace/);
+  assert.match(shader,
+    /if\(direction<0\.0&&backwardTraceExitsReleasedFace\(candidate\)\)\{p=candidate;break;\}[\s\S]*let next=clampTraceToDomain\(candidate\)/,
+    "the released departure must escape before ordinary contact-wall clamping");
 });
 
 test("hierarchy restriction declares corresponding fine support for every velocity component", () => {

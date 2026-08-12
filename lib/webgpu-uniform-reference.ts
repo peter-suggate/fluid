@@ -914,8 +914,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       seam?.(UNIFORM_ADVANCE_PHASE.rigidCoupling);
     }
     // Results states Sec. 3.8 was off unless explicitly noted. The method
-    // profile enables it only for the production symmetry presentation (or an
-    // explicit user choice); this surface texture never feeds simulation.
+    // profile enables it only for presentation-critical symmetry/mini-dam
+    // scenes (or an explicit user choice); it never feeds simulation.
     if (this.densityPostProcessing) {
       this.run(encoder, "Uniform post-process blur x", this.pipelines.postprocessBlurX, this.postprocessBlurXGroup);
       this.run(encoder, "Uniform post-process blur y", this.pipelines.postprocessBlurY, this.postprocessBlurYGroup);
@@ -1088,8 +1088,7 @@ export function uniformDensityPostProcessingEnabled(
   densityPostProcessing: unknown,
   sceneId: string | undefined,
 ): boolean {
-  return densityPostProcessing === "on"
-    || (densityPostProcessing === "scene" && sceneId === "symmetric-expansion");
+  return densityPostProcessing === "on";
 }
 
 const uniformExtensionChip = (context: FluidPipelineContext): string => {
@@ -1332,7 +1331,7 @@ const UNIFORM_FLUID_STAGES: readonly FluidPipelineStage[] = [
       label: "Sec. 3.8 reconstruction",
       hint: "Render-only surface smoothing; simulation state is identical either way. Changing it rebuilds the solver.",
       options: [
-        { value: "scene", label: "Scene", hint: "On only where the presentation depends on it (symmetric expansion)." },
+        { value: "scene", label: "Scene", hint: "On for symmetry and mini-dam scenes where sub-grid sheets are presentation-critical." },
         { value: "off", label: "Off", hint: "The paper's Results default." },
         { value: "on", label: "On", hint: "Blur + sub-grid resolve, 4 extra passes." },
       ],
