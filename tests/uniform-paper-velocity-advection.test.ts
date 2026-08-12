@@ -58,11 +58,18 @@ test("released CM11a wall faces let backward density traces vacate the wall", ()
     "the released departure must escape before ordinary contact-wall clamping");
 });
 
-test("hierarchy restriction declares corresponding fine support for every velocity component", () => {
+test("hierarchy restriction keeps cell-centred fallback off horizontal MAC faces", () => {
   const start = extrapolationShader.indexOf("fn restrictKnownVelocity");
   const body = extrapolationShader.slice(start, extrapolationShader.indexOf("@compute", start));
   assert.match(body, /for \(var component = 0u; component < 3u; component \+= 1u\)/);
-  assert.match(body, /if \(result\.y <= 0\.0\) \{\s*result = hierarchyCorrespondingCellSample\(p, sourceDims, component\)/);
-  assert.doesNotMatch(body, /component\s*==\s*1u/,
-    "the corresponding-cell fallback must not be restricted to the Y component");
+  assert.match(body, /if \(result\.y <= 0\.0 && component == 1u\) \{\s*result = hierarchyCorrespondingCellSample\(p, sourceDims, component\)/);
+  assert.match(extrapolationShader, /not centred on horizontal MAC faces/,
+    "the collocated CM11b fallback must not shift x\/z face support under reflection");
+});
+
+test("paper stencils use D4-canonical floating-point reduction trees", () => {
+  assert.match(shader, /fn d4Sum6\(/);
+  assert.match(shader, /fn d4Sum8\(/);
+  assert.match(extrapolationShader, /fn d4Sum3\(/);
+  assert.match(extrapolationShader, /fn d4Sum8Vec2\(/);
 });

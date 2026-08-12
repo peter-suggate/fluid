@@ -2239,12 +2239,13 @@ function comparisonLiquidResidue(
         componentIndex !== main && !component.touchesFloor) }) });
 }
 
-/** Convert the dense solver's positive-face MAC texture to the same
- * cell-centred xyz field reconstructed from Losasso faces. Domain-exterior
- * negative faces carry the closed-wall zero value used by the solver. */
+/** Convert the dense solver's MAC faces to the same cell-centred xyz field
+ * reconstructed from Losasso faces. CM11a separating walls can release a
+ * domain face, so the three negative planes must not be synthesized as zero. */
 function collocatePositiveFaceVelocity(
   positiveFaces: ArrayLike<number>,
   grid: readonly [number, number, number],
+  negativeBoundaryFaces?: ArrayLike<number>,
 ): Float32Array {
   const [nx, ny, nz] = grid;
   const result = new Float32Array(3 * nx * ny * nz);
@@ -2255,7 +2256,11 @@ function collocatePositiveFaceVelocity(
         const coordinate = axis === 0 ? x : axis === 1 ? y : z;
         const lowerCell = axis === 0 ? cell - 1 : axis === 1 ? cell - nx : cell - nx * ny;
         const upper = Number(positiveFaces[3 * cell + axis]);
-        const lower = coordinate > 0 ? Number(positiveFaces[3 * lowerCell + axis]) : 0;
+        const boundaryIndex = axis === 0 ? y + ny * z
+          : axis === 1 ? ny * nz + x + nx * z
+            : ny * nz + nx * nz + x + nx * y;
+        const lower = coordinate > 0 ? Number(positiveFaces[3 * lowerCell + axis])
+          : Number(negativeBoundaryFaces?.[boundaryIndex] ?? 0);
         result[3 * cell + axis] = 0.5 * (lower + upper);
       }
     }
@@ -4718,21 +4723,32 @@ async function runGPU(
             pressureProjection: GPUTexture;
           }>;
           symmetryStageAuditNegativeBoundaryVelocity?: GPUBuffer;
+          negativeBoundaryVelocityBuffer?: GPUBuffer;
           negativeBoundaryVelocityBytes?: number;
           symmetryStageAuditMacCormackBuffer?: GPUBuffer;
           symmetryStageAuditBetaBuffer?: GPUBuffer;
         };
         const texture = staged.velocityTexture;
         if (!texture) throw new Error(`${method.id} comparison metrics require a collocated velocity texture`);
-        const positiveFaces = await readVelocityField3D(
-          device, texture, solver.info.nx, solver.info.ny, solver.info.nz,
-        );
+        const [positiveFaces, currentNegativeBoundaryBytes] = await Promise.all([
+          readVelocityField3D(device, texture, solver.info.nx, solver.info.ny, solver.info.nz),
+          method.id === "uniform" && staged.negativeBoundaryVelocityBuffer
+            ? readBufferBinding(device, { buffer: staged.negativeBoundaryVelocityBuffer },
+              staged.negativeBoundaryVelocityBytes
+                ?? (solver.info.ny * solver.info.nz + solver.info.nx * solver.info.nz
+                  + solver.info.nx * solver.info.ny) * 4)
+            : Promise.resolve(undefined),
+        ]);
+        const currentNegativeBoundary = currentNegativeBoundaryBytes
+          ? new Float32Array(currentNegativeBoundaryBytes.buffer,
+            currentNegativeBoundaryBytes.byteOffset, currentNegativeBoundaryBytes.byteLength / 4)
+          : undefined;
         if (method.id === "uniform") {
           uniformProjectedPhysicalFaceD4 = projectedPhysicalFaceD4(positiveFaces, cubic.field,
             [solver.info.nx, solver.info.ny, solver.info.nz]);
         }
         compactVelocityField = collocatePositiveFaceVelocity(positiveFaces,
-          [solver.info.nx, solver.info.ny, solver.info.nz]);
+          [solver.info.nx, solver.info.ny, solver.info.nz], currentNegativeBoundary);
         if (method.id === "uniform" && staged.extrapolatedVelocityTexture) {
           const padded = await readRgbaTexture3D(device, staged.extrapolatedVelocityTexture,
             solver.info.nx + 2, solver.info.ny + 2, solver.info.nz + 2);
@@ -4843,8 +4859,14 @@ async function runGPU(
           const predictedExtrapolation = collocatePositiveFaceVelocity(predictedExtrapolationFaces, grid);
           const reverseAdvection = collocatePositiveFaceVelocity(reverseAdvectionFaces, grid);
           const velocityAdvection = collocatePositiveFaceVelocity(velocityAdvectionFaces, grid);
-          const pressureProjection = collocatePositiveFaceVelocity(pressureProjectionFaces, grid);
-          const preExtrapolation = collocatePositiveFaceVelocity(preExtrapolationFaces, grid);
+          const negativeBoundary = negativeBoundaryBytes
+            ? new Float32Array(negativeBoundaryBytes.buffer, negativeBoundaryBytes.byteOffset,
+              negativeBoundaryBytes.byteLength / 4)
+            : undefined;
+          const pressureProjection = collocatePositiveFaceVelocity(
+            pressureProjectionFaces, grid, currentNegativeBoundary);
+          const preExtrapolation = collocatePositiveFaceVelocity(
+            preExtrapolationFaces, grid, negativeBoundary);
           const velocityAdvectionFaceReflection = positiveFaceReflectionError(
             velocityAdvectionFaces, grid);
           const sourceMasks = currentExtrapolatedOpenMasks ? new Uint8Array(grid[0] * grid[1] * grid[2]) : undefined;
@@ -4869,10 +4891,6 @@ async function runGPU(
               }
             }
           }
-          const negativeBoundary = negativeBoundaryBytes
-            ? new Float32Array(negativeBoundaryBytes.buffer, negativeBoundaryBytes.byteOffset,
-              negativeBoundaryBytes.byteLength / 4)
-            : undefined;
           const sharpeningDelta = Float32Array.from(densitySharpening,
             (value, index) => value - densityDiffusion[index]!);
           const massLedger = stageMassLedger([

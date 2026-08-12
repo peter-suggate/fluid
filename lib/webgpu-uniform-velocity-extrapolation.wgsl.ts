@@ -62,6 +62,12 @@ fn accurateBandDistance() -> f32 {
 fn inBounds(p: vec3i, d: vec3i) -> bool {
   return all(p >= vec3i(0)) && all(p < d);
 }
+fn d4Sum3(value:array<f32,3>)->f32{return (value[0]+value[2])+value[1];}
+fn d4Sum8Vec2(value:array<vec2f,8>)->vec2f{
+  let y0=(value[0]+value[5])+(value[1]+value[4]);
+  let y1=(value[2]+value[7])+(value[3]+value[6]);
+  return y0+y1;
+}
 fn componentAxis(component: u32) -> vec3i {
   var axis = vec3i(0);
   axis[component] = 1;
@@ -193,9 +199,10 @@ fn godunovDistance(p: vec3i, component: u32) -> f32 {
 // direction-dependent tie break on symmetric interfaces.
 fn upwindExtensionValue(p: vec3i, component: u32, solvedDistance: f32) -> f32 {
   let h = cellSize();
-  var weightedValue = 0.0; var weightSum = 0.0;
+  var weightedTerms:array<f32,3>;var weightTerms:array<f32,3>;
   let epsilon = fimConvergenceEpsilon(solvedDistance);
   for (var axis = 0u; axis < 3u; axis += 1u) {
+    weightedTerms[axis]=0.0;weightTerms[axis]=0.0;
     var step = vec3i(0); step[axis] = 1;
     let lowDistance = neighborDistance(p - step, component);
     let highDistance = neighborDistance(p + step, component);
@@ -210,9 +217,10 @@ fn upwindExtensionValue(p: vec3i, component: u32, solvedDistance: f32) -> f32 {
     }
     if (minimizerCount <= 0.0) { continue; }
     let weight = (solvedDistance - minimumDistance) / (h[axis] * h[axis]);
-    weightedValue += weight * minimizerValue / minimizerCount;
-    weightSum += weight;
+    weightedTerms[axis]=weight*minimizerValue/minimizerCount;
+    weightTerms[axis]=weight;
   }
+  let weightedValue=d4Sum3(weightedTerms);let weightSum=d4Sum3(weightTerms);
   return select(0.0, weightedValue / weightSum, weightSum > 0.0);
 }
 
@@ -362,8 +370,7 @@ fn hierarchyComponentSample(
     * f32(sourceDims[component]) / f32(targetDims[component]) - 1.0;
   let lower = vec3i(floor(sourcePosition));
   let fraction = fract(sourcePosition);
-  var weightedValue = 0.0;
-  var weightSum = 0.0;
+  var contributions:array<vec2f,8>;
   for (var oz = 0; oz <= 1; oz += 1) {
     for (var oy = 0; oy <= 1; oy += 1) {
       for (var ox = 0; ox <= 1; ox += 1) {
@@ -373,13 +380,14 @@ fn hierarchyComponentSample(
         let weights = select(vec3f(1.0) - fraction, fraction, selector > vec3f(0.5));
         let weight = weights.x * weights.y * weights.z;
         let state = textureLoad(primaryIn, q, 0);
+        let corner=u32(ox+2*oy+4*oz);contributions[corner]=vec2f(0.0);
         if (weight > 0.0 && componentKnown(state, component)) {
-          weightedValue += weight * state[component];
-          weightSum += weight;
+          contributions[corner]=vec2f(weight*state[component],weight);
         }
       }
     }
   }
+  let contribution=d4Sum8Vec2(contributions);let weightedValue=contribution.x;let weightSum=contribution.y;
   return vec2f(select(0.0, weightedValue / weightSum, weightSum > 0.0), weightSum);
 }
 
@@ -427,7 +435,12 @@ fn restrictKnownVelocity(@builtin(global_invocation_id) gid: vec3u) {
   var knownMask = 0u;
   for (var component = 0u; component < 3u; component += 1u) {
     var result = hierarchyComponentSample(p, sourceDims, targetDims, component);
-    if (result.y <= 0.0) {
+    // The corresponding-cell fallback is cell-centred. It is valid for the
+    // vertical component used by the paper's tall-cell construction, but its
+    // 2x2x2 footprint is not centred on horizontal MAC faces: applying it to
+    // x/z chooses a different normal-axis stencil after reflection. Preserve
+    // the staggered trilinear interpolation for those components.
+    if (result.y <= 0.0 && component == 1u) {
       result = hierarchyCorrespondingCellSample(p, sourceDims, component);
     }
     if (result.y > 0.0) {

@@ -205,14 +205,14 @@ const params: MethodParamSpec[] = [
     kind: "select",
     key: "densityPostProcessing",
     label: "Sub-grid rendering",
-    default: "scene",
+    default: "off",
     tier: "fine",
     options: [
       { value: "scene", label: "Scene · Sec. 3.8 where needed" },
       { value: "off", label: "Off · raw paper density" },
       { value: "on", label: "On · Sec. 3.8 reconstruction" },
     ],
-    hint: "Render-only: symmetry and mini-dam scenes use Section 3.8 to expose sub-grid mass; other scenes retain the paper Results default (off). It never feeds simulation physics.",
+    hint: "Render-only: Off matches the paper's Results default. Scene mode retains the symmetry diagnostic's reconstruction; On explicitly exposes sub-grid mass in any scene. It never feeds simulation physics.",
   },
 ];
 

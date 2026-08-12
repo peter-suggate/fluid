@@ -46,6 +46,17 @@ struct UniformMGParams {
 
 fn mgValid(p:vec3i,d:vec3u)->bool{return all(p>=vec3i(0))&&all(p<vec3i(d));}
 fn mgClamp(p:vec3i,d:vec3u)->vec3i{return clamp(p,vec3i(0),vec3i(d)-vec3i(1));}
+fn mgD4Sum6(value:array<f32,6>)->f32{return ((value[0]+value[1])+(value[4]+value[5]))+(value[2]+value[3]);}
+fn mgD4Sum8(value:array<f32,8>)->f32{
+  let y0=(value[0]+value[5])+(value[1]+value[4]);
+  let y1=(value[2]+value[7])+(value[3]+value[6]);
+  return y0+y1;
+}
+fn mgD4Sum8Vec4(value:array<vec4f,8>)->vec4f{
+  let y0=(value[0]+value[5])+(value[1]+value[4]);
+  let y1=(value[2]+value[7])+(value[3]+value[6]);
+  return y0+y1;
+}
 fn mgFineChild(coarse:vec3i,o:vec3i)->vec3i{
   let finePhysical=vec3i(mg.levelDims.xyz)-vec3i(2);
   return clamp(2*(coarse-vec3i(1))+o,vec3i(-1),finePhysical)+vec3i(1);
@@ -103,9 +114,9 @@ fn mgCoefficient(id:vec3i,q:vec3i,axis:u32)->f32{
 fn mgApply(id:vec3i)->f32{
   if(!mgBakedLiquid(id)){return 0.0;}
   let e=array<vec3i,6>(vec3i(-1,0,0),vec3i(1,0,0),vec3i(0,-1,0),vec3i(0,1,0),vec3i(0,0,-1),vec3i(0,0,1));
-  var result=0.0;let centre=mgP(id);
-  for(var n=0;n<6;n+=1){let q=id+e[n];let axis=u32(n/2);let a=mgCoefficient(id,q,axis);let neighbor=select(0.0,mgP(q),mgBakedLiquid(q));result+=a*(centre-neighbor);}
-  return result;
+  var terms:array<f32,6>;let centre=mgP(id);
+  for(var n=0;n<6;n+=1){let q=id+e[n];let axis=u32(n/2);let a=mgCoefficient(id,q,axis);let neighbor=select(0.0,mgP(q),mgBakedLiquid(q));terms[n]=a*(centre-neighbor);}
+  return mgD4Sum6(terms);
 }
 
 @compute @workgroup_size(4,4,4)
@@ -145,12 +156,13 @@ fn mgBuildFinestRhs(@builtin(global_invocation_id) gid:vec3u){
 @compute @workgroup_size(4,4,4)
 fn mgDownsampleTopology(@builtin(global_invocation_id) gid:vec3u){
   let id=vec3i(gid);if(!mgValid(id,mg.coarseDims.xyz)){return;}
-  var v=vec4f(0.0);var phiSum=0.0;var positiveSum=0.0;var positiveCount=0.0;var negativeCount=0.0;
+  var topologyTerms:array<vec4f,8>;var phiTerms:array<f32,8>;var positiveTerms:array<f32,8>;var positiveFlags:array<f32,8>;var negativeFlags:array<f32,8>;
   for(var corner=0u;corner<8u;corner+=1u){
     let o=vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));
     let q=mgFineChild(id,o);
-    v+=mgTopology(q);let phi=mgPhi(q);phiSum+=phi;if(phi>=0.0){positiveSum+=phi;positiveCount+=1.0;}else{negativeCount+=1.0;}
+    topologyTerms[corner]=mgTopology(q);let phi=mgPhi(q);phiTerms[corner]=phi;positiveTerms[corner]=select(0.0,phi,phi>=0.0);positiveFlags[corner]=select(0.0,1.0,phi>=0.0);negativeFlags[corner]=select(1.0,0.0,phi>=0.0);
   }
+  let v=mgD4Sum8Vec4(topologyTerms);let phiSum=mgD4Sum8(phiTerms);let positiveSum=mgD4Sum8(positiveTerms);let positiveCount=mgD4Sum8(positiveFlags);let negativeCount=mgD4Sum8(negativeFlags);
   // CM11a Eq. 15-16 and C=2 sign-aware phi rule. control.x is the
   // destination level and control.y is M-C.
   let mixed=positiveCount>0.0&&negativeCount>0.0;
@@ -182,14 +194,14 @@ fn mgResidual(@builtin(global_invocation_id) gid:vec3u){
 // restriction and prolongation.
 @compute @workgroup_size(4,4,4)
 fn mgRestrictResidual(@builtin(global_invocation_id) gid:vec3u){
-  let id=vec3i(gid);if(!mgValid(id,mg.coarseDims.xyz)){return;}var value=0.0;
-  for(var corner=0u;corner<8u;corner+=1u){let o=vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));value+=textureLoad(mgResidualIn,mgFineChild(id,o),0).x;}
-  textureStore(mgRhsOut,id,vec4f(value/8.0));
+  let id=vec3i(gid);if(!mgValid(id,mg.coarseDims.xyz)){return;}var terms:array<f32,8>;
+  for(var corner=0u;corner<8u;corner+=1u){let o=vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));terms[corner]=textureLoad(mgResidualIn,mgFineChild(id,o),0).x;}
+  textureStore(mgRhsOut,id,vec4f(mgD4Sum8(terms)/8.0));
 }
 
 fn mgTrilinearPressure(fineId:vec3i)->f32{
   let q=(vec3f(fineId)-vec3f(0.5))*0.5+vec3f(0.5);let base=vec3i(floor(q));let f=fract(q);
-  var value=0.0;var total=0.0;
+  var values:array<f32,8>;var weights:array<f32,8>;
   for(var corner=0u;corner<8u;corner+=1u){
     let o=vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));
     let p=base+o;
@@ -197,10 +209,11 @@ fn mgTrilinearPressure(fineId:vec3i)->f32{
     // pressure grid. CM11/CM11a require out-of-grid trilinear samples to be
     // ignored and the remaining weights renormalized. Blending the halo's
     // zero pressure into a correction makes Full-Cycles amplify wall error.
-    if(!mgInterior(p,mg.levelDims.xyz)){continue;}
+    values[corner]=0.0;weights[corner]=0.0;if(!mgInterior(p,mg.levelDims.xyz)){continue;}
     let w=select(1.0-f.x,f.x,o.x==1)*select(1.0-f.y,f.y,o.y==1)*select(1.0-f.z,f.z,o.z==1);
-    value+=w*mgP(p);total+=w;
+    values[corner]=w*mgP(p);weights[corner]=w;
   }
+  let value=mgD4Sum8(values);let total=mgD4Sum8(weights);
   return select(0.0,value/total,total>0.0);
 }
 
@@ -254,8 +267,9 @@ fn mgExtrapolatePhiOneCell(@builtin(global_invocation_id) gid:vec3u){
   let id=vec3i(gid);if(!mgValid(id,mg.levelDims.xyz)){return;}
   if(mgTopology(id).x>1e-5){textureStore(mgPhiOut,id,vec4f(mgPhi(id)));return;}
   let e=array<vec3i,6>(vec3i(-1,0,0),vec3i(1,0,0),vec3i(0,-1,0),vec3i(0,1,0),vec3i(0,0,-1),vec3i(0,0,1));
-  var sum=0.0;var weight=0.0;
-  for(var n=0;n<6;n+=1){let q=id+e[n];if(!mgValid(q,mg.levelDims.xyz)){continue;}let v=mgTopology(q).x;if(v>1e-5&&mgPhi(q)<0.0){sum+=v*mgPhi(q);weight+=v;}}
+  var terms:array<f32,6>;var weights:array<f32,6>;
+  for(var n=0;n<6;n+=1){let q=id+e[n];terms[n]=0.0;weights[n]=0.0;if(!mgValid(q,mg.levelDims.xyz)){continue;}let v=mgTopology(q).x;if(v>1e-5&&mgPhi(q)<0.0){terms[n]=v*mgPhi(q);weights[n]=v;}}
+  let sum=mgD4Sum6(terms);let weight=mgD4Sum6(weights);
   textureStore(mgPhiOut,id,vec4f(select(mgPhi(id),sum/max(weight,1e-9),weight>0.0)));
 }
 
@@ -296,8 +310,9 @@ fn mgSmoothColour(@builtin(global_invocation_id) gid:vec3u){
   // former trailing mgProjectMinimum pass while deleting that pass outright.
   if(coarseDone||!mgBakedLiquid(id)||u32((id.x+id.y+id.z)&1)!=mg.control.z){textureStore(mgPressureOut,id,vec4f(max(old,textureLoad(mgMinimumIn,id,0).x)));return;}
   let e=array<vec3i,6>(vec3i(-1,0,0),vec3i(1,0,0),vec3i(0,-1,0),vec3i(0,1,0),vec3i(0,0,-1),vec3i(0,0,1));
-  var diagonal=0.0;var sum=0.0;
-  for(var n=0;n<6;n+=1){let q=id+e[n];let a=mgCoefficient(id,q,u32(n/2));diagonal+=a;if(mgBakedLiquid(q)){sum+=a*mgP(q);}}
+  var diagonalTerms:array<f32,6>;var sumTerms:array<f32,6>;
+  for(var n=0;n<6;n+=1){let q=id+e[n];let a=mgCoefficient(id,q,u32(n/2));diagonalTerms[n]=a;sumTerms[n]=select(0.0,a*mgP(q),mgBakedLiquid(q));}
+  let diagonal=mgD4Sum6(diagonalTerms);let sum=mgD4Sum6(sumTerms);
   let p=select(0.0,(sum+textureLoad(mgRhsIn,id,0).x)/diagonal,diagonal>0.0);
   // CM11a Eq. 18 says that p_min is enforced while smoothing. Project the
   // newly updated colour before the opposite colour consumes it.
@@ -336,6 +351,9 @@ fn mgDSDivide(a:vec2f,b:f32)->vec2f{
   let q=a.x/b;let remainder=mgDSAdd(a,-mgDSScale(vec2f(q,0.0),b));let correction=(remainder.x+remainder.y)/b;
   return mgTwoSum(q,correction);
 }
+fn mgD4Sum6DS(value:array<vec2f,6>)->vec2f{
+  return mgDSAdd(mgDSAdd(mgDSAdd(value[0],value[1]),mgDSAdd(value[4],value[5])),mgDSAdd(value[2],value[3]));
+}
 fn mgCoarsePressure(index:u32)->vec2f{return vec2f(mgCoarseP[index],mgCoarsePLow[index]);}
 
 fn mgCoarseIndex(p:vec3i)->u32{let d=vec3i(mg.levelDims.xyz);return u32(p.x+d.x*(p.y+d.y*p.z));}
@@ -372,8 +390,9 @@ fn mgSolveCoarsest(@builtin(local_invocation_index) lane:u32){
     if(!converged){iterations=iteration+1u;}
     for(var color=0u;color<2u;color+=1u){
       if(!converged&&live&&mgCoarsePhi[lane]<0.0&&u32((id.x+id.y+id.z)&1)==color){
-        var diagonal=0.0;var sum=vec2f(0.0);
-        for(var n=0;n<6;n+=1){let q=id+e[n];let a=mgCoarseCoefficient(id,q,u32(n/2));diagonal+=a;if(all(q>=vec3i(0))&&all(q<vec3i(d))){let qi=mgCoarseIndex(q);if(mgCoarsePhi[qi]<0.0){sum=mgDSAdd(sum,mgDSScale(mgCoarsePressure(qi),a));}}}
+        var diagonalTerms:array<f32,6>;var sumTerms:array<vec2f,6>;
+        for(var n=0;n<6;n+=1){let q=id+e[n];let a=mgCoarseCoefficient(id,q,u32(n/2));diagonalTerms[n]=a;sumTerms[n]=vec2f(0.0);if(all(q>=vec3i(0))&&all(q<vec3i(d))){let qi=mgCoarseIndex(q);if(mgCoarsePhi[qi]<0.0){sumTerms[n]=mgDSScale(mgCoarsePressure(qi),a);}}}
+        let diagonal=mgD4Sum6(diagonalTerms);let sum=mgD4Sum6DS(sumTerms);
         if(diagonal>0.0){let next=mgDSDivide(mgDSAdd(sum,vec2f(mgCoarseRhs[lane],0.0)),diagonal);
           if(next.x+next.y<mgCoarseMin[lane]){mgCoarseP[lane]=mgCoarseMin[lane];mgCoarsePLow[lane]=0.0;}
           else{mgCoarseP[lane]=next.x;mgCoarsePLow[lane]=next.y;}}
@@ -382,8 +401,9 @@ fn mgSolveCoarsest(@builtin(local_invocation_index) lane:u32){
     }
     if(!converged&&live&&mgCoarseP[lane]+mgCoarsePLow[lane]<mgCoarseMin[lane]){mgCoarseP[lane]=mgCoarseMin[lane];mgCoarsePLow[lane]=0.0;}workgroupBarrier();
     if(lane==0u&&!converged){atomicStore(&mgCoarseResidualBits,0u);atomicStore(&mgCoarseMaxBBits,0u);atomicStore(&mgCoarseMaxDiagPBits,0u);atomicStore(&mgCoarseMaxPBits,0u);atomicStore(&mgCoarseMaxGapBits,0u);atomicStore(&mgCoarseActiveRows,0u);atomicStore(&mgCoarseFreeRows,0u);atomicStore(&mgCoarseWorstLane,0xffffffffu);}if(live){mgCoarseRowResidual[lane]=0.0;mgCoarseRowState[lane]=0u;}workgroupBarrier();
-    if(!converged&&live&&mgCoarsePhi[lane]<0.0){var applied=vec2f(0.0);var diagonal=0.0;
-      for(var n=0;n<6;n+=1){let q=id+e[n];let a=mgCoarseCoefficient(id,q,u32(n/2));diagonal+=a;var neighbor=vec2f(0.0);if(all(q>=vec3i(0))&&all(q<vec3i(d))){let qi=mgCoarseIndex(q);if(mgCoarsePhi[qi]<0.0){neighbor=mgCoarsePressure(qi);}}applied=mgDSAdd(applied,mgDSScale(mgDSAdd(mgCoarsePressure(lane),-neighbor),a));}
+    if(!converged&&live&&mgCoarsePhi[lane]<0.0){var appliedTerms:array<vec2f,6>;var diagonalTerms:array<f32,6>;
+      for(var n=0;n<6;n+=1){let q=id+e[n];let a=mgCoarseCoefficient(id,q,u32(n/2));diagonalTerms[n]=a;var neighbor=vec2f(0.0);if(all(q>=vec3i(0))&&all(q<vec3i(d))){let qi=mgCoarseIndex(q);if(mgCoarsePhi[qi]<0.0){neighbor=mgCoarsePressure(qi);}}appliedTerms[n]=mgDSScale(mgDSAdd(mgCoarsePressure(lane),-neighbor),a);}
+      let applied=mgD4Sum6DS(appliedTerms);let diagonal=mgD4Sum6(diagonalTerms);
       let linearResidualPair=mgDSAdd(vec2f(mgCoarseRhs[lane],0.0),-applied);let linearResidual=linearResidualPair.x+linearResidualPair.y;
       // A raw linear residual is non-zero at a legitimately active lower
       // bound. Measure the projected LCP fixed-point residual instead; away
@@ -430,7 +450,7 @@ fn mgSolveCoarsest(@builtin(local_invocation_index) lane:u32){
 fn mgMeasureFineResidual(@builtin(global_invocation_id) gid:vec3u){
   let id=vec3i(gid);if(!mgValid(id,mg.levelDims.xyz)||!mgBakedLiquid(id)){return;}
   let e=array<vec3i,6>(vec3i(-1,0,0),vec3i(1,0,0),vec3i(0,-1,0),vec3i(0,1,0),vec3i(0,0,-1),vec3i(0,0,1));
-  var diagonal=0.0;for(var n=0;n<6;n+=1){diagonal+=mgCoefficient(id,id+e[n],u32(n/2));}
+  var diagonalTerms:array<f32,6>;for(var n=0;n<6;n+=1){diagonalTerms[n]=mgCoefficient(id,id+e[n],u32(n/2));}let diagonal=mgD4Sum6(diagonalTerms);
   if(diagonal<=0.0){return;}let residual=textureLoad(mgRhsIn,id,0).x-mgApply(id);let pressure=mgP(id);let minimum=textureLoad(mgMinimumIn,id,0).x;let gap=max(0.0,pressure-minimum);
   let projectsToMinimum=residual<0.0&&-residual>=gap*diagonal;let projected=select(abs(residual),gap*diagonal,projectsToMinimum);
   atomicMax(&mgConvergence[10],bitcast<u32>(projected*params.dimsDt.w/params.physical.x));atomicMax(&mgConvergence[11],bitcast<u32>(projected/diagonal));

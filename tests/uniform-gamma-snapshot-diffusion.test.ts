@@ -33,10 +33,12 @@ test("each parity pass writes every cell exactly once, including unpaired walls"
     "one invocation must never race another invocation's output texel");
 });
 
-test("closed-wall scalar characteristics use an even extension", () => {
-  assert.match(shader, /fn reflectScalarCoordinate\(value:f32,low:f32,high:f32\)->f32/);
-  assert.match(shader, /fn scalarTraceEndpoint\(position:vec3f,offset:vec3f\)->vec3f/);
-  assert.match(shader, /endpoint\.x=reflectScalarCoordinate\(endpoint\.x,0\.5,d\.x-0\.5\)/);
-  assert.match(shader, /if\(params\.boundary\.w>0\.5&&position\.y\+offset\.y>d\.y-0\.5\)/);
-  assert.match(shader, /return scalarTraceEndpoint\(position,offset\)-position/g);
+test("closed-wall scalar characteristics substep and stop at the wall", () => {
+  assert.match(shader, /fn clampTraceToDomain\(p:vec3f\)->vec3f/);
+  assert.match(shader, /let substeps=clamp\(i32\(ceil\(length\(sampleVelocity\(position\)\)\*dt\/hMin\)\),1,16\)/);
+  assert.match(shader, /let next=clampTraceToDomain\(candidate\)/);
+  assert.match(shader, /if\(cellInsideSolid\(vec3i\(floor\(next\)\)\)\)\{break;\}/);
+  assert.match(shader, /return integrateTraceOffset\(id,dt,h,-1\.0\)/);
+  assert.doesNotMatch(shader, /reflectScalarCoordinate/,
+    "folding an overshot trace back into the tank duplicates wall-film samples");
 });

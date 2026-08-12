@@ -14,9 +14,11 @@
  *   FLUID_UNIFORM_COLLAPSE_DT          exact time step (default 0.004)
  *   FLUID_UNIFORM_COLLAPSE_WORLD_SCALE world scale (default 1)
  *   FLUID_UNIFORM_COLLAPSE_SHARPENING  on/off (default on)
+ *   FLUID_UNIFORM_COLLAPSE_GAMMA        on/off (default on)
  *   FLUID_UNIFORM_COLLAPSE_POSTPROCESS  on/off (default off)
  *   FLUID_UNIFORM_COLLAPSE_STEPS       steps to advance (default 250)
  *   FLUID_UNIFORM_COLLAPSE_CHECKPOINT  checkpoint cadence (default 10)
+ *   FLUID_UNIFORM_COLLAPSE_COMPACT     print spatial attribution only (default off)
  */
 import assert from "node:assert/strict";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -29,6 +31,7 @@ import { requiredFluidDeviceLimits } from "../lib/webgpu-device-limits";
 
 const steps = Number(process.env.FLUID_UNIFORM_COLLAPSE_STEPS ?? 250);
 const checkpoint = Number(process.env.FLUID_UNIFORM_COLLAPSE_CHECKPOINT ?? 10);
+const compact = process.env.FLUID_UNIFORM_COLLAPSE_COMPACT === "1";
 assert.ok(Number.isSafeInteger(steps) && steps >= 1);
 assert.ok(Number.isSafeInteger(checkpoint) && checkpoint >= 1);
 
@@ -68,12 +71,14 @@ for (let scale = 1; scale < worldScale; scale *= 2) {
 }
 const dt = Number(process.env.FLUID_UNIFORM_COLLAPSE_DT ?? 0.004);
 const sharpening = process.env.FLUID_UNIFORM_COLLAPSE_SHARPENING !== "off";
+const gammaDiffusion = process.env.FLUID_UNIFORM_COLLAPSE_GAMMA !== "off";
 const postprocess = process.env.FLUID_UNIFORM_COLLAPSE_POSTPROCESS === "on";
 scene.numerics.fixedDt_s = dt;
 scene.numerics.maxDt_s = dt;
 const solver = await uniformMethod.createSolverAsync!(device, scene, "balanced",
   { densityPostProcessing: postprocess ? "on" : "off",
-    densitySharpening: sharpening ? "on" : "off", timeStep: "scene" },
+    densitySharpening: sharpening ? "on" : "off",
+    gammaDiffusion: gammaDiffusion ? "on" : "off", timeStep: "scene" },
   undefined, () => {}) as GPUSolverInstance;
 const nx = solver.info.nx, ny = solver.info.ny, nz = solver.info.nz;
 console.log(`scene ${sceneId} worldScale=${worldScale} grid ${nx}x${ny}x${nz} dt=${dt}`
@@ -87,6 +92,8 @@ const internal = solver as unknown as {
     densityDiffusion: GPUTexture;
     densitySharpening: GPUTexture;
   };
+  symmetryStageAuditNegativeBoundaryVelocity?: GPUBuffer;
+  negativeBoundaryVelocityBytes?: number;
 };
 
 async function readTexture(texture: GPUTexture, components: number): Promise<Float32Array> {
@@ -112,6 +119,20 @@ async function readTexture(texture: GPUTexture, components: number): Promise<Flo
   return values;
 }
 
+async function readBuffer(buffer: GPUBuffer, byteLength: number): Promise<Float32Array> {
+  const staging = device.createBuffer({
+    label: "probe buffer readback", size: byteLength,
+    usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+  });
+  const encoder = device.createCommandEncoder();
+  encoder.copyBufferToBuffer(buffer, 0, staging, 0, byteLength);
+  device.queue.submit([encoder.finish()]);
+  await staging.mapAsync(GPUMapMode.READ);
+  const values = Float32Array.from(new Float32Array(staging.getMappedRange()));
+  staging.unmap(); staging.destroy();
+  return values;
+}
+
 const at = (field: Float32Array, x: number, y: number, z: number, components = 1, component = 0) =>
   field[components * (x + nx * (y + ny * z)) + component]!;
 
@@ -130,6 +151,8 @@ const capture = async (step: number) => {
   let lidLayerMass = 0, lidFaceMomentum = 0, lidLowerFaceMomentum = 0;
   let renderWet = 0, renderCeilingWet = 0;
   let minGamma = Infinity, maxGamma = -Infinity;
+  const highestWet: Array<{ x: number; y: number; z: number; rho: number }> = [];
+  const densest: Array<{ x: number; y: number; z: number; rho: number }> = [];
   const layerMass: number[] = Array.from({ length: ny }, () => 0);
   const layerWet: number[] = Array.from({ length: ny }, () => 0);
   const layerGamma: number[] = Array.from({ length: ny }, () => 0);
@@ -143,6 +166,8 @@ const capture = async (step: number) => {
     maxRho = Math.max(maxRho, value);
     if (value > 1 + 1e-4) over1 += 1;
     if (value >= 0.5) { wet += 1; layerWet[y]! += 1; maxWetY = Math.max(maxWetY, y); }
+    if (value >= 0.5) highestWet.push({ x, y, z, rho: value });
+    densest.push({ x, y, z, rho: value });
     if (renderValue >= 0.5) {
       renderWet += 1;
       if (y >= ny - 4) renderCeilingWet += 1;
@@ -167,9 +192,70 @@ const capture = async (step: number) => {
   const centerRho = Array.from({ length: ny }, (_, y) => at(rho, cx, y, cz));
   const centerVy = Array.from({ length: ny }, (_, y) => at(velocity, cx, y, cz, 4, 1));
   const centerGamma = Array.from({ length: ny }, (_, y) => at(gamma, cx, y, cz));
+  highestWet.sort((left, right) => right.y - left.y || right.rho - left.rho);
+  densest.sort((left, right) => right.rho - left.rho);
+  const columnHeights = new Int16Array(nx * nz).fill(-1);
+  for (const cell of highestWet) {
+    const column = cell.x + nx * cell.z;
+    columnHeights[column] = Math.max(columnHeights[column]!, cell.y);
+  }
+  const sidePeaks = (z: number) => Array.from({ length: nx }, (_, x) =>
+    columnHeights[x + nx * z] ?? -1);
+  const landmarkHeights = (field: Float32Array) => {
+    const height = (x: number, z: number) => {
+      for (let y = ny - 1; y >= 0; y -= 1) if (at(field, x, y, z) >= 0.5) return y;
+      return -1;
+    };
+    const front = Math.min(40, nx - 1, nz - 1);
+    const half = Math.floor(front / 2);
+    return {
+      wallX: height(front, 0), midX: height(front, half), diagonal: height(front, front),
+      wallZ: height(0, front), midZ: height(half, front),
+    };
+  };
   console.log(`step ${String(step).padStart(3)} t=${(step * dt).toFixed(3)}s`
     + ` mass=${mass.toFixed(1)} wet=${wet} maxRho=${maxRho.toFixed(3)} over1=${over1}`
     + ` gamma=[${minGamma.toFixed(3)},${maxGamma.toFixed(3)}] maxWetY=${maxWetY}`);
+  console.log(`  surface   highest=${JSON.stringify(highestWet.slice(0, 8).map((cell) => ({
+    ...cell, rho: Number(cell.rho.toFixed(3)),
+  })))} densest=${JSON.stringify(densest.slice(0, 4).map((cell) => ({
+    ...cell, rho: Number(cell.rho.toFixed(3)),
+  })))}`);
+  console.log(`  side-z0   ${sidePeaks(0).map((value) => String(value).padStart(3)).join("")}`);
+  console.log(`  side-zN   ${sidePeaks(nz - 1).map((value) => String(value).padStart(3)).join("")}`);
+  console.log(`  mid-z     ${sidePeaks(cz).map((value) => String(value).padStart(3)).join("")}`);
+  console.log(`  landmark  raw=${JSON.stringify(landmarkHeights(rho))}`
+    + ` render=${JSON.stringify(landmarkHeights(renderDensity))}`);
+  if (internal.symmetryStageAuditNegativeBoundaryVelocity
+    && internal.negativeBoundaryVelocityBytes) {
+    const boundary = await readBuffer(internal.symmetryStageAuditNegativeBoundaryVelocity,
+      internal.negativeBoundaryVelocityBytes);
+    const zOffset = ny * nz + nx * nz;
+    const xAt = (y: number, z: number) => boundary[y + ny * z] ?? 0;
+    const zAt = (x: number, y: number) => boundary[zOffset + x + nx * y] ?? 0;
+    const xFront = Array.from({ length: ny }, (_, y) => xAt(y, Math.min(40, nz - 1)));
+    const zFront = Array.from({ length: ny }, (_, y) => zAt(Math.min(40, nx - 1), y));
+    const extrema = (values: readonly number[]) => ({
+      min: Number(Math.min(...values).toFixed(3)),
+      max: Number(Math.max(...values).toFixed(3)),
+    });
+    console.log(`  low-wall  x=${JSON.stringify(extrema(xFront))}`
+      + ` z=${JSON.stringify(extrema(zFront))}`);
+  }
+  if (compact) {
+    const audit = internal.symmetryStageAuditTextures;
+    if (audit) {
+      const [advected, diffused, sharpened] = await Promise.all([
+        readTexture(audit.densityAdvection, 1),
+        readTexture(audit.densityDiffusion, 1),
+        readTexture(audit.densitySharpening, 1),
+      ]);
+      console.log(`  stages    advected=${JSON.stringify(landmarkHeights(advected))}`
+        + ` diffused=${JSON.stringify(landmarkHeights(diffused))}`
+        + ` sharpened=${JSON.stringify(landmarkHeights(sharpened))}`);
+    }
+    return;
+  }
   console.log(`  ceiling4 mass=${topMass.toFixed(1)} wet=${topWet}`
     + ` meanVy=${(topVerticalMomentum / Math.max(topMass, 1e-9)).toFixed(3)}`
     + ` meanVxz=${(topTangentialMomentum / Math.max(topMass, 1e-9)).toFixed(3)}`

@@ -75,6 +75,16 @@ fn dims() -> vec3i { return vec3i(textureDimensions(volumeIn)); }
 fn inflowGridDims()->vec3i{return dims();}
 fn valid(p: vec3i) -> bool { let d=dims(); return all(p >= vec3i(0)) && all(p < d); }
 fn clampCell(p: vec3i) -> vec3i { return clamp(p, vec3i(0), dims()-vec3i(1)); }
+// Canonical reductions for the horizontal D4 group. Reflections exchange
+// operands inside opposite-direction pairs; x/z exchange operands of the
+// horizontal pair sum. The papers prescribe the stencil, not its add order.
+fn d4Sum6(value:array<f32,6>)->f32{return ((value[0]+value[1])+(value[4]+value[5]))+(value[2]+value[3]);}
+fn d4Sum8(value:array<f32,8>)->f32{
+  let y0=(value[0]+value[5])+(value[1]+value[4]);
+  let y1=(value[2]+value[7])+(value[3]+value[6]);
+  return y0+y1;
+}
+fn d4Sum6Vec3(value:array<vec3f,6>)->vec3f{return ((value[0]+value[1])+(value[4]+value[5]))+(value[2]+value[3]);}
 fn worldCell(id:vec3i)->vec3f{let h=params.cellGravity.xyz;return vec3f(-0.5*params.container.x+(f32(id.x)+0.5)*h.x,(f32(id.y)+0.5)*h.y,-0.5*params.container.z+(f32(id.z)+0.5)*h.z);}
 fn hasTerrain()->bool{return params.container.w>0.5;}
 fn terrainHeightCells(x:i32,z:i32)->f32{let d=dims();return textureLoad(terrainIn,vec2i(clamp(x,0,d.x-1),clamp(z,0,d.z-1)),0).x;}
@@ -173,23 +183,23 @@ fn sampledFaceVelocity(p:vec3i,component:u32)->f32{
 }
 fn transportCoordinate(q:vec3f)->vec3f{return (q+vec3f(1.5))/vec3f(dims()+vec3i(2));}
 fn sampleVolume(p:vec3f)->f32{
-  let q=p-vec3f(0.5);let base=vec3i(floor(q));let f=fract(q);var result=0.0;
+  let q=p-vec3f(0.5);let base=vec3i(floor(q));let f=fract(q);var terms:array<f32,8>;
   for(var corner=0u;corner<8u;corner+=1u){
     let offset=vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));let donor=base+offset;
     let weight=select(1.0-f.x,f.x,offset.x==1)*select(1.0-f.y,f.y,offset.y==1)*select(1.0-f.z,f.z,offset.z==1);
-    if(valid(donor)&&!cellInsideSolid(donor)){result+=weight*volume(donor);}
+    terms[corner]=select(0.0,weight*volume(donor),valid(donor)&&!cellInsideSolid(donor));
   }
-  return result;
+  return d4Sum8(terms);
 }
 fn sampleVelocityComponent(p:vec3f,component:u32)->f32{
   var offset=vec3f(0.5);offset[component]=1.0;var lower=vec3f(0.0);lower[component]=-1.0;let q=clamp(p-offset,lower,vec3f(dims()-vec3i(1)));
-  let base=vec3i(floor(q));let fraction=fract(q);var result=0.0;
+  let base=vec3i(floor(q));let fraction=fract(q);var terms:array<f32,8>;
   for(var corner=0u;corner<8u;corner+=1u){
     let o=vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));
     let weights=select(vec3f(1.0)-fraction,fraction,vec3f(o)>vec3f(0.5));
-    result+=weights.x*weights.y*weights.z*textureLoad(transportIn,base+o+vec3i(1),0)[component];
+    terms[corner]=weights.x*weights.y*weights.z*textureLoad(transportIn,base+o+vec3i(1),0)[component];
   }
-  return result;
+  return d4Sum8(terms);
 }
 fn sampleVelocity(p:vec3f)->vec3f{return vec3f(sampleVelocityComponent(p,0u),sampleVelocityComponent(p,1u),sampleVelocityComponent(p,2u));}
 // Reconstruct every RK2 stage at the actual MAC component offsets.  Sampling
@@ -353,8 +363,9 @@ fn buildExtrapolationAuthority(@builtin(global_invocation_id) gid:vec3u){
 fn ambientFluidVelocity(body:RigidBody,p:vec3i,fallback:vec3f)->vec3f{
   let h=params.cellGravity.xyz;let radius=max(body.dimensions.w,0.0);let reach=vec3i(ceil(vec3f(2.0*radius)/h))+vec3i(2);
   let offsets=array<vec3i,6>(vec3i(-reach.x,0,0),vec3i(reach.x,0,0),vec3i(0,-reach.y,0),vec3i(0,reach.y,0),vec3i(0,0,-reach.z),vec3i(0,0,reach.z));
-  var total=vec3f(0.0);var weight=0.0;
-  for(var n=0;n<6;n+=1){let q=p+offsets[n];if(!valid(q)||cellRigidBody(q)>=0||cellInsideTerrain(q)){continue;}let wet=surfaceOccupancy(q);total+=wet*velocity(q);weight+=wet;}
+  var terms:array<vec3f,6>;var weights:array<f32,6>;
+  for(var n=0;n<6;n+=1){let q=p+offsets[n];terms[n]=vec3f(0.0);weights[n]=0.0;if(!valid(q)||cellRigidBody(q)>=0||cellInsideTerrain(q)){continue;}let wet=surfaceOccupancy(q);terms[n]=wet*velocity(q);weights[n]=wet;}
+  let total=d4Sum6Vec3(terms);let weight=d4Sum6(weights);
   return select(fallback,total/max(weight,1e-6),weight>0.0);
 }
 fn columnHeight(x:i32,z:i32)->f32{
@@ -468,11 +479,11 @@ fn transportStencilWeight(base:vec3i,f:vec3f,corner:u32)->f32{
   return select(1.0-f.x,f.x,offset.x==1)*select(1.0-f.y,f.y,offset.y==1)*select(1.0-f.z,f.z,offset.z==1);
 }
 fn sampleGammaStencil(base:vec3i,f:vec3f)->f32{
-  var result=0.0;
+  var terms:array<f32,8>;
   // Invalid or solid corners are the zero Dirichlet extension of gamma. Do
   // not renormalize this backward gather: the paper permits deficient gamma.
-  for(var corner=0u;corner<8u;corner+=1u){let offset=vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));let donor=base+offset;let weight=transportStencilWeight(base,f,corner);if(weight>0.0){result+=weight*textureLoad(gammaIn,donor,0).x;}}
-  return result;
+  for(var corner=0u;corner<8u;corner+=1u){let offset=vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));let donor=base+offset;let weight=transportStencilWeight(base,f,corner);terms[corner]=0.0;if(weight>0.0){terms[corner]=weight*textureLoad(gammaIn,donor,0).x;}}
+  return d4Sum8(terms);
 }
 // Steps 1-3: backward-advect persistent gamma, initialize beta on the host,
 // and scatter gamma_i w^-_li to each donor l.
@@ -745,15 +756,16 @@ fn divergenceAt(id: vec3i, checkSolid: bool) -> f32 {
   // CM11a Eqs. 8-10. Vi is the non-solid cell fraction; V+/- are the
   // corresponding face fractions. This is not the common blended-flux
   // shortcut V u + (1-V) us, whose solid terms are algebraically different.
-  let h=params.cellGravity.xyz;let vi=cellOpenFraction(id);var result=0.0;
+  let h=params.cellGravity.xyz;let vi=cellOpenFraction(id);var terms:array<f32,6>;
   for(var axis=0u;axis<3u;axis+=1u){
     var minus=id;minus[axis]-=1;
     let vp=pressureFaceVolumeFraction(id,axis);let vm=pressureFaceVolumeFraction(minus,axis);
     let up=domainFaceFluidVelocity(id,axis);let um=domainFaceFluidVelocity(minus,axis);
     let usp=domainFaceSolidVelocity(id,axis,checkSolid);let usm=domainFaceSolidVelocity(minus,axis,checkSolid);
-    result+=(vp*up-vm*um)/h[axis]+(vp-vi)*usp-(vm-vi)*usm;
+    terms[2u*axis]=(vp*up)/h[axis]+(vp-vi)*usp;
+    terms[2u*axis+1u]=-(vm*um)/h[axis]-(vm-vi)*usm;
   }
-  return result;
+  return d4Sum6(terms);
 }
 // Mass-Conserving Eulerian Liquid Simulation Sec 3.7: cells holding more
 // density than they represent add min(lambda (rho'-1), eta) artificial
@@ -778,7 +790,10 @@ fn volumeCorrectionDivergence(id: vec3i) -> f32 {
 
 fn curvatureAt(id:vec3i)->f32{
   let h=params.cellGravity.xyz;
-  return -((interfaceNormal(id+vec3i(1,0,0)).x-interfaceNormal(id-vec3i(1,0,0)).x)/(2.0*h.x)+(interfaceNormal(id+vec3i(0,1,0)).y-interfaceNormal(id-vec3i(0,1,0)).y)/(2.0*h.y)+(interfaceNormal(id+vec3i(0,0,1)).z-interfaceNormal(id-vec3i(0,0,1)).z)/(2.0*h.z));
+  let x=(interfaceNormal(id+vec3i(1,0,0)).x-interfaceNormal(id-vec3i(1,0,0)).x)/(2.0*h.x);
+  let y=(interfaceNormal(id+vec3i(0,1,0)).y-interfaceNormal(id-vec3i(0,1,0)).y)/(2.0*h.y);
+  let z=(interfaceNormal(id+vec3i(0,0,1)).z-interfaceNormal(id-vec3i(0,0,1)).z)/(2.0*h.z);
+  return -((x+z)+y);
 }
 
 @compute @workgroup_size(4,4,4)
@@ -924,8 +939,9 @@ fn sharpenDeltaRho(q:vec3i)->f32{
   let sxp=-(rho*max(openXp,0.0)-volume(q-ex)*max(openXm,0.0))*deltaT/h.x;let sxm=-(volume(q+ex)*max(openXp,0.0)-rho*max(openXm,0.0))*deltaT/h.x;
   let syp=-(rho*max(openYp,0.0)-volume(q-ey)*max(openYm,0.0))*deltaT/h.y;let sym=-(volume(q+ey)*max(openYp,0.0)-rho*max(openYm,0.0))*deltaT/h.y;
   let szp=-(rho*max(openZp,0.0)-volume(q-ez)*max(openZm,0.0))*deltaT/h.z;let szm=-(volume(q+ez)*max(openZp,0.0)-rho*max(openZm,0.0))*deltaT/h.z;
-  let gradPlus=sqrt(max(max(sxp,0.0)*max(sxp,0.0),min(sxm,0.0)*min(sxm,0.0))+max(max(syp,0.0)*max(syp,0.0),min(sym,0.0)*min(sym,0.0))+max(max(szp,0.0)*max(szp,0.0),min(szm,0.0)*min(szm,0.0)));
-  let gradMinus=sqrt(max(min(sxp,0.0)*min(sxp,0.0),max(sxm,0.0)*max(sxm,0.0))+max(min(syp,0.0)*min(syp,0.0),max(sym,0.0)*max(sym,0.0))+max(min(szp,0.0)*min(szp,0.0),max(szm,0.0)*max(szm,0.0)));
+  let plusX=max(max(sxp,0.0)*max(sxp,0.0),min(sxm,0.0)*min(sxm,0.0));let plusY=max(max(syp,0.0)*max(syp,0.0),min(sym,0.0)*min(sym,0.0));let plusZ=max(max(szp,0.0)*max(szp,0.0),min(szm,0.0)*min(szm,0.0));
+  let minusX=max(min(sxp,0.0)*min(sxp,0.0),max(sxm,0.0)*max(sxm,0.0));let minusY=max(min(syp,0.0)*min(syp,0.0),max(sym,0.0)*max(sym,0.0));let minusZ=max(min(szp,0.0)*min(szp,0.0),max(szm,0.0)*max(szm,0.0));
+  let gradPlus=sqrt((plusX+plusZ)+plusY);let gradMinus=sqrt((minusX+minusZ)+minusY);
   var maximumDifference=0.0;
   let offsets=array<vec3i,6>(vec3i(-1,0,0),vec3i(1,0,0),vec3i(0,-1,0),vec3i(0,1,0),vec3i(0,0,-1),vec3i(0,0,1));
   for(var index=0;index<6;index+=1){maximumDifference=max(maximumDifference,abs(rho-volume(q+offsets[index])));}

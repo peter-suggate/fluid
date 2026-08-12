@@ -113,7 +113,7 @@ test("gated stages read their context", () => {
   assert.equal(
     stageById.get("density-post-process")?.state(context({ sceneId: "symmetric-expansion" })), "on");
   assert.equal(
-    stageById.get("density-post-process")?.state(context({ sceneId: "minimal-power-dam-break-64" })), "on");
+    stageById.get("density-post-process")?.state(context({ sceneId: "minimal-power-dam-break-64" })), "off");
   assert.equal(
     stageById.get("density-post-process")?.state(context({ values: { densityPostProcessing: "on" } })), "on");
 });

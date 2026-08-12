@@ -34,7 +34,7 @@ test("uniform reference exposes stage gates, pass schedules, and transport choic
   ]);
   assert.equal(resolveMethodValues(uniformMethod, "balanced", {}).velocityTransport, "semi-lagrangian");
   assert.equal(resolveMethodValues(uniformMethod, "balanced", {}).timeStep, "paper");
-  assert.equal(resolveMethodValues(uniformMethod, "high", {}).densityPostProcessing, "scene");
+  assert.equal(resolveMethodValues(uniformMethod, "high", {}).densityPostProcessing, "off");
   assert.deepEqual(uniformMethod.runtimeParamKeys, UNIFORM_RUNTIME_PARAM_KEYS);
   assert.deepEqual(
     uniformMethod.params.filter(({ update }) => update === "runtime").map(({ key }) => key),
@@ -99,13 +99,13 @@ test("uniform reference exposes stage gates, pass schedules, and transport choic
     { fullCycles: 1, vCycles: 2, preSweeps: 3, postSweeps: 3 });
 });
 
-test("scene-aware Sec. 3.8 rendering exposes mini-dam thin sheets without changing physics", () => {
+test("scene-aware Sec. 3.8 rendering leaves paper dam breaks on raw density", () => {
+  assert.equal(uniformDensityPostProcessingEnabled("scene", "symmetric-expansion"), true);
   for (const sceneId of [
-    "symmetric-expansion",
     "minimal-power-dam-break",
     "minimal-power-dam-break-32",
     "minimal-power-dam-break-64",
-  ]) assert.equal(uniformDensityPostProcessingEnabled("scene", sceneId), true);
+  ]) assert.equal(uniformDensityPostProcessingEnabled("scene", sceneId), false);
   assert.equal(uniformDensityPostProcessingEnabled("scene", "mass-conserving-figure-9-dam-break"), false);
   assert.equal(uniformDensityPostProcessingEnabled("off", "minimal-power-dam-break-64"), false);
   assert.equal(uniformDensityPostProcessingEnabled("on", "mass-conserving-figure-9-dam-break"), true);
@@ -163,7 +163,9 @@ test("uniform reference compiles and advances one step on WebGPU", {
     validationErrors.push(event.error.message);
   });
   const scene = createSmokeScenario("symmetric-expansion").scene;
-  const values = resolveMethodValues(uniformMethod, "balanced", {});
+  const values = resolveMethodValues(uniformMethod, "balanced", {
+    densityPostProcessing: "scene",
+  });
   let solver;
   try {
     solver = await uniformMethod.createSolverAsync!(

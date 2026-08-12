@@ -237,6 +237,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   readonly symmetryStageAuditNegativeBoundaryVelocity?: GPUBuffer;
   /** Scalar-packed x/y/z negative-face plane byte length. */
   readonly negativeBoundaryVelocityBytes: number;
+  /** Negative x/y/z domain MAC faces paired with velocityTexture. */
+  get negativeBoundaryVelocityBuffer(): GPUBuffer { return this.boundaryVelocityA; }
   /** Eight vec4 decision records for every stored MAC face/component. */
   readonly symmetryStageAuditMacCormackBuffer?: GPUBuffer;
   /** Fixed-point beta produced by Sec. 3.4 before deficit scattering. */
@@ -1263,10 +1265,7 @@ export function uniformDensityPostProcessingEnabled(
 ): boolean {
   if (densityPostProcessing === "on") return true;
   if (densityPostProcessing !== "scene") return false;
-  return sceneId === "symmetric-expansion"
-    || sceneId === "minimal-power-dam-break"
-    || sceneId === "minimal-power-dam-break-32"
-    || sceneId === "minimal-power-dam-break-64";
+  return false;
 }
 
 const uniformExtensionChip = (context: FluidPipelineContext): string => {
