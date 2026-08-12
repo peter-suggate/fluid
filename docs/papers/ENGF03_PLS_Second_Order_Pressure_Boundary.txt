@@ -1,0 +1,375 @@
+                                                                                              Proceedings of FEDSM’03
+                                                               2003 4th ASME JSME Joint Fluids Engineering Conference
+                                                                                 July 6-11, 2003, Honolulu, Hawaii USA
+
+
+
+
+                                                                                                 FEDSM2003-45144
+
+
+          USING THE PARTICLE LEVEL SET METHOD AND A SECOND ORDER ACCURATE
+                PRESSURE BOUNDARY CONDITION FOR FREE SURFACE FLOWS
+
+
+                           Doug Enright                                      Duc Nguyen, Frederic Gibou, Ron Fedkiw
+                    Department of Mathematics                                    Department of Computer Science
+                University of California, Los Angeles                                   Stanford University
+                     enright@math.ucla.edu                                           dqnguyen@stanford.edu
+                                                                                    fgibou@math.stanford.edu
+                                                                                     fedkiw@cs.stanford.edu
+
+
+
+
+ABSTRACT                                                                 where t is the time, ~u = (u, v, w) is the velocity field, p is the
+     In this paper, we present an enhanced resolution capturing          pressure, ~g = (0, g, 0) is gravity, ρ is the constant density of the
+                                                                                             ∂ ∂ ∂
+method for topologically complex two and three dimensional in-           liquid, and ∇ = ( ∂x  , ∂y , ∂z ). We use the free surface assumption
+compressible free surface flows. The method is based upon the            so that the air has a constant pressure, pair , in space and time.
+level set method of Osher and Sethian to represent the interface              The location of the liquid free surface is defined as the set of
+combined with two recent advances in the treatment of the in-            points where the level set function φ = 0, and the region occupied
+terface, a second order accurate discretization of the Dirichlet         by the liquid is given by φ < 0. The level set equation [1],
+pressure boundary condition at the free surface (2002, J. Com-
+put. Phys. 176, 205) and the use of massless marker particles                                        φt +~u · ∇φ = 0,                            (3)
+to enhance the resolution of the interface through the use of the
+particle level set method (2002, J. Comput. Phys., 183, 83). Use
+                                                                         determines the evolution of the free surface in space and time.
+of these methods allow for the accurate movement of the inter-
+                                                                         Geometrical information about the interface, e.g. normals and
+face while at the same time preserving the mass of the the liquid,
+                                                                         curvature, can be easily obtained from φ which we take as the
+even on coarse computational grids. Also, these methods com-
+                                                                         signed distance to the interface. The unit outward normal is ~N =
+plement the level set method in its ability to handle changes in
+                                                                         ∇φ/|∇φ| and the curvature is κ = ∇ · ~N. See [2] for more details.
+interface topology in a robust manner. Surface tension effects
+                                                                         In addition to the level set function, massless marker particles are
+can be easily included in our method. The method is presented
+                                                                         passively advected along with the flow using the particle level
+in three spatial dimensions, with numerical examples in both two
+                                                                         set method proposed in [3]. The particles move according to
+and three spatial dimensions.
+                                                                         d~x p /dt = ~u(~x p ), where ~u(~x p ) is the fluid velocity interpolated at
+                                                                         the particle location ~x p .
+1  Governing Equations
+    We solve for inviscid, incompressible flow. The governing
+                                                                         2 Numerical Method
+equations for momentum and mass conservation are
+                                                                                A standard MAC grid is used in the discretization with pi, j,k
+                                                                         and φi, j,k defined at the cell centers and ui±1/2, j,k , vi, j±1/2,k , and
+                                    ∇p                                   wi, j,k±1/2 defined at the appropriate cell faces, see [4,5] for more
+                     ~ut +~u · ∇~u +     = ~g,                 (1)
+                                    ρ                                    details. A pressure free projection method [6, 7] is used to cal-
+                                   ∇ ·~u = 0,                  (2)       culate a divergence free velocity field during an Euler time step
+
+                                                                     1                                           Copyright °
+                                                                                                                           c 2003 by ASME
+update using a two step process. First an intermediate velocity              particle possesses a radius, r p , which is constrained to take on a
+field, ~u∗ is calculated,                                                    value between a minimum and maximum value based upon the
+                                                                             size of the underlying computational grid. A minimum radius
+                      ~u∗ −~un                                               of .1 min(∆x, ∆y, ∆z) and maximum radius of .5 min(∆x, ∆y, ∆z)
+                               +~un · ∇~un = ~g,                  (4)
+                          ∆t                                                 is used. The radius of a particle changes dynamically throughout
+                                                                             the simulation since the particle’s relative location to the surface
+and then the incompressibility constraint is enforced by calculat-           changes in time. This allows for a multiscale sampling of the
+ing a pressure field which makes the intermediate velocity field             interface by the particles. The radius of each particle is set ac-
+divergence free. The pressure field is scaled by the size of the             cording to:
+time step and the liquid density, i.e. p̂ = p∆t/ρ for robustness. A
+                                                                                              
+Poisson equation of the form                                                                   rmax        if s p φ(~x p ) > rmax
+                                                                                         r p = s p φ(~x p ) if rmin ≤ s p φ(~x p ) ≤ rmax     (7)
+                                                                                              
+                                        ∗
+                            4 p̂ = ∇ ·~u ,                        (5)                           rmin        if s p φ(~x p ) < rmin ,
+
+is solved for p̂ through the use of a fast Poisson solver, e.g. a pre-       where s p is the sign of the particle (+1 for positive particles
+conditioned conjugate gradient (PCG) method using a modified                 and -1 for negative particles). This radius adjustment keeps the
+incomplete Cholesky preconditioner [8]. p̂ is then used to make              boundary of the particles tangent to the surface whenever possi-
+the intermediate velocity field divergence free,                             ble. Also, particles are allowed to overlap in order allow for an
+                                                                             enhanced reconstruction of the surface.
+                       ~un+1 −~u∗ + ∇ p̂ = 0.                     (6)             The particles are integrated forward in time using the 3rd
+                                                                             order TVD Runge-Kutta scheme discussed previously. Simple
+                                                                             bilinear or trilinear interpolation is used to calculate the velocity
+A third order TVD Runge-Kutta scheme [9] is used to update the               of a particle on the computational grid. The level set equation, 3,
+velocity field in time. This method can be written as a convex               is discretized using a 5th order accurate Hamilton-Jacobi WENO
+combination of three simple Euler updates, therefore the above               method [12] on the advection terms and 3rd order accurate TVD
+process is repeated three times to advance the velocity field from           Runge-Kutta for the time integration. After the level set func-
+time level n to n + 1. A third order accurate ENO discretiza-                tion, φ, and both the positive and negative particles are integrated
+tion [10] of the convective derivatives in equation 4 is used, oth-          separately forward in time, the particles are used to correct any
+erwise second order central differences is used in equations 5               errors in the representation of the free surface according to the
+and 6. An adaptive time stepping procedure is used to enforce                level set function. This particle correction mechanism is com-
+an appropriate CFL condition incorporating convection, gravity,              prised of several steps discussed below. Note that we apply the
+and surface tension forces as necessary. Our treatment follows               error correction step after each modification of the level set.
+that presented in [11].                                                           Identification of Error Particles are able to detect errors
+                                                                             in the level set representation of the free surface when they ap-
+2.1   Particle Level Set Method                                              pear on the wrong side of the interface by more than their radius.
+     The particle level set method is used to update the position            These particles are said to have escaped. In smooth, well re-
+of the interface in a mass preserving manner. The particle level             solved regions of the flow where the level set method is highly
+set method is a thickened front tracking approach which utilizes             accurate, the particles do not drift an appreciable amount across
+particles to assist the level set method in accurately tracking flow         the interface, so we do not use the lower order accurate particle
+characteristics in under-resolved regions and consequently pre-              representation of the interface in this region. Only when the level
+serve mass. This is achieved through the placement of massless               set has clearly made an error do we resort to using the particle in-
+marker particles near the interface as an error correction mecha-            formation to reconstruct the level set function.
+nism for the level set function.                                                  Quantification of Error We associate a spherical level set
+     Two sets of marker particles are randomly placed in a “thick-           function, φ p , with each particle p whose size is determined by
+ened” surface region about the φ = 0 level set. The thickness                the particle radius, i.e.
+of the band used in the examples section is three grid cells on
+each side of the interface. Positive particles are located in the
+                                                                                                  φ p (~x) = s p (r p − |~x −~x p |).         (8)
+φ > 0 region and negative particles in the φ < 0 region. The num-
+ber of particles placed in each cell can be adjusted according to
+the amount of surface resolution desired. For the examples pre-              The particle defined level set function is computed locally on the
+sented, 16 particles per cell were used in 2D and 32 in 3D. Each             eight corners of the cell containing the particle. The local values
+
+                                                                         2                                            Copyright °
+                                                                                                                                c 2003 by ASME
+of φ p are the particle predictions of the values of the overall level       proposed in [16]. We use a dimension by dimension approach to
+set function, φ, on the corners of the cell. Any variation of φ from         discretize equation 5 near the free surface. Consider the solu-
+φ p indicates possible errors in the level set solution.                     tion of a one dimensional constant coefficient Poisson equation,
+      Error Correction We use escaped positive particles to re-              pxx = u∗x , where the free surface interface is located at x f s with
+build the φ > 0 region and escaped negative particles to rebuild             xi < x f s < xi+1 , and a Dirichlet boundary condition of p = p f s
+the φ ≤ 0 region. The reconstruction of the implicit surface oc-             is applied at that interface. The standard second order accurate
+curs locally within the cell that each escaped particle currently            discretization of the Poisson equation can no longer be applied at
+occupies. Using equation 8, the φ p values of escaped particles              xi , since the stencil cuts across the interface. This can be reme-
+are calculated for the eight grid points on the boundary of the              died by defining a ghost value of pG   i+1 at xi+1 and rewriting the
+cell containing the particle. This value is compared to the cur-             standard discretization of equation 5 as
+rent value of φ for each grid point and we take the smaller value
+(in magnitude) which is the value closest to the “final version”                                  pG
+                                                                                                   i+1 − 2pi + pi−1
+of the φ = 0 contour defining the surface. This is done for each                                                    = (u∗x )i                         (9)
+                                                                                                       (4x)2
+escaped positive and escaped negative particle resulting in an im-
+proved representation of the surface of the liquid.
+      φ is maintained to be a signed distance function through a             in order to solve for pi . Possible candidates for pG i+1 can be
+reinitialization process using φτ + sgn(φ0 )(|∇φ| − 1) = 0, where            derived using extrapolation. The discretization obtained from
+sgn(φ0 ) is a one-dimensional smeared sign function, see [13] for            using constant extrapolation is only first order accurate since it
+more details. This procedure is performed after each combined                displaces the physically correct boundary by an O(∆x) amount.
+Runge-Kutta cycle and error correction step. Unfortunately,                  Several authors (see for example [17, 18]) used schemes equiv-
+reinitialization may cause the zero level set to move, which is              alent to quadratic extrapolation obtaining second order accurate,
+not desirable, so we use the particle level set method to correct            but nonsymmetric discretizations. In [16], the authors proposed
+these errors as well.                                                        using linear extrapolation of the form
+      In summary, the order of operations is: evolve both the par-
+ticles and the level set function forward in time, correct errors in                                                  p f s + (θ − 1) pi
+                                                                                                     pG
+                                                                                                      i+1 =                                          (10)
+the level set function using particles, apply reinitialization, again                                                          θ
+correct errors in the level set function using particles, and finally
+adjust the particle radii. In order to retain a smooth interface,            were θ ∈ [0, 1] is defined by θ = (x f s − xi )/4x. This leads to a
+escaped particles which are more than 1.5 times their radius re-             symmetric discretization of
+moved from the appropriate side of the interface are deleted.
+      Particle reseeding strategies are an important aspect of the                            ³               ´       ³              ´
+                                                                                                  p f s −pi               pi −pi−1
+particle level set method in order to ensure that the interface is                                 θ4x            −          4x
+properly resolved. For the examples shown, we reseeded parti-                                                                            = (u∗x )i   (11)
+                                                                                                                  4x
+cles about the φ = 0 contour after every 20 time steps. We have
+found that this rule-of-thumb works well, but other metrics can              which was shown to be second order accurate. This symmetric
+be used to indicate when the particles near the interface need to            discretization allows for the use of a fast Poisson solver, e.g. we
+reseeded as discussed in [3].                                                use a PCG method with a modified incomplete Cholesky precon-
+                                                                             ditioner [8].
+2.2    Pressure Boundary Treatment                                                One can impose p f s = pair or p f s = pair + σκ f s , depending
+     While the constant coefficient Poisson equation for the pres-           upon whether or not surface tension is included in the calcula-
+sure, equation 5, has been extensively analyzed for a fixed, Carte-          tion. κ f s is the curvature at the interface, and is computed using
+sian computational domain, difficulties arise when solving this              standard central finite differences. Finally, one should be care-
+equation on a domain with a dynamically changing irregular                   ful to use the same discretization of the gradient operator in both
+boundary. For the free surface problem, a physically correct                 equations 5 and 6 in order to maintain the conservative properties
+Dirichlet boundary condition needs to be applied at the sub-cell             of the method. Also, since we wish to make un+1 divergence-
+location of the free surface. Naive central differencing of the left-        free, the location of the interface should be determined by φn+1
+hand side of equations 6 and 5 near the free surface can lead to             rather than φn .
+O(∆x) errors in the pressure as noted by [14]. Later, [15] reduced
+the magnitude of these first order errors with the introduction of           2.3 Velocity Extrapolation
+micro-cells.                                                                      While the Navier-Stokes equations can be used to obtain ve-
+     We instead use the fully second order accurate discretization           locities inside the liquid volume, velocity boundary conditions
+
+                                                                         3                                                    Copyright °
+                                                                                                                                        c 2003 by ASME
+                        Grid Cells      max |~u|                                                                                 Grid Cells            Period        Amplitude
+                        25             1.435e-3                                                                                               50        3.542               .3400
+                        50              1.26e-3                                              1st Order                                     100          3.260               .3443
+                        100             8.0e-4                                               Pressure Solver                               200          3.219               .3470
+                        200             1.51e-4                                                                                               50        3.145               .3475
+   Table 1.   Parasitic velocity on a 1x1 domain after 500 time steps.                       2nd Order                                     100          3.168               .3487
+ are needed on the unmodeled, i.e. φ > 0, side of the free surface.                          Pressure Solver                               200          3.160               .3493
+ A commonly used condition [4,19] is to set the undetermined ve-
+                                                                                Table 2.                 Period of oscillation and amplitude after one period of perturbed
+ locities so that ∇ ·~u = 0 is satisfied. Probably the best treatment
+                                                                                2D droplet (1x1 domain).
+ of this sort is contained in [20]. Since we will use these velocity
+ boundary conditions to not only update the velocity and pressure
+ fields, but also to evolve both the particles and the level set, we            turbed, inviscid 2D droplet. Lamb [28] showed that the fre-
+ need velocity boundary conditions a few grid cells deep into the               quency of oscillation, ω, of a 2D droplet is given by ω2n =
+ φ > 0 region. Thus, we take a different approach using constant                (n3 − n)[σ/(ρa3 )], where the interface of the droplet in polar
+ extrapolation of the liquid velocities from inside the liquid in the           coordinates is determined by r = a + ε cos(nθ). ρ is the liquid
+ direction normal to the interface. The extrapolated velocities,                density, a is the unperturbed radius, σ is the surface tension co-
+~uext can be obtained by solving to steady state                                efficient and n is the mode of oscillation in the plane with ampli-
+                                                                                tude ε. In order to obtain a theoretical period of oscillation of π
+                         ∂~uext ~                                               for the n = 2 mode, a drop with ρ = 27, a = 1/3, σ = 2/3, and
+                               + N · ∇~uext = 0                      (12)       ε = .05a was used. The period of oscillation calculated by the
+                           ∂τ
+                                                                                second order accurate pressure solver shows excellent agreement
+where τ is a fictitious time. At steady state we note that ∇φ ·                 as compared to the theoretical result, unlike the period of oscilla-
+∇~uext = 0 so that a faster method can be devised by marching out               tion obtained by a first order accurate method. Also, the amount
+from the interface, see [21,22]. We usually populate a 3 to 5 grid              of numerical viscosity present in the calculation is greatly re-
+cell band in the φ > 0 region with extension velocities. Note that              duced with the use of the second order accurate solver as seen in
+as the grid resolution approaches zero, these extension velocities              figure 1 and table 2.
+do indeed solve the ∇ ·~u = 0 condition.
+
+                                                                                                                                 Peak Amplitude after One Period
+3 Examples
+3.1 Parasitic Currents                                                                                  0.35
+     The motion of bubbles and drops of small radius can be af-
+                                                                                                       0.348
+fected by spurious velocities generated due to the non-zero cur-
+vature of the interface. In order to obtain accurate behavior of the                                   0.346
+interface over long time periods, these numerical inaccuracies re-
+                                                                                                       0.344
+sulting from parasitic currents need to be suppressed. These spu-
+
+                                                                                      Peak Amplitude
+rious velocities have been analyzed for VOF [23,24], front track-                                      0.342
+
+ing [25–27], and level set [11] methods. Kang et. al. [11] noted
+                                                                                                        0.34
+that the ghost fluid treatment of the discontinuity at the interface
+reduces the effect of parasitic currents on a stationary bubble by a                                   0.338
+
+factor of 1000 over the typical delta function treatment as in [13].                                   0.336
+Our method creates a negligible amount of parasitic currents un-
+                                                                                                                                                       1st order pressure
+der grid refinement for an inviscid, stationary water drop as seen                                     0.334
+                                                                                                                                                       2nd order pressure
+                                                                                                                                                       theory
+in table 1.                                                                                            0.332
+
+
+                                                                                                        0.33
+                                                                                                               0          50           100             150           200            250
+3.2   Drop Oscillation                                                                                                                 number of grid cells
+    To further assess the ability of the second order accurate
+pressure solver, we calculated the period of oscillation of a per-                                                 Figure 1.   Peak amplitude after one period.
+
+
+                                                                            4                                                                   Copyright °
+                                                                                                                                                          c 2003 by ASME
+                                                                                                t = 10.5                                t = 11.75
+
+                                                                                  20                                       20
+                                                                                                                           15
+                                                                              y                                        y
+                                                                                  10                                       10
+                                                                                                                            5
+                                                                                   0                                        0
+                                                                                       120 130 140 150 160 170                  120 130 140 150 160 170
+                                                                                                    x                                        x
+                                                                                                t = 12.5                                 t = 13.5
+
+                                                                                  20                                       20
+                                                                                  15                                       15
+                                                                              y
+                                                                                  10                                   y   10
+                                                                                   5                                        5
+                                                                                   0                                        0
+
+                                                                                       120 130 140 150 160 170                  120 130 140 150 160 170
+                                                                                                    x                                        x
+                                                                                                t = 17.3                                 t = 20.0
+
+
+                                                                                  20                                       20
+                                                                                                                           15
+              Figure 2. Drop impact onto liquid pool.                         y                                        y
+                                                                                  10                                       10
+                                                                                                                            5
+3.3    Liquid Mass Impact                                                          0                                        0
+
+     Liquid drop impact on liquid and solid surfaces has impor-                        120 130 140 150 160 170                  120 130 140 150 160 170
+                                                                                                  x                                        x
+tant engineering and biological implications. Ink-jet printing and
+the dispersal of fungal spores are examples of two processes                                           Figure 3.   Breaking wave.
+which are governed by drop impact dynamics. A variety of dif-
+ferent behaviors can be observed depending upon the initial con-
+ditions used and whether or not the drop impinges upon a liquid          the formation of the secondary jet as seen in figure 3.
+or solid surface, including splashing, coalescence, and bouncing.
+We have performed a number of 3D inviscid drop calculations.
+For example, in figure 2 a drop of radius 1/3m with initial veloc-
+ity −5m/s impinges upon a pool of similar liquid 1m in depth.            4 Conclusion
+A surface tension coefficient of σ = .0728 kg/s2 , corresponding              A mass conserving particle level set discretization was pre-
+to water, was used. The calculation was performed on a compu-            sented for topologically complex two and three dimensional in-
+tational domain of size (-1m,1m)x(-1m,1m)x(-2m,1m) and was               compressible free surface flows. This includes a second order
+discretized using 60x60x90 grid cells. We note that the particle         accurate pressure discretization which allows for the straightfor-
+level set method seems to perform as well as the level set method        ward inclusion of surface tension forces. A velocity extrapola-
+in the case of merging. Moreover, it usually performs better since       tion technique was used to obtain the necessary velocity bound-
+there tends to be area loss or gain when using the level set only        ary conditions at and near the free surface. Future work includes
+method for merging and pinching.                                         the incorporation of viscosity, and a detailed study of the free-
+                                                                         surface turbulence generated by the motion of a ship through the
+                                                                         ocean.
+3.4   Breaking Wave
+     We have also performed a 2D breaking wave calculation.
+Similar work can be found in [22] and [29]. A computational
+domain of size (-50m,175m)x(0m,35m) was discretized using                ACKNOWLEDGMENT
+900x140 grid cells. The initial velocity and shape of the wave                Research supported in part by an ONR YIP and PECASE
+was initialized according to [29] with a wave height of 5m and           award (ONR N00014-01-1-0620), a Packard Foundation Fellow-
+water depth of 10m. No surface tension was used during this cal-         ship, a Sloan Research Fellowship, ONR N00014-03-1-0071,
+culation. The wave breaks against a beach with a slope of 1 : 14.        NSF DMS-0106694 and NSF ITR-0121288. In addition, D.E.
+Our particle level set method is able to robustly handle the over-       and F.G. were each supported in part by an NSF postdoctoral
+turning and splashdown phase of the breaking wave and capture            fellowship (NSF #DMS-0202459 and #DMS-0102029).
+
+                                                                     5                                                Copyright °
+                                                                                                                                c 2003 by ASME
+REFERENCES                                                                     Comp. Phys., 135, pp. 8–29.
+ [1] Osher, S., and Sethian, J., 1988. “Fronts propagating                [18] Udaykumar, H., Mittal, R., and Shyy, W., 1999. “Computa-
+     with curvature dependent speed: Algorithms based on                       tion of solid-liquid phase fronts in the sharp interface limit
+     hamiliton-jacobi formulations”. J. Comp. Phys., 79 (1),                   on fixed grids”. J. Comp. Phys., 153, pp. 535–574.
+     pp. 12–49.                                                           [19] Amsden, A., and Harlow, F., 1970. The SMAC method:
+ [2] Osher, S., and Fedkiw, R., 2002. The Level Set Method and                 A numerical technique for calculating incompressible fluid
+     Dynamic Implicit Surfaces. Springer-Verlag, New York.                     flows. Tech. Rep. LA–4370, Los Alamos Scientific Labo-
+ [3] Enright, D., Fedkiw, R., Ferziger, J., and Mitchell, I., 2002.            ratory.
+     “A hybrid particle level set method for improved interface           [20] Chen, S., Johnson, D., and Raad, P., 1995. “Velocity bound-
+     capturing”. J. Comp. Phys., 183 (1), pp. 83–116.                          ary conditions for the simulation of free surface fluid flow”.
+ [4] Harlow, F., and Welch, J., 1965. “Numerical calculation of                J. Comp. Phys., 116 (2), pp. 262–276.
+     time-dependent viscous incompressible flow of fluid with             [21] Adalsteinsson, D., and Sethian, J., 1999. “The fast con-
+     free surface”. Phys. Fluids, 8 (1), pp. 2182–2189.                        struction of extension velocities in level set methods”. J.
+ [5] Peyret, R., and Taylor, T. D., 1983. Computational Methods                Comp. Phys., 148, pp. 2–22.
+     for Fluid Flow. Spring-Verlag, New York.                             [22] Enright, D., Marschner, S., and Fedkiw, R., 2002. “Ani-
+ [6] Kim, J., and Moin, P., 1985. “Application of a fractional-                mation and rendering of complex water surfaces”. ACM
+     step method to incompressible navier-stokes equations”. J.                Trans. on Graphics (SIGGRAPH 2002 Proceedings), 21
+     Comp. Phys., 59, pp. 308–323.                                             (3), pp. 736–744.
+ [7] Brown, D. L., Cortez, R., and Minion, M. L., 2001. “Accu-            [23] Brackbill, J., Kothe, D., and Zemach, C., 1992. “A con-
+     rate projecion methods for the incompressible navier-stokes               tinuum method for modeling surface tension”. J. Comp.
+     equations”. J. Comp. Phys., 168 (2), pp. 464–499.                         Phys., 100 (2), pp. 335–354.
+ [8] Saad, Y., 1996. Iterative methods for sparse linear systems.         [24] Lafaurie, B., Nardone, C., Scardovelli, R., Zaleski, S., and
+     PWS Publishing. New York, NY.                                             Zanetti, G., 1994. “Modelling merging and fragmentation
+ [9] Shu, C., and Osher, S., 1988. “Efficient implementation                   in multiphase flows with surfer”. J. Comp. Phys., 113 (1),
+     of essentially non-oscillatory shock capturing schemes”. J.               pp. 134–147.
+     Comp. Phys., 77 (2), pp. 439–471.                                    [25] Torres, D., and Brackbill, J., 2000. “The point-set method:
+[10] Shu, C., and Osher, S., 1989. “Efficient implementation                   Front tracking without connectivity”. J. Comp. Phys., 165
+     of essentially non-oscillatory shock capturing schemes ii                 (2), pp. 620–644.
+     (two)”. J. Comp. Phys., 83, pp. 32–78.                               [26] Tryggvason, G., Bunner, B., Esmaeeli, A., Juric, D., Al-
+[11] Kang, M., Fedkiw, R., and Liu, X.-D., 2000. “A boundary                   Rawahi, N., Tauber, W., Han, J., Nas, S., and Jan, Y.-J.,
+     condition capturing method for multiphase incompressible                  2001. “A front-tracking method for the computations of
+     flow”. J. Sci. Comput., 15 (3), pp. 323–360.                              multiphase flow”. J. Comp. Phys., 169 (2), pp. 708–759.
+[12] Jiang, G.-S., and Peng, D., 2000. “Weighted eno schemes              [27] Shin, S., and Juric, D., 2002. “Modeling three-dimensional
+     for hamilton-jacobi equations”. SIAM J. Sci. Comput., 21,                 multiphase flow using a level contour reconstruction
+     pp. 2126–2143.                                                            method for front tracking without connectivity”. J. Comp.
+[13] Sussman, M., Smereka, P., and Osher, S., 1994. “A level set               Phys., 180 (2), pp. 427–470.
+     approach for computing solutions to incompressible two-              [28] Lamb, H., 1932. Hydrodynamics. Dover, New York.
+     phase flow”. J. Comp. Phys., 114 (1), pp. 146–159.                   [29] Radovitzky, R., and Ortiz, M., 1998. “Lagrangian finite
+[14] Chan, R. K.-C., and Street, R. L., 1970. “A computer study                element analysis of newtonian fluid flows”. Int. J. Numer.
+     of finite-amplitude water waves”. J. Comp. Phys., 6 (1),                  Meth. Engng., 43 (4), pp. 607–619.
+     pp. 68–94.
+[15] Raad, P., Chen, S., and Johnson, D., 1994. “The intro-
+     duction of micro cells to treat pressure in free surface flow
+     problems”. In Proceedings of the Fluids Engineering Divi-
+     sion, vol. 202, ASME International Mechanical Engineer-
+     ing Congress and Exposition, pp. 43–54.
+[16] Gibou, F., Fedkiw, R. P., Cheng, L.-T., and Kang, M., 2002.
+     “A second–order–accurate symmetric discretization of the
+     poisson equation on irregular domains”. J. Comp. Phys.,
+     176 (1), pp. 205–227.
+[17] Chen, S., Merriman, B., Osher, S., and Smereka, P., 1997.
+     “A simple level set method for solving stefan problems”. J.
+
+                                                                      6                                      Copyright °
+                                                                                                                       c 2003 by ASME
+

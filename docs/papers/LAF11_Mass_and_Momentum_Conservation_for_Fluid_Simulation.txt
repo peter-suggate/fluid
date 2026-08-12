@@ -1,0 +1,581 @@
+Eurographics/ ACM SIGGRAPH Symposium on Computer Animation (2011)
+A. Bargteil and M. van de Panne (Editors)
+
+
+
+
+      Mass and Momentum Conservation for Fluid Simulation
+
+                                    Michael Lentine†         Mridul Aanjaneya †          Ronald Fedkiw†
+                                   Stanford University       Stanford University       Stanford University
+                                 Industrial Light + Magic   Nokia Research Center    Industrial Light + Magic
+
+
+
+        Abstract
+        Momentum conservation has long been used as a design principle for solid simulation (e.g. collisions between
+        rigid bodies, mass-spring elastic and damping forces, etc.), yet it has not been widely used for fluid simulation.
+        In fact, semi-Lagrangian advection does not conserve momentum, but is still regularly used as a bread and butter
+        method for fluid simulation. In this paper, we propose a modification to the semi-Lagrangian method in order to
+        make it fully conserve momentum. While methods of this type have been proposed earlier in the computational
+        physics literature, they are not necessarily appropriate for coarse grids, large time steps or inviscid flows, all of
+        which are common in graphics applications. In addition, we show that the commonly used vorticity confinement
+        turbulence model can be modified to exactly conserve momentum as well. We provide a number of examples that
+        illustrate the benefits of this new approach, both in conserving fluid momentum and passively advected scalars
+        such as smoke density. In particular, we show that our new method is amenable to efficient smoke simulation with
+        one time step per frame, whereas the traditional non-conservative semi-Lagrangian method experiences serious
+        artifacts when run with these large time steps, especially when object interaction is considered.
+
+
+
+
+1. Introduction
+Momentum conservation is considered to be a fundamen-
+tal building block for solid simulations (e.g. it is enforced
+during rigid body collisions, rigid body temporal evolu-
+tion, elastic and damping forces for mass-spring systems,
+etc.), however, when simulating incompressible fluids in the
+graphics community, it has largely been ignored. The same
+can be said in the computational physics community, where
+many methods for simulating incompressible flow typically
+do not conserve momentum, albeit when simulating com-
+pressible flow, momentum is strictly conserved since it is
+required to get the correct shock speeds. We refer the reader
+to a few of the papers on compressible flow written in the
+graphics literature, such as [YOH00, SGTL09, KGF10]. In
+contrast, the semi-Lagrangian method, introduced in graph-
+ics by Stam [Sta99], does not conserve momentum, yet it
+has been a staple algorithm for incompressible flow for over            Figure 1: A comparison between simulations of (Left) the
+a decade.                                                               traditional semi-Lagrangian method and (Right) our method
+                                                                        with a very large time step at resolution 256 × 512 × 256.
+   While many alternative advection methods exist in the                Note how the large time steps cause alternating gaps in the
+computational physics literature, they often come with re-              smoke as seen above and below the sphere. Also note the lack
+strictions on the grid type, grid spacing, or boundary con-             of fluid structure resulting from the collision with the sphere.
+ditions. This makes them rather difficult to use in graph-              In contrast, our method conserves mass and momentum and
+                                                                        produces a highly detailed flow field. Note in particular, the
+                                                                        creation of multiple distinct vortex rings that pass through
+† e-mail: {mlentine|aanjneya|fedkiw}@cs.stanford.edu                    each other using our method.
+
+c The Eurographics Association 2011.
+                                 Lentine et al. / Mass and Momentum Conservation for Fluid Simulation
+
+                                                                      ure 2 and explain in Section 2 why it performs poorly. Fur-
+                                                                      thermore, we propose a novel algorithm which aims to en-
+                                                                      force incompressibility during advection at a discrete level,
+                                                                      thereby alleviating the problems this scheme has for inviscid
+                                                                      flows on coarse grids with large time steps.
+                                                                         The typical projection step which makes the fluid diver-
+                                                                      gence free naturally conserves momentum. Combining this
+                                                                      with our new momentum-conserving advection, one has a
+                                                                      fully momentum-conserving incompressible flow solver (ex-
+                                                                      cept for source terms). Note that body forces such as grav-
+                                                                      ity and buoyancy should add momentum to a flow as po-
+                                                                      tential energy is converted into kinetic energy. Conserva-
+                                                                      tive algorithms for both rigid and deformable bodies al-
+Figure 2: (Left) using the method from [LGF11], incom-                low for momentum changes based on body forces (these
+pressibility is not properly enforced on coarse grids with            forces would conserve momentum, but the other body, for
+large time steps and no viscosity. Note the white line down           example the earth, is not modelled). Many graphics applica-
+the middle of the image where the smoke splits apart, which           tions use a turbulence model such as vorticity confinement
+occurs because of a lack of incompressibility during the ad-          (see [FSJ01,SRF05,YKH∗ 09,JKB∗ 10]) to increase the level
+vection. (Right) our new method incorporates incompress-              of detail in the flow, and we propose a novel modification to
+ibility into advection, keeping the plume from splitting apart.       this source term which makes it fully conserve momentum.
+                                                                      We demonstrate the advantages of using momentum con-
+ics applications where the geometry tends to be detailed              servation for smoke simulation through several examples.
+and complex. Most of these schemes also come with re-                 Finally, we show that our method can be adapted to water
+strictions on the size of the time step, but semi-Lagrangian          simulations and present some promising results for energy
+advection is unconditionally stable. In fact, this makes              conservation.
+it appealing to build high-order methods out of first-
+order semi-Lagrangian building blocks, as was done in the             2. Advection
+BFECC [DL03, KLLR05] and the MacCormack [SFK∗ 08]                     A momentum-conserving incompressible flow solver re-
+methods. Semi-Lagrangian methods are useful on octrees                quires a conservative method for advection. Consider a pas-
+because of their hierarchical nature and varying grid cell-           sively advected scalar φ in a divergence-free velocity field ~u
+size [LGF04, LFO06], on tetrahedral meshes because of                 which is evolved using the equation
+their lack of structure and varying element size [FOK05,
+                                                                                                 φt +~u · ∇φ = 0.                                (1)
+FOKG05, KFCO06, CFL∗ 07, BXH10], and for solid-fluid
+coupling [CMT04, CGFO06, BBB07, RMSG∗ 08]. It is es-                     Throughout the paper, we denote the value of φ at position
+pecially useful when a solid moves through the mesh caus-            ~x and at time t by φ(~x,t). We use ~xk to denote the location of
+ing cells to be cut in various sizes or when considering              the center of cell k. When updating φ to time t n+1 , the tradi-
+thin shells such as cloth when one does not want leaking              tional semi-Lagrangian method [Sta99] traces a characteris-
+(see [GSLF05]) across the solid surface.                              tic ray from cell j backwards in time to some position~x? and
+   Some computational physics authors have considered mo-             interpolates φ values from the surrounding cells to obtain a
+mentum conservation in the context of incompressible flows.           φ value at ~x? . This value is then used as the new value of φ at
+However, these researchers are typically interested in obtain-        cell j, i.e., φ(~x j ,t n+1 ). In other words, the semi-Lagrangian
+ing algorithms that converge under refinement in both space           method updates φ at ~x j as
+and time, necessitating the use of fully viscous flows. In con-
+                                                                               φ(~x j ,t n+1 ) = φ(~x? ,t n ) =     ∑ wi j φ(~xi ,t n ),         (2)
+trast, graphics applications typically use inviscid flows for                                                     i∈N(~x? )
+efficiency (see [FSJ01]), and these are known not to con-
+verge as the grid cell size and time step size approach zero.         where N(~x? ) denotes the set of cells i near position ~x? and
+In addition, graphics applications typically use large time           wi j are the interpolation weights from cell centers ~xi to the
+steps and coarse grids. Hence, it is not clear if these algo-         point ~x? . Note that cell i could be in the set N(~x? ) for several
+rithms in the computational physics literature would perform          points ~x? and several cells j. Also note that the sum βi =
+well for graphics applications. We have studied one such pa-          ∑ j wi j represents the total amount of φ removed from cell i
+per [LGF11] with a rather simple implementation based on              and is typically not equal to 1.
+the semi-Lagrangian method conducive to use in graphics
+applications and found that although this method converged            2.1. Conservation
+to correct analytical solutions, it performed poorly for ap-           [LGF11] proposes two additional steps beyond Equation 2
+plications of interest to graphics. We illustrate this in Fig-        to make this scheme fully conserve φ. They note that when
+
+                                                                                                                  c The Eurographics Association 2011.
+                                       Lentine et al. / Mass and Momentum Conservation for Fluid Simulation
+
+
+
+
+Figure 3: An example using our conservative advection method with smoke injected from below simulated at one time step per
+frame using a high CFL number (approximately 40) at resolution 256 × 512 × 256.
+βi > 1, more φ is removed from cell i than exists at time t n               ter line of the flow. We observed that the absence of smoke
+and modify the weights to be ŵi j = wi j /βi , for these cells.            along the center line was caused because the clamping lim-
+In addition, when βi < 1, some of the φ in cell i is not ad-                its the amount of density that can reach these cells. The
+vected with the flow. In this case, they perform a second                   quantity γ j = ∑i wi j gives one an indication of how much
+forward advection step tracing a characteristic ray forward                 of φ reaches each cell. For the traditional semi-Lagrangian
+in time from cell i to some new position ~x?? , and distribute              scheme, γ j = 1, meaning that every cell is filled, even though
+(1 − βi )φ(~xi ,t n ) to the cells in N(~x?? ) using an interpolation       cells are oversampled or undersampled in order to do this.
+stencil. Therefore, if the interpolation weights from cell j to             [LGF11] enforces βi = 1 but typically produces γ j 6= 1.
+the point ~x?? are αi j , they distribute (1 − βi )αi j φ(xi ,t n ) to      For conservative incompressible flow, all of φ should be ad-
+each cell j. This means that they modify Equation 2 to in-                  vected (βi = 1) and every destination cell should be exactly
+crement weights wi j by an amount (1 − βi )αi j to get ŵi j for            filled (γ j = 1). This can be viewed as making the weight ma-
+these cells as well as changing N(~x? ) to include all cells from           trix W doubly-stochastic.
+the forward advection step that were not already accounted
+for during the backward advection step. If we redefine wi j to
+                                                                                We propose the following new scheme. First, we make the
+be ŵi j we note that Equation 2 still holds, except that now
+                                                                            observation that the clamping and forward advection steps
+the weights wi j have been first clamped (to guarantee that no
+                                                                            can be flipped, and thus, after the first semi-Lagrangian step
+excess amount of φ is removed from cell i) and then incre-
+                                                                            we forward advect for all cells with βi < 1 before clamp-
+mented (to account for any φ in cell i that had not yet been
+                                                                            ing. This advection step ensures that βi ≥ 1 and γ j ≥ 1 for
+advected). These modifications guarantee that βi = 1, which
+                                                                            all cells. Next, we clamp γ j to 1 by redefining all wi j to
+implies that for each cell i, the amount of φ advected to other
+                                                                            be wi j /γ j , guaranteeing incompressibility. Unfortunately, to
+cells is exactly equal to the amount of φ originally present in
+                                                                            guarantee conservation of φ, one still has to rescale βi to
+cell i, making the scheme fully conservative.
+                                                                            1, and in general, βi is not equal to 1 at this point. Sim-
+   Although the authors show convergence for viscous flows                  ply clamping βi would guarantee conservation and give im-
+under refinement in space and time, when experimenting                      proved results over the original scheme but would still give
+with this scheme on coarse grids, with large time steps and                 γ j unequal to 1. To alleviate this problem one could iterate by
+inviscid flows, we observed that vortices were able to tear                 alternately clamping γi and βi , always ensuring to clamp βi
+the flow apart, producing gaps such as those illustrated in                 last to enforce conservation. Doing this will converge such
+Figure 2 (left) where a white spacing runs down the cen-                    that both γi and βi are 1 but applying a diffusion-based opera-
+
+c The Eurographics Association 2011.
+                                 Lentine et al. / Mass and Momentum Conservation for Fluid Simulation
+
+
+
+
+Figure 4: An example using our conservative advection method with smoke injected from below and a static sphere simulated
+at one time step per frame using a high CFL number (approximately 40) at resolution 256 × 512 × 256.
+tor is more efficient. For our examples, we use one clamping          the amount φ j+1 (γ j+1 − γ j )/2γ j+1 from cell j + 1 to cell j.
+iteration and then apply our diffusion method (see below).            Note that moving φ this way does not diffuse φ itself as ev-
+                                                                      idenced by the fact that when all γ j values are equal the φ
+   Diffusing the quantity φ would destroy the details of the          values remain unchanged.
+flow, and so we diffuse the sum γ j instead. Consider the heat
+equation (γ j )t − ∆γ j = 0 discretized with forward Euler in             Diffusing the sums γ j does not affect the sums β j , so they
+time and central differencing in space, which has an explicit         remain 1. If the heat equation is solved to steady state, then
+time step restriction of ∆t = (∆x)2 /2d, where d is the di-           γ j equals 1 for all cells j. However, this turns out to be
+mension. This means that between any two cells j and j + 1            expensive and unnecessary. Hence, we actually clamp and
+in three dimensions, the flux looks like (γ j+1 − γ j )∆t/(∆x)2       diffuse the cumulative weights. We denote the cumulative
+or (γ j+1 − γ j )/6 (by substitution). We can then apply this         weight at time t n by γnj , and initialize γ0j = 1. These weights
+flux to each of the six pieces in the seven point stencil inde-       are advected forward in time in the same manner as φ to get
+pendently. However, this process can be accelerated by con-           γ̃n+1
+                                                                        j . These advected weights are then used to clamp φ as
+sidering the heat equation one dimension at a time, where             described above, after which we apply a few iterations of
+∆t = (∆x)2 /2 and the flux looks like (γ j+1 − γ j )/2. Thus, we      our diffusion scheme to get γn+1  j    (updating φ values in the
+sweep through the grid in a dimension by dimension manner             process). Note that only a few iterations (between 1 and 7)
+considering every flux between adjacent grid points j and             are required in a time step as γ̃n+1j   incorporates the errors in
+ j + 1, updating their values by the amount (γ j+1 − γ j )/2.         incompressibility from previous iterations. One could alter-
+This is done using Gauss-Jacobi iterations within a di-               natively use other existing methods for making the matrix W
+mension, but Gauss-Seidel iterations between dimensional              doubly-stochastic but we found that this method works well
+sweeps.                                                               in our examples. It is important to note that although we are
+                                                                      looking for a doubly-stochastic matrix we want a matrix that
+   Assuming γ j+1 > γ j , we subtract off the difference              is as close as possible to the results from the conservative
+(γ j+1 − γ j )/2 from γ j+1 and add it to γ j , making them both      semi-Lagrangian method prior to adding diffusion.
+equal to (γ j+1 + γ j )/2. This can be viewed as updating the
+                                                                      2.2. Collisions
+weights wk, j+1 and wk, j to (wk, j+1 + wk, j )/2, for all rows
+k. Observe that the sum wk, j+1 + wk, j does not change in            Although this method works well in the absence of solid ob-
+the process implying that the sums β j remain invariant un-           jects we would also like to simulate examples such as the
+der diffusion. We also advect φ during this update by moving          one shown in Figure 4. To conserve φ in the presence of ob-
+
+                                                                                                           c The Eurographics Association 2011.
+                                       Lentine et al. / Mass and Momentum Conservation for Fluid Simulation
+
+jects, we modify both the forward and backward ray cast-                    3.2. Vorticity Confinement
+ing for interpolation to stop when it hits a solid object. We
+                                                                            Some external forces are meant to add momentum to the sys-
+then use this surface point as ~x? (or ~x?? ) for our interpo-
+                                                                            tem. For example, gravity adds momentum to the system,
+lation weights. Unfortunately, this would still give interpo-
+                                                                            which is allowed because in reality momentum would be
+lation weights coming from cells along the surface of the
+                                                                            conserved if the earth was simulated. However, some forces
+object. In this case, one can simply set those weights to 0,
+                                                                            such as vorticity confinement [FSJ01, SRF05, YKH∗ 09,
+rescaling the remaining weights to sum to 1.
+                                                                            JKB∗ 10], which are necessary to make interesting flow
+                                                                            fields, are not momentum conserving. Heuristically, vortic-
+3. Incompressible Flow                                                      ity confinement should conserve momentum globally since
+Having developed a method for conservatively advecting a                    spinning things in a circle tends to produce equal amounts
+quantity, we can now apply it to incompressible flow in order               of linear momentum in each direction. It turns out that it
+to obtain a simulation that conserves both mass and momen-                  is straightforward to make vorticity confinement conserva-
+tum. We use our new advection method to passively advect                    tive; we do this as follows. For each spatial dimension, sum
+necessary quantities such as smoke density ρ̂ using the equa-               all the forces in that dimension, divide the resultant cumu-
+tion                                                                        lative force by the number of cells, and decrement the force
+                                                                            at every cell by the net force divided by the number of cells.
+                             ρ̂t +~u · ∇ρ̂ = 0,                   (3)       We denote this momentum conserving vorticity confinement
+                                                                            force as ~F ? . Finally, add the momentum conserving force
+which conserves the total mass throughout the simulation.                   ε~F ? , where ε is a scale parameter.
+
+3.1. Navier-Stokes Equations                                                4. Smoke Simulation
+In order to conserve momentum, we solve the inviscid, in-                   Although the traditional semi-Lagrangian method allows us
+compressible Navier-Stokes equations, which are given by                    to take bigger time steps than conditionally stable methods,
+                                         1                                  these large time steps result in noticeable errors in the sim-
+                     ~ut + (~u · ∇)~u = − ∇p + ~f                 (4)       ulation. For conditionally stable simulations, one typically
+                                         ρ
+                                                                            uses the CFL number in order to define stability. A CFL
+                                ∇ ·~u = 0,                        (5)       number of 1 means that semi-Lagrangian rays have a max-
+where ~u is the velocity field of the fluid, ρ is the density of
+the fluid, ~f are any external forces (such as gravity) scaled
+by ρ, and p is the fluid pressure. We solve these equations
+by first calculating an intermediate velocity field ~u? via
+
+                      ~u? −~un
+                               + (~un · ∇)~un = ~f                (6)
+                          ∆t
+using our conservative advection method on the MAC grid.
+Since ρ is constant, this conserves momentum as well. We
+then subsequently add in the pressure forces via the equation
+
+                         ~un+1 −~u?    1
+                                    = − ∇p,                       (7)
+                             ∆t        ρ
+where the pressure is calculated by solving the Poisson equa-
+tion
+                              1                                             Figure 5: A comparison between four simulations at reso-
+                           ∇ · ∇ p̂ = ∇ ·~u? ,                    (8)       lution 128 × 256 × 128. The red and green lines are sim-
+                              ρ
+                                                                            ulations using our conservative scheme. Note that the dif-
+where p̂ = p∆t.                                                             ference in these at later frames is due to different amounts
+                                                                            of smoke exiting the domain as the simulations are different
+   We note that the pressure solve conserves momentum be-
+                                                                            with largely different time steps - but we stress that smoke
+cause pressure is applied in an equal and opposite manner to
+                                                                            is fully conserved in both cases. Comparing the blue to the
+each neighboring ~u? . This means that solving this system in
+                                                                            red, or similarly the purple to the green shows the amount
+the absence of external forces is fully mass and momentum
+                                                                            of mass loss suffered by the traditional semi-Lagrangian
+conserving. We also note that since projection naturally con-
+                                                                            method. Note that an appreciable amount of mass is lost even
+serves momentum and our method only modifies the advec-
+                                                                            before large amounts of smoke starts exiting the domain.
+tion step, other faster projection methods such as [LZF10]
+and [MST10] can be used as well.
+c The Eurographics Association 2011.
+                                 Lentine et al. / Mass and Momentum Conservation for Fluid Simulation
+
+                                                                      imum length of 1 grid cell, whereas a CFL number of 20
+                                                                      would allow them to trace back as many as 20 grid cells.
+                                                                         We demonstrate our method on several smoke simulation
+                                                                      examples ran at 24 frames per second, as shown in Fig-
+                                                                      ures 3 and 4. We simulated two smoke examples, one with
+                                                                      a ball and the other without it. Both examples have a den-
+                                                                      sity source at the bottom of the domain. For each example,
+                                                                      we ran four simulations at resolution 128 × 256 × 128: tradi-
+                                                                      tional semi-Lagrangian method with a CFL number of 1, our
+                                                                      new method with the same CFL number, traditional semi-
+                                                                      Lagrangian method at frame rate (1 time step per frame),
+                                                                      and our method at frame rate. We also ran simulations at
+                                                                      resolution 256 × 512 × 256. Running these simulations us-
+                                                                      ing a low CFL number was infeasible, so we ran both exam-
+                                                                      ples at frame rate. In the lower resolution case, running at
+                                                                      frame rate is equivalent to using a CFL number of 20. For
+                                                                      the higher resolution ones the CFL number was around 40.
+                                                                      This corresponds to taking 1/40 as many time steps as a CFL
+                                                                      1 simulation.
+                                                                        We compared our method to the traditional semi-
+                                                                      Lagrangian method for all these examples. Figure 6 shows a
+                                                                      comparison of the high resolution examples. Note the large
+                                                                      amount of dissipation and artifacts that traditional semi-
+                                                                      Lagrangian examples have compared to our method. We also
+Figure 6: A comparison between simulations of (Left) the              quantitatively compared the two methods, as shown in Fig-
+traditional semi-Lagrangian method and (Right) our method             ure 5. For the lower resolution simulations we also compared
+with a very large time step at resolution 256 × 512 × 256.            our method with the traditional semi-Lagrangian method us-
+Note how the large time steps yield poor interpolation result-        ing a low CFL number (see Figure 7), demonstrating that
+ing in alternating gaps in the smoke; this is especially appar-       even with low CFL numbers we achieve an increase in vi-
+ent slightly above the ground plane and in the large plume.           sual fidelity. In particular, note the large amount of mass lost
+Conserving the amount of smoke, as done by our method,                both near and above the sphere using the traditional semi-
+does not produce these artifacts.                                     Lagrangian method.
+                                                                         It is important to note that as the grid resolution increases
+                                                                      by a factor of 2, the cost increases by a factor of 8 in space
+                                                                      and a factor of 2 in time. However, using our method we can
+                                                                      reduce this to only a factor of 8 in space as we can generate
+                                                                      good results at very large time step sizes. We also note that
+                                                                      although our advection method is about three times slower
+                                                                      than the traditional semi-Lagrangian method, the projection
+                                                                      step dominates the cost for smoke simulations (typically
+                                                                      around 90% of the simulation time) and thus our method
+                                                                      achieves performance comparable to the traditional semi-
+                                                                      Lagrangian method for each time step.
+
+                                                                      5. Water Simulation
+                                                                      In addition to smoke, we applied momentum conserva-
+                                                                      tion to water. To do this we used the particle level set
+                                                                      method [FF01, EFFM02, EMF02], although one could also
+                                                                      use methods such as coupled level set volume of fluid
+Figure 7: A comparison between simulations of (Left) the              (CLSVOF) [MUM∗ 06], marker level set [MMS09] or front
+traditional semi-Lagrangian method and (Right) our method             tracking [BBB10,WTGT10]. In order to make water conser-
+using a typical CFL of 1 at resolution 128 × 256 × 128. Note          vative, momentum needs to be conserved during the veloc-
+the large amount of mass lost when the smoke interacts with           ity advection. However, our algorithm, as described in Sec-
+the sphere as illustrated in Figure 5.                                tion 2, cannot be directly applied because this would allow
+
+                                                                                                          c The Eurographics Association 2011.
+                                       Lentine et al. / Mass and Momentum Conservation for Fluid Simulation
+
+                                                                            the case for our new method is adequately made via smoke
+                                                                            simulation. However, we did wish to discuss some of the is-
+                                                                            sues involved in adapting it for water and show some prelim-
+                                                                            inary simulations. Figure 8 shows a comparison between our
+                                                                            method and the traditional semi-Lagrangian method. In this
+                                                                            example, momentum conservation produces a higher splash
+                                                                            as expected (see also the video).
+                                                                            6. Energy
+Figure 8: A comparison between water simulations using
+(Left) the traditional semi-Lagrangian method and (Right)                   In addition to mass and momentum conservation, we can
+our method at resolution 128 × 256 × 128. Note the improve-                 also conserve the energy of the simulation. Energy conser-
+ment in momentum seen using our conservative method.                        vation has been researched recently as a way to reduce dissi-
+In particular, the height of the splash is higher using our                 pation (see e.g. [SB08, MCP∗ 09, WP10, PTC∗ 10]). In order
+method. Note that in this example our method has 25% more                   to conserve the overall energy, we need to make sure energy
+momentum than the standard method.                                          is conserved in every step of the simulation. To do this in a
+                                                                            visually appealing manner, we choose to add the energy that
+momentum to be advected from cells outside the level set                    was lost at every time step with vorticity confinement. The
+(resulting in a gain in momentum), or allow momentum to                     role of vorticity in spinning up or slowing down a flow works
+be advected to cells outside the level set (resulting in a loss             to our advantage for adding or removing energy. Moreover,
+in momentum). To deal with these issues we modify both the                  it can be difficult to add energy via a force-based method as
+backward and forward advection steps.                                       projection can remove any force added at this step, but vor-
+   First, the standard semi-Lagrangian method is used to ad-                ticity confinement is by nature incompressible (not exactly,
+vect the level set from time t n to t n+1 . Next, we consider the           but approximately) and therefore mostly survives the projec-
+velocity advection step of our algorithm. We modify the al-                 tion step.
+gorithm described in Section 2.1 to use the time t n level set                 Consider adding a momentum conserving vorticity con-
+as a collision body when doing backwards interpolation (see                 finement force ~F
+Section 2.2), ensuring that we only advect momentum that
+                                                                                                         ~uc = ~u? + ε~F                        (9)
+was part of the water volume. Note that some of the charac-
+teristic rays may not land in the level set at time t n due to              to the incremental velocity from Equation 6. The increase in
+numerical errors. With reference to Figure 9 as an example,                 energy due to this force can be calculated as
+this would mean that faces 2, 3, 4, 5 would all be outside the                                                          !
+level set at time t n . However, at least one of the two adjacent                                1         2         ?2
+                                                                                            E=          m~uc − ∑ m~u               (10)
+cells A or B at time t n+1 must have had a valid characteristic                                  2 ∑  i         i
+which landed inside the level set (say, at G), otherwise that
+                                                                            where m is the mass of the cell. Equation 10 simplifies to
+particular velocity degree of freedom would not be inside the
+level set at time t n+1 . We then use A and/or B to find valid                            2E = ε2 ∑ m|~F|2 + 2ε ∑ m~u? · ~F                    (11)
+velocities. However, since these rays end up half of a grid                                          i                     i
+cell away from the velocity value, we find a new velocity by
+                                                                               Solving this quadratic, we get
+tracing a ray half of a grid cell in the appropriate direction                                     q
+from the base of these characteristics. This would change the                      − ∑i m~u? · ~F ± (∑i m~u? · ~F)2 + 2E ∑i m|~F|2
+position from 6 to 7 which we can then use to update 1. In                     ε=                                                              (12)
+the case of both A and B being inside the levelset we use the                                          ∑i m|~F|2
+average of the two approximations of 1. Note that when go-                  We choose the root such that ε = 0 when E = 0. This means
+ing half of a grid cell in one direction or the other from the                                   2             3
+base of the characteristic, we trace a ray colliding with the                     B
+                                                                                                     6
+level set at time t n just as before.                                                                                          C           D
+                                                                                  1                                                7
+                                                    n+1                                          4             5
+    For forward advection we treat the time t       level set as
+                                                                                 A                                                     G
+a collision body. However, we also need to treat forward ad-
+                                                                                                                               E           F
+vection a bit differently since there is no guarantee that time
+t n values of the level set land within the time t n+1 level set            Figure 9: Momentum advection during water simulation:
+using the particle level set method. Therefore, in the case                 shown are the semi-Lagrangian rays used to advect phi val-
+when a velocity characteristic does not land within the time                ues (green) and velocity values (red). Note that when advect-
+t n+1 level set, we simply find the nearest point on the surface            ing the interpolated velocity value, 6 is used if valid, other-
+and allocate the velocity to that point. Our intention here is              wise 7 may be used.
+not to provide an in-depth analysis for water simulation, as
+
+c The Eurographics Association 2011.
+                                  Lentine et al. / Mass and Momentum Conservation for Fluid Simulation
+
+that the ± is chosen to be the same sign as ∑i m~u? · ~F. Note         fully conservative. Non-divergence free external forces mod-
+that one root is equivalent to vorticity spinning the flow in          ify the pressure field, and therefore ∆K in some sense in-
+one direction to add energy and in the other direction to min-         cludes energy added due to these external forces. For ex-
+imize energy, whereas the other root corresponds to vorticity          ample, if we add gravity to the system (with a ground) and
+confinement looking to “invert" the entire flow field, which           project the resulting flow, the projection will lose a large por-
+is non-physical.                                                       tion of the energy that was added with gravity, and we do not
+                                                                       wish to treat this as energy lost. If we did, the energy would
+6.1. Tracking Energy                                                   constantly increase even for an isolated system. One way to
+E is updated after every step in order to track how much               solve this is to simply do two projections, one to make the
+energy is gained or lost. For advection, we simply advect              flow field divergence free before forces are added and an-
+KE = m|~un |2 /2 conservatively using our newly modified               other after the forces are added. However, this is a significant
+version of Equation 2 and compare the advected value of                increase in cost.
+KE ? with m|~u? |2 /2 for each cell, where ~u? is obtained via            Another way to find the energy lost is to figure out the to-
+conservative momentum advection of ~un .                               tal energy of the system at the start, keep track of the amount
+   The change in energy due to projection can be calculated            sourced in and out and store that as A. This allows us to
+at each 1-dimensional MAC grid cell as                                 calculate E = A − PE − KE for vorticity confinement. For
+                   ρ  n+1 2                                          kinetic energy we simply calculate KE = ∑i m|~u? |2 /2 for
+            ∆K =      (u ) − (u? )2                                    all cells i. For potential energy it depends on whether we
+                   2
+                   ρ  n+1                                          are simulating smoke or water. For water we can calculate
+                =     u    + u? un+1 − u?                              PE = ∑i mgh where g is the gravitational constant and h is
+                   2
+                   ρ  n+1        ∆t                                the height. For smoke we use buoyancy instead of gravity.
+                =     u    + u?    − px                                We calculate the potential energy as PE = ∑i mρ̂b(ho − h)
+                   2                  ρ
+                                                                       where b is the buoyancy constant, ρ̂ is the smoke density and
+                 = −∆t ū (px )                                        ho is a constant. Using this equation, we see that as smoke
+                                                                       rises from buoyancy the potential energy decreases and the
+where ū = (un+1 + u? )/2. ∆KV , where V is the volume of
+                                                                       kinetic energy increases to account for this loss.
+the cell, is added to E. Note that this is corrected during the
+vorticity confinement application for the next time step.                Using this formulation we can simulate examples with
+                                                                       gravity, such as the one shown in Figure 10 right, where we
+   Figure 10 illustrates an example of a closed box with an
+                                                                       drop a ball of water into a pool of shallow water, which re-
+initial flow field. The flow is then allowed to evolve, and we
+add fish tracer particles to visualize the flow field. Note that
+the flow never dies down and always conserves the energy in
+the system, as shown in Figure 11.
+  If external forces are divergence-free, then this method is
+
+
+
+
+Figure 10: (Left) A simulation of energy conserving incom-
+pressible flow at resolution 64 × 64 × 64. The initial flow
+field is created by starting with upwards velocities in the            Figure 11: A graph of energy as a function of time for the
+center of the domain and zero elsewhere. The flow is then              simulation in Figure 10. The red line shows that our method
+made divergence free and simulated forward in time, and                conserves energy almost exactly for 1000 frames. Note that
+we note that conserving energy provides a sustainable flow             we do exactly conserve energy when comparing two veloc-
+field for long-time simulation as seen in Figure 11 (also see          ity fields before projection. However, projection removes or
+the video). Fish models are passively advected to visualize            adds a very small amount of energy as can be seen by the
+the flow field. (Right) A simulation of energy conserving free         wiggles in the red line. For comparison we also plot the
+surface flow at resolution 64×64×128. The initial flow field           results for the same simulation using the traditional semi-
+is created by dropping a ball of water into a pool of shallow          Lagrangian method as a green line, and note that the energy
+water (viewed from top down).                                          quickly dies out.
+
+
+                                                                                                           c The Eurographics Association 2011.
+                                       Lentine et al. / Mass and Momentum Conservation for Fluid Simulation
+
+
+
+
+Figure 12: Two simulations using our method with energy conservation with smoke injected from below at resolution 128 ×
+256 × 128. Note that no vorticity confinement was added other than that used to conserve energy. Also note that the resulting
+density field appears significantly less viscous than the traditional semi-Lagrangian method which explicitly adds vorticity
+confinement.
+
+duces the potential energy and increases the kinetic energy.                to the vorticity confinement model which conserves momen-
+We can also simulate energy conserving smoke as shown in                    tum. We have shown that by conserving mass and momen-
+Figure 12. In this case, we did not add any vorticity con-                  tum we are able to run high quality simulations while taking
+finement to the system other than what is added for energy                  very large time steps (at frame rate). Our technique can also
+conservation. Note the increased amount of detail obtained                  be adapted to conserve momentum for water simulation. Fi-
+using this method. This allows us to provide a method for                   nally, we showed a modification using vorticity confinement
+automatically and dynamically determining how much vor-                     that preserves energy as well. By being able to run energy
+ticity should be added into the simulation. However, if en-                 conserving fluid simulations with large time steps, we can
+ergy is lost and there are few areas of vorticity to add energy             create fast, interesting fluid flows that can be potentially used
+to, adding in energy can cause undesirable noise. To allevi-                for other applications such as reduced order models or crowd
+ate this problem we do not add vorticity for these steps, in-               simulations.
+stead accumulating this energy to be added back once suffi-
+cient vorticity has developed. Alternatively, one could target
+the correct energy and add the energy lost slowly over time.
+However, for our examples we found that there was insuffi-                  Acknowledgements
+cient vorticity only near the very beginning where relatively
+little energy was lost. Thus, we could simply add in the total              Research supported in part by ONR N00014-09-1-0101,
+energy lost as soon as vortices started appearing.                          ONR N00014-11-1-0027, ONR N00014-06-1-0505, ONR
+                                                                            N00014-05-1-0479, for a computing cluster, NSF IIS-
+7. Conclusion
+                                                                            1048573 and King Abdullah University of Science and
+We introduced a novel algorithm for mass and momentum                       Technology (KAUST) 42959. M.L. was supported in part
+conservation in incompressible flow. We designed a new ad-                  by an Intel Ph.D. Fellowship. M.A. was supported in part by
+vection method using the basic building blocks used in semi-                the Nokia Research Center. We would like to thank Christos
+Lagrangian advection which is known to work well for invis-                 Kozyrakis for additional computing resources as well as Ja-
+cid flows, coarse grids and large time steps, a scenario com-               cob Leverich for helping us use those resources. We would
+mon in computer graphics. We also proposed a modification                   also like to thank Craig Schroeder for his fish model.
+
+c The Eurographics Association 2011.
+                                    Lentine et al. / Mass and Momentum Conservation for Fluid Simulation
+
+References                                                               [LGF04] L OSASSO F., G IBOU F., F EDKIW R.: Simulating water
+                                                                           and smoke with an octree data structure. ACM Trans. Graph.
+[BBB07] BATTY C., B ERTAILS F., B RIDSON R.: A fast varia-
+                                                                           (SIGGRAPH Proc.) 23 (2004), 457–462.
+  tional framework for accurate solid-fluid coupling. ACM Trans.
+  Graph. (SIGGRAPH Proc.) 26, 3 (2007), 100.                             [LGF11] L ENTINE M., G RÉTARSSON J., F EDKIW R.: An un-
+[BBB10] B ROCHU T., BATTY C., B RIDSON R.: Matching fluid                  conditionally stable fully conservative semi-lagrangian method.
+  simulation elements to surface geometry and topology. ACM                J. Comput. Phys. (to appear) (2011).
+  Trans. Graph. (2010).                                                  [LZF10] L ENTINE M., Z HENG W., F EDKIW R.: A novel algo-
+[BXH10] BATTY C., X ENOS S., H OUSTON B.: Tetrahedral em-                  rithm for incompressible flow using only a coarse grid projection.
+  bedded boundary methods for accurate and flexible adaptive flu-          ACM Transactions on Graphics (July 2010).
+  ids. In Proceedings of Eurographics (2010).                            [MCP∗ 09] M ULLEN P., C RANE K., PAVLOV D., T ONG Y.,
+[CFL∗ 07] C HENTANEZ N., F ELDMAN B. E., L ABELLE F.,                      D ESBRUN M.: Energy-preserving integrators for fluid anima-
+  O’B RIEN J. F., S HEWCHUK J. R.: Liquid simulation on lattice-           tion. In SIGGRAPH ’09: ACM SIGGRAPH 2009 papers (2009),
+  based tetrahedral meshes. In ACM SIGGRAPH/Eurographics                   pp. 1–8.
+  Symp. on Comput. Anim. (2007), pp. 219–228.                            [MMS09] M IHALEF V., M ETAXAS D. N., S USSMAN M.: Sim-
+[CGFO06] C HENTANEZ N., G OKTEKIN T. G., F ELDMAN B.,                      ulation of two-phase flow with sub-scale droplet and bubble ef-
+  O’B RIEN J.: Simultaneous coupling of fluids and deformable              fects. Comput. Graph. Forum (2009).
+  bodies. In ACM SIGGRAPH/Eurographics Symp. on Comput.                  [MST10] M C A DAMS A., S IFAKIS E., T ERAN J.: A parallel
+  Anim. (2006), pp. 325–333.                                               multigrid poisson solver for fluids simulation on large grids. In
+[CMT04] C ARLSON M., M UCHA P. J., T URK G.: Rigid fluid:                  SCA/Eurographics Symp. on Comput. Anim. (2010), ACM Press,
+  Animating the interplay between rigid bodies and fluid. ACM              pp. 1–10.
+  Trans. Graph. (SIGGRAPH Proc.) 23 (2004), 377–384.                     [MUM∗ 06] M IHALEF V., U NLUSU B., M ETAXAS D., S USS -
+[DL03] D UPONT T., L IU Y.: Back and forth error compensation              MAN M., H USSAINI M.:        Physics based boiling sim-
+  and correction methods for removing errors induced by uneven             ulation.     In SCA ’06: Proceedings of the 2006 ACM
+  gradients of the level set function. J. Comput. Phys. 190/1 (2003),      SIGGRAPH/Eurographics symposium on Computer animation
+  311–324.                                                                 (2006), pp. 317–324.
+[EFFM02] E NRIGHT D., F EDKIW R., F ERZIGER J., M ITCHELL                [PTC∗ 10] P FAFF T., T HUEREY N., C OHEN J., TARIQ S.,
+  I.: A hybrid particle level set method for improved interface cap-       G ROSS M.: Scalable fluid simulation using anisotropic turbu-
+  turing. J. Comput. Phys. 183 (2002), 83–116.                             lence particles. In ACM SIGGRAPH Asia 2010 papers (2010),
+[EMF02] E NRIGHT D., M ARSCHNER S., F EDKIW R.: Ani-                       SIGGRAPH ASIA ’10, pp. 174:1–174:8.
+  mation and rendering of complex water surfaces. ACM Trans.             [RMSG∗ 08] ROBINSON -M OSHER A., S HINAR T., G RÉTARS -
+  Graph. (SIGGRAPH Proc.) 21, 3 (2002), 736–744.                           SON J., S U J., F EDKIW R.: Two-way coupling of fluids to rigid
+[FF01] F OSTER N., F EDKIW R.: Practical animation of liquids.             and deformable solids and shells. ACM Trans. on Graphics 27, 3
+  In Proc. of ACM SIGGRAPH 2001 (2001), pp. 23–30.                         (Aug. 2008), 46:1–46:9.
+[FOK05] F ELDMAN B., O’B RIEN J., K LINGNER B.: Animat-                  [SB08] S CHECHTER H., B RIDSON R.: Evolving sub-grid tur-
+  ing gases with hybrid meshes. ACM Trans. Graph. (SIGGRAPH                bulence for smoke animation. In SCA ’08: Proc. of the
+  Proc.) 24, 3 (2005), 904–909.                                            2008 ACM SIGGRAPH/Eurographics Symp. on Comput. Anim.
+                                                                           (2008), pp. 1–7.
+[FOKG05] F ELDMAN B., O’B RIEN J., K LINGNER B., G OK -
+  TEKIN T.: Fluids in deforming meshes. In Proc. of the ACM              [SFK∗ 08] S ELLE A., F EDKIW R., K IM B., L IU Y., ROSSIGNAC
+  SIGGRAPH/Eurographics Symp. on Comput. Anim. (2005).                      J.: An Unconditionally Stable MacCormack Method. J. of Sci.
+                                                                           Comp. 35, 2 (2008), 350–371.
+[FSJ01] F EDKIW R., S TAM J., J ENSEN H.: Visual simulation of
+  smoke. In Proc. of ACM SIGGRAPH 2001 (2001), pp. 15–22.                [SGTL09] S EWALL J., G ALOPPO N., T SANKOV G., L IN M.: Vi-
+                                                                           sual Simulation of Shockwaves. Graphical Models (2009).
+[GSLF05] G UENDELMAN E., S ELLE A., L OSASSO F., F EDKIW
+  R.: Coupling water and smoke to thin deformable and rigid              [SRF05] S ELLE A., R ASMUSSEN N., F EDKIW R.: A vortex
+  shells. ACM Trans. Graph. (SIGGRAPH Proc.) 24, 3 (2005),                 particle method for smoke, water and explosions. ACM Trans.
+  973–981.                                                                 Graph. (SIGGRAPH Proc.) 24, 3 (2005), 910–914.
+[JKB∗ 10] JANG T., K IM H., BAE J., S EO J., N OH J.: Multi-             [Sta99] S TAM J.: Stable fluids. In Proc. of SIGGRAPH 99 (1999),
+   level vorticity confinement for water turbulence simulation. Vis.        pp. 121–128.
+   Comput. 26 (2010), 873–881.
+                                                                         [WP10] W EISSMANN S., P INKALL U.: Filament-based smoke
+[KFCO06] K LINGNER B. M., F ELDMAN B. E., C HENTANEZ                       with vortex shedding and variational reconnection. ACM Trans.
+  N., O’B RIEN J. F.: Fluid animation with dynamic meshes. ACM             Graph. (2010).
+  Trans. Graph. 25, 3 (2006), 820–825.
+                                                                         [WTGT10] W OJTAN C., T HÜREY N., G ROSS M. H., T URK G.:
+[KGF10] K WATRA N., G RÉTARSSON J. T., F EDKIW R.: Practi-                 Physics-inspired topology changes for thin fluid features. ACM
+  cal animation of compressible flow for shock waves and related           Trans. Graph. (2010).
+  phenomena. In ACM SIGGRAPH/Eurographics Symp. on Com-
+  put. Anim. (2010), pp. 207–215.                                        [YKH∗ 09] YOON J.-C., K AM H. R., H ONG J.-M., K ANG S.-J.,
+                                                                           K IM C.-H.: Procedural synthesis using vortex particle method
+[KLLR05] K IM B.-M., L IU Y., L LAMAS I., ROSSIGNAC J.: Us-                for fluid simulation. Comput. Graph. Forum 28, 7 (2009), 1853–
+  ing BFECC for fluid simulation. In Eurographics Workshop on              1859.
+  Natural Phenomena 2005 (2005).
+                                                                         [YOH00] Y NGVE G., O’B RIEN J., H ODGINS J.: Animating ex-
+[LFO06] L OSASSO F., F EDKIW R., O SHER S.: Spatially adap-                plosions. In Proc. of ACM SIGGRAPH 2000 (2000), pp. 29–36.
+  tive techniques for level set methods and incompressible flow.
+  Computers and Fluids 35 (2006), 995–1010.
+
+                                                                                                               c The Eurographics Association 2011.
+

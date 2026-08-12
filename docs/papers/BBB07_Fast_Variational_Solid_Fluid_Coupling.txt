@@ -1,0 +1,485 @@
+                 A Fast Variational Framework for Accurate Solid-Fluid Coupling
+                            Christopher Batty                   Florence Bertails                   Robert Bridson
+
+                                                        University of British Columbia∗
+
+
+
+
+Figure 1: Left: A solid stirring smoke runs at interactive rates, two orders of magnitude faster than previously. Middle: Fully coupled rigid
+bodies of widely varying density, with flow visualized by marker particles. Right: Interactive manipulation of immersed rigid bodies.
+
+
+Abstract                                                                  generating detailed and physically-plausible motion for phenomena
+                                                                          such as smoke, water and explosions, and their complex interac-
+Physical simulation has emerged as a compelling animation tech-           tions with dynamic solid objects. However, current techniques en-
+nique, yet current approaches to coupling simulations of fluids and       counter problems with both efficiency and robustness. In this paper,
+solids with irregular boundary geometry are inefficient or cannot         we propose a new variational framework which allows robust and
+handle some relevant scenarios robustly. We propose a new varia-          accurate solid-fluid coupling on relatively coarse Cartesian grids,
+tional approach which allows robust and accurate solution on rela-        providing potentially orders of magnitude faster simulation.
+tively coarse Cartesian grids, allowing possibly orders of magnitude
+                                                                          For the purposes of this paper, we focus on splitting/projection al-
+faster simulation. By rephrasing the classical pressure projection
+                                                                          gorithms using fluid velocity and pressure as primary variables to
+step as a kinetic energy minimization, broadly similar to modern
+                                                                          solve the incompressible Euler equations:
+approaches to rigid body contact, we permit a robust coupling be-
+tween fluid and arbitrary solid simulations that always gives a well-                        ∂u                 1
+posed symmetric positive semi-definite linear system. We provide                                ∂ t + (u ·∇ )u + ρ ∇ p = f
+several examples of efficient fluid-solid interaction and rigid body                                    ∇ ·u = 0
+coupling with sub-grid cell flow. In addition, we extend the frame-
+work with a new boundary condition for free-surface flow, allowing        We use the standard notation (u for fluid velocity, p for pressure,
+fluid to separate naturally from solids.                                  ρ for density, f for acceleration due to body forces such as grav-
+                                                                          ity, etc.); Bridson et al.’s course notes [2006] provide further back-
+                                                                          ground. The essential steps in such an algorithm are advection, cor-
+CR Categories: I.3.7 [Computer Graphics]: Three-Dimensional
+                                                                          responding to updating the positions of fluid elements (analogous
+Graphics and Realism—Animation
+                                                                          to updating positions in a solid simulation), and projection, corre-
+                                                                          sponding to solving for pressure to make the velocity field incom-
+Keywords: fluid simulation, physically-based animation, fluid-            pressible (analogous to updating velocities from forces in a solid
+solid coupling                                                            simulation). We use the near-zero-dissipation FLIP method of Zhu
+                                                                          and Bridson [2005] for advection but do not use vorticity confine-
+1    Introduction                                                         ment [Fedkiw et al. 2001] in our examples. The contributions of
+                                                                          this paper are concerned with the pressure projection step.
+Physical simulation is an increasingly popular approach for produc-       We do note there are several compelling alternatives to this class of
+ing animations of fluid. It holds out the promise of automatically        methods, such as vorticity approaches (e.g. [Angelidis et al. 2006]),
+    ∗ e-mail: {batty,bertails,rbridson}@cs.ubc.ca                         Smoothed Particle Hydrodynamics (e.g. [Keiser et al. 2005]) and
+                                                                          the Lattice Boltzmann Method (e.g. [Thürey et al. 2006]), which
+                                                                          are beyond the scope of this paper.
+
+                                                                          1.1   Previous Work
+
+                                                                          Solid Wall Boundary Conditions
+                                                                          The dominant approach has been to discretize the fluid equations
+                                                                          on a regular Cartesian grid, using the staggered “MAC-grid” ar-
+                                                                          rangement of pressure and velocity unknowns [Harlow and Welch
+                                                                          1965]. Foster and Metaxas [1996] pioneered its use in computer
+                                                                          graphics, implementing solid boundary conditions by voxelizing
+                                                                           stringent restriction on time step); the considerable computational
+                                                                           overhead of the pointer structure compared to a regular grid reduces
+                                                                           the potential benefit further.
+                                                                           Another promising approach is introduced by Feldman et al. [2005]
+                                                                           where unstructured tetrahedral meshes, which can align with arbi-
+                                                                           trary geometry, are used in lieu of grids. These have the side benefit
+                                                                           of easy adaptivity, and recent advances in mesh generation mean
+Figure 2: Streamlines of a vortex-in-a-box. From left to right:            only a fraction of the simulation time is spent on making meshes
+grid-aligned geometry ground truth, voxelized pressure solve, vari-        even if rebuilt nearly from scratch each time step [Klingner et al.
+ational pressure solve. Note the stair-step artifacts in the voxelized     2006]. However, matching fine-scale geometry or porous objects
+solve, eliminated with the variational method.                             requires an impractically large mesh, and the extensive averaging
+                                                                           used in interpolation introduces more numerical dissipation, de-
+                                                                           manding higher resolution meshes than comparable grid simula-
+obstacles onto the grid. This method, which we shall refer to as           tions. Furthermore, the overhead of unstructured meshes compared
+the “voxelized pressure solve”, works very well if all object bound-       to regular grids of similar resolution is considerable.
+aries happen to be aligned with the grid, but otherwise introduces
+significant stair-step artifacts which unfortunately do not converge       Roble et al. [2005] take an intermediate approach, using an under-
+to zero as grid resolution is increased. In figure 2, observe that the     lying regular grid, but modifying only boundary cells to align with
+streamlines of the flow match the voxelized version, not the origi-        objects. A growing body of similar work exists within the com-
+nal geometry; for comparison we show that our method matches the           putational fluid dynamics community [Johansen and Colella 1998;
+correct streamlines regardless of orientation with respect to the grid.    Udaykumar et al. 2001; Kirkpatrick et al. 2003; Marella et al. 2005;
+These artifacts are particularly objectionable in water simulations,       Liu et al. 2005; Schwartz et al. 2006]. While both finite volume and
+where water will pool on the steps rather than freely flowing down         finite difference techniques are represented in this sampling, a com-
+a slope. However, even in smoke simulations they are noticeable            mon implementation difficulty is the complexity of robustly han-
+as undue numerical viscosity: all components of velocity (includ-          dling the fully three-dimensional geometry and/or stencils required
+ing those tangential to the true surface) are driven to zero. The best     to capture the non-grid-aligned Neumann boundary condition.
+that can be done is to excessively increase grid resolution until the
+affected grid cells are small enough to be visually negligible.            Solid-Fluid Coupling
+
+Foster and Fedkiw [2001] attempted to mitigate these problems by           Takahashi et al. [2002] presented a simple method for coupling flu-
+using an accurate normal to enforce the solid wall velocity bound-         ids and rigid bodies, with the same problematic voxelization as be-
+ary condition (allowing the fluid to slip past tangentially), and then     fore, where the rigid bodies provide velocity boundary conditions
+constraining the voxelized pressure solve not to touch these veloci-       to the fluid and the resulting pressure subsequently provides a net
+ties. Houston et al. [2003] later introduced the constrained velocity      force and torque on the rigid bodies. We note that in certain sit-
+extrapolation method to further improve on this, extrapolating the         uations, such as a rigid stopper resting on fluid in a closed tube,
+tangential component of fluid velocity into solids accurately and          the alternating nature of the coupling results in failure: the fluid
+thus eliminating grid artifacts from fluid advection. Rasmussen et         may be constrained to compress by rigid body velocities, giving an
+al. [2004] further elaborated the approach for level set advection.        inconsistent linear system for pressure.
+Unfortunately, all these methods suffer from artifacts due to the          Génevaux et al. [2003] introduced coupling between a free surface
+voxelized pressure solve, which is highly visible on coarse grids,         fluid simulation using marker particles, and elastic solid simulation
+necessitating high resolutions. Furthermore, though the approach           using masses and springs. The coupling is achieved by attaching the
+works well for highly dynamic splashing scenarios, it fails in the         solid with ad hoc damped springs to nearby fluid marker particles
+simple hydrostatic case of fluid sitting still in a container: unphysi-    (averaging the force down onto the grid for the fluid simulator),
+cal currents develop and unstably blow up, since the pressure cannot       then using the voxelized pressure solve.
+cancel the tangential component of force due to gravity on oblique
+boundaries.                                                                Carlson et al. [2004] simulated coupled fluid and rigid bodies with
+                                                                           Distributed Lagrange Multipliers, conceptually considering rigid
+Here we take an aside to discuss grid resolution. To be able to simu-      bodies as fluid on a grid, solving for pressure, then projecting ve-
+late a flow with features such as vortices as small as some length h,      locity in those regions back to rigid motion with careful additions
+grid cells must be no larger than h. Since convergence to a quantita-      to the body force to account for density differences between solids
+tively accurate solution is generally irrelevant to animation, it would    and fluids. However, the method cannot stably handle light solids
+be ideal to have grid spacing in fact equal to h, much coarser than        (less than ∼ 0.45 the fluid density), and fails in some cases, allow-
+typically used in scientific simulations. Making the most of coarse        ing fluid to erroneously leak through a rigid plug supporting it.
+grids is particularly important since memory scales as O(n3 ), for
+an n × n × n grid, and the time required for simulation can scale          Guendelman et al. [2005] returned to the alternating voxelized ap-
+as badly as O(n5 ) if the typical time step restriction ∆t ∼ 1/n is        proach of Takahashi et al., generalized to include octree grids, thin
+taken and the typical Incomplete Cholesky Level 0 Preconditioned           solids and arbitrary solid dynamics. To improve upon the noisy
+Conjugate Gradient algorithm is used for solving linear systems.           pressure resulting from voxelization to cell faces, a second pressure
+Increasing grid resolution just to account for the failure of an algo-     solve, doubling the expense of the calculation, is done with solid
+rithm to faithfully reflect the physics at the appropriate resolution is   masses added to the fluid grid density in the style of the Immersed
+clearly a very steep price to pay.                                         Boundary Method [Peskin 2002]; this smoother pressure is used
+                                                                           to calculate force on solids. Inconsistent linear systems arising in
+Octree methods [Losasso et al. 2004] allow one to use high resolu-         enclosed fluid regions are handled by projecting out the null-space
+tion only where needed, partially overcoming the efficiency prob-          components from the right-hand-side of the pressure equation; this
+lem of the voxelized approach. However, the node-averaging used            has the unfortunate effect of allowing closed regions to change vol-
+for octrees gives results inferior to the MAC grid at the same reso-       ume as the solid dictates, meaning fluid-filled balloons, for exam-
+lution [Irving et al. 2006] requiring even finer resolution (and more      ple, cannot be simulated.
+Full simultaneous coupling between fluids and solids was achieved        with solid density for a deformable object, the usual 6 × 6 matrix
+by Klingner et al. for rigid bodies [2006] and by Chentanez et al.       containing the inertia tensor and the total mass for each rigid body,
+for deformable objects [2006], with an approach that produces sim-       etc.), and J is a linear operator converting pressure on the boundary
+ilar discretizations to ours. While focusing mostly on tetrahedral       of the solid to generalized forces.
+meshes that align with solid boundaries Chentanez et al. do note
+that this approach can be applied on regular grids, though the ac-       The pressure enforces the incompressibility condition ∇ · un+1 = 0
+companying animation of fluid pouring on a bunny model shows             inside the fluid, and the boundary condition un+1 · n̂ = vn+1 · n̂ on
+apparent grid artifacts.                                                 the solid boundary, with p = 0 on the free surface. Here v is the
+                                                                         velocity of the solid evaluated at a point on the boundary, which
+Of course, many scientific works in computational fluid dynam-           must be v = J∗ V from basic physical principles, with J∗ the adjoint
+ics address fluid-solid coupling. We highlight Peskin’s Immersed         or transpose of J. The solid boundary condition is simply stating the
+Boundary Method [2002], which averages solid properties onto the         fluid may flow neither in nor out of a solid. Substituting the update
+fluid grid (and thus cannot stop fluid leaking through solids, for       equations in these conditions gives the PDE form of the coupled
+example); the ALE approach of Hirt et al. [1974], which requires         pressure equations.
+tetrahedral meshes fully resolving all solid boundaries; and Le et
+al.’s use of the Immersed Interface Method to couple fluid with rigid    The total kinetic energy of the system is
+and elastic bodies [2006], whose expenses each time step include
+                                                                                                          1              1
+                                                                                                 ZZZ
+a solve with an unsymmetric matrix and a Singular Value Decom-                            KE =                 ρ ||u||2 + V∗ MS V             (3)
+position of a matrix with size proportional to the number of points                                  fluid 2             2
+used to discretize solids.
+                                                                         where the solid term may be a double convolution integral for con-
+                                                                         tinua or just a finite quadratic form for rigid bodies. It is a straight-
+1.2   Contributions
+                                                                         forward exercise in variational calculus to show that the pressure
+We introduce a new variational interpretation of the pressure equa-      PDE is in fact the Euler-Lagrange equation for minimizing kinetic
+tion for coupled fluids in section 2, namely that pressure minimizes     energy with respect to pressure (see Bridson et al.’s course notes
+the kinetic energy of the system. The pressure update and total          [2006] for a proof of the simpler case with motionless solids). Note
+kinetic energy may be easily discretized on a regular grid with ar-      that the kinetic energy is bounded below by zero and depends only
+bitrary immersed solid geometry. Then the discrete pressure which        quadratically on pressure, so this minimization is well-posed. Put
+minimizes this discrete kinetic energy is found; this reduces auto-      another way, the pressure solve is computing a projection of veloc-
+matically to a well-posed, sparse, symmetric positive semi-definite      ities onto the space of divergence-free fluid velocities and compat-
+linear system. The solution is free of grid artifacts, permitting fast   ible solid velocities. Projection is equivalent to finding the closest
+solution on coarse grids. It enforces simultaneous coupling cor-         point on that space, and the metric defining “closest” is kinetic en-
+rectly, handling all problem cases mentioned in the previous sec-        ergy. This statement of the pressure problem is also in fact exactly
+tion, and can be applied with arbitrary solid dynamics. In addition,     the Lagrange Multiplier approach to constrained mechanics (e.g.
+we automatically account for sub-grid-resolution solid geometry in       [Baraff 1996]), with pressure playing the role of Lagrange Multi-
+our discrete estimate of kinetic energy; this gives us approximate       plier.
+sub-grid accuracy in coupling, allowing robust handling of fluid
+flowing through thin gaps that could not be efficiently resolved with    Scripted or stationary solids can be incorporated by taking the limit
+octrees or tetrahedral meshes. We work out the details of our solver     as their mass goes to infinity, and instead of total kinetic energy
+for rigid bodies in section 3.                                           using the difference in energy of the open system (excluding infi-
+                                                                         nite masses) from one time step to the next. The coupling with the
+Finally, the variational framework highlights an analogy between         scripted objects reduces to calculating the work done by pressure
+fluid pressure and modern treatment of inelastic contact forces be-      on their boundaries, i.e. the exchange of energy between the open
+tween rigid bodies: they both are based on kinetic energy mini-          system and the scripted objects. Once discretized and reduced to
+mization. Inspired by this connection, we introduce a new free           a linear system, it is in fact easier to take the limit as mass goes
+surface/solid boundary condition in section 4, expressed as an in-       to infinity, i.e. as M−1
+                                                                                               S goes to zero, which has the effect of just
+equality constraint on our minimization. This allows fluid to freely     eliminating terms from the matrix.
+separate from solid walls, similar to rigid bodies separating from
+contact, fixing some enduring artifacts seen in previous fluid simu-
+lation work where fluid unnaturally crawls along walls and ceilings.     2.1   Fluid Discretization
+                                                                         Instead of discretizing the local pressure PDE with boundary con-
+2     A Variational Interpretation of Pressure                           ditions, we discretize the global variational principle. This avoids
+                                                                         directly discretizing the tricky velocity boundary condition at non-
+Consider a fluid and immersed solids. In continuous space variables      grid-aligned solid boundaries, instead relying on the easier task of
+the pressure update for fluid velocity from time n to n + 1 is           estimating the kinetic energy. Moreover, it reduces to the standard
+                                                                         PDE discretizations for grid-aligned geometry, and leads to simula-
+                                       ∆t                                tion code largely the same or simpler than previous techniques.
+                         un+1 = ũ −      ∇p                      (1)
+                                       ρ                                 We discretize the fluid variables on a standard MAC grid, and use
+where ũ is the intermediate velocity field resulting from advection     the regular finite difference approximation to the gradient for the
+and integration of body forces such as gravity. The accompanying         pressure update. For example, the x− component update is
+update to solid velocities is
+                                                                                                                ∆t pi+1, j,k − pi, j,k
+                                                                                                                                      
+                                                                                   un+1        = ũi+1/2, j,k −
+                      Vn+1 = Vn + ∆tM−1
+                                     S Jp                         (2)               i+1/2, j,k                  ρ          ∆x
+
+where V is the generalized velocity of the solid (possibly a contin-     We use the standard second order accurate ghost fluid boundary
+uous field for a deformable object, or a six-dimensional vector for a    condition for pressures lying on the other side of a free surface [Gi-
+single rigid body, etc.), MS is the mass linear operator (convolution    bou et al. 2002].
+                                                                                    For binary voxel weights it is straightforward to see this is exactly
+                                                                                    the same as the traditional discrete pressure equation; in general
+                                                                                    we have the same 7-point-stencil sparsity structure, but with coef-
+                                                                                    ficients based on cell masses. For the sake of space we explicitly
+                                                                                    write only the 5-point two-dimensional version for cell i, j:
+                          pi,j         ui+½,j         pi+1,j
+                                                                                                  (mi+1/2 j + mi−1/2 j + mi j+1/2 + mi j−1/2 )pi j
+                                                                                                                                                  
+                                                                                          ∆t 
+                                                                                                               −mi+1/2 j pi+1 j − mi−1/2 j pi−1 j =
+                                                                                        ρ 2 ∆x2
+                                                                                                
+                                                                                                               −mi j+1/2 pi j+1 − mi j−1/2 pi j−1      (7)
+                                                                                                                                                     !
+                                                                                                        1     −m         u
+                                                                                                                  i+1/2 j i+1/2 j + m       u
+                                                                                                                                     i−1/2 j i−1/2 j
+                                                                                                      ρ ∆x −mi j+1/2 vi j+1/2 + mi j−1/2 vi j−1/2
+
+                                                                                    Note that we have multiplied both sides by −1 to make the system
+Figure 3: Area weights in 2D: The shaded region, in blue (fluid)                    positive semi-definite. This is still a symmetric M-matrix, and thus
+and grey (solid), indicates the staggered cell surrounding velocity                 may be solved efficiently with Modified Incomplete Cholesky Pre-
+sample ui+ 1 , j on a standard MAC grid. The area used to compute                   conditioned Conjugate Gradient using exactly the same code as a
+           2
+the corresponding mass, mi+ 1 , j , is that of the fluid region.                    traditional voxelized solver.
+                                 2
+
+                                                                                    Figure 2 shows a comparison of a 2D vortex-in-a-box, simulated
+The kinetic energy integral of the fluid decouples into the sum of                  with the box grid-aligned (our ground truth), the box rotated and
+the kinetic energies from the x−, y−, and z− components of fluid                    classic voxelized weights used, and the box rotated with our new
+velocity, which we approximate individually:                                        scheme. The bumpy stair-step grid artifacts of the voxelized scheme
+                                                                                    are essentially eliminated with the variational approach. We also
+                 1                           1
+  KEF ≈ ∑          mi+1/2, j,k u2i+1/2, j,k + ∑ mi, j+1/2,k v2i, j+1/2,k            note that unlike previous partial fixes we are guaranteed to be sta-
+          i, j,k 2                           2 i, j,k                               ble, and for the hydrostatic case the exact hydrostatic pressure
+                                                                              (4)   p = −ρ gy is the solution to our minimization, perfectly canceling
+                                           1
+                                                   mi, j,k+1/2 w2i, j,k+1/2
+                                           2 i,∑
+                                       +                                            out gravitational acceleration (giving u = 0).
+                                               j,k
+
+Here the m’s are estimates of the mass of the fluid in the ∆x3                      3     Coupling Fluids and Rigid Bodies
+cube surrounding the appropriate MAC velocity sample point:
+e.g. mi+1/2, j,k is ρ times the volume of fluid inside [xi , xi+1 ] ×               3.1   Pressure Discretization
+[y j−1/2 , y j+1/2 ] × [zk−1/2 , zk+1/2 ]. See figure 3 for a 2D example.           To couple a rigid body, we just approximate the J operator that
+These volumes can easily and efficiently be calculated exactly from                 maps pressure to net force and torque on the body for the pressure
+a polygonal representation of the geometry, or they may be approx-                  update, and add the kinetic energy of the solid to our minimization.
+imated by ∆x times the area of the associated cell face (giving rise
+to a method related to Finite Volumes), or even just ∆x2 times the                  In continuous variables, the translational part of the J operator is
+extent of the fluid on the line segment between pressure samples                    defined by the net force equation:
+(calculated trivially from a level set representation). The problem-                                                           ZZ
+atic voxelized pressure solve corresponds to setting masses equal to                                      F = Jtrans p = −            pn̂             (8)
+                                                                                                                                  S
+ρ ∆x3 or 0, losing all sub-grid information about the boundary.
+                                                                                    where S is the full surface of the solid, n̂ is the outward pointing
+Expressing the vector of all fluid velocity components as u and                     normal (hence the negative sign), and recalling p = 0 on dry parts
+pressures as p, the gradient finite difference operator as matrix G                 of the solid surface. From the fundamental theorem of calculus this
+and the diagonal matrix of all the fluid cell masses as matrix MF ,                 is equivalent to a volume integral:
+the discrete pressure update is
+                                                                                                                         ZZZ
+                                      ∆t                                                                  Jtrans p = −               ∇p               (9)
+                           un+1 = ũ − Gp                                     (5)                                            solid
+                                      ρ
+                                                                                    where p is conceptually smoothly extended into the volume (all
+and the discrete fluid’s kinetic energy is                                          interior values cancel, thus we never actually refer to pressures be-
+                            1 T                                                     yond a grid cell into the interior). This can be discretized in a man-
+           KEn+1      =       u MF un+1                                             ner consistent with the fluid pressure solve. For example, for the
+             F              2 n+1
+                                                                                    horizontal component we have
+                            1      ∆t            ∆t
+                      =       (ũ − Gp)T MF (ũ − Gp)
+                            2      ρ             ρ                                                                             pi+1, j,k − pi, j,k
+                                                                                                  Jx p = − ∑ voli+1/2, j,k                           (10)
+                                                                                                           i, j,k                      ∆x
+We will add the terms corresponding to solids in later sections.
+For now notice that minimizing KE with respect to pressure is a
+weighted linear least-squares problem. Since the weights in MF are                  The volume weights are the volume of the rigid body occupying the
+non-negative masses, it is automatically well-posed (up to addition                 cell centered on each particular MAC grid velocity sample position,
+of pressure differences in the null-space of G, which of course have                exactly analogous to the mass weights used to define kinetic energy
+no influence on velocities). The normal equations are automatically                 of the fluid. For fully submerged cells, we can in fact compute the
+a consistent, symmetric positive semi-definite linear system:                       fluid weights by subtracting off the solid volumes (however they
+                                                                                    are approximated) from the volume of a full cell. We note that in
+                     ∆t T        1                                                  the interior of the solid, where all the volumes are full, the sum
+                        G MF Gp = GT MF ũ                                    (6)   telescopes and cancels out pressure unknowns in the interior.
+                     ρ2          ρ
+The torque part of the J operator is likewise defined:                   of the linear system. Note that if a scripted motion constrains the
+                                  ZZ                                     fluid to compress (e.g. in a piston), the linear system becomes in-
+                T = Jrot p = −            (x − Xcom ) × pn̂      (11)    consistent. If the user insists on this scenario, we remove the null-
+                                      S                                  space component of the right-hand side as in Guendelman et al.’s
+                                                                         work and allow the fluid to change volume [2005].
+where Xcom is the center of mass of the object. Again we transform
+this into a volume integral:
+                                                                         3.2   Time Integration
+                            ZZZ
+                 Jrot p =             ∇ × p(x − Xcom )           (12)    For time integration, we use the following scheme at each time step:
+                              solid
+                                                                            • Advance fluid positions (advection) and rigid body posi-
+For each component of torque we approximate this with a sum,                  tions/orientations independently with current velocities.
+using volume weights, as for translation.                                   • Process collisions.
+Note that if approximations to the volume weights are used in defin-        • Add ∆t times body forces to all velocities.
+ing J, the 6 × 6 mass matrix MS used to compute the rigid body’s
+kinetic energy from translation and rotation should ideally be con-         • Solve the energy minimization problem for pressure.
+sistent with those volumes, multiplied by rigid body density, rather        • Update fluid and solid velocities with pressure.
+than the exact mass matrix. However, this only becomes an issue
+for achieving perfect hydrostatic rest with neutrally buoyant rigid      Note that for advection the tangential fluid velocity should be ex-
+bodies, and may be ignored in more dynamic scenes.                       trapolated into sample points with zero fluid mass, similar to Hous-
+                                                                         ton et al. [2003]. In future work we plan to add frictional contact
+Once J and MS have been computed, we add the rigid body’s terms          forces to the energy minimization problem, which extends it to a
+to the kinetic energy minimization:                                      Quadratic Program (QP) with constraints; currently our simulations
+                                                                         use the simpler rigid body algorithm of Guendelman et al. [2003].
+            1
+     KEn+1
+       S   = (Vn + ∆tM−1   T     n     −1
+                      S Jp) MS (V + ∆tMS Jp)                     (13)
+            2                                                            3.3   Results
+This modifies the linear system for pressure, equation (6), by adding    We ran our simulator on several examples comparable to previous
+∆tJT M−1                           T n
+        S J to the matrix and −J V to the right-hand side. The           papers, on an older 2.8 GHz Pentium 4 desktop. We begin with
+sparsity of this addition depends on how many grid cells the solid       the paddle wheel by Klingner et al. [2006]: they report simulation
+boundary overlaps; we currently naı̈vely use a general sparse matrix     times of approximately one minute per frame. On a strictly larger
+data structure to handle it, but note that the addition is low rank      80 × 40 × 60 grid that approximately matches their smallest tetra-
+(rank 6) which could be gainfully exploited by more sophisticated        hedra, our code runs at 3 seconds per frame, a factor of 20 speed-up
+numerical linear algebra.                                                (presumably due to the overhead of the unstructured mesh). How-
+We do highlight an assumption used in this derivation: rigid bodies      ever, this grid contains more velocity samples than the tetrahedral
+are thick enough to have an interior sampled on the grid. For thin       mesh, and due to the sharper interpolation possible on a regular grid
+rigid bodies, shells in particular, this is violated and the above ap-   gives significantly more detailed results. If we instead find a grid
+proach does not work as described. There we need some method             size, 40 × 20 × 30, that better matches the look of the original (al-
+for encoding the unknown discontinuous pressure jump from one            beit still ending with a much higher degree of turbulent mixing from
+side of the rigid body to the other. We expect, in future work, to       more finely resolved vortices than the original—even though we do
+define ghost pressures on either side of such bodies, where we use       not use vorticity confinement in our simulation) our simulator runs
+the ghost pressure rather than the real pressure on the other side. A    interactively at 5 frames per second, a factor of 300 speed-up. We
+similar approach was successfully adopted by Tam et al., who sim-        observe here the critical importance of methods which can accu-
+ulated fluid interaction with thin rods, albeit for high-speed com-      rately capture details on coarse grids. Figure 1, left, shows frames
+pressible flows [2005].                                                  from the coarse grid, and figure 4 from the higher resolution grid
+                                                                         for comparison.
+To handle scripted rigid bodies (objects with prescribed motion un-
+affected by the fluid) we let M−1                                        Figure 1, middle, shows a simulation of a variety of rigid bodies of
+                               S drop to zero, removing that term        differing densities in a fluid-filled container. The asteroid object (in
+from the matrix but keeping the contribution to the right-hand side
+                                                                         cyan), however, has a density 0.1 times that of the fluid which Carl-
+                                                                         son et al.’s algorithm cannot stably handle [2004]. Our simulation
+                                                                         on a 60 × 90 × 60 grid, ran at 25 seconds per frame. Figure 1, right,
+                                                                         shows an interactive simulation of 2 complex solids immersed in a
+                                                                         fluid, running at 2 frames per second on a 20 × 20 × 20 grid. The
+                                                                         user interactively selects the heavy blue bunny (selection in white),
+                                                                         drags it up, and launches it so that it collides with the much lighter
+                                                                         red dragon.
+                                                                         We believe that by exploiting the low rank of the rigid body addi-
+                                                                         tions to the matrix in the future, we will achieve further significant
+                                                                         improvements, particularly since the most time is spent on easily
+                                                                         optimized matrix-vector multiplies.
+                                                                         Finally, to illustrate more clearly the ability of our model to capture
+                                                                         sub-grid details, figure 5 shows frames from a 2D animation of a
+Figure 4: Simulation of a paddle rotating through smoke on a             heavy rigid box nearly blocking a fluid channel. The gaps on either
+80 × 40 × 60 grid, running at 3 seconds per frame. Note the fine-        side of the box are only half a grid cell wide, yet fluid convincingly
+scale turbulent vortices captured by our approach.                       flows past, jostling the box from side to side.
+Figure 5: Our variational framework gives sub-grid resolution in
+this rigid body flow example, allowing efficient and plausible solu-
+tion on a coarse grid. The box sinks in a slightly larger tube, jostled       Figure 6: A ball of water splashes against the left wall. In the top
+from side to side by the fluid; later an applied force F drives fluid         row, the standard solid wall boundary condition is used, resulting
+in sub-grid gaps to push the box upwards. Fluid flow is visualized            in fluid unnaturally sticking to walls. In the bottom row, our new
+with marker particles.                                                        wall separation condition lets the fluid peel off plausibly.
+
+
+
+4    Wall Separation                                                          discretizing the boundary condition, relying on the discretization of
+                                                                              the variational principle to automatically capture it.
+A common numerical artifact seen in free-surface water simula-
+tions is fluid “crawling” up walls and even along ceilings, eventu-           Parenthetically, this makes the analogy between solving for pres-
+ally dripping down or crossing over to another wall to descend. The           sure and solving for rigid body contact even closer. In rigid body
+source of this problem is the u · n̂ = vsolid · n̂ boundary condition,        contact, contact forces or impulses are constrained to be non-
+which states that fluid cannot flow into or out of a solid. While this        negative with a complementarity condition on relative velocity, al-
+is well established physically for many flow situations, it has the un-       lowing bodies to separate but not interpenetrate.
+fortunate side-effect of not allowing fluid to separate from a wall, a
+phenomena which is readily observed in everyday life. Without get-            Figure 6 shows a 2D comparison of the standard boundary condi-
+ting into the physical chemistry of molecular-scale interactions that         tion and our wall separation condition. We used the PATH solver
+actually govern surface wetting/drying (and that are not captured by          [Ferris and Munson 1998] to solve the equivalent KKT Linear
+continuum mechanics) we argue heuristically that in reality only a            Complementarity Problem, whose performance limits us to rela-
+thin film of fluid is left on the wall in these situations. This film,        tively small problem sizes; in future work we plan to investigate
+at most a wet patch, is far too small to be resolved on an animation          more scalable QP solvers.
+grid. Simulations using this boundary condition instead enforce a
+layer of thickness unrealistically proportional to the grid cell size
+that sticks to the wall, and rely on numerical error in advection to          5   Conclusion
+eventually separate it.
+Foster and Fedkiw [2001] (with extensions by Houston et al. [2003]            We introduced a variational framework for pressure in fluid flow, al-
+and Rasmussen et al. [2004]) observed this problem and offered a              lowing easy coupling to solids with arbitrary geometry not aligned
+fix which works well in certain highly dynamic splashing situations.          with the grid. By exploiting the demonstrated sub-grid accuracy of
+After advecting and applying forces, if fluid velocities are found to         this approach, the desirable properties of the resulting linear system
+be separating from solids (ũ · n̂ > vsolid · n̂), that separation velocity   and the efficiency of Cartesian grid-based simulation, we achieve a
+is enforced in the pressure solve. However, it becomes unstable               performance gain of one or two orders of magnitude over existing
+and physically implausible in more static conditions with oblique             techniques, and overcome many limitations associated with previ-
+boundaries (as mentioned in section 1.1), and completely fails for            ous methods. In addition we introduced a novel wall separation
+closed or nearly closed fluid-filled containers. We instead exploit           boundary condition, which fits naturally in the variational frame-
+our variational framework to arrive at a robust, physically consistent        work and robustly eliminates unwanted sticky artifacts which have
+solution.                                                                     plagued free surface simulations in the past.
+
+Essentially we want to enforce the boundary condition:                        Due to the conceptual simplicity of our framework, we believe that
+                                                                              extending the coupling mechanism to arbitrary deformable bodies
+                             u · n̂ ≥ vsolid · n̂                     (14)    should be straightforward, and preliminary results indicate this to
+                                                                              be the case. In future work we also plan to properly account for thin
+allowing the fluid to separate from the wall but not flow into it. If         solids with ghost pressure values, exploit the low rank of rigid body
+it separates from the wall, it becomes a free surface, p = 0, but             matrix additions to improve performance, and use a more scalable
+if not we argue one appropriate condition on pressure is p > 0:               QP solver to better handle frictional rigid body contacts and wall
+we rule out suction from keeping the fluid stuck. This is then a              separation.
+complementarity condition:
+
+                     0 ≤ p ⊥ u · n̂ − vsolid · n̂ ≥ 0                 (15)    6   Acknowledgements
+This is equivalent to turning our kinetic energy minimization prob-           This work was supported in part by a grant from the Natural Sci-
+lem into an inequality-constrained QP, with just the linear constraint        ences and Engineering Research Council of Canada. Florence
+p ≥ 0 on solid boundaries: the complementarity is automatically               Bertails was supported by a grant from the French Lavoisier pro-
+enforced for us by the KKT conditions. Thus we can again avoid                gram.
+References                                                           J OHANSEN , H., AND C OLELLA , P. 1998. A Cartesian grid em-
+                                                                        bedded boundary method for Poisson’s equation on irregular do-
+A NGELIDIS ,     A.,    N EYRET,   F.,   S INGH ,   K.,  AND            mains. J. Comput. Phys. 147, 1, 60–85.
+   N OWROUZEZAHRAI , D. 2006. A controllable, fast and
+   stable basis for vortex based smoke simulation. In ACM-EG         K EISER , R., A DAMS , B., G ASSER , D., BAZZI , P., D UTR É , P.,
+                                                                        AND G ROSS , M. 2005. A unified Lagrangian approach to solid-
+   Proc. Symposium on Computer Animation, 25–32.
+                                                                        fluid animation. In Eurographics Symposium on Point-Based
+BARAFF , D. 1996. Linear-time dynamics using Lagrange multipli-         Graphics, 125–148.
+  ers. In Computer Graphics Proc. (Proc. SIGGRAPH), 137–146.
+                                                                     K IRKPATRICK , M. P., A RMFIELD , S. W., AND K ENT, J. H. 2003.
+B RIDSON , R., M ÜLLER -F ISCHER , M., AND G UENDELMAN , E.            A representation of curved boundaries for the solution of the
+   2006. Fluid simulation. In ACM SIGGRAPH Course Notes.                Navier-Stokes equations on a staggered three-dimensional Carte-
+                                                                        sian grid. J. Comput. Phys. 184, 1–36.
+C ARLSON , M., M UCHA , P. J., AND T URK , G. 2004. Rigid fluid:
+   animating the interplay between rigid bodies and fluid. ACM       K LINGNER , B. M., F ELDMAN , B. E., C HENTANEZ , N., AND
+   Trans. Graph. (Proc. SIGGRAPH) 23, 377–384.                          O’B RIEN , J. F. 2006. Fluid animation with dynamic meshes. In
+                                                                        ACM Trans. Graph. (Proc. SIGGRAPH), 820–825.
+C HENTANEZ , N., G OKTEKIN , T. G., F ELDMAN , B. E., AND
+   O’B RIEN , J. F. 2006. Simultaneous coupling of fluids and de-    L E , D. V., K HOO , B. C., AND P ERAIRE , J. 2006. An immersed in-
+   formable bodies. In ACM-EG Proc. Symposium on Computer               terface method for viscous incompressible flows involving rigid
+   Animation, 83–89.                                                    and flexible boundaries. J. Comp. Phys. 220, 109–138.
+
+F EDKIW, R., S TAM , J., AND J ENSEN , H. W. 2001. Visual simula-    L IU , H., K RISHNAN , S., M ARELLA , S., AND U DAYKUMAR , H.
+   tion of smoke. In Computer Graphics Proc. (Proc. SIGGRAPH),          2005. Sharp interface Cartesian grid method II: A technique for
+   15–22.                                                               simulating droplet interactions with surfaces of arbitrary shape.
+                                                                        J. Comput. Phys. 210, 1, 32–54.
+F ELDMAN , B. E., O’B RIEN , J. F., AND K LINGNER , B. M. 2005.
+   Animating gases with hybrid meshes. ACM Trans. Graph. (Proc.      L OSASSO , F., G IBOU , F., AND F EDKIW, R. 2004. Simulating wa-
+   SIGGRAPH) 24, 3, 904–909.                                            ter and smoke with an octree data structure. ACM Trans. Graph.
+                                                                        (Proc. SIGGRAPH) 23, 3, 457–462.
+F ERRIS , M. C., AND M UNSON , T. S. 1998. Complementarity
+   problems in GAMS and the PATH solver. Tech. Rep. Mathemat-        M ARELLA , S., K RISHNAN , S., L IU , H., , AND U DAYKUMAR ,
+   ical Programming 98-12, Computer Sciences Dept., University         H. 2005. Sharp interface Cartesian grid method I: An easily
+   of Madison.                                                         implemented technique for 3D moving boundary computations.
+                                                                       J. Comput. Phys. 210, 1, 1–31.
+F OSTER , N., AND F EDKIW, R. 2001. Practical animation of liq-
+   uids. In Computer Graphics Proc. (Proc. SIGGRAPH), 23–30.         P ESKIN , C. S. 2002. The immersed boundary method. Acta Nu-
+                                                                        merica 11, 479–517.
+F OSTER , N., AND M ETAXAS , D. 1996. Realistic animation of
+   liquids. Graphical models and image processing: GMIP 58, 5,       R ASMUSSEN , N., E NRIGHT, D., N GUYEN , D., M ARINO , S.,
+   471–483.                                                             S UMNER , N., G EIGER , W., H OON , S., AND F EDKIW, R. 2004.
+                                                                        Directable photorealistic liquids. In ACM-EG Proc. Symposium
+G ÉNEVAUX , O., H ABIBI , A., AND D ISCHLER , J.-M. 2003. Sim-         on Computer Animation, 193–202.
+   ulating fluid–solid interaction. In Graphics Interface, 31–38.
+                                                                     ROBLE , D., BIN Z AFAR , N., AND FALT, H. 2005. Cartesian
+G IBOU , F., F EDKIW, R., C HENG , L.-T., AND K ANG , M. 2002.         grid fluid simulation with irregular boundary voxels. In Proc.
+   A second order accurate symmetric discretization of the Poisson     SIGGRAPH Sketches & applications.
+   equation on irregular domains. J. Comput. Phys. 176, 205–227.
+                                                                     S CHWARTZ , P., BARAD , M., C OLELLA , P., AND L IGOCKI , T.
+G UENDELMAN , E., B RIDSON , R., AND F EDKIW, R. 2003. Non-             2006. A Cartesian grid embedded boundary method for the heat
+   convex rigid bodies with stacking. ACM Trans. Graph. (Proc.          equation and Poisson’s equation in three dimensions. J. Comput.
+   SIGGRAPH) 22, 871–878.                                               Phys. 211, 2, 531–550.
+G UENDELMAN , E., S ELLE , A., L OSASSO , F., AND F EDKIW, R.        TAKAHASHI , T., H EIHACHI , U., AND K UNIMATSU , A. 2002. The
+   2005. Coupling water and smoke to thin deformable and rigid         simulation of fluid-rigid body interaction. In Proc. SIGGRAPH
+   shells. ACM Trans. Graph. (Proc. SIGGRAPH) 24, 3, 973–981.          Sketches & applications.
+H ARLOW, F. H., AND W ELCH , J. E. 1965. Numerical Calculation       TAM , D., R ADOVITZKY, R., AND S AMTANEY, R. 2005. An al-
+   of Time-Dependent Viscous Incompressible Flow of Fluid with         gorithm for modelling the interaction of a flexible rod with a
+   Free Surface. Phys. Fluids 8, 2182–2189.                            two-dimensional high-speed flow. Int. J. Numer. Meth. Engng
+                                                                       64, 1057–1077.
+H IRT, C. W., A MSDEN , A. A., AND C OOK , J. L. 1974. An arbi-
+   trary Lagrangian-Eulerian computing method for all flow speeds.   T H ÜREY, N., I GLBERGER , K., AND R ÜDE , U. 2006. Free surface
+   J. Comput. Phys. 14, 3, 227–253.                                     flows with moving and deforming objects with LBM. In Vision,
+                                                                        Modeling, and Visualization.
+H OUSTON , B., B OND , C., AND W IEBE , M. 2003. A unified
+   approach for modeling complex occlusions in fluid simulations.    U DAYKUMAR , H. S., M ITTAL , R., R AMPUNGGOON , P., AND
+   In Proc. SIGGRAPH Sketches & applications.                           K HANNA , A. 2001. A sharp interface Cartesian grid method
+                                                                        for simulating flows with complex moving boundaries. J. Com-
+I RVING , G., G UENDELMAN , E., L OSASSO , F., AND F EDKIW,             put. Phys. 174, 345–380.
+   R. 2006. Efficient simulation of large bodies of water by cou-
+   pling two and three dimensional techniques. ACM Trans. Graph.     Z HU , Y., AND B RIDSON , R. 2005. Animating sand as a fluid.
+   (Proc. SIGGRAPH) 25, 805–811.                                        ACM Trans. Graph. (Proc. SIGGRAPH) 24, 3, 965–972.
+

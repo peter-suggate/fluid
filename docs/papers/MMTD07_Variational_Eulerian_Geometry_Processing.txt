@@ -1,0 +1,675 @@
+                     A Variational Approach to Eulerian Geometry Processing
+                        Patrick Mullen          Alexander McKenzie    Yiying Tong                  Mathieu Desbrun
+                                                              Caltech
+
+
+
+
+Figure 1: Eulerian Geometry: our geometry processing framework offers a fully Eulerian variational approach to (left) outward and inward
+surface offset (here spatially varying by height), (center) simultaneous smoothing of foliations (all isosurfaces of volumetric medical data),
+and (right) a conservative mass advection for incompressible fluid simulation.
+
+
+Abstract                                                                  including mesh element degeneracies, self-intersections, and topol-
+                                                                          ogy changes, all of which require delicate treatment. While some of
+We present a purely Eulerian framework for geometry processing of         these issues can be addressed with point sets [Alexa et al. 2006], the
+surfaces and foliations. Contrary to current Eulerian methods used        problem of continuous (fine) resampling remains, and the concern
+in graphics, we use conservative methods and a variational interpre-      of a proper, topologically-sound surface reconstruction arises.
+tation, offering a unified framework for routine surface operations
+such as smoothing, offsetting, and animation. Computations are per-       Consequently, Eulerian methods emerged as a great alternative to
+formed on a fixed volumetric grid without recourse to Lagrangian          meshes in several applications [Frisken et al. 2000; Museth et al.
+techniques such as triangle meshes, particles, or path tracing. At the    2002; Tasdizen et al. 2003]. One particularly successful Eulerian ap-
+core of our approach is the use of the Coarea Formula to express          proach is the Level Set Method (LSM), drawing on the development
+area integrals over isosurfaces as volume integrals. This enables         of numerical solutions to the Hamilton-Jacobi equations in applied
+the simultaneous processing of multiple isosurfaces, while a single       mathematics. The LSM methodology has proven very useful in
+interface can be treated as the special case of a dense foliation. We     vision, image processing, as well as graphics [Sethian 1999; Osher
+show that our method is a powerful alternative to conventional ge-        and Fedkiw 2003] since the traditional hurdles that mesh process-
+ometric representations in delicate cases such as the handling of         ing faces are nicely circumvented due to a parameterization-free
+high-genus surfaces, weighted offsetting, foliation smoothing of          treatment. However, other problems arise in this particular Eulerian
+medical datasets, and incompressible fluid animation.                     approach. From a numerical point of view, the LSM relies on finite
+                                                                          difference methods applied to a distance function. This specific
+Keywords: Digital geometry processing, Offset surfaces, Normal
+                                                                          setup has significant consequences, first and foremost being that vol-
+flows, Mean curvature flow, Foliations, Fluids.
+                                                                          ume loss cannot be prevented without using additional (most often
+                                                                          Lagrangian) computational devices. A less obvious consequence is
+1    Introduction                                                         that the variational nature of useful flows such as mean curvature
+                                                                          motion, which was numerically exploited and proven crucial for
+Evolving surfaces, be it for modeling or animation purposes, is a         mesh processing [Desbrun et al. 1999], is no longer respected.
+routine task in Computer Graphics. Over the last decade, the method
+of choice to process geometry has consisted of a Lagrangian setup         In this paper we present an alternative to current purely-Eulerian
+where the surface is explicitly stored as a piecewise-linear mesh, and    methods in graphics by describing a conservative (i.e., mass-
+vertices are moved so as to achieve the desired deformation [Botsch       preserving) and variational treatment of basic geometry processing
+and Pauly 2006]. Great success with this approach has been reported       tasks. Based on Geometric Measure Theory, our approach even
+for editing, smoothing, and parameterization, often using variational     allows foliation (multiple-surface) processing, a particularly useful
+formulations [Pinkall and Polthier 1993; Grinspun et al. 2003]. Nev-      tool, e.g., in the treatment of medical datasets (see Fig. 1 & 10).
+ertheless, Lagrangian methods come with their share of difficulties,
+                                                                          1.1   Background
+                                                                          Computing interface motion in the Eulerian setting has recently
+                                                                          received considerable attention in applied mathematics and com-
+                                                                          putational physics (thorough reviews can be found in, for in-
+                                                                          stance, [Sethian 1999; Osher and Fedkiw 2003]). These techniques
+                                                                          have made promising contributions to geometry processing in the
+                                                                          last few years.
+
+                                                                          Lagrange vs. Euler      There is a clear historical preference for La-
+                                                                          grangian methods in surface processing, probably due to the classi-
+                                                                          cal parametric definition of surfaces in differential geometry. More-
+over, the large number of efficient data structures available and the     from LSM-based techniques. We show that processing foliations
+ease with which geometric quantities (volume, area, curvatures, etc)      allows the treatment of single surfaces and multiple surfaces in a
+can be accurately evaluated have contributed to make meshes the           unified framework based on the Coarea Formula. Reusing existing
+representation of choice for surfaces. In comparison, Eulerian data       numerical techniques as much as possible (e.g., the large body of
+structures were, until recently, limited to regular grids or restricted   work on Eulerian advection), we go through the list of basic geom-
+octrees. However, recent progress (e.g., [Houston et al. 2006]) is        etry processing tools: advection, outward and inward offset, mean
+a clear sign that fast and concise Eulerian representations can now       curvature flow, and other gradient flows.
+compete with mesh-based methods—their most salient property
+over mesh-based approaches being the natural handling of complex          Our contributions include a number of distinctive features:
+topology changes without special treatment.
+                                                                           • We use a fully Eulerian representation for our surface(s), elimi-
+                                                                             nating the need to prevent the typical degeneracies of Lagrangian
+Level Set Method        Over the years Eulerian approaches have even         mesh elements.
+shown superiority in applications such as compression of complex           • Unlike LSM, volume control is facilitated by construction, al-
+surfaces [Lee et al. 2003], surface offsetting [Breen and Mauch              lowing conservative flows (as in the case of incompressible fluid
+1999], or even surface mesh extraction from 3D scans [Curless and            simulation) to be easily approximated.
+Levoy 1996]. In applications where high-quality surfaces need to be        • Gradient flows are numerically achieved through a simple vari-
+treated, a particular Eulerian technique called the Level Set Method         ational approach based on the Coarea Formula. In particular,
+has also been successfully used for surface editing [Museth et al.           we perform mean curvature flow through area minimization as
+2002], smoothing [Tasdizen et al. 2003], texturing [Bargteil et al.          proposed in [Droske and Rumpf 2004]—but with no need for
+2006], and even incompressible fluid animation [Foster and Fedkiw            regularization.
+2001] to mention a few. The basic idea of the LSM is to represent a        • Multiple surface processing (where all the isosurfaces in a
+surface as the zero level set of a signed distance function, referred        dataset are handled at once) is easily achieved.
+to as the level set function, and to evolve this function according to
+a partial differential equation of motion [Osher and Sethian 1988].
+This level set function is efficiently stored as discrete values on a
+                                                                          2     Processing Eulerian Foliations
+fixed regular grid, allowing for simple Finite Difference schemes to      Before delving into the mathematical foundations of our approach,
+integrate the motion.                                                     we first discuss the dedicated data structures and representations we
+                                                                          wish to utilize. We focus particularly on finding a representation
+There are, however, serious theoretical and practical issues with         that is as simple as possible (a single value per grid cell to optimize
+LSM. First, the use of a distance function brings inherent limitations:   efficiency and memory requirements), but able to capture basic
+even in the continuous limit, a Lie-advected distance function is no      geometric measures like area.
+longer a distance function. Consequently, an Eulerian discretiza-
+tion of this particular setup introduces an inevitable numerical drift    2.1   Discrete Setup
+resulting in volume loss, particularly in regions of high curvature.
+A multitude of remedies to this intrinsic deficiency have been pro-       A fully-Eulerian setup requires special types of surface representa-
+posed, sometimes as simple as refining the grid, but often at the cost    tions: we only allow ourselves to encode and process data stored
+of significantly higher computational complexity [Sussman and             on a fixed grid. However, the exact type of data to use is, a priori,
+Puckett 2000; Frolkovic and Mikula 2005; Olsson and Kreiss 2005;          arbitrary. Out of the various possibilities, we must rule out using the
+Losasso et al. 2004; Mihalef et al. 2006; Bargteil et al. 2006]. The      conventional LSM distance function representation: as we discussed
+addition of a large amount of Lagrangian particles was introduced as      earlier, such a setup does not appear to be a viable solution due to an
+a way to compensate for volume loss [Enright et al. 2002], although       inevitable loss of volume however accurate its numerical treatment
+high-frequency perturbations of the surface can appear [Bargteil          is—particularly in the case of incompressible fluids (see Fig. 3 for a
+et al. 2006] (one promising approach is to store the level set on         simple example). Unfortunately, Volume-Of-Fluid methods (VOF,
+SPH-like particles [Hieber and Koumoutsakos 2005] as it benefits          where the exact ratio of occupancy of an object within each cell
+from a dual Lagrangian-Eulerian representation). Second, the LSM          is stored [Puckett et al. 1997]) must also be ruled out despite their
+uses a traditionally cell-centered representation of vector fields, in-   perfect volume control, due to their notorious difficulty in accurately
+compatible with conventional incompressible Navier-Stokes solvers         evaluating geometric quantities such as curvatures. Note that newer
+that use staggered Marker-And-Cell (MAC) grids.                           variants have partially addressed this deficiency, at the price of a
+                                                                          dramatic increase in data storage and processing [Dyadechko and
+Gradient Flows      Gradient flows are the linchpin of geometry pro-      Shashkov 2006]. Embracing the specificity of Eulerian grids, the
+cessing: many now-traditional geometric tools for meshes such as          Phase Field Method (PFM) by [Anderson et al. 1998] proposes in-
+mean curvature flow (MCF), shape optimization, and conformal pa-          stead the notion of a smeared interface representation, where grid
+rameterization are best expressed and numerically resolved through        cells in a finite width around the interface capture rapid but smooth
+simple variational principles [Botsch and Pauly 2006; Grinspun            transitions in density. PFM, however, presupposes the profile of
+2006] mostly based on L2 -minimizations. However, Eulerian ge-            the smeared interface, requiring very fine grids to obtain detailed
+ometric methods (including LSM) rarely exploit these variational          results.
+qualities to derive robust numerical schemes. In particular, the nu-
+merical implementation of MCF in LSM relies on finite differences         Finite Volumes Instead, we opt for a (cell-centered) Finite-
+to directly approximate the partial differential equations, instead of    Volume setup, where a single value per cell is stored. This setup
+treating the underlying variational principles.                           falls in the category of interface capturing methods, as it defines
+                                                                          the interface as a region of steep gradient of a characteristic-like
+1.2   Our Approach                                                        function (as opposed to LSM-like interface tracking methods which
+                                                                          treat the interface as a sharp discontinuity moving through a grid).
+In this paper, we propose a fully-Eulerian approach to geometry pro-      This setup has an obvious physical interpretation: acknowledging
+cessing that is numerically based on variational principles and de-       the fact that explicitly maintaining a perfect Heaviside function of
+signed to preserve fundamental invariants—two critical differences        the object is impossible in the discrete Eulerian setting, we do not
+Figure 2: Surface Advection: (left) the bunny is advected in a vortex flow causing severe deformation. (right) Comparison of final results
+obtained after reversing the vortex flow using a piecewise-constant (PWC) and WENO-5 advection scheme. Grid size: 2803 .
+
+encode the exact surface, but instead store an approximate (blurred,       discrete surfaces. For instance, discrete (integral) curvatures are
+in a sense) mass density of the object inside each cell. Thus, a cell      nicely defined through Steiner’s polynomial [Schröder 2006], a vari-
+with a value of 0 will be considered completely outside the object,        ational characterization of infinitesimal displacements. Of particular
+a cell at 1 will be considered as completely inside, and the rest of       interest in our work is another celebrated result from Geometric Mea-
+the cells (with densities varying from 0 to 1) represent a smeared         sure Theory (surprisingly absent in the graphics literature) called
+interface of the object. (Note that we will use the terms density and      the Coarea Formula [Federer 1959]. When reduced to the case of
+mass density interchangeably as our explanations will always use           3D (Euclidean) space, this formula states that for a scalar field ρ
+densities restricted to [0, 1].) Unlike VOF or PFM, we do not restrict     with mild continuity conditions, integrating a function over each of
+the profile of our density function, avoiding the computational over-      its isolevels in a region R can be done directly by a volume integral
+head incurred when a special profile needs to be maintained, as well       over R through:
+as allowing the treatment of multiple isosurfaces with varying shape.                  Z    Z                            Z
+Note finally that this density-based setup will facilitate the use of                                    f (x) dA dc =        f (x) |∇ρ|dV,      (1)
+this Eulerian representation in applications such as fluid simulation.                  R   ρ −1 (c)∩R                    R
+
+2.2   Foliations                                                           where c denotes an isovalue of ρ, ρ −1 (c) represents the c-isosurface
+                                                                           (i.e., the set of 3D points such that ρ(x) = c), and f (.) is an arbitrary
+The use of smeared-out Heaviside functions to define an interface          function of space. In other words, the term |∇ρ| measures a local
+is common in phase field and level set methods (e.g., when surface         “density of isosurface area”. Consequently, if we think of the foli-
+tension must be transferred to the surroundings). However, unlike          ation consisting of all ρ −1 (c) as the representation of a “smeared
+LSM and PFM that use predefined expressions for the smearing (typ-         interface”, the Coarea Formula elucidates the relationship between
+ically piecewise Gaussian or sine functions), we will demonstrate          the sum of area integrals and a global volume integral. We now
+that there is significant benefit to keeping our approach valid for any    have not only a representation, but also a mathematical formalism
+function: we will be able to either accurately capture the motion of       to process it.
+a single surface by keeping the density function sharp, or process
+the whole family of isosurfaces that a density function represents.        2.4    Overview of Foliation Processing
+Such a family of isosurfaces of a given function in R3 is a foliation,
+while a single isosurface is a leaf of this foliation (think “layers” of   In the remainder of this paper, we discretize a domain Ω by a
+an onion as an analogy). At the core of our approach is the idea that      regular grid G (extension to arbitrary grids will be discussed in
+one could manipulate foliations instead of single surfaces: we do          Section 7). A grid cell of G is denoted CRi , and the spacing be-
+not favor one isosurface over another, but rather move them all in         tween cells is denoted h. A cell average h13 Ci ρdV is abbreviated
+concert. We show in the next section that such foliation processing        to ρi . We denote Fi j the (oriented) face between cells Ci and C j .
+can be achieved through simple volume integration, which has a             The mass flux between these cells (i.e., the amount of mass per
+natural resilience against numerical noise.                                unit time crossing Fi j ) is denoted fi j (a positive value meaning
+                                                                           a transfer from i to j). Finally, when using a
+Single Surface as a Sharp Foliation         For the treatment of single    vector field u, we denote
+                                                                                                   R       ui j its flux through the
+surfaces, we offer a compromise between the inherent volume loss           face Fi j , i.e., ui j = Fi j u · nFi j dA. The step size
+of LSM and the artifacts found in exact volume-preserving VOF              used for time integration is denoted dt.
+methods. Rather than trying to preserve the volume of a particular
+isosurface, we instead use conservative methods to exactly preserve        Foliation Evolution     In our Eulerian framework, generating a par-
+the total mass used to represent the surface. This mass conservation       ticular type of surface(s) evolution is achieved through an update
+leads to standard volume conservation in the limit of a sharp (un-         of the density field ρ. As we will see next, such an update is per-
+smeared) interface, in which case our representation becomes the           formed via integration of a partial differential equation of the general
+characteristic function of the surface. To this end, a sharpening pro-     form (different from the LSM due to its conservative and variational
+cedure (akin to the LSM redistancing) can be employed to maintain          nature):
+a sharp interface and therefore give good volume control while min-                                       advection   gradient f lows
+imizing artifacts. In particular, this exact mass preservation means                           ∂ρ       z }| {       z }| {
+simulations of moving interfaces (e.g. fluids) can be run indefinitely                             = − ∇·(ρu) + ∂∂ L   ρ
+                                                                                                                         |∇ρ|                (2)
+without continually accumulating volume loss.                                                  ∂t
+                                                                           The first rhs term is an advection (i.e., the surface is moved along
+2.3   Coarea Formula                                                       a given vector field) corresponding to the classical mass continuity
+                                                                           (hyperbolic partial differential) equation. The second term handles a
+Geometric Measure Theory provides a wealth of geometric knowl-             large class of surface deformations known as gradient flows, where
+edge particularly relevant in graphics: its use of integration and         the gradient of an energy functional L is driving the surface’s mo-
+measure theory provides generalizations of differential notions to         tion. In particular, we will show that for the mass functional, a
+motion in the normal direction to the interface (the traditional out-
+ward or inward offset for constant propagation speed) is generated.
+A variational, entropy-satisfying numerical scheme will be designed
+to avoid artifacts like swallow tails. Another gradient flow that we
+will demonstrate is the mean curvature flow (when L is the surface
+area), now corresponding to a parabolic partial differential equation.
+We now review these two terms separately over the course of the
+next two sections.
+
+3     Surface Advection
+We first describe how our Eulerian surface(s) representation is up-
+dated to achieve advection along a given vector field u. We follow          Figure 3: 2D Comparison With LSM: Results of advecting a circle
+the typical MAC set-up, i.e., the vector field is given as fluxes on        in a vortex flow via the LSM (top) and our method (bottom), both
+the grid cell boundaries. Note that these fluxes can be trivially com-      using WENO-5. Our density-based approach continues to capture
+puted regardless of whether the vector field is given analytically or       the motion long after the level set has disappeared due to volume
+via node values.                                                            loss during advection. Grid size: 1282
+
+3.1   Density Advection                                                     piecewise-constant (PWC) approximation. This is easily computed
+                                                                            using:
+Since our grid stores a density value per cell, evolving the set of                          fi j = max(ui j , 0)ρi + min(ui j , 0)ρ j .
+all isosurfaces along an external vector field simply amounts to
+advecting the density, i.e., transporting mass along the velocity field.    When higher accuracy is desirable, a WENO-5 reconstruction [Jiang
+This (Lie) advection is achieved through the following equation:            and Shu 1996] is preferable as it picks an average-preserving poly-
+                                                                            nomial as non-oscillatory as possible. Note that both PWC and
+                             ∂ρ
+                                + ∇·(ρu) = 0                         (3)    WENO-5 are upwinding, i.e., they have a stronger dependence on
+                             ∂t                                             data upstream from u—a very intuitive physical (and numerical) con-
+We can enforce this continuous equation weakly on each cell Ci              dition to enforce for correctly “pushing” the density along the vector
+of our regular grid G through integration, as traditionally done in         field. An example of extreme surface deformation is shown in Fig. 2,
+Finite Volume Methods, by applying the divergence theorem to the            where a bunny model is advected along a strong, vortex-like wind
+previous equation, yielding                                                 inducing large deformation. Notice that such an example done in a
+                                                                            Lagrangian setup would require either an extremely dense triangle
+                                                                            mesh to begin with (dense enough to handle the worst deformation),
+                       Z            Z
+                  ∂                             
+                            ρdV +         ρu ·~n dA = 0              (4)    or an adaptive mesh refinement procedure to avoid artifacts. The
+                  ∂t   Ci           ∂Ci
+                                                                            difference that WENO-5 can make compared to PWC in quality be-
+The interpretation of this last equation is particularly intuitive: mass    comes clear if the deformation is reversed: the shape of the original
+gets moved along the vector field from one cell to the next through         bunny is better preserved with a high-order advection scheme.
+faces. This interpretation leads to the evolution equation of the cell
+averages:
+                        dρi       1                                         Time Integration We use a first or second-order Runge Kutta
+                             = − 3 ∑ fi j                                   (TVD—Total Variation Diminishing) time integration [Shu and Os-
+                        dt        h j∈N (C )
+                                              i                             her 1988] depending on the targeted accuracy. Time step size may
+where N (Ci ) denotes the set of cells adjacent to Ci , while fi j refers   be adapted according to the maximum velocity in order to satisfy
+to the flux of matter between cells Ci and C j induced by ui j as           the CFL condition. Our choice of density advection technique also
+defined in Section 2.4. Because mass is only transferred across             allows us to take larger time steps if efficiency is at stake: as detailed
+cells, the total mass will be preserved by construction. The crux           in [Frolkovic and Mikula 2005], the transfer-through-boundary ap-
+of advection is thus to derive “correct” density exchanges at each          proach can be used recursively to provide a fast, stable integration
+cell boundary. Note the obvious link with the conventional level-           method even for time steps larger than what the CFL stability con-
+set Hamilton-Jacobi equation [Sethian 1999]: for divergence-free            dition imposes—at the cost of only a small loss of accuracy.
+vector fields, the two continuous partial differential equations are
+equivalent—only their numerical treatment differs.                          Once an advection procedure is chosen (whichever it may be), we
+                                                                            can proceed to define Eulerian gradient flows, as we now describe.
+3.2   Numerical Integration
+There are a multitude of available finite-volume techniques to de-          4    Gradient Flows in Eulerian Setting
+termine density flux through cell boundaries. The reader can find
+most relevant references in a recent, thorough review by Barth and          Gradient flows are crucial in geometry processing, used in many
+Ohlberger [2004]. We remain agnostic vis-a-vis the optimal method           design and editing tools. A case in point is the mean curvature
+to use. For our graphics purposes where visual impact overrides             flow (MCF) which, by following the gradient of the surface area
+the necessity of accuracy, we opt for a dimension-by-dimension              functional, provides a geometric diffusion appropriate for denois-
+upwind interpolation. This procedure implements the conventional            ing [Desbrun et al. 1999]. This gradient flow and its variants
+REA (reconstruct-evolve-average) algorithm in which the density             spawned several research topics such as conformal mapping and
+is first locally reconstructed by a polynomial such that it fits the        Laplacian editing that successfully employed the same variational
+current cell averages, then evolved through the cell boundary, and          setup. However, in order to define Eulerian counterparts, we first
+finally averaged to deduce the quantity of mass exchange between            need to properly define how a geometric functional is expressed for
+two adjacent cells. The lowest order polynomial can often be suf-           a surface that is no longer discretized as a 2D simplicial complex,
+ficient in graphics applications, in which case we use a Godunov            but as a smeared-out interface in space.
+4.1   Geometric Functionals                                                         where the sharp operator ] uses the metric h, iρ to transform a differ-
+                                                                                    ential into a vector [Abraham et al. 1988]. Note that this continuous
+Various geometric measures can be computed with our Eulerian                        expression is exact: no approximations have yet been made.
+density-based setup. A particularly simple (yet useful) one is the
+total mass induced by a given density ρ:                                            Weak Form in Tangent Space          Droske and Rumpf’s approach
+                                           Z
+                                                                                    continues by defining a weak (Galerkin) formulation using test func-
+                                Mρ =               ρ dV,                      (5)   tions θ from the tangent space of ρ (i.e., the space in which ∂ ρ/∂t
+                                               Ω
+                                                                                    lives) and enforcing that h∂ ρ/∂t, θ iρ = h−( ∂∂ L
+                                                                                                                                     ρ
+                                                                                                                                       )] , θ iρ . Rewritten
+A cell-localized mass value can similarly be defined as: Mi =
+R            3                                                                      using the density-based metric leads to the equation:
+ Ci ρ dV = h ρi . Another measure we will use when dealing with
+a single surface is the deviation D of the density function from the                                  Z
+                                                                                                           ∂ ρ/∂t θ          ∂L
+                                                                                                                             Z
+1                                                                                                                   dV = −      θ dV.
+2 -isosurface:                                                                                           Ω   |∇ρ|          Ω ∂ρ
+                                      1
+                              Z
+                        Dρ = (ρ − )4 dV,                         (6)
+                                Ω     2                                             The use of classical regularization techniques is then proposed to
+This measure will allow us to evaluate how sharp (i.e., how close to                deal with the denominator on the lhs of this equation.
+a Heaviside function) our smeared interface is.
+                                                                                    Discrete Gradient Flows in Dual Tangent Space              We, however,
+One useful property of the Coarea Formula is that it can be used                    prefer to avoid regularization completely. We resort instead to test
+to compute less obvious geometric measures of surfaces in the Eu-                   functions θ from the dual space of ∂ ρ/∂t (i.e., covectors) and define
+lerian framework. In particular, the surface area Aρ of a smeared                   our weak formulation as enforcing the equality between natural
+interface defined by a density field ρ finds an elegant expression and              pairings (vector-covector) with all test functions, i.e., (∂ ρ/∂t, θ ) =
+interpretation. Indeed, one can take all isosurface areas into account              (−( ∂∂ L
+                                                                                           ρ
+                                                                                             )] , θ ). This yields the equation
+and thus define a total Eulerian surface area (integrated throughout
+the foliation) as:                                                                                   Z
+                                                                                                         ∂ρ            ∂L
+                                                                                                                        Z
+                    Z       Z                                   Z                                           θ dV = −      |∇ρ|θ dV.
+              def                                     Eq. (1)                                          Ω ∂t          Ω ∂ρ
+          Aρ =                              dA dc =                 |∇ρ| dV   (7)
+                    (0,1)   ρ −1 (c)∩Ω                          Ω                   Both methods are strictly equivalent if arbitrary continuous test
+Note that, in the limit case of an infinitely fine grid where ρ is                  functions are used. However, we can now restrict θ to the space
+exactly a characteristic function (1 for inside, 0 for outside), this               spanned by the piecewise-constant basis functions θi , i.e., where θi
+integral equals the area of the (unique) interface. Therefore, this Eu-             is defined to be 1 inside cell Ci and 0 elsewhere. With this Petrov-
+lerian surface area is a direct extension of the usual Lagrangian area,             Galerkin treatment, a gradient flow integration step is thus performed
+accommodating the volumetric nature of our spatial discretization.                  by computing:
+Using the exact same derivation, we can also define a “proportion”                               ∂ ρi
+                                                                                                           Z
+                                                                                                               ∂L
+                                                                                                                               
+                                                                                                                                 ∂L
+                                                                                                                                     
+of total area in a cell Ci as simply:                                                                 =−           |∇ρ|dv ≈ −          |∇ρ|i ,
+                                       Z                                                          ∂t        Ci ∂ ρ               ∂ρ i
+                                Ai =        |∇ρ| dV.                                for each cell Ci , meaning that we locally increase/decrease the den-
+                                       Ci
+                                                                                    sity according to the gradient of our functional weighted by the
+4.2   Eulerian Gradient Flows                                                       integrated area of the isosurfaces in cell Ci . This basic idea can now
+                                                                                    be implemented for various functionals as we describe next.
+We approach the notion of gradient flows as a way to evolve all iso-
+surfaces of our density function ρ in order to minimize a given func-               5     Examples of Gradient Flows
+tional L(ρ). That is, instead of the Lagrangian formulation where a
+functional on the surface itself guides the evolution of the interface,             We now provide examples of basic gradient flows along with numer-
+all isodensity surfaces conspire to extremize a volumetric functional.              ical details on how to implement them.
+This approach remains in line with our overarching methodology of
+treating the interface as a collection of isosurfaces, while coinciding             5.1   Surface Offsetting
+with the Lagrangian definition in the limit of infinite resolution; it
+simply accounts for the reality of Eulerian discretization.                         We start off with the simple example of L = ρ, that is, we wish
+                                                                                    to extremize the total change of mass. This gives ∂ L/∂ ρ = 1, in
+                                                                                    which case the gradient flow to maximize this functional becomes:
+Eulerian Norm of Variations       In our Eulerian approach, the tradi-
+tional L2 norm of vector fields in the Lagrangian setting must now                                                ∂ρ
+be replaced by a special norm on variations of density δ ρ: indeed,                                                  = |∇ρ|
+                                                                                                                  ∂t
+a deformation is no longer induced by a surface vector field, but by
+a volumetric change δ ρ of the density function. In fact, a direct                  As previously mentioned, in the case of a sharp interface the total
+application of the Coarea Formula was advocated in [Droske and                      mass becomes the total volume of the surface as well. In this case the
+Rumpf 2004] to equip the space of all possible deformation fields                   flow can be interpreted as maximizing the change in volume, which
+δ ρ with an inner product h, iρ through:                                            we know to be a uniform motion of the surface along its normal
+                                       Z                                            direction, i.e., an offsetting flow. We will show that this gradient flow
+              h δ1 ρ, δ2 ρ iρ =                δ1 ρ δ2 ρ|∇ρ|−1 dV             (8)   can indeed be used for offsetting/insetting surfaces at uniform or
+                                           Ω                                        spatially-varying speeds. We will use a simple variational definition
+                                                                                    of the term |∇ρ| as the maximum mass gain of a cell (induced
+for two variations δ1 ρ and δ2 ρ of ρ. We can now use this metric to                by unit velocity) to derive its numerical approximation (the exact
+define the gradient flow of L with respect to ρ as:                                 same argument leads to defining the inward flow that maximizes
+                        ∂ρ      ∂L ]    ∂L                                          mass loss). For conciseness, we will denote |∇ρ|+       i the maximum
+                           = −(    ) =−    |∇ρ|,                              (9)   mass gain that cell Ci can receive in a time step dt, and |∇ρ|−
+                        ∂t      ∂ρ      ∂ρ                                                                                                              i its
+maximum potential mass loss. These two values become identical                 superfluous swallow tails) to demonstrate its validity—as well as
+for infinitely fine grids (i.e., in the continuous limit), but are different   its time step restriction. Notice that a closely related scheme to ap-
+in our discrete setting.                                                       proximate |∇ρ| is the Engquist-Osher formula [Engquist and Osher
+                                                                               1980]. We found that this formula can also be interpreted directly
+Approximating Local Mass Gain           To obtain an accurate approx-          in variational geometric terms, by simply allowing the velocity to
+imation of each maximum mass gain in the grid, we first compute                be different at each face of the cell while constraining the squared
+the mass gain that would be incurred by each cell if the density               sum of all these local fluxes to be unit. This scheme is thus a viable
+was advected by an axis-aligned velocity field. This computation               alternative (with fairly minor visual difference) in our context as
+is easily achieved by simulating an advection step for a time step             well, though its variational roots are less geometrically obvious.
+dt, for which the PWC or WENO-5 advection approach detailed
+in Section 3 is used to compute the flux on each boundary of the               Implementation   Once the terms in Eqs (11) and (12) have been
+cell for all possible axis-aligned velocity fields. To simplify our            computed, performing a step of positive normal flow is done
+explanations, let us switch to 2D as the extension to 3 dimensions             through:
+will be straightforward. Each cell evaluates the following mass-gain
+values (2 values per axis, one for each direction):                                              ρit+dt = ρit + |∇ρ t |+
+                                                                                                                       i dt,
+         Z                                Z          
+     +                                  −
+  δix = (∇ · (ρ 10 )dt)dV            δix = (∇ · (ρ −1   0 )dt)dV               while a negative normal flow is achieved via:
+           Ci                                Ci
+         Z                                  Z
+    y+                                 y−
+                                                     
+  δi = (∇ · (ρ 01 )dt)dV             δi = (∇ · (ρ −1    0 )dt)dV
+           Ci                                    Ci                                             ρit+dt = ρit − |∇ρ t |−
+                                                                                                                      i dt.
+With these values, we can now derive what the mass increase in the
+cell would be if the local velocity within the cell were (ux , uy ):           Fig. 4 provides an example of both flows on the bunny model. For a
+                                                                               more general normal flow with a spatially-varying magnitude µ(x),
+                       1                +                  −
+                                                                               the update becomes:
+          δ ρi dt =       max(ux , 0)δix + max(−ux , 0)δix
+                      h2                                               (10)                                                          t −
+                                                                                  ρit+dt = ρit + max(µi , 0)|∇ρ t |+
+                                                                                                                                         
+                                     y+               y− 
+                      + max(uy , 0)δi + max(−uy , 0)δi .                                                           i + min(µi , 0)|∇ρ |i dt, (13)
+                                                                               where µi refers to the integral of µ(x) over the cell Ci (see Fig. 1,
+Since we are looking for the maximum mass increase for a unit                  left). Finally, we note that while using a WENO-5 advection is more
+velocity, we want to extremize the above expression subject to the             accurate for approximating mass gain, the computationally-simpler
+constraint |u|2 = u2x + u2y = 1. This is done using a Lagrange multi-          PWC approach produces very similar visual results in practice.
+plier λ , resulting in the objective function δ ρi dt + λ (u2x + u2y − 1).
+Setting its partial derivatives with respect to ux , uy , and λ equal to       5.2   Mean Curvature Flow
+0, and substituting the solution back into Eq (10) gives the equation
+for the maximum mass increase for a unit velocity in the cell to be:           When the energy functional is the total Eulerian area (i.e., L = Aρ ),
+                      v                                                        the resulting gradient flow is known as the mean curvature flow.
+                                          +�              −                    Therefore, by applying the general expression of a gradient flow, we
+                      u max(max(-δix , 0)2, min(δix , 0)2)
+                      u
+             +      1                                                          can explicitly update the density to produce a MCF through:
+     dt|∇ρ|i = 2      t
+                                         y+�             y−           (11)
+                   h      + max(max(-δi , 0)2, min(δi , 0)2)
+                                                                                                                    ∂ Aρ t
+                                                                                                 ρit+dt = ρit −            (|∇ρ t |i dt),
+Similarly, if we maximize the magnitude of mass decrease instead,                                                    ∂ ρi
+we get:
+                                                                               where |∇ρ t |i dt is computed as detailed in Section 5.1 depending
+                    v                +�           −                            on the sign of its multiplicator. What remains to be computed is the
+                    u max(min(-δix , 0)2, max(δix , 0)2)
+                    u
+             −    1                                                            term ∂ Aρ /∂ ρi for a given cell Ci . To achieve this (again focusing
+    dt|∇ρ|i = 2     t
+                                    y+�          y−         (12)               on 2D for clarity), we use a first-order, centered approximation of
+                 h    + max(min(-δi , 0)2, max(δi , 0)2)
+                                                                               the gradient for simplicity that yields:
+Readers aware of the LSM machinery will notice the resemblance                                    1q
+                                                                                           Ai =       (ρE(i) − ρW (i) )2 + (ρN(i) − ρS(i) )2 ,
+with the Godunov scheme for normal flows [Rouy and Tourin 1992].                                  2
+Hence, our geometric derivation can draw upon applied mathemati-               where N(i), S(i),W (i), E(i) represent respectively the north, south,
+cal results that proved convergence (in the sense of viscosity solu-           west, and east neighbor of cell Ci . Notice that in this low order
+tions) and entropy-satisfying property (as it avoids the formation of          approximation, ρi does not appear in the above expression. Remem-
+                                                                               bering that Aρ = ∑ Ai , we can compute
+
+                                                                                          ∂ Aρ    ∂ AN(i) ∂ AS(i) ∂ AW (i) ∂ AE(i)
+                                                                                                =        +       +        +                     (14)
+                                                                                           ∂ ρi     ∂ ρi   ∂ ρi     ∂ ρi     ∂ ρi
+                                                                               Each of these terms on the rhs is easy to compute; for example
+                                                                                                      ∂ AE(i)       ρi − ρE(E(i))
+                                                                                                                =                               (15)
+                                                                                                        ∂ ρi            4AE(i)
+                                                                               While we explain the concept of this approach in 2D, the extension to
+Figure 4: Surface Offsetting: bunny undergoes a negative and                   nD is straightforward. Fig. 5 demonstrates how even our first-order
+positive offset via normal flow. Notice the sharp corners properly             definition of the gradient of ρ provides accurate results compared to
+created in the process. Grid Size: 3503 .                                      an analytical solution.
+                                                                           where N (Ci ) denotes the set of cells adjacent to Ci ; to keep the
+                                                                           sharpening conservative (in a manner similar to the conservative
+                                                                           curvature flow), we then compute the total mass change β that one
+                                                                           step of sharpening creates and finally update each cell according to
+                                                                                                                         β
+                                                                                          ρit+dt = ρit + (wi (ρ t ) −        )|∇ρ t |i dt    (17)
+                                                                                                                        Aρ t
+                                                                           In practice, |∇ρ|i need only be computed once per sharpening phase
+Figure 5: Mean Curvature Flow: (left) a mean curvature flow of a           and can be reused in the few iterations needed to sharpen the band.
+circle results in a continuous decrease of the radius; (right) when
+simulated in an Eulerian setup, our approach (solid line) follows          6     Applications and Implementation Details
+the analytical value of the radius closer than the LSM (dashed line)
+of equivalent order (WENO-5). Grid Size: 1282                              With the above treatment of Eulerian gradient flows, our approach
+                                                                           provides a unified framework for a wide range of geometry process-
+Conservative MCF     We can now extend MCF to approximate a                ing applications. We review three examples that we experimented
+conservative mean curvature flow, a flow defined in the Lagrangian         with, and provide detailed explanations of our implementation.
+setup as minimizing surface area while preserving the volume. To
+implement this flow in Eulerian form, we need to first compute             6.1   Single Surface Processing
+the global mass change ∆M induced by a given time step. This is
+achieved by computing                                                      When focusing on a single surface (as in Fig. 2 and 4 for instance),
+                                                                           one should maintain the sharpness of the interface such that most
+                                     ∂ Aρ t                                of the isosurfaces remain densely located in a narrow band around
+                       ∆M = ∑               |∇ρ t |i .
+                                      ∂ ρi                                 the surface: this strategy will drastically improve the computational
+                                                                           efficiency by integrating the appropriate differential equations solely
+We then update each cell according to
+                                                                           inside this band. We thus keep track of such a narrow band of
+                                  ∂ Aρ t   ∆M                              cells around the interface and restrict our computations to only be
+               ρit+dt = ρit − (          −      )|∇ρ t |i dt       (16)    performed in those band cells. When ρ reaches certain thresholds
+                                   ∂ ρi    Aρ t
+                                                                           (as in a negligible distance from 1, resp. 0) in the boundary cells
+By our definition of ∆M, the total mass is exactly preserved. Note         of the band, we add the neighboring cells to (resp., remove that
+that this is analogous to the differential geometric way of writing        cell from) the band, thus maintaining this band as it evolves in time.
+conservative mean curvature flow, where instead of moving along            Any remaining small inward/outward flux across the boundary of
+the normal times κ (mean curvature), the magnitude becomes (κ −            the band is applied only to the cell in the band, while the mass
+κ) where κ is the average mean curvature over the domain. Fig. 6           change that would have been applied to the outer cell is postponed
+compares the conservative and non-conservative version of MCF.             and accumulated globally. Once the magnitude of this accumulated
+                                                                           mass reaches a threshold, it is reinjected into the system to ensure
+                                                                           total mass preservation over time. In practice, over the course of an
+                                                                           entire simulation the total postponed mass was generally less than
+                                                                           half of a percent of the total mass. We stress that this narrow band
+                                                                           and reinjection process is performed only as an optimization. In
+                                                                           fact, while extremely valuable for many geometry processing tasks,
+                                                                           computation on a narrow band only may not be desirable depending
+                                                                           on the application (e.g., when dealing with mixed materials or non
+                                                                           divergence-free velocity fields).
+Figure 6: Conservative Mean Curvature Flow: while mean curva-
+ture flow (bottom) significantly shrinks an object, a conservative         Reinjection     There are a few viable options on how to handle the
+version (top) restricts the flow to preserve the mass of the surface,      reinjection of the postponed mass transfers. One simple way is to
+leading to near-preservation of the volume. Grid size: 1603                take a step of normal flow to increase or decrease the total mass by
+                                                                           the necessary amount. We had better results using a second option
+5.3   Sharpening Flow                                                      which reinjects the mass along the advective vector field. Once the
+                                                                           threshold is reached, we use the change from the previous advection
+When treating a single sharp interface the density function may            step to add (resp., remove) density only in the cells whose density in-
+smear over time, particularly with low-order schemes. As the inter-        creased (resp., decreased), in an amount proportional to their change
+face gets more diffused, velocities and densities far from the inter-      in that step. This has the advantage of only affecting densities in
+face begin to play unintended roles. Additionally, the volume of any       regions where it is changed regardless. While this method can cause
+particular isosurface can get farther from the correct value despite       slight inaccuracies in the total speed of the advection over long peri-
+mass preservation. In an effort to both maintain good volume con-          ods of time, it can be sufficient for visual purposes. A third option,
+trol and keep the interface reasonably sharp, we may resharpen the         preferred in our tests, is to reinject the mass during sharpening via a
+interface by redistributing the density while preserving the interface     gradient flow, as explained next.
+shape. A sharpening gradient flow is performed by maximizing the
+deviation function Dρ defined in Eq. (6). To avoid over-sharpening
+(that could lead to grid aliasing), we add a limiter to the flow such      Sharpening      When using a narrow band, smearing of the interface
+that regions where the density suddenly jumps by more than a thresh-       leads to a wider band and therefore a greater computational burden.
+old τ (0.4 in all of our experiments) are left intact. Therefore, the      For this reason the sharpening procedure explained in Section 5.3
+whole sharpening phase is performed by first computing                     takes on the additional role of maintaining a complexity proportional
+                                                                           to the interface area at all times. Detecting when sharpening is
+                                       max j∈N (Ci ) (|ρi − ρ j |) 
+                                                                    
+                       3                                                   necessary can be done by occasionally approximating the average
+     wi (ρ) = (ρi − .5) 1 − min 1,                                     ,   width of the band: this is efficiently achieved by dividing the number
+                                                 τ
+Figure 7: Volumetric Rendering Of Fluid: a bunny-shaped fluid is dropped into a box, preserving the total mass even after gravity is inverted
+arbitrarily, causing extreme deformation. Notice how the volumetric rendering reveals intricate details captured by all the isosurfaces
+throughout the animation, despite a very coarse resolution (grid size: 643 ).
+
+of cells in the band by the total surface area given in Eq. (7). If this    This is a heuristic similar in spirit to the level set fluid interface alter-
+average width exceeds some threshold, sharpening is performed as            native described by Bridson [2006], as we are ensuring that pressure
+explained in Section 5.3. A few conservative gradient flow steps            is zero at the surface estimated at the distance of 21 +ρi from the fluid
+are taken until the band width is narrow enough. As stated above,           cell. A last improvement is also added to combat the unphysical
+reinjection can be performed while sharpening by subtracting the            scenario of ρ j > 1 (which can arise during numerical integration):
+accumulated mass from β .                                                   we further augment the Laplacian matrix L of the Poisson equation
+                                                                            by adding (ρ j − 1) to L j j iff ρ j > 1, or equivalently by modifying
+6.2   Conservative Mass Advection for Fluid Simulation                      the rhs of our Poisson equation. This accentuates the pressure in
+                                                                            the cell j, therefore naturally pushing excess mass into neighboring
+Our mass density representation accommodates incompressible free            cells during the next advection time step. Notice in Fig. 8 that our
+surface fluid flows seamlessly. Contrary to the level set approach,         density-based Eulerian formulation brings robustness to the simu-
+mass preservation is easily achieved through our advection scheme           lation as even thin layers of fluid are treated appropriately. In the
+(Eq. 4) guaranteeing that mass is only exchanged through faces,             continuous setting, mass conservation and true volume preservation
+and hence conserved. This property avoids the visual artifacts of           are synonymous under divergence freeness. While this is difficult
+volume loss traditionally present in particle-free surface capturing        to achieve in the discrete world, the aforementioned sharpening pro-
+schemes—and without the memory and computational overhead                   cedure goes far to alleviate artifacts of spatial mass diffusion, but
+associated with particles. In fact, having a mass density provides          without the visual artifacts often seen with VOF methods.
+more intricate visualizations than the traditional single level-set
+visualization: Fig. 7 depicts volume renderings of a long simulation        Miscible fluids can be simulated effortlessly as well, as multiple
+run, showing the complexity of the details captured in the density          fluid densities are admissible in our representation. The total mass
+function even on a coarse grid—and mass is preserved throughout.            density per cell is directly derived as the sum of these fluid densities.
+                                                                            To demonstrate the mixing between liquids, we use a blending of
+                                                                            colors to indicate the types of fluid (see Fig. 9). Note that our
+                                                                            physically based interpretation of ρ as a mass density could also
+                                                                            be amenable to high-speed compressible fluid models, while again
+                                                                            maintaining mass conservation exactly.
+
+
+
+
+Figure 8: Incompressible Fluid Simulation: the feline flows into
+a thin layer of liquid, showing plenty of small-scale motion while          Figure 9: Miscible Fluids: multiple fluid densities can be simulated
+preserving volume - all in the absence of any Lagrangian artifice.          in our density-based representation. Displayed are slices of two
+Grid Size: 1283 for density, 643 for fluid solver                           miscible fluids to demonstrate that mixing is easily achieved even
+                                                                            on a very coarse grid (643 ).
+Our implementation mostly follows [Foster and Fedkiw 2001] ap-
+plied in conjunction with narrow-band velocity extrapolation [Adal-         6.3    Simultaneous Mean Curvature Flows
+steinsson and Sethian 1999], but now using our Eulerian setup in-
+stead of LSM. A cell is included in the Navier-Stokes solve if it           As discussed in the introduction, mean curvature flows performed
+is ‘full’ of fluid (i.e., if ρi > 1 − ε), thus allowing pressure projec-    on meshes are limited: small topological defects can create de-
+tion to a divergence-free velocity field to be computed in the usual        generacies as triangles distort, requiring either iterative mesh
+fashion. Note that we specify Dirichlet boundary conditions on the          surgery [Pinkall and Polthier 1993] or an initial topological
+Poisson equation at the fluid/vacuum interface, setting the weight of       cleanup [Wood et al. 2004]. Conversely the Eulerian framework
+the dual edge between two cells on opposite sides of the interface to       truly shines when dealing with complex topological objects, as topol-
+1/( 12 + ρi ), where i is the cell on the ‘vacuum’ side of the interface.   ogy changes occur naturally without further complications. How-
+Figure 10: MCF Of Multiple Isosurfaces: Foliation processing can perform a mean curvature flow of all isovalues concurrently. Volumetric
+rendering allows the visualization of several isovalues of the 3D medical scan data being simultaneously smoothed. Grid Size: 2803
+
+ever, our framework allows a nice extension: because our approach          7    Conclusions
+is targeting the foliation instead of a particular surface, we can apply
+our mean curvature flow procedure as is to volumetric datasets—            We have presented a general Eulerian framework along with the
+hence performing a curvature flow of all isovalues collectively and        necessary toolkit to perform standard geometry processing on both
+concurrently. This is particularly desirable for 3D data coming from       single surfaces and foliations through the Coarea Formula. Vari-
+medical imaging as they represent (often noisy) density functions,         ational interpretations, previously proven powerful in Lagrangian
+e.g., hydrogen nuclei density in MRI. As our representation is coher-      settings, are used to derive simple, robust, and conservative numeri-
+ent with this density interpretation, we can smooth all the layers of      cal techniques for routine geometric operations such as offsetting,
+the head between skin and skull simultaneously as shown in Fig. 10,        mean curvature flow, and animation. The applications are clearly
+while LSM or even Lagrangian methods could only process a single           numerous, ranging from anisotropic diffusion of 3D medical data to
+isosurface at a time. The speedup is therefore significant, provid-        fluid interface simulations. Although we carefully avoid the use of
+ing a cheap, yet geometrically relevant anisotropic filtering of 3D        Lagrangian devices to remain truly Eulerian, our framework does
+datasets (comparison with a direct (isotropic) Laplacian smoothing         not prevent either (SPH) particles or semi-Lagragian path tracing to
+provided in Fig. 11).                                                      be incorporated for specific applications.
+
+                                                                           Extensions       Although we only use explicit integration throughout
+6.4   Discussion                                                           our paper, implicit integration is an obvious extension deserving
+                                                                           investigation. In particular, the mean curvature flow could benefit
+In order to provide a general estimate of timings with our mini-           from the same treatment as in the Lagrangian setting where the met-
+mally optimized code, we mention that the advection of the bunny           ric was assumed constant during a time step to allow for a simple
+in Fig. 2 took 1.5 seconds per time step, the smoothing of all the         implicit update; a similar process could be applied to, e.g., Eq. (15)
+isovalues of the medical data set required 30 seconds per time step,       where the denominator would be evaluated with the current value
+and the smoothing of the feline in Fig. 6 required 1.5 seconds per         of ρ while the numerator would represent ρ at the next time step—
+time step for non-conservative MCF and 2 seconds for conservative          resulting in a linear equation to solve for the update. Note also that
+MCF. In general inward or outward offsetting takes times compara-          while the details of our approach were restricted to regular grids, re-
+ble to non-conservative MCF for both volumetric and single surface         cent improvements in finite volume advection schemes [Zhang and
+data. These simulations were performed on a single PC with a               Shu 2003] should make the extension to simplicial or cell complexes
+2.93GHz Intel Core 2 CPU, although only the advection step was             both useful and straightforward: once advection is properly defined,
+implemented to take advantage of both cores. The fluid simula-             the exact same variational approaches we used can be extended to ar-
+tions were performed on a single 1.86GHz Pentium 4 machine and             bitrary grids. Advances in Eulerian data structures should also yield
+took approximately 2 minutes per frame, including the fluid solve,         further computational improvements. Farther reaching future work
+advection, and file I/O.                                                   includes investigation of higher order velocity interpolation (which
+                                                                           may be especially useful for adaptive grids), the use of multidimen-
+                                                                           sional density approximations for more accurate advection, as well
+                                                                           as the study of higher order mean curvature (and Wilmore [Droske
+                                                                           and Rumpf 2004]) flow approximations.
+
+                                                                           Acknowledgments Special thanks to Santiago V. Lombeyda for
+                                                                           volume visualization of Figures 7 and 10. Additional thanks to
+                                                                           Peter Schröder, Ken Museth, and anonymous reviewers for their
+                                                                           discussions and comments. This work is supported by NSF (CA-
+                                                                           REER CCR-0133983, and ITR DMS-0453145), DOE (DE-FG02-
+                                                                           04ER25657), and Pixar.
+
+                                                                           References
+Figure 11: Comparison With Laplacian: A skull (red) along with
+the same amount of smoothing with our mean curvature flow (teal,           A BRAHAM , R., M ARSDEN , J., AND R ATIU , T., Eds. 1988. Mani-
+left) and a standard (isotropic) 3D Laplacian smoothing of the                folds, Tensor Analysis, and Applications. Applied Mathematical
+dataset (green, right). Our mean curvature behaves as expected                Sciences Vol. 75, Springer.
+in convex/concave regions, while Laplacian flow results in signifi-        A DALSTEINSSON , D., AND S ETHIAN , J. 1999. The Fast Construc-
+cant outward motion due to interference from neighboring isovalues.           tion of Extension Velocities in Level Set Methods. J. Computa-
+Grid Size: 2803                                                               tional Physics 148, 2–22.
+A LEXA , M., G ROSS , M., PAULY, M., P FISTER , H., S TAMMINGER ,       and Versatile Deformable Surface Representation. ACM Trans.
+   M., AND Z WICKE , M., 2006. Point-Based Computer Graphics.           on Graphics 25, 1, 151–175.
+   ACM SIGGRAPH Course.                                               J IANG , G.-S., AND S HU , C.-W. 1996. Efficient Implementation
+A NDERSON , D. M., M C FADDEN , G. B., AND W HEELER , A. A.               of Weighted ENO Schemes. J. Comp. Phys. 126, 1, 202–228.
+  1998. Diffuse-Interface Methods In Fluid Mechanics. Annual          L EE , H., D ESBRUN , M., AND S CHR ÖDER , P. 2003. Progressive
+  Review of Fluid Mechanics 30, 139–165.                                 Encoding of Complex Isosurfaces. In Proc. of ACM SIGGRAPH,
+BARGTEIL , A. W., G OKTEKIN , T. G., O’B RIEN , J. F., AND               471–476.
+  S TRAIN , J. A. 2006. A Semi-Lagrangian Contouring Method           L OSASSO , F., G IBOU , F., AND F EDKIW, R. 2004. Simulating
+  for Fluid Simulation. ACM Trans. Graph. 25, 1, 19–38.                  Water and Smoke with an Octree Data Structure. ACM Trans.
+BARTH , T., AND O HLBERGER , M. 2004. Finite volume methods:             Graph. 23, 3 (Aug.), 457–462.
+  foundation and analysis, vol. 1 of Encyclopedia of Computational    M IHALEF, V., U NLUSU , B., M ETAXAS , D., S USSMAN , M., AND
+  Mechanics, E. Stein, R. de Borst, T.J.R. Hughes (Eds.). John           H USSAINI , M. 2006. Physics-based Boiling Simulation. In
+  Wiley and Sons Ltd, 439–474.                                          EG/ACM SIGGRAPH Symp. on Comput. Anim., 317–324.
+B OTSCH , M., AND PAULY, M., 2006. Geometric Modeling based           M USETH , K., B REEN , D., W HITAKER , R., AND BARR , A. 2002.
+   on Triangle Meshes. ACM SIGGRAPH Course.                             Level Set Surface Editing Operators. ACM Trans. on Graphics
+                                                                        21, 3, 330–338.
+B REEN , D., AND M AUCH , S. 1999. Generating Shaded Offset
+   Surfaces with Distance, Closest-Point and Color Volumes. In        O LSSON , E., AND K REISS , G. 2005. A Conservative Level Set
+   International Workshop on Volume Graphics, 307–320.                   Method for Two Phase Flow. J. Comput. Phys. 210, 1, 225–246.
+B RIDSON , R., F EDKIW, R., AND M ÜLLER -F ISCHER , M. 2006.         O SHER , S., AND F EDKIW, R. 2003. Level Set Methods and Dy-
+   Fluid Simulation. In ACM SIGGRAPH Course Notes.                       namic Implicit Surfaces, vol. 153 of Applied Mathematical Sci-
+                                                                         ences. Springer-Verlag, New York.
+C URLESS , B., AND L EVOY, M. 1996. A Volumetric Method for
+   Building Complex Models from Range Images. In Proc. of ACM         O SHER , S., AND S ETHIAN , J. E. 1988. Fronts Propagating with
+   SIGGRAPH, 303–312.                                                    Curvature-dependent Speed: Algorithms based on the Hamilton-
+                                                                         Jacobi Formulation. Journal of Computational Physics 79, 12–49.
+D ESBRUN , M., M EYER , M., S CHR ÖDER , P., AND BARR , A. 1999.
+   Implicit Fairing of Irregular Meshes using Diffusion and Curva-    P INKALL , U., AND P OLTHIER , K. 1993. Computing Discrete Min-
+   ture Flow. ACM SIGGRAPH, 317–324.                                     imal Surfaces and Their Conjugates. Experimental Mathematics
+                                                                         2, 1, 15–36.
+D ROSKE , M., AND RUMPF, M. 2004. A Level Set Formulation for
+   Willmore Flow. Interfaces and Free Boundaries 6, 3, 361–378.       P UCKETT, E. G., A LMGREN , A. S., B ELL , J. B., M ARCUS , D. L.,
+                                                                         AND R IDER , W. J. 1997. A High-order Projection Method
+DYADECHKO , V., AND S HASHKOV, M., 2006. Moment-of-Fluid                 for Tracking Fluid Interfaces in Variable Density Incompressible
+  Interface Reconstruction. LANL Technical Report LA-UR-05-              Flows. J. Comput. Phys. 130, 2, 269–282.
+  7571.
+                                                                      ROUY, E., AND T OURIN , A. 1992. A Viscosity Solutions Approach
+E NGQUIST, B., AND O SHER , S. 1980. One-Sided Difference               to Shape-From-Shading. SIAM J. on Num.l Analysis 29, 3, 867–
+   Schemes and Transonic Flow. PNAS 77, 6, 3071–3074.                   884.
+E NRIGHT, D., R. F EDKIW, J. F., AND M ITCHELL , I. 2002. A Hy-       S CHR ÖDER , P. 2006. What Can We Measure. Discrete Differential
+   brid Particle Level Set Method for Improved Interface Capturing.      Geometry, E. Grinspun, P. Schröder, M. Desbrun (Eds.). ACM
+   J. Computational Physics 183, 83–116.                                 SIGGRAPH Course Lecture Notes, 8–12.
+F EDERER , H. 1959. Curvature Measures. Trans. Amer. Math. Soc.       S ETHIAN , J. A. 1999. Level Set Methods and Fast Marching
+   93, 418–491.                                                          Methods, 2nd ed., vol. 3 of Monographs on Appl. Comput. Math.
+                                                                         Cambridge University Press, Cambridge.
+F OSTER , N., AND F EDKIW, R. 2001. Practical Animation of
+   Liquids. In ACM SIGGRAPH, 23–30.                                   S HU , C., AND O SHER , S. 1988. Efficient Implementation of
+                                                                         Essentially non-Oscillatory Shock Capturing Schemes. J. Sci.
+F RISKEN , S., P ERRY, R., ROCKWOOD , A., AND J ONES , T. 2000.          Comput. 77, 439–471.
+   Adaptively Sampled Distance Fields: A General Representation
+   of Shape for Computer Graphics. In ACM SIGGRAPH Proc.,             S USSMAN , M., AND P UCKETT, E. G. 2000. A Coupled Level Set
+   249–254.                                                              and Volume-Of-Fluid method for Computing 3D and Axisym-
+                                                                         metric Incompressible Two-phase Flows. J. Comput. Phys. 162,
+F ROLKOVIC , P., AND M IKULA , K., 2005. High-resolution Flux-           2, 301–337.
+   based Level Set Method. Preprint 2005-12. Department of Math-
+                                                                      TASDIZEN , T., W HITAKER , R., B URCHARD , P., AND O SHER , S.
+   ematics and Descriptive Geometry, Slovak University of Technol-
+                                                                        2003. Geometric Surface Processing via Normal Maps. ACM
+   ogy, Bratislava.
+                                                                        Trans. on Graphics 2, 4, 1012–1033.
+G RINSPUN , E., H IRANI , A. N., D ESBRUN , M., AND S CHR ÖDER ,     W OOD , Z., H OPPE , H., D ESBRUN , M., AND S CHR ÖDER , P. 2004.
+   P. 2003. Discrete Shells. In Symposium on Computer Animation,        Removing excess topology from isosurfaces. ACM Trans. Graph.
+   62–67.                                                               23, 2, 190–208.
+G RINSPUN , E., 2006. Discrete Differential Geometry: an applied      Z HANG , Y., AND S HU , C. 2003. High-Order WENO Schemes for
+   introduction. ACM SIGGRAPH Course.                                    Hamilton-Jacobi Equations on Triangular Meshes. J. Sci. Comput.
+H IEBER , S. E., AND KOUMOUTSAKOS , P. 2005. A Lagrangian                24, 1005–1030.
+   particle level set method. J. Comput. Phys. 210, 1, 342–367.
+H OUSTON , B., N IELSEN , M., BATTY, C., N ILSSON , O., AND
+   M USETH , K. 2006. Hierarchical RLE Level Set: A Compact
+
