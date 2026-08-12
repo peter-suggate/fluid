@@ -11,8 +11,25 @@ import {
 } from "./types";
 import type { SceneDescription } from "../model";
 
+export const UNIFORM_RUNTIME_PARAM_KEYS = Object.freeze([
+  "gammaDiffusion",
+  "gammaDiffusionIterations",
+  "densitySharpening",
+  "sharpeningMassCorrection",
+  "sharpeningStrength",
+  "sharpeningDistance",
+  "solidExcessCorrection",
+  "rigidCoupling",
+  "velocityTransport",
+  "timeStep",
+  "densityPostProcessing",
+] as const);
+
+const runtimeUpdate = { update: "runtime" as const };
+
 const params: MethodParamSpec[] = [
   {
+    ...runtimeUpdate,
     kind: "select",
     key: "gammaDiffusion",
     label: "Gamma diffusion",
@@ -25,6 +42,7 @@ const params: MethodParamSpec[] = [
     hint: "Ablates Sec. 3.4's ordered pair equalization. The conservative density transport still publishes a complete rho/gamma state for downstream stages.",
   },
   {
+    ...runtimeUpdate,
     kind: "number",
     key: "gammaDiffusionIterations",
     label: "Gamma iterations",
@@ -38,6 +56,7 @@ const params: MethodParamSpec[] = [
     hint: "Each paper iteration is six even/odd axis passes. One is cheapest; seven is the robust high-compression setting.",
   },
   {
+    ...runtimeUpdate,
     kind: "select",
     key: "densitySharpening",
     label: "Interface sharpening",
@@ -50,6 +69,7 @@ const params: MethodParamSpec[] = [
     hint: "Ablates the local Sec. 3.5 density correction. Turning it off bypasses both sharpening and its dependent mass-return stage.",
   },
   {
+    ...runtimeUpdate,
     kind: "select",
     key: "sharpeningMassCorrection",
     label: "Sharpening mass return",
@@ -62,6 +82,7 @@ const params: MethodParamSpec[] = [
     hint: "Controls Algorithm 2 separately from the density correction. Off keeps the sharpened field but omits the scatter/resolve that returns removed mass locally.",
   },
   {
+    ...runtimeUpdate,
     kind: "number",
     key: "sharpeningStrength",
     label: "Sharpening strength",
@@ -75,6 +96,7 @@ const params: MethodParamSpec[] = [
     hint: "Scales the paper's 3dt pseudo-time dose used by the local density correction.",
   },
   {
+    ...runtimeUpdate,
     kind: "number",
     key: "sharpeningDistance",
     label: "Mass-return distance",
@@ -88,6 +110,7 @@ const params: MethodParamSpec[] = [
     hint: "Maximum Algorithm 2 gradient-trace distance D. The paper uses values from 1.1 to 3.1 cells.",
   },
   {
+    ...runtimeUpdate,
     kind: "select",
     key: "solidExcessCorrection",
     label: "Partial-solid excess",
@@ -100,6 +123,7 @@ const params: MethodParamSpec[] = [
     hint: "Ablates the conservative redistribution of density that exceeds a cut cell's open fraction.",
   },
   {
+    ...runtimeUpdate,
     kind: "select",
     key: "rigidCoupling",
     label: "Rigid coupling",
@@ -122,7 +146,7 @@ const params: MethodParamSpec[] = [
     max: 5,
     step: 1,
     digits: 0,
-    hint: "CM11a Full-Cycles seed corrections from the coarsest grid upward. The paper schedule uses three.",
+    hint: "CM11a Full-Cycles seed corrections from the coarsest grid upward. The paper schedule uses three. This prebuilt dispatch schedule resets the solver when changed.",
   },
   {
     kind: "number",
@@ -135,7 +159,7 @@ const params: MethodParamSpec[] = [
     max: 8,
     step: 1,
     digits: 0,
-    hint: "Refinement V-Cycles after the Full-Cycles. The paper schedule uses four.",
+    hint: "Refinement V-Cycles after the Full-Cycles. The paper schedule uses four. This prebuilt dispatch schedule resets the solver when changed.",
   },
   {
     kind: "number",
@@ -148,9 +172,10 @@ const params: MethodParamSpec[] = [
     max: 8,
     step: 1,
     digits: 0,
-    hint: "Projected red-black Gauss-Seidel sweeps on each side of a multigrid coarse correction.",
+    hint: "Projected red-black Gauss-Seidel sweeps on each side of a multigrid coarse correction. This prebuilt dispatch schedule resets the solver when changed.",
   },
   {
+    ...runtimeUpdate,
     kind: "select",
     key: "velocityTransport",
     label: "Velocity advection",
@@ -163,6 +188,7 @@ const params: MethodParamSpec[] = [
     hint: "Semi-Lagrangian uses the original single backward-trace update. Bounded MacCormack adds a forward prediction, predicted-field extension, reverse trace, and local-extrema-limited correction.",
   },
   {
+    ...runtimeUpdate,
     kind: "select",
     key: "timeStep",
     label: "Time step",
@@ -175,6 +201,7 @@ const params: MethodParamSpec[] = [
     hint: "Chentanez-Müller run dt=1/30 s (CFL 8-25) in every example; Sec. 3.5 sharpening only balances transport diffusion at that per-step dose. Scene-step mode exists for matched-dt comparison lanes and dilutes the interface at small dt.",
   },
   {
+    ...runtimeUpdate,
     kind: "select",
     key: "densityPostProcessing",
     label: "Sub-grid rendering",
@@ -259,6 +286,7 @@ export const uniformMethod: SimulationMethod = {
   // octree technique overlays would read a compact source it never produces.
   supportedFieldModes: ["structure", "cfl", "speed", "phi"],
   params,
+  runtimeParamKeys: UNIFORM_RUNTIME_PARAM_KEYS,
   pressureMapping: "CM11a fixes 3 Full-Cycles, 4 V-Cycles, and four pre/post PRBGS sweeps.",
   presetFor: () => ({}),
   createSolverAsync: (

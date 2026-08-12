@@ -877,6 +877,8 @@ export class FluidLabRenderer {
   private uniformBuffer?: GPUBuffer;
   private bodyBuffer?: GPUBuffer;
   private fluidTexture?: GPUTexture;
+  /** Dense surface currently bound into presentation pipelines. */
+  private attachedSurfaceTexture?: GPUTexture;
   private columnBaseTexture?: GPUTexture;
   private gridCellTexture?: GPUTexture;
   private velocityFallbackTexture?: GPUTexture;
@@ -1749,7 +1751,8 @@ export class FluidLabRenderer {
     // they carried stay, because the scene they describe has not changed.
     this.rigidPoseStaging = [];
     this.presentationTexture = undefined; this.presentationTextureKey = "";
-    this.fluidTexture = undefined; this.columnBaseTexture = undefined; this.gridCellTexture = undefined;
+    this.fluidTexture = undefined; this.attachedSurfaceTexture = undefined;
+    this.columnBaseTexture = undefined; this.gridCellTexture = undefined;
     this.velocityFallbackTexture = undefined; this.pressureSamplesFallbackTexture = undefined; this.scalarFallbackTexture = undefined;
     this.fluidTextureKey = ""; this.fluidRevision = -1;
     this.presentationTracePending = false; this.latestPresentationTrace = undefined; this.latestPresentationStageTrace = undefined;
@@ -1816,6 +1819,7 @@ export class FluidLabRenderer {
   private updateRenderSources(texture = this.fluidTexture, columnSource?: GPUTexture, gridCells = this.gridCellTexture, velocity = this.velocityFallbackTexture, pressureSamples = this.pressureSamplesFallbackTexture, divergence = this.scalarFallbackTexture, pressure = this.scalarFallbackTexture) {
     const columnBases = columnSource ?? this.columnBaseTexture;
     if (!this.device || this.disposed || this.deviceLost || !texture || !columnBases || !gridCells || !velocity || !pressureSamples || !divergence || !pressure) return;
+    this.attachedSurfaceTexture = texture;
     this.waterPipeline?.setVolume(texture, columnBases);
     const globalFineLevelSet = this.gpuFluid?.globalFineLevelSetSource;
     this.waterPipeline?.setGlobalFineLevelSet(globalFineLevelSet
@@ -2722,10 +2726,14 @@ export class FluidLabRenderer {
     const globalFineWaterReady = Boolean(readyGPUFluid
       && readyGPUFluid.initialSparseAuthorityReady
       && (readyGPUFluid.globalFineLevelSetSource || readyGPUFluid.coarseLevelSetSource));
-    if (readyGPUFluid && globalFineWaterReady !== this.globalFineWaterAttached) {
+    const requestedSurface = readyGPUFluid
+      ? globalFineWaterReady ? this.scalarFallbackTexture : readyGPUFluid.surfaceFieldTexture ?? readyGPUFluid.volumeTexture
+      : undefined;
+    if (readyGPUFluid && (globalFineWaterReady !== this.globalFineWaterAttached
+      || requestedSurface !== this.attachedSurfaceTexture)) {
       this.globalFineWaterAttached = globalFineWaterReady;
       this.updateRenderSources(
-        globalFineWaterReady ? this.scalarFallbackTexture : readyGPUFluid.surfaceFieldTexture ?? readyGPUFluid.volumeTexture,
+        requestedSurface,
         readyGPUFluid.columnBaseTexture,
         readyGPUFluid.gridCellTexture ?? this.gridCellTexture,
         readyGPUFluid.velocityTexture ?? this.velocityFallbackTexture,

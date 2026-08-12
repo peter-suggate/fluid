@@ -19,7 +19,11 @@ import {
   type GPUVelocityTransport,
 } from "./webgpu-eulerian";
 import { GPUInitializationTaskRunner, type GPUInitializationTask } from "./gpu-initialization";
-import type { GPUSolverInstance, GPUInitializationReporter } from "./methods/types";
+import type {
+  GPUSolverInstance,
+  GPUInitializationReporter,
+  MethodParamValues,
+} from "./methods/types";
 import { WebGPURigidBodySystem } from "./webgpu-rigid-body";
 import { uniformReferenceComputeShader } from "./webgpu-uniform-reference.wgsl";
 import { WebGPUUniformVelocityExtrapolator } from "./webgpu-uniform-velocity-extrapolation";
@@ -202,7 +206,9 @@ const UNIFORM_PRESSURE_STAGE_PHASE: Readonly<Record<UniformCM11aPlanStage, GPUTi
 export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   readonly info: GPUEulerianInfo;
   readonly volumeTexture: GPUTexture;
-  readonly surfaceFieldTexture: GPUTexture;
+  get surfaceFieldTexture(): GPUTexture {
+    return this.densityPostProcessing ? this.surfaceB : this.volumeA;
+  }
   readonly columnBaseTexture: GPUTexture;
   readonly velocityTexture: GPUTexture;
   /** Velocity after advection/forces and before the pressure projection. */
@@ -300,17 +306,17 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private readbackPending = false;
   private lastTime = 0;
   private referenceVolumeCells = 0;
-  private readonly densityPostProcessing: boolean;
-  private readonly densitySharpening: boolean;
-  private readonly sharpeningMassCorrection: boolean;
-  private readonly gammaDiffusionIterations: number;
-  private readonly sharpeningStrength: number;
-  private readonly sharpeningDistance: number;
-  private readonly solidExcessCorrection: boolean;
-  private readonly rigidCoupling: boolean;
+  private densityPostProcessing: boolean;
+  private densitySharpening: boolean;
+  private sharpeningMassCorrection: boolean;
+  private gammaDiffusionIterations: number;
+  private sharpeningStrength: number;
+  private sharpeningDistance: number;
+  private solidExcessCorrection: boolean;
+  private rigidCoupling: boolean;
   private readonly pressureSchedule: UniformCM11aSchedule;
-  private readonly paperTimeStep: boolean;
-  private readonly velocityTransport: GPUVelocityTransport;
+  private paperTimeStep: boolean;
+  private velocityTransport: GPUVelocityTransport;
   private disposed = false;
   private physicsTraceSampleId = 0;
   private physicsTracePending = false;
@@ -426,8 +432,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
         usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
       });
     }
-    if (this.velocityTransport === "maccormack"
-      && typeof process !== "undefined"
+    if (typeof process !== "undefined"
       && process.env.FLUID_UNIFORM_SYMMETRY_STAGE_AUDIT === "1") {
       this.symmetryStageAuditMacCormackBuffer = device.createBuffer({
         label: "Uniform audit bounded MacCormack decisions",
@@ -589,7 +594,6 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       hostSchedulingUsesReadback: false,
     };
     this.volumeTexture = this.volumeA;
-    this.surfaceFieldTexture = this.densityPostProcessing ? this.surfaceB : this.volumeA;
     this.columnBaseTexture = this.heightA;
     this.velocityTexture = this.velocityA;
     this.preProjectionVelocityTexture = this.velocityB;
@@ -675,6 +679,42 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.run(encoder, "Uniform initial post-process blur z", this.pipelines.postprocessBlurZ, this.postprocessBlurZGroup);
     this.run(encoder, "Uniform initial sub-grid surface resolve", this.pipelines.postprocessResolve, this.postprocessResolveGroup);
     this.device.queue.submit([encoder.finish()]);
+  }
+
+  /**
+   * Adopt controls whose pipelines and storage are already resident.
+   *
+   * The renderer calls this once per resolved frame. Keep it allocation-free
+   * and idempotent: stage gates alter host-side command encoding, while the
+   * sharpening scalars reach WGSL through the existing per-advance params
+   * buffer. Turning Sec. 3.8 on while paused is the one transition that needs
+   * work immediately, so reconstruct the current density once for display.
+   */
+  applyRuntimeValues(values: MethodParamValues): void {
+    const finite = (key: string, fallback: number, minimum: number, maximum: number) => {
+      const value = Number(values[key]);
+      return Number.isFinite(value) ? Math.min(maximum, Math.max(minimum, value)) : fallback;
+    };
+    const postProcessing = uniformDensityPostProcessingEnabled(
+      values.densityPostProcessing,
+      this.scene.sceneId,
+    );
+    const refreshPresentation = postProcessing && !this.densityPostProcessing;
+    this.densityPostProcessing = postProcessing;
+    this.densitySharpening = values.densitySharpening !== "off";
+    this.sharpeningMassCorrection = values.sharpeningMassCorrection !== "off";
+    this.gammaDiffusionIterations = values.gammaDiffusion === "off" ? 0 : Math.round(finite(
+      "gammaDiffusionIterations", UNIFORM_GAMMA_DIFFUSION_ITERATIONS, 1,
+      UNIFORM_GAMMA_DIFFUSION_ITERATIONS,
+    ));
+    this.sharpeningStrength = finite("sharpeningStrength", 1, 0.25, 2);
+    this.sharpeningDistance = finite("sharpeningDistance", 2.1, 1.1, 3.1);
+    this.solidExcessCorrection = values.solidExcessCorrection !== "off";
+    this.rigidCoupling = values.rigidCoupling !== "off";
+    this.paperTimeStep = values.timeStep !== "scene";
+    this.velocityTransport = values.velocityTransport === "maccormack"
+      ? "maccormack" : "semi-lagrangian";
+    if (refreshPresentation && this.pipelines) this.encodeInitialPresentationSurface();
   }
 
   private initializeVolumeAndTerrain(): void {
@@ -1468,21 +1508,21 @@ const UNIFORM_FLUID_STAGES: readonly FluidPipelineStage[] = [
         param: "pressureFullCycles",
         label: "Full-Cycles",
         min: 0, max: 5, step: 1,
-        hint: "Coarsest-up CM11a Full-Cycles; the paper schedule uses three.",
+        hint: "Coarsest-up CM11a Full-Cycles; the paper schedule uses three. Changing it rebuilds the precomputed pressure plan and resets to t=0.",
       },
       {
         kind: "param-range",
         param: "pressureVCycles",
         label: "V-Cycles",
         min: 0, max: 8, step: 1,
-        hint: "Refinement V-Cycles after the Full-Cycles; the paper schedule uses four.",
+        hint: "Refinement V-Cycles after the Full-Cycles; the paper schedule uses four. Changing it rebuilds the precomputed pressure plan and resets to t=0.",
       },
       {
         kind: "param-range",
         param: "pressureSweeps",
         label: "Pre/post sweeps",
         min: 1, max: 8, step: 1,
-        hint: "Projected red-black Gauss-Seidel sweeps before and after each coarse correction.",
+        hint: "Projected red-black Gauss-Seidel sweeps before and after each coarse correction. Changing it rebuilds the precomputed pressure plan and resets to t=0.",
       },
       {
         kind: "readout",

@@ -121,7 +121,8 @@ export function FluidPipelinePanel() {
 
   // Declarative stage controls, materialized here so the graph module stays
   // free of React. `param-*` route through the method store exactly as the
-  // method panel would, so runtime-unsafe parameters rebuild the solver.
+  // method panel would. Runtime-safe parameters reach the attached solver on
+  // the next frame; structural controls take the controller's rebuild path.
   const controls = useMemo(() => {
     if (!graph) return {};
     const rendered: Record<string, ReactNode> = {};
@@ -163,6 +164,7 @@ export function FluidPipelinePanel() {
   };
 
   const grid = info ? `${info.nx}×${info.ny}×${info.nz}` : "—";
+  const liveTuning = Boolean(method.runtimeParamKeys?.length);
   const advanceLabel = totalTrace
     ? `${totalTrace.total_ms.toFixed(2)} ms/advance`
     : "no trace yet";
@@ -189,7 +191,11 @@ export function FluidPipelinePanel() {
     <div className="render-preset-strip render-live-strip" role="group" aria-label="Live per-stage timing">
       <PipeToggle label="LIVE ms" checked={liveTiming} onChange={setLiveTiming}
         hint={`Samples the advance on a cadence with hardware timestamp boundaries spliced into passes the step already encodes, so a traced advance submits the same command graph as an untraced one.\n\n${sourceLabel}`} />
-      <output title={`The solver's lattice; every pass in this diagram dispatches over it.`}>GRID {grid}</output>
+      <output title={liveTuning
+        ? "Stage gates and tuning controls apply to the attached solver without resetting time. Pressure schedule controls are marked separately and rebuild their precomputed dispatch plan."
+        : "The solver's lattice; every pass in this diagram dispatches over it."}>
+        {liveTuning ? "TUNING LIVE · " : ""}GRID {grid}
+      </output>
     </div>
 
     {graph

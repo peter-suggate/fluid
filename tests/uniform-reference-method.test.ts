@@ -7,11 +7,13 @@ import {
   simulationMethods,
 } from "../lib/methods";
 import {
+  UNIFORM_RUNTIME_PARAM_KEYS,
   uniformMethod,
   uniformReferenceSolverOptions,
 } from "../lib/methods/uniform";
 import { uniformReferenceComputeShader } from "../lib/webgpu-uniform-reference.wgsl";
 import { uniformDensityPostProcessingEnabled } from "../lib/webgpu-uniform-reference";
+import { structuralMethodValues } from "../lib/webgpu-renderer";
 import { createSmokeScenario } from "../tools/webgpu-smoke-scenarios";
 
 test("uniform is a first-class WebGPU reference method", () => {
@@ -33,6 +35,25 @@ test("uniform reference exposes stage gates, pass schedules, and transport choic
   assert.equal(resolveMethodValues(uniformMethod, "balanced", {}).velocityTransport, "semi-lagrangian");
   assert.equal(resolveMethodValues(uniformMethod, "balanced", {}).timeStep, "paper");
   assert.equal(resolveMethodValues(uniformMethod, "high", {}).densityPostProcessing, "scene");
+  assert.deepEqual(uniformMethod.runtimeParamKeys, UNIFORM_RUNTIME_PARAM_KEYS);
+  assert.deepEqual(
+    uniformMethod.params.filter(({ update }) => update === "runtime").map(({ key }) => key),
+    [...UNIFORM_RUNTIME_PARAM_KEYS],
+  );
+  assert.deepEqual(
+    uniformMethod.params.filter(({ update }) => update !== "runtime").map(({ key }) => key),
+    ["pressureFullCycles", "pressureVCycles", "pressureSweeps"],
+    "only the prebuilt multigrid dispatch plan remains structural",
+  );
+  assert.deepEqual(structuralMethodValues({
+    methodId: "uniform",
+    quality: "balanced",
+    values: resolveMethodValues(uniformMethod, "balanced", {}),
+  }), {
+    pressureFullCycles: 3,
+    pressureVCycles: 4,
+    pressureSweeps: 4,
+  }, "live controls must be absent from the renderer's rebuild fingerprint");
 
   const options = uniformReferenceSolverOptions({ timeStep: "paper", densityPostProcessing: "off" });
   assert.deepEqual(options, {
@@ -169,6 +190,22 @@ test("uniform reference compiles and advances one step on WebGPU", {
     assert.ok(Number.isFinite(stats.maxSpeed_m_s));
     assert.equal(stats.uniformFIMConverged, true);
     assert.equal(stats.uniformFIMTerminalActiveFaces, 0);
+
+    solver.applyRuntimeValues!({
+      ...values,
+      gammaDiffusion: "off",
+      densitySharpening: "off",
+      rigidCoupling: "off",
+      velocityTransport: "maccormack",
+      densityPostProcessing: "off",
+    });
+    assert.equal(solver.surfaceFieldTexture, solver.volumeTexture,
+      "a live Sec. 3.8 toggle must rebind presentation without replacing the solver");
+    assert.equal(solver.advanceTo(2 / 30, []), true,
+      "a live stage/technique update must apply to the next admitted advance");
+    await device.queue.onSubmittedWorkDone();
+    assert.equal((await solver.readStats()).encodedSteps, 2);
+    assert.deepEqual(validationErrors, []);
 
     solver.destroy();
     solver = await uniformMethod.createSolverAsync!(
