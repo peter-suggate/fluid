@@ -54,10 +54,9 @@ level-set hierarchy.
 - CM11b stores velocity collocated and does not publish a staggered-MAC
   stencil or a numeric FIM convergence tolerance.
   The reference therefore applies the stated scalar upwind equation
-  independently on each positive-face lattice and uses one local binary16 ulp
+  independently on each positive-face lattice and uses one local binary32 ulp
   as the convergence threshold. Comparison readback reports the terminal
-  active count and every authoritative open face that remains unknown; both
-  must be zero.
+  active count, which must be zero.
 - The method advances at the paper's own simulation step by default: every
   example in Section 4 runs `dt = 1/30 s` (CFL 8-25), and the
   advection/sharpening balance only holds in that large-step regime. At a far
@@ -68,14 +67,16 @@ level-set hierarchy.
   default, versus `scene`) exists so matched-dt comparison harnesses can pin
   the scene-authored step explicitly; the symmetric-expansion benchmark passes
   `FLUID_UNIFORM_TIME_STEP=scene`.
+  The browser controller uses that same step as its target-clock quantum and
+  the solver rejects fractional paper advances. Treating `1/30 s` only as a
+  `maxDt` previously let the live UI request 4 ms advances while Dawn requested
+  33.33 ms advances, so the two surfaces were not testing the same method.
 - Section 3.5 sharpening uses the paper's fictitious-time correction and
   returns removed air-side density by tracing along `grad(rho)` to the nearby
   interface. Solid destination weights are removed and renormalized. The
-  fictitious step is realized grid-relatively as a two-cell unit-velocity
-  displacement (`deltaT/dx = 2`): the stated `3 dt` evaluates to exactly that
-  on every published example (`dt = 1/30 s`, `dx = 0.05 m`), while a literal
-  `3 dt` at a small scene step under-doses the operator against per-step
-  resample blur.
+  fictitious step is the paper's literal `deltaT = 3 dt`; it is not rescaled
+  with cell size when a comparison lane deliberately selects a non-paper
+  scene timestep.
 - Partial-solid cells use `rho' = rho / V`, fractional open-face aperture
   areas for density, and oriented/moving solid face velocities. Pressure uses
   the distinct CM11a face-centred overlapping-cell volume; a closed aligned
@@ -149,5 +150,8 @@ Memory and work scale with the complete 3D lattice and the CM11a pyramid.
 Fixed-point WebGPU scatters also
 conserve mass only to their quantization precision. The paper's unspecified
 dimension traversal order in gamma diffusion is observable as an x/y/z
-operator-order bias in strict symmetry diagnostics. The method is therefore a
-comparison baseline, not the default and not a binary64 numerical oracle.
+operator-order bias in strict symmetry diagnostics. The current smoke field
+summary is not the paper's marching-cubes enclosed-volume measurement, so a
+Figure 10 volume-curve comparison remains a separate validation task. The
+method is therefore a comparison baseline, not the default and not a binary64
+numerical oracle.

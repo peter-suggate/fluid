@@ -4,6 +4,7 @@ import {
   MINIMUM_LATTICE_DIMENSION,
   sceneLatticeDimensions,
 } from "./scene-lattice";
+import { applyInitialFluidLayout, initialFluidLayout } from "./initial-fluid-layout";
 
 /**
  * Scaling a scene by factors of two.
@@ -11,18 +12,18 @@ import {
  * Two independent axes, because they cost completely different things:
  *
  * - **World** multiplies the container extents and the finest cell size by the
- *   same factor. The lattice is untouched, so the solver keeps its arenas and
- *   its compiled pipelines and only re-seeds: the scene gets physically bigger
- *   or smaller at a constant price. (`gpuSceneStructuralKey` keys the lattice
- *   in cells precisely so this stays a re-seed.)
+ *   same factor. The lattice dimensions are untouched, but metre-mapped GPU
+ *   state is rebuilt so seeded fluid changes physical size with the tank.
+ *   Compiled pipelines remain cached.
  * - **Detail** divides the finest cell size at a fixed world size. That is
  *   eight times the cells per step, so it reallocates every arena — but the
  *   pipeline cache is keyed on shader capabilities and pipeline constants, not
  *   on dimensions, so nothing recompiles.
  *
- * Nothing else scales. A world scale grows the room, not its contents: bodies,
- * props, painted water, the hose, and the camera all stay exactly where and
- * what they were. The only edits below beyond the two lengths are the repairs
+ * Fluid scales with the tank: tank fills retain their fill fraction, authored
+ * reservoirs scale their dimensions and placement, and painted water scales
+ * its seed positions. Other contents — bodies, props, the hose, and the camera
+ * — stay exactly where and what they were. The only other edits below are repairs
  * that keep the document *valid* — a reservoir that no longer fits, a fill
  * fraction that must equal the reservoir's volume share, seeds or a nozzle
  * left outside a shrunken tank. Those are not scaling; they are the alternative
@@ -115,6 +116,9 @@ export function repairSceneForContainer(scene: SceneDescription): SceneDescripti
 }
 
 function scaledScene(scene: SceneDescription, axis: SceneScaleAxis, factor: SceneScaleFactor): SceneDescription {
+  // Capture once into the multi-region representation. Every legacy initial
+  // condition follows the same geometry path from here on.
+  const water = initialFluidLayout(scene);
   const next = cloneScene(scene);
   if (axis === "world") {
     next.container.width_m = scene.container.width_m * factor;
@@ -134,6 +138,10 @@ function scaledScene(scene: SceneDescription, axis: SceneScaleAxis, factor: Scen
   } else {
     next.voxelDomain.finestCellSize_m = scene.voxelDomain.finestCellSize_m / factor;
   }
+  // WORLD changes metres per cell; DETAIL changes how many cells and bricks
+  // cover the same tank. Both must re-materialize the same canonical water
+  // regions against the resulting lattice.
+  applyInitialFluidLayout(next, water);
   return repairSceneForContainer(next);
 }
 

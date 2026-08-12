@@ -427,7 +427,7 @@ fn restrictKnownVelocity(@builtin(global_invocation_id) gid: vec3u) {
   var knownMask = 0u;
   for (var component = 0u; component < 3u; component += 1u) {
     var result = hierarchyComponentSample(p, sourceDims, targetDims, component);
-    if (result.y <= 0.0 && component == 1u) {
+    if (result.y <= 0.0) {
       result = hierarchyCorrespondingCellSample(p, sourceDims, component);
     }
     if (result.y > 0.0) {

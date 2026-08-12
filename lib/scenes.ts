@@ -1,6 +1,6 @@
 import { cloneScene, defaultCamera, defaultScene, DEFAULT_GPU_CPU_TIMESTEP_RATIO, type CameraState, type SceneDescription } from "./model";
 import { applyHeroGardenNodeOverrides } from "./hero-garden-overrides";
-import { createPaperScenario } from "./paper-scenarios";
+import { createMassConservingFigure9DamBreak, createPaperScenario } from "./paper-scenarios";
 import { applyGardenPool, GARDEN_DAM_BRICK_SEED_M, GARDEN_WATERLINE_M, gardenPoolTerrain } from "./garden-scene";
 import {
   createHeroGardenHoseScene,
@@ -1352,7 +1352,6 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     shelf: "Tanks",
     environment: "default",
     presentationMode: "fluid-only",
-    methodProfile: ADAPTIVE_LOSASSO_UI_METHOD_PROFILE,
     build: () => {
       const scene = cloneScene(defaultScene);
       scene.rigidBodies = [];
@@ -1567,9 +1566,19 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     camera: gardenCamera,
   }),
   defineScene({
+    id: "mass-conserving-figure-9-dam-break",
+    name: "CM12 Figure 9 · dam phase",
+    blurb: "Published 128×128×64, dx=.05 m, dt=1/30 s parameters; explicit reconstructed dam geometry for Dawn conformance.",
+    audience: "study",
+    shelf: "Paper figures",
+    environment: "night-lab",
+    build: () => createMassConservingFigure9DamBreak(),
+    camera: paperCamera,
+  }),
+  defineScene({
     id: "hose-tank",
     name: "Hose-filled tank",
-    blurb: "Figure 3 · a continuous jet fills a shallow tank.",
+    blurb: "Paper-inspired legacy demo · a continuous jet fills a shallow tank.",
     audience: "study",
     shelf: "Paper figures",
     environment: "conservatory",
@@ -1580,7 +1589,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
   defineScene({
     id: "dam-break-boxes",
     name: "Dam break + box stack",
-    blurb: "Figure 4 · a dam break strikes a stack of rigid boxes.",
+    blurb: "Paper-inspired legacy demo · a dam break strikes a stack of rigid boxes.",
     audience: "study",
     shelf: "Paper figures",
     environment: "concrete-gallery",
@@ -1590,7 +1599,7 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
   defineScene({
     id: "sphere-jet",
     name: "Jet past sphere",
-    blurb: "Figure 6 · an inlet jet flows past a static sphere.",
+    blurb: "Paper-inspired legacy demo · an inlet jet flows past a static sphere.",
     audience: "study",
     shelf: "Paper figures",
     environment: "night-lab",
@@ -1753,8 +1762,8 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
   }),
   defineScene({
     id: "minimal-power-dam-break",
-    name: "Octree · minimal dam break",
-    blurb: "The analytic 12.5%-volume dam initializer collapses inside a 16³ tank, providing the smallest dynamic authoritative power-projection scene.",
+    name: "Minimal dam break",
+    blurb: "The analytic 12.5%-volume dam initializer collapses inside a 16³ tank, providing the smallest dynamic solver-comparison scene.",
     audience: "validation",
     shelf: "Dam-break ladder",
     environment: "default",
@@ -1764,8 +1773,8 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
   }),
   defineScene({
     id: "minimal-power-dam-break-32",
-    name: "Octree · minimal dam break 32³",
-    blurb: "The same 0.8 m analytic mini dam at 0.025 m resolution. Surface tracking stays coarse-only (1×), while size-16 pressure leaves and three grading layers reveal progressive octree refinement around the interface.",
+    name: "Minimal dam break 32³",
+    blurb: "The same 0.8 m analytic mini dam at 0.025 m resolution, suitable for comparing the Uniform reference lane with the retained Octree profile.",
     audience: "validation",
     shelf: "Dam-break ladder",
     environment: "default",
@@ -1776,8 +1785,8 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
   }),
   defineScene({
     id: "minimal-power-dam-break-64",
-    name: "Octree · minimal dam break 64³",
-    blurb: "The same 0.8 m analytic mini dam at 0.0125 m resolution. Surface tracking stays coarse-only (1×), while size-16 pressure leaves and three grading layers reveal progressive octree refinement around the interface.",
+    name: "Minimal dam break 64³",
+    blurb: "The same 0.8 m analytic mini dam at 0.0125 m resolution, suitable for comparing the Uniform reference lane with the retained Octree profile.",
     audience: "validation",
     shelf: "Dam-break ladder",
     environment: "default",

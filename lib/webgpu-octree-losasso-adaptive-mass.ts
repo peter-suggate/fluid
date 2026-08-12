@@ -6,8 +6,19 @@ import { octreeLosassoAdaptiveMassWGSL } from "./webgpu-octree-losasso-adaptive-
 export const OCTREE_LOSASSO_ADAPTIVE_MASS_MAGIC = 0x414d_4153;
 export const OCTREE_LOSASSO_ADAPTIVE_MASS_CONTROL_WORDS = 32;
 export const OCTREE_LOSASSO_ADAPTIVE_MASS_RECEIPT_WORDS = 32;
-const ADAPTIVE_MASS_UNITS_PER_FINEST_CELL = 65_536;
+const ADAPTIVE_MASS_MAX_UNITS_PER_FINEST_CELL = 65_536;
+const ADAPTIVE_MASS_MAX_DOMAIN_UNITS = 0xffff_ff00;
 const ADAPTIVE_MASS_MAX_ARCS_PER_LEAF = 25;
+
+/** Pick the finest power-of-two density scale whose full-domain reduction fits u32. */
+export function adaptiveMassUnitsPerFinestCell(dimensions: readonly number[]): number {
+  const finestCellCount = dimensions.reduce((product, value) => product * value, 1);
+  const available = Math.floor(ADAPTIVE_MASS_MAX_DOMAIN_UNITS / finestCellCount);
+  if (!Number.isSafeInteger(finestCellCount) || finestCellCount <= 0 || available < 1) {
+    throw new RangeError("adaptive mass fixed-point domain capacity exceeds u32");
+  }
+  return 2 ** Math.floor(Math.log2(Math.min(ADAPTIVE_MASS_MAX_UNITS_PER_FINEST_CELL, available)));
+}
 
 export const adaptiveMassControlLayout = Object.freeze({
   magic: 0, topologyEpoch: 1, surfaceGeneration: 2, leafCount: 3,
@@ -22,6 +33,8 @@ export const adaptiveMassReceiptLayout = Object.freeze({
   reconstructionThresholdBits: 13, reconstructionTargetUnits: 14,
   reconstructionMeasuredUnits: 15, reconstructionSignMismatches: 16,
   firstReconstructionSignMismatchItem: 17, handoffGraphErrors: 18,
+  compressedExcessMassBits: 19, subIsoMassBits: 20,
+  overfullLeafCount: 21, subIsoLeafCount: 22,
 } as const);
 
 const floatWord = (word: number): number => {
@@ -47,6 +60,10 @@ export function unpackAdaptiveMassReceipt(words: ArrayLike<number>) {
     reconstructionSignMismatches: words[16]! >>> 0,
     firstReconstructionSignMismatchItem: words[17]! >>> 0,
     handoffGraphErrors: words[18]! >>> 0,
+    compressedExcessMass_m3: floatWord(words[19]!),
+    subIsoMass_m3: floatWord(words[20]!),
+    overfullLeafCount: words[21]! >>> 0,
+    subIsoLeafCount: words[22]! >>> 0,
   });
 }
 
@@ -77,8 +94,12 @@ export interface WebGPUOctreeLosassoAdaptiveMassOptions {
 }
 
 export interface WebGPUOctreeLosassoAdaptiveMassSource {
+  /** Accepted transaction state. Candidate construction must never mutate it. */
   readonly control: GPUBuffer;
   readonly receipts: GPUBuffer;
+  /** Fail-closed candidate handoff/cache transaction state. */
+  readonly candidateControl: GPUBuffer;
+  readonly candidateReceipts: GPUBuffer;
   /** Graph-owned accepted/candidate integral surface mass. */
   readonly acceptedMass: GPUBuffer;
   readonly acceptedCompression: GPUBuffer;
@@ -112,15 +133,16 @@ type PipelineName = "prepareBootstrap" | "bootstrapMassFromPhi" | "finishBootstr
   | "emitOutgoingTransfers" | "clearRecipientTransferCounts" | "countRecipientTransfers"
   | "scanRecipientTransferLeaves" | "scanRecipientTransferBlocks" | "addRecipientTransferBlockOffsets"
   | "prepareIncomingTransferScatter" | "scatterIncomingTransferIds"
-  | "gatherPredictedCompression" | "gatherTentativeTransport" | "markTransportSurfaceReach"
+  | "gatherPredictedCompression" | "gatherTentativeTransport"
   | "finalizeDestinationTransport" | "returnDonorRemainders"
   | "gatherAcceptedCompression" | "finishTransportLeaves" | "finishTransport"
   | "prepareSharpen" | "countSharpenTransfers" | "emitSharpenTransfers" | "gatherSharpenedMass"
   | "measureTransportAfterBlocks" | "finishTransportAfter"
   | "prepareHandoff" | "measureHandoffSources" | "countHandoffRelations" | "scanHandoffRelationLeaves"
   | "scanHandoffRelationBlocks" | "addHandoffRelationBlockOffsets"
-  | "emitHandoffRelations" | "handoffMass"
-  | "finishHandoffLeaves" | "finishHandoff" | "deriveLeafRhoPhi" | "deriveNodalPseudoPhi"
+  | "emitHandoffRelations" | "handoffMass" | "correctHandoffMass"
+  | "finishHandoffLeaves" | "finishHandoff" | "promoteCommittedCandidate"
+  | "deriveLeafRhoPhi" | "deriveNodalPseudoPhi"
   | "projectNodalPseudoPhi" | "publishDerivedOutputs" | "deriveRows";
 
 const positive = (value: number, label: string): number => {
@@ -167,6 +189,7 @@ export class WebGPUOctreeLosassoAdaptiveMass {
   private readonly emptyVelocity: GPUBuffer;
   private readonly bootstrapCellFractions: GPUBuffer;
   private readonly hasBootstrapCellFractions: boolean;
+  private readonly unitsPerFinestCell: number;
   private pipelines?: Readonly<Record<PipelineName, GPUComputePipeline>>;
   private readonly bindGroups = new Map<string, GPUBindGroup>();
   private destroyed = false;
@@ -198,10 +221,7 @@ export class WebGPUOctreeLosassoAdaptiveMass {
         || value < 0 || value > 1)) {
       throw new RangeError("adaptive initial cell fractions must be finite values in [0, 1]");
     }
-    const fullDomainMassUnits = finestCellCount * ADAPTIVE_MASS_UNITS_PER_FINEST_CELL;
-    if (!Number.isSafeInteger(fullDomainMassUnits) || fullDomainMassUnits > 0xffff_ffff) {
-      throw new RangeError("adaptive mass fixed-point domain capacity exceeds u32");
-    }
+    this.unitsPerFinestCell = adaptiveMassUnitsPerFinestCell(options.dimensions);
     const storage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST;
     this.params = device.createBuffer({ label: "Adaptive surface-mass parameters", size: 80,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
@@ -217,9 +237,13 @@ export class WebGPUOctreeLosassoAdaptiveMass {
     this.candidateDerivedParams = device.createBuffer({
       label: "Adaptive candidate mass-derived cache parameters", size: 80,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-    const control = device.createBuffer({ label: "Adaptive surface-mass control",
+    const control = device.createBuffer({ label: "Adaptive accepted surface-mass control",
       size: 4 * OCTREE_LOSASSO_ADAPTIVE_MASS_CONTROL_WORDS, usage: storage });
-    const receipts = device.createBuffer({ label: "Adaptive surface-mass receipts",
+    const receipts = device.createBuffer({ label: "Adaptive accepted surface-mass receipts",
+      size: 4 * OCTREE_LOSASSO_ADAPTIVE_MASS_RECEIPT_WORDS, usage: storage });
+    const candidateControl = device.createBuffer({ label: "Adaptive candidate surface-mass control",
+      size: 4 * OCTREE_LOSASSO_ADAPTIVE_MASS_CONTROL_WORDS, usage: storage });
+    const candidateReceipts = device.createBuffer({ label: "Adaptive candidate surface-mass receipts",
       size: 4 * OCTREE_LOSASSO_ADAPTIVE_MASS_RECEIPT_WORDS, usage: storage });
     this.nextMass = device.createBuffer({ label: "Adaptive surface-mass transport accumulation",
       size: 4 * leafCapacity, usage: storage });
@@ -277,7 +301,7 @@ export class WebGPUOctreeLosassoAdaptiveMass {
       device.queue.writeBuffer(this.bootstrapCellFractions, 0,
         options.initialCellFractions.slice().buffer);
     }
-    this.source = Object.freeze({ control, receipts,
+    this.source = Object.freeze({ control, receipts, candidateControl, candidateReceipts,
       acceptedMass: graph.accepted.surfaceMass,
       acceptedCompression: graph.accepted.surfaceCompression,
       candidateMass: graph.candidate.surfaceMass,
@@ -287,7 +311,8 @@ export class WebGPUOctreeLosassoAdaptiveMass {
     this.plan = Object.freeze({ leafCapacity, nodeCapacity, pressureRowCapacity, transportArcCapacity,
       leafWorkgroups: dispatch(leafCapacity), nodeWorkgroups: dispatch(nodeCapacity),
       rowWorkgroups: dispatch(pressureRowCapacity), transportArcWorkgroups: dispatch(transportArcCapacity),
-      allocatedBytes: 400 + control.size + receipts.size + this.nextMass.size
+      allocatedBytes: 400 + control.size + receipts.size + candidateControl.size
+        + candidateReceipts.size + this.nextMass.size
         + this.nextCompressionMass.size + this.transportAdmission.size
         + this.outgoingTransfers.size + this.acceptedTransferUnits.size
         + this.donorTransferCounts.size + this.donorTransferOffsets.size
@@ -323,7 +348,7 @@ export class WebGPUOctreeLosassoAdaptiveMass {
       "emitOutgoingTransfers", "clearRecipientTransferCounts", "countRecipientTransfers",
       "scanRecipientTransferLeaves", "scanRecipientTransferBlocks", "addRecipientTransferBlockOffsets",
       "prepareIncomingTransferScatter", "scatterIncomingTransferIds",
-      "gatherPredictedCompression", "gatherTentativeTransport", "markTransportSurfaceReach",
+      "gatherPredictedCompression", "gatherTentativeTransport",
       "finalizeDestinationTransport", "returnDonorRemainders",
       "gatherAcceptedCompression",
       "prepareSharpen", "countSharpenTransfers", "emitSharpenTransfers", "gatherSharpenedMass",
@@ -331,8 +356,8 @@ export class WebGPUOctreeLosassoAdaptiveMass {
       "finishTransportLeaves", "finishTransport",
       "prepareHandoff", "measureHandoffSources", "countHandoffRelations", "scanHandoffRelationLeaves",
       "scanHandoffRelationBlocks", "addHandoffRelationBlockOffsets",
-      "emitHandoffRelations", "handoffMass",
-      "finishHandoffLeaves", "finishHandoff",
+      "emitHandoffRelations", "handoffMass", "correctHandoffMass",
+      "finishHandoffLeaves", "finishHandoff", "promoteCommittedCandidate",
       "deriveLeafRhoPhi",
       "deriveNodalPseudoPhi", "projectNodalPseudoPhi",
       "publishDerivedOutputs", "deriveRows"];
@@ -400,8 +425,6 @@ export class WebGPUOctreeLosassoAdaptiveMass {
       this.plan.leafWorkgroups, this.advanceParams);
     this.run(broker, "gatherTentativeTransport", bank, bank, velocity.values,
       this.plan.leafWorkgroups, this.advanceParams);
-    this.run(broker, "markTransportSurfaceReach", bank, bank, velocity.values,
-      this.plan.leafWorkgroups, this.advanceParams);
     this.run(broker, "finalizeDestinationTransport", bank, bank, velocity.values,
       this.plan.leafWorkgroups, this.advanceParams);
     this.run(broker, "returnDonorRemainders", bank, bank, velocity.values,
@@ -466,8 +489,16 @@ export class WebGPUOctreeLosassoAdaptiveMass {
     this.run(broker, "emitHandoffRelations", target, source, this.emptyVelocity,
       this.plan.leafWorkgroups);
     this.run(broker, "handoffMass", target, source, this.emptyVelocity, this.plan.leafWorkgroups);
+    this.run(broker, "correctHandoffMass", target, source, this.emptyVelocity, 1);
     this.run(broker, "finishHandoffLeaves", target, source, this.emptyVelocity, this.plan.leafWorkgroups);
     this.run(broker, "finishHandoff", target, source, this.emptyVelocity, 1);
+  }
+
+  /** Publish candidate receipts only when the matching graph epoch committed. */
+  encodeCommittedCandidatePromotion(broker: PassBroker): void {
+    this.assertInitialized();
+    this.run(broker, "promoteCommittedCandidate", this.graph.accepted,
+      this.graph.candidate, this.emptyVelocity, 1);
   }
 
   /**
@@ -521,25 +552,31 @@ export class WebGPUOctreeLosassoAdaptiveMass {
     this.handoffRelationCounts.destroy(); this.handoffRelationOffsets.destroy();
     this.handoffRelationBlocks.destroy(); this.handoffRelations.destroy();
     this.emptyVelocity.destroy(); this.bootstrapCellFractions.destroy();
-    this.source.control.destroy(); this.source.receipts.destroy(); this.source.leafRhoPhi.destroy();
+    this.source.control.destroy(); this.source.receipts.destroy();
+    this.source.candidateControl.destroy(); this.source.candidateReceipts.destroy();
+    this.source.leafRhoPhi.destroy();
     this.source.rowRho.destroy(); this.source.rowPhi.destroy();
     this.bindGroups.clear();
   }
 
   private buffers(target: LosassoSurfaceGraphBankSource, source: LosassoSurfaceGraphBankSource,
     velocity: GPUBuffer, params: GPUBuffer): readonly GPUBuffer[] {
+    const candidateTransaction = target === this.graph.candidate;
+    const control = candidateTransaction ? this.source.candidateControl : this.source.control;
+    const receipts = candidateTransaction ? this.source.candidateReceipts : this.source.receipts;
     return [params, target.control, target.leaves, target.leafDirectory, target.nodes,
       target.constraints, target.incidentLeaves, target.pressureRowToGraphLeaf, target.phi, velocity,
       target.surfaceMass, target.surfaceCompression, source.control, source.leaves,
       source.surfaceMass, source.surfaceCompression, this.nextMass, this.nextCompressionMass,
-      this.outgoingTransfers, this.source.control, this.source.receipts, this.source.leafRhoPhi,
+      this.outgoingTransfers, control, receipts, this.source.leafRhoPhi,
       this.source.rowRho, this.source.rowPhi, this.bootstrapCellFractions, this.options.ownerArena,
       target.leafLocator, this.transportAdmission, this.acceptedTransferUnits,
       source.leafLocator, this.handoffRelationCounts, this.handoffRelationOffsets,
       this.handoffRelationBlocks, this.handoffRelations,
       this.donorTransferCounts, this.donorTransferOffsets,
       this.recipientTransferCounts, this.recipientTransferOffsets,
-      this.transferScanBlocks, this.incomingTransfers, this.donorTransportStates];
+      this.transferScanBlocks, this.incomingTransfers, this.donorTransportStates,
+      this.source.candidateControl, this.source.candidateReceipts];
   }
 
   private run(broker: PassBroker, name: PipelineName, target: LosassoSurfaceGraphBankSource,
@@ -586,8 +623,7 @@ export class WebGPUOctreeLosassoAdaptiveMass {
       scatterIncomingTransferIds: [0, 1, 2, 18, 19, 35, 36, 37, 39],
       gatherPredictedCompression: [0, 1, 2, 10, 11, 17, 18, 19, 37, 39],
       gatherTentativeTransport: [0, 1, 2, 16, 17, 18, 19, 27, 28, 37, 39],
-      markTransportSurfaceReach: [0, 1, 2, 10, 16, 25, 26, 27],
-      finalizeDestinationTransport: [0, 1, 2, 16, 19, 27, 28, 37, 39],
+      finalizeDestinationTransport: [0, 1, 2, 16, 19, 28, 37, 39],
       returnDonorRemainders: [0, 1, 2, 10, 11, 16, 17, 18, 19, 28, 35],
       gatherAcceptedCompression: [0, 1, 2, 10, 11, 17, 19, 28, 37, 39],
       prepareSharpen: [19],
@@ -596,8 +632,8 @@ export class WebGPUOctreeLosassoAdaptiveMass {
       gatherSharpenedMass: [0, 1, 2, 16, 18, 19, 37, 39],
       measureTransportAfterBlocks: [0, 1, 2, 16, 38],
       finishTransportAfter: [0, 1, 2, 19, 20, 38],
-      finishTransportLeaves: [0, 1, 2, 10, 11, 16, 17, 19],
-      finishTransport: [19, 20], prepareHandoff: [19, 20],
+      finishTransportLeaves: [0, 1, 2, 10, 11, 16, 17, 19, 20],
+      finishTransport: [0, 19, 20], prepareHandoff: [19, 20],
       measureHandoffSources: [0, 12, 13, 14, 19],
       countHandoffRelations: [0, 1, 2, 12, 13, 19, 25, 29, 30, 31, 33],
       scanHandoffRelationLeaves: [0, 1, 2, 30, 31, 32],
@@ -605,10 +641,12 @@ export class WebGPUOctreeLosassoAdaptiveMass {
       addHandoffRelationBlockOffsets: [0, 1, 2, 19, 31, 32, 33],
       emitHandoffRelations: [0, 1, 2, 12, 13, 19, 25, 29, 30, 31, 33],
       handoffMass: [0, 1, 12, 13, 14, 15, 16, 17, 19, 31, 33],
+      correctHandoffMass: [0, 1, 2, 16, 19],
       finishHandoffLeaves: [0, 1, 2, 10, 11, 16, 17, 19],
       // finishHandoff calls leafCount(), whose arrayLength guard makes the
       // target leaf bank part of the statically inferred pipeline layout.
       finishHandoff: [0, 1, 2, 12, 19, 20],
+      promoteCommittedCandidate: [1, 19, 20, 41, 42],
       deriveLeafRhoPhi: [0, 1, 2, 10, 11, 21],
       deriveNodalPseudoPhi: [0, 1, 2, 5, 6, 8, 10, 19],
       projectNodalPseudoPhi: [0, 1, 5, 8, 19],
@@ -624,7 +662,7 @@ export class WebGPUOctreeLosassoAdaptiveMass {
     f.set([...(this.options.domainOrigin ?? [0, 0, 0]), this.options.cellSize], 4);
     u.set([this.plan.leafCapacity, this.plan.nodeCapacity, this.plan.pressureRowCapacity,
       this.plan.transportArcCapacity], 8);
-    const massQuantum = this.options.cellSize ** 3 / ADAPTIVE_MASS_UNITS_PER_FINEST_CELL;
+    const massQuantum = this.options.cellSize ** 3 / this.unitsPerFinestCell;
     f.set([dt, this.options.massEpsilon ?? 1e-10, massQuantum, 1 / massQuantum], 12);
     u.set([phiSource, velocityRecord, phiTarget, topologyHandoff ? 1 : 0], 16);
     this.device.queue.writeBuffer(target, 0, raw);

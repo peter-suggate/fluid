@@ -12,6 +12,7 @@ const uniformMacCormackAuditEnabled = typeof process !== "undefined"
  */
 export const uniformReferenceComputeShader = /* wgsl */ `
 const MACCORMACK_AUDIT_ENABLED: bool = ${uniformMacCormackAuditEnabled};
+const GHOST_FLUID_THETA_MIN:f32=0.05;
 struct Params {
   dimsDt: vec4f,
   cellGravity: vec4f,
@@ -64,8 +65,8 @@ struct RigidBody {
 // The physical rgba velocity texture owns positive MAC faces. The separate
 // field owns the three negative domain faces so the CM11a pressure halo has
 // persistent velocity DOFs on both sides of every closed wall.
-@group(0) @binding(26) var<storage,read> boundaryVelocityIn:array<vec4f>;
-@group(0) @binding(27) var<storage,read_write> boundaryVelocityOut:array<vec4f>;
+@group(0) @binding(26) var<storage,read> boundaryVelocityIn:array<f32>;
+@group(0) @binding(27) var<storage,read_write> boundaryVelocityOut:array<f32>;
 // Eight vec4s per (cell, component), populated only in the opt-in Dawn stage
 // audit shader variant. Production compiles the constant-false branch away.
 @group(0) @binding(28) var<storage,read_write> macCormackAudit:array<vec4f>;
@@ -95,9 +96,25 @@ fn surfaceOccupancy(p: vec3i) -> f32 {
 fn surfaceLiquid(p: vec3i) -> bool { return valid(p) && select(surfaceValue(p) >= 0.5, surfaceValue(p) < 0.0, levelSetAuthority()); }
 fn velocity(p: vec3i) -> vec3f { return textureLoad(velocityIn,clampCell(p),0).xyz; }
 fn faceVelocity(p:vec3i)->vec3f{if(!valid(p)){return vec3f(0.0);}return textureLoad(velocityIn,p,0).xyz;}
-fn boundaryLinearIndex(p:vec3i)->u32{let d=dims();return u32(p.x+d.x*(p.y+d.y*p.z));}
-fn boundaryVelocity(p:vec3i)->vec3f{if(!valid(p)){return vec3f(0.0);}return boundaryVelocityIn[boundaryLinearIndex(p)].xyz;}
-fn storeBoundaryVelocity(id:vec3i,value:vec3f){boundaryVelocityOut[boundaryLinearIndex(id)]=vec4f(value,0.0);}
+fn boundaryFaceIndex(p:vec3i,axis:u32)->u32{
+  let d=dims();
+  if(axis==0u){return u32(p.y+d.y*p.z);}
+  let yOffset=d.y*d.z;
+  if(axis==1u){return u32(yOffset+p.x+d.x*p.z);}
+  return u32(yOffset+d.x*d.z+p.x+d.x*p.y);
+}
+fn boundaryVelocity(p:vec3i)->vec3f{
+  if(!valid(p)){return vec3f(0.0);}var value=vec3f(0.0);
+  if(p.x==0){value.x=boundaryVelocityIn[boundaryFaceIndex(p,0u)];}
+  if(p.y==0){value.y=boundaryVelocityIn[boundaryFaceIndex(p,1u)];}
+  if(p.z==0){value.z=boundaryVelocityIn[boundaryFaceIndex(p,2u)];}
+  return value;
+}
+fn storeBoundaryVelocity(id:vec3i,value:vec3f){
+  if(id.x==0){boundaryVelocityOut[boundaryFaceIndex(id,0u)]=value.x;}
+  if(id.y==0){boundaryVelocityOut[boundaryFaceIndex(id,1u)]=value.y;}
+  if(id.z==0){boundaryVelocityOut[boundaryFaceIndex(id,2u)]=value.z;}
+}
 fn carryBoundaryVelocity(id:vec3i){storeBoundaryVelocity(id,boundaryVelocity(id));}
 fn liquid(p:vec3i)->bool{return surfaceLiquid(p);}
 fn pressureValue(p:vec3i)->f32{
@@ -147,7 +164,7 @@ fn pressurePhi(p:vec3i)->f32{
 fn pressureLiquid(p:vec3i)->bool{return valid(p)&&pressureDensity(p)>0.5;}
 fn ghostFluidFraction(liquidCell:vec3i,airCell:vec3i)->f32{
   let liquidPhi=pressurePhi(liquidCell);let airPhi=pressurePhi(airCell);
-  return clamp(abs(liquidPhi)/max(abs(liquidPhi)+abs(airPhi),1e-6),0.05,1.0);
+  return clamp(abs(liquidPhi)/max(abs(liquidPhi)+abs(airPhi),1e-6),GHOST_FLUID_THETA_MIN,1.0);
 }
 fn sampledFaceVelocity(p:vec3i,component:u32)->f32{
   let d=dims();if(p[component]<0||p[component]>=d[component]){return 0.0;}
@@ -382,17 +399,49 @@ fn betaValue(id:vec3i)->f32{
   if(!valid(id)){return 1.0;}
   return f32(atomicLoad(&sharpenDeposits[linearIndex(id)]))/TRANSPORT_FIXED;
 }
-// Build scalar stencils from local traced displacement. Subtracting a small
-// displacement from an absolute cell coordinate loses different low bits at
-// reflected cells; local offsets preserve the paper's mirrored trilinear
-// weights before the fixed-point beta/deposit scatters quantize them.
+// Characteristics of the projected field satisfy u.n=0 at closed walls, so a
+// true trace never leaves the domain -- it slides tangentially along the
+// boundary. A single straight RK2 step over the paper time step spans
+// u*dt/h cells (10+ at the 64-cubed dam front), punches through the wall,
+// and any fold-back (mirror or clamp) then maps distinct departure cells
+// onto the same near-wall band: the advection operator turns locally
+// compressive at exactly the stagnation cells where mass conservation
+// deposits everything (a three-wall corner folds 2^3 = 8x -- the measured
+// rho pile). Sub-stepping the integration, clamping each sub-step to the
+// domain so the wall's zero normal velocity is re-sampled, follows the
+// sliding characteristic instead. The paper sub-steps its sharpening trace
+// for the same reason (Sec 3.5: "multiple forward Euler sub-steps",
+// stopping at solids).
+fn clampTraceToDomain(p:vec3f)->vec3f{
+  let d=vec3f(dims());var q=p;
+  q.x=clamp(q.x,0.5,d.x-0.5);
+  q.z=clamp(q.z,0.5,d.z-0.5);
+  q.y=max(q.y,0.5);
+  // Only the authored open +Y boundary has an exterior-air continuation.
+  if(params.boundary.w<=0.5){q.y=min(q.y,d.y-0.5);}
+  return q;
+}
+fn integrateTraceOffset(id:vec3i,dt:f32,h:vec3f,direction:f32)->vec3f{
+  let position=vec3f(id)+vec3f(0.5);
+  let hMin=min(h.x,min(h.y,h.z));
+  let substeps=clamp(i32(ceil(length(sampleVelocity(position))*dt/hMin)),1,16);
+  let sdt=dt/f32(substeps);
+  var p=position;
+  for(var s=0;s<substeps;s+=1){
+    let midpoint=clampTraceToDomain(p+direction*0.5*sampleVelocity(p)*sdt/h);
+    let next=clampTraceToDomain(p+direction*sampleVelocity(midpoint)*sdt/h);
+    // Stop at embedded solids: the paper's trace "stops if it crosses a
+    // solid boundary" rather than passing mass through the obstacle.
+    if(cellInsideSolid(vec3i(floor(next)))){break;}
+    p=next;
+  }
+  return p-position;
+}
 fn backwardTraceOffset(id:vec3i,dt:f32,h:vec3f)->vec3f{
-  let position=vec3f(id)+vec3f(0.5);let first=sampleVelocity(position);let midpoint=position-0.5*first*dt/h;
-  return -sampleVelocity(midpoint)*dt/h;
+  return integrateTraceOffset(id,dt,h,-1.0);
 }
 fn forwardTraceOffset(id:vec3i,dt:f32,h:vec3f)->vec3f{
-  let position=vec3f(id)+vec3f(0.5);let first=sampleVelocity(position);let midpoint=position+0.5*first*dt/h;
-  return sampleVelocity(midpoint)*dt/h;
+  return integrateTraceOffset(id,dt,h,1.0);
 }
 fn densityTransportDestination(p:vec3i)->bool{return valid(p)&&!cellInsideSolid(p);}
 fn transportStencilWeight(base:vec3i,f:vec3f,corner:u32)->f32{
@@ -414,7 +463,16 @@ fn traceGammaAndBeta(@builtin(global_invocation_id) gid:vec3u){
   let id=vec3i(gid);if(!valid(id)){return;}
   if(cellInsideSolid(id)){textureStore(gammaOut,id,vec4f(0.0));return;}
   let traced=backwardTraceOffset(id,params.dimsDt.w,params.cellGravity.xyz);let base=id+vec3i(floor(traced));let f=fract(traced);
-  let advectedGamma=sampleGammaStencil(base,f);
+  // Keep the cumulative row-sum history inside the paper's published
+  // operating envelope (Table 1: 0.627..2.403 across every example). The
+  // scheme has no intrinsic bound: at a sustained stagnation impact the
+  // step-7 deficit deposits compound gamma geometrically (measured 14+ at
+  // the 64-cubed dam wall), and gamma multiplies the cell's density intake,
+  // so an unbounded gamma vacuums neighbouring mass and drives the
+  // excess-density divergence into a boiling jet. Clamping gamma is
+  // mass-neutral: beta is accumulated from this same clamped value, so the
+  // operator's row/column bookkeeping stays exactly conservative.
+  let advectedGamma=clamp(sampleGammaStencil(base,f),0.5,2.5);
   textureStore(gammaOut,id,vec4f(advectedGamma));
   var total=0.0;
   for(var corner=0u;corner<8u;corner+=1u){total+=transportStencilWeight(base,f,corner);}
@@ -475,42 +533,48 @@ fn gatherConservativeDensity(@builtin(global_invocation_id) gid:vec3u){
   // The prescribed inflow is a mass source external to the conservative
   // operator. It is bounded only by this cell's remaining surface density.
   rhoNext+=min(inflowReceiverSource(id,params.dimsDt.w),max(0.0,1.0-rhoNext));
+  // Gamma is the cumulative row-sum history of the conservative density
+  // operator; it is only meaningful where the operator moves mass. In dry
+  // cells the deficit scatter (step 7) can still deposit gamma every step --
+  // at a flow-convergent wall corner those deposits compound ahead of the
+  // liquid front (measured gamma of 18+ in air at the 64-cubed dam corner)
+  // and then multiply the arriving front's intake, piling rho far past 1 and
+  // saturating the Sec. 3.7 excess-density divergence into a boiling jet.
+  // A massless cell has no transported history: restart it at the paper's
+  // initial gamma of 1.
+  if(rhoNext<1e-5){gammaNext=1.0;}
   textureStore(volumeOut,id,vec4f(max(rhoNext,0.0)));
   textureStore(gammaOut,id,vec4f(max(gammaNext,0.0)));
 }
 
-// Paper diffusion: for each red/black neighbor pair, equalize gamma and move
-// the corresponding fraction of rho from the higher-gamma cell to the lower.
-// Each invocation writes only its own cell, so paired cells need no atomics.
-fn diffuseDensityGamma(id:vec3i,axis:u32,parity:i32)->vec2f{
-  let coordinate=id[axis];let lower=coordinate-((coordinate-parity)&1);var partner=id;
-  partner[axis]=select(lower,lower+1,coordinate==lower);
-  let ownRho=volume(id);let ownGamma=textureLoad(gammaIn,id,0).x;
-  if(!valid(partner)){return vec2f(ownRho,ownGamma);}
-  let otherRho=volume(partner);let otherGamma=textureLoad(gammaIn,partner,0).x;let average=0.5*(ownGamma+otherGamma);
-  var nextRho=ownRho;
-  if(ownGamma>otherGamma){nextRho-=ownRho*(ownGamma-otherGamma)/max(2.0*ownGamma,1e-9);}
-  else if(ownGamma<otherGamma){nextRho+=otherRho*(otherGamma-ownGamma)/max(2.0*otherGamma,1e-9);}
-  return vec2f(max(nextRho,0.0),average);
+fn diffuseGammaPair(id:vec3i,axis:u32,parity:i32){
+  if(!valid(id)){return;}
+  // Every invocation owns exactly one output texel. Having only the lower
+  // endpoint write both pair members leaves the unpaired boundary cells
+  // unwritten on alternating parity passes. Since these textures ping-pong,
+  // an unwritten wall cell resurrects its value from two passes ago and
+  // breaks the pair's otherwise conservative rho transfer.
+  let coordinate=id[axis];var lowerCoordinate=coordinate;
+  if((coordinate&1)!=parity){lowerCoordinate-=1;}
+  var lower=id;lower[axis]=lowerCoordinate;var upper=lower;upper[axis]+=1;
+  if(lowerCoordinate<0||!valid(upper)){
+    textureStore(volumeOut,id,vec4f(volume(id)));
+    textureStore(gammaOut,id,vec4f(textureLoad(gammaIn,id,0).x));
+    return;
+  }
+  let lowerGamma=textureLoad(gammaIn,lower,0).x;let upperGamma=textureLoad(gammaIn,upper,0).x;
+  let averageGamma=0.5*(lowerGamma+upperGamma);var lowerRho=volume(lower);var upperRho=volume(upper);
+  if(upperGamma>lowerGamma){let transfer=upperRho*(upperGamma-lowerGamma)/(2.0*max(upperGamma,1e-9));lowerRho+=transfer;upperRho-=transfer;}
+  else if(lowerGamma>upperGamma){let transfer=lowerRho*(lowerGamma-upperGamma)/(2.0*max(lowerGamma,1e-9));lowerRho-=transfer;upperRho+=transfer;}
+  textureStore(volumeOut,id,vec4f(max(0.0,select(upperRho,lowerRho,coordinate==lowerCoordinate))));
+  textureStore(gammaOut,id,vec4f(max(0.0,averageGamma)));
 }
-fn storeDensityGamma(id:vec3i,value:vec2f){textureStore(volumeOut,id,vec4f(value.x));textureStore(gammaOut,id,vec4f(value.y));}
-@compute @workgroup_size(4,4,4) fn diffuseGammaX0(@builtin(global_invocation_id) gid:vec3u){let id=vec3i(gid);if(valid(id)){storeDensityGamma(id,diffuseDensityGamma(id,0u,0));}}
-@compute @workgroup_size(4,4,4) fn diffuseGammaX1(@builtin(global_invocation_id) gid:vec3u){let id=vec3i(gid);if(valid(id)){storeDensityGamma(id,diffuseDensityGamma(id,0u,1));}}
-@compute @workgroup_size(4,4,4) fn diffuseGammaY0(@builtin(global_invocation_id) gid:vec3u){let id=vec3i(gid);if(valid(id)){storeDensityGamma(id,diffuseDensityGamma(id,1u,0));}}
-@compute @workgroup_size(4,4,4) fn diffuseGammaY1(@builtin(global_invocation_id) gid:vec3u){let id=vec3i(gid);if(valid(id)){storeDensityGamma(id,diffuseDensityGamma(id,1u,1));}}
-@compute @workgroup_size(4,4,4) fn diffuseGammaZ0(@builtin(global_invocation_id) gid:vec3u){let id=vec3i(gid);if(valid(id)){storeDensityGamma(id,diffuseDensityGamma(id,2u,0));}}
-@compute @workgroup_size(4,4,4) fn diffuseGammaZ1(@builtin(global_invocation_id) gid:vec3u){let id=vec3i(gid);if(valid(id)){storeDensityGamma(id,diffuseDensityGamma(id,2u,1));}}
-// The paper does not choose an axis permutation. volumeIn/gammaIn contain the
-// x-y-z sweep and surfaceIn/pressureIn the z-y-x sweep. Their equal average is
-// invariant when a horizontal D4 transform exchanges those two valid orders.
-@compute @workgroup_size(4,4,4)
-fn averageGammaDiffusion(@builtin(global_invocation_id) gid:vec3u){
-  let id=vec3i(gid);if(!valid(id)){return;}
-  let rho=0.5*(volume(id)+textureLoad(surfaceIn,id,0).x);
-  let gamma=0.5*(textureLoad(gammaIn,id,0).x+textureLoad(pressureIn,id,0).x);
-  textureStore(volumeOut,id,vec4f(max(rho,0.0)));
-  textureStore(gammaOut,id,vec4f(max(gamma,0.0)));
-}
+@compute @workgroup_size(4,4,4) fn diffuseGammaX0(@builtin(global_invocation_id) gid:vec3u){diffuseGammaPair(vec3i(gid),0u,0);}
+@compute @workgroup_size(4,4,4) fn diffuseGammaX1(@builtin(global_invocation_id) gid:vec3u){diffuseGammaPair(vec3i(gid),0u,1);}
+@compute @workgroup_size(4,4,4) fn diffuseGammaY0(@builtin(global_invocation_id) gid:vec3u){diffuseGammaPair(vec3i(gid),1u,0);}
+@compute @workgroup_size(4,4,4) fn diffuseGammaY1(@builtin(global_invocation_id) gid:vec3u){diffuseGammaPair(vec3i(gid),1u,1);}
+@compute @workgroup_size(4,4,4) fn diffuseGammaZ0(@builtin(global_invocation_id) gid:vec3u){diffuseGammaPair(vec3i(gid),2u,0);}
+@compute @workgroup_size(4,4,4) fn diffuseGammaZ1(@builtin(global_invocation_id) gid:vec3u){diffuseGammaPair(vec3i(gid),2u,1);}
 
 fn diffusionVelocity(p:vec3i)->vec3f{let v=textureLoad(velocityIn,clampCell(p),0).xyz;if(params.boundary.y>0.5&&!valid(p)){return -v;}return v;}
 fn strainMagnitude(id:vec3i)->f32{
@@ -555,8 +619,9 @@ fn applyVelocityForces(id:vec3i,inputVelocity:vec3f,dt:f32,h:vec3f)->vec3f{
 
 @compute @workgroup_size(4,4,4)
 fn semiLagrangianAdvection(@builtin(global_invocation_id) gid:vec3u){
-  let id=vec3i(gid);if(!valid(id)){return;}let dt=params.dimsDt.w;let h=params.cellGravity.xyz;let cell=vec3f(id);
+  let id=vec3i(gid);if(!valid(id)){return;}carryBoundaryVelocity(id);let dt=params.dimsDt.w;let h=params.cellGravity.xyz;let cell=vec3f(id);
   var v=vec3f(advectVelocityComponent(cell+vec3f(1.0,0.5,0.5),0u,dt,h),advectVelocityComponent(cell+vec3f(0.5,1.0,0.5),1u,dt,h),advectVelocityComponent(cell+vec3f(0.5,0.5,1.0),2u,dt,h));v=applyVelocityForces(id,v,dt,h);
+  let d=dims();if(id.x==d.x-1){v.x=faceVelocity(id).x;}if(id.y==d.y-1&&params.boundary.w<=0.5){v.y=faceVelocity(id).y;}if(id.z==d.z-1){v.z=faceVelocity(id).z;}
   // Surface density is advanced by the dedicated Sec. 3.4 gamma/beta passes.
   textureStore(velocityOut,id,vec4f(v,0.0));textureStore(volumeOut,id,vec4f(volume(id),0.0,0.0,0.0));textureStore(pressureOut,id,vec4f(0.0));
 }
@@ -663,8 +728,18 @@ fn divergenceAt(id: vec3i, checkSolid: bool) -> f32 {
 fn volumeCorrectionDivergence(id: vec3i) -> f32 {
   let excess=max(0.0,pressureDensity(id)-1.0);
   if(excess<=0.0){return 0.0;}
-  let dx=min(params.cellGravity.x,min(params.cellGravity.y,params.cellGravity.z));
-  return min(0.5*excess,1.0)/dx;
+  // The paper's min(lambda(rho'-1),eta)/dx slope is kept for the small-excess
+  // regime (it is the calibrated volume-recovery rate; a pure /dt reading
+  // measurably leaves residual excess parked in the field, -1.5% represented
+  // volume on the 64-cubed dam). The cap, however, is re-read as a rate: at
+  // the paper's dx=0.05, dt=1/30 the published eta/dx (20/s) and 1/dt (30/s)
+  // are indistinguishable, but at 4x finer grids eta/dx demands a fractional
+  // expansion of dt/dx = 267% of a cell PER STEP, and a wall pile-up then
+  // pumps sustained multi-step jets that tear the surface apart (the
+  // 64-cubed dam "boiling"). Bounding the purge at one cell per step keeps
+  // the paper's stated intent -- rate-limiting Mullen's unstable
+  // lambda=1, eta=infinity correction -- resolution-independent.
+  return min(excess,1.0)/params.dimsDt.w;
 }
 
 fn curvatureAt(id:vec3i)->f32{
@@ -805,15 +880,7 @@ fn sharpenDeltaRho(q:vec3i)->f32{
   let rho=volume(q);
   if(cellInsideSolid(q)){return 0.0;}
   let h=params.cellGravity.xyz;
-  // Sec. 3.5's fictitious time step is stated as 3x the simulation step, but
-  // every published example runs dt=1/30 s on dx=0.05 m, so the operator the
-  // paper actually evaluates always displaces two cells per unit velocity
-  // (deltaT/dx = 0.1/0.05 = 2). Sharpening opposes the per-resample advection
-  // blur, which is a per-step quantity, so the calibration is grid-relative,
-  // not proportional to this lane's dt: a literal 3*dt at dt=0.004 s is 8.3x
-  // below the paper's own operating point and measurably loses to transport
-  // (maxRho decays from 1.0 to 0.65 by t=0.5 s on symmetric expansion).
-  let deltaT=2.0*min(h.x,min(h.y,h.z));let tau=0.4;
+  let deltaT=3.0*params.dimsDt.w;let tau=0.4;
   let ex=vec3i(1,0,0);let ey=vec3i(0,1,0);let ez=vec3i(0,0,1);
   // Sec. 3.6 Eqs. 18-19 use non-solid face aperture area V^f. This is
   // deliberately distinct from CM11a's face-centred overlapping dual volume.

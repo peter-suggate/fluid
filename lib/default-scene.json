@@ -5,7 +5,7 @@
   "duration_s": 20,
   "container": {
     "width_m": 1.2,
-    "height_m": 0.9,
+    "height_m": 0.8,
     "depth_m": 0.8,
     "fillFraction": 0.22,
     "top": "closed",
@@ -24,8 +24,8 @@
   },
   "nominalResolution": { "length_m": 0.025 },
   "numerics": {
-    "fixedDt_s": 0.004,
-    "maxDt_s": 0.008,
+    "fixedDt_s": 0.016,
+    "maxDt_s": 0.016,
     "pressureRelativeTolerance": 1e-8,
     "pressureMaxIterations": 1000
   },

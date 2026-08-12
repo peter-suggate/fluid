@@ -132,6 +132,8 @@ interface PendingStepSnapshotSources {
   readonly losassoCandidateAuthorityControl?: GPUBuffer;
   readonly losassoAdaptiveMassControl?: GPUBuffer;
   readonly losassoAdaptiveMassReceipts?: GPUBuffer;
+  readonly losassoAdaptiveCandidateMassControl?: GPUBuffer;
+  readonly losassoAdaptiveCandidateMassReceipts?: GPUBuffer;
   readonly losassoCandidateVelocityMigrationReceipt?: GPUBuffer;
   readonly globalFineCurrentWorklist?: GPUBuffer;
   readonly globalFineCurrentTopologyControl?: GPUBuffer;
@@ -1657,6 +1659,7 @@ fn recordPhysicsPhaseBoundary(
       // to refresh the ground the solver and contacts read.
       this.uploadTerrainColumns();
       if (!this.octreeProjection.reseed(scene)) return false;
+      this.octreeProjection.rescaleSparsePresentation(scene);
       await this.publishInitialSparseScene();
       this.lastTime = 0;
       this.info.submittedTime_s = 0;
@@ -2006,6 +2009,8 @@ fn recordPhysicsPhaseBoundary(
           && pending.losassoCandidateAuthorityControl !== undefined
           && pending.losassoAdaptiveMassControl !== undefined
           && pending.losassoAdaptiveMassReceipts !== undefined
+          && pending.losassoAdaptiveCandidateMassControl !== undefined
+          && pending.losassoAdaptiveCandidateMassReceipts !== undefined
           && pending.losassoCandidateVelocityMigrationReceipt !== undefined;
         const nativeSurfaceSources = coarseOnly
           || (pending.globalFineCurrentWorklist !== undefined
@@ -2031,6 +2036,8 @@ fn recordPhysicsPhaseBoundary(
               rendererDirectory: pending.losassoAdaptiveRendererDirectory!,
               massControl: pending.losassoAdaptiveMassControl!,
               massReceipts: pending.losassoAdaptiveMassReceipts!,
+              candidateMassControl: pending.losassoAdaptiveCandidateMassControl!,
+              candidateMassReceipts: pending.losassoAdaptiveCandidateMassReceipts!,
               velocityMigration: pending.losassoCandidateVelocityMigrationReceipt!,
             } } : {}),
             ...(pending.fluidBrickResidencyWorklist
@@ -2637,6 +2644,12 @@ fn recordPhysicsPhaseBoundary(
     const adaptiveMassCells=adaptiveMassReceipt&&adaptiveMassReceipt.errors===0
       && Number.isFinite(adaptiveMassReceipt.acceptedMass_m3)
       ? adaptiveMassReceipt.acceptedMass_m3/baseCellVolume_m3:undefined;
+    this.info.adaptiveCompressedExcessVolume_cells=adaptiveMassReceipt
+      ? adaptiveMassReceipt.compressedExcessMass_m3/baseCellVolume_m3:undefined;
+    this.info.adaptiveSubIsoVolume_cells=adaptiveMassReceipt
+      ? adaptiveMassReceipt.subIsoMass_m3/baseCellVolume_m3:undefined;
+    this.info.adaptiveOverfullLeafCount=adaptiveMassReceipt?.overfullLeafCount;
+    this.info.adaptiveSubIsoLeafCount=adaptiveMassReceipt?.subIsoLeafCount;
     const authoredInitialMassCells=this.info.initialVolumeCellSum;
     // Exact authored volume fractions make the adaptive mass receipt the
     // conservative authority. Retain the legacy phi-page estimator for scenes

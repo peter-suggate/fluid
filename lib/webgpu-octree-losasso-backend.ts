@@ -1066,7 +1066,8 @@ export class WebGPUOctreeLosassoCoarseBackend {
       this.adaptiveVelocitySampler = this.adaptiveVelocity.samplerSource;
       this.adaptiveReadyGate = new WebGPUOctreeLosassoAdaptiveReadyGate(options.device,
         candidate.control, graph.sources.candidate.control, adaptive.frontier,
-        this.publisher.candidateVelocityMigrationReceipt, this.adaptiveMass.source.control);
+        this.publisher.candidateVelocityMigrationReceipt,
+        this.adaptiveMass.source.candidateControl);
       this.adaptiveBootstrapPhi = adaptive.initialPhi;
       this.adaptiveBootstrapPhiLayout = initialPhiLayout;
       this.sources = Object.freeze({ ...published, velocitySampler: undefined });
@@ -1260,7 +1261,7 @@ export class WebGPUOctreeLosassoCoarseBackend {
     // it gate graph[5] left a valid mass/graph candidate at generation zero,
     // while the joint-ready gate waited for velocity generation to match it.
     this.adaptivePhi.encodeJointCommitGate(
-      broker, this.adaptiveMass.source.control);
+      broker, this.adaptiveMass.source.candidateControl);
     // First reconstruct the candidate nodes from every geometrically covered
     // face, then preserve exact coincident accepted nodes and extend genuinely
     // new nodes. Newly introduced faces are subsequently averaged from that
@@ -1416,6 +1417,7 @@ export class WebGPUOctreeLosassoCoarseBackend {
     if (this.surfaceGraph) {
       this.surfaceGraph.encodeReadyCommit(broker);
       this.adaptivePhi!.encodeAcceptedCommitSync(broker);
+      this.adaptiveMass!.encodeCommittedCandidatePromotion(broker);
       this.adaptiveMass!.encodeDerivedOutputs(
         broker, "accepted", "both", "preserve-and-validate");
       this.adaptivePhi!.encodeAcceptedTopologyHandoffPublication(broker);

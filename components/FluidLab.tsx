@@ -194,10 +194,10 @@ export function FluidLab() {
           </div>}
         </div>}
         {gpuStatus.state === "manual" && <div className="gpu-fallback gpu-manual-start" role="status">
-          <strong>WebGPU startup paused for safety</strong>
+          <strong>WebGPU startup paused</strong>
           <p>{safeBringup
             ? "Bounded bring-up permits the authored 384-column dam break, one STEP, then an explicit STOP GPU. Close every Dawn process first."
-            : "The dam-break GPU workload will not start until you explicitly allow it."}</p>
+            : gpuStatus.label}</p>
           <button type="button" onClick={requestManualGPUStart}>START WEBGPU</button>
           <small>{safeBringup
             ? "This browser can exclude other Fluid Lab tabs, but cannot observe Dawn's local filesystem lease."

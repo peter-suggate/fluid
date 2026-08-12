@@ -15,9 +15,11 @@ test("uniform host allocation reports only the fields it actually owns", () => {
   assert.deepEqual(plan.fluxExtent, [7, 5, 3]);
   assert.deepEqual(plan.pressureExtent, [7, 5, 3]);
   assert.deepEqual(plan.volumeExtent, [7, 5, 3]);
-  assert.equal(plan.velocityBytes, 7 * 5 * 3 * (2 * 16 + 8) + 9 * 7 * 5 * 8);
-  assert.equal(plan.scalarBytes, 7 * 5 * 3 * 6 * 4);
-  assert.equal(plan.conditioningBytes, 7 * 5 * 3 * 4);
+  assert.equal(plan.boundaryVelocityBytes, (5 * 3 + 7 * 3 + 7 * 5) * 4);
+  assert.equal(plan.velocityBytes, 7 * 5 * 3 * 2 * 16
+    + 4 * plan.boundaryVelocityBytes + 9 * 7 * 5 * (1 + 6) * 16);
+  assert.equal(plan.scalarBytes, 7 * 5 * 3 * 8 * 4);
+  assert.equal(plan.conditioningBytes, 7 * 5 * 3 * 3 * 4);
   assert.equal(plan.allocatedBytes,
     plan.velocityBytes + plan.scalarBytes + plan.conditioningBytes);
 });
@@ -25,8 +27,8 @@ test("uniform host allocation reports only the fields it actually owns", () => {
 test("MacCormack allocation retains its two predictor/corrector pairs", () => {
   const plan = planUniformHostAllocation(80, 160, 60, "maccormack");
   assert.equal(plan.velocityBytes,
-    80 * 160 * 60 * (4 * 16 + 8)
-      + 82 * 162 * 62 * 2 * 8);
+    80 * 160 * 60 * 4 * 16 + 4 * plan.boundaryVelocityBytes
+      + 82 * 162 * 62 * (2 + 6) * 16);
 });
 
 test("uniform host allocation rejects invalid simulation extents", () => {

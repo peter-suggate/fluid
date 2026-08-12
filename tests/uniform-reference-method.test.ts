@@ -21,34 +21,35 @@ test("uniform is a first-class WebGPU reference method", () => {
   assert.match(uniformMethod.description, /Dense matched-lattice WebGPU baseline/);
 });
 
-test("uniform reference fixes transport and exposes only pressure work", () => {
-  assert.deepEqual(uniformMethod.params.map(({ key }) => key), ["pressureIterations"]);
-  assert.equal(resolveMethodValues(uniformMethod, "balanced", {}).pressureIterations, 64);
-  assert.equal(resolveMethodValues(uniformMethod, "high", {}).pressureIterations, 80);
-  assert.equal(resolveMethodValues(uniformMethod, "ultra", {}).pressureIterations, 96);
+test("uniform reference fixes its solver work and exposes only presentation/time-step choices", () => {
+  assert.deepEqual(uniformMethod.params.map(({ key }) => key), ["timeStep", "densityPostProcessing"]);
+  assert.equal(resolveMethodValues(uniformMethod, "balanced", {}).timeStep, "paper");
+  assert.equal(resolveMethodValues(uniformMethod, "high", {}).densityPostProcessing, "scene");
 
-  const options = uniformReferenceSolverOptions({ pressureIterations: 24 });
+  const options = uniformReferenceSolverOptions({ timeStep: "paper", densityPostProcessing: "off" });
   assert.deepEqual(options, {
-    pressureIterations: 24,
+    densitySharpening: true,
+    densityPostProcessing: false,
+    timeStep: "paper",
   });
 });
 
 test("uniform reference owns the complete dense GPU program", () => {
   for (const entryPoint of [
-    "advect",
-    "reverseAdvection",
-    "correctAdvection",
-    "jacobi",
+    "semiLagrangianAdvection",
     "project",
     "coupleRigid",
     "relaxSolidPhi",
     "reduceDiagnostics",
-    "buildOccupancy",
-    "buildTransport",
-    "buildFluxScales",
-    "measureVolumeCorrection",
-    "applyVolumeCorrection",
-    "smoothSurface",
+    "traceGammaAndBeta",
+    "scatterDensityDeficit",
+    "gatherConservativeDensity",
+    "diffuseGammaX0",
+    "diffuseGammaX1",
+    "diffuseGammaY0",
+    "diffuseGammaY1",
+    "diffuseGammaZ0",
+    "diffuseGammaZ1",
     "sharpenCompute",
     "sharpenScatter",
     "sharpenResolve",
@@ -56,18 +57,10 @@ test("uniform reference owns the complete dense GPU program", () => {
     assert.match(uniformReferenceComputeShader,
       new RegExp(`fn\\s+${entryPoint}\\b`), `${entryPoint} is absent`);
   }
-  assert.match(uniformReferenceComputeShader, /fn boundedMacCormack/);
-  assert.match(uniformReferenceComputeShader, /fn transportConservativeVolume/);
-  assert.match(uniformReferenceComputeShader, /fn advectedVolume/);
-  assert.match(uniformReferenceComputeShader, /fn jacobi/);
-  assert.match(uniformReferenceComputeShader, /1\.0-exp\(-params\.inflowTiming\.w\*params\.dimsDt\.w\)/,
-    "volume correction response must scale with simulated time, not step count");
-  assert.match(uniformReferenceComputeShader, /presentationSample/,
+  assert.match(uniformReferenceComputeShader, /fn diffuseGammaPair/);
+  assert.match(uniformReferenceComputeShader, /fn advectVelocityComponent/);
+  assert.match(uniformReferenceComputeShader, /fn postprocessResolve/,
     "the renderer must receive a separately reconstructed surface field");
-  assert.match(uniformReferenceComputeShader, /mix\(filtered,conservative,0\.25\)/,
-    "presentation smoothing must retain one-cell sheets at the render contour");
-  assert.match(uniformReferenceComputeShader, /mix\(phi,relaxTarget,s\*blend\)/,
-    "immersed-body VOF displacement must scale with physical time");
 });
 
 const webgpuModulePath = process.env.WEBGPU_NODE_MODULE;
@@ -90,7 +83,7 @@ test("uniform reference compiles and advances one step on WebGPU", {
     validationErrors.push(event.error.message);
   });
   const scene = createSmokeScenario("symmetric-expansion").scene;
-  const values = resolveMethodValues(uniformMethod, "balanced", { pressureIterations: 16 });
+  const values = resolveMethodValues(uniformMethod, "balanced", {});
   let solver;
   try {
     solver = await uniformMethod.createSolverAsync!(
@@ -103,7 +96,7 @@ test("uniform reference compiles and advances one step on WebGPU", {
     );
     assert.equal(solver.info.gridKind, "uniform");
     assert.equal(solver.info.compressionRatio, 1);
-    assert.equal(solver.info.pressureIterations, 16);
+    assert.equal(solver.info.pressureIterations, 0);
     assert.equal(solver.info.volumeControl, true);
     assert.notEqual(solver.surfaceFieldTexture, solver.volumeTexture,
       "presentation smoothing must not feed back into the conservative VOF");
@@ -115,6 +108,8 @@ test("uniform reference compiles and advances one step on WebGPU", {
     assert.equal(stats.encodedSteps, 1);
     assert.ok(Number.isFinite(stats.volumeCellSum));
     assert.ok(Number.isFinite(stats.maxSpeed_m_s));
+    assert.equal(stats.uniformFIMConverged, true);
+    assert.equal(stats.uniformFIMTerminalActiveFaces, 0);
     assert.deepEqual(validationErrors, []);
   } finally {
     solver?.destroy();

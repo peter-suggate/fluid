@@ -8,8 +8,10 @@ import { advanceRigidBodies, initializeRigidBodies } from "../lib/rigid-body";
 import { createTallCellLayout } from "../lib/tall-cell-grid";
 import { octreeEffectiveLeafSize, octreeLosassoTopologyLeafSize } from "../lib/webgpu-octree";
 
-test("paper-derived scenarios are valid, deterministic, and uniquely identified", () => {
-  assert.deepEqual(paperScenarios.map((scenario) => scenario.paperFigure), ["Figure 3", "Figure 4", "Figure 6"]);
+test("paper-inspired legacy scenarios are valid, deterministic, and not mislabeled as CM12 figures", () => {
+  assert.deepEqual(paperScenarios.map((scenario) => scenario.paperFigure), [
+    "Paper-inspired legacy demo", "Paper-inspired legacy demo", "Paper-inspired legacy demo",
+  ]);
   for (const metadata of paperScenarios) {
     const first = createPaperScenario(metadata.id), second = createPaperScenario(metadata.id);
     assert.deepEqual(first, second);

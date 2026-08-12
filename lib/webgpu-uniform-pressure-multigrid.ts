@@ -16,9 +16,10 @@ export const UNIFORM_CM11A_COARSE_SWEEP_CAP = 4096;
 
 const ENTRY_POINTS = [
   "mgBuildFinestTopology", "mgBuildFinestRhs", "mgDownsampleTopology", "mgExtrapolatePhiOneCell",
+  "mgBakeCoefficients",
   "mgResidual", "mgRestrictResidual", "mgProlongateAdd", "mgProlongateAssign",
   "mgDownsampleSubtract", "mgDownsampleMinimum", "mgSmoothColour",
-  "mgProjectMinimum", "mgCopyPressure", "mgClearPressure", "mgClearMinimum",
+  "mgCopyPressure", "mgClearPressure", "mgClearMinimum",
   "mgShiftMinimum", "mgAddPressure", "mgSolveCoarsest", "mgMeasureFineResidual",
 ] as const;
 type EntryPoint = typeof ENTRY_POINTS[number];
@@ -26,14 +27,15 @@ type EntryPoint = typeof ENTRY_POINTS[number];
 const ENTRY_BINDINGS: Readonly<Record<EntryPoint, readonly number[]>> = Object.freeze({
   mgBuildFinestTopology: [0, 6, 8], mgBuildFinestRhs: [0, 2, 4, 12],
   mgDownsampleTopology: [0, 5, 6, 7, 8], mgExtrapolatePhiOneCell: [0, 5, 6, 7],
-  mgResidual: [0, 1, 3, 5, 7, 10], mgRestrictResidual: [0, 4, 9],
+  mgBakeCoefficients: [0, 5, 7, 15],
+  mgResidual: [0, 1, 3, 10, 14], mgRestrictResidual: [0, 4, 9],
   mgProlongateAdd: [0, 1, 2, 9], mgProlongateAssign: [0, 1, 2],
   mgDownsampleSubtract: [0, 1, 11, 12], mgDownsampleMinimum: [0, 11, 12],
-  mgSmoothColour: [0, 1, 2, 3, 5, 7, 11, 13], mgProjectMinimum: [0, 1, 2, 11],
+  mgSmoothColour: [0, 1, 2, 3, 11, 13, 14],
   mgCopyPressure: [0, 1, 2], mgClearPressure: [0, 2], mgClearMinimum: [0, 12],
   mgShiftMinimum: [0, 1, 11, 12], mgAddPressure: [0, 1, 2, 9],
   mgSolveCoarsest: [0, 1, 2, 3, 5, 7, 11, 13],
-  mgMeasureFineResidual: [0, 1, 3, 5, 7, 11, 13],
+  mgMeasureFineResidual: [0, 1, 3, 11, 13, 14],
 });
 
 type TexturePair = readonly [GPUTexture, GPUTexture];
@@ -46,6 +48,8 @@ export interface UniformPressureMultigridLevel {
   readonly volume: TexturePair;
   readonly residual: TexturePair;
   readonly minimum: TexturePair;
+  /** Immutable (+x,+y,+z) pressure coefficients and liquid flag for this solve. */
+  readonly coefficients: GPUTexture;
 }
 
 /**
@@ -63,7 +67,8 @@ interface PlannedDispatch {
   readonly entryPoint: EntryPoint;
   readonly stage: UniformCM11aPlanStage;
   readonly workgroups: readonly [number, number, number];
-  readonly firstCoarsestCapture?: {
+  readonly coarsestCapture?: {
+    readonly invocation: number;
     readonly dimensions: readonly [number, number, number];
     readonly pressure: GPUTexture; readonly rhs: GPUTexture; readonly minimum: GPUTexture;
     readonly phi: GPUTexture; readonly topology: GPUTexture;
@@ -79,6 +84,7 @@ export interface UniformCM11aCoarsestCapture {
 }
 
 interface CoarsestCaptureBuffers {
+  readonly invocation: number;
   readonly dimensions: readonly [number, number, number];
   readonly byteLength: number;
   readonly pressure: GPUBuffer; readonly rhs: GPUBuffer; readonly minimum: GPUBuffer;
@@ -92,6 +98,7 @@ interface GroupResources {
   volumeIn: GPUTexture; volumeOut: GPUTexture;
   residualIn: GPUTexture; residualOut: GPUTexture;
   minimumIn: GPUTexture; minimumOut: GPUTexture;
+  coefficientsIn: GPUTexture; coefficientsOut: GPUTexture;
 }
 
 /**
@@ -106,6 +113,8 @@ export class WebGPUUniformPressureMultigrid {
   readonly shaderFragment = uniformPressureMultigridWGSL;
   readonly diagnostics: GPUBuffer;
   readonly allocatedBytes: number;
+  /** CM11a Algorithm 3 p_tmp; no V-cycle scratch dispatch may alias it. */
+  private readonly fullCycleBackup: GPUTexture;
   private readonly spacing: readonly [number, number, number];
   private readonly groupLayouts: Readonly<Record<EntryPoint, GPUBindGroupLayout>>;
   private readonly ownedParams: GPUBuffer[] = [];
@@ -152,10 +161,11 @@ export class WebGPUUniformPressureMultigrid {
       ];
       levels.push(Object.freeze({ dimensions: size, pressure: pair("pressure"), rhs: pair("rhs"),
         phi: pair("phi"), volume: pair("V", "rgba32float"), residual: pair("residual"),
-        minimum: pair("p-min") }));
+        minimum: pair("p-min"), coefficients: texture(`Uniform CM11a L${index} coefficients`, "rgba32float", size) }));
       physicalSize = [physicalSize[0] / 2, physicalSize[1] / 2, physicalSize[2] / 2];
     }
     this.levels = Object.freeze(levels);
+    this.fullCycleBackup = texture("Uniform CM11a Full-Cycle p_tmp", "r32float", levels[0]!.dimensions);
     this.diagnostics = device.createBuffer({ label: "Uniform CM11a convergence status", size: 60,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
     this.allocatedBytes = allocatedBytes;
@@ -167,6 +177,8 @@ export class WebGPUUniformPressureMultigrid {
       ...[2, 4, 6, 10, 12].map((binding) => ({ binding, visibility: GPUShaderStage.COMPUTE, storageTexture: scalarStorage })),
       { binding: 8, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: "write-only", format: "rgba32float", viewDimension: "3d" } },
       { binding: 13, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+      { binding: 14, visibility: GPUShaderStage.COMPUTE, texture: textureBinding },
+      { binding: 15, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: "write-only", format: "rgba32float", viewDimension: "3d" } },
     ];
     this.groupLayouts = Object.freeze(Object.fromEntries(ENTRY_POINTS.map((entryPoint) => [entryPoint,
       device.createBindGroupLayout({ label: `Uniform CM11a hierarchy layout - ${entryPoint}`,
@@ -211,8 +223,9 @@ export class WebGPUUniformPressureMultigrid {
       pass.setBindGroup(0, uniformGroup);
       pass.dispatchWorkgroups(...dispatch.workgroups);
       pass.end();
-      if (dispatch.firstCoarsestCapture && this.coarsestCaptureBuffers) {
-        const capture = dispatch.firstCoarsestCapture, buffers = this.coarsestCaptureBuffers;
+      if (dispatch.coarsestCapture && this.coarsestCaptureBuffers
+        && dispatch.coarsestCapture.invocation === this.coarsestCaptureBuffers.invocation) {
+        const capture = dispatch.coarsestCapture, buffers = this.coarsestCaptureBuffers;
         const destination = (buffer: GPUBuffer) => ({ buffer, bytesPerRow: 256,
           rowsPerImage: capture.dimensions[1] });
         encoder.copyTextureToBuffer({ texture: capture.pressure }, destination(buffers.pressure), capture.dimensions);
@@ -238,14 +251,17 @@ export class WebGPUUniformPressureMultigrid {
     return counts;
   }
 
-  /** Opt-in diagnostic capture of invocation 1. It does not alter the solve. */
-  enableCoarsestCapture(): void {
+  /** Opt-in diagnostic capture of one coarsest solve invocation. It does not alter the solve. */
+  enableCoarsestCapture(invocation = 1): void {
     this.assertLive(); if (this.coarsestCaptureBuffers) return;
+    if (!Number.isSafeInteger(invocation) || invocation < 1) {
+      throw new RangeError("CM11a coarsest capture invocation must be a positive integer");
+    }
     const dimensions = this.levels.at(-1)!.dimensions;
     const byteLength = 256 * dimensions[1] * dimensions[2];
     const buffer = (label: string) => this.device.createBuffer({ label, size: byteLength,
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
-    this.coarsestCaptureBuffers = { dimensions, byteLength,
+    this.coarsestCaptureBuffers = { invocation, dimensions, byteLength,
       pressure: buffer("Uniform CM11a capture pressure"), rhs: buffer("Uniform CM11a capture rhs"),
       minimum: buffer("Uniform CM11a capture p-min"), phi: buffer("Uniform CM11a capture phi"),
       topology: buffer("Uniform CM11a capture topology") };
@@ -293,15 +309,19 @@ export class WebGPUUniformPressureMultigrid {
         phiOut: destination.phi[phi[destinationIndex]! ^ 1]!, volumeIn: source.volume[0], volumeOut: destination.volume[0],
         residualIn: source.residual[0], residualOut: destination.residual[0],
         minimumIn: source.minimum[min[sourceIndex]!]!, minimumOut: destination.minimum[min[destinationIndex]! ^ 1]!,
+        coefficientsIn: source.coefficients, coefficientsOut: destination.coefficients,
       };
       const resources = { ...defaults, ...overrides };
       const texturesByBinding = new Map<number, GPUTexture>([
         [1, resources.pressureIn], [2, resources.pressureOut], [3, resources.rhsIn], [4, resources.rhsOut],
         [5, resources.phiIn], [6, resources.phiOut], [7, resources.volumeIn], [8, resources.volumeOut],
         [9, resources.residualIn], [10, resources.residualOut], [11, resources.minimumIn], [12, resources.minimumOut],
+        [14, resources.coefficientsIn], [15, resources.coefficientsOut],
       ]);
-      const sampled = ENTRY_BINDINGS[entryPoint].filter((binding) => (binding & 1) === 1).map((binding) => texturesByBinding.get(binding));
-      const writable = ENTRY_BINDINGS[entryPoint].filter((binding) => binding > 0 && (binding & 1) === 0).map((binding) => texturesByBinding.get(binding));
+      const sampledBindings = new Set([1, 3, 5, 7, 9, 11, 14]);
+      const writableBindings = new Set([2, 4, 6, 8, 10, 12, 15]);
+      const sampled = ENTRY_BINDINGS[entryPoint].filter((binding) => sampledBindings.has(binding)).map((binding) => texturesByBinding.get(binding));
+      const writable = ENTRY_BINDINGS[entryPoint].filter((binding) => writableBindings.has(binding)).map((binding) => texturesByBinding.get(binding));
       if (sampled.some((texture) => texture !== undefined && writable.includes(texture))) {
         throw new Error(`Uniform CM11a ${entryPoint} aliases a sampled and writable texture`);
       }
@@ -319,6 +339,8 @@ export class WebGPUUniformPressureMultigrid {
           { binding: 9, resource: resources.residualIn.createView() }, { binding: 10, resource: resources.residualOut.createView() },
           { binding: 11, resource: resources.minimumIn.createView() }, { binding: 12, resource: resources.minimumOut.createView() },
           { binding: 13, resource: { buffer: this.diagnostics } },
+          { binding: 14, resource: resources.coefficientsIn.createView() },
+          { binding: 15, resource: resources.coefficientsOut.createView() },
         ];
       const group = this.device.createBindGroup({ label: `Uniform CM11a bindings - ${entryPoint}`,
         layout: this.groupLayouts[entryPoint],
@@ -328,7 +350,8 @@ export class WebGPUUniformPressureMultigrid {
         entryPoint, stage: planStage,
         workgroups: [Math.ceil(dispatchDimensions[0] / 4), Math.ceil(dispatchDimensions[1] / 4),
           Math.ceil(dispatchDimensions[2] / 4)],
-        ...(entryPoint === "mgSolveCoarsest" && control[2] === 1 ? { firstCoarsestCapture: {
+        ...(entryPoint === "mgSolveCoarsest" ? { coarsestCapture: {
+          invocation: control[2],
           dimensions: source.dimensions, pressure: resources.pressureOut, rhs: resources.rhsIn,
           minimum: resources.minimumIn, phi: resources.phiIn, topology: resources.volumeIn,
         } } : {}),
@@ -352,12 +375,17 @@ export class WebGPUUniformPressureMultigrid {
       emit("mgExtrapolatePhiOneCell", level, level,
         { phiIn: this.levels[level]!.phi[0], phiOut: this.levels[level]!.phi[1] });
       phi[level] = 1;
+      emit("mgBakeCoefficients", level, level, {
+        phiIn: this.levels[level]!.phi[1], coefficientsOut: this.levels[level]!.coefficients,
+      });
     }
+    // CM11a summarizes PRBGS as two colour passes plus a projection, but the
+    // smoother projects at write time on both its update and pass-through
+    // paths, so each sweep exits already-projected and the third pass is gone.
     const sweep = (level: number, rhs: GPUTexture) => {
       for (let colour = 0; colour < 2; colour += 1) {
         emit("mgSmoothColour", level, level, { rhsIn: rhs }, [0, 0, colour, 0]); flipPressure(level);
       }
-      emit("mgProjectMinimum", level); flipPressure(level);
     };
     let coarseInvocation = 0;
     const coarseSolve = (rhs: GPUTexture) => {
@@ -383,7 +411,10 @@ export class WebGPUUniformPressureMultigrid {
       for (let i = 0; i < UNIFORM_CM11A_POST_SWEEPS; i += 1) sweep(level, rhs);
     };
     const fullCycle = () => {
-      const backup = this.levels[0]!.residual[1];
+      // Algorithm 3 requires p_tmp to survive every nested V-cycle. Both
+      // finest residual[1] and rhs[1] are selected as residual scratch by
+      // vCycle(), so the backup must have dedicated storage.
+      const backup = this.fullCycleBackup;
       emit("mgCopyPressure", 0, 0, { pressureOut: backup });
       emit("mgShiftMinimum", 0); flipMinimum(0);
       emit("mgResidual", 0, 0, { rhsIn: originalRhs, residualOut: this.levels[0]!.residual[0] });
@@ -431,6 +462,8 @@ export class WebGPUUniformPressureMultigrid {
   destroy(): void { if (this.destroyed) return; this.destroyed = true;
     for (const level of this.levels) for (const pair of [level.pressure, level.rhs, level.phi,
       level.volume, level.residual, level.minimum]) { pair[0].destroy(); pair[1].destroy(); }
+    for (const level of this.levels) level.coefficients.destroy();
+    this.fullCycleBackup.destroy();
     for (const buffer of this.ownedParams) buffer.destroy(); this.diagnostics.destroy();
     if (this.coarsestCaptureBuffers) for (const buffer of [this.coarsestCaptureBuffers.pressure,
       this.coarsestCaptureBuffers.rhs, this.coarsestCaptureBuffers.minimum,

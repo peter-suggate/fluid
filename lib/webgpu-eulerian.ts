@@ -237,6 +237,34 @@ export interface GPUEulerianInfo {
   volumeDrift?:number;
   rawVolumeDrift?:number;
   referenceLiquidVolume_cells?: number;
+  /** CM11a coarsest-grid convergence and finest-grid post-cycle residuals. */
+  uniformCM11aResidualInfinity?: number;
+  uniformCM11aConverged?: boolean;
+  uniformCM11aCoarseIterations?: number;
+  uniformCM11aCapFailure?: boolean;
+  uniformCM11aFailingCoarseInvocation?: number;
+  uniformCM11aCoarseMaxAbsRhs?: number;
+  uniformCM11aCoarseMaxDiagonalPressure?: number;
+  uniformCM11aCoarseMaxAbsPressure?: number;
+  uniformCM11aCoarseProjectedGapPressure?: number;
+  uniformCM11aCoarseNormalizedProjectedResidual?: number;
+  uniformCM11aFineResidualInfinity?: number;
+  uniformCM11aFineProjectedGapPressure?: number;
+  uniformCM11aCoarseActiveRows?: number;
+  uniformCM11aCoarseFreeRows?: number;
+  uniformCM11aCoarseWorstRow?: number;
+  uniformCM11aCoarseWorstRowActive?: boolean;
+  uniformCM11aCoarseWorstRowHalo?: boolean;
+  /** Sec. 3.3 FIM must terminate with an empty active list. */
+  uniformFIMTerminalActiveFaces?: number;
+  uniformFIMConverged?: boolean;
+  uniformFIMExecutedPasses?: number;
+  /** Chentanez--Mueller mass stored above rho=1 after the latest transport. */
+  adaptiveCompressedExcessVolume_cells?: number;
+  /** Conserved mass currently below the rho=.5 visible-surface threshold. */
+  adaptiveSubIsoVolume_cells?: number;
+  adaptiveOverfullLeafCount?: number;
+  adaptiveSubIsoLeafCount?: number;
   phiInterfaceCellCount?: number;
   volumeCorrectionNormalSpeed_cells_s?: number;
   /** Diagnostic divergence-rate equivalent of the normal volume correction. */

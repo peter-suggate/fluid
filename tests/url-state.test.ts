@@ -4,6 +4,7 @@ import { getMethod, resolveMethodValues } from "../lib/methods";
 import { cloneScene } from "../lib/model";
 import { getSceneDefinition, getScenePreset, scenePresets } from "../lib/scenes";
 import { sceneDocumentAtLattice } from "../lib/scene-definition";
+import { sceneLatticeDimensions } from "../lib/scene-lattice";
 import { svoSceneryRefinementDepth } from "../lib/svo-render-tuning";
 import { useUIStore } from "../lib/stores/ui-store";
 import { createSceneQueryLayerCache, parseQueryState, serializeQueryState } from "../lib/url-state";
@@ -244,60 +245,45 @@ test("invalid external query values fall back to validated defaults", () => {
   const parsed = parseQueryState("?method=nope&scene=nope&quality=extreme&environment=the-void&param.uniform.jacobiIterations=9999&scene.container.width_m=-4&scene.fluid.gravity_m_s2.y=null");
   const defaultScene = getScenePreset("water-box-dam-break").create();
 
-  assert.equal(parsed.methodId, "octree");
+  assert.equal(parsed.methodId, "uniform");
   assert.equal(parsed.presetId, "water-box-dam-break");
   assert.equal(parsed.quality, "balanced");
-  assert.deepEqual(parsed.overrides.octree,
-    getScenePreset("water-box-dam-break").methodProfile?.overrides);
+  assert.equal(parsed.overrides.uniform, undefined);
   assert.equal(parsed.scene.container.width_m, defaultScene.container.width_m);
   assert.equal(parsed.scene.fluid.gravity_m_s2.y, defaultScene.fluid.gravity_m_s2.y);
   assert.equal(parsed.ui.diagnosticsOpen, false);
   assert.equal(parsed.ui.rightPanel, null);
   const values = resolveMethodValues(getMethod(parsed.methodId), parsed.quality, parsed.overrides[parsed.methodId] ?? {});
   assert.equal(parsed.scene.voxelDomain.finestCellSize_m, 0.05);
-  assert.equal(values.coarseBackend, "losasso");
-  assert.equal(values.losassoVelocityExtension, "causal-front");
-  assert.equal(values.maximumLeafSize, "16");
-  assert.equal(values.interfaceRefinementBandCells, 4);
-  assert.equal(values.globalFineLevelSetFactor, "1");
+  assert.equal(values.timeStep, "paper");
 });
 
-test("a bare dam-break UI link resolves to the Dawn-proven adaptive LoSasso profile", () => {
+test("a bare dam-break UI link resolves to the uniform paper-step default", () => {
   const preset = getScenePreset("water-box-dam-break");
-  const profile = preset.methodProfile;
-  assert.ok(profile);
+  assert.equal(preset.methodProfile, undefined);
   const parsed = parseQueryState("?scene=water-box-dam-break");
-  assert.equal(parsed.methodId, "octree");
+  assert.equal(parsed.methodId, "uniform");
   assert.equal(parsed.quality, "balanced");
-  assert.deepEqual(parsed.overrides.octree, profile.overrides);
+  assert.equal(parsed.scene.numerics.fixedDt_s, 0.016);
+  assert.equal(parsed.scene.numerics.maxDt_s, 0.016);
   const values = resolveMethodValues(getMethod(parsed.methodId), parsed.quality,
     parsed.overrides[parsed.methodId] ?? {});
-  assert.equal(values.coarseBackend, "losasso");
-  assert.equal(values.losassoVelocityExtension, "causal-front");
-  assert.equal(values.maximumLeafSize, "16");
-  assert.equal(values.interfaceRefinementBandCells, 4);
-  assert.equal(values.globalFineLevelSetFactor, "1");
+  assert.equal(values.timeStep, "paper");
+  assert.deepEqual(sceneLatticeDimensions(parsed.scene), [24, 16, 16],
+    "the default Uniform scene must halve exactly into the CM11a coarsest solve");
 });
 
-/**
- * A profiled preset is only valid at the solver settings it authors. The scene
- * picker applies them via `applyProfile`, so a bare link, a reload, or the very
- * first load must resolve to the same configuration — otherwise the UI runs a
- * validation scene at the method's generic quality defaults (band 4 instead
- * of the authored band 3) while every panel claims the scene
- * is loaded, and no Dawn lane reproduces what the UI is actually running.
- */
-test("a bare link to a profiled preset resolves to that preset's authored method profile", () => {
+test("a bare profiled scene keeps its comparison tuple without overriding Uniform", () => {
   const profile = getScenePreset("minimal-power-dam-break").methodProfile;
   assert.ok(profile, "the minimal dam break preset must author a method profile");
 
   const parsed = parseQueryState("?scene=minimal-power-dam-break");
-  assert.equal(parsed.methodId, profile.methodId);
-  assert.equal(parsed.quality, profile.quality);
+  assert.equal(parsed.methodId, "uniform");
+  assert.equal(parsed.quality, "balanced");
   assert.deepEqual(parsed.overrides[profile.methodId], { ...profile.overrides });
 
-  const values = resolveMethodValues(getMethod(parsed.methodId), parsed.quality,
-    parsed.overrides[parsed.methodId] ?? {});
+  const values = resolveMethodValues(getMethod(profile.methodId), profile.quality,
+    parsed.overrides[profile.methodId] ?? {});
   assert.equal(values.coarseBackend, "losasso");
   assert.equal(values.maximumLeafSize, "16");
   assert.equal(values.interfaceRefinementBandCells, 3);
@@ -316,8 +302,9 @@ test("a bare ceiling-drop link hydrates the dedicated band-1 UI profile", () => 
   const profile = getScenePreset("ceiling-slab-drop").methodProfile;
   assert.ok(profile);
   const parsed = parseQueryState("?scene=ceiling-slab-drop");
-  const values = resolveMethodValues(getMethod(parsed.methodId), parsed.quality,
-    parsed.overrides[parsed.methodId] ?? {});
+  assert.equal(parsed.methodId, "uniform");
+  const values = resolveMethodValues(getMethod(profile.methodId), profile.quality,
+    parsed.overrides[profile.methodId] ?? {});
   assert.equal(values.coarseBackend, "losasso");
   assert.equal(values.maximumLeafSize, "8");
   assert.equal(values.interfaceRefinementBandCells, 1);
@@ -327,7 +314,7 @@ test("a bare ceiling-drop link hydrates the dedicated band-1 UI profile", () => 
 
 test("an explicit param key overrides one value of a profiled preset", () => {
   const parsed = parseQueryState(
-    "?scene=minimal-power-dam-break&param.octree.interfaceRefinementBandCells=0");
+    "?scene=minimal-power-dam-break&method=octree&param.octree.interfaceRefinementBandCells=0");
   const values = resolveMethodValues(getMethod(parsed.methodId), parsed.quality,
     parsed.overrides[parsed.methodId] ?? {});
   assert.equal(values.interfaceRefinementBandCells, 0);
@@ -338,7 +325,7 @@ test("an explicit param key overrides one value of a profiled preset", () => {
 
 test("an explicit scene link can still select a non-default maximum leaf size", () => {
   const parsed = parseQueryState(
-    "?scene=minimal-power-dam-break&param.octree.maximumLeafSize=2");
+    "?scene=minimal-power-dam-break&method=octree&param.octree.maximumLeafSize=2");
   const values = resolveMethodValues(getMethod(parsed.methodId), parsed.quality,
     parsed.overrides[parsed.methodId] ?? {});
   assert.equal(values.maximumLeafSize, "2");

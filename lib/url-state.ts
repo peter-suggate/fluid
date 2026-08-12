@@ -322,17 +322,15 @@ function numberParam(query: URLSearchParams, key: string, fallback: number, min 
 export function parseQueryState(search: string): QueryState {
   const query = new URLSearchParams(search);
   const preset = exactPreset(query.get("scene")) ?? getScenePreset(defaultScenePresetId);
-  // A validation preset authors the solver settings its scene is only valid at,
-  // and the scene picker applies them through `applyProfile`. Hydration has to
-  // start from that same baseline: otherwise a bare `?scene=<profiled preset>`
-  // — the first load, any reload, or a shared link — silently runs the preset
-  // at the method's generic quality defaults, which is a different solver
-  // configuration than the one the scene was authored and validated against.
+  // Profiles preserve comparison settings for their named method, but method
+  // selection itself has one product-wide default. A bare scene URL must not
+  // silently switch back to Octree merely because the card stores its legacy
+  // comparison tuple; an explicit `method=` remains authoritative.
   const profile = preset.methodProfile;
-  const methodId = exactMethod(query.get("method"))?.id ?? profile?.methodId ?? defaultMethodId;
+  const methodId = exactMethod(query.get("method"))?.id ?? defaultMethodId;
   const qualityCandidate = query.get("quality") as GPUQuality | null;
   const quality = qualityCandidate && qualities.includes(qualityCandidate)
-    ? qualityCandidate : profile?.quality ?? "balanced";
+    ? qualityCandidate : "balanced";
   const overrides: Record<string, MethodParamValues> = profile
     ? { [profile.methodId]: { ...profile.overrides } } : {};
 
@@ -512,8 +510,8 @@ export function serializeQueryState(
   query.set("scene", sceneState.presetId);
   const preset = getScenePreset(sceneState.presetId);
   const profile = preset.methodProfile;
-  const baselineMethodId = profile?.methodId ?? defaultMethodId;
-  const baselineQuality = profile?.quality ?? "balanced";
+  const baselineMethodId = defaultMethodId;
+  const baselineQuality = "balanced";
   // A catalog scene's authored runtime contract is implied by its identity.
   // Writing it beside the scene made every clean card navigation look like a
   // hand-tuned override and allowed the URL to drift if that contract changed.

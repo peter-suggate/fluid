@@ -30,5 +30,5 @@ export function interactiveMethodId(id: string): string {
 }
 
 export function getMethod(id: string): SimulationMethod {
-  return simulationMethods.find((method) => method.id === id) ?? octreeMethod;
+  return simulationMethods.find((method) => method.id === id) ?? uniformMethod;
 }

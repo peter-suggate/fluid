@@ -100,7 +100,7 @@ export class WebGPUUniformVelocityExtrapolator {
     this.convergence = device.createBuffer({
       label: "Uniform Sec. 3.3 active-front convergence",
       size: 16,
-      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
     });
     this.dispatchArgs = device.createBuffer({
       label: "Uniform Sec. 3.3 indirect dispatch",
@@ -128,10 +128,11 @@ export class WebGPUUniformVelocityExtrapolator {
     ] });
     this.pipelineLayout = device.createPipelineLayout({ label: "Uniform Sec. 3.3 extrapolation pipeline layout", bindGroupLayouts: [this.layout] });
 
-    // CM11b Sec. 3.3 limits the accurate JRW07 extension to a two-cell band.
-    // Four dependency sweeps per cell and dimension are a conservative GPU
-    // safety ceiling; distance gating in the shader is the band authority.
-    this.activeFrontPasses = 4 * 2 * 3;
+    // CM11b Sec. 3.3 terminates only when the active list is empty.  Indirect
+    // dispatch turns all remaining updates into zero-work calls once that
+    // happens; a longest-axis ceiling gives every dependency chain enough
+    // opportunities to settle without prematurely accepting a live front.
+    this.activeFrontPasses = Math.max(...dims);
 
     const frontBuffer = (config: FrontConfig): GPUBuffer => {
       const buffer = device.createBuffer({
@@ -264,6 +265,9 @@ export class WebGPUUniformVelocityExtrapolator {
 
   get activeFrontPassCeiling(): number { return this.activeFrontPasses; }
 
+  /** Four u32 words: active A/B counts, latest parity, and executed updates. */
+  get convergenceDiagnostics(): GPUBuffer { return this.convergence; }
+
   get hierarchyLevelCount(): number { return this.hierarchyLevels.length; }
 
   /** Compute passes one `encode` call always encodes: the count is fixed at
@@ -315,12 +319,14 @@ export class WebGPUUniformVelocityExtrapolator {
       pass.end();
     };
     const prefix = predicted ? "Uniform predicted Sec. 3.3" : "Uniform Sec. 3.3";
-    dispatchBase(`${prefix} seed active front`, pipelines.seed, predicted ? this.seedPredictedGroup : this.seedCurrentGroup);
+    dispatchBase(`${prefix} seed active front`, pipelines.seed,
+      predicted ? this.seedPredictedGroup : this.seedCurrentGroup);
     const prepare = (label: string, group: GPUBindGroup) => {
       const pass = encoder.beginComputePass({ label });
       pass.setPipeline(pipelines.prepare); pass.setBindGroup(0, group); pass.dispatchWorkgroups(1); pass.end();
     };
-    prepare(`${prefix} prepare initial active dispatch`, predicted ? this.prepareSeedPredictedGroup : this.prepareSeedCurrentGroup);
+    prepare(`${prefix} prepare initial active dispatch`,
+      predicted ? this.prepareSeedPredictedGroup : this.prepareSeedCurrentGroup);
     for (let iteration = 0; iteration < this.activeFrontPasses; iteration += 1) {
       const group = iteration % 2 === 0 ? this.updateABGroup : this.updateBAGroup;
       const pass = encoder.beginComputePass({ label: `${prefix} FIM indirect update ${iteration + 1}` });

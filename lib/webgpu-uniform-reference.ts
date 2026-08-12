@@ -44,8 +44,13 @@ import type {
   FluidPipelineGraph,
   FluidPipelineStage,
 } from "./fluid-pipeline";
+import { UNIFORM_PAPER_DT_S, uniformPaperAdvanceReady } from "./uniform-paper";
+
+export { UNIFORM_PAPER_DT_S } from "./uniform-paper";
 
 export interface WebGPUUniformReferenceOptions {
+  /** Diagnostic-only switch; the authored paper method always enables Sec. 3.5. */
+  densitySharpening?: boolean;
   /** Paper Sec. 3.8 render reconstruction; Results states it is normally off. */
   densityPostProcessing?: boolean;
   /**
@@ -60,8 +65,11 @@ export interface WebGPUUniformReferenceOptions {
   deferPipelineCompilation?: boolean;
 }
 
-/** The simulation time step used by every example in the paper (Sec. 4). */
-export const UNIFORM_PAPER_DT_S = 1 / 30;
+// Sec. 3.4 permits one through seven ordered gamma-diffusion iterations per
+// time step. Use the robust end of the paper's stated range: a single sweep
+// leaves severe compression essentially untouched in the paper-step 64^3
+// splash, where one cell can receive mass from many distant departure rays.
+export const UNIFORM_GAMMA_DIFFUSION_ITERATIONS = 7;
 
 interface UniformReferencePipelines {
   advect: GPUComputePipeline;
@@ -80,7 +88,6 @@ interface UniformReferencePipelines {
   diffuseGammaY1: GPUComputePipeline;
   diffuseGammaZ0: GPUComputePipeline;
   diffuseGammaZ1: GPUComputePipeline;
-  averageGammaDiffusion: GPUComputePipeline;
   postprocessBlurX: GPUComputePipeline;
   postprocessBlurY: GPUComputePipeline;
   postprocessBlurZ: GPUComputePipeline;
@@ -93,9 +100,9 @@ interface UniformReferencePipelines {
 }
 
 const PIPELINES = [
-  ["advect", "Advect velocity", "advect", false],
-  ["reverse", "Reverse advection", "reverseAdvection", false],
-  ["correct", "Correct advection", "correctAdvection", false],
+  ["advect", "Bounded MacCormack velocity prediction", "advect", false],
+  ["reverse", "Bounded MacCormack reverse advection", "reverseAdvection", false],
+  ["correct", "Bounded MacCormack correction and body forces", "correctAdvection", false],
   ["project", "Project velocity", "project", false],
   ["coupleRigid", "Couple rigid bodies", "coupleRigid", false],
   ["reduce", "Reduce diagnostics", "reduceDiagnostics", false],
@@ -103,13 +110,12 @@ const PIPELINES = [
   ["traceGammaBeta", "Trace gamma and scatter beta", "traceGammaAndBeta", false],
   ["scatterDensityDeficit", "Scatter density and gamma deficits", "scatterDensityDeficit", false],
   ["gatherDensity", "Gather conservative surface density", "gatherConservativeDensity", false],
-  ["diffuseGammaX0", "Diffuse gamma x even", "diffuseGammaX0", false],
-  ["diffuseGammaX1", "Diffuse gamma x odd", "diffuseGammaX1", false],
-  ["diffuseGammaY0", "Diffuse gamma y even", "diffuseGammaY0", false],
-  ["diffuseGammaY1", "Diffuse gamma y odd", "diffuseGammaY1", false],
-  ["diffuseGammaZ0", "Diffuse gamma z even", "diffuseGammaZ0", false],
-  ["diffuseGammaZ1", "Diffuse gamma z odd", "diffuseGammaZ1", false],
-  ["averageGammaDiffusion", "Average mirrored gamma diffusion sweeps", "averageGammaDiffusion", false],
+  ["diffuseGammaX0", "Diffuse gamma along x (even pairs)", "diffuseGammaX0", false],
+  ["diffuseGammaX1", "Diffuse gamma along x (odd pairs)", "diffuseGammaX1", false],
+  ["diffuseGammaY0", "Diffuse gamma along y (even pairs)", "diffuseGammaY0", false],
+  ["diffuseGammaY1", "Diffuse gamma along y (odd pairs)", "diffuseGammaY1", false],
+  ["diffuseGammaZ0", "Diffuse gamma along z (even pairs)", "diffuseGammaZ0", false],
+  ["diffuseGammaZ1", "Diffuse gamma along z (odd pairs)", "diffuseGammaZ1", false],
   ["postprocessBlurX", "Post-process gamma blur x", "postprocessBlurX", false],
   ["postprocessBlurY", "Post-process gamma blur y", "postprocessBlurY", false],
   ["postprocessBlurZ", "Post-process gamma blur z", "postprocessBlurZ", false],
@@ -141,15 +147,10 @@ export const UNIFORM_ADVANCE_PHASE = Object.freeze({
   extensionFront: { id: "velocity-extrapolation", label: "Sec. 3.3 narrow-band FIM front" },
   extensionHierarchy: { id: "velocity-extrapolation", label: "Sec. 3.3 hierarchy fill + transport shell" },
   densityAdvection: { id: "fine-sdf-advection", label: "Sec. 3.4 conservative density advection" },
-  gammaDiffusion: { id: "fine-sdf-advection", label: "Sec. 3.4 mirrored gamma diffusion" },
+  gammaDiffusion: { id: "fine-sdf-advection", label: "Sec. 3.4 ordered pair gamma diffusion" },
   interfaceSharpening: { id: "fine-sdf-redistance", label: "Sec. 3.5 interface sharpening" },
   solidExcess: { id: "fine-sdf-redistance", label: "Sec. 3.6 partial-solid excess" },
-  velocityPrediction: { id: "velocity-advection", label: "Semi-Lagrangian velocity prediction" },
-  predictedExtensionAuthority: { id: "velocity-extrapolation", label: "Predicted Sec. 3.3 interface authority" },
-  predictedExtensionFront: { id: "velocity-extrapolation", label: "Predicted Sec. 3.3 narrow-band FIM front" },
-  predictedExtensionHierarchy: { id: "velocity-extrapolation", label: "Predicted Sec. 3.3 hierarchy fill + transport shell" },
-  reverseAdvection: { id: "velocity-advection", label: "MacCormack reverse advection" },
-  advectionCorrection: { id: "velocity-advection", label: "MacCormack correction + body forces" },
+  advectionCorrection: { id: "velocity-advection", label: "Bounded MacCormack advection + body forces" },
   pressureSetup: { id: "pressure-system", label: "CM11a topology + RHS pyramid" },
   pressureFullCycles: { id: "pressure-solve", label: `CM11a Full-Cycles ×${UNIFORM_CM11A_FULL_CYCLES}` },
   pressureVCycles: { id: "pressure-solve", label: `CM11a V-Cycles ×${UNIFORM_CM11A_V_CYCLES}` },
@@ -181,6 +182,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   readonly surfaceFieldTexture: GPUTexture;
   readonly columnBaseTexture: GPUTexture;
   readonly velocityTexture: GPUTexture;
+  /** Velocity after advection/forces and before the pressure projection. */
+  readonly preProjectionVelocityTexture: GPUTexture;
   /** Padded float32 velocity extension retained for opt-in comparison diagnostics. */
   readonly extrapolatedVelocityTexture: GPUTexture;
   /** FIM xyz distances plus the 3-bit active mask in w, for Dawn conformance diagnostics. */
@@ -203,6 +206,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   }>;
   /** Negative domain MAC faces paired with preExtrapolationVelocity. */
   readonly symmetryStageAuditNegativeBoundaryVelocity?: GPUBuffer;
+  /** Scalar-packed x/y/z negative-face plane byte length. */
+  readonly negativeBoundaryVelocityBytes: number;
   /** Eight vec4 decision records for every stored MAC face/component. */
   readonly symmetryStageAuditMacCormackBuffer?: GPUBuffer;
   /** Fixed-point beta produced by Sec. 3.4 before deficit scattering. */
@@ -253,9 +258,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private readonly densityTraceGroup: GPUBindGroup;
   private readonly densityScatterGroup: GPUBindGroup;
   private readonly densityGatherGroup: GPUBindGroup;
-  private readonly gammaDiffusionForwardGroups: readonly GPUBindGroup[];
-  private readonly gammaDiffusionReverseGroups: readonly GPUBindGroup[];
-  private readonly gammaDiffusionAverageGroup: GPUBindGroup;
+  private readonly gammaDiffusionGroups: readonly [GPUBindGroup, GPUBindGroup];
   private readonly postprocessBlurXGroup: GPUBindGroup;
   private readonly postprocessBlurYGroup: GPUBindGroup;
   private readonly postprocessBlurZGroup: GPUBindGroup;
@@ -272,6 +275,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private lastTime = 0;
   private referenceVolumeCells = 0;
   private readonly densityPostProcessing: boolean;
+  private readonly densitySharpening: boolean;
   private readonly paperTimeStep: boolean;
   private disposed = false;
   private physicsTraceSampleId = 0;
@@ -289,6 +293,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     options: WebGPUUniformReferenceOptions = {},
   ) {
     this.densityPostProcessing = options.densityPostProcessing === true;
+    this.densitySharpening = options.densitySharpening !== false;
     this.paperTimeStep = options.timeStep !== "scene";
     // The stage trace's closing marker pass must dispatch observable work, or
     // Metal skips its end-of-pass timestamp and the first sample retires
@@ -296,6 +301,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     void GPUStageTimestampRecorder.prepare(device);
     const [nx, ny, nz] = sceneLatticeDimensions(scene, device.limits.maxTextureDimension3D);
     const allocation = planUniformHostAllocation(nx, ny, nz, "maccormack");
+    this.negativeBoundaryVelocityBytes = allocation.boundaryVelocityBytes;
     const usage = GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING
       | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST;
     const texture3d = (label: string, format: GPUTextureFormat, size: GPUExtent3D) =>
@@ -306,7 +312,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.velocityB = velocity("Uniform reference velocity B");
     this.velocityC = velocity("Uniform reference velocity C");
     this.velocityD = velocity("Uniform reference velocity D");
-    const boundaryVelocity = (label: string) => device.createBuffer({ label, size: nx * ny * nz * 16,
+    const boundaryVelocity = (label: string) => device.createBuffer({ label, size: allocation.boundaryVelocityBytes,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
     this.boundaryVelocityA = boundaryVelocity("Uniform reference negative boundary velocity A");
     this.boundaryVelocityB = boundaryVelocity("Uniform reference negative boundary velocity B");
@@ -315,7 +321,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     if (typeof process !== "undefined" && process.env.FLUID_UNIFORM_SYMMETRY_STAGE_AUDIT === "1") {
       this.symmetryStageAuditNegativeBoundaryVelocity = device.createBuffer({
         label: "Uniform audit pre-extrapolation negative boundary velocity",
-        size: nx * ny * nz * 16,
+        size: allocation.boundaryVelocityBytes,
         usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
       });
     }
@@ -344,7 +350,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
         densitySharpening: scalar("Uniform audit density after sharpening"),
         gammaPostAdvection: scalar("Uniform audit gamma after Sec. 3.4 advection"),
         gammaPostDiffusion: scalar("Uniform audit gamma after diffusion"),
-        velocityPrediction: this.velocityC,
+        velocityPrediction: velocity("Uniform audit velocity after forward prediction"),
         predictedExtrapolation: this.transportB,
         reverseAdvection: this.velocityD,
         velocityAdvection: velocity("Uniform audit velocity after MacCormack advection"),
@@ -451,9 +457,18 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       this.velocityA, this.velocityD, this.pressureA, this.pressureB,
       this.volumeA, this.surfaceA, this.heightB, this.heightA,
     );
-    this.advectGroup = group(this.velocityA, this.velocityC, this.pressureA, this.pressureB, this.volumeA, this.volumeB, this.heightB, this.heightA, this.velocityB, this.velocityD, this.transportA, this.volumeA, this.gammaA, this.gammaB, this.boundaryVelocityA, this.boundaryVelocityC);
-    this.reverseGroup = group(this.velocityC, this.velocityD, this.pressureA, this.pressureB, this.volumeA, this.volumeB, this.heightB, this.heightA, this.velocityA, this.velocityB, this.transportB, this.volumeA, this.gammaA, this.gammaB, this.boundaryVelocityC, this.boundaryVelocityD);
-    this.correctGroup = group(this.velocityA, this.velocityB, this.pressureA, this.pressureB, this.volumeB, this.volumeA, this.heightB, this.heightA, this.velocityC, this.velocityD, this.transportA, this.volumeB, this.gammaA, this.gammaB, this.boundaryVelocityA, this.boundaryVelocityB);
+    this.advectGroup = group(this.velocityA, this.velocityC, this.pressureA, this.pressureB,
+      this.volumeA, this.volumeB, this.heightB, this.heightA,
+      this.velocityB, this.velocityD, this.transportA, this.volumeA,
+      this.gammaA, this.gammaB, this.boundaryVelocityA, this.boundaryVelocityC);
+    this.reverseGroup = group(this.velocityC, this.velocityD, this.pressureA, this.pressureB,
+      this.volumeA, this.volumeB, this.heightB, this.heightA,
+      this.velocityA, this.velocityB, this.transportB, this.volumeA,
+      this.gammaA, this.gammaB, this.boundaryVelocityC, this.boundaryVelocityD);
+    this.correctGroup = group(this.velocityA, this.velocityB, this.pressureA, this.pressureB,
+      this.volumeB, this.volumeA, this.heightB, this.heightA,
+      this.velocityC, this.velocityD, this.transportA, this.volumeB,
+      this.gammaA, this.gammaB, this.boundaryVelocityA, this.boundaryVelocityB);
     this.pressureMultigridGroup = group(this.velocityB, this.velocityA, this.pressureA, this.pressureB, this.volumeB, this.volumeA, this.heightB, this.heightA, this.velocityB, this.velocityB, this.transportA, this.volumeB, this.gammaA, this.gammaB, this.boundaryVelocityB, this.boundaryVelocityA);
     this.projectGroup = group(this.velocityB, this.velocityA, this.pressureMultigrid.pressureTexture, this.pressureA, this.volumeB, this.volumeA, this.heightB, this.heightA, this.velocityB, this.velocityB, this.transportA, this.volumeB, this.gammaA, this.gammaB, this.boundaryVelocityB, this.boundaryVelocityA);
     this.rigidGroup = group(this.velocityA, this.velocityB, this.pressureA, this.pressureB, this.volumeA, this.volumeB, this.heightB, this.heightA, this.velocityA, this.velocityA, this.transportA, this.volumeA, this.gammaA, this.gammaB, this.boundaryVelocityA, this.boundaryVelocityB);
@@ -465,28 +480,16 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       this.velocityA, this.velocityA, this.transportA, this.volumeA, this.gammaA, this.gammaB);
     this.densityGatherGroup = group(this.velocityA, this.velocityB, this.pressureA, this.pressureB, this.volumeA, this.volumeB, this.heightB, this.heightA,
       this.velocityA, this.velocityA, this.transportA, this.volumeA, this.gammaB, this.gammaA);
-    this.gammaDiffusionForwardGroups = [
-      group(this.velocityA, this.velocityB, this.pressureA, this.pressureB, this.volumeB, this.volumeA, this.heightB, this.heightA, this.velocityA, this.velocityA, this.transportA, this.volumeB, this.gammaA, this.gammaB),
-      group(this.velocityA, this.velocityB, this.pressureA, this.pressureB, this.volumeA, this.volumeB, this.heightB, this.heightA, this.velocityA, this.velocityA, this.transportA, this.volumeA, this.gammaB, this.gammaA),
-      group(this.velocityA, this.velocityB, this.pressureA, this.pressureB, this.volumeB, this.volumeA, this.heightB, this.heightA, this.velocityA, this.velocityA, this.transportA, this.volumeB, this.gammaA, this.gammaB),
-      group(this.velocityA, this.velocityB, this.pressureA, this.pressureB, this.volumeA, this.volumeB, this.heightB, this.heightA, this.velocityA, this.velocityA, this.transportA, this.volumeA, this.gammaB, this.gammaA),
-      group(this.velocityA, this.velocityB, this.pressureA, this.pressureB, this.volumeB, this.volumeA, this.heightB, this.heightA, this.velocityA, this.velocityA, this.transportA, this.volumeB, this.gammaA, this.gammaB),
-      group(this.velocityA, this.velocityB, this.pressureA, this.pressureB, this.volumeA, this.volumeB, this.heightB, this.heightA, this.velocityA, this.velocityA, this.transportA, this.volumeA, this.gammaB, this.gammaA),
+    this.gammaDiffusionGroups = [
+      group(this.velocityA, this.velocityB, this.pressureA, this.pressureB,
+        this.volumeB, this.volumeA, this.heightB, this.heightA,
+        this.velocityA, this.velocityA, this.transportA, this.volumeB,
+        this.gammaA, this.gammaB),
+      group(this.velocityA, this.velocityB, this.pressureA, this.pressureB,
+        this.volumeA, this.volumeB, this.heightB, this.heightA,
+        this.velocityA, this.velocityA, this.transportA, this.volumeA,
+        this.gammaB, this.gammaA),
     ];
-    this.gammaDiffusionReverseGroups = [
-      group(this.velocityA, this.velocityB, this.pressureA, this.pressureB, this.surfaceA, this.volumeA, this.heightB, this.heightA, this.velocityA, this.velocityA, this.transportA, this.surfaceA, this.surfaceB, this.gammaB),
-      group(this.velocityA, this.velocityB, this.pressureA, this.pressureB, this.volumeA, this.surfaceA, this.heightB, this.heightA, this.velocityA, this.velocityA, this.transportA, this.volumeA, this.gammaB, this.surfaceB),
-      group(this.velocityA, this.velocityB, this.pressureA, this.pressureB, this.surfaceA, this.volumeA, this.heightB, this.heightA, this.velocityA, this.velocityA, this.transportA, this.surfaceA, this.surfaceB, this.gammaB),
-      group(this.velocityA, this.velocityB, this.pressureA, this.pressureB, this.volumeA, this.surfaceA, this.heightB, this.heightA, this.velocityA, this.velocityA, this.transportA, this.volumeA, this.gammaB, this.surfaceB),
-      group(this.velocityA, this.velocityB, this.pressureA, this.pressureB, this.surfaceA, this.volumeA, this.heightB, this.heightA, this.velocityA, this.velocityA, this.transportA, this.surfaceA, this.surfaceB, this.gammaB),
-      group(this.velocityA, this.velocityB, this.pressureA, this.pressureB, this.volumeA, this.surfaceA, this.heightB, this.heightA, this.velocityA, this.velocityA, this.transportA, this.volumeA, this.gammaB, this.surfaceB),
-    ];
-    this.gammaDiffusionAverageGroup = group(
-      this.velocityA, this.velocityB, this.surfaceB, this.pressureB,
-      this.volumeB, this.volumeA, this.heightB, this.heightA,
-      this.velocityA, this.velocityA, this.transportA, this.surfaceA,
-      this.gammaA, this.gammaB,
-    );
     this.sharpenComputeGroup = group(this.velocityA, this.velocityB, this.pressureA, this.pressureB, this.volumeB, this.volumeA, this.heightB, this.heightA);
     this.sharpenScatterGroup = group(this.velocityA, this.velocityB, this.pressureB, this.pressureA, this.volumeA, this.volumeB, this.heightB, this.heightA);
     this.sharpenResolveGroup = group(this.velocityA, this.velocityB, this.pressureA, this.pressureB, this.volumeA, this.volumeB, this.heightB, this.heightA);
@@ -515,6 +518,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.surfaceFieldTexture = this.densityPostProcessing ? this.surfaceB : this.volumeA;
     this.columnBaseTexture = this.heightA;
     this.velocityTexture = this.velocityA;
+    this.preProjectionVelocityTexture = this.velocityB;
     this.extrapolatedVelocityTexture = this.transportA;
     this.initializeVolumeAndTerrain();
   }
@@ -624,7 +628,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     const gamma = new Float32Array(nx * ny * nz).fill(1);
     this.upload3DF32(this.gammaA, gamma, nx, ny, nz);
     this.upload3DF32(this.gammaB, gamma, nx, ny, nz);
-    const zeroBoundaryVelocity = new Float32Array(nx * ny * nz * 4);
+    const zeroBoundaryVelocity = new Float32Array(this.negativeBoundaryVelocityBytes / 4);
     this.device.queue.writeBuffer(this.boundaryVelocityA, 0, zeroBoundaryVelocity);
     this.device.queue.writeBuffer(this.boundaryVelocityB, 0, zeroBoundaryVelocity);
     this.device.queue.writeBuffer(this.boundaryVelocityC, 0, zeroBoundaryVelocity);
@@ -684,14 +688,11 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       { texture: this.symmetryStageAuditTextures.extrapolationDensityAuthority },
       [this.info.nx, this.info.ny, this.info.nz],
     );
-    seam?.(predicted
-      ? UNIFORM_ADVANCE_PHASE.predictedExtensionAuthority
-      : UNIFORM_ADVANCE_PHASE.extensionAuthority);
-    this.velocityExtrapolator.encode(encoder, predicted, seam && ((stage) => seam(
-      stage === "narrow-band-front"
-        ? (predicted ? UNIFORM_ADVANCE_PHASE.predictedExtensionFront : UNIFORM_ADVANCE_PHASE.extensionFront)
-        : (predicted ? UNIFORM_ADVANCE_PHASE.predictedExtensionHierarchy : UNIFORM_ADVANCE_PHASE.extensionHierarchy),
-    )));
+    if (!predicted) seam?.(UNIFORM_ADVANCE_PHASE.extensionAuthority);
+    this.velocityExtrapolator.encode(encoder, predicted, !predicted && seam ? ((stage) => seam(
+      stage === "narrow-band-front" ? UNIFORM_ADVANCE_PHASE.extensionFront
+        : UNIFORM_ADVANCE_PHASE.extensionHierarchy,
+    )) : undefined);
   }
 
   /**
@@ -718,6 +719,12 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // The paper's method is calibrated for its own large-step regime (dt=1/30
     // in every Sec. 4 example): sharpening opposes per-resample transport
     // blur, so far smaller scene steps structurally out-diffuse it.
+    // A paper advance is exactly 1/30 s. Treating that value only as maxDt
+    // let browser callers feed 4 ms targets, producing a different 250 Hz
+    // method than the Dawn/paper lane and overwhelming sharpening with many
+    // extra resamples. Accumulate target time until one complete paper step
+    // is available; never encode a fractional paper step.
+    if (this.paperTimeStep && !uniformPaperAdvanceReady(time_s, this.lastTime)) return false;
     const advance = planGPUAdvance(time_s, this.lastTime,
       this.paperTimeStep ? UNIFORM_PAPER_DT_S : this.scene.numerics.maxDt_s);
     if (!advance) return false;
@@ -800,13 +807,13 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     );
     if (this.symmetryStageAuditNegativeBoundaryVelocity) encoder.copyBufferToBuffer(
       this.boundaryVelocityA, 0, this.symmetryStageAuditNegativeBoundaryVelocity, 0,
-      this.info.nx * this.info.ny * this.info.nz * 16,
+      this.negativeBoundaryVelocityBytes,
     );
     this.encodeVelocityExtrapolation(encoder, false, seam);
 
     // Algorithm 1 steps 1-2, paper Secs. 3.3-3.5: use the extrapolated
     // current velocity for the modified conservative semi-Lagrangian density
-    // operator, diffuse gamma once in each dimension, then sharpen locally.
+    // operator, diffuse gamma in each dimension, then sharpen locally.
     encoder.clearBuffer(this.conditioningScratch);
     this.run(encoder, "Uniform trace gamma and beta", this.pipelines.traceGammaBeta, this.densityTraceGroup);
     if (this.symmetryStageAuditBetaBuffer) encoder.copyBufferToBuffer(
@@ -824,32 +831,21 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       [this.info.nx, this.info.ny, this.info.nz],
     );
     seam?.(UNIFORM_ADVANCE_PHASE.densityAdvection);
-    // The paper prescribes one to seven dimension-by-dimension repetitions
-    // but leaves the axis traversal order unspecified. Evaluate the two
-    // literal horizontal mirror orders and average them so the unspecified
-    // choice cannot privilege x over z in a D4-symmetric domain.
-    encoder.copyTextureToTexture({ texture: this.volumeB }, { texture: this.surfaceA }, [this.info.nx, this.info.ny, this.info.nz]);
-    encoder.copyTextureToTexture({ texture: this.gammaA }, { texture: this.surfaceB }, [this.info.nx, this.info.ny, this.info.nz]);
-    const forwardDiffusionPipelines = [
-      this.pipelines.diffuseGammaX0, this.pipelines.diffuseGammaX1,
-      this.pipelines.diffuseGammaY0, this.pipelines.diffuseGammaY1,
-      this.pipelines.diffuseGammaZ0, this.pipelines.diffuseGammaZ1,
-    ];
-    forwardDiffusionPipelines.forEach((pipeline, index) => this.run(
-      encoder, `Uniform gamma diffusion xyz ${index + 1}`, pipeline, this.gammaDiffusionForwardGroups[index],
-    ));
-    const reverseDiffusionPipelines = [
-      this.pipelines.diffuseGammaZ0, this.pipelines.diffuseGammaZ1,
-      this.pipelines.diffuseGammaY0, this.pipelines.diffuseGammaY1,
-      this.pipelines.diffuseGammaX0, this.pipelines.diffuseGammaX1,
-    ];
-    reverseDiffusionPipelines.forEach((pipeline, index) => this.run(
-      encoder, `Uniform gamma diffusion zyx ${index + 1}`, pipeline, this.gammaDiffusionReverseGroups[index],
-    ));
-    this.run(encoder, "Uniform average mirrored gamma diffusion", this.pipelines.averageGammaDiffusion,
-      this.gammaDiffusionAverageGroup);
-    encoder.copyTextureToTexture({ texture: this.volumeA }, { texture: this.volumeB }, [this.info.nx, this.info.ny, this.info.nz]);
-    encoder.copyTextureToTexture({ texture: this.gammaB }, { texture: this.gammaA }, [this.info.nx, this.info.ny, this.info.nz]);
+    // Sec. 3.4 step 8: visit neighbouring pairs dimension-by-dimension and
+    // half-equalize gamma while moving the matching donor density. Two
+    // disjoint parity passes cover every edge without atomics; six passes are
+    // one complete paper diffusion iteration. Use all seven iterations
+    // permitted by the paper so high-CFL compression is actually diffused.
+    const diffusionPasses = [
+      ["x even", this.pipelines.diffuseGammaX0], ["x odd", this.pipelines.diffuseGammaX1],
+      ["y even", this.pipelines.diffuseGammaY0], ["y odd", this.pipelines.diffuseGammaY1],
+      ["z even", this.pipelines.diffuseGammaZ0], ["z odd", this.pipelines.diffuseGammaZ1],
+    ] as const;
+    for (let iteration = 0; iteration < UNIFORM_GAMMA_DIFFUSION_ITERATIONS; iteration += 1) {
+      diffusionPasses.forEach(([label, pipeline], index) => this.run(encoder,
+        `Uniform gamma diffusion iteration ${iteration + 1}/${UNIFORM_GAMMA_DIFFUSION_ITERATIONS} ${label}`,
+        pipeline, this.gammaDiffusionGroups[index & 1]!));
+    }
     if (this.symmetryStageAuditTextures) encoder.copyTextureToTexture(
       { texture: this.volumeB }, { texture: this.symmetryStageAuditTextures.densityDiffusion },
       [this.info.nx, this.info.ny, this.info.nz],
@@ -859,10 +855,12 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       [this.info.nx, this.info.ny, this.info.nz],
     );
     seam?.(UNIFORM_ADVANCE_PHASE.gammaDiffusion);
-    encoder.clearBuffer(this.conditioningScratch);
-    this.run(encoder, "Uniform interface sharpening", this.pipelines.sharpenCompute, this.sharpenComputeGroup);
-    this.run(encoder, "Uniform conserved sharpening scatter", this.pipelines.sharpenScatter, this.sharpenScatterGroup);
-    this.run(encoder, "Uniform conserved sharpening resolve", this.pipelines.sharpenResolve, this.sharpenResolveGroup);
+    if (this.densitySharpening) {
+      encoder.clearBuffer(this.conditioningScratch);
+      this.run(encoder, "Uniform interface sharpening", this.pipelines.sharpenCompute, this.sharpenComputeGroup);
+      this.run(encoder, "Uniform conserved sharpening scatter", this.pipelines.sharpenScatter, this.sharpenScatterGroup);
+      this.run(encoder, "Uniform conserved sharpening resolve", this.pipelines.sharpenResolve, this.sharpenResolveGroup);
+    }
     if (this.symmetryStageAuditTextures) encoder.copyTextureToTexture(
       { texture: this.volumeB }, { texture: this.symmetryStageAuditTextures.densitySharpening },
       [this.info.nx, this.info.ny, this.info.nz],
@@ -877,12 +875,22 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     encoder.copyTextureToTexture({ texture: this.volumeB }, { texture: this.volumeA }, [this.info.nx, this.info.ny, this.info.nz]);
     // Algorithm 1 steps 3-4: advect/force velocity after the surface-density
     // update, then enforce incompressibility.
-    this.run(encoder, "Uniform velocity prediction", this.pipelines.advect, this.advectGroup);
-    seam?.(UNIFORM_ADVANCE_PHASE.velocityPrediction);
-    this.encodeVelocityExtrapolation(encoder, true, seam);
-    this.run(encoder, "Uniform reverse advection", this.pipelines.reverse, this.reverseGroup);
-    seam?.(UNIFORM_ADVANCE_PHASE.reverseAdvection);
-    this.run(encoder, "Uniform MacCormack correction", this.pipelines.correct, this.correctGroup);
+    // CM11b Sec. 3.5, which the mass-conserving paper delegates velocity
+    // transport to: modified MacCormack with local-extrema fallback. Extend
+    // the forward prediction before the reverse trace so every lookup has a
+    // defined velocity; body forces are applied exactly once in correction.
+    this.run(encoder, "Uniform bounded MacCormack velocity prediction",
+      this.pipelines.advect, this.advectGroup);
+    if (this.symmetryStageAuditTextures) encoder.copyTextureToTexture(
+      { texture: this.velocityC }, { texture: this.symmetryStageAuditTextures.velocityPrediction },
+      [this.info.nx, this.info.ny, this.info.nz],
+    );
+    this.encodeVelocityExtrapolation(encoder, true);
+    this.run(encoder, "Uniform bounded MacCormack reverse advection",
+      this.pipelines.reverse, this.reverseGroup);
+    // velocityD is also the opt-in reverse-advection audit texture.
+    this.run(encoder, "Uniform bounded MacCormack correction and body forces",
+      this.pipelines.correct, this.correctGroup);
     if (this.symmetryStageAuditTextures) encoder.copyTextureToTexture(
       { texture: this.velocityB }, { texture: this.symmetryStageAuditTextures.velocityAdvection },
       [this.info.nx, this.info.ny, this.info.nz],
@@ -900,7 +908,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       this.run(encoder, "Uniform rigid-body coupling", this.pipelines.coupleRigid, this.rigidGroup);
       encoder.copyTextureToTexture({ texture: this.volumeB }, { texture: this.volumeA }, [this.info.nx, this.info.ny, this.info.nz]);
       encoder.copyTextureToTexture({ texture: this.velocityB }, { texture: this.velocityA }, [this.info.nx, this.info.ny, this.info.nz]);
-      encoder.copyBufferToBuffer(this.boundaryVelocityB, 0, this.boundaryVelocityA, 0, this.info.nx * this.info.ny * this.info.nz * 16);
+      encoder.copyBufferToBuffer(this.boundaryVelocityB, 0, this.boundaryVelocityA, 0, this.negativeBoundaryVelocityBytes);
       const cellVolume = c.width_m * c.height_m * c.depth_m / (this.info.nx * this.info.ny * this.info.nz);
       this.rigidSystem.encode(encoder, dt, cellVolume, 1, c.height_m / this.info.ny);
       seam?.(UNIFORM_ADVANCE_PHASE.rigidCoupling);
@@ -964,10 +972,11 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   async readStats(): Promise<GPUEulerianInfo> {
     if (this.disposed || this.readbackPending) return this.info;
     this.readbackPending = true;
-    this.statsReadback ??= this.device.createBuffer({ label: "Uniform reference diagnostics readback", size: 96, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    this.statsReadback ??= this.device.createBuffer({ label: "Uniform reference diagnostics readback", size: 112, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     const encoder = this.device.createCommandEncoder({ label: "Uniform reference diagnostics readback" });
     encoder.copyBufferToBuffer(this.reductions, 0, this.statsReadback, 0, 20);
     encoder.copyBufferToBuffer(this.pressureMultigrid.diagnostics, 0, this.statsReadback, 32, 60);
+    encoder.copyBufferToBuffer(this.velocityExtrapolator.convergenceDiagnostics, 0, this.statsReadback, 96, 16);
     this.device.queue.submit([encoder.finish()]);
     try {
       await this.statsReadback.mapAsync(GPUMapMode.READ);
@@ -1002,6 +1011,9 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
         uniformCM11aCoarseWorstRow: words[22] & 0xffff,
         uniformCM11aCoarseWorstRowActive: (words[22] & 0x1_0000) !== 0,
         uniformCM11aCoarseWorstRowHalo: (words[22] & 0x2_0000) !== 0,
+        uniformFIMTerminalActiveFaces: words[24] + words[25],
+        uniformFIMConverged: words[24] + words[25] === 0,
+        uniformFIMExecutedPasses: words[27],
       });
       return this.info;
     } finally {
@@ -1010,7 +1022,9 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     }
   }
 
-  enableCM11aCoarsestCapture(): void { this.pressureMultigrid.enableCoarsestCapture(); }
+  enableCM11aCoarsestCapture(invocation = 1): void {
+    this.pressureMultigrid.enableCoarsestCapture(invocation);
+  }
   readCM11aCoarsestCapture(): Promise<UniformCM11aCoarsestCapture | undefined> {
     return this.pressureMultigrid.readCoarsestCapture();
   }
@@ -1085,11 +1099,11 @@ const uniformExtensionChip = (context: FluidPipelineContext): string => {
     : "narrow-band FIM + hierarchy fill";
 };
 
-const uniformExtensionTip = (predicted: boolean) => ({
-  summary: `Sec. 3.3: builds the interface authority field, marches extended face velocities across the narrow band with a fast-iterative-method front, then fills the far field through a coarse hierarchy so ${predicted ? "the predicted" : "every"} advection lookup lands on defined velocity.`,
-  reads: predicted ? "predicted MAC velocity, surface density" : "MAC velocity, surface density",
+const uniformExtensionTip = () => ({
+  summary: "Sec. 3.3: builds the interface authority field, marches extended face velocities across the narrow band with a fast-iterative-method front, then fills the far field through a coarse hierarchy so every advection lookup lands on defined velocity.",
+  reads: "MAC velocity, surface density",
   writes: "extended MAC velocity, FIM active state",
-  feeds: predicted ? "reverse advection" : "conservative density advection",
+  feeds: "conservative density and velocity advection",
 } as const);
 
 const UNIFORM_FLUID_STAGES: readonly FluidPipelineStage[] = [
@@ -1103,7 +1117,7 @@ const UNIFORM_FLUID_STAGES: readonly FluidPipelineStage[] = [
       UNIFORM_ADVANCE_PHASE.extensionFront.label,
       UNIFORM_ADVANCE_PHASE.extensionHierarchy.label,
     ],
-    tip: uniformExtensionTip(false),
+    tip: uniformExtensionTip(),
     controls: [{
       kind: "readout",
       label: "Front sweeps",
@@ -1138,13 +1152,13 @@ const UNIFORM_FLUID_STAGES: readonly FluidPipelineStage[] = [
     label: "Gamma diffusion",
     phaseLabels: [UNIFORM_ADVANCE_PHASE.gammaDiffusion.label],
     tip: {
-      summary: "Sec. 3.4: dimension-by-dimension gamma diffusion, run in both horizontal mirror orders (xyz and zyx) and averaged so the paper's unspecified axis order cannot privilege x over z in a symmetric domain.",
+      summary: "Sec. 3.4: neighbouring pairs half-equalize gamma in the paper's dimension-by-dimension order while transferring the matching donor density. Even/odd passes cover every edge without atomics.",
       reads: "surface density, gamma",
       writes: "surface density, gamma",
       feeds: "interface sharpening",
     },
     state: () => "on",
-    chip: () => "12 sweeps + average · mirrored orders",
+    chip: () => "6 passes · 1 paper iteration",
   },
   {
     id: "interface-sharpening",
@@ -1179,63 +1193,19 @@ const UNIFORM_FLUID_STAGES: readonly FluidPipelineStage[] = [
       : "no solids in scene",
   },
   {
-    id: "velocity-prediction",
+    id: "velocity-advection",
     band: "momentum",
     side: "left",
-    label: "Velocity prediction",
-    phaseLabels: [UNIFORM_ADVANCE_PHASE.velocityPrediction.label],
-    tip: {
-      summary: "Algorithm 1 step 3, first leg: semi-Lagrangian backtrace of the extended velocity field to produce the MacCormack forward prediction.",
-      reads: "extended MAC velocity",
-      writes: "predicted MAC velocity",
-      feeds: "predicted extension",
-    },
-    state: () => "on",
-    chip: () => "1 pass · semi-Lagrangian",
-  },
-  {
-    id: "predicted-extension",
-    band: "momentum",
-    side: "right",
-    label: "Predicted extension",
-    phaseLabels: [
-      UNIFORM_ADVANCE_PHASE.predictedExtensionAuthority.label,
-      UNIFORM_ADVANCE_PHASE.predictedExtensionFront.label,
-      UNIFORM_ADVANCE_PHASE.predictedExtensionHierarchy.label,
-    ],
-    tip: uniformExtensionTip(true),
-    state: () => "on",
-    chip: uniformExtensionChip,
-  },
-  {
-    id: "reverse-advection",
-    band: "momentum",
-    side: "left",
-    label: "Reverse advection",
-    phaseLabels: [UNIFORM_ADVANCE_PHASE.reverseAdvection.label],
-    tip: {
-      summary: "MacCormack second leg: advect the extended prediction backward to measure how much the forward trace distorted the field.",
-      reads: "extended predicted MAC velocity",
-      writes: "reverse-traced MAC velocity",
-      feeds: "MacCormack correction",
-    },
-    state: () => "on",
-    chip: () => "1 pass",
-  },
-  {
-    id: "maccormack-correction",
-    band: "momentum",
-    side: "right",
-    label: "MacCormack correction",
+    label: "Bounded MacCormack velocity advection",
     phaseLabels: [UNIFORM_ADVANCE_PHASE.advectionCorrection.label],
     tip: {
-      summary: "Halves the measured forward/reverse error out of the prediction, clamps to the local extrema, and applies every body force — gravity, viscosity, and surface tension act here and nowhere else in the advance.",
-      reads: "predicted + reverse-traced MAC velocity, surface density",
+      summary: "Algorithm 1 step 3 and CM11b Sec. 3.5: bounded modified MacCormack velocity transport with semi-Lagrangian fallback, followed by gravity, viscosity, and surface tension.",
+      reads: "current and predicted extended MAC velocity",
       writes: "advected MAC velocity",
       feeds: "pressure solve",
     },
     state: () => "on",
-    chip: () => "gravity · viscosity · surface tension",
+    chip: () => "forward + reverse + bounded correction",
   },
   {
     id: "pressure-system",
@@ -1278,8 +1248,8 @@ const UNIFORM_FLUID_STAGES: readonly FluidPipelineStage[] = [
       hint: "Fine-level residual after the last cycle, from the diagnostics readback. The schedule is fixed; this reads convergence, it does not steer it.",
       value: (context) => {
         const residual = (context.info as unknown as {
-          uniformCM11aResidualInfinity?: number;
-        } | null)?.uniformCM11aResidualInfinity;
+          uniformCM11aFineResidualInfinity?: number;
+        } | null)?.uniformCM11aFineResidualInfinity;
         return residual === undefined || !Number.isFinite(residual)
           ? "—"
           : residual.toExponential(2);

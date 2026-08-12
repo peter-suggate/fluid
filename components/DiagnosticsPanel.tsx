@@ -36,6 +36,7 @@ export function DiagnosticsPanel() {
   const selectedBodyId = useUIStore((state) => state.selectedBodyId);
   const { bodies, rigidState, fluidState, fluidRenderState, couplingState, gpuInfo, waterSurfacePresentation } = useDiagnosticsStore();
   const method = getMethod(methodId);
+  const uniformMethod = methodId === "uniform";
   const backend = simulation.backend;
   const selectedBody = bodies.find((body) => body.description.id === selectedBodyId);
   const requestedGlobalFineFactor = Number(methodValues.globalFineLevelSetFactor);
@@ -86,8 +87,12 @@ export function DiagnosticsPanel() {
         <MetricCard label="Rigid bodies" value={String(bodies.length)} unit={`${rigidState?.contactCount ?? 0} contact solves`} />
         {fluidState && fluidRenderState && <MetricCard label="MAC grid" value={`${fluidRenderState.nx} × ${fluidRenderState.ny} × ${fluidRenderState.nz}`} unit={`${fluidState.pressureIterations} PCG iterations`} tone={fluidState.pressureConverged ? "good" : "warn"} />}
         {fluidState && <MetricCard label="Dam front" value={fluidState.damFront_m.toFixed(3)} unit="m" />}
-        <MetricCard label="GPU octree" value={gpuInfo ? `${gpuInfo.nx} × ${gpuInfo.storedNy} × ${gpuInfo.nz}` : "initializing"} unit={gpuInfo ? `${gpuInfo.ny} cubic-equivalent Y · ${((gpuInfo.activeCompressionRatio ?? gpuInfo.compressionRatio) * 100).toFixed(0)}% active` : undefined} tone={backend === "webgpu" ? "good" : "neutral"} />
-        <MetricCard label="Octree pressure rows" value={gpuInfo ? pressureRowsLabel : "—"} unit={gpuInfo ? `cells · ${(gpuInfo.allocatedBytes / 1048576).toFixed(1)} MiB physics` : undefined} />
+        <MetricCard label={uniformMethod ? "GPU uniform grid" : "GPU octree"} value={gpuInfo ? `${gpuInfo.nx} × ${gpuInfo.storedNy} × ${gpuInfo.nz}` : "initializing"} unit={gpuInfo ? uniformMethod
+          ? `${gpuInfo.ny} cells in Y · dense`
+          : `${gpuInfo.ny} cubic-equivalent Y · ${((gpuInfo.activeCompressionRatio ?? gpuInfo.compressionRatio) * 100).toFixed(0)}% active` : undefined} tone={backend === "webgpu" ? "good" : "neutral"} />
+        <MetricCard label={uniformMethod ? "Uniform pressure lattice" : "Octree pressure rows"} value={gpuInfo ? uniformMethod
+          ? (gpuInfo.nx * gpuInfo.storedNy * gpuInfo.nz).toLocaleString()
+          : pressureRowsLabel : "—"} unit={gpuInfo ? `cells · ${(gpuInfo.allocatedBytes / 1048576).toFixed(1)} MiB physics` : undefined} />
         {gpuInfo?.gridKind === "octree" && gpuInfo.frontierListCapacity !== undefined && <MetricCard
           label="Octree frontier publication"
           value={`${gpuInfo.frontierRequiredLeaves?.toLocaleString() ?? "—"} / ${gpuInfo.frontierListCapacity.toLocaleString()}`}

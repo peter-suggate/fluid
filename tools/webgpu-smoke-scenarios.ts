@@ -64,6 +64,7 @@ export function createSmokeScenario(id: SmokeScenarioId, laneId?: string): Smoke
 export interface ScalarFieldSummary {
   minimum: number;
   maximum: number;
+  maximumCell: { x: number; y: number; z: number } | null;
   cellSum: number;
   wetCells: number;
   mixedCells: number;
@@ -81,12 +82,15 @@ export interface ScalarFieldSummary {
 export function summarizeScalarField(field: ArrayLike<number>, nx: number, ny: number, nz: number): ScalarFieldSummary {
   if (field.length !== nx * ny * nz) throw new Error(`Field length ${field.length} does not match ${nx}x${ny}x${nz}`);
   const index = (x: number, y: number, z: number) => x + nx * (y + ny * z);
-  let minimum = Infinity, maximum = -Infinity, cellSum = 0, wetCells = 0, mixedCells = 0, excessCells = 0;
+  let minimum = Infinity, maximum = -Infinity, maximumCell: ScalarFieldSummary["maximumCell"] = null;
+  let cellSum = 0, wetCells = 0, mixedCells = 0, excessCells = 0;
   let weightedX = 0, weightedY = 0, weightedZ = 0;
   const columnAmounts = new Float64Array(nx * nz);
   for (let z = 0; z < nz; z += 1) for (let y = 0; y < ny; y += 1) for (let x = 0; x < nx; x += 1) {
     const value = field[index(x, y, z)];
-    minimum = Math.min(minimum, value); maximum = Math.max(maximum, value); cellSum += value;
+    minimum = Math.min(minimum, value);
+    if (value > maximum) { maximum = value; maximumCell = { x, y, z }; }
+    cellSum += value;
     weightedX += value * (x + 0.5); weightedY += value * (y + 0.5); weightedZ += value * (z + 0.5);
     if (value >= 0.5) wetCells += 1;
     if (value > 0.001 && value < 0.999) mixedCells += 1;
@@ -155,7 +159,7 @@ export function summarizeScalarField(field: ArrayLike<number>, nx: number, ny: n
     }
   }
   return {
-    minimum, maximum, cellSum, wetCells, mixedCells, excessCells, meanColumnAmount, columnAmountStdDev,
+    minimum, maximum, maximumCell, cellSum, wetCells, mixedCells, excessCells, meanColumnAmount, columnAmountStdDev,
     componentCount, largestComponent, interfaceFaceCount, enclosedAirComponentCount, enclosedAirCells,
     centroidCells: cellSum > 0 ? { x: weightedX / cellSum, y: weightedY / cellSum, z: weightedZ / cellSum } : null
   };

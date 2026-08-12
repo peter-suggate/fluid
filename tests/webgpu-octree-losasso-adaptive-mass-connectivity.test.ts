@@ -4,87 +4,54 @@ import test from "node:test";
 
 import { octreeLosassoAdaptiveMassWGSL } from
   "../lib/webgpu-octree-losasso-adaptive-mass.wgsl";
+import { adaptiveMassUnitsPerFinestCell } from
+  "../lib/webgpu-octree-losasso-adaptive-mass";
 test("sharpening only scatters mass after reaching the rho=.5 contour", () => {
   assert.match(octreeLosassoAdaptiveMassWGSL,
-    /stagedRho\(neighbor\)<SHARPEN_RHO_THRESHOLD/);
+    /stagedRho\(current\)>=SURFACE_RHO_ISO/);
   assert.match(octreeLosassoAdaptiveMassWGSL,
-    /D=1\.1h is within the paper's stated 1\.1h\.\.3\.1h range/);
+    /2\.1\*sourceSpan-distance/);
   assert.match(octreeLosassoAdaptiveMassWGSL,
-    /if\(count==0u\)\{transfers\[first\]=Transfer\(donor,donor,units,1u\);return;\}/);
+    /f32\(requested\)\*weights\[corner\]\/totalWeight/);
+  assert.match(octreeLosassoAdaptiveMassWGSL,
+    /plan\.recipientUnits\[slot\]\+=remainder/);
 });
 
 test("rho=.5 remains the unmasked simulation surface", () => {
   assert.doesNotMatch(octreeLosassoAdaptiveMassWGSL, /priorWetReach|copyNodalPseudoPhi/);
   assert.match(octreeLosassoAdaptiveMassWGSL,
-    /let value=clamp\(\(threshold-rho\)\*localH,-2\.\*localH,2\.\*localH\)/);
+    /let value=clamp\(\(SURFACE_RHO_ISO-rho\)\*localH,-2\.\*localH,2\.\*localH\)/);
 });
 
 test("transport admission is independent of donor scheduling order", () => {
   assert.doesNotMatch(octreeLosassoAdaptiveMassWGSL,
     /atomicCompareExchangeWeak\(&transportAdmission\[transfer\.recipient\]/);
   assert.match(octreeLosassoAdaptiveMassWGSL,
-    /let accepted=min\(transfer\.weightBits,u32\(floor\(f32\(transfer\.weightBits\)\/max\(1\.,predicted\)\)\)\)/);
+    /let tentative=min\(units,u32\(floor\(f32\(units\)\/max\(1\.,predicted\)\)\)\)/);
   assert.match(octreeLosassoAdaptiveMassWGSL,
-    /atomicAdd\(&transportAdmission\[transfer\.recipient\],accepted\)/);
+    /atomicStore\(&transportAdmission\[dst\],remoteUnits\)/);
+  assert.doesNotMatch(octreeLosassoAdaptiveMassWGSL, /priorFaceSurfaceReach/);
   assert.match(octreeLosassoAdaptiveMassWGSL,
-    /factor=f32\(room\)\/f32\(max\(remoteTotal,1u\)\)/);
+    /let remainder=units-accepted/);
   assert.match(octreeLosassoAdaptiveMassWGSL,
-    /let accepted=min\(tentative,u32\(floor\(f32\(tentative\)\*factor\)\)\)/);
+    /fn returnDonorRemainders/);
   assert.match(octreeLosassoAdaptiveMassWGSL,
-    /transferRemainders\[i\]=transfer\.weightBits-accepted/);
-  assert.match(octreeLosassoAdaptiveMassWGSL,
-    /fn returnTransferRemainders/);
-  assert.match(octreeLosassoAdaptiveMassWGSL,
-    /atomicAdd\(&nextMass\[transfer\.donor\],remainder\)/);
+    /atomicStore\(&nextMass\[donor\],incoming\+remainderUnits\)/);
 });
 
-test("new liquid requires a face-reachable bridge which stays wet", () => {
-  const admissible = (recipientWasWet: boolean,
-    neighbours: readonly { wasWet: boolean; predictedRho: number }[]) =>
-    recipientWasWet || neighbours.some((neighbor) =>
-      neighbor.wasWet && neighbor.predictedRho >= 0.5);
-  assert.equal(admissible(false, [{ wasWet: true, predictedRho: 0.49 }]), false,
-    "a wet->dry / dry->wet threshold swap must not open a gap");
-  assert.equal(admissible(false, [{ wasWet: true, predictedRho: 0.5 }]), true,
-    "a persistent wet bridge admits CFL-local surface advance");
-  assert.equal(admissible(true, []), true,
-    "existing detached sheets remain valid liquid authority");
-  assert.match(octreeLosassoAdaptiveMassWGSL,
-    /rhoOf\(neighbor\)>=SURFACE_RHO_ISO&&tentativeWet\(neighbor\)/);
-  assert.match(octreeLosassoAdaptiveMassWGSL,
-    /atomicOr\(&transportAdmission\[i\],0x80000000u\)/);
+test("new liquid is not rejected by a prior-frame connectivity veto", () => {
+  assert.doesNotMatch(octreeLosassoAdaptiveMassWGSL, /tentativeWet|priorFaceSurfaceReach/);
   const host = readFileSync(new URL(
     "../lib/webgpu-octree-losasso-adaptive-mass.ts", import.meta.url), "utf8");
-  const scatter = host.indexOf('this.run(broker, "scatterTransfers"');
-  const mark = host.indexOf('this.run(broker, "markTransportSurfaceReach"');
-  const finalize = host.indexOf('this.run(broker, "finalizeTransfers"');
-  assert.ok(scatter >= 0 && scatter < mark && mark < finalize,
-    "persistent reach must observe complete tentative recipient aggregates");
-  for (const span of [1, 2, 4]) {
-    const covered = span ** 3;
-    const threshold = covered * 32_768;
-    const cap = threshold - covered;
-    assert.equal(threshold / covered, 32_768,
-      `span-${span} rho=.5 threshold stays exact in integer space`);
-    assert.equal(Math.floor(cap / covered), 32_767,
-      `span-${span} cap remains one unit air-side after uniform refine`);
-    const massQuantum = Math.fround(0.05 ** 3 / 65_536);
-    const decodedRho = Math.fround(threshold * massQuantum) / (span * 0.05) ** 3;
-    assert.ok(Math.abs(decodedRho - 0.5) <= 1 / 65_536,
-      `span-${span} integer threshold decodes to rho=.5 within one unit`);
-  }
-  const threshold = 32_768, cap = threshold - 1;
-  const selfUnits = 30_000, remoteUnits = 5_000;
-  const admitted = selfUnits + Math.min(remoteUnits, Math.max(0, cap - selfUnits));
-  assert.equal(admitted, threshold - 1,
-    "an unreachable tail must remain strictly air-side, not seed equality next step");
+  const scatter = host.indexOf('this.run(broker, "gatherTentativeTransport"');
+  const finalize = host.indexOf('this.run(broker, "finalizeDestinationTransport"');
+  assert.ok(scatter >= 0 && scatter < finalize,
+    "destination finalization must observe complete tentative recipient aggregates");
   assert.match(octreeLosassoAdaptiveMassWGSL,
-    /fn surfaceThresholdUnits\(r:Leaf\)->u32\{return leafCells\(r\)\*32768u;\}/);
+    /fn surfaceThresholdUnits\(r:Leaf\)->u32\{return leafCells\(r\)\*\(unitsPerFineCell\(\)\/2u\);\}/);
   assert.match(octreeLosassoAdaptiveMassWGSL,
-    /let cap=select\(0u,threshold-covered,threshold>=covered\)/);
-  assert.match(octreeLosassoAdaptiveMassWGSL,
-    /rhoOf\(i\)>=SURFACE_RHO_ISO/,
-    "authored exact-contour cells remain admissible");
+    /let accepted=acceptedTransferUnits\[arc\]/,
+    "all beta\/gamma-admitted mass reaches its traced destination");
 });
 
 test("cumulative gamma uses volume integrals across an unequal 2:1 permutation", () => {
@@ -115,9 +82,9 @@ test("cumulative gamma uses volume integrals across an unequal 2:1 permutation",
 
 test("gamma limits row compression without imposing a rho<=1 mass cap", () => {
   assert.match(octreeLosassoAdaptiveMassWGSL,
-    /f32\(transfer\.weightBits\)\/max\(1\.,predicted\)/);
+    /f32\(units\)\/max\(1\.,predicted\)/);
   assert.match(octreeLosassoAdaptiveMassWGSL,
-    /transferRemainders\[i\]=transfer\.weightBits-accepted/);
+    /let remainder=units-accepted/);
   assert.doesNotMatch(octreeLosassoAdaptiveMassWGSL,
     /min\(transfer\.weightBits,massToUnits\(volume\(leaves\[transfer\.recipient\]\)\)\)/);
 });
@@ -131,4 +98,11 @@ test("closed box boundaries retain outward donor mass", () => {
     /let outwardHigh=displacement\[axis\]>0\.&&r\.originSpan\[axis\]\+r\.originSpan\.w>=p\.dimsMax\[axis\]/);
   assert.match(octreeLosassoAdaptiveMassWGSL,
     /if\(outwardLow\|\|outwardHigh\)\{crossing\[axis\]=0\.;\}/);
+});
+
+test("fixed-point density scale supports 64-cubed and larger domains", () => {
+  assert.equal(adaptiveMassUnitsPerFinestCell([32, 32, 32]), 65_536);
+  assert.equal(adaptiveMassUnitsPerFinestCell([64, 64, 64]), 8_192);
+  assert.equal(adaptiveMassUnitsPerFinestCell([128, 128, 128]), 1_024);
+  assert.ok(64 ** 3 * adaptiveMassUnitsPerFinestCell([64, 64, 64]) <= 0xffff_ff00);
 });

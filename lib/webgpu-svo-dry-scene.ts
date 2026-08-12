@@ -8999,7 +8999,18 @@ export class SparseVoxelDrySceneRenderer {
 
   /** Attach only the mutable SVO acceleration source. Scene content publishes independently. */
   setSource(source: SparseVoxelSceneRenderSource | undefined): void {
-    if (source === this.source) return;
+    if (source === this.source) {
+      // A warm world-scale re-seed retains the sparse buffers but republishes
+      // their metre mapping on the same source object. Refresh the uniforms
+      // rather than treating object identity as proof that nothing changed.
+      if (source && this.scene && canEncodeSparseVoxelDryScene(source, this.scene)) {
+        this.clearReusableFrame();
+        this.clearPrimaryVisibilityCache();
+        this.worldGiCacheDirty = true;
+        this.writeParams(source, this.scene);
+      }
+      return;
+    }
     this.pickingFrameToken += 1;
     this.lastPickingTarget = undefined;
     this.clearReusableFrame();

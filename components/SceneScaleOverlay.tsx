@@ -33,7 +33,7 @@ const AXES: ReadonlyArray<{
   {
     axis: "world",
     label: "WORLD",
-    hint: "Container extents and cell size together — the lattice, the arenas, and the compiled pipelines all hold, so this re-seeds instead of rebuilding.",
+    hint: "Container extents, fluid, and cell size together — lattice dimensions hold and the live solver re-seeds at the new metre scale.",
   },
   {
     axis: "detail",
@@ -70,7 +70,7 @@ export function SceneScaleOverlay() {
         disabled={!option.available}
         data-testid={`scene-scale-${axis}-${factor === 2 ? "up" : "down"}`}
         title={option.available
-          ? `${factor === 2 ? "Double" : "Halve"} the ${axis === "world" ? "world size" : "cell size"} · ${ax}×${ay}×${az} cells`
+          ? `${factor === 2 ? "Double" : "Halve"} the ${axis === "world" ? "world and fluid size" : "cell size"} · ${ax}×${ay}×${az} cells`
           : `Unavailable — ${option.blocked}`}
         onClick={() => simulation.scaleScene(axis, factor)}
       >{factor === 2 ? "×2" : "÷2"}</button>

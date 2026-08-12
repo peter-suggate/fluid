@@ -39,6 +39,10 @@ struct UniformMGParams {
 // 12..14: active/free coarsest rows and packed worst-row state for the first
 // failing solve (lane | active<<16 | halo<<17).
 @group(1) @binding(13) var<storage,read_write> mgConvergence:array<atomic<u32>,15>;
+// Per-level immutable (+x,+y,+z) coefficients and liquid flag, baked once
+// after topology and the one-cell phi continuation are complete.
+@group(1) @binding(14) var mgCoefficientsIn: texture_3d<f32>;
+@group(1) @binding(15) var mgCoefficientsOut: texture_storage_3d<rgba32float,write>;
 
 fn mgValid(p:vec3i,d:vec3u)->bool{return all(p>=vec3i(0))&&all(p<vec3i(d));}
 fn mgClamp(p:vec3i,d:vec3u)->vec3i{return clamp(p,vec3i(0),vec3i(d)-vec3i(1));}
@@ -60,28 +64,47 @@ fn mgFaceV(id:vec3i,neighbor:vec3i,axis:u32)->f32{
 }
 fn mgTheta(liquidCell:vec3i,airCell:vec3i)->f32{
   let a=mgPhi(liquidCell);let b=mgPhi(airCell);
-  return clamp(abs(a)/max(abs(a)+abs(b),1e-9),0.05,1.0);
+  return clamp(abs(a)/max(abs(a)+abs(b),1e-9),GHOST_FLUID_THETA_MIN,1.0);
 }
-fn mgCoefficient(id:vec3i,q:vec3i,axis:u32)->f32{
+fn mgCoefficientRaw(id:vec3i,q:vec3i,axis:u32)->f32{
   if(!mgValid(q,mg.levelDims.xyz)){
     // The authored +Y opening is atmospheric air. All other exterior faces
     // are covered walls, matching the fine-grid stencil helper.
     if(axis==1u&&id.y==i32(mg.levelDims.y)-1&&q.y==i32(mg.levelDims.y)&&params.boundary.w>0.5){
       let h=mg.spacing.y;let phi=mgPhi(id);let exteriorPhi=0.5*h;
-      let theta=clamp(abs(phi)/max(abs(phi)+exteriorPhi,1e-9),0.05,1.0);
+      let theta=clamp(abs(phi)/max(abs(phi)+exteriorPhi,1e-9),GHOST_FLUID_THETA_MIN,1.0);
       return mgTopology(id).z/(h*h*theta);
     }
     return 0.0;
   }
   let vf=mgFaceV(id,q,axis);if(vf<=1e-6){return 0.0;}
   let h=mg.spacing[axis];
-  return vf/(h*h*select(mgTheta(id,q),1.0,mgLiquid(q)));
+  // A positive MAC face is baked once by its lower-coordinate owner, but the
+  // liquid can lie on either side. The old expression only applied theta when
+  // id was liquid and q was air. An air-owned face with a positive-side
+  // liquid therefore used theta=1 in the solve while projection used the real
+  // theta, creating a correction up to 1/theta_min too large.
+  let idLiquid=mgLiquid(id);let qLiquid=mgLiquid(q);var theta=1.0;
+  if(idLiquid&&!qLiquid){theta=mgTheta(id,q);}
+  if(!idLiquid&&qLiquid){theta=mgTheta(q,id);}
+  return vf/(h*h*theta);
+}
+fn mgBakedLiquid(p:vec3i)->bool{
+  return mgValid(p,mg.levelDims.xyz)&&textureLoad(mgCoefficientsIn,p,0).w>0.5;
+}
+fn mgCoefficient(id:vec3i,q:vec3i,axis:u32)->f32{
+  if(!mgValid(q,mg.levelDims.xyz)){
+    if(q[axis]>id[axis]){return textureLoad(mgCoefficientsIn,id,0)[axis];}
+    return 0.0;
+  }
+  if(q[axis]>id[axis]){return textureLoad(mgCoefficientsIn,id,0)[axis];}
+  return textureLoad(mgCoefficientsIn,q,0)[axis];
 }
 fn mgApply(id:vec3i)->f32{
-  if(!mgLiquid(id)){return 0.0;}
+  if(!mgBakedLiquid(id)){return 0.0;}
   let e=array<vec3i,6>(vec3i(-1,0,0),vec3i(1,0,0),vec3i(0,-1,0),vec3i(0,1,0),vec3i(0,0,-1),vec3i(0,0,1));
   var result=0.0;let centre=mgP(id);
-  for(var n=0;n<6;n+=1){let q=id+e[n];let axis=u32(n/2);let a=mgCoefficient(id,q,axis);let neighbor=select(0.0,mgP(q),mgLiquid(q));result+=a*(centre-neighbor);}
+  for(var n=0;n<6;n+=1){let q=id+e[n];let axis=u32(n/2);let a=mgCoefficient(id,q,axis);let neighbor=select(0.0,mgP(q),mgBakedLiquid(q));result+=a*(centre-neighbor);}
   return result;
 }
 
@@ -107,8 +130,10 @@ fn mgBuildFinestRhs(@builtin(global_invocation_id) gid:vec3u){
   let id=vec3i(gid);if(!mgValid(id,mg.levelDims.xyz)){return;}let simulation=id-vec3i(1);
   var rhs=0.0;var minimum=-3.402823e38;
   if(mgInterior(id,mg.levelDims.xyz)){
-    let checkSolid=nearAnyBody(worldCell(simulation));rhs=params.physical.x*(divergenceAt(simulation,checkSolid)-volumeCorrectionDivergence(simulation))/params.dimsDt.w;
     minimum=select(-3.402823e38,0.0,cellInsideSolid(simulation)||cellInsideTerrain(simulation));
+    if(pressureLiquid(simulation)){
+      let checkSolid=nearAnyBody(worldCell(simulation));rhs=params.physical.x*(divergenceAt(simulation,checkSolid)-volumeCorrectionDivergence(simulation))/params.dimsDt.w;
+    }
   }else if(!mgOpenTopHalo(id,mg.levelDims.xyz)){minimum=0.0;}
   // The hierarchy uses A p = b with A p = sum a(p_i-p_j). The existing fine
   // projection convention therefore publishes b=-rho div(u*)/dt.
@@ -131,13 +156,25 @@ fn mgDownsampleTopology(@builtin(global_invocation_id) gid:vec3u){
   let mixed=positiveCount>0.0&&negativeCount>0.0;
   let usePositive=mixed&&mg.control.x>=mg.control.y;
   let coarsePhi=select(phiSum/8.0,positiveSum/max(positiveCount,1.0),usePositive);
-  textureStore(mgVolumeOut,id,v/8.0);textureStore(mgPhiOut,id,vec4f(coarsePhi));
+  var topology=v/8.0;
+  // The positive face components are overlapping dual-cell volumes. A dual
+  // cell centred on a grid-aligned closed wall is half exterior at every
+  // hierarchy level; averaging the adjacent interior face into it would make
+  // the wall spuriously approach V=1 with each coarsening step.
+  if(id.x==i32(mg.coarseDims.x)-2){topology.y=0.5;}
+  if(id.y==i32(mg.coarseDims.y)-2){topology.z=select(0.5,1.0,params.boundary.w>0.5);}
+  if(id.z==i32(mg.coarseDims.z)-2){topology.w=0.5;}
+  textureStore(mgVolumeOut,id,topology);textureStore(mgPhiOut,id,vec4f(coarsePhi));
 }
 
 @compute @workgroup_size(4,4,4)
 fn mgResidual(@builtin(global_invocation_id) gid:vec3u){
   let id=vec3i(gid);if(!mgValid(id,mg.levelDims.xyz)){return;}
-  textureStore(mgResidualOut,id,vec4f(textureLoad(mgRhsIn,id,0).x-mgApply(id)));
+  // CM11a defines b only on pressure unknowns. Air rows have no diagonal in
+  // A, so carrying their velocity divergence as b-Ap would inject arbitrary
+  // forcing into restriction and eventually the coarsest solve.
+  let residual=select(0.0,textureLoad(mgRhsIn,id,0).x-mgApply(id),mgBakedLiquid(id));
+  textureStore(mgResidualOut,id,vec4f(residual));
 }
 
 // Cell-centred trilinear restriction: a coarse centre lies halfway between
@@ -154,8 +191,13 @@ fn mgTrilinearPressure(fineId:vec3i)->f32{
   let q=(vec3f(fineId)-vec3f(0.5))*0.5+vec3f(0.5);let base=vec3i(floor(q));let f=fract(q);
   var value=0.0;var total=0.0;
   for(var corner=0u;corner<8u;corner+=1u){
-    let o=vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));let p=base+o;
-    if(!mgValid(p,mg.levelDims.xyz)){continue;}
+    let o=vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));
+    let p=base+o;
+    // The persistent halo is implementation bookkeeping, not part of the
+    // pressure grid. CM11/CM11a require out-of-grid trilinear samples to be
+    // ignored and the remaining weights renormalized. Blending the halo's
+    // zero pressure into a correction makes Full-Cycles amplify wall error.
+    if(!mgInterior(p,mg.levelDims.xyz)){continue;}
     let w=select(1.0-f.x,f.x,o.x==1)*select(1.0-f.y,f.y,o.y==1)*select(1.0-f.z,f.z,o.z==1);
     value+=w*mgP(p);total+=w;
   }
@@ -217,6 +259,16 @@ fn mgExtrapolatePhiOneCell(@builtin(global_invocation_id) gid:vec3u){
   textureStore(mgPhiOut,id,vec4f(select(mgPhi(id),sum/max(weight,1e-9),weight>0.0)));
 }
 
+@compute @workgroup_size(4,4,4)
+fn mgBakeCoefficients(@builtin(global_invocation_id) gid:vec3u){
+  let id=vec3i(gid);if(!mgValid(id,mg.levelDims.xyz)){return;}
+  let coefficients=vec3f(
+    mgCoefficientRaw(id,id+vec3i(1,0,0),0u),
+    mgCoefficientRaw(id,id+vec3i(0,1,0),1u),
+    mgCoefficientRaw(id,id+vec3i(0,0,1),2u));
+  textureStore(mgCoefficientsOut,id,vec4f(coefficients,select(0.0,1.0,mgLiquid(id))));
+}
+
 // CM11a Eq. 19-20. mgMinimumIn and mgPressureIn are the fine p_min and
 // current p; mgMinimumOut is the next-coarser constraint field.
 @compute @workgroup_size(4,4,4)
@@ -242,21 +294,14 @@ fn mgSmoothColour(@builtin(global_invocation_id) gid:vec3u){
   // (neighbour sums are mgLiquid-gated and an update never reads its own old
   // value), so projecting here leaves every sweep-exit value identical to the
   // former trailing mgProjectMinimum pass while deleting that pass outright.
-  if(coarseDone||!mgLiquid(id)||u32((id.x+id.y+id.z)&1)!=mg.control.z){textureStore(mgPressureOut,id,vec4f(old));return;}
+  if(coarseDone||!mgBakedLiquid(id)||u32((id.x+id.y+id.z)&1)!=mg.control.z){textureStore(mgPressureOut,id,vec4f(max(old,textureLoad(mgMinimumIn,id,0).x)));return;}
   let e=array<vec3i,6>(vec3i(-1,0,0),vec3i(1,0,0),vec3i(0,-1,0),vec3i(0,1,0),vec3i(0,0,-1),vec3i(0,0,1));
   var diagonal=0.0;var sum=0.0;
-  for(var n=0;n<6;n+=1){let q=id+e[n];let a=mgCoefficient(id,q,u32(n/2));diagonal+=a;if(mgLiquid(q)){sum+=a*mgP(q);}}
+  for(var n=0;n<6;n+=1){let q=id+e[n];let a=mgCoefficient(id,q,u32(n/2));diagonal+=a;if(mgBakedLiquid(q)){sum+=a*mgP(q);}}
   let p=select(0.0,(sum+textureLoad(mgRhsIn,id,0).x)/diagonal,diagonal>0.0);
   // CM11a Eq. 18 says that p_min is enforced while smoothing. Project the
   // newly updated colour before the opposite colour consumes it.
   textureStore(mgPressureOut,id,vec4f(max(p,textureLoad(mgMinimumIn,id,0).x)));
-}
-
-// CM11a's PRBGS sweep is two colour passes followed by this projection.
-@compute @workgroup_size(4,4,4)
-fn mgProjectMinimum(@builtin(global_invocation_id) gid:vec3u){
-  let id=vec3i(gid);if(!mgValid(id,mg.levelDims.xyz)){return;}
-  textureStore(mgPressureOut,id,vec4f(max(mgP(id),textureLoad(mgMinimumIn,id,0).x)));
 }
 
 var<workgroup> mgCoarseP:array<f32,256>;
@@ -299,7 +344,7 @@ fn mgCoarseCoefficient(id:vec3i,q:vec3i,axis:u32)->f32{
   let d=vec3i(mg.levelDims.xyz);
   if(any(q<vec3i(0))||any(q>=d)){
     if(axis==1u&&id.y==d.y-1&&q.y==d.y&&params.boundary.w>0.5){
-      let phi=mgCoarsePhi[ci];let theta=clamp(abs(phi)/max(abs(phi)+0.5*h,1e-9),0.05,1.0);
+      let phi=mgCoarsePhi[ci];let theta=clamp(abs(phi)/max(abs(phi)+0.5*h,1e-9),GHOST_FLUID_THETA_MIN,1.0);
       return mgCoarseTopology[ci].z/(h*h*theta);
     }
     return 0.0;
@@ -307,7 +352,7 @@ fn mgCoarseCoefficient(id:vec3i,q:vec3i,axis:u32)->f32{
   let qi=mgCoarseIndex(q);let positive=q[axis]>id[axis];
   let vf=select(mgCoarseTopology[qi][axis+1u],mgCoarseTopology[ci][axis+1u],positive);
   if(vf<=1e-6){return 0.0;}let qPhi=mgCoarsePhi[qi];var theta=1.0;
-  if(qPhi>=0.0){let phi=mgCoarsePhi[ci];theta=clamp(abs(phi)/max(abs(phi)+abs(qPhi),1e-9),0.05,1.0);}
+  if(qPhi>=0.0){let phi=mgCoarsePhi[ci];theta=clamp(abs(phi)/max(abs(phi)+abs(qPhi),1e-9),GHOST_FLUID_THETA_MIN,1.0);}
   return vf/(h*h*theta);
 }
 
@@ -383,7 +428,7 @@ fn mgSolveCoarsest(@builtin(local_invocation_index) lane:u32){
 
 @compute @workgroup_size(4,4,4)
 fn mgMeasureFineResidual(@builtin(global_invocation_id) gid:vec3u){
-  let id=vec3i(gid);if(!mgValid(id,mg.levelDims.xyz)||!mgLiquid(id)){return;}
+  let id=vec3i(gid);if(!mgValid(id,mg.levelDims.xyz)||!mgBakedLiquid(id)){return;}
   let e=array<vec3i,6>(vec3i(-1,0,0),vec3i(1,0,0),vec3i(0,-1,0),vec3i(0,1,0),vec3i(0,0,-1),vec3i(0,0,1));
   var diagonal=0.0;for(var n=0;n<6;n+=1){diagonal+=mgCoefficient(id,id+e[n],u32(n/2));}
   if(diagonal<=0.0){return;}let residual=textureLoad(mgRhsIn,id,0).x-mgApply(id);let pressure=mgP(id);let minimum=textureLoad(mgMinimumIn,id,0).x;let gap=max(0.0,pressure-minimum);

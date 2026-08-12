@@ -1,11 +1,17 @@
 # Uniform (Chentanez–Müller 2012) performance handoff
 
 **Scope.** The dense `uniform` method (`lib/webgpu-uniform-reference.ts` + its three
-WGSL modules) implements `docs/papers/massConservingLiquids.txt` faithfully but runs
+WGSL modules) implements `docs/papers/massConservingLiquids.txt` faithfully but ran
 **62–88 ms per step on a 32×16×32 grid** (16K cells), where the paper reports
-26.7 ms at 128×128×64 and 113 ms at 256×128×128 on a 2012 GTX 680. This document
-is the implementation plan to close that gap, written after an adversarial
-verification pass over every diagnostic claim. Each claim below carries a verdict:
+26.7 ms at 128×128×64 and 113 ms at 256×128×128 on a 2012 GTX 680.
+**Status 2026-08-11: WP0 measured, WP1 + WP3a landed bit-identical — median
+wall is now 12.3 ms/step (4.8×). Remaining work is handed off to
+`docs/uniform-mass-conserving-remaining-handoff.md`; this document stays as the
+findings ledger (F1–F11) and original WP definitions.** The remaining frame is launch-depth bound
+(~680 multigrid passes at 6–21 µs each plus the FIM front); the next wins are
+the RE-BLESS restructures (WP3c, WP5, WP7), which need Peter's call. This
+document is the implementation plan to close that gap, written after an
+adversarial verification pass over every diagnostic claim. Each claim below carries a verdict:
 **CONFIRMED** (verified in code or artifacts), **ESTIMATED** (arithmetic or cost
 model, not yet measured), or **CORRECTED/RETRACTED** (the adversarial pass changed
 or killed it).
@@ -197,9 +203,11 @@ stage is ~360 manual 16-byte loads per cell versus ~21 hardware samples.
   extension operator across both is therefore an **approximation decision**, not
   free reuse — extending both fields with one (post-advection) operator is
   arguably more consistent for MacCormack's error cancellation, but it changes
-  results and needs the gates re-blessed. The paper-faithful alternative is plain
-  semi-Lagrangian velocity advection (the paper has no MacCormack), which
-  deletes the second extension and the reverse/correct passes outright.
+  results and needs the gates re-blessed. Plain semi-Lagrangian velocity
+  advection would delete the second extension and the reverse/correct passes,
+  but it is not paper-faithful: the delegated CM11b Tall Cells method, Sec.
+  3.5, explicitly prescribes modified bounded MacCormack for velocity and
+  semi-Lagrangian transport only for the level set.
 
 ### F9 — Sequential-depth census. CONFIRMED (arithmetic)
 
@@ -278,24 +286,20 @@ on this lane (it charged ~35 ms to extension phases that per-pass data shows
 are sub-ms, and its per-advance sum exceeded the measured wall). Use
 `FLUID_GPU_PASS_TIMESTAMPS=1` for attribution here.
 
-### WP1 — Coarsest solve: break on convergence. BIT-IDENTICAL
+### WP1 — Coarsest solve: break on convergence. BIT-IDENTICAL — **DONE 2026-08-11**
 
-`webgpu-uniform-pressure-multigrid.wgsl.ts:322–360`. `converged` is computed
-identically by all lanes from a workgroup atomic after a barrier, but WGSL's
-uniformity analysis cannot see that — which is why the current code gates work
-instead of breaking (the repo's "select-by-count, never branch around a barrier"
-lesson). The sanctioned escape: store the convergence flag to a
-`var<workgroup>`, read it with **`workgroupUniformLoad`** (itself a barrier and
-formally uniform), then `if (converged) { break; }` is legal. Post-convergence
-iterations currently compute nothing, so breaking is bit-identical by
-construction. Also fix the telemetry so physical iterations are reported
-(publish both converged-at and executed counts; the current single counter is
-the misleading one).
+Implemented as planned: lane 0 stores the verdict to a `var<workgroup>` flag,
+every lane reads it with `workgroupUniformLoad` (itself a barrier, formally
+uniform), then breaks. Measured on the benchmark arm (100 steps):
 
-Expected: removes ~16 × (4096 − actual) barrier-only iterations per advance.
-This is the cheapest change with the largest depth reduction; measure before/after
-wall per step in the same session (±5%-style noise rules apply — fresh process
-per arm, compare medians of ≥3 runs).
+- **Wall 59.2 → 12.8 ms/step (median of 3, −78%).**
+- `mgSolveCoarsest` 3,403 µs → 61.7 µs per invocation (51.05 → 0.93 ms/advance).
+- Physics verified bit-identical to control across all checkpoint observables
+  (same-instrumentation run pair).
+- Telemetry note: with the break in place the executed count and the reported
+  `uniformCM11aCoarseIterations` are the same number by construction, so the
+  misleading gap no longer exists and no second counter was added (all 15
+  `mgConvergence` slots are in use).
 
 ### WP2 — Bake solid topology once per advance; consumers read textures. BIT-IDENTICAL (body-free scenes trivially; body scenes by construction)
 
@@ -317,9 +321,19 @@ pressure path re-derives it inline).
 
 ### WP3 — Pressure stage restructure. Split into three ratchets
 
-- **WP3a (BIT-IDENTICAL, pending one A/B):** delete `mgProjectMinimum` from
-  `sweep()` after verifying via stage audit that solid/halo pass-through cells
-  never feed a consumer unprojected (F3). Sweep cost 3 passes → 2.
+- **WP3a (BIT-IDENTICAL) — DONE 2026-08-11:** deleted `mgProjectMinimum`
+  (kernel and 228 passes/advance), but NOT by bare deletion — bare deletion is
+  **not** identical: non-liquid/halo pressures reach liquid updates through
+  `mgShiftMinimum` (min − p at every cell) and `mgDownsampleMinimum`/
+  `mgDownsampleSubtract` (max over all 8 children, no liquid gate), so
+  unprojected non-liquid values would leak into the coarse constraint pyramid.
+  The identical-by-construction form: the smoother's pass-through path writes
+  `max(old, p_min)` — nothing reads a wrong-colour or non-liquid cell between
+  the two colour passes (neighbour sums are `mgLiquid`-gated, an update never
+  reads its own old value), so every sweep exits in exactly the state the
+  trailing pass produced. Verified bit-identical over 100 steps on the
+  benchmark config under `FLUID_AWAIT_EVERY_STEPS=1` (see the verification
+  caveat in §4). Sweep cost 3 passes → 2.
 - **WP3b (BIT-IDENTICAL):** per-level coefficient bake — one setup pass per level
   storing (a_x⁺, a_y⁺, a_z⁺, flags) per cell (negative-face coefficients are the
   neighbor's positive ones); smoother and residual read 1 texel per neighbor
@@ -366,13 +380,13 @@ copies (F11). Pure data-movement change; fields must be bit-identical.
 
 ### WP7 — Extension restructure. Two options, decide before starting
 
-- **7a (paper-faithful, RE-BLESS):** drop MacCormack; velocity advection becomes
-  one semi-Lagrangian pass (the paper's own scheme). Deletes the second extension
+- **7a (non-conforming experiment, RE-BLESS):** drop MacCormack; velocity advection becomes
+  one semi-Lagrangian pass. Deletes the second extension
   (61 passes), reverse, and correct. Expect more velocity dissipation — the
   benchmark's `lateToMiddleKineticEnvelopeRatio` /
   `normalizedLateMechanicalEnergySlopePerSecond` indicators are the A/B; the
   uniform lane is already labeled "very dissipative", so this needs Peter's call.
-- **7b (keep MacCormack, RE-BLESS):** build the extension *operator* once from
+- **7b (paper-conforming MacCormack, RE-BLESS):** build the extension *operator* once from
   post-advection density (distances + upwind sources), apply it to both current
   and predicted fields (one cheap apply pass each). Consistent extension of the
   MacCormack pair; changes results slightly vs today's two-geometry extension.
@@ -405,6 +419,17 @@ Do after WP2–WP5, since those change who reads what.
   changes make the compiler reassociate floats — if WP3b or WP4 trip this,
   fall back to the benchmark gates plus a small absolute-difference bound and
   say so in the PR.
+- **Add `FLUID_AWAIT_EVERY_STEPS=1` to every identity A/B (learned during
+  WP3a, 2026-08-11).** Under the default every-30-step fence, a mid-run
+  checkpoint's observation is NOT a pure function of the physics state at that
+  step — it deterministically includes contamination from in-flight later
+  advances, and that contamination shifts when a change alters frame timing.
+  WP3a first "failed" its A/B with 82 checkpoint differences that per-step
+  fencing proved were entirely capture artifacts (physics bit-identical over
+  the same 100 steps). Symptoms of a contaminated comparison: the same code
+  produces different mid-run observations under different checkpoint cadences
+  or run lengths. Physics itself is deterministic per config — 4 runs across
+  2 code states reproduced bit-identically — it is only the capture that lies.
 - **RE-BLESS WPs:** full `benchmark:symmetric-expansion:uniform-vs-losasso` run;
   gates that must hold: D4 volume ≤1e-3, D4 velocity ≤1e-4 m/s, ≤1% conservative
   drift, dominant-component and boundary-residue diagnostics. Energy indicators
@@ -417,7 +442,8 @@ Do after WP2–WP5, since those change who reads what.
 
 ## 5. Appendix: plan arithmetic (recompute, don't trust)
 
-For hierarchy depth `L = log2(min axis)`:
+For hierarchy depth `L = log2(min axis)` (pre-WP3a arithmetic; since WP3a a
+sweep is 2 passes, so recompute with `sweep = 2` — benchmark total 939 → 711):
 `sweep = 3` passes; `v(l) = 29 + v(l+1)` with `v(L−1) = 1`;
 `full = 3 + 2(L−1) + 2 + Σ_{l=0}^{L−2}(1 + v(l)) + 1`;
 total = setup `(2 + (L−1) + L)` + `3·full` + `4·v(0)` + 2.

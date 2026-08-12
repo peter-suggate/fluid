@@ -6141,6 +6141,9 @@ export class WebGPUOctreeProjection {
     return releasedBytes;
   }
   get sparseVoxelSceneSource() { return this.sparseBrickWorld?.sceneSource; }
+  rescaleSparsePresentation(scene: SceneDescription) {
+    this.sparseBrickWorld?.rescaleRenderDomain(scene);
+  }
   stageSceneUpdate(scene: SceneDescription) {
     return this.sparseBrickWorld?.stageSceneUpdate(scene) ?? false;
   }
@@ -6695,6 +6698,12 @@ export class WebGPUOctreeProjection {
   }
   get losassoAdaptiveMassReceipts(): GPUBuffer | undefined {
     return this.losassoBackend?.adaptiveMassSource?.receipts;
+  }
+  get losassoAdaptiveCandidateMassControl(): GPUBuffer | undefined {
+    return this.losassoBackend?.adaptiveMassSource?.candidateControl;
+  }
+  get losassoAdaptiveCandidateMassReceipts(): GPUBuffer | undefined {
+    return this.losassoBackend?.adaptiveMassSource?.candidateReceipts;
   }
   get losassoCandidateVelocityMigrationReceipt(): GPUBuffer | undefined {
     return this.losassoBackend?.candidateVelocityMigrationReceipt;

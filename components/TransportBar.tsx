@@ -16,6 +16,7 @@ import { requestManualGPUStop } from "@/lib/gpu-startup";
 import { useSafeBrowserGPUBringup } from "@/lib/use-safe-browser-gpu-bringup";
 import { planSceneRuntime } from "@/lib/scene-runtime";
 import { resourceActivitiesFor, resourceInteractionGates } from "@/lib/resource-readiness";
+import { effectiveSimulationStep_s, uniformPaperStepActive } from "@/lib/simulation-step";
 
 
 export function TransportBar() {
@@ -25,13 +26,15 @@ export function TransportBar() {
   const notice = useRuntimeStore((state) => state.notice);
   const noticeTone = useRuntimeStore((state) => state.noticeTone);
   const simRate = useRuntimeStore((state) => state.simRate);
-  const maxDt = useSceneStore((state) => state.scene.numerics.maxDt_s);
-  const fixedDt = useSceneStore((state) => state.scene.numerics.fixedDt_s);
+  const scene = useSceneStore((state) => state.scene);
   const rendererOnlyScene = useSceneStore((state) => !planSceneRuntime(state.scene).fluidSolver);
   const gpuLag = useDiagnosticsStore((state) => state.gpuInfo?.simulationLag_s);
   const resourceReadiness = useDiagnosticsStore((state) => state.resourceReadiness);
   const gpuInfo = useDiagnosticsStore((state) => state.gpuInfo);
-  const methodId = useMethodStore((state) => state.methodId);
+  const methodState = useMethodStore();
+  const methodId = methodState.methodId;
+  const fixedDt = effectiveSimulationStep_s(scene, methodState);
+  const paperStep = uniformPaperStepActive(methodState);
   const recordingStatus = useRecordingStore((state) => state.status);
   const recordingStart = useRecordingStore((state) => state.startedAtSimulation_s);
   const recording = useRecordingStore((state) => state.recording);
@@ -42,7 +45,7 @@ export function TransportBar() {
   const browserSafetyLocked = safeBringupPolicy !== false;
   const [safeStepRequested, setSafeStepRequested] = useState(false);
   const webgpu = simulation.backend === "webgpu";
-  const lagged = webgpu && gpuLag !== undefined && gpuLag > 2 * maxDt;
+  const lagged = webgpu && gpuLag !== undefined && gpuLag > 2 * fixedDt;
   // A resource that declares `blocks: "transport"` says so here rather than in
   // the activity tray: the suspended control and its reason stay together.
   const transportResourceWork = resourceActivitiesFor(resourceReadiness, "transport-inline")[0];
@@ -90,7 +93,9 @@ export function TransportBar() {
       <div className="time-readout">
         <span>t</span><strong>{simulationTime.toFixed(4)}</strong><small>s</small>
         <div className="transport-timing">
-          <label title="One fixed step size shared by rigid bodies and fluid">
+          <label title={paperStep
+            ? "Uniform paper mode fixes the shared rigid + fluid step at 1/30 s"
+            : "One fixed step size shared by rigid bodies and fluid"}>
             <span>STEP</span>
             <input
               type="range"
@@ -98,6 +103,7 @@ export function TransportBar() {
               max={MAX_SHARED_STEP_S * 1000}
               step="1"
               value={fixedDt * 1000}
+              disabled={paperStep}
               onChange={(event) => simulation.setStepSize(event.currentTarget.valueAsNumber / 1000)}
               aria-label="Shared simulation step size"
             />
@@ -108,6 +114,7 @@ export function TransportBar() {
                 max={MAX_SHARED_STEP_S * 1000}
                 step="1"
                 value={Math.round(fixedDt * 1000)}
+                disabled={paperStep}
                 onChange={(event) => {
                   if (Number.isFinite(event.currentTarget.valueAsNumber)) {
                     simulation.setStepSize(event.currentTarget.valueAsNumber / 1000);
@@ -125,7 +132,7 @@ export function TransportBar() {
         {rendererOnlyScene
           ? <span className="continuous-run" title="This preset runs the live sparse scene renderer without fluid physics.">LIVE SVO · FLUID SOLVER DISABLED</span>
           : webgpu
-          ? <span className="continuous-run" title={`Each admitted simulation advance is immediately followed by its presentation · double-buffered pairs · shared rigid + fluid step ${(fixedDt * 1000).toFixed(2)} ms`}>SIM + RENDER LOCKSTEP · PRESENT ASAP</span>
+          ? <span className="continuous-run" title={`Each admitted simulation advance is immediately followed by its presentation · double-buffered pairs · ${paperStep ? "uniform paper" : "shared rigid + fluid"} step ${(fixedDt * 1000).toFixed(2)} ms`}>SIM + RENDER LOCKSTEP · PRESENT ASAP</span>
           : <span className="continuous-run" title={`CPU reference simulation · present every browser animation frame · fixed step ${(fixedDt * 1000).toFixed(2)} ms`}>CPU REFERENCE · PRESENT ASAP</span>}
       </div>
       <div className="file-actions">

@@ -30,6 +30,8 @@ export interface LosassoStepSnapshotSources {
     readonly rendererDirectory: GPUBuffer;
     readonly massControl: GPUBuffer;
     readonly massReceipts: GPUBuffer;
+    readonly candidateMassControl: GPUBuffer;
+    readonly candidateMassReceipts: GPUBuffer;
     /** Candidate wet-face migration receipt:
      * generation, faces, migrated, nodal, errors, valid-generation. */
     readonly velocityMigration: GPUBuffer;
@@ -48,8 +50,10 @@ const LAYOUT = Object.freeze({
   adaptiveCandidateAuthority: 1144 + ADAPTIVE_PHI_RECEIPT_BYTES,
   adaptiveMassControl: 1176 + ADAPTIVE_PHI_RECEIPT_BYTES,
   adaptiveMassReceipts: 1304 + ADAPTIVE_PHI_RECEIPT_BYTES,
-  adaptiveVelocityMigration: 1432 + ADAPTIVE_PHI_RECEIPT_BYTES,
-  stride: 1464 + ADAPTIVE_PHI_RECEIPT_BYTES,
+  adaptiveCandidateMassControl: 1432 + ADAPTIVE_PHI_RECEIPT_BYTES,
+  adaptiveCandidateMassReceipts: 1560 + ADAPTIVE_PHI_RECEIPT_BYTES,
+  adaptiveVelocityMigration: 1688 + ADAPTIVE_PHI_RECEIPT_BYTES,
+  stride: 1720 + ADAPTIVE_PHI_RECEIPT_BYTES,
 });
 const COPY_DST = 0x0008, MAP_READ = 0x0001, READ = 0x0001;
 
@@ -77,6 +81,8 @@ export interface LosassoStepSnapshotRecord {
     readonly renderer: Uint32Array;
     readonly massControl: Uint32Array;
     readonly massReceipts: Uint32Array;
+    readonly candidateMassControl: Uint32Array;
+    readonly candidateMassReceipts: Uint32Array;
     readonly velocityMigration: Uint32Array;
   };
 }
@@ -140,8 +146,8 @@ export function losassoStepSnapshotFailures(
     if (!adaptive) {
       failures.push("adaptive graph/phi/velocity receipt tuple is absent");
     } else {
-      const mass = adaptive.massControl;
-      const massReceipts = adaptive.massReceipts;
+      const candidateMass = adaptive.candidateMassControl;
+      const candidateMassReceipts = adaptive.candidateMassReceipts;
       const migration = adaptive.velocityMigration;
       // Epoch zero is the publisher's explicit dormant-candidate state. The
       // candidate graph, mass, and migration buffers are scratch receipts and
@@ -151,15 +157,15 @@ export function losassoStepSnapshotFailures(
       const hardCandidateFailure = candidateEpoch !== 0
         && ((candidateAuthority[4] ?? 0) & 0x8000_0000) !== 0;
       if (hardCandidateFailure) {
-        const massErrors = mass[12] ?? 0;
-        const signMismatches = massReceipts[16] ?? 0;
-        const firstItem = massReceipts[17] ?? 0xffff_ffff;
+        const massErrors = candidateMass[12] ?? 0;
+        const signMismatches = candidateMassReceipts[16] ?? 0;
+        const firstItem = candidateMassReceipts[17] ?? 0xffff_ffff;
         const migrated = migration[2] ?? 0, nodal = migration[3] ?? 0;
         failures.push(`fatal adaptive candidate transaction: authority=${candidateAuthority[4] ?? 0}, mass=${massErrors}, reconstructionSignMismatches=${signMismatches}, firstItem=${firstItem}, velocityMigration=${migration[0] ?? 0}/${migration[1] ?? 0}/${migrated}+${nodal}/${migration[4] ?? 0}/${migration[5] ?? 0}/${migration[6] ?? 0}/${migration[7] ?? 0}`);
       }
-      if (candidateEpoch !== 0 && (mass[0] !== 0x414d_4153
-        || mass[1] !== candidateEpoch || mass[7] !== 1 || mass[12] !== 0
-        || massReceipts[12] !== 0)) {
+      if (candidateEpoch !== 0 && (candidateMass[0] !== 0x414d_4153
+        || candidateMass[1] !== candidateEpoch || candidateMass[7] !== 1
+        || candidateMass[12] !== 0 || candidateMassReceipts[12] !== 0)) {
         failures.push("adaptive conserved-mass receipt is invalid");
       }
       const scheduledPhiNodes = (phiReceipts[32] ?? 0) + (phiReceipts[34] ?? 0);
@@ -240,7 +246,8 @@ export function losassoStepSnapshotDiagnosticSummary(
   }
   const { candidateAuthority, acceptedGraph: accepted, candidateGraph: candidate,
     phiControl: phi, phiReceipts, velocityReceipts: velocity, renderer,
-    massControl: mass, massReceipts, velocityMigration: migration } = record.adaptive;
+    candidateMassControl: candidateMass, candidateMassReceipts,
+    velocityMigration: migration } = record.adaptive;
   const velocityReceipt = (base: number) =>
     `${velocity[base] ?? 0}/${velocity[base + 2] ?? 0}/${velocity[base + 7] ?? 0}`;
   const candidateEpoch = candidateAuthority[0] ?? 0;
@@ -248,9 +255,9 @@ export function losassoStepSnapshotDiagnosticSummary(
     : `candidate=${candidate[0] ?? 0}/${candidate[3] ?? 0}/${candidate[4] ?? 0}`;
   const candidateTransactionSummary = candidateEpoch === 0 ? "candidateTransaction=none"
     : `candidateAuthority=${candidateEpoch}/${candidateAuthority[3] ?? 0}/${candidateAuthority[4] ?? 0}`
-      + ` mass=${mass[1] ?? 0}/${mass[7] ?? 0}/${mass[12] ?? 0}`
-      + ` reconstruction=${massReceipts[16] ?? 0}/${massReceipts[17] ?? 0xffff_ffff}`
-      + ` handoffGraph=${massReceipts[18] ?? 0}`
+      + ` mass=${candidateMass[1] ?? 0}/${candidateMass[7] ?? 0}/${candidateMass[12] ?? 0}`
+      + ` reconstruction=${candidateMassReceipts[16] ?? 0}/${candidateMassReceipts[17] ?? 0xffff_ffff}`
+      + ` handoffGraph=${candidateMassReceipts[18] ?? 0}`
       + ` migration=${migration[0] ?? 0}/${migration[1] ?? 0}/`
       + `${migration[2] ?? 0}+${migration[3] ?? 0}/${migration[4] ?? 0}/${migration[5] ?? 0}`
       + `/${migration[6] ?? 0}/${migration[7] ?? 0}`;
@@ -356,6 +363,8 @@ export class WebGPUOctreeLosassoStepSnapshotRing {
       copy(sources.adaptive.rendererDirectory, LAYOUT.adaptiveRenderer, 32);
       copy(sources.adaptive.massControl, LAYOUT.adaptiveMassControl, 128);
       copy(sources.adaptive.massReceipts, LAYOUT.adaptiveMassReceipts, 128);
+      copy(sources.adaptive.candidateMassControl, LAYOUT.adaptiveCandidateMassControl, 128);
+      copy(sources.adaptive.candidateMassReceipts, LAYOUT.adaptiveCandidateMassReceipts, 128);
       copy(sources.adaptive.velocityMigration, LAYOUT.adaptiveVelocityMigration, 32);
     } else {
       encoder.clearBuffer(slot.buffer, LAYOUT.adaptiveAcceptedGraph,
@@ -395,6 +404,8 @@ export class WebGPUOctreeLosassoStepSnapshotRing {
         renderer: words(LAYOUT.adaptiveRenderer, 8),
         massControl: words(LAYOUT.adaptiveMassControl, 32),
         massReceipts: words(LAYOUT.adaptiveMassReceipts, 32),
+        candidateMassControl: words(LAYOUT.adaptiveCandidateMassControl, 32),
+        candidateMassReceipts: words(LAYOUT.adaptiveCandidateMassReceipts, 32),
         velocityMigration: words(LAYOUT.adaptiveVelocityMigration, 8),
       }) : undefined;
       return Object.freeze({ step: slot.step, surfaceKind: slot.surfaceKind,

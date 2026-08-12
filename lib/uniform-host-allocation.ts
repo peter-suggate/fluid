@@ -11,6 +11,8 @@ export interface UniformHostAllocationPlan {
   readonly conditioningBytes: number;
   readonly velocityBytes: number;
   readonly scalarBytes: number;
+  /** Bytes in one scalar-packed negative x/y/z MAC boundary field. */
+  readonly boundaryVelocityBytes: number;
   readonly allocatedBytes: number;
 }
 
@@ -27,10 +29,11 @@ export function planUniformHostAllocation(
   }
   const velocityCopies = transport === "maccormack" ? 4 : 2;
   const transportCopies = transport === "maccormack" ? 2 : 1;
+  const boundaryVelocityBytes = (ny * nz + nx * nz + nx * ny) * 4;
   const velocityBytes = nx * ny * nz * velocityCopies * 16
     // Four persistent ping-pong fields own the negative x/y/z MAC boundary
     // faces, which cannot be represented by the positive-face cell packing.
-    + nx * ny * nz * 4 * 16
+    + 4 * boundaryVelocityBytes
     + (nx + 2) * (ny + 2) * (nz + 2) * transportCopies * 16
     // Sec. 3.3 owns six rgba32 scratch fields: value and Eikonal-distance
     // ping-pong pairs plus canonical resolved value/distance fields. These
@@ -50,6 +53,7 @@ export function planUniformHostAllocation(
     pressureExtent: [nx, ny, nz],
     volumeExtent: [nx, ny, nz],
     conditioningBytes,
+    boundaryVelocityBytes,
     velocityBytes,
     scalarBytes,
     allocatedBytes: velocityBytes + scalarBytes + conditioningBytes,

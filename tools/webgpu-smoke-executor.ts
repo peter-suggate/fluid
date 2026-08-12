@@ -1998,23 +1998,35 @@ function scalarFieldD4(
     maximumAbsoluteError, worst });
 }
 
-function scalarFieldSummary(field: ArrayLike<number>) {
+function scalarFieldSummary(
+  field: ArrayLike<number>, grid?: readonly [number, number, number],
+) {
   let finiteCount = 0, nonFiniteCount = 0, minimum = Infinity, maximum = -Infinity, sum = 0;
+  let maximumIndex = -1;
   for (let index = 0; index < field.length; index += 1) {
     const value = Number(field[index]);
     if (!Number.isFinite(value)) { nonFiniteCount += 1; continue; }
     finiteCount += 1; sum += value;
-    minimum = Math.min(minimum, value); maximum = Math.max(maximum, value);
+    minimum = Math.min(minimum, value);
+    if (value > maximum) { maximum = value; maximumIndex = index; }
   }
+  const maximumCell = grid && maximumIndex >= 0
+    ? [maximumIndex % grid[0], Math.floor(maximumIndex / grid[0]) % grid[1],
+      Math.floor(maximumIndex / (grid[0] * grid[1]))] as const
+    : undefined;
   return Object.freeze({ finiteCount, nonFiniteCount,
     minimum: finiteCount === 0 ? undefined : minimum,
     maximum: finiteCount === 0 ? undefined : maximum,
+    ...(maximumCell ? { maximumCell } : {}),
     sum_cells: sum });
 }
 
-function stageMassLedger(stages: readonly { readonly name: string; readonly field: ArrayLike<number> }[]) {
+function stageMassLedger(
+  stages: readonly { readonly name: string; readonly field: ArrayLike<number> }[],
+  grid?: readonly [number, number, number],
+) {
   const summaries = Object.freeze(Object.fromEntries(stages.map((stage) =>
-    [stage.name, scalarFieldSummary(stage.field)])));
+    [stage.name, scalarFieldSummary(stage.field, grid)])));
   const transitions = Object.freeze(stages.slice(1).map((stage, index) => {
     const previous = stages[index]!;
     const from = summaries[previous.name]!, to = summaries[stage.name]!;
@@ -2530,7 +2542,9 @@ function domainNormalFaceReflectionError(
   const positive = (x: number, y: number, z: number, axis: number) =>
     Number(positiveFaces[3 * (x + nx * (y + ny * z)) + axis]);
   const negative = (x: number, y: number, z: number, axis: number) =>
-    Number(negativeBoundary[4 * (x + nx * (y + ny * z)) + axis]);
+    Number(negativeBoundary[axis === 0 ? y + ny * z
+      : axis === 1 ? ny * nz + x + nx * z
+        : ny * nz + nx * nz + x + nx * y]);
   let maximumAbsoluteError = 0, maximumBoundaryMagnitude = 0;
   let worst: Readonly<Record<string, unknown>> | undefined;
   const record = (source: number, target: number, transform: string,
@@ -2718,6 +2732,30 @@ function reportResult(scenario: SmokeScenario, result: GPUSmokeResult) {
     initialVolumeCellSum: info.initialVolumeCellSum, volumeCellSum: info.volumeCellSum,
     representedVolumeCellSum: info.representedVolumeCellSum, volumeDrift: info.volumeDrift,
     representedVolumeDrift: info.representedVolumeDrift, rawVolumeDrift: info.rawVolumeDrift,
+    uniformCM11aResidualInfinity: info.uniformCM11aResidualInfinity,
+    uniformCM11aConverged: info.uniformCM11aConverged,
+    uniformCM11aCoarseIterations: info.uniformCM11aCoarseIterations,
+    uniformCM11aCapFailure: info.uniformCM11aCapFailure,
+    uniformCM11aFailingCoarseInvocation: info.uniformCM11aFailingCoarseInvocation,
+    uniformCM11aCoarseMaxAbsRhs: info.uniformCM11aCoarseMaxAbsRhs,
+    uniformCM11aCoarseMaxDiagonalPressure: info.uniformCM11aCoarseMaxDiagonalPressure,
+    uniformCM11aCoarseMaxAbsPressure: info.uniformCM11aCoarseMaxAbsPressure,
+    uniformCM11aCoarseProjectedGapPressure: info.uniformCM11aCoarseProjectedGapPressure,
+    uniformCM11aCoarseNormalizedProjectedResidual: info.uniformCM11aCoarseNormalizedProjectedResidual,
+    uniformCM11aFineResidualInfinity: info.uniformCM11aFineResidualInfinity,
+    uniformCM11aFineProjectedGapPressure: info.uniformCM11aFineProjectedGapPressure,
+    uniformCM11aCoarseActiveRows: info.uniformCM11aCoarseActiveRows,
+    uniformCM11aCoarseFreeRows: info.uniformCM11aCoarseFreeRows,
+    uniformCM11aCoarseWorstRow: info.uniformCM11aCoarseWorstRow,
+    uniformCM11aCoarseWorstRowActive: info.uniformCM11aCoarseWorstRowActive,
+    uniformCM11aCoarseWorstRowHalo: info.uniformCM11aCoarseWorstRowHalo,
+    uniformFIMTerminalActiveFaces: info.uniformFIMTerminalActiveFaces,
+    uniformFIMConverged: info.uniformFIMConverged,
+    uniformFIMExecutedPasses: info.uniformFIMExecutedPasses,
+    adaptiveCompressedExcessVolume_cells: info.adaptiveCompressedExcessVolume_cells,
+    adaptiveSubIsoVolume_cells: info.adaptiveSubIsoVolume_cells,
+    adaptiveOverfullLeafCount: info.adaptiveOverfullLeafCount,
+    adaptiveSubIsoLeafCount: info.adaptiveSubIsoLeafCount,
     volumeCorrectionNormalSpeed_cells_s: info.volumeCorrectionNormalSpeed_cells_s, volumeCorrectionDivergenceRate_s: info.volumeCorrectionDivergenceRate_s, phiInterfaceCellCount: info.phiInterfaceCellCount, front_m: info.front_m,
     maxSpeed_m_s: info.maxSpeed_m_s, maxComponentCfl: info.maxComponentCfl,
     adaptiveFaceTransportedCount: info.adaptiveFaceTransportedCount,
@@ -3100,11 +3138,15 @@ async function runGPU(
   // only through this call. Dawn must cross the same initial boundary.
   solver.applyRuntimeValues?.(values);
   const cm11aCaptureOwner = solver as GPUSolverInstance & {
-    enableCM11aCoarsestCapture?: () => void;
+    enableCM11aCoarsestCapture?: (invocation?: number) => void;
     readCM11aCoarsestCapture?: () => Promise<unknown>;
   };
-  const cm11aCoarsestCaptureRequested = process.env.FLUID_CM11A_COARSE_CAPTURE === "1";
-  if (cm11aCoarsestCaptureRequested) cm11aCaptureOwner.enableCM11aCoarsestCapture?.();
+  const cm11aCoarsestCaptureInvocation = Number.parseInt(process.env.FLUID_CM11A_COARSE_CAPTURE ?? "", 10);
+  const cm11aCoarsestCaptureRequested = Number.isSafeInteger(cm11aCoarsestCaptureInvocation)
+    && cm11aCoarsestCaptureInvocation > 0;
+  if (cm11aCoarsestCaptureRequested) {
+    cm11aCaptureOwner.enableCM11aCoarsestCapture?.(cm11aCoarsestCaptureInvocation);
+  }
   let cm11aCoarsestCapturePublished = false;
   const construction_ms = performance.now() - constructionStarted;
   const actualGrid: [number, number, number] = [solver.info.nx, solver.info.ny, solver.info.nz];
@@ -4412,6 +4454,10 @@ async function runGPU(
         const potential = gravitationalPotentialEnergyProxy(exact.field, sample.nx, sample.ny, sample.nz, spacing, scene.fluid.gravity_m_s2);
         const preMechanical = preProjectionVelocity.kineticEnergyProxy + potential;
         const postMechanical = postProjectionVelocity.kineticEnergyProxy + potential;
+        const uniformFineResidual = resultMethod === "uniform"
+          ? (sample as typeof sample & { uniformCM11aFineResidualInfinity?: number })
+            .uniformCM11aFineResidualInfinity
+          : undefined;
         const energySample: MechanicalEnergySample = {
           time_s: sample.simulatedTime_s ?? solver.info.submittedTime_s ?? 0,
           gravitationalPotentialEnergyProxy: potential,
@@ -4427,7 +4473,10 @@ async function runGPU(
           preProjectionRmsDivergence_s: preProjectionVelocity.rmsLiquidDivergence_s,
           postProjectionRmsDivergence_s: postProjectionVelocity.rmsLiquidDivergence_s,
           rmsDivergenceRatio: postProjectionVelocity.rmsLiquidDivergence_s / Math.max(preProjectionVelocity.rmsLiquidDivergence_s, 1e-30),
-          pressureResidual: sample.pressureResidual ?? 0,
+          // The dense CM11a path publishes a distinct fine-grid projected
+          // residual. Its coarse convergence residual is not evidence about
+          // the velocity field that was actually projected.
+          pressureResidual: uniformFineResidual ?? sample.pressureResidual ?? 0,
           pressureRelativeResidual: sample.pressureRelativeResidual ?? 0,
           exactVolumeDrift
         };
@@ -4669,6 +4718,7 @@ async function runGPU(
             pressureProjection: GPUTexture;
           }>;
           symmetryStageAuditNegativeBoundaryVelocity?: GPUBuffer;
+          negativeBoundaryVelocityBytes?: number;
           symmetryStageAuditMacCormackBuffer?: GPUBuffer;
           symmetryStageAuditBetaBuffer?: GPUBuffer;
         };
@@ -4766,7 +4816,9 @@ async function runGPU(
             readVelocityField3D(device, audit.pressureProjection, ...grid),
             staged.symmetryStageAuditNegativeBoundaryVelocity
               ? readBufferBinding(device, { buffer: staged.symmetryStageAuditNegativeBoundaryVelocity },
-                solver.info.nx * solver.info.ny * solver.info.nz * 16)
+                staged.negativeBoundaryVelocityBytes
+                  ?? (solver.info.ny * solver.info.nz + solver.info.nx * solver.info.nz
+                    + solver.info.nx * solver.info.ny) * 4)
               : Promise.resolve(undefined),
             staged.symmetryStageAuditMacCormackBuffer
               ? readBufferBinding(device, { buffer: staged.symmetryStageAuditMacCormackBuffer },
@@ -4829,8 +4881,8 @@ async function runGPU(
             { name: "densityDiffusion", field: densityDiffusion },
             { name: "densitySharpening", field: densitySharpening },
             { name: "finalRawRho", field: cubic.field },
-          ]);
-          const rhoPrimeSummary = scalarFieldSummary(extrapolationDensityAuthority);
+          ], grid);
+          const rhoPrimeSummary = scalarFieldSummary(extrapolationDensityAuthority, grid);
           let rhoPrimeExcess_cells = 0, maximumRhoPrimeMinusRawRho = 0;
           for (let cell = 0; cell < extrapolationDensityAuthority.length; cell += 1) {
             const rhoPrime = Number(extrapolationDensityAuthority[cell]);
@@ -4859,8 +4911,8 @@ async function runGPU(
             authority: "raw transported rho; in symmetric-expansion rho-prime equals rho because the scene has no solids",
             stageMassLedger: massLedger,
             gamma: Object.freeze({
-              postAdvection: scalarFieldSummary(gammaPostAdvection),
-              postDiffusion: scalarFieldSummary(gammaPostDiffusion),
+              postAdvection: scalarFieldSummary(gammaPostAdvection, grid),
+              postDiffusion: scalarFieldSummary(gammaPostDiffusion, grid),
               d4: Object.freeze({
                 postAdvection: scalarFieldD4(gammaPostAdvection, grid),
                 postDiffusion: scalarFieldD4(gammaPostDiffusion, grid),

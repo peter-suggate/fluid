@@ -299,7 +299,7 @@ type RedistancePipelineName = "prepareAcceptedRedistance" | "initializeRedistanc
   | "finishAcceptedRedistanceConstrained" | "resetRedistanceResidual"
   | "publishAcceptedRedistanceReceipt" | "publishCandidateRedistanceReceipt";
 type EvidencePipelineName = "prepareTopologyEvidenceEpoch" | "prepareTopologyEvidence"
-  | "publishTopologyEvidenceRows" | "finishTopologyEvidence";
+  | "buildTopologyEvidenceHash" | "publishTopologyEvidenceRows" | "finishTopologyEvidence";
 
 const positiveInteger = (label: string, value: number): number => {
   if (!Number.isSafeInteger(value) || value < 1) throw new RangeError(`${label} must be a positive integer`);
@@ -382,8 +382,11 @@ export class WebGPUOctreeLosassoAdaptivePhi {
       throw new RangeError("adaptive phi graph banks must share pressure row capacity");
     }
     const faceCapacity = positiveInteger("adaptive phi face capacity", options.faceCapacity ?? 1);
+    // The active graph can still contain signed nodes roughly one root-cell
+    // width from the interface. One sweep per finest-cell crossing covers that
+    // distance without pricing the old two-sweeps-per-cell envelope.
     const redistanceIterations = positiveInteger("adaptive phi redistance iterations",
-      options.redistanceIterations ?? Math.max(8, Math.ceil(options.maximumLeafSpan * 2)));
+      options.redistanceIterations ?? Math.max(8, Math.ceil(options.maximumLeafSpan)));
     for (const [axis, extent] of options.dimensions.entries()) positiveInteger(`adaptive phi dimension ${axis}`, extent);
     positiveInteger("adaptive phi maximum leaf span", options.maximumLeafSpan);
     if (!(options.cellSize > 0) || !Number.isFinite(options.cellSize)) throw new RangeError("adaptive phi cell size must be finite and positive");
@@ -591,7 +594,7 @@ export class WebGPUOctreeLosassoAdaptivePhi {
     this.ghost = (await compile(ghostModule, ["deriveGhosts"] as const)).deriveGhosts;
     const evidenceModule = this.device.createShaderModule({ label: "Adaptive phi topology evidence", code: octreeLosassoAdaptivePhiEvidenceWGSL });
     this.evidence = await compile(evidenceModule,
-      ["prepareTopologyEvidenceEpoch", "prepareTopologyEvidence", "publishTopologyEvidenceRows",
+      ["prepareTopologyEvidenceEpoch", "prepareTopologyEvidence", "buildTopologyEvidenceHash", "publishTopologyEvidenceRows",
         "finishTopologyEvidence"] as const);
     const scheduleModule = this.device.createShaderModule({ label: "Adaptive phi GPU candidate schedule", code: octreeLosassoAdaptivePhiScheduleWGSL });
     const schedule = await compile(scheduleModule, ["scheduleCandidateSource", "scheduleCandidateRepair"] as const);
@@ -754,8 +757,9 @@ export class WebGPUOctreeLosassoAdaptivePhi {
     this.runIndirect(broker, this.volumeEvidence!.prepareVolumeEvidence,
       this.volumeEvidenceBuffers(this.graph.candidate, this.candidateParams), 108);
     this.runMainIndirect(broker, "derivePostRedistanceVolumes", buffers, 96);
-    this.runIndirect(broker, this.volumeEvidence!.validateVolumeEvidence,
-      this.volumeEvidenceBuffers(this.graph.candidate, this.candidateParams), 108);
+    this.run(broker, this.volumeEvidence!.validateVolumeEvidence,
+      this.volumeEvidenceBuffers(this.graph.candidate, this.candidateParams),
+      this.plan.nodeDispatch[0]);
     this.runIndirect(broker, this.volumeEvidence!.finalizeVolumeEvidence,
       this.volumeEvidenceBuffers(this.graph.candidate, this.candidateParams), 108);
     this.runMainIndirect(broker, "deriveRows", buffers, 96);
@@ -889,7 +893,8 @@ export class WebGPUOctreeLosassoAdaptivePhi {
     this.runMainBufferIndirect(broker, "derivePostRedistanceVolumes", buffers,
       this.graph.accepted.control, this.graph.accepted.leafDispatchOffsetBytes);
     this.run(broker, this.volumeEvidence!.validateVolumeEvidence,
-      this.volumeEvidenceBuffers(this.graph.accepted, this.advanceParams), 1);
+      this.volumeEvidenceBuffers(this.graph.accepted, this.advanceParams),
+      this.plan.nodeDispatch[0]);
     this.run(broker, this.volumeEvidence!.finalizeVolumeEvidence,
       this.volumeEvidenceBuffers(this.graph.accepted, this.advanceParams), 1);
     // Commit/reject the nodal bank before touching any pressure- or view-facing
@@ -902,7 +907,9 @@ export class WebGPUOctreeLosassoAdaptivePhi {
     this.runMainBufferIndirect(broker, "deriveRows", buffers, this.source.rowDispatch, 0);
     this.runMainBufferIndirect(broker, "deriveLeafVolumes", buffers,
       this.source.leafDispatch, 0);
-    this.runMain(broker, "measureDerivations", buffers, 1);
+    // finalizeVolumeEvidence already published the same post-redistance sum in
+    // receipt 11. Re-summing every leaf serially here cost tens of milliseconds
+    // at 64^3 and provided no additional authority.
     if (this.options.faces) {
       const f = this.options.faces;
       this.runBufferIndirect(broker, this.ghost!, [this.advanceParams,
@@ -1192,6 +1199,7 @@ export class WebGPUOctreeLosassoAdaptivePhi {
       publishTopologyHandoff: [1, 5, 6],
       prepareTopologyEvidenceEpoch: [0, 1, 3, 4, 5, 7, 8],
       prepareTopologyEvidence: [0, 1, 4, 5],
+      buildTopologyEvidenceHash: [0, 1, 3, 4],
       publishTopologyEvidenceRows: [0, 1, 2, 3, 4, 5, 6, 7, 9, 10],
       finishTopologyEvidence: [0, 1, 3, 4, 5, 7, 8],
       scheduleAcceptedWork: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
@@ -1227,6 +1235,8 @@ export class WebGPUOctreeLosassoAdaptivePhi {
     this.run(broker, this.evidence!.prepareTopologyEvidenceEpoch, buffers, 1);
     this.run(broker, this.evidence!.prepareTopologyEvidence, buffers,
       this.evidencePrepareWorkgroups);
+    this.runBufferIndirect(broker, this.evidence!.buildTopologyEvidenceHash,
+      buffers, bank.control, bank.leafDispatchOffsetBytes);
     this.runBufferIndirect(broker, this.evidence!.publishTopologyEvidenceRows,
       buffers, bank.control, bank.leafDispatchOffsetBytes);
     this.run(broker, this.evidence!.finishTopologyEvidence, buffers, 1);

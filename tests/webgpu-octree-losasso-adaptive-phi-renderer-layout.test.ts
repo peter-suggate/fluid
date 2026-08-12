@@ -82,8 +82,11 @@ test("adaptive phi publisher parallelizes live rows and clears the renderer capa
   assert.match(shader,
     /fnpublishTopologyEvidenceRows\(@builtin\(global_invocation_id\)gid:vec3u\).*letrow=gid\.x/s,
     "each live graph leaf must publish its renderer row independently");
-  assert.match(shader, /fnfinishTopologyEvidence\(\).*for\(varrow=0u;row<rows;row\+=1u\)/s,
-    "the collision-sensitive hash insertion must remain canonical and serial");
+  assert.match(shader,
+    /fnbuildTopologyEvidenceHash\(@builtin\(global_invocation_id\)gid:vec3u\).*atomicCompareExchangeWeak/s,
+    "collision-sensitive hash insertion must be parallel and atomically claimed");
+  assert.doesNotMatch(shader, /fnfinishTopologyEvidence\(\).*for\(varrow=0u;row<rows/s,
+    "the topology finalizer must remain constant-time");
   assert.match(shader, /letaux=8u\+8u\*rows\+8u\*row/);
   assert.doesNotMatch(shader, /letaux=8u\+8u\*p\.limits\.y\+8u\*row/);
   assert.match(shader, /rendererRowCapacity=\(rendererWords-8u\)\/16u/);
@@ -100,11 +103,10 @@ test("factor-one renderer combines mass topology with supported nodal sheets", (
     /letsdfPhi=bitcast<f32>\(renderer\[aux\+corner\]\)/,
     "interior and floor geometry must retain the earlier redistanced nodal SDF");
   assert.match(shader,
-    /fnrendererNodeEvidence\(node:vec3u\).*occupied\+=select\(0u,1u,rho>1e-5\);liquid\+=select\(0u,1u,rho>=\.5\).*supportedSheet=!atSideWall&&massPhi>0\.&&sdfPhi<0\.&&evidence\.occupiedOctants>=4u&&evidence\.liquidOctants==0u/s,
-    "only wholly sub-grid four-octant sheets may retain nodal phi; ordinary bulk fronts and isolated tendrils may not");
-  assert.match(shader,
-    /letsignsAgree=.*letvalue=canonicalPublishedZero\(select\(massPhi,sdfPhi,signsAgree\|\|supportedSheet\)\)/s,
-    "mass must repair SDF sign holes without replacing agreeing metric curvature");
+    /letsignsAgree=.*letvalue=canonicalPublishedZero\(select\(massPhi,sdfPhi,signsAgree\)\)/s,
+    "mass must repair every SDF sign hole without replacing agreeing metric curvature");
+  assert.doesNotMatch(shader, /supportedSheet/,
+    "air-side SDF cannot create renderer-only liquid sheets");
   assert.doesNotMatch(shader, /node\.y==0u|node\.y==p\.dims\.y/,
     "the no-stick gate must exclude the floor so thin floor sheets remain visible");
   assert.match(shader,
@@ -173,8 +175,8 @@ test("accepted identity transport retains the exact current phi bank", () => {
     "a valid retained no-op advances generation without flipping banks");
   const encode = compact(WebGPUOctreeLosassoAdaptivePhi.prototype.encodeAcceptedAdvance.toString());
   assert.match(encode,
-    /prepareAdvance.*applyReferenceVolumeDelta.*markTransportReach.*markTransportInflow.*markTransportConstrained.*publishTransportIndependent.*publishTransportConstrained.*this\.backtrace.*this\.transport.*this\.correction.*captureTransportReceipt.*projectTransportedBand.*capturePreRedistanceVolumes/s,
-    "the corrected hanging-node projection must run after the exactly-once transport receipt");
+    /prepareAdvance.*applyReferenceVolumeDelta.*markTransportReach.*markTransportInflow.*markTransportConstrained.*publishTransportIndependent.*publishTransportConstrained.*this\.backtrace.*this\.transport.*projectTransportedBand.*captureTransportReceipt.*capturePreRedistanceVolumes/s,
+    "the hanging-node projection must precede the exactly-once transport receipt");
 });
 
 test("constraint reductions are bit invariant under D4 master permutations", () => {
@@ -220,14 +222,14 @@ test("accepted transport publishes a compact physical-reach band", () => {
   assert.match(prepare,
     /fnprepareRedistanceBand\(\).*atomicStore\(&arena\[11\],bitcast<u32>\(2\.\*p\.originCell\.w\)\).*atomicStore\(&arena\[12\],1u\)/s);
   assert.match(reach,
-    /fnmarkTransportReach\(.*bank=select\(current,1u-current,atomicLoad\(&arena\[12\]\)==1u\).*abs\(phi\[i\]\[bank\]\)<reach/s);
+    /fnmarkTransportReach\(.*redistance=atomicLoad\(&arena\[12\]\)==1u.*bank=select\(current,1u-current,redistance\).*abs\(centre\)<reach/s);
   assert.match(inflow,
     /fnmarkTransportInflow\(.*axial>=-reach.*dot\(radial,radial\)<=radius\*radius.*bandMask\[i\]\|=1u/s);
   const redistance = compact(octreeLosassoAdaptivePhiRedistanceInitializeWGSL
     + octreeLosassoAdaptivePhiRedistanceFinishWGSL);
   assert.match(reach,
-    /scheduled=scheduled\|\|abs\(value\)<reach[\s\S]*scheduled=scheduled\|\|frozen/,
-    "redistance must compact a strict phi core plus one non-cascading donor halo");
+    /scheduled=scheduled\|\|abs\(value\)<reach[\s\S]*scheduled=scheduled\|\|mixed\|\|frozen/,
+    "redistance must compact the strict phi core, mixed leaves, and one non-cascading donor halo");
   assert.match(independent, /fnpublishTransportIndependent\(.*worklist\[rank\]=i\|select\(0u,0x80000000u/s);
   assert.match(independent,
     /if\(\(marked&1u\)==0u\)\{if\(atomicLoad\(&transportControl\[12\]\)==0u\)\{letcurrent=bank\(\);phi\[i\]\[1u-current\]=phi\[i\]\[current\]/,
@@ -235,9 +237,12 @@ test("accepted transport publishes a compact physical-reach band", () => {
   assert.match(constraintMark,
     /constraints\[master\]\.header\.y!=0u.*atomicOr\(&control\[12\],ERR_CONSTRAINT\)/s,
     "constraint scheduling must reject non-independent masters before reading masks");
-  assert.match(reach + constraintMark + redistance,
-    /minimumPhi<=0\.&&maximumPhi>=0\.[\s\S]*atomicOr\(&bandMask\[master\],marked\)[\s\S]*bitcast<u32>\(abs\(signed\)\)\|FROZEN/,
-    "an exact zero and every other mixed-leaf corner must retain transported interface authority");
+  assert.match(reach, /mixed=mixed\|\|\(minimumPhi<=0\.&&maximumPhi>=0\.\)/,
+    "every mixed-leaf corner must retain transported interface authority");
+  assert.match(constraintMark, /atomicOr\(&bandMask\[master\],marked&1u\)/,
+    "constraint masters must inherit scheduled interface authority");
+  assert.match(redistance, /bitcast<f32>\(bitcast<u32>\(crossing\.distance\)\|FROZEN\)/,
+    "exact edge crossings must remain frozen during redistance");
   const backtrace = compact(octreeLosassoAdaptivePhiBacktraceWGSL);
   assert.match(backtrace,
     /fnbacktraceIndependent\(.*v0=packedVelocity\(i\).*sampleVelocity\(boundedMid,incidentLeaves\[8u\*i\+midpointOctant\].*incidentLeaves\[8u\*i\+departureOctant\].*departures\[2u\*i\]=vec4f/s,

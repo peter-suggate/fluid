@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { interactiveMethodId, interactiveSimulationMethods } from "../lib/methods";
+import { getMethod, interactiveMethodId, interactiveSimulationMethods } from "../lib/methods";
 
 const methodPanelSource = readFileSync(new URL("../components/MethodPanel.tsx", import.meta.url), "utf8");
 const urlStateSource = readFileSync(new URL("../lib/url-state.ts", import.meta.url), "utf8");
@@ -17,6 +17,7 @@ test("UI hydration restores supported methods and rejects offline-only methods",
   assert.equal(interactiveMethodId("tall-cell"), "uniform");
   assert.equal(interactiveMethodId("octree"), "octree");
   assert.equal(interactiveMethodId("uniform"), "uniform");
+  assert.equal(getMethod("unknown").id, "uniform");
   assert.match(urlStateSource, /methodId: interactiveMethodId\(state\.methodId\)/);
   assert.doesNotMatch(urlStateSource, /methodId: "octree", quality: state\.quality/);
 });

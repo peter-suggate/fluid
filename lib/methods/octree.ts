@@ -45,7 +45,7 @@ const params: MethodParamSpec[] = [
   { kind: "select", key: "maximumLeafSize", label: "Largest pressure cell", default: "32", tier: "fine", options: [{ value: "2", label: "2³ finest cells" }, { value: "4", label: "4³ finest cells" }, { value: "8", label: "8³ finest cells" }, { value: "16", label: "16³ finest cells" }, { value: "32", label: "32³ finest cells · default" }], hint: "Largest dyadic octree cell away from interfaces. Scene profiles choose the largest compatible root while preserving strict 2:1 grading." },
   { kind: "number", key: "interfaceRefinementBandCells", label: "Band reach", unit: "level", min: 0, max: 4, step: 1, digits: 0, default: 4, tier: "fine", hint: "One coupled reach level for pressure refinement and Section 5 surface tracking. Experimental level 0 uses one fine brick; level 1 retains the two-finest-cell moving-surface floor while still reducing pressure reach and recurring residency. Level 4 is the paper/default reach. This is the STRUCTURAL band: it sizes the pressure row capacity, the residency halo, the candidate dilation rings and the redistance reach, so changing it rebuilds. The performance strip carries a live Surface band dial that thins this one without a rebuild, and is clamped to it." },
   { kind: "number", key: "surfaceRefinementGradingLayers", label: "Surface grading", unit: "layers", min: 1, max: 4, step: 1, digits: 0, default: 1, tier: "fine", hint: "Intermediate pressure-cell layers retained per octree level around the surface. 1 is the existing sharp 2:1 transition; 3 is the progressive-refinement experiment." },
-  { kind: "number", key: "topologyCadenceAdvances", label: "Topology cadence", unit: "advances", min: 1, max: 8, step: 1, digits: 0, default: 1, tier: "fine", hint: "Losasso candidate epochs may cover k accepted advances. Each skipped rebuild is represented spatially by an extra dilation ring; band 4 remains canonical." },
+  { kind: "number", key: "topologyCadenceAdvances", label: "Topology cadence", unit: "advances", min: 1, max: 8, step: 1, digits: 0, default: 8, tier: "fine", hint: "Losasso candidate epochs cover eight accepted advances by default. Each skipped rebuild is represented spatially by an extra dilation ring, keeping the moving interface inside the resident band." },
   ...runtimeDialParams,
 ];
 
@@ -182,7 +182,7 @@ export const octreeMethod: SimulationMethod = {
     interfaceRefinementBandCells: 4,
     surfaceRefinementGradingLayers: 1,
     globalFineLevelSetFactor: "1",
-    topologyCadenceAdvances: 1,
+    topologyCadenceAdvances: 8,
   }),
   normalizeValues: normalizeOctreeMethodValues,
   createSolver: (device, scene, quality, values, onRigidLoads) => new WebGPUOctreeEulerianSolver(device, scene, quality, onRigidLoads, octreeSolverOptions(scene, quality, values)),

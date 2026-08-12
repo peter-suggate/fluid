@@ -171,11 +171,13 @@ interface FieldBindings {
   readonly prepare: GPUBindGroup; readonly reconstruct: GPUBindGroup;
   readonly handoff?: GPUBindGroup;
   readonly seed: GPUBindGroup;
+  readonly seedLeaves: GPUBindGroup;
   readonly waves: readonly { readonly group: GPUBindGroup; readonly inputSlice: number }[];
   readonly constrainA: GPUBindGroup;
   readonly finalize: GPUBindGroup; readonly finish: GPUBindGroup;
   readonly liveDispatch: GPUBuffer;
   readonly liveDispatchOffsetBytes: number;
+  readonly leafDispatchOffsetBytes: number;
 }
 
 interface StencilBuildBindings {
@@ -207,7 +209,8 @@ const ENTRY_POINTS = ["prepareAdaptiveVelocityStencils", "compileAdaptiveVelocit
   "commitAdaptiveVelocityTopology",
   "prepareAdaptiveVelocity", "reconstructAcceptedAdaptiveVelocity",
   "reconstructCandidateAdaptiveVelocity", "handoffAdaptiveVelocity",
-  "seedAdaptiveVelocityFrontier", "propagateAdaptiveVelocityFrontier",
+  "seedAdaptiveVelocityFrontier", "seedAdaptiveVelocityLiquidLeaves",
+  "propagateAdaptiveVelocityFrontier",
   "constrainAdaptiveVelocity", "finalizeAdaptiveVelocity",
   "finishAdaptiveVelocity"] as const;
 type EntryPoint = typeof ENTRY_POINTS[number];
@@ -230,6 +233,7 @@ const BINDINGS: Readonly<Record<EntryPoint, readonly number[]>> = Object.freeze(
   reconstructCandidateAdaptiveVelocity: [0, 1, 2, 3, 4, 5, 6, 7, 8],
   handoffAdaptiveVelocity: [0, 1, 2, 4, 6],
   seedAdaptiveVelocityFrontier: [0, 1, 2, 3, 4],
+  seedAdaptiveVelocityLiquidLeaves: [0, 1, 2, 3, 4],
   propagateAdaptiveVelocityFrontier: [0, 1, 2, 3, 6, 7],
   constrainAdaptiveVelocity: [0, 1, 2, 3, 6],
   finalizeAdaptiveVelocity: [0, 1, 2, 3, 6, 7],
@@ -526,6 +530,8 @@ export class WebGPUOctreeLosassoAdaptiveVelocity {
         source.graph.nodalVelocity]) } : {}),
       seed: this.createGroup("seedAdaptiveVelocityFrontier", [p, topology, this.mutableArena,
         this.controlArena, source.transportBandMask]),
+      seedLeaves: this.createGroup("seedAdaptiveVelocityLiquidLeaves", [p, topology,
+        this.mutableArena, this.controlArena, source.transportBandMask]),
       waves,
       constrainA: this.createGroup("constrainAdaptiveVelocity", [p, topology,
         this.mutableArena, this.controlArena, source.graph.nodalVelocity]),
@@ -535,6 +541,7 @@ export class WebGPUOctreeLosassoAdaptiveVelocity {
         source.graph.control, source.graph.leafLocator]),
       liveDispatch: source.graph.control,
       liveDispatchOffsetBytes: source.graph.nodeDispatchOffsetBytes,
+      leafDispatchOffsetBytes: source.graph.leafDispatchOffsetBytes,
     };
   }
   /** Reconstruct only the carried/projected field consumed by forward traces. */
@@ -643,6 +650,12 @@ export class WebGPUOctreeLosassoAdaptiveVelocity {
       pass.dispatchWorkgroups(ADAPTIVE_VELOCITY_FRONTIER_WORKGROUPS);
     }
     run("seedAdaptiveVelocityFrontier", groups.seed, true);
+    const seedLeaves = broker.compute({
+      label: `Losasso - adaptive velocity ${name} seedAdaptiveVelocityLiquidLeaves`,
+    });
+    seedLeaves.setPipeline(this.pipelines.seedAdaptiveVelocityLiquidLeaves!);
+    seedLeaves.setBindGroup(0, groups.seedLeaves);
+    seedLeaves.dispatchWorkgroupsIndirect(groups.liveDispatch, groups.leafDispatchOffsetBytes);
     for (let wave = 0; wave < this.plan.extensionWaves; wave += 1) {
       const selected = groups.waves[this.plan.accurateExtensionWaves + wave]!;
       const pass = broker.compute({ label: `Losasso - adaptive velocity ${name} harmonic frontier` });

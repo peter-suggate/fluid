@@ -17,6 +17,7 @@ interface MethodStore {
   resetParam: (methodId: string, key: string) => void;
   resetParams: (methodId: string) => void;
   applyProfile: (profile: MethodProfile) => void;
+  seedProfile: (profile: MethodProfile) => void;
 }
 
 export const useMethodStore = create<MethodStore>((set) => ({
@@ -39,6 +40,12 @@ export const useMethodStore = create<MethodStore>((set) => ({
   applyProfile: ({ methodId, quality, overrides }) => set((state) => ({
     methodId,
     quality,
+    overrides: { ...state.overrides, [methodId]: { ...overrides } },
+  })),
+  // Catalog profiles retain the exact settings needed when their historical
+  // method is selected, but opening a card no longer overrides the product's
+  // Uniform default merely because those comparison settings exist.
+  seedProfile: ({ methodId, overrides }) => set((state) => ({
     overrides: { ...state.overrides, [methodId]: { ...overrides } },
   })),
 }));

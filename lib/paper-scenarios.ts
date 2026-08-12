@@ -3,10 +3,50 @@ import { cloneScene, defaultScene, type RigidBodyDescription, type SceneDescript
 export type PaperScenarioId = "hose-tank" | "dam-break-boxes" | "sphere-jet";
 
 export const paperScenarios: ReadonlyArray<{ id: PaperScenarioId; name: string; paperFigure: string; description: string }> = [
-  { id: "hose-tank", name: "Hose-filled tank", paperFigure: "Figure 3", description: "A continuous jet fills a shallow tank." },
-  { id: "dam-break-boxes", name: "Dam break + boxes", paperFigure: "Figure 4", description: "A dam break strikes a stack of rigid boxes." },
-  { id: "sphere-jet", name: "Jet past sphere", paperFigure: "Figure 6", description: "An inlet jet flows past a sphere into a tank." }
+  { id: "hose-tank", name: "Hose-filled tank", paperFigure: "Paper-inspired legacy demo", description: "A continuous jet fills a shallow tank." },
+  { id: "dam-break-boxes", name: "Dam break + boxes", paperFigure: "Paper-inspired legacy demo", description: "A dam break strikes a stack of rigid boxes." },
+  { id: "sphere-jet", name: "Jet past sphere", paperFigure: "Paper-inspired legacy demo", description: "An inlet jet flows past a sphere into a tank." }
 ];
+
+/**
+ * Published-parameter reconstruction of the initial dam phase of CM12 Figure
+ * 9. The paper specifies the 128x128x64 lattice, dx=.05 m, dt=1/30 s, gravity
+ * 10 m/s2, and D=2.1, but not the reservoir dimensions. The 40x96x64-cell
+ * reservoir below is therefore explicit harness geometry, not a claim that
+ * the unpublished production asset has been recovered. Later injected balls
+ * are intentionally outside this initial-condition conformance case.
+ */
+export function createMassConservingFigure9DamBreak(
+  source: SceneDescription = defaultScene,
+): SceneDescription {
+  const scene = cloneScene(source);
+  scene.sceneId = "mass-conserving-figure-9-dam-break";
+  scene.randomSeed = 2012;
+  scene.duration_s = 4;
+  scene.container = {
+    ...scene.container,
+    width_m: 6.4,
+    height_m: 6.4,
+    depth_m: 3.2,
+    fillFraction: 0.234375,
+    top: "closed",
+    fluidWallMode: "free-slip",
+  };
+  scene.voxelDomain = { ...scene.voxelDomain, finestCellSize_m: 0.05 };
+  scene.nominalResolution = { length_m: 0.05 };
+  scene.numerics.fixedDt_s = 1 / 30;
+  scene.numerics.maxDt_s = 1 / 30;
+  scene.fluid.initialCondition = "dam-break";
+  scene.fluid.initialDamBreakDimensions_m = { x: 2, y: 4.8, z: 3.2 };
+  delete scene.fluid.initialDamBreakOrigin_m;
+  delete scene.fluid.initialBrickSeeds_m;
+  delete scene.fluid.initialBrickSeedsAdditive;
+  delete scene.fluid.inflow;
+  scene.fluid.gravity_m_s2 = { x: 0, y: -10, z: 0 };
+  scene.fluid.surfaceTension_N_m = 0;
+  scene.rigidBodies = [];
+  return scene;
+}
 
 function box(id: number, x: number, y: number, z: number, angle = 0): RigidBodyDescription {
   return {
@@ -28,9 +68,9 @@ export function createPaperScenario(id: PaperScenarioId, source: SceneDescriptio
   scene.container.top = "closed";
   scene.container.fluidWallMode = "free-slip";
   scene.fluid.surfaceTension_N_m = 0;
-  // The paper reports 1/30 s. Conservative surface-density transport tolerates
-  // large CFL, but the collocated projection and rigid proxy contacts still use
-  // a smaller step in these impact-heavy validation scenes.
+  // These are retained paper-inspired product demos, not reconstructions of
+  // CM12 Figures 3, 4, or 6. Their smaller step and 20 mm lattice are authored
+  // for the interactive scenes rather than for numerical paper validation.
   scene.numerics.fixedDt_s = 1 / 180;
   scene.numerics.maxDt_s = 1 / 180;
   scene.nominalResolution.length_m = 0.025;

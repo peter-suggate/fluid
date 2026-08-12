@@ -60,6 +60,8 @@ function adaptiveRecord(candidateEpoch: number): LosassoStepSnapshotRecord {
       renderer: words(8, { 0: 0x8000_0000, 1: 36, 2: 1886 }),
       massControl: words(32, { 0: 0x414d_4153, 12: 1 }),
       massReceipts: words(32, { 12: 1, 17: 0xffff_ffff }),
+      candidateMassControl: words(32, { 0: 0x414d_4153, 12: 1 }),
+      candidateMassReceipts: words(32, { 12: 1, 17: 0xffff_ffff }),
       velocityMigration: words(8, { 0: 5, 1: 4306, 4: 8, 6: 8 }),
     },
   };

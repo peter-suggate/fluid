@@ -1275,10 +1275,16 @@ export interface VelocityStageSummary {
   liquidMaximum: number;
   location: number[];
   component: number;
+  locationDensity: number;
+  positiveNeighborDensity: number | null;
   nonFiniteCount: number;
   kineticEnergyProxy: number;
   maximumComponentCfl: number;
   maximumLiquidDivergence_s: number;
+  maximumLiquidDivergenceLocation: number[];
+  maximumLiquidDivergenceSigned_s: number;
+  maximumLiquidDivergenceDensity: number;
+  maximumLiquidDivergenceFaces: number[];
   rmsLiquidDivergence_s: number;
 }
 
@@ -1348,6 +1354,10 @@ export function summarizeVelocityField(
   dt_s: number,
   divergenceStencil: "backward" | "centered"
 ): VelocityStageSummary {
+  // The uniform pressure system owns exactly rho > 0.5 cells. Including the
+  // conservative transport halo (0 < rho <= 0.5) falsely attributes its
+  // intentionally unprojected divergence to the liquid pressure solve.
+  const pressureLiquid = (rho: number) => rho > 0.5;
   let maximum = 0, liquidMaximum = 0, location = [0, 0, 0], component = 0, nonFiniteCount = 0;
   let kineticEnergyProxy = 0, maximumComponentCfl = 0;
   for (let z = 0; z < depth; z += 1) for (let y = 0; y < height; y += 1) for (let x = 0; x < width; x += 1) {
@@ -1355,12 +1365,23 @@ export function summarizeVelocityField(
       const index = x + width * (y + height * z), value = velocity[3 * index + axis];
       if (!Number.isFinite(value)) { nonFiniteCount += 1; continue; }
       const speed = Math.abs(value); if (speed > maximum) { maximum = speed; location = [x, y, z]; component = axis; }
-      if (volume[index] > 0 && speed > liquidMaximum) liquidMaximum = speed;
+      if (pressureLiquid(volume[index]) && speed > liquidMaximum) liquidMaximum = speed;
       maximumComponentCfl = Math.max(maximumComponentCfl, speed * dt_s / [spacing.x, spacing.y, spacing.z][axis]);
       kineticEnergyProxy += 0.5 * Math.max(0, Math.min(1, volume[index])) * value * value * spacing.x * spacing.y * spacing.z;
     }
   }
-  let maximumLiquidDivergence_s = 0, divergenceSquared = 0, liquidCells = 0;
+  const [maximumX, maximumY, maximumZ] = location;
+  const maximumCell = maximumX + width * (maximumY + height * maximumZ);
+  const neighborCoordinates = [maximumX, maximumY, maximumZ];
+  neighborCoordinates[component] += 1;
+  const neighborInDomain = neighborCoordinates[0] < width
+    && neighborCoordinates[1] < height && neighborCoordinates[2] < depth;
+  const neighborCell = neighborCoordinates[0]
+    + width * (neighborCoordinates[1] + height * neighborCoordinates[2]);
+  let maximumLiquidDivergence_s = 0, maximumLiquidDivergenceSigned_s = 0;
+  let maximumLiquidDivergenceLocation = [0, 0, 0], maximumLiquidDivergenceDensity = 0;
+  let maximumLiquidDivergenceFaces = [0, 0, 0, 0, 0, 0];
+  let divergenceSquared = 0, liquidCells = 0;
   const at = (x: number, y: number, z: number, axis: number) => velocity[3 * (x + width * (y + height * z)) + axis];
   // Mirror the collocated solver's `centeredFaceVelocity`: the face value is
   // the average of the two adjacent cell centers, and a face whose neighbor
@@ -1375,19 +1396,36 @@ export function summarizeVelocityField(
   };
   for (let z = 0; z < depth; z += 1) for (let y = 0; y < height; y += 1) for (let x = 0; x < width; x += 1) {
     const index = x + width * (y + height * z);
-    if (!(volume[index] > 1e-4)) continue;
+    if (!pressureLiquid(volume[index])) continue;
     const divergence = divergenceStencil === "centered"
       ? centered(x, y, z, 0) + centered(x, y, z, 1) + centered(x, y, z, 2)
       : (at(x, y, z, 0) - (x > 0 ? at(x - 1, y, z, 0) : 0)) / spacing.x
         + (at(x, y, z, 1) - (y > 0 ? at(x, y - 1, z, 1) : 0)) / spacing.y
         + (at(x, y, z, 2) - (z > 0 ? at(x, y, z - 1, 2) : 0)) / spacing.z;
     if (!Number.isFinite(divergence)) { nonFiniteCount += 1; continue; }
-    maximumLiquidDivergence_s = Math.max(maximumLiquidDivergence_s, Math.abs(divergence));
+    if (Math.abs(divergence) > maximumLiquidDivergence_s) {
+      maximumLiquidDivergence_s = Math.abs(divergence);
+      maximumLiquidDivergenceSigned_s = divergence;
+      maximumLiquidDivergenceLocation = [x, y, z];
+      maximumLiquidDivergenceDensity = Number(volume[index]);
+      maximumLiquidDivergenceFaces = [
+        x > 0 ? at(x - 1, y, z, 0) : 0, at(x, y, z, 0),
+        y > 0 ? at(x, y - 1, z, 1) : 0, at(x, y, z, 1),
+        z > 0 ? at(x, y, z - 1, 2) : 0, at(x, y, z, 2),
+      ];
+    }
     divergenceSquared += divergence * divergence; liquidCells += 1;
   }
   return {
-    maximum, liquidMaximum, location, component, nonFiniteCount, kineticEnergyProxy, maximumComponentCfl,
+    maximum, liquidMaximum, location, component,
+    locationDensity: Number(volume[maximumCell]),
+    positiveNeighborDensity: neighborInDomain ? Number(volume[neighborCell]) : null,
+    nonFiniteCount, kineticEnergyProxy, maximumComponentCfl,
     maximumLiquidDivergence_s,
+    maximumLiquidDivergenceLocation,
+    maximumLiquidDivergenceSigned_s,
+    maximumLiquidDivergenceDensity,
+    maximumLiquidDivergenceFaces,
     rmsLiquidDivergence_s: Math.sqrt(divergenceSquared / Math.max(1, liquidCells))
   };
 }
@@ -2953,7 +2991,7 @@ export async function readCubicVolumeField(
       const cellSum = solver.info.volumeCellSum ?? solver.info.initialVolumeCellSum ?? 0;
       const occupied = Math.max(0, Math.min(nx * ny * nz, Math.round(cellSum)));
       return { field: new Float32Array(0), summary: {
-        minimum: 0, maximum: 1, cellSum, wetCells: occupied, mixedCells: solver.info.phiInterfaceCellCount ?? 0,
+        minimum: 0, maximum: 1, maximumCell: null, cellSum, wetCells: occupied, mixedCells: solver.info.phiInterfaceCellCount ?? 0,
         excessCells: 0, meanColumnAmount: cellSum / Math.max(1, nx * nz), columnAmountStdDev: 0,
         componentCount: occupied > 0 ? 1 : 0, largestComponent: occupied, interfaceFaceCount: 0,
         enclosedAirComponentCount: 0, enclosedAirCells: 0, centroidCells: null,

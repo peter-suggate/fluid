@@ -2409,6 +2409,38 @@ export class OctreeSparseBrickWorld {
   get allocatedBytes(): number { return this.baseAllocatedBytes; }
 
   /**
+   * Adopt a new metre mapping for the resident render lattice.
+   *
+   * World scaling deliberately keeps the cell-address lattice intact, so the
+   * sparse buffers and their topology remain reusable. The presentation ABI,
+   * however, also publishes metres per render cell and the world origin. If
+   * those construction-time values survive a re-seed, seeded bricks keep their
+   * old size while their authored centres move with the enlarged tank.
+   */
+  rescaleRenderDomain(scene: SceneDescription): void {
+    const structural = this.sceneSource.structural;
+    if (!structural) return;
+    const dimensions = structural.domain.dimensionsCells;
+    const worldOrigin_m: [number, number, number] = [
+      -0.5 * scene.container.width_m, 0, -0.5 * scene.container.depth_m,
+    ];
+    const cellSize_m: [number, number, number] = [
+      scene.container.width_m / dimensions[0],
+      scene.container.height_m / dimensions[1],
+      scene.container.depth_m / dimensions[2],
+    ];
+    structural.domain = { ...structural.domain, worldOrigin_m, cellSize_m };
+    this.sceneSource.nodeMipPyramid = this.sceneSource.nodeMipPyramid && {
+      ...this.sceneSource.nodeMipPyramid,
+      worldOrigin_m,
+      worldExtent_m: [
+        scene.container.width_m, scene.container.height_m, scene.container.depth_m,
+      ],
+    };
+    this.sceneSource.revision += 1;
+  }
+
+  /**
    * Stage the newest authored scene as render truth. Multiple editor writes
    * before the next presentation frame coalesce into one publication whose
    * dirty coverage includes every superseded old/new bound.

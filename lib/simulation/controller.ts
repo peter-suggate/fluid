@@ -70,6 +70,7 @@ import {
   performanceTraceMatchesLane,
   type PerformanceTrace,
 } from "../performance-trace";
+import { effectiveSimulationStep_s } from "../simulation-step";
 
 export type BodyDragPhase = "start" | "move" | "end";
 
@@ -332,7 +333,7 @@ class SimulationController {
       return;
     }
     this.accumulator += elapsed;
-    const dt = scene.numerics.fixedDt_s;
+    const dt = effectiveSimulationStep_s(scene, useMethodStore.getState());
     let steps = 0;
     let diagnostics: RigidStepDiagnostics | undefined;
     let fluidDiagnostics: ReturnType<EulerianFluidSolver["step"]> | undefined;
@@ -412,7 +413,7 @@ class SimulationController {
     runtime.setRunState("paused");
     const scene = useSceneStore.getState().scene;
     if (!planSceneRuntime(scene).fluidSolver) return;
-    const dt = scene.numerics.fixedDt_s;
+    const dt = effectiveSimulationStep_s(scene, useMethodStore.getState());
     const backend = this.backend;
     if (backend === "webgpu" && !this.webgpuTransportReady()) return;
     if (backend === "webgpu" && !gpuCanAcceptNextStep(this.simulationTime, this.gpuCompletedTime)) return;
@@ -535,7 +536,7 @@ class SimulationController {
     // never leak into another scene or its URL.
     const previousCamera = useUIStore.getState().camera;
     useMethodStore.setState(useMethodStore.getInitialState());
-    if (opening.methodProfile) useMethodStore.getState().applyProfile(opening.methodProfile);
+    if (opening.methodProfile) useMethodStore.getState().seedProfile(opening.methodProfile);
     this.reset(opening.scene, opening.presetId);
     useUIStore.setState({
       ...useUIStore.getInitialState(),
@@ -1236,11 +1237,9 @@ class SimulationController {
   /**
    * Scale the world or the detail by a factor of two.
    *
-   * A world scale multiplies the extents and the finest cell size together, so
-   * the lattice never moves and the renderer answers with a warm re-seed of the
-   * live solver — no arenas, no pipelines, no shader modules. A detail scale
-   * moves the lattice and therefore rebuilds, which is announced so the status
-   * says which edit is costing the pause.
+   * A world scale keeps the lattice dimensions and warm re-seeds its updated
+   * metre mapping. A detail scale moves the lattice and rebuilds. Compiled
+   * pipelines remain cached.
    */
   scaleScene(axis: SceneScaleAxis, factor: SceneScaleFactor) {
     const sceneStore = useSceneStore.getState();

@@ -134,7 +134,7 @@ export const gardenSceneryGraph: SceneryGraph = {
 };
 
 /**
- * Hose-filled tank (paper Figure 3), staged in a Victorian glasshouse.
+ * Paper-inspired hose-filled tank, staged in a Victorian glasshouse.
  *
  * Everything here exists to explain one event: a hose fills a shallow tank. The
  * coil lies on the flagstones at the near left, uncoils toward the tank, climbs
@@ -266,7 +266,7 @@ export const conservatorySceneryGraph: SceneryGraph = {
 };
 
 /**
- * Jet past a sphere (paper Figure 6), staged in a night laboratory.
+ * Paper-inspired jet past a sphere, staged in a night laboratory.
  *
  * Near-neutral greys separated by value alone, with hue reserved for emitters:
  * one warm tungsten source and the cool family it plays against. The back wall

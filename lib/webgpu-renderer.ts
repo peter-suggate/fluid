@@ -400,12 +400,9 @@ export function canInitializeGPUSceneSource(scene: SceneDescription, methodId: s
  * "does this edit require a reset?" before it takes one.
  */
 export function sceneStructuralKey(scene: SceneDescription): string {
-  // The lattice is keyed in cells, not in metres. Scaling the world multiplies
-  // the container extents and the finest cell size by the same factor, so the
-  // cell counts, every arena sized from them, and every compiled pipeline are
-  // untouched — the structural tier must not claim otherwise and force a
-  // rebuild for what is really a re-seed at a new scale. Authored domain bounds
-  // are measured the same way, in cells, so they survive a scale too.
+  // The lattice is keyed in cells, not metres. A world scale retains these
+  // allocations; the warm re-seed republishes the sparse presentation domain's
+  // origin and cell size separately.
   const cellSize_m = scene.voxelDomain.finestCellSize_m;
   const bounds = scene.voxelDomain.bounds_m;
   const boundsCells = bounds
@@ -1863,6 +1860,8 @@ export class FluidLabRenderer {
         ||this.gpuFluidRequestGeneration!==requestGeneration)return;
       if(!reseeded){this.beginGPUFluidInitialization(scene,config,key,presentationMode);return;}
       this.gpuFluidKey=key;this.appliedSceneUniformKey=gpuSceneUniformKey(scene);this.resetGPUQueueTracking();
+      if(presentationMode === "full-scene")this.attachSparsePresentationSource(
+        solver,requestGeneration,performance.now(),solver.sparseVoxelSceneSource);
       // reset() intentionally clears the diagnostics store. A warm re-seed
       // must therefore republish its authority just like a replacement attach,
       // then earn a fresh raster fence before transport unlocks. Merely moving

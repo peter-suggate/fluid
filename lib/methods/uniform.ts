@@ -51,6 +51,7 @@ export function uniformReferenceSolverOptions(
   scene?: Pick<SceneDescription, "sceneId">,
 ): WebGPUUniformReferenceOptions {
   return {
+    densitySharpening: values.densitySharpening !== "off",
     densityPostProcessing: uniformDensityPostProcessingEnabled(
       values.densityPostProcessing,
       scene?.sceneId,
