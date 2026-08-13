@@ -184,6 +184,27 @@ export interface SceneDescription {
      * scene uses this to raise a slab of water above a settled pool.
      */
     initialBrickSeedsAdditive?: boolean;
+    /**
+     * Balls of liquid present at t = 0, as analytic spheres.
+     *
+     * A brick seed answers "which brick is wet", so the smallest body it can
+     * describe is one 8-cell brick and every body it describes is a cube. That
+     * is the wrong primitive for a dropped ball: six of the ten Chentanez-
+     * Müller 2012 figures start from a sphere of liquid falling into a pool, an
+     * empty tank or a spherical vessel, and a cube falls, splashes and forms a
+     * crown differently from a ball.
+     *
+     * Spheres *union* with whatever the base initial condition produces, the
+     * way `initialBrickSeedsAdditive` seeds do, rather than replacing it — a
+     * ball is something added to a scene that already has a pool or is
+     * deliberately empty (`fillFraction: 0`). Nothing needs an exclusive form,
+     * so there is no flag for one.
+     *
+     * Like an offset reservoir, a sphere is not one of the closed forms the
+     * GPU's `analyticInitialPhi` knows, so a scene carrying one takes the
+     * host-rasterized bootstrap that terrain and rigid bodies already take.
+     */
+    initialLiquidSpheres?: LiquidSphere[];
     inflow?: FluidInflow;
     /**
      * What the liquid looks like, as opposed to how it moves.
@@ -242,6 +263,12 @@ export interface FluidRefinementRegion {
   /** Optional largest pressure-cell edge allowed inside, in finest cells.
    * Power of two. Omitted leaves coarsening entirely evidence-driven. */
   maximumCellSize_cells?: number;
+}
+
+/** A ball of liquid present at t = 0. See `fluid.initialLiquidSpheres`. */
+export interface LiquidSphere {
+  center_m: Vec3;
+  radius_m: number;
 }
 
 export interface FluidInflow {
@@ -504,6 +531,22 @@ export function validateScene(scene: SceneDescription): string[] {
       if (![seed?.x, seed?.y, seed?.z].every(Number.isFinite)) errors.push(`Initial fluid brick seed ${index} must be finite`);
       else if (seed.x < -c.width_m / 2 || seed.x >= c.width_m / 2 || seed.y < 0 || seed.y >= c.height_m || seed.z < -c.depth_m / 2 || seed.z >= c.depth_m / 2) {
         errors.push(`Initial fluid brick seed ${index} must be inside the solver bounds`);
+      }
+    }
+  }
+  if (scene.fluid?.initialLiquidSpheres) {
+    const spheres = scene.fluid.initialLiquidSpheres;
+    if (!Array.isArray(spheres) || spheres.length === 0) errors.push("Initial liquid spheres must be a non-empty array");
+    else for (const [index, sphere] of spheres.entries()) {
+      const centre = sphere?.center_m;
+      if (![centre?.x, centre?.y, centre?.z].every(Number.isFinite)) errors.push(`Initial liquid sphere ${index} centre must be finite`);
+      else if (!(sphere.radius_m > 0) || !Number.isFinite(sphere.radius_m)) errors.push(`Initial liquid sphere ${index} radius must be positive and finite`);
+      // The centre, not the whole ball: a sphere may be clipped by a wall or by
+      // the ground the way an authored dam block sitting in the corner is, and
+      // the seed loops already intersect it with the container and the terrain.
+      else if (centre.x < -c.width_m / 2 || centre.x > c.width_m / 2 || centre.y < 0 || centre.y > c.height_m
+        || centre.z < -c.depth_m / 2 || centre.z > c.depth_m / 2) {
+        errors.push(`Initial liquid sphere ${index} centre must be inside the container`);
       }
     }
   }

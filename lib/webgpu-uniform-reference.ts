@@ -1,7 +1,6 @@
 import {
-  combineInitialBrickWet,
   damBreakBoxContains,
-  initialFluidBrickContainsCell,
+  initialLiquidContainsCell,
   sceneDamBreakBox,
 } from "./initial-fluid";
 import { averageInflowStrength, createInflowGridBoundary, type InflowGridBoundary } from "./inflow-boundary";
@@ -754,11 +753,10 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     let initial = 0;
     for (let z = 0; z < nz; z += 1) for (let y = 0; y < ny; y += 1) for (let x = 0; x < nx; x += 1) {
       const aboveGround = (y + 0.5) * cellHeight > terrain[x + nx * z];
-      const brick = initialFluidBrickContainsCell(this.scene, x, y, z, [nx, ny, nz]);
       const base = this.scene.fluid.initialCondition === "dam-break"
         ? damBreakBoxContains(dam, (x + 0.5) / nx, (y + 0.5) / ny, (z + 0.5) / nz)
         : (y + 0.5) / ny <= c.fillFraction;
-      const wet = aboveGround && combineInitialBrickWet(this.scene, brick, base);
+      const wet = aboveGround && initialLiquidContainsCell(this.scene, x, y, z, [nx, ny, nz], base);
       volume[x + nx * (y + ny * z)] = wet ? 1 : 0;
       if (wet) initial += 1;
     }
@@ -959,7 +957,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       [this.info.nx, this.info.ny, this.info.nz],
     );
     if (this.symmetryStageAuditTextures) encoder.copyTextureToTexture(
-      { texture: this.gammaB }, { texture: this.symmetryStageAuditTextures.gammaPostAdvection },
+      { texture: this.gammaA }, { texture: this.symmetryStageAuditTextures.gammaPostAdvection },
       [this.info.nx, this.info.ny, this.info.nz],
     );
     seam?.(UNIFORM_ADVANCE_PHASE.densityAdvection);

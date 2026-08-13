@@ -1,4 +1,4 @@
-import { combineInitialBrickWet, damBreakBoxContains, initialFluidBrickContainsCell, initialFluidBrickSignedDistance, sceneDamBreakBox, sceneDamBreakFractions } from "./initial-fluid";
+import { damBreakBoxContains, initialFluidBrickSignedDistance, initialLiquidContainsCell, liquidSphereSignedDistance, sceneDamBreakBox, sceneDamBreakFractions } from "./initial-fluid";
 import type { SceneDescription } from "./model";
 import { sceneHasTerrain, terrainColumnHeights, terrainHeightAt } from "./terrain";
 
@@ -141,12 +141,11 @@ function initialWet(scene: SceneDescription, x: number, y: number, z: number, nx
     const worldZ = -0.5 * c.depth_m + (z + 0.5) * c.depth_m / nz;
     if ((y + 0.5) * c.height_m / fineNy <= terrainHeightAt(scene.terrain, worldX, worldZ)) return false;
   }
-  const brickWet = initialFluidBrickContainsCell(scene, x, y, z, [nx, fineNy, nz]);
   const dam = sceneDamBreakBox(scene);
   const baseWet = scene.fluid.initialCondition === "tank-fill"
     ? (y + 0.5) / fineNy <= scene.container.fillFraction
     : damBreakBoxContains(dam, (x + 0.5) / nx, (y + 0.5) / fineNy, (z + 0.5) / nz);
-  return combineInitialBrickWet(scene, brickWet, baseWet);
+  return initialLiquidContainsCell(scene, x, y, z, [nx, fineNy, nz], baseWet);
 }
 
 function boxSignedDistance(point: { x: number; y: number; z: number }, center: { x: number; y: number; z: number }, half: { x: number; y: number; z: number }) {
@@ -162,20 +161,25 @@ function boxSignedDistance(point: { x: number; y: number; z: number }, center: {
  * free-surface plane while a dam break uses the finite liquid block. */
 export function initialLiquidPhi(scene: SceneDescription, point: { x: number; y: number; z: number }, dimensions?: readonly [number, number, number]) {
   const c = scene.container;
+  // Authored balls union with everything below, and their distance is exact at
+  // any point, so they need none of the lattice bookkeeping the box forms do.
+  const sphereDistance = liquidSphereSignedDistance(scene, point);
+  const withSpheres = (value: number) => sphereDistance === undefined
+    ? value : Math.min(value, sphereDistance);
   if (dimensions) {
     const brickDistance = initialFluidBrickSignedDistance(scene, point, dimensions);
     if (brickDistance !== undefined) {
       // Additive seeds union with the base liquid (signed-distance minimum);
       // ordinary seeds replace it entirely.
-      if (!scene.fluid.initialBrickSeedsAdditive) return brickDistance;
+      if (!scene.fluid.initialBrickSeedsAdditive) return withSpheres(brickDistance);
       const basePhi = scene.fluid.initialCondition === "tank-fill"
         ? point.y - c.height_m * c.fillFraction
         : baseDamBreakPhi(scene, point);
-      return Math.min(brickDistance, basePhi);
+      return withSpheres(Math.min(brickDistance, basePhi));
     }
   }
-  if (scene.fluid.initialCondition === "tank-fill") return point.y - c.height_m * c.fillFraction;
-  return baseDamBreakPhi(scene, point);
+  if (scene.fluid.initialCondition === "tank-fill") return withSpheres(point.y - c.height_m * c.fillFraction);
+  return withSpheres(baseDamBreakPhi(scene, point));
 }
 
 function baseDamBreakPhi(scene: SceneDescription, point: { x: number; y: number; z: number }) {

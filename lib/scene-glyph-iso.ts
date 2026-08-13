@@ -153,6 +153,23 @@ function glyphWater(scene: SceneDescription, extent: IsoVec, scale: number): Iso
     if (base) volumes.push(base);
   }
   if (seeds?.length) volumes.push(...seedVolumes(scene, editorFluidLattice(scene), extent, scale));
+  // A ball is drawn as the box it occupies. The glyph is an isometric block
+  // sketch with no round primitive, and the reason to draw one at all is so a
+  // scene whose whole liquid is a dropped sphere is not an empty card.
+  for (const sphere of scene.fluid.initialLiquidSpheres ?? []) {
+    const centre = {
+      x: (sphere.center_m.x + 0.5 * c.width_m) * scale,
+      y: sphere.center_m.y * scale,
+      z: (sphere.center_m.z + 0.5 * c.depth_m) * scale,
+    };
+    const r = sphere.radius_m * scale;
+    const volume = box(
+      { x: centre.x - r, y: centre.y - r, z: centre.z - r },
+      { x: centre.x + r, y: centre.y + r, z: centre.z + r },
+      extent,
+    );
+    if (volume) volumes.push(volume);
+  }
   return volumes;
 }
 

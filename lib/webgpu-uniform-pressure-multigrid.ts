@@ -66,6 +66,104 @@ export interface UniformPressureMultigridLevel {
   readonly coefficients: GPUTexture;
 }
 
+/** The 256-lane workgroup that solves the coarsest level exactly. */
+export const UNIFORM_CM11A_COARSEST_LANES = 256;
+
+/** Physical cells on each axis, halo excluded. */
+export type UniformCM11aLevelSize = readonly [number, number, number];
+
+/** What a dense CM11a hierarchy over `dimensions` would look like. */
+export interface UniformCM11aHierarchyPlan {
+  readonly levelCount: number;
+  /** Physical lattice of every level, finest first. */
+  readonly levelDimensions: readonly UniformCM11aLevelSize[];
+  /** Coarsest lattice with its one-cell halo, which the 256 lanes cover. */
+  readonly coarsestCells: number;
+  /** True when each axis coarsens on its own schedule. */
+  readonly semiCoarsened: boolean;
+  /** Why the hierarchy is impossible, or `undefined` when it is buildable. */
+  readonly rejection?: string;
+}
+
+const haloedCells = (size: UniformCM11aLevelSize): number =>
+  size.reduce((cells, value) => cells * (value + 2), 1);
+
+/**
+ * The original hierarchy: halve all three axes together, stopping when the
+ * thinnest reaches two cells. Returns undefined when it cannot be built.
+ */
+function lockstepLevels(dimensions: UniformCM11aLevelSize): UniformCM11aLevelSize[] | undefined {
+  const minimum = Math.min(...dimensions);
+  if ((minimum & (minimum - 1)) !== 0) return undefined;
+  const levelCount = Math.floor(Math.log2(minimum));
+  const coarsening = 2 ** (levelCount - 1);
+  if (!dimensions.every((value) => value % coarsening === 0)) return undefined;
+  const levels: UniformCM11aLevelSize[] = [];
+  for (let index = 0; index < levelCount; index += 1) {
+    const step = 2 ** index;
+    levels.push([dimensions[0] / step, dimensions[1] / step, dimensions[2] / step]);
+  }
+  return haloedCells(levels[levels.length - 1]!) <= UNIFORM_CM11A_COARSEST_LANES ? levels : undefined;
+}
+
+/**
+ * Semi-coarsening: halve each axis on its own schedule, while it is even and
+ * still above two cells. An axis that has bottomed out simply stops, and the
+ * others keep going.
+ */
+function semiCoarsenedLevels(dimensions: UniformCM11aLevelSize): UniformCM11aLevelSize[] {
+  const levels: UniformCM11aLevelSize[] = [dimensions];
+  for (;;) {
+    const previous = levels[levels.length - 1]!;
+    const next = previous.map((value) =>
+      value % 2 === 0 && value > 2 ? value / 2 : value) as unknown as UniformCM11aLevelSize;
+    if (next.every((value, axis) => value === previous[axis])) return levels;
+    levels.push(next);
+  }
+}
+
+/**
+ * Whether a lattice can carry the dense hierarchy, without a GPU.
+ *
+ * This is a *constructor* precondition, not a scene-validity one: a scene can
+ * satisfy every rule in `validateScene`, build, render its dry world and still
+ * fail to load the instant the solver is created. Exposing it as arithmetic is
+ * what lets the catalog be checked on the CPU.
+ *
+ * Two rules, tried in order, and the order is the whole point. The original
+ * hierarchy coarsens all three axes in **lockstep** and stops when the thinnest
+ * reaches two cells, so a thin axis caps how far the wide ones may coarsen: a
+ * 128x128x8 lattice reaches only 32x32x2 and leaves 4624 coarsest cells for 256
+ * lanes. Coarsening each axis on its own schedule reaches 2x2x2 instead --
+ * fewer coarsest cells, not more, because the 256 lanes were never the real
+ * limit. But semi-coarsening also builds a *different* hierarchy wherever both
+ * rules apply, and the D4 folds downstream make that a change in rounding, so
+ * the lockstep plan is preferred whenever it exists and semi-coarsening is
+ * reached only by lattices that have no hierarchy at all today. Every scene
+ * that loads now keeps the hierarchy, and the numbers, that it already has.
+ */
+export function planUniformCM11aHierarchy(
+  dimensions: UniformCM11aLevelSize,
+): UniformCM11aHierarchyPlan {
+  const reject = (rejection: string): UniformCM11aHierarchyPlan =>
+    ({ levelCount: 0, levelDimensions: [], coarsestCells: 0, semiCoarsened: false, rejection });
+  if (!dimensions.every((value) => Number.isSafeInteger(value) && value >= 2)) {
+    return reject("CM11a dense hierarchy requires positive integral dimensions of at least two cells");
+  }
+  const lockstep = lockstepLevels(dimensions);
+  const levels = lockstep ?? semiCoarsenedLevels(dimensions);
+  const coarsestCells = haloedCells(levels[levels.length - 1]!);
+  const plan = {
+    levelCount: levels.length, levelDimensions: Object.freeze(levels),
+    coarsestCells, semiCoarsened: lockstep === undefined,
+  };
+  if (coarsestCells > UNIFORM_CM11A_COARSEST_LANES) {
+    return { ...plan,
+      rejection: "CM11a coarsest grid must be integral and fit its 256-lane high-precision solve" };
+  }
+  return plan;
+}
+
 /**
  * The cycle-schedule group a planned dispatch belongs to, so a trace seam can
  * split the fixed CM11a schedule into its meaningful sections without timing
@@ -130,6 +228,8 @@ export class WebGPUUniformPressureMultigrid {
   /** CM11a Algorithm 3 p_tmp; no V-cycle scratch dispatch may alias it. */
   private readonly fullCycleBackup: GPUTexture;
   private readonly spacing: readonly [number, number, number];
+  /** Finest physical lattice, the reference every level's spacing scales from. */
+  private readonly finestSize!: UniformCM11aLevelSize;
   private readonly groupLayouts: Readonly<Record<EntryPoint, GPUBindGroupLayout>>;
   private readonly ownedParams: GPUBuffer[] = [];
   private readonly ownedGroups: GPUBindGroup[] = [];
@@ -142,21 +242,15 @@ export class WebGPUUniformPressureMultigrid {
     dimensions: readonly [number, number, number],
     spacing: readonly [number, number, number],
     private readonly schedule: UniformCM11aSchedule = DEFAULT_UNIFORM_CM11A_SCHEDULE) {
-    const minimum = Math.min(...dimensions);
-    if (!dimensions.every((value) => Number.isSafeInteger(value) && value >= 2)
-      || (minimum & (minimum - 1)) !== 0) {
-      throw new RangeError("CM11a dense hierarchy requires positive dimensions and a dyadic minimum axis");
-    }
+    const hierarchy = planUniformCM11aHierarchy(
+      dimensions as readonly [number, number, number]);
+    if (hierarchy.rejection) throw new RangeError(hierarchy.rejection);
     if (!spacing.every((value) => Number.isFinite(value) && value > 0)) {
       throw new RangeError("CM11a grid spacing must be positive and finite");
     }
     this.spacing = spacing;
-    const levelCount = Math.floor(Math.log2(minimum));
-    const coarsening = 2 ** (levelCount - 1);
-    if (!dimensions.every((value) => value % coarsening === 0)
-      || dimensions.reduce((cells, value) => cells * (value / coarsening + 2), 1) > 256) {
-      throw new RangeError("CM11a coarsest grid must be integral and fit its 256-lane high-precision solve");
-    }
+    const { levelCount } = hierarchy;
+    this.finestSize = hierarchy.levelDimensions[0]!;
     const usage = GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.STORAGE_BINDING
       | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST;
     let allocatedBytes = 60;
@@ -167,8 +261,8 @@ export class WebGPUUniformPressureMultigrid {
       return result;
     };
     const levels: UniformPressureMultigridLevel[] = [];
-    let physicalSize: readonly [number, number, number] = dimensions;
     for (let index = 0; index < levelCount; index += 1) {
+      const physicalSize = hierarchy.levelDimensions[index]!;
       const size: readonly [number, number, number] = [physicalSize[0] + 2, physicalSize[1] + 2, physicalSize[2] + 2];
       const pair = (field: string, format: GPUTextureFormat = "r32float"): TexturePair => [
         texture(`Uniform CM11a L${index} ${field} A`, format, size),
@@ -177,7 +271,6 @@ export class WebGPUUniformPressureMultigrid {
       levels.push(Object.freeze({ dimensions: size, pressure: pair("pressure"), rhs: pair("rhs"),
         phi: pair("phi"), volume: pair("V", "rgba32float"), residual: pair("residual"),
         minimum: pair("p-min"), coefficients: texture(`Uniform CM11a L${index} coefficients`, "rgba32float", size) }));
-      physicalSize = [physicalSize[0] / 2, physicalSize[1] / 2, physicalSize[2] / 2];
     }
     this.levels = Object.freeze(levels);
     this.fullCycleBackup = texture("Uniform CM11a Full-Cycle p_tmp", "r32float", levels[0]!.dimensions);
@@ -465,10 +558,16 @@ export class WebGPUUniformPressureMultigrid {
   }
 
   private parameterBuffer(level: readonly [number, number, number], coarse: readonly [number, number, number],
-    levelIndex: number, control: readonly [number, number, number, number]): GPUBuffer {
+    _levelIndex: number, control: readonly [number, number, number, number]): GPUBuffer {
     const bytes = new ArrayBuffer(80); const u = new Uint32Array(bytes); const f = new Float32Array(bytes);
     u.set(this.levels[0]!.dimensions, 0); u.set(level, 4); u.set(coarse, 8);
-    const scale = 2 ** levelIndex; f.set(this.spacing.map((value) => value * scale), 12); u.set(control, 16);
+    // Each axis has coarsened by however many times *it* was halved, which is
+    // no longer one shared 2**levelIndex once a hierarchy is semi-coarsened.
+    // Reading the factor back off the lattice keeps the two in step by
+    // construction, and reproduces 2**levelIndex exactly when they are equal.
+    f.set(this.spacing.map((value, axis) =>
+      value * (this.finestSize[axis]! / (level[axis]! - 2))), 12);
+    u.set(control, 16);
     const buffer = this.device.createBuffer({ label: "Uniform CM11a dispatch parameters", size: 80,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.device.queue.writeBuffer(buffer, 0, bytes); this.ownedParams.push(buffer); return buffer;

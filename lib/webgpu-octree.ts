@@ -25,11 +25,12 @@ import { OCTREE_LOSASSO_CONTROL_WORDS } from "./octree-losasso-operator";
 import { planOctreeSurfaceStateAllocation } from "./octree-surface-allocation";
 import { planOctreeAnalyticBootstrapBounds } from "./octree-analytic-bootstrap";
 import { WebGPUOctreeAnalyticBootstrapWorklist } from "./webgpu-octree-analytic-bootstrap";
-import { combineInitialBrickWet, damBreakBoxContains, damBreakSignedDistanceAtNode, initialFluidBrickComponentBounds,
+import { damBreakBoxContains, damBreakSignedDistanceAtNode, initialFluidBrickComponentBounds,
   initialFluidBrickContainsCell,
   initialFluidBrickSignedDistanceAtCell, initialFluidBrickSignedDistanceAtNode,
-  initialFluidBrickUnionBounds,
-  sceneDamBreakBox, sceneDamBreakFractions, sceneDamBreakIsOffsetFromCorner } from "./initial-fluid";
+  initialFluidBrickUnionBounds, initialLiquidContainsCell,
+  sceneDamBreakBox, sceneDamBreakFractions, sceneDamBreakIsOffsetFromCorner,
+  sceneHasLiquidSpheres } from "./initial-fluid";
 import { integratedInflowVolume } from "./inflow-boundary";
 import { signedDistanceFromVolume } from "./volume-signed-distance";
 import { sceneHasTerrain, terrainColumnHeights } from "./terrain";
@@ -1047,8 +1048,7 @@ export function planOctreeFluidFootprintBudget(
         ? damBreakBoxContains(dam, (x + 0.5) / dims.nx, (y + 0.5) / dims.ny,
           (z + 0.5) / dims.nz)
         : (y + 0.5) / dims.ny <= scene.container.fillFraction;
-      const wet = combineInitialBrickWet(scene,
-        initialFluidBrickContainsCell(scene, x, y, z, dimensions), baseWet);
+      const wet = initialLiquidContainsCell(scene, x, y, z, dimensions, baseWet);
       if (!wet) continue;
       initialLiquidCells += 1;
       minimum[0] = Math.min(minimum[0], x); minimum[1] = Math.min(minimum[1], y);
@@ -2121,9 +2121,13 @@ export class WebGPUOctreeProjection {
     // forms either: `analyticInitialPhi` anchors the block at the container
     // minimum, so an authored origin would be silently ignored on the GPU while
     // the host honoured it. It joins the dense bootstrap path instead.
+    // An authored ball of liquid is not a closed form either, for the same
+    // reason: `analyticInitialPhi` knows a corner block and a fill plane, so a
+    // sphere scene would run the box on the GPU while the host believed it had
+    // authored a ball.
     const analyticSparseBootstrap = (scene.fluid.initialBrickSeeds_m?.length ?? 0) === 0
       && scene.rigidBodies.length === 0 && !sceneHasTerrain(scene)
-      && !sceneDamBreakIsOffsetFromCorner(scene);
+      && !sceneDamBreakIsOffsetFromCorner(scene) && !sceneHasLiquidSpheres(scene);
     this.analyticSparseBootstrap = analyticSparseBootstrap;
     const surfaceStateAllocation = planOctreeSurfaceStateAllocation(
       [dims.nx, dims.ny, dims.nz],
@@ -2834,6 +2838,7 @@ export class WebGPUOctreeProjection {
               })) }
             : (this.scene.fluid.initialBrickSeeds_m?.length ?? 0) === 0
             && !sceneDamBreakIsOffsetFromCorner(this.scene)
+            && !sceneHasLiquidSpheres(this.scene)
             ? { initialCondition: this.scene.fluid.initialCondition,
               fillFraction: this.scene.container.fillFraction,
               damBreakDimensions: this.scene.fluid.initialDamBreakDimensions_m
@@ -2923,6 +2928,7 @@ export class WebGPUOctreeProjection {
     const adaptiveInitialCellFractions = this.coarseOnlySurfaceTracking
       && (this.scene.fluid.initialBrickSeeds_m?.length ?? 0) > 0
       && !this.scene.fluid.initialBrickSeedsAdditive
+      && !sceneHasLiquidSpheres(this.scene)
       ? (() => {
         const values = new Float32Array(this.dims.nx * this.dims.ny * this.dims.nz);
         for (let z = 0; z < this.dims.nz; z += 1) {
@@ -8160,7 +8166,7 @@ export function initialOctreeLevelSet(
   // from binary occupancy, whose Euclidean transform rounds the very corners
   // used by the symmetry oracle before the first GPU command is submitted.
   if ((scene.fluid.initialBrickSeeds_m?.length ?? 0) > 0 && !sceneHasTerrain(scene)
-    && !scene.fluid.initialBrickSeedsAdditive) {
+    && !scene.fluid.initialBrickSeedsAdditive && !sceneHasLiquidSpheres(scene)) {
     const phi = new Float32Array(nx * ny * nz);
     for (let z = 0; z < nz; z += 1) for (let y = 0; y < ny; y += 1) for (let x = 0; x < nx; x += 1) {
       phi[x + nx * (y + ny * z)] = initialFluidBrickSignedDistanceAtCell(
@@ -8173,10 +8179,10 @@ export function initialOctreeLevelSet(
   const terrainHeights = terrainColumnHeights(scene, nx, nz);
   for (let z = 0; z < nz; z += 1) for (let y = 0; y < ny; y += 1) for (let x = 0; x < nx; x += 1) {
     const aboveGround = (y + 0.5) * cell.y > terrainHeights[x + nx * z];
-    const brickWet = initialFluidBrickContainsCell(scene, x, y, z, [nx, ny, nz]);
-    const wet = aboveGround && combineInitialBrickWet(scene, brickWet, scene.fluid.initialCondition === "dam-break"
-      ? damBreakBoxContains(dam, (x + 0.5) / nx, (y + 0.5) / ny, (z + 0.5) / nz)
-      : (y + 0.5) / ny <= scene.container.fillFraction);
+    const wet = aboveGround && initialLiquidContainsCell(scene, x, y, z, [nx, ny, nz],
+      scene.fluid.initialCondition === "dam-break"
+        ? damBreakBoxContains(dam, (x + 0.5) / nx, (y + 0.5) / ny, (z + 0.5) / nz)
+        : (y + 0.5) / ny <= scene.container.fillFraction);
     alpha[x + nx * (y + ny * z)] = wet ? 1 : 0;
   }
   return signedDistanceFromVolume(alpha, nx, ny, nz, cell);
@@ -8194,8 +8200,11 @@ export function initialOctreeNodalLevelSet(
 ): Float32Array | undefined {
   const seeded = (scene.fluid.initialBrickSeeds_m?.length ?? 0) > 0;
   const proceduralDam = !seeded && scene.fluid.initialCondition === "dam-break";
+  // A ball unions with the base condition, so neither branch below is the whole
+  // field once one is authored. Declining leaves the cell-centred rasterization,
+  // which is the same answer terrain and additive seeds already get.
   if ((!seeded && !proceduralDam) || sceneHasTerrain(scene)
-      || scene.fluid.initialBrickSeedsAdditive) return undefined;
+      || scene.fluid.initialBrickSeedsAdditive || sceneHasLiquidSpheres(scene)) return undefined;
   const { nx, ny, nz } = dims;
   const values = new Float32Array((nx + 1) * (ny + 1) * (nz + 1));
   for (let z = 0; z <= nz; z += 1) {

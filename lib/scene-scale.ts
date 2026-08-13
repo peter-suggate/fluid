@@ -100,6 +100,18 @@ export function repairSceneForContainer(scene: SceneDescription): SceneDescripti
     if (inside.length === 0) delete scene.fluid.initialBrickSeeds_m;
     else if (inside.length !== seeds.length) scene.fluid.initialBrickSeeds_m = inside;
   }
+  const spheres = scene.fluid.initialLiquidSpheres;
+  if (spheres) {
+    // validateScene only asks that the centre be inside; a ball clipped by a
+    // wall is as legal as an authored dam block in the corner.
+    for (const sphere of spheres) {
+      sphere.center_m = {
+        x: clamp(sphere.center_m.x, -c.width_m / 2, c.width_m / 2),
+        y: clamp(sphere.center_m.y, 0, c.height_m),
+        z: clamp(sphere.center_m.z, -c.depth_m / 2, c.depth_m / 2),
+      };
+    }
+  }
   const inflow = scene.fluid.inflow;
   if (inflow) {
     inflow.center_m = {
@@ -111,6 +123,17 @@ export function repairSceneForContainer(scene: SceneDescription): SceneDescripti
   // A ground plane at or above the ceiling leaves no container at all.
   if (scene.terrain && scene.terrain.baseHeight_m >= c.height_m) {
     scene.terrain.baseHeight_m = Math.max(0, c.height_m * 0.5);
+  }
+  const grid = scene.terrain?.grid;
+  if (grid && grid.heights_m.some((height) => !(height >= 0) || height > c.height_m)) {
+    // A ceiling that dropped below the ground truncates it; the alternative is
+    // an unloadable document. Rebuilt only when a sample is actually out of
+    // range, so the common repair leaves the array shared.
+    scene.terrain!.grid = {
+      ...grid,
+      heights_m: grid.heights_m.map((height) =>
+        Number.isFinite(height) ? clamp(height, 0, c.height_m) : 0),
+    };
   }
   return scene;
 }
@@ -134,6 +157,29 @@ function scaledScene(scene: SceneDescription, axis: SceneScaleAxis, factor: Scen
         min: scaleVec3(next.voxelDomain.bounds_m.min, factor),
         max: scaleVec3(next.voxelDomain.bounds_m.max, factor),
       };
+    }
+    // A baked terrain grid is metric through and through: where its samples
+    // sit, how far apart they are, and how high they stand are all lengths in
+    // the container's frame, so all three ride the scale together. A procedural
+    // terrain needs none of this — it is re-derived against the new container.
+    const grid = next.terrain?.grid;
+    if (grid) {
+      next.terrain!.grid = {
+        ...grid,
+        origin_m: { x: grid.origin_m.x * factor, z: grid.origin_m.z * factor },
+        spacing_m: grid.spacing_m * factor,
+        heights_m: grid.heights_m.map((height) => height * factor),
+      };
+    }
+    // Liquid spheres are absolute metres rather than container fractions, so
+    // unlike the box regions below they do not come back from the canonical
+    // layout. A ball is contents of the tank: it rides the world scale whole,
+    // keeping its share of the container and its radius in cells.
+    if (next.fluid.initialLiquidSpheres) {
+      next.fluid.initialLiquidSpheres = next.fluid.initialLiquidSpheres.map((sphere) => ({
+        center_m: scaleVec3(sphere.center_m, factor),
+        radius_m: sphere.radius_m * factor,
+      }));
     }
   } else {
     next.voxelDomain.finestCellSize_m = scene.voxelDomain.finestCellSize_m / factor;

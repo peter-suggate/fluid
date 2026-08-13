@@ -32,6 +32,10 @@ test("semi-Lagrangian velocity transport applies forces in its single pass", () 
   const body = shader.slice(start, shader.indexOf("@compute", start));
   assert.match(body, /advectVelocityComponent/);
   assert.match(body, /applyVelocityForces\(id,v,dt,h\)/);
+  assert.match(body, /v\.y=min\(v\.y,faceVelocity\(id\)\.y\)/,
+    "a positive closed wall must preserve velocity away from the solid before forces");
+  assert.doesNotMatch(body, /v\.y=faceVelocity\(id\)\.y/,
+    "restoring the old ceiling face after gravity pins released liquid to zero velocity");
 });
 
 test("bounded correction falls back outside donor bounds and applies forces once", () => {
@@ -56,6 +60,16 @@ test("released CM11a wall faces let backward density traces vacate the wall", ()
   assert.match(shader,
     /if\(direction<0\.0&&backwardTraceExitsReleasedFace\(candidate\)\)\{p=candidate;break;\}[\s\S]*let next=clampTraceToDomain\(candidate\)/,
     "the released departure must escape before ordinary contact-wall clamping");
+});
+
+test("sub-isovalue liquid keeps separating-wall force and velocity support", () => {
+  assert.match(shader, /let centerLiquid=occupancy>1e-5/);
+  assert.match(shader, /let yLiquid=yOccupancy>1e-5/);
+  const projectStart = shader.indexOf("fn project(@builtin");
+  const project = shader.slice(projectStart, shader.indexOf("// Moving-solid bookkeeping", projectStart));
+  assert.match(project,
+    /v\[axis\]=select\(solidVelocity,min\(v\[axis\],solidVelocity\),volume\(id\)>1e-5\)/,
+    "thin liquid must retain only the positive-wall velocity directed away from the solid");
 });
 
 test("hierarchy restriction keeps cell-centred fallback off horizontal MAC faces", () => {

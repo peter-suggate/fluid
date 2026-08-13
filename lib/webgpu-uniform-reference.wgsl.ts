@@ -537,25 +537,28 @@ fn traceGammaAndBeta(@builtin(global_invocation_id) gid:vec3u){
   let id=vec3i(gid);if(!valid(id)){return;}
   if(cellInsideSolid(id)){textureStore(gammaOut,id,vec4f(0.0));return;}
   let traced=backwardTraceOffset(id,params.dimsDt.w,params.cellGravity.xyz);let base=id+vec3i(floor(traced));let f=fract(traced);
-  // Keep the cumulative row-sum history inside the paper's published
-  // operating envelope (Table 1: 0.627..2.403 across every example). The
-  // scheme has no intrinsic bound: at a sustained stagnation impact the
-  // step-7 deficit deposits compound gamma geometrically (measured 14+ at
-  // the 64-cubed dam wall), and gamma multiplies the cell's density intake,
-  // so an unbounded gamma vacuums neighbouring mass and drives the
-  // excess-density divergence into a boiling jet. Clamping gamma is
-  // mass-neutral: beta is accumulated from this same clamped value, so the
-  // operator's row/column bookkeeping stays exactly conservative.
-  let advectedGamma=clamp(sampleGammaStencil(base,f),0.5,2.5);
-  textureStore(gammaOut,id,vec4f(advectedGamma));
   var total=0.0;
   for(var corner=0u;corner<8u;corner+=1u){total+=transportStencilWeight(base,f,corner);}
-  if(total<=1e-9){
-    if(advectedGamma>0.0){atomicAdd(&sharpenDeposits[linearIndex(id)],i32(round(advectedGamma*TRANSPORT_FIXED)));}
-    return;
-  }
+  // CM12 step 1 is an ordinary backward semi-Lagrangian sample of the
+  // cumulative row sum. In particular, a characteristic that leaves a
+  // released solid face sees the zero exterior extension. Giving that case a
+  // positive floor invents a backward coefficient at the wall and suppresses
+  // the forward remainder that is responsible for detaching the wall cell.
+  // The interior clamp is the existing large-CFL conditioning policy; it must
+  // never turn the exterior zero into a synthetic wall coefficient.
+  let sampledGamma=sampleGammaStencil(base,f);
+  // Preserve a partially exterior row instead of applying the interior floor
+  // or renormalizing its visible corners. Either operation turns the zero
+  // solid extension back into a self-sample and pins density to the wall.
+  let advectedGamma=select(min(sampledGamma,2.5),clamp(sampledGamma,0.5,2.5),total>=1.0-1e-6);
+  textureStore(gammaOut,id,vec4f(advectedGamma));
+  // No visible donor means there is no backward coefficient. Do not credit a
+  // synthetic self coefficient: the gather has no corresponding density
+  // term, and doing so prevents the donor's missing column weight from being
+  // returned by steps 6-7.
+  if(total<=1e-9){return;}
   for(var corner=0u;corner<8u;corner+=1u){
-    let offset=vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));let donor=base+offset;let weight=transportStencilWeight(base,f,corner)/total;
+    let offset=vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));let donor=base+offset;let weight=transportStencilWeight(base,f,corner);
     if(weight>0.0){atomicAdd(&sharpenDeposits[linearIndex(donor)],i32(round(advectedGamma*weight*TRANSPORT_FIXED)));}
   }
 }
@@ -598,8 +601,10 @@ fn gatherConservativeDensity(@builtin(global_invocation_id) gid:vec3u){
   for(var corner=0u;corner<8u;corner+=1u){
     let offset=vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));let donor=base+offset;
     if(total<=1e-9){break;}
-    let weight=transportStencilWeight(base,f,corner)/total;if(weight<=0.0){continue;}
-    let scaled=advectedGamma*weight/max(1.0,betaValue(donor));rhoNext+=scaled*volume(donor);gammaNext+=scaled;
+    let weight=transportStencilWeight(base,f,corner);if(weight<=0.0){continue;}
+    let scaled=advectedGamma*weight/max(1.0,betaValue(donor));rhoNext+=scaled*volume(donor);
+    // Step 5 publishes gamma-prime, the row sum of the conditioned operator.
+    gammaNext+=scaled;
   }
   let count=cellCount();let index=linearIndex(id);
   rhoNext+=f32(atomicLoad(&sharpenDeposits[count+index]))/TRANSPORT_FIXED;
@@ -607,15 +612,9 @@ fn gatherConservativeDensity(@builtin(global_invocation_id) gid:vec3u){
   // The prescribed inflow is a mass source external to the conservative
   // operator. It is bounded only by this cell's remaining surface density.
   rhoNext+=min(inflowReceiverSource(id,params.dimsDt.w),max(0.0,1.0-rhoNext));
-  // Gamma is the cumulative row-sum history of the conservative density
-  // operator; it is only meaningful where the operator moves mass. In dry
-  // cells the deficit scatter (step 7) can still deposit gamma every step --
-  // at a flow-convergent wall corner those deposits compound ahead of the
-  // liquid front (measured gamma of 18+ in air at the 64-cubed dam corner)
-  // and then multiply the arriving front's intake, piling rho far past 1 and
-  // saturating the Sec. 3.7 excess-density divergence into a boiling jet.
-  // A massless cell has no transported history: restart it at the paper's
-  // initial gamma of 1.
+  // Keep the established dry-air conditioning separate from the released
+  // wall case above. It cannot create a backward density coefficient because
+  // beta was already built from advectedGamma.
   if(rhoNext<1e-5){gammaNext=1.0;}
   textureStore(volumeOut,id,vec4f(max(rhoNext,0.0)));
   textureStore(gammaOut,id,vec4f(max(gammaNext,0.0)));
@@ -703,8 +702,10 @@ fn applyVelocityForces(id:vec3i,inputVelocity:vec3f,dt:f32,h:vec3f)->vec3f{
   // Body force lives on faces. A face participates whenever liquid exists on
   // either side; this is the same rule during impact and at equilibrium.
   let qy=id+vec3i(0,1,0);let yOccupancy=surfaceOccupancy(qy);
-  let centerLiquid=select(occupancy>=0.5,occupancy>0.5,levelSetAuthority());
-  let yLiquid=select(yOccupancy>=0.5,yOccupancy>0.5,levelSetAuthority());
+  // Sub-isovalue density is still physical liquid. Excluding it from gravity
+  // leaves a thin sheet with no way to separate from a ceiling.
+  let centerLiquid=occupancy>1e-5;
+  let yLiquid=yOccupancy>1e-5;
   if(centerLiquid||yLiquid){v.y+=params.cellGravity.w*dt;}
   let qx=id+vec3i(1,0,0);let qz=id+vec3i(0,0,1);
   let xOccupancy=surfaceOccupancy(qx);let zOccupancy=surfaceOccupancy(qz);
@@ -732,8 +733,15 @@ fn applyVelocityForces(id:vec3i,inputVelocity:vec3f,dt:f32,h:vec3f)->vec3f{
 @compute @workgroup_size(4,4,4)
 fn semiLagrangianAdvection(@builtin(global_invocation_id) gid:vec3u){
   let id=vec3i(gid);if(!valid(id)){return;}carryBoundaryVelocity(id);let dt=params.dimsDt.w;let h=params.cellGravity.xyz;let cell=vec3f(id);
-  var v=vec3f(advectVelocityComponent(cell+vec3f(1.0,0.5,0.5),0u,dt,h),advectVelocityComponent(cell+vec3f(0.5,1.0,0.5),1u,dt,h),advectVelocityComponent(cell+vec3f(0.5,0.5,1.0),2u,dt,h));v=applyVelocityForces(id,v,dt,h);
-  let d=dims();if(id.x==d.x-1){v.x=faceVelocity(id).x;}if(id.y==d.y-1&&params.boundary.w<=0.5){v.y=faceVelocity(id).y;}if(id.z==d.z-1){v.z=faceVelocity(id).z;}
+  var v=vec3f(advectVelocityComponent(cell+vec3f(1.0,0.5,0.5),0u,dt,h),advectVelocityComponent(cell+vec3f(0.5,1.0,0.5),1u,dt,h),advectVelocityComponent(cell+vec3f(0.5,0.5,1.0),2u,dt,h));
+  // A closed-face sample uses the solid-side zero extension. Preserve an old
+  // velocity directed away from a positive wall before adding this step's
+  // forces; projection below will clamp only the into-wall sign.
+  let d=dims();
+  if(id.x==d.x-1){v.x=min(v.x,faceVelocity(id).x);}
+  if(id.y==d.y-1&&params.boundary.w<=0.5){v.y=min(v.y,faceVelocity(id).y);}
+  if(id.z==d.z-1){v.z=min(v.z,faceVelocity(id).z);}
+  v=applyVelocityForces(id,v,dt,h);
   // Surface density is advanced by the dedicated Sec. 3.4 gamma/beta passes.
   textureStore(velocityOut,id,vec4f(v,0.0));textureStore(volumeOut,id,vec4f(volume(id),0.0,0.0,0.0));textureStore(pressureOut,id,vec4f(0.0));
 }
@@ -897,7 +905,12 @@ fn project(@builtin(global_invocation_id) gid: vec3u) {
           // A partially open solid face couples to the CM11a p_min=0 halo.
           v[axis]-=scale*(projectPressureValue(neighbor)-p0)/h[axis];
         }else{v[axis]=domainFaceSolidVelocity(id,axis,true);}
-      }else{v[axis]=0.0;}
+      }else{
+        // Thin density has no pressure row, but its boundary face still owns
+        // the separating inequality. On a positive wall, retain v<=u_s.
+        let solidVelocity=domainFaceSolidVelocity(id,axis,true);
+        v[axis]=select(solidVelocity,min(v[axis],solidVelocity),volume(id)>1e-5);
+      }
       continue;
     }
     let pressureFace=pressureFaceData(id,axis);let open=select(1.0,pressureFace.w,hasTerrain()||nearAnyBody(faceWorld(id,axis)));

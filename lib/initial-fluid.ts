@@ -1,4 +1,4 @@
-import type { SceneDescription, Vec3 } from "./model";
+import type { LiquidSphere, SceneDescription, Vec3 } from "./model";
 
 export interface DamBreakFractions {
   width: number;
@@ -79,6 +79,82 @@ export function sceneDamBreakIsOffsetFromCorner(scene: SceneDescription): boolea
   const origin = scene.fluid.initialDamBreakOrigin_m;
   if (!origin || !scene.fluid.initialDamBreakDimensions_m) return false;
   return Math.abs(origin.x) > 1e-9 || Math.abs(origin.y) > 1e-9 || Math.abs(origin.z) > 1e-9;
+}
+
+/**
+ * The authored balls of liquid, or nothing.
+ *
+ * A named accessor rather than `scene.fluid.initialLiquidSpheres ?? []` at each
+ * of the nine seeding sites, because "does this scene carry a shape the closed
+ * forms cannot express" is a question three GPU bootstrap gates ask and it must
+ * be answered the same way in all of them.
+ */
+export function sceneLiquidSpheres(scene: SceneDescription): readonly LiquidSphere[] {
+  return scene.fluid.initialLiquidSpheres ?? [];
+}
+
+export function sceneHasLiquidSpheres(scene: SceneDescription): boolean {
+  return sceneLiquidSpheres(scene).length > 0;
+}
+
+/** Whether a finest-cell centre lies inside any authored ball of liquid. */
+export function liquidSphereContainsCell(
+  scene: SceneDescription,
+  x: number,
+  y: number,
+  z: number,
+  dimensions: readonly [number, number, number],
+): boolean {
+  const spheres = sceneLiquidSpheres(scene);
+  if (spheres.length === 0) return false;
+  const c = scene.container;
+  const point = {
+    x: -0.5 * c.width_m + (x + 0.5) * c.width_m / dimensions[0],
+    y: (y + 0.5) * c.height_m / dimensions[1],
+    z: -0.5 * c.depth_m + (z + 0.5) * c.depth_m / dimensions[2],
+  };
+  return spheres.some((sphere) => Math.hypot(point.x - sphere.center_m.x,
+    point.y - sphere.center_m.y, point.z - sphere.center_m.z) <= sphere.radius_m);
+}
+
+/**
+ * Exact signed distance to the union of authored balls, in metres.
+ *
+ * Exact at any point rather than only on the lattice, which is what a sphere
+ * buys over the brick seeds beside it: `|p - c| - r` needs none of the integer
+ * bounds bookkeeping the box unions above do to keep their corners from being
+ * rounded before the first advance.
+ */
+export function liquidSphereSignedDistance(
+  scene: SceneDescription,
+  point: Vec3,
+): number | undefined {
+  const spheres = sceneLiquidSpheres(scene);
+  if (spheres.length === 0) return undefined;
+  return Math.min(...spheres.map((sphere) => Math.hypot(point.x - sphere.center_m.x,
+    point.y - sphere.center_m.y, point.z - sphere.center_m.z) - sphere.radius_m));
+}
+
+/**
+ * Resolves the whole t = 0 liquid occupancy at a finest cell.
+ *
+ * The base condition, the seeded bricks and the authored balls, in the one
+ * order every seeding site has to agree on: spheres union with whatever the
+ * brick/base resolution produced, because a ball is added to a scene rather
+ * than being the scene. The terrain gate stays with the caller — only the
+ * caller knows whether it holds a baked column table or a live sample.
+ */
+export function initialLiquidContainsCell(
+  scene: SceneDescription,
+  x: number,
+  y: number,
+  z: number,
+  dimensions: readonly [number, number, number],
+  baseWet: boolean,
+): boolean {
+  const brick = initialFluidBrickContainsCell(scene, x, y, z, dimensions);
+  return combineInitialBrickWet(scene, brick, baseWet)
+    || liquidSphereContainsCell(scene, x, y, z, dimensions);
 }
 
 export const INITIAL_FLUID_BRICK_SIZE = 8;

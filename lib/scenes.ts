@@ -1,6 +1,7 @@
 import { cloneScene, defaultCamera, defaultScene, DEFAULT_GPU_CPU_TIMESTEP_RATIO, type CameraState, type SceneDescription } from "./model";
 import { applyHeroGardenNodeOverrides } from "./hero-garden-overrides";
 import { createMassConservingFigure9DamBreak, createPaperScenario } from "./paper-scenarios";
+import { CM12_FIGURES, cm12Camera, cm12Grid, cm12MethodProfile, cm12Scene } from "./cm12-paper-scenes";
 import { applyGardenPool, GARDEN_DAM_BRICK_SEED_M, GARDEN_WATERLINE_M, gardenPoolTerrain } from "./garden-scene";
 import {
   createHeroGardenHoseScene,
@@ -1606,6 +1607,29 @@ export const SCENE_CATALOG: readonly SceneDefinition[] = Object.freeze([
     presentationMode: "full-scene",
     build: () => createPaperScenario("sphere-jet"),
     camera: paperCamera,
+  }),
+  // Chentanez & Muller 2012, every figure that is a simulation. Figure 4 is a
+  // 1D schematic of the sharpening scheme and Figure 10 is a plot, so neither
+  // is a scene. See lib/cm12-paper-scenes.ts for what each entry reproduces
+  // exactly and what it reconstructs.
+  ...CM12_FIGURES.map((figure) => {
+    const grid = cm12Grid(figure);
+    const twoDimensional = figure.grid[2] === undefined;
+    const published = twoDimensional
+      ? `${figure.grid[0]}\u00d7${figure.grid[1]} (2D, run as a ${grid[2]}-cell slab)`
+      : grid.join("\u00d7");
+    return defineScene({
+      id: figure.id,
+      name: `CM12 Figure ${figure.figure} \u00b7 ${figure.name}`,
+      blurb: `${figure.blurb} Published ${published} cells at dx=.05 m, dt=1/30 s, g=10 m/s\u00b2, D=2.1${
+        figure.cfl === undefined ? "" : `; CFL ${figure.cfl}`}.`,
+      audience: "study",
+      shelf: "CM12 paper figures",
+      environment: "default",
+      methodProfile: cm12MethodProfile(figure),
+      build: () => cm12Scene(figure.id),
+      camera: cm12Camera(cm12Scene(figure.id)),
+    });
   }),
   defineScene({
     id: "deep-water-ab",

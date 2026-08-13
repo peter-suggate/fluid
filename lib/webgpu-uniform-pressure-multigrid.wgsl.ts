@@ -57,9 +57,18 @@ fn mgD4Sum8Vec4(value:array<vec4f,8>)->vec4f{
   let y1=(value[2]+value[7])+(value[3]+value[6]);
   return y0+y1;
 }
+// The map from a coarse cell to one of its fine children. A semi-coarsened
+// level has a stride of 1 on any axis that did not halve, and there both child
+// offsets land on the same fine cell: the eight-tap folds above then average
+// four distinct cells at weight 2/8 each, which is the correct restriction, and
+// the max-folds are unaffected by seeing a cell twice. Nothing downstream has
+// to know whether an axis coarsened. Multiplying o by (stride-1) is that
+// collapse: it is o at stride 2 and 0 at stride 1.
 fn mgFineChild(coarse:vec3i,o:vec3i)->vec3i{
   let finePhysical=vec3i(mg.levelDims.xyz)-vec3i(2);
-  return clamp(2*(coarse-vec3i(1))+o,vec3i(-1),finePhysical)+vec3i(1);
+  let coarsePhysical=max(vec3i(mg.coarseDims.xyz)-vec3i(2),vec3i(1));
+  let stride=max(finePhysical/coarsePhysical,vec3i(1));
+  return clamp(stride*(coarse-vec3i(1))+o*(stride-vec3i(1)),vec3i(-1),finePhysical)+vec3i(1);
 }
 fn mgTopology(p:vec3i)->vec4f{return textureLoad(mgVolumeIn,mgClamp(p,mg.levelDims.xyz),0);}
 fn mgPhi(p:vec3i)->f32{return textureLoad(mgPhiIn,mgClamp(p,mg.levelDims.xyz),0).x;}
@@ -200,7 +209,15 @@ fn mgRestrictResidual(@builtin(global_invocation_id) gid:vec3u){
 }
 
 fn mgTrilinearPressure(fineId:vec3i)->f32{
-  let q=(vec3f(fineId)-vec3f(0.5))*0.5+vec3f(0.5);let base=vec3i(floor(q));let f=fract(q);
+  // Prolongation reads the coarse level (levelDims) into the fine one
+  // (coarseDims), so the per-axis scale is the inverse of mgFineChild's
+  // stride. An axis that did not coarsen scales by 1, which lands q on an
+  // exact integer: fract is then 0 and that axis's far weight collapses to
+  // zero, degenerating the trilinear tap into the bilinear one it should be.
+  let finePhysical=vec3f(vec3i(mg.coarseDims.xyz)-vec3i(2));
+  let coarsePhysical=vec3f(vec3i(mg.levelDims.xyz)-vec3i(2));
+  let scale=coarsePhysical/max(finePhysical,vec3f(1.0));
+  let q=(vec3f(fineId)-vec3f(0.5))*scale+vec3f(0.5);let base=vec3i(floor(q));let f=fract(q);
   var values:array<f32,8>;var weights:array<f32,8>;
   for(var corner=0u;corner<8u;corner+=1u){
     let o=vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));
