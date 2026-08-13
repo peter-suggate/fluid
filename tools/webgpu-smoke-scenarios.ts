@@ -76,6 +76,8 @@ export interface ScalarFieldSummary {
   interfaceFaceCount: number;
   enclosedAirComponentCount: number;
   enclosedAirCells: number;
+  wetBounds: { minimum: { x: number; y: number; z: number };
+    maximum: { x: number; y: number; z: number } } | null;
   centroidCells: { x: number; y: number; z: number } | null;
 }
 
@@ -84,6 +86,8 @@ export function summarizeScalarField(field: ArrayLike<number>, nx: number, ny: n
   const index = (x: number, y: number, z: number) => x + nx * (y + ny * z);
   let minimum = Infinity, maximum = -Infinity, maximumCell: ScalarFieldSummary["maximumCell"] = null;
   let cellSum = 0, wetCells = 0, mixedCells = 0, excessCells = 0;
+  let wetMinimumX = nx, wetMinimumY = ny, wetMinimumZ = nz;
+  let wetMaximumX = -1, wetMaximumY = -1, wetMaximumZ = -1;
   let weightedX = 0, weightedY = 0, weightedZ = 0;
   const columnAmounts = new Float64Array(nx * nz);
   for (let z = 0; z < nz; z += 1) for (let y = 0; y < ny; y += 1) for (let x = 0; x < nx; x += 1) {
@@ -92,7 +96,12 @@ export function summarizeScalarField(field: ArrayLike<number>, nx: number, ny: n
     if (value > maximum) { maximum = value; maximumCell = { x, y, z }; }
     cellSum += value;
     weightedX += value * (x + 0.5); weightedY += value * (y + 0.5); weightedZ += value * (z + 0.5);
-    if (value >= 0.5) wetCells += 1;
+    if (value >= 0.5) {
+      wetCells += 1;
+      wetMinimumX = Math.min(wetMinimumX, x); wetMaximumX = Math.max(wetMaximumX, x);
+      wetMinimumY = Math.min(wetMinimumY, y); wetMaximumY = Math.max(wetMaximumY, y);
+      wetMinimumZ = Math.min(wetMinimumZ, z); wetMaximumZ = Math.max(wetMaximumZ, z);
+    }
     if (value > 0.001 && value < 0.999) mixedCells += 1;
     if (value > 1.001) excessCells += 1;
     columnAmounts[x + nx * z] += value;
@@ -161,6 +170,10 @@ export function summarizeScalarField(field: ArrayLike<number>, nx: number, ny: n
   return {
     minimum, maximum, maximumCell, cellSum, wetCells, mixedCells, excessCells, meanColumnAmount, columnAmountStdDev,
     componentCount, largestComponent, interfaceFaceCount, enclosedAirComponentCount, enclosedAirCells,
+    wetBounds: wetCells > 0 ? {
+      minimum: { x: wetMinimumX, y: wetMinimumY, z: wetMinimumZ },
+      maximum: { x: wetMaximumX, y: wetMaximumY, z: wetMaximumZ },
+    } : null,
     centroidCells: cellSum > 0 ? { x: weightedX / cellSum, y: weightedY / cellSum, z: weightedZ / cellSum } : null
   };
 }

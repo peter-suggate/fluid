@@ -45,6 +45,12 @@ import { sceneCanopyPads } from "@/lib/tree-canopy-controls";
 import { vesselNameFromSelection } from "@/lib/editor-vessel-rim";
 import { createInflowAt, INFLOW_SELECTION_ID } from "@/lib/editor-inflow";
 import {
+  addFluidBall,
+  defaultFluidBallRadius_m,
+  fluidBallDropAllowedAt,
+  fluidDropVolume,
+} from "@/lib/editor-fluid-volume";
+import {
   fillFractionForHeight,
   fillLevelHandlePosition,
   fluidBrushSample,
@@ -220,6 +226,11 @@ export function WebGPUViewport() {
   // Subscribed, so a gizmo drawn around a body follows it while it moves.
   const bodyPoses = useDiagnosticsStore((state) => state.bodyPoses);
   const [hover, setHover] = useState<EditorHover | null>(null);
+  // The ball a drop gesture is currently proposing. Held as state rather than
+  // read off the draft because the water it describes is not drawn until the
+  // release re-seeds the solver: without this the whole drag would be invisible,
+  // and the radius the gesture exists to choose would be chosen blind.
+  const [ballDrop, setBallDrop] = useState<{ centre_m: Vec3; radius_m: number } | null>(null);
   /** Handle under the pointer, so it can announce what it does before the press. */
   const [handleHover, setHandleHover] = useState<{
     handleId: string;
@@ -651,6 +662,13 @@ export function WebGPUViewport() {
     // every sample of the drag revises the same region instead of appending one
     // per pointer-move.
     | { id: number; action: "region-draw"; anchor: Vec3; regionId: string }
+    // A ball being dropped. `anchor` is the point under the press — the ball
+    // rests on it and its surface passes through it — and `hover` is the
+    // surface that anchor came from, kept so the ball can be re-rested as it
+    // grows instead of sinking into the floor it was dropped on. `moved` is
+    // what separates the two gestures this tool has: a click drops a default
+    // ball, a drag sizes one.
+    | { id: number; action: "fluid-ball"; anchor: Vec3; hover?: EditorHover; downX: number; downY: number; moved: boolean; radius_m: number; selectionId: string }
     | { id: number; action: "fill-level" }
     // One arm for every editable thing. `entity` is the entity as it stood when
     // the gesture opened, resolved against the committed scene: re-resolving it
@@ -716,6 +734,20 @@ export function WebGPUViewport() {
   // between a constraint and a gesture that looks broken.
   const heldHandle = handleDrag && heldEntity?.handles.find((handle) => handle.id === handleDrag.handleId);
   const heldAxes = heldHandle && constrainedAxes(heldHandle.axes, axisConstraint);
+  // The ball being dropped, as a circle on the glass: its centre projected, and
+  // its radius scaled by the same perspective divide every gizmo arm uses, so
+  // the circle is the ball's own silhouette rather than a fixed-size cursor.
+  const ballDropCircle = (() => {
+    if (!ballDrop) return undefined;
+    const projection = projectToViewport(ballDrop.centre_m, camera, viewportSize.width, viewportSize.height);
+    if (!(projection.depth_m > 1e-6)) return undefined;
+    return {
+      x: projection.leftFraction * viewportSize.width,
+      y: projection.topFraction * viewportSize.height,
+      radius_px: ballDrop.radius_m * viewportSize.height
+        / (2 * projection.depth_m * cameraTanHalfFov(camera)),
+    };
+  })();
   // The fill handle belongs to the brush, which `fluidToolArmed` already gates.
   const fillHandle = fluidToolArmed && scene.fluid.initialCondition === "tank-fill"
     ? projectToViewport(fillLevelHandlePosition(scene), camera, viewportSize.width, viewportSize.height)
@@ -1489,6 +1521,111 @@ export function WebGPUViewport() {
     updateRegionDraft(anchor, anchor, regionId);
   };
 
+  /**
+   * Where a dropped ball's centre goes: resting on the surface under the press,
+   * or on the camera-facing plane when the press met nothing.
+   *
+   * Re-evaluated at every radius rather than fixed at the press, so growing the
+   * ball lifts it off the floor instead of burying half of it.
+   */
+  const fluidBallCentre = (anchor: Vec3, hover: EditorHover | undefined, radius_m: number) =>
+    hover ? restOnHover(hover, radius_m, useSceneStore.getState().scene) : anchor;
+
+  /**
+   * Revise the ball being dropped, as a draft over the committed document.
+   *
+   * Rebuilt from the committed scene at every sample rather than edited in
+   * place, which is what keeps the ball's index — and so the selection the
+   * release makes — the same for the whole gesture. Same commit-on-release
+   * contract as the brushes: authoring one ball per pointer-move would spend a
+   * re-seed on each of them.
+   */
+  const updateFluidBallDraft = (anchor: Vec3, hover: EditorHover | undefined, radius_m: number) => {
+    const committed = useSceneStore.getState().scene;
+    const centre = fluidBallCentre(anchor, hover, radius_m);
+    useSceneDraftStore.getState().updateDraft({ fluid: addFluidBall(committed, centre, radius_m).fluid });
+    setBallDrop({ centre_m: centre, radius_m });
+  };
+
+  /**
+   * Open a ball drop on whatever the press is over.
+   *
+   * The ball is already in the draft before the pointer moves, so a plain click
+   * is a complete gesture and a drag is the same gesture continued.
+   */
+  const beginFluidBallDrop = (event: React.PointerEvent<HTMLCanvasElement>, ray: { origin: Vec3; direction: Vec3 }) => {
+    const scene = useSceneStore.getState().scene;
+    const hover = hoverSceneAt(scene, drawnBodies(), ray);
+    const anchor = hover?.position_m ?? planeHit(ray.origin, ray.direction,
+      { x: 0, y: scene.container.height_m / 2, z: 0 }, cameraBasis(useUIStore.getState().camera).forward);
+    // A press outside the tank is not a drop at all: it falls through to the
+    // camera, the same as a press on the background under any other tool.
+    if (!fluidBallDropAllowedAt(scene, anchor)) return;
+    const radius_m = defaultFluidBallRadius_m(scene);
+    simulation.beginDraft("fluid-body", "Dropped a ball of water");
+    pointerRef.current = {
+      id: event.pointerId, action: "fluid-ball", anchor, hover,
+      downX: event.clientX, downY: event.clientY, moved: false, radius_m,
+      selectionId: addFluidBall(scene, anchor, radius_m).id,
+    };
+    updateFluidBallDraft(anchor, hover, radius_m);
+  };
+
+  /**
+   * Land a dropped ball, as whichever of the two things it is.
+   *
+   * Before the clock has moved, a ball *is* part of the initial condition: it
+   * goes into the document, where it is selectable, undoable and saved with the
+   * scene, and the seed it changes costs nothing because there is no run yet to
+   * lose. Once the clock has moved it is an event instead — water arriving in a
+   * world that already exists — so it goes straight into the live field and the
+   * document keeps describing the t = 0 the run actually started from. Writing
+   * it to the document there would re-seed, which is to say it would delete the
+   * simulation the user was adding water to.
+   *
+   * A method with no injection falls back to authoring it, because a re-seeded
+   * run is a worse answer than a live drop but a much better one than a gesture
+   * that quietly did nothing.
+   */
+  const finishFluidBallDrop = async (active: {
+    anchor: Vec3; hover?: EditorHover; radius_m: number; selectionId: string;
+  }) => {
+    const authored = () => {
+      simulation.commitDraft();
+      useUIStore.getState().select({ kind: "fluid-body", id: active.selectionId });
+    };
+    if (simulation.time() <= 0) { authored(); return; }
+    // The same shape the draft authored, so a drop into a running 2D case is
+    // the disk that scene's water is and not a ball floating inside its slab.
+    const drop = fluidDropVolume(scene, fluidBallCentre(active.anchor, active.hover, active.radius_m),
+      active.radius_m);
+    const taken = await rendererRef.current?.injectLiquidBall({
+      centre_m: drop.center_m,
+      radius_m: drop.radius_m,
+      ...(drop.shape === "cylinder" ? { halfHeight_m: drop.halfHeight_m } : {}),
+    });
+    if (!taken) { authored(); return; }
+    // Nothing to record: the document did not change, and the water is now part
+    // of the field like every other litre in it.
+    simulation.cancelDraft();
+    useRuntimeStore.getState().setNotice("Dropped a ball of water into the running solve");
+  };
+
+  /**
+   * The radius a drag is asking for: how far the pointer has travelled from the
+   * press, resolved on the camera-facing plane through it.
+   *
+   * Which puts the pointer *on* the ball rather than near it — the ball rests on
+   * the anchor, so its surface passes through both the anchor and, at exactly
+   * this radius, the point being dragged to.
+   */
+  const fluidBallDragRadius = (active: { anchor: Vec3 }, ray: { origin: Vec3; direction: Vec3 }) => {
+    const point = planeHit(ray.origin, ray.direction, active.anchor,
+      cameraBasis(useUIStore.getState().camera).forward);
+    const reach = length(sub(point, active.anchor));
+    return Number.isFinite(reach) ? reach : undefined;
+  };
+
   /** Drop the armed placement shape onto whatever the cursor is over. */
   const placeBodyAt = (ray: { origin: Vec3; direction: Vec3 }) => {
     const ui = useUIStore.getState();
@@ -1606,6 +1743,7 @@ export function WebGPUViewport() {
           return;
         }
         if (beginFillLevelDrag(event)) return;
+        if (useUIStore.getState().activeTool === "fluid-ball") { beginFluidBallDrop(event, ray); return; }
         const paintTool = useUIStore.getState().activeTool;
         if (paintTool === "fluid-paint" || paintTool === "fluid-erase") {
           const erase = paintTool === "fluid-erase";
@@ -1749,6 +1887,15 @@ export function WebGPUViewport() {
         planeHit(ray.origin, ray.direction, active.anchor, { x: 0, y: 1, z: 0 }), active.regionId);
       return;
     }
+    if (active.action === "fluid-ball") {
+      const moved = active.moved
+        || Math.hypot(event.clientX - active.downX, event.clientY - active.downY) > CLICK_SLOP_PX;
+      if (!moved) return;
+      const radius_m = fluidBallDragRadius(active, pointerRay(event));
+      pointerRef.current = { ...active, moved, radius_m: radius_m ?? active.radius_m };
+      if (radius_m !== undefined) updateFluidBallDraft(active.anchor, active.hover, radius_m);
+      return;
+    }
     if (active.action === "entity-handle") {
       const ray = pointerRay(event);
       pointerRef.current = { ...active, lastRay: ray };
@@ -1882,6 +2029,12 @@ export function WebGPUViewport() {
       simulation.commitDraft();
       return;
     }
+    if (active.action === "fluid-ball") {
+      setBallDrop(null);
+      if (cancelled) { simulation.cancelDraft(); return; }
+      void finishFluidBallDrop(active);
+      return;
+    }
     // The new box becomes the selection, so its flyout — where the box says
     // what it means and how coarse it may go — is open the moment it exists.
     //
@@ -2002,6 +2155,16 @@ export function WebGPUViewport() {
             y2={region.corners[to]!.topFraction * viewportSize.height}
           />
         )))}
+    </svg>}
+    {ballDropCircle && <svg
+      className="editor-gizmo editor-ball-gizmo"
+      data-testid="editor-ball-gizmo"
+      width={viewportSize.width}
+      height={viewportSize.height}
+      aria-hidden="true"
+    >
+      <circle className="ball-drop" cx={ballDropCircle.x} cy={ballDropCircle.y} r={Math.max(2, ballDropCircle.radius_px)} />
+      <circle className="ball-drop-centre" cx={ballDropCircle.x} cy={ballDropCircle.y} r={2.5} />
     </svg>}
     {entityGizmos.length > 0 && <svg
       className="editor-gizmo editor-entity-gizmo"

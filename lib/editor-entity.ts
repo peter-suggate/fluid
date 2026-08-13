@@ -339,6 +339,25 @@ export function pickSolidBox(ray: EditorRay, box: BoxExtent): number | undefined
   return t > 0 ? t : undefined;
 }
 
+/**
+ * Where a ray first meets a solid sphere, from outside or from within it.
+ *
+ * The balls of liquid are the only entities whose bounding box is a poor stand-in
+ * for their surface: a box pick around one would claim the corners, and the
+ * corner of a ball's box is the empty air a click there is trying to reach past.
+ */
+export function pickSolidSphere(ray: EditorRay, centre_m: Vec3, radius_m: number): number | undefined {
+  const offset = { x: ray.origin.x - centre_m.x, y: ray.origin.y - centre_m.y, z: ray.origin.z - centre_m.z };
+  const along = offset.x * ray.direction.x + offset.y * ray.direction.y + offset.z * ray.direction.z;
+  const discriminant = along * along
+    - (offset.x * offset.x + offset.y * offset.y + offset.z * offset.z - radius_m * radius_m);
+  if (discriminant < 0) return undefined;
+  const root = Math.sqrt(discriminant);
+  const near = -along - root, far = -along + root;
+  const t = near > 0 ? near : far;
+  return t > 0 ? t : undefined;
+}
+
 /** Where a ray meets the inside of a room: the far wall, which is the visible one. */
 export function pickRoomInterior(ray: EditorRay, box: BoxExtent): number | undefined {
   const span = intersectBox(ray, box);

@@ -1633,3 +1633,8 @@ button:hover .iso-water-side { fill-opacity: .26; }
 .transport-resource-state i { flex: none; width: 7px; height: 7px; border: 1px solid rgba(131,241,209,.35); border-top-color: var(--accent); border-radius: 50%; animation: gpu-build-spin .8s linear infinite; }
 .transport-resource-state strong { overflow: hidden; color: var(--accent); font: 650 8px/1 var(--mono); letter-spacing: .04em; text-overflow: ellipsis; white-space: nowrap; }
 .transport-resource-state small { flex: none; color: var(--muted); font: 8px/1 var(--mono); font-variant-numeric: tabular-nums; }
+
+/* The ball a BALL drop is proposing: its silhouette on the glass, dashed like
+   every other outline that is a proposal rather than a published surface. */
+.editor-ball-gizmo .ball-drop { fill: rgba(124,182,255,.16); stroke: rgba(124,182,255,.9); stroke-width: 1.2; stroke-dasharray: 4 3; }
+.editor-ball-gizmo .ball-drop-centre { fill: #9dc6ff; stroke: #dceaff; }

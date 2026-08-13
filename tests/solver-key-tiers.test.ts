@@ -62,6 +62,7 @@ test("each authoring input reaches exactly the tiers that must answer it", () =>
     },
     { label: "container top", tiers: ["structural"], mutate: (scene) => { scene.container.top = scene.container.top === "open" ? "closed" : "open"; } },
     { label: "wall mode", tiers: ["structural"], mutate: (scene) => { scene.container.fluidWallMode = scene.container.fluidWallMode === "no-slip" ? "free-slip" : "no-slip"; } },
+    { label: "depth boundary", tiers: ["structural"], mutate: (scene) => { scene.container.depthBoundary = "symmetry"; } },
     { label: "voxel domain", tiers: ["structural"], mutate: (scene) => { scene.voxelDomain.finestCellSize_m *= 0.5; } },
     { label: "fill fraction", tiers: ["seed"], mutate: (scene) => { scene.container.fillFraction = 0.5 * (scene.container.fillFraction + 1); } },
     // Emptying the roster crosses the one boundary that is genuinely
@@ -71,6 +72,9 @@ test("each authoring input reaches exactly the tiers that must answer it", () =>
     { label: "dam origin", tiers: ["seed"], mutate: (scene) => { scene.fluid.initialDamBreakOrigin_m = { x: 0.1, y: 0, z: 0 }; } },
     { label: "brick seeds", tiers: ["seed"], mutate: (scene) => { scene.fluid.initialBrickSeeds_m = [{ x: 0, y: 0.1, z: 0 }]; } },
     { label: "seed additivity", tiers: ["seed"], mutate: (scene) => { scene.fluid.initialBrickSeedsAdditive = true; } },
+    { label: "analytic liquid volume", tiers: ["seed"], mutate: (scene) => {
+      scene.fluid.initialLiquidVolumes = [{ shape: "sphere", center_m: { x: 0, y: 0.5, z: 0 }, radius_m: 0.1 }];
+    } },
     { label: "terrain", tiers: ["seed"], mutate: (scene) => { scene.terrain = { baseHeight_m: 0.1, features: [] }; } },
     { label: "density", tiers: ["uniform"], mutate: (scene) => { scene.fluid.density_kg_m3 += 10; } },
     { label: "viscosity", tiers: ["uniform"], mutate: (scene) => { scene.fluid.dynamicViscosity_Pa_s += 0.01; } },
@@ -246,7 +250,7 @@ test("a seed-tier change re-seeds the live solver instead of rebuilding it", () 
   const projection = readFileSync(new URL("../lib/webgpu-octree.ts", import.meta.url), "utf8");
   const surface = readFileSync(new URL("../lib/webgpu-quadtree-builder.ts", import.meta.url), "utf8");
 
-  assert.match(renderer, /tryReseedGPUFluid\(scene,config,key\)\)return undefined/,
+  assert.match(renderer, /tryReseedGPUFluid\(scene,config,key,presentationMode\)\)return undefined/,
     "the warm path must be attempted before beginGPUFluidInitialization");
   assert.match(renderer, /gpuSceneStructuralKey\(scene,config\)!==this\.attachedStructuralKey\)return false/,
     "a structural change must never be answered by a re-seed");

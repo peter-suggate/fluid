@@ -88,6 +88,8 @@ export interface SceneDescription {
     fillFraction: number;
     top: "open" | "closed";
     fluidWallMode: "free-slip" | "no-slip";
+    /** Use the depth faces as 2D symmetry planes instead of physical walls. */
+    depthBoundary?: "closed" | "symmetry";
     /**
      * Shape of the physical boundary. Omitted preserves the rectangular tank.
      * A spherical boundary is the largest sphere contained by the three
@@ -259,7 +261,7 @@ export interface FluidRefinementRegion {
 }
 
 /** A world-space analytic liquid volume present at t = 0. */
-export type InitialLiquidVolume = InitialLiquidBox | InitialLiquidSphere | InitialLiquidHemisphere;
+export type InitialLiquidVolume = InitialLiquidBox | InitialLiquidSphere | InitialLiquidHemisphere | InitialLiquidCylinder;
 
 export interface InitialLiquidBox {
   shape: "box";
@@ -282,6 +284,14 @@ export interface InitialLiquidHemisphere {
    * `dot(point - center, outwardNormal) <= 0`.
    */
   outwardNormal: Vec3;
+}
+
+/** A finite cylinder aligned with the world z axis. */
+export interface InitialLiquidCylinder {
+  shape: "cylinder";
+  center_m: Vec3;
+  radius_m: number;
+  halfHeight_m: number;
 }
 
 export interface FluidInflow {
@@ -472,6 +482,9 @@ export function validateScene(scene: SceneDescription): string[] {
   if (c?.shape === "sphere" && c.top !== "closed") errors.push("A spherical container must be closed");
   if (!c || c.fillFraction < 0 || c.fillFraction > 1) errors.push("Fill fraction must be in [0, 1]");
   if (!c || !["free-slip", "no-slip"].includes(c.fluidWallMode)) errors.push("Unsupported fluid wall mode");
+  if (c?.depthBoundary !== undefined && c.depthBoundary !== "closed" && c.depthBoundary !== "symmetry") {
+    errors.push("Unsupported depth boundary");
+  }
   const voxelDomain = scene.voxelDomain;
   if (!voxelDomain || !Number.isFinite(voxelDomain.finestCellSize_m) || !(voxelDomain.finestCellSize_m > 0)) errors.push("Voxel finest cell size must be positive and finite");
   if (!voxelDomain || (voxelDomain.brickSize_cells !== 4 && voxelDomain.brickSize_cells !== 8)) errors.push("Voxel brick size must be 4 or 8 cells");
@@ -553,7 +566,7 @@ export function validateScene(scene: SceneDescription): string[] {
     const volumes = scene.fluid.initialLiquidVolumes;
     if (!Array.isArray(volumes) || volumes.length === 0) errors.push("Initial liquid volumes must be a non-empty array");
     else for (const [index, volume] of volumes.entries()) {
-      if (!volume || !["box", "sphere", "hemisphere"].includes(volume.shape)) {
+      if (!volume || !["box", "sphere", "hemisphere", "cylinder"].includes(volume.shape)) {
         errors.push(`Initial liquid volume ${index} has an unsupported shape`);
         continue;
       }
@@ -573,6 +586,9 @@ export function validateScene(scene: SceneDescription): string[] {
       const centre = volume.center_m;
       if (![centre?.x, centre?.y, centre?.z].every(Number.isFinite)) errors.push(`Initial liquid ${volume.shape} ${index} centre must be finite`);
       else if (!(volume.radius_m > 0) || !Number.isFinite(volume.radius_m)) errors.push(`Initial liquid ${volume.shape} ${index} radius must be positive and finite`);
+      else if (volume.shape === "cylinder" && (!(volume.halfHeight_m > 0) || !Number.isFinite(volume.halfHeight_m))) {
+        errors.push(`Initial liquid cylinder ${index} half-height must be positive and finite`);
+      }
       else if (centre.x < -c.width_m / 2 || centre.x > c.width_m / 2 || centre.y < 0 || centre.y > c.height_m
         || centre.z < -c.depth_m / 2 || centre.z > c.depth_m / 2) {
         errors.push(`Initial liquid ${volume.shape} ${index} centre must be inside the container`);

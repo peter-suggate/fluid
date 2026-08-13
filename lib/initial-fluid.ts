@@ -104,6 +104,9 @@ export function initialLiquidVolumeContainsPoint(volume: InitialLiquidVolume, po
   const dx = point.x - volume.center_m.x;
   const dy = point.y - volume.center_m.y;
   const dz = point.z - volume.center_m.z;
+  if (volume.shape === "cylinder") {
+    return Math.hypot(dx, dy) <= volume.radius_m && Math.abs(dz) <= volume.halfHeight_m;
+  }
   if (Math.hypot(dx, dy, dz) > volume.radius_m) return false;
   if (volume.shape === "sphere") return true;
   const normal = normalizedNormal(volume.outwardNormal);
@@ -127,6 +130,11 @@ export function initialLiquidVolumeSignedDistance(volume: InitialLiquidVolume, p
     y: point.y - volume.center_m.y,
     z: point.z - volume.center_m.z,
   };
+  if (volume.shape === "cylinder") {
+    const radial = Math.hypot(delta.x, delta.y) - volume.radius_m;
+    const axial = Math.abs(delta.z) - volume.halfHeight_m;
+    return Math.hypot(Math.max(radial, 0), Math.max(axial, 0)) + Math.min(Math.max(radial, axial), 0);
+  }
   const sphere = Math.hypot(delta.x, delta.y, delta.z) - volume.radius_m;
   if (volume.shape === "sphere") return sphere;
   const normal = normalizedNormal(volume.outwardNormal);

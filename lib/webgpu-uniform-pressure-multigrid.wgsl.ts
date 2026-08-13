@@ -185,7 +185,7 @@ fn mgDownsampleTopology(@builtin(global_invocation_id) gid:vec3u){
   if(!hasSphericalContainer()){
     if(id.x==i32(mg.coarseDims.x)-2){topology.y=0.5;}
     if(id.y==i32(mg.coarseDims.y)-2){topology.z=select(0.5,1.0,params.boundary.w>0.5);}
-    if(id.z==i32(mg.coarseDims.z)-2){topology.w=0.5;}
+    if(id.z==i32(mg.coarseDims.z)-2){topology.w=select(0.5,0.0,depthSymmetry());}
   }
   textureStore(mgVolumeOut,id,topology);textureStore(mgPhiOut,id,vec4f(coarsePhi));
 }
@@ -327,7 +327,8 @@ fn mgSmoothColour(@builtin(global_invocation_id) gid:vec3u){
   // (neighbour sums are mgLiquid-gated and an update never reads its own old
   // value), so projecting here leaves every sweep-exit value identical to the
   // former trailing mgProjectMinimum pass while deleting that pass outright.
-  if(coarseDone||!mgBakedLiquid(id)||u32((id.x+id.y+id.z)&1)!=mg.control.z){textureStore(mgPressureOut,id,vec4f(max(old,textureLoad(mgMinimumIn,id,0).x)));return;}
+  let colour=u32((id.x+id.y+select(id.z,0,depthSymmetry()))&1);
+  if(coarseDone||!mgBakedLiquid(id)||colour!=mg.control.z){textureStore(mgPressureOut,id,vec4f(max(old,textureLoad(mgMinimumIn,id,0).x)));return;}
   let e=array<vec3i,6>(vec3i(-1,0,0),vec3i(1,0,0),vec3i(0,-1,0),vec3i(0,1,0),vec3i(0,0,-1),vec3i(0,0,1));
   var diagonalTerms:array<f32,6>;var sumTerms:array<f32,6>;
   for(var n=0;n<6;n+=1){let q=id+e[n];let a=mgCoefficient(id,q,u32(n/2));diagonalTerms[n]=a;sumTerms[n]=select(0.0,a*mgP(q),mgBakedLiquid(q));}

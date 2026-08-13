@@ -91,6 +91,10 @@ const internal = solver as unknown as {
     densityAdvection: GPUTexture;
     densityDiffusion: GPUTexture;
     densitySharpening: GPUTexture;
+    preExtrapolationVelocity: GPUTexture;
+    velocityPrediction: GPUTexture;
+    velocityAdvection: GPUTexture;
+    pressureProjection: GPUTexture;
   };
   symmetryStageAuditNegativeBoundaryVelocity?: GPUBuffer;
   negativeBoundaryVelocityBytes?: number;
@@ -137,6 +141,57 @@ const at = (field: Float32Array, x: number, y: number, z: number, components = 1
   field[components * (x + nx * (y + ny * z)) + component]!;
 
 const format = (value: number) => value.toFixed(2).padStart(6);
+
+const depthVariation = (field: Float32Array, components: number,
+  includedComponents = Array.from({ length: components }, (_, component) => component)) => {
+  const referenceZ = nz >> 1;
+  let maximumAbsolute = 0, sumAbsolute = 0, samples = 0;
+  for (let z = 0; z < nz; z += 1) for (let y = 0; y < ny; y += 1) {
+    for (let x = 0; x < nx; x += 1) for (const component of includedComponents) {
+      const difference = Math.abs(at(field, x, y, z, components, component)
+        - at(field, x, y, referenceZ, components, component));
+      maximumAbsolute = Math.max(maximumAbsolute, difference);
+      sumAbsolute += difference;
+      samples += 1;
+    }
+  }
+  return { max: Number(maximumAbsolute.toExponential(3)),
+    mean: Number((sumAbsolute / Math.max(samples, 1)).toExponential(3)) };
+};
+
+const wetComponents = (field: Float32Array) => {
+  const visited = new Uint8Array(nx * ny * nz);
+  const stack = new Int32Array(visited.length);
+  const result: Array<Record<string, unknown>> = [];
+  for (let seed = 0; seed < field.length; seed += 1) {
+    if (visited[seed] || field[seed]! < 0.5) continue;
+    let head = 0, tail = 0, cells = 0, mass = 0;
+    let minX = nx, minY = ny, minZ = nz, maxX = -1, maxY = -1, maxZ = -1;
+    visited[seed] = 1; stack[tail++] = seed;
+    while (head < tail) {
+      const cell = stack[head++]!;
+      const x = cell % nx, yz = Math.floor(cell / nx);
+      const y = yz % ny, z = Math.floor(yz / ny);
+      cells += 1; mass += field[cell]!;
+      minX = Math.min(minX, x); maxX = Math.max(maxX, x);
+      minY = Math.min(minY, y); maxY = Math.max(maxY, y);
+      minZ = Math.min(minZ, z); maxZ = Math.max(maxZ, z);
+      for (const neighbor of [
+        x > 0 ? cell - 1 : -1, x + 1 < nx ? cell + 1 : -1,
+        y > 0 ? cell - nx : -1, y + 1 < ny ? cell + nx : -1,
+        z > 0 ? cell - nx * ny : -1, z + 1 < nz ? cell + nx * ny : -1,
+      ]) {
+        if (neighbor >= 0 && !visited[neighbor] && field[neighbor]! >= 0.5) {
+          visited[neighbor] = 1; stack[tail++] = neighbor;
+        }
+      }
+    }
+    const width = maxX - minX + 1, height = maxY - minY + 1;
+    result.push({ cells, mass: Number(mass.toFixed(2)), bounds: [minX, minY, minZ, maxX, maxY, maxZ],
+      width, height, aspect: Number((width / height).toFixed(3)) });
+  }
+  return result.sort((a, b) => Number(b.mass) - Number(a.mass));
+};
 
 const capture = async (step: number) => {
   await device.queue.onSubmittedWorkDone();
@@ -226,6 +281,7 @@ const capture = async (step: number) => {
   console.log(`  mid-z     ${sidePeaks(cz).map((value) => String(value).padStart(3)).join("")}`);
   console.log(`  landmark  raw=${JSON.stringify(landmarkHeights(rho))}`
     + ` render=${JSON.stringify(landmarkHeights(renderDensity))}`);
+  console.log(`  components ${JSON.stringify(wetComponents(rho))}`);
   if (internal.symmetryStageAuditNegativeBoundaryVelocity
     && internal.negativeBoundaryVelocityBytes) {
     const boundary = await readBuffer(internal.symmetryStageAuditNegativeBoundaryVelocity,
@@ -288,6 +344,28 @@ const capture = async (step: number) => {
     await stageSummary("advected", audit.densityAdvection);
     await stageSummary("diffused", audit.densityDiffusion);
     await stageSummary("sharpened", audit.densitySharpening);
+    const [preVelocity, predictionVelocity, advectedVelocity, projectedVelocity,
+      advectedDensity, diffusedDensity, sharpenedDensity] = await Promise.all([
+      readTexture(audit.preExtrapolationVelocity, 4),
+      readTexture(audit.velocityPrediction, 4),
+      readTexture(audit.velocityAdvection, 4),
+      readTexture(audit.pressureProjection, 4),
+      readTexture(audit.densityAdvection, 1),
+      readTexture(audit.densityDiffusion, 1),
+      readTexture(audit.densitySharpening, 1),
+    ]);
+    console.log(`  depth-var density=${JSON.stringify({
+      pre: depthVariation(rho, 1),
+      advected: depthVariation(advectedDensity, 1),
+      diffused: depthVariation(diffusedDensity, 1),
+      sharpened: depthVariation(sharpenedDensity, 1),
+    })}`);
+    console.log(`  depth-var tangent-velocity=${JSON.stringify({
+      pre: depthVariation(preVelocity, 4, [0, 1]),
+      prediction: depthVariation(predictionVelocity, 4, [0, 1]),
+      advection: depthVariation(advectedVelocity, 4, [0, 1]),
+      projection: depthVariation(projectedVelocity, 4, [0, 1]),
+    })}`);
   }
 };
 

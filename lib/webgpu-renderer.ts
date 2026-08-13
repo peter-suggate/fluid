@@ -7,7 +7,7 @@ import { boundingRadius, type RigidBodyState } from "./rigid-body";
 import { decodeGPURigidBodyPoses, GPU_RIGID_RENDER_BYTES, type DrawnRigidBodyPose } from "./webgpu-rigid-body";
 import type { EulerianRenderState } from "./eulerian-solver";
 import type { GPUEulerianInfo, GPURigidLoad, GPUQuality } from "./webgpu-eulerian";
-import { getMethod, type GPUSolverInstance, type MethodParamValues } from "./methods";
+import { getMethod, type GPUSolverInstance, type InjectedLiquidBall, type MethodParamValues } from "./methods";
 import { GridOverlayPipeline } from "./webgpu-grid-overlay";
 import { FLUID_RASTER_PRIMARY_COLOR_BYTES_PER_SAMPLE, requiredFluidDeviceLimits } from "./webgpu-device-limits";
 import { RasterWaterPipeline, type WaterRenderDiagnostics, type WaterSurfacePresentationDiagnostics } from "./webgpu-water-pipeline";
@@ -410,7 +410,7 @@ export function sceneStructuralKey(scene: SceneDescription): string {
       .map((value) => Math.round(value / cellSize_m)).join(",")
     : "none";
   const lattice = `${sceneLatticeDimensions(scene).join("x")}:${scene.voxelDomain.brickSize_cells}:${boundsCells}`;
-  return `fluid-${planSceneRuntime(scene).fluidSolver}:${lattice}:${scene.container.shape ?? "box"}:${scene.container.top}:${scene.container.fluidWallMode}`;
+  return `fluid-${planSceneRuntime(scene).fluidSolver}:${lattice}:${scene.container.shape ?? "box"}:${scene.container.top}:${scene.container.fluidWallMode}:${scene.container.depthBoundary ?? "closed"}`;
 }
 
 export function gpuSceneStructuralKey(scene: SceneDescription, config: SimulationRunConfig): string {
@@ -1898,6 +1898,20 @@ export class FluidLabRenderer {
   }
 
   /** Begin a new controller timeline before any old GPU completion can commit. */
+  /**
+   * Add a ball of liquid to the attached solve.
+   *
+   * Returns whether a solver took it. False means there is nothing running to
+   * add water to, or the attached method has no injection — either way the
+   * caller has to fall back to re-seeding the document, which is why this
+   * answers rather than silently doing nothing.
+   */
+  injectLiquidBall(ball: InjectedLiquidBall): boolean {
+    if (this.disposed || this.deviceLost || !this.gpuFluid?.injectLiquidBall) return false;
+    this.gpuFluid.injectLiquidBall(ball);
+    return true;
+  }
+
   resetSimulationTimeline(): void {
     if (this.disposed || this.deviceLost) return;
     this.simulationRunning = false;

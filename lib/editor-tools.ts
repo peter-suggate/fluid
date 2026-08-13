@@ -23,6 +23,7 @@ export type EditorTool =
   | "terrain-lower"
   | "fluid-paint"
   | "fluid-erase"
+  | "fluid-ball"
   | "inflow"
   | "refinement-region";
 
@@ -136,6 +137,20 @@ export const EDITOR_TOOLS: readonly EditorToolSpec[] = Object.freeze([
     label: "ERASE",
     shortcut: "y",
     hint: "click or drag to remove painted water bricks",
+    status: "active",
+  },
+  // A ball is not a coarser brush. The brushes quantize to the brick lattice,
+  // which is the resolution painting can address at all; a ball is an analytic
+  // volume seeded exactly, so it can be a metre across or two cells across and
+  // it falls as a ball rather than as a staircase. One gesture makes and sizes
+  // it — press where it should sit, drag out to the radius, release — because
+  // the size is the only thing about a dropped ball anyone wants to choose, and
+  // a tool that made you place it and then go find a handle would be two.
+  {
+    id: "fluid-ball",
+    label: "BALL",
+    shortcut: "b",
+    hint: "click inside the tank to drop a ball of water · drag out from where you clicked to size it · dropped into a running solve it joins the water already there, without restarting it",
     status: "active",
   },
   // One nozzle, not a roster: `inflowBoundaryWGSL` resolves a single dominant

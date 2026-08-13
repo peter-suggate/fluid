@@ -5,7 +5,7 @@ import {
   initialLiquidVolumeContainsPoint,
   initialLiquidVolumeSignedDistance,
 } from "../lib/initial-fluid";
-import { cloneScene, defaultScene, validateScene, type InitialLiquidHemisphere } from "../lib/model";
+import { cloneScene, defaultScene, validateScene, type InitialLiquidCylinder, type InitialLiquidHemisphere } from "../lib/model";
 import { cm12Scene } from "../lib/cm12-paper-scenes";
 
 const leftHemisphere: InitialLiquidHemisphere = {
@@ -13,6 +13,13 @@ const leftHemisphere: InitialLiquidHemisphere = {
   center_m: { x: 0, y: 1, z: 0 },
   radius_m: 1,
   outwardNormal: { x: 1, y: 0, z: 0 },
+};
+
+const depthDisk: InitialLiquidCylinder = {
+  shape: "cylinder",
+  center_m: { x: 0, y: 1, z: 0 },
+  radius_m: 1,
+  halfHeight_m: 0.2,
 };
 
 test("a hemisphere is a ball intersected with its retained half-space", () => {
@@ -34,6 +41,23 @@ test("analytic volume seeding retains fractional curved boundary cells", () => {
   assert.ok(fraction > 0 && fraction < 1, `fraction ${fraction}`);
 });
 
+test("a 2D disk is a capped cylinder aligned to world z", () => {
+  assert.equal(initialLiquidVolumeContainsPoint(depthDisk, { x: 0.5, y: 1, z: 0.19 }), true);
+  assert.equal(initialLiquidVolumeContainsPoint(depthDisk, { x: 0.5, y: 1, z: 0.21 }), false);
+  assert.equal(initialLiquidVolumeContainsPoint(depthDisk, { x: 1.1, y: 1, z: 0 }), false);
+  assert.ok(initialLiquidVolumeSignedDistance(depthDisk, { x: 0.5, y: 1, z: 0 }) < 0);
+  assert.ok(initialLiquidVolumeSignedDistance(depthDisk, { x: 0.5, y: 1, z: 0.3 }) > 0);
+});
+
+test("the published 2D paper balls are disks on symmetry depth faces", () => {
+  for (const id of ["cm12-figure-2", "cm12-figure-3"] as const) {
+    const scene = cm12Scene(id);
+    assert.equal(scene.container.depthBoundary, "symmetry");
+    assert.ok(scene.fluid.initialLiquidVolumes?.every((volume) => volume.shape === "cylinder"));
+    assert.deepEqual(validateScene(scene), []);
+  }
+});
+
 test("the spherical paper cases use the unified initial-volume vocabulary", () => {
   const dam = cm12Scene("cm12-figure-8");
   const drop = cm12Scene("cm12-figure-12");
@@ -47,4 +71,13 @@ test("hemisphere normals are validated as geometry", () => {
   const scene = cloneScene(defaultScene);
   scene.fluid.initialLiquidVolumes = [{ ...leftHemisphere, outwardNormal: { x: 0, y: 0, z: 0 } }];
   assert.match(validateScene(scene).join("\n"), /outward normal must be finite and non-zero/);
+});
+
+test("cylinder dimensions and depth boundary modes are validated", () => {
+  const scene = cloneScene(defaultScene);
+  scene.fluid.initialLiquidVolumes = [{ ...depthDisk, halfHeight_m: 0 }];
+  assert.match(validateScene(scene).join("\n"), /cylinder 0 half-height must be positive and finite/);
+  scene.fluid.initialLiquidVolumes = [depthDisk];
+  scene.container.depthBoundary = "not-a-mode" as "closed";
+  assert.match(validateScene(scene).join("\n"), /Unsupported depth boundary/);
 });

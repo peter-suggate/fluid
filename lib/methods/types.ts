@@ -68,6 +68,23 @@ export interface SelectParamSpec extends ParamBase {
 
 export type MethodParamSpec = NumberParamSpec | SelectParamSpec;
 
+/**
+ * A ball of liquid added to a solve that is already running.
+ *
+ * Authoring one into the document would re-seed from t = 0, which throws away
+ * the run the user is adding water to. A solver that implements the injection
+ * below can take the ball where the clock already is instead.
+ */
+export interface InjectedLiquidBall {
+  readonly centre_m: Vec3;
+  readonly radius_m: number;
+  /**
+   * Set when the drop is a disk rather than a ball: the half-depth it spans
+   * along z, which is how a 2D case's liquid is shaped. Absent is a ball.
+   */
+  readonly halfHeight_m?: number;
+}
+
 /** Minimal interface the renderer needs from a GPU solver. */
 export interface GPUSolverInstance {
   readonly info: GPUEulerianInfo;
@@ -147,6 +164,13 @@ export interface GPUSolverInstance {
   readonly rigidMotionBuffer?: GPUBuffer;
   /** Updates selection metadata without mirroring dynamic poses through CPU memory. */
   setSelectedRigidBody?(index: number): void;
+  /**
+   * Add a ball of liquid to the running field, without re-seeding.
+   *
+   * Optional: a method that does not implement it simply keeps taking the
+   * re-seed, so dropping a ball still works — it just costs the run.
+   */
+  injectLiquidBall?(ball: InjectedLiquidBall): void;
   /**
    * Stage the latest authoritative scene revision for GPU consumers.
    *

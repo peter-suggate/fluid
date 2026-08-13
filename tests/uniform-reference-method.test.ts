@@ -144,6 +144,47 @@ test("uniform reference owns the complete dense GPU program", () => {
     "the renderer must receive a separately reconstructed surface field");
 });
 
+test("the params buffer is exactly the struct the shader declares", () => {
+  // Every lane in this struct is a vec4, so the buffer is 16 bytes per member.
+  // Adding one on either side alone binds a buffer the shader reads past — a
+  // silent lie in the last lane on some backends — and the drop lane below was
+  // the last member added, so this is the tripwire that catches the next one.
+  const struct = /struct Params \{([\s\S]*?)\n\}/.exec(uniformReferenceComputeShader)?.[1];
+  assert.ok(struct, "the shader must declare a Params struct");
+  const members = struct.match(/^\s*\w+:\s*vec4f,/gm) ?? [];
+  assert.ok(members.length > 0);
+  assert.equal(struct.match(/^\s*\w+:/gm)?.length, members.length,
+    "a member that is not a vec4 breaks the 16-byte stride this asserts");
+  const declared = /"Uniform reference parameters", size: (\d+)/.exec(uniformHostSource)?.[1];
+  assert.equal(Number(declared), 16 * members.length);
+});
+
+test("a dropped ball enters as a mass source under the fill guard", () => {
+  // Adding water to a running solve is the nozzle's seam, not a re-seed: the
+  // drop is added outside the conservative operator and so has to be capped by
+  // what the cell has room for, and to leave γ at least full where it lands.
+  assert.match(uniformReferenceComputeShader,
+    /let dropped=min\(dropSource\(id\),max\(0\.0,1\.0-rhoNext\)\);/,
+    "a drop must never push a cell past full");
+  assert.match(uniformReferenceComputeShader, /if\(inflowSource>0\.0\|\|dropped>0\.0\)\{gammaNext=max\(gammaNext,1\.0\);\}/);
+  // The shape lane: a 2D case's drop spans its slab, so the source is a disk.
+  assert.match(uniformReferenceComputeShader, /params\.dropExtent\.x>0\.0/);
+  assert.match(uniformHostSource, /drop\?\.halfHeight_m \?\? 0/,
+    "the host must publish the half-depth the shader switches on");
+});
+
+test("a 2D scene removes the out-of-plane pressure derivative", () => {
+  const multigrid = readFileSync(
+    new URL("../lib/webgpu-uniform-pressure-multigrid.wgsl.ts", import.meta.url), "utf8");
+  assert.match(uniformHostSource, /c\.depthBoundary === "symmetry" \? 1 : 0/);
+  assert.match(uniformReferenceComputeShader, /fn depthSymmetry\(\)->bool/);
+  assert.match(uniformReferenceComputeShader,
+    /axis==2u&&depthSymmetry\(\)&&valid\(id\)!=valid\(neighbor\).*return vec4f\(0\.0\)/,
+    "storage-depth faces must contribute no pressure coefficient");
+  assert.match(multigrid, /select\(0\.5,0\.0,depthSymmetry\(\)\)/,
+    "the coarse hierarchy must preserve the same symmetry face volume");
+});
+
 test("moving solids preserve every CM12 cut-cell donor before transport", () => {
   assert.match(uniformReferenceComputeShader,
     /fn densityTransportDestination\(p:vec3i\)->bool\{return valid\(p\)&&cellOpenFraction\(p\)>1e-5;\}/,

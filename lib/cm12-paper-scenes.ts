@@ -1,4 +1,4 @@
-import { cloneScene, defaultScene, type CameraState, type InitialLiquidSphere, type RigidBodyDescription, type SceneDescription } from "./model";
+import { cloneScene, defaultScene, type CameraState, type InitialLiquidCylinder, type InitialLiquidSphere, type RigidBodyDescription, type SceneDescription } from "./model";
 import type { MethodProfile } from "./methods";
 import type { TerrainDescription } from "./terrain";
 import type { SceneryGraph, SceneryNode } from "./scenery-graph";
@@ -77,15 +77,10 @@ export interface Cm12Figure {
  * The depth a published 2D case is simulated at, in cells.
  *
  * Figures 2 and 3 are 2D (128^2 for Figure 2; Figure 3 publishes no grid at
- * all). This solver is 3D, so they are run as a thin slab with free-slip walls
- * on the two depth faces, so that nothing in the third dimension does work. It
- * is the one place a published grid is *extended* rather than reproduced, and
- * the scene blurbs say so.
- *
- * The floor is physical rather than numerical: the depth has to comfortably
- * exceed the D = 2.1 cell trace distance of Algorithm 2, or the mass-return
- * trace reaches through the slab and out the far wall. Eight cells is a little
- * under four times that, and costs a sixteenth of a 128-deep domain.
+ * all). The dense GPU storage has an eight-cell minimum, so these cases use a
+ * depth-uniform extrusion with symmetry faces. Those faces remove the third
+ * derivative from the pressure problem instead of introducing two physical
+ * separating walls that do not exist in the paper.
  *
  * It used to be numerical, and much larger. The pressure hierarchy coarsened
  * all three axes in lockstep, so a thin axis capped how far the wide ones could
@@ -230,6 +225,7 @@ function cm12Domain(figure: Cm12Figure): SceneDescription {
     fillFraction: 0,
     top: "closed",
     fluidWallMode: "free-slip",
+    ...(figure.grid[2] === undefined ? { depthBoundary: "symmetry" as const } : {}),
   };
   scene.voxelDomain = { ...scene.voxelDomain, finestCellSize_m: CM12_CELL_SIZE_M };
   scene.nominalResolution = { length_m: CM12_CELL_SIZE_M };
@@ -331,6 +327,20 @@ function ball(centreCells: readonly [number, number, number], radiusCells: numbe
       z: centreCells[2] * CM12_CELL_SIZE_M,
     },
     radius_m: radiusCells * CM12_CELL_SIZE_M,
+  };
+}
+
+/** A paper 2D ball: a circular x/y cross-section extruded through the slab. */
+function disk(scene: SceneDescription, centreCells: readonly [number, number], radiusCells: number): InitialLiquidCylinder {
+  return {
+    shape: "cylinder",
+    center_m: {
+      x: centreCells[0] * CM12_CELL_SIZE_M,
+      y: centreCells[1] * CM12_CELL_SIZE_M,
+      z: 0,
+    },
+    radius_m: radiusCells * CM12_CELL_SIZE_M,
+    halfHeight_m: 0.5 * scene.container.depth_m,
   };
 }
 
@@ -467,7 +477,7 @@ export function createCm12Figure1(): SceneDescription {
  */
 export function createCm12Figure2(): SceneDescription {
   const scene = cm12Domain(cm12Figure("cm12-figure-2"));
-  scene.fluid.initialLiquidVolumes = [ball([0, 90, 0], 14)];
+  scene.fluid.initialLiquidVolumes = [disk(scene, [0, 90], 14)];
   return scene;
 }
 
@@ -484,10 +494,10 @@ export function createCm12Figure3(): SceneDescription {
   const scene = cm12Domain(cm12Figure("cm12-figure-3"));
   scene.container.fillFraction = 0.12;
   scene.fluid.initialLiquidVolumes = [
-    ball([-40, 100, 0], 6),
-    ball([-8, 112, 0], 7),
-    ball([28, 96, 0], 6),
-    ball([48, 108, 0], 4),
+    disk(scene, [-40, 100], 6),
+    disk(scene, [-8, 112], 7),
+    disk(scene, [28, 96], 6),
+    disk(scene, [48, 108], 4),
   ];
   return scene;
 }

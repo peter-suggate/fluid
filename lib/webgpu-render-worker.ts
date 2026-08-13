@@ -175,6 +175,9 @@ scope.addEventListener("message", (event: MessageEvent<WebGPURenderWorkerRequest
     post({ type: "simulation-running-set", requestId: message.requestId, submittedTime_s });
   }
   else if (message.type === "reset-simulation-timeline") runtime.resetSimulationTimeline();
+  else if (message.type === "inject-liquid-ball") {
+    post({ type: "inject-result", requestId: message.requestId, taken: runtime.injectLiquidBall(message.ball) });
+  }
   else if (message.type === "pick-rigid-body") {
     void runtime.pickRigidBody(...message.args)
       .then((result) => post({ type: "pick-result", requestId: message.requestId, result }))

@@ -76,6 +76,8 @@ test("the published 2D figures are the only ones extended into depth", () => {
     assert.deepEqual(cm12Grid(figure), [figure.grid[0], figure.grid[1], CM12_SLAB_DEPTH_CELLS]);
     assert.equal(cm12Scene(figure.id).container.fluidWallMode, "free-slip",
       `figure ${figure.figure} slab walls`);
+    assert.equal(cm12Scene(figure.id).container.depthBoundary, "symmetry",
+      `figure ${figure.figure} has no out-of-plane pressure derivative`);
   }
 });
 

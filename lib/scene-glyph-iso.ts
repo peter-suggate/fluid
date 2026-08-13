@@ -165,8 +165,8 @@ function glyphWater(scene: SceneDescription, extent: IsoVec, scale: number): Iso
       worldMax = liquid.max_m;
     } else {
       const r = liquid.radius_m;
-      let negative = { x: r, y: r, z: r };
-      let positive = { x: r, y: r, z: r };
+      let negative = { x: r, y: r, z: liquid.shape === "cylinder" ? liquid.halfHeight_m : r };
+      let positive = { x: r, y: r, z: liquid.shape === "cylinder" ? liquid.halfHeight_m : r };
       if (liquid.shape === "hemisphere") {
         const length = Math.hypot(liquid.outwardNormal.x, liquid.outwardNormal.y, liquid.outwardNormal.z) || 1;
         const n = {

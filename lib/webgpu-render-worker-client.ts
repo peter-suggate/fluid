@@ -1,4 +1,5 @@
 import type { GPUEulerianInfo, GPURigidLoad } from "./webgpu-eulerian";
+import type { InjectedLiquidBall } from "./methods/types";
 import type { SceneDescription } from "./model";
 import { terrainContentStamp, type TerrainDescription } from "./terrain";
 import type {
@@ -44,6 +45,7 @@ export type WebGPURenderWorkerRequest =
   | { type: "set-hover-highlight"; range: { first: number; last: number } | undefined }
   | { type: "set-simulation-running"; requestId: number; running: boolean }
   | { type: "reset-simulation-timeline" }
+  | { type: "inject-liquid-ball"; requestId: number; ball: InjectedLiquidBall }
   | { type: "pick-rigid-body"; requestId: number; args: PickArguments }
   | { type: "shutdown"; requestId: number };
 
@@ -58,6 +60,7 @@ export type WebGPURenderWorkerResponse =
   | { type: "simulation-running-set"; requestId: number; submittedTime_s: number | undefined }
   | { type: "frame"; frameId: number; metrics: RendererFrameMetrics; snapshot: WebGPURenderWorkerSnapshot }
   | { type: "pick-result"; requestId: number; result: PickResult }
+  | { type: "inject-result"; requestId: number; taken: boolean }
   | { type: "shutdown-complete"; requestId: number }
   | { type: "request-failed"; requestId: number; message: string };
 
@@ -232,6 +235,19 @@ export class WebGPURenderWorkerClient {
     this.post({ type: "reset-simulation-timeline" });
   }
 
+  /**
+   * Hand a dropped ball to the running solve, and say whether it was taken.
+   *
+   * The answer is the whole point of the round trip: not every method has an
+   * injection, and a caller that assumed one would silently drop the user's
+   * water on the floor. False means "author it into the document and pay the
+   * re-seed instead", which is a worse outcome than a live drop but a far
+   * better one than nothing happening.
+   */
+  injectLiquidBall(ball: InjectedLiquidBall): Promise<boolean> {
+    return this.request<boolean>({ type: "inject-liquid-ball", requestId: this.nextRequestId(), ball });
+  }
+
   pickRigidBody(...args: PickArguments): Promise<PickResult> {
     return this.request<PickResult>({ type: "pick-rigid-body", requestId: this.nextRequestId(), args });
   }
@@ -311,6 +327,7 @@ export class WebGPURenderWorkerClient {
     else if (message.type === "initialized" || message.type === "shutdown-complete") this.settle(message.requestId);
     else if (message.type === "simulation-running-set") this.settle(message.requestId, message.submittedTime_s);
     else if (message.type === "pick-result") this.settle(message.requestId, message.result);
+    else if (message.type === "inject-result") this.settle(message.requestId, message.taken);
     else if (message.type === "request-failed") this.settle(message.requestId, undefined, message.message);
     else if (message.type === "frame") {
       this.snapshot = message.snapshot;

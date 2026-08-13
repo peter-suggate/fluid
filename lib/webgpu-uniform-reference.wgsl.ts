@@ -23,6 +23,13 @@ struct Params {
   inflowVelocityLength: vec4f,
   inflowTiming: vec4f,
   tuning: vec4f,
+  // A ball of liquid dropped into the running solve: centre in metres, radius
+  // in w. Zero radius is the resting state, which is every step but the one
+  // immediately after the user let go of a drop.
+  drop: vec4f,
+  // x: the half-depth a dropped disk spans along z, zero for a ball. A 2D
+  // case's liquid is extruded through the slab, so its drops are too.
+  dropExtent: vec4f,
 }
 @group(0) @binding(0) var velocityIn: texture_3d<f32>;
 @group(0) @binding(1) var velocityOut: texture_storage_3d<rgba32float, write>;
@@ -88,6 +95,7 @@ fn d4Sum6Vec3(value:array<vec3f,6>)->vec3f{return ((value[0]+value[1])+(value[4]
 fn worldCell(id:vec3i)->vec3f{let h=params.cellGravity.xyz;return vec3f(-0.5*params.container.x+(f32(id.x)+0.5)*h.x,(f32(id.y)+0.5)*h.y,-0.5*params.container.z+(f32(id.z)+0.5)*h.z);}
 fn hasTerrain()->bool{return params.container.w>0.5;}
 fn hasSphericalContainer()->bool{return params.tuning.z>0.5;}
+fn depthSymmetry()->bool{return params.tuning.w>0.5;}
 fn sphericalContainerCenter()->vec3f{return vec3f(0.0,0.5*params.container.y,0.0);}
 fn sphericalContainerRadius()->f32{return 0.5*min(params.container.x,min(params.container.y,params.container.z));}
 fn worldInsideSphericalContainer(world:vec3f)->bool{
@@ -108,6 +116,31 @@ fn cellSphericalSolidFraction(p:vec3i)->f32{
   return solid/8.0;
 }
 ${inflowBoundaryWGSL}
+/**
+ * Share of a cell covered by a ball dropped into the running solve.
+ *
+ * Eight sub-cell samples, which is the same estimator the host uses to seed a
+ * ball at t = 0 — so a ball dropped at t > 0 wets exactly the cells it would
+ * have wetted had it been authored in the document from the start. Anything
+ * cheaper (a centre-in-sphere test) would make a small ball's mass depend on
+ * where it happened to land relative to the lattice.
+ */
+fn dropSource(q:vec3i)->f32{
+  let radius=params.drop.w;if(radius<=0.0){return 0.0;}
+  let h=params.cellGravity.xyz;
+  let minimum=vec3f(-0.5*params.container.x,0.0,-0.5*params.container.z);
+  var covered=0.0;
+  for(var sample=0u;sample<8u;sample+=1u){
+    let offset=vec3f(f32(sample&1u),f32((sample>>1u)&1u),f32((sample>>2u)&1u))*0.5+vec3f(0.25);
+    let point=minimum+(vec3f(q)+offset)*h;
+    let d=point-params.drop.xyz;
+    let inside=select(length(d)<=radius,
+      length(d.xy)<=radius&&abs(d.z)<=params.dropExtent.x,
+      params.dropExtent.x>0.0);
+    if(inside){covered+=0.125;}
+  }
+  return covered;
+}
 fn volume(p: vec3i) -> f32 { if (!valid(p)) { return 0.0; } return textureLoad(volumeIn,p,0).x; }
 fn levelSetAuthority() -> bool { return params.physical.w > 0.5; }
 fn surfaceValue(p: vec3i) -> f32 {
@@ -391,6 +424,9 @@ fn extrapolatedRigidVelocityAtFace(world:vec3f)->vec3f{
 fn pressureFaceData(id:vec3i,axis:u32)->vec4f{
   var neighbor=id;neighbor[axis]+=1;
   if(!valid(id)||!valid(neighbor)){
+    // A published 2D case has no z pressure derivative. Its storage-depth
+    // faces are symmetry planes, not CM11a separating solid boundaries.
+    if(axis==2u&&depthSymmetry()&&valid(id)!=valid(neighbor)){return vec4f(0.0);}
     if(axis==1u&&valid(id)&&id.y==dims().y-1&&neighbor.y==dims().y&&params.boundary.w>0.5){return vec4f(0.0,0.0,0.0,1.0);}
     if(valid(id)==valid(neighbor)){return vec4f(0.0);}
     // A box wall cuts exactly half of its boundary dual cell.  A spherical
@@ -645,9 +681,15 @@ fn gatherConservativeDensity(@builtin(global_invocation_id) gid:vec3u){
   // the prescribed nozzle volume.
   let inflowSource=min(inflowSweptPlugSource(id,params.dimsDt.w),max(0.0,1.0-rhoNext));
   rhoNext+=inflowSource;
+  // A dropped ball is the same kind of thing as the nozzle — mass appearing
+  // from outside the conservative operator — so it lands in the same place and
+  // takes the same capacity guard. It is applied on one step and then the host
+  // clears the params lane, which is what makes it a drop rather than a source.
+  let dropped=min(dropSource(id),max(0.0,1.0-rhoNext));
+  rhoNext+=dropped;
   // Gamma is initialized to one throughout the domain at startup. A cell
   // first wetted by the external reservoir needs the same operator state.
-  if(inflowSource>0.0){gammaNext=max(gammaNext,1.0);}
+  if(inflowSource>0.0||dropped>0.0){gammaNext=max(gammaNext,1.0);}
   if(rhoNext<1e-5){gammaNext=1.0;}
   textureStore(volumeOut,id,vec4f(max(rhoNext,0.0)));
   textureStore(gammaOut,id,vec4f(max(gammaNext,0.0)));
@@ -892,18 +934,17 @@ fn divergenceAt(id: vec3i, checkSolid: bool) -> f32 {
 fn volumeCorrectionDivergence(id: vec3i) -> f32 {
   let excess=max(0.0,pressureDensity(id)-1.0);
   if(excess<=0.0){return 0.0;}
-  // The paper's min(lambda(rho'-1),eta)/dx slope is kept for the small-excess
-  // regime (it is the calibrated volume-recovery rate; a pure /dt reading
-  // measurably leaves residual excess parked in the field, -1.5% represented
-  // volume on the 64-cubed dam). The cap, however, is re-read as a rate: at
-  // the paper's dx=0.05, dt=1/30 the published eta/dx (20/s) and 1/dt (30/s)
-  // are indistinguishable, but at 4x finer grids eta/dx demands a fractional
-  // expansion of dt/dx = 267% of a cell PER STEP, and a wall pile-up then
-  // pumps sustained multi-step jets that tear the surface apart (the
-  // 64-cubed dam "boiling"). Bounding the purge at one cell per step keeps
-  // the paper's stated intent -- rate-limiting Mullen's unstable
-  // lambda=1, eta=infinity correction -- resolution-independent.
-  return min(excess,1.0)/params.dimsDt.w;
+  // Preserve CM12's calibrated small-excess slope exactly:
+  // min(lambda * (rho' - 1), eta) / dx with lambda=0.5 and eta=1.
+  // Replacing this by excess/dt makes the correction three times stronger at
+  // the paper's dx=0.05, dt=1/30 settings. In free fall that turns local
+  // transport compression into a large sideways pressure impulse and visibly
+  // flattens a drop before impact.
+  let paperRate=min(0.5*excess,1.0)/params.cellGravity.x;
+  // Keep the existing fine-grid safety policy as a cap only. It prevents the
+  // correction from expanding by more than one cell per time step without
+  // changing the published equation at the Figure 2/3 resolution.
+  return min(paperRate,1.0/params.dimsDt.w);
 }
 
 fn curvatureAt(id:vec3i)->f32{

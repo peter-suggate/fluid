@@ -20,6 +20,13 @@ import {
   type EditorEntityDefinition,
 } from "./editor-entity";
 import { editorFluidLattice, fluidBrickCenter } from "./editor-fluid";
+import {
+  fluidVolumeBodies,
+  fluidVolumeEntity,
+  fluidVolumeVolume_m3,
+  pickFluidVolume,
+  type FluidVolumeBody,
+} from "./editor-fluid-volume";
 import { sceneCellSizes_m, sceneLatticeDimensions } from "./scene-lattice";
 import type { SceneDescription, Vec3 } from "./model";
 
@@ -213,7 +220,12 @@ export function fluidWaterVolume_m3(scene: SceneDescription): number {
   const brick_m3 = lattice.brickSize_m.x * lattice.brickSize_m.y * lattice.brickSize_m.z;
   const bricks = fluidSeedBodies(scene)
     .reduce((total, body) => total + body.brickCount, 0);
-  return (base ? fluidBodyBoxVolume_m3(base) : 0) + bricks * brick_m3;
+  // Analytic volumes are counted from their own closed forms — a ball holds
+  // 4/3 pi r^3, not the cube its gizmo draws — for the same reason the seeds
+  // are counted as bricks rather than as the box around them.
+  const analytic = fluidVolumeBodies(scene)
+    .reduce((total, body) => total + fluidVolumeVolume_m3(body.volume), 0);
+  return (base ? fluidBodyBoxVolume_m3(base) : 0) + bricks * brick_m3 + analytic;
 }
 
 /**
@@ -416,7 +428,9 @@ function fluidSeedBodyEntityFor(
  * to describe them.
  */
 function fluidBodyLabel(scene: SceneDescription, ordinal: number): string {
-  const total = (fluidBodyBox(scene) ? 1 : 0) + fluidSeedBodies(scene).length;
+  const total = (fluidBodyBox(scene) ? 1 : 0)
+    + fluidSeedBodies(scene).length
+    + fluidVolumeBodies(scene).length;
   return total > 1 ? `WATER ${ordinal}` : "WATER";
 }
 
@@ -458,41 +472,68 @@ function fluidBodyEntityFor(context: EditorEntityContext): EditorEntity | undefi
  * the water has already left. That is the honest target: the box is the thing
  * the handles move, and picking what is drawn instead would mean picking a
  * simulation result that no edit can reach.
+ *
+ * Three lists answer here under one selection kind: the base reservoir, the
+ * painted seed bodies, and the analytic volumes of `editor-fluid-volume.ts`.
+ * They are all water, they are all numbered in one `WATER n` sequence, and the
+ * flyout cannot tell which field described them — which is the point. Which
+ * document field a body happens to live in is the editor's problem, not the
+ * user's.
  */
 export const fluidBodyEntity: EditorEntityDefinition = {
   kind: "fluid-body",
   surfacedBy: (tool) => tool === "select",
   instances: (context) => {
     const base = fluidBodyEntityFor(context);
+    const seeds = fluidSeedBodies(context.scene);
     const offset = base ? 1 : 0;
     return [
       ...(base ? [base] : []),
-      ...fluidSeedBodies(context.scene)
-        .map((body, index) => fluidSeedBodyEntityFor(context, body, offset + index + 1)),
+      ...seeds.map((body, index) => fluidSeedBodyEntityFor(context, body, offset + index + 1)),
+      ...fluidVolumeBodies(context.scene).map((body, index) =>
+        volumeEntityFor(context.scene, body, offset + seeds.length + index + 1)),
     ];
   },
   find: (context, id) => {
     if (id === FLUID_BODY_SELECTION_ID) return fluidBodyEntityFor(context);
-    const bodies = fluidSeedBodies(context.scene);
-    const index = bodies.findIndex((body) => body.id === id);
-    if (index < 0) return undefined;
     const offset = fluidBodyBox(context.scene) ? 1 : 0;
-    return fluidSeedBodyEntityFor(context, bodies[index]!, offset + index + 1);
+    const seeds = fluidSeedBodies(context.scene);
+    const seed = seeds.findIndex((body) => body.id === id);
+    if (seed >= 0) return fluidSeedBodyEntityFor(context, seeds[seed]!, offset + seed + 1);
+    const volumes = fluidVolumeBodies(context.scene);
+    const volume = volumes.findIndex((body) => body.id === id);
+    if (volume < 0) return undefined;
+    return volumeEntityFor(context.scene, volumes[volume]!, offset + seeds.length + volume + 1);
   },
   pick: (context, ray, exclude) => {
     let nearest: { id: string; distance_m: number } | undefined;
-    const consider = (id: string, box: FluidBodyBox | undefined) => {
+    const consider = (id: string, distance_m: number | undefined) => {
       if (pickExcluded(exclude, "fluid-body", id)) return;
-      const distance_m = box && pickSolidBox(ray, box);
       if (distance_m !== undefined && (!nearest || distance_m < nearest.distance_m)) {
         nearest = { id, distance_m };
       }
     };
-    consider(FLUID_BODY_SELECTION_ID, fluidBodyBox(context.scene));
-    for (const body of fluidSeedBodies(context.scene)) consider(body.id, body.box);
+    const considerBox = (id: string, box: FluidBodyBox | undefined) =>
+      consider(id, box && pickSolidBox(ray, box));
+    considerBox(FLUID_BODY_SELECTION_ID, fluidBodyBox(context.scene));
+    for (const body of fluidSeedBodies(context.scene)) considerBox(body.id, body.box);
+    // A ball is picked on the ball, not on the box around it: the corners of
+    // that box are the air a click there is trying to reach past.
+    for (const body of fluidVolumeBodies(context.scene)) {
+      consider(body.id, pickFluidVolume(ray, body.volume));
+    }
     return nearest && {
       selection: { kind: "fluid-body", id: nearest.id },
       distance_m: nearest.distance_m,
     };
   },
 };
+
+/** The volume entity, under the label its place in the scene's water earns it. */
+function volumeEntityFor(
+  scene: SceneDescription,
+  body: FluidVolumeBody,
+  ordinal: number,
+): EditorEntity {
+  return fluidVolumeEntity(scene, body, fluidBodyLabel(scene, ordinal));
+}

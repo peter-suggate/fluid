@@ -29,8 +29,10 @@ test("there is no separate mode for editing the tank", () => {
   // mode has nothing left to do and SELECT is the only editing tool.
   assert.equal(EDITOR_TOOLS.some((tool) => tool.id === "select" && tool.status === "active"), true);
   assert.equal(EDITOR_TOOLS.some((tool) => (tool.id as string) === "bounds"), false);
-  assert.equal(EDITOR_TOOLS.some((tool) => tool.shortcut === "b"), false,
-    "and its key is free again");
+  // Its key went to BALL, which is a placement and not a second editing mode:
+  // what must never come back is a tool that only exists to make the tank and
+  // the water visible, whatever letter it is spelled with.
+  assert.equal(EDITOR_TOOLS.find((tool) => tool.shortcut === "b")?.id, "fluid-ball");
   assert.match(getEditorTool("select").hint, /click anything to select/);
 });
 
@@ -167,6 +169,6 @@ test("only geometry-preserving drafts are presented to the renderer", () => {
     "presenting a draft must pin the solver to the committed scene");
 
   const renderer = readFileSync(new URL("../lib/webgpu-renderer.ts", import.meta.url), "utf8");
-  assert.match(renderer, /this\.currentGPUFluid\(this\.simulationScene \?\? scene, svoSceneConfig/,
+  assert.match(renderer, /this\.currentGPUFluid\(this\.simulationScene \?\? scene, sceneConfig/,
     "the rebuild key must read the pinned scene, never the presented one");
 });

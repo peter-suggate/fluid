@@ -25,6 +25,7 @@ import { GPUInitializationTaskRunner, type GPUInitializationTask } from "./gpu-i
 import type {
   GPUSolverInstance,
   GPUInitializationReporter,
+  InjectedLiquidBall,
   MethodParamValues,
 } from "./methods/types";
 import { WebGPURigidBodySystem } from "./webgpu-rigid-body";
@@ -316,6 +317,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private readbackPending = false;
   private lastTime = 0;
   private referenceVolumeCells = 0;
+  /** A ball waiting for a step to wet its cells. See `injectLiquidBall`. */
+  private pendingDrop?: InjectedLiquidBall;
   private densityPostProcessing: boolean;
   private densitySharpening: boolean;
   private sharpeningMassCorrection: boolean;
@@ -422,7 +425,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
         pressureProjection: velocity("Uniform audit velocity after pressure projection"),
       });
     }
-    this.params = device.createBuffer({ label: "Uniform reference parameters", size: 144, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.params = device.createBuffer({ label: "Uniform reference parameters", size: 176, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.velocityExtrapolator = new WebGPUUniformVelocityExtrapolator(
       device, [nx, ny, nz], [
         scene.container.width_m / nx,
@@ -708,7 +711,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.device.queue.submit([encoder.finish()]);
   }
 
-  private writeParams(dt: number, activeBodyCount: number, inflowStrength: number): void {
+  private writeParams(dt: number, activeBodyCount: number, inflowStrength: number, drop?: InjectedLiquidBall): void {
     const c = this.scene.container;
     const inflow = this.scene.fluid.inflow;
     const outlet = this.inflowBoundary?.outletCenter_m;
@@ -722,8 +725,29 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       inflow?.velocity_m_s.x ?? 0, inflow?.velocity_m_s.y ?? 0, inflow?.velocity_m_s.z ?? 0, this.inflowBoundary?.apertureScale ?? 0,
       inflowStrength, this.referenceVolumeCells, c.fillFraction * this.info.ny, 4,
       this.sharpeningStrength, this.sharpeningDistance,
-      sceneHasSphericalContainer(this.scene) ? 1 : 0, 0,
+      sceneHasSphericalContainer(this.scene) ? 1 : 0,
+      c.depthBoundary === "symmetry" ? 1 : 0,
+      drop?.centre_m.x ?? 0, drop?.centre_m.y ?? 0, drop?.centre_m.z ?? 0, drop?.radius_m ?? 0,
+      drop?.halfHeight_m ?? 0, 0, 0, 0,
     ]));
+  }
+
+  /**
+   * Add a ball of liquid to the solve that is already running.
+   *
+   * The alternative is re-seeding from the edited document, which throws away
+   * the run the user is watching in order to add water to it — so authoring a
+   * ball at t > 0 would mean losing everything that had happened. This is the
+   * same mass source the nozzle uses, on the same guard, applied on exactly one
+   * step: the ball appears in the field where it was dropped and is transported
+   * from there like any other liquid.
+   *
+   * Consumed by the next step, which is also what happens if the clock is
+   * paused when it is called — the ball lands when the clock next runs.
+   */
+  injectLiquidBall(ball: InjectedLiquidBall): void {
+    if (!(ball.radius_m > 0)) return;
+    this.pendingDrop = ball;
   }
 
   /**
@@ -912,8 +936,24 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
         / (this.info.nx * this.info.ny * this.info.nz);
       this.referenceVolumeCells += this.inflowBoundary.flowRate_m3_s * strength * dt / cellVolume;
     }
+    // The drop is consumed by this step and only this step, so the lane is
+    // cleared before anything can encode a second one. Its mass joins the
+    // reference the same way the nozzle's does — analytically, from the volume
+    // asked for rather than from the volume that fitted — because the guard
+    // that caps a cell at full is the same guard, and the drift telemetry is
+    // the instrument that says how much the two disagreed.
+    const drop = this.pendingDrop;
+    this.pendingDrop = undefined;
+    if (drop) {
+      const cellVolume = c.width_m * c.height_m * c.depth_m
+        / (this.info.nx * this.info.ny * this.info.nz);
+      const dropped = drop.halfHeight_m !== undefined
+        ? Math.PI * drop.radius_m ** 2 * 2 * drop.halfHeight_m
+        : (4 / 3) * Math.PI * drop.radius_m ** 3;
+      this.referenceVolumeCells += dropped / cellVolume;
+    }
     this.info.referenceLiquidVolume_cells = this.referenceVolumeCells;
-    this.writeParams(dt, activeBodies.length, strength);
+    this.writeParams(dt, activeBodies.length, strength, drop);
     // The advance-pipeline trace: a hardware-timestamp boundary chain over the
     // whole step, sampled on a cadence while the instrumentation store asks for
     // it. Boundaries splice into the next real pass's timestampWrites, so an
