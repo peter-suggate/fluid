@@ -2,7 +2,7 @@
 
 **Reference:** [`mass-conserving-liquids-algorithm-reference.md`](mass-conserving-liquids-algorithm-reference.md)  
 **Implementation audited:** the dense `uniform` WebGPU method in the current worktree  
-**Audit date:** 12 August 2026  
+**Audit date:** 13 August 2026
 **Purpose:** map every algorithm, formula, invariant, edge case, and acceptance requirement in the reference to code; identify every observed difference and potential gotcha.
 
 ---
@@ -63,6 +63,7 @@ These are the material findings. They are expanded and code-linked later.
 | D17 | The sharpening-step regression formerly assumed a literal `3*dt` after sharpening became runtime-tunable. | Resolved validation gap | The assertion now checks `3*dt*strength`; unit strength remains the paper value while the ceiling/gamma/boundary invariants stay independently guarded. |
 | D18 | FIM and pressure convergence failures are telemetry only; the frame still consumes the resulting fields. | Confirmed runtime gotcha | A ceiling/cap failure is not rejected, retried, or rolled back. |
 | D19 | Thin density below the pressure-liquid isovalue formerly received no gravity, semi-Lagrangian transport erased an existing away-wall boundary velocity, and projection reset its positive-wall face to the solid velocity. | Resolved separating-boundary defect | Sub-isovalue liquid now receives body force, transport preserves the away-wall sign, and projection clamps only motion into the wall. The wall inequality remains active even when the cell has no pressure row. |
+| D20 | Density transport formerly classified cells by centre-point solid containment and ran before current-geometry excess ejection. | Resolved moving-solid conservation defect | A cut cell with `V>0` lost valid `rho<=V` donor mass when its centre was inside a body, while a newly covered `V=0` donor was zeroed before Sec. 3.6 could move its density. Current `V` is now reconciled before transport and `V>1e-5` defines the transport cell set. |
 
 ---
 
@@ -74,15 +75,16 @@ The paper's four stages are present in the correct top-level order. The live enc
 |---:|---|---|
 | 1 | Update body state/solid geometry inputs | body sync and parameter upload in [`advanceTo`](../../lib/webgpu-uniform-reference.ts#L734); geometry is evaluated procedurally in shader functions beginning at [`insideRigid`](../../lib/webgpu-uniform-reference.wgsl.ts#L203) |
 | 2 | Velocity extrapolation | authority field in [`buildExtrapolationAuthority`](../../lib/webgpu-uniform-reference.wgsl.ts#L342), then FIM/hierarchy dispatch from [`encodeVelocityExtrapolation`](../../lib/webgpu-uniform-reference.ts#L695) |
-| 3 | Conservative density advection | host dispatches at [`webgpu-uniform-reference.ts:831`](../../lib/webgpu-uniform-reference.ts#L831); kernels at [`traceGammaAndBeta`](../../lib/webgpu-uniform-reference.wgsl.ts#L478), [`scatterDensityDeficit`](../../lib/webgpu-uniform-reference.wgsl.ts#L509), and [`gatherConservativeDensity`](../../lib/webgpu-uniform-reference.wgsl.ts#L533) |
-| 4 | Gamma diffusion | 42 passes: six ordered parity passes times seven iterations at [`webgpu-uniform-reference.ts:851`](../../lib/webgpu-uniform-reference.ts#L851) |
-| 5 | Density sharpening | compute/scatter/resolve at [`webgpu-uniform-reference.ts:875`](../../lib/webgpu-uniform-reference.ts#L875) |
-| 6 | Partial-solid excess ejection | conditionally dispatched for bodies or terrain at [`webgpu-uniform-reference.ts:886`](../../lib/webgpu-uniform-reference.ts#L886) |
-| 7 | Velocity advection and forces | selectable path at [`webgpu-uniform-reference.ts:893`](../../lib/webgpu-uniform-reference.ts#L893) |
-| 8 | Pressure hierarchy and projection | fixed multigrid schedule and projection at [`webgpu-uniform-reference.ts:939`](../../lib/webgpu-uniform-reference.ts#L939) |
-| 9 | Implementation-only two-way rigid coupling | [`webgpu-uniform-reference.ts:947`](../../lib/webgpu-uniform-reference.ts#L947) |
-| 10 | Optional render-only density reconstruction | [`webgpu-uniform-reference.ts:956`](../../lib/webgpu-uniform-reference.ts#L956) |
-| 11 | Fixed-point diagnostics | [`reduceDiagnostics`](../../lib/webgpu-uniform-reference.wgsl.ts#L1057) |
+| 3 | Current-geometry solid reconciliation | Sec. 3.6 scatter/resolve establishes the paper's `rho<=V` and `rho=0` for `V=0` state before transport can omit fully solid donors. |
+| 4 | Conservative density advection | host dispatches [`traceGammaAndBeta`](../../lib/webgpu-uniform-reference.wgsl.ts), [`scatterDensityDeficit`](../../lib/webgpu-uniform-reference.wgsl.ts), and [`gatherConservativeDensity`](../../lib/webgpu-uniform-reference.wgsl.ts) |
+| 5 | Gamma diffusion | seven iterations of paired axis diffusion |
+| 6 | Density sharpening | compute/scatter/resolve |
+| 7 | Post-density partial-solid excess ejection | the same Sec. 3.6 invariant is checked after advection, diffusion, and sharpening |
+| 8 | Velocity advection and forces | selectable path |
+| 9 | Pressure hierarchy and projection | fixed multigrid schedule and projection |
+| 10 | Implementation-only two-way rigid coupling | post-projection reaction and integration |
+| 11 | Optional render-only density reconstruction | presentation-only field |
+| 12 | Fixed-point diagnostics | [`reduceDiagnostics`](../../lib/webgpu-uniform-reference.wgsl.ts) |
 
 The order of CM12 Algorithm 1 is therefore preserved. The extra stages do not reorder density ahead of extrapolation or pressure ahead of velocity advection. The material differences are the added solid cleanup, two-way coupling, inflow, force models, and telemetry behavior.
 
@@ -324,7 +326,9 @@ Differences/gotchas:
 
 The source is reduced to `min(rho,V)` and excess is scattered one minimum-cell-size away along the solid SDF gradient. This maps the intended main path.
 
-The no-target path is not conservative: `rho-excess` has already been stored, and only `reductions[4]` receives the amount. There is no recovery field, retry, or source restoration. The public field `uniformUnplaceableSolidExcess_cells` is therefore a **mass-loss receipt**, not conserved pending mass.
+For moving geometry, the same Sec. 3.6 operation is also applied before conservative density transport. This follows the paper's own state definitions: Sec. 3.6 removes `rho-V` and guarantees `rho=0` inside a completely solid cell; Sec. 3.7 defines that completely solid case by `V=0`. Applying the invariant only after transport allowed Sec. 3.4 to discard a newly covered donor first. The transport domain therefore uses `V>1e-5`; a centre-inside cut cell with `V>0` remains a valid donor holding at most `V` density. The post-density Sec. 3.6 pass remains because advection, gamma diffusion, and sharpening can create new `rho>V` states. Neither pass rescales global mass or applies a post-step volume correction.
+
+The no-target path first searches the immediate 26-neighbourhood for an open receiver. If none exists, `rho-excess` has already been stored and only `reductions[4]` receives the amount. There is no persistent recovery field, retry, or source restoration. The public field `uniformUnplaceableSolidExcess_cells` is therefore a **mass-loss receipt**, not conserved pending mass. The Dawn moving-solid regression requires this receipt to remain zero.
 
 ---
 
@@ -510,6 +514,7 @@ The implementation does not currently satisfy all 12 acceptance-gate items in Se
 | FIM terminal-active telemetry | [`uniform-fim-convergence-diagnostics.test.ts`](../../tests/uniform-fim-convergence-diagnostics.test.ts) | Static source assertions |
 | Published Figure 9 harness constants | [`mass-conserving-paper-cases.test.ts`](../../tests/mass-conserving-paper-cases.test.ts) | Numerical scene configuration only |
 | Ceiling separation and mass | [`uniform-ceiling-separation-gpu.test.ts`](../../tests/uniform-ceiling-separation-gpu.test.ts) | 300-step, 1.2 s GPU readback after the lid-impact window when WebGPU is configured |
+| Moving-solid displacement | [`run-uniform-displacement-smoke.ts`](../../tools/run-uniform-displacement-smoke.ts), `npm run test:webgpu:uniform-displacement` | Native Dawn/Metal runs with one and two descending rigid boxes. Gates raw conservative mass loss below `0.1%`, Sec. 3.6 unplaceable mass at zero, and transient clamped represented-volume loss below `2%`. On 13 August 2026 the one-body result was `0.00065%` final mass loss / `1.453%` maximum represented loss; two bodies measured `0.00072%` / `1.790%`. The pre-fix one-body reproduction lost `25.8%` raw mass. |
 
 ### 12.2 Focused test run performed for this audit
 
@@ -527,7 +532,7 @@ node --import tsx --test \
   tests/mass-conserving-paper-cases.test.ts
 ```
 
-Result: **35 tests; 34 passed, 0 failed, 1 WebGPU test skipped**.
+Current source-focused result after D20: **39 tests; 38 passed, 0 failed, 1 WebGPU test skipped** across the uniform and pipeline-graph subset. The separate Dawn displacement command passes both one- and two-body cases.
 
 ### 12.3 Missing validation relative to the reference
 

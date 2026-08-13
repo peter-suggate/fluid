@@ -517,7 +517,13 @@ fn backwardTraceOffset(id:vec3i,dt:f32,h:vec3f)->vec3f{
 fn forwardTraceOffset(id:vec3i,dt:f32,h:vec3f)->vec3f{
   return integrateTraceOffset(id,dt,h,1.0);
 }
-fn densityTransportDestination(p:vec3i)->bool{return valid(p)&&!cellInsideSolid(p);}
+// CM12 Secs. 3.6-3.7 classify density storage with the cut-cell volume V, not
+// the centre-point solid predicate. A cell whose centre is inside a body can
+// still have V>0 and retain rho<=V after excess ejection. Masking that partial
+// donor deletes its valid open-subcell density from the conservative matrix.
+// The host reconciles rho with current V before this predicate is evaluated,
+// so only geometrically full cells are excluded.
+fn densityTransportDestination(p:vec3i)->bool{return valid(p)&&cellOpenFraction(p)>1e-5;}
 fn transportStencilWeight(base:vec3i,f:vec3f,corner:u32)->f32{
   let offset=vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));
   if(!densityTransportDestination(base+offset)){return 0.0;}
@@ -535,7 +541,7 @@ fn sampleGammaStencil(base:vec3i,f:vec3f)->f32{
 @compute @workgroup_size(4,4,4)
 fn traceGammaAndBeta(@builtin(global_invocation_id) gid:vec3u){
   let id=vec3i(gid);if(!valid(id)){return;}
-  if(cellInsideSolid(id)){textureStore(gammaOut,id,vec4f(0.0));return;}
+  if(!densityTransportDestination(id)){textureStore(gammaOut,id,vec4f(0.0));return;}
   let traced=backwardTraceOffset(id,params.dimsDt.w,params.cellGravity.xyz);let base=id+vec3i(floor(traced));let f=fract(traced);
   var total=0.0;
   for(var corner=0u;corner<8u;corner+=1u){total+=transportStencilWeight(base,f,corner);}
@@ -593,7 +599,7 @@ fn scatterDensityDeficit(@builtin(global_invocation_id) gid:vec3u){
 @compute @workgroup_size(4,4,4)
 fn gatherConservativeDensity(@builtin(global_invocation_id) gid:vec3u){
   let id=vec3i(gid);if(!valid(id)){return;}
-  if(cellInsideSolid(id)){textureStore(volumeOut,id,vec4f(0.0));textureStore(gammaOut,id,vec4f(0.0));return;}
+  if(!densityTransportDestination(id)){textureStore(volumeOut,id,vec4f(0.0));textureStore(gammaOut,id,vec4f(0.0));return;}
   let traced=backwardTraceOffset(id,params.dimsDt.w,params.cellGravity.xyz);let base=id+vec3i(floor(traced));let f=fract(traced);
   let advectedGamma=textureLoad(gammaIn,id,0).x;var rhoNext=0.0;var gammaNext=0.0;
   var total=0.0;

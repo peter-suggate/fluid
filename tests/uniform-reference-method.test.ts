@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import test from "node:test";
 import {
@@ -15,6 +16,9 @@ import { uniformReferenceComputeShader } from "../lib/webgpu-uniform-reference.w
 import { uniformDensityPostProcessingEnabled } from "../lib/webgpu-uniform-reference";
 import { structuralMethodValues } from "../lib/webgpu-renderer";
 import { createSmokeScenario } from "../tools/webgpu-smoke-scenarios";
+
+const uniformHostSource = readFileSync(
+  new URL("../lib/webgpu-uniform-reference.ts", import.meta.url), "utf8");
 
 test("uniform is a first-class WebGPU reference method", () => {
   assert.equal(getMethod("uniform"), uniformMethod);
@@ -138,6 +142,30 @@ test("uniform reference owns the complete dense GPU program", () => {
   assert.match(uniformReferenceComputeShader, /fn advectVelocityComponent/);
   assert.match(uniformReferenceComputeShader, /fn postprocessResolve/,
     "the renderer must receive a separately reconstructed surface field");
+});
+
+test("moving solids preserve every CM12 cut-cell donor before transport", () => {
+  assert.match(uniformReferenceComputeShader,
+    /fn densityTransportDestination\(p:vec3i\)->bool\{return valid\(p\)&&cellOpenFraction\(p\)>1e-5;\}/,
+    "CM12 Secs. 3.6-3.7 define density storage by open fraction V, not centre containment");
+  assert.match(uniformReferenceComputeShader,
+    /fn traceGammaAndBeta[\s\S]*?if\(!densityTransportDestination\(id\)\)[\s\S]*?fn scatterDensityDeficit/,
+    "beta construction must retain partially open donors");
+  assert.match(uniformReferenceComputeShader,
+    /fn gatherConservativeDensity[\s\S]*?if\(!densityTransportDestination\(id\)\)/,
+    "the conservative gather must use the same V-based cell set");
+
+  const advance = uniformHostSource.slice(
+    uniformHostSource.indexOf("advanceTo(time_s"),
+    uniformHostSource.indexOf("async readStats()"),
+  );
+  const entry = advance.indexOf("Uniform moving-solid entry excess scatter");
+  const transport = advance.indexOf("Uniform trace gamma and beta");
+  const postSharpening = advance.indexOf("Uniform partial-solid excess scatter");
+  assert.ok(entry >= 0 && entry < transport,
+    "Sec. 3.6 must reconcile rho with current V before Sec. 3.4 can mask V=0 donors");
+  assert.ok(postSharpening > transport,
+    "the ordinary post-density Sec. 3.6 invariant check must remain in place");
 });
 
 const webgpuModulePath = process.env.WEBGPU_NODE_MODULE;

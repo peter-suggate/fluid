@@ -302,6 +302,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private readonly sharpenComputeGroup: GPUBindGroup;
   private readonly sharpenScatterGroup: GPUBindGroup;
   private readonly sharpenResolveGroup: GPUBindGroup;
+  private readonly solidEntryScatterGroup: GPUBindGroup;
+  private readonly solidEntryResolveGroup: GPUBindGroup;
   private readonly solidExcessScatterGroup: GPUBindGroup;
   private readonly solidExcessResolveGroup: GPUBindGroup;
   private pipelines?: UniformReferencePipelines;
@@ -575,6 +577,12 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.sharpenComputeGroup = group(this.velocityA, this.velocityB, this.pressureA, this.pressureB, this.volumeB, this.volumeA, this.heightB, this.heightA);
     this.sharpenScatterGroup = group(this.velocityA, this.velocityB, this.pressureB, this.pressureA, this.volumeA, this.volumeB, this.heightB, this.heightA);
     this.sharpenResolveGroup = group(this.velocityA, this.velocityB, this.pressureA, this.pressureB, this.volumeA, this.volumeB, this.heightB, this.heightA);
+    // A moving body can cover an occupied cell between advances. Reconcile
+    // the current density against the newly uploaded body geometry before the
+    // conservative operator masks solid donors. The later pair retains the
+    // paper's post-sharpening rho <= V cleanup.
+    this.solidEntryScatterGroup = group(this.velocityA, this.velocityB, this.pressureA, this.pressureB, this.volumeA, this.volumeB, this.heightB, this.heightA);
+    this.solidEntryResolveGroup = group(this.velocityA, this.velocityB, this.pressureA, this.pressureB, this.volumeB, this.volumeA, this.heightB, this.heightA);
     this.solidExcessScatterGroup = group(this.velocityA, this.velocityB, this.pressureA, this.pressureB, this.volumeB, this.volumeA, this.heightB, this.heightA);
     this.solidExcessResolveGroup = group(this.velocityA, this.velocityB, this.pressureA, this.pressureB, this.volumeA, this.volumeB, this.heightB, this.heightA);
     this.postprocessBlurXGroup = group(this.velocityA, this.velocityB, this.pressureA, this.pressureB, this.volumeA, this.surfaceA, this.heightB, this.heightA);
@@ -940,6 +948,19 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       this.negativeBoundaryVelocityBytes,
     );
     this.encodeVelocityExtrapolation(encoder, false, seam);
+
+    // Sec. 3.6 must see the updated solid geometry before Sec. 3.4 excludes
+    // solid donors. Without this pair, density in cells newly covered by a
+    // moving body is skipped by beta construction and then overwritten with
+    // zero by the gather, so the supposedly conservative operator loses the
+    // displaced liquid before the historical post-sharpening cleanup runs.
+    if (this.solidExcessCorrection && (activeBodies.length > 0 || sceneHasTerrain(this.scene))) {
+      encoder.clearBuffer(this.conditioningScratch);
+      this.run(encoder, "Uniform moving-solid entry excess scatter",
+        this.pipelines.scatterSolidExcess, this.solidEntryScatterGroup);
+      this.run(encoder, "Uniform moving-solid entry excess resolve",
+        this.pipelines.resolveSolidExcess, this.solidEntryResolveGroup);
+    }
 
     // Algorithm 1 steps 1-2, paper Secs. 3.3-3.5: use the extrapolated
     // current velocity for the modified conservative semi-Lagrangian density
@@ -1436,7 +1457,7 @@ const UNIFORM_FLUID_STAGES: readonly FluidPipelineStage[] = [
     label: "Partial-solid excess",
     phaseLabels: [UNIFORM_ADVANCE_PHASE.solidExcess.label],
     tip: {
-      summary: "Sec. 3.6: cells partially covered by rigid bodies or terrain can end up holding more liquid than their open fraction admits; the excess is scattered to open neighbours and resolved conservatively. Unplaceable excess is published as telemetry.",
+      summary: "Sec. 3.6: current density is reconciled before transport can mask newly covered donors, then checked again after sharpening. Excess beyond a cut cell's open fraction is scattered to open neighbours and resolved conservatively; genuinely enclosed excess is published as telemetry.",
       reads: "surface density, solid fractions",
       writes: "surface density",
       gate: "the scene has rigid bodies or terrain",
@@ -1449,7 +1470,7 @@ const UNIFORM_FLUID_STAGES: readonly FluidPipelineStage[] = [
       ? context.values.solidExcessCorrection === "off" ? "off" : "on"
       : "unavailable",
     chip: (context) => context.bodyCount > 0 || context.hasTerrain
-      ? context.values.solidExcessCorrection === "off" ? "off · excess retained" : "2 passes · conserved"
+      ? context.values.solidExcessCorrection === "off" ? "off · excess retained" : "4 passes · entry + post-sharpening"
       : "no solids in scene",
   },
   {
