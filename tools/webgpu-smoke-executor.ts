@@ -5,6 +5,7 @@ import { octreeMethod } from "../lib/methods/octree";
 import { uniformMethod } from "../lib/methods/uniform";
 import { initializeRigidBodies } from "../lib/rigid-body";
 import type { SceneDescription } from "../lib/model";
+import { sceneAtFinestCellSize } from "../lib/scene-scale";
 import { createSingleTallCellProbeControlLayout, createSingleTallCellProbeLayout, type SingleTallCellProbeOptions } from "../lib/tall-cell-grid";
 import type { GPUEulerianInfo, GPUQuality } from "../lib/webgpu-eulerian";
 import { summarizeDriftOscillation } from "../lib/tall-cell-diagnostics";
@@ -2823,7 +2824,8 @@ async function runGPU(
   oracleSteps: number,
   options: ResolvedSceneRunOptions,
 ): Promise<GPUSmokeResult> {
-  const scenarioId = scenario.id, scene = applySceneOverrides(scenario.scene, options.maxDt_s);
+  const scenarioId = scenario.id;
+  let scene = applySceneOverrides(scenario.scene, options.maxDt_s);
   const exactStepCount = options.exactSteps;
   const maxDtOverride = options.maxDt_s;
   const includeFinalFieldStats = options.includeFinalFieldStats;
@@ -2865,7 +2867,9 @@ async function runGPU(
   // package.json.
   const solverQuality = authoredProfile?.quality ?? quality;
   // Validation comparisons author the exact same scene lattice on every backend.
-  if (voxelCellSizeOverride !== undefined) scene.voxelDomain.finestCellSize_m = voxelCellSizeOverride;
+  if (voxelCellSizeOverride !== undefined) {
+    scene = sceneAtFinestCellSize(scene, voxelCellSizeOverride);
+  }
   const adapter = await gpu.requestAdapter({ powerPreference: "high-performance" });
   if (!adapter) throw new Error("Dawn did not expose a WebGPU adapter");
   const requiredFeatures = fluidExecutionDeviceFeatures(adapter.features);

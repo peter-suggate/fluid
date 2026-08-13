@@ -3,10 +3,11 @@ import test from "node:test";
 import { cloneScene, validateScene, type SceneDescription } from "../lib/model";
 import { getScenePreset, scenePresets } from "../lib/scenes";
 import { sceneLatticeDimensions } from "../lib/scene-lattice";
-import { scaleScene, sceneScaleOption, sceneScaleSummary } from "../lib/scene-scale";
+import { scaleScene, sceneAtFinestCellSize, sceneScaleOption, sceneScaleSummary } from "../lib/scene-scale";
 import { gpuSceneSeedKey, gpuSceneStructuralKey } from "../lib/webgpu-renderer";
 import { fluidWaterVolume_m3 } from "../lib/editor-fluid-body";
-import { initialFluidLayout } from "../lib/initial-fluid-layout";
+import { initialFluidLayout, initialFluidLayoutVolumeFraction } from "../lib/initial-fluid-layout";
+import { initialFluidBrickUnionBounds } from "../lib/initial-fluid";
 
 const runConfig = { methodId: "octree", quality: "balanced" as const, values: {}, simulationEpoch: 0 };
 
@@ -48,6 +49,23 @@ test("detail scale moves the lattice and therefore the structural key", () => {
   const before = sceneLatticeDimensions(scene), after = sceneLatticeDimensions(finer);
   assert.deepEqual(after, before.map((value) => value * 2));
   assert.notEqual(gpuSceneStructuralKey(finer, runConfig), gpuSceneStructuralKey(scene, runConfig));
+});
+
+test("an arbitrary finest-cell edit preserves seeded water geometry", () => {
+  const scene = preset("brick-quad-dam-break");
+  const before = initialFluidLayout(scene);
+  const finer = sceneAtFinestCellSize(scene, 0.0125);
+  assert.deepEqual(sceneLatticeDimensions(finer), [64, 32, 64]);
+  assert.equal(finer.fluid.initialBrickSeeds_m?.length, 64,
+    "the original half-width/full-height/half-depth brick must become 4×4×4 finer bricks");
+  assert.equal(initialFluidLayoutVolumeFraction(initialFluidLayout(finer)),
+    initialFluidLayoutVolumeFraction(before),
+    "editing the lattice must change samples rather than the water volume");
+  assert.deepEqual(initialFluidBrickUnionBounds(finer, [64, 32, 64]), {
+    minimum: { x: -0.4, y: 0, z: -0.4 },
+    maximum: { x: 0, y: 0.4, z: 0 },
+  }, "the finer seeds must occupy the same physical reservoir bounds");
+  assert.deepEqual(validateScene(finer), []);
 });
 
 test("scaling the world carries fluid with the tank but leaves other contents alone", () => {

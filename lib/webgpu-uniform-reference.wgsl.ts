@@ -78,7 +78,14 @@ struct RigidBody {
 // Eight vec4s per (cell, component), populated only in the opt-in Dawn stage
 // audit shader variant. Production compiles the constant-false branch away.
 @group(0) @binding(28) var<storage,read_write> macCormackAudit:array<vec4f>;
+// GPU-resident wet bounds followed by indirect dispatch records. Words 7..9
+// are the main-grid origin; the pressure hierarchy consumes the level records
+// beginning at word 16.
+@group(0) @binding(29) var<storage,read> activeRegion:array<u32>;
+@group(0) @binding(30) var<storage,read_write> activeScratch:array<atomic<u32>>;
 fn dims() -> vec3i { return vec3i(textureDimensions(volumeIn)); }
+fn activeId(gid:vec3u)->vec3i{return vec3i(gid)+vec3i(vec3u(
+  activeRegion[7],activeRegion[8],activeRegion[9]));}
 fn inflowGridDims()->vec3i{return dims();}
 fn valid(p: vec3i) -> bool { let d=dims(); return all(p >= vec3i(0)) && all(p < d); }
 fn clampCell(p: vec3i) -> vec3i { return clamp(p, vec3i(0), dims()-vec3i(1)); }
@@ -453,13 +460,15 @@ fn pressureFaceVolumeFraction(id:vec3i,axis:u32)->f32{return pressureFaceData(id
 // rho'=rho/V (including Eq. 20's adjacent-solid continuation) and the exact
 // positive-MAC face fractions used by projection; it never reclassifies raw
 // surface density or approximates a second solid boundary.
-@compute @workgroup_size(4,4,4)
-fn buildExtrapolationAuthority(@builtin(global_invocation_id) gid:vec3u){
-  let id=vec3i(gid);if(!valid(id)){return;}
+fn storeExtrapolationAuthority(id:vec3i){if(!valid(id)){return;}
   textureStore(volumeOut,id,vec4f(pressureDensity(id)));
   textureStore(velocityOut,id,vec4f(
     faceOpenFraction(id,0u),faceOpenFraction(id,1u),faceOpenFraction(id,2u),0.0));
 }
+@compute @workgroup_size(4,4,4)
+fn buildExtrapolationAuthority(@builtin(global_invocation_id) gid:vec3u){storeExtrapolationAuthority(activeId(gid));}
+@compute @workgroup_size(4,4,4)
+fn buildDenseExtrapolationAuthority(@builtin(global_invocation_id) gid:vec3u){storeExtrapolationAuthority(vec3i(gid));}
 // Projection enforces body velocity on interior faces, so that value cannot be
 // used as the undisturbed fluid velocity for form drag. Sample six wet, open
 // points just beyond the body's bounding sphere instead.
@@ -598,7 +607,7 @@ fn sampleGammaStencil(base:vec3i,f:vec3f)->f32{
 // and scatter gamma_i w^-_li to each donor l.
 @compute @workgroup_size(4,4,4)
 fn traceGammaAndBeta(@builtin(global_invocation_id) gid:vec3u){
-  let id=vec3i(gid);if(!valid(id)){return;}
+  let id=activeId(gid);if(!valid(id)){return;}
   if(!densityTransportDestination(id)){textureStore(gammaOut,id,vec4f(0.0));return;}
   let traced=backwardTraceOffset(id,params.dimsDt.w,params.cellGravity.xyz);let base=id+vec3i(floor(traced));let f=fract(traced);
   var total=0.0;
@@ -632,7 +641,7 @@ fn traceGammaAndBeta(@builtin(global_invocation_id) gid:vec3u){
 // the rho and gamma corrections are accumulated separately.
 @compute @workgroup_size(4,4,4)
 fn scatterDensityDeficit(@builtin(global_invocation_id) gid:vec3u){
-  let id=vec3i(gid);if(!densityTransportDestination(id)){return;}
+  let id=activeId(gid);if(!densityTransportDestination(id)){return;}
   let deficit=max(0.0,1.0-betaValue(id));if(deficit<=1.0/TRANSPORT_FIXED){return;}
   let traced=forwardTraceOffset(id,params.dimsDt.w,params.cellGravity.xyz);let base=id+vec3i(floor(traced));let f=fract(traced);let count=cellCount();
   var total=0.0;
@@ -656,7 +665,7 @@ fn scatterDensityDeficit(@builtin(global_invocation_id) gid:vec3u){
 // without materializing A.
 @compute @workgroup_size(4,4,4)
 fn gatherConservativeDensity(@builtin(global_invocation_id) gid:vec3u){
-  let id=vec3i(gid);if(!valid(id)){return;}
+  let id=activeId(gid);if(!valid(id)){return;}
   if(!densityTransportDestination(id)){textureStore(volumeOut,id,vec4f(0.0));textureStore(gammaOut,id,vec4f(0.0));return;}
   let traced=backwardTraceOffset(id,params.dimsDt.w,params.cellGravity.xyz);let base=id+vec3i(floor(traced));let f=fract(traced);
   let advectedGamma=textureLoad(gammaIn,id,0).x;var rhoNext=0.0;var gammaNext=0.0;
@@ -743,19 +752,19 @@ fn diffuseGammaPair(id:vec3i,axis:u32,parity:i32){
   textureStore(volumeOut,id,vec4f(max(0.0,select(upperRho,lowerRho,coordinate==lowerCoordinate))));
   textureStore(gammaOut,id,vec4f(max(0.0,averageGamma)));
 }
-@compute @workgroup_size(4,4,4) fn diffuseGammaX0(@builtin(global_invocation_id) gid:vec3u){diffuseGammaPair(vec3i(gid),0u,0);}
-@compute @workgroup_size(4,4,4) fn diffuseGammaX1(@builtin(global_invocation_id) gid:vec3u){diffuseGammaPair(vec3i(gid),0u,1);}
-@compute @workgroup_size(4,4,4) fn diffuseGammaY0(@builtin(global_invocation_id) gid:vec3u){diffuseGammaPair(vec3i(gid),1u,0);}
-@compute @workgroup_size(4,4,4) fn diffuseGammaY1(@builtin(global_invocation_id) gid:vec3u){diffuseGammaPair(vec3i(gid),1u,1);}
-@compute @workgroup_size(4,4,4) fn diffuseGammaZ0(@builtin(global_invocation_id) gid:vec3u){diffuseGammaPair(vec3i(gid),2u,0);}
-@compute @workgroup_size(4,4,4) fn diffuseGammaZ1(@builtin(global_invocation_id) gid:vec3u){diffuseGammaPair(vec3i(gid),2u,1);}
+@compute @workgroup_size(4,4,4) fn diffuseGammaX0(@builtin(global_invocation_id) gid:vec3u){diffuseGammaPair(activeId(gid),0u,0);}
+@compute @workgroup_size(4,4,4) fn diffuseGammaX1(@builtin(global_invocation_id) gid:vec3u){diffuseGammaPair(activeId(gid),0u,1);}
+@compute @workgroup_size(4,4,4) fn diffuseGammaY0(@builtin(global_invocation_id) gid:vec3u){diffuseGammaPair(activeId(gid),1u,0);}
+@compute @workgroup_size(4,4,4) fn diffuseGammaY1(@builtin(global_invocation_id) gid:vec3u){diffuseGammaPair(activeId(gid),1u,1);}
+@compute @workgroup_size(4,4,4) fn diffuseGammaZ0(@builtin(global_invocation_id) gid:vec3u){diffuseGammaPair(activeId(gid),2u,0);}
+@compute @workgroup_size(4,4,4) fn diffuseGammaZ1(@builtin(global_invocation_id) gid:vec3u){diffuseGammaPair(activeId(gid),2u,1);}
 // The paper leaves the dimension traversal order unspecified. volumeIn and
 // gammaIn are the xyz result; surfaceIn and pressureIn are the zyx result.
 // Their equal average is invariant under the horizontal x/z exchange that
 // maps one valid paper order to the other.
 @compute @workgroup_size(4,4,4)
 fn averageGammaDiffusion(@builtin(global_invocation_id) gid:vec3u){
-  let id=vec3i(gid);if(!valid(id)){return;}
+  let id=activeId(gid);if(!valid(id)){return;}
   let rho=0.5*(volume(id)+textureLoad(surfaceIn,id,0).x);
   let gamma=0.5*(textureLoad(gammaIn,id,0).x+textureLoad(pressureIn,id,0).x);
   textureStore(volumeOut,id,vec4f(max(rho,0.0)));
@@ -810,7 +819,7 @@ fn applyVelocityForces(id:vec3i,inputVelocity:vec3f,dt:f32,h:vec3f)->vec3f{
 
 @compute @workgroup_size(4,4,4)
 fn semiLagrangianAdvection(@builtin(global_invocation_id) gid:vec3u){
-  let id=vec3i(gid);if(!valid(id)){return;}carryBoundaryVelocity(id);let dt=params.dimsDt.w;let h=params.cellGravity.xyz;let cell=vec3f(id);
+  let id=activeId(gid);if(!valid(id)){return;}carryBoundaryVelocity(id);let dt=params.dimsDt.w;let h=params.cellGravity.xyz;let cell=vec3f(id);
   var v=vec3f(advectVelocityComponent(cell+vec3f(1.0,0.5,0.5),0u,dt,h),advectVelocityComponent(cell+vec3f(0.5,1.0,0.5),1u,dt,h),advectVelocityComponent(cell+vec3f(0.5,0.5,1.0),2u,dt,h));
   // A closed-face sample uses the solid-side zero extension. Preserve an old
   // velocity directed away from a positive wall before adding this step's
@@ -826,7 +835,7 @@ fn semiLagrangianAdvection(@builtin(global_invocation_id) gid:vec3u){
 
 @compute @workgroup_size(4,4,4)
 fn advect(@builtin(global_invocation_id) gid: vec3u) {
-  let id=vec3i(gid); if (!valid(id)) { return; }
+  let id=activeId(gid); if (!valid(id)) { return; }
   carryBoundaryVelocity(id);
   let dt=params.dimsDt.w; let h=params.cellGravity.xyz;
   let cell=vec3f(id);var v=vec3f(advectVelocityComponent(cell+vec3f(1.0,0.5,0.5),0u,dt,h),advectVelocityComponent(cell+vec3f(0.5,1.0,0.5),1u,dt,h),advectVelocityComponent(cell+vec3f(0.5,0.5,1.0),2u,dt,h));
@@ -841,7 +850,7 @@ fn advect(@builtin(global_invocation_id) gid: vec3u) {
 
 @compute @workgroup_size(4,4,4)
 fn reverseAdvection(@builtin(global_invocation_id) gid:vec3u){
-  let id=vec3i(gid);if(!valid(id)){return;}
+  let id=activeId(gid);if(!valid(id)){return;}
   carryBoundaryVelocity(id);
   let dt=params.dimsDt.w;let h=params.cellGravity.xyz;let cell=vec3f(id);
   var v=vec3f(advectVelocityComponent(cell+vec3f(1.0,0.5,0.5),0u,-dt,h),advectVelocityComponent(cell+vec3f(0.5,1.0,0.5),1u,-dt,h),advectVelocityComponent(cell+vec3f(0.5,0.5,1.0),2u,-dt,h));let d=dims();
@@ -882,7 +891,7 @@ fn boundedMacCormack(id:vec3i,position:vec3f,component:u32,dt:f32,h:vec3f,predic
 
 @compute @workgroup_size(4,4,4)
 fn correctAdvection(@builtin(global_invocation_id) gid:vec3u){
-  let id=vec3i(gid);if(!valid(id)){return;}
+  let id=activeId(gid);if(!valid(id)){return;}
   carryBoundaryVelocity(id);
   let dt=params.dimsDt.w;let h=params.cellGravity.xyz;let cell=vec3f(id);
   let predicted=textureLoad(predictedVelocityIn,id,0).xyz;let original=textureLoad(velocityIn,id,0).xyz;let reversed=textureLoad(reversedVelocityIn,id,0).xyz;
@@ -957,7 +966,7 @@ fn curvatureAt(id:vec3i)->f32{
 
 @compute @workgroup_size(4,4,4)
 fn project(@builtin(global_invocation_id) gid: vec3u) {
-  let id=vec3i(gid); if (!valid(id)) { return; }
+  let id=activeId(gid); if (!valid(id)) { return; }
   let h=params.cellGravity.xyz;let scale=params.dimsDt.w/params.physical.x;var v=velocity(id);var boundaryV=boundaryVelocity(id);let d=dims();
   let ex=id+vec3i(1,0,0);let ey=id+vec3i(0,1,0);let ez=id+vec3i(0,0,1);
   let p0=select(0.0,projectPressureValue(id),pressureLiquid(id));
@@ -1011,7 +1020,7 @@ fn project(@builtin(global_invocation_id) gid: vec3u) {
 // performs the conservative covered-density redistribution before projection.
 @compute @workgroup_size(4,4,4)
 fn coupleRigid(@builtin(global_invocation_id) gid:vec3u){
-  let id=vec3i(gid);if(!valid(id)){return;}carryBoundaryVelocity(id);let phi=volume(id);let wetFraction=surfaceOccupancy(id);var v=velocity(id);let h=params.cellGravity.xyz;
+  let id=activeId(gid);if(!valid(id)){return;}carryBoundaryVelocity(id);let phi=volume(id);let wetFraction=surfaceOccupancy(id);var v=velocity(id);let h=params.cellGravity.xyz;
   let world=vec3f(-0.5*params.container.x+(f32(id.x)+0.5)*h.x,(f32(id.y)+0.5)*h.y,-0.5*params.container.z+(f32(id.z)+0.5)*h.z);
   let bodyCount=u32(round(params.boundary.z));let cellMass=params.physical.x*h.x*h.y*h.z*wetFraction;let blend=clamp(45.0*params.dimsDt.w,0.0,1.0);var coupledBody=12u;var solidFraction=0.0;
   // Match the adaptive voxelizer's overlap rule: the body with the greatest
@@ -1117,7 +1126,7 @@ fn sharpenDeltaRho(q:vec3i)->f32{
 }
 @compute @workgroup_size(4,4,4)
 fn sharpenCompute(@builtin(global_invocation_id) gid:vec3u){
-  let id=vec3i(gid);if(!valid(id)){return;}
+  let id=activeId(gid);if(!valid(id)){return;}
   let stored=textureLoad(volumeIn,id,0).x;
   let deltaRho=sharpenDeltaRho(id);
   textureStore(volumeOut,id,vec4f(stored+deltaRho));
@@ -1125,7 +1134,7 @@ fn sharpenCompute(@builtin(global_invocation_id) gid:vec3u){
 }
 @compute @workgroup_size(4,4,4)
 fn sharpenScatter(@builtin(global_invocation_id) gid:vec3u){
-  let id=vec3i(gid);if(!valid(id)){return;}
+  let id=activeId(gid);if(!valid(id)){return;}
   let deltaRho=textureLoad(pressureIn,id,0).x;if(deltaRho>=0.0){return;}
   var p=vec3f(id)+vec3f(0.5);let maximumDistance=params.tuning.y;var travelled=0.0;let stepLength=0.5;
   for(var stepIndex=0;stepIndex<7;stepIndex+=1){
@@ -1160,7 +1169,7 @@ fn sharpenScatter(@builtin(global_invocation_id) gid:vec3u){
 }
 @compute @workgroup_size(4,4,4)
 fn sharpenResolve(@builtin(global_invocation_id) gid:vec3u){
-  let id=vec3i(gid);if(!valid(id)){return;}
+  let id=activeId(gid);if(!valid(id)){return;}
   let d=dims();let index=u32(id.x+d.x*(id.y+d.y*id.z));
   let deposit=f32(atomicLoad(&sharpenDeposits[index]))/1048576.0;
   textureStore(volumeOut,id,vec4f(textureLoad(volumeIn,id,0).x+deposit));
@@ -1195,7 +1204,7 @@ fn solidSignedDistanceGradient(world:vec3f)->vec3f{
 }
 @compute @workgroup_size(4,4,4)
 fn scatterSolidExcess(@builtin(global_invocation_id) gid:vec3u){
-  let id=vec3i(gid);if(!valid(id)){return;}
+  let id=activeId(gid);if(!valid(id)){return;}
   let rho=volume(id);let open=cellOpenFraction(id);
   if(open>=1.0-1e-6){textureStore(volumeOut,id,vec4f(rho));return;}
   let excess=max(0.0,rho-open);
@@ -1245,7 +1254,7 @@ fn scatterSolidExcess(@builtin(global_invocation_id) gid:vec3u){
 }
 @compute @workgroup_size(4,4,4)
 fn resolveSolidExcess(@builtin(global_invocation_id) gid:vec3u){
-  let id=vec3i(gid);if(!valid(id)){return;}
+  let id=activeId(gid);if(!valid(id)){return;}
   let deposit=f32(atomicLoad(&sharpenDeposits[linearIndex(id)]))/TRANSPORT_FIXED;
   textureStore(volumeOut,id,vec4f(volume(id)+deposit));
 }
@@ -1285,7 +1294,7 @@ fn wallFilmResolvedDensity(id:vec3i,base:f32)->f32{
 }
 @compute @workgroup_size(4,4,4)
 fn wallFilmResolve(@builtin(global_invocation_id) gid:vec3u){
-  let id=vec3i(gid);if(!valid(id)){return;}
+  let id=activeId(gid);if(!valid(id)){return;}
   let rho=textureLoad(volumeIn,id,0).x;
   textureStore(volumeOut,id,vec4f(wallFilmResolvedDensity(id,rho)));
 }
@@ -1304,12 +1313,12 @@ fn blurPostprocessAxis(id:vec3i,axis:u32,seedDensity:bool)->f32{
   return weighted/max(total,1e-9);
 }
 fn storePostprocessBlur(id:vec3i,axis:u32,seedDensity:bool){textureStore(volumeOut,id,vec4f(blurPostprocessAxis(id,axis,seedDensity)));}
-@compute @workgroup_size(4,4,4) fn postprocessBlurX(@builtin(global_invocation_id) gid:vec3u){let id=vec3i(gid);if(valid(id)){storePostprocessBlur(id,0u,true);}}
-@compute @workgroup_size(4,4,4) fn postprocessBlurY(@builtin(global_invocation_id) gid:vec3u){let id=vec3i(gid);if(valid(id)){storePostprocessBlur(id,1u,false);}}
-@compute @workgroup_size(4,4,4) fn postprocessBlurZ(@builtin(global_invocation_id) gid:vec3u){let id=vec3i(gid);if(valid(id)){storePostprocessBlur(id,2u,false);}}
+@compute @workgroup_size(4,4,4) fn postprocessBlurX(@builtin(global_invocation_id) gid:vec3u){let id=activeId(gid);if(valid(id)){storePostprocessBlur(id,0u,true);}}
+@compute @workgroup_size(4,4,4) fn postprocessBlurY(@builtin(global_invocation_id) gid:vec3u){let id=activeId(gid);if(valid(id)){storePostprocessBlur(id,1u,false);}}
+@compute @workgroup_size(4,4,4) fn postprocessBlurZ(@builtin(global_invocation_id) gid:vec3u){let id=activeId(gid);if(valid(id)){storePostprocessBlur(id,2u,false);}}
 @compute @workgroup_size(4,4,4)
 fn postprocessResolve(@builtin(global_invocation_id) gid:vec3u){
-  let id=vec3i(gid);if(!valid(id)){return;}
+  let id=activeId(gid);if(!valid(id)){return;}
   let rho=textureLoad(volumeIn,id,0).x;let blurredGamma=textureLoad(surfaceIn,id,0).x;
   var reconstructed=rho/min(max(blurredGamma,0.01),1.0);
   // Preserve calibrated wall-cell rho: the surface extractor supplies its
@@ -1319,6 +1328,72 @@ fn postprocessResolve(@builtin(global_invocation_id) gid:vec3u){
   if(embedded.y>0.5){reconstructed=max(rho,embedded.x);}
   textureStore(volumeOut,id,vec4f(reconstructed));
 }
+
+// One cheap dense census replaces hundreds of dense dispatches. The observed
+// wet/source bounds are rebuilt every step. Dispatch the union of the current
+// and previous padded boxes: the one-step tail clears every ping-pong target
+// before it leaves the working set, without retaining the whole swept history.
+@compute @workgroup_size(1)
+fn resetActiveRegion(){
+  let d=dims();
+  atomicStore(&activeScratch[0],u32(d.x));atomicStore(&activeScratch[1],u32(d.y));atomicStore(&activeScratch[2],u32(d.z));
+  atomicStore(&activeScratch[3],0u);atomicStore(&activeScratch[4],0u);atomicStore(&activeScratch[5],0u);
+  atomicStore(&activeScratch[6],0u);
+}
 @compute @workgroup_size(4,4,4)
-fn reduceDiagnostics(@builtin(global_invocation_id) gid:vec3u){let id=vec3i(gid);if(!valid(id)){return;}let represented=surfaceOccupancy(id);let conservative=volume(id);atomicAdd(&reductions[0],u32(represented*2048.0+0.5));if(surfaceLiquid(id)){atomicMax(&reductions[1],u32(id.x+1));}let speed=length(faceVelocity(id));atomicMax(&reductions[2],bitcast<u32>(speed));atomicAdd(&reductions[3],u32(clamp(conservative,0.0,8.0)*2048.0+0.5));}
+fn scanActiveRegion(@builtin(global_invocation_id) gid:vec3u){
+  let id=activeId(gid);if(!valid(id)){return;}
+  atomicMax(&activeScratch[6],bitcast<u32>(length(faceVelocity(id))));
+  if(volume(id)<=1e-5){return;}
+  atomicMin(&activeScratch[0],u32(id.x));atomicMin(&activeScratch[1],u32(id.y));atomicMin(&activeScratch[2],u32(id.z));
+  atomicMax(&activeScratch[3],u32(id.x+1));atomicMax(&activeScratch[4],u32(id.y+1));atomicMax(&activeScratch[5],u32(id.z+1));
+}
+@compute @workgroup_size(4,4,4)
+fn scanExternalActiveSources(@builtin(global_invocation_id) gid:vec3u){
+  let id=vec3i(gid);if(!valid(id)){return;}
+  let source=inflowSweptPlugSource(id,params.dimsDt.w)>0.0||dropSource(id)>0.0;
+  if(!source){return;}
+  atomicMin(&activeScratch[0],gid.x);atomicMin(&activeScratch[1],gid.y);atomicMin(&activeScratch[2],gid.z);
+  atomicMax(&activeScratch[3],gid.x+1u);atomicMax(&activeScratch[4],gid.y+1u);atomicMax(&activeScratch[5],gid.z+1u);
+}
+fn activeCeilDiv(value:u32,divisor:u32)->u32{return (value+divisor-1u)/divisor;}
+@compute @workgroup_size(1)
+fn finalizeActiveRegion(){
+  let d=vec3u(dims());
+  let observedMin=vec3u(atomicLoad(&activeScratch[0]),atomicLoad(&activeScratch[1]),atomicLoad(&activeScratch[2]));
+  let observedMax=vec3u(atomicLoad(&activeScratch[3]),atomicLoad(&activeScratch[4]),atomicLoad(&activeScratch[5]));
+  let speed=max(bitcast<f32>(atomicLoad(&activeScratch[6])),length(params.inflowVelocityLength.xyz));
+  let travel=vec3u(ceil(vec3f(speed*params.dimsDt.w)/params.cellGravity.xyz));
+  let padding=travel+vec3u(u32(ceil(params.tuning.y))+4u);
+  let previousMinimum=vec3u(activeRegion[0],activeRegion[1],activeRegion[2]);
+  let previousMaximum=vec3u(activeRegion[3],activeRegion[4],activeRegion[5]);
+  var currentMinimum=previousMinimum;
+  var currentMaximum=previousMaximum;
+  if(all(observedMax>observedMin)){
+    currentMinimum=observedMin-min(observedMin,padding);
+    currentMaximum=min(d,observedMax+padding);
+  }
+  let minimum=min(previousMinimum,currentMinimum);
+  let maximum=max(previousMaximum,currentMaximum);
+  atomicStore(&activeScratch[0],currentMinimum.x);atomicStore(&activeScratch[1],currentMinimum.y);atomicStore(&activeScratch[2],currentMinimum.z);
+  atomicStore(&activeScratch[3],currentMaximum.x);atomicStore(&activeScratch[4],currentMaximum.y);atomicStore(&activeScratch[5],currentMaximum.z);
+  atomicStore(&activeScratch[7],minimum.x);atomicStore(&activeScratch[8],minimum.y);atomicStore(&activeScratch[9],minimum.z);
+  atomicStore(&activeScratch[10],maximum.x);atomicStore(&activeScratch[11],maximum.y);atomicStore(&activeScratch[12],maximum.z);
+  let groups=(maximum-minimum+vec3u(3u))/4u;
+  atomicStore(&activeScratch[13],groups.x);atomicStore(&activeScratch[14],groups.y);atomicStore(&activeScratch[15],groups.z);
+  for(var level=0u;level<16u;level+=1u){
+    let base=16u+10u*level;
+    let physical=vec3u(atomicLoad(&activeScratch[base+6u]),atomicLoad(&activeScratch[base+7u]),atomicLoad(&activeScratch[base+8u]));
+    if(any(physical==vec3u(0u))){break;}
+    let scaledMin=(minimum*physical)/d;
+    let scaledMax=vec3u(activeCeilDiv(maximum.x*physical.x,d.x),activeCeilDiv(maximum.y*physical.y,d.y),activeCeilDiv(maximum.z*physical.z,d.z));
+    let origin=scaledMin-min(scaledMin,vec3u(2u));
+    let end=min(physical+vec3u(2u),scaledMax+vec3u(3u));
+    let levelGroups=(end-origin+vec3u(3u))/4u;
+    atomicStore(&activeScratch[base],origin.x);atomicStore(&activeScratch[base+1u],origin.y);atomicStore(&activeScratch[base+2u],origin.z);
+    atomicStore(&activeScratch[base+3u],levelGroups.x);atomicStore(&activeScratch[base+4u],levelGroups.y);atomicStore(&activeScratch[base+5u],levelGroups.z);
+  }
+}
+@compute @workgroup_size(4,4,4)
+fn reduceDiagnostics(@builtin(global_invocation_id) gid:vec3u){let id=activeId(gid);if(!valid(id)){return;}let represented=surfaceOccupancy(id);let conservative=volume(id);atomicAdd(&reductions[0],u32(represented*2048.0+0.5));if(surfaceLiquid(id)){atomicMax(&reductions[1],u32(id.x+1));}let speed=length(faceVelocity(id));atomicMax(&reductions[2],bitcast<u32>(speed));atomicAdd(&reductions[3],u32(clamp(conservative,0.0,8.0)*2048.0+0.5));}
 `;

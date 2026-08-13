@@ -13,7 +13,8 @@ import {
   uniformReferenceSolverOptions,
 } from "../lib/methods/uniform";
 import { uniformReferenceComputeShader } from "../lib/webgpu-uniform-reference.wgsl";
-import { uniformDensityPostProcessingEnabled } from "../lib/webgpu-uniform-reference";
+import { UNIFORM_FLUID_PIPELINE,
+  uniformDensityPostProcessingEnabled } from "../lib/webgpu-uniform-reference";
 import { structuralMethodValues } from "../lib/webgpu-renderer";
 import { createSmokeScenario } from "../tools/webgpu-smoke-scenarios";
 
@@ -30,7 +31,7 @@ test("uniform is a first-class WebGPU reference method", () => {
 
 test("uniform reference exposes stage gates, pass schedules, and transport choices", () => {
   assert.deepEqual(uniformMethod.params.map(({ key }) => key), [
-    "gammaDiffusion", "gammaDiffusionIterations", "densitySharpening",
+    "activeRegion", "gammaDiffusion", "gammaDiffusionIterations", "densitySharpening",
     "sharpeningMassCorrection", "sharpeningStrength", "sharpeningDistance",
     "solidExcessCorrection", "rigidCoupling", "pressureFullCycles",
     "pressureVCycles", "pressureSweeps", "velocityTransport", "timeStep",
@@ -46,21 +47,27 @@ test("uniform reference exposes stage gates, pass schedules, and transport choic
   );
   assert.deepEqual(
     uniformMethod.params.filter(({ update }) => update !== "runtime").map(({ key }) => key),
-    ["pressureFullCycles", "pressureVCycles", "pressureSweeps"],
-    "only the prebuilt multigrid dispatch plan remains structural",
+    ["activeRegion", "pressureFullCycles", "pressureVCycles", "pressureSweeps"],
+    "dispatch mode and the prebuilt multigrid plan remain structural",
   );
   assert.deepEqual(structuralMethodValues({
     methodId: "uniform",
     quality: "balanced",
     values: resolveMethodValues(uniformMethod, "balanced", {}),
   }), {
+    activeRegion: "on",
     pressureFullCycles: 3,
     pressureVCycles: 4,
-    pressureSweeps: 4,
+    pressureSweeps: 6,
   }, "live controls must be absent from the renderer's rebuild fingerprint");
+  assert.ok(UNIFORM_FLUID_PIPELINE.stages.some((stage) =>
+    stage.controls?.some((control) => control.kind === "param-choice"
+      && control.param === "activeRegion")),
+  "the simulation observatory must expose the sparse/dense A/B control");
 
   const options = uniformReferenceSolverOptions({ timeStep: "paper", densityPostProcessing: "off" });
   assert.deepEqual(options, {
+    activeRegion: true,
     densitySharpening: true,
     sharpeningMassCorrection: true,
     gammaDiffusionIterations: 7,
@@ -71,8 +78,8 @@ test("uniform reference exposes stage gates, pass schedules, and transport choic
     pressureSchedule: {
       fullCycles: 3,
       vCycles: 4,
-      preSweeps: 4,
-      postSweeps: 4,
+      preSweeps: 6,
+      postSweeps: 6,
     },
     densityPostProcessing: false,
     timeStep: "paper",
@@ -80,10 +87,12 @@ test("uniform reference exposes stage gates, pass schedules, and transport choic
   });
 
   assert.equal(uniformReferenceSolverOptions({
+    activeRegion: "off",
     velocityTransport: "maccormack",
     timeStep: "paper",
     densityPostProcessing: "off",
   }).velocityTransport, "maccormack");
+  assert.equal(uniformReferenceSolverOptions({ activeRegion: "off" }).activeRegion, false);
 
   const ablated = uniformReferenceSolverOptions({
     gammaDiffusion: "off",

@@ -59,6 +59,8 @@ import { UNIFORM_PAPER_DT_S, uniformPaperAdvanceReady } from "./uniform-paper";
 export { UNIFORM_PAPER_DT_S } from "./uniform-paper";
 
 export interface WebGPUUniformReferenceOptions {
+  /** GPU-resident sparse work boxes; false retains the original dense control. */
+  activeRegion?: boolean;
   /** Velocity transport used by Algorithm 1 step 3. */
   velocityTransport?: GPUVelocityTransport;
   /** Diagnostic-only switch; the authored paper method always enables Sec. 3.5. */
@@ -98,6 +100,10 @@ export interface WebGPUUniformReferenceOptions {
 export const UNIFORM_GAMMA_DIFFUSION_ITERATIONS = 7;
 
 interface UniformReferencePipelines {
+  resetActiveRegion: GPUComputePipeline;
+  scanActiveRegion: GPUComputePipeline;
+  scanExternalActiveSources: GPUComputePipeline;
+  finalizeActiveRegion: GPUComputePipeline;
   semiLagrangian: GPUComputePipeline;
   advect: GPUComputePipeline;
   reverse: GPUComputePipeline;
@@ -106,6 +112,7 @@ interface UniformReferencePipelines {
   coupleRigid: GPUComputePipeline;
   reduce: GPUComputePipeline;
   extrapolationAuthority: GPUComputePipeline;
+  extrapolationAuthorityDense: GPUComputePipeline;
   traceGammaBeta: GPUComputePipeline;
   scatterDensityDeficit: GPUComputePipeline;
   gatherDensity: GPUComputePipeline;
@@ -129,6 +136,10 @@ interface UniformReferencePipelines {
 }
 
 const PIPELINES = [
+  ["resetActiveRegion", "Reset active liquid bounds", "resetActiveRegion", false],
+  ["scanActiveRegion", "Scan active liquid bounds", "scanActiveRegion", false],
+  ["scanExternalActiveSources", "Scan external active sources", "scanExternalActiveSources", false],
+  ["finalizeActiveRegion", "Finalize active liquid dispatches", "finalizeActiveRegion", false],
   ["semiLagrangian", "Semi-Lagrangian velocity advection and body forces", "semiLagrangianAdvection", false],
   ["advect", "Bounded MacCormack velocity prediction", "advect", false],
   ["reverse", "Bounded MacCormack reverse advection", "reverseAdvection", false],
@@ -137,6 +148,7 @@ const PIPELINES = [
   ["coupleRigid", "Couple rigid bodies", "coupleRigid", false],
   ["reduce", "Reduce diagnostics", "reduceDiagnostics", false],
   ["extrapolationAuthority", "Build Sec. 3.3 interface authority", "buildExtrapolationAuthority", false],
+  ["extrapolationAuthorityDense", "Seed dense Sec. 3.3 interface authority", "buildDenseExtrapolationAuthority", false],
   ["traceGammaBeta", "Trace gamma and scatter beta", "traceGammaAndBeta", false],
   ["scatterDensityDeficit", "Scatter density and gamma deficits", "scatterDensityDeficit", false],
   ["gatherDensity", "Gather conservative surface density", "gatherConservativeDensity", false],
@@ -164,6 +176,12 @@ const PIPELINES = [
  * frame already encodes) but the trace's query set, resolve and map are not.
  */
 const UNIFORM_PHYSICS_TRACE_CADENCE_MS = 100;
+
+/** Active-region buffer ABI shared by the main kernels and pressure hierarchy. */
+const UNIFORM_ACTIVE_MAIN_DISPATCH_OFFSET = 13 * 4;
+const UNIFORM_ACTIVE_LEVEL_WORDS = 10;
+const UNIFORM_ACTIVE_LEVEL_BASE_WORD = 16;
+const UNIFORM_ACTIVE_MAX_LEVELS = 16;
 
 /**
  * The exact partition of one uniform advance, in encode order.
@@ -276,6 +294,9 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private readonly params: GPUBuffer;
   private readonly reductions: GPUBuffer;
   private readonly conditioningScratch: GPUBuffer;
+  private readonly activeRegion: GPUBuffer;
+  private readonly activeScratch: GPUBuffer;
+  private readonly activeDispatch: GPUBuffer;
   /** Distinct storage binding for the compile-time-disabled MacCormack audit.
    * WebGPU still validates writable binding aliasing even when the shader's
    * constant-false branch cannot execute. */
@@ -337,6 +358,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   /** One unusable hardware sample retires the stage recorder for this solver;
    * the non-invasive queue-wall observation takes over from then on. */
   private hardwarePhysicsTraceInvalid = false;
+  /** UI-selectable A/B control; the environment override keeps Dawn scripts reproducible. */
+  private readonly activeRegionEnabled: boolean;
 
   private constructor(
     private readonly device: GPUDevice,
@@ -345,13 +368,15 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     _onRigidLoads?: (loads: GPURigidLoad[]) => void,
     options: WebGPUUniformReferenceOptions = {},
   ) {
+    this.activeRegionEnabled = options.activeRegion !== false
+      && (typeof process === "undefined" || process.env.FLUID_UNIFORM_ACTIVE_REGION !== "0");
     this.densityPostProcessing = options.densityPostProcessing === true;
     this.densitySharpening = options.densitySharpening !== false;
     this.sharpeningMassCorrection = options.sharpeningMassCorrection !== false;
     this.gammaDiffusionIterations = Math.round(Math.min(UNIFORM_GAMMA_DIFFUSION_ITERATIONS,
       Math.max(0, options.gammaDiffusionIterations ?? UNIFORM_GAMMA_DIFFUSION_ITERATIONS)));
     this.sharpeningStrength = Math.min(2, Math.max(0.25, options.sharpeningStrength ?? 1));
-    this.sharpeningDistance = Math.min(3.1, Math.max(1.1, options.sharpeningDistance ?? 2.1));
+    this.sharpeningDistance = Math.min(3.1, Math.max(0.1, options.sharpeningDistance ?? 2.1));
     this.solidExcessCorrection = options.solidExcessCorrection !== false;
     this.rigidCoupling = options.rigidCoupling !== false;
     this.pressureSchedule = options.pressureSchedule ?? {
@@ -426,6 +451,20 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       });
     }
     this.params = device.createBuffer({ label: "Uniform reference parameters", size: 176, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    const activeRegionBytes = (UNIFORM_ACTIVE_LEVEL_BASE_WORD
+      + UNIFORM_ACTIVE_MAX_LEVELS * UNIFORM_ACTIVE_LEVEL_WORDS) * 4;
+    this.activeRegion = device.createBuffer({
+      label: "Uniform reference active liquid region", size: activeRegionBytes,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+    this.activeScratch = device.createBuffer({
+      label: "Uniform reference active liquid census scratch", size: activeRegionBytes,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
+    });
+    this.activeDispatch = device.createBuffer({
+      label: "Uniform reference active indirect dispatches", size: activeRegionBytes,
+      usage: GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST,
+    });
     this.velocityExtrapolator = new WebGPUUniformVelocityExtrapolator(
       device, [nx, ny, nz], [
         scene.container.width_m / nx,
@@ -433,6 +472,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
         scene.container.depth_m / nz,
       ], this.params, this.surfaceA, this.velocityD,
       this.velocityA, this.velocityC, this.transportA, this.transportB,
+      this.activeRegion, this.activeRegionEnabled ? this.activeDispatch : undefined,
     );
     this.extrapolationActiveStateTexture = this.velocityExtrapolator.activeStateTexture;
     this.extrapolationActiveFrontPassCeiling = this.velocityExtrapolator.activeFrontPassCeiling;
@@ -492,12 +532,14 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       { binding: 26, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
       { binding: 27, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
       { binding: 28, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
+      { binding: 29, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage" } },
+      { binding: 30, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
     ] });
     this.pressureMultigrid = new WebGPUUniformPressureMultigrid(device, [nx, ny, nz], [
       scene.container.width_m / nx,
       scene.container.height_m / ny,
       scene.container.depth_m / nz,
-    ], this.pressureSchedule);
+    ], this.pressureSchedule, this.activeRegionEnabled ? this.activeDispatch : undefined);
     this.mainPipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [this.mainLayout] });
     const sampler = device.createSampler({ minFilter: "linear", magFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge", addressModeW: "clamp-to-edge" });
     const group = (velocityIn: GPUTexture, velocityOut: GPUTexture, pressureIn: GPUTexture,
@@ -520,6 +562,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
           { binding: 24, resource: gammaRead.createView() }, { binding: 25, resource: gammaWrite.createView() },
           { binding: 26, resource: { buffer: boundaryRead } }, { binding: 27, resource: { buffer: boundaryWrite } },
           { binding: 28, resource: { buffer: this.macCormackAuditBinding } },
+          { binding: 29, resource: { buffer: this.activeRegion } },
+          { binding: 30, resource: { buffer: this.activeScratch } },
         ],
       });
     this.extrapolationAuthorityGroup = group(
@@ -606,7 +650,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       cellSize_m: Math.min(scene.container.width_m / nx, scene.container.height_m / ny, scene.container.depth_m / nz),
       pressureIterations: 0, pressureSolver: `CM11a dense LCP multigrid (${this.pressureSchedule.fullCycles} Full-Cycles + ${this.pressureSchedule.vCycles} V-Cycles, ${this.pressureSchedule.preSweeps}/${this.pressureSchedule.postSweeps} pre/post PRBGS)`,
       allocatedBytes: allocation.allocatedBytes + this.pressureMultigrid.allocatedBytes
-        + (this.symmetryStageAuditMacCormackBuffer ? 0 : 16), quality,
+        + activeRegionBytes * 3 + (this.symmetryStageAuditMacCormackBuffer ? 0 : 16), quality,
       submittedTime_s: 0, simulatedTime_s: 0, completedTime_s: 0,
       simulationLag_s: 0, encodedSteps: 0, maximumTallCellHeight: 0,
       volumeControl: true,
@@ -694,6 +738,12 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     if (!this.pipelines) throw new Error("Uniform reference pipelines are not initialized");
     this.writeParams(0, Math.min(this.scene.rigidBodies.length, 12), 0);
     const encoder = this.device.createCommandEncoder({ label: "Uniform reference t=0 surface reconstruction" });
+    // Seed static rho'/face-open authority once across the lattice. Runtime
+    // updates only need the rolling active box; untouched air keeps this exact
+    // static boundary state instead of paying the same full pass every frame.
+    this.runDirect(encoder, "Uniform initial Sec. 3.3 interface authority",
+      this.pipelines.extrapolationAuthorityDense, this.extrapolationAuthorityGroup,
+      [Math.ceil(this.info.nx / 4), Math.ceil(this.info.ny / 4), Math.ceil(this.info.nz / 4)]);
     if (this.densityPostProcessing) {
       this.run(encoder, "Uniform initial post-process blur x", this.pipelines.postprocessBlurX, this.postprocessBlurXGroup);
       this.run(encoder, "Uniform initial post-process blur y", this.pipelines.postprocessBlurY, this.postprocessBlurYGroup);
@@ -777,7 +827,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       UNIFORM_GAMMA_DIFFUSION_ITERATIONS,
     ));
     this.sharpeningStrength = finite("sharpeningStrength", 1, 0.25, 2);
-    this.sharpeningDistance = finite("sharpeningDistance", 2.1, 1.1, 3.1);
+    this.sharpeningDistance = finite("sharpeningDistance", 2.1, 0.1, 3.1);
     this.solidExcessCorrection = values.solidExcessCorrection !== "off";
     this.rigidCoupling = values.rigidCoupling !== "off";
     this.paperTimeStep = values.timeStep !== "scene";
@@ -794,6 +844,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     const volume = new Float32Array(nx * ny * nz);
     const dam = sceneDamBreakBox(this.scene);
     let initial = 0;
+    const wetMinimum = [nx, ny, nz];
+    const wetMaximum = [0, 0, 0];
     for (let z = 0; z < nz; z += 1) for (let y = 0; y < ny; y += 1) for (let x = 0; x < nx; x += 1) {
       const aboveGround = (y + 0.5) * cellHeight > terrain[x + nx * z];
       const containerOpen = sphericalContainerOpenFractionAtCell(this.scene, x, y, z, [nx, ny, nz]);
@@ -808,6 +860,14 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       const density = Math.min(containerOpen, liquidFraction);
       volume[x + nx * (y + ny * z)] = density;
       initial += density;
+      if (density > 1e-5) {
+        wetMinimum[0] = Math.min(wetMinimum[0]!, x);
+        wetMinimum[1] = Math.min(wetMinimum[1]!, y);
+        wetMinimum[2] = Math.min(wetMinimum[2]!, z);
+        wetMaximum[0] = Math.max(wetMaximum[0]!, x + 1);
+        wetMaximum[1] = Math.max(wetMaximum[1]!, y + 1);
+        wetMaximum[2] = Math.max(wetMaximum[2]!, z + 1);
+      }
     }
     this.upload3DF32(this.volumeA, volume, nx, ny, nz);
     this.upload3DF32(this.volumeB, volume, nx, ny, nz);
@@ -824,6 +884,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.referenceVolumeCells = initial;
     const terrainCells = Float32Array.from(terrain, (height) => height / cellHeight);
     this.upload2DF32(this.terrainTexture, terrainCells, nx, nz);
+    this.initializeActiveRegion(wetMinimum, wetMaximum);
     Object.assign(this.info, {
       initialVolumeCellSum: initial, volumeCellSum: initial,
       representedVolumeCellSum: initial, volumeDrift: 0, representedVolumeDrift: 0,
@@ -833,6 +894,39 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
         ? -c.width_m / 2 + dam.max.x * c.width_m : c.width_m / 2,
       frontTelemetrySource: "initial-condition",
     });
+  }
+
+  private initializeActiveRegion(wetMinimum: number[], wetMaximum: number[]): void {
+    const dimensions = [this.info.nx, this.info.ny, this.info.nz];
+    const words = new Uint32Array(UNIFORM_ACTIVE_LEVEL_BASE_WORD
+      + UNIFORM_ACTIVE_MAX_LEVELS * UNIFORM_ACTIVE_LEVEL_WORDS);
+    const empty = wetMaximum.every((value) => value === 0);
+    const minimum = !this.activeRegionEnabled || empty ? [0, 0, 0]
+      : wetMinimum.map((value) => Math.max(0, value - 8));
+    const maximum = !this.activeRegionEnabled ? dimensions
+      : empty ? [1, 1, 1] : wetMaximum.map((value, axis) =>
+        Math.min(dimensions[axis]!, value + 8));
+    // Words 0..5 retain the padded wet/source box from the previous step.
+    // Words 7..12 are the union of two consecutive boxes, giving ping-pong
+    // targets one clearing tail without retaining the entire swept history.
+    words.set(minimum, 0);
+    words.set(maximum, 3);
+    words.set(minimum, 7);
+    words.set(maximum, 10);
+    words.set(maximum.map((value, axis) => Math.ceil((value - minimum[axis]!) / 4)), 13);
+    this.pressureMultigrid.levelPhysicalDimensions.forEach((level, index) => {
+      const base = UNIFORM_ACTIVE_LEVEL_BASE_WORD + index * UNIFORM_ACTIVE_LEVEL_WORDS;
+      const scale = dimensions.map((value, axis) => value / level[axis]!);
+      const origin = minimum.map((value, axis) => Math.max(0, Math.floor(value / scale[axis]!) - 2));
+      const end = maximum.map((value, axis) => Math.min(level[axis]! + 2,
+        Math.ceil(value / scale[axis]!) + 3));
+      words.set(origin, base);
+      words.set(end.map((value, axis) => Math.ceil((value - origin[axis]!) / 4)), base + 3);
+      words.set(level, base + 6);
+    });
+    this.device.queue.writeBuffer(this.activeRegion, 0, words);
+    this.device.queue.writeBuffer(this.activeScratch, 0, words);
+    this.device.queue.writeBuffer(this.activeDispatch, 0, words);
   }
 
   private upload3DF32(texture: GPUTexture, values: Float32Array, nx: number, ny: number, nz: number): void {
@@ -854,13 +948,44 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
 
   private dispatch(pass: GPUComputePassEncoder, pipeline: GPUComputePipeline, group: GPUBindGroup): void {
     pass.setPipeline(pipeline); pass.setBindGroup(0, group);
-    pass.dispatchWorkgroups(Math.ceil(this.info.nx / 4), Math.ceil(this.info.ny / 4), Math.ceil(this.info.nz / 4));
+    if (this.activeRegionEnabled) {
+      pass.dispatchWorkgroupsIndirect(this.activeDispatch, UNIFORM_ACTIVE_MAIN_DISPATCH_OFFSET);
+    } else pass.dispatchWorkgroups(
+      Math.ceil(this.info.nx / 4), Math.ceil(this.info.ny / 4), Math.ceil(this.info.nz / 4));
   }
 
   private run(encoder: GPUCommandEncoder, label: string, pipeline: GPUComputePipeline, group: GPUBindGroup): void {
     const pass = encoder.beginComputePass({ label });
     this.dispatch(pass, pipeline, group);
     pass.end();
+  }
+
+  private runDirect(encoder: GPUCommandEncoder, label: string, pipeline: GPUComputePipeline,
+    group: GPUBindGroup, workgroups: readonly [number, number, number]): void {
+    const pass = encoder.beginComputePass({ label });
+    pass.setPipeline(pipeline); pass.setBindGroup(0, group);
+    pass.dispatchWorkgroups(...workgroups); pass.end();
+  }
+
+  private encodeActiveRegion(encoder: GPUCommandEncoder, externalSources: boolean): void {
+    if (!this.pipelines) throw new Error("Uniform reference pipelines are not initialized");
+    if (!this.activeRegionEnabled) return;
+    this.runDirect(encoder, "Uniform reset active liquid bounds", this.pipelines.resetActiveRegion,
+      this.reductionGroup, [1, 1, 1]);
+    this.run(encoder, "Uniform scan prior active liquid bounds", this.pipelines.scanActiveRegion,
+      this.reductionGroup);
+    // A newly enabled inlet or interactive drop may begin outside the prior
+    // box. Pay the dense source-only discovery pass only on those frames; an
+    // ordinary closed sparse scene never scans its empty domain again.
+    if (externalSources) this.runDirect(encoder, "Uniform scan external active sources",
+      this.pipelines.scanExternalActiveSources, this.reductionGroup,
+      [Math.ceil(this.info.nx / 4), Math.ceil(this.info.ny / 4), Math.ceil(this.info.nz / 4)]);
+    this.runDirect(encoder, "Uniform finalize active liquid dispatches", this.pipelines.finalizeActiveRegion,
+      this.reductionGroup, [1, 1, 1]);
+    encoder.copyBufferToBuffer(this.activeScratch, 0, this.activeRegion, 0,
+      (UNIFORM_ACTIVE_LEVEL_BASE_WORD + UNIFORM_ACTIVE_MAX_LEVELS * UNIFORM_ACTIVE_LEVEL_WORDS) * 4);
+    encoder.copyBufferToBuffer(this.activeScratch, 0, this.activeDispatch, 0,
+      (UNIFORM_ACTIVE_LEVEL_BASE_WORD + UNIFORM_ACTIVE_MAX_LEVELS * UNIFORM_ACTIVE_LEVEL_WORDS) * 4);
   }
 
   private encodeVelocityExtrapolation(
@@ -992,6 +1117,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // Preserve Sec. 3.6 unplaceable-excess telemetry written during the step.
     encoder.clearBuffer(this.reductions);
     encoder.clearBuffer(this.rigidExchange);
+    this.encodeActiveRegion(encoder, strength > 0 || drop !== undefined);
     if (this.symmetryStageAuditTextures) encoder.copyTextureToTexture(
       { texture: this.velocityA }, { texture: this.symmetryStageAuditTextures.preExtrapolationVelocity },
       [this.info.nx, this.info.ny, this.info.nz],
@@ -1244,11 +1370,12 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   async readStats(): Promise<GPUEulerianInfo> {
     if (this.disposed || this.readbackPending) return this.info;
     this.readbackPending = true;
-    this.statsReadback ??= this.device.createBuffer({ label: "Uniform reference diagnostics readback", size: 112, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    this.statsReadback ??= this.device.createBuffer({ label: "Uniform reference diagnostics readback", size: 176, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
     const encoder = this.device.createCommandEncoder({ label: "Uniform reference diagnostics readback" });
     encoder.copyBufferToBuffer(this.reductions, 0, this.statsReadback, 0, 20);
     encoder.copyBufferToBuffer(this.pressureMultigrid.diagnostics, 0, this.statsReadback, 32, 60);
     encoder.copyBufferToBuffer(this.velocityExtrapolator.convergenceDiagnostics, 0, this.statsReadback, 96, 16);
+    encoder.copyBufferToBuffer(this.activeRegion, 0, this.statsReadback, 112, 64);
     this.device.queue.submit([encoder.finish()]);
     try {
       await this.statsReadback.mapAsync(GPUMapMode.READ);
@@ -1286,6 +1413,17 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
         uniformFIMTerminalActiveFaces: words[24] + words[25],
         uniformFIMConverged: words[24] + words[25] === 0,
         uniformFIMExecutedPasses: words[27],
+      });
+      const activeMinimum = { x: words[35]!, y: words[36]!, z: words[37]! };
+      const activeMaximum = { x: words[38]!, y: words[39]!, z: words[40]! };
+      const activeCellCount = Math.max(0, activeMaximum.x - activeMinimum.x)
+        * Math.max(0, activeMaximum.y - activeMinimum.y)
+        * Math.max(0, activeMaximum.z - activeMinimum.z);
+      Object.assign(this.info, {
+        uniformActiveRegionMinimum: activeMinimum,
+        uniformActiveRegionMaximum: activeMaximum,
+        uniformActiveRegionCellCount: activeCellCount,
+        uniformActiveRegionFraction: activeCellCount / Math.max(1, this.info.cellCount),
       });
       return this.info;
     } finally {
@@ -1335,6 +1473,9 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.params.destroy();
     this.reductions.destroy();
     this.conditioningScratch.destroy();
+    this.activeRegion.destroy();
+    this.activeScratch.destroy();
+    this.activeDispatch.destroy();
     this.rigidSystem.destroy();
     this.rigidExchange.destroy();
     this.statsReadback?.destroy();
@@ -1391,15 +1532,36 @@ const UNIFORM_FLUID_STAGES: readonly FluidPipelineStage[] = [
       UNIFORM_ADVANCE_PHASE.extensionHierarchy.label,
     ],
     tip: uniformExtensionTip(),
-    controls: [{
-      kind: "readout",
-      label: "Front sweeps",
-      hint: "Fixed FIM iteration ceiling; the front resolves early and later sweeps are no-ops on converged cells.",
-      value: (context) => {
-        const facts = uniformFacts(context);
-        return facts ? `${facts.extrapolationFrontSweeps}` : "—";
+    controls: [
+      {
+        kind: "param-choice",
+        param: "activeRegion",
+        label: "Dispatch",
+        options: [
+          { value: "on", label: "Active region" },
+          { value: "off", label: "Dense control" },
+        ],
       },
-    }],
+      {
+        kind: "readout",
+        label: "Work box",
+        hint: "Latest GPU-measured dispatch volume as a share of the uniform lattice.",
+        value: (context) => context.values.activeRegion === "off"
+          ? "100% dense"
+          : context.info?.uniformActiveRegionFraction !== undefined
+            ? `${(100 * context.info.uniformActiveRegionFraction).toFixed(1)}%`
+            : "—",
+      },
+      {
+        kind: "readout",
+        label: "Front sweeps",
+        hint: "Bounded FIM iteration ceiling; indirect work resolves early and later sweeps are no-ops on converged cells.",
+        value: (context) => {
+          const facts = uniformFacts(context);
+          return facts ? `${facts.extrapolationFrontSweeps}` : "—";
+        },
+      },
+    ],
     state: () => "on",
     chip: uniformExtensionChip,
   },
@@ -1499,8 +1661,8 @@ const UNIFORM_FLUID_STAGES: readonly FluidPipelineStage[] = [
       param: "sharpeningDistance",
       label: "Trace distance",
       unit: "cells",
-      min: 1.1, max: 3.1, step: 0.1, digits: 1,
-      hint: "Maximum gradient-trace distance D; the paper explores 1.1–3.1 cells.",
+      min: 0.1, max: 3.1, step: 0.1, digits: 1,
+      hint: "Maximum gradient-trace distance D; the paper explores 1.1–3.1 cells, and values below that keep returned mass local.",
       enabled: (context) => context.values.densitySharpening !== "off"
         && context.values.sharpeningMassCorrection !== "off",
     }],

@@ -13,6 +13,7 @@ import { sceneDefinitionTakesLattice } from "@/lib/scene-definition";
 import { svoSceneryRefinementDepth, SVO_ENVIRONMENT_REFINEMENT_DEPTH_MAXIMUM, SVO_ENVIRONMENT_REFINEMENT_DEPTH_MINIMUM } from "@/lib/svo-render-tuning";
 import { terrainSampleShape } from "@/lib/terrain";
 import type { FluidInflow } from "@/lib/model";
+import { sceneAtFinestCellSize } from "@/lib/scene-scale";
 
 const defaultInflow: FluidInflow = {
   center_m: { x: -0.4, y: 0.55, z: 0 }, radius_m: 0.08, length_m: 0.12,
@@ -47,6 +48,7 @@ export function SceneConfigPopover() {
   const setOpen = useUIStore((state) => state.setSceneModalOpen);
   const scene = useSceneStore((state) => state.scene);
   const presetId = useSceneStore((state) => state.presetId);
+  const setScene = useSceneStore((state) => state.setScene);
   const patchScene = useSceneStore((state) => state.patchScene);
   const patchContainer = useSceneStore((state) => state.patchContainer);
   const patchFluid = useSceneStore((state) => state.patchFluid);
@@ -70,6 +72,10 @@ export function SceneConfigPopover() {
   const voxelDimensions = [scene.container.width_m, scene.container.height_m, scene.container.depth_m]
     .map((extent) => Math.max(8, Math.round(extent / voxelDomain.finestCellSize_m)));
   const patchVoxelDomain = (patch: Partial<typeof voxelDomain>) => patchScene({ voxelDomain: { ...voxelDomain, ...patch } });
+  const setFinestCellSize = (value: number) => {
+    const finestCellSize_m = Math.max(0.0015625, value);
+    setScene(sceneAtFinestCellSize(scene, finestCellSize_m), presetId);
+  };
   const patchInflow = (patch: Partial<FluidInflow>) => patchFluid({ inflow: { ...(inflow ?? defaultInflow), ...patch } });
   // The jet's direction is carried by its velocity vector (the solvers orient
   // the injection cylinder along it), edited here as speed + pitch + yaw.
@@ -144,19 +150,20 @@ export function SceneConfigPopover() {
                 {/* Floors at 1.5625 mm, the bottom of the halving ladder every
                     container dimension stays a whole number of 8-cell bricks at.
                     The old 10 mm floor predates the dry render and made the
-                    entire fine ladder unreachable from the UI. Note this patches
-                    a built document: it changes the tree, not the terrain bake
-                    or the generators' legibility ladders, which are inputs to
-                    construction. Reload the scene to rebuild the set. */}
-                <NumberField label="Finest cell" unit="m" value={voxelDomain.finestCellSize_m} step={0.0015625} min={0.0015625} max={0.25} onChange={(value) => patchVoxelDomain({ finestCellSize_m: Math.max(0.0015625, value) })} />
+                    entire fine ladder unreachable from the UI. This moves a
+                    built document onto another lattice, so seeded water is
+                    re-rasterized to preserve its physical region. Terrain
+                    bakes and generator legibility ladders remain construction
+                    inputs; reload a rebuildable scene to regenerate those. */}
+                <NumberField label="Finest cell" unit="m" value={voxelDomain.finestCellSize_m} step={0.0015625} min={0.0015625} max={0.25} onChange={setFinestCellSize} />
               </div>
               <Segmented ariaLabel="Sparse voxel brick size" value={String(voxelDomain.brickSize_cells)} options={[{ value: "4", label: "4³-cell leaves", disabled: fluidEnabled, title: fluidEnabled ? "4³ leaves require a renderer-only scene; fluid owner pages currently use 8³ bricks." : undefined }, { value: "8", label: "8³-cell leaves" }]} onChange={(value) => patchVoxelDomain({ brickSize_cells: value === "4" ? 4 : 8 })} />
               <small className="control-hint">Container lattice: {voxelDimensions.join(" × ")} finest cells. The sparse world grows automatically to include authored environment objects and optional scene bounds.{fluidEnabled ? " Fluid scenes require 8³ leaves; 4³ is available for renderer-only scenes." : ""}</small>
             </section>
             {/* The rebuild, and why it is a second control rather than a fix to
-                the one above. "Finest cell" writes onto a finished document, and
-                for a scene whose whole body is a container of water that is the
-                complete edit. It is not for a scene that *bakes* something: the
+                the one above. "Finest cell" moves a finished document and its
+                water onto another lattice. It is not sufficient for a scene that
+                *bakes* something: the
                 hero garden bakes a heightfield, composes its set against the
                 surface that bake produced, and hands every generator a detail
                 voxel to size its features against — none of which a patch

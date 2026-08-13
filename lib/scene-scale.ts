@@ -1,4 +1,4 @@
-import { cloneScene, type SceneDescription, type Vec3 } from "./model";
+import { cloneScene, type InitialLiquidVolume, type SceneDescription, type Vec3 } from "./model";
 import {
   DEFAULT_MAXIMUM_LATTICE_DIMENSION,
   MINIMUM_LATTICE_DIMENSION,
@@ -63,6 +63,31 @@ function clamp(value: number, low: number, high: number): number {
 }
 
 /**
+ * Move a finished scene onto an arbitrary solver lattice without changing the
+ * initial water geometry it describes.
+ *
+ * Seed points address storage bricks, not metric volumes. Patching only
+ * `finestCellSize_m` therefore changes the physical size of every seeded body:
+ * one 8^3 brick at 50 mm becomes one 8^3 brick at 12.5 mm. Capture the water as
+ * container-relative regions before moving the lattice, then rasterize those
+ * same regions onto the new brick grid.
+ */
+export function sceneAtFinestCellSize(
+  scene: SceneDescription,
+  finestCellSize_m: number,
+): SceneDescription {
+  if (!(finestCellSize_m > 0) || !Number.isFinite(finestCellSize_m)) {
+    throw new RangeError("Finest cell size must be positive and finite");
+  }
+  if (finestCellSize_m === scene.voxelDomain.finestCellSize_m) return cloneScene(scene);
+  const water = initialFluidLayout(scene);
+  const next = cloneScene(scene);
+  next.voxelDomain.finestCellSize_m = finestCellSize_m;
+  applyInitialFluidLayout(next, water);
+  return repairSceneForContainer(next);
+}
+
+/**
  * Re-establish the invariants `validateScene` enforces after the container has
  * moved underneath the authored content. Every clamp here is a repair, not a
  * scale: content keeps its size wherever the new container still admits it.
@@ -102,7 +127,7 @@ export function repairSceneForContainer(scene: SceneDescription): SceneDescripti
   }
   const volumes = scene.fluid.initialLiquidVolumes;
   if (volumes) {
-    scene.fluid.initialLiquidVolumes = volumes.flatMap((volume) => {
+    scene.fluid.initialLiquidVolumes = volumes.flatMap<InitialLiquidVolume>((volume) => {
       if (volume.shape === "box") {
         const min_m = {
           x: clamp(volume.min_m.x, -c.width_m / 2, c.width_m / 2),
@@ -155,54 +180,52 @@ export function repairSceneForContainer(scene: SceneDescription): SceneDescripti
 }
 
 function scaledScene(scene: SceneDescription, axis: SceneScaleAxis, factor: SceneScaleFactor): SceneDescription {
+  if (axis === "detail") {
+    return sceneAtFinestCellSize(scene, scene.voxelDomain.finestCellSize_m / factor);
+  }
   // Capture once into the multi-region representation. Every legacy initial
   // condition follows the same geometry path from here on.
   const water = initialFluidLayout(scene);
   const next = cloneScene(scene);
-  if (axis === "world") {
-    next.container.width_m = scene.container.width_m * factor;
-    next.container.height_m = scene.container.height_m * factor;
-    next.container.depth_m = scene.container.depth_m * factor;
-    next.voxelDomain.finestCellSize_m = scene.voxelDomain.finestCellSize_m * factor;
-    // Metre lengths that describe the domain rather than its contents: the
-    // oracle's cell and the authored address-space bounds are the same lattice
-    // measured in different units, so they ride the world scale.
-    next.nominalResolution = { length_m: scene.nominalResolution.length_m * factor };
-    if (next.voxelDomain.bounds_m) {
-      next.voxelDomain.bounds_m = {
-        min: scaleVec3(next.voxelDomain.bounds_m.min, factor),
-        max: scaleVec3(next.voxelDomain.bounds_m.max, factor),
-      };
-    }
-    // A baked terrain grid is metric through and through: where its samples
-    // sit, how far apart they are, and how high they stand are all lengths in
-    // the container's frame, so all three ride the scale together. A procedural
-    // terrain needs none of this — it is re-derived against the new container.
-    const grid = next.terrain?.grid;
-    if (grid) {
-      next.terrain!.grid = {
-        ...grid,
-        origin_m: { x: grid.origin_m.x * factor, z: grid.origin_m.z * factor },
-        spacing_m: grid.spacing_m * factor,
-        heights_m: grid.heights_m.map((height) => height * factor),
-      };
-    }
-    // Analytic liquid volumes are absolute metres, so they ride world scale
-    // whole and retain their share of the container and their radius in cells.
-    if (next.fluid.initialLiquidVolumes) {
-      next.fluid.initialLiquidVolumes = next.fluid.initialLiquidVolumes.map((volume) => volume.shape === "box"
-        ? { ...volume, min_m: scaleVec3(volume.min_m, factor), max_m: scaleVec3(volume.max_m, factor) }
-        : volume.shape === "cylinder"
-          ? { ...volume, center_m: scaleVec3(volume.center_m, factor), radius_m: volume.radius_m * factor,
-            halfHeight_m: volume.halfHeight_m * factor }
-          : { ...volume, center_m: scaleVec3(volume.center_m, factor), radius_m: volume.radius_m * factor });
-    }
-  } else {
-    next.voxelDomain.finestCellSize_m = scene.voxelDomain.finestCellSize_m / factor;
+  next.container.width_m = scene.container.width_m * factor;
+  next.container.height_m = scene.container.height_m * factor;
+  next.container.depth_m = scene.container.depth_m * factor;
+  next.voxelDomain.finestCellSize_m = scene.voxelDomain.finestCellSize_m * factor;
+  // Metre lengths that describe the domain rather than its contents: the
+  // oracle's cell and the authored address-space bounds are the same lattice
+  // measured in different units, so they ride the world scale.
+  next.nominalResolution = { length_m: scene.nominalResolution.length_m * factor };
+  if (next.voxelDomain.bounds_m) {
+    next.voxelDomain.bounds_m = {
+      min: scaleVec3(next.voxelDomain.bounds_m.min, factor),
+      max: scaleVec3(next.voxelDomain.bounds_m.max, factor),
+    };
   }
-  // WORLD changes metres per cell; DETAIL changes how many cells and bricks
-  // cover the same tank. Both must re-materialize the same canonical water
-  // regions against the resulting lattice.
+  // A baked terrain grid is metric through and through: where its samples
+  // sit, how far apart they are, and how high they stand are all lengths in
+  // the container's frame, so all three ride the scale together. A procedural
+  // terrain needs none of this — it is re-derived against the new container.
+  const grid = next.terrain?.grid;
+  if (grid) {
+    next.terrain!.grid = {
+      ...grid,
+      origin_m: { x: grid.origin_m.x * factor, z: grid.origin_m.z * factor },
+      spacing_m: grid.spacing_m * factor,
+      heights_m: grid.heights_m.map((height) => height * factor),
+    };
+  }
+  // Analytic liquid volumes are absolute metres, so they ride world scale
+  // whole and retain their share of the container and their radius in cells.
+  if (next.fluid.initialLiquidVolumes) {
+    next.fluid.initialLiquidVolumes = next.fluid.initialLiquidVolumes.map((volume) => volume.shape === "box"
+      ? { ...volume, min_m: scaleVec3(volume.min_m, factor), max_m: scaleVec3(volume.max_m, factor) }
+      : volume.shape === "cylinder"
+        ? { ...volume, center_m: scaleVec3(volume.center_m, factor), radius_m: volume.radius_m * factor,
+          halfHeight_m: volume.halfHeight_m * factor }
+        : { ...volume, center_m: scaleVec3(volume.center_m, factor), radius_m: volume.radius_m * factor });
+  }
+  // WORLD changes metres per cell, so re-materialize the same canonical water
+  // regions against the resulting metric lattice.
   applyInitialFluidLayout(next, water);
   return repairSceneForContainer(next);
 }

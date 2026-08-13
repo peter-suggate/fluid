@@ -7,7 +7,7 @@ const extrapolator = readFileSync(
 const host = readFileSync(new URL("../lib/webgpu-uniform-reference.ts", import.meta.url), "utf8");
 
 test("uniform FIM publishes and checks the source-stated empty active-list termination", () => {
-  assert.match(extrapolator, /this\.activeFrontPasses = Math\.max\(\.\.\.dims\)/);
+  assert.match(extrapolator, /this\.activeFrontPasses = Math\.min\(Math\.max\(\.\.\.dims\), 16\)/);
   assert.match(extrapolator, /GPUBufferUsage\.COPY_SRC/);
   assert.match(extrapolator, /get convergenceDiagnostics\(\): GPUBuffer/);
   assert.match(host, /copyBufferToBuffer\(this\.velocityExtrapolator\.convergenceDiagnostics/);

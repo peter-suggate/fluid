@@ -23,6 +23,10 @@ struct FrontParams {
   targetParity: u32,
   hierarchySourceUsesBaseDims: u32,
   hierarchyTargetUsesBaseDims: u32,
+  activeLevel: u32,
+  _padding0: u32,
+  _padding1: u32,
+  _padding2: u32,
 }
 struct ConvergenceState {
   activeA: atomic<u32>,
@@ -48,12 +52,23 @@ struct DispatchArgs {
 @group(0) @binding(8) var faceOpenIn: texture_3d<f32>;
 @group(0) @binding(9) var<storage, read_write> convergence: ConvergenceState;
 @group(0) @binding(10) var<storage, read_write> dispatchArgs: DispatchArgs;
+@group(0) @binding(11) var<storage, read> activeRegion: array<u32>;
 
 const DISTANCE_INFINITY: f32 = 65504.0;
 const LIQUID_ISOVALUE: f32 = 0.5;
 const ACCURATE_BAND_CELLS: f32 = 2.0;
 
 fn baseDims() -> vec3i { return vec3i(textureDimensions(densityIn)); }
+fn activeBaseId(gid:vec3u)->vec3i{return vec3i(gid)+vec3i(vec3u(activeRegion[7],activeRegion[8],activeRegion[9]));}
+fn hierarchyActiveId(gid:vec3u)->vec3i{
+  if(frontParams.activeLevel==0xffffffffu){return vec3i(gid);}
+  if(frontParams.hierarchyTargetUsesBaseDims!=0u){return activeBaseId(gid);}
+  let base=16u+10u*frontParams.activeLevel;
+  // Pressure hierarchy coordinates carry a one-cell domain halo; velocity
+  // hierarchy textures do not. Its conservative 2/3-cell active halo remains
+  // after translating the origin back by one.
+  return vec3i(gid)+vec3i(vec3u(activeRegion[base],activeRegion[base+1u],activeRegion[base+2u]))-vec3i(1);
+}
 fn cellSize() -> vec3f { return params.cellGravity.xyz; }
 fn accurateBandDistance() -> f32 {
   let h = cellSize();
@@ -121,9 +136,16 @@ fn oneNeighborTouchesSource(p: vec3i, component: u32) -> bool {
   return false;
 }
 
+@compute @workgroup_size(4,4,4)
+fn clearExtrapolationState(@builtin(global_invocation_id) gid:vec3u){
+  let p=vec3i(gid);if(!inBounds(p,baseDims())){return;}
+  textureStore(primaryOut,p,vec4f(0.0));
+  textureStore(secondaryOut,p,vec4f(vec3f(DISTANCE_INFINITY),0.0));
+}
+
 @compute @workgroup_size(4, 4, 4)
 fn seedActiveFront(@builtin(global_invocation_id) gid: vec3u) {
-  let p = vec3i(gid); let d = baseDims();
+  let p = activeBaseId(gid); let d = baseDims();
   if (!inBounds(p, d)) { return; }
   let inputVelocity = textureLoad(velocityIn, p, 0).xyz;
   var values = vec3f(0.0);
@@ -262,7 +284,7 @@ fn activatedByConvergedUpwindNeighbor(p: vec3i, component: u32) -> bool {
 
 @compute @workgroup_size(4, 4, 4)
 fn updateActiveFront(@builtin(global_invocation_id) gid: vec3u) {
-  let p = vec3i(gid); let d = baseDims();
+  let p = activeBaseId(gid); let d = baseDims();
   if (!inBounds(p, d)) { return; }
   let oldValues = textureLoad(primaryIn, p, 0);
   let oldDistances = textureLoad(secondaryIn, p, 0);
@@ -329,17 +351,16 @@ fn prepareActiveDispatch(@builtin(global_invocation_id) gid: vec3u) {
     clearActiveCounter(source);
   }
   let activeCount = loadActiveCounter(targetIndex);
-  let d = baseDims();
-  atomicStore(&dispatchArgs.x, select(0u, u32((d.x + 3) / 4), activeCount > 0u));
-  atomicStore(&dispatchArgs.y, select(0u, u32((d.y + 3) / 4), activeCount > 0u));
-  atomicStore(&dispatchArgs.z, select(0u, u32((d.z + 3) / 4), activeCount > 0u));
+  atomicStore(&dispatchArgs.x, select(0u, activeRegion[13], activeCount > 0u));
+  atomicStore(&dispatchArgs.y, select(0u, activeRegion[14], activeCount > 0u));
+  atomicStore(&dispatchArgs.z, select(0u, activeRegion[15], activeCount > 0u));
 }
 
 // Indirect termination leaves the last written ping-pong side dynamic. Resolve
 // the completed two-cell band into canonical textures before hierarchy transfer.
 @compute @workgroup_size(4, 4, 4)
 fn resolveConvergedFront(@builtin(global_invocation_id) gid: vec3u) {
-  let p = vec3i(gid); let d = baseDims();
+  let p = activeBaseId(gid); let d = baseDims();
   if (!inBounds(p, d)) { return; }
   let parity = atomicLoad(&convergence.latestParity);
   let values = select(textureLoad(primaryIn, p, 0), textureLoad(velocityIn, p, 0), parity == 1u);
@@ -427,7 +448,7 @@ fn hierarchyCorrespondingCellSample(
 
 @compute @workgroup_size(4, 4, 4)
 fn restrictKnownVelocity(@builtin(global_invocation_id) gid: vec3u) {
-  let p = vec3i(gid);
+  let p = hierarchyActiveId(gid);
   let sourceDims = hierarchySourceDims();
   let targetDims = hierarchyTargetDims();
   if (!inBounds(p, targetDims)) { return; }
@@ -453,7 +474,7 @@ fn restrictKnownVelocity(@builtin(global_invocation_id) gid: vec3u) {
 
 @compute @workgroup_size(4, 4, 4)
 fn prolongUnknownVelocity(@builtin(global_invocation_id) gid: vec3u) {
-  let p = vec3i(gid);
+  let p = hierarchyActiveId(gid);
   let sourceDims = hierarchySourceDims();
   let targetDims = hierarchyTargetDims();
   if (!inBounds(p, targetDims)) { return; }
@@ -473,10 +494,8 @@ fn prolongUnknownVelocity(@builtin(global_invocation_id) gid: vec3u) {
 
 @compute @workgroup_size(4, 4, 4)
 fn packTransportShell(@builtin(global_invocation_id) gid: vec3u) {
-  let padded = vec3i(gid); let d = baseDims();
-  if (any(padded >= d + vec3i(2))) { return; }
-  let p = padded - vec3i(1);
-  if (!inBounds(p, d)) { textureStore(primaryOut, padded, vec4f(0.0)); return; }
+  let p=activeBaseId(gid);let padded=p+vec3i(1);let d=baseDims();
+  if(!inBounds(p,d)){return;}
   let state = textureLoad(primaryIn, p, 0);
   var values = vec3f(0.0); var knownMask = 0u; var openMask = 0u;
   for (var component = 0u; component < 3u; component += 1u) {

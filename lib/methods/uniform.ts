@@ -29,6 +29,18 @@ const runtimeUpdate = { update: "runtime" as const };
 
 const params: MethodParamSpec[] = [
   {
+    kind: "select",
+    key: "activeRegion",
+    label: "Active-region dispatch",
+    default: "on",
+    tier: "coarse",
+    options: [
+      { value: "on", label: "On · sparse GPU work box" },
+      { value: "off", label: "Off · dense control" },
+    ],
+    hint: "Rebuilds the solver with GPU-resident active bounds or the original full-lattice dispatches. Off is the production A/B control.",
+  },
+  {
     ...runtimeUpdate,
     kind: "select",
     key: "gammaDiffusion",
@@ -103,11 +115,11 @@ const params: MethodParamSpec[] = [
     default: 2.1,
     tier: "fine",
     unit: "cells",
-    min: 1.1,
+    min: 0.1,
     max: 3.1,
     step: 0.1,
     digits: 1,
-    hint: "Maximum Algorithm 2 gradient-trace distance D. The paper uses values from 1.1 to 3.1 cells.",
+    hint: "Maximum Algorithm 2 gradient-trace distance D. The paper uses 1.1 to 3.1 cells; below 1.1 mass stays where it was removed, which reads as weaker surface tension.",
   },
   {
     ...runtimeUpdate,
@@ -165,14 +177,14 @@ const params: MethodParamSpec[] = [
     kind: "number",
     key: "pressureSweeps",
     label: "Pressure pre/post sweeps",
-    default: 4,
+    default: 6,
     tier: "fine",
     unit: "sweeps",
     min: 1,
     max: 8,
     step: 1,
     digits: 0,
-    hint: "Projected red-black Gauss-Seidel sweeps on each side of a multigrid coarse correction. This prebuilt dispatch schedule resets the solver when changed.",
+    hint: "Projected red-black Gauss-Seidel sweeps on each side of a multigrid coarse correction. The paper used four; six keeps deeper 64×32×64 hierarchies converged. This prebuilt dispatch schedule resets the solver when changed.",
   },
   {
     ...runtimeUpdate,
@@ -230,6 +242,7 @@ export function uniformReferenceSolverOptions(
 ): WebGPUUniformReferenceOptions {
   const whole = (key: string) => Math.round(numberValue(values, params, key));
   return {
+    activeRegion: values.activeRegion !== "off",
     densitySharpening: values.densitySharpening !== "off",
     sharpeningMassCorrection: values.sharpeningMassCorrection !== "off",
     gammaDiffusionIterations: values.gammaDiffusion === "off"
@@ -289,7 +302,7 @@ export const uniformMethod: SimulationMethod = {
   supportedFieldModes: ["structure", "density", "cfl", "speed", "phi"],
   params,
   runtimeParamKeys: UNIFORM_RUNTIME_PARAM_KEYS,
-  pressureMapping: "CM11a fixes 3 Full-Cycles, 4 V-Cycles, and four pre/post PRBGS sweeps.",
+  pressureMapping: "CM11a uses 3 Full-Cycles, 4 V-Cycles, and six pre/post PRBGS sweeps (two above the paper's shallow-grid schedule for deep-hierarchy convergence).",
   presetFor: () => ({}),
   createSolverAsync: (
     device,

@@ -45,4 +45,12 @@ test("brick-quad scene is registered in the UI presets and the smoke harness", (
   assert.equal(scenario.scene.container.width_m, 0.8);
   assert.equal(scenario.scene.container.height_m, 0.4);
   assert.equal(scenario.scene.container.depth_m, 0.8);
+
+  const detail = createSmokeScenario("brick-quad-dam-break", "uniform-detail-first-step");
+  assert.deepEqual(detail.lane.stop, {
+    simulatedTime_s: 1 / 30,
+    exactSteps: 1,
+    maxDt_s: 1 / 30,
+  });
+  assert.deepEqual(detail.lane.methods.map(({ id }) => id), ["uniform"]);
 });

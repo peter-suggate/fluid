@@ -90,6 +90,18 @@ export function DiagnosticsPanel() {
         <MetricCard label={uniformMethod ? "GPU uniform grid" : "GPU octree"} value={gpuInfo ? `${gpuInfo.nx} × ${gpuInfo.storedNy} × ${gpuInfo.nz}` : "initializing"} unit={gpuInfo ? uniformMethod
           ? `${gpuInfo.ny} cells in Y · dense`
           : `${gpuInfo.ny} cubic-equivalent Y · ${((gpuInfo.activeCompressionRatio ?? gpuInfo.compressionRatio) * 100).toFixed(0)}% active` : undefined} tone={backend === "webgpu" ? "good" : "neutral"} />
+        {uniformMethod && <MetricCard
+          label="Uniform active dispatch"
+          value={gpuInfo?.uniformActiveRegionFraction !== undefined
+            ? `${(gpuInfo.uniformActiveRegionFraction * 100).toFixed(1)}%`
+            : "awaiting sample"}
+          unit={gpuInfo?.uniformActiveRegionMinimum && gpuInfo.uniformActiveRegionMaximum
+            ? `${gpuInfo.uniformActiveRegionCellCount?.toLocaleString() ?? "—"} cells · [${gpuInfo.uniformActiveRegionMinimum.x}, ${gpuInfo.uniformActiveRegionMinimum.y}, ${gpuInfo.uniformActiveRegionMinimum.z}] → [${gpuInfo.uniformActiveRegionMaximum.x}, ${gpuInfo.uniformActiveRegionMaximum.y}, ${gpuInfo.uniformActiveRegionMaximum.z}]`
+            : "rolling two-frame work box"}
+          tone={gpuInfo?.uniformActiveRegionFraction !== undefined
+            ? gpuInfo.uniformActiveRegionFraction < 0.75 ? "good" : "warn"
+            : "neutral"}
+        />}
         <MetricCard label={uniformMethod ? "Uniform pressure lattice" : "Octree pressure rows"} value={gpuInfo ? uniformMethod
           ? (gpuInfo.nx * gpuInfo.storedNy * gpuInfo.nz).toLocaleString()
           : pressureRowsLabel : "—"} unit={gpuInfo ? `cells · ${(gpuInfo.allocatedBytes / 1048576).toFixed(1)} MiB physics` : undefined} />

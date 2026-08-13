@@ -259,6 +259,11 @@ export interface GPUEulerianInfo {
   uniformFIMTerminalActiveFaces?: number;
   uniformFIMConverged?: boolean;
   uniformFIMExecutedPasses?: number;
+  /** Latest rolling uniform work box, copied only by the existing diagnostics readback. */
+  uniformActiveRegionMinimum?: GPUFieldLocation;
+  uniformActiveRegionMaximum?: GPUFieldLocation;
+  uniformActiveRegionCellCount?: number;
+  uniformActiveRegionFraction?: number;
   /** Chentanez--Mueller mass stored above rho=1 after the latest transport. */
   adaptiveCompressedExcessVolume_cells?: number;
   /** Conserved mass currently below the rho=.5 visible-surface threshold. */

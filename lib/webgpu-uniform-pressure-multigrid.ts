@@ -4,8 +4,12 @@ import { UNIFORM_CM11A_COARSE_RESIDUAL_TOLERANCE,
 
 export const UNIFORM_CM11A_FULL_CYCLES = 3;
 export const UNIFORM_CM11A_V_CYCLES = 4;
-export const UNIFORM_CM11A_PRE_SWEEPS = 4;
-export const UNIFORM_CM11A_POST_SWEEPS = 4;
+// CM11a measured four pre/post sweeps on its published grids. Six is the
+// minimum robust schedule for the deeper 64x32x64 hierarchy: at four or five,
+// a late Full-Cycle coarse correction reaches the 4096-sweep cap and its
+// unconverged pressure injects 10^7 m/s into the first projection.
+export const UNIFORM_CM11A_PRE_SWEEPS = 6;
+export const UNIFORM_CM11A_POST_SWEEPS = 6;
 export const UNIFORM_CM11A_CONSTRAINT_LEVELS = 3;
 export const UNIFORM_CM11A_PHI_PRESERVATION_LEVELS = 2;
 // TallCells reports 1e-4 s^-1 as its GPU/single-precision absolute L-infinity
@@ -179,6 +183,7 @@ interface PlannedDispatch {
   readonly entryPoint: EntryPoint;
   readonly stage: UniformCM11aPlanStage;
   readonly workgroups: readonly [number, number, number];
+  readonly activeLevel: number;
   readonly coarsestCapture?: {
     readonly invocation: number;
     readonly dimensions: readonly [number, number, number];
@@ -241,7 +246,8 @@ export class WebGPUUniformPressureMultigrid {
   constructor(private readonly device: GPUDevice,
     dimensions: readonly [number, number, number],
     spacing: readonly [number, number, number],
-    private readonly schedule: UniformCM11aSchedule = DEFAULT_UNIFORM_CM11A_SCHEDULE) {
+    private readonly schedule: UniformCM11aSchedule = DEFAULT_UNIFORM_CM11A_SCHEDULE,
+    private readonly activeDispatch?: GPUBuffer) {
     const hierarchy = planUniformCM11aHierarchy(
       dimensions as readonly [number, number, number]);
     if (hierarchy.rejection) throw new RangeError(hierarchy.rejection);
@@ -296,6 +302,12 @@ export class WebGPUUniformPressureMultigrid {
 
   get pressureTexture(): GPUTexture { return this.levels[0]!.pressure[0]; }
 
+  /** Physical (halo-free) dimensions used to seed the shared active ABI. */
+  get levelPhysicalDimensions(): readonly UniformCM11aLevelSize[] {
+    return this.levels.map((level) => [level.dimensions[0] - 2,
+      level.dimensions[1] - 2, level.dimensions[2] - 2] as const);
+  }
+
   async initialize(input: { readonly uniformBindGroupLayout: GPUBindGroupLayout;
     readonly shaderSource: string; readonly signal?: AbortSignal }): Promise<void> {
     this.assertLive(); if (this.pipelines) return;
@@ -311,7 +323,7 @@ export class WebGPUUniformPressureMultigrid {
     this.plan = Object.freeze(this.buildPlan());
   }
 
-  /** Encode the paper's fixed 3 Full-Cycles followed by 4 V-Cycles. */
+  /** Encode the configured Full-Cycle/V-Cycle schedule. */
   encode(
     encoder: GPUCommandEncoder,
     uniformGroup: GPUBindGroup,
@@ -329,7 +341,12 @@ export class WebGPUUniformPressureMultigrid {
       const pass = encoder.beginComputePass({ label: `Uniform CM11a ${dispatch.entryPoint}` });
       pass.setPipeline(dispatch.pipeline); pass.setBindGroup(1, dispatch.group);
       pass.setBindGroup(0, uniformGroup);
-      pass.dispatchWorkgroups(...dispatch.workgroups);
+      if (this.activeDispatch && dispatch.entryPoint !== "mgSolveCoarsest") {
+        const indirectOffset = (16 + dispatch.activeLevel * 10 + 3) * 4;
+        pass.dispatchWorkgroupsIndirect(this.activeDispatch, indirectOffset);
+      } else {
+        pass.dispatchWorkgroups(...dispatch.workgroups);
+      }
       pass.end();
       if (dispatch.coarsestCapture && this.coarsestCaptureBuffers
         && dispatch.coarsestCapture.invocation === this.coarsestCaptureBuffers.invocation) {
@@ -435,7 +452,7 @@ export class WebGPUUniformPressureMultigrid {
       }
       const paperM = this.levels.length;
       const paperDestination = paperM - destinationIndex;
-      const params = this.parameterBuffer(source.dimensions, destination.dimensions, sourceIndex,
+      const params = this.parameterBuffer(source.dimensions, destination.dimensions, destinationIndex,
         [control[0] || paperDestination, control[1] || paperM - UNIFORM_CM11A_PHI_PRESERVATION_LEVELS,
           control[2], control[3]]);
       const allEntries: GPUBindGroupEntry[] = [
@@ -456,6 +473,7 @@ export class WebGPUUniformPressureMultigrid {
       this.ownedGroups.push(group);
       result.push({ pipeline: this.pipelines![entryPoint], group,
         entryPoint, stage: planStage,
+        activeLevel: destinationIndex,
         workgroups: [Math.ceil(dispatchDimensions[0] / 4), Math.ceil(dispatchDimensions[1] / 4),
           Math.ceil(dispatchDimensions[2] / 4)],
         ...(entryPoint === "mgSolveCoarsest" ? { coarsestCapture: {
@@ -558,7 +576,7 @@ export class WebGPUUniformPressureMultigrid {
   }
 
   private parameterBuffer(level: readonly [number, number, number], coarse: readonly [number, number, number],
-    _levelIndex: number, control: readonly [number, number, number, number]): GPUBuffer {
+    activeLevel: number, control: readonly [number, number, number, number]): GPUBuffer {
     const bytes = new ArrayBuffer(80); const u = new Uint32Array(bytes); const f = new Float32Array(bytes);
     u.set(this.levels[0]!.dimensions, 0); u.set(level, 4); u.set(coarse, 8);
     // Each axis has coarsened by however many times *it* was halved, which is
@@ -568,6 +586,7 @@ export class WebGPUUniformPressureMultigrid {
     f.set(this.spacing.map((value, axis) =>
       value * (this.finestSize[axis]! / (level[axis]! - 2))), 12);
     u.set(control, 16);
+    u[3] = activeLevel;
     const buffer = this.device.createBuffer({ label: "Uniform CM11a dispatch parameters", size: 80,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.device.queue.writeBuffer(buffer, 0, bytes); this.ownedParams.push(buffer); return buffer;
