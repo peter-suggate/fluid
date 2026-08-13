@@ -82,7 +82,9 @@ struct RigidBody {
 // are the main-grid origin; the pressure hierarchy consumes the level records
 // beginning at word 16.
 @group(0) @binding(29) var<storage,read> activeRegion:array<u32>;
-@group(0) @binding(30) var<storage,read_write> activeScratch:array<atomic<u32>>;
+@group(0) @binding(30) var<storage,read_write> activeScratch:array<u32>;
+// Header words 0..175 mirror activeRegion; eight words per workgroup follow.
+const ACTIVE_SUMMARY_BASE:u32=176u;
 fn dims() -> vec3i { return vec3i(textureDimensions(volumeIn)); }
 fn activeId(gid:vec3u)->vec3i{return vec3i(gid)+vec3i(vec3u(
   activeRegion[7],activeRegion[8],activeRegion[9]));}
@@ -704,72 +706,61 @@ fn gatherConservativeDensity(@builtin(global_invocation_id) gid:vec3u){
   textureStore(gammaOut,id,vec4f(max(gammaNext,0.0)));
 }
 
-fn diffuseGammaPair(id:vec3i,axis:u32,parity:i32){
+// LAF11 Sec. 3.2 uses Gauss-Jacobi iterations within one dimension and
+// Gauss-Seidel between dimensional sweeps. The value returned here is the
+// signed (rho, gamma) flux into own across one face, calculated entirely
+// from the immutable input textures for the current axis.
+fn gammaDiffusionFluxInto(
+  ownRho:f32,ownGamma:f32,neighborRho:f32,neighborGamma:f32,open:f32,
+)->vec2f{
+  let gammaFlux=0.5*open*(neighborGamma-ownGamma);
+  var rhoFlux=0.0;
+  if(neighborGamma>ownGamma){
+    rhoFlux=open*neighborRho*(neighborGamma-ownGamma)/(2.0*max(neighborGamma,1e-9));
+  }else if(ownGamma>neighborGamma){
+    rhoFlux=-open*ownRho*(ownGamma-neighborGamma)/(2.0*max(ownGamma,1e-9));
+  }
+  return vec2f(rhoFlux,gammaFlux);
+}
+
+fn gammaDiffusionFaceOpen(lower:vec3i,axis:u32)->f32{
+  var upper=lower;upper[axis]=upper[axis]+1;
+  if(!valid(lower)||!valid(upper)){return 0.0;}
+  if(!(hasRigidBodies()||hasTerrain()||hasSphericalContainer())){return 1.0;}
+  return clamp(faceOpenFraction(lower,axis),0.0,1.0);
+}
+
+fn diffuseGammaAxis(id:vec3i,axis:u32){
   if(!valid(id)){return;}
-  // Every invocation owns exactly one output texel. Having only the lower
-  // endpoint write both pair members leaves the unpaired boundary cells
-  // unwritten on alternating parity passes. Since these textures ping-pong,
-  // an unwritten wall cell resurrects its value from two passes ago and
-  // breaks the pair's otherwise conservative rho transfer.
-  let coordinate=id[axis];var lowerCoordinate=coordinate;
-  if((coordinate&1)!=parity){lowerCoordinate-=1;}
-  var lower=id;lower[axis]=lowerCoordinate;var upper=lower;upper[axis]+=1;
-  if(lowerCoordinate<0||!valid(upper)){
-    textureStore(volumeOut,id,vec4f(volume(id)));
-    textureStore(gammaOut,id,vec4f(textureLoad(gammaIn,id,0).x));
-    return;
+  let ownRho=volume(id);
+  let ownGamma=textureLoad(gammaIn,id,0).x;
+  var delta=vec2f(0.0);
+
+  var lower=id;lower[axis]=lower[axis]-1;
+  let lowerOpen=gammaDiffusionFaceOpen(lower,axis);
+  if(lowerOpen>0.0){
+    delta+=gammaDiffusionFluxInto(
+      ownRho,ownGamma,volume(lower),textureLoad(gammaIn,lower,0).x,lowerOpen,
+    );
   }
-  let lowerGamma=textureLoad(gammaIn,lower,0).x;let upperGamma=textureLoad(gammaIn,upper,0).x;
-  let averageGamma=0.5*(lowerGamma+upperGamma);var lowerRho=volume(lower);var upperRho=volume(upper);
-  // The pair straddles one face.  A solid between the two cells carries no
-  // mass, so diffusing across it teleports liquid through the body -- seven
-  // iterations of six axis passes every step, which reads as water leaking
-  // straight through a dragged object.  Weight the exchange by the face
-  // aperture V^f, which is 1 on an open face and 0 on a covered one.
-  //
-  // The body-free case is spelled as the original statements rather than as a
-  // V^f of 1: routing it through the weighted form is algebraically exact but
-  // reassociates the arithmetic, which measurably moved a still scene that has
-  // no solids in it at all.
-  if(hasRigidBodies()||hasTerrain()||hasSphericalContainer()){
-    let open=clamp(faceOpenFraction(lower,axis),0.0,1.0);
-    if(open<=1e-5){
-      textureStore(volumeOut,id,vec4f(volume(id)));
-      textureStore(gammaOut,id,vec4f(textureLoad(gammaIn,id,0).x));
-      return;
-    }
-    if(upperGamma>lowerGamma){let transfer=open*upperRho*(upperGamma-lowerGamma)/(2.0*max(upperGamma,1e-9));lowerRho+=transfer;upperRho-=transfer;}
-    else if(lowerGamma>upperGamma){let transfer=open*lowerRho*(lowerGamma-upperGamma)/(2.0*max(lowerGamma,1e-9));lowerRho-=transfer;upperRho+=transfer;}
-    // A partly covered face equilibrates gamma only as far as it is open.
-    let ownGamma=select(upperGamma,lowerGamma,coordinate==lowerCoordinate);
-    let pairedGamma=ownGamma+open*(averageGamma-ownGamma);
-    textureStore(volumeOut,id,vec4f(max(0.0,select(upperRho,lowerRho,coordinate==lowerCoordinate))));
-    textureStore(gammaOut,id,vec4f(max(0.0,pairedGamma)));
-    return;
+
+  var upper=id;upper[axis]=upper[axis]+1;
+  let upperOpen=gammaDiffusionFaceOpen(id,axis);
+  if(upperOpen>0.0){
+    delta+=gammaDiffusionFluxInto(
+      ownRho,ownGamma,volume(upper),textureLoad(gammaIn,upper,0).x,upperOpen,
+    );
   }
-  if(upperGamma>lowerGamma){let transfer=upperRho*(upperGamma-lowerGamma)/(2.0*max(upperGamma,1e-9));lowerRho+=transfer;upperRho-=transfer;}
-  else if(lowerGamma>upperGamma){let transfer=lowerRho*(lowerGamma-upperGamma)/(2.0*max(lowerGamma,1e-9));lowerRho-=transfer;upperRho+=transfer;}
-  textureStore(volumeOut,id,vec4f(max(0.0,select(upperRho,lowerRho,coordinate==lowerCoordinate))));
-  textureStore(gammaOut,id,vec4f(max(0.0,averageGamma)));
+
+  // The two endpoints evaluate equal and opposite face fluxes from the same
+  // snapshot. Avoid per-cell clamps here: the analytic update is nonnegative,
+  // while clamping only one endpoint would break exact pair conservation.
+  textureStore(volumeOut,id,vec4f(ownRho+delta.x));
+  textureStore(gammaOut,id,vec4f(ownGamma+delta.y));
 }
-@compute @workgroup_size(4,4,4) fn diffuseGammaX0(@builtin(global_invocation_id) gid:vec3u){diffuseGammaPair(activeId(gid),0u,0);}
-@compute @workgroup_size(4,4,4) fn diffuseGammaX1(@builtin(global_invocation_id) gid:vec3u){diffuseGammaPair(activeId(gid),0u,1);}
-@compute @workgroup_size(4,4,4) fn diffuseGammaY0(@builtin(global_invocation_id) gid:vec3u){diffuseGammaPair(activeId(gid),1u,0);}
-@compute @workgroup_size(4,4,4) fn diffuseGammaY1(@builtin(global_invocation_id) gid:vec3u){diffuseGammaPair(activeId(gid),1u,1);}
-@compute @workgroup_size(4,4,4) fn diffuseGammaZ0(@builtin(global_invocation_id) gid:vec3u){diffuseGammaPair(activeId(gid),2u,0);}
-@compute @workgroup_size(4,4,4) fn diffuseGammaZ1(@builtin(global_invocation_id) gid:vec3u){diffuseGammaPair(activeId(gid),2u,1);}
-// The paper leaves the dimension traversal order unspecified. volumeIn and
-// gammaIn are the xyz result; surfaceIn and pressureIn are the zyx result.
-// Their equal average is invariant under the horizontal x/z exchange that
-// maps one valid paper order to the other.
-@compute @workgroup_size(4,4,4)
-fn averageGammaDiffusion(@builtin(global_invocation_id) gid:vec3u){
-  let id=activeId(gid);if(!valid(id)){return;}
-  let rho=0.5*(volume(id)+textureLoad(surfaceIn,id,0).x);
-  let gamma=0.5*(textureLoad(gammaIn,id,0).x+textureLoad(pressureIn,id,0).x);
-  textureStore(volumeOut,id,vec4f(max(rho,0.0)));
-  textureStore(gammaOut,id,vec4f(max(gamma,0.0)));
-}
+@compute @workgroup_size(4,4,4) fn diffuseGammaX(@builtin(global_invocation_id) gid:vec3u){diffuseGammaAxis(activeId(gid),0u);}
+@compute @workgroup_size(4,4,4) fn diffuseGammaY(@builtin(global_invocation_id) gid:vec3u){diffuseGammaAxis(activeId(gid),1u);}
+@compute @workgroup_size(4,4,4) fn diffuseGammaZ(@builtin(global_invocation_id) gid:vec3u){diffuseGammaAxis(activeId(gid),2u);}
 
 fn diffusionVelocity(p:vec3i)->vec3f{let v=textureLoad(velocityIn,clampCell(p),0).xyz;if(params.boundary.y>0.5&&!valid(p)){return -v;}return v;}
 fn strainMagnitude(id:vec3i)->f32{
@@ -1329,40 +1320,114 @@ fn postprocessResolve(@builtin(global_invocation_id) gid:vec3u){
   textureStore(volumeOut,id,vec4f(reconstructed));
 }
 
-// One cheap dense census replaces hundreds of dense dispatches. The observed
-// wet/source bounds are rebuilt every step. Dispatch the union of the current
-// and previous padded boxes: the one-step tail clears every ping-pong target
-// before it leaves the working set, without retaining the whole swept history.
-@compute @workgroup_size(1)
-fn resetActiveRegion(){
-  let d=dims();
-  atomicStore(&activeScratch[0],u32(d.x));atomicStore(&activeScratch[1],u32(d.y));atomicStore(&activeScratch[2],u32(d.z));
-  atomicStore(&activeScratch[3],0u);atomicStore(&activeScratch[4],0u);atomicStore(&activeScratch[5],0u);
-  atomicStore(&activeScratch[6],0u);
+// The census deliberately contains no atomics. Each 4^3 workgroup reduces its
+// cells in shared memory and writes one uncontended 32-byte summary. A single
+// 256-lane pass then merges those compact records. This avoids serializing all
+// wet cells on seven device-global words, which overwhelmed sparse scenes.
+var<workgroup> activeMinimumLanes:array<vec3u,256>;
+var<workgroup> activeMaximumLanes:array<vec3u,256>;
+var<workgroup> activeSpeedLanes:array<u32,256>;
+fn writeActiveWorkgroupSummary(
+  id:vec3i, wet:bool, localIndex:u32, workgroupId:vec3u, groupCount:vec3u,
+){
+  let d=vec3u(dims());
+  var minimum=d;
+  var maximum=vec3u(0u);
+  var speedBits=0u;
+  if(wet){
+    minimum=vec3u(id);maximum=minimum+vec3u(1u);
+    speedBits=bitcast<u32>(length(faceVelocity(id)));
+  }
+  activeMinimumLanes[localIndex]=minimum;
+  activeMaximumLanes[localIndex]=maximum;
+  activeSpeedLanes[localIndex]=speedBits;
+  workgroupBarrier();
+  var stride=32u;
+  loop{
+    if(localIndex<stride){
+      activeMinimumLanes[localIndex]=min(activeMinimumLanes[localIndex],activeMinimumLanes[localIndex+stride]);
+      activeMaximumLanes[localIndex]=max(activeMaximumLanes[localIndex],activeMaximumLanes[localIndex+stride]);
+      activeSpeedLanes[localIndex]=max(activeSpeedLanes[localIndex],activeSpeedLanes[localIndex+stride]);
+    }
+    workgroupBarrier();
+    if(stride==1u){break;}stride/=2u;
+  }
+  if(localIndex==0u){
+    let summaryIndex=workgroupId.x+groupCount.x*(workgroupId.y+groupCount.y*workgroupId.z);
+    let base=ACTIVE_SUMMARY_BASE+8u*summaryIndex;
+    activeScratch[base]=activeMinimumLanes[0].x;activeScratch[base+1u]=activeMinimumLanes[0].y;
+    activeScratch[base+2u]=activeMinimumLanes[0].z;activeScratch[base+3u]=activeSpeedLanes[0];
+    activeScratch[base+4u]=activeMaximumLanes[0].x;activeScratch[base+5u]=activeMaximumLanes[0].y;
+    activeScratch[base+6u]=activeMaximumLanes[0].z;activeScratch[base+7u]=0u;
+  }
 }
 @compute @workgroup_size(4,4,4)
-fn scanActiveRegion(@builtin(global_invocation_id) gid:vec3u){
-  let id=activeId(gid);if(!valid(id)){return;}
-  atomicMax(&activeScratch[6],bitcast<u32>(length(faceVelocity(id))));
-  if(volume(id)<=1e-5){return;}
-  atomicMin(&activeScratch[0],u32(id.x));atomicMin(&activeScratch[1],u32(id.y));atomicMin(&activeScratch[2],u32(id.z));
-  atomicMax(&activeScratch[3],u32(id.x+1));atomicMax(&activeScratch[4],u32(id.y+1));atomicMax(&activeScratch[5],u32(id.z+1));
+fn scanActiveRegion(
+  @builtin(global_invocation_id) gid:vec3u,
+  @builtin(local_invocation_index) localIndex:u32,
+  @builtin(workgroup_id) workgroupId:vec3u,
+){
+  let id=activeId(gid);
+  let wet=valid(id)&&volume(id)>1e-5;
+  let groupCount=vec3u(activeRegion[13],activeRegion[14],activeRegion[15]);
+  writeActiveWorkgroupSummary(id,wet,localIndex,workgroupId,groupCount);
 }
 @compute @workgroup_size(4,4,4)
-fn scanExternalActiveSources(@builtin(global_invocation_id) gid:vec3u){
-  let id=vec3i(gid);if(!valid(id)){return;}
-  let source=inflowSweptPlugSource(id,params.dimsDt.w)>0.0||dropSource(id)>0.0;
-  if(!source){return;}
-  atomicMin(&activeScratch[0],gid.x);atomicMin(&activeScratch[1],gid.y);atomicMin(&activeScratch[2],gid.z);
-  atomicMax(&activeScratch[3],gid.x+1u);atomicMax(&activeScratch[4],gid.y+1u);atomicMax(&activeScratch[5],gid.z+1u);
+fn scanExternalActiveSources(
+  @builtin(global_invocation_id) gid:vec3u,
+  @builtin(local_invocation_index) localIndex:u32,
+  @builtin(workgroup_id) workgroupId:vec3u,
+){
+  let id=vec3i(gid);let inDomain=valid(id);
+  let source=inDomain&&(inflowSweptPlugSource(id,params.dimsDt.w)>0.0||dropSource(id)>0.0);
+  let wet=inDomain&&(volume(id)>1e-5||source);
+  let groupCount=(vec3u(dims())+vec3u(3u))/4u;
+  writeActiveWorkgroupSummary(id,wet,localIndex,workgroupId,groupCount);
+}
+fn reduceActiveSummaryRange(groupCount:vec3u,lane:u32){
+  let d=vec3u(dims());let summaryCount=groupCount.x*groupCount.y*groupCount.z;
+  var minimum=d;var maximum=vec3u(0u);var speedBits=0u;
+  for(var summaryIndex=lane;summaryIndex<summaryCount;summaryIndex+=256u){
+    let base=ACTIVE_SUMMARY_BASE+8u*summaryIndex;
+    minimum=min(minimum,vec3u(activeScratch[base],activeScratch[base+1u],activeScratch[base+2u]));
+    maximum=max(maximum,vec3u(activeScratch[base+4u],activeScratch[base+5u],activeScratch[base+6u]));
+    speedBits=max(speedBits,activeScratch[base+3u]);
+  }
+  activeMinimumLanes[lane]=minimum;
+  activeMaximumLanes[lane]=maximum;
+  activeSpeedLanes[lane]=speedBits;
+  workgroupBarrier();
+  var stride=128u;
+  loop{
+    if(lane<stride){
+      activeMinimumLanes[lane]=min(activeMinimumLanes[lane],activeMinimumLanes[lane+stride]);
+      activeMaximumLanes[lane]=max(activeMaximumLanes[lane],activeMaximumLanes[lane+stride]);
+      activeSpeedLanes[lane]=max(activeSpeedLanes[lane],activeSpeedLanes[lane+stride]);
+    }
+    workgroupBarrier();
+    if(stride==1u){break;}stride/=2u;
+  }
+  if(lane==0u){
+    activeScratch[0]=activeMinimumLanes[0].x;activeScratch[1]=activeMinimumLanes[0].y;activeScratch[2]=activeMinimumLanes[0].z;
+    activeScratch[3]=activeMaximumLanes[0].x;activeScratch[4]=activeMaximumLanes[0].y;activeScratch[5]=activeMaximumLanes[0].z;
+    activeScratch[6]=activeSpeedLanes[0];
+  }
+}
+@compute @workgroup_size(256)
+fn reduceActiveRegionSummaries(@builtin(local_invocation_index) lane:u32){
+  reduceActiveSummaryRange(vec3u(activeRegion[13],activeRegion[14],activeRegion[15]),lane);
+}
+@compute @workgroup_size(256)
+fn reduceExternalActiveRegionSummaries(@builtin(local_invocation_index) lane:u32){
+  reduceActiveSummaryRange((vec3u(dims())+vec3u(3u))/4u,lane);
 }
 fn activeCeilDiv(value:u32,divisor:u32)->u32{return (value+divisor-1u)/divisor;}
 @compute @workgroup_size(1)
 fn finalizeActiveRegion(){
   let d=vec3u(dims());
-  let observedMin=vec3u(atomicLoad(&activeScratch[0]),atomicLoad(&activeScratch[1]),atomicLoad(&activeScratch[2]));
-  let observedMax=vec3u(atomicLoad(&activeScratch[3]),atomicLoad(&activeScratch[4]),atomicLoad(&activeScratch[5]));
-  let speed=max(bitcast<f32>(atomicLoad(&activeScratch[6])),length(params.inflowVelocityLength.xyz));
+  let observedMin=vec3u(activeScratch[0],activeScratch[1],activeScratch[2]);
+  let observedMax=vec3u(activeScratch[3],activeScratch[4],activeScratch[5]);
+  let speed=max(bitcast<f32>(activeScratch[6]),length(params.inflowVelocityLength.xyz));
   let travel=vec3u(ceil(vec3f(speed*params.dimsDt.w)/params.cellGravity.xyz));
   let padding=travel+vec3u(u32(ceil(params.tuning.y))+4u);
   let previousMinimum=vec3u(activeRegion[0],activeRegion[1],activeRegion[2]);
@@ -1375,23 +1440,23 @@ fn finalizeActiveRegion(){
   }
   let minimum=min(previousMinimum,currentMinimum);
   let maximum=max(previousMaximum,currentMaximum);
-  atomicStore(&activeScratch[0],currentMinimum.x);atomicStore(&activeScratch[1],currentMinimum.y);atomicStore(&activeScratch[2],currentMinimum.z);
-  atomicStore(&activeScratch[3],currentMaximum.x);atomicStore(&activeScratch[4],currentMaximum.y);atomicStore(&activeScratch[5],currentMaximum.z);
-  atomicStore(&activeScratch[7],minimum.x);atomicStore(&activeScratch[8],minimum.y);atomicStore(&activeScratch[9],minimum.z);
-  atomicStore(&activeScratch[10],maximum.x);atomicStore(&activeScratch[11],maximum.y);atomicStore(&activeScratch[12],maximum.z);
+  activeScratch[0]=currentMinimum.x;activeScratch[1]=currentMinimum.y;activeScratch[2]=currentMinimum.z;
+  activeScratch[3]=currentMaximum.x;activeScratch[4]=currentMaximum.y;activeScratch[5]=currentMaximum.z;
+  activeScratch[7]=minimum.x;activeScratch[8]=minimum.y;activeScratch[9]=minimum.z;
+  activeScratch[10]=maximum.x;activeScratch[11]=maximum.y;activeScratch[12]=maximum.z;
   let groups=(maximum-minimum+vec3u(3u))/4u;
-  atomicStore(&activeScratch[13],groups.x);atomicStore(&activeScratch[14],groups.y);atomicStore(&activeScratch[15],groups.z);
+  activeScratch[13]=groups.x;activeScratch[14]=groups.y;activeScratch[15]=groups.z;
   for(var level=0u;level<16u;level+=1u){
     let base=16u+10u*level;
-    let physical=vec3u(atomicLoad(&activeScratch[base+6u]),atomicLoad(&activeScratch[base+7u]),atomicLoad(&activeScratch[base+8u]));
+    let physical=vec3u(activeScratch[base+6u],activeScratch[base+7u],activeScratch[base+8u]);
     if(any(physical==vec3u(0u))){break;}
     let scaledMin=(minimum*physical)/d;
     let scaledMax=vec3u(activeCeilDiv(maximum.x*physical.x,d.x),activeCeilDiv(maximum.y*physical.y,d.y),activeCeilDiv(maximum.z*physical.z,d.z));
     let origin=scaledMin-min(scaledMin,vec3u(2u));
     let end=min(physical+vec3u(2u),scaledMax+vec3u(3u));
     let levelGroups=(end-origin+vec3u(3u))/4u;
-    atomicStore(&activeScratch[base],origin.x);atomicStore(&activeScratch[base+1u],origin.y);atomicStore(&activeScratch[base+2u],origin.z);
-    atomicStore(&activeScratch[base+3u],levelGroups.x);atomicStore(&activeScratch[base+4u],levelGroups.y);atomicStore(&activeScratch[base+5u],levelGroups.z);
+    activeScratch[base]=origin.x;activeScratch[base+1u]=origin.y;activeScratch[base+2u]=origin.z;
+    activeScratch[base+3u]=levelGroups.x;activeScratch[base+4u]=levelGroups.y;activeScratch[base+5u]=levelGroups.z;
   }
 }
 @compute @workgroup_size(4,4,4)

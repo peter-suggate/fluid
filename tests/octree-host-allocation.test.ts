@@ -18,7 +18,7 @@ test("uniform host allocation reports only the fields it actually owns", () => {
   assert.equal(plan.boundaryVelocityBytes, (5 * 3 + 7 * 3 + 7 * 5) * 4);
   assert.equal(plan.velocityBytes, 7 * 5 * 3 * 2 * 16
     + 4 * plan.boundaryVelocityBytes + 9 * 7 * 5 * (1 + 6) * 16);
-  assert.equal(plan.scalarBytes, 7 * 5 * 3 * 8 * 4);
+  assert.equal(plan.scalarBytes, 7 * 5 * 3 * 9 * 4);
   assert.equal(plan.conditioningBytes, 7 * 5 * 3 * 3 * 4);
   assert.equal(plan.allocatedBytes,
     plan.velocityBytes + plan.scalarBytes + plan.conditioningBytes);

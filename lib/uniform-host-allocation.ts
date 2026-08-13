@@ -39,10 +39,11 @@ export function planUniformHostAllocation(
     // ping-pong pairs plus canonical resolved value/distance fields. These
     // replace, rather than supplement, the removed JFA coordinate fields.
     + (nx + 2) * (ny + 2) * (nz + 2) * 6 * 16;
-  // Two pressure, two surface-density, two persistent gamma, and two
-  // render-only post-processing textures. Presentation reconstruction must
-  // never feed back into transport.
-  const scalarBytes = nx * ny * nz * 8 * 4;
+  // Two pressure, two surface-density, two persistent gamma, two render-only
+  // post-processing textures, and one mirrored gamma-diffusion scratch.
+  // Presentation reconstruction must never double as solver scratch: sparse
+  // presentation dispatches intentionally leave its exterior untouched.
+  const scalarBytes = nx * ny * nz * 9 * 4;
   // Sec. 3.4 uses three fixed-point scatter fields: beta, rho deficits, and
   // gamma deficits. Sec. 3.5 reuses the first field for sharpening deposits.
   const conditioningBytes = nx * ny * nz * 3 * 4;

@@ -437,16 +437,18 @@ GammaDiffusion(gamma, rho, iterations):
         for axis in x,y,z:
             old_gamma = gamma             # Jacobi within an axis
             old_rho = rho
-            for each disjoint or atomically handled neighbor pair (i,j):
-                if old_gamma[j] > old_gamma[i] and old_gamma[j] > 0:
-                    m = old_rho[j]*(old_gamma[j]-old_gamma[i])/(2*old_gamma[j])
-                    rho[j] -= m; rho[i] += m
-                else if old_gamma[i] > old_gamma[j] and old_gamma[i] > 0:
-                    symmetric transfer
-                gamma[i] = gamma[j] = (old_gamma[i]+old_gamma[j])/2
+            concurrently for each cell i:
+                gamma[i] = old_gamma[i]
+                rho[i] = old_rho[i]
+                for j in the two axis-neighbors of i:
+                    gamma[i] += (old_gamma[j]-old_gamma[i])/2
+                    if old_gamma[j] > old_gamma[i] and old_gamma[j] > 0:
+                        rho[i] += old_rho[j]*(old_gamma[j]-old_gamma[i])/(2*old_gamma[j])
+                    else if old_gamma[i] > old_gamma[j] and old_gamma[i] > 0:
+                        rho[i] -= old_rho[i]*(old_gamma[i]-old_gamma[j])/(2*old_gamma[i])
 ```
 
-The source describes Jacobi updates within a dimension and Gauss-Seidel behavior between dimension sweeps. A GPU implementation can use parity-colored nonoverlapping edges to avoid atomics, but the update ordering then becomes an implementation variant that must be regression-tested.
+The source describes Jacobi updates within a dimension and Gauss-Seidel behavior between dimension sweeps. A cell-centric gather needs no atomics: both endpoints independently evaluate the same face flux with opposite signs from the same snapshot. Parity-colored edge passes are not equivalent, because the second parity reads the first parity's result and therefore introduce grid-phase-dependent Gauss-Seidel behavior within the dimension.
 
 Correctness:
 

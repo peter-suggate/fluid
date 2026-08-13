@@ -93,16 +93,19 @@ export interface WebGPUUniformReferenceOptions {
   deferPipelineCompilation?: boolean;
 }
 
-// Sec. 3.4 permits one through seven ordered gamma-diffusion iterations per
-// time step. Use the robust end of the paper's stated range: a single sweep
-// leaves severe compression essentially untouched in the paper-step 64^3
-// splash, where one cell can receive mass from many distant departure rays.
-export const UNIFORM_GAMMA_DIFFUSION_ITERATIONS = 7;
+// Sec. 3.4 permits one through seven gamma-diffusion repetitions per time
+// step. One repetition is the reference schedule: each dimensional sweep is
+// one Jacobi update from a single snapshot, as specified by LAF11/CM12. More
+// repetitions remain available explicitly, but are not a neutral robustness
+// setting: they apply more physical/numerical diffusion per simulation step.
+export const UNIFORM_GAMMA_DIFFUSION_DEFAULT_ITERATIONS = 1;
+export const UNIFORM_GAMMA_DIFFUSION_MAX_ITERATIONS = 7;
 
 interface UniformReferencePipelines {
-  resetActiveRegion: GPUComputePipeline;
   scanActiveRegion: GPUComputePipeline;
   scanExternalActiveSources: GPUComputePipeline;
+  reduceActiveRegionSummaries: GPUComputePipeline;
+  reduceExternalActiveRegionSummaries: GPUComputePipeline;
   finalizeActiveRegion: GPUComputePipeline;
   semiLagrangian: GPUComputePipeline;
   advect: GPUComputePipeline;
@@ -116,13 +119,9 @@ interface UniformReferencePipelines {
   traceGammaBeta: GPUComputePipeline;
   scatterDensityDeficit: GPUComputePipeline;
   gatherDensity: GPUComputePipeline;
-  diffuseGammaX0: GPUComputePipeline;
-  diffuseGammaX1: GPUComputePipeline;
-  diffuseGammaY0: GPUComputePipeline;
-  diffuseGammaY1: GPUComputePipeline;
-  diffuseGammaZ0: GPUComputePipeline;
-  diffuseGammaZ1: GPUComputePipeline;
-  averageGammaDiffusion: GPUComputePipeline;
+  diffuseGammaX: GPUComputePipeline;
+  diffuseGammaY: GPUComputePipeline;
+  diffuseGammaZ: GPUComputePipeline;
   postprocessBlurX: GPUComputePipeline;
   postprocessBlurY: GPUComputePipeline;
   postprocessBlurZ: GPUComputePipeline;
@@ -136,9 +135,10 @@ interface UniformReferencePipelines {
 }
 
 const PIPELINES = [
-  ["resetActiveRegion", "Reset active liquid bounds", "resetActiveRegion", false],
   ["scanActiveRegion", "Scan active liquid bounds", "scanActiveRegion", false],
   ["scanExternalActiveSources", "Scan external active sources", "scanExternalActiveSources", false],
+  ["reduceActiveRegionSummaries", "Reduce active liquid summaries", "reduceActiveRegionSummaries", false],
+  ["reduceExternalActiveRegionSummaries", "Reduce external-source summaries", "reduceExternalActiveRegionSummaries", false],
   ["finalizeActiveRegion", "Finalize active liquid dispatches", "finalizeActiveRegion", false],
   ["semiLagrangian", "Semi-Lagrangian velocity advection and body forces", "semiLagrangianAdvection", false],
   ["advect", "Bounded MacCormack velocity prediction", "advect", false],
@@ -152,13 +152,9 @@ const PIPELINES = [
   ["traceGammaBeta", "Trace gamma and scatter beta", "traceGammaAndBeta", false],
   ["scatterDensityDeficit", "Scatter density and gamma deficits", "scatterDensityDeficit", false],
   ["gatherDensity", "Gather conservative surface density", "gatherConservativeDensity", false],
-  ["diffuseGammaX0", "Diffuse gamma along x (even pairs)", "diffuseGammaX0", false],
-  ["diffuseGammaX1", "Diffuse gamma along x (odd pairs)", "diffuseGammaX1", false],
-  ["diffuseGammaY0", "Diffuse gamma along y (even pairs)", "diffuseGammaY0", false],
-  ["diffuseGammaY1", "Diffuse gamma along y (odd pairs)", "diffuseGammaY1", false],
-  ["diffuseGammaZ0", "Diffuse gamma along z (even pairs)", "diffuseGammaZ0", false],
-  ["diffuseGammaZ1", "Diffuse gamma along z (odd pairs)", "diffuseGammaZ1", false],
-  ["averageGammaDiffusion", "Average mirrored gamma diffusion sweeps", "averageGammaDiffusion", false],
+  ["diffuseGammaX", "Diffuse gamma along x (Jacobi)", "diffuseGammaX", false],
+  ["diffuseGammaY", "Diffuse gamma along y (Jacobi)", "diffuseGammaY", false],
+  ["diffuseGammaZ", "Diffuse gamma along z (Jacobi)", "diffuseGammaZ", false],
   ["postprocessBlurX", "Post-process gamma blur x", "postprocessBlurX", false],
   ["postprocessBlurY", "Post-process gamma blur y", "postprocessBlurY", false],
   ["postprocessBlurZ", "Post-process gamma blur z", "postprocessBlurZ", false],
@@ -182,6 +178,7 @@ const UNIFORM_ACTIVE_MAIN_DISPATCH_OFFSET = 13 * 4;
 const UNIFORM_ACTIVE_LEVEL_WORDS = 10;
 const UNIFORM_ACTIVE_LEVEL_BASE_WORD = 16;
 const UNIFORM_ACTIVE_MAX_LEVELS = 16;
+const UNIFORM_ACTIVE_SUMMARY_BYTES = 32;
 
 /**
  * The exact partition of one uniform advance, in encode order.
@@ -197,7 +194,7 @@ export const UNIFORM_ADVANCE_PHASE = Object.freeze({
   extensionFront: { id: "velocity-extrapolation", label: "Sec. 3.3 narrow-band FIM front" },
   extensionHierarchy: { id: "velocity-extrapolation", label: "Sec. 3.3 hierarchy fill + transport shell" },
   densityAdvection: { id: "fine-sdf-advection", label: "Sec. 3.4 conservative density advection" },
-  gammaDiffusion: { id: "fine-sdf-advection", label: "Sec. 3.4 ordered pair gamma diffusion" },
+  gammaDiffusion: { id: "fine-sdf-advection", label: "Sec. 3.4 axis-Jacobi gamma diffusion" },
   interfaceSharpening: { id: "fine-sdf-redistance", label: "Sec. 3.5 interface density correction" },
   sharpeningMassCorrection: { id: "fine-sdf-redistance", label: "Sec. 3.5 local mass return" },
   solidExcess: { id: "fine-sdf-redistance", label: "Sec. 3.6 partial-solid excess" },
@@ -317,9 +314,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private readonly densityTraceGroup: GPUBindGroup;
   private readonly densityScatterGroup: GPUBindGroup;
   private readonly densityGatherGroup: GPUBindGroup;
-  private readonly gammaDiffusionForwardGroups: readonly [GPUBindGroup, GPUBindGroup];
-  private readonly gammaDiffusionReverseGroups: readonly [GPUBindGroup, GPUBindGroup];
-  private readonly gammaDiffusionAverageGroup: GPUBindGroup;
+  private readonly gammaDiffusionGroups: readonly [GPUBindGroup, GPUBindGroup];
   private readonly postprocessBlurXGroup: GPUBindGroup;
   private readonly postprocessBlurYGroup: GPUBindGroup;
   private readonly postprocessBlurZGroup: GPUBindGroup;
@@ -368,13 +363,13 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     _onRigidLoads?: (loads: GPURigidLoad[]) => void,
     options: WebGPUUniformReferenceOptions = {},
   ) {
-    this.activeRegionEnabled = options.activeRegion !== false
+    this.activeRegionEnabled = options.activeRegion === true
       && (typeof process === "undefined" || process.env.FLUID_UNIFORM_ACTIVE_REGION !== "0");
     this.densityPostProcessing = options.densityPostProcessing === true;
     this.densitySharpening = options.densitySharpening !== false;
     this.sharpeningMassCorrection = options.sharpeningMassCorrection !== false;
-    this.gammaDiffusionIterations = Math.round(Math.min(UNIFORM_GAMMA_DIFFUSION_ITERATIONS,
-      Math.max(0, options.gammaDiffusionIterations ?? UNIFORM_GAMMA_DIFFUSION_ITERATIONS)));
+    this.gammaDiffusionIterations = Math.round(Math.min(UNIFORM_GAMMA_DIFFUSION_MAX_ITERATIONS,
+      Math.max(0, options.gammaDiffusionIterations ?? UNIFORM_GAMMA_DIFFUSION_DEFAULT_ITERATIONS)));
     this.sharpeningStrength = Math.min(2, Math.max(0.25, options.sharpeningStrength ?? 1));
     this.sharpeningDistance = Math.min(3.1, Math.max(0.1, options.sharpeningDistance ?? 2.1));
     this.solidExcessCorrection = options.solidExcessCorrection !== false;
@@ -455,10 +450,15 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       + UNIFORM_ACTIVE_MAX_LEVELS * UNIFORM_ACTIVE_LEVEL_WORDS) * 4;
     this.activeRegion = device.createBuffer({
       label: "Uniform reference active liquid region", size: activeRegionBytes,
-      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+      // readStats copies the published bounds/counters into its readback
+      // packet in both dense and sparse modes.
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
     });
+    const activeSummaryCount = Math.ceil(nx / 4) * Math.ceil(ny / 4) * Math.ceil(nz / 4);
+    const activeSummaryBytes = activeSummaryCount * UNIFORM_ACTIVE_SUMMARY_BYTES;
     this.activeScratch = device.createBuffer({
-      label: "Uniform reference active liquid census scratch", size: activeRegionBytes,
+      label: "Uniform reference active liquid census scratch and summaries",
+      size: activeRegionBytes + activeSummaryBytes,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
     });
     this.activeDispatch = device.createBuffer({
@@ -599,7 +599,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       this.velocityA, this.velocityA, this.transportA, this.volumeA, this.gammaA, this.gammaB);
     this.densityGatherGroup = group(this.velocityA, this.velocityB, this.pressureA, this.pressureB, this.volumeA, this.volumeB, this.heightB, this.heightA,
       this.velocityA, this.velocityA, this.transportA, this.volumeA, this.gammaB, this.gammaA);
-    this.gammaDiffusionForwardGroups = [
+    this.gammaDiffusionGroups = [
       group(this.velocityA, this.velocityB, this.pressureA, this.pressureB,
         this.volumeB, this.volumeA, this.heightB, this.heightA,
         this.velocityA, this.velocityA, this.transportA, this.volumeB,
@@ -609,22 +609,6 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
         this.velocityA, this.velocityA, this.transportA, this.volumeA,
         this.gammaB, this.gammaA),
     ];
-    this.gammaDiffusionReverseGroups = [
-      group(this.velocityA, this.velocityB, this.pressureA, this.pressureB,
-        this.surfaceA, this.volumeA, this.heightB, this.heightA,
-        this.velocityA, this.velocityA, this.transportA, this.surfaceA,
-        this.surfaceB, this.gammaB),
-      group(this.velocityA, this.velocityB, this.pressureA, this.pressureB,
-        this.volumeA, this.surfaceA, this.heightB, this.heightA,
-        this.velocityA, this.velocityA, this.transportA, this.volumeA,
-        this.gammaB, this.surfaceB),
-    ];
-    this.gammaDiffusionAverageGroup = group(
-      this.velocityA, this.velocityB, this.surfaceB, this.pressureB,
-      this.volumeB, this.volumeA, this.heightB, this.heightA,
-      this.velocityA, this.velocityA, this.transportA, this.surfaceA,
-      this.gammaA, this.gammaB,
-    );
     this.sharpenComputeGroup = group(this.velocityA, this.velocityB, this.pressureA, this.pressureB, this.volumeB, this.volumeA, this.heightB, this.heightA);
     this.sharpenScatterGroup = group(this.velocityA, this.velocityB, this.pressureB, this.pressureA, this.volumeA, this.volumeB, this.heightB, this.heightA);
     this.sharpenResolveGroup = group(this.velocityA, this.velocityB, this.pressureA, this.pressureB, this.volumeA, this.volumeB, this.heightB, this.heightA);
@@ -650,7 +634,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       cellSize_m: Math.min(scene.container.width_m / nx, scene.container.height_m / ny, scene.container.depth_m / nz),
       pressureIterations: 0, pressureSolver: `CM11a dense LCP multigrid (${this.pressureSchedule.fullCycles} Full-Cycles + ${this.pressureSchedule.vCycles} V-Cycles, ${this.pressureSchedule.preSweeps}/${this.pressureSchedule.postSweeps} pre/post PRBGS)`,
       allocatedBytes: allocation.allocatedBytes + this.pressureMultigrid.allocatedBytes
-        + activeRegionBytes * 3 + (this.symmetryStageAuditMacCormackBuffer ? 0 : 16), quality,
+        + activeRegionBytes * 3 + activeSummaryBytes
+        + (this.symmetryStageAuditMacCormackBuffer ? 0 : 16), quality,
       submittedTime_s: 0, simulatedTime_s: 0, completedTime_s: 0,
       simulationLag_s: 0, encodedSteps: 0, maximumTallCellHeight: 0,
       volumeControl: true,
@@ -823,8 +808,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.densitySharpening = values.densitySharpening !== "off";
     this.sharpeningMassCorrection = values.sharpeningMassCorrection !== "off";
     this.gammaDiffusionIterations = values.gammaDiffusion === "off" ? 0 : Math.round(finite(
-      "gammaDiffusionIterations", UNIFORM_GAMMA_DIFFUSION_ITERATIONS, 1,
-      UNIFORM_GAMMA_DIFFUSION_ITERATIONS,
+      "gammaDiffusionIterations", UNIFORM_GAMMA_DIFFUSION_DEFAULT_ITERATIONS, 1,
+      UNIFORM_GAMMA_DIFFUSION_MAX_ITERATIONS,
     ));
     this.sharpeningStrength = finite("sharpeningStrength", 1, 0.25, 2);
     this.sharpeningDistance = finite("sharpeningDistance", 2.1, 0.1, 3.1);
@@ -970,16 +955,20 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private encodeActiveRegion(encoder: GPUCommandEncoder, externalSources: boolean): void {
     if (!this.pipelines) throw new Error("Uniform reference pipelines are not initialized");
     if (!this.activeRegionEnabled) return;
-    this.runDirect(encoder, "Uniform reset active liquid bounds", this.pipelines.resetActiveRegion,
-      this.reductionGroup, [1, 1, 1]);
-    this.run(encoder, "Uniform scan prior active liquid bounds", this.pipelines.scanActiveRegion,
-      this.reductionGroup);
-    // A newly enabled inlet or interactive drop may begin outside the prior
-    // box. Pay the dense source-only discovery pass only on those frames; an
-    // ordinary closed sparse scene never scans its empty domain again.
-    if (externalSources) this.runDirect(encoder, "Uniform scan external active sources",
-      this.pipelines.scanExternalActiveSources, this.reductionGroup,
-      [Math.ceil(this.info.nx / 4), Math.ceil(this.info.ny / 4), Math.ceil(this.info.nz / 4)]);
+    if (externalSources) {
+      // A new inlet/drop may begin beyond the previous box. One dense pass
+      // summarizes both existing liquid and sources, avoiding a second census.
+      this.runDirect(encoder, "Uniform scan liquid and external active sources",
+        this.pipelines.scanExternalActiveSources, this.reductionGroup,
+        [Math.ceil(this.info.nx / 4), Math.ceil(this.info.ny / 4), Math.ceil(this.info.nz / 4)]);
+      this.runDirect(encoder, "Uniform reduce external-source workgroup summaries",
+        this.pipelines.reduceExternalActiveRegionSummaries, this.reductionGroup, [1, 1, 1]);
+    } else {
+      this.run(encoder, "Uniform scan prior active liquid bounds", this.pipelines.scanActiveRegion,
+        this.reductionGroup);
+      this.runDirect(encoder, "Uniform reduce active workgroup summaries",
+        this.pipelines.reduceActiveRegionSummaries, this.reductionGroup, [1, 1, 1]);
+    }
     this.runDirect(encoder, "Uniform finalize active liquid dispatches", this.pipelines.finalizeActiveRegion,
       this.reductionGroup, [1, 1, 1]);
     encoder.copyBufferToBuffer(this.activeScratch, 0, this.activeRegion, 0,
@@ -1166,38 +1155,25 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       [this.info.nx, this.info.ny, this.info.nz],
     );
     seam?.(UNIFORM_ADVANCE_PHASE.densityAdvection);
-    // Sec. 3.4 step 8 prescribes dimension-by-dimension neighbouring-pair
-    // equalization but does not prescribe an axis order. A lone xyz sweep is
-    // therefore a hidden anisotropic choice: under horizontal D4, swapping x
-    // and z produces the distinct zyx operator. Evaluate both paper-valid
-    // orders from the same snapshot and average them. This makes the
-    // unspecified choice neutral while retaining the paper's pair formula.
-    // The two parity passes for each of three dimensions mean six passes are
-    // one complete paper diffusion iteration in either mirrored branch.
-    const forwardDiffusionPasses = [
-      ["x even", this.pipelines.diffuseGammaX0], ["x odd", this.pipelines.diffuseGammaX1],
-      ["y even", this.pipelines.diffuseGammaY0], ["y odd", this.pipelines.diffuseGammaY1],
-      ["z even", this.pipelines.diffuseGammaZ0], ["z odd", this.pipelines.diffuseGammaZ1],
-    ] as const;
-    const reverseDiffusionPasses = [
-      ["z even", this.pipelines.diffuseGammaZ0], ["z odd", this.pipelines.diffuseGammaZ1],
-      ["y even", this.pipelines.diffuseGammaY0], ["y odd", this.pipelines.diffuseGammaY1],
-      ["x even", this.pipelines.diffuseGammaX0], ["x odd", this.pipelines.diffuseGammaX1],
+    // Sec. 3.4 step 8 and LAF11 Sec. 3.2: Jacobi within a dimension,
+    // Gauss-Seidel between dimensions. Each dispatch gathers both face fluxes
+    // from one immutable input snapshot; x -> y -> z ping-pongs those complete
+    // snapshots. This is three dispatches per paper repetition. Splitting a
+    // dimension into even/odd pair passes makes the odd pass observe the even
+    // result, turning the intended Jacobi sweep into an order-dependent
+    // Gauss-Seidel operator and substantially increasing diffusion.
+    const diffusionPasses = [
+      ["x", this.pipelines.diffuseGammaX],
+      ["y", this.pipelines.diffuseGammaY],
+      ["z", this.pipelines.diffuseGammaZ],
     ] as const;
     for (let iteration = 0; iteration < this.gammaDiffusionIterations; iteration += 1) {
-      encoder.copyTextureToTexture({ texture: this.volumeB }, { texture: this.surfaceA },
-        [this.info.nx, this.info.ny, this.info.nz]);
-      encoder.copyTextureToTexture({ texture: this.gammaA }, { texture: this.surfaceB },
-        [this.info.nx, this.info.ny, this.info.nz]);
-      forwardDiffusionPasses.forEach(([label, pipeline], index) => this.run(encoder,
-        `Uniform gamma diffusion iteration ${iteration + 1}/${this.gammaDiffusionIterations} xyz ${label}`,
-        pipeline, this.gammaDiffusionForwardGroups[index & 1]!));
-      reverseDiffusionPasses.forEach(([label, pipeline], index) => this.run(encoder,
-        `Uniform gamma diffusion iteration ${iteration + 1}/${this.gammaDiffusionIterations} zyx ${label}`,
-        pipeline, this.gammaDiffusionReverseGroups[index & 1]!));
-      this.run(encoder,
-        `Uniform gamma diffusion iteration ${iteration + 1}/${this.gammaDiffusionIterations} average mirrored orders`,
-        this.pipelines.averageGammaDiffusion, this.gammaDiffusionAverageGroup);
+      diffusionPasses.forEach(([axis, pipeline], index) => this.run(encoder,
+        `Uniform gamma diffusion iteration ${iteration + 1}/${this.gammaDiffusionIterations} ${axis} Jacobi`,
+        pipeline, this.gammaDiffusionGroups[index & 1]!));
+      // Three axis passes leave their result in the A/B output pair. Restore
+      // the density-advection ABI expected by sharpening and by the next
+      // repetition.
       encoder.copyTextureToTexture({ texture: this.volumeA }, { texture: this.volumeB },
         [this.info.nx, this.info.ny, this.info.nz]);
       encoder.copyTextureToTexture({ texture: this.gammaB }, { texture: this.gammaA },
@@ -1587,27 +1563,27 @@ const UNIFORM_FLUID_STAGES: readonly FluidPipelineStage[] = [
     label: "Gamma diffusion",
     phaseLabels: [UNIFORM_ADVANCE_PHASE.gammaDiffusion.label],
     tip: {
-      summary: "Sec. 3.4: neighbouring pairs half-equalize gamma in the paper's dimension-by-dimension order while transferring the matching donor density. Even/odd passes cover every edge without atomics.",
+      summary: "Sec. 3.4: each axis gathers neighbouring half-fluxes from one Jacobi snapshot while transferring the matching donor density; completed axes feed the next axis.",
       reads: "surface density, gamma",
       writes: "surface density, gamma",
       feeds: "interface sharpening",
     },
     toggle: {
       param: "gammaDiffusion", on: "on", off: "off",
-      hint: "Toggle Sec. 3.4 ordered-pair gamma diffusion. Density transport remains complete when it is off.",
+      hint: "Toggle Sec. 3.4 axis-Jacobi gamma diffusion. Density transport remains complete when it is off.",
     },
     controls: [{
       kind: "param-range",
       param: "gammaDiffusionIterations",
       label: "Iterations",
       min: 1, max: 7, step: 1,
-      hint: "One iteration is six even/odd axis passes; the paper permits one through seven.",
+      hint: "One iteration is three snapshot axis passes; the paper permits one through seven.",
       enabled: (context) => context.values.gammaDiffusion !== "off",
     }],
     state: (context) => context.values.gammaDiffusion === "off" ? "off" : "on",
     chip: (context) => context.values.gammaDiffusion === "off"
       ? "off · identity handoff"
-      : `${6 * Number(context.values.gammaDiffusionIterations ?? UNIFORM_GAMMA_DIFFUSION_ITERATIONS)} passes · ${context.values.gammaDiffusionIterations ?? UNIFORM_GAMMA_DIFFUSION_ITERATIONS} iterations`,
+      : `${3 * Number(context.values.gammaDiffusionIterations ?? UNIFORM_GAMMA_DIFFUSION_DEFAULT_ITERATIONS)} passes · ${context.values.gammaDiffusionIterations ?? UNIFORM_GAMMA_DIFFUSION_DEFAULT_ITERATIONS} iterations`,
   },
   {
     id: "interface-sharpening",

@@ -32,13 +32,13 @@ const params: MethodParamSpec[] = [
     kind: "select",
     key: "activeRegion",
     label: "Active-region dispatch",
-    default: "on",
+    default: "off",
     tier: "coarse",
     options: [
       { value: "on", label: "On · sparse GPU work box" },
       { value: "off", label: "Off · dense control" },
     ],
-    hint: "Rebuilds the solver with GPU-resident active bounds or the original full-lattice dispatches. Off is the production A/B control.",
+    hint: "Dense full-lattice dispatch is the reference default. Enable the GPU-resident sparse work box only as an explicit optimization A/B.",
   },
   {
     ...runtimeUpdate,
@@ -48,24 +48,24 @@ const params: MethodParamSpec[] = [
     default: "on",
     tier: "fine",
     options: [
-      { value: "on", label: "On · ordered pair diffusion" },
+      { value: "on", label: "On · axis-Jacobi diffusion" },
       { value: "off", label: "Off · retain transported gamma" },
     ],
-    hint: "Ablates Sec. 3.4's ordered pair equalization. The conservative density transport still publishes a complete rho/gamma state for downstream stages.",
+    hint: "Ablates Sec. 3.4's snapshot axis diffusion. The conservative density transport still publishes a complete rho/gamma state for downstream stages.",
   },
   {
     ...runtimeUpdate,
     kind: "number",
     key: "gammaDiffusionIterations",
     label: "Gamma iterations",
-    default: 7,
+    default: 1,
     tier: "fine",
     unit: "iterations",
     min: 1,
     max: 7,
     step: 1,
     digits: 0,
-    hint: "Each paper iteration is six even/odd axis passes. One is cheapest; seven is the robust high-compression setting.",
+    hint: "Each paper iteration is three snapshot axis passes. One is the reference default; additional repetitions deliberately apply more diffusion.",
   },
   {
     ...runtimeUpdate,
@@ -242,7 +242,7 @@ export function uniformReferenceSolverOptions(
 ): WebGPUUniformReferenceOptions {
   const whole = (key: string) => Math.round(numberValue(values, params, key));
   return {
-    activeRegion: values.activeRegion !== "off",
+    activeRegion: values.activeRegion === "on",
     densitySharpening: values.densitySharpening !== "off",
     sharpeningMassCorrection: values.sharpeningMassCorrection !== "off",
     gammaDiffusionIterations: values.gammaDiffusion === "off"

@@ -16,6 +16,7 @@ import { uniformReferenceComputeShader } from "../lib/webgpu-uniform-reference.w
 import { UNIFORM_FLUID_PIPELINE,
   uniformDensityPostProcessingEnabled } from "../lib/webgpu-uniform-reference";
 import { structuralMethodValues } from "../lib/webgpu-renderer";
+import { requiredFluidDeviceLimits } from "../lib/webgpu-device-limits";
 import { createSmokeScenario } from "../tools/webgpu-smoke-scenarios";
 
 const uniformHostSource = readFileSync(
@@ -55,7 +56,7 @@ test("uniform reference exposes stage gates, pass schedules, and transport choic
     quality: "balanced",
     values: resolveMethodValues(uniformMethod, "balanced", {}),
   }), {
-    activeRegion: "on",
+    activeRegion: "off",
     pressureFullCycles: 3,
     pressureVCycles: 4,
     pressureSweeps: 6,
@@ -67,10 +68,10 @@ test("uniform reference exposes stage gates, pass schedules, and transport choic
 
   const options = uniformReferenceSolverOptions({ timeStep: "paper", densityPostProcessing: "off" });
   assert.deepEqual(options, {
-    activeRegion: true,
+    activeRegion: false,
     densitySharpening: true,
     sharpeningMassCorrection: true,
-    gammaDiffusionIterations: 7,
+    gammaDiffusionIterations: 1,
     sharpeningStrength: 1,
     sharpeningDistance: 2.1,
     solidExcessCorrection: true,
@@ -93,6 +94,7 @@ test("uniform reference exposes stage gates, pass schedules, and transport choic
     densityPostProcessing: "off",
   }).velocityTransport, "maccormack");
   assert.equal(uniformReferenceSolverOptions({ activeRegion: "off" }).activeRegion, false);
+  assert.equal(uniformReferenceSolverOptions({ activeRegion: "on" }).activeRegion, true);
 
   const ablated = uniformReferenceSolverOptions({
     gammaDiffusion: "off",
@@ -134,12 +136,9 @@ test("uniform reference owns the complete dense GPU program", () => {
     "traceGammaAndBeta",
     "scatterDensityDeficit",
     "gatherConservativeDensity",
-    "diffuseGammaX0",
-    "diffuseGammaX1",
-    "diffuseGammaY0",
-    "diffuseGammaY1",
-    "diffuseGammaZ0",
-    "diffuseGammaZ1",
+    "diffuseGammaX",
+    "diffuseGammaY",
+    "diffuseGammaZ",
     "sharpenCompute",
     "sharpenScatter",
     "sharpenResolve",
@@ -147,7 +146,7 @@ test("uniform reference owns the complete dense GPU program", () => {
     assert.match(uniformReferenceComputeShader,
       new RegExp(`fn\\s+${entryPoint}\\b`), `${entryPoint} is absent`);
   }
-  assert.match(uniformReferenceComputeShader, /fn diffuseGammaPair/);
+  assert.match(uniformReferenceComputeShader, /fn diffuseGammaAxis/);
   assert.match(uniformReferenceComputeShader, /fn advectVelocityComponent/);
   assert.match(uniformReferenceComputeShader, /fn postprocessResolve/,
     "the renderer must receive a separately reconstructed surface field");
@@ -232,10 +231,9 @@ test("uniform reference compiles and advances one step on WebGPU", {
   const gpu = dawn.create([`backend=${process.env.WEBGPU_BACKEND ?? "metal"}`]);
   const adapter = await gpu.requestAdapter({ powerPreference: "high-performance" });
   assert.ok(adapter);
-  const device = await adapter.requestDevice({ requiredLimits: {
-    maxStorageTexturesPerShaderStage: Math.min(
-      8, adapter.limits.maxStorageTexturesPerShaderStage),
-  } });
+  const device = await adapter.requestDevice({
+    requiredLimits: requiredFluidDeviceLimits(adapter.limits),
+  });
   const validationErrors: string[] = [];
   device.addEventListener("uncapturederror", (event) => {
     validationErrors.push(event.error.message);
