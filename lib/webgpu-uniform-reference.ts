@@ -1,6 +1,6 @@
 import {
   damBreakBoxContains,
-  initialLiquidContainsCell,
+  initialLiquidFractionAtCell,
   sceneDamBreakBox,
 } from "./initial-fluid";
 import { averageInflowStrength, createInflowGridBoundary, type InflowGridBoundary } from "./inflow-boundary";
@@ -11,6 +11,10 @@ import { sceneLatticeDimensions } from "./scene-lattice";
 import { planGPUAdvance } from "./tall-cell-diagnostics";
 import type { GPUQuality } from "./tall-cell-grid";
 import { sceneHasTerrain, terrainColumnHeights } from "./terrain";
+import {
+  sceneHasSphericalContainer,
+  sphericalContainerOpenFractionAtCell,
+} from "./spherical-container";
 import {
   GPU_RIGID_EXCHANGE_BYTES,
   type GPUEulerianInfo,
@@ -692,6 +696,12 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       this.run(encoder, "Uniform initial post-process blur y", this.pipelines.postprocessBlurY, this.postprocessBlurYGroup);
       this.run(encoder, "Uniform initial post-process blur z", this.pipelines.postprocessBlurZ, this.postprocessBlurZGroup);
       this.run(encoder, "Uniform initial sub-grid surface resolve", this.pipelines.postprocessResolve, this.postprocessResolveGroup);
+    } else if (sceneHasSphericalContainer(this.scene)) {
+      // Curved vessels render the conserved density directly. A wall film is a
+      // rectangular-tank presentation device and produces a false inner shell
+      // when reconstructed against the analytic sphere.
+      encoder.copyTextureToTexture({ texture: this.volumeA }, { texture: this.surfaceB },
+        [this.info.nx, this.info.ny, this.info.nz]);
     } else {
       this.run(encoder, "Uniform initial wall-film resolve", this.pipelines.wallFilmResolve, this.wallFilmResolveGroup);
     }
@@ -711,7 +721,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       outlet?.x ?? 0, outlet?.y ?? 0, outlet?.z ?? 0, inflow?.radius_m ?? 0,
       inflow?.velocity_m_s.x ?? 0, inflow?.velocity_m_s.y ?? 0, inflow?.velocity_m_s.z ?? 0, this.inflowBoundary?.apertureScale ?? 0,
       inflowStrength, this.referenceVolumeCells, c.fillFraction * this.info.ny, 4,
-      this.sharpeningStrength, this.sharpeningDistance, 0, 0,
+      this.sharpeningStrength, this.sharpeningDistance,
+      sceneHasSphericalContainer(this.scene) ? 1 : 0, 0,
     ]));
   }
 
@@ -761,12 +772,18 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     let initial = 0;
     for (let z = 0; z < nz; z += 1) for (let y = 0; y < ny; y += 1) for (let x = 0; x < nx; x += 1) {
       const aboveGround = (y + 0.5) * cellHeight > terrain[x + nx * z];
+      const containerOpen = sphericalContainerOpenFractionAtCell(this.scene, x, y, z, [nx, ny, nz]);
       const base = this.scene.fluid.initialCondition === "dam-break"
         ? damBreakBoxContains(dam, (x + 0.5) / nx, (y + 0.5) / ny, (z + 0.5) / nz)
         : (y + 0.5) / ny <= c.fillFraction;
-      const wet = aboveGround && initialLiquidContainsCell(this.scene, x, y, z, [nx, ny, nz], base);
-      volume[x + nx * (y + ny * z)] = wet ? 1 : 0;
-      if (wet) initial += 1;
+      const liquidFraction = aboveGround
+        ? initialLiquidFractionAtCell(this.scene, x, y, z, [nx, ny, nz], base) : 0;
+      // Both fractions use the same eight sub-cell samples. Taking their
+      // intersection as a minimum preserves a hemisphere that coincides with
+      // the spherical vessel; multiplying would square its cut-cell fringe.
+      const density = Math.min(containerOpen, liquidFraction);
+      volume[x + nx * (y + ny * z)] = density;
+      initial += density;
     }
     this.upload3DF32(this.volumeA, volume, nx, ny, nz);
     this.upload3DF32(this.volumeB, volume, nx, ny, nz);
@@ -954,7 +971,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     // moving body is skipped by beta construction and then overwritten with
     // zero by the gather, so the supposedly conservative operator loses the
     // displaced liquid before the historical post-sharpening cleanup runs.
-    if (this.solidExcessCorrection && (activeBodies.length > 0 || sceneHasTerrain(this.scene))) {
+    if (this.solidExcessCorrection && (activeBodies.length > 0 || sceneHasTerrain(this.scene)
+      || sceneHasSphericalContainer(this.scene))) {
       encoder.clearBuffer(this.conditioningScratch);
       this.run(encoder, "Uniform moving-solid entry excess scatter",
         this.pipelines.scatterSolidExcess, this.solidEntryScatterGroup);
@@ -1051,7 +1069,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       { texture: this.volumeB }, { texture: this.symmetryStageAuditTextures.densitySharpening },
       [this.info.nx, this.info.ny, this.info.nz],
     );
-    if (this.solidExcessCorrection && (activeBodies.length > 0 || sceneHasTerrain(this.scene))) {
+    if (this.solidExcessCorrection && (activeBodies.length > 0 || sceneHasTerrain(this.scene)
+      || sceneHasSphericalContainer(this.scene))) {
       encoder.clearBuffer(this.conditioningScratch);
       this.run(encoder, "Uniform partial-solid excess scatter", this.pipelines.scatterSolidExcess, this.solidExcessScatterGroup);
       this.run(encoder, "Uniform partial-solid excess resolve", this.pipelines.resolveSolidExcess, this.solidExcessResolveGroup);
@@ -1121,13 +1140,17 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       this.rigidSystem.encode(encoder, dt, cellVolume, 1, c.height_m / this.info.ny);
       seam?.(UNIFORM_ADVANCE_PHASE.rigidCoupling);
     }
-    // Wall-film reconstruction is always produced for presentation. Sec. 3.8
-    // remains the optional global reconstruction; neither field feeds physics.
+    // Sec. 3.8 remains the optional global reconstruction. Box tanks may expose
+    // mass-proportional wall films; a spherical vessel deliberately renders
+    // the conserved field directly so it never gains a false inner shell.
     if (this.densityPostProcessing) {
       this.run(encoder, "Uniform post-process blur x", this.pipelines.postprocessBlurX, this.postprocessBlurXGroup);
       this.run(encoder, "Uniform post-process blur y", this.pipelines.postprocessBlurY, this.postprocessBlurYGroup);
       this.run(encoder, "Uniform post-process blur z", this.pipelines.postprocessBlurZ, this.postprocessBlurZGroup);
       this.run(encoder, "Uniform sub-grid surface resolve", this.pipelines.postprocessResolve, this.postprocessResolveGroup);
+    } else if (sceneHasSphericalContainer(this.scene)) {
+      encoder.copyTextureToTexture({ texture: this.volumeA }, { texture: this.surfaceB },
+        [this.info.nx, this.info.ny, this.info.nz]);
     } else {
       this.run(encoder, "Uniform wall-film resolve", this.pipelines.wallFilmResolve, this.wallFilmResolveGroup);
     }

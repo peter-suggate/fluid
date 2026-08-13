@@ -1,4 +1,4 @@
-import { cloneScene, defaultScene, type CameraState, type LiquidSphere, type RigidBodyDescription, type SceneDescription } from "./model";
+import { cloneScene, defaultScene, type CameraState, type InitialLiquidSphere, type RigidBodyDescription, type SceneDescription } from "./model";
 import type { MethodProfile } from "./methods";
 import type { TerrainDescription } from "./terrain";
 import type { SceneryGraph, SceneryNode } from "./scenery-graph";
@@ -248,7 +248,7 @@ function cm12Domain(figure: Cm12Figure): SceneDescription {
   delete scene.fluid.initialDamBreakOrigin_m;
   delete scene.fluid.initialBrickSeeds_m;
   delete scene.fluid.initialBrickSeedsAdditive;
-  delete scene.fluid.initialLiquidSpheres;
+  delete scene.fluid.initialLiquidVolumes;
   delete scene.fluid.inflow;
   delete scene.terrain;
   scene.rigidBodies = [];
@@ -265,19 +265,16 @@ function cm12Domain(figure: Cm12Figure): SceneDescription {
  * extents left to the scene rather than authored at the studio's size, and a
  * key light placed off the container instead of off a fixed height.
  *
- * A figure with a vessel publishes a terrain shell instead, because there the
- * heightfield *is* the enclosure — and `porcelain` rather than the garden lawn,
- * for the reason `SceneryTerrainShellNode` gives: a formed vessel wants one
- * unmodulated albedo, not ground cover with a tide line cut across it.
+ * The spherical figures use the renderer's analytic glass vessel. Their room
+ * remains deliberately plain so the curved silhouette, caustics and water
+ * motion read as clearly as they do in the paper plates.
  */
 export function cm12SceneryGraph(scene: SceneDescription): SceneryGraph {
   const c = scene.container;
   return {
     palettes: { white: { tint: [1, 1, 1] }, daylight: { tint: [1, 1, 1] } },
     nodes: [
-      scene.terrain
-        ? { kind: "terrain-shell", id: "shell", materialModel: "porcelain" }
-        : {
+      {
           kind: "room-shell", id: "shell", materialModel: "room",
           floor: { palette: "white", value: .9 },
           wall: { colorLinear: [1, 1, 1] },
@@ -314,9 +311,20 @@ function softbox(c: SceneDescription["container"]): SceneryNode {
     material: { palette: "daylight", value: 1, emission: 1 },
   };
 }
-/** A ball of liquid, authored in whole cells so a plate reading stays legible. */
-function ball(centreCells: readonly [number, number, number], radiusCells: number): LiquidSphere {
+/**
+ * A ball of liquid, authored in whole cells so a plate reading stays legible.
+ *
+ * The radii are all anchored on one measurement. Figure 7's plate — the lone
+ * ball falling in the dry box — puts the ball at about a third of the domain
+ * width across, a 20-cell radius at this lattice, and every other figure's
+ * ball is scaled from its previous reconstruction by that same factor. They
+ * were uniformly too small before: read against the plates the balls carried
+ * roughly a third of the liquid they should, so the sheets and crowns they
+ * make were correspondingly thin.
+ */
+function ball(centreCells: readonly [number, number, number], radiusCells: number): InitialLiquidSphere {
   return {
+    shape: "sphere",
     center_m: {
       x: centreCells[0] * CM12_CELL_SIZE_M,
       y: centreCells[1] * CM12_CELL_SIZE_M,
@@ -459,7 +467,7 @@ export function createCm12Figure1(): SceneDescription {
  */
 export function createCm12Figure2(): SceneDescription {
   const scene = cm12Domain(cm12Figure("cm12-figure-2"));
-  scene.fluid.initialLiquidSpheres = [ball([0, 90, 0], 10)];
+  scene.fluid.initialLiquidVolumes = [ball([0, 90, 0], 14)];
   return scene;
 }
 
@@ -475,11 +483,11 @@ export function createCm12Figure2(): SceneDescription {
 export function createCm12Figure3(): SceneDescription {
   const scene = cm12Domain(cm12Figure("cm12-figure-3"));
   scene.container.fillFraction = 0.12;
-  scene.fluid.initialLiquidSpheres = [
-    ball([-40, 100, 0], 4),
-    ball([-8, 112, 0], 5),
-    ball([28, 96, 0], 4),
-    ball([48, 108, 0], 3),
+  scene.fluid.initialLiquidVolumes = [
+    ball([-40, 100, 0], 6),
+    ball([-8, 112, 0], 7),
+    ball([28, 96, 0], 6),
+    ball([48, 108, 0], 4),
   ];
   return scene;
 }
@@ -495,7 +503,7 @@ export function createCm12Figure3(): SceneDescription {
 export function createCm12Figure5(): SceneDescription {
   const scene = cm12Domain(cm12Figure("cm12-figure-5"));
   block(scene, [16, 0, 16], [96, 16, 96]);
-  scene.fluid.initialLiquidSpheres = [ball([0, 88, 0], 12)];
+  scene.fluid.initialLiquidVolumes = [ball([0, 88, 0], 17)];
   return scene;
 }
 
@@ -509,20 +517,24 @@ export function createCm12Figure5(): SceneDescription {
 export function createCm12Figure6(): SceneDescription {
   const scene = cm12Domain(cm12Figure("cm12-figure-6"));
   block(scene, [16, 0, 16], [96, 8, 96]);
-  scene.fluid.initialLiquidSpheres = [ball([0, 104, 0], 12)];
+  scene.fluid.initialLiquidVolumes = [ball([0, 104, 0], 17)];
   return scene;
 }
 
 /**
  * Figure 7 — a liquid ball dropped inside an empty box.
  *
- * Published: the 128^3 grid. Reconstructed: the ball. The tank starts dry, so
- * the ball is the entire liquid; it spreads over the floor until the sheet is
- * thinner than a cell, which is the case the figure exists to show.
+ * Published: the 128^3 grid. Reconstructed: the ball, whose 20-cell radius is
+ * read off the plate and calibrates every other figure's (see `ball`). The
+ * tank starts dry, so the ball is the entire liquid; it spreads over the floor
+ * until the sheet is thinner than a cell, which is the case the figure exists
+ * to show. At this radius the ball is about two cells deep spread over the
+ * whole floor, so the thinning happens at the spreading front rather than
+ * everywhere at once.
  */
 export function createCm12Figure7(): SceneDescription {
   const scene = cm12Domain(cm12Figure("cm12-figure-7"));
-  scene.fluid.initialLiquidSpheres = [ball([0, 90, 0], 14)];
+  scene.fluid.initialLiquidVolumes = [ball([0, 90, 0], 20)];
   return scene;
 }
 
@@ -536,8 +548,15 @@ export function createCm12Figure7(): SceneDescription {
  */
 export function createCm12Figure8(): SceneDescription {
   const scene = cm12Domain(cm12Figure("cm12-figure-8"));
-  scene.terrain = cm12SphericalVesselTerrain(scene);
-  block(scene, [0, 0, 0], [64, 128, 128]);
+  scene.container.shape = "sphere";
+  scene.container.vessel = "glass";
+  scene.surfaceStyle = "smooth";
+  scene.fluid.initialLiquidVolumes = [{
+    shape: "hemisphere",
+    center_m: { x: 0, y: 0.5 * scene.container.height_m, z: 0 },
+    radius_m: 0.5 * Math.min(scene.container.width_m, scene.container.height_m, scene.container.depth_m),
+    outwardNormal: { x: 1, y: 0, z: 0 },
+  }];
   return scene;
 }
 
@@ -559,7 +578,7 @@ export function createCm12Figure8(): SceneDescription {
 export function createCm12Figure9(): SceneDescription {
   const scene = cm12Domain(cm12Figure("cm12-figure-9"));
   block(scene, [0, 0, 0], [40, 120, 64]);
-  scene.fluid.initialLiquidSpheres = [ball([8, 86, 0], 13)];
+  scene.fluid.initialLiquidVolumes = [ball([8, 86, 0], 19)];
   return scene;
 }
 
@@ -601,8 +620,10 @@ export function createCm12Figure11(): SceneDescription {
  */
 export function createCm12Figure12(): SceneDescription {
   const scene = cm12Domain(cm12Figure("cm12-figure-12"));
-  scene.terrain = cm12SphericalVesselTerrain(scene);
-  scene.fluid.initialLiquidSpheres = [ball([0, 92, 0], 12)];
+  scene.container.shape = "sphere";
+  scene.container.vessel = "glass";
+  scene.surfaceStyle = "smooth";
+  scene.fluid.initialLiquidVolumes = [ball([0, 92, 0], 17)];
   return scene;
 }
 

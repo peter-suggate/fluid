@@ -2849,6 +2849,9 @@ async function runGPU(
     : [];
   const perturbCadence = regressionDtPattern.length > 0;
   const collectStabilityEnvelope = perturbCadence || stabilityEnvelopeRequested;
+  const maximumStoredDensity = Number(scenario.lane.diagnostics.find(
+    (diagnostic) => diagnostic.id === "volume-and-topology",
+  )?.parameters?.maximumStoredDensity ?? 1.5);
   const applicableTerminalCollectors = evidenceCollectors.filter((collector) => collector.phase === "terminal"
     && (!collector.methods || collector.methods.includes(method.id as WebGPUSmokeMethodId)));
   const terminalSources = new Set(applicableTerminalCollectors.flatMap((collector) => collector.requires ?? []));
@@ -4451,7 +4454,7 @@ async function runGPU(
         sample.pressureResidual, stepDt, scene.fluid.density_kg_m3);
       if (stabilityEnvelope && (!Number.isFinite(exact.summary.minimum)
         || !Number.isFinite(exact.summary.maximum) || !Number.isFinite(exact.summary.cellSum)
-        || exact.summary.minimum < -0.01 || exact.summary.maximum > 1.5
+        || exact.summary.minimum < -0.01 || exact.summary.maximum > maximumStoredDensity
         || exact.summary.cellSum <= 1 || exact.summary.cellSum >= exact.field.length - 1)) {
         stabilityEnvelope.invalidVolumeSampleCount += 1;
       }

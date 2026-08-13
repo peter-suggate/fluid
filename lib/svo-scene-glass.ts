@@ -75,7 +75,7 @@ export interface SvoSceneGlassBuild {
   packedRecords: Uint32Array<ArrayBuffer>;
   metadata: readonly SvoSceneGlassMetadata[];
   unsupportedEntries: readonly SvoSceneGlassUnsupportedEntry[];
-  containerPolicy: "thin-glass-vessel" | "absent-open-environment";
+  containerPolicy: "thin-glass-vessel" | "analytic-spherical-vessel" | "absent-open-environment";
   containerPaneIndices: readonly number[];
   containerTopPaneIndex?: number;
   environmentPaneIndices: readonly number[];
@@ -164,7 +164,9 @@ function containerIsGlass(scene: SceneDescription, environmentId: EnvironmentId)
 }
 
 function containerPanes(scene: SceneDescription, environmentId: EnvironmentId, thickness_m: number): AuthoredSceneGlassPane[] {
-  if (!containerIsGlass(scene, environmentId)) return [];
+  // Curved vessel glass is owned by the exact water compositor. Publishing
+  // six planar panes here would leave a box visibly wrapped around the sphere.
+  if (!containerIsGlass(scene, environmentId) || scene.container.shape === "sphere") return [];
   const halfWidth = 0.5 * scene.container.width_m;
   const halfDepth = 0.5 * scene.container.depth_m;
   const halfHeight = 0.5 * scene.container.height_m;
@@ -253,11 +255,15 @@ export function svoSceneGlassFromEnvironmentCatalog(
       + ` derive from it — or by declaring fewer glazing nodes in the environment catalog.`);
   }
   const unsupportedEntries = unsupportedCatalogGlass(catalog);
+  const containerPolicy = !containerIsGlass(scene, catalog.environmentId)
+    ? "absent-open-environment" as const
+    : scene.container.shape === "sphere" ? "analytic-spherical-vessel" as const : "thin-glass-vessel" as const;
   const contentRevision = hashSvoPublication(new Uint32Array(), JSON.stringify({
     environmentId: catalog.environmentId,
     authored,
     unsupportedEntries,
     cell,
+    containerPolicy,
   }));
   const cacheKey = `svo-scene-glass-v${SVO_SCENE_GLASS_VERSION}:${catalog.environmentId}:${contentRevision}`;
   const cached = cachedSvoPublication(sceneGlassCache, cacheKey);
@@ -283,7 +289,7 @@ export function svoSceneGlassFromEnvironmentCatalog(
     packedRecords,
     metadata,
     unsupportedEntries,
-    containerPolicy: containerIsGlass(scene, catalog.environmentId) ? "thin-glass-vessel" : "absent-open-environment",
+    containerPolicy,
     containerPaneIndices,
     containerTopPaneIndex: metadata.find(({ role }) => role === "container-top")?.recordIndex,
     environmentPaneIndices,

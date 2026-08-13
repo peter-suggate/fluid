@@ -464,6 +464,7 @@ fn wallFilmAtLatticeVertex(face:u32,p:vec3i)->f32{
 }
 
 fn augmentedWallThickness(p:vec3i,dims:vec3i)->f32{
+  if(u.cameraTarget.w>1.5){return 0.0;}
   var thicknessCells=0.0;
   if(p.x==1){thicknessCells=max(thicknessCells,wallFilmAtLatticeVertex(0u,p));}
   if(p.x==dims.x+2){thicknessCells=max(thicknessCells,wallFilmAtLatticeVertex(1u,p));}
@@ -497,7 +498,7 @@ fn augmentedWallValue(p:vec3i,dims:vec3i)->f32{
 // oriented interface for both bulk and film, with no secondary shell to pair.
 fn latticeValue(p: vec3i) -> f32 {
   let dims = select(vec3i(u.gridInfo.xyz), vec3i(sparseParams.fineDims.xyz), sparseField);
-  if(thinWallFilmsEnabled&&!sparseField&&u.gridInfo.w<1.5){
+  if(thinWallFilmsEnabled&&!sparseField&&u.gridInfo.w<1.5&&u.cameraTarget.w<1.5){
     // Nonuniform augmented axis:
     // outside, wall, first centre, ..., last centre, wall, outside.
     if(any(p<=vec3i(0))||any(p>=dims+vec3i(3))){return 0.0;}
@@ -520,7 +521,7 @@ fn augmentedAxisWorld(p:f32,samples:f32,extent:f32)->f32{
   return (p-1.5)*extent/max(samples,1.0);
 }
 fn latticeWorld(p: vec3f, dims:vec3f) -> vec3f {
-  if(thinWallFilmsEnabled&&!sparseField&&u.gridInfo.w<1.5){
+  if(thinWallFilmsEnabled&&!sparseField&&u.gridInfo.w<1.5&&u.cameraTarget.w<1.5){
     let local=vec3f(augmentedAxisWorld(p.x,dims.x,u.container.x),augmentedAxisWorld(p.y,dims.y,u.container.y),augmentedAxisWorld(p.z,dims.z,u.container.z));
     return vec3f(-0.5*u.container.x,0.0,-0.5*u.container.z)+local;
   }
@@ -556,7 +557,7 @@ fn crossing(a: vec3f, b: vec3f, va: f32, vb: f32, cubeBase: vec3f, cubeScale: f3
   if (abs(denominator) > 1e-20) { t = clamp((0.5 - va) / denominator, 0.0, 1.0); }
   let lattice = mix(a, b, t);
   var film=0.0;
-  if(thinWallFilmsEnabled&&!sparseField&&u.gridInfo.w<1.5){
+  if(thinWallFilmsEnabled&&!sparseField&&u.gridInfo.w<1.5&&u.cameraTarget.w<1.5){
     let idims=vec3i(u.gridInfo.xyz);
     film=max(augmentedWallThickness(vec3i(round(a)),idims),augmentedWallThickness(vec3i(round(b)),idims));
     let base=vec3i(round(cubeBase));
@@ -627,7 +628,7 @@ fn cubeTriangleCount(value: ptr<function, array<f32, 8>>) -> u32 {
 // small enough for the occupancy that hides the load latency.
 fn classifyCubeScaled(base: vec3i, scale: u32) {
   let fieldDims = select(vec3u(u.gridInfo.xyz), sparseParams.fineDims.xyz, sparseField);
-  let cubeDims = fieldDims + select(vec3u(1),vec3u(3),thinWallFilmsEnabled&&!sparseField&&u.gridInfo.w<1.5);
+  let cubeDims = fieldDims + select(vec3u(1),vec3u(3),thinWallFilmsEnabled&&!sparseField&&u.gridInfo.w<1.5&&u.cameraTarget.w<1.5);
   if (any(base < vec3i(0)) || any(vec3u(base) >= cubeDims)) { return; }
   var value = loadCubeCornersScaled(base, i32(scale));
   var minimum = 1.0; var maximum = 0.0;
@@ -849,6 +850,7 @@ fn extractWallMain(@builtin(global_invocation_id) gid: vec3u) {
 const WALL_FILM_EPS:f32=1e-4;
 
 fn wallFilmFaceEnabled(face:u32)->bool{
+  if(u.cameraTarget.w>1.5){return false;}
   return face<5u||(face==5u&&u.cameraTarget.w>0.5);
 }
 fn wallFilmFaceDimensions(face:u32)->vec2i{
@@ -877,7 +879,7 @@ fn wallContactCount(c:vec3i)->f32{
   if(c.x==0){count+=1u;}if(c.x==d.x-1){count+=1u;}
   if(c.z==0){count+=1u;}if(c.z==d.z-1){count+=1u;}
   if(c.y==0){count+=1u;}
-  if(c.y==d.y-1&&u.cameraTarget.w>0.5){count+=1u;}
+  if(c.y==d.y-1&&u.cameraTarget.w>0.5&&u.cameraTarget.w<1.5){count+=1u;}
   return f32(max(count,1u));
 }
 fn wallFilmCellDensity(face:u32,q:vec2i)->f32{
@@ -987,6 +989,17 @@ struct SurfaceOut { @location(0) position:vec4f, @location(1) normal:vec4f }
   // solid/glass contact, not an optical air-water interface. The dry/glass
   // renderer owns it; only the inner film free surface enters water peeling.
   if(input.film< -1e-5){discard;}
+  // Density is stored at cut-cell centres, so marching cubes can form a chord
+  // between two valid boundary samples whose triangle extends beyond the
+  // analytic curved wall. Clip coverage to the same sphere used by physics;
+  // this is presentation-only and prevents those chords from appearing as
+  // rectangular sheets or spikes through the glass silhouette.
+  if(u.cameraTarget.w>1.5){
+    let center=vec3f(0.0,0.5*u.container.y,0.0);
+    let radius=0.5*min(u.container.x,min(u.container.y,u.container.z));
+    let cellSize=min(min(u.container.x/max(u.gridInfo.x,1.0),u.container.y/max(u.gridInfo.y,1.0)),u.container.z/max(u.gridInfo.z,1.0));
+    if(distance(input.world,center)>radius+0.001*cellSize){discard;}
+  }
   if(peelBehindFirstExit>.5){
     let firstBack=textureLoad(firstBackPosition,vec2i(input.clip.xy),0);
     if(firstBack.a<.5){discard;}
@@ -1304,8 +1317,23 @@ fn boxNormal(point:vec3f,center:vec3f,halfSize:vec3f)->vec3f{
   if(q.y>=q.z){return vec3f(0,sign(point.y-center.y),0);}
   return vec3f(0,0,sign(point.z-center.z));
 }
+fn sphericalContainerEnabled()->bool{return u.cameraTarget.w>1.5;}
+fn sphericalContainerGlassVisible()->bool{return u.cameraTarget.w>1.5&&u.cameraTarget.w<2.5;}
+fn sphericalContainerCenter()->vec3f{return vec3f(0.0,0.5*u.container.y,0.0);}
+fn sphericalContainerRadius()->f32{return 0.5*min(u.container.x,min(u.container.y,u.container.z));}
+fn sphereHit(ro:vec3f,rd:vec3f,center:vec3f,radius:f32)->vec2f{
+  let relative=ro-center;let halfB=dot(relative,rd);let c=dot(relative,relative)-radius*radius;
+  let discriminant=halfB*halfB-c;if(discriminant<0.0){return vec2f(1e20,-1e20);}
+  let root=sqrt(max(0.0,discriminant));return vec2f(-halfB-root,-halfB+root);
+}
 struct TankWallSample{distance:f32,inward:vec3f,cellWidth:f32}
 fn nearestTankWallSample(point:vec3f)->TankWallSample{
+  if(sphericalContainerEnabled()){
+    let radial=point-sphericalContainerCenter();let radialLength=max(length(radial),1e-6);
+    let h=u.container.xyz/max(u.gridInfo.xyz,vec3f(1.0));
+    let inward=-radial/radialLength;let width=1.0/max(length(inward/h),1e-6);
+    return TankWallSample(abs(sphericalContainerRadius()-radialLength),inward,width);
+  }
   let half=0.5*u.container.xz;let h=u.container.xyz/max(u.gridInfo.xyz,vec3f(1.0));
   var result=TankWallSample(abs(point.x+half.x),vec3f(1,0,0),h.x);
   var d=abs(half.x-point.x);if(d<result.distance){result=TankWallSample(d,vec3f(-1,0,0),h.x);}
@@ -1351,6 +1379,20 @@ fn causticModulation(textureUV:vec2f)->vec3f{
 fn compositeFrontGlass(color:vec3f,ro:vec3f,rd:vec3f,sceneDepth:f32)->vec3f{
   // The garden pond has no vessel: nothing to composite in front of the water.
   if(environmentIndex()==7){return color;}
+  if(sphericalContainerEnabled()){
+    if(!sphericalContainerGlassVisible()){return color;}
+    let center=sphericalContainerCenter();let radius=sphericalContainerRadius();let hit=sphereHit(ro,rd,center,radius);
+    if(hit.x>hit.y||hit.y<=1e-4){return color;}let glassT=select(hit.x,hit.y,hit.x<=1e-4);
+    if(glassT<=1e-4||glassT>resolvedDrySceneDepth(sceneDepth)+.001){return color;}
+    let point=ro+rd*glassT;let normal=normalize(point-center);let cosine=clamp(abs(dot(-rd,normal)),0.0,1.0);
+    let fresnel=unifiedDielectricFresnel(cosine,${GLASS_OPTICS.fresnelF0.toFixed(2)});
+    let silhouette=pow(1.0-cosine,5.0);let broadRim=smoothstep(.55,.98,1.0-cosine);
+    let glassTint=vec3f(${GLASS_OPTICS.tint.join(",")});
+    var result=mix(color,color*vec3f(.982,1.0,.997)+glassTint*.04,.008+.07*fresnel+.22*silhouette);
+    let light=environmentLightDirection();let glint=unifiedSpecularLobe(normal,-rd,light,300.0);
+    result+=environmentLightColor()*(glint*(.22+.78*broadRim)+fresnel*broadRim*.12);
+    return result;
+  }
   let size=u.container.xyz;let mn=vec3f(-size.x*.5,0,-size.z*.5);let mx=vec3f(size.x*.5,size.y,size.z*.5);let hit=boxHit(ro,rd,mn,mx);
   if(hit.x>hit.y||hit.y<=0.0){return color;}
   let glassT=select(hit.x,hit.y,hit.x<=1e-4);
@@ -1445,8 +1487,14 @@ fn finish(color:vec3f,ndc:vec2f)->vec4f{let c=color*(1.0-.08*dot(ndc*.55,ndc*.55
     // Solid contacts are not extracted as fake water-air sheets. When the
     // refracted ray reaches the floor (or a mesh exit is temporarily missing),
     // terminate it analytically at the tank boundary instead.
-    let boundsMin=vec3f(-u.container.x*.5,0,-u.container.z*.5);let boundsMax=vec3f(u.container.x*.5,u.container.y,u.container.z*.5);let tankExit=boxHit(innerOrigin,inside,boundsMin,boundsMax);let travel=max(.002,tankExit.y);
-    thickness=length(innerOrigin-front.xyz)+travel;exitPoint=innerOrigin+inside*travel;exitN=boxNormal(exitPoint,(boundsMin+boundsMax)*.5,u.container.xyz*.5);
+    let boundsMin=vec3f(-u.container.x*.5,0,-u.container.z*.5);let boundsMax=vec3f(u.container.x*.5,u.container.y,u.container.z*.5);
+    if(sphericalContainerEnabled()){
+      let tankExit=sphereHit(innerOrigin,inside,sphericalContainerCenter(),sphericalContainerRadius());let travel=max(.002,tankExit.y);
+      thickness=length(innerOrigin-front.xyz)+travel;exitPoint=innerOrigin+inside*travel;exitN=normalize(exitPoint-sphericalContainerCenter());
+    }else{
+      let tankExit=boxHit(innerOrigin,inside,boundsMin,boundsMax);let travel=max(.002,tankExit.y);
+      thickness=length(innerOrigin-front.xyz)+travel;exitPoint=innerOrigin+inside*travel;exitN=boxNormal(exitPoint,(boundsMin+boundsMax)*.5,u.container.xyz*.5);
+    }
   }
   var outgoing=inside;var tir=false;var backgroundUV=project(exitPoint);
   if(!opaqueSolidExit){if(dot(exitN,inside)<0.0){exitN=-exitN;}outgoing=refract(inside,-exitN,waterIndexOfRefraction());tir=length(outgoing)<1e-5;if(tir){outgoing=reflect(inside,-exitN);}backgroundUV=project(exitPoint+outgoing*(.55+.45*thickness));}

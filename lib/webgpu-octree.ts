@@ -30,7 +30,7 @@ import { damBreakBoxContains, damBreakSignedDistanceAtNode, initialFluidBrickCom
   initialFluidBrickSignedDistanceAtCell, initialFluidBrickSignedDistanceAtNode,
   initialFluidBrickUnionBounds, initialLiquidContainsCell,
   sceneDamBreakBox, sceneDamBreakFractions, sceneDamBreakIsOffsetFromCorner,
-  sceneHasLiquidSpheres } from "./initial-fluid";
+  sceneHasInitialLiquidVolumes } from "./initial-fluid";
 import { integratedInflowVolume } from "./inflow-boundary";
 import { signedDistanceFromVolume } from "./volume-signed-distance";
 import { sceneHasTerrain, terrainColumnHeights } from "./terrain";
@@ -2127,7 +2127,7 @@ export class WebGPUOctreeProjection {
     // authored a ball.
     const analyticSparseBootstrap = (scene.fluid.initialBrickSeeds_m?.length ?? 0) === 0
       && scene.rigidBodies.length === 0 && !sceneHasTerrain(scene)
-      && !sceneDamBreakIsOffsetFromCorner(scene) && !sceneHasLiquidSpheres(scene);
+      && !sceneDamBreakIsOffsetFromCorner(scene) && !sceneHasInitialLiquidVolumes(scene);
     this.analyticSparseBootstrap = analyticSparseBootstrap;
     const surfaceStateAllocation = planOctreeSurfaceStateAllocation(
       [dims.nx, dims.ny, dims.nz],
@@ -2838,7 +2838,7 @@ export class WebGPUOctreeProjection {
               })) }
             : (this.scene.fluid.initialBrickSeeds_m?.length ?? 0) === 0
             && !sceneDamBreakIsOffsetFromCorner(this.scene)
-            && !sceneHasLiquidSpheres(this.scene)
+            && !sceneHasInitialLiquidVolumes(this.scene)
             ? { initialCondition: this.scene.fluid.initialCondition,
               fillFraction: this.scene.container.fillFraction,
               damBreakDimensions: this.scene.fluid.initialDamBreakDimensions_m
@@ -2928,7 +2928,7 @@ export class WebGPUOctreeProjection {
     const adaptiveInitialCellFractions = this.coarseOnlySurfaceTracking
       && (this.scene.fluid.initialBrickSeeds_m?.length ?? 0) > 0
       && !this.scene.fluid.initialBrickSeedsAdditive
-      && !sceneHasLiquidSpheres(this.scene)
+      && !sceneHasInitialLiquidVolumes(this.scene)
       ? (() => {
         const values = new Float32Array(this.dims.nx * this.dims.ny * this.dims.nz);
         for (let z = 0; z < this.dims.nz; z += 1) {
@@ -8166,7 +8166,7 @@ export function initialOctreeLevelSet(
   // from binary occupancy, whose Euclidean transform rounds the very corners
   // used by the symmetry oracle before the first GPU command is submitted.
   if ((scene.fluid.initialBrickSeeds_m?.length ?? 0) > 0 && !sceneHasTerrain(scene)
-    && !scene.fluid.initialBrickSeedsAdditive && !sceneHasLiquidSpheres(scene)) {
+    && !scene.fluid.initialBrickSeedsAdditive && !sceneHasInitialLiquidVolumes(scene)) {
     const phi = new Float32Array(nx * ny * nz);
     for (let z = 0; z < nz; z += 1) for (let y = 0; y < ny; y += 1) for (let x = 0; x < nx; x += 1) {
       phi[x + nx * (y + ny * z)] = initialFluidBrickSignedDistanceAtCell(
@@ -8204,7 +8204,7 @@ export function initialOctreeNodalLevelSet(
   // field once one is authored. Declining leaves the cell-centred rasterization,
   // which is the same answer terrain and additive seeds already get.
   if ((!seeded && !proceduralDam) || sceneHasTerrain(scene)
-      || scene.fluid.initialBrickSeedsAdditive || sceneHasLiquidSpheres(scene)) return undefined;
+      || scene.fluid.initialBrickSeedsAdditive || sceneHasInitialLiquidVolumes(scene)) return undefined;
   const { nx, ny, nz } = dims;
   const values = new Float32Array((nx + 1) * (ny + 1) * (nz + 1));
   for (let z = 0; z <= nz; z += 1) {

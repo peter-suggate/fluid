@@ -41,6 +41,7 @@ export interface SceneIsoGlyph {
   /** That longest axis in metres: the scene's true size, for a shared scale. */
   readonly size_m: number;
   readonly tank: {
+    readonly shape: "box" | "sphere";
     readonly top: "open" | "closed";
     /** Whether the room is a visible vessel or bare walls. */
     readonly glass: boolean;
@@ -153,19 +154,46 @@ function glyphWater(scene: SceneDescription, extent: IsoVec, scale: number): Iso
     if (base) volumes.push(base);
   }
   if (seeds?.length) volumes.push(...seedVolumes(scene, editorFluidLattice(scene), extent, scale));
-  // A ball is drawn as the box it occupies. The glyph is an isometric block
-  // sketch with no round primitive, and the reason to draw one at all is so a
-  // scene whose whole liquid is a dropped sphere is not an empty card.
-  for (const sphere of scene.fluid.initialLiquidSpheres ?? []) {
-    const centre = {
-      x: (sphere.center_m.x + 0.5 * c.width_m) * scale,
-      y: sphere.center_m.y * scale,
-      z: (sphere.center_m.z + 0.5 * c.depth_m) * scale,
-    };
-    const r = sphere.radius_m * scale;
+  // Analytic volumes share the same card path. The water mark is still an
+  // isometric translucent block sketch, but a hemisphere gets its actual
+  // half-ball bounds rather than masquerading as a rectangular dam.
+  for (const liquid of scene.fluid.initialLiquidVolumes ?? []) {
+    let worldMin: { x: number; y: number; z: number };
+    let worldMax: { x: number; y: number; z: number };
+    if (liquid.shape === "box") {
+      worldMin = liquid.min_m;
+      worldMax = liquid.max_m;
+    } else {
+      const r = liquid.radius_m;
+      let negative = { x: r, y: r, z: r };
+      let positive = { x: r, y: r, z: r };
+      if (liquid.shape === "hemisphere") {
+        const length = Math.hypot(liquid.outwardNormal.x, liquid.outwardNormal.y, liquid.outwardNormal.z) || 1;
+        const n = {
+          x: liquid.outwardNormal.x / length,
+          y: liquid.outwardNormal.y / length,
+          z: liquid.outwardNormal.z / length,
+        };
+        for (const axis of ["x", "y", "z"] as const) {
+          const rim = r * Math.sqrt(Math.max(0, 1 - n[axis] * n[axis]));
+          if (n[axis] > 0) positive = { ...positive, [axis]: rim };
+          if (n[axis] < 0) negative = { ...negative, [axis]: rim };
+        }
+      }
+      worldMin = {
+        x: liquid.center_m.x - negative.x,
+        y: liquid.center_m.y - negative.y,
+        z: liquid.center_m.z - negative.z,
+      };
+      worldMax = {
+        x: liquid.center_m.x + positive.x,
+        y: liquid.center_m.y + positive.y,
+        z: liquid.center_m.z + positive.z,
+      };
+    }
     const volume = box(
-      { x: centre.x - r, y: centre.y - r, z: centre.z - r },
-      { x: centre.x + r, y: centre.y + r, z: centre.z + r },
+      { x: (worldMin.x + 0.5 * c.width_m) * scale, y: worldMin.y * scale, z: (worldMin.z + 0.5 * c.depth_m) * scale },
+      { x: (worldMax.x + 0.5 * c.width_m) * scale, y: worldMax.y * scale, z: (worldMax.z + 0.5 * c.depth_m) * scale },
       extent,
     );
     if (volume) volumes.push(volume);
@@ -260,6 +288,7 @@ export function sceneIsoGlyph(scene: SceneDescription): SceneIsoGlyph {
     extent,
     size_m,
     tank: {
+      shape: c.shape ?? "box",
       top: c.top,
       // Restated rather than imported from `lib/svo-scene-glass.ts`, which
       // carries the renderer's pane compositor: the garden's water sits in the
@@ -282,8 +311,13 @@ export function sceneIsoGlyphWaterline(glyph: SceneIsoGlyph): number | undefined
 /** Screen-reader summary of what the mark shows. */
 export function sceneIsoGlyphLabel(glyph: SceneIsoGlyph): string {
   const waterline = sceneIsoGlyphWaterline(glyph);
+  const vessel = glyph.tank.shape === "sphere"
+    ? glyph.tank.glass ? "Glass sphere" : "Spherical room"
+    : glyph.tank.glass ? "Glass tank" : "Room";
   const parts = [
-    `${glyph.tank.glass ? "Glass tank" : "Room"}, ${glyph.tank.top === "open" ? "open" : "closed"} on top`,
+    glyph.tank.shape === "sphere"
+      ? `${vessel}, closed vessel`
+      : `${vessel}, ${glyph.tank.top === "open" ? "open" : "closed"} on top`,
     waterline === undefined ? "no water" : `water at ${Math.round(waterline * 100)}%`,
   ];
   if (glyph.terrain) parts.push("terrain");

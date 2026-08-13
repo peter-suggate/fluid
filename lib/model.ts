@@ -89,6 +89,12 @@ export interface SceneDescription {
     top: "open" | "closed";
     fluidWallMode: "free-slip" | "no-slip";
     /**
+     * Shape of the physical boundary. Omitted preserves the rectangular tank.
+     * A spherical boundary is the largest sphere contained by the three
+     * extents and is always closed; its exterior is solid.
+     */
+    shape?: "box" | "sphere";
+    /**
      * Whether the domain is drawn as a glass vessel standing in the set.
      *
      * The container is two things at once: the solver's boundary, and — in
@@ -185,26 +191,13 @@ export interface SceneDescription {
      */
     initialBrickSeedsAdditive?: boolean;
     /**
-     * Balls of liquid present at t = 0, as analytic spheres.
+     * Analytic liquid volumes present at t = 0.
      *
-     * A brick seed answers "which brick is wet", so the smallest body it can
-     * describe is one 8-cell brick and every body it describes is a cube. That
-     * is the wrong primitive for a dropped ball: six of the ten Chentanez-
-     * Müller 2012 figures start from a sphere of liquid falling into a pool, an
-     * empty tank or a spherical vessel, and a cube falls, splashes and forms a
-     * crown differently from a ball.
-     *
-     * Spheres *union* with whatever the base initial condition produces, the
-     * way `initialBrickSeedsAdditive` seeds do, rather than replacing it — a
-     * ball is something added to a scene that already has a pool or is
-     * deliberately empty (`fillFraction: 0`). Nothing needs an exclusive form,
-     * so there is no flag for one.
-     *
-     * Like an offset reservoir, a sphere is not one of the closed forms the
-     * GPU's `analyticInitialPhi` knows, so a scene carrying one takes the
-     * host-rasterized bootstrap that terrain and rigid bodies already take.
+     * Volumes are unioned with the ordinary tank-fill/dam-break condition and
+     * with painted bricks. Boxes, spheres and hemispheres share one vocabulary
+     * so scene authors do not need a solver-specific seeding field per shape.
      */
-    initialLiquidSpheres?: LiquidSphere[];
+    initialLiquidVolumes?: InitialLiquidVolume[];
     inflow?: FluidInflow;
     /**
      * What the liquid looks like, as opposed to how it moves.
@@ -265,10 +258,30 @@ export interface FluidRefinementRegion {
   maximumCellSize_cells?: number;
 }
 
-/** A ball of liquid present at t = 0. See `fluid.initialLiquidSpheres`. */
-export interface LiquidSphere {
+/** A world-space analytic liquid volume present at t = 0. */
+export type InitialLiquidVolume = InitialLiquidBox | InitialLiquidSphere | InitialLiquidHemisphere;
+
+export interface InitialLiquidBox {
+  shape: "box";
+  min_m: Vec3;
+  max_m: Vec3;
+}
+
+export interface InitialLiquidSphere {
+  shape: "sphere";
   center_m: Vec3;
   radius_m: number;
+}
+
+export interface InitialLiquidHemisphere {
+  shape: "hemisphere";
+  center_m: Vec3;
+  radius_m: number;
+  /**
+   * Outward normal of the flat face. The retained liquid satisfies
+   * `dot(point - center, outwardNormal) <= 0`.
+   */
+  outwardNormal: Vec3;
 }
 
 export interface FluidInflow {
@@ -455,6 +468,8 @@ export function validateScene(scene: SceneDescription): string[] {
   // document that round-trips through `parseScene`, and the whole point of the
   // optional form is that an authored scene is unchanged by its existence.
   if (c?.vessel !== undefined && c.vessel !== "glass" && c.vessel !== "none") errors.push("Container vessel must be 'glass' or 'none'");
+  if (c?.shape !== undefined && c.shape !== "box" && c.shape !== "sphere") errors.push("Container shape must be 'box' or 'sphere'");
+  if (c?.shape === "sphere" && c.top !== "closed") errors.push("A spherical container must be closed");
   if (!c || c.fillFraction < 0 || c.fillFraction > 1) errors.push("Fill fraction must be in [0, 1]");
   if (!c || !["free-slip", "no-slip"].includes(c.fluidWallMode)) errors.push("Unsupported fluid wall mode");
   const voxelDomain = scene.voxelDomain;
@@ -534,19 +549,40 @@ export function validateScene(scene: SceneDescription): string[] {
       }
     }
   }
-  if (scene.fluid?.initialLiquidSpheres) {
-    const spheres = scene.fluid.initialLiquidSpheres;
-    if (!Array.isArray(spheres) || spheres.length === 0) errors.push("Initial liquid spheres must be a non-empty array");
-    else for (const [index, sphere] of spheres.entries()) {
-      const centre = sphere?.center_m;
-      if (![centre?.x, centre?.y, centre?.z].every(Number.isFinite)) errors.push(`Initial liquid sphere ${index} centre must be finite`);
-      else if (!(sphere.radius_m > 0) || !Number.isFinite(sphere.radius_m)) errors.push(`Initial liquid sphere ${index} radius must be positive and finite`);
-      // The centre, not the whole ball: a sphere may be clipped by a wall or by
-      // the ground the way an authored dam block sitting in the corner is, and
-      // the seed loops already intersect it with the container and the terrain.
+  if (scene.fluid?.initialLiquidVolumes) {
+    const volumes = scene.fluid.initialLiquidVolumes;
+    if (!Array.isArray(volumes) || volumes.length === 0) errors.push("Initial liquid volumes must be a non-empty array");
+    else for (const [index, volume] of volumes.entries()) {
+      if (!volume || !["box", "sphere", "hemisphere"].includes(volume.shape)) {
+        errors.push(`Initial liquid volume ${index} has an unsupported shape`);
+        continue;
+      }
+      if (volume.shape === "box") {
+        const min = volume.min_m;
+        const max = volume.max_m;
+        if (![min?.x, min?.y, min?.z, max?.x, max?.y, max?.z].every(Number.isFinite)) {
+          errors.push(`Initial liquid box ${index} bounds must be finite`);
+        } else if (!(min.x < max.x && min.y < max.y && min.z < max.z)) {
+          errors.push(`Initial liquid box ${index} must have positive extent`);
+        } else if (max.x <= -c.width_m / 2 || min.x >= c.width_m / 2 || max.y <= 0 || min.y >= c.height_m
+          || max.z <= -c.depth_m / 2 || min.z >= c.depth_m / 2) {
+          errors.push(`Initial liquid box ${index} must intersect the container`);
+        }
+        continue;
+      }
+      const centre = volume.center_m;
+      if (![centre?.x, centre?.y, centre?.z].every(Number.isFinite)) errors.push(`Initial liquid ${volume.shape} ${index} centre must be finite`);
+      else if (!(volume.radius_m > 0) || !Number.isFinite(volume.radius_m)) errors.push(`Initial liquid ${volume.shape} ${index} radius must be positive and finite`);
       else if (centre.x < -c.width_m / 2 || centre.x > c.width_m / 2 || centre.y < 0 || centre.y > c.height_m
         || centre.z < -c.depth_m / 2 || centre.z > c.depth_m / 2) {
-        errors.push(`Initial liquid sphere ${index} centre must be inside the container`);
+        errors.push(`Initial liquid ${volume.shape} ${index} centre must be inside the container`);
+      }
+      if (volume.shape === "hemisphere") {
+        const normal = volume.outwardNormal;
+        if (![normal?.x, normal?.y, normal?.z].every(Number.isFinite)
+          || !(Math.hypot(normal.x, normal.y, normal.z) > 1e-12)) {
+          errors.push(`Initial liquid hemisphere ${index} outward normal must be finite and non-zero`);
+        }
       }
     }
   }

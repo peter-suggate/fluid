@@ -39,6 +39,8 @@ export const sceneWebGPUSmokeIds = [
   "settled-tank",
   "settled-tank-ui",
   "dam-break-boxes",
+  "cm12-figure-8",
+  "cm12-figure-12",
   "mass-conserving-figure-9-dam-break",
   "hose-tank",
   "sphere-jet",
@@ -216,6 +218,8 @@ interface LaneOptions {
   timeout_ms?: number;
   /** False for source-driven inflow scenes whose represented volume grows. */
   maximumRepresentedVolumeDrift?: number | false;
+  /** Paper surface density may temporarily exceed one while volume recovers. */
+  maximumStoredDensity?: number;
 }
 
 function backendAcceptance(configuredMethods: readonly SceneWebGPUSmokeMethod[]): SceneWebGPUAcceptanceRule[] {
@@ -343,9 +347,12 @@ function diagnosticAcceptance(
 function lane(options: LaneOptions): SceneWebGPUSmokeLane {
   const configuredMethods = options.methods ?? methods();
   const powerReference = usesPowerReference(configuredMethods);
+  const maximumStoredDensity = options.maximumStoredDensity ?? 1.5;
   const configuredDiagnostics = [
     ...coreDiagnostics.filter((diagnostic) => diagnostic.id !== "octree-authority"
-      || powerReference),
+      || powerReference).map((diagnostic) => diagnostic.id === "volume-and-topology"
+      ? { ...diagnostic, parameters: { ...diagnostic.parameters, maximumStoredDensity } }
+      : diagnostic),
     ...(options.diagnostics ?? []),
   ];
   const maximumRepresentedVolumeDrift = options.maximumRepresentedVolumeDrift === undefined
@@ -364,7 +371,10 @@ function lane(options: LaneOptions): SceneWebGPUSmokeLane {
     collect: { ...defaultCollection, ...options.collect },
     diagnostics: configuredDiagnostics,
     acceptance: [
-      ...coreAcceptance,
+      ...coreAcceptance.map((rule) => rule.id === "volume-upper-bound"
+        || rule.id === "final-volume-upper-bound"
+        ? { ...rule, expected: maximumStoredDensity }
+        : rule),
       ...backendAcceptance(configuredMethods),
       ...diagnosticAcceptance(configuredMethods, configuredDiagnostics),
       ...(maximumRepresentedVolumeDrift === false ? [] : [{
@@ -807,6 +817,46 @@ const suiteList = [
     default: lane({ target_s: Math.max(paperFigureStep_s * 8, 0.05), oracleSteps: 2,
       diagnostics: [tallCellRestrictedDiagnostic] }),
   }),
+  suite("cm12-figure-8", "CM12 Figure 8 dam break in a spherical container", { definitionId: "cm12-figure-8" }, {
+    motion: lane({ id: "motion", description: "Fifteen paper steps establish conserved downslope slosh",
+      target_s: 0.5, exactSteps: 15, maxDt_s: 1 / 30, oracleSteps: 15, cpuOracle: false,
+      methods: methods(["uniform"], { uniform: { timeStep: "paper", densityPostProcessing: "off" } }),
+      timeout_ms: 600_000,
+      // Sec. 3.7 explicitly permits rho' > 1 during impact and removes it
+      // gradually with the bounded artificial-divergence term.
+      maximumStoredDensity: 3,
+      collect: { fieldStats: "final", spatialField: true, stabilityEnvelope: true },
+      diagnostics: [],
+      acceptance: [
+        { id: "cm12-figure8-grid", metric: "methods.uniform.grid", operator: "equal", expected: [128, 128, 128] },
+        { id: "cm12-figure8-mass", metric: "methods.uniform.info.rawVolumeDrift.abs", operator: "at-most", expected: 0.001 },
+        { id: "cm12-figure8-finite", metric: "methods.uniform.info.nonFiniteCount", operator: "equal", expected: 0 },
+        { id: "cm12-figure8-pressure", metric: "methods.uniform.info.uniformCM11aConverged", operator: "equal", expected: true },
+        { id: "cm12-figure8-fim", metric: "methods.uniform.info.uniformFIMConverged", operator: "equal", expected: true },
+        { id: "cm12-figure8-paper-cfl", metric: "methods.uniform.stabilityEnvelope.peakLiquidSpeed_m_s", operator: "at-most", expected: 22 },
+        { id: "cm12-figure8-falls", metric: "methods.uniform.finalSummary.centroidCells.y", operator: "at-most", expected: 63 },
+        { id: "cm12-figure8-spreads", metric: "methods.uniform.finalSummary.centroidCells.x", operator: "at-least", expected: 33 },
+      ],
+    }),
+  }, "motion"),
+  suite("cm12-figure-12", "CM12 Figure 12 ball drop in a spherical container", { definitionId: "cm12-figure-12" }, {
+    motion: lane({ id: "motion", description: "Fifteen paper steps establish a conserved fall toward the curved floor",
+      target_s: 0.5, exactSteps: 15, maxDt_s: 1 / 30, oracleSteps: 15, cpuOracle: false,
+      methods: methods(["uniform"], { uniform: { timeStep: "paper", densityPostProcessing: "off" } }),
+      timeout_ms: 600_000,
+      collect: { fieldStats: "final", spatialField: true, stabilityEnvelope: true },
+      diagnostics: [],
+      acceptance: [
+        { id: "cm12-figure12-grid", metric: "methods.uniform.grid", operator: "equal", expected: [128, 128, 128] },
+        { id: "cm12-figure12-mass", metric: "methods.uniform.info.rawVolumeDrift.abs", operator: "at-most", expected: 0.001 },
+        { id: "cm12-figure12-finite", metric: "methods.uniform.info.nonFiniteCount", operator: "equal", expected: 0 },
+        { id: "cm12-figure12-pressure", metric: "methods.uniform.info.uniformCM11aConverged", operator: "equal", expected: true },
+        { id: "cm12-figure12-fim", metric: "methods.uniform.info.uniformFIMConverged", operator: "equal", expected: true },
+        { id: "cm12-figure12-falls", metric: "methods.uniform.finalSummary.centroidCells.y", operator: "at-most", expected: 88 },
+        { id: "cm12-figure12-coherent", metric: "methods.uniform.stabilityEnvelope.minimumDominantComponentFraction", operator: "at-least", expected: 0.98 },
+      ],
+    }),
+  }, "motion"),
   suite("mass-conserving-figure-9-dam-break",
     "CM12 Figure 9 initial dam phase at the paper's published lattice and timestep",
     { definitionId: "mass-conserving-figure-9-dam-break" }, {

@@ -1,4 +1,4 @@
-import type { LiquidSphere, SceneDescription, Vec3 } from "./model";
+import type { InitialLiquidVolume, SceneDescription, Vec3 } from "./model";
 
 export interface DamBreakFractions {
   width: number;
@@ -81,68 +81,133 @@ export function sceneDamBreakIsOffsetFromCorner(scene: SceneDescription): boolea
   return Math.abs(origin.x) > 1e-9 || Math.abs(origin.y) > 1e-9 || Math.abs(origin.z) > 1e-9;
 }
 
-/**
- * The authored balls of liquid, or nothing.
- *
- * A named accessor rather than `scene.fluid.initialLiquidSpheres ?? []` at each
- * of the nine seeding sites, because "does this scene carry a shape the closed
- * forms cannot express" is a question three GPU bootstrap gates ask and it must
- * be answered the same way in all of them.
- */
-export function sceneLiquidSpheres(scene: SceneDescription): readonly LiquidSphere[] {
-  return scene.fluid.initialLiquidSpheres ?? [];
+/** The scene's canonical analytic t=0 volumes. */
+export function sceneInitialLiquidVolumes(scene: SceneDescription): readonly InitialLiquidVolume[] {
+  return scene.fluid.initialLiquidVolumes ?? [];
 }
 
-export function sceneHasLiquidSpheres(scene: SceneDescription): boolean {
-  return sceneLiquidSpheres(scene).length > 0;
+export function sceneHasInitialLiquidVolumes(scene: SceneDescription): boolean {
+  return sceneInitialLiquidVolumes(scene).length > 0;
 }
 
-/** Whether a finest-cell centre lies inside any authored ball of liquid. */
-export function liquidSphereContainsCell(
+function normalizedNormal(normal: Vec3): Vec3 {
+  const length = Math.hypot(normal.x, normal.y, normal.z);
+  return length > 1e-12
+    ? { x: normal.x / length, y: normal.y / length, z: normal.z / length }
+    : { x: 1, y: 0, z: 0 };
+}
+
+export function initialLiquidVolumeContainsPoint(volume: InitialLiquidVolume, point: Vec3): boolean {
+  if (volume.shape === "box") return point.x >= volume.min_m.x && point.x <= volume.max_m.x
+    && point.y >= volume.min_m.y && point.y <= volume.max_m.y
+    && point.z >= volume.min_m.z && point.z <= volume.max_m.z;
+  const dx = point.x - volume.center_m.x;
+  const dy = point.y - volume.center_m.y;
+  const dz = point.z - volume.center_m.z;
+  if (Math.hypot(dx, dy, dz) > volume.radius_m) return false;
+  if (volume.shape === "sphere") return true;
+  const normal = normalizedNormal(volume.outwardNormal);
+  return dx * normal.x + dy * normal.y + dz * normal.z <= 0;
+}
+
+function analyticBoxSignedDistance(point: Vec3, min: Vec3, max: Vec3): number {
+  const center = { x: 0.5 * (min.x + max.x), y: 0.5 * (min.y + max.y), z: 0.5 * (min.z + max.z) };
+  const half = { x: 0.5 * (max.x - min.x), y: 0.5 * (max.y - min.y), z: 0.5 * (max.z - min.z) };
+  const qx = Math.abs(point.x - center.x) - half.x;
+  const qy = Math.abs(point.y - center.y) - half.y;
+  const qz = Math.abs(point.z - center.z) - half.z;
+  return Math.hypot(Math.max(qx, 0), Math.max(qy, 0), Math.max(qz, 0))
+    + Math.min(Math.max(qx, qy, qz), 0);
+}
+
+export function initialLiquidVolumeSignedDistance(volume: InitialLiquidVolume, point: Vec3): number {
+  if (volume.shape === "box") return analyticBoxSignedDistance(point, volume.min_m, volume.max_m);
+  const delta = {
+    x: point.x - volume.center_m.x,
+    y: point.y - volume.center_m.y,
+    z: point.z - volume.center_m.z,
+  };
+  const sphere = Math.hypot(delta.x, delta.y, delta.z) - volume.radius_m;
+  if (volume.shape === "sphere") return sphere;
+  const normal = normalizedNormal(volume.outwardNormal);
+  const plane = delta.x * normal.x + delta.y * normal.y + delta.z * normal.z;
+  // Intersection of the ball and its retained half-space. This is an exact
+  // sign field (and exact at either smooth face), which is what phi seeding
+  // needs; the max is intentionally sharp at the circular rim.
+  return Math.max(sphere, plane);
+}
+
+export function initialLiquidVolumesSignedDistance(
+  scene: SceneDescription,
+  point: Vec3,
+): number | undefined {
+  const volumes = sceneInitialLiquidVolumes(scene);
+  if (volumes.length === 0) return undefined;
+  return Math.min(...volumes.map((volume) => initialLiquidVolumeSignedDistance(volume, point)));
+}
+
+/** Whether a finest-cell centre lies inside any authored analytic volume. */
+export function initialLiquidVolumeContainsCell(
   scene: SceneDescription,
   x: number,
   y: number,
   z: number,
   dimensions: readonly [number, number, number],
 ): boolean {
-  const spheres = sceneLiquidSpheres(scene);
-  if (spheres.length === 0) return false;
+  const volumes = sceneInitialLiquidVolumes(scene);
+  if (volumes.length === 0) return false;
   const c = scene.container;
   const point = {
     x: -0.5 * c.width_m + (x + 0.5) * c.width_m / dimensions[0],
     y: (y + 0.5) * c.height_m / dimensions[1],
     z: -0.5 * c.depth_m + (z + 0.5) * c.depth_m / dimensions[2],
   };
-  return spheres.some((sphere) => Math.hypot(point.x - sphere.center_m.x,
-    point.y - sphere.center_m.y, point.z - sphere.center_m.z) <= sphere.radius_m);
+  return volumes.some((volume) => initialLiquidVolumeContainsPoint(volume, point));
 }
 
 /**
- * Exact signed distance to the union of authored balls, in metres.
- *
- * Exact at any point rather than only on the lattice, which is what a sphere
- * buys over the brick seeds beside it: `|p - c| - r` needs none of the integer
- * bounds bookkeeping the box unions above do to keep their corners from being
- * rounded before the first advance.
+ * Fractional t=0 occupancy at a cell using the same eight samples as spherical
+ * cut cells. Base fills and painted bricks remain exact whole-cell inputs;
+ * analytic volumes receive the fractional boundary they were authored for.
  */
-export function liquidSphereSignedDistance(
+export function initialLiquidFractionAtCell(
   scene: SceneDescription,
-  point: Vec3,
-): number | undefined {
-  const spheres = sceneLiquidSpheres(scene);
-  if (spheres.length === 0) return undefined;
-  return Math.min(...spheres.map((sphere) => Math.hypot(point.x - sphere.center_m.x,
-    point.y - sphere.center_m.y, point.z - sphere.center_m.z) - sphere.radius_m));
+  x: number,
+  y: number,
+  z: number,
+  dimensions: readonly [number, number, number],
+  baseWet: boolean,
+): number {
+  const brick = initialFluidBrickContainsCell(scene, x, y, z, dimensions);
+  if (combineInitialBrickWet(scene, brick, baseWet)) return 1;
+  const volumes = sceneInitialLiquidVolumes(scene);
+  if (volumes.length === 0) return 0;
+  const c = scene.container;
+  const h = [c.width_m / dimensions[0], c.height_m / dimensions[1], c.depth_m / dimensions[2]] as const;
+  const center = {
+    x: -0.5 * c.width_m + (x + 0.5) * h[0],
+    y: (y + 0.5) * h[1],
+    z: -0.5 * c.depth_m + (z + 0.5) * h[2],
+  };
+  let wetSamples = 0;
+  for (let corner = 0; corner < 8; corner += 1) {
+    const point = {
+      x: center.x + ((corner & 1) ? 0.4 : -0.4) * h[0],
+      y: center.y + ((corner & 2) ? 0.4 : -0.4) * h[1],
+      z: center.z + ((corner & 4) ? 0.4 : -0.4) * h[2],
+    };
+    if (volumes.some((volume) => initialLiquidVolumeContainsPoint(volume, point))) wetSamples += 1;
+  }
+  return wetSamples / 8;
 }
 
 /**
  * Resolves the whole t = 0 liquid occupancy at a finest cell.
  *
- * The base condition, the seeded bricks and the authored balls, in the one
- * order every seeding site has to agree on: spheres union with whatever the
- * brick/base resolution produced, because a ball is added to a scene rather
- * than being the scene. The terrain gate stays with the caller — only the
- * caller knows whether it holds a baked column table or a live sample.
+ * The base condition, seeded bricks and analytic volumes in the one order every
+ * seeding site has to agree on. Volumes union with the brick/base resolution;
+ * the terrain gate stays with the caller because only it knows whether it owns
+ * a baked column table or a live sample.
  */
 export function initialLiquidContainsCell(
   scene: SceneDescription,
@@ -154,7 +219,7 @@ export function initialLiquidContainsCell(
 ): boolean {
   const brick = initialFluidBrickContainsCell(scene, x, y, z, dimensions);
   return combineInitialBrickWet(scene, brick, baseWet)
-    || liquidSphereContainsCell(scene, x, y, z, dimensions);
+    || initialLiquidVolumeContainsCell(scene, x, y, z, dimensions);
 }
 
 export const INITIAL_FLUID_BRICK_SIZE = 8;

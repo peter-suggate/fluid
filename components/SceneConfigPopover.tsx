@@ -128,14 +128,15 @@ export function SceneConfigPopover() {
               <RangeControl label="Height" unit="m" value={scene.container.height_m} min={0.4} max={20} step={0.05} onChange={(value) => patchContainer({ height_m: value })} displayDigits={2} />
               <RangeControl label="Depth" unit="m" value={scene.container.depth_m} min={0.4} max={2} step={0.05} onChange={(value) => patchContainer({ depth_m: value })} displayDigits={2} />
               <RangeControl label="Water fill" unit="%" value={scene.container.fillFraction * 100} min={5} max={90} step={1} onChange={(value) => patchContainer({ fillFraction: value / 100 })} displayDigits={0} />
+              <Segmented ariaLabel="Container shape" value={scene.container.shape ?? "box"} options={[{ value: "box", label: "Box" }, { value: "sphere", label: "Sphere" }]} onChange={(value) => patchContainer(value === "sphere" ? { shape: "sphere", top: "closed" } : { shape: "box" })} />
               <div className="field-grid">
-                <Segmented ariaLabel="Container top" value={scene.container.top} options={[{ value: "open", label: "Open top" }, { value: "closed", label: "Closed" }]} onChange={(value) => patchContainer({ top: value })} />
+                <Segmented ariaLabel="Container top" value={scene.container.top} options={[{ value: "open", label: "Open top", disabled: scene.container.shape === "sphere", title: "A spherical boundary is closed." }, { value: "closed", label: "Closed" }]} onChange={(value) => patchContainer({ top: value })} />
                 <Segmented ariaLabel="Fluid wall condition" value={scene.container.fluidWallMode} options={[{ value: "no-slip", label: "No slip" }, { value: "free-slip", label: "Free slip" }]} onChange={(value) => patchContainer({ fluidWallMode: value })} />
               </div>
               {/* Whether the domain is *drawn* as a tank, which is separate from
                   the boundary it always is. A fresh scene starts as a room, so
                   this is how its author asks for the vessel. */}
-              <Segmented ariaLabel="Container vessel" value={scene.container.vessel ?? "glass"} options={[{ value: "glass", label: "Glass tank" }, { value: "none", label: "No tank" }]} onChange={(value) => patchContainer({ vessel: value })} />
+              <Segmented ariaLabel="Container vessel" value={scene.container.vessel ?? "glass"} options={[{ value: "glass", label: scene.container.shape === "sphere" ? "Glass sphere" : "Glass tank" }, { value: "none", label: "No vessel" }]} onChange={(value) => patchContainer({ vessel: value })} />
             </section>
             <section data-testid="voxel-domain-controls">
               <h3>Unified voxel domain</h3>

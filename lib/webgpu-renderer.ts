@@ -410,7 +410,7 @@ export function sceneStructuralKey(scene: SceneDescription): string {
       .map((value) => Math.round(value / cellSize_m)).join(",")
     : "none";
   const lattice = `${sceneLatticeDimensions(scene).join("x")}:${scene.voxelDomain.brickSize_cells}:${boundsCells}`;
-  return `fluid-${planSceneRuntime(scene).fluidSolver}:${lattice}:${scene.container.top}:${scene.container.fluidWallMode}`;
+  return `fluid-${planSceneRuntime(scene).fluidSolver}:${lattice}:${scene.container.shape ?? "box"}:${scene.container.top}:${scene.container.fluidWallMode}`;
 }
 
 export function gpuSceneStructuralKey(scene: SceneDescription, config: SimulationRunConfig): string {
@@ -436,7 +436,7 @@ export function gpuSceneStructuralKey(scene: SceneDescription, config: Simulatio
  */
 export function gpuSceneSeedKey(scene: SceneDescription): string {
   const c = scene.container;
-  return `${c.width_m}:${c.height_m}:${c.depth_m}:${c.fillFraction}:${rigidBodyAllocationKey(scene.rigidBodies)}:${scene.fluid.initialCondition}:${JSON.stringify(scene.fluid.initialDamBreakDimensions_m ?? null)}:${JSON.stringify(scene.fluid.initialDamBreakOrigin_m ?? null)}:${JSON.stringify(scene.fluid.initialBrickSeeds_m ?? null)}:${scene.fluid.initialBrickSeedsAdditive ?? false}:${JSON.stringify(scene.fluid.initialLiquidSpheres ?? null)}:${JSON.stringify(scene.terrain ?? null)}:${inflowBudgetKey(scene.fluid.inflow)}`;
+  return `${c.width_m}:${c.height_m}:${c.depth_m}:${c.shape ?? "box"}:${c.fillFraction}:${rigidBodyAllocationKey(scene.rigidBodies)}:${scene.fluid.initialCondition}:${JSON.stringify(scene.fluid.initialDamBreakDimensions_m ?? null)}:${JSON.stringify(scene.fluid.initialDamBreakOrigin_m ?? null)}:${JSON.stringify(scene.fluid.initialBrickSeeds_m ?? null)}:${scene.fluid.initialBrickSeedsAdditive ?? false}:${JSON.stringify(scene.fluid.initialLiquidVolumes ?? null)}:${JSON.stringify(scene.terrain ?? null)}:${inflowBudgetKey(scene.fluid.inflow)}`;
 }
 
 /**
@@ -2784,7 +2784,10 @@ export class FluidLabRenderer {
       position.x, position.y, position.z, cameraTanHalfFov(camera),
       // cameraTarget.w is shared presentation metadata: the surface extractor
       // uses it to distinguish a closed ceiling from an open tank top.
-      camera.target_m.x, camera.target_m.y, camera.target_m.z, scene.container.top === "closed" ? 1 : 0,
+      camera.target_m.x, camera.target_m.y, camera.target_m.z,
+      scene.container.shape === "sphere"
+        ? scene.container.vessel === "none" ? 3 : 2
+        : scene.container.top === "closed" ? 1 : 0,
       scene.container.width_m, scene.container.height_m, scene.container.depth_m, scene.container.height_m * scene.container.fillFraction,
       // options.w carries the largest represented adaptive pressure-cell
       // width. The grid overlay uses it to normalize its categorical scale

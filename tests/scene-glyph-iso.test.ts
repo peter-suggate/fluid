@@ -85,6 +85,14 @@ test("a dam break draws the reservoir the seeder uses", () => {
   assert.ok(Math.abs(water.max.z - reservoir.max.z * depth_m * scale) < 1e-12);
 });
 
+test("spherical paper scenes advertise a spherical vessel", () => {
+  for (const id of ["cm12-figure-8", "cm12-figure-12"]) {
+    const glyph = sceneIsoGlyph(getScenePreset(id).create());
+    assert.equal(glyph.tank.shape, "sphere");
+    assert.match(sceneIsoGlyphLabel(glyph), /^Glass sphere, closed vessel,/);
+  }
+});
+
 test("a fluid-disabled scene has no water and no hose", () => {
   const scene = getScenePreset("garden-svo-lighting").create();
   assert.equal(scene.systems?.fluid, false);

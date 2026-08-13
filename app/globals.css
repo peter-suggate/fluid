@@ -1603,6 +1603,8 @@ button.card[data-active] { border-color: var(--accent); }
 .iso-room-lid { fill-opacity: .022; }
 .iso-room-edge { fill: none; stroke: var(--iso-ink); stroke-opacity: .3; stroke-width: .9; stroke-linejoin: round; stroke-linecap: round; }
 .iso-room-edge-near { stroke-opacity: .55; stroke-width: 1.2; }
+.iso-sphere-vessel-fill { fill: var(--iso-ink); fill-opacity: .025; }
+.iso-sphere-vessel-edge { fill: none; stroke: var(--iso-ink); stroke-opacity: .5; stroke-width: 1.15; }
 .iso-water-top, .iso-water-side { fill: var(--accent); transition: fill-opacity .22s ease; }
 .iso-water-top { fill-opacity: .3; }
 .iso-water-side { fill-opacity: .17; }

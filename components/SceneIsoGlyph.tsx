@@ -1,5 +1,7 @@
 "use client";
 
+import { useId } from "react";
+
 import type { SceneDescription } from "@/lib/model";
 import {
   sceneIsoGlyph,
@@ -63,6 +65,7 @@ export interface SceneIsoGlyphProps {
 }
 
 export function SceneIsoGlyph({ scene, glyph = sceneIsoGlyph(scene), scale, className }: SceneIsoGlyphProps) {
+  const sphereClipId = useId().replace(/:/g, "");
   const extent = glyph.extent;
   const shared = scale !== undefined;
   // A shared scale measures every room against the same cube, so a hall and a
@@ -127,6 +130,11 @@ export function SceneIsoGlyph({ scene, glyph = sceneIsoGlyph(scene), scale, clas
   const depth = (volume: IsoBox) => volume.min.x + volume.min.y + volume.min.z;
   const water = [...(glyph.water ?? [])].sort((left, right) => depth(left) - depth(right));
   const bodies = [...glyph.bodies].sort((left, right) => depth(left) - depth(right));
+  const sphere = glyph.tank.shape === "sphere" ? (() => {
+    const centre = put({ x: 0.5 * ex, y: 0.5 * ey, z: 0.5 * ez });
+    return { centre, radius: ISO_SPHERE * fit * Math.min(ex, ey, ez) * 0.5 };
+  })() : undefined;
+  const vesselClip = sphere ? `url(#${sphereClipId})` : undefined;
 
   return (
     <svg
@@ -136,13 +144,22 @@ export function SceneIsoGlyph({ scene, glyph = sceneIsoGlyph(scene), scale, clas
       role="img"
       aria-label={sceneIsoGlyphLabel(glyph)}
     >
-      <path className="iso-room-floor" d={face(room.floor)} />
-      <path className="iso-room-wall" d={face(room.backLeft)} />
-      <path className="iso-room-wall" d={face(room.backRight)} />
+      {sphere && <defs>
+        <clipPath id={sphereClipId}>
+          <circle cx={sphere.centre.x} cy={sphere.centre.y} r={sphere.radius} />
+        </clipPath>
+      </defs>}
+      {sphere
+        ? <circle className="iso-sphere-vessel-fill" cx={sphere.centre.x} cy={sphere.centre.y} r={sphere.radius} />
+        : <>
+          <path className="iso-room-floor" d={face(room.floor)} />
+          <path className="iso-room-wall" d={face(room.backLeft)} />
+          <path className="iso-room-wall" d={face(room.backRight)} />
+        </>}
 
       {water.map((volume, index) => {
         const faces = litFaces(volume);
-        return <g className="iso-water" key={`water-${index}`}>
+        return <g className="iso-water" key={`water-${index}`} clipPath={vesselClip}>
           <path className="iso-water-side" d={face(faces.right)} />
           <path className="iso-water-side" d={face(faces.front)} />
           <path className="iso-water-top" d={face(faces.top)} />
@@ -198,9 +215,13 @@ export function SceneIsoGlyph({ scene, glyph = sceneIsoGlyph(scene), scale, clas
 
       {/* The room last, so nothing drawn inside it spills over its walls. A lid
           is a face you look through; an open room simply has none. */}
-      {glyph.tank.top === "closed" && <path className="iso-room-lid" d={face(room.lid)} />}
-      <path className="iso-room-edge" d={farEdges.join("")} />
-      <path className="iso-room-edge iso-room-edge-near" d={nearEdges.join("")} />
+      {sphere
+        ? <circle className="iso-sphere-vessel-edge" cx={sphere.centre.x} cy={sphere.centre.y} r={sphere.radius} />
+        : <>
+          {glyph.tank.top === "closed" && <path className="iso-room-lid" d={face(room.lid)} />}
+          <path className="iso-room-edge" d={farEdges.join("")} />
+          <path className="iso-room-edge iso-room-edge-near" d={nearEdges.join("")} />
+        </>}
     </svg>
   );
 }

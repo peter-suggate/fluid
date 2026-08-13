@@ -43,6 +43,8 @@ const sceneQueryPaths = [
   "container.fillFraction",
   "container.top",
   "container.fluidWallMode",
+  "container.shape",
+  "container.vessel",
   "voxelDomain",
   "fluid.density_kg_m3",
   "fluid.dynamicViscosity_Pa_s",
@@ -56,6 +58,7 @@ const sceneQueryPaths = [
   // far too large for a URL and belongs to the scene library; painted water was
   // too, until it moved to the compact `seeds` key below.
   "fluid.initialBrickSeedsAdditive",
+  "fluid.initialLiquidVolumes",
   "terrain",
   "nominalResolution.length_m",
   "numerics.fixedDt_s",

@@ -100,17 +100,33 @@ export function repairSceneForContainer(scene: SceneDescription): SceneDescripti
     if (inside.length === 0) delete scene.fluid.initialBrickSeeds_m;
     else if (inside.length !== seeds.length) scene.fluid.initialBrickSeeds_m = inside;
   }
-  const spheres = scene.fluid.initialLiquidSpheres;
-  if (spheres) {
-    // validateScene only asks that the centre be inside; a ball clipped by a
-    // wall is as legal as an authored dam block in the corner.
-    for (const sphere of spheres) {
-      sphere.center_m = {
-        x: clamp(sphere.center_m.x, -c.width_m / 2, c.width_m / 2),
-        y: clamp(sphere.center_m.y, 0, c.height_m),
-        z: clamp(sphere.center_m.z, -c.depth_m / 2, c.depth_m / 2),
-      };
-    }
+  const volumes = scene.fluid.initialLiquidVolumes;
+  if (volumes) {
+    scene.fluid.initialLiquidVolumes = volumes.flatMap((volume) => {
+      if (volume.shape === "box") {
+        const min_m = {
+          x: clamp(volume.min_m.x, -c.width_m / 2, c.width_m / 2),
+          y: clamp(volume.min_m.y, 0, c.height_m),
+          z: clamp(volume.min_m.z, -c.depth_m / 2, c.depth_m / 2),
+        };
+        const max_m = {
+          x: clamp(volume.max_m.x, -c.width_m / 2, c.width_m / 2),
+          y: clamp(volume.max_m.y, 0, c.height_m),
+          z: clamp(volume.max_m.z, -c.depth_m / 2, c.depth_m / 2),
+        };
+        return min_m.x < max_m.x && min_m.y < max_m.y && min_m.z < max_m.z
+          ? [{ ...volume, min_m, max_m }] : [];
+      }
+      return [{
+        ...volume,
+        center_m: {
+          x: clamp(volume.center_m.x, -c.width_m / 2, c.width_m / 2),
+          y: clamp(volume.center_m.y, 0, c.height_m),
+          z: clamp(volume.center_m.z, -c.depth_m / 2, c.depth_m / 2),
+        },
+      }];
+    });
+    if (scene.fluid.initialLiquidVolumes.length === 0) delete scene.fluid.initialLiquidVolumes;
   }
   const inflow = scene.fluid.inflow;
   if (inflow) {
@@ -171,15 +187,12 @@ function scaledScene(scene: SceneDescription, axis: SceneScaleAxis, factor: Scen
         heights_m: grid.heights_m.map((height) => height * factor),
       };
     }
-    // Liquid spheres are absolute metres rather than container fractions, so
-    // unlike the box regions below they do not come back from the canonical
-    // layout. A ball is contents of the tank: it rides the world scale whole,
-    // keeping its share of the container and its radius in cells.
-    if (next.fluid.initialLiquidSpheres) {
-      next.fluid.initialLiquidSpheres = next.fluid.initialLiquidSpheres.map((sphere) => ({
-        center_m: scaleVec3(sphere.center_m, factor),
-        radius_m: sphere.radius_m * factor,
-      }));
+    // Analytic liquid volumes are absolute metres, so they ride world scale
+    // whole and retain their share of the container and their radius in cells.
+    if (next.fluid.initialLiquidVolumes) {
+      next.fluid.initialLiquidVolumes = next.fluid.initialLiquidVolumes.map((volume) => volume.shape === "box"
+        ? { ...volume, min_m: scaleVec3(volume.min_m, factor), max_m: scaleVec3(volume.max_m, factor) }
+        : { ...volume, center_m: scaleVec3(volume.center_m, factor), radius_m: volume.radius_m * factor });
     }
   } else {
     next.voxelDomain.finestCellSize_m = scene.voxelDomain.finestCellSize_m / factor;

@@ -105,6 +105,27 @@ test("every CM12 figure is in the catalog under the paper's own shelf", () => {
   }
 });
 
+test("Figures 8 and 12 share the true closed spherical boundary", () => {
+  for (const id of ["cm12-figure-8", "cm12-figure-12"] as const) {
+    const scene = cm12Scene(id);
+    assert.equal(scene.container.shape, "sphere", id);
+    assert.equal(scene.container.top, "closed", id);
+    assert.equal(scene.container.vessel, "glass", id);
+    assert.equal(scene.terrain, undefined, `${id} must not degrade the upper hemisphere to a heightfield wall`);
+    assert.equal(scene.surfaceStyle, "smooth", id);
+  }
+  const dam = cm12Scene("cm12-figure-8");
+  assert.deepEqual(dam.fluid.initialLiquidVolumes, [{
+    shape: "hemisphere",
+    center_m: { x: 0, y: 3.2, z: 0 },
+    radius_m: 3.2,
+    outwardNormal: { x: 1, y: 0, z: 0 },
+  }]);
+  const drop = cm12Scene("cm12-figure-12");
+  assert.equal(drop.fluid.initialLiquidVolumes?.length, 1);
+  assert.equal(drop.fluid.initialLiquidVolumes?.[0]?.shape, "sphere");
+});
+
 /**
  * The precondition that is invisible to `validateScene`.
  *

@@ -1,4 +1,4 @@
-import { damBreakBoxContains, initialFluidBrickSignedDistance, initialLiquidContainsCell, liquidSphereSignedDistance, sceneDamBreakBox, sceneDamBreakFractions } from "./initial-fluid";
+import { damBreakBoxContains, initialFluidBrickSignedDistance, initialLiquidContainsCell, initialLiquidVolumesSignedDistance, sceneDamBreakBox, sceneDamBreakFractions } from "./initial-fluid";
 import type { SceneDescription } from "./model";
 import { sceneHasTerrain, terrainColumnHeights, terrainHeightAt } from "./terrain";
 
@@ -163,23 +163,23 @@ export function initialLiquidPhi(scene: SceneDescription, point: { x: number; y:
   const c = scene.container;
   // Authored balls union with everything below, and their distance is exact at
   // any point, so they need none of the lattice bookkeeping the box forms do.
-  const sphereDistance = liquidSphereSignedDistance(scene, point);
-  const withSpheres = (value: number) => sphereDistance === undefined
-    ? value : Math.min(value, sphereDistance);
+  const volumeDistance = initialLiquidVolumesSignedDistance(scene, point);
+  const withVolumes = (value: number) => volumeDistance === undefined
+    ? value : Math.min(value, volumeDistance);
   if (dimensions) {
     const brickDistance = initialFluidBrickSignedDistance(scene, point, dimensions);
     if (brickDistance !== undefined) {
       // Additive seeds union with the base liquid (signed-distance minimum);
       // ordinary seeds replace it entirely.
-      if (!scene.fluid.initialBrickSeedsAdditive) return withSpheres(brickDistance);
+      if (!scene.fluid.initialBrickSeedsAdditive) return withVolumes(brickDistance);
       const basePhi = scene.fluid.initialCondition === "tank-fill"
         ? point.y - c.height_m * c.fillFraction
         : baseDamBreakPhi(scene, point);
-      return withSpheres(Math.min(brickDistance, basePhi));
+      return withVolumes(Math.min(brickDistance, basePhi));
     }
   }
-  if (scene.fluid.initialCondition === "tank-fill") return withSpheres(point.y - c.height_m * c.fillFraction);
-  return withSpheres(baseDamBreakPhi(scene, point));
+  if (scene.fluid.initialCondition === "tank-fill") return withVolumes(point.y - c.height_m * c.fillFraction);
+  return withVolumes(baseDamBreakPhi(scene, point));
 }
 
 function baseDamBreakPhi(scene: SceneDescription, point: { x: number; y: number; z: number }) {

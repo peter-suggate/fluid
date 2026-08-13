@@ -60,6 +60,17 @@ test("a container declared vessel-free publishes no panes in any environment", (
   }
 });
 
+test("a spherical vessel is reserved for the analytic curved-glass compositor", () => {
+  const scene = cloneScene(defaultScene);
+  scene.container.shape = "sphere";
+  scene.container.top = "closed";
+  scene.container.vessel = "glass";
+  const glass = buildSvoSceneGlass(scene, { environmentId: "default" });
+  assert.equal(glass.containerPolicy, "analytic-spherical-vessel");
+  assert.equal(glass.containerPaneIndices.length, 0);
+  assert.equal(glass.containerTopPaneIndex, undefined);
+});
+
 test("an absent vessel field still means glass, so no authored scene changes", () => {
   const scene = cloneScene(defaultScene);
   assert.equal(scene.container.vessel, undefined);
