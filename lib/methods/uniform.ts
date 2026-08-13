@@ -21,6 +21,7 @@ export const UNIFORM_RUNTIME_PARAM_KEYS = Object.freeze([
   "solidExcessCorrection",
   "rigidCoupling",
   "velocityTransport",
+  "liquidOnlyVelocityAdvection",
   "timeStep",
   "densityPostProcessing",
 ] as const);
@@ -202,6 +203,19 @@ const params: MethodParamSpec[] = [
   {
     ...runtimeUpdate,
     kind: "select",
+    key: "liquidOnlyVelocityAdvection",
+    label: "Liquid-only velocity advection",
+    default: "off",
+    tier: "coarse",
+    options: [
+      { value: "off", label: "Off · paper feedback" },
+      { value: "on", label: "On · phase-masked liquid" },
+    ],
+    hint: "On gathers liquid momentum only from prior liquid faces in the authoritative velocity field. The extension still defines the SL characteristic but supplies no momentum. Off restores unrestricted CM11b transport-field sampling for comparison. Scenes do not override this live control.",
+  },
+  {
+    ...runtimeUpdate,
+    kind: "select",
     key: "timeStep",
     label: "Time step",
     default: "paper",
@@ -264,6 +278,7 @@ export function uniformReferenceSolverOptions(
     timeStep: values.timeStep === "scene" ? "scene" : "paper",
     velocityTransport: values.velocityTransport === "maccormack"
       ? "maccormack" : "semi-lagrangian",
+    liquidOnlyVelocityAdvection: values.liquidOnlyVelocityAdvection === "on",
   };
 }
 

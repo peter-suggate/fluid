@@ -57,6 +57,8 @@ test("every CM12 figure reproduces the published grid and parameter tuple", () =
     const profile = cm12MethodProfile(figure);
     assert.equal(profile.methodId, "uniform", `${where} runs the paper's method`);
     assert.equal(profile.overrides?.timeStep, "paper", `${where} pins the paper step`);
+    assert.equal(Object.hasOwn(profile.overrides ?? {}, "liquidOnlyVelocityAdvection"), false,
+      `${where} must not override the global liquid-only-advection control`);
     assert.equal(profile.overrides?.sharpeningDistance, CM12_TRACE_DISTANCE_CELLS, `${where} D`);
     assert.equal(profile.overrides?.sharpeningStrength, CM12_SOLID_EXCESS_STRENGTH, `${where} S`);
     // Sec. 3.8 is off "unless otherwise stated"; only Figure 6 states otherwise.

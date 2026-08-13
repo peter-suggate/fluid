@@ -61,6 +61,9 @@ struct RigidBody {
 // trilinear sampling reproduces the zero wall-face boundary condition.
 @group(0) @binding(14) var transportIn: texture_3d<f32>;
 @group(0) @binding(15) var transportSampler: sampler;
+// Previous-step rho'=rho/V. Liquid momentum advection uses this phase mask
+// with velocityIn and never reads momentum from the extrapolated transport.
+@group(0) @binding(16) var velocityPhaseIn: texture_3d<f32>;
 @group(0) @binding(19) var<storage,read_write> sharpenDeposits:array<atomic<i32>>;
 // The adaptive method binds its resident signed-distance field here. Uniform
 // reference solvers bind volumeIn instead, preserving their VOF formulation.
@@ -96,6 +99,11 @@ fn clampCell(p: vec3i) -> vec3i { return clamp(p, vec3i(0), dims()-vec3i(1)); }
 // horizontal pair sum. The papers prescribe the stencil, not its add order.
 fn d4Sum6(value:array<f32,6>)->f32{return ((value[0]+value[1])+(value[4]+value[5]))+(value[2]+value[3]);}
 fn d4Sum8(value:array<f32,8>)->f32{
+  let y0=(value[0]+value[5])+(value[1]+value[4]);
+  let y1=(value[2]+value[7])+(value[3]+value[6]);
+  return y0+y1;
+}
+fn d4Sum8Vec2(value:array<vec2f,8>)->vec2f{
   let y0=(value[0]+value[5])+(value[1]+value[4]);
   let y1=(value[2]+value[7])+(value[3]+value[6]);
   return y0+y1;
@@ -259,10 +267,69 @@ fn sampleVelocityComponent(p:vec3f,component:u32)->f32{
   return d4Sum8(terms);
 }
 fn sampleVelocity(p:vec3f)->vec3f{return vec3f(sampleVelocityComponent(p,0u),sampleVelocityComponent(p,1u),sampleVelocityComponent(p,2u));}
-// Reconstruct every RK2 stage at the actual MAC component offsets.  Sampling
-// a collocated rgba vector here introduced a +1/4-cell directional shift and
-// was the first dynamically accumulated D4 error in symmetric expansion.
-fn departurePoint(position:vec3f,dt:f32,h:vec3f)->vec3f{let first=sampleVelocity(position);let midpoint=position-0.5*first*dt/h;return position-sampleVelocity(midpoint)*dt/h;}
+fn velocityPhaseWeight(p:vec3i)->f32{
+  if(!valid(p)){return 0.0;}
+  // velocityPhaseIn stores prior rho'=rho/V. Thin numerical density halos are
+  // not full-strength velocity donors. This is support selection only: neither
+  // density nor wall aperture scales the intensive transported velocity.
+  let liquidFraction=clamp(textureLoad(velocityPhaseIn,p,0).x,0.0,1.0);
+  return select(0.0,1.0,liquidFraction>0.5&&cellOpenFraction(p)>1e-5);
+}
+fn physicalVelocityFaceWeight(p:vec3i,component:u32)->f32{
+  var axis=vec3i(0);axis[component]=1;let neighbor=p+axis;
+  // MAC storage keeps positive faces in velocityIn and the three negative
+  // domain faces in boundaryVelocityIn. Both are authoritative boundary
+  // conditions, not extrapolated air. A stencil location is addressable when
+  // at least one of its adjacent cells is in the domain; invalid transverse
+  // coordinates leave both cells invalid and are rejected.
+  if(!valid(p)&&!valid(neighbor)){return 0.0;}
+  let liquidWeight=max(velocityPhaseWeight(p),velocityPhaseWeight(p+axis));
+  return liquidWeight;
+}
+fn physicalVelocityFaceValue(p:vec3i,component:u32)->f32{
+  if(valid(p)){return textureLoad(velocityIn,p,0)[component];}
+  var axis=vec3i(0);axis[component]=1;let neighbor=p+axis;
+  if(valid(neighbor)&&p[component]==-1){return boundaryVelocity(neighbor)[component];}
+  return 0.0;
+}
+// Interpolate the authoritative pre-advection MAC field using only faces
+// adjacent to prior liquid. Exterior transport values are not candidates and
+// therefore cannot contribute momentum, regardless of how they were filled.
+fn samplePhysicalVelocityComponent(p:vec3f,component:u32)->vec2f{
+  var offset=vec3f(0.5);offset[component]=1.0;var lower=vec3f(0.0);lower[component]=-1.0;
+  let q=clamp(p-offset,lower,vec3f(dims()-vec3i(1)));let base=vec3i(floor(q));let fraction=fract(q);
+  var terms:array<vec2f,8>;
+  for(var corner=0u;corner<8u;corner+=1u){
+    let o=vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));
+    let weights=select(vec3f(1.0)-fraction,fraction,vec3f(o)>vec3f(0.5));let weight=weights.x*weights.y*weights.z;
+    let donor=base+o;let combinedWeight=weight*physicalVelocityFaceWeight(donor,component);
+    terms[corner]=vec2f(combinedWeight*physicalVelocityFaceValue(donor,component),combinedWeight);
+  }
+  let sum=d4Sum8Vec2(terms);
+  return vec2f(select(0.0,sum.x/sum.y,sum.y>0.0),sum.y);
+}
+fn clampVelocityTraceToDomain(p:vec3f)->vec3f{
+  let upper=vec3f(dims());var q=p;
+  q.x=clamp(q.x,0.0,upper.x);q.z=clamp(q.z,0.0,upper.z);q.y=max(q.y,0.0);
+  if(params.boundary.w<=0.5){q.y=min(q.y,upper.y);}
+  return q;
+}
+// Reconstruct every RK2 stage at the actual MAC component offsets. Long
+// characteristics remain semi-Lagrangian, but are integrated in local pieces
+// no longer than the accurate extension band. The extension defines only the
+// characteristic map; samplePhysicalVelocityComponent owns transported
+// momentum below.
+fn departurePoint(position:vec3f,dt:f32,h:vec3f)->vec3f{
+  var point=position;var remaining=abs(dt);let direction=select(-1.0,1.0,dt>=0.0);
+  for(var step=0;step<32;step+=1){
+    if(remaining<=1e-7){break;}
+    let first=sampleVelocity(point);let rate=max(abs(first.x)/h.x,max(abs(first.y)/h.y,abs(first.z)/h.z));
+    let stepSeconds=min(remaining,1.5/max(rate,1e-6));let signedStep=direction*stepSeconds;
+    let midpoint=clampVelocityTraceToDomain(point-0.5*first*signedStep/h);
+    point=clampVelocityTraceToDomain(point-sampleVelocity(midpoint)*signedStep/h);remaining-=stepSeconds;
+  }
+  return point;
+}
 // advectVelocityComponent follows rigidBodyIndexAt below: it clips the
 // characteristic against the bodies, and WGSL requires declaration before use.
 fn quaternionRotate(q:vec4f,v:vec3f)->vec3f{let uv=cross(q.yzw,v);let uuv=cross(q.yzw,uv);return v+2.0*(q.x*uv+uuv);}
@@ -334,9 +401,39 @@ fn clippedDeparturePoint(position:vec3f,dt:f32,h:vec3f)->vec3f{
   if(!hasRigidBodies()&&!hasSphericalContainer()){return departurePoint(position,dt,h);}
   return clipDepartureAtSolid(position,departurePoint(position,dt,h));
 }
+fn velocityFaceLiquid(position:vec3f,component:u32)->bool{
+  var offset=vec3f(0.5);offset[component]=1.0;let face=vec3i(floor(position-offset+vec3f(0.5)));
+  var axis=vec3i(0);axis[component]=1;
+  // Sub-isovalue density is still physical liquid. Switching it back to the
+  // exterior gather at 0.5 produces a temporal discontinuity at energetic
+  // interfaces and separating walls.
+  return volume(face)>1e-5||volume(face+axis)>1e-5;
+}
+fn liquidOnlyVelocityAdvection()->bool{return params.dropExtent.y>0.5;}
 fn advectVelocityComponent(position:vec3f,component:u32,dt:f32,h:vec3f)->f32{
-  if(!hasRigidBodies()&&!hasSphericalContainer()){return sampleVelocityComponent(departurePoint(position,dt,h),component);}
-  return sampleVelocityComponent(clipDepartureAtSolid(position,departurePoint(position,dt,h)),component);
+  let rawDeparture=departurePoint(position,dt,h);
+  var departure=rawDeparture;
+  if(hasRigidBodies()||hasSphericalContainer()){departure=clipDepartureAtSolid(position,rawDeparture);}
+  // Air-side values still need the complete hierarchy for interface transport
+  // and the following extrapolation. When the toggle is on, a face belonging
+  // to updated liquid gathers momentum exclusively from prior liquid faces.
+  if(!liquidOnlyVelocityAdvection()||!velocityFaceLiquid(position,component)){
+    return sampleVelocityComponent(departure,component);
+  }
+  let supported=samplePhysicalVelocityComponent(departure,component);
+  if(supported.y>0.0){return supported.x;}
+  // Discrete high-CFL traces can miss the old liquid stencil. Search back
+  // along the same characteristic for authoritative liquid support. This is
+  // phase-aware interpolation of velocityIn, not sampling of the air field.
+  for(var probe=1;probe<=16;probe+=1){
+    let candidate=mix(departure,position,f32(probe)/16.0);
+    let recovered=samplePhysicalVelocityComponent(candidate,component);
+    if(recovered.y>0.0){return recovered.x;}
+  }
+  // No prior-liquid donor exists on this characteristic. Zero is neutral and
+  // deterministic; projection may reconstruct it from neighboring liquid,
+  // while exterior velocity cannot steer the liquid.
+  return 0.0;
 }
 // Conservative bounding-sphere reject so cells away from every body (and
 // body-free scenes) skip the per-cell primitive tests in the solid-aware

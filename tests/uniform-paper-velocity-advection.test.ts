@@ -38,6 +38,52 @@ test("semi-Lagrangian velocity transport applies forces in its single pass", () 
     "restoring the old ceiling face after gravity pins released liquid to zero velocity");
 });
 
+test("liquid momentum never samples exterior transport while retaining SL characteristics", () => {
+  assert.doesNotMatch(extrapolationShader, /localMask|sourceMask/);
+  assert.doesNotMatch(extrapolator, /packedValues, this\.resolvedDistances/);
+  assert.match(shader, /fn samplePhysicalVelocityComponent/);
+  const physicalStart = shader.indexOf("fn samplePhysicalVelocityComponent");
+  const physical = shader.slice(physicalStart, shader.indexOf("// Reconstruct every RK2", physicalStart));
+  assert.match(physical, /physicalVelocityFaceValue\(donor,component\)/);
+  assert.doesNotMatch(physical, /transportIn/,
+    "liquid momentum interpolation must never read the exterior transport field");
+  assert.match(shader, /if\(!liquidOnlyVelocityAdvection\(\)\|\|!velocityFaceLiquid\(position,component\)\)/,
+    "the complete extension remains transport support outside liquid");
+  assert.match(shader, /let supported=samplePhysicalVelocityComponent\(departure,component\)/,
+    "an updated liquid face must gather only prior-liquid velocityIn donors");
+  assert.match(shader, /return 0\.0;\s*\}/,
+    "a failed trace must not fall back to exterior transport momentum");
+});
+
+test("liquid-only velocity gathering excludes density halos and retains wall conditions", () => {
+  const phaseStart = shader.indexOf("fn velocityPhaseWeight");
+  const phase = shader.slice(phaseStart, shader.indexOf("// Interpolate the authoritative", phaseStart));
+  assert.match(phase, /let liquidFraction=clamp\(textureLoad\(velocityPhaseIn,p,0\)\.x,0\.0,1\.0\)/,
+    "prior rho/V must identify authoritative liquid donors");
+  assert.match(phase, /return select\(0\.0,1\.0,liquidFraction>0\.5&&cellOpenFraction\(p\)>1e-5\)/,
+    "thin numerical halos and closed cells must not become full velocity donors");
+  assert.match(phase, /if\(!valid\(p\)&&!valid\(neighbor\)\)\{return 0\.0;\}/,
+    "only truly exterior stencil locations may be rejected");
+  assert.match(phase, /return boundaryVelocity\(neighbor\)\[component\]/,
+    "negative domain faces must use their authoritative boundary condition");
+  assert.match(phase, /if\(valid\(p\)\)\{return textureLoad\(velocityIn,p,0\)\[component\];\}/,
+    "stored positive and embedded wall faces must remain authoritative donors");
+  assert.match(shader, /return volume\(face\)>1e-5\|\|volume\(face\+axis\)>1e-5/,
+    "sub-isovalue liquid must remain on the liquid-only path");
+  assert.match(shader, /fn clampVelocityTraceToDomain/);
+  assert.match(shader, /midpoint=clampVelocityTraceToDomain/);
+  assert.match(shader, /point=clampVelocityTraceToDomain/);
+});
+
+test("long characteristics remain semi-Lagrangian and substep within the accurate band", () => {
+  const start = shader.indexOf("fn departurePoint");
+  const body = shader.slice(start, shader.indexOf("// advectVelocityComponent", start));
+  assert.match(body, /for\(var step=0;step<32;step\+=1\)/);
+  assert.match(body, /stepSeconds=min\(remaining,1\.5\/max\(rate,1e-6\)\)/);
+  assert.match(body, /let midpoint=clampVelocityTraceToDomain\(point-0\.5\*first\*signedStep\/h\)/);
+  assert.match(body, /point=clampVelocityTraceToDomain\(point-sampleVelocity\(midpoint\)\*signedStep\/h\)/);
+});
+
 test("bounded correction falls back outside donor bounds and applies forces once", () => {
   const boundedStart = shader.indexOf("fn boundedMacCormack");
   const bounded = shader.slice(boundedStart, shader.indexOf("@compute", boundedStart));

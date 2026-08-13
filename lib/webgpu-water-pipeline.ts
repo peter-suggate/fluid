@@ -421,27 +421,14 @@ fn columnBaseAt(x: i32, z: i32) -> i32 {
   return i32(round(textureLoad(columnBases, vec2i(x, z), 0).x));
 }
 
-// Raw cell-centred volume fractions carry a one-cell staircase wherever a
-// diagonal free surface crosses the lattice. Marching cubes cannot remove
-// that staircase: it only interpolates the eight values it is given. For the
-// presentation contour, reconstruct those values with the separable
-// [1 2 1]^3 / 64 binomial kernel. The kernel has unit sum, so it preserves a
-// constant field and the interior volume integral while replacing cell steps
-// with a C0 transition. Solid side/floor neighbours extend the boundary value;
-// samples above the open domain remain air. Simulation p is never modified.
+// The solver has already published the field to contour: raw rho for the
+// ordinary CM12 path, or rho'' after its optional Section 3.8 reconstruction.
+// Sample it exactly. A second presentation blur is not contour preserving: a
+// one-cell sheet with rho=.6 becomes .3 under [1 2 1]^3 / 64 and vanishes even
+// though the solver and the surface-density diagnostic both classify it as
+// liquid. Marching cubes owns interpolation between these cell-centred nodes.
 fn presentationFieldCell(cell:vec3i)->f32{
-  if(u.gridInfo.w>=1.5){return fieldCell(cell);}
-  let dims=vec3i(u.gridInfo.xyz);
-  if(any(cell<vec3i(0))||any(cell>=dims)){return 0.0;}
-  var sum=0.0;
-  for(var z=-1;z<=1;z+=1){for(var y=-1;y<=1;y+=1){for(var x=-1;x<=1;x+=1){
-    let sampleY=cell.y+y;
-    if(sampleY>=dims.y){continue;}
-    let q=vec3i(clamp(cell.x+x,0,dims.x-1),max(sampleY,0),clamp(cell.z+z,0,dims.z-1));
-    let wx=select(1.0,2.0,x==0);let wy=select(1.0,2.0,y==0);let wz=select(1.0,2.0,z==0);
-    sum+=wx*wy*wz*fieldCell(q);
-  }}}
-  return sum/64.0;
+  return fieldCell(cell);
 }
 
 // A cell centre lies half a cell inside the wall. Given an intended film

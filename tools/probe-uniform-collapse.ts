@@ -16,6 +16,7 @@
  *   FLUID_UNIFORM_COLLAPSE_SHARPENING  on/off (default on)
  *   FLUID_UNIFORM_COLLAPSE_GAMMA        on/off (default on)
  *   FLUID_UNIFORM_COLLAPSE_POSTPROCESS  on/off (default off)
+ *   FLUID_UNIFORM_COLLAPSE_LIQUID_VELOCITY on/off (default off)
  *   FLUID_UNIFORM_COLLAPSE_STEPS       steps to advance (default 250)
  *   FLUID_UNIFORM_COLLAPSE_CHECKPOINT  checkpoint cadence (default 10)
  *   FLUID_UNIFORM_COLLAPSE_COMPACT     print spatial attribution only (default off)
@@ -73,16 +74,19 @@ const dt = Number(process.env.FLUID_UNIFORM_COLLAPSE_DT ?? 0.004);
 const sharpening = process.env.FLUID_UNIFORM_COLLAPSE_SHARPENING !== "off";
 const gammaDiffusion = process.env.FLUID_UNIFORM_COLLAPSE_GAMMA !== "off";
 const postprocess = process.env.FLUID_UNIFORM_COLLAPSE_POSTPROCESS === "on";
+const liquidVelocity = process.env.FLUID_UNIFORM_COLLAPSE_LIQUID_VELOCITY === "on";
 scene.numerics.fixedDt_s = dt;
 scene.numerics.maxDt_s = dt;
 const solver = await uniformMethod.createSolverAsync!(device, scene, "balanced",
   { densityPostProcessing: postprocess ? "on" : "off",
     densitySharpening: sharpening ? "on" : "off",
-    gammaDiffusion: gammaDiffusion ? "on" : "off", timeStep: "scene" },
+    gammaDiffusion: gammaDiffusion ? "on" : "off",
+    liquidOnlyVelocityAdvection: liquidVelocity ? "on" : "off", timeStep: "scene" },
   undefined, () => {}) as GPUSolverInstance;
 const nx = solver.info.nx, ny = solver.info.ny, nz = solver.info.nz;
 console.log(`scene ${sceneId} worldScale=${worldScale} grid ${nx}x${ny}x${nz} dt=${dt}`
-  + ` sharpening=${sharpening ? "on" : "off"} postprocess=${postprocess ? "on" : "off"}`);
+  + ` sharpening=${sharpening ? "on" : "off"} postprocess=${postprocess ? "on" : "off"}`
+  + ` liquidVelocity=${liquidVelocity ? "on" : "off"}`);
 
 const internal = solver as unknown as {
   volumeA: GPUTexture; velocityA: GPUTexture; gammaA: GPUTexture; surfaceFieldTexture: GPUTexture;

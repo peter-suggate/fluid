@@ -35,10 +35,11 @@ test("uniform reference exposes stage gates, pass schedules, and transport choic
     "activeRegion", "gammaDiffusion", "gammaDiffusionIterations", "densitySharpening",
     "sharpeningMassCorrection", "sharpeningStrength", "sharpeningDistance",
     "solidExcessCorrection", "rigidCoupling", "pressureFullCycles",
-    "pressureVCycles", "pressureSweeps", "velocityTransport", "timeStep",
+    "pressureVCycles", "pressureSweeps", "velocityTransport", "liquidOnlyVelocityAdvection", "timeStep",
     "densityPostProcessing",
   ]);
   assert.equal(resolveMethodValues(uniformMethod, "balanced", {}).velocityTransport, "semi-lagrangian");
+  assert.equal(resolveMethodValues(uniformMethod, "balanced", {}).liquidOnlyVelocityAdvection, "off");
   assert.equal(resolveMethodValues(uniformMethod, "balanced", {}).timeStep, "paper");
   assert.equal(resolveMethodValues(uniformMethod, "high", {}).densityPostProcessing, "off");
   assert.deepEqual(uniformMethod.runtimeParamKeys, UNIFORM_RUNTIME_PARAM_KEYS);
@@ -85,6 +86,7 @@ test("uniform reference exposes stage gates, pass schedules, and transport choic
     densityPostProcessing: false,
     timeStep: "paper",
     velocityTransport: "semi-lagrangian",
+    liquidOnlyVelocityAdvection: false,
   });
 
   assert.equal(uniformReferenceSolverOptions({
@@ -93,6 +95,9 @@ test("uniform reference exposes stage gates, pass schedules, and transport choic
     timeStep: "paper",
     densityPostProcessing: "off",
   }).velocityTransport, "maccormack");
+  assert.equal(uniformReferenceSolverOptions({
+    liquidOnlyVelocityAdvection: "on",
+  }).liquidOnlyVelocityAdvection, true);
   assert.equal(uniformReferenceSolverOptions({ activeRegion: "off" }).activeRegion, false);
   assert.equal(uniformReferenceSolverOptions({ activeRegion: "on" }).activeRegion, true);
 
@@ -275,6 +280,7 @@ test("uniform reference compiles and advances one step on WebGPU", {
       densitySharpening: "off",
       rigidCoupling: "off",
       velocityTransport: "maccormack",
+      liquidOnlyVelocityAdvection: "on",
       densityPostProcessing: "off",
     });
     assert.notEqual(solver.surfaceFieldTexture, solver.volumeTexture,

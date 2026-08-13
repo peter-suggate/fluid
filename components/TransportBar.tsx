@@ -96,7 +96,7 @@ export function TransportBar() {
           <label title={paperStep
             ? "Uniform paper mode holds the shared rigid + fluid step at 1/30 s · changing it leaves paper mode for the scene-authored step"
             : "One fixed step size shared by rigid bodies and fluid"}>
-            <span>{paperStep ? "STEP · PAPER" : "STEP"}</span>
+            <span>STEP</span>
             <input
               type="range"
               min={MIN_SHARED_STEP_S * 1000}

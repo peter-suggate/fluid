@@ -63,6 +63,8 @@ export interface WebGPUUniformReferenceOptions {
   activeRegion?: boolean;
   /** Velocity transport used by Algorithm 1 step 3. */
   velocityTransport?: GPUVelocityTransport;
+  /** Reject hierarchy-only air samples when updating liquid momentum. */
+  liquidOnlyVelocityAdvection?: boolean;
   /** Diagnostic-only switch; the authored paper method always enables Sec. 3.5. */
   densitySharpening?: boolean;
   /** Return the density removed by Sec. 3.5 through local Algorithm 2 scatter. */
@@ -346,6 +348,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private readonly pressureSchedule: UniformCM11aSchedule;
   private paperTimeStep: boolean;
   private velocityTransport: GPUVelocityTransport;
+  private liquidOnlyVelocityAdvection: boolean;
   private disposed = false;
   private physicsTraceSampleId = 0;
   private physicsTracePending = false;
@@ -383,6 +386,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.paperTimeStep = options.timeStep !== "scene";
     this.velocityTransport = options.velocityTransport === "maccormack"
       ? "maccormack" : "semi-lagrangian";
+    this.liquidOnlyVelocityAdvection = options.liquidOnlyVelocityAdvection === true;
     // The stage trace's closing marker pass must dispatch observable work, or
     // Metal skips its end-of-pass timestamp and the first sample retires
     // hardware tracing for this solver. Compile it long before the panel asks.
@@ -524,6 +528,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       { binding: 13, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
       { binding: 14, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
       { binding: 15, visibility: GPUShaderStage.COMPUTE, sampler: { type: "filtering" } },
+      { binding: 16, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
       { binding: 19, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" } },
       { binding: 20, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
       { binding: 21, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: "unfilterable-float", viewDimension: "2d" } },
@@ -547,7 +552,8 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       heightIn: GPUTexture, heightOut: GPUTexture, predicted = velocityIn,
       reversed = velocityIn, transport = this.transportA, surface = volumeIn,
       gammaRead = this.gammaA, gammaWrite = this.gammaB,
-      boundaryRead = this.boundaryVelocityA, boundaryWrite = this.boundaryVelocityB) => device.createBindGroup({
+      boundaryRead = this.boundaryVelocityA, boundaryWrite = this.boundaryVelocityB,
+      velocityPhase = volumeIn) => device.createBindGroup({
         layout: this.mainLayout, entries: [
           { binding: 0, resource: velocityIn.createView() }, { binding: 1, resource: velocityOut.createView() },
           { binding: 2, resource: pressureIn.createView() }, { binding: 3, resource: pressureOut.createView() },
@@ -557,6 +563,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
           { binding: 10, resource: { buffer: this.rigidSystem.stateBuffer } }, { binding: 11, resource: { buffer: this.rigidExchange } },
           { binding: 12, resource: predicted.createView() }, { binding: 13, resource: reversed.createView() },
           { binding: 14, resource: transport.createView() }, { binding: 15, resource: sampler },
+          { binding: 16, resource: velocityPhase.createView() },
           { binding: 19, resource: { buffer: this.conditioningScratch } },
           { binding: 20, resource: surface.createView() }, { binding: 21, resource: this.terrainTexture.createView() },
           { binding: 24, resource: gammaRead.createView() }, { binding: 25, resource: gammaWrite.createView() },
@@ -575,19 +582,23 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       this.volumeB, this.volumeA, this.heightB, this.heightA,
       this.velocityA, this.velocityA, this.transportA, this.volumeB,
       this.gammaA, this.gammaB, this.boundaryVelocityA, this.boundaryVelocityB,
+      this.surfaceA,
     );
     this.advectGroup = group(this.velocityA, this.velocityC, this.pressureA, this.pressureB,
       this.volumeA, this.volumeB, this.heightB, this.heightA,
       this.velocityB, this.velocityD, this.transportA, this.volumeA,
-      this.gammaA, this.gammaB, this.boundaryVelocityA, this.boundaryVelocityC);
+      this.gammaA, this.gammaB, this.boundaryVelocityA, this.boundaryVelocityC,
+      this.surfaceA);
     this.reverseGroup = group(this.velocityC, this.velocityD, this.pressureA, this.pressureB,
       this.volumeA, this.volumeB, this.heightB, this.heightA,
       this.velocityA, this.velocityB, this.transportB, this.volumeA,
-      this.gammaA, this.gammaB, this.boundaryVelocityC, this.boundaryVelocityD);
+      this.gammaA, this.gammaB, this.boundaryVelocityC, this.boundaryVelocityD,
+      this.surfaceA);
     this.correctGroup = group(this.velocityA, this.velocityB, this.pressureA, this.pressureB,
       this.volumeB, this.volumeA, this.heightB, this.heightA,
       this.velocityC, this.velocityD, this.transportA, this.volumeB,
-      this.gammaA, this.gammaB, this.boundaryVelocityA, this.boundaryVelocityB);
+      this.gammaA, this.gammaB, this.boundaryVelocityA, this.boundaryVelocityB,
+      this.surfaceA);
     this.pressureMultigridGroup = group(this.velocityB, this.velocityA, this.pressureA, this.pressureB, this.volumeB, this.volumeA, this.heightB, this.heightA, this.velocityB, this.velocityB, this.transportA, this.volumeB, this.gammaA, this.gammaB, this.boundaryVelocityB, this.boundaryVelocityA);
     this.projectGroup = group(this.velocityB, this.velocityA, this.pressureMultigrid.pressureTexture, this.pressureA, this.volumeB, this.volumeA, this.heightB, this.heightA, this.velocityB, this.velocityB, this.transportA, this.volumeB, this.gammaA, this.gammaB, this.boundaryVelocityB, this.boundaryVelocityA);
     this.rigidGroup = group(this.velocityA, this.velocityB, this.pressureA, this.pressureB, this.volumeA, this.volumeB, this.heightB, this.heightA, this.velocityA, this.velocityA, this.transportA, this.volumeA, this.gammaA, this.gammaB, this.boundaryVelocityA, this.boundaryVelocityB);
@@ -763,7 +774,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       sceneHasSphericalContainer(this.scene) ? 1 : 0,
       c.depthBoundary === "symmetry" ? 1 : 0,
       drop?.centre_m.x ?? 0, drop?.centre_m.y ?? 0, drop?.centre_m.z ?? 0, drop?.radius_m ?? 0,
-      drop?.halfHeight_m ?? 0, 0, 0, 0,
+      drop?.halfHeight_m ?? 0, this.liquidOnlyVelocityAdvection ? 1 : 0, 0, 0,
     ]));
   }
 
@@ -818,6 +829,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.paperTimeStep = values.timeStep !== "scene";
     this.velocityTransport = values.velocityTransport === "maccormack"
       ? "maccormack" : "semi-lagrangian";
+    this.liquidOnlyVelocityAdvection = values.liquidOnlyVelocityAdvection === "on";
     if (refreshPresentation && this.pipelines) this.encodeInitialPresentationSurface();
   }
 
