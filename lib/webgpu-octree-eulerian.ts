@@ -1,4 +1,4 @@
-import { combineInitialBrickWet, damBreakBoxContains, initialFluidBrickContainsCell, sceneDamBreakBox, sceneDamBreakFractions } from "./initial-fluid";
+import { damBreakBoxContains, initialLiquidContainsCell, sceneDamBreakBox, sceneDamBreakFractions } from "./initial-fluid";
 import { resolveOctreeRuntimeDials } from "./octree-runtime-dials";
 import {
   CPUPerformanceTrace,
@@ -1703,10 +1703,10 @@ fn recordPhysicsPhaseBoundary(
     let initialSum = 0;
     for (let k = 0; k < nz; k++) for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
       const aboveGround = (j + 0.5) * cellHeight > terrainHeights[i + nx * k];
-      const brickWet = initialFluidBrickContainsCell(this.scene, i, j, k, [nx, ny, nz]);
-      const fill = aboveGround && combineInitialBrickWet(this.scene, brickWet, this.scene.fluid.initialCondition === "dam-break"
-        ? damBreakBoxContains(dam, (i + .5) / nx, (j + .5) / ny, (k + .5) / nz)
-        : (j + .5) / ny <= c.fillFraction);
+      const fill = aboveGround && initialLiquidContainsCell(this.scene, i, j, k, [nx, ny, nz],
+        this.scene.fluid.initialCondition === "dam-break"
+          ? damBreakBoxContains(dam, (i + .5) / nx, (j + .5) / ny, (k + .5) / nz)
+          : (j + .5) / ny <= c.fillFraction);
       if (fill) initialSum += 1;
     }
     const terrainCells = new Float32Array(nx * nz);

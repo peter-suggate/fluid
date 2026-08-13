@@ -547,9 +547,9 @@ fn traceGammaAndBeta(@builtin(global_invocation_id) gid:vec3u){
   // The interior clamp is the existing large-CFL conditioning policy; it must
   // never turn the exterior zero into a synthetic wall coefficient.
   let sampledGamma=sampleGammaStencil(base,f);
-  // Preserve a partially exterior row instead of applying the interior floor
-  // or renormalizing its visible corners. Either operation turns the zero
-  // solid extension back into a self-sample and pins density to the wall.
+  // Preserve a partially exterior gamma sample instead of applying the
+  // interior floor. Beta and density gathering still normalize the visible
+  // interpolation stencil below; only cumulative gamma sees the zero exterior.
   let advectedGamma=select(min(sampledGamma,2.5),clamp(sampledGamma,0.5,2.5),total>=1.0-1e-6);
   textureStore(gammaOut,id,vec4f(advectedGamma));
   // No visible donor means there is no backward coefficient. Do not credit a
@@ -558,7 +558,7 @@ fn traceGammaAndBeta(@builtin(global_invocation_id) gid:vec3u){
   // returned by steps 6-7.
   if(total<=1e-9){return;}
   for(var corner=0u;corner<8u;corner+=1u){
-    let offset=vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));let donor=base+offset;let weight=transportStencilWeight(base,f,corner);
+    let offset=vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));let donor=base+offset;let weight=transportStencilWeight(base,f,corner)/total;
     if(weight>0.0){atomicAdd(&sharpenDeposits[linearIndex(donor)],i32(round(advectedGamma*weight*TRANSPORT_FIXED)));}
   }
 }
@@ -601,7 +601,7 @@ fn gatherConservativeDensity(@builtin(global_invocation_id) gid:vec3u){
   for(var corner=0u;corner<8u;corner+=1u){
     let offset=vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));let donor=base+offset;
     if(total<=1e-9){break;}
-    let weight=transportStencilWeight(base,f,corner);if(weight<=0.0){continue;}
+    let weight=transportStencilWeight(base,f,corner)/total;if(weight<=0.0){continue;}
     let scaled=advectedGamma*weight/max(1.0,betaValue(donor));rhoNext+=scaled*volume(donor);
     // Step 5 publishes gamma-prime, the row sum of the conditioned operator.
     gammaNext+=scaled;

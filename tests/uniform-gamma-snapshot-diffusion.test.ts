@@ -43,19 +43,22 @@ test("closed-wall scalar characteristics substep and stop at the wall", () => {
     "folding an overshot trace back into the tank duplicates wall-film samples");
 });
 
-test("released-wall density transport leaves no synthetic backward coefficient", () => {
+test("released-wall gamma sampling keeps the exterior zero without an empty self coefficient", () => {
   assert.match(shader,
     /let advectedGamma=select\(min\(sampledGamma,2\.5\),clamp\(sampledGamma,0\.5,2\.5\),total>=1\.0-1e-6\)/,
     "the interior gamma floor must not fill the missing part of a released-wall row");
   const traceStart = shader.indexOf("fn traceGammaAndBeta");
   const trace = shader.slice(traceStart, shader.indexOf("@compute", traceStart));
   assert.match(trace, /if\(total<=1e-9\)\{return;\}/);
-  assert.match(trace, /let weight=transportStencilWeight\(base,f,corner\);/,
-    "partially exterior backward rows must retain their missing weight");
-  assert.doesNotMatch(trace, /transportStencilWeight\(base,f,corner\)\/total/);
+  assert.match(trace, /let weight=transportStencilWeight\(base,f,corner\)\/total;/,
+    "beta must normalize the surviving interpolation stencil");
   assert.doesNotMatch(trace,
     /atomicAdd\(&sharpenDeposits\[linearIndex\(id\)\]/,
     "an empty backward stencil must not suppress the donor's forward remainder");
+  const gatherStart = shader.indexOf("fn gatherConservativeDensity");
+  const gather = shader.slice(gatherStart, shader.indexOf("fn diffuseGammaPair", gatherStart));
+  assert.match(gather, /let weight=transportStencilWeight\(base,f,corner\)\/total;/,
+    "density gathering must use the same normalized visible weights as beta");
 });
 
 test("CM12 gather publishes the conditioned operator row sum exactly once", () => {

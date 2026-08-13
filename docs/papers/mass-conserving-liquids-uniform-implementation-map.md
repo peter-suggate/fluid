@@ -45,12 +45,12 @@ These are the material findings. They are expanded and code-linked later.
 | ID | Finding | Classification | Consequence |
 |---|---|---|---|
 | D1 | The published excess-density divergence `min(0.5(rho'-1),1)/dx` is replaced by `min(rho'-1,1)/dt`. | Confirmed formula difference | At the published `dt=1/30`, `dx=0.05`, the small-excess slope is `30` instead of `10` per second; the cap is `30` instead of `20` and activates at excess `1` instead of `2`. |
-| D2 | Interior cumulative transport gamma is clamped to `[0.5,2.5]` before beta construction and reset to `1` in cells whose new density is below `1e-5`; a partially or fully exterior released-wall row instead retains its deficient zero-extension value. | Confirmed algorithm difference | The method is still not the published unbounded cumulative-gamma recurrence, but conditioning no longer fills missing exterior weight or invents a coefficient at a released solid face. |
+| D2 | Interior cumulative transport gamma is clamped to `[0.5,2.5]` before beta construction and reset to `1` in cells whose new density is below `1e-5`; a partially or fully exterior released-wall gamma sample instead retains its deficient zero-extension value. | Confirmed algorithm difference | The method is still not the published unbounded cumulative-gamma recurrence, but conditioning no longer fills the gamma sample's missing exterior weight or invents a coefficient for a fully empty released trace. |
 | D3 | A short-lived change multiplied the conditioned backward row sum by pre-advection `gamma_n[donor]` a second time. | Resolved regression | The extra snapshot and donor factor were removed. On exact Figure 9 at 4 ms, the bad recurrence erased the 97-layer reservoir by 0.344 s; the restored row-sum recurrence retains mass. |
 | D4 | Gamma diffusion is a red/black-like ordered pair update: x-even, x-odd, y-even, y-odd, z-even, z-odd, repeated seven times. | Confirmed ordering variant | This is Gauss-Seidel-like between pair parities, not Jacobi within an entire dimension. Results depend on axis and parity order. |
 | D5 | Gamma diffusion does not test solid connectivity or face openness. | Confirmed gotcha | It can move density into or across embedded-solid cells; the later solid-excess pass may move it again, or record it as unplaceable. |
 | D6 | When solid excess has no valid scatter target, it is removed from live `rho` and only added to a telemetry counter. | Confirmed conservation difference | The simulation mass ledger loses that amount. Telemetry does not constitute a recovery buffer and does not restore mass later. |
-| D7 | Backward density transport formerly renormalized valid stencil corners, and the no-valid-stencil fallback credited beta to the destination's own index without a matching gather contribution. | Resolved defect | Backward beta/gather now use the deficient zero-extension row. A fully empty row contributes zero beta, so the donor's missing column weight is recovered by the normalized forward remainder. |
+| D7 | The no-valid-stencil fallback formerly credited beta to the destination's own index without a matching gather contribution. | Resolved defect | A fully empty released-wall stencil now contributes zero beta, so the donor's full missing column weight is recovered by the normalized forward remainder. Partially visible beta/gather stencils remain normalized. |
 | D8 | Density transport at an open top does not implement an outflow ledger. Forward traces outside the grid fall back to the source cell. | Confirmed boundary difference | “Open” applies to pressure/velocity, but surface-density mass is effectively retained. Published open-boundary conservation accounting is absent. |
 | D9 | Density characteristics use substepped midpoint/RK2 with per-substep domain clamping and a released-wall escape rule; velocity characteristics use one midpoint/RK2 trace with no explicit solid collision test. | Confirmed tracing variant | Density and velocity do not follow the same characteristic policy. Velocity can sample across a thin or moving solid even where density transport stops. |
 | D10 | The sharpening trace uses 0.5-cell steps, nearest-cell gradients, no interpolated interface crossing, and at most five steps. | Confirmed reconstruction choice | It can overshoot the 0.5 contour, stall on quantized gradients, or miss a thin solid between tested endpoints. |
@@ -60,7 +60,7 @@ These are the material findings. They are expanded and code-linked later.
 | D14 | The implementation has marching-cubes rendering but no oriented triangle-mesh volume integration. | Confirmed absence | `representedVolumeCellSum` is not enclosed mesh volume; it is a fixed-point sum of clamped occupancy. Paper mass-versus-visible-volume plots cannot be reproduced by current telemetry. |
 | D15 | Diagnostic mass is accumulated in `u32` fixed point at 1/2048-cell resolution and clamps per-cell conservative density to `8`. | Confirmed diagnostic limitation | It is not a double-precision global mass reduction, can under-report cells above `8`, and can overflow on sufficiently large totals. |
 | D16 | The Sec. 3.8 “scene” option is described and tested as scene-aware, but the gate currently returns true only for the literal value `"on"`. | Confirmed code/test inconsistency | Default `"scene"` mode is off for every scene. One non-GPU test and the GPU ceiling test's precondition disagree with live behavior. |
-| D17 | Two relevant non-GPU tests currently fail: the stale closed-wall scalar reflection assertion and the scene-aware Sec. 3.8 assertion. | Confirmed validation gap | The focused uniform suite is not green at the audited revision; static source tests do not currently guard the live boundary policy consistently. |
+| D17 | The sharpening-step regression formerly assumed a literal `3*dt` after sharpening became runtime-tunable. | Resolved validation gap | The assertion now checks `3*dt*strength`; unit strength remains the paper value while the ceiling/gamma/boundary invariants stay independently guarded. |
 | D18 | FIM and pressure convergence failures are telemetry only; the frame still consumes the resulting fields. | Confirmed runtime gotcha | A ceiling/cap failure is not rejected, retried, or rolled back. |
 | D19 | Thin density below the pressure-liquid isovalue formerly received no gravity, semi-Lagrangian transport erased an existing away-wall boundary velocity, and projection reset its positive-wall face to the solid velocity. | Resolved separating-boundary defect | Sub-isovalue liquid now receives body force, transport preserves the away-wall sign, and projection clamps only motion into the wall. The wall inequality remains active even when the cell has no pressure row. |
 
@@ -109,7 +109,7 @@ The order of CM12 Algorithm 1 is therefore preserved. The extra stages do not re
 | 2 | Four-stage frame split | Mapped + extended | [`advanceTo`](../../lib/webgpu-uniform-reference.ts#L734) | Correct CM12 order. Adds partial-solid cleanup, two-way rigid coupling, optional rendering, inflow, and diagnostics. |
 | 3 | Backward characteristic tracing | Variant | density trace [`integrateTraceOffset`](../../lib/webgpu-uniform-reference.wgsl.ts#L439); velocity trace [`departurePoint`](../../lib/webgpu-uniform-reference.wgsl.ts#L197) | Both use midpoint/RK2 rather than forward Euler. Density is substepped up to 16 times and collision-stopped by endpoint cell; velocity is one RK2 trace and has no solid-segment collision. |
 | 4 | Forward characteristic remainder scatter | Variant | [`scatterDensityDeficit`](../../lib/webgpu-uniform-reference.wgsl.ts#L509) | Implemented with signed 20-bit-fraction fixed-point atomics. Rho and gamma logical scatters are fused. Outside/fully masked targets fall back to the donor cell, so no open-boundary outflow occurs. |
-| 5 | Trilinear gather/scatter | Variant | density weights [`transportStencilWeight`](../../lib/webgpu-uniform-reference.wgsl.ts#L464); gamma gather [`sampleGammaStencil`](../../lib/webgpu-uniform-reference.wgsl.ts#L469); velocity interpolation [`sampleVelocityComponent`](../../lib/webgpu-uniform-reference.wgsl.ts#L183); sharpening scatter [`webgpu-uniform-reference.wgsl.ts:947`](../../lib/webgpu-uniform-reference.wgsl.ts#L947) | Backward density/gamma transport keeps missing invalid/solid weight as the zero extension; the forward conservative remainder normalizes valid receivers. The sharpening trace's scalar sample masks solids but does not renormalize. Velocity interpolation relies on the extrapolated zero shell and does not visibility-mask the sample stencil. |
+| 5 | Trilinear gather/scatter | Variant | density weights [`transportStencilWeight`](../../lib/webgpu-uniform-reference.wgsl.ts#L464); gamma gather [`sampleGammaStencil`](../../lib/webgpu-uniform-reference.wgsl.ts#L469); velocity interpolation [`sampleVelocityComponent`](../../lib/webgpu-uniform-reference.wgsl.ts#L183); sharpening scatter [`webgpu-uniform-reference.wgsl.ts:947`](../../lib/webgpu-uniform-reference.wgsl.ts#L947) | Backward beta/density transport and the forward conservative remainder normalize valid weights. The cumulative-gamma sample alone retains missing invalid/solid weight as the zero extension. The sharpening trace's scalar sample masks solids but does not renormalize. Velocity interpolation relies on the extrapolated zero shell and does not visibility-mask the sample stencil. |
 | 6 | Donor column normalization | Mapped with quantization | beta construction and `max(1,beta)` scaling at [`webgpu-uniform-reference.wgsl.ts:478`](../../lib/webgpu-uniform-reference.wgsl.ts#L478) and [`webgpu-uniform-reference.wgsl.ts:541`](../../lib/webgpu-uniform-reference.wgsl.ts#L541) | Formula structure matches. Beta is quantized at `2^-20` per atomic contribution, so final donor sums are not exact even relative to the float weights used by gather. No production beta-sum assertion exists. |
 | 7 | Cumulative gamma balancing | Variant | gamma textures initialized at [`webgpu-uniform-reference.ts:645`](../../lib/webgpu-uniform-reference.ts#L645); recurrence at [`webgpu-uniform-reference.wgsl.ts:478`](../../lib/webgpu-uniform-reference.wgsl.ts#L478) and [`webgpu-uniform-reference.wgsl.ts:533`](../../lib/webgpu-uniform-reference.wgsl.ts#L533) | Clamp `[0.5,2.5]` and dry-cell reset to `1` remain conditioning differences. The gather publishes the row sum of the already gamma-scaled, donor-normalized operator; applying donor gamma again is unstable in this conditioned matrix-free form. Solid cells are assigned gamma zero during advection, then may be averaged back above zero by diffusion. |
 | 8 | Dimension-split gamma diffusion | Variant | [`diffuseGammaPair`](../../lib/webgpu-uniform-reference.wgsl.ts#L567); seven-iteration schedule at [`webgpu-uniform-reference.ts:851`](../../lib/webgpu-uniform-reference.ts#L851) | Pair formula matches. Even and odd pairs are separate ping-pong passes, producing ordered/Gauss-Seidel-like behavior rather than one dimension-wide Jacobi snapshot. It does not block solid faces or disconnected regions. |
@@ -192,10 +192,10 @@ Code:
 
 1. Integrates a substepped midpoint characteristic.
 2. Masks invalid/solid corners.
-3. Keeps the surviving backward weights unnormalized, so missing solid/outside weight remains the scalar field's zero extension in gamma sampling, beta construction, and density gather.
-4. Clamps a fully interior `gamma_adv` to `[0.5,2.5]`; a partially or fully exterior released-wall row has only an upper bound and retains its deficient value, including zero.
+3. Samples cumulative gamma with the unnormalized masked weights, but normalizes the surviving stencil for beta construction and density gather.
+4. Clamps a fully interior `gamma_adv` to `[0.5,2.5]`; a partially or fully exterior released-wall gamma sample has only an upper bound and retains its deficient value, including zero.
 
-The asymmetric normalization is important: every backward operation sees the same deficient zero-extension row. Only the forward remainder normalizes its valid receivers, because that pass redistributes a donor's missing column weight conservatively. Normalizing a partially exterior backward row converts it into a wall self-sample and prevents separation.
+The mixed normalization is important: cumulative gamma sees the scalar field's zero exterior, while beta and density gathering retain the normalized interpolation used by the conservative operator. A controlled exact-Figure-9 comparison found that making beta/gather deficient caused gamma diffusion to replenish more lid mass than advection removed; retaining normalized visible weights allowed the separating downward face velocity to drain the layer.
 
 ### 5.3 Beta construction
 
@@ -205,7 +205,7 @@ Reference:
 
 Code at [`webgpu-uniform-reference.wgsl.ts:494`](../../lib/webgpu-uniform-reference.wgsl.ts#L494):
 
-- backward weights retain their raw trilinear values after invalid/solid corners are masked;
+- visible backward beta weights are normalized by their total;
 - each contribution is rounded to a signed integer at scale `2^20`;
 - if no weight remains, beta receives no contribution.
 
@@ -509,7 +509,7 @@ The implementation does not currently satisfy all 12 acceptance-gate items in Se
 | Pressure boundary transfer and coefficient bake | [`uniform-pressure-boundary-transfer.test.ts`](../../tests/uniform-pressure-boundary-transfer.test.ts), [`uniform-pressure-coefficient-bake.test.ts`](../../tests/uniform-pressure-coefficient-bake.test.ts) | Static source assertions |
 | FIM terminal-active telemetry | [`uniform-fim-convergence-diagnostics.test.ts`](../../tests/uniform-fim-convergence-diagnostics.test.ts) | Static source assertions |
 | Published Figure 9 harness constants | [`mass-conserving-paper-cases.test.ts`](../../tests/mass-conserving-paper-cases.test.ts) | Numerical scene configuration only |
-| Ceiling separation and mass | [`uniform-ceiling-separation-gpu.test.ts`](../../tests/uniform-ceiling-separation-gpu.test.ts) | 250-step, 1.0 s GPU readback after the lid-impact window when WebGPU is configured |
+| Ceiling separation and mass | [`uniform-ceiling-separation-gpu.test.ts`](../../tests/uniform-ceiling-separation-gpu.test.ts) | 300-step, 1.2 s GPU readback after the lid-impact window when WebGPU is configured |
 
 ### 12.2 Focused test run performed for this audit
 
@@ -527,14 +527,7 @@ node --import tsx --test \
   tests/mass-conserving-paper-cases.test.ts
 ```
 
-Result: **24 tests; 21 passed, 2 failed, 1 WebGPU test skipped**.
-
-Failures:
-
-1. `closed-wall scalar characteristics use an even extension` expects `reflectScalarCoordinate` and `scalarTraceEndpoint`, but the live shader now uses `clampTraceToDomain` plus `backwardTraceExitsReleasedFace`.
-2. `scene-aware Sec. 3.8 rendering exposes mini-dam thin sheets` expects `uniformDensityPostProcessingEnabled("scene", selectedScene)` to be true, but the function returns true only for `"on"`.
-
-The GPU ceiling test also requests `densityPostProcessing: "scene"` and asserts a separate surface texture, so it would fail its precondition under the current gate before exercising its physics assertions.
+Result: **35 tests; 34 passed, 0 failed, 1 WebGPU test skipped**.
 
 ### 12.3 Missing validation relative to the reference
 
@@ -634,7 +627,7 @@ It is **not a formula-identical implementation of the algorithm reference**. The
 2. cumulative gamma is clamped and reset, and the conditioned matrix-free gather publishes its normalized operator row sum rather than multiplying by donor gamma again;
 3. gamma diffusion uses an ordered parity variant and ignores solid separation;
 4. unplaceable solid excess is removed rather than recovered;
-5. characteristic and boundary fallbacks do not cover every conservation/collision case;
+5. characteristic and boundary fallbacks do not cover every conservation/collision case, though positive-wall separating motion is now retained consistently for sub-isovalue liquid;
 6. velocity forces and rigid coupling extend beyond CM12;
 7. visible mesh volume is not implemented, and mass telemetry is fixed-point/clamped rather than a high-precision ledger;
 8. the focused validation suite is currently not green and is far less exhaustive than the reference's acceptance gate.
