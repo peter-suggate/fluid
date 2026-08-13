@@ -1,4 +1,5 @@
 import { refinementRegionsToQuery, withRefinementRegionsFromQuery } from "./editor-refinement-region";
+import { sceneSeedsQuery, withSceneSeedsFromQuery } from "./initial-brick-seed-query";
 import { defaultMethodId, interactiveMethodId, simulationMethods, type MethodParamValue, type MethodParamValues } from "./methods";
 import { cloneScene, validateScene, type CameraState, type SceneDescription } from "./model";
 import { isOctreeTechniqueOverlayMode } from "./octree-technique-debug";
@@ -51,9 +52,9 @@ const sceneQueryPaths = [
   "fluid.gravity_m_s2.z",
   "fluid.initialCondition",
   "fluid.inflow",
-  // Painted water and analytic terrain round-trip as atomic blobs. A sculpted
-  // terrain grid is far too large for a URL and belongs to the scene library.
-  "fluid.initialBrickSeeds_m",
+  // Analytic terrain round-trips as an atomic blob. A sculpted terrain grid is
+  // far too large for a URL and belongs to the scene library; painted water was
+  // too, until it moved to the compact `seeds` key below.
   "fluid.initialBrickSeedsAdditive",
   "terrain",
   "nominalResolution.length_m",
@@ -211,6 +212,8 @@ interface SceneQueryBaseline {
   readonly stones: string;
   /** The preset's authored coping rims, in the same form the key carries. */
   readonly rim: string;
+  /** The preset's own painted water, as brick occupancy. */
+  readonly seeds: string;
 }
 
 const sceneQueryBaselineCache = new WeakMap<ScenePreset, SceneQueryBaseline>();
@@ -226,6 +229,7 @@ function sceneQueryBaseline(presetId: string): SceneQueryBaseline {
     canopy: sceneCanopyQuery(baseScene),
     stones: sceneStoneQuery(baseScene),
     rim: sceneRimQuery(baseScene),
+    seeds: sceneSeedsQuery(baseScene),
   };
   sceneQueryBaselineCache.set(preset, baseline);
   return baseline;
@@ -265,6 +269,19 @@ const STONES_QUERY_KEY = "stones";
 /** Coping-rim dials, on the same contract as `canopy`. */
 const RIM_QUERY_KEY = "rim";
 
+/**
+ * Painted water, as brick occupancy rather than the document's seed array.
+ *
+ * The array is a list of metre positions whose only readers immediately floor
+ * them to the brick they land in, so the URL was spending ~81 characters per
+ * seed on a small integer triple — a 256-brick paint reloaded as an HTTP 431.
+ * See `initial-brick-seed-query` for the two encodings and why the brick grid
+ * travels with them. On the same present-key-means-removal contract as
+ * `regions`: an erased paint still writes `seeds=`, or hydration would restore
+ * the preset's water over a deliberate deletion.
+ */
+const SEEDS_QUERY_KEY = "seeds";
+
 function sceneQueryEntries(sceneState: SerializableSceneState): readonly SceneQueryEntry[] {
   const baseline = sceneQueryBaseline(sceneState.presetId);
   const entries: SceneQueryEntry[] = [];
@@ -276,6 +293,8 @@ function sceneQueryEntries(sceneState: SerializableSceneState): readonly SceneQu
   if (stones !== baseline.stones) entries.push([STONES_QUERY_KEY, stones]);
   const rim = sceneRimQuery(sceneState.scene);
   if (rim !== baseline.rim) entries.push([RIM_QUERY_KEY, rim]);
+  const seeds = sceneSeedsQuery(sceneState.scene);
+  if (seeds !== baseline.seeds) entries.push([SEEDS_QUERY_KEY, seeds]);
   sceneQueryPaths.forEach((path, index) => {
     const current = getAtPath(sceneState.scene, path);
     const serialized = JSON.stringify(current);
@@ -322,8 +341,16 @@ function parseMethodValue(methodId: string, key: string, raw: string): MethodPar
 function compatibleSceneValue(base: unknown, value: unknown) {
   if (typeof base === "number") return typeof value === "number" && Number.isFinite(value);
   if (typeof base === "string") return typeof value === "string";
+  if (typeof base === "boolean") return typeof value === "boolean";
   if (Array.isArray(base)) return Array.isArray(value);
   if (base && typeof base === "object") return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+  // An absent baseline admits whatever that key's schema is optional about: an
+  // object like `fluid.inflow`, or a flag like `fluid.initialBrickSeedsAdditive`,
+  // which a preset authoring no painted water simply does not carry. Without the
+  // flag arm the object test below refused every boolean whose preset left it
+  // unset, so a painted link reloaded as water that *replaced* the authored dam
+  // instead of adding to it — the one thing the flag exists to say.
+  if (typeof value === "boolean") return true;
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
@@ -411,14 +438,35 @@ export function parseQueryState(search: string): QueryState {
     }
     catch { /* Malformed external values are ignored and canonicalized away. */ }
   }
+  // Links written before painted water moved to `seeds` carry the seed array on
+  // its old `scene.*` path. Read here rather than from `sceneQueryPaths`, which
+  // no longer lists it, so those links keep their water; the compact key below
+  // wins when a link somehow carries both.
+  const legacySeeds = query.get("scene.fluid.initialBrickSeeds_m");
+  if (legacySeeds !== null) {
+    try {
+      const value = JSON.parse(legacySeeds);
+      if (compatibleSceneValue(getAtPath(baseScene, "fluid.initialBrickSeeds_m"), value)) {
+        setAtPath(patched, "fluid.initialBrickSeeds_m", value);
+      }
+    }
+    catch { /* Malformed external values are ignored and canonicalized away. */ }
+  }
+  // After the loop, never inside it, and for the same reason the regions below
+  // are: brick indices are addressed in a lattice the link's own container and
+  // `voxelDomain` define, and the loop is what just applied them.
+  const seedsQuery = query.get(SEEDS_QUERY_KEY);
+  const withSeeds = seedsQuery === null
+    ? patched
+    : withSceneSeedsFromQuery(patched, seedsQuery);
   // After the loop, never inside it: the regions are percentages of the
   // container, and the container is one of the paths above. Resolving them
   // first would measure them against the preset's tank rather than the one the
   // link actually describes.
   const regionsQuery = query.get(REGIONS_QUERY_KEY);
   const withRegions = regionsQuery === null
-    ? patched
-    : withRefinementRegionsFromQuery(patched, regionsQuery);
+    ? withSeeds
+    : withRefinementRegionsFromQuery(withSeeds, regionsQuery);
   // After the lattice re-author above, deliberately: the dials are applied to
   // whatever document the link's lattice actually built, which is what lets an
   // environment-level change and a tree edit travel in the same URL.
@@ -473,7 +521,7 @@ export function parseQueryState(search: string): QueryState {
       gridOverlaySlice: grid === "volume"
         ? Math.max(0.05, numberParam(query, "gridSlice", initialUI.gridOverlaySlice, 0, 1))
         : numberParam(query, "gridSlice", initialUI.gridOverlaySlice, 0, 1),
-      gridOverlayMode: gridMode === "structure" || gridMode === "resolution" || gridMode === "optical" || gridMode === "cfl" || gridMode === "speed" || gridMode === "phi" || gridMode === "divergence" || gridMode === "pressure" || gridMode === "projection" || gridMode === "representation" || (gridMode !== null && isOctreeTechniqueOverlayMode(gridMode)) ? gridMode : initialUI.gridOverlayMode,
+      gridOverlayMode: gridMode === "structure" || gridMode === "resolution" || gridMode === "optical" || gridMode === "cfl" || gridMode === "speed" || gridMode === "phi" || gridMode === "divergence" || gridMode === "pressure" || gridMode === "projection" || gridMode === "representation" || gridMode === "density" || (gridMode !== null && isOctreeTechniqueOverlayMode(gridMode)) ? gridMode : initialUI.gridOverlayMode,
       svoShadowsEnabled: query.get("svoShadows") !== "0" ? DEFAULT_SVO_LIGHTING_OPTIONS.shadowsEnabled : false,
       svoAmbientOcclusionEnabled: query.get("svoAO") !== "0" ? DEFAULT_SVO_LIGHTING_OPTIONS.ambientOcclusionEnabled : false,
       silhouetteRefinementEnabled: query.get("svoPrimarySeamClosure") === "1",
@@ -508,7 +556,7 @@ export function parseQueryState(search: string): QueryState {
 function isManagedKey(key: string) {
   return key === "method" || key === "scene" || key === "quality" || key === "view" || key === "diagnostics" || key === "waterdiag" || key === "panel" || key === "panelWidth"
     || key === "performance" || key === "validation" || key === "sceneConfig" || key === "grid" || key === "gridSlice" || key === "gridMode"
-    || key === REGIONS_QUERY_KEY || key === CANOPY_QUERY_KEY || key === STONES_QUERY_KEY || key === RIM_QUERY_KEY || key === "render" || key === "svoLighting" || key === "svoShadows" || key === "svoAO" || key === "svoSilhouetteRefinement" || key === "svoPrimarySeamClosure" || key === "svoCones" || key === "svoPrimary" || key === "svoStage" || key === "svoFlatExempt" || key === "svoLodPixels" || key === "svoSurface" || key === "environment" || key === "fps" || key.startsWith("camera.") || key.startsWith("param.") || key.startsWith("scene.");
+    || key === REGIONS_QUERY_KEY || key === CANOPY_QUERY_KEY || key === STONES_QUERY_KEY || key === RIM_QUERY_KEY || key === SEEDS_QUERY_KEY || key === "render" || key === "svoLighting" || key === "svoShadows" || key === "svoAO" || key === "svoSilhouetteRefinement" || key === "svoPrimarySeamClosure" || key === "svoCones" || key === "svoPrimary" || key === "svoStage" || key === "svoFlatExempt" || key === "svoLodPixels" || key === "svoSurface" || key === "environment" || key === "fps" || key.startsWith("camera.") || key.startsWith("param.") || key.startsWith("scene.");
 }
 
 /** Build a canonical query string from the stores, preserving unrelated keys. */

@@ -49,9 +49,39 @@ test("adaptive cell-scale mode audits the compact octree leaf level", () => {
   assert.doesNotMatch(gridOverlayShader, /sparseSurfaceCoreSample|sparseSurfacePhi/,
     "the retired independent sparse-band overlay cannot shadow adaptive pages");
   assert.match(gridOverlayShader, /fill = select\(mix\(middleColor, coarseColor/);
-  assert.match(rendererSource, /gridOverlay\?\.mode === "resolution" && \(gpuInfo\?\.gridKind === "quadtree-tall-cell" \|\| gpuInfo\?\.gridKind === "octree"\) \? 9 : 0/);
+  assert.match(rendererSource, /gridOverlay\?\.mode === "resolution" && \(gpuInfo\?\.gridKind === "quadtree-tall-cell" \|\| gpuInfo\?\.gridKind === "octree"\) \? 9 : /);
   assert.doesNotMatch(rendererSource, /gridOverlay\?\.mode === "(?:surface|faces)"/);
   assert.match(rendererSource, /gpuInfo\?\.quadtreeMaximumFluidScale \?\? 1/);
+});
+
+test("density reads the solver's transported rho, not the presentation reconstruction", () => {
+  // Every other dense view samples fluidField, which on the uniform lane is the
+  // wall-film/blur reconstruction the renderer contours. A density view fed from
+  // that texture would show a picture of the presentation filter rather than of
+  // the state the transport and projection actually operate on.
+  assert.match(gridOverlayShader, /@group\(0\) @binding\(9\) var densityField: texture_3d<f32>/);
+  assert.match(gridOverlayShader, /fn densitySample\(cell: vec3i\) -> f32 \{\n  let dims = vec3i\(u\.gridInfo\.xyz\);\n  return textureLoad\(densityField/);
+  assert.match(gridOverlayShader, /fieldMode == 10/);
+  assert.match(gridOverlayShader, /let rho = densitySample\(cell\);/);
+  assert.match(rendererSource, /gridOverlay\?\.mode === "density" && gpuInfo\?\.gridKind === "uniform" \? 10 : 0/,
+    "rho is the uniform method's own state variable; no other grid kind publishes one");
+  assert.match(rendererSource, /this\.gpuFluid\.gridPressureTexture \?\? this\.scalarFallbackTexture, this\.gpuFluid\.volumeTexture\)/,
+    "the overlay binds volumeTexture directly rather than the contoured surface field");
+});
+
+test("density separates the two thresholds the method itself branches on", () => {
+  // rho > 0.5 is pressureLiquid and rho > 1 is the excess Sec. 3.7 drains. One
+  // continuous ramp would hide both behind a colour the reader has to decode.
+  assert.match(gridOverlayShader, /let dilute = clamp\(rho \* 2\.0, 0\.0, 1\.0\)/);
+  assert.match(gridOverlayShader, /let full = clamp\(\(rho - 0\.5\) \* 2\.0, 0\.0, 1\.0\)/);
+  assert.match(gridOverlayShader, /let excess = clamp\(\(rho - 1\.0\) \* 4\.0, 0\.0, 1\.0\)/);
+  assert.match(gridOverlayShader, /fill = select\(select\(diluteColor, liquidColor, rho > 0\.5\), excessColor, rho > 1\.0\)/);
+  // An empty cell has to read as empty, or "where is there mass at all" — the
+  // first question this view answers — is lost under a floor of tinted haze.
+  assert.match(gridOverlayShader, /alpha = select\(alpha, 0\.0, rho <= 1e-4\)/);
+  // The per-cell fill bar needs both a vertical extent and readable cells.
+  assert.match(gridOverlayShader, /if \(axis != 3 && rho > 1e-4\) \{/);
+  assert.match(gridOverlayShader, /let barFade = smoothstep\(7\.0, 14\.0, pixelsPerCell\)/);
 });
 
 test("default adaptive structure mode has no retired sparse-band overlay", () => {

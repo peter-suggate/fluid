@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { getMethod, resolveMethodValues } from "../lib/methods";
+import { editorFluidLattice, fluidBrickCenter } from "../lib/editor-fluid";
 import { cloneScene } from "../lib/model";
 import { getSceneDefinition, getScenePreset, scenePresets } from "../lib/scenes";
 import { sceneDocumentAtLattice } from "../lib/scene-definition";
@@ -577,4 +578,53 @@ test("query state carries the opt-in primary-seam-closure choice", () => {
   assert.equal(new URLSearchParams(
     serializeQueryState("", { presetId: "garden-svo-lighting", scene }, method, defaults.ui),
   ).get("svoPrimarySeamClosure"), null);
+});
+
+test("a painted twin dam survives a shared link at a fraction of the characters it used to cost", () => {
+  const method = { methodId: "uniform" as const, quality: "balanced" as const, overrides: {} };
+  const parsed = parseQueryState("?scene=twin-dam-collision&scene.voxelDomain="
+    + encodeURIComponent(JSON.stringify({ finestCellSize_m: 0.0125, brickSize_cells: 8 })));
+  const lattice = editorFluidLattice(parsed.scene);
+  const painted = cloneScene(parsed.scene);
+  const bricks: { x: number; y: number; z: number }[] = [];
+  for (const originX of [0, 20])
+    for (let z = originX === 0 ? 0 : 4; z < (originX === 0 ? 4 : 8); z += 1)
+      for (let y = 0; y < 4; y += 1)
+        for (let x = originX; x < originX + 8; x += 1) bricks.push({ x, y, z });
+  painted.fluid = {
+    ...painted.fluid,
+    initialBrickSeeds_m: bricks.map((brick) => fluidBrickCenter(lattice, brick)),
+    initialBrickSeedsAdditive: true,
+  };
+
+  const query = serializeQueryState("", { presetId: "twin-dam-collision", scene: painted }, method);
+  assert.equal(new URLSearchParams(query).has("scene.fluid.initialBrickSeeds_m"), false,
+    "the seed array is no longer a query path");
+  // The same paint as a `scene.*` array was ~20.7 kB, which reloads as an HTTP
+  // 431 once the request line passes Node's 16 kB header ceiling.
+  assert.ok(query.length < 1_000,
+    `a painted scene location must remain reloadable, not grow to ${query.length} characters`);
+
+  const rehydrated = parseQueryState(query);
+  assert.equal(rehydrated.scene.fluid.initialBrickSeeds_m?.length, 256);
+  assert.deepEqual(rehydrated.scene.fluid.initialBrickSeeds_m, painted.fluid.initialBrickSeeds_m);
+});
+
+test("links written before the seeds key still restore the water they carry", () => {
+  const parsed = parseQueryState("?scene=twin-dam-collision");
+  const legacy = [{ x: 0.35, y: 0.1, z: 0.1 }, { x: -0.35, y: 0.1, z: -0.1 }];
+  const restored = parseQueryState("?scene=twin-dam-collision&scene.fluid.initialBrickSeeds_m="
+    + encodeURIComponent(JSON.stringify(legacy)));
+
+  assert.notDeepEqual(parsed.scene.fluid.initialBrickSeeds_m, legacy, "the preset authors its own seeds");
+  assert.deepEqual(restored.scene.fluid.initialBrickSeeds_m, legacy);
+});
+
+test("an optional boolean the preset leaves unset still hydrates from a link", () => {
+  const additive = parseQueryState(
+    "?scene=twin-dam-collision&scene.fluid.initialBrickSeedsAdditive=true");
+  assert.equal(getScenePreset("twin-dam-collision").create().fluid.initialBrickSeedsAdditive, undefined,
+    "the preset must not author the flag, or this proves nothing");
+  assert.equal(additive.scene.fluid.initialBrickSeedsAdditive, true,
+    "painted water that adds to the authored dam must not reload as water that replaces it");
 });

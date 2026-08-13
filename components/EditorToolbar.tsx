@@ -84,15 +84,22 @@ export function EditorToolbar() {
           ))}
         </div>
       )}
-      {activeTool === "body-place" && (
-        <div className="editor-tool-options" role="group" aria-label="Placement shape">
+      {/*
+        One shape roster for both tools that spawn a body. DRAG only spawns on
+        a click that misses, so the strip reads as "what you get if you grab
+        nothing" there and "what you place" in BODY — the same choice either
+        way, and keeping one selection means switching between the two modes
+        never silently changes the object under the cursor.
+      */}
+      {(activeTool === "body-place" || activeTool === "body-drag") && (
+        <div className="editor-tool-options" role="group" aria-label={activeTool === "body-drag" ? "Shape to grab" : "Placement shape"}>
           {PLACEMENT_SHAPES.map(({ shape, label }) => (
             <button
               key={shape}
               type="button"
               className={placementShape === shape ? "active" : ""}
               aria-pressed={placementShape === shape}
-              title={`Place a ${label.toLowerCase()}`}
+              title={activeTool === "body-drag" ? `Grab a ${label.toLowerCase()}` : `Place a ${label.toLowerCase()}`}
               onClick={() => setPlacementShape(shape)}
             >
               <i className={`body-shape-icon shape-${shape}`} aria-hidden="true" /><span>{label}</span>

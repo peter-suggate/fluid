@@ -46,7 +46,7 @@ test("the observatory exposes paper fields with exact axis, slice, and legend co
     "stencil-locality",
   ]) assert.ok(modes.has(mode), mode);
 
-  assert.equal(cards.length, 21);
+  assert.equal(cards.length, 22);
   // Octree publications default to the ray-integrated volume; the dense-grid
   // views are authored as slices because the methods that register them — the
   // uniform reference — have no volume rendering at all.

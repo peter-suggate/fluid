@@ -108,12 +108,13 @@ test("gated stages read their context", () => {
   assert.equal(stageById.get("solid-excess")?.state(context({ hasTerrain: true })), "on");
   assert.equal(stageById.get("rigid-coupling")?.state(context()), "unavailable");
   assert.equal(stageById.get("rigid-coupling")?.state(context({ bodyCount: 2 })), "on");
-  // The Sec. 3.8 gate resolves "scene" exactly as solver construction does.
-  assert.equal(stageById.get("density-post-process")?.state(context()), "off");
+  // The render-density stage always emits wall-supported sub-cell films;
+  // Sec. 3.8 only changes which reconstruction runs inside that live stage.
+  assert.equal(stageById.get("density-post-process")?.state(context()), "on");
   assert.equal(
     stageById.get("density-post-process")?.state(context({ sceneId: "symmetric-expansion" })), "on");
   assert.equal(
-    stageById.get("density-post-process")?.state(context({ sceneId: "minimal-power-dam-break-64" })), "off");
+    stageById.get("density-post-process")?.state(context({ sceneId: "minimal-power-dam-break-64" })), "on");
   assert.equal(
     stageById.get("density-post-process")?.state(context({ values: { densityPostProcessing: "on" } })), "on");
 });

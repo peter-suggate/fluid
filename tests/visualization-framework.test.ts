@@ -137,9 +137,9 @@ test("the observatory's card set is the visible fields, in catalog order", () =>
   // exactly the non-hidden fields, and hiding one is the only way to declare a
   // mode for the shader harness without adding a card.
   const visible = VISUALIZATION_FIELDS.filter((field) => !field.hidden);
-  assert.equal(visible.length, 21);
+  assert.equal(visible.length, 22);
   assert.deepEqual(visible.map((field) => field.mode), [
-    "structure", "cfl", "speed", "phi",
+    "structure", "density", "cfl", "speed", "phi",
     "fine-band-lifecycle", "resolution", "global-fine-phi", "band-residency",
     "blast-radius", "flood-provenance", "power-cells", "power-faces",
     "octree-lifecycle", "pressure", "evaluated-velocity", "projection-update",

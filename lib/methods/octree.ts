@@ -168,10 +168,14 @@ export const octreeMethod: SimulationMethod = {
   },
   qualityLabels: { balanced: "paper defaults", high: "paper defaults", ultra: "paper defaults" },
   showQualityControl: false,
-  // The octree publishes every catalog field: the technique overlays read its
-  // compact debug source, and the generic dense-grid views read the diagnostic
-  // textures it materializes on demand.
-  supportedFieldModes: VISUALIZATION_FIELDS.map((field) => field.mode),
+  // The octree publishes every catalog field bar one: the technique overlays
+  // read its compact debug source, and the generic dense-grid views read the
+  // diagnostic textures it materializes on demand. `density` is the exception
+  // — it is the uniform method's transported rho, and this method tracks a
+  // level set instead, so the view would have nothing to read.
+  supportedFieldModes: VISUALIZATION_FIELDS
+    .filter((field) => field.mode !== "density")
+    .map((field) => field.mode),
   params,
   pressureMapping: "Losasso uses the wide, warm-started V-cycle-preconditioned MGPCG authority. The frozen Power 2017 backend retains its persistent Section 4.3 solver; neither backend falls through to the other after construction.",
   runtimeParamKeys: OCTREE_RUNTIME_DIAL_KEYS,

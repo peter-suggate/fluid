@@ -99,8 +99,8 @@ test("uniform reference exposes stage gates, pass schedules, and transport choic
     { fullCycles: 1, vCycles: 2, preSweeps: 3, postSweeps: 3 });
 });
 
-test("scene-aware Sec. 3.8 rendering leaves paper dam breaks on raw density", () => {
-  assert.equal(uniformDensityPostProcessingEnabled("scene", "symmetric-expansion"), true);
+test("Sec. 3.8 stays opt-in while wall-film reconstruction remains available", () => {
+  assert.equal(uniformDensityPostProcessingEnabled("scene", "symmetric-expansion"), false);
   for (const sceneId of [
     "minimal-power-dam-break",
     "minimal-power-dam-break-32",
@@ -201,8 +201,8 @@ test("uniform reference compiles and advances one step on WebGPU", {
       velocityTransport: "maccormack",
       densityPostProcessing: "off",
     });
-    assert.equal(solver.surfaceFieldTexture, solver.volumeTexture,
-      "a live Sec. 3.8 toggle must rebind presentation without replacing the solver");
+    assert.notEqual(solver.surfaceFieldTexture, solver.volumeTexture,
+      "disabling Sec. 3.8 must retain the render-only wall-film field");
     assert.equal(solver.advanceTo(2 / 30, []), true,
       "a live stage/technique update must apply to the next admitted advance");
     await device.queue.onSubmittedWorkDone();

@@ -209,10 +209,10 @@ const params: MethodParamSpec[] = [
     tier: "fine",
     options: [
       { value: "scene", label: "Scene · Sec. 3.8 where needed" },
-      { value: "off", label: "Off · raw paper density" },
-      { value: "on", label: "On · Sec. 3.8 reconstruction" },
+      { value: "off", label: "Wall films only" },
+      { value: "on", label: "Wall films + Sec. 3.8" },
     ],
-    hint: "Render-only: Off matches the paper's Results default. Scene mode retains the symmetry diagnostic's reconstruction; On explicitly exposes sub-grid mass in any scene. It never feeds simulation physics.",
+    hint: "Render-only: mass-proportional sheets against walls and solids are always reconstructed. Scene/On additionally enable the paper's Sec. 3.8 global reconstruction. Neither feeds simulation physics.",
   },
 ];
 
@@ -284,7 +284,9 @@ export const uniformMethod: SimulationMethod = {
   // The dense reference publishes occupancy, velocity, and a density-derived
   // surface, so only the generic dense-grid views can draw honest data; the
   // octree technique overlays would read a compact source it never produces.
-  supportedFieldModes: ["structure", "cfl", "speed", "phi"],
+  // `density` is this method's own state variable rather than a derived view,
+  // which is why it is offered here and withheld from the level-set octree.
+  supportedFieldModes: ["structure", "density", "cfl", "speed", "phi"],
   params,
   runtimeParamKeys: UNIFORM_RUNTIME_PARAM_KEYS,
   pressureMapping: "CM11a fixes 3 Full-Cycles, 4 V-Cycles, and four pre/post PRBGS sweeps.",

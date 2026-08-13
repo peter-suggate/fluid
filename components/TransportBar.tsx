@@ -94,16 +94,15 @@ export function TransportBar() {
         <span>t</span><strong>{simulationTime.toFixed(4)}</strong><small>s</small>
         <div className="transport-timing">
           <label title={paperStep
-            ? "Uniform paper mode fixes the shared rigid + fluid step at 1/30 s"
+            ? "Uniform paper mode holds the shared rigid + fluid step at 1/30 s · changing it leaves paper mode for the scene-authored step"
             : "One fixed step size shared by rigid bodies and fluid"}>
-            <span>STEP</span>
+            <span>{paperStep ? "STEP · PAPER" : "STEP"}</span>
             <input
               type="range"
               min={MIN_SHARED_STEP_S * 1000}
               max={MAX_SHARED_STEP_S * 1000}
               step="1"
               value={fixedDt * 1000}
-              disabled={paperStep}
               onChange={(event) => simulation.setStepSize(event.currentTarget.valueAsNumber / 1000)}
               aria-label="Shared simulation step size"
             />
@@ -114,7 +113,6 @@ export function TransportBar() {
                 max={MAX_SHARED_STEP_S * 1000}
                 step="1"
                 value={Math.round(fixedDt * 1000)}
-                disabled={paperStep}
                 onChange={(event) => {
                   if (Number.isFinite(event.currentTarget.valueAsNumber)) {
                     simulation.setStepSize(event.currentTarget.valueAsNumber / 1000);

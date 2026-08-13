@@ -71,7 +71,7 @@ import {
   performanceTraceMatchesLane,
   type PerformanceTrace,
 } from "../performance-trace";
-import { effectiveSimulationStep_s } from "../simulation-step";
+import { effectiveSimulationStep_s, uniformPaperStepActive } from "../simulation-step";
 
 export type BodyDragPhase = "start" | "move" | "end";
 
@@ -454,12 +454,28 @@ class SimulationController {
   setStepSize(step_s: number) {
     const sceneStore = useSceneStore.getState();
     const numerics = sharedStepNumerics(sceneStore.scene.numerics, step_s);
-    if (numerics.fixedDt_s === sceneStore.scene.numerics.fixedDt_s
+    // Asking for a step is how you leave the paper step. The uniform paper
+    // profile pins the clock at 1/30 s, but the control stays live while it
+    // does: an edit releases the profile to the scene-authored dt rather than
+    // presenting a number that silently refuses to move.
+    const releasedPaperStep = this.releaseUniformPaperStep();
+    if (!releasedPaperStep
+      && numerics.fixedDt_s === sceneStore.scene.numerics.fixedDt_s
       && numerics.maxDt_s === sceneStore.scene.numerics.maxDt_s) return;
     sceneStore.patchNumerics(numerics);
     this.fluidSolver?.applyNumerics(numerics);
     this.accumulator = Math.min(this.accumulator, numerics.fixedDt_s);
-    useRuntimeStore.getState().setNotice(`Shared rigid + fluid step · ${(numerics.fixedDt_s * 1000).toFixed(2)} ms`);
+    useRuntimeStore.getState().setNotice(releasedPaperStep
+      ? `Uniform paper 1/30 s step released · shared rigid + fluid step ${(numerics.fixedDt_s * 1000).toFixed(2)} ms`
+      : `Shared rigid + fluid step · ${(numerics.fixedDt_s * 1000).toFixed(2)} ms`);
+  }
+
+  /** Switch the uniform method off its paper step; true when it was on one. */
+  private releaseUniformPaperStep(): boolean {
+    const { methodId } = useMethodStore.getState();
+    if (!uniformPaperStepActive(useMethodStore.getState())) return false;
+    this.setMethodParam(methodId, "timeStep", "scene");
+    return true;
   }
 
   reset(source?: SceneDescription, presetId?: string) {
@@ -978,10 +994,15 @@ class SimulationController {
    * Tray drops start the clock so the body visibly falls; editor placement
    * passes `autoRun: false` because authoring geometry is an edit, not a throw.
    */
-  addBodyAt(shape: RigidShape, position: RigidBodyState["position_m"], options: { autoRun?: boolean } = {}) {
+  /**
+   * Returns the body it created, so a caller that places one in order to act on
+   * it immediately — the DRAG tool grabbing what an empty click just dropped —
+   * does not have to re-find it by guessing the generated id.
+   */
+  addBodyAt(shape: RigidShape, position: RigidBodyState["position_m"], options: { autoRun?: boolean } = {}): RigidBodyDescription | undefined {
     const sceneStore = useSceneStore.getState();
     const scene = sceneStore.scene;
-    if (scene.rigidBodies.length >= MAX_BODIES) { useRuntimeStore.getState().setNotice(`Renderer limit is ${MAX_BODIES} bodies in this verified increment`, "warn"); return; }
+    if (scene.rigidBodies.length >= MAX_BODIES) { useRuntimeStore.getState().setNotice(`Renderer limit is ${MAX_BODIES} bodies in this verified increment`, "warn"); return undefined; }
     this.recordHistory(`place ${shape}`);
     let bodyIndex = 1;
     while (scene.rigidBodies.some((body) => body.id === `body-${shape}-${bodyIndex}`)) bodyIndex += 1;
@@ -998,6 +1019,7 @@ class SimulationController {
     useUIStore.getState().selectBody(description.id);
     if (options.autoRun !== false) useRuntimeStore.getState().setRunState("running");
     useRuntimeStore.getState().setNotice(`${description.name} ${options.autoRun === false ? "placed" : "dropped into the scene"}`);
+    return description;
   }
 
   removeBody(bodyId: string) {

@@ -1505,6 +1505,53 @@ export function WebGPUViewport() {
     simulation.addBodyAt(shape, position, { autoRun: false });
   };
 
+  /**
+   * DRAG: grab a body and sweep it through the water.
+   *
+   * Deliberately analytic rather than deferring to the exact GPU pick that
+   * SELECT uses. That pick is a fenced 1x1 readback, so awaiting it costs the
+   * gesture the frame the pointer went down on, and a play mode that starts a
+   * frame late feels broken in a way a slightly generous grab radius does not.
+   * A body big enough to stir water with is big enough for a bounding sphere
+   * to find.
+   *
+   * A miss spawns the armed shape at the cursor and grabs that instead, which
+   * is what makes the mode one click rather than six. The spawn rests on
+   * whatever surface is under the cursor when there is one — the water, the
+   * ground, a prop — and otherwise lands on the camera-facing plane through
+   * the container centre, the same fallback the tray drop uses.
+   */
+  const beginBodySweep = (event: React.PointerEvent<HTMLCanvasElement>, ray: { origin: Vec3; direction: Vec3 }) => {
+    const ui = useUIStore.getState();
+    const scene = useSceneStore.getState().scene;
+    const bodies = drawnBodies();
+    const surface = hoverSceneAt(scene, bodies, ray);
+    const bodyHit = surface?.kind === "body" ? surface : undefined;
+    const grabbed = bodyHit && bodies.find((candidate) => candidate.description.id === bodyHit.bodyId);
+    if (grabbed && bodyHit) {
+      useUIStore.getState().selectBody(grabbed.description.id);
+      // The live pose, not the authored one: the GPU owns rigid motion once the
+      // clock starts, so grabbing from the description would teleport a settled
+      // body back to where it was authored. Same reason the GPU pick passes its
+      // own position through.
+      beginBodyDrag(event.pointerId, event.timeStamp, event.clientX, event.clientY, ray, grabbed,
+        grabbed.position_m, grabbed.orientation, bodyHit.position_m);
+      return;
+    }
+    const template = createBodyDescription(ui.placementShape, 1, scene.container.height_m);
+    const position = surface
+      ? restOnHover(surface, boundingRadius(template), scene)
+      : planeHit(ray.origin, ray.direction, { x: 0, y: scene.container.height_m / 2, z: 0 }, cameraBasis(ui.camera).forward);
+    // autoRun false: the clock starts on the drag itself, so a spawn that the
+    // user never moves does not quietly begin the simulation under them.
+    const created = simulation.addBodyAt(ui.placementShape, position, { autoRun: false });
+    if (!created) return;
+    const spawned = drawnBodies().find((candidate) => candidate.description.id === created.id);
+    if (!spawned) return;
+    beginBodyDrag(event.pointerId, event.timeStamp, event.clientX, event.clientY, ray, spawned,
+      spawned.position_m, spawned.orientation);
+  };
+
   const pointerDown = async (event: React.PointerEvent<HTMLCanvasElement>) => {
     event.currentTarget.setPointerCapture(event.pointerId);
     // Arm before any of the early returns below claim the press: the release, not
@@ -1533,6 +1580,14 @@ export function WebGPUViewport() {
       // reshapes that region instead of starting a new one on top of it.
       if (useUIStore.getState().activeTool === "refinement-region") {
         beginRegionDraw(event, ray);
+        return;
+      }
+      // DRAG claims the press ahead of the gate below. It resolves entirely
+      // against analytic geometry and the host body mirror, so unlike the
+      // placement tools it has nothing to read out of a published generation
+      // and no reason to wait for one.
+      if (useUIStore.getState().activeTool === "body-drag" && event.button === 0) {
+        beginBodySweep(event, ray);
         return;
       }
       // Everything below drops something onto, or reads something out of, the

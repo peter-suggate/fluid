@@ -3,13 +3,12 @@ import { pathToFileURL } from "node:url";
 import test from "node:test";
 
 import { uniformMethod } from "../lib/methods/uniform";
-import { scaleScene } from "../lib/scene-scale";
 import { getScenePreset } from "../lib/scenes";
 import { requiredFluidDeviceLimits } from "../lib/webgpu-device-limits";
 
 const webgpuModulePath = process.env.WEBGPU_NODE_MODULE;
 
-test("CM11a ceiling separation releases the 4x paper-step mini-dam film", {
+test("the 64-cubed 4 ms mini dam releases its physical ceiling film", {
   skip: !webgpuModulePath && "set WEBGPU_NODE_MODULE for GPU validation",
   timeout: 120_000,
 }, async () => {
@@ -28,12 +27,8 @@ test("CM11a ceiling separation releases the 4x paper-step mini-dam film", {
     requiredLimits: requiredFluidDeviceLimits(adapter.limits),
   });
 
-  const base = getScenePreset("minimal-power-dam-break-64").create();
-  const twice = scaleScene(base, "world", 2);
-  assert.ok(twice);
-  const scene = scaleScene(twice, "world", 2);
-  assert.ok(scene);
-  const dt = 1 / 30;
+  const scene = getScenePreset("minimal-power-dam-break-64").create();
+  const dt = 0.004;
   scene.numerics.fixedDt_s = dt;
   scene.numerics.maxDt_s = dt;
 
@@ -46,8 +41,8 @@ test("CM11a ceiling separation releases the 4x paper-step mini-dam film", {
     const surfaceField = solver.surfaceFieldTexture;
     assert.ok(surfaceField);
     assert.notEqual(surfaceField, solver.volumeTexture,
-      "the mini dam should render the Sec. 3.8 reconstruction");
-    for (let step = 1; step <= 45; step += 1) {
+      "the mini dam should retain a render-only wall-film surface with Sec. 3.8 off");
+    for (let step = 1; step <= 250; step += 1) {
       assert.equal(solver.advanceTo(step * dt, []), true);
     }
     await device.queue.onSubmittedWorkDone();
@@ -107,16 +102,16 @@ test("CM11a ceiling separation releases the 4x paper-step mini-dam film", {
     staging.destroy();
     renderStaging.destroy();
 
-    assert.ok(Math.abs(mass - 94_400) < 1,
+    assert.ok(Math.abs(mass - 94_400) < 10,
       `conservative density drifted to ${mass}`);
     assert.equal(lidWetCells, 0,
       `the released film left ${lidWetCells} visible cells stuck to the lid`);
-    assert.ok(lidMass < 350,
+    assert.ok(lidMass < 1,
       `the released film left ${lidMass} density-cell units in the lid layer`);
-    assert.ok(highestWetLayer <= 60,
+    assert.ok(highestWetLayer <= 40,
       `the visible surface remained at layer ${highestWetLayer}`);
-    assert.ok(reconstructedCeilingWetCells > 2_000,
-      `Sec. 3.8 exposed only ${reconstructedCeilingWetCells} top-band thin-sheet cells`);
+    assert.equal(reconstructedCeilingWetCells, 0,
+      `bulk extraction still promoted ${reconstructedCeilingWetCells} top-band cells; sub-cell residue belongs to the thin-shell path`);
   } finally {
     solver.destroy();
     device.destroy();

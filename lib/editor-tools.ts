@@ -16,6 +16,7 @@
 
 export type EditorTool =
   | "select"
+  | "body-drag"
   | "body-place"
   | "prop-place"
   | "terrain-raise"
@@ -65,6 +66,26 @@ export const EDITOR_TOOLS: readonly EditorToolSpec[] = Object.freeze([
     label: "SELECT",
     shortcut: "q",
     hint: "click anything to select it · drag a face, edge or corner to resize · drag the centre to move · press X, Y or Z to constrain to that axis, or shift with it to lock that axis out · click empty space or press Esc to deselect",
+    status: "active",
+  },
+  // Playing with the water is its own mode, not a variant of SELECT.
+  //
+  // SELECT already opens a throw when the GPU pick lands on a body, but that
+  // gesture is reachable only once a body exists and has been found: arm BODY,
+  // pick a shape, click a surface, switch back to SELECT, click the body,
+  // drag. Six steps to answer "what happens if I push this through the water".
+  // DRAG collapses them — an empty click drops the armed shape and grabs it in
+  // the same motion — because the question is asked constantly and is the
+  // whole point of having a solver you can watch.
+  //
+  // It also deliberately does not gate on the GPU pick. A play gesture has to
+  // start on the frame the pointer went down, so it grabs against the analytic
+  // bounding sphere the hover chip already uses.
+  {
+    id: "body-drag",
+    label: "DRAG",
+    shortcut: "d",
+    hint: "click a body to grab it and sweep it through the water · click anywhere else to drop the current shape and grab that · release to hand it back to gravity and buoyancy",
     status: "active",
   },
   {

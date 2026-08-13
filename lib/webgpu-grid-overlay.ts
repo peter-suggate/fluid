@@ -41,6 +41,11 @@ ${cameraApertureShaderLibrary("u")}
 @group(0) @binding(6) var pressureSamples: texture_3d<u32>;
 @group(0) @binding(7) var divergenceField: texture_3d<f32>;
 @group(0) @binding(8) var mappedPressureField: texture_3d<f32>;
+// Raw transported density, straight from the solver's own volume texture.
+// Every other dense view samples fluidField, which on the uniform lane is the
+// render-only wall-film/blur reconstruction; the density view deliberately
+// does not, because the question it answers is what the method holds.
+@group(0) @binding(9) var densityField: texture_3d<f32>;
 struct VertexOutput { @builtin(position) position: vec4f, @location(0) uv: vec2f }
 @vertex fn vertexMain(@builtin(vertex_index) index: u32) -> VertexOutput {
   var positions = array<vec2f, 3>(vec2f(-1.0, -1.0), vec2f(3.0, -1.0), vec2f(-1.0, 3.0));
@@ -148,6 +153,11 @@ fn levelSetSample(cell: vec3i) -> f32 {
   let h = u.container.y / max(u.gridInfo.y, 1.0);
   if (u.gridInfo.w > 2.5) { return textureLoad(fluidField, q, 0).x; }
   return (0.5 - fluidSample(q)) * 4.0 * h;
+}
+
+fn densitySample(cell: vec3i) -> f32 {
+  let dims = vec3i(u.gridInfo.xyz);
+  return textureLoad(densityField, clamp(cell, vec3i(0), dims - vec3i(1)), 0).x;
 }
 
 fn hasLiquidPressureDof(cell: vec3i) -> bool {
@@ -477,6 +487,42 @@ fn gridSample(point: vec3f, boundsMin: vec3f, size: vec3f, axis: i32, footprint:
       let coarseColor = vec3f(0.08, 0.18, 0.48);
       fill = select(mix(middleColor, coarseColor, (level - 0.5) * 2.0), mix(fineColor, middleColor, level * 2.0), level < 0.5);
       alpha = 0.88;
+    } else if (fieldMode == 10) {
+      // Chentanez--Mueller surface density rho: the mass a cell holds, in cell
+      // volumes. Its two thresholds are physical rather than cosmetic, so they
+      // get their own segments instead of one continuous ramp — rho > 0.5 is
+      // what the projection calls liquid (pressureLiquid), and rho > 1 is the
+      // excess Sec. 3.7 charges the divergence with removing. Sub-half mass is
+      // therefore visible as its own phase rather than reading as air, which is
+      // the whole point: it is carried by transport and ignored by pressure.
+      let rho = densitySample(cell);
+      let dilute = clamp(rho * 2.0, 0.0, 1.0);
+      let full = clamp((rho - 0.5) * 2.0, 0.0, 1.0);
+      let excess = clamp((rho - 1.0) * 4.0, 0.0, 1.0);
+      // Chosen against the tonemap rather than on a colour wheel: displayColor
+      // compresses by c/(c+1), which pulls any near-white toward grey, so the
+      // top of the liquid ramp is a saturated blue rather than a pale one and
+      // the dilute phase is held in green where the compression cannot merge it
+      // into that blue.
+      let diluteColor = mix(vec3f(0.04, 0.16, 0.14), vec3f(0.10, 0.62, 0.42), dilute);
+      let liquidColor = mix(vec3f(0.05, 0.14, 0.60), vec3f(0.28, 0.62, 1.25), full);
+      let excessColor = mix(vec3f(0.98, 0.72, 0.14), vec3f(1.60, 0.10, 0.05), excess);
+      fill = select(select(diluteColor, liquidColor, rho > 0.5), excessColor, rho > 1.0);
+      alpha = select(select(0.10 + 0.55 * dilute, 0.62 + 0.30 * full, rho > 0.5), 0.95, rho > 1.0);
+      // An empty cell keeps only its grid lines. "Where is there any mass at
+      // all" is the first question this view has to answer, and a floor of
+      // tinted haze over vacuum is how that answer gets lost.
+      alpha = select(alpha, 0.0, rho <= 1e-4);
+      // Where cells are large enough on screen each one also fills to min(rho, 1)
+      // of its own height, so the quantity is legible as a level without anyone
+      // decoding a colour. A horizontal slice has no vertical extent to fill and
+      // keeps the flat colour, as do cells too small to hold a readable bar.
+      if (axis != 3 && rho > 1e-4) {
+        let barFade = smoothstep(7.0, 14.0, pixelsPerCell);
+        let below = 1.0 - smoothstep(-derivative.y, derivative.y, fract(samplePosition.y) - clamp(rho, 0.0, 1.0));
+        fill = mix(fill, mix(fill * 0.30, fill, below), barFade);
+        alpha = mix(alpha, mix(alpha * 0.28, max(alpha, 0.88), below), barFade);
+      }
     }
   }
   line *= lineFade;
@@ -609,6 +655,7 @@ export class GridOverlayPipeline {
   private pressureSamples?: GPUTexture;
   private divergence?: GPUTexture;
   private mappedPressure?: GPUTexture;
+  private density?: GPUTexture;
 
   constructor(
     private readonly device: GPUDevice,
@@ -642,8 +689,8 @@ export class GridOverlayPipeline {
     this.rebuildBindGroup();
   }
 
-  setVolume(volume: GPUTexture, columnBases: GPUTexture, adaptiveCells: GPUTexture, velocity: GPUTexture, pressureSamples: GPUTexture, divergence: GPUTexture, mappedPressure: GPUTexture) {
-    if (this.volume === volume && this.columnBases === columnBases && this.adaptiveCells === adaptiveCells && this.velocity === velocity && this.pressureSamples === pressureSamples && this.divergence === divergence && this.mappedPressure === mappedPressure) return;
+  setVolume(volume: GPUTexture, columnBases: GPUTexture, adaptiveCells: GPUTexture, velocity: GPUTexture, pressureSamples: GPUTexture, divergence: GPUTexture, mappedPressure: GPUTexture, density: GPUTexture) {
+    if (this.volume === volume && this.columnBases === columnBases && this.adaptiveCells === adaptiveCells && this.velocity === velocity && this.pressureSamples === pressureSamples && this.divergence === divergence && this.mappedPressure === mappedPressure && this.density === density) return;
     this.volume = volume;
     this.columnBases = columnBases;
     this.adaptiveCells = adaptiveCells;
@@ -651,11 +698,12 @@ export class GridOverlayPipeline {
     this.pressureSamples = pressureSamples;
     this.divergence = divergence;
     this.mappedPressure = mappedPressure;
+    this.density = density;
     this.rebuildBindGroup();
   }
 
   private rebuildBindGroup() {
-    if (!this.pipeline || !this.volume || !this.columnBases || !this.adaptiveCells || !this.velocity || !this.pressureSamples || !this.divergence || !this.mappedPressure) return;
+    if (!this.pipeline || !this.volume || !this.columnBases || !this.adaptiveCells || !this.velocity || !this.pressureSamples || !this.divergence || !this.mappedPressure || !this.density) return;
     this.bindGroup = this.device.createBindGroup({
       layout: this.pipeline.getBindGroupLayout(0),
       entries: [
@@ -667,7 +715,8 @@ export class GridOverlayPipeline {
         { binding: 5, resource: this.velocity.createView({ dimension: "3d" }) },
         { binding: 6, resource: this.pressureSamples.createView({ dimension: "3d" }) },
         { binding: 7, resource: this.divergence.createView({ dimension: "3d" }) },
-        { binding: 8, resource: this.mappedPressure.createView({ dimension: "3d" }) }
+        { binding: 8, resource: this.mappedPressure.createView({ dimension: "3d" }) },
+        { binding: 9, resource: this.density.createView({ dimension: "3d" }) }
       ]
     });
   }

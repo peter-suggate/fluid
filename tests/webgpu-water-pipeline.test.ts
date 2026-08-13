@@ -186,6 +186,20 @@ test("restricted extraction has separate surface-band and tank-wall entry points
   assert.match(surfaceExtractionShader, /let minimumBase/);
 });
 
+test("sub-cell tank-wall mass is emitted as a conservative thin shell", () => {
+  assert.match(surfaceExtractionShader, /fn emitWallFilmMain/,
+    "wall-supported density below the bulk isovalue needs its own two-sided geometry");
+  assert.match(surfaceExtractionShader,
+    /return wallFilmDensity\(face,q\)\*wallFilmAxisCellWidths\(face\)\.x/,
+    "film thickness must be the represented volume fraction times the wall-normal cell width");
+  assert.match(surfaceExtractionShader, /return rho\/wallContactCount\(c\)/,
+    "edge and corner mass must be divided rather than rendered once on every wall");
+  assert.doesNotMatch(surfaceExtractionShader, /fn wallFilmGhost/,
+    "one ghost edge cannot represent both interfaces of a thinner-than-cell slab");
+  assert.match(surfaceRasterShader, /interfaceCoverageExpansionPixels>0\.0&&v\.normal\.w<0\.5/,
+    "per-triangle silhouette expansion must not inflate the regular wall-film tiles");
+});
+
 test("extraction is split into a lean classify sweep and a compacted polygonise pass", () => {
   assert.match(surfaceExtractionShader, /fn classifyCube/, "sweep kernels classify and append to the worklist");
   assert.match(surfaceExtractionShader, /fn polygoniseMain/, "triangle emission runs over compacted surface cubes only");
@@ -247,8 +261,8 @@ test("global-fine presentation compiles and encodes only the combined mesh path"
     .replace(/\s+/g, "");
   assert.doesNotMatch(source, /globalFineClassifiedEmitShaders|polygoniseGlobalFineEmitPipelines/,
     "the six unused per-tetrahedron modules and pipelines must stay deleted");
-  assert.match(source, /consttotal=16/,
-    "pipeline progress must count only the sixteen pipelines that are actually constructed");
+  assert.match(source, /consttotal=17/,
+    "pipeline progress must include the dedicated wall-film pipeline");
 
   const globalStart = source.indexOf("if(globalFine){");
   const volumeStart = source.indexOf("}else{", globalStart);
@@ -266,9 +280,10 @@ test("global-fine presentation compiles and encodes only the combined mesh path"
 test("buffer capacities keep the worklist aligned with the vertex allocation", () => {
   assert.equal(surfaceVertexCapacity(16, 16, 16), 262_144, "small grids use the floor allocation");
   assert.equal(surfaceVertexCapacity(512, 512, 512), 2_097_152, "large grids hit the 64 MiB ceiling");
-  assert.equal(surfaceVertexCapacity(64, 64, 64), 983_040,
-    "the mini dam global-fine mesh keeps headroom above its two-second 839,490-vertex peak");
-  assert.equal(surfaceVertexCapacity(60, 120, 50), (60 * 120 + 60 * 50 + 120 * 50) * 80, "mid-size grids scale with transported surface area");
+  assert.equal(surfaceVertexCapacity(64, 64, 64), 2_097_152,
+    "the mini dam allocation covers its bulk mesh plus the worst-case two-sided wall shell");
+  assert.equal(surfaceVertexCapacity(60, 120, 50), 2_097_152,
+    "mid-size grids remain bounded by the absolute 64 MiB vertex ceiling");
   assert.equal(activeCubeCapacity(262_144), 87_382, "every appended cube emits at least one triangle, so capacity/3 entries suffice");
   assert.equal(activeCubeCapacity(2_097_152), 699_051);
 });

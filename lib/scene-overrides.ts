@@ -1,4 +1,5 @@
 import { withRefinementRegionsFromQuery, refinementRegionsToQuery } from "./editor-refinement-region";
+import { sceneSeedsQuery, withSceneSeedsFromQuery } from "./initial-brick-seed-query";
 import { defaultMethodId, getMethod, simulationMethods, type MethodParamValue } from "./methods";
 import type { SceneDescription } from "./model";
 import { cameraForPreset, findSceneDefinition, getScenePreset } from "./scenes";
@@ -63,6 +64,7 @@ const SCENE_LAYER_KEYS: Readonly<Record<string, { readonly label: string; readon
   canopy: { label: "Tree canopy", hint: "Canopy art-direction dials" },
   stones: { label: "Stone looks", hint: "Stone look dials and seeds" },
   rim: { label: "Coping rim", hint: "Vessel rim dials" },
+  seeds: { label: "Painted water", hint: "Seeded brick occupancy, as a bitset over the bricks it wets" },
 };
 
 interface UIOverrideSpec {
@@ -283,6 +285,7 @@ export function sceneOverrideClearPlan(
     if (cleared.has("canopy")) scene = withSceneCanopyQuery(scene, sceneCanopyQuery(baseScene));
     if (cleared.has("stones")) scene = withSceneStoneQuery(scene, sceneStoneQuery(baseScene));
     if (cleared.has("rim")) scene = withSceneRimQuery(scene, sceneRimQuery(baseScene));
+    if (cleared.has("seeds")) scene = withSceneSeedsFromQuery(scene, sceneSeedsQuery(baseScene));
   }
 
   for (const key of cleared) {

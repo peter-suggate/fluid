@@ -869,7 +869,11 @@ export async function smokeRenderHybridPresentation(
   const packed = new Float32Array(100);
   packed.set([width, height, solver.info.submittedTime_s ?? 0, 0], 0);
   packed.set([1.55 * span, 1.12 * span, 1.72 * span, 0], 4);
-  packed.set([0, 0.38 * scene.container.height_m, 0, 0], 8);
+  // Match FluidLabRenderer's shared presentation metadata so Dawn exercises
+  // the closed-ceiling film path instead of silently treating every top as
+  // open exterior air.
+  packed.set([0, 0.38 * scene.container.height_m, 0,
+    scene.container.top === "closed" ? 1 : 0], 8);
   packed.set([scene.container.width_m, scene.container.height_m, scene.container.depth_m, scene.container.height_m * scene.container.fillFraction], 12);
   packed.set([0, scene.voxelDomain.finestCellSize_m, presentationBodies.length, 0], 16);
   packed.set([solver.info.nx, solver.info.ny, solver.info.nz, solver.info.gridKind === "restricted-tall-cell" ? 2 : solver.info.gridKind === "quadtree-tall-cell" || solver.info.gridKind === "octree" ? 3 : 1], 20);
@@ -996,7 +1000,10 @@ export async function smokeRenderHybridPresentation(
       if (!interfaceCapture) throw new Error("Hybrid presentation did not expose its front interface target");
       const backInterfaceCapture = pipeline.diagnosticCaptureTexture("back-interface-positions");
       if (!backInterfaceCapture) throw new Error("Hybrid presentation did not expose its back interface target");
-      const interfaceBytesPerRow = Math.ceil(width * 8 / 256) * 256;
+      // Production interface positions are rgba32float: thin wall films need
+      // the full precision when the smoke compares independently rasterized
+      // front/back surfaces, just as the optical compositor does.
+      const interfaceBytesPerRow = Math.ceil(width * 16 / 256) * 256;
       const interfacePlaneBytes = interfaceBytesPerRow * height;
       const interfaceReadback = device.createBuffer({ size: 2 * interfacePlaneBytes, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
       try {
@@ -1047,8 +1054,10 @@ export async function smokeRenderHybridPresentation(
           }
         }
         await interfaceReadback.mapAsync(GPUMapMode.READ);
-        const interfaceWords = new Uint16Array(interfaceReadback.getMappedRange());
-        const interfaceRowWords = interfaceBytesPerRow / 2;
+        const interfaceRange = interfaceReadback.getMappedRange();
+        const interfaceValues = new Float32Array(interfaceRange);
+        const interfaceWords = new Uint32Array(interfaceRange);
+        const interfaceRowWords = interfaceBytesPerRow / 4;
         let frontInterfacePixels = 0, backInterfacePixels = 0, pairedInterfacePixels = 0;
         let frontCeilingContactPixels = 0, backCeilingContactPixels = 0;
         let frontOnlyInterfacePixels = 0, backOnlyInterfacePixels = 0;
@@ -1086,19 +1095,19 @@ export async function smokeRenderHybridPresentation(
         backPositions.fill(Number.NaN);
         for (let y = 0; y < height; y += 1) for (let x = 0; x < width; x += 1) {
           const at = y * interfaceRowWords + x * 4;
-          const backAt = interfacePlaneBytes / 2 + at;
+          const backAt = interfacePlaneBytes / 4 + at;
           for (let channel = 0; channel < 4; channel += 1) {
             frontInterfaceHash = fold(frontInterfaceHash, interfaceWords[at + channel]);
             backInterfaceHash = fold(backInterfaceHash, interfaceWords[backAt + channel]);
           }
-          const frontPresent = interfaceWords[at + 3] !== 0;
-          const backPresent = interfaceWords[backAt + 3] !== 0;
+          const frontPresent = interfaceValues[at + 3] !== 0;
+          const backPresent = interfaceValues[backAt + 3] !== 0;
           if (frontPresent) {
             frontInterfacePixels += 1;
             frontMask[x + y * width] = 1;
-            const px = decodeFloat16(interfaceWords[at]);
-            const py = decodeFloat16(interfaceWords[at + 1]);
-            const pz = decodeFloat16(interfaceWords[at + 2]);
+            const px = interfaceValues[at];
+            const py = interfaceValues[at + 1];
+            const pz = interfaceValues[at + 2];
             if (Math.abs(py - scene.container.height_m) <= wallPlaneTolerance) {
               frontCeilingContactPixels += 1;
             }
@@ -1120,7 +1129,7 @@ export async function smokeRenderHybridPresentation(
               if (damDz <= wallPlaneTolerance && damDx <= cornerTangentialBand) damExposedCornerCapPixels[1] += 1;
             }
             for (let axis = 0; axis < 3; axis += 1) {
-              const value = decodeFloat16(interfaceWords[at + axis]);
+              const value = interfaceValues[at + axis];
               frontMinimum[axis] = Math.min(frontMinimum[axis], value);
               frontMaximum[axis] = Math.max(frontMaximum[axis], value);
             }
@@ -1128,14 +1137,14 @@ export async function smokeRenderHybridPresentation(
           if (backPresent) {
             backInterfacePixels += 1;
             backMask[x + y * width] = 1;
-            const backY = decodeFloat16(interfaceWords[backAt + 1]);
+            const backY = interfaceValues[backAt + 1];
             if (Math.abs(backY - scene.container.height_m) <= wallPlaneTolerance) {
               backCeilingContactPixels += 1;
             }
             backPositions.set([
-              decodeFloat16(interfaceWords[backAt]),
+              interfaceValues[backAt],
               backY,
-              decodeFloat16(interfaceWords[backAt + 2]),
+              interfaceValues[backAt + 2],
             ], (x + y * width) * 3);
           }
           if (frontPresent && backPresent) pairedInterfacePixels += 1;
@@ -1145,9 +1154,9 @@ export async function smokeRenderHybridPresentation(
             if (backOnlyInterfaceLocations.length < 16) {
               backOnlyInterfaceLocations.push([x, y]);
               backOnlyInterfacePositions_m.push([
-                decodeFloat16(interfaceWords[backAt]),
-                decodeFloat16(interfaceWords[backAt + 1]),
-                decodeFloat16(interfaceWords[backAt + 2]),
+                interfaceValues[backAt],
+                interfaceValues[backAt + 1],
+                interfaceValues[backAt + 2],
               ]);
             }
           }

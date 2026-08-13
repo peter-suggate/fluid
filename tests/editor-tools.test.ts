@@ -100,3 +100,34 @@ test("an armed tool can be disarmed by the control that armed it", () => {
   assert.match(shortcuts, /ui\.setActiveTool\(ui\.activeTool === tool \? DEFAULT_EDITOR_TOOL : tool\)/,
     "pressing the armed tool's own key must toggle it off");
 });
+
+test("DRAG is an authoring-strip tool that grabs rather than places", () => {
+  const drag = getEditorTool("body-drag");
+  assert.equal(editorToolIsActive("body-drag"), true, "the pointer behaviour has landed");
+  assert.equal(drag.placement ?? "strip", "strip");
+  // The mode is only worth having if the hint says what a miss does: an empty
+  // click spawning and grabbing the armed shape is the whole reason it costs
+  // one click instead of six.
+  assert.match(drag.hint, /grab/i);
+  assert.match(drag.hint, /release/i);
+});
+
+test("DRAG shares BODY's shape roster so switching modes keeps the object", () => {
+  const toolbar = readFileSync(new URL("../components/EditorToolbar.tsx", import.meta.url), "utf8");
+  assert.match(toolbar, /activeTool === "body-place" \|\| activeTool === "body-drag"/,
+    "both body-spawning tools must offer the same shape strip");
+  assert.match(toolbar, /placementShape === shape/,
+    "and must read one shared selection, not a per-tool copy");
+});
+
+test("DRAG claims the press before the GPU picking gate", () => {
+  // The gate awaits a fenced 1x1 readback. A play gesture that waits for it
+  // starts a frame late, which is exactly the latency this mode exists to
+  // avoid, so the arm must sit above `if (pickingInteractive)`.
+  const viewport = readFileSync(new URL("../components/WebGPUViewport.tsx", import.meta.url), "utf8");
+  const armed = viewport.indexOf('activeTool === "body-drag"');
+  const gate = viewport.indexOf("if (pickingInteractive) {");
+  assert.ok(armed > 0, "the viewport must arm the drag tool");
+  assert.ok(gate > 0, "the picking gate must still exist");
+  assert.ok(armed < gate, "the drag arm must precede the picking gate");
+});

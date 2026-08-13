@@ -206,9 +206,8 @@ fn sampleVelocity(p:vec3f)->vec3f{return vec3f(sampleVelocityComponent(p,0u),sam
 // a collocated rgba vector here introduced a +1/4-cell directional shift and
 // was the first dynamically accumulated D4 error in symmetric expansion.
 fn departurePoint(position:vec3f,dt:f32,h:vec3f)->vec3f{let first=sampleVelocity(position);let midpoint=position-0.5*first*dt/h;return position-sampleVelocity(midpoint)*dt/h;}
-fn advectVelocityComponent(position:vec3f,component:u32,dt:f32,h:vec3f)->f32{
-  return sampleVelocityComponent(departurePoint(position,dt,h),component);
-}
+// advectVelocityComponent follows rigidBodyIndexAt below: it clips the
+// characteristic against the bodies, and WGSL requires declaration before use.
 fn quaternionRotate(q:vec4f,v:vec3f)->vec3f{let uv=cross(q.yzw,v);let uuv=cross(q.yzw,uv);return v+2.0*(q.x*uv+uuv);}
 fn quaternionInverseRotate(q:vec4f,v:vec3f)->vec3f{return quaternionRotate(vec4f(q.x,-q.yzw),v);}
 fn insideRigid(body:RigidBody,world:vec3f)->bool{
@@ -234,6 +233,52 @@ fn rigidBodyIndexAt(world:vec3f)->i32{
 fn rigidVelocityAt(bodyIndex:i32,world:vec3f)->vec3f{
   let body=rigidBodies[u32(bodyIndex)];
   return body.linearVelocity.xyz+cross(body.angularVelocity.xyz,world-body.positionShape.xyz);
+}
+// Trace-space to world.  Advection positions are cell coordinates carrying a
+// per-component MAC offset (cell+(1,.5,.5) is the +x face of cell), so the
+// half-cell that worldCell adds is already present in the position.
+fn traceWorld(p:vec3f)->vec3f{
+  let h=params.cellGravity.xyz;
+  return vec3f(-0.5*params.container.x+p.x*h.x,p.y*h.y,-0.5*params.container.z+p.z*h.z);
+}
+// Gates the moving-solid corrections.  Each reduces to the original expression
+// when no body is present, but the gate keeps body-free scenes on the literal
+// original path so their trajectories stay bit-identical rather than merely
+// algebraically equal.  Terrain is deliberately excluded: it is static, so it
+// gains far less from these corrections than it would cost in re-blessing
+// every shipped terrain scene.
+fn hasRigidBodies()->bool{return params.boundary.z>=0.5;}
+fn insideAnyRigid(world:vec3f)->bool{return rigidBodyIndexAt(world)>=0;}
+// Sec. 3.4 stops the density characteristic at a solid boundary; the velocity
+// characteristic had no such test.  The RK2 backtrace therefore read straight
+// through a body, so liquid ahead of a moving obstacle sampled the liquid
+// behind it and the obstacle never pushed it.  Clip the chord at the first
+// crossing and sample just outside the surface, where the Sec. 3.3 extension
+// has already written u_s.  A departure that is not inside a body -- the
+// overwhelmingly common case -- costs exactly one primitive test.
+fn clipDepartureAtSolid(position:vec3f,departure:vec3f)->vec3f{
+  if(!insideAnyRigid(traceWorld(departure))){return departure;}
+  // A departure inside a body converges to lo=0 and samples in place, the
+  // correct degenerate answer for a face the body has already swallowed.
+  var lo=0.0;var hi=1.0;
+  for(var step=0;step<8;step+=1){
+    let mid=0.5*(lo+hi);
+    if(insideAnyRigid(traceWorld(mix(position,departure,mid)))){hi=mid;}else{lo=mid;}
+  }
+  return mix(position,departure,lo);
+}
+// Both branches spell the body-free case as the original expression rather
+// than as a clip that happens to be the identity.  Routing it through the
+// wrapper instead measured a 1.5e-4 relative shift in maxSpeed on the
+// body-free hydrostatic lane -- pure float reassociation, but enough to make
+// every still-scene lane need re-blessing for no physical reason.
+fn clippedDeparturePoint(position:vec3f,dt:f32,h:vec3f)->vec3f{
+  if(!hasRigidBodies()){return departurePoint(position,dt,h);}
+  return clipDepartureAtSolid(position,departurePoint(position,dt,h));
+}
+fn advectVelocityComponent(position:vec3f,component:u32,dt:f32,h:vec3f)->f32{
+  if(!hasRigidBodies()){return sampleVelocityComponent(departurePoint(position,dt,h),component);}
+  return sampleVelocityComponent(clipDepartureAtSolid(position,departurePoint(position,dt,h)),component);
 }
 // Conservative bounding-sphere reject so cells away from every body (and
 // body-free scenes) skip the per-cell primitive tests in the solid-aware
@@ -593,6 +638,32 @@ fn diffuseGammaPair(id:vec3i,axis:u32,parity:i32){
   }
   let lowerGamma=textureLoad(gammaIn,lower,0).x;let upperGamma=textureLoad(gammaIn,upper,0).x;
   let averageGamma=0.5*(lowerGamma+upperGamma);var lowerRho=volume(lower);var upperRho=volume(upper);
+  // The pair straddles one face.  A solid between the two cells carries no
+  // mass, so diffusing across it teleports liquid through the body -- seven
+  // iterations of six axis passes every step, which reads as water leaking
+  // straight through a dragged object.  Weight the exchange by the face
+  // aperture V^f, which is 1 on an open face and 0 on a covered one.
+  //
+  // The body-free case is spelled as the original statements rather than as a
+  // V^f of 1: routing it through the weighted form is algebraically exact but
+  // reassociates the arithmetic, which measurably moved a still scene that has
+  // no solids in it at all.
+  if(hasRigidBodies()){
+    let open=clamp(faceOpenFraction(lower,axis),0.0,1.0);
+    if(open<=1e-5){
+      textureStore(volumeOut,id,vec4f(volume(id)));
+      textureStore(gammaOut,id,vec4f(textureLoad(gammaIn,id,0).x));
+      return;
+    }
+    if(upperGamma>lowerGamma){let transfer=open*upperRho*(upperGamma-lowerGamma)/(2.0*max(upperGamma,1e-9));lowerRho+=transfer;upperRho-=transfer;}
+    else if(lowerGamma>upperGamma){let transfer=open*lowerRho*(lowerGamma-upperGamma)/(2.0*max(lowerGamma,1e-9));lowerRho-=transfer;upperRho+=transfer;}
+    // A partly covered face equilibrates gamma only as far as it is open.
+    let ownGamma=select(upperGamma,lowerGamma,coordinate==lowerCoordinate);
+    let pairedGamma=ownGamma+open*(averageGamma-ownGamma);
+    textureStore(volumeOut,id,vec4f(max(0.0,select(upperRho,lowerRho,coordinate==lowerCoordinate))));
+    textureStore(gammaOut,id,vec4f(max(0.0,pairedGamma)));
+    return;
+  }
   if(upperGamma>lowerGamma){let transfer=upperRho*(upperGamma-lowerGamma)/(2.0*max(upperGamma,1e-9));lowerRho+=transfer;upperRho-=transfer;}
   else if(lowerGamma>upperGamma){let transfer=lowerRho*(lowerGamma-upperGamma)/(2.0*max(lowerGamma,1e-9));lowerRho-=transfer;upperRho+=transfer;}
   textureStore(volumeOut,id,vec4f(max(0.0,select(upperRho,lowerRho,coordinate==lowerCoordinate))));
@@ -693,7 +764,10 @@ fn reverseAdvection(@builtin(global_invocation_id) gid:vec3u){
 
 fn boundedMacCormack(id:vec3i,position:vec3f,component:u32,dt:f32,h:vec3f,predicted:f32,original:f32,reversed:f32)->f32{
   var offset=vec3f(0.5);offset[component]=1.0;var lowerCoordinate=vec3f(0.0);lowerCoordinate[component]=-1.0;
-  let q=clamp(departurePoint(position,dt,h)-offset,lowerCoordinate,vec3f(dims()-vec3i(1)));let b=vec3i(floor(q));let fraction=fract(q);
+  // Same clipped chord the predictor used: bracketing the limiter against
+  // donors the predictor never sampled would let the correction reintroduce
+  // the through-body velocity the clip just removed.
+  let q=clamp(clippedDeparturePoint(position,dt,h)-offset,lowerCoordinate,vec3f(dims()-vec3i(1)));let b=vec3i(floor(q));let fraction=fract(q);
   var donorWeights=array<f32,8>();var donorValues=array<f32,8>();
   donorValues[0]=sampledFaceVelocity(b,component);var lower=1e30;var upper=-1e30;
   donorWeights[0]=(1.0-fraction.x)*(1.0-fraction.y)*(1.0-fraction.z);
@@ -1046,9 +1120,31 @@ fn scatterSolidExcess(@builtin(global_invocation_id) gid:vec3u){
   // The donor was already reduced to V. Returning an unplaceable deposit to
   // a V=0 donor would violate the paper's rho=0-inside-solid guarantee.
   if(total<=1e-9){
-    // No source-supported placement exists. Keep rho=0 in the solid and
-    // expose the unplaceable conservative mass instead of silently losing it.
-    atomicAdd(&reductions[4],u32(round(excess*2048.0)));
+    // The gradient landed entirely in solid.  Before conceding the mass, sweep
+    // the 26-neighbourhood for any open cell: a body sweeping through liquid
+    // evicts whole cells at once, and the single-gradient-step trace fails
+    // often enough there that conceding on the first miss is visible volume
+    // loss exactly while the user is playing with the body.
+    var fallbackTotal=0.0;
+    for(var neighbor=0u;neighbor<27u;neighbor+=1u){
+      if(neighbor==13u){continue;}
+      let destination=id+vec3i(i32(neighbor%3u)-1,i32((neighbor/3u)%3u)-1,i32(neighbor/9u)-1);
+      if(valid(destination)&&!cellInsideSolid(destination)){fallbackTotal+=cellOpenFraction(destination);}
+    }
+    if(fallbackTotal<=1e-9){
+      // Genuinely enclosed by solid.  Keep rho=0 inside the body and expose
+      // the unplaceable conservative mass instead of silently losing it.
+      atomicAdd(&reductions[4],u32(round(excess*2048.0)));
+      return;
+    }
+    for(var neighbor=0u;neighbor<27u;neighbor+=1u){
+      if(neighbor==13u){continue;}
+      let destination=id+vec3i(i32(neighbor%3u)-1,i32((neighbor/3u)%3u)-1,i32(neighbor/9u)-1);
+      if(!valid(destination)||cellInsideSolid(destination)){continue;}
+      let share=cellOpenFraction(destination)/fallbackTotal;
+      if(share<=0.0){continue;}
+      atomicAdd(&sharpenDeposits[linearIndex(destination)],i32(round(excess*share*TRANSPORT_FIXED)));
+    }
     return;
   }
   for(var corner=0u;corner<8u;corner+=1u){if(weights[corner]>0.0){atomicAdd(&sharpenDeposits[indices[corner]],i32(round(excess*weights[corner]/total*TRANSPORT_FIXED)));}}
@@ -1060,7 +1156,47 @@ fn resolveSolidExcess(@builtin(global_invocation_id) gid:vec3u){
   textureStore(volumeOut,id,vec4f(volume(id)+deposit));
 }
 
-// Render-only Sec. 3.8 reconstruction. Blur g=2 min(rho,.5) with a separable
+// Render-only wall-film reconstruction. For a solid signed distance s and a
+// supported cell density rho<.5, R=.5-s/h+rho has its .5 contour at s=rho*h.
+// It therefore displays the mass as a proportionally thin sheet rather than
+// promoting it to a half-cell liquid region. R is written only to the render
+// texture and never becomes transport or pressure authority.
+fn domainWallFilmCell(id:vec3i,rho:f32)->bool{
+  if(rho<=1e-5||rho>=0.5){return false;}
+  let d=dims();
+  return id.x==0||id.z==0||id.x==d.x-1||id.z==d.z-1||id.y==0
+    ||(id.y==d.y-1&&params.boundary.w<=0.5);
+}
+fn embeddedWallFilm(id:vec3i)->vec2f{
+  let world=worldCell(id);let distance=solidSignedDistance(world);
+  if(distance>=1e19){return vec2f(0.0);}
+  let gradient=solidSignedDistanceGradient(world);let gradientLength=length(gradient);
+  if(gradientLength<=1e-6){return vec2f(0.0);}
+  let normal=gradient/gradientLength;let h=params.cellGravity.xyz;
+  let normalCellWidth=1.0/max(length(normal/h),1e-6);
+  if(distance>1.25*normalCellWidth){return vec2f(0.0);}
+  let sourceWorld=world+normal*(0.5*normalCellWidth-distance);
+  let source=vec3i(floor(vec3f(
+    (sourceWorld.x+0.5*params.container.x)/h.x,
+    sourceWorld.y/h.y,
+    (sourceWorld.z+0.5*params.container.z)/h.z)));
+  if(!valid(source)||cellInsideSolid(source)){return vec2f(0.0);}
+  let rho=textureLoad(volumeIn,source,0).x;
+  if(rho<=1e-5||rho>=0.5){return vec2f(0.0);}
+  return vec2f(max(0.0,0.5-distance/normalCellWidth+rho),1.0);
+}
+fn wallFilmResolvedDensity(id:vec3i,base:f32)->f32{
+  let film=embeddedWallFilm(id);
+  return max(base,film.x);
+}
+@compute @workgroup_size(4,4,4)
+fn wallFilmResolve(@builtin(global_invocation_id) gid:vec3u){
+  let id=vec3i(gid);if(!valid(id)){return;}
+  let rho=textureLoad(volumeIn,id,0).x;
+  textureStore(volumeOut,id,vec4f(wallFilmResolvedDensity(id,rho)));
+}
+
+// Optional Sec. 3.8 reconstruction. Blur g=2 min(rho,.5) with a separable
 // Gaussian (sigma=2 cells), then expose sub-grid mass through
 // rho''=rho/min(max(g,theta),1), theta=.01. None of these outputs are rebound
 // into transport or projection.
@@ -1081,7 +1217,13 @@ fn storePostprocessBlur(id:vec3i,axis:u32,seedDensity:bool){textureStore(volumeO
 fn postprocessResolve(@builtin(global_invocation_id) gid:vec3u){
   let id=vec3i(gid);if(!valid(id)){return;}
   let rho=textureLoad(volumeIn,id,0).x;let blurredGamma=textureLoad(surfaceIn,id,0).x;
-  textureStore(volumeOut,id,vec4f(rho/min(max(blurredGamma,0.01),1.0)));
+  var reconstructed=rho/min(max(blurredGamma,0.01),1.0);
+  // Preserve calibrated wall-cell rho: the surface extractor supplies its
+  // matching boundary ghost. Sec. 3.8 remains active everywhere unsupported.
+  if(domainWallFilmCell(id,rho)){reconstructed=rho;}
+  let embedded=embeddedWallFilm(id);
+  if(embedded.y>0.5){reconstructed=max(rho,embedded.x);}
+  textureStore(volumeOut,id,vec4f(reconstructed));
 }
 @compute @workgroup_size(4,4,4)
 fn reduceDiagnostics(@builtin(global_invocation_id) gid:vec3u){let id=vec3i(gid);if(!valid(id)){return;}let represented=surfaceOccupancy(id);let conservative=volume(id);atomicAdd(&reductions[0],u32(represented*2048.0+0.5));if(surfaceLiquid(id)){atomicMax(&reductions[1],u32(id.x+1));}let speed=length(faceVelocity(id));atomicMax(&reductions[2],bitcast<u32>(speed));atomicAdd(&reductions[3],u32(clamp(conservative,0.0,8.0)*2048.0+0.5));}

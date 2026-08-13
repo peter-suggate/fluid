@@ -1,6 +1,6 @@
 /**
  * Field views the generic dense-grid overlay renders from the textures every
- * GPU solver publishes — occupancy, velocity, and the level set.
+ * GPU solver publishes — occupancy, density, velocity, and the level set.
  *
  * Declared beside `webgpu-grid-overlay.ts` for the same reason the octree
  * views live beside their debug source: the colours below are the shader's
@@ -22,6 +22,19 @@ export const gridOverlayVisualizations: readonly Visualization[] = Object.freeze
       { swatch: "#3380bd", label: "wet cell" },
       { swatch: "#d9e8e3", label: "dry represented cell" },
       { swatch: "#9e3d38", label: "above the simulated band" },
+    ],
+  }),
+  fieldVisualization({
+    kind: "field", id: "dense-grid/density", pass: "Dense grid",
+    label: "Surface density",
+    description: "Mass per cell in cell volumes, from the solver's own transported field: dilute sub-half mass, liquid, and the overfull cells the projection has to drain.",
+    source: "Live volume texture, before the render-only wall-film reconstruction",
+    mode: "density", axis: "z",
+    swatch: "#2f8fd6",
+    legend: [
+      { swatch: "#3f9f8f", label: "0 < ρ < ½ — carried, not liquid" },
+      { swatch: "linear-gradient(90deg,#3f5fa0,#7ea3c1)", label: "ρ ½ → 1 — liquid, filling" },
+      { swatch: "linear-gradient(90deg,#baad61,#c9563f)", label: "ρ > 1 — overfull" },
     ],
   }),
   fieldVisualization({

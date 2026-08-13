@@ -725,7 +725,7 @@ export class SecondaryParticleRenderPipeline {
     const opticalDescriptor = (label: string, entryPoint: "ellipsoidFront" | "ellipsoidBack"): GPURenderPipelineDescriptor => ({
       label, layout: pipelineLayout,
       vertex: { module: opticalModule, entryPoint: "ellipsoidVertex" },
-      fragment: { module: opticalModule, entryPoint, targets: [{ format: "rgba16float" }, { format: "rgba16float" }] },
+      fragment: { module: opticalModule, entryPoint, targets: [{ format: "rgba32float" }, { format: "rgba16float" }] },
       primitive: { topology: "triangle-list", cullMode: "none" },
       depthStencil: { format: "depth24plus", depthWriteEnabled: true, depthCompare: "less" }
     });

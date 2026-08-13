@@ -116,6 +116,7 @@ interface UniformReferencePipelines {
   postprocessBlurY: GPUComputePipeline;
   postprocessBlurZ: GPUComputePipeline;
   postprocessResolve: GPUComputePipeline;
+  wallFilmResolve: GPUComputePipeline;
   sharpenCompute: GPUComputePipeline;
   sharpenScatter: GPUComputePipeline;
   sharpenResolve: GPUComputePipeline;
@@ -146,6 +147,7 @@ const PIPELINES = [
   ["postprocessBlurY", "Post-process gamma blur y", "postprocessBlurY", false],
   ["postprocessBlurZ", "Post-process gamma blur z", "postprocessBlurZ", false],
   ["postprocessResolve", "Resolve sub-grid surface density", "postprocessResolve", false],
+  ["wallFilmResolve", "Resolve mass-proportional wall films", "wallFilmResolve", false],
   ["sharpenCompute", "Compute interface sharpening", "sharpenCompute", false],
   ["sharpenScatter", "Scatter conserved interface mass", "sharpenScatter", false],
   ["sharpenResolve", "Resolve conserved interface mass", "sharpenResolve", false],
@@ -184,7 +186,7 @@ export const UNIFORM_ADVANCE_PHASE = Object.freeze({
   pressureFinish: { id: "pressure-solve", label: "CM11a parity copy + fine residual" },
   pressureProjection: { id: "velocity-projection", label: "Pressure projection" },
   rigidCoupling: { id: "other", label: "Rigid two-way coupling + integration" },
-  densityPostProcess: { id: "surface-extraction", label: "Sec. 3.8 render density reconstruction" },
+  densityPostProcess: { id: "surface-extraction", label: "Render-only wall-film / Sec. 3.8 reconstruction" },
   diagnosticsReduction: { id: "other", label: "Diagnostics reduction" },
 } satisfies Record<string, GPUTimestampPhase>);
 
@@ -207,7 +209,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   readonly info: GPUEulerianInfo;
   readonly volumeTexture: GPUTexture;
   get surfaceFieldTexture(): GPUTexture {
-    return this.densityPostProcessing ? this.surfaceB : this.volumeA;
+    return this.surfaceB;
   }
   readonly columnBaseTexture: GPUTexture;
   readonly velocityTexture: GPUTexture;
@@ -297,6 +299,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
   private readonly postprocessBlurYGroup: GPUBindGroup;
   private readonly postprocessBlurZGroup: GPUBindGroup;
   private readonly postprocessResolveGroup: GPUBindGroup;
+  private readonly wallFilmResolveGroup: GPUBindGroup;
   private readonly sharpenComputeGroup: GPUBindGroup;
   private readonly sharpenScatterGroup: GPUBindGroup;
   private readonly sharpenResolveGroup: GPUBindGroup;
@@ -580,6 +583,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     this.postprocessBlurZGroup = group(this.velocityA, this.velocityB, this.pressureA, this.pressureB, this.surfaceB, this.surfaceA, this.heightB, this.heightA);
     this.postprocessResolveGroup = group(this.velocityA, this.velocityB, this.pressureA, this.pressureB, this.volumeA, this.surfaceB, this.heightB, this.heightA,
       this.velocityA, this.velocityA, this.transportA, this.surfaceA);
+    this.wallFilmResolveGroup = group(this.velocityA, this.velocityB, this.pressureA, this.pressureB, this.volumeA, this.surfaceB, this.heightB, this.heightA);
     const count = nx * ny * nz;
     this.info = {
       nx, ny, nz, storedNy: ny, cellCount: count, equivalentUniformCells: count,
@@ -674,13 +678,34 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
 
   private encodeInitialPresentationSurface(): void {
     if (!this.pipelines) throw new Error("Uniform reference pipelines are not initialized");
-    if (!this.densityPostProcessing) return;
+    this.writeParams(0, Math.min(this.scene.rigidBodies.length, 12), 0);
     const encoder = this.device.createCommandEncoder({ label: "Uniform reference t=0 surface reconstruction" });
-    this.run(encoder, "Uniform initial post-process blur x", this.pipelines.postprocessBlurX, this.postprocessBlurXGroup);
-    this.run(encoder, "Uniform initial post-process blur y", this.pipelines.postprocessBlurY, this.postprocessBlurYGroup);
-    this.run(encoder, "Uniform initial post-process blur z", this.pipelines.postprocessBlurZ, this.postprocessBlurZGroup);
-    this.run(encoder, "Uniform initial sub-grid surface resolve", this.pipelines.postprocessResolve, this.postprocessResolveGroup);
+    if (this.densityPostProcessing) {
+      this.run(encoder, "Uniform initial post-process blur x", this.pipelines.postprocessBlurX, this.postprocessBlurXGroup);
+      this.run(encoder, "Uniform initial post-process blur y", this.pipelines.postprocessBlurY, this.postprocessBlurYGroup);
+      this.run(encoder, "Uniform initial post-process blur z", this.pipelines.postprocessBlurZ, this.postprocessBlurZGroup);
+      this.run(encoder, "Uniform initial sub-grid surface resolve", this.pipelines.postprocessResolve, this.postprocessResolveGroup);
+    } else {
+      this.run(encoder, "Uniform initial wall-film resolve", this.pipelines.wallFilmResolve, this.wallFilmResolveGroup);
+    }
     this.device.queue.submit([encoder.finish()]);
+  }
+
+  private writeParams(dt: number, activeBodyCount: number, inflowStrength: number): void {
+    const c = this.scene.container;
+    const inflow = this.scene.fluid.inflow;
+    const outlet = this.inflowBoundary?.outletCenter_m;
+    this.device.queue.writeBuffer(this.params, 0, new Float32Array([
+      this.info.nx, this.info.ny, this.info.nz, dt,
+      c.width_m / this.info.nx, c.height_m / this.info.ny, c.depth_m / this.info.nz, this.scene.fluid.gravity_m_s2.y,
+      c.width_m, c.height_m, c.depth_m, sceneHasTerrain(this.scene) ? 1 : 0,
+      this.scene.fluid.density_kg_m3, this.scene.fluid.dynamicViscosity_Pa_s, 1, 0,
+      this.scene.fluid.surfaceTension_N_m, c.fluidWallMode === "no-slip" ? 1 : 0, activeBodyCount, c.top === "open" ? 1 : 0,
+      outlet?.x ?? 0, outlet?.y ?? 0, outlet?.z ?? 0, inflow?.radius_m ?? 0,
+      inflow?.velocity_m_s.x ?? 0, inflow?.velocity_m_s.y ?? 0, inflow?.velocity_m_s.z ?? 0, this.inflowBoundary?.apertureScale ?? 0,
+      inflowStrength, this.referenceVolumeCells, c.fillFraction * this.info.ny, 4,
+      this.sharpeningStrength, this.sharpeningDistance, 0, 0,
+    ]));
   }
 
   /**
@@ -701,7 +726,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       values.densityPostProcessing,
       this.scene.sceneId,
     );
-    const refreshPresentation = postProcessing && !this.densityPostProcessing;
+    const refreshPresentation = postProcessing !== this.densityPostProcessing;
     this.densityPostProcessing = postProcessing;
     this.densitySharpening = values.densitySharpening !== "off";
     this.sharpeningMassCorrection = values.sharpeningMassCorrection !== "off";
@@ -865,18 +890,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       this.referenceVolumeCells += this.inflowBoundary.flowRate_m3_s * strength * dt / cellVolume;
     }
     this.info.referenceLiquidVolume_cells = this.referenceVolumeCells;
-    const outlet = this.inflowBoundary?.outletCenter_m;
-    this.device.queue.writeBuffer(this.params, 0, new Float32Array([
-      this.info.nx, this.info.ny, this.info.nz, dt,
-      c.width_m / this.info.nx, c.height_m / this.info.ny, c.depth_m / this.info.nz, this.scene.fluid.gravity_m_s2.y,
-      c.width_m, c.height_m, c.depth_m, sceneHasTerrain(this.scene) ? 1 : 0,
-      this.scene.fluid.density_kg_m3, this.scene.fluid.dynamicViscosity_Pa_s, 1, 0,
-      this.scene.fluid.surfaceTension_N_m, c.fluidWallMode === "no-slip" ? 1 : 0, activeBodies.length, c.top === "open" ? 1 : 0,
-      outlet?.x ?? 0, outlet?.y ?? 0, outlet?.z ?? 0, inflow?.radius_m ?? 0,
-      inflow?.velocity_m_s.x ?? 0, inflow?.velocity_m_s.y ?? 0, inflow?.velocity_m_s.z ?? 0, this.inflowBoundary?.apertureScale ?? 0,
-      strength, this.referenceVolumeCells, c.fillFraction * this.info.ny, 4,
-      this.sharpeningStrength, this.sharpeningDistance, 0, 0,
-    ]));
+    this.writeParams(dt, activeBodies.length, strength);
     // The advance-pipeline trace: a hardware-timestamp boundary chain over the
     // whole step, sampled on a cadence while the instrumentation store asks for
     // it. Boundaries splice into the next real pass's timestampWrites, so an
@@ -1088,16 +1102,17 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
       this.rigidSystem.encode(encoder, dt, cellVolume, 1, c.height_m / this.info.ny);
       seam?.(UNIFORM_ADVANCE_PHASE.rigidCoupling);
     }
-    // Results states Sec. 3.8 was off unless explicitly noted. The method
-    // profile enables it only for presentation-critical symmetry/mini-dam
-    // scenes (or an explicit user choice); it never feeds simulation.
+    // Wall-film reconstruction is always produced for presentation. Sec. 3.8
+    // remains the optional global reconstruction; neither field feeds physics.
     if (this.densityPostProcessing) {
       this.run(encoder, "Uniform post-process blur x", this.pipelines.postprocessBlurX, this.postprocessBlurXGroup);
       this.run(encoder, "Uniform post-process blur y", this.pipelines.postprocessBlurY, this.postprocessBlurYGroup);
       this.run(encoder, "Uniform post-process blur z", this.pipelines.postprocessBlurZ, this.postprocessBlurZGroup);
       this.run(encoder, "Uniform sub-grid surface resolve", this.pipelines.postprocessResolve, this.postprocessResolveGroup);
-      seam?.(UNIFORM_ADVANCE_PHASE.densityPostProcess);
+    } else {
+      this.run(encoder, "Uniform wall-film resolve", this.pipelines.wallFilmResolve, this.wallFilmResolveGroup);
     }
+    seam?.(UNIFORM_ADVANCE_PHASE.densityPostProcess);
     // The final phase closes on the reduction pass itself (its end-of-pass
     // counter) rather than on a synthetic marker pass after it: a marker
     // touches no frame resource, so Metal is free to schedule it early and its
@@ -1616,10 +1631,10 @@ const UNIFORM_FLUID_STAGES: readonly FluidPipelineStage[] = [
     label: "Render density",
     phaseLabels: [UNIFORM_ADVANCE_PHASE.densityPostProcess.label],
     tip: {
-      summary: "Sec. 3.8: separable gamma blur plus a sub-grid surface resolve producing the smoothed render-only density texture. Never feeds simulation state; the paper's Results ran with it off unless noted.",
+      summary: "Always reconstructs sub-half-cell liquid supported by tank walls and embedded solids at a mass-proportional thickness. Sec. 3.8 optionally adds its global gamma-blur reconstruction. The result never feeds simulation state.",
       reads: "surface density, gamma",
       writes: "render surface texture",
-      gate: "the Sec. 3.8 post-processing parameter is on",
+      gate: "wall films always; global Sec. 3.8 reconstruction when enabled",
     },
     controls: [{
       kind: "param-choice",
@@ -1628,22 +1643,21 @@ const UNIFORM_FLUID_STAGES: readonly FluidPipelineStage[] = [
       hint: "Render-only surface smoothing; simulation state is identical either way. Changing it rebuilds the solver.",
       options: [
         { value: "scene", label: "Scene", hint: "On for symmetry and mini-dam scenes where sub-grid sheets are presentation-critical." },
-        { value: "off", label: "Off", hint: "The paper's Results default." },
-        { value: "on", label: "On", hint: "Blur + sub-grid resolve, 4 extra passes." },
+        { value: "off", label: "Wall films", hint: "Mass-proportional solid-supported sheets only." },
+        { value: "on", label: "Wall films + Sec. 3.8", hint: "Adds gamma blur and global sub-grid resolve." },
       ],
     }],
     toggle: {
       param: "densityPostProcessing", on: "on", off: "off",
       hint: "Toggle the render-only Sec. 3.8 density reconstruction without changing simulation physics.",
     },
-    state: (context) => uniformDensityPostProcessingEnabled(
-      context.values.densityPostProcessing, context.sceneId) ? "on" : "off",
+    state: () => "on",
     chip: (context) => uniformDensityPostProcessingEnabled(
       context.values.densityPostProcessing, context.sceneId)
-      ? "4 passes · render-only"
+      ? "4 passes · Sec. 3.8 + wall films"
       : context.values.densityPostProcessing === "scene"
-        ? "off for this scene · render-only"
-        : "off · render-only",
+        ? "1 pass · wall films"
+        : "1 pass · wall films",
   },
   {
     id: "diagnostics-reduction",
