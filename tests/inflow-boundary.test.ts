@@ -1,8 +1,12 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { averageInflowStrength, createInflowGridBoundary, inflowBoundaryWGSL, inflowOutletCenter, integratedInflowVolume } from "../lib/inflow-boundary";
 import { createPaperScenario } from "../lib/paper-scenarios";
 import { createTallCellLayout } from "../lib/tall-cell-grid";
+
+const uniformShader = readFileSync(
+  new URL("../lib/webgpu-uniform-reference.wgsl.ts", import.meta.url), "utf8");
 
 test("hose outlet is a normalized face flux rather than a painted volume", () => {
   const scene = createPaperScenario("hose-tank"), inflow = scene.fluid.inflow!;
@@ -43,4 +47,27 @@ test("step-averaged ramp integrates the configured tap volume", () => {
 
 test("the conservative boundary-face flux stays loop-free", () => {
   assert.doesNotMatch(inflowBoundaryWGSL, /\bfor\s*\(/, "the shared aperture must not expand quadrature loops into transport pipelines");
+});
+
+test("large-CFL inflow rasterizes the full swept plug instead of saturating one receiver layer", () => {
+  assert.match(inflowBoundaryWGSL, /fn inflowSweptPlugSource/);
+  assert.match(inflowBoundaryWGSL,
+    /let overlap=max\(0\.0,min\(axial\+halfAxial,speed\*dt\)-max\(axial-halfAxial,0\.0\)\)/,
+    "the source must cover every cell interval crossed during the timestep");
+  assert.doesNotMatch(inflowBoundaryWGSL,
+    /fn inflowSweptPlugSource[\s\S]*q\[axis\]!=inflowReceiverIndex/,
+    "the swept source must not collapse back to one receiver plane");
+  assert.match(inflowBoundaryWGSL,
+    /fn isInflowSweptVelocityCell[\s\S]*upstreamSupport\|\|inflowSweptPlugSource\(q,params\.dimsDt\.w\)>0\.0/,
+    "the prescribed velocity must carry every newly rasterized plug cell away from the nozzle");
+  assert.match(uniformShader, /return applyInflowSweptVelocity\(id,v\)/,
+    "the swept reservoir velocity must be applied before pressure projection");
+  assert.match(uniformShader, /v=applyInflowVelocity\(id,v\);textureStore\(velocityOut/,
+    "post-projection enforcement must remain limited to the actual nozzle face");
+  assert.match(uniformShader,
+    /let inflowSource=min\(inflowSweptPlugSource\(id,params\.dimsDt\.w\),max\(0\.0,1\.0-rhoNext\)\)/,
+    "recirculating liquid in the virtual nozzle must not be overfilled");
+  assert.match(uniformShader,
+    /if\(inflowSource>0\.0\)\{gammaNext=max\(gammaNext,1\.0\);\}/,
+    "newly wetted reservoir cells need the unit cumulative-gamma state used at startup");
 });

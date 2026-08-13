@@ -27,11 +27,45 @@ fn inflowBoundaryFlux(q:vec3i,axis:u32,dt:f32)->f32{
 fn inflowReceiverSource(q:vec3i,dt:f32)->f32{
   let axis=inflowAxis();if(q[axis]!=inflowReceiverIndex(axis)){return 0.0;}var face=q;face[axis]=inflowFaceIndex(axis);return abs(inflowBoundaryFlux(face,axis,dt));
 }
+// A prescribed boundary can carry more than one cell volume through each
+// aperture cell in a timestep.  Depositing that whole flux into the single
+// receiver layer and then clamping rho to one silently caps every inflow at
+// CFL 1.  Rasterize the plug swept out by the reservoir during this timestep
+// instead.  For an axis-aligned jet, a CFL of 25 fills exactly 25 downstream
+// layers; the interval overlap retains the fractional final layer.  The
+// dominant-face aperture normalization keeps the integrated plug volume equal
+// to pi*r^2*|u|*dt.
+fn inflowSweptPlugSource(q:vec3i,dt:f32)->f32{
+  let strength=inflowStrength();let velocity=params.inflowVelocityLength.xyz;let speed=length(velocity)*strength;
+  if(speed<=1e-6||dt<=0.0){return 0.0;}
+  let direction=velocity/max(length(velocity),1e-6);let h=params.cellGravity.xyz;
+  let minimum=vec3f(-0.5*params.container.x,0.0,-0.5*params.container.z);
+  let centre=minimum+(vec3f(q)+vec3f(0.5))*h;
+  let relative=centre-params.inflowPositionRadius.xyz;
+  let axial=dot(relative,direction);let halfAxial=0.5*dot(abs(direction),h);
+  let overlap=max(0.0,min(axial+halfAxial,speed*dt)-max(axial-halfAxial,0.0));
+  if(overlap<=0.0){return 0.0;}
+  let radialDistance=length(relative-axial*direction);let axis=inflowAxis();var tangentA=0u;var tangentB=1u;
+  if(axis==0u){tangentA=1u;tangentB=2u;}else if(axis==1u){tangentA=0u;tangentB=2u;}
+  let edgeWidth=max(0.5*length(vec2f(h[tangentA],h[tangentB])),1e-6);
+  let edge=clamp(0.5+0.5*(params.inflowPositionRadius.w-radialDistance)/edgeWidth,0.0,1.0);
+  let radialCoverage=edge*edge*(3.0-2.0*edge);
+  return overlap/max(2.0*halfAxial,1e-6)*radialCoverage*params.inflowVelocityLength.w;
+}
 fn isInflowVelocityCell(q:vec3i)->bool{
   let axis=inflowAxis();let receiver=inflowReceiverIndex(axis);let donor=select(receiver+1,receiver-1,params.inflowVelocityLength[axis]>=0.0);return inflowStrength()>0.0&&(q[axis]==receiver||q[axis]==donor)&&inflowApertureFraction(q)>0.0;
 }
+fn isInflowSweptVelocityCell(q:vec3i)->bool{
+  let axis=inflowAxis();let receiver=inflowReceiverIndex(axis);let donor=select(receiver+1,receiver-1,params.inflowVelocityLength[axis]>=0.0);
+  let upstreamSupport=q[axis]==donor&&inflowApertureFraction(q)>0.0;
+  return inflowStrength()>0.0&&(upstreamSupport||inflowSweptPlugSource(q,params.dimsDt.w)>0.0);
+}
 fn applyInflowVelocity(q:vec3i,inputVelocity:vec3f)->vec3f{
   let strength=inflowStrength();if(strength<=0.0){return inputVelocity;}let axis=inflowAxis();let receiver=inflowReceiverIndex(axis);if(!isInflowVelocityCell(q)){return inputVelocity;}var desiredVelocity=params.inflowVelocityLength.xyz*strength;desiredVelocity[axis]*=params.inflowVelocityLength.w;var velocity=inputVelocity;if(q[axis]==receiver){velocity=desiredVelocity;}velocity[axis]=desiredVelocity[axis];return velocity;
+}
+fn applyInflowSweptVelocity(q:vec3i,inputVelocity:vec3f)->vec3f{
+  let strength=inflowStrength();if(strength<=0.0||!isInflowSweptVelocityCell(q)){return inputVelocity;}
+  var desiredVelocity=params.inflowVelocityLength.xyz*strength;let axis=inflowAxis();desiredVelocity[axis]*=params.inflowVelocityLength.w;return desiredVelocity;
 }
 `;
 

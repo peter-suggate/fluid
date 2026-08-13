@@ -610,11 +610,16 @@ fn gatherConservativeDensity(@builtin(global_invocation_id) gid:vec3u){
   rhoNext+=f32(atomicLoad(&sharpenDeposits[count+index]))/TRANSPORT_FIXED;
   gammaNext+=f32(atomicLoad(&sharpenDeposits[2u*count+index]))/TRANSPORT_FIXED;
   // The prescribed inflow is a mass source external to the conservative
-  // operator. It is bounded only by this cell's remaining surface density.
-  rhoNext+=min(inflowReceiverSource(id,params.dimsDt.w),max(0.0,1.0-rhoNext));
-  // Keep the established dry-air conditioning separate from the released
-  // wall case above. It cannot create a backward density coefficient because
-  // beta was already built from advectedGamma.
+  // operator.  Rasterize the entire timestep-swept plug: a one-layer receiver
+  // source would cap the paper's CFL-25 jet at 1/25 of its authored flux. The
+  // matching swept velocity support moves this new plug clear before the next
+  // step; retain the density-capacity guard for recirculating liquid crossing
+  // the prescribed nozzle volume.
+  let inflowSource=min(inflowSweptPlugSource(id,params.dimsDt.w),max(0.0,1.0-rhoNext));
+  rhoNext+=inflowSource;
+  // Gamma is initialized to one throughout the domain at startup. A cell
+  // first wetted by the external reservoir needs the same operator state.
+  if(inflowSource>0.0){gammaNext=max(gammaNext,1.0);}
   if(rhoNext<1e-5){gammaNext=1.0;}
   textureStore(volumeOut,id,vec4f(max(rhoNext,0.0)));
   textureStore(gammaOut,id,vec4f(max(gammaNext,0.0)));
@@ -727,7 +732,10 @@ fn applyVelocityForces(id:vec3i,inputVelocity:vec3f,dt:f32,h:vec3f)->vec3f{
       if(dz!=0.0){v.z+=dt*sigmaOverRho*0.5*(centreCurvature+curvatureAt(qz))*dz/h.z;}
     }
   }
-  return applyInflowVelocity(id,v);
+  // Give the newly rasterized high-CFL plug its reservoir velocity before
+  // projection. The projection may then redirect it at impacts; only the
+  // actual nozzle face is re-imposed after projection.
+  return applyInflowSweptVelocity(id,v);
 }
 
 @compute @workgroup_size(4,4,4)
