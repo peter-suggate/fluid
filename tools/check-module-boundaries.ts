@@ -30,6 +30,7 @@ type Zone =
   | "method-uniform"
   | "method-losasso"
   | "method-power"
+  | "method-adaptive-mass"
   | "octree-shared"
   | "svo"
   | "harness"
@@ -43,6 +44,7 @@ function zoneOf(relPath: string): Zone {
   if (relPath.startsWith("lib/methods/uniform/")) return "method-uniform";
   if (relPath.startsWith("lib/methods/losasso/")) return "method-losasso";
   if (relPath.startsWith("lib/methods/power/")) return "method-power";
+  if (relPath.startsWith("lib/methods/adaptive-mass/")) return "method-adaptive-mass";
   if (relPath.startsWith("lib/methods/octree-shared/")) return "octree-shared";
   if (relPath.startsWith("lib/svo/")) return "svo";
   if (relPath.startsWith("lib/harness/")) return "harness";
@@ -60,6 +62,7 @@ const ALLOWED: Record<Zone, ReadonlySet<Zone>> = {
   "method-uniform": new Set<Zone>(["core", "method-uniform"]),
   "method-losasso": new Set<Zone>(["core", "octree-shared", "method-losasso"]),
   "method-power": new Set<Zone>(["core", "octree-shared", "method-power"]),
+  "method-adaptive-mass": new Set<Zone>(["core", "method-adaptive-mass"]),
   "octree-shared": new Set<Zone>(["core", "octree-shared"]),
   // The SVO stack encodes and traces voxels. Which solver filled them is not
   // its business, so no method zone appears here — that absence is the rule.
@@ -71,6 +74,7 @@ const ALLOWED: Record<Zone, ReadonlySet<Zone>> = {
     "method-uniform",
     "method-losasso",
     "method-power",
+    "method-adaptive-mass",
     "octree-shared",
   ]),
   // The lab expands SVO primitives and field programs on CPU — that is what it
@@ -83,6 +87,7 @@ const ALLOWED: Record<Zone, ReadonlySet<Zone>> = {
     "method-uniform",
     "method-losasso",
     "method-power",
+    "method-adaptive-mass",
     "octree-shared",
     "harness",
   ]),
@@ -98,6 +103,7 @@ const ALLOWED: Record<Zone, ReadonlySet<Zone>> = {
     "method-uniform",
     "method-losasso",
     "method-power",
+    "method-adaptive-mass",
     "octree-shared",
     "lib-other",
     "shape-lab",

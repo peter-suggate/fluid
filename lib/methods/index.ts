@@ -8,6 +8,7 @@ import { spgridRowCapacityForBindingLimit } from "./power/webgpu-octree-spgrid-v
 import { structuredVelocityRowCapacityForBindingLimit } from "./power/webgpu-octree-structured-velocity-gpu";
 import { powerLiquidsMethod } from "./power/method";
 import { uniformMethod } from "./uniform/method";
+import { adaptiveMassMethod } from "./adaptive-mass/method";
 import type { SimulationMethod } from "../core/method-contract";
 
 /**
@@ -19,7 +20,12 @@ import type { SimulationMethod } from "../core/method-contract";
  * asymmetry is the decoupling: the catalog may reach a method, and nothing
  * that a method can reach may reach the catalog.
  */
-const simulationMethods: ReadonlyArray<SimulationMethod> = [losassoMethod, powerLiquidsMethod, uniformMethod];
+const simulationMethods: ReadonlyArray<SimulationMethod> = [
+  losassoMethod,
+  powerLiquidsMethod,
+  uniformMethod,
+  adaptiveMassMethod,
+];
 
 /**
  * The octree engine resolves its coarse dynamics lane by backend id, and this
@@ -52,7 +58,7 @@ installSimulationMethods({
   // `coarseBackend` select) and because `interactiveMethodId` silently
   // substitutes the default for a non-interactive id: a `method=power-liquids`
   // link would have hydrated as uniform and simulated something else.
-  interactive: [losassoMethod, powerLiquidsMethod, uniformMethod],
+  interactive: [losassoMethod, powerLiquidsMethod, uniformMethod, adaptiveMassMethod],
   // Uniform is the default for any scene that does not author a method profile.
   defaultId: uniformMethod.id,
 });
