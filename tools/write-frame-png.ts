@@ -2,7 +2,7 @@ import { deflateSync } from "node:zlib";
 import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
-import { resolveDisplayGrade, type ResolvedDisplayGrade } from "../lib/webgpu-lighting";
+import { resolveDisplayGrade, type ResolvedDisplayGrade } from "../lib/core/webgpu-lighting";
 
 /**
  * Write a captured `rgba16float` frame out as a PNG.

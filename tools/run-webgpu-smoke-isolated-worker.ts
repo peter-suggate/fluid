@@ -3,7 +3,8 @@ import {
   acquireWebGPUExclusiveLock,
   releaseWebGPUExclusiveLock,
   releaseWebGPUExclusiveLockSync,
-} from "./webgpu-smoke-isolation";
+} from "../lib/harness/webgpu-smoke-isolation";
+import "../lib/methods";
 
 async function acquireExclusiveGPUProcessLock(): Promise<void> {
   const evidence = await acquireWebGPUExclusiveLock(

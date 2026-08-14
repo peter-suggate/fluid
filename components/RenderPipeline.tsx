@@ -12,8 +12,8 @@ import {
   type RenderPipelineMeasurement,
   type RenderPipelineNode,
   type RenderPipelineNodeState,
-} from "@/lib/render-pipeline-graph";
-import { SVO_RENDER_STAGE_DEFINITIONS, type SvoRenderStageView } from "@/lib/svo-render-diagnostics";
+} from "../lib/core/render-pipeline-graph";
+import { SVO_RENDER_STAGE_DEFINITIONS, type SvoRenderStageView } from "../lib/svo/svo-render-diagnostics";
 
 /** Where a connector meets a card: the centre of its single head row. */
 const ANCHOR_Y = 12;

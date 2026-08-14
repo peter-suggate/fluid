@@ -1,9 +1,9 @@
 import { pathToFileURL } from "node:url";
-import { GPUPerformanceTraceRecorder } from "../lib/performance-trace";
+import { GPUPerformanceTraceRecorder } from "../lib/core/performance-trace";
 import {
   acquireWebGPUExclusiveLock,
   releaseWebGPUExclusiveLock,
-} from "./webgpu-smoke-isolation";
+} from "../lib/harness/webgpu-smoke-isolation";
 
 const rows = Number(process.env.FLUID_SECTION63_BENCHMARK_ROWS ?? 1_048_576);
 const neighbours = 18;

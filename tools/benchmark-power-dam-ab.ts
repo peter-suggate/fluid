@@ -37,6 +37,7 @@ import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { POWER_DAM_LANE_ENVIRONMENT, type PowerDamRuntimeLane }
   from "./power-dam-lane-environment";
+import "../lib/methods";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const benchmark = fileURLToPath(new URL("./benchmark-power-dam.ts", import.meta.url));

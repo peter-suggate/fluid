@@ -29,9 +29,9 @@
  * A finer lattice costs nothing here: this scene opens dry, so none of the fluid
  * walls the hero scene's header records are on the path to a frame.
  */
-import type { CameraState, SceneDescription } from "../../lib/model";
-import { terrainHeightAt } from "../../lib/terrain";
-import { BONSAI_POND_CANOPY, bonsaiNodes, type BonsaiSpec } from "../../lib/voxel-scenery/bonsai";
+import type { CameraState, SceneDescription } from "../../lib/core/model";
+import { terrainHeightAt } from "../../lib/core/terrain";
+import { BONSAI_POND_CANOPY, bonsaiNodes, type BonsaiSpec } from "../../lib/core/voxel-scenery/bonsai";
 import { heroPreviewCamera, heroPreviewScene } from "./hero-still";
 
 /**

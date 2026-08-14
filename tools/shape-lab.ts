@@ -35,15 +35,15 @@
  * what the octree made of it, and the two differ by exactly the resampling the
  * lab exists to see past.
  */
-import { encodeRgbPng } from "../lib/png-codec";
-import type { Vec3 } from "../lib/model";
+import { encodeRgbPng } from "../lib/core/png-codec";
+import type { Vec3 } from "../lib/core/model";
 import {
   evaluateSvoFieldProgram,
   svoFieldProgramExtent_m,
   svoFieldProgramFeatureRadius_m,
   validateSvoFieldProgram,
   type SvoFieldProgram,
-} from "../lib/svo-field-program";
+} from "../lib/svo/svo-field-program";
 import { writeFileSync } from "node:fs";
 
 // ---------------------------------------------------------------------------

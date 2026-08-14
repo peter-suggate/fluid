@@ -14,14 +14,18 @@
 import assert from "node:assert/strict";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { octreeMethod } from "../lib/methods/octree";
-import type { GPUSolverInstance } from "../lib/methods/types";
-import { getScenePreset } from "../lib/scenes";
-import { requiredFluidDeviceLimits } from "../lib/webgpu-device-limits";
+// Composition root for this entry point: importing the method catalog installs
+// the simulation methods and the octree coarse-dynamics lanes, without which
+// constructing a solver throws rather than silently running the wrong backend.
+import "../lib/methods";
+import { losassoMethod } from "../lib/methods/losasso/method";
+import type { GPUSolverInstance } from "../lib/core/method-contract";
+import { getScenePreset } from "../lib/core/scenes";
+import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { globalFineSurfaceClassificationShader } from
-  "../lib/webgpu-water-global-fine-classify";
+  "../lib/core/webgpu-water-global-fine-classify";
 import { globalFineClassifiedEmitShader, globalFineClassifiedIndirectScanShader } from
-  "../lib/webgpu-water-global-fine-tetra";
+  "../lib/core/webgpu-water-global-fine-tetra";
 
 type Point = readonly [number, number, number];
 interface Snapshot {
@@ -594,8 +598,8 @@ const scene = getScenePreset("water-box-dam-break").create();
 const fixedDt_s = Number(process.env.FLUID_MAX_DT ?? .008);
 assert.ok(Number.isFinite(fixedDt_s) && fixedDt_s > 0);
 scene.numerics.fixedDt_s = fixedDt_s; scene.numerics.maxDt_s = fixedDt_s;
-const solver = await octreeMethod.createSolverAsync!(device, scene, "balanced", {
-  ...octreeMethod.presetFor("balanced"), coarseBackend: "losasso",
+const solver = await losassoMethod.createSolverAsync!(device, scene, "balanced", {
+  ...losassoMethod.presetFor("balanced"),
   losassoVelocityExtension: "causal-front",
   maximumLeafSize: process.env.FLUID_MAXIMUM_LEAF_SIZE ?? "16",
   interfaceRefinementBandCells: 4, globalFineLevelSetFactor: "1", secondaryParticles: "off",

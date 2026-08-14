@@ -17,9 +17,9 @@
  * every document the factory produces, so pushing preview nodes onto it would
  * edit the hero scene itself for the rest of the process.
  */
-import type { CameraState, SceneDescription } from "../../lib/model";
-import { getScenePreset } from "../../lib/scenes";
-import type { SceneryNode } from "../../lib/scenery-graph";
+import type { CameraState, SceneDescription } from "../../lib/core/model";
+import { getScenePreset } from "../../lib/core/scenes";
+import type { SceneryNode } from "../../lib/core/scenery-graph";
 
 const HERO_PRESET_ID = "hero-garden-hose";
 

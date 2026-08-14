@@ -2,11 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
 import { packFineLevelSetBrickKey,
-  planFineLevelSetBricks } from "../lib/octree-fine-levelset-bricks";
-import { WebGPUFineLevelSetBricks, type WebGPUFineLevelSetBrickSource } from
-  "../lib/webgpu-octree-fine-levelset-bricks";
-import { WebGPUFineLevelSetTopology } from "../lib/webgpu-octree-fine-levelset-topology";
-import { PassBroker } from "../lib/webgpu-pass-broker";
+  planFineLevelSetBricks } from "../lib/methods/octree-shared/octree-fine-levelset-bricks";
+import { WebGPUFineLevelSetBricks } from "../lib/methods/octree-shared/webgpu-octree-fine-levelset-bricks";
+import type { WebGPUFineLevelSetBrickSource } from "../lib/core/levelset-consumer-abi";
+import { WebGPUFineLevelSetTopology } from "../lib/methods/octree-shared/webgpu-octree-fine-levelset-topology";
+import { PassBroker } from "../lib/core/webgpu-pass-broker";
 
 const topologyEnduranceWGSL = /* wgsl */ `
 const INVALID:u32=0xffffffffu;

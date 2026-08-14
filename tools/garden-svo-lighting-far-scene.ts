@@ -6,8 +6,8 @@
  * question it answers is why the app stays slow at the far end of the zoom
  * range where almost nothing subtends more than a pixel.
  */
-import type { CameraState, SceneDescription } from "../lib/model";
-import { getScenePreset } from "../lib/scenes";
+import type { CameraState, SceneDescription } from "../lib/core/model";
+import { getScenePreset } from "../lib/core/scenes";
 
 const preset = getScenePreset("garden-svo-lighting");
 

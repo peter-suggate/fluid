@@ -2,8 +2,8 @@
 import assert from "node:assert/strict";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { GPUPerformanceTraceRecorder } from "../lib/performance-trace";
-import { createWebgpuSvoTraversalWGSL, webgpuSvoTraversalWGSL } from "../lib/webgpu-svo-traversal";
+import { GPUPerformanceTraceRecorder } from "../lib/core/performance-trace";
+import { createWebgpuSvoTraversalWGSL, webgpuSvoTraversalWGSL } from "../lib/svo/webgpu-svo-traversal";
 
 type Variant = "restart" | "continuation" | "parametric";
 

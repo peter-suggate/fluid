@@ -39,10 +39,10 @@ import { spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
-import { heroGardenCamera } from "../lib/hero-garden-scene";
-import { defaultCamera, type CameraState } from "../lib/model";
-import { decodeRgbPng } from "../lib/png-codec";
-import { decodeLinearPng, edgeAlignment, linearFromSrgbImage, registerToScoringGrid } from "../lib/hero-fidelity-score";
+import { heroGardenCamera } from "../lib/core/hero-garden-scene";
+import { defaultCamera, type CameraState } from "../lib/core/model";
+import { decodeRgbPng } from "../lib/core/png-codec";
+import { decodeLinearPng, edgeAlignment, linearFromSrgbImage, registerToScoringGrid } from "../lib/core/hero-fidelity-score";
 
 const environment = process.env;
 const width = Number(environment.FLUID_HERO_SOLVE_WIDTH ?? 418);

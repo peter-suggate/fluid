@@ -24,11 +24,15 @@
 import assert from "node:assert/strict";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { uniformMethod } from "../lib/methods/uniform";
-import type { GPUSolverInstance } from "../lib/methods/types";
-import { scaleScene } from "../lib/scene-scale";
-import { getScenePreset } from "../lib/scenes";
-import { requiredFluidDeviceLimits } from "../lib/webgpu-device-limits";
+// Composition root for this entry point: importing the method catalog installs
+// the simulation methods and the octree coarse-dynamics lanes, without which
+// constructing a solver throws rather than silently running the wrong backend.
+import "../lib/methods";
+import { uniformMethod } from "../lib/methods/uniform/method";
+import type { GPUSolverInstance } from "../lib/core/method-contract";
+import { scaleScene } from "../lib/core/scene-scale";
+import { getScenePreset } from "../lib/core/scenes";
+import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 
 const steps = Number(process.env.FLUID_UNIFORM_COLLAPSE_STEPS ?? 250);
 const checkpoint = Number(process.env.FLUID_UNIFORM_COLLAPSE_CHECKPOINT ?? 10);

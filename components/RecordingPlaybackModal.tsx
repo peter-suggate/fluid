@@ -1,9 +1,9 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { realTimePlaybackRate, sourceDurationForPlayback } from "@/lib/recording-timing";
-import { simulationRecording } from "@/lib/simulation/recording";
-import { useRecordingStore } from "@/lib/stores/recording-store";
+import { realTimePlaybackRate, sourceDurationForPlayback } from "../lib/core/recording-timing";
+import { simulationRecording } from "../lib/core/simulation/recording";
+import { useRecordingStore } from "../lib/core/stores/recording-store";
 
 type PlaybackMode = "real-time" | "source";
 

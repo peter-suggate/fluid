@@ -1,21 +1,117 @@
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
-import { extname, relative, resolve } from "node:path";
-import { performanceTraceIsExact, type PaperPhaseId } from "../lib/performance-trace";
+import { readFileSync, readdirSync, statSync } from "node:fs";
+import { basename, extname, join, relative, resolve } from "node:path";
+import { performanceTraceIsExact, type PaperPhaseId } from "../lib/core/performance-trace";
 import type { PowerDamRunEnvironment } from "./power-dam-run-environment";
 import {
   OCTREE_WORK_STAGES,
   type OctreeWorkSnapshot,
   type OctreeWorkStage,
-} from "../lib/webgpu-octree-work-accounting";
-import {
-  discoverOctreeProductionSources,
-  extractEmbeddedWgslSources,
-} from "./audit-octree-production-source";
+} from "../lib/methods/octree-shared/webgpu-octree-work-accounting";
 import {
   powerDamComputePassStage,
   type PowerDamResultRecord,
 } from "./power-dam-performance-report";
+
+/** Presentation and one-shot inspection paths are not part of the recurring
+ * simulation graph. Everything else with an octree production prefix is
+ * scanned; the list is intentionally an exclusion list so new files enter the
+ * revision digest automatically. */
+const NON_RECURRING_SOURCE_BASENAMES = new Set([
+  "webgpu-octree-sparse-bricks.ts",
+  "webgpu-octree-technique-overlay.ts",
+  "webgpu-octree-voxel-inspection.ts",
+  "webgpu-octree-work-accounting.ts",
+]);
+
+/** Recurring simulation modules whose names do not carry an octree prefix, so
+ * the prefix filter above silently skipped them. Both are encoded every
+ * advance from `webgpu-octree.ts` -- brick residency publishes the topology the
+ * octree consumes, and the sparse mutation module rewrites it. Membership here
+ * is an inclusion list only because the naming convention is not uniform;
+ * anything that acquires an octree prefix is picked up automatically. */
+const ADDITIONAL_RECURRING_SOURCE_BASENAMES = new Set([
+  "webgpu-fluid-brick-residency.ts",
+  "webgpu-sparse-brick-topology-mutation.ts",
+]);
+
+export interface EmbeddedWgslSource {
+  readonly source: string;
+  readonly body: string;
+  readonly bodyOffset: number;
+  readonly bodyLine: number;
+  readonly templateStart: number;
+  readonly templateEnd: number;
+}
+
+function lineAt(source: string, offset: number): number {
+  let line = 1;
+  for (let index = 0; index < offset; index += 1) {
+    if (source.charCodeAt(index) === 10) line += 1;
+  }
+  return line;
+}
+
+/** Discover WGSL template literals by syntax, not exported constant names.
+ * This makes every new embedded shader enter the revision digest automatically. */
+export function extractEmbeddedWgslSources(
+  sourceName: string,
+  source: string,
+): readonly EmbeddedWgslSource[] {
+  const shaders: EmbeddedWgslSource[] = [];
+  for (let cursor = 0; cursor < source.length;) {
+    const templateStart = source.indexOf("`", cursor);
+    if (templateStart < 0) break;
+    let templateEnd = templateStart + 1;
+    while (templateEnd < source.length) {
+      if (source[templateEnd] === "\\") { templateEnd += 2; continue; }
+      if (source[templateEnd] === "`") break;
+      templateEnd += 1;
+    }
+    if (templateEnd >= source.length) break;
+    const bodyOffset = templateStart + 1;
+    const body = source.slice(bodyOffset, templateEnd);
+    if (/(?:@(?:compute|vertex|fragment|group|binding)\b|\bstruct\s+[A-Za-z_]\w*\s*\{)/.test(body)) {
+      shaders.push(Object.freeze({
+        source: `${sourceName}#wgsl-${shaders.length + 1}`,
+        body,
+        bodyOffset,
+        bodyLine: lineAt(source, bodyOffset),
+        templateStart,
+        templateEnd: templateEnd + 1,
+      }));
+    }
+    cursor = templateEnd + 1;
+  }
+  return Object.freeze(shaders);
+}
+
+function walk(directory: string): string[] {
+  const files: string[] = [];
+  for (const entry of readdirSync(directory).sort()) {
+    const path = join(directory, entry);
+    const stats = statSync(path);
+    if (stats.isDirectory()) files.push(...walk(path));
+    else files.push(path);
+  }
+  return files;
+}
+
+/** The recurring octree production surface, content-addressed by
+ * `octreeRegressionRevision` so a dirty worktree gets its own revision. */
+export function discoverOctreeProductionSources(repositoryRoot: string): readonly string[] {
+  const libraryRoot = join(resolve(repositoryRoot), "lib");
+  return walk(libraryRoot).filter((path) => {
+    const name = basename(path);
+    if (NON_RECURRING_SOURCE_BASENAMES.has(name)) return false;
+    const extension = extname(name);
+    if (extension !== ".ts" && extension !== ".wgsl") return false;
+    return name === "webgpu-octree.ts"
+      || name.startsWith("webgpu-octree-")
+      || name.startsWith("octree-")
+      || ADDITIONAL_RECURRING_SOURCE_BASENAMES.has(name);
+  });
+}
 
 export const OCTREE_REGRESSION_SCHEMA_VERSION = 1 as const;
 export type OctreeRegressionLane = "mini" | "ui" | "quiescent" | "moving-interface";

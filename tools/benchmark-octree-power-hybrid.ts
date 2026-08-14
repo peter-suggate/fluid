@@ -1,4 +1,4 @@
-import { buildOctreePowerHybridPlan } from "../lib/octree-power-hybrid";
+import { buildOctreePowerHybridPlan } from "../lib/methods/power/octree-power-hybrid";
 import { buildCartesianPowerFixture } from "./octree-power-hybrid-cartesian-fixture";
 
 const dimensions = [32, 32, 32] as const;

@@ -23,7 +23,7 @@
  *                                    after applying the lane preset
  *   --fine-factor=N                  override the global fine factor
  *   --maximum-leaf-size=N            override the maximum octree leaf size
- *   --coarse-backend=NAME            override the coarse solver backend
+ *   --method=ID                      override the lane's simulation method
  *   --no-tripwires                   disable runtime control-buffer tripwires
  *   --first-frame                    gate before advance 1 and reduce the
  *                                    capture to literal advance 1
@@ -108,13 +108,14 @@ import {
 import {
   readWebGPUExclusiveLockHolder,
   WEBGPU_EXCLUSIVE_LOCK,
-} from "./webgpu-smoke-isolation";
+} from "../lib/harness/webgpu-smoke-isolation";
 import { parseTraceTable, readTraceRows } from "./xctrace-trace-tables";
 import {
   buildFrameReport,
   GPU_FRAME_START_LABELS,
   renderFrameReportHtml,
 } from "./xctrace-frame-report";
+import "../lib/methods";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const worker = fileURLToPath(new URL("./run-webgpu-smoke-isolated-worker.ts", import.meta.url));
@@ -156,7 +157,7 @@ if (maximumLeafSize !== undefined
   && (!Number.isInteger(maximumLeafSize) || maximumLeafSize < 1)) {
   throw new Error("--maximum-leaf-size must be a positive integer");
 }
-const coarseBackend = flag("coarse-backend");
+const methodOverride = flag("method");
 const steps = flag("steps") === undefined
   ? losassoD4FirstFrame ? 1 : uniformMini64 ? 8 : undefined : Number(flag("steps"));
 const retainedFrames = Number(flag("frames") ?? (uniformMini64 ? 2 : 1));
@@ -426,6 +427,7 @@ const laneEnvironment = uniformMini64 ? {
   FLUID_ORACLE_STEPS: String(requestedSteps),
   FLUID_EXPECT_EXACT_STEPS: String(requestedSteps),
   FLUID_EXPECT_GRID: "64,64,64",
+  FLUID_METHOD: "uniform",
   FLUID_UNIFORM_TIME_STEP: "scene",
   FLUID_UNIFORM_DENSITY_POSTPROCESSING: "0",
 } : laneSteps === undefined
@@ -438,7 +440,6 @@ const profileEnvironment: Record<string, string> = {
   // `use_user_defined_labels_in_backend` is what makes GPU intervals
   // attributable to the repo's own pass names. Measured cost: none.
   FLUID_WEBGPU_DAWN_FEATURES: "skip_validation,use_user_defined_labels_in_backend",
-  FLUID_METHOD: uniformMini64 ? "uniform" : "octree",
   FLUID_QUALITY: "balanced",
   FLUID_PERFORMANCE_PROFILE: "1",
   FLUID_PERFORMANCE_TRACES: "0",
@@ -473,7 +474,6 @@ const profileEnvironment: Record<string, string> = {
   FLUID_POWER_GENERATION_AUDIT: "0",
   FLUID_STABILITY_ENVELOPE: "0",
   FLUID_CHECKPOINT_EVERY_S: "0",
-  FLUID_CPU_ORACLE: "0",
   FLUID_FIELD_STATS: "0",
   FLUID_SPARSE_STATS: "0",
   FLUID_RASTER_CHECKPOINTS: "0",
@@ -486,7 +486,8 @@ const profileEnvironment: Record<string, string> = {
   // comparative traces silently profile the lane's default band every time.
   ...(bandLevel === undefined ? {} : { FLUID_OCTREE_INTERFACE_BAND: String(bandLevel) }),
   ...(losassoD4FirstFrame ? {
-    FLUID_COARSE_BACKEND: "losasso",
+    // The Losasso method comes from the locked `symmetric-expansion` lane
+    // record; only the D4 shape knobs are restated here.
     // This is a timing capture of the shipping command graph. The separate
     // fine-factor-4 smoke owns raster/evidence correctness; enabling its
     // FLUID_LOSASSO_D4_CUTOVER gate here would reject the intentionally lean
@@ -495,7 +496,7 @@ const profileEnvironment: Record<string, string> = {
     FLUID_OCTREE_GLOBAL_FINE_FACTOR: "4",
     FLUID_GLOBAL_FINE_GENERATION_TRANSITION: "1",
   } : {}),
-  ...(coarseBackend === undefined ? {} : { FLUID_COARSE_BACKEND: coarseBackend }),
+  ...(methodOverride === undefined ? {} : { FLUID_METHOD: methodOverride }),
   ...(maximumLeafSize === undefined ? {}
     : { FLUID_MAXIMUM_LEAF_SIZE: String(maximumLeafSize) }),
   ...(fineFactor === undefined ? {} : {
@@ -534,7 +535,6 @@ const writeCaptureManifest = async (
     configuration: {
       lane: uniformMini64 ? "uniform-mini-64" : lane,
       scene: profileEnvironment.FLUID_SCENE, method: profileEnvironment.FLUID_METHOD,
-      backend: profileEnvironment.FLUID_COARSE_BACKEND,
       grid: profileEnvironment.FLUID_EXPECT_GRID,
       maximumLeafSize: profileEnvironment.FLUID_MAXIMUM_LEAF_SIZE,
       interfaceBand: profileEnvironment.FLUID_OCTREE_INTERFACE_BAND,

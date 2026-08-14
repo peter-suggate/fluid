@@ -1,66 +1,66 @@
 "use client";
 
 import { useEffect, useRef, useState , useMemo} from "react";
-import { webGPUPlatformResourcePlugin, type FluidCellTraceConfig, type PixelTraceConfig, type PixelTraceStatus } from "@/lib/webgpu-renderer";
-import { WebGPURenderWorkerClient, type FluidLabRendererHandle } from "@/lib/webgpu-render-worker-client";
+import type { FluidCellTraceConfig, PixelTraceConfig, PixelTraceStatus } from "../lib/core/webgpu-renderer";
+import { webGPUPlatformResourcePlugin } from "../lib/core/webgpu-platform-resource";
+import { WebGPURenderWorkerClient, type FluidLabRendererHandle } from "../lib/core/webgpu-render-worker-client";
 import {
   resolveSvoPixelTracePin, resolveSvoPixelTracePinnedFrame, svoPixelTracePinClick,
   type SvoPixelTrace, type SvoPixelTracePinRequest,
-} from "@/lib/svo-pixel-trace";
+} from "../lib/svo/svo-pixel-trace";
 import { PixelTraceHud } from "./PixelTraceHud";
 import { FluidCellTraceHud, type FluidCellTraceStatusHint } from "./FluidCellTraceHud";
-import { visualizationIdsForGroups } from "@/lib/visualization-catalog";
+import { visualizationIdsForGroups } from "../lib/core/visualization-catalog";
 import {
   fluidCellTraceScheduleFor,
   stepFluidCellTraceHit,
   type FluidCellTrace,
   type FluidCellTraceSchedule,
-} from "@/lib/fluid-cell-trace";
-import type { FineBandCellContext } from "@/lib/fine-band-cell-model";
+} from "../lib/core/fluid-cell-trace";
+import type { FineBandCellContext } from "../lib/core/fine-band-cell-model";
 import {
   blastRadiusLevelsToSingleCell,
   growBlastRadius,
   planBlastRadiusSchedule,
   summarizeBlastRadius,
-} from "@/lib/fluid-blast-radius";
-import { planOctreeSolveTail } from "@/lib/octree-solve-tail-policy";
-import { getMethod } from "@/lib/methods";
-import { canonicalScene, type CameraState } from "@/lib/model";
-import { add, cameraBasis, dot, length, orbit, pan, scale, sub, zoom } from "@/lib/math";
-import { boundingRadius, createBodyDescription, type RigidBodyState } from "@/lib/rigid-body";
-import type { RigidBodyDescription } from "@/lib/model";
-import { resourceInteractionGates } from "@/lib/resource-readiness";
-import { simulation } from "@/lib/simulation/controller";
-import { simulationRecording } from "@/lib/simulation/recording";
-import { cameraTanHalfFov, projectToViewport, viewportRayForPointer } from "@/lib/webgpu-camera";
+} from "../lib/core/fluid-blast-radius";
+import { getMethod } from "@/lib/core/method-registry";
+import { canonicalScene, type CameraState } from "../lib/core/model";
+import { add, cameraBasis, dot, length, orbit, pan, scale, sub, zoom } from "../lib/core/math";
+import { boundingRadius, createBodyDescription, type RigidBodyState } from "../lib/core/rigid-body";
+import type { RigidBodyDescription } from "../lib/core/model";
+import { resourceInteractionGates } from "../lib/core/resource-readiness";
+import { simulation } from "../lib/core/simulation/controller";
+import { simulationRecording } from "../lib/core/simulation/recording";
+import { cameraTanHalfFov, projectToViewport, viewportRayForPointer } from "../lib/core/webgpu-camera";
 import {
   closestPointOnAxis,
   GIZMO_AXIS_DIRECTIONS,
-} from "@/lib/editor-gizmo";
-import { CLICK_SLOP_PX, DEFAULT_EDITOR_TOOL, emptySpaceClickDeselects, pointerStayedWithinClickSlop, type EditorSelection } from "@/lib/editor-tools";
-import { hoverSceneAt, restOnHover, type EditorHover } from "@/lib/editor-hover";
-import { sceneryHighlightRange, sceneryIdFromSelection } from "@/lib/editor-scenery";
-import { sceneStoneNode } from "@/lib/stone-look-controls";
-import { sceneCanopyPads } from "@/lib/tree-canopy-controls";
-import { vesselNameFromSelection } from "@/lib/editor-vessel-rim";
-import { createInflowAt, INFLOW_SELECTION_ID } from "@/lib/editor-inflow";
+} from "../lib/core/editor-gizmo";
+import { CLICK_SLOP_PX, DEFAULT_EDITOR_TOOL, emptySpaceClickDeselects, pointerStayedWithinClickSlop, type EditorSelection } from "../lib/core/editor-tools";
+import { hoverSceneAt, restOnHover, type EditorHover } from "../lib/core/editor-hover";
+import { sceneryHighlightRange, sceneryIdFromSelection } from "../lib/core/editor-scenery";
+import { sceneStoneNode } from "../lib/core/stone-look-controls";
+import { sceneCanopyPads } from "../lib/core/tree-canopy-controls";
+import { vesselNameFromSelection } from "../lib/core/editor-vessel-rim";
+import { createInflowAt, INFLOW_SELECTION_ID } from "../lib/core/editor-inflow";
 import {
   addFluidBall,
   defaultFluidBallRadius_m,
   fluidBallDropAllowedAt,
   fluidDropVolume,
-} from "@/lib/editor-fluid-volume";
+} from "../lib/core/editor-fluid-volume";
 import {
   fillFractionForHeight,
   fillLevelHandlePosition,
   fluidBrushSample,
-} from "@/lib/editor-fluid";
+} from "../lib/core/editor-fluid";
 import {
   axisConstraintLabel,
   axisDragDirection,
   constrainedAxes,
   type AxisConstraint,
-} from "@/lib/editor-axis-constraint";
+} from "../lib/core/editor-axis-constraint";
 import {
   entityCentre,
   entityHandleAtPointer,
@@ -76,20 +76,20 @@ import {
   type EditorEntity,
   type EditorEntityContext,
   type EditorHandle,
-} from "@/lib/editor-entity";
-import { editorBodyPoses, editorEntityContext, entityAtRay, findEntity, surfacedEntities } from "@/lib/editor-entity-catalog";
+} from "../lib/core/editor-entity";
+import { editorBodyPoses, editorEntityContext, entityAtRay, findEntity, surfacedEntities } from "../lib/core/editor-entity-catalog";
 import {
   refinementRegionBox,
   refinementRegionCapacityRemaining,
   refinementRegionFromDrag,
   refinementRegionSelectionId,
   withRefinementRegion,
-} from "@/lib/editor-refinement-region";
+} from "../lib/core/editor-refinement-region";
 import {
   nextRefinementRegionId,
   OCTREE_REFINEMENT_REGION_CAPACITY,
   sceneRefinementRegions,
-} from "@/lib/octree-refinement-regions";
+} from "../lib/core/refinement-regions";
 import {
   applyTerrainFeatureDrag,
   terrainFeatureAt,
@@ -97,29 +97,29 @@ import {
   terrainFeatureIndex,
   terrainFeatureSelectionId,
   type TerrainHandleKind,
-} from "@/lib/editor-terrain";
+} from "../lib/core/editor-terrain";
 import { FluidFieldFlyout } from "./FluidFieldFlyout";
 import { StoneLookFlyout } from "./StoneLookFlyout";
 import { TreeCanopyFlyout } from "./TreeCanopyFlyout";
 import { VesselRimFlyout } from "./VesselRimFlyout";
 import { SelectionFlyout } from "./SelectionFlyout";
 import { ToplineToolbar } from "./ToplineToolbar";
-import { useSceneStore } from "@/lib/stores/scene-store";
-import { applySceneDraft, displaySceneSnapshot, useDisplayScene, useSceneDraftStore, type SceneDraftSubject } from "@/lib/stores/scene-draft-store";
-import { useMethodStore, resolvedMethodValues } from "@/lib/stores/method-store";
-import { drawnBodies, mergeDrawnPoses, useDiagnosticsStore } from "@/lib/stores/diagnostics-store";
-import type { GPURigidBodyPose } from "@/lib/webgpu-rigid-body";
-import { useUIStore } from "@/lib/stores/ui-store";
-import { useRuntimeStore } from "@/lib/stores/runtime-store";
-import { SmoothedFrameRate } from "@/lib/frame-rate-meter";
-import { getScenePreset } from "@/lib/scenes";
+import { useSceneStore } from "../lib/core/stores/scene-store";
+import { applySceneDraft, displaySceneSnapshot, useDisplayScene, useSceneDraftStore, type SceneDraftSubject } from "../lib/core/stores/scene-draft-store";
+import { useMethodStore, resolvedMethodValues } from "../lib/core/stores/method-store";
+import { drawnBodies, mergeDrawnPoses, useDiagnosticsStore } from "../lib/core/stores/diagnostics-store";
+import type { GPURigidBodyPose } from "../lib/core/webgpu-rigid-body";
+import { useUIStore } from "../lib/core/stores/ui-store";
+import { useRuntimeStore } from "../lib/core/stores/runtime-store";
+import { SmoothedFrameRate } from "../lib/core/frame-rate-meter";
+import { getScenePreset } from "../lib/core/scenes";
 import {
   DEFAULT_SVO_RENDER_DIAGNOSTICS,
   SVO_RENDER_STAGE_DEFINITIONS,
   svoRenderStageUsesLightSlot,
-} from "@/lib/svo-render-diagnostics";
-import { projectViewportFailure, viewportFailureIndicator } from "@/lib/viewport-failure-diagnostics";
-import { dawnReproductionForGPUFailure } from "@/lib/webgpu-failure-reproduction";
+} from "../lib/svo/svo-render-diagnostics";
+import { projectViewportFailure, viewportFailureIndicator } from "../lib/core/viewport-failure-diagnostics";
+import { dawnReproductionForGPUFailure } from "../lib/core/webgpu-failure-reproduction";
 import {
   acquireBrowserGPULease,
   GPU_MANUAL_START_EVENT,
@@ -129,7 +129,7 @@ import {
   safeBrowserGPUBringupViolations,
   safeBrowserSimulationEpochChanged,
   shutdownBrowserGPUSession,
-} from "@/lib/gpu-startup";
+} from "../lib/core/gpu-startup";
 
 type Vec3 = RigidBodyState["position_m"];
 
@@ -203,6 +203,10 @@ export function WebGPUViewport() {
   const sceneDraft = useSceneDraftStore((state) => state.draft);
   const gpuInfo = useDiagnosticsStore((state) => state.gpuInfo);
   const waterSurfacePresentation = useDiagnosticsStore((state) => state.waterSurfacePresentation);
+  // Subscribed rather than read from `getState()` because the failure banner is
+  // rendered, not encoded: a method switch has to redraw the alert its own
+  // publications justify, not leave the previous method's verdict on screen.
+  const methodId = useMethodStore((state) => state.methodId);
   // Two gates, not one. A rebuild replaces the image, so it may only take away
   // the things that read that image: a ray into the scene, the hover chip, a
   // drop onto a surface. The camera is ours and keeps moving, and so does every
@@ -293,11 +297,22 @@ export function WebGPUViewport() {
    */
   const [fluidCellFineBand, setFluidCellFineBand] = useState<FineBandCellContext | undefined>(undefined);
   /**
+   * Outer iterations the solver's own encoded tail scheduled.
+   *
+   * The HUD used to re-derive this by re-running the solver's tail planner over
+   * scene facts it had to invent — leaf size 32, a dam break, no inflow, no
+   * terrain, a fixed tolerance — which made the cone describe a solve nobody
+   * had encoded whenever any of those guesses was wrong. Nothing in the UI can
+   * know the encoded schedule; the solver publishes it.
+   */
+  const encodedOuterIterations = gpuInfo?.quadtreePressureIterationBudget;
+  /**
    * The encoded solve schedule for the traced cell's own domain.
    *
-   * Derived from the trace rather than from the live scene so a cell and the
-   * schedule shown beside it always describe the same grid, and recomputed only
-   * when the domain changes rather than per frame.
+   * The domain comes from the trace rather than from the live scene so a cell
+   * and the schedule shown beside it always describe the same grid. Recomputed
+   * when either the domain or the published schedule changes, never per frame:
+   * the cone flood is a whole-domain walk per stage.
    */
   const fluidCellSolve = useMemo<{
     readonly schedule: FluidCellTraceSchedule;
@@ -305,14 +320,14 @@ export function WebGPUViewport() {
   } | undefined>(() => {
     const dimensions = fluidCellTrace?.dimensions;
     if (!dimensions || dimensions.some((extent) => !Number.isInteger(extent) || extent < 1)) return undefined;
-    const tail = planOctreeSolveTail({
-      finestDimensions: dimensions, maximumLeafSize: 32,
-      initialCondition: "dam-break", hasInflow: false, hasTerrain: false,
-      movingRigidBodyCount: 0, closedTop: false, requestedRelativeTolerance: 1e-4,
-    });
+    // No published schedule means no cone: a method that encodes no outer
+    // iterations has no dependency stages to grow, and a placeholder count
+    // would draw a reach that nothing in the frame produced.
+    if (encodedOuterIterations === undefined
+      || !Number.isSafeInteger(encodedOuterIterations) || encodedOuterIterations < 1) return undefined;
     // Chebyshev degree two is the shipped smoother contract.
     const policy = {
-      outerIterations: tail.encodedOuterIterations,
+      outerIterations: encodedOuterIterations,
       levels: blastRadiusLevelsToSingleCell(dimensions),
       smoothsPerLevel: 2,
     };
@@ -329,7 +344,7 @@ export function WebGPUViewport() {
         stagesToGlobal: summary.stagesToGlobal, stageCount: summary.stageCount,
       }),
     };
-  }, [fluidCellTrace?.dimensions]);
+  }, [fluidCellTrace?.dimensions, encodedOuterIterations]);
   const fluidCellTraceSchedule = fluidCellSolve?.schedule;
   /**
    * The solve policy the draw config hands the cone decorator.
@@ -859,7 +874,7 @@ export function WebGPUViewport() {
     return () => observer.disconnect();
   }, []);
 
-  const failure = viewportFailureIndicator(gpuInfo, waterSurfacePresentation, scene);
+  const failure = viewportFailureIndicator(getMethod(methodId), gpuInfo, waterSurfacePresentation, scene);
   const failureProjection = failure?.location_m
     ? projectViewportFailure(failure.location_m, camera, viewportSize.width, viewportSize.height)
     : undefined;
@@ -901,7 +916,7 @@ export function WebGPUViewport() {
     }
     const diagnostics = useDiagnosticsStore.getState();
     const safeBringup = safeBrowserGPUBringupEnabled(window.location.search);
-    const canonicalSafeMethodValues = resolvedMethodValues({ methodId: "octree", quality: "balanced", overrides: {} });
+    const canonicalSafeMethodValues = resolvedMethodValues({ methodId: "losasso", quality: "balanced", overrides: {} });
     const startupMode = () => resolveGPUStartupMode(window.location.search, {
       presetId: useSceneStore.getState().presetId,
       methodId: useMethodStore.getState().methodId,
@@ -1087,7 +1102,6 @@ export function WebGPUViewport() {
         try {
           metrics = renderer.draw(
             simulation.time(), presentationScene, ui.camera, state.bodies, ui.selectedBodyId,
-            state.fluidRenderState ?? undefined, simulation.backend,
             { methodId: method.methodId, quality: method.quality, values: resolvedMethodValues(method), simulationEpoch: runtime.simulationEpoch },
             { axis: ui.gridOverlayAxis, position: ui.gridOverlaySlice, mode: ui.gridOverlayMode },
             scenePreset.background,
@@ -1785,7 +1799,7 @@ export function WebGPUViewport() {
       const grab = sliceGrabHit(ray.origin, ray.direction);
       if (grab) { pointerRef.current = { id: event.pointerId, action: "slice", ...grab, startClientY: event.clientY, startSlice: useUIStore.getState().gridOverlaySlice }; return; }
       // The GPU pick reads the published frame, so it answers to the same gate.
-      if (pickingInteractive && simulation.backend === "webgpu" && rendererRef.current) {
+      if (pickingInteractive && rendererRef.current) {
         const pointerId=event.pointerId,timeStamp=event.timeStamp,x=event.clientX,y=event.clientY;
         pointerRef.current={id:pointerId,x,y,downX:x,downY:y,action:"pick"};
         const rect=event.currentTarget.getBoundingClientRect();

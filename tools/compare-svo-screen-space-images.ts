@@ -2,7 +2,7 @@
 /** Compare packed rgba16float dry-scene captures from exact and LOD runs. */
 import assert from "node:assert/strict";
 import { readFileSync, writeFileSync } from "node:fs";
-import { compareSvoScreenSpaceImages } from "../lib/svo-screen-space-termination";
+import { compareSvoScreenSpaceImages } from "../lib/svo/svo-screen-space-termination";
 
 const [referencePath, candidatePath, widthRaw, heightRaw, outputPath] = process.argv.slice(2);
 const width = Number(widthRaw), height = Number(heightRaw);

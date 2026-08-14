@@ -5,8 +5,8 @@ import { pathToFileURL } from "node:url";
 import {
   decodeGeneratedOctreePowerCatalog,
   OCTREE_GENERATED_POWER_CATALOG_MANIFEST,
-} from "../lib/generated/octree-power-catalog";
-import { PassBroker } from "../lib/webgpu-pass-broker";
+} from "../lib/methods/power/generated/octree-power-catalog";
+import { PassBroker } from "../lib/core/webgpu-pass-broker";
 import {
   OCTREE_POWER_TOPOLOGY_ERROR,
   OCTREE_POWER_REGULAR_DESCRIPTOR,
@@ -14,11 +14,11 @@ import {
   octreePowerTopologyShader,
   planOctreePowerTopology,
   powerCellSpacingIsotropic,
-} from "../lib/webgpu-octree-power-topology";
+} from "../lib/methods/power/webgpu-octree-power-topology";
 import { createColdPowerRowPublication } from "./webgpu-octree-power-row-delta-fixture";
 
 function catalogViews() {
-  const bytes = readFileSync(new URL("../lib/generated/octree-power-catalog.bin", import.meta.url));
+  const bytes = readFileSync(new URL("../lib/methods/power/generated/octree-power-catalog.bin", import.meta.url));
   return decodeGeneratedOctreePowerCatalog(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
 }
 
@@ -133,7 +133,7 @@ test("power topology WGSL resolves affected rows and compacts exact publication 
 });
 
 test("power topology resolve dispatch is sourced from the exact row delta", () => {
-  const source = readFileSync(new URL("../lib/webgpu-octree-power-topology.ts", import.meta.url), "utf8");
+  const source = readFileSync(new URL("../lib/methods/power/webgpu-octree-power-topology.ts", import.meta.url), "utf8");
   assert.match(source,
     /copyBufferToBuffer\(rowDelta\.rows,\s*\(rowDelta\.controlOffsetWords \+ 12\) \* 4,\s*this\.workDispatch,\s*0,\s*12\)/,
     "row-delta control words 12-14 are the producer-owned affected-row dispatch");

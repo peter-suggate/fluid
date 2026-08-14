@@ -1,9 +1,13 @@
 "use client";
 
+// A second composition root: the library is handed to `AppShell` as children
+// from a server component, so it is its own client entry and cannot rely on
+// the shell's module having been evaluated first. See `AppShell`.
+import "../lib/methods";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { simulation } from "@/lib/simulation/controller";
-import { currentScenePageUrl } from "@/lib/url-state";
+import { simulation } from "../lib/core/simulation/controller";
+import { currentScenePageUrl } from "../lib/core/url-state";
 import {
   allSceneCards,
   matchSceneCards,
@@ -12,15 +16,15 @@ import {
   sceneSections,
   starterSceneCards,
   type SceneSection,
-} from "@/lib/scene-cards";
-import type { SceneCard } from "@/lib/scene-definition";
-import { sceneResume } from "@/lib/scene-autosave";
-import { browserSceneLibraryStorage, readSceneLibrary, type SceneLibraryEntry } from "@/lib/scene-library";
-import { readSceneRecents, recentSceneCards, recordSceneOpen, type RecentSceneOpen } from "@/lib/scene-recents";
-import { planSceneRuntime } from "@/lib/scene-runtime";
-import { sceneLatticeDimensions } from "@/lib/scene-lattice";
-import { useShellStore } from "@/lib/stores/shell-store";
-import { useSceneStore } from "@/lib/stores/scene-store";
+} from "../lib/core/scene-cards";
+import type { SceneCard } from "../lib/core/scene-definition";
+import { sceneResume } from "../lib/core/scene-autosave";
+import { browserSceneLibraryStorage, readSceneLibrary, type SceneLibraryEntry } from "../lib/core/scene-library";
+import { readSceneRecents, recentSceneCards, recordSceneOpen, type RecentSceneOpen } from "../lib/core/scene-recents";
+import { planSceneRuntime } from "../lib/core/scene-runtime";
+import { sceneLatticeDimensions } from "../lib/core/scene-lattice";
+import { useShellStore } from "../lib/core/stores/shell-store";
+import { useSceneStore } from "../lib/core/stores/scene-store";
 import { SceneIsoGlyph } from "./SceneIsoGlyph";
 import { ThemeSwitch } from "./ThemeSwitch";
 

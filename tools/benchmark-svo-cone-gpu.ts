@@ -14,7 +14,7 @@
 import assert from "node:assert/strict";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { GPUPerformanceTraceRecorder } from "../lib/performance-trace";
+import { GPUPerformanceTraceRecorder } from "../lib/core/performance-trace";
 import {
   SVO_NODE_MIP_LAYOUT,
   createSvoNodeMipPageWithApron,
@@ -22,10 +22,10 @@ import {
   type SvoNodeMipCoordinate,
   type SvoNodeMipRgba8,
   reduceSvoNodeMipChildren,
-} from "../lib/svo-node-mip-pyramid";
-import { svoNodeMipSamplingWGSL } from "../lib/svo-node-mip-sampling";
-import { WebGpuSvoNodeMipPyramid } from "../lib/webgpu-svo-node-mip-pyramid";
-import { createSvoDryConeMarcherWGSL, type SvoDryConeMarcherOptions } from "../lib/webgpu-svo-dry-scene";
+} from "../lib/svo/svo-node-mip-pyramid";
+import { svoNodeMipSamplingWGSL } from "../lib/svo/svo-node-mip-sampling";
+import { WebGpuSvoNodeMipPyramid } from "../lib/svo/webgpu-svo-node-mip-pyramid";
+import { createSvoDryConeMarcherWGSL, type SvoDryConeMarcherOptions } from "../lib/svo/webgpu-svo-dry-scene";
 
 const width = positiveInteger(process.env.FLUID_SVO_CONE_WIDTH ?? "256", "width");
 const height = positiveInteger(process.env.FLUID_SVO_CONE_HEIGHT ?? "256", "height");

@@ -30,7 +30,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
-import { decodeRgbPng, encodeRgbPng } from "../lib/png-codec";
+import { decodeRgbPng, encodeRgbPng } from "../lib/core/png-codec";
 
 const platePath = process.env.FLUID_HERO_PLATE ?? "output/imagegen/garden-pond-hose-fill-simplified.png";
 const outDirectory = process.env.FLUID_HERO_PLATE_CROPS ?? "artifacts/plate-crops";

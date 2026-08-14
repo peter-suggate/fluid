@@ -1,15 +1,15 @@
 "use client";
 
 import { useEffect, useRef } from "react";
-import { simulation } from "@/lib/simulation/controller";
-import { useSceneStore } from "@/lib/stores/scene-store";
+import { simulation } from "../lib/core/simulation/controller";
+import { useSceneStore } from "../lib/core/stores/scene-store";
 import {
   sceneStoneNode,
   stoneDials,
   withStoneDials,
   withStoneSeedRerolled,
   type StoneDials,
-} from "@/lib/stone-look-controls";
+} from "../lib/core/stone-look-controls";
 
 /**
  * The stone sculptor, riding the selected boulder's own corner — the same

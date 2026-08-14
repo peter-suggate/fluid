@@ -10,7 +10,7 @@ import {
   OCTREE_POWER_ROW_TEMPLATE_HEADER_WORDS,
   OCTREE_POWER_ROW_TEMPLATE_VERSION,
   type OctreePowerTopologyConfiguration,
-} from "../lib/octree-power-catalog";
+} from "../lib/methods/power/octree-power-catalog";
 import {
   OCTREE_POWER_NEIGHBOR_DIRECTIONS,
   OCTREE_POWER_SAME_OR_COARSER_FLAG,
@@ -20,15 +20,15 @@ import {
   enumerateCanonicalSameOrFinerPowerDescriptors,
   sitesForSameOrCoarserPowerDescriptor,
   sitesForSameOrFinerPowerDescriptor,
-} from "../lib/octree-power-descriptor";
+} from "../lib/methods/power/octree-power-descriptor";
 import {
   OCTREE_CUBE_TRANSFORMS,
   composeCubeTransforms,
   transformPowerVector,
-} from "../lib/octree-power-topology";
+} from "../lib/methods/power/octree-power-topology";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-const outputDirectory = join(root, "lib", "generated");
+const outputDirectory = join(root, "lib", "methods", "power", "generated");
 const binaryPath = join(outputDirectory, "octree-power-catalog.bin");
 const modulePath = join(outputDirectory, "octree-power-catalog.ts");
 const MAGIC = 0x504f_5743;
@@ -279,8 +279,9 @@ binary.set(new Uint8Array(catalog.reconstructionData.buffer), reconstructionData
 
 const hash = createHash("sha256");
 for (const relative of [
-  "lib/octree-power-geometry.ts", "lib/octree-power-topology.ts", "lib/octree-power-descriptor.ts",
-  "lib/octree-power-catalog.ts", "tools/generate-octree-power-catalog.ts",
+  "lib/methods/power/octree-power-geometry.ts", "lib/methods/power/octree-power-topology.ts",
+  "lib/methods/power/octree-power-descriptor.ts", "lib/methods/power/octree-power-catalog.ts",
+  "tools/generate-octree-power-catalog.ts",
 ]) hash.update(readFileSync(join(root, relative)));
 const generatorHash = hash.digest("hex");
 const binarySha256 = createHash("sha256").update(binary).digest("hex");

@@ -40,24 +40,27 @@
  *
  * Exits 0 only when every check passes; the report prints either way.
  */
+// These lanes render without a solver, but they construct the renderer, and
+// a renderer resolves a method by id on any path that reaches a scene.
+import "../lib/methods";
 import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import type { EnvironmentId } from "../lib/environments";
+import type { EnvironmentId } from "../lib/core/environments";
 import {
   createHeroGardenHoseStressScene,
   HERO_GARDEN_STRESS_MAXIMUM_MULTIPLIER,
-} from "../lib/hero-garden-stress-scene";
-import { cloneScene, defaultCamera, defaultScene, type CameraState } from "../lib/model";
-import { getScenePreset } from "../lib/scenes";
-import { encodeSvoBrickOccupancy } from "../lib/svo-brick-occupancy";
-import { SVO_PRIMITIVE_RECORD_STRIDE_BYTES } from "../lib/svo-primitive-abi";
-import { SVO_PRIMITIVE_CANDIDATE_MAXIMUM_LEAVES } from "../lib/svo-primitive-candidates";
-import { DEFAULT_SVO_RENDER_TUNING } from "../lib/svo-render-tuning";
-import { buildSvoSceneGlass, SVO_SCENE_GLASS_MAXIMUM_PANES } from "../lib/svo-scene-glass";
-import { WebGPULiveSvoScene } from "../lib/webgpu-live-svo-scene";
+} from "../lib/core/hero-garden-stress-scene";
+import { cloneScene, defaultCamera, defaultScene, type CameraState } from "../lib/core/model";
+import { getScenePreset } from "../lib/core/scenes";
+import { encodeSvoBrickOccupancy } from "../lib/svo/svo-brick-occupancy";
+import { SVO_PRIMITIVE_RECORD_STRIDE_BYTES } from "../lib/svo/svo-primitive-abi";
+import { SVO_PRIMITIVE_CANDIDATE_MAXIMUM_LEAVES } from "../lib/svo/svo-primitive-candidates";
+import { DEFAULT_SVO_RENDER_TUNING } from "../lib/svo/svo-render-tuning";
+import { buildSvoSceneGlass, SVO_SCENE_GLASS_MAXIMUM_PANES } from "../lib/svo/svo-scene-glass";
+import { WebGPULiveSvoScene } from "../lib/svo/webgpu-live-svo-scene";
 import {
   assertSvoBrickRasterNodeAddressable,
   createSvoBrickRasterCullWGSL,
@@ -72,18 +75,18 @@ import {
   SVO_BRICK_RASTER_CONTRACT,
   SVO_RASTER_COVERAGE_OVERFLOW_BUDGET,
   SVO_RASTER_COVERAGE_OVERFLOW_CONTRACT,
-} from "../lib/webgpu-svo-brick-raster";
+} from "../lib/svo/webgpu-svo-brick-raster";
 import {
   canConsumeSparseVoxelPrimitiveCandidates,
   SparseVoxelDrySceneRenderer,
   sparseVoxelDrySceneContractFailure,
-} from "../lib/webgpu-svo-dry-scene";
-import { SVO_GBUFFER_RENDER_TARGET_CONTRACT } from "../lib/webgpu-svo-gbuffer-targets";
+} from "../lib/svo/webgpu-svo-dry-scene";
+import { SVO_GBUFFER_RENDER_TARGET_CONTRACT } from "../lib/svo/webgpu-svo-gbuffer-targets";
 import {
   assertSvoRigidRasterBodyCount,
   packSvoRigidRasterSplitIdentity,
   SVO_RIGID_RASTER_CONTRACT,
-} from "../lib/webgpu-svo-rigid-raster";
+} from "../lib/svo/webgpu-svo-rigid-raster";
 import {
   buildSvoDrySceneAssembly,
   createDawnRenderDevice,

@@ -8,12 +8,12 @@ import {
   packFineLevelSetBrickKey,
   planFineLevelSetBricks,
   unpackFineLevelSetBrickKey,
-} from "../lib/octree-fine-levelset-bricks";
+} from "../lib/methods/octree-shared/octree-fine-levelset-bricks";
 import {
   packFineLevelSetSample,
   unpackFineLevelSetPackedFlags,
   unpackFineLevelSetPackedPhi,
-} from "../lib/fine-levelset-packed-sample";
+} from "../lib/core/fine-levelset-packed-sample";
 
 function plan(fineFactor: 4 | 8 = 4) {
   return planFineLevelSetBricks({

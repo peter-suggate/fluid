@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import "../lib/methods";
 
 type TerminalCounters = Readonly<Record<string, number | undefined>>;
 interface BenchmarkSummary {

@@ -1,7 +1,7 @@
 import {
   OCTREE_POWER_ROW_DELTA_VALID,
   type OctreePowerRowDeltaSource,
-} from "../lib/webgpu-octree-power-descriptor";
+} from "../lib/methods/power/webgpu-octree-power-descriptor";
 
 export interface ColdPowerRowPublication {
   readonly rowCount: GPUBuffer;

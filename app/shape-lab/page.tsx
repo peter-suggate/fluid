@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { ShapeLab } from "@/components/ShapeLab";
+import { ShapeLab } from "../../shape-lab/ShapeLab";
 
 export const metadata: Metadata = {
   title: "Shape lab — Fluid Lab",

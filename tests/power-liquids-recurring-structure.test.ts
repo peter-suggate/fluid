@@ -3,57 +3,57 @@ import test from "node:test";
 import {
   WebGPUFineLevelSetSummaries,
   fineLevelSetSummaryWGSL,
-} from "../lib/webgpu-octree-fine-levelset-summary";
+} from "../lib/methods/octree-shared/webgpu-octree-fine-levelset-summary";
 import {
   WebGPUFineLevelSetTransport,
   structuredFineLevelSetTransportWGSL,
-} from "../lib/webgpu-octree-fine-levelset-transport";
+} from "../lib/methods/octree-shared/webgpu-octree-fine-levelset-transport";
 import {
   WebGPUFineLevelSetVolumeCorrection,
   fineLevelSetVolumeCorrectionWGSL,
-} from "../lib/webgpu-octree-fine-levelset-volume";
+} from "../lib/methods/octree-shared/webgpu-octree-fine-levelset-volume";
 import {
   WebGPUFineToCoarseLevelSet,
   fineToCoarseLevelSetWGSL,
-} from "../lib/webgpu-octree-fine-to-coarse-levelset";
+} from "../lib/methods/octree-shared/webgpu-octree-fine-to-coarse-levelset";
 import {
   WebGPUOctreeSimulationOwnerPages,
   octreeDeterministicOwnerPageLifecycleShader,
-} from "../lib/webgpu-octree-owner-pages";
+} from "../lib/methods/octree-shared/webgpu-octree-owner-pages";
 import {
   fineSeedCandidateCommitShader,
   fineSeedCandidateResidencyShader,
   sparseFineSeedCandidateResidencyShader,
-} from "../lib/webgpu-fluid-brick-residency";
+} from "../lib/core/webgpu-fluid-brick-residency";
 import {
   WebGPUOctreePowerCoarseLevelSet,
   octreePowerCoarseLevelSetShader,
-} from "../lib/webgpu-octree-power-coarse-levelset";
+} from "../lib/methods/power/webgpu-octree-power-coarse-levelset";
 import {
   WebGPUOctreePowerDescriptor,
   octreePowerDescriptorShader,
-} from "../lib/webgpu-octree-power-descriptor";
+} from "../lib/methods/power/webgpu-octree-power-descriptor";
 import {
   WebGPUDirectStructuredVelocityAuthority,
   directStructuredVelocityPublicationWGSL,
-} from "../lib/webgpu-octree-structured-velocity-gpu";
+} from "../lib/methods/power/webgpu-octree-structured-velocity-gpu";
 import {
   WebGPUStructuredBoundaryCoefficients,
   structuredBoundaryCoefficientWGSL,
-} from "../lib/webgpu-octree-structured-boundary";
+} from "../lib/methods/power/webgpu-octree-structured-boundary";
 import {
   WebGPUStructuredVelocityDynamics,
   structuredVelocityDynamicsWGSL,
-} from "../lib/webgpu-octree-structured-dynamics";
+} from "../lib/methods/power/webgpu-octree-structured-dynamics";
 import {
   WebGPUOctreeSPGridVCycle,
   octreeSPGridVCycleShader,
-} from "../lib/webgpu-octree-spgrid-vcycle";
+} from "../lib/methods/power/webgpu-octree-spgrid-vcycle";
 import {
   WebGPUOctreePowerTopology,
   octreePowerTopologyShader,
-} from "../lib/webgpu-octree-power-topology";
-import { WebGPUOctreeProjection } from "../lib/webgpu-octree";
+} from "../lib/methods/power/webgpu-octree-power-topology";
+import { WebGPUOctreeProjection } from "../lib/methods/octree-shared/webgpu-octree";
 
 interface WgslGraph {
   readonly computeEntries: ReadonlySet<string>;

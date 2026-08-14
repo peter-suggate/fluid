@@ -29,40 +29,43 @@
  * This module has no top-level side effects and reads no environment variables;
  * every caller passes what it wants explicitly.
  */
+// These lanes render without a solver, but they construct the renderer, and
+// a renderer resolves a method by id on any path that reaches a scene.
+import "../lib/methods";
 import assert from "node:assert/strict";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { environmentIndex, type EnvironmentId } from "../lib/environments";
-import { cameraPosition } from "../lib/math";
-import { sceneUsesFlatVoxelNormals, type CameraState, type SceneDescription } from "../lib/model";
-import { cameraTanHalfFov } from "../lib/webgpu-camera";
-import { boundingRadius, initializeRigidBodies } from "../lib/rigid-body";
+import { environmentIndex, type EnvironmentId } from "../lib/core/environments";
+import { cameraPosition } from "../lib/core/math";
+import { sceneUsesFlatVoxelNormals, type CameraState, type SceneDescription } from "../lib/core/model";
+import { cameraTanHalfFov } from "../lib/core/webgpu-camera";
+import { boundingRadius, initializeRigidBodies } from "../lib/core/rigid-body";
 import {
   buildDefaultSvoMaterialRecords,
   packSvoMaterialTable,
   svoMaterialFromEnvironmentProxyMaterial,
   svoMaterialFunctionIdForEnvironmentProxy,
-} from "../lib/svo-material-abi";
-import { svoPrimitiveCandidateBounds } from "../lib/svo-primitive-candidates";
-import { buildSvoSceneGlass } from "../lib/svo-scene-glass";
-import { buildSvoScenePrimitives, type SvoScenePrimitiveBuild } from "../lib/svo-scene-primitives";
-import { buildSvoSceneThickGlass } from "../lib/svo-scene-thick-glass";
-import { buildSvoTerrainMaterial, sceneTerrainSurfaceModel } from "../lib/svo-terrain-material";
+} from "../lib/svo/svo-material-abi";
+import { svoPrimitiveCandidateBounds } from "../lib/svo/svo-primitive-candidates";
+import { buildSvoSceneGlass } from "../lib/svo/svo-scene-glass";
+import { buildSvoScenePrimitives, type SvoScenePrimitiveBuild } from "../lib/svo/svo-scene-primitives";
+import { buildSvoSceneThickGlass } from "../lib/svo/svo-scene-thick-glass";
+import { buildSvoTerrainMaterial, sceneTerrainSurfaceModel } from "../lib/svo/svo-terrain-material";
 import {
   MAX_TERRAIN_FEATURES,
   sceneHasTerrain,
   TERRAIN_DEFAULT_FLAT,
   TERRAIN_UNION_EXPONENT,
   terrainSampleGrid,
-} from "../lib/terrain";
-import { requiredFluidDeviceLimits } from "../lib/webgpu-device-limits";
-import { SVO_CAMERA_CHANGING_FRAME } from "../lib/webgpu-renderer";
+} from "../lib/core/terrain";
+import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
+import { SVO_CAMERA_CHANGING_FRAME } from "../lib/core/webgpu-renderer";
 import {
   buildSparseVoxelDrySceneLightingMirrors,
   packSvoDrySceneTerrainHeightfield,
   type SparseVoxelDrySceneData,
-} from "../lib/webgpu-svo-dry-scene";
-import type { SparseVoxelSceneRenderSource } from "../lib/webgpu-voxel-debug";
+} from "../lib/svo/webgpu-svo-dry-scene";
+import type { SparseVoxelSceneRenderSource } from "../lib/core/webgpu-voxel-debug";
 
 /** Floats in the 416-byte view uniform block (`FluidLabRenderer`, webgpu-renderer.ts). */
 export const SVO_VIEW_UNIFORM_FLOATS = 104;

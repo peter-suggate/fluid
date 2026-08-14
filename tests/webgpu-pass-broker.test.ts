@@ -12,7 +12,7 @@ import {
   passBrokerLabelIsolationRequested,
   resetPassBrokerBoundaryAuditTotals,
   xctraceSafeComputeLabel,
-} from "../lib/webgpu-pass-broker";
+} from "../lib/core/webgpu-pass-broker";
 
 function fakeEncoder(events: string[]) {
   let passIndex = 0;
@@ -349,26 +349,26 @@ test("raw command encoder access is an explicit pass boundary", () => {
 });
 
 test("PassBroker cutover has no raw-encoder adapter or proxy facade", () => {
-  const brokerSource = readFileSync(new URL("../lib/webgpu-pass-broker.ts", import.meta.url), "utf8");
-  const ownerPageSource = readFileSync(new URL("../lib/webgpu-octree-owner-pages.ts", import.meta.url), "utf8");
+  const brokerSource = readFileSync(new URL("../lib/core/webgpu-pass-broker.ts", import.meta.url), "utf8");
+  const ownerPageSource = readFileSync(new URL("../lib/methods/octree-shared/webgpu-octree-owner-pages.ts", import.meta.url), "utf8");
   const powerDescriptorSource = readFileSync(
-    new URL("../lib/webgpu-octree-power-descriptor.ts", import.meta.url), "utf8");
+    new URL("../lib/methods/power/webgpu-octree-power-descriptor.ts", import.meta.url), "utf8");
   const powerTopologySource = readFileSync(
-    new URL("../lib/webgpu-octree-power-topology.ts", import.meta.url), "utf8");
+    new URL("../lib/methods/power/webgpu-octree-power-topology.ts", import.meta.url), "utf8");
   const structuredVelocitySource = readFileSync(
-    new URL("../lib/webgpu-octree-structured-velocity-gpu.ts", import.meta.url), "utf8");
+    new URL("../lib/methods/power/webgpu-octree-structured-velocity-gpu.ts", import.meta.url), "utf8");
   const structuredBoundarySource = readFileSync(
-    new URL("../lib/webgpu-octree-structured-boundary.ts", import.meta.url), "utf8");
+    new URL("../lib/methods/power/webgpu-octree-structured-boundary.ts", import.meta.url), "utf8");
   const structuredDynamicsSource = readFileSync(
-    new URL("../lib/webgpu-octree-structured-dynamics.ts", import.meta.url), "utf8");
+    new URL("../lib/methods/power/webgpu-octree-structured-dynamics.ts", import.meta.url), "utf8");
   const fineTopologySource = readFileSync(
-    new URL("../lib/webgpu-octree-fine-levelset-topology.ts", import.meta.url), "utf8");
+    new URL("../lib/methods/octree-shared/webgpu-octree-fine-levelset-topology.ts", import.meta.url), "utf8");
   const fineTransportSource = readFileSync(
-    new URL("../lib/webgpu-octree-fine-levelset-transport.ts", import.meta.url), "utf8");
+    new URL("../lib/methods/octree-shared/webgpu-octree-fine-levelset-transport.ts", import.meta.url), "utf8");
   const spgridSource = readFileSync(
-    new URL("../lib/webgpu-octree-spgrid-vcycle.ts", import.meta.url), "utf8");
-  const octreeSource = readFileSync(new URL("../lib/webgpu-octree.ts", import.meta.url), "utf8");
-  const advanceSource = readFileSync(new URL("../lib/webgpu-octree-eulerian.ts", import.meta.url), "utf8");
+    new URL("../lib/methods/power/webgpu-octree-spgrid-vcycle.ts", import.meta.url), "utf8");
+  const octreeSource = readFileSync(new URL("../lib/methods/octree-shared/webgpu-octree.ts", import.meta.url), "utf8");
+  const advanceSource = readFileSync(new URL("../lib/methods/octree-shared/webgpu-octree-eulerian.ts", import.meta.url), "utf8");
 
   for (const legacyName of ["PassBrokerSource", "withPassBroker", "commandEncoderFacade", "PASS_BROKER_OWNER",
     "legacy encoder boundary"]) {

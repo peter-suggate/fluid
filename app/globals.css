@@ -484,7 +484,6 @@ input[type="range"]::-webkit-slider-thumb { appearance: none; width: 9px; height
 .performance-dials-status > span { color: var(--accent-strong); font: 600 12px/1 var(--mono); letter-spacing: .04em; white-space: nowrap; }
 .performance-dials-status > button { padding: 0; border: 0; background: none; color: var(--amber-ink); font: 600 12px/1 var(--mono); letter-spacing: .04em; cursor: pointer; }
 .performance-dials-status > button:hover { color: var(--ink); }
-.performance-dials-inert { margin: 0 0 16px; max-width: 640px; color: var(--label); font: 12px/1.55 var(--sans); }
 .performance-dial-grid { display: grid; gap: 16px 24px; }
 @media (min-width: 900px) { .performance-dial-grid { grid-template-columns: repeat(2,minmax(0,1fr)); } }
 .performance-dial { min-width: 0; display: block; }

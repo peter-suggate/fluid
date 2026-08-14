@@ -16,12 +16,12 @@
 import assert from "node:assert/strict";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { requiredFluidDeviceLimits } from "../lib/webgpu-device-limits";
+import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import { globalFineSurfaceClassificationShader } from
-  "../lib/webgpu-water-global-fine-classify";
+  "../lib/core/webgpu-water-global-fine-classify";
 import { globalFineClassifiedEmitShader, globalFineClassifiedIndirectScanShader } from
-  "../lib/webgpu-water-global-fine-tetra";
-import { rasterMeshSymmetryMetrics } from "./raster-mesh-symmetry";
+  "../lib/core/webgpu-water-global-fine-tetra";
+import { rasterMeshSymmetryMetrics } from "../lib/harness/raster-mesh-symmetry";
 
 type Point = readonly [number, number, number];
 interface Leaf { readonly origin: Point; readonly span: 1 | 2 | 4 }

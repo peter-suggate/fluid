@@ -11,7 +11,7 @@ import {
   planFineLevelSetGPUTransportPasses,
   structuredFineLevelSetTransportWGSL,
   WebGPUFineLevelSetTransport,
-} from "../lib/webgpu-octree-fine-levelset-transport";
+} from "../lib/methods/octree-shared/webgpu-octree-fine-levelset-transport";
 
 function compact(source: string) { return source.replace(/\s+/g, ""); }
 
@@ -50,7 +50,7 @@ test("fine transport consumes the shared positive-air tag and vector authority",
 test("fine transport applies the authored nozzle source outside the existing interface band", () => {
   const shader = compact(structuredFineLevelSetTransportWGSL);
   const encode = compact(WebGPUFineLevelSetTransport.prototype.encode.toString());
-  const octree = compact(readFileSync(new URL("../lib/webgpu-octree.ts", import.meta.url), "utf8"));
+  const octree = compact(readFileSync(new URL("../lib/methods/octree-shared/webgpu-octree.ts", import.meta.url), "utf8"));
   assert.match(encode,
     /inflowPositionRadius.*inflow\.outletCenter_m\.x.*inflowVelocityAperture|f\.set\(\[inflow\.outletCenter_m\.x/s,
     "the recurring uniform must carry the exact per-step outlet state");
@@ -66,7 +66,7 @@ test("fine transport applies the authored nozzle source outside the existing int
   assert.doesNotMatch(shader, /effectiveRadius|sqrt\(inflowStrength\(\)\)/,
     "source strength must never deform the authored circular nozzle radius");
   assert.match(octree,
-    /transport\.encode\(transportBroker,\{timestep:dt_s,\.\.\.\(inflow\?\{inflow\}:\{\}\)/,
+    /this\.lane\.encodeFineTransport\(transportBroker,transport,\{timestep:dt_s,\.\.\.\(inflow\?\{inflow\}:\{\}\)/,
     "octree surface publication must forward the authored source to direct fine transport");
 });
 
@@ -175,7 +175,7 @@ test("WGSL fails closed unless generation, epoch, and accepted A\/B bank agree",
 
 test("quiescent fine pages sleep only behind exact conservative wake predicates", () => {
   const shader = compact(structuredFineLevelSetTransportWGSL);
-  const octree = compact(readFileSync(new URL("../lib/webgpu-octree.ts", import.meta.url), "utf8"));
+  const octree = compact(readFileSync(new URL("../lib/methods/octree-shared/webgpu-octree.ts", import.meta.url), "utf8"));
   assert.match(shader,
     /activitySnapshot\[work\]!=key.*metadata\[id\*4u\+3u\]&PAGE_DIRTY.*activitySnapshot\[work\]=key/s,
     "logical page replacement or an exact fine repair must wake transport");

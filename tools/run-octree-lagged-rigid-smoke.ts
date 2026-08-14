@@ -1,11 +1,15 @@
 import assert from "node:assert/strict";
 import { pathToFileURL } from "node:url";
-import { octreeMethod } from "../lib/methods/octree";
-import { createPaperScenario } from "../lib/paper-scenarios";
-import { initializeRigidBodies } from "../lib/rigid-body";
-import { GPU_RIGID_RENDER_BYTES, GPU_RIGID_RENDER_FLOATS } from "../lib/webgpu-rigid-body";
-import { fluidExecutionDeviceFeatures } from "../lib/gpu-startup";
-import { requiredFluidDeviceLimits } from "../lib/webgpu-device-limits";
+// Composition root for this entry point: importing the method catalog installs
+// the simulation methods and the octree coarse-dynamics lanes, without which
+// constructing a solver throws rather than silently running the wrong backend.
+import "../lib/methods";
+import { losassoMethod } from "../lib/methods/losasso/method";
+import { createPaperScenario } from "../lib/core/paper-scenarios";
+import { initializeRigidBodies } from "../lib/core/rigid-body";
+import { GPU_RIGID_RENDER_BYTES, GPU_RIGID_RENDER_FLOATS } from "../lib/core/webgpu-rigid-body";
+import { fluidExecutionDeviceFeatures } from "../lib/core/gpu-startup";
+import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 
 const modulePath = process.env.WEBGPU_NODE_MODULE;
 if (!modulePath) throw new Error("Set WEBGPU_NODE_MODULE to the installed webgpu package index.js");
@@ -45,8 +49,8 @@ const initialCenters = bodies.map((body) => ({ ...body.position_m }));
 // substep flips a topology candidate that only exists once that publication has
 // fenced. Construct through the asynchronous path the product uses so no step
 // is encoded against a half-published epoch.
-const solver = await octreeMethod.createSolverAsync!(
-  device, scene, "balanced", octreeMethod.presetFor("balanced"), undefined, () => {},
+const solver = await losassoMethod.createSolverAsync!(
+  device, scene, "balanced", losassoMethod.presetFor("balanced"), undefined, () => {},
 );
 assert.equal(solver.initialSparseAuthorityReady, true,
   "octree construction must fence the complete t=0 sparse authority");

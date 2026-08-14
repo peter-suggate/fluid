@@ -2,16 +2,16 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
-import { planFineLevelSetBricks } from "../lib/octree-fine-levelset-bricks";
-import { WebGPUFineLevelSetBricks } from "../lib/webgpu-octree-fine-levelset-bricks";
-import { PassBroker } from "../lib/webgpu-pass-broker";
+import { planFineLevelSetBricks } from "../lib/methods/octree-shared/octree-fine-levelset-bricks";
+import { WebGPUFineLevelSetBricks } from "../lib/methods/octree-shared/webgpu-octree-fine-levelset-bricks";
+import { PassBroker } from "../lib/core/webgpu-pass-broker";
 import { planGlobalFineNarrowBandBrickCapacity, resolveGlobalFineBrickCapacity } from
-  "../lib/webgpu-octree";
-import { WebGPUFineLevelSetRedistance } from "../lib/webgpu-octree-fine-levelset-redistance";
-import { planFineLevelSetSummaryLeafLookup } from "../lib/webgpu-octree-fine-levelset-summary";
+  "../lib/methods/octree-shared/octree-fine-band-capacity";
+import { WebGPUFineLevelSetRedistance } from "../lib/methods/octree-shared/webgpu-octree-fine-levelset-redistance";
+import { planFineLevelSetSummaryLeafLookup } from "../lib/methods/octree-shared/webgpu-octree-fine-levelset-summary";
 import { WebGPUFineLevelSetLeafSeeds, WebGPUFineLevelSetTopology,
   fineLevelSetLeafSeedWGSL, makeFineLevelSetTopologyWGSL, planFineLevelSetLeafBrickBounds,
-  unpackFineLevelSetGPUTopologyControl } from "../lib/webgpu-octree-fine-levelset-topology";
+  unpackFineLevelSetGPUTopologyControl } from "../lib/methods/octree-shared/webgpu-octree-fine-levelset-topology";
 
 test("factor-8 B4 topology pre-dilates and clips while redistance remains fixed-resident", () => {
   const plan = planFineLevelSetBricks({ domainOrigin: [0, 0, 0], finestCellDimensions: [60, 45, 40],
@@ -58,7 +58,7 @@ test("factor-8 B4 topology pre-dilates and clips while redistance remains fixed-
     /redistanceValid=arrayLength\(&redistanceControl\)>=4u&&redistanceControl\[0\]==0u&&\(redistanceControl\[2\]>0u\|\|pageDelta\[2\]==0u\)&&redistanceControl\[3\]!=0u/,
     "factor-8 topology remains provisional until redistance commits, while an exact empty dirty set needs no work");
 
-  const projection = readFileSync(new URL("../lib/webgpu-octree.ts", import.meta.url), "utf8");
+  const projection = readFileSync(new URL("../lib/methods/octree-shared/webgpu-octree.ts", import.meta.url), "utf8");
   const construction = projection.match(/const structured = new WebGPUDirectStructuredVelocityAuthority[\s\S]*?this\.globalFineTransportB = new WebGPUFineLevelSetTransport[\s\S]*?\);/)?.[0];
   assert.ok(construction, "production direct structured velocity and fine-transport construction must exist");
   assert.match(construction,

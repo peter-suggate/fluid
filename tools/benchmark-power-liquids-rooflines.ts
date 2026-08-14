@@ -1,6 +1,6 @@
 import { pathToFileURL } from "node:url";
-import { GPUPerformanceTraceRecorder } from "../lib/performance-trace";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "./webgpu-smoke-isolation";
+import { GPUPerformanceTraceRecorder } from "../lib/core/performance-trace";
+import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 
 // The captured large-lane band spans roughly 14–18K pages. Use its lower
 // observed resident point: Dawn/Metal terminates a single 8-tap dispatch at

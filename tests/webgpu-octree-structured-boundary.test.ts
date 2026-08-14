@@ -6,7 +6,7 @@ import {
   structuredBoundaryCoefficientWGSL,
   structuredBoundaryExactRowCarryEnabled,
   structuredBoundaryExactRowCarryMode,
-} from "../lib/webgpu-octree-structured-boundary";
+} from "../lib/methods/power/webgpu-octree-structured-boundary";
 
 const boundaryEntryPoints = ["prepareStructuredBoundaryCandidate", "prepareStructuredBoundaryAccepted",
   "classifyStructuredLiquidRows",
@@ -198,7 +198,7 @@ test("every structured boundary entry point fits the hard ten-storage-buffer con
   assert.deepEqual(reachableStorageBindings("countStructuredRowClasses"),
     [3, 13, 14, 16, 27, 28],
     "class-4 dry proof reaches the accepted liquid mask at binding 13");
-  const host = readFileSync(new URL("../lib/webgpu-octree-structured-boundary.ts", import.meta.url), "utf8");
+  const host = readFileSync(new URL("../lib/methods/power/webgpu-octree-structured-boundary.ts", import.meta.url), "utf8");
   assert.match(host, /group\(this\.countRowClasses, \[0, 3, 13, 14, 16, 27, 28\]\)/,
     "the host bind group must include every storage binding reachable from class-4 proof");
 });
@@ -229,7 +229,7 @@ test("the exact row carry is an opt-in uniform arm, never a shader-source varian
   assert.match(structuredBoundaryCoefficientWGSL,
     /struct P\{counts:vec4u,[^}]*damDimensions:vec4f,carry:vec4u\}/,
     "the carry arm selector must be a uniform word");
-  const host = readFileSync(new URL("../lib/webgpu-octree-structured-boundary.ts", import.meta.url), "utf8");
+  const host = readFileSync(new URL("../lib/methods/power/webgpu-octree-structured-boundary.ts", import.meta.url), "utf8");
   assert.match(host, /size: 160,\s*\n\s*usage: GPUBufferUsage\.UNIFORM/,
     "the parameter buffer must cover the tenth vec4");
   assert.match(host, /const words = new Uint32Array\(40\)/);
@@ -352,7 +352,7 @@ test("the carry gate reaches only the bindings it adds, and only where it is eva
       || entryPoint === "prepareStructuredBoundaryCandidate",
       `${entryPoint} must not reach the coarse delta receipt`);
   }
-  const host = readFileSync(new URL("../lib/webgpu-octree-structured-boundary.ts", import.meta.url), "utf8");
+  const host = readFileSync(new URL("../lib/methods/power/webgpu-octree-structured-boundary.ts", import.meta.url), "utf8");
   assert.match(host, /\[0, 1, 4, 5, 16, 17, 22, 29\] : \[0, 1, 16, 17\]/,
     "the host prepare groups must match the two entry points' reachable sets");
   assert.match(host, /group\(this\.scanWorksetBlocks, \[0, 16, 18, 22, 28\]\)/);

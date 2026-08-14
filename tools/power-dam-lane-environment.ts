@@ -6,6 +6,12 @@
  * (`profile-mini-dam-xctrace.ts`) both read it, so a profile can never
  * describe a different scene, step count, or refinement setting than the
  * number the benchmark gates on.
+ *
+ * Each lane names its own `FLUID_METHOD`. The coarse backend used to be a
+ * parameter of one octree method, so a lane could inherit it from the scene's
+ * authored profile; it is now the method id itself. A lane that left the id to
+ * its caller would silently benchmark Losasso on a frozen Power reference
+ * scene, and the wall would look like a speedup.
  */
 
 export type PowerDamRuntimeLane = "mini" | "large" | "high-resolution-dam-break" | "hydrostatic-tiny" | "large-hydrostatic" | "deep-hydrostatic" | "hydrostatic" | "ui" | "moving-interface" | "ocean" | "ceiling-drop" | "symmetric-expansion" | "droplet-64" | "droplet-128" | "droplet-240" | "droplet-256" | "fill-100" | "fill-800" | "fill-6400";
@@ -38,7 +44,7 @@ export type PowerDamRuntimeLane = "mini" | "large" | "high-resolution-dam-break"
  * which is seconds of cold start that no GPU change removes.
  */
 const dropletLane = (edgeCells: number, steps = 20): Record<string, string> => ({
-  FLUID_SCENE: `power-droplet-${edgeCells}`,
+  FLUID_METHOD: "power-liquids", FLUID_SCENE: `power-droplet-${edgeCells}`,
   FLUID_TARGET_S: String(steps * 0.004),
   FLUID_MAX_DT: "0.004",
   FLUID_ORACLE_STEPS: String(steps),
@@ -81,7 +87,7 @@ const dropletLane = (edgeCells: number, steps = 20): Record<string, string> => (
  * Compare only runs at the same step count and the same capture window.
  */
 const fillLane = (liquidCells: number, steps = 80): Record<string, string> => ({
-  FLUID_SCENE: `power-fill-256-${liquidCells}`,
+  FLUID_METHOD: "power-liquids", FLUID_SCENE: `power-fill-256-${liquidCells}`,
   FLUID_TARGET_S: String(steps * 0.004),
   FLUID_MAX_DT: "0.004",
   FLUID_ORACLE_STEPS: String(steps),
@@ -103,13 +109,13 @@ const fillLane = (liquidCells: number, steps = 80): Record<string, string> => ({
 
 export const POWER_DAM_LANE_ENVIRONMENT: Record<PowerDamRuntimeLane, Record<string, string>> = {
   mini: {
-    FLUID_SCENE: "minimal-power-dam-break", FLUID_TARGET_S: "2",
+    FLUID_METHOD: "power-liquids", FLUID_SCENE: "minimal-power-dam-break", FLUID_TARGET_S: "2",
     FLUID_MAX_DT: "0.004", FLUID_ORACLE_STEPS: "500", FLUID_EXPECT_EXACT_STEPS: "500",
     FLUID_EXPECT_GRID: "16,16,16", FLUID_MAXIMUM_LEAF_SIZE: "32",
     FLUID_OCTREE_INTERFACE_BAND: "3", FLUID_OCTREE_GLOBAL_FINE_FACTOR: "4",
   },
   large: {
-    FLUID_SCENE: "large-power-dam-break", FLUID_TARGET_S: "2",
+    FLUID_METHOD: "power-liquids", FLUID_SCENE: "large-power-dam-break", FLUID_TARGET_S: "2",
     FLUID_MAX_DT: "0.004", FLUID_ORACLE_STEPS: "500", FLUID_EXPECT_EXACT_STEPS: "500",
     FLUID_EXPECT_GRID: "64,20,64", FLUID_MAXIMUM_LEAF_SIZE: "32",
     FLUID_OCTREE_INTERFACE_BAND: "1", FLUID_OCTREE_GLOBAL_FINE_FACTOR: "4",
@@ -131,21 +137,21 @@ export const POWER_DAM_LANE_ENVIRONMENT: Record<PowerDamRuntimeLane, Record<stri
     // override in `lib/methods/octree.ts` + `tools/webgpu-smoke-executor.ts`.
   },
   "high-resolution-dam-break": {
-    FLUID_SCENE: "high-resolution-dam-break", FLUID_LANE: "performance",
+    FLUID_METHOD: "losasso", FLUID_SCENE: "high-resolution-dam-break", FLUID_LANE: "performance",
     FLUID_TARGET_S: "0.004", FLUID_MAX_DT: "0.004", FLUID_ORACLE_STEPS: "1",
     FLUID_EXPECT_EXACT_STEPS: "1", FLUID_EXPECT_GRID: "128,128,128",
-    FLUID_COARSE_BACKEND: "losasso", FLUID_MAXIMUM_LEAF_SIZE: "32",
+    FLUID_MAXIMUM_LEAF_SIZE: "32",
     FLUID_OCTREE_INTERFACE_BAND: "3", FLUID_OCTREE_SURFACE_GRADING: "3",
     FLUID_OCTREE_GLOBAL_FINE_FACTOR: "1",
   },
   "hydrostatic-tiny": {
-    FLUID_SCENE: "hydrostatic-power-two-level", FLUID_TARGET_S: "0.96",
+    FLUID_METHOD: "power-liquids", FLUID_SCENE: "hydrostatic-power-two-level", FLUID_TARGET_S: "0.96",
     FLUID_MAX_DT: "0.004", FLUID_ORACLE_STEPS: "240", FLUID_EXPECT_EXACT_STEPS: "240",
     FLUID_EXPECT_GRID: "16,16,16", FLUID_MAXIMUM_LEAF_SIZE: "32",
     FLUID_OCTREE_INTERFACE_BAND: "3", FLUID_OCTREE_GLOBAL_FINE_FACTOR: "4",
   },
   "large-hydrostatic": {
-    FLUID_SCENE: "large-power-hydrostatic", FLUID_TARGET_S: "0.96",
+    FLUID_METHOD: "power-liquids", FLUID_SCENE: "large-power-hydrostatic", FLUID_TARGET_S: "0.96",
     FLUID_MAX_DT: "0.004", FLUID_ORACLE_STEPS: "240", FLUID_EXPECT_EXACT_STEPS: "240",
     FLUID_EXPECT_GRID: "64,20,64", FLUID_MAXIMUM_LEAF_SIZE: "32",
     FLUID_OCTREE_INTERFACE_BAND: "1", FLUID_OCTREE_GLOBAL_FINE_FACTOR: "4",
@@ -181,7 +187,7 @@ export const POWER_DAM_LANE_ENVIRONMENT: Record<PowerDamRuntimeLane, Record<stri
     //
     // 240 steps must also fit the isolated runner's 240 s ceiling (~1 s/adv).
     // Take the first capture with `--steps=20` before committing to the full lane.
-    FLUID_SCENE: "deep-power-hydrostatic", FLUID_TARGET_S: "0.96",
+    FLUID_METHOD: "power-liquids", FLUID_SCENE: "deep-power-hydrostatic", FLUID_TARGET_S: "0.96",
     FLUID_MAX_DT: "0.004", FLUID_ORACLE_STEPS: "240", FLUID_EXPECT_EXACT_STEPS: "240",
     FLUID_EXPECT_GRID: "64,48,64", FLUID_MAXIMUM_LEAF_SIZE: "32",
     FLUID_OCTREE_INTERFACE_BAND: "1", FLUID_OCTREE_GLOBAL_FINE_FACTOR: "4",
@@ -204,26 +210,26 @@ export const POWER_DAM_LANE_ENVIRONMENT: Record<PowerDamRuntimeLane, Record<stri
     // The scene itself is the Section 4/5 still-water correctness oracle. Its
     // intentional quarter-cell cut prevents a grid-aligned surface from hiding
     // interface work or hydrostatic imbalance.
-    FLUID_SCENE: "hydrostatic-power-large-offset", FLUID_TARGET_S: "0.96",
+    FLUID_METHOD: "power-liquids", FLUID_SCENE: "hydrostatic-power-large-offset", FLUID_TARGET_S: "0.96",
     FLUID_MAX_DT: "0.004", FLUID_ORACLE_STEPS: "240", FLUID_EXPECT_EXACT_STEPS: "240",
     FLUID_EXPECT_GRID: "32,24,16", FLUID_MAXIMUM_LEAF_SIZE: "32",
     FLUID_OCTREE_INTERFACE_BAND: "1", FLUID_OCTREE_GLOBAL_FINE_FACTOR: "4",
   },
   "moving-interface": {
-    FLUID_SCENE: "minimal-power-dam-break", FLUID_TARGET_S: "0.248",
+    FLUID_METHOD: "power-liquids", FLUID_SCENE: "minimal-power-dam-break", FLUID_TARGET_S: "0.248",
     FLUID_MAX_DT: "0.004", FLUID_ORACLE_STEPS: "62", FLUID_EXPECT_EXACT_STEPS: "62",
     FLUID_EXPECT_GRID: "16,16,16", FLUID_MAXIMUM_LEAF_SIZE: "32",
     FLUID_OCTREE_INTERFACE_BAND: "3", FLUID_OCTREE_GLOBAL_FINE_FACTOR: "4",
   },
   ui: {
-    FLUID_SCENE: "dam-break-ui", FLUID_TARGET_S: "0.496",
+    FLUID_METHOD: "losasso", FLUID_SCENE: "dam-break-ui", FLUID_TARGET_S: "0.496",
     FLUID_MAX_DT: "0.008", FLUID_ORACLE_STEPS: "62", FLUID_EXPECT_EXACT_STEPS: "62",
     FLUID_EXPECT_GRID: "24,18,16",
   },
   ocean: {
     // Two submissions are intentional: the second semantic frame-start is the
     // exact GPU end boundary for the literal first advance selected by xctrace.
-    FLUID_SCENE: "ocean-seiche", FLUID_TARGET_S: "0.01",
+    FLUID_METHOD: "losasso", FLUID_SCENE: "ocean-seiche", FLUID_TARGET_S: "0.01",
     FLUID_MAX_DT: "0.005", FLUID_ORACLE_STEPS: "2", FLUID_EXPECT_EXACT_STEPS: "2",
     FLUID_WEBGPU_MAX_STORAGE_BINDING_BYTES: "2147483648",
     // Ocean is a product-default Losasso lane. The benchmark-level audit
@@ -236,7 +242,7 @@ export const POWER_DAM_LANE_ENVIRONMENT: Record<PowerDamRuntimeLane, Record<stri
     // correctness lane uses. `performance` is the same solver configuration
     // without the evidence collectors, so a change scored here can be
     // re-gated on symmetry without changing the scene.
-    FLUID_SCENE: "symmetric-expansion", FLUID_LANE: "performance",
+    FLUID_METHOD: "losasso", FLUID_SCENE: "symmetric-expansion", FLUID_LANE: "performance",
     FLUID_TARGET_S: "0.248",
     FLUID_MAX_DT: "0.004", FLUID_ORACLE_STEPS: "62", FLUID_EXPECT_EXACT_STEPS: "62",
     FLUID_EXPECT_GRID: "32,16,32", FLUID_MAXIMUM_LEAF_SIZE: "32",
@@ -250,7 +256,7 @@ export const POWER_DAM_LANE_ENVIRONMENT: Record<PowerDamRuntimeLane, Record<stri
   "fill-800": fillLane(800),
   "fill-6400": fillLane(6400),
   "ceiling-drop": {
-    FLUID_SCENE: "ceiling-slab-drop", FLUID_TARGET_S: "0.024",
+    FLUID_METHOD: "losasso", FLUID_SCENE: "ceiling-slab-drop", FLUID_TARGET_S: "0.024",
     FLUID_LANE: "performance",
     FLUID_MAX_DT: "0.004", FLUID_ORACLE_STEPS: "6", FLUID_EXPECT_EXACT_STEPS: "6",
     FLUID_EXPECT_GRID: "24,16,24", FLUID_MAXIMUM_LEAF_SIZE: "32",

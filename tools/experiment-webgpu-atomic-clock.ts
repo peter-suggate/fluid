@@ -26,7 +26,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   acquireWebGPUExclusiveLock,
   releaseWebGPUExclusiveLock,
-} from "./webgpu-smoke-isolation";
+} from "../lib/harness/webgpu-smoke-isolation";
 
 const unsignedInteger = (name: string, fallback: number, maximum: number): number => {
   const raw = process.env[name];

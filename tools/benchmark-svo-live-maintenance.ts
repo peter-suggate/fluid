@@ -33,18 +33,21 @@
  *   FLUID_SVO_MAINTENANCE_MOVED        records moved by the edit-burst scenario (default 64)
  *   FLUID_SVO_MAINTENANCE_OUT          optional JSON report path
  */
+// These lanes render without a solver, but they construct the renderer, and
+// a renderer resolves a method by id on any path that reaches a scene.
+import "../lib/methods";
 import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { getScenePreset } from "../lib/scenes";
-import { WebGPULiveSvoScene } from "../lib/webgpu-live-svo-scene";
+import { getScenePreset } from "../lib/core/scenes";
+import { WebGPULiveSvoScene } from "../lib/svo/webgpu-live-svo-scene";
 import {
   ENVIRONMENT_VOXEL_MATERIAL_BASE,
   planOctreeLiveSceneRecordIndex,
   type OctreeSparseBrickWorld,
-} from "../lib/webgpu-octree-sparse-bricks";
+} from "../lib/svo/webgpu-svo-sparse-bricks";
 import {
   SPARSE_SCENE_CLUSTER_CAPACITY,
   SPARSE_SCENE_MAINTENANCE_STAGES,
@@ -54,8 +57,8 @@ import {
   type SparseSceneAxisAlignedBounds,
   type SparseScenePrimitive,
   type SparseSceneRecordIndexOptions,
-} from "../lib/webgpu-sparse-scene-proxies";
-import { buildEnvironmentProxyCatalog, environmentProxyPrimitives } from "../lib/voxel-environments";
+} from "../lib/core/webgpu-sparse-scene-proxies";
+import { buildEnvironmentProxyCatalog, environmentProxyPrimitives } from "../lib/core/voxel-environments";
 import { createDawnRenderDevice } from "./svo-dry-frame-harness";
 
 const scenePresetId = process.env.FLUID_SVO_MAINTENANCE_SCENE ?? "hero-garden-hose";

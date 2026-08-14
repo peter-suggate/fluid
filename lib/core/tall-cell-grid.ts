@@ -1,0 +1,436 @@
+import { damBreakBoxContains, initialFluidBrickSignedDistance, initialLiquidContainsCell, initialLiquidVolumesSignedDistance, sceneDamBreakBox, sceneDamBreakFractions } from "./initial-fluid";
+import type { SceneDescription } from "./model";
+import { sceneHasTerrain, terrainColumnHeights, terrainHeightAt } from "./terrain";
+import type { GPUQuality } from "./gpu-quality";
+
+export interface TallCellSettings {
+  regularLayers: number;
+  liquidHalo: number;
+  airHalo: number;
+  maximumNeighborDelta: number;
+  /** Temporary parity boundary: Section 5's unmeasured interior lateral
+   * faces grow with tall-cell depth. Three leaves only one such layer. */
+  maximumTallHeight: number;
+  remeshInterval: number;
+}
+
+export interface TallCellLayout {
+  nx: number;
+  fineNy: number;
+  nz: number;
+  packedNy: number;
+  cellSize_m: { x: number; y: number; z: number };
+  columnBases: Float32Array;
+  initialVolume: Float32Array;
+  /** Signed-distance point samples at the paper's Eq. 4 locations. Negative
+   * values are liquid and the narrow band is clamped to five fine cells. */
+  initialPhi: Float32Array;
+  initialVolumeCellSum: number;
+  /** Initial volume represented by the level-set Heaviside and its fixed-point
+   * GPU diagnostic, in fine-cell units. This is intentionally distinct from
+   * initialVolumeCellSum: the latter is the exact binary seed volume, whereas
+   * the level-set solver must measure drift against its own t=0 functional. */
+  referenceLiquidVolume_cells: number;
+  packedSampleCount: number;
+  activeSampleCount: number;
+  equivalentUniformCellCount: number;
+  compressionRatio: number;
+  activeCompressionRatio: number;
+  settings: TallCellSettings;
+  planning: {
+    requestedRegularLayers: number;
+    requiredInitialRegularLayers: number;
+    storedRegularLayers: number;
+    regularLayersBeforeOrdinaryFallback: number;
+    maximumBaseBeforeOrdinaryFallback: number;
+    ordinaryGridFallback: boolean;
+  };
+}
+
+// Quality controls storage/work around the scene-authored lattice. Spatial
+// resolution belongs exclusively to SceneDescription.voxelDomain.
+export const tallCellSettings: Record<GPUQuality, TallCellSettings> = {
+  // Twelve layers keeps the default 24 x 18 x 16 UI dam-break on the genuine
+  // restricted backend. Higher quality levels deliberately retain wider bands
+  // and may reach the uniform-grid limit in shallow scenes.
+  balanced: { regularLayers: 12, liquidHalo: 8, airHalo: 8, maximumNeighborDelta: 4, maximumTallHeight: 4096, remeshInterval: 1 },
+  high: { regularLayers: 32, liquidHalo: 16, airHalo: 8, maximumNeighborDelta: 4, maximumTallHeight: 4096, remeshInterval: 1 },
+  ultra: { regularLayers: 40, liquidHalo: 24, airHalo: 8, maximumNeighborDelta: 5, maximumTallHeight: 4096, remeshInterval: 1 }
+};
+
+export function chooseTallCellBase(
+  lowestSurfaceCell: number,
+  highestSurfaceCell: number,
+  fineNy: number,
+  settings: TallCellSettings
+): number {
+  const maximumBase = Math.max(0, fineNy - settings.regularLayers);
+  const lowerBound = highestSurfaceCell + 1 + settings.airHalo - settings.regularLayers;
+  const upperBound = lowestSurfaceCell + 1 - settings.liquidHalo;
+  const desired = lowerBound <= upperBound
+    ? Math.round((lowerBound + upperBound) / 2)
+    // Section 8 gives the air-halo constraint priority when a vertically
+    // extended interface cannot satisfy both halos in the fixed B_y band.
+    : lowerBound;
+  const clamped = Math.max(0, Math.min(maximumBase, desired));
+  // A restricted packed column always owns one tall cell. A one-subcell tall
+  // cell has coincident endpoint samples, while base zero would retain only
+  // the fixed regular band rather than a complete ordinary column. The method
+  // selects its separately allocated uniform backend when h >= 2 is globally
+  // impossible, so every restricted column can safely keep this minimum.
+  return maximumBase >= 2 ? Math.max(2, clamped) : 0;
+}
+
+export function limitNeighboringTallCellBases(
+  source: Float32Array,
+  nx: number,
+  nz: number,
+  maximumDelta: number,
+  passes = 2
+): Float32Array {
+  let current = source.slice();
+  for (let pass = 0; pass < passes; pass += 1) {
+    const next = current.slice();
+    for (let z = 0; z < nz; z += 1) for (let x = 0; x < nx; x += 1) {
+      const index = x + nx * z;
+      let upper = current[index];
+      if (x > 0) upper = Math.min(upper, current[index - 1] + maximumDelta);
+      if (x + 1 < nx) upper = Math.min(upper, current[index + 1] + maximumDelta);
+      if (z > 0) upper = Math.min(upper, current[index - nx] + maximumDelta);
+      if (z + 1 < nz) upper = Math.min(upper, current[index + nx] + maximumDelta);
+      next[index] = Math.round(upper);
+    }
+    current = next;
+  }
+  return current;
+}
+
+function initialWet(scene: SceneDescription, x: number, y: number, z: number, nx: number, fineNy: number, nz: number) {
+  if (sceneHasTerrain(scene)) {
+    const c = scene.container;
+    const worldX = -0.5 * c.width_m + (x + 0.5) * c.width_m / nx;
+    const worldZ = -0.5 * c.depth_m + (z + 0.5) * c.depth_m / nz;
+    if ((y + 0.5) * c.height_m / fineNy <= terrainHeightAt(scene.terrain, worldX, worldZ)) return false;
+  }
+  const dam = sceneDamBreakBox(scene);
+  const baseWet = scene.fluid.initialCondition === "tank-fill"
+    ? (y + 0.5) / fineNy <= scene.container.fillFraction
+    : damBreakBoxContains(dam, (x + 0.5) / nx, (y + 0.5) / fineNy, (z + 0.5) / nz);
+  return initialLiquidContainsCell(scene, x, y, z, [nx, fineNy, nz], baseWet);
+}
+
+function boxSignedDistance(point: { x: number; y: number; z: number }, center: { x: number; y: number; z: number }, half: { x: number; y: number; z: number }) {
+  const qx = Math.abs(point.x - center.x) - half.x;
+  const qy = Math.abs(point.y - center.y) - half.y;
+  const qz = Math.abs(point.z - center.z) - half.z;
+  const outside = Math.hypot(Math.max(qx, 0), Math.max(qy, 0), Math.max(qz, 0));
+  return outside + Math.min(Math.max(qx, qy, qz), 0);
+}
+
+/** Analytic initial liquid signed distance in metres. Container walls are
+ * solid contacts, not liquid-air interfaces, so a tank fill is the vertical
+ * free-surface plane while a dam break uses the finite liquid block. */
+export function initialLiquidPhi(scene: SceneDescription, point: { x: number; y: number; z: number }, dimensions?: readonly [number, number, number]) {
+  const c = scene.container;
+  // Authored balls union with everything below, and their distance is exact at
+  // any point, so they need none of the lattice bookkeeping the box forms do.
+  const volumeDistance = initialLiquidVolumesSignedDistance(scene, point);
+  const withVolumes = (value: number) => volumeDistance === undefined
+    ? value : Math.min(value, volumeDistance);
+  if (dimensions) {
+    const brickDistance = initialFluidBrickSignedDistance(scene, point, dimensions);
+    if (brickDistance !== undefined) {
+      // Additive seeds union with the base liquid (signed-distance minimum);
+      // ordinary seeds replace it entirely.
+      if (!scene.fluid.initialBrickSeedsAdditive) return withVolumes(brickDistance);
+      const basePhi = scene.fluid.initialCondition === "tank-fill"
+        ? point.y - c.height_m * c.fillFraction
+        : baseDamBreakPhi(scene, point);
+      return withVolumes(Math.min(brickDistance, basePhi));
+    }
+  }
+  if (scene.fluid.initialCondition === "tank-fill") return withVolumes(point.y - c.height_m * c.fillFraction);
+  return withVolumes(baseDamBreakPhi(scene, point));
+}
+
+function baseDamBreakPhi(scene: SceneDescription, point: { x: number; y: number; z: number }) {
+  const c = scene.container;
+  const dam = sceneDamBreakBox(scene);
+  const half = {
+    x: 0.5 * (dam.max.x - dam.min.x) * c.width_m,
+    y: 0.5 * (dam.max.y - dam.min.y) * c.height_m,
+    z: 0.5 * (dam.max.z - dam.min.z) * c.depth_m,
+  };
+  return boxSignedDistance(point, {
+    x: -0.5 * c.width_m + dam.min.x * c.width_m + half.x,
+    y: dam.min.y * c.height_m + half.y,
+    z: -0.5 * c.depth_m + dam.min.z * c.depth_m + half.z
+  }, half);
+}
+
+function buildInitialPhi(scene: SceneDescription, nx: number, fineNy: number, nz: number, packedNy: number, columnBases: Float32Array) {
+  const c = scene.container;
+  const h = { x: c.width_m / nx, y: c.height_m / fineNy, z: c.depth_m / nz };
+  const limit = 5 * Math.min(h.x, h.y, h.z);
+  const phi = new Float32Array(nx * packedNy * nz);
+  for (let z = 0; z < nz; z += 1) for (let x = 0; x < nx; x += 1) {
+    const base = columnBases[x + nx * z];
+    for (let packedY = 0; packedY < packedNy; packedY += 1) {
+      const sampleY = packedY === 0 ? 0.5 : packedY === 1 ? Math.max(0.5, base - 0.5) : base + packedY - 1.5;
+      const active = packedY < 2 ? base > 0 : base + packedY - 2 < fineNy;
+      const value = active ? initialLiquidPhi(scene, {
+        x: -0.5 * c.width_m + (x + 0.5) * h.x,
+        y: sampleY * h.y,
+        z: -0.5 * c.depth_m + (z + 0.5) * h.z
+      }, [nx, fineNy, nz]) : limit;
+      phi[x + nx * (packedY + packedNy * z)] = Math.max(-limit, Math.min(limit, value));
+    }
+  }
+  return phi;
+}
+
+/**
+ * Evaluate the exact represented-volume functional used by
+ * tallCellComputeShader.reduceDiagnostics at t=0.
+ *
+ * The binary seed volume and a point-sampled signed-distance field are not
+ * interchangeable near box corners: smoothing phi over one cell can differ
+ * from the binary count by several percent without any transport having run.
+ * Using that binary count as the controller reference therefore reports a
+ * fictitious first-step loss and makes volume control expand an unchanged
+ * interface. Keep the packed-row 8-bit truncation here because the GPU atomic
+ * reduction has that same ABI: the bottom tall-cell endpoint reconstructs and
+ * sums every world row below the column base before one conversion to u32,
+ * while each regular row is converted independently.
+ */
+export function representedInitialPhiVolumeCells(
+  scene: SceneDescription,
+  nx: number,
+  fineNy: number,
+  nz: number,
+  packedNy: number,
+  columnBases: ArrayLike<number>,
+  initialPhi: ArrayLike<number>
+) {
+  const h = {
+    x: scene.container.width_m / nx,
+    y: scene.container.height_m / fineNy,
+    z: scene.container.depth_m / nz
+  };
+  const hMin = Math.min(h.x, h.y, h.z);
+  const terrainHeights = terrainColumnHeights(scene, nx, nz);
+  let fixedPointTotal = 0;
+  for (let z = 0; z < nz; z += 1) for (let x = 0; x < nx; x += 1) {
+    const column = x + nx * z;
+    const base = Math.round(columnBases[column]);
+    const bottom = initialPhi[x + nx * packedNy * z];
+    const top = initialPhi[x + nx * (1 + packedNy * z)];
+    const terrainHeightCells = terrainHeights[column] / h.y;
+    let tallOccupied = 0;
+    for (let y = 0; y < fineNy; y += 1) {
+      let phi: number;
+      if (y < base && base > 0) {
+        const t = Math.min(1, Math.max(0, y / Math.max(base - 1, 1)));
+        phi = bottom + (top - bottom) * t;
+      } else {
+        const packedY = 2 + y - base;
+        phi = packedY >= 2 && packedY < packedNy
+          ? initialPhi[x + nx * (packedY + packedNy * z)]
+          : 5 * hMin;
+      }
+      const open = 1 - Math.min(1, Math.max(0, terrainHeightCells - y));
+      const occupied = open * Math.min(1, Math.max(0, 0.5 - phi / hMin));
+      if (y < base) tallOccupied += occupied;
+      else fixedPointTotal += Math.trunc(Math.min(0xffff_ffff, Math.max(0, occupied * 256)));
+    }
+    fixedPointTotal += Math.trunc(Math.min(0xffff_ffff, Math.max(0, tallOccupied * 256)));
+  }
+  return fixedPointTotal / 256;
+}
+
+function insideTerrainCell(scene: SceneDescription, x: number, y: number, z: number, nx: number, fineNy: number, nz: number) {
+  if (!sceneHasTerrain(scene)) return false;
+  const c = scene.container;
+  const worldX = -0.5 * c.width_m + (x + 0.5) * c.width_m / nx;
+  const worldZ = -0.5 * c.depth_m + (z + 0.5) * c.depth_m / nz;
+  return (y + 0.5) * c.height_m / fineNy <= terrainHeightAt(scene.terrain, worldX, worldZ);
+}
+
+function isInitialSurfaceCell(scene: SceneDescription, x: number, y: number, z: number, nx: number, fineNy: number, nz: number) {
+  const wet = initialWet(scene, x, y, z, nx, fineNy, nz);
+  // The moving cubic band follows vertical crossings within a column. A
+  // vertical liquid face is represented by horizontal interpolation between
+  // neighbouring tall endpoint values and does not force B_y to the floor.
+  // A wet/dry transition against the terrain heightfield is a solid contact
+  // like the flat floor — never a liquid-air surface — so it must not drag
+  // the band down to the pool bed (the paper's H excludes the ground from
+  // the water column entirely).
+  const belowWet = y === 0 || insideTerrainCell(scene, x, y - 1, z, nx, fineNy, nz)
+    ? wet
+    : initialWet(scene, x, y - 1, z, nx, fineNy, nz);
+  const aboveWet = y + 1 < fineNy && initialWet(scene, x, y + 1, z, nx, fineNy, nz);
+  return wet !== belowWet || wet !== aboveWet;
+}
+
+function requiredInitialRegularLayers(
+  scene: SceneDescription,
+  nx: number,
+  fineNy: number,
+  nz: number,
+  settings: TallCellSettings
+) {
+  let lowest = fineNy;
+  let highest = -1;
+  for (let z = 0; z < nz; z += 1) for (let x = 0; x < nx; x += 1) for (let y = 0; y < fineNy; y += 1) {
+    if (!isInitialSurfaceCell(scene, x, y, z, nx, fineNy, nz)) continue;
+    lowest = Math.min(lowest, y);
+    highest = Math.max(highest, y);
+  }
+  const inflow = scene.fluid.inflow;
+  if (inflow) {
+    const speed = Math.hypot(inflow.velocity_m_s.x, inflow.velocity_m_s.y, inflow.velocity_m_s.z);
+    const directionY = speed > 0 ? inflow.velocity_m_s.y / speed : 0;
+    const verticalRadius = Math.abs(directionY) * inflow.length_m / 2 + Math.sqrt(Math.max(0, 1 - directionY * directionY)) * inflow.radius_m;
+    const inletLowest = Math.max(0, Math.floor((inflow.center_m.y - verticalRadius) / scene.container.height_m * fineNy));
+    const inletHighest = Math.min(fineNy - 1, Math.floor((inflow.center_m.y + verticalRadius) / scene.container.height_m * fineNy));
+    lowest = Math.min(lowest, inletLowest);
+    highest = Math.max(highest, inletHighest);
+  }
+  if (highest < 0) return settings.regularLayers;
+
+  // The inequalities in chooseTallCellBase have a solution only when the
+  // entire surface range plus its available liquid/air halos fits in By.  At
+  // a wall, the halo is clipped because cells outside the domain are solid.
+  const liquidHalo = Math.min(settings.liquidHalo, lowest + 1);
+  const airHalo = Math.min(settings.airHalo, fineNy - highest - 1);
+  return highest - lowest + liquidHalo + airHalo;
+}
+
+export function createTallCellLayout(scene: SceneDescription, quality: GPUQuality, maximumTextureDimension = 2048, overrides?: Partial<TallCellSettings>): TallCellLayout {
+  const c = scene.container, settings = { ...tallCellSettings[quality], ...overrides };
+  const requestedCellSize = scene.voxelDomain.finestCellSize_m;
+  const nx = Math.min(maximumTextureDimension, Math.max(8, Math.round(c.width_m / requestedCellSize)));
+  const nz = Math.min(maximumTextureDimension, Math.max(8, Math.round(c.depth_m / requestedCellSize)));
+  const fineNy = Math.min(maximumTextureDimension, Math.max(8, Math.round(c.height_m / requestedCellSize)));
+  // Grow B_y only when the vertical crossings and their halos do not fit. A
+  // vertical dam face is representable across neighbouring tall columns.
+  const requiredLayers = requiredInitialRegularLayers(scene, nx, fineNy, nz, settings);
+  // The paper's Section 5 attributes volume artifacts to lateral fluxes that
+  // enter unmeasured tall-cell interiors. Until those virtual faces are part
+  // of the pressure unknowns, retain only one omitted cubic layer by default.
+  const parityLayers = fineNy - Math.max(2, Math.round(settings.maximumTallHeight));
+  const regularLayers = Math.min(fineNy, Math.max(settings.regularLayers, requiredLayers, parityLayers));
+  const storedRegularLayers = regularLayers;
+  const regularLayersBeforeOrdinaryFallback = regularLayers;
+  const maximumBaseBeforeOrdinaryFallback = Math.max(0, fineNy - regularLayers);
+  const ordinaryGridFallback = regularLayers >= fineNy;
+  const effectiveSettings = { ...settings, regularLayers, liquidHalo: Math.min(settings.liquidHalo, regularLayers), airHalo: Math.min(settings.airHalo, regularLayers) };
+  const packedNy = storedRegularLayers + 2;
+  const maximumBase = Math.max(0, fineNy - regularLayers);
+  const rawBases = new Float32Array(nx * nz);
+
+  for (let z = 0; z < nz; z += 1) for (let x = 0; x < nx; x += 1) {
+    let lowestSurface = fineNy, highestSurface = -1;
+    for (let y = 0; y < fineNy; y += 1) {
+      if (isInitialSurfaceCell(scene, x, y, z, nx, fineNy, nz)) {
+        lowestSurface = Math.min(lowestSurface, y);
+        highestSurface = Math.max(highestSurface, y);
+      }
+    }
+    const worldX = -c.width_m / 2 + (x + 0.5) * c.width_m / nx;
+    const worldZ = -c.depth_m / 2 + (z + 0.5) * c.depth_m / nz;
+    const inflow = scene.fluid.inflow;
+    if (inflow) {
+      const speed = Math.hypot(inflow.velocity_m_s.x, inflow.velocity_m_s.y, inflow.velocity_m_s.z);
+      const direction = speed > 0
+        ? { x: inflow.velocity_m_s.x / speed, y: inflow.velocity_m_s.y / speed, z: inflow.velocity_m_s.z / speed }
+        : { x: 1, y: 0, z: 0 };
+      const halfLength = inflow.length_m / 2;
+      const extentX = Math.abs(direction.x) * halfLength + Math.sqrt(Math.max(0, 1 - direction.x * direction.x)) * inflow.radius_m;
+      const extentY = Math.abs(direction.y) * halfLength + Math.sqrt(Math.max(0, 1 - direction.y * direction.y)) * inflow.radius_m;
+      const extentZ = Math.abs(direction.z) * halfLength + Math.sqrt(Math.max(0, 1 - direction.z * direction.z)) * inflow.radius_m;
+      if (Math.abs(worldX - inflow.center_m.x) <= extentX + c.width_m / nx / 2 && Math.abs(worldZ - inflow.center_m.z) <= extentZ + c.depth_m / nz / 2) {
+        lowestSurface = Math.min(lowestSurface, Math.max(0, Math.floor((inflow.center_m.y - extentY) / c.height_m * fineNy)));
+        highestSurface = Math.max(highestSurface, Math.min(fineNy - 1, Math.ceil((inflow.center_m.y + extentY) / c.height_m * fineNy)));
+      }
+    }
+    let bodyUpper = maximumBase;
+    for (const body of scene.rigidBodies) {
+      const d = body.dimensions_m;
+      const radius = body.shape === "sphere" ? d.x : Math.hypot(d.x, d.y, d.z) / 2;
+      if (Math.hypot(worldX - body.position_m.x, worldZ - body.position_m.z) > radius + Math.max(c.width_m / nx, c.depth_m / nz) / 2) continue;
+      // Rigid geometry is not a liquid interface and must never lift the
+      // regular band. Doing so makes the bottom tall store grow as soon as a
+      // body approaches the water, even though the surface band already
+      // contains every cell that can exchange momentum with that body.
+      // The body's bottom is only an upper bound: if the body is initially
+      // submerged, keep it out of the tall store by shortening that store.
+      const bodyBottom = Math.floor((body.position_m.y - radius) / c.height_m * fineNy);
+      let wetTop = -1;
+      for (let y = fineNy - 1; y >= 0; y -= 1) if (initialWet(scene, x, y, z, nx, fineNy, nz)) { wetTop = y; break; }
+      if (bodyBottom <= wetTop + 1 + effectiveSettings.airHalo) bodyUpper = Math.min(bodyUpper, bodyBottom);
+    }
+    const surfaceBase = highestSurface >= 0
+      ? chooseTallCellBase(lowestSurface, highestSurface, fineNy, effectiveSettings)
+      // An empty column still needs its regular band at the same elevation as
+      // neighbouring water.  Setting it to zero discards the upper domain and
+      // makes the D limiter pull every wet tall cell down a few cells per
+      // frame.  The paper has one tall cell in every column, including air.
+      // In parity mode the near-full-height band already covers every dry
+      // column. Keep those columns at the height-two control and introduce
+      // h=3 only where liquid depth requires it; the one-cell jump satisfies
+      // Eq. 10 and avoids thousands of unnecessary endpoint perturbations.
+      : maximumBase <= 3 ? Math.min(2, maximumBase) : maximumBase;
+    rawBases[x + nx * z] = maximumBase >= 2
+      ? Math.max(2, Math.min(surfaceBase, bodyUpper))
+      : 0;
+  }
+
+  const columnBases = limitNeighboringTallCellBases(rawBases, nx, nz, effectiveSettings.maximumNeighborDelta, nx + nz);
+  const initialVolume = new Float32Array(nx * packedNy * nz);
+  let initialVolumeCellSum = 0;
+  let activeSampleCount = 0;
+  for (let z = 0; z < nz; z += 1) for (let x = 0; x < nx; x += 1) {
+    const base = columnBases[x + nx * z];
+    let tallAmount = 0;
+    for (let worldY = 0; worldY < base; worldY += 1) if (initialWet(scene, x, worldY, z, nx, fineNy, nz)) tallAmount += 1;
+    const tallFraction = base > 0 ? tallAmount / base : 0;
+    for (let packedY = 0; packedY < packedNy; packedY += 1) {
+      let worldY: number;
+      if (packedY === 0) worldY = 0;
+      else if (packedY === 1) worldY = Math.max(0, base - 1);
+      else worldY = base + packedY - 2;
+      const active = packedY >= 2 ? worldY < fineNy : base > 0;
+      if (active) activeSampleCount += 1;
+      const fraction = packedY < 2 ? tallFraction : active && initialWet(scene, x, worldY, z, nx, fineNy, nz) ? 1 : 0;
+      initialVolume[x + nx * (packedY + packedNy * z)] = fraction;
+      if (packedY === 0) initialVolumeCellSum += tallAmount;
+      else if (packedY >= 2) initialVolumeCellSum += fraction;
+    }
+  }
+
+  const packedSampleCount = nx * packedNy * nz;
+  const equivalentUniformCellCount = nx * fineNy * nz;
+  const initialPhi = buildInitialPhi(scene, nx, fineNy, nz, packedNy, columnBases);
+  const referenceLiquidVolume_cells = representedInitialPhiVolumeCells(
+    scene, nx, fineNy, nz, packedNy, columnBases, initialPhi
+  );
+  return {
+    nx, fineNy, nz, packedNy,
+    cellSize_m: { x: c.width_m / nx, y: c.height_m / fineNy, z: c.depth_m / nz },
+    columnBases, initialVolume, initialPhi, initialVolumeCellSum,
+    referenceLiquidVolume_cells,
+    packedSampleCount, activeSampleCount, equivalentUniformCellCount,
+    compressionRatio: packedSampleCount / equivalentUniformCellCount,
+    activeCompressionRatio: activeSampleCount / equivalentUniformCellCount,
+    settings: effectiveSettings,
+    planning: {
+      requestedRegularLayers: settings.regularLayers,
+      requiredInitialRegularLayers: requiredLayers,
+      storedRegularLayers,
+      regularLayersBeforeOrdinaryFallback,
+      maximumBaseBeforeOrdinaryFallback,
+      ordinaryGridFallback
+    }
+  };
+}

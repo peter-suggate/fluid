@@ -1,11 +1,11 @@
 "use client";
 
-import { DEFAULT_EDITOR_TOOL, editorToolsPlacedAt } from "@/lib/editor-tools";
-import type { RigidShape } from "@/lib/model";
-import type { SceneryPropKind } from "@/lib/stores/ui-store";
-import { simulation } from "@/lib/simulation/controller";
-import { useEditorHistoryStore } from "@/lib/stores/history-store";
-import { useUIStore } from "@/lib/stores/ui-store";
+import { DEFAULT_EDITOR_TOOL, editorToolsPlacedAt } from "../lib/core/editor-tools";
+import type { RigidShape } from "../lib/core/model";
+import type { SceneryPropKind } from "../lib/core/stores/ui-store";
+import { simulation } from "../lib/core/simulation/controller";
+import { useEditorHistoryStore } from "../lib/core/stores/history-store";
+import { useUIStore } from "../lib/core/stores/ui-store";
 
 const PLACEMENT_SHAPES: ReadonlyArray<{ shape: RigidShape; label: string }> = [
   { shape: "sphere", label: "Sphere" },

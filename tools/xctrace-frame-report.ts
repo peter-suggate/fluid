@@ -23,7 +23,7 @@
  *  - The trace has no notion of a simulation step, so frame boundaries are
  *    recovered by finding a pass that fires exactly once per advance.
  */
-import { xctraceSafeComputeLabel } from "../lib/webgpu-pass-broker";
+import { xctraceSafeComputeLabel } from "../lib/core/webgpu-pass-broker";
 import { readTraceRows, durationMicroseconds, timestampMicroseconds } from "./xctrace-trace-tables";
 
 export interface Interval {

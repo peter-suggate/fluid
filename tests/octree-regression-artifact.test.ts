@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import type { PerformanceTrace } from "../lib/performance-trace";
+import type { PerformanceTrace } from "../lib/core/performance-trace";
 import {
   OCTREE_WORK_STAGES,
   type OctreeWorkSnapshot,
-} from "../lib/webgpu-octree-work-accounting";
+} from "../lib/methods/octree-shared/webgpu-octree-work-accounting";
 import {
   buildOctreeRegressionArtifact,
   type OctreeRegressionArtifact,
@@ -57,7 +57,7 @@ function trace(pressure_ms = 10): PerformanceTrace {
 
 function result(pressure_ms = 10): OctreeRegressionResultRecord {
   return {
-    scenario: "minimal-power-dam-break", method: "octree", phase: "result",
+    scenario: "minimal-power-dam-break", method: "power-liquids", phase: "result",
     steps: 500, simulatedTime_s: 2, simulationWall_ms: 1_000,
     physicsTrace: trace(pressure_ms),
     gpuCommandAudit: {
@@ -118,7 +118,7 @@ test("artifact records every unavailable runtime counter as a blocker", () => {
   const incomplete = buildOctreeRegressionArtifact({
     lane: "mini",
     result: {
-      scenario: "minimal-power-dam-break", method: "octree", phase: "result",
+      scenario: "minimal-power-dam-break", method: "power-liquids", phase: "result",
       steps: 500, simulatedTime_s: 2, simulationWall_ms: 1_000,
     },
     repositoryRoot: process.cwd(), revisions,

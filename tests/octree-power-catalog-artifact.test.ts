@@ -12,21 +12,21 @@ import {
   OCTREE_POWER_ROW_TEMPLATE_VERSION,
   OCTREE_POWER_TRANSFER_RELATION,
   unpackOctreePowerRowTemplateSlot,
-} from "../lib/octree-power-catalog";
+} from "../lib/methods/power/octree-power-catalog";
 import {
   decodeGeneratedOctreePowerCatalog,
   OCTREE_GENERATED_POWER_CATALOG_MAGIC,
   OCTREE_GENERATED_POWER_CATALOG_MANIFEST,
-} from "../lib/generated/octree-power-catalog";
+} from "../lib/methods/power/generated/octree-power-catalog";
 import {
   OCTREE_POWER_NEIGHBOR_DIRECTIONS,
   OCTREE_POWER_SAME_OR_FINER_MASK,
   sitesForSameOrCoarserPowerDescriptor,
-} from "../lib/octree-power-descriptor";
-import { constructOctreePowerCell } from "../lib/octree-power-geometry";
-import { OCTREE_CUBE_TRANSFORMS, transformPowerVector } from "../lib/octree-power-topology";
+} from "../lib/methods/power/octree-power-descriptor";
+import { constructOctreePowerCell } from "../lib/methods/power/octree-power-geometry";
+import { OCTREE_CUBE_TRANSFORMS, transformPowerVector } from "../lib/methods/power/octree-power-topology";
 
-const catalogUrl = new URL("../lib/generated/octree-power-catalog.bin", import.meta.url);
+const catalogUrl = new URL("../lib/methods/power/generated/octree-power-catalog.bin", import.meta.url);
 
 test("normal development and validation consume the committed catalog", () => {
   const packageJson = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as {

@@ -46,7 +46,7 @@
 import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import path from "node:path";
 
-import { resolveDisplayGrade, type SceneToneCurve } from "../lib/webgpu-lighting";
+import { resolveDisplayGrade, type SceneToneCurve } from "../lib/core/webgpu-lighting";
 import {
   decodeLinearPng,
   deltaE2000,
@@ -56,7 +56,7 @@ import {
   registerToScoringGrid,
   srgbToLinear,
   type LinearImage,
-} from "../lib/hero-fidelity-score";
+} from "../lib/core/hero-fidelity-score";
 
 const environment = process.env;
 const rawPath = environment.FLUID_HERO_GRADE_RAW ?? "artifacts/hero-grade/frame.raw";

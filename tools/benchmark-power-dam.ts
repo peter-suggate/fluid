@@ -22,12 +22,13 @@ import {
   type PowerDamRuntimeLane as RuntimeLane,
 } from "./power-dam-lane-environment";
 import { POWER_DAM_PRESSURE_KERNEL_LABEL_PREFIXES } from "./power-dam-pressure-kernel-profile";
-import { formatPassBrokerBoundaryAudit } from "../lib/webgpu-pass-broker";
+import { formatPassBrokerBoundaryAudit } from "../lib/core/webgpu-pass-broker";
 import {
   formatResidentMemoryReport,
   type GPUResidentMemoryReport,
-} from "./webgpu-smoke-gpu-audits";
+} from "../lib/harness/webgpu-smoke-gpu-audits";
 import { powerDamRunEnvironment } from "./power-dam-run-environment";
+import "../lib/methods";
 
 const args = new Set(process.argv.slice(2));
 const requestedLane = process.argv.find((argument) => argument.startsWith("--lane="))
@@ -105,7 +106,6 @@ const benchmarkEnvironmentOverlay = (overrides: Record<string, string> = {}): Re
     // evidence-grade validated run when diagnosing or comparing a cut.
     FLUID_WEBGPU_DAWN_FEATURES: process.env.FLUID_BENCHMARK_VALIDATE === "1"
       ? "" : "skip_validation",
-    FLUID_METHOD: "octree",
     FLUID_QUALITY: "balanced",
     FLUID_PERFORMANCE_PROFILE: "1",
     FLUID_PERFORMANCE_TRACES: traceProfile || artifactPath ? "1" : "0",
@@ -147,7 +147,7 @@ const benchmarkEnvironmentOverlay = (overrides: Record<string, string> = {}): Re
     FLUID_CHECKPOINT_EVERY_S: artifactPath
       ? (lane === "ui" ? "0.08" : lane === "mini" ? "0.1" : "0.04")
       : (process.env.FLUID_CHECKPOINT_EVERY_S ?? "0"),
-    FLUID_CPU_ORACLE: "0", FLUID_FIELD_STATS: "0", FLUID_SPARSE_STATS: "0",
+    FLUID_FIELD_STATS: "0", FLUID_SPARSE_STATS: "0",
     FLUID_RASTER_CHECKPOINTS: "0", FLUID_WEBGPU_SMOKE_TIMEOUT_MS: "240000",
     ...laneEnvironment[lane],
     ...overrides,

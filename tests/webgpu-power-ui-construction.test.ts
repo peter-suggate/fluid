@@ -2,16 +2,20 @@ import assert from "node:assert/strict";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
-import { resolveMethodValues } from "../lib/methods";
-import { octreeMethod, octreeSolverOptions } from "../lib/methods/octree";
-import { POWER2017_FACTOR4_BENCHMARK_METHOD_PROFILE } from "../lib/scenes";
-import { fluidExecutionDeviceFeatures } from "../lib/gpu-startup";
-import { requiredFluidDeviceLimits } from "../lib/webgpu-device-limits";
-import { managedGPUDevice } from "../lib/gpu-compilation-manager";
-import { WebGPUOctreeEulerianSolver } from "../lib/webgpu-octree-eulerian";
-import { OCTREE_INITIAL_SPARSE_AUTHORITY_PHASES } from "../lib/webgpu-octree";
-import { WEBGPU_EXCLUSIVE_LOCK } from "../tools/webgpu-smoke-isolation";
-import { createSmokeScenario } from "../tools/webgpu-smoke-scenarios";
+// Composition root for this entry point: importing the method catalog installs
+// the simulation methods and the octree coarse-dynamics lanes, without which
+// constructing a solver throws rather than silently running the wrong backend.
+import "../lib/methods";
+import { resolveMethodValues } from "../lib/core/method-contract";
+import { losassoMethod, losassoSolverOptions } from "../lib/methods/losasso/method";
+import { POWER2017_FACTOR4_BENCHMARK_METHOD_PROFILE } from "../lib/core/scenes";
+import { fluidExecutionDeviceFeatures } from "../lib/core/gpu-startup";
+import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
+import { managedGPUDevice } from "../lib/core/gpu-compilation-manager";
+import { WebGPUOctreeEulerianSolver } from "../lib/methods/octree-shared/webgpu-octree-eulerian";
+import { OCTREE_INITIAL_SPARSE_AUTHORITY_PHASES } from "../lib/methods/octree-shared/octree-projection-contract";
+import { WEBGPU_EXCLUSIVE_LOCK } from "../lib/harness/webgpu-smoke-isolation";
+import { createSmokeScenario } from "../lib/harness/webgpu-smoke-scenarios";
 
 const PORTABLE_STORAGE_BUFFER_LIMIT = 10;
 // Dawn's Node/Metal wrapper owns native instance lifetime separately from the
@@ -137,12 +141,12 @@ test("Dawn constructs the selectable Power 2017 factor-4 graph at the portable s
   let scopeOpen = true;
   try {
     const scenario = createSmokeScenario("symmetric-expansion", "power2017-factor-4");
-    const values = resolveMethodValues(octreeMethod, "balanced",
+    const values = resolveMethodValues(losassoMethod, "balanced",
       POWER2017_FACTOR4_BENCHMARK_METHOD_PROFILE.overrides);
     constructingSolver = true;
     try {
       solver = new WebGPUOctreeEulerianSolver(solverDevice, scenario.scene, "balanced", undefined, {
-        ...octreeSolverOptions(scenario.scene, "balanced", values),
+        ...losassoSolverOptions(scenario.scene, "balanced", values),
         deferPipelineCompilation: true,
       });
     } finally {

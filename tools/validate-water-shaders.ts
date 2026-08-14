@@ -8,8 +8,8 @@ import {
   extractionPrepareShader,
   surfaceExtractionShader,
   surfaceRasterShader
-} from "../lib/webgpu-water-pipeline";
-import { gridOverlayShader } from "../lib/webgpu-grid-overlay";
+} from "../lib/core/webgpu-water-pipeline";
+import { gridOverlayShader } from "../lib/core/webgpu-grid-overlay";
 import {
   octreeTechniqueAdaptiveVelocityShader,
   octreeTechniqueFaceShader,
@@ -17,47 +17,48 @@ import {
   octreeTechniqueLifecycleShader,
   octreeTechniqueStructuredShader,
   octreeTechniqueTopologyShader,
-} from "../lib/webgpu-octree-technique-overlay";
-import { octreeTechniqueTetraValidityShader } from "../lib/webgpu-octree-technique-audit-overlay";
+} from "../lib/methods/octree-shared/webgpu-octree-technique-overlay";
+import { octreeTechniqueTetraValidityShader } from "../lib/methods/octree-shared/webgpu-octree-technique-audit-overlay";
 import {
   fluidBlastRadiusFloodShader,
   fluidBlastRadiusOverlayShader,
-} from "../lib/webgpu-fluid-blast-radius";
-import { fluidCellTraceGatherShader } from "../lib/webgpu-fluid-cell-trace";
-import { secondaryParticleComputeShader, secondaryParticleOpticalShader } from "../lib/webgpu-secondary-particles";
-import { sparseBrickDenseFieldShader } from "../lib/sparse-brick-octree";
-import { octreeProjectionShader } from "../lib/webgpu-octree";
+} from "../lib/core/webgpu-fluid-blast-radius";
+import { fluidCellTraceGatherShader } from "../lib/core/webgpu-fluid-cell-trace";
+import { secondaryParticleComputeShader, secondaryParticleOpticalShader } from "../lib/core/webgpu-secondary-particles";
+import { sparseBrickDenseFieldShader } from "../lib/svo/sparse-brick-octree";
+import { octreeLosassoProjectionShader } from "../lib/methods/losasso/octree-losasso-projection.wgsl";
+import { octreePowerProjectionShader } from "../lib/methods/power/octree-power-projection.wgsl";
 import { octreeSPGridAccurateDispatchGateShader, octreeSPGridAccurateOperatorShader,
-  octreeSPGridVCycleShader } from "../lib/webgpu-octree-spgrid-vcycle";
-import { directStructuredVelocityPublicationWGSL } from "../lib/webgpu-octree-structured-velocity-gpu";
-import { structuredBoundaryCoefficientWGSL } from "../lib/webgpu-octree-structured-boundary";
-import { structuredVelocityDynamicsWGSL } from "../lib/webgpu-octree-structured-dynamics";
-import { octreeCoarsePhiBootstrapShader } from "../lib/webgpu-octree-coarse-levelset";
-import { octreePowerCoarseLevelSetShader } from "../lib/webgpu-octree-power-coarse-levelset";
-import { octreePowerDescriptorShader } from "../lib/webgpu-octree-power-descriptor";
-import { octreePowerTopologyShader } from "../lib/webgpu-octree-power-topology";
-import { octreeSolidVertexSdfShader } from "../lib/webgpu-octree-solid-vertex-sdf";
-import { octreeAnalyticBootstrapWorklistShader } from "../lib/webgpu-octree-analytic-bootstrap";
-import { octreeDeterministicOwnerPageLifecycleShader } from "../lib/webgpu-octree-owner-pages";
-import { octreeTopologyEpochWGSL } from "../lib/webgpu-octree-topology-epoch";
+  octreeSPGridVCycleShader } from "../lib/methods/power/webgpu-octree-spgrid-vcycle";
+import { directStructuredVelocityPublicationWGSL } from "../lib/methods/power/webgpu-octree-structured-velocity-gpu";
+import { structuredBoundaryCoefficientWGSL } from "../lib/methods/power/webgpu-octree-structured-boundary";
+import { structuredVelocityDynamicsWGSL } from "../lib/methods/power/webgpu-octree-structured-dynamics";
+import { octreeCoarsePhiBootstrapShader } from "../lib/methods/octree-shared/webgpu-octree-coarse-levelset";
+import { octreePowerCoarseLevelSetShader } from "../lib/methods/power/webgpu-octree-power-coarse-levelset";
+import { octreePowerDescriptorShader } from "../lib/methods/power/webgpu-octree-power-descriptor";
+import { octreePowerTopologyShader } from "../lib/methods/power/webgpu-octree-power-topology";
+import { octreeSolidVertexSdfShader } from "../lib/methods/octree-shared/webgpu-octree-solid-vertex-sdf";
+import { octreeAnalyticBootstrapWorklistShader } from "../lib/methods/octree-shared/webgpu-octree-analytic-bootstrap";
+import { octreeDeterministicOwnerPageLifecycleShader } from "../lib/methods/octree-shared/webgpu-octree-owner-pages";
+import { octreeTopologyEpochWGSL } from "../lib/methods/octree-shared/webgpu-octree-topology-epoch";
 import {
   sparseFineSeedCandidateResidencyShader,
   fineSeedCandidateCommitShader,
   fineSeedCandidateResidencyShader,
-} from "../lib/webgpu-fluid-brick-residency";
-import { octreeFineSeedAdapterShader, octreeFineSeedCandidateShader } from "../lib/webgpu-octree-fine-seed-adapter";
-import { sparseSceneProxyVoxelizationShader } from "../lib/webgpu-sparse-scene-proxies";
-import { svoDrySceneShader } from "../lib/webgpu-svo-dry-scene";
-import { svoThickGlassWGSL } from "../lib/svo-thick-glass";
-import { globalFineClassifiedEmitShader, globalFineClassifiedEmitShaders, globalFineClassifiedIndirectScanShader, globalFineClassifiedScanShader } from "../lib/webgpu-water-global-fine-tetra";
-import { structuredFineLevelSetTransportWGSL } from "../lib/webgpu-octree-fine-levelset-transport";
-import { fineLevelSetVolumeCorrectionWGSL } from "../lib/webgpu-octree-fine-levelset-volume";
-import { fineLevelSetJFACPTWGSL } from "../lib/webgpu-octree-fine-levelset-redistance";
-import { fineLevelSetSummaryWGSL } from "../lib/webgpu-octree-fine-levelset-summary";
-import { makeFineLevelSetTopologyWGSL } from "../lib/webgpu-octree-fine-levelset-topology";
-import { globalFineSurfaceClassificationShader } from "../lib/webgpu-water-global-fine-classify";
-import { octreeAirVelocitySupportPublicationWGSL } from "../lib/webgpu-octree-air-velocity-support-gpu";
-import { octreeLosassoSurfaceGraphWGSL } from "../lib/webgpu-octree-losasso-surface-graph.wgsl";
+} from "../lib/core/webgpu-fluid-brick-residency";
+import { octreeFineSeedAdapterShader, octreeFineSeedCandidateShader } from "../lib/methods/octree-shared/webgpu-octree-fine-seed-adapter";
+import { sparseSceneProxyVoxelizationShader } from "../lib/core/webgpu-sparse-scene-proxies";
+import { svoDrySceneShader } from "../lib/svo/webgpu-svo-dry-scene";
+import { svoThickGlassWGSL } from "../lib/svo/svo-thick-glass";
+import { globalFineClassifiedEmitShader, globalFineClassifiedEmitShaders, globalFineClassifiedIndirectScanShader, globalFineClassifiedScanShader } from "../lib/core/webgpu-water-global-fine-tetra";
+import { structuredFineLevelSetTransportWGSL } from "../lib/methods/octree-shared/webgpu-octree-fine-levelset-transport";
+import { fineLevelSetVolumeCorrectionWGSL } from "../lib/methods/octree-shared/webgpu-octree-fine-levelset-volume";
+import { fineLevelSetJFACPTWGSL } from "../lib/methods/octree-shared/webgpu-octree-fine-levelset-redistance";
+import { fineLevelSetSummaryWGSL } from "../lib/methods/octree-shared/webgpu-octree-fine-levelset-summary";
+import { makeFineLevelSetTopologyWGSL } from "../lib/methods/octree-shared/webgpu-octree-fine-levelset-topology";
+import { globalFineSurfaceClassificationShader } from "../lib/core/webgpu-water-global-fine-classify";
+import { octreeAirVelocitySupportPublicationWGSL } from "../lib/methods/power/webgpu-octree-air-velocity-support-gpu";
+import { octreeLosassoSurfaceGraphWGSL } from "../lib/methods/losasso/webgpu-octree-losasso-surface-graph.wgsl";
 import {
   octreeLosassoAdaptivePhiAcceptedScheduleWGSL,
   octreeLosassoAdaptivePhiBacktraceWGSL,
@@ -84,13 +85,13 @@ import {
   octreeLosassoAdaptivePhiWorklistReachWGSL,
   octreeLosassoAdaptivePhiWorklistReceiptWGSL,
   octreeLosassoAdaptivePhiWGSL,
-} from "../lib/webgpu-octree-losasso-adaptive-phi.wgsl";
+} from "../lib/methods/losasso/webgpu-octree-losasso-adaptive-phi.wgsl";
 import {
   octreeLosassoAdaptiveVelocitySamplerWGSL,
   octreeLosassoAdaptiveVelocityWGSL,
-} from "../lib/webgpu-octree-losasso-adaptive-velocity.wgsl";
-import { octreeLosassoAdaptiveMassWGSL } from "../lib/webgpu-octree-losasso-adaptive-mass.wgsl";
-import { makeOctreeLosassoAdaptiveDynamicsWGSL } from "../lib/webgpu-octree-losasso-dynamics.wgsl";
+} from "../lib/methods/losasso/webgpu-octree-losasso-adaptive-velocity.wgsl";
+import { octreeLosassoAdaptiveMassWGSL } from "../lib/methods/losasso/webgpu-octree-losasso-adaptive-mass.wgsl";
+import { makeOctreeLosassoAdaptiveDynamicsWGSL } from "../lib/methods/losasso/webgpu-octree-losasso-dynamics.wgsl";
 
 const naga = process.env.NAGA ?? "naga";
 const shaders = {
@@ -125,7 +126,8 @@ fn sampleCoarseOctreePhi(position:vec3f)->f32{return coarsePhi[u32(position.x)*0
   "secondary-liquid-particle-optics": secondaryParticleOpticalShader,
   "secondary-liquid-particle-compute": secondaryParticleComputeShader,
   "sparse-brick-dense-field": sparseBrickDenseFieldShader,
-  "octree-projection": octreeProjectionShader,
+  "octree-projection-power": octreePowerProjectionShader,
+  "octree-projection-losasso": octreeLosassoProjectionShader,
   "octree-spgrid-vcycle": octreeSPGridVCycleShader,
   "octree-section63-operator": octreeSPGridAccurateOperatorShader,
   "octree-section63-dispatch-gate": octreeSPGridAccurateDispatchGateShader,

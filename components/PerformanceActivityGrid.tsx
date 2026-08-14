@@ -9,12 +9,12 @@ import type {
   PerformanceActivityCaptureDiagnostics,
   PerformanceActivityCaptureReason,
   PerformanceActivityFrame,
-} from "@/lib/performance-activity";
+} from "../lib/core/performance-activity";
 import {
   performanceTraceAccounting,
   type PaperPhaseId,
   type PerformanceTrace,
-} from "@/lib/performance-trace";
+} from "../lib/core/performance-trace";
 
 export type PerformanceActivityEvidence =
   | "measured-progress"

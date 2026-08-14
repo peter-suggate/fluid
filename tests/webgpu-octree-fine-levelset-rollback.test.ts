@@ -5,14 +5,14 @@ import {
   FineLevelSetBrickOracle,
   packFineLevelSetBrickKey,
   planFineLevelSetBricks,
-} from "../lib/octree-fine-levelset-bricks";
-import { WebGPUFineLevelSetBricks } from "../lib/webgpu-octree-fine-levelset-bricks";
-import { PassBroker } from "../lib/webgpu-pass-broker";
+} from "../lib/methods/octree-shared/octree-fine-levelset-bricks";
+import { WebGPUFineLevelSetBricks } from "../lib/methods/octree-shared/webgpu-octree-fine-levelset-bricks";
+import { PassBroker } from "../lib/core/webgpu-pass-broker";
 import {
   FINE_LEVELSET_TOPOLOGY_ERROR,
   WebGPUFineLevelSetTopology,
   unpackFineLevelSetGPUTopologyControl,
-} from "../lib/webgpu-octree-fine-levelset-topology";
+} from "../lib/methods/octree-shared/webgpu-octree-fine-levelset-topology";
 
 // The Dawn Node binding schedules a native instance event pump beyond the
 // final device callback. Retain the instance for the test-process lifetime so

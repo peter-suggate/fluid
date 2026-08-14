@@ -1,14 +1,14 @@
 "use client";
 
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent } from "react";
-import { simulation } from "@/lib/simulation/controller";
-import { startQueryStateSync } from "@/lib/url-state";
-import { startSceneAutosave } from "@/lib/scene-autosave";
-import { browserSceneLibraryStorage } from "@/lib/scene-library";
-import { useDiagnosticsStore } from "@/lib/stores/diagnostics-store";
-import { useRuntimeStore } from "@/lib/stores/runtime-store";
-import { useUIStore } from "@/lib/stores/ui-store";
-import { useShellStore } from "@/lib/stores/shell-store";
+import { simulation } from "../lib/core/simulation/controller";
+import { startQueryStateSync } from "../lib/core/url-state";
+import { startSceneAutosave } from "../lib/core/scene-autosave";
+import { browserSceneLibraryStorage } from "../lib/core/scene-library";
+import { useDiagnosticsStore } from "../lib/core/stores/diagnostics-store";
+import { useRuntimeStore } from "../lib/core/stores/runtime-store";
+import { useUIStore } from "../lib/core/stores/ui-store";
+import { useShellStore } from "../lib/core/stores/shell-store";
 import { WebGPUViewport } from "./WebGPUViewport";
 import { EditorToolbar } from "./EditorToolbar";
 import { SceneOverlay } from "./SceneOverlay";
@@ -22,12 +22,12 @@ import { DiagnosticsPanel } from "./DiagnosticsPanel";
 import { PerformancePanel } from "./PerformancePanel";
 import { TransportBar } from "./TransportBar";
 import { RecordingPlaybackModal } from "./RecordingPlaybackModal";
-import type { ResourceActivity, ResourcePluginDefinition } from "@/lib/resource-readiness";
-import { resourceActivities, resourceActivitiesFor } from "@/lib/resource-readiness";
-import { requestManualGPUStart } from "@/lib/gpu-startup";
-import { useSafeBrowserGPUBringup } from "@/lib/use-safe-browser-gpu-bringup";
-import { useEditorShortcuts } from "@/lib/use-editor-shortcuts";
-import { MAX_RIGHT_PANEL_WIDTH, MIN_RIGHT_PANEL_WIDTH } from "@/lib/stores/ui-store";
+import type { ResourceActivity, ResourcePluginDefinition } from "../lib/core/resource-readiness";
+import { resourceActivities, resourceActivitiesFor } from "../lib/core/resource-readiness";
+import { requestManualGPUStart } from "../lib/core/gpu-startup";
+import { useSafeBrowserGPUBringup } from "../lib/core/use-safe-browser-gpu-bringup";
+import { useEditorShortcuts } from "../lib/core/use-editor-shortcuts";
+import { MAX_RIGHT_PANEL_WIDTH, MIN_RIGHT_PANEL_WIDTH } from "../lib/core/stores/ui-store";
 
 function RightPanelResizer() {
   const rightPanelWidth = useUIStore((state) => state.rightPanelWidth);

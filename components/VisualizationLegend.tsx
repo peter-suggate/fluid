@@ -1,11 +1,11 @@
 "use client";
 
-import { visualizationMark } from "@/lib/visualization-catalog";
+import { visualizationMark } from "../lib/core/visualization-catalog";
 import type {
   Visualization,
   VisualizationLegendEntry,
   VisualizationLegendMark,
-} from "@/lib/visualization-registry";
+} from "../lib/core/visualization-registry";
 
 /**
  * The mark a legend row draws, at legend size.

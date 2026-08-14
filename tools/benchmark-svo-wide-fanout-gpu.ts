@@ -2,10 +2,10 @@
 import assert from "node:assert/strict";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { GPUPerformanceTraceRecorder } from "../lib/performance-trace";
-import { planSvoWideFanout } from "../lib/svo-wide-fanout";
-import { packSvoWideFanout, createWebgpuSvoWideFanoutTraversalWGSL, validateSvoWidePackedPlan } from "../lib/webgpu-svo-wide-fanout";
-import { webgpuSvoTraversalWGSL } from "../lib/webgpu-svo-traversal";
+import { GPUPerformanceTraceRecorder } from "../lib/core/performance-trace";
+import { planSvoWideFanout } from "../lib/svo/svo-wide-fanout";
+import { packSvoWideFanout, createWebgpuSvoWideFanoutTraversalWGSL, validateSvoWidePackedPlan } from "../lib/svo/webgpu-svo-wide-fanout";
+import { webgpuSvoTraversalWGSL } from "../lib/svo/webgpu-svo-traversal";
 
 type Variant = "canonical" | "wide";
 const INVALID = 0xffff_ffff;

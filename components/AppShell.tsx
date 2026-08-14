@@ -1,8 +1,14 @@
 "use client";
 
+// Composition root for the browser. The server components under `app/` are a
+// different module graph from the one the browser and its SSR pass evaluate,
+// so wiring the root layout wires neither: this is the outermost `use client`
+// module the router reaches, and installing the catalog here is what makes
+// every method resolvable by id in the browser.
+import "../lib/methods";
 import type { ReactNode } from "react";
 import { usePathname } from "next/navigation";
-import { useShellStore } from "@/lib/stores/shell-store";
+import { useShellStore } from "../lib/core/stores/shell-store";
 import { FluidLab } from "./FluidLab";
 
 /**

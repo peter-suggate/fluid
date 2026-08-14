@@ -6,16 +6,16 @@ import {
   FineLevelSetBrickOracle,
   packFineLevelSetBrickKey,
   planFineLevelSetBricks,
-} from "../lib/octree-fine-levelset-bricks";
+} from "../lib/methods/octree-shared/octree-fine-levelset-bricks";
 import {
   WebGPUFineLevelSetBricks,
   fineLevelSetBrickSamplingWGSL,
-} from "../lib/webgpu-octree-fine-levelset-bricks";
+} from "../lib/methods/octree-shared/webgpu-octree-fine-levelset-bricks";
 import {
   structuredFineLevelSetTransportWGSL,
   unpackFineLevelSetGPUTransportControl,
 } from
-  "../lib/webgpu-octree-fine-levelset-transport";
+  "../lib/methods/octree-shared/webgpu-octree-fine-levelset-transport";
 import {
   FINE_LEVELSET_JFA_B4_ADDRESSING_ENV,
   FINE_LEVELSET_JFA_COLD_COLLAR_REPAIR_PASSES,
@@ -35,13 +35,13 @@ import {
   planFineLevelSetJFAFrontierStages,
   planFineLevelSetJFAStrides,
   unpackFineLevelSetGPURedistanceControl,
-} from "../lib/webgpu-octree-fine-levelset-redistance";
+} from "../lib/methods/octree-shared/webgpu-octree-fine-levelset-redistance";
 
-import { PassBroker } from "../lib/webgpu-pass-broker";
+import { PassBroker } from "../lib/core/webgpu-pass-broker";
 import {
   unpackFineLevelSetPackedFlags,
   unpackFineLevelSetPackedPhi,
-} from "../lib/fine-levelset-packed-sample";
+} from "../lib/core/fine-levelset-packed-sample";
 import {
   decodeFineLevelSetRecurringRejectionClauses,
   FINE_LEVELSET_TOPOLOGY_FINALIZE_REASON,
@@ -57,7 +57,7 @@ import {
   WebGPUFineLevelSetLeafSeeds,
   WebGPUFineLevelSetTopology,
   unpackFineLevelSetGPUTopologyControl,
-} from "../lib/webgpu-octree-fine-levelset-topology";
+} from "../lib/methods/octree-shared/webgpu-octree-fine-levelset-topology";
 
 test("recurring topology rejection clauses retain stable forensic names", () => {
   assert.deepEqual(decodeFineLevelSetRecurringRejectionClauses(1 | 512 | 4096), [
@@ -459,7 +459,7 @@ test("membership-plus-one-ring fine dirty oracle is deleted", () => {
   );
   assert.doesNotMatch(shader, /DIRTY_ORACLE_MEMBERSHIP|membershipNeighborRadii/);
   assert.doesNotMatch(readFileSync(
-    new URL("../lib/webgpu-octree-fine-levelset-topology.ts", import.meta.url), "utf8"),
+    new URL("../lib/methods/octree-shared/webgpu-octree-fine-levelset-topology.ts", import.meta.url), "utf8"),
   /FLUID_DIRTY_ORACLE/);
 });
 
@@ -469,7 +469,7 @@ test("fine topology isolates cold closure and publishes recurring sparse deltas"
   ).replace(/\s+/g, "");
   const encode = WebGPUFineLevelSetTopology.prototype.encode.toString().replace(/\s+/g, "");
   const topologyHost = readFileSync(
-    new URL("../lib/webgpu-octree-fine-levelset-topology.ts", import.meta.url), "utf8",
+    new URL("../lib/methods/octree-shared/webgpu-octree-fine-levelset-topology.ts", import.meta.url), "utf8",
   ).replace(/\s+/g, "");
   const leafSeedHost = topologyHost.slice(topologyHost.indexOf("exportclassWebGPUFineLevelSetLeafSeeds"),
     topologyHost.indexOf("exportfunctionunpackFineLevelSetGPUTopologyControl"));
@@ -609,7 +609,7 @@ test("fine topology isolates cold closure and publishes recurring sparse deltas"
 
 test("direct recurring identity scatter exactly matches per-output membership", () => {
   const topologySource = readFileSync(
-    new URL("../lib/webgpu-octree-fine-levelset-topology.ts", import.meta.url), "utf8",
+    new URL("../lib/methods/octree-shared/webgpu-octree-fine-levelset-topology.ts", import.meta.url), "utf8",
   );
   assert.doesNotMatch(topologySource, /clearFinePageDirectory|logicalBrickCount\s*\/\s*64/,
     "recurring publication must not clear the logical-directory capacity");
@@ -1247,7 +1247,7 @@ test("B4 flood addressing changes only the seed address arithmetic", () => {
     fineLevelSetJFACPTB4AddressingWGSL.indexOf("fn cooperativeFlood"),
     fineLevelSetJFACPTB4AddressingWGSL.indexOf("fn resolvedDistance"));
   assert.match(flood,
-    /let seedQ=physicalSampleQ\(candidate\);let delta=\(vec3f\(q\)\+vec3f\(\.5\)\)-closestPointAt\(seedQ,candidate\);let candidateDistance=dot\(delta,delta\);let candidateKey=sampleKey\(seedQ\);/,
+    /let seedQ=physicalSampleQ\(candidate\);let delta=\(vec3f\(q\)\+vec3f\(\.5\)\)-closestPointAt\(seedQ,candidate\);let candidateDistance=dot\(delta,delta\);let candidateKey=seedOrderKey\(candidate,sampleKey\(seedQ\)\);/,
     "the candidate's physical coordinate must be resolved once and shared");
   assert.equal(flood.match(/physicalSampleQ\(/g)?.length, 1,
     "a candidate lane must resolve its seed coordinate exactly once");

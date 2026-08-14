@@ -2,10 +2,10 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
-import { decodeGeneratedOctreePowerCatalog } from "../lib/generated/octree-power-catalog";
-import { PassBroker } from "../lib/webgpu-pass-broker";
-import { WebGPUOctreePowerTopology } from "../lib/webgpu-octree-power-topology";
-import { usePerformanceInstrumentationStore } from "../lib/stores/performance-instrumentation-store";
+import { decodeGeneratedOctreePowerCatalog } from "../lib/methods/power/generated/octree-power-catalog";
+import { PassBroker } from "../lib/core/webgpu-pass-broker";
+import { WebGPUOctreePowerTopology } from "../lib/methods/power/webgpu-octree-power-topology";
+import { usePerformanceInstrumentationStore } from "../lib/core/stores/performance-instrumentation-store";
 import {
   OCTREE_STRUCTURED_FINALIZE_LANES,
   OCTREE_STRUCTURED_FINALIZE_WORKGROUP_BYTES,
@@ -17,7 +17,7 @@ import {
   structuredImageIdentityCarryEnabled,
   structuredReconstructionIdentityGateEnabled,
   structuredVelocityRowCapacityForBindingLimit,
-} from "../lib/webgpu-octree-structured-velocity-gpu";
+} from "../lib/methods/power/webgpu-octree-structured-velocity-gpu";
 
 // Numerical harnesses submit their own raw encoders; exercise the production
 // shader variant instead of the solver-owned activity binding session.
@@ -314,12 +314,12 @@ test("the carried velocity reconstruction can publish zero launches for provably
   assert.match(directStructuredVelocityPublicationWGSL,
     /reconstructionIdentityGateEnabled:u32,/,
     "the gate must be a uniform arm so both A/B arms compile the identical module");
-  const host = readFileSync(new URL("../lib/webgpu-octree-structured-velocity-gpu.ts", import.meta.url), "utf8");
+  const host = readFileSync(new URL("../lib/methods/power/webgpu-octree-structured-velocity-gpu.ts", import.meta.url), "utf8");
   assert.match(host, /words\[44\] = structuredReconstructionIdentityGateEnabled\(\) \? 1 : 0;/);
   // Record 27 is consumed twice per substep: once at the tail of
   // encodeCandidatePasses and once directly from the octree's inactive coupled
   // candidate, so both launches disappear together.
-  const octree = readFileSync(new URL("../lib/webgpu-octree.ts", import.meta.url), "utf8");
+  const octree = readFileSync(new URL("../lib/methods/power/octree-power-lane.ts", import.meta.url), "utf8");
   assert.equal([...octree.matchAll(/encodeCandidateReconstruction\(/g)].length, 1,
     "the second per-substep reconstruction launch must stay a single, findable call site");
 });
@@ -417,7 +417,7 @@ test("rejected packed A/B publication preserves every accepted byte", {
   const device = await adapter.requestDevice({ requiredLimits: {
     maxStorageBuffersPerShaderStage: Math.min(10, adapter.limits.maxStorageBuffersPerShaderStage),
   } });
-  const catalogBytes = readFileSync(new URL("../lib/generated/octree-power-catalog.bin", import.meta.url));
+  const catalogBytes = readFileSync(new URL("../lib/methods/power/generated/octree-power-catalog.bin", import.meta.url));
   const catalog = decodeGeneratedOctreePowerCatalog(catalogBytes.buffer.slice(
     catalogBytes.byteOffset, catalogBytes.byteOffset + catalogBytes.byteLength));
   const topology = new WebGPUOctreePowerTopology(device, 1, catalog);

@@ -1,6 +1,6 @@
 import { pathToFileURL } from "node:url";
-import { GPUPerformanceTraceRecorder } from "../lib/performance-trace";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "./webgpu-smoke-isolation";
+import { GPUPerformanceTraceRecorder } from "../lib/core/performance-trace";
+import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 
 // Match the captured large-lane resident range without landing on Dawn/Metal's
 // unstable synthetic 16,384-page boundary (the same boundary that kills the

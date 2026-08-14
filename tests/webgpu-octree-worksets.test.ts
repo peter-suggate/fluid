@@ -16,7 +16,7 @@ import {
   scatterOctreeMarked,
   unpackOctreeWorksetHeader,
   validateOctreeWorkset,
-} from "../lib/webgpu-octree-worksets";
+} from "../lib/methods/octree-shared/webgpu-octree-worksets";
 
 test("common header places the indirect record at words four through six", () => {
   const packet = buildOctreeWorkset([9, 3, 7], {

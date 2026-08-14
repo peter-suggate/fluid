@@ -4,11 +4,22 @@ import path from "node:path";
 import test from "node:test";
 import ts from "typescript";
 
+/**
+ * The harness is acceptance-lane machinery, not product code.
+ *
+ * It lives under lib/ so a lane can import it as a library, but it runs only
+ * in Node, only inside a fenced smoke run, and the compilation policy below
+ * exists to protect an interactive frame — which the harness never draws.
+ */
+const NON_PRODUCTION_DIRECTORIES = new Set(["harness"]);
+
 async function sourceFiles(directory: string): Promise<string[]> {
   const entries = await readdir(directory, { withFileTypes: true });
   const nested = await Promise.all(entries.map(async (entry) => {
     const target = path.join(directory, entry.name);
-    if (entry.isDirectory()) return sourceFiles(target);
+    if (entry.isDirectory()) {
+      return NON_PRODUCTION_DIRECTORIES.has(entry.name) ? [] : sourceFiles(target);
+    }
     return entry.isFile() && /\.(?:ts|tsx)$/.test(entry.name) ? [target] : [];
   }));
   return nested.flat();

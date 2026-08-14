@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { PerformanceTrace } from "../lib/performance-trace";
+import type { PerformanceTrace } from "../lib/core/performance-trace";
 import {
   buildPowerDamPassBoundaryProfile,
   powerDamComputePassStage,
@@ -26,7 +26,7 @@ const physicsTrace = (phases: PerformanceTrace["phases"]): PerformanceTrace => (
 
 test("power dam throughput summary normalizes command costs per advance", () => {
   const summary = summarizePowerDamPerformance({
-    scenario: "minimal-power-dam-break", method: "octree", phase: "result",
+    scenario: "minimal-power-dam-break", method: "power-liquids", phase: "result",
     steps: 4, simulationWall_ms: 240, validationErrors: [],
     gpuCommandAudit: {
       dispatches: 400, indirectDispatches: 240, computePasses: 80,
@@ -66,7 +66,7 @@ test("power dam throughput summary normalizes command costs per advance", () => 
 test("fine GPU pass timestamps normalize by sampled advances, not the full smoke length", () => {
   const summary = summarizePowerDamPerformance({
     scenario: "minimal-power-dam-break",
-    method: "octree",
+    method: "power-liquids",
     phase: "result",
     steps: 62,
     simulationWall_ms: 620,
@@ -97,7 +97,7 @@ test("fine GPU pass timestamps normalize by sampled advances, not the full smoke
  */
 test("pass boundary causes rank by measured closures and separate batchable requests", () => {
   const summary = summarizePowerDamPerformance({
-    scenario: "minimal-power-dam-break", method: "octree", phase: "result",
+    scenario: "minimal-power-dam-break", method: "power-liquids", phase: "result",
     steps: 4, simulationWall_ms: 240,
     gpuPassBoundaryAudit: {
       schemaVersion: 1,
@@ -258,7 +258,7 @@ test("pressure kernel taxonomy exposes transfer direction and hierarchy level", 
 test("quiescent paired-prefix window subtracts cumulative work and retains terminal counters", () => {
   const prefix = {
     scenario: "minimal-power-dam-break",
-    method: "octree",
+    method: "power-liquids",
     phase: "result" as const,
     steps: 500,
     simulatedTime_s: 2,
@@ -391,7 +391,7 @@ test("quiescent paired-prefix window subtracts cumulative work and retains termi
 test("quiescent paired-prefix window fails closed when cumulative counters regress", () => {
   const common = {
     scenario: "minimal-power-dam-break",
-    method: "octree",
+    method: "power-liquids",
     phase: "result" as const,
     simulationWall_ms: 100,
     gpuCommandAudit: { dispatches: 10 },
@@ -421,7 +421,7 @@ test("compute-pass attribution aggregates indexed native labels into stable owni
   computePassesByLabel["Rank fixed octree fine-seed candidate records"] = { calls: 2, bytes: 0 };
   computePassesByLabel["Finalize octree fine-seed candidate publication"] = { calls: 2, bytes: 0 };
   const summary = summarizePowerDamPerformance({
-    scenario: "dam-break-ui", method: "octree", phase: "result", steps: 2,
+    scenario: "dam-break-ui", method: "losasso", phase: "result", steps: 2,
     simulationWall_ms: 100, gpuCommandAudit: { computePasses: 60, computePassesByLabel },
   });
   assert.deepEqual(summary.commands?.computePassesByStage, {
@@ -443,7 +443,7 @@ test("compute-pass attribution is a closed ownership table", () => {
   assert.equal(powerDamComputePassStage("A newly introduced mystery pass"), undefined);
 
   const summary = summarizePowerDamPerformance({
-    scenario: "dam-break-ui", method: "octree", phase: "result", steps: 2,
+    scenario: "dam-break-ui", method: "losasso", phase: "result", steps: 2,
     simulationWall_ms: 1, gpuCommandAudit: {
       computePasses: 4,
       computePassesByLabel: { "A newly introduced mystery pass": { calls: 4, bytes: 0 } },
@@ -459,7 +459,7 @@ test("compute-pass attribution is a closed ownership table", () => {
 
 test("generic physics attribution is exact and aggregates repeated semantic phases", () => {
   const summary = summarizePowerDamPerformance({
-    scenario: "dam-break-ui", method: "octree", phase: "result", steps: 62,
+    scenario: "dam-break-ui", method: "losasso", phase: "result", steps: 62,
     simulationWall_ms: 4_200,
     physicsTrace: physicsTrace([
       { id: "coarse-grid", label: "Adaptive coarse-grid topology", duration_ms: 9 },
@@ -482,13 +482,13 @@ test("NDJSON parsing ignores logs and selects octree result records", () => {
   assert.equal(powerDamResultFromLine("SAFETY: close browser tabs"), undefined);
   assert.equal(powerDamResultFromLine(JSON.stringify({ phase: "result", method: "uniform" })), undefined);
   assert.equal(powerDamResultFromLine(JSON.stringify({
-    phase: "result", method: "octree", scenario: "dam-break-ui", steps: 62, simulationWall_ms: 4200,
+    phase: "result", method: "losasso", scenario: "dam-break-ui", steps: 62, simulationWall_ms: 4200,
   }))?.scenario, "dam-break-ui");
 });
 
 test("performance limits gate throughput and generic pressure-system attribution independently", () => {
   const summary = summarizePowerDamPerformance({
-    scenario: "dam-break-ui", method: "octree", phase: "result", steps: 2,
+    scenario: "dam-break-ui", method: "losasso", phase: "result", steps: 2,
     simulationWall_ms: 120,
     gpuCommandAudit: {
       dispatches: 300, computePasses: 50,
@@ -515,7 +515,7 @@ test("performance limits gate throughput and generic pressure-system attribution
 
 test("compute-pass budget rejects missing and unnamed stage ownership", () => {
   const missing = summarizePowerDamPerformance({
-    scenario: "dam-break-ui", method: "octree", phase: "result", steps: 2,
+    scenario: "dam-break-ui", method: "losasso", phase: "result", steps: 2,
     simulationWall_ms: 1, gpuCommandAudit: { computePasses: 4 },
   });
   assert.deepEqual(powerDamPerformanceFailures(missing, {
@@ -529,7 +529,7 @@ test("compute-pass budget rejects missing and unnamed stage ownership", () => {
   // complete for it -- while still being reported separately, which is the
   // point of the separate bucket.
   const unlabeled = summarizePowerDamPerformance({
-    scenario: "dam-break-ui", method: "octree", phase: "result", steps: 2,
+    scenario: "dam-break-ui", method: "losasso", phase: "result", steps: 2,
     simulationWall_ms: 1, gpuCommandAudit: {
       computePasses: 4,
       computePassesByLabel: { "<unlabeled compute pass>": { calls: 4, bytes: 0 } },
@@ -546,7 +546,7 @@ test("compute-pass budget rejects missing and unnamed stage ownership", () => {
   // exists for, and bucketing the known unlabeled pass must not have opened a
   // hole for genuinely unattributed work.
   const unowned = summarizePowerDamPerformance({
-    scenario: "dam-break-ui", method: "octree", phase: "result", steps: 2,
+    scenario: "dam-break-ui", method: "losasso", phase: "result", steps: 2,
     simulationWall_ms: 1, gpuCommandAudit: {
       computePasses: 4,
       computePassesByLabel: { "A newly introduced mystery pass": { calls: 4, bytes: 0 } },
@@ -559,7 +559,7 @@ test("compute-pass budget rejects missing and unnamed stage ownership", () => {
 
 test("configured structural gates fail closed when their audit source is absent", () => {
   const summary = summarizePowerDamPerformance({
-    scenario: "dam-break-ui", method: "octree", phase: "result", steps: 1,
+    scenario: "dam-break-ui", method: "losasso", phase: "result", steps: 1,
     simulationWall_ms: 1,
   });
   assert.deepEqual(powerDamPerformanceFailures(summary, {

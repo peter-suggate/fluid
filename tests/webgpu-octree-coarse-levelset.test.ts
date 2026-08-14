@@ -7,19 +7,19 @@ import {
   octreeCoarsePhiBootstrapActivityShader,
   octreeCoarsePhiBootstrapShader,
   planOctreeCoarsePhi,
-} from "../lib/webgpu-octree-coarse-levelset";
-import { OCTREE_COARSE_PHI_BYTES, OCTREE_COARSE_PHI_FLAG } from "../lib/octree-coarse-levelset";
-import { OCTREE_FINE_SEED_STATE } from "../lib/octree-fine-seed-leaves";
+} from "../lib/methods/octree-shared/webgpu-octree-coarse-levelset";
+import { OCTREE_COARSE_PHI_BYTES, OCTREE_COARSE_PHI_FLAG } from "../lib/methods/octree-shared/octree-coarse-levelset";
+import { OCTREE_FINE_SEED_STATE } from "../lib/methods/octree-shared/octree-fine-seed-leaves";
 import {
   createGPULogicalActivityAdoptionContext,
   gpuLogicalActivityTaskDescriptions,
-} from "../lib/gpu-logical-activity-adoption";
+} from "../lib/core/gpu-logical-activity-adoption";
 import {
   assertWGSLActivityBindingEligibility,
   auditWGSLComputeBindingReachability,
-} from "../lib/wgsl-binding-reachability";
-import { usePerformanceInstrumentationStore } from "../lib/stores/performance-instrumentation-store";
-import { PassBroker } from "../lib/webgpu-pass-broker";
+} from "../lib/core/wgsl-binding-reachability";
+import { usePerformanceInstrumentationStore } from "../lib/core/stores/performance-instrumentation-store";
+import { PassBroker } from "../lib/core/webgpu-pass-broker";
 
 // Standalone Dawn execution below does not install the frame-owned recorder.
 // Activity source and compilation are exercised explicitly in the focused test.

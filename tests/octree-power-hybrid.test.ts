@@ -5,9 +5,9 @@ import {
   OCTREE_POWER_HYBRID_ROW_CLASS,
   applyOctreePowerHybridMatrix,
   buildOctreePowerHybridPlan,
-} from "../lib/octree-power-hybrid";
-import { applyOctreePowerMatrix } from "../lib/octree-power-operator";
-import { OCTREE_CUBE_TRANSFORMS } from "../lib/octree-power-topology";
+} from "../lib/methods/power/octree-power-hybrid";
+import { applyOctreePowerMatrix } from "../lib/methods/power/octree-power-operator";
+import { OCTREE_CUBE_TRANSFORMS } from "../lib/methods/power/octree-power-topology";
 import { buildCartesianPowerFixture } from "../tools/octree-power-hybrid-cartesian-fixture";
 
 const bits64 = (value: number) => new BigUint64Array(Float64Array.of(value).buffer)[0];

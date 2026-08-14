@@ -64,26 +64,30 @@
 import assert from "node:assert/strict";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { octreeMethod } from "../lib/methods/octree";
-import type { GPUSolverInstance } from "../lib/methods/types";
+// Composition root for this entry point: importing the method catalog installs
+// the simulation methods and the octree coarse-dynamics lanes, without which
+// constructing a solver throws rather than silently running the wrong backend.
+import "../lib/methods";
+import { losassoMethod } from "../lib/methods/losasso/method";
+import type { GPUSolverInstance } from "../lib/core/method-contract";
+import { octreeDebugSources } from "../lib/methods/octree-shared/octree-debug-sources";
 import {
   unpackFineLevelSetPackedFlags,
   unpackFineLevelSetPackedPhi,
-} from "../lib/fine-levelset-packed-sample";
-import { getScenePreset } from "../lib/scenes";
-import type { WebGPUFineLevelSetBrickSource } from
-  "../lib/webgpu-octree-fine-levelset-bricks";
-import { unpackAdaptivePhiReceipt } from "../lib/webgpu-octree-losasso-adaptive-phi";
+} from "../lib/core/fine-levelset-packed-sample";
+import { getScenePreset } from "../lib/core/scenes";
+import type { WebGPUFineLevelSetBrickSource } from "../lib/core/levelset-consumer-abi";
+import { unpackAdaptivePhiReceipt } from "../lib/methods/losasso/webgpu-octree-losasso-adaptive-phi";
 import { adaptiveMassControlLayout, unpackAdaptiveMassReceipt } from
-  "../lib/webgpu-octree-losasso-adaptive-mass";
+  "../lib/methods/losasso/webgpu-octree-losasso-adaptive-mass";
 import { LOSASSO_SURFACE_GRAPH_CONTROL } from
-  "../lib/webgpu-octree-losasso-surface-graph";
-import { requiredFluidDeviceLimits } from "../lib/webgpu-device-limits";
-import { readBufferBinding } from "./webgpu-smoke-readbacks";
+  "../lib/methods/losasso/webgpu-octree-losasso-surface-graph";
+import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
+import { readBufferBinding } from "../lib/harness/webgpu-smoke-readbacks";
 import {
   acquireWebGPUExclusiveLock,
   releaseWebGPUExclusiveLock,
-} from "./webgpu-smoke-isolation";
+} from "../lib/harness/webgpu-smoke-isolation";
 
 const HEADER_WORDS = 8;
 const ROW_WORDS = 8;
@@ -888,7 +892,7 @@ try {
   }
   const solverQuality = scenePreset.methodProfile?.quality ?? "balanced";
   const solverValues = {
-    ...octreeMethod.presetFor(solverQuality),
+    ...losassoMethod.presetFor(solverQuality),
     ...scenePreset.methodProfile?.overrides,
     secondaryParticles: "off",
     // Bisection handles only: the browser never sets these, and the untouched
@@ -908,12 +912,13 @@ try {
     ...(process.env.FLUID_OCTREE_ADAPTIVITY
       ? { octreeAdaptivity: Number(process.env.FLUID_OCTREE_ADAPTIVITY) } : {}),
   };
-  const solver = await octreeMethod.createSolverAsync!(device, scene, solverQuality,
+  const solver = await losassoMethod.createSolverAsync!(device, scene, solverQuality,
     solverValues, undefined, () => {}) as GPUSolverInstance;
   solver.applyRuntimeValues?.(solverValues);
   await device.queue.onSubmittedWorkDone();
   const dimensions = [solver.info.nx, solver.info.ny, solver.info.nz] as
     [number, number, number];
+  const debug = octreeDebugSources(solver);
 
   const projection = (solver as unknown as {
     octreeProjection?: {
@@ -1424,11 +1429,11 @@ try {
         + `face-connected component`);
     }
     const fineTransportControl = await readControlWords(device,
-      solver.globalFineTransportControl, 16);
+      debug.globalFineTransportControl, 16);
     const fineTopologyControl = await readControlWords(device,
       fineSource?.topologyControl, 16);
     const fineRedistanceControl = await readControlWords(device,
-      solver.globalFineRedistanceControl, 24);
+      debug.globalFineRedistanceControl, 24);
     const transitionSources = projection?.losassoBackend;
     const topologyTransition = topologyTransitionDiagnostics ? {
       acceptedAuthority: authorityControlSummary(await readControlWords(device,
@@ -1677,6 +1682,8 @@ try {
       typeof unpackAdaptivePhiReceipt> | undefined;
     const massReceipt = sample.adaptiveMassReceipt as ReturnType<
       typeof unpackAdaptiveMassReceipt> | undefined;
+    const candidateDiagnostics = sample.candidateDiagnostics as Awaited<ReturnType<
+      NonNullable<typeof projection>["readLosassoAuthorityDiagnostics"]>>;
     return {
       t_s: sample.t_s,
       wetCells: sample.wetCells,
@@ -1740,12 +1747,12 @@ try {
       fineTransportControl: sample.fineTransportControl,
       fineTopologyControl: sample.fineTopologyControl,
       fineRedistanceControl: sample.fineRedistanceControl,
-      candidateAuthority: sample.candidateDiagnostics?.candidate,
-      candidateGraph: sample.candidateDiagnostics?.candidateAdaptiveGraph,
-      ownerCandidate: sample.candidateDiagnostics?.ownerCandidate,
-      frontierControl: sample.candidateDiagnostics?.frontierControl,
-      massControl: sample.candidateDiagnostics?.adaptiveMassControl,
-      velocityMigration: sample.candidateDiagnostics?.velocityMigration,
+      candidateAuthority: candidateDiagnostics?.candidate,
+      candidateGraph: candidateDiagnostics?.candidateAdaptiveGraph,
+      ownerCandidate: candidateDiagnostics?.ownerCandidate,
+      frontierControl: candidateDiagnostics?.frontierControl,
+      massControl: candidateDiagnostics?.adaptiveMassControl,
+      velocityMigration: candidateDiagnostics?.velocityMigration,
       maximumSpeed: sample.maximumSpeed,
       pressureResidual: sample.pressureResidual,
       pressureRelativeResidual: sample.pressureRelativeResidual,

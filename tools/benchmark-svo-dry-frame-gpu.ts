@@ -84,6 +84,9 @@
  *      render-only frame loop for external xctrace attachment and exits before
  *      the benchmark's timestamp queries, A/Bs, or readbacks.
  */
+// These lanes render without a solver, but they construct the renderer, and
+// a renderer resolves a method by id on any path that reaches a scene.
+import "../lib/methods";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -92,8 +95,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import zlib from "node:zlib";
 
-import type { EnvironmentId } from "../lib/environments";
-import { defaultCamera, type CameraState, type SceneDescription } from "../lib/model";
+import type { EnvironmentId } from "../lib/core/environments";
+import { defaultCamera, type CameraState, type SceneDescription } from "../lib/core/model";
 import {
   GPUPassTimestampRecorder,
   passTimestampPerformanceTrace,
@@ -101,22 +104,22 @@ import {
   type GPUPassTimestampSample,
   type PaperPhaseId,
   type PerformanceTrace,
-} from "../lib/performance-trace";
-import { heroGardenCamera } from "../lib/hero-garden-scene";
-import { createHeroGardenHoseStressScene } from "../lib/hero-garden-stress-scene";
-import { sceneDefinitionTakesLattice, sceneDocumentAtLattice } from "../lib/scene-definition";
-import { getSceneDefinition, getScenePreset } from "../lib/scenes";
-import type { SvoConeTracingMode } from "../lib/svo-render-options";
+} from "../lib/core/performance-trace";
+import { heroGardenCamera } from "../lib/core/hero-garden-scene";
+import { createHeroGardenHoseStressScene } from "../lib/core/hero-garden-stress-scene";
+import { sceneDefinitionTakesLattice, sceneDocumentAtLattice } from "../lib/core/scene-definition";
+import { getSceneDefinition, getScenePreset } from "../lib/core/scenes";
+import type { SvoConeTracingMode } from "../lib/svo/svo-render-options";
 import {
   DEFAULT_SVO_RENDER_TUNING,
   svoEnvironmentTreeRefinementDepth,
   svoSceneryDetailCellSize_m,
   SVO_ENVIRONMENT_REFINEMENT_DEPTH_MAXIMUM,
   type SvoConeRadianceReconstruction,
-} from "../lib/svo-render-tuning";
-import { effectiveSvoScreenSpaceThresholdPixels, SVO_SCREEN_SPACE_TERMINATION_CONTRACT } from "../lib/svo-screen-space-termination";
-import { WebGPULiveSvoScene } from "../lib/webgpu-live-svo-scene";
-import { LIVE_SVO_RADIANCE_FEEDBACK } from "../lib/webgpu-svo-live-derived-builder";
+} from "../lib/svo/svo-render-tuning";
+import { effectiveSvoScreenSpaceThresholdPixels, SVO_SCREEN_SPACE_TERMINATION_CONTRACT } from "../lib/svo/svo-screen-space-termination";
+import { WebGPULiveSvoScene } from "../lib/svo/webgpu-live-svo-scene";
+import { LIVE_SVO_RADIANCE_FEEDBACK } from "../lib/svo/webgpu-svo-live-derived-builder";
 import {
   buildSvoDrySceneAssembly,
   createDawnRenderDevice,
@@ -127,7 +130,7 @@ import {
 import {
   createPassEncoderIsolationScratch,
   isolateComputePassEncoders,
-} from "./webgpu-pass-encoder-isolation";
+} from "../lib/harness/webgpu-pass-encoder-isolation";
 import {
   canConsumeSparseVoxelPbrMaterials,
   canEncodeSparseVoxelDryScene,
@@ -144,8 +147,8 @@ import {
   type SvoDryShadingPath,
   type SvoDryRayCoherenceMode,
   type SvoDryOptimizationExperiments,
-} from "../lib/webgpu-svo-dry-scene";
-import { SVO_GBUFFER_RENDER_TARGET_CONTRACT } from "../lib/webgpu-svo-gbuffer-targets";
+} from "../lib/svo/webgpu-svo-dry-scene";
+import { SVO_GBUFFER_RENDER_TARGET_CONTRACT } from "../lib/svo/webgpu-svo-gbuffer-targets";
 
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
 

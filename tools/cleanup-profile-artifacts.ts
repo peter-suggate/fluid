@@ -19,7 +19,7 @@ import {
 } from "node:fs";
 import { basename, dirname, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { readWebGPUExclusiveLockHolder } from "./webgpu-smoke-isolation";
+import { readWebGPUExclusiveLockHolder } from "../lib/harness/webgpu-smoke-isolation";
 
 // fileURLToPath preserves the directory URL's trailing slash while dirname()
 // does not. Normalise once so the exact-root safety comparison is meaningful.

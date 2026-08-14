@@ -21,16 +21,16 @@
  * A ladder is deliberately one variable wide. Two swept at once cannot tell you
  * which of them moved the picture.
  */
-import { HERO_GARDEN_VESSEL } from "../../lib/hero-garden-scene";
-import type { CameraState, SceneDescription } from "../../lib/model";
-import type { SceneryNode } from "../../lib/scenery-graph";
-import { terrainHeightAt } from "../../lib/terrain";
+import { HERO_GARDEN_VESSEL } from "../../lib/core/hero-garden-scene";
+import type { CameraState, SceneDescription } from "../../lib/core/model";
+import type { SceneryNode } from "../../lib/core/scenery-graph";
+import { terrainHeightAt } from "../../lib/core/terrain";
 import {
   ROSETTE_AIR_PLANT,
   ROSETTE_GRASS_TUFT,
   rosetteNodes,
   type RosetteForm,
-} from "../../lib/voxel-scenery/rosette";
+} from "../../lib/core/voxel-scenery/rosette";
 import { heroPreviewCamera, heroPreviewScene } from "./hero-still";
 
 type PreviewMode = "bank" | "width" | "segments";

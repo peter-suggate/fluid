@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
-import { simulation } from "@/lib/simulation/controller";
+import { simulation } from "../lib/core/simulation/controller";
 import {
   cleanSceneLink,
   countedSceneOverrides,
@@ -9,12 +9,12 @@ import {
   sceneOverridesInQuery,
   type SceneOverride,
   type SceneOverrideGroup,
-} from "@/lib/scene-overrides";
-import { useMethodStore } from "@/lib/stores/method-store";
-import { useSceneStore } from "@/lib/stores/scene-store";
-import { useShellStore } from "@/lib/stores/shell-store";
-import { useUIStore } from "@/lib/stores/ui-store";
-import { createSceneQueryLayerCache, replaceQueryStateUrl, serializeQueryState } from "@/lib/url-state";
+} from "../lib/core/scene-overrides";
+import { useMethodStore } from "../lib/core/stores/method-store";
+import { useSceneStore } from "../lib/core/stores/scene-store";
+import { useShellStore } from "../lib/core/stores/shell-store";
+import { useUIStore } from "../lib/core/stores/ui-store";
+import { createSceneQueryLayerCache, replaceQueryStateUrl, serializeQueryState } from "../lib/core/url-state";
 
 /**
  * One cache for the process, matching `startQueryStateSync`'s own: the scene

@@ -2,9 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
-import { OCTREE_COARSE_PHI_FLAG } from "../lib/octree-coarse-levelset";
-import { decodeGeneratedOctreePowerCatalog } from "../lib/generated/octree-power-catalog";
-import { WebGPUOctreeCoarseLevelSet } from "../lib/webgpu-octree-coarse-levelset";
+import { OCTREE_COARSE_PHI_FLAG } from "../lib/methods/octree-shared/octree-coarse-levelset";
+import { decodeGeneratedOctreePowerCatalog } from "../lib/methods/power/generated/octree-power-catalog";
+import { WebGPUOctreeCoarseLevelSet } from "../lib/methods/octree-shared/webgpu-octree-coarse-levelset";
 import {
   OCTREE_POWER_COARSE_LEVELSET_CONTROL_BYTES,
   OCTREE_POWER_COARSE_LEVELSET_ERROR,
@@ -16,10 +16,10 @@ import {
   octreePowerCoarseLevelSetShader,
   planOctreePowerCoarseLevelSet,
   unpackOctreePowerCoarseLevelSetControl,
-} from "../lib/webgpu-octree-power-coarse-levelset";
-import { PassBroker } from "../lib/webgpu-pass-broker";
-import { OCTREE_POWER_TOPOLOGY_VALID, WebGPUOctreePowerTopology } from "../lib/webgpu-octree-power-topology";
-import { requiredFluidDeviceLimits } from "../lib/webgpu-device-limits";
+} from "../lib/methods/power/webgpu-octree-power-coarse-levelset";
+import { PassBroker } from "../lib/core/webgpu-pass-broker";
+import { OCTREE_POWER_TOPOLOGY_VALID, WebGPUOctreePowerTopology } from "../lib/methods/power/webgpu-octree-power-topology";
+import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 
 test("fine modes retain the exact row-directory ABI while coarse-only opts into a dense complement", () => {
   const fine = planOctreePowerCoarseLevelSet(32);
@@ -60,7 +60,7 @@ test("Dawn runs live-row advection and cell-center fine restriction without read
   });
   const compilation = await device.createShaderModule({ code: octreePowerCoarseLevelSetShader }).getCompilationInfo();
   assert.deepEqual(compilation.messages.filter((message) => message.type === "error"), []);
-  const bytes = readFileSync(new URL("../lib/generated/octree-power-catalog.bin", import.meta.url));
+  const bytes = readFileSync(new URL("../lib/methods/power/generated/octree-power-catalog.bin", import.meta.url));
   const catalog = decodeGeneratedOctreePowerCatalog(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
   const rowCount = 8, topology = new WebGPUOctreePowerTopology(device, rowCount, catalog);
   const coarse = new WebGPUOctreeCoarseLevelSet(device, rowCount);

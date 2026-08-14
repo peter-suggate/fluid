@@ -1,23 +1,22 @@
 "use client";
 
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { useDiagnosticsStore } from "@/lib/stores/diagnostics-store";
-import { useMethodStore, resolvedMethodValues } from "@/lib/stores/method-store";
-import { useRuntimeStore } from "@/lib/stores/runtime-store";
-import { useSceneStore } from "@/lib/stores/scene-store";
-import { useUIStore } from "@/lib/stores/ui-store";
-import { usePerformanceInstrumentationStore } from "@/lib/stores/performance-instrumentation-store";
-import { averagePerformanceTraces, type PerformanceTrace } from "@/lib/performance-trace";
+import { useDiagnosticsStore } from "../lib/core/stores/diagnostics-store";
+import { useMethodStore, resolvedMethodValues } from "../lib/core/stores/method-store";
+import { useRuntimeStore } from "../lib/core/stores/runtime-store";
+import { useSceneStore } from "../lib/core/stores/scene-store";
+import { useUIStore } from "../lib/core/stores/ui-store";
+import { usePerformanceInstrumentationStore } from "../lib/core/stores/performance-instrumentation-store";
+import { averagePerformanceTraces, type PerformanceTrace } from "../lib/core/performance-trace";
 import {
   fluidPipelinePhaseCosts,
   type FluidPipelineContext,
   type FluidPipelineGraph,
   type FluidStageControl,
-} from "@/lib/fluid-pipeline";
-import { loadFluidPipeline } from "@/lib/fluid-pipelines";
-import { getMethod } from "@/lib/methods";
-import { simulation } from "@/lib/simulation/controller";
-import { sceneHasTerrain } from "@/lib/terrain";
+} from "../lib/core/fluid-pipeline";
+import { getMethod } from "@/lib/core/method-registry";
+import { simulation } from "../lib/core/simulation/controller";
+import { sceneHasTerrain } from "../lib/core/terrain";
 import { FluidPipeline } from "./FluidPipeline";
 import { PipeChoice, PipeRange, PipeToggle } from "./PipeControls";
 
@@ -79,7 +78,7 @@ export function FluidPipelinePanel() {
   useEffect(() => {
     let cancelled = false;
     setGraph(undefined);
-    void loadFluidPipeline(methodId).then((loaded) => {
+    void getMethod(methodId).pipelineGraph?.().then((loaded) => {
       if (!cancelled) setGraph(loaded);
     });
     return () => { cancelled = true; };

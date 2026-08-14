@@ -19,8 +19,8 @@ import {
   planBlastRadiusSchedule,
   summarizeBlastRadius,
   type BlastRadiusVec3,
-} from "../lib/fluid-blast-radius";
-import { planOctreeSolveTail, type OctreeSolveTailSceneProfile } from "../lib/octree-solve-tail-policy";
+} from "../lib/core/fluid-blast-radius";
+import { planOctreeSolveTail, type OctreeSolveTailSceneProfile } from "../lib/methods/octree-shared/octree-solve-tail-policy";
 
 /**
  * Scene profiles in the same shape the solver's tail policy consumes, so the

@@ -3,9 +3,9 @@ import {
   performanceTraceIsExact,
   type PaperPhaseId,
   type PerformanceTrace,
-} from "../lib/performance-trace";
-import type { GPUDataFlowManifest } from "./webgpu-data-flow-manifest";
-import type { OctreeWorkSnapshot } from "../lib/webgpu-octree-work-accounting";
+} from "../lib/core/performance-trace";
+import type { GPUDataFlowManifest } from "../lib/harness/webgpu-data-flow-manifest";
+import type { OctreeWorkSnapshot } from "../lib/methods/octree-shared/webgpu-octree-work-accounting";
 import {
   buildPowerDamPressureKernelProfile,
   type PowerDamPressureKernelProfile,
@@ -14,7 +14,7 @@ import {
   rankPassBrokerBoundaryAudit,
   type PassBrokerBoundaryAuditBucket,
   type PassBrokerBoundaryAuditSnapshot,
-} from "../lib/webgpu-pass-broker";
+} from "../lib/core/webgpu-pass-broker";
 
 export interface PowerDamCommandBucket {
   readonly calls: number;
@@ -838,7 +838,11 @@ export function powerDamResultFromLine(line: string): PowerDamResultRecord | und
   try { parsed = JSON.parse(line); } catch { return undefined; }
   if (!parsed || typeof parsed !== "object") return undefined;
   const candidate = parsed as Partial<PowerDamResultRecord>;
-  return candidate.phase === "result" && candidate.method === "octree"
+  // Both adaptive methods emit this record and both are benchmarked here; the
+  // uniform method's result lines share the stream and must not be summarized
+  // against Power/Losasso limits.
+  return candidate.phase === "result"
+    && (candidate.method === "losasso" || candidate.method === "power-liquids")
     ? candidate as PowerDamResultRecord : undefined;
 }
 

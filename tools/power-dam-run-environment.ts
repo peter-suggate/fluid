@@ -59,7 +59,6 @@ const MEASUREMENT_CLEAN: Readonly<Record<string, readonly (string | null)[]>> = 
   // A checkpoint is a fenced readback. `0` disables them.
   FLUID_CHECKPOINT_EVERY_S: ["0", null],
   FLUID_REGRESSION_ARTIFACT: ["0", null],
-  FLUID_CPU_ORACLE: ["0", null],
   FLUID_FIELD_STATS: ["0", null],
   FLUID_SPARSE_STATS: ["0", null],
   FLUID_RASTER_CHECKPOINTS: ["0", null],

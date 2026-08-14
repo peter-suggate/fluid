@@ -1,9 +1,9 @@
 import { pathToFileURL } from "node:url";
-import { GPUPerformanceTraceRecorder } from "../lib/performance-trace";
+import { GPUPerformanceTraceRecorder } from "../lib/core/performance-trace";
 import {
   acquireWebGPUExclusiveLock,
   releaseWebGPUExclusiveLock,
-} from "./webgpu-smoke-isolation";
+} from "../lib/harness/webgpu-smoke-isolation";
 
 await acquireWebGPUExclusiveLock("dawn-benchmark", "tools/benchmark-octree-pressure-page-shapes.ts");
 try {

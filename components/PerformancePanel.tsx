@@ -1,8 +1,8 @@
 "use client";
 
 import { useMemo } from "react";
-import { VISUALIZATION_FIELDS } from "@/lib/visualization-catalog";
-import type { FieldVisualization } from "@/lib/visualization-registry";
+import { VISUALIZATION_FIELDS } from "../lib/core/visualization-catalog";
+import type { FieldVisualization } from "../lib/core/visualization-registry";
 import { PerformanceActivityGrid } from "./PerformanceActivityGrid";
 import { PerformanceDials } from "./PerformanceDials";
 import {
@@ -10,20 +10,20 @@ import {
   performanceTraceIsExact,
   type PaperPhaseId,
   type PerformanceTrace,
-} from "@/lib/performance-trace";
-import { performanceActivityFrameHasSettledEvidence } from "@/lib/performance-activity";
-import { emptyPerformanceReport, useDiagnosticsStore } from "@/lib/stores/diagnostics-store";
-import { getMethod } from "@/lib/methods";
-import { simulation } from "@/lib/simulation/controller";
-import { usePerformanceActivityStore } from "@/lib/stores/performance-activity-store";
-import { useMethodStore } from "@/lib/stores/method-store";
+} from "../lib/core/performance-trace";
+import { performanceActivityFrameHasSettledEvidence } from "../lib/core/performance-activity";
+import { emptyPerformanceReport, useDiagnosticsStore } from "../lib/core/stores/diagnostics-store";
+import { getMethod } from "@/lib/core/method-registry";
+import { simulation } from "../lib/core/simulation/controller";
+import { usePerformanceActivityStore } from "../lib/core/stores/performance-activity-store";
+import { useMethodStore } from "../lib/core/stores/method-store";
 import {
   usePerformanceInstrumentationStore,
   type PerformanceInstrumentationMode,
-} from "@/lib/stores/performance-instrumentation-store";
-import { useRuntimeStore } from "@/lib/stores/runtime-store";
-import { useUIStore } from "@/lib/stores/ui-store";
-import type { GridOverlayConfig, GridOverlayMode } from "@/lib/webgpu-renderer";
+} from "../lib/core/stores/performance-instrumentation-store";
+import { useRuntimeStore } from "../lib/core/stores/runtime-store";
+import { useUIStore } from "../lib/core/stores/ui-store";
+import type { GridOverlayConfig, GridOverlayMode } from "../lib/core/webgpu-renderer";
 
 const PERFORMANCE_AVERAGE_WINDOW = 30;
 const PERFORMANCE_CAPTURE_MODES: readonly {
@@ -204,10 +204,11 @@ export function PerformancePanel() {
   };
   // Only the views the active method registered: a card offering a publication
   // the solver never produces is a button that draws nothing.
-  const supportedModes = new Set(getMethod(methodId).supportedFieldModes ?? []);
+  const method = getMethod(methodId);
+  const supportedModes = new Set(method.supportedFieldModes ?? []);
   const methodViews = PAPER_VIEWS.filter((view) => supportedModes.has(view.mode));
   const selectedView = methodViews.find((view) => view.mode === overlayMode);
-  const volumeCapable = methodId === "octree";
+  const volumeCapable = method.capabilities?.volumeRendering === true;
   const traces = [cpu, physics, presentation].filter((trace): trace is PerformanceTrace => trace !== undefined);
   const allExact = traces.length === 3 && traces.every(performanceTraceIsExact);
   const holdingPausedMeasurements = lanes.cpu.held || lanes.physics.held || lanes.presentation.held;
@@ -298,7 +299,7 @@ export function PerformancePanel() {
     </div>}
 
     <section className="paper-observatory">
-      <header><div><h3>Paper field observatory</h3><small>LIVE GPU PUBLICATIONS · NO FIELD READBACK</small></div><span>{methodId === "octree" ? "OCTREE AUTHORITY" : "SELECT OCTREE FOR FULL SET"}</span></header>
+      <header><div><h3>Paper field observatory</h3><small>LIVE GPU PUBLICATIONS · NO FIELD READBACK</small></div><span>{volumeCapable ? `${method.badge} AUTHORITY` : "SELECT A VOLUME METHOD FOR THE FULL SET"}</span></header>
       <div className="paper-view-grid">
         {methodViews.map((view) => {
           const active = overlayAxis !== "off" && overlayMode === view.mode;

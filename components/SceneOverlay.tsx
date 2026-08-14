@@ -2,10 +2,10 @@
 
 import { useRouter } from "next/navigation";
 import { SceneOverridesChip } from "./SceneOverridesChip";
-import { findSceneDefinition } from "@/lib/scenes";
-import { useSceneStore } from "@/lib/stores/scene-store";
-import { useUIStore } from "@/lib/stores/ui-store";
-import { planSceneRuntime } from "@/lib/scene-runtime";
+import { findSceneDefinition } from "../lib/core/scenes";
+import { useSceneStore } from "../lib/core/stores/scene-store";
+import { useUIStore } from "../lib/core/stores/ui-store";
+import { planSceneRuntime } from "../lib/core/scene-runtime";
 
 /**
  * The only always-visible scene affordances: which scene is loaded, the way back

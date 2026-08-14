@@ -10,13 +10,13 @@
  * unique keys, dense owner order, finite bounds, light-record budget, and that
  * nothing has been parked inside the container where the water lives.
  */
-import { environmentIds, type EnvironmentId } from "../lib/environments";
-import { createHeroGardenHoseScene, HERO_GARDEN_CELL_M } from "../lib/hero-garden-scene";
-import { cloneScene, defaultScene, type SceneDescription } from "../lib/model";
-import { buildSvoEnvironmentCoverage } from "../lib/svo-scene-coverage";
-import { SVO_LIGHT_MAXIMUM_RECORDS } from "../lib/svo-light-abi";
-import { terrainSampleShape } from "../lib/terrain";
-import { buildEnvironmentProxyCatalog, environmentProxyPrimitives } from "../lib/voxel-environments";
+import { environmentIds, type EnvironmentId } from "../lib/core/environments";
+import { createHeroGardenHoseScene, HERO_GARDEN_CELL_M } from "../lib/core/hero-garden-scene";
+import { cloneScene, defaultScene, type SceneDescription } from "../lib/core/model";
+import { buildSvoEnvironmentCoverage } from "../lib/svo/svo-scene-coverage";
+import { SVO_LIGHT_MAXIMUM_RECORDS } from "../lib/svo/svo-light-abi";
+import { terrainSampleShape } from "../lib/core/terrain";
+import { buildEnvironmentProxyCatalog, environmentProxyPrimitives } from "../lib/core/voxel-environments";
 
 /**
  * What gets walked, and why it is not simply `environmentIds`.

@@ -1,27 +1,22 @@
 "use client";
 
 import { RangeControl, Segmented } from "./controls";
-import { getMethod, interactiveSimulationMethods, type MethodParamSpec } from "@/lib/methods";
-import type { GPUQuality } from "@/lib/tall-cell-grid";
-import { simulation } from "@/lib/simulation/controller";
-import { useDiagnosticsStore } from "@/lib/stores/diagnostics-store";
-import { useMethodStore, resolvedMethodValues } from "@/lib/stores/method-store";
-import { isOctreePersistentMGPCGSolverLabel } from "@/lib/webgpu-octree-section43-contract";
+import { getMethod, interactiveSimulationMethods } from "@/lib/core/method-registry";
+import type { MethodParamSpec } from "@/lib/core/method-contract";
+import type { GPUQuality } from "../lib/core/gpu-quality";
+import { simulation } from "../lib/core/simulation/controller";
+import { useDiagnosticsStore } from "../lib/core/stores/diagnostics-store";
+import { useMethodStore, resolvedMethodValues } from "../lib/core/stores/method-store";
 
 function ParamControl({ spec, methodId }: { spec: MethodParamSpec; methodId: string }) {
   const methodState = useMethodStore();
   const values = resolvedMethodValues(methodState);
   const overridden = spec.key in (methodState.overrides[methodId] ?? {});
   if (spec.kind === "select") {
-    const fixedPowerFineBand = methodId === "octree"
-      && spec.key === "globalFineLevelSetFactor"
-      && values.coarseBackend === "power2017";
     return (
-      <label className="select-control" title={fixedPowerFineBand
-        ? "Power 2017 benchmark: separate factor-4 narrow-band level set (paper Section 5)."
-        : spec.hint}>
+      <label className="select-control" title={spec.hint}>
         <span>{spec.label}</span>
-        <select value={String(values[spec.key])} disabled={fixedPowerFineBand}
+        <select value={String(values[spec.key])}
           onChange={(event) => simulation.setMethodParam(methodId, spec.key, event.target.value)}>
           {spec.options.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
         </select>
@@ -45,22 +40,22 @@ function ParamControl({ spec, methodId }: { spec: MethodParamSpec; methodId: str
 
 /** Solver choice, quality, and the per-method parameters, as a configuration section. */
 export function MethodPanel() {
-  const methodId = useMethodStore((state) => state.methodId);
-  const quality = useMethodStore((state) => state.quality);
+  const methodState = useMethodStore();
+  const methodId = methodState.methodId;
+  const quality = methodState.quality;
   const gpuInfo = useDiagnosticsStore((state) => state.gpuInfo);
-  const fluidRenderState = useDiagnosticsStore((state) => state.fluidRenderState);
   const fluidResource = useDiagnosticsStore((state) => state.resourceReadiness.fluid);
   const method = getMethod(methodId);
   const coarse = method.params.filter((spec) => spec.tier === "coarse");
   const fine = method.params.filter((spec) => spec.tier === "fine");
   return (
     <section data-testid="method-panel" aria-busy={fluidResource.state === "preparing"}>
-      <div className="popover-section-heading"><h3>Method</h3><span>{method.backend === "webgpu" ? "WebGPU f32" : "CPU binary64"}</span></div>
+      <div className="popover-section-heading"><h3>Method</h3><span>WebGPU f32</span></div>
       {fluidResource.state === "preparing" && fluidResource.activity?.operation && <div className="method-apply-state" role="status"><i aria-hidden="true" /><span><strong>APPLYING</strong>{fluidResource.activity.operation}</span></div>}
       <Segmented
         ariaLabel="Simulation method"
         value={methodId}
-        options={interactiveSimulationMethods.map((candidate) => ({
+        options={interactiveSimulationMethods().map((candidate) => ({
           value: candidate.id,
           label: candidate.shortLabel,
           title: candidate.description,
@@ -82,19 +77,19 @@ export function MethodPanel() {
         </label>}
         {coarse.filter((spec) => spec.kind === "select").map((spec) => <ParamControl key={spec.key} spec={spec} methodId={methodId} />)}
       </div>
-      {method.backend === "webgpu" && gpuInfo && <div className="grid-readout" title="The grid the selected quality and parameters actually allocated" data-testid="grid-readout">
+      {gpuInfo && <div className="grid-readout" title="The grid the selected quality and parameters actually allocated" data-testid="grid-readout">
         <strong>{gpuInfo.nx} × {gpuInfo.ny} × {gpuInfo.nz}</strong>
         <span>{gpuInfo.cellCount.toLocaleString()} samples · {(gpuInfo.allocatedBytes / 1048576).toFixed(1)} MiB</span>
       </div>}
-      {method.backend === "cpu" && fluidRenderState && <div className="grid-readout" title="The MAC grid the selected cell size actually allocated" data-testid="grid-readout">
-        <strong>{fluidRenderState.nx} × {fluidRenderState.ny} × {fluidRenderState.nz}</strong>
-        <span>{(fluidRenderState.nx * fluidRenderState.ny * fluidRenderState.nz).toLocaleString()} cells · binary64</span>
-      </div>}
       {coarse.filter((spec) => spec.kind !== "select").map((spec) => <ParamControl key={spec.key} spec={spec} methodId={methodId} />)}
-      {methodId === "octree" && isOctreePersistentMGPCGSolverLabel(gpuInfo?.pressureSolver) && <div className="grid-readout" title="Actual GPU convergence work compared with the currently encoded safety cap">
-        <strong>{gpuInfo!.quadtreePressureIterationsUsed ?? "—"} / {gpuInfo!.quadtreePressureIterationBudget ?? "—"}</strong>
-        <span>PCG iterations executed / cap · {gpuInfo!.quadtreePressureConverged === undefined ? "awaiting telemetry" : gpuInfo!.quadtreePressureConverged ? "converged" : "cap exhausted"} · {gpuInfo!.quadtreeMultigridLevelCount ?? "—"} pyramid levels · {gpuInfo!.quadtreeMultigridCoarsestDofs ?? "—"} coarse DOFs</span>
-      </div>}
+      {/* What the machinery this configuration selected actually did, from the
+          method that selected it. Recognising a §4.3 executor from its published
+          solver label is the method's own business; doing it here made a UI file
+          the second place in the repo that had to know the marker. */}
+      {method.configurationReadouts?.(gpuInfo ?? undefined, resolvedMethodValues(methodState)).map((readout) => <div key={readout.id} className="grid-readout" title={readout.title}>
+        <strong>{readout.value}</strong>
+        <span>{readout.detail}</span>
+      </div>)}
       {fine.length > 0 && <details className="advanced-params">
         <summary>Advanced</summary>
         {fine.map((spec) => <ParamControl key={spec.key} spec={spec} methodId={methodId} />)}

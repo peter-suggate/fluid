@@ -11,7 +11,7 @@ import {
   type FluidPipelineMeasurement,
   type FluidPipelineStage,
   type FluidPipelineStageState,
-} from "@/lib/fluid-pipeline";
+} from "../lib/core/fluid-pipeline";
 
 /**
  * The simulation sibling of `RenderPipeline`: same trunk-and-cards anatomy and

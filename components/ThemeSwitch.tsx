@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect } from "react";
-import { useThemeStore, type ThemePreference } from "@/lib/stores/theme-store";
+import { useThemeStore, type ThemePreference } from "../lib/core/stores/theme-store";
 
 /**
  * System, light, dark — in that order, because the default is first.

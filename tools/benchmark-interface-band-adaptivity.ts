@@ -34,20 +34,24 @@
 import assert from "node:assert/strict";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { octreeMethod } from "../lib/methods/octree";
-import type { GPUSolverInstance } from "../lib/methods/types";
-import { getScenePreset } from "../lib/scenes";
-import { requiredFluidDeviceLimits } from "../lib/webgpu-device-limits";
+// Composition root for this entry point: importing the method catalog installs
+// the simulation methods and the octree coarse-dynamics lanes, without which
+// constructing a solver throws rather than silently running the wrong backend.
+import "../lib/methods";
+import { losassoMethod } from "../lib/methods/losasso/method";
+import type { GPUSolverInstance } from "../lib/core/method-contract";
+import { getScenePreset } from "../lib/core/scenes";
+import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import {
   auditOctreeInterfaceBand,
   type OctreeInterfaceBandAudit,
-} from "../lib/octree-interface-band-audit";
-import type { OctreeTopologyLeafCensus } from "../lib/webgpu-octree";
-import { readBufferBinding } from "./webgpu-smoke-readbacks";
+} from "../lib/methods/octree-shared/octree-interface-band-audit";
+import type { OctreeTopologyLeafCensus } from "../lib/methods/octree-shared/octree-topology-census";
+import { readBufferBinding } from "../lib/harness/webgpu-smoke-readbacks";
 import {
   acquireWebGPUExclusiveLock,
   releaseWebGPUExclusiveLock,
-} from "./webgpu-smoke-isolation";
+} from "../lib/harness/webgpu-smoke-isolation";
 
 interface Arm {
   readonly bandCells: number;
@@ -116,8 +120,8 @@ try {
     const scene = getScenePreset(sceneId).create();
     scene.numerics.fixedDt_s = dt;
     scene.numerics.maxDt_s = dt;
-    const solver = await octreeMethod.createSolverAsync!(device, scene, "balanced", {
-      ...octreeMethod.presetFor("balanced"),
+    const solver = await losassoMethod.createSolverAsync!(device, scene, "balanced", {
+      ...losassoMethod.presetFor("balanced"),
       // Factor 1 is the product default and the only configuration in which
       // this directory is the whole surface; the artifact lives here.
       globalFineLevelSetFactor: "1",

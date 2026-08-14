@@ -1,7 +1,7 @@
 "use client";
 
-import { DEFAULT_EDITOR_TOOL, editorToolsPlacedAt } from "@/lib/editor-tools";
-import { useUIStore } from "@/lib/stores/ui-store";
+import { DEFAULT_EDITOR_TOOL, editorToolsPlacedAt } from "../lib/core/editor-tools";
+import { useUIStore } from "../lib/core/stores/ui-store";
 
 /**
  * The topline tool cluster, top-right of the viewport.

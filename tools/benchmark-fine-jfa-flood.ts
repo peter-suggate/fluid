@@ -2,8 +2,8 @@ import { pathToFileURL } from "node:url";
 import {
   fineLevelSetJFACPTSubgroupOracleWGSL,
   fineLevelSetJFACPTWGSL,
-} from "../lib/webgpu-octree-fine-levelset-redistance";
-import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "./webgpu-smoke-isolation";
+} from "../lib/methods/octree-shared/webgpu-octree-fine-levelset-redistance";
+import { acquireWebGPUExclusiveLock, releaseWebGPUExclusiveLock } from "../lib/harness/webgpu-smoke-isolation";
 
 const brickDimension = Number(process.env.FLUID_FINE_JFA_FLOOD_BRICK_DIMENSION ?? 8);
 if (!Number.isSafeInteger(brickDimension) || brickDimension < 2 || brickDimension > 16) {

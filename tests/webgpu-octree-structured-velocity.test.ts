@@ -4,8 +4,8 @@ import {
   
   buildResolvedPowerRowsPublication,
   planResolvedPowerRows,
-} from "../lib/webgpu-octree-power-resolved-rows";
-import { packOctreePowerRowTemplateSlot } from "../lib/octree-power-catalog";
+} from "../lib/methods/power/webgpu-octree-power-resolved-rows";
+import { packOctreePowerRowTemplateSlot } from "../lib/methods/power/octree-power-catalog";
 import {
   OCTREE_STRUCTURED_VELOCITY_CLASSES,
   OCTREE_STRUCTURED_VELOCITY_INVALID_HANDLE,
@@ -16,8 +16,8 @@ import {
   structuredVelocityFamilyHandlesForRow,
   structuredVelocityDivergence,
   type StructuredVelocityCatalogSource,
-} from "../lib/webgpu-octree-structured-velocity";
-import { unpackOctreeWorksetHeader } from "../lib/webgpu-octree-worksets";
+} from "../lib/methods/power/webgpu-octree-structured-velocity";
+import { unpackOctreeWorksetHeader } from "../lib/methods/octree-shared/webgpu-octree-worksets";
 
 const INVALID = OCTREE_STRUCTURED_VELOCITY_INVALID_HANDLE;
 const noFamilyHandles = [INVALID, INVALID, INVALID, INVALID, INVALID, INVALID];

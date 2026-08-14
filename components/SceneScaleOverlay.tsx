@@ -1,10 +1,10 @@
 "use client";
 
-import { simulation } from "@/lib/simulation/controller";
-import { useDisplayScene } from "@/lib/stores/scene-draft-store";
-import { useUIStore } from "@/lib/stores/ui-store";
-import { sceneScaleOption, sceneScaleSummary, type SceneScaleAxis, type SceneScaleFactor } from "@/lib/scene-scale";
-import { fluidBodyBox, fluidWaterVolume_m3 } from "@/lib/editor-fluid-body";
+import { simulation } from "../lib/core/simulation/controller";
+import { useDisplayScene } from "../lib/core/stores/scene-draft-store";
+import { useUIStore } from "../lib/core/stores/ui-store";
+import { sceneScaleOption, sceneScaleSummary, type SceneScaleAxis, type SceneScaleFactor } from "../lib/core/scene-scale";
+import { fluidBodyBox, fluidWaterVolume_m3 } from "../lib/core/editor-fluid-body";
 
 /**
  * Scale and water-volume controls, over the scene rather than inside the

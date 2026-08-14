@@ -1,16 +1,20 @@
 import assert from "node:assert/strict";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { cloneScene, defaultScene, type SceneDescription } from "../lib/model";
-import { octreeMethod } from "../lib/methods/octree";
-import type { GPUSolverInstance } from "../lib/methods/types";
-import type { PaperPhaseId, PerformanceTrace } from "../lib/performance-trace";
+// Composition root for this entry point: importing the method catalog installs
+// the simulation methods and the octree coarse-dynamics lanes, without which
+// constructing a solver throws rather than silently running the wrong backend.
+import "../lib/methods";
+import { cloneScene, defaultScene, type SceneDescription } from "../lib/core/model";
+import { losassoMethod } from "../lib/methods/losasso/method";
+import type { GPUSolverInstance } from "../lib/core/method-contract";
+import type { PaperPhaseId, PerformanceTrace } from "../lib/core/performance-trace";
 import { usePerformanceInstrumentationStore } from
-  "../lib/stores/performance-instrumentation-store";
-import { requiredFluidDeviceLimits } from "../lib/webgpu-device-limits";
+  "../lib/core/stores/performance-instrumentation-store";
+import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import {
   acquireWebGPUExclusiveLock,
   releaseWebGPUExclusiveLock,
-} from "./webgpu-smoke-isolation";
+} from "../lib/harness/webgpu-smoke-isolation";
 
 await acquireWebGPUExclusiveLock("dawn-benchmark", "tools/benchmark-octree-leaf-sizes.ts");
 try {
@@ -129,11 +133,11 @@ for (const [configIndex, maximumLeafSize] of leafSizes.entries()) {
   }
   const scene = calmDeepScene();
   const values = {
-    ...octreeMethod.presetFor("balanced"),
+    ...losassoMethod.presetFor("balanced"),
     maximumLeafSize: String(maximumLeafSize),
     secondaryParticles: "off",
   };
-  const solver = await octreeMethod.createSolverAsync!(
+  const solver = await losassoMethod.createSolverAsync!(
     device, scene, "balanced", values, undefined, () => {}) as GPUSolverInstance;
   assert.deepEqual([solver.info.nx, solver.info.ny, solver.info.nz], [64 * tankScale, 96, 64 * tankScale]);
   const samples = Object.fromEntries(timingFields.map((field) => [field, [] as number[]])) as Record<typeof timingFields[number], number[]>;

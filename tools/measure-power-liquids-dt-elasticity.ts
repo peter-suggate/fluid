@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import type { PowerDamPerformanceSummary } from "./power-dam-performance-report";
+import "../lib/methods";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const benchmark = fileURLToPath(new URL("./benchmark-power-dam.ts", import.meta.url));

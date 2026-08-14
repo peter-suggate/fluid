@@ -1,25 +1,26 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { readFileSync } from "node:fs";
-import { planFineLevelSetBricks } from "../lib/octree-fine-levelset-bricks";
-import { planOctreeCoarsePhi } from "../lib/webgpu-octree-coarse-levelset";
-import { fineLevelSetRedistanceAllocatedBytes } from "../lib/webgpu-octree-fine-levelset-redistance";
+import { planFineLevelSetBricks } from "../lib/methods/octree-shared/octree-fine-levelset-bricks";
+import { planOctreeCoarsePhi } from "../lib/methods/octree-shared/webgpu-octree-coarse-levelset";
+import { fineLevelSetRedistanceAllocatedBytes } from "../lib/methods/octree-shared/webgpu-octree-fine-levelset-redistance";
 import { FINE_LEVELSET_SUMMARY_ENTRY_WORDS,
-  planFineLevelSetGPUSummaries } from "../lib/webgpu-octree-fine-levelset-summary";
+  planFineLevelSetGPUSummaries } from "../lib/methods/octree-shared/webgpu-octree-fine-levelset-summary";
 import { fineLevelSetLeafSeedAllocatedBytes, FINE_LEVELSET_TOPOLOGY_ALLOCATED_BYTES } from
-  "../lib/webgpu-octree-fine-levelset-topology";
-import { planFineLevelSetGPUTransport } from "../lib/webgpu-octree-fine-levelset-transport";
-import { planFineLevelSetGPUVolume } from "../lib/webgpu-octree-fine-levelset-volume";
-import { planFineToCoarseLevelSet } from "../lib/webgpu-octree-fine-to-coarse-levelset";
+  "../lib/methods/octree-shared/webgpu-octree-fine-levelset-topology";
+import { planFineLevelSetGPUTransport } from "../lib/methods/octree-shared/webgpu-octree-fine-levelset-transport";
+import { planFineLevelSetGPUVolume } from "../lib/methods/octree-shared/webgpu-octree-fine-levelset-volume";
+import { planFineToCoarseLevelSet } from "../lib/methods/octree-shared/webgpu-octree-fine-to-coarse-levelset";
 import { FINE_TO_COARSE_LEVELSET_ERROR, unpackFineToCoarseGPUControl } from
-  "../lib/webgpu-octree-fine-to-coarse-levelset";
+  "../lib/methods/octree-shared/webgpu-octree-fine-to-coarse-levelset";
 import { OCTREE_POWER_COARSE_LEVELSET_ENCODE_SLOTS ,
-  planOctreePowerCoarseLevelSet } from "../lib/webgpu-octree-power-coarse-levelset";
-import { planOctreePowerDescriptors } from "../lib/webgpu-octree-power-descriptor";
-import { planStructuredVelocityGPU } from "../lib/webgpu-octree-structured-velocity-gpu";
+  planOctreePowerCoarseLevelSet } from "../lib/methods/power/webgpu-octree-power-coarse-levelset";
+import { planOctreePowerDescriptors } from "../lib/methods/power/webgpu-octree-power-descriptor";
+import { planStructuredVelocityGPU } from "../lib/methods/power/webgpu-octree-structured-velocity-gpu";
 import { estimateGlobalFineNarrowBandBrickCapacity,
-  planGlobalFineNarrowBandBrickCapacity, resolveGlobalFineBrickCapacity,
-  sumOctreePowerAllocationBreakdown } from "../lib/webgpu-octree";
+  planGlobalFineNarrowBandBrickCapacity,
+  resolveGlobalFineBrickCapacity } from "../lib/methods/octree-shared/octree-fine-band-capacity";
+import { sumOctreePowerAllocationBreakdown } from "../lib/methods/octree-shared/octree-arena-allocation";
 
 function fineArchitectureBytes(factor: 4 | 8, dimensions: readonly [number, number, number],
   brickCapacity: number, rowCapacity: number): number {
@@ -214,7 +215,7 @@ test("power allocation accounting charges each structured arena once", () => {
   assert.equal(sumOctreePowerAllocationBreakdown({ structured: 52_841_136, solver: 13_520_048,
     topology: 8_383_068 }), 74_744_252);
   assert.throws(() => sumOctreePowerAllocationBreakdown({ faces: -1 }), /non-negative safe bytes/);
-  const source = readFileSync(new URL("../lib/webgpu-octree.ts", import.meta.url), "utf8");
+  const source = readFileSync(new URL("../lib/methods/power/octree-power-lane.ts", import.meta.url), "utf8");
   const accounting = source.match(/const powerAllocated = sumOctreePowerAllocationBreakdown\(\{[\s\S]*?\}\);/)?.[0];
   assert.ok(accounting);
   assert.equal(accounting.match(/structuredVelocity: structured\.allocatedBytes/g)?.length, 1);

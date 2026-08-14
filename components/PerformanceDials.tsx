@@ -1,28 +1,28 @@
 "use client";
 
-import {
-  OCTREE_RUNTIME_DIALS,
-  octreeDialledSurfaceBand,
-  octreeDialledIterationCap,
-  octreeDialledRelativeTolerance,
-  resolveOctreeRuntimeDials,
-  type OctreeRuntimeDialSpec,
-} from "@/lib/octree-runtime-dials";
-import { simulation } from "@/lib/simulation/controller";
-import { useDiagnosticsStore } from "@/lib/stores/diagnostics-store";
-import { useMethodStore, resolvedMethodValues } from "@/lib/stores/method-store";
-import { useSceneStore } from "@/lib/stores/scene-store";
+import type { RuntimeDialReadouts, RuntimeDialSpec } from "../lib/core/method-contract";
+import { getMethod } from "@/lib/core/method-registry";
+import { simulation } from "../lib/core/simulation/controller";
+import { useDiagnosticsStore } from "../lib/core/stores/diagnostics-store";
+import { useMethodStore, resolvedMethodValues } from "../lib/core/stores/method-store";
+import { useSceneStore } from "../lib/core/stores/scene-store";
 
 /**
  * The live accuracy-for-frame-time strip.
  *
- * These are the coarse-band Losasso knobs with the largest measured
- * bearing on the physics lane, ordered by leverage (see
- * `lib/octree-runtime-dials.ts` for the capture that picked them). They sit at
- * the top of the observatory because the point is to move one and watch the
- * lane's measured time respond in the same session: every dial is declared
- * `update: "runtime"`, so a drag reaches the attached solver as a queue write
- * instead of resetting the simulation to t=0.
+ * Which dials exist, in what order, and what each slider position actually
+ * resolves to are all the running method's answers — the panel renders the
+ * declaration and knows nothing about any individual knob. It used to import
+ * one method's dial table and three of its V-cycle derivations directly, which
+ * made the observatory's most prominent strip a consumer of Losasso coarse-band
+ * internals and gave every other method nine greyed-out sliders for machinery
+ * it does not run. The capture that picked and ordered the octree lane's dials
+ * is in `lib/methods/octree-shared/octree-runtime-dials.ts`, beside them.
+ *
+ * The strip sits at the top of the observatory because the point is to move one
+ * and watch the lane's measured time respond in the same session: every dial is
+ * declared `update: "runtime"`, so a drag reaches the attached solver as a queue
+ * write instead of resetting the simulation to t=0.
  *
  * Each carries two captions — what it controls, and what the cheap direction
  * costs — instead of a share-of-frame figure. The figure was true of one
@@ -39,24 +39,14 @@ import { useSceneStore } from "@/lib/stores/scene-store";
 
 /** Value the panel shows for a dial that is still at construction's choice. */
 function effectiveLabel(
-  spec: OctreeRuntimeDialSpec,
+  spec: RuntimeDialSpec,
   value: number,
-  resolved: { tolerance: number; iterationCap: number; bandWidthCells: number },
+  readouts: RuntimeDialReadouts,
 ): { text: string; auto: boolean } {
-  const auto = spec.auto !== undefined && value === spec.auto;
-  switch (spec.key) {
-    case "pressureToleranceDecades":
-      return { text: resolved.tolerance.toExponential(1), auto };
-    case "pressureIterationCap":
-      return { text: `${resolved.iterationCap}`, auto };
-    // The slider position is a requested thickness; show what the authored
-    // band/grading pair can actually express after clamping. Optional grading
-    // layers can make those two numbers differ.
-    case "interfaceBandCells":
-      return { text: `${resolved.bandWidthCells}`, auto };
-    default:
-      return { text: `${value}`, auto };
-  }
+  return {
+    text: readouts.effective[spec.key] ?? `${value}`,
+    auto: spec.auto !== undefined && value === spec.auto,
+  };
 }
 
 export function PerformanceDials() {
@@ -66,65 +56,39 @@ export function PerformanceDials() {
   const scene = useSceneStore((state) => state.scene);
   const gpuInfo = useDiagnosticsStore((state) => state.gpuInfo);
   const values = resolvedMethodValues(methodState);
-  const dials = resolveOctreeRuntimeDials(values);
-  // The strip describes Losasso coarse-dynamics machinery. On any other
-  // backend the controls would be inert, and an inert slider reads as a broken
-  // one, so the strip states why instead of pretending.
-  const losasso = methodId === "octree" && values.coarseBackend !== "power2017";
-  // What the solver was BUILT with bounds what a dial can ask for; the panel
-  // must show the clamp rather than the request. The envelope is telemetry, so
-  // fall back to the paper ceiling until the first stats poll lands.
-  const builtEnvelope = gpuInfo?.quadtreePressureIterationBudget ?? 40;
-  const authoredBandCells = Number(values.interfaceRefinementBandCells ?? 4);
-  const authoredGradingLayers = Number(values.surfaceRefinementGradingLayers ?? 1);
-  // Coarse band (factor one) and the 4x/8x fine band take different protection
-  // widths for the same authored band, so the readout has to know which.
-  const authoredFineFactor = Number(values.globalFineLevelSetFactor ?? 1);
-  const resolved = {
-    tolerance: octreeDialledRelativeTolerance(
-      scene.numerics.pressureRelativeTolerance, dials),
-    iterationCap: octreeDialledIterationCap(builtEnvelope, dials),
-    // The authored band and grading are ordinary method params, so the panel
-    // can resolve the same width the shader will compute. Leaf size 2 is the
-    // finest merge candidate, i.e. the width that governs the cells around the
-    // surface itself rather than the coarser rungs behind it.
-    bandWidthCells: octreeDialledSurfaceBand(
-      authoredBandCells, authoredGradingLayers, authoredFineFactor, dials).widthCells,
-  };
-  const executed = gpuInfo?.quadtreePressureIterationsUsed;
-  const anyOverridden = OCTREE_RUNTIME_DIALS.some((spec) => spec.key in overrides);
+  const dials = getMethod(methodId).dials;
+  // A method with no live knobs gets no strip. The alternative is another
+  // method's sliders, disabled, which reads as a broken control rather than an
+  // absent one — and it was only ever the octree lane's strip anyway.
+  if (!dials) return null;
+  const readouts = dials.readouts(values, scene, gpuInfo ?? undefined);
+  const anyOverridden = dials.specs.some((spec) => spec.key in overrides);
   return (
     <section className="performance-dials" data-testid="performance-dials" aria-label="Live accuracy and frame-time dials">
       <header>
         <div>
-          <span>LOSASSO COARSE BAND · LIVE</span>
+          <span>{dials.label}</span>
           <h3>Accuracy for frame time</h3>
         </div>
         <div className="performance-dials-status">
-          {executed !== undefined && <span title="Iterations the residual gate actually executed on the last polled advance">
-            {executed} / {resolved.iterationCap} PCG
+          {readouts.executed && <span title={readouts.executed.hint}>
+            {readouts.executed.text}
           </span>}
           {anyOverridden && <button
             type="button"
             onClick={() => {
-              for (const spec of OCTREE_RUNTIME_DIALS) {
+              for (const spec of dials.specs) {
                 if (spec.key in overrides) simulation.resetMethodParam(methodId, spec.key);
               }
             }}
           >RESTORE ALL</button>}
         </div>
       </header>
-      {!losasso && <p className="performance-dials-inert">
-        These dials drive Losasso coarse-dynamics machinery — the resident MGPCG,
-        its first-order V-cycle, the Section 5 axis-face extension, and the
-        candidate topology epoch. Select the octree method with the Losasso
-        backend to make them live.
-      </p>}
       <div className="performance-dial-grid">
-        {OCTREE_RUNTIME_DIALS.map((spec) => {
-          const value = dials[spec.key];
+        {dials.specs.map((spec) => {
+          const value = readouts.positions[spec.key] ?? spec.default;
           const overridden = spec.key in overrides;
-          const { text, auto } = effectiveLabel(spec, value, resolved);
+          const { text, auto } = effectiveLabel(spec, value, readouts);
           return (
             <label key={spec.key} className="performance-dial" title={spec.hint} data-dial={spec.key} data-modified={overridden}>
               <span className="performance-dial-heading">
@@ -141,7 +105,6 @@ export function PerformanceDials() {
               </span>
               <input
                 type="range"
-                disabled={!losasso}
                 min={spec.min}
                 max={spec.max}
                 step={spec.step}

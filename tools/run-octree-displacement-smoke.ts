@@ -1,11 +1,15 @@
 import assert from "node:assert/strict";
 import { pathToFileURL } from "node:url";
-import { octreeMethod } from "../lib/methods/octree";
-import { cloneScene, defaultScene } from "../lib/model";
-import { initializeRigidBodies } from "../lib/rigid-body";
-import type { GPURigidLoad } from "../lib/webgpu-eulerian";
-import { fluidExecutionDeviceFeatures } from "../lib/gpu-startup";
-import { requiredFluidDeviceLimits } from "../lib/webgpu-device-limits";
+// Composition root for this entry point: importing the method catalog installs
+// the simulation methods and the octree coarse-dynamics lanes, without which
+// constructing a solver throws rather than silently running the wrong backend.
+import "../lib/methods";
+import { losassoMethod } from "../lib/methods/losasso/method";
+import { cloneScene, defaultScene } from "../lib/core/model";
+import { initializeRigidBodies } from "../lib/core/rigid-body";
+import type { GPURigidLoad } from "../lib/core/webgpu-eulerian";
+import { fluidExecutionDeviceFeatures } from "../lib/core/gpu-startup";
+import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 
 const modulePath = process.env.WEBGPU_NODE_MODULE;
 if (!modulePath) throw new Error("Set WEBGPU_NODE_MODULE to the installed webgpu package index.js");
@@ -56,10 +60,10 @@ let latestLoad: GPURigidLoad | undefined;
 // 40 cubed, whose pressure rows exceed the bounded 16384-row SPGrid and
 // failed in the allocator before the first step.
 scene.voxelDomain.finestCellSize_m = Number(process.env.FLUID_VOXEL_CELL_SIZE ?? 0.025);
-const values = octreeMethod.presetFor("balanced");
+const values = losassoMethod.presetFor("balanced");
 // The octree publishes its t=0 sparse authority asynchronously; the first
 // substep flips a candidate epoch that only exists once that has fenced.
-const solver = await octreeMethod.createSolverAsync!(device, scene, "balanced", values, (loads) => {
+const solver = await losassoMethod.createSolverAsync!(device, scene, "balanced", values, (loads) => {
   latestLoad = loads.find((load) => load.bodyId === bodyId) ?? latestLoad;
 }, () => {});
 const bodies = initializeRigidBodies(scene.rigidBodies);
@@ -128,7 +132,7 @@ const complementError = Math.abs((rawCells - referenceOpenCells) - displacedCell
 const geometricError = Math.abs(measuredDisplacement_m3 - analyticDisplacement_m3) / analyticDisplacement_m3;
 const reportingError = Math.abs(reportedDisplacement_m3 - measuredDisplacement_m3) / Math.max(measuredDisplacement_m3, Number.EPSILON);
 const result = {
-  scenario: scene.sceneId, method: octreeMethod.id, grid: [nx, ny, nz], descentSteps, settleSteps,
+  scenario: scene.sceneId, method: losassoMethod.id, grid: [nx, ny, nz], descentSteps, settleSteps,
   solidToInitialWaterRatio: analyticDisplacement_m3 / (referenceOpenCells * cellVolume_m3),
   referenceOpenVolume_m3: referenceOpenCells * cellVolume_m3,
   finalOpenVolume_m3: openCells * cellVolume_m3,

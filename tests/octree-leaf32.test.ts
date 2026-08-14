@@ -1,16 +1,20 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
-import { cloneScene, defaultScene, type SceneDescription } from "../lib/model";
-import { octreeMethod } from "../lib/methods/octree";
-import { requiredFluidDeviceLimits } from "../lib/webgpu-device-limits";
-import { planOctreeLeafFrontierAllocation } from "../lib/webgpu-octree";
+// Composition root for this entry point: importing the method catalog installs
+// the simulation methods and the octree coarse-dynamics lanes, without which
+// constructing a solver throws rather than silently running the wrong backend.
+import "../lib/methods";
+import { cloneScene, defaultScene, type SceneDescription } from "../lib/core/model";
+import { losassoMethod } from "../lib/methods/losasso/method";
+import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
+import { planOctreeLeafFrontierAllocation } from "../lib/methods/octree-shared/octree-arena-allocation";
 import {
   lookupOctreeOwnerPage,
   type OctreeOwnerLeafSize,
   type OctreeOwnerPagePlan,
-} from "../lib/webgpu-octree-owner-pages";
-import { WebGPUOctreeEulerianSolver } from "../lib/webgpu-octree-eulerian";
+} from "../lib/methods/octree-shared/webgpu-octree-owner-pages";
+import { WebGPUOctreeEulerianSolver } from "../lib/methods/octree-shared/webgpu-octree-eulerian";
 
 const modulePath = process.env.WEBGPU_NODE_MODULE;
 
@@ -72,10 +76,10 @@ interface OctreeInternals {
 
 async function runCalmDeepSolve(device: GPUDevice, maximumLeafSize: "8" | "32") {
   const scene = calmDeepScene();
-  const values = Object.fromEntries(octreeMethod.params.map((parameter) => [parameter.key, "default" in parameter ? parameter.default : 0])) as Record<string, string | number | boolean>;
+  const values = Object.fromEntries(losassoMethod.params.map((parameter) => [parameter.key, "default" in parameter ? parameter.default : 0])) as Record<string, string | number | boolean>;
   values.maximumLeafSize = maximumLeafSize;
   values.secondaryParticles = "off";
-  const solver = octreeMethod.createSolver!(device, scene, "balanced", values, undefined) as unknown as {
+  const solver = losassoMethod.createSolver!(device, scene, "balanced", values, undefined) as unknown as {
     advanceTo(time_s: number, bodies: never[]): boolean;
     info: { nx: number; ny: number; nz: number };
     destroy(): void;

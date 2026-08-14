@@ -8,7 +8,7 @@ type JsonRecord = Record<string, unknown>;
 
 interface ArmCapture {
   readonly id: "uniform" | "losasso" | "uniform-large-dt";
-  readonly method: "uniform" | "octree";
+  readonly method: "uniform" | "losasso";
   readonly exitCode: number;
   readonly observations: readonly JsonRecord[];
   readonly constructed?: JsonRecord;
@@ -84,6 +84,11 @@ const isolatedRunner = resolve(root, "tools/run-webgpu-smoke-isolated.ts");
 function numberAt(record: JsonRecord | undefined, key: string): number | undefined {
   const value = record?.[key];
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function stringAt(record: JsonRecord | undefined, key: string): string | undefined {
+  const value = record?.[key];
+  return typeof value === "string" ? value : undefined;
 }
 
 function objectAt(record: JsonRecord | undefined, key: string): JsonRecord | undefined {
@@ -256,7 +261,6 @@ async function runArm(id: ArmCapture["id"], method: ArmCapture["method"],
     FLUID_REQUIRE_SPATIAL_FIELD: "1",
     FLUID_FIELD_STATS: "1",
     FLUID_STABILITY_ENVELOPE: "0",
-    FLUID_CPU_ORACLE: "0",
     FLUID_RASTER_CHECKPOINTS: "0",
     FLUID_GLOBAL_FINE_GENERATION_TRANSITION: "0",
     FLUID_POWER_GENERATION_AUDIT: "0",
@@ -314,8 +318,10 @@ function armFailures(arm: ArmCapture): string[] {
   if (arm.exitCode !== 0) failures.push(`${arm.id} process exited ${arm.exitCode}`);
   if (!result) return [...failures, `${arm.id} emitted no result record`];
   const resolvedValues = objectAt(arm.constructed, "resolvedMethodValues");
-  if (arm.id === "losasso" && (resolvedValues?.coarseBackend !== "losasso"
-    || String(resolvedValues.globalFineLevelSetFactor) !== "1")) {
+  // The backend used to be a value inside `resolvedMethodValues`; it is now the
+  // method id the child reported constructing, so read that instead.
+  if (arm.id === "losasso" && (stringAt(arm.constructed, "method") !== "losasso"
+    || String(resolvedValues?.globalFineLevelSetFactor) !== "1")) {
     failures.push("losasso arm did not instantiate the adaptive factor-one profile");
   }
   const expectedTime = steps * dt_s;
@@ -700,7 +706,7 @@ function armSummary(arm: ArmCapture) {
 }
 
 const uniform = await runArm("uniform", "uniform");
-const losasso = await runArm("losasso", "octree");
+const losasso = await runArm("losasso", "losasso");
 const largeDtConfiguration: ArmRunConfiguration | undefined = largeDtFactor === undefined
   ? undefined : { steps: largeDtSteps, dt_s: dt_s * largeDtFactor,
     checkpointSteps: Math.min(largeDtSteps, checkpointSteps) };

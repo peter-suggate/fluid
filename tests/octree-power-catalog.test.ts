@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { constructOctreePowerCell, createOctreePowerSite, type OctreePowerSite } from "../lib/octree-power-geometry";
+import { constructOctreePowerCell, createOctreePowerSite, type OctreePowerSite } from "../lib/methods/power/octree-power-geometry";
 import {
   OCTREE_POWER_CATALOG_FACE_FLOATS,
   OCTREE_POWER_CATALOG_D4_MASK_SHIFT,
@@ -20,24 +20,24 @@ import {
   canonicalizeOctreePowerConfiguration,
   resolveOctreePowerCatalogDescriptor,
   unpackOctreePowerRowTemplateSlot,
-} from "../lib/octree-power-catalog";
+} from "../lib/methods/power/octree-power-catalog";
 import {
   OCTREE_CUBE_TRANSFORMS,
   inverseCubeTransform,
   transformPowerVector,
-} from "../lib/octree-power-topology";
+} from "../lib/methods/power/octree-power-topology";
 import {
   OCTREE_POWER_SAME_OR_COARSER_FLAG,
   OCTREE_POWER_SAME_OR_FINER_MASK,
   sitesForSameOrCoarserPowerDescriptor,
   sitesForSameOrFinerPowerDescriptor,
-} from "../lib/octree-power-descriptor";
-import { describeOctreePowerRow } from "../lib/webgpu-octree-power-descriptor";
+} from "../lib/methods/power/octree-power-descriptor";
+import { describeOctreePowerRow } from "../lib/methods/power/webgpu-octree-power-descriptor";
 import {
   decodeGeneratedOctreePowerCatalog,
   fetchGeneratedOctreePowerCatalog,
   OCTREE_GENERATED_POWER_CATALOG_MANIFEST,
-} from "../lib/generated/octree-power-catalog";
+} from "../lib/methods/power/generated/octree-power-catalog";
 
 function uniformSites(): OctreePowerSite[] {
   return [
@@ -183,7 +183,7 @@ test("co-spherical same/coarser links choose strict-acute row-local Delaunay tet
 });
 
 test("generated exhaustive catalog decodes within the fixed budget and proven bounds", () => {
-  const bytes = readFileSync(join(process.cwd(), "lib/generated/octree-power-catalog.bin"));
+  const bytes = readFileSync(join(process.cwd(), "lib/methods/power/generated/octree-power-catalog.bin"));
   const data = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
   const views = decodeGeneratedOctreePowerCatalog(data);
   assert.equal(OCTREE_GENERATED_POWER_CATALOG_MANIFEST.descriptorCount, 1_608);
@@ -255,7 +255,7 @@ test("generated exhaustive catalog decodes within the fixed budget and proven bo
 });
 
 test("every nonuniform tetra selector set contains every power-face neighbor", () => {
-  const bytes = readFileSync(join(process.cwd(), "lib/generated/octree-power-catalog.bin"));
+  const bytes = readFileSync(join(process.cwd(), "lib/methods/power/generated/octree-power-catalog.bin"));
   const views = decodeGeneratedOctreePowerCatalog(
     bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
   const key = (values: ArrayLike<number>, offset: number) => Array.from({ length: 4 },
@@ -292,7 +292,7 @@ test("every nonuniform tetra selector set contains every power-face neighbor", (
 });
 
 test("generated tetra headers publish exact immutable D4 fan-closure masks for every fixed axis", () => {
-  const bytes = readFileSync(join(process.cwd(), "lib/generated/octree-power-catalog.bin"));
+  const bytes = readFileSync(join(process.cwd(), "lib/methods/power/generated/octree-power-catalog.bin"));
   const views = decodeGeneratedOctreePowerCatalog(
     bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
   const vertices = Array.from({ length: views.tetrahedronVertexData.length / 4 }, (_, selector) =>
@@ -323,7 +323,7 @@ test("generated tetra headers publish exact immutable D4 fan-closure masks for e
 });
 
 test("direct quotient lookup reconstructs non-canonical world geometry", () => {
-  const bytes = readFileSync(join(process.cwd(), "lib/generated/octree-power-catalog.bin"));
+  const bytes = readFileSync(join(process.cwd(), "lib/methods/power/generated/octree-power-catalog.bin"));
   const views = decodeGeneratedOctreePowerCatalog(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
   for (const descriptor of [0x00002, 0x12345, 0x2abcd]) {
     const sites = sitesForSameOrFinerPowerDescriptor(descriptor);

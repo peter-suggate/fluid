@@ -8,9 +8,9 @@ import {
   publishReadyOctreeTopology,
   validateOctreeTopologyCandidate,
   type OctreeTopologyEpochState,
-} from "../lib/webgpu-octree-topology-epoch";
-import { WebGPUOctreeSimulationOwnerPages } from "../lib/webgpu-octree-owner-pages";
-import { PassBroker } from "../lib/webgpu-pass-broker";
+} from "../lib/methods/octree-shared/webgpu-octree-topology-epoch";
+import { WebGPUOctreeSimulationOwnerPages } from "../lib/methods/octree-shared/webgpu-octree-owner-pages";
+import { PassBroker } from "../lib/core/webgpu-pass-broker";
 
 function state(): OctreeTopologyEpochState {
   return {

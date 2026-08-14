@@ -18,15 +18,19 @@
 import assert from "node:assert/strict";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { octreeMethod } from "../lib/methods/octree";
-import type { GPUSolverInstance } from "../lib/methods/types";
+// Composition root for this entry point: importing the method catalog installs
+// the simulation methods and the octree coarse-dynamics lanes, without which
+// constructing a solver throws rather than silently running the wrong backend.
+import "../lib/methods";
+import { losassoMethod } from "../lib/methods/losasso/method";
+import type { GPUSolverInstance } from "../lib/core/method-contract";
 import { analyzeAdaptiveSurfaceFeatureGeometry, analyzeAdaptiveSurfacePublication } from
-  "../lib/octree-adaptive-surface-diagnostics";
-import { getScenePreset, SYMMETRIC_EXPANSION_METHOD_PROFILE } from "../lib/scenes";
-import { requiredFluidDeviceLimits } from "../lib/webgpu-device-limits";
-import { initialOctreeNodalLevelSet } from "../lib/webgpu-octree";
-import { unpackAdaptiveMassReceipt } from "../lib/webgpu-octree-losasso-adaptive-mass";
-import { unpackAdaptivePhiReceipt } from "../lib/webgpu-octree-losasso-adaptive-phi";
+  "../lib/methods/octree-shared/octree-adaptive-surface-diagnostics";
+import { getScenePreset, SYMMETRIC_EXPANSION_METHOD_PROFILE } from "../lib/core/scenes";
+import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
+import { initialOctreeNodalLevelSet } from "../lib/methods/octree-shared/webgpu-octree";
+import { unpackAdaptiveMassReceipt } from "../lib/methods/losasso/webgpu-octree-losasso-adaptive-mass";
+import { unpackAdaptivePhiReceipt } from "../lib/methods/losasso/webgpu-octree-losasso-adaptive-phi";
 
 const steps = Number(process.env.FLUID_SURFACE_AUDIT_STEPS ?? 4);
 const redistanceGeometryAudit = process.env.FLUID_SURFACE_AUDIT_REDISTANCE_GEOMETRY === "1";
@@ -65,8 +69,8 @@ const scene = getScenePreset("symmetric-expansion").create();
 const dt = 0.004;
 scene.numerics.fixedDt_s = dt;
 scene.numerics.maxDt_s = dt;
-const solver = await octreeMethod.createSolverAsync!(device, scene, "balanced", {
-  ...octreeMethod.presetFor("balanced"),
+const solver = await losassoMethod.createSolverAsync!(device, scene, "balanced", {
+  ...losassoMethod.presetFor("balanced"),
   ...SYMMETRIC_EXPANSION_METHOD_PROFILE.overrides,
   secondaryParticles: "off",
 }, undefined, () => {}) as GPUSolverInstance;
@@ -81,10 +85,33 @@ const analyticPhi = (x: number, y: number, z: number) =>
   exactNodalPhi[x + nodeWidth * (y + nodeHeight * z)]!;
 const projection = (solver as unknown as {
   octreeProjection?: {
+    // The analysis snapshot type declares its word arrays as `ArrayLike<number>`.
+    // The projection publishes concrete typed arrays (webgpu-octree.ts
+    // `readAdaptiveSurfacePublicationDiagnostics`), which the D4 audits below
+    // slice and hand to typed-array helpers, plus the candidate-bank and
+    // face-velocity rows the analysis snapshot does not carry at all.
     readAdaptiveSurfacePublicationDiagnostics(): Promise<Parameters<
       typeof analyzeAdaptiveSurfacePublication>[0] & {
+        graphControl: Uint32Array;
+        phiControl: Uint32Array;
+        nodes: Uint32Array;
+        constraints: Uint32Array;
+        adjacency: Uint32Array;
         phiReceipts: Uint32Array;
         nodalVelocity: Uint32Array;
+        authorityControl: Uint32Array;
+        faceGeometry: Uint32Array;
+        advectedFaceVelocity: Uint32Array;
+        predictedFaceVelocity: Uint32Array;
+        projectedFaceVelocity: Uint32Array;
+        extendedFaceVelocity: Uint32Array;
+        candidateGraphControl: Uint32Array;
+        candidateNodes: Uint32Array;
+        candidateNodalPhi: Uint32Array;
+        candidateNodalVelocity: Uint32Array;
+        candidateAuthorityControl: Uint32Array;
+        candidateFaceGeometry: Uint32Array;
+        candidateExtendedFaceVelocity: Uint32Array;
         redistanceDistanceA: Float32Array;
         acceptedMass: Float32Array;
         leafRhoPhi: Float32Array;

@@ -6,8 +6,8 @@ import {
   classifyExclusivePowerGrading,
   planResolvedPowerRows,
   validateResolvedPowerReciprocity,
-} from "../lib/webgpu-octree-power-resolved-rows";
-import { OCTREE_WORKSET_INVALID_ID, unpackOctreeWorksetHeader } from "../lib/webgpu-octree-worksets";
+} from "../lib/methods/power/webgpu-octree-power-resolved-rows";
+import { OCTREE_WORKSET_INVALID_ID, unpackOctreeWorksetHeader } from "../lib/methods/octree-shared/webgpu-octree-worksets";
 
 const handles = [0, 1, 2, OCTREE_WORKSET_INVALID_ID,
   OCTREE_WORKSET_INVALID_ID, OCTREE_WORKSET_INVALID_ID];

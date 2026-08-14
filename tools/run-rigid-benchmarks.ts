@@ -1,5 +1,5 @@
-import { advanceRigidBodies, cloneRigidBodies, initializeRigidBody, massProperties, quaternionNormalize, rigidDiagnostics } from "../lib/rigid-body";
-import { cloneScene, defaultScene, type RigidBodyDescription } from "../lib/model";
+import { advanceRigidBodies, cloneRigidBodies, initializeRigidBody, massProperties, quaternionNormalize, rigidDiagnostics } from "../lib/core/rigid-body";
+import { cloneScene, defaultScene, type RigidBodyDescription } from "../lib/core/model";
 
 const sphere = (overrides: Partial<RigidBodyDescription> = {}): RigidBodyDescription => ({
   id: "benchmark-sphere", name: "Benchmark sphere", shape: "sphere",

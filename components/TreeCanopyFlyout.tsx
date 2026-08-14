@@ -1,14 +1,14 @@
 "use client";
 
 import { useEffect, useRef } from "react";
-import { simulation } from "@/lib/simulation/controller";
-import { useSceneStore } from "@/lib/stores/scene-store";
+import { simulation } from "../lib/core/simulation/controller";
+import { useSceneStore } from "../lib/core/stores/scene-store";
 import {
   canopyDials,
   sceneCanopyPads,
   withCanopyDials,
   type CanopyDials,
-} from "@/lib/tree-canopy-controls";
+} from "../lib/core/tree-canopy-controls";
 
 /**
  * The canopy sculptor, riding the selected tree's crown corner.

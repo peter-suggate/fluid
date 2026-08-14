@@ -1,8 +1,9 @@
 import { pathToFileURL } from "node:url";
-import { getScenePreset } from "../lib/scenes";
-import { DynamicGPUPerformanceTraceRecorder } from "../lib/performance-trace";
-import { createTallCellLayout, type GPUQuality } from "../lib/tall-cell-grid";
-import { activeCubeCapacity, extractionPrepareShader, surfaceExtractionDispatchPlan, surfaceExtractionShader, surfaceVertexCapacity, type SurfaceExtractionDispatchPlan } from "../lib/webgpu-water-pipeline";
+import { getScenePreset } from "../lib/core/scenes";
+import { DynamicGPUPerformanceTraceRecorder } from "../lib/core/performance-trace";
+import { createTallCellLayout } from "../lib/core/tall-cell-grid";
+import type { GPUQuality } from "../lib/core/gpu-quality";
+import { activeCubeCapacity, extractionPrepareShader, surfaceExtractionDispatchPlan, surfaceExtractionShader, surfaceVertexCapacity, type SurfaceExtractionDispatchPlan } from "../lib/core/webgpu-water-pipeline";
 
 const modulePath = process.env.WEBGPU_NODE_MODULE;
 if (!modulePath) throw new Error("Set WEBGPU_NODE_MODULE to the installed webgpu package index.js");

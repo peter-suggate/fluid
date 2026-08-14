@@ -1,11 +1,11 @@
 import { pathToFileURL } from "node:url";
 
-import { planAdaptiveSparseBrickOctree } from "../lib/adaptive-sparse-brick-plan";
-import { planSvoNodeMipPyramid } from "../lib/svo-node-mip-pyramid";
-import { planSvoWideFanout, traverseSvoWideFanout, type SvoWideRay } from "../lib/svo-wide-fanout";
-import { packSparseBrickPlan, type SparseBrickCoordinate } from "../lib/sparse-brick-octree";
-import { traversePackedSvo, type SvoWorldMapping } from "../lib/webgpu-svo-traversal";
-import { planWebgpuSvoWideFanoutAllocation } from "../lib/webgpu-svo-wide-fanout";
+import { planAdaptiveSparseBrickOctree } from "../lib/core/adaptive-sparse-brick-plan";
+import { planSvoNodeMipPyramid } from "../lib/svo/svo-node-mip-pyramid";
+import { planSvoWideFanout, traverseSvoWideFanout, type SvoWideRay } from "../lib/svo/svo-wide-fanout";
+import { packSparseBrickPlan, type SparseBrickCoordinate } from "../lib/svo/sparse-brick-octree";
+import { traversePackedSvo, type SvoWorldMapping } from "../lib/svo/webgpu-svo-traversal";
+import { planWebgpuSvoWideFanoutAllocation } from "../lib/svo/webgpu-svo-wide-fanout";
 
 export const SVO_DERIVED_LOOKUP_REDUCTION_GATE = 0.35;
 

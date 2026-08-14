@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
-import { unpackOctreePowerRowTemplateSlot } from "../lib/octree-power-catalog";
+import { unpackOctreePowerRowTemplateSlot } from "../lib/methods/power/octree-power-catalog";
 import {
   OCTREE_POWER_COMPILED_SAMPLER_HEADER_WORDS,
   OCTREE_POWER_COMPILED_SAMPLER_INVALID,
@@ -11,10 +11,10 @@ import {
   OCTREE_POWER_COMPILED_SAMPLER_TRANSFORMS,
   OCTREE_POWER_COMPILED_SAMPLER_VERSION,
   compileOctreePowerSampler,
-} from "../lib/octree-power-compiled-sampler";
-import { decodeGeneratedOctreePowerCatalog } from "../lib/generated/octree-power-catalog";
-import { OCTREE_CUBE_TRANSFORMS, transformPowerVector } from "../lib/octree-power-topology";
-import { structuredBoundaryCoefficientWGSL } from "../lib/webgpu-octree-structured-boundary";
+} from "../lib/methods/power/octree-power-compiled-sampler";
+import { decodeGeneratedOctreePowerCatalog } from "../lib/methods/power/generated/octree-power-catalog";
+import { OCTREE_CUBE_TRANSFORMS, transformPowerVector } from "../lib/methods/power/octree-power-topology";
+import { structuredBoundaryCoefficientWGSL } from "../lib/methods/power/webgpu-octree-structured-boundary";
 import {
   decodeStructuredProjectionEnergy,
   STRUCTURED_BOUNDARY_DRY_PROBE_DISPATCH_OFFSET_BYTES,
@@ -25,9 +25,10 @@ import {
   
   structuredRowTouchesDryProbeOracle,
   structuredVelocityDynamicsWGSL,
-} from "../lib/webgpu-octree-structured-dynamics";
+} from "../lib/methods/power/webgpu-octree-structured-dynamics";
+import "../lib/methods";
 
-const dynamicsSource = readFileSync(new URL("../lib/webgpu-octree-structured-dynamics.ts", import.meta.url), "utf8");
+const dynamicsSource = readFileSync(new URL("../lib/methods/power/webgpu-octree-structured-dynamics.ts", import.meta.url), "utf8");
 const dynamicsHost = dynamicsSource.slice(0, dynamicsSource.indexOf("export const structuredVelocityDynamicsWGSL"));
 
 /** Every `name[...]` subscript expression in a WGSL source, in source order. */
@@ -198,7 +199,7 @@ test("reflected midpoint and cube-fallback coordinates are bit-exact; zero displ
 });
 
 test("transition barycentric sampling requires non-face selector adjacency", () => {
-  const bytes = readFileSync(new URL("../lib/generated/octree-power-catalog.bin", import.meta.url));
+  const bytes = readFileSync(new URL("../lib/methods/power/generated/octree-power-catalog.bin", import.meta.url));
   const catalog = decodeGeneratedOctreePowerCatalog(
     bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
   const caseId = 6999;
@@ -222,7 +223,7 @@ test("transition barycentric sampling requires non-face selector adjacency", () 
 });
 
 test("compiled transition sampler covers every selector transform and tetrahedron adjacency", () => {
-  const bytes = readFileSync(new URL("../lib/generated/octree-power-catalog.bin", import.meta.url));
+  const bytes = readFileSync(new URL("../lib/methods/power/generated/octree-power-catalog.bin", import.meta.url));
   const catalog = decodeGeneratedOctreePowerCatalog(
     bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
   const compiled = compileOctreePowerSampler(catalog);
@@ -428,7 +429,7 @@ test("projection energy decoder fails closed on partial pairs", () => {
 });
 
 test("smoke stability envelope consumes only explicit structured energy pairs", () => {
-  const smoke = readFileSync(new URL("../tools/webgpu-smoke-executor.ts", import.meta.url), "utf8");
+  const smoke = readFileSync(new URL("../lib/harness/webgpu-smoke-executor.ts", import.meta.url), "utf8");
   assert.match(smoke,
     /structuredEnergySamples = sample\.structuredProjectionEnergySampleCount[\s\S]*structuredEnergyRatio = sample\.structuredProjectionEnergyRatio/);
   assert.match(smoke,
@@ -438,10 +439,10 @@ test("smoke stability envelope consumes only explicit structured energy pairs", 
 });
 
 test("pooled stats readback decodes the exact 32-byte pair and clears rejected samples", () => {
-  const projection = readFileSync(new URL("../lib/webgpu-octree.ts", import.meta.url), "utf8");
-  const uniform = readFileSync(new URL("../lib/webgpu-octree-eulerian.ts", import.meta.url), "utf8");
-  assert.match(projection,
-    /get structuredProjectionEnergyStats\(\): GPUBuffer \| undefined \{[\s\S]*this\.structuredDynamics\?\.projectionEnergyStats/);
+  const lane = readFileSync(new URL("../lib/methods/power/octree-power-lane.ts", import.meta.url), "utf8");
+  const uniform = readFileSync(new URL("../lib/methods/octree-shared/webgpu-octree-eulerian.ts", import.meta.url), "utf8");
+  assert.match(lane,
+    /structuredProjectionEnergyStats: this\.structuredDynamics\.projectionEnergyStats/);
   assert.match(uniform,
     /copyBufferToBuffer\([\s\S]*structuredProjectionEnergy, 0, buffer, 16, STRUCTURED_PROJECTION_ENERGY_WORDS \* 4/);
   assert.match(uniform,
@@ -452,7 +453,7 @@ test("pooled stats readback decodes the exact 32-byte pair and clears rejected s
 });
 
 test("uniform telemetry reads the exact paired projection report and clears blockers", () => {
-  const uniform = readFileSync(new URL("../lib/webgpu-octree-eulerian.ts", import.meta.url), "utf8");
+  const uniform = readFileSync(new URL("../lib/methods/octree-shared/webgpu-octree-eulerian.ts", import.meta.url), "utf8");
   const readStats = uniform.slice(uniform.indexOf("async readStats()"), uniform.indexOf("\n  destroy()"));
   assert.match(uniform, /size: 16 \+ STRUCTURED_PROJECTION_ENERGY_WORDS \* 4/,
     "the pooled readback reserves exactly one eight-word energy report");
@@ -966,11 +967,11 @@ test("the divergence RHS and the projection are given the same density", () => {
       `stage ${stage} must forward the caller's density, never a literal`);
   }
 
-  const host = readFileSync(new URL("../lib/webgpu-octree.ts", import.meta.url), "utf8");
+  const host = readFileSync(new URL("../lib/methods/power/octree-power-lane.ts", import.meta.url), "utf8");
   for (const call of ["encodeForcesAndDivergence", "encodeProjection"]) {
     const at = host.indexOf(`dynamics.${call}(`);
     assert.ok(at > 0, `${call} must be called from the production encode path`);
-    assert.match(host.slice(at, at + 240), /this\.scene\.fluid\.density_kg_m3/,
+    assert.match(host.slice(at, at + 240), /this\.engine\.scene\.fluid\.density_kg_m3/,
       `${call} must be passed the scene density`);
   }
 });
@@ -1059,7 +1060,7 @@ test("the body-impulse exchange is the exact adjoint of the divergence solid ter
 });
 
 test("zero-body structured dynamics omits body-impulse pipelines", () => {
-  const dynamicsHost = readFileSync(new URL("../lib/webgpu-octree-structured-dynamics.ts", import.meta.url), "utf8");
+  const dynamicsHost = readFileSync(new URL("../lib/methods/power/webgpu-octree-structured-dynamics.ts", import.meta.url), "utf8");
   assert.match(dynamicsHost,
     /this\.resources\.bodyCount === 0 \? \[\] : \["exchangeStructuredBodyImpulseRows"\]/,
     "a scene without rigid bodies must not create the impulse pipeline");
@@ -1101,10 +1102,11 @@ test("only integrating bodies put the adjoint on the command graph", () => {
     dynamicsHost.indexOf("destroy(): void"));
   assert.match(projection, /if \(couplingBodyCount > 0\) \{[\s\S]*this\.bodyImpulse/,
     "a scene of authored static solids must not encode an exchange nobody reads");
-  const octree = readFileSync(new URL("../lib/webgpu-octree.ts", import.meta.url), "utf8");
+  const octree = readFileSync(new URL("../lib/methods/octree-shared/webgpu-octree.ts", import.meta.url), "utf8");
   assert.match(octree, /this\.dynamicCouplingBodyCount = hasDynamicBodies \? bounded : 0;/,
     "static-only rosters must resolve to a zero coupling count");
-  assert.match(octree, /\], pressure, this\.dynamicCouplingBodyCount, this\.surfaceInflow\);/,
+  const lane = readFileSync(new URL("../lib/methods/power/octree-power-lane.ts", import.meta.url), "utf8");
+  assert.match(lane, /\], pressure, this\.engine\.dynamicCouplingBodyCount, this\.engine\.surfaceInflow\);/,
     "the projection encode must carry the live coupling roster");
 });
 

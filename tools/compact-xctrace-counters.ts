@@ -10,6 +10,7 @@ import { resolve } from "node:path";
 import { writeFile } from "node:fs/promises";
 import { readTraceRows } from "./xctrace-trace-tables";
 import { CounterRowSelector, makeCounterExtractionPolicy } from "./profile-mini-dam-xctrace";
+import "../lib/methods";
 
 const flag = (name: string): string | undefined => process.argv
   .find((argument) => argument.startsWith(`--${name}=`))?.slice(name.length + 3);

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { constructOctreePowerCell } from "../lib/octree-power-geometry";
+import { constructOctreePowerCell } from "../lib/methods/power/octree-power-geometry";
 import {
   OCTREE_POWER_NEIGHBOR_DIRECTIONS,
   OCTREE_POWER_SAME_OR_FINER_MASK,
@@ -14,8 +14,8 @@ import {
   sitesForSameOrFinerPowerDescriptor,
   sitesForSameOrCoarserPowerDescriptor,
   transformSameOrFinerPowerDescriptor,
-} from "../lib/octree-power-descriptor";
-import { OCTREE_CUBE_TRANSFORMS } from "../lib/octree-power-topology";
+} from "../lib/methods/power/octree-power-descriptor";
+import { OCTREE_CUBE_TRANSFORMS } from "../lib/methods/power/octree-power-topology";
 
 test("18-bit descriptor covers six face and twelve edge directions", () => {
   assert.equal(OCTREE_POWER_NEIGHBOR_DIRECTIONS.length, 18);

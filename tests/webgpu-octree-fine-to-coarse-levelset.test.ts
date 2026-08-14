@@ -2,14 +2,14 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
 import { FineLevelSetBrickOracle, packFineLevelSetBrickKey,
-  planFineLevelSetBricks } from "../lib/octree-fine-levelset-bricks";
-import { WebGPUFineLevelSetBricks } from "../lib/webgpu-octree-fine-levelset-bricks";
+  planFineLevelSetBricks } from "../lib/methods/octree-shared/octree-fine-levelset-bricks";
+import { WebGPUFineLevelSetBricks } from "../lib/methods/octree-shared/webgpu-octree-fine-levelset-bricks";
 import { FINE_TO_COARSE_LEVELSET_ERROR, fineToCoarseLevelSetWGSL,
   fineToCoarseLevelSetActivityShader, unpackFineToCoarseGPUControl,
-  WebGPUFineToCoarseLevelSet } from "../lib/webgpu-octree-fine-to-coarse-levelset";
-import { PassBroker } from "../lib/webgpu-pass-broker";
+  WebGPUFineToCoarseLevelSet } from "../lib/methods/octree-shared/webgpu-octree-fine-to-coarse-levelset";
+import { PassBroker } from "../lib/core/webgpu-pass-broker";
 import { createGPULogicalActivityAdoptionContext,
-  gpuLogicalActivityTaskDescriptions } from "../lib/gpu-logical-activity-adoption";
+  gpuLogicalActivityTaskDescriptions } from "../lib/core/gpu-logical-activity-adoption";
 
 test("fine-to-coarse activity is conditional and describes all three stages", () => {
   const disabled = createGPULogicalActivityAdoptionContext({

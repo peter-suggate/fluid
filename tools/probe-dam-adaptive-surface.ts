@@ -2,13 +2,17 @@
 import assert from "node:assert/strict";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { octreeMethod } from "../lib/methods/octree";
-import type { GPUSolverInstance } from "../lib/methods/types";
+// Composition root for this entry point: importing the method catalog installs
+// the simulation methods and the octree coarse-dynamics lanes, without which
+// constructing a solver throws rather than silently running the wrong backend.
+import "../lib/methods";
+import { losassoMethod } from "../lib/methods/losasso/method";
+import type { GPUSolverInstance } from "../lib/core/method-contract";
 import { analyzeAdaptiveSurfaceFeatureGeometry, analyzeAdaptiveSurfacePublication } from
-  "../lib/octree-adaptive-surface-diagnostics";
-import { getScenePreset } from "../lib/scenes";
-import { requiredFluidDeviceLimits } from "../lib/webgpu-device-limits";
-import { unpackAdaptivePhiReceipt } from "../lib/webgpu-octree-losasso-adaptive-phi";
+  "../lib/methods/octree-shared/octree-adaptive-surface-diagnostics";
+import { getScenePreset } from "../lib/core/scenes";
+import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
+import { unpackAdaptivePhiReceipt } from "../lib/methods/losasso/webgpu-octree-losasso-adaptive-phi";
 
 const modulePath = process.env.WEBGPU_NODE_MODULE
   ?? fileURLToPath(new URL("../node_modules/webgpu/index.js", import.meta.url));
@@ -28,16 +32,25 @@ device.addEventListener("uncapturederror", event => validationErrors.push(event.
 
 const scene = getScenePreset("water-box-dam-break").create();
 scene.numerics.fixedDt_s = 0.004; scene.numerics.maxDt_s = 0.004;
-const solver = await octreeMethod.createSolverAsync!(device, scene, "balanced", {
-  ...octreeMethod.presetFor("balanced"), coarseBackend: "losasso",
+const solver = await losassoMethod.createSolverAsync!(device, scene, "balanced", {
+  ...losassoMethod.presetFor("balanced"),
   losassoVelocityExtension: "causal-front",
   maximumLeafSize: process.env.FLUID_MAXIMUM_LEAF_SIZE ?? "16",
   interfaceRefinementBandCells: 4, globalFineLevelSetFactor: "1", secondaryParticles: "off",
 }, undefined, () => {}) as GPUSolverInstance;
 const dimensions = [solver.info.nx, solver.info.ny, solver.info.nz] as const;
+// The analysis snapshot type declares its word arrays as `ArrayLike<number>`;
+// the projection actually publishes concrete typed arrays (webgpu-octree.ts
+// `readAdaptiveSurfacePublicationDiagnostics`), which this probe slices.
 const projection = (solver as unknown as { octreeProjection?: {
   readAdaptiveSurfacePublicationDiagnostics(): Promise<Parameters<
-    typeof analyzeAdaptiveSurfacePublication>[0] & { phiReceipts: Uint32Array } | undefined>;
+    typeof analyzeAdaptiveSurfacePublication>[0] & {
+      graphControl: Uint32Array;
+      phiControl: Uint32Array;
+      nodalPhi: Uint32Array;
+      constraints: Uint32Array;
+      phiReceipts: Uint32Array;
+    } | undefined>;
 } }).octreeProjection;
 assert.ok(projection);
 const samples: unknown[] = [];

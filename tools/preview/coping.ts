@@ -20,21 +20,21 @@
  * The document's terrain is then replaced, which is a preview's business and not
  * an edit to the hero scene: the preset builds a fresh document per call.
  */
-import type { CameraState, SceneDescription } from "../../lib/model";
-import { cameraPosition } from "../../lib/math";
-import type { SceneryNode } from "../../lib/scenery-graph";
-import { terrainHeightAt } from "../../lib/terrain";
+import type { CameraState, SceneDescription } from "../../lib/core/model";
+import { cameraPosition } from "../../lib/core/math";
+import type { SceneryNode } from "../../lib/core/scenery-graph";
+import { terrainHeightAt } from "../../lib/core/terrain";
 import {
   HERO_GARDEN_CONTAINER,
   HERO_GARDEN_TERRAIN_SAMPLE_M,
   HERO_GARDEN_VESSEL,
-} from "../../lib/hero-garden-scene";
-import { bakePondVesselTerrain, pondVesselPlanCurve } from "../../lib/voxel-scenery/pond-vessel";
+} from "../../lib/core/hero-garden-scene";
+import { bakePondVesselTerrain, pondVesselPlanCurve } from "../../lib/core/voxel-scenery/pond-vessel";
 import {
   SWEPT_COPING_POND_BULLNOSE,
   sweptCopingNodes,
   sweptCopingSection,
-} from "../../lib/voxel-scenery/swept-coping";
+} from "../../lib/core/voxel-scenery/swept-coping";
 import { heroPreviewCamera, heroPreviewScene } from "./hero-still";
 
 const FORM = process.env.FLUID_COPING_FORM === "heightfield" ? "heightfield" : "swept";

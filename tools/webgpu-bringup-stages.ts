@@ -1,4 +1,4 @@
-import type { GPUInitializationProgress } from "../lib/methods/types";
+import type { GPUInitializationProgress } from "../lib/core/method-contract";
 
 /**
  * Ordered, independently runnable checkpoints for native Dawn bring-up.

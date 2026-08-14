@@ -1,16 +1,20 @@
 import assert from "node:assert/strict";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { octreeMethod } from "../lib/methods/octree";
-import type { GPUSolverInstance } from "../lib/methods/types";
-import { createMinimalPowerDamBreakScene } from "../lib/scenes";
-import { requiredFluidDeviceLimits } from "../lib/webgpu-device-limits";
-import { usePerformanceInstrumentationStore } from "../lib/stores/performance-instrumentation-store";
-import { compareScalarFields } from "./webgpu-smoke-scenarios";
-import { readCubicVolumeField } from "./webgpu-smoke-readbacks";
+// Composition root for this entry point: importing the method catalog installs
+// the simulation methods and the octree coarse-dynamics lanes, without which
+// constructing a solver throws rather than silently running the wrong backend.
+import "../lib/methods";
+import { losassoMethod } from "../lib/methods/losasso/method";
+import type { GPUSolverInstance } from "../lib/core/method-contract";
+import { createMinimalPowerDamBreakScene } from "../lib/core/scenes";
+import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
+import { usePerformanceInstrumentationStore } from "../lib/core/stores/performance-instrumentation-store";
+import { compareScalarFields } from "../lib/harness/webgpu-smoke-scenarios";
+import { readCubicVolumeField } from "../lib/harness/webgpu-smoke-readbacks";
 import {
   acquireWebGPUExclusiveLock,
   releaseWebGPUExclusiveLock,
-} from "./webgpu-smoke-isolation";
+} from "../lib/harness/webgpu-smoke-isolation";
 
 interface Arm {
   readonly label: string;
@@ -162,7 +166,7 @@ try {
   for (const arm of arms) {
     const scene = createMinimalPowerDamBreakScene();
     const values = {
-      ...octreeMethod.presetFor("balanced"),
+      ...losassoMethod.presetFor("balanced"),
       maximumLeafSize: String(arm.maximumLeafSize),
       interfaceRefinementBandCells: arm.interfaceBandCells,
       globalFineLevelSetFactor: String(surfaceTrackingFactor),
@@ -171,7 +175,7 @@ try {
       secondaryParticles: "off",
     };
     const constructionStarted = performance.now();
-    const solver = await octreeMethod.createSolverAsync!(
+    const solver = await losassoMethod.createSolverAsync!(
       device,
       scene,
       "balanced",

@@ -1,8 +1,8 @@
 "use client";
 
-import { VISUALIZATION_FIELDS } from "@/lib/visualization-catalog";
-import { useUIStore } from "@/lib/stores/ui-store";
-import type { GridOverlayMode } from "@/lib/webgpu-renderer";
+import { VISUALIZATION_FIELDS } from "../lib/core/visualization-catalog";
+import { useUIStore } from "../lib/core/stores/ui-store";
+import type { GridOverlayMode } from "../lib/core/webgpu-renderer";
 
 const ADAPTIVE_VELOCITY_MODE: GridOverlayMode = "adaptive-velocity-arrows";
 const ADAPTIVE_VELOCITY_VIEW = VISUALIZATION_FIELDS.find(

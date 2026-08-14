@@ -4,22 +4,22 @@ import test from "node:test";
 import { pathToFileURL } from "node:url";
 import {
   decodeGeneratedOctreePowerCatalog,
-} from "../lib/generated/octree-power-catalog";
-import { PassBroker } from "../lib/webgpu-pass-broker";
+} from "../lib/methods/power/generated/octree-power-catalog";
+import { PassBroker } from "../lib/core/webgpu-pass-broker";
 import {
   OCTREE_OWNER_ARENA_MAGIC,
   OCTREE_OWNER_PAGE_CONTROL_WORDS,
   OCTREE_OWNER_PAGE_PUBLICATION_STATUS,
   packOctreeOwnerPageWord,
   planOctreeOwnerPages,
-} from "../lib/webgpu-octree-owner-pages";
+} from "../lib/methods/octree-shared/webgpu-octree-owner-pages";
 import {
   OCTREE_POWER_SAME_OR_COARSER_FLAG,
   enumerateCanonicalSameOrFinerPowerDescriptors,
   encodeSameOrCoarserPowerDescriptor,
   sitesForSameOrCoarserPowerDescriptor,
   sitesForSameOrFinerPowerDescriptor,
-} from "../lib/octree-power-descriptor";
+} from "../lib/methods/power/octree-power-descriptor";
 import {
   OCTREE_POWER_DESCRIPTOR_ERROR,
   OCTREE_POWER_DESCRIPTOR_BOUNDARY_MASK,
@@ -34,7 +34,7 @@ import {
   planOctreePowerDescriptors,
   unpackOctreePowerDescriptorControl,
   type OctreePowerOwner,
-} from "../lib/webgpu-octree-power-descriptor";
+} from "../lib/methods/power/webgpu-octree-power-descriptor";
 import { createColdPowerRowPublication } from "./webgpu-octree-power-row-delta-fixture";
 
 const dimensions = [32, 32, 32] as const;
@@ -71,7 +71,7 @@ function singletonOwnerPageArena(d: readonly [number, number, number]): Uint32Ar
 }
 
 function catalogViews() {
-  const bytes = readFileSync(new URL("../lib/generated/octree-power-catalog.bin", import.meta.url));
+  const bytes = readFileSync(new URL("../lib/methods/power/generated/octree-power-catalog.bin", import.meta.url));
   return decodeGeneratedOctreePowerCatalog(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
 }
 
@@ -342,7 +342,7 @@ test("descriptor WGSL has bounded direct-owner queries and exact delta publicati
 });
 
 test("descriptor production source has only exact delta work and deterministic publication", () => {
-  const source = readFileSync(new URL("../lib/webgpu-octree-power-descriptor.ts", import.meta.url), "utf8");
+  const source = readFileSync(new URL("../lib/methods/power/webgpu-octree-power-descriptor.ts", import.meta.url), "utf8");
   assert.doesNotMatch(source, /\batomic(?:Add|Load|Min|Or|Store)?\b|compareExchange|clearBuffer|workControl/);
   assert.doesNotMatch(source, /live-index|indexedOwner|hashSite|hashCapacity|ownerMode.*auto/);
   assert.match(source, /copyBufferToBuffer\(delta\.rows, \(delta\.controlOffsetWords \+ 9\) \* 4/,

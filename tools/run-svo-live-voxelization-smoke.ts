@@ -53,42 +53,45 @@
  *   FLUID_SVO_VOXELIZATION_CONVERGE_FRAMES authored ceiling on frames one teleport may take (default 64)
  *   FLUID_SVO_VOXELIZATION_OUT             optional JSON report path
  */
+// These lanes render without a solver, but they construct the renderer, and
+// a renderer resolves a method by id on any path that reaches a scene.
+import "../lib/methods";
 import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { getScenePreset } from "../lib/scenes";
-import { SVO_CLUSTER_ARENA_BLOCK, packSvoClusterArena } from "../lib/svo-cluster-arena";
+import { getScenePreset } from "../lib/core/scenes";
+import { SVO_CLUSTER_ARENA_BLOCK, packSvoClusterArena } from "../lib/svo/svo-cluster-arena";
 import {
   growSvoNodeMipAddressPlan,
   pagesOutsideSvoNodeMipAddressPlan,
   planSvoNodeMipAddresses,
   svoNodeMipDomainBasePages,
   svoNodeMipDomainPyramidPageCount,
-} from "../lib/svo-node-mip-address-plan";
-import type { SvoNodeMipCoordinate } from "../lib/svo-node-mip-pyramid";
-import { SVO_SMOOTH_UNION_CLUSTER_ARENA_WORDS, type SvoSmoothUnionClusterPacking } from "../lib/svo-primitive-abi";
+} from "../lib/svo/svo-node-mip-address-plan";
+import type { SvoNodeMipCoordinate } from "../lib/svo/svo-node-mip-pyramid";
+import { SVO_SMOOTH_UNION_CLUSTER_ARENA_WORDS, type SvoSmoothUnionClusterPacking } from "../lib/svo/svo-primitive-abi";
 import {
   SPARSE_BRICK_PAYLOAD_PROFILES, sparseBrickScenePayloadIdentityAt, unpackMaterialOwner,
-} from "../lib/sparse-brick-octree";
-import { packSvoDrySceneClusters } from "../lib/webgpu-svo-dry-scene";
-import { WebGPULiveSvoScene } from "../lib/webgpu-live-svo-scene";
+} from "../lib/svo/sparse-brick-octree";
+import { packSvoDrySceneClusters } from "../lib/svo/webgpu-svo-dry-scene";
+import { WebGPULiveSvoScene } from "../lib/svo/webgpu-live-svo-scene";
 import {
   ENVIRONMENT_VOXEL_MATERIAL_BASE,
   OCTREE_LIVE_SCENE_CANDIDATES_PER_BRICK,
   OCTREE_LIVE_SCENE_REFINEMENT_CANDIDATE_TARGET,
   octreeLiveSceneDryPayloadProfile,
   type OctreeSparseBrickWorld,
-} from "../lib/webgpu-octree-sparse-bricks";
+} from "../lib/svo/webgpu-svo-sparse-bricks";
 import {
   SPARSE_SCENE_MAINTENANCE_STATE_WORDS,
   sparseScenePrimitiveBounds,
   sparseScenePrimitiveForProxy,
   sparseSceneRevisionIncomplete,
   type SparseScenePrimitive,
-} from "../lib/webgpu-sparse-scene-proxies";
-import { buildEnvironmentProxyCatalog, environmentProxyPrimitives } from "../lib/voxel-environments";
+} from "../lib/core/webgpu-sparse-scene-proxies";
+import { buildEnvironmentProxyCatalog, environmentProxyPrimitives } from "../lib/core/voxel-environments";
 import { createDawnRenderDevice } from "./svo-dry-frame-harness";
 
 const scenePresetId = process.env.FLUID_SVO_VOXELIZATION_SCENE ?? "hero-garden-hose";

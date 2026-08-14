@@ -144,63 +144,66 @@
  *
  * Exits 0 only when every check passes; the report is printed either way.
  */
+// These lanes render without a solver, but they construct the renderer, and
+// a renderer resolves a method by id on any path that reaches a scene.
+import "../lib/methods";
 import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import type { EnvironmentId } from "../lib/environments";
-import { HERO_GARDEN_BRICK_CELLS, HERO_GARDEN_CELL_M, HERO_GARDEN_CONTAINER } from "../lib/hero-garden-scene";
+import type { EnvironmentId } from "../lib/core/environments";
+import { HERO_GARDEN_BRICK_CELLS, HERO_GARDEN_CELL_M, HERO_GARDEN_CONTAINER } from "../lib/core/hero-garden-scene";
 import {
   createHeroGardenHoseStressScene,
   HERO_GARDEN_STRESS_MAXIMUM_MULTIPLIER,
-} from "../lib/hero-garden-stress-scene";
-import { defaultCamera, type CameraState, type SceneDescription } from "../lib/model";
-import { createHeroGardenHoseSceneWithSet, getScenePreset } from "../lib/scenes";
-import { SVO_PRIMITIVE_RECORD_STRIDE_BYTES } from "../lib/svo-primitive-abi";
-import { SVO_PRIMITIVE_CANDIDATE_MAXIMUM_LEAVES } from "../lib/svo-primitive-candidates";
-import { SVO_BRICK_CONTOUR, decodeSvoBrickContour, fitSvoBrickContour } from "../lib/svo-brick-contour";
-import { decodeSvoBrickOccupancy } from "../lib/svo-brick-occupancy";
+} from "../lib/core/hero-garden-stress-scene";
+import { defaultCamera, type CameraState, type SceneDescription } from "../lib/core/model";
+import { createHeroGardenHoseSceneWithSet, getScenePreset } from "../lib/core/scenes";
+import { SVO_PRIMITIVE_RECORD_STRIDE_BYTES } from "../lib/svo/svo-primitive-abi";
+import { SVO_PRIMITIVE_CANDIDATE_MAXIMUM_LEAVES } from "../lib/svo/svo-primitive-candidates";
+import { SVO_BRICK_CONTOUR, decodeSvoBrickContour, fitSvoBrickContour } from "../lib/svo/svo-brick-contour";
+import { decodeSvoBrickOccupancy } from "../lib/svo/svo-brick-occupancy";
 import {
   SPARSE_BRICK_BANDED_ALLOCATOR_WORDS, SPARSE_BRICK_BANDED_BLOB_BYTES_PER_LEAF,
   SPARSE_BRICK_BANDED_HEADER_WORDS, SPARSE_BRICK_BANDED_OVERFLOW,
   SPARSE_BRICK_GPU_LAYOUT, resolveSparseBrickPayloadLayout, sparseBrickSceneFractionAt,
   sparseBrickScenePayloadIdentityAt,
   type SparseBrickSize,
-} from "../lib/sparse-brick-octree";
+} from "../lib/svo/sparse-brick-octree";
 import {
   octreeLiveSceneDryPayloadProfile, octreeLiveSceneSceneGeometryFormat,
-} from "../lib/webgpu-octree-sparse-bricks";
+} from "../lib/svo/webgpu-svo-sparse-bricks";
 import {
   planSparseSceneTerrainField,
   sparseSceneTerrainColumnRange,
-} from "../lib/sparse-scene-terrain-field";
+} from "../lib/core/sparse-scene-terrain-field";
 import {
   SVO_NODE_MIP_LAYOUT,
   raiseSvoNodeMipSeedToFloor,
   svoNodeMipPageBytes,
   svoNodeMipSeedKey,
-} from "../lib/svo-node-mip-pyramid";
-import { liveSvoLeafPage } from "../lib/webgpu-svo-live-derived-builder";
-import { terrainSampleShape } from "../lib/terrain";
-import { VOXEL_MATERIAL_IDS } from "../lib/voxel-scene";
-import { resolveSvoPrimaryTraversal, type SvoConeTracingMode } from "../lib/svo-render-options";
+} from "../lib/svo/svo-node-mip-pyramid";
+import { liveSvoLeafPage } from "../lib/svo/webgpu-svo-live-derived-builder";
+import { terrainSampleShape } from "../lib/core/terrain";
+import { VOXEL_MATERIAL_IDS } from "../lib/core/voxel-scene";
+import { resolveSvoPrimaryTraversal, type SvoConeTracingMode } from "../lib/svo/svo-render-options";
 import {
   DEFAULT_SVO_RENDER_TUNING, SVO_LOD_FIXED_LEVEL_MAXIMUM, SVO_LOD_SCREEN_SPACE_PIXELS_MAXIMUM,
   SVO_RENDER_QUALITY_PRESETS,
   svoSceneryDetailCellSize_m,
   type SvoLodMode,
   type SvoRenderQualityPreset,
-} from "../lib/svo-render-tuning";
-import { WebGPULiveSvoScene } from "../lib/webgpu-live-svo-scene";
+} from "../lib/svo/svo-render-tuning";
+import { WebGPULiveSvoScene } from "../lib/svo/webgpu-live-svo-scene";
 import {
   OCTREE_LIVE_SCENE_CANDIDATES_PER_BRICK,
   OCTREE_LIVE_SCENE_REFINEMENT_CANDIDATE_TARGET,
   octreeLiveSceneTerrainVoxelsEnabled,
-} from "../lib/webgpu-octree-sparse-bricks";
-import { SPARSE_SCENE_CLUSTER_CAPACITY } from "../lib/webgpu-sparse-scene-proxies";
-import { cameraPosition } from "../lib/math";
-import { voxelViewProjectionMatrix } from "../lib/webgpu-renderer";
+} from "../lib/svo/webgpu-svo-sparse-bricks";
+import { SPARSE_SCENE_CLUSTER_CAPACITY } from "../lib/core/webgpu-sparse-scene-proxies";
+import { cameraPosition } from "../lib/core/math";
+import { voxelViewProjectionMatrix } from "../lib/core/webgpu-renderer";
 import {
   canConsumeSparseVoxelPbrMaterials,
   canConsumeSparseVoxelPrimitiveCandidates,
@@ -210,11 +213,11 @@ import {
   SVO_DRY_SCENE_CLUSTER_CAPACITY,
   type SvoConeLightingScale,
   type SvoDryOptimizationExperiments,
-} from "../lib/webgpu-svo-dry-scene";
-import { SVO_GBUFFER_RENDER_TARGET_CONTRACT } from "../lib/webgpu-svo-gbuffer-targets";
-import { FLUID_RASTER_PRIMARY_COLOR_BYTES_PER_SAMPLE } from "../lib/webgpu-device-limits";
-import { resolveDisplayGrade } from "../lib/webgpu-lighting";
-import { SVO_SCREEN_SPACE_TERMINATION_CONTRACT } from "../lib/svo-screen-space-termination";
+} from "../lib/svo/webgpu-svo-dry-scene";
+import { SVO_GBUFFER_RENDER_TARGET_CONTRACT } from "../lib/svo/webgpu-svo-gbuffer-targets";
+import { FLUID_RASTER_PRIMARY_COLOR_BYTES_PER_SAMPLE } from "../lib/core/webgpu-device-limits";
+import { resolveDisplayGrade } from "../lib/core/webgpu-lighting";
+import { SVO_SCREEN_SPACE_TERMINATION_CONTRACT } from "../lib/svo/svo-screen-space-termination";
 import { frameRadianceRange, writeFramePng } from "./write-frame-png";
 import {
   buildSvoDrySceneAssembly,

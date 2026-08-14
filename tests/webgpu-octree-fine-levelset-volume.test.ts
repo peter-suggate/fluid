@@ -2,15 +2,15 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
 import { FineLevelSetBrickOracle, packFineLevelSetBrickKey,
-  planFineLevelSetBricks } from "../lib/octree-fine-levelset-bricks";
-import { WebGPUFineLevelSetBricks } from "../lib/webgpu-octree-fine-levelset-bricks";
-import { OCTREE_POWER_COARSE_LEVELSET_VALID } from "../lib/webgpu-octree-power-coarse-levelset";
+  planFineLevelSetBricks } from "../lib/methods/octree-shared/octree-fine-levelset-bricks";
+import { WebGPUFineLevelSetBricks } from "../lib/methods/octree-shared/webgpu-octree-fine-levelset-bricks";
+import { OCTREE_POWER_COARSE_LEVELSET_VALID } from "../lib/methods/power/webgpu-octree-power-coarse-levelset";
 import { WebGPUFineLevelSetVolumeCorrection,
   fineLevelSetVolumeCadence,
   fineLevelSetVolumeCorrectionWGSL,
-  unpackFineLevelSetGPUVolumeControl } from "../lib/webgpu-octree-fine-levelset-volume";
-import { PassBroker } from "../lib/webgpu-pass-broker";
-import { usePerformanceInstrumentationStore } from "../lib/stores/performance-instrumentation-store";
+  unpackFineLevelSetGPUVolumeControl } from "../lib/methods/octree-shared/webgpu-octree-fine-levelset-volume";
+import { PassBroker } from "../lib/core/webgpu-pass-broker";
+import { usePerformanceInstrumentationStore } from "../lib/core/stores/performance-instrumentation-store";
 
 // Numerical harnesses submit their own raw encoders; exercise the production
 // shader variant instead of the solver-owned activity binding session.

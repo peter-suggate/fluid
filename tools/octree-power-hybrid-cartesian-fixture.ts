@@ -1,11 +1,11 @@
-import { createOctreePowerSite } from "../lib/octree-power-geometry";
+import { createOctreePowerSite } from "../lib/methods/power/octree-power-geometry";
 import {
   OCTREE_POWER_INVALID_ROW,
   type OctreePowerCompactRow,
   type OctreePowerFaceRecord,
   type OctreePowerIncidence,
   type OctreePowerOperator,
-} from "../lib/octree-power-operator";
+} from "../lib/methods/power/octree-power-operator";
 
 export interface CartesianPowerFixtureOptions {
   readonly openFraction?: (a: readonly [number, number, number], b: readonly [number, number, number]) => number;

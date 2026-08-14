@@ -4,16 +4,16 @@ import { useRef, useState } from "react";
 import { NumberField, RangeControl, Segmented } from "./controls";
 import { MethodPanel } from "./MethodPanel";
 import { SceneLibraryPanel } from "./SceneLibraryPanel";
-import { simulation } from "@/lib/simulation/controller";
-import { useSceneStore } from "@/lib/stores/scene-store";
-import { useUIStore } from "@/lib/stores/ui-store";
-import { HERO_GARDEN_SOLVER_CELL_M } from "@/lib/hero-garden-scene";
-import { findSceneDefinition } from "@/lib/scenes";
-import { sceneDefinitionTakesLattice } from "@/lib/scene-definition";
-import { svoSceneryRefinementDepth, SVO_ENVIRONMENT_REFINEMENT_DEPTH_MAXIMUM, SVO_ENVIRONMENT_REFINEMENT_DEPTH_MINIMUM } from "@/lib/svo-render-tuning";
-import { terrainSampleShape } from "@/lib/terrain";
-import type { FluidInflow } from "@/lib/model";
-import { sceneAtFinestCellSize } from "@/lib/scene-scale";
+import { simulation } from "../lib/core/simulation/controller";
+import { useSceneStore } from "../lib/core/stores/scene-store";
+import { useUIStore } from "../lib/core/stores/ui-store";
+import { HERO_GARDEN_SOLVER_CELL_M } from "../lib/core/hero-garden-scene";
+import { findSceneDefinition } from "../lib/core/scenes";
+import { sceneDefinitionTakesLattice } from "../lib/core/scene-definition";
+import { svoSceneryRefinementDepth, SVO_ENVIRONMENT_REFINEMENT_DEPTH_MAXIMUM, SVO_ENVIRONMENT_REFINEMENT_DEPTH_MINIMUM } from "../lib/svo/svo-render-tuning";
+import { terrainSampleShape } from "../lib/core/terrain";
+import type { FluidInflow } from "../lib/core/model";
+import { sceneAtFinestCellSize } from "../lib/core/scene-scale";
 
 const defaultInflow: FluidInflow = {
   center_m: { x: -0.4, y: 0.55, z: 0 }, radius_m: 0.08, length_m: 0.12,

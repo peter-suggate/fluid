@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import type { FineLevelSetActivityCensus }
-  from "../lib/fine-levelset-activity-census";
+  from "../lib/core/fine-levelset-activity-census";
 
 interface Arm {
   readonly id: string;
@@ -58,14 +58,12 @@ const run = (arm: Arm) => new Promise<ArmRun>((resolve, reject) => {
         ...process.env,
         FLUID_SCENE: arm.scene,
         FLUID_LANE: arm.lane,
-        FLUID_METHOD: "octree",
-        FLUID_COARSE_BACKEND: "losasso",
+        FLUID_METHOD: "losasso",
         FLUID_OCTREE_GLOBAL_FINE_FACTOR: "4",
         FLUID_TARGET_S: String(arm.steps * 0.004),
         FLUID_MAX_DT: "0.004",
         FLUID_ORACLE_STEPS: String(arm.steps),
         FLUID_EXPECT_EXACT_STEPS: String(arm.steps),
-        FLUID_CPU_ORACLE: "0",
         FLUID_FIELD_STATS: "0",
         FLUID_STABILITY_ENVELOPE: "0",
         FLUID_CHECKPOINT_EVERY_S: "0",

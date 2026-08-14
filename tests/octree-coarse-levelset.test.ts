@@ -6,7 +6,7 @@ import {
   correctCoarsePhiFromFine,
   packOctreeCoarsePhiRecords,
   resolveTwoResolutionPhi,
-} from "../lib/octree-coarse-levelset";
+} from "../lib/methods/octree-shared/octree-coarse-levelset";
 
 test("fine restriction preserves a thin-sheet zero crossing in the coarse interval", () => {
   const corrected = correctCoarsePhiFromFine([

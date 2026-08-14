@@ -7,8 +7,8 @@ import {
   powerBoxBoundary,
   serializeOctreePowerCell,
   type OctreePowerSite,
-} from "../lib/octree-power-geometry";
-import { OCTREE_CUBE_TRANSFORMS, transformPowerVector } from "../lib/octree-power-topology";
+} from "../lib/methods/power/octree-power-geometry";
+import { OCTREE_CUBE_TRANSFORMS, transformPowerVector } from "../lib/methods/power/octree-power-topology";
 
 const close = (actual: number, expected: number, tolerance = 1e-9) => assert.ok(Math.abs(actual - expected) <= tolerance,
   `expected ${actual} to be within ${tolerance} of ${expected}`);

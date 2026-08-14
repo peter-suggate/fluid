@@ -1,13 +1,17 @@
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
-import { initializeRigidBodies } from "../lib/rigid-body";
-import type { GPUInitializationProgress, GPUSolverInstance, MethodParamValues } from "../lib/methods/types";
-import { octreeMethod } from "../lib/methods/octree";
-import { fluidExecutionDeviceFeatures } from "../lib/gpu-startup";
-import { viewportFailureIndicator } from "../lib/viewport-failure-diagnostics";
-import { requiredFluidDeviceLimits } from "../lib/webgpu-device-limits";
-import { decodeOctreeAirSupportGPUFirstError } from "../lib/webgpu-octree-air-velocity-support-gpu";
-import { createSmokeScenario, isSmokeScenarioId } from "./webgpu-smoke-scenarios";
+// Composition root for this entry point: importing the method catalog installs
+// the simulation methods and the octree coarse-dynamics lanes, without which
+// constructing a solver throws rather than silently running the wrong backend.
+import "../lib/methods";
+import { initializeRigidBodies } from "../lib/core/rigid-body";
+import type { GPUInitializationProgress, GPUSolverInstance, MethodParamValues } from "../lib/core/method-contract";
+import { losassoMethod } from "../lib/methods/losasso/method";
+import { fluidExecutionDeviceFeatures } from "../lib/core/gpu-startup";
+import { viewportFailureIndicator } from "../lib/core/viewport-failure-diagnostics";
+import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
+import { decodeOctreeAirSupportGPUFirstError } from "../lib/methods/power/webgpu-octree-air-velocity-support-gpu";
+import { createSmokeScenario, isSmokeScenarioId } from "../lib/harness/webgpu-smoke-scenarios";
 import {
   parseWebGPUBringupStage,
   reachedSolverResourceBoundary,
@@ -316,7 +320,7 @@ function decodePrecedingRejectedIdentity(packed: number | undefined, detail: num
 }
 
 function solverValues(): MethodParamValues {
-  const values = octreeMethod.presetFor("balanced");
+  const values = losassoMethod.presetFor("balanced");
   values.globalFineLevelSetFactor = process.env.FLUID_FINE_FACTOR
     ?? process.env.FLUID_OCTREE_GLOBAL_FINE_FACTOR
     ?? "4";
@@ -365,7 +369,7 @@ try {
         if (stage === "solver-resources" && reachedSolverResourceBoundary(snapshot)) throw new SolverResourceBoundary();
       };
       try {
-        solver = await octreeMethod.createSolverAsync!(device, scenario.scene, "balanced", solverValues(), undefined, progress);
+        solver = await losassoMethod.createSolverAsync!(device, scenario.scene, "balanced", solverValues(), undefined, progress);
       } catch (error) {
         if (!(error instanceof SolverResourceBoundary)) throw error;
         await flushGPUErrorDelivery(device);
@@ -405,7 +409,7 @@ try {
         if ((info.completedTime_s ?? 0) + 1e-9 < requestedTime_s) {
           throw new Error(`one-step checkpoint did not reach its GPU completion fence: completed=${info.completedTime_s}, requested=${requestedTime_s}`);
         }
-        const authorityFailure = viewportFailureIndicator(info, undefined, scenario.scene);
+        const authorityFailure = viewportFailureIndicator(losassoMethod, info, undefined, scenario.scene);
         if (authorityFailure?.tone === "rejected") {
           const projection = (solver as unknown as { octreeProjection?: {
             readGlobalFineLevelSetDiagnostics(): Promise<{ structuredVelocityControl?: readonly number[];

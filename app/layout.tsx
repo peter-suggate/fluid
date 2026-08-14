@@ -1,5 +1,10 @@
 import type { Metadata } from "next";
 import { headers } from "next/headers";
+// Composition root for the browser: importing the method catalog installs the
+// simulation methods every panel and the renderer later resolve by id. The
+// router evaluates this layout around every route, so this is the one place
+// the app has to say it.
+import "@/lib/methods";
 import { AppShell } from "@/components/AppShell";
 import "./globals.css";
 

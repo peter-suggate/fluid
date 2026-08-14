@@ -7,7 +7,7 @@ import {
   GPUCompilationManager,
   managedGPUDevice,
   type GPUCompilationManifest,
-} from "../lib/gpu-compilation-manager";
+} from "../lib/core/gpu-compilation-manager";
 
 interface FakeGPU {
   readonly device: GPUDevice;

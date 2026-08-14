@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { simulation } from "@/lib/simulation/controller";
+import { simulation } from "../lib/core/simulation/controller";
 import {
   browserSceneLibraryStorage,
   deleteSceneFromLibrary,
@@ -9,8 +9,8 @@ import {
   renameSceneInLibrary,
   savedSceneEntries,
   type SceneLibraryEntry,
-} from "@/lib/scene-library";
-import { useSceneStore } from "@/lib/stores/scene-store";
+} from "../lib/core/scene-library";
+import { useSceneStore } from "../lib/core/stores/scene-store";
 
 function savedLabel(savedAt_ms: number): string {
   const elapsed_s = Math.max(0, (Date.now() - savedAt_ms) / 1000);

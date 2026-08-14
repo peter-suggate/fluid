@@ -5,8 +5,9 @@ import {
   WEBGPU_EXCLUSIVE_LOCK,
   WEBGPU_SMOKE_KILL_REAP_MS,
   WEBGPU_SMOKE_TERMINATE_GRACE_MS,
-} from "./webgpu-smoke-isolation";
-import { dawnReproductionForSmokeEnvironment } from "../lib/webgpu-failure-reproduction";
+} from "../lib/harness/webgpu-smoke-isolation";
+import { dawnReproductionForSmokeEnvironment } from "../lib/core/webgpu-failure-reproduction";
+import "../lib/methods";
 
 const timeout_ms = parseWebGPUSmokeTimeout(process.env.FLUID_WEBGPU_SMOKE_TIMEOUT_MS);
 const worker = fileURLToPath(new URL("./run-webgpu-smoke-isolated-worker.ts", import.meta.url));

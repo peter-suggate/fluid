@@ -3,7 +3,7 @@ import test from "node:test";
 import {
   OCTREE_POWER_SAME_OR_COARSER_FLAG,
   sitesForSameOrCoarserPowerDescriptor,
-} from "../lib/octree-power-descriptor";
+} from "../lib/methods/power/octree-power-descriptor";
 import {
   OCTREE_CUBE_TRANSFORMS,
   auditOctreePowerTopology,
@@ -11,7 +11,7 @@ import {
   enforcePaperCompatibleOctreeGrading,
   inverseCubeTransform,
   transformPowerVector,
-} from "../lib/octree-power-topology";
+} from "../lib/methods/power/octree-power-topology";
 
 test("every co-spherical same/coarser mask is covered without topology refinement", () => {
   for (const mask of [25, 42, 52, 57, 58, 60]) {

@@ -20,7 +20,7 @@
  *             separate one: a baseline taken at a different revision of a scene
  *             four people are editing is not a baseline.
  */
-import { withHeroLayout, type LayoutFidelity } from "../../lib/voxel-scenery/hero-layout";
+import { withHeroLayout, type LayoutFidelity } from "../../lib/core/voxel-scenery/hero-layout";
 import { heroPreviewCamera, heroPreviewScene } from "./hero-still";
 
 const fidelity = process.env.FLUID_HERO_LAYOUT_FIDELITY ?? "blocking";

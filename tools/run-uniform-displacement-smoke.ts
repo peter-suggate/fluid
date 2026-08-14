@@ -1,10 +1,14 @@
 import assert from "node:assert/strict";
 import { pathToFileURL } from "node:url";
-import { fluidExecutionDeviceFeatures } from "../lib/gpu-startup";
-import { uniformMethod } from "../lib/methods/uniform";
-import { cloneScene, defaultScene, type RigidBodyDescription } from "../lib/model";
-import { initializeRigidBodies } from "../lib/rigid-body";
-import { requiredFluidDeviceLimits } from "../lib/webgpu-device-limits";
+// Composition root for this entry point: importing the method catalog installs
+// the simulation methods and the octree coarse-dynamics lanes, without which
+// constructing a solver throws rather than silently running the wrong backend.
+import "../lib/methods";
+import { fluidExecutionDeviceFeatures } from "../lib/core/gpu-startup";
+import { uniformMethod } from "../lib/methods/uniform/method";
+import { cloneScene, defaultScene, type RigidBodyDescription } from "../lib/core/model";
+import { initializeRigidBodies } from "../lib/core/rigid-body";
+import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 
 const modulePath = process.env.WEBGPU_NODE_MODULE;
 if (!modulePath) throw new Error("Set WEBGPU_NODE_MODULE to the installed webgpu package index.js");
@@ -134,6 +138,12 @@ for (let step = 1; step <= descentSteps + settleSteps; step += 1) {
   }
   await device.queue.onSubmittedWorkDone();
   const stats = await solver.readStats();
+  // Sec. 3.6 unplaceable-excess telemetry is stamped onto `info` by the uniform
+  // reference solver (webgpu-uniform-reference.ts) and is not part of the shared
+  // GPUEulerianInfo shape, so read it through a narrow structural view.
+  const uniformDiagnostics = stats as typeof stats & {
+    uniformUnplaceableSolidExcess_cells?: number;
+  };
   const mass_cells = Number(stats.volumeCellSum);
   maximumRelativeMassLoss = Math.max(maximumRelativeMassLoss,
     Math.max(0, (initialMass_cells - mass_cells) / initialMass_cells));
@@ -141,11 +151,11 @@ for (let step = 1; step <= descentSteps + settleSteps; step += 1) {
   maximumRelativeRepresentedVolumeLoss = Math.max(maximumRelativeRepresentedVolumeLoss,
     Math.max(0, (initialMass_cells - finalRepresentedVolume_cells) / initialMass_cells));
   maximumUnplaceable_cells = Math.max(maximumUnplaceable_cells,
-    Number(stats.uniformUnplaceableSolidExcess_cells ?? 0));
+    Number(uniformDiagnostics.uniformUnplaceableSolidExcess_cells ?? 0));
   if (process.env.FLUID_DISPLACEMENT_LOG_STEPS === "1") {
     console.log(JSON.stringify({ step, fraction, mass_cells,
       relativeMassLoss: (initialMass_cells - mass_cells) / initialMass_cells,
-      unplaceable_cells: stats.uniformUnplaceableSolidExcess_cells ?? 0 }));
+      unplaceable_cells: uniformDiagnostics.uniformUnplaceableSolidExcess_cells ?? 0 }));
   }
 }
 

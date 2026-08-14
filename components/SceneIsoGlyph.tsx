@@ -2,14 +2,14 @@
 
 import { useId } from "react";
 
-import type { SceneDescription } from "@/lib/model";
+import type { SceneDescription } from "../lib/core/model";
 import {
   sceneIsoGlyph,
   sceneIsoGlyphLabel,
   type IsoBox,
   type IsoVec,
   type SceneIsoGlyph as SceneIsoGlyphModel,
-} from "@/lib/scene-glyph-iso";
+} from "../lib/core/scene-glyph-iso";
 
 /**
  * The card's thumbnail: `sceneIsoGlyph` drawn as a small room, in inline SVG.
@@ -27,8 +27,15 @@ const VIEW_HEIGHT = 72;
 /** Room for the near-bottom corner's stroke and for a body sitting proud of the rim. */
 const MARGIN = 6;
 
-const ISO_COS = Math.cos(Math.PI / 6);
-const ISO_SIN = Math.sin(Math.PI / 6);
+// The 30° pair, written so that it is the same double everywhere. `Math.cos`
+// and `Math.sin` are implementation-defined to within an ulp, and these
+// coordinates are rendered once on the server and again in the browser: a
+// one-ulp disagreement is a hydration mismatch React reports and declines to
+// patch. `Math.sqrt` is correctly rounded by IEEE-754 and halving is exact, so
+// this form agrees bit for bit — and sin 30° really is exactly a half, which
+// `Math.sin(Math.PI / 6)` is not.
+const ISO_COS = Math.sqrt(3) / 2;
+const ISO_SIN = 0.5;
 /**
  * The projection is orthogonal with equal row norms, so it is √1.5 times an
  * orthonormal one — which is exactly the radius a unit sphere comes out at.
@@ -37,6 +44,19 @@ const ISO_SPHERE = Math.sqrt(1.5);
 
 /** Enough to read as a hose at 90 px without crossing the room it enters. */
 const INFLOW_LENGTH = 0.28;
+
+/**
+ * Every coordinate this file emits, at the precision the drawing can carry.
+ *
+ * Two hundredths of a viewBox unit is a fifth of a pixel at the size these are
+ * drawn, so the rounding is invisible — and it is what makes the glyph the
+ * same string on the server and in the browser. `Math.cos` and friends are
+ * implementation-defined to within an ulp, the two renders run on different
+ * engines, and an unrounded attribute turns that ulp into a hydration mismatch
+ * React reports and then declines to patch. The path builders always rounded;
+ * the circles did not, and were the ones that mismatched.
+ */
+const round = (value: number) => value.toFixed(2);
 
 interface Projected { readonly x: number; readonly y: number }
 
@@ -87,10 +107,10 @@ export function SceneIsoGlyph({ scene, glyph = sceneIsoGlyph(scene), scale, clas
     y: originY + fit * ((point.x + point.z) * ISO_SIN - point.y),
   });
   const face = (points: readonly IsoVec[]) =>
-    `M${points.map(put).map(({ x, y }) => `${x.toFixed(2)},${y.toFixed(2)}`).join("L")}Z`;
+    `M${points.map(put).map(({ x, y }) => `${round(x)},${round(y)}`).join("L")}Z`;
   const edge = (from: IsoVec, to: IsoVec) => {
     const a = put(from), b = put(to);
-    return `M${a.x.toFixed(2)},${a.y.toFixed(2)}L${b.x.toFixed(2)},${b.y.toFixed(2)}`;
+    return `M${round(a.x)},${round(a.y)}L${round(b.x)},${round(b.y)}`;
   };
 
   // The three faces a corner view sees of any box: the top, and the two that
@@ -146,11 +166,11 @@ export function SceneIsoGlyph({ scene, glyph = sceneIsoGlyph(scene), scale, clas
     >
       {sphere && <defs>
         <clipPath id={sphereClipId}>
-          <circle cx={sphere.centre.x} cy={sphere.centre.y} r={sphere.radius} />
+          <circle cx={round(sphere.centre.x)} cy={round(sphere.centre.y)} r={round(sphere.radius)} />
         </clipPath>
       </defs>}
       {sphere
-        ? <circle className="iso-sphere-vessel-fill" cx={sphere.centre.x} cy={sphere.centre.y} r={sphere.radius} />
+        ? <circle className="iso-sphere-vessel-fill" cx={round(sphere.centre.x)} cy={round(sphere.centre.y)} r={round(sphere.radius)} />
         : <>
           <path className="iso-room-floor" d={face(room.floor)} />
           <path className="iso-room-wall" d={face(room.backLeft)} />
@@ -189,7 +209,7 @@ export function SceneIsoGlyph({ scene, glyph = sceneIsoGlyph(scene), scale, clas
             z: 0.5 * (body.min.z + body.max.z),
           });
           const radius = ISO_SPHERE * fit * (body.max.x - body.min.x + body.max.y - body.min.y + body.max.z - body.min.z) / 6;
-          return <circle className="iso-body-round" key={`body-${index}`} cx={centre.x} cy={centre.y} r={Math.max(0.6, radius)} />;
+          return <circle className="iso-body-round" key={`body-${index}`} cx={round(centre.x)} cy={round(centre.y)} r={round(Math.max(0.6, radius))} />;
         }
         const faces = litFaces(body);
         return <g className="iso-body" key={`body-${index}`}>
@@ -208,15 +228,15 @@ export function SceneIsoGlyph({ scene, glyph = sceneIsoGlyph(scene), scale, clas
           z: origin.z + direction.z * INFLOW_LENGTH,
         });
         return <g className="iso-inflow">
-          <line x1={nozzle.x} y1={nozzle.y} x2={jet.x} y2={jet.y} />
-          <circle cx={nozzle.x} cy={nozzle.y} r={1.6} />
+          <line x1={round(nozzle.x)} y1={round(nozzle.y)} x2={round(jet.x)} y2={round(jet.y)} />
+          <circle cx={round(nozzle.x)} cy={round(nozzle.y)} r={1.6} />
         </g>;
       })()}
 
       {/* The room last, so nothing drawn inside it spills over its walls. A lid
           is a face you look through; an open room simply has none. */}
       {sphere
-        ? <circle className="iso-sphere-vessel-edge" cx={sphere.centre.x} cy={sphere.centre.y} r={sphere.radius} />
+        ? <circle className="iso-sphere-vessel-edge" cx={round(sphere.centre.x)} cy={round(sphere.centre.y)} r={round(sphere.radius)} />
         : <>
           {glyph.tank.top === "closed" && <path className="iso-room-lid" d={face(room.lid)} />}
           <path className="iso-room-edge" d={farEdges.join("")} />

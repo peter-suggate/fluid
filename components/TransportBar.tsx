@@ -5,18 +5,19 @@ import {
   MAX_SHARED_STEP_S,
   MIN_SHARED_STEP_S,
   simulation,
-} from "@/lib/simulation/controller";
-import { simulationRecording } from "@/lib/simulation/recording";
-import { useDiagnosticsStore } from "@/lib/stores/diagnostics-store";
-import { useRecordingStore } from "@/lib/stores/recording-store";
-import { useRuntimeStore } from "@/lib/stores/runtime-store";
-import { useSceneStore } from "@/lib/stores/scene-store";
-import { useMethodStore } from "@/lib/stores/method-store";
-import { requestManualGPUStop } from "@/lib/gpu-startup";
-import { useSafeBrowserGPUBringup } from "@/lib/use-safe-browser-gpu-bringup";
-import { planSceneRuntime } from "@/lib/scene-runtime";
-import { resourceActivitiesFor, resourceInteractionGates } from "@/lib/resource-readiness";
-import { effectiveSimulationStep_s, uniformPaperStepActive } from "@/lib/simulation-step";
+} from "../lib/core/simulation/controller";
+import { simulationRecording } from "../lib/core/simulation/recording";
+import { useDiagnosticsStore } from "../lib/core/stores/diagnostics-store";
+import { useRecordingStore } from "../lib/core/stores/recording-store";
+import { useRuntimeStore } from "../lib/core/stores/runtime-store";
+import { useSceneStore } from "../lib/core/stores/scene-store";
+import { useMethodStore } from "../lib/core/stores/method-store";
+import { requestManualGPUStop } from "../lib/core/gpu-startup";
+import { useSafeBrowserGPUBringup } from "../lib/core/use-safe-browser-gpu-bringup";
+import { planSceneRuntime } from "../lib/core/scene-runtime";
+import { resourceActivitiesFor, resourceInteractionGates } from "../lib/core/resource-readiness";
+import { effectiveSimulationStep_s, methodPinsSimulationStep } from "../lib/core/simulation-step";
+import { requiresFencedInitialRasterPresentation } from "../lib/core/gpu-t0-presentation";
 
 
 export function TransportBar() {
@@ -34,7 +35,7 @@ export function TransportBar() {
   const methodState = useMethodStore();
   const methodId = methodState.methodId;
   const fixedDt = effectiveSimulationStep_s(scene, methodState);
-  const paperStep = uniformPaperStepActive(methodState);
+  const paperStep = methodPinsSimulationStep(scene, methodState);
   const recordingStatus = useRecordingStore((state) => state.status);
   const recordingStart = useRecordingStore((state) => state.startedAtSimulation_s);
   const recording = useRecordingStore((state) => state.recording);
@@ -44,15 +45,15 @@ export function TransportBar() {
   const browserPolicyPending = safeBringupPolicy === null;
   const browserSafetyLocked = safeBringupPolicy !== false;
   const [safeStepRequested, setSafeStepRequested] = useState(false);
-  const webgpu = simulation.backend === "webgpu";
-  const lagged = webgpu && gpuLag !== undefined && gpuLag > 2 * fixedDt;
+  const lagged = gpuLag !== undefined && gpuLag > 2 * fixedDt;
   // A resource that declares `blocks: "transport"` says so here rather than in
   // the activity tray: the suspended control and its reason stay together.
   const transportResourceWork = resourceActivitiesFor(resourceReadiness, "transport-inline")[0];
   const interaction = resourceInteractionGates(resourceReadiness, !rendererOnlyScene);
-  const initialSceneReady = methodId !== "octree" || (gpuInfo?.initialSparseAuthorityReady === true
-    && gpuInfo?.initialRasterSurfaceReady === true);
-  const transportLocked = rendererOnlyScene || (webgpu && (!interaction.transportInteractive || !initialSceneReady));
+  const initialSceneReady = !requiresFencedInitialRasterPresentation(methodId)
+    || (gpuInfo?.initialSparseAuthorityReady === true
+      && gpuInfo?.initialRasterSurfaceReady === true);
+  const transportLocked = rendererOnlyScene || !interaction.transportInteractive || !initialSceneReady;
   const safeStepLocked = safeBringup && (safeStepRequested || (gpuInfo?.encodedSteps ?? 0) >= 1);
   const importScene = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -124,14 +125,12 @@ export function TransportBar() {
             </div>
           </label>
         </div>
-        {simRate !== null && <small className="sim-rate" title={webgpu ? "Queue-confirmed simulated seconds completed per wall-clock second" : "Simulated seconds completed per wall-clock second"}>ACTUAL ×{simRate.toFixed(2)}</small>}
+        {simRate !== null && <small className="sim-rate" title="Queue-confirmed simulated seconds completed per wall-clock second">ACTUAL ×{simRate.toFixed(2)}</small>}
         {lagged && <small className="lag-chip" title="Simulation time currently admitted to the bounded GPU feed window.">GPU −{gpuLag.toFixed(1)} s</small>}
         {recordingStatus === "recording" && recordingStart !== null && <small className="recording-chip"><i />REC {(simulationTime - recordingStart).toFixed(2)} s</small>}
         {rendererOnlyScene
           ? <span className="continuous-run" title="This preset runs the live sparse scene renderer without fluid physics.">LIVE SVO · FLUID SOLVER DISABLED</span>
-          : webgpu
-          ? <span className="continuous-run" title={`Each admitted simulation advance is immediately followed by its presentation · double-buffered pairs · ${paperStep ? "uniform paper" : "shared rigid + fluid"} step ${(fixedDt * 1000).toFixed(2)} ms`}>SIM + RENDER LOCKSTEP · PRESENT ASAP</span>
-          : <span className="continuous-run" title={`CPU reference simulation · present every browser animation frame · fixed step ${(fixedDt * 1000).toFixed(2)} ms`}>CPU REFERENCE · PRESENT ASAP</span>}
+          : <span className="continuous-run" title={`Each admitted simulation advance is immediately followed by its presentation · double-buffered pairs · ${paperStep ? "uniform paper" : "shared rigid + fluid"} step ${(fixedDt * 1000).toFixed(2)} ms`}>SIM + RENDER LOCKSTEP · PRESENT ASAP</span>}
       </div>
       <div className="file-actions">
         <span className={`notice${noticeTone === "warn" ? " warn" : ""}`}>{notice}</span>

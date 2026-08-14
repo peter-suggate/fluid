@@ -77,7 +77,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
-import { encodeRgbPng, decodeRgbPng, type RgbImage } from "../lib/png-codec";
+import { encodeRgbPng, decodeRgbPng, type RgbImage } from "../lib/core/png-codec";
 import {
   decodeLinearPng,
   deltaE2000,
@@ -92,7 +92,7 @@ import {
   type FidelityRegion,
   type LinearImage,
   type RegionFidelityScore,
-} from "../lib/hero-fidelity-score";
+} from "../lib/core/hero-fidelity-score";
 
 const environment = process.env;
 const mode = environment.FLUID_HERO_FIDELITY_MODE ?? "score";

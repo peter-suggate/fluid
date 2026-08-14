@@ -25,11 +25,13 @@ import {
   unpackOctreeOwnerPageControl,
   unpackOctreeOwnerPageWord,
   type OctreeOwnerLeafSize,
-} from "../lib/webgpu-octree-owner-pages";
-import { PassBroker } from "../lib/webgpu-pass-broker";
+} from "../lib/methods/octree-shared/webgpu-octree-owner-pages";
+import { PassBroker } from "../lib/core/webgpu-pass-broker";
 
-const projectionSource = readFileSync(new URL("../lib/webgpu-octree.ts", import.meta.url), "utf8");
-const ownerPageSource = readFileSync(new URL("../lib/webgpu-octree-owner-pages.ts", import.meta.url), "utf8");
+// The projection module's WGSL now lives beside it in `octree-projection.wgsl.ts`;
+// this assertion reads the shader text, not the host class.
+const projectionSource = readFileSync(new URL("../lib/methods/octree-shared/octree-projection.wgsl.ts", import.meta.url), "utf8");
+const ownerPageSource = readFileSync(new URL("../lib/methods/octree-shared/webgpu-octree-owner-pages.ts", import.meta.url), "utf8");
 
 test("recurring owner lifecycle separates inactive preparation from next-boundary commit", () => {
   const prepare = WebGPUOctreeSimulationOwnerPages.prototype.encodeInactiveCandidate.toString();

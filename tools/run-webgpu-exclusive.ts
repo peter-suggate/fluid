@@ -3,7 +3,7 @@ import { constants } from "node:os";
 import {
   acquireWebGPUExclusiveLock,
   releaseWebGPUExclusiveLock,
-} from "./webgpu-smoke-isolation";
+} from "../lib/harness/webgpu-smoke-isolation";
 
 const nodeArguments = process.argv.slice(2);
 if (nodeArguments.length === 0) {

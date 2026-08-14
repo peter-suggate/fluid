@@ -1,16 +1,13 @@
 "use client";
 
-import {
-  getMethod,
-  interactiveSimulationMethods,
-  type SelectParamSpec,
-} from "@/lib/methods";
-import { VISUALIZATION_FIELDS } from "@/lib/visualization-catalog";
-import type { FieldVisualization } from "@/lib/visualization-registry";
-import { simulation } from "@/lib/simulation/controller";
-import { resolvedMethodValues, useMethodStore } from "@/lib/stores/method-store";
-import { useUIStore } from "@/lib/stores/ui-store";
-import type { GridOverlayMode } from "@/lib/webgpu-renderer";
+import { getMethod, interactiveSimulationMethods } from "@/lib/core/method-registry";
+import type { SelectParamSpec } from "@/lib/core/method-contract";
+import { VISUALIZATION_FIELDS } from "../lib/core/visualization-catalog";
+import type { FieldVisualization } from "../lib/core/visualization-registry";
+import { simulation } from "../lib/core/simulation/controller";
+import { resolvedMethodValues, useMethodStore } from "../lib/core/stores/method-store";
+import { useUIStore } from "../lib/core/stores/ui-store";
+import type { GridOverlayMode } from "../lib/core/webgpu-renderer";
 
 /**
  * The field-overlay picker, riding a corner of the fluid container.
@@ -48,10 +45,10 @@ export function FluidFieldFlyout({
   const setOverlayMode = useUIStore((state) => state.setGridOverlayMode);
   const setOverlayAxis = useUIStore((state) => state.setGridOverlayAxis);
   const setOverlaySlice = useUIStore((state) => state.setGridOverlaySlice);
-  const volumeCapable = methodId === "octree";
   // Only the views this method registered: a picker offering a publication the
   // solver never produces is a button that draws nothing.
   const method = getMethod(methodId);
+  const volumeCapable = method.capabilities?.volumeRendering === true;
   const methodValues = resolvedMethodValues(methodState);
   const importantOptions = method.params.filter((spec): spec is SelectParamSpec =>
     spec.tier === "coarse" && spec.kind === "select");
@@ -107,7 +104,7 @@ export function FluidFieldFlyout({
           type="button"
           className={overlayAxis === "volume" ? "active" : ""}
           disabled={!volumeCapable}
-          title={volumeCapable ? undefined : "Volume views need the octree method"}
+          title={volumeCapable ? undefined : "Volume views need an adaptive octree method"}
           onClick={() => setOverlayAxis("volume")}
         >VOL</button>
       </div>
@@ -149,7 +146,7 @@ export function FluidFieldFlyout({
         watch-adjust-repeat loop does not require opening the full method panel. */}
     <div className="fluid-field-solver" role="group" aria-label="Fluid solver method">
       <span>SOLVER</span>
-      {interactiveSimulationMethods.map((candidate) => <button
+      {interactiveSimulationMethods().map((candidate) => <button
         key={candidate.id}
         type="button"
         className={candidate.id === methodId ? "active" : ""}
@@ -164,16 +161,10 @@ export function FluidFieldFlyout({
       aria-label="Important fluid solver options"
     >
       {importantOptions.map((spec) => {
-        const fixedPowerFineBand = methodId === "octree"
-          && spec.key === "globalFineLevelSetFactor"
-          && methodValues.coarseBackend === "power2017";
-        return <label className="select-control" key={spec.key} title={fixedPowerFineBand
-          ? "Power 2017 fixes the separate narrow-band level set at factor four."
-          : spec.hint}>
+        return <label className="select-control" key={spec.key} title={spec.hint}>
           <span>{spec.label}</span>
           <select
             value={String(methodValues[spec.key])}
-            disabled={fixedPowerFineBand}
             onChange={(event) => simulation.setMethodParam(
               methodId, spec.key, event.currentTarget.value)}
           >

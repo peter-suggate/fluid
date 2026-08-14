@@ -12,6 +12,85 @@ This doc is the implementation plan. Every claim below was verified against HEAD
 import graph, the god files, and the UI/harness seams. File:line references are to that
 state and will drift as phases land — re-verify before acting on any single one.
 
+## 0. Status (2026-08-14, uncommitted working tree)
+
+| phase | state |
+|---|---|
+| 0 — guardrails, deletions, decisions | done |
+| 1 — cut the SCC, shrink the contracts | done |
+| 2 — physical layout + uniform first | done |
+| 3 — WGSL inversion + planner extraction | done |
+| 4 — split the god class; lane strategies | done |
+| 5 — registry promotion + UI plugins | done |
+| 6 — harness plugins | in progress |
+| 7 — sweep | in progress |
+
+Landed results worth carrying:
+
+- **Boundary violations 43 → 9** (`node --import tsx tools/check-module-boundaries.ts`).
+  The nine survivors are all `octree-shared → method-*` or `octree-shared → svo` and are
+  listed in Phase 7 below.
+- **`webgpu-octree.ts` 10,805 → 3,992 lines**, with the lane strategies split out into
+  `octree-coarse-dynamics-lane.ts` (836), `power/octree-power-lane.ts` (2,145) and
+  `losasso/octree-losasso-lane.ts` (2,068). The 66-member `OctreeCoarseDynamicsLane` is
+  the Phase 4 contract.
+- **WGSL byte-identical across the 6,800-line move.** `octreePowerProjectionShader`
+  190,220 bytes sha256 `2b17d6ae…f46f6`; `octreeLosassoProjectionShader` 190,340 bytes
+  sha256 `3d944b68…5184d5`. Re-check these after any lane edit.
+- **Three registered methods** — `losasso`, `power-liquids`, `uniform`; all interactive;
+  `uniform` the default; `coarseBackend` deleted everywhere.
+- Dawn: `symmetric-expansion:power2017` and `symmetric-expansion:fine` both PASS with 0
+  failing findings. The 250-step losasso main lane is 10-of-46, **identical to the
+  pre-split baseline** — i.e. the split moved nothing. Those ten are pre-existing physics
+  and are parked; see §0.2.
+
+### 0.1 The app has three module graphs, not one
+
+This bit the refactor and is not obvious from the layout. `vinext` / `@vitejs/plugin-rsc`
+gives the app **three module graphs that share no evaluation**:
+
+1. **server / RSC** — `app/**` and its static imports.
+2. **client** — each `"use client"` module the server graph hands the router, plus its
+   imports; evaluated in the browser *and* in the separate SSR pass. Today
+   `components/AppShell.tsx` and `components/SceneLibrary.tsx` (the library arrives as
+   `children`, so it is a **sibling** entry, not a descendant of the shell).
+3. **worker** — `lib/core/webgpu-render-worker.ts`, spawned by `new Worker(new URL(…))`.
+
+Each is a composition root and each does its own `import "@/lib/methods"`. Because
+`lib/core/stores/method-store.ts` resolves `defaultMethodId()` at module scope, dropping
+any one of them 500s every page with *"No simulation methods are installed"*.
+`tools/check-method-install.ts` originally modelled a single graph — its comment
+reasoned that "the router evaluates the root layout around every route, so wiring it
+wires the whole browser app" — and reported green while every page was broken. It also
+credited the worker's install to the page that spawns it, because the reach walker
+followed `new URL(…)` edges. A `new URL(…)` specifier is a **thread** boundary, not an
+import: `reach(roots, { evaluated: true })` in `tools/import-partition.ts` is the reading
+any question about module-scope side effects wants.
+
+### 0.2 Parked: the losasso symmetry findings
+
+Peter parked further fluid-correctness work on 2026-08-14 in favour of finishing the
+re-architecture. Recorded here so the next pass does not re-derive it:
+
+- Three symmetry fixes did land during Phase 4/5 and are in the tree: exact
+  superaccumulator reductions replacing 11 CompensatedF32 folds (+9.0%), page-level band
+  membership in the extension band (−2.2%), and a `seedOrderKey` JFA tie-break in the
+  fine level-set redistance (+0.4%). The main lane stayed at 10-of-46 findings.
+- **The factor-1 (genuinely adaptive coarse-band) lane and the factor-4 lane have
+  different D4 generators.** At factor 1, `swap-xz` is clean and the *reflections* break:
+  velocity loses bit-exact D4 first, alone, at step 18, born in the pressure projection's
+  axis-face velocity update at 1 ulp. Advection, the predictor and the pressure rows
+  themselves stay bit-exact; the extension is a passenger. The unverified next step is
+  that one of `faceMetrics.z` (`deltaYCells`), `face.openFraction` or
+  `face.inverseDistance` is not itself mirror-exact. At factor 4 the polarity is
+  reversed, so a fix for one lane should not be assumed to help the other.
+- The factor-1 lane does **not** fail-closed — it runs all 250 steps and then throws in
+  the terminal `Losasso cutover oracle`, before diagnostics are evaluated, which is why
+  it normally emits no findings at all. `FLUID_LOSASSO_CUTOVER_REPORT_ONLY=1` demotes the
+  oracle and yields 41 findings, 9 failing.
+- `fluid-symmetry-losasso-projected-velocity` is a **broken diagnostic** (~108k
+  mismatches with null values at step 1), not a physics signal.
+
 ---
 
 ## 1. Ground truth (what the audit established)

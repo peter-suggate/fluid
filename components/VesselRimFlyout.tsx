@@ -1,14 +1,14 @@
 "use client";
 
 import { useEffect, useRef } from "react";
-import { simulation } from "@/lib/simulation/controller";
-import { useSceneStore } from "@/lib/stores/scene-store";
+import { simulation } from "../lib/core/simulation/controller";
+import { useSceneStore } from "../lib/core/stores/scene-store";
 import {
   rimDials,
   sceneVessel,
   withRimDials,
   type RimDials,
-} from "@/lib/vessel-rim-controls";
+} from "../lib/core/vessel-rim-controls";
 
 /**
  * The coping sculptor, riding the selected rim's corner — the same gesture as

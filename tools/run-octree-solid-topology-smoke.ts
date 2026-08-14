@@ -22,11 +22,15 @@
  */
 import assert from "node:assert/strict";
 import { pathToFileURL } from "node:url";
-import { octreeMethod } from "../lib/methods/octree";
-import { createTinyHydrostaticScene } from "../lib/scenes";
-import { initializeRigidBodies } from "../lib/rigid-body";
-import { fluidExecutionDeviceFeatures } from "../lib/gpu-startup";
-import { requiredFluidDeviceLimits } from "../lib/webgpu-device-limits";
+// Composition root for this entry point: importing the method catalog installs
+// the simulation methods and the octree coarse-dynamics lanes, without which
+// constructing a solver throws rather than silently running the wrong backend.
+import "../lib/methods";
+import { losassoMethod } from "../lib/methods/losasso/method";
+import { createTinyHydrostaticScene } from "../lib/core/scenes";
+import { initializeRigidBodies } from "../lib/core/rigid-body";
+import { fluidExecutionDeviceFeatures } from "../lib/core/gpu-startup";
+import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 
 const modulePath = process.env.WEBGPU_NODE_MODULE;
 if (!modulePath) throw new Error("Set WEBGPU_NODE_MODULE to the installed webgpu package index.js");
@@ -65,13 +69,13 @@ scene.rigidBodies = [{
   restitution: 0, friction: 0, motion: "static",
 }];
 
-const values = { ...octreeMethod.presetFor("balanced") };
+const values = { ...losassoMethod.presetFor("balanced") };
 if (process.env.FLUID_MAXIMUM_LEAF_SIZE) values.maximumLeafSize = process.env.FLUID_MAXIMUM_LEAF_SIZE;
 if (process.env.FLUID_OCTREE_INTERFACE_BAND) {
   values.interfaceRefinementBandCells = Number(process.env.FLUID_OCTREE_INTERFACE_BAND);
 }
 const bodies = initializeRigidBodies(scene.rigidBodies);
-const solver = await octreeMethod.createSolverAsync!(
+const solver = await losassoMethod.createSolverAsync!(
   device, scene, "balanced", values, undefined, () => {},
 );
 assert.equal(solver.initialSparseAuthorityReady, true,

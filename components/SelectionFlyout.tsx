@@ -2,10 +2,10 @@
 
 import { useState } from "react";
 import { NumberField, Segmented } from "./controls";
-import { simulation } from "@/lib/simulation/controller";
-import { getMethod, interactiveSimulationMethods } from "@/lib/methods";
-import { useMethodStore } from "@/lib/stores/method-store";
-import type { EditorEntity } from "@/lib/editor-entity";
+import { simulation } from "../lib/core/simulation/controller";
+import { getMethod, interactiveSimulationMethods } from "@/lib/core/method-registry";
+import { useMethodStore } from "../lib/core/stores/method-store";
+import type { EditorEntity } from "../lib/core/editor-entity";
 
 /**
  * The solver switch, for the entity that declares it is the thing being solved
@@ -23,7 +23,7 @@ function FluidMethodChoice() {
       <Segmented
         ariaLabel="Fluid solver method"
         value={methodId}
-        options={interactiveSimulationMethods.map((candidate) => ({
+        options={interactiveSimulationMethods().map((candidate) => ({
           value: candidate.id,
           label: candidate.shortLabel,
           title: candidate.description,

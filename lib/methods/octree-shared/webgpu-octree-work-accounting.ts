@@ -1,0 +1,982 @@
+/** Host-visible accounting for the GPU command graph. Simulation decisions
+ * never consume these counters; they exist to make regressions attributable.
+ *
+ * Missing observations are null, never zero. A zero means the runtime
+ * positively observed no work; null means the instrumentation is incomplete.
+ */
+
+export const OCTREE_WORK_STAGES = [
+  "topology-publication",
+  "forces-and-solids",
+  "fine-transport",
+  "rhs",
+  "pressure-solve",
+  "projection",
+  "fine-redistance",
+  "candidate-build",
+] as const;
+
+export type OctreeWorkStage = typeof OCTREE_WORK_STAGES[number];
+export type OctreeAllocationClass = "authoritative" | "scratch";
+
+export interface OctreeStageWork {
+  readonly scheduledLanes: number | null;
+  readonly activeLanes: number | null;
+  readonly activePages: number | null;
+  readonly logicalPages: number | null;
+  readonly worksets: number | null;
+  readonly encodedIterations: number | null;
+  readonly executedIterations: number | null;
+  readonly reductionPasses: number | null;
+  /** Estimate supplied by the encoder from the actual kernel ABI. */
+  readonly estimatedBytesMoved: number | null;
+  /** Derived only when both bytes moved and active lanes were observed. */
+  readonly estimatedBytesMovedPerActiveElement: number | null;
+}
+
+type OctreeObservedStageMetric = Exclude<
+  keyof OctreeStageWork,
+  "estimatedBytesMovedPerActiveElement"
+>;
+export type OctreeStageWorkObservation = Partial<{
+  [K in OctreeObservedStageMetric]: Exclude<OctreeStageWork[K], null>;
+}>;
+
+export interface OctreeWorkSnapshot {
+  readonly topologyEpoch: number;
+  readonly catalogStamps: number | null;
+  readonly solverIterations: number | null;
+  readonly reductionPasses: number | null;
+  readonly scheduledLanes: number | null;
+  readonly activeLanes: number | null;
+  readonly activePages: number | null;
+  readonly logicalPages: number | null;
+  readonly worksetCount: number | null;
+  readonly estimatedBytesMoved: number | null;
+  readonly activeLaneRatio: number | null;
+  readonly stagesComplete: boolean;
+  readonly missingStageMetrics: Readonly<Record<OctreeWorkStage, readonly (keyof OctreeStageWork)[]>>;
+  readonly stages: Readonly<Record<OctreeWorkStage, OctreeStageWork>>;
+  readonly allocatedBytesByAuthority: Readonly<Record<string, number>>;
+  readonly allocatedScratchBytesByArena: Readonly<Record<string, number>>;
+  readonly authoritativeBytes: number;
+  readonly scratchBytes: number;
+  readonly allocatedBytes: number;
+  readonly allocationInventoryComplete: boolean;
+}
+
+const EMPTY_STAGE: OctreeStageWork = Object.freeze({
+  scheduledLanes: null,
+  activeLanes: null,
+  activePages: null,
+  logicalPages: null,
+  worksets: null,
+  encodedIterations: null,
+  executedIterations: null,
+  reductionPasses: null,
+  estimatedBytesMoved: null,
+  estimatedBytesMovedPerActiveElement: null,
+});
+
+const STAGE_METRICS = Object.freeze(Object.keys(EMPTY_STAGE) as (keyof OctreeStageWork)[]);
+
+function count(value: number, label: string): number {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new RangeError(`${label} must be a non-negative safe integer`);
+  }
+  return value;
+}
+
+function finiteNonNegative(value: number, label: string): number {
+  if (!Number.isFinite(value) || value < 0) {
+    throw new RangeError(`${label} must be a non-negative finite number`);
+  }
+  return value;
+}
+
+function emptyStages(): Record<OctreeWorkStage, OctreeStageWork> {
+  return Object.fromEntries(
+    OCTREE_WORK_STAGES.map((stage) => [stage, EMPTY_STAGE]),
+  ) as Record<OctreeWorkStage, OctreeStageWork>;
+}
+
+function completeSum(
+  stages: Readonly<Record<OctreeWorkStage, OctreeStageWork>>,
+  metric: keyof OctreeStageWork,
+): number | null {
+  let total = 0;
+  for (const stage of OCTREE_WORK_STAGES) {
+    const value = stages[stage][metric];
+    if (value === null) return null;
+    total += value;
+  }
+  return total;
+}
+
+export class OctreeWorkAccounting {
+  private topologyEpoch = 0;
+  private catalogStamps: number | null = null;
+  private solverIterations: number | null = null;
+  private stages = emptyStages();
+  private readonly authorityBytes = new Map<string, number>();
+  private readonly scratchBytes = new Map<string, number>();
+  private allocationInventoryComplete = false;
+
+  beginSubstep(): void {
+    this.catalogStamps = null;
+    this.solverIterations = null;
+    this.stages = emptyStages();
+  }
+
+  publishTopologyEpoch(epoch: number): void {
+    count(epoch, "Topology epoch");
+    if (epoch < this.topologyEpoch) {
+      throw new RangeError("Topology epochs must be monotonic");
+    }
+    this.topologyEpoch = epoch;
+  }
+
+  recordStage(stage: OctreeWorkStage, work: OctreeStageWorkObservation): void {
+    const previous = this.stages[stage];
+    const next: OctreeStageWork = Object.freeze({
+      scheduledLanes: work.scheduledLanes === undefined
+        ? previous.scheduledLanes
+        : count(work.scheduledLanes, `${stage} scheduled lanes`),
+      activeLanes: work.activeLanes === undefined
+        ? previous.activeLanes
+        : count(work.activeLanes, `${stage} active lanes`),
+      activePages: work.activePages === undefined
+        ? previous.activePages
+        : count(work.activePages, `${stage} active pages`),
+      logicalPages: work.logicalPages === undefined
+        ? previous.logicalPages
+        : count(work.logicalPages, `${stage} logical pages`),
+      worksets: work.worksets === undefined
+        ? previous.worksets
+        : count(work.worksets, `${stage} worksets`),
+      encodedIterations: work.encodedIterations === undefined
+        ? previous.encodedIterations
+        : count(work.encodedIterations, `${stage} encoded iterations`),
+      executedIterations: work.executedIterations === undefined
+        ? previous.executedIterations
+        : count(work.executedIterations, `${stage} executed iterations`),
+      reductionPasses: work.reductionPasses === undefined
+        ? previous.reductionPasses
+        : count(work.reductionPasses, `${stage} reduction passes`),
+      estimatedBytesMoved: work.estimatedBytesMoved === undefined
+        ? previous.estimatedBytesMoved
+        : finiteNonNegative(work.estimatedBytesMoved, `${stage} estimated bytes moved`),
+      estimatedBytesMovedPerActiveElement: null,
+    });
+    if (next.activeLanes !== null && next.scheduledLanes !== null
+        && next.activeLanes > next.scheduledLanes) {
+      throw new RangeError(`${stage} active lanes cannot exceed scheduled lanes`);
+    }
+    if (next.activePages !== null && next.logicalPages !== null
+        && next.activePages > next.logicalPages) {
+      throw new RangeError(`${stage} active pages cannot exceed logical pages`);
+    }
+    if (next.executedIterations !== null && next.encodedIterations !== null
+        && next.executedIterations > next.encodedIterations) {
+      throw new RangeError(`${stage} executed iterations cannot exceed encoded iterations`);
+    }
+    this.stages[stage] = Object.freeze({
+      ...next,
+      estimatedBytesMovedPerActiveElement:
+        next.estimatedBytesMoved === null || next.activeLanes === null
+          ? null
+          : next.activeLanes === 0
+            ? (next.estimatedBytesMoved === 0 ? 0 : null)
+            : next.estimatedBytesMoved / next.activeLanes,
+    });
+  }
+
+  /** Marks a stage that was positively observed to perform no work. */
+  recordIdleStage(stage: OctreeWorkStage): void {
+    this.recordStage(stage, {
+      scheduledLanes: 0,
+      activeLanes: 0,
+      activePages: 0,
+      logicalPages: 0,
+      worksets: 0,
+      encodedIterations: 0,
+      executedIterations: 0,
+      reductionPasses: 0,
+      estimatedBytesMoved: 0,
+    });
+  }
+
+  recordCatalogStamps(stamps: number): void {
+    this.catalogStamps = count(stamps, "Catalog stamps");
+  }
+
+  recordSolver(iterations: number, reductionPasses: number, encodedIterations?: number): void {
+    this.solverIterations = count(iterations, "Solver iterations");
+    const stage = this.stages["pressure-solve"];
+    this.recordStage("pressure-solve", {
+      executedIterations: iterations,
+      ...(encodedIterations === undefined ? {} : { encodedIterations }),
+      reductionPasses,
+      ...(stage.scheduledLanes === null ? {} : { scheduledLanes: stage.scheduledLanes }),
+      ...(stage.activeLanes === null ? {} : { activeLanes: stage.activeLanes }),
+      ...(stage.activePages === null ? {} : { activePages: stage.activePages }),
+      ...(stage.logicalPages === null ? {} : { logicalPages: stage.logicalPages }),
+      ...(stage.worksets === null ? {} : { worksets: stage.worksets }),
+      ...(stage.estimatedBytesMoved === null ? {} : { estimatedBytesMoved: stage.estimatedBytesMoved }),
+    });
+  }
+
+  /** Consume one fail-closed pressure telemetry decode after its GPU readback. */
+  recordPressureSolveReport(report: OctreePressureSolveWorkReport): void {
+    this.recordStage("pressure-solve", report.stage);
+    this.solverIterations = report.outer.executedIterations;
+  }
+
+  setAllocationBytes(name: string, allocationClass: OctreeAllocationClass, bytes: number): void {
+    if (name.length === 0) throw new RangeError("Allocation name must not be empty");
+    const inventory = allocationClass === "authoritative" ? this.authorityBytes : this.scratchBytes;
+    inventory.set(name, count(bytes, `${name} bytes`));
+    this.allocationInventoryComplete = false;
+  }
+
+  setAuthorityBytes(authority: string, bytes: number): void {
+    this.setAllocationBytes(authority, "authoritative", bytes);
+  }
+
+  setScratchBytes(arena: string, bytes: number): void {
+    this.setAllocationBytes(arena, "scratch", bytes);
+  }
+
+  /** The caller asserts it has registered every persistent allocation. */
+  sealAllocationInventory(): void {
+    this.allocationInventoryComplete = true;
+  }
+
+  snapshot(): OctreeWorkSnapshot {
+    const stages = Object.freeze({ ...this.stages });
+    const missingStageMetrics = Object.freeze(Object.fromEntries(
+      OCTREE_WORK_STAGES.map((stage) => [
+        stage,
+        Object.freeze(STAGE_METRICS.filter((metric) => stages[stage][metric] === null)),
+      ]),
+    ) as Record<OctreeWorkStage, readonly (keyof OctreeStageWork)[]>);
+    const stagesComplete = Object.values(missingStageMetrics).every((metrics) => metrics.length === 0);
+    const scheduledLanes = completeSum(stages, "scheduledLanes");
+    const activeLanes = completeSum(stages, "activeLanes");
+    const activePages = completeSum(stages, "activePages");
+    const logicalPages = completeSum(stages, "logicalPages");
+    const worksetCount = completeSum(stages, "worksets");
+    const estimatedBytesMoved = completeSum(stages, "estimatedBytesMoved");
+    const reductionPasses = completeSum(stages, "reductionPasses");
+    const allocatedBytesByAuthority = Object.freeze(
+      Object.fromEntries([...this.authorityBytes].sort(([a], [b]) => a.localeCompare(b))),
+    );
+    const allocatedScratchBytesByArena = Object.freeze(
+      Object.fromEntries([...this.scratchBytes].sort(([a], [b]) => a.localeCompare(b))),
+    );
+    const authoritativeBytes = Object.values(allocatedBytesByAuthority)
+      .reduce((sum, bytes) => sum + bytes, 0);
+    const scratchBytes = Object.values(allocatedScratchBytesByArena)
+      .reduce((sum, bytes) => sum + bytes, 0);
+    return Object.freeze({
+      topologyEpoch: this.topologyEpoch,
+      catalogStamps: this.catalogStamps,
+      solverIterations: this.solverIterations,
+      reductionPasses,
+      scheduledLanes,
+      activeLanes,
+      activePages,
+      logicalPages,
+      worksetCount,
+      estimatedBytesMoved,
+      activeLaneRatio: scheduledLanes === null || activeLanes === null
+        ? null
+        : scheduledLanes === 0 ? 1 : activeLanes / scheduledLanes,
+      stagesComplete,
+      missingStageMetrics,
+      stages,
+      allocatedBytesByAuthority,
+      allocatedScratchBytesByArena,
+      authoritativeBytes,
+      scratchBytes,
+      allocatedBytes: authoritativeBytes + scratchBytes,
+      allocationInventoryComplete: this.allocationInventoryComplete,
+    });
+  }
+}
+
+export const OCTREE_PRESSURE_WORK_LAYER_NAMES = [
+  "class-applies",
+  "hybrid-shell",
+  "spgrid-vcycle",
+  "persistent-coarse-solve",
+  "outer-pipelined-mgpcg",
+] as const;
+export type OctreePressureWorkLayerName = typeof OCTREE_PRESSURE_WORK_LAYER_NAMES[number];
+
+export interface OctreePressureLayerWork {
+  /** Payload invocations launched by nonzero direct/indirect records. The
+   * one-thread publishers that gate those records are control traffic, not
+   * scheduled row lanes, and are deliberately excluded. */
+  readonly scheduledLanes: number;
+  /** Invocations doing useful solver work after the fail-closed control gate. */
+  readonly activeLanes: number;
+  readonly activePages: number;
+  readonly worksets: number;
+  readonly encodedIterations: number;
+  readonly executedIterations: number;
+  /** Dispatch commands present in the immutable command graph. */
+  readonly encodedDispatches: number;
+  /** Payload commands whose direct/indirect dimensions launch at least one
+   * workgroup. Control-only record publishers are deliberately excluded. */
+  readonly executedDispatches: number;
+  readonly reductionPasses: number;
+  readonly estimatedBytesMoved: number;
+}
+
+export interface OctreePressureSolveGPUControls {
+  /** Accepted resolved publication: error, first error, rows, epoch, bank, slots. */
+  readonly acceptedRows?: Uint32Array;
+  /** Four accepted-bank seven-word class workset headers. */
+  readonly classWorksets?: readonly Uint32Array[];
+  /** Four class intersections of the compact Section 4.3 L2 shell. */
+  readonly hybridBandWorksets?: readonly Uint32Array[];
+  /** Twelve words per level followed by valid/published-row lifecycle words. */
+  readonly spgridDispatch?: Uint32Array;
+  /** Outer merged-recurrence control record. */
+  readonly outerControl?: Uint32Array;
+  /** Four four-word indirect records per encoded outer iteration. */
+  readonly outerIndirectTail?: Uint32Array;
+  /** Optional one-workgroup persistent control when that solver is selected. */
+  readonly persistentControl?: Uint32Array;
+}
+
+export interface OctreePressureSolveAccountingPlan {
+  readonly rowCapacity: number;
+  readonly maximumOuterIterations: number;
+  /** Outer scalar reductions fold their 128-row blocks inside one workgroup. */
+  readonly combinedReductionDrains?: boolean;
+  readonly classWorkgroupSize?: 64;
+  readonly maximumNeighborSlots: number;
+  readonly classApplyEncodedDispatches: number;
+  readonly hybridBoundarySweeps: number;
+  readonly hybridEncodedCorrectionDispatches: number;
+  readonly spgridLevelCount: number;
+  readonly spgridEncodedCorrectionDispatches: number;
+  readonly spgridLevelCapacities: readonly number[];
+  readonly persistentMaximumIterations?: number;
+  readonly persistentEnabled?: boolean;
+  readonly reductionLanes?: 128;
+  readonly reductionPartialCount: number;
+}
+
+export interface OctreePressureSolveWorkReport {
+  readonly epoch: number;
+  readonly liveRows: number;
+  readonly outer: Readonly<{
+    encodedIterations: number;
+    executedIterations: number;
+    initialReductionPasses: 1;
+    outerReductionPasses: number;
+    zeroedTailDispatches: number;
+    tailExecutedRowLanes: 0;
+  }>;
+  readonly layers: Readonly<Record<OctreePressureWorkLayerName, OctreePressureLayerWork | null>>;
+  readonly stage: Required<OctreeStageWorkObservation>;
+}
+
+export interface OctreePressureSolveWorkDecode {
+  readonly report: OctreePressureSolveWorkReport | null;
+  readonly blocker: string | null;
+}
+
+/** Complete observational packet copied from immutable GPU publications after
+ * queue completion. Optional fields stay absent when the corresponding
+ * authority is disabled or has not published; absence never means zero work. */
+export interface OctreeRuntimeWorkGPUControls extends OctreePressureSolveGPUControls {
+  /** Four accepted dynamic-boundary row classes consumed by RHS/reconstruction. */
+  readonly runtimeClassWorksets?: readonly Uint32Array[];
+  /** Four accepted dynamic-boundary family classes consumed by force/projection. */
+  readonly runtimeFamilyWorksets?: readonly Uint32Array[];
+  /** Accepted row and family-slot indirect records, two vec3u records. */
+  readonly liveRowDispatch?: Uint32Array;
+  readonly ownerControl?: Uint32Array;
+  readonly fineWorkset?: Uint32Array;
+  /** Source generation workset consumed by the last encoded transport. */
+  readonly fineTransportWorkset?: Uint32Array;
+  readonly fineTopologyControl?: Uint32Array;
+  readonly fineTransportControl?: Uint32Array;
+  /** GPU governor: error, executed substeps, substep dt, displacement, then enable words. */
+  readonly fineTransportGovernor?: Uint32Array;
+  readonly fineRedistanceControl?: Uint32Array;
+}
+
+export interface OctreeRuntimeWorkAccountingPlan {
+  readonly pressure: OctreePressureSolveAccountingPlan;
+  readonly ownerLogicalPages: number;
+  readonly ownerBytesPerPage: number;
+  readonly fineLogicalPages?: number;
+  readonly fineSamplesPerPage?: 64;
+  readonly fineMaximumPages?: number;
+  readonly fineTransportEncodedIterations?: number;
+  readonly fineRedistanceEncodedIterations?: number;
+}
+
+const READY_VALIDATED = 3;
+const WORKSET_WORDS = Object.freeze({ epoch: 0, count: 1, capacity: 2, flags: 3,
+  x: 4, y: 5, z: 6 });
+const OUTER = Object.freeze({ error: 0, converged: 1, iterations: 2, reductions: 3,
+  rows: 4, zeroed: 5, published: 20 });
+
+function blocked(blocker: string): OctreePressureSolveWorkDecode {
+  return Object.freeze({ report: null, blocker });
+}
+
+function safeProduct(values: ArrayLike<number>): number | null {
+  let product = 1;
+  for (let index = 0; index < values.length; index += 1) {
+    const value = values[index]!;
+    if (!Number.isSafeInteger(value) || value < 0) return null;
+    product *= value;
+    if (!Number.isSafeInteger(product)) return null;
+  }
+  return product;
+}
+
+function layer(values: OctreePressureLayerWork): OctreePressureLayerWork {
+  for (const [name, value] of Object.entries(values)) {
+    if (!Number.isSafeInteger(value) || value < 0) {
+      throw new RangeError(`Pressure ${name} estimate must be a non-negative safe integer`);
+    }
+  }
+  return Object.freeze(values);
+}
+
+function invalidPressurePlan(plan: OctreePressureSolveAccountingPlan): string | null {
+  const positive = [
+    [plan.rowCapacity, "row capacity"],
+    [plan.maximumOuterIterations, "outer iteration budget"],
+    [plan.maximumNeighborSlots, "neighbor-slot bound"],
+    [plan.classApplyEncodedDispatches, "class-apply dispatch count"],
+    [plan.spgridLevelCount, "SPGrid level count"],
+    [plan.spgridEncodedCorrectionDispatches, "SPGrid correction dispatch count"],
+    [plan.reductionPartialCount, "reduction partial count"],
+  ] as const;
+  for (const [value, label] of positive) {
+    if (!Number.isSafeInteger(value) || value < 1) return `${label} is invalid`;
+  }
+  const nonNegative = [
+    [plan.hybridBoundarySweeps, "hybrid boundary-sweep count"],
+    [plan.hybridEncodedCorrectionDispatches, "hybrid correction dispatch count"],
+  ] as const;
+  for (const [value, label] of nonNegative) {
+    if (!Number.isSafeInteger(value) || value < 0) return `${label} is invalid`;
+  }
+  if (plan.classWorkgroupSize !== undefined && plan.classWorkgroupSize !== 64) {
+    return "class-apply workgroup size is not the production ABI";
+  }
+  if (plan.reductionLanes !== undefined && plan.reductionLanes !== 128) {
+    return "outer reduction width is not the production ABI";
+  }
+  if (plan.reductionPartialCount !== Math.ceil(plan.rowCapacity / 128)) {
+    return "outer reduction partial count does not match row capacity";
+  }
+  if (plan.spgridLevelCapacities.length !== plan.spgridLevelCount
+    || plan.spgridLevelCapacities.some((value) => !Number.isSafeInteger(value) || value < 1)) {
+    return "SPGrid level capacities are invalid";
+  }
+  if (plan.persistentEnabled
+    && (!Number.isSafeInteger(plan.persistentMaximumIterations)
+      || plan.persistentMaximumIterations! < 1)) {
+    return "persistent iteration budget is invalid";
+  }
+  return null;
+}
+
+/**
+ * Decode already-read GPU controls into a deterministic pressure-stage record.
+ * This function is observational only: no simulation decision may consume it.
+ */
+function decodeOctreePressureSolveWorkUnchecked(
+  controls: OctreePressureSolveGPUControls,
+  plan: OctreePressureSolveAccountingPlan,
+): OctreePressureSolveWorkDecode {
+  const invalidPlan = invalidPressurePlan(plan);
+  if (invalidPlan !== null) return blocked(`pressure accounting plan is invalid: ${invalidPlan}`);
+  const accepted = controls.acceptedRows;
+  if (!accepted || accepted.length < 6) return blocked("accepted-row control unavailable");
+  if (accepted[0] !== 0 || accepted[1] !== 0xffff_ffff
+    || accepted[3] === 0 || accepted[4]! > 1) {
+    return blocked("accepted-row control is invalid or unpublished");
+  }
+  const liveRows = accepted[2]!, epoch = accepted[3]!;
+  if (liveRows === 0 || liveRows > plan.rowCapacity) {
+    return blocked("accepted live-row count is outside the planned capacity");
+  }
+  const outer = controls.outerControl;
+  if (!outer || outer.length <= OUTER.published) return blocked("outer MGPCG control unavailable");
+  if (outer[OUTER.error] !== 0 || outer[OUTER.converged] !== 1
+    || outer[OUTER.published] !== 1 || outer[OUTER.rows] !== liveRows) {
+    return blocked("outer MGPCG control did not publish a successful solve");
+  }
+  const iterations = outer[OUTER.iterations]!, reductions = outer[OUTER.reductions]!;
+  const requiredReductions = iterations === 0 ? 1 : 2 * iterations;
+  if (iterations > plan.maximumOuterIterations || reductions !== requiredReductions) {
+    return blocked("outer MGPCG iteration/reduction control is inconsistent");
+  }
+  const requiredZeroedTail = iterations === 0
+    ? 4 * plan.maximumOuterIterations
+    : 2 + 4 * (plan.maximumOuterIterations - iterations);
+  if (outer[OUTER.zeroed] !== requiredZeroedTail) {
+    return blocked("outer convergence tail was not proven zero-work");
+  }
+  const rowGroups = Math.ceil(liveRows / 64);
+  const liveReductionPartials = Math.ceil(liveRows / (plan.reductionLanes ?? 128));
+  if (!plan.persistentEnabled) {
+    const indirect = controls.outerIndirectTail;
+    if (!indirect || indirect.length < plan.maximumOuterIterations * 16) {
+      return blocked("outer indirect-tail snapshot unavailable");
+    }
+    const zeroRecord = (record: number) => indirect[record * 4] === 0
+      && indirect[record * 4 + 1] === 0 && indirect[record * 4 + 2] === 0
+      && indirect[record * 4 + 3] === 0;
+    const liveRecord = (record: number, x: number) => indirect[record * 4] === x
+      && indirect[record * 4 + 1] === 1 && indirect[record * 4 + 2] === 1
+      && indirect[record * 4 + 3] === 0;
+    for (let iteration = 0; iteration < iterations; iteration += 1) {
+      const base = iteration * 4;
+      const terminal = iteration + 1 === iterations;
+      if (!liveRecord(base, rowGroups)
+        || (terminal
+          ? !zeroRecord(base + 1)
+          : !liveRecord(base + 1, liveReductionPartials))
+        || !liveRecord(base + 2, liveReductionPartials)
+        || (terminal ? !zeroRecord(base + 3) : !liveRecord(base + 3, rowGroups))) {
+        return blocked("outer executed indirect records do not match the planned solve");
+      }
+    }
+    for (let iteration = iterations; iteration < plan.maximumOuterIterations; iteration += 1) {
+      for (let stage = 0; stage < 4; stage += 1) {
+        if (!zeroRecord(iteration * 4 + stage)) {
+          return blocked("outer future convergence-tail record is not zero-work");
+        }
+      }
+    }
+  }
+
+  const worksets = controls.classWorksets;
+  if (!worksets || worksets.length !== 4) return blocked("resolved class worksets unavailable");
+  let classRows = 0, classScheduledPerApply = 0, liveClassDispatchesPerApply = 0;
+  for (const header of worksets) {
+    if (header.length < 7 || header[WORKSET_WORDS.epoch] !== epoch
+      || (header[WORKSET_WORDS.flags]! & READY_VALIDATED) !== READY_VALIDATED
+      || (header[WORKSET_WORDS.flags]! & ~7) !== 0
+      || header[WORKSET_WORDS.capacity]! > plan.rowCapacity
+      || header[WORKSET_WORDS.count]! > header[WORKSET_WORDS.capacity]!) {
+      return blocked("resolved class workset is invalid or stale");
+    }
+    const groups = safeProduct([header[WORKSET_WORDS.x]!, header[WORKSET_WORDS.y]!,
+      header[WORKSET_WORDS.z]!]);
+    if (groups === null) return blocked("resolved class dispatch is invalid");
+    if (groups !== Math.ceil(header[WORKSET_WORDS.count]! / (plan.classWorkgroupSize ?? 64))) {
+      return blocked("resolved class dispatch does not cover its compact row count");
+    }
+    classRows += header[WORKSET_WORDS.count]!;
+    classScheduledPerApply += groups * (plan.classWorkgroupSize ?? 64);
+    liveClassDispatchesPerApply += Number(groups > 0);
+  }
+  if (classRows !== liveRows) return blocked("resolved class worksets do not partition live rows");
+  const bandWorksets = controls.hybridBandWorksets;
+  if (!bandWorksets || bandWorksets.length !== 4) {
+    return blocked("Section 4.3 compact class intersections unavailable");
+  }
+  let bandRows = 0, bandScheduledPerApply = 0, liveBandDispatchesPerApply = 0;
+  for (const header of bandWorksets) {
+    if (header.length < 7 || header[WORKSET_WORDS.epoch] !== epoch
+      || header[WORKSET_WORDS.flags] !== READY_VALIDATED
+      || header[WORKSET_WORDS.capacity]! > plan.rowCapacity
+      || header[WORKSET_WORDS.count]! > header[WORKSET_WORDS.capacity]!) {
+      return blocked("Section 4.3 compact class intersection is invalid or stale");
+    }
+    const groups = safeProduct(header.subarray(WORKSET_WORDS.x, WORKSET_WORDS.z + 1));
+    if (groups === null || groups !== Math.ceil(header[WORKSET_WORDS.count]! / 64)) {
+      return blocked("Section 4.3 compact class dispatch is invalid");
+    }
+    bandRows += header[WORKSET_WORDS.count]!;
+    bandScheduledPerApply += groups * 64;
+    liveBandDispatchesPerApply += Number(groups > 0);
+  }
+  if (bandRows > liveRows) return blocked("Section 4.3 compact shell exceeds live rows");
+
+  const dispatch = controls.spgridDispatch;
+  const dispatchWords = plan.spgridLevelCount * 12 + 2;
+  if (!dispatch || dispatch.length < dispatchWords) return blocked("SPGrid dispatch snapshot unavailable");
+  const lifecycle = plan.spgridLevelCount * 12;
+  if (dispatch[lifecycle] !== 1 || dispatch[lifecycle + 1] !== liveRows) {
+    return blocked("SPGrid hierarchy is invalid or stale");
+  }
+  let levelRows = 0, transferRows = 0, pagesPerCycle = 0;
+  let selectedScheduledLanes = 0, transferScheduledLanes = 0;
+  let executedSPGridDispatchesPerCorrection = 3;
+  for (let levelIndex = 0; levelIndex < plan.spgridLevelCount; levelIndex += 1) {
+    const base = levelIndex * 12, count = dispatch[base]!;
+    const transfers = dispatch[base + 1]!, pages = dispatch[base + 8]!;
+    if (count > plan.spgridLevelCapacities[levelIndex]!
+      || pages > plan.spgridLevelCapacities[levelIndex]!) {
+      return blocked("SPGrid level count exceeds its published capacity");
+    }
+    const selectedGroups = safeProduct(dispatch.subarray(base + 2, base + 5));
+    const parentGroups = safeProduct(dispatch.subarray(base + 5, base + 8));
+    const pageGroups = safeProduct(dispatch.subarray(base + 9, base + 12));
+    const parentSlots = levelIndex + 1 < plan.spgridLevelCount
+      ? dispatch[(levelIndex + 1) * 12]!
+      : 0;
+    if (selectedGroups === null || parentGroups === null || pageGroups === null
+      || selectedGroups !== Math.ceil(count / 64)
+      // Restriction is one cooperative workgroup per coarse parent slot. The
+      // transfer-record count bounds the chain walked inside those groups; it
+      // is not the indirect dispatch width.
+      || parentGroups !== parentSlots || pageGroups !== pages) {
+      return blocked("SPGrid indirect dispatch does not match its compact publication");
+    }
+    levelRows += count;
+    selectedScheduledLanes += selectedGroups * 64;
+    executedSPGridDispatchesPerCorrection += Number(selectedGroups > 0);
+    if (levelIndex + 1 < plan.spgridLevelCount) {
+      transferRows += transfers;
+      transferScheduledLanes += parentGroups * 64;
+      pagesPerCycle += 2 * pages;
+      executedSPGridDispatchesPerCorrection += 2 * Number(pages > 0)
+        + Number(parentGroups > 0) + Number(selectedGroups > 0);
+    } else {
+      executedSPGridDispatchesPerCorrection += Number(selectedGroups > 0);
+    }
+  }
+  if (dispatch[(plan.spgridLevelCount - 1) * 12] !== 1) {
+    return blocked("SPGrid exact bottom is not a published single-cell solve");
+  }
+
+  const priorUpdates = Math.max(0, iterations - 1);
+  const encodedPreconditionerApplications = 1 + plan.maximumOuterIterations;
+  const preconditionerApplications = 1 + iterations;
+  const fullEncodedOperatorApplications = 2 + plan.maximumOuterIterations
+    + encodedPreconditionerApplications;
+  // Direct-curvature PCG applies A(direction) only after a nonterminal
+  // residual update. The terminal converged update zeroes that indirect
+  // record, so credit prior updates rather than every completed iteration.
+  const fullOperatorApplications = 2 + priorUpdates + preconditionerApplications;
+  const bandAppliesPerPreconditioner = 2 * plan.hybridBoundarySweeps - 1;
+  const bandEncodedOperatorApplications = bandAppliesPerPreconditioner
+    * encodedPreconditionerApplications;
+  const bandOperatorApplications = bandAppliesPerPreconditioner
+    * preconditionerApplications;
+  const encodedOperatorApplications = fullEncodedOperatorApplications
+    + bandEncodedOperatorApplications;
+  const operatorApplications = fullOperatorApplications + bandOperatorApplications;
+  const classBytesPerRow = 4 * (4 + 2 * plan.maximumNeighborSlots);
+  const classApplies = layer({
+    // Every nested apply has a one-thread publisher, but convergence makes
+    // its payload records exactly zero. Credit only the observed nonzero
+    // applications; encodedIterations/encodedDispatches retain graph size.
+    scheduledLanes: classScheduledPerApply * fullOperatorApplications
+      + bandScheduledPerApply * bandOperatorApplications,
+    activeLanes: liveRows * fullOperatorApplications
+      + bandRows * bandOperatorApplications,
+    activePages: 0,
+    worksets: 4 * operatorApplications,
+    encodedIterations: encodedOperatorApplications,
+    executedIterations: operatorApplications,
+    encodedDispatches: plan.classApplyEncodedDispatches * encodedOperatorApplications,
+    executedDispatches: liveClassDispatchesPerApply * fullOperatorApplications
+      + liveBandDispatchesPerApply * bandOperatorApplications,
+    reductionPasses: 0,
+    estimatedBytesMoved: classRows * classBytesPerRow * fullOperatorApplications
+      + bandRows * classBytesPerRow * bandOperatorApplications,
+  });
+  // Four row-wide stages (zero sweep, inner residual, M1 seeding, publication),
+  // 2k-1 compact shell smooths, and the singleton convergence-gate publisher
+  // that republishes the row and union-class records for this application.
+  const hybridRowPasses = 2 * plan.hybridBoundarySweeps + 4;
+  const capacityRowLanes = Math.ceil(plan.rowCapacity / 64) * 64;
+  const liveRowLanes = Math.ceil(liveRows / 64) * 64;
+  const fullHybridPasses = 4;
+  const bandHybridPasses = 2 * plan.hybridBoundarySweeps - 1;
+  const hybrid = layer({
+    scheduledLanes: (liveRowLanes * fullHybridPasses
+      + bandScheduledPerApply * bandHybridPasses) * preconditionerApplications,
+    activeLanes: (liveRows * fullHybridPasses
+      + bandRows * bandHybridPasses) * preconditionerApplications,
+    activePages: 0,
+    worksets: preconditionerApplications,
+    encodedIterations: encodedPreconditionerApplications,
+    executedIterations: preconditionerApplications,
+    encodedDispatches: hybridRowPasses * encodedPreconditionerApplications,
+    executedDispatches: hybridRowPasses * preconditionerApplications,
+    reductionPasses: 0,
+    estimatedBytesMoved: (liveRows * fullHybridPasses
+      + bandRows * bandHybridPasses) * 16 * preconditionerApplications,
+  });
+  const spgrid = layer({
+    scheduledLanes: (3 * capacityRowLanes + 2 * selectedScheduledLanes
+      + transferScheduledLanes + pagesPerCycle * 128) * preconditionerApplications,
+    activeLanes: (3 * liveRows + 2 * levelRows + transferRows
+      + pagesPerCycle * 128) * preconditionerApplications,
+    activePages: pagesPerCycle * preconditionerApplications,
+    worksets: plan.spgridLevelCount * preconditionerApplications,
+    encodedIterations: encodedPreconditionerApplications,
+    executedIterations: preconditionerApplications,
+    encodedDispatches: plan.spgridEncodedCorrectionDispatches
+      * (1 + plan.maximumOuterIterations),
+    executedDispatches: executedSPGridDispatchesPerCorrection
+      * preconditionerApplications,
+    reductionPasses: 0,
+    estimatedBytesMoved: (pagesPerCycle * (12_000 + 256 * 4) + levelRows * 24)
+      * preconditionerApplications,
+  });
+
+  let persistent: OctreePressureLayerWork | null = null;
+  if (plan.persistentEnabled) {
+    const control = controls.persistentControl;
+    if (!control || control.length < 5) return blocked("persistent solve control unavailable");
+    if (control[0] !== 0 || control[1] !== 1 || control[4] !== liveRows
+      || control[2]! > (plan.persistentMaximumIterations ?? 12)) {
+      return blocked("persistent solve control is invalid or unconverged");
+    }
+    const persistentIterations = control[2]!;
+    persistent = layer({
+      scheduledLanes: 256,
+      activeLanes: Math.min(liveRows, 256),
+      activePages: 0,
+      worksets: 1,
+      encodedIterations: plan.persistentMaximumIterations ?? 12,
+      executedIterations: persistentIterations,
+      encodedDispatches: 1,
+      executedDispatches: 1,
+      reductionPasses: persistentIterations + 1,
+      estimatedBytesMoved: liveRows * (persistentIterations * 48 + 64),
+    });
+  }
+  const partialLanes = liveReductionPartials * (plan.reductionLanes ?? 128);
+  const combinedReductionDrains = plan.combinedReductionDrains === true;
+  const outerPartialReductions = combinedReductionDrains
+    ? 1
+    : iterations + 1 + priorUpdates;
+  const outerLayer = layer({
+    scheduledLanes: 2 + liveRowLanes * (4 + iterations + priorUpdates)
+      + partialLanes * outerPartialReductions
+      + (plan.reductionLanes ?? 128) * (2 * plan.maximumOuterIterations + 1),
+    activeLanes: 2 + liveRows * (4 + iterations + priorUpdates)
+      + partialLanes * outerPartialReductions
+      + (plan.reductionLanes ?? 128) * reductions,
+    activePages: 0,
+    worksets: 1,
+    encodedIterations: plan.maximumOuterIterations,
+    executedIterations: iterations,
+    encodedDispatches: 8 + (combinedReductionDrains ? 4 : 6)
+      * plan.maximumOuterIterations,
+    executedDispatches: 8 + 2 * plan.maximumOuterIterations
+      + (combinedReductionDrains ? 1 : 2) * (iterations + priorUpdates),
+    reductionPasses: reductions,
+    estimatedBytesMoved: liveRows * (56 + iterations * 72)
+      + liveReductionPartials * 32 * (combinedReductionDrains ? 1 : reductions),
+  });
+  const layers = Object.freeze({
+    "class-applies": classApplies,
+    "hybrid-shell": hybrid,
+    "spgrid-vcycle": spgrid,
+    "persistent-coarse-solve": persistent,
+    "outer-pipelined-mgpcg": outerLayer,
+  });
+  const present = Object.values(layers).filter((value): value is OctreePressureLayerWork => value !== null);
+  const total = (key: keyof OctreePressureLayerWork) => present.reduce((sum, item) => sum + item[key], 0);
+  const stage: Required<OctreeStageWorkObservation> = Object.freeze({
+    scheduledLanes: total("scheduledLanes"), activeLanes: total("activeLanes"),
+    activePages: total("activePages"), logicalPages: total("activePages"),
+    worksets: total("worksets"), encodedIterations: plan.maximumOuterIterations,
+    executedIterations: iterations, reductionPasses: total("reductionPasses"),
+    estimatedBytesMoved: total("estimatedBytesMoved"),
+  });
+  return Object.freeze({ report: Object.freeze({ epoch, liveRows,
+    outer: Object.freeze({ encodedIterations: plan.maximumOuterIterations,
+      executedIterations: iterations, initialReductionPasses: 1 as const,
+      outerReductionPasses: reductions - 1, zeroedTailDispatches: outer[OUTER.zeroed]!,
+      tailExecutedRowLanes: 0 as const }), layers, stage }), blocker: null });
+}
+
+export function decodeOctreePressureSolveWork(
+  controls: OctreePressureSolveGPUControls,
+  plan: OctreePressureSolveAccountingPlan,
+): OctreePressureSolveWorkDecode {
+  try {
+    return decodeOctreePressureSolveWorkUnchecked(controls, plan);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : "unknown accounting failure";
+    return blocked(`pressure accounting controls or estimates are invalid: ${detail}`);
+  }
+}
+
+const OWNER_READY = 1;
+const OWNER_INVALID_STATUS = (1 << 2) | (1 << 3) | (1 << 6);
+const OWNER_MAGIC = 0x4f57_4e52;
+
+function decodeCompactWorksets(headers: readonly Uint32Array[] | undefined, epoch: number): {
+  scheduledLanes: number; activeLanes: number; worksets: number;
+} | null {
+  if (!headers || headers.length === 0) return null;
+  let scheduledLanes = 0, activeLanes = 0;
+  for (const header of headers) {
+    if (header.length < 7 || header[0] !== epoch || header[1]! > header[2]!
+      || (header[3]! & READY_VALIDATED) !== READY_VALIDATED
+      || header[5] !== 1 || header[6] !== 1) return null;
+    const groups = safeProduct(header.subarray(4, 7));
+    if (groups === null || groups !== Math.ceil(header[1]! / 64)) return null;
+    scheduledLanes += groups * 64;
+    activeLanes += header[1]!;
+  }
+  return { scheduledLanes, activeLanes, worksets: headers.length };
+}
+
+/**
+ * Apply one post-submit GPU capture to the observational stage ledger.
+ * Every populated value is decoded from a compact GPU authority. Metrics not
+ * proved by those controls remain null in the accounting snapshot.
+ */
+export function recordOctreeRuntimeGPUWork(
+  accounting: OctreeWorkAccounting,
+  controls: OctreeRuntimeWorkGPUControls,
+  plan: OctreeRuntimeWorkAccountingPlan,
+): OctreePressureSolveWorkDecode {
+  const pressure = decodeOctreePressureSolveWork(controls, plan.pressure);
+  if (pressure.report) accounting.recordPressureSolveReport(pressure.report);
+
+  const accepted = controls.acceptedRows;
+  const acceptedValid = accepted !== undefined && accepted.length >= 6
+    && accepted[0] === 0 && accepted[1] === 0xffff_ffff
+    && accepted[3] !== 0 && accepted[4]! <= 1
+    && accepted[2]! <= plan.pressure.rowCapacity;
+  if (acceptedValid) {
+    const epoch = accepted![3]!, liveRows = accepted![2]!;
+    const liveDispatch = controls.liveRowDispatch;
+    const acceptedSlots = accepted![5]!;
+    const liveDispatchValid = liveDispatch !== undefined && liveDispatch.length >= 6
+      && liveDispatch[0] === Math.ceil(liveRows / 64)
+      && liveDispatch[1] === 1 && liveDispatch[2] === 1
+      && liveDispatch[3] === Math.ceil(acceptedSlots / 64)
+      && liveDispatch[4] === 1 && liveDispatch[5] === 1;
+    accounting.publishTopologyEpoch(epoch);
+    accounting.recordCatalogStamps(accepted![5]!);
+    const resolved = decodeCompactWorksets(controls.runtimeClassWorksets, epoch);
+    const families = decodeCompactWorksets(controls.runtimeFamilyWorksets, epoch);
+    const owner = controls.ownerControl;
+    const ownerValid = owner !== undefined && owner.length >= 16 && owner[15] === OWNER_MAGIC
+      && owner[2] === 0 && owner[12] === 0 && owner[7] !== 0 && owner[1]! <= owner[3]!
+      && owner[4] === plan.ownerLogicalPages && owner[1]! <= plan.ownerLogicalPages
+      && (owner[10]! & OWNER_READY) !== 0 && (owner[10]! & OWNER_INVALID_STATUS) === 0;
+    const ownerPages = ownerValid ? owner![1]! : null;
+    if (liveDispatchValid && resolved && resolved.activeLanes === liveRows) {
+      const compactRows = { scheduledLanes: resolved.scheduledLanes,
+        activeLanes: resolved.activeLanes,
+        activePages: ownerPages ?? 0, logicalPages: plan.ownerLogicalPages,
+        worksets: resolved.worksets, encodedIterations: 1, executedIterations: 1,
+        reductionPasses: 0,
+        estimatedBytesMoved: liveRows * 4 * (4 + 2 * plan.pressure.maximumNeighborSlots) };
+      if (ownerPages !== null) accounting.recordStage("rhs", compactRows);
+      if (ownerPages !== null && families) accounting.recordStage("projection", {
+        scheduledLanes: compactRows.scheduledLanes + families.scheduledLanes,
+        activeLanes: compactRows.activeLanes + families.activeLanes,
+        activePages: ownerPages, logicalPages: plan.ownerLogicalPages,
+        worksets: compactRows.worksets + families.worksets,
+        encodedIterations: 1, executedIterations: 1, reductionPasses: 0,
+        estimatedBytesMoved: compactRows.estimatedBytesMoved
+          + families.activeLanes * 24 + liveRows * 16,
+      });
+    }
+    if (liveDispatchValid && families && ownerPages !== null) accounting.recordStage("forces-and-solids", {
+      ...families, activePages: ownerPages, logicalPages: plan.ownerLogicalPages,
+      encodedIterations: 1, executedIterations: 1, reductionPasses: 0,
+      estimatedBytesMoved: families.activeLanes * 16,
+    });
+  }
+
+  const owner = controls.ownerControl;
+  if (owner && owner.length >= 16 && owner[15] === OWNER_MAGIC && owner[2] === 0
+    && owner[12] === 0 && owner[7] !== 0 && owner[1]! <= owner[3]!
+    && owner[4] === plan.ownerLogicalPages && owner[1]! <= plan.ownerLogicalPages
+    && (owner[10]! & OWNER_READY) !== 0 && (owner[10]! & OWNER_INVALID_STATUS) === 0) {
+    accounting.recordStage("topology-publication", {
+      scheduledLanes: 1, activeLanes: 1,
+      activePages: owner[1]!, logicalPages: owner[4]!, worksets: 1,
+      encodedIterations: 1, executedIterations: 1, reductionPasses: 0,
+      estimatedBytesMoved: 64 + owner[1]! * plan.ownerBytesPerPage,
+    });
+  }
+
+  const fine = controls.fineWorkset, fineTopology = controls.fineTopologyControl;
+  const fineValid = fine !== undefined && fine.length >= 7 && fine[0] !== 0
+    && fine[1]! <= fine[2]! && (fine[3]! & READY_VALIDATED) === READY_VALIDATED
+    && fine[5] === 1 && fine[6] === 1
+    && fineTopology !== undefined && fineTopology.length >= 8
+    && fineTopology[0] === 0 && fineTopology[4] === 1 && fineTopology[5] === 0;
+  if (fineValid) {
+    const groups = safeProduct(fine!.subarray(4, 7));
+    const logicalPages = plan.fineLogicalPages;
+    const finePages = fineTopology![2]!;
+    if (logicalPages !== undefined && finePages <= logicalPages && groups !== null
+      && groups === Math.ceil(fine![1]! / 64)) {
+      accounting.recordStage("candidate-build", {
+        scheduledLanes: groups * 64, activeLanes: finePages,
+        activePages: finePages, logicalPages, worksets: 1,
+        encodedIterations: 1, executedIterations: 1, reductionPasses: 0,
+        estimatedBytesMoved: finePages * 40,
+      });
+    }
+    const transport = controls.fineTransportControl;
+    const transportWorkset = controls.fineTransportWorkset;
+    const governor = controls.fineTransportGovernor;
+    const transportWorksetValid = transportWorkset !== undefined && transportWorkset.length >= 7
+      && transportWorkset[0] !== 0 && transportWorkset[1]! <= transportWorkset[2]!
+      && (transportWorkset[3]! & READY_VALIDATED) === READY_VALIDATED
+      && transportWorkset[5] === 1 && transportWorkset[6] === 1;
+    if (transportWorksetValid
+      && transport && transport.length >= 8 && transport[3] === 1
+      && transport[0] === 0 && transport[1] === 0
+      && transport[6] === 0 && transport[7] === 0
+      && governor && governor.length >= 4 && governor[0] === 0
+      && governor[1]! >= 1
+      && governor[1]! <= (plan.fineTransportEncodedIterations ?? 0)
+      && logicalPages !== undefined && transportWorkset![1]! <= logicalPages) {
+      const executed = governor[1]!, samples = plan.fineSamplesPerPage ?? 64;
+      const scheduled = transportWorkset![1]! * samples * executed;
+      if (transport[2]! <= scheduled) {
+      accounting.recordStage("fine-transport", {
+        scheduledLanes: scheduled, activeLanes: transport[2]!, activePages: transportWorkset![1]!,
+        logicalPages, worksets: 1,
+        encodedIterations: plan.fineTransportEncodedIterations!, executedIterations: executed,
+        reductionPasses: executed,
+        estimatedBytesMoved: transport[2]! * 24,
+      });
+      }
+    }
+    const redistance = controls.fineRedistanceControl;
+    if (redistance && redistance.length >= 9 && redistance[0] === 0
+      && redistance[3] === 1 && redistance[4] === 0
+      && logicalPages !== undefined && redistance[8]! <= logicalPages
+      && plan.fineRedistanceEncodedIterations !== undefined) {
+      const samples = plan.fineSamplesPerPage ?? 64;
+      const iterations = redistance[8] === 0 ? 0 : plan.fineRedistanceEncodedIterations;
+      const scheduled = redistance[8]! * samples * iterations;
+      accounting.recordStage("fine-redistance", {
+        scheduledLanes: scheduled, activeLanes: scheduled,
+        activePages: redistance[8]!, logicalPages, worksets: 2,
+        encodedIterations: plan.fineRedistanceEncodedIterations,
+        executedIterations: iterations, reductionPasses: iterations,
+        estimatedBytesMoved: scheduled * 16,
+      });
+    }
+  } else if (plan.fineLogicalPages === undefined) {
+    accounting.recordIdleStage("candidate-build");
+    accounting.recordIdleStage("fine-transport");
+    accounting.recordIdleStage("fine-redistance");
+  }
+  return pressure;
+}

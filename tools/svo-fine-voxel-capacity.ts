@@ -18,37 +18,40 @@
  *
  *   node --import tsx tools/svo-fine-voxel-capacity.ts [cellSize_mm ...]
  */
-import { planAdaptiveSparseBrickOctree } from "../lib/adaptive-sparse-brick-plan";
-import { createHeroGardenHoseStressScene } from "../lib/hero-garden-stress-scene";
-import { buildEnvironmentProxyCatalog, environmentProxyPrimitives } from "../lib/voxel-environments";
-import type { SceneDescription } from "../lib/model";
-import { getScenePreset } from "../lib/scenes";
-import { planSparseSceneDomain } from "../lib/sparse-scene-domain";
-import { SPARSE_BRICK_GPU_LAYOUT } from "../lib/sparse-brick-octree";
-import { planSvoNodeMipPyramid } from "../lib/svo-node-mip-pyramid";
-import { SVO_PRIMITIVE_RECORD_STRIDE_BYTES } from "../lib/svo-primitive-abi";
-import { SVO_PRIMITIVE_CANDIDATE_ARENA_SIZE_BYTES } from "../lib/svo-primitive-candidates";
-import { svoTetrahedralRadianceAtlasBytes } from "../lib/svo-tetrahedral-radiance";
+// These lanes render without a solver, but they construct the renderer, and
+// a renderer resolves a method by id on any path that reaches a scene.
+import "../lib/methods";
+import { planAdaptiveSparseBrickOctree } from "../lib/core/adaptive-sparse-brick-plan";
+import { createHeroGardenHoseStressScene } from "../lib/core/hero-garden-stress-scene";
+import { buildEnvironmentProxyCatalog, environmentProxyPrimitives } from "../lib/core/voxel-environments";
+import type { SceneDescription } from "../lib/core/model";
+import { getScenePreset } from "../lib/core/scenes";
+import { planSparseSceneDomain } from "../lib/core/sparse-scene-domain";
+import { SPARSE_BRICK_GPU_LAYOUT } from "../lib/svo/sparse-brick-octree";
+import { planSvoNodeMipPyramid } from "../lib/svo/svo-node-mip-pyramid";
+import { SVO_PRIMITIVE_RECORD_STRIDE_BYTES } from "../lib/svo/svo-primitive-abi";
+import { SVO_PRIMITIVE_CANDIDATE_ARENA_SIZE_BYTES } from "../lib/svo/svo-primitive-candidates";
+import { svoTetrahedralRadianceAtlasBytes } from "../lib/svo/svo-tetrahedral-radiance";
 import {
   svoBrickRasterInstanceBytes,
   svoBrickRasterPublicationInstanceOffsetBytes,
   svoRasterCoverageArenaBytes,
   svoRasterCoverageCountAllocationBytes,
   SVO_BRICK_RASTER_CONTRACT,
-} from "../lib/webgpu-svo-brick-raster";
-import { SVO_SCENE_PRIMITIVE_RASTER_CONTRACT } from "../lib/webgpu-svo-dry-scene";
-import { buildSvoScenePrimitives } from "../lib/svo-scene-primitives";
-import { svoPrimitiveCandidateBounds } from "../lib/svo-primitive-candidates";
-import { createTallCellLayout } from "../lib/tall-cell-grid";
-import { terrainHeightAt } from "../lib/terrain";
+} from "../lib/svo/webgpu-svo-brick-raster";
+import { SVO_SCENE_PRIMITIVE_RASTER_CONTRACT } from "../lib/svo/webgpu-svo-dry-scene";
+import { buildSvoScenePrimitives } from "../lib/svo/svo-scene-primitives";
+import { svoPrimitiveCandidateBounds } from "../lib/svo/svo-primitive-candidates";
+import { createTallCellLayout } from "../lib/core/tall-cell-grid";
+import { terrainHeightAt } from "../lib/core/terrain";
 import {
   environmentMaximumCoarseningPower,
   OCTREE_LIVE_SCENE_CANDIDATES_PER_BRICK,
   liveSvoBasePageDimensions,
   OCTREE_LIVE_SCENE_MUTATION_BRICK_CAPACITY,
   sparseSceneOctreeMaximumDepth,
-} from "../lib/webgpu-octree-sparse-bricks";
-import { liveSvoPlanBasePages } from "../lib/webgpu-svo-live-derived-builder";
+} from "../lib/svo/webgpu-svo-sparse-bricks";
+import { liveSvoPlanBasePages } from "../lib/svo/webgpu-svo-live-derived-builder";
 import { svoScenePrimitiveBrickDensity } from "./svo-dry-frame-harness";
 
 /** This machine's Dawn/Metal adapter, as reported by `adapter.limits`. */

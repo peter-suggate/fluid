@@ -2,13 +2,13 @@
 
 import { useRef, useState } from "react";
 import { RangeControl } from "./controls";
-import { add, cameraBasis, dot, scale, sub } from "@/lib/math";
-import type { RigidShape } from "@/lib/model";
-import { viewportRayForPointer } from "@/lib/webgpu-camera";
-import { simulation } from "@/lib/simulation/controller";
-import { useDiagnosticsStore } from "@/lib/stores/diagnostics-store";
-import { useSceneStore } from "@/lib/stores/scene-store";
-import { useUIStore } from "@/lib/stores/ui-store";
+import { add, cameraBasis, dot, scale, sub } from "../lib/core/math";
+import type { RigidShape } from "../lib/core/model";
+import { viewportRayForPointer } from "../lib/core/webgpu-camera";
+import { simulation } from "../lib/core/simulation/controller";
+import { useDiagnosticsStore } from "../lib/core/stores/diagnostics-store";
+import { useSceneStore } from "../lib/core/stores/scene-store";
+import { useUIStore } from "../lib/core/stores/ui-store";
 
 const shapes: ReadonlyArray<{ shape: RigidShape; label: string }> = [
   { shape: "sphere", label: "Sphere" },

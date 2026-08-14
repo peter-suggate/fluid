@@ -3,7 +3,7 @@ import test from "node:test";
 import {
   solveOctreePipelinedPCG,
   type OctreePipelinedPCGLinearMap,
-} from "../lib/octree-pipelined-pcg";
+} from "../lib/methods/octree-shared/octree-pipelined-pcg";
 
 function denseMap(matrix: readonly (readonly number[])[]): OctreePipelinedPCGLinearMap {
   return (input) => matrix.map((row) =>

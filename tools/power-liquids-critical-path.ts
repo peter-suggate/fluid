@@ -1,5 +1,5 @@
 import { readFileSync } from "node:fs";
-import type { GPUDataFlowManifest } from "./webgpu-data-flow-manifest";
+import type { GPUDataFlowManifest } from "../lib/harness/webgpu-data-flow-manifest";
 
 export interface GPUCriticalPathSegment {
   readonly ordinal: number;

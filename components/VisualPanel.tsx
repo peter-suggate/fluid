@@ -1,25 +1,25 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { useDiagnosticsStore } from "@/lib/stores/diagnostics-store";
-import { useRuntimeStore } from "@/lib/stores/runtime-store";
-import { useSceneStore } from "@/lib/stores/scene-store";
-import { useUIStore } from "@/lib/stores/ui-store";
-import { usePerformanceInstrumentationStore } from "@/lib/stores/performance-instrumentation-store";
-import { averagePerformanceTraces, type PerformanceTrace } from "@/lib/performance-trace";
+import { useDiagnosticsStore } from "../lib/core/stores/diagnostics-store";
+import { useRuntimeStore } from "../lib/core/stores/runtime-store";
+import { useSceneStore } from "../lib/core/stores/scene-store";
+import { useUIStore } from "../lib/core/stores/ui-store";
+import { usePerformanceInstrumentationStore } from "../lib/core/stores/performance-instrumentation-store";
+import { averagePerformanceTraces, type PerformanceTrace } from "../lib/core/performance-trace";
 import {
   renderPipelinePhaseDurations,
   RENDER_PIPELINE_NODES,
   type RenderPipelineContext,
-} from "@/lib/render-pipeline-graph";
-import { disabledRenderStagesFrom } from "@/lib/render-stage-switches";
+} from "../lib/core/render-pipeline-graph";
+import { disabledRenderStagesFrom } from "../lib/core/render-stage-switches";
 import { RenderPipeline } from "./RenderPipeline";
 import {
   SVO_RENDER_STAGE_MAXIMUM_LIGHT_SLOT,
   svoRenderStageUsesLightSlot,
   type SvoRenderStageView,
-} from "@/lib/svo-render-diagnostics";
-import { resolveSvoPrimaryTraversal } from "@/lib/svo-render-options";
+} from "../lib/svo/svo-render-diagnostics";
+import { resolveSvoPrimaryTraversal } from "../lib/svo/svo-render-options";
 import {
   SVO_ENVIRONMENT_BRICK_REFINEMENT_MAXIMUM,
   SVO_ENVIRONMENT_REFINEMENT_DEPTH_MAXIMUM,
@@ -32,10 +32,10 @@ import {
   type SvoConeRadianceReconstruction,
   type SvoRenderQualityPreset,
   type SvoRenderTuning,
-} from "@/lib/svo-render-tuning";
-import { findSceneDefinition } from "@/lib/scenes";
-import { sceneDefinitionTakesLattice } from "@/lib/scene-definition";
-import { simulation } from "@/lib/simulation/controller";
+} from "../lib/svo/svo-render-tuning";
+import { findSceneDefinition } from "../lib/core/scenes";
+import { sceneDefinitionTakesLattice } from "../lib/core/scene-definition";
+import { simulation } from "../lib/core/simulation/controller";
 import { PipeChoice, PipeRange, PipeToggle } from "./PipeControls";
 
 /** Frames the live readout averages over. */

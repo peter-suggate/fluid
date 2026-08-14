@@ -2,7 +2,7 @@ import { pathToFileURL } from "node:url";
 import {
   acquireWebGPUExclusiveLock,
   releaseWebGPUExclusiveLock,
-} from "./webgpu-smoke-isolation";
+} from "../lib/harness/webgpu-smoke-isolation";
 
 export const DENSE_CACHE_MINI_DIMENSIONS = Object.freeze([
   [16, 16, 16], [8, 8, 8], [4, 4, 4], [2, 2, 2], [1, 1, 1],

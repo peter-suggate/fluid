@@ -3,8 +3,8 @@ import {
   SECONDARY_PARTICLE_STRIDE_BYTES,
   SecondaryParticleRenderPipeline,
   type GPUSecondaryParticleSource
-} from "../lib/webgpu-secondary-particles";
-import { DynamicGPUPerformanceTraceRecorder } from "../lib/performance-trace";
+} from "../lib/core/webgpu-secondary-particles";
+import { DynamicGPUPerformanceTraceRecorder } from "../lib/core/performance-trace";
 
 const modulePath = process.env.WEBGPU_NODE_MODULE;
 if (!modulePath) throw new Error("Set WEBGPU_NODE_MODULE to the installed webgpu package index.js");

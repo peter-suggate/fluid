@@ -24,6 +24,9 @@
  *     [--counter-seconds=3] [--counter-reduction=100] [--out=DIR]
  *     [--timing-only] [--reuse-trace] [--reuse-tables]
  */
+// These lanes render without a solver, but they construct the renderer, and
+// a renderer resolves a method by id on any path that reaches a scene.
+import "../lib/methods";
 import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { createWriteStream, existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
@@ -42,9 +45,9 @@ import {
   releaseWebGPUExclusiveLock,
   releaseWebGPUExclusiveLockSync,
   WEBGPU_EXCLUSIVE_LOCK,
-} from "./webgpu-smoke-isolation";
-import { SVO_SCREEN_SPACE_TERMINATION_CONTRACT } from "../lib/svo-screen-space-termination";
-import { SVO_DRY_TRAVERSAL_MODES, type SvoDryTraversalMode } from "../lib/webgpu-svo-dry-scene";
+} from "../lib/harness/webgpu-smoke-isolation";
+import { SVO_SCREEN_SPACE_TERMINATION_CONTRACT } from "../lib/svo/svo-screen-space-termination";
+import { SVO_DRY_TRAVERSAL_MODES, type SvoDryTraversalMode } from "../lib/svo/webgpu-svo-dry-scene";
 import { buildFrameReport, renderFrameReportHtml, type FrameReport } from "./xctrace-frame-report";
 import { parseTraceTable, readTraceRows } from "./xctrace-trace-tables";
 

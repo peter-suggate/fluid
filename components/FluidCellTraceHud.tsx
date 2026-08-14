@@ -1,6 +1,6 @@
 "use client";
 
-import { visualizationsForGroups } from "@/lib/visualization-catalog";
+import { visualizationsForGroups } from "../lib/core/visualization-catalog";
 import {
   fineBandCensus,
   fineBandFreeSurfaceCrossings,
@@ -11,7 +11,7 @@ import {
   fineBandPhiSpan,
   type FineBandCellContext,
   type FineBandPhiSpan,
-} from "@/lib/fine-band-cell-model";
+} from "../lib/core/fine-band-cell-model";
 import {
   FLUID_CELL_TRACE_LAYERS,
   FLUID_CELL_TRACE_LAYER_DEFINITIONS,
@@ -24,8 +24,8 @@ import {
   type FluidCellTrace,
   type FluidCellTraceLayer,
   type FluidCellTraceSchedule,
-} from "@/lib/fluid-cell-trace";
-import { FLUID_CELL_TRACE_FINE_PROBES } from "@/lib/webgpu-fluid-cell-trace";
+} from "../lib/core/fluid-cell-trace";
+import { FLUID_CELL_TRACE_FINE_PROBES } from "../lib/core/webgpu-fluid-cell-trace";
 import { VisualizationLegend } from "./VisualizationLegend";
 
 export type FluidCellTraceStatusHint =

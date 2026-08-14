@@ -2,18 +2,18 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { pathToFileURL } from "node:url";
 import { FineLevelSetBrickOracle, packFineLevelSetBrickKey, planFineLevelSetBricks } from
-  "../lib/octree-fine-levelset-bricks";
-import { WebGPUFineLevelSetBricks, type WebGPUFineLevelSetBrickSource } from
-  "../lib/webgpu-octree-fine-levelset-bricks";
+  "../lib/methods/octree-shared/octree-fine-levelset-bricks";
+import { WebGPUFineLevelSetBricks } from "../lib/methods/octree-shared/webgpu-octree-fine-levelset-bricks";
+import type { WebGPUFineLevelSetBrickSource } from "../lib/core/levelset-consumer-abi";
 import { FINE_LEVELSET_SUMMARY_CENTER_COMPLETE, FINE_LEVELSET_SUMMARY_CONSUMERS,
   FINE_LEVELSET_SUMMARY_DIRECTORY_PAGE_SIZE, FINE_LEVELSET_SUMMARY_ENTRY_WORDS,
   FINE_LEVELSET_SUMMARY_VALID,
   fineLevelSetSummaryDirectEntryBase,
   fineLevelSetSummaryWGSL, planFineLevelSetGPUSummaries,
   planFineLevelSetSummaryLeafLookup, WebGPUFineLevelSetSummaries } from
-  "../lib/webgpu-octree-fine-levelset-summary";
-import { requiredFluidDeviceLimits } from "../lib/webgpu-device-limits";
-import { PassBroker } from "../lib/webgpu-pass-broker";
+  "../lib/methods/octree-shared/webgpu-octree-fine-levelset-summary";
+import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
+import { PassBroker } from "../lib/core/webgpu-pass-broker";
 
 function reachableSummaryBindings(entryPoint: string): number[] {
   const source = fineLevelSetSummaryWGSL.replace(/\/\/[^\n\r]*/g, "").replace(/\/\*[\s\S]*?\*\//g, "");
