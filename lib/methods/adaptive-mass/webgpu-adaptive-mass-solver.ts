@@ -3,6 +3,7 @@ import type { GPUQuality } from "../../core/gpu-quality";
 import type {
   GPUInitializationReporter,
   GPUSolverInstance,
+  InjectedLiquidBall,
 } from "../../core/method-contract";
 import type { SceneDescription } from "../../core/model";
 import type { RigidBodyState } from "../../core/rigid-body";
@@ -28,6 +29,7 @@ import {
   type SparseAtlasProjectionResult,
 } from "./sparse-atlas-composite-projection";
 import {
+  injectSparseAtlasLiquid,
   initializeSparseAtlasDynamics,
   materializeSparseAtlasDynamicsVelocityRgba,
   stepSparseAtlasDynamics,
@@ -233,6 +235,69 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       : Math.min(this.scene.numerics.maxDt_s, time_s - this.lastTime_s);
     if (!(dt_s > 0)) return false;
     const cellSize_m = finestCellSize(this.scene, this.atlas);
+  /** Every atlas-derived counter, from whatever last changed the atlas. */
+  private publishAtlasStats(): void {
+    const stats = sparseBrickAtlasStats(this.atlas);
+    this.info.volumeCellSum = stats.integratedMassFineCells;
+    this.info.representedVolumeCellSum = stats.integratedMassFineCells;
+    this.info.representedVolumeDrift = stats.integratedMassFineCells - this.initialMassFineCells;
+    this.info.fluidBrickGeneration = stats.generation;
+    this.info.adaptiveFineBrickCount = stats.fineBrickCount;
+    this.info.adaptiveCoarseBrickCount = stats.coarseBrickCount;
+    this.info.adaptiveFineCoarseFaceConnectedPairCount =
+      stats.fineCoarseFaceConnectedPairCount;
+    this.info.fluidBrickResidentCount = stats.residentBrickCount;
+    this.info.fluidBrickCoreCount = stats.residentBrickCount;
+    this.info.cellCount = stats.leafCount;
+    this.info.activeSampleCount = stats.leafCount;
+    this.info.compressionRatio = stats.leafCompressionRatio;
+    this.info.activeCompressionRatio = stats.leafCompressionRatio;
+  }
+
+  /**
+   * Add a ball of liquid to the atlas the running solve is stepping.
+   *
+   * Without this the editor authors the ball into the scene document instead,
+   * which re-seeds this solver at t = 0 — the user drops water into a running
+   * tank and the tank restarts. The ball is converted from metres to finest
+   * cells here because the atlas is the only thing that knows the lattice, and
+   * its radius becomes three radii: a metric sphere is an ellipsoid on any
+   * lattice whose cells are not cubes.
+   *
+   * The drop is applied to the atlas immediately rather than deferred to the
+   * next step, and the presentation is republished from it so the fields the
+   * renderer and the diagnostics read agree with the atlas before that step.
+   * The ball is drawn from the step after the drop, like any other water.
+   */
+  injectLiquidBall(ball: InjectedLiquidBall): void {
+    if (this.disposed || !(ball.radius_m > 0)) return;
+    const container = this.scene.container;
+    const [nx, ny, nz] = this.atlas.dimensions;
+    const before = sparseBrickAtlasStats(this.atlas).integratedMassFineCells;
+    const dynamics = injectSparseAtlasLiquid(this.dynamics, {
+      centerFine: [
+        (ball.centre_m.x + 0.5 * container.width_m) * nx / container.width_m,
+        ball.centre_m.y * ny / container.height_m,
+        (ball.centre_m.z + 0.5 * container.depth_m) * nz / container.depth_m,
+      ],
+      radiusFine: [
+        ball.radius_m * nx / container.width_m,
+        ball.radius_m * ny / container.height_m,
+        (ball.halfHeight_m ?? ball.radius_m) * nz / container.depth_m,
+      ],
+    });
+    if (dynamics === this.dynamics) return;
+    this.dynamics = dynamics;
+    this.atlas = dynamics.atlas;
+    // The drift counter reads "mass this run has lost", so the water the user
+    // just added is added to its baseline too — otherwise a drop registers as
+    // a conservation failure of exactly its own volume.
+    this.initialMassFineCells +=
+      sparseBrickAtlasStats(this.atlas).integratedMassFineCells - before;
+    this.publishAtlasStats();
+    this.presentation.upload(atlasMaterialization(this.atlas, this.scene, this.dynamics));
+  }
+
     const gravity = this.scene.fluid.gravity_m_s2;
     const instrumentation = usePerformanceInstrumentationStore.getState();
     const traceRequestedAt_ms = instrumentation.enabled ? performance.now() : 0;
@@ -265,7 +330,6 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
     this.atlas = step.atlas;
     this.dynamics = step.state;
     this.lastTime_s = step.state.time_s;
-    const stats = sparseBrickAtlasStats(this.atlas);
     const projection = step.projection;
     const nextTime_s = step.state.time_s;
     this.info.submittedTime_s = nextTime_s;
@@ -273,20 +337,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
     this.info.simulationLag_s = Math.max(0, time_s - nextTime_s);
     this.info.lastDt_s = dt_s;
     this.info.encodedSteps = (this.info.encodedSteps ?? 0) + 1;
-    this.info.volumeCellSum = stats.integratedMassFineCells;
-    this.info.representedVolumeCellSum = stats.integratedMassFineCells;
-    this.info.representedVolumeDrift = stats.integratedMassFineCells - this.initialMassFineCells;
-    this.info.fluidBrickGeneration = stats.generation;
-    this.info.adaptiveFineBrickCount = stats.fineBrickCount;
-    this.info.adaptiveCoarseBrickCount = stats.coarseBrickCount;
-    this.info.adaptiveFineCoarseFaceConnectedPairCount =
-      stats.fineCoarseFaceConnectedPairCount;
-    this.info.fluidBrickResidentCount = stats.residentBrickCount;
-    this.info.fluidBrickCoreCount = stats.residentBrickCount;
-    this.info.cellCount = stats.leafCount;
-    this.info.activeSampleCount = stats.leafCount;
-    this.info.compressionRatio = stats.leafCompressionRatio;
-    this.info.activeCompressionRatio = stats.leafCompressionRatio;
+    this.publishAtlasStats();
     this.info.lastSubsteps = step.stats.transportSubsteps;
     this.info.maxComponentCfl = step.stats.maximumOutgoingCfl;
     this.info.adaptiveMixedSeamFaceCount = projection?.receipt.mixedSeamRowCount ?? 0;

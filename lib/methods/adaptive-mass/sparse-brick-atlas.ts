@@ -73,7 +73,7 @@ export interface SparseAtlasLeaf {
   readonly gamma: number;
 }
 
-const BRICK_FINE_RESOLUTION = 8;
+export const BRICK_FINE_RESOLUTION = 8;
 
 function positiveDimensions(value: SparseBrickVec3): void {
   for (const component of value) {

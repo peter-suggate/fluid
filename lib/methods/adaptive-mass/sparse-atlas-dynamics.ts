@@ -18,6 +18,7 @@ import {
   type SparseAtlasProjectionResult,
 } from "./sparse-atlas-composite-projection";
 import {
+  BRICK_FINE_RESOLUTION,
   createSparseAdaptiveMassAtlas,
   sparseBrickKey,
   type SparseAdaptiveMassAtlas,
@@ -416,6 +417,144 @@ function maximumOutflowRate(
   }
   let maximum = 0;
   for (const cell of grid.cells) maximum = Math.max(maximum, rates[cell.id] / cell.volume);
+/** A ball of liquid to add to a live state, in finest-cell index space. */
+export interface SparseAtlasLiquidInjection {
+  /** Centre in finest cells, where cell (i, j, k) spans [i, i + 1) on each axis. */
+  readonly centerFine: SparseBrickVec3;
+  /** Per-axis radii: a metric sphere is an ellipsoid whenever the lattice is anisotropic. */
+  readonly radiusFine: SparseBrickVec3;
+}
+
+/**
+ * Add liquid to a running state instead of restarting one.
+ *
+ * The alternative is authoring the ball into the scene document, which re-seeds
+ * the solver at t = 0: the drop lands, but the run it landed in is gone. This
+ * writes density straight into the atlas. Bricks the ball reaches that the
+ * atlas does not hold are created 8³ — a ball is all interface, the same rule
+ * the initial atlas applies to an interface brick — while bricks it already
+ * holds keep the resolution the activity policy chose for them, because a drop
+ * is not evidence about the region it lands in. Every touched cell takes
+ * `max(existing, coverage)`, so the ball adds water and never erases any.
+ *
+ * Velocity is left alone: created cells arrive at rest and existing cells keep
+ * what they had, which is what a ball released from a standstill looks like.
+ * The mass arrives divergent and the next step's projection resolves it in the
+ * same global solve as everything else — there is no separate correction here.
+ */
+export function injectSparseAtlasLiquid(
+  state: SparseAtlasDynamicsState,
+  injection: SparseAtlasLiquidInjection,
+): SparseAtlasDynamicsState {
+  assertFiniteVector(injection.centerFine, "injected centre");
+  assertFiniteVector(injection.radiusFine, "injected radius");
+  const source = state.atlas;
+  const minimumFine: number[] = [];
+  const maximumFine: number[] = [];
+  for (let axis = 0; axis < 3; axis += 1) {
+    if (!(injection.radiusFine[axis] > 0)) return state;
+    minimumFine.push(Math.max(0,
+      Math.floor(injection.centerFine[axis] - injection.radiusFine[axis])));
+    maximumFine.push(Math.min(source.dimensions[axis] - 1,
+      Math.ceil(injection.centerFine[axis] + injection.radiusFine[axis])));
+    if (minimumFine[axis] > maximumFine[axis]) return state;
+  }
+
+  // Sub-sampled coverage rather than a centre-in/centre-out test, because the
+  // ball is a few cells across at interactive radii and a hard test would make
+  // its surface the lattice's staircase. Two samples per finest cell on every
+  // axis, so a 4³ brick's larger cells are sampled at the same density.
+  const coverage = (origin: readonly number[], span: number): number => {
+    const perAxis = 2 * span;
+    let inside = 0;
+    let counted = 0;
+    for (let sz = 0; sz < perAxis; sz += 1) {
+      const z = origin[2] + (sz + 0.5) * span / perAxis;
+      if (z < 0 || z > source.dimensions[2]) continue;
+      for (let sy = 0; sy < perAxis; sy += 1) {
+        const y = origin[1] + (sy + 0.5) * span / perAxis;
+        if (y < 0 || y > source.dimensions[1]) continue;
+        for (let sx = 0; sx < perAxis; sx += 1) {
+          const x = origin[0] + (sx + 0.5) * span / perAxis;
+          if (x < 0 || x > source.dimensions[0]) continue;
+          counted += 1;
+          const dx = (x - injection.centerFine[0]) / injection.radiusFine[0];
+          const dy = (y - injection.centerFine[1]) / injection.radiusFine[1];
+          const dz = (z - injection.centerFine[2]) / injection.radiusFine[2];
+          if (dx * dx + dy * dy + dz * dz <= 1) inside += 1;
+        }
+      }
+    }
+    return counted > 0 ? inside / counted : 0;
+  };
+
+  const bricks = new Map(source.bricks.map((brick) => [brick.key, brick] as const));
+  let touched = false;
+  const first = minimumFine.map((value) => Math.floor(value / BRICK_FINE_RESOLUTION));
+  const last = maximumFine.map((value) => Math.floor(value / BRICK_FINE_RESOLUTION));
+  for (let bz = first[2]; bz <= last[2]; bz += 1) {
+    for (let by = first[1]; by <= last[1]; by += 1) {
+      for (let bx = first[0]; bx <= last[0]; bx += 1) {
+        const coordinate: SparseBrickVec3 = [bx, by, bz];
+        const key = sparseBrickKey(coordinate, source.brickDimensions);
+        const brick = bricks.get(key) ?? zeroBrick(key, coordinate, 8);
+        const span = BRICK_FINE_RESOLUTION / brick.resolution;
+        let density: Float64Array | undefined;
+        for (let lz = 0; lz < brick.resolution; lz += 1) {
+          for (let ly = 0; ly < brick.resolution; ly += 1) {
+            for (let lx = 0; lx < brick.resolution; lx += 1) {
+              const fraction = coverage([
+                BRICK_FINE_RESOLUTION * bx + span * lx,
+                BRICK_FINE_RESOLUTION * by + span * ly,
+                BRICK_FINE_RESOLUTION * bz + span * lz,
+              ], span);
+              const local = lx + brick.resolution * (ly + brick.resolution * lz);
+              if (fraction <= brick.density[local]) continue;
+              density ??= Float64Array.from(brick.density);
+              density[local] = fraction;
+            }
+          }
+        }
+        if (!density) continue;
+        touched = true;
+        bricks.set(key, { ...brick, density });
+      }
+    }
+  }
+  if (!touched) return state;
+
+  const atlas = createSparseAdaptiveMassAtlas(
+    source.dimensions,
+    [...bricks.values()].sort((left, right) => left.key - right.key),
+    source.generation + 1,
+  );
+  const retained = sameAtlasTopology(source, atlas);
+  const grid = retained
+    ? rebindCompositeGrid(state.grid, atlas)
+    : buildSparseAtlasCompositeGrid(atlas);
+  const cellVelocity = retained ? state.cellVelocity : remapCellVelocity(state, grid);
+  return {
+    ...state,
+    atlas,
+    grid,
+    cellVelocity,
+    faceNormalVelocity: retained ? state.faceNormalVelocity : remapFaceVelocity(
+      state.grid,
+      state.faceNormalVelocity,
+      grid,
+      facesFromCells(grid, cellVelocity),
+    ),
+    cellPressure: retained
+      ? state.cellPressure
+      : remapCellScalar(state.grid, state.cellPressure, grid),
+    resolutionPolicy: retainSparseAtlasResolutionPolicy(state.resolutionPolicy, atlas),
+    residualQuiescence_s: new Map(grid.cells.flatMap((cell) => {
+      const age = state.residualQuiescence_s.get(cell.stableLeafId);
+      return age === undefined ? [] : [[cell.stableLeafId, age] as const];
+    })),
+  };
+}
+
   return maximum;
 }
 
