@@ -20,7 +20,10 @@ import {
   acquireWebGPUExclusiveLock,
   releaseWebGPUExclusiveLock,
 } from "../lib/harness/webgpu-smoke-isolation";
-import { WebGPUAdaptiveMassSolver } from
+import {
+  type AdaptiveMassStepTelemetry,
+  WebGPUAdaptiveMassSolver,
+} from
   "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
 
 type Dimensions = readonly [number, number, number];
@@ -68,6 +71,15 @@ interface Checkpoint {
   readonly maximumPostProjectionDivergence_s?: number;
   readonly statsMaximumPostProjectionDivergence_s?: number;
   readonly maximumAbsoluteVerticalVelocity_m_s?: number;
+  readonly maximumCfl?: number;
+  readonly kineticEnergyBeforeFineUnits?: number;
+  readonly kineticEnergyAfterFineUnits?: number;
+  readonly projectionKineticEnergyBeforeFineUnits?: number;
+  readonly projectionKineticEnergyAfterFineUnits?: number;
+  readonly inactiveFaceCount?: number;
+  readonly maximumInactiveFaceSpeedBefore_m_s?: number;
+  readonly maximumInactiveFaceSpeedAfter_m_s?: number;
+  readonly maximumMixedSeamDivergence_s?: number;
   readonly pressureIterations?: number;
   readonly adaptiveMixedSeamFaceCount?: number;
   readonly residentOwnerScales: readonly number[];
@@ -102,6 +114,15 @@ const positiveInteger = (name: string, fallback: number): number => {
   const value = Number(argument(name) ?? process.env[environment] ?? fallback);
   if (!Number.isSafeInteger(value) || value < 1) {
     throw new RangeError(`${name} must be a positive integer; received ${value}`);
+  }
+  return value;
+};
+
+const positiveNumber = (name: string, fallback: number): number => {
+  const environment = `FLUID_ADAPTIVE_SYMMETRY_${name.toUpperCase().replaceAll("-", "_")}`;
+  const value = Number(argument(name) ?? process.env[environment] ?? fallback);
+  if (!Number.isFinite(value) || value <= 0) {
+    throw new RangeError(`${name} must be finite and positive; received ${value}`);
   }
   return value;
 };
@@ -433,7 +454,11 @@ try {
   device.pushErrorScope("validation");
 
   const scene = createSymmetricExpansionScene();
-  const dt_s = scene.numerics.fixedDt_s ?? scene.numerics.maxDt_s;
+  const dt_s = positiveNumber(
+    "dt",
+    scene.numerics.fixedDt_s ?? scene.numerics.maxDt_s,
+  );
+  scene.numerics.fixedDt_s = scene.numerics.maxDt_s = dt_s;
   const expectedInitialMass_cells = (scene.fluid.initialBrickSeeds_m?.length ?? 0)
     * scene.voxelDomain.brickSize_cells ** 3;
   let solver: WebGPUAdaptiveMassSolver | undefined;
@@ -458,6 +483,7 @@ try {
     const capture = async (step: number): Promise<Checkpoint> => {
       await device.queue.onSubmittedWorkDone();
       const stats = await solver!.readStats();
+      const adaptiveStats = stats as typeof stats & AdaptiveMassStepTelemetry;
       const density = await readTexture(device, solver!.volumeTexture, dimensions, 1);
       if (step === 0 && initialDensity === undefined) initialDensity = density.slice();
       const levelSet = solver!.surfaceFieldTexture
@@ -527,6 +553,22 @@ try {
         maximumPostProjectionDivergence_s,
         statsMaximumPostProjectionDivergence_s: stats.maxDivergenceAfter_s,
         maximumAbsoluteVerticalVelocity_m_s,
+        maximumCfl: stats.maxComponentCfl,
+        kineticEnergyBeforeFineUnits:
+          adaptiveStats.adaptiveKineticEnergyBeforeFineUnits,
+        kineticEnergyAfterFineUnits:
+          adaptiveStats.adaptiveKineticEnergyAfterFineUnits,
+        projectionKineticEnergyBeforeFineUnits:
+          adaptiveStats.adaptiveProjectionKineticEnergyBeforeFineUnits,
+        projectionKineticEnergyAfterFineUnits:
+          adaptiveStats.adaptiveProjectionKineticEnergyAfterFineUnits,
+        inactiveFaceCount: adaptiveStats.adaptiveInactiveFaceCount,
+        maximumInactiveFaceSpeedBefore_m_s:
+          adaptiveStats.adaptiveMaximumInactiveFaceSpeedBefore_m_s,
+        maximumInactiveFaceSpeedAfter_m_s:
+          adaptiveStats.adaptiveMaximumInactiveFaceSpeedAfter_m_s,
+        maximumMixedSeamDivergence_s:
+          adaptiveStats.adaptiveMaximumMixedSeamDivergence_s,
         pressureIterations: stats.pressureIterations,
         adaptiveMixedSeamFaceCount: (stats as typeof stats & {
           readonly adaptiveMixedSeamFaceCount?: number;
@@ -634,6 +676,11 @@ try {
       expect(failures, checkpoint.maximumPostProjectionDivergence_s !== undefined
         && checkpoint.maximumPostProjectionDivergence_s <= POST_PROJECTION_DIVERGENCE_LIMIT_S,
       `step ${step}: post-projection divergence ${checkpoint.maximumPostProjectionDivergence_s ?? "missing"} exceeds ${POST_PROJECTION_DIVERGENCE_LIMIT_S}`);
+      expect(failures, checkpoint.maximumInactiveFaceSpeedAfter_m_s === 0,
+        `step ${step}: pressure-inactive faces retained ${checkpoint.maximumInactiveFaceSpeedAfter_m_s ?? "missing"} m/s after projection`);
+      expect(failures, checkpoint.maximumMixedSeamDivergence_s !== undefined
+        && checkpoint.maximumMixedSeamDivergence_s <= POST_PROJECTION_DIVERGENCE_LIMIT_S,
+      `step ${step}: mixed-seam divergence ${checkpoint.maximumMixedSeamDivergence_s ?? "missing"} exceeds ${POST_PROJECTION_DIVERGENCE_LIMIT_S}`);
       const divergenceAgreementTolerance = DIVERGENCE_PUBLICATION_ABSOLUTE_AGREEMENT_S
         + DIVERGENCE_PUBLICATION_RELATIVE_AGREEMENT * Math.max(
           Math.abs(checkpoint.maximumPostProjectionDivergence_s ?? Number.POSITIVE_INFINITY),
@@ -703,6 +750,22 @@ try {
       maximumTopologyD4Error: maximum((sample) => sample.symmetry.topology?.maximumAbsoluteError),
       maximumPressureRelativeResidual: maximum((sample) => sample.pressureRelativeResidual),
       maximumPostProjectionDivergence_s: maximum((sample) => sample.maximumPostProjectionDivergence_s),
+      maximumMixedSeamDivergence_s: maximum(
+        (sample) => sample.maximumMixedSeamDivergence_s,
+      ),
+      maximumInactiveFaceSpeedBefore_m_s: maximum(
+        (sample) => sample.maximumInactiveFaceSpeedBefore_m_s,
+      ),
+      maximumInactiveFaceSpeedAfter_m_s: maximum(
+        (sample) => sample.maximumInactiveFaceSpeedAfter_m_s,
+      ),
+      maximumCfl: maximum((sample) => sample.maximumCfl),
+      maximumKineticEnergyAfterFineUnits: maximum(
+        (sample) => sample.kineticEnergyAfterFineUnits,
+      ),
+      maximumProjectionKineticEnergyAfterFineUnits: maximum(
+        (sample) => sample.projectionKineticEnergyAfterFineUnits,
+      ),
       maximumAdaptiveMixedSeamFaceCount: maximumMixedSeamFaceCount,
       minimumDominantBodyMassFraction: Math.min(...checkpoints.map(
         (sample) => sample.dominantBodyMassFraction)),

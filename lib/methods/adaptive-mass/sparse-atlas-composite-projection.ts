@@ -129,6 +129,11 @@ export interface SparseAtlasProjectionReceipt {
   readonly kineticEnergyAfter: number;
   readonly pressureCorrectionEnergy: number;
   readonly energyIdentityAbsError: number;
+  /** Pressure-inactive faces are outside the liquid velocity authority. */
+  readonly inactiveRowCount: number;
+  readonly maximumInactiveFaceVelocityBefore: number;
+  readonly maximumInactiveFaceVelocityAfter: number;
+  readonly postMixedSeamDivergenceMaximum: number;
 }
 
 export interface SparseAtlasProjectionResult {
@@ -873,9 +878,37 @@ export function projectSparseAtlasVelocity(
   projectNullspace(system, trueResidual);
   options.onStageComplete?.("solve");
   const correction = pressureCorrection(system, pressure);
+  const activeRows = new Uint8Array(grid.gradientRows.length);
+  for (const row of system.rows) activeRows[row.source.id] = 1;
+  let maximumInactiveFaceVelocityBefore = 0;
   const projectedFaceVelocity = Float64Array.from(
-    velocityBefore, (value, rowId) => value - correction[rowId],
+    velocityBefore,
+    (value, rowId) => {
+      if (activeRows[rowId] === 0) {
+        maximumInactiveFaceVelocityBefore = Math.max(
+          maximumInactiveFaceVelocityBefore,
+          Math.abs(value),
+        );
+        // Sparse CM12 has no air-velocity authority. Carrying a forced value
+        // on a pressure-inactive row stores ballistic air momentum; when that
+        // row later becomes a liquid interface, the stale value is injected
+        // into transport and appears as surface boiling. Velocity extension
+        // can replace this zero boundary condition later, but inactive values
+        // must never persist as physical state.
+        return 0;
+      }
+      return value - correction[rowId];
+    },
   );
+  let maximumInactiveFaceVelocityAfter = 0;
+  for (const row of grid.gradientRows) {
+    if (activeRows[row.id] === 0) {
+      maximumInactiveFaceVelocityAfter = Math.max(
+        maximumInactiveFaceVelocityAfter,
+        Math.abs(projectedFaceVelocity[row.id]),
+      );
+    }
+  }
   options.onStageComplete?.("projection");
   // This is the physical finite-volume flux imbalance. Do not apply the
   // pressure system's quotient-space nullspace projector here: doing so would
@@ -884,6 +917,16 @@ export function projectSparseAtlasVelocity(
   const projectedEquationResidual = assembleLiquidRhs(system, projectedFaceVelocity);
   const preDivergence = divergenceFromEquationResidual(system, rhs);
   const leafDivergence = divergenceFromEquationResidual(system, projectedEquationResidual);
+  let postMixedSeamDivergenceMaximum = 0;
+  for (const row of system.rows) {
+    if (row.source.kind !== "mixed-seam") continue;
+    for (const term of row.terms) {
+      postMixedSeamDivergenceMaximum = Math.max(
+        postMixedSeamDivergenceMaximum,
+        Math.abs(leafDivergence[term.cellId]),
+      );
+    }
+  }
   const preDivergenceVolumeL2 = volumeL2(grid, preDivergence);
   const postDivergenceVolumeL2 = volumeL2(grid, leafDivergence);
   const kineticEnergyBefore = faceEnergy(system, velocityBefore);
@@ -925,6 +968,11 @@ export function projectSparseAtlasVelocity(
       energyIdentityAbsError: Math.abs(
         kineticEnergyBefore - kineticEnergyAfter - pressureCorrectionEnergy,
       ),
+      inactiveRowCount: activeRows.reduce(
+        (count, active) => count + (active === 0 ? 1 : 0), 0),
+      maximumInactiveFaceVelocityBefore,
+      maximumInactiveFaceVelocityAfter,
+      postMixedSeamDivergenceMaximum,
     },
   };
 }

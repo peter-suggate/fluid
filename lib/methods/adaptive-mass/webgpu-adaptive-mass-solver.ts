@@ -38,6 +38,18 @@ import {
   type AdaptiveMassAtlasMaterialization,
 } from "./webgpu-adaptive-mass-atlas-presentation";
 
+/** Method-local long-run physics receipt carried through the generic info bag. */
+export interface AdaptiveMassStepTelemetry {
+  adaptiveKineticEnergyBeforeFineUnits?: number;
+  adaptiveKineticEnergyAfterFineUnits?: number;
+  adaptiveProjectionKineticEnergyBeforeFineUnits?: number;
+  adaptiveProjectionKineticEnergyAfterFineUnits?: number;
+  adaptiveInactiveFaceCount?: number;
+  adaptiveMaximumInactiveFaceSpeedBefore_m_s?: number;
+  adaptiveMaximumInactiveFaceSpeedAfter_m_s?: number;
+  adaptiveMaximumMixedSeamDivergence_s?: number;
+}
+
 /**
  * Browser milestone for the adaptive-mass method.
  *
@@ -274,6 +286,9 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
     this.info.adaptiveMixedSeamFaceCount = projection?.receipt.mixedSeamRowCount ?? 0;
     this.info.hostSimulationSizedWorkItems = step.stats.workCellCount
       + step.stats.workFaceCount;
+    const adaptiveInfo = this.info as typeof this.info & AdaptiveMassStepTelemetry;
+    adaptiveInfo.adaptiveKineticEnergyBeforeFineUnits = step.stats.kineticEnergyBefore;
+    adaptiveInfo.adaptiveKineticEnergyAfterFineUnits = step.stats.kineticEnergyAfter;
     frameCapture?.completeStateCommit();
     const materialization = atlasMaterialization(
       this.atlas, this.scene, this.dynamics, step.projection, dt_s,
@@ -306,6 +321,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
     materialization: AdaptiveMassAtlasMaterialization,
   ): void {
     const receipt = projection.receipt;
+    const adaptiveInfo = this.info as typeof this.info & AdaptiveMassStepTelemetry;
     this.info.pressureIterations = receipt.iterations;
     this.info.pressureRelativeResidual = receipt.relativeResidualL2;
     this.info.pressureResidual = receipt.maximumResidual;
@@ -322,6 +338,17 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       materialization.velocity ?? [], materialization.pressure ?? [],
       materialization.divergence ?? [],
     );
+    adaptiveInfo.adaptiveProjectionKineticEnergyBeforeFineUnits =
+      receipt.kineticEnergyBefore;
+    adaptiveInfo.adaptiveProjectionKineticEnergyAfterFineUnits =
+      receipt.kineticEnergyAfter;
+    adaptiveInfo.adaptiveInactiveFaceCount = receipt.inactiveRowCount;
+    adaptiveInfo.adaptiveMaximumInactiveFaceSpeedBefore_m_s =
+      receipt.maximumInactiveFaceVelocityBefore * this.info.cellSize_m;
+    adaptiveInfo.adaptiveMaximumInactiveFaceSpeedAfter_m_s =
+      receipt.maximumInactiveFaceVelocityAfter * this.info.cellSize_m;
+    adaptiveInfo.adaptiveMaximumMixedSeamDivergence_s =
+      receipt.postMixedSeamDivergenceMaximum;
   }
 
   async readStats(): Promise<GPUEulerianInfo> {
