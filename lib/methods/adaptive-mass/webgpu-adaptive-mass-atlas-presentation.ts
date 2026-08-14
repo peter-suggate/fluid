@@ -58,6 +58,18 @@ export interface AdaptiveMassAtlasMaterializationOptions {
   readonly densityProxyBand: number;
 }
 
+interface PresentationLeafSample {
+  readonly lower: AdaptiveMassAtlasCoordinate;
+  readonly center: AdaptiveMassAtlasCoordinate;
+  readonly scale: number;
+  readonly phi: number;
+}
+
+interface DirectionalSample {
+  readonly value: number;
+  readonly distance: number;
+}
+
 export interface AdaptiveMassAtlasUploadReceipt {
   readonly generation: number;
   readonly cellCount: number;
@@ -94,6 +106,107 @@ function linearIndex(
   z: number,
 ): number {
   return x + dimensions[0] * (y + dimensions[1] * z);
+}
+
+/**
+ * Area-average the composite neighbours touching one leaf face. Fine neighbours
+ * contribute one sample per fine subface, while a coarse neighbour contributes
+ * the same value over its covered subfaces. This is the presentation analogue
+ * of the conservative 2:1 face quadrature used by the solver.
+ */
+function faceNeighborSample(
+  dimensions: AdaptiveMassAtlasDimensions,
+  sourceLeafAtFineCell: Int32Array,
+  leaves: readonly PresentationLeafSample[],
+  leaf: PresentationLeafSample,
+  axis: 0 | 1 | 2,
+  side: -1 | 1,
+  emptyLevelSet: number,
+): DirectionalSample | undefined {
+  const faceCoordinate = side < 0 ? leaf.lower[axis] - 1 : leaf.lower[axis] + leaf.scale;
+  if (faceCoordinate < 0 || faceCoordinate >= dimensions[axis]) return undefined;
+  const tangentA = axis === 0 ? 1 : 0;
+  const tangentB = axis === 2 ? 1 : 2;
+  let value = 0;
+  let distance = 0;
+  let samples = 0;
+  for (let b = 0; b < leaf.scale; b += 1) {
+    for (let a = 0; a < leaf.scale; a += 1) {
+      const q: [number, number, number] = [...leaf.lower];
+      q[axis] = faceCoordinate;
+      q[tangentA] += a;
+      q[tangentB] += b;
+      const neighborIndex = sourceLeafAtFineCell[linearIndex(dimensions, q[0], q[1], q[2])];
+      if (neighborIndex < 0) {
+        value += emptyLevelSet;
+        distance += Math.abs(faceCoordinate + 0.5 - leaf.center[axis]);
+      } else {
+        const neighbor = leaves[neighborIndex];
+        value += neighbor.phi;
+        distance += Math.abs(neighbor.center[axis] - leaf.center[axis]);
+      }
+      samples += 1;
+    }
+  }
+  return { value: value / samples, distance: distance / samples };
+}
+
+/**
+ * Prolong a coarse cell-centred scalar to the shared finest presentation
+ * lattice. The centred linear reconstruction has exactly the source value as
+ * the mean of its children, so density-derived phi retains every coarse cell's
+ * integrated CM12 mass. All marching-cubes cubes subsequently load the same
+ * fine-lattice samples, including cubes straddling a 4^3 <-> 8^3 brick seam.
+ */
+function reconstructCoarseLeafPhi(
+  dimensions: AdaptiveMassAtlasDimensions,
+  sourceLeafAtFineCell: Int32Array,
+  leaves: readonly PresentationLeafSample[],
+  leafIndex: number,
+  emptyLevelSet: number,
+): readonly [number, number, number] {
+  const leaf = leaves[leafIndex];
+  if (leaf.scale === 1) return [0, 0, 0];
+  const gradient: [number, number, number] = [0, 0, 0];
+  let maximumNeighborDelta = 0;
+  for (const axis of [0, 1, 2] as const) {
+    const negative = faceNeighborSample(
+      dimensions, sourceLeafAtFineCell, leaves, leaf, axis, -1, emptyLevelSet,
+    );
+    const positive = faceNeighborSample(
+      dimensions, sourceLeafAtFineCell, leaves, leaf, axis, 1, emptyLevelSet,
+    );
+    if (negative) maximumNeighborDelta = Math.max(
+      maximumNeighborDelta, Math.abs(negative.value - leaf.phi),
+    );
+    if (positive) maximumNeighborDelta = Math.max(
+      maximumNeighborDelta, Math.abs(positive.value - leaf.phi),
+    );
+    if (negative && positive) {
+      gradient[axis] = (positive.value - negative.value)
+        / Math.max(Number.EPSILON, positive.distance + negative.distance);
+    } else if (positive) {
+      gradient[axis] = (positive.value - leaf.phi)
+        / Math.max(Number.EPSILON, positive.distance);
+    } else if (negative) {
+      gradient[axis] = (leaf.phi - negative.value)
+        / Math.max(Number.EPSILON, negative.distance);
+    }
+  }
+
+  // A noisy adaptive neighbourhood must not extrapolate further than the
+  // largest value change already present on a touching face. One scalar theta
+  // preserves the direction and the zero-mean child offsets exactly.
+  const maximumOffset = 0.5 * (leaf.scale - 1);
+  const predictedMaximumDelta = maximumOffset
+    * (Math.abs(gradient[0]) + Math.abs(gradient[1]) + Math.abs(gradient[2]));
+  if (predictedMaximumDelta > maximumNeighborDelta && predictedMaximumDelta > 0) {
+    const theta = maximumNeighborDelta / predictedMaximumDelta;
+    gradient[0] *= theta;
+    gradient[1] *= theta;
+    gradient[2] *= theta;
+  }
+  return gradient;
 }
 
 /**
@@ -154,6 +267,8 @@ export function materializeAdaptiveMassPresentationAtlas(
     ownerKeys[2 * index + 1] = background[1];
   }
   const occupied = new Uint8Array(count);
+  const sourceLeafAtFineCell = new Int32Array(count).fill(-1);
+  const leaves: PresentationLeafSample[] = [];
 
   for (let brickIndex = 0; brickIndex < options.bricks.length; brickIndex += 1) {
     const brick = options.bricks[brickIndex];
@@ -201,6 +316,17 @@ export function materializeAdaptiveMassPresentationAtlas(
             brick.originFine[2] + localZ * cellScale,
           ];
           const owner = packAdaptiveMassPresentationOwnerKey(lower, cellScale);
+          const leafIndex = leaves.length;
+          leaves.push({
+            lower,
+            center: [
+              lower[0] + 0.5 * cellScale,
+              lower[1] + 0.5 * cellScale,
+              lower[2] + 0.5 * cellScale,
+            ],
+            scale: cellScale,
+            phi,
+          });
           for (let childZ = 0; childZ < cellScale; childZ += 1) {
             for (let childY = 0; childY < cellScale; childY += 1) {
               for (let childX = 0; childX < cellScale; childX += 1) {
@@ -210,13 +336,36 @@ export function materializeAdaptiveMassPresentationAtlas(
                   throw new Error(`adaptive presentation bricks overlap at dense cell ${destination}`);
                 }
                 occupied[destination] = 1;
+                sourceLeafAtFineCell[destination] = leafIndex;
                 density[destination] = Math.fround(rho);
-                levelSetOrProxy[destination] = Math.fround(phi);
                 ownerKeys[2 * destination] = owner[0];
                 ownerKeys[2 * destination + 1] = owner[1];
               }
             }
           }
+        }
+      }
+    }
+  }
+
+  // The physics texture remains the exact piecewise-constant leaf density.
+  // Only the renderer's phi proxy is reconstructed: it cannot feed transport,
+  // pressure, topology, or any mass receipt owned by the sparse solver.
+  for (let leafIndex = 0; leafIndex < leaves.length; leafIndex += 1) {
+    const leaf = leaves[leafIndex];
+    const gradient = reconstructCoarseLeafPhi(
+      options.dimensions, sourceLeafAtFineCell, leaves, leafIndex, options.emptyLevelSet,
+    );
+    for (let childZ = 0; childZ < leaf.scale; childZ += 1) {
+      for (let childY = 0; childY < leaf.scale; childY += 1) {
+        for (let childX = 0; childX < leaf.scale; childX += 1) {
+          const destination = linearIndex(options.dimensions,
+            leaf.lower[0] + childX, leaf.lower[1] + childY, leaf.lower[2] + childZ);
+          const offsetX = childX + 0.5 - 0.5 * leaf.scale;
+          const offsetY = childY + 0.5 - 0.5 * leaf.scale;
+          const offsetZ = childZ + 0.5 - 0.5 * leaf.scale;
+          levelSetOrProxy[destination] = Math.fround(leaf.phi
+            + gradient[0] * offsetX + gradient[1] * offsetY + gradient[2] * offsetZ);
         }
       }
     }

@@ -12,6 +12,7 @@
     "probe:adaptive-mass:m1:transport": "node --import tsx tools/run-adaptive-mass-m1-transport.ts",
     "probe:adaptive-mass:m1:surface": "node --import tsx tools/run-adaptive-mass-m1-surface.ts",
     "probe:adaptive-mass:m1:surface-ab": "node --import tsx tools/run-adaptive-mass-m1-surface-ab.ts",
+    "probe:adaptive-mass:presentation-seam": "node --import tsx tools/probe-adaptive-mass-presentation-seam.ts",
     "probe:adaptive-mass:m1:gpu": "WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js WEBGPU_BACKEND=${WEBGPU_BACKEND:-metal} node --import tsx tools/probe-adaptive-mass-two-tile-pressure-gpu.ts",
     "probe:adaptive-mass:m1:transport-gpu": "WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js WEBGPU_BACKEND=${WEBGPU_BACKEND:-metal} node --import tsx tools/probe-adaptive-mass-two-tile-transport-gpu.ts",
     "acceptance:adaptive-mass:m1": "npm run probe:adaptive-mass:m1:ab && npm run probe:adaptive-mass:m1:projection && npm run probe:adaptive-mass:m1:ghost-fluid && npm run probe:adaptive-mass:m1:transport && npm run probe:adaptive-mass:m1:surface && npm run probe:adaptive-mass:m1:surface-ab && npm run probe:adaptive-mass:m1:gpu && npm run probe:adaptive-mass:m1:transport-gpu",
