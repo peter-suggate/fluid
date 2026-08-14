@@ -19,9 +19,9 @@ import {
  *
  * The differences are the honest ones. Lamps are readouts — a solver stage is
  * not optional, so the lamp reports what the advance encodes and takes no
- * click. There are no taps and no ablation deltas. And because the physics
- * trace is an exact boundary-chain partition, the figures on this trunk sum to
- * the advance rather than to a pass subset.
+ * click. There are no taps and no ablation deltas. And because the method's
+ * best trace is an exact boundary-chain partition, the figures on this trunk
+ * sum to the measured authoritative advance rather than to a pass subset.
  */
 
 const ANCHOR_Y = 12;
@@ -79,7 +79,10 @@ function trunkCostText(cost: FluidPipelineMeasurement): string {
 }
 
 /** Why the figure on the pipe is the kind of number it is. */
-function costExplanation(cost: FluidPipelineMeasurement): string {
+function costExplanation(
+  cost: FluidPipelineMeasurement,
+  measurementDomain: "cpu" | "gpu" | undefined,
+): string {
   switch (cost.kind) {
     case "withheld":
       return "0 ms — not encoded this advance. The stage's gate is closed, so this is a measured zero rather than a missing measurement.";
@@ -92,7 +95,7 @@ function costExplanation(cost: FluidPipelineMeasurement): string {
     case "unmeasured":
       return "No phase in the advance partition names this stage yet — either no trace has arrived, or the fallback queue-wall observation is too coarse to split the advance.";
     default:
-      return `${formatDuration(cost.duration_ms ?? 0)} GPU execution time between this stage's trace seams, averaged across the trace window.${cost.encodedFraction !== undefined
+      return `${formatDuration(cost.duration_ms ?? 0)} ${measurementDomain === "cpu" ? "CPU active time" : "GPU execution time"} between this stage's trace seams, averaged across the trace window.${cost.encodedFraction !== undefined
         ? `\n\nEncoded in ${Math.round(cost.encodedFraction * 100)}% of sampled advances; the figure is the expected cost per advance, not the per-encode mean.`
         : ""}`;
   }
@@ -139,12 +142,14 @@ export interface FluidPipelineProps {
   total_ms: number;
   /** True when an averaged physics partition has arrived. */
   measured: boolean;
+  /** Execution domain of the exact stage partition. */
+  measurementDomain?: "cpu" | "gpu";
   /** Declarative stage controls, rendered by the panel and slotted by stage id. */
   controls: Readonly<Record<string, ReactNode>>;
   onToggleStage?: (stageId: string, checked: boolean) => void;
 }
 
-export function FluidPipeline({ graph, context, costs, total_ms, measured, controls, onToggleStage }: FluidPipelineProps) {
+export function FluidPipeline({ graph, context, costs, total_ms, measured, measurementDomain, controls, onToggleStage }: FluidPipelineProps) {
   return <div className="rp-graph" data-testid="fluid-pipeline">
     <div className="rp-row rp-row-cap">
       <div className="rp-slot" /><Trunk cap="start" /><div className="rp-slot" />
@@ -178,7 +183,7 @@ export function FluidPipeline({ graph, context, costs, total_ms, measured, contr
           return <div key={stage.id} className={`rp-row rp-row-node is-${stage.side}`}>
             {stage.side === "left" ? card : <div className="rp-slot" />}
             <Trunk side={stage.side} state={state} cost={cost}
-              costTitle={`${stage.label}\n\n${costExplanation(cost)}`} />
+              costTitle={`${stage.label}\n\n${costExplanation(cost, measurementDomain)}`} />
             {stage.side === "right" ? card : <div className="rp-slot" />}
           </div>;
         })}

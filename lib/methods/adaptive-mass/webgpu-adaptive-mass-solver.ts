@@ -118,6 +118,11 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       fluidBrickCoreCount: stats.residentBrickCount,
       fluidBrickHaloCount: 0,
       fluidBrickGeneration: stats.generation,
+      adaptiveFineBrickCount: stats.fineBrickCount,
+      adaptiveCoarseBrickCount: stats.coarseBrickCount,
+      adaptiveFineCoarseFaceConnectedPairCount:
+        stats.fineCoarseFaceConnectedPairCount,
+      adaptiveMixedSeamFaceCount: dynamics.grid.mixedSeamRowCount,
       quadtreeMaximumFluidScale: 2,
       quadtreeMaximumNeighborRatio: 2,
       submittedTime_s: 0,
@@ -169,7 +174,10 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
               side: options.fineSide,
             },
           });
-          atlas = coarsenLargeQuiescentComponents(atlas);
+          atlas = coarsenLargeQuiescentComponents(atlas, 8, {
+            axis: options.seamAxis === "x" ? 0 : options.seamAxis === "y" ? 1 : 2,
+            side: options.fineSide,
+          });
           dynamics = initializeSparseAtlasDynamics(atlas);
           materialization = atlasMaterialization(atlas, scene, dynamics);
         },
@@ -227,8 +235,11 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       ],
       maximumCfl: 0.8,
       projection: {
-        relativeTolerance: 1e-12,
-        absoluteTolerance: 1e-14,
+        // The public physics gate is 1e-8. A 100x guard band avoids spending
+        // CPU-reference frame time on invisible residual digits while keeping
+        // the accepted solution comfortably inside that unchanged gate.
+        relativeTolerance: 1e-10,
+        absoluteTolerance: 1e-12,
         onStageComplete: frameCapture?.completeProjectionStage,
       },
       onStageComplete: frameCapture?.completeDynamicsStage,
@@ -248,6 +259,10 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
     this.info.representedVolumeCellSum = stats.integratedMassFineCells;
     this.info.representedVolumeDrift = stats.integratedMassFineCells - this.initialMassFineCells;
     this.info.fluidBrickGeneration = stats.generation;
+    this.info.adaptiveFineBrickCount = stats.fineBrickCount;
+    this.info.adaptiveCoarseBrickCount = stats.coarseBrickCount;
+    this.info.adaptiveFineCoarseFaceConnectedPairCount =
+      stats.fineCoarseFaceConnectedPairCount;
     this.info.fluidBrickResidentCount = stats.residentBrickCount;
     this.info.fluidBrickCoreCount = stats.residentBrickCount;
     this.info.cellCount = stats.leafCount;

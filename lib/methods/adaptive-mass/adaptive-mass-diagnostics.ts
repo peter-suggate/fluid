@@ -29,9 +29,9 @@ export function adaptiveMassDiagnosticRows(
   return [
     {
       id: "resolution-split",
-      label: "Initial resolution split",
+      label: "Fine seam seed",
       value: `8³ ${fineSide} ${axis}`,
-      unit: "4³ neighbour · fixed 2:1 world-space tiles",
+      unit: "one retained seed per large component · 4³ neighbours",
       tone: "neutral",
     },
     {

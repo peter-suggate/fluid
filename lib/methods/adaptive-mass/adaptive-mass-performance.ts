@@ -24,6 +24,11 @@ export const SPARSE_CM12_MINI_DAM_32_PERFORMANCE_ACCEPTANCE = Object.freeze({
   ...SPARSE_CM12_PERFORMANCE_ACCEPTANCE,
   sceneId: "minimal-power-dam-break-32",
   finestDimensions: [32, 32, 32] as const,
+  requiredInitialFineBrickCount: 1,
+  minimumInitialCoarseBrickCount: 1,
+  minimumInitialFineCoarseFaceConnectedPairCount: 1,
+  minimumInitialMixedSeamRows: 1,
+  minimumEvolvedMixedSeamRows: 1,
 });
 
 export interface SparseCM12TimingSummary {
@@ -44,6 +49,15 @@ export interface SparseCM12BenchmarkArm {
   readonly cpuTraces: readonly PerformanceTrace[];
   /** Hardware or queue-wall samples; never merged with CPU observations. */
   readonly gpuTraces: readonly PerformanceTrace[];
+  readonly initialTopology?: SparseCM12TopologySample;
+  readonly evolvedTopology?: readonly SparseCM12TopologySample[];
+}
+
+export interface SparseCM12TopologySample {
+  readonly fineBricks: number;
+  readonly coarseBricks: number;
+  readonly fineCoarseFaceConnectedPairs: number;
+  readonly mixedSeamRows: number;
 }
 
 export interface SparseCM12BenchmarkArmSummary {
@@ -160,6 +174,34 @@ export function evaluateSparseCM12Performance(
   }
   if (uniform.methodId !== "uniform" || sparse.methodId !== "adaptive-mass") {
     failures.push("performance arms must be uniform then adaptive-mass");
+  }
+  if ("requiredInitialFineBrickCount" in acceptance) {
+    const mixedAcceptance = acceptance as typeof SPARSE_CM12_MINI_DAM_32_PERFORMANCE_ACCEPTANCE;
+    const initial = sparse.initialTopology;
+    if (!initial) {
+      failures.push("adaptive-mass did not publish its initial mixed-fineness topology");
+    } else {
+      if (initial.fineBricks !== mixedAcceptance.requiredInitialFineBrickCount) {
+        failures.push(`adaptive-mass initial fine-brick count ${initial.fineBricks} is not ${mixedAcceptance.requiredInitialFineBrickCount}`);
+      }
+      if (initial.coarseBricks < mixedAcceptance.minimumInitialCoarseBrickCount) {
+        failures.push("adaptive-mass initial topology has no coarse brick");
+      }
+      if (initial.fineCoarseFaceConnectedPairs
+        < mixedAcceptance.minimumInitialFineCoarseFaceConnectedPairCount) {
+        failures.push("adaptive-mass retained fine seed is not face-connected to a coarse brick");
+      }
+      if (initial.mixedSeamRows < mixedAcceptance.minimumInitialMixedSeamRows) {
+        failures.push("adaptive-mass initial composite grid has no live mixed seam row");
+      }
+    }
+    const evolved = sparse.evolvedTopology ?? [];
+    if (evolved.length === 0 || evolved.some((sample) =>
+      sample.mixedSeamRows < mixedAcceptance.minimumEvolvedMixedSeamRows
+      || sample.fineCoarseFaceConnectedPairs
+        < mixedAcceptance.minimumInitialFineCoarseFaceConnectedPairCount)) {
+      failures.push("adaptive-mass did not retain a face-connected live mixed seam throughout timed evolution");
+    }
   }
   const uniformSummary = summarizeSparseCM12BenchmarkArm(uniform);
   const sparseSummary = summarizeSparseCM12BenchmarkArm(sparse);

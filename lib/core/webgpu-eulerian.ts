@@ -46,6 +46,10 @@ export interface GPUEulerianInfo {
   fluidBrickActivatedCount?: number;
   fluidBrickRetiredCount?: number;
   fluidBrickGeneration?: number;
+  /** Sparse CM12 4^3/8^3 topology receipt. These are brick adjacencies, not leaf rows. */
+  adaptiveFineBrickCount?: number;
+  adaptiveCoarseBrickCount?: number;
+  adaptiveFineCoarseFaceConnectedPairCount?: number;
   /** Wet-domain storage residency, independent from the narrow surface band. */
   fluidBulkBrickResidentCount?: number;
   fluidBulkBrickHaloCount?: number;

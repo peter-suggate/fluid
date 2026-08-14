@@ -7,7 +7,11 @@ import { useRuntimeStore } from "../lib/core/stores/runtime-store";
 import { useSceneStore } from "../lib/core/stores/scene-store";
 import { useUIStore } from "../lib/core/stores/ui-store";
 import { usePerformanceInstrumentationStore } from "../lib/core/stores/performance-instrumentation-store";
-import { averagePerformanceTraces, type PerformanceTrace } from "../lib/core/performance-trace";
+import {
+  averagePerformanceTraces,
+  performanceTraceMatchesLane,
+  type PerformanceTrace,
+} from "../lib/core/performance-trace";
 import {
   fluidPipelinePhaseCosts,
   type FluidPipelineContext,
@@ -26,35 +30,59 @@ const TRACE_WINDOW = 12;
 /**
  * The averaged physics lane, split by honesty.
  *
- * `stages` is only ever the hardware boundary-chain partition — an exact,
- * exclusive split of the advance whose phases the graph's seam labels name.
- * When a device cannot produce one, the solver publishes the queue-wall
- * observation instead; that is a real advance total but a single number, so it
- * feeds the header as `total` and the trunk stays honestly unmeasured.
+ * `stages` is the best exact, exclusive partition of the authoritative
+ * advance. GPU solvers prefer hardware timestamp boundaries. A host-authority
+ * solver instead publishes its semantic CPU boundary chain under the same
+ * capture identity as the queue-wall completion; the controller has already
+ * joined those traces before they reach this report. A bare queue-wall sample
+ * remains a real total but cannot put figures on individual stage nodes.
  */
-function usePhysicsTiming(): {
+function usePhysicsTiming(methodId: string): {
   readonly total?: PerformanceTrace;
   readonly stages?: PerformanceTrace;
 } {
   const reports = useDiagnosticsStore((state) => state.performanceReports);
   return useMemo(() => {
-    const newest = reports.findLast((report) => report.physics);
+    const newest = reports.findLast((report) => report.methodId === methodId && report.physics);
     if (!newest) return {};
     const recent = reports
-      .filter((report) => report.context === newest.context)
-      .slice(-TRACE_WINDOW)
-      .map((report) => report.physics)
+      .filter((report) => report.methodId === methodId && report.context === newest.context)
+      .slice(-TRACE_WINDOW);
+    const physics = recent.map((report) => report.physics)
       .filter((trace): trace is PerformanceTrace => trace !== undefined);
-    const latest = recent.at(-1);
+    const latest = physics.at(-1);
     // The averager refuses mixed lanes, and a window straddling the hardware →
     // queue-wall degradation would be one: average only the newest source.
     const matching = latest
-      ? recent.filter((trace) => trace.measurementSource === latest.measurementSource)
+      ? physics.filter((trace) => trace.measurementSource === latest.measurementSource)
       : [];
-    const mean = averagePerformanceTraces(matching);
-    const hardware = mean?.measurementSource === "gpu-hardware-timestamp";
-    return { total: mean, stages: hardware ? mean : undefined };
-  }, [reports]);
+    const physicsMean = averagePerformanceTraces(matching);
+    if (physicsMean?.measurementSource === "gpu-hardware-timestamp") {
+      return { total: physicsMean, stages: physicsMean };
+    }
+
+    // `performanceReportCPUTrace` only admits a CPU trace here when its sample,
+    // context and stable capture frame all match this completed physics trace.
+    // Recheck the observable half of that contract locally so a future report
+    // producer cannot accidentally turn an animation/render tick into solver
+    // stage timing.
+    const cpu = recent.flatMap((report) => {
+      const trace = report.cpu;
+      const completed = report.physics;
+      if (!trace || !completed
+        || !performanceTraceMatchesLane(trace, "cpu", "main-thread")
+        || trace.sampleId !== completed.sampleId) return [];
+      const suffix = ":queue-wall-fallback";
+      const physicsContext = completed.context.endsWith(suffix)
+        ? completed.context.slice(0, -suffix.length)
+        : completed.context;
+      return trace.context === physicsContext ? [trace] : [];
+    });
+    const cpuMean = averagePerformanceTraces(cpu);
+    return cpuMean
+      ? { total: cpuMean, stages: cpuMean }
+      : { total: physicsMean, stages: undefined };
+  }, [reports, methodId]);
 }
 
 export function FluidPipelinePanel() {
@@ -74,15 +102,18 @@ export function FluidPipelinePanel() {
 
   // Graphs are declared beside their encoders, so loading one loads the solver
   // module; async keeps an unsupported method from paying for that.
-  const [graph, setGraph] = useState<FluidPipelineGraph | undefined>(undefined);
+  const [loadedGraph, setLoadedGraph] = useState<{
+    readonly methodId: string;
+    readonly graph: FluidPipelineGraph;
+  } | undefined>(undefined);
   useEffect(() => {
     let cancelled = false;
-    setGraph(undefined);
     void getMethod(methodId).pipelineGraph?.().then((loaded) => {
-      if (!cancelled) setGraph(loaded);
+      if (!cancelled) setLoadedGraph({ methodId, graph: loaded });
     });
     return () => { cancelled = true; };
   }, [methodId]);
+  const graph = loadedGraph?.methodId === methodId ? loadedGraph.graph : undefined;
 
   const [liveTiming, setLiveTiming] = useState(true);
 
@@ -101,7 +132,7 @@ export function FluidPipelinePanel() {
     };
   }, [liveTiming]);
 
-  const timing = usePhysicsTiming();
+  const timing = usePhysicsTiming(methodId);
   const stageTrace = liveTiming ? timing.stages : undefined;
   const totalTrace = liveTiming ? timing.total : undefined;
   const costs = useMemo(() => fluidPipelinePhaseCosts(stageTrace), [stageTrace]);
@@ -171,7 +202,9 @@ export function FluidPipelinePanel() {
     ? "Waiting for a sampled advance."
     : totalTrace.measurementSource === "gpu-hardware-timestamp"
       ? `Hardware timestamp boundary chain: an exact, exclusive partition of the advance, so the trunk figures sum to the total. ${TRACE_WINDOW}-sample mean.`
-      : `GPU queue-wall observation: the whole advance is timed but this device could not split it per stage, so the trunk stays unmeasured. ${TRACE_WINDOW}-sample mean.`;
+      : totalTrace.measurementSource === "cpu-active-wall"
+        ? `Authoritative CPU boundary chain: an exact, exclusive partition of the host solve, so the trunk figures sum to the total. ${TRACE_WINDOW}-sample mean.`
+        : `GPU queue-wall observation: the whole advance is timed but no semantic boundary partition is available, so the trunk stays unmeasured. ${TRACE_WINDOW}-sample mean.`;
 
   return <aside id="simulation-panel" className="right-panel panel-scroll performance-panel performance-v2 visual-panel"
     aria-label="Simulation pipeline" data-testid="fluid-pipeline-panel">
@@ -189,7 +222,7 @@ export function FluidPipelinePanel() {
 
     <div className="render-preset-strip render-live-strip" role="group" aria-label="Live per-stage timing">
       <PipeToggle label="LIVE ms" checked={liveTiming} onChange={setLiveTiming}
-        hint={`Samples the advance on a cadence with hardware timestamp boundaries spliced into passes the step already encodes, so a traced advance submits the same command graph as an untraced one.\n\n${sourceLabel}`} />
+        hint={`Samples the method-owned advance boundary chain on a cadence without changing its algorithmic schedule.\n\n${sourceLabel}`} />
       <output title={liveTuning
         ? "Stage gates and tuning controls apply to the attached solver without resetting time. Pressure schedule controls are marked separately and rebuild their precomputed dispatch plan."
         : "The solver's lattice; every pass in this diagram dispatches over it."}>
@@ -200,6 +233,7 @@ export function FluidPipelinePanel() {
     {graph
       ? <FluidPipeline graph={graph} context={context} costs={costs}
         total_ms={total_ms} measured={measured} controls={controls}
+        measurementDomain={stageTrace?.domain}
         onToggleStage={toggleStage} />
       : <p className="render-inline-warning">
         The {method.label} method has not declared an advance pipeline yet. Select the uniform

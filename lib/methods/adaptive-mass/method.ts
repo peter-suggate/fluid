@@ -22,7 +22,7 @@ const params: MethodParamSpec[] = [
   {
     kind: "select",
     key: "seamAxis",
-    label: "Resolution split axis",
+    label: "Fine seed axis",
     default: "x",
     tier: "coarse",
     options: [
@@ -30,19 +30,19 @@ const params: MethodParamSpec[] = [
       { value: "y", label: "Y axis" },
       { value: "z", label: "Z axis" },
     ],
-    hint: "Chooses the initial 4³/8³ resolution split. Changing it rebuilds the sparse solver.",
+    hint: "Chooses the axis used to place the retained 8³ seam-acceptance seed. Changing it rebuilds the sparse solver.",
   },
   {
     kind: "select",
     key: "fineSide",
-    label: "Fine half",
+    label: "Fine seed side",
     default: "negative",
     tier: "coarse",
     options: [
       { value: "negative", label: "Negative side · 8³" },
       { value: "positive", label: "Positive side · 8³" },
     ],
-    hint: "Prefers 8³ bricks on this side of the initial split and 4³ bricks on the other. Changing it rebuilds the sparse solver.",
+    hint: "Places one deterministic 8³ seed on this side of each large quiescent component; activity-driven promotion will grow the fine region. Changing it rebuilds the solver.",
   },
 ];
 

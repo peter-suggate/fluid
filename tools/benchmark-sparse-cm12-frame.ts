@@ -34,6 +34,7 @@ import {
   SPARSE_CM12_MINI_DAM_32_PERFORMANCE_ACCEPTANCE,
   SPARSE_CM12_PERFORMANCE_ACCEPTANCE,
   type SparseCM12BenchmarkArm,
+  type SparseCM12TopologySample,
 } from "../lib/methods/adaptive-mass/adaptive-mass-performance";
 import { uniformMethod } from "../lib/methods/uniform/method";
 
@@ -82,8 +83,19 @@ interface MutableArm {
   readonly cpuTraces: PerformanceTrace[];
   readonly gpuTraces: PerformanceTrace[];
   readonly frameState: FrameStateSample[];
+  initialTopology?: SparseCM12TopologySample;
+  readonly evolvedTopology: SparseCM12TopologySample[];
   lastCPUTraceSampleId: number;
   lastGPUTraceSampleId: number;
+}
+
+function topologySample(info: Awaited<ReturnType<GPUSolverInstance["readStats"]>>): SparseCM12TopologySample {
+  return {
+    fineBricks: info.adaptiveFineBrickCount ?? 0,
+    coarseBricks: info.adaptiveCoarseBrickCount ?? 0,
+    fineCoarseFaceConnectedPairs: info.adaptiveFineCoarseFaceConnectedPairCount ?? 0,
+    mixedSeamRows: info.adaptiveMixedSeamFaceCount ?? 0,
+  };
 }
 
 function collectTrace(
@@ -114,6 +126,9 @@ async function advanceOne(arm: MutableArm, targetTime_s: number, timed: boolean)
       pressureIterations: info.pressureIterations,
       maximumCfl: info.maxComponentCfl ?? 0,
     });
+    if (arm.method.id === "adaptive-mass") {
+      arm.evolvedTopology.push(topologySample(info));
+    }
   }
   arm.lastCPUTraceSampleId = collectTrace(
     arm.cpuTraces,
@@ -149,6 +164,7 @@ async function createArm(
     dimensions,
     `${method.id} did not construct the matched finest lattice`,
   );
+  const initialInfo = await solver.readStats();
   return {
     method,
     solver,
@@ -156,6 +172,9 @@ async function createArm(
     cpuTraces: [],
     gpuTraces: [],
     frameState: [],
+    initialTopology: method.id === "adaptive-mass"
+      ? topologySample(initialInfo) : undefined,
+    evolvedTopology: [],
     lastCPUTraceSampleId: 0,
     lastGPUTraceSampleId: 0,
   };
@@ -171,6 +190,8 @@ function frozenArm(arm: MutableArm): SparseCM12BenchmarkArm {
     endToEndFrame_ms: arm.endToEndFrame_ms,
     cpuTraces: arm.cpuTraces,
     gpuTraces: arm.gpuTraces,
+    initialTopology: arm.initialTopology,
+    evolvedTopology: arm.evolvedTopology,
   };
 }
 
@@ -280,6 +301,15 @@ try {
     stateGrowth: {
       uniform: summarizeFrameState(uniform.frameState),
       sparse: summarizeFrameState(sparse.frameState),
+    },
+    topologyAcceptance: {
+      initial: sparse.initialTopology,
+      evolvedMinimumMixedSeamRows: Math.min(...sparse.evolvedTopology.map(
+        (sample) => sample.mixedSeamRows,
+      )),
+      evolvedMinimumFineCoarseFaceConnectedPairs: Math.min(
+        ...sparse.evolvedTopology.map((sample) => sample.fineCoarseFaceConnectedPairs),
+      ),
     },
     ...verdict,
   };

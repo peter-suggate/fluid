@@ -53,6 +53,8 @@ export interface SparseBrickAtlasStats {
   readonly omittedEmptyBrickCount: number;
   readonly fineBrickCount: number;
   readonly coarseBrickCount: number;
+  /** Unique resident 8^3-to-4^3 brick pairs sharing a complete brick face. */
+  readonly fineCoarseFaceConnectedPairCount: number;
   readonly leafCount: number;
   readonly equivalentFinestCellCount: number;
   readonly leafCompressionRatio: number;
@@ -318,6 +320,10 @@ export function materializeSparseBrickAtlasDensity(atlas: SparseAdaptiveMassAtla
 export function coarsenLargeQuiescentComponents(
   atlas: SparseAdaptiveMassAtlas,
   maximumFineComponentBricks = 8,
+  fineSeed?: {
+    readonly axis: 0 | 1 | 2;
+    readonly side: "negative" | "positive";
+  },
 ): SparseAdaptiveMassAtlas {
   if (!Number.isSafeInteger(maximumFineComponentBricks)
     || maximumFineComponentBricks < 1) {
@@ -355,16 +361,46 @@ export function coarsenLargeQuiescentComponents(
     return atlas;
   }
   const denseDensity = materializeSparseBrickAtlasDensity(atlas);
-  const bricks = components.flatMap((component) => component.map((brick) =>
-    component.length <= maximumFineComponentBricks || brick.resolution === 4
-      ? brick
-      : sparseBrickFromDense(
-        brick.key,
-        brick.coordinate,
-        4,
-        denseDensity,
-        atlas.dimensions,
-      )));
+  const bricks = components.flatMap((component) => {
+    if (component.length <= maximumFineComponentBricks) return component;
+    let retainedFineKey: number | undefined;
+    if (fineSeed) {
+      const tangentialAxes = ([0, 1, 2] as const).filter(
+        (axis) => axis !== fineSeed.axis,
+      );
+      const centroid = component.reduce((sum, brick) => [
+        sum[0] + brick.coordinate[0] / component.length,
+        sum[1] + brick.coordinate[1] / component.length,
+        sum[2] + brick.coordinate[2] / component.length,
+      ], [0, 0, 0]);
+      const candidates = component.filter((brick) => brick.resolution === 8);
+      candidates.sort((left, right) => {
+        const alongSplit = fineSeed.side === "negative"
+          ? left.coordinate[fineSeed.axis] - right.coordinate[fineSeed.axis]
+          : right.coordinate[fineSeed.axis] - left.coordinate[fineSeed.axis];
+        if (alongSplit !== 0) return alongSplit;
+        let leftTangentialDistance = 0;
+        let rightTangentialDistance = 0;
+        for (const axis of tangentialAxes) {
+          leftTangentialDistance += (left.coordinate[axis] - centroid[axis]) ** 2;
+          rightTangentialDistance += (right.coordinate[axis] - centroid[axis]) ** 2;
+        }
+        return leftTangentialDistance - rightTangentialDistance
+          || left.key - right.key;
+      });
+      retainedFineKey = candidates[0]?.key;
+    }
+    return component.map((brick) =>
+      brick.resolution === 4 || brick.key === retainedFineKey
+        ? brick
+        : sparseBrickFromDense(
+          brick.key,
+          brick.coordinate,
+          4,
+          denseDensity,
+          atlas.dimensions,
+        ));
+  });
   return createSparseAdaptiveMassAtlas(
     atlas.dimensions,
     bricks.sort((left, right) => left.key - right.key),
@@ -383,6 +419,17 @@ export function sparseBrickAtlasStats(atlas: SparseAdaptiveMassAtlas): SparseBri
     omittedEmptyBrickCount: logicalBrickCount - atlas.bricks.length,
     fineBrickCount: atlas.bricks.filter((brick) => brick.resolution === 8).length,
     coarseBrickCount: atlas.bricks.filter((brick) => brick.resolution === 4).length,
+    fineCoarseFaceConnectedPairCount: atlas.bricks.reduce((count, brick) => {
+      // Positive axes count every undirected adjacency exactly once.
+      for (let axis = 0; axis < 3; axis += 1) {
+        const coordinate = [...brick.coordinate] as [number, number, number];
+        coordinate[axis] += 1;
+        if (coordinate[axis] >= atlas.brickDimensions[axis]) continue;
+        const neighbor = atlas.directory.get(sparseBrickKey(coordinate, atlas.brickDimensions));
+        if (neighbor && neighbor.resolution !== brick.resolution) count += 1;
+      }
+      return count;
+    }, 0),
     leafCount: leaves.length,
     equivalentFinestCellCount,
     leafCompressionRatio: equivalentFinestCellCount / Math.max(1, leaves.length),

@@ -826,12 +826,17 @@ export function projectSparseAtlasVelocity(
     system.diagonal[cellId] > 0 ? value / system.diagonal[cellId] : 0);
   projectNullspace(system, preconditioned);
   const direction = preconditioned.slice();
+  // One stable residual norm per iteration is sufficient. The former loop
+  // condition recomputed the same O(n) Kahan dot after the previous tail,
+  // adding a full leaf sweep to every PCG iteration.
+  const applied = new Float64Array(grid.cells.length);
   let residualPreconditioned = dot(residual, preconditioned);
+  let residualNorm = norm(residual);
   let iterations = 0;
   const target = Math.max(absoluteTolerance, relativeTolerance * rhsNorm);
 
-  while (iterations < maximumIterations && norm(residual) > target) {
-    const applied = applyLiquidOperator(system, direction);
+  while (iterations < maximumIterations && residualNorm > target) {
+    applyLiquidOperator(system, direction, applied);
     projectNullspace(system, applied);
     const curvature = dot(direction, applied);
     if (!(curvature > 0) || !Number.isFinite(curvature)) {
@@ -845,7 +850,8 @@ export function projectSparseAtlasVelocity(
     projectNullspace(system, pressure);
     projectNullspace(system, residual);
     iterations += 1;
-    if (norm(residual) <= target) break;
+    residualNorm = norm(residual);
+    if (residualNorm <= target) break;
     for (let index = 0; index < preconditioned.length; index += 1) {
       preconditioned[index] = system.diagonal[index] > 0
         ? residual[index] / system.diagonal[index] : 0;
