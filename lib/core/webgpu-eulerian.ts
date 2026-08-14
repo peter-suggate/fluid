@@ -50,6 +50,15 @@ export interface GPUEulerianInfo {
   adaptiveFineBrickCount?: number;
   adaptiveCoarseBrickCount?: number;
   adaptiveFineCoarseFaceConnectedPairCount?: number;
+  /** Sparse CM12 activity-controller receipt for the latest accepted step. */
+  adaptiveActivityMaximumScore?: number;
+  adaptiveActivitySurfaceBrickCount?: number;
+  adaptiveActivityHotBrickCount?: number;
+  adaptiveActivityQuietBrickCount?: number;
+  adaptiveResolutionTopologyEpoch?: boolean;
+  adaptiveResolutionPromotedBrickCount?: number;
+  adaptiveResolutionDemotedBrickCount?: number;
+  adaptiveResolutionDeferredPromotionCount?: number;
   /** Wet-domain storage residency, independent from the narrow surface band. */
   fluidBulkBrickResidentCount?: number;
   fluidBulkBrickHaloCount?: number;

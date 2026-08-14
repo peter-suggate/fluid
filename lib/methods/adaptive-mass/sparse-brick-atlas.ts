@@ -38,7 +38,7 @@ export interface SparseBrickAtlasInitializationOptions {
     readonly axis: 0 | 1 | 2;
     readonly side: "negative" | "positive";
   };
-  /** Optional policy for non-interface, nonempty bricks. Interface always wins at 8^3. */
+  /** Optional fixed-policy override for every nonempty brick, including interfaces. */
   readonly resolutionForBrick?: (input: {
     readonly coordinate: SparseBrickVec3;
     readonly brickDimensions: SparseBrickVec3;
@@ -112,6 +112,9 @@ export function createSparseAdaptiveMassAtlas(
     Math.ceil(value / BRICK_FINE_RESOLUTION)) as [number, number, number];
   const directory = new Map<number, SparseAdaptiveMassBrick>();
   for (const brick of bricks) {
+    if (brick.resolution !== 4 && brick.resolution !== 8) {
+      throw new RangeError(`brick ${brick.key} resolution must be 4 or 8`);
+    }
     const count = brick.resolution ** 3;
     if (brick.density.length !== count || brick.gamma.length !== count) {
       throw new RangeError(`brick ${brick.key} payload does not match ${brick.resolution}^3`);
@@ -121,6 +124,19 @@ export function createSparseAdaptiveMassAtlas(
     }
     if (directory.has(brick.key)) throw new Error(`duplicate sparse brick ${brick.key}`);
     directory.set(brick.key, brick);
+  }
+  // The current two-rung atlas admits only 4³ and 8³ leaves, hence every
+  // face adjacency is at most 2:1. Keep the explicit check at the storage
+  // boundary so later resolution rungs cannot silently weaken that invariant.
+  for (const brick of directory.values()) for (let axis = 0; axis < 3; axis += 1) {
+    const coordinate = [...brick.coordinate] as [number, number, number];
+    coordinate[axis] += 1;
+    if (coordinate[axis] >= brickDimensions[axis]) continue;
+    const neighbor = directory.get(sparseBrickKey(coordinate, brickDimensions));
+    if (neighbor && Math.max(brick.resolution, neighbor.resolution)
+      / Math.min(brick.resolution, neighbor.resolution) > 2) {
+      throw new Error(`brick face ${brick.key}/${neighbor.key} exceeds 2:1 grading`);
+    }
   }
   return { dimensions, brickDimensions, bricks: [...bricks], directory, generation };
 }
@@ -254,7 +270,8 @@ export function initializeSparseBrickAtlasFromScene(
         if (selected !== 4 && selected !== 8) {
           throw new RangeError("resolutionForBrick must return 4 or 8");
         }
-        const resolution: SparseBrickResolution = interfaceBrick ? 8 : selected;
+        const resolution: SparseBrickResolution = interfaceBrick
+          && !options.resolutionForBrick ? 8 : selected;
         const key = sparseBrickKey(coordinate, brickDimensions);
         bricks.push(sparseBrickFromDense(
           key, coordinate, resolution, dense, options.finestDimensions,

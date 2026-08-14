@@ -2,23 +2,27 @@
 
 Status: first implementable rung. This is the specified replacement for
 bootstrap component-size coarsening; it does not add camera-distance adaptation.
+The first rung keeps every free-surface brick and predicted surface receiver
+fine, while allowing deep calm liquid to coarsen. Calm-surface coarsening is a
+separate second rung after the conservative controller is proven.
 
 ## Current failure and decision
 
 `WebGPUAdaptiveMassSolver.createAsync` first asks scene initialization to keep
 one half of the resident bricks fine. It then calls
 `coarsenLargeQuiescentComponents`. For any connected wet component larger than
-eight bricks, that function converts every fine brick in the component to
-`4^3`. The mini dam break is one such component, so the deliberate negative
-fine region disappears. Component size is neither activity nor an accuracy
-measure and must not remain the production policy.
+eight bricks, that function conservatively converts saturated fine bricks to
+`4^3`, retaining interface bricks and at most one deterministic fine seam seed.
+The mini dam break is one such component, so the deliberate negative fine half
+collapses to a diagnostic seed. Component size is neither activity nor an
+accuracy measure and must not remain the production policy.
 
 The first production rung is a hysteretic, brick-local surface policy:
 
 - absent bricks stay absent and receive zero classification work;
 - fully interior, quiescent liquid may be `4^3`;
-- a free-surface brick is `8^3` only while measured shape or transport error
-  requires it;
+- every free-surface brick is `8^3` in the first rung, independently of its
+  activity score;
 - resolution changes occur at a topology epoch, never in the middle of a CM12
   step;
 - the accepted atlas remains authoritative if any planning, transfer, balance,
@@ -43,7 +47,8 @@ A brick is in the surface band if either:
 2. one of its composite rows straddles the CM12 `rho = 0.5` isovalue, treating
    sparse air as `rho = 0`.
 
-Only surface-band bricks evaluate the more expensive channels. Use the coarse
+Only surface-band bricks evaluate the more expensive channels, but surface-band
+membership itself is a hard fine-resolution floor in the first rung. Use the coarse
 cell width `h4 = 2` in finest-cell units when making the score, irrespective of
 the brick's current resolution; this makes a promote decision and the
 corresponding keep-fine decision comparable.
@@ -149,11 +154,14 @@ otherwise                                   -> retain resolution
 ```
 
 Refinement always wins over demotion. A brick changes by one rung in an epoch.
-Newly resident receiver bricks start `4^3`, `Unknown`, with zero quiet epochs.
-A surface row whose outward characteristic can reach another brick before the
-next topology epoch sets `PredictedFace` and immediately requests that receiver
-fine. This uses `topologyCadenceSteps * dt * max(abs(faceVelocity))`; it is a
-surface-motion guard, not camera adaptation.
+Newly resident receiver bricks start `8^3`, `Unknown`, with zero quiet epochs in
+the first rung. A surface row whose outward characteristic can reach another
+brick before the next topology epoch sets `PredictedFace` and immediately
+requests that receiver fine. This uses
+`topologyCadenceSteps * dt * max(abs(faceVelocity))`; it is a surface-motion
+guard, not camera adaptation. A later calm-surface rung may create a `4^3`
+receiver only when the predictor proves that the interface cannot reach it
+before the following topology epoch.
 
 With only `4^3` and `8^3` bricks, every resident adjacency is already strictly
 2:1 or equal. Still run a balance/validation pass and publish its zero-or-more
@@ -272,7 +280,9 @@ export function validateSparseAtlasResolutionCandidate(
 `sentinelKeys`, deferred score buckets, balance closure keys, predicted leaf
 delta, and a policy version/threshold receipt. The transfer receipt contains
 before/after integrals for density, gamma, XYZ momentum, exterior face flux,
-pressure warm-start mean, plus first non-finite/failing keys.
+pressure warm-start mean, plus first non-finite/failing keys. These conservation
+values describe the candidate before projection. The zero-time projection
+publishes its pressure impulse and energy identity separately.
 
 Pipeline order is:
 
@@ -282,9 +292,10 @@ accepted projected state
   -> history update
   -> topology planning (every fourth accepted step)
   -> candidate transfer + composite-row rebuild
-  -> next normal CM12 step and projection on candidate
-  -> validate physics + transfer receipts
+  -> zero-time global projection on candidate
+  -> validate transfer + projection receipts
   -> atomic generation publication
+  -> next normal CM12 step
 ```
 
 Activity measurement should eventually be one GPU dispatch over resident

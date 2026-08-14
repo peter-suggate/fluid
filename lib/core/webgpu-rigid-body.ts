@@ -315,9 +315,13 @@ export class WebGPURigidBodySystem {
   private selectedIndex = -1;
   private motionGenerations: number[] = [];
 
+  // No `deferPipelineCompilation` parameter: the two rigid pipelines are always
+  // compiled through `initializationTasks`, because a scene that starts without
+  // bodies is a scene that can still be given one, and the first body dropped
+  // into a running bodyless scene used to reach `encode` with no pipeline at
+  // all. Both callers passed their own defer flag through and it named nothing.
   constructor(private readonly device: GPUDevice, private readonly scene: SceneDescription,
-    readonly exchangeBuffer: GPUBuffer, private readonly terrainTexture: GPUTexture,
-    _deferPipelineCompilation = true) {
+    readonly exchangeBuffer: GPUBuffer, private readonly terrainTexture: GPUTexture) {
     this.pipelinesDeferred = true;
     this.stateBuffer = device.createBuffer({ label: "GPU authoritative rigid-body state", size: GPU_RIGID_STATE_BYTES, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
     this.renderBuffer = device.createBuffer({ label: "GPU rigid-body render records", size: GPU_RIGID_RENDER_BYTES, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });

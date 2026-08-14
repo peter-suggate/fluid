@@ -852,7 +852,7 @@ export class WebGPUOctreeEulerianSolver {
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
     });
     this.rigidSystem = new WebGPURigidBodySystem(
-      device, scene, this.rigidExchangeBuffer, this.terrainTexture, options.deferPipelineCompilation,
+      device, scene, this.rigidExchangeBuffer, this.terrainTexture,
     );
     this.rigidBuffer = this.rigidSystem.stateBuffer;
     this.rigidSystem.syncBodies(initializeRigidBodies(scene.rigidBodies));

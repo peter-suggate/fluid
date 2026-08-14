@@ -506,7 +506,7 @@ export class WebGPUUniformReferenceSolver implements GPUSolverInstance {
     });
     this.rigidExchange = device.createBuffer({ label: "Uniform reference rigid exchange", size: GPU_RIGID_EXCHANGE_BYTES, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
     this.rigidSystem = new WebGPURigidBodySystem(device, scene, this.rigidExchange,
-      this.terrainTexture, options.deferPipelineCompilation);
+      this.terrainTexture);
     this.rigidSystem.syncBodies(initializeRigidBodies(scene.rigidBodies));
     this.inflowBoundary = scene.fluid.inflow
       ? createInflowGridBoundary(scene.fluid.inflow, scene.container, [nx, ny, nz]) : undefined;

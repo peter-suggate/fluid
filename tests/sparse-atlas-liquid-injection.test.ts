@@ -75,7 +75,6 @@ test("a step after an injection conserves the mass the ball brought", () => {
   const step = stepSparseAtlasDynamics(injected, {
     dt_s: 1 / 30,
     accelerationFinePerSecond2: [0, scene.fluid.gravity_m_s2.y / 0.025, 0],
-    maximumCfl: 0.8,
     projection: { relativeTolerance: 1e-10, absoluteTolerance: 1e-12 },
   });
   assert.ok(step.stats.massAbsoluteErrorFineCells / before < 1e-9,

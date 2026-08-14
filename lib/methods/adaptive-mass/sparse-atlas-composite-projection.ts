@@ -93,6 +93,8 @@ export interface SparseAtlasCompositeGrid {
 export interface SparseAtlasProjectionOptions {
   /** One oriented velocity per `grid.gradientRows` entry. Defaults to zero. */
   readonly normalVelocity?: ArrayLike<number>;
+  /** Desired liquid divergence in 1/s, one value per compact cell. */
+  readonly targetDivergence?: ArrayLike<number>;
   /** Optional warm start in compact `grid.cells` order. */
   readonly initialPressure?: ArrayLike<number>;
   /** Cell-centred level set, negative in liquid. Defaults to isovalue-density. */
@@ -717,11 +719,23 @@ function maximumAbsolute(values: ArrayLike<number>): number {
   return maximum;
 }
 
-function assembleLiquidRhs(system: LiquidSystem, velocity: ArrayLike<number>): Float64Array {
+function assembleLiquidRhs(
+  system: LiquidSystem,
+  velocity: ArrayLike<number>,
+  targetDivergence?: ArrayLike<number>,
+): Float64Array {
+  if (targetDivergence) {
+    assertVectorLength(targetDivergence, system.grid.cells.length, "targetDivergence");
+  }
   const rhs = new Float64Array(system.grid.cells.length);
   for (const row of system.rows) {
     const weighted = row.source.dualWeight * velocity[row.source.id];
     for (const term of row.terms) rhs[term.cellId] += term.coefficient * weighted;
+  }
+  // D = -M^-1 G^T W. Solving A p = G^T W u + M q leaves
+  // G^T W (u-Gp) = -M q and therefore D u' = q.
+  if (targetDivergence) for (const cell of system.grid.cells) {
+    if (system.liquid[cell.id]) rhs[cell.id] += cell.volume * targetDivergence[cell.id];
   }
   return rhs;
 }
@@ -759,7 +773,7 @@ function volumeL2(grid: SparseAtlasCompositeGrid, values: ArrayLike<number>): nu
   return Math.sqrt(squared);
 }
 
-function collocateVelocity(
+export function collocateSparseAtlasVelocity(
   grid: SparseAtlasCompositeGrid,
   velocity: ArrayLike<number>,
 ): Float64Array {
@@ -772,6 +786,17 @@ function collocateVelocity(
       result[offset] += weight * velocity[row.id];
       weights[offset] += weight;
     }
+  }
+  // Domain-wall faces are fixed zero-velocity ports and therefore do not need
+  // pressure rows. They still contribute one side of the MAC-to-cell average.
+  // Without their zero-valued weight, boundary cells use the sole interior
+  // face at full strength (twice Uniform CM12's collocated wall velocity).
+  for (const cell of grid.cells) for (const axis of [0, 1, 2] as const) {
+    if (cell.minimumFine[axis] !== 0
+      && cell.maximumFine[axis] !== grid.atlas.dimensions[axis]) continue;
+    const tangents = tangentialAxes(axis);
+    weights[3 * cell.id + axis] += cell.widthsFine[tangents[0]]
+      * cell.widthsFine[tangents[1]] / cell.widthsFine[axis];
   }
   for (let index = 0; index < result.length; index += 1) {
     if (weights[index] > 0) result[index] /= weights[index];
@@ -810,7 +835,7 @@ export function projectSparseAtlasVelocity(
     grid, options.phi, denominatorEpsilon, sparseAirPhi,
   );
   options.onStageComplete?.("topology");
-  const rhs = assembleLiquidRhs(system, velocityBefore);
+  const rhs = assembleLiquidRhs(system, velocityBefore, options.targetDivergence);
   const rhsCompatibilityMaxAbs = projectNullspace(system, rhs);
   const rhsNorm = norm(rhs);
   options.onStageComplete?.("rhs");
@@ -914,7 +939,9 @@ export function projectSparseAtlasVelocity(
   // pressure system's quotient-space nullspace projector here: doing so would
   // hide a componentwise compatibility/net-flux defect from the published
   // divergence receipt. Nullspace projection belongs only to PCG algebra.
-  const projectedEquationResidual = assembleLiquidRhs(system, projectedFaceVelocity);
+  const projectedEquationResidual = assembleLiquidRhs(
+    system, projectedFaceVelocity, options.targetDivergence,
+  );
   const preDivergence = divergenceFromEquationResidual(system, rhs);
   const leafDivergence = divergenceFromEquationResidual(system, projectedEquationResidual);
   let postMixedSeamDivergenceMaximum = 0;
@@ -941,7 +968,7 @@ export function projectSparseAtlasVelocity(
     leafDiagonal: system.diagonal,
     leafDivergenceBefore: preDivergence,
     leafDivergence,
-    leafCollocatedVelocity: collocateVelocity(grid, projectedFaceVelocity),
+    leafCollocatedVelocity: collocateSparseAtlasVelocity(grid, projectedFaceVelocity),
     projectedFaceVelocity,
     receipt: {
       iterations,

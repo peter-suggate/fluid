@@ -10,9 +10,11 @@ import { WebGPUAdaptiveMassSolver } from "./webgpu-adaptive-mass-solver";
 
 export type AdaptiveMassSeamAxis = "x" | "y" | "z";
 export type AdaptiveMassFineSide = "negative" | "positive";
+export type AdaptiveMassResolutionMode = "adaptive" | "all-fine" | "all-coarse";
 
 /** Initial sparse-resolution split consumed by the interactive solver factory. */
 export interface AdaptiveMassSolverOptions {
+  readonly resolutionMode: AdaptiveMassResolutionMode;
   readonly seamAxis: AdaptiveMassSeamAxis;
   readonly fineSide: AdaptiveMassFineSide;
   readonly fineTileResolution: 8;
@@ -22,6 +24,19 @@ export interface AdaptiveMassSolverOptions {
 }
 
 const params: MethodParamSpec[] = [
+  {
+    kind: "select",
+    key: "resolutionMode",
+    label: "Resolution policy",
+    default: "adaptive",
+    tier: "coarse",
+    options: [
+      { value: "adaptive", label: "Adaptive · 4³ / 8³" },
+      { value: "all-fine", label: "All fine · 8³" },
+      { value: "all-coarse", label: "All coarse · 4³" },
+    ],
+    hint: "Fixed modes keep every resident and newly activated world tile at one rung. They provide matched-resolution parity lanes against fine or reduced Uniform CM12.",
+  },
   {
     kind: "select",
     key: "seamAxis",
@@ -67,10 +82,14 @@ const seamAxis = (value: unknown): AdaptiveMassSeamAxis =>
 const fineSide = (value: unknown): AdaptiveMassFineSide =>
   value === "positive" ? value : "negative";
 
+const resolutionMode = (value: unknown): AdaptiveMassResolutionMode =>
+  value === "all-fine" || value === "all-coarse" ? value : "adaptive";
+
 export function adaptiveMassSolverOptions(
   values: MethodParamValues,
 ): AdaptiveMassSolverOptions {
   return {
+    resolutionMode: resolutionMode(values.resolutionMode),
     seamAxis: seamAxis(values.seamAxis),
     fineSide: fineSide(values.fineSide),
     fineTileResolution: 8,
@@ -85,7 +104,7 @@ export const adaptiveMassMethod: SimulationMethod = {
   shortLabel: "Sparse CM12",
   badge: "SPARSE CM12",
   description: "Sparse 4³/8³ world-brick expansion of the uniform CM12 mass-conserving method.",
-  detail: "Sparse CM12 maps any authored scene into a fixed-world-space brick atlas, retains no dry bricks, and couples 4³ and 8³ neighbours through shared conservative transport and a global composite pressure solve. This milestone runs the sparse physics authority on CPU and publishes its fields through WebGPU; the final zero-empty-work GPU page pool and camera/activity-driven resolution policy are not yet claimed.",
+  detail: "Sparse CM12 maps any authored scene into a fixed-world-space brick atlas, retains no dry bricks, and couples 4³ and 8³ neighbours through shared conservative transport and a global composite pressure solve. Its hysteretic activity policy promotes moving, deforming, or geometrically complex surface bricks and slowly coarsens calm regions under a bounded fine-leaf capacity. This milestone still runs the sparse physics authority on CPU; the final GPU page pool and camera-weighted refinement are not yet claimed.",
   backend: "webgpu",
   resource: {
     id: "fluid.sparse-cm12",
@@ -121,6 +140,7 @@ export const adaptiveMassMethod: SimulationMethod = {
   pressureMapping: "Every live Sparse CM12 step solves one globally coupled composite pressure system over regular faces and conservative 2:1 seam ports using matrix-free Jacobi-PCG.",
   normalizeValues: (values) => ({
     ...values,
+    resolutionMode: resolutionMode(values.resolutionMode),
     seamAxis: seamAxis(values.seamAxis),
     fineSide: fineSide(values.fineSide),
     timeStep: values.timeStep === "scene" ? "scene" : "paper",
@@ -128,6 +148,7 @@ export const adaptiveMassMethod: SimulationMethod = {
   effectiveStep_s: (_scene, values) =>
     values.timeStep !== "scene" ? CM12_PAPER_DT_S : undefined,
   presetFor: () => ({
+    resolutionMode: "adaptive",
     seamAxis: "x",
     fineSide: "negative",
     timeStep: "paper",

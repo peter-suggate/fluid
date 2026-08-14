@@ -33,6 +33,14 @@ export const ADAPTIVE_MASS_ADVANCE_PHASE = Object.freeze({
     id: "fine-sdf-advection",
     label: "Coupled conservative mass + gamma + momentum transport",
   },
+  surfaceConditioning: {
+    id: "fine-sdf-redistance",
+    label: "CM12 surface sharpening + gamma conditioning",
+  },
+  activityResolution: {
+    id: "power-topology",
+    label: "Brick activity measurement + hysteretic resolution planning",
+  },
   retentionConditioning: {
     id: "adaptive-publication",
     label: "Dry-brick retirement + retained-atlas conditioning",
@@ -85,6 +93,8 @@ const DYNAMICS_PHASE: Readonly<Partial<Record<
 >>> = Object.freeze({
   "receiver-topology": ADAPTIVE_MASS_ADVANCE_PHASE.receiverTopology,
   "coupled-transport": ADAPTIVE_MASS_ADVANCE_PHASE.coupledTransport,
+  "surface-conditioning": ADAPTIVE_MASS_ADVANCE_PHASE.surfaceConditioning,
+  "activity-resolution": ADAPTIVE_MASS_ADVANCE_PHASE.activityResolution,
   "retain-rebuild": ADAPTIVE_MASS_ADVANCE_PHASE.retentionConditioning,
   force: ADAPTIVE_MASS_ADVANCE_PHASE.force,
   // Projection is partitioned by the nested projection-stage seams below.
@@ -244,6 +254,30 @@ const ADAPTIVE_MASS_FLUID_STAGES: readonly FluidPipelineStage[] = [
       feeds: "body-force prediction",
     },
     chip: () => "shared conservative transaction",
+  }),
+  stage({
+    id: "surface-conditioning", band: "transport", side: "left",
+    label: "Surface conditioning",
+    phaseLabels: [ADAPTIVE_MASS_ADVANCE_PHASE.surfaceConditioning.label],
+    tip: {
+      summary: "Applies the shared CM12 surface-conditioning transaction on compact resident leaves before activity is measured.",
+      reads: "transported density and gamma",
+      writes: "conditioned density and gamma",
+      feeds: "activity measurement and resolution planning",
+    },
+    chip: () => "CM12 sharpening",
+  }),
+  stage({
+    id: "activity-resolution", band: "topology", side: "left",
+    label: "Activity + resolution",
+    phaseLabels: [ADAPTIVE_MASS_ADVANCE_PHASE.activityResolution.label],
+    tip: {
+      summary: "Measures compact brick activity every accepted step, promotes persistent deformation or temporal change, and slowly demotes calm bricks. Surface presence alone does not force fine resolution.",
+      reads: "transported density, momentum, policy history",
+      writes: "score/reason history and target 4³/8³ levels",
+      feeds: "conservative topology transfer",
+    },
+    chip: (context) => `${context.info?.adaptiveFineBrickCount ?? 0} fine · ${context.info?.adaptiveCoarseBrickCount ?? 0} coarse`,
   }),
   stage({
     id: "retention-conditioning", band: "topology", side: "right",

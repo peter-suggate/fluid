@@ -328,7 +328,18 @@ class SimulationController {
     this.simulationTime = 0; this.gpuCompletedTime = 0; this.accumulator = 0; this.lastClock = null;
     this.rateWallClock = 0; this.rateSimTime = 0;
     this.pendingCpuTickTrace = undefined;
-    this.kinematicDrag = null;
+    // A carry outlives a rebuild. This used to drop the kinematic constraint
+    // unconditionally, so any edit that re-seeded the solver let go of a body
+    // the user was still holding: the hand stayed on the cursor and the solid
+    // fell out of it with no click anywhere. Kept while the body it names
+    // survives into the new roster, and re-applied before the publish below so
+    // the body stands where the hand is rather than snapping back to the pose
+    // it was authored at.
+    const heldId = this.kinematicDrag?.bodyId;
+    if (heldId !== undefined && !this.bodies.some((body) => body.description.id === heldId)) {
+      this.kinematicDrag = null;
+    }
+    this.applyDragConstraint();
     if (!this.safeBrowserBringup()) this.safeBrowserStepConsumed = false;
     const diagnosticsStore = useDiagnosticsStore.getState();
     if (runtimePlan.fluidSolver

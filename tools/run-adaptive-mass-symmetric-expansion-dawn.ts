@@ -471,7 +471,13 @@ try {
       scene,
       "balanced",
       undefined,
-      { seamAxis: "x", fineSide: "negative", fineTileResolution: 8, coarseTileResolution: 4 },
+      {
+        resolutionMode: "adaptive",
+        seamAxis: "x",
+        fineSide: "negative",
+        fineTileResolution: 8,
+        coarseTileResolution: 4,
+      },
       () => {},
     );
     const dimensions = [solver.info.nx, solver.info.ny, solver.info.nz] as const;

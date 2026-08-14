@@ -9,7 +9,11 @@
  */
 
 import {
+  cm12VolumeCorrectionDivergence,
+} from "../../core/cm12-numerics";
+import {
   buildSparseAtlasCompositeGrid,
+  collocateSparseAtlasVelocity,
   materializeSparseAtlasCollocatedVelocity,
   projectSparseAtlasVelocity,
   type SparseAtlasCompositeGrid,
@@ -26,6 +30,19 @@ import {
   type SparseBrickResolution,
   type SparseBrickVec3,
 } from "./sparse-brick-atlas";
+import { conditionSparseAtlasSurface } from "./sparse-atlas-surface-conditioning";
+import {
+  extrapolateSparseAtlasFaceVelocity,
+  extrapolateSparseAtlasVelocity,
+  transportSparseAtlasCM12,
+} from "./sparse-atlas-cm12-transport";
+import {
+  initializeSparseAtlasResolutionPolicy,
+  planSparseAtlasResolution,
+  retainSparseAtlasResolutionPolicy,
+  type SparseAtlasResolutionPolicyReceipt,
+  type SparseAtlasResolutionPolicyState,
+} from "./sparse-atlas-resolution-policy";
 
 export interface SparseAtlasDynamicsState {
   readonly atlas: SparseAdaptiveMassAtlas;
@@ -36,6 +53,7 @@ export interface SparseAtlasDynamicsState {
   readonly faceNormalVelocity: Float64Array;
   /** Latest composite pressure potential in `grid.cells` order. */
   readonly cellPressure: Float64Array;
+  readonly resolutionPolicy: SparseAtlasResolutionPolicyState;
   readonly time_s: number;
 }
 
@@ -50,23 +68,27 @@ export interface SparseAtlasDynamicsInitializationOptions {
 export type SparseAtlasDynamicsStageId =
   | "receiver-topology"
   | "coupled-transport"
+  | "surface-conditioning"
+  | "activity-resolution"
   | "retain-rebuild"
   | "force"
   | "projection";
 
 export interface SparseAtlasDynamicsStepOptions {
   readonly dt_s: number;
+  /** Physical finest-cell size used by CM12's calibrated volume correction. */
+  readonly finestCellSize_m?: number;
+  /** Fixed parity modes keep every resident and receiver brick on one rung. */
+  readonly resolutionMode?: "adaptive" | "all-fine" | "all-coarse";
   /** Finest-cell units / second squared. Defaults to zero. */
   readonly accelerationFinePerSecond2?: SparseBrickVec3;
-  /** Donor-cell outgoing-volume ceiling per transport substep. */
-  readonly maximumCfl?: number;
+  /** CM12 Sec. 3.5 dry-cell threshold; defaults to the paper's 1e-5. */
   readonly emptyEpsilon?: number;
   /** Pressure is enabled by default. */
   readonly project?: boolean;
   readonly projection?: Omit<SparseAtlasProjectionOptions, "normalVelocity" | "phi">;
   /** Optional level-set override in the retained, post-transport grid's cell order. */
   readonly phi?: ArrayLike<number>;
-  readonly maximumTransportSubsteps?: number;
   /** Pure stage-boundary signal for external timing; dynamics owns no clock. */
   readonly onStageComplete?: (stage: SparseAtlasDynamicsStageId) => void;
 }
@@ -91,8 +113,10 @@ export interface SparseAtlasDynamicsStats {
   readonly kineticEnergyAfter: number;
   readonly minimumDensity: number;
   readonly maximumDensity: number;
+  readonly maximumDensityAfterTransport: number;
   readonly minimumGamma: number;
   readonly maximumGamma: number;
+  readonly resolutionPolicy: SparseAtlasResolutionPolicyReceipt;
 }
 
 export interface SparseAtlasDynamicsStepResult {
@@ -125,52 +149,33 @@ function zeroBrick(
 }
 
 /**
- * Add transient receiver bricks only where a resident sparse-air face has
- * outward flow. New support is always 4³: interface bricks remain 8³ while
- * low-activity receiver space is genuinely coarse, so the live expansion path
- * exercises the same 2:1 ports as projection instead of silently refining its
- * entire halo. Face-local activation is D4-invariant and performs no transport
- * work for omitted bricks whose boundary flux is zero or points inward.
+ * Add only the characteristic/trilinear closure reachable this step around
+ * resident tiles. Far empty space remains absent. With the method's 4³/8³
+ * levels every created adjacency is automatically at most 2:1.
  */
 function transportSupport(
   source: SparseAdaptiveMassAtlas,
-  sourceGrid: SparseAtlasCompositeGrid,
-  sourceFaceVelocity: ArrayLike<number>,
+  receiverResolution: SparseBrickResolution,
+  haloBricks: number,
 ): SparseAdaptiveMassAtlas {
-  if (source.bricks.length === 0) {
-    return createSparseAdaptiveMassAtlas(source.dimensions, [], source.generation);
+  if (source.bricks.length === 0) return source;
+  const bricks = new Map(source.bricks.map((brick) => [brick.key, brick] as const));
+  for (const brick of source.bricks) for (let dz = -haloBricks; dz <= haloBricks; dz += 1) {
+    for (let dy = -haloBricks; dy <= haloBricks; dy += 1) {
+      for (let dx = -haloBricks; dx <= haloBricks; dx += 1) {
+        const coordinate = [brick.coordinate[0] + dx, brick.coordinate[1] + dy,
+          brick.coordinate[2] + dz] as const;
+        if (coordinate.some((value, axis) =>
+          value < 0 || value >= source.brickDimensions[axis])) continue;
+        const key = sparseBrickKey(coordinate, source.brickDimensions);
+        if (!bricks.has(key)) bricks.set(key,
+          zeroBrick(key, coordinate, receiverResolution));
+      }
+    }
   }
-  const bricks = new Map<number, SparseAdaptiveMassBrick>();
-  for (const brick of source.bricks) bricks.set(brick.key, brick);
-  const requested = new Map<number, SparseBrickVec3>();
-  for (const row of sourceGrid.gradientRows) {
-    if (row.kind !== "sparse-air" || row.terms.length !== 1) continue;
-    const velocity = sourceFaceVelocity[row.id];
-    const term = row.terms[0];
-    // The sign of G's sole coefficient identifies the resident side. Flow is
-    // outward precisely when oriented velocity and that coefficient disagree.
-    if (!(velocity * term.coefficient < -1e-14)
-      || sourceGrid.cells[term.cellId].density <= 0) continue;
-    const residentKey = row.negativeBrickKey ?? row.positiveBrickKey;
-    if (residentKey === undefined) continue;
-    const resident = source.directory.get(residentKey);
-    if (!resident) continue;
-    const coordinate = [...resident.coordinate] as [number, number, number];
-    coordinate[row.axis] += row.negativeBrickKey === residentKey ? 1 : -1;
-    if (coordinate.some((value, axis) =>
-      value < 0 || value >= source.brickDimensions[axis])) continue;
-    const key = sparseBrickKey(coordinate, source.brickDimensions);
-    if (!bricks.has(key)) requested.set(key, coordinate);
-  }
-  if (requested.size === 0) return source;
-  for (const [key, coordinate] of requested) {
-    bricks.set(key, zeroBrick(key, coordinate, 4));
-  }
-  return createSparseAdaptiveMassAtlas(
-    source.dimensions,
-    [...bricks.values()].sort((left, right) => left.key - right.key),
-    source.generation,
-  );
+  if (bricks.size === source.bricks.length) return source;
+  return createSparseAdaptiveMassAtlas(source.dimensions,
+    [...bricks.values()].sort((left, right) => left.key - right.key), source.generation);
 }
 
 function collocatedFaceVelocity(
@@ -206,10 +211,10 @@ function facesFromCells(
     collocatedFaceVelocity(row, cellVelocity));
 }
 
+const TANGENTIAL_AXES = [[1, 2], [0, 2], [0, 1]] as const;
+
 function tangentialAxes(axis: 0 | 1 | 2): readonly [0 | 1 | 2, 0 | 1 | 2] {
-  if (axis === 0) return [1, 2];
-  if (axis === 1) return [0, 2];
-  return [0, 1];
+  return TANGENTIAL_AXES[axis];
 }
 
 /**
@@ -223,7 +228,13 @@ function remapFaceVelocity(
   nextGrid: SparseAtlasCompositeGrid,
   fallback: ArrayLike<number>,
 ): Float64Array {
-  const bins = new Map<string, number[]>();
+  const bins: readonly Map<number, number[]>[] = [new Map(), new Map(), new Map()];
+  const binKey = (axis: 0 | 1 | 2, plane: number, u: number, v: number) => {
+    const tangents = tangentialAxes(axis);
+    const planeCount = 2 * previousGrid.atlas.dimensions[axis] + 1;
+    const uCount = previousGrid.atlas.dimensions[tangents[0]];
+    return Math.round(2 * plane) + planeCount * (u + uCount * v);
+  };
   const bounds = (row: SparseAtlasGradientRow) => {
     const tangents = tangentialAxes(row.axis);
     const width = Math.sqrt(row.area);
@@ -235,14 +246,15 @@ function remapFaceVelocity(
       maximumV: row.centerFine[tangents[1]] + 0.5 * width,
     };
   };
+  const previousBounds = previousGrid.gradientRows.map(bounds);
   for (const row of previousGrid.gradientRows) {
-    const box = bounds(row);
+    const box = previousBounds[row.id];
     for (let v = Math.floor(box.minimumV); v < Math.ceil(box.maximumV); v += 1) {
       for (let u = Math.floor(box.minimumU); u < Math.ceil(box.maximumU); u += 1) {
-        const key = `${row.axis}:${row.centerFine[row.axis]}:${u}:${v}`;
-        const entries = bins.get(key);
+        const key = binKey(row.axis, row.centerFine[row.axis], u, v);
+        const entries = bins[row.axis].get(key);
         if (entries) entries.push(row.id);
-        else bins.set(key, [row.id]);
+        else bins[row.axis].set(key, [row.id]);
       }
     }
   }
@@ -251,15 +263,16 @@ function remapFaceVelocity(
     const candidates = new Set<number>();
     for (let v = Math.floor(box.minimumV); v < Math.ceil(box.maximumV); v += 1) {
       for (let u = Math.floor(box.minimumU); u < Math.ceil(box.maximumU); u += 1) {
-        for (const id of bins.get(`${row.axis}:${row.centerFine[row.axis]}:${u}:${v}`) ?? []) {
+        for (const id of bins[row.axis].get(
+          binKey(row.axis, row.centerFine[row.axis], u, v),
+        ) ?? []) {
           candidates.add(id);
         }
       }
     }
     let weighted = 0, overlapArea = 0;
     for (const candidateId of candidates) {
-      const candidate = previousGrid.gradientRows[candidateId];
-      const source = bounds(candidate);
+      const source = previousBounds[candidateId];
       const overlapU = Math.max(0,
         Math.min(box.maximumU, source.maximumU) - Math.max(box.minimumU, source.minimumU));
       const overlapV = Math.max(0,
@@ -323,6 +336,30 @@ function rebindCompositeGrid(
   return { ...topology, atlas, cells };
 }
 
+const transportGridCache = new WeakMap<object, Map<string, SparseAtlasCompositeGrid>>();
+
+function transportGrid(
+  sourceGrid: SparseAtlasCompositeGrid,
+  supportAtlas: SparseAdaptiveMassAtlas,
+  receiverResolution: SparseBrickResolution,
+  haloBricks: number,
+): SparseAtlasCompositeGrid {
+  const topologyKey = sourceGrid.gradientRows as object;
+  let variants = transportGridCache.get(topologyKey);
+  if (!variants) {
+    variants = new Map();
+    transportGridCache.set(topologyKey, variants);
+  }
+  const variantKey = `${receiverResolution}:${haloBricks}`;
+  const cached = variants.get(variantKey);
+  if (cached && sameAtlasTopology(cached.atlas, supportAtlas)) {
+    return rebindCompositeGrid(cached, supportAtlas);
+  }
+  const built = buildSparseAtlasCompositeGrid(supportAtlas);
+  variants.set(variantKey, built);
+  return built;
+}
+
 function remapCellScalar(
   previousGrid: SparseAtlasCompositeGrid,
   previousValues: ArrayLike<number>,
@@ -332,11 +369,38 @@ function remapCellScalar(
     throw new RangeError("previous scalar must contain one value per grid cell");
   }
   const byStableLeaf = new Map<number, number>();
+  const byBrick = new Map<number, SparseAtlasCompositeGrid["cells"][number][]>();
   for (const cell of previousGrid.cells) {
     byStableLeaf.set(cell.stableLeafId, previousValues[cell.id]);
+    const cells = byBrick.get(cell.brickKey) ?? [];
+    cells.push(cell);
+    byBrick.set(cell.brickKey, cells);
   }
-  return Float64Array.from(nextGrid.cells, (cell) =>
-    byStableLeaf.get(cell.stableLeafId) ?? 0);
+  return Float64Array.from(nextGrid.cells, (cell) => {
+    const exact = byStableLeaf.get(cell.stableLeafId);
+    if (exact !== undefined && previousGrid.atlas.directory.get(cell.brickKey)?.resolution
+      === cell.brickResolution) return exact;
+    let weighted = 0;
+    let volume = 0;
+    for (const source of byBrick.get(cell.brickKey) ?? []) {
+      const overlap = overlapVolume(source, cell);
+      weighted += overlap * previousValues[source.id];
+      volume += overlap;
+    }
+    return volume > 0 ? weighted / volume : 0;
+  });
+}
+
+function overlapVolume(
+  left: SparseAtlasCompositeGrid["cells"][number],
+  right: SparseAtlasCompositeGrid["cells"][number],
+): number {
+  let result = 1;
+  for (let axis = 0; axis < 3; axis += 1) {
+    result *= Math.max(0, Math.min(left.maximumFine[axis], right.maximumFine[axis])
+      - Math.max(left.minimumFine[axis], right.minimumFine[axis]));
+  }
+  return result;
 }
 
 export function initializeSparseAtlasDynamics(
@@ -368,55 +432,11 @@ export function initializeSparseAtlasDynamics(
     cellVelocity,
     faceNormalVelocity: facesFromCells(grid, cellVelocity),
     cellPressure: new Float64Array(grid.cells.length),
+    resolutionPolicy: initializeSparseAtlasResolutionPolicy(atlas),
     time_s,
   };
 }
 
-interface SideTerm {
-  readonly cellId: number;
-  readonly fraction: number;
-}
-
-function rowSides(row: SparseAtlasGradientRow): {
-  negative: readonly SideTerm[];
-  positive: readonly SideTerm[];
-} {
-  const negative: SideTerm[] = [], positive: SideTerm[] = [];
-  let negativeTotal = 0, positiveTotal = 0;
-  for (const term of row.terms) {
-    const raw = Math.abs(term.coefficient) * row.distance;
-    if (term.coefficient < 0) {
-      negative.push({ cellId: term.cellId, fraction: raw });
-      negativeTotal += raw;
-    } else {
-      positive.push({ cellId: term.cellId, fraction: raw });
-      positiveTotal += raw;
-    }
-  }
-  return {
-    negative: negativeTotal > 0
-      ? negative.map((term) => ({ ...term, fraction: term.fraction / negativeTotal })) : [],
-    positive: positiveTotal > 0
-      ? positive.map((term) => ({ ...term, fraction: term.fraction / positiveTotal })) : [],
-  };
-}
-
-function maximumOutflowRate(
-  grid: SparseAtlasCompositeGrid,
-  faceVelocity: ArrayLike<number>,
-): number {
-  const rates = new Float64Array(grid.cells.length);
-  for (const row of grid.gradientRows) {
-    const velocity = faceVelocity[row.id];
-    if (velocity === 0) continue;
-    const sides = rowSides(row);
-    const donors = velocity > 0 ? sides.negative : sides.positive;
-    if (donors.length === 0 || (velocity > 0 ? sides.positive : sides.negative).length === 0) continue;
-    const rate = Math.abs(velocity) * row.area;
-    for (const donor of donors) rates[donor.cellId] += rate * donor.fraction;
-  }
-  let maximum = 0;
-  for (const cell of grid.cells) maximum = Math.max(maximum, rates[cell.id] / cell.volume);
 /** A ball of liquid to add to a live state, in finest-cell index space. */
 export interface SparseAtlasLiquidInjection {
   /** Centre in finest cells, where cell (i, j, k) spans [i, i + 1) on each axis. */
@@ -548,97 +568,14 @@ export function injectSparseAtlasLiquid(
       ? state.cellPressure
       : remapCellScalar(state.grid, state.cellPressure, grid),
     resolutionPolicy: retainSparseAtlasResolutionPolicy(state.resolutionPolicy, atlas),
-    residualQuiescence_s: new Map(grid.cells.flatMap((cell) => {
-      const age = state.residualQuiescence_s.get(cell.stableLeafId);
-      return age === undefined ? [] : [[cell.stableLeafId, age] as const];
-    })),
   };
-}
-
-  return maximum;
 }
 
 interface TransportFields {
   density: Float64Array;
   gamma: Float64Array;
   velocity: Float64Array;
-}
-
-function transportSubstep(
-  grid: SparseAtlasCompositeGrid,
-  faceVelocity: ArrayLike<number>,
-  fields: TransportFields,
-  dt_s: number,
-): TransportFields {
-  const count = grid.cells.length;
-  const mass = Float64Array.from(grid.cells, (cell) =>
-    cell.volume * fields.density[cell.id]);
-  const gammaIntegral = Float64Array.from(grid.cells, (cell) =>
-    cell.volume * fields.gamma[cell.id]);
-  const momentum = new Float64Array(3 * count);
-  for (const cell of grid.cells) {
-    const cellMass = mass[cell.id];
-    for (let axis = 0; axis < 3; axis += 1) {
-      momentum[3 * cell.id + axis] = cellMass * fields.velocity[3 * cell.id + axis];
-    }
-  }
-  const massDelta = new Float64Array(count);
-  const gammaDelta = new Float64Array(count);
-  const momentumDelta = new Float64Array(3 * count);
-
-  for (const row of grid.gradientRows) {
-    const normalVelocity = faceVelocity[row.id];
-    if (normalVelocity === 0) continue;
-    const sides = rowSides(row);
-    const donors = normalVelocity > 0 ? sides.negative : sides.positive;
-    const receivers = normalVelocity > 0 ? sides.positive : sides.negative;
-    // A one-sided sparse-air row is the exterior of the transient support,
-    // never a mass sink. The one-brick halo and CFL bound keep wet material
-    // from reaching it during this step.
-    if (donors.length === 0 || receivers.length === 0) continue;
-    const sweptVolume = Math.abs(normalVelocity) * row.area * dt_s;
-    let transferredMass = 0, transferredGamma = 0;
-    const transferredMomentum = [0, 0, 0];
-    for (const donor of donors) {
-      const volume = sweptVolume * donor.fraction;
-      const density = fields.density[donor.cellId];
-      const gamma = fields.gamma[donor.cellId];
-      const donorMass = volume * density;
-      const donorGamma = volume * gamma;
-      massDelta[donor.cellId] -= donorMass;
-      gammaDelta[donor.cellId] -= donorGamma;
-      transferredMass += donorMass;
-      transferredGamma += donorGamma;
-      for (let axis = 0; axis < 3; axis += 1) {
-        const amount = donorMass * fields.velocity[3 * donor.cellId + axis];
-        momentumDelta[3 * donor.cellId + axis] -= amount;
-        transferredMomentum[axis] += amount;
-      }
-    }
-    for (const receiver of receivers) {
-      massDelta[receiver.cellId] += receiver.fraction * transferredMass;
-      gammaDelta[receiver.cellId] += receiver.fraction * transferredGamma;
-      for (let axis = 0; axis < 3; axis += 1) {
-        momentumDelta[3 * receiver.cellId + axis]
-          += receiver.fraction * transferredMomentum[axis];
-      }
-    }
-  }
-
-  const density = new Float64Array(count);
-  const gamma = new Float64Array(count);
-  const velocity = new Float64Array(3 * count);
-  for (const cell of grid.cells) {
-    const nextMass = mass[cell.id] + massDelta[cell.id];
-    density[cell.id] = nextMass / cell.volume;
-    gamma[cell.id] = (gammaIntegral[cell.id] + gammaDelta[cell.id]) / cell.volume;
-    if (nextMass <= 1e-30) continue;
-    for (let axis = 0; axis < 3; axis += 1) {
-      velocity[3 * cell.id + axis] =
-        (momentum[3 * cell.id + axis] + momentumDelta[3 * cell.id + axis]) / nextMass;
-    }
-  }
-  return { density, gamma, velocity };
+  faceNormalVelocity?: Float64Array;
 }
 
 function integral(
@@ -688,6 +625,7 @@ function retainedAtlas(
   density: ArrayLike<number>,
   gamma: ArrayLike<number>,
   epsilon: number,
+  targetResolutionByBrick: ReadonlyMap<number, SparseBrickResolution>,
 ): SparseAdaptiveMassAtlas {
   const retained: SparseAdaptiveMassBrick[] = [];
   let cellCursor = 0;
@@ -705,7 +643,22 @@ function retainedAtlas(
       wet ||= nextDensity[cell.localIndex] > epsilon;
       cellCursor += 1;
     }
-    if (wet) retained.push({ ...brick, density: nextDensity, gamma: nextGamma });
+    if (!wet) continue;
+    const target = targetResolutionByBrick.get(brick.key) ?? brick.resolution;
+    if (target === brick.resolution) {
+      retained.push({ ...brick, density: nextDensity, gamma: nextGamma });
+      continue;
+    }
+    retained.push({
+      ...brick,
+      resolution: target,
+      density: resampleBrickScalar(
+        source.dimensions, brick, nextDensity, target, 0,
+      ),
+      gamma: resampleBrickScalar(
+        source.dimensions, brick, nextGamma, target, 1,
+      ),
+    });
   }
   return createSparseAdaptiveMassAtlas(
     source.dimensions,
@@ -714,21 +667,105 @@ function retainedAtlas(
   );
 }
 
+function localCellVolume(
+  dimensions: SparseBrickVec3,
+  brick: SparseAdaptiveMassBrick,
+  resolution: SparseBrickResolution,
+  x: number,
+  y: number,
+  z: number,
+): number {
+  const scale = 8 / resolution;
+  const local = [x, y, z] as const;
+  let volume = 1;
+  for (let axis = 0; axis < 3; axis += 1) {
+    const lower = brick.coordinate[axis] * 8 + local[axis] * scale;
+    volume *= Math.max(0, Math.min(scale, dimensions[axis] - lower));
+  }
+  return volume;
+}
+
+function resampleBrickScalar(
+  dimensions: SparseBrickVec3,
+  brick: SparseAdaptiveMassBrick,
+  source: ArrayLike<number>,
+  targetResolution: SparseBrickResolution,
+  emptyValue: number,
+): Float64Array {
+  const output = new Float64Array(targetResolution ** 3).fill(emptyValue);
+  if (brick.resolution === 4 && targetResolution === 8) {
+    for (let z = 0; z < 8; z += 1) for (let y = 0; y < 8; y += 1) {
+      for (let x = 0; x < 8; x += 1) {
+        output[x + 8 * (y + 8 * z)] = source[Math.floor(x / 2) + 4
+          * (Math.floor(y / 2) + 4 * Math.floor(z / 2))];
+      }
+    }
+    return output;
+  }
+  if (brick.resolution === 8 && targetResolution === 4) {
+    for (let z = 0; z < 4; z += 1) for (let y = 0; y < 4; y += 1) {
+      for (let x = 0; x < 4; x += 1) {
+        let weighted = 0;
+        let volume = 0;
+        for (let dz = 0; dz < 2; dz += 1) for (let dy = 0; dy < 2; dy += 1) {
+          for (let dx = 0; dx < 2; dx += 1) {
+            const sx = 2 * x + dx, sy = 2 * y + dy, sz = 2 * z + dz;
+            const childVolume = localCellVolume(dimensions, brick, 8, sx, sy, sz);
+            weighted += childVolume * source[sx + 8 * (sy + 8 * sz)];
+            volume += childVolume;
+          }
+        }
+        output[x + 4 * (y + 4 * z)] = volume > 0 ? weighted / volume : emptyValue;
+      }
+    }
+    return output;
+  }
+  throw new Error(`unsupported sparse resolution transfer ${brick.resolution} -> ${targetResolution}`);
+}
+
 function remapWorkVelocityToOutput(
   workGrid: SparseAtlasCompositeGrid,
   workVelocity: ArrayLike<number>,
+  workDensity: ArrayLike<number>,
   outputGrid: SparseAtlasCompositeGrid,
 ): Float64Array {
   const result = new Float64Array(3 * outputGrid.cells.length);
-  let workIndex = 0;
+  const byBrick = new Map<number, SparseAtlasCompositeGrid["cells"][number][]>();
+  const byStableLeaf = new Map<number, SparseAtlasCompositeGrid["cells"][number]>();
+  for (const cell of workGrid.cells) {
+    byStableLeaf.set(cell.stableLeafId, cell);
+    const cells = byBrick.get(cell.brickKey) ?? [];
+    cells.push(cell);
+    byBrick.set(cell.brickKey, cells);
+  }
   for (const cell of outputGrid.cells) {
-    while (workIndex < workGrid.cells.length
-      && workGrid.cells[workIndex].stableLeafId < cell.stableLeafId) workIndex += 1;
-    const source = workGrid.cells[workIndex];
-    if (!source || source.stableLeafId !== cell.stableLeafId) continue;
-    result[3 * cell.id] = workVelocity[3 * source.id];
-    result[3 * cell.id + 1] = workVelocity[3 * source.id + 1];
-    result[3 * cell.id + 2] = workVelocity[3 * source.id + 2];
+    const exact = byStableLeaf.get(cell.stableLeafId);
+    if (exact && exact.brickResolution === cell.brickResolution) {
+      for (let axis = 0; axis < 3; axis += 1) {
+        result[3 * cell.id + axis] = workVelocity[3 * exact.id + axis];
+      }
+      continue;
+    }
+    const momentum = [0, 0, 0];
+    const fallback = [0, 0, 0];
+    let mass = 0;
+    let volume = 0;
+    for (const source of byBrick.get(cell.brickKey) ?? []) {
+      const overlap = overlapVolume(source, cell);
+      if (!(overlap > 0)) continue;
+      const weightedMass = overlap * Math.max(0, workDensity[source.id]);
+      mass += weightedMass;
+      volume += overlap;
+      for (let axis = 0; axis < 3; axis += 1) {
+        momentum[axis] += weightedMass * workVelocity[3 * source.id + axis];
+        fallback[axis] += overlap * workVelocity[3 * source.id + axis];
+      }
+    }
+    for (let axis = 0; axis < 3; axis += 1) {
+      result[3 * cell.id + axis] = mass > 1e-30
+        ? momentum[axis] / mass
+        : volume > 0 ? fallback[axis] / volume : 0;
+    }
   }
   return result;
 }
@@ -743,56 +780,117 @@ export function stepSparseAtlasDynamics(
   }
   const acceleration = options.accelerationFinePerSecond2 ?? [0, 0, 0];
   assertFiniteVector(acceleration, "accelerationFinePerSecond2");
-  const maximumCfl = options.maximumCfl ?? 0.8;
-  const maximumTransportSubsteps = options.maximumTransportSubsteps ?? 256;
-  const epsilon = options.emptyEpsilon ?? 0;
-  if (!(maximumCfl > 0 && maximumCfl <= 1)
-    || !Number.isInteger(maximumTransportSubsteps) || maximumTransportSubsteps <= 0
-    || !(epsilon >= 0)) {
-    throw new RangeError("invalid transport stability options");
+  const epsilon = options.emptyEpsilon ?? 1e-5;
+  if (!(epsilon >= 0)) {
+    throw new RangeError("emptyEpsilon must be nonnegative");
   }
 
+  const receiverResolution: SparseBrickResolution =
+    options.resolutionMode === "all-fine" ? 8 : 4;
+  const receiverCellSpanFine = BRICK_FINE_RESOLUTION / receiverResolution;
+  const maximumFaceComponent = [0, 0, 0];
+  for (const row of source.grid.gradientRows) {
+    maximumFaceComponent[row.axis] = Math.max(maximumFaceComponent[row.axis],
+      Math.abs(source.faceNormalVelocity[row.id]));
+  }
+  const maximumCharacteristicDisplacementFine = dt_s * Math.hypot(
+    maximumFaceComponent[0], maximumFaceComponent[1], maximumFaceComponent[2],
+  );
+  // CM12 is intentionally useful at large CFL. Cover every brick reachable
+  // by the characteristic plus one finest cell for trilinear interpolation;
+  // never scan or allocate the rest of the authored domain.
+  const transportHaloBricks = Math.max(1, Math.ceil(
+    (maximumCharacteristicDisplacementFine + receiverCellSpanFine)
+      / BRICK_FINE_RESOLUTION,
+  ));
   const supportAtlas = transportSupport(
-    source.atlas,
-    source.grid,
-    source.faceNormalVelocity,
+    source.atlas, receiverResolution, transportHaloBricks,
   );
   const receiverTopologyUnchanged = supportAtlas === source.atlas;
   const workGrid = receiverTopologyUnchanged
     ? source.grid
-    : buildSparseAtlasCompositeGrid(supportAtlas);
+    : transportGrid(
+      source.grid, supportAtlas, receiverResolution, transportHaloBricks,
+    );
   const remappedCellVelocity = receiverTopologyUnchanged
     ? source.cellVelocity
     : remapCellVelocity(source, workGrid);
+  options.onStageComplete?.("receiver-topology");
+  const workDensity = Float64Array.from(workGrid.cells, (cell) => cell.density);
+  const transportVelocity = extrapolateSparseAtlasVelocity(
+    workGrid, workDensity, remappedCellVelocity,
+  );
   const remappedFaces = receiverTopologyUnchanged
     ? source.faceNormalVelocity
     : remapFaceVelocity(
       source.grid,
       source.faceNormalVelocity,
       workGrid,
-      facesFromCells(workGrid, remappedCellVelocity),
+      facesFromCells(workGrid, transportVelocity),
     );
-  options.onStageComplete?.("receiver-topology");
+  const transportFaces = extrapolateSparseAtlasFaceVelocity(
+    workGrid, workDensity, remappedFaces,
+    facesFromCells(workGrid, transportVelocity),
+    Math.max(
+      2 * receiverCellSpanFine,
+      maximumCharacteristicDisplacementFine + receiverCellSpanFine,
+    ),
+  );
+  const faceCollocatedVelocity = collocateSparseAtlasVelocity(
+    workGrid, transportFaces,
+  );
   let fields: TransportFields = {
-    density: Float64Array.from(workGrid.cells, (cell) => cell.density),
+    density: workDensity,
     gamma: Float64Array.from(workGrid.cells, (cell) => cell.gamma),
-    velocity: remappedCellVelocity,
+    velocity: faceCollocatedVelocity,
+    faceNormalVelocity: transportFaces,
   };
   const massBefore = integral(workGrid, fields.density);
   const gammaBefore = integral(workGrid, fields.gamma);
   const energyBefore = kineticEnergy(workGrid, fields.density, fields.velocity);
-  const outflowRate = maximumOutflowRate(workGrid, remappedFaces);
-  const transportSubsteps = Math.max(1, Math.ceil(dt_s * outflowRate / maximumCfl));
-  if (transportSubsteps > maximumTransportSubsteps) {
-    throw new RangeError(`transport requires ${transportSubsteps} CFL substeps; cap is ${maximumTransportSubsteps}`);
+  let outflowRate = 0;
+  for (let id = 0; id < workGrid.cells.length; id += 1) {
+    outflowRate = Math.max(outflowRate, Math.hypot(
+      fields.velocity[3 * id], fields.velocity[3 * id + 1],
+      fields.velocity[3 * id + 2],
+    ));
   }
-  const subDt_s = dt_s / transportSubsteps;
-  for (let substep = 0; substep < transportSubsteps; substep += 1) {
-    fields = transportSubstep(workGrid, remappedFaces, fields, subDt_s);
-  }
+  const transportSubsteps = 1;
+  fields = transportSparseAtlasCM12(workGrid, fields, dt_s).fields;
+  const [, maximumDensityAfterTransport] = extrema(fields.density, 0);
   options.onStageComplete?.("coupled-transport");
 
-  const atlas = retainedAtlas(source.atlas, workGrid, fields.density, fields.gamma, epsilon);
+  // CM12 Secs. 3.4-3.5 conditioning is part of the method, not presentation
+  // polish. Run it on resident composite rows with the paper's 3dt dose.
+  const conditioned = conditionSparseAtlasSurface(workGrid, fields, {
+    gammaDiffusionIterations: 1,
+    timeStep_s: dt_s,
+  });
+  fields = {
+    density: conditioned.fields.density,
+    gamma: conditioned.fields.gamma,
+    velocity: fields.velocity,
+    faceNormalVelocity: fields.faceNormalVelocity,
+  };
+  options.onStageComplete?.("surface-conditioning");
+
+  const resolutionDecision = planSparseAtlasResolution(
+    workGrid,
+    fields.density,
+    fields.velocity,
+    source.resolutionPolicy,
+    dt_s,
+    options.resolutionMode,
+  );
+  options.onStageComplete?.("activity-resolution");
+  const atlas = retainedAtlas(
+    source.atlas,
+    workGrid,
+    fields.density,
+    fields.gamma,
+    epsilon,
+    resolutionDecision.targetResolutionByBrick,
+  );
   const sourceTopologyRetained = sameAtlasTopology(source.atlas, atlas);
   const workTopologyRetained = sameAtlasTopology(workGrid.atlas, atlas);
   const grid = sourceTopologyRetained
@@ -802,8 +900,16 @@ export function stepSparseAtlasDynamics(
       : buildSparseAtlasCompositeGrid(atlas);
   const advectedCellVelocity = workTopologyRetained
     ? fields.velocity
-    : remapWorkVelocityToOutput(workGrid, fields.velocity, grid);
-  const advectedFaces = facesFromCells(grid, advectedCellVelocity);
+    : remapWorkVelocityToOutput(workGrid, fields.velocity, fields.density, grid);
+  const reconstructedFaces = facesFromCells(grid, advectedCellVelocity);
+  const advectedFaces = workTopologyRetained
+    ? fields.faceNormalVelocity ?? reconstructedFaces
+    : remapFaceVelocity(
+      workGrid,
+      fields.faceNormalVelocity ?? facesFromCells(workGrid, fields.velocity),
+      grid,
+      reconstructedFaces,
+    );
   options.onStageComplete?.("retain-rebuild");
   const forcedFaces = Float64Array.from(advectedFaces, (value, rowId) =>
     value + dt_s * acceleration[grid.gradientRows[rowId].axis]);
@@ -823,6 +929,12 @@ export function stepSparseAtlasDynamics(
     normalVelocity: forcedFaces,
     initialPressure,
     phi: options.phi,
+    targetDivergence: Float64Array.from(grid.cells, (cell) =>
+      cm12VolumeCorrectionDivergence(
+        cell.density,
+        (options.finestCellSize_m ?? 1) * Math.min(...cell.widthsFine),
+        dt_s,
+      )),
   });
   if (projection) options.onStageComplete?.("projection");
   const cellVelocity = projection?.leafCollocatedVelocity ?? forcedCells;
@@ -833,6 +945,10 @@ export function stepSparseAtlasDynamics(
     cellVelocity,
     faceNormalVelocity,
     cellPressure: projection?.leafPressure ?? initialPressure,
+    resolutionPolicy: retainSparseAtlasResolutionPolicy(
+      resolutionDecision.state,
+      atlas,
+    ),
     time_s: source.time_s + dt_s,
   };
   const massAfter = integral(workGrid, fields.density);
@@ -868,8 +984,10 @@ export function stepSparseAtlasDynamics(
       ),
       minimumDensity,
       maximumDensity,
+      maximumDensityAfterTransport,
       minimumGamma,
       maximumGamma,
+      resolutionPolicy: resolutionDecision.receipt,
     },
   };
 }

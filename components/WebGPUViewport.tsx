@@ -1460,8 +1460,14 @@ export function WebGPUViewport() {
       return;
     }
     if (carryRef.current?.bodyId === carrySession.bodyId) return;
-    const pose = drawnBodies().find((body) => body.description.id === carrySession.bodyId);
-    if (!pose) { useUIStore.getState().endCarry(); return; }
+    // The published pose first, the authored one as the fallback, and never a
+    // cancellation: a carry that ends itself is a body dropped without a click,
+    // and the roster is empty for a whole rebuild — long enough to lose one.
+    // The document always has the body, or the session could not name it.
+    const pose = drawnBodies().find((body) => body.description.id === carrySession.bodyId)
+      ?? useSceneStore.getState().scene.rigidBodies
+        .find((body) => body.id === carrySession.bodyId);
+    if (!pose) return;
     const plane = carryPlane(useUIStore.getState().camera, pose.position_m);
     carryRef.current = {
       bodyId: carrySession.bodyId,

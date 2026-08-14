@@ -29,8 +29,8 @@ import {
   type SparseAtlasProjectionResult,
 } from "./sparse-atlas-composite-projection";
 import {
-  injectSparseAtlasLiquid,
   initializeSparseAtlasDynamics,
+  injectSparseAtlasLiquid,
   materializeSparseAtlasDynamicsVelocityRgba,
   stepSparseAtlasDynamics,
   type SparseAtlasDynamicsState,
@@ -51,7 +51,16 @@ export interface AdaptiveMassStepTelemetry {
   adaptiveMaximumInactiveFaceSpeedBefore_m_s?: number;
   adaptiveMaximumInactiveFaceSpeedAfter_m_s?: number;
   adaptiveMaximumMixedSeamDivergence_s?: number;
+  adaptiveMaximumDensityAfterTransport?: number;
+  adaptiveMaximumDensityAfterConditioning?: number;
 }
+
+/**
+ * Temporary budget for the legacy dense renderer/diagnostic bridge.
+ * Physics is never rescaled to fit it: a future compact surface-page source
+ * replaces this bridge for domains above the budget.
+ */
+export const ADAPTIVE_MASS_DENSE_PRESENTATION_MAXIMUM_CELLS = 1_048_576;
 
 /**
  * Browser milestone for the adaptive-mass method.
@@ -60,7 +69,9 @@ export interface AdaptiveMassStepTelemetry {
  * conservative transport, and global composite projection across arbitrary
  * resident 4³/8³ bricks; WebGPU owns the consumer textures and ordinary
  * renderer lifecycle. This does not yet claim the final GPU page pool, GPU
- * sparse execution, or dynamic camera/activity resolution policy.
+ * sparse execution or camera-weighted refinement. Compact activity-driven
+ * 4³/8³ topology changes are authoritative and reprojected every accepted
+ * step; only the execution backend remains the M1 CPU reference.
  */
 export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
   readonly info: GPUEulerianInfo;
@@ -174,7 +185,7 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
         id: "adaptive-mass.plan",
         phase: "planning",
         label: "Bound the arbitrary-scene presentation lattice",
-        run: () => { dimensions = boundedPresentationDimensions(scene); },
+        run: () => { dimensions = adaptiveMassPresentationDimensionsForScene(scene); },
       }, {
         id: "adaptive-mass.atlas",
         phase: "adaptive-topology",
@@ -183,16 +194,21 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
         run: () => {
           atlas = initializeSparseBrickAtlasFromScene(scene, {
             finestDimensions: dimensions!,
-            maximumFinestCells: 64 ** 3,
+            maximumFinestCells: ADAPTIVE_MASS_DENSE_PRESENTATION_MAXIMUM_CELLS,
+            resolutionForBrick: options.resolutionMode === "all-fine"
+              ? () => 8
+              : options.resolutionMode === "all-coarse" ? () => 4 : undefined,
             fineHalf: {
               axis: options.seamAxis === "x" ? 0 : options.seamAxis === "y" ? 1 : 2,
               side: options.fineSide,
             },
           });
-          atlas = coarsenLargeQuiescentComponents(atlas, 8, {
-            axis: options.seamAxis === "x" ? 0 : options.seamAxis === "y" ? 1 : 2,
-            side: options.fineSide,
-          });
+          if (options.resolutionMode === "adaptive") {
+            atlas = coarsenLargeQuiescentComponents(atlas, 8, {
+              axis: options.seamAxis === "x" ? 0 : options.seamAxis === "y" ? 1 : 2,
+              side: options.fineSide,
+            });
+          }
           dynamics = initializeSparseAtlasDynamics(atlas);
           materialization = atlasMaterialization(atlas, scene, dynamics);
         },
@@ -224,17 +240,6 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
     }
   }
 
-  advanceTo(time_s: number, _bodies: RigidBodyState[]): boolean {
-    void _bodies;
-    if (this.disposed || !Number.isFinite(time_s) || time_s <= this.lastTime_s + 1e-9) return false;
-    const paperTimeStep = this.options.timeStep === "paper";
-    if (paperTimeStep
-      && time_s - this.lastTime_s < CM12_PAPER_DT_S - 1e-9) return false;
-    const dt_s = paperTimeStep
-      ? CM12_PAPER_DT_S
-      : Math.min(this.scene.numerics.maxDt_s, time_s - this.lastTime_s);
-    if (!(dt_s > 0)) return false;
-    const cellSize_m = finestCellSize(this.scene, this.atlas);
   /** Every atlas-derived counter, from whatever last changed the atlas. */
   private publishAtlasStats(): void {
     const stats = sparseBrickAtlasStats(this.atlas);
@@ -298,6 +303,17 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
     this.presentation.upload(atlasMaterialization(this.atlas, this.scene, this.dynamics));
   }
 
+  advanceTo(time_s: number, _bodies: RigidBodyState[]): boolean {
+    void _bodies;
+    if (this.disposed || !Number.isFinite(time_s) || time_s <= this.lastTime_s + 1e-9) return false;
+    const paperTimeStep = this.options.timeStep === "paper";
+    if (paperTimeStep
+      && time_s - this.lastTime_s < CM12_PAPER_DT_S - 1e-9) return false;
+    const dt_s = paperTimeStep
+      ? CM12_PAPER_DT_S
+      : Math.min(this.scene.numerics.maxDt_s, time_s - this.lastTime_s);
+    if (!(dt_s > 0)) return false;
+    const cellSize_m = finestCellSize(this.scene, this.atlas);
     const gravity = this.scene.fluid.gravity_m_s2;
     const instrumentation = usePerformanceInstrumentationStore.getState();
     const traceRequestedAt_ms = instrumentation.enabled ? performance.now() : 0;
@@ -311,12 +327,13 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       : undefined;
     const step = stepSparseAtlasDynamics(this.dynamics, {
       dt_s,
+      finestCellSize_m: cellSize_m,
+      resolutionMode: this.options.resolutionMode,
       accelerationFinePerSecond2: [
         gravity.x / cellSize_m,
         gravity.y / cellSize_m,
         gravity.z / cellSize_m,
       ],
-      maximumCfl: 0.8,
       projection: {
         // The public physics gate is 1e-8. A 100x guard band avoids spending
         // CPU-reference frame time on invisible residual digits while keeping
@@ -341,11 +358,26 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
     this.info.lastSubsteps = step.stats.transportSubsteps;
     this.info.maxComponentCfl = step.stats.maximumOutgoingCfl;
     this.info.adaptiveMixedSeamFaceCount = projection?.receipt.mixedSeamRowCount ?? 0;
+    this.info.adaptiveActivityMaximumScore = step.stats.resolutionPolicy.maximumScoreByte;
+    this.info.adaptiveActivitySurfaceBrickCount =
+      step.stats.resolutionPolicy.surfaceBrickCount;
+    this.info.adaptiveActivityHotBrickCount = step.stats.resolutionPolicy.hotBrickCount;
+    this.info.adaptiveActivityQuietBrickCount = step.stats.resolutionPolicy.quietBrickCount;
+    this.info.adaptiveResolutionTopologyEpoch = step.stats.resolutionPolicy.topologyEpoch;
+    this.info.adaptiveResolutionPromotedBrickCount =
+      step.stats.resolutionPolicy.promotedBrickCount;
+    this.info.adaptiveResolutionDemotedBrickCount =
+      step.stats.resolutionPolicy.demotedBrickCount;
+    this.info.adaptiveResolutionDeferredPromotionCount =
+      step.stats.resolutionPolicy.deferredPromotionCount;
     this.info.hostSimulationSizedWorkItems = step.stats.workCellCount
       + step.stats.workFaceCount;
     const adaptiveInfo = this.info as typeof this.info & AdaptiveMassStepTelemetry;
     adaptiveInfo.adaptiveKineticEnergyBeforeFineUnits = step.stats.kineticEnergyBefore;
     adaptiveInfo.adaptiveKineticEnergyAfterFineUnits = step.stats.kineticEnergyAfter;
+    adaptiveInfo.adaptiveMaximumDensityAfterTransport =
+      step.stats.maximumDensityAfterTransport;
+    adaptiveInfo.adaptiveMaximumDensityAfterConditioning = step.stats.maximumDensity;
     frameCapture?.completeStateCommit();
     const materialization = atlasMaterialization(
       this.atlas, this.scene, this.dynamics, step.projection, dt_s,
@@ -424,11 +456,20 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
   }
 }
 
-function boundedPresentationDimensions(scene: SceneDescription): SparseBrickVec3 {
+export function adaptiveMassPresentationDimensionsForScene(
+  scene: SceneDescription,
+): SparseBrickVec3 {
   const authored = sceneLatticeDimensions(scene);
-  const scale = Math.min(1, 64 / Math.max(...authored));
-  return authored.map((value) => Math.max(8, Math.min(64,
-    Math.max(1, Math.round(value * scale / 8)) * 8))) as [number, number, number];
+  const cells = authored[0] * authored[1] * authored[2];
+  if (cells > ADAPTIVE_MASS_DENSE_PRESENTATION_MAXIMUM_CELLS) {
+    throw new RangeError(
+      `Sparse CM12 authored lattice ${authored.join("x")} has ${cells} cells, `
+      + `above the temporary dense presentation bridge budget `
+      + `${ADAPTIVE_MASS_DENSE_PRESENTATION_MAXIMUM_CELLS}. Physics resolution `
+      + "will not be silently reduced; use the compact sparse surface-page publisher.",
+    );
+  }
+  return authored;
 }
 
 function atlasMaterialization(

@@ -2,17 +2,21 @@
 
 Implementation research and plan, 2026-08-14
 
-Status: Milestone 1 implementation in progress. The existing uniform method
-remains the behavioral oracle and is not the implementation substrate.
+Status: Sparse CM12 is interactive and the two-level composite method is
+numerically operational. The current authority is still a CPU implementation
+published through WebGPU textures; the GPU-resident topology, transport, and
+pressure pipelines described below remain the production target. The existing
+uniform method remains the behavioral oracle and is not the implementation
+substrate.
 
 Current implementation checkpoint (2026-08-14):
 
 - CM12 constants and pure formulas live in `lib/core/cm12-numerics.ts` and are
   consumed by the production uniform shaders and the adaptive CPU oracles.
-- One row builder covers the `8+8`, `4+4`, `8+4`, and reflected `4+8`
-  two-tile pressure topologies on x/y/z. The mixed seam has one authoritative
-  five-cell port per coarse face patch and derives divergence as the weighted
-  negative transpose of its gradient.
+- One row builder now covers arbitrary sparse `8^3`/`4^3` atlases as well as
+  the original `8+8`, `4+4`, `8+4`, and reflected `4+8` two-tile controls. The
+  mixed seam has one authoritative five-cell port per coarse face patch and
+  derives divergence as the weighted negative transpose of its gradient.
 - Focused executable receipts cover algebraic A/B symmetry, a matrix-free
   pressure projection, volume-weighted conservative transport with persistent
   gamma, and WGSL pressure-operator parity. `npm run
@@ -21,11 +25,21 @@ Current implementation checkpoint (2026-08-14):
 - Free-surface pressure (using one SPD ghost fraction per composite row),
   composite gamma diffusion/sharpening, GPU transport-operator parity, and a
   symmetric density-slice A/B are now executable companion receipts.
-- This is not yet the completed production method. GPU-authored arbitrary
-  characteristics, velocity advection/extension, a GPU pressure solve, solid
-  coupling, and a fully coupled rendered CM12 step remain open.
+- The interactive solver omits empty bricks, activates face-local transport
+  receivers, conservatively transports density/gamma/momentum, conditions the
+  CM12 surface, and projects one globally coupled composite pressure system.
+  A two-second mixed-resolution symmetric-expansion receipt is stable and the
+  matched mini-dam performance lane is inside the `1.20x` median target.
+- Resolution is not yet adaptive in the production sense. Construction uses a
+  component-size bootstrap plus an optional deterministic fine seam seed;
+  moving surface bricks are promoted immediately and never demoted. This is a
+  correctness scaffold, not an activity policy.
+- GPU-authored topology/classification, GPU transport and pressure authority,
+  dynamic demotion, solid coupling, and compact sparse surface publication
+  remain open.
 
 Working method id: `adaptive-mass`
+User-facing method name: `Sparse CM12`
 
 ## 1. Decision
 
@@ -834,7 +848,7 @@ lib/methods/adaptive-mass/
 
 ## 12. From the seam to the full sparse method
 
-### M2 — Sparse single-resolution residency
+### M2 — GPU sparse single-resolution residency
 
 Keep every resident tile at `8^3` and add GPU-authored occupancy:
 
@@ -851,55 +865,217 @@ Keep every resident tile at `8^3` and add GPU-authored occupancy:
 M2 proves the first user goal: two disconnected droplets cost their occupied
 and support tiles, not the enclosing AABB. An empty scene has zero physics work.
 
-### M3 — Dynamic per-tile resolution
+### M3 — Dynamic two-level resolution controller
 
-Enable levels 0–3 using the already-proven M1 seam:
+The detailed first-rung specification is colocated with the method at
+[`surface-activity-resolution-policy.md`](../lib/methods/adaptive-mass/surface-activity-resolution-policy.md).
+This section is the architectural contract and takes precedence if an older
+prototype or benchmark policy disagrees with it.
 
-- Refine immediately when physics requires it.
-- Coarsen one level per topology epoch after hysteresis.
-- Enforce 2:1 face-neighbor grading before publication.
-- Sum child mass exactly on coarsening.
-- Use limited density prolongation plus deterministic integer remainder on
-  refinement.
-- Restrict face velocity by area-weighted flux; prolong with a correction so
-  child integrated flux equals the parent flux.
-- Restrict gamma by volume and keep pressure only as a warm start.
-- Run the composite pressure solve over all leaf cells and seam ports.
+#### M3.1 Keep residency, accuracy floors, and activity separate
 
-Topology is double-buffered. A candidate generation is invisible to physics
-until directory entries, descriptors, fields, worksets, and all receipts agree.
-Capacity failure keeps the last valid generation; it never publishes a partial
-mesh.
+Three independent questions produce the next topology:
 
-### M4 — Physics-driven resolution policy
+1. **Residency:** must this logical brick exist for wet mass, pressure
+   connectivity, velocity extension, a swept characteristic, or a prescribed
+   source? If not, it is absent and receives zero physics or classification
+   work.
+2. **Accuracy floor:** what is the coarsest representation that is safe even if
+   the flow is currently calm? Free surface, unresolved fine detail,
+   solid/inflow proximity, and a predicted interface arrival can impose a hard
+   `8^3` floor.
+3. **Activity:** does accepted state show enough deformation or temporal change
+   to promote, retain fine resolution, or begin cooling toward `4^3`?
 
-Separate support from accuracy.
+Do not fold these into one average. A nearly stationary thin sheet is calm but
+not safely coarse. A uniformly translating saturated block is moving but does
+not need fine interior cells. A dry swept receiver must exist even before it
+contains mass, but it need not enter the pressure workset.
 
-Support score answers “must this tile exist?” and includes wet cells, interface
-band, pressure connectivity, solid/inflow reach, and swept characteristics.
+The first production rung has only `4^3` and `8^3` leaves. More levels wait
+until repeated two-level promote/demote cycles pass every conservation,
+symmetry, stability, and frame-time gate.
 
-Accuracy score answers “which level may represent it?” and uses maxima, not
-averages, of dimensionless indicators:
+#### M3.2 First-rung state machine
 
-- interface presence and projected curvature;
-- normalized strain, vorticity, and velocity-gradient variation;
-- divergence and pressure residual;
-- solid/cut/inflow proximity;
-- unresolved mass variance under trial restriction;
-- protected wavelength/detail history.
+Every resident brick has compact persistent policy state:
 
-Raw speed alone does not request refinement: uniform translation needs a larger
-support closure but not smaller cells.
+| State | Meaning | Allowed next states |
+|---|---|---|
+| `CoarseCalm` | `4^3`, below all floors and thresholds | `CoarseWatch`, `PromotePending` |
+| `CoarseWatch` | `4^3`, activity rising but below a hard floor | `CoarseCalm`, `PromotePending` |
+| `FineActive` | `8^3`, protected by a floor or recent activity | `FineCooling` |
+| `FineCooling` | `8^3`, quiet but still inside demotion hysteresis | `FineActive`, `DemotePending` |
+| `PromotePending` | candidate `4^3 -> 8^3` transaction | `FineActive` or rollback |
+| `DemotePending` | candidate `8^3 -> 4^3` transaction | `CoarseCalm` or rollback |
 
-Initial safety floors:
+Absence is directory state, not a resolution state. Transitions are decided
+from one immutable accepted snapshot; one brick's decision cannot mutate the
+inputs used by another brick in the same epoch.
 
-- interface, moving solid/cut cells, and inflow: finest;
-- one graded guard tile around those regions;
-- deep calm liquid may coarsen;
-- no surface coarsening until M3 pressure/transport artifacts pass.
+Run the cheap measurement/history pass after every accepted step. Run topology
+planning every four accepted steps, or earlier for a hard prediction/emergency.
+Initial thresholds are:
 
-Use per-tile maximum error and temporal hysteresis. One high-curvature corner
-must not disappear because 511 quiet cells dilute an average.
+```text
+promote: score >= 160 / 255 for 2 topology epochs
+emergency promote: score >= 224 / 255 immediately
+demote: score <= 96 / 255 for 8 topology epochs
+demotion veto: fine-to-coarse restriction error > 0.08
+```
+
+Promotion wins every conflict. Demotion is at most one level per epoch. A
+topology or history discontinuity resets quiet history rather than treating
+missing evidence as calm. No brick may reverse its last transition before its
+cooldown expires unless a hard safety floor requests promotion.
+
+#### M3.3 Conservative surface-first rollout
+
+The rollout intentionally starts more conservative than the eventual policy:
+
+1. **Rung A — fine interface, adaptive bulk.** Every brick containing
+   `0.05 < rho < 0.95` or a composite row crossing `rho = 0.5` is `8^3`.
+   Bricks reachable by the interface before the next topology epoch are also
+   `8^3`. Deep saturated liquid may demote after hysteresis and a restriction
+   veto. This replaces component-size bootstrap coarsening first.
+2. **Rung B — activity-sized surface.** A planar, slowly changing surface may
+   become `4^3` only after a composite restriction estimator predicts bounded
+   density, normal, flux, and silhouette error. Curved, thin, breaking, or
+   rapidly moving surface remains fine. This rung cannot relax Rung A gates.
+3. **Rung C — additional levels.** Introduce `2^3` only after grading closure,
+   transfer, and pressure conditioning survive the same long runs. Never jump
+   across a level.
+
+New face-local receivers start fine in Rung A. This is deliberate: the current
+implementation showed that creating a coarse receiver can erase the advancing
+surface before a later classifier has evidence to recover it. Rung B may create
+a coarse receiver only when the swept-interface predictor proves no surface
+can enter it before the following epoch.
+
+A method-level seam sentinel may pin one fine brick, or a complete D4 orbit, for
+diagnostic A/B scenes. It is explicit in policy telemetry and is off for
+production and physics comparisons. The present `fineHalf` and component-size
+bootstrap are deleted once the sentinel and real classifier land.
+
+### M4 — Physics-driven measurement, planning, and transfer
+
+#### M4.1 Compact activity measurement
+
+Classification reads accepted compact leaves and composite rows. It never
+materializes or scans the finest presentation volume. Per-brick reductions use
+maxima and reason bits, not averages:
+
+- **surface shape:** density-normal variation and projected curvature;
+- **deformation:** normalized strain, vorticity, and velocity-gradient
+  variation;
+- **temporal change:** overlap-matched density and normal change since the last
+  accepted observation;
+- **transport prediction:** characteristic reach before the next topology
+  epoch and local CFL;
+- **solver trouble:** post-projection divergence, pressure residual, or an
+  iteration spike localized to the brick/incident ports;
+- **fine-detail veto:** error produced by trial volume restriction followed by
+  the exact current prolongation operator;
+- **hard reasons:** interface, solid/cut/inflow, protected detail, unknown
+  history, and diagnostic seam sentinel.
+
+Raw speed is not a refinement signal. It affects swept support and arrival
+prediction, while strain/variation determine accuracy. All channels are
+dimensionless, axis symmetric, byte quantized with round-to-nearest-even, and
+published with a policy version and threshold receipt.
+
+#### M4.2 Budgeted, symmetry-preserving planning
+
+A `4^3 -> 8^3` promotion adds 448 leaves. Plan in leaf deltas rather than brick
+counts and cap ordinary promotion per epoch to:
+
+```text
+clamp(max(448, floor(0.10 * acceptedLeafCount)), 448, 8 * 448)
+```
+
+Consume complete equal-score/equal-reason buckets. If a bucket does not fit,
+defer the whole bucket; do not split an exactly symmetric D4 orbit by brick key.
+Emergency and predicted-surface requests may exceed the soft frame budget,
+because knowingly advecting an interface into an under-resolved receiver is a
+correctness failure. A hard slot-capacity miss rejects the step and keeps the
+accepted generation.
+
+Before transfer, close the plan under face-neighbor grading. With only `4^3`
+and `8^3` this is validation; with later rungs it becomes a fixpoint promotion
+pass. Omitted air is not assigned a level merely to satisfy grading.
+
+#### M4.3 Exact transition transaction
+
+Build a candidate generation beside the accepted state:
+
+- `8^3 -> 4^3`: volume-average density and gamma; sum liquid momentum then
+  divide by mass; area-average authoritative normal face flux; volume-average
+  pressure only as a warm start.
+- `4^3 -> 8^3`: first use conservative constant injection for density, gamma,
+  and momentum; inject parent flux to child subfaces; initialize internal faces
+  from the injected field. Limited-linear prolongation is a later accuracy
+  improvement, never a prerequisite for conservation.
+- Transfer history by exact overlap. Children inherit hot/protected evidence
+  and zero quiet age; a parent receives the maximum child score, union of
+  reasons, minimum quiet age, and zero hot age.
+- Rebuild only affected brick/seam descriptors, remap the pressure warm start,
+  and run the same global composite projection. Pressure itself is not a
+  conserved quantity.
+
+Validate mass, gamma integral, XYZ momentum, exterior flux, finite bounds,
+grading, unique ownership, pressure convergence, and post-projection
+divergence. Conservation is checked on the transferred candidate before
+projection. The subsequent pressure impulse is reported separately so a
+legitimate boundary/free-surface impulse is not mislabeled as transfer error.
+Also record the kinetic-energy change caused solely by transfer: coarsening may
+remove unresolved energy, but it may not create energy beyond roundoff and its
+loss must be bounded by the measured restriction error. The zero-time
+projection then has its own energy/impulse identity.
+
+Only after every receipt passes does one generation word atomically publish
+directory entries, levels, fields, worksets, policy history, and diagnostics.
+Any failure leaves the previous accepted state fully usable. There is no
+partial resolution change and no global mass rescale.
+
+#### M4.4 Adaptive acceptance matrix
+
+Every case has forced-all-fine Sparse CM12, forced-all-coarse where meaningful,
+adaptive Sparse CM12, and Uniform CM12 controls at the same finest resolution
+and exact time step:
+
+1. **Settling pool:** surface stays fine, saturated bulk demotes, transition
+   count reaches zero, and hydrostatic pressure remains quiet for two seconds.
+2. **Translating slab:** predicted receivers promote before the interface
+   arrives; bricks behind the slab cool and demote without a mass or momentum
+   step.
+3. **Wake/sleep pulse:** one compact impulse promotes the affected region; it
+   remains fine through cooldown and returns to coarse exactly once.
+4. **Slosh:** repeatedly changing normals do not chatter levels or accumulate a
+   pressure/energy pulse at mixed seams.
+5. **Thin sheet and droplet:** restriction-error veto prevents irreversible
+   loss even when instantaneous velocity is small.
+6. **Dam break and impact:** rapid activation may use emergency budget but must
+   keep mass, pressure convergence, and frame timing explicit.
+7. **D4 symmetric expansion, at least two seconds:** resolution, activity,
+   reasons, and history are D4 equivariant at every epoch; density, velocity,
+   pressure, divergence, topology, and connectivity retain their existing
+   long-run gates.
+8. **Empty/disconnected:** empty has zero policy work; separated bodies do not
+   force resolution or residency in the space between them.
+
+Hard transition gates are exact CPU/double closure and `<= 5e-7` GPU/float32
+relative error for pre-projection density, gamma, XYZ momentum, and exterior
+flux; no nonfinite or invalid density/gamma value; no topology-only
+kinetic-energy increase above roundoff; a closed projection impulse/energy
+identity; unchanged pressure residual/divergence tolerances; and no reversed
+transition inside cooldown. A transition pressure solve may not exceed the
+greater of eight extra iterations or `1.5x` the preceding steady-topology
+iteration count without publishing a performance failure.
+
+Adaptation must also be useful: after the settling interval, at least 60% of
+eligible saturated bulk bricks are coarse, while every Rung A interface and
+predicted receiver is fine. A controller that passes by retaining everything
+at `8^3` fails.
 
 ### M5 — Camera-driven resolution
 
@@ -1000,6 +1176,34 @@ generation.
 No step performs a synchronous CPU readback. Diagnostics copy compact receipts
 asynchronously after physics publication.
 
+### 13.5 Resolution epochs on the GPU
+
+The production controller is a method-colocated frame-pipeline plugin, not a
+CPU policy loop hidden inside `advanceTo`:
+
+```text
+accepted compact state
+  -> per-brick measure + history update                 every accepted step
+  -> mark requests + score buckets                      topology epoch only
+  -> scan/scatter budgeted requests + grading closure   topology epoch only
+  -> allocate candidate slots + conservative transfer   changed bricks only
+  -> patch affected regular/seam blocks and worksets     changed neighborhood
+  -> global composite projection                         candidate topology
+  -> validate receipts -> atomic publish or rollback
+```
+
+Use stable brick slots and per-brick row blocks so a one-brick transition does
+not renumber every leaf or rebuild the complete pressure graph. Unchanged
+regular interiors and seam blocks retain their descriptors; only the changed
+brick and its face neighbors are regenerated. PCG vectors use stable leaf slots
+plus compact active worklists, and the pressure warm start is overlap-remapped
+without a host map.
+
+The current CPU oracle may rebuild a complete candidate graph while proving the
+transaction. That is not acceptable as the final GPU execution path. It must
+remain visibly separated in timing telemetry so an oracle convenience cannot
+silently become production topology cost.
+
 ## 14. Performance plan
 
 ### 14.1 Measurements
@@ -1014,7 +1218,14 @@ Measure per adapter and scene:
 - topology, transport, extension, pressure, and presentation GPU time;
 - pressure applications and residual reduction;
 - bytes allocated, resident, and touched;
-- occupancy fraction and sparse-versus-uniform break-even.
+- occupancy fraction and sparse-versus-uniform break-even;
+- activity score/reason histograms and bricks in each lifecycle state;
+- requested, budgeted, deferred, promoted, demoted, and grading-closure counts;
+- classifier/history, planning, transfer, row-patch, and post-transition
+  projection time;
+- pressure iterations and warm-start residual before/after every resolution
+  epoch;
+- topology-induced mass, momentum, flux, and kinetic-energy deltas.
 
 Primary targets should include the repository's Apple M1 Max path and at least
 one discrete NVIDIA or AMD WebGPU adapter. Tune pipeline variants from measured
@@ -1031,8 +1242,34 @@ adapter limits; do not hard-code a CUDA warp model.
   one system.
 - High occupancy is reported honestly. If sparse overhead loses to uniform,
   telemetry should make the crossover visible rather than masking it.
+- A no-change activity epoch performs no allocation, field transfer, or
+  pressure-topology rebuild.
+- Transition cost scales with changed bricks plus their seam neighborhood, not
+  all resident leaves.
+- Resolution budgets bound ordinary frame spikes. Predicted activation should
+  make emergency budget overruns rare and independently visible.
 
-### 14.3 Optimization order
+### 14.3 Frame-time contract
+
+At a given finest authored resolution and time step, compare complete captured
+physics frames against Uniform CM12 after construction and warm-up:
+
+- target median Sparse CM12 frame `<= 1.20x` uniform;
+- hard median cap `<= 1.30x` uniform;
+- p95 Sparse CM12 frame `<= 1.30x` uniform;
+- classifier plus history `<= 5%` of Sparse frame and `<= 0.25 ms` median on
+  the reference adapter;
+- no-change topology epoch `<= 2%` of frame and performs zero allocation;
+- candidate planning/transfer/patch work `<= 10%` amortized over the default
+  four-step cadence;
+- after a settling scene becomes calm, transition count must converge to zero.
+
+The hard comparison includes pressure-iteration effects caused by the adaptive
+topology; reporting a fast classifier beside a much slower solve is a failure.
+Publish p50/p95 stage timings on the pipeline graph and keep a forced-all-fine
+Sparse arm to distinguish sparse bookkeeping overhead from useful coarsening.
+
+### 14.4 Optimization order
 
 1. Remove unnecessary work and copies.
 2. Separate regular and seam paths.
@@ -1051,6 +1288,11 @@ Each accepted step publishes compact receipts:
 
 - topology generation/status/capacity;
 - resident and per-stage counts;
+- fine/coarse counts, lifecycle-state counts, and exact mixed-level adjacency;
+- activity score/reason histogram, history age, hard-floor count, and policy
+  version/thresholds;
+- requested/deferred/promoted/demoted/sentinel/balance-closure keys or compact
+  counts, plus ordinary/emergency leaf-budget use;
 - missing/stale/duplicate directory references;
 - transport source, deposited, source/sink, and remainder mass;
 - sharpening and solid-excess debits/credits;
@@ -1058,6 +1300,8 @@ Each accepted step publishes compact receipts:
 - post-projection volume-weighted divergence norms;
 - negative/degenerate free-surface seam weights;
 - refinement/coarsening mass and flux closure;
+- refinement/coarsening momentum and kinetic-energy deltas;
+- pressure warm-start residual and iteration delta across a topology epoch;
 - first failing tile/cell/port ID.
 
 Failures are fail-closed:
@@ -1091,6 +1335,21 @@ Failures are fail-closed:
    must cover swept traces before the step.
 7. **Presentation can re-densify the method.** A dense volume publication is
    test-only; production rendering must consume sparse adaptive surface data.
+8. **Resolution chatter.** Threshold-only selection can rebuild topology every
+   few frames and inject transfer/projection noise. Use asymmetric hysteresis,
+   cooldown, immutable decisions, and a no-ping-pong acceptance lane.
+9. **Late promotion loses detail permanently.** Constant prolongation cannot
+   recreate a sheet or curvature already averaged into `4^3`. Predict interface
+   arrival, preserve unknown/history evidence, and veto demotion with trial
+   restriction error.
+10. **Topology changes destabilize pressure.** Changed conditioning or a poor
+    warm start can make an otherwise cheap adaptation dominate the frame or
+    produce visible boiling. Reproject every candidate globally, gate pressure
+    iterations/residual/divergence, and retain the previous generation on
+    failure.
+11. **Averaging velocity creates energy.** Transfer authoritative normal flux
+    and liquid momentum, not presentation/collocated velocity alone. Record the
+    topology-only energy delta and reject artificial energy gain.
 
 ### Approaches rejected up front
 
@@ -1116,9 +1375,10 @@ two-tile domain, all hard algebra/conservation/stability gates pass, the mixed
 result beats the all-coarse control against a fine-uniform reference, and no
 seam is visible in the prescribed renders or diagnostics.
 
-### New method
+### Production GPU method
 
-The new method is ready for interactive registration when:
+The interactive CPU authority can be replaced by the production GPU authority
+when:
 
 - M1 seam gates remain green under the production composite operator;
 - M2 proves zero physics work for empty tiles and sparse memory authority;
@@ -1134,16 +1394,53 @@ Camera-driven surface LOD and separating rigid coupling can then graduate in
 their own gated rungs rather than delaying validation of the fundamental sparse
 multiresolution liquid method.
 
+### Dynamic-resolution rung
+
+The first adaptive calm/active rung is done only when:
+
+- component-size bootstrap coarsening and implicit `fineHalf` policy are absent
+  from production selection;
+- the same accepted snapshot produces byte-identical score, reason, history,
+  and resolution maps under x/z D4 transformations;
+- interface/predicted receivers promote before mass arrives, while deep liquid
+  demonstrably demotes after settling;
+- every transition closes density, gamma, momentum, and exterior flux and is
+  followed by a converged global projection;
+- a two-second symmetric expansion, translating slab, slosh, droplet impact,
+  and settling pool show no boiling, seam crease, pressure spike, or topology
+  ping-pong;
+- the adaptive result remains between the all-coarse and finest-uniform
+  controls for interface shape, centroid/spread, and kinetic energy, and moves
+  closer to finest-uniform as the fine region grows;
+- mini dam break and symmetric expansion satisfy the complete p50/p95 frame
+  contract, including topology epochs and pressure-iteration spikes;
+- a settled pool reaches zero transitions and a materially coarse bulk, rather
+  than passing stability by remaining all fine.
+
 ## 18. Immediate next actions
 
-1. Check in this numerical contract and name the working method package.
-2. Restore/capture the smallest uniform CPU/GPU oracle vectors needed by M1.0.
-3. Implement the two-tile graph and print every one of the 16 seam-port rows.
-4. Prove the composite `G^T W G` operator against a dense assembled CPU matrix.
-5. Implement and compare the two volume-aware gamma seam exchanges.
-6. Freeze the M1 ABI only after those results.
-7. Implement GPU state/worksets and projection before transport.
-8. Add transport, exact receipts, complete stepping, and regression artifacts.
+1. Preserve the current fixed-topology two-second symmetry, long-run A/B, and
+   matched frame receipts as the pre-adaptation baseline.
+2. Replace construction-time component-size coarsening with the Rung A CPU
+   oracle: fine interface/predicted receivers, hysteretic deep-liquid demotion,
+   conservative transfers, global reprojection, and rollback.
+3. Add translating-interface, settling-pool, slosh, and repeated wake/sleep CPU
+   receipts. Capture resolution/history maps at every epoch, not just final
+   fluid fields.
+4. Add method-colocated classifier/planner/transfer/row-patch stages to the
+   frame graph so topology costs and pressure iteration spikes are visible.
+5. Implement compact GPU measurement and history first. A no-change epoch must
+   pass the zero-allocation and frame-overhead gates before GPU transfer lands.
+6. Implement GPU candidate allocation and exact `8^3 <-> 4^3` transfer, patch
+   only changed descriptor neighborhoods, reproject, validate, and atomically
+   publish.
+7. Remove `fineHalf` from production policy; retain only an explicit off-by-
+   default seam sentinel for diagnostics.
+8. Run two-second symmetry and mini-dam matched A/B lanes with forced-all-fine,
+   adaptive, and uniform controls. Tune thresholds only from stored receipts.
+9. Only after Rung A is stable, useful, and inside the frame contract, research
+   Rung B calm-planar-surface coarsening and then camera advice.
 
-The critical path is numerical seam correctness. Dynamic topology, camera
-policy, and aggressive kernel optimization begin after that evidence exists.
+The critical path is now stable, incremental resolution change—not additional
+seam algebra. Correctness requires conservative transfer and global projection;
+performance requires compact classification and local topology patching.

@@ -21,6 +21,8 @@ export function adaptiveMassDiagnosticRows(
 ): readonly DiagnosticRow[] {
   const axis = labelValue(values.seamAxis, ["x", "y", "z"], "x");
   const fineSide = labelValue(values.fineSide, ["negative", "positive"], "negative");
+  const allFine = values.resolutionMode === "all-fine";
+  const allCoarse = values.resolutionMode === "all-coarse";
   const resident = info?.fluidBrickResidentCount;
   const capacity = info?.fluidBrickCapacity;
   const divergence = info?.maxDivergenceAfter_s;
@@ -29,10 +31,23 @@ export function adaptiveMassDiagnosticRows(
   return [
     {
       id: "resolution-split",
-      label: "Fine seam seed",
-      value: `8³ ${fineSide} ${axis}`,
-      unit: "one retained seed per large component · 4³ neighbours",
-      tone: "neutral",
+      label: "Adaptive resolution",
+      value: info?.adaptiveFineBrickCount !== undefined
+        ? `${info.adaptiveFineBrickCount} fine · ${info.adaptiveCoarseBrickCount ?? 0} coarse`
+        : allFine ? "all resident tiles 8³"
+          : allCoarse ? "all resident tiles 4³" : `seed 8³ ${fineSide} ${axis}`,
+      unit: info?.adaptiveResolutionTopologyEpoch
+        ? `${info.adaptiveResolutionPromotedBrickCount ?? 0} promoted · ${info.adaptiveResolutionDemotedBrickCount ?? 0} demoted this epoch`
+        : `${info?.adaptiveActivitySurfaceBrickCount ?? 0} surface · score ${info?.adaptiveActivityMaximumScore ?? 0}/255`,
+      tone: (allFine && (info?.adaptiveCoarseBrickCount ?? 0) > 0)
+        || (allCoarse && (info?.adaptiveFineBrickCount ?? 0) > 0) ? "warn" : "good",
+    },
+    {
+      id: "resolution-activity",
+      label: "Calm / active policy",
+      value: `${info?.adaptiveActivityHotBrickCount ?? 0} hot · ${info?.adaptiveActivityQuietBrickCount ?? 0} quiet`,
+      unit: `${info?.adaptiveResolutionDeferredPromotionCount ?? 0} deferred promotions · topology every 4 accepted steps`,
+      tone: (info?.adaptiveResolutionDeferredPromotionCount ?? 0) > 0 ? "warn" : "neutral",
     },
     {
       id: "sparse-residency",

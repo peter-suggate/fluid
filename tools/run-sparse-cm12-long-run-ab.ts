@@ -9,27 +9,47 @@
  *   WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js \
  *     node --import tsx tools/run-sparse-cm12-long-run-ab.ts --seconds=2
  *
- * UI-sized timestep stress:
+ * Force every sparse tile one rung coarser and compare it either to the full
+ * fine Uniform grid or the physically equivalent reduced Uniform grid:
+ *   ... --sparse-resolution=all-coarse --uniform-resolution=fine
+ *   ... --sparse-resolution=all-coarse --uniform-resolution=matched
+ *
+ * Uncalibrated UI-sized timestep stress:
  *   WEBGPU_NODE_MODULE=$PWD/node_modules/webgpu/index.js \
- *     node --import tsx tools/run-sparse-cm12-long-run-ab.ts --seconds=2 --dt=0.033
+ *     node --import tsx tools/run-sparse-cm12-long-run-ab.ts --seconds=2 --regime=scene --dt=0.004
  */
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { MethodParamValues, SimulationMethod } from
   "../lib/core/method-contract";
 import { resolveMethodValues } from "../lib/core/method-contract";
+import { initialFluidBrickUnionBounds } from "../lib/core/initial-fluid";
 import { createSymmetricExpansionScene } from "../lib/core/scenes";
+import { sceneAtFinestCellSize } from "../lib/core/scene-scale";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
 import {
   acquireWebGPUExclusiveLock,
   releaseWebGPUExclusiveLock,
 } from "../lib/harness/webgpu-smoke-isolation";
 import { adaptiveMassMethod } from "../lib/methods/adaptive-mass/method";
+import type { AdaptiveMassResolutionMode } from
+  "../lib/methods/adaptive-mass/method";
 import type { AdaptiveMassStepTelemetry } from
   "../lib/methods/adaptive-mass/webgpu-adaptive-mass-solver";
 import { uniformMethod } from "../lib/methods/uniform/method";
 
 type Dimensions = readonly [number, number, number];
+type FixedSparseResolutionMode = Extract<
+  AdaptiveMassResolutionMode,
+  "all-fine" | "all-coarse"
+>;
+
+function fieldHash(values: Float32Array): string {
+  return createHash("sha256").update(new Uint8Array(
+    values.buffer, values.byteOffset, values.byteLength,
+  )).digest("hex");
+}
 
 const argument = (name: string): string | undefined => {
   const prefix = `--${name}=`;
@@ -76,6 +96,8 @@ interface StepReceipt {
   readonly maximumMixedSeamRows: number;
   readonly minimumEvolvedMixedSeamRows: number;
   readonly maximumFineCoarseConnectedPairs: number;
+  readonly maximumDensityAfterTransport: number;
+  readonly maximumDensityAfterConditioning: number;
 }
 
 interface MutableStepReceipt {
@@ -90,12 +112,25 @@ interface MutableStepReceipt {
   maximumMixedSeamRows: number;
   minimumEvolvedMixedSeamRows: number;
   maximumFineCoarseConnectedPairs: number;
+  maximumDensityAfterTransport: number;
+  maximumDensityAfterConditioning: number;
 }
 
 interface ArmReceipt {
   readonly method: string;
   readonly checkpoints: readonly FieldReceipt[];
   readonly evolution: StepReceipt;
+  readonly performance: {
+    readonly totalStepWallTime_ms: number;
+    readonly meanStepWallTime_ms: number;
+  };
+  readonly sparseTopology?: {
+    readonly maximumFineBrickCount: number;
+    readonly maximumCoarseBrickCount: number;
+    readonly maximumActiveCellCount: number;
+    readonly finalFineBrickCount: number;
+    readonly finalCoarseBrickCount: number;
+  };
 }
 
 async function readTexture(
@@ -145,6 +180,7 @@ function fieldReceipt(
   dimensions: Dimensions,
   initialMass: number,
   velocityLocation: "collocated" | "negative-mac",
+  cellVolumeInFineCells = 1,
 ): FieldReceipt {
   const [nx, ny, nz] = dimensions;
   let mass = 0;
@@ -165,10 +201,15 @@ function fieldReceipt(
       for (const component of [0, 1, 2] as const) {
         let value = velocity[4 * index + component];
         if (velocityLocation === "negative-mac") {
-          const positive = [x, y, z] as [number, number, number];
-          positive[component] += 1;
-          value = 0.5 * (value + (positive[component] < dimensions[component]
-            ? velocity[4 * cell(...positive) + component] : 0));
+          // velocityTexture stores the positive x/y/z face of this cell. The
+          // collocated value averages it with the previous cell's positive
+          // face (the current cell's negative face). Symmetric expansion is
+          // detached from the domain wall, so the omitted negative boundary
+          // buffer is zero in every density-weighted sample used here.
+          const negative = [x, y, z] as [number, number, number];
+          negative[component] -= 1;
+          value = 0.5 * (value + (negative[component] >= 0
+            ? velocity[4 * cell(...negative) + component] : 0));
         }
         collocated[3 * index + component] = value;
       }
@@ -181,6 +222,10 @@ function fieldReceipt(
     targetComponent: 0 | 1 | 2,
     sign: number,
   ) => {
+    // Post-projection air velocity is outside the liquid authority and is
+    // rebuilt by Sec. 3.3 before the next characteristic trace. Measuring it
+    // as fluid symmetry conflates inactive storage with physical momentum.
+    if (density[source] <= 0.5 && density[target] <= 0.5) return;
     velocitySymmetry = Math.max(velocitySymmetry, Math.abs(
       collocated[3 * target + targetComponent] - sign * collocated[3 * source + component],
     ));
@@ -189,20 +234,21 @@ function fieldReceipt(
     for (let x = 0; x < nx; x += 1) {
       const index = cell(x, y, z);
       const rho = density[index];
+      const weightedRho = cellVolumeInFineCells * rho;
       const speed = Math.hypot(
         collocated[3 * index], collocated[3 * index + 1], collocated[3 * index + 2],
       );
-      mass += rho;
+      mass += weightedRho;
       for (const [axis, coordinate] of [x, y, z].entries()) {
         const centered = coordinate + 0.5;
-        firstMoment[axis] += rho * centered;
-        secondMoment[axis] += rho * centered * centered;
+        firstMoment[axis] += weightedRho * centered;
+        secondMoment[axis] += weightedRho * centered * centered;
         if (rho > 1e-3) {
           supportMinimum[axis] = Math.min(supportMinimum[axis], coordinate);
           supportMaximum[axis] = Math.max(supportMaximum[axis], coordinate);
         }
       }
-      kinetic += 0.5 * rho * speed * speed;
+      kinetic += 0.5 * weightedRho * speed * speed;
       maximumDensity = Math.max(maximumDensity, rho);
       if (rho > 0.5) maximumLiquidSpeed = Math.max(maximumLiquidSpeed, speed);
       for (const target of [
@@ -255,19 +301,75 @@ function finiteOrZero(value: number | undefined): number {
   return value !== undefined && Number.isFinite(value) ? value : 0;
 }
 
+function downsampleNearest(
+  source: Float32Array,
+  sourceDimensions: Dimensions,
+  scale: number,
+  channels: 1 | 4,
+): { readonly values: Float32Array; readonly dimensions: Dimensions } {
+  if (scale === 1) return { values: source, dimensions: sourceDimensions };
+  const dimensions = sourceDimensions.map((value) =>
+    value / scale) as unknown as Dimensions;
+  const [sx, sy] = sourceDimensions;
+  const [nx, ny, nz] = dimensions;
+  const values = new Float32Array(channels * nx * ny * nz);
+  for (let z = 0; z < nz; z += 1) for (let y = 0; y < ny; y += 1) {
+    for (let x = 0; x < nx; x += 1) {
+      const sourceCell = scale * x + sx * (scale * y + sy * scale * z);
+      const targetCell = x + nx * (y + ny * z);
+      for (let channel = 0; channel < channels; channel += 1) {
+        values[channels * targetCell + channel] =
+          source[channels * sourceCell + channel];
+      }
+    }
+  }
+  return { values, dimensions };
+}
+
 async function runArm(
   device: GPUDevice,
   method: SimulationMethod,
   dimensions: Dimensions,
   dt_s: number,
   steps: number,
+  regime: "paper" | "scene",
+  latticeScale: 1 | 2,
+  sparseResolutionMode: FixedSparseResolutionMode,
+  onFinalFields?: (density: Float32Array, velocity: Float32Array) => void,
 ): Promise<ArmReceipt> {
-  const scene = createSymmetricExpansionScene();
+  const authoredScene = createSymmetricExpansionScene();
+  const scene = latticeScale === 1 ? authoredScene : sceneAtFinestCellSize(
+    authoredScene,
+    latticeScale * authoredScene.voxelDomain.finestCellSize_m,
+  );
+  if (latticeScale > 1) {
+    // An 8^3 seed is a storage primitive, not physical geometry. At the coarse
+    // Uniform lattice it would cover twice the intended width on every axis.
+    // The symmetric seed union is an exact box, so express that same authored
+    // volume as an offset dam box for this resolution-independent control arm.
+    const fineDimensions = dimensions.map((value) =>
+      value * latticeScale) as unknown as Dimensions;
+    const bounds = initialFluidBrickUnionBounds(authoredScene, fineDimensions);
+    assert.ok(bounds, "symmetric-expansion seed union must be an exact box");
+    scene.fluid.initialCondition = "dam-break";
+    scene.fluid.initialDamBreakDimensions_m = {
+      x: bounds.maximum.x - bounds.minimum.x,
+      y: bounds.maximum.y - bounds.minimum.y,
+      z: bounds.maximum.z - bounds.minimum.z,
+    };
+    scene.fluid.initialDamBreakOrigin_m = {
+      x: bounds.minimum.x + 0.5 * scene.container.width_m,
+      y: bounds.minimum.y,
+      z: bounds.minimum.z + 0.5 * scene.container.depth_m,
+    };
+    delete scene.fluid.initialBrickSeeds_m;
+    delete scene.fluid.initialBrickSeedsAdditive;
+  }
   scene.duration_s = steps * dt_s;
   scene.numerics.fixedDt_s = scene.numerics.maxDt_s = dt_s;
   const overrides: MethodParamValues = method.id === "uniform"
-    ? { timeStep: "scene", densityPostProcessing: "off" }
-    : { timeStep: "scene" };
+    ? { timeStep: regime, densityPostProcessing: "off" }
+    : { timeStep: regime, resolutionMode: sparseResolutionMode };
   const solver = await method.createSolverAsync!(
     device,
     scene,
@@ -289,30 +391,61 @@ async function runArm(
     maximumMixedSeamRows: 0,
     minimumEvolvedMixedSeamRows: Number.POSITIVE_INFINITY,
     maximumFineCoarseConnectedPairs: 0,
+    maximumDensityAfterTransport: 0,
+    maximumDensityAfterConditioning: 0,
   };
+  let maximumFineBrickCount = 0;
+  let maximumCoarseBrickCount = 0;
+  let maximumActiveCellCount = 0;
+  let finalFineBrickCount = 0;
+  let finalCoarseBrickCount = 0;
   try {
     assert.deepEqual([solver.info.nx, solver.info.ny, solver.info.nz], dimensions);
     let initialMass = 0;
     const capture = async (step: number) => {
       const density = await readTexture(device, solver.volumeTexture, dimensions, 1);
       const velocity = await readTexture(device, solver.velocityTexture!, dimensions, 4);
-      if (step === 0) for (const value of density) initialMass += value;
+      if (step === steps) onFinalFields?.(density, velocity);
+      const publicationScale = method.id === "adaptive-mass"
+        && sparseResolutionMode === "all-coarse" ? 2 : 1;
+      const analyzedDensity = downsampleNearest(
+        density, dimensions, publicationScale, 1,
+      );
+      const analyzedVelocity = downsampleNearest(
+        velocity, dimensions, publicationScale, 4,
+      );
+      const cellVolumeInFineCells = (latticeScale * publicationScale) ** 3;
+      if (step === 0) {
+        for (const value of analyzedDensity.values) {
+          initialMass += cellVolumeInFineCells * value;
+        }
+      }
       checkpoints.push(fieldReceipt(
         step,
         dt_s,
-        density,
-        velocity,
-        dimensions,
+        analyzedDensity.values,
+        analyzedVelocity.values,
+        analyzedDensity.dimensions,
         initialMass,
         method.id === "uniform" ? "negative-mac" : "collocated",
+        cellVolumeInFineCells,
       ));
     };
     await capture(0);
     const checkpointSteps = new Set([Math.floor(steps / 2), steps]);
+    const stepClockStart = performance.now();
     for (let step = 1; step <= steps; step += 1) {
       while (!solver.advanceTo(step * dt_s, [])) await new Promise(setImmediate);
       const info = await solver.readStats();
       const sparse = info as typeof info & AdaptiveMassStepTelemetry;
+      maximumFineBrickCount = Math.max(maximumFineBrickCount,
+        finiteOrZero(info.adaptiveFineBrickCount));
+      maximumCoarseBrickCount = Math.max(maximumCoarseBrickCount,
+        finiteOrZero(info.adaptiveCoarseBrickCount));
+      maximumActiveCellCount = Math.max(maximumActiveCellCount,
+        finiteOrZero(info.activeSampleCount));
+      finalFineBrickCount = finiteOrZero(info.adaptiveFineBrickCount);
+      finalCoarseBrickCount = finiteOrZero(info.adaptiveCoarseBrickCount);
       evolution.maximumPressureRelativeResidual = Math.max(
         evolution.maximumPressureRelativeResidual,
         finiteOrZero(info.pressureRelativeResidual),
@@ -359,21 +492,113 @@ async function runArm(
         evolution.maximumFineCoarseConnectedPairs,
         finiteOrZero(info.adaptiveFineCoarseFaceConnectedPairCount),
       );
+      evolution.maximumDensityAfterTransport = Math.max(
+        evolution.maximumDensityAfterTransport,
+        finiteOrZero(sparse.adaptiveMaximumDensityAfterTransport),
+      );
+      evolution.maximumDensityAfterConditioning = Math.max(
+        evolution.maximumDensityAfterConditioning,
+        finiteOrZero(sparse.adaptiveMaximumDensityAfterConditioning),
+      );
       if (checkpointSteps.has(step)) await capture(step);
     }
+    const totalStepWallTime_ms = performance.now() - stepClockStart;
     if (!Number.isFinite(evolution.minimumEvolvedMixedSeamRows)) {
       evolution.minimumEvolvedMixedSeamRows = 0;
     }
-    return { method: method.id, checkpoints, evolution };
+    return {
+      method: method.id,
+      checkpoints,
+      evolution,
+      performance: {
+        totalStepWallTime_ms,
+        meanStepWallTime_ms: totalStepWallTime_ms / steps,
+      },
+      sparseTopology: method.id === "adaptive-mass" ? {
+        maximumFineBrickCount,
+        maximumCoarseBrickCount,
+        maximumActiveCellCount,
+        finalFineBrickCount,
+        finalCoarseBrickCount,
+      } : undefined,
+    };
   } finally {
     solver.destroy();
   }
 }
 
-const dt_s = positiveNumber("dt", 0.004);
+function upsampleDensityNearest(
+  source: Float32Array,
+  sourceDimensions: Dimensions,
+  targetDimensions: Dimensions,
+): Float32Array {
+  if (sourceDimensions.every((value, axis) => value === targetDimensions[axis])) {
+    return source;
+  }
+  for (let axis = 0; axis < 3; axis += 1) {
+    if (targetDimensions[axis] % sourceDimensions[axis] !== 0) {
+      throw new RangeError("comparison grids must have integer refinement ratios");
+    }
+  }
+  const [sx, sy] = sourceDimensions;
+  const [tx, ty, tz] = targetDimensions;
+  const result = new Float32Array(tx * ty * tz);
+  for (let z = 0; z < tz; z += 1) for (let y = 0; y < ty; y += 1) {
+    for (let x = 0; x < tx; x += 1) {
+      const sourceX = Math.floor(x * sourceDimensions[0] / tx);
+      const sourceY = Math.floor(y * sourceDimensions[1] / ty);
+      const sourceZ = Math.floor(z * sourceDimensions[2] / tz);
+      result[x + tx * (y + ty * z)] = source[
+        sourceX + sx * (sourceY + sy * sourceZ)
+      ];
+    }
+  }
+  return result;
+}
+
+function d4SymmetrizedDensity(
+  source: Float32Array,
+  dimensions: Dimensions,
+): Float32Array {
+  const [nx, ny, nz] = dimensions;
+  if (nx !== nz) return source;
+  const cell = (x: number, y: number, z: number) => x + nx * (y + ny * z);
+  return Float32Array.from(source, (_, index) => {
+    const x = index % nx;
+    const y = Math.floor(index / nx) % ny;
+    const z = Math.floor(index / (nx * ny));
+    const reflectedX = nx - 1 - x, reflectedZ = nz - 1 - z;
+    return (
+      source[cell(x, y, z)] + source[cell(reflectedX, y, z)]
+      + source[cell(x, y, reflectedZ)] + source[cell(reflectedX, y, reflectedZ)]
+      + source[cell(z, y, x)] + source[cell(reflectedZ, y, x)]
+      + source[cell(z, y, reflectedX)] + source[cell(reflectedZ, y, reflectedX)]
+    ) / 8;
+  });
+}
+
+const regimeArgument = argument("regime") ?? "paper";
+if (regimeArgument !== "paper" && regimeArgument !== "scene") {
+  throw new RangeError("regime must be paper or scene");
+}
+const regime = regimeArgument;
+const dt_s = positiveNumber("dt", regime === "paper" ? 1 / 30 : 0.004);
 const target_s = positiveNumber("seconds", 2);
 const steps = Math.ceil(target_s / dt_s);
-const dimensions = [32, 16, 32] as const;
+const sparseResolutionArgument = argument("sparse-resolution") ?? "all-fine";
+if (sparseResolutionArgument !== "all-fine" && sparseResolutionArgument !== "all-coarse") {
+  throw new RangeError("sparse-resolution must be all-fine or all-coarse");
+}
+const sparseResolutionMode = sparseResolutionArgument;
+const uniformResolutionMode = argument("uniform-resolution") ?? "fine";
+if (uniformResolutionMode !== "fine" && uniformResolutionMode !== "matched") {
+  throw new RangeError("uniform-resolution must be fine or matched");
+}
+const fineDimensions = [32, 16, 32] as const;
+const uniformLatticeScale: 1 | 2 = uniformResolutionMode === "matched"
+  && sparseResolutionMode === "all-coarse" ? 2 : 1;
+const uniformDimensions = fineDimensions.map((value) =>
+  value / uniformLatticeScale) as unknown as Dimensions;
 await acquireWebGPUExclusiveLock("dawn-acceptance", "tools/run-sparse-cm12-long-run-ab.ts");
 try {
   const modulePath = process.env.WEBGPU_NODE_MODULE
@@ -396,8 +621,29 @@ try {
   const validationErrors: string[] = [];
   device.addEventListener("uncapturederror", (event) => validationErrors.push(event.error.message));
   try {
-    const uniform = await runArm(device, uniformMethod, dimensions, dt_s, steps);
-    const sparse = await runArm(device, adaptiveMassMethod, dimensions, dt_s, steps);
+    let uniformFinalDensity: Float32Array | undefined;
+    let uniformFinalVelocity: Float32Array | undefined;
+    let sparseFinalDensity: Float32Array | undefined;
+    let sparseFinalVelocity: Float32Array | undefined;
+    const uniform = await runArm(
+      device, uniformMethod, uniformDimensions, dt_s, steps, regime,
+      uniformLatticeScale, sparseResolutionMode,
+      (density, velocity) => {
+        uniformFinalDensity = density;
+        uniformFinalVelocity = velocity;
+      });
+    const sparse = await runArm(
+      device, adaptiveMassMethod, fineDimensions, dt_s, steps, regime,
+      1, sparseResolutionMode,
+      (density, velocity) => {
+        sparseFinalDensity = density;
+        sparseFinalVelocity = velocity;
+      });
+    assert.ok(uniformFinalDensity && uniformFinalVelocity
+      && sparseFinalDensity && sparseFinalVelocity);
+    uniformFinalDensity = upsampleDensityNearest(
+      uniformFinalDensity, uniformDimensions, fineDimensions,
+    );
     const failures: string[] = [];
     for (const arm of [uniform, sparse]) {
       const final = arm.checkpoints.at(-1)!;
@@ -412,10 +658,17 @@ try {
     if (sparse.evolution.maximumPostProjectionDivergence_s > 1e-5) failures.push("sparse: divergence");
     if (sparse.evolution.maximumMixedSeamDivergence_s > 1e-5) failures.push("sparse: seam divergence");
     if (sparse.evolution.maximumInactiveFaceSpeedAfter_m_s !== 0) failures.push("sparse: inactive face carry");
-    if (sparse.evolution.maximumMixedSeamRows === 0
-      || sparse.evolution.maximumFineCoarseConnectedPairs === 0) failures.push("sparse: mixed topology absent");
-    if (sparse.evolution.minimumEvolvedMixedSeamRows === 0) {
-      failures.push("sparse: connected mixed seam did not persist after activation");
+    if (sparse.evolution.maximumMixedSeamRows !== 0
+      || sparse.evolution.maximumFineCoarseConnectedPairs !== 0) {
+      failures.push(`sparse: ${sparseResolutionMode} mode produced a mixed-resolution seam`);
+    }
+    if (sparseResolutionMode === "all-fine"
+      && (sparse.sparseTopology?.maximumCoarseBrickCount ?? 0) !== 0) {
+      failures.push("sparse: all-fine mode created a coarse brick");
+    }
+    if (sparseResolutionMode === "all-coarse"
+      && (sparse.sparseTopology?.maximumFineBrickCount ?? 0) !== 0) {
+      failures.push("sparse: all-coarse mode created a fine brick");
     }
     const uniformFinal = uniform.checkpoints.at(-1)!;
     const horizontalSpreadRatios = [0, 2].map((axis) =>
@@ -437,11 +690,41 @@ try {
     const centerOfMassYDifference = Math.abs(
       sparseFinal.centerOfMassNormalized[1] - uniformFinal.centerOfMassNormalized[1],
     );
-    if (horizontalSpreadRatios.some((ratio) => ratio < 0.8 || ratio > 1.2)) {
-      failures.push("similarity: horizontal mass spread ratio outside [0.8, 1.2]");
+    let densityAbsolute = 0, densitySquared = 0;
+    let uniformDensityAbsolute = 0, uniformDensitySquared = 0;
+    let densityMaximumAbsolute = 0, supportIntersection = 0, supportUnion = 0;
+    let symmetrizedUniformDensityAbsolute = 0;
+    const symmetrizedUniformDensity = d4SymmetrizedDensity(
+      uniformFinalDensity, fineDimensions,
+    );
+    for (let index = 0; index < uniformFinalDensity.length; index += 1) {
+      const difference = sparseFinalDensity[index] - uniformFinalDensity[index];
+      densityAbsolute += Math.abs(difference);
+      densitySquared += difference * difference;
+      uniformDensityAbsolute += Math.abs(uniformFinalDensity[index]);
+      uniformDensitySquared += uniformFinalDensity[index] ** 2;
+      densityMaximumAbsolute = Math.max(densityMaximumAbsolute, Math.abs(difference));
+      const uniformSupported = uniformFinalDensity[index] > 1e-3;
+      const sparseSupported = sparseFinalDensity[index] > 1e-3;
+      supportIntersection += uniformSupported && sparseSupported ? 1 : 0;
+      supportUnion += uniformSupported || sparseSupported ? 1 : 0;
+      symmetrizedUniformDensityAbsolute += Math.abs(
+        sparseFinalDensity[index] - symmetrizedUniformDensity[index],
+      );
     }
-    if (supportExtentRatios.some((ratio) => Math.abs(ratio - 1) > 1e-12)) {
-      failures.push("similarity: horizontal support extent differs from Uniform");
+    const densityRelativeL1 = densityAbsolute / Math.max(1e-30, uniformDensityAbsolute);
+    const densityRelativeL2 = Math.sqrt(
+      densitySquared / Math.max(1e-30, uniformDensitySquared),
+    );
+    const supportIntersectionOverUnion = supportIntersection / Math.max(1, supportUnion);
+    if (horizontalSpreadRatios.some((ratio) => ratio < 0.85 || ratio > 1.15)) {
+      failures.push("similarity: horizontal mass spread ratio outside [0.85, 1.15]");
+    }
+    if (densityRelativeL1 > 0.05) {
+      failures.push("similarity: final density relative L1 exceeds 0.05");
+    }
+    if (supportIntersectionOverUnion < 0.85) {
+      failures.push("similarity: rho>1e-3 support intersection/union is below 0.85");
     }
     if (centerOfMassYDifference > 0.03) {
       failures.push("similarity: normalized vertical center of mass differs by more than 0.03");
@@ -449,8 +732,8 @@ try {
     if (maximumDensityRatio < 0.75 || maximumDensityRatio > 1.25) {
       failures.push("similarity: maximum-density ratio outside [0.75, 1.25]");
     }
-    if (kineticEnergyRatio < 0.1 || kineticEnergyRatio > 2) {
-      failures.push("similarity: kinetic-energy ratio outside [0.1, 2]");
+    if (kineticEnergyRatio < 0.65 || kineticEnergyRatio > 1.35) {
+      failures.push("similarity: kinetic-energy ratio outside [0.65, 1.35]");
     }
     if (liquidSpeedRatio < 0.2 || liquidSpeedRatio > 2) {
       failures.push("similarity: liquid-speed ratio outside [0.2, 2]");
@@ -458,7 +741,10 @@ try {
     console.log(JSON.stringify({
       passed: failures.length === 0 && validationErrors.length === 0,
       scenario: "symmetric-expansion",
-      grid: dimensions,
+      sparseResolutionMode,
+      uniformResolutionMode,
+      regime,
+      grids: { sparse: fineDimensions, uniform: uniformDimensions },
       dt_s,
       steps,
       exactTargetTime_s: steps * dt_s,
@@ -480,12 +766,27 @@ try {
             uniform.checkpoints.at(-1)!.supportExtentNormalized[axis],
           )),
       },
+      finalDensityDifference: {
+        relativeL1: densityRelativeL1,
+        relativeL2: densityRelativeL2,
+        maximumAbsolute: densityMaximumAbsolute,
+        supportIntersectionOverUnion1e3: supportIntersectionOverUnion,
+        relativeL1AgainstD4SymmetrizedUniform:
+          symmetrizedUniformDensityAbsolute / Math.max(1e-30, uniformDensityAbsolute),
+      },
+      finalFieldHashes: {
+        uniformDensity: fieldHash(uniformFinalDensity),
+        uniformVelocity: fieldHash(uniformFinalVelocity),
+        sparseDensity: fieldHash(sparseFinalDensity),
+        sparseVelocity: fieldHash(sparseFinalVelocity),
+      },
       similarityThresholds: {
-        horizontalMassSpreadRatio: [0.8, 1.2],
-        horizontalSupportExtentRatio: 1,
+        horizontalMassSpreadRatio: [0.85, 1.15],
+        finalDensityRelativeL1: 0.05,
+        supportIntersectionOverUnion1e3: 0.85,
         centerOfMassYAbsoluteDifference: 0.03,
         maximumDensityRatio: [0.75, 1.25],
-        densityWeightedKineticEnergyRatio: [0.1, 2],
+        densityWeightedKineticEnergyRatio: [0.65, 1.35],
         maximumLiquidSpeedRatio: [0.2, 2],
       },
       uniformBaselineSymmetry: uniform.checkpoints.map((checkpoint) => ({
