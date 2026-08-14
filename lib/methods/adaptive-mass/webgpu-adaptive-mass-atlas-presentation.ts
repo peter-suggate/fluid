@@ -27,6 +27,12 @@ export interface AdaptiveMassAtlasMaterialization {
   readonly levelSetOrProxy: ArrayLike<number>;
   /** Two packed u32 words per cell, matching `adaptiveCellKey` in the grid overlay. */
   readonly ownerKeys: ArrayLike<number>;
+  /** Optional collocated xyz velocity plus padding, four f32 values per cell. */
+  readonly velocity?: ArrayLike<number>;
+  /** Optional materialized composite pressure, one f32 value per cell. */
+  readonly pressure?: ArrayLike<number>;
+  /** Optional post-projection divergence, one f32 value per cell. */
+  readonly divergence?: ArrayLike<number>;
 }
 
 /** One sparse source brick before presentation-only finest-lattice expansion. */
@@ -396,6 +402,9 @@ export class WebGPUAdaptiveMassAtlasPresentation {
   readonly densityTexture: GPUTexture;
   readonly levelSetTexture: GPUTexture;
   readonly gridCellTexture: GPUTexture;
+  readonly velocityTexture: GPUTexture;
+  readonly pressureTexture: GPUTexture;
+  readonly divergenceTexture: GPUTexture;
   readonly allocatedBytes: number;
   generation = 0;
   private destroyed = false;
@@ -429,7 +438,28 @@ export class WebGPUAdaptiveMassAtlasPresentation {
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST
         | GPUTextureUsage.COPY_SRC,
     });
-    this.allocatedBytes = cellCount(dimensions) * 16;
+    this.velocityTexture = device.createTexture({
+      label: "Adaptive mass presentation velocity",
+      size: dimensions,
+      dimension: "3d",
+      format: "rgba32float",
+      usage: scalarUsage,
+    });
+    this.pressureTexture = device.createTexture({
+      label: "Adaptive mass presentation pressure",
+      size: dimensions,
+      dimension: "3d",
+      format: "r32float",
+      usage: scalarUsage,
+    });
+    this.divergenceTexture = device.createTexture({
+      label: "Adaptive mass presentation divergence",
+      size: dimensions,
+      dimension: "3d",
+      format: "r32float",
+      usage: scalarUsage,
+    });
+    this.allocatedBytes = cellCount(dimensions) * 40;
   }
 
   /** Alias matching the optional `GPUSolverInstance.surfaceFieldTexture`. */
@@ -447,16 +477,28 @@ export class WebGPUAdaptiveMassAtlasPresentation {
     const count = cellCount(this.dimensions);
     if (materialization.density.length !== count
       || materialization.levelSetOrProxy.length !== count
-      || materialization.ownerKeys.length !== 2 * count) {
+      || materialization.ownerKeys.length !== 2 * count
+      || (materialization.velocity !== undefined && materialization.velocity.length !== 4 * count)
+      || (materialization.pressure !== undefined && materialization.pressure.length !== count)
+      || (materialization.divergence !== undefined && materialization.divergence.length !== count)) {
       throw new RangeError(
-        `adaptive presentation upload requires ${count} scalar values and ${2 * count} owner words`,
+        `adaptive presentation upload dimensions do not match ${count} cells`,
       );
     }
     const density = Float32Array.from(materialization.density);
     const levelSet = Float32Array.from(materialization.levelSetOrProxy);
     const owners = Uint32Array.from(materialization.ownerKeys);
+    const velocity = materialization.velocity === undefined
+      ? new Float32Array(4 * count) : Float32Array.from(materialization.velocity);
+    const pressure = materialization.pressure === undefined
+      ? new Float32Array(count) : Float32Array.from(materialization.pressure);
+    const divergence = materialization.divergence === undefined
+      ? new Float32Array(count) : Float32Array.from(materialization.divergence);
     for (let index = 0; index < count; index += 1) {
-      if (!Number.isFinite(density[index]) || !Number.isFinite(levelSet[index])) {
+      if (!Number.isFinite(density[index]) || !Number.isFinite(levelSet[index])
+        || !Number.isFinite(pressure[index]) || !Number.isFinite(divergence[index])
+        || !Number.isFinite(velocity[4 * index]) || !Number.isFinite(velocity[4 * index + 1])
+        || !Number.isFinite(velocity[4 * index + 2])) {
         throw new RangeError(`adaptive presentation upload cell ${index} is non-finite`);
       }
     }
@@ -464,7 +506,7 @@ export class WebGPUAdaptiveMassAtlasPresentation {
     const upload = (
       texture: GPUTexture,
       values: Float32Array | Uint32Array,
-      channels: 1 | 2,
+      channels: 1 | 2 | 4,
     ): number => {
       const rowBytes = nx * channels * 4;
       const source = new Uint8Array(values.buffer, values.byteOffset, values.byteLength);
@@ -480,6 +522,9 @@ export class WebGPUAdaptiveMassAtlasPresentation {
     let uploadedBytes = upload(this.densityTexture, density, 1);
     uploadedBytes += upload(this.levelSetTexture, levelSet, 1);
     uploadedBytes += upload(this.gridCellTexture, owners, 2);
+    uploadedBytes += upload(this.velocityTexture, velocity, 4);
+    uploadedBytes += upload(this.pressureTexture, pressure, 1);
+    uploadedBytes += upload(this.divergenceTexture, divergence, 1);
     this.generation += 1;
     return { generation: this.generation, cellCount: count, uploadedBytes };
   }
@@ -490,6 +535,9 @@ export class WebGPUAdaptiveMassAtlasPresentation {
     this.densityTexture.destroy();
     this.levelSetTexture.destroy();
     this.gridCellTexture.destroy();
+    this.velocityTexture.destroy();
+    this.pressureTexture.destroy();
+    this.divergenceTexture.destroy();
   }
 
   private assertLive(): void {

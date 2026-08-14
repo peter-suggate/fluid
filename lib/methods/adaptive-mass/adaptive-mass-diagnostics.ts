@@ -9,7 +9,7 @@ const labelValue = (
 ): string => typeof value === "string" && allowed.includes(value) ? value : fallback;
 
 /**
- * M1 publications owned by the sparse fixed-tile method.
+ * Sparse CM12 publications owned by the fixed-world-brick method.
  *
  * The generic panel deliberately does not infer these cards from `gridKind`:
  * resident bricks, a frozen 4/8 seam orientation, and the composite pressure
@@ -28,8 +28,8 @@ export function adaptiveMassDiagnosticRows(
 
   return [
     {
-      id: "m1-seam",
-      label: "Experimental M1 seam",
+      id: "resolution-split",
+      label: "Initial resolution split",
       value: `8³ ${fineSide} ${axis}`,
       unit: "4³ neighbour · fixed 2:1 world-space tiles",
       tone: "neutral",

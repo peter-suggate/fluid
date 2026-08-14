@@ -1,4 +1,3 @@
-import type { SceneDescription } from "./model";
 import type { PerformanceTrace } from "./performance-trace";
 import type { TallCellLayout } from "./tall-cell-grid";
 import type { GPUQuality } from "./gpu-quality";
@@ -271,6 +270,8 @@ export interface GPUEulerianInfo {
   adaptiveSubIsoVolume_cells?: number;
   adaptiveOverfullLeafCount?: number;
   adaptiveSubIsoLeafCount?: number;
+  /** Composite face ports crossing a live 4³/8³ atlas seam in the latest step. */
+  adaptiveMixedSeamFaceCount?: number;
   phiInterfaceCellCount?: number;
   volumeCorrectionNormalSpeed_cells_s?: number;
   /** Diagnostic divergence-rate equivalent of the normal volume correction. */
