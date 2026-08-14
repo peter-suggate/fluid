@@ -1,4 +1,5 @@
 import { inflowBoundaryWGSL } from "../../core/inflow-boundary";
+import { createCm12NumericsWGSL } from "../../core/cm12-numerics";
 
 const uniformMacCormackAuditEnabled = typeof process !== "undefined"
   && process.env.FLUID_UNIFORM_SYMMETRY_STAGE_AUDIT === "1";
@@ -12,7 +13,7 @@ const uniformMacCormackAuditEnabled = typeof process !== "undefined"
  */
 export const uniformReferenceComputeShader = /* wgsl */ `
 const MACCORMACK_AUDIT_ENABLED: bool = ${uniformMacCormackAuditEnabled};
-const GHOST_FLUID_THETA_MIN:f32=0.05;
+${createCm12NumericsWGSL()}
 struct Params {
   dimsDt: vec4f,
   cellGravity: vec4f,
@@ -240,7 +241,7 @@ fn pressurePhi(p:vec3i)->f32{
 fn pressureLiquid(p:vec3i)->bool{return valid(p)&&pressureDensity(p)>0.5;}
 fn ghostFluidFraction(liquidCell:vec3i,airCell:vec3i)->f32{
   let liquidPhi=pressurePhi(liquidCell);let airPhi=pressurePhi(airCell);
-  return clamp(abs(liquidPhi)/max(abs(liquidPhi)+abs(airPhi),1e-6),GHOST_FLUID_THETA_MIN,1.0);
+  return cm12GhostFluidTheta(liquidPhi,airPhi,1e-6);
 }
 fn sampledFaceVelocity(p:vec3i,component:u32)->f32{
   let d=dims();if(p[component]<0||p[component]>=d[component]){return 0.0;}
@@ -615,12 +616,11 @@ fn volumeGradient(id:vec3i)->vec3f{
 // --- Conservative surface-density transport (paper Sec. 3.4, modified
 // three-scatter scheme). beta, rho deficits, and gamma deficits occupy three
 // consecutive fixed-point arrays in conditioningScratch/sharpenDeposits.
-const TRANSPORT_FIXED:f32=1048576.0;
 fn linearIndex(id:vec3i)->u32{let d=dims();return u32(id.x+d.x*(id.y+d.y*id.z));}
 fn cellCount()->u32{let d=dims();return u32(d.x*d.y*d.z);}
 fn betaValue(id:vec3i)->f32{
   if(!valid(id)){return 1.0;}
-  return f32(atomicLoad(&sharpenDeposits[linearIndex(id)]))/TRANSPORT_FIXED;
+  return f32(atomicLoad(&sharpenDeposits[linearIndex(id)]))/CM12_TRANSPORT_FIXED;
 }
 // Characteristics at contacting closed-wall faces satisfy u.n=0, so a true
 // trace stays in the domain and slides tangentially along the boundary. (A
@@ -722,7 +722,7 @@ fn traceGammaAndBeta(@builtin(global_invocation_id) gid:vec3u){
   // Preserve a partially exterior gamma sample instead of applying the
   // interior floor. Beta and density gathering still normalize the visible
   // interpolation stencil below; only cumulative gamma sees the zero exterior.
-  let advectedGamma=select(min(sampledGamma,2.5),clamp(sampledGamma,0.5,2.5),total>=1.0-1e-6);
+  let advectedGamma=cm12ConditionedGamma(sampledGamma,total);
   textureStore(gammaOut,id,vec4f(advectedGamma));
   // No visible donor means there is no backward coefficient. Do not credit a
   // synthetic self coefficient: the gather has no corresponding density
@@ -731,7 +731,10 @@ fn traceGammaAndBeta(@builtin(global_invocation_id) gid:vec3u){
   if(total<=1e-9){return;}
   for(var corner=0u;corner<8u;corner+=1u){
     let offset=vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));let donor=base+offset;let weight=transportStencilWeight(base,f,corner)/total;
-    if(weight>0.0){atomicAdd(&sharpenDeposits[linearIndex(donor)],i32(round(advectedGamma*weight*TRANSPORT_FIXED)));}
+    if(weight>0.0){
+      let betaContribution=cm12VolumeWeightedBetaContribution(1.0,1.0,advectedGamma*weight);
+      atomicAdd(&sharpenDeposits[linearIndex(donor)],i32(round(betaContribution*CM12_TRANSPORT_FIXED)));
+    }
   }
 }
 
@@ -741,21 +744,25 @@ fn traceGammaAndBeta(@builtin(global_invocation_id) gid:vec3u){
 @compute @workgroup_size(4,4,4)
 fn scatterDensityDeficit(@builtin(global_invocation_id) gid:vec3u){
   let id=activeId(gid);if(!densityTransportDestination(id)){return;}
-  let deficit=max(0.0,1.0-betaValue(id));if(deficit<=1.0/TRANSPORT_FIXED){return;}
+  let deficit=max(0.0,1.0-betaValue(id));if(deficit<=1.0/CM12_TRANSPORT_FIXED){return;}
   let traced=forwardTraceOffset(id,params.dimsDt.w,params.cellGravity.xyz);let base=id+vec3i(floor(traced));let f=fract(traced);let count=cellCount();
   var total=0.0;
   for(var corner=0u;corner<8u;corner+=1u){total+=transportStencilWeight(base,f,corner);}
   if(total<=1e-9){
     let index=linearIndex(id);
-    atomicAdd(&sharpenDeposits[count+index],i32(round(volume(id)*deficit*TRANSPORT_FIXED)));
-    atomicAdd(&sharpenDeposits[2u*count+index],i32(round(textureLoad(gammaIn,id,0).x*deficit*TRANSPORT_FIXED)));
+    let densityDeposit=cm12VolumeScaledDeficitTransfer(volume(id),1.0,1.0,deficit,1.0);
+    let gammaDeposit=cm12VolumeScaledDeficitTransfer(textureLoad(gammaIn,id,0).x,1.0,1.0,deficit,1.0);
+    atomicAdd(&sharpenDeposits[count+index],i32(round(densityDeposit*CM12_TRANSPORT_FIXED)));
+    atomicAdd(&sharpenDeposits[2u*count+index],i32(round(gammaDeposit*CM12_TRANSPORT_FIXED)));
     return;
   }
   for(var corner=0u;corner<8u;corner+=1u){
     let offset=vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));let receiver=base+offset;let weight=transportStencilWeight(base,f,corner)/total;
     if(weight<=0.0){continue;}let index=linearIndex(receiver);
-    atomicAdd(&sharpenDeposits[count+index],i32(round(volume(id)*deficit*weight*TRANSPORT_FIXED)));
-    atomicAdd(&sharpenDeposits[2u*count+index],i32(round(textureLoad(gammaIn,id,0).x*deficit*weight*TRANSPORT_FIXED)));
+    let densityDeposit=cm12VolumeScaledDeficitTransfer(volume(id),1.0,1.0,deficit,weight);
+    let gammaDeposit=cm12VolumeScaledDeficitTransfer(textureLoad(gammaIn,id,0).x,1.0,1.0,deficit,weight);
+    atomicAdd(&sharpenDeposits[count+index],i32(round(densityDeposit*CM12_TRANSPORT_FIXED)));
+    atomicAdd(&sharpenDeposits[2u*count+index],i32(round(gammaDeposit*CM12_TRANSPORT_FIXED)));
   }
 }
 
@@ -774,13 +781,13 @@ fn gatherConservativeDensity(@builtin(global_invocation_id) gid:vec3u){
     let offset=vec3i(i32(corner&1u),i32((corner>>1u)&1u),i32((corner>>2u)&1u));let donor=base+offset;
     if(total<=1e-9){break;}
     let weight=transportStencilWeight(base,f,corner)/total;if(weight<=0.0){continue;}
-    let scaled=advectedGamma*weight/max(1.0,betaValue(donor));rhoNext+=scaled*volume(donor);
+    let scaled=cm12ConditionedRowCoefficient(advectedGamma,weight,betaValue(donor));rhoNext+=scaled*volume(donor);
     // Step 5 publishes gamma-prime, the row sum of the conditioned operator.
     gammaNext+=scaled;
   }
   let count=cellCount();let index=linearIndex(id);
-  rhoNext+=f32(atomicLoad(&sharpenDeposits[count+index]))/TRANSPORT_FIXED;
-  gammaNext+=f32(atomicLoad(&sharpenDeposits[2u*count+index]))/TRANSPORT_FIXED;
+  rhoNext+=f32(atomicLoad(&sharpenDeposits[count+index]))/CM12_TRANSPORT_FIXED;
+  gammaNext+=f32(atomicLoad(&sharpenDeposits[2u*count+index]))/CM12_TRANSPORT_FIXED;
   // The prescribed inflow is a mass source external to the conservative
   // operator.  Rasterize the entire timestep-swept plug: a one-layer receiver
   // source would cap the paper's CFL-25 jet at 1/25 of its authored flux. The
@@ -807,19 +814,6 @@ fn gatherConservativeDensity(@builtin(global_invocation_id) gid:vec3u){
 // Gauss-Seidel between dimensional sweeps. The value returned here is the
 // signed (rho, gamma) flux into own across one face, calculated entirely
 // from the immutable input textures for the current axis.
-fn gammaDiffusionFluxInto(
-  ownRho:f32,ownGamma:f32,neighborRho:f32,neighborGamma:f32,open:f32,
-)->vec2f{
-  let gammaFlux=0.5*open*(neighborGamma-ownGamma);
-  var rhoFlux=0.0;
-  if(neighborGamma>ownGamma){
-    rhoFlux=open*neighborRho*(neighborGamma-ownGamma)/(2.0*max(neighborGamma,1e-9));
-  }else if(ownGamma>neighborGamma){
-    rhoFlux=-open*ownRho*(ownGamma-neighborGamma)/(2.0*max(ownGamma,1e-9));
-  }
-  return vec2f(rhoFlux,gammaFlux);
-}
-
 fn gammaDiffusionFaceOpen(lower:vec3i,axis:u32)->f32{
   var upper=lower;upper[axis]=upper[axis]+1;
   if(!valid(lower)||!valid(upper)){return 0.0;}
@@ -836,7 +830,7 @@ fn diffuseGammaAxis(id:vec3i,axis:u32){
   var lower=id;lower[axis]=lower[axis]-1;
   let lowerOpen=gammaDiffusionFaceOpen(lower,axis);
   if(lowerOpen>0.0){
-    delta+=gammaDiffusionFluxInto(
+    delta+=cm12GammaDiffusionFluxInto(
       ownRho,ownGamma,volume(lower),textureLoad(gammaIn,lower,0).x,lowerOpen,
     );
   }
@@ -844,7 +838,7 @@ fn diffuseGammaAxis(id:vec3i,axis:u32){
   var upper=id;upper[axis]=upper[axis]+1;
   let upperOpen=gammaDiffusionFaceOpen(id,axis);
   if(upperOpen>0.0){
-    delta+=gammaDiffusionFluxInto(
+    delta+=cm12GammaDiffusionFluxInto(
       ownRho,ownGamma,volume(upper),textureLoad(gammaIn,upper,0).x,upperOpen,
     );
   }
@@ -1029,19 +1023,18 @@ fn divergenceAt(id: vec3i, checkSolid: bool) -> f32 {
 // divergence (lambda = 0.5, eta = 1 per the paper), divided by dx, so the
 // pressure solve pushes the excess out.
 fn volumeCorrectionDivergence(id: vec3i) -> f32 {
-  let excess=max(0.0,pressureDensity(id)-1.0);
-  if(excess<=0.0){return 0.0;}
   // Preserve CM12's calibrated small-excess slope exactly:
   // min(lambda * (rho' - 1), eta) / dx with lambda=0.5 and eta=1.
   // Replacing this by excess/dt makes the correction three times stronger at
   // the paper's dx=0.05, dt=1/30 settings. In free fall that turns local
   // transport compression into a large sideways pressure impulse and visibly
   // flattens a drop before impact.
-  let paperRate=min(0.5*excess,1.0)/params.cellGravity.x;
   // Keep the existing fine-grid safety policy as a cap only. It prevents the
   // correction from expanding by more than one cell per time step without
   // changing the published equation at the Figure 2/3 resolution.
-  return min(paperRate,1.0/params.dimsDt.w);
+  return cm12VolumeCorrectionDivergence(
+    pressureDensity(id),params.cellGravity.x,params.dimsDt.w,
+  );
 }
 
 fn curvatureAt(id:vec3i)->f32{
@@ -1191,7 +1184,7 @@ fn sharpenDeltaRho(q:vec3i)->f32{
   let rho=volume(q);
   if(cellInsideSolid(q)){return 0.0;}
   let h=params.cellGravity.xyz;
-  let deltaT=3.0*params.dimsDt.w*params.tuning.x;let tau=0.4;
+  let deltaT=3.0*params.dimsDt.w*params.tuning.x;
   let ex=vec3i(1,0,0);let ey=vec3i(0,1,0);let ez=vec3i(0,0,1);
   // Sec. 3.6 Eqs. 18-19 use non-solid face aperture area V^f. This is
   // deliberately distinct from CM11a's face-centred overlapping dual volume.
@@ -1207,7 +1200,7 @@ fn sharpenDeltaRho(q:vec3i)->f32{
   var maximumDifference=0.0;
   let offsets=array<vec3i,6>(vec3i(-1,0,0),vec3i(1,0,0),vec3i(0,-1,0),vec3i(0,1,0),vec3i(0,0,-1),vec3i(0,0,1));
   for(var index=0;index<6;index+=1){maximumDifference=max(maximumDifference,abs(rho-volume(q+offsets[index])));}
-  let weight=(rho-0.5)*(rho-0.5)*(rho-0.5)*(1.0-min(1.0,maximumDifference/tau));
+  let weight=cm12SharpeningWeight(rho,maximumDifference);
   var deltaRho=select(weight*gradMinus,weight*gradPlus,weight>=0.0);
   if(rho+deltaRho<0.0||rho<1e-5){deltaRho=-rho;}else if(rho>0.5){deltaRho=0.0;}
   return deltaRho;
@@ -1248,18 +1241,18 @@ fn sharpenScatter(@builtin(global_invocation_id) gid:vec3u){
   }
   if(total<=1e-8){
     let ownIndex=id.x+d.x*(id.y+d.y*id.z);
-    atomicAdd(&sharpenDeposits[u32(ownIndex)],i32(round(-deltaRho*1048576.0)));return;
+    atomicAdd(&sharpenDeposits[u32(ownIndex)],i32(round(-deltaRho*CM12_TRANSPORT_FIXED)));return;
   }
   for(var corner=0u;corner<8u;corner+=1u){
     if(weights[corner]<=0.0){continue;}
-    atomicAdd(&sharpenDeposits[u32(indices[corner])],i32(round(-deltaRho*weights[corner]/total*1048576.0)));
+    atomicAdd(&sharpenDeposits[u32(indices[corner])],i32(round(-deltaRho*weights[corner]/total*CM12_TRANSPORT_FIXED)));
   }
 }
 @compute @workgroup_size(4,4,4)
 fn sharpenResolve(@builtin(global_invocation_id) gid:vec3u){
   let id=activeId(gid);if(!valid(id)){return;}
   let d=dims();let index=u32(id.x+d.x*(id.y+d.y*id.z));
-  let deposit=f32(atomicLoad(&sharpenDeposits[index]))/1048576.0;
+  let deposit=f32(atomicLoad(&sharpenDeposits[index]))/CM12_TRANSPORT_FIXED;
   textureStore(volumeOut,id,vec4f(textureLoad(volumeIn,id,0).x+deposit));
 }
 
@@ -1334,16 +1327,16 @@ fn scatterSolidExcess(@builtin(global_invocation_id) gid:vec3u){
       if(!valid(destination)||cellInsideSolid(destination)){continue;}
       let share=cellOpenFraction(destination)/fallbackTotal;
       if(share<=0.0){continue;}
-      atomicAdd(&sharpenDeposits[linearIndex(destination)],i32(round(excess*share*TRANSPORT_FIXED)));
+      atomicAdd(&sharpenDeposits[linearIndex(destination)],i32(round(excess*share*CM12_TRANSPORT_FIXED)));
     }
     return;
   }
-  for(var corner=0u;corner<8u;corner+=1u){if(weights[corner]>0.0){atomicAdd(&sharpenDeposits[indices[corner]],i32(round(excess*weights[corner]/total*TRANSPORT_FIXED)));}}
+  for(var corner=0u;corner<8u;corner+=1u){if(weights[corner]>0.0){atomicAdd(&sharpenDeposits[indices[corner]],i32(round(excess*weights[corner]/total*CM12_TRANSPORT_FIXED)));}}
 }
 @compute @workgroup_size(4,4,4)
 fn resolveSolidExcess(@builtin(global_invocation_id) gid:vec3u){
   let id=activeId(gid);if(!valid(id)){return;}
-  let deposit=f32(atomicLoad(&sharpenDeposits[linearIndex(id)]))/TRANSPORT_FIXED;
+  let deposit=f32(atomicLoad(&sharpenDeposits[linearIndex(id)]))/CM12_TRANSPORT_FIXED;
   textureStore(volumeOut,id,vec4f(volume(id)+deposit));
 }
 

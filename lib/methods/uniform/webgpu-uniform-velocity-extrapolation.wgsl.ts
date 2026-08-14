@@ -7,7 +7,10 @@
  * renormalized trilinear restriction followed by reverse-order prolongation.
  * Each staggered component is interpolated on its own positive-face lattice.
  */
+import { createCm12NumericsWGSL } from "../../core/cm12-numerics";
+
 export const uniformVelocityExtrapolationShader = /* wgsl */ `
+${createCm12NumericsWGSL(true)}
 struct Params {
   dimsDt: vec4f,
   cellGravity: vec4f,
@@ -55,7 +58,6 @@ struct DispatchArgs {
 @group(0) @binding(11) var<storage, read> activeRegion: array<u32>;
 
 const DISTANCE_INFINITY: f32 = 65504.0;
-const LIQUID_ISOVALUE: f32 = 0.5;
 const ACCURATE_BAND_CELLS: f32 = 2.0;
 
 fn baseDims() -> vec3i { return vec3i(textureDimensions(densityIn)); }
@@ -112,7 +114,7 @@ fn density(p: vec3i) -> f32 {
 fn sourceFace(p: vec3i, component: u32) -> bool {
   let d = baseDims();
   if (!openBaseFace(p, component)) { return false; }
-  return density(p) > LIQUID_ISOVALUE || density(p + componentAxis(component)) > LIQUID_ISOVALUE;
+  return density(p) > CM12_LIQUID_ISOVALUE || density(p + componentAxis(component)) > CM12_LIQUID_ISOVALUE;
 }
 fn faceValue(state: vec4f, component: u32) -> f32 { return state[component]; }
 fn faceDistance(state: vec4f, component: u32) -> f32 { return state[component]; }

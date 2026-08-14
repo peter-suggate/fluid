@@ -88,7 +88,7 @@ fn mgFaceV(id:vec3i,neighbor:vec3i,axis:u32)->f32{
 }
 fn mgTheta(liquidCell:vec3i,airCell:vec3i)->f32{
   let a=mgPhi(liquidCell);let b=mgPhi(airCell);
-  return clamp(abs(a)/max(abs(a)+abs(b),1e-9),GHOST_FLUID_THETA_MIN,1.0);
+  return cm12GhostFluidTheta(a,b,1e-9);
 }
 fn mgCoefficientRaw(id:vec3i,q:vec3i,axis:u32)->f32{
   if(!mgValid(q,mg.levelDims.xyz)){
@@ -96,7 +96,7 @@ fn mgCoefficientRaw(id:vec3i,q:vec3i,axis:u32)->f32{
     // are covered walls, matching the fine-grid stencil helper.
     if(axis==1u&&id.y==i32(mg.levelDims.y)-1&&q.y==i32(mg.levelDims.y)&&params.boundary.w>0.5){
       let h=mg.spacing.y;let phi=mgPhi(id);let exteriorPhi=0.5*h;
-      let theta=clamp(abs(phi)/max(abs(phi)+exteriorPhi,1e-9),GHOST_FLUID_THETA_MIN,1.0);
+      let theta=cm12GhostFluidTheta(phi,exteriorPhi,1e-9);
       return mgTopology(id).z/(h*h*theta);
     }
     return 0.0;
@@ -386,7 +386,7 @@ fn mgCoarseCoefficient(id:vec3i,q:vec3i,axis:u32)->f32{
   let d=vec3i(mg.levelDims.xyz);
   if(any(q<vec3i(0))||any(q>=d)){
     if(axis==1u&&id.y==d.y-1&&q.y==d.y&&params.boundary.w>0.5){
-      let phi=mgCoarsePhi[ci];let theta=clamp(abs(phi)/max(abs(phi)+0.5*h,1e-9),GHOST_FLUID_THETA_MIN,1.0);
+      let phi=mgCoarsePhi[ci];let theta=cm12GhostFluidTheta(phi,0.5*h,1e-9);
       return mgCoarseTopology[ci].z/(h*h*theta);
     }
     return 0.0;
@@ -394,7 +394,7 @@ fn mgCoarseCoefficient(id:vec3i,q:vec3i,axis:u32)->f32{
   let qi=mgCoarseIndex(q);let positive=q[axis]>id[axis];
   let vf=select(mgCoarseTopology[qi][axis+1u],mgCoarseTopology[ci][axis+1u],positive);
   if(vf<=1e-6){return 0.0;}let qPhi=mgCoarsePhi[qi];var theta=1.0;
-  if(qPhi>=0.0){let phi=mgCoarsePhi[ci];theta=clamp(abs(phi)/max(abs(phi)+abs(qPhi),1e-9),GHOST_FLUID_THETA_MIN,1.0);}
+  if(qPhi>=0.0){let phi=mgCoarsePhi[ci];theta=cm12GhostFluidTheta(phi,qPhi,1e-9);}
   return vf/(h*h*theta);
 }
 
