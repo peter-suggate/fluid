@@ -2,6 +2,7 @@ import type { GPUSolverInstance } from "../core/method-contract";
 import { octreeDebugSources } from "../methods/octree-shared/octree-debug-sources";
 import { damBreakFractions } from "../core/initial-fluid";
 import { boundingRadius, initializeRigidBodies, type RigidBodyState } from "../core/rigid-body";
+import { SCENE_SHAPE_PALETTE_LINEAR, sceneShapeCode, sceneShapeRenderHalfExtent_m } from "../core/scene-shape";
 import type { SceneDescription } from "../core/model";
 import { VOXEL_MATERIAL_IDS } from "../core/voxel-scene";
 import type { SparseVoxelSceneRenderSource } from "../core/webgpu-voxel-debug";
@@ -888,14 +889,12 @@ export async function smokeRenderHybridPresentation(
   }
   device.queue.writeBuffer(uniformBuffer, 0, packed);
   const bodyData = new Float32Array(12 * 16);
-  const shapeIndex = { sphere: 0, box: 1, capsule: 2, cylinder: 3 } as const;
-  const palette = [[0.95, 0.63, 0.29], [0.48, 0.66, 0.96], [0.84, 0.42, 0.48], [0.66, 0.52, 0.92]];
   presentationBodies.forEach((body, index) => {
-    const offset = index * 16, d = body.description.dimensions_m;
-    const half = body.description.shape === "box" ? [d.x / 2, d.y / 2, d.z / 2] : body.description.shape === "sphere" ? [d.x, d.x, d.x] : [d.x, d.y / 2, d.x];
-    const color = palette[shapeIndex[body.description.shape]];
+    const offset = index * 16, shape = body.description.shape;
+    const half = sceneShapeRenderHalfExtent_m(shape, body.description.dimensions_m);
+    const color = SCENE_SHAPE_PALETTE_LINEAR[sceneShapeCode(shape)];
     bodyData.set([body.position_m.x, body.position_m.y, body.position_m.z, boundingRadius(body)], offset);
-    bodyData.set([half[0], half[1], half[2], shapeIndex[body.description.shape]], offset + 4);
+    bodyData.set([half[0], half[1], half[2], sceneShapeCode(shape)], offset + 4);
     bodyData.set([body.orientation.w, body.orientation.x, body.orientation.y, body.orientation.z], offset + 8);
     bodyData.set([color[0], color[1], color[2], 0], offset + 12);
   });

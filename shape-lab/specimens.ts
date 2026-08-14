@@ -286,7 +286,7 @@ export function shapeLabRecords(world: ShapeLabWorld, nodeIds: readonly string[]
     for (let index = span.from; index < span.to; index += 1) {
       const proxy = catalog.primitives[index];
       records.push({
-        descriptor: svoDescriptorForEnvironmentProxy(scene, proxy),
+        descriptor: svoDescriptorForEnvironmentProxy(proxy),
         colorLinear: proxy.material.colorLinear,
         group: proxy.group,
         key: proxy.key,

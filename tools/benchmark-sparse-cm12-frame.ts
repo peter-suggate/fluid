@@ -148,7 +148,7 @@ async function createArm(
 ): Promise<MutableArm> {
   const overrides: MethodParamValues = method.id === "uniform"
     ? { timeStep: "scene", densityPostProcessing: "off" }
-    : {};
+    : { timeStep: "scene" };
   const values = resolveMethodValues(method, "balanced", overrides);
   const solver = await method.createSolverAsync!(
     device,

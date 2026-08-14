@@ -1,3 +1,4 @@
+import { sceneShapeWgsl } from "../../core/scene-shape";
 import { inflowBoundaryWGSL } from "../../core/inflow-boundary";
 import { createCm12NumericsWGSL } from "../../core/cm12-numerics";
 
@@ -335,20 +336,20 @@ fn departurePoint(position:vec3f,dt:f32,h:vec3f)->vec3f{
 // characteristic against the bodies, and WGSL requires declaration before use.
 fn quaternionRotate(q:vec4f,v:vec3f)->vec3f{let uv=cross(q.yzw,v);let uuv=cross(q.yzw,uv);return v+2.0*(q.x*uv+uuv);}
 fn quaternionInverseRotate(q:vec4f,v:vec3f)->vec3f{return quaternionRotate(vec4f(q.x,-q.yzw),v);}
+${sceneShapeWgsl()}
+// Body space: every shape function above is written as if the body sat at the
+// origin unrotated, so these two are the whole of what this shader knows about
+// what a shape *is*. Adding one is an entry in SCENE_SHAPE_TABLE and nothing
+// here.
+fn rigidLocalPoint(body:RigidBody,world:vec3f)->vec3f{
+  return quaternionInverseRotate(body.orientation,world-body.positionShape.xyz);
+}
+fn rigidShapeTag(body:RigidBody)->i32{return i32(round(body.positionShape.w));}
 fn insideRigid(body:RigidBody,world:vec3f)->bool{
-  let p=quaternionInverseRotate(body.orientation,world-body.positionShape.xyz);let d=body.dimensions.xyz;let shape=i32(round(body.positionShape.w));
-  if(shape==0){return length(p)<=d.x;}
-  if(shape==1){return all(abs(p)<=0.5*d);}
-  if(shape==2){let cy=clamp(p.y,-0.5*d.y,0.5*d.y);return length(vec3f(p.x,p.y-cy,p.z))<=d.x;}
-  return p.x*p.x+p.z*p.z<=d.x*d.x&&abs(p.y)<=0.5*d.y;
+  return rigidShapeInside(rigidShapeTag(body),body.dimensions.xyz,rigidLocalPoint(body,world));
 }
 fn rigidSignedDistance(body:RigidBody,world:vec3f)->f32{
-  let p=quaternionInverseRotate(body.orientation,world-body.positionShape.xyz);let d=body.dimensions.xyz;let shape=i32(round(body.positionShape.w));
-  if(shape==0){return length(p)-d.x;}
-  if(shape==1){let q=abs(p)-0.5*d;return length(max(q,vec3f(0.0)))+min(max(q.x,max(q.y,q.z)),0.0);}
-  if(shape==2){let cy=clamp(p.y,-0.5*d.y,0.5*d.y);return length(vec3f(p.x,p.y-cy,p.z))-d.x;}
-  let q=vec2f(length(p.xz)-d.x,abs(p.y)-0.5*d.y);
-  return length(max(q,vec2f(0.0)))+min(max(q.x,q.y),0.0);
+  return rigidShapeDistance(rigidShapeTag(body),body.dimensions.xyz,rigidLocalPoint(body,world));
 }
 fn rigidBodyIndexAt(world:vec3f)->i32{
   let bodyCount=u32(round(params.boundary.z));
@@ -444,11 +445,14 @@ fn nearAnyBody(world:vec3f)->bool{
   let margin=2.0*max(params.cellGravity.x,max(params.cellGravity.y,params.cellGravity.z));
   for(var bodyIndex=0u;bodyIndex<12u;bodyIndex+=1u){
     if(bodyIndex>=bodyCount){break;}
-    let body=rigidBodies[bodyIndex];let d=body.dimensions.xyz;let shape=i32(round(body.positionShape.w));
-    var radius=0.5*length(d);
-    if(shape==0){radius=d.x;}
-    if(shape==2){radius=d.x+0.5*d.y;}
-    if(shape==3){radius=sqrt(d.x*d.x+0.25*d.y*d.y);}
+    let body=rigidBodies[bodyIndex];
+    // One bounding radius, from the shape table. This ladder used to spell the
+    // cylinder's as sqrt(x*x+0.25*y*y) while the octree lane spelled the same
+    // radius as length(vec2f(x,0.5*y)); they agree to the last ulp on almost
+    // every input and were free to disagree on the rest. The margin below is
+    // two cells wide, so the reject was never sensitive to that difference —
+    // but nothing said so, and a reader had to prove it twice.
+    let radius=rigidShapeBoundingRadius(rigidShapeTag(body),body.dimensions.xyz);
     if(distance(world,body.positionShape.xyz)<=radius+margin){return true;}
   }
   return false;

@@ -14,6 +14,7 @@ import {
 import { buildEnvironmentProxyCatalog, environmentProxyPrimitives } from "../core/voxel-environments";
 import { VOXEL_MATERIAL_IDS } from "../core/voxel-scene";
 import { ENVIRONMENT_VOXEL_MATERIAL_BASE } from "./webgpu-svo-sparse-bricks";
+import { SCENE_ENVIRONMENT_OWNER_BASE } from "../core/webgpu-rigid-body";
 
 export const SVO_SCENE_THICK_GLASS_VERSION = "1" as const;
 export const SVO_SCENE_THICK_GLASS_MAXIMUM_VOLUMES = 32;
@@ -118,7 +119,7 @@ export function buildSvoSceneThickGlass(
       descriptor: {
         glassId: glassIdBase + authored.length,
         materialId: globe ? ENVIRONMENT_VOXEL_MATERIAL_BASE + proxy.ownerIndex : VOXEL_MATERIAL_IDS.containerGlass,
-        ownerId: scene.rigidBodies.length + proxy.ownerIndex,
+        ownerId: SCENE_ENVIRONMENT_OWNER_BASE + proxy.ownerIndex,
         revision,
         shape: equalRadii(radii) ? "sphere" : "ellipsoid",
         center_m: [proxy.center_m.x, proxy.center_m.y, proxy.center_m.z],

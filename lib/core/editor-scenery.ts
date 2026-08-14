@@ -13,6 +13,7 @@ import {
   type EditorEntityDefinition,
   type EditorRay,
 } from "./editor-entity";
+import type { EditorActionIcon } from "./editor-action";
 import type { EnvironmentId } from "./environments";
 import type { SceneDescription, Vec3 } from "./model";
 import {
@@ -27,6 +28,7 @@ import {
 import type { SceneryNode, SceneryPlacement } from "./scenery-graph";
 import { intersectSvoPrimitive, type SvoFinitePrimitiveDescriptor } from "../svo/svo-primitive-abi";
 import { svoDescriptorForEnvironmentProxy, svoOwnerIdForEnvironmentProxy } from "../svo/svo-scene-primitives";
+import type { SceneryPropKind } from "./stores/ui-store";
 import {
   buildEnvironmentProxyCatalog,
   type EnvironmentProxyPrimitive,
@@ -251,6 +253,32 @@ export function createSceneryNodeAt(
   return { kind, id, group: id, tags, place, radius: { x: extent, y: extent, z: extent }, material };
 }
 
+/**
+ * Where a prop the next click would place lands, and how wide it draws.
+ *
+ * Built from the node `createSceneryNodeAt` would actually create rather than
+ * from a second copy of its sizing arithmetic: the circle on the cursor is a
+ * promise about what the click does, and two copies of that sum is exactly how
+ * such a promise starts lying.
+ */
+export function sceneryPlacementPreview(
+  scene: SceneDescription,
+  kind: SceneryPropKind,
+  point_m: Vec3,
+  normal: Vec3,
+): { centre_m: Vec3; radius_m: number } {
+  const node = createSceneryNodeAt(scene, kind, point_m, normal);
+  const centre_m = node.place?.position ?? point_m;
+  if (node.kind === "box") {
+    return { centre_m, radius_m: Math.max(node.halfSize.x, node.halfSize.y, node.halfSize.z) };
+  }
+  if (node.kind === "cylinder") return { centre_m, radius_m: Math.max(node.radius, node.halfHeight) };
+  if (node.kind === "ellipsoid") {
+    return { centre_m, radius_m: Math.max(node.radius.x, node.radius.y, node.radius.z) };
+  }
+  return { centre_m, radius_m: SCENERY_MINIMUM_HALF_SIZE_M };
+}
+
 export function addSceneryNode(scene: SceneDescription, node: SceneryNode): SceneDescription {
   return withSceneryNodes(scene, [node]);
 }
@@ -314,7 +342,7 @@ function pickTargets(scene: SceneDescription) {
     // Shell faces are the room, not an object in it: picking them would put
     // a gizmo on the floor every time a click missed everything else.
     if (primitive.tags.includes("shell")) return;
-    const descriptor = svoDescriptorForEnvironmentProxy(scene, primitive);
+    const descriptor = svoDescriptorForEnvironmentProxy(primitive);
     // A proxy is never terrain — the heightfield is the shell's, not a
     // prop's — but the descriptor union carries the case, and the tracer for
     // it is a different one.
@@ -324,6 +352,21 @@ function pickTargets(scene: SceneDescription) {
   pickTargetCache.set(catalog, targets);
   return targets;
 }
+
+/**
+ * The scenery shapes a single click on a surface fully determines — the same
+ * three the place tool has always offered, stated here because this is now the
+ * only place that offers them.
+ */
+const PROP_ACTION_SHAPES: ReadonlyArray<{
+  kind: SceneryPropKind;
+  label: string;
+  icon: EditorActionIcon;
+}> = Object.freeze([
+  { kind: "box", label: "Box", icon: "box" },
+  { kind: "cylinder", label: "Post", icon: "cylinder" },
+  { kind: "ellipsoid", label: "Blob", icon: "ellipsoid" },
+]);
 
 export const sceneryEntity: EditorEntityDefinition = {
   kind: "scenery",
@@ -336,6 +379,29 @@ export const sceneryEntity: EditorEntityDefinition = {
     const node = nodeId === undefined ? undefined : findSceneryNode(context.scene, nodeId);
     return node && entityForNode(context, node);
   },
+  /**
+   * Scenery's one verb is "more of this".
+   *
+   * A prop is decoration, so nothing about it is worth a mode of its own — but
+   * standing something *next to* the thing you are pointing at is the whole
+   * gesture of dressing a scene, and it is the only reason PROP was ever a
+   * button.
+   */
+  actions: () => [{
+    id: "prop",
+    label: "Prop",
+    icon: "prop",
+    tone: "prop",
+    hint: "Click a surface to rest decorative geometry on it \u00b7 props never enter the solve",
+    children: PROP_ACTION_SHAPES.map((prop) => ({
+      id: prop.kind,
+      label: prop.label,
+      icon: prop.icon,
+      tone: "prop" as const,
+      hint: `Rest a ${prop.label.toLowerCase()} on the next surface you click`,
+      effect: { kind: "arm" as const, tool: "prop-place" as const, prop: prop.kind },
+    })),
+  }],
   pick: (context, ray, exclude) => {
     let nearest: { nodeId: string; distance_m: number } | undefined;
     for (const target of pickTargets(context.scene)) {
@@ -375,7 +441,7 @@ export function sceneryHighlightRange(
   const span = catalog.spans.find((candidate) => candidate.nodeId === nodeId);
   if (!span || span.to <= span.from) return undefined;
   return {
-    first: svoOwnerIdForEnvironmentProxy(scene, catalog.primitives[span.from]!),
-    last: svoOwnerIdForEnvironmentProxy(scene, catalog.primitives[span.to - 1]!),
+    first: svoOwnerIdForEnvironmentProxy(catalog.primitives[span.from]!),
+    last: svoOwnerIdForEnvironmentProxy(catalog.primitives[span.to - 1]!),
   };
 }

@@ -75,6 +75,16 @@ const SHAPE_EXTENTS: Readonly<Record<RigidShape, {
   // both ends and arrives at a sphere, so a capsule would refuse to get fatter.
   // Only a drag that actually moved the y side may set the length, and shrinking
   // that below the radius is a sphere — the floor, not an error.
+  // A cup's third dimension is its wall, not an extent, so the box gizmo never
+  // writes it: dragging a face changes how big the cup is, and how thick its
+  // wall is stays where the user set it. The wall is clamped against the radius
+  // and the height at evaluation (`cupWallThickness_m`), so shrinking a cup
+  // past its own wall thins the wall rather than inverting the cavity.
+  cup: {
+    half: (d) => ({ x: d.x, y: 0.5 * d.y, z: d.x }),
+    dimensions: (half, previous) => ({ x: half.x, y: 2 * half.y, z: previous.z }),
+    links: [["x", "z"]],
+  },
   capsule: {
     half: (d) => ({ x: d.x, y: 0.5 * d.y + d.x, z: d.x }),
     dimensions: (half, previous) => ({
@@ -214,6 +224,37 @@ export const rigidBodyEntity: EditorEntityDefinition = {
   find: (context, id) => {
     const description = context.scene.rigidBodies.find((body) => body.id === id);
     return description && rigidBodyEntityFor(context, description);
+  },
+  /**
+   * A body's two verbs.
+   *
+   * Carrying is not a resize, so it is not a handle; it is what you do with a
+   * cup rather than what you do to one. Dropping is its counterpart and is here
+   * rather than implied by releasing the carry, because a body that has been
+   * set down inside the water still has to be *let go of* — the solver only
+   * takes it back when nothing is holding it.
+   */
+  actions: (context, target) => {
+    const description = context.scene.rigidBodies.find((body) => body.id === target.selection.id);
+    if (!description) return [];
+    return [
+      {
+        id: "carry",
+        label: "Carry",
+        icon: "carry",
+        tone: "body",
+        hint: "Bind it to the cursor: height follows the pointer, the wheel pushes it away, Q and E tilt it to pour \u00b7 click to put it down",
+        effect: { kind: "carry", bodyId: description.id },
+      },
+      {
+        id: "release",
+        label: "Drop",
+        icon: "drop",
+        tone: "body",
+        hint: `Let ${description.name} fall from above the tank`,
+        effect: { kind: "release", bodyId: description.id },
+      },
+    ];
   },
   pick: (context, ray, exclude) => {
     let nearest: { id: string; distance_m: number } | undefined;

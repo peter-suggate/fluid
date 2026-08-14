@@ -1,4 +1,6 @@
 import { damBreakFractions, initialFluidBrickComponents } from "./initial-fluid";
+import { SCENE_SHAPES_BY_CODE } from "./scene-shape";
+import type { EditorAction } from "./editor-action";
 import {
   boxCenter,
   boxHandles,
@@ -480,6 +482,82 @@ function fluidBodyEntityFor(context: EditorEntityContext): EditorEntity | undefi
  * document field a body happens to live in is the editor's problem, not the
  * user's.
  */
+/**
+ * What pointing at water offers.
+ *
+ * Declared once and shared with the tank, because an empty tank and the water
+ * standing in it are the same place as far as this menu is concerned: someone
+ * who right-clicks either is asking what they can do to the water there, and a
+ * ring that changed as the tank filled would be a ring nobody could aim at.
+ *
+ * The shapes come from the shape table, so a shape declared for the solver is
+ * reachable here the day it is declared and never has to be added to a menu.
+ * Placing one carries it: a solid you asked for at a point is a solid you are
+ * holding, and making you find it again afterwards is the step the pie removes.
+ */
+export function fluidPlayActions(point_m: Vec3): readonly EditorAction[] {
+  return [
+    {
+      id: "ball",
+      label: "Ball",
+      icon: "water-ball",
+      tone: "fluid",
+      hint: "Click inside the tank to drop a ball of water \u00b7 drag out to size it",
+      effect: { kind: "arm", tool: "fluid-ball" },
+    },
+    {
+      id: "carry-solid",
+      label: "Solid",
+      icon: "solid",
+      tone: "body",
+      hint: "Put a solid here and pick it straight up",
+      // The shape's own name is the icon's name: the vocabulary in
+      // `EditorActionIcon` covers every `SceneShapeName`, so a shape added to
+      // the table draws itself in the ring without a second table to update.
+      children: SCENE_SHAPES_BY_CODE.map((shape) => ({
+        id: shape.name,
+        label: shape.label,
+        icon: shape.name,
+        tone: "body" as const,
+        hint: `Place a ${shape.label.toLowerCase()} here and carry it`,
+        effect: { kind: "place" as const, shape: shape.name, point_m, carry: true },
+      })),
+    },
+    {
+      id: "paint",
+      label: "Water",
+      icon: "paint",
+      tone: "fluid",
+      hint: "Click to add a water brick \u00b7 drag to paint a body of water",
+      effect: { kind: "arm", tool: "fluid-paint" },
+    },
+    {
+      id: "erase",
+      label: "Erase",
+      icon: "erase",
+      tone: "fluid",
+      hint: "Click or drag to remove painted water bricks",
+      effect: { kind: "arm", tool: "fluid-erase" },
+    },
+    {
+      id: "region",
+      label: "Region",
+      icon: "region",
+      tone: "region",
+      hint: "Drag a box over the water to cap how finely it is solved there",
+      effect: { kind: "arm", tool: "refinement-region" },
+    },
+    {
+      id: "hose",
+      label: "Hose",
+      icon: "hose",
+      tone: "inflow",
+      hint: "Click a surface to aim the hose there",
+      effect: { kind: "arm", tool: "inflow" },
+    },
+  ];
+}
+
 export const fluidBodyEntity: EditorEntityDefinition = {
   kind: "fluid-body",
   surfacedBy: (tool) => tool === "select",
@@ -494,6 +572,7 @@ export const fluidBodyEntity: EditorEntityDefinition = {
         volumeEntityFor(context.scene, body, offset + seeds.length + index + 1)),
     ];
   },
+  actions: (_context, target) => fluidPlayActions(target.point_m),
   find: (context, id) => {
     if (id === FLUID_BODY_SELECTION_ID) return fluidBodyEntityFor(context);
     const offset = fluidBodyBox(context.scene) ? 1 : 0;

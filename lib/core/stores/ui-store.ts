@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import type { EditorAction } from "../editor-action";
 import { bodySelection, DEFAULT_EDITOR_TOOL, selectedBodyIdOf, type EditorSelection, type EditorTool } from "../editor-tools";
 import type { AxisConstraint } from "../editor-axis-constraint";
 import { defaultCamera, type CameraState, type RigidShape } from "../model";
@@ -22,6 +23,40 @@ import { DEFAULT_SVO_RENDER_TUNING, normalizeSvoRenderTuning, type SvoRenderTuni
 import { SVO_PIXEL_TRACE_LAYERS, type SvoPixelTraceLayer } from "../../svo/svo-pixel-trace";
 import { FLUID_CELL_TRACE_LAYERS, type FluidCellTraceLayer } from "../fluid-cell-trace";
 import type { GridOverlayConfig, GridOverlayMode } from "../webgpu-renderer";
+
+/**
+ * The object currently in the user's hand.
+ *
+ * A mode, not a gesture: it outlives the press that started it and ends on the
+ * next click. Only what something outside the viewport has to read lives here —
+ * which body, what to call it, and how far it is tilted, for the chip that says
+ * so. The carried *position* stays in the viewport, because it changes with
+ * every pointer move and a store write per move would re-render the shell at
+ * pointer rate to say nothing new.
+ */
+export interface CarrySession {
+  readonly bodyId: string;
+  readonly label: string;
+  /** Degrees, for display; the radians the solver sees are the viewport's. */
+  readonly tiltDegrees: number;
+}
+
+/**
+ * An open radial menu: where it was asked for, and what it holds.
+ *
+ * The actions are already resolved when this is set. The viewport is the only
+ * thing that knows what the pointer is over, so it composes the ring at the
+ * moment of the click; holding the composed list means the menu cannot change
+ * under the cursor while it is open, which is the one thing a pie must never do.
+ */
+export interface RadialMenuState {
+  /** Client CSS pixels — the ring is a window-fixed layer, not a canvas child. */
+  readonly x: number;
+  readonly y: number;
+  /** What the pointer was over. Named above the ring so the context is legible. */
+  readonly title: string;
+  readonly actions: readonly EditorAction[];
+}
 
 export type RightPanel = "visual" | "visuals" | "simulation" | "bodies" | "diagnostics" | "performance" | null;
 
@@ -58,6 +93,18 @@ interface UIStore {
    */
   selection?: EditorSelection;
   selectedBodyId?: string;
+  /** The body bound to the cursor, or undefined when both hands are free. */
+  carry?: CarrySession;
+  /** The contextual ring, or undefined when it is closed. */
+  radialMenu?: RadialMenuState;
+  /**
+   * Whether the selection flyout is expanded past its chip.
+   *
+   * Store state rather than the flyout's own, because the radial menu's Edit
+   * wedge has to be able to open it: an action that selected something and left
+   * the numbers folded away would be indistinguishable from an ordinary click.
+   */
+  selectionControlsOpen: boolean;
   /** Shape the body-place tool drops on the next click. */
   placementShape: RigidShape;
   /** Shape the scenery-place tool rests on the next surface. */
@@ -150,6 +197,12 @@ interface UIStore {
   setAxisConstraint: (constraint: AxisConstraint) => void;
   select: (selection?: EditorSelection) => void;
   selectBody: (bodyId?: string) => void;
+  openRadialMenu: (menu: RadialMenuState) => void;
+  closeRadialMenu: () => void;
+  setSelectionControlsOpen: (open: boolean) => void;
+  beginCarry: (bodyId: string, label: string) => void;
+  setCarryTilt: (tiltDegrees: number) => void;
+  endCarry: () => void;
   setPlacementShape: (shape: RigidShape) => void;
   setPropShape: (shape: SceneryPropKind) => void;
   setSceneModalOpen: (open: boolean) => void;
@@ -200,6 +253,9 @@ export const useUIStore = create<UIStore>((set) => ({
   axisConstraint: undefined,
   selection: undefined,
   selectedBodyId: undefined,
+  carry: undefined,
+  radialMenu: undefined,
+  selectionControlsOpen: false,
   placementShape: "sphere",
   propShape: "box",
   sceneModalOpen: false,
@@ -239,8 +295,30 @@ export const useUIStore = create<UIStore>((set) => ({
   // be a hidden state that silently ate two thirds of the next drag.
   setActiveTool: (activeTool) => set({ activeTool, axisConstraint: undefined }),
   setAxisConstraint: (axisConstraint) => set({ axisConstraint }),
-  select: (selection) => set({ selection, selectedBodyId: selectedBodyIdOf(selection) }),
-  selectBody: (selectedBodyId) => set({ selectedBodyId, selection: bodySelection(selectedBodyId) }),
+  // Selecting something else folds the numbers away: they described the last
+  // thing, and leaving them open silently re-points every field at the new one.
+  select: (selection) => set((state) => ({
+    selection,
+    selectedBodyId: selectedBodyIdOf(selection),
+    selectionControlsOpen: state.selection?.id === selection?.id && state.selection?.kind === selection?.kind
+      ? state.selectionControlsOpen : false,
+  })),
+  selectBody: (selectedBodyId) => set((state) => ({
+    selectedBodyId,
+    selection: bodySelection(selectedBodyId),
+    selectionControlsOpen: state.selectedBodyId === selectedBodyId ? state.selectionControlsOpen : false,
+  })),
+  openRadialMenu: (radialMenu) => set({ radialMenu }),
+  closeRadialMenu: () => set({ radialMenu: undefined }),
+  setSelectionControlsOpen: (selectionControlsOpen) => set({ selectionControlsOpen }),
+  // Carrying arms nothing and disarms nothing: the tool decides what a click on
+  // the scene means, and while something is in hand the click means "put it
+  // down" whatever is armed underneath. Restoring the tool on release is what
+  // makes the carry a parenthesis rather than a mode change.
+  beginCarry: (bodyId, label) => set({ carry: { bodyId, label, tiltDegrees: 0 } }),
+  setCarryTilt: (tiltDegrees) => set((state) => state.carry
+    ? { carry: { ...state.carry, tiltDegrees } } : {}),
+  endCarry: () => set({ carry: undefined }),
   setPlacementShape: (placementShape) => set({ placementShape }),
   setPropShape: (propShape) => set({ propShape }),
   setSceneModalOpen: (sceneModalOpen) => set({ sceneModalOpen }),

@@ -20,7 +20,19 @@ export interface Quaternion {
   z: number;
 }
 
-export type RigidShape = "sphere" | "box" | "capsule" | "cylinder";
+/**
+ * The rigid primitives a body can be.
+ *
+ * Declared here because it is a document field, but everything *about* a shape
+ * — what is inside it, how far it reaches, what it displaces, what it weighs,
+ * and the WGSL every solver tests it with — lives once in
+ * `SCENE_SHAPE_TABLE` (lib/core/scene-shape.ts). Adding a member here without
+ * adding it there does not type-check.
+ *
+ * `cup` is the first hollow one: an open-top vessel that carries water rather
+ * than only displacing it.
+ */
+export type RigidShape = "sphere" | "box" | "capsule" | "cylinder" | "cup";
 
 export interface RigidBodyDescription {
   id: string;

@@ -8,6 +8,7 @@ import type { SceneDescription } from "../../core/model";
 import type { RigidBodyState } from "../../core/rigid-body";
 import { sceneLatticeDimensions } from "../../core/scene-lattice";
 import { usePerformanceInstrumentationStore } from "../../core/stores/performance-instrumentation-store";
+import { CM12_PAPER_DT_S } from "../../core/cm12-numerics";
 import type { GPUEulerianInfo, GPURigidLoad } from "../../core/webgpu-eulerian";
 import {
   ADAPTIVE_MASS_FRAME_TRACE_CADENCE_MS,
@@ -224,7 +225,12 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
   advanceTo(time_s: number, _bodies: RigidBodyState[]): boolean {
     void _bodies;
     if (this.disposed || !Number.isFinite(time_s) || time_s <= this.lastTime_s + 1e-9) return false;
-    const dt_s = Math.min(this.scene.numerics.maxDt_s, time_s - this.lastTime_s);
+    const paperTimeStep = this.options.timeStep === "paper";
+    if (paperTimeStep
+      && time_s - this.lastTime_s < CM12_PAPER_DT_S - 1e-9) return false;
+    const dt_s = paperTimeStep
+      ? CM12_PAPER_DT_S
+      : Math.min(this.scene.numerics.maxDt_s, time_s - this.lastTime_s);
     if (!(dt_s > 0)) return false;
     const cellSize_m = finestCellSize(this.scene, this.atlas);
     const gravity = this.scene.fluid.gravity_m_s2;

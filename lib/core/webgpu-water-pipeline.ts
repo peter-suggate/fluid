@@ -2385,8 +2385,11 @@ export class RasterWaterPipeline {
       // No geometry, shader, draw, or recurring full-frame write. The clear is
       // retained until a dry-scene encoder writes the attachment or it resizes.
       if (!this.clearBackgroundEncoded) {
+        // Linear counterpart of the studio's own ground (`--bg`, warmed): the
+        // viewport is most of the window, so a teal backdrop here made the
+        // whole app read cold no matter what the chrome around it did.
         encoder.beginRenderPass({label:"Fluid-only clear background",colorAttachments:[{
-          view:this.sceneTextureView!,clearValue:{r:.01,g:.025,b:.024,a:65504},loadOp:"clear",storeOp:"store"
+          view:this.sceneTextureView!,clearValue:{r:.0194,g:.0145,b:.0097,a:65504},loadOp:"clear",storeOp:"store"
         }]}).end();
         this.clearBackgroundEncoded = true;
         tracePhase?.({ id: "dry-scene", label: "Fluid-only background clear" });

@@ -61,6 +61,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { SCENE_ENVIRONMENT_OWNER_BASE } from "../lib/core/webgpu-rigid-body";
 import { getScenePreset } from "../lib/core/scenes";
 import { SVO_CLUSTER_ARENA_BLOCK, packSvoClusterArena } from "../lib/svo/svo-cluster-arena";
 import {
@@ -210,7 +211,7 @@ const scene = getScenePreset(scenePresetId).create();
 const environmentId = (scene.environment ?? "default") as Parameters<typeof buildEnvironmentProxyCatalog>[1];
 const catalog = buildEnvironmentProxyCatalog(scene, environmentId);
 const proxies = environmentProxyPrimitives(catalog, true);
-const ownerFor = (ownerIndex: number) => scene.rigidBodies.length + ownerIndex;
+const ownerFor = (ownerIndex: number) => SCENE_ENVIRONMENT_OWNER_BASE + ownerIndex;
 const clusterProxies = proxies.filter((proxy) => proxy.kind === "cluster");
 const crownProxies = clusterProxies.filter((proxy) => proxy.tags.includes("crown") || proxy.key.includes("crown"));
 const censusProxies = crownProxies.length > 0 ? crownProxies : clusterProxies;

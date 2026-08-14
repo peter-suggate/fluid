@@ -1,3 +1,4 @@
+import { sceneShapeWgsl } from "../../core/scene-shape";
 import { FINE_LEVELSET_SUMMARY_DIRECTORY_PAGE_SIZE, FINE_LEVELSET_SUMMARY_ENTRY_WORDS }
   from "./webgpu-octree-fine-levelset-summary";
 import { OCTREE_LOSASSO_COARSE_PHI_MAGIC } from "./octree-lane-scratch-abi";
@@ -698,12 +699,16 @@ fn worldCell(p: vec3i) -> vec3f {
 }
 fn quaternionRotate(q: vec4f, v: vec3f) -> vec3f { let uv = cross(q.yzw, v); let uuv = cross(q.yzw, uv); return v + 2.0 * (q.x * uv + uuv); }
 fn quaternionInverseRotate(q: vec4f, v: vec3f) -> vec3f { return quaternionRotate(vec4f(q.x, -q.yzw), v); }
+${sceneShapeWgsl()}
+// Body space. Everything this lane knows about what a shape *is* now arrives
+// from SCENE_SHAPE_TABLE above, which is also what the uniform lane and the
+// renderer read: the three used to carry their own copies of the same four
+// ladders, and a shape added to two of them leaked through its own walls in
+// the third.
+fn rigidShapeTag(body: RigidBody) -> i32 { return i32(round(body.positionShape.w)); }
 fn insideRigid(body: RigidBody, world: vec3f) -> bool {
-  let p = quaternionInverseRotate(body.orientation, world - body.positionShape.xyz); let d = body.dimensions.xyz; let shape = i32(round(body.positionShape.w));
-  if (shape == 0) { return length(p) <= d.x; }
-  if (shape == 1) { return all(abs(p) <= 0.5 * d); }
-  if (shape == 2) { let cy = clamp(p.y, -0.5 * d.y, 0.5 * d.y); return length(vec3f(p.x, p.y - cy, p.z)) <= d.x; }
-  return p.x * p.x + p.z * p.z <= d.x * d.x && abs(p.y) <= 0.5 * d.y;
+  let p = quaternionInverseRotate(body.orientation, world - body.positionShape.xyz);
+  return rigidShapeInside(rigidShapeTag(body), body.dimensions.xyz, p);
 }
 fn insideInflowChannel(world: vec3f) -> bool {
   if (params.inflowPositionRadius.w <= 0.0 || params.inflowDirectionLength.w <= 0.0) { return false; }
@@ -727,12 +732,7 @@ fn bodySolidFraction(body: RigidBody, p: vec3i) -> f32 {
 // its analytic SDF. The stored fraction remains zero and therefore cannot turn
 // a merely nearby cell into a solid pressure owner.
 fn bodyMayIntersectCell(body: RigidBody, p: vec3i) -> bool {
-  let d = body.dimensions.xyz;
-  let shape = i32(round(body.positionShape.w));
-  var radius = d.x;
-  if (shape == 1) { radius = 0.5 * length(d); }
-  else if (shape == 2) { radius = d.x + 0.5 * d.y; }
-  else if (shape == 3) { radius = length(vec2f(d.x, 0.5 * d.y)); }
+  let radius = rigidShapeBoundingRadius(rigidShapeTag(body), body.dimensions.xyz);
   let halfDiagonal = 0.5 * length(params.cellRelax.xyz);
   return distance(worldCell(p), body.positionShape.xyz) <= radius + halfDiagonal;
 }

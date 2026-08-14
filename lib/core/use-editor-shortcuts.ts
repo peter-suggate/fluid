@@ -29,6 +29,15 @@ export function useEditorShortcuts(): void {
       const ui = useUIStore.getState();
       const accelerator = event.metaKey || event.ctrlKey;
 
+      // While something is being carried, the viewport owns the keyboard except
+      // for undo/redo: Q and E tilt what is in hand rather than arming a tool,
+      // and Escape puts it back rather than dropping the selection. A carry is
+      // the innermost mode, and modes are left from the inside out.
+      if (ui.carry && !accelerator) return;
+      // The ring is the same case one level out: while it is open its own
+      // handler walks and closes it.
+      if (ui.radialMenu && !accelerator) return;
+
       if (accelerator && event.key.toLowerCase() === "z") {
         event.preventDefault();
         if (event.shiftKey) simulation.redo(); else simulation.undo();

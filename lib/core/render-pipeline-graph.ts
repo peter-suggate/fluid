@@ -34,11 +34,11 @@ export interface RenderPipelineBand {
 }
 
 export const RENDER_PIPELINE_BANDS: readonly RenderPipelineBand[] = Object.freeze([
-  { id: "source", label: "SOURCE" },
-  { id: "primary", label: "PRIMARY VISIBILITY" },
-  { id: "lighting", label: "LIGHTING VISIBILITY" },
-  { id: "shading", label: "SHADING" },
-  { id: "output", label: "OUTPUT" },
+  { id: "source", label: "Source" },
+  { id: "primary", label: "Primary visibility" },
+  { id: "lighting", label: "Lighting visibility" },
+  { id: "shading", label: "Shading" },
+  { id: "output", label: "Output" },
 ]);
 
 /**
@@ -187,7 +187,7 @@ export interface RenderPipelineCollapseGroupDefinition {
 /** What a collapsed run of rows reads as while its arm is unreachable. */
 export const RENDER_PIPELINE_COLLAPSE_GROUPS: Readonly<Record<RenderPipelineCollapseGroupId, RenderPipelineCollapseGroupDefinition>> = Object.freeze({
   "raster-arm": {
-    label: "RASTER ARM",
+    label: "Raster arm",
     chip: "3 tiers · not reachable",
     summary: "The rasterized brick-proxy primary's own visibility tiers — thin-glass discovery, the scene-primitive tier, and rigid impostors. The megakernel primary resolves all three inline, so none of these passes can encode; the arm expands into its rows only under FLUID_SVO_PRIMARY_TRAVERSAL=raster.",
   },
@@ -201,7 +201,7 @@ const NODES: readonly RenderPipelineNode[] = [
     id: "sparse-world-build",
     band: "source",
     side: "left",
-    label: "SPARSE WORLD BUILD",
+    label: "Sparse world build",
     // Incremental voxelization, encoded before any pass that marches it.
     phaseLabels: ["Sparse world maintenance"],
     stage: "sparse-world-build",
@@ -222,7 +222,7 @@ const NODES: readonly RenderPipelineNode[] = [
     id: "fluid-coverage",
     band: "source",
     side: "right",
-    label: "FLUID COVERAGE",
+    label: "Fluid coverage",
     phaseLabels: ["SVO fluid coverage"],
     stage: "fluid-coverage",
     taps: [],
@@ -242,7 +242,7 @@ const NODES: readonly RenderPipelineNode[] = [
     id: "stationary-reuse",
     band: "primary",
     side: "right",
-    label: "STATIONARY REUSE GATE",
+    label: "Stationary reuse gate",
     // A decision, not a dispatch. Its worth shows up as the primary row going
     // to zero on a hit, which is where it belongs.
     phaseLabels: [],
@@ -262,7 +262,7 @@ const NODES: readonly RenderPipelineNode[] = [
     id: "primary-traversal",
     band: "primary",
     side: "left",
-    label: "PRIMARY TRAVERSAL",
+    label: "Primary traversal",
     phaseLabels: ["SVO primary visibility", "SVO traversal + dry shading", "SVO brick instance cull"],
     stage: "primary-traversal",
     taps: [
@@ -283,7 +283,7 @@ const NODES: readonly RenderPipelineNode[] = [
     id: "thin-glass",
     band: "primary",
     side: "right",
-    label: "THIN-GLASS DISCOVERY",
+    label: "Thin-glass discovery",
     phaseLabels: ["SVO raster thin-glass discovery"],
     stage: "thin-glass",
     taps: ["glass-discovery"],
@@ -301,7 +301,7 @@ const NODES: readonly RenderPipelineNode[] = [
     id: "scene-primitive",
     band: "primary",
     side: "left",
-    label: "SCENE-PRIMITIVE TIER",
+    label: "Scene-primitive tier",
     phaseLabels: ["SVO exact live-scene primitive visibility", "SVO near-field analytic band selection"],
     stage: "scene-primitive",
     taps: [],
@@ -318,7 +318,7 @@ const NODES: readonly RenderPipelineNode[] = [
     id: "rigid-impostor",
     band: "primary",
     side: "right",
-    label: "RIGID IMPOSTOR",
+    label: "Rigid impostor",
     phaseLabels: ["SVO analytic rigid discovery"],
     stage: "rigid-impostor",
     taps: ["rigid-impostor"],
@@ -335,7 +335,7 @@ const NODES: readonly RenderPipelineNode[] = [
     id: "seam-closure",
     band: "primary",
     side: "left",
-    label: "PRIMARY SEAM CLOSURE",
+    label: "Primary seam closure",
     phaseLabels: ["SVO primary seam closure"],
     switchedBy: "silhouetteRefinementEnabled",
     taps: [],
@@ -352,7 +352,7 @@ const NODES: readonly RenderPipelineNode[] = [
     id: "cone-visibility",
     band: "lighting",
     side: "right",
-    label: "CONE PREPASS + VISIBILITY",
+    label: "Cone prepass + visibility",
     phaseLabels: ["SVO compacted cone lighting", "SVO cone-lighting prepass", "SVO cone sample fan-out"],
     switchedBy: "svoConeTracingMode",
     taps: ["cone-ambient-visibility", "cone-light-visibility", "cone-geometry"],
@@ -373,7 +373,7 @@ const NODES: readonly RenderPipelineNode[] = [
     id: "voxel-light-cache",
     band: "lighting",
     side: "left",
-    label: "VOXEL LIGHT CACHE",
+    label: "Voxel light cache",
     phaseLabels: ["SVO voxel light cache"],
     stage: "voxel-light-cache",
     taps: [],
@@ -397,7 +397,7 @@ const NODES: readonly RenderPipelineNode[] = [
     id: "world-gi-cache",
     band: "lighting",
     side: "right",
-    label: "WORLD-SPACE GI CACHE",
+    label: "World-space GI cache",
     phaseLabels: ["SVO persistent world-space environmental GI"],
     stage: "world-gi-cache",
     taps: ["cone-radiance"],
@@ -418,7 +418,7 @@ const NODES: readonly RenderPipelineNode[] = [
     id: "reduced-shade",
     band: "shading",
     side: "left",
-    label: "REDUCED-RATE OPAQUE SHADE",
+    label: "Reduced-rate opaque shade",
     phaseLabels: ["SVO reduced-rate opaque shading"],
     stage: "reduced-shade",
     taps: [],
@@ -443,7 +443,7 @@ const NODES: readonly RenderPipelineNode[] = [
     id: "sky-lighting",
     band: "shading",
     side: "right",
-    label: "SKY LIGHTING",
+    label: "Sky lighting",
     phaseLabels: ["SVO deferred sky lighting"],
     stage: "sky-lighting",
     taps: [],
@@ -462,7 +462,7 @@ const NODES: readonly RenderPipelineNode[] = [
     id: "deferred-lighting",
     band: "shading",
     side: "right",
-    label: "DEFERRED LIGHTING",
+    label: "Deferred lighting",
     phaseLabels: [
       "SVO deferred dry lighting",
       "Dry scene lighting",
@@ -486,7 +486,7 @@ const NODES: readonly RenderPipelineNode[] = [
     id: "gi-composition",
     band: "shading",
     side: "left",
-    label: "GI COMPOSITION",
+    label: "GI composition",
     // A term inside the deferred draw, not a dispatch. It has a row because it
     // is the frame's energy balance and has to be steerable; it never claims a
     // phase of its own, so it reports the pass it runs inside.
@@ -512,7 +512,7 @@ const NODES: readonly RenderPipelineNode[] = [
     id: "surface-extraction",
     band: "output",
     side: "left",
-    label: "SURFACE EXTRACTION",
+    label: "Surface extraction",
     phaseLabels: [
       "Water surface extraction",
       "Surface extraction + caustics",
@@ -535,7 +535,7 @@ const NODES: readonly RenderPipelineNode[] = [
     id: "water-interfaces",
     band: "output",
     side: "right",
-    label: "WATER + SPRAY INTERFACES",
+    label: "Water + spray interfaces",
     phaseLabels: [
       "Water + spray front interface",
       "Water + spray back interface",
@@ -564,7 +564,7 @@ const NODES: readonly RenderPipelineNode[] = [
     id: "caustics",
     band: "output",
     side: "right",
-    label: "CAUSTIC MAP",
+    label: "Caustic map",
     phaseLabels: ["Water caustic map"],
     stage: "caustics",
     taps: [],
@@ -582,7 +582,7 @@ const NODES: readonly RenderPipelineNode[] = [
     id: "optical-composite",
     band: "output",
     side: "left",
-    label: "LAYERED OPTICAL COMPOSITE",
+    label: "Layered optical composite",
     phaseLabels: [
       "Layered optical composite",
       "Optical composite",
@@ -603,7 +603,7 @@ const NODES: readonly RenderPipelineNode[] = [
     id: "inspection-overlays",
     band: "output",
     side: "right",
-    label: "INSPECTION OVERLAYS",
+    label: "Inspection overlays",
     phaseLabels: ["Inspection overlays"],
     stage: "inspection-overlays",
     taps: [],
@@ -621,7 +621,7 @@ const NODES: readonly RenderPipelineNode[] = [
     id: "present",
     band: "output",
     side: "left",
-    label: "UPSCALE + PRESENT",
+    label: "Upscale + present",
     phaseLabels: [
       "Final upscale + present",
       "Final presentation",

@@ -1,10 +1,10 @@
 "use client";
 
-import { useState } from "react";
 import { NumberField, Segmented } from "./controls";
 import { simulation } from "../lib/core/simulation/controller";
 import { getMethod, interactiveSimulationMethods } from "@/lib/core/method-registry";
 import { useMethodStore } from "../lib/core/stores/method-store";
+import { useUIStore } from "../lib/core/stores/ui-store";
 import type { EditorEntity } from "../lib/core/editor-entity";
 
 /**
@@ -57,7 +57,11 @@ export function SelectionFlyout({
   leftFraction: number;
   topFraction: number;
 }) {
-  const [open, setOpen] = useState(false);
+  // Held in the store rather than locally so the ring's Edit verb can open this
+  // directly. The store folds it back shut whenever the selection changes, so
+  // expanding one thing never expands the next thing clicked.
+  const open = useUIStore((state) => state.selectionControlsOpen);
+  const setOpen = useUIStore((state) => state.setSelectionControlsOpen);
   const fields = entity.fields ?? [];
   const choices = entity.choices ?? [];
 

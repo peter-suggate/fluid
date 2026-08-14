@@ -3,6 +3,7 @@ import type {
   MethodParamValues,
   SimulationMethod,
 } from "../../core/method-contract";
+import { CM12_PAPER_DT_S } from "../../core/cm12-numerics";
 import { adaptiveMassDiagnosticRows } from "./adaptive-mass-diagnostics";
 import { ADAPTIVE_MASS_FLUID_PIPELINE } from "./adaptive-mass-frame-pipeline";
 import { WebGPUAdaptiveMassSolver } from "./webgpu-adaptive-mass-solver";
@@ -16,6 +17,8 @@ export interface AdaptiveMassSolverOptions {
   readonly fineSide: AdaptiveMassFineSide;
   readonly fineTileResolution: 8;
   readonly coarseTileResolution: 4;
+  /** Omitted only by direct diagnostic constructors, which retain scene-step behavior. */
+  readonly timeStep?: "paper" | "scene";
 }
 
 const params: MethodParamSpec[] = [
@@ -44,6 +47,18 @@ const params: MethodParamSpec[] = [
     ],
     hint: "Places one deterministic 8³ seed on this side of each large quiescent component; activity-driven promotion will grow the fine region. Changing it rebuilds the solver.",
   },
+  {
+    kind: "select",
+    key: "timeStep",
+    label: "Time step",
+    default: "paper",
+    tier: "coarse",
+    options: [
+      { value: "paper", label: "Paper · 1/30 s large steps" },
+      { value: "scene", label: "Scene · authored maxDt" },
+    ],
+    hint: "Sparse CM12 defaults to the same exact 1/30 s operating step as Uniform CM12. Scene mode is retained for matched-step validation and explicit timestep overrides.",
+  },
 ];
 
 const seamAxis = (value: unknown): AdaptiveMassSeamAxis =>
@@ -60,6 +75,7 @@ export function adaptiveMassSolverOptions(
     fineSide: fineSide(values.fineSide),
     fineTileResolution: 8,
     coarseTileResolution: 4,
+    timeStep: values.timeStep === "scene" ? "scene" : "paper",
   };
 }
 
@@ -91,7 +107,14 @@ export const adaptiveMassMethod: SimulationMethod = {
     ultra: "Sparse fixed 4³/8³",
   },
   showQualityControl: false,
-  capabilities: { volumeRendering: true },
+  // `adoptsRigidRosterShape` for the opposite reason to Uniform CM12's: this
+  // method has no rigid system at all — `_onRigidLoads` is ignored, `advanceTo`
+  // voids its bodies, and nothing under lib/methods/adaptive-mass so much as
+  // names `scene.rigidBodies` — so the roster sizes none of its allocations.
+  // Keeping the first body in the solver key restarted the scene to buy an
+  // identical solver, and a body that the sparse water cannot see is no less
+  // invisible after a rebuild than before one.
+  capabilities: { volumeRendering: true, adoptsRigidRosterShape: true },
   supportedFieldModes: ["structure", "resolution", "density", "cfl", "speed", "phi", "pressure"],
   params,
   pipelineGraph: async () => ADAPTIVE_MASS_FLUID_PIPELINE,
@@ -100,10 +123,14 @@ export const adaptiveMassMethod: SimulationMethod = {
     ...values,
     seamAxis: seamAxis(values.seamAxis),
     fineSide: fineSide(values.fineSide),
+    timeStep: values.timeStep === "scene" ? "scene" : "paper",
   }),
+  effectiveStep_s: (_scene, values) =>
+    values.timeStep !== "scene" ? CM12_PAPER_DT_S : undefined,
   presetFor: () => ({
     seamAxis: "x",
     fineSide: "negative",
+    timeStep: "paper",
   }),
   diagnosticRows: adaptiveMassDiagnosticRows,
   createSolverAsync: (

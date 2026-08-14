@@ -318,6 +318,12 @@ export const uniformMethod: SimulationMethod = {
   // `density` is this method's own state variable rather than a derived view,
   // which is why it is offered here and withheld from the level-set octree.
   supportedFieldModes: ["structure", "density", "cfl", "speed", "phi"],
+  // Nothing here is sized from the roster: the rigid arenas are allocated at
+  // GPU_RIGID_BODY_CAPACITY in the constructor, `syncBodies` re-uploads the
+  // whole roster every advance, and the coupling dispatch is gated at encode
+  // time on `activeBodies.length > 0`. So a body can be dropped into water
+  // that is already moving and be coupled on the very next step.
+  capabilities: { adoptsRigidRosterShape: true },
   params,
   runtimeParamKeys: UNIFORM_RUNTIME_PARAM_KEYS,
   pipelineGraph: async () => UNIFORM_FLUID_PIPELINE,

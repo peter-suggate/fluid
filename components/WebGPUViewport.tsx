@@ -39,7 +39,7 @@ import {
 } from "../lib/core/editor-gizmo";
 import { CLICK_SLOP_PX, DEFAULT_EDITOR_TOOL, emptySpaceClickDeselects, pointerStayedWithinClickSlop, type EditorSelection } from "../lib/core/editor-tools";
 import { hoverSceneAt, restOnHover, type EditorHover } from "../lib/core/editor-hover";
-import { sceneryHighlightRange, sceneryIdFromSelection } from "../lib/core/editor-scenery";
+import { sceneryHighlightRange, sceneryIdFromSelection, sceneryPlacementPreview } from "../lib/core/editor-scenery";
 import { sceneStoneNode } from "../lib/core/stone-look-controls";
 import { sceneCanopyPads } from "../lib/core/tree-canopy-controls";
 import { vesselNameFromSelection } from "../lib/core/editor-vessel-rim";
@@ -77,7 +77,19 @@ import {
   type EditorEntityContext,
   type EditorHandle,
 } from "../lib/core/editor-entity";
-import { editorBodyPoses, editorEntityContext, entityAtRay, findEntity, surfacedEntities } from "../lib/core/editor-entity-catalog";
+import { editorBodyPoses, editorEntityContext, entityActionsAt, entityAtRay, findEntity, sceneActionsAt, surfacedEntities } from "../lib/core/editor-entity-catalog";
+import {
+  advanceCarryPlane,
+  carryOrientation,
+  carryPlane,
+  carryPlaneHit,
+  carryPositionFor,
+  carryVelocity,
+  clampCarryPosition,
+  clampCarryTilt,
+  CARRY_TILT_STEP_RAD,
+  type CarryPlane,
+} from "../lib/core/editor-carry";
 import {
   refinementRegionBox,
   refinementRegionCapacityRemaining,
@@ -103,12 +115,11 @@ import { StoneLookFlyout } from "./StoneLookFlyout";
 import { TreeCanopyFlyout } from "./TreeCanopyFlyout";
 import { VesselRimFlyout } from "./VesselRimFlyout";
 import { SelectionFlyout } from "./SelectionFlyout";
-import { ToplineToolbar } from "./ToplineToolbar";
 import { useSceneStore } from "../lib/core/stores/scene-store";
 import { applySceneDraft, displaySceneSnapshot, useDisplayScene, useSceneDraftStore, type SceneDraftSubject } from "../lib/core/stores/scene-draft-store";
 import { useMethodStore, resolvedMethodValues } from "../lib/core/stores/method-store";
 import { drawnBodies, mergeDrawnPoses, useDiagnosticsStore } from "../lib/core/stores/diagnostics-store";
-import type { GPURigidBodyPose } from "../lib/core/webgpu-rigid-body";
+import { samePublishedBodyPoses, type GPURigidBodyPose } from "../lib/core/webgpu-rigid-body";
 import { useUIStore } from "../lib/core/stores/ui-store";
 import { useRuntimeStore } from "../lib/core/stores/runtime-store";
 import { SmoothedFrameRate } from "../lib/core/frame-rate-meter";
@@ -230,11 +241,21 @@ export function WebGPUViewport() {
   // Subscribed, so a gizmo drawn around a body follows it while it moves.
   const bodyPoses = useDiagnosticsStore((state) => state.bodyPoses);
   const [hover, setHover] = useState<EditorHover | null>(null);
-  // The ball a drop gesture is currently proposing. Held as state rather than
-  // read off the draft because the water it describes is not drawn until the
-  // release re-seeds the solver: without this the whole drag would be invisible,
-  // and the radius the gesture exists to choose would be chosen blind.
-  const [ballDrop, setBallDrop] = useState<{ centre_m: Vec3; radius_m: number } | null>(null);
+  // The object the cursor is currently carrying towards a click: a ball of
+  // water, a solid, or a prop. Held as state rather than read off the draft
+  // because none of the three is drawn by the renderer until the click lands —
+  // without this the whole gesture would be invisible, and the radius the ball
+  // drag exists to choose would be chosen blind.
+  const [cursorDrop, setCursorDrop] = useState<
+    { centre_m: Vec3; radius_m: number; tone: "fluid" | "body" | "prop" } | null>(null);
+  // Disarming takes the cursor's object with it, even if the pointer never
+  // moves again: the circle promises the *next* click puts something there, and
+  // it must not outlive the tool that would.
+  const [cursorDropTool, setCursorDropTool] = useState(activeTool);
+  if (activeTool !== cursorDropTool) {
+    setCursorDropTool(activeTool);
+    if (cursorDrop) setCursorDrop(null);
+  }
   /** Handle under the pointer, so it can announce what it does before the press. */
   const [handleHover, setHandleHover] = useState<{
     handleId: string;
@@ -500,6 +521,12 @@ export function WebGPUViewport() {
    * has to assume the roster is the same length it was when the frame was
    * encoded. The revision guard keeps this to one store write per readback
    * rather than one per animation frame.
+   *
+   * These readbacks land while the simulation runs, so the second guard matters
+   * as much as the first: a settled crate publishes the same numbers frame after
+   * frame, and writing them would re-render every gizmo, chip and handle in the
+   * editor for a scene that is not moving. Only a pose that actually changed is
+   * worth a render.
    */
   const publishBodyPoses = (renderer: FluidLabRendererHandle) => {
     const revision = renderer.rigidBodyPoseRevision;
@@ -509,6 +536,8 @@ export function WebGPUViewport() {
     for (const { id, position_m, orientation } of renderer.rigidBodyPoses) {
       published[id] = { position_m, orientation };
     }
+    const previous = useDiagnosticsStore.getState().bodyPoses;
+    if (samePublishedBodyPoses(previous, published)) return;
     useDiagnosticsStore.getState().set({ bodyPoses: published });
   };
 
@@ -653,6 +682,30 @@ export function WebGPUViewport() {
     // work should give way to the pointer on the very next frame.
     if (!request && ui.pixelTracePinned) ui.setPixelTracePinned(false);
   };
+  /**
+   * The object in the user's hand.
+   *
+   * A ref and not state: it changes on every pointer move, and a React render
+   * per move would cost the frame the gesture is being judged by. What the rest
+   * of the shell needs to know — that something is being carried, and how far it
+   * is tilted — is in the UI store, written only when it changes.
+   *
+   * `plane` is the vertical sheet the body slides on, `anchor` is the pointer/
+   * body pair the current gear was engaged at, and `origin_m` is where the body
+   * was when the carry began, which is where Escape puts it back.
+   */
+  const carryRef = useRef<{
+    bodyId: string;
+    plane: CarryPlane;
+    anchor: { pointer_m: Vec3; body_m: Vec3 };
+    origin_m: Vec3;
+    position_m: Vec3;
+    lastPointer_m: Vec3;
+    lastTime_ms: number;
+    tilt_rad: number;
+    fine: boolean;
+  } | null>(null);
+
   const pointerRef = useRef<
     // `x`/`y` track the last move; `downX`/`downY` stay at the press origin.
     // The distance between them is what separates a background click, which
@@ -749,17 +802,19 @@ export function WebGPUViewport() {
   // between a constraint and a gesture that looks broken.
   const heldHandle = handleDrag && heldEntity?.handles.find((handle) => handle.id === handleDrag.handleId);
   const heldAxes = heldHandle && constrainedAxes(heldHandle.axes, axisConstraint);
-  // The ball being dropped, as a circle on the glass: its centre projected, and
-  // its radius scaled by the same perspective divide every gizmo arm uses, so
-  // the circle is the ball's own silhouette rather than a fixed-size cursor.
-  const ballDropCircle = (() => {
-    if (!ballDrop) return undefined;
-    const projection = projectToViewport(ballDrop.centre_m, camera, viewportSize.width, viewportSize.height);
+  // The object on the cursor, as a circle on the glass: its centre projected,
+  // and its radius scaled by the same perspective divide every gizmo arm uses,
+  // so the circle is the object's own silhouette rather than a fixed-size
+  // cursor — it grows as it nears the camera because the thing it stands for
+  // would.
+  const cursorDropCircle = (() => {
+    if (!cursorDrop) return undefined;
+    const projection = projectToViewport(cursorDrop.centre_m, camera, viewportSize.width, viewportSize.height);
     if (!(projection.depth_m > 1e-6)) return undefined;
     return {
       x: projection.leftFraction * viewportSize.width,
       y: projection.topFraction * viewportSize.height,
-      radius_px: ballDrop.radius_m * viewportSize.height
+      radius_px: cursorDrop.radius_m * viewportSize.height
         / (2 * projection.depth_m * cameraTanHalfFov(camera)),
     };
   })();
@@ -1214,7 +1269,9 @@ export function WebGPUViewport() {
     return lifecycle.deferCleanup;
   }, []);
 
-  const pointerRay = (event: React.PointerEvent<HTMLCanvasElement>) =>
+  // Any event that carries a viewport pixel: pointer moves, and the wheel while
+  // something is being carried.
+  const pointerRay = (event: React.MouseEvent<HTMLCanvasElement>) =>
     viewportRayForPointer(useUIStore.getState().camera, event.clientX, event.clientY, event.currentTarget.getBoundingClientRect());
 
   /**
@@ -1277,6 +1334,181 @@ export function WebGPUViewport() {
     pointerRef.current = { id: pointerId, action: "body", bodyId: body.description.id, downX, downY, planePoint: surfacePosition, planeNormal: basis.forward, grabOffset, lastPosition: position, lastTime: timeStamp };
     simulation.dragBody(body.description.id, position, { x: 0, y: 0, z: 0 }, "start", orientation);
   };
+
+  /**
+   * Drive the carried body to where the pointer is.
+   *
+   * The one place the carry arithmetic meets the solver. Everything about
+   * *where* it goes is in `editor-carry.ts`; what is here is the part that
+   * needs the frame: the ray, the clock, and the kinematic command.
+   *
+   * The velocity handed over is a finite difference rather than zero, because
+   * the water has to see the cup move. A dip that told the solver the cup was
+   * stationary at each new place would displace no water at all — the surface
+   * would open and close around it without a splash.
+   */
+  const updateCarry = (ray: { origin: Vec3; direction: Vec3 }, timeStamp: number) => {
+    const carry = carryRef.current;
+    if (!carry) return;
+    const description = useSceneStore.getState().scene.rigidBodies
+      .find((body) => body.id === carry.bodyId);
+    if (!description) { finishCarry(); return; }
+    const hit = carryPlaneHit(carry.plane, ray);
+    if (!hit) return;
+    const position = clampCarryPosition(useSceneStore.getState().scene, description,
+      carryPositionFor(carry.anchor, hit, carry.fine));
+    const velocity = carryVelocity(carry.position_m, position,
+      (timeStamp - carry.lastTime_ms) / 1000);
+    carryRef.current = { ...carry, position_m: position, lastPointer_m: hit, lastTime_ms: timeStamp };
+    simulation.dragBody(carry.bodyId, position, velocity, "move",
+      carryOrientation(useUIStore.getState().camera, carry.tilt_rad));
+  };
+
+  /**
+   * Put it down, or put it back.
+   *
+   * `restore` is Escape: the body returns to where it was picked up, which is
+   * the only way out of a carry that has gone somewhere unintended. An ordinary
+   * click ends the carry where the body already is, and hands it to gravity by
+   * ending the kinematic constraint.
+   */
+  const finishCarry = (restore = false) => {
+    const carry = carryRef.current;
+    carryRef.current = null;
+    useUIStore.getState().endCarry();
+    if (!carry) return;
+    const at = restore ? carry.origin_m : carry.position_m;
+    simulation.dragBody(carry.bodyId, at, { x: 0, y: 0, z: 0 }, "end",
+      restore ? { w: 1, x: 0, y: 0, z: 0 } : carryOrientation(useUIStore.getState().camera, carry.tilt_rad));
+  };
+
+  /** Re-anchor without moving anything — how a gear change avoids a jump. */
+  const reanchorCarry = (fine: boolean) => {
+    const carry = carryRef.current;
+    if (!carry || carry.fine === fine) return;
+    carryRef.current = { ...carry, fine, anchor: { pointer_m: carry.lastPointer_m, body_m: carry.position_m } };
+  };
+
+  const tiltCarry = (steps: number) => {
+    const carry = carryRef.current;
+    if (!carry) return;
+    const tilt_rad = clampCarryTilt(carry.tilt_rad + steps * CARRY_TILT_STEP_RAD);
+    if (tilt_rad === carry.tilt_rad) return;
+    carryRef.current = { ...carry, tilt_rad };
+    useUIStore.getState().setCarryTilt(Math.round((tilt_rad * 180) / Math.PI));
+    simulation.dragBody(carry.bodyId, carry.position_m, { x: 0, y: 0, z: 0 }, "move",
+      carryOrientation(useUIStore.getState().camera, tilt_rad));
+  };
+
+  /**
+   * Right-click: ask whatever is under the pointer what it offers.
+   *
+   * The whole contextual story is these six lines. The ray resolves to an
+   * entity through the same picker a left-click uses, the catalog composes that
+   * entity's own actions, and the ring draws them. Nothing here knows what a
+   * tank offers or what a body offers, which is why adding a verb to either is
+   * a change to that entity's file and to nothing else.
+   */
+  const openRadialMenuAt = (event: React.MouseEvent<HTMLCanvasElement>) => {
+    event.preventDefault();
+    // While carrying, the ring would be a second thing competing for the click
+    // that puts the object down.
+    if (carryRef.current) return;
+    const rect = event.currentTarget.getBoundingClientRect();
+    const ray = viewportRayForPointer(useUIStore.getState().camera, event.clientX, event.clientY, rect);
+    const context = editorEntityContext();
+    const hover = hoverSceneAt(context.scene, drawnBodies(), ray);
+    const hit = entityAtRay(context, ray);
+    // A thing under the cursor answers for itself; a bare point in the room is
+    // answered by the room. Both are rings — see `sceneActionsAt`.
+    const entity = hit && findEntity(context, hit.selection);
+    const actions = hit
+      ? entityActionsAt(context, {
+        selection: hit.selection,
+        point_m: add(ray.origin, scale(ray.direction, hit.distance_m)),
+        normal: hover?.normal,
+      })
+      : hover ? sceneActionsAt(hover.position_m) : [];
+    if (actions.length === 0) { useUIStore.getState().closeRadialMenu(); return; }
+    // Client coordinates: the ring is a fixed-position layer over the window,
+    // not a child of the canvas, so it must not be told canvas-relative ones.
+    useUIStore.getState().openRadialMenu({
+      x: event.clientX,
+      y: event.clientY,
+      title: entity?.label ?? hover?.label ?? "Scene",
+      actions,
+    });
+  };
+
+  const carrySession = useUIStore((state) => state.carry);
+
+  /**
+   * Pick the body up when the store says something is being carried, and put it
+   * down when it stops saying so.
+   *
+   * The store is the mode and the viewport is the mechanism, which is what lets
+   * a wedge in the radial menu — or anything else — start a carry without
+   * knowing that a carry is a plane, an anchor and a kinematic command. Starting
+   * here rather than at the wedge also means the carry begins from the pose the
+   * user can *see*: during a run the GPU owns rigid motion, and picking up from
+   * the authored position would teleport a settled cup back to where it was
+   * placed.
+   */
+  useEffect(() => {
+    if (!carrySession) {
+      if (carryRef.current) finishCarry();
+      return;
+    }
+    if (carryRef.current?.bodyId === carrySession.bodyId) return;
+    const pose = drawnBodies().find((body) => body.description.id === carrySession.bodyId);
+    if (!pose) { useUIStore.getState().endCarry(); return; }
+    const plane = carryPlane(useUIStore.getState().camera, pose.position_m);
+    carryRef.current = {
+      bodyId: carrySession.bodyId,
+      plane,
+      anchor: { pointer_m: pose.position_m, body_m: pose.position_m },
+      origin_m: pose.position_m,
+      position_m: pose.position_m,
+      lastPointer_m: pose.position_m,
+      lastTime_ms: performance.now(),
+      tilt_rad: 0,
+      fine: false,
+    };
+    simulation.dragBody(carrySession.bodyId, pose.position_m, { x: 0, y: 0, z: 0 }, "start",
+      carryOrientation(useUIStore.getState().camera, 0));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [carrySession?.bodyId]);
+
+  /**
+   * The keys a carry answers to.
+   *
+   * On the window rather than the canvas because a carry is a mode and the
+   * pointer may be anywhere: a tilt that only worked while the cursor happened
+   * to be over the canvas would fail exactly when someone lifted a cup to the
+   * top of the frame. Registered only while carrying, so nothing else in the
+   * app loses Q, E or Escape.
+   */
+  useEffect(() => {
+    if (!carrySession) return;
+    const keyDown = (event: KeyboardEvent) => {
+      if (event.metaKey || event.ctrlKey || event.altKey) return;
+      if (event.key === "Shift") { reanchorCarry(true); return; }
+      const key = event.key.toLowerCase();
+      if (key === "escape") { event.preventDefault(); finishCarry(true); return; }
+      // Q tips the near rim down and E the far one, about the camera's right —
+      // so "pour towards me" is the same key from every side of the tank.
+      if (key === "q") { event.preventDefault(); tiltCarry(-1); return; }
+      if (key === "e") { event.preventDefault(); tiltCarry(1); return; }
+    };
+    const keyUp = (event: KeyboardEvent) => { if (event.key === "Shift") reanchorCarry(false); };
+    window.addEventListener("keydown", keyDown);
+    window.addEventListener("keyup", keyUp);
+    return () => {
+      window.removeEventListener("keydown", keyDown);
+      window.removeEventListener("keyup", keyUp);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [carrySession?.bodyId]);
 
   const TERRAIN_HANDLE_TOLERANCE_PX = 12;
   const FILL_HANDLE_TOLERANCE_PX = 12;
@@ -1558,7 +1790,55 @@ export function WebGPUViewport() {
     const committed = useSceneStore.getState().scene;
     const centre = fluidBallCentre(anchor, hover, radius_m);
     useSceneDraftStore.getState().updateDraft({ fluid: addFluidBall(committed, centre, radius_m).fluid });
-    setBallDrop({ centre_m: centre, radius_m });
+    setCursorDrop({ centre_m: centre, radius_m, tone: "fluid" });
+  };
+
+  /**
+   * Show whatever the armed tool would put down, on the cursor, before the click.
+   *
+   * The circle used to appear only once the press had already committed a ball
+   * to the draft, which made the first half of the gesture a guess: how big it
+   * would be, and what it would land on, were both answered after the fact. It
+   * is the same circle the ball drag draws, resting on the same surface, so
+   * arming the tool and pressing show one continuous object rather than two
+   * states — and the two other tools that drop something on a click now make
+   * the same promise, in their own tone.
+   *
+   * Each arm asks its own tool's placement code where the thing would land,
+   * never a second copy of that arithmetic: a preview that disagrees with the
+   * click is worse than no preview.
+   *
+   * Cleared, not hidden, when nothing is armed or the point would not take the
+   * object — a circle over a place the click will not use is a promise broken
+   * as soon as it is tested.
+   */
+  const previewCursorDrop = (ray: { origin: Vec3; direction: Vec3 }, hover: EditorHover | undefined) => {
+    const ui = useUIStore.getState();
+    const scene = useSceneStore.getState().scene;
+    const groundPlane = () => planeHit(ray.origin, ray.direction,
+      { x: 0, y: scene.container.height_m / 2, z: 0 }, cameraBasis(ui.camera).forward);
+    if (ui.activeTool === "fluid-ball") {
+      const anchor = hover?.position_m ?? groundPlane();
+      if (!fluidBallDropAllowedAt(scene, anchor)) { setCursorDrop(null); return; }
+      const radius_m = defaultFluidBallRadius_m(scene);
+      setCursorDrop({ centre_m: fluidBallCentre(anchor, hover, radius_m), radius_m, tone: "fluid" });
+      return;
+    }
+    if (ui.activeTool === "body-place") {
+      const radius_m = boundingRadius(createBodyDescription(ui.placementShape, 1, scene.container.height_m));
+      const centre_m = hover ? restOnHover(hover, radius_m, scene) : groundPlane();
+      setCursorDrop({ centre_m, radius_m, tone: "body" });
+      return;
+    }
+    // A prop rests *on* something, so with no surface under the cursor there is
+    // nothing for it to stand on and the click does nothing either.
+    if (ui.activeTool === "prop-place") {
+      if (!hover) { setCursorDrop(null); return; }
+      const preview = sceneryPlacementPreview(scene, ui.propShape, hover.position_m, hover.normal);
+      setCursorDrop({ ...preview, tone: "prop" });
+      return;
+    }
+    setCursorDrop(null);
   };
 
   /**
@@ -1704,6 +1984,15 @@ export function WebGPUViewport() {
   };
 
   const pointerDown = async (event: React.PointerEvent<HTMLCanvasElement>) => {
+    // Carrying outranks every armed tool: while something is in hand a click
+    // means "put it down" and nothing else. A carry that could be ended only by
+    // finding the right mode again would be a trap, and the mode underneath is
+    // still there when the hand is empty.
+    if (carryRef.current && event.button === 0) { finishCarry(); return; }
+    // The secondary button belongs to the ring and to nothing else. Without this
+    // the same press also starts an orbit and clears the selection, so the menu
+    // would open over a viewport that had just discarded the thing it is about.
+    if (event.button === 2) return;
     event.currentTarget.setPointerCapture(event.pointerId);
     // Arm before any of the early returns below claim the press: the release, not
     // the press, is what decides whether this was a click.
@@ -1842,6 +2131,7 @@ export function WebGPUViewport() {
     pointerRef.current = { id: event.pointerId, x: event.clientX, y: event.clientY, downX: event.clientX, downY: event.clientY, action: event.shiftKey || event.button === 1 ? "pan" : "orbit" };
   };
   const pointerMove = (event: React.PointerEvent<HTMLCanvasElement>) => {
+    if (carryRef.current) { updateCarry(pointerRay(event), event.timeStamp); return; }
     const active = pointerRef.current;
     // The pixel-trace probe follows the pointer whatever else the gesture is
     // doing: a ref, so tracking it costs no React render per move.
@@ -1872,6 +2162,7 @@ export function WebGPUViewport() {
         });
         setHover(null);
         publishHoverHighlight(null);
+        setCursorDrop(null);
         return;
       }
       setHandleHover(null);
@@ -1879,7 +2170,7 @@ export function WebGPUViewport() {
       // still names the thing under the cursor *in the presented image*, so it
       // waits for a generation to be presented — unlike the handle hover above,
       // which reads the document and stays live through a rebuild.
-      if (!pickingInteractive) { setHover(null); publishHoverHighlight(null); return; }
+      if (!pickingInteractive) { setHover(null); publishHoverHighlight(null); setCursorDrop(null); return; }
       // Scenery is asked for only under the select tool — see EditorHoverOptions.
       const ray = pointerRay(event);
       const hovered = hoverSceneAt(
@@ -1887,6 +2178,7 @@ export function WebGPUViewport() {
         { scenery: ui.activeTool === "select" }) ?? null;
       setHover(hovered);
       publishHoverHighlight(hovered);
+      previewCursorDrop(ray, hovered ?? undefined);
       return;
     }
     if (active.id !== event.pointerId) return;
@@ -2044,7 +2336,7 @@ export function WebGPUViewport() {
       return;
     }
     if (active.action === "fluid-ball") {
-      setBallDrop(null);
+      setCursorDrop(null);
       if (cancelled) { simulation.cancelDraft(); return; }
       void finishFluidBallDrop(active);
       return;
@@ -2098,18 +2390,32 @@ export function WebGPUViewport() {
       onPointerMove={pointerMove}
       onPointerUp={pointerUp}
       onPointerCancel={pointerUp}
-      onPointerLeave={() => { setHover(null); publishHoverHighlight(null); setHandleHover(null); }}
-      onWheel={cameraInteractive ? (event) => { event.preventDefault(); setCamera((current) => zoom(current, event.deltaY)); } : undefined}
-      onContextMenu={(event) => event.preventDefault()}
+      onPointerLeave={() => { setHover(null); publishHoverHighlight(null); setHandleHover(null); setCursorDrop(null); }}
+      onWheel={(event) => {
+        // The wheel is the carry's one extra degree of freedom: a single pointer
+        // cannot say "further away", and reaching across the tank is most of
+        // what carrying something is for.
+        const carry = carryRef.current;
+        if (carry) {
+          event.preventDefault();
+          const plane = advanceCarryPlane(carry.plane, event.deltaY);
+          carryRef.current = { ...carry, plane };
+          updateCarry(pointerRay(event), event.timeStamp);
+          return;
+        }
+        if (!cameraInteractive) return;
+        event.preventDefault();
+        setCamera((current) => zoom(current, event.deltaY));
+      }}
+      onContextMenu={openRadialMenuAt}
     />
     {/* The top-right cluster: everything that rides the corner is laid out by
         one flex row rather than by a column of hand-tuned `right:` offsets.
-        Three of them stacked on the same absolute corner is how the region tool
+        Two of them stacked on the same absolute corner is how a tool once
         landed on top of the frame-rate readout, and the next thing added there
-        would have done it again. Order is left-to-right by how often it is
-        touched: a mode, a mode, then a readout. */}
+        would do it again. Order is left-to-right by how often it is touched:
+        a mode, then a readout. */}
     <div className="viewport-topright">
-    <ToplineToolbar />
     {/* Pick mode, beside the frame rate rather than four scrolls into a
         collapsed panel section. It is a mode and not an action — it changes
         what a click on the scene means — so it reads as a pressed state with
@@ -2170,15 +2476,16 @@ export function WebGPUViewport() {
           />
         )))}
     </svg>}
-    {ballDropCircle && <svg
+    {cursorDropCircle && <svg
       className="editor-gizmo editor-ball-gizmo"
       data-testid="editor-ball-gizmo"
+      data-tone={cursorDrop?.tone}
       width={viewportSize.width}
       height={viewportSize.height}
       aria-hidden="true"
     >
-      <circle className="ball-drop" cx={ballDropCircle.x} cy={ballDropCircle.y} r={Math.max(2, ballDropCircle.radius_px)} />
-      <circle className="ball-drop-centre" cx={ballDropCircle.x} cy={ballDropCircle.y} r={2.5} />
+      <circle className="ball-drop" cx={cursorDropCircle.x} cy={cursorDropCircle.y} r={Math.max(2, cursorDropCircle.radius_px)} />
+      <circle className="ball-drop-centre" cx={cursorDropCircle.x} cy={cursorDropCircle.y} r={2.5} />
     </svg>}
     {entityGizmos.length > 0 && <svg
       className="editor-gizmo editor-entity-gizmo"

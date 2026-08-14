@@ -93,6 +93,7 @@ import {
 } from "../core/webgpu-sparse-brick-topology-mutation";
 import { assertSvoBrickRasterNodeAddressable } from "./webgpu-svo-brick-raster";
 import { planSparseSceneDomain } from "../core/sparse-scene-domain";
+import { SCENE_ENVIRONMENT_OWNER_BASE } from "../core/webgpu-rigid-body";
 import { VOXEL_MATERIAL_IDS, materialIdForRigidShape, packVoxelDebugMaterialTable } from "../core/voxel-scene";
 import { buildEnvironmentProxyCatalog, environmentProxyPrimitives, type EnvironmentProxyPrimitive } from "../core/voxel-environments";
 import {
@@ -353,6 +354,7 @@ export function sparseSceneOctreeMaximumDepth(
 }
 
 export const ENVIRONMENT_VOXEL_MATERIAL_BASE = 32;
+
 export const OCTREE_SVO_PBR_MATERIAL_REVISION = 2;
 export const OCTREE_SVO_LIGHT_REVISION = 1;
 export const OCTREE_SVO_ENVIRONMENT_LIGHTING_REVISION = 1;
@@ -744,6 +746,14 @@ function sparseScenePrimitiveForRigidBody(body: RigidBodyDescription, ownerId: n
   }
   if (body.shape === "capsule") {
     return { kind: "capsule", center, radius: body.dimensions_m.x, halfLength: body.dimensions_m.y / 2, orientation, materialId, ownerId };
+  }
+  // A cup's rigid dimensions carry the full height; every render vocabulary
+  // downstream carries the half.
+  if (body.shape === "cup") {
+    return {
+      kind: "cup", center, radius: body.dimensions_m.x, halfHeight: body.dimensions_m.y / 2,
+      wallThickness: body.dimensions_m.z, orientation, materialId, ownerId,
+    };
   }
   return { kind: "cylinder", center, radius: body.dimensions_m.x, halfHeight: body.dimensions_m.y / 2, orientation, materialId, ownerId };
 }
@@ -2459,7 +2469,7 @@ export class OctreeSparseBrickWorld {
         key: primitive.key,
         primitive: sparseScenePrimitiveForProxy(primitive, {
           materialId: ENVIRONMENT_VOXEL_MATERIAL_BASE + primitive.ownerIndex,
-          ownerId: scene.rigidBodies.length + primitive.ownerIndex,
+          ownerId: SCENE_ENVIRONMENT_OWNER_BASE + primitive.ownerIndex,
         }),
         materialSignature: JSON.stringify(primitive.material),
       })),

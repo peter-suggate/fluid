@@ -1,12 +1,36 @@
 import type { SceneDescription } from "./model";
 import type { Quaternion, Vec3 } from "./model";
-import { primitiveVolume, type RigidBodyState } from "./rigid-body";
+import { boundingRadius, primitiveVolume, type RigidBodyState } from "./rigid-body";
 import { SVO_PRIMITIVE_MOTION_STRIDE_BYTES, svoPrimitiveMotionWGSL } from "../svo/svo-primitive-motion";
 import { sceneHasTerrain } from "./terrain";
+import {
+  SCENE_SHAPES_BY_CODE,
+  SCENE_SHAPE_PALETTE_LINEAR,
+  sceneShapeCode,
+  sceneShapePresentationWgsl,
+  sceneShapeRenderHalfExtent_m,
+  sceneShapeWgsl,
+} from "./scene-shape";
 import { VOXEL_MATERIAL_IDS } from "./voxel-scene";
 import type { GPUInitializationTask } from "./gpu-initialization";
 
 export const GPU_RIGID_BODY_CAPACITY = 12;
+/**
+ * The first owner id that is *not* a rigid body.
+ *
+ * Owner ids 0..GPU_RIGID_BODY_CAPACITY-1 name a slot in the rigid arenas, which
+ * are sized at that capacity whether or not the scene fills them; everything
+ * else in the scene — scenery proxies, glass, fixture lights — is numbered from
+ * here.
+ *
+ * It used to be `scene.rigidBodies.length`, which made every scenery object's
+ * owner id a function of how many solids the scene happened to hold. Adding one
+ * renumbered the whole published render source, which is why the roster length
+ * sat in the solver's seed tier and why dropping a body into running water
+ * restarted the clock. Pinned, the two ranges are disjoint by construction
+ * rather than by arithmetic. See `rigidAllocationKey`.
+ */
+export const SCENE_ENVIRONMENT_OWNER_BASE = GPU_RIGID_BODY_CAPACITY;
 export const GPU_RIGID_STATE_FLOATS = 32;
 export const GPU_RIGID_STATE_BYTES = GPU_RIGID_BODY_CAPACITY * GPU_RIGID_STATE_FLOATS * 4;
 export const GPU_RIGID_RENDER_FLOATS = 16;
@@ -26,6 +50,34 @@ export interface GPURigidBodyPick {
 export interface GPURigidBodyPose {
   position_m: Vec3;
   orientation: Quaternion;
+}
+
+/**
+ * Whether two published pose tables say the same thing.
+ *
+ * Exact comparison, not a tolerance: the question is whether the readback
+ * carries news, and the numbers come from the same decode of the same buffer,
+ * so a body that has not moved compares equal bit for bit. A tolerance here
+ * would instead make a slow drift invisible until it crossed the threshold, and
+ * a gizmo that snaps every few seconds is worse than one that tracks.
+ */
+export function samePublishedBodyPoses(
+  a: Readonly<Record<string, GPURigidBodyPose>>,
+  b: Readonly<Record<string, GPURigidBodyPose>>,
+): boolean {
+  const keys = Object.keys(a);
+  if (keys.length !== Object.keys(b).length) return false;
+  return keys.every((id) => {
+    const left = a[id], right = b[id];
+    if (!right) return false;
+    return left.position_m.x === right.position_m.x
+      && left.position_m.y === right.position_m.y
+      && left.position_m.z === right.position_m.z
+      && left.orientation.w === right.orientation.w
+      && left.orientation.x === right.orientation.x
+      && left.orientation.y === right.orientation.y
+      && left.orientation.z === right.orientation.z;
+  });
 }
 
 /** A pose with the body it belongs to, as published from a drawn frame. */
@@ -96,13 +148,12 @@ fn inverseInertia(body: RigidBody, v: vec3f) -> vec3f {
   let rho=max(params.step.y,1e-9); let local=qInverseRotate(body.orientation,v);
   return qRotate(body.orientation,local*body.inverseMassInertia.yzw/rho);
 }
+${sceneShapeWgsl()}
+${sceneShapePresentationWgsl()}
+fn rigidShapeTag(body: RigidBody) -> i32 { return i32(round(body.positionShape.w)); }
 fn supportRadius(body: RigidBody, directionWorld: vec3f) -> f32 {
   let direction=safeNormalize(directionWorld,vec3f(1,0,0)); let local=qInverseRotate(body.orientation,direction);
-  let d=body.dimensions.xyz; let shape=i32(round(body.positionShape.w));
-  if(shape==0){return d.x;}
-  if(shape==1){return .5*(abs(local.x)*d.x+abs(local.y)*d.y+abs(local.z)*d.z);}
-  if(shape==2){return d.x+.5*d.y*abs(local.y);}
-  return d.x*length(local.xz)+.5*d.y*abs(local.y);
+  return rigidShapeSupportRadius(rigidShapeTag(body),body.dimensions.xyz,local);
 }
 fn velocityAt(body: RigidBody, arm: vec3f) -> vec3f { return body.linearVelocity.xyz+cross(body.angularVelocity.xyz,arm); }
 fn angularTerm(body: RigidBody, arm: vec3f, direction: vec3f) -> f32 {
@@ -133,11 +184,7 @@ fn planeContact(body: ptr<function,RigidBody>, normal: vec3f, offset: f32) {
   applyImpulse(body,tangent*tangentMagnitude,arm);
 }
 fn bodyVolume(body: RigidBody) -> f32 {
-  let d=body.dimensions.xyz; let shape=i32(round(body.positionShape.w));
-  if(shape==0){return 4.1887902047863905*d.x*d.x*d.x;}
-  if(shape==1){return d.x*d.y*d.z;}
-  if(shape==3){return 3.141592653589793*d.x*d.x*d.y;}
-  return 3.141592653589793*d.x*d.x*d.y+4.1887902047863905*d.x*d.x*d.x;
+  return rigidShapeVolume(rigidShapeTag(body),body.dimensions.xyz);
 }
 fn terrainPlane(position: vec3f) -> vec4f {
   if(params.container.w<0.5){return vec4f(0,1,0,0);}
@@ -172,9 +219,9 @@ fn solveBodyPair(aIndex: u32,bIndex: u32) {
   bodies[aIndex]=a;bodies[bIndex]=b;
 }
 fn publish(index: u32) {
-  let body=bodies[index];let shape=i32(round(body.positionShape.w));let d=body.dimensions.xyz;
-  var half=vec3f(d.x,.5*d.y,d.x);if(shape==0){half=vec3f(d.x);}else if(shape==1){half=.5*d;}
-  var color=vec3f(.95,.63,.29);if(shape==1){color=vec3f(.48,.66,.96);}else if(shape==2){color=vec3f(.84,.42,.48);}else if(shape==3){color=vec3f(.66,.52,.92);}
+  let body=bodies[index];let shape=rigidShapeTag(body);
+  let half=rigidShapeRenderHalf(shape,body.dimensions.xyz);
+  let color=rigidShapePalette(shape);
   renderBodies[index]=RenderBody(vec4f(body.positionShape.xyz,body.dimensions.w),vec4f(half,body.positionShape.w),body.orientation,vec4f(color,body.material.w));
 }
 fn motionQuaternionXyzw(qWxyz:vec4f)->vec4f{return vec4f(qWxyz.yzw,qWxyz.x);}
@@ -184,7 +231,8 @@ fn motionTransformMatches(record:SvoPrimitiveMotionRecord,body:RigidBody)->bool{
   return positionMatches&&abs(dot(oldQ,bodyQ))>=1.0-1e-6;
 }
 fn motionMaterialId(shape:i32)->u32{
-  if(shape==0){return ${VOXEL_MATERIAL_IDS.sphere}u;}if(shape==1){return ${VOXEL_MATERIAL_IDS.box}u;}if(shape==2){return ${VOXEL_MATERIAL_IDS.capsule}u;}return ${VOXEL_MATERIAL_IDS.cylinder}u;
+  ${SCENE_SHAPES_BY_CODE.map((kind) => `if(shape==${kind.code}){return ${VOXEL_MATERIAL_IDS[kind.name]}u;}`).join("")}
+  return ${VOXEL_MATERIAL_IDS.sphere}u;
 }
 fn publishMotion(index:u32,previousBody:RigidBody,currentBody:RigidBody,dt:f32){
   let old=rigidMotion[index];let generation=bitcast<u32>(currentBody.material.y);let previousGeneration=old.publication.x;
@@ -236,7 +284,7 @@ fn integrate(@builtin(global_invocation_id) id: vec3u) {
 }
 `;
 
-const shapeIndex = { sphere: 0, box: 1, capsule: 2, cylinder: 3 } as const;
+
 
 /** Authoritative GPU rigid state. CPU writes only explicit reset/edit/drag commands. */
 export class WebGPURigidBodySystem {
@@ -256,7 +304,6 @@ export class WebGPURigidBodySystem {
   private pickPipeline!: GPUComputePipeline;
   private pickBindGroup!: GPUBindGroup;
   private shaderModule?: GPUShaderModule;
-  private readonly pipelinesRequired: boolean;
   private readonly pipelinesDeferred: boolean;
   private readonly pickParamsBuffer: GPUBuffer;
   private readonly pickResultBuffer: GPUBuffer;
@@ -271,7 +318,6 @@ export class WebGPURigidBodySystem {
   constructor(private readonly device: GPUDevice, private readonly scene: SceneDescription,
     readonly exchangeBuffer: GPUBuffer, private readonly terrainTexture: GPUTexture,
     _deferPipelineCompilation = true) {
-    this.pipelinesRequired = scene.rigidBodies.length > 0;
     this.pipelinesDeferred = true;
     this.stateBuffer = device.createBuffer({ label: "GPU authoritative rigid-body state", size: GPU_RIGID_STATE_BYTES, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
     this.renderBuffer = device.createBuffer({ label: "GPU rigid-body render records", size: GPU_RIGID_RENDER_BYTES, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC });
@@ -316,8 +362,21 @@ export class WebGPURigidBodySystem {
     ] });
   }
 
+  /**
+   * Compile the two rigid pipelines, whether or not the scene has bodies yet.
+   *
+   * It used to skip an empty roster, which made the pipelines a *compiled policy
+   * shaped by solid presence*: the first body dropped into a running scene then
+   * reached `encode` with `this.pipeline` still undefined and killed the device
+   * on `setPipeline(undefined)`. That gate is the only reason the roster length
+   * had to force a rebuild, so removing it is what actually makes
+   * `adoptsRigidRosterShape` true rather than merely declared.
+   *
+   * The cost is two small pipelines from one module for a scene that never
+   * gains a body, next to the several hundred a solver already compiles.
+   */
   initializationTasks(): GPUInitializationTask[] {
-    if (!this.pipelinesRequired || !this.pipelinesDeferred) return [];
+    if (!this.pipelinesDeferred) return [];
     return [
       { id: "rigid.pipeline.integrate", phase: "solver-pipelines",
         label: "Compile rigid-body integration",
@@ -351,14 +410,22 @@ export class WebGPURigidBodySystem {
       const next = (generation + 1) >>> 0;
       return next === 0 ? 1 : next;
     });
-    const palette = [[.95,.63,.29],[.48,.66,.96],[.84,.42,.48],[.66,.52,.92]];
+    // The shape table's palette, not a local copy of it: this line held the
+    // fifth copy of the same four literals, so the day a fifth shape was added
+    // `palette[shape]` became undefined and spreading it took the device down
+    // the moment a cup was placed. Indexed by code, which is what the table
+    // orders it by.
+    const palette = SCENE_SHAPE_PALETTE_LINEAR;
     active.forEach((body, index) => {
-      const o = index * GPU_RIGID_STATE_FLOATS, d = body.description.dimensions_m, q = body.orientation, shape = shapeIndex[body.description.shape];
+      const o = index * GPU_RIGID_STATE_FLOATS, d = body.description.dimensions_m, q = body.orientation, shape = sceneShapeCode(body.description.shape);
       const rho = this.scene.fluid.density_kg_m3;
-      const radius = body.description.shape === "box" ? Math.hypot(d.x,d.y,d.z)/2 : body.description.shape === "sphere" ? d.x : body.description.shape === "cylinder" ? Math.hypot(d.x,d.y/2) : d.x+d.y/2;
+      // Same reason as the palette: this was a hand-rolled ternary chain that
+      // fell through to the capsule's radius for anything it did not name, so a
+      // cup was packed with a bounding sphere it does not have.
+      const radius = boundingRadius(body.description);
       state.set([body.position_m.x,body.position_m.y,body.position_m.z,shape,d.x,d.y,d.z,radius,q.w,q.x,q.y,q.z,body.linearVelocity_m_s.x,body.linearVelocity_m_s.y,body.linearVelocity_m_s.z,body.inverseMass_kg*rho,body.angularVelocity_rad_s.x,body.angularVelocity_rad_s.y,body.angularVelocity_rad_s.z,body.description.density_kg_m3,body.inverseMass_kg*rho,body.inverseInertiaBody_kg_m2.x*rho,body.inverseInertiaBody_kg_m2.y*rho,body.inverseInertiaBody_kg_m2.z*rho,body.angularMomentum_kg_m2_s.x,body.angularMomentum_kg_m2_s.y,body.angularMomentum_kg_m2_s.z,body.description.restitution,body.description.friction,0,body.description.motion === "static" ? 0 : 1,0],o);
       stateWords[o+29]=nextMotionGenerations[index];
-      const half = body.description.shape === "box" ? [d.x/2,d.y/2,d.z/2] : body.description.shape === "sphere" ? [d.x,d.x,d.x] : [d.x,d.y/2,d.x];
+      const half = sceneShapeRenderHalfExtent_m(body.description.shape, d);
       render.set([body.position_m.x,body.position_m.y,body.position_m.z,state[o+7],half[0],half[1],half[2],shape,q.w,q.x,q.y,q.z,...palette[shape],0],index*GPU_RIGID_RENDER_FLOATS);
       const volume = primitiveVolume(body.description.shape, body.description.dimensions_m);
       const waterline = this.scene.container.fillFraction * this.scene.container.height_m;

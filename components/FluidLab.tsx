@@ -10,7 +10,8 @@ import { useRuntimeStore } from "../lib/core/stores/runtime-store";
 import { useUIStore } from "../lib/core/stores/ui-store";
 import { useShellStore } from "../lib/core/stores/shell-store";
 import { WebGPUViewport } from "./WebGPUViewport";
-import { EditorToolbar } from "./EditorToolbar";
+import { EditorModeChip } from "./EditorModeChip";
+import { RadialMenu } from "./RadialMenu";
 import { SceneOverlay } from "./SceneOverlay";
 import { SceneScaleOverlay } from "./SceneScaleOverlay";
 import { SceneConfigPopover } from "./SceneConfigPopover";
@@ -167,7 +168,8 @@ export function FluidLab() {
     <main className="lab-shell" style={{ "--right-panel-width": `${rightPanelWidth}px` } as CSSProperties} data-run-state={runState} data-solver-mode="eulerian" data-simulation-time={simulationTime.toFixed(6)} data-body-count={bodies.length} data-right-panel-open={Boolean(rightPanel)} data-right-panel={rightPanel ?? "closed"} data-shell-view={shellView}>
       <section className="viewport-shell" data-resource-active={activities.length > 0} data-gpu-transition={activities.at(-1)?.lane ?? resourceReadiness.platform.state}>
         <WebGPUViewport />
-        <EditorToolbar />
+        <EditorModeChip />
+        <RadialMenu />
         <div className="viewport-topline">
           <div className="topline-left">
             <SceneOverlay />

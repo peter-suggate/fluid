@@ -48,7 +48,8 @@ export type SvoPrimitiveKindName =
   | "smooth-union-cluster"
   | "round-cone"
   | "rounded-cylinder"
-  | "field-program";
+  | "field-program"
+  | "cup";
 
 export const SVO_PRIMITIVE_KIND_FLAGS = Object.freeze({
   exactDistance: 1,
@@ -326,6 +327,37 @@ export const SVO_PRIMITIVE_KIND_TABLE = Object.freeze({
     finite: true,
     localExtent_m: (d) => ({ ...d }),
     boundingRadius_m: (d) => Math.hypot(d.x, d.y, d.z),
+  },
+  /**
+   * An open-top vessel — the render half of the rigid `cup` shape.
+   *
+   * The distance function is not written here or anywhere else in this
+   * directory: it is `SCENE_SHAPE_TABLE.cup` in `lib/core/scene-shape.ts`, the
+   * same text the fluid solvers compile, emitted into this ABI by
+   * `cupDistanceWgsl()`. That is the whole point of the cup existing — a vessel
+   * drawn with one cavity and solved with another would fill with water on
+   * screen and hold none, and the failure would look like a solver defect.
+   *
+   * Marched rather than closed-form, for the reason the flag documents: a new
+   * shape should cost one distance function, not a bespoke quartic. The bounds
+   * are the outer cylinder's, which is exact — a cavity never reaches past the
+   * wall it is cut from.
+   *
+   * Note the half height. Every kind in this table is written in half extents,
+   * and `SCENE_SHAPE_TABLE` is written in the full height a rigid body's
+   * `dimensions_m` carries; the one conversion is at the one call site in
+   * `svoPrimitiveDistance_m`, spelled out rather than absorbed.
+   */
+  cup: {
+    name: "cup",
+    code: 13,
+    wgslConstant: "SVO_KIND_CUP",
+    flags: hardFeatures | marchedIntersection,
+    normalPolicy: "hard-feature",
+    dimensionLabels: ["outer radius", "half height", "wall thickness"],
+    finite: true,
+    localExtent_m: (d) => ({ x: d.x, y: d.y, z: d.x }),
+    boundingRadius_m: (d) => Math.hypot(d.x, d.y),
   },
 } as const satisfies Record<SvoPrimitiveKindName, SvoPrimitiveKindEntry>);
 

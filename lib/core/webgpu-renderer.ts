@@ -2,9 +2,10 @@ import { WebGpuSvoFluidCoverage } from "../svo/webgpu-svo-fluid-coverage";
 import { cameraBasis, dot } from "./math";
 import { sceneLatticeDimensions } from "./scene-lattice";
 import { canonicalScene, sceneRevision, sceneUsesFlatVoxelNormals, type CameraState, type SceneDescription } from "./model";
+import { SCENE_SHAPE_PALETTE_LINEAR, sceneShapeCode, sceneShapeRenderHalfExtent_m } from "./scene-shape";
 import { svoSceneLighting } from "../svo/svo-dry-scene-lighting";
 import { boundingRadius, type RigidBodyState } from "./rigid-body";
-import { decodeGPURigidBodyPoses, GPU_RIGID_RENDER_BYTES, type DrawnRigidBodyPose } from "./webgpu-rigid-body";
+import { decodeGPURigidBodyPoses, GPU_RIGID_RENDER_BYTES, SCENE_ENVIRONMENT_OWNER_BASE, type DrawnRigidBodyPose } from "./webgpu-rigid-body";
 import type { GPUEulerianInfo, GPURigidLoad } from "./webgpu-eulerian";
 import type { GPUQuality } from "./gpu-quality";
 import { getMethod } from "./method-registry";
@@ -423,12 +424,11 @@ export function gpuSceneStructuralKey(scene: SceneDescription, config: Simulatio
  */
 export function gpuSceneSeedKey(scene: SceneDescription): string {
   const c = scene.container;
-  return `${c.width_m}:${c.height_m}:${c.depth_m}:${c.shape ?? "box"}:${c.fillFraction}:${rigidBodyAllocationKey(scene.rigidBodies)}:${scene.fluid.initialCondition}:${JSON.stringify(scene.fluid.initialDamBreakDimensions_m ?? null)}:${JSON.stringify(scene.fluid.initialDamBreakOrigin_m ?? null)}:${JSON.stringify(scene.fluid.initialBrickSeeds_m ?? null)}:${scene.fluid.initialBrickSeedsAdditive ?? false}:${JSON.stringify(scene.fluid.initialLiquidVolumes ?? null)}:${JSON.stringify(scene.terrain ?? null)}:${inflowBudgetKey(scene.fluid.inflow)}`;
+  return `${c.width_m}:${c.height_m}:${c.depth_m}:${c.shape ?? "box"}:${c.fillFraction}:${scene.fluid.initialCondition}:${JSON.stringify(scene.fluid.initialDamBreakDimensions_m ?? null)}:${JSON.stringify(scene.fluid.initialDamBreakOrigin_m ?? null)}:${JSON.stringify(scene.fluid.initialBrickSeeds_m ?? null)}:${scene.fluid.initialBrickSeedsAdditive ?? false}:${JSON.stringify(scene.fluid.initialLiquidVolumes ?? null)}:${JSON.stringify(scene.terrain ?? null)}:${inflowBudgetKey(scene.fluid.inflow)}`;
 }
 
 /**
- * The rigid-body facts an allocation, a compiled policy, or the owner numbering
- * is shaped by.
+ * The rigid-body facts a solver's *allocations* are shaped by.
  *
  * *Which* bodies, where they are, and what shape they take are absent on
  * purpose: every step already writes the whole roster into the rigid state
@@ -436,28 +436,28 @@ export function gpuSceneSeedKey(scene: SceneDescription): string {
  * buffer, so moving, reshaping or re-materialing a body is adopted live. That
  * is what keeps `rigidBodyRosterKey` in the uniform tier.
  *
- * What remains is three facts, and the third is the interesting one:
+ * What remains is two facts, both of them thresholds rather than counts:
  *
- *  - Are there any solids? `octreeSparseWorldRequired`,
+ *  - Are there *any* solids? `octreeSparseWorldRequired`,
  *    `planOctreeSolidCellAllocation` and `planOctreeSurfaceStateAllocation`
  *    each allocate a dense solid field for the whole lattice or skip it.
  *  - Does any of them move? `planOctreeSolveTail` scores one extra iteration
  *    for a moving immersed boundary, regardless of how many there are.
- *  - **How many are there?** Not an allocation — a numbering.
- *    `svo-scene-primitives`, `svo-scene-thick-glass`, the sparse brick world
- *    and the dry-scene publication all number environment proxies as
- *    `rigidBodies.length + ownerIndex`, so the roster length is part of the
- *    render source's ABI. Adding a body renumbers every scenery object, which
- *    is why the count is here and why adding one still costs a re-seed.
  *
- * That third one is a decoupling worth doing and is not done: pinning the
- * environment base at the fixed rigid capacity (`GPU_RIGID_BODY_CAPACITY`, 12)
- * would take the count out of this key entirely, at the cost of resizing every
- * per-owner arena from `bodies.length + proxies` to `12 + proxies`. Until then,
- * "drop a body into running water" is warm only for a body that already exists.
+ * The *count* used to be here too, and it is the reason dropping a body into
+ * running water restarted the clock: the environment proxies were numbered
+ * `rigidBodies.length + ownerIndex`, so the roster length was part of the
+ * render source's ABI and adding one renumbered every scenery object. It is
+ * now `SCENE_ENVIRONMENT_OWNER_BASE + ownerIndex` — pinned at the fixed rigid
+ * capacity every rigid arena is already sized to — so the count names nothing.
+ *
+ * A method that allocates nothing from either remaining fact declares
+ * `adoptsRigidRosterShape` and gets a constant, which is what makes the first
+ * body dropped into a running uniform scene warm as well.
  */
-function rigidBodyAllocationKey(bodies: SceneDescription["rigidBodies"]): string {
-  return `${bodies.length}:${bodies.some((body) => body.motion !== "static")}`;
+function rigidAllocationKey(bodies: SceneDescription["rigidBodies"], methodId: string): string {
+  if (getMethod(methodId).capabilities?.adoptsRigidRosterShape) return "live";
+  return `${bodies.length > 0}:${bodies.some((body) => body.motion !== "static")}`;
 }
 
 /** The roster itself, which a live solver re-uploads rather than rebuilds for. */
@@ -501,9 +501,10 @@ function inflowBudgetKey(inflow: SceneDescription["fluid"]["inflow"]): string {
  * not just the seed one, because a lattice change is the case where continuing
  * would be worst: the solver would keep running at the old shape.
  */
-export function sceneEditRequiresReset(before: SceneDescription, after: SceneDescription): boolean {
+export function sceneEditRequiresReset(before: SceneDescription, after: SceneDescription, methodId: string): boolean {
   return sceneStructuralKey(before) !== sceneStructuralKey(after)
-    || gpuSceneSeedKey(before) !== gpuSceneSeedKey(after);
+    || gpuSceneSeedKey(before) !== gpuSceneSeedKey(after)
+    || rigidAllocationKey(before.rigidBodies, methodId) !== rigidAllocationKey(after.rigidBodies, methodId);
 }
 
 /** Where the nozzle is, which way it points, and how far it reaches. */
@@ -552,7 +553,7 @@ function refinementRegionKey(scene: SceneDescription): string {
  * ignoring the edit.
  */
 export function gpuSceneSolverKey(scene: SceneDescription, config: SimulationRunConfig): string {
-  return `${config.simulationEpoch ?? 0}:${gpuSceneStructuralKey(scene, config)}:${gpuSceneSeedKey(scene)}`;
+  return `${config.simulationEpoch ?? 0}:${gpuSceneStructuralKey(scene, config)}:${gpuSceneSeedKey(scene)}:${rigidAllocationKey(scene.rigidBodies, config.methodId)}`;
 }
 
 
@@ -2109,7 +2110,7 @@ export class FluidLabRenderer {
       primitiveCandidates,
       materialRecords,
       materialRevision: revision,
-      ownerBase: scene.rigidBodies.length,
+      ownerBase: SCENE_ENVIRONMENT_OWNER_BASE,
       skippedOwnerId: scenePrimitives.openShellOwnerId,
       terrainMaterialId: scenePrimitives.analyticTerrain?.materialId,
       terrainMaterialMetadata: terrainMaterial?.packedMetadata,
@@ -2700,15 +2701,13 @@ export class FluidLabRenderer {
       this.gpuFluid?.setSelectedRigidBody?.(bodies.findIndex((body) => body.description.id === selectedBodyId));
     } else {
       const bodyData = new Float32Array(12 * 16);
-      const shapeIndex = { sphere: 0, box: 1, capsule: 2, cylinder: 3 } as const;
-      const palette = [[0.95, 0.63, 0.29], [0.48, 0.66, 0.96], [0.84, 0.42, 0.48], [0.66, 0.52, 0.92]];
       bodies.slice(0, 12).forEach((body, index) => {
         const offset = index * 16;
-        const d = body.description.dimensions_m;
-        const half = body.description.shape === "box" ? [d.x / 2, d.y / 2, d.z / 2] : body.description.shape === "sphere" ? [d.x, d.x, d.x] : [d.x, d.y / 2, d.x];
-        const color = palette[shapeIndex[body.description.shape]];
+        const shape = body.description.shape;
+        const half = sceneShapeRenderHalfExtent_m(shape, body.description.dimensions_m);
+        const color = SCENE_SHAPE_PALETTE_LINEAR[sceneShapeCode(shape)];
         bodyData.set([body.position_m.x, body.position_m.y, body.position_m.z, boundingRadius(body)], offset);
-        bodyData.set([half[0], half[1], half[2], shapeIndex[body.description.shape]], offset + 4);
+        bodyData.set([half[0], half[1], half[2], sceneShapeCode(shape)], offset + 4);
         bodyData.set([body.orientation.w, body.orientation.x, body.orientation.y, body.orientation.z], offset + 8);
         bodyData.set([color[0], color[1], color[2], body.description.id === selectedBodyId ? 1 : 0], offset + 12);
       });
@@ -2791,7 +2790,15 @@ export class FluidLabRenderer {
     };
     if (residentRigidBuffer) encoder.copyBufferToBuffer(residentRigidBuffer, 0, this.bodyBuffer, 0, 12 * 16 * 4);
     // The same records, on their way to the host. See `publishRigidBodyPoses`.
-    const poseStaging = !this.simulationRunning && residentRigidBuffer && bodies.length > 0
+    //
+    // Issued while the simulation runs, which is the whole point: the solver
+    // owns rigid motion from t=0 onward, so a gizmo fed only by paused frames
+    // stays pinned where the body was authored while the body itself falls out
+    // from under it. "Live frames never map solver state" is the rule for
+    // `readStats`, which maps a buffer the solver owns; this maps a
+    // renderer-owned staging copy, double-buffered and skipped whenever both
+    // slots are still in flight, so it neither blocks the queue nor paces it.
+    const poseStaging = residentRigidBuffer && bodies.length > 0
       ? this.encodeRigidBodyPoseReadback(encoder, residentRigidBuffer) : undefined;
     if (sparsePresentationRequired) {
       this.svoDryScenePipeline?.setRigidMotionSource(this.gpuFluid?.rigidMotionBuffer);
@@ -3005,7 +3012,7 @@ export class FluidLabRenderer {
     // withheld blit would read as "free" while the image stopped updating for a
     // reason nothing on screen could explain.
     const finalPresentationPhase = { id: "present", label: "Final upscale + present" } as const;
-    const upscalePass=encoder.beginRenderPass({colorAttachments:[{view:this.context.getCurrentTexture().createView(),clearValue:{r:0.01,g:0.025,b:0.024,a:1},loadOp:"clear",storeOp:"store"}]});
+    const upscalePass=encoder.beginRenderPass({colorAttachments:[{view:this.context.getCurrentTexture().createView(),clearValue:{r:0.0194,g:0.0145,b:0.0097,a:1},loadOp:"clear",storeOp:"store"}]});
     if (!disabledStages.has("present")) {
       upscalePass.setPipeline(this.upscalePipeline);upscalePass.setBindGroup(0,this.upscaleBindGroup);upscalePass.draw(3);
     }

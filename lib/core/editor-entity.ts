@@ -4,6 +4,7 @@ import type { EditorSelection, EditorSelectionKind, EditorTool } from "./editor-
 import { add, scale, sub } from "./math";
 import { quaternionInverseRotate, quaternionRotate } from "./rigid-body";
 import type { CameraState, Quaternion, SceneDescription, Vec3 } from "./model";
+import type { EditorAction, EditorActionTarget } from "./editor-action";
 import type { SceneDraftSubject } from "./stores/scene-draft-store";
 import { CAMERA_TAN_HALF_FOV, cameraTanHalfFov, projectToViewport } from "./webgpu-camera";
 
@@ -286,6 +287,18 @@ export interface EditorEntityDefinition {
     ray: EditorRay,
     exclude?: EditorSelection,
   ) => EntityRayHit | undefined;
+  /**
+   * What this entity offers at a point on it — the radial menu's contents.
+   *
+   * Only what is *particular* to the entity: selecting it and deleting it are
+   * offered to everything that can be selected and everything that declares
+   * `remove`, and are composed in by `entityActionsAt` rather than repeated
+   * here five times. See `editor-action.ts`.
+   */
+  readonly actions?: (
+    context: EditorEntityContext,
+    target: EditorActionTarget,
+  ) => readonly EditorAction[];
 }
 
 export interface EditorRay {

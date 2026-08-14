@@ -469,9 +469,12 @@ export function FluidCellTraceHud({
             </small>
             <div>
               {crossings.map((crossing) => {
+                // The sheet owns these three: an alarm, a caution and the
+                // trace HUD's own violet. Named rather than spelled so they
+                // follow the theme the rest of the overlay follows.
                 const swatch = crossing.outward
-                  ? (crossing.fraction < 0.25 ? "#ff1738" : "#f5ba1a")
-                  : "#8a7ad6";
+                  ? (crossing.fraction < 0.25 ? "var(--alert)" : "var(--amber)")
+                  : "var(--violet)";
                 return (
                   <span
                     key={crossing.direction}
@@ -500,8 +503,8 @@ export function FluidCellTraceHud({
             <small>Resolution transitions — one hop crosses a whole neighbour leaf, so reach is uneven</small>
             <div>
               {transitions.map((neighbor) => (
-                <span key={neighbor.direction} style={{ borderColor: neighbor.coarser ? "#fa9e14" : "#0fc7cc" }}>
-                  <i style={{ background: neighbor.coarser ? "#fa9e14" : "#0fc7cc" }} />
+                <span key={neighbor.direction} style={{ borderColor: neighbor.coarser ? "var(--amber)" : "var(--accent)" }}>
+                  <i style={{ background: neighbor.coarser ? "var(--amber)" : "var(--accent)" }} />
                   <b>{fluidCellTraceDirectionLabel(neighbor.direction)}</b>
                   <output>{neighbor.leafSize}³</output>
                   <em>{neighbor.coarser ? "coarser" : "finer"}</em>

@@ -32,6 +32,7 @@ import {
   type SvoFieldProgram,
 } from "../svo/svo-field-program";
 import { svoProceduralNoiseWGSL } from "../svo/svo-procedural-material";
+import { cupWallThickness_m } from "./scene-shape";
 import type { SparseSceneTerrainField } from "./sparse-scene-terrain-field";
 import { VOXEL_MATERIAL_IDS } from "./voxel-scene";
 
@@ -102,6 +103,7 @@ export const SPARSE_SCENE_PRIMITIVE_TYPES = Object.freeze({
   "round-cone": 8,
   "rounded-cylinder": 9,
   "field-program": 10,
+  cup: 11,
 } as const);
 
 /**
@@ -224,6 +226,23 @@ export interface SparseSceneRoundedCylinderPrimitive extends SparseScenePrimitiv
 }
 
 /**
+ * An open-topped vessel: the outer cylinder with a coaxial cavity subtracted.
+ *
+ * Not expressible as any combination of the kinds above — this pass has no CSG —
+ * and substituting the solid cylinder would fill the cavity with the very
+ * material the cup exists to keep out, so a carried cup would voxelize as a
+ * plug. It therefore evaluates through the render ABI, which owns the one
+ * declaration of the field in `lib/core/scene-shape.ts`.
+ */
+export interface SparseSceneCupPrimitive extends SparseScenePrimitiveBase {
+  kind: "cup";
+  radius: number;
+  halfHeight: number;
+  wallThickness: number;
+  orientation?: SparseSceneQuaternion;
+}
+
+/**
  * A procedural field clipped to an ellipsoidal envelope — the bonsai's crown,
  * the stone sets, the swept tubes.
  *
@@ -263,6 +282,7 @@ export type SparseScenePrimitive =
   | SparseSceneConePrimitive
   | SparseSceneRoundConePrimitive
   | SparseSceneRoundedCylinderPrimitive
+  | SparseSceneCupPrimitive
   | SparseSceneSmoothUnionClusterPrimitive
   | SparseSceneFieldProgramPrimitive;
 
@@ -270,9 +290,9 @@ export type SparseScenePrimitive =
 export function sparseSceneAbiTruePrimitive(
   primitive: SparseScenePrimitive,
 ): primitive is SparseSceneRoundConePrimitive | SparseSceneRoundedCylinderPrimitive
-  | SparseSceneSmoothUnionClusterPrimitive | SparseSceneFieldProgramPrimitive {
+  | SparseSceneCupPrimitive | SparseSceneSmoothUnionClusterPrimitive | SparseSceneFieldProgramPrimitive {
   return primitive.kind === "round-cone" || primitive.kind === "rounded-cylinder"
-    || primitive.kind === "smooth-union-cluster" || primitive.kind === "field-program";
+    || primitive.kind === "cup" || primitive.kind === "smooth-union-cluster" || primitive.kind === "field-program";
 }
 
 /**
@@ -284,7 +304,7 @@ export function sparseSceneAbiTruePrimitive(
  * own packed word and never reads them back through the ABI.
  */
 function abiDescriptorForPrimitive(
-  primitive: SparseSceneRoundConePrimitive | SparseSceneRoundedCylinderPrimitive
+  primitive: SparseSceneRoundConePrimitive | SparseSceneRoundedCylinderPrimitive | SparseSceneCupPrimitive
     | SparseSceneSmoothUnionClusterPrimitive | SparseSceneFieldProgramPrimitive,
   arenaReference = 0,
 ): SvoPrimitiveDescriptor {
@@ -306,6 +326,12 @@ function abiDescriptorForPrimitive(
     return {
       ...identity, kind: "rounded-cylinder",
       radius_m: primitive.radius, halfHeight_m: primitive.halfHeight, edgeRadius_m: primitive.edgeRadius,
+    };
+  }
+  if (primitive.kind === "cup") {
+    return {
+      ...identity, kind: "cup",
+      radius_m: primitive.radius, halfHeight_m: primitive.halfHeight, wallThickness_m: primitive.wallThickness,
     };
   }
   if (primitive.kind === "field-program") {
@@ -345,6 +371,10 @@ export function sparseScenePrimitiveForSvoDescriptor(descriptor: SvoPrimitiveDes
   if (descriptor.kind === "rounded-cylinder") return {
     ...base, kind: "rounded-cylinder", radius: descriptor.radius_m,
     halfHeight: descriptor.halfHeight_m, edgeRadius: descriptor.edgeRadius_m,
+  };
+  if (descriptor.kind === "cup") return {
+    ...base, kind: "cup", radius: descriptor.radius_m,
+    halfHeight: descriptor.halfHeight_m, wallThickness: descriptor.wallThickness_m,
   };
   if (descriptor.kind === "torus") return { ...base, kind: "torus", majorRadius: descriptor.majorRadius_m, minorRadius: descriptor.minorRadius_m };
   if (descriptor.kind === "cone") return { ...base, kind: "cone", baseRadius: descriptor.baseRadius_m, topRadius: descriptor.topRadius_m, halfHeight: descriptor.halfHeight_m };
@@ -769,6 +799,18 @@ function primitiveExtent(primitive: SparseScenePrimitive): SparseSceneVector3 {
     }
     return [primitive.radius, primitive.halfHeight, primitive.edgeRadius];
   }
+  if (primitive.kind === "cup") {
+    // The wall bound is the render ABI's, restated as a refusal rather than a
+    // clamp: this pass publishes occupancy, and a wall silently moved here would
+    // voxelize a different cup than the one the renderer draws.
+    if (!Number.isFinite(primitive.radius) || primitive.radius <= 0
+        || !Number.isFinite(primitive.halfHeight) || primitive.halfHeight <= 0
+        || !Number.isFinite(primitive.wallThickness) || primitive.wallThickness <= 0
+        || primitive.wallThickness > cupWallThickness_m({ x: primitive.radius, y: 2 * primitive.halfHeight, z: primitive.wallThickness }) * (1 + 1e-6)) {
+      throw new RangeError("Cup extents must be positive and leave an open cavity");
+    }
+    return [primitive.radius, primitive.halfHeight, primitive.wallThickness];
+  }
   if (primitive.kind === "smooth-union-cluster") {
     positiveVector(primitive.lobeRadii, "Cluster envelope radii");
     return primitive.lobeRadii;
@@ -817,7 +859,7 @@ function primitiveLocalBounds(primitive: SparseScenePrimitive): SparseSceneVecto
     const radius = Math.max(primitive.baseRadius, primitive.topRadius);
     return [radius, primitive.halfHeight + radius, radius];
   }
-  if (primitive.kind === "rounded-cylinder") {
+  if (primitive.kind === "rounded-cylinder" || primitive.kind === "cup") {
     primitiveExtent(primitive);
     return [primitive.radius, primitive.halfHeight, primitive.radius];
   }
@@ -1293,6 +1335,11 @@ export function sparseScenePrimitiveSignedDistance(
  * more than its centre sample.
  */
 export function sparseScenePrimitiveFeatureRadius(primitive: SparseScenePrimitive): number {
+  // A cup's finest solid is its wall, and a wall thinner than a cell is exactly
+  // the case the corner sweep exists for: the centre sample of a cell straddling
+  // the wall sits in the cavity or outside, and the cup voxelizes as a ring of
+  // holes that water pours straight through.
+  if (primitive.kind === "cup") return primitive.wallThickness;
   if (primitive.kind !== "smooth-union-cluster") return Number.POSITIVE_INFINITY;
   return svoClusterFeatureRadius_m(
     { x: primitive.lobeRadii[0], y: primitive.lobeRadii[1], z: primitive.lobeRadii[2] },
@@ -1855,6 +1902,10 @@ fn primitiveDistance(primitive: ScenePrimitive, world: vec3f) -> f32 {
     return svoPrimitiveDistance_m(scenePrimitiveAbiRecord(primitive, SVO_KIND_ROUNDED_CYLINDER), world, 0.0,
       svoInvalidClusterPacking());
   }
+  if (primitiveType == ${SPARSE_SCENE_PRIMITIVE_TYPES.cup}u) {
+    return svoPrimitiveDistance_m(scenePrimitiveAbiRecord(primitive, SVO_KIND_CUP), world, 0.0,
+      svoInvalidClusterPacking());
+  }
   return 1e20;
 }
 /**
@@ -1863,6 +1914,7 @@ fn primitiveDistance(primitive: ScenePrimitive, world: vec3f) -> f32 {
  * \`sparseScenePrimitiveFeatureRadius\`.
  */
 fn primitiveFeatureRadius(primitive: ScenePrimitive) -> f32 {
+  if (scenePrimitiveType(primitive) == ${SPARSE_SCENE_PRIMITIVE_TYPES.cup}u) { return primitive.extentIdentity.z; }
   if (scenePrimitiveType(primitive) != ${SPARSE_SCENE_PRIMITIVE_TYPES["smooth-union-cluster"]}u) { return 1e20; }
   return svoClusterFeatureRadius_m(primitive.extentIdentity.xyz,
     sceneClusterPacking(scenePrimitiveArenaSlot(primitive)));

@@ -1,5 +1,6 @@
 import type { EnvironmentId } from "../core/environments";
 import type { SceneDescription } from "../core/model";
+import { SCENE_ENVIRONMENT_OWNER_BASE } from "../core/webgpu-rigid-body";
 import { svoSceneLighting } from "./svo-dry-scene-lighting";
 import {
   cachedSvoPublication,
@@ -237,7 +238,7 @@ export function buildSvoSceneLights(scene: SceneDescription, options: BuildSvoSc
     sourceKey: "authored/directional",
   });
   const catalog = buildEnvironmentProxyCatalog(scene, options.environmentId ?? scene.environment ?? "default");
-  const fixtures = environmentProxyPrimitives(catalog).map((proxy) => proxyPhysicalLight(proxy, scene.rigidBodies.length, revision))
+  const fixtures = environmentProxyPrimitives(catalog).map((proxy) => proxyPhysicalLight(proxy, SCENE_ENVIRONMENT_OWNER_BASE, revision))
     .filter((light): light is SvoLightRecord => Boolean(light));
   const selected = fixtures.slice().sort((a, b) => importance(b) - importance(a) || a.lightId - b.lightId).slice(0, maximumRecords - 1);
   const selectedIds = new Set(selected.map((light) => light.lightId));

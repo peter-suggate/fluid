@@ -251,7 +251,7 @@ export interface SparseVoxelDrySceneData {
   /** Complete live material table. Binding 6 is renderer-owned and capacity-stable. */
   materialRecords: Uint32Array<ArrayBuffer>;
   materialRevision: number;
-  /** First owner ID belonging to primitive zero (rigid bodies occupy lower IDs). */
+  /** First owner ID belonging to primitive zero (rigid bodies occupy the ids below it). */
   ownerBase: number;
   /** Interior-facing shell pane omitted so the camera can see into the room. */
   skippedOwnerId?: number;

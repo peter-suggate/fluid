@@ -12,6 +12,13 @@ import {
   type SvoPrimitiveKindName,
 } from "./svo-primitive-kinds";
 import { sampleSvoProceduralNoise } from "./svo-procedural-material";
+import {
+  CUP_DISTANCE_FUNCTION,
+  CUP_WALL_FUNCTION,
+  cupDistance_m,
+  cupDistanceWgsl,
+  cupWallThickness_m,
+} from "../core/scene-shape";
 import { terrainHeightAt, terrainNormalAt, type TerrainDescription } from "../core/terrain";
 import { materialIdForRigidShape } from "../core/voxel-scene";
 
@@ -51,6 +58,7 @@ export const SVO_PRIMITIVE_KINDS = Object.freeze({
   roundCone: SVO_PRIMITIVE_KIND_TABLE["round-cone"].code,
   roundedCylinder: SVO_PRIMITIVE_KIND_TABLE["rounded-cylinder"].code,
   fieldProgram: SVO_PRIMITIVE_KIND_TABLE["field-program"].code,
+  cup: SVO_PRIMITIVE_KIND_TABLE.cup.code,
 } as const);
 
 export const SVO_PRIMITIVE_FLAGS = SVO_PRIMITIVE_KIND_FLAGS;
@@ -369,6 +377,23 @@ export interface SvoRoundedCylinderPrimitive extends SvoOrientedPrimitive {
   /** Outer vertical half extent, including the fillet. */
   halfHeight_m: number;
   edgeRadius_m: number;
+}
+
+/**
+ * An open-top vessel: the outer cylinder with a coaxial cavity subtracted.
+ *
+ * The render half of the rigid `cup` shape. Its distance comes from
+ * `SCENE_SHAPE_TABLE` rather than from this file — see the kind's entry in
+ * `svo-primitive-kinds.ts` for why that matters.
+ */
+export interface SvoCupPrimitive extends SvoOrientedPrimitive {
+  kind: "cup";
+  /** Outer radial extent. */
+  radius_m: number;
+  /** Outer vertical half extent. */
+  halfHeight_m: number;
+  /** Wall thickness, clamped against the radius and the height at evaluation. */
+  wallThickness_m: number;
 }
 
 export interface SvoEllipsoidPrimitive extends SvoOrientedPrimitive {
@@ -705,6 +730,7 @@ export type SvoPrimitiveDescriptor =
   | SvoCapsulePrimitive
   | SvoCylinderPrimitive
   | SvoRoundedCylinderPrimitive
+  | SvoCupPrimitive
   | SvoEllipsoidPrimitive
   | SvoTorusPrimitive
   | SvoConePrimitive
@@ -852,6 +878,20 @@ function dimensions(descriptor: SvoPrimitiveDescriptor): Vec3 {
       throw new RangeError("Rounded-cylinder edge radius must fit inside its outer radius and half height");
     }
     return { x: descriptor.radius_m, y: descriptor.halfHeight_m, z: descriptor.edgeRadius_m };
+  }
+  if (descriptor.kind === "cup") {
+    positive(descriptor.radius_m, "Cup radius");
+    positive(descriptor.halfHeight_m, "Cup half height");
+    positive(descriptor.wallThickness_m, "Cup wall thickness");
+    // The shared field clamps a wall that would close the cavity, so a wall the
+    // clamp would move describes a different cup than the one that gets drawn.
+    // Asking the clamp rather than restating its limits keeps the refusal and
+    // the shape derived from one number.
+    const clampedWall = cupWallThickness_m({ x: descriptor.radius_m, y: 2 * descriptor.halfHeight_m, z: descriptor.wallThickness_m });
+    if (descriptor.wallThickness_m > clampedWall * SINGLE_PRECISION_SLACK) {
+      throw new RangeError("Cup wall thickness must leave an open cavity inside its radius and height");
+    }
+    return { x: descriptor.radius_m, y: descriptor.halfHeight_m, z: descriptor.wallThickness_m };
   }
   if (descriptor.kind === "ellipsoid") {
     finiteVec3(descriptor.radii_m, "Ellipsoid radii");
@@ -1119,6 +1159,7 @@ export function canonicalSvoPrimitive(descriptor: SvoPrimitiveDescriptor): SvoPr
   if (descriptor.kind === "capsule") return { ...descriptor, center_m: { ...descriptorCenter(descriptor) }, ownerId, orientation: descriptorOrientation(descriptor), radius_m: d.x, segmentHalfLength_m: d.y };
   if (descriptor.kind === "cylinder") return { ...descriptor, center_m: { ...descriptorCenter(descriptor) }, ownerId, orientation: descriptorOrientation(descriptor), radius_m: d.x, halfHeight_m: d.y };
   if (descriptor.kind === "rounded-cylinder") return { ...descriptor, center_m: { ...descriptorCenter(descriptor) }, ownerId, orientation: descriptorOrientation(descriptor), radius_m: d.x, halfHeight_m: d.y, edgeRadius_m: d.z };
+  if (descriptor.kind === "cup") return { ...descriptor, center_m: { ...descriptorCenter(descriptor) }, ownerId, orientation: descriptorOrientation(descriptor), radius_m: d.x, halfHeight_m: d.y, wallThickness_m: d.z };
   if (descriptor.kind === "ellipsoid") return { ...descriptor, center_m: { ...descriptorCenter(descriptor) }, ownerId, orientation: descriptorOrientation(descriptor), radii_m: d };
   if (descriptor.kind === "torus") return { ...descriptor, center_m: { ...descriptorCenter(descriptor) }, ownerId, orientation: descriptorOrientation(descriptor), majorRadius_m: d.x, minorRadius_m: d.y };
   if (descriptor.kind === "cone" || descriptor.kind === "round-cone") return { ...descriptor, center_m: { ...descriptorCenter(descriptor) }, ownerId, orientation: descriptorOrientation(descriptor), baseRadius_m: d.x, halfHeight_m: d.y, topRadius_m: d.z };
@@ -1184,6 +1225,7 @@ function descriptorFromRecord(words: Uint32Array, floats: Float32Array, base: nu
   if (kind === SVO_PRIMITIVE_KINDS.capsule) return { ...identity, kind: "capsule", center_m, orientation, radius_m: d.x, segmentHalfLength_m: d.y };
   if (kind === SVO_PRIMITIVE_KINDS.cylinder) return { ...identity, kind: "cylinder", center_m, orientation, radius_m: d.x, halfHeight_m: d.y };
   if (kind === SVO_PRIMITIVE_KINDS.roundedCylinder) return { ...identity, kind: "rounded-cylinder", center_m, orientation, radius_m: d.x, halfHeight_m: d.y, edgeRadius_m: d.z };
+  if (kind === SVO_PRIMITIVE_KINDS.cup) return { ...identity, kind: "cup", center_m, orientation, radius_m: d.x, halfHeight_m: d.y, wallThickness_m: d.z };
   if (kind === SVO_PRIMITIVE_KINDS.ellipsoid) return { ...identity, kind: "ellipsoid", center_m, orientation, radii_m: d };
   if (kind === SVO_PRIMITIVE_KINDS.torus) return { ...identity, kind: "torus", center_m, orientation, majorRadius_m: d.x, minorRadius_m: d.y };
   if (kind === SVO_PRIMITIVE_KINDS.cone) return { ...identity, kind: "cone", center_m, orientation, baseRadius_m: d.x, halfHeight_m: d.y, topRadius_m: d.z };
@@ -1236,6 +1278,13 @@ export function svoPrimitiveForRigidBody(
     ...identity, kind: "capsule", orientation: { ...body.orientation },
     radius_m: body.dimensions_m.x, segmentHalfLength_m: body.dimensions_m.y / 2,
   }) as SvoCapsulePrimitive;
+  // A cup's rigid dimensions are (outer radius, full height, wall), and the
+  // render ABI carries half heights, so this is the only conversion between the
+  // two conventions on the publish path.
+  if (body.shape === "cup") return canonicalSvoPrimitive({
+    ...identity, kind: "cup", orientation: { ...body.orientation },
+    radius_m: body.dimensions_m.x, halfHeight_m: body.dimensions_m.y / 2, wallThickness_m: body.dimensions_m.z,
+  }) as SvoCupPrimitive;
   return canonicalSvoPrimitive({
     ...identity, kind: "cylinder", orientation: { ...body.orientation },
     radius_m: body.dimensions_m.x, halfHeight_m: body.dimensions_m.y / 2,
@@ -2308,7 +2357,7 @@ type ResolvedCluster = SvoSmoothUnionClusterPrimitive & { packing: SvoSmoothUnio
 /** A field program whose tape has been resolved, which is the only form that can be evaluated. */
 type ResolvedFieldProgram = SvoFieldProgramPrimitive & { program: SvoFieldProgram };
 
-type MarchedPrimitive = SvoTorusPrimitive | SvoConePrimitive | SvoRoundConePrimitive | SvoRoundedCylinderPrimitive
+type MarchedPrimitive = SvoTorusPrimitive | SvoConePrimitive | SvoRoundConePrimitive | SvoRoundedCylinderPrimitive | SvoCupPrimitive
   | ResolvedCluster | ResolvedFieldProgram;
 
 /**
@@ -2382,6 +2431,43 @@ function roundedCylinderLocalSample(descriptor: SvoRoundedCylinderPrimitive, poi
   return { signedDistance_m, normal, featureId: SVO_PRIMITIVE_FEATURES.smooth };
 }
 
+/**
+ * Hard-feature sample of the shared cup field.
+ *
+ * The distance itself comes from {@link cupDistance_m}, so this file never
+ * spells the cup's geometry a second time — the terms below only *select* which
+ * of its three authored surfaces a point belongs to. That selection is the
+ * whole reason not to take a central difference of the CSG: subtraction rounds
+ * the rim, and a cup's rim is most of its silhouette.
+ *
+ * Local dimensions are `(outer radius, half height, wall)`; the shared field
+ * takes the full height, and this is the one place the two conventions meet.
+ */
+function cupLocalSample(descriptor: SvoCupPrimitive, point: Vec3): SvoPrimitiveSample {
+  const wall = cupWallThickness_m({ x: descriptor.radius_m, y: 2 * descriptor.halfHeight_m, z: descriptor.wallThickness_m });
+  const signedDistance_m = cupDistance_m(
+    { x: descriptor.radius_m, y: 2 * descriptor.halfHeight_m, z: descriptor.wallThickness_m }, point);
+  const radial = Math.hypot(point.x, point.z);
+  const outerSide = radial - descriptor.radius_m;
+  const outerCap = Math.abs(point.y) - descriptor.halfHeight_m;
+  const outer = Math.hypot(Math.max(outerSide, 0), Math.max(outerCap, 0)) + Math.min(Math.max(outerSide, outerCap), 0);
+  const innerSide = radial - (descriptor.radius_m - wall);
+  const floor = (-descriptor.halfHeight_m + wall) - point.y;
+  const direction = radial > NORMAL_EPSILON ? { x: point.x / radial, z: point.z / radial } : { x: 1, z: 0 };
+  if (outer >= -Math.max(innerSide, floor)) {
+    // The outer shell won: a plain cylinder's cap-versus-side split.
+    return outerCap >= outerSide
+      ? { signedDistance_m, normal: { x: 0, y: Math.sign(point.y || 1), z: 0 }, featureId: SVO_PRIMITIVE_FEATURES.cylinderCap }
+      : { signedDistance_m, normal: { x: direction.x, y: 0, z: direction.z }, featureId: SVO_PRIMITIVE_FEATURES.cylinderSide };
+  }
+  // The subtracted cavity won, so the surface faces *into* it: the inner wall
+  // points at the axis and the floor points up, both the negation of the term
+  // that selected them.
+  return innerSide >= floor
+    ? { signedDistance_m, normal: { x: -direction.x, y: 0, z: -direction.z }, featureId: SVO_PRIMITIVE_FEATURES.cylinderSide }
+    : { signedDistance_m, normal: { x: 0, y: 1, z: 0 }, featureId: SVO_PRIMITIVE_FEATURES.cylinderCap };
+}
+
 function roundConeLocalSample(descriptor: SvoRoundConePrimitive, point: Vec3): SvoPrimitiveSample {
   // This is the local-Y specialization of `clusterRoundConeDistance`. Besides
   // being cheaper during a march, its region test also gives the exact normal:
@@ -2449,6 +2535,7 @@ function marchedLocalSample(descriptor: MarchedPrimitive, point: Vec3): SvoPrimi
     return { signedDistance_m, normal, featureId: SVO_PRIMITIVE_FEATURES.smooth };
   }
   if (descriptor.kind === "rounded-cylinder") return roundedCylinderLocalSample(descriptor, point);
+  if (descriptor.kind === "cup") return cupLocalSample(descriptor, point);
   if (descriptor.kind === "round-cone") return roundConeLocalSample(descriptor, point);
   const { baseRadius_m: base, topRadius_m: top, halfHeight_m: half } = descriptor;
   const radial = Math.hypot(point.x, point.z);
@@ -2546,7 +2633,7 @@ function intersectCanonicalSvoPrimitive(
             ? intersectMarchedLocal(resolveCluster(descriptor, clusterResolver), origin, direction, ray)
             : descriptor.kind === "field-program"
               ? intersectMarchedLocal(resolveFieldProgram(descriptor, fieldProgramResolver), origin, direction, ray)
-              : descriptor.kind === "torus" || descriptor.kind === "cone" || descriptor.kind === "round-cone" || descriptor.kind === "rounded-cylinder"
+              : descriptor.kind === "torus" || descriptor.kind === "cone" || descriptor.kind === "round-cone" || descriptor.kind === "rounded-cylinder" || descriptor.kind === "cup"
                 ? intersectMarchedLocal(descriptor, origin, direction, ray)
                 : intersectEllipsoidLocal(descriptor, origin, direction, ray);
   if (!localHit) return null;
@@ -2735,7 +2822,7 @@ export function sampleSvoPrimitive(
       normal: worldNormal(orientation, normalize(offset)), featureId: SVO_PRIMITIVE_FEATURES.smooth,
     };
   }
-  if (descriptor.kind === "torus" || descriptor.kind === "cone" || descriptor.kind === "round-cone" || descriptor.kind === "rounded-cylinder") {
+  if (descriptor.kind === "torus" || descriptor.kind === "cone" || descriptor.kind === "round-cone" || descriptor.kind === "rounded-cylinder" || descriptor.kind === "cup") {
     const local = marchedLocalSample(descriptor, point);
     return { ...local, normal: worldNormal(orientation, local.normal) };
   }
@@ -2907,6 +2994,7 @@ fn svoPrimitiveLocalExtent_m(kind: u32, dimensions_m: vec3f) -> vec3f {
   if (kind == SVO_KIND_CAPSULE) { return vec3f(dimensions_m.x, dimensions_m.y + dimensions_m.x, dimensions_m.x); }
   if (kind == SVO_KIND_CYLINDER) { return vec3f(dimensions_m.x, dimensions_m.y, dimensions_m.x); }
   if (kind == SVO_KIND_ROUNDED_CYLINDER) { return vec3f(dimensions_m.x, dimensions_m.y, dimensions_m.x); }
+  if (kind == SVO_KIND_CUP) { return vec3f(dimensions_m.x, dimensions_m.y, dimensions_m.x); }
   if (kind == SVO_KIND_TORUS) { return vec3f(dimensions_m.x + dimensions_m.y, dimensions_m.y, dimensions_m.x + dimensions_m.y); }
   if (kind == SVO_KIND_CONE) { let radius = max(dimensions_m.x, dimensions_m.z); return vec3f(radius, dimensions_m.y, radius); }
   if (kind == SVO_KIND_ROUND_CONE) { let radius = max(dimensions_m.x, dimensions_m.z); return vec3f(radius, dimensions_m.y + radius, radius); }
@@ -3548,6 +3636,36 @@ struct SvoConeSample {
   normal: vec3f,
 }
 
+${cupDistanceWgsl()}
+/**
+ * WGSL mirror of the host's cupLocalSample. Same selection, same three surfaces,
+ * and the distance itself is the shared field's, not a second spelling of it.
+ * Local dimensions are (outer radius, half height, wall); the shared field takes
+ * the full height.
+ */
+fn svoCupSample(point: vec3f, dimensions_m: vec3f) -> SvoConeSample {
+  let d = vec3f(dimensions_m.x, 2.0 * dimensions_m.y, dimensions_m.z);
+  let wall = ${CUP_WALL_FUNCTION}(d);
+  let distance_m = ${CUP_DISTANCE_FUNCTION}(d, point);
+  let radial = length(point.xz);
+  let outerSide = radial - dimensions_m.x;
+  let outerCap = abs(point.y) - dimensions_m.y;
+  let outer = length(max(vec2f(outerSide, outerCap), vec2f(0.0))) + min(max(outerSide, outerCap), 0.0);
+  let innerSide = radial - (dimensions_m.x - wall);
+  let floorPlane = (-dimensions_m.y + wall) - point.y;
+  let direction = select(vec2f(1.0, 0.0), point.xz / max(radial, 1e-8), radial > 1e-6);
+  if (outer >= -max(innerSide, floorPlane)) {
+    if (outerCap >= outerSide) {
+      return SvoConeSample(distance_m, SVO_FEATURE_CYLINDER_CAP, vec3f(0.0, select(-1.0, 1.0, point.y >= 0.0), 0.0));
+    }
+    return SvoConeSample(distance_m, SVO_FEATURE_CYLINDER_SIDE, vec3f(direction.x, 0.0, direction.y));
+  }
+  if (innerSide >= floorPlane) {
+    return SvoConeSample(distance_m, SVO_FEATURE_CYLINDER_SIDE, vec3f(-direction.x, 0.0, -direction.y));
+  }
+  return SvoConeSample(distance_m, SVO_FEATURE_CYLINDER_CAP, vec3f(0.0, 1.0, 0.0));
+}
+
 fn svoTorusDistance_m(point: vec3f, dimensions_m: vec3f) -> f32 {
   let ring = vec2f(length(point.xz) - dimensions_m.x, point.y);
   return length(ring) - dimensions_m.y;
@@ -3669,7 +3787,7 @@ fn svoFieldProgramResolved(reference: u32) -> bool {
 }
 
 fn svoMarchedKind(kind: u32) -> bool {
-  return kind == SVO_KIND_TORUS || kind == SVO_KIND_CONE || kind == SVO_KIND_ROUND_CONE || kind == SVO_KIND_ROUNDED_CYLINDER || kind == SVO_KIND_SMOOTH_UNION_CLUSTER || kind == SVO_KIND_FIELD_PROGRAM;
+  return kind == SVO_KIND_TORUS || kind == SVO_KIND_CONE || kind == SVO_KIND_ROUND_CONE || kind == SVO_KIND_ROUNDED_CYLINDER || kind == SVO_KIND_CUP || kind == SVO_KIND_SMOOTH_UNION_CLUSTER || kind == SVO_KIND_FIELD_PROGRAM;
 }
 
 fn svoMarchedDistance_m(kind: u32, point: vec3f, dimensions_m: vec3f, packing: SvoClusterPacking, fieldProgramReference: u32) -> f32 {
@@ -3678,6 +3796,7 @@ fn svoMarchedDistance_m(kind: u32, point: vec3f, dimensions_m: vec3f, packing: S
   if (kind == SVO_KIND_FIELD_PROGRAM) { return svoFieldProgramDistance_m(fieldProgramReference, point); }
   if (kind == SVO_KIND_ROUND_CONE) { return svoRoundConeDistance_m(point,dimensions_m); }
   if (kind == SVO_KIND_ROUNDED_CYLINDER) { return svoRoundedCylinderDistance_m(point,dimensions_m); }
+  if (kind == SVO_KIND_CUP) { return svoCupSample(point, dimensions_m).distance_m; }
   return svoConeSample(point, dimensions_m).distance_m;
 }
 
@@ -3691,6 +3810,7 @@ fn svoMarchedLocalNormal(kind: u32, point: vec3f, dimensions_m: vec3f, packing: 
   }
   if (kind == SVO_KIND_ROUND_CONE) { return vec4f(svoRoundConeNormal(point,dimensions_m),f32(SVO_FEATURE_SMOOTH)); }
   if (kind == SVO_KIND_ROUNDED_CYLINDER) { return vec4f(svoRoundedCylinderNormal(point,dimensions_m),f32(SVO_FEATURE_SMOOTH)); }
+  if (kind == SVO_KIND_CUP) { let cup = svoCupSample(point, dimensions_m); return vec4f(cup.normal, f32(cup.featureId)); }
   let cone = svoConeSample(point, dimensions_m);
   return vec4f(cone.normal, f32(cone.featureId));
 }
@@ -3710,6 +3830,8 @@ fn svoMarchedBoundingRadius_m(kind: u32, dimensions_m: vec3f) -> f32 {
   if (kind == SVO_KIND_SMOOTH_UNION_CLUSTER) { return max(dimensions_m.x, max(dimensions_m.y, dimensions_m.z)); }
   if (kind == SVO_KIND_ROUND_CONE) { return dimensions_m.y + max(dimensions_m.x,dimensions_m.z); }
   if (kind == SVO_KIND_ROUNDED_CYLINDER) { return length(dimensions_m.xy); }
+  // A cavity only removes material, so a cup is bounded by its outer cylinder.
+  if (kind == SVO_KIND_CUP) { return length(dimensions_m.xy); }
   return length(vec2f(max(dimensions_m.x, dimensions_m.z), dimensions_m.y));
 }
 
@@ -3759,6 +3881,9 @@ fn svoIntersectPrimitiveExact(
   else if (kind == SVO_KIND_ROUNDED_CYLINDER) {
     dimensionsValid=dimensions_m.x>0.0&&dimensions_m.y>0.0&&dimensions_m.z>0.0&&dimensions_m.z<=min(dimensions_m.x,dimensions_m.y);
   }
+  // The host refuses a wall the clamp would move, so a valid record's wall is
+  // already the one the field uses and this only has to reject a degenerate cup.
+  else if (kind == SVO_KIND_CUP) { dimensionsValid = all(dimensions_m > vec3f(0.0)); }
   // A cluster whose arena block did not resolve is invalid, not empty: falling
   // through to a miss would draw a hole where the aggregate is and say nothing.
   else if (kind == SVO_KIND_SMOOTH_UNION_CLUSTER) {

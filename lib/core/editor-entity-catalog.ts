@@ -1,4 +1,4 @@
-import { fluidBodyEntity } from "./editor-fluid-body";
+import { fluidBodyEntity, fluidPlayActions } from "./editor-fluid-body";
 import { inflowEntity } from "./editor-inflow";
 import { refinementRegionEntity } from "./editor-refinement-region";
 import { sceneryEntity } from "./editor-scenery";
@@ -6,9 +6,11 @@ import { rigidBodyEntity } from "./editor-rigid-body";
 import { tankEntity } from "./editor-tank";
 import { vesselRimEntity } from "./editor-vessel-rim";
 import type { EditorSelection, EditorTool } from "./editor-tools";
+import type { Vec3 } from "./model";
 import { resourceInteractionGates } from "./resource-readiness";
 import { drawnBodies, useDiagnosticsStore } from "./stores/diagnostics-store";
 import { displaySceneSnapshot } from "./stores/scene-draft-store";
+import type { EditorAction, EditorActionTarget } from "./editor-action";
 import type {
   EditorEntity,
   EditorEntityContext,
@@ -150,6 +152,70 @@ export function entityAtRay(
  * Not GPU-gated either: a selection names something in the document, and it
  * outlives a presentation generation the same way it outlives a tool.
  */
+/**
+ * The radial menu for a point on an entity: what the entity itself offers,
+ * then what everything offers.
+ *
+ * The two halves are separate because they answer to different things. The
+ * particular half is the entity's own declaration and is the whole reason the
+ * menu is contextual — a tank offers a ball of water, a body offers to be
+ * picked up, and neither knows the other exists. The general half is the pair
+ * of verbs that mean the same thing for every editable object, and repeating
+ * them in seven declarations would guarantee they drifted: one entity would
+ * quietly lose its delete, and the only symptom would be a missing wedge.
+ *
+ * `Delete` comes last and is toned as destructive, so the one irreversible
+ * wedge is always in the same place whatever else the ring holds.
+ */
+export function entityActionsAt(
+  context: EditorEntityContext,
+  target: EditorActionTarget,
+): readonly EditorAction[] {
+  const definition = EDITOR_ENTITIES.find((candidate) => candidate.kind === target.selection.kind);
+  if (!definition) return [];
+  const entity = definition.find(context, target.selection.id);
+  if (!entity) return [];
+  const general: EditorAction[] = [{
+    id: "select",
+    label: "Edit",
+    icon: "edit",
+    tone: entity.tone,
+    hint: `Select ${entity.label} and open its controls`,
+    effect: { kind: "select", selection: entity.selection, openControls: true },
+  }];
+  const remove = entity.remove;
+  if (remove) {
+    general.push({
+      id: "delete",
+      label: "Delete",
+      icon: "delete",
+      tone: "danger",
+      hint: `Remove ${entity.label} from the scene`,
+      effect: { kind: "scene", label: `Deleted ${entity.label}`, scene: remove(), reseed: true },
+    });
+  }
+  return [...(definition.actions?.(context, target) ?? []), ...general];
+}
+
+/**
+ * The ring for a point that belongs to no entity: the floor, the far wall, or
+ * anything at all while the GPU pick is unavailable.
+ *
+ * A pie that opens on some pixels and not others teaches the reader that
+ * right-click is unreliable, and they stop trying it. Since the ring is now the
+ * only route to every mode the tool strip used to hold, "nothing here" cannot
+ * be allowed to mean "no menu" — so a miss offers the verbs that need a place
+ * rather than a thing, which is exactly what the water body contributes.
+ *
+ * This also keeps the editor reachable when picking is gated off. `entityAtRay`
+ * refuses without a fenced presentation because selecting the wrong object is
+ * worse than selecting none; placing water at an analytically-traced point has
+ * no such hazard, and the fallback card already promises the editor still works.
+ */
+export function sceneActionsAt(point_m: Vec3): readonly EditorAction[] {
+  return fluidPlayActions(point_m);
+}
+
 export function findEntity(
   context: EditorEntityContext,
   selection: EditorSelection | undefined,

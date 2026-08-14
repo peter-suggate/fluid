@@ -760,7 +760,7 @@ class SimulationController {
     const changed = canonicalScene(committed) !== canonicalScene(pending.snapshot.scene);
     if (!changed) return false;
     useEditorHistoryStore.getState().record(pending.snapshot);
-    if (options.reseed && sceneEditRequiresReset(pending.snapshot.scene, committed)) {
+    if (options.reseed && sceneEditRequiresReset(pending.snapshot.scene, committed, useMethodStore.getState().methodId)) {
       // reset() re-selects the first body; an editor gesture must keep the
       // thing the user is still holding selected.
       const selection = useUIStore.getState().selection;

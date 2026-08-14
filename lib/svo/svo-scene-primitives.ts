@@ -1,5 +1,6 @@
 import type { EnvironmentId } from "../core/environments";
 import type { SceneDescription } from "../core/model";
+import { SCENE_ENVIRONMENT_OWNER_BASE } from "../core/webgpu-rigid-body";
 import { swayedPrimitiveDescriptor, type EnvironmentProxySway } from "../core/scenery-sway";
 import type { SvoFieldProgram } from "./svo-field-program";
 import {
@@ -147,9 +148,9 @@ function positiveSafeInteger(value: number, label: string): number {
   return value;
 }
 
-function environmentIdentity(scene: Pick<SceneDescription, "rigidBodies">, primitive: EnvironmentProxyPrimitive) {
+function environmentIdentity(primitive: EnvironmentProxyPrimitive) {
   const materialId = ENVIRONMENT_VOXEL_MATERIAL_BASE + primitive.ownerIndex;
-  const ownerId = scene.rigidBodies.length + primitive.ownerIndex;
+  const ownerId = SCENE_ENVIRONMENT_OWNER_BASE + primitive.ownerIndex;
   if (materialId > 0xffff) throw new RangeError(`Environment material ID for ${primitive.key} does not fit uint16`);
   // 0xffff is the established no-owner sentinel, so authored owners stop at 0xfffe.
   if (ownerId >= 0xffff) throw new RangeError(`Environment owner ID for ${primitive.key} collides with the no-owner sentinel`);
@@ -160,17 +161,13 @@ function environmentIdentity(scene: Pick<SceneDescription, "rigidBodies">, primi
  * The scene-global owner id the SVO publishes for one catalog proxy.
  *
  * This is the number a shader reads back off a hit, and it is *not* the
- * catalog's own dense index: the rigid bodies are numbered first and the
- * environment's owners follow them. Exported so that anything addressing a
- * traced surface — the editor's hover rim, for one — asks for the numbering
- * rather than reproducing the offset, which reads as correct until a scene
- * gains its first body.
+ * catalog's own dense index: the rigid bodies own the first
+ * `SCENE_ENVIRONMENT_OWNER_BASE` ids and the environment's owners follow them.
+ * Exported so that anything addressing a traced surface — the editor's hover
+ * rim, for one — asks for the numbering rather than reproducing the offset.
  */
-export function svoOwnerIdForEnvironmentProxy(
-  scene: Pick<SceneDescription, "rigidBodies">,
-  primitive: EnvironmentProxyPrimitive,
-): number {
-  return environmentIdentity(scene, primitive).ownerId;
+export function svoOwnerIdForEnvironmentProxy(primitive: EnvironmentProxyPrimitive): number {
+  return environmentIdentity(primitive).ownerId;
 }
 
 /**
@@ -181,22 +178,18 @@ export function svoOwnerIdForEnvironmentProxy(
  * be a second definition of every scenery shape, and the first cone whose
  * radius convention drifted would make the cursor lie.
  */
-export function svoDescriptorForEnvironmentProxy(
-  scene: Pick<SceneDescription, "rigidBodies">,
-  primitive: EnvironmentProxyPrimitive,
-): SvoPrimitiveDescriptor {
-  return descriptorForProxy(scene, primitive);
+export function svoDescriptorForEnvironmentProxy(primitive: EnvironmentProxyPrimitive): SvoPrimitiveDescriptor {
+  return descriptorForProxy(primitive);
 }
 
 function descriptorForProxy(
-  scene: Pick<SceneDescription, "rigidBodies">,
   primitive: EnvironmentProxyPrimitive,
   clusterIndex = 0,
   fieldProgramIndex = 0,
 ): SvoPrimitiveDescriptor {
-  const identity = environmentIdentity(scene, primitive);
+  const identity = environmentIdentity(primitive);
   // Primitive ID follows the scene-global owner ID. It is stable for the same
-  // scene body list and catalog, and remains distinct from the packed index.
+  // catalog, and remains distinct from the packed index.
   const base = {
     primitiveId: identity.ownerId,
     materialId: identity.materialId,
@@ -288,7 +281,6 @@ function coverageBounds(primitive: EnvironmentProxyPrimitive, minimumWidth_m: nu
  * primitive records without changing sparse-voxel material or owner identity.
  */
 export function svoScenePrimitivesFromEnvironmentCatalog(
-  scene: Pick<SceneDescription, "rigidBodies">,
   catalog: EnvironmentProxyCatalog,
   options: Omit<SvoScenePrimitiveBuildOptions, "environmentId"> = {},
 ): SvoScenePrimitiveBuild {
@@ -312,7 +304,6 @@ export function svoScenePrimitivesFromEnvironmentCatalog(
   } : undefined;
   const contentRevision = hashSvoPublication(new Uint32Array(), JSON.stringify({
     environmentId: catalog.environmentId,
-    rigidBodyCount: scene.rigidBodies.length,
     coverageCellSize_m,
     primitives,
     analyticTerrain,
@@ -336,7 +327,7 @@ export function svoScenePrimitivesFromEnvironmentCatalog(
   const fieldProgramIndexByKey = new Map<string, number>();
   for (const primitive of primitives) {
     const primitiveIndex = descriptors.length;
-    const { materialId, ownerId } = environmentIdentity(scene, primitive);
+    const { materialId, ownerId } = environmentIdentity(primitive);
     if (primitiveIndexByOwnerId.has(ownerId)) throw new Error(`Duplicate environment owner ID ${ownerId}`);
     if (primitiveIndexByMaterialId.has(materialId)) throw new Error(`Duplicate environment material ID ${materialId}`);
     const openShell = frontOpenShell(primitive);
@@ -359,7 +350,7 @@ export function svoScenePrimitivesFromEnvironmentCatalog(
     const programKey = primitive.kind === "field-program" ? JSON.stringify(primitive.program) : undefined;
     const sharedIndex = programKey === undefined ? undefined : fieldProgramIndexByKey.get(programKey);
     const descriptor = descriptorForProxy(
-      scene, primitive, clusterPackings.length, sharedIndex ?? fieldPrograms.length,
+      primitive, clusterPackings.length, sharedIndex ?? fieldPrograms.length,
     );
     if (descriptor.kind === "smooth-union-cluster" && descriptor.packing) clusterPackings.push(descriptor.packing);
     if (descriptor.kind === "field-program" && descriptor.program && sharedIndex === undefined) {
@@ -503,7 +494,7 @@ export function buildSvoScenePrimitives(
 ): SvoScenePrimitiveBuild {
   const environmentId = options.environmentId ?? scene.environment ?? "default";
   const catalog = buildEnvironmentProxyCatalog(scene, environmentId);
-  return svoScenePrimitivesFromEnvironmentCatalog(scene, catalog, {
+  return svoScenePrimitivesFromEnvironmentCatalog(catalog, {
     ...options,
     // Match the default-camera acceptance audit: features below 1.5 finest
     // cells retain conservative coverage even when cell-centre sampling moves.

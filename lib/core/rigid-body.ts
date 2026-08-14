@@ -1,5 +1,6 @@
 import { add, cross, dot, length, normalize, scale, sub } from "./math";
 import type { Quaternion, RigidBodyDescription, RigidShape, SceneDescription, Vec3 } from "./model";
+import { sceneShape } from "./scene-shape";
 import { sceneHasTerrain, terrainHeightAt, terrainNormalAt } from "./terrain";
 
 export interface MassProperties {
@@ -53,44 +54,25 @@ export interface RigidStepDiagnostics {
 
 const ZERO = (): Vec3 => ({ x: 0, y: 0, z: 0 });
 
+/** Displaced volume, from the one table that declares what each shape is. */
 export function primitiveVolume(shape: RigidShape, dimensions: Vec3): number {
-  if (shape === "sphere") return (4 / 3) * Math.PI * dimensions.x ** 3;
-  if (shape === "box") return dimensions.x * dimensions.y * dimensions.z;
-  if (shape === "cylinder") return Math.PI * dimensions.x ** 2 * dimensions.y;
-  return Math.PI * dimensions.x ** 2 * dimensions.y + (4 / 3) * Math.PI * dimensions.x ** 3;
+  return sceneShape(shape).volume_m3(dimensions);
 }
 
 export function massProperties(body: RigidBodyDescription): MassProperties {
   const { shape, dimensions_m: d, density_kg_m3: density } = body;
-  const volume = primitiveVolume(shape, d);
-  const mass = density * volume;
-  let inertia: Vec3;
-  if (shape === "sphere") {
-    const value = (2 / 5) * mass * d.x ** 2;
-    inertia = { x: value, y: value, z: value };
-  } else if (shape === "box") {
-    inertia = {
-      x: mass * (d.y ** 2 + d.z ** 2) / 12,
-      y: mass * (d.x ** 2 + d.z ** 2) / 12,
-      z: mass * (d.x ** 2 + d.y ** 2) / 12
-    };
-  } else if (shape === "cylinder") {
-    inertia = {
-      x: mass * (3 * d.x ** 2 + d.y ** 2) / 12,
-      y: 0.5 * mass * d.x ** 2,
-      z: mass * (3 * d.x ** 2 + d.y ** 2) / 12
-    };
-  } else {
-    const radius = d.x;
-    const cylinderLength = d.y;
-    const cylinderMass = density * Math.PI * radius ** 2 * cylinderLength;
-    const sphereMass = density * (4 / 3) * Math.PI * radius ** 3;
-    const axial = 0.5 * cylinderMass * radius ** 2 + (2 / 5) * sphereMass * radius ** 2;
-    const transverseCaps = sphereMass * ((83 / 320) * radius ** 2 + (cylinderLength / 2 + 3 * radius / 8) ** 2);
-    const transverse = cylinderMass * (3 * radius ** 2 + cylinderLength ** 2) / 12 + transverseCaps;
-    inertia = { x: transverse, y: axial, z: transverse };
-  }
-  return { volume_m3: volume, mass_kg: mass, inertiaBody_kg_m2: inertia };
+  const kind = sceneShape(shape);
+  const volume = kind.volume_m3(d);
+  return {
+    volume_m3: volume,
+    mass_kg: density * volume,
+    // Density rather than mass, because a composite shape — the capsule, the
+    // cup — weighs each of its parts separately and folding that into a
+    // per-mass ratio reorders the arithmetic. Blessed trajectories here are
+    // compared bit-identically, so the shape arm keeps the operation order the
+    // integrator was blessed with.
+    inertiaBody_kg_m2: kind.inertia_kg_m2(d, density),
+  };
 }
 
 export function quaternionNormalize(q: Quaternion): Quaternion {
@@ -247,11 +229,7 @@ export function cloneRigidBodies(bodies: RigidBodyState[]): RigidBodyState[] {
 
 export function boundingRadius(body: RigidBodyState | RigidBodyDescription): number {
   const description = "description" in body ? body.description : body;
-  const d = description.dimensions_m;
-  if (description.shape === "sphere") return d.x;
-  if (description.shape === "box") return 0.5 * Math.hypot(d.x, d.y, d.z);
-  if (description.shape === "cylinder") return Math.hypot(d.x, d.y / 2);
-  return d.y / 2 + d.x;
+  return sceneShape(description.shape).boundingRadius_m(description.dimensions_m);
 }
 
 function supportRadius(body: RigidBodyState, directionWorld: Vec3): number {
@@ -263,7 +241,7 @@ function supportRadius(body: RigidBodyState, directionWorld: Vec3): number {
     support = scale(normalize(local), d.x);
   } else if (body.description.shape === "box") {
     support = { x: Math.sign(local.x || 1) * d.x / 2, y: Math.sign(local.y || 1) * d.y / 2, z: Math.sign(local.z || 1) * d.z / 2 };
-  } else if (body.description.shape === "cylinder") {
+  } else if (body.description.shape === "cylinder" || body.description.shape === "cup") {
     const radialLength = Math.hypot(local.x, local.z);
     support = {
       x: radialLength > 0 ? d.x * local.x / radialLength : 0,
@@ -444,18 +422,39 @@ export function advanceRigidBodies(bodies: RigidBodyState[], scene: Pick<SceneDe
   return rigidDiagnostics(bodies, scene.fluid.gravity_m_s2);
 }
 
+/**
+ * A cup large enough to scoop with, and light enough to float empty.
+ *
+ * Sized against the default 1.2 x 0.8 x 0.8 m tank rather than against the
+ * other primitives: a cup is an instrument, so it is the water it can lift —
+ * about nine litres here — that has to read, not its footprint next to a
+ * sphere. The 50 mm wall is two cells at the 25 mm lattice a cup scene wants;
+ * see `cupResolutionAdvice`, which is what the editor states when a scene
+ * carries a cup its cell size cannot hold water in.
+ */
+const CUP_DIMENSIONS_M: Vec3 = { x: 0.15, y: 0.26, z: 0.05 };
+
 export function createBodyDescription(shape: RigidShape, index: number, containerHeight: number): RigidBodyDescription {
   const radius = 0.075;
-  const dimensions = shape === "box" ? { x: 0.15, y: 0.12, z: 0.13 } : shape === "sphere" ? { x: radius, y: radius, z: radius } : { x: radius, y: 0.14, z: radius };
+  const dimensions = shape === "cup" ? { ...CUP_DIMENSIONS_M }
+    : shape === "box" ? { x: 0.15, y: 0.12, z: 0.13 }
+    : shape === "sphere" ? { x: radius, y: radius, z: radius }
+    : { x: radius, y: 0.14, z: radius };
   return {
     id: `body-${shape}-${index}`,
     name: `${shape[0].toUpperCase()}${shape.slice(1)} ${index}`,
     shape,
     dimensions_m: dimensions,
-    density_kg_m3: shape === "sphere" ? 650 : 1100,
+    // A cup has to float when empty and sink when full, or dipping it is a
+    // gesture with one outcome. Six hundred puts the empty shell well above
+    // the surface and the filled one just under it.
+    density_kg_m3: shape === "sphere" ? 650 : shape === "cup" ? 600 : 1100,
     position_m: { x: 0, y: containerHeight + 0.24 + index * 0.025, z: 0 },
     orientation: { w: 1, x: 0, y: 0, z: 0 },
-    linearVelocity_m_s: ZERO(), angularVelocity_rad_s: { x: 0.4, y: 0.8, z: 1.1 },
+    // A cup enters the scene upright. Spinning it is the one thing that empties
+    // it before the user has touched it.
+    linearVelocity_m_s: ZERO(),
+    angularVelocity_rad_s: shape === "cup" ? ZERO() : { x: 0.4, y: 0.8, z: 1.1 },
     restitution: 0.3, friction: 0.45
   };
 }

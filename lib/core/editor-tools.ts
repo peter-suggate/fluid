@@ -5,8 +5,13 @@
  * existing slice-grab / pick / orbit fallback, so every tool listed here is a
  * distinct pointer behaviour rather than a mode flag. Tools whose pointer
  * behaviour has not landed yet are declared with `status: "planned"` and the
- * plan phase that implements them: the toolbar shows them disabled instead of
- * silently accepting clicks that do nothing.
+ * plan phase that implements them, and `editorToolIsActive` keeps them off
+ * every keyboard and menu path until it flips.
+ *
+ * Nothing here is a button any more. Modes are armed from the contextual ring,
+ * which asks each entity what it offers at the pointer, or from the shortcut
+ * key; what is armed is reported by `EditorModeChip`. So a tool needs no
+ * placement, and the labels below are captions for that one chip.
  *
  * Selecting and adjusting things is not a tool: SELECT is the one editing mode,
  * and every editable thing carries the same handles there. The tools that remain
@@ -29,28 +34,15 @@ export type EditorTool =
 
 export type EditorToolStatus = "active" | "planned";
 
-/**
- * Where a tool's button lives.
- *
- * The strip on the left is what a scene is *authored* with. A tool that
- * annotates the solve rather than the set does not belong in that list — it is
- * asked for while reading a frame, not while building a room — so it is
- * declared here instead of being filtered out of the strip by name somewhere
- * downstream.
- */
-export type EditorToolPlacement = "strip" | "topline";
-
 export interface EditorToolSpec {
   readonly id: EditorTool;
-  /** Toolbar caption; kept short enough for the vertical strip. */
+  /** Caption for the armed-mode chip; kept short. */
   readonly label: string;
   /** Single unmodified key that arms the tool. */
   readonly shortcut: string;
   /** Help line shown in the viewport while the tool is armed. */
   readonly hint: string;
   readonly status: EditorToolStatus;
-  /** Defaults to the left-edge strip. */
-  readonly placement?: EditorToolPlacement;
   /** Plan phase that lands the pointer behaviour. Only set while planned. */
   readonly phase?: string;
 }
@@ -174,15 +166,8 @@ export const EDITOR_TOOLS: readonly EditorToolSpec[] = Object.freeze([
     shortcut: "g",
     hint: "drag a box over the water to cap how finely it is solved there · pick its meaning and its smallest cell in the flyout · drag its faces, edges and corners to reshape it",
     status: "active",
-    placement: "topline",
   },
 ] as const satisfies readonly EditorToolSpec[]);
-
-/** Tools rendered in the given place, in declaration order. */
-export function editorToolsPlacedAt(placement: EditorToolPlacement): readonly EditorToolSpec[] {
-  return EDITOR_TOOLS.filter((tool) =>
-    tool.status === "active" && (tool.placement ?? "strip") === placement);
-}
 
 const TOOLS_BY_ID = new Map(EDITOR_TOOLS.map((tool) => [tool.id, tool]));
 

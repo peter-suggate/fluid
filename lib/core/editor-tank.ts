@@ -12,6 +12,7 @@ import {
   type EditorEntityDefinition,
 } from "./editor-entity";
 import type { FluidBodyBox } from "./editor-fluid-body";
+import { fluidPlayActions } from "./editor-fluid-body";
 
 /**
  * Direct manipulation of the tank itself.
@@ -185,6 +186,9 @@ export const tankEntity: EditorEntityDefinition = {
   kind: "tank",
   surfacedBy: (tool) => tool === "select",
   instances: (context) => [tankEntityFor(context)],
+  // The same ring the water offers: see `fluidPlayActions`. Pointing at an
+  // empty tank and pointing at the water in it are the same question.
+  actions: (_context, target) => fluidPlayActions(target.point_m),
   find: (context, id) => id === TANK_SELECTION_ID ? tankEntityFor(context) : undefined,
   pick: (context, ray, exclude) => {
     if (pickExcluded(exclude, "tank", TANK_SELECTION_ID)) return undefined;

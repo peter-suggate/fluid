@@ -387,6 +387,32 @@ export interface SimulationMethod {
      * solver leaves this off.
      */
     fencedInitialPresentation?: boolean;
+    /**
+     * A change in the *shape* of the rigid roster — gaining its first body, or
+     * its first moving one — is adopted by the running solver rather than
+     * requiring one to be built.
+     *
+     * The test is exactly one thing: the method allocates nothing from the
+     * roster. Two different arrangements pass it.
+     *
+     *  - The method owns rigid state whose arenas are sized at
+     *    `GPU_RIGID_BODY_CAPACITY` whether or not the scene fills them, with
+     *    the whole roster re-uploaded through `syncBodies` every advance and
+     *    coupling gated at encode time on the live body count rather than
+     *    compiled in. Uniform CM12. A body dropped into running water there
+     *    both keeps the clock and interacts with it.
+     *  - The method has no rigid system at all, so there is nothing for the
+     *    roster to size. Sparse CM12. A body there is inert — drawn from the
+     *    CPU roster, movable by a carry, and invisible to the water — but
+     *    restarting the solve does not make it any less so, which is the whole
+     *    argument for declaring this: the reset costs the scene and buys
+     *    nothing.
+     *
+     * A method with a dense solid field sized on solid *presence* — the octree
+     * family, through `octreeSparseWorldRequired` — must leave this off, and
+     * `rigidAllocationKey` then keeps that first body in the solver key.
+     */
+    adoptsRigidRosterShape?: boolean;
   };
   /**
    * The SIM panel's advance diagram, loaded on demand.

@@ -13,7 +13,8 @@ export const VOXEL_MATERIAL_IDS = {
   sphere: 16,
   box: 17,
   capsule: 18,
-  cylinder: 19
+  cylinder: 19,
+  cup: 20
 } as const;
 
 export interface VoxelMaterial {
@@ -85,6 +86,14 @@ export const VOXEL_MATERIALS: ReadonlyArray<VoxelMaterial> = [
     id: VOXEL_MATERIAL_IDS.cylinder, key: "cylinder", name: "Cylinder", closure: "opaque",
     baseColorLinear: [0.66, 0.52, 0.92], emissiveLinear: [0, 0, 0], metallic: 0, roughness: 0.5, transmission: 0, ior: 1.45,
     colorProvenance: "webgpu-renderer rigid palette"
+  },
+  {
+    // Glazed ceramic rather than another saturated primitive tone. A cup is the
+    // instrument the user is holding, and it reads as one by not matching the
+    // things it is being dipped among.
+    id: VOXEL_MATERIAL_IDS.cup, key: "cup", name: "Cup", closure: "opaque",
+    baseColorLinear: [0.86, 0.83, 0.76], emissiveLinear: [0, 0, 0], metallic: 0, roughness: 0.32, transmission: 0, ior: 1.45,
+    colorProvenance: "SCENE_SHAPE_TABLE cup palette"
   }
 ];
 

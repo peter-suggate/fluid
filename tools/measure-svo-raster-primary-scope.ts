@@ -33,6 +33,7 @@ import { getScenePreset } from "../lib/core/scenes";
 import { decodeSvoBrickOccupancy } from "../lib/svo/svo-brick-occupancy";
 import { buildSvoScenePrimitives } from "../lib/svo/svo-scene-primitives";
 import { requiredFluidDeviceLimits } from "../lib/core/webgpu-device-limits";
+import { SCENE_ENVIRONMENT_OWNER_BASE } from "../lib/core/webgpu-rigid-body";
 import { WebGPULiveSvoScene } from "../lib/svo/webgpu-live-svo-scene";
 
 const repoRoot = fileURLToPath(new URL("..", import.meta.url));
@@ -129,7 +130,7 @@ interface BrickInstance {
 // only when its owner reaches the analytic-primitive base and is not the
 // suppressed open-shell owner (webgpu-svo-dry-scene.ts traceLeafPayload).
 const scenePrimitives = buildSvoScenePrimitives(scene);
-const ownerBase = scene.rigidBodies.length;
+const ownerBase = SCENE_ENVIRONMENT_OWNER_BASE;
 const suppressedOwner = scenePrimitives.openShellOwnerId;
 const primitiveCount = scenePrimitives.packedRecords.length > 0
   ? scenePrimitives.packedRecords.length / (scenePrimitives.packedRecords.length > 0 ? 1 : 1) : 0;

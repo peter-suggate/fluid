@@ -266,7 +266,8 @@ async function runArm(
   scene.duration_s = steps * dt_s;
   scene.numerics.fixedDt_s = scene.numerics.maxDt_s = dt_s;
   const overrides: MethodParamValues = method.id === "uniform"
-    ? { timeStep: "scene", densityPostProcessing: "off" } : {};
+    ? { timeStep: "scene", densityPostProcessing: "off" }
+    : { timeStep: "scene" };
   const solver = await method.createSolverAsync!(
     device,
     scene,

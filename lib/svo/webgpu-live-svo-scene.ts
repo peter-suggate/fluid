@@ -192,7 +192,7 @@ export class WebGPULiveSvoScene implements GPUSolverInstance {
       // The same build, one proxy at a time: what the curvature-driven
       // refinement rule evaluates when `FLUID_SVO_REFINEMENT_MODE=surface`.
       // Bound here for the reason directly above — the world cannot import it.
-      environmentDescriptorFor: (primitive) => svoDescriptorForEnvironmentProxy(scene, primitive),
+      environmentDescriptorFor: (primitive) => svoDescriptorForEnvironmentProxy(primitive),
       haloCells: 0,
       brickPreActivation: false,
     }, interrupt);
