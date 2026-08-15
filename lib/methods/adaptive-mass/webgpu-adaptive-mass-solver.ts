@@ -9,6 +9,7 @@ import type {
 import type { SceneDescription } from "../../core/model";
 import type { RigidBodyState } from "../../core/rigid-body";
 import { sceneLatticeDimensions } from "../../core/scene-lattice";
+import { GPUStageTimestampRecorder } from "../../core/performance-trace";
 import { usePerformanceInstrumentationStore } from "../../core/stores/performance-instrumentation-store";
 import { CM12_PAPER_DT_S } from "../../core/cm12-numerics";
 import type { GPUEulerianInfo, GPURigidLoad } from "../../core/webgpu-eulerian";
@@ -251,6 +252,8 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
   private physicsTraceSampleId = 0;
   private physicsTracePending = false;
   private lastPhysicsTraceAt_ms = -Infinity;
+  /** One undecodable hardware sample retires the chain for this solver. */
+  private hardwarePhysicsTraceInvalid = false;
 
   private constructor(
     private readonly device: GPUDevice,
@@ -340,6 +343,11 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
     signal: AbortSignal = new AbortController().signal,
   ): Promise<WebGPUAdaptiveMassSolver> {
     const runner = new GPUInitializationTaskRunner(onProgress, signal);
+    // Compile the boundary chain's closing marker while the scene builds. A
+    // recorder constructed before it exists closes on an empty pass, which
+    // Metal never samples, and that one bad sample would retire hardware
+    // timing for the whole run.
+    void GPUStageTimestampRecorder.prepare(device);
     let dimensions: SparseBrickVec3 | undefined;
     let atlas: SparseAdaptiveMassAtlas | undefined;
     let presentation: WebGPUAdaptiveMassSparsePresentation | undefined;
@@ -512,15 +520,27 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       && traceRequestedAt_ms - this.lastPhysicsTraceAt_ms
         >= ADAPTIVE_MASS_FRAME_TRACE_CADENCE_MS;
     const traceSampleId = shouldTracePhysics ? ++this.physicsTraceSampleId : 0;
+    const traceContext = `adaptive-mass:sim-${(this.lastTime_s + dt_s).toFixed(6)}`;
     const frameCapture = shouldTracePhysics
-      ? new AdaptiveMassFrameCapture(
-        traceSampleId,
-        `adaptive-mass:sim-${(this.lastTime_s + dt_s).toFixed(6)}`,
-      )
+      ? new AdaptiveMassFrameCapture(traceSampleId, traceContext)
       : undefined;
-    const encoder = this.device.createCommandEncoder({
+    const rawEncoder = this.device.createCommandEncoder({
       label: `Sparse CM12 resident frame ${(this.lastTime_s + dt_s).toFixed(6)}`,
     });
+    // The stage partition is the encoder's own: boundaries ride the passes the
+    // advance already encodes, so a sampled advance dispatches exactly the
+    // physics an unsampled one does. `markersReady` gates the recorder's
+    // fallback closing marker, which an advance whose final stage encoded
+    // nothing would fall back to; an unsampled boundary there would retire
+    // hardware timing for the whole run.
+    const hardwareTrace = frameCapture && !this.hardwarePhysicsTraceInvalid
+      && GPUStageTimestampRecorder.supported(this.device)
+      && GPUStageTimestampRecorder.markersReady(this.device)
+      ? new GPUStageTimestampRecorder(this.device, traceSampleId, "physics", traceContext)
+      : undefined;
+    const encoder = frameCapture
+      ? frameCapture.instrument(rawEncoder, hardwareTrace)
+      : rawEncoder;
     this.resident.encode(
       encoder,
       dt_s,
@@ -531,19 +551,9 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
         distanceCells: this.options.sharpeningDistance,
         traceSteps: this.options.sharpeningTraceSteps,
       },
+      frameCapture?.residentStageSeams,
     );
-    // These seams describe host encoding only.  The corresponding numerical
-    // stages are ordered compute dispatches in the command buffer above.
-    for (const stage of ["receiver-topology", "coupled-transport",
-      "surface-conditioning", "activity-resolution", "retain-rebuild", "force"] as const) {
-      frameCapture?.completeDynamicsStage(stage);
-    }
-    for (const stage of ["topology", "rhs", "solve", "projection", "diagnostics"] as const) {
-      frameCapture?.completeProjectionStage(stage);
-    }
-    frameCapture?.completeStateCommit();
-    frameCapture?.completeMaterialization();
-    frameCapture?.beginQueueUpload();
+    frameCapture?.closeCommands();
     this.device.queue.submit([encoder.finish()]);
 
     this.lastTime_s += dt_s;
@@ -570,9 +580,21 @@ export class WebGPUAdaptiveMassSolver implements GPUSolverInstance {
       this.physicsTracePending = true;
       this.info.physicsCPUTrace = captured.cpuTrace;
       this.info.physicsCaptureIdentity = captured.identity;
-      void captured.queueTrace.then((trace) => {
+      // Prefer the hardware partition: it is the only lane that can put a
+      // figure on an individual stage. One unusable sample retires it for this
+      // solver and the queue-wall observation carries the advance from then on.
+      const resolved = captured.hardwareTrace
+        ? captured.hardwareTrace.then((trace) => {
+          this.hardwarePhysicsTraceInvalid = !trace;
+          return trace ?? captured.queueTrace;
+        }).catch(() => {
+          this.hardwarePhysicsTraceInvalid = true;
+          return captured.queueTrace;
+        })
+        : captured.queueTrace;
+      void Promise.resolve(resolved).then((trace) => {
         const current = usePerformanceInstrumentationStore.getState();
-        if (!this.disposed && current.enabled
+        if (trace && !this.disposed && current.enabled
           && current.enabledAt_ms <= traceRequestedAt_ms) {
           this.info.physicsTrace = trace;
         }

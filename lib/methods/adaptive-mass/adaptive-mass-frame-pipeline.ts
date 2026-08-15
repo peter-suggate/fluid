@@ -5,47 +5,65 @@ import type {
 import { gpuPhysicsPerformanceActivityFrameId } from "../../core/performance-activity";
 import {
   CPUPerformanceTrace,
+  GPUStageTimestampRecorder,
   partitionPerformanceTrace,
   type GPUTimestampPhase,
   type PerformanceTrace,
 } from "../../core/performance-trace";
 import type { GPUEulerianInfo } from "../../core/webgpu-eulerian";
-import type { SparseAtlasProjectionStageId } from "./sparse-atlas-composite-projection";
-import type { SparseAtlasDynamicsStageId } from "./sparse-atlas-dynamics";
 import {
+  SPARSE_CM12_RESIDENT_FINAL_STAGE,
   SPARSE_CM12_SHARPENING_DISTANCE_CELLS,
   SPARSE_CM12_SHARPENING_TRACE_STEPS,
+  type SparseCM12ResidentStageId,
+  type SparseCM12ResidentStageSeams,
 } from "./webgpu-sparse-cm12-resident";
 
 /** The capture cadence matches the uniform reference's observatory lane. */
 export const ADAPTIVE_MASS_FRAME_TRACE_CADENCE_MS = 100;
 
 /**
- * Host-encoding seams for the GPU-resident sparse authority. Hardware work is
- * observed independently by the GPU trace; these CPU intervals describe only
- * command construction/submission and must never contain simulation-sized
- * field loops.
+ * The advance partition: one phase per resident stage, in encode order.
+ *
+ * Both lanes emit exactly these labels. The GPU boundary chain closes a stage
+ * on the pass that opens its successor, so a phase here is that stage's own
+ * hardware execution time; the CPU chain closes the same stage at the same
+ * seam over host command construction, and carries the panel when a device has
+ * no timestamp queries. A diagram node names its label, which is what keeps
+ * the picture and the measurement from drifting apart.
+ *
+ * `commandEncoding` and `upload` bracket the chain on the CPU lane only —
+ * planning before the first stage and closure after the last. No GPU work
+ * lives in either, so no diagram node claims them.
  */
 export const ADAPTIVE_MASS_ADVANCE_PHASE = Object.freeze({
-  receiverTopology: {
+  commandEncoding: {
+    id: "command-encoding",
+    label: "Advance planning + trace setup",
+  },
+  velocityExtension: {
+    id: "velocity-extrapolation",
+    label: "Transport velocity extension into the sparse air band",
+  },
+  faceTopology: {
     id: "power-topology",
-    label: "Sparse receiver activation + composite face topology",
+    label: "Composite face preparation + oriented transport rows",
   },
   coupledTransport: {
     id: "fine-sdf-advection",
     label: "Coupled conservative mass + gamma + momentum transport",
   },
+  gammaDiffusion: {
+    id: "fine-sdf-advection",
+    label: "Gamma diffusion forward and reverse axis sweeps",
+  },
   surfaceConditioning: {
     id: "fine-sdf-redistance",
     label: "CM12 surface sharpening + gamma conditioning",
   },
-  activityResolution: {
-    id: "power-topology",
-    label: "Brick activity measurement + hysteretic resolution planning",
-  },
-  retentionConditioning: {
-    id: "adaptive-publication",
-    label: "Dry-brick retirement + retained-atlas conditioning",
+  symmetryAuthority: {
+    id: "other",
+    label: "Horizontal D4 symmetry authority",
   },
   force: {
     id: "velocity-advection",
@@ -71,9 +89,21 @@ export const ADAPTIVE_MASS_ADVANCE_PHASE = Object.freeze({
     id: "other",
     label: "Projection residual + divergence + energy receipts",
   },
-  stateCommit: {
+  activityMeasurement: {
+    id: "power-topology",
+    label: "Compact brick activity measurement",
+  },
+  resolutionPlanning: {
+    id: "power-topology",
+    label: "Hysteretic resolution planning + 2:1 candidate grading",
+  },
+  candidateTransfer: {
+    id: "power-topology",
+    label: "Candidate cell and face conservative transfer",
+  },
+  retentionConditioning: {
     id: "adaptive-publication",
-    label: "Sparse authority commit + conservation receipts",
+    label: "Dry-brick retirement + retained-atlas conditioning",
   },
   materialization: {
     id: "adaptive-publication",
@@ -89,43 +119,59 @@ export const ADAPTIVE_MASS_ADVANCE_PHASE = Object.freeze({
   },
 } satisfies Record<string, GPUTimestampPhase>);
 
-const DYNAMICS_PHASE: Readonly<Partial<Record<
-  SparseAtlasDynamicsStageId,
-  GPUTimestampPhase
->>> = Object.freeze({
-  "receiver-topology": ADAPTIVE_MASS_ADVANCE_PHASE.receiverTopology,
-  "coupled-transport": ADAPTIVE_MASS_ADVANCE_PHASE.coupledTransport,
-  "surface-conditioning": ADAPTIVE_MASS_ADVANCE_PHASE.surfaceConditioning,
-  "activity-resolution": ADAPTIVE_MASS_ADVANCE_PHASE.activityResolution,
-  "retain-rebuild": ADAPTIVE_MASS_ADVANCE_PHASE.retentionConditioning,
-  force: ADAPTIVE_MASS_ADVANCE_PHASE.force,
-  // Projection is partitioned by the nested projection-stage seams below.
-});
-
-const PROJECTION_PHASE: Readonly<Record<
-  SparseAtlasProjectionStageId,
+/**
+ * Resident stage id to trace phase. Exhaustive by type: a stage added to the
+ * encoder's partition does not compile until it has a phase to be timed under.
+ */
+export const ADAPTIVE_MASS_RESIDENT_STAGE_PHASE: Readonly<Record<
+  SparseCM12ResidentStageId,
   GPUTimestampPhase
 >> = Object.freeze({
-  topology: ADAPTIVE_MASS_ADVANCE_PHASE.pressureTopology,
-  rhs: ADAPTIVE_MASS_ADVANCE_PHASE.pressureRhs,
-  solve: ADAPTIVE_MASS_ADVANCE_PHASE.pressureSolve,
-  projection: ADAPTIVE_MASS_ADVANCE_PHASE.pressureProjection,
-  diagnostics: ADAPTIVE_MASS_ADVANCE_PHASE.pressureDiagnostics,
+  "transport-velocity-extension": ADAPTIVE_MASS_ADVANCE_PHASE.velocityExtension,
+  "face-preparation": ADAPTIVE_MASS_ADVANCE_PHASE.faceTopology,
+  "conservative-transport": ADAPTIVE_MASS_ADVANCE_PHASE.coupledTransport,
+  "gamma-diffusion": ADAPTIVE_MASS_ADVANCE_PHASE.gammaDiffusion,
+  "surface-sharpening": ADAPTIVE_MASS_ADVANCE_PHASE.surfaceConditioning,
+  "symmetry-authority": ADAPTIVE_MASS_ADVANCE_PHASE.symmetryAuthority,
+  "body-forces": ADAPTIVE_MASS_ADVANCE_PHASE.force,
+  "pressure-topology": ADAPTIVE_MASS_ADVANCE_PHASE.pressureTopology,
+  "pressure-rhs": ADAPTIVE_MASS_ADVANCE_PHASE.pressureRhs,
+  "pressure-solve": ADAPTIVE_MASS_ADVANCE_PHASE.pressureSolve,
+  "velocity-projection": ADAPTIVE_MASS_ADVANCE_PHASE.pressureProjection,
+  "projection-diagnostics": ADAPTIVE_MASS_ADVANCE_PHASE.pressureDiagnostics,
+  "activity-measurement": ADAPTIVE_MASS_ADVANCE_PHASE.activityMeasurement,
+  "resolution-planning": ADAPTIVE_MASS_ADVANCE_PHASE.resolutionPlanning,
+  "candidate-transfer": ADAPTIVE_MASS_ADVANCE_PHASE.candidateTransfer,
+  "brick-retirement": ADAPTIVE_MASS_ADVANCE_PHASE.retentionConditioning,
+  "presentation-publication": ADAPTIVE_MASS_ADVANCE_PHASE.materialization,
 });
 
 export interface AdaptiveMassFrameCaptureResult {
   readonly cpuTrace: PerformanceTrace;
-  readonly queueTrace: Promise<PerformanceTrace>;
+  /**
+   * The hardware boundary chain, when the device could carry one. `undefined`
+   * resolves mean the sample came back undecodable and the caller should stop
+   * asking this device for hardware boundaries.
+   */
+  readonly hardwareTrace?: Promise<PerformanceTrace | undefined>;
+  /** Always observed, and the answer whenever the chain above has none. */
+  readonly queueTrace: Promise<PerformanceTrace | undefined>;
   readonly identity: NonNullable<GPUEulerianInfo["physicsCaptureIdentity"]>;
 }
 
 /**
- * One exhaustive host-encoding partition plus the independently observed
- * WebGPU queue interval for one adaptive advance. Construction/warmup never
- * enters either lane. The recorder owns no physics and is safe to omit.
+ * One advance, observed three ways from a single set of seams.
+ *
+ * The seams are the resident encoder's own stage partition, so all three lanes
+ * describe the same boundaries: hardware timestamps spliced into the frame's
+ * passes, host command-construction intervals, and the queue-wall interval
+ * that still covers the advance when a device has no timestamp queries. The
+ * recorder owns no physics and is safe to omit entirely.
  */
 export class AdaptiveMassFrameCapture {
   private readonly cpu: CPUPerformanceTrace;
+  private gpu?: GPUStageTimestampRecorder;
+  private encoder?: GPUCommandEncoder;
   private queueStartedAt_ms?: number;
   private closed = false;
 
@@ -137,38 +183,61 @@ export class AdaptiveMassFrameCapture {
     this.cpu = new CPUPerformanceTrace(
       sampleId,
       context,
-      ADAPTIVE_MASS_ADVANCE_PHASE.receiverTopology,
+      ADAPTIVE_MASS_ADVANCE_PHASE.commandEncoding,
       clock,
     );
   }
 
-  readonly completeDynamicsStage = (stage: SparseAtlasDynamicsStageId): void => {
-    const phase = DYNAMICS_PHASE[stage];
-    if (phase) this.cpu.completePhase(phase);
-  };
-
-  readonly completeProjectionStage = (stage: SparseAtlasProjectionStageId): void => {
-    this.cpu.completePhase(PROJECTION_PHASE[stage]);
-  };
-
-  /** Close work after the projection receipt and before dense publication. */
-  completeStateCommit(): void {
-    this.cpu.completePhase(ADAPTIVE_MASS_ADVANCE_PHASE.stateCommit);
+  /**
+   * Adopt the frame's encoder, and the hardware chain when one was supplied.
+   *
+   * The returned encoder must be used everywhere the raw one went: stage
+   * boundaries ride the passes opened through it, which is what makes them
+   * free. Passing no recorder leaves the encoder untouched.
+   */
+  instrument(
+    encoder: GPUCommandEncoder,
+    gpu?: GPUStageTimestampRecorder,
+  ): GPUCommandEncoder {
+    if (this.encoder) throw new Error("Sparse CM12 frame capture already instrumented");
+    this.gpu = gpu;
+    this.encoder = gpu ? gpu.instrument(encoder) : encoder;
+    gpu?.begin();
+    this.cpu.completePhase(ADAPTIVE_MASS_ADVANCE_PHASE.commandEncoding);
+    return this.encoder;
   }
 
-  completeMaterialization(): void {
-    this.cpu.completePhase(ADAPTIVE_MASS_ADVANCE_PHASE.materialization);
-  }
+  /**
+   * The encoder's stage seams: one stage closes on every lane at once.
+   *
+   * The final stage is the exception. Its hardware boundary is armed before
+   * its pass begins so that pass's own end-of-pass counter closes the chain;
+   * a marker pass after it measures whenever the driver felt like running it.
+   * The host lane has no such hazard and closes it at the seam like any other.
+   */
+  readonly residentStageSeams: SparseCM12ResidentStageSeams = {
+    close: (stage) => {
+      const phase = ADAPTIVE_MASS_RESIDENT_STAGE_PHASE[stage];
+      this.cpu.completePhase(phase);
+      if (this.encoder && stage !== SPARSE_CM12_RESIDENT_FINAL_STAGE) {
+        this.gpu?.completePhase(this.encoder, phase);
+      }
+    },
+    openFinal: (stage) => {
+      this.gpu?.completeFinalPhaseOnNextPass(ADAPTIVE_MASS_RESIDENT_STAGE_PHASE[stage]);
+    },
+  };
 
-  /** Start immediately before the first queue.writeTexture call. */
-  beginQueueUpload(): void {
+  /** Stage the query readback and start the queue clock, just before submit. */
+  closeCommands(): void {
     if (this.queueStartedAt_ms !== undefined) {
       throw new Error("Sparse CM12 queue capture already started");
     }
+    if (this.encoder) this.gpu?.resolve(this.encoder);
     this.queueStartedAt_ms = this.clock();
   }
 
-  /** Close after all upload calls have been enqueued. */
+  /** Close after the command buffer has been submitted. */
   finish(queue: Pick<GPUQueue, "onSubmittedWorkDone">): AdaptiveMassFrameCaptureResult {
     if (this.closed) throw new Error("Sparse CM12 frame capture already closed");
     if (this.queueStartedAt_ms === undefined) {
@@ -195,9 +264,12 @@ export class AdaptiveMassFrameCapture {
           end_ms,
         }],
       });
-    });
+    // The hardware chain usually wins, leaving this observation unread; a
+    // rejection here must not surface as an unhandled one.
+    }).catch(() => undefined);
     return {
       cpuTrace,
+      ...(this.gpu ? { hardwareTrace: this.gpu.read() } : {}),
       queueTrace,
       identity: {
         sampleId: this.sampleId,
@@ -218,13 +290,25 @@ const stage = (
 
 const ADAPTIVE_MASS_FLUID_STAGES: readonly FluidPipelineStage[] = [
   stage({
-    id: "receiver-topology", band: "topology", side: "left",
-    label: "Receiver activation",
-    phaseLabels: [ADAPTIVE_MASS_ADVANCE_PHASE.receiverTopology.label],
+    id: "transport-velocity-extension", band: "transport", side: "left",
+    label: "Velocity extension",
+    phaseLabels: [ADAPTIVE_MASS_ADVANCE_PHASE.velocityExtension.label],
     tip: {
-      summary: "Activates only face-local receiver bricks needed by this CFL-bounded advance, then builds the canonical regular and 2:1 face-port rows.",
-      reads: "resident atlas, face-normal velocity",
-      writes: "transient support atlas, composite G rows",
+      summary: "Seeds the transport velocity from the projected liquid field and extends it outward through eight alternating source/destination sweeps, so a semi-Lagrangian trace that leaves the liquid still lands on a defined velocity.",
+      reads: "projected collocated velocity, density",
+      writes: "transport velocity over liquid and its sparse air band",
+      feeds: "composite face preparation",
+    },
+    chip: () => "8 alternating sweeps",
+  }),
+  stage({
+    id: "receiver-topology", band: "transport", side: "right",
+    label: "Face preparation",
+    phaseLabels: [ADAPTIVE_MASS_ADVANCE_PHASE.faceTopology.label],
+    tip: {
+      summary: "Resolves the extended velocity onto the canonical regular and 2:1 face-port rows this advance transports through, so donor and receiver read one oriented flux rather than two independent samples.",
+      reads: "extended transport velocity, composite row topology",
+      writes: "oriented face transport rows",
       feeds: "coupled conservative transport",
     },
     chip: (context) => context.info
@@ -257,7 +341,19 @@ const ADAPTIVE_MASS_FLUID_STAGES: readonly FluidPipelineStage[] = [
     chip: () => "shared conservative transaction",
   }),
   stage({
-    id: "surface-conditioning", band: "transport", side: "left",
+    id: "gamma-diffusion", band: "transport", side: "left",
+    label: "Gamma diffusion",
+    phaseLabels: [ADAPTIVE_MASS_ADVANCE_PHASE.gammaDiffusion.label],
+    tip: {
+      summary: "Sec. 3.4 step 8: Jacobi within an axis, Gauss-Seidel between axes. Three forward and three reverse sweeps are averaged into one order-independent result, which is what keeps the diffused gamma from inheriting the sweep direction.",
+      reads: "transported gamma",
+      writes: "diffused gamma",
+      feeds: "surface sharpening",
+    },
+    chip: () => "6 axis sweeps · averaged",
+  }),
+  stage({
+    id: "surface-conditioning", band: "transport", side: "right",
     label: "Surface conditioning",
     phaseLabels: [ADAPTIVE_MASS_ADVANCE_PHASE.surfaceConditioning.label],
     tip: {
@@ -291,25 +387,62 @@ const ADAPTIVE_MASS_FLUID_STAGES: readonly FluidPipelineStage[] = [
     ).toFixed(0)} substeps`,
   }),
   stage({
-    id: "activity-resolution", band: "topology", side: "left",
-    label: "Activity + resolution",
-    phaseLabels: [ADAPTIVE_MASS_ADVANCE_PHASE.activityResolution.label],
+    id: "symmetry-authority", band: "transport", side: "left",
+    label: "D4 symmetry authority",
+    phaseLabels: [ADAPTIVE_MASS_ADVANCE_PHASE.symmetryAuthority.label],
     tip: {
-      summary: "Measures compact brick activity every accepted step, promotes persistent deformation or temporal change, and slowly demotes calm bricks. Surface presence alone does not force fine resolution.",
+      summary: "Folds the conditioned scalars onto the horizontal D4 orbit so a scene authored symmetric stays bit-identical under the group action instead of drifting apart one rounding step at a time.",
+      reads: "conditioned density and gamma",
+      writes: "D4-folded density and gamma",
+      feeds: "body-force prediction",
+      gate: "the authored scene and every injected drop are horizontally D4 symmetric",
+    },
+    chip: () => "horizontal orbit fold",
+  }),
+  stage({
+    id: "activity-measurement", band: "adaptivity", side: "left",
+    label: "Activity measurement",
+    phaseLabels: [ADAPTIVE_MASS_ADVANCE_PHASE.activityMeasurement.label],
+    tip: {
+      summary: "Advances the accepted-step clock and measures one activity record per compact brick: occupied travel, surface evidence, thin-feature evidence, restriction detail and the density moments the planner scores.",
+      reads: "conditioned density, momentum, previous records",
+      writes: "per-brick score, reasons and epoch history",
+      feeds: "resolution planning",
+    },
+    chip: (context) => `${context.info?.adaptiveActivityMeasuredBrickCount ?? 0} bricks measured`,
+  }),
+  stage({
+    id: "resolution-planning", band: "adaptivity", side: "right",
+    label: "Resolution planning",
+    phaseLabels: [ADAPTIVE_MASS_ADVANCE_PHASE.resolutionPlanning.label],
+    tip: {
+      summary: "Measures compact brick activity every accepted step and authors full 1³/2³/4³/8³ candidate requests. Surface, thin fluid, fast bulk, and predicted fronts target fine; calm bulk demotes hysteretically. Accepted in-run topology publication is not implemented yet, so structural receiver controls remain the physical guard.",
       reads: "transported density, momentum, policy history",
-      writes: "score/reason history and target 4³/8³ levels",
-      feeds: "conservative topology transfer",
+      writes: "score/reason history and candidate 1³/2³/4³/8³ levels",
+      feeds: "candidate conservative transfer (publication pending)",
     },
     chip: (context) => `${context.info?.adaptiveFineBrickCount ?? 0} fine · ${context.info?.adaptiveCoarseBrickCount ?? 0} coarse`,
   }),
   stage({
-    id: "retention-conditioning", band: "topology", side: "right",
+    id: "candidate-transfer", band: "adaptivity", side: "left",
+    label: "Candidate transfer",
+    phaseLabels: [ADAPTIVE_MASS_ADVANCE_PHASE.candidateTransfer.label],
+    tip: {
+      summary: "Restricts and prolongs cells and faces into each brick's candidate resolution and writes the mass, gamma and momentum error receipts that decide whether that candidate could be accepted.",
+      reads: "candidate levels, conditioned cell and face state",
+      writes: "candidate leaf storage and per-brick transfer receipts",
+      feeds: "dry-brick retirement",
+    },
+    chip: (context) => `${context.info?.adaptiveActivityHotBrickCount ?? 0} hot · ${context.info?.adaptiveActivityQuietBrickCount ?? 0} quiet`,
+  }),
+  stage({
+    id: "retention-conditioning", band: "adaptivity", side: "right",
     label: "Retain + condition",
     phaseLabels: [ADAPTIVE_MASS_ADVANCE_PHASE.retentionConditioning.label],
     tip: {
-      summary: "Retires dry bricks, rebuilds the compact atlas and remaps surviving velocity without allocating work for empty bricks.",
+      summary: "Retires unsupported dry bricks logically and clears their stale fields. Packed cell/row capacity remains immutable; this stage does not publish candidate resolutions as a rebuilt accepted atlas.",
       reads: "transported density/gamma/momentum",
-      writes: "next resident atlas and face state",
+      writes: "active-bit history, cleared residue, and retirement receipts",
       feeds: "forces and projection",
     },
     chip: () => "zero persistent dry bricks",
@@ -377,12 +510,9 @@ const ADAPTIVE_MASS_FLUID_STAGES: readonly FluidPipelineStage[] = [
       : `|div|∞ ${context.info.maxDivergenceAfter_s.toExponential(2)} s⁻¹`,
   }),
   stage({
-    id: "projection-receipts", band: "output", side: "left",
+    id: "projection-receipts", band: "pressure", side: "left",
     label: "Physics receipts",
-    phaseLabels: [
-      ADAPTIVE_MASS_ADVANCE_PHASE.pressureDiagnostics.label,
-      ADAPTIVE_MASS_ADVANCE_PHASE.stateCommit.label,
-    ],
+    phaseLabels: [ADAPTIVE_MASS_ADVANCE_PHASE.pressureDiagnostics.label],
     tip: {
       summary: "Publishes pressure residual, post-projection divergence, energy identity, mass/gamma conservation and sparse work receipts from the committed authority.",
       reads: "projected state and solver residual",
@@ -391,39 +521,29 @@ const ADAPTIVE_MASS_FLUID_STAGES: readonly FluidPipelineStage[] = [
     chip: () => "mass · gamma · residual · divergence",
   }),
   stage({
-    id: "presentation-materialization", band: "output", side: "right",
-    label: "Presentation fields",
+    id: "presentation-publication", band: "output", side: "left",
+    label: "Presentation pages",
     phaseLabels: [ADAPTIVE_MASS_ADVANCE_PHASE.materialization.label],
     tip: {
-      summary: "Expands only the renderer-facing density, phi, owner, velocity, pressure and divergence textures; dense fields never feed physics.",
-      reads: "compact sparse authority",
-      writes: "bounded dense presentation arrays",
-      feeds: "WebGPU upload",
+      summary: "Classifies which bricks the renderer can see and publishes their compact level-set pages in place. Nothing is expanded to a dense field and nothing crosses to the host, so consumers read the same sparse authority physics stepped.",
+      reads: "committed sparse authority",
+      writes: "compact level-set brick pages and presentation classification",
+      feeds: "renderer level-set and grid consumers",
     },
-    chip: () => "presentation-only dense bridge",
-  }),
-  stage({
-    id: "presentation-upload", band: "output", side: "left",
-    label: "Upload + queue",
-    phaseLabels: [ADAPTIVE_MASS_ADVANCE_PHASE.upload.label],
-    tip: {
-      summary: "Packs rows, enqueues all consumer texture uploads, and observes queue completion independently from CPU physics timing.",
-      reads: "dense presentation arrays",
-      writes: "WebGPU consumer textures",
-    },
-    chip: () => "6 texture publications",
+    chip: (context) => `${context.info?.fluidBrickResidentCount ?? 0} pages · resident`,
   }),
 ];
 
 /** Method-owned diagram; no core or UI module imports adaptive implementation. */
 export const ADAPTIVE_MASS_FLUID_PIPELINE: FluidPipelineGraph = Object.freeze({
   methodId: "adaptive-mass",
+  // Encode order, so the diagram reads down the advance the solver encodes.
   bands: [
-    { id: "topology", label: "Sparse topology + receiver activation" },
-    { id: "transport", label: "Coupled CM12 conservative transport" },
+    { id: "transport", label: "Transport velocity + conservative CM12 transport" },
     { id: "momentum", label: "Momentum prediction" },
-    { id: "pressure", label: "Composite pressure projection" },
-    { id: "output", label: "Receipts + presentation publication" },
+    { id: "pressure", label: "Composite pressure projection + receipts" },
+    { id: "adaptivity", label: "Brick activity + candidate resolution" },
+    { id: "output", label: "Sparse presentation publication" },
   ],
   stages: ADAPTIVE_MASS_FLUID_STAGES,
 });

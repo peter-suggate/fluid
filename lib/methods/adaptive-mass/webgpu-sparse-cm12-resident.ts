@@ -43,6 +43,78 @@ export const sparseCM12SharpeningTraceSteps = (value: unknown): number =>
     : SPARSE_CM12_SHARPENING_TRACE_STEPS;
 
 const INVALID = 0xffff_ffff;
+/**
+ * The advance's stage partition, in encode order.
+ *
+ * Every dispatch `encode` issues belongs to exactly one of these, so a caller
+ * that closes each stage in turn holds an exhaustive partition of the frame's
+ * GPU work rather than a sampling of it. These ids are the ABI the method's
+ * trace phases and its advance-pipeline diagram are keyed by; adding a
+ * dispatch means placing it in a stage here.
+ */
+export type SparseCM12ResidentStageId =
+  | "transport-velocity-extension"
+  | "face-preparation"
+  | "conservative-transport"
+  | "gamma-diffusion"
+  | "surface-sharpening"
+  | "symmetry-authority"
+  | "body-forces"
+  | "pressure-topology"
+  | "pressure-rhs"
+  | "pressure-solve"
+  | "velocity-projection"
+  | "projection-diagnostics"
+  | "activity-measurement"
+  | "resolution-planning"
+  | "candidate-transfer"
+  | "brick-retirement"
+  | "presentation-publication";
+
+/** Encode order. The seam chain closes these left to right, exactly once each. */
+export const SPARSE_CM12_RESIDENT_STAGES: readonly SparseCM12ResidentStageId[] =
+  Object.freeze([
+    "transport-velocity-extension",
+    "face-preparation",
+    "conservative-transport",
+    "gamma-diffusion",
+    "surface-sharpening",
+    "symmetry-authority",
+    "body-forces",
+    "pressure-topology",
+    "pressure-rhs",
+    "pressure-solve",
+    "velocity-projection",
+    "projection-diagnostics",
+    "activity-measurement",
+    "resolution-planning",
+    "candidate-transfer",
+    "brick-retirement",
+    "presentation-publication",
+  ] as const);
+
+/** The last stage in encode order; its boundary needs the treatment below. */
+export const SPARSE_CM12_RESIDENT_FINAL_STAGE: SparseCM12ResidentStageId =
+  SPARSE_CM12_RESIDENT_STAGES[SPARSE_CM12_RESIDENT_STAGES.length - 1]!;
+
+/** Where an observer is told about each stage of the advance. */
+export interface SparseCM12ResidentStageSeams {
+  /**
+   * Close the named stage, immediately after its last dispatch. A stage that
+   * encodes nothing this advance still reports: it closes on its successor's
+   * boundary and costs exactly zero.
+   */
+  readonly close: (stage: SparseCM12ResidentStageId) => void;
+  /**
+   * Name the final stage before its first dispatch, so an observer can put the
+   * closing boundary on that stage's own pass. Measured on Dawn/Metal: a
+   * trailing marker pass touches nothing the frame touches, so the driver
+   * scheduled it 10 ms *before* the boundary it was meant to close and the
+   * whole sample decoded as non-monotonic.
+   */
+  readonly openFinal?: (stage: SparseCM12ResidentStageId) => void;
+}
+
 const WORKGROUP_SIZE = 64;
 const PCG_ITERATIONS = 128;
 const ACTIVITY_HEADER_WORDS = 12;
@@ -616,80 +688,133 @@ export class WebGPUSparseCM12Resident {
     pressureScale: number,
     accelerationFinePerSecond2: readonly [number, number, number],
     sharpening?: SharpeningTrace,
+    seams?: SparseCM12ResidentStageSeams,
   ): void {
     this.assertLive();
     const packed = this.lastPacked!;
     this.writeParameters(packed, dt_s, finestCellSize_m, pressureScale,
       accelerationFinePerSecond2, sharpening);
     encoder.clearBuffer(this.conditioning);
-    const pass = encoder.beginComputePass({ label: "Sparse CM12 resident frame" });
+    // The pass opens on first dispatch rather than up front. A stage that
+    // encodes nothing this advance — the D4 authority on an asymmetric scene —
+    // then leaves no empty pass behind, which matters because Metal writes no
+    // timestamp for a pass that does no work and one unsampled boundary
+    // rejects the whole chain.
+    let pass: GPUComputePassEncoder | undefined;
+    let passLabel = "Sparse CM12 resident frame";
     const dispatch = (name: string, count: number, y = 1, z = 1) => {
+      pass ??= encoder.beginComputePass({ label: passLabel });
       pass.setPipeline(this.pipelines[name]!); pass.setBindGroup(0, this.bindGroup);
       pass.dispatchWorkgroups(count, y, z);
     };
+    // Without seams this is the single frame pass it has always been. With
+    // them, each stage becomes its own pass so a boundary chain can land a
+    // hardware timestamp on the pass that opens the next stage. Dispatch order
+    // and the implicit barriers between dispatches are identical either way,
+    // so a traced advance computes exactly what an untraced one computes.
+    const stage = (id: SparseCM12ResidentStageId, encodeStage: () => void) => {
+      if (seams) {
+        passLabel = `Sparse CM12 resident ${id}`;
+        if (id === SPARSE_CM12_RESIDENT_FINAL_STAGE) seams.openFinal?.(id);
+      }
+      encodeStage();
+      if (!seams) return;
+      pass?.end();
+      pass = undefined;
+      seams.close(id);
+    };
     const cells = Math.ceil(this.cellCount / WORKGROUP_SIZE);
     const rows = Math.ceil(this.rowCount / WORKGROUP_SIZE);
-    dispatch("initializeTransportVelocity", cells);
-    for (let sweep = 0; sweep < 8; sweep += 1) {
-      dispatch(sweep % 2 === 0
-        ? "extrapolateTransportVelocityToSource"
-        : "extrapolateTransportVelocityToDestination", cells);
-    }
-    dispatch("prepareTransportFaces", rows);
-    dispatch("traceGammaAndBeta", cells);
-    dispatch("scatterDensityDeficit", cells);
-    dispatch("gatherConservativeDensity", cells);
-    dispatch("diffuseGammaForwardX", cells);
-    dispatch("diffuseGammaForwardY", cells);
-    dispatch("diffuseGammaForwardZ", cells);
-    dispatch("diffuseGammaReverseZ", cells);
-    dispatch("diffuseGammaReverseY", cells);
-    dispatch("diffuseGammaReverseX", cells);
-    dispatch("averageGammaDiffusion", cells);
-    dispatch("scatterSharpeningMass", cells);
-    dispatch("finalizeSharpening", cells);
-    if (this.horizontalD4Authority) {
+    const bricks = Math.ceil(packed.brickCount / WORKGROUP_SIZE);
+    stage("transport-velocity-extension", () => {
+      dispatch("initializeTransportVelocity", cells);
+      for (let sweep = 0; sweep < 8; sweep += 1) {
+        dispatch(sweep % 2 === 0
+          ? "extrapolateTransportVelocityToSource"
+          : "extrapolateTransportVelocityToDestination", cells);
+      }
+    });
+    stage("face-preparation", () => {
+      dispatch("prepareTransportFaces", rows);
+    });
+    stage("conservative-transport", () => {
+      dispatch("traceGammaAndBeta", cells);
+      dispatch("scatterDensityDeficit", cells);
+      dispatch("gatherConservativeDensity", cells);
+    });
+    stage("gamma-diffusion", () => {
+      dispatch("diffuseGammaForwardX", cells);
+      dispatch("diffuseGammaForwardY", cells);
+      dispatch("diffuseGammaForwardZ", cells);
+      dispatch("diffuseGammaReverseZ", cells);
+      dispatch("diffuseGammaReverseY", cells);
+      dispatch("diffuseGammaReverseX", cells);
+      dispatch("averageGammaDiffusion", cells);
+    });
+    stage("surface-sharpening", () => {
+      dispatch("scatterSharpeningMass", cells);
+      dispatch("finalizeSharpening", cells);
+    });
+    stage("symmetry-authority", () => {
+      if (!this.horizontalD4Authority) return;
       dispatch("preserveHorizontalD4", cells);
       dispatch("commitHorizontalD4", cells);
-    }
-    dispatch("forceFaces", rows);
-    dispatch("preparePressure", cells);
-    dispatch("classifyRows", rows);
-    dispatch("preparePressure", cells);
-    dispatch("initializePCG", cells);
-    dispatch("reduceInitialize", 1);
-    for (let iteration = 0; iteration < PCG_ITERATIONS; iteration += 1) {
-      dispatch("applyDirection", cells);
-      dispatch("reduceCurvature", 1);
-      dispatch("updateResidual", cells);
-      dispatch("reduceResidual", 1);
-      dispatch("updateDirection", cells);
-    }
-    dispatch("projectFaces", rows);
-    dispatch("collocateAndDiagnose", cells);
-    dispatch("measureDivergenceDiagnostics", cells);
-    dispatch("reduceDivergenceDiagnostics", 1);
-    dispatch("advanceActivityClock", 1);
-    dispatch("measureBrickActivity", this.lastPacked!.brickCount);
-    dispatch("planBrickResolution", Math.ceil(this.lastPacked!.brickCount / WORKGROUP_SIZE));
-    dispatch("activateSweptReceivers", Math.ceil(this.lastPacked!.brickCount / WORKGROUP_SIZE));
-    for (let gradingPass = 0; gradingPass < 3; gradingPass += 1) {
-      dispatch("closePlannedResolution", Math.ceil(
-        this.lastPacked!.brickCount / WORKGROUP_SIZE,
-      ));
-    }
-    dispatch("validateCandidateResolution",
-      Math.ceil(this.lastPacked!.brickCount / WORKGROUP_SIZE));
-    dispatch("transferCandidateCells", this.lastPacked!.brickCount);
-    dispatch("prepareCandidateFaceReceipts",
-      Math.ceil(this.lastPacked!.brickCount / WORKGROUP_SIZE));
-    dispatch("transferCandidateFaces", this.lastPacked!.brickCount, 6);
-    dispatch("retireUnsupportedEmptyBricks",
-      Math.ceil(this.lastPacked!.brickCount / WORKGROUP_SIZE));
-    dispatch("classifyPresentationBricks", Math.ceil(this.lastPacked!.brickCount / WORKGROUP_SIZE));
-    dispatch("publishSparseLevelSet",
-      this.globalFineLevelSetSource.plan.maximumResidentBricks);
-    pass.end();
+    });
+    stage("body-forces", () => {
+      dispatch("forceFaces", rows);
+    });
+    stage("pressure-topology", () => {
+      dispatch("preparePressure", cells);
+      dispatch("classifyRows", rows);
+      dispatch("preparePressure", cells);
+    });
+    stage("pressure-rhs", () => {
+      dispatch("initializePCG", cells);
+      dispatch("reduceInitialize", 1);
+    });
+    stage("pressure-solve", () => {
+      for (let iteration = 0; iteration < PCG_ITERATIONS; iteration += 1) {
+        dispatch("applyDirection", cells);
+        dispatch("reduceCurvature", 1);
+        dispatch("updateResidual", cells);
+        dispatch("reduceResidual", 1);
+        dispatch("updateDirection", cells);
+      }
+    });
+    stage("velocity-projection", () => {
+      dispatch("projectFaces", rows);
+      dispatch("collocateAndDiagnose", cells);
+    });
+    stage("projection-diagnostics", () => {
+      dispatch("measureDivergenceDiagnostics", cells);
+      dispatch("reduceDivergenceDiagnostics", 1);
+    });
+    stage("activity-measurement", () => {
+      dispatch("advanceActivityClock", 1);
+      dispatch("measureBrickActivity", packed.brickCount);
+    });
+    stage("resolution-planning", () => {
+      dispatch("planBrickResolution", bricks);
+      dispatch("activateSweptReceivers", bricks);
+      for (let gradingPass = 0; gradingPass < 3; gradingPass += 1) {
+        dispatch("closePlannedResolution", bricks);
+      }
+      dispatch("validateCandidateResolution", bricks);
+    });
+    stage("candidate-transfer", () => {
+      dispatch("transferCandidateCells", packed.brickCount);
+      dispatch("prepareCandidateFaceReceipts", bricks);
+      dispatch("transferCandidateFaces", packed.brickCount, 6);
+    });
+    stage("brick-retirement", () => {
+      dispatch("retireUnsupportedEmptyBricks", bricks);
+    });
+    stage("presentation-publication", () => {
+      dispatch("classifyPresentationBricks", bricks);
+      dispatch("publishSparseLevelSet",
+        this.globalFineLevelSetSource.plan.maximumResidentBricks);
+    });
+    pass?.end();
     this.parity ^= 1;
   }
 

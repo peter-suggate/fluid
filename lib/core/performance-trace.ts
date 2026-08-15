@@ -1010,6 +1010,15 @@ export class GPUStageTimestampRecorder {
       const bytes = this.queryCount * 8;
       await this.readBuffer.mapAsync(GPUMapMode.READ, 0, bytes);
       const resolved = new BigUint64Array(this.readBuffer.getMappedRange(0, bytes).slice(0));
+      if ((globalThis as { process?: { env?: Record<string, string | undefined> } })
+        .process?.env?.FLUID_TRACE_DEBUG === "1") {
+        console.warn(JSON.stringify({
+          record: "stage-trace", context: this.context, sampleId: this.sampleId,
+          queryCount: this.queryCount, slots: this.boundarySlots,
+          phases: this.phases.map((phase) => phase.label),
+          resolved: Array.from(resolved, String),
+        }));
+      }
       return decodeGPUTimestampPartition({
         sampleId: this.sampleId,
         lane: this.lane,
